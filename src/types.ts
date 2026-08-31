@@ -56,6 +56,8 @@ export interface ArticleEntry {
   rawContent: string;         // RSS 原始正文
   translatedContent: string;  // 译文
   aiSummary: string;
+  /** 正文已被 Readability 全文覆盖（手动按钮/设置自动模式共用状态源，DB 持久化；mock 数据可缺省） */
+  fulltextExtracted?: boolean;
 
   /* ---- 布局专属扩展（可空，按布局使用） ---- */
   durationSec?: number;   // 播客：时长秒数

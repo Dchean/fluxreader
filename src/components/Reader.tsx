@@ -21,6 +21,8 @@ export function Reader() {
   const toggleReaderRenderMode = useAppStore((s) => s.toggleReaderRenderMode);
   const toggleReaderTranslation = useAppStore((s) => s.toggleReaderTranslation);
   const triggerReaderSummary = useAppStore((s) => s.triggerReaderSummary);
+  const extractCurrentArticle = useAppStore((s) => s.extractCurrentArticle);
+  const dataMode = useAppStore((s) => s.dataMode);
   const showToast = useAppStore((s) => s.showToast);
 
   /* find() 返回既有元素引用（稳定）；config 返回新对象 → useShallow */
@@ -129,6 +131,16 @@ export function Reader() {
                   {isRawRenderMode ? <Icons.doc /> : <Icons.code />}
                   <span>{isRawRenderMode ? '原文' : '渲染'}</span>
                 </button>
+                {dataMode === 'tauri' && (
+                  <button
+                    className={`toggle-action-btn ${art.fulltextExtracted ? 'active-accent' : ''}`}
+                    onClick={extractCurrentArticle}
+                    title={art.fulltextExtracted ? '已提取全文，点击刷新' : '从原文网页提取全文（Readability）'}
+                  >
+                    <Icons.doc />
+                    <span>{art.fulltextExtracted ? '已全文' : '全文'}</span>
+                  </button>
+                )}
                 <button
                   className="toggle-action-btn"
                   onClick={() => {

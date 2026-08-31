@@ -424,11 +424,11 @@ pub async fn extract_fulltext(state: State<'_, AppState>, article_id: i64) -> Ap
         .map_err(|e| AppError::internal(format!("blocking task: {e}")))?
         .unwrap_or_default();
 
-    // 落库覆盖正文（全文 > RSS 摘要）
+    // 落库覆盖正文（全文 > RSS 摘要）+ 置提取标志（按钮/设置状态共用）
     {
         let conn = state.db.lock().await;
         conn.execute(
-            "UPDATE articles SET content_html = ?1 WHERE id = ?2",
+            "UPDATE articles SET content_html = ?1, fulltext_extracted = 1 WHERE id = ?2",
             rusqlite::params![extracted, article_id],
         )?;
         if !image.is_empty() {

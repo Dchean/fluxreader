@@ -730,6 +730,13 @@ body {
   border-color: var(--border-strong);
 }
 
+/* 全文提取按钮激活态：正文已是提取结果（与设置「自动全文」共用状态源） */
+.toggle-action-btn.active-accent {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--accent-light);
+}
+
 /* 主题模式选择卡片的选中态（外观页三张卡片） */
 .theme-mode-btn.theme-active {
   border-color: var(--accent) !important;

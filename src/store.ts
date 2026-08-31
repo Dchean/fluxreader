@@ -155,6 +155,8 @@ export interface AppState {
   markEntriesReadBulk: (ids: string[]) => void;
   /** 正文懒加载水合（选中文章 / 社交卡片挂载） */
   ensureArticleContent: (id: string) => void;
+  /** 手动全文提取（工具栏按钮；已提取时为刷新全文） */
+  extractCurrentArticle: () => void;
 
   /* ---------- Actions: 卡片就地操作 ---------- */
   toggleEntryFlag: (id: string, field: 'isRead' | 'isStarred') => void;
@@ -381,6 +383,8 @@ export const useAppStore = create<AppState>((set, get) => ({
                 aiSummary: row.ai_summary ?? a.aiSummary,
                 /* 原文网页地址（「源网页」「查看原文」外链） */
                 url: row.url ?? a.url,
+                /* 全文提取标志（DB 持久化：按钮状态与设置「自动全文」共用） */
+                fulltextExtracted: row.fulltext_extracted ?? false,
               }
             : a,
         ),
@@ -393,7 +397,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           .then((full) => {
             if (!full) return;
             set((s) => ({
-              entries: s.entries.map((a) => (a.id === id ? { ...a, content: full, rawContent: full } : a)),
+              entries: s.entries.map((a) => (a.id === id ? { ...a, content: full, rawContent: full, fulltextExtracted: true } : a)),
             }));
           })
           .catch(() => {/* 提取失败保留 RSS 摘要正文，不打扰 */ });
@@ -403,6 +407,32 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   clearReaderSelection: () =>
     set({ activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false }),
+
+  /** 手动全文提取：Readability 拉原文网页覆盖正文；状态源与设置「自动全文」一致 */
+  extractCurrentArticle: () => {
+    const { activeArticleId, entries, dataMode, showToast } = get();
+    if (!activeArticleId || dataMode !== 'tauri') return;
+    const art = entries.find((a) => a.id === activeArticleId);
+    if (!art) return;
+    if (!art.url) {
+      showToast('该条目没有原文网页地址');
+      return;
+    }
+    showToast(art.fulltextExtracted ? '正在刷新全文…' : '正在提取全文…');
+    void api
+      .extractFulltext(Number(activeArticleId))
+      .then((full) => {
+        if (!full) return;
+        const id = activeArticleId;
+        set((s) => ({
+          entries: s.entries.map((a) =>
+            a.id === id ? { ...a, content: full, rawContent: full, fulltextExtracted: true } : a,
+          ),
+        }));
+        showToast('全文提取完成');
+      })
+      .catch(() => showToast('全文提取失败，保留 RSS 正文'));
+  },
 
   toggleCurrentReadStatus: () => {
     const { activeArticleId, entries, dataMode } = get();

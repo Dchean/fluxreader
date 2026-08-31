@@ -68,6 +68,7 @@ export interface ArticleDetailRow extends ArticleListItemRow {
   url: string | null;
   content_html: string | null;
   translated_content: string | null;
+  fulltext_extracted: boolean;
 }
 
 export interface RefreshSummary {
@@ -367,5 +368,6 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
     content: '',
     rawContent: '',
     translatedContent: '',
+    fulltextExtracted: (row as ArticleDetailRow).fulltext_extracted ?? false,
   };
 }

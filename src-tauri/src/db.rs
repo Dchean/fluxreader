@@ -138,6 +138,9 @@ static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         ALTER TABLE feeds ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE feeds ADD COLUMN next_retry_at TEXT;
     "#),
+    // 全文提取标志：1 = 正文已被 Readability 全文覆盖（工具栏按钮状态与
+    // 设置「自动全文」共用此标志，重启不丢）。user_version=5。
+    M::up("ALTER TABLE articles ADD COLUMN fulltext_extracted INTEGER NOT NULL DEFAULT 0;"),
     // 后续迁移在此追加（M::up），已发布的不可改
     ])
 });
@@ -202,6 +205,8 @@ pub struct ArticleRow {
     pub published_at: Option<String>,
     pub is_read: bool,
     pub is_starred: bool,
+    /// 正文是否已被全文提取覆盖（手动按钮/自动模式共用状态源）
+    pub fulltext_extracted: bool,
 }
 
 /// 列表页条目（轻量：不含正文 HTML，snippet 截断）
@@ -456,7 +461,7 @@ pub struct NewArticle {
     pub source: String,
 }
 
-const ARTICLE_COLS: &str = "id, feed_id, url, title, author, summary, content_html, image_url, enclosure_url, enclosure_mime, duration_sec, ai_summary, translated_content, source, published_at, is_read, is_starred";
+const ARTICLE_COLS: &str = "id, feed_id, url, title, author, summary, content_html, image_url, enclosure_url, enclosure_mime, duration_sec, ai_summary, translated_content, source, published_at, is_read, is_starred, fulltext_extracted";
 
 fn article_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleRow> {
     Ok(ArticleRow {
@@ -477,6 +482,7 @@ fn article_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleRow> {
         published_at: r.get(14)?,
         is_read: r.get::<_, i64>(15)? != 0,
         is_starred: r.get::<_, i64>(16)? != 0,
+        fulltext_extracted: r.get::<_, i64>(17)? != 0,
     })
 }
 
