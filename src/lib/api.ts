@@ -272,6 +272,19 @@ export const api = {
     return inv ? (await inv('extract_fulltext', { articleId }) as string) : null;
   },
 
+  /* ---- SMTC 系统媒体控制 ---- */
+  /** 播放状态/元数据同步到系统媒体控制（PlayerBar 节流调用）。 */
+  async mediaUpdateFull(title: string, show: string, durationSec: number, positionSec: number, playing: boolean): Promise<void> {
+    const inv = await getInvoke();
+    if (inv) await inv('media_update_full', { title, show, durationSec, positionSec, playing });
+  },
+
+  /** 播放结束/关闭播放条：SMTC 置 Stopped。 */
+  async mediaStop(): Promise<void> {
+    const inv = await getInvoke();
+    if (inv) await inv('media_stop');
+  },
+
   /* ---- OPML 导入导出 ---- */
   /** 导入 OPML 内容（字符串）。返回 (新增, 跳过)。 */
   async opmlImport(content: string): Promise<{ imported: number; skipped: number } | null> {

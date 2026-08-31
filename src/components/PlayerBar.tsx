@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
+import { api } from '../lib/api';
 
 /* ============================================================
    播客底部播放条 —— Mini Player
@@ -71,6 +72,35 @@ export function PlayerBar() {
       el.removeEventListener('error', onError);
     };
   }, [syncPlayerProgress, playerEnded, showToast, player.audioUrl]);
+
+  /* ---------- SMTC 系统媒体控制同步（节流 1s，进度变化才推送） ---------- */
+  const lastSentRef = useRef({ pos: -1, playing: null as boolean | null, title: '' });
+  useEffect(() => {
+    // 播放条关闭 → SMTC 置 Stopped
+    if (!player.isActive) return;
+    const pos = Math.floor(player.positionSec);
+    const metaChanged = player.title !== lastSentRef.current.title;
+    const posChanged = pos !== lastSentRef.current.pos;
+    const stateChanged = player.isPlaying !== lastSentRef.current.playing;
+    if (!metaChanged && !posChanged && !stateChanged) return;
+    lastSentRef.current = { pos, playing: player.isPlaying, title: player.title };
+    void api.mediaUpdateFull(
+      player.title,
+      player.showName,
+      player.durationSec,
+      player.positionSec,
+      player.isPlaying,
+    ).catch(() => {/* SMTC 失败不影响播放 */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [player.title, player.showName, player.positionSec, player.isPlaying, player.durationSec, player.isActive]);
+
+  /* 播放条卸载/关闭 → SMTC 停止 */
+  useEffect(() => {
+    if (!player.isActive && lastSentRef.current.title) {
+      lastSentRef.current = { pos: -1, playing: null, title: '' };
+      void api.mediaStop().catch(() => {});
+    }
+  }, [player.isActive]);
 
   if (!player.isActive) return null;
 

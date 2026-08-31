@@ -1,6 +1,7 @@
-//! 应用状态：SQLite 连接（异步互斥守卫）+ 共享 HTTP client。
+//! 应用状态：SQLite 连接（异步互斥守卫）+ 共享 HTTP client + SMTC 句柄。
 //! 锁从不跨 .await 持有。
 
+use crate::media::MediaHandle;
 use reqwest::Client;
 use rusqlite::Connection;
 use std::sync::Arc;
@@ -12,10 +13,12 @@ pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     /// 共享 HTTP client（连接池）；clone 廉价
     pub http: Client,
+    /// SMTC 系统媒体控制投递端（专用线程持有 MediaControls）
+    pub media: MediaHandle,
 }
 
 impl AppState {
-    pub fn new(db: Connection, http: Client) -> Self {
-        Self { db: Arc::new(Mutex::new(db)), http }
+    pub fn new(db: Connection, http: Client, media: MediaHandle) -> Self {
+        Self { db: Arc::new(Mutex::new(db)), http, media }
     }
 }

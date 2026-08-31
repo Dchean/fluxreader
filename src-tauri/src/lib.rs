@@ -5,6 +5,7 @@ pub mod db;
 pub mod error;
 pub mod extraction;
 pub mod ingestion;
+pub mod media;
 pub mod miniflux;
 pub mod opml;
 pub mod sanitize;
@@ -44,8 +45,10 @@ pub fn run() {
             let db_path = app_dir.join("fluxreader.db");
             let conn = db::open(&db_path).expect("failed to open sqlite database");
             let http = ingestion::build_client(30);
+            // SMTC 媒体控制线程（失败降级为 inactive，不影响播放）
+            let media = media::spawn_media_thread(app.handle());
 
-            app.manage(state::AppState::new(conn, http));
+            app.manage(state::AppState::new(conn, http, media));
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
@@ -97,6 +100,9 @@ pub fn run() {
         // OPML 导入导出
         commands::opml_import,
         commands::opml_export,
+        // SMTC 系统媒体控制
+        media::media_update_full,
+        media::media_stop,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

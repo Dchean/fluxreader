@@ -78,6 +78,29 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
+  /* ---------- SMTC 系统媒体键回调：媒体键/音量浮层控制播放 ---------- */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<string>('player-media', (e) => {
+          const st = useAppStore.getState();
+          if (!st.player.isActive) return;
+          if (e.payload === 'toggle' || e.payload === 'play' || e.payload === 'pause') {
+            st.togglePlayerPlay();
+          } else if (e.payload === 'stop') {
+            st.closePodcastBar();
+          }
+        });
+      } catch {
+        /* 事件监听失败不影响主流程 */
+      }
+    })();
+    return () => unlisten?.();
+  }, []);
+
   /* ---------- 主题引擎：data-theme × data-palette 应用到 <html> ---------- */
   useEffect(() => {
     const root = document.documentElement;

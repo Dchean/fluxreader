@@ -49,3 +49,7 @@ opml = "1"
 url = "2"
 tauri-plugin-autostart = { version = "2", default-features = false }
 tauri-plugin-window-state = "2"
+
+[target.'cfg(windows)'.dependencies]
+# SMTC 系统媒体控制（播客播放条接入 Windows 媒体键/音量浮层），仅 Windows 编译
+souvlaki = "0.8.3"
