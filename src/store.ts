@@ -155,6 +155,8 @@ export interface AppState {
   /** opts.silent：源级开关自动触发时静默失败（未配置 AI 不弹 toast） */
   toggleReaderTranslation: (opts?: { silent?: boolean }) => void;
   triggerReaderSummary: (opts?: { silent?: boolean }) => void;
+  /** 列表卡片就地摘要（通知布局）：按文章 id 流式生成，不依赖阅读器选中态 */
+  summarizeEntry: (id: string, opts?: { silent?: boolean }) => void;
   /** 滚动触发的批量已读（滚出列表/正文到底）：静默、只标未读项 */
   markEntriesReadBulk: (ids: string[]) => void;
   /** 正文懒加载水合（选中文章 / 社交卡片挂载） */
@@ -164,10 +166,6 @@ export interface AppState {
 
   /* ---------- Actions: 卡片就地操作 ---------- */
   toggleEntryFlag: (id: string, field: 'isRead' | 'isStarred') => void;
-  showCardToast: (text: string) => void;
-
-  /* ---------- Actions: 阅读器（跨布局通用） ---------- */
-  findEntry: (id: string) => ArticleEntry | undefined;
 
   /* ---------- Actions: 播客 ---------- */
   playPodcastEpisode: (title: string, showName: string, cover: string, audioUrl: string, entryId?: string) => void;
@@ -532,10 +530,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
   },
 
-  triggerReaderSummary: (opts) => {
+  /** 按 id 流式生成摘要（增量落到 aiSummary，卡片实时打字机）。有缓存直接短路。 */
+  summarizeEntry: (id, opts) => {
     const silent = opts?.silent ?? false;
     const s = get();
-    const art = s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) : null;
+    const art = s.entries.find((a) => a.id === id);
     if (!art) return;
     /* 已有缓存 → 直接展示（ai_summarize 后端也会短路，这里前端提前判断） */
     if (art.aiSummary) {
@@ -546,18 +545,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!silent) get().showToast('浏览器演示模式无 AI 服务');
       return;
     }
-    /* 流式生成：增量落到 aiSummary（Reader 摘要卡实时打字机） */
     set({ summaryGenerating: true });
-    const articleId = art.id;
     void api
       .aiSummarize(
-        Number(articleId),
+        Number(id),
         (delta) => {
           set((st) => {
-            const cur = st.entries.find((a) => a.id === articleId);
+            const cur = st.entries.find((a) => a.id === id);
             if (!cur) return st;
             const next = (cur.aiSummary || '') + delta;
-            return { entries: st.entries.map((a) => (a.id === articleId ? { ...a, aiSummary: next } : a)) };
+            return { entries: st.entries.map((a) => (a.id === id ? { ...a, aiSummary: next } : a)) };
           });
         },
         () => set({ summaryGenerating: false }),
@@ -570,6 +567,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ summaryGenerating: false });
         if (!silent) get().showToast('摘要失败：请先在设置中配置 AI 服务');
       });
+  },
+
+  triggerReaderSummary: (opts) => {
+    const id = get().activeArticleId;
+    if (!id) return;
+    get().summarizeEntry(id, opts);
   },
 
   /* ================= 卡片就地操作 ================= */
@@ -587,12 +590,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       entries: s.entries.map((e) => (e.id === id ? { ...e, [field]: !e[field] } : e)),
     }));
   },
-
-  showCardToast: (text) => {
-    if (text) get().showToast(text);
-  },
-
-  findEntry: (id) => get().entries.find((e) => e.id === id),
 
   /* ================= 播客 ================= */
 

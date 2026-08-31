@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg01" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#050b17"/>
+      <stop offset="50%" stop-color="#0a1936"/>
+      <stop offset="100%" stop-color="#040a18"/>
+    </linearGradient>
+    <radialGradient id="glow01" cx="45%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#0ea5e9" stop-opacity="0.45"/>
+      <stop offset="50%" stop-color="#3b82f6" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#0a1936" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="glassFill01" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="glassStroke01" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.8"/>
+      <stop offset="40%" stop-color="#93c5fd" stop-opacity="0.4"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.1"/>
+    </linearGradient>
+    <radialGradient id="dotGlow01" cx="35%" cy="35%" r="65%">
+      <stop offset="0%" stop-color="#ffedd5"/>
+      <stop offset="40%" stop-color="#f97316"/>
+      <stop offset="100%" stop-color="#ea580c"/>
+    </radialGradient>
+  </defs>
+  <!-- Background & Ambient Glow -->
+  <rect width="512" height="512" rx="112" fill="url(#bg01)"/>
+  <rect width="512" height="512" rx="112" fill="url(#glow01)"/>
+  <!-- Top Frosted Bar -->
+  <rect x="106" y="146" width="300" height="48" rx="24" fill="url(#glassFill01)" stroke="url(#glassStroke01)" stroke-width="1.5"/>
+  <!-- Middle Frosted Bar + Glass Dot -->
+  <rect x="106" y="232" width="186" height="48" rx="24" fill="url(#glassFill01)" stroke="url(#glassStroke01)" stroke-width="1.5"/>
+  <!-- Dot Ambient Halo -->
+  <circle cx="354" cy="256" r="42" fill="#f97316" opacity="0.25"/>
+  <circle cx="354" cy="256" r="28" fill="url(#dotGlow01)" stroke="#ffedd5" stroke-width="2" stroke-opacity="0.8"/>
+  <!-- Bottom Frosted Bar -->
+  <rect x="106" y="318" width="112" height="48" rx="24" fill="url(#glassFill01)" stroke="url(#glassStroke01)" stroke-width="1.5"/>
+</svg>

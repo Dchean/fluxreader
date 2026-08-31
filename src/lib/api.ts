@@ -180,10 +180,6 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('mark_all_read', { feedId, folderId }) as number) : null;
   },
-  async refreshFeed(feedId: number): Promise<number | null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('refresh_feed', { feedId }) as number) : null;
-  },
   async refreshAllFeeds(): Promise<RefreshSummary | null> {
     const inv = await getInvoke();
     return inv ? (await inv('refresh_all_feeds') as RefreshSummary) : null;

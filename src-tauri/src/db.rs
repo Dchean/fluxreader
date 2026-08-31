@@ -437,7 +437,6 @@ pub fn move_feed(conn: &Connection, id: i64, folder_id: i64) -> AppResult<()> {
 }
 
 /// 直连失败的源（供 Miniflux 兜底路径查询）
-#[allow(dead_code)] // Miniflux 兜底路径使用
 pub fn feeds_fetch_failed(conn: &Connection) -> AppResult<Vec<FeedRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {FEED_COLS} FROM feeds WHERE fetch_failed = 1 ORDER BY id"

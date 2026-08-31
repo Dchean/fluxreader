@@ -256,17 +256,12 @@ body {
 }
 
 .brand-icon {
-  width: 26px;
-  height: 26px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-light));
-  border-radius: 7px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-size: 13px;
-  font-weight: 800;
-  box-shadow: 0 2px 10px var(--accent-glow);
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: block;
+  object-fit: contain;
+  box-shadow: 0 2px 10px rgba(72, 128, 200, 0.22);
 }
 
 .brand-name {
@@ -488,11 +483,11 @@ body {
   color: var(--text-primary);
 }
 
-.folder-chevron-svg {
+.folder-chevron-btn svg {
   transition: transform 0.18s ease;
 }
 
-.folder-chevron-btn.collapsed .folder-chevron-svg {
+.folder-chevron-btn.collapsed svg {
   transform: rotate(-90deg);
 }
 
@@ -1840,14 +1835,6 @@ body {
   flex: 1;
   padding: 24px 32px 40px;
   overflow-y: auto;
-}
-
-.settings-tab-section {
-  display: none;
-}
-
-.settings-tab-section.active {
-  display: block;
 }
 
 .settings-group-title {

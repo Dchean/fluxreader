@@ -74,7 +74,7 @@ export function Sidebar() {
     <aside className="sidebar">
       <div className="sidebar-fixed-top">
         <div className="sidebar-brand">
-          <div className="brand-icon">F</div>
+          <img className="brand-icon" src="/logo.svg" alt="FluxReader" draggable={false} />
           <div>
             <div className="brand-name">FluxReader</div>
             <div className="brand-badge">Local-First</div>

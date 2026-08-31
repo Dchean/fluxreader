@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, selectFeedConfig } from '../store';
 import { Icons } from './icons';
@@ -33,7 +33,10 @@ export function Reader() {
   const config = useAppStore(
     useShallow((s) => selectFeedConfig(s, art?.feedId ?? '')),
   );
-  const summaryOpen = config.autoSummary || summaryGenerating;
+  /* 摘要卡显隐：默认跟随源/分类的自动摘要开关（未开启则不显示卡片）；
+     手动点击「摘要」按钮覆写——点开即展开并生成，再点收起 */
+  const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
+  const summaryOpen = summaryOverride ?? (config.autoSummary || summaryGenerating);
 
   /* 阅读时间估算（中文 ~400字/分钟，英文 ~220词/分钟） */
   const readTime = art
@@ -43,9 +46,10 @@ export function Reader() {
   /* ---------- 滚动行为 ---------- */
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  /* 切换文章 → 滚动归零（否则上一篇的滚动深度带到下一篇） */
+  /* 切换文章 → 滚动归零（否则上一篇的滚动深度带到下一篇）；手动摘要覆写态不跨文章保留 */
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: 0 });
+    setSummaryOverride(null);
   }, [art?.id]);
 
   /* 源级 autoSummary/autoTranslate：打开文章即自动触发。
@@ -153,7 +157,14 @@ export function Reader() {
                 </button>
               </div>
               <div className="reader-actions-right">
-                <button className="toggle-action-btn" onClick={() => triggerReaderSummary()}>
+                <button
+                  className={`toggle-action-btn ${summaryOpen ? 'active-accent' : ''}`}
+                  onClick={() => {
+                    /* 未开自动摘要的源：点开即展开卡片并触发生成（有缓存直接展示）；再点收起 */
+                    if (!summaryOpen) triggerReaderSummary();
+                    setSummaryOverride(!summaryOpen);
+                  }}
+                >
                   <Icons.spark />
                   <span>摘要</span>
                 </button>

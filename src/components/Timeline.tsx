@@ -378,6 +378,7 @@ function PodcastCard({ item }: { item: ArticleEntry }) {
 function NotifCard({ item }: { item: ArticleEntry }) {
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
+  const summarizeEntry = useAppStore((s) => s.summarizeEntry);
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
@@ -392,7 +393,11 @@ function NotifCard({ item }: { item: ArticleEntry }) {
         <div className="notif-top-actions">
           <button
             className={`toggle-action-btn notif-act ${summaryOpen ? 'act-on' : ''}`}
-            onClick={() => setSummaryOverride(!summaryOpen)}
+            onClick={() => {
+              /* 未开自动摘要的源默认不显示卡片：点开后就地触发生成（有缓存直接展示） */
+              if (!summaryOpen) summarizeEntry(item.id);
+              setSummaryOverride(!summaryOpen);
+            }}
           >
             <Icons.spark />
             <span>摘要</span>
