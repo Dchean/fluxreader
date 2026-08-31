@@ -170,7 +170,7 @@ pub struct FolderRow {
     pub collapsed: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FeedRow {
     pub id: i64,
     pub folder_id: i64,
@@ -420,18 +420,42 @@ pub fn update_feed_layout(conn: &Connection, id: i64, layout: &str) -> AppResult
     Ok(())
 }
 
-pub fn set_feed_ai_flags(conn: &Connection, id: i64, summary: bool, translate: bool) -> AppResult<()> {
+/// 编辑源一次性落库：标题 / 所属分类 / 布局 / AI 开关（单语句，避免多次往返）
+pub fn update_feed(
+    conn: &Connection,
+    id: i64,
+    title: Option<&str>,
+    folder_id: Option<i64>,
+    layout: Option<&str>,
+    auto_summary: Option<bool>,
+    auto_translate: Option<bool>,
+) -> AppResult<()> {
+    let title = title.map(str::trim).filter(|t| !t.is_empty());
+    // 空标题回退原值（不置 NULL——源名必填）
     conn.execute(
-        "UPDATE feeds SET auto_summary = ?1, auto_translate = ?2 WHERE id = ?3",
-        params![summary as i64, translate as i64, id],
+        "UPDATE feeds SET
+            title = COALESCE(?1, title),
+            folder_id = COALESCE(?2, folder_id),
+            layout = COALESCE(?3, layout),
+            auto_summary = COALESCE(?4, auto_summary),
+            auto_translate = COALESCE(?5, auto_translate)
+         WHERE id = ?6",
+        params![
+            title,
+            folder_id,
+            layout,
+            auto_summary.map(|b| b as i64),
+            auto_translate.map(|b| b as i64),
+            id
+        ],
     )?;
     Ok(())
 }
 
-pub fn move_feed(conn: &Connection, id: i64, folder_id: i64) -> AppResult<()> {
+pub fn set_feed_ai_flags(conn: &Connection, id: i64, summary: bool, translate: bool) -> AppResult<()> {
     conn.execute(
-        "UPDATE feeds SET folder_id = ?1 WHERE id = ?2",
-        params![folder_id, id],
+        "UPDATE feeds SET auto_summary = ?1, auto_translate = ?2 WHERE id = ?3",
+        params![summary as i64, translate as i64, id],
     )?;
     Ok(())
 }

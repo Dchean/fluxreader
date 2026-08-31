@@ -4,6 +4,7 @@
 use crate::db::{self, ArticleQuery};
 use crate::error::{AppError, AppResult};
 use crate::ingestion;
+use crate::miniflux::MinifluxClient;
 use crate::state::AppState;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
@@ -41,8 +42,33 @@ pub async fn create_folder(
 
 #[tauri::command]
 pub async fn rename_folder(state: State<'_, AppState>, id: i64, name: String) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::rename_folder(&conn, id, &name)
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::new("validate", "分类名称不能为空"));
+    }
+    // 锁内：改名落库 + 收集远端映射；锁外：同步改名到 Miniflux（best-effort）
+    let remote = {
+        let conn = state.db.lock().await;
+        let mf_id: Option<i64> = conn
+            .query_row("SELECT miniflux_id FROM folders WHERE id = ?1", [id], |r| r.get(0))
+            .ok()
+            .flatten();
+        let creds = if mf_id.is_some() && sync_configured(&conn) {
+            crate::sync::read_credentials(&conn)
+        } else {
+            None
+        };
+        db::rename_folder(&conn, id, &name)?;
+        mf_id.zip(creds)
+    };
+    if let Some((mf_id, (endpoint, token))) = remote {
+        let client = MinifluxClient::new(&endpoint, &token, state.http.clone());
+        client
+            .rename_category(mf_id, &name)
+            .await
+            .map_err(|e| AppError::network(format!("同步分类改名到 Miniflux 失败: {e}")))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -170,6 +196,71 @@ pub async fn update_feed_layout(
     db::update_feed_layout(&conn, id, &layout)
 }
 
+/// 编辑源：标题/所属分类/布局/AI 开关一次性更新。
+/// 连接 Miniflux 时改名与移动分类尽量同步到远端（best-effort，失败不阻塞本地落库结果）。
+#[tauri::command]
+pub async fn update_feed(
+    state: State<'_, AppState>,
+    id: i64,
+    title: Option<String>,
+    folder_id: Option<i64>,
+    layout: Option<String>,
+    auto_summary: Option<bool>,
+    auto_translate: Option<bool>,
+) -> AppResult<()> {
+    let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+
+    // 目标分类必须存在（防 UI 传错 id 把源挂飞）
+    if let Some(fid) = folder_id {
+        let conn = state.db.lock().await;
+        let exists: bool = conn
+            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [fid], |r| r.get::<_, i64>(0))
+            .map(|n| n > 0)?;
+        if !exists {
+            return Err(AppError::new("validate", "目标分类不存在"));
+        }
+    }
+
+    // 收集需要推送到 Miniflux 的动作（锁内读映射，锁外执行网络 IO）
+    let conn = state.db.lock().await;
+    let (mf_feed_id, mf_new_cat) = {
+        let configured = sync_configured(&conn);
+        let mf_feed_id: Option<i64> = conn
+            .query_row("SELECT miniflux_id FROM feeds WHERE id = ?1", [id], |r| r.get(0))
+            .ok()
+            .flatten();
+        if !configured || mf_feed_id.is_none() {
+            (None, None)
+        } else {
+            let mf_new_cat: Option<i64> = match folder_id {
+                Some(fid) => conn
+                    .query_row("SELECT miniflux_id FROM folders WHERE id = ?1", [fid], |r| r.get(0))
+                    .ok()
+                    .flatten(),
+                None => None,
+            };
+            (mf_feed_id, mf_new_cat)
+        }
+    };
+
+    db::update_feed(&conn, id, title.as_deref(), folder_id, layout.as_deref(), auto_summary, auto_translate)?;
+
+    // 连接 Miniflux 且该源有远端映射 → 改名 / 移动分类
+    if let (Some(mf_id), true) = (mf_feed_id, sync_configured(&conn)) {
+        if let Some((endpoint, token)) = crate::sync::read_credentials(&conn) {
+            let client = MinifluxClient::new(&endpoint, &token, state.http.clone());
+            if let Some(t) = title.as_deref() {
+                let cat = mf_new_cat.unwrap_or(1);
+                let _ = client.update_feed_title(mf_id, t, cat).await;
+            }
+            if let Some(cat) = mf_new_cat {
+                let _ = client.move_feed_category(mf_id, cat).await;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn set_feed_ai_flags(
     state: State<'_, AppState>,
@@ -181,15 +272,6 @@ pub async fn set_feed_ai_flags(
     db::set_feed_ai_flags(&conn, id, summary, translate)
 }
 
-#[tauri::command]
-pub async fn move_feed(
-    state: State<'_, AppState>,
-    id: i64,
-    folder_id: i64,
-) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::move_feed(&conn, id, folder_id)
-}
 
 /* ============================================================
    Articles

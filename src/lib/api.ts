@@ -151,6 +151,27 @@ export const api = {
     const mount = await getInvoke();
     return mount ? (await mount('delete_feed', { id }) as null) : null;
   },
+  /** 编辑源：标题/分类/布局/AI 开关一次性更新（undefined 字段保持不变） */
+  async updateFeed(args: {
+    id: number;
+    title?: string;
+    folderId?: number;
+    layout?: string;
+    autoSummary?: boolean;
+    autoTranslate?: boolean;
+  }): Promise<null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('update_feed', args) as null) : null;
+  },
+  async renameFolder(id: number, name: string): Promise<null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('rename_folder', { id, name }) as null) : null;
+  },
+  /** 刷新单个订阅源（直连），返回新增条数 */
+  async refreshFeed(feedId: number): Promise<number | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('refresh_feed', { feedId }) as number) : null;
+  },
   async updateFeedLayout(id: number, layout: string): Promise<null> {
     const inv = await getInvoke();
     return inv ? (await inv('update_feed_layout', { id, layout }) as null) : null;

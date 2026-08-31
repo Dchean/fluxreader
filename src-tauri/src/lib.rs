@@ -155,9 +155,9 @@ pub fn run() {
             commands::list_feeds,
             commands::add_feed,
             commands::delete_feed,
+            commands::update_feed,
             commands::update_feed_layout,
             commands::set_feed_ai_flags,
-            commands::move_feed,
             // 条目
             commands::list_articles,
             commands::get_article,

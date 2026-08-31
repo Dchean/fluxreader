@@ -5,7 +5,7 @@ import { Timeline } from './components/Timeline';
 import { Reader } from './components/Reader';
 import { PlayerBar } from './components/PlayerBar';
 import { SettingsModal } from './components/SettingsModal';
-import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal } from './components/Overlays';
+import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal } from './components/Overlays';
 /* ============================================================
    Application Shell
 
@@ -204,6 +204,8 @@ export default function App() {
       <Lightbox />
       <NewCategoryModal />
       <AddFeedModal />
+      <EditFeedModal />
+      <RenameCategoryModal />
 
       {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
           退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载 */}

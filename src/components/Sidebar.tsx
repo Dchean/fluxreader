@@ -48,6 +48,9 @@ export function Sidebar() {
   const openSettingsTab = useAppStore((s) => s.openSettingsTab);
   const openNewCategoryModal = useAppStore((s) => s.openNewCategoryModal);
   const openAddFeedModal = useAppStore((s) => s.openAddFeedModal);
+  const openEditFeedModal = useAppStore((s) => s.openEditFeedModal);
+  const openRenameCatModal = useAppStore((s) => s.openRenameCatModal);
+  const refreshOneFeed = useAppStore((s) => s.refreshOneFeed);
   const toggleFolderCollapse = useAppStore((s) => s.toggleFolderCollapse);
   const toggleAllFolders = useAppStore((s) => s.toggleAllFolders);
   const triggerManualSync = useAppStore((s) => s.triggerManualSync);
@@ -175,6 +178,16 @@ export function Sidebar() {
                 <div className="feed-folder-right">
                   <span className="feed-count-badge" title="当前视图筛选下的条目数">{treeCounts.get(cat.id) ?? 0}</span>
                   <button
+                    className="feed-row-act-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openRenameCatModal(cat.id);
+                    }}
+                    title="重命名分类"
+                  >
+                    <Icons.edit />
+                  </button>
+                  <button
                     className={`folder-chevron-btn ${cat.collapsed ? 'collapsed' : ''}`}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -190,10 +203,13 @@ export function Sidebar() {
               {!cat.collapsed && (
                 <div className="feed-sub-list">
                   {matchingFeeds.map((f) => (
-                    <button
+                    <div
                       key={f.id}
                       className={`feed-leaf-item ${activeFeedFilter === f.id ? 'active-feed' : ''}`}
                       onClick={() => selectFeed(f.id)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => e.key === 'Enter' && selectFeed(f.id)}
                       title={f.name}
                     >
                       <div className="feed-leaf-name">
@@ -212,8 +228,32 @@ export function Sidebar() {
                         )}
                         <span className="feed-leaf-title">{f.name}</span>
                       </div>
-                      <span className="feed-count-badge" title="当前视图筛选下的条目数">{treeCounts.get(f.id) ?? 0}</span>
-                    </button>
+                      <div className="feed-leaf-right">
+                        <span className="feed-count-badge" title="当前视图筛选下的条目数">{treeCounts.get(f.id) ?? 0}</span>
+                        <span className="feed-leaf-actions">
+                          <button
+                            className="feed-row-act-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              refreshOneFeed(f.id);
+                            }}
+                            title="刷新此源"
+                          >
+                            <Icons.refresh />
+                          </button>
+                          <button
+                            className="feed-row-act-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEditFeedModal(f.id);
+                            }}
+                            title="编辑订阅源"
+                          >
+                            <Icons.edit />
+                          </button>
+                        </span>
+                      </div>
+                    </div>
                   ))}
                 </div>
               )}

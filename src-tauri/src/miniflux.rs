@@ -227,6 +227,48 @@ impl MinifluxClient {
             .await
     }
 
+    /// 更新订阅标题：PUT /v1/feeds/{id} {title}（Miniflux 要求带 category_id）
+    pub async fn update_feed_title(&self, feed_id: i64, title: &str, category_id: i64) -> AppResult<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            title: &'a str,
+            category_id: i64,
+        }
+        let body = serde_json::to_string(&Body { title, category_id })?;
+        self.send_expect_ok(reqwest::Method::PUT, &format!("/v1/feeds/{feed_id}"), Some(body))
+            .await
+    }
+
+    /// 移动订阅到分类：PUT /v1/feeds/{id}/category {category_id}
+    pub async fn move_feed_category(&self, feed_id: i64, category_id: i64) -> AppResult<()> {
+        #[derive(Serialize)]
+        struct Body {
+            category_id: i64,
+        }
+        let body = serde_json::to_string(&Body { category_id })?;
+        self.send_expect_ok(
+            reqwest::Method::PUT,
+            &format!("/v1/feeds/{feed_id}/category"),
+            Some(body),
+        )
+        .await
+    }
+
+    /// 改名分类：PUT /v1/categories/{id} {title}
+    pub async fn rename_category(&self, category_id: i64, title: &str) -> AppResult<()> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            title: &'a str,
+        }
+        let body = serde_json::to_string(&Body { title })?;
+        self.send_expect_ok(
+            reqwest::Method::PUT,
+            &format!("/v1/categories/{category_id}"),
+            Some(body),
+        )
+        .await
+    }
+
     /// 新建分类：POST /v1/categories {title}
     pub async fn create_category(&self, title: &str) -> AppResult<i64> {
         #[derive(Serialize)]

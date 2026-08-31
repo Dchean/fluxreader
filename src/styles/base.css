@@ -534,6 +534,51 @@ body {
   white-space: nowrap;
 }
 
+/* 源行右侧：计数 + 悬停浮现的操作按钮（编辑 / 刷新）；分类行的改名按钮同理 */
+.feed-leaf-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.feed-leaf-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.feed-leaf-item:hover .feed-leaf-actions,
+.feed-folder-header:hover .feed-row-act-btn {
+  display: inline-flex;
+}
+
+/* 行内小操作钮（源行/分类行共用） */
+.feed-row-act-btn {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.feed-row-act-btn:hover {
+  color: var(--accent-light);
+  background: var(--badge-bg);
+}
+
+.feed-row-act-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
 /* "全部订阅源"行（与 leaf 行同结构，额外顶部间距） */
 .feed-all-row {
   padding-left: 8px;

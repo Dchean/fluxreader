@@ -4,7 +4,7 @@ import { api, articleRowToEntry } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
 import { ModalOverlay, FluxDropdown } from './primitives';
 import { formatRelativeTime } from '../lib/format';
-import type { ArticleEntry, ContentLayoutType } from '../types';
+import type { ArticleEntry, ContentLayoutType, FeedItem } from '../types';
 
 /* ============================================================
    全局搜索 / 灯箱 / 新建分类 / 添加订阅源 四个浮层
@@ -457,6 +457,193 @@ function AddFeedModalBody({
             添加订阅
           </button>
         </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   编辑源对话框：改名 / 移动分类 / 布局绑定 / AI 开关一次性提交
+   ============================================================ */
+
+export function EditFeedModal() {
+  const open = useAppStore((s) => s.editFeedModalOpen);
+  const targetId = useAppStore((s) => s.editFeedTargetId);
+  const closeMiniModal = useAppStore((s) => s.closeMiniModal);
+  const editFeed = useAppStore((s) => s.editFeed);
+  const categories = useAppStore((s) => s.categories);
+  const binding = useAppStore((s) => (s.editFeedTargetId ? s.feedIndex.get(s.editFeedTargetId) ?? null : null));
+
+  return (
+    <ModalOverlay open={open} onClose={() => closeMiniModal('editFeed')}>
+      {binding && (
+        <EditFeedModalBody
+          key={targetId + String(open)}
+          feed={binding.feed}
+          curCatId={binding.cat.id}
+          curCatLayout={binding.cat.layout}
+          categories={categories.map((c) => ({ id: c.id, name: c.name, layout: c.layout }))}
+          onCancel={() => closeMiniModal('editFeed')}
+          onSubmit={(next) => {
+            editFeed(targetId, next);
+            closeMiniModal('editFeed');
+          }}
+        />
+      )}
+    </ModalOverlay>
+  );
+}
+
+function EditFeedModalBody({
+  feed,
+  curCatId,
+  curCatLayout,
+  categories,
+  onCancel,
+  onSubmit,
+}: {
+  feed: FeedItem;
+  curCatId: string;
+  curCatLayout: string;
+  categories: { id: string; name: string; layout: string }[];
+  onCancel: () => void;
+  onSubmit: (next: { title: string; catId: string; layout: string; autoSummary: boolean; autoTranslate: boolean }) => void;
+}) {
+  const [title, setTitle] = useState(feed.name);
+  const [catId, setCatId] = useState(curCatId);
+  const [layout, setLayout] = useState<string>(feed.layout);
+  const [autoSummary, setAutoSummary] = useState(feed.autoSummary);
+  const [autoTranslate, setAutoTranslate] = useState(feed.autoTranslate);
+
+  return (
+    <div className="mini-dialog">
+      <div className="mini-dialog-title">编辑订阅源</div>
+
+      <div className="mini-dialog-field">
+        <label>订阅源地址</label>
+        <input type="text" className="setting-input" style={{ width: '100%' }} value={feed.url} disabled />
+        <div className="mini-dialog-hint">地址不可修改（如需更换请删除后重新添加）</div>
+      </div>
+
+      <div className="mini-dialog-field">
+        <label>订阅源名称</label>
+        <input
+          type="text"
+          className="setting-input"
+          style={{ width: '100%' }}
+          placeholder={feed.name}
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+      </div>
+
+      <div className="mini-dialog-field">
+        <label>归属分类</label>
+        <FluxDropdown
+          width={'100%'}
+          value={catId}
+          onChange={setCatId}
+          options={categories.map((c) => ({ value: c.id, label: c.name }))}
+        />
+      </div>
+
+      <div className="mini-dialog-field">
+        <label>内容布局绑定</label>
+        <FluxDropdown
+          width={'100%'}
+          value={layout}
+          onChange={setLayout}
+          options={[
+            { value: 'inherit', label: `继承分类布局（${LAYOUT_NAMES[curCatLayout as ContentLayoutType] ?? curCatLayout}）` },
+            ...LAYOUT_OPTIONS,
+          ]}
+        />
+      </div>
+
+      <div className="mini-dialog-checkbox-row">
+        <label className="mini-dialog-checkbox">
+          <input
+            type="checkbox"
+            checked={autoSummary}
+            onChange={(e) => setAutoSummary(e.target.checked)}
+            style={{ accentColor: 'var(--accent)' }}
+          />
+          自动摘要
+        </label>
+        <label className="mini-dialog-checkbox">
+          <input
+            type="checkbox"
+            checked={autoTranslate}
+            onChange={(e) => setAutoTranslate(e.target.checked)}
+            style={{ accentColor: 'var(--accent)' }}
+          />
+          自动翻译
+        </label>
+      </div>
+
+      <div className="mini-dialog-actions">
+        <button className="toggle-action-btn" onClick={onCancel}>取消</button>
+        <button
+          className="toggle-action-btn btn-primary"
+          onClick={() => onSubmit({ title, catId, layout, autoSummary, autoTranslate })}
+        >
+          保存
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   分类改名对话框
+   ============================================================ */
+
+export function RenameCategoryModal() {
+  const open = useAppStore((s) => s.renameCatModalOpen);
+  const targetId = useAppStore((s) => s.renameCatTargetId);
+  const closeMiniModal = useAppStore((s) => s.closeMiniModal);
+  const renameCategory = useAppStore((s) => s.renameCategory);
+  const cat = useAppStore((s) => s.categories.find((c) => c.id === s.renameCatTargetId) ?? null);
+
+  return (
+    <ModalOverlay open={open} onClose={() => closeMiniModal('renameCat')}>
+      {cat && <RenameCatModalBody key={targetId + String(open)} initialName={cat.name} onCancel={() => closeMiniModal('renameCat')} onSubmit={(name) => { renameCategory(targetId, name); closeMiniModal('renameCat'); }} />}
+    </ModalOverlay>
+  );
+}
+
+function RenameCatModalBody({
+  initialName,
+  onCancel,
+  onSubmit,
+}: {
+  initialName: string;
+  onCancel: () => void;
+  onSubmit: (name: string) => void;
+}) {
+  const [name, setName] = useState(initialName);
+  return (
+    <div className="mini-dialog">
+      <div className="mini-dialog-title">重命名分类</div>
+      <div className="mini-dialog-field">
+        <label>分类名称</label>
+        <input
+          type="text"
+          className="setting-input"
+          style={{ width: '100%' }}
+          value={name}
+          autoFocus
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && name.trim()) onSubmit(name);
+          }}
+        />
+      </div>
+      <div className="mini-dialog-actions">
+        <button className="toggle-action-btn" onClick={onCancel}>取消</button>
+        <button className="toggle-action-btn btn-primary" disabled={!name.trim()} onClick={() => onSubmit(name)}>
+          保存
+        </button>
+      </div>
     </div>
   );
 }

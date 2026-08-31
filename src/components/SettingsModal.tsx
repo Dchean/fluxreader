@@ -346,6 +346,8 @@ function FeedsTab() {
   const categories = useAppStore((s) => s.categories);
   const openNewCategoryModal = useAppStore((s) => s.openNewCategoryModal);
   const openAddFeedModal = useAppStore((s) => s.openAddFeedModal);
+  const openEditFeedModal = useAppStore((s) => s.openEditFeedModal);
+  const openRenameCatModal = useAppStore((s) => s.openRenameCatModal);
   const deleteCategory = useAppStore((s) => s.deleteCategory);
   const deleteFeed = useAppStore((s) => s.deleteFeed);
   const updateCatLayout = useAppStore((s) => s.updateCatLayout);
@@ -478,6 +480,15 @@ function FeedsTab() {
                   + 添加源
                 </button>
                 <button
+                  className="toggle-action-btn"
+                  style={{ fontSize: 11 }}
+                  title="重命名该分类"
+                  onClick={() => openRenameCatModal(cat.id)}
+                >
+                  <Icons.edit />
+                  <span>改名</span>
+                </button>
+                <button
                   className="toggle-action-btn btn-danger-text"
                   style={{ fontSize: 11 }}
                   title="删除该分类及其全部订阅源"
@@ -528,6 +539,15 @@ function FeedsTab() {
                         />
                         翻译
                       </label>
+                      <button
+                        className="toggle-action-btn"
+                        style={{ fontSize: 11 }}
+                        title="编辑该订阅源（改名/移动分类/布局/AI 开关）"
+                        onClick={() => openEditFeedModal(f.id)}
+                      >
+                        <Icons.edit />
+                        <span>编辑</span>
+                      </button>
                       <button
                         className="toggle-action-btn btn-danger-text"
                         style={{ fontSize: 11 }}

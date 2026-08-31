@@ -42,6 +42,7 @@ export const Icons = {
 
   /* 排序/筛选 */
   sort: iconFn('<polyline points="7 3 7 21"/><polyline points="3 7 7 3 11 7"/><polyline points="17 21 17 3"/><polyline points="13 17 17 21 21 17"/>'),
+  edit: iconFn('<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>'),
   chevronDown: iconFn('<polyline points="6 9 12 15 18 9"/>'),
 
   /* 设置导航 */

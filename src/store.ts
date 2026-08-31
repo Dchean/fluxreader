@@ -117,6 +117,12 @@ export interface AppState {
   newCategoryModalOpen: boolean;
   addFeedModalOpen: boolean;
   addFeedTargetCatId: string;
+  /** 编辑源对话框：目标源 id（空串 = 关闭） */
+  editFeedModalOpen: boolean;
+  editFeedTargetId: string;
+  /** 分类改名对话框：目标分类 id（空串 = 关闭） */
+  renameCatModalOpen: boolean;
+  renameCatTargetId: string;
 
   /* ---------- Toast 与同步 ---------- */
   toasts: ToastMessage[];
@@ -190,7 +196,9 @@ export interface AppState {
   closeLightbox: () => void;
   openNewCategoryModal: () => void;
   openAddFeedModal: (catId: string) => void;
-  closeMiniModal: (which: 'newCategory' | 'addFeed') => void;
+  openEditFeedModal: (feedId: string) => void;
+  openRenameCatModal: (catId: string) => void;
+  closeMiniModal: (which: 'newCategory' | 'addFeed' | 'editFeed' | 'renameCat') => void;
 
   /* ---------- Actions: Toast / 同步 ---------- */
   showToast: (text: string) => void;
@@ -199,8 +207,14 @@ export interface AppState {
   /* ---------- Actions: 订阅管理 ---------- */
   createCategory: (name: string, layout: ContentLayoutType) => void;
   deleteCategory: (catId: string) => void;
+  /** 分类改名（连接 Miniflux 时同步远端） */
+  renameCategory: (catId: string, name: string) => void;
   addFeed: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean) => void;
   deleteFeed: (catId: string, feedId: string) => void;
+  /** 编辑源：改名/移动分类/布局/AI 开关一次性提交 */
+  editFeed: (feedId: string, next: { title: string; catId: string; layout: string; autoSummary: boolean; autoTranslate: boolean }) => void;
+  /** 单源手动刷新（直连），toast 反馈新增条数 */
+  refreshOneFeed: (feedId: string) => void;
   updateCatLayout: (catId: string, layout: ContentLayoutType) => void;
   updateFeedLayout: (catId: string, feedId: string, layout: string) => void;
   toggleCatSummary: (catId: string, val: boolean) => void;
@@ -260,6 +274,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   newCategoryModalOpen: false,
   addFeedModalOpen: false,
   addFeedTargetCatId: '',
+  editFeedModalOpen: false,
+  editFeedTargetId: '',
+  renameCatModalOpen: false,
+  renameCatTargetId: '',
 
   toasts: [],
 
@@ -659,8 +677,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   closeLightbox: () => set({ lightboxUrl: null }),
   openNewCategoryModal: () => set({ newCategoryModalOpen: true }),
   openAddFeedModal: (catId) => set({ addFeedModalOpen: true, addFeedTargetCatId: catId }),
+  openEditFeedModal: (feedId) => set({ editFeedModalOpen: true, editFeedTargetId: feedId }),
+  openRenameCatModal: (catId) => set({ renameCatModalOpen: true, renameCatTargetId: catId }),
   closeMiniModal: (which) =>
-    set(which === 'newCategory' ? { newCategoryModalOpen: false } : { addFeedModalOpen: false }),
+    set(
+      which === 'newCategory' ? { newCategoryModalOpen: false }
+      : which === 'addFeed' ? { addFeedModalOpen: false }
+      : which === 'editFeed' ? { editFeedModalOpen: false }
+      : { renameCatModalOpen: false },
+    ),
 
   showToast: (text) => {
     const id = ++toastId;
@@ -795,6 +820,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().showToast('分类已删除');
   },
 
+  renameCategory: (catId, name) => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      get().showToast('分类名称不能为空');
+      return;
+    }
+    if (get().dataMode === 'tauri') {
+      void api
+        .renameFolder(Number(catId.replace('cat-', '')), trimmed)
+        .then(() => get().reloadFromBackend())
+        .then(() => get().showToast(`分类已改名：${trimmed}`))
+        .catch((e: unknown) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          get().showToast(`改名失败：${msg}`);
+        });
+      return;
+    }
+    set((s) => reconcileCategories(s, s.categories.map((c) => (c.id === catId ? { ...c, name: trimmed } : c))));
+    get().showToast(`分类已改名：${trimmed}`);
+  },
+
   addFeed: (catId, url, title, layout, autoSummary, autoTranslate) => {
     if (get().dataMode === 'tauri') {
       const folderId = Number(catId.replace('cat-', ''));
@@ -856,6 +902,69 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     });
     get().showToast('订阅源已删除');
+  },
+
+  editFeed: (feedId, next) => {
+    if (get().dataMode === 'tauri') {
+      /* 只提交变化字段：标题为空 = 不改名；分类/布局/AI 开关与当前一致则省略 */
+      const binding = get().feedIndex.get(feedId);
+      const cur = binding?.feed;
+      if (!cur) return;
+      const targetFolderId = Number(next.catId.replace('cat-', ''));
+      const args: Parameters<typeof api.updateFeed>[0] = { id: Number(feedId) };
+      if (next.title.trim() && next.title.trim() !== cur.name) args.title = next.title.trim();
+      if (binding && binding.cat.id !== next.catId) args.folderId = targetFolderId;
+      if (next.layout !== cur.layout) args.layout = next.layout;
+      if (next.autoSummary !== cur.autoSummary) args.autoSummary = next.autoSummary;
+      if (next.autoTranslate !== cur.autoTranslate) args.autoTranslate = next.autoTranslate;
+      if (args.title === undefined && args.folderId === undefined && args.layout === undefined
+        && args.autoSummary === undefined && args.autoTranslate === undefined) {
+        get().showToast('没有需要保存的更改');
+        return;
+      }
+      void api
+        .updateFeed(args)
+        .then(() => get().reloadFromBackend())
+        .then(() => get().showToast('订阅源已更新'))
+        .catch((e: unknown) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          get().showToast(`保存失败：${msg}`);
+        });
+      return;
+    }
+    /* mock 模式：改内存树（改名/改属性 + 跨分类移动一次完成） */
+    set((s) => {
+      const moving = s.categories.flatMap((c) => c.feeds).find((f) => f.id === feedId);
+      if (!moving) return s;
+      const updated: FeedItem = {
+        ...moving,
+        name: next.title.trim() || moving.name,
+        layout: next.layout as FeedItem['layout'],
+        autoSummary: next.autoSummary,
+        autoTranslate: next.autoTranslate,
+      };
+      /* 先全部摘除，再放进目标分类 */
+      const stripped = s.categories.map((c) => ({ ...c, feeds: c.feeds.filter((f) => f.id !== feedId) }));
+      const finalCategories = stripped.map((c) => (c.id === next.catId ? { ...c, feeds: [...c.feeds, updated] } : c));
+      return reconcileCategories(s, finalCategories);
+    });
+    get().showToast('订阅源已更新');
+  },
+
+  refreshOneFeed: (feedId) => {
+    if (get().dataMode !== 'tauri') {
+      get().showToast('浏览器演示模式无直连能力');
+      return;
+    }
+    get().showToast('正在刷新该订阅源...');
+    void api
+      .refreshFeed(Number(feedId))
+      .then((n) => {
+        if (n === null) return;
+        get().showToast(n > 0 ? `刷新完成：新增 ${n} 条` : '刷新完成：没有新文章');
+        return get().reloadFromBackend();
+      })
+      .catch(() => get().showToast('刷新失败：源站不可达或地址失效'));
   },
 
   updateCatLayout: (catId, layout) => {
