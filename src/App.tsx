@@ -194,7 +194,7 @@ export default function App() {
 }
 
 /** 单条 toast：挂载后 rAF 切 visible 让 CSS transition 接管进场 */
-function ToastPill({ id, text, leaving }: { id: number; text: string; leaving: boolean }) {
+function ToastPill({ text, leaving }: { id: number; text: string; leaving: boolean }) {
   const [shown, setShown] = useState(false);
   useEffect(() => {
     const raf = requestAnimationFrame(() => setShown(true));

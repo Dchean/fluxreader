@@ -2114,6 +2114,15 @@ body {
   color: var(--text-secondary);
 }
 
+.about-update-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.about-update-btn {
+  font-size: 12px;
+}
+
 .mini-dialog {
   width: 440px;
   background: var(--bg-elevated);

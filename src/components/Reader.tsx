@@ -141,11 +141,11 @@ export function Reader() {
                 </button>
               </div>
               <div className="reader-actions-right">
-                <button className="toggle-action-btn" onClick={triggerReaderSummary}>
+                <button className="toggle-action-btn" onClick={() => triggerReaderSummary()}>
                   <Icons.spark />
                   <span>摘要</span>
                 </button>
-                <button className="toggle-action-btn" onClick={toggleReaderTranslation}>
+                <button className="toggle-action-btn" onClick={() => toggleReaderTranslation()}>
                   <Icons.globe />
                   <span>{isShowingTranslatedProse ? '显示原文' : '翻译'}</span>
                 </button>

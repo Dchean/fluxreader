@@ -238,7 +238,6 @@ function SocialCard({ item }: { item: ArticleEntry }) {
   }, [item.id]);
   /* 派生值提取为局部变量：JSX 表达式内不放可选链（oxc 解析限制，且更易读） */
   const feedName = binding ? binding.feed.name : '';
-  const feedUrl = binding ? binding.feed.url : '';
   /* 三态：null=跟随 feed 配置，true=手动展开，false=手动收起 */
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const showTranslate = transOverride ?? feedConfig.autoTranslate;

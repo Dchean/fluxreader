@@ -206,9 +206,6 @@ export interface AppState {
   toggleFolderCollapse: (catId: string) => void;
   toggleAllFolders: () => void;
   toggleSettingsCatCollapse: (catId: string) => void;
-
-  /* ---------- Actions: 设置 ---------- */
-  updateSettings: (partial: Partial<SettingsState>) => void;
 }
 
 let toastId = 0;
@@ -452,7 +449,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!silent) get().showToast('浏览器演示模式无 AI 服务');
       return;
     }
-    set({ translating: true, isShowingTranslatedProse: true, translatedStreamText: '' });
+    set({ translating: true, isShowingTranslatedProse: true });
     const articleId = art.id;
     void api
       .aiTranslate(
@@ -935,9 +932,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       const saved = JSON.parse(raw) as Partial<SettingsState>;
       /* 逐键合并（未来新增设置项自动落默认值）；类型不符的丢弃 */
       const merged: SettingsState = { ...get().settings };
+      const target = merged as unknown as Record<string, unknown>;
       for (const [k, v] of Object.entries(saved)) {
-        if (k in merged && typeof v === typeof (merged as Record<string, unknown>)[k]) {
-          (merged as Record<string, unknown>)[k] = v;
+        if (k in merged && typeof v === typeof target[k]) {
+          target[k] = v;
         }
       }
       /* startupView：启动默认视图（未读/全部/今天/收藏） */

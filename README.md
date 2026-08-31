@@ -2,6 +2,8 @@
 
 本地优先（Local-First）的 Windows 桌面 RSS 阅读器。Tauri 2 + Rust 后端 + React 19 前端，全部数据存于本机 SQLite，直连抓取订阅源，可选连接 Miniflux 服务端做双向同步。基于 [Papr](https://github.com/l0ng-ai/papr)（MIT）二次开发。
 
+> 本项目代码由纯 AI 古法生成——没有一滴人工代码，人工仅负责需求定义与验收。
+
 ## 技术栈
 
 | 层 | 技术 |

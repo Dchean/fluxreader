@@ -159,7 +159,8 @@ function SearchModalBody({ onClose, selectArticle }: { onClose: () => void; sele
   const groups = useMemo(() => {
     const byLayout = new Map<ContentLayoutType, ArticleEntry[]>();
     for (const a of results) {
-      const layout = useAppStore.getState().feedIndex.get(a.feedId)?.feed.layout ?? 'article';
+      const raw = useAppStore.getState().feedIndex.get(a.feedId)?.feed.layout ?? 'article';
+      const layout: ContentLayoutType = raw === 'inherit' ? 'article' : raw;
       const list = byLayout.get(layout) ?? [];
       list.push(a);
       byLayout.set(layout, list);
