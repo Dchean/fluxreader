@@ -1,6 +1,7 @@
 // pub 供集成测试（tests/）直接复用数据层与抓取管线
 pub mod ai;
 pub mod commands;
+pub mod config_sync;
 pub mod db;
 pub mod error;
 pub mod extraction;
@@ -190,6 +191,12 @@ pub fn run() {
         // SMTC 系统媒体控制
         media::media_update_full,
         media::media_stop,
+        // 配置同步（Gist / WebDAV）
+        config_sync::config_sync_save_credentials,
+        config_sync::config_sync_upload,
+        config_sync::config_sync_download,
+        config_sync::config_sync_apply,
+        config_sync::config_sync_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

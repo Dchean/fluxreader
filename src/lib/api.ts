@@ -285,6 +285,40 @@ export const api = {
     if (inv) await inv('media_stop');
   },
 
+  /* ---- 配置同步（Gist / WebDAV） ---- */
+  /** 同步状态（是否已配置/后端/上次上传时间）。 */
+  async configSyncStatus(): Promise<{ configured: boolean; backend?: string; lastUpload?: string } | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('config_sync_status')) as { configured: boolean; backend?: string; lastUpload?: string } : null;
+  },
+
+  /** 保存凭据（JSON：backend/token/server/username/gist_id）。 */
+  async configSyncSaveCredentials(credentials: string): Promise<void> {
+    const inv = await getInvoke();
+    if (inv) await inv('config_sync_save_credentials', { credentials });
+  },
+
+  /** 上传配置。返回上传时间戳。 */
+  async configSyncUpload(): Promise<string> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('config_sync_upload')) as string;
+  },
+
+  /** 下载远端配置（不应用）。返回 payload JSON 字符串。 */
+  async configSyncDownload(): Promise<string> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('config_sync_download')) as string;
+  },
+
+  /** 应用下载的配置。返回 { imported, skipped }。 */
+  async configSyncApply(payload: string): Promise<{ imported: number; skipped: number }> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('config_sync_apply', { payload })) as { imported: number; skipped: number };
+  },
+
   /* ---- OPML 导入导出 ---- */
   /** 导入 OPML 内容（字符串）。返回 (新增, 跳过)。 */
   async opmlImport(content: string): Promise<{ imported: number; skipped: number } | null> {
