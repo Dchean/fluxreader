@@ -1,0 +1,23 @@
+# ---- 构建产物 ----
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# ---- 运行时数据（本地 SQLite 与窗口状态，绝不入库）----
+*.db
+*.db-shm
+*.db-wal
+.window-state.json
+
+# ---- IDE / 工具 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- 日志与临时文件 ----
+*.log
+tmp/
+.cache/

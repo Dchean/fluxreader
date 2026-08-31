@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <title>Local Test Feed</title>
+  <link>http://127.0.0.1:8765/</link>
+  <description>ingestion_e2e deterministic fixture</description>
+  <item>
+    <title>Direct fetch entry (newest)</title>
+    <link>/post/1</link>
+    <guid isPermaLink="false">fixture-001</guid>
+    <pubDate>Mon, 24 Aug 2026 11:00:00 GMT</pubDate>
+    <description><![CDATA[<p>Newest entry: relative link and relative image must resolve against the feed base URL.</p><img src="/img/a.png" />]]></description>
+  </item>
+  <item>
+    <title>Older entry</title>
+    <link>/post/2</link>
+    <guid isPermaLink="false">fixture-002</guid>
+    <pubDate>Mon, 24 Aug 2026 10:00:00 GMT</pubDate>
+    <description><![CDATA[<p>Older entry for newest-first ordering assertion.</p>]]></description>
+  </item>
+</channel>
+</rss>

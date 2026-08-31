@@ -1,0 +1,51 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-opener = "2.5.4"
+
+# ---- 数据层（M2 P1）----
+# bundled SQLite：免系统依赖，含 FTS5
+rusqlite = { version = "0.32", features = ["bundled"] }
+# 追加式迁移：已发布迁移不可改，只能新增
+rusqlite_migration = "1"
+
+# ---- 直连抓取（M2 P1）----
+feed-rs = "2"
+reqwest = { version = "0.12", default-features = false, features = ["gzip", "brotli", "rustls-tls", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+# HTML 清洗：feed 正文进 reader webview 前必经（白名单式，相对 URL 重写）
+ammonia = "4.1"
+# 惰性图片恢复 + 文本抽取用的 DOM 解析
+scraper = "0.21"
+ego-tree = "0.9"
+# Readability 全文提取（「自动全文」打开方式）
+dom_smoothie = "0.17"
+# OPML 订阅列表导入导出
+opml = "1"
+url = "2"
+tauri-plugin-autostart = { version = "2", default-features = false }
+tauri-plugin-window-state = "2"

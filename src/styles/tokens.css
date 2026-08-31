@@ -1,0 +1,239 @@
+/* ============================================================
+   FluxReader Design Tokens
+   迁移自 prototype.html —— data-theme × data-palette 变量体系
+   浅色模式当前仅实现 blue 调色盘（原型如此），dark 全部 5 色
+   ============================================================ */
+
+:root {
+  --radius-sm: 6px;
+  --radius-md: 9px;
+  --radius-lg: 12px;
+  --shadow-elevation: 0 16px 40px rgba(0, 0, 0, 0.45);
+  --transition-fast: 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  /* 语义色（主题无关） */
+  --star-color: #e2a90e;         /* 收藏星标：深浅模式均醒目 */
+  --sync-ok: #2fae57;            /* 同步成功 */
+  --danger: #e81123;             /* 删除/关闭危险操作 */
+}
+
+/* === Dark Modes for 5 Palettes === */
+:root[data-theme="dark"][data-palette="blue"] {
+  --bg-base: #14161a;
+  --bg-sidebar: #181a20;
+  --bg-timeline: #15171c;
+  --bg-reader: #17191f;
+  --bg-card: rgba(35, 40, 50, 0.65);
+  --bg-card-hover: rgba(45, 52, 65, 0.85);
+  --bg-card-active: #242c3b;
+  --bg-elevated: #1e222a;
+  --bg-overlay: rgba(0, 0, 0, 0.7);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --text-primary: #f1f3f7;
+  --text-secondary: #959fae;
+  --text-tertiary: #7a8494;
+  --accent: #4880c8;
+  --accent-light: #6a9ee2;
+  --accent-glow: rgba(72, 128, 200, 0.22);
+  --accent-subtle: rgba(72, 128, 200, 0.15);
+  --badge-bg: rgba(255, 255, 255, 0.07);
+}
+
+:root[data-theme="dark"][data-palette="zinc"] {
+  --bg-base: #151517;
+  --bg-sidebar: #19191c;
+  --bg-timeline: #161618;
+  --bg-reader: #18181a;
+  --bg-card: rgba(38, 38, 42, 0.65);
+  --bg-card-hover: rgba(50, 50, 56, 0.85);
+  --bg-card-active: #2a2a30;
+  --bg-elevated: #212125;
+  --bg-overlay: rgba(0, 0, 0, 0.75);
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text-primary: #f2f2f5;
+  --text-secondary: #9c9ca4;
+  --text-tertiary: #7d7d88;
+  --accent: #6b7280;
+  --accent-light: #9ca3af;
+  --accent-glow: rgba(107, 114, 128, 0.2);
+  --accent-subtle: rgba(107, 114, 128, 0.15);
+  --badge-bg: rgba(255, 255, 255, 0.07);
+}
+
+:root[data-theme="dark"][data-palette="purple"] {
+  --bg-base: #16141c;
+  --bg-sidebar: #1b1724;
+  --bg-timeline: #16131d;
+  --bg-reader: #181520;
+  --bg-card: rgba(43, 35, 58, 0.6);
+  --bg-card-hover: rgba(56, 46, 75, 0.8);
+  --bg-card-active: #342848;
+  --bg-elevated: #241d30;
+  --bg-overlay: rgba(0, 0, 0, 0.7);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --text-primary: #f4f2f8;
+  --text-secondary: #a497b8;
+  --text-tertiary: #8a7f9e;
+  --accent: #7873b8;
+  --accent-light: #9893dc;
+  --accent-glow: rgba(120, 115, 184, 0.22);
+  --accent-subtle: rgba(120, 115, 184, 0.15);
+  --badge-bg: rgba(255, 255, 255, 0.07);
+}
+
+:root[data-theme="dark"][data-palette="emerald"] {
+  --bg-base: #121815;
+  --bg-sidebar: #16201a;
+  --bg-timeline: #131a16;
+  --bg-reader: #141c18;
+  --bg-card: rgba(30, 46, 38, 0.6);
+  --bg-card-hover: rgba(40, 62, 51, 0.8);
+  --bg-card-active: #223f31;
+  --bg-elevated: #1a2721;
+  --bg-overlay: rgba(0, 0, 0, 0.7);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --text-primary: #f0f6f2;
+  --text-secondary: #95ad9e;
+  --text-tertiary: #77977f;
+  --accent: #419e79;
+  --accent-light: #5dbda7;
+  --accent-glow: rgba(65, 158, 121, 0.22);
+  --accent-subtle: rgba(65, 158, 121, 0.15);
+  --badge-bg: rgba(255, 255, 255, 0.07);
+}
+
+:root[data-theme="dark"][data-palette="terracotta"] {
+  --bg-base: #191413;
+  --bg-sidebar: #211a17;
+  --bg-timeline: #1a1412;
+  --bg-reader: #1c1513;
+  --bg-card: rgba(52, 36, 31, 0.6);
+  --bg-card-hover: rgba(68, 47, 41, 0.8);
+  --bg-card-active: #442a22;
+  --bg-elevated: #2b1f1a;
+  --bg-overlay: rgba(0, 0, 0, 0.7);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --text-primary: #faf3f1;
+  --text-secondary: #bda199;
+  --text-tertiary: #9c8177;
+  --accent: #c46d54;
+  --accent-light: #dc8972;
+  --accent-glow: rgba(196, 109, 84, 0.22);
+  --accent-subtle: rgba(196, 109, 84, 0.15);
+  --badge-bg: rgba(255, 255, 255, 0.07);
+}
+
+/* === Light Modes for 5 Palettes（补齐原型缺失的 4 色，保持 blue 与原型一致） === */
+:root[data-theme="light"][data-palette="blue"] {
+  --bg-base: #f0f3f7;
+  --bg-sidebar: #f5f7fa;
+  --bg-timeline: #ffffff;
+  --bg-reader: #ffffff;
+  --bg-card: rgba(238, 242, 249, 0.85);
+  --bg-card-hover: rgba(228, 234, 246, 0.95);
+  --bg-card-active: #d6e1f3;
+  --bg-elevated: #ffffff;
+  --bg-overlay: rgba(0, 0, 0, 0.35);
+  --border-subtle: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text-primary: #191c22;
+  --text-secondary: #576274;
+  --text-tertiary: #6f7a8c;
+  --accent: #326db3;
+  --accent-light: #4880c8;
+  --accent-glow: rgba(50, 109, 179, 0.18);
+  --accent-subtle: rgba(50, 109, 179, 0.12);
+  --badge-bg: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"][data-palette="zinc"] {
+  --bg-base: #f4f4f5;
+  --bg-sidebar: #f7f7f8;
+  --bg-timeline: #ffffff;
+  --bg-reader: #ffffff;
+  --bg-card: rgba(244, 244, 245, 0.85);
+  --bg-card-hover: rgba(234, 234, 237, 0.95);
+  --bg-card-active: #e4e4e7;
+  --bg-elevated: #ffffff;
+  --bg-overlay: rgba(0, 0, 0, 0.35);
+  --border-subtle: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-tertiary: #71717a;
+  --accent: #52525b;
+  --accent-light: #71717a;
+  --accent-glow: rgba(82, 82, 91, 0.18);
+  --accent-subtle: rgba(82, 82, 91, 0.12);
+  --badge-bg: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"][data-palette="purple"] {
+  --bg-base: #f5f4f9;
+  --bg-sidebar: #f8f7fb;
+  --bg-timeline: #ffffff;
+  --bg-reader: #ffffff;
+  --bg-card: rgba(245, 244, 249, 0.85);
+  --bg-card-hover: rgba(236, 234, 245, 0.95);
+  --bg-card-active: #e6e3f2;
+  --bg-elevated: #ffffff;
+  --bg-overlay: rgba(0, 0, 0, 0.35);
+  --border-subtle: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text-primary: #1d1b26;
+  --text-secondary: #58536b;
+  --text-tertiary: #7e7590;
+  --accent: #6d68a8;
+  --accent-light: #8781c2;
+  --accent-glow: rgba(109, 104, 168, 0.18);
+  --accent-subtle: rgba(109, 104, 168, 0.12);
+  --badge-bg: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"][data-palette="emerald"] {
+  --bg-base: #f0f5f2;
+  --bg-sidebar: #f4f8f5;
+  --bg-timeline: #ffffff;
+  --bg-reader: #ffffff;
+  --bg-card: rgba(240, 245, 242, 0.85);
+  --bg-card-hover: rgba(228, 240, 234, 0.95);
+  --bg-card-active: #d7ebe1;
+  --bg-elevated: #ffffff;
+  --bg-overlay: rgba(0, 0, 0, 0.35);
+  --border-subtle: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text-primary: #141d18;
+  --text-secondary: #4a5f55;
+  --text-tertiary: #6a8076;
+  --accent: #35846a;
+  --accent-light: #4a9d82;
+  --accent-glow: rgba(53, 132, 106, 0.18);
+  --accent-subtle: rgba(53, 132, 106, 0.12);
+  --badge-bg: rgba(0, 0, 0, 0.05);
+}
+
+:root[data-theme="light"][data-palette="terracotta"] {
+  --bg-base: #f8f4f2;
+  --bg-sidebar: #faf7f5;
+  --bg-timeline: #ffffff;
+  --bg-reader: #ffffff;
+  --bg-card: rgba(248, 244, 242, 0.85);
+  --bg-card-hover: rgba(243, 234, 230, 0.95);
+  --bg-card-active: #f0e0d8;
+  --bg-elevated: #ffffff;
+  --bg-overlay: rgba(0, 0, 0, 0.35);
+  --border-subtle: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text-primary: #241a15;
+  --text-secondary: #6e564d;
+  --text-tertiary: #8a7166;
+  --accent: #b05d42;
+  --accent-light: #c67a5f;
+  --accent-glow: rgba(176, 93, 66, 0.18);
+  --accent-subtle: rgba(176, 93, 66, 0.12);
+  --badge-bg: rgba(0, 0, 0, 0.05);
+}
