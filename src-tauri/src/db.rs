@@ -393,6 +393,13 @@ pub fn feeds_due_for_refresh(conn: &Connection, interval_min: i64) -> AppResult<
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// 全部源 id（托盘「刷新全部订阅」入口，忽略到期与退避）。
+pub fn feeds_all_ids(conn: &Connection) -> AppResult<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM feeds")?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 pub fn set_feed_title_and_icon(conn: &Connection, id: i64, title: Option<&str>, favicon: Option<&str>, site_url: Option<&str>) -> AppResult<()> {
     let title = title.filter(|t| !t.trim().is_empty());
     let favicon = favicon.filter(|f| !f.trim().is_empty());

@@ -175,6 +175,12 @@ function GeneralTab() {
 
       <div className="settings-group-title">启动</div>
       <AutoStartSwitch />
+      <SettingCard title="关闭时最小化到托盘" desc="关闭按钮仅隐藏窗口，托盘图标常驻；托盘菜单「退出」才是真正退出">
+        <Switch checked={settings.closeToTray} onChange={(v) => updateSettings({ closeToTray: v })} />
+      </SettingCard>
+      <SettingCard title="新文章系统通知" desc="窗口在后台/托盘时，后台刷新抓到新文章发 Windows 通知">
+        <Switch checked={settings.notifyOnNewArticles} onChange={(v) => updateSettings({ notifyOnNewArticles: v })} />
+      </SettingCard>
       <SettingCard title="启动时打开" desc="下次打开应用时默认进入的视图">
         <FluxDropdown
           width={130}

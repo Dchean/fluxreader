@@ -69,6 +69,10 @@ export interface SettingsState {
   defaultOpenMode: 'rss' | 'fulltext';
   /** 智能去重：同 URL 文章跨源只保留首个（入库层拦截） */
   smartDedup: boolean;
+  /** 关闭按钮 → 最小化到托盘（默认开；托盘「退出」才是真退出） */
+  closeToTray: boolean;
+  /** 新文章到达发 Windows 系统通知（默认关；窗口隐藏时才发） */
+  notifyOnNewArticles: boolean;
 }
 
 /** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM */
@@ -286,6 +290,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     showReadTime: true,
     defaultOpenMode: 'rss',
     smartDedup: false,
+    closeToTray: true,
+    notifyOnNewArticles: false,
   },
 
   /* ================= 导航 ================= */

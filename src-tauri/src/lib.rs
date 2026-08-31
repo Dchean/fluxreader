@@ -14,19 +14,50 @@ pub mod state;
 pub mod sync;
 
 use std::path::PathBuf;
-use tauri::Manager;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    Emitter, Manager,
+};
+
+/// 主窗口显示并聚焦（托盘恢复/二实例唤起共用）
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+}
+
+/// 读取 closeToTray 设置（缺省 true：关闭即最小化到托盘）
+async fn read_close_to_tray(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> bool {
+    let conn = db.lock().await;
+    match crate::db::get_setting(&conn, "app_settings") {
+        Ok(Some(raw)) => serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get("closeToTray").and_then(|b| b.as_bool()))
+            .unwrap_or(true),
+        _ => true,
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例：二实例启动 → 聚焦既有窗口后自行退出。必须第一个注册。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
-        // 窗口状态记忆：尺寸/位置/最大化跨启动保留（npm 包已装，此前 Rust 侧未注册）
+        // 窗口状态记忆：尺寸/位置/最大化跨启动保留
         .plugin(tauri_plugin_window_state::Builder::default().build())
         // 开机自启：Windows 注册表 Run 键（设置页开关控制）
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // 系统通知：新文章到达时 Windows toast（scheduler 触发）
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -52,7 +83,63 @@ pub fn run() {
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
+
+            // 系统托盘：显示/刷新全部/退出
+            let show = MenuItem::with_id(app, "show", "显示 FluxReader", true, None::<&str>)?;
+            let refresh = MenuItem::with_id(app, "refresh", "刷新全部订阅", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &refresh, &quit])?;
+            TrayIconBuilder::with_id("main-tray")
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main_window(app),
+                    "refresh" => {
+                        // 复用调度器的全量刷新路径：抓全部源并广播事件
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app.state::<state::AppState>();
+                            let db = state.db.clone();
+                            let http = state.http.clone();
+                            let (n, f) = scheduler::refresh_all(&db, &http).await;
+                            let _ = app.emit(
+                                "feeds-updated",
+                                serde_json::json!({ "new_articles": n, "failed_feeds": f }),
+                            );
+                        });
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // 左键单击托盘图标 → 显示主窗口
+                    if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, button_state: tauri::tray::MouseButtonState::Up, .. } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 关闭按钮 → 最小化到托盘（closeToTray 设置，默认开）；托盘「退出」才是真退出
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle().clone();
+                let win = window.clone();
+                api.prevent_close();
+                tauri::async_runtime::spawn(async move {
+                    let db = app.state::<state::AppState>().db.clone();
+                    if read_close_to_tray(&db).await {
+                        let _ = win.hide();
+                    } else {
+                        app.exit(0);
+                    }
+                });
+            }
         })
         .invoke_handler(tauri::generate_handler![
             // 分类

@@ -42,24 +42,43 @@ async fn read_refresh_config(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>)
     (enabled, interval, dedup)
 }
 
+/// 全量刷新所有源（托盘「刷新全部订阅」入口，忽略到期时间）。
+pub async fn refresh_all(
+    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    http: &reqwest::Client,
+) -> (usize, usize) {
+    refresh_feeds_inner(db, http, None).await
+}
+
 /// 抓取所有到期源（Semaphore 4 并发）。HTTP 在锁外执行，写库时短暂持锁。
 /// 返回 (新增条数, 失败源数)。
 async fn refresh_due_feeds(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
 ) -> (usize, usize) {
-    use tokio::sync::Semaphore;
-
     let (_, interval_min, dedup) = read_refresh_config(db).await;
+    refresh_feeds_inner(db, http, Some((interval_min, dedup))).await
+}
+
+/// 抓取实现：Some((interval, dedup)) 只抓到期源，None 全量。
+async fn refresh_feeds_inner(
+    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    http: &reqwest::Client,
+    due_filter: Option<(i64, bool)>,
+) -> (usize, usize) {
+    use tokio::sync::Semaphore;
+    let dedup = due_filter.map(|(_, d)| d).unwrap_or(false);
     let due: Vec<i64> = {
         let conn = db.lock().await;
-        match crate::db::feeds_due_for_refresh(&conn, interval_min) {
-            Ok(ids) => ids,
-            Err(e) => {
-                log::warn!("scheduler: query due feeds failed: {e}");
-                return (0, 0);
-            }
+        match due_filter {
+            Some((interval_min, _)) => crate::db::feeds_due_for_refresh(&conn, interval_min),
+            None => crate::db::feeds_all_ids(&conn),
         }
+        .map(|ids| ids)
+        .unwrap_or_else(|e| {
+            log::warn!("scheduler: query feeds failed: {e}");
+            Vec::new()
+        })
     };
     if due.is_empty() {
         return (0, 0);
@@ -108,9 +127,45 @@ pub fn spawn_scheduler(app: AppHandle) {
                         "feeds-updated",
                         serde_json::json!({ "new_articles": new_articles, "failed_feeds": failed }),
                     );
+                    // 新文章系统通知（notifyOnNewArticles 开关，默认关；
+                    // 窗口隐藏/失焦时才发——正在看应用时不打扰）
+                    if new_articles > 0 && should_notify(&db, &app).await {
+                        notify_new_articles(&app, new_articles);
+                    }
                 }
             }
             tokio::time::sleep(TICK).await;
         }
     });
+}
+
+/// 通知开关开启 且 主窗口不可见（最小化到托盘/失焦）。
+async fn should_notify(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>, app: &AppHandle) -> bool {
+    let on = {
+        let conn = db.lock().await;
+        crate::db::get_setting(&conn, "app_settings")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("notifyOnNewArticles").and_then(|b| b.as_bool()))
+            .unwrap_or(false)
+    };
+    if !on {
+        return false;
+    }
+    !app
+        .get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+/// Windows toast：新文章到达。
+fn notify_new_articles(app: &AppHandle, count: usize) {
+    use tauri_plugin_notification::NotificationExt;
+    let _ = app
+        .notification()
+        .builder()
+        .title("FluxReader 新文章")
+        .body(format!("后台刷新抓到 {count} 篇新文章，点击查看"))
+        .show();
 }
