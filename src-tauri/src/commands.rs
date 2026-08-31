@@ -405,7 +405,10 @@ pub async fn feed_counts(state: State<'_, AppState>) -> AppResult<Vec<db::FeedCo
    刷新（直连优先）
    ============================================================ */
 
-/// 刷新单个订阅源（直连）
+/// 刷新单个订阅源（直连）。
+/// 注意：ingestion::refresh_feed 在持有 db 锁期间完成网络抓取（既有设计——
+/// 条件 GET 头与落库需同一连接视图）。抓取期间其他命令排队，个人使用量级可接受；
+/// 若未来出现可感知卡顿，再拆「锁内取头 → 锁外抓 → 锁内落库」。
 #[tauri::command]
 pub async fn refresh_feed(state: State<'_, AppState>, feed_id: i64) -> AppResult<usize> {
     let client = state.http.clone();
@@ -630,7 +633,7 @@ pub async fn sync_connect(
             db::set_setting(&conn, "miniflux_token", "")?;
             return Err(AppError::new(
                 "syncFailed",
-                &format!("连接成功但首次同步失败：{e}"),
+                format!("连接成功但首次同步失败：{e}"),
             ));
         }
     }

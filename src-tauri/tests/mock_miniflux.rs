@@ -192,7 +192,7 @@ fn route(srv: &MockMiniflux, method: &str, path: &str, path_query: &str, body: &
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|e| !changed || chrono::Utc::now().timestamp_millis() >= after_ms)
+                .filter(|_| !changed || chrono::Utc::now().timestamp_millis() >= after_ms)
                 .cloned()
                 .collect();
             let total = entries.len();
@@ -225,7 +225,7 @@ fn route(srv: &MockMiniflux, method: &str, path: &str, path_query: &str, body: &
             };
             (200, serde_json::json!({ "feed_id": feed_id }).to_string())
         }
-        (m, p) if p.starts_with("/v1/entries/") && p.ends_with("/bookmark") => {
+        (_, p) if p.starts_with("/v1/entries/") && p.ends_with("/bookmark") => {
             let id: i64 = p
                 .trim_start_matches("/v1/entries/")
                 .trim_end_matches("/bookmark")

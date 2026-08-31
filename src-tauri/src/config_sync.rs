@@ -1,6 +1,7 @@
 //! 配置同步（GitHub Gist / WebDAV）：手动上传/下载客户端配置。
 //! 同步范围：分类（名称/布局/AI标志）+ 订阅源（URL/标题/归属/布局/AI标志）
 //! + app_settings + ai_config。不含正文/媒体/AI 缓存（按设计文档边界）。
+//!
 //! 不做冲突合并：下载整体覆盖设置，源/分类按 URL/名称 upsert。
 
 use crate::db;

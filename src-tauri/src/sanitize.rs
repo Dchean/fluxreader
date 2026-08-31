@@ -48,7 +48,7 @@ fn promote_lazy_images(html: &str) -> String {
                 img.value()
                     .attr("srcset")
                     .and_then(|ss| ss.split(',').next())
-                    .and_then(|c| c.trim().split_whitespace().next())
+                    .and_then(|c| c.split_whitespace().next())
             });
         if let Some(u) = recovered.filter(|u| !u.is_empty()) {
             let placeholder = img.value().attr("src").unwrap_or("");

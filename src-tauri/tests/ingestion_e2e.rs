@@ -14,7 +14,7 @@ const FEED_URL: &str = "http://127.0.0.1:8765/local_feed.xml";
 async fn direct_fetch_pipeline_end_to_end() {
     let tmp = std::env::temp_dir().join("fluxreader_e2e_test.db");
     let _ = std::fs::remove_file(&tmp);
-    let mut conn = db::open(&tmp).expect("open db");
+    let conn = db::open(&tmp).expect("open db");
 
     // 1. 建分类 + 直连抓取验证（add_feed 命令的核心路径）
     let folder_id = db::create_folder(&conn, "技术开发", "article").unwrap();

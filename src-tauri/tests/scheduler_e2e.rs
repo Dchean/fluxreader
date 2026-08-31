@@ -11,7 +11,6 @@
 use app_lib::db;
 use app_lib::ingestion;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::Mutex;
 
 const FEED_URL: &str = "http://127.0.0.1:8765/local_feed.xml";
@@ -71,8 +70,8 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
 
     // ---------- 场景：1 个好源 + 1 个坏源 ----------
     {
-        let mut conn = db.lock().await;
-        db::create_folder(&mut conn, "技术", "article").unwrap();
+        let conn = db.lock().await;
+        db::create_folder(&conn, "技术", "article").unwrap();
     }
     let good_id = {
         let conn = db.lock().await;
@@ -140,7 +139,7 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
 
     // ---------- 5. autoRefresh=false 语义（调度循环里读设置决定，这里验证读取函数可用）----------
     {
-        let mut conn = db.lock().await;
+        let conn = db.lock().await;
         db::set_setting(&conn, "app_settings", r#"{"autoRefresh":false,"refreshInterval":45}"#).unwrap();
     }
     let raw = {

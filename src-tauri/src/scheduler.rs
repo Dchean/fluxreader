@@ -74,7 +74,6 @@ async fn refresh_feeds_inner(
             Some((interval_min, _)) => crate::db::feeds_due_for_refresh(&conn, interval_min),
             None => crate::db::feeds_all_ids(&conn),
         }
-        .map(|ids| ids)
         .unwrap_or_else(|e| {
             log::warn!("scheduler: query feeds failed: {e}");
             Vec::new()

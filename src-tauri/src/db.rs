@@ -328,6 +328,9 @@ pub fn find_feed_by_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> 
     Ok(id)
 }
 
+/// 新增订阅源。参数即 feeds 表列（URL/站点/标题/分类/布局/AI 开关）——
+/// 结构与表一一对应，收窄成结构体反而隔着一层，接受 9 参。
+#[allow(clippy::too_many_arguments)]
 pub fn insert_feed(
     conn: &Connection,
     feed_url: &str,

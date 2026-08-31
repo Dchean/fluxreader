@@ -20,9 +20,9 @@ async fn miniflux_sync_end_to_end() {
 
     // ---------- 场景准备：本地状态 ----------
     // 本地分类 + 一个直连添加的 feed（URL 与远端 feed 10 碰撞）
-    let folder_id = db::create_folder(&mut conn, "技术开发", "article").unwrap();
+    let folder_id = db::create_folder(&conn, "技术开发", "article").unwrap();
     let local_feed_id = db::insert_feed(
-        &mut conn,
+        &conn,
         "http://127.0.0.1:8765/local_feed.xml", // 与 mock 的 feed 10 同 URL
         None,
         "Local Direct Feed",
@@ -49,7 +49,7 @@ async fn miniflux_sync_end_to_end() {
         published_at: Some(chrono::Utc::now().to_rfc3339()),
         source: "direct".into(),
     };
-    let (local_article_id, _) = db::upsert_article_with_feed(&mut conn, local_feed_id, &local_entry, false).unwrap();
+    let (local_article_id, _) = db::upsert_article_with_feed(&conn, local_feed_id, &local_entry, false).unwrap();
 
     // 远端同 URL 条目（已读 + 收藏状态 —— Miniflux 是状态权威）
     server.add_entry(10, "http://127.0.0.1:8765/post/1", "Remote version of same article", "read", true);
@@ -57,8 +57,8 @@ async fn miniflux_sync_end_to_end() {
     server.add_entry(11, "http://example.com/only-remote", "Remote only article", "unread", false);
 
     // ---------- ① 连接 + 全量同步 ----------
-    db::set_setting(&mut conn, "miniflux_endpoint", &server.url()).unwrap();
-    db::set_setting(&mut conn, "miniflux_token", "test-token").unwrap();
+    db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "miniflux_token", "test-token").unwrap();
 
     let http = app_lib::ingestion::build_client(10);
     let report = sync::sync_now(&mut conn, &http).await.expect("sync should succeed");
@@ -102,11 +102,11 @@ async fn miniflux_sync_end_to_end() {
     assert!(merged.2.is_some(), "article bound to miniflux entry id");
 
     // ---------- ② 状态推送：本地改未读 → push 到远端 ----------
-    db::set_read(&mut conn, local_article_id, false).unwrap();
-    db::enqueue_sync(&mut conn, Some(local_article_id), None, "unread", None).unwrap();
+    db::set_read(&conn, local_article_id, false).unwrap();
+    db::enqueue_sync(&conn, Some(local_article_id), None, "unread", None).unwrap();
     // 收藏切换
-    db::set_starred(&mut conn, local_article_id, false).unwrap();
-    db::enqueue_sync(&mut conn, Some(local_article_id), None, "unstar", None).unwrap();
+    db::set_starred(&conn, local_article_id, false).unwrap();
+    db::enqueue_sync(&conn, Some(local_article_id), None, "unstar", None).unwrap();
 
     let report2 = sync::sync_now(&mut conn, &http).await.expect("second sync");
     println!("push report: pushed_states={}", report2.pushed_states);
@@ -127,7 +127,7 @@ async fn miniflux_sync_end_to_end() {
 
     // ---------- ③ 兜底：直连失败的源从 Miniflux 拉条目 ----------
     // 把 local_feed 标记为直连失败 + 绑定远端 feed，远端加一条本地没有的条目
-    db::set_feed_fetch_state(&mut conn, local_feed_id, true, Some("connection refused"), None, None).unwrap();
+    db::set_feed_fetch_state(&conn, local_feed_id, true, Some("connection refused"), None, None).unwrap();
     server.add_entry(10, "http://127.0.0.1:8765/new-fallback-entry", "Fallback Entry From Miniflux", "unread", false);
 
     let report3 = sync::sync_now(&mut conn, &http).await.expect("third sync");
@@ -145,7 +145,7 @@ async fn miniflux_sync_end_to_end() {
     assert!(fb.0.contains("Fallback"));
 
     // 队列清空
-    let queue_left = db::take_sync_queue(&mut conn).unwrap().len();
+    let queue_left = db::take_sync_queue(&conn).unwrap().len();
     assert_eq!(queue_left, 0, "sync queue must be drained after successful push");
 
     // 连接测试

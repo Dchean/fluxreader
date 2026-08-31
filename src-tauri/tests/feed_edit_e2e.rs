@@ -19,7 +19,7 @@ fn seed() -> (Connection, std::path::PathBuf) {
     let f1 = db::create_folder(&conn, "技术", "article").unwrap();
     let f2 = db::create_folder(&conn, "生活", "social").unwrap();
     let feed = db::insert_feed(&conn, "https://a.com/rss", Some("https://a.com"), "源A", None, f1, "inherit", true, false).unwrap();
-    let _ = f2;
+    let _ = (f2, feed);  // seed 局部值：测试各自用 list_feeds 重新取
     (conn, tmp)
 }
 
