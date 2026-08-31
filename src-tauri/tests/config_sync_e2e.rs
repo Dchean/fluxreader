@@ -220,3 +220,47 @@ async fn webdav_get_404_maps_to_error() {
     let r = app_lib::config_sync::webdav_get_for_test(&http, &cred).await;
     assert!(r.is_err());
 }
+
+/// 命令级端到端：build → webdav_put → webdav_get → apply 全链路（对本地 mock）。
+#[tokio::test]
+async fn full_roundtrip_upload_download_apply() {
+    let (port, _store) = start_webdav_mock();
+    let http = app_lib::ingestion::build_client(30);
+    let cred = app_lib::config_sync::SyncCredentials {
+        backend: "webdav".into(),
+        token: "pass".into(),
+        server: format!("http://127.0.0.1:{port}"),
+        username: "user".into(),
+        gist_id: None,
+    };
+
+    // 设备A：本地库构建 payload 并上传
+    let tmp_a = std::env::temp_dir().join("fluxreader_cfgsync_rt_a.db");
+    let _ = std::fs::remove_file(&tmp_a);
+    let conn_a = db::open(&tmp_a).unwrap();
+    seed_db(&conn_a);
+    let payload_a = build_payload(&conn_a).unwrap();
+    app_lib::config_sync::webdav_put_for_test(&http, &cred, &serde_json::to_string(&payload_a).unwrap())
+        .await
+        .unwrap();
+
+    // 设备B：空库下载同一配置并应用
+    let tmp_b = std::env::temp_dir().join("fluxreader_cfgsync_rt_b.db");
+    let _ = std::fs::remove_file(&tmp_b);
+    let conn_b = db::open(&tmp_b).unwrap();
+    let downloaded = app_lib::config_sync::webdav_get_for_test(&http, &cred).await.unwrap();
+    let parsed: SyncPayload = serde_json::from_str(&downloaded).unwrap();
+    let (imported, skipped) = apply_payload(&conn_b, &parsed).unwrap();
+
+    assert_eq!(imported, 2, "空库应导入全部 2 个源");
+    assert_eq!(skipped, 0);
+    // 设备B 拿到与设备A 相同的分类结构
+    let folders_b = db::list_folders(&conn_b).unwrap();
+    assert!(folders_b.iter().any(|f| f.name == "技术" && f.layout == "article" && f.auto_summary));
+    assert!(folders_b.iter().any(|f| f.name == "播客" && f.layout == "podcast"));
+    // 设备B 拿到设备A 的设置
+    let s = db::get_setting(&conn_b, "app_settings").unwrap().unwrap();
+    assert!(s.contains("fontSize"));
+    let _ = std::fs::remove_file(&tmp_a);
+    let _ = std::fs::remove_file(&tmp_b);
+}
