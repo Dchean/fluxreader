@@ -844,6 +844,12 @@ body {
   color: var(--text-primary);
   line-height: 1.35;
   margin-bottom: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .card-snippet {
@@ -854,6 +860,8 @@ body {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .card-footer {
@@ -930,7 +938,37 @@ body {
   color: var(--text-primary);
   margin-bottom: 8px;
   user-select: text;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
+
+/* 社交卡正文内嵌 HTML 的轻量排版（feed 来源已是消毒白名单输出） */
+.social-text p { margin: 0 0 0.6em; }
+.social-text > :last-child { margin-bottom: 0; }
+.social-text img { max-width: 100%; height: auto; border-radius: var(--radius-sm); margin: 4px 0; }
+.social-text blockquote {
+  margin: 0.6em 0;
+  padding: 0.3em 0.9em;
+  border-left: 3px solid var(--accent);
+  color: var(--text-secondary);
+}
+.social-text code {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.88em;
+  background: var(--badge-bg);
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+}
+.social-text pre {
+  overflow-x: auto;
+  background: var(--badge-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 0.85em;
+}
+.social-text pre code { background: none; padding: 0; }
+.social-text a { color: var(--accent-light); text-decoration: none; }
 
 .social-translated-block {
   font-size: 13px;
@@ -1027,8 +1065,15 @@ body {
 .gallery-title {
   font-size: 12.5px;
   font-weight: 600;
+  line-height: 1.4;
   margin-bottom: 4px;
   color: var(--text-primary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .gallery-meta-row {
@@ -1099,12 +1144,22 @@ body {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
+  line-height: 1.35;
   margin: 2px 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .podcast-desc {
   font-size: 12px;
   color: var(--text-secondary);
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .podcast-bottom-bar {
@@ -1472,26 +1527,170 @@ body {
   color: var(--text-primary);
 }
 
+/* -------------------------------------------------------------
+   阅读器正文排版（参照成熟 RSS 阅读器 Reeder/NetNewsWire/Folo 惯例）
+   正文 HTML 为氨气白名单输出：h1-h6/ul/ol/blockquote/pre/code/
+   table/figure/img/hr 均可能出现，此处统一排版体系
+   ------------------------------------------------------------- */
+
 .article-prose {
   font-size: 16px;
   line-height: 1.8;
   color: var(--text-primary);
+  overflow-wrap: break-word;
+  word-break: break-word;
   transition: font-size var(--transition-fast), line-height var(--transition-fast), font-family var(--transition-fast);
 }
 
+/* 首尾段落边距归一（RSS 正文常带冗余首/尾空段） */
+.article-prose > :first-child { margin-top: 0; }
+.article-prose > :last-child { margin-bottom: 0; }
+
 .article-prose p {
-  margin-bottom: 18px;
+  margin: 0 0 1em;
 }
 
+/* RSS 常见空段落（<p><br></p> / <p></p>）——隐藏而非占位 */
+.article-prose p:empty,
+.article-prose p:has(> br:only-child) {
+  display: none;
+}
+
+.article-prose h1, .article-prose h2, .article-prose h3,
+.article-prose h4, .article-prose h5, .article-prose h6 {
+  color: var(--text-primary);
+  font-weight: 700;
+  line-height: 1.4;
+  margin: 1.6em 0 0.7em;
+}
+
+.article-prose h1 { font-size: 1.45em; }
+.article-prose h2 { font-size: 1.3em; }
+.article-prose h3 { font-size: 1.15em; }
+.article-prose h4 { font-size: 1.05em; }
+.article-prose h5, .article-prose h6 { font-size: 1em; }
+
+/* 首个标题不留大上边距（与标题区衔接） */
+.article-prose > h1:first-child,
+.article-prose > h2:first-child,
+.article-prose > h3:first-child { margin-top: 0; }
+
+.article-prose ul, .article-prose ol {
+  margin: 0 0 1em;
+  padding-left: 1.6em;
+}
+
+.article-prose li { margin: 0.3em 0; }
+
+.article-prose blockquote {
+  margin: 1.2em 0;
+  padding: 0.4em 1.1em;
+  border-left: 3px solid var(--accent);
+  background: var(--badge-bg);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text-secondary);
+}
+
+.article-prose blockquote p { margin: 0 0 0.5em; }
+.article-prose blockquote p:last-child { margin-bottom: 0; }
+
+/* 行内代码与代码块 */
+.article-prose code {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 0.88em;
+  background: var(--badge-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+.article-prose pre {
+  margin: 1.2em 0;
+  padding: 12px 14px;
+  background: var(--badge-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  line-height: 1.55;
+}
+
+.article-prose pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.85em;
+}
+
+.article-prose table {
+  width: 100%;
+  margin: 1.2em 0;
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+
+.article-prose th, .article-prose td {
+  border: 1px solid var(--border-subtle);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.article-prose th {
+  background: var(--badge-bg);
+  font-weight: 600;
+}
+
+.article-prose tr:nth-child(even) td { background: color-mix(in srgb, var(--badge-bg) 50%, transparent); }
+
+.article-prose img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.2em auto;
+  border-radius: var(--radius-sm);
+}
+
+.article-prose figure { margin: 1.2em 0; text-align: center; }
+
+.article-prose figcaption {
+  font-size: 0.82em;
+  color: var(--text-tertiary);
+  margin-top: 0.5em;
+  text-align: center;
+}
+
+.article-prose hr {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 2em auto;
+  width: 60%;
+}
+
+.article-prose a {
+  color: var(--accent-light);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-light) 35%, transparent);
+}
+
+.article-prose a:hover { border-bottom-color: var(--accent-light); }
+
+.article-prose strong { font-weight: 700; color: var(--text-primary); }
+
+.article-prose em { font-style: italic; }
+
+/* 原文模式：干净衬线素排版（同一份消毒 HTML 的另一套视觉，非数据切换） */
 .article-prose.raw-render-mode {
   font-family: Georgia, Cambria, "Times New Roman", Times, serif;
   font-size: 14.5px;
   line-height: 1.65;
   color: var(--text-secondary);
-  background: var(--badge-bg);
-  padding: 16px;
-  border-radius: var(--radius-sm);
-  border: 1px dashed var(--border-subtle);
+}
+
+.article-prose.raw-render-mode a { border-bottom: none; }
+.article-prose.raw-render-mode pre,
+.article-prose.raw-render-mode table,
+.article-prose.raw-render-mode blockquote {
+  font-family: 'JetBrains Mono', Consolas, monospace;
 }
 
 /* -------------------------------------------------------------
