@@ -91,3 +91,74 @@ fn migration_v1_to_v2_preserves_data() {
     let _ = std::fs::remove_file(&tmp);
     println!("=== MIGRATION v1→v2 PASS (version {v}) ===");
 }
+
+#[test]
+fn migration_v6_to_v7_backfills_precise_url_norm() {
+    let tmp = std::env::temp_dir().join("fluxreader_migration_v7_test.db");
+    let _ = std::fs::remove_file(&tmp);
+
+    // 手工建 v6 形状库：v5 + deduped_urls 表
+    {
+        let conn = Connection::open(&tmp).unwrap();
+        conn.execute_batch(r#"
+            CREATE TABLE folders (id INTEGER PRIMARY KEY, name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0,
+                layout TEXT NOT NULL DEFAULT 'article', auto_summary INTEGER NOT NULL DEFAULT 1,
+                auto_translate INTEGER NOT NULL DEFAULT 0, collapsed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')), miniflux_id INTEGER);
+            CREATE TABLE feeds (id INTEGER PRIMARY KEY, feed_url TEXT NOT NULL UNIQUE, site_url TEXT,
+                title TEXT NOT NULL, favicon_url TEXT, folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,
+                layout TEXT NOT NULL DEFAULT 'inherit', auto_summary INTEGER NOT NULL DEFAULT 1,
+                auto_translate INTEGER NOT NULL DEFAULT 0, etag TEXT, last_modified TEXT, last_fetched_at TEXT,
+                fetch_error TEXT, fetch_failed INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                fail_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, miniflux_id INTEGER);
+            CREATE TABLE articles (id INTEGER PRIMARY KEY, feed_id INTEGER NOT NULL REFERENCES feeds(id) ON DELETE CASCADE,
+                guid TEXT NOT NULL, url TEXT, title TEXT NOT NULL, author TEXT, summary TEXT, content_html TEXT,
+                body_text TEXT NOT NULL DEFAULT '', image_url TEXT, enclosure_url TEXT, enclosure_mime TEXT,
+                duration_sec INTEGER, ai_summary TEXT, translated_content TEXT, source TEXT NOT NULL DEFAULT 'direct',
+                published_at TEXT, fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+                is_read INTEGER NOT NULL DEFAULT 0, is_starred INTEGER NOT NULL DEFAULT 0,
+                miniflux_id INTEGER, fulltext_extracted INTEGER NOT NULL DEFAULT 0, UNIQUE(feed_id, guid));
+            CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE deduped_urls (url TEXT PRIMARY KEY, kept_aid INTEGER NOT NULL, kept_at TEXT NOT NULL DEFAULT (datetime('now')));
+        "#).unwrap();
+        conn.execute("INSERT INTO folders (name) VALUES ('Cat')", []).unwrap();
+        conn.execute(
+            "INSERT INTO feeds (feed_url, title, folder_id) VALUES ('https://example.com/rss', 'F', 1)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO articles (feed_id, guid, url, title) VALUES (1, 'g1', 'https://www.example.com/story/?utm_source=rss&id=9', 'Dressed URL')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO articles (feed_id, guid, url, title) VALUES (1, 'g2', 'http://example.com/story?id=9', 'Clean URL')",
+            [],
+        ).unwrap();
+        conn.pragma_update(None, "user_version", 6).unwrap();
+    }
+
+    let conn = db::open(&tmp).expect("migrate v6→v7");
+
+    // url_norm 由 Rust normalize_url 精确回填（非 lower(url) 占位）
+    let (n1, n2): (String, String) = conn
+        .query_row(
+            "SELECT (SELECT url_norm FROM articles WHERE guid='g1'), (SELECT url_norm FROM articles WHERE guid='g2')",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(n1, n2, "dressed URL and clean URL must normalize to the same key");
+    assert!(n1 == "http://example.com/story?id=9", "normalized form: got {n1}");
+
+    // miniflux_dup_ids 列存在且默认空
+    let dups: String = conn
+        .query_row("SELECT miniflux_dup_ids FROM articles WHERE guid='g1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(dups, "");
+
+    let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    assert_eq!(v, 7);
+
+    let _ = std::fs::remove_file(&tmp);
+    println!("=== MIGRATION v6→v7 PASS ===");
+}

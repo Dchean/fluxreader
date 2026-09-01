@@ -145,13 +145,26 @@ static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
     // 清空墓碑（尊重用户想让重复文章回来的意图）。墓碑存在期间，任何抓取
     // 轮次重放同 URL 都直接跳过——否则 feed B 的 guid 稳定，每轮刷新都会
     // 把被去重的那篇重新插进来（关开关→重影的真正来源）。
-    // user_version=6。
+    // url 列存规范化匹配键（v7 起）。user_version=6。
     M::up(r#"
         CREATE TABLE deduped_urls (
             url     TEXT PRIMARY KEY,
             kept_aid INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
             kept_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+    "#),
+    // 去重精确化：url_norm = URL 规范化匹配键（剥跟踪参数/www./m./尾斜杠/
+    // AMP/锚点，https→http 统一），原始 url 保留用于「打开源网页」。
+    // 同一篇被多个源用不同饰词引用时也能正确去重。
+    // miniflux_dup_ids：服务端同文副本 entry 记账（逗号分隔）——双端场景
+    // （Read You + FluxReader 共用 Miniflux）下，桌面端的已读/收藏变更
+    // 广播到全部副本，手机上任意副本的已读也能被桌面正确跟随。
+    // user_version=7。
+    M::up(r#"
+        ALTER TABLE articles ADD COLUMN url_norm TEXT;
+        ALTER TABLE articles ADD COLUMN miniflux_dup_ids TEXT NOT NULL DEFAULT '';
+        CREATE INDEX idx_articles_url_norm ON articles(url_norm);
+        UPDATE articles SET url_norm = lower(url) WHERE url IS NOT NULL AND url != '';
     "#),
     // 后续迁移在此追加（M::up），已发布的不可改
     ])
@@ -164,8 +177,34 @@ pub fn open(path: &Path) -> AppResult<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
+    let prev_version = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
     MIGRATIONS.to_latest(&mut conn)?;
+    // v7 的 SQL 回填只是 lower(url) 占位；Rust 端 normalize_url 才是完整
+    // 规范化（剥跟踪参数/www./AMP/锚点）。从 v6 及以下升级的库补一次精确回填
+    // （v7 SQL 已建列，逐行 UPDATE 即可；新装库无行，零成本跳过）
+    if prev_version > 0 && prev_version < 7 {
+        backfill_url_norm(&conn)?;
+    }
     Ok(conn)
+}
+
+/// 逐行用 normalize_url 重算 url_norm（v6→v7 升级路径）
+fn backfill_url_norm(conn: &Connection) -> AppResult<()> {
+    let rows: Vec<(i64, Option<String>)> = {
+        let mut stmt =
+            conn.prepare("SELECT id, url FROM articles WHERE url IS NOT NULL AND url != ''")?;
+        let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        it.collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, url) in rows {
+        if let Some(u) = url {
+            let _ = conn.execute(
+                "UPDATE articles SET url_norm = ?1 WHERE id = ?2",
+                params![normalize_url(&u), id],
+            );
+        }
+    }
+    Ok(())
 }
 
 /* ============================================================
@@ -653,12 +692,14 @@ pub fn search_articles(conn: &Connection, query: &str, limit: i64) -> AppResult<
 
 /// 抓取管线写入（带 feed_id）：guid 冲突时仅更新内容字段（正文/图片/enclosure/来源），
 /// 已读/收藏/AI 产物等用户状态字段不动 —— 直连重抓到已读文章时不会"复活"它。
-/// 同 URL 已有文章 → 返回其 id（去重判定 + 墓碑 kept_aid 记账共用）
+/// 同 URL 已有文章 → 返回其 id（去重判定 + 墓碑 kept_aid 记账共用）。
+/// 匹配键用规范化 URL（url_norm）：跟踪参数/www./m./协议/尾斜杠/AMP 差异
+/// 不再产生重复文章。
 fn existing_article_with_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> {
     Ok(conn
         .query_row(
-            "SELECT id FROM articles WHERE url = ?1 ORDER BY id LIMIT 1",
-            params![url],
+            "SELECT id FROM articles WHERE url_norm = ?1 ORDER BY id LIMIT 1",
+            params![normalize_url(url)],
             |r| r.get(0),
         )
         .optional()?)
@@ -668,6 +709,77 @@ fn existing_article_with_url(conn: &Connection, url: &str) -> AppResult<Option<i
 pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
     let n = conn.execute("DELETE FROM deduped_urls", [])?;
     Ok(n)
+}
+
+/* ============================================================
+   URL 规范化（去重匹配键）
+   ============================================================ */
+
+/// 已知跟踪/统计参数（utm 系 + 各家统计 SDK）。剥掉后不影响定位同一篇文章。
+const TRACKING_PARAMS: &[&str] = &[
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_name", "utm_cid", "utm_reader", "utm_social",
+    "gclid", "gclsrc", "dclid", "gbraid", "wbraid",           // Google Ads
+    "fbclid", "fb_action_ids", "fb_action_types", "fb_source", // Facebook
+    "igshid", "igsh",                                          // Instagram
+    "twclid", "t", "s",                                        // X/Twitter（t/s 短链跳转带参）
+    "mc_cid", "mc_eid",                                        // Mailchimp
+    "ref", "ref_src", "ref_url", "referrer",                   // 引荐来源
+    "spm_id", "scm", "share_token", "nsfrom", "nstoken",       // 国内生态（掘金/微信/知乎）
+    "share_source", "tt_from", "group_id", "web_chapter_id",
+];
+
+/// URL 规范化为去重匹配键：同文不同饰（跟踪参数/协议/www./m./尾斜杠/AMP）
+/// 归一为一个键。失败（非 URL 形态）返回原串小写——匹配键退化但可用。
+/// 规则从宽到严排序：只做「无损压缩」，绝不合并可能不同的文章。
+pub fn normalize_url(url: &str) -> String {
+    let Ok(mut u) = url::Url::parse(url.trim()) else {
+        return url.trim().to_lowercase();
+    };
+    // https 统一（http 降级为同一篇；其他 scheme 保留原样区分）
+    if u.scheme() == "https" {
+        let _ = u.set_scheme("http");
+    }
+    // 规整 host：www./m./mobile. 前缀剥掉（多数站点移动/桌面同文）
+    if let Some(host) = u.host_str() {
+        let trimmed = host
+            .strip_prefix("www.")
+            .or_else(|| host.strip_prefix("m."))
+            .or_else(|| host.strip_prefix("mobile."));
+        if let Some(t) = trimmed {
+            let port = u.port().map(|p| format!(":{p}")).unwrap_or_default();
+            let _ = u.set_host(Some(&format!("{t}{port}")));
+        }
+    }
+    // 跟踪参数剥离
+    let filtered: Vec<(String, String)> = u
+        .query_pairs()
+        .filter(|(k, _)| {
+            let k = k.to_lowercase();
+            !TRACKING_PARAMS.contains(&k.as_str())
+        })
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if filtered.is_empty() {
+        u.set_query(None);
+    } else {
+        let mut q = url::form_urlencoded::Serializer::new(String::new());
+        for (k, v) in &filtered {
+            q.append_pair(k, v);
+        }
+        u.set_query(Some(&q.finish()));
+    }
+    // 尾斜杠归一（/a/ 与 /a 同文）；AMP 页归一（/amp/x → /x）
+    let mut path = u.path().trim_end_matches('/').to_string();
+    if let Some(rest) = path.strip_prefix("/amp") {
+        if rest.is_empty() || rest.starts_with('/') {
+            path = rest.to_string();
+        }
+    }
+    u.set_path(&path);
+    // fragment 无定位意义（纯锚点），丢弃
+    u.set_fragment(None);
+    u.to_string()
 }
 
 /// dedup=true 时同 URL 文章跨源去重（智能去重：同一新闻被多个源推送只留首个）。
@@ -680,14 +792,16 @@ pub fn upsert_article_with_feed(
     a: &NewArticle,
     dedup: bool,
 ) -> AppResult<(i64, bool)> {
-    // 智能去重：URL 已存在于任一源 → 跳过（返回非新增，计数不膨胀）
+    // 智能去重：规范化 URL 已存在于任一源 → 跳过（返回非新增，计数不膨胀）
     if dedup {
         if let Some(url) = a.url.as_deref().filter(|u| !u.is_empty()) {
+            let norm = normalize_url(url);
             if let Some(kept_aid) = existing_article_with_url(conn, url)? {
-                // 墓碑记账（INSERT OR REPLACE：重放时刷新 kept_aid/kept_at）
+                // 墓碑记账（INSERT OR REPLACE：重放时刷新 kept_aid/kept_at；
+                // 键用规范化 URL——重放时参数饰词可能不同，规范化后才对得上）
                 let _ = conn.execute(
                     "INSERT OR REPLACE INTO deduped_urls (url, kept_aid) VALUES (?1, ?2)",
-                    params![url, kept_aid],
+                    params![norm, kept_aid],
                 );
                 return Ok((0, false));
             }
@@ -695,7 +809,7 @@ pub fn upsert_article_with_feed(
             // 否则删掉一篇 → 下轮刷新同 URL 立即回来，删除形同虚设。
             let tombstoned: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM deduped_urls WHERE url = ?1)",
-                params![url],
+                params![norm],
                 |r| r.get(0),
             )?;
             if tombstoned {
@@ -714,6 +828,7 @@ pub fn upsert_article_with_feed(
         conn.execute(
             "UPDATE articles SET
                 url = COALESCE(?2, url),
+                url_norm = CASE WHEN ?2 IS NOT NULL AND ?2 != '' THEN ?13 ELSE url_norm END,
                 title = ?3,
                 author = COALESCE(?4, author),
                 summary = COALESCE(?5, summary),
@@ -737,16 +852,17 @@ pub fn upsert_article_with_feed(
                 a.enclosure_url,
                 a.enclosure_mime,
                 a.duration_sec,
-                a.published_at
+                a.published_at,
+                a.url.as_deref().map(normalize_url)
             ],
         )?;
         Ok((id, false))
     } else {
         conn.execute(
             "INSERT INTO articles
-                (feed_id, guid, url, title, author, summary, content_html, body_text, image_url,
+                (feed_id, guid, url, url_norm, title, author, summary, content_html, body_text, image_url,
                  enclosure_url, enclosure_mime, duration_sec, published_at, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             VALUES (?1, ?2, ?3, ?15, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 feed_id,
                 a.guid,
@@ -761,7 +877,8 @@ pub fn upsert_article_with_feed(
                 a.enclosure_mime,
                 a.duration_sec,
                 a.published_at,
-                a.source
+                a.source,
+                a.url.as_deref().map(normalize_url)
             ],
         )?;
         Ok((conn.last_insert_rowid(), true))
@@ -1005,6 +1122,69 @@ pub fn set_article_miniflux_id(conn: &Connection, id: i64, miniflux_id: i64) -> 
         params![miniflux_id, id],
     )?;
     Ok(())
+}
+
+/// 记账服务端同文副本 entry（跨源同 URL 的另一条 entry）。
+/// 幂等：已在列表中不重复；上限 16 个防脏数据撑爆字段。
+pub fn add_article_dup_entry(conn: &Connection, id: i64, dup_entry_id: i64) -> AppResult<()> {
+    if dup_entry_id <= 0 {
+        return Ok(());
+    }
+    let cur: String = conn
+        .query_row(
+            "SELECT COALESCE(miniflux_dup_ids, '') FROM articles WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    let ids: Vec<i64> = cur
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    if ids.contains(&dup_entry_id) || ids.len() >= 16 {
+        return Ok(());
+    }
+    let mut next = ids;
+    next.push(dup_entry_id);
+    let joined = next
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    conn.execute(
+        "UPDATE articles SET miniflux_dup_ids = ?1 WHERE id = ?2",
+        params![joined, id],
+    )?;
+    Ok(())
+}
+
+/// 读某文章的副本 entry 列表（广播已读/收藏用）
+pub fn article_dup_entries(conn: &Connection, id: i64) -> AppResult<Vec<i64>> {
+    let cur: Option<String> = conn
+        .query_row(
+            "SELECT miniflux_dup_ids FROM articles WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(cur
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect())
+}
+
+/// 是否存在「已入队未推送」的本地状态变更（读/收藏）。
+/// 有 → 拉取状态时跳过该文章（本地变更优先推送，防止被服务端旧状态覆盖
+/// 回来造成乒乓）。绑定回填后下一轮同步即恢复合并。
+pub fn article_has_pending_sync(conn: &Connection, id: i64) -> AppResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sync_queue WHERE article_id = ?1 AND action IN ('read','unread','star','unstar')",
+        params![id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// 记录上次同步时间戳（Pull 增量游标，unix 秒）

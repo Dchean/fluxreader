@@ -82,7 +82,17 @@ async fn push_queue(conn: &mut Connection, client: &MinifluxClient, report: &mut
             continue;
         };
         match item.action.as_str() {
-            "read" => read_ids.push(mf_id),
+            // 已读广播：绑定的 entry + 记账的全部同文副本 entry 一并标读
+            // （双端场景：Read You 不去重，手机上另一源的副本也要已读，
+            // 否则手机读完这篇、那个源里又冒出来一篇未读的"同一篇"）
+            "read" => {
+                read_ids.push(mf_id);
+                for dup in db::article_dup_entries(conn, article_id).unwrap_or_default() {
+                    if dup != mf_id {
+                        read_ids.push(dup);
+                    }
+                }
+            }
             "unread" => unread_ids.push(mf_id),
             "star" | "unstar" => {
                 if client.toggle_bookmark(mf_id).await.is_ok() {
@@ -324,9 +334,7 @@ async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &m
         }
     };
     for e in &entries {
-        // 匹配：miniflux_id 直配 → URL 兜底
-        // URL 兜底需同源校验：跨源的同 URL entry 无权写本地状态
-        // （防止已读文章被服务端另一条同 URL entry 的未读状态复活）
+        // 匹配：miniflux_id 直配 → URL 兜底（同源校验）
         let local = db::article_by_miniflux_id(conn, e.id)
             .ok()
             .flatten()
@@ -335,15 +343,39 @@ async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &m
                     .filter(|aid| db::article_matches_remote_feed(conn, *aid, e.feed_id).unwrap_or(false))
             });
         let Some(aid) = local else {
+            // 跨源同 URL entry（手机端另一源的副本）：不写状态，但记账
+            // 副本 entry——桌面端的已读变更要广播到它（Read You 那边的副本
+            // 才能跟着变已读，不会"手机读了、桌面又来一篇"）
+            if let Some(u) = e.url.as_deref() {
+                if let Ok(Some(aid)) = db::article_id_by_url(conn, u) {
+                    let _ = db::add_article_dup_entry(conn, aid, e.id);
+                }
+            }
             continue;
         };
         let _ = db::set_article_miniflux_id(conn, aid, e.id);
-        // Miniflux 是状态权威（starred 需读列表接口的 starred 标志位）
-        let _ = conn.execute(
-            "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
-            rusqlite::params![(e.status == "read") as i64, e.starred as i64, aid],
-        );
-        report.pulled_entries += 1;
+        // 本地有未推送的状态变更 → 本地优先（推送后下一轮再合并服务端），
+        // 防止「刚在桌面标读、同步瞬间被服务端旧未读态覆盖」的乒乓
+        if db::article_has_pending_sync(conn, aid).unwrap_or(false) {
+            continue;
+        }
+        // Miniflux 是状态权威；但未读只认绑定 entry 自己说的
+        // （跨源副本的未读态不能复活桌面已读的文章——「读」是强意图，
+        // 读到哪算读；「标回未读」只可能来自本端操作，走推送链路）
+        let remote_read = e.status == "read";
+        let local_bound = db::article_by_miniflux_id(conn, e.id)
+            .ok()
+            .flatten()
+            .is_some();
+        let same_feed_trusted = db::article_matches_remote_feed(conn, aid, e.feed_id).unwrap_or(false);
+        let accept_unread = local_bound && same_feed_trusted;
+        if remote_read || accept_unread {
+            let _ = conn.execute(
+                "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
+                rusqlite::params![remote_read as i64, e.starred as i64, aid],
+            );
+            report.pulled_entries += 1;
+        }
     }
 
     let now = Utc::now().timestamp();

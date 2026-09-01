@@ -152,7 +152,15 @@ async fn miniflux_sync_end_to_end() {
     // 场景：本地文章（feed 10 的 entry）已读；服务端另一源（feed 11）
     // 也有同 URL 的 entry 且未读。同步后本地必须仍是已读——
     // 跨源 entry 无权写状态（旧版会按 URL 兜底把未读覆盖回来）
+    // 注意：② 推过 unread（mock 真实回写），own entry 现在服务端是 unread；
+    // 未读合并只认绑定 entry 是合法语义，所以先把 own 恢复 read（手机读过）
     conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [local_article_id]).unwrap();
+    {
+        let mut es = server.entries.lock().unwrap();
+        if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
+            e.status = "read".into();
+        }
+    }
     // 模拟跨源同 URL entry（feed 11 = remote-only feed，未读态）
     let cross_url = "http://127.0.0.1:8765/post/1"; // 与本地文章同 URL
     server.add_entry(11, cross_url, "Cross-feed duplicate of read article", "unread", false);

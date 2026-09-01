@@ -67,7 +67,15 @@ impl MockMiniflux {
         format!("http://127.0.0.1:{}", self.port)
     }
 
+    /// 旧便捷入口（sync_e2e 使用；dual_client 用 add_entry_ret 拿真实 id）。
+    /// 共享模块跨 test target 编译，未用的 target 会报 dead_code，显式豁免。
+    #[allow(dead_code)]
     pub fn add_entry(&self, feed_id: i64, url: &str, title: &str, status: &str, starred: bool) {
+        let _ = self.add_entry_ret(feed_id, url, title, status, starred);
+    }
+
+    /// 同 add_entry，返回 mock 分配的 entry id（绑定场景需要真实 id）
+    pub fn add_entry_ret(&self, feed_id: i64, url: &str, title: &str, status: &str, starred: bool) -> i64 {
         let id = {
             let mut n = self.next_entry_id.lock().unwrap();
             *n += 1;
@@ -86,6 +94,7 @@ impl MockMiniflux {
             status: status.to_string(),
             starred,
         });
+        id
     }
 }
 
@@ -208,8 +217,14 @@ fn route(srv: &MockMiniflux, method: &str, path: &str, path_query: &str, body: &
                 .and_then(|a| a.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_i64()).collect())
                 .unwrap_or_default();
-            for id in ids {
-                srv.status_updates.lock().unwrap().push((id, status.clone()));
+            // 真实回写：同步轮次间状态持久（模拟服务端行为，双向流测试依赖）
+            srv.entries.lock().unwrap().iter_mut().for_each(|e| {
+                if ids.contains(&e.id) {
+                    e.status = status.clone();
+                }
+            });
+            for id in &ids {
+                srv.status_updates.lock().unwrap().push((*id, status.clone()));
             }
             (204, String::new())
         }
