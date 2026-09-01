@@ -223,11 +223,11 @@ export const api = {
   },
   async setFolderAiFlags(id: number, autoSummary: boolean, autoTranslate: boolean): Promise<null> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_folder_ai_flags', { id, autoSummary, autoTranslate }) as null) : null;
+    return inv ? (await inv('set_folder_ai_flags', { id, summary: autoSummary, translate: autoTranslate }) as null) : null;
   },
   async setFeedAiFlags(id: number, autoSummary: boolean, autoTranslate: boolean): Promise<null> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_feed_ai_flags', { id, autoSummary, autoTranslate }) as null) : null;
+    return inv ? (await inv('set_feed_ai_flags', { id, summary: autoSummary, translate: autoTranslate }) as null) : null;
   },
 
   /* ---- AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi） ---- */

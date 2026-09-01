@@ -205,7 +205,9 @@ async fn gist_upsert(http: &reqwest::Client, cred: &SyncCredentials, json: &str)
             let status = resp.status();
             let text = resp.text().await?;
             if !status.is_success() {
-                return Err(AppError::network(format!("Gist 创建失败：HTTP {status}：{}", &text[..text.len().min(200)])));
+                /* 字符级截断：字节位置 200 可能落在多字节字符中间（panic） */
+                let head: String = text.chars().take(200).collect();
+                return Err(AppError::network(format!("Gist 创建失败：HTTP {status}：{head}")));
             }
             let v: serde_json::Value = serde_json::from_str(&text)?;
             v.get("id")
