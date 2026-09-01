@@ -52,17 +52,36 @@ async fn read_refresh_config(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>)
     (enabled, interval, dedup, concurrency)
 }
 
-/// 全量刷新所有源（托盘「刷新全部订阅」入口，忽略到期时间）。
+/// 同步模式（app_settings.syncMode）：
+/// - `hybrid` 本地优先：后台刷新跳过 Miniflux 源（内容走服务端同步）
+/// - `direct` 直连优先（默认/未配置）：全部源直连抓取（旧行为）
+///
+/// 锁内读（调用方持 conn）。
+fn read_sync_mode_conn(conn: &rusqlite::Connection) -> String {
+    crate::db::get_setting(conn, "app_settings")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("syncMode").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| "direct".into())
+}
+
+/// 全量刷新所有源（托盘「刷新全部订阅」与手动全刷入口，忽略到期时间）。
+/// 手动动作始终包含 Miniflux 源——用户显式点了刷新就是要全部内容
+/// （同步模式只影响后台定时行为，不拦用户显式动作）。
 pub async fn refresh_all(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
 ) -> (usize, usize) {
-    refresh_feeds_inner(db, http, None).await
+    let concurrency = read_refresh_config(db).await.3;
+    refresh_feeds_inner_with_concurrency(db, http, None, concurrency).await
 }
 
-/// 抓取所有到期源（并发上限 = 设置 fetchConcurrency，默认 4）。
+/// 抓取所有到期源（后台调度入口，并发上限 = 设置 fetchConcurrency，默认 4）。
 /// HTTP 在锁外执行（refresh_feed_staged），写库时短暂持锁。
 /// 返回 (新增条数, 失败源数)。
+/// 同步模式作用点：hybrid（本地优先）→ 到期查询跳过 origin='miniflux' 的源
+/// （服务端源内容由 Miniflux 同步提供）；direct → 全部源照常直连（旧行为）。
 async fn refresh_due_feeds(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
@@ -71,17 +90,9 @@ async fn refresh_due_feeds(
     refresh_feeds_inner_with_concurrency(db, http, Some((interval_min, dedup)), concurrency).await
 }
 
-/// 抓取实现：Some((interval, dedup)) 只抓到期源，None 全量。
+/// 抓取实现：`Some((interval, dedup))` 只抓到期源（模式过滤在查询内做），
+/// `None` 全量（手动语义，始终含 Miniflux 源）。
 /// 并发上限取设置值（全量入口同样尊重 fetchConcurrency）。
-async fn refresh_feeds_inner(
-    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
-    http: &reqwest::Client,
-    due_filter: Option<(i64, bool)>,
-) -> (usize, usize) {
-    let concurrency = read_refresh_config(db).await.3;
-    refresh_feeds_inner_with_concurrency(db, http, due_filter, concurrency).await
-}
-
 async fn refresh_feeds_inner_with_concurrency(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
@@ -93,8 +104,13 @@ async fn refresh_feeds_inner_with_concurrency(
     let due: Vec<i64> = {
         let conn = db.lock().await;
         match due_filter {
-            Some((interval_min, _)) => crate::db::feeds_due_for_refresh(&conn, interval_min),
-            None => crate::db::feeds_all_ids(&conn),
+            // 调度路径：模式判定在锁内一次完成（读 settings + 查询同临界区）
+            Some((interval_min, _)) => {
+                let include_miniflux = read_sync_mode_conn(&conn) != "hybrid";
+                crate::db::feeds_due_for_refresh(&conn, interval_min, include_miniflux)
+            }
+            // 手动全量：始终包含 Miniflux 源
+            None => crate::db::feeds_all_ids(&conn, true),
         }
         .unwrap_or_else(|e| {
             log::warn!("scheduler: query feeds failed: {e}");

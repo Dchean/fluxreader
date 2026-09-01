@@ -983,6 +983,20 @@ function SyncTab() {
       </div>
 
       <div className="settings-group-title" style={{ marginTop: 20 }}>自动同步</div>
+      <SettingCard
+        title="同步模式"
+        desc="本地优先：服务端订阅的源由 Miniflux 提供内容，后台刷新不再直连源站（内容与服务器一致，适合多端阅读）；直连优先：全部源由本机直接抓取，Miniflux 只同步已读/收藏状态"
+      >
+        <FluxDropdown
+          width={130}
+          value={settings.syncMode}
+          onChange={(v) => updateSettings({ syncMode: v as 'direct' | 'hybrid' })}
+          options={[
+            { value: 'direct', label: '直连优先' },
+            { value: 'hybrid', label: '本地优先' },
+          ]}
+        />
+      </SettingCard>
       <SettingCard title="后台自动同步 Miniflux" desc="按刷新间隔到期时自动做轻量增量同步（拉取服务端状态变化）">
         <Switch checked={settings.autoSyncMiniflux} onChange={(v) => updateSettings({ autoSyncMiniflux: v })} />
       </SettingCard>

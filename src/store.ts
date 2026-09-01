@@ -79,6 +79,9 @@ export interface SettingsState {
   notifyOnNewArticles: boolean;
   /** 后台自动同步 Miniflux（默认开；到期跑轻量增量同步，状态变更另有即时推送） */
   autoSyncMiniflux: boolean;
+  /** 同步模式：'direct' 直连优先（默认，全部源本地直连抓取）；
+   *  'hybrid' 本地优先（后台刷新跳过服务端来源的源，内容由 Miniflux 同步提供） */
+  syncMode: 'direct' | 'hybrid';
 }
 
 /** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM。
@@ -341,6 +344,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     closePromptShown: false,
     notifyOnNewArticles: false,
     autoSyncMiniflux: true,
+    syncMode: 'direct',
   },
 
   /* ================= 导航 ================= */

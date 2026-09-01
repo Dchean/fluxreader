@@ -33,7 +33,7 @@ async fn refresh_due(
 ) -> (usize, usize) {
     let due: Vec<i64> = {
         let conn = db.lock().await;
-        db::feeds_due_for_refresh(&conn, interval_min).unwrap()
+        db::feeds_due_for_refresh(&conn, interval_min, true).unwrap()
     };
     if due.is_empty() {
         return (0, 0);
@@ -93,7 +93,7 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
         assert_eq!((ff, fc), (1, 1), "dead feed records first failure");
         assert!(nra.is_some(), "dead feed gets a retry window");
         // 到期判定：坏源在退避窗口内 → 不再 due（interval=0 下好源必然 due，跳过它）
-        let due: Vec<i64> = db::feeds_due_for_refresh(&conn, 0).unwrap();
+        let due: Vec<i64> = db::feeds_due_for_refresh(&conn, 0, true).unwrap();
         assert!(!due.contains(&bad_id), "backoff must exclude failed feed");
     }
 
@@ -110,16 +110,16 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
     }
     let due: Vec<i64> = {
         let conn = db.lock().await;
-        db::feeds_due_for_refresh(&conn, 0).unwrap()
+        db::feeds_due_for_refresh(&conn, 0, true).unwrap()
     };
     assert!(due.contains(&bad_id), "expired backoff returns feed to due set");
 
     // ---------- 4. 好源间隔未到 → 不 due；间隔设 0 → due ----------
     {
         let conn = db.lock().await;
-        let due = db::feeds_due_for_refresh(&conn, 30).unwrap();
+        let due = db::feeds_due_for_refresh(&conn, 30, true).unwrap();
         assert!(!due.contains(&good_id), "within interval → not due");
-        let due = db::feeds_due_for_refresh(&conn, 0).unwrap();
+        let due = db::feeds_due_for_refresh(&conn, 0, true).unwrap();
         assert!(due.contains(&good_id), "interval=0 → always due");
     }
 
@@ -137,4 +137,78 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
 
     let _ = std::fs::remove_file(&tmp);
     println!("ALL SCHEDULER ASSERTIONS PASSED");
+}
+
+/* ============================================================
+   同步模式（syncMode）过滤语义：hybrid 跳过 Miniflux 源，direct 全含，
+   手动全量入口（feeds_all_ids(true)）不受模式影响。
+   ============================================================ */
+
+fn seed_mode_feeds(conn: &rusqlite::Connection) -> (i64, i64) {
+    let folder = db::create_folder(conn, "模式", "article").unwrap();
+    let direct = db::insert_feed_origin(
+        conn, "http://127.0.0.1:1/direct.xml", None, "Direct", None, folder, "inherit", true, false, "local",
+    ).unwrap();
+    let mf = db::insert_feed_origin(
+        conn, "http://127.0.0.1:1/remote.xml", None, "Remote", None, folder, "inherit", true, false, "miniflux",
+    ).unwrap();
+    (direct, mf)
+}
+
+#[test]
+fn sync_mode_hybrid_skips_miniflux_feeds_in_due_query() {
+    let tmp = std::env::temp_dir().join(format!("fluxreader_mode_{}.db", line!()));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    let (direct, mf) = seed_mode_feeds(&conn);
+
+    // hybrid（include_miniflux=false）：Miniflux 源被跳过
+    let due = db::feeds_due_for_refresh(&conn, 0, false).unwrap();
+    assert!(due.contains(&direct), "direct feed still refreshed in hybrid mode");
+    assert!(!due.contains(&mf), "miniflux feed must be skipped in hybrid mode");
+
+    // direct（include_miniflux=true）：全部包含（旧行为）
+    let due_all = db::feeds_due_for_refresh(&conn, 0, true).unwrap();
+    assert!(due_all.contains(&direct) && due_all.contains(&mf), "direct mode refreshes all feeds");
+
+    // 未设置 syncMode 时 scheduler 默认 direct（read_sync_mode_conn 是私有函数，
+    // 通过行为验证：due 查询 include=true 的调用在 scheduler 内部由该默认驱动）
+}
+
+#[test]
+fn sync_mode_manual_refresh_always_includes_miniflux_feeds() {
+    let tmp = std::env::temp_dir().join(format!("fluxreader_mode_{}.db", line!()));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    let (direct, mf) = seed_mode_feeds(&conn);
+
+    // 手动/托盘全量入口：无论模式，始终全部源（模式只影响后台定时）
+    let all = db::feeds_all_ids(&conn, true).unwrap();
+    assert!(all.contains(&direct) && all.contains(&mf), "manual refresh includes all feeds");
+}
+
+#[test]
+fn sync_mode_default_is_direct_when_unset() {
+    let tmp = std::env::temp_dir().join(format!("fluxreader_mode_{}.db", line!()));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    // 未写 app_settings → 读到默认 "direct"（scheduler 的判定依赖此默认）
+    // 复刻 scheduler 私有函数的读取逻辑：
+    let mode = crate::db::get_setting(&conn, "app_settings")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("syncMode").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| "direct".into());
+    assert_eq!(mode, "direct", "unset syncMode must default to direct (legacy behavior)");
+
+    // 写入 hybrid → 读回 hybrid
+    db::set_setting(&conn, "app_settings", r#"{"syncMode":"hybrid"}"#).unwrap();
+    let mode2 = crate::db::get_setting(&conn, "app_settings")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("syncMode").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| "direct".into());
+    assert_eq!(mode2, "hybrid");
 }

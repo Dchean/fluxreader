@@ -461,21 +461,30 @@ pub fn set_feed_fetch_state(
 
 /// 调度器取"到期"的源：超过全局间隔未抓 且 不在退避窗口内。
 /// last_fetched_at 为 NULL（从未抓过）的源立即视为到期。
-pub fn feeds_due_for_refresh(conn: &Connection, interval_min: i64) -> AppResult<Vec<i64>> {
+/// 到期源 id。`include_miniflux = false`（本地优先同步模式）时跳过
+/// origin='miniflux' 的源——服务端源的内容由 Miniflux 同步提供，
+/// 直连抓取会与服务端状态产生两份不一致的真相。
+pub fn feeds_due_for_refresh(
+    conn: &Connection,
+    interval_min: i64,
+    include_miniflux: bool,
+) -> AppResult<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT id FROM feeds
-         WHERE last_fetched_at IS NULL
+         WHERE (last_fetched_at IS NULL
             OR ( (julianday('now') - julianday(last_fetched_at)) * 1440.0 >= ?1
-                 AND (next_retry_at IS NULL OR julianday('now') >= julianday(next_retry_at)) )",
+                 AND (next_retry_at IS NULL OR julianday('now') >= julianday(next_retry_at)) ))
+           AND (?2 OR origin != 'miniflux')",
     )?;
-    let rows = stmt.query_map(params![interval_min], |r| r.get(0))?;
+    let rows = stmt.query_map(params![interval_min, include_miniflux], |r| r.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 全部源 id（托盘「刷新全部订阅」入口，忽略到期与退避）。
-pub fn feeds_all_ids(conn: &Connection) -> AppResult<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM feeds")?;
-    let rows = stmt.query_map([], |r| r.get(0))?;
+/// 全部源 id（托盘「刷新全部订阅」与手动全刷入口，忽略到期与退避）。
+/// 手动入口始终包含 Miniflux 源（用户显式动作 = 要全部内容）。
+pub fn feeds_all_ids(conn: &Connection, include_miniflux: bool) -> AppResult<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM feeds WHERE (?1 OR origin != 'miniflux')")?;
+    let rows = stmt.query_map(params![include_miniflux], |r| r.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
