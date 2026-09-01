@@ -241,13 +241,25 @@ function SocialCard({ item }: { item: ArticleEntry }) {
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const showTranslate = transOverride ?? feedConfig.autoTranslate;
   /* 自动收起：渲染后测高，超过 260px 视为长内容（收起至 6 行 + 展开按钮）；
-     与通知卡不同，这里是 HTML（高度比字符数准确——图片/换行/引用都会撑高） */
+     与通知卡不同，这里是 HTML（高度比字符数准确——图片/换行/引用都会撑高）。
+     ResizeObserver 而非一次性测量：正文里的图片懒加载完成后高度才真正
+     确定，一次性 useEffect 会把"短文本+多图"的卡片误判为短内容 */
   const textRef = useRef<HTMLDivElement>(null);
   const [isLong, setIsLong] = useState(false);
   const [expanded, setExpanded] = useState(false);
   useEffect(() => {
-    if (!textRef.current) return;
-    setIsLong(textRef.current.scrollHeight > 260);
+    const el = textRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') {
+      if (el) setIsLong(el.scrollHeight > 260);
+      return;
+    }
+    /* 折叠态下 scrollHeight 仍是完整内容高（overflow:hidden 不改变
+       scrollHeight）——测量不受折叠影响 */
+    const ro = new ResizeObserver(() => {
+      setIsLong(el.scrollHeight > 260);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [item.content]);
 
   return (
@@ -407,12 +419,22 @@ function NotifCard({ item }: { item: ArticleEntry }) {
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const [expanded, setExpanded] = useState(false);
+  /* 挂载即水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
+     「展开更多」必须展示全文而非同一段截断文本 */
+  useEffect(() => {
+    useAppStore.getState().ensureArticleContent(item.id);
+  }, [item.id]);
+  /* 展示文本：展开态优先水合全文（剥 HTML 标签），未水合/收起态用 snippet */
+  const fullText = item.content
+    ? item.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+    : '';
+  const displayText = expanded && fullText ? fullText : item.snippet;
   /* 失败后卡片保持展开（展示错误 + 重试按钮） */
   const summaryOpen = summaryOverride ?? (feedConfig.autoSummary || !!summaryError);
   const transShow = transOverride ?? feedConfig.autoTranslate;
-  /* 自动收起：短内容（≤120 字符，折叠 2 行足够容纳）直接全文展示，
-     不渲染展开按钮——只有真正超长的内容才收起 */
-  const isLong = (item.snippet || '').length > 120;
+  /* 自动收起：按展示源文本判定（全文可得时按全文长度，否则按 snippet），
+     短内容直接全文展示、不渲染展开按钮 */
+  const isLong = (fullText || item.snippet || '').length > 120;
 
   return (
     <div className={`notif-card ${item.isRead ? 'read' : ''}`}>
@@ -468,7 +490,7 @@ function NotifCard({ item }: { item: ArticleEntry }) {
         )}
       </div>
 
-      <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{item.snippet}</div>
+      <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
 
       <div className={`notif-translated-block ${transShow ? 'show' : ''}`}>{item.translatedContent}</div>
 

@@ -189,7 +189,8 @@ pub async fn add_feed(
     let final_title = title.filter(|t| !t.trim().is_empty())
         .or(parsed.title.clone())
         .unwrap_or_else(|| feed_url.clone());
-    // 未选分类 → 「未分类」文件夹（无则建）
+    // 未选分类 → 「未分类」文件夹（无则建）。创建失败必须上抛——
+    // 兜底到 id=1 会在 folder 1 不存在时触发外键违约，文章静默丢失。
     let folder_id = match folder_id {
         Some(fid) => fid,
         None => {
@@ -201,7 +202,10 @@ pub async fn add_feed(
                 )
                 .ok()
                 .flatten();
-            existing.unwrap_or_else(|| db::create_folder(&conn, "未分类", "article").unwrap_or(1))
+            match existing {
+                Some(fid) => fid,
+                None => db::create_folder(&conn, "未分类", "article")?,
+            }
         }
     };
     let feed_id = db::insert_feed(

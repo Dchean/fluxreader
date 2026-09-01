@@ -431,30 +431,45 @@ pub async fn refresh_feed_staged(
     };
 
     match fetch_and_parse(client, &feed_url, etag.as_deref(), last_modified.as_deref()).await {
-        Ok((fetched, mut parsed)) => {
-            /* favicon 自动发现：feed 未自带 icon（大量真实世界 feed 如此）且
-               DB 也还没有 → 抓站点 HTML 解析 <link rel=icon>，兜底 /favicon.ico。
-               锁外 HTTP；失败静默（无图标不构成错误，前端有字母回退位） */
+        Ok((fetched, parsed)) => {
+            /* favicon 后台发现：feed 未带 icon 且 DB 无缓存且本进程未尝试过 →
+               spawn 独立任务（不占刷新信号量、不拖慢刷新关键路径——favicon 是
+               锦上添花）。负缓存防无 favicon 的站点每轮重付探测超时。 */
             if parsed.icon.is_none() {
-                let existing_icon: Option<String> = {
+                let (existing_icon, already_tried): (Option<String>, bool) = {
                     let conn = db.lock().await;
-                    conn.query_row(
-                        "SELECT favicon_url FROM feeds WHERE id = ?1",
-                        rusqlite::params![feed_id],
-                        |r| r.get(0),
-                    )
-                    .ok()
-                    .flatten()
+                    let icon = conn
+                        .query_row(
+                            "SELECT favicon_url FROM feeds WHERE id = ?1",
+                            rusqlite::params![feed_id],
+                            |r| r.get(0),
+                        )
+                        .ok()
+                        .flatten();
+                    (icon, FAVICON_TRIED.lock().unwrap().contains(&feed_id))
                 };
-                if existing_icon.is_none() {
+                if existing_icon.is_none() && !already_tried {
+                    FAVICON_TRIED.lock().unwrap().insert(feed_id);
                     let site = parsed.site_url.clone().or_else(|| Some(feed_url.clone()));
-                    let discovered = match site {
-                        Some(s) => discover_favicon(client, &s).await,
-                        None => None,
-                    };
-                    if let Some(icon) = discovered {
-                        parsed.icon = Some(icon);
-                    }
+                    let db = db.clone();
+                    let client = client.clone();
+                    /* tokio::spawn（非 tauri::async_runtime）：本函数在测试里
+                       无 Tauri 运行时也能跑；调度器/命令均在 tokio 上下文调用 */
+                    tokio::spawn(async move {
+                        let discovered = match site.as_deref() {
+                            Some(s) => discover_favicon(&client, s).await,
+                            None => None,
+                        };
+                        if let Some(icon) = discovered {
+                            let conn = db.lock().await;
+                            let _ = conn.execute(
+                                "UPDATE feeds SET favicon_url = ?1 WHERE id = ?2 AND (favicon_url IS NULL OR favicon_url = '')",
+                                rusqlite::params![icon, feed_id],
+                            );
+                        }
+                        /* 失败留在 FAVICON_TRIED（本进程不再重试）；
+                           前端下次 reload 拿到新 favicon（如有） */
+                    });
                 }
             }
             let conn = db.lock().await;
@@ -468,10 +483,17 @@ pub async fn refresh_feed_staged(
     }
 }
 
+/// favicon 发现负缓存（feed_id 集合）：发现失败的源本进程生命周期内不重试。
+/// 成功的 icon 已写库（feeds.favicon_url），不依赖此表。
+static FAVICON_TRIED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
 /// favicon 自动发现：先取站点 HTML 解析 `<link rel~=icon>`（svg/png 优先），
-/// 失败或无 link 则退回 `<origin>/favicon.ico`。返回通过 HEAD/GET 探活
+/// 失败或无 link 则退回 `<origin>/favicon.ico`。返回通过 GET 探活
 /// 确认可达（200-299 且非 HTML）的图标 URL；任何失败返回 None（调用方静默）。
 /// UA 用浏览器伪装——部分站点对非浏览器 UA 直接 403。
+/// 超时收紧（首页 5s / 探活 3s）：favicon 是锦上添花，不值得长等——
+/// 探测发生在刷新信号量内，超时越长并发刷新被拖得越久。
 async fn discover_favicon(client: &Client, site_url: &str) -> Option<String> {
     let origin = url::Url::parse(site_url).ok()?;
     let base = format!("{}://{}", origin.scheme(), origin.host_str()?);
@@ -480,7 +502,7 @@ async fn discover_favicon(client: &Client, site_url: &str) -> Option<String> {
     let html = client
         .get(&base)
         .header("User-Agent", BROWSER_UA)
-        .timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
         .ok()?
@@ -497,7 +519,7 @@ async fn discover_favicon(client: &Client, site_url: &str) -> Option<String> {
         if let Ok(resp) = client
             .get(&url)
             .header("User-Agent", BROWSER_UA)
-            .timeout(std::time::Duration::from_secs(6))
+            .timeout(std::time::Duration::from_secs(3))
             .send()
             .await
         {

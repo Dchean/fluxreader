@@ -5,6 +5,10 @@ import { Icons, LayoutIcon } from './icons';
 import { ModalOverlay, FluxDropdown } from './primitives';
 import type { ArticleEntry, ContentLayoutType, FeedItem } from '../types';
 
+/** 不使用 AI 的布局（与 SettingsModal 的判定一致）：卡片不渲染摘要/翻译，
+ *  对话框里选了这类布局时隐藏 AI 开关（勾选值一并归零，避免保存无效配置）。 */
+const LAYOUT_NO_AI: ReadonlySet<string> = new Set(['image', 'podcast']);
+
 /* ============================================================
    全局搜索 / 灯箱 / 新建分类 / 添加订阅源 四个浮层
    ============================================================ */
@@ -386,7 +390,7 @@ function AddFeedModalBody({
   onSubmit,
 }: {
   initialCatId: string;
-  categories: { id: string; name: string }[];
+  categories: { id: string; name: string; layout?: string }[];
   onCancel: () => void;
   onSubmit: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean) => void;
 }) {
@@ -396,6 +400,9 @@ function AddFeedModalBody({
   const [layout, setLayout] = useState('inherit');
   const [autoSummary, setAutoSummary] = useState(true);
   const [autoTranslate, setAutoTranslate] = useState(false);
+  /* 生效布局：显式选择优先，否则目标分类的布局——画廊/播客布局隐藏 AI 开关 */
+  const curCatLayout = categories.find((c) => c.id === catId)?.layout ?? 'article';
+  const noAi = LAYOUT_NO_AI.has(layout === 'inherit' ? curCatLayout : layout);
 
   return (
     <div className="mini-dialog">
@@ -453,24 +460,28 @@ function AddFeedModalBody({
         </div>
 
         <div className="mini-dialog-checkbox-row">
-          <label className="mini-dialog-checkbox">
-            <input
-              type="checkbox"
-              checked={autoSummary}
-              onChange={(e) => setAutoSummary(e.target.checked)}
-              style={{ accentColor: 'var(--accent)' }}
-            />
-            自动摘要
-          </label>
-          <label className="mini-dialog-checkbox">
-            <input
-              type="checkbox"
-              checked={autoTranslate}
-              onChange={(e) => setAutoTranslate(e.target.checked)}
-              style={{ accentColor: 'var(--accent)' }}
-            />
-            自动翻译
-          </label>
+          {!noAi && (
+            <>
+              <label className="mini-dialog-checkbox">
+                <input
+                  type="checkbox"
+                  checked={autoSummary}
+                  onChange={(e) => setAutoSummary(e.target.checked)}
+                  style={{ accentColor: 'var(--accent)' }}
+                />
+                自动摘要
+              </label>
+              <label className="mini-dialog-checkbox">
+                <input
+                  type="checkbox"
+                  checked={autoTranslate}
+                  onChange={(e) => setAutoTranslate(e.target.checked)}
+                  style={{ accentColor: 'var(--accent)' }}
+                />
+                自动翻译
+              </label>
+            </>
+          )}
         </div>
 
         <div className="mini-dialog-actions">
@@ -479,7 +490,7 @@ function AddFeedModalBody({
             className="toggle-action-btn btn-primary"
             onClick={() => {
               if (!url.trim()) return;
-              onSubmit(catId, url.trim(), title.trim() || url.trim(), layout, autoSummary, autoTranslate);
+              onSubmit(catId, url.trim(), title.trim() || url.trim(), layout, noAi ? false : autoSummary, noAi ? false : autoTranslate);
               onCancel();
             }}
           >
@@ -589,31 +600,45 @@ function EditFeedModalBody({
       </div>
 
       <div className="mini-dialog-checkbox-row">
-        <label className="mini-dialog-checkbox">
-          <input
-            type="checkbox"
-            checked={autoSummary}
-            onChange={(e) => setAutoSummary(e.target.checked)}
-            style={{ accentColor: 'var(--accent)' }}
-          />
-          自动摘要
-        </label>
-        <label className="mini-dialog-checkbox">
-          <input
-            type="checkbox"
-            checked={autoTranslate}
-            onChange={(e) => setAutoTranslate(e.target.checked)}
-            style={{ accentColor: 'var(--accent)' }}
-          />
-          自动翻译
-        </label>
+        {(() => {
+          /* 生效布局：显式选择优先，否则继承分类布局 */
+          const eff = layout === 'inherit' ? curCatLayout : layout;
+          if (LAYOUT_NO_AI.has(eff)) return null;
+          return (
+            <>
+              <label className="mini-dialog-checkbox">
+                <input
+                  type="checkbox"
+                  checked={autoSummary}
+                  onChange={(e) => setAutoSummary(e.target.checked)}
+                  style={{ accentColor: 'var(--accent)' }}
+                />
+                自动摘要
+              </label>
+              <label className="mini-dialog-checkbox">
+                <input
+                  type="checkbox"
+                  checked={autoTranslate}
+                  onChange={(e) => setAutoTranslate(e.target.checked)}
+                  style={{ accentColor: 'var(--accent)' }}
+                />
+                自动翻译
+              </label>
+            </>
+          );
+        })()}
       </div>
 
       <div className="mini-dialog-actions">
         <button className="toggle-action-btn" onClick={onCancel}>取消</button>
         <button
           className="toggle-action-btn btn-primary"
-          onClick={() => onSubmit({ title, catId, layout, autoSummary, autoTranslate })}
+          onClick={() => {
+            /* 不支持 AI 的布局：勾选值归零再提交（与 UI 隐藏一致） */
+            const eff = layout === 'inherit' ? curCatLayout : layout;
+            const noAi = LAYOUT_NO_AI.has(eff);
+            onSubmit({ title, catId, layout, autoSummary: noAi ? false : autoSummary, autoTranslate: noAi ? false : autoTranslate });
+          }}
         >
           保存
         </button>
