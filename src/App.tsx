@@ -43,6 +43,12 @@ export default function App() {
   const themeMode = useAppStore((s) => s.settings.themeMode);
   const palette = useAppStore((s) => s.settings.palette);
   const toasts = useAppStore((s) => s.toasts);
+  const playerActive = useAppStore((s) => s.player.isActive);
+
+  /* PlayerBar 活跃 → body 标记类（toast 层上移避让底栏） */
+  useEffect(() => {
+    document.body.classList.toggle('has-player', playerActive);
+  }, [playerActive]);
 
   /* ---------- 数据源装载：Tauri 环境从 SQLite 拉全量；浏览器保持 mock ---------- */
   useEffect(() => {

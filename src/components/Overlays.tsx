@@ -295,6 +295,7 @@ export function Lightbox() {
           src={lightboxUrl}
           className="lightbox-img"
           alt="preview"
+          referrerPolicy="no-referrer"
         />
       )}
     </div>

@@ -999,6 +999,20 @@ body {
   word-break: break-word;
 }
 
+/* 社交卡自动收起（超 260px 的长正文折叠为 6 行 + 展开按钮；
+   点击展开恢复全文，isLong 判定见 SocialCard） */
+.social-text.collapsed {
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+
+.social-expand-btn {
+  margin-bottom: 8px;
+}
+
 /* 社交卡正文内嵌 HTML 的轻量排版（feed 来源已是消毒白名单输出） */
 .social-text p { margin: 0 0 0.6em; }
 .social-text > :last-child { margin-bottom: 0; }
@@ -2621,18 +2635,28 @@ body {
 }
 
 /* ---------- Toast 浮层容器 ---------- */
+/* Toast 层：内容区右下角堆叠（列布局自动不重叠），避开 PlayerBar。
+   播放器活跃时整体上移（body 加 has-player 类，见 App.tsx） */
 .toast-layer {
   position: fixed;
-  inset: 0;
-  pointer-events: none;
+  right: 20px;
+  bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
   z-index: 500;
+  pointer-events: none;
+  max-width: 460px;
+  transition: bottom 0.25s ease;
+}
+
+body.has-player .toast-layer {
+  bottom: 96px; /* PlayerBar 高度 + 间距 */
 }
 
 .toast-pill {
-  position: absolute;
-  bottom: 28px;
-  left: 50%;
-  transform: translateX(-50%) translateY(12px) scale(0.96);
+  position: relative;
   background: var(--bg-elevated);
   color: var(--text-primary);
   border: 1px solid var(--border-strong);
@@ -2641,9 +2665,9 @@ body {
   border-radius: var(--radius-md);
   font-size: 12.5px;
   font-weight: 500;
-  z-index: 500;
   opacity: 0;
   pointer-events: none;
+  transform: translateY(12px) scale(0.96);
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   text-align: center;
   white-space: nowrap;
@@ -2651,7 +2675,7 @@ body {
 
 .toast-pill.visible {
   opacity: 1;
-  transform: translateX(-50%) translateY(0) scale(1);
+  transform: translateY(0) scale(1);
 }
 
 /* 带操作按钮的失败 toast：文本 + 按钮横向排布，可点击 */

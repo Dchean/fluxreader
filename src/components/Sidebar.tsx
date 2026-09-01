@@ -223,6 +223,7 @@ export function Sidebar() {
                             className="feed-favicon"
                             alt=""
                             loading="lazy"
+                            referrerPolicy="no-referrer"
                             onError={(e) => {
                               (e.target as HTMLImageElement).style.display = 'none';
                             }}

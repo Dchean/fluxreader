@@ -112,7 +112,7 @@ export function PlayerBar() {
       <audio ref={audioRef} src={player.audioUrl} preload="metadata" />
 
       <div className="player-track-info">
-        {player.cover && <img src={player.cover} className="player-cover" alt="cover" />}
+        {player.cover && <img src={player.cover} className="player-cover" alt="cover" referrerPolicy="no-referrer" />}
         <div className="player-titles">
           <div className="player-title">{player.title}</div>
           <div className="player-subtitle">{player.showName}</div>

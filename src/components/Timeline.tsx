@@ -57,7 +57,6 @@ export function Timeline() {
     const container = scrollRef.current;
     if (!container) return;
     if (!useAppStore.getState().settings.markReadOnScrollOut) return;
-    if (activeContentLayout === 'social') return; // 社交布局卡片内含展开翻译等交互，不自动已读
     if (items.length === 0) return;
 
     /* rootMargin 只留 10% 上沿裁剪带：卡片完全越过视口上沿才算"滚出"，
@@ -215,7 +214,7 @@ function ArticleCard({ art, onSelect }: { art: ArticleEntry; onSelect: (id: stri
           <h4 className="card-title">{art.title}</h4>
           <p className="card-snippet">{art.snippet}</p>
         </div>
-        {art.cover && <img src={art.cover} className="card-cover-thumb" alt="cover" loading="lazy" />}
+        {art.cover && <img src={art.cover} className="card-cover-thumb" alt="cover" loading="lazy" referrerPolicy="no-referrer" />}
       </div>
       <div className="card-footer">
         <span>{art.author}</span>
@@ -241,6 +240,15 @@ function SocialCard({ item }: { item: ArticleEntry }) {
   /* 三态：null=跟随 feed 配置，true=手动展开，false=手动收起 */
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const showTranslate = transOverride ?? feedConfig.autoTranslate;
+  /* 自动收起：渲染后测高，超过 260px 视为长内容（收起至 6 行 + 展开按钮）；
+     与通知卡不同，这里是 HTML（高度比字符数准确——图片/换行/引用都会撑高） */
+  const textRef = useRef<HTMLDivElement>(null);
+  const [isLong, setIsLong] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    if (!textRef.current) return;
+    setIsLong(textRef.current.scrollHeight > 260);
+  }, [item.content]);
 
   return (
     <div className={`social-card ${item.isRead ? 'read' : ''}`}>
@@ -252,11 +260,20 @@ function SocialCard({ item }: { item: ArticleEntry }) {
           <span className="social-date">{formatRelativeTime(item.publishedAt)}</span>
         </div>
         {/* 正文是消毒后的 HTML（同 Reader）；水合完成前显示轻量占位（毫秒级） */}
-        <div className="social-text" onClick={handleArticleLinkClick}>
+        <div
+          ref={textRef}
+          className={`social-text ${isLong && !expanded ? 'collapsed' : ''}`}
+          onClick={handleArticleLinkClick}
+        >
           {item.content
             ? <div dangerouslySetInnerHTML={{ __html: item.content }} />
             : <span style={{ opacity: 0.45 }}>加载正文…</span>}
         </div>
+        {isLong && (
+          <button className="notif-expand-btn social-expand-btn" onClick={() => setExpanded(!expanded)}>
+            {expanded ? '收起内容 ▲' : '展开更多 ▼'}
+          </button>
+        )}
         <div className={"social-translated-block" + (showTranslate ? " show" : "")}>{item.translatedContent}</div>
         <div className="social-actions-bar">
           <button
@@ -314,14 +331,19 @@ function GalleryCard({ item }: { item: ArticleEntry }) {
   const selectArticle = useAppStore((s) => s.selectArticle);
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
   /* 打开灯箱 = 用户"看到"了这张图；画廊布局下无阅读器列，
-     以灯箱打开作为已读触发点（遵循 markReadOnOpen 设置） */
+     以灯箱打开作为已读触发点（与 markReadOnOpen 设置解耦——
+     点开大图本身就是"阅读完成"，不标读会出现永远未读的幽灵项） */
   const openImage = () => {
     if (item.imageUrl) openLightbox(item.imageUrl);
-    selectArticle(item.id);
+    if (!item.isRead) {
+      useAppStore.getState().markEntriesReadBulk([item.id]);
+    } else {
+      selectArticle(item.id);
+    }
   };
   return (
     <div className={`gallery-card ${item.isRead ? 'read' : ''}`}>
-      <img src={item.imageUrl} loading="lazy" onClick={openImage} alt={item.title} />
+      <img src={item.imageUrl} loading="lazy" onClick={openImage} alt={item.title} referrerPolicy="no-referrer" />
       <div className="gallery-meta">
         <div className="gallery-title">{item.title}</div>
         <div className="gallery-meta-row">
@@ -357,7 +379,7 @@ function PodcastCard({ item }: { item: ArticleEntry }) {
       className={`podcast-card ${item.isRead ? 'read' : ''}`}
       onClick={() => playPodcastEpisode(item.title, feedName, item.cover ?? '', item.enclosureUrl ?? '', item.id)}
     >
-      <img src={item.cover} className="podcast-cover-box" alt="cover" loading="lazy" />
+      <img src={item.cover} className="podcast-cover-box" alt="cover" loading="lazy" referrerPolicy="no-referrer" />
       <div style={{ flex: 1 }}>
         <div className="podcast-show-name">
           {feedName}
@@ -388,6 +410,9 @@ function NotifCard({ item }: { item: ArticleEntry }) {
   /* 失败后卡片保持展开（展示错误 + 重试按钮） */
   const summaryOpen = summaryOverride ?? (feedConfig.autoSummary || !!summaryError);
   const transShow = transOverride ?? feedConfig.autoTranslate;
+  /* 自动收起：短内容（≤120 字符，折叠 2 行足够容纳）直接全文展示，
+     不渲染展开按钮——只有真正超长的内容才收起 */
+  const isLong = (item.snippet || '').length > 120;
 
   return (
     <div className={`notif-card ${item.isRead ? 'read' : ''}`}>
@@ -443,13 +468,15 @@ function NotifCard({ item }: { item: ArticleEntry }) {
         )}
       </div>
 
-      <div className={`notif-body-text ${expanded ? '' : 'collapsed'}`}>{item.snippet}</div>
+      <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{item.snippet}</div>
 
       <div className={`notif-translated-block ${transShow ? 'show' : ''}`}>{item.translatedContent}</div>
 
-      <button className="notif-expand-btn" onClick={() => setExpanded(!expanded)}>
-        {expanded ? '收起内容 ▲' : '展开更多 ▼'}
-      </button>
+      {isLong && (
+        <button className="notif-expand-btn" onClick={() => setExpanded(!expanded)}>
+          {expanded ? '收起内容 ▲' : '展开更多 ▼'}
+        </button>
+      )}
     </div>
   );
 }

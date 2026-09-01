@@ -42,6 +42,11 @@ const LAYOUT_OPTIONS = CONTENT_LAYOUTS.map((l) => {
   return { value: l as string, label: LAYOUT_NAMES[l], icon: <Icon /> };
 });
 
+/** 不使用 AI 功能的布局：image（画廊·纯图）与 podcast（播客·音频）布局
+ *  的卡片不渲染摘要/翻译内容——设置页对这类布局隐藏自动摘要/自动翻译
+ *  开关，避免无效开关误导（article/notification 用摘要+翻译，social 用翻译）。 */
+const LAYOUT_NO_AI: ReadonlySet<string> = new Set(['image', 'podcast']);
+
 export function SettingsModal() {
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const settingsTab = useAppStore((s) => s.settingsTab);
@@ -471,7 +476,11 @@ function FeedsTab() {
                   />
                 </div>
 
-                <label className="mgr-checkbox-label" title="分类内新文章自动生成 AI 摘要">
+                <label
+                  className="mgr-checkbox-label"
+                  title="分类内新文章自动生成 AI 摘要"
+                  style={LAYOUT_NO_AI.has(cat.layout) ? { display: 'none' } : undefined}
+                >
                   <input
                     type="checkbox"
                     checked={cat.autoSummary}
@@ -480,7 +489,11 @@ function FeedsTab() {
                   />
                   自动摘要
                 </label>
-                <label className="mgr-checkbox-label" title="分类内新文章自动翻译正文">
+                <label
+                  className="mgr-checkbox-label"
+                  title="分类内新文章自动翻译正文"
+                  style={LAYOUT_NO_AI.has(cat.layout) ? { display: 'none' } : undefined}
+                >
                   <input
                     type="checkbox"
                     checked={cat.autoTranslate}
@@ -500,7 +513,7 @@ function FeedsTab() {
                   onClick={() => openRenameCatModal(cat.id)}
                 >
                   <Icons.edit />
-                  <span>改名</span>
+                  <span>重命名</span>
                 </button>
                 <button
                   className="toggle-action-btn btn-danger-text"
@@ -509,7 +522,7 @@ function FeedsTab() {
                   onClick={() => setPending({ kind: 'category', catId: cat.id, catName: cat.name })}
                 >
                   <Icons.trash />
-                  <span>删除分类</span>
+                  <span>删除</span>
                 </button>
               </div>
             </div>
@@ -519,7 +532,12 @@ function FeedsTab() {
                 {cat.feeds.length === 0 && (
                   <div className="group-mgr-empty">该分类暂无订阅源，点击「+ 添加源」创建</div>
                 )}
-                {cat.feeds.map((f) => (
+                {cat.feeds.map((f) => {
+                  /* AI 开关只对使用 AI 的布局有意义（文章/通知/社交——翻译）；
+                     画廊/播客布局下隐藏，避免无效开关误导 */
+                  const effLayout = f.layout === 'inherit' ? cat.layout : (f.layout as ContentLayoutType);
+                  const noAi = LAYOUT_NO_AI.has(effLayout);
+                  return (
                   <div className="group-mgr-child-row" key={f.id}>
                     <div className="group-mgr-feed-info">
                       <div className="group-mgr-feed-name">{f.name}</div>
@@ -535,7 +553,11 @@ function FeedsTab() {
                           ...LAYOUT_OPTIONS,
                         ]}
                       />
-                      <label className="mgr-checkbox-label" title="该源新文章自动生成 AI 摘要">
+                      <label
+                        className="mgr-checkbox-label"
+                        title="该源新文章自动生成 AI 摘要"
+                        style={noAi ? { display: 'none' } : undefined}
+                      >
                         <input
                           type="checkbox"
                           checked={f.autoSummary}
@@ -544,7 +566,11 @@ function FeedsTab() {
                         />
                         自动摘要
                       </label>
-                      <label className="mgr-checkbox-label" title="该源新文章自动翻译正文">
+                      <label
+                        className="mgr-checkbox-label"
+                        title="该源新文章自动翻译正文"
+                        style={noAi ? { display: 'none' } : undefined}
+                      >
                         <input
                           type="checkbox"
                           checked={f.autoTranslate}
@@ -555,7 +581,7 @@ function FeedsTab() {
                       </label>
                       <button
                         className="toggle-action-btn"
-                       
+
                         title="编辑该订阅源（改名/移动分类/布局/AI 开关）"
                         onClick={() => openEditFeedModal(f.id)}
                       >
@@ -564,7 +590,7 @@ function FeedsTab() {
                       </button>
                       <button
                         className="toggle-action-btn btn-danger-text"
-                       
+
                         title="删除该订阅源"
                         onClick={() => setPending({ kind: 'feed', catId: cat.id, catName: cat.name, feedId: f.id, feedName: f.name })}
                       >
@@ -573,7 +599,8 @@ function FeedsTab() {
                       </button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

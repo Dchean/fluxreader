@@ -597,9 +597,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     const marked = new Set(unread);
     set((s) => ({
       entries: s.entries.map((e) => (marked.has(e.id) ? { ...e, isRead: true } : e)),
-      /* 标读的卡片原地变灰保留（未读筛选下不消失）；
+      /* 标读的卡片原地变灰保留（未读筛选下不消失）——合并而非替换：
+         批量标读（滚动/全部已读）不能抹掉之前"打开过"的保留记录，
+         否则那些卡片会在未读筛选下突然消失（体验为"已读的直接隐藏"）；
          切视图/布局/筛选时的清理逻辑统一把它们移除 */
-      openedReadIds: Object.fromEntries(unread.map((id) => [id, true])),
+      openedReadIds: {
+        ...s.openedReadIds,
+        ...Object.fromEntries(unread.map((id) => [id, true])),
+      },
     }));
   },
 
