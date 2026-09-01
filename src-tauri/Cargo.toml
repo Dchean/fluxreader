@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.8.2"
+version = "0.9.0"
 description = "FluxReader —— 本地优先的 Windows 桌面 RSS 阅读器"
 authors = ["Dchean"]
 license = "MIT"
