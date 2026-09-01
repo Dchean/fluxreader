@@ -153,9 +153,57 @@ pub fn spawn_scheduler(app: AppHandle) {
                     }
                 }
             }
+            // Miniflux 后台自动同步（autoSyncMiniflux 开关，默认开）：
+            // 到期才跑轻量同步（push 队列 + changed_after 增量 pull）
+            auto_sync_miniflux(&db, &http).await;
             tokio::time::sleep(TICK).await;
         }
     });
+}
+
+/// Miniflux 自动同步：读 autoSyncMiniflux（默认开）与刷新间隔，
+/// 到期（now - last_sync ≥ refreshInterval 分钟）时跑轻量同步。
+/// 失败静默（log 记录），下个 tick 仍会因 last_sync 未推进而重试。
+async fn auto_sync_miniflux(
+    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    http: &reqwest::Client,
+) {
+    let (on, interval_min, connected, last_sync) = {
+        let conn = db.lock().await;
+        let raw = crate::db::get_setting(&conn, "app_settings")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let on = raw.as_ref()
+            .and_then(|v| v.get("autoSyncMiniflux").and_then(|b| b.as_bool()))
+            .unwrap_or(true);
+        if !on {
+            return;
+        }
+        let interval = raw
+            .as_ref()
+            .and_then(|v| v.get("refreshInterval").and_then(|i| i.as_i64()))
+            .filter(|i| (5..=720).contains(i))
+            .unwrap_or(30);
+        let connected = crate::sync::read_credentials(&conn).is_some();
+        let last = crate::db::last_sync_ts(&conn).unwrap_or(0);
+        (on, interval, connected, last)
+    };
+    if !on || !connected {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp();
+    if now - last_sync < interval_min * 60 {
+        return;
+    }
+    log::info!("scheduler: Miniflux 自动同步开始（间隔 {interval_min} 分钟到期）");
+    match crate::sync::sync_light(db, http).await {
+        Ok(r) => log::info!(
+            "scheduler: Miniflux 自动同步完成：推 {}/拉 {} 项，{} 错误",
+            r.pushed_states, r.pulled_entries, r.errors.len()
+        ),
+        Err(e) => log::warn!("scheduler: Miniflux 自动同步失败: {e}"),
+    }
 }
 
 /// 通知开关开启 且 主窗口不可见（最小化到托盘/失焦）。

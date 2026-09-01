@@ -5,6 +5,14 @@
 //! ③ 兜底：直连失败的源从 Miniflux 拉条目（source='miniflux'）
 //! 本地未连接期间添加的源，首次 Pull 时按 URL 碰撞检测：
 //!   远端无 → 推送创建；远端有 → 合并（Miniflux id 绑定本地 feed）
+//!
+//! 锁纪律：与 refresh_feed_staged 相同的三段式——锁内读写 SQLite，
+//! HTTP 全部在锁外执行，同步进行时其他 DB 命令不被冻结。
+//!
+//! 阶段划分（前端分步同步 + 后台自动同步复用）：
+//!   feeds 阶段  = push_feeds + pull_feeds（订阅层，秒级）
+//!   states 阶段 = push_queue + pull_entries（状态+条目层，慢）
+//! sync_now = 两个阶段串联（全量路径，含绑定回填+全量状态对账）。
 
 use crate::db::{self, NewArticle};
 use crate::error::{AppError, AppResult};
@@ -12,6 +20,8 @@ use crate::miniflux::{Entry, MinifluxClient};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Default, Serialize)]
 pub struct SyncReport {
@@ -37,36 +47,46 @@ pub fn read_credentials(conn: &Connection) -> Option<(String, String)> {
     Some((endpoint, token))
 }
 
-fn build_client(conn: &Connection, http: &reqwest::Client) -> Option<MinifluxClient> {
-    let (endpoint, token) = read_credentials(conn)?;
-    Some(MinifluxClient::new(&endpoint, &token, http.clone()))
+fn client_from_creds(endpoint: &str, token: &str, http: &reqwest::Client) -> MinifluxClient {
+    MinifluxClient::new(endpoint, token, http.clone())
+}
+
+/// 锁内读凭据 → 构建 client（锁外使用）
+async fn build_client(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> Option<MinifluxClient> {
+    let (endpoint, token) = {
+        let conn = db.lock().await;
+        read_credentials(&conn)?
+    };
+    Some(client_from_creds(&endpoint, &token, http))
 }
 
 /* ============================================================
-   ① Push：本地变更 → Miniflux
+   ① Push：本地状态变更 → Miniflux（只推不拉）
    ============================================================ */
 
-async fn push_queue(conn: &mut Connection, client: &MinifluxClient, report: &mut SyncReport) {
-    let items = match db::take_sync_queue(conn) {
-        Ok(v) => v,
-        Err(e) => {
-            report.errors.push(format!("读队列失败: {e}"));
-            return;
-        }
-    };
-    if items.is_empty() {
-        return;
-    }
+/// 待推送动作的锁内快照：HTTP 执行所需的全部信息。
+struct PushPlan {
+    /// (队列 id, article_id, entry ids)——read 广播副本展开后
+    status: Vec<PushStatus>,
+    /// (队列 id, entry id)——收藏切换（Miniflux 只有 toggle 语义）
+    stars: Vec<(i64, i64)>,
+}
 
-    let mut done_ids: Vec<i64> = Vec::new();
-    // 状态变更按 action 分组批量推（Miniflux PUT /v1/entries 支持批量）
-    let mut read_ids: Vec<i64> = Vec::new();
-    let mut unread_ids: Vec<i64> = Vec::new();
+struct PushStatus {
+    queue_id: i64,
+    action: String,
+    entry_ids: Vec<i64>,
+}
 
-    for item in &items {
+/// 锁内：解析 sync_queue → 推送计划。
+/// 条目未绑定 entry 的跳过（保留在队列，Pull 的绑定回填会补上，直接丢弃
+/// 会让"已读"在服务端永久丢失）。
+fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
+    let items = db::take_sync_queue(conn)?;
+    let mut plan = PushPlan { status: Vec::new(), stars: Vec::new() };
+    for item in items {
         let Some(article_id) = item.article_id else {
-            // feed 级动作（add_feed/remove_feed）在 push_feeds 阶段处理
-            continue;
+            continue; // feed 级动作（add_feed）在 push_feeds 阶段处理
         };
         let mf_id: Option<i64> = conn
             .query_row(
@@ -77,8 +97,6 @@ async fn push_queue(conn: &mut Connection, client: &MinifluxClient, report: &mut
             .ok()
             .flatten();
         let Some(mf_id) = mf_id else {
-            // 本地条目还没绑定 Miniflux id：保留在队列（Pull 的绑定回填会补上，
-            // 下一轮同步重推），直接丢弃会让"已读"在服务端永久丢失
             continue;
         };
         match item.action.as_str() {
@@ -86,60 +104,97 @@ async fn push_queue(conn: &mut Connection, client: &MinifluxClient, report: &mut
             // （双端场景：Read You 不去重，手机上另一源的副本也要已读，
             // 否则手机读完这篇、那个源里又冒出来一篇未读的"同一篇"）
             "read" => {
-                read_ids.push(mf_id);
+                let mut ids = vec![mf_id];
                 for dup in db::article_dup_entries(conn, article_id).unwrap_or_default() {
                     if dup != mf_id {
-                        read_ids.push(dup);
+                        ids.push(dup);
                     }
                 }
+                plan.status.push(PushStatus { queue_id: item.id, action: "read".into(), entry_ids: ids });
             }
-            "unread" => unread_ids.push(mf_id),
-            "star" | "unstar" => {
-                if client.toggle_bookmark(mf_id).await.is_ok() {
-                    done_ids.push(item.id);
-                    report.pushed_states += 1;
-                } else {
-                    report.errors.push(format!("收藏同步失败: entry {mf_id}"));
-                }
-            }
-            _ => done_ids.push(item.id),
+            "unread" => plan.status.push(PushStatus { queue_id: item.id, action: "unread".into(), entry_ids: vec![mf_id] }),
+            "star" | "unstar" => plan.stars.push((item.id, mf_id)),
+            _ => {}
         }
     }
+    Ok(plan)
+}
 
-    for (ids, status) in [(read_ids, "read"), (unread_ids, "unread")] {
+/// 锁外：执行推送计划。返回成功清除的队列 id（失败项保留 → 天然重试）。
+async fn exec_push(client: &MinifluxClient, plan: &PushPlan, report: &mut SyncReport) -> Vec<i64> {
+    let mut done: Vec<i64> = Vec::new();
+    // read/unread 聚合批量 PUT（Miniflux 单请求可携带全部 id）
+    for action in ["read", "unread"] {
+        let ids: Vec<i64> = plan
+            .status
+            .iter()
+            .filter(|s| s.action == action)
+            .flat_map(|s| s.entry_ids.iter().copied())
+            .collect::<Vec<_>>();
         if ids.is_empty() {
             continue;
         }
-        match client.update_entries_status(&ids, status).await {
+        match client.update_entries_status(&ids, action).await {
             Ok(()) => {
                 report.pushed_states += ids.len();
-                // 批量成功：把对应的队列条目标记完成
-                for item in &items {
-                    if let Some(aid) = item.article_id {
-                        let mf: Option<i64> = conn
-                            .query_row(
-                                "SELECT miniflux_id FROM articles WHERE id = ?1",
-                                [aid],
-                                |r| r.get(0),
-                            )
-                            .ok()
-                            .flatten();
-                        if let Some(m) = mf {
-                            if ids.contains(&m) {
-                                done_ids.push(item.id);
-                            }
-                        }
-                    }
-                }
+                done.extend(plan.status.iter().filter(|s| s.action == action).map(|s| s.queue_id));
             }
             Err(e) => report.errors.push(format!("状态推送失败: {e}")),
         }
     }
-
-    let _ = db::prune_sync(conn, &done_ids);
+    // 收藏逐条 toggle
+    for (qid, mf_id) in &plan.stars {
+        match client.toggle_bookmark(*mf_id).await {
+            Ok(()) => {
+                report.pushed_states += 1;
+                done.push(*qid);
+            }
+            Err(e) => report.errors.push(format!("收藏同步失败: entry {mf_id}: {e}")),
+        }
+    }
+    done
 }
 
-/// 未连接期间本地新增/删除的订阅推到远端
+/// 即时状态推送：只推 sync_queue（read/unread/star/unstar + 副本广播），
+/// 不做任何 pull。set_read/set_starred 变更后 ~1s 内到达服务端。
+/// 失败静默（队列保留，下轮同步重推）——后台同步不打扰用户。
+pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) {
+    let Some(client) = build_client(db, http).await else {
+        return;
+    };
+    let plan = {
+        let conn = db.lock().await;
+        match plan_push(&conn) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("sync: 读队列失败: {e}");
+                return;
+            }
+        }
+    };
+    if plan.status.is_empty() && plan.stars.is_empty() {
+        return;
+    }
+    let mut report = SyncReport::default();
+    let done = exec_push(&client, &plan, &mut report).await;
+    if !done.is_empty() {
+        let conn = db.lock().await;
+        if let Err(e) = db::prune_sync(&conn, &done) {
+            log::warn!("sync: 清队列失败: {e}");
+        }
+    }
+    if !report.errors.is_empty() {
+        log::info!("sync: 即时推送失败（队列保留待重推）: {:?}", report.errors);
+    } else {
+        log::info!("sync: 即时推送 {} 项状态", report.pushed_states);
+    }
+}
+
+/* ============================================================
+   ② Pull：远端 → 本地（订阅关系 + 状态 + 条目）
+   ============================================================ */
+
+/// 未连接期间本地新增的订阅推到远端
 async fn push_feeds(conn: &mut Connection, client: &MinifluxClient, report: &mut SyncReport) {
     // add_feed 队列动作
     let items = db::take_sync_queue(conn).unwrap_or_default();
@@ -190,10 +245,7 @@ async fn push_feeds(conn: &mut Connection, client: &MinifluxClient, report: &mut
     // 设计约定「同步服务端不受影响」——remove_feed 仅在用户显式操作时入队，暂不自动推删）
 }
 
-/* ============================================================
-   ② Pull：远端 → 本地（订阅关系 + 状态 + 条目）
-   ============================================================ */
-
+/// 拉远端分类+订阅，URL 碰撞合并（§4.4）
 async fn pull_feeds(conn: &mut Connection, client: &MinifluxClient, report: &mut SyncReport) {
     let (remote_cats, remote_feeds) = match tokio::join!(client.categories(), client.feeds()) {
         (Ok(c), Ok(f)) => (c, f),
@@ -261,7 +313,7 @@ async fn pull_feeds(conn: &mut Connection, client: &MinifluxClient, report: &mut
                         conn.query_row("SELECT id FROM folders LIMIT 1", [], |r| r.get(0))
                             .unwrap_or(1)
                     });
-                let inserted = db::insert_feed(
+                let inserted = db::insert_feed_origin(
                     conn,
                     &rf.feed_url,
                     rf.site_url.as_deref(),
@@ -271,6 +323,7 @@ async fn pull_feeds(conn: &mut Connection, client: &MinifluxClient, report: &mut
                     "inherit",
                     true,
                     false,
+                    "miniflux",
                 );
                 if let Ok(fid) = inserted {
                     let _ = db::set_feed_miniflux_id(conn, fid, rf.id);
@@ -281,38 +334,81 @@ async fn pull_feeds(conn: &mut Connection, client: &MinifluxClient, report: &mut
     }
 }
 
-/// 拉远端条目（新条目 + 状态变化），按 miniflux_id/URL 匹配合并
-async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &mut SyncReport) {
-    // ②' 绑定回填：直连抓取的文章（首同步后入库）尚未绑定 miniflux_id，
-    // 推送会被跳过。按 URL 全量对齐远程条目 id（增量窗口会漏掉
-    // 早于上次同步入库的文章；个人订阅几百条，全量成本可接受）。
-    let all_entries = match client.entries(None, 0, false).await {
-        Ok(v) => v,
-        Err(e) => {
-            report.errors.push(format!("绑定回填拉取失败: {e}"));
-            Vec::new()
-        }
-    };
-    for e in &all_entries {
-        if let Some(u) = e.url.as_deref() {
-            if let Some(aid) = db::article_id_by_url(conn, u).ok().flatten() {
-                // 同源校验：跨源同 URL entry 不抢绑定（绑错会让已读/收藏
-                // 推到服务端另一条的 entry 上，状态从此两边发散）
-                if db::article_matches_remote_feed(conn, aid, e.feed_id).unwrap_or(false) {
-                    let _ = db::set_article_miniflux_id(conn, aid, e.id);
-                }
+/// 状态合并的守卫语义（pull_entries 与对账共用）：
+/// - 待推保护：本地有未推送变更 → 跳过（本地优先，防乒乓）
+/// - read-anywhere-wins：「读」是强意图，任何副本的已读都接受
+/// - unread 只认绑定同源 entry：跨源副本的未读不能复活桌面已读
+fn merge_remote_status(conn: &Connection, aid: i64, e: &Entry, report: &mut SyncReport) {
+    let _ = db::set_article_miniflux_id(conn, aid, e.id);
+    if db::article_has_pending_sync(conn, aid).unwrap_or(false) {
+        return;
+    }
+    let remote_read = e.status == "read";
+    let local_bound = db::article_by_miniflux_id(conn, e.id).ok().flatten().is_some();
+    let same_feed_trusted = db::article_matches_remote_feed(conn, aid, e.feed_id).unwrap_or(false);
+    let accept_unread = local_bound && same_feed_trusted;
+    if remote_read || accept_unread {
+        let _ = conn.execute(
+            "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
+            rusqlite::params![remote_read as i64, e.starred as i64, aid],
+        );
+        report.pulled_entries += 1;
+    }
+}
+
+/// 拉远端条目（新条目 + 状态变化），按 miniflux_id/URL 匹配合并。
+/// `full=true`（手动同步/首连）：先做绑定回填 + 全量状态对账——
+/// 全量条目已经在手上（绑定回填本来就要拉），对已匹配条目直接应用远端
+/// 状态，changed_at 早于游标的旧变更从此收敛（未读数漂移根因）。
+/// `full=false`（后台自动同步）：只拉 changed_after 增量，便宜。
+async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &mut SyncReport, full: bool) {
+    // ②' 绑定回填 + 状态对账（full 路径）
+    if full {
+        let all_entries = match client.entries(None, 0, false).await {
+            Ok(v) => v,
+            Err(e) => {
+                report.errors.push(format!("绑定回填拉取失败: {e}"));
+                Vec::new()
             }
+        };
+        for e in &all_entries {
+            let Some(u) = e.url.as_deref() else { continue };
+            let Some(aid) = db::article_id_by_url(conn, u).ok().flatten() else {
+                continue;
+            };
+            // 已绑定的 entry id 直配 = 自己的条目（feed 可能尚未绑定——
+            // states 阶段先于 feeds 阶段的窗口），无需再查 feed 归属
+            let bound_entry: Option<i64> = conn
+                .query_row("SELECT miniflux_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
+                .ok()
+                .flatten();
+            let is_own = bound_entry == Some(e.id)
+                || (bound_entry.is_none() && db::article_matches_remote_feed(conn, aid, e.feed_id).unwrap_or(false));
+            if !is_own {
+                // 跨源副本：记账（已读广播对象）。
+                // read-anywhere-wins：远端副本的已读也是真读意图（手机在
+                // 另一源上读过这篇）→ 接受已读，但不抢绑定、不接受未读
+                let _ = db::add_article_dup_entry(conn, aid, e.id);
+                if e.status == "read" && !db::article_has_pending_sync(conn, aid).unwrap_or(false) {
+                    let _ = conn.execute(
+                        "UPDATE articles SET is_read = 1 WHERE id = ?1",
+                        rusqlite::params![aid],
+                    );
+                }
+                continue;
+            }
+            merge_remote_status(conn, aid, e, report);
         }
     }
 
     // ① 新条目（只补直连失败的源 + 远端新订阅的源）
-    let since_ms = db::last_sync_ts(conn).unwrap_or(0) * 1000;
+    let since_s = db::last_sync_ts(conn).unwrap_or(0);
     let failed_feeds = db::feeds_fetch_failed(conn).unwrap_or_default();
     for feed in &failed_feeds {
         let Some(mf_id) = feed_miniflux_id(conn, feed.id) else {
             continue;
         };
-        match client.entries(Some(mf_id), since_ms, false).await {
+        match client.entries(Some(mf_id), since_s, false).await {
             Ok(entries) => {
                 let before = report.pulled_entries;
                 for e in &entries {
@@ -325,8 +421,8 @@ async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &m
         }
     }
 
-    // ② 状态变化（全部已绑定的源，changed_after 增量）
-    let entries = match client.entries(None, since_ms, true).await {
+    // ② 状态变化（全部已绑定的源，changed_after 增量，unix 秒）
+    let entries = match client.entries(None, since_s, true).await {
         Ok(v) => v,
         Err(e) => {
             report.errors.push(format!("拉取状态变化失败: {e}"));
@@ -353,29 +449,7 @@ async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &m
             }
             continue;
         };
-        let _ = db::set_article_miniflux_id(conn, aid, e.id);
-        // 本地有未推送的状态变更 → 本地优先（推送后下一轮再合并服务端），
-        // 防止「刚在桌面标读、同步瞬间被服务端旧未读态覆盖」的乒乓
-        if db::article_has_pending_sync(conn, aid).unwrap_or(false) {
-            continue;
-        }
-        // Miniflux 是状态权威；但未读只认绑定 entry 自己说的
-        // （跨源副本的未读态不能复活桌面已读的文章——「读」是强意图，
-        // 读到哪算读；「标回未读」只可能来自本端操作，走推送链路）
-        let remote_read = e.status == "read";
-        let local_bound = db::article_by_miniflux_id(conn, e.id)
-            .ok()
-            .flatten()
-            .is_some();
-        let same_feed_trusted = db::article_matches_remote_feed(conn, aid, e.feed_id).unwrap_or(false);
-        let accept_unread = local_bound && same_feed_trusted;
-        if remote_read || accept_unread {
-            let _ = conn.execute(
-                "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
-                rusqlite::params![remote_read as i64, e.starred as i64, aid],
-            );
-            report.pulled_entries += 1;
-        }
+        merge_remote_status(conn, aid, e, report);
     }
 
     let now = Utc::now().timestamp();
@@ -453,30 +527,82 @@ fn strip_html_text(html: &str) -> String {
    总入口
    ============================================================ */
 
-/// 完整同步：push → pull feeds → pull entries。返回报告（前端 Toast/同步中心展示）。
+/// 完整同步（全量路径）：push → pull feeds → pull entries（含对账）。
+/// 返回报告（前端 Toast/同步中心展示）。
 pub async fn sync_now(conn: &mut Connection, http: &reqwest::Client) -> AppResult<SyncReport> {
-    let Some(client) = build_client(conn, http) else {
+    let Some((endpoint, token)) = read_credentials(conn) else {
         return Err(AppError::new("notConnected", "未配置 Miniflux Endpoint/Token"));
     };
-
-    // 连接验证（凭据错误早失败）
+    let client = client_from_creds(&endpoint, &token, http);
     client.me().await?;
-
     let mut report = SyncReport::default();
     push_feeds(conn, &client, &mut report).await;
-    push_queue(conn, &client, &mut report).await;
+    // 旧 push_queue 语义由 plan_push/exec_push 承接
+    {
+        let plan = plan_push(conn)?;
+        let done = exec_push(&client, &plan, &mut report).await;
+        let _ = db::prune_sync(conn, &done);
+    }
     pull_feeds(conn, &client, &mut report).await;
-    pull_entries(conn, &client, &mut report).await;
+    pull_entries(conn, &client, &mut report, true).await;
     Ok(report)
+}
+
+/// feeds 阶段（订阅层）：push_feeds + pull_feeds。秒级，首连先跑这段。
+pub async fn feeds_phase(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> AppResult<SyncReport> {
+    let Some(client) = build_client(db, http).await else {
+        return Err(AppError::new("notConnected", "未配置 Miniflux Endpoint/Token"));
+    };
+    client.me().await?;
+    let mut report = SyncReport::default();
+    let mut conn = db.lock().await;
+    push_feeds(&mut conn, &client, &mut report).await;
+    pull_feeds(&mut conn, &client, &mut report).await;
+    Ok(report)
+}
+
+/// states 阶段（状态+条目层）：push 队列 + pull entries。
+/// `full=true` 含绑定回填+全量对账（手动同步/首连）；false 只做增量（后台自动同步）。
+pub async fn states_phase(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+    full: bool,
+) -> AppResult<SyncReport> {
+    let Some(client) = build_client(db, http).await else {
+        return Err(AppError::new("notConnected", "未配置 Miniflux Endpoint/Token"));
+    };
+    client.me().await?;
+    let mut report = SyncReport::default();
+    {
+        let conn = db.lock().await;
+        let plan = plan_push(&conn)?;
+        drop(conn);
+        let done = exec_push(&client, &plan, &mut report).await;
+        let conn = db.lock().await;
+        let _ = db::prune_sync(&conn, &done);
+    }
+    let mut conn = db.lock().await;
+    pull_entries(&mut conn, &client, &mut report, full).await;
+    Ok(report)
+}
+
+/// 轻量同步（后台自动调度）：push 队列 + 增量 pull。
+pub async fn sync_light(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> AppResult<SyncReport> {
+    states_phase(db, http, false).await
 }
 
 /// 测试连接（设置页「测试连接」按钮）。
 /// 直接收凭据：rusqlite Connection 非 Sync，不能把 &Connection 跨 await 传进来。
-pub async fn test_connection(endpoint: &str, token: &str, http: &reqwest::Client) -> AppResult<String> {
+/// 返回 (展示消息, 用户名)——用户名供 sync_save 落库做账号显示。
+pub async fn test_connection(
+    endpoint: &str,
+    token: &str,
+    http: &reqwest::Client,
+) -> AppResult<(String, String)> {
     if endpoint.trim().is_empty() || token.trim().is_empty() {
         return Err(AppError::new("notConnected", "请先填写 Endpoint 和 Token"));
     }
-    let client = MinifluxClient::new(endpoint, token, http.clone());
+    let client = client_from_creds(endpoint, token, http);
     let me = client.me().await?;
-    Ok(format!("已连接：{} (id {})", me.username, me.id))
+    Ok((format!("已连接：{} (id {})", me.username, me.id), me.username))
 }

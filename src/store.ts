@@ -75,6 +75,8 @@ export interface SettingsState {
   closeToTray: boolean;
   /** 新文章到达发 Windows 系统通知（默认关；窗口隐藏时才发） */
   notifyOnNewArticles: boolean;
+  /** 后台自动同步 Miniflux（默认开；到期跑轻量增量同步，状态变更另有即时推送） */
+  autoSyncMiniflux: boolean;
 }
 
 /** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM。
@@ -241,6 +243,9 @@ export interface AppState {
 
 let toastId = 0;
 
+/** reloadFromBackend 代际计数：并发 reload 只接受最新一次结果 */
+let reloadGeneration = 0;
+
 /** 由 categories 构建 feedId → { feed, cat } 解析表（每次 categories 变更后重建） */
 function buildFeedIndex(categories: CategoryGroup[]) {
   const map = new Map<string, { feed: FeedItem; cat: CategoryGroup }>();
@@ -324,6 +329,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     smartDedup: false,
     closeToTray: true,
     notifyOnNewArticles: false,
+    autoSyncMiniflux: true,
   },
 
   /* ================= 导航 ================= */
@@ -752,13 +758,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   /* ================= 数据源：后端 SQLite ⇄ mock ================= */
 
-  /** 从后端拉全量快照（folders + feeds + articles）替换本地状态 */
+  /** 从后端拉全量快照（folders + feeds + articles）替换本地状态。
+      代际守卫：并发调用只接受最新一次的结果——后台刷新事件与用户操作
+      同时触发 reload 时，旧快照不会覆盖新快照（布局显示回退的根因）。 */
   reloadFromBackend: async () => {
+    const gen = ++reloadGeneration;
     const [folders, feeds, articles] = await Promise.all([
       api.listFolders(),
       api.listFeeds(),
-      api.listArticles({ limit: 1000 }),
+      api.listArticles({ limit: 3000 }),
     ]);
+    if (gen !== reloadGeneration) return; // 已有更新的 reload 在途/完成
     if (!folders || !feeds || articles === null) return;
 
     const categories = folderRowsToCategories(folders, feeds);
@@ -770,7 +780,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
     /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
     void api.syncStatus().then((st) => {
-      if (st) set({ minifluxConnected: st.connected });
+      if (st && gen === reloadGeneration) set({ minifluxConnected: st.connected });
     });
   },
 
@@ -792,11 +802,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   triggerManualSync: () => {
     if (get().dataMode === 'tauri') {
       set({ syncStatus: 'syncing' });
-      /* 已连接 Miniflux → 推拉同步；未连接 → 纯直连刷新 */
+      /* 分步同步：feeds 阶段（订阅层，快）→ states 阶段（状态+条目，慢，含对账）。
+         未连接 Miniflux → feeds 阶段 notConnected → 走纯直连刷新 */
       void api
-        .syncNow()
+        .syncPhase('feeds')
         .catch(() => null) // 未连接（notConnected）→ 走纯直连刷新
-        .then(() => api.refreshAllFeeds())
+        .then(async (feedsReport) => {
+          if (feedsReport) {
+            await get().reloadFromBackend();
+            get().showToast('订阅同步完成，正在同步文章状态…');
+            return api.syncPhase('states', true);
+          }
+          return null;
+        })
+        .then(async (statesReport) => {
+          if (statesReport) await get().reloadFromBackend();
+          return api.refreshAllFeeds();
+        })
         .then((summary: RefreshSummary | null) => get().reloadFromBackend().then(() => summary))
         .then((summary: RefreshSummary | null) => {
           set({ syncStatus: 'synced' });
@@ -810,6 +832,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         })
         .catch((e: unknown) => {
           const msg = e instanceof Error ? e.message : String(e);
+          set({ syncStatus: 'error' });
           get().showToast(`刷新失败：${msg}`, { label: '重试', run: () => get().triggerManualSync() });
         });
       return;

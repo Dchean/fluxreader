@@ -89,6 +89,8 @@ export interface SyncReport {
 export interface SyncStatusInfo {
   connected: boolean;
   endpoint: string | null;
+  /** 服务端账户名（连接时记录，设置页动态显示） */
+  account: string | null;
   last_sync: number;
 }
 
@@ -351,13 +353,29 @@ export const api = {
 
   /* ---- Miniflux 同步 ---- */
   /** 返回 null = 浏览器环境（mock 模式） */
-  async syncConnect(endpoint: string, token: string): Promise<string | null> {
+  /** 轻量连通测试（GET /v1/me），不落库不做同步 */
+  async syncTest(endpoint: string, token: string): Promise<string | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('sync_connect', { endpoint, token }) as string) : null;
+    return inv ? (await inv('sync_test', { endpoint, token }) as string) : null;
   },
-  async syncDisconnect(): Promise<null> {
+  /** 保存凭据（先测试，失败不保存）。重活（拉订阅/同步状态）由前端随后台阶段执行 */
+  async syncSave(endpoint: string, token: string): Promise<string | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('sync_disconnect') as null) : null;
+    return inv ? (await inv('sync_save', { endpoint, token }) as string) : null;
+  },
+  /** 分步同步：which='feeds'（订阅层）| 'states'（状态+条目层）。full=true 含全量对账 */
+  async syncPhase(which: 'feeds' | 'states', full = false): Promise<SyncReport | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('sync_phase', { which, full }) as SyncReport) : null;
+  },
+  async syncDisconnect(): Promise<string | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('sync_disconnect') as string) : null;
+  },
+  /** 缓存清理：days 天前的文章（收藏保留）或 AI 缓存。scope='articles'|'ai' */
+  async cacheCleanup(days: number, scope: 'articles' | 'ai'): Promise<string | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('cache_cleanup', { days, scope }) as string) : null;
   },
   async syncNow(): Promise<SyncReport | null> {
     const inv = await getInvoke();

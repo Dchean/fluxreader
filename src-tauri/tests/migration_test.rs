@@ -157,7 +157,7 @@ fn migration_v6_to_v7_backfills_precise_url_norm() {
     assert_eq!(dups, "");
 
     let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert_eq!(v, 7);
+    assert!(v >= 7, "v6 schema must migrate through v7 (url_norm), got {v}");
 
     let _ = std::fs::remove_file(&tmp);
     println!("=== MIGRATION v6→v7 PASS ===");

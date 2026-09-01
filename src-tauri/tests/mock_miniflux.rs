@@ -179,29 +179,38 @@ fn route(srv: &MockMiniflux, method: &str, path: &str, path_query: &str, body: &
             (200, json.into())
         }
         ("GET", "/v1/entries") => {
-            // 解析 after/changed_after/offset（毫秒）
-            let mut after_ms: i64 = 0;
+            // 解析 after/changed_after（unix 秒，与真实 Miniflux 一致）/offset/feed_id
+            let mut after_s: i64 = 0;
             let mut offset: usize = 0;
             let mut changed = false;
+            let mut feed_filter: Option<i64> = None;
             for kv in path_query.split('&').skip(1) {
                 let (k, v) = kv.split_once('=').unwrap_or(("", ""));
                 match k {
-                    "after" => after_ms = v.parse().unwrap_or(0),
+                    "after" => after_s = v.parse().unwrap_or(0),
                     "changed_after" => {
                         changed = true;
-                        after_ms = v.parse().unwrap_or(0)
+                        after_s = v.parse().unwrap_or(0)
                     }
                     "offset" => offset = v.parse().unwrap_or(0),
+                    "feed_id" => feed_filter = v.parse().ok(),
                     _ => {}
                 }
             }
-            // changed_after 也过滤 published_at（简化：测试里时间都是现在）
+            // 真实语义：after 过滤 published_at、changed_after 过滤 changed_at（unix 秒）
             let entries: Vec<MockEntry> = srv
                 .entries
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|_| !changed || chrono::Utc::now().timestamp_millis() >= after_ms)
+                .filter(|e| feed_filter.map_or(true, |f| e.feed_id == f))
+                .filter(|e| {
+                    let ts = if changed { &e.changed_at } else { &e.published_at };
+                    let t = chrono::DateTime::parse_from_rfc3339(ts)
+                        .map(|d| d.timestamp())
+                        .unwrap_or(0);
+                    t >= after_s
+                })
                 .cloned()
                 .collect();
             let total = entries.len();
@@ -254,7 +263,9 @@ fn route(srv: &MockMiniflux, method: &str, path: &str, path_query: &str, body: &
     }
 }
 
-/// 供测试断言用的便捷读取
+/// 供测试断言用的便捷读取（跨 test target 共享，未用的 target 会报
+/// dead_code，显式豁免）
+#[allow(dead_code)]
 pub fn status_updates_map(srv: &MockMiniflux) -> HashMap<i64, String> {
     srv.status_updates
         .lock()

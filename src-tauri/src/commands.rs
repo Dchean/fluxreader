@@ -8,6 +8,7 @@ use crate::miniflux::MinifluxClient;
 use crate::state::AppState;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
 
 /// 读 app_settings JSON 里的 smartDedup 开关（默认关：保持既有抓取行为）。
@@ -18,6 +19,41 @@ pub(crate) fn read_dedup_flag(conn: &rusqlite::Connection) -> bool {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("smartDedup").and_then(|f| f.as_bool()))
         .unwrap_or(false)
+}
+
+/* ============================================================
+   即时状态推送调度（防抖合批）
+   set_read/set_starred/mark_all_read 入队后调 schedule_state_push：
+   - AtomicBool 防重入：已有一个推送任务在飞时只标记"再来一轮"
+   - 800ms 防抖：快速滚动批量标读只发一次 PUT
+   - 失败静默（队列保留）→ 下次变更或下轮同步自动重推
+   ============================================================ */
+
+static STATE_PUSH_FLYING: AtomicBool = AtomicBool::new(false);
+static STATE_PUSH_PENDING: AtomicBool = AtomicBool::new(false);
+const STATE_PUSH_DEBOUNCE_MS: u64 = 800;
+
+pub(crate) fn schedule_state_push(state: &AppState) {
+    STATE_PUSH_PENDING.store(true, Ordering::SeqCst);
+    if STATE_PUSH_FLYING.swap(true, Ordering::SeqCst) {
+        return; // 已有任务在飞：它收尾时会看到 PENDING 再跑一轮
+    }
+    let db = state.db.clone();
+    let http = state.http.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(STATE_PUSH_DEBOUNCE_MS)).await;
+            if !STATE_PUSH_PENDING.swap(false, Ordering::SeqCst) {
+                break;
+            }
+            crate::sync::push_states_now(&db, &http).await;
+            // push 期间又入队 → 继续循环；否则退出并放行下一个调度
+            if !STATE_PUSH_PENDING.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        STATE_PUSH_FLYING.store(false, Ordering::SeqCst);
+    });
 }
 
 /* ============================================================
@@ -331,34 +367,45 @@ pub async fn search_articles(
 
 #[tauri::command]
 pub async fn set_read(state: State<'_, AppState>, id: i64, read: bool) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::set_read(&conn, id, read)?;
-    // 连接了 Miniflux 才入队；未连接时纯本地生效（连接后首 Pull 全量对齐）
-    if sync_configured(&conn) {
-        db::enqueue_sync(
-            &conn,
-            Some(id),
-            None,
-            if read { "read" } else { "unread" },
-            None,
-        )?;
+    {
+        let conn = state.db.lock().await;
+        db::set_read(&conn, id, read)?;
+        // 连接了 Miniflux 才入队；未连接时纯本地生效（连接后首 Pull 全量对齐）
+        if sync_configured(&conn) {
+            db::enqueue_sync(
+                &conn,
+                Some(id),
+                None,
+                if read { "read" } else { "unread" },
+                None,
+            )?;
+        } else {
+            return Ok(());
+        }
     }
+    // 锁外调度即时推送（防抖合批，~1s 内到达服务端）
+    schedule_state_push(&state);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn set_starred(state: State<'_, AppState>, id: i64, starred: bool) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::set_starred(&conn, id, starred)?;
-    if sync_configured(&conn) {
-        db::enqueue_sync(
-            &conn,
-            Some(id),
-            None,
-            if starred { "star" } else { "unstar" },
-            None,
-        )?;
+    {
+        let conn = state.db.lock().await;
+        db::set_starred(&conn, id, starred)?;
+        if sync_configured(&conn) {
+            db::enqueue_sync(
+                &conn,
+                Some(id),
+                None,
+                if starred { "star" } else { "unstar" },
+                None,
+            )?;
+        } else {
+            return Ok(());
+        }
     }
+    schedule_state_push(&state);
     Ok(())
 }
 
@@ -372,26 +419,32 @@ pub async fn mark_all_read(
     feed_id: Option<i64>,
     folder_id: Option<i64>,
 ) -> AppResult<usize> {
-    let conn = state.db.lock().await;
-    let n = db::mark_all_read(&conn, feed_id, folder_id)?;
-    if sync_configured(&conn) {
-        // 逐条入队（量级可控：个人订阅日常几十条）
-        let mut sql = String::from("SELECT id FROM articles WHERE is_read = 0");
-        if let Some(fid) = feed_id {
-            sql.push_str(&format!(" AND feed_id = {fid}"));
+    let n = {
+        let conn = state.db.lock().await;
+        let n = db::mark_all_read(&conn, feed_id, folder_id)?;
+        if sync_configured(&conn) {
+            // 逐条入队（量级可控：个人订阅日常几十条）
+            let mut sql = String::from("SELECT id FROM articles WHERE is_read = 0");
+            if let Some(fid) = feed_id {
+                sql.push_str(&format!(" AND feed_id = {fid}"));
+            }
+            if let Some(f) = folder_id {
+                sql.push_str(&format!(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {f})"));
+            }
+            let ids: Vec<i64> = {
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |r| r.get(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            for id in ids {
+                db::enqueue_sync(&conn, Some(id), None, "read", None)?;
+            }
+            drop(conn);
+            schedule_state_push(&state);
+            return Ok(n);
         }
-        if let Some(f) = folder_id {
-            sql.push_str(&format!(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {f})"));
-        }
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map([], |r| r.get(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        for id in ids {
-            db::enqueue_sync(&conn, Some(id), None, "read", None)?;
-        }
-    }
+        n
+    };
     Ok(n)
 }
 
@@ -611,59 +664,145 @@ pub async fn opml_export(state: State<'_, AppState>) -> AppResult<String> {
    Miniflux 同步
    ============================================================ */
 
-/// 保存 Endpoint/Token 并测试连接。成功返回欢迎信息。
+/// 测试连接（轻量）：纯 GET /v1/me，不落库、不做任何同步。
+/// 用于填表时快速验证连通性。
 #[tauri::command]
-pub async fn sync_connect(
+pub async fn sync_test(
     state: State<'_, AppState>,
     endpoint: String,
     token: String,
 ) -> AppResult<String> {
-    // 先写凭据再测试（test_connection 读 settings）；锁不跨 await
-    {
+    let (msg, _) = crate::sync::test_connection(&endpoint, &token, &state.http).await?;
+    Ok(msg)
+}
+
+/// 保存凭据：先轻量测试（失败不保存），通过后立即落库返回。
+/// 首连的重活（拉订阅、同步状态）由前端随后台阶段执行，不阻塞这里。
+/// Token 留空且已连接 → 复用已存 Token（仅改 Endpoint 的场景）。
+/// 换账号检测：已连接其他账号（endpoint 或 token 不同）时先清理旧账号
+/// 数据（订阅/绑定/队列），避免两份订阅列表混杂。
+#[tauri::command]
+pub async fn sync_save(
+    state: State<'_, AppState>,
+    endpoint: String,
+    token: String,
+) -> AppResult<String> {
+    // 留空 Token 且已连接 → 复用旧 Token（改地址不动密钥）
+    let (endpoint, token) = {
         let conn = state.db.lock().await;
-        db::set_setting(&conn, "miniflux_endpoint", &endpoint)?;
-        db::set_setting(&conn, "miniflux_token", &token)?;
-    }
-    let msg = crate::sync::test_connection(&endpoint, &token, &state.http).await?;
-    // 连接成功即做一次全量同步（订阅合并）。失败时回滚凭据：
-    // 否则设置页显示"已连接"但首次合并实际没跑，用户无从得知。
+        let old = crate::sync::read_credentials(&conn);
+        match (&old, token.trim().is_empty()) {
+            (Some((_old_ep, old_tk)), true) => (endpoint.trim().to_string(), old_tk.clone()),
+            (None, true) => {
+                return Err(AppError::new("validate", "请填写 API Token"));
+            }
+            _ => (endpoint.trim().to_string(), token.trim().to_string()),
+        }
+    };
+    // 换账号检测（锁内读旧凭据）
+    let account_changed = {
+        let conn = state.db.lock().await;
+        let old = crate::sync::read_credentials(&conn);
+        match old {
+            Some((old_ep, old_tk)) => {
+                old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/') || old_tk != token
+            }
+            None => false,
+        }
+    };
+    // 测试新凭据（失败不保存不动现状）；账户名随凭据落库（设置页动态显示）
+    let (msg, account) = crate::sync::test_connection(&endpoint, &token, &state.http).await?;
     {
         let mut conn = state.db.lock().await;
-        if let Err(e) = crate::sync::sync_now(&mut conn, &state.http).await {
-            db::set_setting(&conn, "miniflux_endpoint", "")?;
-            db::set_setting(&conn, "miniflux_token", "")?;
-            return Err(AppError::new(
-                "syncFailed",
-                format!("连接成功但首次同步失败：{e}"),
-            ));
+        if account_changed {
+            let (feeds, _) = db::purge_miniflux_data(&mut conn)?;
+            log::info!("sync: 账号切换，清理旧账号数据：{feeds} 个订阅");
         }
+        db::set_setting(&conn, "miniflux_endpoint", &endpoint)?;
+        db::set_setting(&conn, "miniflux_token", &token)?;
+        db::set_setting(&conn, "miniflux_account", &account)?;
+        // 新连接：清增量游标，让首同步从全量开始（对账旧状态差异）
+        db::set_setting(&conn, "miniflux_last_sync", "0")?;
     }
     Ok(msg)
 }
 
-/// 断开连接（清凭据，本地数据不动）
+/// 分步同步：which="feeds"（订阅层，秒级）| "states"（状态+条目层，慢）。
+/// states 全量对账只在 full=true（手动/首连）时做。
 #[tauri::command]
-pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    db::set_setting(&conn, "miniflux_endpoint", "")?;
-    db::set_setting(&conn, "miniflux_token", "")?;
-    db::set_setting(&conn, "miniflux_last_sync", "0")?;
-    Ok(())
+pub async fn sync_phase(
+    state: State<'_, AppState>,
+    which: String,
+    full: Option<bool>,
+) -> AppResult<crate::sync::SyncReport> {
+    match which.as_str() {
+        "feeds" => crate::sync::feeds_phase(&state.db, &state.http).await,
+        "states" => crate::sync::states_phase(&state.db, &state.http, full.unwrap_or(false)).await,
+        _ => Err(AppError::new("validate", "which 必须是 feeds 或 states")),
+    }
 }
 
-/// 手动全量同步（侧栏刷新按钮 / 同步中心）
+/// 断开连接：清凭据 + 清理服务端来源数据（订阅/条目/绑定/队列）。
+/// 用户直连订阅（origin='local'）保留——本地优先的产品语义。
+#[tauri::command]
+pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<String> {
+    let (feeds, articles) = {
+        let mut conn = state.db.lock().await;
+        let r = db::purge_miniflux_data(&mut conn)?;
+        db::set_setting(&conn, "miniflux_endpoint", "")?;
+        db::set_setting(&conn, "miniflux_token", "")?;
+        db::set_setting(&conn, "miniflux_account", "")?;
+        db::set_setting(&conn, "miniflux_last_sync", "0")?;
+        r
+    };
+    Ok(format!("已断开并清理：移除 {feeds} 个服务端订阅（{articles} 处绑定），本地直连订阅保留"))
+}
+
+/// 缓存清理：删除指定天数前的文章（收藏/待同步项保留）或仅清 AI 缓存。
+/// scope='articles' | 'ai'。返回 (删文章数, 清 AI 字段数)。
+#[tauri::command]
+pub async fn cache_cleanup(
+    state: State<'_, AppState>,
+    days: i64,
+    scope: String,
+) -> AppResult<String> {
+    if !(1..=3650).contains(&days) {
+        return Err(AppError::new("validate", "天数需在 1–3650 之间"));
+    }
+    if scope != "articles" && scope != "ai" {
+        return Err(AppError::new("validate", "scope 必须是 articles 或 ai"));
+    }
+    let (deleted, ai_cleared) = {
+        let mut conn = state.db.lock().await;
+        db::cleanup_cache(&mut conn, days, &scope)?
+    };
+    Ok(if scope == "articles" {
+        format!("已清理 {days} 天前的文章 {deleted} 篇（收藏文章已保留）")
+    } else {
+        format!("已清理 {days} 天前文章的 AI 摘要与翻译缓存 {ai_cleared} 篇")
+    })
+}
+
+/// 手动全量同步（侧栏刷新按钮 / 同步中心）。staged：锁只在 DB 读写时持有。
 #[tauri::command]
 pub async fn sync_now(state: State<'_, AppState>) -> AppResult<crate::sync::SyncReport> {
-    let client = state.http.clone();
-    let mut conn = state.db.lock().await;
-    crate::sync::sync_now(&mut conn, &client).await
+    // feeds 阶段 → states 阶段（full 对账），两阶段各自内部管理锁
+    let mut report = crate::sync::feeds_phase(&state.db, &state.http).await?;
+    let states = crate::sync::states_phase(&state.db, &state.http, true).await?;
+    // 合并报告（错误聚合，方便前端展示）
+    report.pushed_states = states.pushed_states;
+    report.pulled_entries = states.pulled_entries;
+    report.fallback_entries = states.fallback_entries;
+    report.errors.extend(states.errors);
+    Ok(report)
 }
 
-/// 同步配置状态（设置页显示用）
+/// 同步配置状态（设置页显示用）。account = 连接时记录的服务端用户名。
 #[derive(serde::Serialize)]
 pub struct SyncStatusInfo {
     pub connected: bool,
     pub endpoint: Option<String>,
+    pub account: Option<String>,
     pub last_sync: i64,
 }
 
@@ -672,9 +811,12 @@ pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo
     let conn = state.db.lock().await;
     let endpoint = db::get_setting(&conn, "miniflux_endpoint").ok().flatten()
         .filter(|e| !e.trim().is_empty());
+    let account = db::get_setting(&conn, "miniflux_account").ok().flatten()
+        .filter(|a| !a.trim().is_empty());
     Ok(SyncStatusInfo {
         connected: endpoint.is_some(),
         endpoint,
+        account,
         last_sync: db::last_sync_ts(&conn).unwrap_or(0),
     })
 }

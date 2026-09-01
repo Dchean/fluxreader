@@ -167,6 +167,13 @@ static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         UPDATE articles SET url_norm = lower(url) WHERE url IS NOT NULL AND url != '';
     "#),
     // 后续迁移在此追加（M::up），已发布的不可改
+    // 账号数据边界：feeds.origin 标记订阅来源（'local' 用户直连添加 |
+    // 'miniflux' 从服务端拉取）。断开连接时删 miniflux 来源的订阅（级联
+    // 清掉其文章/绑定/队列），本地直连订阅保留——换账号登录不会混杂两份
+    // 订阅列表。user_version=8。
+    M::up(r#"
+        ALTER TABLE feeds ADD COLUMN origin TEXT NOT NULL DEFAULT 'local';
+    "#),
     ])
 });
 
@@ -393,10 +400,28 @@ pub fn insert_feed(
     auto_summary: bool,
     auto_translate: bool,
 ) -> AppResult<i64> {
+    insert_feed_origin(conn, feed_url, site_url, title, favicon_url, folder_id, layout, auto_summary, auto_translate, "local")
+}
+
+/// 同 insert_feed，带来源标记（'local' 用户直连添加 | 'miniflux' 服务端拉取）。
+/// 断开连接按此列清理服务端来源订阅（换账号不混杂）。
+#[allow(clippy::too_many_arguments)]
+pub fn insert_feed_origin(
+    conn: &Connection,
+    feed_url: &str,
+    site_url: Option<&str>,
+    title: &str,
+    favicon_url: Option<&str>,
+    folder_id: i64,
+    layout: &str,
+    auto_summary: bool,
+    auto_translate: bool,
+    origin: &str,
+) -> AppResult<i64> {
     conn.execute(
-        "INSERT INTO feeds (feed_url, site_url, title, favicon_url, folder_id, layout, auto_summary, auto_translate)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![feed_url, site_url, title, favicon_url, folder_id, layout, auto_summary as i64, auto_translate as i64],
+        "INSERT INTO feeds (feed_url, site_url, title, favicon_url, folder_id, layout, auto_summary, auto_translate, origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![feed_url, site_url, title, favicon_url, folder_id, layout, auto_summary as i64, auto_translate as i64, origin],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -709,6 +734,73 @@ fn existing_article_with_url(conn: &Connection, url: &str) -> AppResult<Option<i
 pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
     let n = conn.execute("DELETE FROM deduped_urls", [])?;
     Ok(n)
+}
+
+/* ============================================================
+   账号数据边界 / 缓存清理
+   ============================================================ */
+
+/// 断开连接时清理服务端来源的数据：删 origin='miniflux' 的订阅（级联清
+/// 其文章/绑定/队列/墓碑），清空本地条目上的 Miniflux 绑定与副本记账、
+/// folders/feeds 的 miniflux_id 残留。用户直连订阅（origin='local'）保留。
+/// 空目录（pull 建的、没了成员）一并删除。
+pub fn purge_miniflux_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
+    let tx = conn.transaction()?;
+    // 1. 服务端来源订阅（级联：articles → sync_queue / deduped_urls 墓碑 / FTS 触发器）
+    let feeds = tx.execute("DELETE FROM feeds WHERE origin = 'miniflux'", [])?;
+    // 2. 本地直连条目上的绑定/副本/已读态全部回归纯本地
+    let articles = tx.execute(
+        "UPDATE articles SET miniflux_id = NULL, miniflux_dup_ids = ''",
+        [],
+    )?;
+    // 3. 本地直连源/分类的 miniflux_id 绑定清除
+    tx.execute("UPDATE feeds SET miniflux_id = NULL", [])?;
+    tx.execute("UPDATE folders SET miniflux_id = NULL", [])?;
+    // 4. 清空待推队列（推给这个账号的变更不再有意义）
+    tx.execute("DELETE FROM sync_queue", [])?;
+    // 5. 空目录（Pull 建的远端分类，删完成员后空了）——保留用户建的非空目录
+    tx.execute(
+        "DELETE FROM folders WHERE id NOT IN (SELECT DISTINCT folder_id FROM feeds WHERE folder_id IS NOT NULL)",
+        [],
+    )?;
+    tx.commit()?;
+    Ok((feeds, articles))
+}
+
+/// 缓存清理：删除指定天数之前的文章（含 FTS/队列级联）与/或 AI 产物。
+/// 保留项：收藏文章永不清（用户显式标过星）；scope='ai' 只清 AI 摘要与
+/// 翻译缓存（正文保留，重新打开可再生成）。返回 (删文章数, 清 AI 字段数)。
+pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult<(usize, usize)> {
+    let tx = conn.transaction()?;
+    let cutoff = format!(
+        "datetime('now', '-{days} days', 'localtime')"
+    );
+    let (mut deleted, mut ai_cleared) = (0usize, 0usize);
+    if scope == "articles" {
+        deleted = tx.execute(
+            &format!(
+                "DELETE FROM articles
+                 WHERE published_at < {cutoff}
+                   AND is_starred = 0
+                   AND id NOT IN (SELECT article_id FROM sync_queue WHERE article_id IS NOT NULL)"
+            ),
+            [],
+        )?;
+        // 墓碑指向被删文章的清掉（kept_aid 级联已处理，这里兜底空墓碑）
+        tx.execute("DELETE FROM deduped_urls WHERE kept_aid NOT IN (SELECT id FROM articles)", [])?;
+    } else if scope == "ai" {
+        ai_cleared = tx.execute(
+            &format!(
+                "UPDATE articles SET ai_summary = NULL, translated_content = NULL
+                 WHERE (ai_summary IS NOT NULL OR translated_content IS NOT NULL)
+                   AND published_at < {cutoff}"
+            ),
+            [],
+        )?;
+        // FTS 触发器同步（UPDATE 触发 articles_au 已处理）
+    }
+    tx.commit()?;
+    Ok((deleted, ai_cleared))
 }
 
 /* ============================================================

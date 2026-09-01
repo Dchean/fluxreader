@@ -173,10 +173,14 @@ pub fn run() {
             commands::get_setting,
             commands::set_setting,
         // Miniflux 同步
-        commands::sync_connect,
+        commands::sync_test,
+        commands::sync_save,
+        commands::sync_phase,
         commands::sync_disconnect,
         commands::sync_now,
         commands::sync_status,
+        // 缓存清理
+        commands::cache_cleanup,
         // AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi）
         commands::save_ai_config,
         commands::get_ai_config,

@@ -789,11 +789,16 @@ function SyncTab() {
   const showToast = useAppStore((s) => s.showToast);
   const dataMode = useAppStore((s) => s.dataMode);
   const reloadFromBackend = useAppStore((s) => s.reloadFromBackend);
+  const settings = useAppStore((s) => s.settings);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const [endpoint, setEndpoint] = useState('');
   const [token, setToken] = useState('');
   const [connected, setConnected] = useState(false);
+  const [account, setAccount] = useState<string | null>(null);
   const [lastSync, setLastSync] = useState(0);
-  const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   /* 打开设置时读取当前连接状态 */
   useEffect(() => {
@@ -801,40 +806,90 @@ function SyncTab() {
     void api.syncStatus().then((st) => {
       if (!st) return;
       setConnected(st.connected);
+      setAccount(st.account);
       setLastSync(st.last_sync);
       if (st.connected && st.endpoint) setEndpoint(st.endpoint);
     });
   }, [dataMode]);
 
-  const doConnect = async () => {
+  /* 轻量连通测试：不落库不做同步（填表时快速验证） */
+  const doTest = async () => {
     if (!endpoint.trim() || !token.trim()) {
       showToast('请填写 Endpoint 和 API Token');
       return;
     }
-    setBusy(true);
+    setTesting(true);
     try {
-      const msg = await api.syncConnect(endpoint.trim(), token.trim());
-      /* 首次连接拉下来的新源立即直连抓取一次，条目马上可见 */
-      await api.refreshAllFeeds().catch(() => null);
-      await reloadFromBackend();
-      setConnected(true);
-      showToast(msg ?? '已连接 Miniflux');
+      const msg = await api.syncTest(endpoint.trim(), token.trim());
+      showToast(msg ?? '连接成功');
     } catch (e) {
       showToast(`连接失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setBusy(false);
+      setTesting(false);
+    }
+  };
+
+  /** 保存并后台同步：保存秒回（只做轻量测试+落库），
+      订阅/状态的拉取全部后台执行，设置页可随时关闭。
+      已连接且 Token 留空 = 复用已存 Token（仅改 Endpoint） */
+  const doSaveAndSync = async () => {
+    if (!endpoint.trim()) {
+      showToast('请填写 Endpoint');
+      return;
+    }
+    if (!token.trim() && !connected) {
+      showToast('请填写 API Token');
+      return;
+    }
+    setSaving(true);
+    try {
+      const msg = await api.syncSave(endpoint.trim(), token.trim());
+      setConnected(true);
+      /* 保存成功即刷新账户名显示（syncSave 落了 miniflux_account） */
+      void api.syncStatus().then((st) => { if (st) setAccount(st.account); });
+      setToken('');
+      showToast(msg ?? '已保存，正在后台同步…');
+      /* 全后台链：feeds 阶段（快）→ states 阶段（慢，含全量对账）→ 直连抓新源 */
+      void api
+        .syncPhase('feeds')
+        .then(async () => {
+          await reloadFromBackend();
+          showToast('已拉取订阅源，正在同步文章状态…');
+          return api.syncPhase('states', true);
+        })
+        .then(async () => {
+          await reloadFromBackend();
+          return api.refreshAllFeeds().catch(() => null);
+        })
+        .then(() => reloadFromBackend())
+        .then(() => {
+          useAppStore.setState({ syncStatus: 'synced', minifluxConnected: true });
+          showToast('Miniflux 同步完成');
+        })
+        .catch((e: unknown) => {
+          const m = e instanceof Error ? e.message : String(e);
+          showToast(`后台同步失败：${m}`, { label: '重试', run: () => { void doSaveAndSync(); } });
+        });
+    } catch (e) {
+      showToast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSaving(false);
     }
   };
 
   const doDisconnect = async () => {
-    setBusy(true);
+    setSaving(true);
     try {
-      await api.syncDisconnect();
+      const msg = await api.syncDisconnect();
       setConnected(false);
+      setAccount(null);
       setToken('');
-      showToast('已断开连接（本地数据保留）');
+      await reloadFromBackend();
+      showToast(msg ?? '已断开连接');
+    } catch (e) {
+      showToast(`断开失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   };
 
@@ -855,10 +910,10 @@ function SyncTab() {
       <SettingCard
         title="连接状态"
         desc={connected
-          ? `已连接 · 上次同步 ${lastSync > 0 ? new Date(lastSync * 1000).toLocaleString() : '从未'}`
+          ? `${account ? `账户 ${account} · ` : ''}上次同步 ${lastSync > 0 ? new Date(lastSync * 1000).toLocaleString() : '从未'}`
           : '未连接（客户端可独立使用：直连抓取、阅读、收藏均正常）'}
       >
-        <span className={`about-arch-tag ${connected ? '' : ''}`}>{connected ? '已连接' : '未连接'}</span>
+        <span className="about-arch-tag">{connected ? (account ?? '已连接') : '未连接'}</span>
       </SettingCard>
       <SettingCard title="Miniflux 服务端 Endpoint" desc="例如 https://reader.example.com">
         <input
@@ -869,35 +924,124 @@ function SyncTab() {
           onChange={(e) => setEndpoint(e.target.value)}
         />
       </SettingCard>
-      <SettingCard title="API Token" desc="Miniflux 设置 → API Keys 生成，用于双向同步已读/收藏/订阅">
+      <SettingCard
+        title="API Token"
+        desc={connected ? '已保存（出于安全不回显）。留空提交 = 保持当前 Token；填写新值 = 更换账号/密钥' : 'Miniflux 设置 → API Keys 生成，用于双向同步已读/收藏/订阅'}
+      >
         <input
           type="password"
           className="setting-input"
-          placeholder="X-Auth-Token"
+          placeholder={connected ? '●●●●●●●●（已保存）' : 'X-Auth-Token'}
           value={token}
           onChange={(e) => setToken(e.target.value)}
         />
       </SettingCard>
       <div className="settings-action-row">
-        <button
-          className="toggle-action-btn btn-primary"
-          disabled={busy}
-          onClick={() => void doConnect()}
-        >
-          {busy ? '同步中...' : '测试连接并立即同步'}
+        <button className="toggle-action-btn" disabled={testing || saving} onClick={() => void doTest()}>
+          {testing ? '测试中…' : '测试连接'}
+        </button>
+        <button className="toggle-action-btn btn-primary" disabled={testing || saving} onClick={() => void doSaveAndSync()}>
+          {saving ? '保存中…' : '保存并同步'}
         </button>
         {connected && (
-          <button className="toggle-action-btn" disabled={busy} onClick={() => void doDisconnect()}>
+          <button className="toggle-action-btn" disabled={testing || saving} onClick={() => setConfirmDisconnect(true)}>
             断开连接
           </button>
         )}
       </div>
       <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        连接后：本地已读/收藏/订阅变更双向同步；直连失败的源自动从 Miniflux 兜底拉取条目。
-        不连接也完全可用 —— 客户端直连源站抓取（第一优先级）。
+        「测试连接」只验证连通性（秒级）；「保存并同步」保存后立即在后台拉取订阅与文章状态——
+        期间可关闭设置继续阅读。已读/收藏等状态变更会即时推送到服务端（约 1 秒内）。
+        断开连接会移除服务端拉取的订阅与文章（本地直连添加的保留）。
       </div>
 
+      <div className="settings-group-title" style={{ marginTop: 20 }}>自动同步</div>
+      <SettingCard title="后台自动同步 Miniflux" desc="按刷新间隔到期时自动做轻量增量同步（拉取服务端状态变化）">
+        <Switch checked={settings.autoSyncMiniflux} onChange={(v) => updateSettings({ autoSyncMiniflux: v })} />
+      </SettingCard>
+
+      <CacheCleanupSection />
       <ConfigSyncSection />
+
+      <ConfirmDialog
+        open={confirmDisconnect}
+        title="断开 Miniflux 连接"
+        message="断开后将移除从服务端拉取的订阅与文章（含已读/收藏绑定），本地直连添加的订阅不受影响。确定断开吗？"
+        confirmText="断开并清理"
+        onConfirm={() => { setConfirmDisconnect(false); void doDisconnect(); }}
+        onCancel={() => setConfirmDisconnect(false)}
+      />
+    </>
+  );
+}
+
+/* ---------- 缓存清理（文章 / AI 产物） ---------- */
+
+const CACHE_PERIODS = [
+  { days: 7, label: '1 周' },
+  { days: 30, label: '1 个月' },
+  { days: 90, label: '3 个月' },
+  { days: 365, label: '1 年' },
+  { days: 3650, label: '全部' },
+];
+
+function CacheCleanupSection() {
+  const showToast = useAppStore((s) => s.showToast);
+  const dataMode = useAppStore((s) => s.dataMode);
+  const reloadFromBackend = useAppStore((s) => s.reloadFromBackend);
+  const [days, setDays] = useState(30);
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<'articles' | 'ai' | null>(null);
+
+  if (dataMode !== 'tauri') return null;
+
+  const run = async (scope: 'articles' | 'ai') => {
+    setBusy(true);
+    try {
+      const msg = await api.cacheCleanup(days, scope);
+      showToast(msg ?? '清理完成');
+      await reloadFromBackend();
+    } catch (e) {
+      showToast(`清理失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+      setConfirm(null);
+    }
+  };
+
+  return (
+    <>
+      <div className="settings-group-title" style={{ marginTop: 20 }}>缓存清理</div>
+      <SettingCard title="清理时间范围" desc="删除该时间之前的本地缓存（收藏文章与待同步状态始终保留）">
+        <FluxDropdown
+          width={110}
+          value={String(days)}
+          onChange={(v) => setDays(Number(v))}
+          options={CACHE_PERIODS.map((p) => ({ value: String(p.days), label: p.label }))}
+        />
+      </SettingCard>
+      <div className="settings-action-row">
+        <button className="toggle-action-btn" disabled={busy} onClick={() => setConfirm('articles')}>
+          清理旧文章
+        </button>
+        <button className="toggle-action-btn" disabled={busy} onClick={() => setConfirm('ai')}>
+          清理 AI 缓存
+        </button>
+      </div>
+      <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
+        「清理旧文章」删除指定时间前的文章正文与条目（收藏除外）；「清理 AI 缓存」仅清除 AI 摘要与翻译
+        缓存（正文保留，重新打开文章可再次生成）。
+      </div>
+      <ConfirmDialog
+        open={confirm !== null}
+        title={confirm === 'articles' ? '清理旧文章' : '清理 AI 缓存'}
+        message={confirm === 'articles'
+          ? `将删除 ${CACHE_PERIODS.find((p) => p.days === days)?.label ?? `${days} 天`} 之前的文章（收藏与待同步项保留），此操作不可撤销。`
+          : `将清除 ${CACHE_PERIODS.find((p) => p.days === days)?.label ?? `${days} 天`} 之前文章的 AI 摘要与翻译缓存，正文保留。`}
+        confirmText="确认清理"
+        onConfirm={() => { if (confirm) void run(confirm); }}
+        onCancel={() => setConfirm(null)}
+      />
     </>
   );
 }

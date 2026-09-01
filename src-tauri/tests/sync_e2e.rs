@@ -192,8 +192,9 @@ async fn miniflux_sync_end_to_end() {
     assert!(!now_read, "own-feed entry status change still merges (guard doesn't break normal path)");
 
     // 连接测试
-    let msg = sync::test_connection(&server.url(), "test-token", &http).await.unwrap();
+    let (msg, username) = sync::test_connection(&server.url(), "test-token", &http).await.unwrap();
     assert!(msg.contains("mockuser"), "test_connection returns username: {msg}");
+    assert_eq!(username, "mockuser");
 
     let _ = std::fs::remove_file(&tmp);
     println!("=== SYNC E2E PASS ===");

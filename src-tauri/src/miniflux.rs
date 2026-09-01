@@ -142,10 +142,12 @@ impl MinifluxClient {
         }
     }
 
-    /// 拉条目：after/changed_after 为 unix 秒游标（Miniflux 用毫秒时间戳过滤）
-    pub async fn entries(&self, feed_id: Option<i64>, after_epoch_ms: i64, changed: bool) -> AppResult<Vec<Entry>> {
+    /// 拉条目：after/changed_after 为 unix **秒**（Miniflux API 文档如此；
+    /// 传毫秒会被当作未来时间 → 永远返回空，增量同步静默失效）。
+    /// order=id asc + offset 翻页保证稳定。
+    pub async fn entries(&self, feed_id: Option<i64>, after_epoch_s: i64, changed: bool) -> AppResult<Vec<Entry>> {
         let mut path = format!(
-            "/v1/entries?limit=100&order=id&direction=asc&{}={after_epoch_ms}",
+            "/v1/entries?limit=100&order=id&direction=asc&{}={after_epoch_s}",
             if changed { "changed_after" } else { "after" }
         );
         if let Some(fid) = feed_id {
@@ -161,7 +163,7 @@ impl MinifluxClient {
             }
             // offset 翻页（order=id asc 保证稳定）
             path = format!(
-                "/v1/entries?limit=100&order=id&direction=asc&offset={}&{}={after_epoch_ms}",
+                "/v1/entries?limit=100&order=id&direction=asc&offset={}&{}={after_epoch_s}",
                 all.len(),
                 if changed { "changed_after" } else { "after" }
             );
