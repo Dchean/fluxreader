@@ -17,47 +17,51 @@
 
 ```
 src-tauri/src/
-  db.rs          # 数据层：rusqlite_migration 迁移链 v1→v4、FTS5 外部内容表 + 触发器同步、
-                 #   全部参数化查询、智能去重（跨源 URL 查重）
+  db.rs          # 数据层：rusqlite_migration 迁移链 v1→v8、FTS5 外部内容表 + 触发器同步、
+                 #   全部参数化查询、智能去重（跨源 URL 查重）、缓存清理、账号数据隔离
   ingestion.rs   # RSS/Atom 抓取解析（feed-rs）、Conditional GET（etag/last-modified/304 短路）、
                  #   失败退避状态机（fail_count → 5/5/30/120 分钟 next_retry_at）
   scheduler.rs   # 后台刷新：60s tick 读 app_settings（间隔/开关实时生效）、
-                 #   Semaphore 4 并发抓取、新文章 emit 事件 → 前端重载 + toast
+                 #   Semaphore 并发抓取（设置 1-16，默认 4）、新文章 emit 事件 → 前端重载 + toast、
+                 #   Miniflux 自动同步（sync-running/sync-idle 事件驱动侧栏指示）
   ai.rs          # OpenAI 兼容 SSE 流式消费：预设端点（DeepSeek/OpenAI/GLM）+ 自定义 baseUrl、
                  #   逐 delta 抽取、错误对象检测、8MiB 缓冲上限
   sync.rs        # Miniflux 双向同步：拉取合并（icon/title 补全、缺失源入库）+
-                 #   sync_queue 出队推送（已读/收藏/增删源），离线操作不丢
+                 #   sync_queue 出队推送（已读/收藏/增删源），离线操作不丢；
+                 #   feeds/states 两阶段 + 全量对账（未读数漂移收敛）、即时状态推送（防抖合批）
   opml.rs        # OPML 解析（tidy 修复裸 & 的真实世界导出）与构建、按 xml_url 去重
   extraction.rs  # dom_smoothie Readability 全文提取 + og:image 首图（spawn_blocking，非 Send 隔离）
-  sanitize.rs    # ammonia 白名单消毒 + 相对 URL 以 feed base 重写 + 惰性图片恢复
-  commands.rs    # 全部 IPC 命令（列表/设置/AI 流式/OPML/同步/全文提取）
+  sanitize.rs    # ammonia 白名单消毒 + 相对 URL 以 feed base 重写 + 惰性图片恢复 +
+                 #   正文富媒体放行（video/audio/source/track；iframe 走域名白名单，未允许的降级外链）
+  commands.rs    # 全部 IPC 命令（列表/设置/AI 流式/OPML/同步/全文提取/即时推送调度）
   state.rs       # AppState：Arc<Mutex<Connection>>（锁不跨 .await）+ 共享 reqwest Client
-  miniflux.rs    # Miniflux REST 客户端（兼容对象/裸数组两种响应形态）
+  miniflux.rs    # Miniflux REST 客户端（兼容对象/裸数组两种响应形态、enclosure 附件）
 
 src/
   store.ts       # 全局状态机：导航/筛选/已读保留快照（openedReadIds）/播放器/AI 流式打字机累积
-  components/    # Sidebar（订阅树+角标）/ Timeline（五布局卡片流+滚动标读）/
-                 #   Reader（懒加载水合+工具栏）/ PlayerBar（单 audio 元素双向同步）/
-                 #   Overlays（命令面板式搜索：文章/订阅源/命令三组）/ SettingsModal
+  components/    # Sidebar（订阅树+角标+失败源警示）/ Timeline（五布局卡片流+滚动标读）/
+                 #   Reader（懒加载水合+工具栏+正文图片灯箱+附件播放）/ PlayerBar（单 audio 元素双向同步）/
+                 #   Overlays（Papr 式命令面板：命令/订阅源/文章）/ SettingsModal
   lib/api.ts     # invoke 封装：Tauri 环境 → 后端；浏览器环境 → 自动回退演示数据
   lib/external.ts# 外链统一拦截：仅放行 http(s) → 系统浏览器（opener 插件）
 ```
 
 ## 关键设计
 
-- **单写连接**：`Arc<Mutex<Connection>>` 串行化全部 SQL；HTTP 等待期间不持锁（先快照后网络）
-- **安全边界**：外部 HTML 入库即消毒（ammonia 白名单 + URL 重写），前端 `dangerouslySetInnerHTML` 只渲染已消毒内容；外链点击只放行 http(s)
-- **列表性能**：列表快照不含正文（`content_html` 选中时懒加载水合）；FTS5 外部内容表靠触发器与 articles 行级同步，搜索覆盖标题/正文/作者/AI 摘要/译文
+- **单写连接**：`Arc<Mutex<Connection>>` 串行化全部 SQL；HTTP 等待期间不持锁（三段式：锁内读 → 锁外网络 → 锁内写；同步/抓取/推送全部遵循）
+- **安全边界**：外部 HTML 入库即消毒（ammonia 白名单 + URL 重写 + iframe 域名白名单降级），前端 `dangerouslySetInnerHTML` 只渲染已消毒内容；AI 翻译产物入库前二次消毒；外链点击只放行 http(s)
+- **列表性能**：列表快照不含正文（`content_html` 选中时懒加载水合）；搜索走 LIKE 子串（中英文/特殊字符语义一致，FTS 的 unicode61 分词对中文无效故弃用）
 - **已读语义**：打开/滚动到底/滚出列表三种触发；未读筛选下已读卡片原地变灰（会话级快照），切视图才移除
 - **AI 流式**：Rust 消费 SSE → `Channel<AiEvent>` 逐 delta 推前端 → 打字机渲染；完成后写 `ai_summary`/`translated_content` 缓存列，重复打开零重算；未配置时源级自动触发静默跳过
 - **播放器**：store ↔ 单 `<audio>` 元素双向同步（store→element: play/rate/seek；element→store: timeupdate/metadata/ended）
+- **正文媒体**：直连源内嵌 video/audio 可播；YouTube/B 站等白名单 iframe 嵌入播放，其余嵌入内容降级为「在浏览器打开」外链
 
 ## 数据模型
 
 SQLite（`%APPDATA%\com.fluxreader.app\fluxreader.db`，WAL）：
 - `folders` / `feeds`（layout 绑定、auto_summary/translate 开关、退避字段、miniflux_id 映射）
 - `articles`（guid 唯一约束、enclosure、AI 产物列、部分索引 `idx_articles_unread`）
-- `articles_fts`（FTS5 external content，unicode61 分词：中文按字、英文按词）
+- `articles_fts`（FTS5 external content 表，靠触发器与 articles 同步；搜索用 LIKE 子串，此表保留作备用索引）
 - `settings`（键值：app_settings JSON / ai_config / miniflux 凭据）
 - `sync_queue`（离线变更队列，同步成功后出队）
 

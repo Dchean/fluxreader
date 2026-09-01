@@ -150,7 +150,7 @@ fn cache_cleanup_articles_respects_star_and_age() {
     let mut conn = fresh_db("cache");
     let (feed, _) = seed_local(&conn);
 
-    let mk = |guid: &str, days_ago: i64, starred: bool| {
+    let mk = |guid: &str, days_ago: i64, starred: bool, read: bool| {
         let a = db::NewArticle {
             guid: guid.into(),
             url: Some(format!("http://127.0.0.1:8765/{guid}")),
@@ -172,19 +172,25 @@ fn cache_cleanup_articles_respects_star_and_age() {
         if starred {
             conn.execute("UPDATE articles SET is_starred = 1 WHERE id = ?1", [aid]).unwrap();
         }
+        if read {
+            conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [aid]).unwrap();
+        }
         aid
     };
-    let old = mk("old", 40, false);
-    let old_starred = mk("old-star", 40, true);
-    let recent = mk("recent", 3, false);
+    let old = mk("old", 40, false, true);
+    let old_starred = mk("old-star", 40, true, true);
+    let recent = mk("recent", 3, false, true);
+    // 未读旧文不删：删了会被全量同步按服务器 unread 状态拉回（数据打架）
+    let old_unread = mk("old-unread", 40, false, false);
 
     let (deleted, _) = db::cleanup_cache(&mut conn, 30, "articles").unwrap();
-    assert_eq!(deleted, 1, "only old non-starred deleted");
+    assert_eq!(deleted, 1, "only old read non-starred deleted");
 
     for (aid, should_exist, why) in [
-        (old, false, "old article purged"),
+        (old, false, "old read article purged"),
         (old_starred, true, "starred preserved"),
         (recent, true, "recent preserved"),
+        (old_unread, true, "old UNREAD preserved (sync would resurrect it)"),
     ] {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM articles WHERE id = ?1", [aid], |r| r.get(0))

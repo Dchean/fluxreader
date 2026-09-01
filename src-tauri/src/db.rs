@@ -681,37 +681,61 @@ pub fn get_article(conn: &Connection, id: i64) -> AppResult<Option<ArticleRow>> 
     Ok(row)
 }
 
-/// 全文搜索：FTS5 MATCH，命中按相关度（bm25）排序，返回与列表页同构的轻量行。
-/// 查询词走 OR 连接（多关键词任一命中即返回）；空关键词返回空。
+/// 全文搜索：LIKE 子串匹配，命中按发布时间倒序，返回与列表页同构的轻量行。
+///
+/// 不用 FTS5 MATCH 的原因：unicode61 分词器把连续中文整段当作一个 token，
+/// 搜「科技」永远匹配不到正文里的「科技公司新闻」——对中文用户形同虚设；
+/// 且 FTS 查询语法字符（"*()" 等）需要额外转义，`node.js`、`C++` 这类词
+/// 的前缀/精确语义也很反直觉。个人库规模（≤ 数千篇）LIKE 全表扫毫秒级
+/// 完成，语义对任意语言/任意字符都正确（就是"包含这个子串"）。
+///
+/// 多关键词 AND（所有词都要命中，与主流阅读器一致）；匹配字段：标题 +
+/// 正文纯文本 + 摘要；LIKE 通配符 %/_ 按字面转义。
 pub fn search_articles(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<ArticleListItem>> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    /* FTS5 语法字符（双引号/括号/星号等）会破坏 MATCH 表达式：
-       逐词包裹双引号转义（"词"），任意词命中即可。 */
     let terms: Vec<String> = q
         .split_whitespace()
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .filter(|t| !t.is_empty())
+        .map(|t| t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
         .collect();
     if terms.is_empty() {
         return Ok(Vec::new());
     }
-    let match_expr = terms.join(" OR ");
 
+    // 每个词一组 (title/body/summary LIKE)，词间 AND。
+    // 占位符逐个编号（?N 是编号引用，跨词组复用 ?1..?3 会错位），
+    // ESCAPE 声明 SQLite 的 LIKE 通配符转义字符 '\'。
+    let mut where_parts = Vec::with_capacity(terms.len());
+    let mut like_args: Vec<String> = Vec::with_capacity(terms.len() * 3);
+    for (i, t) in terms.iter().enumerate() {
+        let pat = format!("%{t}%");
+        let base = i * 3 + 1;
+        where_parts.push(format!(
+            "(a.title LIKE ?{b} ESCAPE '\\' OR a.body_text LIKE ?{c} ESCAPE '\\' OR COALESCE(a.summary,'') LIKE ?{d} ESCAPE '\\')",
+            b = base,
+            c = base + 1,
+            d = base + 2
+        ));
+        like_args.push(pat.clone());
+        like_args.push(pat.clone());
+        like_args.push(pat);
+    }
     let sql = format!(
         "SELECT a.id, a.feed_id, a.title, a.author,
                 COALESCE(NULLIF(a.summary, ''), substr(a.body_text, 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
                 a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred
-         FROM articles_fts f
-         JOIN articles a ON a.id = f.rowid
-         WHERE articles_fts MATCH ?
-         ORDER BY bm25(articles_fts)
-         LIMIT {limit}"
+         FROM articles a
+         WHERE {}
+         ORDER BY a.published_at DESC
+         LIMIT {limit}",
+        where_parts.join(" AND ")
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![match_expr], article_list_item)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(like_args), article_list_item)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -768,8 +792,10 @@ pub fn purge_miniflux_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
 }
 
 /// 缓存清理：删除指定天数之前的文章（含 FTS/队列级联）与/或 AI 产物。
-/// 保留项：收藏文章永不清（用户显式标过星）；scope='ai' 只清 AI 摘要与
-/// 翻译缓存（正文保留，重新打开可再生成）。返回 (删文章数, 清 AI 字段数)。
+/// 保留项：收藏文章永不清（用户显式标过星）；**未读文章永不清**——删除后
+/// 下一次全量同步会按服务器状态重新拉回（Miniflux 端仍是 unread），数据
+/// 打架等于白删；scope='ai' 只清 AI 摘要与翻译缓存（正文保留，重新打开
+/// 可再生成）。返回 (删文章数, 清 AI 字段数)。
 pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult<(usize, usize)> {
     let tx = conn.transaction()?;
     let cutoff = format!(
@@ -781,6 +807,7 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
             &format!(
                 "DELETE FROM articles
                  WHERE published_at < {cutoff}
+                   AND is_read = 1
                    AND is_starred = 0
                    AND id NOT IN (SELECT article_id FROM sync_queue WHERE article_id IS NOT NULL)"
             ),
@@ -1384,5 +1411,54 @@ mod dedup_tests {
         let (_, new5) = upsert_article_with_feed(&conn, feed1, &new_article("https://n.example/a", "g1"), true).unwrap();
         assert!(!new5);
         let _ = id1;
+    }
+    /// 搜索（LIKE 子串）：中文子串、多词 AND、通配符转义。
+    /// 修复背景：unicode61 FTS 把整段中文当一个 token，搜「科技」匹配不到
+    /// 「科技公司新闻」——改为子串匹配后语义对任意语言正确。
+    #[test]
+    fn search_finds_chinese_substring_and_multi_term_and() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://x.example/f", None, "f", None, f, "inherit", true, false).unwrap();
+
+        let art = |url: &str, guid: &str, title: &str, body: &str| {
+            let mut a = new_article(url, guid);
+            a.title = title.into();
+            a.body_text = body.into();
+            let _ = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+        };
+        art("https://n.example/1", "g1", "科技公司新闻", "今天发布了新产品");
+        art("https://n.example/2", "g2", "无关标题", "正文提到了科技公司");
+        art("https://n.example/3", "g3", "另一个", "完全没有相关内容");
+
+        // 中文子串：标题或正文含「科技」都命中（FTS 时代这条是失败的）
+        let r1 = search_articles(&conn, "科技", 50).unwrap();
+        assert_eq!(r1.len(), 2, "chinese substring must match both: {:?}", r1.iter().map(|a| &a.title).collect::<Vec<_>>());
+
+        // 多词 AND：两个词都命中才返回
+        let r2 = search_articles(&conn, "科技 产品", 50).unwrap();
+        assert_eq!(r2.len(), 1, "AND semantics: {:?}", r2.iter().map(|a| &a.title).collect::<Vec<_>>());
+        assert_eq!(r2[0].title, "科技公司新闻");
+
+        // 无命中
+        let r3 = search_articles(&conn, "不存在的词", 50).unwrap();
+        assert!(r3.is_empty());
+
+        // LIKE 通配符按字面转义：存 % 和 _ 的标题不被 % 通配误命中
+        art("https://n.example/4", "g4", "100%_安全", "特殊字符");
+        let r4 = search_articles(&conn, "100%", 50).unwrap();
+        assert_eq!(r4.len(), 1, "literal %% must match: {}", r4.len());
+        assert_eq!(r4[0].title, "100%_安全");
+        // 单下划线词不当作通配符命中任意单字符
+        let r5 = search_articles(&conn, "100X_安全", 50).unwrap();
+        assert!(r5.is_empty(), "underscore must be literal, not wildcard");
+
+        // 含 FTS 特殊字符的词安全
+        art("https://n.example/5", "g5", "node.js 指南", "C++ 与 Rust 对比");
+        let r6 = search_articles(&conn, "node.js", 50).unwrap();
+        assert_eq!(r6.len(), 1);
+        let r7 = search_articles(&conn, "C++", 50).unwrap();
+        assert_eq!(r7.len(), 1);
     }
 }

@@ -41,6 +41,15 @@ pub(crate) fn schedule_state_push(state: &AppState) {
     let db = state.db.clone();
     let http = state.http.clone();
     tauri::async_runtime::spawn(async move {
+        // Drop 守卫：循环任何出口（含 push_states_now 内部未来可能出现的
+        // panic 展开）都复位 FLYING——否则一次 panic 后推送永久静默
+        struct FlyingGuard;
+        impl Drop for FlyingGuard {
+            fn drop(&mut self) {
+                STATE_PUSH_FLYING.store(false, Ordering::SeqCst);
+            }
+        }
+        let _guard = FlyingGuard;
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(STATE_PUSH_DEBOUNCE_MS)).await;
             if !STATE_PUSH_PENDING.swap(false, Ordering::SeqCst) {
@@ -52,7 +61,6 @@ pub(crate) fn schedule_state_push(state: &AppState) {
                 break;
             }
         }
-        STATE_PUSH_FLYING.store(false, Ordering::SeqCst);
     });
 }
 
@@ -150,13 +158,15 @@ pub async fn list_feeds(state: State<'_, AppState>) -> AppResult<Vec<db::FeedRow
     db::list_feeds(&conn)
 }
 
-/// 添加订阅源：先直连抓一次验证 URL 是有效 feed，成功才入库（不依赖 Miniflux）
+/// 添加订阅源：先直连抓一次验证 URL 是有效 feed，成功才入库（不依赖 Miniflux）。
+/// `folder_id = None`（UI 未选分类，如全新安装无任何分类时）→ 自动落到
+/// 「未分类」文件夹（不存在则创建）——首次使用添加源不再报错。
 #[tauri::command]
 pub async fn add_feed(
     state: State<'_, AppState>,
     feed_url: String,
     title: Option<String>,
-    folder_id: i64,
+    folder_id: Option<i64>,
     layout: String,
     auto_summary: bool,
     auto_translate: bool,
@@ -179,6 +189,21 @@ pub async fn add_feed(
     let final_title = title.filter(|t| !t.trim().is_empty())
         .or(parsed.title.clone())
         .unwrap_or_else(|| feed_url.clone());
+    // 未选分类 → 「未分类」文件夹（无则建）
+    let folder_id = match folder_id {
+        Some(fid) => fid,
+        None => {
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM folders WHERE name = '未分类' ORDER BY id LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            existing.unwrap_or_else(|| db::create_folder(&conn, "未分类", "article").unwrap_or(1))
+        }
+    };
     let feed_id = db::insert_feed(
         &conn,
         &feed_url,
@@ -246,52 +271,49 @@ pub async fn update_feed(
 ) -> AppResult<()> {
     let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
 
-    // 目标分类必须存在（防 UI 传错 id 把源挂飞）
-    if let Some(fid) = folder_id {
+    // 三段式锁纪律：锁内校验+读映射+落库，锁外执行 Miniflux 网络 IO——
+    // 远端 30s 超时期间其他 DB 命令不被冻结（与 sync.rs/refresh_feed_staged 一致）
+    let (mf_feed_id, mf_new_cat, creds) = {
         let conn = state.db.lock().await;
-        let exists: bool = conn
-            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [fid], |r| r.get::<_, i64>(0))
-            .map(|n| n > 0)?;
-        if !exists {
-            return Err(AppError::new("validate", "目标分类不存在"));
+        // 目标分类必须存在（防 UI 传错 id 把源挂飞）
+        if let Some(fid) = folder_id {
+            let exists: bool = conn
+                .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [fid], |r| r.get::<_, i64>(0))
+                .map(|n| n > 0)?;
+            if !exists {
+                return Err(AppError::new("validate", "目标分类不存在"));
+            }
         }
-    }
-
-    // 收集需要推送到 Miniflux 的动作（锁内读映射，锁外执行网络 IO）
-    let conn = state.db.lock().await;
-    let (mf_feed_id, mf_new_cat) = {
         let configured = sync_configured(&conn);
         let mf_feed_id: Option<i64> = conn
             .query_row("SELECT miniflux_id FROM feeds WHERE id = ?1", [id], |r| r.get(0))
             .ok()
             .flatten();
-        if !configured || mf_feed_id.is_none() {
-            (None, None)
+        let creds = if configured && mf_feed_id.is_some() {
+            crate::sync::read_credentials(&conn)
         } else {
-            let mf_new_cat: Option<i64> = match folder_id {
-                Some(fid) => conn
-                    .query_row("SELECT miniflux_id FROM folders WHERE id = ?1", [fid], |r| r.get(0))
-                    .ok()
-                    .flatten(),
-                None => None,
-            };
-            (mf_feed_id, mf_new_cat)
-        }
+            None
+        };
+        let mf_new_cat: Option<i64> = match (configured, folder_id) {
+            (true, Some(fid)) => conn
+                .query_row("SELECT miniflux_id FROM folders WHERE id = ?1", [fid], |r| r.get(0))
+                .ok()
+                .flatten(),
+            _ => None,
+        };
+        db::update_feed(&conn, id, title.as_deref(), folder_id, layout.as_deref(), auto_summary, auto_translate)?;
+        (mf_feed_id, mf_new_cat, creds)
     };
 
-    db::update_feed(&conn, id, title.as_deref(), folder_id, layout.as_deref(), auto_summary, auto_translate)?;
-
-    // 连接 Miniflux 且该源有远端映射 → 改名 / 移动分类
-    if let (Some(mf_id), true) = (mf_feed_id, sync_configured(&conn)) {
-        if let Some((endpoint, token)) = crate::sync::read_credentials(&conn) {
-            let client = MinifluxClient::new(&endpoint, &token, state.http.clone());
-            if let Some(t) = title.as_deref() {
-                let cat = mf_new_cat.unwrap_or(1);
-                let _ = client.update_feed_title(mf_id, t, cat).await;
-            }
-            if let Some(cat) = mf_new_cat {
-                let _ = client.move_feed_category(mf_id, cat).await;
-            }
+    // 锁外：远端改名 / 移动分类（best-effort，失败不阻塞本地结果）
+    if let (Some(mf_id), Some((endpoint, token))) = (mf_feed_id, creds) {
+        let client = MinifluxClient::new(&endpoint, &token, state.http.clone());
+        if let Some(t) = title.as_deref() {
+            let cat = mf_new_cat.unwrap_or(1);
+            let _ = client.update_feed_title(mf_id, t, cat).await;
+        }
+        if let Some(cat) = mf_new_cat {
+            let _ = client.move_feed_category(mf_id, cat).await;
         }
     }
     Ok(())
@@ -1015,8 +1037,13 @@ pub async fn ai_translate(
     .await?;
 
     if outcome.completed && !outcome.text.trim().is_empty() {
+        // 翻译产物是 HTML 且直接 dangerouslySetInnerHTML 渲染——入库前
+        // 过消毒器（模型输出不可信：可能带 <script> 或被提示注入）。
+        // 流式 delta 已发给前端（流中预览），落库的是消毒版；前端流完
+        // 读回 content 时拿到的即消毒产物。
+        let safe = crate::sanitize::sanitize(&outcome.text, None);
         let conn = state.db.lock().await;
-        let _ = db::set_article_ai_fields(&conn, article_id, None, Some(&outcome.text));
+        let _ = db::set_article_ai_fields(&conn, article_id, None, Some(&safe));
     }
     let _ = on_channel.send(AiEvent::Done);
     Ok(outcome.text)

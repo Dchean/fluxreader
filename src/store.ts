@@ -145,6 +145,8 @@ export interface AppState {
   /* ---------- Toast 与同步 ---------- */
   toasts: ToastMessage[];
   syncStatus: 'synced' | 'syncing' | 'error';
+  /** 后台自动同步进行中（scheduler sync-running/sync-idle 事件驱动；与手动 syncStatus 独立） */
+  backgroundSyncing: boolean;
   /** 后端真实的 Miniflux 连接态（bootstrap/sync 后刷新），未连接时侧栏不显示"已同步" */
   minifluxConnected: boolean;
 
@@ -309,6 +311,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   toasts: [],
 
   syncStatus: 'synced',
+  backgroundSyncing: false,
   minifluxConnected: false,
 
   /* mock 数据先行渲染；Tauri 环境启动时 bootstrapFromBackend 会整体替换 */
@@ -743,7 +746,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (remember) {
       set((s) => ({ settings: { ...s.settings, closeToTray: action === 'tray', closePromptShown: true } }));
     }
-    void api.resolveClose(action, remember);
+    /* invoke 失败（DB 锁超时/IPC 错）时本地重试一次，仍失败 toast 提示
+       （窗口可能没关——用户再点 ✕ 会走完整流程） */
+    api.resolveClose(action, remember)
+      .catch(() =>
+        api.resolveClose(action, remember).catch(() =>
+          get().showToast('关闭操作未生效，请再点一次关闭按钮', 'error'),
+        ),
+      );
   },
   openLightbox: (url) => set({ lightboxUrl: url }),
   closeLightbox: () => set({ lightboxUrl: null }),
@@ -761,7 +771,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   showToast: (text, action) => {
     const id = ++toastId;
-    set((s) => ({ toasts: [...s.toasts, { id, text, action }] }));
+    set((s) => ({
+      /* 上限 4 条：错误循环（如后台刷新连续失败）不再无限堆叠；保留最新 */
+      toasts: [...s.toasts, { id, text, action }].slice(-4),
+    }));
     /* 两段式生命周期：2200ms 后先标 leaving（CSS 退场过渡），200ms 过渡完成再卸载；
        带操作按钮时延长停留（留出点重试的时间） */
     const stay = action ? 4200 : 2200;

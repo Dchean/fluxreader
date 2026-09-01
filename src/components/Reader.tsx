@@ -16,6 +16,9 @@ export function Reader() {
   const summaryGenerating = useAppStore((s) => s.summaryGenerating);
   const translating = useAppStore((s) => s.translating);
   const settings = useAppStore((s) => s.settings);
+  const openLightbox = useAppStore((s) => s.openLightbox);
+  const playPodcastEpisode = useAppStore((s) => s.playPodcastEpisode);
+  const player = useAppStore((s) => s.player);
 
   const toggleCurrentReadStatus = useAppStore((s) => s.toggleCurrentReadStatus);
   const toggleCurrentStar = useAppStore((s) => s.toggleCurrentStar);
@@ -89,6 +92,21 @@ export function Reader() {
     return () => el.removeEventListener('scroll', onScroll);
   }, [art?.id, settings.markReadOnScrollBottom, art?.content, isRawRenderMode, isShowingTranslatedProse]);
 
+  /* 正文点击代理：<a> 走外链（external.ts）；<img> 走灯箱放大；
+     视频/音频原生控件点击不拦截 */
+  const handleProseClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'IMG') {
+      const src = (target as HTMLImageElement).currentSrc || (target as HTMLImageElement).src;
+      if (src && !src.startsWith('data:')) {
+        e.preventDefault();
+        openLightbox(src);
+      }
+      return;
+    }
+    handleArticleLinkClick(e);
+  };
+
   return (
     <main className="reader-col" id="readerContainerCol">
       {!art && (
@@ -160,6 +178,19 @@ export function Reader() {
                   <Icons.externalLink />
                   <span>源网页</span>
                 </button>
+                {art.enclosureUrl && (
+                  <button
+                    className={`toggle-action-btn ${player.audioUrl === art.enclosureUrl ? 'active-accent' : ''}`}
+                    onClick={() => {
+                      /* 播客/音频附件：阅读视图内直接进 PlayerBar（与播客卡片同一播放器） */
+                      playPodcastEpisode(art.title, feedName, art.imageUrl ?? '', art.enclosureUrl ?? '', art.id);
+                    }}
+                    title={art.enclosureUrl}
+                  >
+                    <Icons.play />
+                    <span>播放</span>
+                  </button>
+                )}
               </div>
               <div className="reader-actions-right">
                 <button
@@ -218,7 +249,7 @@ export function Reader() {
                 fontSize: settings.fontSize,
                 lineHeight: settings.lineHeight / 100,
               }}
-              onClick={handleArticleLinkClick}
+              onClick={handleProseClick}
               dangerouslySetInnerHTML={{
                 __html: isRawRenderMode
                   ? art.rawContent

@@ -16,7 +16,9 @@ async fn miniflux_sync_end_to_end() {
 
     let tmp = std::env::temp_dir().join("fluxreader_sync_e2e.db");
     let _ = std::fs::remove_file(&tmp);
-    let mut conn = db::open(&tmp).expect("open db");
+    let conn = db::open(&tmp).expect("open db");
+    let db = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
+    let conn = db.lock().await;
 
     // ---------- 场景准备：本地状态 ----------
     // 本地分类 + 一个直连添加的 feed（URL 与远端 feed 10 碰撞）
@@ -61,7 +63,9 @@ async fn miniflux_sync_end_to_end() {
     db::set_setting(&conn, "miniflux_token", "test-token").unwrap();
 
     let http = app_lib::ingestion::build_client(10);
-    let report = sync::sync_now(&mut conn, &http).await.expect("sync should succeed");
+    drop(conn);
+    let report = sync::sync_now(&db, &http).await.expect("sync should succeed");
+    let conn = db.lock().await;
     println!("sync report: pushed_states={} pushed_feeds={} pulled_feeds={} pulled_entries={} merged={} fallback={}",
         report.pushed_states, report.pushed_feeds, report.pulled_feeds, report.pulled_entries, report.merged_states, report.fallback_entries);
 
@@ -108,7 +112,9 @@ async fn miniflux_sync_end_to_end() {
     db::set_starred(&conn, local_article_id, false).unwrap();
     db::enqueue_sync(&conn, Some(local_article_id), None, "unstar", None).unwrap();
 
-    let report2 = sync::sync_now(&mut conn, &http).await.expect("second sync");
+    drop(conn);
+    let report2 = sync::sync_now(&db, &http).await.expect("second sync");
+    let conn = db.lock().await;
     println!("push report: pushed_states={}", report2.pushed_states);
 
     // 远端收到 unread 状态更新（entry id 即绑定的 miniflux_id）
@@ -129,8 +135,10 @@ async fn miniflux_sync_end_to_end() {
     // 把 local_feed 标记为直连失败 + 绑定远端 feed，远端加一条本地没有的条目
     db::set_feed_fetch_state(&conn, local_feed_id, true, Some("connection refused"), None, None).unwrap();
     server.add_entry(10, "http://127.0.0.1:8765/new-fallback-entry", "Fallback Entry From Miniflux", "unread", false);
+    drop(conn);
 
-    let report3 = sync::sync_now(&mut conn, &http).await.expect("third sync");
+    let report3 = sync::sync_now(&db, &http).await.expect("third sync");
+    let conn = db.lock().await;
     println!("fallback report: fallback_entries={}", report3.fallback_entries);
 
     let fallback: Option<(String, String)> = conn
@@ -155,6 +163,7 @@ async fn miniflux_sync_end_to_end() {
     // 注意：② 推过 unread（mock 真实回写），own entry 现在服务端是 unread；
     // 未读合并只认绑定 entry 是合法语义，所以先把 own 恢复 read（手机读过）
     conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [local_article_id]).unwrap();
+    drop(conn);
     {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
@@ -165,7 +174,8 @@ async fn miniflux_sync_end_to_end() {
     let cross_url = "http://127.0.0.1:8765/post/1"; // 与本地文章同 URL
     server.add_entry(11, cross_url, "Cross-feed duplicate of read article", "unread", false);
 
-    let _report4 = sync::sync_now(&mut conn, &http).await.expect("fourth sync (cross-feed guard)");
+    let _report4 = sync::sync_now(&db, &http).await.expect("fourth sync (cross-feed guard)");
+    let conn = db.lock().await;
 
     let (still_read, binding): (bool, i64) = conn
         .query_row(
@@ -185,7 +195,9 @@ async fn miniflux_sync_end_to_end() {
             e.status = "unread".into();
         }
     }
-    let _report5 = sync::sync_now(&mut conn, &http).await.expect("fifth sync (same-feed still merges)");
+    drop(conn);
+    let _report5 = sync::sync_now(&db, &http).await.expect("fifth sync (same-feed still merges)");
+    let conn = db.lock().await;
     let now_read: bool = conn
         .query_row("SELECT is_read FROM articles WHERE id = ?1", [local_article_id], |r| r.get::<_, i64>(0).map(|v| v != 0))
         .unwrap();

@@ -64,6 +64,12 @@ async fn build_client(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> Op
    ① Push：本地状态变更 → Miniflux（只推不拉）
    ============================================================ */
 
+/// 全局推送互斥：同一时刻只允许一个推送在飞（防抖即时推送 vs 后台自动
+/// 同步 vs 手动同步并发）。exec_push 成功后按 queue_id prune——并发时 A
+/// 可能 prune 掉 B 正在推的项；更糟的是收藏 toggle 非幂等，交错执行会把
+/// 星标状态翻转两次。串行化后两场景只会先后重推同一状态（幂等），无害。
+static PUSH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 待推送动作的锁内快照：HTTP 执行所需的全部信息。
 struct PushPlan {
     /// (队列 id, article_id, entry ids)——read 广播副本展开后
@@ -162,6 +168,8 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
     let Some(client) = build_client(db, http).await else {
         return;
     };
+    // 串行化：与 states_phase/feeds_phase 的推送段互斥（见 PUSH_LOCK 注释）
+    let _guard = PUSH_LOCK.lock().await;
     let plan = {
         let conn = db.lock().await;
         match plan_push(&conn) {
@@ -195,58 +203,75 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
    ============================================================ */
 
 /// 未连接期间本地新增的订阅推到远端
-async fn push_feeds(conn: &mut Connection, client: &MinifluxClient, report: &mut SyncReport) {
-    // add_feed 队列动作
-    let items = db::take_sync_queue(conn).unwrap_or_default();
-    let mut done: Vec<i64> = Vec::new();
-    for item in &items {
-        if item.action != "add_feed" {
-            continue;
-        }
-        let Some(url) = item.feed_url.as_deref() else {
-            done.push(item.id);
-            continue;
-        };
-        // 分类：payload 里带本地 folder_id → 查 miniflux_id；没有就推默认分类
-        let folder_mf_id: Option<i64> = item
-            .payload
-            .as_deref()
-            .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
-            .and_then(|v| v.get("folder_id").and_then(|f| f.as_i64()))
-            .and_then(|fid| {
-                conn.query_row(
-                    "SELECT miniflux_id FROM folders WHERE id = ?1",
-                    [fid],
-                    |r| r.get(0),
-                )
-                .ok()
-            });
-        let cat_id = match folder_mf_id {
-            Some(c) => c,
-            None => match client.categories().await {
-                Ok(cats) => cats.first().map(|c| c.id).unwrap_or(1),
-                Err(_) => 1,
-            },
-        };
-        match client.create_feed(url, cat_id).await {
-            Ok(mf_feed_id) => {
-                if let Some(local_id) = db::feed_id_by_url(conn, url).ok().flatten() {
-                    let _ = db::set_feed_miniflux_id(conn, local_id, mf_feed_id);
-                }
-                report.pushed_feeds += 1;
-                done.push(item.id);
+/// 未连接期间本地新增的订阅推到远端（三段式：锁内读队列 → 锁外 HTTP → 锁内落库）
+async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report: &mut SyncReport) {
+    // add_feed 队列动作：锁内读出全部待处理项（feed_url + 目标分类）
+    struct PendingFeed { queue_id: i64, url: String, folder_mf: Option<i64> }
+    let items: Vec<PendingFeed> = {
+        let conn = db.lock().await;
+        let mut out = Vec::new();
+        for item in db::take_sync_queue(&conn).unwrap_or_default() {
+            if item.action != "add_feed" {
+                continue;
             }
-            Err(e) => report.errors.push(format!("推送订阅 {url} 失败: {e}")),
+            let Some(url) = item.feed_url else { continue };
+            let folder_mf = item
+                .payload
+                .as_deref()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                .and_then(|v| v.get("folder_id").and_then(|f| f.as_i64()))
+                .and_then(|fid| {
+                    conn.query_row(
+                        "SELECT miniflux_id FROM folders WHERE id = ?1",
+                        [fid],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                });
+            out.push(PendingFeed { queue_id: item.id, url, folder_mf });
+        }
+        out
+    };
+    if items.is_empty() {
+        return;
+    }
+    // 锁外：逐个创建远端 feed（分类缺失时补拉一次 categories）
+    let mut done: Vec<i64> = Vec::new();
+    let mut default_cat: Option<i64> = None;
+    for it in &items {
+        let cat_id = match it.folder_mf {
+            Some(c) => c,
+            None => {
+                if default_cat.is_none() {
+                    default_cat = client.categories().await.ok().and_then(|c| c.first().map(|c| c.id));
+                }
+                default_cat.unwrap_or(1)
+            }
+        };
+        match client.create_feed(&it.url, cat_id).await {
+            Ok(mf_feed_id) => {
+                report.pushed_feeds += 1;
+                done.push(it.queue_id);
+                // 锁内：绑定本地 feed（URL 匹配）
+                let conn = db.lock().await;
+                if let Some(local_id) = db::feed_id_by_url(&conn, &it.url).ok().flatten() {
+                    let _ = db::set_feed_miniflux_id(&conn, local_id, mf_feed_id);
+                }
+                drop(conn);
+            }
+            Err(e) => report.errors.push(format!("推送订阅 {} 失败: {e}", it.url)),
         }
     }
-    let _ = db::prune_sync(conn, &done);
+    let conn = db.lock().await;
+    let _ = db::prune_sync(&conn, &done);
+    drop(conn);
 
     // remove_feed 队列动作：远端也有此源才删（本地删除 ≠ 强删远端，避免误删服务端数据；
     // 设计约定「同步服务端不受影响」——remove_feed 仅在用户显式操作时入队，暂不自动推删）
 }
 
-/// 拉远端分类+订阅，URL 碰撞合并（§4.4）
-async fn pull_feeds(conn: &mut Connection, client: &MinifluxClient, report: &mut SyncReport) {
+/// 拉远端分类+订阅，URL 碰撞合并（三段式：锁外拉取 → 锁内合并）
+async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report: &mut SyncReport) {
     let (remote_cats, remote_feeds) = match tokio::join!(client.categories(), client.feeds()) {
         (Ok(c), Ok(f)) => (c, f),
         (Err(e), _) | (_, Err(e)) => {
@@ -255,79 +280,85 @@ async fn pull_feeds(conn: &mut Connection, client: &MinifluxClient, report: &mut
         }
     };
 
-    // 分类：按标题匹配本地 folder；不存在则创建本地 folder 并绑定
-    for rc in &remote_cats {
-        let existing: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM folders WHERE name = ?1 OR miniflux_id = ?2",
-                rusqlite::params![rc.title, rc.id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
-        match existing {
-            Some(fid) => {
-                let _ = db::set_folder_miniflux_id(conn, fid, rc.id);
-            }
-            None => {
-                let fid = db::create_folder(conn, &rc.title, "article").unwrap_or(-1);
-                if fid > 0 {
-                    let _ = db::set_folder_miniflux_id(conn, fid, rc.id);
+    // 锁内：分类按标题/miniflux_id 匹配本地 folder，不存在则创建并绑定
+    {
+        let conn = db.lock().await;
+        for rc in &remote_cats {
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM folders WHERE name = ?1 OR miniflux_id = ?2",
+                    rusqlite::params![rc.title, rc.id],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            match existing {
+                Some(fid) => {
+                    let _ = db::set_folder_miniflux_id(&conn, fid, rc.id);
+                }
+                None => {
+                    let fid = db::create_folder(&conn, &rc.title, "article").unwrap_or(-1);
+                    if fid > 0 {
+                        let _ = db::set_folder_miniflux_id(&conn, fid, rc.id);
+                    }
                 }
             }
         }
     }
 
-    // 订阅：URL 碰撞合并（§4.4）
-    for rf in &remote_feeds {
-        let local_feed = db::feed_id_by_url(conn, &rf.feed_url).ok().flatten();
-        match local_feed {
-            Some(lid) => {
-                // 已存在（本地直连添加过）→ 绑定 miniflux_id，本地分类/布局保留
-                let _ = db::set_feed_miniflux_id(conn, lid, rf.id);
-                // 远端标题仅在本地标题等于 URL（从未抓取成功过）时回填
-                let _ = conn.execute(
-                    "UPDATE feeds SET
-                        title = CASE WHEN title = feed_url THEN ?1 ELSE title END,
-                        favicon_url = COALESCE(favicon_url, ?2),
-                        site_url = COALESCE(site_url, ?3)
-                     WHERE id = ?4",
-                    rusqlite::params![rf.title, rf.icon_url, rf.site_url, lid],
-                );
-                report.merged_states += 1;
-            }
-            None => {
-                // 本地没有 → 建本地 feed（挂到远端分类对应的本地 folder）
-                let folder_id: i64 = rf
-                    .category
-                    .as_ref()
-                    .and_then(|c| {
-                        conn.query_row(
-                            "SELECT id FROM folders WHERE miniflux_id = ?1",
-                            [c.id],
-                            |r| r.get(0),
-                        )
-                        .ok()
-                    })
-                    .unwrap_or_else(|| {
-                        conn.query_row("SELECT id FROM folders LIMIT 1", [], |r| r.get(0))
-                            .unwrap_or(1)
-                    });
-                let inserted = db::insert_feed_origin(
-                    conn,
-                    &rf.feed_url,
-                    rf.site_url.as_deref(),
-                    &rf.title,
-                    rf.icon_url.as_deref(),
-                    folder_id,
-                    "inherit",
-                    true,
-                    false,
-                    "miniflux",
-                );
-                if let Ok(fid) = inserted {
-                    let _ = db::set_feed_miniflux_id(conn, fid, rf.id);
-                    report.pulled_feeds += 1;
+    // 锁内：订阅按 URL 碰撞合并
+    {
+        let conn = db.lock().await;
+        for rf in &remote_feeds {
+            let local_feed = db::feed_id_by_url(&conn, &rf.feed_url).ok().flatten();
+            match local_feed {
+                Some(lid) => {
+                    // 已存在（本地直连添加过）→ 绑定 miniflux_id，本地分类/布局保留
+                    let _ = db::set_feed_miniflux_id(&conn, lid, rf.id);
+                    // 远端标题仅在本地标题等于 URL（从未抓取成功过）时回填
+                    let _ = conn.execute(
+                        "UPDATE feeds SET
+                            title = CASE WHEN title = feed_url THEN ?1 ELSE title END,
+                            favicon_url = COALESCE(favicon_url, ?2),
+                            site_url = COALESCE(site_url, ?3)
+                         WHERE id = ?4",
+                        rusqlite::params![rf.title, rf.icon_url, rf.site_url, lid],
+                    );
+                    report.merged_states += 1;
+                }
+                None => {
+                    // 本地没有 → 建本地 feed（挂到远端分类对应的本地 folder）
+                    let folder_id: i64 = rf
+                        .category
+                        .as_ref()
+                        .and_then(|c| {
+                            conn.query_row(
+                                "SELECT id FROM folders WHERE miniflux_id = ?1",
+                                [c.id],
+                                |r| r.get(0),
+                            )
+                            .ok()
+                        })
+                        .unwrap_or_else(|| {
+                            conn.query_row("SELECT id FROM folders LIMIT 1", [], |r| r.get(0))
+                                .unwrap_or(1)
+                        });
+                    let inserted = db::insert_feed_origin(
+                        &conn,
+                        &rf.feed_url,
+                        rf.site_url.as_deref(),
+                        &rf.title,
+                        rf.icon_url.as_deref(),
+                        folder_id,
+                        "inherit",
+                        true,
+                        false,
+                        "miniflux",
+                    );
+                    if let Ok(fid) = inserted {
+                        let _ = db::set_feed_miniflux_id(&conn, fid, rf.id);
+                        report.pulled_feeds += 1;
+                    }
                 }
             }
         }
@@ -361,8 +392,14 @@ fn merge_remote_status(conn: &Connection, aid: i64, e: &Entry, report: &mut Sync
 /// 全量条目已经在手上（绑定回填本来就要拉），对已匹配条目直接应用远端
 /// 状态，changed_at 早于游标的旧变更从此收敛（未读数漂移根因）。
 /// `full=false`（后台自动同步）：只拉 changed_after 增量，便宜。
-async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &mut SyncReport, full: bool) {
-    // ②' 绑定回填 + 状态对账（full 路径）
+/// 拉远端条目（新条目 + 状态变化），按 miniflux_id/URL 匹配合并。
+/// 分页三段式：每页「锁外拉取 → 锁内合并」，锁从不跨分页 HTTP await。
+/// `full=true`（手动同步/首连）：先做绑定回填 + 全量状态对账——
+/// 全量条目已经在手上（绑定回填本来就要拉），对已匹配条目直接应用远端
+/// 状态，changed_at 早于游标的旧变更从此收敛（未读数漂移根因）。
+/// `full=false`（后台自动同步）：只拉 changed_after 增量，便宜。
+async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report: &mut SyncReport, full: bool) {
+    // ②' 绑定回填 + 状态对账（full 路径）：锁外拉全量，锁内逐条合并
     if full {
         let all_entries = match client.entries(None, 0, false).await {
             Ok(v) => v,
@@ -371,48 +408,58 @@ async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &m
                 Vec::new()
             }
         };
-        for e in &all_entries {
-            let Some(u) = e.url.as_deref() else { continue };
-            let Some(aid) = db::article_id_by_url(conn, u).ok().flatten() else {
-                continue;
-            };
-            // 已绑定的 entry id 直配 = 自己的条目（feed 可能尚未绑定——
-            // states 阶段先于 feeds 阶段的窗口），无需再查 feed 归属
-            let bound_entry: Option<i64> = conn
-                .query_row("SELECT miniflux_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
-                .ok()
-                .flatten();
-            let is_own = bound_entry == Some(e.id)
-                || (bound_entry.is_none() && db::article_matches_remote_feed(conn, aid, e.feed_id).unwrap_or(false));
-            if !is_own {
-                // 跨源副本：记账（已读广播对象）。
-                // read-anywhere-wins：远端副本的已读也是真读意图（手机在
-                // 另一源上读过这篇）→ 接受已读，但不抢绑定、不接受未读
-                let _ = db::add_article_dup_entry(conn, aid, e.id);
-                if e.status == "read" && !db::article_has_pending_sync(conn, aid).unwrap_or(false) {
-                    let _ = conn.execute(
-                        "UPDATE articles SET is_read = 1 WHERE id = ?1",
-                        rusqlite::params![aid],
-                    );
+        {
+            let conn = db.lock().await;
+            for e in &all_entries {
+                let Some(u) = e.url.as_deref() else { continue };
+                let Some(aid) = db::article_id_by_url(&conn, u).ok().flatten() else {
+                    continue;
+                };
+                // 已绑定的 entry id 直配 = 自己的条目（feed 可能尚未绑定——
+                // states 阶段先于 feeds 阶段的窗口），无需再查 feed 归属
+                let bound_entry: Option<i64> = conn
+                    .query_row("SELECT miniflux_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
+                    .ok()
+                    .flatten();
+                let is_own = bound_entry == Some(e.id)
+                    || (bound_entry.is_none() && db::article_matches_remote_feed(&conn, aid, e.feed_id).unwrap_or(false));
+                if !is_own {
+                    // 跨源副本：记账（已读广播对象）。read-anywhere-wins：远端副本的
+                    // 已读也是真读意图 → 接受已读，但不抢绑定、不接受未读
+                    let _ = db::add_article_dup_entry(&conn, aid, e.id);
+                    if e.status == "read" && !db::article_has_pending_sync(&conn, aid).unwrap_or(false) {
+                        let _ = conn.execute(
+                            "UPDATE articles SET is_read = 1 WHERE id = ?1",
+                            rusqlite::params![aid],
+                        );
+                    }
+                    continue;
                 }
-                continue;
+                merge_remote_status(&conn, aid, e, report);
             }
-            merge_remote_status(conn, aid, e, report);
         }
     }
 
     // ① 新条目（只补直连失败的源 + 远端新订阅的源）
-    let since_s = db::last_sync_ts(conn).unwrap_or(0);
-    let failed_feeds = db::feeds_fetch_failed(conn).unwrap_or_default();
+    let (since_s, failed_feeds) = {
+        let conn = db.lock().await;
+        (
+            db::last_sync_ts(&conn).unwrap_or(0),
+            db::feeds_fetch_failed(&conn).unwrap_or_default(),
+        )
+    };
     for feed in &failed_feeds {
-        let Some(mf_id) = feed_miniflux_id(conn, feed.id) else {
-            continue;
+        let mf_id: Option<i64> = {
+            let conn = db.lock().await;
+            feed_miniflux_id(&conn, feed.id)
         };
+        let Some(mf_id) = mf_id else { continue };
         match client.entries(Some(mf_id), since_s, false).await {
             Ok(entries) => {
                 let before = report.pulled_entries;
+                let conn = db.lock().await;
                 for e in &entries {
-                    upsert_miniflux_entry(conn, feed.id, e, report);
+                    upsert_miniflux_entry(&conn, feed.id, e, report);
                 }
                 // 只统计真实入库/合并的条目（upsert_miniflux_entry 内累计 pulled_entries）
                 report.fallback_entries = report.pulled_entries - before;
@@ -429,31 +476,32 @@ async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &m
             return;
         }
     };
-    for e in &entries {
-        // 匹配：miniflux_id 直配 → URL 兜底（同源校验）
-        let local = db::article_by_miniflux_id(conn, e.id)
-            .ok()
-            .flatten()
-            .or_else(|| {
-                e.url.as_deref().and_then(|u| db::article_id_by_url(conn, u).ok().flatten())
-                    .filter(|aid| db::article_matches_remote_feed(conn, *aid, e.feed_id).unwrap_or(false))
-            });
-        let Some(aid) = local else {
-            // 跨源同 URL entry（手机端另一源的副本）：不写状态，但记账
-            // 副本 entry——桌面端的已读变更要广播到它（Read You 那边的副本
-            // 才能跟着变已读，不会"手机读了、桌面又来一篇"）
-            if let Some(u) = e.url.as_deref() {
-                if let Ok(Some(aid)) = db::article_id_by_url(conn, u) {
-                    let _ = db::add_article_dup_entry(conn, aid, e.id);
+    {
+        let conn = db.lock().await;
+        for e in &entries {
+            // 匹配：miniflux_id 直配 → URL 兜底（同源校验）
+            let local = db::article_by_miniflux_id(&conn, e.id)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    e.url.as_deref().and_then(|u| db::article_id_by_url(&conn, u).ok().flatten())
+                        .filter(|aid| db::article_matches_remote_feed(&conn, *aid, e.feed_id).unwrap_or(false))
+                });
+            let Some(aid) = local else {
+                // 跨源同 URL entry（手机端另一源的副本）：不写状态，但记账
+                // 副本 entry——桌面端的已读变更要广播到它
+                if let Some(u) = e.url.as_deref() {
+                    if let Ok(Some(aid)) = db::article_id_by_url(&conn, u) {
+                        let _ = db::add_article_dup_entry(&conn, aid, e.id);
+                    }
                 }
-            }
-            continue;
-        };
-        merge_remote_status(conn, aid, e, report);
+                continue;
+            };
+            merge_remote_status(&conn, aid, e, report);
+        }
+        let now = Utc::now().timestamp();
+        let _ = db::set_last_sync_ts(&conn, now);
     }
-
-    let now = Utc::now().timestamp();
-    let _ = db::set_last_sync_ts(conn, now);
 }
 
 fn feed_miniflux_id(conn: &Connection, feed_id: i64) -> Option<i64> {
@@ -468,7 +516,8 @@ fn feed_miniflux_id(conn: &Connection, feed_id: i64) -> Option<i64> {
 
 /// Miniflux 兜底条目入库（source='miniflux'，不覆盖直连正文）。
 /// URL 兜底合并需同源校验：跨源同 URL entry 不写状态、不抢绑定。
-fn upsert_miniflux_entry(conn: &mut Connection, feed_id: i64, e: &Entry, report: &mut SyncReport) {
+/// enclosure（播客音频/视频）与图片一并落库——播放器与卡片封面依赖。
+fn upsert_miniflux_entry(conn: &Connection, feed_id: i64, e: &Entry, report: &mut SyncReport) {
     let existing = db::article_by_miniflux_id(conn, e.id)
         .ok()
         .flatten()
@@ -481,6 +530,13 @@ fn upsert_miniflux_entry(conn: &mut Connection, feed_id: i64, e: &Entry, report:
         .map(|d| d.with_timezone(&Utc).to_rfc3339())
         .unwrap_or_else(|_| Utc::now().to_rfc3339());
 
+    // enclosure：Miniflux entry 的 enclosures 数组，取第一个音/视频
+    let enclosure = e.enclosures.first();
+    let (enc_url, enc_mime, duration) = match enclosure {
+        Some(enc) => (Some(enc.url.clone()), Some(enc.mime_type.clone()), enc.duration),
+        None => (None, None, None),
+    };
+
     if let Some(aid) = existing {
         // 状态以 Miniflux 为准；正文仅在本地为空时补
         let _ = db::set_article_miniflux_id(conn, aid, e.id);
@@ -488,9 +544,21 @@ fn upsert_miniflux_entry(conn: &mut Connection, feed_id: i64, e: &Entry, report:
             "UPDATE articles SET
                 is_read = ?1, is_starred = ?2,
                 content_html = CASE WHEN COALESCE(content_html, '') = '' THEN ?3 ELSE content_html END,
-                body_text = CASE WHEN body_text = '' THEN ?4 ELSE body_text END
-             WHERE id = ?5",
-            rusqlite::params![(e.status == "read") as i64, e.starred as i64, e.content, strip_html_text(&e.content), aid],
+                body_text = CASE WHEN body_text = '' THEN ?4 ELSE body_text END,
+                enclosure_url = COALESCE(enclosure_url, ?5),
+                enclosure_mime = COALESCE(enclosure_mime, ?6),
+                duration_sec = COALESCE(duration_sec, ?7)
+             WHERE id = ?8",
+            rusqlite::params![
+                (e.status == "read") as i64,
+                e.starred as i64,
+                e.content,
+                strip_html_text(&e.content),
+                enc_url,
+                enc_mime,
+                duration,
+                aid
+            ],
         );
     } else {
         let a = NewArticle {
@@ -501,10 +569,13 @@ fn upsert_miniflux_entry(conn: &mut Connection, feed_id: i64, e: &Entry, report:
             summary: None,
             content_html: Some(crate::sanitize::sanitize(&e.content, e.url.as_deref())),
             body_text: strip_html_text(&e.content),
-            image_url: None,
-            enclosure_url: None,
-            enclosure_mime: None,
-            duration_sec: None,
+            image_url: enclosure
+                .map(|enc| enc.url.clone())
+                .filter(|u| u.starts_with("http"))
+                .or_else(|| crate::sanitize::first_image(&e.content)),
+            enclosure_url: enc_url,
+            enclosure_mime: enc_mime,
+            duration_sec: duration,
             published_at: Some(published),
             source: "miniflux".into(),
         };
@@ -527,37 +598,16 @@ fn strip_html_text(html: &str) -> String {
    总入口
    ============================================================ */
 
-/// 完整同步（全量路径）：push → pull feeds → pull entries（含对账）。
-/// 返回报告（前端 Toast/同步中心展示）。
-pub async fn sync_now(conn: &mut Connection, http: &reqwest::Client) -> AppResult<SyncReport> {
-    let Some((endpoint, token)) = read_credentials(conn) else {
-        return Err(AppError::new("notConnected", "未配置 Miniflux Endpoint/Token"));
-    };
-    let client = client_from_creds(&endpoint, &token, http);
-    client.me().await?;
-    let mut report = SyncReport::default();
-    push_feeds(conn, &client, &mut report).await;
-    // 旧 push_queue 语义由 plan_push/exec_push 承接
-    {
-        let plan = plan_push(conn)?;
-        let done = exec_push(&client, &plan, &mut report).await;
-        let _ = db::prune_sync(conn, &done);
-    }
-    pull_feeds(conn, &client, &mut report).await;
-    pull_entries(conn, &client, &mut report, true).await;
-    Ok(report)
-}
-
 /// feeds 阶段（订阅层）：push_feeds + pull_feeds。秒级，首连先跑这段。
+/// 锁纪律：HTTP 全在锁外；DB 读写在锁内短临界区完成。
 pub async fn feeds_phase(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> AppResult<SyncReport> {
     let Some(client) = build_client(db, http).await else {
         return Err(AppError::new("notConnected", "未配置 Miniflux Endpoint/Token"));
     };
     client.me().await?;
     let mut report = SyncReport::default();
-    let mut conn = db.lock().await;
-    push_feeds(&mut conn, &client, &mut report).await;
-    pull_feeds(&mut conn, &client, &mut report).await;
+    push_feeds(db, &client, &mut report).await;
+    pull_feeds(db, &client, &mut report).await;
     Ok(report)
 }
 
@@ -573,16 +623,32 @@ pub async fn states_phase(
     };
     client.me().await?;
     let mut report = SyncReport::default();
+    // 推送段进 PUSH_LOCK（与 push_states_now/feeds_phase 的推送互斥，防 prune 竞态）
     {
-        let conn = db.lock().await;
-        let plan = plan_push(&conn)?;
-        drop(conn);
+        let _guard = PUSH_LOCK.lock().await;
+        let plan = {
+            let conn = db.lock().await;
+            plan_push(&conn)?
+        };
         let done = exec_push(&client, &plan, &mut report).await;
-        let conn = db.lock().await;
-        let _ = db::prune_sync(&conn, &done);
+        if !done.is_empty() {
+            let conn = db.lock().await;
+            let _ = db::prune_sync(&conn, &done);
+        }
     }
-    let mut conn = db.lock().await;
-    pull_entries(&mut conn, &client, &mut report, full).await;
+    pull_entries(db, &client, &mut report, full).await;
+    Ok(report)
+}
+
+/// 完整同步（全量路径）：feeds 阶段 + states 阶段（full 对账）串联。
+/// 测试与既有调用方使用；生产前端走 sync_phase 分步 API。
+pub async fn sync_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> AppResult<SyncReport> {
+    let mut report = feeds_phase(db, http).await?;
+    let states = states_phase(db, http, true).await?;
+    report.pushed_states = states.pushed_states;
+    report.pulled_entries = states.pulled_entries;
+    report.fallback_entries = states.fallback_entries;
+    report.errors.extend(states.errors);
     Ok(report)
 }
 

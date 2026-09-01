@@ -59,6 +59,20 @@ pub struct Entry {
     pub status: String,           // "unread" | "read"
     #[serde(default)]
     pub starred: bool,
+    /// 播客音频/视频附件（Miniflux API enclosures 数组）
+    #[serde(default)]
+    pub enclosures: Vec<Enclosure>,
+}
+
+/// 条目附件：播客音频/视频/封面图
+#[derive(Debug, Clone, Deserialize)]
+pub struct Enclosure {
+    pub url: String,
+    #[serde(default)]
+    pub mime_type: String,
+    /// 时长（秒）——Miniflux 在 itunes:duration 可解析时提供
+    #[serde(default)]
+    pub duration: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

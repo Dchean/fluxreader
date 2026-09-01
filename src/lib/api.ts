@@ -132,7 +132,7 @@ export const api = {
   async addFeed(
     feedUrl: string,
     title: string | null,
-    folderId: number,
+    folderId: number | null,
     layout: string,
     autoSummary: boolean,
     autoTranslate: boolean,

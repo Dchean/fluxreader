@@ -78,6 +78,30 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
+  /* ---------- 后台 Miniflux 自动同步进行中状态（侧栏 spinner 可见性） ---------- */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    const unlistens: Array<() => void> = [];
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlistens.push(
+          await listen('sync-running', () => {
+            useAppStore.setState({ backgroundSyncing: true });
+          }),
+        );
+        unlistens.push(
+          await listen('sync-idle', () => {
+            useAppStore.setState({ backgroundSyncing: false });
+          }),
+        );
+      } catch {
+        /* 事件监听失败不影响主流程 */
+      }
+    })();
+    return () => unlistens.forEach((u) => u());
+  }, []);
+
   /* ---------- SMTC 系统媒体键回调：媒体键/音量浮层控制播放 ---------- */
   useEffect(() => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
@@ -107,12 +131,15 @@ export default function App() {
     let unlisten: (() => void) | undefined;
     void (async () => {
       try {
-        const { listen } = await import('@tauri-apps/api/event');
+        const { listen, emit } = await import('@tauri-apps/api/event');
         unlisten = await listen('close-ask', () => {
           useAppStore.setState({ closeAskVisible: true });
+          /* 回 ack：让 Rust 侧知道前端已接管（10s 无 ack Rust 会兜底隐藏，
+             避免窗口"关不掉"；ack 前提是弹窗真的弹出来了） */
+          void emit('close-ask-ack', 'frontend-ready');
         });
       } catch {
-        /* 忽略：监听失败时按默认行为关闭 */
+        /* 忽略：监听失败时 Rust 10s 兜底按默认行为处理 */
       }
     })();
     return () => unlisten?.();

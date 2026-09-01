@@ -8,9 +8,11 @@ export function isSameLocalDay(a: number, b: number): boolean {
   return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth() && da.getDate() === db.getDate();
 }
 
-/** 相对时间：刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / YYYY-MM-DD */
+/** 相对时间：刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / YYYY-MM-DD。
+ *  未来时间戳（源站时钟偏差/Miniflux 远端数据）clamp 为「刚刚」——
+ *  负数差值会算出「-3 小时前」这类破损文案。 */
 export function formatRelativeTime(ts: number, now: number = Date.now()): string {
-  const diff = now - ts;
+  const diff = Math.max(0, now - ts);
   if (diff < 60_000) return '刚刚';
   if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
   if (isSameLocalDay(ts, now)) return `${Math.floor(diff / 3_600_000)} 小时前`;

@@ -6,6 +6,7 @@
 //! 管线：HTTP 在锁外执行，写库时短暂持锁——并发真正并行。
 
 use crate::state::AppState;
+use rusqlite::Connection;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -155,7 +156,7 @@ pub fn spawn_scheduler(app: AppHandle) {
             }
             // Miniflux 后台自动同步（autoSyncMiniflux 开关，默认开）：
             // 到期才跑轻量同步（push 队列 + changed_after 增量 pull）
-            auto_sync_miniflux(&db, &http).await;
+            auto_sync_miniflux(&db, &http, &app).await;
             tokio::time::sleep(TICK).await;
         }
     });
@@ -164,9 +165,12 @@ pub fn spawn_scheduler(app: AppHandle) {
 /// Miniflux 自动同步：读 autoSyncMiniflux（默认开）与刷新间隔，
 /// 到期（now - last_sync ≥ refreshInterval 分钟）时跑轻量同步。
 /// 失败静默（log 记录），下个 tick 仍会因 last_sync 未推进而重试。
+/// 状态被拉平后发 feeds-updated——前端列表/未读计数与 DB 不再脱节
+/// （pull 改变了 is_read 但用户无感知的"静默漂移"问题）。
 async fn auto_sync_miniflux(
-    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    db: &Arc<tokio::sync::Mutex<Connection>>,
     http: &reqwest::Client,
+    app: &AppHandle,
 ) {
     let (on, interval_min, connected, last_sync) = {
         let conn = db.lock().await;
@@ -197,13 +201,24 @@ async fn auto_sync_miniflux(
         return;
     }
     log::info!("scheduler: Miniflux 自动同步开始（间隔 {interval_min} 分钟到期）");
+    let _ = app.emit("sync-running", serde_json::json!({ "source": "auto" }));
     match crate::sync::sync_light(db, http).await {
-        Ok(r) => log::info!(
-            "scheduler: Miniflux 自动同步完成：推 {}/拉 {} 项，{} 错误",
-            r.pushed_states, r.pulled_entries, r.errors.len()
-        ),
+        Ok(r) => {
+            log::info!(
+                "scheduler: Miniflux 自动同步完成：推 {}/拉 {} 项，{} 错误",
+                r.pushed_states, r.pulled_entries, r.errors.len()
+            );
+            // 拉平了状态（或推空但有 pending 修正）→ 通知前端重载
+            if r.pulled_entries > 0 {
+                let _ = app.emit(
+                    "feeds-updated",
+                    serde_json::json!({ "new_articles": 0, "failed_feeds": 0 }),
+                );
+            }
+        }
         Err(e) => log::warn!("scheduler: Miniflux 自动同步失败: {e}"),
     }
+    let _ = app.emit("sync-idle", ());
 }
 
 /// 通知开关开启 且 主窗口不可见（最小化到托盘/失焦）。

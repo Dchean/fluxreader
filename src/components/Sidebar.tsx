@@ -38,6 +38,7 @@ export function Sidebar() {
   const activeViewFilter = useAppStore((s) => s.activeViewFilter);
   const activeFeedFilter = useAppStore((s) => s.activeFeedFilter);
   const syncStatus = useAppStore((s) => s.syncStatus);
+  const backgroundSyncing = useAppStore((s) => s.backgroundSyncing);
   const minifluxConnected = useAppStore((s) => s.minifluxConnected);
 
   const selectLayout = useAppStore((s) => s.selectLayout);
@@ -64,14 +65,17 @@ export function Sidebar() {
     (c) => c.layout === activeContentLayout || c.feeds.some((f) => resolveFeedLayout(f, c.layout) === activeContentLayout),
   );
 
+  const isBusy = syncStatus === 'syncing' || backgroundSyncing;
   const syncLabel =
     syncStatus === 'syncing'
       ? '正在同步...'
-      : syncStatus === 'error'
-        ? '同步失败'
-        : minifluxConnected
-          ? 'Miniflux 已同步'
-          : '本地模式 · 直连抓取';
+      : backgroundSyncing
+        ? '后台同步中...'
+        : syncStatus === 'error'
+          ? '同步失败'
+          : minifluxConnected
+            ? 'Miniflux 已同步'
+            : '本地模式 · 直连抓取';
 
   return (
     <aside className="sidebar">
@@ -227,6 +231,14 @@ export function Sidebar() {
                           <span className="feed-favicon-fallback"><Icons.dot /></span>
                         )}
                         <span className="feed-leaf-title">{f.name}</span>
+                        {f.fetchFailed && (
+                          <span
+                            className="feed-error-dot"
+                            title="最近一次刷新抓取失败（点击 ↻ 重试）"
+                          >
+                            ⚠
+                          </span>
+                        )}
                       </div>
                       <div className="feed-leaf-right">
                         <span className="feed-count-badge" title="当前视图筛选下的条目数">{treeCounts.get(f.id) ?? 0}</span>
@@ -270,7 +282,7 @@ export function Sidebar() {
             <span>{syncLabel}</span>
           </button>
           <button
-            className={`sync-refresh-btn ${syncStatus === 'syncing' ? 'spinning' : ''}`}
+            className={`sync-refresh-btn ${isBusy ? 'spinning' : ''}`}
             onClick={triggerManualSync}
             title="手动同步"
           >

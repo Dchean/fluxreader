@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Emitter, Manager,
+    Emitter, Listener, Manager,
 };
 
 /// 主窗口显示并聚焦（托盘恢复/二实例唤起共用）
@@ -179,8 +179,33 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let db = app.state::<state::AppState>().db.clone();
                     if !read_close_prompt_shown(&db).await {
-                        // 首次：前端弹选择对话框（选完调 resolve_close 执行）
+                        // 首次：前端弹选择对话框（选完调 resolve_close 执行）。
+                        // 10s 兜底：前端监听失败/重载中没回 ack → 按默认（托盘）
+                        // 执行——绝不出现"窗口关不掉"的僵尸态。
+                        // resolve_close 也会触发 ack（视为已处理，走它自己的路径）。
+                        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+                        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+                        let unlisten = {
+                            let tx = tx.clone();
+                            app.listen("close-ask-ack", move |_| {
+                                let mut g = tx.lock().unwrap();
+                                if let Some(tx) = g.take() {
+                                    let _ = tx.send(());
+                                }
+                            })
+                        };
                         let _ = app.emit("close-ask", ());
+                        let acked = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            rx,
+                        )
+                        .await
+                        .is_ok();
+                        app.unlisten(unlisten);
+                        if !acked {
+                            log::warn!("close-ask 无前端确认，10s 兜底按默认（托盘）执行");
+                            let _ = win.hide();
+                        }
                         return;
                     }
                     if read_close_to_tray(&db).await {

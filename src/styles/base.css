@@ -625,6 +625,16 @@ body {
   flex-shrink: 0;
 }
 
+/* 抓取失败源角标：警示色小点，hover 有 title 说明 */
+.feed-error-dot {
+  flex-shrink: 0;
+  margin-left: 4px;
+  font-size: 11px;
+  line-height: 1;
+  color: #e67e22;
+  cursor: help;
+}
+
 .sidebar-fixed-bottom {
   flex-shrink: 0;
   border-top: 1px solid var(--border-subtle);
@@ -1695,6 +1705,34 @@ body {
   height: auto;
   margin: 1.2em auto;
   border-radius: var(--radius-sm);
+  cursor: zoom-in;
+}
+
+/* 正文内嵌媒体：视频/音频/iframe 自适应列宽，不溢出 */
+.article-prose video {
+  display: block;
+  width: 100%;
+  max-height: 78vh;
+  margin: 1.2em auto;
+  border-radius: var(--radius-sm);
+  background: #000;
+}
+
+.article-prose audio {
+  display: block;
+  width: 100%;
+  margin: 1.2em 0;
+}
+
+.article-prose iframe {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  height: auto;
+  margin: 1.2em auto;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
 }
 
 .article-prose figure { margin: 1.2em 0; text-align: center; }
