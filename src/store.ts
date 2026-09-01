@@ -751,7 +751,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     api.resolveClose(action, remember)
       .catch(() =>
         api.resolveClose(action, remember).catch(() =>
-          get().showToast('关闭操作未生效，请再点一次关闭按钮', 'error'),
+          get().showToast('关闭操作未生效，请再点一次关闭按钮'),
         ),
       );
   },
