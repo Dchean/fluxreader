@@ -582,7 +582,7 @@ function FeedsTab() {
                       <button
                         className="toggle-action-btn"
 
-                        title="编辑该订阅源（改名/移动分类/布局/AI 开关）"
+                        title="编辑该订阅源（重命名/移动分类/布局/AI 开关）"
                         onClick={() => openEditFeedModal(f.id)}
                       >
                         <Icons.edit />
