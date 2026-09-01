@@ -141,6 +141,18 @@ static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
     // 全文提取标志：1 = 正文已被 Readability 全文覆盖（工具栏按钮状态与
     // 设置「自动全文」共用此标志，重启不丢）。user_version=5。
     M::up("ALTER TABLE articles ADD COLUMN fulltext_extracted INTEGER NOT NULL DEFAULT 0;"),
+    // 智能去重墓碑：被丢弃的同 URL 文章记下「保留了哪篇」，关闭去重时
+    // 清空墓碑（尊重用户想让重复文章回来的意图）。墓碑存在期间，任何抓取
+    // 轮次重放同 URL 都直接跳过——否则 feed B 的 guid 稳定，每轮刷新都会
+    // 把被去重的那篇重新插进来（关开关→重影的真正来源）。
+    // user_version=6。
+    M::up(r#"
+        CREATE TABLE deduped_urls (
+            url     TEXT PRIMARY KEY,
+            kept_aid INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+            kept_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+    "#),
     // 后续迁移在此追加（M::up），已发布的不可改
     ])
 });
@@ -641,7 +653,27 @@ pub fn search_articles(conn: &Connection, query: &str, limit: i64) -> AppResult<
 
 /// 抓取管线写入（带 feed_id）：guid 冲突时仅更新内容字段（正文/图片/enclosure/来源），
 /// 已读/收藏/AI 产物等用户状态字段不动 —— 直连重抓到已读文章时不会"复活"它。
+/// 同 URL 已有文章 → 返回其 id（去重判定 + 墓碑 kept_aid 记账共用）
+fn existing_article_with_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM articles WHERE url = ?1 ORDER BY id LIMIT 1",
+            params![url],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
+/// 清空去重墓碑（smartDedup 开→关 瞬间调用：用户想让重复文章回来）
+pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
+    let n = conn.execute("DELETE FROM deduped_urls", [])?;
+    Ok(n)
+}
+
 /// dedup=true 时同 URL 文章跨源去重（智能去重：同一新闻被多个源推送只留首个）。
+/// 丢弃时写 deduped_urls 墓碑：记录保留了哪篇；墓碑在（开关未关闭过）时，
+/// 同 URL 的后续重放（guid 稳定 → 每轮刷新都会再来）持续被拦，
+/// 直到用户关闭智能去重（清墓碑，重复文章按用户意图重新入库）。
 pub fn upsert_article_with_feed(
     conn: &Connection,
     feed_id: i64,
@@ -651,12 +683,22 @@ pub fn upsert_article_with_feed(
     // 智能去重：URL 已存在于任一源 → 跳过（返回非新增，计数不膨胀）
     if dedup {
         if let Some(url) = a.url.as_deref().filter(|u| !u.is_empty()) {
-            let exists: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM articles WHERE url = ?1)",
+            if let Some(kept_aid) = existing_article_with_url(conn, url)? {
+                // 墓碑记账（INSERT OR REPLACE：重放时刷新 kept_aid/kept_at）
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO deduped_urls (url, kept_aid) VALUES (?1, ?2)",
+                    params![url, kept_aid],
+                );
+                return Ok((0, false));
+            }
+            // 无现存文章但墓碑在（保留的那篇已被用户删掉）：同 URL 仍拦。
+            // 否则删掉一篇 → 下轮刷新同 URL 立即回来，删除形同虚设。
+            let tombstoned: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM deduped_urls WHERE url = ?1)",
                 params![url],
                 |r| r.get(0),
             )?;
-            if exists {
+            if tombstoned {
                 return Ok((0, false));
             }
         }
@@ -913,6 +955,35 @@ pub fn article_by_miniflux_id(conn: &Connection, miniflux_id: i64) -> AppResult<
         )
         .optional()?;
     Ok(id)
+}
+
+/// URL 兜底匹配的安全校验：本地文章（aid）与远端 entry（mf_entry_id 所属
+/// feed mf_feed_id）是否同一订阅源。同源 → 服务端说的是同一篇，可合并状态；
+/// 跨源 → URL 碰巧相同但属于另一个订阅的 entry，只有已绑定的那条才有权
+/// 写状态（防止未读状态从服务端另一条同 URL entry 复活已读文章）。
+/// 判定依据：aid 已绑定的 miniflux_id 所属远端 feed（feeds.miniflux_id）
+/// 与远端 entry 的 feed_id 一致，或 aid 尚未绑定（首见，允许建立绑定）。
+pub fn article_matches_remote_feed(
+    conn: &Connection,
+    aid: i64,
+    mf_feed_id: i64,
+) -> AppResult<bool> {
+    let bound: Option<(Option<i64>, Option<i64>)> = conn
+        .query_row(
+            "SELECT a.miniflux_id, f.miniflux_id FROM articles a
+             JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?1",
+            params![aid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    match bound {
+        // 文章或 feed 已不存在 → 不匹配（保守）
+        None => Ok(false),
+        // 文章已绑定 entry：entry 必须属于同一（远端）feed 才可信
+        Some((Some(_entry_id), feed_mf)) => Ok(feed_mf == Some(mf_feed_id)),
+        // 未绑定：首见，允许（绑定回填/兜底合并的正常路径）
+        Some((None, _)) => Ok(true),
+    }
 }
 
 /// 按 URL 找本地条目（Pull 合并的兜底匹配键）

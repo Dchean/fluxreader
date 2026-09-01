@@ -148,6 +148,41 @@ async fn miniflux_sync_end_to_end() {
     let queue_left = db::take_sync_queue(&conn).unwrap().len();
     assert_eq!(queue_left, 0, "sync queue must be drained after successful push");
 
+    // ---------- ④ 复活防护：跨源同 URL entry 不得覆盖本地状态 ----------
+    // 场景：本地文章（feed 10 的 entry）已读；服务端另一源（feed 11）
+    // 也有同 URL 的 entry 且未读。同步后本地必须仍是已读——
+    // 跨源 entry 无权写状态（旧版会按 URL 兜底把未读覆盖回来）
+    conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [local_article_id]).unwrap();
+    // 模拟跨源同 URL entry（feed 11 = remote-only feed，未读态）
+    let cross_url = "http://127.0.0.1:8765/post/1"; // 与本地文章同 URL
+    server.add_entry(11, cross_url, "Cross-feed duplicate of read article", "unread", false);
+
+    let _report4 = sync::sync_now(&mut conn, &http).await.expect("fourth sync (cross-feed guard)");
+
+    let (still_read, binding): (bool, i64) = conn
+        .query_row(
+            "SELECT is_read, COALESCE(miniflux_id, -1) FROM articles WHERE id = ?1",
+            [local_article_id],
+            |r| Ok((r.get::<_, i64>(0)? != 0, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(still_read, "cross-feed unread entry must NOT resurrect the read article");
+    assert_eq!(binding, mf_id, "binding must stay on the original (own-feed) entry");
+
+    // 同源 entry（feed 10）状态变化仍正常合并（防护不影响正常路径）
+    // —— 通过 mock 更新既有 entry 状态为 unread 再同步，本地应跟随
+    {
+        let mut es = server.entries.lock().unwrap();
+        if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
+            e.status = "unread".into();
+        }
+    }
+    let _report5 = sync::sync_now(&mut conn, &http).await.expect("fifth sync (same-feed still merges)");
+    let now_read: bool = conn
+        .query_row("SELECT is_read FROM articles WHERE id = ?1", [local_article_id], |r| r.get::<_, i64>(0).map(|v| v != 0))
+        .unwrap();
+    assert!(!now_read, "own-feed entry status change still merges (guard doesn't break normal path)");
+
     // 连接测试
     let msg = sync::test_connection(&server.url(), "test-token", &http).await.unwrap();
     assert!(msg.contains("mockuser"), "test_connection returns username: {msg}");

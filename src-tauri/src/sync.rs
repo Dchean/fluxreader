@@ -286,7 +286,11 @@ async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &m
     for e in &all_entries {
         if let Some(u) = e.url.as_deref() {
             if let Some(aid) = db::article_id_by_url(conn, u).ok().flatten() {
-                let _ = db::set_article_miniflux_id(conn, aid, e.id);
+                // 同源校验：跨源同 URL entry 不抢绑定（绑错会让已读/收藏
+                // 推到服务端另一条的 entry 上，状态从此两边发散）
+                if db::article_matches_remote_feed(conn, aid, e.feed_id).unwrap_or(false) {
+                    let _ = db::set_article_miniflux_id(conn, aid, e.id);
+                }
             }
         }
     }
@@ -321,10 +325,15 @@ async fn pull_entries(conn: &mut Connection, client: &MinifluxClient, report: &m
     };
     for e in &entries {
         // 匹配：miniflux_id 直配 → URL 兜底
+        // URL 兜底需同源校验：跨源的同 URL entry 无权写本地状态
+        // （防止已读文章被服务端另一条同 URL entry 的未读状态复活）
         let local = db::article_by_miniflux_id(conn, e.id)
             .ok()
             .flatten()
-            .or_else(|| e.url.as_deref().and_then(|u| db::article_id_by_url(conn, u).ok().flatten()));
+            .or_else(|| {
+                e.url.as_deref().and_then(|u| db::article_id_by_url(conn, u).ok().flatten())
+                    .filter(|aid| db::article_matches_remote_feed(conn, *aid, e.feed_id).unwrap_or(false))
+            });
         let Some(aid) = local else {
             continue;
         };
@@ -351,12 +360,16 @@ fn feed_miniflux_id(conn: &Connection, feed_id: i64) -> Option<i64> {
     .flatten()
 }
 
-/// Miniflux 兜底条目入库（source='miniflux'，不覆盖直连正文）
+/// Miniflux 兜底条目入库（source='miniflux'，不覆盖直连正文）。
+/// URL 兜底合并需同源校验：跨源同 URL entry 不写状态、不抢绑定。
 fn upsert_miniflux_entry(conn: &mut Connection, feed_id: i64, e: &Entry, report: &mut SyncReport) {
     let existing = db::article_by_miniflux_id(conn, e.id)
         .ok()
         .flatten()
-        .or_else(|| e.url.as_deref().and_then(|u| db::article_id_by_url(conn, u).ok().flatten()));
+        .or_else(|| {
+            e.url.as_deref().and_then(|u| db::article_id_by_url(conn, u).ok().flatten())
+                .filter(|aid| db::article_matches_remote_feed(conn, *aid, e.feed_id).unwrap_or(false))
+        });
 
     let published = DateTime::parse_from_rfc3339(&e.published_at)
         .map(|d| d.with_timezone(&Utc).to_rfc3339())

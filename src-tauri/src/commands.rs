@@ -447,6 +447,18 @@ pub async fn get_setting(state: State<'_, AppState>, key: String) -> AppResult<O
 #[tauri::command]
 pub async fn set_setting(state: State<'_, AppState>, key: String, value: String) -> AppResult<()> {
     let conn = state.db.lock().await;
+    // smartDedup 关闭瞬间清去重墓碑：用户显式想让重复文章回来，
+    // 之后的抓取按无去重语义正常入库（不清的话墓碑会继续拦截）
+    if key == "app_settings" {
+        let was_on = read_dedup_flag(&conn);
+        let now_on = serde_json::from_str::<serde_json::Value>(&value)
+            .ok()
+            .and_then(|v| v.get("smartDedup").and_then(|b| b.as_bool()))
+            .unwrap_or(false);
+        if was_on && !now_on {
+            let _ = db::clear_dedup_tombstones(&conn);
+        }
+    }
     db::set_setting(&conn, &key, &value)
 }
 
