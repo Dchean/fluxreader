@@ -161,6 +161,20 @@ function GeneralTab() {
           <span style={{ width: 50 }}>{settings.refreshInterval} 分钟</span>
         </div>
       </SettingCard>
+      <SettingCard title="并发抓取数" desc="同时请求的订阅源数量。源多可调高；个别源站限流时调低（1 为逐个抓取）">
+        <div className="range-slider-wrap">
+          <input
+            type="range"
+            min={1}
+            max={16}
+            step={1}
+            value={settings.fetchConcurrency}
+            className="range-input"
+            onChange={(e) => updateSettings({ fetchConcurrency: Number(e.target.value) })}
+          />
+          <span style={{ width: 50 }}>{settings.fetchConcurrency} 路</span>
+        </div>
+      </SettingCard>
 
       <div className="settings-group-title">已读行为</div>
       <SettingCard title="打开文章时标为已读" desc="点击选中文章后立即更新本地已读状态">

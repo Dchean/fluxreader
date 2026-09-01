@@ -405,38 +405,27 @@ pub async fn feed_counts(state: State<'_, AppState>) -> AppResult<Vec<db::FeedCo
    刷新（直连优先）
    ============================================================ */
 
-/// 刷新单个订阅源（直连）。
-/// 注意：ingestion::refresh_feed 在持有 db 锁期间完成网络抓取（既有设计——
-/// 条件 GET 头与落库需同一连接视图）。抓取期间其他命令排队，个人使用量级可接受；
-/// 若未来出现可感知卡顿，再拆「锁内取头 → 锁外抓 → 锁内落库」。
+/// 刷新单个订阅源（直连）。三段式：锁内取条件头 → 锁外 HTTP+解析 → 锁内落库。
+/// 与并发管线共用 refresh_feed_staged，网络 IO 不占数据库写锁。
 #[tauri::command]
 pub async fn refresh_feed(state: State<'_, AppState>, feed_id: i64) -> AppResult<usize> {
+    let db = state.db.clone();
     let client = state.http.clone();
-    // HTTP 在锁外执行（网络 IO 不占数据库写锁）
-    let mut conn = state.db.lock().await;
-    let dedup = read_dedup_flag(&conn);
-    ingestion::refresh_feed(&mut conn, &client, feed_id, dedup).await
+    let dedup = {
+        let conn = db.lock().await;
+        read_dedup_flag(&conn)
+    };
+    ingestion::refresh_feed_staged(&db, &client, feed_id, dedup).await
 }
 
-/// 刷新全部订阅源（直连，顺序执行避免并发风控）
+/// 刷新全部订阅源（直连，并发上限 = 设置 fetchConcurrency，默认 4）。
+/// 复用调度器的三段式管线：HTTP 锁外并行，写库短暂持锁。
 #[tauri::command]
 pub async fn refresh_all_feeds(state: State<'_, AppState>) -> AppResult<RefreshSummary> {
-    let client = state.http.clone();
-    let (feed_ids, dedup): (Vec<i64>, bool) = {
-        let conn = state.db.lock().await;
-        let ids = db::list_feeds(&conn)?.into_iter().map(|f| f.id).collect();
-        (ids, read_dedup_flag(&conn))
-    };
-
-    let mut summary = RefreshSummary::default();
-    for id in feed_ids {
-        let mut conn = state.db.lock().await;
-        match ingestion::refresh_feed(&mut conn, &client, id, dedup).await {
-            Ok(n) => summary.new_articles += n,
-            Err(_e) => summary.failed_feeds += 1,
-        }
-    }
-    Ok(summary)
+    let db = state.db.clone();
+    let http = state.http.clone();
+    let (n, f) = crate::scheduler::refresh_all(&db, &http).await;
+    Ok(RefreshSummary { new_articles: n, failed_feeds: f })
 }
 
 #[derive(serde::Serialize, Default)]

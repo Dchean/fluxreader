@@ -1,8 +1,9 @@
 //! 后台刷新调度器：定时醒来 → 查"到期"源 → 限并发抓取 → 事件通知前端。
 //!
-//! 设置实时读取（app_settings JSON 的 autoRefresh/refreshInterval），改设置
-//! 无需重启即生效（下一个 tick 最多 60s 后跟上）。抓取与 `refresh_all_feeds`
-//! 命令共用 `ingestion::refresh_feed` 管线，退避状态由 db 层统一维护。
+//! 设置实时读取（app_settings JSON 的 autoRefresh/refreshInterval/
+//! fetchConcurrency/smartDedup），改设置无需重启即生效（下一个 tick
+//! 最多 60s 后跟上）。抓取走 ingestion::refresh_feed_staged 三段式
+//! 管线：HTTP 在锁外执行，写库时短暂持锁——并发真正并行。
 
 use crate::state::AppState;
 use std::sync::Arc;
@@ -12,17 +13,20 @@ use tauri::{AppHandle, Emitter, Manager};
 /// 调度循环的醒来节奏。每 tick 只跑一条便宜的索引查询，没到期的源直接返回。
 const TICK: Duration = Duration::from_secs(60);
 
-/// 并发抓取上限：4（个人规模订阅数下兼顾速度与源站压力）。
-const CONCURRENCY: usize = 4;
+/// 并发抓取上限默认值：4（个人规模订阅数下兼顾速度与源站压力）。
+/// 用户可在设置页 1–16 调整（fetchConcurrency）。
+const DEFAULT_CONCURRENCY: usize = 4;
+pub const MAX_CONCURRENCY: usize = 16;
 
-/// 从 app_settings JSON 里读 autoRefresh / refreshInterval / smartDedup。
-/// async 版：在调度循环（tokio worker）里调用。
-async fn read_refresh_config(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> (bool, i64, bool) {
+/// 从 app_settings JSON 里读 autoRefresh / refreshInterval / smartDedup /
+/// fetchConcurrency。async 版：在调度循环（tokio worker）里调用。
+async fn read_refresh_config(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> (bool, i64, bool, usize) {
     let conn = db.lock().await;
     let raw = crate::db::get_setting(&conn, "app_settings").ok().flatten();
     let mut enabled = true;
     let mut interval = 30i64;
     let mut dedup = false;
+    let mut concurrency = DEFAULT_CONCURRENCY;
     if let Some(json) = raw
         .as_deref()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -38,8 +42,13 @@ async fn read_refresh_config(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>)
         if let Some(v) = json.get("smartDedup").and_then(|v| v.as_bool()) {
             dedup = v;
         }
+        if let Some(v) = json.get("fetchConcurrency").and_then(|v| v.as_i64()) {
+            if (1..=MAX_CONCURRENCY as i64).contains(&v) {
+                concurrency = v as usize;
+            }
+        }
     }
-    (enabled, interval, dedup)
+    (enabled, interval, dedup, concurrency)
 }
 
 /// 全量刷新所有源（托盘「刷新全部订阅」入口，忽略到期时间）。
@@ -50,21 +59,33 @@ pub async fn refresh_all(
     refresh_feeds_inner(db, http, None).await
 }
 
-/// 抓取所有到期源（Semaphore 4 并发）。HTTP 在锁外执行，写库时短暂持锁。
+/// 抓取所有到期源（并发上限 = 设置 fetchConcurrency，默认 4）。
+/// HTTP 在锁外执行（refresh_feed_staged），写库时短暂持锁。
 /// 返回 (新增条数, 失败源数)。
 async fn refresh_due_feeds(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
 ) -> (usize, usize) {
-    let (_, interval_min, dedup) = read_refresh_config(db).await;
-    refresh_feeds_inner(db, http, Some((interval_min, dedup))).await
+    let (_, interval_min, dedup, concurrency) = read_refresh_config(db).await;
+    refresh_feeds_inner_with_concurrency(db, http, Some((interval_min, dedup)), concurrency).await
 }
 
 /// 抓取实现：Some((interval, dedup)) 只抓到期源，None 全量。
+/// 并发上限取设置值（全量入口同样尊重 fetchConcurrency）。
 async fn refresh_feeds_inner(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
     due_filter: Option<(i64, bool)>,
+) -> (usize, usize) {
+    let concurrency = read_refresh_config(db).await.3;
+    refresh_feeds_inner_with_concurrency(db, http, due_filter, concurrency).await
+}
+
+async fn refresh_feeds_inner_with_concurrency(
+    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    http: &reqwest::Client,
+    due_filter: Option<(i64, bool)>,
+    concurrency: usize,
 ) -> (usize, usize) {
     use tokio::sync::Semaphore;
     let dedup = due_filter.map(|(_, d)| d).unwrap_or(false);
@@ -82,9 +103,9 @@ async fn refresh_feeds_inner(
     if due.is_empty() {
         return (0, 0);
     }
-    log::info!("scheduler: {} feed(s) due", due.len());
+    log::info!("scheduler: {} feed(s) due, concurrency={concurrency}", due.len());
 
-    let sem = Arc::new(Semaphore::new(CONCURRENCY));
+    let sem = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::with_capacity(due.len());
     for id in due {
         let sem = sem.clone();
@@ -92,8 +113,7 @@ async fn refresh_feeds_inner(
         let http = http.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire_owned().await;
-            let mut conn = db.lock().await;
-            match crate::ingestion::refresh_feed(&mut conn, &http, id, dedup).await {
+            match crate::ingestion::refresh_feed_staged(&db, &http, id, dedup).await {
                 Ok(n) => (n, 0),
                 Err(_) => (0, 1),
             }
@@ -118,7 +138,7 @@ pub fn spawn_scheduler(app: AppHandle) {
         let db = app.state::<AppState>().db.clone();
         let http = app.state::<AppState>().http.clone();
         loop {
-            let (enabled, _interval, _dedup) = read_refresh_config(&db).await;
+            let (enabled, _interval, _dedup, _concurrency) = read_refresh_config(&db).await;
             if enabled {
                 let (new_articles, failed) = refresh_due_feeds(&db, &http).await;
                 if new_articles > 0 || failed > 0 {

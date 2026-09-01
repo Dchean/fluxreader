@@ -51,6 +51,8 @@ export interface SettingsState {
   /* 通用 */
   autoRefresh: boolean;
   refreshInterval: number;
+  /** 并发抓取上限（1–16，默认 4）：直连刷新同时请求的源站数量 */
+  fetchConcurrency: number;
   markReadOnOpen: boolean;
   markReadOnScrollBottom: boolean;
   markReadOnScrollOut: boolean;
@@ -75,8 +77,14 @@ export interface SettingsState {
   notifyOnNewArticles: boolean;
 }
 
-/** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM */
-export type ToastMessage = { id: number; text: string; leaving?: boolean };
+/** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM。
+    action：可选操作按钮（失败 toast 的一键重试） */
+export type ToastMessage = {
+  id: number;
+  text: string;
+  leaving?: boolean;
+  action?: { label: string; run: () => void };
+};
 
 export interface AppState {
   /* ---------- 导航与筛选 ---------- */
@@ -93,6 +101,10 @@ export interface AppState {
   summaryGenerating: boolean;
   /** AI 翻译流式生成中 */
   translating: boolean;
+  /** 摘要失败：文章 id → 错误信息（卡片内联展示 + 重试依据） */
+  summaryErrors: Record<string, string>;
+  /** 翻译失败：文章 id → 错误信息（Reader 内联展示 + 重试依据） */
+  translateErrors: Record<string, string>;
   /* 本次列表会话中被打开过的文章 id → 未读筛选下原地保留变灰（用户决策） */
   openedReadIds: Record<string, boolean>;
 
@@ -201,7 +213,8 @@ export interface AppState {
   closeMiniModal: (which: 'newCategory' | 'addFeed' | 'editFeed' | 'renameCat') => void;
 
   /* ---------- Actions: Toast / 同步 ---------- */
-  showToast: (text: string) => void;
+  /** text + 可选操作按钮（label/run：失败场景的一键重试） */
+  showToast: (text: string, action?: { label: string; run: () => void }) => void;
   triggerManualSync: () => void;
 
   /* ---------- Actions: 订阅管理 ---------- */
@@ -259,6 +272,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   isRawRenderMode: false,
   summaryGenerating: false,
   translating: false,
+  summaryErrors: {},
+  translateErrors: {},
   openedReadIds: {},
 
   categories: createInitialCategories(),
@@ -291,6 +306,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   settings: {
     autoRefresh: true,
     refreshInterval: 30,
+    fetchConcurrency: 4,
     markReadOnOpen: true,
     markReadOnScrollBottom: false,
     markReadOnScrollOut: false,
@@ -453,7 +469,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         }));
         showToast('全文提取完成');
       })
-      .catch(() => showToast('全文提取失败，保留 RSS 正文'));
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        showToast(`全文提取失败：${msg}`, { label: '重试', run: () => get().extractCurrentArticle() });
+      });
   },
 
   toggleCurrentReadStatus: () => {
@@ -501,8 +520,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!silent) get().showToast('浏览器演示模式无 AI 服务');
       return;
     }
-    set({ translating: true, isShowingTranslatedProse: true });
     const articleId = art.id;
+    /* 重试语义：清上次的错误与半截译文，重新走完整流 */
+    set((st) => ({
+      translating: true,
+      isShowingTranslatedProse: true,
+      translateErrors: { ...st.translateErrors, [articleId]: '' },
+      entries: st.entries.map((a) => (a.id === articleId ? { ...a, translatedContent: '' } : a)),
+    }));
     void api
       .aiTranslate(
         Number(articleId),
@@ -517,13 +542,26 @@ export const useAppStore = create<AppState>((set, get) => ({
         },
         () => set({ translating: false }),
         (msg) => {
-          set({ translating: false, isShowingTranslatedProse: false });
-          if (!silent) get().showToast(`翻译失败：${msg}`);
+          /* 内联错误（Reader 正文上方展示）+ 非 silent 时 toast 带重试 */
+          set((st) => ({
+            translating: false,
+            isShowingTranslatedProse: false,
+            translateErrors: { ...st.translateErrors, [articleId]: msg },
+          }));
+          if (!silent) {
+            get().showToast(`翻译失败：${msg}`, { label: '重试', run: () => get().toggleReaderTranslation() });
+          }
         },
       )
       .catch(() => {
-        set({ translating: false, isShowingTranslatedProse: false });
-        if (!silent) get().showToast('翻译失败：请先在设置中配置 AI 服务');
+        set((st) => ({
+          translating: false,
+          isShowingTranslatedProse: false,
+          translateErrors: { ...st.translateErrors, [articleId]: 'AI 服务未配置或不可达' },
+        }));
+        if (!silent) {
+          get().showToast('翻译失败：请先在设置中配置 AI 服务', { label: '重试', run: () => get().toggleReaderTranslation() });
+        }
       });
   },
 
@@ -548,7 +586,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
   },
 
-  /** 按 id 流式生成摘要（增量落到 aiSummary，卡片实时打字机）。有缓存直接短路。 */
+  /** 按 id 流式生成摘要（增量落到 aiSummary，卡片实时打字机）。有缓存直接短路。
+      失败记录到 summaryErrors[id]（卡片内联展示 + 重试依据）；重试前先清错误与半截文本。 */
   summarizeEntry: (id, opts) => {
     const silent = opts?.silent ?? false;
     const s = get();
@@ -563,7 +602,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!silent) get().showToast('浏览器演示模式无 AI 服务');
       return;
     }
-    set({ summaryGenerating: true });
+    /* 重试语义：清掉上次的错误与半截摘要，重新走完整流 */
+    set((st) => ({
+      summaryGenerating: true,
+      summaryErrors: { ...st.summaryErrors, [id]: '' },
+      entries: st.entries.map((a) => (a.id === id ? { ...a, aiSummary: '' } : a)),
+    }));
     void api
       .aiSummarize(
         Number(id),
@@ -577,13 +621,18 @@ export const useAppStore = create<AppState>((set, get) => ({
         },
         () => set({ summaryGenerating: false }),
         (msg) => {
-          set({ summaryGenerating: false });
-          if (!silent) get().showToast(`摘要失败：${msg}`);
+          /* 内联错误（卡片上直接可见）+ 非 silent 时 toast 带重试 */
+          set((st) => ({ summaryGenerating: false, summaryErrors: { ...st.summaryErrors, [id]: msg } }));
+          if (!silent) {
+            get().showToast(`摘要失败：${msg}`, { label: '重试', run: () => get().summarizeEntry(id) });
+          }
         },
       )
       .catch(() => {
-        set({ summaryGenerating: false });
-        if (!silent) get().showToast('摘要失败：请先在设置中配置 AI 服务');
+        set((st) => ({ summaryGenerating: false, summaryErrors: { ...st.summaryErrors, [id]: 'AI 服务未配置或不可达' } }));
+        if (!silent) {
+          get().showToast('摘要失败：请先在设置中配置 AI 服务', { label: '重试', run: () => get().summarizeEntry(id) });
+        }
       });
   },
 
@@ -687,16 +736,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       : { renameCatModalOpen: false },
     ),
 
-  showToast: (text) => {
+  showToast: (text, action) => {
     const id = ++toastId;
-    set((s) => ({ toasts: [...s.toasts, { id, text }] }));
-    /* 两段式生命周期：2200ms 后先标 leaving（CSS 退场过渡），200ms 过渡完成再卸载 */
+    set((s) => ({ toasts: [...s.toasts, { id, text, action }] }));
+    /* 两段式生命周期：2200ms 后先标 leaving（CSS 退场过渡），200ms 过渡完成再卸载；
+       带操作按钮时延长停留（留出点重试的时间） */
+    const stay = action ? 4200 : 2200;
     setTimeout(() => {
       set((s) => ({ toasts: s.toasts.map((t) => (t.id === id ? { ...t, leaving: true } : t)) }));
       setTimeout(() => {
         set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
       }, 200);
-    }, 2200);
+    }, stay);
   },
 
   /* ================= 数据源：后端 SQLite ⇄ mock ================= */
@@ -757,9 +808,9 @@ export const useAppStore = create<AppState>((set, get) => ({
             get().showToast('刷新完成');
           }
         })
-        .catch(() => {
-          set({ syncStatus: 'error' });
-          get().showToast('刷新失败');
+        .catch((e: unknown) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          get().showToast(`刷新失败：${msg}`, { label: '重试', run: () => get().triggerManualSync() });
         });
       return;
     }
@@ -855,7 +906,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         .catch((e: unknown) => {
           set({ syncStatus: 'error' });
           const msg = e instanceof Error ? e.message : String(e);
-          get().showToast(`添加失败：${msg}`);
+          get().showToast(`添加失败：${msg}`, {
+            label: '重试',
+            run: () => get().addFeed(catId, url, title, layout, autoSummary, autoTranslate),
+          });
         });
       return;
     }
@@ -964,7 +1018,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         get().showToast(n > 0 ? `刷新完成：新增 ${n} 条` : '刷新完成：没有新文章');
         return get().reloadFromBackend();
       })
-      .catch(() => get().showToast('刷新失败：源站不可达或地址失效'));
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        get().showToast(`刷新失败：${msg}`, { label: '重试', run: () => get().refreshOneFeed(feedId) });
+      });
   },
 
   updateCatLayout: (catId, layout) => {

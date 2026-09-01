@@ -3,7 +3,8 @@
 //!
 //! 由于调度器核心循环绑定了 AppHandle（事件 emit），可测部分拆为两层：
 //! 1. `db::feeds_due_for_refresh` 到期/退避判定（纯 SQL，直接断言）
-//! 2. `refresh_due_feeds` 等价管线（Semaphore 4 并发 + 状态写回）
+//! 2. `refresh_feed_staged` 三段式管线（锁外 HTTP + 状态写回）
+//!    ——并发重叠已有专门测试（staged_refresh_e2e），此处只测调度语义
 //!
 //! 运行：先 python -m http.server 8765 --bind 127.0.0.1（serve fixtures 目录）
 //! 然后 cargo test --test scheduler_e2e -- --ignored --nocapture
@@ -24,13 +25,12 @@ async fn setup() -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client, std::pat
     (Arc::new(Mutex::new(conn)), client, tmp)
 }
 
-/// 复刻 scheduler::refresh_due_feeds 的管线（AppHandle 无关部分）
+/// 刷新到期源：直接走三段式管线（生产同款，Semaphore 并发由调度器持有）
 async fn refresh_due(
     db: &Arc<Mutex<rusqlite::Connection>>,
     client: &reqwest::Client,
     interval_min: i64,
 ) -> (usize, usize) {
-    use tokio::sync::Semaphore;
     let due: Vec<i64> = {
         let conn = db.lock().await;
         db::feeds_due_for_refresh(&conn, interval_min).unwrap()
@@ -38,26 +38,12 @@ async fn refresh_due(
     if due.is_empty() {
         return (0, 0);
     }
-    let sem = Arc::new(Semaphore::new(4));
-    let mut handles = Vec::new();
+    let mut n = 0;
+    let mut f = 0;
     for id in due {
-        let sem = sem.clone();
-        let db = db.clone();
-        let client = client.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire_owned().await;
-            let mut conn = db.lock().await;
-            match ingestion::refresh_feed(&mut conn, &client, id, false).await {
-                Ok(n) => (n, 0usize),
-                Err(_) => (0, 1),
-            }
-        }));
-    }
-    let (mut n, mut f) = (0, 0);
-    for h in handles {
-        if let Ok((a, b)) = h.await {
-            n += a;
-            f += b;
+        match ingestion::refresh_feed_staged(db, client, id, false).await {
+            Ok(count) => n += count,
+            Err(_) => f += 1,
         }
     }
     (n, f)

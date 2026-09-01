@@ -380,10 +380,13 @@ function NotifCard({ item }: { item: ArticleEntry }) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const summarizeEntry = useAppStore((s) => s.summarizeEntry);
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
+  const summaryGenerating = useAppStore((s) => s.summaryGenerating);
+  const summaryError = useAppStore((s) => s.summaryErrors[item.id] || '');
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const summaryOpen = summaryOverride ?? feedConfig.autoSummary;
+  /* 失败后卡片保持展开（展示错误 + 重试按钮） */
+  const summaryOpen = summaryOverride ?? (feedConfig.autoSummary || !!summaryError);
   const transShow = transOverride ?? feedConfig.autoTranslate;
 
   return (
@@ -428,7 +431,16 @@ function NotifCard({ item }: { item: ArticleEntry }) {
           <Icons.spark />
           <span>摘要</span>
         </div>
-        <div className="notif-ai-text">{item.aiSummary}</div>
+        {summaryError ? (
+          <div className="ai-error-row">
+            <span className="ai-error-text" title={summaryError}>生成失败：{summaryError}</span>
+            <button className="ai-retry-btn" onClick={() => summarizeEntry(item.id)}>重试</button>
+          </div>
+        ) : summaryGenerating && !item.aiSummary ? (
+          <div className="notif-ai-text ai-generating-hint">⏳ 正在生成摘要...</div>
+        ) : (
+          <div className="notif-ai-text">{item.aiSummary}</div>
+        )}
       </div>
 
       <div className={`notif-body-text ${expanded ? '' : 'collapsed'}`}>{item.snippet}</div>

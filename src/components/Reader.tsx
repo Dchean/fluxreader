@@ -14,6 +14,7 @@ export function Reader() {
   const isShowingTranslatedProse = useAppStore((s) => s.isShowingTranslatedProse);
   const isRawRenderMode = useAppStore((s) => s.isRawRenderMode);
   const summaryGenerating = useAppStore((s) => s.summaryGenerating);
+  const translating = useAppStore((s) => s.translating);
   const settings = useAppStore((s) => s.settings);
 
   const toggleCurrentReadStatus = useAppStore((s) => s.toggleCurrentReadStatus);
@@ -33,10 +34,14 @@ export function Reader() {
   const config = useAppStore(
     useShallow((s) => selectFeedConfig(s, art?.feedId ?? '')),
   );
+  /* 内联错误：摘要/翻译失败按文章记录（空串 = 无错误） */
+  const summaryError = useAppStore((s) => (art ? s.summaryErrors[art.id] || '' : ''));
+  const translateError = useAppStore((s) => (art ? s.translateErrors[art.id] || '' : ''));
   /* 摘要卡显隐：默认跟随源/分类的自动摘要开关（未开启则不显示卡片）；
-     手动点击「摘要」按钮覆写——点开即展开并生成，再点收起 */
+     手动点击「摘要」按钮覆写——点开即展开并生成，再点收起。
+     失败后卡片保持展开（展示错误 + 重试按钮）。 */
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
-  const summaryOpen = summaryOverride ?? (config.autoSummary || summaryGenerating);
+  const summaryOpen = summaryOverride ?? (config.autoSummary || summaryGenerating || !!summaryError);
 
   /* 阅读时间估算（中文 ~400字/分钟，英文 ~220词/分钟） */
   const readTime = art
@@ -186,11 +191,24 @@ export function Reader() {
               <div className="ai-body-content">
                 {summaryGenerating ? (
                   <span className="ai-generating-hint">⏳ 正在根据提示词生成摘要...</span>
+                ) : summaryError ? (
+                  <div className="ai-error-row">
+                    <span className="ai-error-text" title={summaryError}>摘要生成失败：{summaryError}</span>
+                    <button className="ai-retry-btn" onClick={() => triggerReaderSummary()}>重试</button>
+                  </div>
                 ) : (
                   <p>{art.aiSummary}</p>
                 )}
               </div>
             </div>
+
+            {/* 翻译失败内联提示（正文上方，切换按钮旁） */}
+            {translateError && !isShowingTranslatedProse && !translating && (
+              <div className="ai-error-row reader-translate-error">
+                <span className="ai-error-text" title={translateError}>翻译失败：{translateError}</span>
+                <button className="ai-retry-btn" onClick={() => toggleReaderTranslation()}>重试</button>
+              </div>
+            )}
 
             {/* 正文 */}
             <div

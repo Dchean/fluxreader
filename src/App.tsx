@@ -208,10 +208,11 @@ export default function App() {
       <RenameCategoryModal />
 
       {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
-          退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载 */}
+          退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。
+          带操作按钮（action）的失败 toast 可一键重试。 */}
       <div className="toast-layer" aria-live="polite">
         {toasts.map((t) => (
-          <ToastPill key={t.id} id={t.id} text={t.text} leaving={!!t.leaving} />
+          <ToastPill key={t.id} text={t.text} leaving={!!t.leaving} action={t.action} />
         ))}
       </div>
     </>
@@ -219,12 +220,25 @@ export default function App() {
 }
 
 /** 单条 toast：挂载后 rAF 切 visible 让 CSS transition 接管进场 */
-function ToastPill({ text, leaving }: { id: number; text: string; leaving: boolean }) {
+function ToastPill({
+  text,
+  leaving,
+  action,
+}: {
+  text: string;
+  leaving: boolean;
+  action?: { label: string; run: () => void };
+}) {
   const [shown, setShown] = useState(false);
   useEffect(() => {
     const raf = requestAnimationFrame(() => setShown(true));
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  return <div className={`toast-pill ${shown && !leaving ? 'visible' : ''}`}>{text}</div>;
+  return (
+    <div className={`toast-pill ${shown && !leaving ? 'visible' : ''} ${action ? 'with-action' : ''}`}>
+      <span className="toast-text">{text}</span>
+      {action && <button className="toast-action-btn" onClick={action.run}>{action.label}</button>}
+    </div>
+  );
 }
