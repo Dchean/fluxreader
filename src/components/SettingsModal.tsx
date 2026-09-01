@@ -471,7 +471,7 @@ function FeedsTab() {
                   />
                 </div>
 
-                <label className="mgr-checkbox-label">
+                <label className="mgr-checkbox-label" title="分类内新文章自动生成 AI 摘要">
                   <input
                     type="checkbox"
                     checked={cat.autoSummary}
@@ -480,7 +480,7 @@ function FeedsTab() {
                   />
                   自动摘要
                 </label>
-                <label className="mgr-checkbox-label">
+                <label className="mgr-checkbox-label" title="分类内新文章自动翻译正文">
                   <input
                     type="checkbox"
                     checked={cat.autoTranslate}
@@ -490,12 +490,12 @@ function FeedsTab() {
                   自动翻译
                 </label>
 
-                <button className="toggle-action-btn" style={{ fontSize: 11 }} onClick={() => openAddFeedModal(cat.id)}>
+                <button className="toggle-action-btn" onClick={() => openAddFeedModal(cat.id)}>
                   + 添加源
                 </button>
                 <button
                   className="toggle-action-btn"
-                  style={{ fontSize: 11 }}
+                 
                   title="重命名该分类"
                   onClick={() => openRenameCatModal(cat.id)}
                 >
@@ -504,7 +504,7 @@ function FeedsTab() {
                 </button>
                 <button
                   className="toggle-action-btn btn-danger-text"
-                  style={{ fontSize: 11 }}
+                 
                   title="删除该分类及其全部订阅源"
                   onClick={() => setPending({ kind: 'category', catId: cat.id, catName: cat.name })}
                 >
@@ -535,27 +535,27 @@ function FeedsTab() {
                           ...LAYOUT_OPTIONS,
                         ]}
                       />
-                      <label className="mgr-checkbox-label">
+                      <label className="mgr-checkbox-label" title="该源新文章自动生成 AI 摘要">
                         <input
                           type="checkbox"
                           checked={f.autoSummary}
                           onChange={(e) => toggleFeedSummary(cat.id, f.id, e.target.checked)}
                           style={{ accentColor: 'var(--accent)' }}
                         />
-                        摘要
+                        自动摘要
                       </label>
-                      <label className="mgr-checkbox-label">
+                      <label className="mgr-checkbox-label" title="该源新文章自动翻译正文">
                         <input
                           type="checkbox"
                           checked={f.autoTranslate}
                           onChange={(e) => toggleFeedTranslate(cat.id, f.id, e.target.checked)}
                           style={{ accentColor: 'var(--accent)' }}
                         />
-                        翻译
+                        自动翻译
                       </label>
                       <button
                         className="toggle-action-btn"
-                        style={{ fontSize: 11 }}
+                       
                         title="编辑该订阅源（改名/移动分类/布局/AI 开关）"
                         onClick={() => openEditFeedModal(f.id)}
                       >
@@ -564,7 +564,7 @@ function FeedsTab() {
                       </button>
                       <button
                         className="toggle-action-btn btn-danger-text"
-                        style={{ fontSize: 11 }}
+                       
                         title="删除该订阅源"
                         onClick={() => setPending({ kind: 'feed', catId: cat.id, catName: cat.name, feedId: f.id, feedName: f.name })}
                       >

@@ -5,7 +5,7 @@ import { Timeline } from './components/Timeline';
 import { Reader } from './components/Reader';
 import { PlayerBar } from './components/PlayerBar';
 import { SettingsModal } from './components/SettingsModal';
-import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal } from './components/Overlays';
+import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal, CloseAskDialog } from './components/Overlays';
 /* ============================================================
    Application Shell
 
@@ -96,6 +96,23 @@ export default function App() {
         });
       } catch {
         /* 事件监听失败不影响主流程 */
+      }
+    })();
+    return () => unlisten?.();
+  }, []);
+
+  /* ---------- 首次关闭询问：Rust CloseRequested 判断未问过 → 弹窗 ---------- */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen('close-ask', () => {
+          useAppStore.setState({ closeAskVisible: true });
+        });
+      } catch {
+        /* 忽略：监听失败时按默认行为关闭 */
       }
     })();
     return () => unlisten?.();
@@ -206,6 +223,7 @@ export default function App() {
       <AddFeedModal />
       <EditFeedModal />
       <RenameCategoryModal />
+      <CloseAskDialog />
 
       {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
           退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。

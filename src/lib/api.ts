@@ -377,6 +377,11 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('cache_cleanup', { days, scope }) as string) : null;
   },
+  /** 首次关闭询问的应答：action='tray'|'exit'；remember=true 持久化选择 */
+  async resolveClose(action: 'tray' | 'exit', remember: boolean): Promise<void> {
+    const inv = await getInvoke();
+    if (inv) await inv('resolve_close', { action, remember });
+  },
   async syncNow(): Promise<SyncReport | null> {
     const inv = await getInvoke();
     return inv ? (await inv('sync_now') as SyncReport) : null;

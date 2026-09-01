@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
 import { api, articleRowToEntry } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
 import { ModalOverlay, FluxDropdown } from './primitives';
-import { formatRelativeTime } from '../lib/format';
 import type { ArticleEntry, ContentLayoutType, FeedItem } from '../types';
 
 /* ============================================================
@@ -18,38 +17,65 @@ const LAYOUT_OPTIONS = CONTENT_LAYOUTS.map((l) => {
 export function SearchModal() {
   const searchOpen = useAppStore((s) => s.searchOpen);
   const closeSearch = useAppStore((s) => s.closeSearch);
-  const selectArticle = useAppStore((s) => s.selectArticle);
 
   return (
     <ModalOverlay open={searchOpen} onClose={closeSearch} contentWidth={580}>
-      <SearchModalBody key={String(searchOpen)} onClose={closeSearch} selectArticle={selectArticle} />
+      <SearchModalBody key={String(searchOpen)} onClose={closeSearch} />
     </ModalOverlay>
   );
 }
 
-/* 每次打开重挂载（key={searchOpen}），天然获得清空的搜索词 */
-function SearchModalBody({ onClose, selectArticle }: { onClose: () => void; selectArticle: (id: string) => void }) {
+/* ============================================================
+   命令面板（对齐 Papr CommandPalette 行为）：
+   - 空查询即显示全部命令 + 订阅源（打开即可用，不是只有输入才有结果）
+   - 输入过滤：命令按标签、订阅源按名称/URL、文章走后端 FTS5
+   - IME 保护：Enter 判 isComposing（中文输入法选词回车不误触）
+   - 键盘导航：↑↓ 循环 + Enter 执行；键盘移动时 scrollIntoView
+     （鼠标 hover 不触发滚动，防止列表内容在光标下跳动）
+   - 底部快捷键提示条
+   ============================================================ */
+
+interface PaletteItem {
+  id: string;
+  group: 'command' | 'feed' | 'article';
+  label: string;
+  hint: string;
+  run: () => void;
+}
+
+function SearchModalBody({ onClose }: { onClose: () => void }) {
   const [q, setQ] = useState('');
+  const [debounced, setDebounced] = useState('');
   const [results, setResults] = useState<ArticleEntry[]>([]);
   const [searching, setSearching] = useState(false);
   const [cursor, setCursor] = useState(0);
+  const [searchError, setSearchError] = useState(false);
   const feedIndex = useAppStore((s) => s.feedIndex);
-  const selectFeed = useAppStore((s) => s.selectFeed);
+  const listRef = useRef<HTMLDivElement>(null);
+  /* 键盘移动标记：scrollIntoView 只在键盘导航时触发 */
+  const keyboardNav = useRef(false);
 
-  /* 防抖 250ms 调后端 FTS5（标题/正文/作者/AI 摘要/翻译全文）；
-     Tauri 环境外回退为内存标题匹配（mock 演示用） */
+  /* 180ms 防抖 */
   useEffect(() => {
-    const query = q.trim();
+    const t = setTimeout(() => setDebounced(q.trim()), 180);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  /* 文章搜索：后端 FTS5（防抖后触发）；浏览器环境回退内存匹配 */
+  useEffect(() => {
+    const query = debounced;
     if (!query) {
       setResults([]);
       setSearching(false);
+      setSearchError(false);
       return;
     }
     setSearching(true);
     const t = setTimeout(() => {
       api
-        .searchArticles(query, 50)
+        .searchArticles(query, 10)
         .then((rows) => {
+          setSearchError(false);
           if (!rows) {
             const lower = query.toLowerCase();
             setResults(
@@ -60,116 +86,156 @@ function SearchModalBody({ onClose, selectArticle }: { onClose: () => void; sele
                     a.title.toLowerCase().includes(lower) ||
                     a.snippet.toLowerCase().includes(lower),
                 )
-                .slice(0, 50),
+                .slice(0, 10),
             );
             return;
           }
           setResults(rows.map(articleRowToEntry));
         })
-        .catch(() => setResults([]))
+        .catch(() => {
+          setSearchError(true);
+          setResults([]);
+        })
         .finally(() => setSearching(false));
     }, 250);
     return () => clearTimeout(t);
-  }, [q]);
+  }, [debounced]);
 
-  /* 重置键盘光标：搜索词/结果变化时回到第一项 */
-  useEffect(() => setCursor(0), [q, results]);
-
-  /* 订阅源组：名称匹配（本地 feedIndex 即可，无需后端） */
-  const feedMatches = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    if (!query) return [];
-    return [...feedIndex.values()]
-      .filter(({ feed }) => feed.name.toLowerCase().includes(query) || feed.url.toLowerCase().includes(query))
-      .slice(0, 5);
-  }, [q, feedIndex]);
-
-  /* 命令组：固定命令表 + 关键词匹配 */
-  const commands = useMemo(() => {
+  /* 命令表：全部命令（含快捷键 hint）；订阅源/文章按当前过滤 */
+  const items = useMemo<PaletteItem[]>(() => {
     const s = useAppStore.getState();
-    const all: { label: string; hint: string; run: () => void }[] = [
-      { label: '全部标为已读', hint: '', run: () => s.markCurrentViewAllRead() },
+    const query = debounced.toLowerCase();
+    const out: PaletteItem[] = [];
+
+    const commands: { label: string; hint: string; run: () => void }[] = [
+      { label: '同步并刷新所有订阅源', hint: '', run: () => s.triggerManualSync() },
+      { label: '将当前列表全部标为已读', hint: '', run: () => s.markCurrentViewAllRead() },
       { label: '切换 未读/全部 筛选', hint: '', run: () => s.toggleTimelineFilter() },
-      { label: '立即同步刷新', hint: '', run: () => s.triggerManualSync() },
-      { label: '打开设置', hint: 'Ctrl+,', run: () => s.openSettings() },
-      { label: 'AI 服务设置', hint: '', run: () => s.openSettingsTab('ai') },
-      { label: '添加订阅源', hint: '', run: () => s.openAddFeedModal('') },
-      { label: '新建分类', hint: '', run: () => s.openNewCategoryModal() },
+      { label: '切换深色 / 浅色模式', hint: '', run: () => {
+        const dark = s.settings.themeMode === 'light';
+        s.updateSettings({ themeMode: dark ? 'dark' : 'light' });
+      } },
+      { label: '添加订阅源…', hint: '', run: () => s.openAddFeedModal('') },
+      { label: '新建分类…', hint: '', run: () => s.openNewCategoryModal() },
+      { label: '打开设置…', hint: 'Ctrl+,', run: () => s.openSettings() },
+      { label: 'AI 服务设置…', hint: '', run: () => s.openSettingsTab('ai') },
     ];
-    const query = q.trim().toLowerCase();
-    if (!query) return [];
-    return all.filter((c) => c.label.toLowerCase().includes(query)).slice(0, 5);
-  }, [q]);
+    for (const c of commands) {
+      if (query && !c.label.toLowerCase().includes(query)) continue;
+      out.push({ id: `cmd-${c.label}`, group: 'command', label: c.label, hint: c.hint, run: c.run });
+    }
 
-  /* 扁平化全部可选项（键盘导航的目标列表）：命令 → 订阅源 → 文章（按布局分组） */
-  const flatItems = useMemo(() => {
-    type Item =
-      | { kind: 'command'; idx: number }
-      | { kind: 'feed'; idx: number }
-      | { kind: 'article'; entry: ArticleEntry };
-    const items: Item[] = [];
-    commands.forEach((_, i) => items.push({ kind: 'command', idx: i }));
-    feedMatches.forEach((_, i) => items.push({ kind: 'feed', idx: i }));
-    results.forEach((entry) => items.push({ kind: 'article', entry }));
-    return items;
-  }, [commands, feedMatches, results]);
+    const feedMatches = [...feedIndex.values()]
+      .filter(({ feed }) =>
+        !query ||
+        feed.name.toLowerCase().includes(query) ||
+        feed.url.toLowerCase().includes(query))
+      .slice(0, 8);
+    for (const { feed } of feedMatches) {
+      out.push({
+        id: `feed-${feed.id}`,
+        group: 'feed',
+        label: feed.name,
+        hint: hostOf(feed.url),
+        run: () => {
+          useAppStore.getState().selectFeed(feed.id);
+        },
+      });
+    }
 
-  /* 键盘导航：↑↓ 移动、Enter 执行、保持 input 焦点 */
+    if (query) {
+      for (const a of results) {
+        out.push({
+          id: `art-${a.id}`,
+          group: 'article',
+          label: a.title,
+          hint: feedIndex.get(a.feedId)?.feed.name ?? '',
+          run: () => {
+            /* 文章：选中并定位列表。若该文章已读而当前是未读筛选，先切到
+               「全部」视图保证卡片可见（否则定位到一条看不见的卡片）。 */
+            const st = useAppStore.getState();
+            const binding = st.feedIndex.get(a.feedId);
+            if (binding) st.selectFeed(binding.feed.id);
+            if (a.isRead) {
+              if (st.activeViewFilter === 'unread') st.selectView('all');
+              if (st.timelineFilter === 'unread') st.toggleTimelineFilter();
+            }
+            st.selectArticle(a.id);
+          },
+        });
+      }
+    }
+    return out;
+  }, [debounced, feedIndex, results]);
+
+  /* 光标重置 + 查询变化回到列表顶部 */
+  useEffect(() => setCursor(0), [debounced, items.length]);
+  useEffect(() => {
+    if (listRef.current) listRef.current.scrollTop = 0;
+  }, [debounced]);
+
+  /* 键盘选中行滚动到可见（仅键盘导航触发；鼠标 hover 不滚动） */
+  useEffect(() => {
+    if (!keyboardNav.current) return;
+    keyboardNav.current = false;
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-cp-index="${cursor}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [cursor]);
+
+  const runItem = (it: PaletteItem | undefined) => {
+    if (!it) return;
+    it.run();
+    onClose();
+  };
+
   const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
-      if (flatItems.length === 0) return;
+      if (items.length === 0) return;
+      keyboardNav.current = true;
       setCursor((c) =>
         e.key === 'ArrowDown'
-          ? (c + 1) % flatItems.length
-          : (c - 1 + flatItems.length) % flatItems.length,
+          ? (c + 1) % items.length
+          : (c - 1 + items.length) % items.length,
       );
-    } else if (e.key === 'Enter') {
+    } else if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+      /* IME 组合中的 Enter 是选词确认，不执行 */
       e.preventDefault();
-      execItem(flatItems[cursor]);
+      runItem(items[cursor]);
     }
   };
 
-  const execItem = (item: { kind: 'command'; idx: number } | { kind: 'feed'; idx: number } | { kind: 'article'; entry: ArticleEntry } | undefined) => {
-    if (!item) return;
-    if (item.kind === 'command') {
-      commands[item.idx].run();
-      onClose();
-    } else if (item.kind === 'feed') {
-      selectFeed(feedMatches[item.idx].feed.id);
-      onClose();
-    } else {
-      /* 文章：选中并定位列表。若该文章已读而当前是未读筛选，先切到
-         「全部」视图保证卡片可见（否则定位到一条看不见的卡片）。 */
-      const feedOfArticle = feedIndex.get(item.entry.feedId);
-      if (feedOfArticle) {
-        selectFeed(feedOfArticle.feed.id);
-      }
-      if (item.entry.isRead) {
-        const st = useAppStore.getState();
-        if (st.activeViewFilter === 'unread') st.selectView('all');
-        if (st.timelineFilter === 'unread') st.toggleTimelineFilter();
-      }
-      selectArticle(item.entry.id);
-      onClose();
-    }
+  /* 分组渲染（组内序号接续全局扁平序号，键盘光标对齐） */
+  let flat = -1;
+  const renderGroup = (group: PaletteItem['group'], title: string) => {
+    const list = items.filter((i) => i.group === group);
+    if (list.length === 0) return null;
+    return (
+      <div key={group} role="group" aria-label={title}>
+        <div className="cp-group-title" aria-hidden="true">{title}</div>
+        {list.map((it) => {
+          flat++;
+          const idx = flat;
+          return (
+            <div
+              key={it.id}
+              data-cp-index={idx}
+              className={`cp-item ${cursor === idx ? 'active' : ''}`}
+              role="option"
+              aria-selected={idx === cursor}
+              onMouseEnter={() => setCursor(idx)}
+              onClick={() => runItem(it)}
+            >
+              <span className="cp-ico">{group === 'command' ? <Icons.spark /> : group === 'feed' ? <Icons.rss /> : <Icons.article />}</span>
+              <span className="cp-label">{it.label}</span>
+              {it.hint && <span className="cp-hint">{it.hint}</span>}
+            </div>
+          );
+        })}
+      </div>
+    );
   };
-
-  /* 按内容布局类型分组（搜索结果可能横跨文章/社交/播客等布局） */
-  const groups = useMemo(() => {
-    const byLayout = new Map<ContentLayoutType, ArticleEntry[]>();
-    for (const a of results) {
-      const raw = useAppStore.getState().feedIndex.get(a.feedId)?.feed.layout ?? 'article';
-      const layout: ContentLayoutType = raw === 'inherit' ? 'article' : raw;
-      const list = byLayout.get(layout) ?? [];
-      list.push(a);
-      byLayout.set(layout, list);
-    }
-    return [...byLayout.entries()];
-  }, [results]);
-
-  /* 文章项的全局序号（键盘光标对齐）：命令数 + 订阅源数 + 组内偏移 */
-  let articleSeq = commands.length + feedMatches.length;
 
   return (
     <>
@@ -178,7 +244,7 @@ function SearchModalBody({ onClose, selectArticle }: { onClose: () => void; sele
         <input
           type="text"
           autoFocus
-          placeholder="搜索文章、订阅源，或输入命令…"
+          placeholder="搜索文章、订阅源，或运行命令…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={onInputKeyDown}
@@ -186,75 +252,37 @@ function SearchModalBody({ onClose, selectArticle }: { onClose: () => void; sele
         />
         <span className="kbd-tag" style={{ marginLeft: 0 }}>ESC 关闭</span>
       </div>
-      <div className="search-modal-results">
-        {/* 命令组 */}
-        {commands.length > 0 && (
-          <div>
-            <div className="search-group-label">命令 · {commands.length}</div>
-            {commands.map((c, i) => (
-              <div
-                key={c.label}
-                className={`search-result-item ${cursor === i ? 'active' : ''}`}
-                onMouseEnter={() => setCursor(i)}
-                onClick={() => execItem({ kind: 'command', idx: i })}
-              >
-                <div className="search-result-title">{c.label}</div>
-                {c.hint && <div className="search-result-meta">{c.hint}</div>}
-              </div>
-            ))}
+      <div className="cp-list" ref={listRef} role="listbox">
+        {items.length === 0 ? (
+          <div className="search-empty">
+            {searching ? '搜索中…' : searchError ? '搜索失败 — 请检查网络连接' : '没有结果'}
           </div>
+        ) : (
+          <>
+            {renderGroup('command', '操作')}
+            {renderGroup('feed', '订阅源')}
+            {renderGroup('article', '文章')}
+          </>
         )}
-        {/* 订阅源组 */}
-        {feedMatches.length > 0 && (
-          <div>
-            <div className="search-group-label">订阅源 · {feedMatches.length}</div>
-            {feedMatches.map(({ feed }, i) => {
-              const seq = commands.length + i;
-              return (
-                <div
-                  key={feed.id}
-                  className={`search-result-item ${cursor === seq ? 'active' : ''}`}
-                  onMouseEnter={() => setCursor(seq)}
-                  onClick={() => execItem({ kind: 'feed', idx: i })}
-                >
-                  <div className="search-result-title">{feed.name}</div>
-                  <div className="search-result-meta">{feed.url}</div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {/* 文章组（按布局分组） */}
-        {groups.map(([layout, items]) => (
-          <div key={layout}>
-            <div className="search-group-label">
-              {LAYOUT_NAMES[layout]} · {items.length}
-            </div>
-            {items.map((a) => {
-              const seq = articleSeq++;
-              return (
-                <div
-                  key={a.id}
-                  className={`search-result-item ${cursor === seq ? 'active' : ''}`}
-                  onMouseEnter={() => setCursor(seq)}
-                  onClick={() => execItem({ kind: 'article', entry: a })}
-                >
-                  <div className="search-result-title">{a.title}</div>
-                  <div className="search-result-meta">
-                    {feedIndex.get(a.feedId)?.feed.name ?? ''} · {formatRelativeTime(a.publishedAt)}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ))}
-        {!searching && q.trim() && results.length === 0 && commands.length === 0 && feedMatches.length === 0 && (
-          <div className="search-empty">未找到匹配内容</div>
-        )}
-        {searching && <div className="search-empty">搜索中…</div>}
+      </div>
+      <div className="cp-footer">
+        <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+        <span><kbd>⏎</kbd> 打开</span>
+        <span><kbd>esc</kbd> 关闭</span>
+        <div style={{ flex: 1 }} />
+        <span>支持文章 · 订阅源 · 命令</span>
       </div>
     </>
   );
+}
+
+/** 订阅源 URL → 域名（Papr feedHost 等价物，命令面板 hint 用） */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 export function Lightbox() {
@@ -645,5 +673,48 @@ function RenameCatModalBody({
         </button>
       </div>
     </div>
+  );
+}
+
+/* ============================================================
+   首次关闭询问弹窗：Rust close-ask 事件驱动。
+   选项：最小化到托盘（主）/ 退出 FluxReader；「记住我的选择」默认勾选。
+   记住 → 落库 closeToTray + closePromptShown（此后直接按设置走）；
+   不记住 → 仅本次生效，下次关闭再问。
+   ============================================================ */
+
+export function CloseAskDialog() {
+  const visible = useAppStore((s) => s.closeAskVisible);
+  const answerCloseAsk = useAppStore((s) => s.answerCloseAsk);
+  const [remember, setRemember] = useState(true);
+
+  return (
+    <ModalOverlay open={visible} onClose={() => answerCloseAsk('tray', remember)}>
+      <div className="mini-dialog">
+        <div className="mini-dialog-title">关闭 FluxReader</div>
+        <div className="mini-dialog-hint" style={{ marginTop: 0 }}>
+          可以最小化到系统托盘保持后台刷新，或直接退出程序。
+        </div>
+        <div className="mini-dialog-checkbox-row" style={{ marginTop: 10 }}>
+          <label className="mini-dialog-checkbox">
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+              style={{ accentColor: 'var(--accent)' }}
+            />
+            记住我的选择（之后可在 设置 → 通用 修改）
+          </label>
+        </div>
+        <div className="mini-dialog-actions">
+          <button className="toggle-action-btn" onClick={() => answerCloseAsk('exit', remember)}>
+            退出 FluxReader
+          </button>
+          <button className="toggle-action-btn btn-primary" onClick={() => answerCloseAsk('tray', remember)}>
+            最小化到托盘
+          </button>
+        </div>
+      </div>
+    </ModalOverlay>
   );
 }

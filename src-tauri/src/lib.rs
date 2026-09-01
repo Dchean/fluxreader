@@ -42,6 +42,49 @@ async fn read_close_to_tray(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Con
     }
 }
 
+/// 首次关闭询问是否已展示过（app_settings.closePromptShown，缺省 false）
+async fn read_close_prompt_shown(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> bool {
+    let conn = db.lock().await;
+    crate::db::get_setting(&conn, "app_settings")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("closePromptShown").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
+/// 用户在首次关闭询问弹窗里做出选择：
+/// remember=true → 持久化 closeToTray + closePromptShown（此后不再问）；
+/// remember=false → 仅本次生效（下次关闭再问）。
+#[tauri::command]
+async fn resolve_close(app: tauri::AppHandle, action: String, remember: bool) -> Result<(), String> {
+    let to_tray = action == "tray";
+    let db = app.state::<state::AppState>().db.clone();
+    if remember {
+        let conn = db.lock().await;
+        let raw = crate::db::get_setting(&conn, "app_settings")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "{}".into());
+        let mut v: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+        v["closeToTray"] = serde_json::json!(to_tray);
+        v["closePromptShown"] = serde_json::json!(true);
+        let _ = crate::db::set_setting(&conn, "app_settings", &v.to_string());
+        /* 设置页的开关镜像同步（前端 bootstrapSettings 恢复，当前会话里
+           事件通知前端刷新——见 close-resolved 事件） */
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        if to_tray {
+            let _ = win.hide();
+        } else {
+            app.exit(0);
+        }
+    }
+    let _ = app.emit("close-resolved", to_tray);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -127,13 +170,19 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 关闭按钮 → 最小化到托盘（closeToTray 设置，默认开）；托盘「退出」才是真退出
+            // 关闭按钮：首次关闭询问（closePromptShown 未置位 → 弹窗让用户选）；
+            // 已选过 → 直接按 closeToTray 设置走（隐藏到托盘 / 退出）
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle().clone();
                 let win = window.clone();
                 api.prevent_close();
                 tauri::async_runtime::spawn(async move {
                     let db = app.state::<state::AppState>().db.clone();
+                    if !read_close_prompt_shown(&db).await {
+                        // 首次：前端弹选择对话框（选完调 resolve_close 执行）
+                        let _ = app.emit("close-ask", ());
+                        return;
+                    }
                     if read_close_to_tray(&db).await {
                         let _ = win.hide();
                     } else {
@@ -181,6 +230,8 @@ pub fn run() {
         commands::sync_status,
         // 缓存清理
         commands::cache_cleanup,
+        // 首次关闭询问
+        resolve_close,
         // AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi）
         commands::save_ai_config,
         commands::get_ai_config,

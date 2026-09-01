@@ -73,6 +73,8 @@ export interface SettingsState {
   smartDedup: boolean;
   /** 关闭按钮 → 最小化到托盘（默认开；托盘「退出」才是真退出） */
   closeToTray: boolean;
+  /** 首次关闭询问已展示（true 后关窗直接按 closeToTray 走，不再问） */
+  closePromptShown: boolean;
   /** 新文章到达发 Windows 系统通知（默认关；窗口隐藏时才发） */
   notifyOnNewArticles: boolean;
   /** 后台自动同步 Miniflux（默认开；到期跑轻量增量同步，状态变更另有即时推送） */
@@ -127,6 +129,8 @@ export interface AppState {
   settingsOpen: boolean;
   settingsTab: string;
   searchOpen: boolean;
+  /** 首次关闭询问弹窗（Rust close-ask 事件驱动） */
+  closeAskVisible: boolean;
   lightboxUrl: string | null;
   newCategoryModalOpen: boolean;
   addFeedModalOpen: boolean;
@@ -206,6 +210,8 @@ export interface AppState {
   openSettingsTab: (tab: string) => void;
   openSearch: () => void;
   closeSearch: () => void;
+  /** 首次关闭询问的应答（Rust resolve_close 执行隐藏/退出；remember 时同步设置镜像） */
+  answerCloseAsk: (action: 'tray' | 'exit', remember: boolean) => void;
   openLightbox: (url: string) => void;
   closeLightbox: () => void;
   openNewCategoryModal: () => void;
@@ -290,6 +296,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsOpen: false,
   settingsTab: 'general',
   searchOpen: false,
+  closeAskVisible: false,
   lightboxUrl: null,
   newCategoryModalOpen: false,
   addFeedModalOpen: false,
@@ -328,6 +335,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     defaultOpenMode: 'rss',
     smartDedup: false,
     closeToTray: true,
+    closePromptShown: false,
     notifyOnNewArticles: false,
     autoSyncMiniflux: true,
   },
@@ -728,6 +736,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   openSettingsTab: (tab) => set({ settingsOpen: true, settingsTab: tab }),
   openSearch: () => set({ searchOpen: true }),
   closeSearch: () => set({ searchOpen: false }),
+  answerCloseAsk: (action, remember) => {
+    set({ closeAskVisible: false });
+    /* remember 时同步设置镜像（真值由后端 resolve_close 落库，
+       这里保证当前会话的设置页开关即时一致） */
+    if (remember) {
+      set((s) => ({ settings: { ...s.settings, closeToTray: action === 'tray', closePromptShown: true } }));
+    }
+    void api.resolveClose(action, remember);
+  },
   openLightbox: (url) => set({ lightboxUrl: url }),
   closeLightbox: () => set({ lightboxUrl: null }),
   openNewCategoryModal: () => set({ newCategoryModalOpen: true }),
@@ -1047,26 +1064,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
   },
 
+  /* 布局/AI 开关统一走乐观更新：先改 store（设置页与主界面同帧生效，
+     不再依赖 reloadFromBackend 全量重拉——异步竞态会让设置页显示回旧值），
+     落库 fire-and-forget，失败 toast 提醒（本地状态不回滚，下次同步对齐）。 */
   updateCatLayout: (catId, layout) => {
-    if (get().dataMode === 'tauri') {
-      void api
-        .updateFolderLayout(Number(catId.replace('cat-', '')), layout)
-        .then(() => get().reloadFromBackend())
-        .catch(() => get().showToast('更新布局失败'));
-      return;
-    }
     set((s) => reconcileCategories(s, s.categories.map((c) => (c.id === catId ? { ...c, layout } : c))));
     get().showToast('已更新分类布局并即时生效');
+    void api
+      .updateFolderLayout(Number(catId.replace('cat-', '')), layout)
+      .catch(() => get().showToast('布局保存失败（界面已生效，重启后可能回退）'));
   },
 
   updateFeedLayout: (catId, feedId, layout) => {
-    if (get().dataMode === 'tauri') {
-      void api
-        .updateFeedLayout(Number(feedId), layout)
-        .then(() => get().reloadFromBackend())
-        .catch(() => get().showToast('更新布局失败'));
-      return;
-    }
     set((s) =>
       reconcileCategories(
         s,
@@ -1078,11 +1087,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       ),
     );
     get().showToast('已更新订阅源布局并即时生效');
+    void api
+      .updateFeedLayout(Number(feedId.slice(2)), layout)
+      .catch(() => get().showToast('布局保存失败（界面已生效，重启后可能回退）'));
   },
 
   toggleCatSummary: (catId, val) => {
     set((s) => ({ categories: s.categories.map((c) => (c.id === catId ? { ...c, autoSummary: val } : c)) }));
-    /* 落库：分类级 AI 标志 */
     const cat = get().categories.find((c) => c.id === catId);
     if (cat) void api.setFolderAiFlags(Number(catId.slice(4)), val, cat.autoTranslate);
   },
