@@ -826,6 +826,9 @@ function SyncTab() {
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  /** 首连弹窗：本地未绑定源数（>0 弹「同步本地订阅到 Miniflux」确认） */
+  const [pendingLocalSync, setPendingLocalSync] = useState(0);
+  const [syncingLocal, setSyncingLocal] = useState(false);
 
   /* 打开设置时读取当前连接状态 */
   useEffect(() => {
@@ -870,12 +873,17 @@ function SyncTab() {
     }
     setSaving(true);
     try {
-      const msg = await api.syncSave(endpoint.trim(), token.trim());
+      const result = await api.syncSave(endpoint.trim(), token.trim());
       setConnected(true);
       /* 保存成功即刷新账户名显示（syncSave 落了 miniflux_account） */
       void api.syncStatus().then((st) => { if (st) setAccount(st.account); });
       setToken('');
-      showToast(msg ?? '已保存，正在后台同步…');
+      showToast(result?.message ?? '已保存，正在后台同步…');
+      /* 首连且本地有未绑定的直连源 → 弹「同步本地订阅到 Miniflux」
+         （不自动推：推送会改变服务端数据，必须用户确认） */
+      if (result?.firstConnect && result.unboundLocalFeeds > 0) {
+        setPendingLocalSync(result.unboundLocalFeeds);
+      }
       /* 全后台链：feeds 阶段（快）→ states 阶段（慢，含全量对账）→ 直连抓新源 */
       void api
         .syncPhase('feeds')
@@ -901,6 +909,26 @@ function SyncTab() {
       showToast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSaving(false);
+    }
+  };
+
+  /** 把本地直连订阅推送到 Miniflux（首连弹窗确认与手动按钮共用）。
+   * 幂等：已绑定的跳过、服务端已有同 URL（409）回查绑定不报错 */
+  const doSyncLocal = async () => {
+    if (dataMode !== 'tauri') {
+      showToast('浏览器演示模式无同步能力');
+      return;
+    }
+    setSyncingLocal(true);
+    try {
+      const msg = await api.syncLocalFeeds();
+      await reloadFromBackend();
+      setPendingLocalSync(0);
+      showToast(msg ?? '同步完成');
+    } catch (e) {
+      showToast(`同步本地订阅失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setSyncingLocal(false);
     }
   };
 
@@ -971,6 +999,16 @@ function SyncTab() {
           {saving ? '保存中…' : '保存并同步'}
         </button>
         {connected && (
+          <button
+            className="toggle-action-btn"
+            disabled={syncingLocal || saving}
+            onClick={() => void doSyncLocal()}
+            title="把本地直连添加的订阅推送到服务端（已同步的自动跳过）"
+          >
+            {syncingLocal ? '同步中…' : '同步本地订阅'}
+          </button>
+        )}
+        {connected && (
           <button className="toggle-action-btn" disabled={testing || saving} onClick={() => setConfirmDisconnect(true)}>
             断开连接
           </button>
@@ -1011,6 +1049,17 @@ function SyncTab() {
         confirmText="断开并清理"
         onConfirm={() => { setConfirmDisconnect(false); void doDisconnect(); }}
         onCancel={() => setConfirmDisconnect(false)}
+      />
+
+      {/* 首连且本地有未绑定源：询问是否把本地订阅推送到服务端
+          （推送会改变服务端数据——必须用户确认，不自动执行） */}
+      <ConfirmDialog
+        open={pendingLocalSync > 0}
+        title="同步本地订阅到 Miniflux"
+        message={`检测到本地有 ${pendingLocalSync} 个直连添加的订阅尚未同步到服务端。是否现在同步？同步后它们会出现在你的 Miniflux 账户中，其他设备也能看到。`}
+        confirmText="同步到服务端"
+        onConfirm={() => { setPendingLocalSync(0); void doSyncLocal(); }}
+        onCancel={() => setPendingLocalSync(0)}
       />
     </>
   );

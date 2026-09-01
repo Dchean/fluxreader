@@ -251,6 +251,7 @@ pub fn run() {
         commands::sync_save,
         commands::sync_phase,
         commands::sync_disconnect,
+        commands::sync_local_feeds,
         commands::sync_now,
         commands::sync_status,
         // 缓存清理

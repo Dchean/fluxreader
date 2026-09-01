@@ -94,6 +94,14 @@ export interface SyncStatusInfo {
   last_sync: number;
 }
 
+/** sync_save 返回：首连且本地有未绑定源时 firstConnect=true
+ *（前端据此弹「同步本地订阅到 Miniflux」确认框） */
+export interface SyncSaveResult {
+  message: string;
+  firstConnect: boolean;
+  unboundLocalFeeds: number;
+}
+
 export interface ArticleListArgs {
   feed_id?: number | null;
   folder_id?: number | null;
@@ -358,10 +366,25 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('sync_test', { endpoint, token }) as string) : null;
   },
-  /** 保存凭据（先测试，失败不保存）。重活（拉订阅/同步状态）由前端随后台阶段执行 */
-  async syncSave(endpoint: string, token: string): Promise<string | null> {
+  /** 保存凭据（先测试，失败不保存）。重活（拉订阅/同步状态）由前端随后台阶段执行。
+   * 返回 JSON：{ message, firstConnect, unboundLocalFeeds }——首连且本地有
+   * 未绑定源时前端弹「同步本地订阅」确认框 */
+  async syncSave(endpoint: string, token: string): Promise<SyncSaveResult | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('sync_save', { endpoint, token }) as string) : null;
+    if (!inv) return null;
+    const raw = (await inv('sync_save', { endpoint, token })) as string;
+    try {
+      return JSON.parse(raw) as SyncSaveResult;
+    } catch {
+      // 兼容旧纯文本消息格式
+      return { message: raw, firstConnect: false, unboundLocalFeeds: 0 };
+    }
+  },
+  /** 把本地直连订阅（未绑定的）推送到 Miniflux。幂等：已绑定的跳过、
+   * 服务端已存在（409）回查绑定不报错 */
+  async syncLocalFeeds(): Promise<string | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('sync_local_feeds') as string) : null;
   },
   /** 分步同步：which='feeds'（订阅层）| 'states'（状态+条目层）。full=true 含全量对账 */
   async syncPhase(which: 'feeds' | 'states', full = false): Promise<SyncReport | null> {

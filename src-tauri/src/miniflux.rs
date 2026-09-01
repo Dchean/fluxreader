@@ -207,7 +207,10 @@ impl MinifluxClient {
         .await
     }
 
-    /// 新增订阅：POST /v1/feeds {feed_url, category_id}
+    /// 新增订阅：POST /v1/feeds {feed_url, category_id}。
+    /// 幂等：服务端已存在（409）时回查 /v1/feeds 按 URL 找到既有 feed_id
+    /// 返回（真实 Miniflux 409 响应体里带 feed_id，优先取响应体，
+    /// 兜底走列表回查）——同一 URL 重复推送不构成错误，视为"已同步"。
     pub async fn create_feed(&self, feed_url: &str, category_id: i64) -> AppResult<i64> {
         #[derive(Serialize)]
         struct Body<'a> {
@@ -223,18 +226,36 @@ impl MinifluxClient {
             .body(body)
             .send()
             .await?;
-        if !resp.status().is_success() {
-            return Err(AppError::network(format!(
-                "POST /v1/feeds → {}",
-                resp.status()
-            )));
+        let status = resp.status();
+        if status.is_success() {
+            #[derive(Deserialize)]
+            struct Created {
+                feed_id: i64,
+            }
+            let created: Created = resp.json().await?;
+            return Ok(created.feed_id);
         }
-        #[derive(Deserialize)]
-        struct Created {
-            feed_id: i64,
+        if status.as_u16() == 409 {
+            // 已存在：先试响应体里的 feed_id（真实服务端行为）
+            #[derive(Deserialize, Default)]
+            struct Conflict {
+                #[serde(default)]
+                feed_id: Option<i64>,
+            }
+            if let Ok(c) = resp.json::<Conflict>().await {
+                if let Some(id) = c.feed_id {
+                    return Ok(id);
+                }
+            }
+            // 兜底：列表回查
+            let feeds = self.feeds().await?;
+            return feeds
+                .iter()
+                .find(|f| f.feed_url == feed_url)
+                .map(|f| f.id)
+                .ok_or_else(|| AppError::network("409 但列表中找不到该订阅"));
         }
-        let created: Created = resp.json().await?;
-        Ok(created.feed_id)
+        Err(AppError::network(format!("POST /v1/feeds → {status}")))
     }
 
     /// 删除订阅：DELETE /v1/feeds/{id}

@@ -278,3 +278,91 @@ async fn reconnect_other_account_no_mixing() {
     assert_eq!(left, 0, "no account A feeds left after purge");
     let _ = std::fs::remove_file(&tmp);
 }
+
+/* ============================================================
+   本地订阅同步到 Miniflux（sync_local_feeds 语义）
+   ============================================================ */
+
+/// 未连接期间添加的本地源 → 首连后 sync_local_feeds 入队 → push_feeds 推送 →
+/// 服务端收到 create_feed 且本地绑定 miniflux_id；再跑一次（幂等）不再推送。
+#[tokio::test]
+async fn sync_local_feeds_pushes_unbound_local_feeds() {
+    let server = MockMiniflux::start().await.expect("start mock");
+    let tmp = std::env::temp_dir().join("fluxreader_account_localsync.db");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = fresh_db("localsync");
+
+    // 未连接时的本地直连源（origin 默认 local）
+    let folder = db::create_folder(&conn, "本地", "article").unwrap();
+    db::insert_feed(&conn, "http://127.0.0.1:1/a.xml", None, "Local A", None, folder, "inherit", true, false).unwrap();
+    db::insert_feed(&conn, "http://127.0.0.1:1/b.xml", None, "Local B", None, folder, "inherit", true, false).unwrap();
+    // 已绑定一个（不应重复入队）
+    let bound = db::insert_feed(&conn, "http://127.0.0.1:1/c.xml", None, "Bound", None, folder, "inherit", true, false).unwrap();
+    db::set_feed_miniflux_id(&conn, bound, 999).unwrap();
+
+    // 连接（复刻 sync_local_feeds 的入队逻辑：未绑本地源 → add_feed 队列）
+    db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "miniflux_token", "t").unwrap();
+    let unbound: Vec<(String, Option<i64>)> = {
+        let mut stmt = conn
+            .prepare("SELECT feed_url, folder_id FROM feeds WHERE origin = 'local' AND miniflux_id IS NULL")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(unbound.len(), 2, "只有未绑定的本地源入队");
+    for (url, folder_id) in &unbound {
+        let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
+        db::enqueue_sync(&conn, None, Some(url), "add_feed", Some(&payload)).unwrap();
+    }
+
+    // 跑 feeds 阶段（推送）：服务端 created_feeds 应收到 2 个 create
+    let http = app_lib::ingestion::build_client(10);
+    let report = app_lib::sync::feeds_phase(
+        &std::sync::Arc::new(tokio::sync::Mutex::new(conn)),
+        &http,
+    ).await.expect("feeds phase");
+
+    let created = server.created_feeds.lock().unwrap();
+    assert_eq!(created.len(), 2, "both unbound local feeds pushed: {created:?}");
+    assert_eq!(report.pushed_feeds, 2, "report counts both");
+
+    // 本地两个源绑定上 miniflux_id
+    let tmp2 = db::open(&tmp).unwrap();
+    let bound_count: i64 = tmp2
+        .query_row(
+            "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND miniflux_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(bound_count, 3, "2 newly bound + 1 pre-bound");
+
+    // 幂等：队列已清空，再入队（无未绑源）→ 0
+    let unbound2: i64 = tmp2
+        .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND miniflux_id IS NULL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(unbound2, 0, "idempotent: nothing left to push");
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// create_feed 409 幂等：对 mock 已有的 feed 10 URL（GET /v1/feeds 静态预置）
+/// 再 create → 409 + feed_id → create_feed 返回既有 id 而非报错。
+/// （真实 Miniflux 对重复订阅同样返回 409 带 feed_id。）
+#[tokio::test]
+async fn create_feed_conflict_returns_existing_id() {
+    let server = MockMiniflux::start().await.expect("start mock");
+    let http = app_lib::ingestion::build_client(10);
+    let client = app_lib::miniflux::MinifluxClient::new(&server.url(), "t", http.clone());
+
+    // mock GET /v1/feeds 预置的既有订阅 URL
+    let existing_url = "http://127.0.0.1:8765/local_feed.xml";
+    let id = client.create_feed(existing_url, 1).await.expect("409 should resolve to existing id, not error");
+    assert_eq!(id, 10, "conflict resolves to the pre-existing feed id");
+
+    // 且不重复入 created_feeds（幂等，不产生重复创建记录）
+    let created = server.created_feeds.lock().unwrap();
+    assert!(!created.iter().any(|(u, _)| u == existing_url), "no duplicate create recorded");
+}

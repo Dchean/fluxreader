@@ -29,6 +29,8 @@ pub struct MockMiniflux {
     pub bookmark_toggles: Mutex<Vec<i64>>,
     /// 收到的 feed 创建请求 (url, category_id)
     pub created_feeds: Mutex<Vec<(String, i64)>>,
+    /// 服务端"已有"订阅（url → feed_id）：create 同 URL 返回 409（幂等路径）
+    pub existing_feed_urls: Mutex<Vec<(String, i64)>>,
     pub next_feed_id: Mutex<i64>,
     pub next_entry_id: Mutex<i64>,
 }
@@ -43,6 +45,11 @@ impl MockMiniflux {
             status_updates: Mutex::new(Vec::new()),
             bookmark_toggles: Mutex::new(Vec::new()),
             created_feeds: Mutex::new(Vec::new()),
+            // 与 GET /v1/feeds 静态列表一致：feed 10（URL 碰撞/409 幂等路径用）
+            existing_feed_urls: Mutex::new(vec![(
+                "http://127.0.0.1:8765/local_feed.xml".into(),
+                10,
+            )]),
             next_feed_id: Mutex::new(100),
             next_entry_id: Mutex::new(500),
         });
@@ -241,13 +248,26 @@ fn route(srv: &MockMiniflux, method: &str, path: &str, path_query: &str, body: &
             let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
             let url = v.get("feed_url").and_then(|s| s.as_str()).unwrap_or("").to_string();
             let cat = v.get("category_id").and_then(|s| s.as_i64()).unwrap_or(1);
-            srv.created_feeds.lock().unwrap().push((url.clone(), cat));
-            let feed_id = {
-                let mut n = srv.next_feed_id.lock().unwrap();
-                *n += 1;
-                *n
-            };
-            (200, serde_json::json!({ "feed_id": feed_id }).to_string())
+            // 服务端已有同 URL 订阅 → 409 + 既有 feed_id（真实 Miniflux 行为，
+            // 驱动 create_feed 的幂等回查路径被真实测试覆盖）
+            let existing = srv
+                .existing_feed_urls
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(u, _)| *u == url)
+                .map(|(_, id)| *id);
+            if let Some(id) = existing {
+                (409, serde_json::json!({ "feed_id": id, "error_message": "This feed already exists" }).to_string())
+            } else {
+                srv.created_feeds.lock().unwrap().push((url.clone(), cat));
+                let feed_id = {
+                    let mut n = srv.next_feed_id.lock().unwrap();
+                    *n += 1;
+                    *n
+                };
+                (200, serde_json::json!({ "feed_id": feed_id }).to_string())
+            }
         }
         (_, p) if p.starts_with("/v1/entries/") && p.ends_with("/bookmark") => {
             let id: i64 = p

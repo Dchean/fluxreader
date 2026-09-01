@@ -725,15 +725,17 @@ pub async fn sync_save(
             _ => (endpoint.trim().to_string(), token.trim().to_string()),
         }
     };
-    // 换账号检测（锁内读旧凭据）
-    let account_changed = {
+    // 换账号检测（锁内读旧凭据）；保存前凭据为空 = 首连
+    let (account_changed, old_was_empty) = {
         let conn = state.db.lock().await;
         let old = crate::sync::read_credentials(&conn);
         match old {
             Some((old_ep, old_tk)) => {
-                old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/') || old_tk != token
+                let changed =
+                    old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/') || old_tk != token;
+                (changed, false)
             }
-            None => false,
+            None => (false, true),
         }
     };
     // 测试新凭据（失败不保存不动现状）；账户名随凭据落库（设置页动态显示）
@@ -744,13 +746,31 @@ pub async fn sync_save(
             let (feeds, _) = db::purge_miniflux_data(&mut conn)?;
             log::info!("sync: 账号切换，清理旧账号数据：{feeds} 个订阅");
         }
+        // 首连判定（保存前凭据为空 = 第一次连接）：供前端决定是否弹
+        // 「同步本地订阅到 Miniflux」（本地有未绑源时）
+        let unbound_local: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND miniflux_id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let first_connect = old_was_empty && unbound_local > 0;
         db::set_setting(&conn, "miniflux_endpoint", &endpoint)?;
         db::set_setting(&conn, "miniflux_token", &token)?;
         db::set_setting(&conn, "miniflux_account", &account)?;
         // 新连接：清增量游标，让首同步从全量开始（对账旧状态差异）
         db::set_setting(&conn, "miniflux_last_sync", "0")?;
+        if first_connect {
+            return Ok(serde_json::json!({
+                "message": msg,
+                "firstConnect": true,
+                "unboundLocalFeeds": unbound_local,
+            })
+            .to_string());
+        }
     }
-    Ok(msg)
+    Ok(serde_json::json!({ "message": msg, "firstConnect": false, "unboundLocalFeeds": 0 }).to_string())
 }
 
 /// 分步同步：which="feeds"（订阅层，秒级）| "states"（状态+条目层，慢）。
@@ -765,6 +785,70 @@ pub async fn sync_phase(
         "feeds" => crate::sync::feeds_phase(&state.db, &state.http).await,
         "states" => crate::sync::states_phase(&state.db, &state.http, full.unwrap_or(false)).await,
         _ => Err(AppError::new("validate", "which 必须是 feeds 或 states")),
+    }
+}
+
+/// 把本地直连订阅（origin='local' 且未绑定 miniflux_id）推送到服务端：
+/// 入队 add_feed（带分类映射 payload）→ 立即跑 feeds 阶段（推送+碰撞绑定）。
+/// 幂等：已绑定的源不入队；服务端已存在同 URL（409）回查绑定，不构成错误。
+/// 返回 (待推数, 推送摘要)——首连弹窗与手动按钮共用此入口。
+#[tauri::command]
+pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
+    // 锁内：找未绑定的本地源并入队（分类 id 随 payload，push 时映射远端分类）；
+    // 查重：队列里已有同 URL 的 add_feed 项则跳过（弹窗确认 + 手动按钮连点
+    // 不会堆积重复队列——失败项保留是重试语义，重复入队才是堆积）
+    let queued = {
+        let conn = state.db.lock().await;
+        if !sync_configured(&conn) {
+            return Err(AppError::new("notConnected", "未连接 Miniflux"));
+        }
+        let mut stmt = conn
+            .prepare(
+                "SELECT f.id, f.feed_url, f.folder_id FROM feeds f
+                 WHERE f.origin = 'local' AND f.miniflux_id IS NULL",
+            )?;
+        let rows: Vec<(i64, String, Option<i64>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let pending_urls: std::collections::HashSet<String> = db::take_sync_queue(&conn)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|i| i.action == "add_feed")
+            .filter_map(|i| i.feed_url)
+            .collect();
+        let mut n = 0usize;
+        for (_id, url, folder) in rows {
+            if pending_urls.contains(&url) {
+                continue; // 已在队列（上次失败待重试）
+            }
+            let payload = serde_json::json!({ "folder_id": folder }).to_string();
+            db::enqueue_sync(&conn, None, Some(&url), "add_feed", Some(&payload))?;
+            n += 1;
+        }
+        n
+    };
+    if queued == 0 {
+        // 没有新入队，但可能仍有待推队列项（上次失败的）——检查后再决定
+        let has_pending = {
+            let conn = state.db.lock().await;
+            db::take_sync_queue(&conn)
+                .map(|q| q.iter().any(|i| i.action == "add_feed"))
+                .unwrap_or(false)
+        };
+        if !has_pending {
+            return Ok("没有需要同步的本地订阅（全部已绑定或已推送）".into());
+        }
+    }
+    // feeds 阶段：push（新入队的 + 队列残留的）+ pull（碰撞绑定 + 远端新订阅）
+    let report = crate::sync::feeds_phase(&state.db, &state.http).await?;
+    if report.errors.is_empty() {
+        Ok(format!("已同步 {queued} 个本地订阅到 Miniflux（推送 {}）", report.pushed_feeds))
+    } else {
+        Ok(format!(
+            "已同步 {queued} 个本地订阅，其中 {} 个失败（下次同步自动重试）：{}",
+            report.errors.len(),
+            report.errors.join("；")
+        ))
     }
 }
 
