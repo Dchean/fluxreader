@@ -785,6 +785,11 @@ body {
   white-space: nowrap;
 }
 
+/* 纯图标功能按钮（订阅管理行「添加源」）：正方形、图标居中，含义靠 title 提示 */
+.toggle-action-btn.icon-btn {
+  padding: 4px 7px;
+}
+
 .toggle-action-btn:hover {
   background: var(--bg-card-hover);
   border-color: var(--border-strong);
@@ -2201,7 +2206,8 @@ body {
    header 左侧 = 可点击折叠的标题按钮；右侧 = 控件区（独立事件域） */
 .group-mgr-header {
   background: var(--badge-bg);
-  padding: 12px 16px;
+  /* 与源行（.group-mgr-child-row）水平内边距一致：右侧功能按键列垂直对齐的前提 */
+  padding: 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2259,6 +2265,13 @@ body {
   flex-wrap: wrap;
 }
 
+/* 分类头行与源行的功能按键统一右对齐：两行末端按钮（删除/编辑）X 边缘一致，
+   左侧复选框/布局下拉自然对齐成列 */
+.group-mgr-controls,
+.group-mgr-feed-controls {
+  justify-content: flex-end;
+}
+
 .group-mgr-layout-control {
   display: flex;
   align-items: center;
@@ -2282,10 +2295,13 @@ body {
   gap: 4px;
   cursor: pointer;
   color: var(--text-secondary);
+  /* 定宽列：分类行与源行的摘要/翻译复选框同宽，右对齐后垂直成列 */
+  flex: 0 0 52px;
 }
 
 .group-mgr-body {
-  padding: 10px 14px;
+  /* 水平 padding 归零：源行自带 12px 行内边距，与 header 同基准对齐（双层缩进会让按键列错 12px） */
+  padding: 10px 0;
 }
 
 .group-mgr-empty {
@@ -2354,6 +2370,20 @@ body {
 .group-mgr-controls .toggle-action-btn,
 .group-mgr-feed-controls .toggle-action-btn {
   font-size: 11px;
+}
+
+/* 功能按键列定宽：分类行「重命名」与源行「编辑」语义对位（都是"修改"动作），
+   删除/编辑两行同宽——右对齐后每列垂直对齐，窄窗 flex-wrap 仍可换行 */
+.group-mgr-controls .toggle-action-btn,
+.group-mgr-feed-controls .toggle-action-btn {
+  flex: 0 0 64px;
+  justify-content: center;
+}
+
+/* 纯图标按钮（添加源）按内容宽，不参与 64px 定宽列 */
+.group-mgr-controls .toggle-action-btn.icon-btn,
+.group-mgr-feed-controls .toggle-action-btn.icon-btn {
+  flex: 0 0 auto;
 }
 
 /* ---------- 主操作按钮（原"background:var(--accent)"内联样式类化） ---------- */

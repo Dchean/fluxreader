@@ -445,7 +445,6 @@ function FeedsTab() {
       </div>
 
       {categories.map((cat) => {
-        const CatIcon = LayoutIcon[cat.layout];
         return (
           <div className="feed-group-mgr-box" key={cat.id}>
             <div className="group-mgr-header">
@@ -463,13 +462,16 @@ function FeedsTab() {
               </button>
 
               <div className="group-mgr-controls" onClick={(e) => e.stopPropagation()}>
+                <button
+                  className="toggle-action-btn icon-btn"
+                  onClick={() => openAddFeedModal(cat.id)}
+                  title="添加订阅源"
+                >
+                  <Icons.plus />
+                </button>
                 <div className="group-mgr-layout-control">
-                  <span className="layout-svg-badge">
-                    {CatIcon && <CatIcon />}
-                    布局:
-                  </span>
                   <FluxDropdown
-                    width={95}
+                    width={115}
                     value={cat.layout}
                     onChange={(v) => updateCatLayout(cat.id, v as ContentLayoutType)}
                     options={LAYOUT_OPTIONS}
@@ -487,7 +489,7 @@ function FeedsTab() {
                     onChange={(e) => toggleCatSummary(cat.id, e.target.checked)}
                     style={{ accentColor: 'var(--accent)' }}
                   />
-                  自动摘要
+                  摘要
                 </label>
                 <label
                   className="mgr-checkbox-label"
@@ -500,20 +502,15 @@ function FeedsTab() {
                     onChange={(e) => toggleCatTranslate(cat.id, e.target.checked)}
                     style={{ accentColor: 'var(--accent)' }}
                   />
-                  自动翻译
+                  翻译
                 </label>
 
-                <button className="toggle-action-btn" onClick={() => openAddFeedModal(cat.id)}>
-                  + 添加源
-                </button>
                 <button
-                  className="toggle-action-btn"
-                 
+                  className="toggle-action-btn icon-btn"
                   title="重命名该分类"
                   onClick={() => openRenameCatModal(cat.id)}
                 >
                   <Icons.edit />
-                  <span>重命名</span>
                 </button>
                 <button
                   className="toggle-action-btn btn-danger-text"
@@ -530,7 +527,7 @@ function FeedsTab() {
             {!cat.settingsCollapsed && (
               <div className="group-mgr-body">
                 {cat.feeds.length === 0 && (
-                  <div className="group-mgr-empty">该分类暂无订阅源，点击「+ 添加源」创建</div>
+                  <div className="group-mgr-empty">该分类暂无订阅源，点击右上角 ⊕ 添加</div>
                 )}
                 {cat.feeds.map((f) => {
                   /* AI 开关只对使用 AI 的布局有意义（文章/通知/社交——翻译）；
@@ -564,7 +561,7 @@ function FeedsTab() {
                           onChange={(e) => toggleFeedSummary(cat.id, f.id, e.target.checked)}
                           style={{ accentColor: 'var(--accent)' }}
                         />
-                        自动摘要
+                        摘要
                       </label>
                       <label
                         className="mgr-checkbox-label"
@@ -577,16 +574,14 @@ function FeedsTab() {
                           onChange={(e) => toggleFeedTranslate(cat.id, f.id, e.target.checked)}
                           style={{ accentColor: 'var(--accent)' }}
                         />
-                        自动翻译
+                        翻译
                       </label>
                       <button
-                        className="toggle-action-btn"
-
+                        className="toggle-action-btn icon-btn"
                         title="编辑该订阅源（重命名/移动分类/布局/AI 开关）"
                         onClick={() => openEditFeedModal(f.id)}
                       >
                         <Icons.edit />
-                        <span>编辑</span>
                       </button>
                       <button
                         className="toggle-action-btn btn-danger-text"
