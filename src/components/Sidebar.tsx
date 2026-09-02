@@ -290,6 +290,14 @@ export function Sidebar() {
             <Icons.refresh />
           </button>
         </div>
+        <button
+          className={`sidebar-refresh-all ${isBusy ? 'sync-refresh-all-busy' : ''}`}
+          onClick={triggerManualSync}
+          disabled={isBusy}
+        >
+          <Icons.refresh />
+          <span>{isBusy ? '刷新中…' : '刷新所有订阅源'}</span>
+        </button>
         <button className="nav-tab-item" onClick={openSettings}>
           <span className="nav-icon"><Icons.settings /></span>
           <span>设置中心</span>

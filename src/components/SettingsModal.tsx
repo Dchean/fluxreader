@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
-import { api } from '../lib/api';
+import { api, extractError } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
 import { FluxDropdown, Switch, SettingCard, ModalOverlay, ConfirmDialog } from './primitives';
 import type { ContentLayoutType } from '../types';
@@ -52,11 +52,23 @@ export function SettingsModal() {
   const settingsTab = useAppStore((s) => s.settingsTab);
   const closeSettings = useAppStore((s) => s.closeSettings);
   const switchSettingsTab = useAppStore((s) => s.switchSettingsTab);
+  const showToast = useAppStore((s) => s.showToast);
 
   const meta = TAB_META.find((t) => t.id === settingsTab) ?? TAB_META[0];
 
+  /* GitHub 等待授权期间锁定弹窗：遮罩点击/Esc 不关闭——切到网页输入代码时
+     误关会让用户看不到授权进度与常驻代码（轮询已常驻 store，不受影响） */
+  const ghFlow = useAppStore((s) => s.githubFlow);
+  const handleClose = () => {
+    if (ghFlow) {
+      showToast('GitHub 授权进行中，等待网页授权完成后再关闭');
+      return;
+    }
+    closeSettings();
+  };
+
   return (
-    <ModalOverlay open={settingsOpen} onClose={closeSettings}>
+    <ModalOverlay open={settingsOpen} onClose={handleClose}>
       <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
         {/* 左侧导航 */}
         <div className="settings-sidebar">
@@ -856,7 +868,7 @@ function SyncTab() {
       const msg = await api.syncTest(endpoint.trim(), token.trim());
       showToast(msg ?? '连接成功');
     } catch (e) {
-      showToast(`连接失败：${e instanceof Error ? e.message : String(e)}`);
+      showToast(`连接失败：${extractError(e)}`);
     } finally {
       setTesting(false);
     }
@@ -905,11 +917,11 @@ function SyncTab() {
           showToast('Miniflux 同步完成');
         })
         .catch((e: unknown) => {
-          const m = e instanceof Error ? e.message : String(e);
+          const m = extractError(e);
           showToast(`后台同步失败：${m}`, { label: '重试', run: () => { void doSaveAndSync(); } });
         });
     } catch (e) {
-      showToast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+      showToast(`保存失败：${extractError(e)}`);
     } finally {
       setSaving(false);
     }
@@ -929,7 +941,7 @@ function SyncTab() {
       setPendingLocalSync(0);
       showToast(msg ?? '同步完成');
     } catch (e) {
-      showToast(`同步本地订阅失败：${e instanceof Error ? e.message : String(e)}`);
+      showToast(`同步本地订阅失败：${extractError(e)}`);
     } finally {
       setSyncingLocal(false);
     }
@@ -945,7 +957,7 @@ function SyncTab() {
       await reloadFromBackend();
       showToast(msg ?? '已断开连接');
     } catch (e) {
-      showToast(`断开失败：${e instanceof Error ? e.message : String(e)}`);
+      showToast(`断开失败：${extractError(e)}`);
     } finally {
       setSaving(false);
     }
@@ -1095,7 +1107,7 @@ function CacheCleanupSection() {
       showToast(msg ?? '清理完成');
       await reloadFromBackend();
     } catch (e) {
-      showToast(`清理失败：${e instanceof Error ? e.message : String(e)}`);
+      showToast(`清理失败：${extractError(e)}`);
     } finally {
       setBusy(false);
       setConfirm(null);
@@ -1152,15 +1164,21 @@ function ConfigSyncSection() {
   const [status, setStatus] = useState<{ configured: boolean; backend?: string; lastUpload?: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
-  /* ---- GitHub 设备流登录态 ---- */
-  const [ghAccount, setGhAccount] = useState<{ login: string } | null>(null);
-  const [ghFlow, setGhFlow] = useState<{ user_code: string; verification_uri: string; interval: number } | null>(null);
-  const [ghBusy, setGhBusy] = useState(false);
-  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /* ---- GitHub 设备流登录态（状态与轮询在 store 层，组件只做展示触发） ---- */
+  const ghAccount = useAppStore((s) => s.githubAccount);
+  const ghFlow = useAppStore((s) => s.githubFlow);
+  const ghLoggingIn = useAppStore((s) => s.githubLoggingIn);
+  const githubLoginStart = useAppStore((s) => s.githubLoginStart);
+  const githubLoginDisconnect = useAppStore((s) => s.githubLoginDisconnect);
 
-  /* 卸载时清轮询定时器（等待授权期间关弹窗不再空转） */
-  useEffect(() => () => { if (pollTimer.current) clearTimeout(pollTimer.current); }, []);
+  const doGhLogin = () => void githubLoginStart();
+  const doGhDisconnect = () => {
+    void githubLoginDisconnect().then(() => {
+      setStatus(null);
+    });
+  };
 
+  /* 挂载 + GitHub 登录态变化时同步后端配置状态（登录后上传入口立即可用） */
   useEffect(() => {
     void api.configSyncStatus().then((st) => {
       if (st) {
@@ -1168,74 +1186,7 @@ function ConfigSyncSection() {
         if (st.backend === 'webdav') setBackend('webdav');
       }
     });
-    void api.githubLoginStatus().then((acc) => { if (acc) setGhAccount(acc); });
-  }, []);
-
-  const doGhLogin = async (force = false) => {
-    if (ghBusy) return;
-    setGhBusy(true);
-    try {
-      let start: Awaited<ReturnType<typeof api.githubLoginStart>>;
-      try {
-        start = await api.githubLoginStart(force ? true : undefined);
-      } catch (first) {
-        /* WebDAV 冲突：确认后带 force 重发（后端错误码 webdavConflict） */
-        const msg = first instanceof Error ? first.message : String(first);
-        if (msg.includes('WebDAV') && !force) {
-          if (!window.confirm(`${msg}
-
-确定切换吗？`)) return;
-          start = await api.githubLoginStart(true);
-        } else {
-          throw first;
-        }
-      }
-      setGhFlow(start);
-      await openExternal(start.verification_uri);
-      showToast('浏览器已打开授权页，代码已常驻显示在本页');
-      schedulePoll(start.interval);
-    } catch (e) {
-      showToast(`发起登录失败：${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setGhBusy(false);
-    }
-  };
-
-  const schedulePoll = (intervalSec: number) => {
-    if (pollTimer.current) clearTimeout(pollTimer.current);
-    pollTimer.current = setTimeout(() => void doPoll(), Math.max(3, intervalSec) * 1000);
-  };
-
-  const doPoll = async () => {
-    try {
-      const acc = await api.githubLoginPoll();
-      if (acc) {
-        setGhAccount(acc);
-        setGhFlow(null);
-        setStatus((s) => (s ? { ...s, configured: true, backend: 'gist' } : { configured: true, backend: 'gist' }));
-        showToast(`已登录 GitHub：${acc.login}（Gist 同步已就绪）`);
-      } else if (ghFlow) {
-        schedulePoll(ghFlow.interval);
-      }
-    } catch (e) {
-      setGhFlow(null);
-      showToast(`GitHub 登录失败：${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
-  const doGhDisconnect = async () => {
-    setGhBusy(true);
-    try {
-      await api.githubLoginDisconnect();
-      setGhAccount(null);
-      setStatus((s) => (s ? { ...s, configured: false, lastUpload: undefined } : null));
-      showToast('已断开 GitHub 登录');
-    } catch (e) {
-      showToast(`断开失败：${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setGhBusy(false);
-    }
-  };
+  }, [ghAccount]);
 
   const doSave = async () => {
     if (!token.trim()) {
@@ -1259,7 +1210,7 @@ function ConfigSyncSection() {
       }
       showToast('凭据已保存（本地存储）');
     } catch (e) {
-      showToast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+      showToast(`保存失败：${extractError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -1272,7 +1223,7 @@ function ConfigSyncSection() {
       setStatus({ configured: true, backend, lastUpload: at });
       showToast('配置已上传');
     } catch (e) {
-      showToast(`上传失败：${e instanceof Error ? e.message : String(e)}`);
+      showToast(`上传失败：${extractError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -1293,7 +1244,7 @@ function ConfigSyncSection() {
       await bootstrapSettings().catch(() => null);
       showToast(`配置已应用：新增 ${r.imported} 个源${r.skipped > 0 ? `，跳过 ${r.skipped} 个已存在` : ''}`);
     } catch (e) {
-      showToast(`下载失败：${e instanceof Error ? e.message : String(e)}`);
+      showToast(`下载失败：${extractError(e)}`);
     } finally {
       setBusy(false);
     }
@@ -1307,7 +1258,7 @@ function ConfigSyncSection() {
           title="已登录 GitHub"
           desc={`账户 ${ghAccount.login} · 配置经私有 Gist 同步（与 PAT 等效，仅本机存储 token）`}
         >
-          <button className="toggle-action-btn btn-danger-text" disabled={ghBusy} onClick={() => void doGhDisconnect()}>
+          <button className="toggle-action-btn btn-danger-text" disabled={ghLoggingIn} onClick={() => void doGhDisconnect()}>
             断开
           </button>
         </SettingCard>
@@ -1333,8 +1284,8 @@ function ConfigSyncSection() {
           title="网页登录 GitHub"
           desc="跳转浏览器完成 GitHub 授权（授权页显示 GitHub CLI 请求 gist 权限，属正常现象），登录后配置同步到你的私有 Gist"
         >
-          <button className="toggle-action-btn btn-primary" disabled={ghBusy} onClick={() => void doGhLogin()}>
-            {ghBusy ? '发起中...' : '登录 GitHub'}
+          <button className="toggle-action-btn btn-primary" disabled={ghLoggingIn} onClick={() => void doGhLogin()}>
+            {ghLoggingIn ? '发起中...' : '登录 GitHub'}
           </button>
         </SettingCard>
       )}

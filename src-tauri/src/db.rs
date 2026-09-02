@@ -39,7 +39,7 @@ static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
             favicon_url     TEXT,
             folder_id       INTEGER REFERENCES folders(id) ON DELETE CASCADE,
             layout          TEXT NOT NULL DEFAULT 'inherit',
-            auto_summary    INTEGER NOT NULL DEFAULT 1,
+            auto_summary    INTEGER NOT NULL DEFAULT 0,
             auto_translate  INTEGER NOT NULL DEFAULT 0,
             etag            TEXT,
             last_modified   TEXT,

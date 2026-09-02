@@ -12,10 +12,12 @@ import { createInitialCategories, createInitialEntries } from './mockData';
 import { isSameLocalDay } from './lib/format';
 import {
   api,
+  extractError,
   folderRowsToCategories,
   articleRowToEntry,
   type RefreshSummary,
 } from './lib/api';
+import { openExternal } from './lib/external';
 
 /* ============================================================
    全局客户端状态机 —— 对应规范 §2.2 + 原型交互引擎
@@ -29,6 +31,51 @@ import {
       React 才能可靠地重渲染（Tauri 环境下由 SQLite 快照整体替换）。
    3. 导航类 action 统一重置「已读保留快照」，保证未读筛选语义。
    ============================================================ */
+
+/* GitHub 设备流轮询的模块级定时器：常驻不受组件生命周期影响。
+   poll 在成功/失败/被新登录覆盖时清掉；未授权期间按 interval 自续。 */
+let githubPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleGithubPoll(intervalSec: number) {
+  if (githubPollTimer) clearTimeout(githubPollTimer);
+  githubPollTimer = setTimeout(() => void doGithubPoll(), Math.max(3, intervalSec) * 1000);
+}
+
+function clearGithubPoll() {
+  if (githubPollTimer) {
+    clearTimeout(githubPollTimer);
+    githubPollTimer = null;
+  }
+}
+
+async function doGithubPoll() {
+  githubPollTimer = null;
+  try {
+    const acc = await api.githubLoginPoll();
+    if (acc) {
+      clearGithubPoll();
+      useAppStore.setState({ githubAccount: acc, githubFlow: null });
+      useAppStore.getState().showToast(`已登录 GitHub：${acc.login}（Gist 同步已就绪）`);
+    } else {
+      const flow = useAppStore.getState().githubFlow;
+      if (flow) scheduleGithubPoll(flow.interval);
+    }
+  } catch (e) {
+    clearGithubPoll();
+    useAppStore.setState({ githubFlow: null });
+    useAppStore.getState().showToast(`GitHub 登录失败：${extractError(e)}`);
+  }
+}
+
+/* 应用启动时恢复登录态（设备流 token 持久化在 SQLite，与组件无关） */
+export async function bootstrapGithubAuth() {
+  try {
+    const acc = await api.githubLoginStatus();
+    if (acc) useAppStore.setState({ githubAccount: acc });
+  } catch {
+    /* 后端不可用（浏览器 mock）静默忽略 */
+  }
+}
 
 export interface PodcastPlayerState {
   isActive: boolean;
@@ -154,6 +201,13 @@ export interface AppState {
   /** 后端真实的 Miniflux 连接态（bootstrap/sync 后刷新），未连接时侧栏不显示"已同步" */
   minifluxConnected: boolean;
 
+  /** GitHub 设备流登录：等待授权态（user_code 常驻显示；组件 unmount 不影响后端轮询） */
+  githubFlow: { user_code: string; verification_uri: string; interval: number } | null;
+  /** 已登录账户（设置页显示「已登录：username」） */
+  githubAccount: { login: string } | null;
+  /** 登录进行中（按钮防抖） */
+  githubLoggingIn: boolean;
+
   /* ---------- 数据源模式 ---------- */
   /** tauri = 真实 SQLite 后端；mock = 浏览器开发回退 */
   dataMode: 'tauri' | 'mock';
@@ -251,6 +305,11 @@ export interface AppState {
   toggleFolderCollapse: (catId: string) => void;
   toggleAllFolders: () => void;
   toggleSettingsCatCollapse: (catId: string) => void;
+
+  /** 发起 GitHub 设备流登录（轮询不依赖组件生命周期） */
+  githubLoginStart: () => Promise<void>;
+  /** 断开 GitHub 登录 */
+  githubLoginDisconnect: () => Promise<void>;
 }
 
 let toastId = 0;
@@ -317,6 +376,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   syncStatus: 'synced',
   backgroundSyncing: false,
   minifluxConnected: false,
+  githubFlow: null,
+  githubAccount: null,
+  githubLoggingIn: false,
 
   /* mock 数据先行渲染；Tauri 环境启动时 bootstrapFromBackend 会整体替换 */
   dataMode: 'mock',
@@ -381,10 +443,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   markCurrentViewAllRead: () => {
     const ids = new Set(selectVisibleEntries(get()).map((i) => i.id));
     if (get().dataMode === 'tauri') {
-      /* 范围语义与后端一致：当前 feed/分类范围（all 时两者皆 null） */
+      /* 范围语义与后端一致：当前 feed/分类范围（all 时两者皆 null）。
+         feed id 三种形态（'feed-123' / 纯数字 '123' / 旧 'f-123'）统一数字提取，
+         避免定长前缀 slice 在纯数字 id 下截出 NaN（历史契约断裂 bug） */
       const scope = get().activeFeedFilter;
-      const feedId = scope.startsWith('f-') ? Number(scope.slice(2)) : null;
-      const folderId = scope.startsWith('cat-') ? Number(scope.slice(4)) : null;
+      const feedId = scope.startsWith('cat-') ? null : scope === 'all' ? null : numericId(scope);
+      const folderId = scope.startsWith('cat-') ? numericId(scope) : null;
       void api.markAllRead(feedId, folderId);
     }
     set((s) => ({
@@ -492,7 +556,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         showToast('全文提取完成');
       })
       .catch((e: unknown) => {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = extractError(e);
         showToast(`全文提取失败：${msg}`, { label: '重试', run: () => get().extractCurrentArticle() });
       });
   },
@@ -871,7 +935,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           }
         })
         .catch((e: unknown) => {
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = extractError(e);
           set({ syncStatus: 'error' });
           get().showToast(`刷新失败：${msg}`, { label: '重试', run: () => get().triggerManualSync() });
         });
@@ -883,6 +947,57 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ syncStatus: 'synced' });
       get().showToast('Miniflux 同步完成');
     }, 1100);
+  },
+
+  /* ================= GitHub 设备流登录（store 级常驻轮询） ================= *
+     GitHub 登录的发起/轮询放在 store 而非设置页组件：设备流等待授权
+     可能跨数十秒，期间用户可能切走/关闭设置弹窗——组件卸载即清定时器，
+     网页授权完成后软件再无反应（历史复现 bug）。模块级定时器不受组件
+     生命周期影响，登录状态常驻 AppState。 */
+
+  githubLoginStart: async () => {
+    if (get().githubLoggingIn) return;
+    set({ githubLoggingIn: true });
+    try {
+      let start: Awaited<ReturnType<typeof api.githubLoginStart>>;
+      try {
+        start = await api.githubLoginStart();
+      } catch (first) {
+        /* WebDAV 冲突：确认后带 force 重发（后端错误码 webdavConflict） */
+        const msg = first instanceof Error ? first.message : String(first);
+        if (msg.includes('WebDAV')) {
+          if (!window.confirm(`${msg}
+
+确定切换为 GitHub Gist 同步吗？`)) return;
+          start = await api.githubLoginStart(true);
+        } else {
+          throw first;
+        }
+      }
+      set({ githubFlow: start });
+      await openExternal(start.verification_uri);
+      get().showToast('浏览器已打开授权页，代码已常驻显示在本页');
+      scheduleGithubPoll(start.interval);
+    } catch (e) {
+      get().showToast(`发起登录失败：${extractError(e)}`);
+    } finally {
+      set({ githubLoggingIn: false });
+    }
+  },
+
+  githubLoginDisconnect: async () => {
+    set({ githubLoggingIn: true });
+    try {
+      await api.githubLoginDisconnect();
+      clearGithubPoll();
+      set({ githubAccount: null, githubFlow: null });
+      set({ syncStatus: 'synced' });
+      get().showToast('已断开 GitHub 登录');
+    } catch (e) {
+      get().showToast(`断开失败：${extractError(e)}`);
+    } finally {
+      set({ githubLoggingIn: false });
+    }
   },
 
   /* ================= 订阅管理 ================= */
@@ -946,7 +1061,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         .then(() => get().reloadFromBackend())
         .then(() => get().showToast(`分类已改名：${trimmed}`))
         .catch((e: unknown) => {
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = extractError(e);
           get().showToast(`改名失败：${msg}`);
         });
       return;
@@ -968,7 +1083,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         })
         .catch((e: unknown) => {
           set({ syncStatus: 'error' });
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = extractError(e);
           get().showToast(`添加失败：${msg}`, {
             label: '重试',
             run: () => get().addFeed(catId, url, title, layout, autoSummary, autoTranslate),
@@ -1044,7 +1159,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         .then(() => get().reloadFromBackend())
         .then(() => get().showToast('订阅源已更新'))
         .catch((e: unknown) => {
-          const msg = e instanceof Error ? e.message : String(e);
+          const msg = extractError(e);
           get().showToast(`保存失败：${msg}`);
         });
       return;
@@ -1082,7 +1197,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         return get().reloadFromBackend();
       })
       .catch((e: unknown) => {
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = extractError(e);
         get().showToast(`刷新失败：${msg}`, { label: '重试', run: () => get().refreshOneFeed(feedId) });
       });
   },
@@ -1099,32 +1214,36 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   updateFeedLayout: (catId, feedId, layout) => {
+    /* layout 参数来自 LAYOUT_OPTIONS（'inherit' | 五布局之一），原样存进
+       feed——此前误写 as 'inherit' 把任何选择强转成继承，导致独立布局
+       设了不生效、reload 后回落到分类布局（历史 bug 模式 C 契约混淆） */
+    const next = layout as FeedItem['layout'];
     set((s) =>
       reconcileCategories(
         s,
         s.categories.map((c) =>
           c.id === catId
-            ? { ...c, feeds: c.feeds.map((f) => (f.id === feedId ? { ...f, layout: layout as 'inherit' } : f)) }
+            ? { ...c, feeds: c.feeds.map((f) => (f.id === feedId ? { ...f, layout: next } : f)) }
             : c,
         ),
       ),
     );
     get().showToast('已更新订阅源布局并即时生效');
     void api
-      .updateFeedLayout(Number(feedId.slice(2)), layout)
+      .updateFeedLayout(numericId(feedId), next)
       .catch(() => get().showToast('布局保存失败（界面已生效，重启后可能回退）'));
   },
 
   toggleCatSummary: (catId, val) => {
     set((s) => ({ categories: s.categories.map((c) => (c.id === catId ? { ...c, autoSummary: val } : c)) }));
     const cat = get().categories.find((c) => c.id === catId);
-    if (cat) void api.setFolderAiFlags(Number(catId.slice(4)), val, cat.autoTranslate);
+    if (cat) void api.setFolderAiFlags(numericId(catId), val, cat.autoTranslate);
   },
 
   toggleCatTranslate: (catId, val) => {
     set((s) => ({ categories: s.categories.map((c) => (c.id === catId ? { ...c, autoTranslate: val } : c)) }));
     const cat = get().categories.find((c) => c.id === catId);
-    if (cat) void api.setFolderAiFlags(Number(catId.slice(4)), cat.autoSummary, val);
+    if (cat) void api.setFolderAiFlags(numericId(catId), cat.autoSummary, val);
   },
 
   toggleFeedSummary: (catId, feedId, val) => {
@@ -1133,7 +1252,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         c.id === catId ? { ...c, feeds: c.feeds.map((f) => (f.id === feedId ? { ...f, autoSummary: val } : f)) } : c,
       ),
     }));
-    void api.setFeedAiFlags(Number(feedId.slice(2)), val, get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId)?.autoTranslate ?? false);
+    void api.setFeedAiFlags(numericId(feedId), val, get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId)?.autoTranslate ?? false);
   },
 
   toggleFeedTranslate: (catId, feedId, val) => {
@@ -1142,7 +1261,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         c.id === catId ? { ...c, feeds: c.feeds.map((f) => (f.id === feedId ? { ...f, autoTranslate: val } : f)) } : c,
       ),
     }));
-    void api.setFeedAiFlags(Number(feedId.slice(2)), get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId)?.autoSummary ?? false, val);
+    void api.setFeedAiFlags(numericId(feedId), get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId)?.autoSummary ?? false, val);
   },
 
   toggleFolderCollapse: (catId) => {
@@ -1151,7 +1270,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
     /* 落库：分类折叠状态 */
     const cat = get().categories.find((c) => c.id === catId);
-    if (cat) void api.setFolderCollapsed(Number(catId.slice(4)), cat.collapsed);
+    if (cat) void api.setFolderCollapsed(numericId(catId), cat.collapsed);
   },
 
   toggleAllFolders: () => {
@@ -1160,7 +1279,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().showToast(anyOpen ? '已收起全部分类' : '已展开全部分类');
     /* 批量落库折叠状态 */
     if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-      for (const c of get().categories) void api.setFolderCollapsed(Number(c.id.slice(4)), anyOpen);
+      for (const c of get().categories) void api.setFolderCollapsed(numericId(c.id), anyOpen);
     }
   },
 
@@ -1280,15 +1399,17 @@ export function selectVisibleEntries(s: AppState): ArticleEntry[] {
 }
 
 /** 侧边栏视图角标计数（跟随当前订阅范围）。
-    口径与列表完全一致：范围 × 布局 × 视图 × 时间流筛选——
-    角标数字 = 点击后列表里实际出现的条目数。 */
+    口径与列表一致（范围 × 布局）；「全部」固定 = 范围内全部条目数，
+    不受「显示: 全部/未读」收缩——标读/新条目到达时与「未读」同步动态增减；
+    其余 view filter 各自独立计数。 */
 export function selectViewCounts(
   s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'activeViewFilter' | 'timelineFilter' | 'openedReadIds' | 'entries' | 'feedIndex'>,
 ) {
   const now = Date.now();
-  const raw = selectScopeEntries(s).filter((i) => matchesTimelineFilter(i, s.timelineFilter, s.openedReadIds));
+  const scoped = selectScopeEntries(s);
+  const raw = scoped.filter((i) => matchesTimelineFilter(i, s.timelineFilter, s.openedReadIds));
   return {
-    all: raw.length,
+    all: scoped.length,
     today: raw.filter((i) => isSameLocalDay(i.publishedAt, now)).length,
     unread: raw.filter((i) => !i.isRead).length,
     starred: raw.filter((i) => i.isStarred).length,
@@ -1304,6 +1425,15 @@ function matchesTimelineFilter(entry: ArticleEntry, filter: 'all' | 'unread', op
     布局与视图构成两道筛选条件，树不再另设 unread/total 之类的第二套数字。
     计数用严格判定（不含 openedReadIds 会话保留）：侧栏数字是导航概览，
     不随点开文章逐条抖动，与 Miniflux 未读语义一致。 */
+/** 从 store 的字符串 id（纯数字 / 'cat-'/'feed-' 前缀两种形态）提取后端数字 id。
+    历史 bug：mock 用 'feed-'+Date.now() 前缀、真实数据用 String(row.id) 纯数字，
+    定长 slice(2)/slice(4) 会把 '26'.slice(2) 截成 ''→NaN，布局/AI 开关等
+    全部写库失败且被乐观更新掩盖（7 类模式 C 契约断裂变体）。 */
+function numericId(id: string): number {
+  const m = id.match(/(\d+)/);
+  return m ? Number(m[1]) : NaN;
+}
+
 export function selectTreeCounts(
   s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'openedReadIds' | 'entries' | 'feedIndex'>,
 ): Map<string, number> {

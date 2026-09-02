@@ -11,6 +11,18 @@ export const isTauri = (): boolean =>
 type Invoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 let invokeFn: Invoke | null = null;
 
+/** Rust AppError 序列化后注入的字段（Tauri invoke 拒绝时抛 {code,message}）。
+    统一提取成可读文案——此前各处 `String(e)` 会显示出 [object Object]。 */
+export function extractError(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'object' && e !== null) {
+    const rec = e as Record<string, unknown>;
+    if (typeof rec.message === 'string') return rec.message;
+    if (typeof rec.code === 'string') return `[${rec.code}]`;
+  }
+  return String(e);
+}
+
 async function getInvoke(): Promise<Invoke | null> {
   if (!isTauri()) return null;
   if (invokeFn) return invokeFn;

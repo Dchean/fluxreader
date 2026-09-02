@@ -57,6 +57,9 @@ export function Timeline() {
     const container = scrollRef.current;
     if (!container) return;
     if (!useAppStore.getState().settings.markReadOnScrollOut) return;
+    /* 滚动标已读只在「显示: 未读」筛选下生效：显示全部时列表包含大量已读
+       旧文，滚过就标读会误伤不该重读的历史记录 */
+    if (timelineFilter !== 'unread') return;
     if (items.length === 0) return;
 
     /* rootMargin 只留 10% 上沿裁剪带：卡片完全越过视口上沿才算"滚出"，
@@ -81,7 +84,7 @@ export function Timeline() {
 
     for (const el of cardRegistry.current.values()) io.observe(el);
     return () => io.disconnect();
-  }, [filterKey, items.length, activeContentLayout]);
+  }, [filterKey, items.length, activeContentLayout, timelineFilter]);
 
   /* 卡片挂载/卸载时维护注册表 */
   const registerCard = (id: string, el: HTMLElement | null) => {
@@ -266,6 +269,8 @@ function SocialCard({ item }: { item: ArticleEntry }) {
     <div className={`social-card ${item.isRead ? 'read' : ''}`}>
       <div className="social-avatar">{feedName.charAt(0) || '?'}</div>
       <div className="social-body">
+        {/* 标题：社交布局此前漏显示——正文太长时一眼无法辨识内容主题 */}
+        {item.title && <div className="social-card-title">{item.title}</div>}
         <div className="social-author-row">
           <strong className="social-author-name">{item.author}</strong>
           <span className="social-handle">{feedName}</span>

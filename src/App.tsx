@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useAppStore, selectVisibleEntries } from './store';
+import { useAppStore, bootstrapGithubAuth, selectVisibleEntries } from './store';
 import { Sidebar } from './components/Sidebar';
 import { Timeline } from './components/Timeline';
 import { Reader } from './components/Reader';
@@ -56,6 +56,8 @@ export default function App() {
     void useAppStore.getState().bootstrapSettings().then(() => {
       useAppStore.getState().bootstrapFromBackend();
     });
+    /* GitHub 登录态恢复（设备流 token 持久化在 SQLite，启动即还原账户显示） */
+    void bootstrapGithubAuth();
   }, []);
 
   /* ---------- 后台刷新调度器事件：新文章到达即重载列表 + toast ---------- */

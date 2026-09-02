@@ -398,7 +398,7 @@ function AddFeedModalBody({
   const [title, setTitle] = useState('');
   const [catId, setCatId] = useState(initialCatId);
   const [layout, setLayout] = useState('inherit');
-  const [autoSummary, setAutoSummary] = useState(true);
+  const [autoSummary, setAutoSummary] = useState(false);
   const [autoTranslate, setAutoTranslate] = useState(false);
   /* 生效布局：显式选择优先，否则目标分类的布局——画廊/播客布局隐藏 AI 开关 */
   const curCatLayout = categories.find((c) => c.id === catId)?.layout ?? 'article';

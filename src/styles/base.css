@@ -515,6 +515,7 @@ body {
   width: 100%;
   text-align: left;
   font-family: inherit;
+  position: relative; /* hover 操作钮以此为定位基准 */
 }
 
 .feed-leaf-item:hover {
@@ -551,14 +552,28 @@ body {
 }
 
 .feed-leaf-actions {
-  display: none;
+  /* opacity/visibility 过渡而非 display 切换：hover 时操作钮淡入，
+     不改变行布局尺寸——此前 display:none→inline-flex 会把行内元素
+     顶高/挤位，造成整行「下陷闪动」 */
+  position: absolute;
+  right: 8px;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  display: inline-flex;
   align-items: center;
   gap: 2px;
+  background: var(--bg-card);
+  border-radius: var(--radius-sm);
+  padding: 1px 2px;
+  transition: opacity var(--transition-fast), visibility var(--transition-fast);
 }
 
 .feed-leaf-item:hover .feed-leaf-actions,
 .feed-folder-header:hover .feed-row-act-btn {
-  display: inline-flex;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 /* 行内小操作钮（源行/分类行共用） */
@@ -650,6 +665,34 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* 左下角「刷新所有订阅源」主入口：比状态行更醒目，单行文案 */
+.sidebar-refresh-all {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  border: none;
+  color: #ffffff;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: filter var(--transition-fast), opacity var(--transition-fast);
+}
+
+.sidebar-refresh-all:hover {
+  filter: brightness(1.1);
+}
+
+.sidebar-refresh-all:disabled {
+  opacity: 0.6;
+  cursor: default;
+  filter: none;
 }
 
 .sync-status-row {
@@ -979,6 +1022,15 @@ body {
 
 .social-body {
   flex: 1;
+}
+
+.social-card-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+  line-height: 1.4;
+  word-break: break-word;
 }
 
 .social-author-row {

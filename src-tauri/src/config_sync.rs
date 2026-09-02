@@ -288,9 +288,13 @@ pub async fn config_sync_save_credentials(
 /// 上传：本地库 → 远端。
 #[tauri::command]
 pub async fn config_sync_upload(state: State<'_, AppState>) -> AppResult<String> {
+    /* 锁内直接读凭据并构建 payload——此前在这里再调 read_credentials(内部二次 lock)
+       会对同一 tokio Mutex 重入挂死（配好 Gist 后一上传即无响应） */
     let (json, mut cred) = {
         let conn = state.db.lock().await;
-        (serde_json::to_string(&build_payload(&conn)?)?, read_credentials(&state.db).await?)
+        let raw = db::get_setting(&conn, "config_sync_credentials")?
+            .ok_or_else(|| AppError::not_found("未配置配置同步凭据"))?;
+        (serde_json::to_string(&build_payload(&conn)?)?, serde_json::from_str::<SyncCredentials>(&raw)?)
     };
     let http = &state.http;
     match cred.backend.as_str() {
