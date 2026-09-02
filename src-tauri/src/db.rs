@@ -461,7 +461,7 @@ pub fn set_feed_fetch_state(
 
 /// 调度器取"到期"的源：超过全局间隔未抓 且 不在退避窗口内。
 /// last_fetched_at 为 NULL（从未抓过）的源立即视为到期。
-/// 到期源 id。`include_miniflux = false`（本地优先同步模式）时跳过
+/// 到期源 id。`include_miniflux = false`（跟随服务端同步模式）时跳过
 /// origin='miniflux' 的源——服务端源的内容由 Miniflux 同步提供，
 /// 直连抓取会与服务端状态产生两份不一致的真相。
 pub fn feeds_due_for_refresh(

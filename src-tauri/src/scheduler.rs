@@ -52,9 +52,9 @@ async fn read_refresh_config(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>)
     (enabled, interval, dedup, concurrency)
 }
 
-/// 同步模式（app_settings.syncMode）：
-/// - `hybrid` 本地优先：后台刷新跳过 Miniflux 源（内容走服务端同步）
-/// - `direct` 直连优先（默认/未配置）：全部源直连抓取（旧行为）
+/// 同步模式（app_settings.syncMode，UI 词条「本机抓取 / 跟随服务端」）：
+/// - `hybrid` 跟随服务端：后台刷新跳过 Miniflux 源（内容走服务端同步）
+/// - `direct` 本机抓取（默认/未配置）：全部源直连抓取（旧行为）
 ///
 /// 锁内读（调用方持 conn）。
 fn read_sync_mode_conn(conn: &rusqlite::Connection) -> String {
@@ -80,7 +80,7 @@ pub async fn refresh_all(
 /// 抓取所有到期源（后台调度入口，并发上限 = 设置 fetchConcurrency，默认 4）。
 /// HTTP 在锁外执行（refresh_feed_staged），写库时短暂持锁。
 /// 返回 (新增条数, 失败源数)。
-/// 同步模式作用点：hybrid（本地优先）→ 到期查询跳过 origin='miniflux' 的源
+/// 同步模式作用点：hybrid（跟随服务端）→ 到期查询跳过 origin='miniflux' 的源
 /// （服务端源内容由 Miniflux 同步提供）；direct → 全部源照常直连（旧行为）。
 async fn refresh_due_feeds(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,

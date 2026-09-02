@@ -481,7 +481,7 @@ pub async fn feed_counts(state: State<'_, AppState>) -> AppResult<Vec<db::FeedCo
 }
 
 /* ============================================================
-   刷新（直连优先）
+   刷新（直连抓取）
    ============================================================ */
 
 /// 刷新单个订阅源（直连）。三段式：锁内取条件头 → 锁外 HTTP+解析 → 锁内落库。
@@ -853,7 +853,7 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
 }
 
 /// 断开连接：清凭据 + 清理服务端来源数据（订阅/条目/绑定/队列）。
-/// 用户直连订阅（origin='local'）保留——本地优先的产品语义。
+/// 用户直连订阅（origin='local'）保留——断开只清服务端数据的产品语义。
 #[tauri::command]
 pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<String> {
     let (feeds, articles) = {

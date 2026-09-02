@@ -79,8 +79,9 @@ export interface SettingsState {
   notifyOnNewArticles: boolean;
   /** 后台自动同步 Miniflux（默认开；到期跑轻量增量同步，状态变更另有即时推送） */
   autoSyncMiniflux: boolean;
-  /** 同步模式：'direct' 直连优先（默认，全部源本地直连抓取）；
-   *  'hybrid' 本地优先（后台刷新跳过服务端来源的源，内容由 Miniflux 同步提供） */
+  /** 同步模式（UI 词条：本机抓取 / 跟随服务端——命名直指差异点"内容从哪来"）：
+   *  'direct' 本机抓取（默认）：全部源由 FluxReader 直连抓取，Miniflux 只同步状态；
+   *  'hybrid' 跟随服务端：后台刷新跳过服务端来源的源，内容由 Miniflux 同步提供 */
   syncMode: 'direct' | 'hybrid';
 }
 
