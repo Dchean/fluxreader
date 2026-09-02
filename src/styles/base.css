@@ -109,6 +109,14 @@ body {
   min-height: 28px;
 }
 
+/* 触发器标签：单行不折；容器被压缩时先截断省略，保住按钮形态 */
+.flux-dropdown-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
 .flux-dropdown-trigger:hover {
   border-color: var(--border-strong);
   background: var(--bg-card-hover);
@@ -773,6 +781,8 @@ body {
   gap: 5px;
   transition: all var(--transition-fast);
   font-family: inherit;
+  /* 控件文字单行：容器挤压时按钮宁可换位（父级 flex-wrap）也不折字 */
+  white-space: nowrap;
 }
 
 .toggle-action-btn:hover {
@@ -1828,6 +1838,10 @@ body {
   position: relative;
 }
 
+/* 窄窗口收缩策略（见文件尾部同名媒体查询——顺序上必须位于 .settings-sidebar 基础规则之后，同特异性下后者胜）：
+   ≤ 700px 侧栏收窄（220→170），导语文字宽度让位；
+   ≤ 560px 弹窗改为通栏（贴边 96vw），保证内容列至少还有一列卡片的可读宽 */
+
 .settings-sidebar {
   width: 220px;
   background: var(--badge-bg);
@@ -1891,6 +1905,9 @@ body {
   font-size: 11px;
   color: var(--text-tertiary);
   border-top: 1px solid var(--border-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .settings-content-area {
@@ -1915,12 +1932,23 @@ body {
   font-size: 16px;
   font-weight: 700;
   color: var(--text-primary);
+  white-space: nowrap;
 }
 
 .settings-pane-header-right {
   display: flex;
   align-items: center;
   gap: 16px;
+  min-width: 0;
+}
+
+/* 副标题窄时先省略（标题优先保完整），不与关闭按钮互相挤压 */
+.settings-pane-subtitle {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-pane-subtitle {
@@ -1959,15 +1987,52 @@ body {
   gap: 16px;
 }
 
-.setting-card h5 {
+/* 左列文字：可收缩但保住最小可读宽度；极窄时整卡转上下堆叠（见媒体查询） */
+.setting-card-text {
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.setting-card-text h5 {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.setting-card p {
+/* 描述最多两行，超出省略——窄窗口下不再折成细长条 */
+.setting-card-text p {
   font-size: 11.5px;
   color: var(--text-tertiary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 控件列不缩：开关/下拉/按钮保持固有宽度，与文字列拉开层次 */
+.setting-card > *:not(.setting-card-text) {
+  flex-shrink: 0;
+}
+
+/* 极窄窗口（内容区 < 480px）：卡片转纵向堆叠，控件回到标题下方 —— 同行挤压消除 */
+@media (max-width: 719px) {
+  .setting-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .setting-card-text {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+
+  .setting-card > *:not(.setting-card-text) {
+    align-self: stretch;
+  }
 }
 
 .switch-control {
@@ -2020,6 +2085,17 @@ body {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px;
   color: var(--text-secondary);
+  /* 数值标签（「30 分钟」）单行；极窄时滑杆先收缩，标签不折行 */
+  white-space: nowrap;
+}
+
+.range-slider-wrap input[type='range'] {
+  min-width: 60px;
+}
+
+/* 滑杆数值标签：自适应内容宽（替代原内联 width:50 —— 120 分钟/16 路装不下会折行） */
+.range-value-tag {
+  flex-shrink: 0;
 }
 
 .range-input {
@@ -2149,6 +2225,11 @@ body {
   border-radius: var(--radius-sm);
   font-family: inherit;
   transition: background var(--transition-fast);
+  /* 分类名（用户可改长名）：单行省略，不给右侧控件行制造折行压力 */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .group-mgr-title:hover {
@@ -2225,6 +2306,18 @@ body {
   margin-bottom: 6px;
 }
 
+/* 源信息列可收缩但保最小可读宽：名称省略号替代被压到 0px 消失 */
+.group-mgr-child-row .group-mgr-feed-info {
+  min-width: 0;
+  flex: 1 1 120px;
+}
+
+.group-mgr-child-row .group-mgr-feed-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .group-mgr-feed-info {
   min-width: 0;
 }
@@ -2252,6 +2345,9 @@ body {
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
+  /* 排不下时按钮整体换行，而不是把单个按钮压到折字/溢出行外 */
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 /* 管理行内的小尺寸操作按钮（原内联 fontSize:11 收敛为类） */
@@ -2299,6 +2395,8 @@ body {
 
 .confirm-dialog {
   width: 400px;
+  max-width: calc(100vw - 32px); /* 同 mini-dialog：窄视口不横向裁切 */
+  box-sizing: border-box;
   padding: 22px;
   display: flex;
   flex-direction: column;
@@ -2421,11 +2519,13 @@ body {
 
 .mini-dialog {
   width: 440px;
+  max-width: calc(100vw - 32px); /* 窄窗口不横向溢出（原先 440px 固定宽在 <460px 视口会被裁切） */
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   padding: 20px;
   box-shadow: var(--shadow-elevation);
+  box-sizing: border-box;
 }
 
 .mini-dialog-title {
@@ -2769,4 +2869,43 @@ body.has-player .toast-layer {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(128, 128, 128, 0.45);
+}
+
+/* ============================================================
+   窄窗口收缩策略（设置弹窗）
+   位置说明：媒体查询必须位于 .settings-modal / .settings-sidebar /
+   .settings-content-pane / .settings-content-header 基础规则之后
+   （同特异性下后者胜，写在前面会被基础规则覆盖——本文件早前的
+   前置版本正是因此失效）。
+   ≤ 700px：弹窗收窄到 760px、侧栏 220→170，文字列宽度让位；
+   ≤ 560px：弹窗贴边 96vw、侧栏 148px、pane padding 收紧，
+            保证内容列至少保有一列卡片的可读宽。
+   ============================================================ */
+@media (max-width: 700px) {
+  .settings-modal {
+    width: 760px;
+  }
+
+  .settings-sidebar {
+    width: 170px;
+  }
+}
+
+@media (max-width: 560px) {
+  .settings-modal {
+    width: 96vw;
+    max-width: 96vw;
+  }
+
+  .settings-sidebar {
+    width: 148px;
+  }
+
+  .settings-content-pane {
+    padding: 16px 16px 32px;
+  }
+
+  .settings-content-header {
+    padding: 12px 14px 10px 18px;
+  }
 }

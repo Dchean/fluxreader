@@ -142,7 +142,8 @@ interface SettingCardProps {
 export function SettingCard({ title, desc, children }: SettingCardProps) {
   return (
     <div className="setting-card">
-      <div>
+      {/* 左列文字允许收缩（min-width:0 在 CSS），控件列 flex-shrink:0 —— 窄窗口下文字不再被压到一字一行 */}
+      <div className="setting-card-text">
         <h5>{title}</h5>
         {desc && <p>{desc}</p>}
       </div>

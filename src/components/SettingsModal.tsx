@@ -163,7 +163,7 @@ function GeneralTab() {
             className="range-input"
             onChange={(e) => updateSettings({ refreshInterval: Number(e.target.value) })}
           />
-          <span style={{ width: 50 }}>{settings.refreshInterval} 分钟</span>
+          <span className="range-value-tag">{settings.refreshInterval} 分钟</span>
         </div>
       </SettingCard>
       <SettingCard title="并发抓取数" desc="同时请求的订阅源数量。源多可调高；个别源站限流时调低（1 为逐个抓取）">
@@ -177,7 +177,7 @@ function GeneralTab() {
             className="range-input"
             onChange={(e) => updateSettings({ fetchConcurrency: Number(e.target.value) })}
           />
-          <span style={{ width: 50 }}>{settings.fetchConcurrency} 路</span>
+          <span className="range-value-tag">{settings.fetchConcurrency} 路</span>
         </div>
       </SettingCard>
 
