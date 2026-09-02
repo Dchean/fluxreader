@@ -1206,7 +1206,7 @@ function ConfigSyncSection() {
       setToken('');
       if (backend === 'gist') {
         /* PAT 手动保存后登录态按未知账户处理（手动模式不显示账户名，只显示已配置） */
-        setGhAccount(null);
+        useAppStore.setState({ githubAccount: null });
       }
       showToast('凭据已保存（本地存储）');
     } catch (e) {
