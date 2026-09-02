@@ -2208,7 +2208,7 @@ body {
 .group-mgr-header {
   background: var(--badge-bg);
   /* 与源行（.group-mgr-child-row）水平内边距一致：右侧功能按键列垂直对齐的前提 */
-  padding: 12px;
+  padding: 12px 10px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2316,11 +2316,22 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 8px 12px;
-  background: var(--badge-bg);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  margin-bottom: 6px;
+  /* 列表式行：去卡片边框/底色（贴边不好看），悬停浮背景 + 底部细分隔线 */
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  margin-bottom: 0;
+  transition: background var(--transition-fast);
+}
+
+.group-mgr-child-row:hover {
+  background: var(--bg-card-hover);
+}
+
+.group-mgr-child-row:last-child {
+  border-bottom: none;
 }
 
 /* 源信息列可收缩但保最小可读宽：名称省略号替代被压到 0px 消失 */
@@ -2501,6 +2512,9 @@ body {
 .feeds-tab-hint {
   font-size: 12px;
   color: var(--text-tertiary);
+  /* 独占左侧剩余空间：右侧导入/导出/新建按钮连成一组（gap 12px）贴右，
+     不再被 space-between 均摊空隙撑开 83px */
+  margin-right: auto;
 }
 
 .settings-action-row {
