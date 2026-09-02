@@ -5,6 +5,7 @@ pub mod config_sync;
 pub mod db;
 pub mod error;
 pub mod extraction;
+pub mod github_auth;
 pub mod ingestion;
 pub mod media;
 pub mod miniflux;
@@ -278,6 +279,11 @@ pub fn run() {
         config_sync::config_sync_download,
         config_sync::config_sync_apply,
         config_sync::config_sync_status,
+        // GitHub 设备流登录
+        github_auth::github_login_start,
+        github_auth::github_login_poll,
+        github_auth::github_login_status,
+        github_auth::github_login_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

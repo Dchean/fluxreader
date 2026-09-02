@@ -2970,3 +2970,30 @@ body.has-player .toast-layer {
     padding: 12px 14px 10px 18px;
   }
 }
+
+/* ---------- GitHub 设备流授权码常驻块 ---------- */
+.device-code-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.device-code-value {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  user-select: text;
+}
+
+.device-code-hint {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}

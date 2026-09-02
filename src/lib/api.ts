@@ -346,6 +346,34 @@ export const api = {
     return (await inv('config_sync_apply', { payload })) as { imported: number; skipped: number };
   },
 
+  /* ---- GitHub 设备流登录 ---- */
+  /** 发起 GitHub 登录：返回 user_code + 授权页地址 + 轮询间隔（秒）。 */
+  async githubLoginStart(force?: boolean): Promise<{ user_code: string; verification_uri: string; interval: number }> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('github_login_start', { force })) as { user_code: string; verification_uri: string; interval: number };
+  },
+
+  /** 轮询授权状态。返回账户（已批准）或 null（等待用户在浏览器完成授权）。 */
+  async githubLoginPoll(): Promise<{ login: string } | null> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('github_login_poll')) as { login: string } | null;
+  },
+
+  /** 已登录账户名；未登录返回 null。 */
+  async githubLoginStatus(): Promise<{ login: string } | null> {
+    const inv = await getInvoke();
+    if (!inv) return null;
+    return (await inv('github_login_status')) as { login: string } | null;
+  },
+
+  /** 断开 GitHub 登录（清 Gist 凭据；WebDAV 凭据不受影响）。 */
+  async githubLoginDisconnect(): Promise<void> {
+    const inv = await getInvoke();
+    if (inv) await inv('github_login_disconnect');
+  },
+
   /* ---- OPML 导入导出 ---- */
   /** 导入 OPML 内容（字符串）。返回 (新增, 跳过)。 */
   async opmlImport(content: string): Promise<{ imported: number; skipped: number } | null> {

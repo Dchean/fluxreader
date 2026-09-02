@@ -1,6 +1,7 @@
 //! 应用状态：SQLite 连接（异步互斥守卫）+ 共享 HTTP client + SMTC 句柄。
 //! 锁从不跨 .await 持有。
 
+use crate::github_auth::SharedDeviceFlow;
 use crate::media::MediaHandle;
 use reqwest::Client;
 use rusqlite::Connection;
@@ -15,10 +16,17 @@ pub struct AppState {
     pub http: Client,
     /// SMTC 系统媒体控制投递端（专用线程持有 MediaControls）
     pub media: MediaHandle,
+    /// 进行中的 GitHub 设备流登录（发起 → 轮询完成期间持有；一次性短命态不落库）
+    pub github_flow: SharedDeviceFlow,
 }
 
 impl AppState {
     pub fn new(db: Connection, http: Client, media: MediaHandle) -> Self {
-        Self { db: Arc::new(Mutex::new(db)), http, media }
+        Self {
+            db: Arc::new(Mutex::new(db)),
+            http,
+            media,
+            github_flow: Arc::new(Mutex::new(None)),
+        }
     }
 }

@@ -1152,6 +1152,15 @@ function ConfigSyncSection() {
   const [status, setStatus] = useState<{ configured: boolean; backend?: string; lastUpload?: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
+  /* ---- GitHub 设备流登录态 ---- */
+  const [ghAccount, setGhAccount] = useState<{ login: string } | null>(null);
+  const [ghFlow, setGhFlow] = useState<{ user_code: string; verification_uri: string; interval: number } | null>(null);
+  const [ghBusy, setGhBusy] = useState(false);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /* 卸载时清轮询定时器（等待授权期间关弹窗不再空转） */
+  useEffect(() => () => { if (pollTimer.current) clearTimeout(pollTimer.current); }, []);
+
   useEffect(() => {
     void api.configSyncStatus().then((st) => {
       if (st) {
@@ -1159,7 +1168,74 @@ function ConfigSyncSection() {
         if (st.backend === 'webdav') setBackend('webdav');
       }
     });
+    void api.githubLoginStatus().then((acc) => { if (acc) setGhAccount(acc); });
   }, []);
+
+  const doGhLogin = async (force = false) => {
+    if (ghBusy) return;
+    setGhBusy(true);
+    try {
+      let start: Awaited<ReturnType<typeof api.githubLoginStart>>;
+      try {
+        start = await api.githubLoginStart(force ? true : undefined);
+      } catch (first) {
+        /* WebDAV 冲突：确认后带 force 重发（后端错误码 webdavConflict） */
+        const msg = first instanceof Error ? first.message : String(first);
+        if (msg.includes('WebDAV') && !force) {
+          if (!window.confirm(`${msg}
+
+确定切换吗？`)) return;
+          start = await api.githubLoginStart(true);
+        } else {
+          throw first;
+        }
+      }
+      setGhFlow(start);
+      await openExternal(start.verification_uri);
+      showToast('浏览器已打开授权页，代码已常驻显示在本页');
+      schedulePoll(start.interval);
+    } catch (e) {
+      showToast(`发起登录失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setGhBusy(false);
+    }
+  };
+
+  const schedulePoll = (intervalSec: number) => {
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+    pollTimer.current = setTimeout(() => void doPoll(), Math.max(3, intervalSec) * 1000);
+  };
+
+  const doPoll = async () => {
+    try {
+      const acc = await api.githubLoginPoll();
+      if (acc) {
+        setGhAccount(acc);
+        setGhFlow(null);
+        setStatus((s) => (s ? { ...s, configured: true, backend: 'gist' } : { configured: true, backend: 'gist' }));
+        showToast(`已登录 GitHub：${acc.login}（Gist 同步已就绪）`);
+      } else if (ghFlow) {
+        schedulePoll(ghFlow.interval);
+      }
+    } catch (e) {
+      setGhFlow(null);
+      showToast(`GitHub 登录失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const doGhDisconnect = async () => {
+    setGhBusy(true);
+    try {
+      await api.githubLoginDisconnect();
+      setGhAccount(null);
+      setStatus((s) => (s ? { ...s, configured: false, lastUpload: undefined } : null));
+      showToast('已断开 GitHub 登录');
+    } catch (e) {
+      showToast(`断开失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setGhBusy(false);
+    }
+  };
 
   const doSave = async () => {
     if (!token.trim()) {
@@ -1177,6 +1253,10 @@ function ConfigSyncSection() {
       }));
       setStatus({ configured: true, backend });
       setToken('');
+      if (backend === 'gist') {
+        /* PAT 手动保存后登录态按未知账户处理（手动模式不显示账户名，只显示已配置） */
+        setGhAccount(null);
+      }
       showToast('凭据已保存（本地存储）');
     } catch (e) {
       showToast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
@@ -1221,6 +1301,44 @@ function ConfigSyncSection() {
 
   return (
     <>
+      <div className="settings-group-title" style={{ marginTop: 20 }}>GitHub 同步</div>
+      {ghAccount ? (
+        <SettingCard
+          title="已登录 GitHub"
+          desc={`账户 ${ghAccount.login} · 配置经私有 Gist 同步（与 PAT 等效，仅本机存储 token）`}
+        >
+          <button className="toggle-action-btn btn-danger-text" disabled={ghBusy} onClick={() => void doGhDisconnect()}>
+            断开
+          </button>
+        </SettingCard>
+      ) : ghFlow ? (
+        <SettingCard
+          title="等待授权"
+          desc="在浏览器打开授权页，输入下方代码完成授权。此卡片常驻，登录成功后自动消失"
+        >
+          <div className="device-code-block">
+            <span className="device-code-value">{ghFlow.user_code}</span>
+            <span className="device-code-hint">在授权页输入该代码</span>
+          </div>
+          <button
+            className="toggle-action-btn"
+            onClick={() => void openExternal(ghFlow.verification_uri)}
+            title="重新打开授权页"
+          >
+            打开授权页
+          </button>
+        </SettingCard>
+      ) : (
+        <SettingCard
+          title="网页登录 GitHub"
+          desc="跳转浏览器完成 GitHub 授权（授权页显示 GitHub CLI 请求 gist 权限，属正常现象），登录后配置同步到你的私有 Gist"
+        >
+          <button className="toggle-action-btn btn-primary" disabled={ghBusy} onClick={() => void doGhLogin()}>
+            {ghBusy ? '发起中...' : '登录 GitHub'}
+          </button>
+        </SettingCard>
+      )}
+
       <div className="settings-group-title" style={{ marginTop: 20 }}>配置同步（Gist / WebDAV）</div>
       <SettingCard
         title="同步内容与状态"
@@ -1230,7 +1348,7 @@ function ConfigSyncSection() {
       >
         <span className="about-arch-tag">{status?.configured ? '已配置' : '未配置'}</span>
       </SettingCard>
-      <SettingCard title="同步后端" desc="Gist 需 classic PAT（勾选 gist 权限）；WebDAV 填服务器地址与账号">
+      <SettingCard title="同步后端" desc="Gist 可用上方网页登录自动配置，或手动填 classic PAT；WebDAV 填服务器地址与账号">
         <FluxDropdown
           width={140}
           value={backend}
@@ -1242,7 +1360,7 @@ function ConfigSyncSection() {
         />
       </SettingCard>
       {backend === 'gist' ? (
-        <SettingCard title="GitHub Token（classic PAT）" desc="Settings → Developer settings → Tokens (classic)，勾选 gist scope。注意：fine-grained PAT 不支持 Gist API">
+        <SettingCard title="GitHub Token（classic PAT）" desc="可选：手动填入替代网页登录。Settings → Developer settings → Tokens (classic)，勾选 gist scope。注意：fine-grained PAT 不支持 Gist API">
           <input
             type="password"
             className="setting-input"
@@ -1298,6 +1416,7 @@ function ConfigSyncSection() {
     </>
   );
 }
+
 
 /* ---------- TAB 7: 快捷键 ---------- */
 
