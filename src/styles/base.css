@@ -1963,7 +1963,8 @@ body {
 
 .settings-content-pane {
   flex: 1;
-  padding: 24px 32px 40px;
+  /* 右内边距与内容头部(24px)一致：订阅工具栏/分组盒右缘与头部关闭按钮视觉对齐 */
+  padding: 24px 24px 40px;
   overflow-y: auto;
 }
 
@@ -2296,7 +2297,7 @@ body {
   cursor: pointer;
   color: var(--text-secondary);
   /* 定宽列：分类行与源行的摘要/翻译复选框同宽，右对齐后垂直成列 */
-  flex: 0 0 52px;
+  flex: 0 0 44px;
 }
 
 .group-mgr-body {
@@ -2326,6 +2327,22 @@ body {
 .group-mgr-child-row .group-mgr-feed-info {
   min-width: 0;
   flex: 1 1 120px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* favicon + 名称/URL 文本列：图标给源行视觉锚点，文本两行仍紧凑 */
+.group-mgr-feed-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.group-mgr-child-row .feed-favicon,
+.group-mgr-child-row .feed-favicon-fallback {
+  width: 16px;
+  height: 16px;
+  margin-right: 0;
 }
 
 .group-mgr-child-row .group-mgr-feed-name {
@@ -2376,11 +2393,11 @@ body {
    删除/编辑两行同宽——右对齐后每列垂直对齐，窄窗 flex-wrap 仍可换行 */
 .group-mgr-controls .toggle-action-btn,
 .group-mgr-feed-controls .toggle-action-btn {
-  flex: 0 0 64px;
+  flex: 0 0 56px;
   justify-content: center;
 }
 
-/* 纯图标按钮（添加源）按内容宽，不参与 64px 定宽列 */
+/* 纯图标按钮按内容宽，不参与定宽列 */
 .group-mgr-controls .toggle-action-btn.icon-btn,
 .group-mgr-feed-controls .toggle-action-btn.icon-btn {
   flex: 0 0 auto;

@@ -463,15 +463,16 @@ function FeedsTab() {
 
               <div className="group-mgr-controls" onClick={(e) => e.stopPropagation()}>
                 <button
-                  className="toggle-action-btn icon-btn"
+                  className="toggle-action-btn"
                   onClick={() => openAddFeedModal(cat.id)}
-                  title="添加订阅源"
+                  title="在该分类下添加订阅源"
                 >
                   <Icons.plus />
+                  <span>添加源</span>
                 </button>
                 <div className="group-mgr-layout-control">
                   <FluxDropdown
-                    width={115}
+                    width={96}
                     value={cat.layout}
                     onChange={(v) => updateCatLayout(cat.id, v as ContentLayoutType)}
                     options={LAYOUT_OPTIONS}
@@ -527,7 +528,7 @@ function FeedsTab() {
             {!cat.settingsCollapsed && (
               <div className="group-mgr-body">
                 {cat.feeds.length === 0 && (
-                  <div className="group-mgr-empty">该分类暂无订阅源，点击右上角 ⊕ 添加</div>
+                  <div className="group-mgr-empty">该分类暂无订阅源，点击「添加源」创建</div>
                 )}
                 {cat.feeds.map((f) => {
                   /* AI 开关只对使用 AI 的布局有意义（文章/通知/社交——翻译）；
@@ -537,12 +538,19 @@ function FeedsTab() {
                   return (
                   <div className="group-mgr-child-row" key={f.id}>
                     <div className="group-mgr-feed-info">
-                      <div className="group-mgr-feed-name">{f.name}</div>
-                      <div className="group-mgr-feed-url">{f.url}</div>
+                      {f.favicon ? (
+                        <img src={f.favicon} alt="" className="feed-favicon" referrerPolicy="no-referrer" />
+                      ) : (
+                        <span className="feed-favicon-fallback"><Icons.dot /></span>
+                      )}
+                      <div className="group-mgr-feed-text">
+                        <div className="group-mgr-feed-name">{f.name}</div>
+                        <div className="group-mgr-feed-url">{f.url}</div>
+                      </div>
                     </div>
                     <div className="group-mgr-feed-controls">
                       <FluxDropdown
-                        width={115}
+                        width={96}
                         value={f.layout}
                         onChange={(v) => updateFeedLayout(cat.id, f.id, v)}
                         options={[
