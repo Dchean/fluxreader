@@ -44,6 +44,7 @@ export default function App() {
   const palette = useAppStore((s) => s.settings.palette);
   const toasts = useAppStore((s) => s.toasts);
   const playerActive = useAppStore((s) => s.player.isActive);
+  const dataLoading = useAppStore((s) => s.dataLoading);
 
   /* PlayerBar 活跃 → body 标记类（toast 层上移避让底栏） */
   useEffect(() => {
@@ -243,9 +244,19 @@ export default function App() {
       </div>
 
       <div className={`app-root ${gridClass}`} id="appRoot">
-        <Sidebar />
-        <Timeline />
-        <Reader />
+        {/* 首屏加载骨架：dataLoading 期间不渲染真实 UI（避免空闪/测试数据闪现） */}
+        {dataLoading ? (
+          <div className="app-loading-splash">
+            <div className="app-loading-logo"><img src="/logo.svg" alt="" draggable={false} /></div>
+            <div className="app-loading-bar" />
+          </div>
+        ) : (
+          <>
+            <Sidebar />
+            <Timeline />
+            <Reader />
+          </>
+        )}
       </div>
 
       <PlayerBar />

@@ -352,9 +352,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   translateErrors: {},
   openedReadIds: {},
 
-  categories: createInitialCategories(),
-  entries: createInitialEntries(),
-  feedIndex: buildFeedIndex(createInitialCategories()),
+  /* 启动用空数据 + dataLoading 骨架（不用 mock 先行渲染——曾导致卸载重装后
+     「测试订阅一闪而过」，同步后被真实空库替换；蓝图中 P1/I3 要求首帧即真实态） */
+  categories: [],
+  entries: [],
+  feedIndex: new Map(),
 
   player: { isActive: false, isPlaying: false, speed: 1.0, title: '', showName: '', cover: '', audioUrl: '', positionSec: 0, durationSec: 0, seekToSec: null },
 
@@ -888,18 +890,35 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  /** 启动装载：Tauri 环境下从 SQLite 拉数据；浏览器保持 mock */
+  /** 启动装载：Tauri 环境下从 SQLite 拉数据；浏览器开发/后端异常回退 mock。
+    注意：Tauri 启动填充真实数据（dataLoading 骨架期间不渲染任何默认数据，
+    防止历史「测试订阅一闪而过」——卸载重装后真实空库替换 mock 的时序问题）。 */
   bootstrapFromBackend: async () => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
-      set({ dataMode: 'mock', dataLoading: false });
+      /* 浏览器开发预览：亮出 mock 数据供看效果 */
+      const cats = createInitialCategories();
+      set({
+        categories: cats,
+        entries: createInitialEntries(),
+        feedIndex: buildFeedIndex(cats),
+        dataMode: 'mock',
+        dataLoading: false,
+      });
       return;
     }
     try {
       await get().reloadFromBackend();
     } catch (e) {
-      /* 后端异常时回退 mock，保证界面可用 */
+      /* 后端异常时回退 mock，保证界面可用（Tauri 极少触发） */
       console.error('bootstrap from backend failed:', e);
-      set({ dataMode: 'mock', dataLoading: false });
+      const cats = createInitialCategories();
+      set({
+        categories: cats,
+        entries: createInitialEntries(),
+        feedIndex: buildFeedIndex(cats),
+        dataMode: 'mock',
+        dataLoading: false,
+      });
     }
   },
 
