@@ -311,6 +311,14 @@ export const api = {
     return inv ? (await inv('extract_fulltext', { articleId }) as string) : null;
   },
 
+  /** 后端抓图（防盗链兼容）：走 Referer 候选链（无→图床 origin→文章 URL）。
+      返回图片字节（Tauri IPC 的 Vec<u8> 序列化为 number[]），用于 webview 自身加载失败时的重试。 */
+  async fetchImage(url: string, pageUrl?: string): Promise<Uint8Array | number[] | null> {
+    const inv = await getInvoke();
+    if (!inv) return null;
+    return (await inv('fetch_image', { url, pageUrl })) as Uint8Array | number[];
+  },
+
   /* ---- SMTC 系统媒体控制 ---- */
   /** 播放状态/元数据同步到系统媒体控制（PlayerBar 节流调用）。 */
   async mediaUpdateFull(title: string, show: string, durationSec: number, positionSec: number, playing: boolean): Promise<void> {

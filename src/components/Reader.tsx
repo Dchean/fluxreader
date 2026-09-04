@@ -4,6 +4,7 @@ import { useAppStore, selectFeedConfig } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
+import { proxyImagesInHtml } from '../lib/imageProxy';
 
 /* ============================================================
    Reader —— 右侧沉浸阅读器
@@ -13,6 +14,7 @@ import { openExternal, handleArticleLinkClick } from '../lib/external';
 export function Reader() {
   const isShowingTranslatedProse = useAppStore((s) => s.isShowingTranslatedProse);
   const isRawRenderMode = useAppStore((s) => s.isRawRenderMode);
+  const showFulltext = useAppStore((s) => s.showFulltext);
   const summaryGenerating = useAppStore((s) => s.summaryGenerating);
   const translating = useAppStore((s) => s.translating);
   const settings = useAppStore((s) => s.settings);
@@ -23,9 +25,9 @@ export function Reader() {
   const toggleCurrentReadStatus = useAppStore((s) => s.toggleCurrentReadStatus);
   const toggleCurrentStar = useAppStore((s) => s.toggleCurrentStar);
   const toggleReaderRenderMode = useAppStore((s) => s.toggleReaderRenderMode);
+  const toggleReaderFulltext = useAppStore((s) => s.toggleReaderFulltext);
   const toggleReaderTranslation = useAppStore((s) => s.toggleReaderTranslation);
   const triggerReaderSummary = useAppStore((s) => s.triggerReaderSummary);
-  const extractCurrentArticle = useAppStore((s) => s.extractCurrentArticle);
   const dataMode = useAppStore((s) => s.dataMode);
   const showToast = useAppStore((s) => s.showToast);
 
@@ -33,6 +35,23 @@ export function Reader() {
   const art = useAppStore((s) =>
     s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) ?? null : null,
   );
+  /* 正文图片代理（防盗链）：对少数派等白名单式防盗链域名，走后端 fetch_image
+     拿 bytes 转 data: URL 替换。代理目标 = 当前要显示的基础 HTML（全文或 RSS 原文），
+     按 baseHtml 缓存，避免每次渲染重复抓图。 */
+  const baseHtml = showFulltext ? art?.content ?? '' : art?.rawContent ?? '';
+  const [proxiedContent, setProxiedContent] = useState<{ key: string; html: string } | null>(null);
+  useEffect(() => {
+    if (!baseHtml) { setProxiedContent(null); return; }
+    if (proxiedContent?.key === baseHtml) return; // 已代理过
+    let alive = true;
+    void proxyImagesInHtml(baseHtml, art?.url).then((result) => {
+      if (!alive) return;
+      if (result == null) { setProxiedContent(null); return; } // 无代理需要或浏览器环境
+      setProxiedContent({ key: baseHtml, html: result });
+    });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseHtml, art?.url]);
   const feedName = useAppStore((s) => (s.activeArticleId ? s.feedIndex.get(s.entries.find((a) => a.id === s.activeArticleId)?.feedId ?? '')?.feed.name ?? '' : ''));
   const config = useAppStore(
     useShallow((s) => selectFeedConfig(s, art?.feedId ?? '')),
@@ -160,12 +179,20 @@ export function Reader() {
                 </button>
                 {dataMode === 'tauri' && (
                   <button
-                    className={`toggle-action-btn ${art.fulltextExtracted ? 'active-accent' : ''}`}
-                    onClick={extractCurrentArticle}
-                    title={art.fulltextExtracted ? '已提取全文，点击刷新' : '从原文网页提取全文（Readability）'}
+                    className={`toggle-action-btn ${showFulltext ? 'active-accent' : ''}`}
+                    onClick={toggleReaderFulltext}
+                    title={
+                      !art.fulltextExtracted
+                        ? '从原文网页提取全文（Readability）'
+                        : showFulltext
+                          ? '切换到 RSS 原文'
+                          : '切换到已提取的全文'
+                    }
                   >
                     <Icons.doc />
-                    <span>{art.fulltextExtracted ? '已全文' : '全文'}</span>
+                    <span>
+                      {!art.fulltextExtracted ? '全文' : showFulltext ? 'RSS 正文' : '全文'}
+                    </span>
                   </button>
                 )}
                 <button
@@ -251,11 +278,9 @@ export function Reader() {
               }}
               onClick={handleProseClick}
               dangerouslySetInnerHTML={{
-                __html: isRawRenderMode
-                  ? art.rawContent
-                  : isShowingTranslatedProse
-                    ? art.translatedContent
-                    : art.content,
+                __html: isShowingTranslatedProse
+                  ? art.translatedContent
+                  : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml),
               }}
             />
           </div>

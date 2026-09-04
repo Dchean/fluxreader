@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "FluxReader",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "identifier": "com.fluxreader.app",
   "build": {
     "frontendDist": "../dist",
@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' http: https: data:; media-src 'self' http: https: data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-src http: https:; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {

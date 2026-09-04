@@ -200,3 +200,56 @@ async fn stale_remote_read_converges_via_full_reconcile() {
         .unwrap();
     assert!(is_read, "full reconcile must converge the stale remote read");
 }
+
+/// 本地直连源漏抓的条目（本地文章数 < 远端）→ full 同步对比拉取补齐。
+/// 根因：此前 pull_entries 只对「完全失败」的源做 Miniflux 兜底，正常直连源
+/// 若 feed 只提供摘要/漏了几条，本地永久缺失。现在 full 对账会对已绑定源
+/// 的远端条目逐一 upsert 补齐（幂等，不重复、不覆盖已有正文/已读）。
+#[tokio::test]
+#[ignore = "spins a local mock server"]
+async fn full_reconcile_backfills_missing_local_entries() {
+    let (db, http, server) = setup("backfill").await;
+    // 本地造一篇直连文章 + 绑定远端 feed 10
+    let (_aid, _mf) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
+    // feeds 阶段绑定本地 feed → 远端 feed 10
+    sync::feeds_phase(&db, &http).await.expect("feeds phase bind");
+
+    // 远端 feed 10 加一条本地完全没有的条目（模拟直连源漏抓）
+    server.add_entry_ret(10, "http://127.0.0.1:8765/missing/post/999", "Remote-only entry", "unread", false);
+
+    // full 同步：绑定回填 + 对比拉取补齐缺失条目
+    sync::states_phase(&db, &http, true).await.expect("full reconcile");
+
+    {
+        let conn = db.lock().await;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM articles WHERE url = 'http://127.0.0.1:8765/missing/post/999'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "远程独有条目应被对比拉取补齐到本地");
+        // 来源应标记为 miniflux（兜底补齐）
+        let source: String = conn
+            .query_row(
+                "SELECT source FROM articles WHERE url = 'http://127.0.0.1:8765/missing/post/999'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(source, "miniflux", "补齐的条目来源应为 miniflux");
+    }
+
+    // 幂等：再跑一次 full 同步，不应重复入库
+    let before: i64 = {
+        let conn = db.lock().await;
+        conn.query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0)).unwrap()
+    };
+    sync::states_phase(&db, &http, true).await.expect("second full reconcile");
+    let after: i64 = {
+        let conn = db.lock().await;
+        conn.query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0)).unwrap()
+    };
+    assert_eq!(before, after, "二次 full 同步不应重复入库（幂等）");
+}

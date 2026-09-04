@@ -91,10 +91,11 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.9.3"
+version = "0.10.0"
 dependencies = [
  "ammonia",
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "dom_smoothie",
  "ego-tree",
@@ -118,6 +119,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "tokio",
  "url",
+ "windows 0.61.3",
 ]
 
 [[package]]

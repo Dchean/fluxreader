@@ -190,8 +190,11 @@ export default function App() {
         if (s.searchOpen) s.closeSearch();
         else if (s.newCategoryModalOpen) s.closeMiniModal('newCategory');
         else if (s.addFeedModalOpen) s.closeMiniModal('addFeed');
+        else if (s.editFeedModalOpen) s.closeMiniModal('editFeed');
+        else if (s.renameCatModalOpen) s.closeMiniModal('renameCat');
         else if (s.settingsOpen) s.closeSettings();
         else if (s.lightboxUrl) s.closeLightbox();
+        else if (s.playerExpanded && s.player.isActive) s.togglePlayerExpanded(); // Full Player 大浮层
         else if (s.activeArticleId) s.clearReaderSelection();
         return;
       }

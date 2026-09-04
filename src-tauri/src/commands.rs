@@ -237,17 +237,9 @@ pub async fn add_feed(
 #[tauri::command]
 pub async fn delete_feed(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     let conn = state.db.lock().await;
-    // 删除前取 URL 入同步队列（连接 Miniflux 后补推 remove_feed，服务端同步删）
-    let url: Option<String> = conn
-        .query_row(
-            "SELECT feed_url FROM feeds WHERE id = ?1",
-            rusqlite::params![id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if let Some(url) = url {
-        db::enqueue_sync(&conn, None, Some(&url), "remove_feed", None)?;
-    }
+    // 删除语义（SUB-4/SYN-1）：本地删除 ≠ 强删远端，避免误删服务端数据。
+    // 不建 remove_feed 队项（该动作从未被 sync.rs 消费，只会累积僵尸队列）；
+    // 若历史版本残留了 remove_feed 僵尸项，由 sync 阶段统一清理（见 sync.rs）。
     db::delete_feed(&conn, id)
 }
 
@@ -589,9 +581,24 @@ pub async fn extract_fulltext(state: State<'_, AppState>, article_id: i64) -> Ap
         .map_err(|e| AppError::internal(format!("blocking task: {e}")))?
         .unwrap_or_default();
 
-    // 落库覆盖正文（全文 > RSS 摘要）+ 置提取标志（按钮/设置状态共用）
+    // 落库覆盖正文（全文 > RSS 摘要）+ 置提取标志（按钮/设置状态共用）。
+    // 智能全文防退化：提取结果剥标签后若比原 RSS 正文还短，说明原内容已是
+    // 全文或提取失败——保留原内容、不置提取标志（避免把好正文换成更短的）。
     {
         let conn = state.db.lock().await;
+        let original: String = conn
+            .query_row(
+                "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
+                rusqlite::params![article_id],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        let orig_text_len = crate::sanitize::html_to_text(&original).trim().len();
+        let extracted_text_len = crate::sanitize::html_to_text(&extracted).trim().len();
+        // 提取结果显著更短（不足原文 80%）→ 判定退化，保留原文
+        if extracted_text_len > 0 && extracted_text_len * 5 < orig_text_len * 4 {
+            return Ok(original);
+        }
         conn.execute(
             "UPDATE articles SET content_html = ?1, fulltext_extracted = 1 WHERE id = ?2",
             rusqlite::params![extracted, article_id],
@@ -604,6 +611,79 @@ pub async fn extract_fulltext(state: State<'_, AppState>, article_id: i64) -> Ap
         }
     }
     Ok(extracted)
+}
+
+/* ============================================================
+   图片代理（防盗链兼容）——参考 Papr 方案
+   ============================================================ */
+
+/// 浏览器 UA（部分图床除 Referer 外还检查 UA）。
+const IMAGE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+    AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
+
+/// 图片字节上限（防恶意/误配 URL 撑爆内存）。
+const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Referer 候选链：防盗链双向——黑名单式（sinaimg.cn 拒外来 Referer、只认裸请求）
+/// 与白名单式（少数派 cdnfile.sspai.com 拒裸请求、要求 sspai.com Referer）无法用
+/// 单一值同时满足，故依次尝试：无 Referer → 图片自身 origin → 文章原文 URL。
+fn referer_candidates(image_url: &str, page_url: Option<&str>) -> Vec<Option<String>> {
+    let mut out = vec![None];
+    if let Ok(u) = url::Url::parse(image_url) {
+        let origin = u.origin().ascii_serialization();
+        if origin != "null" {
+            out.push(Some(format!("{origin}/")));
+        }
+    }
+    if let Some(p) = page_url {
+        if (p.starts_with("http://") || p.starts_with("https://")) && url::Url::parse(p).is_ok() {
+            let candidate = Some(p.to_string());
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
+/// 后端抓图：走 Referer 候选链直到某值被图床接受，返回图片字节。
+/// 用于 webview 自身加载失败（防盗链）时的重试——webview 的 Referer 无法按
+/// 域名变化，Rust 端可控制。传输错误（DNS/超时）直接中止（换 Referer 无济于事），
+/// 仅 HTTP 状态错误才继续下一候选。
+#[tauri::command]
+pub async fn fetch_image(
+    state: State<'_, AppState>,
+    url: String,
+    page_url: Option<String>,
+) -> AppResult<Vec<u8>> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(AppError::new("badImageUrl", "仅支持 http/https 图片"));
+    }
+    let http = &state.http;
+    let mut last_err = AppError::new("imageFetch", "图片抓取失败");
+    for referer in referer_candidates(&url, page_url.as_deref()) {
+        let mut req = http.get(&url).header("User-Agent", IMAGE_UA);
+        if let Some(r) = &referer {
+            req = req.header("Referer", r.as_str());
+        }
+        match req.send().await {
+            Err(e) => return Err(e.into()), // 传输错误：换 Referer 无济于事
+            Ok(resp) => match resp.error_for_status() {
+                Err(e) => last_err = AppError::new("imageFetch", format!("HTTP 错误: {e}")),
+                Ok(resp) => {
+                    if resp.content_length().is_some_and(|n| n > MAX_IMAGE_BYTES) {
+                        return Err(AppError::new("imageTooLarge", "图片过大"));
+                    }
+                    let bytes = resp.bytes().await?;
+                    if bytes.len() as u64 > MAX_IMAGE_BYTES {
+                        return Err(AppError::new("imageTooLarge", "图片过大"));
+                    }
+                    return Ok(bytes.to_vec());
+                }
+            },
+        }
+    }
+    Err(last_err)
 }
 
 /* ============================================================
@@ -1045,8 +1125,9 @@ pub async fn ai_summarize(
     let user = format!("标题：{title}\n\n正文：\n{body}");
     let (system, _) = load_prompts(&state).await;
     let mut sink = |delta: &str| {
-        let _ = on_channel.send(AiEvent::Delta(delta.to_string()));
-        true // 前端关闭面板的场景由 Channel 自身丢弃处理
+        // 前端关闭面板（Channel 被 drop）时 send 返回 Err → 返回 false 让
+        // stream_chat 提前终止，不浪费 token、不落残缺产物（A-5）。
+        on_channel.send(AiEvent::Delta(delta.to_string())).is_ok()
     };
     let outcome = crate::ai::stream_chat(
         &state.http,
@@ -1111,8 +1192,9 @@ pub async fn ai_translate(
     let user = format!("标题：{title}\n\nHTML：\n{html}");
     let (_, system) = load_prompts(&state).await;
     let mut sink = |delta: &str| {
-        let _ = on_channel.send(AiEvent::Delta(delta.to_string()));
-        true
+        // 前端关闭面板（Channel 被 drop）时 send 返回 Err → 返回 false 让
+        // stream_chat 提前终止，不浪费 token、不落残缺产物（A-5）。
+        on_channel.send(AiEvent::Delta(delta.to_string())).is_ok()
     };
     let outcome = crate::ai::stream_chat(
         &state.http,
@@ -1127,8 +1209,9 @@ pub async fn ai_translate(
     if outcome.completed && !outcome.text.trim().is_empty() {
         // 翻译产物是 HTML 且直接 dangerouslySetInnerHTML 渲染——入库前
         // 过消毒器（模型输出不可信：可能带 <script> 或被提示注入）。
-        // 流式 delta 已发给前端（流中预览），落库的是消毒版；前端流完
-        // 读回 content 时拿到的即消毒产物。
+        // 流式 delta 已发给前端（流中预览，未消毒）；落库的是消毒版。
+        // 前端在流结束后回读 get_article 拿消毒版覆盖流式预览（见 store.ts
+        // toggleReaderTranslation 的 onDone 回读逻辑）。
         let safe = crate::sanitize::sanitize(&outcome.text, None);
         let conn = state.db.lock().await;
         let _ = db::set_article_ai_fields(&conn, article_id, None, Some(&safe));
@@ -1152,5 +1235,46 @@ mod ai_event_tests {
         let err = serde_json::to_value(AiEvent::Error("失败".into())).unwrap();
         assert_eq!(err["type"], "error");
         assert_eq!(err["data"], "失败");
+    }
+}
+
+#[cfg(test)]
+mod image_proxy_tests {
+    use super::referer_candidates;
+
+    /// Referer 候选链：无 Referer → 图床 origin → 文章 URL（白名单式防盗链靠最后一项）。
+    #[test]
+    fn referer_candidates_tries_none_origin_then_page() {
+        let got = referer_candidates(
+            "https://cdnfile.sspai.com/a.jpg",
+            Some("https://sspai.com/post/123"),
+        );
+        assert_eq!(
+            got,
+            vec![
+                None,
+                Some("https://cdnfile.sspai.com/".to_string()),
+                Some("https://sspai.com/post/123".to_string()),
+            ],
+            "候选链顺序必须是 无→origin→文章URL"
+        );
+    }
+
+    #[test]
+    fn referer_candidates_without_page_url() {
+        let got = referer_candidates("https://wx1.sinaimg.cn/large/a.jpg", None);
+        assert_eq!(got, vec![None, Some("https://wx1.sinaimg.cn/".to_string())]);
+    }
+
+    #[test]
+    fn referer_candidates_skips_non_http_page_url() {
+        let got = referer_candidates("https://ex.com/a.png", Some("mailto:editor@ex.com"));
+        assert_eq!(got, vec![None, Some("https://ex.com/".to_string())]);
+    }
+
+    #[test]
+    fn referer_candidates_dedupes_page_equal_to_origin() {
+        let got = referer_candidates("https://ex.com/a.png", Some("https://ex.com/"));
+        assert_eq!(got, vec![None, Some("https://ex.com/".to_string())]);
     }
 }

@@ -1,6 +1,7 @@
 # ---- 构建产物 ----
 node_modules/
 dist/
+dist-test/
 src-tauri/target/
 src-tauri/gen/schemas/
 

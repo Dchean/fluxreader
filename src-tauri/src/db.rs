@@ -17,7 +17,7 @@ use crate::error::AppResult;
    articles 增 source 列（'direct' | 'miniflux'）+ fetch_failed 源级状态。
    ============================================================ */
 
-static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
+pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
     Migrations::new(vec![
     M::up(r#"
         CREATE TABLE folders (
@@ -95,7 +95,7 @@ static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
             id          INTEGER PRIMARY KEY,
             article_id  INTEGER REFERENCES articles(id) ON DELETE CASCADE,
             feed_url    TEXT,
-            action      TEXT NOT NULL,  -- 'read' | 'unread' | 'star' | 'unstar' | 'add_feed' | 'remove_feed'
+            action      TEXT NOT NULL,  -- 'read' | 'unread' | 'star' | 'unstar' | 'add_feed'（'remove_feed' 为历史遗留，已废弃：本地删除不推远端）
             payload     TEXT,           -- JSON：add_feed 的 title/folder 等附加信息
             created_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -192,6 +192,8 @@ pub fn open(path: &Path) -> AppResult<Connection> {
     if prev_version > 0 && prev_version < 7 {
         backfill_url_norm(&conn)?;
     }
+    // 启动迁移：历史明文敏感凭据升级为 DPAPI 密文（SEC-2）。幂等。
+    let _ = crate::credentials::migrate_legacy_plaintext(&conn)?;
     Ok(conn)
 }
 
@@ -699,7 +701,9 @@ pub fn get_article(conn: &Connection, id: i64) -> AppResult<Option<ArticleRow>> 
 /// 完成，语义对任意语言/任意字符都正确（就是"包含这个子串"）。
 ///
 /// 多关键词 AND（所有词都要命中，与主流阅读器一致）；匹配字段：标题 +
-/// 正文纯文本 + 摘要；LIKE 通配符 %/_ 按字面转义。
+/// 正文纯文本 + 摘要 + AI 摘要 + AI 翻译；LIKE 通配符 %/_ 按字面转义。
+/// 注：AI 字段纳入命中后（SRH-2），`articles_fts` FTS5 表（unicode61 分词对中文
+/// 不友好，见迁移注释）不再作为搜索入口，仅保留触发器同步作历史遗留。
 pub fn search_articles(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<ArticleListItem>> {
     let q = query.trim();
     if q.is_empty() {
@@ -714,20 +718,24 @@ pub fn search_articles(conn: &Connection, query: &str, limit: i64) -> AppResult<
         return Ok(Vec::new());
     }
 
-    // 每个词一组 (title/body/summary LIKE)，词间 AND。
-    // 占位符逐个编号（?N 是编号引用，跨词组复用 ?1..?3 会错位），
+    // 每个词一组 (title/body/summary/ai_summary/translated LIKE)，词间 AND。
+    // 占位符逐个编号（?N 是编号引用，跨词组复用 ?1..?5 会错位），
     // ESCAPE 声明 SQLite 的 LIKE 通配符转义字符 '\'。
     let mut where_parts = Vec::with_capacity(terms.len());
-    let mut like_args: Vec<String> = Vec::with_capacity(terms.len() * 3);
+    let mut like_args: Vec<String> = Vec::with_capacity(terms.len() * 5);
     for (i, t) in terms.iter().enumerate() {
         let pat = format!("%{t}%");
-        let base = i * 3 + 1;
+        let base = i * 5 + 1;
         where_parts.push(format!(
-            "(a.title LIKE ?{b} ESCAPE '\\' OR a.body_text LIKE ?{c} ESCAPE '\\' OR COALESCE(a.summary,'') LIKE ?{d} ESCAPE '\\')",
+            "(a.title LIKE ?{b} ESCAPE '\\' OR a.body_text LIKE ?{c} ESCAPE '\\' OR COALESCE(a.summary,'') LIKE ?{d} ESCAPE '\\' OR COALESCE(a.ai_summary,'') LIKE ?{e} ESCAPE '\\' OR COALESCE(a.translated_content,'') LIKE ?{f} ESCAPE '\\')",
             b = base,
             c = base + 1,
-            d = base + 2
+            d = base + 2,
+            e = base + 3,
+            f = base + 4,
         ));
+        like_args.push(pat.clone());
+        like_args.push(pat.clone());
         like_args.push(pat.clone());
         like_args.push(pat.clone());
         like_args.push(pat);
@@ -1101,14 +1109,27 @@ pub fn get_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
             r.get(0)
         })
         .optional()?;
-    Ok(v)
+    // 敏感键读时解密（SEC-2）；历史明文无前缀则原样返回（兼容）
+    Ok(v.map(|raw: String| {
+        if crate::credentials::is_sensitive_key(key) {
+            crate::credentials::decrypt_secret(&raw)
+        } else {
+            raw
+        }
+    }))
 }
 
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
+    // 敏感键写时加密（SEC-2）：DPAPI 加密后落库，读 DB 不见明文
+    let stored = if crate::credentials::is_sensitive_key(key) {
+        crate::credentials::encrypt_secret(value)
+    } else {
+        value.to_string()
+    };
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
+        params![key, stored],
     )?;
     Ok(())
 }
@@ -1188,6 +1209,13 @@ pub fn prune_sync(conn: &Connection, ids: &[i64]) -> AppResult<()> {
         rusqlite::params_from_iter(ids.iter()),
     )?;
     Ok(())
+}
+
+/// 清掉历史版本残留的 remove_feed 僵尸队项（该动作从未被 sync 消费；现行
+/// 删除语义为「本地删除不推远端」，见 delete_feed 命令）。返回清除条数。
+pub fn purge_remove_feed_zombies(conn: &Connection) -> AppResult<usize> {
+    let n = conn.execute("DELETE FROM sync_queue WHERE action = 'remove_feed'", [])?;
+    Ok(n)
 }
 
 /// 按 Miniflux entry id 找本地条目（Pull 状态合并的匹配键之一）
@@ -1469,5 +1497,33 @@ mod dedup_tests {
         assert_eq!(r6.len(), 1);
         let r7 = search_articles(&conn, "C++", 50).unwrap();
         assert_eq!(r7.len(), 1);
+    }
+
+    /// 搜索命中 AI 摘要/翻译（SRH-2）：正文/标题都不含关键词、仅 AI 产物含时也要命中。
+    #[test]
+    fn search_finds_ai_summary_and_translation() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://x.example/f", None, "f", None, f, "inherit", true, false).unwrap();
+
+        let mut a = new_article("https://n.example/1", "g1");
+        a.title = "普通标题".into();
+        a.body_text = "正文不含关键词".into();
+        let (id, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+
+        // 仅摘要含关键词
+        set_article_ai_fields(&conn, id, Some("这篇讲的是量子计算的突破"), None).unwrap();
+        let r1 = search_articles(&conn, "量子计算", 50).unwrap();
+        assert_eq!(r1.len(), 1, "ai_summary 命中");
+
+        // 仅译文含关键词
+        set_article_ai_fields(&conn, id, None, Some("译文里提到了深度学习模型")).unwrap();
+        let r2 = search_articles(&conn, "深度学习", 50).unwrap();
+        assert_eq!(r2.len(), 1, "translated_content 命中");
+
+        // 无关词不命中
+        let r3 = search_articles(&conn, "不存在的词", 50).unwrap();
+        assert!(r3.is_empty());
     }
 }

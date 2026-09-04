@@ -29,12 +29,15 @@ const PALETTES = [
   { id: 'terracotta', name: '赤陶', color: '#c46d54' },
 ] as const;
 
+/* 字体选项：一律用系统本地字体，不依赖 CDN webfont。
+   Windows 优先回退链：UI 走 Segoe UI Variable → Segoe UI → 微软雅黑；
+   等宽走 Cascadia Mono → Consolas（JetBrains Mono 非系统字体，移除）。 */
 const FONT_OPTIONS = [
-  { value: "'Plus Jakarta Sans', -apple-system, 'Segoe UI', sans-serif", label: 'Plus Jakarta Sans (默认)' },
-  { value: "'Microsoft YaHei', 'PingFang SC', sans-serif", label: '微软雅黑 / 苹方 (无衬线)' },
+  { value: '"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif', label: '系统默认 (Segoe UI / 微软雅黑)' },
+  { value: '"Microsoft YaHei", "PingFang SC", system-ui, sans-serif', label: '微软雅黑 / 苹方 (无衬线)' },
   { value: 'Georgia, Cambria, "Times New Roman", serif', label: 'Georgia (优雅衬线)' },
-  { value: "'Songti SC', SimSun, 'Source Han Serif SC', serif", label: '宋体 / 思源宋体 (中文衬线)' },
-  { value: "'JetBrains Mono', Consolas, monospace", label: 'JetBrains Mono (等宽代码)' },
+  { value: '"SimSun", "Songti SC", "Source Han Serif SC", serif', label: '宋体 / 思源宋体 (中文衬线)' },
+  { value: '"Cascadia Mono", Consolas, monospace', label: 'Cascadia / Consolas (等宽代码)' },
 ];
 
 const LAYOUT_OPTIONS = CONTENT_LAYOUTS.map((l) => {

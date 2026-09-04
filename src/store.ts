@@ -48,6 +48,20 @@ function clearGithubPoll() {
   }
 }
 
+/** 「智能全文」判定：正文是否已是全文（无需 Readability 提取）。
+    启发式：只认明确的"正文被截断"信号——摘要型源（少数派等）的结尾标记
+    "查看全文/阅读全文/继续阅读/阅读原文" 等。返回 true = 需要提取全文（是摘要）；
+    false = 已是全文（跳过，省请求）。
+    注意：不按"文本短"判断——论坛（Linux DO）的短帖本身就是完整全文，短 ≠ 摘要；
+    也不认"阅读更多"——那是论坛/列表"去原帖看回复"链接，非正文截断。 */
+function shouldExtractFulltext(html: string): boolean {
+  if (!html) return false;
+  const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  // 明确的正文截断标记（"全文/原文"字样；不含"阅读更多"= 论坛去原帖链接）
+  const truncationMarks = /查看全文|阅读全文|继续阅读|展开全文|阅读原文|查看原文|Read more|read more|Continue reading|continue reading/;
+  return truncationMarks.test(text);
+}
+
 async function doGithubPoll() {
   githubPollTimer = null;
   try {
@@ -153,6 +167,8 @@ export interface AppState {
   activeArticleId: string | null;
   isShowingTranslatedProse: boolean;
   isRawRenderMode: boolean;
+  /** 全文视图开关：true=显示 Readability 全文，false=显示 RSS 原文 */
+  showFulltext: boolean;
   summaryGenerating: boolean;
   /** AI 翻译流式生成中 */
   translating: boolean;
@@ -236,6 +252,8 @@ export interface AppState {
   toggleCurrentReadStatus: () => void;
   toggleCurrentStar: () => void;
   toggleReaderRenderMode: () => void;
+  /** 全文视图切换：RSS 原文 ↔ Readability 全文（已提取则直接切换，不重复请求） */
+  toggleReaderFulltext: () => void;
   /** opts.silent：源级开关自动触发时静默失败（未配置 AI 不弹 toast） */
   toggleReaderTranslation: (opts?: { silent?: boolean }) => void;
   triggerReaderSummary: (opts?: { silent?: boolean }) => void;
@@ -256,6 +274,9 @@ export interface AppState {
   togglePlayerPlay: () => void;
   cyclePlaybackSpeed: () => void;
   closePodcastBar: () => void;
+  /** Full Player 展开态（大播放器覆盖层；Esc/再次点击收起） */
+  playerExpanded: boolean;
+  togglePlayerExpanded: () => void;
   /** audio 元素进度回写 */
   syncPlayerProgress: (positionSec: number, durationSec: number) => void;
   playerEnded: () => void;
@@ -346,6 +367,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activeArticleId: null,
   isShowingTranslatedProse: false,
   isRawRenderMode: false,
+  showFulltext: false,
   summaryGenerating: false,
   translating: false,
   summaryErrors: {},
@@ -359,6 +381,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   feedIndex: new Map(),
 
   player: { isActive: false, isPlaying: false, speed: 1.0, title: '', showName: '', cover: '', audioUrl: '', positionSec: 0, durationSec: 0, seekToSec: null },
+  playerExpanded: false,
 
   settingsOpen: false,
   settingsTab: 'general',
@@ -398,7 +421,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     hideReadOnStartup: true,
     themeMode: 'dark',
     palette: 'blue',
-    fontFamily: "'Plus Jakarta Sans', -apple-system, 'Segoe UI', sans-serif",
+    fontFamily: '"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif',
     fontSize: 16,
     lineHeight: 180,
     maxWidth: 760,
@@ -422,6 +445,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeArticleId: null,
       isShowingTranslatedProse: false,
       isRawRenderMode: false,
+      showFulltext: false,
       /* 切换布局 = 刷新列表，清除"已读保留"快照 */
       openedReadIds: {},
     }),
@@ -480,6 +504,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeArticleId: id,
       isShowingTranslatedProse: false,
       isRawRenderMode: false,
+      showFulltext: false,
     }));
     get().ensureArticleContent(id);
   },
@@ -515,26 +540,34 @@ export const useAppStore = create<AppState>((set, get) => ({
             : a,
         ),
       }));
-      /* 「自动全文」模式：摘要型正文（<600 字符且非空）自动触发 Readability 提取 */
+      /* 「智能全文」：识别到正文是摘要（非全文）才触发 Readability 提取，
+         已是全文则跳过（省请求）。判定 = 纯文本长度 + 截断标记（见 shouldExtractFulltext）。 */
       const mode = get().settings.defaultOpenMode;
-      if (mode === 'fulltext' && row.url && html.length > 0 && html.length < 600) {
+      const alreadyExtracted = row.fulltext_extracted ?? false;
+      if (mode === 'fulltext' && row.url && !alreadyExtracted && shouldExtractFulltext(html)) {
         void api
           .extractFulltext(Number(id))
           .then((full) => {
             if (!full) return;
             set((s) => ({
-              entries: s.entries.map((a) => (a.id === id ? { ...a, content: full, rawContent: full, fulltextExtracted: true } : a)),
+              entries: s.entries.map((a) => (a.id === id ? { ...a, content: full, fulltextExtracted: true } : a)),
+              showFulltext: true,
             }));
           })
-          .catch(() => {/* 提取失败保留 RSS 摘要正文，不打扰 */ });
+          .catch((e: unknown) => {
+            /* C-3：全文提取失败不再静默——给可重试提示（自动全文路径）。 */
+            const msg = extractError(e);
+            get().showToast(`全文提取失败：${msg}`, { label: '重试', run: () => get().extractCurrentArticle() });
+          });
       }
     });
   },
 
   clearReaderSelection: () =>
-    set({ activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false }),
+    set({ activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false, showFulltext: false }),
 
-  /** 手动全文提取：Readability 拉原文网页覆盖正文；状态源与设置「自动全文」一致 */
+  /** 手动全文提取：Readability 拉原文网页存 content；rawContent 始终保留 RSS 原文
+      （供「全文 ↔ RSS 正文」切换回跳）。提取成功后进入全文视图。 */
   extractCurrentArticle: () => {
     const { activeArticleId, entries, dataMode, showToast } = get();
     if (!activeArticleId || dataMode !== 'tauri') return;
@@ -552,8 +585,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         const id = activeArticleId;
         set((s) => ({
           entries: s.entries.map((a) =>
-            a.id === id ? { ...a, content: full, rawContent: full, fulltextExtracted: true } : a,
+            a.id === id ? { ...a, content: full, fulltextExtracted: true } : a,
           ),
+          showFulltext: true,
         }));
         showToast('全文提取完成');
       })
@@ -561,6 +595,22 @@ export const useAppStore = create<AppState>((set, get) => ({
         const msg = extractError(e);
         showToast(`全文提取失败：${msg}`, { label: '重试', run: () => get().extractCurrentArticle() });
       });
+  },
+
+  /** 全文视图切换：已提取全文 → 在 RSS 原文与全文间切换（不重复请求）；
+      未提取 → 触发提取（同 extractCurrentArticle）。 */
+  toggleReaderFulltext: () => {
+    const { activeArticleId, entries, showFulltext } = get();
+    if (!activeArticleId) return;
+    const art = entries.find((a) => a.id === activeArticleId);
+    if (!art) return;
+    if (art.fulltextExtracted) {
+      // 已提取：直接切换视图
+      set({ showFulltext: !showFulltext });
+    } else {
+      // 未提取：触发提取
+      get().extractCurrentArticle();
+    }
   },
 
   toggleCurrentReadStatus: () => {
@@ -628,7 +678,24 @@ export const useAppStore = create<AppState>((set, get) => ({
             return { entries: st.entries.map((a) => (a.id === articleId ? { ...a, translatedContent: next } : a)) };
           });
         },
-        () => set({ translating: false }),
+        () => {
+          /* 流式结束：回读 DB 的消毒版译文（后端 ai_translate 落库前已 sanitize，
+             流中 delta 是未消毒原样，若直接保留会把 XSS 窗口留到渲染时）。
+             回读成功后用消毒版覆盖流式产物；失败则回退到已展示的流式内容。 */
+          set({ translating: false });
+          void api.getArticle(Number(articleId)).then((row) => {
+            if (!row) return;
+            const cur = get().entries.find((a) => a.id === articleId);
+            if (!cur) return;
+            const safe = row.translated_content ?? '';
+            if (!safe) return;
+            set((st) => ({
+              entries: st.entries.map((a) =>
+                a.id === articleId ? { ...a, translatedContent: safe } : a,
+              ),
+            }));
+          });
+        },
         (msg) => {
           /* 内联错误（Reader 正文上方展示）+ 非 silent 时 toast 带重试 */
           set((st) => ({
@@ -805,7 +872,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   closePodcastBar: () =>
-    set((s) => ({ player: { ...s.player, isActive: false, isPlaying: false, seekToSec: null } })),
+    set((s) => ({ player: { ...s.player, isActive: false, isPlaying: false, seekToSec: null }, playerExpanded: false })),
+
+  togglePlayerExpanded: () => set((s) => ({ playerExpanded: !s.playerExpanded })),
 
   /* ================= 弹层 ================= */
 

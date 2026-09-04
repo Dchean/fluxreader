@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "outDir": "./dist-test",
+    "rootDir": "./src",
+    "verbatimModuleSyntax": true,
+    "noEmit": false,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "declaration": false,
+    "sourceMap": false
+  },
+  "include": [
+    "src/store.ts",
+    "src/mockData.ts",
+    "src/types.ts",
+    "src/lib/api.ts",
+    "src/lib/format.ts",
+    "src/lib/external.ts"
+  ]
+}

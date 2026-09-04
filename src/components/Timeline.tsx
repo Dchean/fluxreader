@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import {
   useAppStore,
@@ -150,7 +150,11 @@ export function Timeline() {
           ))}
         {activeContentLayout === 'social' && (
           <div className="social-feed-wrap">
-            {items.map((s) => <SocialCard key={s.id} item={s} />)}
+            {items.map((s) => (
+              <div key={s.id} data-card-id={s.id} ref={(el) => registerCard(s.id, el)}>
+                <SocialCard item={s} />
+              </div>
+            ))}
           </div>
         )}
         {activeContentLayout === 'image' && (
@@ -187,7 +191,7 @@ export function Timeline() {
 
 /* ---------- 文章卡片 ---------- */
 
-function ArticleCard({ art, onSelect }: { art: ArticleEntry; onSelect: (id: string) => void }) {
+const ArticleCard = memo(function ArticleCard({ art, onSelect }: { art: ArticleEntry; onSelect: (id: string) => void }) {
   const activeArticleId = useAppStore((s) => s.activeArticleId);
   const feedName = useAppStore((s) => s.feedIndex.get(art.feedId)?.feed.name ?? '');
   const selected = activeArticleId === art.id;
@@ -225,11 +229,11 @@ function ArticleCard({ art, onSelect }: { art: ArticleEntry; onSelect: (id: stri
       </div>
     </div>
   );
-}
+});
 
 /* ---------- 社交卡片 ---------- */
 
-function SocialCard({ item }: { item: ArticleEntry }) {
+const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const showToast = useAppStore((s) => s.showToast);
   const binding = useAppStore((s) => s.feedIndex.get(item.feedId));
@@ -250,6 +254,9 @@ function SocialCard({ item }: { item: ArticleEntry }) {
   const textRef = useRef<HTMLDivElement>(null);
   const [isLong, setIsLong] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  /* 记录上次 isLong 值：ResizeObserver 频繁触发，只在值真正翻转时才 setState，
+     避免滚动/图片加载时每帧都重渲染（页面抖动的根因之一） */
+  const isLongRef = useRef(false);
   useEffect(() => {
     const el = textRef.current;
     if (!el || typeof ResizeObserver === 'undefined') {
@@ -259,7 +266,11 @@ function SocialCard({ item }: { item: ArticleEntry }) {
     /* 折叠态下 scrollHeight 仍是完整内容高（overflow:hidden 不改变
        scrollHeight）——测量不受折叠影响 */
     const ro = new ResizeObserver(() => {
-      setIsLong(el.scrollHeight > 260);
+      const next = el.scrollHeight > 260;
+      if (next !== isLongRef.current) {
+        isLongRef.current = next;
+        setIsLong(next);
+      }
     });
     ro.observe(el);
     return () => ro.disconnect();
@@ -304,7 +315,7 @@ function SocialCard({ item }: { item: ArticleEntry }) {
             <span>{item.isStarred ? '已收藏' : '收藏'}</span>
           </button>
           <button
-            className="social-act-item"
+            className={`social-act-item ${item.isRead ? 'act-on' : ''}`}
             onClick={() => {
               toggleEntryFlag(item.id, 'isRead');
               showToast(item.isRead ? '已标记为未读' : '已标记为已读');
@@ -338,11 +349,11 @@ function SocialCard({ item }: { item: ArticleEntry }) {
       </div>
     </div>
   );
-}
+});
 
 /* ---------- 画廊卡片 ---------- */
 
-function GalleryCard({ item }: { item: ArticleEntry }) {
+const GalleryCard = memo(function GalleryCard({ item }: { item: ArticleEntry }) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const openLightbox = useAppStore((s) => s.openLightbox);
   const selectArticle = useAppStore((s) => s.selectArticle);
@@ -384,11 +395,11 @@ function GalleryCard({ item }: { item: ArticleEntry }) {
       </div>
     </div>
   );
-}
+});
 
 /* ---------- 播客卡片 ---------- */
 
-function PodcastCard({ item }: { item: ArticleEntry }) {
+const PodcastCard = memo(function PodcastCard({ item }: { item: ArticleEntry }) {
   const playPodcastEpisode = useAppStore((s) => s.playPodcastEpisode);
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
   return (
@@ -410,11 +421,11 @@ function PodcastCard({ item }: { item: ArticleEntry }) {
       </div>
     </div>
   );
-}
+});
 
 /* ---------- 通知卡片 ---------- */
 
-function NotifCard({ item }: { item: ArticleEntry }) {
+const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const summarizeEntry = useAppStore((s) => s.summarizeEntry);
@@ -506,4 +517,4 @@ function NotifCard({ item }: { item: ArticleEntry }) {
       )}
     </div>
   );
-}
+});

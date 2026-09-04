@@ -54,3 +54,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Run self-hosted mock integration tests (core sync/AI protocols)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test account_lifecycle_e2e --test ai_e2e --test sync_e2e --test sync_phases_e2e -- --ignored

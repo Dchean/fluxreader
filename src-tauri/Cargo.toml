@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.9.3"
+version = "0.10.0"
 description = "FluxReader —— 本地优先的 Windows 桌面 RSS 阅读器"
 authors = ["Dchean"]
 license = "MIT"
@@ -53,3 +53,6 @@ tauri-plugin-notification = "2.4.0"
 [target.'cfg(windows)'.dependencies]
 # SMTC 系统媒体控制（播客播放条接入 Windows 媒体键/音量浮层），仅 Windows 编译
 souvlaki = "0.8.3"
+# DPAPI 凭据加密（SEC-2）：CryptProtectData/CryptUnprotectData
+windows = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
+base64 = "0.22"

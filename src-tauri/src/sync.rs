@@ -202,7 +202,6 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
    ② Pull：远端 → 本地（订阅关系 + 状态 + 条目）
    ============================================================ */
 
-/// 未连接期间本地新增的订阅推到远端
 /// 未连接期间本地新增的订阅推到远端（三段式：锁内读队列 → 锁外 HTTP → 锁内落库）
 async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report: &mut SyncReport) {
     // add_feed 队列动作：锁内读出全部待处理项（feed_url + 目标分类）
@@ -264,10 +263,11 @@ async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report
     }
     let conn = db.lock().await;
     let _ = db::prune_sync(&conn, &done);
+    // remove_feed 语义（SUB-4/SYN-1）：本地删除不推远端。历史版本可能在
+    // delete_feed 时建过 remove_feed 队项（从未被消费）——此处统一清僵尸项，
+    // 与 delete_feed 命令「不再建 remove_feed」的新语义一致。
+    let _ = db::purge_remove_feed_zombies(&conn);
     drop(conn);
-
-    // remove_feed 队列动作：远端也有此源才删（本地删除 ≠ 强删远端，避免误删服务端数据；
-    // 设计约定「同步服务端不受影响」——remove_feed 仅在用户显式操作时入队，暂不自动推删）
 }
 
 /// 拉远端分类+订阅，URL 碰撞合并（三段式：锁外拉取 → 锁内合并）
@@ -413,6 +413,14 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
             for e in &all_entries {
                 let Some(u) = e.url.as_deref() else { continue };
                 let Some(aid) = db::article_id_by_url(&conn, u).ok().flatten() else {
+                    // 本地没有这条 URL（规范化匹配也找不到）→ 可能是直连源
+                    // 漏抓/feed 只提供摘要而缺失的条目。若其远端 feed 已在本地
+                    // 绑定（直连源 + Miniflux 兜底同源），则 upsert 补齐——幂等，
+                    // 已存在的不重复、不覆盖正文/已读；真正缺失的才入库。
+                    let local_feed = db::feed_by_miniflux_id(&conn, e.feed_id).ok().flatten();
+                    if let Some(feed_id) = local_feed {
+                        upsert_miniflux_entry(&conn, feed_id, e, report);
+                    }
                     continue;
                 };
                 // 已绑定的 entry id 直配 = 自己的条目（feed 可能尚未绑定——

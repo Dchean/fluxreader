@@ -2,6 +2,7 @@
 pub mod ai;
 pub mod commands;
 pub mod config_sync;
+pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod extraction;
@@ -267,6 +268,8 @@ pub fn run() {
         commands::ai_translate,
         // 全文提取
         commands::extract_fulltext,
+        // 图片代理（防盗链兼容）
+        commands::fetch_image,
         // OPML 导入导出
         commands::opml_import,
         commands::opml_export,

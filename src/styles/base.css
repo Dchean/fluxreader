@@ -1,5 +1,5 @@
 /* ============================================================
-   FluxReader 全局基础样式（迁移自 prototype.html §1-§7）
+   FluxReader 全局基础样式（迁移自 prototype.html §1-§7�?
    ============================================================ */
 
 * {
@@ -17,7 +17,7 @@ button {
 }
 
 body {
-  font-family: 'Plus Jakarta Sans', -apple-system, "Segoe UI Variable", "Segoe UI", Roboto, sans-serif;
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
   background-color: var(--bg-base);
   color: var(--text-primary);
   height: 100vh;
@@ -109,7 +109,7 @@ body {
   min-height: 28px;
 }
 
-/* 触发器标签：单行不折；容器被压缩时先截断省略，保住按钮形态 */
+/* 触发器标签：单行不折；容器被压缩时先截断省略，保住按钮形�?*/
 .flux-dropdown-label {
   white-space: nowrap;
   overflow: hidden;
@@ -163,8 +163,8 @@ body {
   gap: 2px;
 }
 
-/* Portal 到 body 的菜单：可见性由自身 .open 控制（不能依赖 .flux-dropdown 父级，
-   因为 createPortal 已脱离父子 DOM 关系，父级选择器永不匹配 → 菜单永久透明） */
+/* Portal �?body 的菜单：可见性由自身 .open 控制（不能依�?.flux-dropdown 父级�?
+   因为 createPortal 已脱离父�?DOM 关系，父级选择器永不匹�?�?菜单永久透明�?*/
 .flux-dropdown-menu.open {
   opacity: 1;
   pointer-events: auto;
@@ -305,7 +305,7 @@ body {
 }
 
 .kbd-tag {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 10px;
   background: var(--badge-bg);
   padding: 1px 5px;
@@ -368,8 +368,8 @@ body {
   font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
-  /* 只过渡颜色类属性：border-width 从 0→1px 的过渡会让选中边框
-     "淡入闪现"，改为瞬时应用（见 .active-view） */
+  /* 只过渡颜色类属性：border-width �?0�?px 的过渡会让选中边框
+     "淡入闪现"，改为瞬时应用（�?.active-view�?*/
   transition: background var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
   margin-bottom: 2px;
   background: transparent;
@@ -467,7 +467,7 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  /* 固定宽尾部槽：数字列右缘与 leaf 行（margin 补偿）的数字右缘一致 */
+  /* 固定宽尾部槽：数字列右缘�?leaf 行（margin 补偿）的数字右缘一�?*/
   justify-content: flex-end;
 }
 
@@ -543,7 +543,7 @@ body {
   white-space: nowrap;
 }
 
-/* 源行右侧：计数 + 悬停浮现的操作按钮（编辑 / 刷新）；分类行的改名按钮同理 */
+/* 源行右侧：计�?+ 悬停浮现的操作按钮（编辑 / 刷新）；分类行的改名按钮同理 */
 .feed-leaf-right {
   display: flex;
   align-items: center;
@@ -552,9 +552,9 @@ body {
 }
 
 .feed-leaf-actions {
-  /* opacity/visibility 过渡而非 display 切换：hover 时操作钮淡入，
-     不改变行布局尺寸——此前 display:none→inline-flex 会把行内元素
-     顶高/挤位，造成整行「下陷闪动」 */
+  /* opacity/visibility 过渡而非 display 切换：hover 时操作钮淡入�?
+     不改变行布局尺寸——此�?display:none→inline-flex 会把行内元素
+     顶高/挤位，造成整行「下陷闪动�?*/
   position: absolute;
   right: 8px;
   opacity: 0;
@@ -576,7 +576,7 @@ body {
   pointer-events: auto;
 }
 
-/* 行内小操作钮（源行/分类行共用） */
+/* 行内小操作钮（源�?分类行共用） */
 .feed-row-act-btn {
   width: 20px;
   height: 20px;
@@ -602,7 +602,7 @@ body {
   height: 12px;
 }
 
-/* "全部订阅源"行（与 leaf 行同结构，额外顶部间距） */
+/* "全部订阅�?行（�?leaf 行同结构，额外顶部间距） */
 .feed-all-row {
   padding-left: 8px;
   padding-right: 8px;
@@ -610,8 +610,8 @@ body {
 }
 
 /* 计数徽章统一尾部槽位：订阅源行的数字右缘与分类行数字对齐
-   （分类行数字左侧还有折叠按钮，订阅源行以等宽 margin 补偿，
-    两类行的数字落在同一条右对齐线上） */
+   （分类行数字左侧还有折叠按钮，订阅源行以等宽 margin 补偿�?
+    两类行的数字落在同一条右对齐线上�?*/
 .feed-leaf-item .feed-count-badge {
   margin-right: 22px; /* = folder-chevron-btn 18px + 间隙 4px，补偿无折叠按钮的行 */
 }
@@ -648,7 +648,7 @@ body {
   flex-shrink: 0;
 }
 
-/* 抓取失败源角标：警示色小点，hover 有 title 说明 */
+/* 抓取失败源角标：警示色小点，hover �?title 说明 */
 .feed-error-dot {
   flex-shrink: 0;
   margin-left: 4px;
@@ -724,7 +724,7 @@ body {
   box-shadow: 0 0 6px var(--sync-ok);
 }
 
-/* 未连接 Miniflux：灰色中性点，与文案"本地模式"一致 */
+/* 未连�?Miniflux：灰色中性点，与文案"本地模式"一�?*/
 .sync-dot-off {
   background: var(--text-tertiary);
   box-shadow: none;
@@ -824,11 +824,11 @@ body {
   gap: 5px;
   transition: all var(--transition-fast);
   font-family: inherit;
-  /* 控件文字单行：容器挤压时按钮宁可换位（父级 flex-wrap）也不折字 */
+  /* 控件文字单行：容器挤压时按钮宁可换位（父�?flex-wrap）也不折�?*/
   white-space: nowrap;
 }
 
-/* 纯图标功能按钮（订阅管理行「添加源」）：正方形、图标居中，含义靠 title 提示 */
+/* 纯图标功能按钮（订阅管理行「添加源」）：正方形、图标居中，含义�?title 提示 */
 .toggle-action-btn.icon-btn {
   padding: 4px 7px;
 }
@@ -838,7 +838,7 @@ body {
   border-color: var(--border-strong);
 }
 
-/* 全文提取按钮激活态：正文已是提取结果（与设置「自动全文」共用状态源） */
+/* 全文提取按钮激活态：正文已是提取结果（与设置「自动全文」共用状态源�?*/
 .toggle-action-btn.active-accent {
   border-color: var(--accent);
   background: var(--accent-subtle);
@@ -864,7 +864,7 @@ body {
 }
 
 /* 视图/布局/筛选切换时的一次性淡入过渡（160ms）：
-   列表 DOM 整体替换不再"闪一下"，而是轻微上浮淡入 */
+   列表 DOM 整体替换不再"闪一�?，而是轻微上浮淡入 */
 .timeline-scroll-body.list-entering {
   animation: timelineFadeIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -881,7 +881,7 @@ body {
   font-size: 12.5px;
 }
 
-/* 卡片右上角分类小标签（原内联样式类化） */
+/* 卡片右上角分类小标签（原内联样式类化�?*/
 .card-tag-badge {
   margin-left: auto;
   background: var(--badge-bg);
@@ -1006,6 +1006,10 @@ body {
   display: flex;
   gap: 12px;
 }
+/* read gray */
+.social-card.read {
+  opacity: 0.65;
+}
 
 .social-avatar {
   width: 40px;
@@ -1066,8 +1070,8 @@ body {
   word-break: break-word;
 }
 
-/* 社交卡自动收起（超 260px 的长正文折叠为 6 行 + 展开按钮；
-   点击展开恢复全文，isLong 判定见 SocialCard） */
+/* 社交卡自动收起（�?260px 的长正文折叠�?6 �?+ 展开按钮�?
+   点击展开恢复全文，isLong 判定�?SocialCard�?*/
 .social-text.collapsed {
   display: -webkit-box;
   -webkit-line-clamp: 6;
@@ -1080,7 +1084,7 @@ body {
   margin-bottom: 8px;
 }
 
-/* 社交卡正文内嵌 HTML 的轻量排版（feed 来源已是消毒白名单输出） */
+/* 社交卡正文内�?HTML 的轻量排版（feed 来源已是消毒白名单输出） */
 .social-text p { margin: 0 0 0.6em; }
 .social-text > :last-child { margin-bottom: 0; }
 .social-text img { max-width: 100%; height: auto; border-radius: var(--radius-sm); margin: 4px 0; }
@@ -1091,7 +1095,7 @@ body {
   color: var(--text-secondary);
 }
 .social-text code {
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 0.88em;
   background: var(--badge-bg);
   border-radius: 4px;
@@ -1153,7 +1157,7 @@ body {
   color: var(--accent-light);
 }
 
-/* 翻译按钮的激活态（社交卡片） */
+/* 翻译按钮的激活态（社交卡片�?*/
 .social-act-item.active-translate {
   color: var(--accent-light);
   font-weight: 600;
@@ -1161,6 +1165,10 @@ body {
 
 .social-act-item.starred {
   color: var(--star-color);
+  font-weight: 600;
+}
+.social-act-item.act-on {
+  color: var(--accent-light);
   font-weight: 600;
 }
 
@@ -1222,7 +1230,7 @@ body {
   color: var(--text-tertiary);
 }
 
-/* 画廊卡片已读态视觉弱化（与文章卡一致的语义） */
+/* 画廊卡片已读态视觉弱化（与文章卡一致的语义�?*/
 .gallery-card.read .gallery-meta,
 .podcast-card.read {
   opacity: 0.65;
@@ -1376,7 +1384,7 @@ body {
   align-items: center;
 }
 
-/* 通知卡片小操作按钮的统一规格与激活态 */
+/* 通知卡片小操作按钮的统一规格与激活�?*/
 .toggle-action-btn.notif-act {
   font-size: 10.5px;
   padding: 2px 6px;
@@ -1481,7 +1489,7 @@ body {
   color: var(--accent-light);
 }
 
-/* ---------- 播放器底部条语义类 ---------- */
+/* ---------- 播放器底部条语义�?---------- */
 .player-track-info {
   display: flex;
   align-items: center;
@@ -1536,7 +1544,7 @@ body {
   align-items: center;
   gap: 8px;
   font-size: 10px;
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
   color: var(--text-tertiary);
 }
 
@@ -1666,7 +1674,7 @@ body {
 }
 
 /* -------------------------------------------------------------
-   阅读器正文排版（参照成熟 RSS 阅读器 Reeder/NetNewsWire/Folo 惯例）
+   阅读器正文排版（参照成熟 RSS 阅读�?Reeder/NetNewsWire/Folo 惯例�?
    正文 HTML 为氨气白名单输出：h1-h6/ul/ol/blockquote/pre/code/
    table/figure/img/hr 均可能出现，此处统一排版体系
    ------------------------------------------------------------- */
@@ -1680,7 +1688,7 @@ body {
   transition: font-size var(--transition-fast), line-height var(--transition-fast), font-family var(--transition-fast);
 }
 
-/* 首尾段落边距归一（RSS 正文常带冗余首/尾空段） */
+/* 首尾段落边距归一（RSS 正文常带冗余�?尾空段） */
 .article-prose > :first-child { margin-top: 0; }
 .article-prose > :last-child { margin-bottom: 0; }
 
@@ -1734,7 +1742,7 @@ body {
 
 /* 行内代码与代码块 */
 .article-prose code {
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 0.88em;
   background: var(--badge-bg);
   border: 1px solid var(--border-subtle);
@@ -1789,7 +1797,7 @@ body {
   cursor: zoom-in;
 }
 
-/* 正文内嵌媒体：视频/音频/iframe 自适应列宽，不溢出 */
+/* 正文内嵌媒体：视�?音频/iframe 自适应列宽，不溢出 */
 .article-prose video {
   display: block;
   width: 100%;
@@ -1844,7 +1852,7 @@ body {
 
 .article-prose em { font-style: italic; }
 
-/* 原文模式：干净衬线素排版（同一份消毒 HTML 的另一套视觉，非数据切换） */
+/* 原文模式：干净衬线素排版（同一份消�?HTML 的另一套视觉，非数据切换） */
 .article-prose.raw-render-mode {
   font-family: Georgia, Cambria, "Times New Roman", Times, serif;
   font-size: 14.5px;
@@ -1856,7 +1864,7 @@ body {
 .article-prose.raw-render-mode pre,
 .article-prose.raw-render-mode table,
 .article-prose.raw-render-mode blockquote {
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
 }
 
 /* -------------------------------------------------------------
@@ -1896,8 +1904,8 @@ body {
 }
 
 /* 窄窗口收缩策略（见文件尾部同名媒体查询——顺序上必须位于 .settings-sidebar 基础规则之后，同特异性下后者胜）：
-   ≤ 700px 侧栏收窄（220→170），导语文字宽度让位；
-   ≤ 560px 弹窗改为通栏（贴边 96vw），保证内容列至少还有一列卡片的可读宽 */
+   �?700px 侧栏收窄�?20�?70），导语文字宽度让位�?
+   �?560px 弹窗改为通栏（贴�?96vw），保证内容列至少还有一列卡片的可读�?*/
 
 .settings-sidebar {
   width: 220px;
@@ -2015,7 +2023,7 @@ body {
 
 .settings-content-pane {
   flex: 1;
-  /* 右内边距与内容头部(24px)一致：订阅工具栏/分组盒右缘与头部关闭按钮视觉对齐 */
+  /* 右内边距与内容头�?24px)一致：订阅工具�?分组盒右缘与头部关闭按钮视觉对齐 */
   padding: 24px 24px 40px;
   overflow-y: auto;
 }
@@ -2045,7 +2053,7 @@ body {
   gap: 16px;
 }
 
-/* 左列文字：可收缩但保住最小可读宽度；极窄时整卡转上下堆叠（见媒体查询） */
+/* 左列文字：可收缩但保住最小可读宽度；极窄时整卡转上下堆叠（见媒体查询�?*/
 .setting-card-text {
   min-width: 0;
   flex: 1 1 180px;
@@ -2070,12 +2078,12 @@ body {
   overflow: hidden;
 }
 
-/* 控件列不缩：开关/下拉/按钮保持固有宽度，与文字列拉开层次 */
+/* 控件列不缩：开�?下拉/按钮保持固有宽度，与文字列拉开层次 */
 .setting-card > *:not(.setting-card-text) {
   flex-shrink: 0;
 }
 
-/* 极窄窗口（内容区 < 480px）：卡片转纵向堆叠，控件回到标题下方 —— 同行挤压消除 */
+/* 极窄窗口（内容区 < 480px）：卡片转纵向堆叠，控件回到标题下方 —�?同行挤压消除 */
 @media (max-width: 719px) {
   .setting-card {
     flex-direction: column;
@@ -2140,10 +2148,10 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 11.5px;
   color: var(--text-secondary);
-  /* 数值标签（「30 分钟」）单行；极窄时滑杆先收缩，标签不折行 */
+  /* 数值标签（�?0 分钟」）单行；极窄时滑杆先收缩，标签不折�?*/
   white-space: nowrap;
 }
 
@@ -2151,7 +2159,7 @@ body {
   min-width: 60px;
 }
 
-/* 滑杆数值标签：自适应内容宽（替代原内联 width:50 —— 120 分钟/16 路装不下会折行） */
+/* 滑杆数值标签：自适应内容宽（替代原内�?width:50 —�?120 分钟/16 路装不下会折行） */
 .range-value-tag {
   flex-shrink: 0;
 }
@@ -2254,9 +2262,9 @@ body {
   overflow: visible;
 }
 
-/* Feed Group Manager —— 设置页订阅管理
-   结构（修复"下拉框不显示/分类无法收起"）：
-   header 左侧 = 可点击折叠的标题按钮；右侧 = 控件区（独立事件域） */
+/* Feed Group Manager —�?设置页订阅管�?
+   结构（修�?下拉框不显示/分类无法收起"）：
+   header 左侧 = 可点击折叠的标题按钮；右�?= 控件区（独立事件域） */
 .group-mgr-header {
   background: var(--badge-bg);
   /* 与源行（.group-mgr-child-row）水平内边距一致：右侧功能按键列垂直对齐的前提 */
@@ -2284,7 +2292,7 @@ body {
   border-radius: var(--radius-sm);
   font-family: inherit;
   transition: background var(--transition-fast);
-  /* 分类名（用户可改长名）：单行省略，不给右侧控件行制造折行压力 */
+  /* 分类名（用户可改长名）：单行省略，不给右侧控件行制造折行压�?*/
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
@@ -2318,7 +2326,7 @@ body {
   flex-wrap: wrap;
 }
 
-/* 分类头行与源行的功能按键统一右对齐：两行末端按钮（删除/编辑）X 边缘一致，
+/* 分类头行与源行的功能按键统一右对齐：两行末端按钮（删�?编辑）X 边缘一致，
    左侧复选框/布局下拉自然对齐成列 */
 .group-mgr-controls,
 .group-mgr-feed-controls {
@@ -2333,7 +2341,7 @@ body {
   color: var(--text-secondary);
 }
 
-/* "布局:" 前缀（含布局图标）与下拉框垂直居中对齐 */
+/* "布局:" 前缀（含布局图标）与下拉框垂直居中对�?*/
 .layout-svg-badge {
   display: inline-flex;
   align-items: center;
@@ -2348,12 +2356,12 @@ body {
   gap: 4px;
   cursor: pointer;
   color: var(--text-secondary);
-  /* 定宽列：分类行与源行的摘要/翻译复选框同宽，右对齐后垂直成列 */
+  /* 定宽列：分类行与源行的摘�?翻译复选框同宽，右对齐后垂直成�?*/
   flex: 0 0 44px;
 }
 
 .group-mgr-body {
-  /* 水平 padding 归零：源行自带 12px 行内边距，与 header 同基准对齐（双层缩进会让按键列错 12px） */
+  /* 水平 padding 归零：源行自�?12px 行内边距，与 header 同基准对齐（双层缩进会让按键列错 12px�?*/
   padding: 10px 0;
 }
 
@@ -2368,7 +2376,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  /* 列表式行：去卡片边框/底色（贴边不好看），悬停浮背景 + 底部细分隔线 */
+  /* 列表式行：去卡片边框/底色（贴边不好看），悬停浮背�?+ 底部细分隔线 */
   padding: 7px 10px;
   background: transparent;
   border: none;
@@ -2386,7 +2394,7 @@ body {
   border-bottom: none;
 }
 
-/* 源信息列可收缩但保最小可读宽：名称省略号替代被压到 0px 消失 */
+/* 源信息列可收缩但保最小可读宽：名称省略号替代被压�?0px 消失 */
 .group-mgr-child-row .group-mgr-feed-info {
   min-width: 0;
   flex: 1 1 120px;
@@ -2395,7 +2403,7 @@ body {
   gap: 8px;
 }
 
-/* favicon + 名称/URL 文本列：图标给源行视觉锚点，文本两行仍紧凑 */
+/* favicon + 名称/URL 文本列：图标给源行视觉锚点，文本两行仍紧�?*/
 .group-mgr-feed-text {
   min-width: 0;
   flex: 1;
@@ -2424,9 +2432,9 @@ body {
   color: var(--text-primary);
 }
 
-/* 订阅源地址：等宽字体 + 主题适配的次级色（替代原蓝色，提升两种模式下的可读性） */
+/* 订阅源地址：等宽字�?+ 主题适配的次级色（替代原蓝色，提升两种模式下的可读性） */
 .group-mgr-feed-url {
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 10.5px;
   color: var(--text-tertiary);
   overflow: hidden;
@@ -2446,7 +2454,7 @@ body {
   justify-content: flex-end;
 }
 
-/* 管理行内的小尺寸操作按钮（原内联 fontSize:11 收敛为类） */
+/* 管理行内的小尺寸操作按钮（原内联 fontSize:11 收敛为类�?*/
 .group-mgr-controls .toggle-action-btn,
 .group-mgr-feed-controls .toggle-action-btn {
   font-size: 11px;
@@ -2466,7 +2474,7 @@ body {
   flex: 0 0 auto;
 }
 
-/* ---------- 主操作按钮（原"background:var(--accent)"内联样式类化） ---------- */
+/* ---------- 主操作按钮（�?background:var(--accent)"内联样式类化�?---------- */
 .toggle-action-btn.btn-primary {
   background: var(--accent);
   border-color: var(--accent);
@@ -2486,7 +2494,7 @@ body {
   border-color: var(--danger);
 }
 
-/* 实心 danger 按钮（确认弹窗的确认动作） */
+/* 实心 danger 按钮（确认弹窗的确认动作�?*/
 .toggle-action-btn.btn-danger {
   background: var(--danger);
   border-color: var(--danger);
@@ -2498,14 +2506,14 @@ body {
 }
 
 /* ---------- 二次确认弹窗 ----------
-   层级最高：盖过设置弹窗（150）与下拉菜单（2000） */
+   层级最高：盖过设置弹窗�?50）与下拉菜单�?000�?*/
 .modal-overlay.confirm-overlay {
   z-index: 3000;
 }
 
 .confirm-dialog {
   width: 400px;
-  max-width: calc(100vw - 32px); /* 同 mini-dialog：窄视口不横向裁切 */
+  max-width: calc(100vw - 32px); /* �?mini-dialog：窄视口不横向裁�?*/
   box-sizing: border-box;
   padding: 22px;
   display: flex;
@@ -2564,8 +2572,8 @@ body {
 .feeds-tab-hint {
   font-size: 12px;
   color: var(--text-tertiary);
-  /* 独占左侧剩余空间：右侧导入/导出/新建按钮连成一组（gap 12px）贴右，
-     不再被 space-between 均摊空隙撑开 83px */
+  /* 独占左侧剩余空间：右侧导�?导出/新建按钮连成一组（gap 12px）贴右，
+     不再�?space-between 均摊空隙撑开 83px */
   margin-right: auto;
 }
 
@@ -2616,7 +2624,7 @@ body {
 }
 
 .about-arch-tag {
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 11px;
   color: var(--text-secondary);
 }
@@ -2632,7 +2640,7 @@ body {
 
 .mini-dialog {
   width: 440px;
-  max-width: calc(100vw - 32px); /* 窄窗口不横向溢出（原先 440px 固定宽在 <460px 视口会被裁切） */
+  max-width: calc(100vw - 32px); /* 窄窗口不横向溢出（原�?440px 固定宽在 <460px 视口会被裁切�?*/
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
@@ -2659,7 +2667,7 @@ body {
   margin-bottom: 4px;
 }
 
-/* 表单内辅助提示（如添加订阅的本地直连说明） */
+/* 表单内辅助提示（如添加订阅的本地直连说明�?*/
 .mini-dialog-hint {
   margin-top: 6px;
   font-size: 11px;
@@ -2746,7 +2754,7 @@ body {
   color: var(--text-tertiary);
 }
 
-/* ---------- 命令面板（cp-*，对齐 Papr CommandPalette 几何） ---------- */
+/* ---------- 命令面板（cp-*，对�?Papr CommandPalette 几何�?---------- */
 .cp-list {
   max-height: 60vh;
   overflow-y: auto;
@@ -2798,7 +2806,7 @@ body {
 .cp-item .cp-hint {
   font-size: 11px;
   color: var(--text-tertiary);
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
 }
 
 .cp-footer {
@@ -2821,7 +2829,7 @@ body {
 }
 
 .cp-footer kbd {
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 10px;
   padding: 1px 5px;
   border-radius: 3px;
@@ -2848,8 +2856,8 @@ body {
 }
 
 /* ---------- Toast 浮层容器 ---------- */
-/* Toast 层：内容区右下角堆叠（列布局自动不重叠），避开 PlayerBar。
-   播放器活跃时整体上移（body 加 has-player 类，见 App.tsx） */
+/* Toast 层：内容区右下角堆叠（列布局自动不重叠），避开 PlayerBar�?
+   播放器活跃时整体上移（body �?has-player 类，�?App.tsx�?*/
 .toast-layer {
   position: fixed;
   right: 20px;
@@ -2891,7 +2899,7 @@ body.has-player .toast-layer {
   transform: translateY(0) scale(1);
 }
 
-/* 带操作按钮的失败 toast：文本 + 按钮横向排布，可点击 */
+/* 带操作按钮的失败 toast：文�?+ 按钮横向排布，可点击 */
 .toast-pill.with-action {
   display: flex;
   align-items: center;
@@ -2924,7 +2932,7 @@ body.has-player .toast-layer {
   filter: brightness(1.15);
 }
 
-/* ---------- AI 内联错误行（摘要/翻译失败：错误信息 + 重试按钮） ---------- */
+/* ---------- AI 内联错误行（摘要/翻译失败：错误信�?+ 重试按钮�?---------- */
 .ai-error-row {
   display: flex;
   align-items: center;
@@ -2985,14 +2993,14 @@ body.has-player .toast-layer {
 }
 
 /* ============================================================
-   窄窗口收缩策略（设置弹窗）
-   位置说明：媒体查询必须位于 .settings-modal / .settings-sidebar /
+   窄窗口收缩策略（设置弹窗�?
+   位置说明：媒体查询必须位�?.settings-modal / .settings-sidebar /
    .settings-content-pane / .settings-content-header 基础规则之后
-   （同特异性下后者胜，写在前面会被基础规则覆盖——本文件早前的
-   前置版本正是因此失效）。
-   ≤ 700px：弹窗收窄到 760px、侧栏 220→170，文字列宽度让位；
-   ≤ 560px：弹窗贴边 96vw、侧栏 148px、pane padding 收紧，
-            保证内容列至少保有一列卡片的可读宽。
+   （同特异性下后者胜，写在前面会被基础规则覆盖——本文件早前�?
+   前置版本正是因此失效）�?
+   �?700px：弹窗收窄到 760px、侧�?220�?70，文字列宽度让位�?
+   �?560px：弹窗贴�?96vw、侧�?148px、pane padding 收紧�?
+            保证内容列至少保有一列卡片的可读宽�?
    ============================================================ */
 @media (max-width: 700px) {
   .settings-modal {
@@ -3023,7 +3031,7 @@ body.has-player .toast-layer {
   }
 }
 
-/* ---------- GitHub 设备流授权码常驻块 ---------- */
+/* ---------- GitHub 设备流授权码常驻�?---------- */
 .device-code-block {
   display: flex;
   flex-direction: column;
@@ -3033,7 +3041,7 @@ body.has-player .toast-layer {
 }
 
 .device-code-value {
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 22px;
   font-weight: 700;
   letter-spacing: 3px;
@@ -3050,7 +3058,7 @@ body.has-player .toast-layer {
   color: var(--text-tertiary);
 }
 
-/* ---------- 首屏加载骨架（dataLoading 期间替代真实 UI） ---------- */
+/* ---------- 首屏加载骨架（dataLoading 期间替代真实 UI�?---------- */
 .app-loading-splash {
   grid-column: 1 / -1;
   display: flex;
@@ -3095,4 +3103,51 @@ body.has-player .toast-layer {
 @keyframes app-loading-slide {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(350%); }
+}
+
+
+/* ============================================================
+   Full Player 覆盖层（播客大播放器）
+   复用底部 Mini 的单例 audio，仅提供大视图与控制；Esc 或点遮罩收起。
+   ============================================================ */
+.player-full-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 260;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg-overlay) 72%, transparent);
+  backdrop-filter: blur(6px);
+}
+.player-full-card {
+  display: flex;
+  gap: 28px;
+  align-items: center;
+  width: min(720px, 90vw);
+  padding: 28px 32px;
+  border-radius: var(--radius-lg, 14px);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong, rgba(128,128,128,.35));
+  box-shadow: var(--shadow-elevation, 0 18px 48px rgba(0,0,0,.35));
+  color: var(--text-primary);
+}
+.player-full-cover-wrap { flex: 0 0 200px; }
+.player-full-cover {
+  width: 200px; height: 200px; object-fit: cover;
+  border-radius: 12px; background: var(--bg-overlay);
+}
+.player-full-cover-fallback { background: linear-gradient(135deg, var(--accent), transparent); }
+.player-full-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.player-full-show { opacity: .7; font-size: 13px; }
+.player-full-title { font-size: 20px; font-weight: 700; line-height: 1.3; }
+.player-full-track { height: 8px; cursor: pointer; }
+.player-full-times { display: flex; justify-content: space-between; font-size: 12px; opacity: .8; margin-top: 2px; }
+.player-full-controls { display: flex; align-items: center; gap: 16px; margin-top: 6px; }
+.player-full-play { width: 52px; height: 52px; font-size: 20px; }
+.player-full-actions { display: flex; gap: 10px; margin-top: 4px; }
+@media (max-width: 640px) {
+  .player-full-card { flex-direction: column; text-align: center; }
+  .player-full-cover-wrap { flex: 0 0 auto; }
+  .player-full-cover { width: 160px; height: 160px; }
 }
