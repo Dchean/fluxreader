@@ -254,8 +254,13 @@ mod tests {
         let stored: String = conn
             .query_row("SELECT value FROM settings WHERE key='miniflux_token'", [], |r| r.get(0))
             .unwrap();
+        // 平台分支：Windows 上应为密文（dpapi: 前缀），非 Windows 回落明文。
+        // 两个分支都要引用 stored，避免 Linux（cfg(windows)=false）下 stored 未使用
+        // 触发 unused_variables（clippy -D warnings 下 CI 失败）。
         #[cfg(windows)]
         assert!(stored.starts_with(DPAPI_PREFIX), "迁移后应为密文: {stored}");
+        #[cfg(not(windows))]
+        assert_eq!(stored, "plain-token", "非 Windows 平台应保持明文");
         // 幂等：再迁移不重复升级
         let n2 = migrate_legacy_plaintext(&conn).unwrap();
         assert_eq!(n2, 0, "二次迁移不重复升级");
