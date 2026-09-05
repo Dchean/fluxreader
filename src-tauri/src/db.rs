@@ -559,6 +559,24 @@ pub fn feeds_fetch_failed(conn: &Connection) -> AppResult<Vec<FeedRow>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// 需要从 Miniflux 拉取条目的源：
+///
+/// - `origin='miniflux'`：服务端来源订阅，内容由 Miniflux 提供（跟随服务端
+///   模式下不直连抓取，只能靠这里补内容——否则这些源的新条目永远不落库）。
+/// - `fetch_failed=1`：直连失败走 Miniflux 兜底的源。
+///
+/// 仅返回已绑定 miniflux_id 的源（未绑定说明尚未与远端建立关联，无从拉取）。
+pub fn feeds_needing_miniflux(conn: &Connection) -> AppResult<Vec<FeedRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {FEED_COLS} FROM feeds
+         WHERE (origin = 'miniflux' OR fetch_failed = 1)
+           AND miniflux_id IS NOT NULL
+         ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([], feed_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /* ============================================================
    Articles
    ============================================================ */
@@ -1259,12 +1277,15 @@ pub fn article_matches_remote_feed(
     }
 }
 
-/// 按 URL 找本地条目（Pull 合并的兜底匹配键）
+/// 按 URL 找本地条目（Pull 合并的兜底匹配键）。
+/// 用规范化 URL（url_norm）匹配：Miniflux 返回的条目 URL 与本地直连抓取的
+/// URL 常有跟踪参数/www./m./尾斜杠/AMP/https 等差异，精确匹配会漏判成新条目
+/// 导致同文重复入库（文章数虚高 + 状态对不齐）。与去重键同源同口径。
 pub fn article_id_by_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> {
     let id = conn
         .query_row(
-            "SELECT id FROM articles WHERE url = ?1 ORDER BY id LIMIT 1",
-            params![url],
+            "SELECT id FROM articles WHERE url_norm = ?1 ORDER BY id LIMIT 1",
+            params![normalize_url(url)],
             |r| r.get(0),
         )
         .optional()?;

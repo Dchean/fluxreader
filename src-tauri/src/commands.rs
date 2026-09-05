@@ -439,9 +439,9 @@ pub async fn mark_all_read(
 ) -> AppResult<usize> {
     let n = {
         let conn = state.db.lock().await;
-        let n = db::mark_all_read(&conn, feed_id, folder_id)?;
-        if sync_configured(&conn) {
-            // 逐条入队（量级可控：个人订阅日常几十条）
+        // 先收集「即将被标读」的未读文章 id（标读后再查 is_read=0 会得到空集，
+        // 导致「全部已读」从不推送到 Miniflux——历史 bug）。
+        let target_sql = {
             let mut sql = String::from("SELECT id FROM articles WHERE is_read = 0");
             if let Some(fid) = feed_id {
                 sql.push_str(&format!(" AND feed_id = {fid}"));
@@ -449,11 +449,16 @@ pub async fn mark_all_read(
             if let Some(f) = folder_id {
                 sql.push_str(&format!(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {f})"));
             }
-            let ids: Vec<i64> = {
-                let mut stmt = conn.prepare(&sql)?;
-                let rows = stmt.query_map([], |r| r.get(0))?;
-                rows.collect::<Result<Vec<_>, _>>()?
-            };
+            sql
+        };
+        let ids: Vec<i64> = {
+            let mut stmt = conn.prepare(&target_sql)?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let n = db::mark_all_read(&conn, feed_id, folder_id)?;
+        if sync_configured(&conn) {
+            // 逐条入队（量级可控：个人订阅日常几十条）
             for id in ids {
                 db::enqueue_sync(&conn, Some(id), None, "read", None)?;
             }
@@ -735,8 +740,11 @@ pub async fn opml_import(
             None => db::create_folder(&conn, "导入", "article")?,
         };
         db::insert_feed(&conn, &f.feed_url, None, &f.title, None, folder_id, "inherit", true, false)?;
-        // 新增订阅入同步队列（连接 Miniflux 后补推）
-        db::enqueue_sync(&conn, None, Some(&f.feed_url), "add_feed", Some(&f.title))?;
+        // 新增订阅入同步队列（连接 Miniflux 后补推）。payload 必须是含 folder_id
+        // 的 JSON——push_feeds 据此把订阅挂到远端对应分类；此前误传标题字符串，
+        // serde_json 解析失败导致 payload 丢弃、源被推到远端默认分类（目录丢失）。
+        let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
+        db::enqueue_sync(&conn, None, Some(&f.feed_url), "add_feed", Some(&payload))?;
         report.imported += 1;
     }
     Ok(report)

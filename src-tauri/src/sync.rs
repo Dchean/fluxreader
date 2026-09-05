@@ -448,15 +448,18 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
         }
     }
 
-    // ① 新条目（只补直连失败的源 + 远端新订阅的源）
-    let (since_s, failed_feeds) = {
+    // ① 新条目：拉取所有「内容应由 Miniflux 提供」的源（origin='miniflux' 的
+    // 服务端订阅 + 直连失败走兜底的源）。修复：此前只遍历 fetch_failed 的源，
+    // 导致「跟随服务端」模式下 origin='miniflux' 的源既不直连抓取、又从不从
+    // Miniflux 拉新条目（它们不会被标 fetch_failed）——文章数永久少于服务端。
+    let (since_s, miniflux_feeds) = {
         let conn = db.lock().await;
         (
             db::last_sync_ts(&conn).unwrap_or(0),
-            db::feeds_fetch_failed(&conn).unwrap_or_default(),
+            db::feeds_needing_miniflux(&conn).unwrap_or_default(),
         )
     };
-    for feed in &failed_feeds {
+    for feed in &miniflux_feeds {
         let mf_id: Option<i64> = {
             let conn = db.lock().await;
             feed_miniflux_id(&conn, feed.id)
@@ -546,20 +549,25 @@ fn upsert_miniflux_entry(conn: &Connection, feed_id: i64, e: &Entry, report: &mu
     };
 
     if let Some(aid) = existing {
-        // 状态以 Miniflux 为准；正文仅在本地为空时补
+        // 状态以 Miniflux 为准；正文仅在本地为空时补。
+        // 待推保护：本地有未推送的读/收藏变更时，跳过状态覆盖（本地优先，
+        // 防乒乓——与 merge_remote_status 的守卫语义一致）。正文/附件仍照常补。
         let _ = db::set_article_miniflux_id(conn, aid, e.id);
+        if !db::article_has_pending_sync(conn, aid).unwrap_or(false) {
+            let _ = conn.execute(
+                "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
+                rusqlite::params![(e.status == "read") as i64, e.starred as i64, aid],
+            );
+        }
         let _ = conn.execute(
             "UPDATE articles SET
-                is_read = ?1, is_starred = ?2,
-                content_html = CASE WHEN COALESCE(content_html, '') = '' THEN ?3 ELSE content_html END,
-                body_text = CASE WHEN body_text = '' THEN ?4 ELSE body_text END,
-                enclosure_url = COALESCE(enclosure_url, ?5),
-                enclosure_mime = COALESCE(enclosure_mime, ?6),
-                duration_sec = COALESCE(duration_sec, ?7)
-             WHERE id = ?8",
+                content_html = CASE WHEN COALESCE(content_html, '') = '' THEN ?1 ELSE content_html END,
+                body_text = CASE WHEN body_text = '' THEN ?2 ELSE body_text END,
+                enclosure_url = COALESCE(enclosure_url, ?3),
+                enclosure_mime = COALESCE(enclosure_mime, ?4),
+                duration_sec = COALESCE(duration_sec, ?5)
+             WHERE id = ?6",
             rusqlite::params![
-                (e.status == "read") as i64,
-                e.starred as i64,
                 e.content,
                 strip_html_text(&e.content),
                 enc_url,
