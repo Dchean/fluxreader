@@ -151,3 +151,53 @@ fn article_id_by_url_uses_normalized_match() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+/// ④ 核心回归：origin='miniflux' 源的历史文章（published_at 早于增量游标）
+/// 必须被全量拉取并对齐状态。此前用 after=last_sync_ts（按 published_at 过滤）
+/// 会漏掉发布时间早于游标的历史文章——这是「跟随服务端」模式下客户端文章数
+/// 少于 Miniflux、且已读状态对不齐的根因。
+#[tokio::test]
+#[ignore = "spins a local mock server"]
+async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
+    let (db, http, server) = setup("history_pull").await;
+
+    // 先 feeds 阶段：把远端 feed 11（remote-only）拉到本地（origin='miniflux'）
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+
+    // 服务端 feed 11 加一条「历史文章」：published_at 拨到 3 天前（早于增量游标），
+    // 状态为 read（Miniflux 端已读）。
+    let old_ts = (chrono::Utc::now() - chrono::Duration::days(3)).to_rfc3339();
+    server.add_entry_with_published(
+        11,
+        "http://example.com/remote-only/post/history-1",
+        "Historical read article",
+        "read",
+        false,
+        old_ts,
+    );
+
+    // 把本地增量游标拨到「现在」（模拟：上次同步已推进到当前，之后服务端才补入
+    // 了这条 published_at 更早的历史文章）。旧实现用 after=now 会漏掉它。
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, chrono::Utc::now().timestamp()).unwrap();
+    }
+
+    // 后台轻量同步（full=false）——必须拉入历史文章并对齐 read 状态
+    sync::sync_light(&db, &http).await.expect("light sync");
+
+    {
+        let conn = db.lock().await;
+        let (count, is_read, source): (i64, bool, String) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(is_read), 0), COALESCE(MAX(source), '')
+                 FROM articles WHERE url = 'http://example.com/remote-only/post/history-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1).unwrap_or(0) != 0, r.get::<_, String>(2).unwrap_or_default())),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "历史文章（published_at 早于游标）必须被拉入本地");
+        assert_eq!(source, "miniflux");
+        assert!(is_read, "Miniflux 端已读的历史文章，客户端必须对齐为已读");
+    }
+}

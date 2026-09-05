@@ -83,12 +83,26 @@ impl MockMiniflux {
 
     /// 同 add_entry，返回 mock 分配的 entry id（绑定场景需要真实 id）
     pub fn add_entry_ret(&self, feed_id: i64, url: &str, title: &str, status: &str, starred: bool) -> i64 {
+        self.add_entry_with_published(feed_id, url, title, status, starred, chrono::Utc::now().to_rfc3339())
+    }
+
+    /// 同 add_entry_ret，但可指定 published_at（模拟历史文章：发布时间早于增量游标，
+    /// 用于验证「after 按 published_at 过滤会漏掉历史文章」的回归）。
+    pub fn add_entry_with_published(
+        &self,
+        feed_id: i64,
+        url: &str,
+        title: &str,
+        status: &str,
+        starred: bool,
+        published_at: String,
+    ) -> i64 {
         let id = {
             let mut n = self.next_entry_id.lock().unwrap();
             *n += 1;
             *n
         };
-        let now = chrono::Utc::now().to_rfc3339();
+        let changed_at = chrono::Utc::now().to_rfc3339();
         self.entries.lock().unwrap().push(MockEntry {
             id,
             feed_id,
@@ -96,8 +110,8 @@ impl MockMiniflux {
             title: title.to_string(),
             author: Some("Miniflux Author".into()),
             content: "<p>Miniflux fetched content</p>".into(),
-            published_at: now.clone(),
-            changed_at: now,
+            published_at,
+            changed_at,
             status: status.to_string(),
             starred,
         });

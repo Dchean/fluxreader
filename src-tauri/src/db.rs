@@ -559,18 +559,26 @@ pub fn feeds_fetch_failed(conn: &Connection) -> AppResult<Vec<FeedRow>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 需要从 Miniflux 拉取条目的源：
-///
-/// - `origin='miniflux'`：服务端来源订阅，内容由 Miniflux 提供（跟随服务端
-///   模式下不直连抓取，只能靠这里补内容——否则这些源的新条目永远不落库）。
-/// - `fetch_failed=1`：直连失败走 Miniflux 兜底的源。
-///
-/// 仅返回已绑定 miniflux_id 的源（未绑定说明尚未与远端建立关联，无从拉取）。
-pub fn feeds_needing_miniflux(conn: &Connection) -> AppResult<Vec<FeedRow>> {
+/// 服务端来源（origin='miniflux'）的源：内容完全由 Miniflux 提供，本地不直连
+/// 抓取。同步时**全量拉取**其条目（幂等 upsert），保证数量与状态与 Miniflux
+/// 完全对齐——用 `after`（published_at）增量会漏掉发布时间早于游标的历史文章。
+/// 仅返回已绑定 miniflux_id 的源。
+pub fn feeds_origin_miniflux(conn: &Connection) -> AppResult<Vec<FeedRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {FEED_COLS} FROM feeds
-         WHERE (origin = 'miniflux' OR fetch_failed = 1)
-           AND miniflux_id IS NOT NULL
+         WHERE origin = 'miniflux' AND miniflux_id IS NOT NULL
+         ORDER BY id"
+    ))?;
+    let rows = stmt.query_map([], feed_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 直连失败（fetch_failed=1）且已绑定 miniflux_id 的源：直连失败走 Miniflux
+/// 兜底，增量拉取（after=上次同步时间）补直连漏掉的条目。
+pub fn feeds_fetch_failed_bound(conn: &Connection) -> AppResult<Vec<FeedRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {FEED_COLS} FROM feeds
+         WHERE fetch_failed = 1 AND miniflux_id IS NOT NULL
          ORDER BY id"
     ))?;
     let rows = stmt.query_map([], feed_row)?;

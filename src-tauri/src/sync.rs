@@ -448,18 +448,40 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
         }
     }
 
-    // ① 新条目：拉取所有「内容应由 Miniflux 提供」的源（origin='miniflux' 的
-    // 服务端订阅 + 直连失败走兜底的源）。修复：此前只遍历 fetch_failed 的源，
-    // 导致「跟随服务端」模式下 origin='miniflux' 的源既不直连抓取、又从不从
-    // Miniflux 拉新条目（它们不会被标 fetch_failed）——文章数永久少于服务端。
-    let (since_s, miniflux_feeds) = {
+    // ① 新条目：分两类源拉取——
+    //   (a) origin='miniflux' 的服务端源：内容完全由 Miniflux 提供，全量拉取
+    //       （after=0），幂等 upsert 保证数量与状态对齐。此前用 after=since_s
+    //       （按 published_at 过滤）会漏掉发布时间早于游标的历史文章——这是
+    //       「跟随服务端」模式下客户端文章数少于 Miniflux 的根因。
+    //   (b) fetch_failed 的直连源：兜底，增量拉取（after=since_s）。
+    let (since_s, miniflux_feeds, failed_feeds) = {
         let conn = db.lock().await;
         (
             db::last_sync_ts(&conn).unwrap_or(0),
-            db::feeds_needing_miniflux(&conn).unwrap_or_default(),
+            db::feeds_origin_miniflux(&conn).unwrap_or_default(),
+            db::feeds_fetch_failed_bound(&conn).unwrap_or_default(),
         )
     };
     for feed in &miniflux_feeds {
+        let mf_id: Option<i64> = {
+            let conn = db.lock().await;
+            feed_miniflux_id(&conn, feed.id)
+        };
+        let Some(mf_id) = mf_id else { continue };
+        // 全量拉取（after=0）：服务端源内容以 Miniflux 为唯一真相
+        match client.entries(Some(mf_id), 0, false).await {
+            Ok(entries) => {
+                let before = report.pulled_entries;
+                let conn = db.lock().await;
+                for e in &entries {
+                    upsert_miniflux_entry(&conn, feed.id, e, report);
+                }
+                report.fallback_entries = report.pulled_entries - before;
+            }
+            Err(err) => report.errors.push(format!("拉取服务端源 {} 失败: {}", feed.title, err)),
+        }
+    }
+    for feed in &failed_feeds {
         let mf_id: Option<i64> = {
             let conn = db.lock().await;
             feed_miniflux_id(&conn, feed.id)
@@ -472,7 +494,6 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
                 for e in &entries {
                     upsert_miniflux_entry(&conn, feed.id, e, report);
                 }
-                // 只统计真实入库/合并的条目（upsert_miniflux_entry 内累计 pulled_entries）
                 report.fallback_entries = report.pulled_entries - before;
             }
             Err(err) => report.errors.push(format!("兜底拉取 {} 失败: {}", feed.title, err)),
