@@ -190,6 +190,29 @@ impl MinifluxClient {
         Ok(all)
     }
 
+    /// 拉指定状态的 entry id 列表（轻量对账用）。
+    /// GET /v1/entries/ids?status=unread（或 read）→ {"total": N, "entry_ids": [...]}。
+    /// 单次最多 10000 个 id（Miniflux MaxEntryIDsLimit），超量需 offset 翻页。
+    /// 用于「未读/已读状态精确对齐」——比 changed_after 增量可靠，不受游标漂移影响。
+    pub async fn entry_ids(&self, status: &str) -> AppResult<Vec<i64>> {
+        let mut all: Vec<i64> = Vec::new();
+        loop {
+            let path = format!("/v1/entries/ids?status={status}&limit=10000&offset={}", all.len());
+            #[derive(Deserialize)]
+            struct IdsResp {
+                #[serde(default)]
+                entry_ids: Vec<i64>,
+            }
+            let r: IdsResp = self.get_json(&path).await?;
+            let got = r.entry_ids.len();
+            all.extend(r.entry_ids);
+            if got < 10000 {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
     /* ---------- 写操作 ---------- */
 
     /// 批量更新条目状态：PUT /v1/entries

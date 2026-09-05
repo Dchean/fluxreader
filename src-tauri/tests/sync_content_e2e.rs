@@ -201,3 +201,62 @@ async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
         assert!(is_read, "Miniflux 端已读的历史文章，客户端必须对齐为已读");
     }
 }
+
+/// ⑤ 核心回归：本地已绑定文章「未读」，Miniflux 端已读且 changed_at 早于增量
+/// 游标（手机很久前标读）——light 同步（full=false）必须通过未读 id 精确对账
+/// 收敛为已读。此前只靠 changed_after 增量，会永久漏掉这条旧变更，导致
+/// 「Miniflux 已读但本地未读」与未读数漂移。
+#[tokio::test]
+#[ignore = "spins a local mock server"]
+async fn light_sync_converges_stale_remote_read_via_unread_ids() {
+    let (db, http, server) = setup("stale_read").await;
+
+    // 本地直连 feed 绑定远端 feed 10，造一篇未读文章并绑定 entry
+    let (aid, mf_id) = {
+        let conn = db.lock().await;
+        let folder = db::create_folder(&conn, "F", "article").unwrap();
+        let feed = db::insert_feed(&conn, "http://127.0.0.1:8765/local_feed.xml", None, "Local", None, folder, "inherit", true, false).unwrap();
+        db::set_feed_miniflux_id(&conn, feed, 10).unwrap();
+        let mf_id = server.add_entry_ret(10, "http://127.0.0.1:8765/post/stale", "Stale read", "unread", false);
+        let a = db::NewArticle {
+            guid: "g-stale".into(),
+            url: Some("http://127.0.0.1:8765/post/stale".into()),
+            title: "Stale read".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>x</p>".into()),
+            body_text: "x".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some(chrono::Utc::now().to_rfc3339()),
+            source: "direct".into(),
+        };
+        let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+        db::set_article_miniflux_id(&conn, aid, mf_id).unwrap();
+        // 本地保持未读（is_read=0）
+        (aid, mf_id)
+    };
+
+    // 手机端很久以前标读：entry 状态 read，changed_at 拨回 1 小时前（早于游标）
+    {
+        let mut es = server.entries.lock().unwrap();
+        if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
+            e.status = "read".into();
+            e.changed_at = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        }
+    }
+
+    // light 同步（full=false）：changed_after 增量拉不到这条旧变更，但未读 id
+    // 对账必须收敛——本地应从「未读」变为「已读」。
+    sync::sync_light(&db, &http).await.expect("light sync");
+
+    {
+        let conn = db.lock().await;
+        let is_read: bool = conn
+            .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| r.get::<_, i64>(0).map(|v| v != 0))
+            .unwrap();
+        assert!(is_read, "light sync must converge stale remote read (本地未读 → Miniflux 已读)");
+    }
+}

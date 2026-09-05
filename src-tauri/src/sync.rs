@@ -389,6 +389,75 @@ fn merge_remote_status(conn: &Connection, aid: i64, e: &Entry, report: &mut Sync
     }
 }
 
+/// 未读状态精确对账：拉 Miniflux 全部未读 entry id，与本地已绑定文章逐条对齐。
+///
+/// 为什么需要（根因）：`changed_after` 增量拉状态变化会漏掉 changed_at 早于
+/// 游标（last_sync_ts）的旧变更——用户很久没开客户端、或某次同步失败时，
+/// 手机端标读/标未读的变更永远不被桌面拉到，导致「Miniflux 已读但本地未读」
+/// 与未读数漂移。全量对账用 `GET /v1/entries/ids?status=unread`（轻量，仅 id
+/// 列表）精确对齐，不受游标漂移影响。
+///
+/// 对齐规则（与 merge_remote_status 一致）：
+/// - 本地有待推变更（pending）→ 跳过（本地优先，推送后下轮对齐）
+/// - Miniflux 未读（id 在未读列表）→ 本地设未读
+/// - Miniflux 已读（id 不在未读列表）→ 本地设已读（read-anywhere-wins）
+async fn reconcile_unread_state(
+    db: &Arc<Mutex<Connection>>,
+    client: &MinifluxClient,
+    report: &mut SyncReport,
+) {
+    let unread_ids = match client.entry_ids("unread").await {
+        Ok(v) => v,
+        Err(e) => {
+            report.errors.push(format!("拉取未读 id 列表失败: {e}"));
+            return;
+        }
+    };
+    let unread: std::collections::HashSet<i64> = unread_ids.iter().copied().collect();
+
+    let conn = db.lock().await;
+    // 遍历本地所有已绑定 miniflux_id 的文章
+    let bound: Vec<(i64, i64)> = {
+        let mut stmt = match conn.prepare("SELECT id, miniflux_id FROM articles WHERE miniflux_id IS NOT NULL") {
+            Ok(s) => s,
+            Err(e) => {
+                report.errors.push(format!("查询已绑定文章失败: {e}"));
+                return;
+            }
+        };
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)));
+        match rows {
+            Ok(iter) => iter.flatten().collect(),
+            Err(e) => {
+                report.errors.push(format!("读取已绑定文章失败: {e}"));
+                return;
+            }
+        }
+    };
+    drop(conn);
+
+    // 逐条对齐（短临界区批量更新，避免长持锁）
+    let mut aligned = 0usize;
+    let conn = db.lock().await;
+    for (aid, mf_id) in &bound {
+        // 待推保护：本地有未推送的读/收藏变更 → 跳过，推送后下轮对齐
+        if db::article_has_pending_sync(&conn, *aid).unwrap_or(false) {
+            continue;
+        }
+        let should_unread = unread.contains(mf_id);
+        // is_read 语义：1=已读、0=未读。Miniflux 未读（should_unread=true）
+        // → is_read=0；Miniflux 已读（should_unread=false）→ is_read=1。
+        let _ = conn.execute(
+            "UPDATE articles SET is_read = ?1 WHERE id = ?2",
+            rusqlite::params![(!should_unread) as i64, aid],
+        );
+        aligned += 1;
+    }
+    if aligned > 0 {
+        report.pulled_entries += aligned;
+    }
+}
+
 /// 拉远端条目（新条目 + 状态变化），按 miniflux_id/URL 匹配合并。
 /// `full=true`（手动同步/首连）：先做绑定回填 + 全量状态对账——
 /// 全量条目已经在手上（绑定回填本来就要拉），对已匹配条目直接应用远端
@@ -536,6 +605,11 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
         let now = Utc::now().timestamp();
         let _ = db::set_last_sync_ts(&conn, now);
     }
+
+    // ③ 未读状态精确对账：用 Miniflux 未读 id 列表逐条对齐本地已绑定文章，
+    // 收敛 changed_after 增量漏掉的旧变更（「Miniflux 已读但本地未读」根因）。
+    // full=true 时全量对账已覆盖，但此处再跑一次确保收敛（幂等，代价小）。
+    reconcile_unread_state(db, client, report).await;
 }
 
 fn feed_miniflux_id(conn: &Connection, feed_id: i64) -> Option<i64> {

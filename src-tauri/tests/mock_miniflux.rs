@@ -240,6 +240,34 @@ fn route(srv: &MockMiniflux, method: &str, path: &str, path_query: &str, body: &
             let json = serde_json::json!({ "total": total, "entries": page }).to_string();
             (200, json)
         }
+        ("GET", "/v1/entries/ids") => {
+            // 真实语义：status=unread 返回所有未读 entry id（或 read 返回已读）
+            // path_query 形如 "/v1/entries/ids?status=unread&limit=...&offset=..."，
+            // 需先取 '?' 之后的纯 query 部分再解析参数。
+            let query = path_query.split('?').nth(1).unwrap_or("");
+            let mut status_filter = "";
+            let mut offset: usize = 0;
+            for kv in query.split('&') {
+                let (k, v) = kv.split_once('=').unwrap_or(("", ""));
+                match k {
+                    "status" => status_filter = v,
+                    "offset" => offset = v.parse().unwrap_or(0),
+                    _ => {}
+                }
+            }
+            let ids: Vec<i64> = srv
+                .entries
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| status_filter.is_empty() || e.status == status_filter)
+                .map(|e| e.id)
+                .collect();
+            let total = ids.len();
+            let page: Vec<i64> = ids.into_iter().skip(offset).take(10000).collect();
+            let json = serde_json::json!({ "total": total, "entry_ids": page }).to_string();
+            (200, json)
+        }
         ("PUT", "/v1/entries") => {
             let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
             let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("read").to_string();

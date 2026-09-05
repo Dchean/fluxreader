@@ -182,14 +182,16 @@ async fn stale_remote_read_converges_via_full_reconcile() {
         }
     }
 
-    // light 增量（changed_after = last_sync ≈ now）：拉不到这条旧变更
+    // light 增量：此前 changed_after 增量拉不到这条旧变更（changed_at 早于游标），
+    // 导致「Miniflux 已读但本地未读」漂移。修复后 light 同步末尾有未读状态精确
+    // 对账（GET /v1/entries/ids?status=unread），即使增量漏掉也能收敛。
     sync::sync_light(&db, &http).await.expect("light sync");
     {
         let conn = db.lock().await;
         let is_read: bool = conn
             .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| r.get::<_, i64>(0).map(|v| v != 0))
             .unwrap();
-        assert!(!is_read, "light sync must not see the stale change (by design)");
+        assert!(is_read, "light sync must converge the stale remote read via unread-id reconcile");
     }
 
     // full 对账：全量条目结果里直接应用状态 → 收敛
