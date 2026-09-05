@@ -95,11 +95,14 @@ pub fn decrypt_secret(stored: &str) -> String {
     if stored.is_empty() {
         return String::new();
     }
-    if let Some(b64) = stored.strip_prefix(DPAPI_PREFIX) {
+    // `_b64` 前缀：Windows 分支会使用该绑定，非 Windows（Linux CI）分支不用——
+    // 下划线前缀在未使用平台上抑制 unused_variables 警告（clippy -D warnings 下
+    // 会导致 CI 失败），Windows 上被使用则无任何警告。
+    if let Some(_b64) = stored.strip_prefix(DPAPI_PREFIX) {
         #[cfg(windows)]
         {
             use base64::Engine;
-            match base64::engine::general_purpose::STANDARD.decode(b64) {
+            match base64::engine::general_purpose::STANDARD.decode(_b64) {
                 Ok(cipher) => match dpapi_decrypt(&cipher) {
                     Ok(plain) => return String::from_utf8_lossy(&plain).into_owned(),
                     Err(e) => {
