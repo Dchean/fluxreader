@@ -193,7 +193,7 @@ async fn gist_upsert(http: &reqwest::Client, cred: &SyncCredentials, json: &str)
         None => {
             let body = serde_json::json!({
                 "description": "FluxReader 配置同步（勿删）",
-                "secret": true,
+                "public": false,
                 "files": { FILE_NAME: { "content": json } }
             });
             let resp = http.post("https://api.github.com/gists")

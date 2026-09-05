@@ -25,9 +25,14 @@ const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
 
 /// 官方预设：preset 名 → (base_url, 默认模型)。
 /// 自定义预设（newapi 等）直接存 base_url，走同一条 OpenAI 兼容路径。
+///
+/// 注意：OpenAI 的 gpt-4.1 系列（及 o1 推理模型）已弃用 `max_tokens`，改用
+/// `max_completion_tokens`；而 DeepSeek/GLM 仍只认 `max_tokens`。本项目统一
+/// 用 `max_tokens`（stream_chat 请求体），故 OpenAI 预设默认模型须选仍支持
+/// `max_tokens` 的 gpt-4o-mini（而非 gpt-4.1-mini），否则默认配置即报错。
 pub const PRESETS: &[(&str, &str, &str)] = &[
     ("deepseek", "https://api.deepseek.com", "deepseek-chat"),
-    ("openai", "https://api.openai.com/v1", "gpt-4.1-mini"),
+    ("openai", "https://api.openai.com/v1", "gpt-4o-mini"),
     ("glm", "https://open.bigmodel.cn/api/paas/v4", "glm-4-flash"),
 ];
 
@@ -248,7 +253,7 @@ mod tests {
         // 只给 preset+key：base_url/model 取预设默认
         let cfg = AiConfig::from_json(r#"{"preset":"openai","apiKey":"sk-2"}"#).unwrap();
         assert_eq!(cfg.base_url, "https://api.openai.com/v1");
-        assert_eq!(cfg.model, "gpt-4.1-mini");
+        assert_eq!(cfg.model, "gpt-4o-mini");
     }
 
     #[test]
