@@ -30,14 +30,13 @@ jobs:
 
   rust:
     name: Check & test Rust (src-tauri)
-    runs-on: ubuntu-latest
+    # 纯 Windows 客户端：DPAPI 凭据加密、SMTC 媒体控制等 Windows 专有功能
+    # 只在 Windows 编译。若在 Linux 上跑，clippy/test 检查的是 #[cfg(not(windows))]
+    # 降级分支（生产环境根本不执行），真正的 Windows 代码路径反而被跳过，
+    # 与 release workflow（windows-latest）平台不一致。故 rust job 固定在 Windows。
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
