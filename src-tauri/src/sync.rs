@@ -310,7 +310,12 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report
     {
         let conn = db.lock().await;
         for rf in &remote_feeds {
-            let local_feed = db::feed_id_by_url(&conn, &rf.feed_url).ok().flatten();
+            // 用规范化 URL 匹配本地 feed（Miniflux 返回的 URL 与本地直连添加时
+            // 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成新订阅 → 同一
+            // 订阅出现两个本地 feed，文章翻倍、状态分裂、数量对不齐）。
+            let local_feed = db::feed_id_by_url_normalized(&conn, &rf.feed_url)
+                .ok()
+                .flatten();
             match local_feed {
                 Some(lid) => {
                     // 已存在（本地直连添加过）→ 绑定 miniflux_id，本地分类/布局保留
@@ -353,7 +358,7 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report
                         None, // favicon 留空，交给本地直连抓取的 discover_favicon 发现
                         folder_id,
                         "inherit",
-                        true,
+                        false,
                         false,
                         "miniflux",
                     );
@@ -572,38 +577,39 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
     }
 
     // ② 状态变化（全部已绑定的源，changed_after 增量，unix 秒）
-    let entries = match client.entries(None, since_s, true).await {
-        Ok(v) => v,
+    // 注意：增量拉取失败不提前 return——③ 段未读 id 对账是独立且更可靠的
+    // 收敛手段，增量失败时也必须执行（否则一次网络抖动就让状态永久漂移，
+    // 直到下次成功同步，且期间游标不推进、失败反复重试同一增量）。
+    match client.entries(None, since_s, true).await {
+        Ok(entries) => {
+            let conn = db.lock().await;
+            for e in &entries {
+                // 匹配：miniflux_id 直配 → URL 兜底（同源校验）
+                let local = db::article_by_miniflux_id(&conn, e.id)
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        e.url.as_deref().and_then(|u| db::article_id_by_url(&conn, u).ok().flatten())
+                            .filter(|aid| db::article_matches_remote_feed(&conn, *aid, e.feed_id).unwrap_or(false))
+                    });
+                let Some(aid) = local else {
+                    // 跨源同 URL entry（手机端另一源的副本）：不写状态，但记账
+                    // 副本 entry——桌面端的已读变更要广播到它
+                    if let Some(u) = e.url.as_deref() {
+                        if let Ok(Some(aid)) = db::article_id_by_url(&conn, u) {
+                            let _ = db::add_article_dup_entry(&conn, aid, e.id);
+                        }
+                    }
+                    continue;
+                };
+                merge_remote_status(&conn, aid, e, report);
+            }
+            let now = Utc::now().timestamp();
+            let _ = db::set_last_sync_ts(&conn, now);
+        }
         Err(e) => {
             report.errors.push(format!("拉取状态变化失败: {e}"));
-            return;
         }
-    };
-    {
-        let conn = db.lock().await;
-        for e in &entries {
-            // 匹配：miniflux_id 直配 → URL 兜底（同源校验）
-            let local = db::article_by_miniflux_id(&conn, e.id)
-                .ok()
-                .flatten()
-                .or_else(|| {
-                    e.url.as_deref().and_then(|u| db::article_id_by_url(&conn, u).ok().flatten())
-                        .filter(|aid| db::article_matches_remote_feed(&conn, *aid, e.feed_id).unwrap_or(false))
-                });
-            let Some(aid) = local else {
-                // 跨源同 URL entry（手机端另一源的副本）：不写状态，但记账
-                // 副本 entry——桌面端的已读变更要广播到它
-                if let Some(u) = e.url.as_deref() {
-                    if let Ok(Some(aid)) = db::article_id_by_url(&conn, u) {
-                        let _ = db::add_article_dup_entry(&conn, aid, e.id);
-                    }
-                }
-                continue;
-            };
-            merge_remote_status(&conn, aid, e, report);
-        }
-        let now = Utc::now().timestamp();
-        let _ = db::set_last_sync_ts(&conn, now);
     }
 
     // ③ 未读状态精确对账：用 Miniflux 未读 id 列表逐条对齐本地已绑定文章，

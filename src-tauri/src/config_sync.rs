@@ -106,7 +106,13 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                 let _ = db::set_folder_ai_flags(conn, id, f.auto_summary, f.auto_translate);
                 id
             }
-            None => db::create_folder(conn, &f.name, &f.layout)?,
+            None => {
+                let id = db::create_folder(conn, &f.name, &f.layout)?;
+                // 新建分类也要应用 payload 里的 AI 标志（此前只依赖 DEFAULT，
+                // 若 DEFAULT 与 payload 不一致会丢失用户的摘要/翻译开关）。
+                let _ = db::set_folder_ai_flags(conn, id, f.auto_summary, f.auto_translate);
+                id
+            }
         };
         folder_ids.insert(f.name.clone(), id);
     }

@@ -25,7 +25,7 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
             name          TEXT NOT NULL,
             position      INTEGER NOT NULL DEFAULT 0,
             layout        TEXT NOT NULL DEFAULT 'article',
-            auto_summary  INTEGER NOT NULL DEFAULT 1,
+            auto_summary  INTEGER NOT NULL DEFAULT 0,
             auto_translate INTEGER NOT NULL DEFAULT 0,
             collapsed     INTEGER NOT NULL DEFAULT 0,
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1425,6 +1425,20 @@ pub fn feed_id_by_url(conn: &Connection, feed_url: &str) -> AppResult<Option<i64
     Ok(id)
 }
 
+/// 按规范化 URL 找本地 feed（与 article_id_by_url 同口径）。
+/// 用于 pull_feeds 与 Miniflux 的 feed_url 碰撞匹配：Miniflux 返回的 URL 与
+/// 本地直连添加时的 URL 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成
+/// 新订阅 → 同一订阅出现两个本地 feed（文章翻倍、状态分裂、数量与未读数
+/// 对不齐的根因）。feeds 数量少（个人订阅几十个），内存规范化匹配即可。
+pub fn feed_id_by_url_normalized(conn: &Connection, feed_url: &str) -> AppResult<Option<i64>> {
+    let norm = normalize_url(feed_url);
+    let feeds = list_feeds(conn)?;
+    Ok(feeds
+        .iter()
+        .find(|f| normalize_url(&f.feed_url) == norm)
+        .map(|f| f.id))
+}
+
 #[cfg(test)]
 mod dedup_tests {
     use super::*;
@@ -1554,5 +1568,36 @@ mod dedup_tests {
         // 无关词不命中
         let r3 = search_articles(&conn, "不存在的词", 50).unwrap();
         assert!(r3.is_empty());
+    }
+
+    /// feed_id_by_url_normalized：Miniflux 返回的 feed_url 与本地直连添加时
+    /// 有协议/www./尾斜杠/跟踪参数差异时，必须规范化为同一 feed（否则同一
+    /// 订阅出现两个本地 feed → 文章翻倍、状态分裂、数量对不齐）。
+    #[test]
+    fn feed_url_normalized_matching_collides_differently_decorated_urls() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let f = create_folder(&conn, "F", "article").unwrap();
+        // 本地直连添加：https + www + 尾斜杠 + 跟踪参数
+        let fid = insert_feed(
+            &conn,
+            "https://www.example.com/feed/?utm_source=x",
+            None,
+            "f",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        // Miniflux 返回：http + 无 www + 无尾斜杠 + 无跟踪参数 → 必须匹配到同一 feed
+        let matched = feed_id_by_url_normalized(&conn, "http://example.com/feed").unwrap();
+        assert_eq!(matched, Some(fid), "规范化后不同饰的 feed_url 必须匹配同一本地 feed");
+
+        // 精确匹配（旧函数）对这种情况会漏判——保持旧函数不变，仅新函数规范化
+        let exact = feed_id_by_url(&conn, "http://example.com/feed").unwrap();
+        assert!(exact.is_none(), "精确匹配对规范化差异应返回 None（这正是修复前漏判的根因）");
     }
 }

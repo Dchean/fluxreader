@@ -1107,7 +1107,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           collapsed: false,
           settingsCollapsed: false,
           layout,
-          autoSummary: true,
+          autoSummary: false,
           autoTranslate: false,
           feeds: [],
         },
