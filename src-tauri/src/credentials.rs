@@ -12,7 +12,6 @@
 //! 下次写入时自动升级为密文。
 
 use crate::error::AppResult;
-use rusqlite::OptionalExtension;
 
 /// 密文前缀标记：以 `dpapi:` 开头说明是 DPAPI 密文，否则视为明文（历史遗留/非 Windows）。
 const DPAPI_PREFIX: &str = "dpapi:";
@@ -43,10 +42,11 @@ pub fn migrate_legacy_plaintext(conn: &rusqlite::Connection) -> AppResult<usize>
     #[cfg(not(windows))]
     {
         let _ = conn;
-        return Ok(0);
+        Ok(0)
     }
     #[cfg(windows)]
     {
+        use rusqlite::OptionalExtension;
         let mut upgraded = 0usize;
         for key in SENSITIVE_KEYS {
             let raw: Option<String> = conn
