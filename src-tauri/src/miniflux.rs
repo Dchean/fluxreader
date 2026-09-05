@@ -31,19 +31,24 @@ pub struct Feed {
     pub title: String,
     #[serde(default)]
     pub category: Option<CategoryRef>,
-    pub icon_url: Option<String>,
+    /// favicon 引用（真实字段是 icon 对象 {feed_id, icon_id}，无 icon_url 字符串；
+    /// icon 为 null 时表示无 favicon）
+    #[serde(default)]
+    pub icon: Option<FeedIcon>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FeedIcon {
+    pub feed_id: i64,
+    pub icon_id: i64,
+    #[serde(default)]
+    pub external_icon_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CategoryRef {
     pub id: i64,
     pub title: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FeedListResponse {
-    pub feeds: Vec<Feed>,
-    pub total: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,11 +154,8 @@ impl MinifluxClient {
     }
 
     pub async fn feeds(&self) -> AppResult<Vec<Feed>> {
-        // 标准格式 {"feeds": [...], "total": N}；部分版本/反代返回裸数组，两种都兼容
-        match self.get_json::<FeedListResponse>("/v1/feeds").await {
-            Ok(r) => Ok(r.feeds),
-            Err(_) => Ok(self.get_json::<Vec<Feed>>("/v1/feeds").await?),
-        }
+        // 真实 Miniflux GET /v1/feeds 返回裸数组 [...]（handler 直接 response.JSON(w, r, feeds)）
+        self.get_json("/v1/feeds").await
     }
 
     /// 拉条目：after/changed_after 为 unix **秒**（Miniflux API 文档如此；
@@ -208,9 +210,10 @@ impl MinifluxClient {
     }
 
     /// 新增订阅：POST /v1/feeds {feed_url, category_id}。
-    /// 幂等：服务端已存在（409）时回查 /v1/feeds 按 URL 找到既有 feed_id
-    /// 返回（真实 Miniflux 409 响应体里带 feed_id，优先取响应体，
-    /// 兜底走列表回查）——同一 URL 重复推送不构成错误，视为"已同步"。
+    /// 幂等：服务端已存在同 URL 订阅时，Miniflux 返回 **400**（非 409）——
+    /// 响应体 `{"error_message": "This feed already exists"}`（validator 的
+    /// error.feed_already_exists 经 JSONBadRequest 返回）。此时回查 /v1/feeds
+    /// 按 URL 找到既有 feed_id 返回，同一 URL 重复推送不构成错误。
     pub async fn create_feed(&self, feed_url: &str, category_id: i64) -> AppResult<i64> {
         #[derive(Serialize)]
         struct Body<'a> {
@@ -235,25 +238,27 @@ impl MinifluxClient {
             let created: Created = resp.json().await?;
             return Ok(created.feed_id);
         }
-        if status.as_u16() == 409 {
-            // 已存在：先试响应体里的 feed_id（真实服务端行为）
-            #[derive(Deserialize, Default)]
-            struct Conflict {
-                #[serde(default)]
-                feed_id: Option<i64>,
+        // Miniflux 对重复 feed 返回 400（validator.ValidateFeedCreation 的
+        // error.feed_already_exists 经 JSONBadRequest 返回）。真实服务端也可能
+        // 返回 409（旧版本/反代），两种都兼容：只要能确认「已存在」，就回查绑定。
+        if status.as_u16() == 400 || status.as_u16() == 409 {
+            let is_conflict = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|v| v.get("error_message").and_then(|m| m.as_str()).map(String::from))
+                .map(|msg| msg.to_ascii_lowercase().contains("already exists"))
+                .unwrap_or(false)
+                || status.as_u16() == 409;
+            if is_conflict {
+                // 兜底：列表回查，按 URL 找到既有 feed_id
+                let feeds = self.feeds().await?;
+                return feeds
+                    .iter()
+                    .find(|f| f.feed_url == feed_url)
+                    .map(|f| f.id)
+                    .ok_or_else(|| AppError::network("订阅已存在但列表中找不到该 URL"));
             }
-            if let Ok(c) = resp.json::<Conflict>().await {
-                if let Some(id) = c.feed_id {
-                    return Ok(id);
-                }
-            }
-            // 兜底：列表回查
-            let feeds = self.feeds().await?;
-            return feeds
-                .iter()
-                .find(|f| f.feed_url == feed_url)
-                .map(|f| f.id)
-                .ok_or_else(|| AppError::network("409 但列表中找不到该订阅"));
         }
         Err(AppError::network(format!("POST /v1/feeds → {status}")))
     }
@@ -276,7 +281,9 @@ impl MinifluxClient {
             .await
     }
 
-    /// 移动订阅到分类：PUT /v1/feeds/{id}/category {category_id}
+    /// 移动订阅到分类：PUT /v1/feeds/{id} {category_id}。
+    /// 注意：Miniflux 没有独立的 /v1/feeds/{id}/category 端点——移动分类与改名
+    /// 共用 PUT /v1/feeds/{id}（Update Feed，body 可含 title 与 category_id）。
     pub async fn move_feed_category(&self, feed_id: i64, category_id: i64) -> AppResult<()> {
         #[derive(Serialize)]
         struct Body {
@@ -285,7 +292,7 @@ impl MinifluxClient {
         let body = serde_json::to_string(&Body { category_id })?;
         self.send_expect_ok(
             reqwest::Method::PUT,
-            &format!("/v1/feeds/{feed_id}/category"),
+            &format!("/v1/feeds/{feed_id}"),
             Some(body),
         )
         .await

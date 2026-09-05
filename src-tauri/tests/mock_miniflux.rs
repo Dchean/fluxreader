@@ -192,11 +192,12 @@ fn route(srv: &MockMiniflux, method: &str, path: &str, path_query: &str, body: &
             r#"[{"id":1,"title":"Default"},{"id":2,"title":"Remote Cat"}]"#.into(),
         ),
         ("GET", "/v1/feeds") => {
-            // 两个远端 feed：一个与本地 URL 碰撞，一个是远端独有
-            let json = r#"{"total":2,"feeds":[
-                {"id":10,"feed_url":"http://127.0.0.1:8765/local_feed.xml","site_url":null,"title":"Remote Collision Feed","icon_url":null,"category":{"id":1,"title":"Default"}},
-                {"id":11,"feed_url":"http://example.com/remote-only.xml","site_url":null,"title":"Remote Only Feed","icon_url":null,"category":{"id":2,"title":"Remote Cat"}}
-            ]}"#;
+            // 两个远端 feed：一个与本地 URL 碰撞，一个是远端独有。
+            // 真实 Miniflux GET /v1/feeds 返回裸数组 [...]（非 {"feeds":[...]}）
+            let json = r#"[
+                {"id":10,"feed_url":"http://127.0.0.1:8765/local_feed.xml","site_url":null,"title":"Remote Collision Feed","icon":null,"category":{"id":1,"title":"Default"}},
+                {"id":11,"feed_url":"http://example.com/remote-only.xml","site_url":null,"title":"Remote Only Feed","icon":null,"category":{"id":2,"title":"Remote Cat"}}
+            ]"#;
             (200, json.into())
         }
         ("GET", "/v1/entries") => {

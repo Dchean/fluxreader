@@ -316,13 +316,15 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report
                     // 已存在（本地直连添加过）→ 绑定 miniflux_id，本地分类/布局保留
                     let _ = db::set_feed_miniflux_id(&conn, lid, rf.id);
                     // 远端标题仅在本地标题等于 URL（从未抓取成功过）时回填
+                    // favicon：Miniflux 的 icon 是 {feed_id, icon_id} 引用（非 URL），
+                    // 需另调 GET /v1/feeds/{id}/icon 拿 base64——非关键，交给本地
+                    // 直连抓取的 discover_favicon 自动发现（此处不覆盖）。
                     let _ = conn.execute(
                         "UPDATE feeds SET
                             title = CASE WHEN title = feed_url THEN ?1 ELSE title END,
-                            favicon_url = COALESCE(favicon_url, ?2),
-                            site_url = COALESCE(site_url, ?3)
-                         WHERE id = ?4",
-                        rusqlite::params![rf.title, rf.icon_url, rf.site_url, lid],
+                            site_url = COALESCE(site_url, ?2)
+                         WHERE id = ?3",
+                        rusqlite::params![rf.title, rf.site_url, lid],
                     );
                     report.merged_states += 1;
                 }
@@ -348,7 +350,7 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report
                         &rf.feed_url,
                         rf.site_url.as_deref(),
                         &rf.title,
-                        rf.icon_url.as_deref(),
+                        None, // favicon 留空，交给本地直连抓取的 discover_favicon 发现
                         folder_id,
                         "inherit",
                         true,
