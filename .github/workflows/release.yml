@@ -38,7 +38,34 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "FluxReader ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install this version."
+          releaseBody: |
+            本版本新增文章状态同步、自定义右键菜单，并大幅优化同步性能与界面体验。
+
+            ## 新功能
+
+            - **文章状态同步**：GitHub Gist / WebDAV 跨设备同步已读/收藏状态（OR-合并，任一端已读即已读）
+            - **自定义右键菜单**：替换系统默认菜单，按上下文（文章卡片/订阅源/正文/空白）提供收藏、已读、复制、编辑、删除等操作
+            - **添加订阅同步到 Miniflux**：已连接时默认勾选，添加后立即推送到服务端
+
+            ## 改进
+
+            - **同步性能**：Miniflux 多源并发拉取 + 批量匹配映射（消除 N+1 查询），断连重连同步提速
+            - **图片防盗链代理**：少数派、豆瓣等白名单式防盗链图床走后端抓取转 data: URL
+            - **Reader 界面重构**：顶栏（标为已读/收藏/源网页/播放）+ 阅读工具栏（摘要/翻译/全文/源码）分离
+            - **列表与正文分栏宽度可拖动调整**
+            - **文案统一**：切换按钮统一动作式（标为已读/收藏），消除状态词与动作词混用
+
+            ## 修复
+
+            - 列表滚动后自动跳回选中文章（虚拟滚动定位依赖 totalSize/items 导致）
+            - 正文无法选择文字（全局 user-select:none 覆盖子元素）
+            - 社交布局图片点击跳转浏览器（改为灯箱放大）
+            - 豆瓣画廊图片防盗链显示失败
+            - 无时间戳 RSS 源（如 kirikira.moe）文章发布时间为空
+
+            ## 数据迁移
+
+            - 数据库迁移至 v12：回填缺失发布时间（用抓取时间兜底）
           releaseDraft: true
           prerelease: false
           args: ""
