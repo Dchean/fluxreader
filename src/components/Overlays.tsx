@@ -155,16 +155,15 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
           label: a.title,
           hint: feedIndex.get(a.feedId)?.feed.name ?? '',
           run: () => {
-            /* 文章：选中并定位列表。若该文章已读而当前是未读筛选，先切到
-               「全部」视图保证卡片可见（否则定位到一条看不见的卡片）。 */
+            /* 文章：锚定打开——计算该文章在「全部」视图下的绝对位置，从目标页
+               加载列表（而非从头拉 500 篇），正确定位到很老的文章。 */
             const st = useAppStore.getState();
-            const binding = st.feedIndex.get(a.feedId);
-            if (binding) st.selectFeed(binding.feed.id);
-            if (a.isRead) {
-              if (st.activeViewFilter === 'unread') st.selectView('all');
-              if (st.timelineFilter === 'unread') st.toggleTimelineFilter();
-            }
-            st.selectArticle(a.id);
+            // 统一在「全部订阅源」范围锚定（搜索结果可能来自任意 feed）
+            if (st.activeFeedFilter !== 'all') st.selectFeed('all');
+            // 未读/今天等视图会过滤掉目标文章，先切到「全部」视图
+            if (st.activeViewFilter !== 'all') st.selectView('all');
+            if (st.timelineFilter === 'unread') st.toggleTimelineFilter();
+            void st.anchorToArticle(a.id);
           },
         });
       }

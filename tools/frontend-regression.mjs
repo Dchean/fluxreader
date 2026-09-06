@@ -92,7 +92,7 @@ articleRow = { ...articleRow, content_html: '<p>这是摘要正文，比较短�
 store.setState((s) => ({
   entries: s.entries.map((a) => (a.id === entryId ? { ...a, content: '' } : a)),
 }));
-store.getState().ensureArticleContent(entryId);
+store.getState().ensureArticleContent(entryId, { extractFulltext: true });
 await new Promise((r) => setTimeout(r, 50));
 
 const toasts = store.getState().toasts;

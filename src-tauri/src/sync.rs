@@ -318,7 +318,10 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report
                 .flatten();
             match local_feed {
                 Some(lid) => {
-                    // 已存在（本地直连添加过）→ 绑定 miniflux_id，本地分类/布局保留
+                    // 已存在（本地直连添加过）→ 绑定 miniflux_id，本地分类/布局保留。
+                    // origin 标记「订阅来源」，不随同步模式（direct/hybrid）变化；
+                    // 内容来源由 syncMode 决定（direct 本地抓取 / hybrid Miniflux 提供），
+                    // 不在此转换 origin、也不清理 source='direct'（本地抓取是合法内容）。
                     let _ = db::set_feed_miniflux_id(&conn, lid, rf.id);
                     // 远端标题仅在本地标题等于 URL（从未抓取成功过）时回填
                     // favicon：Miniflux 的 icon 是 {feed_id, icon_id} 引用（非 URL），
@@ -376,14 +379,27 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, report
 /// - 待推保护：本地有未推送变更 → 跳过（本地优先，防乒乓）
 /// - read-anywhere-wins：「读」是强意图，任何副本的已读都接受
 /// - unread 只认绑定同源 entry：跨源副本的未读不能复活桌面已读
-fn merge_remote_status(conn: &Connection, aid: i64, e: &Entry, report: &mut SyncReport) {
+fn merge_remote_status(conn: &Connection, aid: i64, e: &Entry, maps: &mut db::SyncMatchMaps, report: &mut SyncReport) {
     let _ = db::set_article_miniflux_id(conn, aid, e.id);
-    if db::article_has_pending_sync(conn, aid).unwrap_or(false) {
+    // 同步 maps 的绑定状态：后续 entry 若 URL 兜底匹配到同一 aid，能读到
+    // 「已绑定 e.id」而非批量快照里的「未绑定」，避免跨源同 URL 副本被误判
+    // 为自己的条目（时序偏差）。
+    maps.id_to_mf_id.insert(aid, Some(e.id));
+    maps.id_to_mf_pair.insert(aid, (Some(e.id), maps.id_to_mf_pair.get(&aid).map(|p| p.1).unwrap_or(None)));
+    maps.mf_id_to_article.insert(e.id, aid);
+    if maps.pending_ids.contains(&aid) {
         return;
     }
     let remote_read = e.status == "read";
     let local_bound = db::article_by_miniflux_id(conn, e.id).ok().flatten().is_some();
-    let same_feed_trusted = db::article_matches_remote_feed(conn, aid, e.feed_id).unwrap_or(false);
+    let same_feed_trusted = maps
+        .id_to_mf_pair
+        .get(&aid)
+        .map(|(entry_mf, feed_mf)| match entry_mf {
+            Some(_) => *feed_mf == Some(e.feed_id),
+            None => true,
+        })
+        .unwrap_or(false);
     let accept_unread = local_bound && same_feed_trusted;
     if remote_read || accept_unread {
         let _ = conn.execute(
@@ -444,9 +460,29 @@ async fn reconcile_unread_state(
     // 逐条对齐（短临界区批量更新，避免长持锁）
     let mut aligned = 0usize;
     let conn = db.lock().await;
+    // 批量预取 pending 集合（消除「每条已绑定文章一次 article_has_pending_sync」的 N+1）
+    let pending: std::collections::HashSet<i64> = {
+        let mut stmt = match conn.prepare(
+            "SELECT DISTINCT article_id FROM sync_queue WHERE action IN ('read','unread','star','unstar')",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                report.errors.push(format!("查询待推队列失败: {e}"));
+                return;
+            }
+        };
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0));
+        match rows {
+            Ok(iter) => iter.flatten().collect(),
+            Err(e) => {
+                report.errors.push(format!("读取待推队列失败: {e}"));
+                return;
+            }
+        }
+    };
     for (aid, mf_id) in &bound {
         // 待推保护：本地有未推送的读/收藏变更 → 跳过，推送后下轮对齐
-        if db::article_has_pending_sync(&conn, *aid).unwrap_or(false) {
+        if pending.contains(aid) {
             continue;
         }
         let should_unread = unread.contains(mf_id);
@@ -486,32 +522,52 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
         };
         {
             let conn = db.lock().await;
+            // 批量预取匹配映射：消除「每条 entry 数次 SQLite 查询」的 N+1
+            // （首次同步上千条 → 数千次查询），改为内存 HashMap/HashSet 查找。
+            let mut maps = db::sync_match_maps(&conn).unwrap_or_else(|e| {
+                report.errors.push(format!("同步匹配映射构建失败: {e}"));
+                db::SyncMatchMaps {
+                    url_to_id: Default::default(),
+                    id_to_mf_id: Default::default(),
+                    id_to_mf_pair: Default::default(),
+                    pending_ids: Default::default(),
+                    feed_mf_to_id: Default::default(),
+                    mf_id_to_article: Default::default(),
+                }
+            });
             for e in &all_entries {
                 let Some(u) = e.url.as_deref() else { continue };
-                let Some(aid) = db::article_id_by_url(&conn, u).ok().flatten() else {
+                // 规范化 URL 匹配（与 article_id_by_url 同口径）
+                let url_key = db::normalize_url(u);
+                let Some(aid) = maps.url_to_id.get(&url_key).copied() else {
                     // 本地没有这条 URL（规范化匹配也找不到）→ 可能是直连源
                     // 漏抓/feed 只提供摘要而缺失的条目。若其远端 feed 已在本地
                     // 绑定（直连源 + Miniflux 兜底同源），则 upsert 补齐——幂等，
                     // 已存在的不重复、不覆盖正文/已读；真正缺失的才入库。
-                    let local_feed = db::feed_by_miniflux_id(&conn, e.feed_id).ok().flatten();
+                    let local_feed = maps.feed_mf_to_id.get(&e.feed_id).copied();
                     if let Some(feed_id) = local_feed {
-                        upsert_miniflux_entry(&conn, feed_id, e, report);
+                        upsert_miniflux_entry(&conn, feed_id, e, &mut maps, report);
                     }
                     continue;
                 };
                 // 已绑定的 entry id 直配 = 自己的条目（feed 可能尚未绑定——
                 // states 阶段先于 feeds 阶段的窗口），无需再查 feed 归属
-                let bound_entry: Option<i64> = conn
-                    .query_row("SELECT miniflux_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
-                    .ok()
-                    .flatten();
+                let bound_entry = maps.id_to_mf_id.get(&aid).copied().flatten();
                 let is_own = bound_entry == Some(e.id)
-                    || (bound_entry.is_none() && db::article_matches_remote_feed(&conn, aid, e.feed_id).unwrap_or(false));
+                    || (bound_entry.is_none()
+                        && maps
+                            .id_to_mf_pair
+                            .get(&aid)
+                            .map(|(entry_mf, feed_mf)| match entry_mf {
+                                Some(_) => *feed_mf == Some(e.feed_id),
+                                None => true,
+                            })
+                            .unwrap_or(false));
                 if !is_own {
                     // 跨源副本：记账（已读广播对象）。read-anywhere-wins：远端副本的
                     // 已读也是真读意图 → 接受已读，但不抢绑定、不接受未读
                     let _ = db::add_article_dup_entry(&conn, aid, e.id);
-                    if e.status == "read" && !db::article_has_pending_sync(&conn, aid).unwrap_or(false) {
+                    if e.status == "read" && !maps.pending_ids.contains(&aid) {
                         let _ = conn.execute(
                             "UPDATE articles SET is_read = 1 WHERE id = ?1",
                             rusqlite::params![aid],
@@ -519,7 +575,7 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
                     }
                     continue;
                 }
-                merge_remote_status(&conn, aid, e, report);
+                merge_remote_status(&conn, aid, e, &mut maps, report);
             }
         }
     }
@@ -544,13 +600,27 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
             feed_miniflux_id(&conn, feed.id)
         };
         let Some(mf_id) = mf_id else { continue };
-        // 全量拉取（after=0）：服务端源内容以 Miniflux 为唯一真相
+        // 全量拉取（after=0）：服务端源内容以 Miniflux 为唯一真相。
+        // 注意：不清除本地直连抓取的 source='direct' 文章——「本地抓取」模式下
+        // 这些是合法内容（本地抓取成功、Miniflux 抓取失败时，本地内容就是
+        // 唯一来源），重复问题由 upsert 的 URL 兜底去重解决，而非删除。
         match client.entries(Some(mf_id), 0, false).await {
             Ok(entries) => {
                 let before = report.pulled_entries;
                 let conn = db.lock().await;
+                let mut maps = db::sync_match_maps(&conn).unwrap_or_else(|e| {
+                    report.errors.push(format!("同步匹配映射构建失败: {e}"));
+                    db::SyncMatchMaps {
+                        url_to_id: Default::default(),
+                        id_to_mf_id: Default::default(),
+                        id_to_mf_pair: Default::default(),
+                        pending_ids: Default::default(),
+                        feed_mf_to_id: Default::default(),
+                        mf_id_to_article: Default::default(),
+                    }
+                });
                 for e in &entries {
-                    upsert_miniflux_entry(&conn, feed.id, e, report);
+                    upsert_miniflux_entry(&conn, feed.id, e, &mut maps, report);
                 }
                 report.fallback_entries = report.pulled_entries - before;
             }
@@ -567,8 +637,19 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
             Ok(entries) => {
                 let before = report.pulled_entries;
                 let conn = db.lock().await;
+                let mut maps = db::sync_match_maps(&conn).unwrap_or_else(|e| {
+                    report.errors.push(format!("同步匹配映射构建失败: {e}"));
+                    db::SyncMatchMaps {
+                        url_to_id: Default::default(),
+                        id_to_mf_id: Default::default(),
+                        id_to_mf_pair: Default::default(),
+                        pending_ids: Default::default(),
+                        feed_mf_to_id: Default::default(),
+                        mf_id_to_article: Default::default(),
+                    }
+                });
                 for e in &entries {
-                    upsert_miniflux_entry(&conn, feed.id, e, report);
+                    upsert_miniflux_entry(&conn, feed.id, e, &mut maps, report);
                 }
                 report.fallback_entries = report.pulled_entries - before;
             }
@@ -583,26 +664,43 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
     match client.entries(None, since_s, true).await {
         Ok(entries) => {
             let conn = db.lock().await;
+            // 批量预取匹配映射（消除增量路径的 N+1）
+            let mut maps = db::sync_match_maps(&conn).unwrap_or_else(|e| {
+                report.errors.push(format!("同步匹配映射构建失败: {e}"));
+                db::SyncMatchMaps {
+                    url_to_id: Default::default(),
+                    id_to_mf_id: Default::default(),
+                    id_to_mf_pair: Default::default(),
+                    pending_ids: Default::default(),
+                    feed_mf_to_id: Default::default(),
+                    mf_id_to_article: Default::default(),
+                }
+            });
             for e in &entries {
                 // 匹配：miniflux_id 直配 → URL 兜底（同源校验）
-                let local = db::article_by_miniflux_id(&conn, e.id)
-                    .ok()
-                    .flatten()
-                    .or_else(|| {
-                        e.url.as_deref().and_then(|u| db::article_id_by_url(&conn, u).ok().flatten())
-                            .filter(|aid| db::article_matches_remote_feed(&conn, *aid, e.feed_id).unwrap_or(false))
-                    });
+                let local = maps.mf_id_to_article.get(&e.id).copied().or_else(|| {
+                    e.url.as_deref().and_then(|u| maps.url_to_id.get(&db::normalize_url(u)).copied())
+                        .filter(|aid| {
+                            maps.id_to_mf_pair
+                                .get(aid)
+                                .map(|(entry_mf, feed_mf)| match entry_mf {
+                                    Some(_) => *feed_mf == Some(e.feed_id),
+                                    None => true,
+                                })
+                                .unwrap_or(false)
+                        })
+                });
                 let Some(aid) = local else {
                     // 跨源同 URL entry（手机端另一源的副本）：不写状态，但记账
                     // 副本 entry——桌面端的已读变更要广播到它
                     if let Some(u) = e.url.as_deref() {
-                        if let Ok(Some(aid)) = db::article_id_by_url(&conn, u) {
+                        if let Some(aid) = maps.url_to_id.get(&db::normalize_url(u)).copied() {
                             let _ = db::add_article_dup_entry(&conn, aid, e.id);
                         }
                     }
                     continue;
                 };
-                merge_remote_status(&conn, aid, e, report);
+                merge_remote_status(&conn, aid, e, &mut maps, report);
             }
             let now = Utc::now().timestamp();
             let _ = db::set_last_sync_ts(&conn, now);
@@ -631,14 +729,20 @@ fn feed_miniflux_id(conn: &Connection, feed_id: i64) -> Option<i64> {
 /// Miniflux 兜底条目入库（source='miniflux'，不覆盖直连正文）。
 /// URL 兜底合并需同源校验：跨源同 URL entry 不写状态、不抢绑定。
 /// enclosure（播客音频/视频）与图片一并落库——播放器与卡片封面依赖。
-fn upsert_miniflux_entry(conn: &Connection, feed_id: i64, e: &Entry, report: &mut SyncReport) {
-    let existing = db::article_by_miniflux_id(conn, e.id)
-        .ok()
-        .flatten()
-        .or_else(|| {
-            e.url.as_deref().and_then(|u| db::article_id_by_url(conn, u).ok().flatten())
-                .filter(|aid| db::article_matches_remote_feed(conn, *aid, e.feed_id).unwrap_or(false))
-        });
+fn upsert_miniflux_entry(conn: &Connection, feed_id: i64, e: &Entry, maps: &mut db::SyncMatchMaps, report: &mut SyncReport) {
+    let existing = maps.mf_id_to_article.get(&e.id).copied().or_else(|| {
+        e.url.as_deref()
+            .and_then(|u| maps.url_to_id.get(&db::normalize_url(u)).copied())
+            .filter(|aid| {
+                maps.id_to_mf_pair
+                    .get(aid)
+                    .map(|(entry_mf, feed_mf)| match entry_mf {
+                        Some(_) => *feed_mf == Some(e.feed_id),
+                        None => true,
+                    })
+                    .unwrap_or(false)
+            })
+    });
 
     let published = DateTime::parse_from_rfc3339(&e.published_at)
         .map(|d| d.with_timezone(&Utc).to_rfc3339())
@@ -656,7 +760,11 @@ fn upsert_miniflux_entry(conn: &Connection, feed_id: i64, e: &Entry, report: &mu
         // 待推保护：本地有未推送的读/收藏变更时，跳过状态覆盖（本地优先，
         // 防乒乓——与 merge_remote_status 的守卫语义一致）。正文/附件仍照常补。
         let _ = db::set_article_miniflux_id(conn, aid, e.id);
-        if !db::article_has_pending_sync(conn, aid).unwrap_or(false) {
+        // 同步 maps 绑定状态（与 merge_remote_status 同：避免快照时序偏差）
+        maps.id_to_mf_id.insert(aid, Some(e.id));
+        maps.id_to_mf_pair.insert(aid, (Some(e.id), maps.id_to_mf_pair.get(&aid).map(|p| p.1).unwrap_or(None)));
+        maps.mf_id_to_article.insert(e.id, aid);
+        if !maps.pending_ids.contains(&aid) {
             let _ = conn.execute(
                 "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
                 rusqlite::params![(e.status == "read") as i64, e.starred as i64, aid],
@@ -700,6 +808,9 @@ fn upsert_miniflux_entry(conn: &Connection, feed_id: i64, e: &Entry, report: &mu
         };
         if let Ok((aid, _)) = db::upsert_article_with_feed(conn, feed_id, &a, false) {
             let _ = db::set_article_miniflux_id(conn, aid, e.id);
+            // 新入库条目也同步 maps：后续 entry 若 URL 兜底匹配到它，能读到绑定
+            maps.id_to_mf_id.insert(aid, Some(e.id));
+            maps.mf_id_to_article.insert(e.id, aid);
             let _ = conn.execute(
                 "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
                 rusqlite::params![(e.status == "read") as i64, e.starred as i64, aid],
@@ -756,6 +867,24 @@ pub async fn states_phase(
         }
     }
     pull_entries(db, &client, &mut report, full).await;
+    // pull 后补推：pull 会为「本地已读但 Miniflux 刚抓取成功的文章」绑定
+    // miniflux_id（此前未绑定，push 段跳过）。绑定后再推一次，把它们的
+    // pending read/star 推到 Miniflux——否则这些文章要等下一轮同步才同步状态，
+    // 其他客户端会看到「本地已读、服务端仍未读」。二次 push 幂等（队列已空则无操作）。
+    {
+        let _guard = PUSH_LOCK.lock().await;
+        let plan = {
+            let conn = db.lock().await;
+            plan_push(&conn)?
+        };
+        if !plan.status.is_empty() || !plan.stars.is_empty() {
+            let done = exec_push(&client, &plan, &mut report).await;
+            if !done.is_empty() {
+                let conn = db.lock().await;
+                let _ = db::prune_sync(&conn, &done);
+            }
+        }
+    }
     Ok(report)
 }
 

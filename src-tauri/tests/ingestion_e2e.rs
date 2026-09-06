@@ -78,6 +78,8 @@ async fn direct_fetch_pipeline_end_to_end() {
             only_today: false,
             newest_first: true,
             limit: 500,
+            offset: 0,
+            with_content: true,
         },
     )
     .unwrap();

@@ -1,7 +1,7 @@
 //! Tauri IPC 命令面：前端 store 经 invoke 调用这里。
 //! 每个命令短小：拿锁 → db:: 类型化函数 → 返回 Serialize 行类型。
 
-use crate::db::{self, ArticleQuery};
+use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::ingestion;
 use crate::miniflux::MinifluxClient;
@@ -341,6 +341,8 @@ pub struct ArticleListArgs {
     pub only_today: Option<bool>,
     pub newest_first: Option<bool>,
     pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub with_content: Option<bool>,
 }
 
 #[tauri::command]
@@ -349,18 +351,34 @@ pub async fn list_articles(
     args: ArticleListArgs,
 ) -> AppResult<Vec<db::ArticleListItem>> {
     let conn = state.db.lock().await;
-    db::list_articles(
-        &conn,
-        &ArticleQuery {
-            feed_id: args.feed_id,
-            folder_id: args.folder_id,
-            only_unread: args.only_unread.unwrap_or(false),
-            only_starred: args.only_starred.unwrap_or(false),
-            only_today: args.only_today.unwrap_or(false),
-            newest_first: args.newest_first.unwrap_or(true),
-            limit: args.limit.unwrap_or(500),
-        },
-    )
+    db::list_articles(&conn, &article_query(&args))
+}
+
+/// 计算某篇文章在当前筛选排序下的绝对位置（0 起）——供前端「搜索/深层打开
+/// 文章后只加载目标页」的双向分页锚定。
+#[tauri::command]
+pub async fn article_index(
+    state: State<'_, AppState>,
+    args: ArticleListArgs,
+    article_id: i64,
+) -> AppResult<Option<i64>> {
+    let conn = state.db.lock().await;
+    db::article_index(&conn, &article_query(&args), article_id)
+}
+
+/// 从反序列化的列表参数构建 db::ArticleQuery（list_articles 与 article_index 共用）。
+fn article_query(args: &ArticleListArgs) -> db::ArticleQuery {
+    db::ArticleQuery {
+        feed_id: args.feed_id,
+        folder_id: args.folder_id,
+        only_unread: args.only_unread.unwrap_or(false),
+        only_starred: args.only_starred.unwrap_or(false),
+        only_today: args.only_today.unwrap_or(false),
+        newest_first: args.newest_first.unwrap_or(true),
+        limit: args.limit.unwrap_or(500),
+        offset: args.offset.unwrap_or(0),
+        with_content: args.with_content.unwrap_or(false),
+    }
 }
 
 #[tauri::command]
@@ -370,6 +388,15 @@ pub async fn get_article(
 ) -> AppResult<Option<db::ArticleRow>> {
     let conn = state.db.lock().await;
     db::get_article(&conn, id)
+}
+
+#[tauri::command]
+pub async fn get_articles(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+) -> AppResult<Vec<db::ArticleRow>> {
+    let conn = state.db.lock().await;
+    db::get_articles(&conn, &ids)
 }
 
 /// 全文搜索（FTS5）：标题/正文/作者/AI 摘要/翻译

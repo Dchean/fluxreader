@@ -74,6 +74,11 @@ export interface ArticleListItemRow {
   published_at: string | null;
   is_read: boolean;
   is_starred: boolean;
+  /** with_content 时填充 */
+  url?: string | null;
+  content_html?: string | null;
+  translated_content?: string | null;
+  fulltext_extracted?: boolean;
 }
 
 export interface ArticleDetailRow extends ArticleListItemRow {
@@ -122,6 +127,18 @@ export interface ArticleListArgs {
   only_today?: boolean;
   newest_first?: boolean;
   limit?: number;
+  offset?: number;
+  /** 附带正文 HTML（社交/通知布局直接渲染，免逐篇水合） */
+  with_content?: boolean;
+}
+
+/** 后端聚合的精确条目计数（按 feed 分组）——侧边栏数字用，不受列表分页 limit 影响 */
+export interface FeedCountsRow {
+  feed_id: number;
+  total: number;
+  unread: number;
+  starred: number;
+  today: number;
 }
 
 /* ============================================================
@@ -148,6 +165,11 @@ export const api = {
   async listFeeds(): Promise<FeedRow[] | null> {
     const inv = await getInvoke();
     return inv ? (await inv('list_feeds') as FeedRow[]) : null;
+  },
+  /** 精确条目计数（后端聚合，按 feed 分组），侧边栏角标用 */
+  async feedCounts(): Promise<FeedCountsRow[] | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('feed_counts') as FeedCountsRow[]) : null;
   },
   async addFeed(
     feedUrl: string,
@@ -202,6 +224,11 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('list_articles', { args }) as ArticleListItemRow[]) : null;
   },
+  /** 计算某篇文章在当前筛选排序下的绝对位置（0 起）——搜索/深层打开文章的双向分页锚定 */
+  async articleIndex(args: ArticleListArgs, articleId: number): Promise<number | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('article_index', { args, articleId }) as number | null) : null;
+  },
   /** FTS5 全文搜索（标题/正文/作者/AI 摘要/翻译）。浏览器环境返回 null。 */
   async searchArticles(query: string, limit?: number): Promise<ArticleListItemRow[] | null> {
     const inv = await getInvoke();
@@ -210,6 +237,11 @@ export const api = {
   async getArticle(id: number): Promise<ArticleDetailRow | null> {
     const inv = await getInvoke();
     return inv ? (await inv('get_article', { id }) as ArticleDetailRow) : null;
+  },
+  /** 批量拉取文章详情（正文水合专用）：一次 IPC 返回多篇，替代逐篇 getArticle */
+  async getArticles(ids: number[]): Promise<ArticleDetailRow[] | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('get_articles', { ids }) as ArticleDetailRow[]) : null;
   },
   async setRead(id: number, read: boolean): Promise<null> {
     const inv = await getInvoke();
@@ -505,6 +537,7 @@ export function folderRowsToCategories(folders: FolderRow[], feeds: FeedRow[]): 
 }
 
 export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
+  const html = row.content_html ?? '';
   return {
     id: String(row.id),
     feedId: String(row.feed_id),
@@ -521,11 +554,11 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
     audioUrl: row.enclosure_url ?? undefined,
     enclosureUrl: row.enclosure_url ?? undefined,
     durationSec: row.duration_sec ?? undefined,
-    url: (row as ArticleDetailRow).url ?? undefined,
+    url: row.url ?? undefined,
     aiSummary: row.ai_summary ?? '',
-    content: '',
-    rawContent: '',
-    translatedContent: '',
-    fulltextExtracted: (row as ArticleDetailRow).fulltext_extracted ?? false,
+    content: html,
+    rawContent: html,
+    translatedContent: row.translated_content ?? '',
+    fulltextExtracted: row.fulltext_extracted ?? false,
   };
 }

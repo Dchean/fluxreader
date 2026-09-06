@@ -6,6 +6,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use rusqlite_migration::{Migrations, M};
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -27,7 +28,7 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
             layout        TEXT NOT NULL DEFAULT 'article',
             auto_summary  INTEGER NOT NULL DEFAULT 0,
             auto_translate INTEGER NOT NULL DEFAULT 0,
-            collapsed     INTEGER NOT NULL DEFAULT 0,
+            collapsed     INTEGER NOT NULL DEFAULT 1,
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -174,6 +175,27 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
     M::up(r#"
         ALTER TABLE feeds ADD COLUMN origin TEXT NOT NULL DEFAULT 'local';
     "#),
+    // 「跟随服务端」（hybrid）模式下，本地直连添加的源（origin='local'）绑定
+    // Miniflux 后转为服务端来源（origin='miniflux'，内容由 Miniflux 提供）。
+    // 但断开连接时需把这类源恢复为 'local'（保留本地直连订阅），而非删除——
+    // origin_was_local 标记「原本是本地直连添加」。user_version=9。
+    M::up(r#"
+        ALTER TABLE feeds ADD COLUMN origin_was_local INTEGER NOT NULL DEFAULT 0;
+    "#),
+    // 订阅源分组默认折叠：新库建表 DEFAULT 已改为 1，这里把已有库的分类
+    // 统一折叠（用户诉求：分组默认收起，腾出滚动区给订阅源列表）。user_version=10。
+    M::up(r#"
+        UPDATE folders SET collapsed = 1;
+    "#),
+    // 清理历史重复：旧版在「本地抓取」模式下直连抓取 origin='miniflux' 源，
+    // 产生 source='direct' 文章与已有的 source='miniflux' 文章 URL 重复
+    // （guid 不同 + 智能去重默认关），导致文章翻倍、状态错乱。删除这些重复的
+    // direct 文章（内容/状态已由同 URL 的 miniflux 文章承载）。user_version=11。
+    M::up(r#"
+        DELETE FROM articles
+         WHERE source = 'direct'
+           AND url_norm IN (SELECT url_norm FROM articles WHERE source = 'miniflux');
+    "#),
     ])
 });
 
@@ -269,7 +291,8 @@ pub struct ArticleRow {
     pub fulltext_extracted: bool,
 }
 
-/// 列表页条目（轻量：不含正文 HTML，snippet 截断）
+/// 列表页条目（轻量：默认不含正文 HTML，snippet 截断；with_content 时附带正文，
+/// 供社交/通知布局直接渲染，免去逐篇 get_article 水合的 IPC 洪峰与「加载正文」等待）。
 #[derive(Debug, Serialize)]
 pub struct ArticleListItem {
     pub id: i64,
@@ -286,6 +309,11 @@ pub struct ArticleListItem {
     pub published_at: Option<String>,
     pub is_read: bool,
     pub is_starred: bool,
+    /* with_content=true 时填充（否则 None） */
+    pub url: Option<String>,
+    pub content_html: Option<String>,
+    pub translated_content: Option<String>,
+    pub fulltext_extracted: bool,
 }
 
 /* ============================================================
@@ -315,7 +343,7 @@ pub fn create_folder(conn: &Connection, name: &str, layout: &str) -> AppResult<i
         .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM folders", [], |r| r.get(0))
         .unwrap_or(0);
     conn.execute(
-        "INSERT INTO folders (name, position, layout) VALUES (?1, ?2, ?3)",
+        "INSERT INTO folders (name, position, layout, collapsed) VALUES (?1, ?2, ?3, 1)",
         params![name, next_pos, layout],
     )?;
     Ok(conn.last_insert_rowid())
@@ -633,6 +661,7 @@ fn article_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleRow> {
 }
 
 fn article_list_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleListItem> {
+    // 列顺序依赖 list_articles 的 SELECT；当 with_content=false 时尾部四列为 NULL/0。
     Ok(ArticleListItem {
         id: r.get(0)?,
         feed_id: r.get(1)?,
@@ -648,10 +677,15 @@ fn article_list_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleListItem>
         published_at: r.get(11)?,
         is_read: r.get::<_, i64>(12)? != 0,
         is_starred: r.get::<_, i64>(13)? != 0,
+        url: r.get(14)?,
+        content_html: r.get(15)?,
+        translated_content: r.get(16)?,
+        fulltext_extracted: r.get::<_, i64>(17)? != 0,
     })
 }
 
-/// 列表查询参数：feed 范围 + 视图筛选 + 排序。
+/// 列表查询参数：feed 范围 + 视图筛选 + 排序 + 分页。
+#[derive(Debug, Clone)]
 pub struct ArticleQuery {
     pub feed_id: Option<i64>,
     pub folder_id: Option<i64>,
@@ -660,19 +694,51 @@ pub struct ArticleQuery {
     pub only_today: bool,
     pub newest_first: bool,
     pub limit: i64,
+    pub offset: i64,
+    /// 附带正文 HTML（社交/通知布局直接渲染，免逐篇水合）
+    pub with_content: bool,
 }
 
-/// 列表条目（含 body_text 截断生成的 snippet）
+/// 列表条目（含 body_text 截断生成的 snippet；with_content 时附带正文）
 pub fn list_articles(conn: &Connection, q: &ArticleQuery) -> AppResult<Vec<ArticleListItem>> {
-    let mut sql = String::from(
+    // 正文列只在 with_content 时 SELECT（社交/通知布局需要），其余布局保持轻量查询。
+    // 尾部四列顺序与 article_list_item 的索引 14..17 严格对应。
+    let content_cols = if q.with_content {
+        "a.url, a.content_html, a.translated_content, a.fulltext_extracted"
+    } else {
+        "NULL, NULL, NULL, 0"
+    };
+    let mut sql = format!(
         "SELECT a.id, a.feed_id, a.title, a.author,
                 COALESCE(NULLIF(a.summary, ''), substr(a.body_text, 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
-                a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred
+                a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
+                {content_cols}
          FROM articles a",
     );
     // 值全部走绑定参数（占位符序号即绑定顺序），条件文本只拼固定字符串
-    let mut where_clauses: Vec<&str> = vec![];
+    let (where_clauses, mut params) = article_where(q);
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+    sql.push_str(if q.newest_first {
+        " ORDER BY COALESCE(a.published_at, a.fetched_at) DESC LIMIT ? OFFSET ?"
+    } else {
+        " ORDER BY COALESCE(a.published_at, a.fetched_at) ASC LIMIT ? OFFSET ?"
+    });
+    params.push(q.limit.into());
+    params.push(q.offset.into());
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), article_list_item)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 构建列表查询的 WHERE 条件 + 绑定参数（`list_articles` 与 `article_index`
+/// 共用，保证「绝对位置」与「列表顺序」口径一致）。
+fn article_where(q: &ArticleQuery) -> (Vec<&'static str>, Vec<rusqlite::types::Value>) {
+    let mut where_clauses: Vec<&'static str> = vec![];
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(fid) = q.feed_id {
         where_clauses.push("a.feed_id = ?");
@@ -691,20 +757,41 @@ pub fn list_articles(conn: &Connection, q: &ArticleQuery) -> AppResult<Vec<Artic
     if q.only_today {
         where_clauses.push("date(a.published_at) = date('now', 'localtime')");
     }
-    if !where_clauses.is_empty() {
-        sql.push_str(" WHERE ");
-        sql.push_str(&where_clauses.join(" AND "));
-    }
-    sql.push_str(if q.newest_first {
-        " ORDER BY COALESCE(a.published_at, a.fetched_at) DESC LIMIT ?"
-    } else {
-        " ORDER BY COALESCE(a.published_at, a.fetched_at) ASC LIMIT ?"
-    });
-    params.push(q.limit.into());
+    (where_clauses, params)
+}
 
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params), article_list_item)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+/// 计算某篇文章在当前筛选排序下的绝对位置（0 起）。
+/// 用窗口函数 ROW_NUMBER() OVER (ORDER BY ...) - 1 求位置，供前端「搜索/深层
+/// 打开文章后只加载目标那一页」的双向分页锚定——无需从头拉全量。
+/// 排序与 list_articles 完全同口径（COALESCE(published_at, fetched_at)）。
+pub fn article_index(conn: &Connection, q: &ArticleQuery, article_id: i64) -> AppResult<Option<i64>> {
+    let (where_clauses, mut params) = article_where(q);
+    let order = if q.newest_first {
+        "COALESCE(a.published_at, a.fetched_at) DESC"
+    } else {
+        "COALESCE(a.published_at, a.fetched_at) ASC"
+    };
+    let where_sql = if where_clauses.is_empty() {
+        "1=1".to_string()
+    } else {
+        where_clauses.join(" AND ")
+    };
+    let sql = format!(
+        "SELECT pos FROM (
+             SELECT a.id AS aid,
+                    ROW_NUMBER() OVER (ORDER BY {order}) - 1 AS pos
+             FROM articles a
+             WHERE {where_sql}
+         ) WHERE aid = ?",
+        order = order,
+        where_sql = where_sql,
+    );
+    params.push(article_id.into());
+    let pos = conn
+        .prepare(&sql)?
+        .query_row(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))
+        .optional()?;
+    Ok(pos)
 }
 
 pub fn get_article(conn: &Connection, id: i64) -> AppResult<Option<ArticleRow>> {
@@ -716,6 +803,20 @@ pub fn get_article(conn: &Connection, id: i64) -> AppResult<Option<ArticleRow>> 
         )
         .optional()?;
     Ok(row)
+}
+
+/// 批量拉取文章详情（正文水合专用）：一次查询返回多篇完整行，
+/// 避免前端逐篇 get_article 造成 IPC 洪峰 + 每篇一次 set 的 O(n) 重渲染。
+/// IN 子句占位符按 id 数量动态展开（id 列表来自受控的 ids 参数，非用户输入拼接）。
+pub fn get_articles(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ArticleRow>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!("SELECT {ARTICLE_COLS} FROM articles WHERE id IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), article_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// 全文搜索：LIKE 子串匹配，命中按发布时间倒序，返回与列表页同构的轻量行。
@@ -770,7 +871,8 @@ pub fn search_articles(conn: &Connection, query: &str, limit: i64) -> AppResult<
         "SELECT a.id, a.feed_id, a.title, a.author,
                 COALESCE(NULLIF(a.summary, ''), substr(a.body_text, 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
-                a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred
+                a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
+                NULL, NULL, NULL, 0
          FROM articles a
          WHERE {}
          ORDER BY a.published_at DESC
@@ -813,6 +915,12 @@ pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
 /// 空目录（pull 建的、没了成员）一并删除。
 pub fn purge_miniflux_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
     let tx = conn.transaction()?;
+    // 0. 先恢复「原本是本地直连添加、后被 hybrid 模式转为服务端来源」的订阅
+    //    ——这类源在断开连接时应保留（回到纯本地直连），而非随服务端数据删除。
+    tx.execute(
+        "UPDATE feeds SET origin = 'local', origin_was_local = 0 WHERE origin_was_local = 1",
+        [],
+    )?;
     // 1. 服务端来源订阅（级联：articles → sync_queue / deduped_urls 墓碑 / FTS 触发器）
     let feeds = tx.execute("DELETE FROM feeds WHERE origin = 'miniflux'", [])?;
     // 2. 本地直连条目上的绑定/副本/已读态全部回归纯本地
@@ -1019,32 +1127,82 @@ pub fn upsert_article_with_feed(
             ],
         )?;
         Ok((id, false))
+    } else if let Some(url) = a.url.as_deref().filter(|u| !u.is_empty()) {
+        // 同 feed 内按规范化 URL 兜底去重：direct 抓取与 Miniflux 同步的 guid 不同
+        // （direct 用原始 guid，Miniflux 用 `miniflux-{id}`），但 URL 相同是同一篇。
+        // 命中已有文章时只更新内容（正文/标题/封面/附件），**保留 source 与状态**
+        // （is_read/is_starred/miniflux_id）——抓取只负责内容、同步只负责状态，
+        // 避免「切换本地抓取后数量翻倍」与「状态被抓取覆盖回未读」。
+        let by_url: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM articles WHERE feed_id = ?1 AND url_norm = ?2 ORDER BY id LIMIT 1",
+                params![feed_id, normalize_url(url)],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = by_url {
+            conn.execute(
+                "UPDATE articles SET
+                    title = ?1,
+                    author = COALESCE(?2, author),
+                    summary = COALESCE(?3, summary),
+                    content_html = COALESCE(?4, content_html),
+                    body_text = CASE WHEN ?5 != '' THEN ?5 ELSE body_text END,
+                    image_url = COALESCE(?6, image_url),
+                    enclosure_url = COALESCE(?7, enclosure_url),
+                    enclosure_mime = COALESCE(?8, enclosure_mime),
+                    duration_sec = COALESCE(?9, duration_sec),
+                    published_at = COALESCE(?10, published_at)
+                 WHERE id = ?11",
+                params![
+                    a.title,
+                    a.author,
+                    a.summary,
+                    a.content_html,
+                    a.body_text,
+                    a.image_url,
+                    a.enclosure_url,
+                    a.enclosure_mime,
+                    a.duration_sec,
+                    a.published_at,
+                    id,
+                ],
+            )?;
+            Ok((id, false))
+        } else {
+            insert_new_article(conn, feed_id, a)
+        }
     } else {
-        conn.execute(
-            "INSERT INTO articles
-                (feed_id, guid, url, url_norm, title, author, summary, content_html, body_text, image_url,
-                 enclosure_url, enclosure_mime, duration_sec, published_at, source)
-             VALUES (?1, ?2, ?3, ?15, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                feed_id,
-                a.guid,
-                a.url,
-                a.title,
-                a.author,
-                a.summary,
-                a.content_html,
-                a.body_text,
-                a.image_url,
-                a.enclosure_url,
-                a.enclosure_mime,
-                a.duration_sec,
-                a.published_at,
-                a.source,
-                a.url.as_deref().map(normalize_url)
-            ],
-        )?;
-        Ok((conn.last_insert_rowid(), true))
+        insert_new_article(conn, feed_id, a)
     }
+}
+
+/// 插入新文章（upsert_article_with_feed 的兜底路径）。
+fn insert_new_article(conn: &Connection, feed_id: i64, a: &NewArticle) -> AppResult<(i64, bool)> {
+    conn.execute(
+        "INSERT INTO articles
+            (feed_id, guid, url, url_norm, title, author, summary, content_html, body_text, image_url,
+             enclosure_url, enclosure_mime, duration_sec, published_at, source)
+         VALUES (?1, ?2, ?3, ?15, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            feed_id,
+            a.guid,
+            a.url,
+            a.title,
+            a.author,
+            a.summary,
+            a.content_html,
+            a.body_text,
+            a.image_url,
+            a.enclosure_url,
+            a.enclosure_mime,
+            a.duration_sec,
+            a.published_at,
+            a.source,
+            a.url.as_deref().map(normalize_url)
+        ],
+    )?;
+    Ok((conn.last_insert_rowid(), true))
 }
 
 pub fn set_read(conn: &Connection, id: i64, read: bool) -> AppResult<()> {
@@ -1100,18 +1258,22 @@ pub fn mark_all_read(
     Ok(n)
 }
 
-/// 条目计数（侧边栏角标）：按 feed/分类聚合，含未读/收藏细分
+/// 条目计数（侧边栏角标）：按 feed 聚合，含未读/收藏/今日细分。
+/// 前端据此聚合分类/视图的精确计数——不依赖文章列表的分页 limit，
+/// 保证数字准确（「全部/未读数字被 limit 截断」的根因修复）。
 #[derive(Debug, Serialize)]
 pub struct FeedCounts {
     pub feed_id: i64,
     pub total: i64,
     pub unread: i64,
     pub starred: i64,
+    pub today: i64,
 }
 
 pub fn feed_counts(conn: &Connection) -> AppResult<Vec<FeedCounts>> {
     let mut stmt = conn.prepare(
-        "SELECT feed_id, COUNT(*), SUM(is_read = 0), SUM(is_starred = 1)
+        "SELECT feed_id, COUNT(*), SUM(is_read = 0), SUM(is_starred = 1),
+                SUM(date(published_at) = date('now', 'localtime'))
          FROM articles GROUP BY feed_id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1120,6 +1282,7 @@ pub fn feed_counts(conn: &Connection) -> AppResult<Vec<FeedCounts>> {
             total: r.get(1)?,
             unread: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
             starred: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            today: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -1254,6 +1417,105 @@ pub fn article_by_miniflux_id(conn: &Connection, miniflux_id: i64) -> AppResult<
         )
         .optional()?;
     Ok(id)
+}
+
+/* ============================================================
+   Pull 合并的批量预取映射 —— 消除 N+1
+
+   同步对账（pull_entries）里，对每个远端 entry 逐条调用
+   article_id_by_url / article_by_miniflux_id / article_matches_remote_feed /
+   article_has_pending_sync / feed_by_miniflux_id，首次同步上千条 = 数千次
+   SQLite 查询。这里一次性把全部映射查进内存，循环内改为 HashMap/HashSet
+   查找（O(1)），把「数千次查询」压成「5 次批量查询」。
+   ============================================================ */
+
+/// Pull 合并所需的全部匹配映射（一次批量预取，替代循环内逐条查询）。
+pub struct SyncMatchMaps {
+    /// 规范化 URL（url_norm）→ article id（替代 article_id_by_url）
+    pub url_to_id: HashMap<String, i64>,
+    /// article id → miniflux_id（替代 `SELECT miniflux_id FROM articles WHERE id=?`）
+    pub id_to_mf_id: HashMap<i64, Option<i64>>,
+    /// article id → (文章 miniflux_id, 所属 feed 的 miniflux_id)
+    /// （替代 article_matches_remote_feed 的 JOIN 查询）
+    pub id_to_mf_pair: HashMap<i64, (Option<i64>, Option<i64>)>,
+    /// 有「已入队未推送」读/收藏变更的 article id 集合（替代 article_has_pending_sync）
+    pub pending_ids: HashSet<i64>,
+    /// feed miniflux_id → feed id（替代 feed_by_miniflux_id）
+    pub feed_mf_to_id: HashMap<i64, i64>,
+    /// article miniflux_id → article id（替代 article_by_miniflux_id）
+    pub mf_id_to_article: HashMap<i64, i64>,
+}
+
+/// 一次批量查询构建 Pull 合并所需的全部匹配映射。
+pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
+    // 1. url_norm → id
+    let mut url_to_id = HashMap::new();
+    {
+        // ORDER BY id：与 article_id_by_url 的 ORDER BY id LIMIT 1 同口径——
+        // 同 URL 多篇时保留 id 最小者（or_insert 保留首见，首见即最小 id）
+        let mut stmt = conn.prepare("SELECT url_norm, id FROM articles WHERE url_norm IS NOT NULL ORDER BY id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (url_norm, id) = row?;
+            url_to_id.entry(url_norm).or_insert(id);
+        }
+    }
+
+    // 2. id → miniflux_id（含 None 的也要，用 Option 区分「未绑定」与「不存在」）
+    let mut id_to_mf_id: HashMap<i64, Option<i64>> = HashMap::new();
+    // 3. id → (文章 mf_id, feed mf_id)
+    let mut id_to_mf_pair: HashMap<i64, (Option<i64>, Option<i64>)> = HashMap::new();
+    // 6. mf_id → article id（仅已绑定的）
+    let mut mf_id_to_article: HashMap<i64, i64> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT a.id, a.miniflux_id, f.miniflux_id FROM articles a
+             JOIN feeds f ON f.id = a.feed_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?))
+        })?;
+        for row in rows {
+            let (id, mf_id, feed_mf_id) = row?;
+            id_to_mf_id.insert(id, mf_id);
+            id_to_mf_pair.insert(id, (mf_id, feed_mf_id));
+            if let Some(mf) = mf_id {
+                mf_id_to_article.insert(mf, id);
+            }
+        }
+    }
+
+    // 4. pending sync 的 article id 集合
+    let mut pending_ids = HashSet::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT article_id FROM sync_queue WHERE action IN ('read','unread','star','unstar')",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        for row in rows {
+            pending_ids.insert(row?);
+        }
+    }
+
+    // 5. feed mf_id → feed id
+    let mut feed_mf_to_id = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT miniflux_id, id FROM feeds WHERE miniflux_id IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows {
+            let (mf_id, id) = row?;
+            feed_mf_to_id.insert(mf_id, id);
+        }
+    }
+
+    Ok(SyncMatchMaps {
+        url_to_id,
+        id_to_mf_id,
+        id_to_mf_pair,
+        pending_ids,
+        feed_mf_to_id,
+        mf_id_to_article,
+    })
 }
 
 /// URL 兜底匹配的安全校验：本地文章（aid）与远端 entry（mf_entry_id 所属
@@ -1599,5 +1861,56 @@ mod dedup_tests {
         // 精确匹配（旧函数）对这种情况会漏判——保持旧函数不变，仅新函数规范化
         let exact = feed_id_by_url(&conn, "http://example.com/feed").unwrap();
         assert!(exact.is_none(), "精确匹配对规范化差异应返回 None（这正是修复前漏判的根因）");
+    }
+
+    /// article_index 与 list_articles 位置对齐：某篇文章的绝对位置 = list_articles
+    /// 用该 offset 拉取时的第一条。验证双向分页锚定（搜索/深层打开文章）的正确性。
+    #[test]
+    fn article_index_positions_align_with_list() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://x.example/f", None, "f", None, f, "inherit", true, false).unwrap();
+
+        // 插入 5 篇，published_at 递增（最新在最前，newest_first=true）
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            let mut a = new_article(&format!("https://n.example/{i}"), &format!("g{i}"));
+            a.published_at = Some(format!("2026-01-0{}T00:00:00Z", i + 1));
+            let (id, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+            ids.push(id);
+        }
+
+        let q = ArticleQuery {
+            feed_id: Some(feed),
+            folder_id: None,
+            only_unread: false,
+            only_starred: false,
+            only_today: false,
+            newest_first: true,
+            limit: 500,
+            offset: 0,
+            with_content: false,
+        };
+
+        // 全量列表顺序：最新（i=4）在最前
+        let all = list_articles(&conn, &q).unwrap();
+        assert_eq!(all.len(), 5);
+        // 位置 0 = i=4（最新），位置 4 = i=0（最旧）
+        assert_eq!(all[0].id, ids[4], "newest first: ids[4] at pos 0");
+        assert_eq!(all[4].id, ids[0], "newest first: ids[0] at pos 4");
+
+        // 每篇的 article_index 应与它在列表中的位置一致
+        for (pos, row) in all.iter().enumerate() {
+            let idx = article_index(&conn, &q, row.id).unwrap();
+            assert_eq!(idx, Some(pos as i64), "article {} should be at pos {}", row.id, pos);
+        }
+
+        // 从某个 offset 拉取，第一条应是 article_index 等于该 offset 的文章
+        let target = all[2].id; // 位置 2 的文章
+        let idx = article_index(&conn, &q, target).unwrap().unwrap();
+        assert_eq!(idx, 2);
+        let page = list_articles(&conn, &ArticleQuery { offset: idx, ..q.clone() }).unwrap();
+        assert_eq!(page[0].id, target, "offset={} 的第一条应是目标文章", idx);
     }
 }

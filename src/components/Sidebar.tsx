@@ -110,7 +110,7 @@ export function Sidebar() {
         ))}
 
         {/* Section 2: 内容布局 */}
-        <div className="nav-section-title" style={{ marginTop: 10 }}>内容布局</div>
+        <div className="nav-section-title" style={{ marginTop: 6 }}>内容布局</div>
         {LAYOUT_ITEMS.map((l) => (
           <button
             key={l.id}
@@ -123,7 +123,7 @@ export function Sidebar() {
         ))}
 
         {/* Section 3: 订阅源工具栏 */}
-        <div className="nav-section-title" style={{ marginTop: 10 }}>
+        <div className="nav-section-title" style={{ marginTop: 6 }}>
           <span>订阅源</span>
           <div className="feed-header-actions">
             <button className="icon-sub-btn" onClick={toggleAllFolders} title="展开/收起全部">

@@ -236,7 +236,9 @@ pub fn run() {
             commands::set_feed_ai_flags,
             // 条目
             commands::list_articles,
+            commands::article_index,
             commands::get_article,
+            commands::get_articles,
             commands::search_articles,
             commands::set_read,
             commands::set_starred,

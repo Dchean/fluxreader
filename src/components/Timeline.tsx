@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useShallow } from 'zustand/react/shallow';
 import {
   useAppStore,
@@ -24,9 +25,6 @@ import type { ArticleEntry } from '../types';
    时间为相对时间（由 publishedAt 派生，每分钟自然刷新）。
    ============================================================ */
 
-/** 滚动容器 ref 上挂的已注册卡片 Map（id → element） */
-type RegisteredCards = Map<string, HTMLElement>;
-
 export function Timeline() {
   const activeContentLayout = useAppStore((s) => s.activeContentLayout);
   const activeViewFilter = useAppStore((s) => s.activeViewFilter);
@@ -38,11 +36,18 @@ export function Timeline() {
   const toggleTimelineFilter = useAppStore((s) => s.toggleTimelineFilter);
   const toggleTimelineSort = useAppStore((s) => s.toggleTimelineSort);
   const markCurrentViewAllRead = useAppStore((s) => s.markCurrentViewAllRead);
+  const loadMoreArticles = useAppStore((s) => s.loadMoreArticles);
+  const articlesLoading = useAppStore((s) => s.articlesLoading);
+  const articlesExhausted = useAppStore((s) => s.articlesExhausted);
+  const activeArticleId = useAppStore((s) => s.activeArticleId);
 
   /* 返回新数组的派生 selector 必须包 useShallow */
   const items = useAppStore(useShallow(selectVisibleEntries));
 
-  /* 筛选上下文变化 → CSS 动画通过 key 重放淡入；DOM key 同时驱动滚动归零 */
+  /* 筛选上下文变化 → 滚动归零。不再用 key 重挂载整个列表 DOM（此前每次
+     布局/视图/排序切换都强制卸载重建全部卡片 + 重建全部 IntersectionObserver/
+     ResizeObserver，是「切换卡顿 + 加载正文闪动」的主因）；改为复用 DOM，
+     React 只 diff 列表项，内容切换即时可见。 */
   const filterKey = `${activeContentLayout}|${activeViewFilter}|${activeFeedFilter}|${timelineFilter}|${timelineSort}`;
 
   useEffect(() => {
@@ -51,45 +56,63 @@ export function Timeline() {
 
   /* ---------- 滚动出列表视口 → 标已读（markReadOnScrollOut） ---------- */
   const scrollRef = useRef<HTMLDivElement>(null);
-  const cardRegistry = useRef<RegisteredCards>(new Map());
 
+  /* 虚拟滚动：只渲染视口 + overscan 缓冲内的条目（约 30 条），滚动时复用 DOM，
+     彻底消除「一次性渲染 500 张含正文卡片」的卡顿（成熟 RSS 客户端的共识做法）。 */
+  const rowVirtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 160,
+    overscan: 8,
+    getItemKey: (index) => items[index]?.id ?? index,
+    /* 画廊（瀑布流多列）不虚拟化；其余单列布局虚拟化。 */
+    enabled: activeContentLayout !== 'image',
+  });
+
+  /* markReadOnScrollOut：滚动时，可视区起始 index 递增 → 之间的条目「滚出上方」，
+     批量标已读。用 ref 记录上次可视区起始 index，在 onChange 里比较。 */
+  const lastStartIndexRef = useRef(0);
   useEffect(() => {
-    const container = scrollRef.current;
-    if (!container) return;
     if (!useAppStore.getState().settings.markReadOnScrollOut) return;
-    /* 滚动标已读只在「显示: 未读」筛选下生效：显示全部时列表包含大量已读
-       旧文，滚过就标读会误伤不该重读的历史记录 */
     if (timelineFilter !== 'unread') return;
-    if (items.length === 0) return;
+    const start = rowVirtualizer.range?.startIndex ?? 0;
+    if (start > lastStartIndexRef.current) {
+      const exitedIds: string[] = [];
+      for (let i = lastStartIndexRef.current; i < start && i < items.length; i++) {
+        const it = items[i];
+        if (it && !it.isRead) exitedIds.push(it.id);
+      }
+      if (exitedIds.length > 0) {
+        useAppStore.getState().markEntriesReadBulk(exitedIds);
+      }
+    }
+    lastStartIndexRef.current = start;
+  }, [rowVirtualizer.range?.startIndex, items, timelineFilter]);
 
-    /* rootMargin 只留 10% 上沿裁剪带：卡片完全越过视口上沿才算"滚出"，
-       避免刚挂载时视口内卡片被误标（IntersectionObserver 初次回调即报告相交状态） */
-    const io = new IntersectionObserver(
-      (records) => {
-        const exitedIds: string[] = [];
-        for (const rec of records) {
-          const id = (rec.target as HTMLElement).dataset.cardId;
-          if (!id) continue;
-          const above = rec.boundingClientRect.top < container.getBoundingClientRect().top;
-          if (!rec.isIntersecting && above) {
-            exitedIds.push(id);
-          }
-        }
-        if (exitedIds.length > 0) {
-          useAppStore.getState().markEntriesReadBulk(exitedIds);
-        }
-      },
-      { root: container, threshold: 0, rootMargin: '0px 0px -90% 0px' },
-    );
+  /* 选中文章（搜索/命令面板/J/K 导航）→ 滚动定位到该卡片。虚拟化下卡片
+     可能不在可视区（不渲染），不能用 scrollIntoView；改用 virtualizer 的
+     scrollToIndex。
+     持续定位：动态高度虚拟滚动下，长卡片/图片加载会改变行高，一次性
+     scrollToIndex 在未测量时会定位不准。依赖 totalSize——列表总高度每变化
+     就 re-check，直到目标稳定。align:'auto' 只在目标不完全可见时才滚动，
+     点击可见卡片不会抖动（papr 同款方案）。 */
+  const totalSize = rowVirtualizer.getTotalSize();
+  useEffect(() => {
+    if (!activeArticleId) return;
+    const idx = items.findIndex((a) => a.id === activeArticleId);
+    if (idx < 0) return; // 目标尚未加载进 items（如 anchorToArticle 异步中）——等 totalSize 变化重试
+    rowVirtualizer.scrollToIndex(idx, { align: 'auto' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeArticleId, items, totalSize]);
 
-    for (const el of cardRegistry.current.values()) io.observe(el);
-    return () => io.disconnect();
-  }, [filterKey, items.length, activeContentLayout, timelineFilter]);
-
-  /* 卡片挂载/卸载时维护注册表 */
-  const registerCard = (id: string, el: HTMLElement | null) => {
-    if (el) cardRegistry.current.set(id, el);
-    else cardRegistry.current.delete(id);
+  /* 滚动到底部附近 → 按需加载下一批文章（分页，避免一次性全量拉取）。 */
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // 距底部 600px 内视为"到底"，提前预加载，滚动体验更顺滑
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 600) {
+      void loadMoreArticles();
+    }
   };
 
   /* 标题：布局名 [· 视图筛选] [(分类/源名称)] */
@@ -132,61 +155,85 @@ export function Timeline() {
       </div>
 
       <div
-        className="timeline-scroll-body list-entering"
+        className="timeline-scroll-body"
         id="timelineContentScroll"
-        key={filterKey}
         ref={scrollRef}
+        onScroll={handleScroll}
       >
         {items.length === 0 && (
           <div className="timeline-empty-state">
             {activeViewFilter === 'starred' ? '暂无收藏内容' : activeViewFilter === 'today' ? '今天暂无新内容' : '暂无匹配内容'}
           </div>
         )}
-        {activeContentLayout === 'article' &&
-          items.map((art) => (
-            <div key={art.id} data-card-id={art.id} ref={(el) => registerCard(art.id, el)}>
-              <ArticleCard art={art} onSelect={selectArticle} />
-            </div>
-          ))}
-        {activeContentLayout === 'social' && (
-          <div className="social-feed-wrap">
-            {items.map((s) => (
-              <div key={s.id} data-card-id={s.id} ref={(el) => registerCard(s.id, el)}>
-                <SocialCard item={s} />
-              </div>
-            ))}
-          </div>
-        )}
+
+        {/* 画廊（瀑布流多列）：不虚拟化，保持全量渲染（图片数量通常较少） */}
         {activeContentLayout === 'image' && (
           <div className="gallery-masonry-grid">
             {items.map((img) => (
-              <div key={img.id} data-card-id={img.id} ref={(el) => registerCard(img.id, el)}>
+              <div key={img.id} data-card-id={img.id}>
                 <GalleryCard item={img} />
               </div>
             ))}
           </div>
         )}
-        {activeContentLayout === 'podcast' && (
-          <div className="podcast-feed-wrap">
-            {items.map((p) => (
-              <div key={p.id} data-card-id={p.id} ref={(el) => registerCard(p.id, el)}>
-                <PodcastCard item={p} />
-              </div>
-            ))}
+
+        {/* 其余 4 种单列布局：虚拟滚动，只渲染视口 + overscan 内的条目 */}
+        {activeContentLayout !== 'image' && items.length > 0 && (
+          <div
+            className={`timeline-virtual-wrap ${activeContentLayout !== 'article' ? 'virtual-narrow' : ''}`}
+            style={{ height: rowVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}
+          >
+            {rowVirtualizer.getVirtualItems().map((vi) => {
+              const item = items[vi.index];
+              if (!item) return null;
+              return (
+                <div
+                  key={vi.key}
+                  data-index={vi.index}
+                  ref={rowVirtualizer.measureElement}
+                  className="timeline-virtual-item"
+                  style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
+                >
+                  {activeContentLayout === 'article' && <ArticleCard art={item} onSelect={selectArticle} />}
+                  {activeContentLayout === 'social' && <SocialCard item={item} />}
+                  {activeContentLayout === 'podcast' && <PodcastCard item={item} />}
+                  {activeContentLayout === 'notification' && <NotifCard item={item} />}
+                </div>
+              );
+            })}
           </div>
         )}
-        {activeContentLayout === 'notification' && (
-          <div className="notif-feed-wrap">
-            {items.map((n) => (
-              <div key={n.id} data-card-id={n.id} ref={(el) => registerCard(n.id, el)}>
-                <NotifCard item={n} />
-              </div>
-            ))}
+
+        {/* 分页加载指示：加载中显示动画；到底显示「已到底」；否则占位等待滚动 */}
+        {items.length > 0 && (
+          <div className="timeline-load-more">
+            {articlesLoading ? (
+              <span className="load-more-spinner" aria-label="加载中" />
+            ) : articlesExhausted ? (
+              <span className="load-more-end">— 已到底 —</span>
+            ) : (
+              <span className="load-more-idle">下拉加载更多</span>
+            )}
           </div>
         )}
       </div>
     </section>
   );
+}
+
+/* ---------- 正文懒加载水合 ---------- */
+
+/** 虚拟滚动下，卡片只在进入视口（+overscan 缓冲）时才挂载，挂载即水合正文。
+    不再需要 IntersectionObserver 判断「是否进入视口」——虚拟化本身已保证
+    挂载的卡片就在视口附近。批量队列（store 的 enqueueHydration）会把同一帧
+    内挂载的几十张卡片合并成一次 IPC，避免逐篇洪峰。 */
+function useLazyHydrate(id: string): React.RefObject<HTMLDivElement | null> {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    /* 挂载即水合（幂等：已有正文则短路） */
+    useAppStore.getState().ensureArticleContent(id);
+  }, [id]);
+  return ref;
 }
 
 /* ---------- 文章卡片 ---------- */
@@ -195,16 +242,9 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect }: { art: ArticleE
   const activeArticleId = useAppStore((s) => s.activeArticleId);
   const feedName = useAppStore((s) => s.feedIndex.get(art.feedId)?.feed.name ?? '');
   const selected = activeArticleId === art.id;
-  const cardRef = useRef<HTMLDivElement>(null);
-
-  /* 从搜索/命令面板选中（范围切换后首次渲染）→ 滚动定位到该卡片 */
-  useEffect(() => {
-    if (selected) cardRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  }, [selected, art.id]);
 
   return (
     <div
-      ref={cardRef}
       className={`article-card ${art.isRead ? 'read' : ''} ${selected ? 'active-selected' : ''}`}
       onClick={() => onSelect(art.id)}
     >
@@ -238,10 +278,9 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   const showToast = useAppStore((s) => s.showToast);
   const binding = useAppStore((s) => s.feedIndex.get(item.feedId));
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
-  /* 社交卡片正文直接渲染 item.content：挂载时懒加载水合（列表快照不含 HTML） */
-  useEffect(() => {
-    useAppStore.getState().ensureArticleContent(item.id);
-  }, [item.id]);
+  /* 社交卡片正文直接渲染 item.content：进入视口附近才懒加载水合（避免几百张
+     卡片同时 getArticle 卡顿） */
+  const hydrateRef = useLazyHydrate(item.id);
   /* 派生值提取为局部变量：JSX 表达式内不放可选链（oxc 解析限制，且更易读） */
   const feedName = binding ? binding.feed.name : '';
   /* 三态：null=跟随 feed 配置，true=手动展开，false=手动收起 */
@@ -277,7 +316,7 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   }, [item.content]);
 
   return (
-    <div className={`social-card ${item.isRead ? 'read' : ''}`}>
+    <div ref={hydrateRef} className={`social-card ${item.isRead ? 'read' : ''}`}>
       <div className="social-avatar">{feedName.charAt(0) || '?'}</div>
       <div className="social-body">
         {/* 标题：社交布局此前漏显示——正文太长时一眼无法辨识内容主题 */}
@@ -295,7 +334,7 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
         >
           {item.content
             ? <div dangerouslySetInnerHTML={{ __html: item.content }} />
-            : <span style={{ opacity: 0.45 }}>加载正文…</span>}
+            : <span className="hydrate-placeholder" style={{ opacity: 0.45 }}>加载正文…</span>}
         </div>
         {isLong && (
           <button className="notif-expand-btn social-expand-btn" onClick={() => setExpanded(!expanded)}>
@@ -435,11 +474,9 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const [expanded, setExpanded] = useState(false);
-  /* 挂载即水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
+  /* 进入视口附近才水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
      「展开更多」必须展示全文而非同一段截断文本 */
-  useEffect(() => {
-    useAppStore.getState().ensureArticleContent(item.id);
-  }, [item.id]);
+  const hydrateRef = useLazyHydrate(item.id);
   /* 展示文本：展开态优先水合全文（剥 HTML 标签），未水合/收起态用 snippet */
   const fullText = item.content
     ? item.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
@@ -453,7 +490,7 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
   const isLong = (fullText || item.snippet || '').length > 120;
 
   return (
-    <div className={`notif-card ${item.isRead ? 'read' : ''}`}>
+    <div ref={hydrateRef} className={`notif-card ${item.isRead ? 'read' : ''}`}>
       <div className="notif-card-header-row">
         <div className="notif-title">{item.title}</div>
         <div className="notif-top-actions">

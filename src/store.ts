@@ -181,13 +181,18 @@ export interface AppState {
 
   /* ---------- 数据（Tauri 环境 = SQLite 快照；浏览器环境 = 演示数据） ---------- */
   categories: CategoryGroup[];
-  /** 全部条目的单一扁平集合。条目的内容布局由
-      「订阅源布局绑定 → 分类布局」在查询时动态解析（selectRawEntries），
-      修改绑定后条目即时跟随，无需数据迁移。 */
+  /** 当前视图下应展示的条目完整集合。「全部」视图 = 分页快照（最新 N 篇 +
+      滚动加载）；收藏/未读/今天视图 = 切换时按后端筛选拉取完整列表替换。
+      条目的内容布局由「订阅源布局绑定 → 分类布局」在查询时动态解析。 */
   entries: ArticleEntry[];
 
   /** feedId → feed 引用的解析表（派生 selector 的公共底座） */
   feedIndex: Map<string, { feed: FeedItem; cat: CategoryGroup }>;
+
+  /** 后端聚合的精确计数（feedId → total/unread/starred/today）。
+      侧边栏角标用——不受文章列表分页 limit 影响，保证数字准确。
+      （「全部/未读数字被 limit 截断」的根因修复） */
+  feedCounts: Map<string, { total: number; unread: number; starred: number; today: number }>;
 
   /* ---------- 播客播放器 ---------- */
   player: PodcastPlayerState;
@@ -231,6 +236,22 @@ export interface AppState {
   dataLoading: boolean;
   bootstrapFromBackend: () => Promise<void>;
   reloadFromBackend: () => Promise<void>;
+  /** 已从后端加载的文章数（分页游标：reload 重置为 PAGE_SIZE，loadMore 累加）。
+      避免一次性全量拉取，滚动到底部按需追加，提高同步后重载速度。 */
+  articlesLimit: number;
+  /** 正在加载下一批文章（列表底部加载动画） */
+  articlesLoading: boolean;
+  /** 已加载完所有文章（列表底部显示「到底了」） */
+  articlesExhausted: boolean;
+  /** 滚动到底部时按需拉取下一批文章（追加到 entries）。 */
+  loadMoreArticles: () => Promise<void>;
+  /** 切换视图到收藏/未读/今天时，按后端筛选拉取完整列表并替换 entries。
+      这些视图需要完整数据，而「全部」视图的 entries 是分页快照。 */
+  reloadFilteredEntries: (view: ViewFilterType) => Promise<void>;
+  /** 搜索/深层打开文章：计算目标文章在当前筛选下的绝对位置，从该页加载列表
+      （而非从头拉 500 篇），并选中该文章。解决「搜索结果是很老的文章时，
+      列表还停在第 1 页、定位不到」的问题。 */
+  anchorToArticle: (articleId: string) => Promise<void>;
 
   /* ---------- 设置 ---------- */
   settings: SettingsState;
@@ -262,7 +283,9 @@ export interface AppState {
   /** 滚动触发的批量已读（滚出列表/正文到底）：静默、只标未读项 */
   markEntriesReadBulk: (ids: string[]) => void;
   /** 正文懒加载水合（选中文章 / 社交卡片挂载） */
-  ensureArticleContent: (id: string) => void;
+  ensureArticleContent: (id: string, opts?: { extractFulltext?: boolean }) => void;
+  /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰） */
+  hydrateArticleContent: (ids: string[]) => void;
   /** 手动全文提取（工具栏按钮；已提取时为刷新全文） */
   extractCurrentArticle: () => void;
 
@@ -338,6 +361,28 @@ let toastId = 0;
 /** reloadFromBackend 代际计数：并发 reload 只接受最新一次结果 */
 let reloadGeneration = 0;
 
+/** 文章列表分页大小：首批/每次滚动加载拉取的文章数 */
+const ARTICLES_PAGE_SIZE = 500;
+
+/** 视图切换缓存：key = 「布局 × 视图」→ 该视图最近一次拉取的 entries 快照。
+    用途：视图切换（尤其「收藏19 ↔ 全部2122」这类数量悬殊的切换）不再每次
+    重新从后端拉取 + 一次性渲染数百张卡片（卡顿根因），而是先同步恢复缓存
+    零延迟显示，再后台异步刷新。模块级（非 store 状态）避免触发重渲染。 */
+const viewEntriesCache = new Map<string, ArticleEntry[]>();
+
+/** 视图缓存 key：布局 × 视图（订阅范围 'all' 单独缓存；具体 feed/分类范围不缓存——
+    范围切换频繁且数据量小，直接拉取更快，避免缓存膨胀） */
+function viewCacheKey(layout: ContentLayoutType, view: ViewFilterType): string {
+  return `${layout}|${view}`;
+}
+
+/** 判断列表查询是否附带正文。虚拟滚动下仅视口约 30 条需要正文，由
+    useLazyHydrate 按需批量水合（1 次 IPC）即可；列表查询保持轻量（不含
+    正文 HTML），避免每页 500 条背 2-3MB 正文（「列表背正文」是滚动卡顿主因）。 */
+function layoutNeedsBody(_layout: ContentLayoutType): boolean {
+  return false;
+}
+
 /** 由 categories 构建 feedId → { feed, cat } 解析表（每次 categories 变更后重建） */
 function buildFeedIndex(categories: CategoryGroup[]) {
   const map = new Map<string, { feed: FeedItem; cat: CategoryGroup }>();
@@ -356,6 +401,30 @@ function reconcileCategories(
   const entries = s.entries.filter((e) => index.has(e.feedId));
   return { categories: nextCategories, feedIndex: index, entries };
 }
+
+/* ============================================================
+   正文水合批量队列 —— 首屏/布局切换时几十张可见卡片同帧触发 ensureArticleContent，
+   逐篇 getArticle（各一次 IPC + 各一次 set + 全量 selector 重算）是「加载正文
+   几秒 + 切换卡顿」的根因。这里把同一帧内的请求合批：微任务 flush 成一次
+   get_articles IPC + 一次 set。 */
+let hydrationQueue: Set<string> | null = null;
+let hydrationFlushScheduled = false;
+
+function enqueueHydration(id: string) {
+  if (!hydrationQueue) hydrationQueue = new Set();
+  hydrationQueue.add(id);
+  if (hydrationFlushScheduled) return;
+  hydrationFlushScheduled = true;
+  /* 微任务：等当前同步帧内所有卡片都入队后一次性 flush */
+  Promise.resolve().then(() => {
+    hydrationFlushScheduled = false;
+    const q = hydrationQueue;
+    hydrationQueue = null;
+    if (!q || q.size === 0) return;
+    useAppStore.getState().hydrateArticleContent(Array.from(q));
+  });
+}
+
 
 export const useAppStore = create<AppState>((set, get) => ({
   activeContentLayout: 'article',
@@ -379,6 +448,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   categories: [],
   entries: [],
   feedIndex: new Map(),
+  feedCounts: new Map(),
 
   player: { isActive: false, isPlaying: false, speed: 1.0, title: '', showName: '', cover: '', audioUrl: '', positionSec: 0, durationSec: 0, seekToSec: null },
   playerExpanded: false,
@@ -408,6 +478,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   /* mock 数据先行渲染；Tauri 环境启动时 bootstrapFromBackend 会整体替换 */
   dataMode: 'mock',
   dataLoading: true,
+  articlesLimit: 0,
+  articlesLoading: false,
+  articlesExhausted: false,
 
   settings: {
     autoRefresh: true,
@@ -437,7 +510,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   /* ================= 导航 ================= */
 
-  selectLayout: (layout) =>
+  selectLayout: (layout) => {
     set({
       activeContentLayout: layout,
       activeFeedFilter: 'all',
@@ -448,9 +521,31 @@ export const useAppStore = create<AppState>((set, get) => ({
       showFulltext: false,
       /* 切换布局 = 刷新列表，清除"已读保留"快照 */
       openedReadIds: {},
-    }),
+    });
+    /* 不触发 reload：entries 已统一附带正文（with_content 全量），布局切换是
+       纯本地过滤（selectVisibleEntries 按新布局 resolve feed 布局），内容立即
+       可见、零延迟。之前在此触发 reload 会在切换瞬间显示旧布局的空 content
+       条目（「加载正文」闪动）+ 异步等待，是「切换卡顿/不直接查看」的根因。 */
+  },
 
-  selectView: (view) => set({ activeViewFilter: view, openedReadIds: {} }),
+  selectView: (view) => {
+    /* 视图缓存优先：命中则同步恢复该视图上次的 entries（零延迟、无渲染卡顿），
+       再后台异步刷新保证数据最新。数量悬殊切换（收藏19 ↔ 全部2122）不再经历
+       「清空 → 拉取 → 一次性渲染数百张卡片」的卡顿。 */
+    const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view));
+    if (cached) {
+      set({ activeViewFilter: view, openedReadIds: {}, entries: cached, articlesLimit: cached.length, articlesExhausted: view !== 'all' });
+      /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
+      if (view !== 'all') void get().reloadFilteredEntries(view);
+      else void get().reloadFromBackend();
+      return;
+    }
+    set({ activeViewFilter: view, openedReadIds: {} });
+    // 非「全部」视图：按后端筛选拉取完整列表替换 entries（收藏/未读的老文章
+    // 不在「全部」的分页快照里）；「全部」视图：恢复分页快照。
+    if (view !== 'all') void get().reloadFilteredEntries(view);
+    else void get().reloadFromBackend();
+  },
 
   selectFeed: (feedId) => set({ activeFeedFilter: feedId, openedReadIds: {} }),
 
@@ -477,10 +572,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       const folderId = scope.startsWith('cat-') ? numericId(scope) : null;
       void api.markAllRead(feedId, folderId);
     }
-    set((s) => ({
-      entries: s.entries.map((e) => (ids.has(e.id) ? { ...e, isRead: true } : e)),
-      openedReadIds: {},
-    }));
+    markEntriesRead(ids);
+    set({ openedReadIds: {} });
     get().showToast('已将当前筛选的所有内容标记为已读');
   },
 
@@ -490,76 +583,132 @@ export const useAppStore = create<AppState>((set, get) => ({
     const { entries, settings, dataMode } = get();
     const art = entries.find((a) => a.id === id);
     if (!art) return;
-    if (dataMode === 'tauri' && settings.markReadOnOpen && !art.isRead) {
+    const shouldMarkRead = dataMode === 'tauri' && settings.markReadOnOpen && !art.isRead;
+    if (shouldMarkRead) {
       /* 后端模式：已读落库（不重载快照，本地同步置位即可） */
       void api.setRead(Number(id), true);
+      markEntriesRead(new Set([id]));
     }
     set((s) => ({
       /* 记录"本次会话中被打开过"：即使标已读，在未读筛选下也保留显示（原地变灰） */
       openedReadIds: { ...s.openedReadIds, [id]: true },
-      entries:
-        settings.markReadOnOpen && !art.isRead
-          ? s.entries.map((a) => (a.id === id ? { ...a, isRead: true } : a))
-          : s.entries,
       activeArticleId: id,
       isShowingTranslatedProse: false,
       isRawRenderMode: false,
       showFulltext: false,
     }));
-    get().ensureArticleContent(id);
+    /* 打开文章：触发「智能全文」判定（摘要型源才提取原文；列表卡片水合不触发） */
+    get().ensureArticleContent(id, { extractFulltext: true });
   },
 
   /** 正文懒加载（幂等）：列表快照不含 HTML，选中/社交卡片挂载时拉详情水合。
-      守卫用「条目仍在且仍未水合」（不依赖 activeArticleId：社交卡片挂载时也走这里）。 */
-  ensureArticleContent: (id) => {
+      守卫用「条目仍在」（不依赖 activeArticleId：社交卡片挂载时也走这里）。
+      实现：并入批量水合队列（微任务合批）——首屏几十张可见卡片同帧触发时，
+      合并成一次 get_articles IPC + 一次 set，避免逐篇 IPC 洪峰与逐篇 O(n) 重渲染。
+      注意：extractFulltext（打开文章的智能全文）即使 content 已水合也须执行——
+      列表卡片批量水合只填 content，不触发智能全文判定；打开文章时若 content
+      已在（列表水合过），仍要走 extractFulltext 分支。 */
+  ensureArticleContent: (id, opts) => {
     const { dataMode, entries } = get();
     if (dataMode !== 'tauri') return;
     const art = entries.find((a) => a.id === id);
-    if (!art || art.content) return;
-    void api.getArticle(Number(id)).then((row) => {
-      if (!row) return;
-      const cur = get().entries.find((a) => a.id === id);
-      if (!cur || cur.content) return;
-      const html = row.content_html ?? '';
-      set((s) => ({
-        entries: s.entries.map((a) =>
-          a.id === id
-            ? {
-                ...a,
-                content: html,
-                rawContent: html,
-                translatedContent: row.translated_content ?? '',
-                /* 详情里的 summary 可能比列表 snippet 更完整（列表是截断的 body_text 兜底） */
-                snippet: row.snippet || a.snippet,
-                aiSummary: row.ai_summary ?? a.aiSummary,
-                /* 原文网页地址（「源网页」「查看原文」外链） */
-                url: row.url ?? a.url,
-                /* 全文提取标志（DB 持久化：按钮状态与设置「自动全文」共用） */
-                fulltextExtracted: row.fulltext_extracted ?? false,
-              }
-            : a,
-        ),
-      }));
-      /* 「智能全文」：识别到正文是摘要（非全文）才触发 Readability 提取，
-         已是全文则跳过（省请求）。判定 = 纯文本长度 + 截断标记（见 shouldExtractFulltext）。 */
-      const mode = get().settings.defaultOpenMode;
-      const alreadyExtracted = row.fulltext_extracted ?? false;
-      if (mode === 'fulltext' && row.url && !alreadyExtracted && shouldExtractFulltext(html)) {
-        void api
-          .extractFulltext(Number(id))
-          .then((full) => {
-            if (!full) return;
-            set((s) => ({
-              entries: s.entries.map((a) => (a.id === id ? { ...a, content: full, fulltextExtracted: true } : a)),
-              showFulltext: true,
-            }));
-          })
-          .catch((e: unknown) => {
-            /* C-3：全文提取失败不再静默——给可重试提示（自动全文路径）。 */
-            const msg = extractError(e);
-            get().showToast(`全文提取失败：${msg}`, { label: '重试', run: () => get().extractCurrentArticle() });
-          });
-      }
+    if (!art) return;
+    if (opts?.extractFulltext) {
+      /* 打开文章：需要完整详情（含 url/fulltext_extracted）+ 智能全文判定。
+         若已水合（列表卡片批量水合过），content 已有，但仍需取详情以判断
+         是否要提取全文——故不因 art.content 短路。 */
+      void api.getArticle(Number(id)).then((row) => {
+        if (!row) return;
+        const cur = get().entries.find((a) => a.id === id);
+        if (!cur) return;
+        const html = row.content_html ?? '';
+        /* 若已有正文（列表水合过）且详情正文相同，跳过重复 set，仅补全可能
+           缺失的 url/fulltext_extracted 等字段；否则正常水合 */
+        if (!cur.content || cur.content !== html) {
+          set((s) => ({
+            entries: s.entries.map((a) =>
+              a.id === id
+                ? {
+                    ...a,
+                    content: html,
+                    rawContent: html,
+                    translatedContent: row.translated_content ?? '',
+                    snippet: row.snippet || a.snippet,
+                    aiSummary: row.ai_summary ?? a.aiSummary,
+                    url: row.url ?? a.url,
+                    fulltextExtracted: row.fulltext_extracted ?? false,
+                  }
+                : a,
+            ),
+          }));
+        } else {
+          /* content 相同：仍补全 url（列表水合可能缺 url） */
+          set((s) => ({
+            entries: s.entries.map((a) =>
+              a.id === id && !a.url && row.url ? { ...a, url: row.url, fulltextExtracted: row.fulltext_extracted ?? false } : a,
+            ),
+          }));
+        }
+        const mode = get().settings.defaultOpenMode;
+        const alreadyExtracted = row.fulltext_extracted ?? false;
+        if (mode === 'fulltext' && row.url && !alreadyExtracted && shouldExtractFulltext(html)) {
+          void api
+            .extractFulltext(Number(id))
+            .then((full) => {
+              if (!full) return;
+              set((s) => ({
+                entries: s.entries.map((a) => (a.id === id ? { ...a, content: full, fulltextExtracted: true } : a)),
+                showFulltext: true,
+              }));
+            })
+            .catch((e: unknown) => {
+              const msg = extractError(e);
+              get().showToast(`全文提取失败：${msg}`, { label: '重试', run: () => get().extractCurrentArticle() });
+            });
+        }
+      });
+      return;
+    }
+    /* 列表卡片（社交/通知）水合：已水合则短路，否则并入批量队列 */
+    if (art.content) return;
+    enqueueHydration(id);
+  },
+
+  /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰）。 */
+  hydrateArticleContent: (ids) => {
+    if (get().dataMode !== 'tauri') return;
+    /* 过滤出「仍存在且未水合」的 id（幂等 + 去重） */
+    const pending = ids.filter((id) => {
+      const a = get().entries.find((e) => e.id === id);
+      return a && !a.content;
+    });
+    if (pending.length === 0) return;
+    void api.getArticles(pending.map(Number)).then((rows) => {
+      if (!rows || rows.length === 0) return;
+      /* 构建 id → 详情 映射，一次性合并进 entries（单次 map，单次 set） */
+      const byId = new Map(rows.map((r) => [String(r.id), r]));
+      set((s) => {
+        let changed = false;
+        const entries = s.entries.map((a) => {
+          if (a.content) return a;
+          const row = byId.get(a.id);
+          if (!row) return a;
+          changed = true;
+          const html = row.content_html ?? '';
+          return {
+            ...a,
+            content: html,
+            rawContent: html,
+            translatedContent: row.translated_content ?? '',
+            snippet: row.snippet || a.snippet,
+            aiSummary: row.ai_summary ?? a.aiSummary,
+            url: row.url ?? a.url,
+            fulltextExtracted: row.fulltext_extracted ?? false,
+          };
+        });
+        if (changed) syncCurrentViewCache(entries);
+        return changed ? { entries } : s;
+      });
     });
   },
 
@@ -619,9 +768,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const art = entries.find((a) => a.id === activeArticleId);
     if (!art) return;
     if (dataMode === 'tauri') void api.setRead(Number(activeArticleId), !art.isRead);
-    set((s) => ({
-      entries: s.entries.map((a) => (a.id === activeArticleId ? { ...a, isRead: !a.isRead } : a)),
-    }));
+    flipEntryFlag(activeArticleId, 'isRead');
     get().showToast(art.isRead ? '已标记为未读' : '已标记为已读');
   },
 
@@ -631,9 +778,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const art = entries.find((a) => a.id === activeArticleId);
     if (!art) return;
     if (dataMode === 'tauri') void api.setStarred(Number(activeArticleId), !art.isStarred);
-    set((s) => ({
-      entries: s.entries.map((a) => (a.id === activeArticleId ? { ...a, isStarred: !a.isStarred } : a)),
-    }));
+    flipEntryFlag(activeArticleId, 'isStarred');
   },
 
   toggleReaderRenderMode: () => set((s) => ({ isRawRenderMode: !s.isRawRenderMode })),
@@ -733,8 +878,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       for (const id of unread) void api.setRead(Number(id), true);
     }
     const marked = new Set(unread);
+    markEntriesRead(marked);
     set((s) => ({
-      entries: s.entries.map((e) => (marked.has(e.id) ? { ...e, isRead: true } : e)),
       /* 标读的卡片原地变灰保留（未读筛选下不消失）——合并而非替换：
          批量标读（滚动/全部已读）不能抹掉之前"打开过"的保留记录，
          否则那些卡片会在未读筛选下突然消失（体验为"已读的直接隐藏"）；
@@ -813,9 +958,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         else void api.setStarred(Number(id), !cur.isStarred);
       }
     }
-    set((s) => ({
-      entries: s.entries.map((e) => (e.id === id ? { ...e, [field]: !e[field] } : e)),
-    }));
+    flipEntryFlag(id, field);
   },
 
   /* ================= 播客 ================= */
@@ -938,18 +1081,33 @@ export const useAppStore = create<AppState>((set, get) => ({
       同时触发 reload 时，旧快照不会覆盖新快照（布局显示回退的根因）。 */
   reloadFromBackend: async () => {
     const gen = ++reloadGeneration;
-    const [folders, feeds, articles] = await Promise.all([
+    const layout = get().activeContentLayout;
+    const [folders, feeds, articles, counts] = await Promise.all([
       api.listFolders(),
       api.listFeeds(),
-      api.listArticles({ limit: 3000 }),
+      api.listArticles({ limit: ARTICLES_PAGE_SIZE, offset: 0, newest_first: true, with_content: layoutNeedsBody(layout) }),
+      api.feedCounts(),
     ]);
     if (gen !== reloadGeneration) return; // 已有更新的 reload 在途/完成
     if (!folders || !feeds || articles === null) return;
 
     const categories = folderRowsToCategories(folders, feeds);
+    const feedCounts = new Map<string, { total: number; unread: number; starred: number; today: number }>();
+    if (counts) {
+      for (const c of counts) {
+        feedCounts.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
+      }
+    }
+    const nextEntries = articles.map(articleRowToEntry);
+    // 缓存「全部」视图快照：切回时零延迟恢复（视图切换卡顿的根治）
+    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, 'all'), nextEntries);
     set((s) => ({
       ...reconcileCategories(s, categories),
-      entries: articles.map(articleRowToEntry),
+      entries: nextEntries,
+      feedCounts,
+      articlesLimit: ARTICLES_PAGE_SIZE,
+      articlesLoading: false,
+      articlesExhausted: articles.length < ARTICLES_PAGE_SIZE,
       dataMode: 'tauri',
       dataLoading: false,
     }));
@@ -957,6 +1115,111 @@ export const useAppStore = create<AppState>((set, get) => ({
     void api.syncStatus().then((st) => {
       if (st && gen === reloadGeneration) set({ minifluxConnected: st.connected });
     });
+    // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
+    // （状态/内容可能变化，entries 需同步刷新为筛选结果）
+    const view = get().activeViewFilter;
+    if (view !== 'all') void get().reloadFilteredEntries(view);
+  },
+
+  /** 滚动到底部按需拉取下一批文章（追加到 entries，不覆盖已加载的）。
+      分页游标 articlesLimit 随每次加载累加；若已有更多在途则跳过（防抖）。 */
+  loadMoreArticles: async () => {
+    const st = get();
+    if (st.dataMode !== 'tauri') return;
+    if (st.articlesLoading || st.articlesExhausted) return; // 已在加载 / 已到底
+    const offset = st.articlesLimit;
+    set({ articlesLoading: true });
+    try {
+      const rows = await api.listArticles({ limit: ARTICLES_PAGE_SIZE, offset, newest_first: true, with_content: layoutNeedsBody(get().activeContentLayout) });
+      // 竞态保护：加载期间发生了 reload（游标被重置），丢弃本次追加
+      if (get().articlesLimit !== offset) return;
+      const next = rows ? rows.map(articleRowToEntry) : [];
+      if (next.length < ARTICLES_PAGE_SIZE) {
+        // 不足一页 → 已到底
+        set((s) => ({
+          entries: next.length ? [...s.entries, ...next] : s.entries,
+          articlesLimit: offset + next.length,
+          articlesLoading: false,
+          articlesExhausted: true,
+        }));
+      } else {
+        set((s) => ({
+          entries: [...s.entries, ...next],
+          articlesLimit: offset + next.length,
+          articlesLoading: false,
+        }));
+      }
+    } catch {
+      set({ articlesLoading: false });
+    }
+  },
+
+  /** 切换视图到收藏/未读/今天时，按后端筛选拉取完整列表（不分页）。
+      这些视图的文章数通常远小于「全部」，一次性拉全可接受；且必须拉全——
+      「全部」视图的 entries 是分页快照，收藏/未读的老文章（排在最新 N 篇外）
+      不在其中，否则筛选视图会漏显示（「收藏视图不显示列表」的根因）。 */
+  reloadFilteredEntries: async (view) => {
+    if (get().dataMode !== 'tauri') return;
+    const rows = await api.listArticles({
+      limit: 100000,
+      offset: 0,
+      newest_first: true,
+      only_unread: view === 'unread' ? true : undefined,
+      only_starred: view === 'starred' ? true : undefined,
+      only_today: view === 'today' ? true : undefined,
+      with_content: layoutNeedsBody(get().activeContentLayout),
+    });
+    if (!rows) return;
+    // 竞态保护：拉取期间用户又切了视图，丢弃过期结果
+    if (get().activeViewFilter !== view) return;
+    // 替换 entries（筛选视图的完整列表），重置分页游标（筛选视图不分页）
+    const next = rows.map(articleRowToEntry);
+    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view), next);
+    set({ entries: next, articlesLimit: rows.length, articlesExhausted: true, articlesLoading: false });
+  },
+
+  /** 搜索/深层打开文章：计算目标文章在当前筛选下的绝对位置，从该页加载列表
+      （而非从头拉 500 篇），并选中该文章。解决「搜索结果是很老的文章时，
+      列表还停在第 1 页、定位不到」的问题。
+      注意：article_index 与 list_articles 用同一组筛选参数（where + 排序），
+      保证「位置」与「该位置的列表」对齐。 */
+  anchorToArticle: async (articleId) => {
+    if (get().dataMode !== 'tauri') return;
+    // 递增代际：使先前触发的 reloadFromBackend（如 selectView('all') 触发的）
+    // 结果失效，避免其覆盖本锚定结果（竞态）。
+    const gen = ++reloadGeneration;
+    const st = get();
+    // 映射当前订阅范围 → feed_id / folder_id（与 markCurrentViewAllRead 同口径）
+    const scope = st.activeFeedFilter;
+    const feedId = scope.startsWith('cat-') ? null : scope === 'all' ? null : numericId(scope);
+    const folderId = scope.startsWith('cat-') ? numericId(scope) : null;
+    const args = {
+      feed_id: feedId,
+      folder_id: folderId,
+      newest_first: st.timelineSort === 'newest',
+      limit: ARTICLES_PAGE_SIZE,
+      offset: 0,
+      with_content: layoutNeedsBody(st.activeContentLayout),
+    };
+    const pos = await api.articleIndex(args, Number(articleId));
+    if (gen !== reloadGeneration) return; // 期间又有更新的导航操作
+    if (pos == null) return;
+    // 从目标位置加载一页（若位置靠前，offset 为负会被 SQLite 截断为 0，安全）
+    const offset = Math.max(0, pos);
+    const rows = await api.listArticles({ ...args, offset });
+    if (gen !== reloadGeneration) return;
+    if (!rows) return;
+    const next = rows.map(articleRowToEntry);
+    set({
+      entries: next,
+      articlesLimit: offset + next.length,
+      articlesExhausted: next.length < ARTICLES_PAGE_SIZE,
+      articlesLoading: false,
+      activeArticleId: articleId,
+      openedReadIds: { ...get().openedReadIds, [articleId]: true },
+    });
+    // 打开文章：触发智能全文（与 selectArticle 一致）
+    get().ensureArticleContent(articleId, { extractFulltext: true });
   },
 
   /** 启动装载：Tauri 环境下从 SQLite 拉数据；浏览器开发/后端异常回退 mock。
@@ -994,21 +1257,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   triggerManualSync: () => {
     if (get().dataMode === 'tauri') {
       set({ syncStatus: 'syncing' });
-      /* 分步同步：feeds 阶段（订阅层，快）→ states 阶段（状态+条目，慢，含对账）。
-         未连接 Miniflux → feeds 阶段 notConnected → 走纯直连刷新 */
+      /* 分步同步：feeds（订阅层）→ states（状态对账，只写状态不重拉列表）→
+         refreshAllFeeds（内容抓取）。状态先落库、内容再抓取，最后只 reload 一次
+         带出「最新内容 + 最新状态」，避免多次 reload 造成的列表闪动
+         （「获取内容后再次同步状态导致闪动」的解耦）。 */
       void api
         .syncPhase('feeds')
         .catch(() => null) // 未连接（notConnected）→ 走纯直连刷新
         .then(async (feedsReport) => {
           if (feedsReport) {
-            await get().reloadFromBackend();
             get().showToast('订阅同步完成，正在同步文章状态…');
             return api.syncPhase('states', true);
           }
           return null;
         })
-        .then(async (statesReport) => {
-          if (statesReport) await get().reloadFromBackend();
+        .then(async () => {
+          /* states 阶段已把最新状态落库（is_read/is_starred），不在此 reload——
+             等下方内容抓取完成后一次性 reload，避免「状态同步→闪动→内容→再闪动」 */
           return api.refreshAllFeeds();
         })
         .then((summary: RefreshSummary | null) => get().reloadFromBackend().then(() => summary))
@@ -1104,7 +1369,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         {
           id: 'cat-' + Date.now(),
           name,
-          collapsed: false,
+          collapsed: true,
           settingsCollapsed: false,
           layout,
           autoSummary: false,
@@ -1416,6 +1681,67 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 }));
 
+/** 乐观更新某篇条目的 isRead/isStarred，并同步 feedCounts 的未读/收藏计数。
+    侧边栏数字基于 feedCounts（后端精确计数），若不联动，标读/收藏后角标
+    不立即变化（与乐观更新的列表脱节）。total/today 不受影响。 */
+function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
+  const s = useAppStore.getState();
+  const entry = s.entries.find((e) => e.id === id);
+  if (!entry) return;
+  const nextVal = !entry[field];
+  const entries = s.entries.map((e) => (e.id === id ? { ...e, [field]: nextVal } : e));
+  const c = s.feedCounts.get(entry.feedId);
+  let feedCounts = s.feedCounts;
+  if (c) {
+    const key = field === 'isRead' ? 'unread' : 'starred';
+    const delta = field === 'isRead' ? (nextVal ? -1 : 1) : (nextVal ? 1 : -1);
+    feedCounts = new Map(s.feedCounts);
+    feedCounts.set(entry.feedId, { ...c, [key]: Math.max(0, c[key] + delta) });
+  }
+  useAppStore.setState({ entries, feedCounts });
+  /* 同步当前视图缓存：避免切走再切回时，缓存恢复旧状态（标读/收藏回退闪烁） */
+  syncCurrentViewCache(entries);
+}
+
+/** 把当前 entries 同步进「当前布局 × 当前视图」的缓存。
+    乐观更新（标读/收藏/水合）只改 store.entries，缓存若不联动，切走视图再
+    切回会用旧快照覆盖新状态（正文丢失、标读回退）。 */
+function syncCurrentViewCache(entries: ArticleEntry[]) {
+  const s = useAppStore.getState();
+  viewEntriesCache.set(viewCacheKey(s.activeContentLayout, s.activeViewFilter), entries);
+}
+
+/** 批量标已读：同步 feedCounts 的未读计数（每篇 -1）。
+    高效实现：一次遍历 entries 构建新数组，一次聚合 feedId 的未读减少数，
+    避免循环内多次 Map 复制 / entries.map（「全部已读」几百篇时 O(n²) 卡顿）。 */
+function markEntriesRead(ids: Set<string>) {
+  const s = useAppStore.getState();
+  let entries = s.entries;
+  const unreadDeltas = new Map<string, number>();
+  let changed = false;
+  // 一次遍历：标记 entries + 聚合每个 feed 的未读减少数
+  entries = entries.map((e) => {
+    if (ids.has(e.id) && !e.isRead) {
+      changed = true;
+      unreadDeltas.set(e.feedId, (unreadDeltas.get(e.feedId) ?? 0) + 1);
+      return { ...e, isRead: true };
+    }
+    return e;
+  });
+  if (!changed) return;
+  // 一次更新 feedCounts
+  let feedCounts = s.feedCounts;
+  for (const [feedId, delta] of unreadDeltas) {
+    const c = feedCounts.get(feedId);
+    if (c) {
+      if (feedCounts === s.feedCounts) feedCounts = new Map(s.feedCounts); // 惰性复制
+      feedCounts.set(feedId, { ...c, unread: Math.max(0, c.unread - delta) });
+    }
+  }
+  useAppStore.setState({ entries, feedCounts });
+  syncCurrentViewCache(entries);
+}
+
 /* ============================================================
    Selector 钩子 —— 派生数据在组件层计算，store 保持精简
    ============================================================ */
@@ -1470,8 +1796,31 @@ export function selectScopeEntries(
   return list;
 }
 
-/** 当前视图下应展示的条目（应用视图筛选 + 时间流筛选 + 排序） */
+/** 当前视图下应展示的条目（应用视图筛选 + 时间流筛选 + 排序）。
+    结果按输入引用缓存：同一份 entries/feedIndex/筛选标量下多次调用返回同一数组
+    引用，useShallow 逐元素浅比较直接命中（元素引用相同）→ 跳过整表 diff。
+    水合/标读会产生新的 entries 数组（引用变化），缓存自然失效重算一次——但
+    批量水合已把「每篇一次 set」收敛为「每批一次 set」，重算频率大幅下降。 */
+let visibleEntriesCache: {
+  entries: ArticleEntry[];
+  feedIndex: Map<string, { feed: FeedItem; cat: CategoryGroup }>;
+  openedReadIds: Record<string, boolean>;
+  key: string;
+  result: ArticleEntry[];
+} | null = null;
+
 export function selectVisibleEntries(s: AppState): ArticleEntry[] {
+  const key = `${s.activeContentLayout}|${s.activeFeedFilter}|${s.activeViewFilter}|${s.timelineFilter}|${s.timelineSort}`;
+  if (
+    visibleEntriesCache &&
+    visibleEntriesCache.entries === s.entries &&
+    visibleEntriesCache.feedIndex === s.feedIndex &&
+    visibleEntriesCache.openedReadIds === s.openedReadIds &&
+    visibleEntriesCache.key === key
+  ) {
+    return visibleEntriesCache.result;
+  }
+
   const now = Date.now();
   let list = selectScopeEntries(s);
 
@@ -1479,34 +1828,45 @@ export function selectVisibleEntries(s: AppState): ArticleEntry[] {
   else if (s.activeViewFilter === 'unread') list = list.filter((i) => !i.isRead || s.openedReadIds[i.id]);
   else if (s.activeViewFilter === 'starred') list = list.filter((i) => i.isStarred);
 
-  if (s.timelineFilter === 'unread') list = list.filter((i) => !i.isRead || s.openedReadIds[i.id]);
+  // 「显示: 全部/未读」只在「全部」视图下生效：今天/未读/收藏视图已有各自
+  // 明确的筛选语义，再叠加「显示未读」会把收藏(全已读)、今天等视图误筛成空
+  // （「收藏视图不显示列表」的根因）。
+  if (s.activeViewFilter === 'all' && s.timelineFilter === 'unread') {
+    list = list.filter((i) => !i.isRead || s.openedReadIds[i.id]);
+  }
 
   /* 时间流排序：真实客户端按时间戳降序/升序，不依赖数据插入顺序 */
   list = [...list].sort((a, b) => (s.timelineSort === 'newest' ? b.publishedAt - a.publishedAt : a.publishedAt - b.publishedAt));
+  visibleEntriesCache = { entries: s.entries, feedIndex: s.feedIndex, openedReadIds: s.openedReadIds, key, result: list };
   return list;
 }
 
 /** 侧边栏视图角标计数（跟随当前订阅范围）。
-    口径与列表一致（范围 × 布局）；「全部」固定 = 范围内全部条目数，
-    不受「显示: 全部/未读」收缩——标读/新条目到达时与「未读」同步动态增减；
-    其余 view filter 各自独立计数。 */
+    口径与列表一致（范围 × 布局 × 时间流筛选）；「全部」键受「显示: 全部/未读」
+    （timelineFilter）影响：显示全部时 = 全部文章数，显示未读时 = 未读数；
+    其余 view filter（今天/未读/收藏）各自独立计数。 */
 export function selectViewCounts(
-  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'activeViewFilter' | 'timelineFilter' | 'openedReadIds' | 'entries' | 'feedIndex'>,
+  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts'>,
 ) {
-  const now = Date.now();
-  const scoped = selectScopeEntries(s);
-  const raw = scoped.filter((i) => matchesTimelineFilter(i, s.timelineFilter, s.openedReadIds));
-  return {
-    all: scoped.length,
-    today: raw.filter((i) => isSameLocalDay(i.publishedAt, now)).length,
-    unread: raw.filter((i) => !i.isRead).length,
-    starred: raw.filter((i) => i.isStarred).length,
-  };
-}
-
-/** 时间流筛选（显示: 全部/未读）的判定；未读模式下保留本会话打开过的条目（原地变灰） */
-function matchesTimelineFilter(entry: ArticleEntry, filter: 'all' | 'unread', openedReadIds: Record<string, boolean>): boolean {
-  return filter === 'all' || !entry.isRead || Boolean(openedReadIds[entry.id]);
+  // 用后端精确计数（feedCounts）聚合，而非前端 entries——entries 受分页 limit
+  // 截断，会导致「全部/未读数字不准确」。遍历 feedIndex，按「当前布局 × 订阅范围」
+  // 累加各 feed 的 total/unread/starred/today。
+  let total = 0, today = 0, unread = 0, starred = 0;
+  for (const [feedId, binding] of s.feedIndex) {
+    if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
+    // 订阅范围过滤：'cat-xxx' 只算该分类，单个 feed 只算该 feed
+    if (s.activeFeedFilter.startsWith('cat-') && binding.cat.id !== s.activeFeedFilter) continue;
+    if (s.activeFeedFilter !== 'all' && !s.activeFeedFilter.startsWith('cat-') && feedId !== s.activeFeedFilter) continue;
+    const c = s.feedCounts.get(feedId);
+    if (!c) continue;
+    total += c.total;
+    today += c.today;
+    unread += c.unread;
+    starred += c.starred;
+  }
+  // 「全部」键的数字随「显示: 全部/未读」动态变化
+  const all = s.timelineFilter === 'unread' ? unread : total;
+  return { all, today, unread, starred };
 }
 
 /** 订阅树角标 —— 统一口径：数字 = 该行在「当前布局 × 当前视图」筛选下的条目数。
@@ -1523,20 +1883,29 @@ function numericId(id: string): number {
 }
 
 export function selectTreeCounts(
-  s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'openedReadIds' | 'entries' | 'feedIndex'>,
+  s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts'>,
 ): Map<string, number> {
-  const now = Date.now();
+  // 订阅树角标：数字 = 该行在「当前布局 × 当前视图 × 显示: 全部/未读」筛选下的
+  // 条目数。用后端精确计数聚合（feedCounts），不受文章列表分页 limit 影响。
+  // 口径：timelineFilter（显示: 未读）优先——切到未读时订阅源数字随之变未读，
+  // 与「全部」键动态数字一致；否则按 activeViewFilter（全部→total、未读→unread…）。
   const counts = new Map<string, number>();
-  const bump = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
-  for (const e of s.entries) {
-    const binding = s.feedIndex.get(e.feedId);
-    if (!binding) continue;
+  const bump = (key: string, n: number) => counts.set(key, (counts.get(key) ?? 0) + n);
+  for (const [feedId, binding] of s.feedIndex) {
     if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
-    if (!matchesViewFilter(e, s.activeViewFilter, now)) continue;
-    if (!matchesTimelineFilter(e, s.timelineFilter, s.openedReadIds)) continue;
-    bump(e.feedId);
-    bump(binding.cat.id);
-    bump('all');
+    const c = s.feedCounts.get(feedId);
+    if (!c) continue;
+    // 「显示: 未读」只在「全部」视图生效（与 selectVisibleEntries 同口径），
+    // 其余视图按各自筛选语义。
+    const n = s.activeViewFilter === 'all' && s.timelineFilter === 'unread'
+      ? c.unread
+      : s.activeViewFilter === 'unread' ? c.unread
+      : s.activeViewFilter === 'starred' ? c.starred
+      : s.activeViewFilter === 'today' ? c.today
+      : c.total;
+    bump(feedId, n);
+    bump(binding.cat.id, n);
+    bump('all', n);
   }
   return counts;
 }

@@ -76,7 +76,6 @@ pub async fn refresh_all(
     let concurrency = read_refresh_config(db).await.3;
     refresh_feeds_inner_with_concurrency(db, http, None, concurrency).await
 }
-
 /// 抓取所有到期源（后台调度入口，并发上限 = 设置 fetchConcurrency，默认 4）。
 /// HTTP 在锁外执行（refresh_feed_staged），写库时短暂持锁。
 /// 返回 (新增条数, 失败源数)。
@@ -109,8 +108,14 @@ async fn refresh_feeds_inner_with_concurrency(
                 let include_miniflux = read_sync_mode_conn(&conn) != "hybrid";
                 crate::db::feeds_due_for_refresh(&conn, interval_min, include_miniflux)
             }
-            // 手动全量：始终包含 Miniflux 源
-            None => crate::db::feeds_all_ids(&conn, true),
+            // 手动全量：hybrid（跟随服务端）模式下跳过 origin='miniflux' 源——
+            // 服务端源的内容由 Miniflux 同步提供，直连抓取会产生 source='direct'
+            // 文章与已有的 source='miniflux' 文章重复（guid 不同 + 智能去重默认关），
+            // 导致文章翻倍、状态错乱、未读数对不齐。direct 模式则全部直连（旧行为）。
+            None => {
+                let include_miniflux = read_sync_mode_conn(&conn) != "hybrid";
+                crate::db::feeds_all_ids(&conn, include_miniflux)
+            }
         }
         .unwrap_or_else(|e| {
             log::warn!("scheduler: query feeds failed: {e}");

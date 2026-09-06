@@ -12,6 +12,7 @@
     "test:frontend": "tsc -p tsconfig.test.json && node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.10",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-notification": "^2.4.0",
