@@ -27,14 +27,21 @@
 - prepend（向上加载）时补偿 scrollTop，避免视口跳变
 - 打开文章 `scrollToIndex(align:auto)` + 持续 re-check 直到尺寸稳定
 
-### A. React Query 数据层分离（治本，大改动）
+### A. store 解耦拆分（已执行，替代 React Query 迁移）
 
-**目标**：服务端数据（feeds/articles）从 zustand 迁到 `@tanstack/react-query`，
-zustand 只保留纯 UI 状态，彻底解决 store.ts 臃肿（1872 行 → 目标 <600 行）。
+**原方案（React Query 迁移）评估后放弃**：FluxReader 的 `entries` 混合了服务端快照、
+客户端水合、乐观更新、会话状态，迁到 React Query 需重设计数据流，风险高且单机
+本地 SQLite 无缓存/去重诉求，收益有限。
 
-- 引入 `@tanstack/react-query`
-- feeds/articles/counts 迁到 React Query（缓存、失效、无限分页）
-- zustand 保留：视图选择、外观偏好、播放器、弹层、Toast
+**改为更安全的 store 拆分**（对外 API 不变，`from '../store'` 继续工作）：
+
+- ✅ `src/store/selectors.ts`（191 行）：派生 selector + 常量（CONTENT_LAYOUTS 等）
+- ✅ `src/store/types.ts`（274 行）：类型契约（AppState/PodcastPlayerState/SettingsState 等）
+- ✅ `src/store.ts`（1920 → 1482 行）：核心 action 逻辑，re-export 上述两层
+
+**停在此边界的原因**：剩余 action 深度耦合（`showToast` 被 50 处调用、`reloadFromBackend`
+11 处），继续拆 slice 会引入循环依赖，风险显著而收益边际递减。selector/类型分离
+已实现最有价值的边界划分。
 
 ### 可选（未纳入当前批次）
 
