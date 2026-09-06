@@ -172,11 +172,16 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
         .map(|t| t.content.trim().to_string())
         .filter(|t| !t.is_empty());
 
+    // 发布时间：源未提供 pubDate/updated 时，回退为抓取时间（否则 published_at
+    // 为 NULL，前端 publishedAt=0 显示成 1970-01-01，且「今天」过滤/排序都失准）。
+    // 有真实 guid 的条目去重键不依赖时间，兜底不影响去重。
     let published_at = e
         .published
         .or(e.updated)
         .map(clamp_publish_date)
-        .map(|d| d.to_rfc3339());
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339();
+    let published_at = Some(published_at);
 
     // 去重键优先级：真实 guid → title+日期 → URL
     let guid = if !e.id.trim().is_empty() && e.id != NO_STABLE_ID {

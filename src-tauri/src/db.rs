@@ -196,6 +196,15 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
          WHERE source = 'direct'
            AND url_norm IN (SELECT url_norm FROM articles WHERE source = 'miniflux');
     "#),
+    // 回填缺失发布时间：某些 RSS 源不提供 pubDate/updated（如 kirikira.moe），
+    // 历史入库的 direct 文章 published_at 为 NULL，前端 publishedAt=0 显示成
+    // 1970-01-01、「今天」过滤与排序失准。用 fetched_at（抓取时间）兜底回填，
+    // 与 map_entry 的新抓取兜底逻辑（Utc::now）口径一致。user_version=12。
+    M::up(r#"
+        UPDATE articles
+           SET published_at = fetched_at
+         WHERE published_at IS NULL OR published_at = '';
+    "#),
     ])
 });
 

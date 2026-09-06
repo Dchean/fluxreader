@@ -178,6 +178,7 @@ export const api = {
     layout: string,
     autoSummary: boolean,
     autoTranslate: boolean,
+    syncToMiniflux: boolean,
   ): Promise<FeedRow | null> {
     const inv = await getInvoke();
     return inv
@@ -188,6 +189,7 @@ export const api = {
           layout,
           autoSummary,
           autoTranslate,
+          syncToMiniflux,
         }) as FeedRow)
       : null;
   },
@@ -396,6 +398,27 @@ export const api = {
     const inv = await getInvoke();
     if (!inv) throw new Error('仅 Tauri 客户端可用');
     return (await inv('config_sync_apply', { payload })) as { imported: number; skipped: number };
+  },
+
+  /* 文章状态同步（已读/收藏，GitHub Gist / WebDAV） */
+  async articleStateUpload(): Promise<string> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('article_state_upload')) as string;
+  },
+  async articleStateDownload(): Promise<string> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('article_state_download')) as string;
+  },
+  async articleStateApply(payload: string): Promise<{ matched: number; set_read: number; set_starred: number }> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('article_state_apply', { payload })) as { matched: number; set_read: number; set_starred: number };
+  },
+  async articleStateStatus(): Promise<{ configured: boolean; backend?: string; lastUpload?: string; localCount: number } | null> {
+    const inv = await getInvoke();
+    return inv ? ((await inv('article_state_status')) as { configured: boolean; backend?: string; lastUpload?: string; localCount: number }) : null;
   },
 
   /* ---- GitHub 设备流登录 ---- */

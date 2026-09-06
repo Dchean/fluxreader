@@ -215,6 +215,9 @@ export function Sidebar() {
                       tabIndex={0}
                       onKeyDown={(e) => e.key === 'Enter' && selectFeed(f.id)}
                       title={f.name}
+                      data-ctx="feed"
+                      data-id={f.id}
+                      data-cat={cat.id}
                     >
                       <div className="feed-leaf-name">
                         {f.favicon ? (
@@ -242,7 +245,6 @@ export function Sidebar() {
                         )}
                       </div>
                       <div className="feed-leaf-right">
-                        <span className="feed-count-badge" title="当前视图筛选下的条目数">{treeCounts.get(f.id) ?? 0}</span>
                         <span className="feed-leaf-actions">
                           <button
                             className="feed-row-act-btn"
@@ -265,6 +267,7 @@ export function Sidebar() {
                             <Icons.edit />
                           </button>
                         </span>
+                        <span className="feed-count-badge" title="当前视图筛选下的条目数">{treeCounts.get(f.id) ?? 0}</span>
                       </div>
                     </div>
                   ))}

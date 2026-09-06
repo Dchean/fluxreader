@@ -6,6 +6,7 @@ import { Reader } from './components/Reader';
 import { PlayerBar } from './components/PlayerBar';
 import { SettingsModal } from './components/SettingsModal';
 import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal, CloseAskDialog } from './components/Overlays';
+import { ContextMenuHost } from './components/ContextMenu';
 /* ============================================================
    Application Shell
 
@@ -42,6 +43,8 @@ export default function App() {
   const activeContentLayout = useAppStore((s) => s.activeContentLayout);
   const themeMode = useAppStore((s) => s.settings.themeMode);
   const palette = useAppStore((s) => s.settings.palette);
+  const listWidth = useAppStore((s) => s.settings.listWidth);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const toasts = useAppStore((s) => s.toasts);
   const playerActive = useAppStore((s) => s.player.isActive);
   const dataLoading = useAppStore((s) => s.dataLoading);
@@ -237,6 +240,23 @@ export default function App() {
 
   const gridClass = activeContentLayout === 'article' ? 'layout-3col' : 'layout-2col';
 
+  /* 列表列宽拖动：拖动分隔条调整文章列表列宽（280–560px），松手持久化 */
+  const startDragListWidth = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = listWidth;
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.min(560, Math.max(280, startWidth + (ev.clientX - startX)));
+      updateSettings({ listWidth: Math.round(next) });
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+
   return (
     <>
       {/* 浮动窗口控制（Tauri 无边框窗口的原生控制） */}
@@ -246,7 +266,7 @@ export default function App() {
         <button className="win-btn close" title="关闭" onClick={closeWindow}>✕</button>
       </div>
 
-      <div className={`app-root ${gridClass}`} id="appRoot">
+      <div className={`app-root ${gridClass}`} id="appRoot" style={{ '--list-width': `${listWidth}px` } as React.CSSProperties}>
         {/* 首屏加载骨架：dataLoading 期间不渲染真实 UI（避免空闪/测试数据闪现） */}
         {dataLoading ? (
           <div className="app-loading-splash">
@@ -257,6 +277,9 @@ export default function App() {
           <>
             <Sidebar />
             <Timeline />
+            {activeContentLayout === 'article' && (
+              <div className="reader-resize-handle" onMouseDown={startDragListWidth} title="拖动调整列表宽度" />
+            )}
             <Reader />
           </>
         )}
@@ -273,6 +296,8 @@ export default function App() {
       <EditFeedModal />
       <RenameCategoryModal />
       <CloseAskDialog />
+      {/* 全局右键菜单（替换 WebView2 默认菜单） */}
+      <ContextMenuHost />
 
       {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
           退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。

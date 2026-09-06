@@ -485,14 +485,6 @@ function FeedsTab() {
                   <Icons.plus />
                   <span>添加源</span>
                 </button>
-                <div className="group-mgr-layout-control">
-                  <FluxDropdown
-                    width={96}
-                    value={cat.layout}
-                    onChange={(v) => updateCatLayout(cat.id, v as ContentLayoutType)}
-                    options={LAYOUT_OPTIONS}
-                  />
-                </div>
 
                 <label
                   className="mgr-checkbox-label"
@@ -520,6 +512,15 @@ function FeedsTab() {
                   />
                   翻译
                 </label>
+
+                <div className="group-mgr-layout-control">
+                  <FluxDropdown
+                    width={96}
+                    value={cat.layout}
+                    onChange={(v) => updateCatLayout(cat.id, v as ContentLayoutType)}
+                    options={LAYOUT_OPTIONS}
+                  />
+                </div>
 
                 <button
                   className="toggle-action-btn icon-btn"
@@ -564,15 +565,6 @@ function FeedsTab() {
                       </div>
                     </div>
                     <div className="group-mgr-feed-controls">
-                      <FluxDropdown
-                        width={96}
-                        value={f.layout}
-                        onChange={(v) => updateFeedLayout(cat.id, f.id, v)}
-                        options={[
-                          { value: 'inherit', label: '继承组' },
-                          ...LAYOUT_OPTIONS,
-                        ]}
-                      />
                       <label
                         className="mgr-checkbox-label"
                         title="该源新文章自动生成 AI 摘要"
@@ -599,6 +591,15 @@ function FeedsTab() {
                         />
                         翻译
                       </label>
+                      <FluxDropdown
+                        width={96}
+                        value={f.layout}
+                        onChange={(v) => updateFeedLayout(cat.id, f.id, v)}
+                        options={[
+                          { value: 'inherit', label: '继承组' },
+                          ...LAYOUT_OPTIONS,
+                        ]}
+                      />
                       <button
                         className="toggle-action-btn icon-btn"
                         title="编辑该订阅源（重命名/移动分类/布局/AI 开关）"
@@ -1041,7 +1042,7 @@ function SyncTab() {
       <div className="settings-group-title" style={{ marginTop: 20 }}>自动同步</div>
       <SettingCard
         title="同步模式"
-        desc="决定文章内容从哪里来：本机抓取 = FluxReader 直接访问各订阅源（不依赖服务端，离线可用）；跟随服务端 = 服务端订阅的源由 Miniflux 提供内容，多设备阅读保持完全一致"
+        desc="本机抓取 = 直连各订阅源（离线可用）；跟随服务端 = 内容由 Miniflux 提供，多设备一致"
       >
         <FluxDropdown
           width={130}
@@ -1059,6 +1060,7 @@ function SyncTab() {
 
       <CacheCleanupSection />
       <ConfigSyncSection />
+      <ArticleStateSyncSection />
 
       <ConfirmDialog
         open={confirmDisconnect}
@@ -1285,7 +1287,7 @@ function ConfigSyncSection() {
       ) : (
         <SettingCard
           title="网页登录 GitHub"
-          desc="跳转浏览器完成 GitHub 授权（授权页显示 GitHub CLI 请求 gist 权限，属正常现象），登录后配置同步到你的私有 Gist"
+          desc="跳转浏览器完成 GitHub 授权，登录后配置同步到你的私有 Gist"
         >
           <button className="toggle-action-btn btn-primary" disabled={ghLoggingIn} onClick={() => void doGhLogin()}>
             {ghLoggingIn ? '发起中...' : '登录 GitHub'}
@@ -1314,7 +1316,7 @@ function ConfigSyncSection() {
         />
       </SettingCard>
       {backend === 'gist' ? (
-        <SettingCard title="GitHub Token（classic PAT）" desc="可选：手动填入替代网页登录。Settings → Developer settings → Tokens (classic)，勾选 gist scope。注意：fine-grained PAT 不支持 Gist API">
+        <SettingCard title="GitHub Token（classic PAT）" desc="手动填入替代网页登录；需 classic PAT（勾选 gist scope），fine-grained PAT 不支持 Gist API">
           <input
             type="password"
             className="setting-input"
@@ -1367,6 +1369,75 @@ function ConfigSyncSection() {
         手动上传/下载模式：下载会覆盖本地设置与 AI 配置，订阅源按 URL 合并（已存在跳过）。
         多设备使用时，换机先「上传」，新机「下载并应用」。
       </div>
+    </>
+  );
+}
+
+
+/* ---------- 文章状态同步（已读/收藏：复用上方 Gist/WebDAV 凭据）---------- */
+function ArticleStateSyncSection() {
+  const [status, setStatus] = useState<{ configured: boolean; backend?: string; lastUpload?: string; localCount: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      setStatus(await api.articleStateStatus());
+    } catch { /* Tauri-only */ }
+  };
+  useEffect(() => { void refresh(); }, []);
+
+  const doUpload = async () => {
+    setBusy(true); setReport(null);
+    try {
+      const at = await api.articleStateUpload();
+      setReport(`已上传本地 ${status?.localCount ?? '?'} 条状态到远端（${new Date(at).toLocaleString()}）`);
+      void refresh();
+    } catch (e: unknown) { setReport(`上传失败：${extractError(e)}`); }
+    finally { setBusy(false); }
+  };
+  const doDownload = async () => {
+    setBusy(true); setReport(null);
+    try {
+      const json = await api.articleStateDownload();
+      const r = await api.articleStateApply(json);
+      setReport(`已应用远端状态：匹配 ${r.matched} 篇，新标已读 ${r.set_read}、新加收藏 ${r.set_starred}。OR-合并：任一端已读/收藏→本地跟随`);
+      void refresh();
+    } catch (e: unknown) { setReport(`下载失败：${extractError(e)}`); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <>
+      <div className="settings-group-title" style={{ marginTop: 28 }}>文章状态同步</div>
+      <SettingCard
+        title="已读 / 收藏多端对齐"
+        desc={
+          status?.configured
+            ? `共用上方同步凭据（${status.backend === 'webdav' ? 'WebDAV' : 'GitHub Gist'}）。本地 ${status.localCount} 条有 URL 的文章${status.lastUpload ? ` · 上次上传 ${new Date(status.lastUpload).toLocaleString()}` : ' · 从未上传'}`
+            : '先把上方「同步后端」配置好（GitHub Token 或 WebDAV），本节会复用同一套凭据'
+        }
+      >
+        <span className="about-arch-tag">{status?.configured ? '已配置' : '未配置'}</span>
+      </SettingCard>
+      <div className="settings-action-row">
+        <button className="toggle-action-btn btn-primary" disabled={busy || !status?.configured} onClick={() => void doUpload()}>
+          {busy ? '上传中...' : '上传状态'}
+        </button>
+        <button className="toggle-action-btn" disabled={busy || !status?.configured} onClick={() => void doDownload()}>
+          {busy ? '下载中...' : '下载并应用'}
+        </button>
+      </div>
+      <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
+        仅同步已读/收藏 + URL 匹配键（url_norm），文件 ~50KB。冲突策略：OR-合并——
+        任一端已读即已读，任一端收藏即收藏，不会被另一端覆盖回未读。
+        后台默认每 10 分钟自动下载对齐；可在 app_settings 的 articleStateIntervalMin 调整（5–1440 分钟）。
+      </div>
+      {report && (
+        <div className="mini-dialog-hint" style={{ marginTop: 6, color: report.startsWith('失败') ? 'var(--accent-light)' : undefined }}>
+          {report}
+        </div>
+      )}
     </>
   );
 }

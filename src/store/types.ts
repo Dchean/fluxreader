@@ -45,6 +45,8 @@ export interface SettingsState {
   fontSize: number;
   lineHeight: number;
   maxWidth: number;
+  /** 文章列表列宽（px，可拖动调整，280–560，默认 380） */
+  listWidth: number;
   showReadTime: boolean;
   defaultOpenMode: 'rss' | 'fulltext';
   /** 智能去重：同 URL 文章跨源只保留首个（入库层拦截） */
@@ -251,7 +253,7 @@ export interface AppState {
   deleteCategory: (catId: string) => void;
   /** 分类改名（连接 Miniflux 时同步远端） */
   renameCategory: (catId: string, name: string) => void;
-  addFeed: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean) => void;
+  addFeed: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean, syncToMiniflux?: boolean) => void;
   deleteFeed: (catId: string, feedId: string) => void;
   /** 编辑源：改名/移动分类/布局/AI 开关一次性提交 */
   editFeed: (feedId: string, next: { title: string; catId: string; layout: string; autoSummary: boolean; autoTranslate: boolean }) => void;

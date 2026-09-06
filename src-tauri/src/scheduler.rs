@@ -272,3 +272,51 @@ fn notify_new_articles(app: &AppHandle, count: usize) {
         .body(format!("后台刷新抓到 {count} 篇新文章，点击查看"))
         .show();
 }
+
+
+/// 文章状态自动同步（GitHub Gist / WebDAV）。
+///
+/// 独立的循环（不和 feed 抓取 tick 共用 sleep），间隔读 `article_state_interval_min` 设置
+/// （默认 10 分钟，范围 5–1440）。到点了读远端 → 应用 OR-合并到本地。
+/// 未配置 Gist/WebDAV 凭据时静默 no-op（让用户只在设置页配置后启用）。
+///
+/// 状态变化触发（已读/收藏时即时推送）暂不实现——把"何时同步"和"内容合并"解耦，
+/// 让用户先用"定时拉取"看到效果，再决定是否需要即时推送。后续可加 outbox 表。
+pub fn spawn_article_state_sync(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // 启动后等 30s 再跑首轮（避开启动期 UI 抢锁 + 给 Miniflux 自动同步优先）
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let db = app.state::<AppState>().db.clone();
+        let http = app.state::<AppState>().http.clone();
+        loop {
+            // 读间隔（默认 10 分钟）
+            let interval_min: i64 = {
+                let conn = db.lock().await;
+                crate::db::get_setting(&conn, "app_settings")
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| v.get("articleStateIntervalMin").and_then(|i| i.as_i64()))
+                    .filter(|i| (5..=1440).contains(i))
+                    .unwrap_or(10)
+            };
+            // 检查开关：未配置凭据跳过（设置未启用同步）
+            let configured = {
+                let conn = db.lock().await;
+                crate::db::get_setting(&conn, "config_sync_credentials")
+                    .ok()
+                    .flatten()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            };
+            if configured {
+                match crate::article_state_sync::article_state_sync_tick(&db, &http).await {
+                    Ok(true) => log::info!("scheduler: 文章状态自动同步完成（OR-合并）"),
+                    Ok(false) => {} // 未配置，跳过
+                    Err(e) => log::warn!("scheduler: 文章状态自动同步失败：{e}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(interval_min as u64 * 60)).await;
+        }
+    });
+}

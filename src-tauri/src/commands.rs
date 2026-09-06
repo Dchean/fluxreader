@@ -161,7 +161,9 @@ pub async fn list_feeds(state: State<'_, AppState>) -> AppResult<Vec<db::FeedRow
 /// 添加订阅源：先直连抓一次验证 URL 是有效 feed，成功才入库（不依赖 Miniflux）。
 /// `folder_id = None`（UI 未选分类，如全新安装无任何分类时）→ 自动落到
 /// 「未分类」文件夹（不存在则创建）——首次使用添加源不再报错。
+/// 参数较多是 IPC 契约（前端 invoke 逐字段传），加 allow 避免 clippy 误报。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn add_feed(
     state: State<'_, AppState>,
     feed_url: String,
@@ -170,6 +172,7 @@ pub async fn add_feed(
     layout: String,
     auto_summary: bool,
     auto_translate: bool,
+    sync_to_miniflux: bool,
 ) -> AppResult<db::FeedRow> {
     // 1. 抓取验证（直连，第一优先级）
     let fetched = ingestion::conditional_get(&state.http, &feed_url, None, None).await?;
@@ -224,8 +227,8 @@ pub async fn add_feed(
     for a in &parsed.articles {
         db::upsert_article_with_feed(&conn, feed_id, a, dedup)?;
     }
-    // 连接了 Miniflux → 入队推送新订阅
-    if sync_configured(&conn) {
+    // 勾选「同步到 Miniflux」且已连接 → 入队推送新订阅（feeds 阶段推远端）
+    if sync_to_miniflux && sync_configured(&conn) {
         let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
         db::enqueue_sync(&conn, None, Some(&feed_url), "add_feed", Some(&payload))?;
     }

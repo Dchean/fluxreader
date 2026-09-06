@@ -8,12 +8,14 @@ import { api } from './api';
 /** 需要走后端代理的图床域名（白名单式防盗链：要求特定 Referer）。
     少数派 cdnfile/rssfile 是典型；后续遇到同类站点在此追加。 */
 const PROXY_HOSTS = new Set(['cdnfile.sspai.com', 'rssfile.sspai.com']);
+const PROXY_HOST_SUFFIXES = ['.doubanio.com'];
 
 /** 判断某图片 URL 是否需要后端代理。 */
 export function needsImageProxy(src: string): boolean {
   try {
     const host = new URL(src).hostname.toLowerCase();
-    return PROXY_HOSTS.has(host);
+    if (PROXY_HOSTS.has(host)) return true;
+    return PROXY_HOST_SUFFIXES.some((suffix) => host === suffix.slice(1) || host.endsWith(suffix));
   } catch {
     return false;
   }
@@ -79,4 +81,24 @@ export async function proxyImagesInHtml(
     }),
   );
   return doc.body.innerHTML;
+}
+
+
+/** 代理单张图片 URL（画廊封面/播客封面等非 HTML 场景）。
+    需要代理的域名走后端 fetch_image 拿字节转 data: URL；不需要则原样返回。
+    失败返回 null（调用方回退到原始 src 或隐藏）。 */
+export async function proxyImageUrl(
+  src: string,
+  pageUrl?: string,
+): Promise<string | null> {
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
+  if (!src || !/^https?:\/\//.test(src)) return null;
+  if (!needsImageProxy(src)) return null;
+  try {
+    const bytes = await api.fetchImage(src, pageUrl);
+    if (!bytes || bytes.length === 0) return null;
+    return imageDataUrl(src, bytes);
+  } catch {
+    return null;
+  }
 }

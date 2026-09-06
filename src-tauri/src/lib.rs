@@ -2,6 +2,7 @@
 pub mod ai;
 pub mod commands;
 pub mod config_sync;
+pub mod article_state_sync;
 pub mod credentials;
 pub mod db;
 pub mod error;
@@ -129,6 +130,7 @@ pub fn run() {
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
+            scheduler::spawn_article_state_sync(app.handle().clone());
 
             // 系统托盘：显示/刷新全部/退出
             let show = MenuItem::with_id(app, "show", "显示 FluxReader", true, None::<&str>)?;
@@ -284,6 +286,11 @@ pub fn run() {
         config_sync::config_sync_download,
         config_sync::config_sync_apply,
         config_sync::config_sync_status,
+        // 文章状态同步（已读/收藏）
+        article_state_sync::article_state_upload,
+        article_state_sync::article_state_download,
+        article_state_sync::article_state_apply,
+        article_state_sync::article_state_status,
         // GitHub 设备流登录
         github_auth::github_login_start,
         github_auth::github_login_poll,

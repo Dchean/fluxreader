@@ -228,7 +228,7 @@ body {
 }
 
 .app-root.layout-3col {
-  grid-template-columns: 260px 380px 1fr;
+  grid-template-columns: 260px var(--list-width, 380px) 1fr;
 }
 
 .app-root.layout-2col {
@@ -557,8 +557,6 @@ body {
   /* opacity/visibility 过渡而非 display 切换：hover 时操作钮淡入�?
      不改变行布局尺寸——此�?display:none→inline-flex 会把行内元素
      顶高/挤位，造成整行「下陷闪动�?*/
-  position: absolute;
-  right: 8px;
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
@@ -615,7 +613,7 @@ body {
    （分类行数字左侧还有折叠按钮，订阅源行以等宽 margin 补偿�?
     两类行的数字落在同一条右对齐线上�?*/
 .feed-leaf-item .feed-count-badge {
-  margin-right: 22px; /* = folder-chevron-btn 18px + 间隙 4px，补偿无折叠按钮的行 */
+  margin-right: 0; /* = folder-chevron-btn 18px + 间隙 4px，补偿无折叠按钮的行 */
 }
 
 .feed-count-badge {
@@ -789,6 +787,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 12px;
   -webkit-app-region: no-drag;
 }
 
@@ -796,6 +795,11 @@ body {
   font-size: 16.5px;
   font-weight: 700;
   letter-spacing: -0.3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .timeline-actions-row {
@@ -809,8 +813,9 @@ body {
 .filter-sort-group {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  gap: 6px;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
 }
 
 .toggle-action-btn {
@@ -1087,8 +1092,15 @@ body {
   color: var(--text-primary);
   margin-bottom: 8px;
   user-select: text;
+  -webkit-user-select: text;
   overflow-wrap: break-word;
   word-break: break-word;
+}
+
+/* 社交正文子元素恢复可选中（全局 *{user-select:none} 压过继承的 text） */
+.social-text * {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 /* 社交卡自动收起（�?260px 的长正文折叠�?6 �?+ 展开按钮�?
@@ -1223,6 +1235,18 @@ body {
 .gallery-card img {
   width: 100%;
   display: block;
+}
+
+/* 无封面图（源没给 image_url）的画廊卡片占位：保持卡片高度一致，不显示破图 */
+.gallery-no-image {
+  width: 100%;
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-card-hover);
+  color: var(--text-tertiary);
+  font-size: 12px;
 }
 
 .gallery-meta {
@@ -1472,6 +1496,27 @@ body {
 }
 
 /* -------------------------------------------------------------
+   Reader resize handle（列表列宽拖动分隔条）
+   ------------------------------------------------------------- */
+.reader-resize-handle {
+  position: absolute;
+  left: calc(260px + var(--list-width, 380px));
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  margin-left: -2.5px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 30;
+  transition: background var(--transition-fast);
+}
+
+.reader-resize-handle:hover,
+.reader-resize-handle:active {
+  background: var(--accent);
+}
+
+/* -------------------------------------------------------------
    Column 3: Reader Pane
    ------------------------------------------------------------- */
 .reader-col {
@@ -1598,7 +1643,24 @@ body {
   display: none;
   flex-direction: column;
   height: 100%;
+}
+
+/* 正文可选中文字：全局 *{user-select:none} 直接作用于每个元素（特异性压过
+   父级继承的 text），必须显式给正文内容及其子元素恢复 text。工具栏按钮
+   （toggle-action-btn）保持不可选中（按钮文字不参与选择）。 */
+.reader-active-view .reader-scroll-content,
+.reader-active-view .reader-scroll-content *,
+.reader-active-view .article-prose,
+.reader-active-view .article-prose * {
   user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 工具栏/顶栏按钮文字不可选中（覆盖上面的通配 text） */
+.reader-active-view .toggle-action-btn,
+.reader-active-view .toggle-action-btn * {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .reader-active-view.visible {
@@ -1609,10 +1671,23 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 38px 48px 60px;
-  max-width: 760px;
+  max-width: 860px;
   margin: 0 auto;
   width: 100%;
   transition: max-width var(--transition-fast);
+}
+
+/* 顶栏：不随正文滚动，固定于阅读器顶部。文章状态操作（已读/收藏/源网页/播放）
+   与正文阅读功能（摘要/翻译/全文/渲染）分离，各归其位、互不拥挤。
+   顶部 38px 留白与 Timeline 控制栏对齐，并避开右上角窗口控制按钮（fixed 34px）。 */
+.reader-topbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 38px 20px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-reader);
+  flex-shrink: 0;
 }
 
 .reader-feed-badge {
@@ -1643,7 +1718,8 @@ body {
 .reader-actions-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
   margin-bottom: 18px;
 }
 
@@ -1651,12 +1727,7 @@ body {
   display: flex;
   gap: 6px;
   align-items: center;
-}
-
-.reader-actions-right {
-  display: flex;
-  gap: 6px;
-  align-items: center;
+  flex-wrap: wrap;
 }
 
 .ai-reader-box {
@@ -2601,6 +2672,7 @@ body {
 .settings-action-row {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   margin: 8px 0 16px;
 }
 
@@ -3208,4 +3280,69 @@ body.has-player .toast-layer {
   display: block;
   min-height: 60px;
   line-height: 1.55;
+}
+
+
+/* ============================================================
+   全局右键菜单（替换 WebView2 默认菜单）
+   ============================================================ */
+.ctx-menu {
+  min-width: 180px;
+  background: var(--bg-elevated);
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-elevation);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ctx-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  white-space: nowrap;
+  transition: background var(--transition-fast);
+}
+
+.ctx-menu-item:hover {
+  background: var(--bg-card-hover);
+}
+
+.ctx-menu-item.danger {
+  color: var(--danger, #e5484d);
+}
+
+.ctx-menu-item.danger:hover {
+  background: color-mix(in srgb, var(--danger, #e5484d) 12%, transparent);
+}
+
+.ctx-menu-item.disabled {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+
+.ctx-menu-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+.ctx-menu-icon .svg-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.ctx-menu-label {
+  flex: 1;
 }

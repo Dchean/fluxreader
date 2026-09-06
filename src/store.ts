@@ -232,7 +232,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     fontFamily: '"Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif',
     fontSize: 16,
     lineHeight: 180,
-    maxWidth: 760,
+    maxWidth: 860,
+    listWidth: 320,
     showReadTime: true,
     defaultOpenMode: 'rss',
     smartDedup: false,
@@ -1158,14 +1159,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().showToast(`分类已改名：${trimmed}`);
   },
 
-  addFeed: (catId, url, title, layout, autoSummary, autoTranslate) => {
+  addFeed: (catId, url, title, layout, autoSummary, autoTranslate, syncToMiniflux = true) => {
     if (get().dataMode === 'tauri') {
       const folderId = Number(catId.replace('cat-', ''));
       set({ syncStatus: 'syncing' });
       void api
-        .addFeed(url, title || null, folderId, layout, autoSummary, autoTranslate)
+        .addFeed(url, title || null, folderId, layout, autoSummary, autoTranslate, syncToMiniflux)
         .then(() => get().reloadFromBackend())
-        .then(() => {
+        .then(async () => {
+          /* 勾选「同步到 Miniflux」→ 添加后立即跑 feeds 阶段推送新订阅到远端
+             （add_feed 只入队，这里触发推送让勾选语义即时生效） */
+          if (syncToMiniflux && get().minifluxConnected) {
+            await api.syncLocalFeeds().catch(() => null);
+          }
           set({ syncStatus: 'synced' });
           get().showToast(`已添加订阅源：${title || url}`);
         })
@@ -1174,7 +1180,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const msg = extractError(e);
           get().showToast(`添加失败：${msg}`, {
             label: '重试',
-            run: () => get().addFeed(catId, url, title, layout, autoSummary, autoTranslate),
+            run: () => get().addFeed(catId, url, title, layout, autoSummary, autoTranslate, syncToMiniflux),
           });
         });
       return;
@@ -1400,6 +1406,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (k in merged && typeof v === typeof target[k]) {
           target[k] = v;
         }
+      }
+      /* maxWidth 旧默认迁移：v0.10.x 默认 760，现已提升为 860。若用户从未
+         主动改过（值恰等于旧默认 760），升级到新默认；主动设过的值保留。 */
+      if (merged.maxWidth === 760) {
+        merged.maxWidth = 860;
       }
       /* startupView：启动默认视图（未读/全部/今天/收藏） */
       const view = saved.startupView;

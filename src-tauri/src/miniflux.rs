@@ -90,6 +90,7 @@ pub struct EntryListResponse {
    客户端
    ============================================================ */
 
+#[derive(Clone)]
 pub struct MinifluxClient {
     base: String,
     token: String,

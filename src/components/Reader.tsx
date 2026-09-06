@@ -8,7 +8,7 @@ import { proxyImagesInHtml } from '../lib/imageProxy';
 
 /* ============================================================
    Reader —— 右侧沉浸阅读器
-   正文结构：源Badge → 标题 → 作者/时间 → 工具栏 → AI摘要卡 → 正文
+   正文结构：顶栏(状态操作) → 源Badge → 标题 → 作者/时间 → 阅读功能工具栏 → AI摘要卡 → 正文
    ============================================================ */
 
 export function Reader() {
@@ -140,7 +140,43 @@ export function Reader() {
 
       {art && (
         <div className="reader-active-view visible">
-          <div className="reader-scroll-content" ref={scrollRef} style={{ maxWidth: settings.maxWidth }}>
+          {/* 顶栏（不随正文滚动）：文章状态操作——标为已读/收藏/源网页/播放 */}
+          <div className="reader-topbar">
+            <button className="toggle-action-btn" onClick={toggleCurrentReadStatus} title={art.isRead ? '标为未读' : '标为已读'}>
+              {art.isRead ? <Icons.unreadDot /> : <Icons.check />}
+              <span>{art.isRead ? '标为未读' : '标为已读'}</span>
+            </button>
+            <button className="toggle-action-btn" onClick={toggleCurrentStar} title={art.isStarred ? '取消收藏' : '收藏'}>
+              {art.isStarred ? <Icons.starFilled /> : <Icons.star />}
+              <span>{art.isStarred ? '取消收藏' : '收藏'}</span>
+            </button>
+            <button
+              className="toggle-action-btn"
+              onClick={() => {
+                if (!art.url) { showToast('该条目没有原文网页地址'); return; }
+                void openExternal(art.url).catch(() => showToast('打开失败'));
+              }}
+              title="在浏览器打开源网页"
+            >
+              <Icons.externalLink />
+              <span>源网页</span>
+            </button>
+            {art.enclosureUrl && (
+              <button
+                className={`toggle-action-btn ${player.audioUrl === art.enclosureUrl ? 'active-accent' : ''}`}
+                onClick={() => {
+                  /* 播客/音频附件：阅读视图内直接进 PlayerBar（与播客卡片同一播放器） */
+                  playPodcastEpisode(art.title, feedName, art.imageUrl ?? '', art.enclosureUrl ?? '', art.id);
+                }}
+                title={art.enclosureUrl}
+              >
+                <Icons.play />
+                <span>播放</span>
+              </button>
+            )}
+          </div>
+
+          <div className="reader-scroll-content" ref={scrollRef} style={{ maxWidth: settings.maxWidth }} data-ctx="reader">
             <span className="reader-feed-badge">{feedName}</span>
             <h1 className="reader-article-title">{art.title}</h1>
 
@@ -162,20 +198,23 @@ export function Reader() {
               )}
             </div>
 
-            {/* 操作工具栏 */}
+            {/* 阅读功能工具栏（标题与正文之间）：摘要/翻译/全文/渲染 */}
             <div className="reader-actions-toolbar">
               <div className="reader-actions-left">
-                <button className="toggle-action-btn" onClick={toggleCurrentReadStatus}>
-                  {art.isRead ? <Icons.unreadDot /> : <Icons.check />}
-                  <span>{art.isRead ? '标为未读' : '标为已读'}</span>
+                <button
+                  className={`toggle-action-btn ${summaryOpen ? 'active-accent' : ''}`}
+                  onClick={() => {
+                    /* 未开自动摘要的源：点开即展开卡片并触发生成（有缓存直接展示）；再点收起 */
+                    if (!summaryOpen) triggerReaderSummary();
+                    setSummaryOverride(!summaryOpen);
+                  }}
+                >
+                  <Icons.spark />
+                  <span>摘要</span>
                 </button>
-                <button className="toggle-action-btn" onClick={toggleCurrentStar}>
-                  {art.isStarred ? <Icons.starFilled /> : <Icons.star />}
-                  <span>{art.isStarred ? '已收藏' : '收藏'}</span>
-                </button>
-                <button className="toggle-action-btn" onClick={toggleReaderRenderMode}>
-                  {isRawRenderMode ? <Icons.doc /> : <Icons.code />}
-                  <span>{isRawRenderMode ? '原文' : '渲染'}</span>
+                <button className="toggle-action-btn" onClick={() => toggleReaderTranslation()}>
+                  <Icons.globe />
+                  <span>{isShowingTranslatedProse ? '显示原文' : '翻译'}</span>
                 </button>
                 {dataMode === 'tauri' && (
                   <button
@@ -191,49 +230,13 @@ export function Reader() {
                   >
                     <Icons.doc />
                     <span>
-                      {!art.fulltextExtracted ? '全文' : showFulltext ? 'RSS 正文' : '全文'}
+                      {!art.fulltextExtracted ? '提取全文' : showFulltext ? 'RSS 原文' : '显示全文'}
                     </span>
                   </button>
                 )}
-                <button
-                  className="toggle-action-btn"
-                  onClick={() => {
-                    if (!art.url) { showToast('该条目没有原文网页地址'); return; }
-                    void openExternal(art.url).catch(() => showToast('打开失败'));
-                  }}
-                >
-                  <Icons.externalLink />
-                  <span>源网页</span>
-                </button>
-                {art.enclosureUrl && (
-                  <button
-                    className={`toggle-action-btn ${player.audioUrl === art.enclosureUrl ? 'active-accent' : ''}`}
-                    onClick={() => {
-                      /* 播客/音频附件：阅读视图内直接进 PlayerBar（与播客卡片同一播放器） */
-                      playPodcastEpisode(art.title, feedName, art.imageUrl ?? '', art.enclosureUrl ?? '', art.id);
-                    }}
-                    title={art.enclosureUrl}
-                  >
-                    <Icons.play />
-                    <span>播放</span>
-                  </button>
-                )}
-              </div>
-              <div className="reader-actions-right">
-                <button
-                  className={`toggle-action-btn ${summaryOpen ? 'active-accent' : ''}`}
-                  onClick={() => {
-                    /* 未开自动摘要的源：点开即展开卡片并触发生成（有缓存直接展示）；再点收起 */
-                    if (!summaryOpen) triggerReaderSummary();
-                    setSummaryOverride(!summaryOpen);
-                  }}
-                >
-                  <Icons.spark />
-                  <span>摘要</span>
-                </button>
-                <button className="toggle-action-btn" onClick={() => toggleReaderTranslation()}>
-                  <Icons.globe />
-                  <span>{isShowingTranslatedProse ? '显示原文' : '翻译'}</span>
+                <button className="toggle-action-btn" onClick={toggleReaderRenderMode} title={isRawRenderMode ? '切换到 HTML 渲染' : '查看原始 HTML 源码'}>
+                  {isRawRenderMode ? <Icons.doc /> : <Icons.code />}
+                  <span>{isRawRenderMode ? '渲染' : '源码'}</span>
                 </button>
               </div>
             </div>

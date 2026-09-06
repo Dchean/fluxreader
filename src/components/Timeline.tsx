@@ -11,6 +11,7 @@ import {
 import { Icons } from './icons';
 import { formatRelativeTime, formatDuration } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
+import { proxyImageUrl } from '../lib/imageProxy';
 import type { ArticleEntry } from '../types';
 
 /* ============================================================
@@ -92,18 +93,20 @@ export function Timeline() {
   /* 选中文章（搜索/命令面板/J/K 导航）→ 滚动定位到该卡片。虚拟化下卡片
      可能不在可视区（不渲染），不能用 scrollIntoView；改用 virtualizer 的
      scrollToIndex。
-     持续定位：动态高度虚拟滚动下，长卡片/图片加载会改变行高，一次性
-     scrollToIndex 在未测量时会定位不准。依赖 totalSize——列表总高度每变化
-     就 re-check，直到目标稳定。align:'auto' 只在目标不完全可见时才滚动，
-     点击可见卡片不会抖动（papr 同款方案）。 */
-  const totalSize = rowVirtualizer.getTotalSize();
+     align:'auto' 只在目标不完全可见时才滚动，点击可见卡片不会抖动。
+     只依赖 activeArticleId：定位是「选中文章变化」这个动作的副作用，必须
+     只在此时触发一次。此前依赖 totalSize/items（为了在动态测量后微调），
+     但副作用是——用户手动滚动列表时，滚动触发 measureElement → totalSize 变、
+     或滚动到底触发 loadMoreArticles → items 变，都会重新 scrollToIndex 把列表
+     拉回选中文章（「列表滚一会又跳回原位」的根因）。动态高度下首次定位的
+     少量误差可接受（估算行高），远好于「无法自由滚动」。 */
   useEffect(() => {
     if (!activeArticleId) return;
     const idx = items.findIndex((a) => a.id === activeArticleId);
-    if (idx < 0) return; // 目标尚未加载进 items（如 anchorToArticle 异步中）——等 totalSize 变化重试
+    if (idx < 0) return; // 目标不在当前 items（如 anchorToArticle 异步窗口），跳过
     rowVirtualizer.scrollToIndex(idx, { align: 'auto' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeArticleId, items, totalSize]);
+  }, [activeArticleId]);
 
   /* 滚动到底部附近 → 按需加载下一批文章（分页，避免一次性全量拉取）。 */
   const handleScroll = () => {
@@ -133,20 +136,18 @@ export function Timeline() {
       <div className="timeline-control-bar">
         <div className="control-bar-main-row">
           <h3 className="view-title-text">{base}</h3>
-        </div>
-        <div className="timeline-actions-row">
           <div className="filter-sort-group">
             {activeViewFilter !== 'unread' && (
-              <button className="toggle-action-btn" onClick={toggleTimelineFilter}>
+              <button className="toggle-action-btn" onClick={toggleTimelineFilter} title={timelineFilter === 'all' ? '显示全部' : '仅显示未读'}>
                 <Icons.unreadDot />
-                <span>显示: {timelineFilter === 'all' ? '全部' : '未读'}</span>
+                <span>{timelineFilter === 'all' ? '全部' : '未读'}</span>
               </button>
             )}
-            <button className="toggle-action-btn" onClick={toggleTimelineSort}>
+            <button className="toggle-action-btn" onClick={toggleTimelineSort} title={timelineSort === 'newest' ? '按最新排序' : '按最早排序'}>
               <Icons.sort />
-              <span>排序: {timelineSort === 'newest' ? '最新 ↓' : '最早 ↑'}</span>
+              <span>{timelineSort === 'newest' ? '最新' : '最早'}</span>
             </button>
-            <button className="toggle-action-btn" onClick={markCurrentViewAllRead}>
+            <button className="toggle-action-btn" onClick={markCurrentViewAllRead} title="将当前列表全部标为已读">
               <Icons.check />
               <span>全部已读</span>
             </button>
@@ -247,6 +248,8 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect }: { art: ArticleE
     <div
       className={`article-card ${art.isRead ? 'read' : ''} ${selected ? 'active-selected' : ''}`}
       onClick={() => onSelect(art.id)}
+      data-ctx="article"
+      data-id={art.id}
     >
       <div className="card-meta-top">
         <span className="source-tag">{feedName}</span>
@@ -276,6 +279,7 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect }: { art: ArticleE
 const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const showToast = useAppStore((s) => s.showToast);
+  const openLightbox = useAppStore((s) => s.openLightbox);
   const binding = useAppStore((s) => s.feedIndex.get(item.feedId));
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
   /* 社交卡片正文直接渲染 item.content：进入视口附近才懒加载水合（避免几百张
@@ -316,7 +320,7 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   }, [item.content]);
 
   return (
-    <div ref={hydrateRef} className={`social-card ${item.isRead ? 'read' : ''}`}>
+    <div ref={hydrateRef} className={`social-card ${item.isRead ? 'read' : ''}`} data-ctx="article" data-id={item.id}>
       <div className="social-avatar">{feedName.charAt(0) || '?'}</div>
       <div className="social-body">
         {/* 标题：社交布局此前漏显示——正文太长时一眼无法辨识内容主题 */}
@@ -326,11 +330,23 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
           <span className="social-handle">{feedName}</span>
           <span className="social-date">{formatRelativeTime(item.publishedAt)}</span>
         </div>
-        {/* 正文是消毒后的 HTML（同 Reader）；水合完成前显示轻量占位（毫秒级） */}
+        {/* 正文是消毒后的 HTML（同 Reader）；水合完成前显示轻量占位（毫秒级）。
+            <img> 点击走灯箱放大（与 Reader 一致），<a> 走外链 */}
         <div
           ref={textRef}
           className={`social-text ${isLong && !expanded ? 'collapsed' : ''}`}
-          onClick={handleArticleLinkClick}
+          onClick={(e) => {
+            const target = e.target as HTMLElement;
+            if (target.tagName === 'IMG') {
+              const src = (target as HTMLImageElement).currentSrc || (target as HTMLImageElement).src;
+              if (src && !src.startsWith('data:')) {
+                e.preventDefault();
+                openLightbox(src);
+              }
+              return;
+            }
+            handleArticleLinkClick(e);
+          }}
         >
           {item.content
             ? <div dangerouslySetInnerHTML={{ __html: item.content }} />
@@ -347,17 +363,17 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
             className={`social-act-item ${item.isStarred ? 'starred' : ''}`}
             onClick={() => {
               toggleEntryFlag(item.id, 'isStarred');
-              showToast(item.isStarred ? '已取消收藏' : '已加入收藏');
+              showToast(item.isStarred ? '已取消收藏' : '已收藏');
             }}
           >
             <Icons.star />
-            <span>{item.isStarred ? '已收藏' : '收藏'}</span>
+            <span>{item.isStarred ? '取消收藏' : '收藏'}</span>
           </button>
           <button
             className={`social-act-item ${item.isRead ? 'act-on' : ''}`}
             onClick={() => {
               toggleEntryFlag(item.id, 'isRead');
-              showToast(item.isRead ? '已标记为未读' : '已标记为已读');
+              showToast(item.isRead ? '已标为未读' : '已标为已读');
             }}
           >
             <Icons.check />
@@ -397,11 +413,29 @@ const GalleryCard = memo(function GalleryCard({ item }: { item: ArticleEntry }) 
   const openLightbox = useAppStore((s) => s.openLightbox);
   const selectArticle = useAppStore((s) => s.selectArticle);
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
+  /* 封面图防盗链代理：需要代理的图床（如 doubanio.com）走后端 fetch_image 拿
+     bytes 转 data: URL；不需要的图原样直连。空 imageUrl（源没给图）则 src 为空，
+     由 CSS 的 object 兜底显示。 */
+  const [proxiedSrc, setProxiedSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const src = item.imageUrl;
+    if (!src) { setProxiedSrc(null); return; }
+    void proxyImageUrl(src, item.url).then((dataUrl) => {
+      if (!alive) return;
+      setProxiedSrc(dataUrl); // data: URL 或 null（不需要代理/失败）
+    });
+    return () => { alive = false; };
+  }, [item.imageUrl, item.url]);
+  const imgSrc = proxiedSrc ?? item.imageUrl;
   /* 打开灯箱 = 用户"看到"了这张图；画廊布局下无阅读器列，
      以灯箱打开作为已读触发点（与 markReadOnOpen 设置解耦——
      点开大图本身就是"阅读完成"，不标读会出现永远未读的幽灵项） */
   const openImage = () => {
-    if (item.imageUrl) openLightbox(item.imageUrl);
+    /* 灯箱用代理后的 data: URL（若有）：豆瓣等防盗链图，原始 URL 在灯箱里
+       no-referrer 也会 418；代理成功则用 data: URL 放大。 */
+    const lightboxSrc = proxiedSrc ?? item.imageUrl;
+    if (lightboxSrc) openLightbox(lightboxSrc);
     if (!item.isRead) {
       useAppStore.getState().markEntriesReadBulk([item.id]);
     } else {
@@ -409,8 +443,12 @@ const GalleryCard = memo(function GalleryCard({ item }: { item: ArticleEntry }) 
     }
   };
   return (
-    <div className={`gallery-card ${item.isRead ? 'read' : ''}`}>
-      <img src={item.imageUrl} loading="lazy" onClick={openImage} alt={item.title} referrerPolicy="no-referrer" />
+    <div className={`gallery-card ${item.isRead ? 'read' : ''}`} data-ctx="article" data-id={item.id}>
+      {imgSrc ? (
+        <img src={imgSrc} loading="lazy" onClick={openImage} alt={item.title} referrerPolicy="no-referrer" />
+      ) : (
+        <div className="gallery-no-image" onClick={openImage}>无图</div>
+      )}
       <div className="gallery-meta">
         <div className="gallery-title">{item.title}</div>
         <div className="gallery-meta-row">
@@ -427,7 +465,7 @@ const GalleryCard = memo(function GalleryCard({ item }: { item: ArticleEntry }) 
               className={`toggle-action-btn notif-act ${item.isRead ? 'act-on' : ''}`}
               onClick={(e) => { e.stopPropagation(); toggleEntryFlag(item.id, 'isRead'); }}
             >
-              <span>{item.isRead ? '已读' : '未读'}</span>
+              <span>{item.isRead ? '标未读' : '标已读'}</span>
             </button>
           </div>
         </div>
@@ -445,6 +483,8 @@ const PodcastCard = memo(function PodcastCard({ item }: { item: ArticleEntry }) 
     <div
       className={`podcast-card ${item.isRead ? 'read' : ''}`}
       onClick={() => playPodcastEpisode(item.title, feedName, item.cover ?? '', item.enclosureUrl ?? '', item.id)}
+      data-ctx="article"
+      data-id={item.id}
     >
       <img src={item.cover} className="podcast-cover-box" alt="cover" loading="lazy" referrerPolicy="no-referrer" />
       <div style={{ flex: 1 }}>
@@ -490,7 +530,7 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
   const isLong = (fullText || item.snippet || '').length > 120;
 
   return (
-    <div ref={hydrateRef} className={`notif-card ${item.isRead ? 'read' : ''}`}>
+    <div ref={hydrateRef} className={`notif-card ${item.isRead ? 'read' : ''}`} data-ctx="article" data-id={item.id}>
       <div className="notif-card-header-row">
         <div className="notif-title">{item.title}</div>
         <div className="notif-top-actions">
@@ -517,7 +557,7 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
             onClick={() => toggleEntryFlag(item.id, 'isRead')}
           >
             <Icons.check />
-            <span>{item.isRead ? '已读' : '标为已读'}</span>
+            <span>{item.isRead ? '标为未读' : '标为已读'}</span>
           </button>
         </div>
       </div>

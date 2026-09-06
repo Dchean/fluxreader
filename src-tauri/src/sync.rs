@@ -500,11 +500,6 @@ async fn reconcile_unread_state(
 }
 
 /// 拉远端条目（新条目 + 状态变化），按 miniflux_id/URL 匹配合并。
-/// `full=true`（手动同步/首连）：先做绑定回填 + 全量状态对账——
-/// 全量条目已经在手上（绑定回填本来就要拉），对已匹配条目直接应用远端
-/// 状态，changed_at 早于游标的旧变更从此收敛（未读数漂移根因）。
-/// `full=false`（后台自动同步）：只拉 changed_after 增量，便宜。
-/// 拉远端条目（新条目 + 状态变化），按 miniflux_id/URL 匹配合并。
 /// 分页三段式：每页「锁外拉取 → 锁内合并」，锁从不跨分页 HTTP await。
 /// `full=true`（手动同步/首连）：先做绑定回填 + 全量状态对账——
 /// 全量条目已经在手上（绑定回填本来就要拉），对已匹配条目直接应用远端
@@ -594,37 +589,18 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
             db::feeds_fetch_failed_bound(&conn).unwrap_or_default(),
         )
     };
+    // 收集拉取目标：miniflux 源全量（after=0）+ failed 源增量（after=since_s）。
+    // 并发拉取（锁外 HTTP，tokio::spawn 并行）替代逐个串行 await——此前 15+ 个源
+    // 串行拉取是同步慢的主因之一。合并阶段仍在锁内串行（SQLite 非 Sync，upsert
+    // 需 &mut maps），但合并是纯内存查找 + 已索引 upsert，远快于网络等待。
+    let mut pull_targets: Vec<(i64, String, i64, i64, bool)> = Vec::new();
     for feed in &miniflux_feeds {
         let mf_id: Option<i64> = {
             let conn = db.lock().await;
             feed_miniflux_id(&conn, feed.id)
         };
-        let Some(mf_id) = mf_id else { continue };
-        // 全量拉取（after=0）：服务端源内容以 Miniflux 为唯一真相。
-        // 注意：不清除本地直连抓取的 source='direct' 文章——「本地抓取」模式下
-        // 这些是合法内容（本地抓取成功、Miniflux 抓取失败时，本地内容就是
-        // 唯一来源），重复问题由 upsert 的 URL 兜底去重解决，而非删除。
-        match client.entries(Some(mf_id), 0, false).await {
-            Ok(entries) => {
-                let before = report.pulled_entries;
-                let conn = db.lock().await;
-                let mut maps = db::sync_match_maps(&conn).unwrap_or_else(|e| {
-                    report.errors.push(format!("同步匹配映射构建失败: {e}"));
-                    db::SyncMatchMaps {
-                        url_to_id: Default::default(),
-                        id_to_mf_id: Default::default(),
-                        id_to_mf_pair: Default::default(),
-                        pending_ids: Default::default(),
-                        feed_mf_to_id: Default::default(),
-                        mf_id_to_article: Default::default(),
-                    }
-                });
-                for e in &entries {
-                    upsert_miniflux_entry(&conn, feed.id, e, &mut maps, report);
-                }
-                report.fallback_entries = report.pulled_entries - before;
-            }
-            Err(err) => report.errors.push(format!("拉取服务端源 {} 失败: {}", feed.title, err)),
+        if let Some(mf_id) = mf_id {
+            pull_targets.push((feed.id, feed.title.clone(), mf_id, 0, false));
         }
     }
     for feed in &failed_feeds {
@@ -632,28 +608,66 @@ async fn pull_entries(db: &Arc<Mutex<Connection>>, client: &MinifluxClient, repo
             let conn = db.lock().await;
             feed_miniflux_id(&conn, feed.id)
         };
-        let Some(mf_id) = mf_id else { continue };
-        match client.entries(Some(mf_id), since_s, false).await {
-            Ok(entries) => {
-                let before = report.pulled_entries;
-                let conn = db.lock().await;
-                let mut maps = db::sync_match_maps(&conn).unwrap_or_else(|e| {
-                    report.errors.push(format!("同步匹配映射构建失败: {e}"));
-                    db::SyncMatchMaps {
-                        url_to_id: Default::default(),
-                        id_to_mf_id: Default::default(),
-                        id_to_mf_pair: Default::default(),
-                        pending_ids: Default::default(),
-                        feed_mf_to_id: Default::default(),
-                        mf_id_to_article: Default::default(),
-                    }
-                });
-                for e in &entries {
-                    upsert_miniflux_entry(&conn, feed.id, e, &mut maps, report);
-                }
-                report.fallback_entries = report.pulled_entries - before;
+        if let Some(mf_id) = mf_id {
+            pull_targets.push((feed.id, feed.title.clone(), mf_id, since_s, true));
+        }
+    }
+
+    let mut handles = Vec::new();
+    for (_feed_id, title, mf_id, after, is_fallback) in &pull_targets {
+        let c = client.clone();
+        let (title, mf_id, after, is_fallback) = (title.clone(), *mf_id, *after, *is_fallback);
+        handles.push(tokio::spawn(async move {
+            let entries = c.entries(Some(mf_id), after, false).await;
+            (title, is_fallback, entries)
+        }));
+    }
+
+    {
+        let conn = db.lock().await;
+        // 全库匹配映射只建一次（此前 miniflux + failed 每源各建一次，15+ 次全库
+        // 扫描是同步慢的次因）。各源合并复用同一份 maps。
+        let mut maps = db::sync_match_maps(&conn).unwrap_or_else(|e| {
+            report.errors.push(format!("同步匹配映射构建失败: {e}"));
+            db::SyncMatchMaps {
+                url_to_id: Default::default(),
+                id_to_mf_id: Default::default(),
+                id_to_mf_pair: Default::default(),
+                pending_ids: Default::default(),
+                feed_mf_to_id: Default::default(),
+                mf_id_to_article: Default::default(),
             }
-            Err(err) => report.errors.push(format!("兜底拉取 {} 失败: {}", feed.title, err)),
+        });
+        // 逐个源的结果，回到 feed 本地 id 以便 upsert 挂到正确订阅
+        for (h, (feed_id, _title, _mf_id, _after, _is_fb)) in handles.into_iter().zip(pull_targets) {
+            let (title, is_fallback, result) = match h.await {
+                Ok(v) => v,
+                Err(e) => {
+                    report.errors.push(format!("拉取源任务失败: {e}"));
+                    continue;
+                }
+            };
+            let entries = match result {
+                Ok(v) => v,
+                Err(err) => {
+                    report.errors.push(format!(
+                        "拉取{} {} 失败: {}",
+                        if is_fallback { "兜底" } else { "服务端源" },
+                        title,
+                        err
+                    ));
+                    continue;
+                }
+            };
+            let before = report.pulled_entries;
+            for e in &entries {
+                upsert_miniflux_entry(&conn, feed_id, e, &mut maps, report);
+            }
+            // fallback_entries 只统计 failed 源的增量兜底新增；miniflux 源全量
+            // upsert 不计入（修复历史实现里 miniflux 源也误计 fallback 的 bug）。
+            if is_fallback {
+                report.fallback_entries += report.pulled_entries - before;
+            }
         }
     }
 
