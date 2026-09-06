@@ -420,7 +420,7 @@ const GalleryCard = memo(function GalleryCard({ item }: { item: ArticleEntry }) 
   useEffect(() => {
     let alive = true;
     const src = item.imageUrl;
-    if (!src) { setProxiedSrc(null); return; }
+    if (!src) return; // 无图：proxiedSrc 保持初始 null，走「无图」占位分支
     void proxyImageUrl(src, item.url).then((dataUrl) => {
       if (!alive) return;
       setProxiedSrc(dataUrl); // data: URL 或 null（不需要代理/失败）
