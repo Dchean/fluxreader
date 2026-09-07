@@ -5,21 +5,22 @@
 //!    （light 路径追不上——分层设计：快路径便宜、慢路径彻底）
 //! 运行：cargo test --test sync_phases_e2e -- --ignored --nocapture
 
-mod mock_miniflux;
+mod mock_greader;
 
 use app_lib::db;
 use app_lib::sync;
-use mock_miniflux::MockMiniflux;
+use mock_greader::MockGReader;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-async fn setup(name: &str) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client, Arc<MockMiniflux>) {
-    let server = MockMiniflux::start().await.expect("start mock server");
+async fn setup(name: &str) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client, Arc<MockGReader>) {
+    let server = MockGReader::start().await.expect("start mock server");
     let tmp = std::env::temp_dir().join(format!("fluxreader_phases_{name}.db"));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
-    db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
-    db::set_setting(&conn, "miniflux_token", "test-token").unwrap();
+    db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "greader_username", "test").unwrap();
+    db::set_setting(&conn, "greader_password", "test-token").unwrap();
     let http = app_lib::ingestion::build_client(10);
     (Arc::new(Mutex::new(conn)), http, server)
 }
@@ -28,7 +29,7 @@ async fn setup(name: &str) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client
 /// 返回 (本地文章 id, 远端 entry id)。
 async fn seed_local_article(
     db: &Arc<Mutex<rusqlite::Connection>>,
-    server: &MockMiniflux,
+    server: &MockGReader,
     url: &str,
 ) -> (i64, i64) {
     let conn = db.lock().await;
@@ -62,7 +63,7 @@ async fn seed_local_article(
     };
     let aid = db::upsert_article_with_feed(&conn, feed_id, &a, false).unwrap().0;
     drop(conn);
-    let mf_id = server.add_entry_ret(10, url, "Remote version", "unread", false);
+    let mf_id = server.add_entry_ret(10, url, "Remote version", false, false);
     (aid, mf_id)
 }
 
@@ -92,7 +93,7 @@ async fn instant_push_only_pushes_and_drains_queue() {
     sync::push_states_now(&db, &http).await;
 
     // 远端收到 read
-    let updates = mock_miniflux::status_updates_map(&server);
+    let updates = mock_greader::status_updates_map(&server);
     let (conn, ) = (db.lock().await,);
     let mf_id: i64 = conn
         .query_row("SELECT remote_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
@@ -115,7 +116,7 @@ async fn instant_push_read_broadcasts_dup_entries() {
     sync::states_phase(&db, &http, true).await.expect("bind phase");
 
     // 跨源副本 entry（feed 11 同 URL——手机端另一源的副本）
-    let dup_id = server.add_entry_ret(11, "http://127.0.0.1:8765/post/1", "Dup copy", "unread", false);
+    let dup_id = server.add_entry_ret(11, "http://127.0.0.1:8765/post/1", "Dup copy", false, false);
     // states 增量轮把副本记账到 remote_dup_ids
     sync::states_phase(&db, &http, true).await.expect("record dup");
 
@@ -126,7 +127,7 @@ async fn instant_push_read_broadcasts_dup_entries() {
         db::enqueue_sync(&conn, Some(aid), None, "read", None).unwrap();
     }
     sync::push_states_now(&db, &http).await;
-    let updates = mock_miniflux::status_updates_map(&server);
+    let updates = mock_greader::status_updates_map(&server);
     assert_eq!(
         updates.get(&dup_id).map(|s| s.as_str()),
         Some("read"),
@@ -177,8 +178,8 @@ async fn stale_remote_read_converges_via_full_reconcile() {
     {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
-            e.status = "read".into();
-            e.changed_at = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+            e.read = true;
+            e.changed_at = (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp();
         }
     }
 
@@ -217,7 +218,7 @@ async fn full_reconcile_backfills_missing_local_entries() {
     sync::feeds_phase(&db, &http).await.expect("feeds phase bind");
 
     // 远端 feed 10 加一条本地完全没有的条目（模拟直连源漏抓）
-    server.add_entry_ret(10, "http://127.0.0.1:8765/missing/post/999", "Remote-only entry", "unread", false);
+    server.add_entry_ret(10, "http://127.0.0.1:8765/missing/post/999", "Remote-only entry", false, false);
 
     // full 同步：绑定回填 + 对比拉取补齐缺失条目
     sync::states_phase(&db, &http, true).await.expect("full reconcile");

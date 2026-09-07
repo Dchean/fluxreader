@@ -5,10 +5,10 @@
 //!    scope=ai 只清 AI 摘要/翻译缓存
 //! 运行：cargo test --test account_lifecycle_e2e -- --include-ignored --nocapture
 
-mod mock_miniflux;
+mod mock_greader;
 
 use app_lib::db;
-use mock_miniflux::MockMiniflux;
+use mock_greader::MockGReader;
 use rusqlite::Connection;
 
 fn fresh_db(name: &str) -> Connection {
@@ -241,14 +241,15 @@ fn cache_cleanup_ai_only_clears_ai_fields() {
 #[tokio::test]
 #[ignore = "spins a local mock server"]
 async fn reconnect_other_account_no_mixing() {
-    let server = MockMiniflux::start().await.expect("mock");
+    let server = MockGReader::start().await.expect("mock");
     let tmp = std::env::temp_dir().join("fluxreader_account_mix.db");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
 
     // 账号 A：拉取订阅（origin=miniflux）
-    db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
-    db::set_setting(&conn, "miniflux_token", "token-a").unwrap();
+    db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "greader_username", "token-a").unwrap();
+    db::set_setting(&conn, "greader_password", "pw-a").unwrap();
     let http = app_lib::ingestion::build_client(10);
     let _ = app_lib::sync::feeds_phase(
         &std::sync::Arc::new(tokio::sync::Mutex::new(conn)),
@@ -271,7 +272,8 @@ async fn reconnect_other_account_no_mixing() {
     assert_eq!(feeds, 2, "account A data purged on disconnect");
 
     // 换账号 B（不同 token）：本地不再有 A 的订阅 → 不混杂
-    db::set_setting(&conn, "miniflux_token", "token-b").unwrap();
+    db::set_setting(&conn, "greader_username", "token-b").unwrap();
+    db::set_setting(&conn, "greader_password", "pw-b").unwrap();
     let left: i64 = conn
         .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'remote'", [], |r| r.get(0))
         .unwrap();
@@ -287,7 +289,7 @@ async fn reconnect_other_account_no_mixing() {
 /// 服务端收到 create_feed 且本地绑定 remote_id；再跑一次（幂等）不再推送。
 #[tokio::test]
 async fn sync_local_feeds_pushes_unbound_local_feeds() {
-    let server = MockMiniflux::start().await.expect("start mock");
+    let server = MockGReader::start().await.expect("start mock");
     let tmp = std::env::temp_dir().join("fluxreader_account_localsync.db");
     let _ = std::fs::remove_file(&tmp);
     let conn = fresh_db("localsync");
@@ -301,8 +303,9 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
     db::set_feed_remote_id(&conn, bound, 999).unwrap();
 
     // 连接（复刻 sync_local_feeds 的入队逻辑：未绑本地源 → add_feed 队列）
-    db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
-    db::set_setting(&conn, "miniflux_token", "t").unwrap();
+    db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "greader_username", "t").unwrap();
+    db::set_setting(&conn, "greader_password", "pw").unwrap();
     let unbound: Vec<(String, Option<i64>)> = {
         let mut stmt = conn
             .prepare("SELECT feed_url, folder_id FROM feeds WHERE origin = 'local' AND remote_id IS NULL")
@@ -350,19 +353,20 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
 
 /// create_feed 409 幂等：对 mock 已有的 feed 10 URL（GET /v1/feeds 静态预置）
 /// 再 create → 409 + feed_id → create_feed 返回既有 id 而非报错。
-/// （真实 Miniflux 对重复订阅同样返回 409 带 feed_id。）
+/// Google Reader quick_add 幂等：已存在同 URL 订阅返回既有 feed id。
 #[tokio::test]
 async fn create_feed_conflict_returns_existing_id() {
-    let server = MockMiniflux::start().await.expect("start mock");
+    let server = MockGReader::start().await.expect("start mock");
     let http = app_lib::ingestion::build_client(10);
-    let client = app_lib::miniflux::MinifluxClient::new(&server.url(), "t", http.clone());
+    let client = app_lib::greader::GReaderClient::new(&server.url(), "mock/abc", http.clone());
 
-    // mock GET /v1/feeds 预置的既有订阅 URL
+    // mock subscription/list 预置的既有订阅 URL
     let existing_url = "http://127.0.0.1:8765/local_feed.xml";
-    let id = client.create_feed(existing_url, 1).await.expect("409 should resolve to existing id, not error");
-    assert_eq!(id, 10, "conflict resolves to the pre-existing feed id");
+    let r = client.quick_add(existing_url).await.expect("quick_add should resolve existing feed");
+    // 幂等：返回既有 feed id 10，不重复创建
+    assert_eq!(r.stream_id.as_deref(), Some("feed/10"), "conflict resolves to the pre-existing feed id");
 
-    // 且不重复入 created_feeds（幂等，不产生重复创建记录）
-    let created = server.created_feeds.lock().unwrap();
-    assert!(!created.iter().any(|(u, _)| u == existing_url), "no duplicate create recorded");
+    // 且不重复入 subscribed_urls（幂等，不产生重复创建记录）
+    let subscribed = server.subscribed_urls.lock().unwrap();
+    assert!(!subscribed.iter().any(|u| u == existing_url), "no duplicate subscribe recorded");
 }

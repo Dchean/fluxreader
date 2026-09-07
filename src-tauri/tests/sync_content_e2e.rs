@@ -5,21 +5,22 @@
 //! ③ article_id_by_url 用规范化 URL 匹配，同文不同饰不重复入库。
 //! 运行：cargo test --test sync_content_e2e -- --ignored --nocapture
 
-mod mock_miniflux;
+mod mock_greader;
 
 use app_lib::db;
 use app_lib::sync;
-use mock_miniflux::{MockEnclosure, MockMiniflux};
+use mock_greader::{MockEnclosure, MockGReader};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-async fn setup(name: &str) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client, Arc<MockMiniflux>) {
-    let server = MockMiniflux::start().await.expect("start mock server");
+async fn setup(name: &str) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client, Arc<MockGReader>) {
+    let server = MockGReader::start().await.expect("start mock server");
     let tmp = std::env::temp_dir().join(format!("fluxreader_sync_content_{name}.db"));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
-    db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
-    db::set_setting(&conn, "miniflux_token", "test-token").unwrap();
+    db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "greader_username", "test").unwrap();
+    db::set_setting(&conn, "greader_password", "test-token").unwrap();
     let http = app_lib::ingestion::build_client(10);
     (Arc::new(Mutex::new(conn)), http, server)
 }
@@ -45,7 +46,7 @@ async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
     }
 
     // 服务端 feed 11 加一条新条目（本地完全没有）
-    server.add_entry_ret(11, "http://example.com/remote-only/post/new-1", "New from server", "unread", false);
+    server.add_entry_ret(11, "http://example.com/remote-only/post/new-1", "New from server", false, false);
 
     // 后台轻量同步（full=false）——旧实现只拉 fetch_failed 源，会漏掉这条
     sync::sync_light(&db, &http).await.expect("light sync");
@@ -78,7 +79,7 @@ async fn pending_local_read_wins_over_stale_remote_in_upsert() {
     let (db, http, server) = setup("pending_upsert").await;
 
     // 服务端 feed 10 已有该条目（unread），拿到真实 entry id
-    let mf_id = server.add_entry_ret(10, "http://127.0.0.1:8765/post/pending", "Pending", "unread", false);
+    let mf_id = server.add_entry_ret(10, "http://127.0.0.1:8765/post/pending", "Pending", false, false);
 
     // 本地直连 feed 绑定远端 feed 10，造一篇未读文章并绑定该 entry
     let aid = {
@@ -132,6 +133,7 @@ async fn miniflux_enclosure_is_not_used_as_cover() {
     let content = r#"<p>shownotes</p><img src="https://img.example.com/cover.jpg" />"#;
     let enclosures = vec![MockEnclosure {
         url: "https://audio.example.com/ep1.mp3".into(),
+        r#type: "audio/mpeg".into(),
         mime_type: "audio/mpeg".into(),
         duration: Some(1234),
     }];
@@ -139,7 +141,7 @@ async fn miniflux_enclosure_is_not_used_as_cover() {
         11,
         "http://example.com/remote-only/post/podcast-1",
         "Podcast Episode",
-        "unread",
+        false,
         false,
         content,
         enclosures,
@@ -177,7 +179,7 @@ async fn miniflux_existing_entry_backfills_cover() {
         11,
         "http://example.com/remote-only/post/cover",
         "Cover",
-        "unread",
+        false,
         false,
         "<p>no image yet</p>",
         Vec::new(),
@@ -264,13 +266,13 @@ async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
     sync::feeds_phase(&db, &http).await.expect("feeds phase");
 
     // 服务端 feed 11 加一条「历史文章」：published_at 拨到 3 天前（早于增量游标），
-    // 状态为 read（Miniflux 端已读）。
-    let old_ts = (chrono::Utc::now() - chrono::Duration::days(3)).to_rfc3339();
+    // 状态为 read（后端已读）。
+    let old_ts = (chrono::Utc::now() - chrono::Duration::days(3)).timestamp();
     server.add_entry_with_published(
         11,
         "http://example.com/remote-only/post/history-1",
         "Historical read article",
-        "read",
+        true,
         false,
         old_ts,
     );
@@ -316,7 +318,7 @@ async fn light_sync_converges_stale_remote_read_via_unread_ids() {
         let folder = db::create_folder(&conn, "F", "article").unwrap();
         let feed = db::insert_feed(&conn, "http://127.0.0.1:8765/local_feed.xml", None, "Local", None, folder, "inherit", true, false).unwrap();
         db::set_feed_remote_id(&conn, feed, 10).unwrap();
-        let mf_id = server.add_entry_ret(10, "http://127.0.0.1:8765/post/stale", "Stale read", "unread", false);
+        let mf_id = server.add_entry_ret(10, "http://127.0.0.1:8765/post/stale", "Stale read", false, false);
         let a = db::NewArticle {
             guid: "g-stale".into(),
             url: Some("http://127.0.0.1:8765/post/stale".into()),
@@ -342,8 +344,8 @@ async fn light_sync_converges_stale_remote_read_via_unread_ids() {
     {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
-            e.status = "read".into();
-            e.changed_at = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+            e.read = true;
+            e.changed_at = (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp();
         }
     }
 

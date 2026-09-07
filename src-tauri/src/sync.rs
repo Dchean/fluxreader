@@ -463,113 +463,6 @@ fn merge_remote_status(
     }
 }
 
-/// 未读状态精确对账：拉后端全部未读 entry id，与本地已绑定文章逐条对齐。
-///
-/// Google Reader 语义：用 `reading-list` 流 + `xt=read`（排除已读）得到未读 id。
-/// 对齐规则（与 merge_remote_status 一致）：
-/// - 本地有待推变更（pending）→ 跳过（本地优先，推送后下轮对齐）
-/// - 后端未读（id 在未读列表）→ 本地设未读
-/// - 后端已读（id 不在未读列表）→ 本地设已读（read-anywhere-wins）
-async fn reconcile_unread_state(
-    db: &Arc<Mutex<Connection>>,
-    client: &GReaderClient,
-    report: &mut SyncReport,
-) {
-    // 拉全部未读 id：reading-list 流 + xt=read（排除已读），分页拉全
-    let mut unread_ids: Vec<i64> = Vec::new();
-    let mut continuation: Option<u64> = None;
-    loop {
-        let r = match client
-            .item_ids(
-                "user/-/state/com.google/reading-list",
-                None,
-                None,
-                Some(1000),
-                continuation,
-            )
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                report.errors.push(format!("拉取未读 id 列表失败: {e}"));
-                return;
-            }
-        };
-        for it in &r.item_refs {
-            if let Ok(id) = it.id.parse::<i64>() {
-                unread_ids.push(id);
-            }
-        }
-        match r.continuation.and_then(|c| c.parse::<u64>().ok()) {
-            Some(c) if !r.item_refs.is_empty() => continuation = Some(c),
-            _ => break,
-        }
-    }
-    let unread: std::collections::HashSet<i64> = unread_ids.iter().copied().collect();
-
-    let conn = db.lock().await;
-    // 遍历本地所有已绑定 remote_id 的文章
-    let bound: Vec<(i64, i64)> = {
-        let mut stmt = match conn.prepare("SELECT id, remote_id FROM articles WHERE remote_id IS NOT NULL") {
-            Ok(s) => s,
-            Err(e) => {
-                report.errors.push(format!("查询已绑定文章失败: {e}"));
-                return;
-            }
-        };
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)));
-        match rows {
-            Ok(iter) => iter.flatten().collect(),
-            Err(e) => {
-                report.errors.push(format!("读取已绑定文章失败: {e}"));
-                return;
-            }
-        }
-    };
-    drop(conn);
-
-    // 逐条对齐（短临界区批量更新，避免长持锁）
-    let mut aligned = 0usize;
-    let conn = db.lock().await;
-    // 批量预取 pending 集合（消除「每条已绑定文章一次 article_has_pending_sync」的 N+1）
-    let pending: std::collections::HashSet<i64> = {
-        let mut stmt = match conn.prepare(
-            "SELECT DISTINCT article_id FROM sync_queue WHERE action IN ('read','unread','star','unstar')",
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                report.errors.push(format!("查询待推队列失败: {e}"));
-                return;
-            }
-        };
-        let rows = stmt.query_map([], |r| r.get::<_, i64>(0));
-        match rows {
-            Ok(iter) => iter.flatten().collect(),
-            Err(e) => {
-                report.errors.push(format!("读取待推队列失败: {e}"));
-                return;
-            }
-        }
-    };
-    for (aid, remote_id) in &bound {
-        // 待推保护：本地有未推送的读/收藏变更 → 跳过，推送后下轮对齐
-        if pending.contains(aid) {
-            continue;
-        }
-        let should_unread = unread.contains(remote_id);
-        // is_read 语义：1=已读、0=未读。后端未读（should_unread=true）
-        // → is_read=0；后端已读（should_unread=false）→ is_read=1。
-        let _ = conn.execute(
-            "UPDATE articles SET is_read = ?1 WHERE id = ?2",
-            rusqlite::params![(!should_unread) as i64, aid],
-        );
-        aligned += 1;
-    }
-    if aligned > 0 {
-        report.pulled_entries += aligned;
-    }
-}
-
 /// 拉远端条目（新条目 + 状态变化），按 remote_id/URL 匹配合并。
 /// 分页三段式：每页「锁外拉取 → 锁内合并」，锁从不跨分页 HTTP await。
 /// `full=true`（手动同步/首连）：先做绑定回填 + 全量状态对账。
@@ -705,8 +598,6 @@ async fn pull_entries(
     let _ = db::set_last_sync_ts(&conn, now);
     drop(conn);
 
-    // 未读状态精确对账（幂等，收敛增量漏掉的旧变更）
-    reconcile_unread_state(db, client, report).await;
 }
 
 /// 后端条目入库（source='miniflux'，不覆盖直连正文）。
