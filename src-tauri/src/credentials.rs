@@ -1,7 +1,8 @@
 //! 凭据加密存储（SEC-2）：Windows DPAPI 加密，读 DB 不再见明文。
 //!
-//! 覆盖三类敏感值（settings 键）：
-//! - `miniflux_token`（Miniflux API token）
+//! 覆盖四类敏感值（settings 键）：
+//! - `miniflux_token`（历史遗留：旧 Miniflux API token，已停用但保留加密）
+//! - `greader_password`（Google Reader 集成密码）
 //! - `ai_config`（AI 服务配置，含 api key）
 //! - `config_sync_credentials`（Gist PAT / WebDAV 密码）
 //!
@@ -19,6 +20,7 @@ const DPAPI_PREFIX: &str = "dpapi:";
 /// 需要加密存储的 settings 键（SEC-2）。
 pub const SENSITIVE_KEYS: &[&str] = &[
     "miniflux_token",
+    "greader_password",
     "ai_config",
     "config_sync_credentials",
 ];
@@ -31,7 +33,7 @@ pub fn is_sensitive_key(key: &str) -> bool {
 /// 启动迁移：把历史明文敏感值升级为 DPAPI 密文（SEC-2）。
 ///
 /// 旧版本把 miniflux_token/ai_config/config_sync_credentials 明文存 SQLite。
-/// 本函数扫描这 3 个键，凡无 `dpapi:` 前缀且非空的，用 encrypt_secret 重写。
+/// 本函数扫描 SENSITIVE_KEYS 全部键，凡无 `dpapi:` 前缀且非空的，用 encrypt_secret 重写。
 /// 幂等：已密文值跳过；每次启动都安全调用。
 ///
 /// 非 Windows 平台无 DPAPI，encrypt_secret 只会回落明文（无法产生 `dpapi:`

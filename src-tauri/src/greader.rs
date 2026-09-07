@@ -1,6 +1,9 @@
-//! Google Reader API（兼容协议）客户端 + Fever API 客户端。
+//! Google Reader API（兼容协议）客户端。
 //!
 //! 后端：Miniflux（新版原生支持 Google Reader 兼容层 + Fever API）。
+//! 本模块当前**只实现 Google Reader 协议**（后端可换的基线）；Fever API 预留
+//! 未实现——它是可选备胎，仅在 Google Reader 兼容层不可用时才需要补充
+//! （`POST /fever/?api` + `api_key=md5(username:password)`）。
 //! 认证：两步 ClientLogin 换取 auth token，后续请求用 `Authorization: GoogleLogin auth=<token>`（GET）
 //! 或表单参数 `T=<token>`（POST）。
 //!
