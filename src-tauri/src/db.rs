@@ -205,6 +205,18 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
            SET published_at = fetched_at
          WHERE published_at IS NULL OR published_at = '';
     "#),
+    // 协议中立化：miniflux_id → remote_id、miniflux_dup_ids → remote_dup_ids、
+    // origin='miniflux' → origin='remote'。同步层从 Miniflux 专用协议迁移到
+    // 标准协议（Google Reader / Fever），后端可替换（Miniflux/FreshRSS/自建）。
+    // 物理列用 RENAME COLUMN（SQLite 3.25+，bundled 3.46 支持），数据无损。
+    // user_version=13。
+    M::up(r#"
+        ALTER TABLE articles RENAME COLUMN miniflux_id TO remote_id;
+        ALTER TABLE articles RENAME COLUMN miniflux_dup_ids TO remote_dup_ids;
+        ALTER TABLE feeds RENAME COLUMN miniflux_id TO remote_id;
+        ALTER TABLE folders RENAME COLUMN miniflux_id TO remote_id;
+        UPDATE feeds SET origin = 'remote' WHERE origin = 'miniflux';
+    "#),
     ])
 });
 
@@ -500,30 +512,30 @@ pub fn set_feed_fetch_state(
 
 /// 调度器取"到期"的源：超过全局间隔未抓 且 不在退避窗口内。
 /// last_fetched_at 为 NULL（从未抓过）的源立即视为到期。
-/// 到期源 id。`include_miniflux = false`（跟随服务端同步模式）时跳过
-/// origin='miniflux' 的源——服务端源的内容由 Miniflux 同步提供，
+/// 到期源 id。`include_remote = false`（跟随服务端同步模式）时跳过
+/// origin='remote' 的源——服务端源的内容由 Miniflux 同步提供，
 /// 直连抓取会与服务端状态产生两份不一致的真相。
 pub fn feeds_due_for_refresh(
     conn: &Connection,
     interval_min: i64,
-    include_miniflux: bool,
+    include_remote: bool,
 ) -> AppResult<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT id FROM feeds
          WHERE (last_fetched_at IS NULL
             OR ( (julianday('now') - julianday(last_fetched_at)) * 1440.0 >= ?1
                  AND (next_retry_at IS NULL OR julianday('now') >= julianday(next_retry_at)) ))
-           AND (?2 OR origin != 'miniflux')",
+           AND (?2 OR origin != 'remote')",
     )?;
-    let rows = stmt.query_map(params![interval_min, include_miniflux], |r| r.get(0))?;
+    let rows = stmt.query_map(params![interval_min, include_remote], |r| r.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 /// 全部源 id（托盘「刷新全部订阅」与手动全刷入口，忽略到期与退避）。
 /// 手动入口始终包含 Miniflux 源（用户显式动作 = 要全部内容）。
-pub fn feeds_all_ids(conn: &Connection, include_miniflux: bool) -> AppResult<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM feeds WHERE (?1 OR origin != 'miniflux')")?;
-    let rows = stmt.query_map(params![include_miniflux], |r| r.get(0))?;
+pub fn feeds_all_ids(conn: &Connection, include_remote: bool) -> AppResult<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT id FROM feeds WHERE (?1 OR origin != 'remote')")?;
+    let rows = stmt.query_map(params![include_remote], |r| r.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -596,26 +608,26 @@ pub fn feeds_fetch_failed(conn: &Connection) -> AppResult<Vec<FeedRow>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 服务端来源（origin='miniflux'）的源：内容完全由 Miniflux 提供，本地不直连
+/// 服务端来源（origin='remote'）的源：内容完全由 Miniflux 提供，本地不直连
 /// 抓取。同步时**全量拉取**其条目（幂等 upsert），保证数量与状态与 Miniflux
 /// 完全对齐——用 `after`（published_at）增量会漏掉发布时间早于游标的历史文章。
-/// 仅返回已绑定 miniflux_id 的源。
-pub fn feeds_origin_miniflux(conn: &Connection) -> AppResult<Vec<FeedRow>> {
+/// 仅返回已绑定 remote_id 的源。
+pub fn feeds_origin_remote(conn: &Connection) -> AppResult<Vec<FeedRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {FEED_COLS} FROM feeds
-         WHERE origin = 'miniflux' AND miniflux_id IS NOT NULL
+         WHERE origin = 'remote' AND remote_id IS NOT NULL
          ORDER BY id"
     ))?;
     let rows = stmt.query_map([], feed_row)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 直连失败（fetch_failed=1）且已绑定 miniflux_id 的源：直连失败走 Miniflux
+/// 直连失败（fetch_failed=1）且已绑定 remote_id 的源：直连失败走 Miniflux
 /// 兜底，增量拉取（after=上次同步时间）补直连漏掉的条目。
 pub fn feeds_fetch_failed_bound(conn: &Connection) -> AppResult<Vec<FeedRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {FEED_COLS} FROM feeds
-         WHERE fetch_failed = 1 AND miniflux_id IS NOT NULL
+         WHERE fetch_failed = 1 AND remote_id IS NOT NULL
          ORDER BY id"
     ))?;
     let rows = stmt.query_map([], feed_row)?;
@@ -918,11 +930,11 @@ pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
    账号数据边界 / 缓存清理
    ============================================================ */
 
-/// 断开连接时清理服务端来源的数据：删 origin='miniflux' 的订阅（级联清
+/// 断开连接时清理服务端来源的数据：删 origin='remote' 的订阅（级联清
 /// 其文章/绑定/队列/墓碑），清空本地条目上的 Miniflux 绑定与副本记账、
-/// folders/feeds 的 miniflux_id 残留。用户直连订阅（origin='local'）保留。
+/// folders/feeds 的 remote_id 残留。用户直连订阅（origin='local'）保留。
 /// 空目录（pull 建的、没了成员）一并删除。
-pub fn purge_miniflux_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
+pub fn purge_remote_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
     let tx = conn.transaction()?;
     // 0. 先恢复「原本是本地直连添加、后被 hybrid 模式转为服务端来源」的订阅
     //    ——这类源在断开连接时应保留（回到纯本地直连），而非随服务端数据删除。
@@ -931,15 +943,15 @@ pub fn purge_miniflux_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
         [],
     )?;
     // 1. 服务端来源订阅（级联：articles → sync_queue / deduped_urls 墓碑 / FTS 触发器）
-    let feeds = tx.execute("DELETE FROM feeds WHERE origin = 'miniflux'", [])?;
+    let feeds = tx.execute("DELETE FROM feeds WHERE origin = 'remote'", [])?;
     // 2. 本地直连条目上的绑定/副本/已读态全部回归纯本地
     let articles = tx.execute(
-        "UPDATE articles SET miniflux_id = NULL, miniflux_dup_ids = ''",
+        "UPDATE articles SET remote_id = NULL, remote_dup_ids = ''",
         [],
     )?;
-    // 3. 本地直连源/分类的 miniflux_id 绑定清除
-    tx.execute("UPDATE feeds SET miniflux_id = NULL", [])?;
-    tx.execute("UPDATE folders SET miniflux_id = NULL", [])?;
+    // 3. 本地直连源/分类的 remote_id 绑定清除
+    tx.execute("UPDATE feeds SET remote_id = NULL", [])?;
+    tx.execute("UPDATE folders SET remote_id = NULL", [])?;
     // 4. 清空待推队列（推给这个账号的变更不再有意义）
     tx.execute("DELETE FROM sync_queue", [])?;
     // 5. 空目录（Pull 建的远端分类，删完成员后空了）——保留用户建的非空目录
@@ -1140,7 +1152,7 @@ pub fn upsert_article_with_feed(
         // 同 feed 内按规范化 URL 兜底去重：direct 抓取与 Miniflux 同步的 guid 不同
         // （direct 用原始 guid，Miniflux 用 `miniflux-{id}`），但 URL 相同是同一篇。
         // 命中已有文章时只更新内容（正文/标题/封面/附件），**保留 source 与状态**
-        // （is_read/is_starred/miniflux_id）——抓取只负责内容、同步只负责状态，
+        // （is_read/is_starred/remote_id）——抓取只负责内容、同步只负责状态，
         // 避免「切换本地抓取后数量翻倍」与「状态被抓取覆盖回未读」。
         let by_url: Option<i64> = conn
             .query_row(
@@ -1437,11 +1449,11 @@ pub fn purge_remove_feed_zombies(conn: &Connection) -> AppResult<usize> {
 }
 
 /// 按 Miniflux entry id 找本地条目（Pull 状态合并的匹配键之一）
-pub fn article_by_miniflux_id(conn: &Connection, miniflux_id: i64) -> AppResult<Option<i64>> {
+pub fn article_by_remote_id(conn: &Connection, remote_id: i64) -> AppResult<Option<i64>> {
     let id = conn
         .query_row(
-            "SELECT id FROM articles WHERE miniflux_id = ?1",
-            params![miniflux_id],
+            "SELECT id FROM articles WHERE remote_id = ?1",
+            params![remote_id],
             |r| r.get(0),
         )
         .optional()?;
@@ -1452,8 +1464,8 @@ pub fn article_by_miniflux_id(conn: &Connection, miniflux_id: i64) -> AppResult<
    Pull 合并的批量预取映射 —— 消除 N+1
 
    同步对账（pull_entries）里，对每个远端 entry 逐条调用
-   article_id_by_url / article_by_miniflux_id / article_matches_remote_feed /
-   article_has_pending_sync / feed_by_miniflux_id，首次同步上千条 = 数千次
+   article_id_by_url / article_by_remote_id / article_matches_remote_feed /
+   article_has_pending_sync / feed_by_remote_id，首次同步上千条 = 数千次
    SQLite 查询。这里一次性把全部映射查进内存，循环内改为 HashMap/HashSet
    查找（O(1)），把「数千次查询」压成「5 次批量查询」。
    ============================================================ */
@@ -1462,16 +1474,16 @@ pub fn article_by_miniflux_id(conn: &Connection, miniflux_id: i64) -> AppResult<
 pub struct SyncMatchMaps {
     /// 规范化 URL（url_norm）→ article id（替代 article_id_by_url）
     pub url_to_id: HashMap<String, i64>,
-    /// article id → miniflux_id（替代 `SELECT miniflux_id FROM articles WHERE id=?`）
+    /// article id → remote_id（替代 `SELECT remote_id FROM articles WHERE id=?`）
     pub id_to_mf_id: HashMap<i64, Option<i64>>,
-    /// article id → (文章 miniflux_id, 所属 feed 的 miniflux_id)
+    /// article id → (文章 remote_id, 所属 feed 的 remote_id)
     /// （替代 article_matches_remote_feed 的 JOIN 查询）
     pub id_to_mf_pair: HashMap<i64, (Option<i64>, Option<i64>)>,
     /// 有「已入队未推送」读/收藏变更的 article id 集合（替代 article_has_pending_sync）
     pub pending_ids: HashSet<i64>,
-    /// feed miniflux_id → feed id（替代 feed_by_miniflux_id）
+    /// feed remote_id → feed id（替代 feed_by_remote_id）
     pub feed_mf_to_id: HashMap<i64, i64>,
-    /// article miniflux_id → article id（替代 article_by_miniflux_id）
+    /// article remote_id → article id（替代 article_by_remote_id）
     pub mf_id_to_article: HashMap<i64, i64>,
 }
 
@@ -1490,7 +1502,7 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
         }
     }
 
-    // 2. id → miniflux_id（含 None 的也要，用 Option 区分「未绑定」与「不存在」）
+    // 2. id → remote_id（含 None 的也要，用 Option 区分「未绑定」与「不存在」）
     let mut id_to_mf_id: HashMap<i64, Option<i64>> = HashMap::new();
     // 3. id → (文章 mf_id, feed mf_id)
     let mut id_to_mf_pair: HashMap<i64, (Option<i64>, Option<i64>)> = HashMap::new();
@@ -1498,7 +1510,7 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     let mut mf_id_to_article: HashMap<i64, i64> = HashMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT a.id, a.miniflux_id, f.miniflux_id FROM articles a
+            "SELECT a.id, a.remote_id, f.remote_id FROM articles a
              JOIN feeds f ON f.id = a.feed_id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1529,7 +1541,7 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     // 5. feed mf_id → feed id
     let mut feed_mf_to_id = HashMap::new();
     {
-        let mut stmt = conn.prepare("SELECT miniflux_id, id FROM feeds WHERE miniflux_id IS NOT NULL")?;
+        let mut stmt = conn.prepare("SELECT remote_id, id FROM feeds WHERE remote_id IS NOT NULL")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
             let (mf_id, id) = row?;
@@ -1551,7 +1563,7 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
 /// feed mf_feed_id）是否同一订阅源。同源 → 服务端说的是同一篇，可合并状态；
 /// 跨源 → URL 碰巧相同但属于另一个订阅的 entry，只有已绑定的那条才有权
 /// 写状态（防止未读状态从服务端另一条同 URL entry 复活已读文章）。
-/// 判定依据：aid 已绑定的 miniflux_id 所属远端 feed（feeds.miniflux_id）
+/// 判定依据：aid 已绑定的 remote_id 所属远端 feed（feeds.remote_id）
 /// 与远端 entry 的 feed_id 一致，或 aid 尚未绑定（首见，允许建立绑定）。
 pub fn article_matches_remote_feed(
     conn: &Connection,
@@ -1560,7 +1572,7 @@ pub fn article_matches_remote_feed(
 ) -> AppResult<bool> {
     let bound: Option<(Option<i64>, Option<i64>)> = conn
         .query_row(
-            "SELECT a.miniflux_id, f.miniflux_id FROM articles a
+            "SELECT a.remote_id, f.remote_id FROM articles a
              JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?1",
             params![aid],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -1592,10 +1604,10 @@ pub fn article_id_by_url(conn: &Connection, url: &str) -> AppResult<Option<i64>>
 }
 
 /// 绑定 Miniflux entry id（Pull 时首次见到该条目）
-pub fn set_article_miniflux_id(conn: &Connection, id: i64, miniflux_id: i64) -> AppResult<()> {
+pub fn set_article_remote_id(conn: &Connection, id: i64, remote_id: i64) -> AppResult<()> {
     conn.execute(
-        "UPDATE articles SET miniflux_id = ?1 WHERE id = ?2",
-        params![miniflux_id, id],
+        "UPDATE articles SET remote_id = ?1 WHERE id = ?2",
+        params![remote_id, id],
     )?;
     Ok(())
 }
@@ -1608,7 +1620,7 @@ pub fn add_article_dup_entry(conn: &Connection, id: i64, dup_entry_id: i64) -> A
     }
     let cur: String = conn
         .query_row(
-            "SELECT COALESCE(miniflux_dup_ids, '') FROM articles WHERE id = ?1",
+            "SELECT COALESCE(remote_dup_ids, '') FROM articles WHERE id = ?1",
             params![id],
             |r| r.get(0),
         )
@@ -1629,7 +1641,7 @@ pub fn add_article_dup_entry(conn: &Connection, id: i64, dup_entry_id: i64) -> A
         .collect::<Vec<_>>()
         .join(",");
     conn.execute(
-        "UPDATE articles SET miniflux_dup_ids = ?1 WHERE id = ?2",
+        "UPDATE articles SET remote_dup_ids = ?1 WHERE id = ?2",
         params![joined, id],
     )?;
     Ok(())
@@ -1639,7 +1651,7 @@ pub fn add_article_dup_entry(conn: &Connection, id: i64, dup_entry_id: i64) -> A
 pub fn article_dup_entries(conn: &Connection, id: i64) -> AppResult<Vec<i64>> {
     let cur: Option<String> = conn
         .query_row(
-            "SELECT miniflux_dup_ids FROM articles WHERE id = ?1",
+            "SELECT remote_dup_ids FROM articles WHERE id = ?1",
             params![id],
             |r| r.get(0),
         )
@@ -1666,38 +1678,38 @@ pub fn article_has_pending_sync(conn: &Connection, id: i64) -> AppResult<bool> {
 /// 记录上次同步时间戳（Pull 增量游标，unix 秒）
 pub fn last_sync_ts(conn: &Connection) -> AppResult<i64> {
     let v: Option<String> = conn
-        .query_row("SELECT value FROM settings WHERE key = 'miniflux_last_sync'", [], |r| r.get(0))
+        .query_row("SELECT value FROM settings WHERE key = 'sync_last_sync'", [], |r| r.get(0))
         .optional()?;
     Ok(v.and_then(|s| s.parse().ok()).unwrap_or(0))
 }
 
 pub fn set_last_sync_ts(conn: &Connection, ts: i64) -> AppResult<()> {
-    set_setting(conn, "miniflux_last_sync", &ts.to_string())
+    set_setting(conn, "sync_last_sync", &ts.to_string())
 }
 
-/// feeds/folders 的 miniflux_id 绑定
-pub fn set_feed_miniflux_id(conn: &Connection, feed_id: i64, miniflux_id: i64) -> AppResult<()> {
+/// feeds/folders 的 remote_id 绑定
+pub fn set_feed_remote_id(conn: &Connection, feed_id: i64, remote_id: i64) -> AppResult<()> {
     conn.execute(
-        "UPDATE feeds SET miniflux_id = ?1 WHERE id = ?2",
-        params![miniflux_id, feed_id],
+        "UPDATE feeds SET remote_id = ?1 WHERE id = ?2",
+        params![remote_id, feed_id],
     )?;
     Ok(())
 }
 
-pub fn set_folder_miniflux_id(conn: &Connection, folder_id: i64, miniflux_id: i64) -> AppResult<()> {
+pub fn set_folder_remote_id(conn: &Connection, folder_id: i64, remote_id: i64) -> AppResult<()> {
     conn.execute(
-        "UPDATE folders SET miniflux_id = ?1 WHERE id = ?2",
-        params![miniflux_id, folder_id],
+        "UPDATE folders SET remote_id = ?1 WHERE id = ?2",
+        params![remote_id, folder_id],
     )?;
     Ok(())
 }
 
 /// 按 Miniflux feed id 找本地 feed
-pub fn feed_by_miniflux_id(conn: &Connection, miniflux_id: i64) -> AppResult<Option<i64>> {
+pub fn feed_by_remote_id(conn: &Connection, remote_id: i64) -> AppResult<Option<i64>> {
     let id = conn
         .query_row(
-            "SELECT id FROM feeds WHERE miniflux_id = ?1",
-            params![miniflux_id],
+            "SELECT id FROM feeds WHERE remote_id = ?1",
+            params![remote_id],
             |r| r.get(0),
         )
         .optional()?;

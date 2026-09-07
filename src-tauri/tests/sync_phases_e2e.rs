@@ -72,12 +72,12 @@ async fn instant_push_only_pushes_and_drains_queue() {
     let (db, http, server) = setup("instant").await;
     let (aid, _mf_id) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
 
-    // 先跑一次 full states（含绑定回填），拿到 miniflux_id 绑定
+    // 先跑一次 full states（含绑定回填），拿到 remote_id 绑定
     sync::states_phase(&db, &http, true).await.expect("bind phase");
     {
         let conn = db.lock().await;
         let bound: Option<i64> = conn
-            .query_row("SELECT miniflux_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
+            .query_row("SELECT remote_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
             .ok()
             .flatten();
         assert!(bound.is_some(), "article bound after states_phase(full)");
@@ -95,7 +95,7 @@ async fn instant_push_only_pushes_and_drains_queue() {
     let updates = mock_miniflux::status_updates_map(&server);
     let (conn, ) = (db.lock().await,);
     let mf_id: i64 = conn
-        .query_row("SELECT miniflux_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
+        .query_row("SELECT remote_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
         .unwrap();
     assert_eq!(
         updates.get(&mf_id).map(|s| s.as_str()),
@@ -116,7 +116,7 @@ async fn instant_push_read_broadcasts_dup_entries() {
 
     // 跨源副本 entry（feed 11 同 URL——手机端另一源的副本）
     let dup_id = server.add_entry_ret(11, "http://127.0.0.1:8765/post/1", "Dup copy", "unread", false);
-    // states 增量轮把副本记账到 miniflux_dup_ids
+    // states 增量轮把副本记账到 remote_dup_ids
     sync::states_phase(&db, &http, true).await.expect("record dup");
 
     // 本地标读 → 即时推送必须广播到副本 entry
@@ -146,7 +146,7 @@ async fn feeds_and_states_phases_run_independently() {
     {
         let conn = db.lock().await;
         let bound: Option<i64> = conn
-            .query_row("SELECT miniflux_id FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'", [], |r| r.get(0))
+            .query_row("SELECT remote_id FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'", [], |r| r.get(0))
             .ok()
             .flatten();
         assert_eq!(bound, Some(10), "feed bound to remote id 10");
@@ -156,7 +156,7 @@ async fn feeds_and_states_phases_run_independently() {
     sync::states_phase(&db, &http, true).await.expect("states phase");
     let (conn, ) = (db.lock().await,);
     let bound: Option<i64> = conn
-        .query_row("SELECT miniflux_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
+        .query_row("SELECT remote_id FROM articles WHERE id = ?1", [aid], |r| r.get(0))
         .ok()
         .flatten();
     assert!(bound.is_some(), "article bound in states phase");

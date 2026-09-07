@@ -1,5 +1,5 @@
 //! 同步内容回归测试（针对「跟随服务端」模式下的文章数量与状态对齐 bug）：
-//! ① origin='miniflux' 源的新条目必须通过 Miniflux 拉取（此前只拉 fetch_failed
+//! ① origin='remote' 源的新条目必须通过 Miniflux 拉取（此前只拉 fetch_failed
 //!    源，服务端源既不直连抓取、又从不补内容 → 文章数永久少于服务端）。
 //! ② upsert_miniflux_entry 的状态覆盖必须尊重本地待推变更（防乒乓）。
 //! ③ article_id_by_url 用规范化 URL 匹配，同文不同饰不重复入库。
@@ -24,13 +24,13 @@ async fn setup(name: &str) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client
     (Arc::new(Mutex::new(conn)), http, server)
 }
 
-/// ① 服务端来源（origin='miniflux'）源：后台增量同步（full=false）必须拉取新条目。
+/// ① 服务端来源（origin='remote'）源：后台增量同步（full=false）必须拉取新条目。
 #[tokio::test]
 #[ignore = "spins a local mock server"]
 async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
     let (db, http, server) = setup("origin_pull").await;
 
-    // 先 feeds 阶段：把远端 feed 11（remote-only）拉到本地（origin='miniflux'）
+    // 先 feeds 阶段：把远端 feed 11（remote-only）拉到本地（origin='remote'）
     sync::feeds_phase(&db, &http).await.expect("feeds phase");
     {
         let conn = db.lock().await;
@@ -41,7 +41,7 @@ async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(origin, "miniflux", "remote feed must be origin='miniflux'");
+        assert_eq!(origin, "remote", "remote feed must be origin='remote'");
     }
 
     // 服务端 feed 11 加一条新条目（本地完全没有）
@@ -59,7 +59,7 @@ async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1, "light sync must pull new entries for origin='miniflux' feeds");
+        assert_eq!(count, 1, "light sync must pull new entries for origin='remote' feeds");
         let source: String = conn
             .query_row(
                 "SELECT source FROM articles WHERE url = 'http://example.com/remote-only/post/new-1'",
@@ -85,7 +85,7 @@ async fn pending_local_read_wins_over_stale_remote_in_upsert() {
         let conn = db.lock().await;
         let folder = db::create_folder(&conn, "F", "article").unwrap();
         let feed = db::insert_feed(&conn, "http://127.0.0.1:8765/local_feed.xml", None, "Local", None, folder, "inherit", true, false).unwrap();
-        db::set_feed_miniflux_id(&conn, feed, 10).unwrap();
+        db::set_feed_remote_id(&conn, feed, 10).unwrap();
         let a = db::NewArticle {
             guid: "g-pending".into(),
             url: Some("http://127.0.0.1:8765/post/pending".into()),
@@ -102,7 +102,7 @@ async fn pending_local_read_wins_over_stale_remote_in_upsert() {
             source: "direct".into(),
         };
         let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
-        db::set_article_miniflux_id(&conn, aid, mf_id).unwrap();
+        db::set_article_remote_id(&conn, aid, mf_id).unwrap();
         // 本地标读并入队（待推），服务端仍是 unread
         db::set_read(&conn, aid, true).unwrap();
         db::enqueue_sync(&conn, Some(aid), None, "read", None).unwrap();
@@ -161,7 +161,7 @@ async fn miniflux_enclosure_is_not_used_as_cover() {
     assert_eq!(image_url.as_deref(), Some("https://img.example.com/cover.jpg"), "封面必须是正文图，不是 enclosure URL");
 }
 
-/// ⑦ 封面回填回归：origin='miniflux' 源的条目，首次入库时正文无图（无封面），
+/// ⑦ 封面回填回归：origin='remote' 源的条目，首次入库时正文无图（无封面），
 /// 之后 Miniflux 端正文带图，重同步时 existing 分支必须回填 image_url
 /// （此前 existing 分支从不补封面 → 「部分文章不显示封面」根因）。
 #[tokio::test]
@@ -169,10 +169,10 @@ async fn miniflux_enclosure_is_not_used_as_cover() {
 async fn miniflux_existing_entry_backfills_cover() {
     let (db, http, server) = setup("cover_backfill").await;
 
-    // 先把远端 feed 11（remote-only）拉到本地（origin='miniflux' + 绑定 miniflux_id）
+    // 先把远端 feed 11（remote-only）拉到本地（origin='remote' + 绑定 remote_id）
     sync::feeds_phase(&db, &http).await.expect("feeds phase");
 
-    // 服务端 feed 11（remote-only，origin='miniflux'）先加一条正文无图的条目
+    // 服务端 feed 11（remote-only，origin='remote'）先加一条正文无图的条目
     let mf_id = server.add_entry_full(
         11,
         "http://example.com/remote-only/post/cover",
@@ -251,7 +251,7 @@ fn article_id_by_url_uses_normalized_match() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// ④ 核心回归：origin='miniflux' 源的历史文章（published_at 早于增量游标）
+/// ④ 核心回归：origin='remote' 源的历史文章（published_at 早于增量游标）
 /// 必须被全量拉取并对齐状态。此前用 after=last_sync_ts（按 published_at 过滤）
 /// 会漏掉发布时间早于游标的历史文章——这是「跟随服务端」模式下客户端文章数
 /// 少于 Miniflux、且已读状态对不齐的根因。
@@ -260,7 +260,7 @@ fn article_id_by_url_uses_normalized_match() {
 async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
     let (db, http, server) = setup("history_pull").await;
 
-    // 先 feeds 阶段：把远端 feed 11（remote-only）拉到本地（origin='miniflux'）
+    // 先 feeds 阶段：把远端 feed 11（remote-only）拉到本地（origin='remote'）
     sync::feeds_phase(&db, &http).await.expect("feeds phase");
 
     // 服务端 feed 11 加一条「历史文章」：published_at 拨到 3 天前（早于增量游标），
@@ -315,7 +315,7 @@ async fn light_sync_converges_stale_remote_read_via_unread_ids() {
         let conn = db.lock().await;
         let folder = db::create_folder(&conn, "F", "article").unwrap();
         let feed = db::insert_feed(&conn, "http://127.0.0.1:8765/local_feed.xml", None, "Local", None, folder, "inherit", true, false).unwrap();
-        db::set_feed_miniflux_id(&conn, feed, 10).unwrap();
+        db::set_feed_remote_id(&conn, feed, 10).unwrap();
         let mf_id = server.add_entry_ret(10, "http://127.0.0.1:8765/post/stale", "Stale read", "unread", false);
         let a = db::NewArticle {
             guid: "g-stale".into(),
@@ -333,7 +333,7 @@ async fn light_sync_converges_stale_remote_read_via_unread_ids() {
             source: "direct".into(),
         };
         let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
-        db::set_article_miniflux_id(&conn, aid, mf_id).unwrap();
+        db::set_article_remote_id(&conn, aid, mf_id).unwrap();
         // 本地保持未读（is_read=0）
         (aid, mf_id)
     };

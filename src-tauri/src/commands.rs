@@ -94,7 +94,7 @@ pub async fn rename_folder(state: State<'_, AppState>, id: i64, name: String) ->
     let remote = {
         let conn = state.db.lock().await;
         let mf_id: Option<i64> = conn
-            .query_row("SELECT miniflux_id FROM folders WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT remote_id FROM folders WHERE id = ?1", [id], |r| r.get(0))
             .ok()
             .flatten();
         let creds = if mf_id.is_some() && sync_configured(&conn) {
@@ -285,7 +285,7 @@ pub async fn update_feed(
         }
         let configured = sync_configured(&conn);
         let mf_feed_id: Option<i64> = conn
-            .query_row("SELECT miniflux_id FROM feeds WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT remote_id FROM feeds WHERE id = ?1", [id], |r| r.get(0))
             .ok()
             .flatten();
         let creds = if configured && mf_feed_id.is_some() {
@@ -295,7 +295,7 @@ pub async fn update_feed(
         };
         let mf_new_cat: Option<i64> = match (configured, folder_id) {
             (true, Some(fid)) => conn
-                .query_row("SELECT miniflux_id FROM folders WHERE id = ?1", [fid], |r| r.get(0))
+                .query_row("SELECT remote_id FROM folders WHERE id = ?1", [fid], |r| r.get(0))
                 .ok()
                 .flatten(),
             _ => None,
@@ -861,14 +861,14 @@ pub async fn sync_save(
     {
         let mut conn = state.db.lock().await;
         if account_changed {
-            let (feeds, _) = db::purge_miniflux_data(&mut conn)?;
+            let (feeds, _) = db::purge_remote_data(&mut conn)?;
             log::info!("sync: 账号切换，清理旧账号数据：{feeds} 个订阅");
         }
         // 首连判定（保存前凭据为空 = 第一次连接）：供前端决定是否弹
         // 「同步本地订阅到 Miniflux」（本地有未绑源时）
         let unbound_local: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND miniflux_id IS NULL",
+                "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL",
                 [],
                 |r| r.get(0),
             )
@@ -878,7 +878,7 @@ pub async fn sync_save(
         db::set_setting(&conn, "miniflux_token", &token)?;
         db::set_setting(&conn, "miniflux_account", &account)?;
         // 新连接：清增量游标，让首同步从全量开始（对账旧状态差异）
-        db::set_setting(&conn, "miniflux_last_sync", "0")?;
+        db::set_setting(&conn, "sync_last_sync", "0")?;
         if first_connect {
             return Ok(serde_json::json!({
                 "message": msg,
@@ -906,7 +906,7 @@ pub async fn sync_phase(
     }
 }
 
-/// 把本地直连订阅（origin='local' 且未绑定 miniflux_id）推送到服务端：
+/// 把本地直连订阅（origin='local' 且未绑定 remote_id）推送到服务端：
 /// 入队 add_feed（带分类映射 payload）→ 立即跑 feeds 阶段（推送+碰撞绑定）。
 /// 幂等：已绑定的源不入队；服务端已存在同 URL（409）回查绑定，不构成错误。
 /// 返回 (待推数, 推送摘要)——首连弹窗与手动按钮共用此入口。
@@ -923,7 +923,7 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
         let mut stmt = conn
             .prepare(
                 "SELECT f.id, f.feed_url, f.folder_id FROM feeds f
-                 WHERE f.origin = 'local' AND f.miniflux_id IS NULL",
+                 WHERE f.origin = 'local' AND f.remote_id IS NULL",
             )?;
         let rows: Vec<(i64, String, Option<i64>)> = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -976,11 +976,11 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
 pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<String> {
     let (feeds, articles) = {
         let mut conn = state.db.lock().await;
-        let r = db::purge_miniflux_data(&mut conn)?;
+        let r = db::purge_remote_data(&mut conn)?;
         db::set_setting(&conn, "miniflux_endpoint", "")?;
         db::set_setting(&conn, "miniflux_token", "")?;
         db::set_setting(&conn, "miniflux_account", "")?;
-        db::set_setting(&conn, "miniflux_last_sync", "0")?;
+        db::set_setting(&conn, "sync_last_sync", "0")?;
         r
     };
     Ok(format!("已断开并清理：移除 {feeds} 个服务端订阅（{articles} 处绑定），本地直连订阅保留"))

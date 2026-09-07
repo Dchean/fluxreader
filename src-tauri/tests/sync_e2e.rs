@@ -35,7 +35,7 @@ async fn miniflux_sync_end_to_end() {
         false,
     )
     .unwrap();
-    // 本地条目（直连抓取产物，miniflux_id 未绑定）
+    // 本地条目（直连抓取产物，remote_id 未绑定）
     let local_entry = db::NewArticle {
         guid: "guid-local-1".into(),
         url: Some("http://127.0.0.1:8765/post/1".into()),
@@ -71,7 +71,7 @@ async fn miniflux_sync_end_to_end() {
 
     // URL 碰撞合并：本地 feed 绑定了远端 feed id 10
     let bound: Option<i64> = conn
-        .query_row("SELECT miniflux_id FROM feeds WHERE id = ?1", [local_feed_id], |r| r.get(0))
+        .query_row("SELECT remote_id FROM feeds WHERE id = ?1", [local_feed_id], |r| r.get(0))
         .ok()
         .flatten();
     assert_eq!(bound, Some(10), "local feed must bind remote feed id 10");
@@ -79,7 +79,7 @@ async fn miniflux_sync_end_to_end() {
     // 远端独有 feed 拉到本地（挂在远端分类对应的本地 folder）
     let remote_only: Option<(i64, i64)> = conn
         .query_row(
-            "SELECT id, miniflux_id FROM feeds WHERE feed_url = 'http://example.com/remote-only.xml'",
+            "SELECT id, remote_id FROM feeds WHERE feed_url = 'http://example.com/remote-only.xml'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -96,7 +96,7 @@ async fn miniflux_sync_end_to_end() {
     // 本地条目与远端条目 URL 匹配 → 状态合并（Miniflux 权威：已读+收藏）
     let merged: (bool, bool, Option<i64>) = conn
         .query_row(
-            "SELECT is_read, is_starred, miniflux_id FROM articles WHERE id = ?1",
+            "SELECT is_read, is_starred, remote_id FROM articles WHERE id = ?1",
             [local_article_id],
             |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)? != 0, r.get(2)?)),
         )
@@ -117,7 +117,7 @@ async fn miniflux_sync_end_to_end() {
     let conn = db.lock().await;
     println!("push report: pushed_states={}", report2.pushed_states);
 
-    // 远端收到 unread 状态更新（entry id 即绑定的 miniflux_id）
+    // 远端收到 unread 状态更新（entry id 即绑定的 remote_id）
     let mf_id = merged.2.unwrap();
     let updates = mock_miniflux::status_updates_map(&server);
     assert_eq!(
@@ -179,7 +179,7 @@ async fn miniflux_sync_end_to_end() {
 
     let (still_read, binding): (bool, i64) = conn
         .query_row(
-            "SELECT is_read, COALESCE(miniflux_id, -1) FROM articles WHERE id = ?1",
+            "SELECT is_read, COALESCE(remote_id, -1) FROM articles WHERE id = ?1",
             [local_article_id],
             |r| Ok((r.get::<_, i64>(0)? != 0, r.get(1)?)),
         )

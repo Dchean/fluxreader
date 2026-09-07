@@ -150,7 +150,7 @@ fn seed_mode_feeds(conn: &rusqlite::Connection) -> (i64, i64) {
         conn, "http://127.0.0.1:1/direct.xml", None, "Direct", None, folder, "inherit", true, false, "local",
     ).unwrap();
     let mf = db::insert_feed_origin(
-        conn, "http://127.0.0.1:1/remote.xml", None, "Remote", None, folder, "inherit", true, false, "miniflux",
+        conn, "http://127.0.0.1:1/remote.xml", None, "Remote", None, folder, "inherit", true, false, "remote",
     ).unwrap();
     (direct, mf)
 }

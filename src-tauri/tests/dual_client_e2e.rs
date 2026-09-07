@@ -120,9 +120,9 @@ async fn read_intent_flows_both_ways_across_feeds() {
 
         db::create_folder(&conn, "F", "article").unwrap();
         db::insert_feed(&conn, "http://x/a.xml", None, "FA", None, 1, "inherit", false, false).unwrap();
-        db::set_feed_miniflux_id(&conn, 1, 10).unwrap();
+        db::set_feed_remote_id(&conn, 1, 10).unwrap();
         let (xid, _) = db::upsert_article_with_feed(&conn, 1, &article("http://x/story", "gx"), false).unwrap();
-        db::set_article_miniflux_id(&conn, xid, own_id).unwrap();
+        db::set_article_remote_id(&conn, xid, own_id).unwrap();
         conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [xid]).unwrap();
 
         db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
@@ -163,7 +163,7 @@ async fn read_intent_flows_both_ways_across_feeds() {
         let y_own = server.add_entry_ret(10, "http://x/story-y", "Y own", "unread", false);
         let y_copy = server.add_entry_ret(20, "http://x/story-y", "Y copy", "unread", false);
         let (yid, _) = db::upsert_article_with_feed(&conn, 1, &article("http://x/story-y", "gy"), false).unwrap();
-        db::set_article_miniflux_id(&conn, yid, y_own).unwrap();
+        db::set_article_remote_id(&conn, yid, y_own).unwrap();
         (yid, y_own, y_copy)
     };
     // 先同步让 y_copy 被记账为副本
@@ -201,10 +201,10 @@ async fn pending_local_change_wins_over_stale_remote() {
 
     db::create_folder(&conn, "F", "article").unwrap();
     db::insert_feed(&conn, "http://x/a.xml", None, "FA", None, 1, "inherit", false, false).unwrap();
-    db::set_feed_miniflux_id(&conn, 1, 10).unwrap();
+    db::set_feed_remote_id(&conn, 1, 10).unwrap();
     let own_id = server.add_entry_ret(10, "http://x/p", "P", "read", false); // 服务端：已读
     let (aid, _) = db::upsert_article_with_feed(&conn, 1, &article("http://x/p", "gp"), false).unwrap();
-    db::set_article_miniflux_id(&conn, aid, own_id).unwrap();
+    db::set_article_remote_id(&conn, aid, own_id).unwrap();
 
     db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
     db::set_setting(&conn, "miniflux_token", "t").unwrap();

@@ -125,21 +125,21 @@ fn cross_feed_remote_entry_cannot_write_state_or_steal_binding() {
     // 两个本地源，各自绑定远端 feed 10 / 20
     db::insert_feed(&conn, "http://x/a.xml", None, "FA", None, 1, "inherit", false, false).unwrap();
     db::insert_feed(&conn, "http://x/b.xml", None, "FB", None, 1, "inherit", false, false).unwrap();
-    db::set_feed_miniflux_id(&conn, 1, 10).unwrap();
-    db::set_feed_miniflux_id(&conn, 2, 20).unwrap();
+    db::set_feed_remote_id(&conn, 1, 10).unwrap();
+    db::set_feed_remote_id(&conn, 2, 20).unwrap();
 
     // feed A 的文章，绑定远端 entry 100（feed 10）
     let (aid, _) = db::upsert_article_with_feed(&conn, 1, &article("http://x/news", "ga"), false).unwrap();
-    db::set_article_miniflux_id(&conn, aid, 100).unwrap();
+    db::set_article_remote_id(&conn, aid, 100).unwrap();
 
     // 判定矩阵
     // 同源 entry（feed 10）：允许
     assert!(db::article_matches_remote_feed(&conn, aid, 10).unwrap(), "same-feed entry is trusted");
     // 跨源 entry（feed 20）：拒绝——服务端另一条同 URL entry 无权写状态
     assert!(!db::article_matches_remote_feed(&conn, aid, 20).unwrap(), "cross-feed entry must be rejected");
-    // 未绑定 feed 的文章（feed 无 miniflux_id 视图下）：绑定后按绑定走
+    // 未绑定 feed 的文章（feed 无 remote_id 视图下）：绑定后按绑定走
     let (aid2, _) = db::upsert_article_with_feed(&conn, 2, &article("http://x/other", "gb"), false).unwrap();
-    db::set_article_miniflux_id(&conn, aid2, 200).unwrap();
+    db::set_article_remote_id(&conn, aid2, 200).unwrap();
     assert!(!db::article_matches_remote_feed(&conn, aid2, 10).unwrap(), "feed-B article rejects feed-10 entry");
     assert!(db::article_matches_remote_feed(&conn, aid2, 20).unwrap(), "own-feed entry is trusted");
 
