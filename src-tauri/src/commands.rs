@@ -4,7 +4,6 @@
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::ingestion;
-use crate::miniflux::MinifluxClient;
 use crate::state::AppState;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
@@ -90,28 +89,10 @@ pub async fn rename_folder(state: State<'_, AppState>, id: i64, name: String) ->
     if name.is_empty() {
         return Err(AppError::new("validate", "分类名称不能为空"));
     }
-    // 锁内：改名落库 + 收集远端映射；锁外：同步改名到 Miniflux（best-effort）
-    let remote = {
-        let conn = state.db.lock().await;
-        let mf_id: Option<i64> = conn
-            .query_row("SELECT remote_id FROM folders WHERE id = ?1", [id], |r| r.get(0))
-            .ok()
-            .flatten();
-        let creds = if mf_id.is_some() && sync_configured(&conn) {
-            crate::sync::read_credentials(&conn)
-        } else {
-            None
-        };
-        db::rename_folder(&conn, id, &name)?;
-        mf_id.zip(creds)
-    };
-    if let Some((mf_id, (endpoint, token))) = remote {
-        let client = MinifluxClient::new(&endpoint, &token, state.http.clone());
-        client
-            .rename_category(mf_id, &name)
-            .await
-            .map_err(|e| AppError::network(format!("同步分类改名到 Miniflux 失败: {e}")))?;
-    }
+    // Google Reader 协议下分类是 label（无数字 id），改名远端同步较复杂；
+    // 此处仅本地改名，靠下次 pull 对账按 label 名收敛（本地优先）。
+    let conn = state.db.lock().await;
+    db::rename_folder(&conn, id, &name)?;
     Ok(())
 }
 
@@ -270,51 +251,19 @@ pub async fn update_feed(
 ) -> AppResult<()> {
     let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
 
-    // 三段式锁纪律：锁内校验+读映射+落库，锁外执行 Miniflux 网络 IO——
-    // 远端 30s 超时期间其他 DB 命令不被冻结（与 sync.rs/refresh_feed_staged 一致）
-    let (mf_feed_id, mf_new_cat, creds) = {
-        let conn = state.db.lock().await;
-        // 目标分类必须存在（防 UI 传错 id 把源挂飞）
-        if let Some(fid) = folder_id {
-            let exists: bool = conn
-                .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [fid], |r| r.get::<_, i64>(0))
-                .map(|n| n > 0)?;
-            if !exists {
-                return Err(AppError::new("validate", "目标分类不存在"));
-            }
-        }
-        let configured = sync_configured(&conn);
-        let mf_feed_id: Option<i64> = conn
-            .query_row("SELECT remote_id FROM feeds WHERE id = ?1", [id], |r| r.get(0))
-            .ok()
-            .flatten();
-        let creds = if configured && mf_feed_id.is_some() {
-            crate::sync::read_credentials(&conn)
-        } else {
-            None
-        };
-        let mf_new_cat: Option<i64> = match (configured, folder_id) {
-            (true, Some(fid)) => conn
-                .query_row("SELECT remote_id FROM folders WHERE id = ?1", [fid], |r| r.get(0))
-                .ok()
-                .flatten(),
-            _ => None,
-        };
-        db::update_feed(&conn, id, title.as_deref(), folder_id, layout.as_deref(), auto_summary, auto_translate)?;
-        (mf_feed_id, mf_new_cat, creds)
-    };
-
-    // 锁外：远端改名 / 移动分类（best-effort，失败不阻塞本地结果）
-    if let (Some(mf_id), Some((endpoint, token))) = (mf_feed_id, creds) {
-        let client = MinifluxClient::new(&endpoint, &token, state.http.clone());
-        if let Some(t) = title.as_deref() {
-            let cat = mf_new_cat.unwrap_or(1);
-            let _ = client.update_feed_title(mf_id, t, cat).await;
-        }
-        if let Some(cat) = mf_new_cat {
-            let _ = client.move_feed_category(mf_id, cat).await;
+    // 本地落库（Google Reader 下订阅改名/移动分类的远端同步较复杂，
+    // 靠下次 pull 对账收敛——本地优先，此处不做远端 best-effort 推送）。
+    let conn = state.db.lock().await;
+    // 目标分类必须存在（防 UI 传错 id 把源挂飞）
+    if let Some(fid) = folder_id {
+        let exists: bool = conn
+            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [fid], |r| r.get::<_, i64>(0))
+            .map(|n| n > 0)?;
+        if !exists {
+            return Err(AppError::new("validate", "目标分类不存在"));
         }
     }
+    db::update_feed(&conn, id, title.as_deref(), folder_id, layout.as_deref(), auto_summary, auto_translate)?;
     Ok(())
 }
 
@@ -814,33 +763,37 @@ pub async fn opml_export(state: State<'_, AppState>) -> AppResult<String> {
 pub async fn sync_test(
     state: State<'_, AppState>,
     endpoint: String,
-    token: String,
+    username: String,
+    password: String,
 ) -> AppResult<String> {
-    let (msg, _) = crate::sync::test_connection(&endpoint, &token, &state.http).await?;
+    let (msg, _) = crate::sync::test_connection(&endpoint, &username, &password, &state.http).await?;
     Ok(msg)
 }
 
 /// 保存凭据：先轻量测试（失败不保存），通过后立即落库返回。
 /// 首连的重活（拉订阅、同步状态）由前端随后台阶段执行，不阻塞这里。
-/// Token 留空且已连接 → 复用已存 Token（仅改 Endpoint 的场景）。
-/// 换账号检测：已连接其他账号（endpoint 或 token 不同）时先清理旧账号
+/// 密码留空且已连接 → 复用已存密码（仅改 Endpoint 的场景）。
+/// 换账号检测：已连接其他账号（endpoint 或 username 不同）时先清理旧账号
 /// 数据（订阅/绑定/队列），避免两份订阅列表混杂。
 #[tauri::command]
 pub async fn sync_save(
     state: State<'_, AppState>,
     endpoint: String,
-    token: String,
+    username: String,
+    password: String,
 ) -> AppResult<String> {
-    // 留空 Token 且已连接 → 复用旧 Token（改地址不动密钥）
-    let (endpoint, token) = {
+    // 留空密码且已连接 → 复用旧密码（改地址不动密钥）
+    let (endpoint, username, password) = {
         let conn = state.db.lock().await;
         let old = crate::sync::read_credentials(&conn);
-        match (&old, token.trim().is_empty()) {
-            (Some((_old_ep, old_tk)), true) => (endpoint.trim().to_string(), old_tk.clone()),
-            (None, true) => {
-                return Err(AppError::new("validate", "请填写 API Token"));
+        match (&old, password.trim().is_empty()) {
+            (Some((_old_ep, old_user, old_pw)), true) => {
+                (endpoint.trim().to_string(), old_user.clone(), old_pw.clone())
             }
-            _ => (endpoint.trim().to_string(), token.trim().to_string()),
+            (None, true) => {
+                return Err(AppError::new("validate", "请填写密码"));
+            }
+            _ => (endpoint.trim().to_string(), username.trim().to_string(), password.trim().to_string()),
         }
     };
     // 换账号检测（锁内读旧凭据）；保存前凭据为空 = 首连
@@ -848,16 +801,17 @@ pub async fn sync_save(
         let conn = state.db.lock().await;
         let old = crate::sync::read_credentials(&conn);
         match old {
-            Some((old_ep, old_tk)) => {
-                let changed =
-                    old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/') || old_tk != token;
+            Some((old_ep, old_user, old_pw)) => {
+                let changed = old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/')
+                    || old_user != username
+                    || old_pw != password;
                 (changed, false)
             }
             None => (false, true),
         }
     };
-    // 测试新凭据（失败不保存不动现状）；账户名随凭据落库（设置页动态显示）
-    let (msg, account) = crate::sync::test_connection(&endpoint, &token, &state.http).await?;
+    // 测试新凭据（失败不保存不动现状）；用户名随凭据落库（设置页动态显示）
+    let (msg, _account) = crate::sync::test_connection(&endpoint, &username, &password, &state.http).await?;
     {
         let mut conn = state.db.lock().await;
         if account_changed {
@@ -865,7 +819,7 @@ pub async fn sync_save(
             log::info!("sync: 账号切换，清理旧账号数据：{feeds} 个订阅");
         }
         // 首连判定（保存前凭据为空 = 第一次连接）：供前端决定是否弹
-        // 「同步本地订阅到 Miniflux」（本地有未绑源时）
+        // 「同步本地订阅到后端」（本地有未绑源时）
         let unbound_local: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL",
@@ -874,9 +828,9 @@ pub async fn sync_save(
             )
             .unwrap_or(0);
         let first_connect = old_was_empty && unbound_local > 0;
-        db::set_setting(&conn, "miniflux_endpoint", &endpoint)?;
-        db::set_setting(&conn, "miniflux_token", &token)?;
-        db::set_setting(&conn, "miniflux_account", &account)?;
+        db::set_setting(&conn, "greader_endpoint", &endpoint)?;
+        db::set_setting(&conn, "greader_username", &username)?;
+        db::set_setting(&conn, "greader_password", &password)?;
         // 新连接：清增量游标，让首同步从全量开始（对账旧状态差异）
         db::set_setting(&conn, "sync_last_sync", "0")?;
         if first_connect {
@@ -977,9 +931,9 @@ pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<String> {
     let (feeds, articles) = {
         let mut conn = state.db.lock().await;
         let r = db::purge_remote_data(&mut conn)?;
-        db::set_setting(&conn, "miniflux_endpoint", "")?;
-        db::set_setting(&conn, "miniflux_token", "")?;
-        db::set_setting(&conn, "miniflux_account", "")?;
+        db::set_setting(&conn, "greader_endpoint", "")?;
+        db::set_setting(&conn, "greader_password", "")?;
+        db::set_setting(&conn, "greader_username", "")?;
         db::set_setting(&conn, "sync_last_sync", "0")?;
         r
     };
@@ -1037,9 +991,9 @@ pub struct SyncStatusInfo {
 #[tauri::command]
 pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo> {
     let conn = state.db.lock().await;
-    let endpoint = db::get_setting(&conn, "miniflux_endpoint").ok().flatten()
+    let endpoint = db::get_setting(&conn, "greader_endpoint").ok().flatten()
         .filter(|e| !e.trim().is_empty());
-    let account = db::get_setting(&conn, "miniflux_account").ok().flatten()
+    let account = db::get_setting(&conn, "greader_username").ok().flatten()
         .filter(|a| !a.trim().is_empty());
     Ok(SyncStatusInfo {
         connected: endpoint.is_some(),

@@ -2,7 +2,6 @@
 pub mod ai;
 pub mod commands;
 pub mod config_sync;
-pub mod article_state_sync;
 pub mod credentials;
 pub mod db;
 pub mod error;
@@ -11,7 +10,6 @@ pub mod greader;
 pub mod github_auth;
 pub mod ingestion;
 pub mod media;
-pub mod miniflux;
 pub mod opml;
 pub mod sanitize;
 pub mod scheduler;
@@ -131,7 +129,6 @@ pub fn run() {
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
-            scheduler::spawn_article_state_sync(app.handle().clone());
             // 封面后台补全（摘要型源 og:image 兜底，低优先级）
             scheduler::spawn_cover_backfill(app.handle().clone());
 
@@ -289,11 +286,6 @@ pub fn run() {
         config_sync::config_sync_download,
         config_sync::config_sync_apply,
         config_sync::config_sync_status,
-        // 文章状态同步（已读/收藏）
-        article_state_sync::article_state_upload,
-        article_state_sync::article_state_download,
-        article_state_sync::article_state_apply,
-        article_state_sync::article_state_status,
         // GitHub 设备流登录
         github_auth::github_login_start,
         github_auth::github_login_poll,
