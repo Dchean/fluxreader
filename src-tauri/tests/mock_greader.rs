@@ -443,7 +443,7 @@ fn route(
                     }
                     if tag.ends_with("/starred") {
                         e.starred = true;
-                        srv.status_updates.lock().unwrap().push((e.id, "star".into()));
+                        srv.bookmark_toggles.lock().unwrap().push(e.id);
                     }
                 }
                 for tag in &remove {
@@ -453,7 +453,7 @@ fn route(
                     }
                     if tag.ends_with("/starred") {
                         e.starred = false;
-                        srv.status_updates.lock().unwrap().push((e.id, "unstar".into()));
+                        srv.bookmark_toggles.lock().unwrap().push(e.id);
                     }
                 }
             }
