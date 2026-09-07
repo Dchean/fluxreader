@@ -178,7 +178,7 @@ export const api = {
     layout: string,
     autoSummary: boolean,
     autoTranslate: boolean,
-    syncToMiniflux: boolean,
+    syncToBackend: boolean,
   ): Promise<FeedRow | null> {
     const inv = await getInvoke();
     return inv
@@ -189,7 +189,7 @@ export const api = {
           layout,
           autoSummary,
           autoTranslate,
-          syncToMiniflux,
+          syncToBackend,
         }) as FeedRow)
       : null;
   },

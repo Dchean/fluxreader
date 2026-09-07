@@ -153,7 +153,7 @@ pub async fn add_feed(
     layout: String,
     auto_summary: bool,
     auto_translate: bool,
-    sync_to_miniflux: bool,
+    sync_to_backend: bool,
 ) -> AppResult<db::FeedRow> {
     // 1. 抓取验证（直连，第一优先级）
     let fetched = ingestion::conditional_get(&state.http, &feed_url, None, None).await?;
@@ -208,8 +208,8 @@ pub async fn add_feed(
     for a in &parsed.articles {
         db::upsert_article_with_feed(&conn, feed_id, a, dedup)?;
     }
-    // 勾选「同步到 Miniflux」且已连接 → 入队推送新订阅（feeds 阶段推远端）
-    if sync_to_miniflux && sync_configured(&conn) {
+    // 勾选「同步到后端」且已连接 → 入队推送新订阅（feeds 阶段推远端）
+    if sync_to_backend && sync_configured(&conn) {
         let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
         db::enqueue_sync(&conn, None, Some(&feed_url), "add_feed", Some(&payload))?;
     }
