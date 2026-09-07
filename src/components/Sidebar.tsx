@@ -74,7 +74,7 @@ export function Sidebar() {
         : syncStatus === 'error'
           ? '同步失败'
           : syncConnected
-            ? 'Miniflux 已同步'
+            ? '后端已同步'
             : '本地模式 · 直连抓取';
 
   return (

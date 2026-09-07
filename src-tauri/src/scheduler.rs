@@ -105,16 +105,16 @@ async fn refresh_feeds_inner_with_concurrency(
         match due_filter {
             // 调度路径：模式判定在锁内一次完成（读 settings + 查询同临界区）
             Some((interval_min, _)) => {
-                let include_miniflux = read_sync_mode_conn(&conn) != "hybrid";
-                crate::db::feeds_due_for_refresh(&conn, interval_min, include_miniflux)
+                let include_remote = read_sync_mode_conn(&conn) != "hybrid";
+                crate::db::feeds_due_for_refresh(&conn, interval_min, include_remote)
             }
             // 手动全量：hybrid（跟随服务端）模式下跳过 origin='miniflux' 源——
             // 服务端源的内容由 Miniflux 同步提供，直连抓取会产生 source='direct'
             // 文章与已有的 source='miniflux' 文章重复（guid 不同 + 智能去重默认关），
             // 导致文章翻倍、状态错乱、未读数对不齐。direct 模式则全部直连（旧行为）。
             None => {
-                let include_miniflux = read_sync_mode_conn(&conn) != "hybrid";
-                crate::db::feeds_all_ids(&conn, include_miniflux)
+                let include_remote = read_sync_mode_conn(&conn) != "hybrid";
+                crate::db::feeds_all_ids(&conn, include_remote)
             }
         }
         .unwrap_or_else(|e| {
@@ -175,20 +175,20 @@ pub fn spawn_scheduler(app: AppHandle) {
                     }
                 }
             }
-            // Miniflux 后台自动同步（autoSyncMiniflux 开关，默认开）：
+            // 后端后台自动同步（autoSync 开关，默认开）：
             // 到期才跑轻量同步（push 队列 + changed_after 增量 pull）
-            auto_sync_miniflux(&db, &http, &app).await;
+            auto_sync_backend(&db, &http, &app).await;
             tokio::time::sleep(TICK).await;
         }
     });
 }
 
-/// Miniflux 自动同步：读 autoSyncMiniflux（默认开）与刷新间隔，
+/// 后端自动同步：读 autoSync（默认开）与刷新间隔，
 /// 到期（now - last_sync ≥ refreshInterval 分钟）时跑轻量同步。
 /// 失败静默（log 记录），下个 tick 仍会因 last_sync 未推进而重试。
 /// 状态被拉平后发 feeds-updated——前端列表/未读计数与 DB 不再脱节
 /// （pull 改变了 is_read 但用户无感知的"静默漂移"问题）。
-async fn auto_sync_miniflux(
+async fn auto_sync_backend(
     db: &Arc<tokio::sync::Mutex<Connection>>,
     http: &reqwest::Client,
     app: &AppHandle,
@@ -200,7 +200,7 @@ async fn auto_sync_miniflux(
             .flatten()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
         let on = raw.as_ref()
-            .and_then(|v| v.get("autoSyncMiniflux").and_then(|b| b.as_bool()))
+            .and_then(|v| v.get("autoSync").and_then(|b| b.as_bool()))
             .unwrap_or(true);
         if !on {
             return;

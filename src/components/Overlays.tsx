@@ -403,7 +403,7 @@ function AddFeedModalBody({
   const [layout, setLayout] = useState('inherit');
   const [autoSummary, setAutoSummary] = useState(false);
   const [autoTranslate, setAutoTranslate] = useState(false);
-  const [syncToBackend, setSyncToMiniflux] = useState(true);
+  const [syncToBackend, setSyncToBackend] = useState(true);
   /* 生效布局：显式选择优先，否则目标分类的布局——画廊/播客布局隐藏 AI 开关 */
   const curCatLayout = categories.find((c) => c.id === catId)?.layout ?? 'article';
   const noAi = LAYOUT_NO_AI.has(layout === 'inherit' ? curCatLayout : layout);
@@ -433,7 +433,7 @@ function AddFeedModalBody({
             onChange={(e) => setUrl(e.target.value)}
           />
           <div className="mini-dialog-hint">
-            不连接 Miniflux 也可添加：客户端将直连源站抓取（第一优先级），
+            不连接后端也可添加：客户端将直连源站抓取（第一优先级），
             连接后自动同步订阅关系并兜底直连失败的源。
           </div>
         </div>
@@ -491,10 +491,10 @@ function AddFeedModalBody({
               <input
                 type="checkbox"
                 checked={syncToBackend}
-                onChange={(e) => setSyncToMiniflux(e.target.checked)}
+                onChange={(e) => setSyncToBackend(e.target.checked)}
                 style={{ accentColor: 'var(--accent)' }}
               />
-              同步到 Miniflux
+              同步到后端
             </label>
           )}
         </div>

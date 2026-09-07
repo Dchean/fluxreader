@@ -112,7 +112,7 @@ export interface SyncStatusInfo {
 }
 
 /** sync_save 返回：首连且本地有未绑定源时 firstConnect=true
- *（前端据此弹「同步本地订阅到 Miniflux」确认框） */
+ *（前端据此弹「同步本地订阅到后端」确认框） */
 export interface SyncSaveResult {
   message: string;
   firstConnect: boolean;
