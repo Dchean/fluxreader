@@ -1,5 +1,5 @@
 //! 账号数据边界 + 缓存清理的端到端测试：
-//! ① 断开连接：origin='miniflux' 订阅（含文章/绑定/队列）被清理，
+//! ① 断开连接：origin='remote' 订阅（含文章/绑定/队列）被清理，
 //!    origin='local' 直连订阅保留，绑定/副本记账归零
 //! ② 缓存清理：scope=articles 删指定天数前的非收藏文章（收藏保留）；
 //!    scope=ai 只清 AI 摘要/翻译缓存
@@ -56,7 +56,7 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
     let mut conn = fresh_db("disconnect");
     let (local_feed, local_aid) = seed_local(&conn);
 
-    // 模拟服务端拉取：origin='miniflux' 订阅 + 文章 + 绑定 + 队列 + 墓碑
+    // 模拟服务端拉取：origin='remote' 订阅 + 文章 + 绑定 + 队列 + 墓碑
     let remote_folder = db::create_folder(&conn, "远端分类", "article").unwrap();
     let remote_feed = db::insert_feed_origin(
         &conn,
@@ -68,7 +68,7 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
         "inherit",
         true,
         false,
-        "miniflux",
+        "remote",
     )
     .unwrap();
     let a = db::NewArticle {
@@ -88,10 +88,10 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
     };
     let (remote_aid, _) = db::upsert_article_with_feed(&conn, remote_feed, &a, false).unwrap();
     // 绑定 + 队列 + 本地订阅也绑（模拟 URL 碰撞合并过的本地源）
-    db::set_article_miniflux_id(&conn, remote_aid, 9001).unwrap();
-    db::set_article_miniflux_id(&conn, local_aid, 9002).unwrap();
-    db::set_feed_miniflux_id(&conn, local_feed, 77).unwrap();
-    db::set_folder_miniflux_id(&conn, remote_folder, 55).unwrap();
+    db::set_article_remote_id(&conn, remote_aid, 9001).unwrap();
+    db::set_article_remote_id(&conn, local_aid, 9002).unwrap();
+    db::set_feed_remote_id(&conn, local_feed, 77).unwrap();
+    db::set_folder_remote_id(&conn, remote_folder, 55).unwrap();
     db::enqueue_sync(&conn, Some(local_aid), None, "read", None).unwrap();
     db::enqueue_sync(&conn, Some(remote_aid), None, "read", None).unwrap();
     let _ = conn.execute(
@@ -99,7 +99,7 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
         rusqlite::params![remote_aid],
     );
 
-    let (feeds, articles) = db::purge_miniflux_data(&mut conn).unwrap();
+    let (feeds, articles) = db::purge_remote_data(&mut conn).unwrap();
     assert_eq!(feeds, 1, "one miniflux-origin feed purged");
     assert!(articles > 0, "bindings cleared (rows touched)");
 
@@ -123,15 +123,15 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
 
     // 绑定/队列/墓碑/文件夹绑定全部归零
     let bound: i64 = conn
-        .query_row("SELECT COUNT(*) FROM articles WHERE miniflux_id IS NOT NULL", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM articles WHERE remote_id IS NOT NULL", [], |r| r.get(0))
         .unwrap();
     assert_eq!(bound, 0, "article bindings cleared");
     let feed_bound: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds WHERE miniflux_id IS NOT NULL", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM feeds WHERE remote_id IS NOT NULL", [], |r| r.get(0))
         .unwrap();
     assert_eq!(feed_bound, 0, "feed bindings cleared");
     let folder_bound: i64 = conn
-        .query_row("SELECT COUNT(*) FROM folders WHERE miniflux_id IS NOT NULL", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM folders WHERE remote_id IS NOT NULL", [], |r| r.get(0))
         .unwrap();
     assert_eq!(folder_bound, 0, "folder bindings cleared");
     let queue: i64 = conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0)).unwrap();
@@ -260,20 +260,20 @@ async fn reconnect_other_account_no_mixing() {
     {
         let conn = db::open(&tmp).unwrap();
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'miniflux'", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'remote'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 2, "account A feeds pulled");
     }
 
     // 断开 → 清理
     let mut conn = db::open(&tmp).unwrap();
-    let (feeds, _) = db::purge_miniflux_data(&mut conn).unwrap();
+    let (feeds, _) = db::purge_remote_data(&mut conn).unwrap();
     assert_eq!(feeds, 2, "account A data purged on disconnect");
 
     // 换账号 B（不同 token）：本地不再有 A 的订阅 → 不混杂
     db::set_setting(&conn, "miniflux_token", "token-b").unwrap();
     let left: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'miniflux'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'remote'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(left, 0, "no account A feeds left after purge");
     let _ = std::fs::remove_file(&tmp);
@@ -284,7 +284,7 @@ async fn reconnect_other_account_no_mixing() {
    ============================================================ */
 
 /// 未连接期间添加的本地源 → 首连后 sync_local_feeds 入队 → push_feeds 推送 →
-/// 服务端收到 create_feed 且本地绑定 miniflux_id；再跑一次（幂等）不再推送。
+/// 服务端收到 create_feed 且本地绑定 remote_id；再跑一次（幂等）不再推送。
 #[tokio::test]
 async fn sync_local_feeds_pushes_unbound_local_feeds() {
     let server = MockMiniflux::start().await.expect("start mock");
@@ -298,14 +298,14 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
     db::insert_feed(&conn, "http://127.0.0.1:1/b.xml", None, "Local B", None, folder, "inherit", true, false).unwrap();
     // 已绑定一个（不应重复入队）
     let bound = db::insert_feed(&conn, "http://127.0.0.1:1/c.xml", None, "Bound", None, folder, "inherit", true, false).unwrap();
-    db::set_feed_miniflux_id(&conn, bound, 999).unwrap();
+    db::set_feed_remote_id(&conn, bound, 999).unwrap();
 
     // 连接（复刻 sync_local_feeds 的入队逻辑：未绑本地源 → add_feed 队列）
     db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
     db::set_setting(&conn, "miniflux_token", "t").unwrap();
     let unbound: Vec<(String, Option<i64>)> = {
         let mut stmt = conn
-            .prepare("SELECT feed_url, folder_id FROM feeds WHERE origin = 'local' AND miniflux_id IS NULL")
+            .prepare("SELECT feed_url, folder_id FROM feeds WHERE origin = 'local' AND remote_id IS NULL")
             .unwrap();
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
@@ -329,11 +329,11 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
     assert_eq!(created.len(), 2, "both unbound local feeds pushed: {created:?}");
     assert_eq!(report.pushed_feeds, 2, "report counts both");
 
-    // 本地两个源绑定上 miniflux_id
+    // 本地两个源绑定上 remote_id
     let tmp2 = db::open(&tmp).unwrap();
     let bound_count: i64 = tmp2
         .query_row(
-            "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND miniflux_id IS NOT NULL",
+            "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NOT NULL",
             [],
             |r| r.get(0),
         )
@@ -342,7 +342,7 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
 
     // 幂等：队列已清空，再入队（无未绑源）→ 0
     let unbound2: i64 = tmp2
-        .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND miniflux_id IS NULL", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL", [], |r| r.get(0))
         .unwrap();
     assert_eq!(unbound2, 0, "idempotent: nothing left to push");
     let _ = std::fs::remove_file(&tmp);

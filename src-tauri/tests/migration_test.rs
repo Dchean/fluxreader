@@ -78,9 +78,9 @@ fn migration_v1_to_v2_preserves_data() {
     assert_eq!(queue[0].action, "read");
 
     // 新列可写
-    db::set_article_miniflux_id(&conn, 1, 42).unwrap();
+    db::set_article_remote_id(&conn, 1, 42).unwrap();
     let bound: i64 = conn
-        .query_row("SELECT miniflux_id FROM articles WHERE id = 1", [], |r| r.get(0))
+        .query_row("SELECT remote_id FROM articles WHERE id = 1", [], |r| r.get(0))
         .unwrap();
     assert_eq!(bound, 42);
 
@@ -150,9 +150,9 @@ fn migration_v6_to_v7_backfills_precise_url_norm() {
     assert_eq!(n1, n2, "dressed URL and clean URL must normalize to the same key");
     assert!(n1 == "http://example.com/story?id=9", "normalized form: got {n1}");
 
-    // miniflux_dup_ids 列存在且默认空
+    // remote_dup_ids 列存在且默认空
     let dups: String = conn
-        .query_row("SELECT miniflux_dup_ids FROM articles WHERE guid='g1'", [], |r| r.get(0))
+        .query_row("SELECT remote_dup_ids FROM articles WHERE guid='g1'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(dups, "");
 
