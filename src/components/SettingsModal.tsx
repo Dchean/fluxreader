@@ -16,7 +16,7 @@ const TAB_META: { id: string; title: string; subtitle: string; icon: () => React
   { id: 'reading', title: '阅读', subtitle: '正文字体、字号、版面、打开方式', icon: Icons.article },
   { id: 'feeds', title: '订阅', subtitle: '分类管理、内容布局绑定、AI规则', icon: Icons.rss },
   { id: 'ai', title: 'AI服务', subtitle: '模型端点配置、连通性探测、自定义提示词', icon: Icons.spark },
-  { id: 'sync', title: '同步', subtitle: 'Miniflux API 连接、双向增量同步', icon: Icons.refresh },
+  { id: 'sync', title: '同步', subtitle: '后端连接、双向增量同步', icon: Icons.refresh },
   { id: 'shortcuts', title: '快捷键', subtitle: '全键盘导航流转、全局指令', icon: Icons.keyboard },
   { id: 'about', title: '关于', subtitle: '客户端版本信息、底层架构', icon: Icons.info },
 ];
@@ -838,14 +838,15 @@ function SyncTab() {
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const [endpoint, setEndpoint] = useState('');
-  const [token, setToken] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [connected, setConnected] = useState(false);
   const [account, setAccount] = useState<string | null>(null);
   const [lastSync, setLastSync] = useState(0);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  /** 首连弹窗：本地未绑定源数（>0 弹「同步本地订阅到 Miniflux」确认） */
+  /** 首连弹窗：本地未绑定源数（>0 弹「同步本地订阅到后端」确认） */
   const [pendingLocalSync, setPendingLocalSync] = useState(0);
   const [syncingLocal, setSyncingLocal] = useState(false);
 
@@ -863,13 +864,13 @@ function SyncTab() {
 
   /* 轻量连通测试：不落库不做同步（填表时快速验证） */
   const doTest = async () => {
-    if (!endpoint.trim() || !token.trim()) {
-      showToast('请填写 Endpoint 和 API Token');
+    if (!endpoint.trim() || !username.trim() || !password.trim()) {
+      showToast('请填写 Endpoint、用户名和密码');
       return;
     }
     setTesting(true);
     try {
-      const msg = await api.syncTest(endpoint.trim(), token.trim());
+      const msg = await api.syncTest(endpoint.trim(), username.trim(), password.trim());
       showToast(msg ?? '连接成功');
     } catch (e) {
       showToast(`连接失败：${extractError(e)}`);
@@ -886,19 +887,19 @@ function SyncTab() {
       showToast('请填写 Endpoint');
       return;
     }
-    if (!token.trim() && !connected) {
-      showToast('请填写 API Token');
+    if ((!username.trim() || !password.trim()) && !connected) {
+      showToast('请填写用户名和密码');
       return;
     }
     setSaving(true);
     try {
-      const result = await api.syncSave(endpoint.trim(), token.trim());
+      const result = await api.syncSave(endpoint.trim(), username.trim(), password.trim());
       setConnected(true);
-      /* 保存成功即刷新账户名显示（syncSave 落了 miniflux_account） */
+      /* 保存成功即刷新账户名显示 */
       void api.syncStatus().then((st) => { if (st) setAccount(st.account); });
-      setToken('');
+      setPassword('');
       showToast(result?.message ?? '已保存，正在后台同步…');
-      /* 首连且本地有未绑定的直连源 → 弹「同步本地订阅到 Miniflux」
+      /* 首连且本地有未绑定的直连源 → 弹「同步本地订阅到后端」
          （不自动推：推送会改变服务端数据，必须用户确认） */
       if (result?.firstConnect && result.unboundLocalFeeds > 0) {
         setPendingLocalSync(result.unboundLocalFeeds);
@@ -917,8 +918,8 @@ function SyncTab() {
         })
         .then(() => reloadFromBackend())
         .then(() => {
-          useAppStore.setState({ syncStatus: 'synced', minifluxConnected: true });
-          showToast('Miniflux 同步完成');
+          useAppStore.setState({ syncStatus: 'synced', syncConnected: true });
+          showToast('后端同步完成');
         })
         .catch((e: unknown) => {
           const m = extractError(e);
@@ -931,7 +932,7 @@ function SyncTab() {
     }
   };
 
-  /** 把本地直连订阅推送到 Miniflux（首连弹窗确认与手动按钮共用）。
+  /** 把本地直连订阅推送到后端（首连弹窗确认与手动按钮共用）。
    * 幂等：已绑定的跳过、服务端已有同 URL（409）回查绑定不报错 */
   const doSyncLocal = async () => {
     if (dataMode !== 'tauri') {
@@ -957,7 +958,7 @@ function SyncTab() {
       const msg = await api.syncDisconnect();
       setConnected(false);
       setAccount(null);
-      setToken('');
+      setPassword('');
       await reloadFromBackend();
       showToast(msg ?? '已断开连接');
     } catch (e) {
@@ -970,7 +971,7 @@ function SyncTab() {
   if (dataMode !== 'tauri') {
     return (
       <>
-        <div className="settings-group-title">Miniflux 配置</div>
+        <div className="settings-group-title">后端配置</div>
         <SettingCard title="浏览器开发模式" desc="同步功能需要运行在 Tauri 客户端内（npm run tauri dev）">
           <span className="about-arch-tag">Mock 模式</span>
         </SettingCard>
@@ -980,7 +981,7 @@ function SyncTab() {
 
   return (
     <>
-      <div className="settings-group-title">Miniflux 配置</div>
+      <div className="settings-group-title">后端配置</div>
       <SettingCard
         title="连接状态"
         desc={connected
@@ -989,7 +990,7 @@ function SyncTab() {
       >
         <span className="about-arch-tag">{connected ? (account ?? '已连接') : '未连接'}</span>
       </SettingCard>
-      <SettingCard title="Miniflux 服务端 Endpoint" desc="例如 https://reader.example.com">
+      <SettingCard title="后端 Endpoint" desc="例如 https://reader.example.com（支持 Google Reader / Fever 协议）">
         <input
           type="text"
           className="setting-input"
@@ -999,15 +1000,27 @@ function SyncTab() {
         />
       </SettingCard>
       <SettingCard
-        title="API Token"
-        desc={connected ? '已保存（出于安全不回显）。留空提交 = 保持当前 Token；填写新值 = 更换账号/密钥' : 'Miniflux 设置 → API Keys 生成，用于双向同步已读/收藏/订阅'}
+        title="Google Reader 用户名"
+        desc="Miniflux「集成」页单独配置的 Google Reader 用户名（非 Miniflux 账号密码）"
+      >
+        <input
+          type="text"
+          className="setting-input"
+          placeholder="Google Reader 用户名"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+      </SettingCard>
+      <SettingCard
+        title="密码"
+        desc={connected ? '已保存（出于安全不回显）。留空提交 = 保持当前密码；填写新值 = 更换账号' : 'Google Reader 集成密码'}
       >
         <input
           type="password"
           className="setting-input"
-          placeholder={connected ? '●●●●●●●●（已保存）' : 'X-Auth-Token'}
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
+          placeholder={connected ? '●●●●●●●●（已保存）' : '密码'}
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
         />
       </SettingCard>
       <div className="settings-action-row">
@@ -1042,7 +1055,7 @@ function SyncTab() {
       <div className="settings-group-title" style={{ marginTop: 20 }}>自动同步</div>
       <SettingCard
         title="同步模式"
-        desc="本机抓取 = 直连各订阅源（离线可用）；跟随服务端 = 内容由 Miniflux 提供，多设备一致"
+        desc="本机抓取 = 直连各订阅源（离线可用）；跟随服务端 = 内容由后端提供，多设备一致"
       >
         <FluxDropdown
           width={130}
@@ -1054,17 +1067,16 @@ function SyncTab() {
           ]}
         />
       </SettingCard>
-      <SettingCard title="后台自动同步 Miniflux" desc="按刷新间隔到期时自动做轻量增量同步（拉取服务端状态变化）">
-        <Switch checked={settings.autoSyncMiniflux} onChange={(v) => updateSettings({ autoSyncMiniflux: v })} />
+      <SettingCard title="后台自动同步" desc="按刷新间隔到期时自动做轻量增量同步（拉取服务端状态变化）">
+        <Switch checked={settings.autoSync} onChange={(v) => updateSettings({ autoSync: v })} />
       </SettingCard>
 
       <CacheCleanupSection />
       <ConfigSyncSection />
-      <ArticleStateSyncSection />
 
       <ConfirmDialog
         open={confirmDisconnect}
-        title="断开 Miniflux 连接"
+        title="断开后端连接"
         message="断开后将移除从服务端拉取的订阅与文章（含已读/收藏绑定），本地直连添加的订阅不受影响。确定断开吗？"
         confirmText="断开并清理"
         onConfirm={() => { setConfirmDisconnect(false); void doDisconnect(); }}
@@ -1075,8 +1087,8 @@ function SyncTab() {
           （推送会改变服务端数据——必须用户确认，不自动执行） */}
       <ConfirmDialog
         open={pendingLocalSync > 0}
-        title="同步本地订阅到 Miniflux"
-        message={`检测到本地有 ${pendingLocalSync} 个直连添加的订阅尚未同步到服务端。是否现在同步？同步后它们会出现在你的 Miniflux 账户中，其他设备也能看到。`}
+        title="同步本地订阅到后端"
+        message={`检测到本地有 ${pendingLocalSync} 个直连添加的订阅尚未同步到服务端。是否现在同步？同步后它们会出现在你的后端账户中，其他设备也能看到。`}
         confirmText="同步到服务端"
         onConfirm={() => { setPendingLocalSync(0); void doSyncLocal(); }}
         onCancel={() => setPendingLocalSync(0)}
@@ -1369,75 +1381,6 @@ function ConfigSyncSection() {
         手动上传/下载模式：下载会覆盖本地设置与 AI 配置，订阅源按 URL 合并（已存在跳过）。
         多设备使用时，换机先「上传」，新机「下载并应用」。
       </div>
-    </>
-  );
-}
-
-
-/* ---------- 文章状态同步（已读/收藏：复用上方 Gist/WebDAV 凭据）---------- */
-function ArticleStateSyncSection() {
-  const [status, setStatus] = useState<{ configured: boolean; backend?: string; lastUpload?: string; localCount: number } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [report, setReport] = useState<string | null>(null);
-
-  const refresh = async () => {
-    try {
-      setStatus(await api.articleStateStatus());
-    } catch { /* Tauri-only */ }
-  };
-  useEffect(() => { void refresh(); }, []);
-
-  const doUpload = async () => {
-    setBusy(true); setReport(null);
-    try {
-      const at = await api.articleStateUpload();
-      setReport(`已上传本地 ${status?.localCount ?? '?'} 条状态到远端（${new Date(at).toLocaleString()}）`);
-      void refresh();
-    } catch (e: unknown) { setReport(`上传失败：${extractError(e)}`); }
-    finally { setBusy(false); }
-  };
-  const doDownload = async () => {
-    setBusy(true); setReport(null);
-    try {
-      const json = await api.articleStateDownload();
-      const r = await api.articleStateApply(json);
-      setReport(`已应用远端状态：匹配 ${r.matched} 篇，新标已读 ${r.set_read}、新加收藏 ${r.set_starred}。OR-合并：任一端已读/收藏→本地跟随`);
-      void refresh();
-    } catch (e: unknown) { setReport(`下载失败：${extractError(e)}`); }
-    finally { setBusy(false); }
-  };
-
-  return (
-    <>
-      <div className="settings-group-title" style={{ marginTop: 28 }}>文章状态同步</div>
-      <SettingCard
-        title="已读 / 收藏多端对齐"
-        desc={
-          status?.configured
-            ? `共用上方同步凭据（${status.backend === 'webdav' ? 'WebDAV' : 'GitHub Gist'}）。本地 ${status.localCount} 条有 URL 的文章${status.lastUpload ? ` · 上次上传 ${new Date(status.lastUpload).toLocaleString()}` : ' · 从未上传'}`
-            : '先把上方「同步后端」配置好（GitHub Token 或 WebDAV），本节会复用同一套凭据'
-        }
-      >
-        <span className="about-arch-tag">{status?.configured ? '已配置' : '未配置'}</span>
-      </SettingCard>
-      <div className="settings-action-row">
-        <button className="toggle-action-btn btn-primary" disabled={busy || !status?.configured} onClick={() => void doUpload()}>
-          {busy ? '上传中...' : '上传状态'}
-        </button>
-        <button className="toggle-action-btn" disabled={busy || !status?.configured} onClick={() => void doDownload()}>
-          {busy ? '下载中...' : '下载并应用'}
-        </button>
-      </div>
-      <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        仅同步已读/收藏 + URL 匹配键（url_norm），文件 ~50KB。冲突策略：OR-合并——
-        任一端已读即已读，任一端收藏即收藏，不会被另一端覆盖回未读。
-        后台默认每 10 分钟自动下载对齐；可在 app_settings 的 articleStateIntervalMin 调整（5–1440 分钟）。
-      </div>
-      {report && (
-        <div className="mini-dialog-hint" style={{ marginTop: 6, color: report.startsWith('失败') ? 'var(--accent-light)' : undefined }}>
-          {report}
-        </div>
-      )}
     </>
   );
 }

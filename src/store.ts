@@ -205,7 +205,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   syncStatus: 'synced',
   backgroundSyncing: false,
-  minifluxConnected: false,
+  syncConnected: false,
   githubFlow: null,
   githubAccount: null,
   githubLoggingIn: false,
@@ -240,7 +240,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     closeToTray: true,
     closePromptShown: false,
     notifyOnNewArticles: false,
-    autoSyncMiniflux: true,
+    autoSync: true,
     syncMode: 'direct',
   },
 
@@ -849,7 +849,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
     /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
     void api.syncStatus().then((st) => {
-      if (st && gen === reloadGeneration) set({ minifluxConnected: st.connected });
+      if (st && gen === reloadGeneration) set({ syncConnected: st.connected });
     });
     // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
     // （状态/内容可能变化，entries 需同步刷新为筛选结果）
@@ -1031,10 +1031,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     set({ syncStatus: 'syncing' });
-    get().showToast('正在后台增量同步 Miniflux...');
+    get().showToast('正在后台增量同步...');
     setTimeout(() => {
       set({ syncStatus: 'synced' });
-      get().showToast('Miniflux 同步完成');
+      get().showToast('后端同步完成');
     }, 1100);
   },
 
@@ -1159,17 +1159,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().showToast(`分类已改名：${trimmed}`);
   },
 
-  addFeed: (catId, url, title, layout, autoSummary, autoTranslate, syncToMiniflux = true) => {
+  addFeed: (catId, url, title, layout, autoSummary, autoTranslate, syncToBackend = true) => {
     if (get().dataMode === 'tauri') {
       const folderId = Number(catId.replace('cat-', ''));
       set({ syncStatus: 'syncing' });
       void api
-        .addFeed(url, title || null, folderId, layout, autoSummary, autoTranslate, syncToMiniflux)
+        .addFeed(url, title || null, folderId, layout, autoSummary, autoTranslate, syncToBackend)
         .then(() => get().reloadFromBackend())
         .then(async () => {
-          /* 勾选「同步到 Miniflux」→ 添加后立即跑 feeds 阶段推送新订阅到远端
+          /* 勾选「同步到后端」→ 添加后立即跑 feeds 阶段推送新订阅到远端
              （add_feed 只入队，这里触发推送让勾选语义即时生效） */
-          if (syncToMiniflux && get().minifluxConnected) {
+          if (syncToBackend && get().syncConnected) {
             await api.syncLocalFeeds().catch(() => null);
           }
           set({ syncStatus: 'synced' });
@@ -1180,7 +1180,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const msg = extractError(e);
           get().showToast(`添加失败：${msg}`, {
             label: '重试',
-            run: () => get().addFeed(catId, url, title, layout, autoSummary, autoTranslate, syncToMiniflux),
+            run: () => get().addFeed(catId, url, title, layout, autoSummary, autoTranslate, syncToBackend),
           });
         });
       return;
