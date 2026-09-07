@@ -93,9 +93,9 @@ export function createInitialEntries(): ArticleEntry[] {
       author: 'Yann LeCun',
       cover: 'https://picsum.photos/seed/deepseek/160/120',
       aiSummary: '文章深入剖析了 MLA（Multi-head Latent Attention）多头潜在注意力机制，展示其如何将 KV 缓存压缩至原始大小的数分之一，极大缓解了长上下文端侧推理的内存墙瓶颈。',
-      content: '<p>现代大语言模型推理阶段的核心瓶颈往往不在算力，而在于高并发与长上下文下的内存带宽限制。</p><p>在 FluxReader 的设计中，Miniflux 承担了订阅关系与状态同步中继，而 SQLite 与 Rust 引擎则完整承载了离线全文索引、正文媒体增强与 AI 摘要持久化。</p><p>通过 MLA 算法，客户端能够在端侧大幅压缩缓存体积，实现毫秒级快速索引与响应。</p>',
+      content: '<p>现代大语言模型推理阶段的核心瓶颈往往不在算力，而在于高并发与长上下文下的内存带宽限制。</p><p>在 FluxReader 的设计中，后端承担了订阅关系与状态同步中继，而 SQLite 与 Rust 引擎则完整承载了离线全文索引、正文媒体增强与 AI 摘要持久化。</p><p>通过 MLA 算法，客户端能够在端侧大幅压缩缓存体积，实现毫秒级快速索引与响应。</p>',
       rawContent: '<p><b>[RSS Raw Output]</b> The primary bottleneck in inference is memory bandwidth. Multi-head Latent Attention (MLA) effectively compresses KV cache. Full local-first implementation tested with SQLite and Rust FFI layer.</p>',
-      translatedContent: '<p>现代大语言模型推理阶段的核心瓶颈往往不在算力，而在于高并发与长上下文下的内存带宽限制。</p><p>在 FluxReader 的设计中，Miniflux 承担了订阅关系与状态同步中继，而 SQLite 与 Rust 引擎则完整承载了离线全文索引、正文媒体增强与 AI 摘要持久化。</p><p>通过 MLA 算法，客户端能够在端侧大幅压缩缓存体积，实现毫秒级快速索引与响应。</p>',
+      translatedContent: '<p>现代大语言模型推理阶段的核心瓶颈往往不在算力，而在于高并发与长上下文下的内存带宽限制。</p><p>在 FluxReader 的设计中，后端承担了订阅关系与状态同步中继，而 SQLite 与 Rust 引擎则完整承载了离线全文索引、正文媒体增强与 AI 摘要持久化。</p><p>通过 MLA 算法，客户端能够在端侧大幅压缩缓存体积，实现毫秒级快速索引与响应。</p>',
     },
     {
       id: 'art-2', feedId: 'f-rust',

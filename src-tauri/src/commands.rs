@@ -754,7 +754,7 @@ pub async fn opml_export(state: State<'_, AppState>) -> AppResult<String> {
 }
 
 /* ============================================================
-   Miniflux 同步
+   后端同步
    ============================================================ */
 
 /// 测试连接（轻量）：纯 GET /v1/me，不落库、不做任何同步。
@@ -872,7 +872,7 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
     let queued = {
         let conn = state.db.lock().await;
         if !sync_configured(&conn) {
-            return Err(AppError::new("notConnected", "未连接 Miniflux"));
+            return Err(AppError::new("notConnected", "未连接后端"));
         }
         let mut stmt = conn
             .prepare(
@@ -914,7 +914,7 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
     // feeds 阶段：push（新入队的 + 队列残留的）+ pull（碰撞绑定 + 远端新订阅）
     let report = crate::sync::feeds_phase(&state.db, &state.http).await?;
     if report.errors.is_empty() {
-        Ok(format!("已同步 {queued} 个本地订阅到 Miniflux（推送 {}）", report.pushed_feeds))
+        Ok(format!("已同步 {queued} 个本地订阅到后端（推送 {}）", report.pushed_feeds))
     } else {
         Ok(format!(
             "已同步 {queued} 个本地订阅，其中 {} 个失败（下次同步自动重试）：{}",
