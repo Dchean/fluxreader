@@ -400,27 +400,6 @@ export const api = {
     return (await inv('config_sync_apply', { payload })) as { imported: number; skipped: number };
   },
 
-  /* 文章状态同步（已读/收藏，GitHub Gist / WebDAV） */
-  async articleStateUpload(): Promise<string> {
-    const inv = await getInvoke();
-    if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('article_state_upload')) as string;
-  },
-  async articleStateDownload(): Promise<string> {
-    const inv = await getInvoke();
-    if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('article_state_download')) as string;
-  },
-  async articleStateApply(payload: string): Promise<{ matched: number; set_read: number; set_starred: number }> {
-    const inv = await getInvoke();
-    if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('article_state_apply', { payload })) as { matched: number; set_read: number; set_starred: number };
-  },
-  async articleStateStatus(): Promise<{ configured: boolean; backend?: string; lastUpload?: string; localCount: number } | null> {
-    const inv = await getInvoke();
-    return inv ? ((await inv('article_state_status')) as { configured: boolean; backend?: string; lastUpload?: string; localCount: number }) : null;
-  },
-
   /* ---- GitHub 设备流登录 ---- */
   /** 发起 GitHub 登录：返回 user_code + 授权页地址 + 轮询间隔（秒）。 */
   async githubLoginStart(force?: boolean): Promise<{ user_code: string; verification_uri: string; interval: number }> {
@@ -462,20 +441,20 @@ export const api = {
     return inv ? (await inv('opml_export') as string) : null;
   },
 
-  /* ---- Miniflux 同步 ---- */
+  /* ---- Google Reader 同步 ---- */
   /** 返回 null = 浏览器环境（mock 模式） */
-  /** 轻量连通测试（GET /v1/me），不落库不做同步 */
-  async syncTest(endpoint: string, token: string): Promise<string | null> {
+  /** 轻量连通测试（ClientLogin + subscription/list），不落库不做同步 */
+  async syncTest(endpoint: string, username: string, password: string): Promise<string | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('sync_test', { endpoint, token }) as string) : null;
+    return inv ? (await inv('sync_test', { endpoint, username, password }) as string) : null;
   },
   /** 保存凭据（先测试，失败不保存）。重活（拉订阅/同步状态）由前端随后台阶段执行。
    * 返回 JSON：{ message, firstConnect, unboundLocalFeeds }——首连且本地有
    * 未绑定源时前端弹「同步本地订阅」确认框 */
-  async syncSave(endpoint: string, token: string): Promise<SyncSaveResult | null> {
+  async syncSave(endpoint: string, username: string, password: string): Promise<SyncSaveResult | null> {
     const inv = await getInvoke();
     if (!inv) return null;
-    const raw = (await inv('sync_save', { endpoint, token })) as string;
+    const raw = (await inv('sync_save', { endpoint, username, password })) as string;
     try {
       return JSON.parse(raw) as SyncSaveResult;
     } catch {
@@ -483,8 +462,8 @@ export const api = {
       return { message: raw, firstConnect: false, unboundLocalFeeds: 0 };
     }
   },
-  /** 把本地直连订阅（未绑定的）推送到 Miniflux。幂等：已绑定的跳过、
-   * 服务端已存在（409）回查绑定不报错 */
+  /** 把本地直连订阅（未绑定的）推送到后端。幂等：已绑定的跳过、
+   * 服务端已存在回查绑定不报错 */
   async syncLocalFeeds(): Promise<string | null> {
     const inv = await getInvoke();
     return inv ? (await inv('sync_local_feeds') as string) : null;

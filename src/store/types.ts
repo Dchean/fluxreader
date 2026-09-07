@@ -58,7 +58,7 @@ export interface SettingsState {
   /** 新文章到达发 Windows 系统通知（默认关；窗口隐藏时才发） */
   notifyOnNewArticles: boolean;
   /** 后台自动同步 Miniflux（默认开；到期跑轻量增量同步，状态变更另有即时推送） */
-  autoSyncMiniflux: boolean;
+  autoSync: boolean;
   /** 同步模式（UI 词条：本机抓取 / 跟随服务端——命名直指差异点"内容从哪来"）：
    *  'direct' 本机抓取（默认）：全部源由 FluxReader 直连抓取，Miniflux 只同步状态；
    *  'hybrid' 跟随服务端：后台刷新跳过服务端来源的源，内容由 Miniflux 同步提供 */
@@ -139,7 +139,7 @@ export interface AppState {
   /** 后台自动同步进行中（scheduler sync-running/sync-idle 事件驱动；与手动 syncStatus 独立） */
   backgroundSyncing: boolean;
   /** 后端真实的 Miniflux 连接态（bootstrap/sync 后刷新），未连接时侧栏不显示"已同步" */
-  minifluxConnected: boolean;
+  syncConnected: boolean;
 
   /** GitHub 设备流登录：等待授权态（user_code 常驻显示；组件 unmount 不影响后端轮询） */
   githubFlow: { user_code: string; verification_uri: string; interval: number } | null;
@@ -253,7 +253,7 @@ export interface AppState {
   deleteCategory: (catId: string) => void;
   /** 分类改名（连接 Miniflux 时同步远端） */
   renameCategory: (catId: string, name: string) => void;
-  addFeed: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean, syncToMiniflux?: boolean) => void;
+  addFeed: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean, syncToBackend?: boolean) => void;
   deleteFeed: (catId: string, feedId: string) => void;
   /** 编辑源：改名/移动分类/布局/AI 开关一次性提交 */
   editFeed: (feedId: string, next: { title: string; catId: string; layout: string; autoSummary: boolean; autoTranslate: boolean }) => void;

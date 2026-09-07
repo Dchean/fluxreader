@@ -367,7 +367,7 @@ export function AddFeedModal() {
   const addFeedTargetCatId = useAppStore((s) => s.addFeedTargetCatId);
   const addFeed = useAppStore((s) => s.addFeed);
   const categories = useAppStore((s) => s.categories);
-  const minifluxConnected = useAppStore((s) => s.minifluxConnected);
+  const syncConnected = useAppStore((s) => s.syncConnected);
 
   /* 每次打开重挂载（key），初始值即打开瞬间的目标分类 */
   return (
@@ -376,7 +376,7 @@ export function AddFeedModal() {
         key={addFeedTargetCatId + String(addFeedModalOpen)}
         initialCatId={addFeedTargetCatId || categories[0]?.id || ''}
         categories={categories}
-        minifluxConnected={minifluxConnected}
+        syncConnected={syncConnected}
         onCancel={() => closeMiniModal('addFeed')}
         onSubmit={addFeed}
       />
@@ -387,15 +387,15 @@ export function AddFeedModal() {
 function AddFeedModalBody({
   initialCatId,
   categories,
-  minifluxConnected,
+  syncConnected,
   onCancel,
   onSubmit,
 }: {
   initialCatId: string;
   categories: { id: string; name: string; layout?: string }[];
-  minifluxConnected: boolean;
+  syncConnected: boolean;
   onCancel: () => void;
-  onSubmit: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean, syncToMiniflux: boolean) => void;
+  onSubmit: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean, syncToBackend: boolean) => void;
 }) {
   const [url, setUrl] = useState('');
   const [title, setTitle] = useState('');
@@ -403,7 +403,7 @@ function AddFeedModalBody({
   const [layout, setLayout] = useState('inherit');
   const [autoSummary, setAutoSummary] = useState(false);
   const [autoTranslate, setAutoTranslate] = useState(false);
-  const [syncToMiniflux, setSyncToMiniflux] = useState(true);
+  const [syncToBackend, setSyncToMiniflux] = useState(true);
   /* 生效布局：显式选择优先，否则目标分类的布局——画廊/播客布局隐藏 AI 开关 */
   const curCatLayout = categories.find((c) => c.id === catId)?.layout ?? 'article';
   const noAi = LAYOUT_NO_AI.has(layout === 'inherit' ? curCatLayout : layout);
@@ -486,11 +486,11 @@ function AddFeedModalBody({
               </label>
             </>
           )}
-          {minifluxConnected && (
+          {syncConnected && (
             <label className="mini-dialog-checkbox">
               <input
                 type="checkbox"
-                checked={syncToMiniflux}
+                checked={syncToBackend}
                 onChange={(e) => setSyncToMiniflux(e.target.checked)}
                 style={{ accentColor: 'var(--accent)' }}
               />
@@ -505,7 +505,7 @@ function AddFeedModalBody({
             className="toggle-action-btn btn-primary"
             onClick={() => {
               if (!url.trim()) return;
-              onSubmit(catId, url.trim(), title.trim() || url.trim(), layout, noAi ? false : autoSummary, noAi ? false : autoTranslate, syncToMiniflux);
+              onSubmit(catId, url.trim(), title.trim() || url.trim(), layout, noAi ? false : autoSummary, noAi ? false : autoTranslate, syncToBackend);
               onCancel();
             }}
           >

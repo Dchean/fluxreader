@@ -39,7 +39,7 @@ export function Sidebar() {
   const activeFeedFilter = useAppStore((s) => s.activeFeedFilter);
   const syncStatus = useAppStore((s) => s.syncStatus);
   const backgroundSyncing = useAppStore((s) => s.backgroundSyncing);
-  const minifluxConnected = useAppStore((s) => s.minifluxConnected);
+  const syncConnected = useAppStore((s) => s.syncConnected);
 
   const selectLayout = useAppStore((s) => s.selectLayout);
   const selectView = useAppStore((s) => s.selectView);
@@ -73,7 +73,7 @@ export function Sidebar() {
         ? '后台同步中...'
         : syncStatus === 'error'
           ? '同步失败'
-          : minifluxConnected
+          : syncConnected
             ? 'Miniflux 已同步'
             : '本地模式 · 直连抓取';
 
@@ -282,7 +282,7 @@ export function Sidebar() {
       <div className="sidebar-fixed-bottom">
         <div className="sync-status-row">
           <button className="sync-status-pill" onClick={() => openSettingsTab('sync')}>
-            <div className={`sync-dot ${minifluxConnected ? '' : 'sync-dot-off'}`} />
+            <div className={`sync-dot ${syncConnected ? '' : 'sync-dot-off'}`} />
             <span>{syncLabel}</span>
           </button>
           <button
