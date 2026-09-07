@@ -9,7 +9,7 @@ mod mock_miniflux;
 
 use app_lib::db;
 use app_lib::sync;
-use mock_miniflux::MockMiniflux;
+use mock_miniflux::{MockEnclosure, MockMiniflux};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -118,6 +118,105 @@ async fn pending_local_read_wins_over_stale_remote_in_upsert() {
         .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| r.get::<_, i64>(0).map(|v| v != 0))
         .unwrap();
     assert!(is_read, "local read must survive (no ping-pong)");
+}
+
+/// ⑥ 封面污染回归：Miniflux entry 带音频 enclosure（播客），enclosure 是
+/// mp3 不是图片——image_url 必须是正文第一图，绝不能是 enclosure URL。
+#[tokio::test]
+#[ignore = "spins a local mock server"]
+async fn miniflux_enclosure_is_not_used_as_cover() {
+    let (db, http, server) = setup("enclosure_cover").await;
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+
+    // 播客源 entry：正文含封面图 + 音频 enclosure（mp3）
+    let content = r#"<p>shownotes</p><img src="https://img.example.com/cover.jpg" />"#;
+    let enclosures = vec![MockEnclosure {
+        url: "https://audio.example.com/ep1.mp3".into(),
+        mime_type: "audio/mpeg".into(),
+        duration: Some(1234),
+    }];
+    server.add_entry_full(
+        11,
+        "http://example.com/remote-only/post/podcast-1",
+        "Podcast Episode",
+        "unread",
+        false,
+        content,
+        enclosures,
+    );
+
+    sync::sync_light(&db, &http).await.expect("light sync");
+
+    let conn = db.lock().await;
+    let (image_url, enclosure_url): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT image_url, enclosure_url FROM articles WHERE url = 'http://example.com/remote-only/post/podcast-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    // enclosure 正确落库（播放依赖）
+    assert_eq!(enclosure_url.as_deref(), Some("https://audio.example.com/ep1.mp3"), "enclosure 必须落库供播放");
+    // 封面必须是正文第一图，绝不能是音频 URL
+    assert_eq!(image_url.as_deref(), Some("https://img.example.com/cover.jpg"), "封面必须是正文图，不是 enclosure URL");
+}
+
+/// ⑦ 封面回填回归：origin='miniflux' 源的条目，首次入库时正文无图（无封面），
+/// 之后 Miniflux 端正文带图，重同步时 existing 分支必须回填 image_url
+/// （此前 existing 分支从不补封面 → 「部分文章不显示封面」根因）。
+#[tokio::test]
+#[ignore = "spins a local mock server"]
+async fn miniflux_existing_entry_backfills_cover() {
+    let (db, http, server) = setup("cover_backfill").await;
+
+    // 先把远端 feed 11（remote-only）拉到本地（origin='miniflux' + 绑定 miniflux_id）
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+
+    // 服务端 feed 11（remote-only，origin='miniflux'）先加一条正文无图的条目
+    let mf_id = server.add_entry_full(
+        11,
+        "http://example.com/remote-only/post/cover",
+        "Cover",
+        "unread",
+        false,
+        "<p>no image yet</p>",
+        Vec::new(),
+    );
+
+    // 首次 light 同步：new 分支入库，正文无图 → image_url 为 NULL
+    sync::sync_light(&db, &http).await.expect("light sync");
+    {
+        let conn = db.lock().await;
+        let image: Option<String> = conn
+            .query_row(
+                "SELECT image_url FROM articles WHERE url = 'http://example.com/remote-only/post/cover'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(image, None, "首次入库正文无图，封面应为空");
+    }
+
+    // Miniflux 端该条目正文补上图（模拟服务端重新抓取后 content 带图）
+    {
+        let mut es = server.entries.lock().unwrap();
+        if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
+            e.content = r#"<p>body</p><img src="https://img.example.com/backfill.jpg" />"#.into();
+        }
+    }
+
+    // 再次 light 同步：existing 分支（URL 匹配）必须回填封面
+    sync::sync_light(&db, &http).await.expect("light sync");
+
+    let conn = db.lock().await;
+    let image_url: Option<String> = conn
+        .query_row(
+            "SELECT image_url FROM articles WHERE url = 'http://example.com/remote-only/post/cover'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(image_url.as_deref(), Some("https://img.example.com/backfill.jpg"), "existing 分支必须回填 Miniflux 正文第一图作封面");
 }
 
 /// ③ 规范化 URL 匹配：同文不同饰（https/http + 尾斜杠）不重复入库。

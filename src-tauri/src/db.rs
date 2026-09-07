@@ -1248,6 +1248,26 @@ pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
     Ok(())
 }
 
+/// 查询「无封面 + 有原文 URL + 直连来源」的文章 id（封面后台补全用）。
+/// 摘要型 RSS（少数派等）不带 media 字段，封面只能从文章页 og:image 拿；
+/// 这里只取直连源（source='direct'）的条目——Miniflux 源在入库时已用
+/// 正文第一图兜底，无需再抓文章页。limit 限制单轮批处理量（避免启动时
+/// 一次性扫全库 + 轰炸源站）。
+pub fn articles_without_cover(conn: &Connection, limit: i64) -> AppResult<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, url FROM articles
+         WHERE (image_url IS NULL OR image_url = '')
+           AND url IS NOT NULL AND url != ''
+           AND source = 'direct'
+         ORDER BY published_at DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// 全部已读：作用于当前筛选范围（feed/folder/all），与前端「全部已读」按钮语义一致
 pub fn mark_all_read(
     conn: &Connection,
