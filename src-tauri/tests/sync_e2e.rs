@@ -3,16 +3,16 @@
 //! 直连失败源的兜底拉取（source='miniflux'）。
 //! 运行：cargo test --test sync_e2e -- --ignored --nocapture
 
-mod mock_miniflux;
+mod mock_greader;
 
 use app_lib::db;
 use app_lib::sync;
-use mock_miniflux::MockMiniflux;
+use mock_greader::MockGReader;
 
 #[tokio::test]
 #[ignore = "spins a local mock server"]
 async fn miniflux_sync_end_to_end() {
-    let server = MockMiniflux::start().await.expect("start mock server");
+    let server = MockGReader::start().await.expect("start mock server");
 
     let tmp = std::env::temp_dir().join("fluxreader_sync_e2e.db");
     let _ = std::fs::remove_file(&tmp);
@@ -59,8 +59,9 @@ async fn miniflux_sync_end_to_end() {
     server.add_entry(11, "http://example.com/only-remote", "Remote only article", "unread", false);
 
     // ---------- ① 连接 + 全量同步 ----------
-    db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
-    db::set_setting(&conn, "miniflux_token", "test-token").unwrap();
+    db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "greader_username", "test").unwrap();
+    db::set_setting(&conn, "greader_password", "test-token").unwrap();
 
     let http = app_lib::ingestion::build_client(10);
     drop(conn);
@@ -119,7 +120,7 @@ async fn miniflux_sync_end_to_end() {
 
     // 远端收到 unread 状态更新（entry id 即绑定的 remote_id）
     let mf_id = merged.2.unwrap();
-    let updates = mock_miniflux::status_updates_map(&server);
+    let updates = mock_greader::status_updates_map(&server);
     assert_eq!(
         updates.get(&mf_id).map(|s| s.as_str()),
         Some("unread"),
@@ -167,7 +168,7 @@ async fn miniflux_sync_end_to_end() {
     {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
-            e.status = "read".into();
+            e.read = true;
         }
     }
     // 模拟跨源同 URL entry（feed 11 = remote-only feed，未读态）
@@ -192,7 +193,7 @@ async fn miniflux_sync_end_to_end() {
     {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
-            e.status = "unread".into();
+            e.read = false;
         }
     }
     drop(conn);
@@ -204,7 +205,7 @@ async fn miniflux_sync_end_to_end() {
     assert!(!now_read, "own-feed entry status change still merges (guard doesn't break normal path)");
 
     // 连接测试
-    let (msg, username) = sync::test_connection(&server.url(), "test-token", &http).await.unwrap();
+    let (msg, username) = sync::test_connection(&server.url(), "mockuser", "mockpass", &http).await.unwrap();
     assert!(msg.contains("mockuser"), "test_connection returns username: {msg}");
     assert_eq!(username, "mockuser");
 

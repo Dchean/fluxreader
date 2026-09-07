@@ -7,7 +7,7 @@
 
 use app_lib::db;
 
-mod mock_miniflux;
+mod mock_greader;
 
 fn temp_db(name: &str) -> std::path::PathBuf {
     let tmp = std::env::temp_dir().join(format!(
@@ -105,7 +105,7 @@ fn dedup_uses_normalized_url() {
 
 #[tokio::test]
 async fn read_intent_flows_both_ways_across_feeds() {
-    let server = mock_miniflux::MockMiniflux::start().await.expect("start mock");
+    let server = mock_greader::MockGReader::start().await.expect("start mock");
     let tmp = temp_db("flow");
     let conn = db::open(&tmp).expect("open db");
     let db = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
@@ -115,8 +115,8 @@ async fn read_intent_flows_both_ways_across_feeds() {
     //   里长持 guard 跨 sync 会自死锁）
     let (xid, _own_id, copy_id) = {
         let conn = db.lock().await;
-        let own_id = server.add_entry_ret(10, "http://x/story", "Own copy", "read", false);
-        let copy_id = server.add_entry_ret(20, "http://x/story", "Other feed copy", "unread", false);
+        let own_id = server.add_entry_ret(10, "http://x/story", "Own copy", true, false);
+        let copy_id = server.add_entry_ret(20, "http://x/story", "Other feed copy", false, false);
 
         db::create_folder(&conn, "F", "article").unwrap();
         db::insert_feed(&conn, "http://x/a.xml", None, "FA", None, 1, "inherit", false, false).unwrap();
@@ -125,8 +125,9 @@ async fn read_intent_flows_both_ways_across_feeds() {
         db::set_article_remote_id(&conn, xid, own_id).unwrap();
         conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [xid]).unwrap();
 
-        db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
-        db::set_setting(&conn, "miniflux_token", "t").unwrap();
+        db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+        db::set_setting(&conn, "greader_username", "t").unwrap();
+    db::set_setting(&conn, "greader_password", "pw").unwrap();
         (xid, own_id, copy_id)
     };
     let http = app_lib::ingestion::build_client(10);
@@ -146,7 +147,7 @@ async fn read_intent_flows_both_ways_across_feeds() {
 
     // ---- 手机端读了副本（copy entry → read）：桌面必须跟随 ----
     server.entries.lock().unwrap().iter_mut().for_each(|e| {
-        if e.id == copy_id { e.status = "read".into(); }
+        if e.id == copy_id { e.read = true; }
     });
     let _ = app_lib::sync::sync_now(&db, &http).await.expect("sync 2");
     {
@@ -160,8 +161,8 @@ async fn read_intent_flows_both_ways_across_feeds() {
     // ---- 桌面端标读：广播到副本 entry ----
     let (yid, y_own, y_copy) = {
         let conn = db.lock().await;
-        let y_own = server.add_entry_ret(10, "http://x/story-y", "Y own", "unread", false);
-        let y_copy = server.add_entry_ret(20, "http://x/story-y", "Y copy", "unread", false);
+        let y_own = server.add_entry_ret(10, "http://x/story-y", "Y own", false, false);
+        let y_copy = server.add_entry_ret(20, "http://x/story-y", "Y copy", false, false);
         let (yid, _) = db::upsert_article_with_feed(&conn, 1, &article("http://x/story-y", "gy"), false).unwrap();
         db::set_article_remote_id(&conn, yid, y_own).unwrap();
         (yid, y_own, y_copy)
@@ -181,7 +182,7 @@ async fn read_intent_flows_both_ways_across_feeds() {
         let conn = db.lock().await;
         let _ = conn; // 断言走 mock 状态，无需 DB
     }
-    let updates = mock_miniflux::status_updates_map(&server);
+    let updates = mock_greader::status_updates_map(&server);
     assert_eq!(updates.get(&y_own).map(|s| s.as_str()), Some("read"), "own entry pushed read");
     assert_eq!(updates.get(&y_copy).map(|s| s.as_str()), Some("read"), "copy entry broadcast read (phone sees it read)");
 
@@ -195,19 +196,20 @@ async fn read_intent_flows_both_ways_across_feeds() {
 
 #[tokio::test]
 async fn pending_local_change_wins_over_stale_remote() {
-    let server = mock_miniflux::MockMiniflux::start().await.expect("start mock");
+    let server = mock_greader::MockGReader::start().await.expect("start mock");
     let tmp = temp_db("pending");
     let conn = db::open(&tmp).expect("open db");
 
     db::create_folder(&conn, "F", "article").unwrap();
     db::insert_feed(&conn, "http://x/a.xml", None, "FA", None, 1, "inherit", false, false).unwrap();
     db::set_feed_remote_id(&conn, 1, 10).unwrap();
-    let own_id = server.add_entry_ret(10, "http://x/p", "P", "read", false); // 服务端：已读
+    let own_id = server.add_entry_ret(10, "http://x/p", "P", true, false); // 服务端：已读
     let (aid, _) = db::upsert_article_with_feed(&conn, 1, &article("http://x/p", "gp"), false).unwrap();
     db::set_article_remote_id(&conn, aid, own_id).unwrap();
 
-    db::set_setting(&conn, "miniflux_endpoint", &server.url()).unwrap();
-    db::set_setting(&conn, "miniflux_token", "t").unwrap();
+    db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "greader_username", "t").unwrap();
+    db::set_setting(&conn, "greader_password", "pw").unwrap();
     let http = app_lib::ingestion::build_client(10);
 
     // 桌面刚标未读（已入队未推送），服务端还是旧已读态
@@ -224,7 +226,7 @@ async fn pending_local_change_wins_over_stale_remote() {
         .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| r.get::<_, i64>(0).map(|v| v != 0))
         .unwrap();
     assert!(!final_read, "local unread must survive the sync round-trip");
-    let updates = mock_miniflux::status_updates_map(&server);
+    let updates = mock_greader::status_updates_map(&server);
     assert_eq!(updates.get(&own_id).map(|s| s.as_str()), Some("unread"), "unread pushed to server");
 
     let _ = std::fs::remove_file(&tmp);
