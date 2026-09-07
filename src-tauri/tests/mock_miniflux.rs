@@ -7,6 +7,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
+pub struct MockEnclosure {
+    pub url: String,
+    #[serde(default)]
+    pub mime_type: String,
+    #[serde(default)]
+    pub duration: Option<i64>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct MockEntry {
     pub id: i64,
     pub feed_id: i64,
@@ -18,6 +27,8 @@ pub struct MockEntry {
     pub changed_at: String,
     pub status: String,
     pub starred: bool,
+    #[serde(default)]
+    pub enclosures: Vec<MockEnclosure>,
 }
 
 pub struct MockMiniflux {
@@ -114,6 +125,44 @@ impl MockMiniflux {
             changed_at,
             status: status.to_string(),
             starred,
+            enclosures: Vec::new(),
+        });
+        id
+    }
+
+    /// 同 add_entry_ret，但可指定正文 HTML 与 enclosures（播客/封面污染回归用）：
+    /// 真实 Miniflux entry 的 enclosures 数组承载音频/视频附件（播客的 mp3/m4a）。
+    #[allow(dead_code)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_entry_full(
+        &self,
+        feed_id: i64,
+        url: &str,
+        title: &str,
+        status: &str,
+        starred: bool,
+        content: &str,
+        enclosures: Vec<MockEnclosure>,
+    ) -> i64 {
+        let id = {
+            let mut n = self.next_entry_id.lock().unwrap();
+            *n += 1;
+            *n
+        };
+        let changed_at = chrono::Utc::now().to_rfc3339();
+        let published_at = chrono::Utc::now().to_rfc3339();
+        self.entries.lock().unwrap().push(MockEntry {
+            id,
+            feed_id,
+            url: Some(url.to_string()),
+            title: title.to_string(),
+            author: Some("Miniflux Author".into()),
+            content: content.to_string(),
+            published_at,
+            changed_at,
+            status: status.to_string(),
+            starred,
+            enclosures,
         });
         id
     }

@@ -320,3 +320,118 @@ pub fn spawn_article_state_sync(app: AppHandle) {
         }
     });
 }
+
+/* ============================================================
+   封面后台补全（og:image 兜底）
+   ============================================================ */
+
+/// 每轮最多补全的封面数（防一次性扫全库 + 轰炸源站）。
+const COVER_BACKFILL_BATCH: i64 = 20;
+/// 封面补全并发上限（低优先级，比 feed 抓取的默认 4 更低，避免抢带宽）。
+const COVER_BACKFILL_CONCURRENCY: usize = 2;
+/// 封面补全循环间隔：60s 醒一次，每轮最多处理一批，处理完下一批等下轮。
+const COVER_BACKFILL_TICK: Duration = Duration::from_secs(60);
+
+/// 封面后台补全循环：摘要型 RSS（少数派等）不带 media 字段，正文也没有图，
+/// 列表卡片无封面。此循环对「无封面 + 有原文 URL 的直连文章」抓文章页
+/// og:image 补封面（复用 extraction::lead_image），低优先级、限并发、失败
+/// 负缓存（同一 URL 本进程不重试，避免反复轰炸源站）。
+///
+/// 只处理 direct 源：Miniflux 源入库时已用正文第一图兜底，无需再抓文章页。
+pub fn spawn_cover_backfill(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // 启动后等 45s 再跑首轮：避开启动期 UI 抢锁 + 让 feed 抓取先落库，
+        // 否则首轮查到的是「还没有文章的库」，白跑一轮。
+        tokio::time::sleep(Duration::from_secs(45)).await;
+        let db = app.state::<AppState>().db.clone();
+        let http = app.state::<AppState>().http.clone();
+        let tried = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
+        loop {
+            // 取一批无封面文章（url, 已尝试过的不再取）
+            let targets: Vec<(i64, String)> = {
+                let conn = db.lock().await;
+                let all = crate::db::articles_without_cover(&conn, COVER_BACKFILL_BATCH)
+                    .unwrap_or_default();
+                let tried_guard = tried.lock().await;
+                all.into_iter()
+                    .filter(|(_, url)| !tried_guard.contains(url))
+                    .collect()
+            };
+            if targets.is_empty() {
+                tokio::time::sleep(COVER_BACKFILL_TICK).await;
+                continue;
+            }
+
+            let sem = Arc::new(tokio::sync::Semaphore::new(COVER_BACKFILL_CONCURRENCY));
+            let mut handles = Vec::with_capacity(targets.len());
+            for (aid, url) in targets {
+                let sem = sem.clone();
+                let db = db.clone();
+                let http = http.clone();
+                let tried = tried.clone();
+                handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire_owned().await;
+                    match backfill_cover_once(&http, &db, &tried, aid, &url).await {
+                        Ok(true) => Some(aid),
+                        _ => None,
+                    }
+                }));
+            }
+            let mut filled = 0usize;
+            for h in handles {
+                if let Ok(Some(_)) = h.await {
+                    filled += 1;
+                }
+            }
+            if filled > 0 {
+                log::info!("scheduler: 封面补全 {} 篇", filled);
+                // 封面变化 → 通知前端重载（列表卡片封面即时补上）
+                let _ = app.emit("feeds-updated", serde_json::json!({ "new_articles": 0, "failed_feeds": 0 }));
+            }
+            tokio::time::sleep(COVER_BACKFILL_TICK).await;
+        }
+    });
+}
+
+/// 单篇文章封面补全：抓文章页 → lead_image 抽 og:image → 落库（幂等 COALESCE）。
+/// 返回 true=补到了封面；任何失败（网络/无 og:image/超时）记负缓存后返回 false。
+async fn backfill_cover_once(
+    http: &reqwest::Client,
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    tried: &Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+    aid: i64,
+    url: &str,
+) -> Result<bool, ()> {
+    // 负缓存：本进程已尝试过（失败/无图）的 URL 不再重试
+    {
+        let mut g = tried.lock().await;
+        if g.contains(url) {
+            return Ok(false);
+        }
+        g.insert(url.to_string());
+    }
+    // 拉文章页（30s 超时；只取 og:image，不必等整页正文）
+    let resp = match http.get(url).timeout(std::time::Duration::from_secs(30)).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Ok(false),
+    };
+    let html = match resp.text().await {
+        Ok(h) => h,
+        Err(_) => return Ok(false),
+    };
+    // lead_image 是纯同步（scraper）返回 Option<String>，spawn_blocking 里跑避免阻塞 async worker
+    let base = url.to_string();
+    let image = match tokio::task::spawn_blocking(move || crate::extraction::lead_image(&html, &base)).await {
+        Ok(Some(img)) => img,
+        _ => return Ok(false),
+    };
+    // 落库（幂等：已有封面不覆盖）
+    let conn = db.lock().await;
+    let n = conn
+        .execute(
+            "UPDATE articles SET image_url = COALESCE(image_url, ?1) WHERE id = ?2",
+            rusqlite::params![image, aid],
+        )
+        .unwrap_or(0);
+    Ok(n > 0)
+}

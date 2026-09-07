@@ -131,6 +131,8 @@ pub fn run() {
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
             scheduler::spawn_article_state_sync(app.handle().clone());
+            // 封面后台补全（摘要型源 og:image 兜底，低优先级）
+            scheduler::spawn_cover_backfill(app.handle().clone());
 
             // 系统托盘：显示/刷新全部/退出
             let show = MenuItem::with_id(app, "show", "显示 FluxReader", true, None::<&str>)?;

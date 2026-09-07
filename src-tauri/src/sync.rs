@@ -784,17 +784,23 @@ fn upsert_miniflux_entry(conn: &Connection, feed_id: i64, e: &Entry, maps: &mut 
                 rusqlite::params![(e.status == "read") as i64, e.starred as i64, aid],
             );
         }
+        // 封面回填：已存在（URL 匹配）的 Miniflux 条目此前从不补 image_url，
+        // 直连抓取未抓到封面 + Miniflux 正文有图时，封面永远缺失。正文第一图
+        // 优先，本地已有封面则不覆盖（COALESCE）。
+        let content_image = crate::sanitize::first_image(&e.content);
         let _ = conn.execute(
             "UPDATE articles SET
                 content_html = CASE WHEN COALESCE(content_html, '') = '' THEN ?1 ELSE content_html END,
                 body_text = CASE WHEN body_text = '' THEN ?2 ELSE body_text END,
-                enclosure_url = COALESCE(enclosure_url, ?3),
-                enclosure_mime = COALESCE(enclosure_mime, ?4),
-                duration_sec = COALESCE(duration_sec, ?5)
-             WHERE id = ?6",
+                image_url = COALESCE(image_url, ?3),
+                enclosure_url = COALESCE(enclosure_url, ?4),
+                enclosure_mime = COALESCE(enclosure_mime, ?5),
+                duration_sec = COALESCE(duration_sec, ?6)
+             WHERE id = ?7",
             rusqlite::params![
                 e.content,
                 strip_html_text(&e.content),
+                content_image,
                 enc_url,
                 enc_mime,
                 duration,
@@ -810,10 +816,10 @@ fn upsert_miniflux_entry(conn: &Connection, feed_id: i64, e: &Entry, maps: &mut 
             summary: None,
             content_html: Some(crate::sanitize::sanitize(&e.content, e.url.as_deref())),
             body_text: strip_html_text(&e.content),
-            image_url: enclosure
-                .map(|enc| enc.url.clone())
-                .filter(|u| u.starts_with("http"))
-                .or_else(|| crate::sanitize::first_image(&e.content)),
+            // 封面：正文第一图。enclosure 是音频/视频附件（播客的 mp3/m4a），
+            // 不是图片——此前误把 enclosure URL 当封面，导致播客/带附件的文章
+            // 卡片封面指向音频地址、永远 404（「部分文章不显示封面」根因之一）。
+            image_url: crate::sanitize::first_image(&e.content),
             enclosure_url: enc_url,
             enclosure_mime: enc_mime,
             duration_sec: duration,
