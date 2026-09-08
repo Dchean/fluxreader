@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.11.0"
+version = "0.12.0"
 description = "FluxReader —— 本地优先的 Windows 桌面 RSS 阅读器"
 authors = ["Dchean"]
 license = "MIT"
@@ -45,6 +45,8 @@ dom_smoothie = "0.17"
 # OPML 订阅列表导入导出
 opml = "1"
 url = "2"
+# Fever API 认证：api_key = md5(username:password)
+md-5 = "0.10"
 tauri-plugin-autostart = { version = "2", default-features = false }
 tauri-plugin-window-state = "2"
 tauri-plugin-single-instance = "2.4.4"

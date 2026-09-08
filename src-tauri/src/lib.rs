@@ -6,6 +6,7 @@ pub mod credentials;
 pub mod db;
 pub mod error;
 pub mod extraction;
+pub mod fever;
 pub mod greader;
 pub mod github_auth;
 pub mod ingestion;

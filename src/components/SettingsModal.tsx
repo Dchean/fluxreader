@@ -838,6 +838,7 @@ function SyncTab() {
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const [endpoint, setEndpoint] = useState('');
+  const [protocol, setProtocol] = useState<'greader' | 'fever'>('greader');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [connected, setConnected] = useState(false);
@@ -859,6 +860,7 @@ function SyncTab() {
       setAccount(st.account);
       setLastSync(st.last_sync);
       if (st.connected && st.endpoint) setEndpoint(st.endpoint);
+      setProtocol(st.protocol === 'fever' ? 'fever' : 'greader');
     });
   }, [dataMode]);
 
@@ -870,7 +872,7 @@ function SyncTab() {
     }
     setTesting(true);
     try {
-      const msg = await api.syncTest(endpoint.trim(), username.trim(), password.trim());
+      const msg = await api.syncTest(protocol, endpoint.trim(), username.trim(), password.trim());
       showToast(msg ?? '连接成功');
     } catch (e) {
       showToast(`连接失败：${extractError(e)}`);
@@ -893,7 +895,7 @@ function SyncTab() {
     }
     setSaving(true);
     try {
-      const result = await api.syncSave(endpoint.trim(), username.trim(), password.trim());
+      const result = await api.syncSave(protocol, endpoint.trim(), username.trim(), password.trim());
       setConnected(true);
       /* 保存成功即刷新账户名显示 */
       void api.syncStatus().then((st) => { if (st) setAccount(st.account); });
@@ -990,6 +992,19 @@ function SyncTab() {
       >
         <span className="about-arch-tag">{connected ? (account ?? '已连接') : '未连接'}</span>
       </SettingCard>
+      <SettingCard
+        title="同步协议"
+        desc="Google Reader 与 Fever 共用 Miniflux「集成」凭据。切协议不丢数据（remote id 同源）。"
+      >
+        <select
+          className="setting-input"
+          value={protocol}
+          onChange={(e) => setProtocol(e.target.value === 'fever' ? 'fever' : 'greader')}
+        >
+          <option value="greader">Google Reader（推荐）</option>
+          <option value="fever">Fever</option>
+        </select>
+      </SettingCard>
       <SettingCard title="后端 Endpoint" desc="例如 https://reader.example.com（支持 Google Reader / Fever 协议）">
         <input
           type="text"
@@ -1000,20 +1015,20 @@ function SyncTab() {
         />
       </SettingCard>
       <SettingCard
-        title="Google Reader 用户名"
-        desc="Miniflux「集成」页单独配置的 Google Reader 用户名（非 Miniflux 账号密码）"
+        title="用户名"
+        desc="Miniflux「集成」页单独配置的用户名（Google Reader / Fever 共用，非 Miniflux 账号密码）"
       >
         <input
           type="text"
           className="setting-input"
-          placeholder="Google Reader 用户名"
+          placeholder="集成用户名"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
         />
       </SettingCard>
       <SettingCard
         title="密码"
-        desc={connected ? '已保存（出于安全不回显）。留空提交 = 保持当前密码；填写新值 = 更换账号' : 'Google Reader 集成密码'}
+        desc={connected ? '已保存（出于安全不回显）。留空提交 = 保持当前密码；填写新值 = 更换账号' : '集成密码（Google Reader / Fever 共用）'}
       >
         <input
           type="password"
