@@ -757,43 +757,53 @@ pub async fn opml_export(state: State<'_, AppState>) -> AppResult<String> {
    后端同步
    ============================================================ */
 
-/// 测试连接（轻量）：纯 GET /v1/me，不落库、不做任何同步。
-/// 用于填表时快速验证连通性。
+/// 测试连接（轻量）：按协议分派（Google Reader ClientLogin / Fever api_key），
+/// 不落库、不做任何同步。用于填表时快速验证连通性。
 #[tauri::command]
 pub async fn sync_test(
     state: State<'_, AppState>,
+    protocol: String,
     endpoint: String,
     username: String,
     password: String,
 ) -> AppResult<String> {
-    let (msg, _) = crate::sync::test_connection(&endpoint, &username, &password, &state.http).await?;
+    let (msg, _) =
+        crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http).await?;
     Ok(msg)
 }
 
 /// 保存凭据：先轻量测试（失败不保存），通过后立即落库返回。
 /// 首连的重活（拉订阅、同步状态）由前端随后台阶段执行，不阻塞这里。
 /// 密码留空且已连接 → 复用已存密码（仅改 Endpoint 的场景）。
-/// 换账号检测：已连接其他账号（endpoint 或 username 不同）时先清理旧账号
+/// 换账号检测：已连接其他账号（协议/endpoint/username 不同）时先清理旧账号
 /// 数据（订阅/绑定/队列），避免两份订阅列表混杂。
 #[tauri::command]
 pub async fn sync_save(
     state: State<'_, AppState>,
+    protocol: String,
     endpoint: String,
     username: String,
     password: String,
 ) -> AppResult<String> {
+    // 协议归一：未知值回退 greader（前端下拉只有两个合法项）
+    let protocol = if protocol == "fever" { "fever" } else { "greader" }.to_string();
+
     // 留空密码且已连接 → 复用旧密码（改地址不动密钥）
     let (endpoint, username, password) = {
         let conn = state.db.lock().await;
         let old = crate::sync::read_credentials(&conn);
         match (&old, password.trim().is_empty()) {
-            (Some((_old_ep, old_user, old_pw)), true) => {
+            (Some((_old_p, _old_ep, old_user, old_pw)), true) => {
                 (endpoint.trim().to_string(), old_user.clone(), old_pw.clone())
             }
             (None, true) => {
                 return Err(AppError::new("validate", "请填写密码"));
             }
-            _ => (endpoint.trim().to_string(), username.trim().to_string(), password.trim().to_string()),
+            _ => (
+                endpoint.trim().to_string(),
+                username.trim().to_string(),
+                password.trim().to_string(),
+            ),
         }
     };
     // 换账号检测（锁内读旧凭据）；保存前凭据为空 = 首连
@@ -801,8 +811,9 @@ pub async fn sync_save(
         let conn = state.db.lock().await;
         let old = crate::sync::read_credentials(&conn);
         match old {
-            Some((old_ep, old_user, old_pw)) => {
-                let changed = old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/')
+            Some((old_p, old_ep, old_user, old_pw)) => {
+                let changed = old_p != protocol
+                    || old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/')
                     || old_user != username
                     || old_pw != password;
                 (changed, false)
@@ -811,7 +822,8 @@ pub async fn sync_save(
         }
     };
     // 测试新凭据（失败不保存不动现状）；用户名随凭据落库（设置页动态显示）
-    let (msg, _account) = crate::sync::test_connection(&endpoint, &username, &password, &state.http).await?;
+    let (msg, _account) =
+        crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http).await?;
     {
         let mut conn = state.db.lock().await;
         if account_changed {
@@ -828,11 +840,13 @@ pub async fn sync_save(
             )
             .unwrap_or(0);
         let first_connect = old_was_empty && unbound_local > 0;
+        db::set_setting(&conn, "sync_protocol", &protocol)?;
         db::set_setting(&conn, "greader_endpoint", &endpoint)?;
         db::set_setting(&conn, "greader_username", &username)?;
         db::set_setting(&conn, "greader_password", &password)?;
-        // 新连接：清增量游标，让首同步从全量开始（对账旧状态差异）
+        // 新连接：清增量游标（GReader 时间戳 / Fever 条目 id），让首同步从全量开始
         db::set_setting(&conn, "sync_last_sync", "0")?;
+        db::set_setting(&conn, "sync_last_entry_id", "0")?;
         if first_connect {
             return Ok(serde_json::json!({
                 "message": msg,
@@ -986,6 +1000,8 @@ pub struct SyncStatusInfo {
     pub endpoint: Option<String>,
     pub account: Option<String>,
     pub last_sync: i64,
+    /// 同步协议："greader" | "fever"
+    pub protocol: Option<String>,
 }
 
 #[tauri::command]
@@ -1000,6 +1016,10 @@ pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo
         endpoint,
         account,
         last_sync: db::last_sync_ts(&conn).unwrap_or(0),
+        protocol: db::get_setting(&conn, "sync_protocol")
+            .ok()
+            .flatten()
+            .filter(|p| p == "fever" || p == "greader"),
     })
 }
 

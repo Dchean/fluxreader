@@ -16,6 +16,7 @@
 
 use crate::db::{self, NewArticle};
 use crate::error::{AppError, AppResult};
+use crate::fever;
 use crate::greader::{self, GReaderClient, ItemContent};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -38,30 +39,111 @@ pub struct SyncReport {
    凭据
    ============================================================ */
 
-/// 后端凭据（Google Reader 集成凭据：endpoint + username + password）。
-/// username/password 是 Miniflux「集成」页单独配置的 Google Reader 凭据（非账号密码）。
-pub fn read_credentials(conn: &Connection) -> Option<(String, String, String)> {
+/// 后端凭据：协议 + endpoint + username + password。
+/// username/password 是 Miniflux「集成」页单独配置的凭据（Google Reader 与
+/// Fever 共用同一套集成凭据，非 Miniflux 账号密码）。
+/// 协议从 settings 键 `sync_protocol` 读取（"greader" | "fever"，默认 "greader"）。
+pub fn read_credentials(conn: &Connection) -> Option<(String, String, String, String)> {
+    let protocol = db::get_setting(conn, "sync_protocol")
+        .ok()
+        .flatten()
+        .filter(|p| p == "fever" || p == "greader")
+        .unwrap_or_else(|| "greader".to_string());
     let endpoint = db::get_setting(conn, "greader_endpoint").ok().flatten()?;
     let username = db::get_setting(conn, "greader_username").ok().flatten()?;
     let password = db::get_setting(conn, "greader_password").ok().flatten()?;
     if endpoint.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
         return None;
     }
-    Some((endpoint, username, password))
+    Some((protocol, endpoint, username, password))
 }
 
-/// 锁内读凭据 → 锁外 ClientLogin 换取 token 构建 client。
-async fn build_client(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> Option<GReaderClient> {
-    let (endpoint, username, password) = {
+/// 协议无关后端客户端（Google Reader / Fever）。
+/// sync 引擎只依赖这个枚举的统一方法，协议差异封装在内部。
+pub enum Backend {
+    GReader(GReaderClient),
+    Fever(fever::FeverClient),
+}
+
+impl Backend {
+    async fn subscriptions(&self) -> AppResult<Vec<greader::Subscription>> {
+        match self {
+            Backend::GReader(c) => c.subscriptions().await,
+            Backend::Fever(c) => c.subscriptions().await,
+        }
+    }
+
+    async fn tags(&self) -> AppResult<Vec<greader::TagRef>> {
+        match self {
+            Backend::GReader(c) => c.tags().await,
+            Backend::Fever(c) => c.tags().await,
+        }
+    }
+
+    async fn mark_read(&self, ids: &[i64]) -> AppResult<()> {
+        match self {
+            Backend::GReader(c) => c.mark_read(ids).await,
+            Backend::Fever(c) => c.mark_read(ids).await,
+        }
+    }
+
+    async fn mark_unread(&self, ids: &[i64]) -> AppResult<()> {
+        match self {
+            Backend::GReader(c) => c.mark_unread(ids).await,
+            Backend::Fever(c) => c.mark_unread(ids).await,
+        }
+    }
+
+    async fn mark_starred(&self, ids: &[i64]) -> AppResult<()> {
+        match self {
+            Backend::GReader(c) => c.mark_starred(ids).await,
+            Backend::Fever(c) => c.mark_starred(ids).await,
+        }
+    }
+
+    async fn mark_unstarred(&self, ids: &[i64]) -> AppResult<()> {
+        match self {
+            Backend::GReader(c) => c.mark_unstarred(ids).await,
+            Backend::Fever(c) => c.mark_unstarred(ids).await,
+        }
+    }
+
+    /// 订阅新源。Fever 协议无写订阅端点，降级为明确错误。
+    async fn quick_add(&self, url: &str) -> AppResult<greader::QuickAddResponse> {
+        match self {
+            Backend::GReader(c) => c.quick_add(url).await,
+            Backend::Fever(_) => Err(AppError::new(
+                "unsupported",
+                "Fever 协议不支持添加订阅，请在 Miniflux Web 端添加后重新同步",
+            )),
+        }
+    }
+}
+
+/// 锁内读凭据 → 锁外按协议构建 client。
+async fn build_client(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> Option<Backend> {
+    let (protocol, endpoint, username, password) = {
         let conn = db.lock().await;
         read_credentials(&conn)?
     };
-    match GReaderClient::login(&endpoint, &username, &password, http.clone()).await {
-        Ok(c) => Some(c),
-        Err(e) => {
-            log::warn!("sync: ClientLogin 失败: {e}");
-            None
+    match protocol.as_str() {
+        "fever" => {
+            let client = fever::FeverClient::new(&endpoint, &username, &password, http.clone());
+            match client.verify().await {
+                Ok(()) => Some(Backend::Fever(client)),
+                Err(e) => {
+                    log::warn!("sync: Fever 认证失败: {e}");
+                    None
+                }
+            }
         }
+        _ => match GReaderClient::login(&endpoint, &username, &password, http.clone()).await {
+            Ok(c) => Some(Backend::GReader(c)),
+            Err(e) => {
+                log::warn!("sync: ClientLogin 失败: {e}");
+                None
+            }
+        },
     }
 }
 
@@ -133,7 +215,7 @@ fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
 }
 
 /// 锁外：执行推送计划。返回成功清除的队列 id（失败项保留 → 天然重试）。
-async fn exec_push(client: &GReaderClient, plan: &PushPlan, report: &mut SyncReport) -> Vec<i64> {
+async fn exec_push(client: &Backend, plan: &PushPlan, report: &mut SyncReport) -> Vec<i64> {
     let mut done: Vec<i64> = Vec::new();
     // read/unread 聚合批量（Google Reader edit-tag 单请求可携带全部 id + tag）
     for action in ["read", "unread"] {
@@ -219,7 +301,7 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
    ============================================================ */
 
 /// 未连接期间本地新增的订阅推到远端（三段式：锁内读队列 → 锁外 HTTP → 锁内落库）
-async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &GReaderClient, report: &mut SyncReport) {
+async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut SyncReport) {
     // add_feed 队列动作：锁内读出全部待处理项（feed_url + 目标分类）
     struct PendingFeed { queue_id: i64, url: String }
     let items: Vec<PendingFeed> = {
@@ -268,7 +350,7 @@ async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &GReaderClient, report:
 }
 
 /// 拉远端分类+订阅，URL 碰撞合并（三段式：锁外拉取 → 锁内合并）
-async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &GReaderClient, report: &mut SyncReport) {
+async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut SyncReport) {
     // Google Reader：subscription/list 同时含订阅 + 分类（categories 里的 label/folder）。
     // tag/list 提供独立分类（含空分类）。分类映射用 tag/list 的 label。
     let (remote_tags, remote_subs) = match tokio::join!(client.tags(), client.subscriptions()) {
@@ -467,7 +549,7 @@ fn merge_remote_status(
 /// 分页三段式：每页「锁外拉取 → 锁内合并」，锁从不跨分页 HTTP await。
 /// `full=true`（手动同步/首连）：先做绑定回填 + 全量状态对账。
 /// `full=false`（后台自动同步）：只拉增量（ot 游标），便宜。
-async fn pull_entries(
+async fn pull_entries_greader(
     db: &Arc<Mutex<Connection>>,
     client: &GReaderClient,
     report: &mut SyncReport,
@@ -538,57 +620,23 @@ async fn pull_entries(
         };
         let conn = db.lock().await;
         for e in &entries {
-            // URL 兜底匹配（规范化）
-            let aid = item_url(e)
-                .as_deref()
-                .and_then(|u| maps.url_to_id.get(&db::normalize_url(u)).copied())
-                .or_else(|| {
-                    // 已绑定 remote_id 直配
-                    item_numeric_id(e).and_then(|eid| maps.mf_id_to_article.get(&eid).copied())
-                });
-            match aid {
-                Some(aid) => {
-                    // 已存在：判断是否自己的条目（同源），合并状态；跨源副本记账
-                    let eid = item_numeric_id(e);
-                    let feed_id = item_feed_id(e);
-                    let bound_entry = maps.id_to_mf_id.get(&aid).copied().flatten();
-                    let is_own = bound_entry == eid
-                        || (bound_entry.is_none()
-                            && maps
-                                .id_to_mf_pair
-                                .get(&aid)
-                                .map(|(entry_mf, feed_mf)| match entry_mf {
-                                    Some(_) => *feed_mf == feed_id,
-                                    None => true,
-                                })
-                                .unwrap_or(false));
-                    if !is_own {
-                        // 跨源副本：记账（已读广播对象）。read-anywhere-wins
-                        if let Some(eid) = eid {
-                            let _ = db::add_article_dup_entry(&conn, aid, eid);
-                        }
-                        if greader::has_tag(&e.categories, "/com.google/read")
-                            && !maps.pending_ids.contains(&aid)
-                        {
-                            let _ = conn.execute(
-                                "UPDATE articles SET is_read = 1 WHERE id = ?1",
-                                rusqlite::params![aid],
-                            );
-                        }
-                        continue;
-                    }
-                    merge_remote_status(&conn, aid, e, &mut maps, report);
-                }
-                None => {
-                    // 本地没有 → 若其远端 feed 已绑定，则 upsert 补齐
-                    let feed_id = item_feed_id(e);
-                    let local_feed = feed_id.and_then(|fid| maps.feed_mf_to_id.get(&fid).copied());
-                    if let Some(local_feed) = local_feed {
-                        upsert_remote_entry(&conn, local_feed, e, &mut maps, report);
-                    }
-                }
-            }
+            merge_pulled_entry(&conn, e, &mut maps, report);
         }
+        drop(conn);
+    }
+
+    // 轻量同步（full=false）状态对账：增量 item_contents 只覆盖「变更过的」条目，
+    // 漏掉「手机很早前标读 / 收藏、changed_at 早于游标」的旧变更。这里用 read /
+    // starred 权威 id 集合补齐（与 Fever 的 unread/saved 对账对称）。
+    if !full {
+        let (read_ids, starred_ids) = tokio::join!(
+            fetch_stream_ids(client, greader::tags::READ),
+            fetch_stream_ids(client, greader::tags::STARRED),
+        );
+        let read_ids = read_ids.unwrap_or_default();
+        let starred_ids = starred_ids.unwrap_or_default();
+        let conn = db.lock().await;
+        reconcile_reader_state(&conn, &read_ids, &starred_ids, &maps, report);
         drop(conn);
     }
 
@@ -598,6 +646,337 @@ async fn pull_entries(
     let _ = db::set_last_sync_ts(&conn, now);
     drop(conn);
 
+}
+
+/// 分页拉取某 Google Reader stream 的全部条目 id（read / starred 权威集合）。
+async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec<i64>> {
+    let mut ids: Vec<i64> = Vec::new();
+    let mut continuation: Option<u64> = None;
+    loop {
+        let r = client
+            .item_ids(stream, Some(0), None, Some(1000), continuation)
+            .await?;
+        let mut got = 0;
+        for it in &r.item_refs {
+            if let Ok(id) = it.id.parse::<i64>() {
+                ids.push(id);
+                got += 1;
+            }
+        }
+        match r.continuation.and_then(|c| c.parse::<u64>().ok()) {
+            Some(c) if got > 0 => continuation = Some(c),
+            _ => break,
+        }
+    }
+    Ok(ids)
+}
+
+/// Google Reader 权威状态对账（轻量同步用）：
+/// - read 集合含 remote_id → 远端已读 → 本地已读（read-wins，不反向复活未读）
+/// - starred 集合含 remote_id → 本地收藏；不含 → 取消收藏
+/// - pending 保护：本地有未推送变更的条目跳过，防「刚标读/刚收藏」被远端快照回滚
+fn reconcile_reader_state(
+    conn: &Connection,
+    read_ids: &[i64],
+    starred_ids: &[i64],
+    maps: &db::SyncMatchMaps,
+    report: &mut SyncReport,
+) {
+    use std::collections::HashSet;
+    let read_set: HashSet<i64> = read_ids.iter().copied().collect();
+    let starred_set: HashSet<i64> = starred_ids.iter().copied().collect();
+
+    for (remote_id, aid) in &maps.mf_id_to_article {
+        let aid = *aid;
+        if maps.pending_ids.contains(&aid) {
+            continue; // 交给 push 段队列，不被远端快照回滚
+        }
+        if read_set.contains(remote_id) {
+            if let Ok(n) = conn.execute(
+                "UPDATE articles SET is_read = 1 WHERE id = ?1 AND is_read = 0",
+                rusqlite::params![aid],
+            ) {
+                report.merged_states += n;
+            }
+        }
+        if starred_set.contains(remote_id) {
+            if let Ok(n) = conn.execute(
+                "UPDATE articles SET is_starred = 1 WHERE id = ?1 AND is_starred = 0",
+                rusqlite::params![aid],
+            ) {
+                report.merged_states += n;
+            }
+        } else if let Ok(n) = conn.execute(
+            "UPDATE articles SET is_starred = 0 WHERE id = ?1 AND is_starred = 1",
+            rusqlite::params![aid],
+        ) {
+            report.merged_states += n;
+        }
+    }
+}
+
+/// 共享：合并一条已拉取的远端条目（URL 兜底匹配 / remote_id 直配 / 同源判定 /
+/// 跨源副本记账 / 新条目 upsert）。Google Reader 与 Fever 两条 pull 路径共用。
+fn merge_pulled_entry(
+    conn: &Connection,
+    e: &ItemContent,
+    maps: &mut db::SyncMatchMaps,
+    report: &mut SyncReport,
+) {
+    // URL 兜底匹配（规范化）
+    let aid = item_url(e)
+        .as_deref()
+        .and_then(|u| maps.url_to_id.get(&db::normalize_url(u)).copied())
+        .or_else(|| {
+            // 已绑定 remote_id 直配
+            item_numeric_id(e).and_then(|eid| maps.mf_id_to_article.get(&eid).copied())
+        });
+    match aid {
+        Some(aid) => {
+            // 已存在：判断是否自己的条目（同源），合并状态；跨源副本记账
+            let eid = item_numeric_id(e);
+            let feed_id = item_feed_id(e);
+            let bound_entry = maps.id_to_mf_id.get(&aid).copied().flatten();
+            let is_own = bound_entry == eid
+                || (bound_entry.is_none()
+                    && maps
+                        .id_to_mf_pair
+                        .get(&aid)
+                        .map(|(entry_mf, feed_mf)| match entry_mf {
+                            Some(_) => *feed_mf == feed_id,
+                            None => true,
+                        })
+                        .unwrap_or(false));
+            if !is_own {
+                // 跨源副本：记账（已读广播对象）。read-anywhere-wins
+                if let Some(eid) = eid {
+                    let _ = db::add_article_dup_entry(conn, aid, eid);
+                }
+                if greader::has_tag(&e.categories, "/com.google/read")
+                    && !maps.pending_ids.contains(&aid)
+                {
+                    let _ = conn.execute(
+                        "UPDATE articles SET is_read = 1 WHERE id = ?1",
+                        rusqlite::params![aid],
+                    );
+                }
+                return;
+            }
+            merge_remote_status(conn, aid, e, maps, report);
+            // 正文/封面/enclosure 兜底回填：本地为空才补，已有内容不覆盖。
+            backfill_entry_content(conn, aid, e);
+        }
+        None => {
+            // 本地没有 → 若其远端 feed 已绑定，则 upsert 补齐
+            let feed_id = item_feed_id(e);
+            let local_feed = feed_id.and_then(|fid| maps.feed_mf_to_id.get(&fid).copied());
+            if let Some(local_feed) = local_feed {
+                upsert_remote_entry(conn, local_feed, e, maps, report);
+            }
+        }
+    }
+}
+
+/// 协议分派：Google Reader 用 `ot` 时间游标，Fever 用 `since_id` 条目游标。
+async fn pull_entries(
+    db: &Arc<Mutex<Connection>>,
+    client: &Backend,
+    report: &mut SyncReport,
+    full: bool,
+) {
+    match client {
+        Backend::GReader(g) => pull_entries_greader(db, g, report, full).await,
+        Backend::Fever(f) => pull_entries_fever(db, f, report, full).await,
+    }
+}
+
+/// 收集一批 Fever 条目：记录已见 id（供 with_ids 补齐去重）+ 追加到总列表。
+fn collect_fever_items(
+    all_items: &mut Vec<ItemContent>,
+    seen: &mut std::collections::HashSet<i64>,
+    incoming: Vec<ItemContent>,
+) {
+    for it in incoming {
+        if let Some(eid) = item_numeric_id(&it) {
+            seen.insert(eid);
+        }
+        all_items.push(it);
+    }
+}
+
+/// Fever 拉取：Fever 无「全部条目 id」端点（items 仅给最近 50 条），拆两段：
+/// ① `since_id` 分页增量拉新条目（含已读+未读 → 同源判定 + upsert）
+/// ② `unread_item_ids`/`saved_item_ids` 权威集合全量对账（已读/收藏反推）。
+async fn pull_entries_fever(
+    db: &Arc<Mutex<Connection>>,
+    client: &fever::FeverClient,
+    report: &mut SyncReport,
+    full: bool,
+) {
+    use std::collections::HashSet;
+
+    let since_id = {
+        let conn = db.lock().await;
+        if full {
+            0
+        } else {
+            db::last_sync_entry_id(&conn).unwrap_or(0)
+        }
+    };
+
+    // ① 权威状态集合（全量 id）：未读 + 收藏
+    let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
+    let unread = unread.unwrap_or_default();
+    let starred = starred.unwrap_or_default();
+
+    // ② 拉条目正文：增量（since_id>0）或首次种子（since_id=0 → 最近 50 条）
+    let mut all_items: Vec<ItemContent> = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+
+    if since_id > 0 {
+        // 增量：items&since_id 升序分页，单页 50，不足 50 即拿完
+        let mut cursor = since_id;
+        loop {
+            let batch = match client.items_since(cursor).await {
+                Ok(b) => b,
+                Err(e) => {
+                    report.errors.push(format!("拉取增量条目失败: {e}"));
+                    break;
+                }
+            };
+            let n = batch.len();
+            if n == 0 {
+                break;
+            }
+            cursor = batch
+                .iter()
+                .filter_map(item_numeric_id)
+                .max()
+                .unwrap_or(cursor);
+            let got_all = n < 50;
+            collect_fever_items(&mut all_items, &mut seen, batch);
+            if got_all {
+                break;
+            }
+        }
+    } else {
+        // 首次：Fever 无全量历史端点；最近 50 条作已读种子，未读/收藏由下方补齐
+        match client.items_recent().await {
+            Ok(seed) => collect_fever_items(&mut all_items, &mut seen, seed),
+            Err(e) => report.errors.push(format!("拉取最近条目失败: {e}")),
+        }
+    }
+
+    // ③ 权威集合中本地还没有正文的条目（未读/收藏），用 with_ids 分块补齐
+    let mut need: Vec<i64> = unread
+        .iter()
+        .chain(starred.iter())
+        .copied()
+        .filter(|id| !seen.contains(id))
+        .collect();
+    need.sort_unstable();
+    need.dedup();
+    for chunk in need.chunks(50) {
+        match client.items_with_ids(chunk).await {
+            Ok(batch) => collect_fever_items(&mut all_items, &mut seen, batch),
+            Err(e) => {
+                report.errors.push(format!("拉取未读/收藏条目失败: {e}"));
+                break;
+            }
+        }
+    }
+
+    // ④ 构建匹配映射 + 锁内合并（复用同一条目合并逻辑）
+    let mut maps = {
+        let conn = db.lock().await;
+        db::sync_match_maps(&conn).unwrap_or_else(|e| {
+            report.errors.push(format!("同步匹配映射构建失败: {e}"));
+            db::SyncMatchMaps {
+                url_to_id: Default::default(),
+                id_to_mf_id: Default::default(),
+                id_to_mf_pair: Default::default(),
+                pending_ids: Default::default(),
+                feed_mf_to_id: Default::default(),
+                mf_id_to_article: Default::default(),
+            }
+        })
+    };
+
+    let mut last_id = since_id;
+    for chunk in all_items.chunks(100) {
+        let conn = db.lock().await;
+        for e in chunk {
+            if let Some(eid) = item_numeric_id(e) {
+                last_id = last_id.max(eid);
+            }
+            merge_pulled_entry(&conn, e, &mut maps, report);
+        }
+        drop(conn);
+    }
+
+    // ⑤ 权威状态对账：Fever 无法直接拉已读条目，靠「未读/收藏集合」反推。
+    {
+        let conn = db.lock().await;
+        reconcile_fever_state(&conn, &unread, &starred, &maps, report);
+    }
+
+    // ⑥ 更新游标（Fever 用条目 id；时间戳游标也记录，供切换回 greader 后的首拉）
+    let conn = db.lock().await;
+    let _ = db::set_last_sync_entry_id(&conn, last_id);
+    let _ = db::set_last_sync_ts(&conn, Utc::now().timestamp());
+    drop(conn);
+}
+
+/// Fever 全量状态对账。Miniflux 按 URL 去重 entry，故 Fever 视角无跨源副本，
+/// 已绑定条目（mf_id_to_article）的远端状态可直接信任：
+/// - `unread_item_ids` 含 remote_id → 远端未读 → 本地未读；不含 → 已读（read-wins）
+/// - `saved_item_ids` 含 remote_id → 本地收藏；不含 → 取消收藏
+///
+/// pending 保护：本地有未推送变更的条目跳过，防把「刚标读/刚收藏」瞬间回滚。
+fn reconcile_fever_state(
+    conn: &Connection,
+    unread: &[i64],
+    starred: &[i64],
+    maps: &db::SyncMatchMaps,
+    report: &mut SyncReport,
+) {
+    use std::collections::HashSet;
+    let unread_set: HashSet<i64> = unread.iter().copied().collect();
+    let starred_set: HashSet<i64> = starred.iter().copied().collect();
+
+    for (remote_id, aid) in &maps.mf_id_to_article {
+        let aid = *aid;
+        if maps.pending_ids.contains(&aid) {
+            continue; // 交给 push 段队列，不被远端快照回滚
+        }
+        let want_read = !unread_set.contains(remote_id);
+        if want_read {
+            if let Ok(n) = conn.execute(
+                "UPDATE articles SET is_read = 1 WHERE id = ?1 AND is_read = 0",
+                rusqlite::params![aid],
+            ) {
+                report.merged_states += n;
+            }
+        } else if let Ok(n) = conn.execute(
+            "UPDATE articles SET is_read = 0 WHERE id = ?1 AND is_read = 1",
+            rusqlite::params![aid],
+        ) {
+            report.merged_states += n;
+        }
+        if starred_set.contains(remote_id) {
+            if let Ok(n) = conn.execute(
+                "UPDATE articles SET is_starred = 1 WHERE id = ?1 AND is_starred = 0",
+                rusqlite::params![aid],
+            ) {
+                report.merged_states += n;
+            }
+        } else if let Ok(n) = conn.execute(
+            "UPDATE articles SET is_starred = 0 WHERE id = ?1 AND is_starred = 1",
+            rusqlite::params![aid],
+        ) {
+            report.merged_states += n;
+        }
+    }
 }
 
 /// 后端条目入库（source='miniflux'，不覆盖直连正文）。
@@ -656,24 +1035,7 @@ fn upsert_remote_entry(
             );
         }
         // 封面回填：正文第一图，本地已有封面不覆盖（COALESCE）
-        let content_image = crate::sanitize::first_image(&content_html);
-        let _ = conn.execute(
-            "UPDATE articles SET
-                content_html = CASE WHEN COALESCE(content_html, '') = '' THEN ?1 ELSE content_html END,
-                body_text = CASE WHEN body_text = '' THEN ?2 ELSE body_text END,
-                image_url = COALESCE(image_url, ?3),
-                enclosure_url = COALESCE(enclosure_url, ?4),
-                enclosure_mime = COALESCE(enclosure_mime, ?5)
-             WHERE id = ?6",
-            rusqlite::params![
-                content_html,
-                strip_html_text(&content_html),
-                content_image,
-                enc_url,
-                enc_mime,
-                aid
-            ],
-        );
+        backfill_entry_content(conn, aid, e);
     } else {
         let a = NewArticle {
             guid: item_numeric_id(e)
@@ -711,6 +1073,35 @@ fn strip_html_text(html: &str) -> String {
     crate::sanitize::html_to_text(html)
 }
 
+/// 已有条目正文/封面/enclosure 兜底回填：本地为空才补（COALESCE），已有内容绝不覆盖。
+/// （封面 / enclosure 单列 COALESCE：既不抢本地封面，也能补上 Miniflux 后来抓到的图。）
+fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) {
+    let content_html = item_content_html(e);
+    let enclosure = e.enclosure.first();
+    let (enc_url, enc_mime) = match enclosure {
+        Some(enc) => (Some(enc.url.clone()), enc.r#type.clone()),
+        None => (None, None),
+    };
+    let content_image = crate::sanitize::first_image(&content_html);
+    let _ = conn.execute(
+        "UPDATE articles SET
+            content_html = CASE WHEN COALESCE(content_html, '') = '' THEN ?1 ELSE content_html END,
+            body_text = CASE WHEN body_text = '' THEN ?2 ELSE body_text END,
+            image_url = COALESCE(image_url, ?3),
+            enclosure_url = COALESCE(enclosure_url, ?4),
+            enclosure_mime = COALESCE(enclosure_mime, ?5)
+         WHERE id = ?6",
+        rusqlite::params![
+            content_html,
+            strip_html_text(&content_html),
+            content_image,
+            enc_url,
+            enc_mime,
+            aid
+        ],
+    );
+}
+
 /* ============================================================
    总入口
    ============================================================ */
@@ -719,7 +1110,7 @@ fn strip_html_text(html: &str) -> String {
 /// 锁纪律：HTTP 全在锁外；DB 读写在锁内短临界区完成。
 pub async fn feeds_phase(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> AppResult<SyncReport> {
     let Some(client) = build_client(db, http).await else {
-        return Err(AppError::new("notConnected", "未配置同步后端（Google Reader 凭据）"));
+        return Err(AppError::new("notConnected", "未配置同步后端（Google Reader / Fever 凭据）"));
     };
     let mut report = SyncReport::default();
     push_feeds(db, &client, &mut report).await;
@@ -735,7 +1126,7 @@ pub async fn states_phase(
     full: bool,
 ) -> AppResult<SyncReport> {
     let Some(client) = build_client(db, http).await else {
-        return Err(AppError::new("notConnected", "未配置同步后端（Google Reader 凭据）"));
+        return Err(AppError::new("notConnected", "未配置同步后端（Google Reader / Fever 凭据）"));
     };
     let mut report = SyncReport::default();
     // 推送段进 PUSH_LOCK（与 push_states_now/feeds_phase 的推送互斥，防 prune 竞态）
@@ -790,9 +1181,10 @@ pub async fn sync_light(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> 
 }
 
 /// 测试连接（设置页「测试连接」按钮）。
-/// 直接收凭据：ClientLogin 换 token 成功即连通。
+/// 按协议分派：Google Reader 走 ClientLogin，Fever 走 `api_key` 认证。
 /// 返回 (展示消息, 用户名)——用户名供 sync_save 落库做账号显示。
 pub async fn test_connection(
+    protocol: &str,
     endpoint: &str,
     username: &str,
     password: &str,
@@ -801,7 +1193,18 @@ pub async fn test_connection(
     if endpoint.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
         return Err(AppError::new("notConnected", "请先填写 Endpoint、用户名和密码"));
     }
-    let client = GReaderClient::login(endpoint, username, password, http.clone()).await?;
-    let subs = client.subscriptions().await?;
-    Ok((format!("已连接：{username}（{} 个订阅）", subs.len()), username.to_string()))
+    let subs = match protocol {
+        "fever" => {
+            let client = fever::FeverClient::new(endpoint, username, password, http.clone());
+            client.subscriptions().await?.len()
+        }
+        _ => {
+            let client = GReaderClient::login(endpoint, username, password, http.clone()).await?;
+            client.subscriptions().await?.len()
+        }
+    };
+    Ok((
+        format!("已连接：{username}（{subs} 个订阅）"),
+        username.to_string(),
+    ))
 }

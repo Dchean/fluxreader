@@ -109,6 +109,8 @@ export interface SyncStatusInfo {
   /** 服务端账户名（连接时记录，设置页动态显示） */
   account: string | null;
   last_sync: number;
+  /** 同步协议："greader" | "fever" */
+  protocol?: string | null;
 }
 
 /** sync_save 返回：首连且本地有未绑定源时 firstConnect=true
@@ -441,20 +443,20 @@ export const api = {
     return inv ? (await inv('opml_export') as string) : null;
   },
 
-  /* ---- Google Reader 同步 ---- */
+  /* ---- 后端同步（Google Reader / Fever） ---- */
   /** 返回 null = 浏览器环境（mock 模式） */
-  /** 轻量连通测试（ClientLogin + subscription/list），不落库不做同步 */
-  async syncTest(endpoint: string, username: string, password: string): Promise<string | null> {
+  /** 轻量连通测试（按协议分派 ClientLogin / Fever api_key），不落库不做同步 */
+  async syncTest(protocol: string, endpoint: string, username: string, password: string): Promise<string | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('sync_test', { endpoint, username, password }) as string) : null;
+    return inv ? (await inv('sync_test', { protocol, endpoint, username, password }) as string) : null;
   },
   /** 保存凭据（先测试，失败不保存）。重活（拉订阅/同步状态）由前端随后台阶段执行。
    * 返回 JSON：{ message, firstConnect, unboundLocalFeeds }——首连且本地有
    * 未绑定源时前端弹「同步本地订阅」确认框 */
-  async syncSave(endpoint: string, username: string, password: string): Promise<SyncSaveResult | null> {
+  async syncSave(protocol: string, endpoint: string, username: string, password: string): Promise<SyncSaveResult | null> {
     const inv = await getInvoke();
     if (!inv) return null;
-    const raw = (await inv('sync_save', { endpoint, username, password })) as string;
+    const raw = (await inv('sync_save', { protocol, endpoint, username, password })) as string;
     try {
       return JSON.parse(raw) as SyncSaveResult;
     } catch {

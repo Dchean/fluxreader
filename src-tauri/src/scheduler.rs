@@ -79,8 +79,8 @@ pub async fn refresh_all(
 /// 抓取所有到期源（后台调度入口，并发上限 = 设置 fetchConcurrency，默认 4）。
 /// HTTP 在锁外执行（refresh_feed_staged），写库时短暂持锁。
 /// 返回 (新增条数, 失败源数)。
-/// 同步模式作用点：hybrid（跟随服务端）→ 到期查询跳过 origin='miniflux' 的源
-/// （服务端源内容由 Miniflux 同步提供）；direct → 全部源照常直连（旧行为）。
+/// 同步模式作用点：hybrid（跟随服务端）→ 到期查询跳过 origin='remote' 的源
+/// （服务端源内容由后端同步提供）；direct → 全部源照常直连（旧行为）。
 async fn refresh_due_feeds(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
@@ -108,8 +108,8 @@ async fn refresh_feeds_inner_with_concurrency(
                 let include_remote = read_sync_mode_conn(&conn) != "hybrid";
                 crate::db::feeds_due_for_refresh(&conn, interval_min, include_remote)
             }
-            // 手动全量：hybrid（跟随服务端）模式下跳过 origin='miniflux' 源——
-            // 服务端源的内容由 Miniflux 同步提供，直连抓取会产生 source='direct'
+            // 手动全量：hybrid（跟随服务端）模式下跳过 origin='remote' 源——
+            // 服务端源的内容由后端同步提供，直连抓取会产生 source='direct'
             // 文章与已有的 source='miniflux' 文章重复（guid 不同 + 智能去重默认关），
             // 导致文章翻倍、状态错乱、未读数对不齐。direct 模式则全部直连（旧行为）。
             None => {
@@ -221,12 +221,12 @@ async fn auto_sync_backend(
     if now - last_sync < interval_min * 60 {
         return;
     }
-    log::info!("scheduler: Miniflux 自动同步开始（间隔 {interval_min} 分钟到期）");
+    log::info!("scheduler: 后端自动同步开始（间隔 {interval_min} 分钟到期）");
     let _ = app.emit("sync-running", serde_json::json!({ "source": "auto" }));
     match crate::sync::sync_light(db, http).await {
         Ok(r) => {
             log::info!(
-                "scheduler: Miniflux 自动同步完成：推 {}/拉 {} 项，{} 错误",
+                "scheduler: 后端自动同步完成：推 {}/拉 {} 项，{} 错误",
                 r.pushed_states, r.pulled_entries, r.errors.len()
             );
             // 拉平了状态（或推空但有 pending 修正）→ 通知前端重载
@@ -237,7 +237,7 @@ async fn auto_sync_backend(
                 );
             }
         }
-        Err(e) => log::warn!("scheduler: Miniflux 自动同步失败: {e}"),
+        Err(e) => log::warn!("scheduler: 后端自动同步失败: {e}"),
     }
     let _ = app.emit("sync-idle", ());
 }

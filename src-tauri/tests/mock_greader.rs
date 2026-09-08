@@ -137,7 +137,9 @@ impl MockGReader {
         self.add_entry_with_published(feed_id, url, title, read, starred, chrono::Utc::now().timestamp())
     }
 
-    /// 同 add_entry_ret，但可指定 published（unix 秒，模拟历史文章）。
+    /// 同 add_entry_ret，但可指定 published（unix 秒，模拟「原文发布时间早、
+    /// 但刚被抓取入库」的历史文章）。changed_at 固定为现在（抓取时刻），
+    /// 与真实 Google Reader 语义一致：ot 游标按 crawl/change 时间过滤，而非 published。
     pub fn add_entry_with_published(
         &self,
         feed_id: i64,
@@ -163,7 +165,7 @@ impl MockGReader {
             read,
             starred,
             enclosures: Vec::new(),
-            changed_at: published,
+            changed_at: chrono::Utc::now().timestamp(),
         });
         id
     }
@@ -358,7 +360,12 @@ fn route(
             let stream = q.get("s").cloned().unwrap_or_default();
             let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
-            // 过滤：stream 是 feed/数字 时按 feed_id；否则全部（reading-list）
+            // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）
+            let state_filter = match stream.as_str() {
+                "user/-/state/com.google/read" => Some((true, false)),      // 只看已读
+                "user/-/state/com.google/starred" => Some((false, true)),    // 只看收藏
+                _ => None,
+            };
             let feed_filter: Option<i64> = stream.strip_prefix("feed/").and_then(|s| s.parse().ok());
             let ids: Vec<i64> = srv
                 .entries
@@ -366,7 +373,11 @@ fn route(
                 .unwrap()
                 .iter()
                 .filter(|e| feed_filter.map_or(true, |f| e.feed_id == f))
-                .filter(|e| e.published >= ot)
+                .filter(|e| match state_filter {
+                    Some((is_read, is_starred)) => (e.read == is_read) && (e.starred == is_starred),
+                    None => true,
+                })
+                .filter(|e| e.changed_at >= ot)
                 .map(|e| e.id)
                 .collect();
             let total = ids.len();

@@ -454,7 +454,7 @@ pub fn insert_feed(
     insert_feed_origin(conn, feed_url, site_url, title, favicon_url, folder_id, layout, auto_summary, auto_translate, "local")
 }
 
-/// 同 insert_feed，带来源标记（'local' 用户直连添加 | 'miniflux' 服务端拉取）。
+/// 同 insert_feed，带来源标记（'local' 用户直连添加 | 'remote' 服务端拉取）。
 /// 断开连接按此列清理服务端来源订阅（换账号不混杂）。
 #[allow(clippy::too_many_arguments)]
 pub fn insert_feed_origin(
@@ -1330,7 +1330,7 @@ pub fn feed_counts(conn: &Connection) -> AppResult<Vec<FeedCounts>> {
 }
 
 /* ============================================================
-   Settings（键值对，Miniflux Endpoint/Token 等后续接这里）
+   Settings（键值对：同步 Endpoint/凭据、AI/同步相关配置）
    ============================================================ */
 
 pub fn get_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
@@ -1365,7 +1365,7 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
 }
 
 /* ============================================================
-   Miniflux 同步 —— id 映射 + 离线变更队列
+   后端同步 —— id 映射 + 离线变更队列（Google Reader / Fever）
    ============================================================ */
 
 /// 离线变更队列条目
@@ -1685,6 +1685,18 @@ pub fn last_sync_ts(conn: &Connection) -> AppResult<i64> {
 
 pub fn set_last_sync_ts(conn: &Connection, ts: i64) -> AppResult<()> {
     set_setting(conn, "sync_last_sync", &ts.to_string())
+}
+
+/// Fever 协议增量游标：上次同步拉到的最大条目 id（`since_id` 分页用）。
+pub fn last_sync_entry_id(conn: &Connection) -> AppResult<i64> {
+    let v: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = 'sync_last_entry_id'", [], |r| r.get(0))
+        .optional()?;
+    Ok(v.and_then(|s| s.parse().ok()).unwrap_or(0))
+}
+
+pub fn set_last_sync_entry_id(conn: &Connection, id: i64) -> AppResult<()> {
+    set_setting(conn, "sync_last_entry_id", &id.to_string())
 }
 
 /// feeds/folders 的 remote_id 绑定
