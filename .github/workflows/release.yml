@@ -39,33 +39,27 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "FluxReader ${{ github.ref_name }}"
           releaseBody: |
-            本版本新增文章状态同步、自定义右键菜单，并大幅优化同步性能与界面体验。
+            本版本新增 Fever 协议同步，并支持在 Google Reader 与 Fever 之间下拉切换。
 
             ## 新功能
 
-            - **文章状态同步**：GitHub Gist / WebDAV 跨设备同步已读/收藏状态（OR-合并，任一端已读即已读）
-            - **自定义右键菜单**：替换系统默认菜单，按上下文（文章卡片/订阅源/正文/空白）提供收藏、已读、复制、编辑、删除等操作
-            - **添加订阅同步到 Miniflux**：已连接时默认勾选，添加后立即推送到服务端
+            - **Fever 协议同步**：完整实现 Fever v3 客户端（`api_key=md5(username:password)` 认证、feeds/groups、items 分页、unread/saved 权威对账、mark 逐条标读/收藏）
+            - **同步协议下拉选择**：设置页可在 **Google Reader（推荐）/ Fever** 之间切换，共用同一套集成凭据，切协议不丢绑定（remote id 同源）
+            - **Fever 半自动化同步**：since_id + with_ids 分页拉取，未读/收藏由 `unread_item_ids`/`saved_item_ids` 精确对账
 
             ## 改进
 
-            - **同步性能**：Miniflux 多源并发拉取 + 批量匹配映射（消除 N+1 查询），断连重连同步提速
-            - **图片防盗链代理**：少数派、豆瓣等白名单式防盗链图床走后端抓取转 data: URL
-            - **Reader 界面重构**：顶栏（标为已读/收藏/源网页/播放）+ 阅读工具栏（摘要/翻译/全文/源码）分离
-            - **列表与正文分栏宽度可拖动调整**
-            - **文案统一**：切换按钮统一动作式（标为已读/收藏），消除状态词与动作词混用
+            - Google Reader 轻量同步新增 read/starred 权威 id 集合对账，修复「手机很久前标读/收藏」漏同步
+            - 已有条目正文/封面/enclosure 兜底回填（本地为空才补，不覆盖已有内容）
+            - 清理 Miniflux 命名残留（注释/日志 protocol-neutral：`origin='remote'`、后端自动同步）
 
             ## 修复
 
-            - 列表滚动后自动跳回选中文章（虚拟滚动定位依赖 totalSize/items 导致）
-            - 正文无法选择文字（全局 user-select:none 覆盖子元素）
-            - 社交布局图片点击跳转浏览器（改为灯箱放大）
-            - 豆瓣画廊图片防盗链显示失败
-            - 无时间戳 RSS 源（如 kirikira.moe）文章发布时间为空
+            - 修正 mock Google Reader 的 `ot` 游标语义（按 changed_at 过滤）与 read/starred stream 状态过滤，消除 3 个既有同步回归测试失败
 
             ## 数据迁移
 
-            - 数据库迁移至 v12：回填缺失发布时间（用抓取时间兜底）
-          releaseDraft: true
+            - 新增 settings 键 `sync_protocol`（greader|fever，默认 greader）与 `sync_last_entry_id`（Fever since_id 游标）；无 schema 迁移
+          releaseDraft: false
           prerelease: false
           args: ""
