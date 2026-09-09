@@ -8,7 +8,7 @@ on:
 
 jobs:
   frontend:
-    name: Type-check, lint & build frontend
+    name: Type-check, lint, build & test frontend
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +27,9 @@ jobs:
 
       - name: Build (tsc + vite)
         run: npm run build
+
+      - name: Frontend regression (Zustand state machine + pure selectors)
+        run: npm run test:frontend
 
   rust:
     name: Check & test Rust (src-tauri)
@@ -49,10 +52,13 @@ jobs:
           workspaces: src-tauri
 
       - name: Lint (clippy, deny warnings)
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
       - name: Run tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Run self-hosted mock integration tests (core sync/AI protocols)
+        # 进程内自托管 mock（tests/mock_greader.rs），不连真实服务器。
+        # live 用例（fever_live/greader_live/fever_sync_live/freshrss_live/
+        # protocol_coverage_live）连真实后端，明确不进 CI。
         run: cargo test --manifest-path src-tauri/Cargo.toml --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --ignored

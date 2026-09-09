@@ -166,7 +166,15 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
           label: '删除订阅源',
           icon: <Icons.trash />,
           danger: true,
-          onSelect: () => st.deleteFeed(catId, feedId),
+          onSelect: () => {
+            /* P0-6：右键删除源走全局确认框（与设置页一致，I-UI-4） */
+            st.openConfirm({
+              title: '删除订阅源',
+              message: '删除后该源及其文章将从本地移除（若已同步到服务端，远端订阅保留）。确定删除吗？',
+              confirmText: '删除',
+              onConfirm: () => st.deleteFeed(catId, feedId),
+            });
+          },
         },
       ];
     }

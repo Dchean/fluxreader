@@ -5,6 +5,7 @@
 //! api_key 认证、feeds/groups、unread/saved 集合、items 分页、mark 写入均在
 //! 真实 Miniflux 上工作。不跑在 CI，本地 `cargo test -- --ignored` 手动跑。
 
+use app_lib::backend::{resolve_api_base, Protocol, ServerKind};
 use app_lib::fever::FeverClient;
 use app_lib::greader::{self, has_tag};
 
@@ -17,11 +18,16 @@ fn test_creds() -> (String, String, String) {
     (endpoint, username, password)
 }
 
+/// 测试账号按 Miniflux 处理：Fever API base = {root}/fever/
+fn fever_base(endpoint: &str) -> String {
+    resolve_api_base(ServerKind::Miniflux, Protocol::Fever, endpoint)
+}
+
 #[tokio::test]
 #[ignore = "需真实 Miniflux 测试账号 + 网络"]
 async fn fever_auth_and_subscriptions() {
     let (endpoint, username, password) = test_creds();
-    let client = FeverClient::new(&endpoint, &username, &password, reqwest::Client::new());
+    let client = FeverClient::new(&fever_base(&endpoint), &username, &password, reqwest::Client::new());
 
     client.verify().await.unwrap();
 
@@ -48,7 +54,7 @@ async fn fever_auth_and_subscriptions() {
 #[ignore = "需真实 Miniflux 测试账号 + 网络"]
 async fn fever_unread_saved_and_items() {
     let (endpoint, username, password) = test_creds();
-    let client = FeverClient::new(&endpoint, &username, &password, reqwest::Client::new());
+    let client = FeverClient::new(&fever_base(&endpoint), &username, &password, reqwest::Client::new());
 
     let unread = client.unread_item_ids().await.unwrap();
     let saved = client.saved_item_ids().await.unwrap();
@@ -81,7 +87,7 @@ async fn fever_unread_saved_and_items() {
 #[ignore = "需真实 Miniflux 测试账号 + 网络"]
 async fn fever_mark_roundtrip() {
     let (endpoint, username, password) = test_creds();
-    let client = FeverClient::new(&endpoint, &username, &password, reqwest::Client::new());
+    let client = FeverClient::new(&fever_base(&endpoint), &username, &password, reqwest::Client::new());
 
     // 拿一条真实条目
     let unread = client.unread_item_ids().await.unwrap();

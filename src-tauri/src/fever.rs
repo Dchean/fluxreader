@@ -75,10 +75,32 @@ struct FeverFeed {
     site_url: String,
 }
 
+/// 反序列化「数字或数字字符串」→ i64。
+/// FreshRSS 的 entry id 是 16 位微秒时间戳，PHP 以字符串返回（`getItems()` 里
+/// `'id' => $entry->id()`，entry id 本身是 numeric-string）；Miniflux 返回 JSON 数字
+/// （Go int64）。两处都要能解析。
+fn flex_i64<'de, D>(de: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let v = serde_json::Value::deserialize(de)?;
+    match v {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| D::Error::custom("id 不是有效 i64")),
+        serde_json::Value::String(s) => s
+            .parse::<i64>()
+            .map_err(|_| D::Error::custom(format!("id 字符串不是有效数字：{s}"))),
+        _ => Err(D::Error::custom("id 必须是数字或数字字符串")),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct FeverItem {
+    #[serde(deserialize_with = "flex_i64")]
     id: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "flex_i64")]
     feed_id: i64,
     #[serde(default)]
     title: String,
@@ -108,30 +130,49 @@ pub struct FeverClient {
 }
 
 impl FeverClient {
+    /// `endpoint` 是已按 ServerKind 推导的 Fever API base（Miniflux `{root}/fever/`、
+    /// FreshRSS `{root}/api/fever.php`）。保留尾斜杠——Miniflux 的 Fever 路由挂载在
+    /// `/fever/`（尾斜杠是路径一部分），去掉会导致 `/fever?api` 404。
     pub fn new(endpoint: &str, username: &str, password: &str, http: Client) -> Self {
         // Fever 规范：api_key = md5("username:password") 十六进制小写
         let digest = Md5::digest(format!("{username}:{password}").as_bytes());
         let api_key = format!("{digest:x}");
         Self {
-            base: endpoint.trim_end_matches('/').to_string(),
+            base: endpoint.to_string(),
             api_key,
             http,
         }
     }
 
-    /// POST 请求：action 拼 query + api_key 拼 query，返回信封并校验 `auth == 1`。
+    /// POST 请求：action + 带值参数（since_id/with_ids/max_id）拼 query，
+    /// `api_key` 放 body。这是 Miniflux 与 FreshRSS 的交集（逐行核对服务端源码）：
+    ///
+    /// - Miniflux `handleItems` 用 `QueryStringParam`/`HasQueryParam` **只读 query**
+    ///   （`since_id`/`with_ids`/`max_id` 放 body 会被静默忽略，退化为最近 50 条）；
+    /// - FreshRSS `fever.php` 用 `$_REQUEST`（query/body 均可）读参数，`$_POST['api_key']`
+    ///   **只读 body**。故参数进 query、api_key 进 body 双方都能过。
+    ///
+    /// 返回信封并校验 `auth == 1`。
+    /// `base` 是已按 ServerKind 推导的 Fever 端点（Miniflux `{root}/fever/`、
+    /// FreshRSS `{root}/api/fever.php`）。
     /// `action` 形如 `feeds` / `groups` / `items` / `unread_item_ids`（无值参数）。
-    /// `extra` 是 `since_id=5900` / `with_ids=1,2` 这类带值参数。
+    /// `extra` 是 `since_id=5900` / `with_ids=1,2` 这类带值参数（进 query）。
     async fn call(&self, action: &str, extra: &[(&str, String)]) -> AppResult<FeverEnvelope> {
-        let mut url = format!("{}/fever/?api", self.base);
-        url.push_str(&format!("&api_key={}", self.api_key));
+        // URL：`{base}?api` + action + 带值参数全在 query。
+        let mut url = format!("{}?api", self.base);
         if !action.is_empty() {
             url.push_str(&format!("&{action}"));
         }
         for (k, v) in extra {
             url.push_str(&format!("&{k}={v}"));
         }
-        let resp = self.http.post(&url).send().await?;
+        // body：仅 api_key（FreshRSS 只读 `$_POST['api_key']`）。
+        let resp = self
+            .http
+            .post(&url)
+            .form(&[("api_key", self.api_key.clone())])
+            .send()
+            .await?;
         if !resp.status().is_success() {
             return Err(AppError::network(format!(
                 "Fever {action} → {}",
@@ -139,7 +180,9 @@ impl FeverClient {
             )));
         }
         let env: FeverEnvelope = resp.json().await?;
-        if env.api_version != 3 {
+        // Fever 规范基线是 v3；Miniflux 返回 3，FreshRSS 返回 4（其内部 API_LEVEL）。
+        // 只拒绝明确不兼容的 < 3，>= 3 均接受（向后兼容）。
+        if env.api_version < 3 {
             return Err(AppError::new(
                 "protocol",
                 format!("不支持的 Fever API 版本 {}", env.api_version),
@@ -283,12 +326,15 @@ impl FeverClient {
 
     async fn mark_items(&self, ids: &[i64], mark: &str) -> AppResult<()> {
         for id in ids {
-            let mut url = format!(
-                "{}/fever/?api&mark=item&as={mark}&id={id}",
-                self.base
-            );
-            url.push_str(&format!("&api_key={}", self.api_key));
-            let resp = self.http.post(&url).send().await?;
+            // URL：`{base}?api&mark=item&as={mark}&id={id}`（action/flag 在 query）；
+            // api_key 放 body（FreshRSS 只读 $_POST['api_key']）。
+            let url = format!("{}?api&mark=item&as={mark}&id={id}", self.base);
+            let resp = self
+                .http
+                .post(&url)
+                .form(&[("api_key", self.api_key.clone())])
+                .send()
+                .await?;
             if !resp.status().is_success() {
                 return Err(AppError::network(format!(
                     "Fever mark {mark} {id} → {}",

@@ -73,6 +73,7 @@ async fn direct_fetch_pipeline_end_to_end() {
         &db::ArticleQuery {
             feed_id: Some(feed_id),
             folder_id: None,
+            feed_ids: None,
             only_unread: false,
             only_starred: false,
             only_today: false,

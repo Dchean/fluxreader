@@ -65,6 +65,14 @@ export interface SettingsState {
   syncMode: 'direct' | 'hybrid';
 }
 
+/** 全局确认框规格（破坏性操作统一走 ConfirmHost，I-UI-4） */
+export type ConfirmSpec = {
+  title: string;
+  message: string;
+  confirmText?: string;
+  onConfirm: () => void;
+};
+
 /** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM。
     action：可选操作按钮（失败 toast 的一键重试） */
 export type ToastMessage = {
@@ -153,6 +161,8 @@ export interface AppState {
   dataMode: 'tauri' | 'mock';
   /** 后端数据加载中（首屏骨架） */
   dataLoading: boolean;
+  /** 启动装载失败的错误信息（非 null 时 App 渲染错误页 + 重试；不回退 mock） */
+  bootError: string | null;
   bootstrapFromBackend: () => Promise<void>;
   reloadFromBackend: () => Promise<void>;
   /** 已从后端加载的文章数（分页游标：reload 重置为 PAGE_SIZE，loadMore 累加）。
@@ -233,6 +243,10 @@ export interface AppState {
   openSettingsTab: (tab: string) => void;
   openSearch: () => void;
   closeSearch: () => void;
+  /** 全局确认框（破坏性操作统一入口） */
+  confirm: ConfirmSpec | null;
+  openConfirm: (spec: ConfirmSpec) => void;
+  closeConfirm: () => void;
   /** 首次关闭询问的应答（Rust resolve_close 执行隐藏/退出；remember 时同步设置镜像） */
   answerCloseAsk: (action: 'tray' | 'exit', remember: boolean) => void;
   openLightbox: (url: string) => void;

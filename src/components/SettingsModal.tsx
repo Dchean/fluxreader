@@ -404,7 +404,7 @@ function FeedsTab() {
       if (!r) { showToast('浏览器环境不支持导入'); return; }
       showToast(`OPML 导入完成：新增 ${r.imported} 个源${r.skipped > 0 ? `，跳过 ${r.skipped} 个已存在` : ''}`);
       return reloadFromBackend();
-    }).catch((err) => showToast(`OPML 导入失败：${err}`));
+    }).catch((err) => showToast(`OPML 导入失败：${extractError(err)}`));
   };
 
   /* OPML 导出：后端生成 → Blob 下载 */
@@ -718,7 +718,7 @@ function AiTab() {
       await api.saveAiConfig(JSON.stringify(cfg));
       showToast(`连通成功：${list.length} 个可用模型`);
     } catch (e) {
-      showToast(`连通失败：${e}`);
+      showToast(`连通失败：${extractError(e)}`);
     } finally {
       setTesting(false);
     }
@@ -838,6 +838,7 @@ function SyncTab() {
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const [endpoint, setEndpoint] = useState('');
+  const [serverKind, setServerKind] = useState<'miniflux' | 'freshrss' | 'custom'>('miniflux');
   const [protocol, setProtocol] = useState<'greader' | 'fever'>('greader');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -860,19 +861,23 @@ function SyncTab() {
       setAccount(st.account);
       setLastSync(st.last_sync);
       if (st.connected && st.endpoint) setEndpoint(st.endpoint);
+      // 已连接时回填用户名（P1-8：此前只回填 endpoint/protocol，用户名框为空）
+      if (st.connected && st.account) setUsername(st.account);
       setProtocol(st.protocol === 'fever' ? 'fever' : 'greader');
+      const kind = st.server_kind === 'freshrss' ? 'freshrss' : st.server_kind === 'custom' ? 'custom' : 'miniflux';
+      setServerKind(kind);
     });
   }, [dataMode]);
 
   /* 轻量连通测试：不落库不做同步（填表时快速验证） */
   const doTest = async () => {
     if (!endpoint.trim() || !username.trim() || !password.trim()) {
-      showToast('请填写 Endpoint、用户名和密码');
+      showToast('请填写服务器地址、用户名和密码');
       return;
     }
     setTesting(true);
     try {
-      const msg = await api.syncTest(protocol, endpoint.trim(), username.trim(), password.trim());
+      const msg = await api.syncTest(serverKind, protocol, endpoint.trim(), username.trim(), password.trim());
       showToast(msg ?? '连接成功');
     } catch (e) {
       showToast(`连接失败：${extractError(e)}`);
@@ -883,10 +888,10 @@ function SyncTab() {
 
   /** 保存并后台同步：保存秒回（只做轻量测试+落库），
       订阅/状态的拉取全部后台执行，设置页可随时关闭。
-      已连接且 Token 留空 = 复用已存 Token（仅改 Endpoint） */
+      已连接且密码留空 = 复用已存密码（仅改地址） */
   const doSaveAndSync = async () => {
     if (!endpoint.trim()) {
-      showToast('请填写 Endpoint');
+      showToast('请填写服务器地址');
       return;
     }
     if ((!username.trim() || !password.trim()) && !connected) {
@@ -895,7 +900,7 @@ function SyncTab() {
     }
     setSaving(true);
     try {
-      const result = await api.syncSave(protocol, endpoint.trim(), username.trim(), password.trim());
+      const result = await api.syncSave(serverKind, protocol, endpoint.trim(), username.trim(), password.trim());
       setConnected(true);
       /* 保存成功即刷新账户名显示 */
       void api.syncStatus().then((st) => { if (st) setAccount(st.account); });
@@ -993,8 +998,26 @@ function SyncTab() {
         <span className="about-arch-tag">{connected ? (account ?? '已连接') : '未连接'}</span>
       </SettingCard>
       <SettingCard
+        title="服务端类型"
+        desc={serverKind === 'freshrss'
+          ? 'FreshRSS：管理员需在「系统配置」开启 API，用户在「个人资料」设置 API 密码；地址填站点根，用户名用登录名，密码用 API 密码。'
+          : serverKind === 'custom'
+            ? '其他兼容服务端：填写完整 API 根地址（如 https://host/api/greader.php）。'
+            : 'Miniflux：在「设置 → 集成」启用 Google Reader / Fever，填专用集成用户名与密码；地址填站点根。'}
+      >
+        <select
+          className="setting-input"
+          value={serverKind}
+          onChange={(e) => setServerKind(e.target.value === 'freshrss' ? 'freshrss' : e.target.value === 'custom' ? 'custom' : 'miniflux')}
+        >
+          <option value="miniflux">Miniflux</option>
+          <option value="freshrss">FreshRSS</option>
+          <option value="custom">其他兼容服务端</option>
+        </select>
+      </SettingCard>
+      <SettingCard
         title="同步协议"
-        desc="Google Reader 与 Fever 共用 Miniflux「集成」凭据。切协议不丢数据（remote id 同源）。"
+        desc="Google Reader 与 Fever 两套协议。切协议不丢数据（remote id 同源）。"
       >
         <select
           className="setting-input"
@@ -1005,7 +1028,14 @@ function SyncTab() {
           <option value="fever">Fever</option>
         </select>
       </SettingCard>
-      <SettingCard title="后端 Endpoint" desc="例如 https://reader.example.com（支持 Google Reader / Fever 协议）">
+      <SettingCard
+        title="服务器地址"
+        desc={serverKind === 'freshrss'
+          ? '填站点根地址（如 https://rss.example.com），会自动拼接 /api/greader.php 或 /api/fever.php'
+          : serverKind === 'custom'
+            ? '填完整 API 根地址（如 https://host/api/greader.php 或 https://host/fever/）'
+            : '填站点根地址（如 https://reader.example.com）'}
+      >
         <input
           type="text"
           className="setting-input"
@@ -1016,19 +1046,23 @@ function SyncTab() {
       </SettingCard>
       <SettingCard
         title="用户名"
-        desc="Miniflux「集成」页单独配置的用户名（Google Reader / Fever 共用，非 Miniflux 账号密码）"
+        desc={serverKind === 'freshrss'
+          ? 'FreshRSS 登录用户名'
+          : '集成用户名（Miniflux 集成页 / Fever 用户名）'}
       >
         <input
           type="text"
           className="setting-input"
-          placeholder="集成用户名"
+          placeholder="用户名"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
         />
       </SettingCard>
       <SettingCard
         title="密码"
-        desc={connected ? '已保存（出于安全不回显）。留空提交 = 保持当前密码；填写新值 = 更换账号' : '集成密码（Google Reader / Fever 共用）'}
+        desc={serverKind === 'freshrss'
+          ? (connected ? '已保存（不回显）。留空提交 = 保持当前密码；填写新值 = 更换' : 'FreshRSS API 密码（在个人资料页设置）')
+          : (connected ? '已保存（出于安全不回显）。留空提交 = 保持当前密码；填写新值 = 更换账号' : '集成密码')}
       >
         <input
           type="password"
@@ -1435,7 +1469,7 @@ function SettingsSidebarFooter() {
     import('@tauri-apps/api/app')
       .then(({ getVersion }) => getVersion())
       .then((v) => alive && setVersion(v))
-      .catch(() => alive && setVersion('0.8.0'));
+      .catch(() => alive && setVersion('未知'));
     return () => { alive = false; };
   }, []);
   return <div className="settings-sidebar-footer">{`FluxReader v${version || '…'}`}</div>;
@@ -1454,7 +1488,7 @@ function AboutTab() {
     import('@tauri-apps/api/app')
       .then(({ getVersion }) => getVersion())
       .then((v) => alive && setVersion(v))
-      .catch(() => alive && setVersion('0.8.0'));
+      .catch(() => alive && setVersion('未知'));
     return () => { alive = false; };
   }, []);
 
@@ -1477,7 +1511,7 @@ function AboutTab() {
 
   return (
     <>
-      <SettingCard title="客户端版本" desc={`FluxReader v${version || '…'} (Build 2026.08)`}>
+      <SettingCard title="客户端版本" desc={`FluxReader v${version || '…'}`}>
         <span className="about-arch-tag">Tauri 2 + Rust + SQLite</span>
       </SettingCard>
       <SettingCard title="检查更新" desc="检测 GitHub Releases 上的最新版本">

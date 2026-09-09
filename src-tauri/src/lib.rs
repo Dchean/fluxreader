@@ -1,5 +1,6 @@
 // pub 供集成测试（tests/）直接复用数据层与抓取管线
 pub mod ai;
+pub mod backend;
 pub mod commands;
 pub mod config_sync;
 pub mod credentials;

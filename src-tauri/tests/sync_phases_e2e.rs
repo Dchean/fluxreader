@@ -204,7 +204,137 @@ async fn stale_remote_read_converges_via_full_reconcile() {
     assert!(is_read, "full reconcile must converge the stale remote read");
 }
 
-/// 本地直连源漏抓的条目（本地文章数 < 远端）→ full 同步对比拉取补齐。
+/// P0-5 回归：空库（0 分类）直接 feeds_phase → 无分类归属的远端订阅必须落入
+/// 「未分类」分类（无则建），不得回落不存在的 folder_id=1 导致订阅静默丢失。
+#[tokio::test]
+#[ignore = "spins a local mock server"]
+async fn pull_feeds_without_folder_uses_uncategorized() {
+    let (db, http, server) = setup("uncategorized").await;
+    // 造一个无分类归属的远端订阅（空 categories）
+    {
+        let mut subs = server.subscriptions.lock().unwrap();
+        subs.push(mock_greader::MockSubscription {
+            id: "feed/77".into(),
+            title: "No Category Feed".into(),
+            url: "http://example.com/no-category.xml".into(),
+            html_url: None,
+            categories: vec![],
+        });
+    }
+
+    // 空库直接 feeds 阶段
+    let report = sync::feeds_phase(&db, &http).await.expect("feeds phase");
+    assert!(!report.errors.iter().any(|e| e.contains("入库失败")), "无分类订阅不得报错: {:?}", report.errors);
+
+    {
+        let conn = db.lock().await;
+        // 远端订阅已入库
+        let feed_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM feeds WHERE feed_url = 'http://example.com/no-category.xml'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        assert!(feed_id.is_some(), "无分类订阅必须入库");
+        // 落到了「未分类」分类
+        let folder_name: Option<String> = conn
+            .query_row(
+                "SELECT fo.name FROM feeds f JOIN folders fo ON f.folder_id = fo.id WHERE f.id = ?1",
+                [feed_id.unwrap()],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(folder_name.as_deref(), Some("未分类"), "无分类订阅落到「未分类」");
+    }
+}
+
+/// 不推进游标，本地收藏/已读状态与 `sync_last_sync` 均不变。
+/// 修复前：`unwrap_or_default()` 把失败当空集合，本地收藏会被全部取消。
+#[tokio::test]
+#[ignore = "spins a local mock server"]
+async fn authority_set_failure_aborts_reconcile_without_changes() {
+    let (db, http, server) = setup("authset_fail").await;
+    let (aid, mf_id) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
+
+    // 绑定 + 让本地收藏该文章（远端也收藏，避免误伤）
+    sync::states_phase(&db, &http, true).await.expect("bind phase");
+    {
+        let conn = db.lock().await;
+        db::set_starred(&conn, aid, true).unwrap();
+    }
+    // 远端收藏同一条
+    {
+        let mut es = server.entries.lock().unwrap();
+        if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
+            e.starred = true;
+        }
+    }
+    // 记录失败前游标
+    let before_ts = {
+        let conn = db.lock().await;
+        db::last_sync_ts(&conn).unwrap_or(0)
+    };
+
+    // 触发权威集合失败 → 轻量同步应中止对账
+    *server.fail_authority_sets.lock().unwrap() = true;
+    let report = sync::sync_light(&db, &http).await.expect("light sync returns Ok with aborted flag");
+    assert!(report.aborted, "权威集合失败必须标记 aborted");
+    assert!(!report.errors.is_empty(), "必须有错误进入 errors");
+
+    // 本地状态不变（收藏仍为 1，未读不受影响）
+    {
+        let conn = db.lock().await;
+        let (is_read, is_starred): (i64, i64) = conn
+            .query_row("SELECT is_read, is_starred FROM articles WHERE id = ?1", [aid], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(is_starred, 1, "本地收藏不被失败的空集合回滚");
+        assert_eq!(is_read, 0, "本地已读状态不被失败的空集合回滚");
+        // 游标不推进
+        let after_ts = db::last_sync_ts(&conn).unwrap_or(0);
+        assert_eq!(after_ts, before_ts, "失败轮不得推进同步游标");
+    }
+}
+
+/// 同一 I-SYNC-1 语义：恢复后端后，再次轻量同步能正常对账收敛，
+/// 证明中止只是「本轮」，不是永久损坏（失败不推进游标，下次重试）。
+#[tokio::test]
+#[ignore = "spins a local mock server"]
+async fn authority_set_recovers_after_transient_failure() {
+    let (db, http, server) = setup("authset_recover").await;
+    let (aid, mf_id) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
+    sync::states_phase(&db, &http, true).await.expect("bind phase");
+
+    // 远端标读（changed_at 拨回 1 小时前，走权威集合对账才收敛）
+    {
+        let mut es = server.entries.lock().unwrap();
+        if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
+            e.read = true;
+            e.changed_at = (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp();
+        }
+    }
+
+    // 先失败一轮
+    *server.fail_authority_sets.lock().unwrap() = true;
+    let r = sync::sync_light(&db, &http).await.unwrap();
+    assert!(r.aborted);
+    {
+        let conn = db.lock().await;
+        let is_read: i64 = conn.query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| r.get(0)).unwrap();
+        assert_eq!(is_read, 0, "失败轮不误标读");
+    }
+
+    // 恢复后端 → 正常对账，远端已读收敛到本地
+    *server.fail_authority_sets.lock().unwrap() = false;
+    let r2 = sync::sync_light(&db, &http).await.unwrap();
+    assert!(!r2.aborted, "恢复后同步不应中止");
+    {
+        let conn = db.lock().await;
+        let is_read: i64 = conn.query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| r.get(0)).unwrap();
+        assert_eq!(is_read, 1, "恢复后权威对账收敛远端已读");
+    }
+}
+
 /// 根因：此前 pull_entries 只对「完全失败」的源做 Miniflux 兜底，正常直连源
 /// 若 feed 只提供摘要/漏了几条，本地永久缺失。现在 full 对账会对已绑定源
 /// 的远端条目逐一 upsert 补齐（幂等，不重复、不覆盖已有正文/已读）。

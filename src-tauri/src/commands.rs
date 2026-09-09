@@ -177,20 +177,7 @@ pub async fn add_feed(
     // 兜底到 id=1 会在 folder 1 不存在时触发外键违约，文章静默丢失。
     let folder_id = match folder_id {
         Some(fid) => fid,
-        None => {
-            let existing: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM folders WHERE name = '未分类' ORDER BY id LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .ok()
-                .flatten();
-            match existing {
-                Some(fid) => fid,
-                None => db::create_folder(&conn, "未分类", "article")?,
-            }
-        }
+        None => db::ensure_uncategorized_folder(&conn)?,
     };
     let feed_id = db::insert_feed(
         &conn,
@@ -288,6 +275,8 @@ pub async fn set_feed_ai_flags(
 pub struct ArticleListArgs {
     pub feed_id: Option<i64>,
     pub folder_id: Option<i64>,
+    /// 当前内容布局下的源集合。`Some(vec![])` = 该布局下无源（返回空集）。
+    pub feed_ids: Option<Vec<i64>>,
     pub only_unread: Option<bool>,
     pub only_starred: Option<bool>,
     pub only_today: Option<bool>,
@@ -323,6 +312,7 @@ fn article_query(args: &ArticleListArgs) -> db::ArticleQuery {
     db::ArticleQuery {
         feed_id: args.feed_id,
         folder_id: args.folder_id,
+        feed_ids: args.feed_ids.clone(),
         only_unread: args.only_unread.unwrap_or(false),
         only_starred: args.only_starred.unwrap_or(false),
         only_today: args.only_today.unwrap_or(false),
@@ -413,29 +403,28 @@ fn sync_configured(conn: &rusqlite::Connection) -> bool {
 #[tauri::command]
 pub async fn mark_all_read(
     state: State<'_, AppState>,
-    feed_id: Option<i64>,
-    folder_id: Option<i64>,
+    args: ArticleListArgs,
 ) -> AppResult<usize> {
+    let q = article_query(&args);
     let n = {
         let conn = state.db.lock().await;
         // 先收集「即将被标读」的未读文章 id（标读后再查 is_read=0 会得到空集，
         // 导致「全部已读」从不推送到 Miniflux——历史 bug）。
-        let target_sql = {
-            let mut sql = String::from("SELECT id FROM articles WHERE is_read = 0");
-            if let Some(fid) = feed_id {
-                sql.push_str(&format!(" AND feed_id = {fid}"));
-            }
-            if let Some(f) = folder_id {
-                sql.push_str(&format!(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {f})"));
-            }
-            sql
+        // 用与 list_articles / mark_all_read 相同的 filter（I-UI-1），确保
+        // 「推送远端」与「本地标读」作用范围一致。
+        let (where_clauses, params) = db::article_where(&q);
+        let where_sql = if where_clauses.is_empty() {
+            "a.is_read = 0".to_string()
+        } else {
+            format!("a.is_read = 0 AND {}", where_clauses.join(" AND "))
         };
+        let target_sql = format!("SELECT a.id FROM articles AS a WHERE {where_sql}");
         let ids: Vec<i64> = {
             let mut stmt = conn.prepare(&target_sql)?;
-            let rows = stmt.query_map([], |r| r.get(0))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| r.get(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        let n = db::mark_all_read(&conn, feed_id, folder_id)?;
+        let n = db::mark_all_read(&conn, &q)?;
         if sync_configured(&conn) {
             // 逐条入队（量级可控：个人订阅日常几十条）
             for id in ids {
@@ -688,13 +677,27 @@ pub async fn opml_import(
     content: String,
 ) -> AppResult<OpmlImportReport> {
     let feeds = crate::opml::parse(&content)?;
+    let mut conn = state.db.lock().await;
+    // 整个导入包在事务里（I-DATA-1 / T0-4）：中途失败不半应用。
+    let tx = conn.transaction()?;
+    let report = import_opml_feeds(&tx, &feeds)?;
+    tx.commit()?;
+    Ok(report)
+}
+
+/// OPML 导入核心（可脱离 IPC 状态测试）：URL 碰撞跳过；分类名→id 缓存复用，
+/// 无目录源落到「导入」分类（整次导入只建一次）；新增订阅入同步队列。
+/// `conn` 接受 `&Connection` 或 `&Transaction`（deref）。
+fn import_opml_feeds(
+    conn: &rusqlite::Connection,
+    feeds: &[crate::opml::ImportedFeed],
+) -> AppResult<OpmlImportReport> {
     let mut report = OpmlImportReport { imported: 0, skipped: 0 };
-    let conn = state.db.lock().await;
+    // 目录名 → folder_id 缓存：预载库内已有分类（含历史「导入」），一次导入内
+    // 同名目录只建一次。修复前无目录的源每条都新建「导入」分类（P0-4）。
+    let mut folder_ids: std::collections::HashMap<String, i64> = db::folder_name_to_id_map(conn)?;
 
-    // 目录名 → folder_id 缓存（一次导入内同名目录只建一次）
-    let mut folder_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-
-    for f in &feeds {
+    for f in feeds {
         // 已存在（URL 碰撞）→ 跳过
         let exists: bool = conn
             .query_row(
@@ -711,19 +714,27 @@ pub async fn opml_import(
             Some(name) => match folder_ids.get(name) {
                 Some(id) => *id,
                 None => {
-                    let id = db::create_folder(&conn, name, "article")?;
+                    let id = db::create_folder(conn, name, "article")?;
                     folder_ids.insert(name.to_string(), id);
                     id
                 }
             },
-            None => db::create_folder(&conn, "导入", "article")?,
+            // 无目录 → 「导入」分类（缓存复用，整次导入只建一次）
+            None => match folder_ids.get("导入") {
+                Some(id) => *id,
+                None => {
+                    let id = db::create_folder(conn, "导入", "article")?;
+                    folder_ids.insert("导入".to_string(), id);
+                    id
+                }
+            },
         };
-        db::insert_feed(&conn, &f.feed_url, None, &f.title, None, folder_id, "inherit", true, false)?;
+        db::insert_feed(conn, &f.feed_url, None, &f.title, None, folder_id, "inherit", true, false)?;
         // 新增订阅入同步队列（连接 Miniflux 后补推）。payload 必须是含 folder_id
         // 的 JSON——push_feeds 据此把订阅挂到远端对应分类；此前误传标题字符串，
         // serde_json 解析失败导致 payload 丢弃、源被推到远端默认分类（目录丢失）。
         let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
-        db::enqueue_sync(&conn, None, Some(&f.feed_url), "add_feed", Some(&payload))?;
+        db::enqueue_sync(conn, None, Some(&f.feed_url), "add_feed", Some(&payload))?;
         report.imported += 1;
     }
     Ok(report)
@@ -762,24 +773,29 @@ pub async fn opml_export(state: State<'_, AppState>) -> AppResult<String> {
 #[tauri::command]
 pub async fn sync_test(
     state: State<'_, AppState>,
+    server_kind: String,
     protocol: String,
     endpoint: String,
     username: String,
     password: String,
 ) -> AppResult<String> {
+    let kind = crate::backend::ServerKind::parse(&server_kind);
     let (msg, _) =
-        crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http).await?;
+        crate::sync::test_connection(kind, &protocol, &endpoint, &username, &password, &state.http).await?;
     Ok(msg)
 }
 
 /// 保存凭据：先轻量测试（失败不保存），通过后立即落库返回。
 /// 首连的重活（拉订阅、同步状态）由前端随后台阶段执行，不阻塞这里。
-/// 密码留空且已连接 → 复用已存密码（仅改 Endpoint 的场景）。
-/// 换账号检测：已连接其他账号（协议/endpoint/username 不同）时先清理旧账号
+/// 密码留空且已连接且用户名未变 → 复用已存密码（仅改地址的场景）；
+/// 密码留空但用户名变化 → 明确报错（P1-8：不再静默沿用旧用户名）。
+/// 换账号检测：已连接其他账号（kind/协议/endpoint/username 不同）时先清理旧账号
 /// 数据（订阅/绑定/队列），避免两份订阅列表混杂。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_save(
     state: State<'_, AppState>,
+    server_kind: String,
     protocol: String,
     endpoint: String,
     username: String,
@@ -787,13 +803,19 @@ pub async fn sync_save(
 ) -> AppResult<String> {
     // 协议归一：未知值回退 greader（前端下拉只有两个合法项）
     let protocol = if protocol == "fever" { "fever" } else { "greader" }.to_string();
+    // 服务端类型归一：未知值回退 miniflux（老用户零变化）
+    let server_kind = crate::backend::ServerKind::parse(&server_kind).as_str().to_string();
+    let kind = crate::backend::ServerKind::parse(&server_kind);
 
-    // 留空密码且已连接 → 复用旧密码（改地址不动密钥）
+    // 留空密码且已连接 → 复用旧密码（改地址不动密钥）；但用户名变化必须报错。
     let (endpoint, username, password) = {
         let conn = state.db.lock().await;
         let old = crate::sync::read_credentials(&conn);
         match (&old, password.trim().is_empty()) {
             (Some((_old_p, _old_ep, old_user, old_pw)), true) => {
+                if !username.trim().is_empty() && username.trim() != old_user.as_str() {
+                    return Err(AppError::new("validate", "更改用户名时必须重新填写密码"));
+                }
                 (endpoint.trim().to_string(), old_user.clone(), old_pw.clone())
             }
             (None, true) => {
@@ -810,9 +832,11 @@ pub async fn sync_save(
     let (account_changed, old_was_empty) = {
         let conn = state.db.lock().await;
         let old = crate::sync::read_credentials(&conn);
+        let old_kind = crate::backend::read_config(&conn).map(|c| c.kind);
         match old {
             Some((old_p, old_ep, old_user, old_pw)) => {
                 let changed = old_p != protocol
+                    || old_kind.map(|k| k.as_str().to_string()) != Some(server_kind.clone())
                     || old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/')
                     || old_user != username
                     || old_pw != password;
@@ -823,7 +847,7 @@ pub async fn sync_save(
     };
     // 测试新凭据（失败不保存不动现状）；用户名随凭据落库（设置页动态显示）
     let (msg, _account) =
-        crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http).await?;
+        crate::sync::test_connection(kind, &protocol, &endpoint, &username, &password, &state.http).await?;
     {
         let mut conn = state.db.lock().await;
         if account_changed {
@@ -840,6 +864,7 @@ pub async fn sync_save(
             )
             .unwrap_or(0);
         let first_connect = old_was_empty && unbound_local > 0;
+        db::set_setting(&conn, "sync_server_kind", &server_kind)?;
         db::set_setting(&conn, "sync_protocol", &protocol)?;
         db::set_setting(&conn, "greader_endpoint", &endpoint)?;
         db::set_setting(&conn, "greader_username", &username)?;
@@ -949,6 +974,7 @@ pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<String> {
         db::set_setting(&conn, "greader_password", "")?;
         db::set_setting(&conn, "greader_username", "")?;
         db::set_setting(&conn, "sync_last_sync", "0")?;
+        db::set_setting(&conn, "sync_server_kind", "")?;
         r
     };
     Ok(format!("已断开并清理：移除 {feeds} 个服务端订阅（{articles} 处绑定），本地直连订阅保留"))
@@ -1002,6 +1028,10 @@ pub struct SyncStatusInfo {
     pub last_sync: i64,
     /// 同步协议："greader" | "fever"
     pub protocol: Option<String>,
+    /// 服务端类型："miniflux" | "freshrss" | "custom"
+    pub server_kind: Option<String>,
+    /// 探测/推导后的实际 API base（测试连接成功后落库；未连接为 None）
+    pub api_base: Option<String>,
 }
 
 #[tauri::command]
@@ -1011,15 +1041,31 @@ pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo
         .filter(|e| !e.trim().is_empty());
     let account = db::get_setting(&conn, "greader_username").ok().flatten()
         .filter(|a| !a.trim().is_empty());
+    let protocol = db::get_setting(&conn, "sync_protocol")
+        .ok()
+        .flatten()
+        .filter(|p| p == "fever" || p == "greader");
+    let server_kind = db::get_setting(&conn, "sync_server_kind")
+        .ok()
+        .flatten()
+        .filter(|k| !k.trim().is_empty());
+    // api_base：已连接时按 kind + protocol + root 推导（与 test_connection 同口径）
+    let api_base = match (&server_kind, &protocol, &endpoint) {
+        (Some(kind), Some(proto), Some(root)) => Some(crate::backend::resolve_api_base(
+            crate::backend::ServerKind::parse(kind),
+            crate::backend::Protocol::parse(proto),
+            root,
+        )),
+        _ => None,
+    };
     Ok(SyncStatusInfo {
         connected: endpoint.is_some(),
         endpoint,
         account,
         last_sync: db::last_sync_ts(&conn).unwrap_or(0),
-        protocol: db::get_setting(&conn, "sync_protocol")
-            .ok()
-            .flatten()
-            .filter(|p| p == "fever" || p == "greader"),
+        protocol,
+        server_kind,
+        api_base,
     })
 }
 
@@ -1288,5 +1334,66 @@ mod image_proxy_tests {
     fn referer_candidates_dedupes_page_equal_to_origin() {
         let got = referer_candidates("https://ex.com/a.png", Some("https://ex.com/"));
         assert_eq!(got, vec![None, Some("https://ex.com/".to_string())]);
+    }
+}
+
+#[cfg(test)]
+mod opml_import_tests {
+    use super::import_opml_feeds;
+    use crate::db;
+    use crate::opml::ImportedFeed;
+    use rusqlite::Connection;
+
+    fn feed(url: &str, folder: Option<&str>) -> ImportedFeed {
+        ImportedFeed {
+            feed_url: url.into(),
+            title: format!("t-{url}"),
+            folder: folder.map(|s| s.to_string()),
+        }
+    }
+
+    /// P0-4 回归：3 条无目录 + 2 条同目录 → 恰好 1 个「导入」+ 1 个目录分类。
+    #[test]
+    fn opml_import_creates_single_import_folder() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let feeds = vec![
+            feed("https://a.example/1", None),
+            feed("https://a.example/2", None),
+            feed("https://a.example/3", None),
+            feed("https://b.example/1", Some("Tech")),
+            feed("https://b.example/2", Some("Tech")),
+        ];
+        let report = import_opml_feeds(&conn, &feeds).unwrap();
+        assert_eq!(report.imported, 5);
+        assert_eq!(report.skipped, 0);
+
+        let folders = db::list_folders(&conn).unwrap();
+        let import_count = folders.iter().filter(|f| f.name == "导入").count();
+        let tech_count = folders.iter().filter(|f| f.name == "Tech").count();
+        assert_eq!(import_count, 1, "无目录源只建 1 个「导入」分类");
+        assert_eq!(tech_count, 1, "同目录只建 1 个分类");
+        assert_eq!(folders.len(), 2, "总分类数 = 导入 + Tech");
+    }
+
+    /// 二次导入同文件 → 分类数不变（URL 碰撞跳过，不重复建分类）。
+    #[test]
+    fn opml_import_second_run_idempotent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let feeds = vec![
+            feed("https://a.example/1", None),
+            feed("https://b.example/1", Some("Tech")),
+        ];
+        import_opml_feeds(&conn, &feeds).unwrap();
+        let before = db::list_folders(&conn).unwrap().len();
+
+        let report = import_opml_feeds(&conn, &feeds).unwrap();
+        assert_eq!(report.skipped, 2);
+        assert_eq!(report.imported, 0);
+        let after = db::list_folders(&conn).unwrap().len();
+        assert_eq!(before, after, "二次导入不得新增分类");
     }
 }

@@ -199,40 +199,70 @@ pub mod tags {
 
 #[derive(Clone)]
 pub struct GReaderClient {
-    /// 后端根 URL（去尾部斜杠），如 `https://rss.chean.top`
+    /// API base（已按 ServerKind 推导，如 `https://host/api/greader.php` 或 `https://host`）。
     base: String,
-    /// ClientLogin 换取的 auth token（`username/hmac`）
-    token: String,
+    /// ClientLogin 换取的 auth token（`username/hmac`）。
+    auth: String,
+    /// 写操作 action token（`GET /reader/api/0/token` 返回；失败回退 auth）。
+    action_token: String,
     http: Client,
 }
 
 impl GReaderClient {
-    /// 用已知的 auth token 构建（不重新 ClientLogin）。
+    /// 用已知的 auth token 构建（不重新 ClientLogin）。测试用（action_token 回退为 auth）。
     pub fn new(endpoint: &str, token: &str, http: Client) -> Self {
         let base = endpoint.trim_end_matches('/').to_string();
-        Self { base, token: token.to_string(), http }
+        Self {
+            base,
+            auth: token.to_string(),
+            action_token: token.to_string(),
+            http,
+        }
     }
 
-    /// 两步认证：先 ClientLogin 换 token，再构建客户端。
-    /// `username`/`password` 是 Google Reader 集成凭据（非 Miniflux 账号密码）。
-    pub async fn login(endpoint: &str, username: &str, password: &str, http: Client) -> AppResult<Self> {
-        let base = endpoint.trim_end_matches('/').to_string();
+    /// 两步认证：先 ClientLogin 换 auth token，再拉 action token，构建客户端。
+    /// `base` 是已按 ServerKind 推导的 API base（含 `/api/greader.php` 等前缀）。
+    /// `username`/`password` 是 Google Reader 集成凭据（Miniflux）或 FreshRSS
+    /// 登录名 + API 密码。
+    pub async fn login(base: &str, username: &str, password: &str, http: Client) -> AppResult<Self> {
+        let base = base.trim_end_matches('/').to_string();
+        // ClientLogin：`output=json` 仅作提示，不依赖——FreshRSS 永远返回 text/plain。
         let resp = http
             .post(format!("{base}/accounts/ClientLogin"))
             .form(&[("Email", username), ("Passwd", password), ("output", "json")])
             .send()
             .await?;
-        if !resp.status().is_success() {
-            return Err(AppError::network(format!(
-                "ClientLogin → {}",
-                resp.status()
-            )));
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            return Err(map_status(status, &body));
         }
-        let body: ClientLoginResponse = resp.json().await?;
-        if body.auth.is_empty() {
-            return Err(AppError::network("ClientLogin 响应缺少 Auth token"));
+        // 响应解析：先试 JSON 取 `Auth`；失败则按 `Auth=…` 行解析（FreshRSS 是
+        // `SID=…\nLSID=null\nAuth=…\n` 三行 text/plain，G2）。
+        let auth = parse_client_login(&body).ok_or_else(|| {
+            AppError::new(
+                "endpoint",
+                format!(
+                    "响应不是 Google Reader API（可能地址不对，FreshRSS 需填 /api/greader.php）。响应前 200 字符：{}",
+                    body.chars().take(200).collect::<String>()
+                ),
+            )
+        })?;
+
+        // action token：写操作（edit-tag/mark-all-as-read）需要，FreshRSS 校验 `T`
+        // ∈ {'', 'x', action_token}；Miniflux 的 /token 返回 auth token。失败回退 auth。
+        let action_token = match http
+            .get(format!("{base}/reader/api/0/token"))
+            .header("Authorization", format!("GoogleLogin auth={auth}"))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r.text().await.ok().map(|t| t.trim().to_string()),
+            _ => None,
         }
-        Ok(Self { base, token: body.auth, http })
+        .unwrap_or_else(|| auth.clone());
+
+        Ok(Self { base, auth, action_token, http })
     }
 
     fn url(&self, path: &str) -> String {
@@ -244,37 +274,56 @@ impl GReaderClient {
         let resp = self
             .http
             .get(self.url(path))
-            .header("Authorization", format!("GoogleLogin auth={}", self.token))
+            .header("Authorization", format!("GoogleLogin auth={}", self.auth))
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(AppError::network(format!("GET {path} → {}", resp.status())));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_status(status, &body));
         }
         Ok(resp.json().await?)
     }
 
-    /// POST 请求（表单 `T=<token>` 认证）。
+    /// POST 请求：带 `Authorization` 头（G3：FreshRSS 非 accounts 路径先过
+    /// `authorizationToUser()`，缺失即 401）+ 表单前置 `T=<action_token>`（G4）。
     async fn post_form<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
         form: &[(&str, String)],
     ) -> AppResult<T> {
-        let mut params: Vec<(&str, String)> = vec![("T", self.token.clone())];
+        let mut params: Vec<(&str, String)> = vec![("T", self.action_token.clone())];
         params.extend_from_slice(form);
-        let resp = self.http.post(self.url(path)).form(&params).send().await?;
+        let resp = self
+            .http
+            .post(self.url(path))
+            .header("Authorization", format!("GoogleLogin auth={}", self.auth))
+            .form(&params)
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            return Err(AppError::network(format!("POST {path} → {}", resp.status())));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_status(status, &body));
         }
         Ok(resp.json().await?)
     }
 
     /// POST 请求返回纯文本（edit-tag 等返回 `OK`）。
     async fn post_form_text(&self, path: &str, form: &[(&str, String)]) -> AppResult<()> {
-        let mut params: Vec<(&str, String)> = vec![("T", self.token.clone())];
+        let mut params: Vec<(&str, String)> = vec![("T", self.action_token.clone())];
         params.extend_from_slice(form);
-        let resp = self.http.post(self.url(path)).form(&params).send().await?;
+        let resp = self
+            .http
+            .post(self.url(path))
+            .header("Authorization", format!("GoogleLogin auth={}", self.auth))
+            .form(&params)
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            return Err(AppError::network(format!("POST {path} → {}", resp.status())));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(map_status(status, &body));
         }
         Ok(())
     }
@@ -296,14 +345,15 @@ impl GReaderClient {
     }
 
     /// 拉条目 id（增量）。`stream` 如 `user/-/state/com.google/reading-list` 或 `feed/42`。
-    /// `ot`=仅此时间戳后（unix 秒），`nt`=之前，`n`=最大条数，`c`=续读 offset。
+    /// `ot`=仅此时间戳后（unix 秒），`nt`=之前，`n`=最大条数，`c`=续读（原样回传，
+    /// Miniflux 是数字偏移、FreshRSS 是末条 id——均按不透明字符串处理，G/continuation）。
     pub async fn item_ids(
         &self,
         stream: &str,
         ot: Option<i64>,
         nt: Option<i64>,
         n: Option<u32>,
-        c: Option<u64>,
+        c: Option<&str>,
     ) -> AppResult<ItemIdsResponse> {
         let mut path = format!("/reader/api/0/stream/items/ids?output=json&s={stream}");
         if let Some(v) = ot {
@@ -429,22 +479,87 @@ impl GReaderClient {
    辅助：解析工具
    ============================================================ */
 
+/// 解析 ClientLogin 响应正文 → auth token。先试 JSON 取 `Auth`；
+/// 失败则按 `Auth=…` 行解析（FreshRSS 返回 text/plain 三行）。
+pub fn parse_client_login(body: &str) -> Option<String> {
+    // 1) JSON（Miniflux：output=json 时）
+    if let Ok(c) = serde_json::from_str::<ClientLoginResponse>(body) {
+        if !c.auth.is_empty() {
+            return Some(c.auth);
+        }
+    }
+    // 2) `Auth=…` 行（FreshRSS text/plain）
+    for line in body.lines() {
+        if let Some(v) = line.strip_prefix("Auth=") {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 状态码 → AppError code 映射（T0-6 G：可诊断错误）。
+/// 401/403 → auth；404 → endpoint；503 → apiDisabled；其余 → network。
+/// HTML 响应体（地址填错打到网页）→ endpoint。
+fn map_status(status: reqwest::StatusCode, body_head: &str) -> AppError {
+    let code = match status.as_u16() {
+        401 | 403 => "auth",
+        404 => "endpoint",
+        503 => "apiDisabled",
+        _ => "network",
+    };
+    // 返回 HTML（非 JSON API）→ 地址不是 API 根地址
+    let trimmed = body_head.trim_start();
+    if code == "network" && (trimmed.starts_with("<") || trimmed.to_lowercase().starts_with("<!doctype")) {
+        return AppError::new(
+            "endpoint",
+            "地址不是 Google Reader API 根地址（FreshRSS 通常是 https://host/api/greader.php）",
+        );
+    }
+    match code {
+        "auth" => AppError::new(
+            "auth",
+            "用户名或（API）密码错误；FreshRSS 需在个人资料页设置 API 密码并由管理员开启 API",
+        ),
+        "endpoint" => AppError::new(
+            "endpoint",
+            "地址不是 Google Reader API 根地址（FreshRSS 通常是 https://host/api/greader.php）",
+        ),
+        "apiDisabled" => AppError::new("apiDisabled", "服务端 API 未开启或暂时不可用"),
+        _ => AppError::network(format!("Google Reader 请求失败 → {status}")),
+    }
+}
+
 /// 从 `feed/42` 流 id 提取数字 id。
 pub fn parse_feed_numeric_id(stream_id: &str) -> Option<i64> {
     stream_id.strip_prefix("feed/")?.parse().ok()
 }
 
-/// 从长格式 item id（`tag:google.com,2005:reader/item/0000000000001675`）提取十进制 id。
-/// 长格式 id 的尾部是 16 位十六进制；也可直接是十进制（`12345`）。
+/// 从条目 id 提取十进制 id。
+/// - 长格式 `tag:google.com,2005:reader/item/0000000000001675`：尾部 16 位十六进制；
+/// - 纯十进制 `12345` 或 FreshRSS 的 16 位十进制时间戳 id（如 `1788940002880097`）。
+///
+/// 关键：只有带 `tag:` 前缀的长格式才做「16 位 hex 解码」。FreshRSS 的 entry id 是
+/// 16 位**十进制**时间戳，若按「16 位全 hexdigit → hex」启发式会把它误当成十六进制
+/// （`0x1788940002880097` ≈ 1.7e18，错得离谱）——见 protocol_coverage_live 回归。
 pub fn parse_item_id(id: &str) -> Option<i64> {
-    if let Some(hex) = id.rsplit('/').next() {
-        // 16 位十六进制 → 十进制
-        if hex.len() == 16 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            if let Ok(v) = i64::from_str_radix(hex, 16) {
+    // 长格式：`tag:google.com,2005:reader/item/<hex>` → 尾部按 16 位 hex 解码
+    if id.contains(":reader/item/") {
+        if let Some(hex) = id.rsplit('/').next() {
+            if hex.len() == 16 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                if let Ok(v) = i64::from_str_radix(hex, 16) {
+                    return Some(v);
+                }
+            }
+            if let Ok(v) = hex.parse::<i64>() {
                 return Some(v);
             }
         }
-        // 纯十进制
+    }
+    // 纯十进制（含 FreshRSS 16 位时间戳 id / Miniflux 十进制 id）
+    if let Some(hex) = id.rsplit('/').next() {
         if let Ok(v) = hex.parse::<i64>() {
             return Some(v);
         }
@@ -455,15 +570,6 @@ pub fn parse_item_id(id: &str) -> Option<i64> {
 /// 判断 item 的 categories 是否含某 tag（read/starred 状态判断）。
 pub fn has_tag(categories: &[String], tag_suffix: &str) -> bool {
     categories.iter().any(|c| c.ends_with(tag_suffix))
-}
-
-/* ============================================================
-   集成测试入口（供 tests/ 复用）
-   ============================================================ */
-
-#[doc(hidden)]
-pub fn client_login_url(base: &str) -> String {
-    format!("{}/accounts/ClientLogin", base.trim_end_matches('/'))
 }
 
 /* ============================================================
@@ -484,12 +590,15 @@ mod tests {
 
     #[test]
     fn parse_item_id_handles_both_formats() {
-        // 长格式：tag:google.com,2005:reader/item/0000000000001675 → 十进制 5749
+        // 长格式：tag:google.com,2005:reader/item/0000000000001675 → 十六进制 0x1675 = 5749
         assert_eq!(parse_item_id("tag:google.com,2005:reader/item/0000000000001675"), Some(5749));
         // 十进制
         assert_eq!(parse_item_id("5749"), Some(5749));
-        // 16 位十六进制（无前缀）
-        assert_eq!(parse_item_id("0000000000001675"), Some(5749));
+        // FreshRSS 16 位十进制时间戳 id：必须按十进制解析，不得误当十六进制
+        // （0x1788940002880097 ≈ 1.7e18，是灾难性的错值）
+        assert_eq!(parse_item_id("1788940002880097"), Some(1788940002880097));
+        // 裸 16 位全数字（无 tag: 前缀）也按十进制（不再是 hex）
+        assert_eq!(parse_item_id("0000000000001675"), Some(1675));
     }
 
     #[test]
@@ -501,5 +610,22 @@ mod tests {
         ];
         assert!(has_tag(&cats, "/com.google/read"));
         assert!(!has_tag(&cats, "/com.google/starred"));
+    }
+
+    /// G2 回归：ClientLogin 双格式解析——JSON（Miniflux）与 text/plain 三行（FreshRSS）。
+    #[test]
+    fn parse_client_login_handles_json_and_text() {
+        // Miniflux：output=json 返回 JSON
+        assert_eq!(
+            parse_client_login(r#"{"SID":"mock/abc","LSID":"mock/abc","Auth":"mock/abc"}"#),
+            Some("mock/abc".to_string())
+        );
+        // FreshRSS：text/plain 三行 `SID=…\nLSID=null\nAuth=…`
+        assert_eq!(
+            parse_client_login("SID=abc123\nLSID=null\nAuth=theauth\n"),
+            Some("theauth".to_string())
+        );
+        // 都不是 → None
+        assert_eq!(parse_client_login("Not a login response"), None);
     }
 }

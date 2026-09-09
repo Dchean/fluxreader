@@ -359,6 +359,32 @@ pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// 分类名 → id 映射（OPML 导入 / pull_feeds 复用，避免同名分类重复创建）。
+pub fn folder_name_to_id_map(conn: &Connection) -> AppResult<std::collections::HashMap<String, i64>> {
+    let rows = list_folders(conn)?;
+    Ok(rows
+        .into_iter()
+        .map(|f| (f.name, f.id))
+        .collect())
+}
+
+/// 确保「未分类」分类存在并返回其 id（无则创建）。
+/// `add_feed` 与 `pull_feeds` 共用——未选分类的本地源 / 无分类归属的远端订阅
+/// 都落到这里，避免回落不存在的 folder_id（外键违约导致条目静默丢失）。
+pub fn ensure_uncategorized_folder(conn: &Connection) -> AppResult<i64> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM folders WHERE name = '未分类' ORDER BY id LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
+    }
+    create_folder(conn, "未分类", "article")
+}
+
 pub fn create_folder(conn: &Connection, name: &str, layout: &str) -> AppResult<i64> {
     let next_pos: i64 = conn
         .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM folders", [], |r| r.get(0))
@@ -710,6 +736,9 @@ fn article_list_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleListItem>
 pub struct ArticleQuery {
     pub feed_id: Option<i64>,
     pub folder_id: Option<i64>,
+    /// 显式 feed 集合（当前内容布局下的源）。`Some(vec![])` 表示「该布局下无源」，
+    /// 必须返回空集，不得退化为「全部」（I-UI-1）。
+    pub feed_ids: Option<Vec<i64>>,
     pub only_unread: bool,
     pub only_starred: bool,
     pub only_today: bool,
@@ -756,27 +785,40 @@ pub fn list_articles(conn: &Connection, q: &ArticleQuery) -> AppResult<Vec<Artic
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 构建列表查询的 WHERE 条件 + 绑定参数（`list_articles` 与 `article_index`
-/// 共用，保证「绝对位置」与「列表顺序」口径一致）。
-fn article_where(q: &ArticleQuery) -> (Vec<&'static str>, Vec<rusqlite::types::Value>) {
-    let mut where_clauses: Vec<&'static str> = vec![];
+/// 构建列表查询的 WHERE 条件 + 绑定参数（`list_articles` / `article_index` /
+/// `mark_all_read` 共用，保证「绝对位置」「列表顺序」「全部已读范围」口径一致）。
+pub(crate) fn article_where(q: &ArticleQuery) -> (Vec<String>, Vec<rusqlite::types::Value>) {
+    let mut where_clauses: Vec<String> = vec![];
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(fid) = q.feed_id {
-        where_clauses.push("a.feed_id = ?");
+        where_clauses.push("a.feed_id = ?".to_string());
         params.push(fid.into());
     }
     if let Some(folder) = q.folder_id {
-        where_clauses.push("a.feed_id IN (SELECT id FROM feeds WHERE folder_id = ?)");
+        where_clauses.push("a.feed_id IN (SELECT id FROM feeds WHERE folder_id = ?)".to_string());
         params.push(folder.into());
     }
+    // 布局下的源集合：Some(vec![]) 表示无源 → 恒假（返回空集）；否则参数化 IN。
+    // id 来自受控 i64 列表（非用户输入拼接），逐个占位符绑定。
+    if let Some(ids) = &q.feed_ids {
+        if ids.is_empty() {
+            where_clauses.push("0 = 1".to_string());
+        } else {
+            let ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            where_clauses.push(format!("a.feed_id IN ({ph})"));
+            for id in ids {
+                params.push((*id).into());
+            }
+        }
+    }
     if q.only_unread {
-        where_clauses.push("a.is_read = 0");
+        where_clauses.push("a.is_read = 0".to_string());
     }
     if q.only_starred {
-        where_clauses.push("a.is_starred = 1");
+        where_clauses.push("a.is_starred = 1".to_string());
     }
     if q.only_today {
-        where_clauses.push("date(a.published_at) = date('now', 'localtime')");
+        where_clauses.push("date(a.published_at) = date('now', 'localtime')".to_string());
     }
     (where_clauses, params)
 }
@@ -1280,22 +1322,20 @@ pub fn articles_without_cover(conn: &Connection, limit: i64) -> AppResult<Vec<(i
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 全部已读：作用于当前筛选范围（feed/folder/all），与前端「全部已读」按钮语义一致
-pub fn mark_all_read(
-    conn: &Connection,
-    feed_id: Option<i64>,
-    folder_id: Option<i64>,
-) -> AppResult<usize> {
-    let mut sql = String::from("UPDATE articles SET is_read = 1 WHERE is_read = 0");
-    if let Some(fid) = feed_id {
-        sql.push_str(&format!(" AND feed_id = {fid}"));
-    }
-    if let Some(folder) = folder_id {
-        sql.push_str(&format!(
-            " AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {folder})"
-        ));
-    }
-    let n = conn.execute(&sql, [])?;
+/// 全部已读：作用于与 `list_articles` 完全相同的筛选范围（feed/分类/布局源集合
+/// /视图/timeline），与前端「全部已读」按钮语义一致（I-UI-1：侧栏角标 = 点入列表
+/// = 全部已读作用范围共用同一 filter 构造器）。返回实际变更条数。
+pub fn mark_all_read(conn: &Connection, q: &ArticleQuery) -> AppResult<usize> {
+    let (where_clauses, params) = article_where(q);
+    // 只标未读的（is_read = 0 恒真条件由 filter 补上；这里额外兜底 AND is_read=0
+    // 避免对已读行做无意义写，且保证返回值 = 实际变更数）。
+    let where_sql = if where_clauses.is_empty() {
+        "a.is_read = 0".to_string()
+    } else {
+        format!("a.is_read = 0 AND {}", where_clauses.join(" AND "))
+    };
+    let sql = format!("UPDATE articles AS a SET is_read = 1 WHERE {where_sql}");
+    let n = conn.execute(&sql, rusqlite::params_from_iter(params))?;
     Ok(n)
 }
 
@@ -1937,6 +1977,7 @@ mod dedup_tests {
         let q = ArticleQuery {
             feed_id: Some(feed),
             folder_id: None,
+            feed_ids: None,
             only_unread: false,
             only_starred: false,
             only_today: false,
@@ -1965,5 +2006,83 @@ mod dedup_tests {
         assert_eq!(idx, 2);
         let page = list_articles(&conn, &ArticleQuery { offset: idx, ..q.clone() }).unwrap();
         assert_eq!(page[0].id, target, "offset={} 的第一条应是目标文章", idx);
+    }
+
+    /// I-UI-1 回归：mark_all_read 作用范围 = list_articles 的 filter。
+    /// 在「今天」视图（only_today）下点全部已读，只标今天的，非今天的文章
+    /// is_read 不变；feed_ids 限定布局后，其他布局的源不被误标。
+    #[test]
+    fn mark_all_read_respects_today_and_layout_feeds() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        // 两个分类：article 布局（feed A）与 podcast 布局（feed B）
+        let cat_article = create_folder(&conn, "文章分类", "article").unwrap();
+        let cat_pod = create_folder(&conn, "播客分类", "podcast").unwrap();
+        let feed_a = insert_feed(&conn, "https://x.example/a", None, "a", None, cat_article, "inherit", true, false).unwrap();
+        let feed_b = insert_feed(&conn, "https://x.example/b", None, "b", None, cat_pod, "inherit", true, false).unwrap();
+
+        // feed A：一篇今天（未读）+ 一篇昨天（未读）
+        let today = chrono::Utc::now().to_rfc3339();
+        let yesterday = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        let mut a_today = new_article("https://n.example/today", "gtoday");
+        a_today.published_at = Some(today.clone());
+        let (id_today, _) = upsert_article_with_feed(&conn, feed_a, &a_today, false).unwrap();
+        let mut a_yday = new_article("https://n.example/yday", "gyday");
+        a_yday.published_at = Some(yesterday);
+        let (id_yday, _) = upsert_article_with_feed(&conn, feed_a, &a_yday, false).unwrap();
+        // feed B（podcast 布局）：一篇今天未读
+        let mut b_today = new_article("https://n.example/b-today", "gbtoday");
+        b_today.published_at = Some(today);
+        let (id_b, _) = upsert_article_with_feed(&conn, feed_b, &b_today, false).unwrap();
+
+        // 「今天」视图 + article 布局（feed_ids 只含 feed A）
+        let q = ArticleQuery {
+            feed_id: None,
+            folder_id: None,
+            feed_ids: Some(vec![feed_a]),
+            only_unread: false,
+            only_starred: false,
+            only_today: true,
+            newest_first: true,
+            limit: 500,
+            offset: 0,
+            with_content: false,
+        };
+        let n = mark_all_read(&conn, &q).unwrap();
+        assert_eq!(n, 1, "只标今天的 1 篇");
+
+        let is_read = |id: i64| -> i64 {
+            conn.query_row("SELECT is_read FROM articles WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(is_read(id_today), 1, "今天文章被标读");
+        assert_eq!(is_read(id_yday), 0, "昨天文章不受「今天」视图影响");
+        assert_eq!(is_read(id_b), 0, "其他布局（podcast）的源不受 feed_ids 限定影响");
+    }
+
+    /// feed_ids 为空数组（Some(vec![])）= 该布局下无源 → 返回空集/0，不得退化为「全部」。
+    #[test]
+    fn mark_all_read_empty_feed_ids_marks_nothing() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://x.example/f", None, "f", None, f, "inherit", true, false).unwrap();
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &new_article("https://n.example/a", "g"), false).unwrap();
+
+        let q = ArticleQuery {
+            feed_id: None,
+            folder_id: None,
+            feed_ids: Some(vec![]),
+            only_unread: false,
+            only_starred: false,
+            only_today: false,
+            newest_first: true,
+            limit: 500,
+            offset: 0,
+            with_content: false,
+        };
+        let n = mark_all_read(&conn, &q).unwrap();
+        assert_eq!(n, 0, "空 feed_ids 不得退化为全部");
+        let is_read: i64 = conn.query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| r.get(0)).unwrap();
+        assert_eq!(is_read, 0, "无源布局下文章保持未读");
     }
 }

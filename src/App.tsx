@@ -6,6 +6,7 @@ import { Reader } from './components/Reader';
 import { PlayerBar } from './components/PlayerBar';
 import { SettingsModal } from './components/SettingsModal';
 import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal, CloseAskDialog } from './components/Overlays';
+import { ConfirmDialog } from './components/primitives';
 import { ContextMenuHost } from './components/ContextMenu';
 /* ============================================================
    Application Shell
@@ -48,6 +49,7 @@ export default function App() {
   const toasts = useAppStore((s) => s.toasts);
   const playerActive = useAppStore((s) => s.player.isActive);
   const dataLoading = useAppStore((s) => s.dataLoading);
+  const bootError = useAppStore((s) => s.bootError);
 
   /* PlayerBar 活跃 → body 标记类（toast 层上移避让底栏） */
   useEffect(() => {
@@ -273,6 +275,21 @@ export default function App() {
             <div className="app-loading-logo"><img src="/logo.svg" alt="" draggable={false} /></div>
             <div className="app-loading-bar" />
           </div>
+        ) : bootError ? (
+          /* 启动装载失败错误页：不回退 mock 假数据（P0-8），提供重试 */
+          <div className="app-boot-error">
+            <div className="app-boot-error-title">数据加载失败</div>
+            <div className="app-boot-error-desc">{bootError}</div>
+            <button
+              className="toggle-action-btn btn-primary"
+              onClick={() => {
+                useAppStore.setState({ bootError: null, dataLoading: true });
+                void useAppStore.getState().bootstrapFromBackend();
+              }}
+            >
+              重试
+            </button>
+          </div>
         ) : (
           <>
             <Sidebar />
@@ -298,6 +315,8 @@ export default function App() {
       <CloseAskDialog />
       {/* 全局右键菜单（替换 WebView2 默认菜单） */}
       <ContextMenuHost />
+      {/* 全局确认框（破坏性操作统一入口，I-UI-4） */}
+      <ConfirmHost />
 
       {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
           退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。
@@ -311,8 +330,28 @@ export default function App() {
   );
 }
 
-/** 单条 toast：挂载后 rAF 切 visible 让 CSS transition 接管进场 */
-function ToastPill({
+/** 全局确认框宿主：渲染 store.confirm（破坏性操作统一入口，I-UI-4） */
+function ConfirmHost() {
+  const confirm = useAppStore((s) => s.confirm);
+  const closeConfirm = useAppStore((s) => s.closeConfirm);
+  if (!confirm) return null;
+  return (
+    <ConfirmDialog
+      open
+      title={confirm.title}
+      message={confirm.message}
+      confirmText={confirm.confirmText}
+      onConfirm={() => {
+        const fn = confirm.onConfirm;
+        closeConfirm();
+        fn();
+      }}
+      onCancel={closeConfirm}
+    />
+  );
+}
+
+/** 单条 toast：挂载后 rAF 切 visible 让 CSS transition 接管进场 */function ToastPill({
   text,
   leaving,
   action,

@@ -113,6 +113,85 @@ check('缓存命中：已有译文直接展示，不触发 ai_translate',
   cached?.translatedContent === '已缓存译文' && store.getState().isShowingTranslatedProse === true);
 check('缓存命中：未新增 ai_translate 调用', invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1);
 
+// ---- 已读语义：打开即读（markReadOnOpen 开关）----
+// 重置一个未读条目，开启 markReadOnOpen，selectArticle 应标读
+store.setState((s) => ({
+  entries: s.entries.map((a) => (a.id === entryId ? { ...a, isRead: false } : a)),
+}));
+store.getState().updateSettings({ markReadOnOpen: true });
+store.getState().selectArticle(entryId);
+await new Promise((r) => setTimeout(r, 20));
+check('已读语义：markReadOnOpen 开启时打开即读',
+  store.getState().entries.find((a) => a.id === entryId)?.isRead === true);
+check('已读语义：打开过的文章进入 openedReadIds（未读筛选下保留）',
+  store.getState().openedReadIds[entryId] === true);
+
+// 关闭 markReadOnOpen，打开应不标读
+store.setState((s) => ({
+  entries: s.entries.map((a) => (a.id === entryId ? { ...a, isRead: false } : a)),
+  openedReadIds: {},
+}));
+store.getState().updateSettings({ markReadOnOpen: false });
+store.getState().selectArticle(entryId);
+await new Promise((r) => setTimeout(r, 20));
+check('已读语义：markReadOnOpen 关闭时打开不标读',
+  store.getState().entries.find((a) => a.id === entryId)?.isRead === false);
+
+// ---- 已读语义：markEntriesReadBulk 只标未读 + 保留 openedReadIds ----
+store.setState((s) => ({
+  entries: s.entries.map((a) => (a.id === entryId ? { ...a, isRead: false } : a)),
+  openedReadIds: {},
+}));
+store.getState().markEntriesReadBulk([entryId]);
+await new Promise((r) => setTimeout(r, 20));
+check('已读语义：批量标读后 isRead=true',
+  store.getState().entries.find((a) => a.id === entryId)?.isRead === true);
+check('已读语义：批量标读后 openedReadIds 记录该 id',
+  store.getState().openedReadIds[entryId] === true);
+
+// ---- 播客播放器状态机 ----
+store.getState().playPodcastEpisode('测试播客', '测试节目', 'https://x/c.jpg', 'https://x/a.mp3', entryId);
+check('播客：playPodcastEpisode 激活播放器且 isPlaying',
+  store.getState().player.isActive === true && store.getState().player.isPlaying === true);
+check('播客：点播即视为已读（该 entry 已读）',
+  store.getState().entries.find((a) => a.id === entryId)?.isRead === true);
+
+store.getState().togglePlayerPlay();
+check('播客：togglePlayerPlay 暂停', store.getState().player.isPlaying === false);
+store.getState().togglePlayerPlay();
+check('播客：togglePlayerPlay 恢复播放', store.getState().player.isPlaying === true);
+
+store.getState().syncPlayerProgress(30, 120);
+check('播客：syncPlayerProgress 回写进度', store.getState().player.positionSec === 30 && store.getState().player.durationSec === 120);
+
+store.getState().seekPlayer(60);
+check('播客：seekPlayer 跳转到 60s', store.getState().player.seekToSec === 60);
+
+store.getState().skipPlayer(-15);
+check('播客：skipPlayer 快退 15s → 45s', store.getState().player.positionSec === 45);
+
+store.getState().skipPlayer(30);
+check('播客：skipPlayer 快进 30s → 75s', store.getState().player.positionSec === 75);
+
+store.getState().cyclePlaybackSpeed();
+check('播客：cyclePlaybackSpeed 1.0 → 1.25', store.getState().player.speed === 1.25);
+store.getState().cyclePlaybackSpeed();
+check('播客：cyclePlaybackSpeed 1.25 → 1.5', store.getState().player.speed === 1.5);
+
+store.getState().playerEnded();
+check('播客：playerEnded 复位播放态', store.getState().player.isPlaying === false && store.getState().player.positionSec === 0);
+
+store.getState().closePodcastBar();
+check('播客：closePodcastBar 关闭播放器', store.getState().player.isActive === false);
+
+// ---- 播放无音频地址的条目 → 提示不崩溃 ----
+const noAudioId = entryId;
+store.setState((s) => ({
+  entries: s.entries.map((a) => (a.id === noAudioId ? { ...a, enclosureUrl: '' } : a)),
+}));
+store.getState().playPodcastEpisode('无音频', '节目', '', '', noAudioId);
+check('播客：无音频地址时不激活播放器', store.getState().player.isActive === false);
+
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);
 console.log(`\n=== 前端逻辑回归 ${results.length - failed.length}/${results.length} 通过 ===`);

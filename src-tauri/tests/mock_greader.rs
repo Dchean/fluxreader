@@ -65,6 +65,9 @@ pub struct MockGReader {
     pub subscriptions: Mutex<Vec<MockSubscription>>,
     /// 远端分类（GET tag/list 返回的 folder）
     pub folders: Mutex<Vec<String>>,
+    /// 置 true 时，权威状态集合端点（read/starred stream ids）返回 500——
+    /// 用于验证「权威集合拉取失败 → 本轮对账中止，不把空集合当真值」（I-SYNC-1）。
+    pub fail_authority_sets: Mutex<bool>,
     pub next_feed_id: Mutex<i64>,
     pub next_entry_id: Mutex<i64>,
 }
@@ -101,6 +104,7 @@ impl MockGReader {
                 },
             ]),
             folders: Mutex::new(vec!["Default".into(), "Remote Cat".into()]),
+            fail_authority_sets: Mutex::new(false),
             next_feed_id: Mutex::new(100),
             next_entry_id: Mutex::new(500),
         });
@@ -358,6 +362,14 @@ fn route(
         ("GET", "/reader/api/0/stream/items/ids") => {
             let q = parse_query(path_query);
             let stream = q.get("s").cloned().unwrap_or_default();
+            // I-SYNC-1 测试钩子：权威状态集合（read/starred）返回 500，
+            // 模拟一次网络抖动/服务端故障。
+            if *srv.fail_authority_sets.lock().unwrap()
+                && (stream == "user/-/state/com.google/read"
+                    || stream == "user/-/state/com.google/starred")
+            {
+                return (500, r#"{"error_message":"internal server error"}"#.into());
+            }
             let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
             // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）

@@ -111,6 +111,10 @@ export interface SyncStatusInfo {
   last_sync: number;
   /** 同步协议："greader" | "fever" */
   protocol?: string | null;
+  /** 服务端类型："miniflux" | "freshrss" | "custom" */
+  server_kind?: string | null;
+  /** 推导/探测后的实际 API base */
+  api_base?: string | null;
 }
 
 /** sync_save 返回：首连且本地有未绑定源时 firstConnect=true
@@ -124,6 +128,8 @@ export interface SyncSaveResult {
 export interface ArticleListArgs {
   feed_id?: number | null;
   folder_id?: number | null;
+  /** 当前内容布局下的源集合（后端据此把「全部已读」限定到该布局；空数组 = 无源返回空集） */
+  feed_ids?: number[] | null;
   only_unread?: boolean;
   only_starred?: boolean;
   only_today?: boolean;
@@ -255,9 +261,9 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('set_starred', { id, starred }) as null) : null;
   },
-  async markAllRead(feedId: number | null, folderId: number | null): Promise<number | null> {
+  async markAllRead(args: ArticleListArgs): Promise<number | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('mark_all_read', { feedId, folderId }) as number) : null;
+    return inv ? (await inv('mark_all_read', { args }) as number) : null;
   },
   async refreshAllFeeds(): Promise<RefreshSummary | null> {
     const inv = await getInvoke();
@@ -446,17 +452,17 @@ export const api = {
   /* ---- 后端同步（Google Reader / Fever） ---- */
   /** 返回 null = 浏览器环境（mock 模式） */
   /** 轻量连通测试（按协议分派 ClientLogin / Fever api_key），不落库不做同步 */
-  async syncTest(protocol: string, endpoint: string, username: string, password: string): Promise<string | null> {
+  async syncTest(serverKind: string, protocol: string, endpoint: string, username: string, password: string): Promise<string | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('sync_test', { protocol, endpoint, username, password }) as string) : null;
+    return inv ? (await inv('sync_test', { serverKind, protocol, endpoint, username, password }) as string) : null;
   },
   /** 保存凭据（先测试，失败不保存）。重活（拉订阅/同步状态）由前端随后台阶段执行。
    * 返回 JSON：{ message, firstConnect, unboundLocalFeeds }——首连且本地有
    * 未绑定源时前端弹「同步本地订阅」确认框 */
-  async syncSave(protocol: string, endpoint: string, username: string, password: string): Promise<SyncSaveResult | null> {
+  async syncSave(serverKind: string, protocol: string, endpoint: string, username: string, password: string): Promise<SyncSaveResult | null> {
     const inv = await getInvoke();
     if (!inv) return null;
-    const raw = (await inv('sync_save', { protocol, endpoint, username, password })) as string;
+    const raw = (await inv('sync_save', { serverKind, protocol, endpoint, username, password })) as string;
     try {
       return JSON.parse(raw) as SyncSaveResult;
     } catch {

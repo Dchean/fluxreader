@@ -98,7 +98,12 @@ fn filter_iframes(html: &str) -> String {
         let is_iframe = rest.len() >= 7
             && rest.is_char_boundary(7)
             && rest[..7].eq_ignore_ascii_case("<iframe")
-            && !rest[7..8].starts_with(|c: char| c.is_ascii_alphanumeric());
+            // 第 8 字节可能越界（rest 恰以 "<iframe" 结尾）或落在多字节字符中间，
+            // 必须按字节取（ascii_alphanumeric 只关心 ASCII 字节），不能做字符切片。
+            && rest
+                .as_bytes()
+                .get(7)
+                .map_or(true, |b| !b.is_ascii_alphanumeric());
         if !is_iframe {
             // 非 iframe 开标签：拷一个字符继续（避免 '<<' 死循环）
             out.push('<');
@@ -337,6 +342,32 @@ mod tests {
     /// 回归：含中文的属性段曾因字节切片落在多字节字符中间而 panic
     /// （sanitize.rs:96 end byte index not a char boundary —— add_feed
     /// 抓取含中文标题的 feed 时命令任务 panic 永不返回）。
+    /// 回归：HTML 以 "<iframe" 结尾（无后续字符）时，第 8 字节越界曾 panic
+    /// （"byte index 8 is out of bounds"）。残缺标签原样交给 ammonia 处理即可。
+    #[test]
+    fn filter_iframes_truncated_iframe_tag_does_not_panic() {
+        let out = sanitize("<iframe", None);
+        // 残缺开标签无 '>'，被整体丢弃，不 panic 即可
+        assert!(!out.contains("<iframe"), "truncated iframe dropped: {out}");
+    }
+
+    /// 回归：第 8 字节落在多字节字符中间（非字符边界）曾 panic。
+    #[test]
+    fn filter_iframes_multibyte_after_iframe_does_not_panic() {
+        let out = sanitize("x<iframe中", None);
+        assert!(!out.contains("<iframe"), "multibyte after iframe handled: {out}");
+    }
+
+    /// 回归：`<iframeX ...>` 是普通标签（非 iframe），不被 iframe 规则误伤。
+    #[test]
+    fn filter_iframes_iframex_kept_as_plain() {
+        let out = sanitize("<iframeX src=a>", None);
+        // ammonia 不认 iframeX 标签，会剥标签保留文本；关键是不得 panic、
+        // 不得当作 iframe 降级为外链
+        assert!(!out.contains("<iframe"), "iframex not treated as iframe: {out}");
+        assert!(!out.contains("在浏览器打开"));
+    }
+
     #[test]
     fn extract_attr_with_multibyte_attrs_does_not_panic() {
         let attrs = r#" title="媒体测试源" src="http://127.0.0.1:8799/x.mp4" alt="视频说明""#;

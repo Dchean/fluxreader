@@ -12,8 +12,9 @@ use rusqlite::Connection;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// 桌面 RSS 客户端身份标识（避免被站点风控误伤为爬虫脚本）
-pub const USER_AGENT: &str = "FluxReader/0.1 (+https://github.com/fluxreader; RSS reader)";
+/// 桌面 RSS 客户端身份标识（避免被站点风控误伤为爬虫脚本）。
+/// 版本号取 `CARGO_PKG_VERSION`（与 Cargo.toml 同源，避免硬编码漂移）。
+pub const USER_AGENT: &str = concat!("FluxReader/", env!("CARGO_PKG_VERSION"), " (+https://github.com/fluxreader; RSS reader)");
 
 /// 响应体大小上限：feed 是文本，16 MiB 已很宽裕，防恶意/异常响应耗尽内存
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;

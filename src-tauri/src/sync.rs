@@ -32,6 +32,9 @@ pub struct SyncReport {
     pub pulled_entries: usize,
     pub merged_states: usize,
     pub fallback_entries: usize,
+    /// 本轮对账是否因权威集合拉取失败而中止（未推进游标、未改状态）。
+    /// 前端据此显示「本轮同步中止」，调度器据此不触发 feeds-updated。
+    pub aborted: bool,
     pub errors: Vec<String>,
 }
 
@@ -39,23 +42,18 @@ pub struct SyncReport {
    凭据
    ============================================================ */
 
-/// 后端凭据：协议 + endpoint + username + password。
-/// username/password 是 Miniflux「集成」页单独配置的凭据（Google Reader 与
-/// Fever 共用同一套集成凭据，非 Miniflux 账号密码）。
+/// 后端凭据：协议 + endpoint + username + password（旧四元组，供「是否已配置」
+/// 布尔判定与账号切换检测复用）。
+/// username/password 是 Google Reader / Fever 集成凭据。
 /// 协议从 settings 键 `sync_protocol` 读取（"greader" | "fever"，默认 "greader"）。
 pub fn read_credentials(conn: &Connection) -> Option<(String, String, String, String)> {
-    let protocol = db::get_setting(conn, "sync_protocol")
-        .ok()
-        .flatten()
-        .filter(|p| p == "fever" || p == "greader")
-        .unwrap_or_else(|| "greader".to_string());
-    let endpoint = db::get_setting(conn, "greader_endpoint").ok().flatten()?;
-    let username = db::get_setting(conn, "greader_username").ok().flatten()?;
-    let password = db::get_setting(conn, "greader_password").ok().flatten()?;
-    if endpoint.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
-        return None;
-    }
-    Some((protocol, endpoint, username, password))
+    let cfg = crate::backend::read_config(conn)?;
+    Some((
+        cfg.protocol.as_str().to_string(),
+        cfg.root,
+        cfg.username,
+        cfg.password,
+    ))
 }
 
 /// 协议无关后端客户端（Google Reader / Fever）。
@@ -114,21 +112,21 @@ impl Backend {
             Backend::GReader(c) => c.quick_add(url).await,
             Backend::Fever(_) => Err(AppError::new(
                 "unsupported",
-                "Fever 协议不支持添加订阅，请在 Miniflux Web 端添加后重新同步",
+                "Fever 协议不支持添加订阅，请在服务端网页添加后重新同步",
             )),
         }
     }
 }
 
-/// 锁内读凭据 → 锁外按协议构建 client。
+/// 锁内读配置 → 锁外按协议构建 client。API base 由 ServerKind 推导（`backend::read_config`）。
 async fn build_client(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> Option<Backend> {
-    let (protocol, endpoint, username, password) = {
+    let cfg = {
         let conn = db.lock().await;
-        read_credentials(&conn)?
+        crate::backend::read_config(&conn)?
     };
-    match protocol.as_str() {
-        "fever" => {
-            let client = fever::FeverClient::new(&endpoint, &username, &password, http.clone());
+    match cfg.protocol {
+        crate::backend::Protocol::Fever => {
+            let client = fever::FeverClient::new(&cfg.api_base, &cfg.username, &cfg.password, http.clone());
             match client.verify().await {
                 Ok(()) => Some(Backend::Fever(client)),
                 Err(e) => {
@@ -137,13 +135,15 @@ async fn build_client(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> Op
                 }
             }
         }
-        _ => match GReaderClient::login(&endpoint, &username, &password, http.clone()).await {
-            Ok(c) => Some(Backend::GReader(c)),
-            Err(e) => {
-                log::warn!("sync: ClientLogin 失败: {e}");
-                None
+        crate::backend::Protocol::GReader => {
+            match GReaderClient::login(&cfg.api_base, &cfg.username, &cfg.password, http.clone()).await {
+                Ok(c) => Some(Backend::GReader(c)),
+                Err(e) => {
+                    log::warn!("sync: ClientLogin 失败: {e}");
+                    None
+                }
             }
-        },
+        }
     }
 }
 
@@ -426,7 +426,7 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
                 }
                 None => {
                     // 本地没有 → 建本地 feed（挂到远端分类对应的本地 folder）
-                    let folder_id: i64 = remote_folder_label
+                    let folder_id: i64 = match remote_folder_label
                         .as_deref()
                         .and_then(|label| {
                             conn.query_row(
@@ -435,28 +435,45 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
                                 |r| r.get(0),
                             )
                             .ok()
-                        })
-                        .unwrap_or_else(|| {
-                            conn.query_row("SELECT id FROM folders LIMIT 1", [], |r| r.get(0))
-                                .unwrap_or(1)
-                        });
-                    let inserted = db::insert_feed_origin(
+                        }) {
+                        Some(fid) => fid,
+                        // 无分类归属 → 「未分类」分类（无则建）。修复前回落
+                        // `SELECT id FROM folders LIMIT 1` → 空库时得到 1（不存在）
+                        // → 外键违约被 `if let Ok` 吞 → 远端订阅静默丢失（P0-5）。
+                        None => match db::ensure_uncategorized_folder(&conn) {
+                            Ok(fid) => fid,
+                            Err(e) => {
+                                report.errors.push(format!(
+                                    "为订阅 {} 创建「未分类」失败: {e}",
+                                    rf.url
+                                ));
+                                continue;
+                            }
+                        },
+                    };
+                    match db::insert_feed_origin(
                         &conn,
                         &rf.url,
                         rf.html_url.as_deref(),
                         &rf.title,
-                        None, // favicon 留空，交给本地直连抓取的 discover_favicon 发现
+                        None,
                         folder_id,
                         "inherit",
                         false,
                         false,
                         "remote",
-                    );
-                    if let Ok(fid) = inserted {
-                        if let Some(nid) = remote_feed_id {
-                            let _ = db::set_feed_remote_id(&conn, fid, nid);
+                    ) {
+                        Ok(fid) => {
+                            if let Some(nid) = remote_feed_id {
+                                let _ = db::set_feed_remote_id(&conn, fid, nid);
+                            }
+                            report.pulled_feeds += 1;
                         }
-                        report.pulled_feeds += 1;
+                        // 入库失败必须可见（I-SYNC / R8），不得静默吞掉导致订阅丢失。
+                        Err(e) => report.errors.push(format!(
+                            "订阅 {} 入库失败: {e}",
+                            rf.url
+                        )),
                     }
                 }
             }
@@ -563,7 +580,7 @@ async fn pull_entries_greader(
     // 拉取目标：reading-list 全部条目 id（分页），full 时 ot=0（全量），增量时 ot=since_s
     let ot = if full { Some(0i64) } else { Some(since_s) };
     let mut all_item_ids: Vec<i64> = Vec::new();
-    let mut continuation: Option<u64> = None;
+    let mut continuation: Option<String> = None;
     loop {
         let r = match client
             .item_ids(
@@ -571,7 +588,7 @@ async fn pull_entries_greader(
                 ot,
                 None,
                 Some(1000),
-                continuation,
+                continuation.as_deref(),
             )
             .await
         {
@@ -588,7 +605,8 @@ async fn pull_entries_greader(
                 got += 1;
             }
         }
-        match r.continuation.and_then(|c| c.parse::<u64>().ok()) {
+        // continuation 原样回传（Miniflux 数字偏移 / FreshRSS 末条 id），不再 parse::<u64>
+        match r.continuation {
             Some(c) if got > 0 => continuation = Some(c),
             _ => break,
         }
@@ -633,8 +651,17 @@ async fn pull_entries_greader(
             fetch_stream_ids(client, greader::tags::READ),
             fetch_stream_ids(client, greader::tags::STARRED),
         );
-        let read_ids = read_ids.unwrap_or_default();
-        let starred_ids = starred_ids.unwrap_or_default();
+        // I-SYNC-1：任一权威集合拉取失败 → 本轮不对账、不推进游标。
+        // 严禁把「拉取失败」当「空集合」，否则一次网络抖动就会把本地全部
+        // 标已读/取消收藏（数据破坏）。
+        let (read_ids, starred_ids) = match (read_ids, starred_ids) {
+            (Ok(r), Ok(s)) => (r, s),
+            (Err(e), _) | (_, Err(e)) => {
+                report.aborted = true;
+                report.errors.push(format!("权威状态集合拉取失败，跳过对账: {e}"));
+                return;
+            }
+        };
         let conn = db.lock().await;
         reconcile_reader_state(&conn, &read_ids, &starred_ids, &maps, report);
         drop(conn);
@@ -651,10 +678,10 @@ async fn pull_entries_greader(
 /// 分页拉取某 Google Reader stream 的全部条目 id（read / starred 权威集合）。
 async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec<i64>> {
     let mut ids: Vec<i64> = Vec::new();
-    let mut continuation: Option<u64> = None;
+    let mut continuation: Option<String> = None;
     loop {
         let r = client
-            .item_ids(stream, Some(0), None, Some(1000), continuation)
+            .item_ids(stream, Some(0), None, Some(1000), continuation.as_deref())
             .await?;
         let mut got = 0;
         for it in &r.item_refs {
@@ -663,7 +690,7 @@ async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec
                 got += 1;
             }
         }
-        match r.continuation.and_then(|c| c.parse::<u64>().ok()) {
+        match r.continuation {
             Some(c) if got > 0 => continuation = Some(c),
             _ => break,
         }
@@ -826,8 +853,17 @@ async fn pull_entries_fever(
 
     // ① 权威状态集合（全量 id）：未读 + 收藏
     let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
-    let unread = unread.unwrap_or_default();
-    let starred = starred.unwrap_or_default();
+    // I-SYNC-1：任一权威集合拉取失败 → 本轮不对账、不推进游标。
+    // 严禁把「拉取失败」当「空集合」——否则 unread 空集会令 want_read 恒真，
+    // 把本地全部标已读（数据破坏）。
+    let (unread, starred) = match (unread, starred) {
+        (Ok(u), Ok(s)) => (u, s),
+        (Err(e), _) | (_, Err(e)) => {
+            report.aborted = true;
+            report.errors.push(format!("权威状态集合拉取失败，跳过对账: {e}"));
+            return;
+        }
+    };
 
     // ② 拉条目正文：增量（since_id>0）或首次种子（since_id=0 → 最近 50 条）
     let mut all_items: Vec<ItemContent> = Vec::new();
@@ -1181,9 +1217,10 @@ pub async fn sync_light(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> 
 }
 
 /// 测试连接（设置页「测试连接」按钮）。
-/// 按协议分派：Google Reader 走 ClientLogin，Fever 走 `api_key` 认证。
+/// 按服务端类型 + 协议分派：API base 由 `resolve_api_base` 推导（T0-6 G1/F1）。
 /// 返回 (展示消息, 用户名)——用户名供 sync_save 落库做账号显示。
 pub async fn test_connection(
+    kind: crate::backend::ServerKind,
     protocol: &str,
     endpoint: &str,
     username: &str,
@@ -1191,20 +1228,22 @@ pub async fn test_connection(
     http: &reqwest::Client,
 ) -> AppResult<(String, String)> {
     if endpoint.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
-        return Err(AppError::new("notConnected", "请先填写 Endpoint、用户名和密码"));
+        return Err(AppError::new("notConnected", "请先填写服务器地址、用户名和密码"));
     }
+    let protocol = crate::backend::Protocol::parse(protocol);
+    let api_base = crate::backend::resolve_api_base(kind, protocol, endpoint);
     let subs = match protocol {
-        "fever" => {
-            let client = fever::FeverClient::new(endpoint, username, password, http.clone());
+        crate::backend::Protocol::Fever => {
+            let client = fever::FeverClient::new(&api_base, username, password, http.clone());
             client.subscriptions().await?.len()
         }
-        _ => {
-            let client = GReaderClient::login(endpoint, username, password, http.clone()).await?;
+        crate::backend::Protocol::GReader => {
+            let client = GReaderClient::login(&api_base, username, password, http.clone()).await?;
             client.subscriptions().await?.len()
         }
     };
     Ok((
-        format!("已连接：{username}（{subs} 个订阅）"),
+        format!("已连接：{username}（{subs} 个订阅，API 地址 {api_base}）"),
         username.to_string(),
     ))
 }

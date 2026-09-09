@@ -9,7 +9,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:frontend": "tsc -p tsconfig.test.json && node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs"
+    "test:frontend": "tsc -p tsconfig.test.json && node --loader ./tools/test-loader.mjs ./tools/logic-regression.mjs && node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.10",

@@ -20,6 +20,8 @@
     "src/types.ts",
     "src/lib/api.ts",
     "src/lib/format.ts",
-    "src/lib/external.ts"
+    "src/lib/external.ts",
+    "src/store/selectors.ts",
+    "src/store/listArgs.ts"
   ]
 }

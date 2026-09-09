@@ -16,6 +16,7 @@ import {
 } from './lib/api';
 import { openExternal } from './lib/external';
 import { selectVisibleEntries, numericId } from './store/selectors';
+import { buildListArgs } from './store/listArgs';
 import type { AppState, SettingsState } from './store/types';
 
 /* ============================================================
@@ -213,6 +214,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   /* mock 数据先行渲染；Tauri 环境启动时 bootstrapFromBackend 会整体替换 */
   dataMode: 'mock',
   dataLoading: true,
+  bootError: null,
   articlesLimit: 0,
   articlesLoading: false,
   articlesExhausted: false,
@@ -300,17 +302,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   markCurrentViewAllRead: () => {
     const ids = new Set(selectVisibleEntries(get()).map((i) => i.id));
     if (get().dataMode === 'tauri') {
-      /* 范围语义与后端一致：当前 feed/分类范围（all 时两者皆 null）。
-         feed id 三种形态（'feed-123' / 纯数字 '123' / 旧 'f-123'）统一数字提取，
-         避免定长前缀 slice 在纯数字 id 下截出 NaN（历史契约断裂 bug） */
-      const scope = get().activeFeedFilter;
-      const feedId = scope.startsWith('cat-') ? null : scope === 'all' ? null : numericId(scope);
-      const folderId = scope.startsWith('cat-') ? numericId(scope) : null;
-      void api.markAllRead(feedId, folderId);
+      /* 范围语义与后端一致：后端 mark_all_read 接收与 list_articles 相同的
+         ArticleListArgs（范围 × 视图 × 时间流 × 布局源集合），确保「全部已读」
+         只作用于当前可见列表——在「今天」「收藏」视图或非文章布局下点击，
+         不会把整库误标读（I-UI-1）。 */
+      const args = buildListArgs(get());
+      void api.markAllRead(args).then((n) => {
+        if (n != null) get().showToast(`已将 ${n} 篇标记为已读`);
+        else get().showToast('已将当前筛选的所有内容标记为已读');
+      });
     }
     markEntriesRead(ids);
     set({ openedReadIds: {} });
-    get().showToast('已将当前筛选的所有内容标记为已读');
   },
 
   /* ================= 阅读器 ================= */
@@ -763,6 +766,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   openSettingsTab: (tab) => set({ settingsOpen: true, settingsTab: tab }),
   openSearch: () => set({ searchOpen: true }),
   closeSearch: () => set({ searchOpen: false }),
+  confirm: null,
+  openConfirm: (spec) => set({ confirm: spec }),
+  closeConfirm: () => set({ confirm: null }),
   answerCloseAsk: (action, remember) => {
     set({ closeAskVisible: false });
     /* remember 时同步设置镜像（真值由后端 resolve_close 落库，
@@ -958,9 +964,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     get().ensureArticleContent(articleId, { extractFulltext: true });
   },
 
-  /** 启动装载：Tauri 环境下从 SQLite 拉数据；浏览器开发/后端异常回退 mock。
-    注意：Tauri 启动填充真实数据（dataLoading 骨架期间不渲染任何默认数据，
-    防止历史「测试订阅一闪而过」——卸载重装后真实空库替换 mock 的时序问题）。 */
+  /** 启动装载：Tauri 环境下从 SQLite 拉数据；浏览器开发预览亮出 mock 数据。
+     注意：Tauri 启动填充真实数据（dataLoading 骨架期间不渲染任何默认数据，
+     防止历史「测试订阅一闪而过」——卸载重装后真实空库替换 mock 的时序问题）。
+     Tauri 内装载失败 → 错误页 + 重试（P0-8），绝不再静默回退 mock 假数据
+     （历史 bug：回退后部分 action 仍对真实库写入，mock id 算出 NaN 发给后端）。 */
   bootstrapFromBackend: async () => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
       /* 浏览器开发预览：亮出 mock 数据供看效果 */
@@ -977,16 +985,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await get().reloadFromBackend();
     } catch (e) {
-      /* 后端异常时回退 mock，保证界面可用（Tauri 极少触发） */
+      /* 后端异常 → 错误页（带重试），不回退 mock */
       console.error('bootstrap from backend failed:', e);
-      const cats = createInitialCategories();
-      set({
-        categories: cats,
-        entries: createInitialEntries(),
-        feedIndex: buildFeedIndex(cats),
-        dataMode: 'mock',
-        dataLoading: false,
-      });
+      set({ bootError: extractError(e), dataLoading: false });
     }
   },
 
@@ -1161,7 +1162,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   addFeed: (catId, url, title, layout, autoSummary, autoTranslate, syncToBackend = true) => {
     if (get().dataMode === 'tauri') {
-      const folderId = Number(catId.replace('cat-', ''));
+      /* P0-7：无分类（catId === ''）时 folderId 必须为 null——后端只在 None 时落
+         「未分类」；`Number('')` = 0 会被当成不存在的 folder_id=0 触发外键违约。 */
+      const folderId = catId === '' ? null : Number(catId.replace('cat-', ''));
       set({ syncStatus: 'syncing' });
       void api
         .addFeed(url, title || null, folderId, layout, autoSummary, autoTranslate, syncToBackend)
