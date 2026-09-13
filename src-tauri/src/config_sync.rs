@@ -1,8 +1,13 @@
 //! 配置同步（GitHub Gist / WebDAV）：手动上传/下载客户端配置。
-//! 同步范围：分类（名称/布局/AI标志）+ 订阅源（URL/标题/归属/布局/AI标志）
-//! + app_settings + ai_config。不含正文/媒体/AI 缓存（按设计文档边界）。
+//! 同步范围（白名单原则）：分类（名称/布局/AI标志/位置）+ 订阅源（URL/标题/归属/
+//! 布局/AI标志/site_url/favicon_url）+ app_settings（排除 autoStart/closePromptShown）
+//! + 非敏感连接配置（sync_protocol/greader_endpoint/greader_username）。
 //!
-//! 不做冲突合并：下载整体覆盖设置，源/分类按 URL/名称 upsert。
+//! 凭据字段排除：greader_password, ai_config, config_sync_credentials, miniflux_token。
+//! 不含正文/媒体/AI 缓存（按设计文档边界 DEC-008/009）。
+//! 字段清单：.agents/notes/implemented/feature/2026-09-13-opt004-config-sync-field-inventory.md
+//!
+//! 不做冲突合并：下载应用仅更新白名单字段，本地凭据与本地特定设置保持不变。
 
 use crate::db;
 use crate::error::{AppError, AppResult};
@@ -28,7 +33,15 @@ pub struct SyncPayload {
     pub folders: Vec<FolderSpec>,
     pub feeds: Vec<FeedSpec>,
     pub app_settings: Option<String>,
-    pub ai_config: Option<String>,
+    /// 非敏感连接配置（协议、服务器地址、用户名）
+    pub connection_config: Option<ConnectionConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ConnectionConfig {
+    pub sync_protocol: Option<String>,
+    pub greader_endpoint: Option<String>,
+    pub greader_username: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -37,6 +50,7 @@ pub struct FolderSpec {
     pub layout: String,
     pub auto_summary: bool,
     pub auto_translate: bool,
+    pub position: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -47,9 +61,13 @@ pub struct FeedSpec {
     pub layout: String,
     pub auto_summary: bool,
     pub auto_translate: bool,
+    pub site_url: Option<String>,
+    pub favicon_url: Option<String>,
 }
 
-/// 从本地库构建上传 payload。
+/// 从本地库构建上传 payload（白名单原则：仅同步字段清单中 sync=允许 的字段）。
+/// 排除全部凭据字段：greader_password, ai_config, config_sync_credentials, miniflux_token。
+/// 参考：.agents/notes/implemented/feature/2026-09-13-opt004-config-sync-field-inventory.md
 pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
     let folders = db::list_folders(conn)?;
     let feeds = db::list_feeds(conn)?;
@@ -63,6 +81,7 @@ pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
             layout: f.layout.clone(),
             auto_summary: f.auto_summary,
             auto_translate: f.auto_translate,
+            position: f.position,
         })
         .collect();
 
@@ -75,21 +94,49 @@ pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
             layout: f.layout.clone(),
             auto_summary: f.auto_summary,
             auto_translate: f.auto_translate,
+            site_url: f.site_url.clone(),
+            favicon_url: f.favicon_url.clone(),
         })
         .collect();
+
+    // 非敏感连接配置（白名单）
+    let connection_config = ConnectionConfig {
+        sync_protocol: db::get_setting(conn, "sync_protocol")?,
+        greader_endpoint: db::get_setting(conn, "greader_endpoint")?,
+        greader_username: db::get_setting(conn, "greader_username")?,
+    };
+
+    // app_settings 过滤本地特定字段（autoStart, closePromptShown）
+    let app_settings = filter_app_settings(db::get_setting(conn, "app_settings")?)?;
 
     Ok(SyncPayload {
         schema: SCHEMA_VERSION,
         uploaded_at: chrono::Utc::now().to_rfc3339(),
         folders: folder_specs,
         feeds: feed_specs,
-        app_settings: db::get_setting(conn, "app_settings")?,
-        ai_config: db::get_setting(conn, "ai_config")?,
+        app_settings,
+        connection_config: Some(connection_config),
     })
 }
 
-/// 应用下载 payload 到本地库：分类/源 upsert（按名称/URL 匹配，已存在跳过），
-/// 设置整体覆盖。返回 (新增源数, 跳过数)。
+/// 过滤 app_settings JSON，移除本地特定字段。
+fn filter_app_settings(raw: Option<String>) -> AppResult<Option<String>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mut settings: serde_json::Value = serde_json::from_str(&raw)?;
+    if let Some(obj) = settings.as_object_mut() {
+        // 排除本地特定字段（按字段清单）
+        obj.remove("autoStart");
+        obj.remove("closePromptShown");
+    }
+    Ok(Some(serde_json::to_string(&settings)?))
+}
+
+/// 应用下载 payload 到本地库（白名单原则：仅应用允许字段，保留本地凭据）。
+/// 分类/源 upsert（按名称/URL 匹配，已存在跳过），设置字段级覆盖（不整体替换）。
+/// 返回 (新增源数, 跳过数)。
+/// 参考：.agents/notes/implemented/feature/2026-09-13-opt004-config-sync-field-inventory.md
 pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<(usize, usize)> {
     if p.schema > SCHEMA_VERSION {
         return Err(AppError::internal(format!(
@@ -98,7 +145,7 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
         )));
     }
 
-    // 分类按名称 upsert（已存在则更新布局/AI 标志）
+    // 分类按名称 upsert（已存在则更新布局/AI 标志/位置）
     let mut folder_ids: std::collections::HashMap<String, i64> = Default::default();
     for f in &p.folders {
         let existing = list_folder_id_by_name(conn, &f.name)?;
@@ -106,13 +153,20 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
             Some(id) => {
                 let _ = db::update_folder_layout(conn, id, &f.layout);
                 let _ = db::set_folder_ai_flags(conn, id, f.auto_summary, f.auto_translate);
+                // 更新位置
+                conn.execute(
+                    "UPDATE folders SET position = ?1 WHERE id = ?2",
+                    rusqlite::params![f.position, id],
+                )?;
                 id
             }
             None => {
                 let id = db::create_folder(conn, &f.name, &f.layout)?;
-                // 新建分类也要应用 payload 里的 AI 标志（此前只依赖 DEFAULT，
-                // 若 DEFAULT 与 payload 不一致会丢失用户的摘要/翻译开关）。
                 let _ = db::set_folder_ai_flags(conn, id, f.auto_summary, f.auto_translate);
+                conn.execute(
+                    "UPDATE folders SET position = ?1 WHERE id = ?2",
+                    rusqlite::params![f.position, id],
+                )?;
                 id
             }
         };
@@ -123,47 +177,110 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
     let mut imported = 0usize;
     let mut skipped = 0usize;
     for f in &p.feeds {
-        if db::find_feed_by_url(conn, &f.url)?.is_some() {
-            skipped += 1;
-            continue;
-        }
-        let folder_id = match folder_ids.get(&f.folder) {
-            Some(id) => *id,
-            None => {
-                let id = list_folder_id_by_name(conn, "导入")?
-                    .unwrap_or_else(|| db::create_folder(conn, "导入", "article").unwrap_or(0));
-                folder_ids.insert("导入".to_string(), id);
-                id
+        match db::find_feed_by_url(conn, &f.url)? {
+            Some(existing_id) => {
+                // 已存在：更新白名单字段（title, folder, layout, AI flags, site_url, favicon_url）
+                let folder_id = match folder_ids.get(&f.folder) {
+                    Some(id) => *id,
+                    None => {
+                        let id = list_folder_id_by_name(conn, "导入")?.unwrap_or_else(|| {
+                            db::create_folder(conn, "导入", "article").unwrap_or(0)
+                        });
+                        folder_ids.insert("导入".to_string(), id);
+                        id
+                    }
+                };
+                conn.execute(
+                    "UPDATE feeds SET title = ?1, folder_id = ?2, layout = ?3, auto_summary = ?4, auto_translate = ?5, site_url = ?6, favicon_url = ?7 WHERE id = ?8",
+                    rusqlite::params![
+                        f.title,
+                        folder_id,
+                        f.layout,
+                        f.auto_summary,
+                        f.auto_translate,
+                        f.site_url,
+                        f.favicon_url,
+                        existing_id
+                    ],
+                )?;
+                skipped += 1;
             }
-        };
-        let title = if f.title.trim().is_empty() {
-            f.url.clone()
-        } else {
-            f.title.clone()
-        };
-        db::insert_feed(
-            conn,
-            &f.url,
-            None,
-            &title,
-            None,
-            folder_id,
-            &f.layout,
-            f.auto_summary,
-            f.auto_translate,
-        )?;
-        imported += 1;
+            None => {
+                // 新源导入
+                let folder_id = match folder_ids.get(&f.folder) {
+                    Some(id) => *id,
+                    None => {
+                        let id = list_folder_id_by_name(conn, "导入")?.unwrap_or_else(|| {
+                            db::create_folder(conn, "导入", "article").unwrap_or(0)
+                        });
+                        folder_ids.insert("导入".to_string(), id);
+                        id
+                    }
+                };
+                let title = if f.title.trim().is_empty() {
+                    f.url.clone()
+                } else {
+                    f.title.clone()
+                };
+                db::insert_feed(
+                    conn,
+                    &f.url,
+                    f.site_url.as_deref(),
+                    &title,
+                    f.favicon_url.as_deref(),
+                    folder_id,
+                    &f.layout,
+                    f.auto_summary,
+                    f.auto_translate,
+                )?;
+                imported += 1;
+            }
+        }
     }
 
-    // 设置整体覆盖（app_settings + ai_config）
-    if let Some(s) = &p.app_settings {
-        db::set_setting(conn, "app_settings", s)?;
+    // app_settings 字段级合并：只更新白名单字段，保留本地特定字段
+    if let Some(remote_settings) = &p.app_settings {
+        merge_app_settings(conn, remote_settings)?;
     }
-    if let Some(s) = &p.ai_config {
-        db::set_setting(conn, "ai_config", s)?;
+
+    // 非敏感连接配置应用（保留凭据字段不变）
+    if let Some(cc) = &p.connection_config {
+        if let Some(v) = &cc.sync_protocol {
+            db::set_setting(conn, "sync_protocol", v)?;
+        }
+        if let Some(v) = &cc.greader_endpoint {
+            db::set_setting(conn, "greader_endpoint", v)?;
+        }
+        if let Some(v) = &cc.greader_username {
+            db::set_setting(conn, "greader_username", v)?;
+        }
     }
 
     Ok((imported, skipped))
+}
+
+/// 合并 app_settings：远端白名单字段覆盖本地，本地特定字段保留。
+fn merge_app_settings(conn: &rusqlite::Connection, remote_raw: &str) -> AppResult<()> {
+    let remote: serde_json::Value = serde_json::from_str(remote_raw)?;
+    let local_raw = db::get_setting(conn, "app_settings")?;
+
+    let mut merged = if let Some(local_raw) = local_raw {
+        serde_json::from_str::<serde_json::Value>(&local_raw)?
+    } else {
+        serde_json::json!({})
+    };
+
+    // 远端白名单字段覆盖（排除 autoStart, closePromptShown）
+    if let (Some(remote_obj), Some(merged_obj)) = (remote.as_object(), merged.as_object_mut()) {
+        for (key, value) in remote_obj {
+            if key != "autoStart" && key != "closePromptShown" {
+                merged_obj.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    db::set_setting(conn, "app_settings", &serde_json::to_string(&merged)?)?;
+    Ok(())
 }
 
 fn list_folder_id_by_name(conn: &rusqlite::Connection, name: &str) -> AppResult<Option<i64>> {

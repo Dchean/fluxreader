@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "id": "TASK-014",
+  "batch_id": "BATCH-004",
+  "kind": "ci_change_manager_mechanical",
+  "milestone": "M1",
+  "status": "verified",
+  "title": "CI 增加 cargo fmt --check 门禁（关闭 ISSUE-013）",
+  "objective": "在 ci.yml 的 rust 作业中、clippy 步骤之前新增 cargo fmt --check 步骤。TASK-006 已完成全仓格式化，当前 fmt --check 通过——新增检查只增加保护不降级。",
+  "non_goals": [
+    "不修改其他步骤/触发器/权限",
+    "不降级任何既有检查"
+  ],
+  "requirement_refs": [
+    "tasks/BACKLOG.md 候选任务表",
+    "docs/ISSUES.md ISSUE-013"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    ".github/workflows/ci.yml"
+  ],
+  "source_baseline": "main（BATCH-003 合并后）",
+  "dependencies": [],
+  "authorization": {
+    "source": "DEC-013 自主流程授权；属 EXECUTION-POLICY allowed_low_risk 的『只增加既定检查』类 CI 变更",
+    "risk_level": "low"
+  },
+  "blockers": [],
+  "scope": {
+    "allowed_paths": [
+      ".github/workflows/ci.yml"
+    ],
+    "protected_paths": "release.yml 不动",
+    "change_definition": "rust 作业内新增一步：- name: Format (cargo fmt --check)\\n        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+    "generated_artifacts": [],
+    "network_and_data": "无"
+  },
+  "steps": [
+    "定位 rust 作业 clippy 步骤",
+    "其前插入 fmt --check 步骤",
+    "返回结构化结果"
+  ],
+  "acceptance_criteria": [
+    "git diff 仅新增该步骤（含 Note 反向注释一行指向 rust-format-unification Note）",
+    "本地 cargo fmt --check 通过",
+    "yaml 结构完整"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "git diff -- .github/workflows/ci.yml",
+      "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check"
+    ]
+  },
+  "stop_conditions": [],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": null
+  },
+  "outputs": [
+    "ci.yml 新步骤"
+  ],
+  "evidence": [],
+  "note_requirement": "复用 implemented 时将转正的 rust-format-unification Note，不新建",
+  "verification_results": {
+    "verified_at_utc": "BATCH-004 内（以 CI 运行为最终证据）",
+    "executed_by": "manager（机械动作，TASK-014 预定义变更）",
+    "diff": "仅在 Cache Rust build 与 clippy 之间插入 Note 注释 + fmt --check 步骤",
+    "local_fmt_check": "PASS",
+    "note_ref": ".agents/notes/proposed/process/2026-09-13-rust-format-unification.md（随本批代码提交转 implemented）"
+  }
+}

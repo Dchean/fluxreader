@@ -295,6 +295,7 @@ pub struct FolderRow {
     pub auto_summary: bool,
     pub auto_translate: bool,
     pub collapsed: bool,
+    pub position: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -367,7 +368,7 @@ Folders
 
 pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, layout, auto_summary, auto_translate, collapsed
+        "SELECT id, name, layout, auto_summary, auto_translate, collapsed, position
          FROM folders ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -378,6 +379,7 @@ pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
             auto_summary: r.get::<_, i64>(3)? != 0,
             auto_translate: r.get::<_, i64>(4)? != 0,
             collapsed: r.get::<_, i64>(5)? != 0,
+            position: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)

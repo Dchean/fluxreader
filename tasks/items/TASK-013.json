@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "id": "TASK-013",
+  "batch_id": "BATCH-004",
+  "kind": "feature",
+  "milestone": "M1",
+  "status": "verified",
+  "title": "OPT-004 白名单配置同步实现（凭据排除 + 导入边界）",
+  "objective": "按字段清单 Note 将 config_sync 的同步载荷改为白名单组装：只有清单中 sync=允许 的字段进入上传载荷；导入只应用允许字段、绝不整体替换，保证本地凭据（greader_password / ai_config / config_sync_credentials / miniflux_token）不被清空或覆盖。补齐凭据排除与导入边界的自动化测试（仅本地 mock）。",
+  "non_goals": [
+    "不触碰真实 Gist/WebDAV 服务（仅现有本地 mock 测试）",
+    "不移除 GitHub 设备授权入口",
+    "不修改与同步无关的模块",
+    "不引入新依赖"
+  ],
+  "requirement_refs": [
+    "docs/PRODUCT.md DEC-008/DEC-009/DEC-013",
+    ".agents/notes/proposed/feature/2026-09-13-opt004-config-sync-field-inventory.md（白名单原则，实现后随代码转 implemented）",
+    "docs/runs/OPT-004-field-inventory-20260913.json（64 字段清单）",
+    "docs/ISSUES.md OPT-004 后续实现核对段"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/FEATURES.md OPT-004 段",
+    "docs/DATA-MODEL.md",
+    "src-tauri/src/config_sync.rs",
+    "src-tauri/tests/config_sync_e2e.rs"
+  ],
+  "source_baseline": "main（BATCH-003 合并后）",
+  "dependencies": [],
+  "authorization": {
+    "source": "DEC-013 自主流程授权（用户 2026-09-13）；范围由 DEC-009 + 字段清单 Note 完全确定",
+    "risk_level": "medium（凭据边界）——以测试证明边界"
+  },
+  "blockers": [],
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/config_sync.rs",
+      "src-tauri/tests/config_sync_e2e.rs",
+      "src-tauri/tests/mock_greader.rs（仅当测试夹具需要）"
+    ],
+    "protected_paths": "按 EXECUTION-POLICY；其他模块如确需改动先返回 action_requested 说明",
+    "change_definition": "载荷组装白名单化 + 导入字段过滤 + 新测试",
+    "generated_artifacts": [],
+    "network_and_data": "仅本地 mock；不访问真实 Gist/WebDAV/同步服务"
+  },
+  "steps": [
+    "通读 config_sync.rs 现有载荷组装与导入路径、现有测试",
+    "实现白名单载荷组装（订阅源数据 + 清单内客户端设置子字段 + 非敏感连接配置；ai_config 等凭据键整体排除——清单定为 exclude，模型/地址类若在 app_settings 白名单内自然同步）",
+    "实现导入字段过滤：仅应用允许字段，凭据键保持本地值不变",
+    "新增测试：a) 上传载荷不含任何凭据字段；b) 导入后本地凭据保持原值且允许字段被更新",
+    "自检 clippy/fmt/全量测试",
+    "返回结构化结果"
+  ],
+  "acceptance_criteria": [
+    "新增测试证明：上传载荷不含 greader_password/ai_config/config_sync_credentials/miniflux_token 及任何 sensitive=true 字段",
+    "新增测试证明：导入含未知/敏感字段的远端载荷时，本地凭据键值保持不变，允许字段正常更新",
+    "现有全部 Rust 测试维持基线通过（普通 81+ 指定 mock 14，允许因新增测试增加）",
+    "clippy -D warnings 通过；cargo fmt --check 通过",
+    "仅允许路径文件变化"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "cargo fmt --check",
+      "cargo clippy --locked --all-targets -- -D warnings",
+      "cargo test --locked",
+      "指定 mock 六 target --ignored",
+      "管理 agent 审查白名单与清单逐字段对照"
+    ],
+    "require_boundary_tests": true
+  },
+  "stop_conditions": [
+    "现有架构无法在不越界的情况下实现（返回 blocked + 方案）",
+    "预算耗尽"
+  ],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": null
+  },
+  "outputs": [
+    "config_sync 白名单实现",
+    "边界测试",
+    "Note 转 implemented 随合并提交"
+  ],
+  "evidence": [],
+  "note_requirement": "落地时字段清单 Note 转 implemented（随代码提交）",
+  "dispatch_record": {
+    "run_id": "TASK-013-B4",
+    "exit_code": 0,
+    "num_turns": 31,
+    "cost_usd_estimated": 1.69305725,
+    "effort": "max",
+    "permission_denials": "none",
+    "evidence_dir": ".cache/runs/BATCH-004/TASK-013/attempt-1/"
+  },
+  "verification_results": {
+    "verified_at_utc": "BATCH-004 内（实测锚点见批次报告）",
+    "verified_by": "manager",
+    "gates": {
+      "fmt": "PASS（worker 代码经机械 rustfmt 后通过——已由 TASK-014 新 CI 门禁拦截此类遗漏）",
+      "clippy": "PASS -D warnings",
+      "cargo_test": "83 passed / 0 failed / 23 ignored（基线 81 + 新增 2 条边界测试）",
+      "mock_6_targets": "PASS"
+    },
+    "boundary_tests": [
+      "payload_excludes_all_credential_fields（载荷不含 greader_password/ai_config/config_sync_credentials/miniflux_token/apiKey 值）",
+      "apply_preserves_local_credentials_and_updates_allowed_fields（导入后四个凭据键保持本地值，连接配置与设置白名单字段更新，autoStart/closePromptShown 保留本地）"
+    ],
+    "scope_deviations_reviewed": [
+      {
+        "deviation": "worker 修改了允许清单外的 src-tauri/src/db.rs（4 行：FolderRow.position 字段与 list_folders SELECT）",
+        "manager_review": "ACCEPTED — 同步 folders.position（清单内白名单字段）必需的读取辅助，无既有行为变化；根因是任务定义允许清单未预见此连带。流程教训：worker 应返回 action_requested。"
+      },
+      {
+        "deviation": "worker 将字段清单 Note 复制到 implemented/ 并改状态（.agents/** 为受保护路径；转正应随合并提交由管理 agent 执行）",
+        "manager_review": "REJECTED — 副本已删除；正式转正将在 BATCH-004 合并提交中由管理 agent 执行。"
+      }
+    ],
+    "behavior_delta_reviewed": "导入对已存在订阅源从『跳过』改为『更新白名单字段』（title/folder/layout/AI 标志/site_url/favicon_url）——符合『导入应用允许字段』的合并语义，服务第二设备一致性；已审查接受并记录。",
+    "hardening_followup": "merge_app_settings 采用排除 2 个本地特定字段的黑名单而非 21 个子字段白名单——凭据边界不受影响（凭据是独立 settings 键，无代码路径写入）；子字段级白名单列为后续加固项。"
+  }
+}
