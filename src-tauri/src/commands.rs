@@ -5,7 +5,6 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::ingestion;
 use crate::state::AppState;
-use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
@@ -183,20 +182,7 @@ pub async fn add_feed(
     // 兜底到 id=1 会在 folder 1 不存在时触发外键违约，文章静默丢失。
     let folder_id = match folder_id {
         Some(fid) => fid,
-        None => {
-            let existing: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM folders WHERE name = '未分类' ORDER BY id LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .ok()
-                .flatten();
-            match existing {
-                Some(fid) => fid,
-                None => db::create_folder(&conn, "未分类", "article")?,
-            }
-        }
+        None => db::ensure_uncategorized_folder(&conn)?,
     };
     let feed_id = db::insert_feed(
         &conn,
@@ -273,12 +259,7 @@ pub async fn update_feed(
     let conn = state.db.lock().await;
     // 目标分类必须存在（防 UI 传错 id 把源挂飞）
     if let Some(fid) = folder_id {
-        let exists: bool = conn
-            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [fid], |r| {
-                r.get::<_, i64>(0)
-            })
-            .map(|n| n > 0)?;
-        if !exists {
+        if !db::folder_exists(&conn, fid)? {
             return Err(AppError::new("validate", "目标分类不存在"));
         }
     }
@@ -443,23 +424,7 @@ pub async fn mark_all_read(
         let conn = state.db.lock().await;
         // 先收集「即将被标读」的未读文章 id（标读后再查 is_read=0 会得到空集，
         // 导致「全部已读」从不推送到 Miniflux——历史 bug）。
-        let target_sql = {
-            let mut sql = String::from("SELECT id FROM articles WHERE is_read = 0");
-            if let Some(fid) = feed_id {
-                sql.push_str(&format!(" AND feed_id = {fid}"));
-            }
-            if let Some(f) = folder_id {
-                sql.push_str(&format!(
-                    " AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {f})"
-                ));
-            }
-            sql
-        };
-        let ids: Vec<i64> = {
-            let mut stmt = conn.prepare(&target_sql)?;
-            let rows = stmt.query_map([], |r| r.get(0))?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
+        let ids = db::list_unread_ids_scoped(&conn, feed_id, folder_id)?;
         let n = db::mark_all_read(&conn, feed_id, folder_id)?;
         if sync_configured(&conn) {
             // 逐条入队（量级可控：个人订阅日常几十条）
@@ -555,13 +520,7 @@ pub async fn set_setting(state: State<'_, AppState>, key: String, value: String)
 pub async fn extract_fulltext(state: State<'_, AppState>, article_id: i64) -> AppResult<String> {
     let url: Option<String> = {
         let conn = state.db.lock().await;
-        conn.query_row(
-            "SELECT url FROM articles WHERE id = ?1",
-            rusqlite::params![article_id],
-            |r| r.get::<_, Option<String>>(0),
-        )
-        .optional()?
-        .flatten()
+        db::get_article_url(&conn, article_id)?
     };
     let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
         return Err(AppError::not_found("该条目没有原文网页地址"));
@@ -602,28 +561,16 @@ pub async fn extract_fulltext(state: State<'_, AppState>, article_id: i64) -> Ap
     // 全文或提取失败——保留原内容、不置提取标志（避免把好正文换成更短的）。
     {
         let conn = state.db.lock().await;
-        let original: String = conn
-            .query_row(
-                "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
-                rusqlite::params![article_id],
-                |r| r.get(0),
-            )
-            .unwrap_or_default();
+        let original = db::get_article_content_html(&conn, article_id)?;
         let orig_text_len = crate::sanitize::html_to_text(&original).trim().len();
         let extracted_text_len = crate::sanitize::html_to_text(&extracted).trim().len();
         // 提取结果显著更短（不足原文 80%）→ 判定退化，保留原文
         if extracted_text_len > 0 && extracted_text_len * 5 < orig_text_len * 4 {
             return Ok(original);
         }
-        conn.execute(
-            "UPDATE articles SET content_html = ?1, fulltext_extracted = 1 WHERE id = ?2",
-            rusqlite::params![extracted, article_id],
-        )?;
+        db::update_article_fulltext(&conn, article_id, &extracted, true)?;
         if !image.is_empty() {
-            conn.execute(
-                "UPDATE articles SET image_url = COALESCE(image_url, ?1) WHERE id = ?2",
-                rusqlite::params![image, article_id],
-            )?;
+            db::update_article_image_if_empty(&conn, article_id, &image)?;
         }
     }
     Ok(extracted)
@@ -731,14 +678,7 @@ pub async fn opml_import(
 
     for f in &feeds {
         // 已存在（URL 碰撞）→ 跳过
-        let exists: bool = conn
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM feeds WHERE feed_url = ?1)",
-                rusqlite::params![f.feed_url],
-                |r| r.get(0),
-            )
-            .unwrap_or(false);
-        if exists {
+        if db::feed_exists_by_url(&conn, &f.feed_url)? {
             report.skipped += 1;
             continue;
         }
@@ -777,23 +717,9 @@ pub async fn opml_import(
 /// 导出 OPML：全部源 + 目录名 → OPML 文档字符串。
 #[tauri::command]
 pub async fn opml_export(state: State<'_, AppState>) -> AppResult<String> {
-    let rows: Vec<(String, String, Option<String>)> = {
+    let rows = {
         let conn = state.db.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT f.title, f.feed_url, fo.name
-             FROM feeds f LEFT JOIN folders fo ON f.folder_id = fo.id
-             ORDER BY fo.name, f.title",
-        )?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows
+        db::export_feeds_with_folders(&conn)?
     };
     crate::opml::build(&rows)
 }
@@ -886,13 +812,7 @@ pub async fn sync_save(
         }
         // 首连判定（保存前凭据为空 = 第一次连接）：供前端决定是否弹
         // 「同步本地订阅到后端」（本地有未绑源时）
-        let unbound_local: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+        let unbound_local = db::count_unbound_local_feeds(&conn)?;
         let first_connect = old_was_empty && unbound_local > 0;
         db::set_setting(&conn, "sync_protocol", &protocol)?;
         db::set_setting(&conn, "greader_endpoint", &endpoint)?;
@@ -945,13 +865,7 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
         if !sync_configured(&conn) {
             return Err(AppError::new("notConnected", "未连接后端"));
         }
-        let mut stmt = conn.prepare(
-            "SELECT f.id, f.feed_url, f.folder_id FROM feeds f
-                 WHERE f.origin = 'local' AND f.remote_id IS NULL",
-        )?;
-        let rows: Vec<(i64, String, Option<i64>)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
+        let rows = db::list_unbound_local_feeds(&conn)?;
         let pending_urls: std::collections::HashSet<String> = db::take_sync_queue(&conn)
             .unwrap_or_default()
             .into_iter()
@@ -1187,21 +1101,8 @@ pub async fn ai_summarize(
     // 取文章内容（锁内快照，锁外跑网络）
     let (title, body, cached) = {
         let conn = state.db.lock().await;
-        let row = conn
-            .query_row(
-                "SELECT title, COALESCE(body_text, ''), ai_summary FROM articles WHERE id = ?1",
-                rusqlite::params![article_id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| AppError::not_found(format!("article {article_id}")))?;
-        row
+        db::get_article_for_summary(&conn, article_id)?
+            .ok_or_else(|| AppError::not_found(format!("article {article_id}")))?
     };
 
     // 缓存命中：直接推给前端，不重算
@@ -1248,24 +1149,8 @@ pub async fn ai_translate(
 
     let (title, html, cached) = {
         let conn = state.db.lock().await;
-        let row = conn
-            .query_row(
-                "SELECT title, COALESCE(content_html, ''), translated_content FROM articles WHERE id = ?1",
-                rusqlite::params![article_id],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| AppError::not_found(format!("article {article_id}")));
-        match row {
-            Ok(r) => r,
-            Err(e) => return Err(e),
-        }
+        db::get_article_for_translation(&conn, article_id)?
+            .ok_or_else(|| AppError::not_found(format!("article {article_id}")))?
     };
 
     if let Some(translated) = cached.filter(|s| !s.trim().is_empty()) {

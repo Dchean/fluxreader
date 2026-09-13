@@ -1,6 +1,7 @@
 //! SQLite 数据层：schema + 迁移 + 类型化数据访问。
 //!
-//! 所有 SQL 集中在此；命令层只调用类型化函数，不写裸 SQL。
+//! 主要数据访问集中于此；commands.rs 已迁移至类型化函数，sync.rs 的收敛
+//! 见 M2 后续任务（ISSUE-008）。
 //! 迁移为追加式：已发布的迁移不可修改，只能新增 M::up。
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -1867,6 +1868,16 @@ pub fn feed_id_by_url(conn: &Connection, feed_url: &str) -> AppResult<Option<i64
     Ok(id)
 }
 
+/// 按 URL 检查 feed 是否存在（OPML 导入去重用）
+pub fn feed_exists_by_url(conn: &Connection, feed_url: &str) -> AppResult<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM feeds WHERE feed_url = ?1)",
+        params![feed_url],
+        |r| r.get(0),
+    )?;
+    Ok(exists)
+}
+
 /// 按规范化 URL 找本地 feed（与 article_id_by_url 同口径）。
 /// 用于 pull_feeds 与 Miniflux 的 feed_url 碰撞匹配：Miniflux 返回的 URL 与
 /// 本地直连添加时的 URL 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成
@@ -1879,6 +1890,722 @@ pub fn feed_id_by_url_normalized(conn: &Connection, feed_url: &str) -> AppResult
         .iter()
         .find(|f| normalize_url(&f.feed_url) == norm)
         .map(|f| f.id))
+}
+
+/* ============================================================
+commands.rs SQL 抽取层（TASK-017）
+============================================================ */
+
+/// 确保「未分类」folder 存在：已有则返回其 id，无则创建后返回。
+/// 用于 add_feed 未指定分类时的兜底逻辑。
+pub fn ensure_uncategorized_folder(conn: &Connection) -> AppResult<i64> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM folders WHERE name = '未分类' ORDER BY id LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match existing {
+        Some(fid) => Ok(fid),
+        None => create_folder(conn, "未分类", "article"),
+    }
+}
+
+/// 检查 folder 是否存在（update_feed 参数校验用）
+pub fn folder_exists(conn: &Connection, folder_id: i64) -> AppResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM folders WHERE id = ?1",
+        params![folder_id],
+        |r| r.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// 列出指定范围内的未读文章 id（mark_all_read 入队前收集用）。
+/// feed_id/folder_id 为 None 时查全部未读。
+pub fn list_unread_ids_scoped(
+    conn: &Connection,
+    feed_id: Option<i64>,
+    folder_id: Option<i64>,
+) -> AppResult<Vec<i64>> {
+    let mut sql = String::from("SELECT id FROM articles WHERE is_read = 0");
+    if let Some(fid) = feed_id {
+        sql.push_str(&format!(" AND feed_id = {fid}"));
+    }
+    if let Some(f) = folder_id {
+        sql.push_str(&format!(
+            " AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {f})"
+        ));
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |r| r.get(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 获取文章 URL（extract_fulltext 取原文网页地址用）
+pub fn get_article_url(conn: &Connection, article_id: i64) -> AppResult<Option<String>> {
+    let url = conn
+        .query_row(
+            "SELECT url FROM articles WHERE id = ?1",
+            params![article_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(url)
+}
+
+/// 获取文章正文 HTML（extract_fulltext 退化判定用）
+pub fn get_article_content_html(conn: &Connection, article_id: i64) -> AppResult<String> {
+    let html: String = conn
+        .query_row(
+            "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
+            params![article_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+    Ok(html)
+}
+
+/// 更新文章全文提取结果：覆盖 content_html 并置提取标志
+pub fn update_article_fulltext(
+    conn: &Connection,
+    article_id: i64,
+    content_html: &str,
+    extracted: bool,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE articles SET content_html = ?1, fulltext_extracted = ?2 WHERE id = ?3",
+        params![content_html, extracted as i64, article_id],
+    )?;
+    Ok(())
+}
+
+/// 更新文章封面（仅在现有封面为空时）：extract_fulltext 头图兜底用
+pub fn update_article_image_if_empty(
+    conn: &Connection,
+    article_id: i64,
+    image_url: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE articles SET image_url = COALESCE(image_url, ?1) WHERE id = ?2",
+        params![image_url, article_id],
+    )?;
+    Ok(())
+}
+
+/// 导出全部 feeds 附带 folder 名（OPML 导出用）
+pub fn export_feeds_with_folders(
+    conn: &Connection,
+) -> AppResult<Vec<(String, String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.title, f.feed_url, fo.name
+         FROM feeds f LEFT JOIN folders fo ON f.folder_id = fo.id
+         ORDER BY fo.name, f.title",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 统计未绑定的本地源数量（sync_save 首连判定用）
+pub fn count_unbound_local_feeds(conn: &Connection) -> AppResult<i64> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(count)
+}
+
+/// 列出未绑定的本地源（sync_local_feeds 推送用）
+pub fn list_unbound_local_feeds(conn: &Connection) -> AppResult<Vec<(i64, String, Option<i64>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.feed_url, f.folder_id FROM feeds f
+         WHERE f.origin = 'local' AND f.remote_id IS NULL",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 获取文章摘要用数据（ai_summarize 用）：(title, body_text, ai_summary)
+pub fn get_article_for_summary(
+    conn: &Connection,
+    article_id: i64,
+) -> AppResult<Option<(String, String, Option<String>)>> {
+    let row = conn
+        .query_row(
+            "SELECT title, COALESCE(body_text, ''), ai_summary FROM articles WHERE id = ?1",
+            params![article_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// 获取文章翻译用数据（ai_translate 用）：(title, content_html, translated_content)
+pub fn get_article_for_translation(
+    conn: &Connection,
+    article_id: i64,
+) -> AppResult<Option<(String, String, Option<String>)>> {
+    let row = conn
+        .query_row(
+            "SELECT title, COALESCE(content_html, ''), translated_content FROM articles WHERE id = ?1",
+            params![article_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/* ============================================================
+测试模块（TASK-017 追加）
+============================================================ */
+
+#[cfg(test)]
+mod commands_extraction_tests {
+    use super::*;
+
+    /// ensure_uncategorized_folder：不存在时创建，已存在时返回现有 id
+    #[test]
+    fn ensure_uncategorized_folder_creates_or_returns_existing() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        // 首次调用：创建「未分类」
+        let fid1 = ensure_uncategorized_folder(&conn).unwrap();
+        assert!(fid1 > 0);
+
+        // 再次调用：返回现有 id（不重复建）
+        let fid2 = ensure_uncategorized_folder(&conn).unwrap();
+        assert_eq!(fid1, fid2);
+
+        // 验证数据库中确实只有一个「未分类」
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM folders WHERE name = '未分类'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    /// folder_exists：存在返回 true，不存在返回 false
+    #[test]
+    fn folder_exists_checks_correctly() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let fid = create_folder(&conn, "测试分类", "article").unwrap();
+        assert!(folder_exists(&conn, fid).unwrap());
+        assert!(!folder_exists(&conn, 9999).unwrap());
+    }
+
+    /// list_unread_ids_scoped + mark_all_read：范围筛选一致性
+    #[test]
+    fn list_unread_ids_and_mark_all_read_scope_alignment() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f1 = create_folder(&conn, "F1", "article").unwrap();
+        let f2 = create_folder(&conn, "F2", "article").unwrap();
+        let feed1 = insert_feed(
+            &conn,
+            "http://a.example/f1",
+            None,
+            "feed1",
+            None,
+            f1,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let feed2 = insert_feed(
+            &conn,
+            "http://a.example/f2",
+            None,
+            "feed2",
+            None,
+            f2,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        // 插入文章：feed1 两篇未读，feed2 一篇未读
+        let art = |feed_id: i64, guid: &str| {
+            let a = NewArticle {
+                guid: guid.into(),
+                url: None,
+                title: "t".into(),
+                author: None,
+                summary: None,
+                content_html: None,
+                body_text: "b".into(),
+                image_url: None,
+                enclosure_url: None,
+                enclosure_mime: None,
+                duration_sec: None,
+                published_at: None,
+                source: "direct".into(),
+            };
+            upsert_article_with_feed(&conn, feed_id, &a, false).unwrap();
+        };
+        art(feed1, "g1");
+        art(feed1, "g2");
+        art(feed2, "g3");
+
+        // 全部文章未读
+        let all_unread = list_unread_ids_scoped(&conn, None, None).unwrap();
+        assert_eq!(all_unread.len(), 3);
+
+        // feed1 范围
+        let feed1_unread = list_unread_ids_scoped(&conn, Some(feed1), None).unwrap();
+        assert_eq!(feed1_unread.len(), 2);
+
+        // folder f1 范围
+        let folder1_unread = list_unread_ids_scoped(&conn, None, Some(f1)).unwrap();
+        assert_eq!(folder1_unread.len(), 2);
+
+        // 标读 feed1
+        let n = mark_all_read(&conn, Some(feed1), None).unwrap();
+        assert_eq!(n, 2);
+
+        // 剩余未读应该只有 feed2 的一篇
+        let remaining = list_unread_ids_scoped(&conn, None, None).unwrap();
+        assert_eq!(remaining.len(), 1);
+    }
+
+    /// get_article_url：存在返回 url，不存在返回 None
+    #[test]
+    fn get_article_url_returns_url_or_none() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "http://a.example/f",
+            None,
+            "feed",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let a = NewArticle {
+            guid: "g1".into(),
+            url: Some("http://example.com/a1".into()),
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "b".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: None,
+            source: "direct".into(),
+        };
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+
+        let url = get_article_url(&conn, aid).unwrap();
+        assert_eq!(url, Some("http://example.com/a1".to_string()));
+
+        let none_url = get_article_url(&conn, 9999).unwrap();
+        assert_eq!(none_url, None);
+    }
+
+    /// feed_exists_by_url：URL 存在返回 true
+    #[test]
+    fn feed_exists_by_url_checks_correctly() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f = create_folder(&conn, "F", "article").unwrap();
+        insert_feed(
+            &conn,
+            "http://example.com/feed",
+            None,
+            "feed",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!(feed_exists_by_url(&conn, "http://example.com/feed").unwrap());
+        assert!(!feed_exists_by_url(&conn, "http://other.example/feed").unwrap());
+    }
+
+    /// export_feeds_with_folders：返回 (title, url, folder_name) 元组列表
+    #[test]
+    fn export_feeds_with_folders_returns_tuples() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f1 = create_folder(&conn, "科技", "article").unwrap();
+        let f2 = create_folder(&conn, "新闻", "article").unwrap();
+        insert_feed(
+            &conn,
+            "http://a.example/tech",
+            None,
+            "科技源",
+            None,
+            f1,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        insert_feed(
+            &conn,
+            "http://b.example/news",
+            None,
+            "新闻源",
+            None,
+            f2,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let rows = export_feeds_with_folders(&conn).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|(t, _, _)| t == "科技源"));
+        assert!(rows
+            .iter()
+            .any(|(t, _, f)| t == "新闻源" && f.as_deref() == Some("新闻")));
+    }
+
+    /// count_unbound_local_feeds：统计未绑定本地源
+    #[test]
+    fn count_unbound_local_feeds_counts_correctly() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f = create_folder(&conn, "F", "article").unwrap();
+        insert_feed(
+            &conn,
+            "http://a.example/f1",
+            None,
+            "f1",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        insert_feed(
+            &conn,
+            "http://a.example/f2",
+            None,
+            "f2",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let count = count_unbound_local_feeds(&conn).unwrap();
+        assert_eq!(count, 2);
+
+        // 绑定一个
+        let fid = feed_id_by_url(&conn, "http://a.example/f1")
+            .unwrap()
+            .unwrap();
+        set_feed_remote_id(&conn, fid, 123).unwrap();
+
+        let count2 = count_unbound_local_feeds(&conn).unwrap();
+        assert_eq!(count2, 1);
+    }
+
+    /// list_unbound_local_feeds：返回 (id, url, folder_id) 元组列表
+    #[test]
+    fn list_unbound_local_feeds_returns_tuples() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f = create_folder(&conn, "F", "article").unwrap();
+        insert_feed(
+            &conn,
+            "http://a.example/f1",
+            None,
+            "f1",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let rows = list_unbound_local_feeds(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "http://a.example/f1");
+        assert_eq!(rows[0].2, Some(f));
+    }
+
+    /// get_article_for_summary：返回 (title, body_text, ai_summary)
+    #[test]
+    fn get_article_for_summary_returns_tuple() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "http://a.example/f",
+            None,
+            "feed",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let a = NewArticle {
+            guid: "g1".into(),
+            url: None,
+            title: "测试标题".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "测试正文".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: None,
+            source: "direct".into(),
+        };
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+
+        let (title, body, summary) = get_article_for_summary(&conn, aid).unwrap().unwrap();
+        assert_eq!(title, "测试标题");
+        assert_eq!(body, "测试正文");
+        assert_eq!(summary, None);
+
+        // 设置 AI 摘要后再查
+        set_article_ai_fields(&conn, aid, Some("AI 摘要"), None).unwrap();
+        let (_, _, summary2) = get_article_for_summary(&conn, aid).unwrap().unwrap();
+        assert_eq!(summary2, Some("AI 摘要".to_string()));
+    }
+
+    /// get_article_for_translation：返回 (title, content_html, translated_content)
+    #[test]
+    fn get_article_for_translation_returns_tuple() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "http://a.example/f",
+            None,
+            "feed",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let a = NewArticle {
+            guid: "g1".into(),
+            url: None,
+            title: "Test Title".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>Test content</p>".into()),
+            body_text: "Test content".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: None,
+            source: "direct".into(),
+        };
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+
+        let (title, html, translated) = get_article_for_translation(&conn, aid).unwrap().unwrap();
+        assert_eq!(title, "Test Title");
+        assert_eq!(html, "<p>Test content</p>");
+        assert_eq!(translated, None);
+    }
+
+    /// update_article_fulltext：更新正文与提取标志
+    #[test]
+    fn update_article_fulltext_updates_correctly() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "http://a.example/f",
+            None,
+            "feed",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let a = NewArticle {
+            guid: "g1".into(),
+            url: None,
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>原始</p>".into()),
+            body_text: "原始".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: None,
+            source: "direct".into(),
+        };
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+
+        update_article_fulltext(&conn, aid, "<p>全文</p>", true).unwrap();
+
+        let row = get_article(&conn, aid).unwrap().unwrap();
+        assert_eq!(row.content_html, Some("<p>全文</p>".to_string()));
+        assert!(row.fulltext_extracted);
+    }
+
+    /// update_article_image_if_empty：仅在封面为空时更新
+    #[test]
+    fn update_article_image_if_empty_only_when_empty() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "http://a.example/f",
+            None,
+            "feed",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let a = NewArticle {
+            guid: "g1".into(),
+            url: None,
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "b".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: None,
+            source: "direct".into(),
+        };
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+
+        // 首次更新：封面为空，应成功
+        update_article_image_if_empty(&conn, aid, "http://example.com/img1.jpg").unwrap();
+        let row1 = get_article(&conn, aid).unwrap().unwrap();
+        assert_eq!(
+            row1.image_url,
+            Some("http://example.com/img1.jpg".to_string())
+        );
+
+        // 再次更新：封面已有，不应覆盖
+        update_article_image_if_empty(&conn, aid, "http://example.com/img2.jpg").unwrap();
+        let row2 = get_article(&conn, aid).unwrap().unwrap();
+        assert_eq!(
+            row2.image_url,
+            Some("http://example.com/img1.jpg".to_string())
+        );
+    }
+
+    /// get_article_content_html：返回正文 HTML
+    #[test]
+    fn get_article_content_html_returns_html() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let f = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "http://a.example/f",
+            None,
+            "feed",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let a = NewArticle {
+            guid: "g1".into(),
+            url: None,
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>内容</p>".into()),
+            body_text: "内容".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: None,
+            source: "direct".into(),
+        };
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+
+        let html = get_article_content_html(&conn, aid).unwrap();
+        assert_eq!(html, "<p>内容</p>");
+    }
 }
 
 #[cfg(test)]
