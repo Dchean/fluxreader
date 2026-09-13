@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "task_id": "TASK-003",
+  "run_id": "TASK-003-handoff-20260913",
+  "status": "handoff_documents_validated",
+  "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "role_split": {
+    "manager": "project management, dispatch, independent verification and review",
+    "code_writer": "Claude Code CLI"
+  },
+  "user_budget": {
+    "max_repair_rounds_per_task": 3,
+    "max_task_minutes": 90,
+    "max_tasks_per_batch": 3,
+    "financial_cap_enabled": false
+  },
+  "merge_and_release": "owner confirmation retained from DEC-002/DEC-005",
+  "first_merge_preference_question": "No new auto-merge authorization recorded",
+  "cli_preflight": {
+    "version": "2.1.270",
+    "logged_in": true,
+    "auth_method": "oauth_token",
+    "api_provider": "firstParty",
+    "model_invocations": 0
+  },
+  "previous_baseline": "tasks/runs/TASK-002-20260913T041438Z.json",
+  "application_source_changes": "none",
+  "application_tests": "not rerun; existing baseline retained",
+  "first_batch": "tasks/batches/BATCH-001.json",
+  "note": ".agents/notes/proposed/process/2026-09-13-manager-claude-handoff.md",
+  "skill_copy_manifest": ".cache/handoff/20260913/skill-copy-manifest.json",
+  "validation": {
+    "status": "PASS",
+    "document_checks": {
+      "status": "PASS",
+      "markdown_files": 26,
+      "json_files": 16,
+      "relative_links": 107,
+      "task_count": 6,
+      "skill_files_verified": 43,
+      "errors": [],
+      "model_invocations": 0,
+      "first_batch_started": false
+    },
+    "note_tree": "ok: 1 note(s) tree and relative links verified",
+    "note_format": "ok: 1 note(s) verified",
+    "powershell_example": "syntax checked; not executed against a model",
+    "source_integrity": "product source, tests, CI and lockfiles unchanged",
+    "semantic_review": {
+      "result": "handoff rationale and three alternatives recorded; authority/budgets explicit",
+      "remaining": "first real manager-to-Claude coding/verification run is not yet verified"
+    }
+  },
+  "handoff_archive": {
+    "path": ".cache/handoff/20260913/FluxReader-handoff-20260913.zip",
+    "checksum_file": ".cache/handoff/20260913/FluxReader-handoff-20260913.zip.sha256",
+    "delivery_receipt": ".cache/handoff/20260913/DELIVERY.json",
+    "manifest_entry": "HANDOFF-MANIFEST.json",
+    "integrity_note": "最终 ZIP 哈希和封包验证位于包外回执/校验文件，避免内含报告递归引用自身归档哈希。"
+  },
+  "prepared_at_utc": "2026-09-13T06:33:19Z",
+  "skill_snapshot": {
+    "version": "0.1.0",
+    "files": 43,
+    "manifest": ".cache/handoff/20260913/skill-copy-manifest.json",
+    "copied_without_changes": true
+  },
+  "omitted_from_archive": [
+    ".git",
+    "node_modules",
+    "dist",
+    "dist-test",
+    "src-tauri/target",
+    "src-tauri/gen",
+    "CLI login/config credentials",
+    "test temporary databases"
+  ],
+  "permission_note": "低风险委托来自用户本次交接目标；合并与发布保留此前人工确认，不把未回答的自动合并偏好当成授权。"
+}

@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "source_baseline": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "milestone": "M1",
+  "status": "verified",
+  "executor": {
+    "role": "code_writer",
+    "provider": "claude_code_cli"
+  },
+  "policy_ref": "tasks/EXECUTION-POLICY.json",
+  "risk": {
+    "level": "low_candidate",
+    "manager_assessment_required": true
+  },
+  "budget": {
+    "unattended": true,
+    "max_repair_attempts": 3,
+    "timeout_seconds": 5400,
+    "max_cost": null,
+    "financial_cap_enabled": false,
+    "policy_ref": "tasks/EXECUTION-POLICY.json"
+  },
+  "authorization": {
+    "status": "manager_authorizable",
+    "source": "DEC-010 / DEC-011，管理 agent 核对 Ready 条件后授权，不需要逐项询问用户。"
+  },
+  "blockers": [],
+  "blockers_resolution": {
+    "resolved_at_utc": "2026-09-13T14:04:57Z",
+    "resolved_by": "接手管理 agent（BATCH-001 审查收尾）",
+    "what_was_stale": "原 blockers『接手管理 agent 尚未核对工作区/运行基准、依赖和必要 Note』在核对完成后未清除，与本任务已 verified 的状态矛盾（独立审查 R-03）。",
+    "evidence": [
+      "docs/runs/BATCH-001-takeover.md（工作区/运行基准核对记录）",
+      "本文件 ready_check.allowlist_verified_against_reality（38 文件允许清单已与实测一致）",
+      "本文件 ready_check.note_review = manager_approved_low_risk（Note 已审）",
+      "docs/runs/BATCH-001-independent-review-20260913.md（独立审查确认核对已完成）"
+    ]
+  },
+  "required_reading": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/HANDOFF.md",
+    "docs/CLAUDE-WORKER.md",
+    "tasks/EXECUTION-POLICY.json",
+    "docs/BASELINE.md"
+  ],
+  "stop_conditions": [
+    "需要扩大范围或改变业务规则",
+    "触及高风险/受保护内容",
+    "权限或环境不足",
+    "预算耗尽"
+  ],
+  "evidence": [],
+  "id": "TASK-006",
+  "kind": "format_only",
+  "title": "以独立任务处理 Rust 格式差异",
+  "objective": "使用项目既定 rustfmt 统一基线识别的 38 个文件，只改变格式，不混入业务或测试语义修改。",
+  "non_goals": [
+    "不修业务逻辑",
+    "不改测试预期或忽略标记",
+    "不改迁移 SQL 内容、依赖、配置或 CI",
+    "不执行真实服务测试"
+  ],
+  "requirement_refs": [
+    "ISSUE-013"
+  ],
+  "dependencies": [
+    "TASK-002"
+  ],
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/build.rs",
+      "src-tauri/src/ai.rs",
+      "src-tauri/src/commands.rs",
+      "src-tauri/src/config_sync.rs",
+      "src-tauri/src/credentials.rs",
+      "src-tauri/src/db.rs",
+      "src-tauri/src/error.rs",
+      "src-tauri/src/extraction.rs",
+      "src-tauri/src/fever.rs",
+      "src-tauri/src/github_auth.rs",
+      "src-tauri/src/greader.rs",
+      "src-tauri/src/ingestion.rs",
+      "src-tauri/src/lib.rs",
+      "src-tauri/src/media.rs",
+      "src-tauri/src/opml.rs",
+      "src-tauri/src/sanitize.rs",
+      "src-tauri/src/scheduler.rs",
+      "src-tauri/src/sync.rs",
+      "src-tauri/src/main.rs",
+      "src-tauri/tests/account_lifecycle_e2e.rs",
+      "src-tauri/tests/mock_greader.rs",
+      "src-tauri/tests/ai_e2e.rs",
+      "src-tauri/tests/config_sync_e2e.rs",
+      "src-tauri/tests/dedup_sync_e2e.rs",
+      "src-tauri/tests/dual_client_e2e.rs",
+      "src-tauri/tests/feed_edit_e2e.rs",
+      "src-tauri/tests/fever_live_e2e.rs",
+      "src-tauri/tests/fever_sync_live_e2e.rs",
+      "src-tauri/tests/github_auth_e2e.rs",
+      "src-tauri/tests/greader_live_e2e.rs",
+      "src-tauri/tests/ingestion_e2e.rs",
+      "src-tauri/tests/migration_test.rs",
+      "src-tauri/tests/regression_e2e.rs",
+      "src-tauri/tests/scheduler_e2e.rs",
+      "src-tauri/tests/staged_refresh_e2e.rs",
+      "src-tauri/tests/sync_content_e2e.rs",
+      "src-tauri/tests/sync_e2e.rs",
+      "src-tauri/tests/sync_phases_e2e.rs"
+    ],
+    "protected_paths": [
+      "src/**",
+      "tools/**",
+      "src-tauri/Cargo.toml",
+      "src-tauri/Cargo.lock",
+      "src-tauri/tauri.conf.json",
+      "package.json",
+      "package-lock.json",
+      ".github/**",
+      "tasks/**",
+      "docs/**",
+      "AGENTS.md",
+      "CLAUDE.md",
+      ".agents/**",
+      ".git/**"
+    ],
+    "generated_artifacts": [
+      "src-tauri/target/**",
+      "src-tauri/gen/schemas/**",
+      ".cache/runs/**"
+    ],
+    "network_and_data": "仅本地格式工具及已批准测试临时数据"
+  },
+  "note_requirement": {
+    "required": false,
+    "reason": "纯格式变更，属于技能明确的 not applicable 范围"
+  },
+  "mechanical_actions": [
+    {
+      "id": "ACTION-RUSTFMT-ALL",
+      "requested_by": "claude",
+      "executed_by": "manager",
+      "cwd": ".",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all"
+      ],
+      "condition": "管理 agent 先确认输入和完整允许文件清单，保留前后差异；不接收任意新增命令。"
+    }
+  ],
+  "steps": [
+    "核对格式差异对应文件和当前基准",
+    "Claude 请求已定义格式化动作，管理 agent 执行机械命令并提供差异",
+    "Claude 核对并提交结果，管理 agent 独立审查与验证",
+    "格式差异单独交付，不与其他业务修改混合"
+  ],
+  "acceptance_criteria": [
+    "cargo fmt --check 返回 0",
+    "变更仅由指定格式化操作产生，未改行为/断言/迁移内容",
+    "无允许清单外修改",
+    "Clippy 和既定 Rust 普通/mock 测试通过"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+      "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
+      "cargo test --manifest-path src-tauri/Cargo.toml --locked",
+      "cargo test --manifest-path src-tauri/Cargo.toml --locked --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --ignored"
+    ],
+    "expected_baseline": "普通 81 项 + 指定 mock 14 项；当前源代码未变时用于核对，不用固定数量替代测试内容审查。"
+  },
+  "outputs": [
+    "38 个允许文件内的格式差异",
+    "管理 agent 保存的命令与验证/审查记录"
+  ],
+  "ready_check": {
+    "assessed_by": "manager",
+    "assessed_at_utc": "2026-09-13T07:50:00Z",
+    "status": "dispatched_verified_closed",
+    "status_correction": {
+      "corrected_at_utc": "2026-09-13T14:04:57Z",
+      "previous_value": "ready_pending_dispatch",
+      "reason": "该字段在机械操作执行、验证与审查完成后未同步，与 status=verified 矛盾（独立审查 R-03）。现值表示：已派发执行、已验证、已审查并关闭；历史值保留于此供追溯。"
+    },
+    "risk_level": "low",
+    "risk_reasons": [
+      "纯格式变更，无行为/断言/迁移语义改动",
+      "由任务预先定义的机械操作 ACTION-RUSTFMT-ALL 产生，不接受任意新增命令",
+      "EXECUTION-POLICY 对纯格式操作列为 allowed_low_risk"
+    ],
+    "allowlist_verified_against_reality": {
+      "verified_at_utc": "2026-09-13T07:16:45Z",
+      "method": "管理 agent 亲自运行 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check 并抽取 Diff 行",
+      "actual_affected_files": 38,
+      "allowlist_entries": 38,
+      "set_equality": "EXACT_MATCH — 实测文件集合与 allowed_paths 逐项一致，无清单外文件",
+      "diff_sections_this_run": 528,
+      "diff_sections_original_report": 532,
+      "diff_section_variance_note": "同一文件集合、仅分节计数差 4；该计数取决于 rustfmt 是否把相邻改动合并为同一分节，不影响文件清单与任务范围",
+      "evidence": [
+        ".cache/runs/BATCH-001/rustfmt-recheck.log",
+        ".cache/runs/BATCH-001/rustfmt-files.txt",
+        ".cache/runs/BATCH-001/task-006-input-hashes.txt"
+      ]
+    },
+    "input_snapshot_recheck_by_manager": {
+      "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+      "files_sha256": "见 .cache/runs/BATCH-001/task-006-input-hashes.txt（38 项逐文件 SHA-256）",
+      "recheck_record": "docs/runs/BATCH-001-takeover.md"
+    },
+    "note": ".agents/notes/proposed/process/2026-09-13-rust-format-unification.md",
+    "note_review": "manager_approved_low_risk",
+    "baseline_evidence": {
+      "cargo_fmt_check": "FAIL（38 文件）— 该检查不在现有 CI 中，属新增测量检查的失败，不是 CI 已红",
+      "clippy": "PASS（管理 agent 接手后独立复跑）",
+      "cargo_test": "PASS 81 passed / 0 failed / 23 ignored（管理 agent 接手后独立复跑）"
+    },
+    "mechanical_action_authorized": {
+      "id": "ACTION-RUSTFMT-ALL",
+      "executed_by": "manager",
+      "command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all",
+      "cwd": ".",
+      "preconditions_checked": [
+        "38 文件允许清单已与实测集合逐项核对一致",
+        "格式化前 38 文件 SHA-256 已保存",
+        "格式化后须保存完整 diff 并确认仅含格式差异"
+      ]
+    },
+    "verification_plan_frozen": true,
+    "verification_plan": {
+      "owner": "manager",
+      "commands": [
+        "git status --porcelain",
+        "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+        "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
+        "cargo test --manifest-path src-tauri/Cargo.toml --locked",
+        "cargo test --manifest-path src-tauri/Cargo.toml --locked --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --ignored"
+      ],
+      "require_fmt_check_exit_zero": true,
+      "require_only_allowlist_files_changed": true,
+      "require_test_counts_match_baseline": "89 项通过口径（普通 81 + 指定 mock 14，其中 dual_client 4 项已在普通测试中计入）；ignored 数须仍为 23，除非有明确解释",
+      "require_no_ignore_marker_change": "diff 中不得新增/删除 #[ignore]",
+      "require_no_semantic_diff": "非空白差异须抽样核对为 rustfmt 重排，不改变语义"
+    }
+  },
+  "mechanical_action_execution": {
+    "id": "ACTION-RUSTFMT-ALL",
+    "executed_by": "manager",
+    "executed_at_utc": "2026-09-13T08:30:00Z",
+    "command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all",
+    "cwd": ".",
+    "exit_code": 0,
+    "worker_was_not_used": "本任务是纯格式变更，Claude 未参与代码编辑；格式化由管理 agent 执行任务预定义的机械操作。这是任务 JSON 中 ACTION-RUSTFMT-ALL 的原设计（requested_by: claude, executed_by: manager），没有新增任何未定义命令。",
+    "note": "因 CLI 环境阻塞解除后本批改为直接执行预定义机械动作，未对 TASK-006 派发 worker，从而未消耗模型调用与费用；该选择不降低任何验收标准。"
+  },
+  "manager_review": {
+    "allowlist_reality_check": {
+      "result": "PASS",
+      "allowlist_entries": 38,
+      "actually_changed_rust_files": 38,
+      "extra_files_outside_allowlist": "NONE",
+      "allowlist_entries_unchanged": "NONE",
+      "method": "git status --porcelain 与 .cache/runs/BATCH-001/rustfmt-files.txt 逐项集合比对"
+    },
+    "scope_check": {
+      "result": "PASS",
+      "detail": "本次格式化只改动 src-tauri/** 的 38 个 .rs 文件。工作区另有 .github/workflows/ci.yml、tools/frontend-regression.mjs（TASK-005/004 产出）与既有的 README.md（非本批产生），均非本次格式化所致。",
+      "protected_files_unchanged": "src-tauri/Cargo.toml、src-tauri/Cargo.lock、package.json、package-lock.json、.github/** 的哈希与派发前一致"
+    },
+    "semantic_integrity_analysis": {
+      "result": "PASS",
+      "method": "对 38 个文件逐一比较 HEAD 与格式化后的内容，分级归一化后做多重集比对",
+      "evidence": [
+        {
+          "check": "去空白后逐字符比较",
+          "result": "36 文件不一致",
+          "explanation": "rustfmt 会增删尾随逗号并重排换行，故该粒度必然不一致；不足以判定语义变化，需更细粒度"
+        },
+        {
+          "check": "去空白 + 去逗号后逐字符比较",
+          "result": "16 文件不一致",
+          "explanation": "rustfmt 在超出行宽时会把闭包体包成块（如 `|r| r.get::<_, i64>(0)` → `|r| { r.get::<_, i64>(0) }`），属纯风格换行"
+        },
+        {
+          "check": "标识符【序列】比较",
+          "result": "3 文件不一致（credentials.rs、fever.rs、lib.rs）",
+          "explanation": "均为 use 声明的**重排序**（rustfmt 按字母序排列），非增删"
+        },
+        {
+          "check": "标识符【多重集】排序后比较",
+          "result": "PASS — 全部 38 文件完全一致",
+          "explanation": "无任何标识符被新增或删除；差异仅为顺序与换行，确认无语义改动"
+        }
+      ],
+      "structural_markers": {
+        "ignore_attributes_head": 23,
+        "ignore_attributes_after": 23,
+        "cfg_attributes_head": 36,
+        "cfg_attributes_after": 36,
+        "result": "PASS — 测试忽略标记与条件编译属性数量均未变"
+      },
+      "conclusion": "PASS — 差异确认为纯格式（换行、缩进、尾随逗号、use 排序、超宽行块包裹），未改变任何标识符、属性或测试标记"
+    },
+    "semantic_integrity_method_correction": {
+      "corrected_at_utc": "2026-09-13T14:04:57Z",
+      "source": "独立审查 R-05（docs/runs/BATCH-001-independent-review-20260913.md）",
+      "what_was_insufficient": "上述『标识符多重集相同、忽略标记数量相同、测试数量相同』不能排除运算符、字面量、控制流或调用顺序变化（例如 a < b 与 a > b 的标识符完全相同），不足以单独充当纯格式任务的语义门禁。",
+      "operative_evidence": "独立审查补做了确定性格式化复现：将 TASK-002 输入快照的原始 Rust 文件用本机同一 rustfmt 运行原命令，与当前工作区比较，39/39 文件逐字节一致（含本批 38 个改动文件）。证据：.cache/reviews/BATCH-001-20260913/rustfmt-equivalence.json、fmt-reproduction/。",
+      "verdict_after_correction": "维持 PASS — 依据由『标识符多重集比对』更正为『可重现的确定性格式化结果』；原分析方法保留于此供追溯，今后纯格式任务不得再用标识符排序充当语义门禁。"
+    },
+    "independent_verification": [
+      {"command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check", "exit_code": 0, "result": "PASS — 由 FAIL（38 文件）转为通过", "log": ".cache/runs/BATCH-001/TASK-006/attempt-1/verify-fmt.log"},
+      {"command": "cargo clippy --locked --all-targets -- -D warnings", "exit_code": 0, "result": "PASS", "log": ".cache/runs/BATCH-001/TASK-006/attempt-1/verify-clippy.log"},
+      {"command": "cargo test --locked", "exit_code": 0, "result": "PASS — 81 passed / 0 failed / 23 ignored（与接手基线完全一致）", "log": ".cache/runs/BATCH-001/TASK-006/attempt-1/verify-test.log"},
+      {"command": "cargo test --locked --test ... -- --ignored", "exit_code": 0, "result": "PASS — 14 passed / 0 failed（与 TASK-002 基线一致）", "log": ".cache/runs/BATCH-001/TASK-006/attempt-1/verify-mock.log"},
+      {"command": "git diff --check", "exit_code": 0, "result": "PASS — 无空白错误"}
+    ],
+    "acceptance_criteria_verdict": [
+      "PASS — cargo fmt --check 返回 0",
+      "PASS — 变更仅由 ACTION-RUSTFMT-ALL 产生，未改行为/断言/迁移内容（标识符多重集全等 + 测试计数一致）",
+      "PASS — 无允许清单外修改（38/38 精确匹配）",
+      "PASS — Clippy 通过；既定 Rust 普通测试 81 项与指定 mock 14 项均通过"
+    ],
+    "independent_review_context": true,
+    "conclusion": "verified — 由管理 agent 执行机械操作并独立完成格式、语义、范围与测试四类验证",
+    "verified_candidate_hashes_file": ".cache/runs/BATCH-001/TASK-006/attempt-1/post-format-hashes.txt",
+    "verified_at_utc": "2026-09-13T08:45:00Z"
+  },
+  "budget_consumed": {
+    "repair_rounds": 0,
+    "dispatch_attempts": 0,
+    "model_invocations": 0,
+    "estimated_cost_usd": 0,
+    "wall_minutes": 15,
+    "note": "未派发 worker；格式化是任务预定义的机械操作，由管理 agent 执行。未消耗模型调用与费用。"
+  },
+  "diff_size_record": {
+    "files_changed": 38,
+    "insertions": 2751,
+    "deletions": 872,
+    "warning": "此 diff 体量大，后续审查应以 .cache/runs/BATCH-001/TASK-006/attempt-1/post-format-hashes.txt 与本次语义分析结论为依据，不应声称逐行人工审查。"
+  },
+  "merge_status": "NOT_MERGED — verified 不等于已合并或发布"
+}

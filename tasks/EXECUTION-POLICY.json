@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "policy_id": "POLICY-MANAGER-CLAUDE-001",
+  "status": "active_for_next_manager_session",
+  "updated_on": "2026-09-13",
+  "authority": {
+    "source": "用户要求由管理 agent 按文档指挥 Claude 编码、运行基础验收，并仅在高风险问题时审批；运行预算已明确。",
+    "decisions": [
+      "DEC-010",
+      "DEC-011"
+    ],
+    "merge_release_source": "沿用 DEC-002 / DEC-005 的人工确认，未获得自动合并或发布授权。"
+  },
+  "roles": {
+    "manager": [
+      "planning",
+      "risk_assessment",
+      "low_risk_note_review",
+      "dispatch",
+      "verification",
+      "code_review",
+      "basic_acceptance",
+      "task_state",
+      "authorized_mechanical_actions"
+    ],
+    "code_writer": "claude_code_cli"
+  },
+  "execution": {
+    "mode": "manager_driven_serial_cli",
+    "max_concurrent_workers": 1,
+    "max_tasks_per_batch": 3,
+    "max_repair_rounds_per_task": 3,
+    "max_task_wall_minutes": 90,
+    "financial_cap_enabled": false,
+    "max_cost_usd": null,
+    "cost_cap_source": "用户明确：不需要设置费用上限",
+    "model_override": null,
+    "batch_reset_requires_owner": true,
+    "model_selection": "核对既有用户选择；restricted 忽略的设置须以运行级参数传入已选值；未配置时记录 CLI 正常默认，不擅自升级或切换。",
+    "effort_selection": "thinking effort 统一为 max（DEC-012，2026-09-13 用户指令『思考强度从 High 调整为 Max』）；派发一律附加 --effort max，见 docs/CLAUDE-WORKER.md 参数方案。"
+  },
+  "low_risk_policy": "docs/HANDOFF.md",
+  "allowed_low_risk": [
+    "已确认范围内的局部实现与修复",
+    "不改行为的清理或纯格式操作",
+    "补充有效测试",
+    "按既有锁文件准备依赖",
+    "只增加既定检查且不扩大权限/降低门禁的 CI 变更"
+  ],
+  "requires_owner": [
+    "未决产品行为或范围变更",
+    "破坏性架构/数据库/外部契约变更",
+    "真实数据/真实服务账号操作",
+    "凭据存储/认证/安全权限边界变更",
+    "门禁降级与授权/预算变更",
+    "未经批准的新依赖或大版本升级",
+    "新的外部目的地/基础设施",
+    "合并",
+    "发布及发布标签",
+    "超出预算"
+  ],
+  "protected_from_worker": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "tasks/**",
+    "docs/PRODUCT.md",
+    "docs/FEATURES.md",
+    "docs/HANDOFF.md",
+    "docs/CLAUDE-WORKER.md",
+    "docs/PROCESS.md",
+    "docs/EXECUTION-CONTRACT.md",
+    "docs/contracts/**",
+    "docs/prompts/**",
+    ".agents/**",
+    ".git/**",
+    ".claude/**",
+    ".codex/**",
+    ".github/workflows/release.yml"
+  ],
+  "worker_tools": [
+    "Read",
+    "Edit",
+    "Write",
+    "Glob",
+    "Grep"
+  ],
+  "worker_may_commit_push_merge_release": false,
+  "manager_may_approve_low_risk_notes": true,
+  "merge_requires_owner_confirmation": true,
+  "release_requires_separate_owner_confirmation": true,
+  "forbidden_shortcuts": [
+    "用 CLI 退出 0 代替验收",
+    "信任 worker 自报文件清单而不检查差异",
+    "跳过或改弱断言让门禁变绿",
+    "使用全权限绕过解决权限拒绝",
+    "重建任务/批次来重置预算",
+    "直接执行 worker 提议但不在任务许可内的 shell 命令"
+  ],
+  "validation": {
+    "owner": "manager",
+    "gate_plan_must_be_frozen_before_dispatch": true,
+    "bind_to_candidate_hash": true,
+    "unrelated_unchanged_baseline_evidence_may_be_reused": true,
+    "known_failures_must_remain_visible": true,
+    "product_code_needs_independent_review": true
+  },
+  "runtime": {
+    "controller_program_implemented": false,
+    "cli_adapter_program_implemented": false,
+    "scheduled_background_execution": false,
+    "controller_end_to_end_delegation_verified": false,
+    "field_semantics_note": "R-03 更正（2026-09-13T14:04:57Z）：原字段名 end_to_end_delegation_verified 指控制器程序的自动委派，未实现故为 false；管理 agent 人工驱动的委派闭环已另行验证（PROJECT.delegation_loop_verified=true）。仅更名，未改值。"
+  },
+  "startup": {
+    "required_capabilities": [
+      "file_read_write",
+      "terminal_execution",
+      "process_wait_and_cancel",
+      "git_or_equivalent_snapshot"
+    ],
+    "first_batch": "tasks/batches/BATCH-001.json"
+  },
+  "decision_note": ".agents/notes/proposed/process/2026-09-13-manager-claude-handoff.md"
+}
