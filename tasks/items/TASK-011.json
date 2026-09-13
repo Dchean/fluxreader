@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "id": "TASK-011",
+  "batch_id": "BATCH-003",
+  "kind": "analysis_readonly",
+  "milestone": "M1",
+  "status": "verified",
+  "title": "OPT-004 设计：持久化配置字段清单与同步建议（只读分析）",
+  "objective": "盘点全部持久化的订阅数据、客户端设置、连接配置与凭据字段，按 DEC-008/009 已确认的 OPT-004 边界（仅同步订阅源、客户端设置与非敏感连接配置；排除 API Key、密码等凭据）给出逐字段同步建议，作为后续实现任务的字段清单依据。本任务只读不写。",
+  "non_goals": [
+    "不修改任何文件",
+    "不实现同步逻辑",
+    "不改变 DEC-008/009 已确认范围"
+  ],
+  "requirement_refs": [
+    "docs/PRODUCT.md DEC-008/DEC-009",
+    "docs/PROCESS.md OPT-004 段",
+    "docs/FEATURES.md OPT-004"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "docs/FEATURES.md"
+  ],
+  "analysis_targets": [
+    "src-tauri/src/config_sync.rs",
+    "src-tauri/src/credentials.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/commands.rs（设置相关命令）",
+    "src/ 前端设置模型与存储",
+    "docs/DATA-MODEL.md"
+  ],
+  "source_baseline": "6550a223 + 本批合并候选（工作区当前内容）",
+  "authorization": {
+    "source": "用户 AskUserQuestion 批准 BATCH-003（OPT-004 设计）",
+    "risk_level": "low"
+  },
+  "blockers": [],
+  "scope": {
+    "allowed_paths": [],
+    "protected_paths": "全部文件只读",
+    "tools": "Read, Glob, Grep（无 Edit/Write）",
+    "network_and_data": "无网络、无真实数据"
+  },
+  "steps": [
+    "通读配置同步现状（config_sync.rs）与凭据存储（credentials.rs）",
+    "盘点 db.rs / 前端 store 中全部持久化字段",
+    "逐字段给出 kind / storage / sensitive / sync_recommendation / evidence"
+  ],
+  "acceptance_criteria": [
+    "字段清单覆盖订阅、客户端设置、连接配置、凭据四类，无遗漏的持久化配置键",
+    "每个字段有代码证据（文件:行）",
+    "凭据类全部 sync_recommendation=exclude",
+    "结果为结构化 JSON，管理 agent 据此撰写 proposed/feature Note 并审查"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "管理 agent 抽查证据行号与实际代码一致性",
+      "对照 FEATURES.md OPT-004 与 DEC-008/009 边界复查分类"
+    ]
+  },
+  "stop_conditions": [
+    "无法定位某个存储位置时在 evidence 标注 undecided 并继续"
+  ],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": 90
+  },
+  "outputs": [
+    "结构化字段清单（运行 schema：.cache/runs/BATCH-003/TASK-011/schema.run.json）",
+    "管理 agent 审查记录"
+  ],
+  "evidence": [],
+  "note_requirement": "管理 agent 依据清单撰写 .agents/notes/proposed/feature/ OPT-004 字段清单 Note（含 Alternatives considered），实现任务必须引用",
+  "dispatch_record": {
+    "run_id": "TASK-011-20260913T171500Z",
+    "attempt_1": "exit 1（401）——管理 agent 失误：派发前 run-settings.json 已按 TASK-009 脱敏，令牌为占位符；教训已记录，批内派发阶段保持运行设置可用、批末统一脱敏",
+    "attempt_2_exit_code": 0,
+    "duration_seconds": "约 300s",
+    "num_turns": 20,
+    "cost_usd_estimated": 1.286068,
+    "effort": "max（DEC-012 首个分析任务）",
+    "permission_denials": "none",
+    "evidence_dir": ".cache/runs/BATCH-003/TASK-011-attempt2/"
+  },
+  "verification_results": {
+    "verified_at_utc": "2026-09-13T17:50:00Z",
+    "verified_by": "manager",
+    "fields_total": 64,
+    "classification": {
+      "sync": 38,
+      "exclude": 24,
+      "undecided": 2
+    },
+    "credentials_all_excluded": true,
+    "evidence_spot_check": "4/4 行号与真实代码一致（config_sync_credentials / greader_password / sync_protocol / markReadOnScrollBottom）",
+    "scope_check": "只读任务：工作区无任何文件被修改（git status 仅 BATCH-003 定义文件与 Note）",
+    "outputs": [
+      "docs/runs/OPT-004-field-inventory-20260913.json（存档）",
+      ".agents/notes/proposed/feature/2026-09-13-opt004-config-sync-field-inventory.md（管理 agent 撰写并审查）"
+    ]
+  }
+}

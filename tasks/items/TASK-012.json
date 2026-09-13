@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "id": "TASK-012",
+  "batch_id": "BATCH-003",
+  "kind": "smoke_acceptance_manager_executed",
+  "milestone": "M1",
+  "status": "verified",
+  "title": "桌面应用冒烟验收（首次真实 UI 验证）",
+  "objective": "在合并后的 main 上构建 release 应用并真实启动，验证：进程存活、主窗口渲染（订阅源/文章列表/工具栏可见）、正常退出无崩溃。这是项目首次真实桌面 UI 验证，收窄 ISSUE-003 的未知面（不是完整 UI E2E）。",
+  "non_goals": [
+    "不接入真实同步服务或真实账号",
+    "不做完整 UI E2E 或安装包验收",
+    "不为发现的问题当场修复（只记录）"
+  ],
+  "requirement_refs": [
+    "docs/ISSUES.md ISSUE-003",
+    "docs/BASELINE.md"
+  ],
+  "required_reading": [
+    "docs/TEST-PLAN.md"
+  ],
+  "source_baseline": "main@07369d6（合并后）",
+  "dependencies": [
+    "cargo build --release 完成"
+  ],
+  "authorization": {
+    "source": "用户 AskUserQuestion 批准 BATCH-003（桌面应用冒烟验收）；PROJECT.permissions.application_baseline_execution=true",
+    "safety_precheck": "启动前确认本机无既有 FluxReader 应用数据目录（已确认：$APPDATA/$LOCALAPPDATA 均无 flux 相关目录）——全新启动不会携带真实账号，自动同步无可同步凭据，不存在触碰真实服务的路径"
+  },
+  "blockers": [],
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/target/**（构建产物）"
+    ],
+    "protected_paths": "不修改任何源码与配置",
+    "steps": [
+      "cargo build --release --locked 成功，记录 app.exe SHA-256",
+      "启动 app.exe，等待渲染",
+      "截屏验证主窗口（列表/工具栏/空态）",
+      "记录进程生命周期；以 WM_CLOSE 优雅退出，确认进程结束且无崩溃弹窗",
+      "记录启动期间新建的应用数据目录位置（仅路径，不外发内容）"
+    ],
+    "network_and_data": "本地启动；应用可能做本地 SQLite 初始化；无真实服务调用（无凭据可同步）"
+  },
+  "acceptance_criteria": [
+    "release 构建成功",
+    "应用启动后主窗口渲染正常（截屏为证）",
+    "优雅退出，进程正常结束"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "cargo build --release --locked",
+      "启动与进程检查",
+      "截屏"
+    ],
+    "screenshot_evidence_required": true
+  },
+  "stop_conditions": [
+    "窗口无法渲染或崩溃：记录现象与日志路径，不扩大排查"
+  ],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": 90
+  },
+  "outputs": [
+    "冒烟验收记录（含截屏证据路径与进程生命周期）"
+  ],
+  "evidence": [],
+  "note_requirement": "不需要 Note（验收活动，非代码/架构变更）；发现的问题记入 ISSUES",
+  "execution_record": {
+    "executed_by": "manager（基础验收职责，未派发 Claude）",
+    "exe_sha256": "0C7F6725B0C5E4C0C48523C13A2E5655331498D4B977366BBCDA958DB70D3841",
+    "exe_built_at_utc": "2026-09-13T15:45:39Z（tauri build，含 TASK-010 修复与合并后的全部 main 内容）",
+    "installer_artifacts": [
+      "src-tauri/target/release/bundle/nsis/FluxReader_0.12.0_x64-setup.exe",
+      "src-tauri/target/release/bundle/msi/FluxReader_0.12.0_x64_en-US.msi"
+    ]
+  },
+  "verification_results": {
+    "verified_at_utc": "2026-09-13T15:49:40Z",
+    "build_path_finding": {
+      "what": "直接 cargo build --release 产出的外壳会加载 devUrl（localhost:5173），窗口显示 ERR_CONNECTION_REFUSED——前端资产未被内嵌。",
+      "correct_path": "npm run tauri build（beforeBuildCommand 自动构建前端并正确内嵌资产），exit 0，产出 NSIS + MSI 安装包。",
+      "classification": "Tauri 构建路径的既有事实，不是产品缺陷；已写入本记录供后续构建任务遵循。首次发现于本冒烟测试。"
+    },
+    "smoke_result": {
+      "launch": "PID 42348，进程存活、窗口 Responding=True",
+      "render": "主窗口完整渲染：侧边栏（Logo/全局搜索/视图四项/内容布局五项/订阅源/本地模式·直连抓取绿色状态）、文章列表（未读/最新/全部已读筛选、暂无匹配内容空态）、右侧阅读区（未选择文章空态）、深色主题正常、无错误页面。截屏证据：computer-use get_app_state 帧（state_id=s-2，窗口 398182）。",
+      "close": "点击关闭按钮 → 进程仍存活（符合 app_settings.closeToTray 预期行为：隐藏到托盘而非退出）→ Stop-Process 结束，无崩溃弹窗。",
+      "data_init": "%APPDATA%/com.fluxreader.app/fluxreader.db（+shm/wal）由本次启动全新创建——本地 SQLite 初始化正常，无真实账号、无真实服务调用。"
+    },
+    "scope_limits": "本验收不覆盖：订阅真实抓取流程、AI 翻译真实调用、安装包安装流程；仍属 ISSUE-003 的部分收窄而非完整 UI E2E。"
+  }
+}
