@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "TASK-027",
+  "batch_id": "BATCH-008",
+  "kind": "refactor",
+  "milestone": "M2",
+  "status": "ready",
+  "title": "OPT-004 加固：merge_app_settings 子字段白名单",
+  "objective": "把 config_sync.rs 的 merge_app_settings 从『排除 autoStart/closePromptShown 的黑名单』改为字段清单 21 项 app_settings 子字段白名单（清单见 docs/runs/OPT-004-field-inventory-20260913.json 中 kind=client_setting 且 sync_recommendation=sync 的 app_settings 子字段）：远端载荷中不在白名单内的子键一律忽略，不进入本地 app_settings。上传侧 filter_app_settings 保持不变。",
+  "non_goals": [
+    "不改任何行为/返回结构",
+    "不引入新依赖",
+    "不缩减 FEATURES 保留能力"
+  ],
+  "requirement_refs": [
+    "docs/runs/M2-module-disposition-20260913.md",
+    ".agents/notes/proposed/architecture/2026-09-13-m2-module-disposition.md"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "CLAUDE.md"
+  ],
+  "source_baseline": "main（逐任务前移）",
+  "dependencies": [],
+  "blockers": [],
+  "authorization": {
+    "source": "DEC-013 + 用户『后续所有任务一起跑通』",
+    "risk_level": "medium——结构重组，测试回归网覆盖"
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/config_sync.rs",
+      "src-tauri/tests/config_sync_e2e.rs"
+    ],
+    "protected_paths": "按 EXECUTION-POLICY",
+    "change_definition": "纯移动/分组重组",
+    "generated_artifacts": [],
+    "network_and_data": "无"
+  },
+  "steps": [
+    "通读现状",
+    "结构重组（严禁 Write 整文件覆盖既有实现文件；新文件可用 Write）",
+    "全量验证"
+  ],
+  "acceptance_criteria": [
+    "全部门禁通过（Rust: clippy/fmt/cargo test；前端: tsc/8-8/build/lint）",
+    "新增测试：远端 app_settings 含未知子键（如 maliciousKey）时导入后本地 app_settings 不包含该键；既有 96+ 测试全绿"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "各语言门禁全量"
+    ]
+  },
+  "stop_conditions": [
+    "发现必须改变行为才能完成时返回 blocked"
+  ],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": null
+  },
+  "outputs": [
+    "重组后的文件结构"
+  ],
+  "evidence": [],
+  "note_requirement": "随 M2 整理序列统一处理"
+}
