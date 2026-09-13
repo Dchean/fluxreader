@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "id": "TASK-029",
+  "batch_id": "BATCH-008",
+  "kind": "bug_fix",
+  "milestone": "M2",
+  "status": "ready",
+  "title": "Fever 端点路径兼容（支持 /api/fever.php 风格）",
+  "objective": "fever.rs 硬编码 `{base}/fever/?api`，仅支持 /fever/ 路径的服务（Miniflux+插件实证通过）；FreshRSS 的 Fever 在 {base}/api/fever.php，当前配置无法到达（404）。改为：endpoint 以 .php 结尾时按 `{base}?api` 直用，否则维持 `{base}/fever/?api`。向后兼容。",
+  "non_goals": [
+    "不改认证算法",
+    "不改其他协议"
+  ],
+  "requirement_refs": [
+    "docs/ISSUES.md 新增 ISSUE-018",
+    "真实服务取证（ceaion.com /fever/ 404、/api/fever.php auth=1）"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "src-tauri/src/fever.rs"
+  ],
+  "source_baseline": "main（当前）",
+  "dependencies": [],
+  "blockers": [],
+  "authorization": {
+    "source": "DEC-013 + 用户指令",
+    "risk_level": "medium——认证路径"
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/fever.rs",
+      "src-tauri/tests/fever_live_e2e.rs",
+      "src-tauri/tests/fever_sync_live_e2e.rs"
+    ],
+    "protected_paths": "按 EXECUTION-POLICY",
+    "change_definition": "URL 构造分支 + 单元测试",
+    "generated_artifacts": [],
+    "network_and_data": "live 测试访问真实服务"
+  },
+  "steps": [
+    "实现 .php 结尾分支",
+    "单元测试",
+    "live 测试：FreshRSS（endpoint=https://rss.ceaion.com/api/fever.php）与 Miniflux（默认）"
+  ],
+  "acceptance_criteria": [
+    "单元测试覆盖两种端点构造",
+    "fever_live 3/3 与 fever_sync_live 1/1 对 FreshRSS（endpoint=https://rss.ceaion.com/api/fever.php）通过",
+    "Miniflux 默认端点仍全绿",
+    "全量门禁通过"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "cargo test 单元",
+      "live 双服务实测",
+      "全量门禁"
+    ]
+  },
+  "stop_conditions": [],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": null
+  },
+  "outputs": [
+    "Fever 路径兼容",
+    "FreshRSS Fever 全通"
+  ],
+  "evidence": [],
+  "note_requirement": "bug-fix Note"
+}

@@ -20,6 +20,8 @@
 | ISSUE-014 | lint / P2 | oxlint 返回 0，6 条警告：回归脚本 3 条未使用项、Reader 1 条 effect 依赖、Overlays 2 条 effect 内 setState | 产品代码 3 条已由 BATCH-003（TASK-010）按分析 Note 修复（lint 6→3）；剩余 3 条来自技能副本（目录约定原样复制，不在范围） | 产品部分已解决；技能副本部分按约定保留 |
 | ISSUE-015 | 工具环境 / P2 | 初次快照与 Vite 构建出现沙箱 EPERM；获准提升运行权限后成功 | 保留首次失败与重跑，区分环境限制和产品缺陷 | 本次执行已解决，记录保留 |
 | ISSUE-016 | 文档依赖 / P2 | 交接时已将现有技能 43 个文件复制至项目 .agents/skills，并核对与源副本的哈希 | 新 agent 可从项目读取；具体版本与复制记录见交接报告 | 已补齐，随交接包验证 |
+| ISSUE-017 | 协议兼容 / P1 | 真实服务测试（2026-09-13，test 账号）：greader.rs login 以 resp.json() 解析 ClientLogin，仅兼容响应 output=json 的服务（Miniflux/chean.top 实证 3/3 通过）；FreshRSS（ceaion.com）忽略 output=json 返回经典文本，3 项 live 测试全部失败（error decoding response body） | 修复方向：登录解析双格式兼容（JSON 失败回退 Auth= 文本行）| 已定位，修复任务 TASK-028 |
+| ISSUE-018 | 协议兼容 / P1 | fever.rs 硬编码 `{base}/fever/?api`；FreshRSS 的 Fever 在 {base}/api/fever.php（应用公式 md5(user:pass) 下 auth=1 实证可达），当前端点配置无法到达（404） | 修复方向：endpoint 以 .php 结尾时按 `{base}?api` 直用 | 已定位，修复任务 TASK-029 |
 
 ## OPT-004 后续实现核对
 
@@ -32,3 +34,18 @@
 静态怀疑与可复现缺陷分开。没有证据时不得写成确定 bug；已知缺陷不得仅通过改快照/断言变成“通过”。
 
 本次已记录格式失败和 lint 告警；95 项 Rust 测试与 8 项前端逻辑检查没有失败。这不代表不存在其他功能缺陷。后续已按用户交接目标授予管理 agent 低风险工作权限，具体边界见 HANDOFF / EXECUTION-POLICY；高风险、超限、合并和发布仍需用户确认。
+
+
+## 真实服务兼容性实测（2026-09-13，ISSUE-006/007 首轮）
+
+用户提供测试服务与账号（test/testtest）：Miniflux https://rss.chean.top、FreshRSS https://rss.ceaion.com。
+
+| 组合 | 结果 | 证据 |
+| --- | --- | --- |
+| Miniflux × Google Reader | **3/3 通过** | greader_live（登录+订阅、条目+正文、edit-tag 往返）|
+| Miniflux × Fever | **3/3 通过** | fever_live |
+| Miniflux × Fever 完整同步管线 | **1/1 通过** | fever_sync_live（推送+拉取+状态对账）|
+| FreshRSS × Google Reader | 0/3 失败（ISSUE-017） | 登录解析失败 |
+| FreshRSS × Fever | 0/3 失败（ISSUE-018） | /fever/ 404 |
+
+两账号已有订阅源，无需添加。待 TASK-028/029 修复后复测 FreshRSS 两组合。
