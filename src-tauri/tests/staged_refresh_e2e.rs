@@ -16,7 +16,9 @@ use tokio::sync::Mutex;
 /// 返回 (base_url, 命中计数)。
 async fn spawn_slow_feed_server(delay_ms: u64, hits: Arc<AtomicUsize>) -> String {
     use tokio::io::AsyncWriteExt;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
@@ -79,7 +81,18 @@ async fn staged_refresh_http_overlaps_under_concurrency() {
         let conn = db.lock().await;
         db::create_folder(&conn, "并发", "article").unwrap();
         for i in 0..4 {
-            db::insert_feed(&conn, &format!("{url}#{i}"), None, &format!("S{i}"), None, 1, "inherit", false, false).unwrap();
+            db::insert_feed(
+                &conn,
+                &format!("{url}#{i}"),
+                None,
+                &format!("S{i}"),
+                None,
+                1,
+                "inherit",
+                false,
+                false,
+            )
+            .unwrap();
         }
     }
 
@@ -118,14 +131,43 @@ async fn staged_refresh_304_keeps_conditional_headers() {
     let conn = db::open(&tmp).expect("open db");
     {
         db::create_folder(&conn, "Etag", "article").unwrap();
-        db::insert_feed(&conn, "http://127.0.0.1:9/x.xml", None, "E", None, 1, "inherit", false, false).unwrap();
-        db::set_feed_fetch_state(&conn, 1, false, None, Some("W/\"abc\""), Some("Wed, 21 Oct 2026 07:28:00 GMT")).unwrap();
+        db::insert_feed(
+            &conn,
+            "http://127.0.0.1:9/x.xml",
+            None,
+            "E",
+            None,
+            1,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        db::set_feed_fetch_state(
+            &conn,
+            1,
+            false,
+            None,
+            Some("W/\"abc\""),
+            Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+        )
+        .unwrap();
     }
 
-    let parsed = ingestion::ParsedFeed { title: None, site_url: None, icon: None, articles: Vec::new() };
+    let parsed = ingestion::ParsedFeed {
+        title: None,
+        site_url: None,
+        icon: None,
+        articles: Vec::new(),
+    };
     ingestion::apply_refresh_result(
-        &conn, 1, &ingestion::Fetched::NotModified, &parsed, false,
-        Some("W/\"abc\""), Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+        &conn,
+        1,
+        &ingestion::Fetched::NotModified,
+        &parsed,
+        false,
+        Some("W/\"abc\""),
+        Some("Wed, 21 Oct 2026 07:28:00 GMT"),
     )
     .unwrap();
 
@@ -136,8 +178,15 @@ async fn staged_refresh_304_keeps_conditional_headers() {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert_eq!(etag.as_deref(), Some("W/\"abc\""), "304 must keep existing etag");
-    assert!(last_modified.is_some(), "304 must keep existing last_modified");
+    assert_eq!(
+        etag.as_deref(),
+        Some("W/\"abc\""),
+        "304 must keep existing etag"
+    );
+    assert!(
+        last_modified.is_some(),
+        "304 must keep existing last_modified"
+    );
     assert_eq!(failed, 0, "304 is a success (clears failure state)");
 
     let _ = std::fs::remove_file(&tmp);
@@ -154,7 +203,18 @@ async fn staged_refresh_failure_marks_feed() {
     {
         let conn = db.lock().await;
         db::create_folder(&conn, "Fail", "article").unwrap();
-        db::insert_feed(&conn, "http://127.0.0.1:1/dead.xml", None, "D", None, 1, "inherit", false, false).unwrap();
+        db::insert_feed(
+            &conn,
+            "http://127.0.0.1:1/dead.xml",
+            None,
+            "D",
+            None,
+            1,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
     }
 
     let result = ingestion::refresh_feed_staged(&db, &client, 1, false).await;

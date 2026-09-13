@@ -31,13 +31,21 @@ fn migration_v1_to_v2_preserves_data() {
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         "#).unwrap();
         // 用户数据
-        conn.execute("INSERT INTO folders (name, layout) VALUES ('旧分类', 'article')", []).unwrap();
+        conn.execute(
+            "INSERT INTO folders (name, layout) VALUES ('旧分类', 'article')",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO feeds (feed_url, title, folder_id) VALUES ('https://old.example.com/rss', 'Old Feed', 1)", []).unwrap();
         conn.execute(
             "INSERT INTO articles (feed_id, guid, title, is_read, is_starred) VALUES (1, 'g1', 'Old Article', 1, 1)",
             [],
         ).unwrap();
-        conn.execute("INSERT INTO settings VALUES ('miniflux_endpoint', 'https://keep.example.com')", []).unwrap();
+        conn.execute(
+            "INSERT INTO settings VALUES ('miniflux_endpoint', 'https://keep.example.com')",
+            [],
+        )
+        .unwrap();
         conn.pragma_update(None, "user_version", 1).unwrap();
     }
 
@@ -46,20 +54,28 @@ fn migration_v1_to_v2_preserves_data() {
 
     // 数据完好
     let (fname, fcount): (String, i64) = conn
-        .query_row("SELECT name, COUNT(*) FROM folders", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row("SELECT name, COUNT(*) FROM folders", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .unwrap();
     assert_eq!(fname, "旧分类");
     assert_eq!(fcount, 1);
 
     let (ftitle, feedcount): (String, i64) = conn
-        .query_row("SELECT title, COUNT(*) FROM feeds", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .query_row("SELECT title, COUNT(*) FROM feeds", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .unwrap();
     assert_eq!(ftitle, "Old Feed");
     assert_eq!(feedcount, 1);
 
     let (atitle, read, starred): (String, bool, bool) = conn
         .query_row("SELECT title, is_read, is_starred FROM articles", [], |r| {
-            Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get::<_, i64>(2)? != 0))
+            Ok((
+                r.get(0)?,
+                r.get::<_, i64>(1)? != 0,
+                r.get::<_, i64>(2)? != 0,
+            ))
         })
         .unwrap();
     assert_eq!(atitle, "Old Article");
@@ -67,12 +83,20 @@ fn migration_v1_to_v2_preserves_data() {
 
     // 设置保留
     let ep: String = conn
-        .query_row("SELECT value FROM settings WHERE key = 'miniflux_endpoint'", [], |r| r.get(0))
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'miniflux_endpoint'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(ep, "https://keep.example.com");
 
     // v2 新结构可用
-    conn.execute("INSERT INTO sync_queue (article_id, action) VALUES (1, 'read')", []).unwrap();
+    conn.execute(
+        "INSERT INTO sync_queue (article_id, action) VALUES (1, 'read')",
+        [],
+    )
+    .unwrap();
     let queue = db::take_sync_queue(&conn).unwrap();
     assert_eq!(queue.len(), 1);
     assert_eq!(queue[0].action, "read");
@@ -80,12 +104,16 @@ fn migration_v1_to_v2_preserves_data() {
     // 新列可写
     db::set_article_remote_id(&conn, 1, 42).unwrap();
     let bound: i64 = conn
-        .query_row("SELECT remote_id FROM articles WHERE id = 1", [], |r| r.get(0))
+        .query_row("SELECT remote_id FROM articles WHERE id = 1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(bound, 42);
 
     // 版本号
-    let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    let v: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
     assert!(v >= 2, "user_version must be >= 2, got {v}");
 
     let _ = std::fs::remove_file(&tmp);
@@ -121,7 +149,8 @@ fn migration_v6_to_v7_backfills_precise_url_norm() {
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE deduped_urls (url TEXT PRIMARY KEY, kept_aid INTEGER NOT NULL, kept_at TEXT NOT NULL DEFAULT (datetime('now')));
         "#).unwrap();
-        conn.execute("INSERT INTO folders (name) VALUES ('Cat')", []).unwrap();
+        conn.execute("INSERT INTO folders (name) VALUES ('Cat')", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO feeds (feed_url, title, folder_id) VALUES ('https://example.com/rss', 'F', 1)",
             [],
@@ -147,17 +176,32 @@ fn migration_v6_to_v7_backfills_precise_url_norm() {
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
-    assert_eq!(n1, n2, "dressed URL and clean URL must normalize to the same key");
-    assert!(n1 == "http://example.com/story?id=9", "normalized form: got {n1}");
+    assert_eq!(
+        n1, n2,
+        "dressed URL and clean URL must normalize to the same key"
+    );
+    assert!(
+        n1 == "http://example.com/story?id=9",
+        "normalized form: got {n1}"
+    );
 
     // remote_dup_ids 列存在且默认空
     let dups: String = conn
-        .query_row("SELECT remote_dup_ids FROM articles WHERE guid='g1'", [], |r| r.get(0))
+        .query_row(
+            "SELECT remote_dup_ids FROM articles WHERE guid='g1'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(dups, "");
 
-    let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-    assert!(v >= 7, "v6 schema must migrate through v7 (url_norm), got {v}");
+    let v: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        v >= 7,
+        "v6 schema must migrate through v7 (url_norm), got {v}"
+    );
 
     let _ = std::fs::remove_file(&tmp);
     println!("=== MIGRATION v6→v7 PASS ===");

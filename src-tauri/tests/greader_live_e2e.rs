@@ -20,13 +20,19 @@ fn test_creds() -> (String, String, String) {
 async fn greader_login_and_subscriptions() {
     let (endpoint, username, password) = test_creds();
     let http = reqwest::Client::new();
-    let client = GReaderClient::login(&endpoint, &username, &password, http).await.unwrap();
+    let client = GReaderClient::login(&endpoint, &username, &password, http)
+        .await
+        .unwrap();
 
     let subs = client.subscriptions().await.unwrap();
     assert!(!subs.is_empty(), "测试账号应有订阅源");
     // 每个订阅应有 feed/数字 id
     for s in &subs {
-        assert!(greader::parse_feed_numeric_id(&s.id).is_some(), "订阅 id 应是 feed/数字：{}", s.id);
+        assert!(
+            greader::parse_feed_numeric_id(&s.id).is_some(),
+            "订阅 id 应是 feed/数字：{}",
+            s.id
+        );
     }
     println!("订阅数: {}", subs.len());
 }
@@ -36,15 +42,27 @@ async fn greader_login_and_subscriptions() {
 async fn greader_item_ids_and_contents() {
     let (endpoint, username, password) = test_creds();
     let http = reqwest::Client::new();
-    let client = GReaderClient::login(&endpoint, &username, &password, http).await.unwrap();
+    let client = GReaderClient::login(&endpoint, &username, &password, http)
+        .await
+        .unwrap();
 
     // 拉 reading-list 前 5 条 id
     let ids = client
-        .item_ids("user/-/state/com.google/reading-list", None, None, Some(5), None)
+        .item_ids(
+            "user/-/state/com.google/reading-list",
+            None,
+            None,
+            Some(5),
+            None,
+        )
         .await
         .unwrap();
     assert!(!ids.item_refs.is_empty(), "reading-list 应有条目");
-    let numeric: Vec<i64> = ids.item_refs.iter().filter_map(|r| r.id.parse().ok()).collect();
+    let numeric: Vec<i64> = ids
+        .item_refs
+        .iter()
+        .filter_map(|r| r.id.parse().ok())
+        .collect();
     assert!(!numeric.is_empty());
 
     // 拉正文
@@ -61,11 +79,19 @@ async fn greader_item_ids_and_contents() {
 async fn greader_edit_tag_roundtrip() {
     let (endpoint, username, password) = test_creds();
     let http = reqwest::Client::new();
-    let client = GReaderClient::login(&endpoint, &username, &password, http).await.unwrap();
+    let client = GReaderClient::login(&endpoint, &username, &password, http)
+        .await
+        .unwrap();
 
     // 拿一条真实条目
     let ids = client
-        .item_ids("user/-/state/com.google/reading-list", None, None, Some(1), None)
+        .item_ids(
+            "user/-/state/com.google/reading-list",
+            None,
+            None,
+            Some(1),
+            None,
+        )
         .await
         .unwrap();
     let id: i64 = ids.item_refs[0].id.parse().unwrap();
@@ -77,7 +103,10 @@ async fn greader_edit_tag_roundtrip() {
     // 收藏 → 验证 → 恢复
     client.mark_starred(&[id]).await.unwrap();
     let after = client.item_contents(&[id]).await.unwrap();
-    assert!(greader::has_tag(&after[0].categories, "/com.google/starred"), "应已收藏");
+    assert!(
+        greader::has_tag(&after[0].categories, "/com.google/starred"),
+        "应已收藏"
+    );
 
     // 恢复原状
     if before_starred {

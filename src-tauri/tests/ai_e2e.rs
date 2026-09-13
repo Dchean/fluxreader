@@ -20,9 +20,13 @@ fn start_mock_openai() -> u16 {
             let mut req = String::new();
             loop {
                 let n = stream.read(&mut buf).unwrap_or(0);
-                if n == 0 { return; }
+                if n == 0 {
+                    return;
+                }
                 req.push_str(&String::from_utf8_lossy(&buf[..n]));
-                if req.contains("\r\n\r\n") || req.len() > 8192 { break; }
+                if req.contains("\r\n\r\n") || req.len() > 8192 {
+                    break;
+                }
             }
             let is_models = req.starts_with("GET /models");
             let is_chat = req.starts_with("POST /chat/completions");
@@ -90,49 +94,87 @@ async fn ai_summarize_translate_and_cache_pipeline() {
 
     // ---------- 1. 连通性测试 + 模型列表 ----------
     let models = ai::list_models(&client, &cfg).await.unwrap();
-    assert_eq!(models, vec!["deepseek-chat", "glm-4-flash", "gpt-4o"], "models endpoint");
+    assert_eq!(
+        models,
+        vec!["deepseek-chat", "glm-4-flash", "gpt-4o"],
+        "models endpoint"
+    );
     println!("models ok: {models:?}");
 
     // ---------- 2. 流式摘要：收集增量，验证拼接 ----------
     let mut deltas: Vec<String> = Vec::new();
-    let mut sink = |d: &str| { deltas.push(d.to_string()); true };
-    let outcome = ai::stream_chat(&client, &cfg, "sys", "user", &mut sink, ai::SUMMARY_MAX_TOKENS)
-        .await
-        .unwrap();
+    let mut sink = |d: &str| {
+        deltas.push(d.to_string());
+        true
+    };
+    let outcome = ai::stream_chat(
+        &client,
+        &cfg,
+        "sys",
+        "user",
+        &mut sink,
+        ai::SUMMARY_MAX_TOKENS,
+    )
+    .await
+    .unwrap();
     assert!(outcome.completed, "stream must complete");
     assert_eq!(outcome.text, "- 要点一：测试摘要内容完成");
     assert_eq!(deltas.len(), 3, "three deltas received");
-    println!("summary stream ok: {} deltas, text={:?}", deltas.len(), outcome.text);
+    println!(
+        "summary stream ok: {} deltas, text={:?}",
+        deltas.len(),
+        outcome.text
+    );
 
     // ---------- 3. 落库缓存 + 缓存命中短路 ----------
     db::set_article_ai_fields(&conn, 1, Some(&outcome.text), None).unwrap();
     let cached: Option<String> = conn
-        .query_row("SELECT ai_summary FROM articles WHERE id = 1", [], |r| r.get(0))
+        .query_row("SELECT ai_summary FROM articles WHERE id = 1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(cached.as_deref(), Some("- 要点一：测试摘要内容完成"), "cache persisted");
+    assert_eq!(
+        cached.as_deref(),
+        Some("- 要点一：测试摘要内容完成"),
+        "cache persisted"
+    );
 
     // ---------- 4. 翻译路径（不同 system → mock 回译文） ----------
     let mut sink2 = |_: &str| true;
-    let t = ai::stream_chat(&client, &cfg, "你是一名专业译者", "user", &mut sink2, ai::TRANSLATE_MAX_TOKENS)
-        .await
-        .unwrap();
+    let t = ai::stream_chat(
+        &client,
+        &cfg,
+        "你是一名专业译者",
+        "user",
+        &mut sink2,
+        ai::TRANSLATE_MAX_TOKENS,
+    )
+    .await
+    .unwrap();
     assert_eq!(t.text, "<p>你好世界</p>", "translate path");
     db::set_article_ai_fields(&conn, 1, None, Some(&t.text)).unwrap();
 
     let (summary, translated): (Option<String>, Option<String>) = conn
-        .query_row("SELECT ai_summary, translated_content FROM articles WHERE id = 1", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+        .query_row(
+            "SELECT ai_summary, translated_content FROM articles WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .unwrap();
     assert_eq!(summary.as_deref(), Some("- 要点一：测试摘要内容完成"));
     assert_eq!(translated.as_deref(), Some("<p>你好世界</p>"));
     println!("translate cached ok");
 
     // ---------- 5. 配置解析：newapi 自定义 base_url ----------
-    let raw = r#"{"preset":"custom","baseUrl":"http://127.0.0.1:PORT/","apiKey":"sk-x","model":"m1"}"#
-        .replace("PORT", &port.to_string());
+    let raw =
+        r#"{"preset":"custom","baseUrl":"http://127.0.0.1:PORT/","apiKey":"sk-x","model":"m1"}"#
+            .replace("PORT", &port.to_string());
     let cfg2 = AiConfig::from_json(&raw).unwrap();
-    assert_eq!(cfg2.base_url, format!("http://127.0.0.1:{port}"), "trailing slash stripped");
+    assert_eq!(
+        cfg2.base_url,
+        format!("http://127.0.0.1:{port}"),
+        "trailing slash stripped"
+    );
 
     let _ = std::fs::remove_file(&tmp);
     println!("ALL AI ASSERTIONS PASSED");

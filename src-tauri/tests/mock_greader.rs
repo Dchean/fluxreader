@@ -133,8 +133,22 @@ impl MockGReader {
     }
 
     /// 添加条目，返回 mock 分配的 entry id。
-    pub fn add_entry_ret(&self, feed_id: i64, url: &str, title: &str, read: bool, starred: bool) -> i64 {
-        self.add_entry_with_published(feed_id, url, title, read, starred, chrono::Utc::now().timestamp())
+    pub fn add_entry_ret(
+        &self,
+        feed_id: i64,
+        url: &str,
+        title: &str,
+        read: bool,
+        starred: bool,
+    ) -> i64 {
+        self.add_entry_with_published(
+            feed_id,
+            url,
+            title,
+            read,
+            starred,
+            chrono::Utc::now().timestamp(),
+        )
     }
 
     /// 同 add_entry_ret，但可指定 published（unix 秒，模拟「原文发布时间早、
@@ -206,7 +220,10 @@ impl MockGReader {
 }
 
 /// 极简 HTTP/1.1 解析：读请求头 + 可选 body，路由，写 JSON 响应
-async fn handle_conn(mut stream: TcpStream, srv: std::sync::Arc<MockGReader>) -> std::io::Result<()> {
+async fn handle_conn(
+    mut stream: TcpStream,
+    srv: std::sync::Arc<MockGReader>,
+) -> std::io::Result<()> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     loop {
@@ -348,7 +365,8 @@ fn route(
         // 标签列表（分类 + starred）
         ("GET", "/reader/api/0/tag/list") => {
             let folders = srv.folders.lock().unwrap();
-            let mut tags: Vec<serde_json::Value> = vec![serde_json::json!({"id": "user/-/state/com.google/starred"})];
+            let mut tags: Vec<serde_json::Value> =
+                vec![serde_json::json!({"id": "user/-/state/com.google/starred"})];
             for f in folders.iter() {
                 tags.push(serde_json::json!({"id": format!("user/-/label/{f}"), "label": f, "type": "folder"}));
             }
@@ -362,11 +380,12 @@ fn route(
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
             // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）
             let state_filter = match stream.as_str() {
-                "user/-/state/com.google/read" => Some((true, false)),      // 只看已读
-                "user/-/state/com.google/starred" => Some((false, true)),    // 只看收藏
+                "user/-/state/com.google/read" => Some((true, false)), // 只看已读
+                "user/-/state/com.google/starred" => Some((false, true)), // 只看收藏
                 _ => None,
             };
-            let feed_filter: Option<i64> = stream.strip_prefix("feed/").and_then(|s| s.parse().ok());
+            let feed_filter: Option<i64> =
+                stream.strip_prefix("feed/").and_then(|s| s.parse().ok());
             let ids: Vec<i64> = srv
                 .entries
                 .lock()
@@ -391,7 +410,11 @@ fn route(
             } else {
                 None
             };
-            (200, serde_json::json!({ "itemRefs": item_refs, "continuation": continuation }).to_string())
+            (
+                200,
+                serde_json::json!({ "itemRefs": item_refs, "continuation": continuation })
+                    .to_string(),
+            )
         }
         // 条目正文（POST，i 重复参数）
         ("POST", "/reader/api/0/stream/items/contents") => {
@@ -439,7 +462,10 @@ fn route(
         // edit-tag：标读/收藏（a=加 tag, r=删 tag）
         ("POST", "/reader/api/0/edit-tag") => {
             let form = parse_form(body);
-            let ids: Vec<i64> = form.get("i").map(|v| v.iter().filter_map(|s| s.parse().ok()).collect()).unwrap_or_default();
+            let ids: Vec<i64> = form
+                .get("i")
+                .map(|v| v.iter().filter_map(|s| s.parse().ok()).collect())
+                .unwrap_or_default();
             let add: Vec<String> = form.get("a").cloned().unwrap_or_default();
             let remove: Vec<String> = form.get("r").cloned().unwrap_or_default();
             let mut entries = srv.entries.lock().unwrap();
@@ -450,7 +476,10 @@ fn route(
                 for tag in &add {
                     if tag.ends_with("/read") {
                         e.read = true;
-                        srv.status_updates.lock().unwrap().push((e.id, "read".into()));
+                        srv.status_updates
+                            .lock()
+                            .unwrap()
+                            .push((e.id, "read".into()));
                     }
                     if tag.ends_with("/starred") {
                         e.starred = true;
@@ -460,7 +489,10 @@ fn route(
                 for tag in &remove {
                     if tag.ends_with("/read") {
                         e.read = false;
-                        srv.status_updates.lock().unwrap().push((e.id, "unread".into()));
+                        srv.status_updates
+                            .lock()
+                            .unwrap()
+                            .push((e.id, "unread".into()));
                     }
                     if tag.ends_with("/starred") {
                         e.starred = false;
@@ -473,7 +505,10 @@ fn route(
         // quickadd：订阅（幂等：已存在返回既有 id）
         ("POST", "/reader/api/0/subscription/quickadd") => {
             let form = parse_form(body);
-            let url = form.get("quickadd").and_then(|v| v.first().cloned()).unwrap_or_default();
+            let url = form
+                .get("quickadd")
+                .and_then(|v| v.first().cloned())
+                .unwrap_or_default();
             let existing = srv
                 .existing_feed_urls
                 .lock()
@@ -482,7 +517,11 @@ fn route(
                 .find(|(u, _)| *u == url)
                 .map(|(_, id)| *id);
             if let Some(id) = existing {
-                (200, serde_json::json!({"numResults": 1, "streamId": format!("feed/{id}")}).to_string())
+                (
+                    200,
+                    serde_json::json!({"numResults": 1, "streamId": format!("feed/{id}")})
+                        .to_string(),
+                )
             } else {
                 srv.subscribed_urls.lock().unwrap().push(url.clone());
                 srv.created_feeds.lock().unwrap().push((url.clone(), 1));
@@ -491,16 +530,26 @@ fn route(
                     *n += 1;
                     *n
                 };
-                (200, serde_json::json!({"numResults": 1, "streamId": format!("feed/{feed_id}")}).to_string())
+                (
+                    200,
+                    serde_json::json!({"numResults": 1, "streamId": format!("feed/{feed_id}")})
+                        .to_string(),
+                )
             }
         }
         // subscription/edit：订阅/退订/编辑
         ("POST", "/reader/api/0/subscription/edit") => {
             let form = parse_form(body);
-            let ac = form.get("ac").and_then(|v| v.first().cloned()).unwrap_or_default();
+            let ac = form
+                .get("ac")
+                .and_then(|v| v.first().cloned())
+                .unwrap_or_default();
             match ac.as_str() {
                 "subscribe" => {
-                    let url = form.get("s").and_then(|v| v.first().cloned()).unwrap_or_default();
+                    let url = form
+                        .get("s")
+                        .and_then(|v| v.first().cloned())
+                        .unwrap_or_default();
                     let url = url.strip_prefix("feed/").unwrap_or(&url).to_string();
                     srv.subscribed_urls.lock().unwrap().push(url);
                     (200, "OK".into())
@@ -515,10 +564,5 @@ fn route(
 /// 供测试断言用的便捷读取（跨 test target 共享，未用的 target 会报 dead_code，显式豁免）
 #[allow(dead_code)]
 pub fn status_updates_map(srv: &MockGReader) -> HashMap<i64, String> {
-    srv.status_updates
-        .lock()
-        .unwrap()
-        .iter()
-        .cloned()
-        .collect()
+    srv.status_updates.lock().unwrap().iter().cloned().collect()
 }

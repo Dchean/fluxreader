@@ -13,7 +13,13 @@ use mock_greader::{MockEnclosure, MockGReader};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-async fn setup(name: &str) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client, Arc<MockGReader>) {
+async fn setup(
+    name: &str,
+) -> (
+    Arc<Mutex<rusqlite::Connection>>,
+    reqwest::Client,
+    Arc<MockGReader>,
+) {
     let server = MockGReader::start().await.expect("start mock server");
     let tmp = std::env::temp_dir().join(format!("fluxreader_sync_content_{name}.db"));
     let _ = std::fs::remove_file(&tmp);
@@ -46,7 +52,13 @@ async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
     }
 
     // 服务端 feed 11 加一条新条目（本地完全没有）
-    server.add_entry_ret(11, "http://example.com/remote-only/post/new-1", "New from server", false, false);
+    server.add_entry_ret(
+        11,
+        "http://example.com/remote-only/post/new-1",
+        "New from server",
+        false,
+        false,
+    );
 
     // 后台轻量同步（full=false）——旧实现只拉 fetch_failed 源，会漏掉这条
     sync::sync_light(&db, &http).await.expect("light sync");
@@ -60,7 +72,10 @@ async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1, "light sync must pull new entries for origin='remote' feeds");
+        assert_eq!(
+            count, 1,
+            "light sync must pull new entries for origin='remote' feeds"
+        );
         let source: String = conn
             .query_row(
                 "SELECT source FROM articles WHERE url = 'http://example.com/remote-only/post/new-1'",
@@ -79,13 +94,30 @@ async fn pending_local_read_wins_over_stale_remote_in_upsert() {
     let (db, http, server) = setup("pending_upsert").await;
 
     // 服务端 feed 10 已有该条目（unread），拿到真实 entry id
-    let mf_id = server.add_entry_ret(10, "http://127.0.0.1:8765/post/pending", "Pending", false, false);
+    let mf_id = server.add_entry_ret(
+        10,
+        "http://127.0.0.1:8765/post/pending",
+        "Pending",
+        false,
+        false,
+    );
 
     // 本地直连 feed 绑定远端 feed 10，造一篇未读文章并绑定该 entry
     let aid = {
         let conn = db.lock().await;
         let folder = db::create_folder(&conn, "F", "article").unwrap();
-        let feed = db::insert_feed(&conn, "http://127.0.0.1:8765/local_feed.xml", None, "Local", None, folder, "inherit", true, false).unwrap();
+        let feed = db::insert_feed(
+            &conn,
+            "http://127.0.0.1:8765/local_feed.xml",
+            None,
+            "Local",
+            None,
+            folder,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
         db::set_feed_remote_id(&conn, feed, 10).unwrap();
         let a = db::NewArticle {
             guid: "g-pending".into(),
@@ -112,11 +144,15 @@ async fn pending_local_read_wins_over_stale_remote_in_upsert() {
 
     // 直接跑 states 阶段（full）：push 阶段会把 read 推上去（mock 回写 read），
     // 随后 pull 阶段全量条目里该 entry 已是 read。关键验证：本地已读不被覆盖。
-    let _ = sync::states_phase(&db, &http, true).await.expect("states phase");
+    let _ = sync::states_phase(&db, &http, true)
+        .await
+        .expect("states phase");
 
     let conn = db.lock().await;
     let is_read: bool = conn
-        .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| r.get::<_, i64>(0).map(|v| v != 0))
+        .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| {
+            r.get::<_, i64>(0).map(|v| v != 0)
+        })
         .unwrap();
     assert!(is_read, "local read must survive (no ping-pong)");
 }
@@ -158,9 +194,17 @@ async fn miniflux_enclosure_is_not_used_as_cover() {
         )
         .unwrap();
     // enclosure 正确落库（播放依赖）
-    assert_eq!(enclosure_url.as_deref(), Some("https://audio.example.com/ep1.mp3"), "enclosure 必须落库供播放");
+    assert_eq!(
+        enclosure_url.as_deref(),
+        Some("https://audio.example.com/ep1.mp3"),
+        "enclosure 必须落库供播放"
+    );
     // 封面必须是正文第一图，绝不能是音频 URL
-    assert_eq!(image_url.as_deref(), Some("https://img.example.com/cover.jpg"), "封面必须是正文图，不是 enclosure URL");
+    assert_eq!(
+        image_url.as_deref(),
+        Some("https://img.example.com/cover.jpg"),
+        "封面必须是正文图，不是 enclosure URL"
+    );
 }
 
 /// ⑦ 封面回填回归：origin='remote' 源的条目，首次入库时正文无图（无封面），
@@ -218,7 +262,11 @@ async fn miniflux_existing_entry_backfills_cover() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(image_url.as_deref(), Some("https://img.example.com/backfill.jpg"), "existing 分支必须回填 Miniflux 正文第一图作封面");
+    assert_eq!(
+        image_url.as_deref(),
+        Some("https://img.example.com/backfill.jpg"),
+        "existing 分支必须回填 Miniflux 正文第一图作封面"
+    );
 }
 
 /// ③ 规范化 URL 匹配：同文不同饰（https/http + 尾斜杠）不重复入库。
@@ -228,7 +276,18 @@ fn article_id_by_url_uses_normalized_match() {
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     let folder = db::create_folder(&conn, "F", "article").unwrap();
-    let feed = db::insert_feed(&conn, "http://x/f.xml", None, "F", None, folder, "inherit", false, false).unwrap();
+    let feed = db::insert_feed(
+        &conn,
+        "http://x/f.xml",
+        None,
+        "F",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
     let a = db::NewArticle {
         guid: "g-norm".into(),
         url: Some("https://example.com/story/".into()),
@@ -294,7 +353,13 @@ async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
                 "SELECT COUNT(*), COALESCE(MAX(is_read), 0), COALESCE(MAX(source), '')
                  FROM articles WHERE url = 'http://example.com/remote-only/post/history-1'",
                 [],
-                |r| Ok((r.get(0)?, r.get::<_, i64>(1).unwrap_or(0) != 0, r.get::<_, String>(2).unwrap_or_default())),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get::<_, i64>(1).unwrap_or(0) != 0,
+                        r.get::<_, String>(2).unwrap_or_default(),
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(count, 1, "历史文章（published_at 早于游标）必须被拉入本地");
@@ -316,9 +381,26 @@ async fn light_sync_converges_stale_remote_read_via_unread_ids() {
     let (aid, mf_id) = {
         let conn = db.lock().await;
         let folder = db::create_folder(&conn, "F", "article").unwrap();
-        let feed = db::insert_feed(&conn, "http://127.0.0.1:8765/local_feed.xml", None, "Local", None, folder, "inherit", true, false).unwrap();
+        let feed = db::insert_feed(
+            &conn,
+            "http://127.0.0.1:8765/local_feed.xml",
+            None,
+            "Local",
+            None,
+            folder,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
         db::set_feed_remote_id(&conn, feed, 10).unwrap();
-        let mf_id = server.add_entry_ret(10, "http://127.0.0.1:8765/post/stale", "Stale read", false, false);
+        let mf_id = server.add_entry_ret(
+            10,
+            "http://127.0.0.1:8765/post/stale",
+            "Stale read",
+            false,
+            false,
+        );
         let a = db::NewArticle {
             guid: "g-stale".into(),
             url: Some("http://127.0.0.1:8765/post/stale".into()),
@@ -356,8 +438,13 @@ async fn light_sync_converges_stale_remote_read_via_unread_ids() {
     {
         let conn = db.lock().await;
         let is_read: bool = conn
-            .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| r.get::<_, i64>(0).map(|v| v != 0))
+            .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| {
+                r.get::<_, i64>(0).map(|v| v != 0)
+            })
             .unwrap();
-        assert!(is_read, "light sync must converge stale remote read (本地未读 → Miniflux 已读)");
+        assert!(
+            is_read,
+            "light sync must converge stale remote read (本地未读 → Miniflux 已读)"
+        );
     }
 }

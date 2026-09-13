@@ -47,7 +47,11 @@ async fn fever_sync_end_to_end_on_live_backend() {
 
     let conn = db.lock().await;
     let feed_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'remote'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM feeds WHERE origin = 'remote'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     let article_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))

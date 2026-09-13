@@ -29,7 +29,10 @@ pub fn extract_article(html: &str, url: &str) -> AppResult<String> {
         .map_err(|e| AppError::internal(format!("readability parse: {e}")))?;
     let content = article.content.to_string();
     if content.trim().is_empty() {
-        return Err(AppError::new("noExtractableContent", "页面没有可提取的正文"));
+        return Err(AppError::new(
+            "noExtractableContent",
+            "页面没有可提取的正文",
+        ));
     }
     Ok(sanitize::sanitize(&content, Some(url)))
 }

@@ -28,6 +28,9 @@ jobs:
       - name: Build (tsc + vite)
         run: npm run build
 
+      - name: Frontend regression (node state-machine checks)
+        run: npm run test:frontend
+
   rust:
     name: Check & test Rust (src-tauri)
     # 纯 Windows 客户端：DPAPI 凭据加密、SMTC 媒体控制等 Windows 专有功能
