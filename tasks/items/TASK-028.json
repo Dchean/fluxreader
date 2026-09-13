@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "TASK-028",
+  "batch_id": "BATCH-008",
+  "kind": "bug_fix",
+  "milestone": "M2",
+  "status": "ready",
+  "title": "GReader ClientLogin 双格式兼容（FreshRSS 文本 + Miniflux JSON）",
+  "objective": "greader.rs 的 login 以 resp.json() 解析 ClientLogin 响应，仅兼容响应 output=json 的服务（Miniflux/example.invalid 实证）；FreshRSS 忽略 output=json 返回经典文本（SID=/LSID=/Auth= 行）导致解析失败。改为：先尝试 JSON 解析，失败则按行解析文本格式提取 Auth= 行。真实服务测试取证：FreshRSS 3 项 live 测试当前全部失败（error decoding response body）。",
+  "non_goals": [
+    "不改 token 后续使用方式",
+    "不改其他端点"
+  ],
+  "requirement_refs": [
+    "docs/ISSUES.md 新增 ISSUE-017",
+    "真实服务取证（FreshRSS curl 文本响应 / example.invalid JSON 响应）"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "src-tauri/src/greader.rs"
+  ],
+  "source_baseline": "main（当前）",
+  "dependencies": [],
+  "blockers": [],
+  "authorization": {
+    "source": "DEC-013 + 用户『后续所有任务一起跑通』+ 用户提供真实服务凭据",
+    "risk_level": "medium——认证路径"
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/greader.rs",
+      "src-tauri/tests/greader_live_e2e.rs"
+    ],
+    "protected_paths": "按 EXECUTION-POLICY",
+    "change_definition": "登录响应解析双格式兼容 + 单元测试",
+    "generated_artifacts": [],
+    "network_and_data": "live 测试访问用户提供的真实服务（test/REDACTED_PASSWORD）"
+  },
+  "steps": [
+    "实现双格式解析（JSON 失败回退文本 Auth= 行）",
+    "单元测试覆盖两种响应体",
+    "live 测试对 FreshRSS 与 Miniflux 各跑一轮"
+  ],
+  "acceptance_criteria": [
+    "单元测试覆盖 JSON 与文本两种 ClientLogin 响应",
+    "greader_live 3/3 对 FreshRSS（endpoint=https://rss.example.invalid/api/greader.php）通过",
+    "greader_live 3/3 对 Miniflux（默认端点）仍通过",
+    "clippy/fmt/全量测试通过"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "cargo test 单元",
+      "live 双服务实测",
+      "全量门禁"
+    ]
+  },
+  "stop_conditions": [],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": null
+  },
+  "outputs": [
+    "双格式登录",
+    "FreshRSS GReader 全通"
+  ],
+  "evidence": [],
+  "note_requirement": "bug-fix Note（协议兼容，防重犯价值高）"
+}
