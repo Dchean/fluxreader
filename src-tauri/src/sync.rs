@@ -184,14 +184,7 @@ fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
         let Some(article_id) = item.article_id else {
             continue; // feed 级动作（add_feed）在 push_feeds 阶段处理
         };
-        let remote_id: Option<i64> = conn
-            .query_row(
-                "SELECT remote_id FROM articles WHERE id = ?1",
-                [article_id],
-                |r| r.get(0),
-            )
-            .ok()
-            .flatten();
+        let remote_id = db::get_article_remote_id(conn, article_id).ok().flatten();
         let Some(remote_id) = remote_id else {
             continue;
         };
@@ -400,14 +393,7 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
                 continue;
             }
             // 按名称匹配本地 folder
-            let existing: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM folders WHERE name = ?1",
-                    rusqlite::params![label],
-                    |r| r.get(0),
-                )
-                .ok()
-                .flatten();
+            let existing = db::find_folder_by_name(&conn, label).ok().flatten();
             if existing.is_none() {
                 let _ = db::create_folder(&conn, label, "article");
             }
@@ -437,12 +423,11 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
                         let _ = db::set_feed_remote_id(&conn, lid, nid);
                     }
                     // 远端标题仅在本地标题等于 URL（从未抓取成功过）时回填
-                    let _ = conn.execute(
-                        "UPDATE feeds SET
-                            title = CASE WHEN title = feed_url THEN ?1 ELSE title END,
-                            site_url = COALESCE(site_url, ?2)
-                         WHERE id = ?3",
-                        rusqlite::params![rf.title, rf.html_url, lid],
+                    let _ = db::update_feed_title_if_empty(
+                        &conn,
+                        lid,
+                        &rf.title,
+                        rf.html_url.as_deref(),
                     );
                     report.merged_states += 1;
                 }
@@ -450,16 +435,9 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
                     // 本地没有 → 建本地 feed（挂到远端分类对应的本地 folder）
                     let folder_id: i64 = remote_folder_label
                         .as_deref()
-                        .and_then(|label| {
-                            conn.query_row("SELECT id FROM folders WHERE name = ?1", [label], |r| {
-                                r.get(0)
-                            })
-                            .ok()
-                        })
-                        .unwrap_or_else(|| {
-                            conn.query_row("SELECT id FROM folders LIMIT 1", [], |r| r.get(0))
-                                .unwrap_or(1)
-                        });
+                        .and_then(|label| db::find_folder_by_name(&conn, label).ok().flatten())
+                        .or_else(|| db::get_first_folder_id(&conn).ok().flatten())
+                        .unwrap_or(1);
                     let inserted = db::insert_feed_origin(
                         &conn,
                         &rf.url,
@@ -565,10 +543,7 @@ fn merge_remote_status(
         .unwrap_or(false);
     let accept_unread = local_bound && same_feed_trusted;
     if remote_read || accept_unread {
-        let _ = conn.execute(
-            "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
-            rusqlite::params![remote_read as i64, remote_starred as i64, aid],
-        );
+        let _ = db::sync_set_article_status(conn, aid, remote_read, remote_starred);
         report.pulled_entries += 1;
     }
 }
@@ -719,24 +694,15 @@ fn reconcile_reader_state(
             continue; // 交给 push 段队列，不被远端快照回滚
         }
         if read_set.contains(remote_id) {
-            if let Ok(n) = conn.execute(
-                "UPDATE articles SET is_read = 1 WHERE id = ?1 AND is_read = 0",
-                rusqlite::params![aid],
-            ) {
+            if let Ok(n) = db::sync_mark_read_if_unread(conn, aid) {
                 report.merged_states += n;
             }
         }
         if starred_set.contains(remote_id) {
-            if let Ok(n) = conn.execute(
-                "UPDATE articles SET is_starred = 1 WHERE id = ?1 AND is_starred = 0",
-                rusqlite::params![aid],
-            ) {
+            if let Ok(n) = db::sync_mark_starred_if_unstarred(conn, aid) {
                 report.merged_states += n;
             }
-        } else if let Ok(n) = conn.execute(
-            "UPDATE articles SET is_starred = 0 WHERE id = ?1 AND is_starred = 1",
-            rusqlite::params![aid],
-        ) {
+        } else if let Ok(n) = db::sync_mark_unstarred_if_starred(conn, aid) {
             report.merged_states += n;
         }
     }
@@ -782,10 +748,7 @@ fn merge_pulled_entry(
                 if greader::has_tag(&e.categories, "/com.google/read")
                     && !maps.pending_ids.contains(&aid)
                 {
-                    let _ = conn.execute(
-                        "UPDATE articles SET is_read = 1 WHERE id = ?1",
-                        rusqlite::params![aid],
-                    );
+                    let _ = db::sync_mark_read_if_unread(conn, aid);
                 }
                 return;
             }
@@ -978,29 +941,17 @@ fn reconcile_fever_state(
         }
         let want_read = !unread_set.contains(remote_id);
         if want_read {
-            if let Ok(n) = conn.execute(
-                "UPDATE articles SET is_read = 1 WHERE id = ?1 AND is_read = 0",
-                rusqlite::params![aid],
-            ) {
+            if let Ok(n) = db::sync_mark_read_if_unread(conn, aid) {
                 report.merged_states += n;
             }
-        } else if let Ok(n) = conn.execute(
-            "UPDATE articles SET is_read = 0 WHERE id = ?1 AND is_read = 1",
-            rusqlite::params![aid],
-        ) {
+        } else if let Ok(n) = db::sync_mark_unread_if_read(conn, aid) {
             report.merged_states += n;
         }
         if starred_set.contains(remote_id) {
-            if let Ok(n) = conn.execute(
-                "UPDATE articles SET is_starred = 1 WHERE id = ?1 AND is_starred = 0",
-                rusqlite::params![aid],
-            ) {
+            if let Ok(n) = db::sync_mark_starred_if_unstarred(conn, aid) {
                 report.merged_states += n;
             }
-        } else if let Ok(n) = conn.execute(
-            "UPDATE articles SET is_starred = 0 WHERE id = ?1 AND is_starred = 1",
-            rusqlite::params![aid],
-        ) {
+        } else if let Ok(n) = db::sync_mark_unstarred_if_starred(conn, aid) {
             report.merged_states += n;
         }
     }
@@ -1062,10 +1013,7 @@ fn upsert_remote_entry(
             maps.mf_id_to_article.insert(eid, aid);
         }
         if !maps.pending_ids.contains(&aid) {
-            let _ = conn.execute(
-                "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
-                rusqlite::params![remote_read as i64, remote_starred as i64, aid],
-            );
+            let _ = db::sync_set_article_status(conn, aid, remote_read, remote_starred);
         }
         // 封面回填：正文第一图，本地已有封面不覆盖（COALESCE）
         backfill_entry_content(conn, aid, e);
@@ -1096,10 +1044,7 @@ fn upsert_remote_entry(
                 maps.id_to_mf_id.insert(aid, Some(eid));
                 maps.mf_id_to_article.insert(eid, aid);
             }
-            let _ = conn.execute(
-                "UPDATE articles SET is_read = ?1, is_starred = ?2 WHERE id = ?3",
-                rusqlite::params![remote_read as i64, remote_starred as i64, aid],
-            );
+            let _ = db::sync_set_article_status(conn, aid, remote_read, remote_starred);
             report.pulled_entries += 1;
         }
     }
@@ -1119,22 +1064,14 @@ fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) {
         None => (None, None),
     };
     let content_image = crate::sanitize::first_image(&content_html);
-    let _ = conn.execute(
-        "UPDATE articles SET
-            content_html = CASE WHEN COALESCE(content_html, '') = '' THEN ?1 ELSE content_html END,
-            body_text = CASE WHEN body_text = '' THEN ?2 ELSE body_text END,
-            image_url = COALESCE(image_url, ?3),
-            enclosure_url = COALESCE(enclosure_url, ?4),
-            enclosure_mime = COALESCE(enclosure_mime, ?5)
-         WHERE id = ?6",
-        rusqlite::params![
-            content_html,
-            strip_html_text(&content_html),
-            content_image,
-            enc_url,
-            enc_mime,
-            aid
-        ],
+    let _ = db::backfill_article_content(
+        conn,
+        aid,
+        &content_html,
+        &strip_html_text(&content_html),
+        content_image.as_deref(),
+        enc_url.as_deref(),
+        enc_mime.as_deref(),
     );
 }
 
