@@ -6,7 +6,14 @@ use rusqlite::Connection;
 
 #[test]
 fn migration_v1_to_v2_preserves_data() {
-    let tmp = std::env::temp_dir().join("fluxreader_migration_test.db");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_migration_test_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
 
     // ---- 手工建 v1 库（P1 发布时的 schema）----
@@ -122,7 +129,14 @@ fn migration_v1_to_v2_preserves_data() {
 
 #[test]
 fn migration_v6_to_v7_backfills_precise_url_norm() {
-    let tmp = std::env::temp_dir().join("fluxreader_migration_v7_test.db");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_migration_v7_test_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
 
     // 手工建 v6 形状库：v5 + deduped_urls 表

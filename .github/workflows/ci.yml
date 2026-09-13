@@ -52,6 +52,10 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # Note: 格式门禁的设立理由与历史 — 见 .agents/notes/implemented/process/2026-09-13-rust-format-unification.md
+      - name: Format (cargo fmt --check)
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
       - name: Lint (clippy, deny warnings)
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
