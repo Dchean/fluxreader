@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "run_id": "M0-scope-20260912",
+  "task_id": "TASK-001",
+  "date": "2026-09-12",
+  "execution_mode": "documentation_scope_update",
+  "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "executor": {
+    "provider": "Codex desktop agent",
+    "version": "not_recorded",
+    "cli_invocation": false
+  },
+  "outcome": "ready_for_owner_review",
+  "previous_report": "tasks/runs/M0-20260912.json",
+  "previous_documentation_snapshot": "f0ab243d4d0c82d22b80ec33d51fa3403380213a843d1af25d095ff7e728bc31",
+  "history_policy": "初始 M0 报告保留当时结果，不重写为当前状态；本报告记录用户后续决定。",
+  "user_instructions": [
+    "调整一下，除了opt004其他的opt都要保留，调整会被影响的文档",
+    "保留，但是功能调整为只同步订阅源客户端设置的数据",
+    "同步地址、模型等非敏感配置，不同步 API Key 和密码"
+  ],
+  "decision_refs": [
+    "DEC-008",
+    "DEC-009"
+  ],
+  "feature_scope": {
+    "source": "docs/FEATURES.md",
+    "core": "retained",
+    "retained_opt_ids": [
+      "OPT-001",
+      "OPT-002",
+      "OPT-003",
+      "OPT-004",
+      "OPT-005",
+      "OPT-006",
+      "OPT-007",
+      "OPT-008",
+      "OPT-009",
+      "OPT-010"
+    ],
+    "opt004": {
+      "retained": true,
+      "includes": [
+        "订阅源",
+        "客户端设置",
+        "服务地址、模型等非敏感连接配置"
+      ],
+      "excludes": [
+        "API Key、密码等敏感凭据",
+        "文章内容",
+        "媒体文件",
+        "已读/收藏状态",
+        "AI 生成结果"
+      ],
+      "applies_to": "Gist/WebDAV 配置同步，不限制 Google Reader/Fever 的核心文章和状态同步",
+      "implementation_status": "NOT_CHANGED"
+    }
+  },
+  "resolved_questions": [
+    "Q-SCOPE-001",
+    "Q-CONFIG-SYNC-001"
+  ],
+  "changed_files": [
+    "AGENTS.md",
+    "README.md",
+    "docs/API.md",
+    "docs/ARCHITECTURE.md",
+    "docs/DATA-MODEL.md",
+    "docs/FEATURES.md",
+    "docs/ISSUES.md",
+    "docs/PROCESS.md",
+    "docs/PRODUCT.md",
+    "docs/README.md",
+    "docs/RELEASE-ROLLBACK.md",
+    "docs/TEST-PLAN.md",
+    "docs/USER-FLOWS.md",
+    "tasks/IN_PROGRESS.md",
+    "tasks/PROJECT.json",
+    "tasks/README.md",
+    "tasks/items/TASK-001.json",
+    "tasks/items/TASK-002.json",
+    "tasks/runs/M0-scope-20260912.json"
+  ],
+  "application_tests": "NOT_RUN",
+  "application_builds": "NOT_RUN",
+  "dependency_installation": "NOT_RUN",
+  "baseline_authorization": "pending; TASK-002 remains blocked",
+  "implementation_changes": "none",
+  "documentation_validation": {
+    "status": "PASS",
+    "markdown_files": 21,
+    "json_files": 6,
+    "relative_links_checked": 73,
+    "retained_opt_count": 10,
+    "checks": [
+      "Markdown links and whitespace",
+      "JSON parsing",
+      "ten retained OPT rows",
+      "test-plan and user-flow mappings",
+      "task references and evidence",
+      "resolved scope questions",
+      "phase permissions unchanged",
+      "baseline commands unchanged",
+      "sensitive configuration exclusions"
+    ],
+    "errors": [],
+    "attempts": [
+      {
+        "attempt": 1,
+        "status": "CHECKER_ERROR",
+        "reason": "一次性文档校验脚本存在括号语法错误，未执行检查；没有运行产品代码或应用测试。"
+      },
+      {
+        "attempt": 2,
+        "status": "PASS",
+        "reason": "修正校验脚本后完成文档与任务一致性检查。"
+      }
+    ]
+  },
+  "workspace_snapshot": {
+    "kind": "uncommitted_documentation_package",
+    "sha256": "f1aa01ffb763a939376c959e91b4a767c9f0522d2496baf8688f7738a21cda19",
+    "algorithm": "SHA256 of sorted relative-path + NUL + file-SHA256 entries joined with LF",
+    "included_files": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "README.md",
+      "docs/ADR/README.md",
+      "docs/API.md",
+      "docs/ARCHITECTURE.md",
+      "docs/BASELINE.md",
+      "docs/DATA-MODEL.md",
+      "docs/EXECUTION-CONTRACT.md",
+      "docs/FEATURES.md",
+      "docs/ISSUES.md",
+      "docs/PROCESS.md",
+      "docs/PRODUCT.md",
+      "docs/README.md",
+      "docs/RELEASE-ROLLBACK.md",
+      "docs/TEST-PLAN.md",
+      "docs/USER-FLOWS.md",
+      "tasks/BACKLOG.md",
+      "tasks/DONE.md",
+      "tasks/IN_PROGRESS.md",
+      "tasks/PROJECT.json",
+      "tasks/README.md",
+      "tasks/TEMPLATE.json",
+      "tasks/items/TASK-001.json",
+      "tasks/items/TASK-002.json",
+      "tasks/runs/M0-20260912.json"
+    ],
+    "excluded_files": [
+      "tasks/runs/M0-scope-20260912.json"
+    ]
+  },
+  "remaining": [
+    "M0 文档包等待用户审阅",
+    "TASK-002 的测试基线授权",
+    "协议兼容矩阵与服务端版本",
+    "后续任务中的具体行为和字段清单设计"
+  ],
+  "change_scope_validation": {
+    "status": "PASS",
+    "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+    "application_source_tests_ci_and_lockfiles": "unchanged",
+    "scope": "documentation_and_metadata_only"
+  },
+  "verification_reports": [
+    {
+      "kind": "documentation_and_scope_contract",
+      "status": "PASS",
+      "evidence": "documentation_validation"
+    },
+    {
+      "kind": "source_change_scope",
+      "status": "PASS",
+      "evidence": "change_scope_validation"
+    },
+    {
+      "kind": "application_tests",
+      "status": "NOT_RUN",
+      "reason": "本次仅调整文档，基线授权仍为 pending"
+    }
+  ]
+}

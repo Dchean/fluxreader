@@ -1,0 +1,266 @@
+{
+  "schema_version": 1,
+  "source_baseline": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "milestone": "M1",
+  "status": "verified",
+  "executor": {
+    "role": "code_writer",
+    "provider": "claude_code_cli"
+  },
+  "policy_ref": "tasks/EXECUTION-POLICY.json",
+  "risk": {
+    "level": "low_candidate",
+    "manager_assessment_required": true
+  },
+  "budget": {
+    "unattended": true,
+    "max_repair_attempts": 3,
+    "timeout_seconds": 5400,
+    "max_cost": null,
+    "financial_cap_enabled": false,
+    "policy_ref": "tasks/EXECUTION-POLICY.json"
+  },
+  "authorization": {
+    "status": "manager_authorizable",
+    "source": "DEC-010 / DEC-011，管理 agent 核对 Ready 条件后授权，不需要逐项询问用户。"
+  },
+  "blockers": [],
+  "blockers_resolution": {
+    "resolved_at_utc": "2026-09-13T14:04:57Z",
+    "resolved_by": "接手管理 agent（BATCH-001 审查收尾）",
+    "what_was_stale": "原 blockers『接手管理 agent 尚未核对工作区/运行基准、依赖和必要 Note』在核对完成后未清除，与本任务已 verified 的状态矛盾（独立审查 R-03）。",
+    "evidence": [
+      "docs/runs/BATCH-001-takeover.md（工作区/运行基准核对记录）",
+      "tasks/items/TASK-005.json ready_check.input_snapshot_recheck_by_manager（输入快照已核对）",
+      "本文件 ready_check.note_review = manager_approved_low_risk（Note 已审）",
+      "docs/runs/BATCH-001-independent-review-20260913.md（独立审查确认核对已完成）"
+    ]
+  },
+  "required_reading": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/HANDOFF.md",
+    "docs/CLAUDE-WORKER.md",
+    "tasks/EXECUTION-POLICY.json",
+    "docs/BASELINE.md"
+  ],
+  "stop_conditions": [
+    "需要扩大范围或改变业务规则",
+    "触及高风险/受保护内容",
+    "权限或环境不足",
+    "预算耗尽"
+  ],
+  "evidence": [],
+  "id": "TASK-005",
+  "kind": "ci",
+  "title": "将现有前端回归加入 CI",
+  "objective": "在既定 Node 22 前端作业中加入 npm run test:frontend，确保命令失败会使作业失败。",
+  "non_goals": [
+    "不改变权限、触发范围或发布流程",
+    "不增加第三方 action 或依赖",
+    "不修改测试断言",
+    "不将检查设置为 continue-on-error"
+  ],
+  "requirement_refs": [
+    "ISSUE-002"
+  ],
+  "dependencies": [
+    "TASK-002"
+  ],
+  "scope": {
+    "allowed_paths": [
+      ".github/workflows/ci.yml"
+    ],
+    "protected_paths": [
+      "src/**",
+      "src-tauri/**",
+      "tools/**",
+      "package.json",
+      "package-lock.json",
+      ".github/workflows/release.yml",
+      "tasks/**",
+      "docs/**",
+      "AGENTS.md",
+      "CLAUDE.md",
+      ".agents/**",
+      ".git/**"
+    ],
+    "generated_artifacts": [
+      "dist/**",
+      "dist-test/**",
+      "node_modules/.tmp/**",
+      ".cache/runs/**"
+    ],
+    "network_and_data": "不授予新的工作流权限，不接入真实服务"
+  },
+  "note_requirement": {
+    "required": true,
+    "class": "testing",
+    "prepared_and_reviewed_by": "manager"
+  },
+  "steps": [
+    "核对当前 workflow 和已通过的前端命令",
+    "管理 agent 记录复用现有脚本而非更换框架的理由",
+    "Claude 增加检查步骤，保留现有配置和失败语义",
+    "管理 agent 审查 YAML 和差异并运行命令；真实 CI 未运行时明确记录"
+  ],
+  "acceptance_criteria": [
+    "frontend 作业明确运行 test:frontend",
+    "保留现有 Node 版本、触发器和其他检查",
+    "没有 continue-on-error、吞退出码或扩大 token 权限",
+    "本地命令通过；托管 CI 的状态单独记录，未运行不伪称通过"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "git diff --check",
+      "npm run lint",
+      "npm run test:frontend",
+      "npm run build"
+    ],
+    "hosted_ci": "在具备目标仓库授权后核实真实 CI，合并前提供相应证据；本地结果不等于托管 CI 通过。"
+  },
+  "outputs": [
+    ".github/workflows/ci.yml",
+    "管理 agent 保存的 Note、验证与审查记录"
+  ],
+  "ready_check": {
+    "assessed_by": "manager",
+    "assessed_at_utc": "2026-09-13T07:31:56Z",
+    "status": "dispatched_verified_closed",
+    "status_correction": {
+      "corrected_at_utc": "2026-09-13T14:04:57Z",
+      "previous_value": "ready_pending_dispatch",
+      "reason": "该字段在派发、验证与审查完成后未同步，与 status=verified 矛盾（独立审查 R-03）。现值表示：已派发、已验证、已审查并关闭；历史值保留于此供追溯。"
+    },
+    "risk_level": "low",
+    "risk_reasons": [
+      "只增加一个既定检查步骤，不删除或降级任何现有检查",
+      "不新增 action、依赖、权限块或触发器，不接入真实服务",
+      "属于 EXECUTION-POLICY.allowed_low_risk 的『只增加既定检查且不扩大权限/降低门禁的 CI 变更』"
+    ],
+    "input_snapshot_recheck_by_manager": {
+      "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+      "files_sha256": {
+        ".github/workflows/ci.yml": "C591001460352EFC0877E3EC1E9599A5845EC6748501152D50DF019DC701F11F",
+        ".github/workflows/release.yml": "D5174DD67C8800EA507692C348F7FA33C53373D5DE0BAFA0EEA22A852ED3AB92"
+      },
+      "recheck_record": "docs/runs/BATCH-001-takeover.md"
+    },
+    "note": ".agents/notes/proposed/testing/2026-09-13-frontend-regression-in-ci.md",
+    "note_path_correction": {
+      "corrected_at_utc": "2026-09-13T14:04:57Z",
+      "previous_path": ".agents/notes/proposed/ci/2026-09-13-frontend-regression-in-ci.md",
+      "reason": "ci 不是技能允许的类别（feature/bug-fix/simplification/architecture/process/testing），导致两个 Note 校验器失败（独立审查 R-04）。Note 已移入 testing/，内容未改。"
+    },
+    "note_review": "manager_approved_low_risk",
+    "dependency_evidence": {
+      "test_frontend_local": "PASS 8/8（管理 agent 接手后独立复跑，Windows/Node 24）",
+      "ci_frontend_env": "ubuntu-latest + Node 22（与本地不同，见 ISSUE-010）",
+      "hosted_ci_ever_run": "NOT_RUN"
+    },
+    "verification_plan_frozen": true,
+    "verification_plan": {
+      "owner": "manager",
+      "commands": [
+        "git diff --check",
+        "git diff -- .github/workflows/ci.yml",
+        "npm run lint",
+        "npm run test:frontend",
+        "npm run build"
+      ],
+      "manual_yaml_review": [
+        "frontend 作业存在明确运行 test:frontend 的步骤",
+        "无 continue-on-error / || true / set +e",
+        "无 permissions 块新增",
+        "无新 action（uses:）",
+        "node-version 仍为 22，触发器和 rust 作业未变"
+      ],
+      "hosted_ci_status": "NOT_RUN；本地通过不等于托管 CI 通过，报告须如实标注",
+      "require_only_allowed_paths_changed": true
+    }
+  },
+  "dispatch_record": {
+    "attempt": 1,
+    "run_id": "TASK-005-20260913T082200Z",
+    "run_directory": ".cache/runs/BATCH-001/TASK-005/attempt-1",
+    "started_at_utc": "2026-09-13T08:22:00Z",
+    "duration_seconds": 38.5,
+    "exit_code": 0,
+    "timed_out": false,
+    "model": "claude-opus-5",
+    "model_invocations": 1,
+    "cost_usd_estimated": 0.17672925,
+    "cost_note": "CLI 自报估算值，非账单依据",
+    "permission_denials": [],
+    "num_turns": 7,
+    "worker_reported_status": "ready_for_verification",
+    "worker_reported_changed_files": [
+      ".github/workflows/ci.yml"
+    ],
+    "worker_reported_unresolved": [
+      "Hosted CI not run this round - status recorded as NOT_RUN",
+      "Node version difference between local (24) and CI (22) not verified on this machine",
+      "ExperimentalWarning for --loader flag behavior in Node 22 vs 24 not locally reproducible"
+    ]
+  },
+  "manager_review": {
+    "scope_check": {
+      "result": "PASS",
+      "detail": "git status 显示仅 .github/workflows/ci.yml 变化（另有 TASK-004 的 tools/frontend-regression.mjs 与本批无关的既有 README.md）；.github/workflows/release.yml、package.json 等受保护文件哈希与派发前一致。",
+      "declared_vs_actual": "worker 自报 changed_files 与实际 diff 一致"
+    },
+    "diff_review": {
+      "result": "PASS",
+      "numstat": "3 insertions, 0 deletions（唯一改动）",
+      "added_step": "Frontend regression (node state-machine checks) / run: npm run test:frontend",
+      "position": "紧随 Build (tsc + vite) 之后、rust 作业之前",
+      "no_existing_step_removed_or_reordered": true
+    },
+    "hard_constraint_checks": [
+      {"constraint": "不新增第三方 action", "head_uses_count": 5, "now_uses_count": 5, "result": "PASS"},
+      {"constraint": "不新增 permissions 块", "head": 0, "now": 0, "result": "PASS"},
+      {"constraint": "不吞退出码", "continue_on_error": 0, "or_true": 0, "set_plus_e": 0, "result": "PASS"},
+      {"constraint": "node-version 保持 22", "value": 22, "result": "PASS"},
+      {"constraint": "触发器未变", "jobs_parsed": "push, pull_request, frontend, rust", "result": "PASS"},
+      {"constraint": "rust 作业未变", "detail": "diff 中不含 clippy / rust-cache / dtolnay 行", "result": "PASS"},
+      {"constraint": "test:frontend 步骤存在", "occurrences": 1, "result": "PASS"}
+    ],
+    "yaml_structure_review": {
+      "frontend_steps_in_order": [
+        "Setup Node",
+        "Install dependencies",
+        "Lint (oxlint)",
+        "Build (tsc + vite)",
+        "Frontend regression (node state-machine checks)"
+      ],
+      "rust_steps_unchanged": true
+    },
+    "independent_verification": [
+      {"command": "git diff --check", "exit_code": 0, "result": "PASS", "log": null},
+      {"command": "npm run lint", "exit_code": 0, "result": "PASS（6 条警告，与 TASK-004 后状态一致）", "log": ".cache/runs/BATCH-001/TASK-005/attempt-1/verify-lint.log"},
+      {"command": "npm run test:frontend", "exit_code": 0, "result": "PASS — 8/8", "log": ".cache/runs/BATCH-001/TASK-005/attempt-1/verify-frontend.log"},
+      {"command": "npm run build", "exit_code": 0, "result": "PASS", "log": ".cache/runs/BATCH-001/TASK-005/attempt-1/verify-build.log"}
+    ],
+    "acceptance_criteria_verdict": [
+      "PASS — frontend 作业明确运行 test:frontend，失败会使作业失败（默认语义，无 continue-on-error）",
+      "PASS — 保留 Node 22、触发器、既有三步骤与 rust 作业",
+      "PASS — 无 continue-on-error、无吞退出码、无权限扩大",
+      "PASS（本地）/ NOT_RUN（托管 CI）— 本地命令通过；托管 CI 从未运行，如实记录，未伪称通过"
+    ],
+    "hosted_ci_status": "NOT_RUN",
+    "residual_risk_recorded": "本地 Windows + Node 24 与 CI Ubuntu + Node 22 环境不同（ISSUE-010）。--loader 在 Node 22 会打印 ExperimentalWarning 但仍可用；该步骤在托管 CI 上的真实行为未知，首次运行前不得宣称 CI 已通过。",
+    "independent_review_context": true,
+    "conclusion": "verified — 由管理 agent 独立执行验证计划、逐条核对硬性约束并审查实际 YAML 差异；未采信 worker 自报结论",
+    "verified_candidate_sha256": "596B3C86AC96C5E70FCBF3380CEF5DCFA120B1BBA1C92800FA23A30325FB5031",
+    "verified_candidate_sha256_scope": ".github/workflows/ci.yml",
+    "verified_at_utc": "2026-09-13T08:25:00Z"
+  },
+  "budget_consumed": {
+    "repair_rounds": 0,
+    "dispatch_attempts": 1,
+    "wall_minutes": 4,
+    "note": "首次实现即通过，未消耗修复轮（上限 3）"
+  },
+  "merge_status": "NOT_MERGED — verified 不等于已合并或发布；托管 CI 证据需在合并前单独取得"
+}

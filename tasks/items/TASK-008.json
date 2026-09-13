@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "id": "TASK-008",
+  "proposal_ref": "tasks/BATCH-002-PROPOSAL-20260913.md#P2-2",
+  "batch_id": "BATCH-002",
+  "kind": "contract_fix_manager_mechanical",
+  "milestone": "M1",
+  "status": "verified",
+  "title": "修复 docs/contracts/worker-result.schema.json 的 $schema 键（A-3）",
+  "objective": "移除契约文件第 2 行的 $schema 键，使本机 Claude Code 2.1.270 的 --json-schema 直接接受该文件，消除运行期副本绕过；约束语义不变。",
+  "non_goals": [
+    "不修改 schema 的任何约束（required/类型/enum/additionalProperties）",
+    "不改变 worker-result 契约内容",
+    "不修改 dispatch 其他参数"
+  ],
+  "requirement_refs": [
+    "docs/runs/BATCH-001-env-unblock.json BLOCKER-A-REMAINS",
+    "tasks/runs/BATCH-001-final-20260913.json pending_owner_approval A-3",
+    "docs/runs/BATCH-001-independent-review-20260913.md（三份运行级 schema 与受控 schema 差异仅 $schema 键）"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "docs/CLAUDE-WORKER.md",
+    "docs/contracts/worker-result.schema.json"
+  ],
+  "source_baseline": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "dependencies": [],
+  "authorization": {
+    "source": "用户批准 BATCH-002 全部三项（APPROVAL-BATCH-002-001），其中本任务在提案中明确标注触及受保护契约文件并需用户确认；用户批准即视为 A-3 的批准",
+    "execution_mode": "manager_mechanical_action",
+    "rationale": "docs/contracts/** 在 EXECUTION-POLICY.protected_from_worker 清单内，不得派发 Claude 修改；按 TASK-006 的管理 agent 预定义机械操作先例，由管理 agent 执行单行删除并留证"
+  },
+  "blockers": [],
+  "scope": {
+    "allowed_paths": [
+      "docs/contracts/worker-result.schema.json"
+    ],
+    "protected_paths": "其余全部按 EXECUTION-POLICY；Note 文件为管理 agent 职责",
+    "mechanical_action": {
+      "id": "ACTION-SCHEMA-KEY-REMOVE",
+      "definition": "删除 docs/contracts/worker-result.schema.json 第 2 行 \"\\\"$schema\\\": \\\"https://json-schema.org/draft-07/schema#\\\",\"（整行），其余字节不变",
+      "executed_by": "manager"
+    },
+    "generated_artifacts": [],
+    "network_and_data": "一次无害 CLI 探测调用（cost 估算 <0.05 USD，无真实数据）"
+  },
+  "steps": [
+    "记录修改前文件 SHA-256",
+    "执行 ACTION-SCHEMA-KEY-REMOVE",
+    "核对：修改后 JSON 解析成功；原 JSON 去掉 $schema 键后与修改后对象深度相等（约束逐项不变）",
+    "写 proposed/process Note（含 Alternatives considered）",
+    "用真实 CLI 探测 --json-schema 接受度：is_error=false、terminal_reason=completed、结构化输出有效",
+    "记录修改后 SHA-256 与探测证据"
+  ],
+  "acceptance_criteria": [
+    "契约文件被 CLI --json-schema 直接接受（真实调用退出 0 + is_error=false）",
+    "schema 约束逐项不变（深度相等校验通过）",
+    "Note 通过两个校验器",
+    "后续派发不再需要运行期去 $schema 副本"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "python JSON 深度比较",
+      "node 两个 Note 校验器",
+      "claude CLI 一次探测调用"
+    ],
+    "require_real_cli_probe": true
+  },
+  "stop_conditions": [
+    "探测仍拒绝该 schema（则保留运行期副本方案并记录）",
+    "预算耗尽"
+  ],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": 90
+  },
+  "outputs": [
+    "修复后的契约文件",
+    "proposed/process Note",
+    "探测证据（.cache/runs/BATCH-002/TASK-008/）"
+  ],
+  "evidence": [],
+  "note_requirement": "proposed/process/2026-09-13-worker-result-schema-dollar-key.md — 跨 agent 契约变更须留痕",
+  "mechanical_action_execution": {
+    "executed_by": "manager",
+    "action_id": "ACTION-SCHEMA-KEY-REMOVE",
+    "pre_sha256": "5FFF4A19950AF6C7F29F2B73222BCE03CD64E99C8FC920C829E572606B3DC3AE",
+    "post_sha256": "B9E146DD569E1CADF863021480561D293AAF7787CACCE38F68B3494BC4FEACDC",
+    "constraints_unchanged": "True — 修改后对象与『TASK-004 运行期副本（源自原文件）去掉 $schema 键』深度相等"
+  },
+  "verification_results": {
+    "verified_at_utc": "2026-09-13T14:43:55Z",
+    "verified_by": "manager",
+    "cli_probe": {
+      "run_dir": ".cache/runs/BATCH-002/TASK-008-probe/",
+      "schema_source": "docs/contracts/worker-result.schema.json 原文（未去键副本）",
+      "exit_code": 0,
+      "is_error": false,
+      "terminal_reason": "completed",
+      "structured_output_fields": 9,
+      "cost_usd_estimated": 0.049,
+      "conclusion": "契约文件被 CLI --json-schema 直接接受；运行期去键副本步骤自本任务起作废"
+    },
+    "note_validators": "tree/format 均 exit 0"
+  }
+}

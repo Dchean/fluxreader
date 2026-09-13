@@ -1,0 +1,165 @@
+{
+  "schema_version": 1,
+  "run_id": "BATCH-001-review-20260913",
+  "kind": "independent_review",
+  "batch_id": "BATCH-001",
+  "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "review_status": "completed_with_findings",
+  "report": "docs/runs/BATCH-001-independent-review-20260913.md",
+  "candidate_manifest": ".cache/reviews/BATCH-001-20260913/candidate-manifest.json",
+  "candidate_manifest_sha256": "12E51EDEA0834ACF5924460DBF933D301931E74ED7A7EDA43863399C0330685D",
+  "scope_evidence": ".cache/reviews/BATCH-001-20260913/scope-audit.json",
+  "scope_result": {
+    "code_files_changed_from_handoff": 40,
+    "outside_original_task_allowlists": [],
+    "readme_preexisting_and_unchanged_in_batch": true,
+    "candidate_hashes_match_batch_records": true,
+    "candidate_files_changed_by_review_checks": 0
+  },
+  "findings": [
+    {
+      "id": "R-01",
+      "priority": "P1",
+      "summary": "既存 Claude 成功输出被遗漏，同一任务被重复执行并错误归因",
+      "reference": "docs/runs/BATCH-001-takeover.md:127"
+    },
+    {
+      "id": "R-02",
+      "priority": "P2",
+      "summary": "任务摘要的时间、调用和耗时统计与原始证据不符或不完整",
+      "reference": "tasks/runs/BATCH-001-final-20260913.json:186"
+    },
+    {
+      "id": "R-03",
+      "priority": "P2",
+      "summary": "任务 verified 与 blockers、授权状态、项目闭环状态冲突",
+      "reference": "tasks/items/TASK-005.json:24"
+    },
+    {
+      "id": "R-04",
+      "priority": "P2",
+      "summary": "Note 分类无效，两个技能校验器实际失败",
+      "reference": ".agents/notes/proposed/ci/2026-09-13-frontend-regression-in-ci.md:1"
+    },
+    {
+      "id": "R-05",
+      "priority": "P2",
+      "summary": "原 Rust 语义判定方法不足；本审查已补充确定性格式化复现证据",
+      "reference": "tasks/items/TASK-006.json:260"
+    },
+    {
+      "id": "R-06",
+      "priority": "P2",
+      "summary": "凭据已复制到三个本机项目缓存文件，处理描述和授权依据需要准确记录",
+      "reference": "docs/runs/BATCH-001-env-unblock.json:52",
+      "authorization_verdict": "PENDING_CLARIFICATION"
+    }
+  ],
+  "verification": {
+    "typescript": {
+      "status": "PASS",
+      "evidence": ".cache/reviews/BATCH-001-20260913/typecheck.json"
+    },
+    "lint": {
+      "status": "PASS",
+      "warnings": 6,
+      "evidence": ".cache/reviews/BATCH-001-20260913/lint.log"
+    },
+    "frontend": {
+      "status": "PASS",
+      "passed": 8,
+      "failed": 0,
+      "evidence": ".cache/reviews/BATCH-001-20260913/frontend-gates.json"
+    },
+    "rust_format": {
+      "status": "PASS",
+      "evidence": ".cache/reviews/BATCH-001-20260913/rust-fmt.log"
+    },
+    "rust_format_equivalence": {
+      "status": "PASS",
+      "files_compared": 39,
+      "byte_mismatches": 0,
+      "evidence": ".cache/reviews/BATCH-001-20260913/rustfmt-equivalence.json"
+    },
+    "clippy": {
+      "status": "PASS",
+      "evidence": ".cache/reviews/BATCH-001-20260913/rust-clippy.log"
+    },
+    "rust_ordinary": {
+      "status": "PASS",
+      "passed": 81,
+      "failed": 0,
+      "ignored": 23,
+      "evidence": ".cache/reviews/BATCH-001-20260913/rust-test.log"
+    },
+    "rust_selected_mock": {
+      "status": "PASS",
+      "passed": 14,
+      "failed": 0,
+      "remaining_unexecuted_tests": 9,
+      "evidence": ".cache/reviews/BATCH-001-20260913/rust-mock.log"
+    },
+    "rust_runner_metadata": {
+      "status": "CORRECTED_WITH_PROVENANCE",
+      "evidence": ".cache/reviews/BATCH-001-20260913/rust-gates.json",
+      "original": ".cache/reviews/BATCH-001-20260913/rust-gates-original-metadata-error.json"
+    },
+    "note_structure_and_format": {
+      "status": "FAIL",
+      "exit_codes": [
+        1,
+        1
+      ],
+      "evidence": ".cache/reviews/BATCH-001-20260913/note-gates.json"
+    },
+    "build": {
+      "status": "PASS",
+      "exit_code": 0,
+      "evidence": "tasks/runs/BATCH-001-review-build-20260913.json",
+      "output_log": ".cache/reviews/BATCH-001-20260913/build-approved.log",
+      "authorization_source": "用户明确批准及本次工具权限批准",
+      "initial_attempt": {
+        "status": "BLOCKED",
+        "sandbox_exit_code": 1,
+        "reason": "Vite spawn EPERM; outside-sandbox retry rejected by automatic approval review because its codex-auto-review model is unsupported by the configured API (HTTP 404). No bypass attempted.",
+        "evidence": ".cache/reviews/BATCH-001-20260913/build.log",
+        "original_batch_build_log": "PASS_RECORDED_SEPARATELY"
+      }
+    },
+    "hosted_ci": {
+      "status": "NOT_RUN"
+    },
+    "real_desktop_ui_and_installation": {
+      "status": "NOT_RUN"
+    },
+    "real_sync_services": {
+      "status": "NOT_RUN"
+    }
+  },
+  "authorization_clarification": {
+    "owner_reply": "批准过部分或全部（请说明范围）",
+    "status": "PENDING_EXACT_SCOPE",
+    "items": [
+      "使用既有第三方网关",
+      "将认证令牌复制到项目 .cache/",
+      "回退既存未提交改动"
+    ],
+    "note": "未将部分批准推定为全部批准，也暂不认定相关动作越权。"
+  },
+  "changes_made_by_review": [
+    "docs/runs/BATCH-001-independent-review-20260913.md",
+    "tasks/runs/BATCH-001-review-20260913.json",
+    ".cache/reviews/BATCH-001-20260913/**",
+    "tasks/runs/BATCH-001-review-build-20260913.json",
+    "dist/**（获批构建产物）"
+  ],
+  "original_task_states_modified": false,
+  "merge_approved": false,
+  "release_approved": false,
+  "next_batch_authorized": false,
+  "recorded_at_utc": "2026-09-13T16:38:50.7965818+08:00",
+  "updated_at_utc": "2026-09-13T10:46:41.9697243+00:00",
+  "followup_reports": [
+    "tasks/runs/BATCH-001-review-build-20260913.json"
+  ]
+}

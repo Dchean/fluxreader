@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "project": "FluxReader",
+  "updated_on": "2026-09-13",
+  "phase": "managed_delivery",
+  "phase_status": "batch_002_completed_pending_owner_review",
+  "source_baseline": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "current_milestone": "M1",
+  "current_task": null,
+  "current_task_note": "BATCH-002 三个任务（TASK-007/008/009）均已 verified；无进行中任务。",
+  "next_proposed_task": null,
+  "authority": "用户明确指令优先；此文件记录授权，不能通过编辑字段创造授权。",
+  "permissions": {
+    "documentation_and_static_archaeology": true,
+    "tool_version_and_document_consistency_checks": true,
+    "application_baseline_execution": true,
+    "dependency_installation": true,
+    "application_or_test_code_changes": true,
+    "ci_changes": true,
+    "controller_implementation": false,
+    "merge_requires_owner_confirmation": true,
+    "release_requires_separate_owner_confirmation": true,
+    "low_risk_only": true,
+    "risk_policy_ref": "tasks/EXECUTION-POLICY.json"
+  },
+  "owner_decisions": [
+    "DEC-001",
+    "DEC-002",
+    "DEC-003",
+    "DEC-004",
+    "DEC-005",
+    "DEC-006",
+    "DEC-007",
+    "DEC-008",
+    "DEC-009",
+    "DEC-010",
+    "DEC-011",
+    "DEC-012"
+  ],
+  "owner_decisions_source": "docs/PRODUCT.md",
+  "pending_approvals": [
+    {
+      "id": "APPROVAL-BASELINE-001",
+      "scope": "执行 TASK-002：核对环境、按锁文件准备依赖、复现指定现有检查和桌面构建，记录真实结果；不修改业务代码、测试断言、CI 或依赖版本，不运行真实服务测试。",
+      "status": "approved",
+      "user_confirmation": "批准",
+      "recorded_at_utc": "2026-09-13T04:14:38Z",
+      "confirmation_context": "用户批准执行 TASK-002，包括准备锁定依赖、运行指定检查和桌面构建，仅记录结果，不修改业务代码、测试断言或 CI。"
+    },
+    {
+      "id": "APPROVAL-BATCH-002-001",
+      "scope": "执行 BATCH-002 全部三项（TASK-007 补 CI Note 反向注释 / TASK-008 契约文件 $schema 键修复（含 A-3 批准）/ TASK-009 凭据残留脱敏），预算沿用每任务 3 轮修复 + 90 分钟、每批 3 任务、无费用上限。",
+      "status": "approved",
+      "user_confirmation": "全部批准",
+      "recorded_at_utc": "2026-09-13T14:27:01Z",
+      "confirmation_context": "用户对 tasks/BATCH-002-PROPOSAL-20260913.md 三问中的第 2 问答复『全部批准』。"
+    },
+    {
+      "id": "APPROVAL-HOSTED-CI-001",
+      "scope": "A-2：推送 BATCH-001 候选（40 个文件）到远端专用分支以取得托管 CI 真实证据；不含合并（A-1 仍待确认）、不含发布。",
+      "status": "approved",
+      "user_confirmation": "批准",
+      "recorded_at_utc": "2026-09-13T14:27:01Z",
+      "confirmation_context": "用户对提案第 3 问（A-2 托管 CI）答复『批准』。CI 触发需要面向 main 的 PR；gh 未安装，PR 创建方式另行说明。"
+    }
+  ],
+  "unresolved_product_questions": [
+    "Q-COMPAT-001",
+    "Q-BEHAVIOR-001",
+    "Q-QUALITY-001"
+  ],
+  "task_source": "tasks/items/",
+  "board_views": [
+    "tasks/BACKLOG.md",
+    "tasks/IN_PROGRESS.md",
+    "tasks/DONE.md"
+  ],
+  "automation": {
+    "controller_implemented": false,
+    "cli_adapters_implemented": false,
+    "scheduled_execution_enabled": false,
+    "unattended_execution_authorized": true,
+    "retry_time_cost_budgets": {
+      "max_repair_rounds_per_task": 3,
+      "max_task_minutes": 90,
+      "max_tasks_per_batch": 3,
+      "financial_cap_enabled": false,
+      "max_cost": null
+    },
+    "manager_driven_cli_execution_authorized": true,
+    "max_concurrent_workers": 1,
+    "controller_end_to_end_delegation_verified": false,
+    "controller_end_to_end_delegation_note": "R-03 更正（2026-09-13T14:04:57Z）：原字段名 end_to_end_delegation_verified 与顶层 delegation_loop_verified 语义冲突。本字段特指控制器程序自动执行的端到端委派——控制器未实现，保持 false；由管理 agent 人工驱动并取得证据的委派闭环见顶层 delegation_loop_verified=true。",
+    "end_to_end_delegation_verified_removed": "字段已更名为 controller_end_to_end_delegation_verified（2026-09-13T14:04:57Z，R-03），未改变任何值。"
+  },
+  "milestones": [
+    {
+      "id": "M0",
+      "title": "治理启动包与首轮考古",
+      "status": "verified_for_baseline_input"
+    },
+    {
+      "id": "M1",
+      "title": "测试基线与必要保护",
+      "status": "ready_for_managed_delivery"
+    },
+    {
+      "id": "M2",
+      "title": "模块处置方案与重构试点",
+      "status": "not_authorized"
+    },
+    {
+      "id": "M3",
+      "title": "自动总控与可替换执行器试点",
+      "status": "not_authorized"
+    },
+    {
+      "id": "M4",
+      "title": "持续优化与发布",
+      "status": "not_authorized"
+    }
+  ],
+  "feature_scope_source": "docs/FEATURES.md",
+  "latest_documentation_report": "tasks/runs/BATCH-001-review-wrapup-20260913.json",
+  "latest_execution_report": "tasks/runs/BATCH-002-final-20260913.json",
+  "next_action": "A-2 已完成：托管 CI 在候选提交 6646df9 全部通过（PR #2，双检查 success，证据 tasks/runs/A2-HOSTED-CI-20260913.json）。BATCH-002 3/3 verified。等待用户决定 A-1：是否合并（PR https://github.com/Dchean/fluxreader/pull/2 ；合并需用户明确确认）；随后确认下一批（BATCH-003）范围。新决定 DEC-012：CLI 派发一律 --effort max。",
+  "cli_environment": {
+    "status": "resolved_within_existing_authority",
+    "record": "docs/runs/BATCH-001-env-unblock.json",
+    "resolutions": [
+      "运行级 schema 副本规避 $schema 键被拒；受保护契约文件未修改",
+      "受限调用增加 --settings 显式传入用户既有 env；--restricted 保留、未用 bypassPermissions"
+    ],
+    "residual": "docs/contracts/worker-result.schema.json 的 $schema 键仍与工具不兼容，建议后续单独修复"
+  },
+  "execution_policy": "tasks/EXECUTION-POLICY.json",
+  "handoff_entry": "docs/HANDOFF.md",
+  "latest_takeover_record": "docs/runs/BATCH-001-takeover.md",
+  "latest_batch_report": "tasks/runs/BATCH-001-final-20260913.json",
+  "current_batch": "BATCH-002",
+  "next_batch": null,
+  "next_batch_requires_owner": true,
+  "delegation_loop_verified": true,
+  "delegation_loop_note": "首个真实的『管理 agent → Claude Code 编码 → 独立验收』闭环已在 TASK-004 与 TASK-005 取得证据（worker 结构化输出 + 管理 agent 独立复跑验证 + 差异审查）。"
+}

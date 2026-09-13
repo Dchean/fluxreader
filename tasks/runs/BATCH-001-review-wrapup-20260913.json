@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "run_id": "BATCH-001-review-wrapup-20260913",
+  "kind": "review_wrapup_record_corrections",
+  "batch_id": "BATCH-001",
+  "recorded_at_utc": "2026-09-13T14:04:57Z",
+  "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "context": {
+    "recovery": "新管理 agent 会话按 docs/prompts/MANAGER-RESUME.md 接续。核对确认与独立审查记录为同一工作区（E:/tik/fluxreader）、同一源码基准、同一工具链（Node 24.19.0 / npm 11.17.0 / Rust 1.98.1 / rustfmt 1.9.0 / Claude Code 2.1.270），未发生设备迁移，历史证据在本机完整可用。",
+    "authorization_basis": "用户指令『在已有授权内继续』+ AGENTS.md 管理 agent 职责（维护阶段和任务状态、证据整理）+ MANAGER-RESUME『首先可以进行交接核对、证据整理和准备收尾任务包』。本记录只做管理记录与 Note 修正，不改任何产品/测试/CI 代码，不消耗批次任务额度（BATCH-001 保持满额 3/3），不创建新批次。",
+    "input_review": [
+      "docs/runs/BATCH-001-independent-review-20260913.md",
+      "tasks/runs/BATCH-001-review-20260913.json",
+      "tasks/runs/BATCH-001-review-build-20260913.json",
+      "tasks/runs/BATCH-001-final-20260913.json",
+      "docs/runs/BATCH-001-takeover.md",
+      "docs/runs/BATCH-001-env-unblock.json",
+      "tasks/runs/HANDOFF-RESUME-PREP-20260913.json"
+    ]
+  },
+  "evidence_verification_before_changes": {
+    "git_head_matches_baseline": true,
+    "worker_attempt4_structured_result": {
+      "verified": true,
+      "is_error": false,
+      "terminal_reason": "completed",
+      "num_turns": 10,
+      "result_task_id": "TASK-004",
+      "result_run_id": "TASK-004-20260913T073100Z",
+      "changed_files": ["tools/frontend-regression.mjs"],
+      "file_mtime_utc": "2026-09-13T07:36:03.693694Z",
+      "evidence": ".cache/runs/TASK-004-20260913T073100Z/worker.attempt-4.stdout.json"
+    },
+    "process_times_match_review": true,
+    "cost_rebuild_total_usd": 0.9979945,
+    "cost_rebuild_matches_review": true,
+    "credential_files_token_present_nonempty": [
+      ".cache/runs/BATCH-001/probe-settings.json",
+      ".cache/runs/BATCH-001/TASK-004/attempt-1/run-settings.json",
+      ".cache/runs/BATCH-001/TASK-005/attempt-1/run-settings.json"
+    ],
+    "credential_check_note": "仅以字段名+非空布尔核对，未读取、未显示任何令牌值。",
+    "current_script_hash": "6F300509466B1917CBD714D0820C199567194DC1FC244F7788CB11FD1CD051C4",
+    "current_script_hash_equals_pre_reversion_version": true
+  },
+  "finding_dispositions": {
+    "R-01": {
+      "status": "corrected",
+      "action": "docs/runs/BATCH-001-takeover.md 追加第 7 节更正：F-0 第 127 行『没有 worker-result 结构化记录』结论错误；attempt-4 为成功结构化输出；重新派发是同一任务的复现（哈希一致），不是首次实现。原文按原样保留。",
+      "note": "回退动作本身的授权范围归入 R-06 待确认项。"
+    },
+    "R-02": {
+      "status": "corrected",
+      "action": "tasks/runs/BATCH-001-final-20260913.json 追加 budget_corrections_20260913：模型调用 2→3 次编码 + 3 次诊断（费用 0.50268325→0.9979945，CLI 自报估算）；成功派发时间改用 worker-process.json 进程时间；说明记录时间与动作时间的区别及预算合规结论不变。",
+      "budget_conclusion_unchanged": "3/3 任务、0/3 修复轮、无 90 分钟超限证据、无费用上限——与原结论一致。"
+    },
+    "R-03": {
+      "status": "corrected",
+      "action": [
+        "tasks/items/TASK-005.json、tasks/items/TASK-006.json：清空已过时的 blockers 并附 blockers_resolution 证据；ready_check.status 由 ready_pending_dispatch 更正为 dispatched_verified_closed，历史值保留于 status_correction。",
+        "tasks/PROJECT.json：automation.end_to_end_delegation_verified 更名为 controller_end_to_end_delegation_verified（值不变，false），附语义说明；与顶层 delegation_loop_verified=true 的分工在两个文件中显式记录。",
+        "tasks/EXECUTION-POLICY.json：runtime 同名字段同步更名并附语义说明，值不变。",
+        "docs/HANDOFF.md 与 docs/CLAUDE-WORKER.md 复查：R-03 所指『首次委派闭环未运行』表述在 HANDOFF-RESUME-PREP 更新中已不存在（grep 闭环/委派/尚未 均无残留），无需再改。"
+      ],
+      "guard": "未把任何字段改为更宽松值；所有更正使状态向已验证事实收敛，并保留历史值。"
+    },
+    "R-04": {
+      "status": "corrected",
+      "action": [
+        "Note『将现有前端逻辑回归接入 CI』由不存在的 ci 类别移入 testing/：.agents/notes/proposed/testing/2026-09-13-frontend-regression-in-ci.md（内容未改，sha256 255DA83E97B07AEE1381B97BFBBF3CAA68C98A5289482A3E99B187D1D11AA285）。",
+        "同题重复 Note：保留 TASK-004 引用的 simplification 版（有效记录）；删除较简的 testing 重复版（被取代），副本与哈希留存于 .cache/runs/BATCH-001-review-wrapup-20260913/superseded-testing-note-2026-09-13-frontend-regression-unused-bindings.md（sha256 C867DAC530CC86C5BFF3AA10CF1F24D9D69D9048F9CADCE07E111EF23AF9686B）。",
+        "tasks/items/TASK-005.json 的 note 引用路径同步更新并附 note_path_correction。",
+        "CI 文件缺少 Note 反向追溯注释：属代码改动，列入下一批任务提案（BATCH-002 提案 P2-3），本轮未改代码。"
+      ],
+      "verification": {
+        "verify-agent-note-tree": { "exit_code_before": 1, "exit_code_after": 0, "output": "ok: 4 note(s) tree and relative links verified" },
+        "verify-agent-note-format": { "exit_code_before": 1, "exit_code_after": 0, "output": "ok: 4 note(s) verified" }
+      },
+      "lifecycle_note": "四篇 Note 保持 proposed：BATCH-001 未提交，转为 implemented 须随同一次代码提交（AGENTS.md / 技能约定）。"
+    },
+    "R-05": {
+      "status": "corrected",
+      "action": "tasks/items/TASK-006.json 的 manager_review.semantic_integrity_analysis 追加 semantic_integrity_method_correction：原『标识符多重集』方法不足以排除运算符/字面量/控制流变化；运作证据改为独立审查的确定性格式化复现（39/39 逐字节一致，.cache/reviews/BATCH-001-20260913/rustfmt-equivalence.json）。verdict 维持 PASS，原方法保留供追溯。",
+      "board_view_sync": "tasks/DONE.md 中 TASK-006 证据单元格已同步替换该表述。"
+    },
+    "R-06": {
+      "status": "facts_recorded_pending_owner_scope",
+      "confirmed_facts": [
+        "ANTHROPIC_AUTH_TOKEN 非空值存在于三个本机文件：.cache/runs/BATCH-001/probe-settings.json、.cache/runs/BATCH-001/TASK-004/attempt-1/run-settings.json、.cache/runs/BATCH-001/TASK-005/attempt-1/run-settings.json（invoke-worker.ps1 将用户既有 env 整体写入运行目录所致）。",
+        "env-unblock 记录的 credential_handling 段『token_location 只列 probe-settings.json』与『not_persisted_into_repo=true』表述不完整：.cache/ 被 .gitignore 排除只说明不会进入 Git，不说明未落盘。",
+        "无证据表明令牌被打印到控制台、写入本记录或泄露到仓库外。"
+      ],
+      "correction_action": "本记录即对 env-unblock credential_handling 段的更正补充；原记录保留不改（docs/runs/BATCH-001-env-unblock.json 未修改）。",
+      "pending_owner_items": [
+        "使用既有第三方网关（ANTHROPIC_BASE_URL + AUTH_TOKEN）——用户答复『批准过部分或全部』，具体范围待确认",
+        "将认证令牌复制到项目 .cache/ 运行目录（三个文件，本机 .gitignore 排除）——具体批准范围待确认",
+        "回退既存未提交 TASK-004 改动（git checkout -- tools/frontend-regression.mjs，随后重派发产出与原改动逐字节一致）——具体批准范围待确认"
+      ],
+      "handling_rule": "未将部分批准推定为全部批准，也未认定越权；在用户给出确切范围前，上述动作的授权依据记为 PENDING_EXACT_SCOPE。若用户追认全部三项，本记录即为授权依据；若部分追认，未追认项需评估是否需要补救（如清理 .cache 中含令牌的文件）。"
+    }
+  },
+  "changes_made_by_this_wrapup": [
+    "docs/runs/BATCH-001-takeover.md（追加第 7 节更正）",
+    "tasks/runs/BATCH-001-final-20260913.json（追加 budget_corrections_20260913）",
+    "tasks/items/TASK-005.json（blockers/ready_check/note 路径更正）",
+    "tasks/items/TASK-006.json（blockers/ready_check/语义方法更正）",
+    "tasks/PROJECT.json（字段更名与语义说明；next_action、latest_documentation_report、phase_status 更新）",
+    "tasks/EXECUTION-POLICY.json（runtime 字段更名与语义说明）",
+    ".agents/notes/proposed/ci/ → testing/（Note 移动）",
+    ".agents/notes/proposed/testing/2026-09-13-frontend-regression-unused-bindings.md（删除重复，副本留档 .cache）",
+    "tasks/DONE.md、tasks/IN_PROGRESS.md（看板视图同步）",
+    "本记录 tasks/runs/BATCH-001-review-wrapup-20260913.json"
+  ],
+  "code_test_ci_changes": "NONE — 未修改任何产品代码、测试或 CI 文件；未运行应用测试（无需重跑：无相关代码修改，任务 verified 证据继续有效）。",
+  "application_tests": "NOT_RUN_DOCUMENTATION_ONLY",
+  "json_validity_check": "PASS — 本轮修改的全部 JSON（TASK-005/006、BATCH-001-final、PROJECT、EXECUTION-POLICY）均可解析",
+  "original_task_states": "TASK-004/005/006 的 status=verified 未变；更正仅清除与已验证事实矛盾的过时字段并追加更正说明。",
+  "merge_approved": false,
+  "release_approved": false,
+  "next_batch_authorized": false,
+  "next_step": "BATCH-002 范围与额度提案已提交用户确认；R-06 三项历史授权范围待用户确切答复。",
+
+  "r06_owner_reply_20260913": {
+    "recorded_at_utc": "2026-09-13T14:27:01Z",
+    "owner_reply_verbatim": "这个记不清了，但是我现在已经配置好了claude code cli 可以直接调用",
+    "resolution": "用户无法确切回忆三项历史动作的批准范围。按『文件中的 approval 只能记录真实用户决定』，三项的授权依据保持 OWNER_CANNOT_RECALL：不推定追认，也不认定越权。补救措施：用户已批准 BATCH-002（含 TASK-009 对 .cache 内令牌值的原位脱敏），脱敏后暴露面消除；本记录与 env-unblock 原文保留事实描述。",
+    "additional_owner_statement": "用户声明现已配置好 Claude Code CLI 可直接调用；BATCH-002 派发与探测以真实调用结果为准。"
+  },
+  "owner_decisions_20260913": [
+    "BATCH-002 三项全部批准（APPROVAL-BATCH-002-001，见 PROJECT.pending_approvals）",
+    "A-2 托管 CI 证据批准（APPROVAL-HOSTED-CI-001）"
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "run_id": "A2-HOSTED-CI-20260913",
+  "kind": "hosted_ci_evidence",
+  "batch_id": "BATCH-001",
+  "recorded_at_utc": "2026-09-13T16:05:00Z",
+  "authorization": "APPROVAL-HOSTED-CI-001（用户『批准』A-2 推送专用分支取得托管 CI 证据）；PR 由用户在 GitHub 创建",
+  "candidate": {
+    "branch": "ci/batch-001-hosted-verification",
+    "head_commit": "6646df916a0d40a03c72aca16bffe5bef99867a8",
+    "base_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+    "content": "BATCH-001 候选 40 个文件（TASK-004 脚本 + TASK-005 CI 步骤 + TASK-006 38 个 Rust 文件）；不含 README 既存改动与 BATCH-002 变更"
+  },
+  "pull_request": {
+    "number": 2,
+    "title": "BATCH-001 candidate for hosted CI verification",
+    "url": "https://github.com/Dchean/fluxreader/pull/2",
+    "draft": false,
+    "head_sha_at_api_check": "6646df916a0d40a03c72aca16bffe5bef99867a8"
+  },
+  "check_runs_first_hand": {
+    "source": "GitHub API GET /repos/Dchean/fluxreader/commits/6646df916a0d40a03c72aca16bffe5bef99867a8/check-runs（未认证只读，仓库为 public）",
+    "checks": [
+      { "name": "Type-check, lint & build frontend", "conclusion": "success", "status": "completed" },
+      { "name": "Check & test Rust (src-tauri)", "conclusion": "success", "status": "completed" }
+    ],
+    "owner_report": "All checks have passed；2 successful checks；No conflicts with base branch；Merging can be performed automatically"
+  },
+  "verdict": "PASS — TASK-005 新增的前端回归步骤在托管 CI（Ubuntu/Node 22）真实通过；Rust 检查在 CI 配置平台通过。ISSUE-010 针对本候选的『托管 CI 从未运行』状态解除。",
+  "scope_limits": [
+    "托管 CI 覆盖 lint / build / 前端回归 / Rust 检查与测试；不等于真实桌面 UI 验收或真实同步服务验证（仍 NOT_RUN）",
+    "CI 运行对象是分支头 6646df9（BATCH-001 候选），不含后续 BATCH-002 变更（ci.yml 注释、契约修复等）；合并时的最终候选若另有变更需重新绑定验证",
+    "本次不构成合并批准（A-1 仍需用户确认）或发布批准"
+  ],
+  "merge_approved": false,
+  "release_approved": false
+}
