@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "id": "TASK-022",
+  "batch_id": "BATCH-007",
+  "kind": "refactor",
+  "milestone": "M2",
+  "status": "verified",
+  "title": "sync.rs 17 处直接 SQL 收敛至 db.rs（M2 整理序列 1/4）",
+  "objective": "把 sync.rs 中全部 17 处直接 SQL（execute/query_row/prepare）抽取为 db.rs 类型化函数，SQL 语句与参数逐字保留，锁范围与调用时序不变。这是 M2 处置方案整理序列的第二步（试点已完成 commands.rs）。",
+  "non_goals": [
+    "不改任何行为/返回结构/锁纪律（锁内读写、锁外 HTTP 不变）",
+    "不做 db.rs 内部模块化（下一任务）",
+    "不做 sync.rs 分层（后续任务）",
+    "不引入新依赖"
+  ],
+  "requirement_refs": [
+    "docs/runs/M2-module-disposition-20260913.md",
+    ".agents/notes/proposed/architecture/2026-09-13-m2-module-disposition.md",
+    "docs/ISSUES.md ISSUE-008"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "src-tauri/src/sync.rs",
+    "src-tauri/src/db.rs"
+  ],
+  "source_baseline": "main@a8e3481（v0.13.0 版本提交）",
+  "dependencies": [
+    "TASK-017 试点（commands.rs 已收敛）"
+  ],
+  "blockers": [],
+  "authorization": {
+    "source": "用户 2026-09-13 指令『继续整理程序，跑完所有流程，后续所有任务一起跑通』+ DEC-013",
+    "risk_level": "medium——纯移动语义，同步 E2E 测试网覆盖"
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/sync.rs",
+      "src-tauri/src/db.rs",
+      "src-tauri/tests/**（新增测试）"
+    ],
+    "protected_paths": "按 EXECUTION-POLICY",
+    "change_definition": "SQL 逐处移动为 db:: 函数；sync.rs 调用点替换；新函数含单元测试",
+    "generated_artifacts": [],
+    "network_and_data": "无"
+  },
+  "steps": [
+    "逐处定位 sync.rs 的 17 处 SQL 及锁上下文",
+    "db.rs 实现等价函数（**只允许 Edit 追加/局部修改，严禁 Write 整文件覆盖**——TASK-017 attempt-1 事故教训）",
+    "sync.rs 调用点替换",
+    "新增单元测试",
+    "全量验证（clippy/fmt/cargo test）"
+  ],
+  "acceptance_criteria": [
+    "grep -E 'execute\\(|query_row\\(|prepare\\(' src-tauri/src/sync.rs 返回 0",
+    "新增 db:: 函数有单元测试",
+    "cargo test 全量通过（96+ 新增）、clippy -D warnings、fmt --check",
+    "锁纪律与调用时序不变"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "grep 验收",
+      "clippy",
+      "fmt",
+      "cargo test",
+      "diff 审查锁范围"
+    ]
+  },
+  "stop_conditions": [
+    "某处 SQL 移动需改变行为/锁范围时返回 blocked"
+  ],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": null
+  },
+  "outputs": [
+    "sync.rs 无直接 SQL",
+    "db.rs 新函数与测试"
+  ],
+  "evidence": [],
+  "note_requirement": "随 M2 整理序列完成后统一处理 Note 转正",
+  "verification_results": {
+    "verified_at_utc": "BATCH-007 内",
+    "hard_acceptance": "sync.rs execute/query_row/prepare = 0（17 处全部收敛）",
+    "gates": {
+      "clippy": "exit 0（含 7 处 needless_borrow 机械修正）",
+      "fmt": "exit 0（机械 rustfmt）",
+      "cargo_test": "105/0/23（96 基线 + 9 新增）"
+    },
+    "db_integrity": "db.rs 2812→3513 行，追加式（TASK-017 教训已吸收，无覆盖事故）",
+    "env_note": "一次 cargo test 因系统页面文件耗尽触发 rustc ICE（error 1455），重跑通过——环境瞬态，非代码问题，如实记录"
+  }
+}
