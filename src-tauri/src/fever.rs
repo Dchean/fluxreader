@@ -17,8 +17,8 @@
 
 use crate::error::{AppError, AppResult};
 use crate::greader::{
-    CategoryRef, ContentBlock, EnclosureRef, ItemContent, LinkRef, OriginRef, Subscription, TagRef,
-    tags,
+    tags, CategoryRef, ContentBlock, EnclosureRef, ItemContent, LinkRef, OriginRef, Subscription,
+    TagRef,
 };
 use md5::{Digest, Md5};
 use reqwest::Client;
@@ -26,8 +26,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 /* ============================================================
-   Fever 原始响应（JSON）
-   ============================================================ */
+Fever 原始响应（JSON）
+============================================================ */
 
 #[derive(Debug, Deserialize)]
 struct FeverEnvelope {
@@ -97,8 +97,8 @@ struct FeverItem {
 }
 
 /* ============================================================
-   客户端
-   ============================================================ */
+客户端
+============================================================ */
 
 #[derive(Clone)]
 pub struct FeverClient {
@@ -241,7 +241,11 @@ impl FeverClient {
         let env = self
             .call("items", &[("since_id", since_id.to_string())])
             .await?;
-        Ok(env.items.into_iter().map(fever_item_to_item_content).collect())
+        Ok(env
+            .items
+            .into_iter()
+            .map(fever_item_to_item_content)
+            .collect())
     }
 
     /// 拉最近条目（items 无参数，Miniflux 返回最近 50 条，未读优先）。
@@ -249,7 +253,11 @@ impl FeverClient {
     /// `saved_item_ids` + `items_with_ids` 补齐。
     pub async fn items_recent(&self) -> AppResult<Vec<ItemContent>> {
         let env = self.call("items", &[]).await?;
-        Ok(env.items.into_iter().map(fever_item_to_item_content).collect())
+        Ok(env
+            .items
+            .into_iter()
+            .map(fever_item_to_item_content)
+            .collect())
     }
 
     /// 按 id 精确拉条目正文。
@@ -263,7 +271,11 @@ impl FeverClient {
             .collect::<Vec<_>>()
             .join(",");
         let env = self.call("items", &[("with_ids", csv)]).await?;
-        Ok(env.items.into_iter().map(fever_item_to_item_content).collect())
+        Ok(env
+            .items
+            .into_iter()
+            .map(fever_item_to_item_content)
+            .collect())
     }
 
     /* ---------- 状态写入（mark=item，单个 id 逐个调用） ---------- */
@@ -283,10 +295,7 @@ impl FeverClient {
 
     async fn mark_items(&self, ids: &[i64], mark: &str) -> AppResult<()> {
         for id in ids {
-            let mut url = format!(
-                "{}/fever/?api&mark=item&as={mark}&id={id}",
-                self.base
-            );
+            let mut url = format!("{}/fever/?api&mark=item&as={mark}&id={id}", self.base);
             url.push_str(&format!("&api_key={}", self.api_key));
             let resp = self.http.post(&url).send().await?;
             if !resp.status().is_success() {
@@ -305,8 +314,8 @@ impl FeverClient {
 }
 
 /* ============================================================
-   映射辅助
-   ============================================================ */
+映射辅助
+============================================================ */
 
 fn parse_csv_ids(s: Option<&str>) -> Vec<i64> {
     s.unwrap_or("")
@@ -351,8 +360,8 @@ fn fever_item_to_item_content(item: FeverItem) -> ItemContent {
 }
 
 /* ============================================================
-   单元测试
-   ============================================================ */
+单元测试
+============================================================ */
 
 #[cfg(test)]
 mod tests {
@@ -369,7 +378,10 @@ mod tests {
     fn parse_csv_handles_empty_and_trailing() {
         assert!(parse_csv_ids(None).is_empty());
         assert_eq!(parse_csv_ids(Some("")), Vec::<i64>::new());
-        assert_eq!(parse_csv_ids(Some("5699,5700,5711")), vec![5699, 5700, 5711]);
+        assert_eq!(
+            parse_csv_ids(Some("5699,5700,5711")),
+            vec![5699, 5700, 5711]
+        );
     }
 
     #[test]
@@ -388,7 +400,10 @@ mod tests {
         let ic = fever_item_to_item_content(item);
         assert_eq!(ic.id, "5705");
         assert!(crate::greader::has_tag(&ic.categories, "/com.google/read"));
-        assert!(crate::greader::has_tag(&ic.categories, "/com.google/starred"));
+        assert!(crate::greader::has_tag(
+            &ic.categories,
+            "/com.google/starred"
+        ));
         assert_eq!(
             ic.origin.as_ref().map(|o| o.stream_id.as_str()),
             Some("feed/21")

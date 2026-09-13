@@ -15,7 +15,13 @@ pub struct MediaHandle {
 #[cfg(windows)]
 enum MediaCmd {
     /// (标题, 节目名, 时长秒, 进度秒, 播放中)
-    Update { title: String, show: String, duration_sec: f64, position_sec: f64, playing: bool },
+    Update {
+        title: String,
+        show: String,
+        duration_sec: f64,
+        position_sec: f64,
+        playing: bool,
+    },
     Stop,
 }
 
@@ -31,7 +37,14 @@ impl MediaHandle {
     }
 
     #[cfg(windows)]
-    pub fn update(&self, title: &str, show: &str, duration_sec: f64, position_sec: f64, playing: bool) {
+    pub fn update(
+        &self,
+        title: &str,
+        show: &str,
+        duration_sec: f64,
+        position_sec: f64,
+        playing: bool,
+    ) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(MediaCmd::Update {
                 title: title.to_string(),
@@ -44,7 +57,15 @@ impl MediaHandle {
     }
 
     #[cfg(not(windows))]
-    pub fn update(&self, _title: &str, _show: &str, _duration_sec: f64, _position_sec: f64, _playing: bool) {}
+    pub fn update(
+        &self,
+        _title: &str,
+        _show: &str,
+        _duration_sec: f64,
+        _position_sec: f64,
+        _playing: bool,
+    ) {
+    }
 
     #[cfg(windows)]
     pub fn stop(&self) {
@@ -61,7 +82,10 @@ impl MediaHandle {
 /// 启动失败（如无窗口句柄）返回 inactive handle，播放条功能不受影响。
 #[cfg(windows)]
 pub fn spawn_media_thread(app: &tauri::AppHandle) -> MediaHandle {
-    use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
+    use souvlaki::{
+        MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition,
+        PlatformConfig,
+    };
     use std::time::Duration;
     use tauri::{Emitter, Manager};
 
@@ -113,14 +137,24 @@ pub fn spawn_media_thread(app: &tauri::AppHandle) -> MediaHandle {
             // 指令循环：通道关闭（发送端全 drop）即退出线程
             for cmd in rx {
                 match cmd {
-                    MediaCmd::Update { title, show, duration_sec, position_sec, playing } => {
+                    MediaCmd::Update {
+                        title,
+                        show,
+                        duration_sec,
+                        position_sec,
+                        playing,
+                    } => {
                         let playback = if playing {
                             MediaPlayback::Playing {
-                                progress: Some(MediaPosition(Duration::from_secs_f64(position_sec.max(0.0)))),
+                                progress: Some(MediaPosition(Duration::from_secs_f64(
+                                    position_sec.max(0.0),
+                                ))),
                             }
                         } else {
                             MediaPlayback::Paused {
-                                progress: Some(MediaPosition(Duration::from_secs_f64(position_sec.max(0.0)))),
+                                progress: Some(MediaPosition(Duration::from_secs_f64(
+                                    position_sec.max(0.0),
+                                ))),
                             }
                         };
                         let _ = controls.set_playback(playback);
@@ -151,8 +185,8 @@ pub fn spawn_media_thread(_app: &tauri::AppHandle) -> MediaHandle {
 }
 
 /* ============================================================
-   IPC 命令
-   ============================================================ */
+IPC 命令
+============================================================ */
 
 /// 播放状态/元数据同步（PlayerBar 节流调用）
 #[tauri::command]
@@ -164,7 +198,9 @@ pub fn media_update_full(
     position_sec: f64,
     playing: bool,
 ) -> AppResult<()> {
-    state.media.update(&title, &show, duration_sec, position_sec, playing);
+    state
+        .media
+        .update(&title, &show, duration_sec, position_sec, playing);
     Ok(())
 }
 

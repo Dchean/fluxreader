@@ -2,8 +2,6 @@
 // 运行：先 npx tsc -p tsconfig.test.json，再
 //   node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs
 
-import assert from 'node:assert';
-
 // 1) 伪造 Tauri 窗口环境，使 isTauri()=true → dataMode 可进 'tauri'
 globalThis.window = { __TAURI_INTERNALS__: {} };
 
@@ -74,7 +72,7 @@ const entryId = store.getState().entries[0].id;
 store.getState().selectArticle(entryId);
 
 // 触发翻译（走 tauri 路径，onDelta 追加未消毒内容）
-const p = store.getState().toggleReaderTranslation();
+store.getState().toggleReaderTranslation();
 
 // 等流式完成 + 回读完成
 await new Promise((r) => setTimeout(r, 50));
@@ -105,7 +103,6 @@ store.setState((s) => ({
   entries: s.entries.map((a) => (a.id === cachedId ? { ...a, translatedContent: '已缓存译文' } : a)),
   isShowingTranslatedProse: false,
 }));
-const beforeCalls = invokeCalls.length;
 store.getState().toggleReaderTranslation();
 await new Promise((r) => setTimeout(r, 20));
 const cached = store.getState().entries.find((a) => a.id === cachedId);

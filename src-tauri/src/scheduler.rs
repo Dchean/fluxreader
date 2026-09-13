@@ -21,7 +21,9 @@ pub const MAX_CONCURRENCY: usize = 16;
 
 /// 从 app_settings JSON 里读 autoRefresh / refreshInterval / smartDedup /
 /// fetchConcurrency。async 版：在调度循环（tokio worker）里调用。
-async fn read_refresh_config(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> (bool, i64, bool, usize) {
+async fn read_refresh_config(
+    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+) -> (bool, i64, bool, usize) {
     let conn = db.lock().await;
     let raw = crate::db::get_setting(&conn, "app_settings").ok().flatten();
     let mut enabled = true;
@@ -125,7 +127,10 @@ async fn refresh_feeds_inner_with_concurrency(
     if due.is_empty() {
         return (0, 0);
     }
-    log::info!("scheduler: {} feed(s) due, concurrency={concurrency}", due.len());
+    log::info!(
+        "scheduler: {} feed(s) due, concurrency={concurrency}",
+        due.len()
+    );
 
     let sem = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::with_capacity(due.len());
@@ -199,7 +204,8 @@ async fn auto_sync_backend(
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-        let on = raw.as_ref()
+        let on = raw
+            .as_ref()
             .and_then(|v| v.get("autoSync").and_then(|b| b.as_bool()))
             .unwrap_or(true);
         if !on {
@@ -227,7 +233,9 @@ async fn auto_sync_backend(
         Ok(r) => {
             log::info!(
                 "scheduler: 后端自动同步完成：推 {}/拉 {} 项，{} 错误",
-                r.pushed_states, r.pulled_entries, r.errors.len()
+                r.pushed_states,
+                r.pulled_entries,
+                r.errors.len()
             );
             // 拉平了状态（或推空但有 pending 修正）→ 通知前端重载
             if r.pulled_entries > 0 {
@@ -243,7 +251,10 @@ async fn auto_sync_backend(
 }
 
 /// 通知开关开启 且 主窗口不可见（最小化到托盘/失焦）。
-async fn should_notify(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>, app: &AppHandle) -> bool {
+async fn should_notify(
+    db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    app: &AppHandle,
+) -> bool {
     let on = {
         let conn = db.lock().await;
         crate::db::get_setting(&conn, "app_settings")
@@ -256,8 +267,7 @@ async fn should_notify(db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>, app: 
     if !on {
         return false;
     }
-    !app
-        .get_webview_window("main")
+    !app.get_webview_window("main")
         .and_then(|w| w.is_visible().ok())
         .unwrap_or(false)
 }
@@ -273,10 +283,9 @@ fn notify_new_articles(app: &AppHandle, count: usize) {
         .show();
 }
 
-
 /* ============================================================
-   封面后台补全（og:image 兜底）
-   ============================================================ */
+封面后台补全（og:image 兜底）
+============================================================ */
 
 /// 每轮最多补全的封面数（防一次性扫全库 + 轰炸源站）。
 const COVER_BACKFILL_BATCH: i64 = 20;
@@ -298,7 +307,9 @@ pub fn spawn_cover_backfill(app: AppHandle) {
         tokio::time::sleep(Duration::from_secs(45)).await;
         let db = app.state::<AppState>().db.clone();
         let http = app.state::<AppState>().http.clone();
-        let tried = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
+        let tried = std::sync::Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashSet::<String>::new(),
+        ));
         loop {
             // 取一批无封面文章（url, 已尝试过的不再取）
             let targets: Vec<(i64, String)> = {
@@ -339,7 +350,10 @@ pub fn spawn_cover_backfill(app: AppHandle) {
             if filled > 0 {
                 log::info!("scheduler: 封面补全 {} 篇", filled);
                 // 封面变化 → 通知前端重载（列表卡片封面即时补上）
-                let _ = app.emit("feeds-updated", serde_json::json!({ "new_articles": 0, "failed_feeds": 0 }));
+                let _ = app.emit(
+                    "feeds-updated",
+                    serde_json::json!({ "new_articles": 0, "failed_feeds": 0 }),
+                );
             }
             tokio::time::sleep(COVER_BACKFILL_TICK).await;
         }
@@ -364,7 +378,12 @@ async fn backfill_cover_once(
         g.insert(url.to_string());
     }
     // 拉文章页（30s 超时；只取 og:image，不必等整页正文）
-    let resp = match http.get(url).timeout(std::time::Duration::from_secs(30)).send().await {
+    let resp = match http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+    {
         Ok(r) if r.status().is_success() => r,
         _ => return Ok(false),
     };
@@ -374,7 +393,11 @@ async fn backfill_cover_once(
     };
     // lead_image 是纯同步（scraper）返回 Option<String>，spawn_blocking 里跑避免阻塞 async worker
     let base = url.to_string();
-    let image = match tokio::task::spawn_blocking(move || crate::extraction::lead_image(&html, &base)).await {
+    let image = match tokio::task::spawn_blocking(move || {
+        crate::extraction::lead_image(&html, &base)
+    })
+    .await
+    {
         Ok(Some(img)) => img,
         _ => return Ok(false),
     };

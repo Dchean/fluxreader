@@ -36,8 +36,8 @@ pub struct SyncReport {
 }
 
 /* ============================================================
-   凭据
-   ============================================================ */
+凭据
+============================================================ */
 
 /// 后端凭据：协议 + endpoint + username + password。
 /// username/password 是 Miniflux「集成」页单独配置的凭据（Google Reader 与
@@ -148,8 +148,8 @@ async fn build_client(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> Op
 }
 
 /* ============================================================
-   ① Push：本地状态变更 → 后端（只推不拉）
-   ============================================================ */
+① Push：本地状态变更 → 后端（只推不拉）
+============================================================ */
 
 /// 全局推送互斥：同一时刻只允许一个推送在飞（防抖即时推送 vs 后台自动
 /// 同步 vs 手动同步并发）。exec_push 成功后按 queue_id prune——并发时 A
@@ -176,7 +176,10 @@ struct PushStatus {
 /// 会让"已读"在服务端永久丢失）。
 fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
     let items = db::take_sync_queue(conn)?;
-    let mut plan = PushPlan { status: Vec::new(), stars: Vec::new() };
+    let mut plan = PushPlan {
+        status: Vec::new(),
+        stars: Vec::new(),
+    };
     for item in items {
         let Some(article_id) = item.article_id else {
             continue; // feed 级动作（add_feed）在 push_feeds 阶段处理
@@ -203,9 +206,17 @@ fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
                         ids.push(dup);
                     }
                 }
-                plan.status.push(PushStatus { queue_id: item.id, action: "read".into(), entry_ids: ids });
+                plan.status.push(PushStatus {
+                    queue_id: item.id,
+                    action: "read".into(),
+                    entry_ids: ids,
+                });
             }
-            "unread" => plan.status.push(PushStatus { queue_id: item.id, action: "unread".into(), entry_ids: vec![remote_id] }),
+            "unread" => plan.status.push(PushStatus {
+                queue_id: item.id,
+                action: "unread".into(),
+                entry_ids: vec![remote_id],
+            }),
             "star" => plan.stars.push((item.id, remote_id, true)),
             "unstar" => plan.stars.push((item.id, remote_id, false)),
             _ => {}
@@ -236,7 +247,12 @@ async fn exec_push(client: &Backend, plan: &PushPlan, report: &mut SyncReport) -
         match result {
             Ok(()) => {
                 report.pushed_states += ids.len();
-                done.extend(plan.status.iter().filter(|s| s.action == action).map(|s| s.queue_id));
+                done.extend(
+                    plan.status
+                        .iter()
+                        .filter(|s| s.action == action)
+                        .map(|s| s.queue_id),
+                );
             }
             Err(e) => report.errors.push(format!("状态推送失败: {e}")),
         }
@@ -253,7 +269,9 @@ async fn exec_push(client: &Backend, plan: &PushPlan, report: &mut SyncReport) -
                 report.pushed_states += 1;
                 done.push(*qid);
             }
-            Err(e) => report.errors.push(format!("收藏同步失败: entry {remote_id}: {e}")),
+            Err(e) => report
+                .errors
+                .push(format!("收藏同步失败: entry {remote_id}: {e}")),
         }
     }
     done
@@ -297,13 +315,16 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
 }
 
 /* ============================================================
-   ② Pull：远端 → 本地（订阅关系 + 状态 + 条目）
-   ============================================================ */
+② Pull：远端 → 本地（订阅关系 + 状态 + 条目）
+============================================================ */
 
 /// 未连接期间本地新增的订阅推到远端（三段式：锁内读队列 → 锁外 HTTP → 锁内落库）
 async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut SyncReport) {
     // add_feed 队列动作：锁内读出全部待处理项（feed_url + 目标分类）
-    struct PendingFeed { queue_id: i64, url: String }
+    struct PendingFeed {
+        queue_id: i64,
+        url: String,
+    }
     let items: Vec<PendingFeed> = {
         let conn = db.lock().await;
         let mut out = Vec::new();
@@ -312,7 +333,10 @@ async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
                 continue;
             }
             let Some(url) = item.feed_url else { continue };
-            out.push(PendingFeed { queue_id: item.id, url });
+            out.push(PendingFeed {
+                queue_id: item.id,
+                url,
+            });
         }
         out
     };
@@ -397,9 +421,7 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
             // 用规范化 URL 匹配本地 feed（后端返回的 URL 与本地直连添加时
             // 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成新订阅 → 同一
             // 订阅出现两个本地 feed，文章翻倍、状态分裂、数量对不齐）。
-            let local_feed = db::feed_id_by_url_normalized(&conn, &rf.url)
-                .ok()
-                .flatten();
+            let local_feed = db::feed_id_by_url_normalized(&conn, &rf.url).ok().flatten();
             // 远端 feed 数字 id（读响应用 feed/数字）
             let remote_feed_id = greader::parse_feed_numeric_id(&rf.id);
             // 分类归属：subscription 的第一个 folder category
@@ -429,11 +451,9 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
                     let folder_id: i64 = remote_folder_label
                         .as_deref()
                         .and_then(|label| {
-                            conn.query_row(
-                                "SELECT id FROM folders WHERE name = ?1",
-                                [label],
-                                |r| r.get(0),
-                            )
+                            conn.query_row("SELECT id FROM folders WHERE name = ?1", [label], |r| {
+                                r.get(0)
+                            })
                             .ok()
                         })
                         .unwrap_or_else(|| {
@@ -512,14 +532,22 @@ fn merge_remote_status(
     maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
 ) {
-    let Some(eid) = item_numeric_id(e) else { return };
+    let Some(eid) = item_numeric_id(e) else {
+        return;
+    };
     let feed_id = item_feed_id(e);
     let _ = db::set_article_remote_id(conn, aid, eid);
     // 同步 maps 的绑定状态：后续 entry 若 URL 兜底匹配到同一 aid，能读到
     // 「已绑定 eid」而非批量快照里的「未绑定」，避免跨源同 URL 副本被误判
     // 为自己的条目（时序偏差）。
     maps.id_to_mf_id.insert(aid, Some(eid));
-    maps.id_to_mf_pair.insert(aid, (Some(eid), maps.id_to_mf_pair.get(&aid).map(|p| p.1).unwrap_or(None)));
+    maps.id_to_mf_pair.insert(
+        aid,
+        (
+            Some(eid),
+            maps.id_to_mf_pair.get(&aid).map(|p| p.1).unwrap_or(None),
+        ),
+    );
     maps.mf_id_to_article.insert(eid, aid);
     if maps.pending_ids.contains(&aid) {
         return;
@@ -645,7 +673,6 @@ async fn pull_entries_greader(
     let conn = db.lock().await;
     let _ = db::set_last_sync_ts(&conn, now);
     drop(conn);
-
 }
 
 /// 分页拉取某 Google Reader stream 的全部条目 id（read / starred 权威集合）。
@@ -1025,7 +1052,13 @@ fn upsert_remote_entry(
         if let Some(eid) = item_numeric_id(e) {
             let _ = db::set_article_remote_id(conn, aid, eid);
             maps.id_to_mf_id.insert(aid, Some(eid));
-            maps.id_to_mf_pair.insert(aid, (Some(eid), maps.id_to_mf_pair.get(&aid).map(|p| p.1).unwrap_or(None)));
+            maps.id_to_mf_pair.insert(
+                aid,
+                (
+                    Some(eid),
+                    maps.id_to_mf_pair.get(&aid).map(|p| p.1).unwrap_or(None),
+                ),
+            );
             maps.mf_id_to_article.insert(eid, aid);
         }
         if !maps.pending_ids.contains(&aid) {
@@ -1045,7 +1078,10 @@ fn upsert_remote_entry(
             title: e.title.clone(),
             author: e.author.clone(),
             summary: None,
-            content_html: Some(crate::sanitize::sanitize(&content_html, item_url(e).as_deref())),
+            content_html: Some(crate::sanitize::sanitize(
+                &content_html,
+                item_url(e).as_deref(),
+            )),
             body_text: strip_html_text(&content_html),
             image_url: crate::sanitize::first_image(&content_html),
             enclosure_url: enc_url,
@@ -1103,14 +1139,20 @@ fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) {
 }
 
 /* ============================================================
-   总入口
-   ============================================================ */
+总入口
+============================================================ */
 
 /// feeds 阶段（订阅层）：push_feeds + pull_feeds。秒级，首连先跑这段。
 /// 锁纪律：HTTP 全在锁外；DB 读写在锁内短临界区完成。
-pub async fn feeds_phase(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> AppResult<SyncReport> {
+pub async fn feeds_phase(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+) -> AppResult<SyncReport> {
     let Some(client) = build_client(db, http).await else {
-        return Err(AppError::new("notConnected", "未配置同步后端（Google Reader / Fever 凭据）"));
+        return Err(AppError::new(
+            "notConnected",
+            "未配置同步后端（Google Reader / Fever 凭据）",
+        ));
     };
     let mut report = SyncReport::default();
     push_feeds(db, &client, &mut report).await;
@@ -1126,7 +1168,10 @@ pub async fn states_phase(
     full: bool,
 ) -> AppResult<SyncReport> {
     let Some(client) = build_client(db, http).await else {
-        return Err(AppError::new("notConnected", "未配置同步后端（Google Reader / Fever 凭据）"));
+        return Err(AppError::new(
+            "notConnected",
+            "未配置同步后端（Google Reader / Fever 凭据）",
+        ));
     };
     let mut report = SyncReport::default();
     // 推送段进 PUSH_LOCK（与 push_states_now/feeds_phase 的推送互斥，防 prune 竞态）
@@ -1165,7 +1210,10 @@ pub async fn states_phase(
 }
 
 /// 完整同步（全量路径）：feeds 阶段 + states 阶段（full 对账）串联。
-pub async fn sync_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> AppResult<SyncReport> {
+pub async fn sync_now(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+) -> AppResult<SyncReport> {
     let mut report = feeds_phase(db, http).await?;
     let states = states_phase(db, http, true).await?;
     report.pushed_states = states.pushed_states;
@@ -1176,7 +1224,10 @@ pub async fn sync_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> Ap
 }
 
 /// 轻量同步（后台自动调度）：push 队列 + 增量 pull。
-pub async fn sync_light(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) -> AppResult<SyncReport> {
+pub async fn sync_light(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+) -> AppResult<SyncReport> {
     states_phase(db, http, false).await
 }
 
@@ -1191,7 +1242,10 @@ pub async fn test_connection(
     http: &reqwest::Client,
 ) -> AppResult<(String, String)> {
     if endpoint.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
-        return Err(AppError::new("notConnected", "请先填写 Endpoint、用户名和密码"));
+        return Err(AppError::new(
+            "notConnected",
+            "请先填写 Endpoint、用户名和密码",
+        ));
     }
     let subs = match protocol {
         "fever" => {
