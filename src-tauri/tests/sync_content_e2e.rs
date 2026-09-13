@@ -21,7 +21,15 @@ async fn setup(
     Arc<MockGReader>,
 ) {
     let server = MockGReader::start().await.expect("start mock server");
-    let tmp = std::env::temp_dir().join(format!("fluxreader_sync_content_{name}.db"));
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_sync_content_{}_{}_{}.db",
+        name,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
@@ -272,7 +280,14 @@ async fn miniflux_existing_entry_backfills_cover() {
 /// ③ 规范化 URL 匹配：同文不同饰（https/http + 尾斜杠）不重复入库。
 #[test]
 fn article_id_by_url_uses_normalized_match() {
-    let tmp = std::env::temp_dir().join("fluxreader_sync_content_norm.db");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_sync_content_norm_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     let folder = db::create_folder(&conn, "F", "article").unwrap();

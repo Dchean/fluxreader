@@ -22,7 +22,14 @@ async fn setup() -> (
     reqwest::Client,
     std::path::PathBuf,
 ) {
-    let tmp = std::env::temp_dir().join("fluxreader_scheduler_test.db");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_scheduler_test_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     let client = ingestion::build_client(30);
@@ -217,7 +224,15 @@ fn seed_mode_feeds(conn: &rusqlite::Connection) -> (i64, i64) {
 
 #[test]
 fn sync_mode_hybrid_skips_miniflux_feeds_in_due_query() {
-    let tmp = std::env::temp_dir().join(format!("fluxreader_mode_{}.db", line!()));
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_mode_{}_{}_{}.db",
+        line!(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     let (direct, mf) = seed_mode_feeds(&conn);
@@ -246,7 +261,15 @@ fn sync_mode_hybrid_skips_miniflux_feeds_in_due_query() {
 
 #[test]
 fn sync_mode_manual_refresh_always_includes_miniflux_feeds() {
-    let tmp = std::env::temp_dir().join(format!("fluxreader_mode_{}.db", line!()));
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_mode_{}__{}_{}.db",
+        line!(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     let (direct, mf) = seed_mode_feeds(&conn);
@@ -261,7 +284,15 @@ fn sync_mode_manual_refresh_always_includes_miniflux_feeds() {
 
 #[test]
 fn sync_mode_default_is_direct_when_unset() {
-    let tmp = std::env::temp_dir().join(format!("fluxreader_mode_{}.db", line!()));
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_mode_{}_{}_{}.db",
+        line!(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     // 未写 app_settings → 读到默认 "direct"（scheduler 的判定依赖此默认）

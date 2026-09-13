@@ -80,7 +80,14 @@ async fn ai_summarize_translate_and_cache_pipeline() {
     let client = app_lib::ingestion::build_client(30);
     let cfg = test_config(port);
 
-    let tmp = std::env::temp_dir().join("fluxreader_ai_test.db");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_ai_test_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = Connection::open(&tmp).unwrap();
     // 建最小 schema（只建这次测试需要的表）

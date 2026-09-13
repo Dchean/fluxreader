@@ -1,6 +1,7 @@
 //! 配置同步集成测试：本地 HTTP mock（WebDAV 语义）+ payload 构建/应用逻辑。
 //! 覆盖：payload 构建含全部配置域、上传-下载往返、应用 upsert 语义
-//! （新源导入/已存在跳过/分类合并/设置覆盖）。运行：cargo test --test config_sync_e2e
+//! （新源导入/已存在跳过/分类合并/设置覆盖）、凭据边界（上传排除 + 导入保留）。
+//! 运行：cargo test --test config_sync_e2e
 
 use app_lib::config_sync::{apply_payload, build_payload, SyncPayload};
 use app_lib::db;
@@ -98,9 +99,9 @@ fn seed_db(conn: &Connection) {
     db::insert_feed(
         conn,
         "https://b.com/feed",
-        None,
+        Some("https://b.com"),
         "源B",
-        None,
+        Some("https://b.com/favicon.ico"),
         f2,
         "social",
         false,
@@ -110,15 +111,185 @@ fn seed_db(conn: &Connection) {
     db::set_setting(
         conn,
         "app_settings",
-        r#"{"themeMode":"dark","fontSize":17}"#,
+        r#"{"themeMode":"dark","fontSize":17,"autoStart":true,"closePromptShown":true}"#,
     )
     .unwrap();
-    db::set_setting(conn, "ai_config", r#"{"preset":"glm"}"#).unwrap();
+    db::set_setting(
+        conn,
+        "ai_config",
+        r#"{"preset":"glm","apiKey":"secret123"}"#,
+    )
+    .unwrap();
+    db::set_setting(conn, "sync_protocol", "greader").unwrap();
+    db::set_setting(conn, "greader_endpoint", "https://example.com").unwrap();
+    db::set_setting(conn, "greader_username", "testuser").unwrap();
+    db::set_setting(conn, "greader_password", "secret_password").unwrap();
+}
+
+#[test]
+fn payload_excludes_all_credential_fields() {
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_cfgsync_test_cred_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    seed_db(&conn);
+
+    let p = build_payload(&conn).unwrap();
+    let json = serde_json::to_string(&p).unwrap();
+
+    // 验证：载荷不含任何凭据字段
+    assert!(!json.contains("ai_config"), "payload 不应包含 ai_config");
+    assert!(!json.contains("apiKey"), "payload 不应包含 AI API key");
+    assert!(!json.contains("secret123"), "payload 不应包含凭据值");
+    assert!(
+        !json.contains("greader_password"),
+        "payload 不应包含 greader_password"
+    );
+    assert!(!json.contains("secret_password"), "payload 不应包含密码");
+    assert!(
+        !json.contains("config_sync_credentials"),
+        "payload 不应包含 config_sync_credentials"
+    );
+    assert!(
+        !json.contains("miniflux_token"),
+        "payload 不应包含 miniflux_token"
+    );
+
+    // 验证：载荷包含非敏感连接配置
+    assert!(
+        json.contains("greader_endpoint"),
+        "payload 应包含 greader_endpoint"
+    );
+    assert!(json.contains("example.com"), "payload 应包含服务器地址");
+    assert!(
+        json.contains("greader_username"),
+        "payload 应包含 greader_username"
+    );
+    assert!(json.contains("testuser"), "payload 应包含用户名");
+
+    // 验证：app_settings 不含本地特定字段
+    assert!(!json.contains("autoStart"), "payload 不应包含 autoStart");
+    assert!(
+        !json.contains("closePromptShown"),
+        "payload 不应包含 closePromptShown"
+    );
+    assert!(json.contains("themeMode"), "payload 应包含 themeMode");
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn apply_preserves_local_credentials_and_updates_allowed_fields() {
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_cfgsync_test_apply_cred_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+
+    // 本地有凭据和本地特定设置
+    db::set_setting(
+        &conn,
+        "ai_config",
+        r#"{"preset":"local_model","apiKey":"local_secret"}"#,
+    )
+    .unwrap();
+    db::set_setting(&conn, "greader_password", "local_password").unwrap();
+    db::set_setting(
+        &conn,
+        "config_sync_credentials",
+        r#"{"token":"local_gist_pat"}"#,
+    )
+    .unwrap();
+    db::set_setting(
+        &conn,
+        "app_settings",
+        r#"{"themeMode":"light","autoStart":false,"closePromptShown":true}"#,
+    )
+    .unwrap();
+
+    // 远端 payload 包含不同的非敏感配置和设置，但不包含凭据（模拟白名单构建）
+    let payload = SyncPayload {
+        schema: 1,
+        uploaded_at: "2026-09-01T00:00:00Z".into(),
+        folders: vec![],
+        feeds: vec![],
+        app_settings: Some(r#"{"themeMode":"dark","fontSize":20}"#.into()),
+        connection_config: Some(app_lib::config_sync::ConnectionConfig {
+            sync_protocol: Some("fever".into()),
+            greader_endpoint: Some("https://remote.com".into()),
+            greader_username: Some("remoteuser".into()),
+        }),
+    };
+
+    apply_payload(&conn, &payload).unwrap();
+
+    // 验证：本地凭据保持不变
+    let ai_config = db::get_setting(&conn, "ai_config").unwrap().unwrap();
+    assert!(
+        ai_config.contains("local_secret"),
+        "本地 ai_config 应保持不变"
+    );
+    assert!(ai_config.contains("local_model"), "本地 AI 预设应保持不变");
+
+    let password = db::get_setting(&conn, "greader_password").unwrap().unwrap();
+    assert_eq!(password, "local_password", "本地密码应保持不变");
+
+    let sync_cred = db::get_setting(&conn, "config_sync_credentials")
+        .unwrap()
+        .unwrap();
+    assert!(
+        sync_cred.contains("local_gist_pat"),
+        "本地同步凭据应保持不变"
+    );
+
+    // 验证：非敏感连接配置被更新
+    let protocol = db::get_setting(&conn, "sync_protocol").unwrap().unwrap();
+    assert_eq!(protocol, "fever", "sync_protocol 应被远端更新");
+
+    let endpoint = db::get_setting(&conn, "greader_endpoint").unwrap().unwrap();
+    assert_eq!(
+        endpoint, "https://remote.com",
+        "greader_endpoint 应被远端更新"
+    );
+
+    let username = db::get_setting(&conn, "greader_username").unwrap().unwrap();
+    assert_eq!(username, "remoteuser", "greader_username 应被远端更新");
+
+    // 验证：app_settings 白名单字段更新，本地特定字段保留
+    let settings = db::get_setting(&conn, "app_settings").unwrap().unwrap();
+    let settings_obj: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert_eq!(settings_obj["themeMode"], "dark", "themeMode 应被远端更新");
+    assert_eq!(settings_obj["fontSize"], 20, "fontSize 应被远端更新");
+    assert_eq!(settings_obj["autoStart"], false, "autoStart 应保持本地值");
+    assert_eq!(
+        settings_obj["closePromptShown"], true,
+        "closePromptShown 应保持本地值"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]
 fn payload_contains_all_config_domains() {
-    let tmp = std::env::temp_dir().join("fluxreader_cfgsync_test1.db");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_cfgsync_test1_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     seed_db(&conn);
@@ -138,15 +309,31 @@ fn payload_contains_all_config_domains() {
         .unwrap();
     assert_eq!(feed_b.folder, "播客");
     assert_eq!(feed_b.layout, "social");
-    // 设置原文带出
+    assert_eq!(feed_b.site_url, Some("https://b.com".to_string()));
+    assert_eq!(
+        feed_b.favicon_url,
+        Some("https://b.com/favicon.ico".to_string())
+    );
+    // 设置原文带出（过滤后）
     assert!(p.app_settings.as_deref().unwrap().contains("fontSize"));
-    assert!(p.ai_config.as_deref().unwrap().contains("glm"));
+    // 连接配置带出
+    assert_eq!(
+        p.connection_config.as_ref().unwrap().sync_protocol,
+        Some("greader".to_string())
+    );
     let _ = std::fs::remove_file(&tmp);
 }
 
 #[test]
 fn apply_upserts_feeds_and_overrides_settings() {
-    let tmp = std::env::temp_dir().join("fluxreader_cfgsync_test2.db");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_cfgsync_test2_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     // 本地已有：一个同名分类 + 一个同 URL 源
@@ -173,12 +360,14 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "article".into(),
                 auto_summary: true,
                 auto_translate: false,
+                position: 0,
             },
             app_lib::config_sync::FolderSpec {
                 name: "新分类".into(),
                 layout: "podcast".into(),
                 auto_summary: false,
                 auto_translate: true,
+                position: 1,
             },
         ],
         feeds: vec![
@@ -190,6 +379,8 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "inherit".into(),
                 auto_summary: true,
                 auto_translate: false,
+                site_url: Some("https://a.com".into()),
+                favicon_url: None,
             },
             // 新源 → 导入到已有分类
             app_lib::config_sync::FeedSpec {
@@ -199,6 +390,8 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "inherit".into(),
                 auto_summary: false,
                 auto_translate: false,
+                site_url: None,
+                favicon_url: None,
             },
             // 新源 + 新分类名 → 分类创建后导入
             app_lib::config_sync::FeedSpec {
@@ -208,6 +401,8 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "inherit".into(),
                 auto_summary: false,
                 auto_translate: false,
+                site_url: None,
+                favicon_url: None,
             },
             // 未知分类 → 落「导入」分类
             app_lib::config_sync::FeedSpec {
@@ -217,10 +412,12 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "inherit".into(),
                 auto_summary: false,
                 auto_translate: false,
+                site_url: None,
+                favicon_url: None,
             },
         ],
         app_settings: Some(r#"{"themeMode":"light","fontSize":18}"#.into()),
-        ai_config: Some(r#"{"preset":"deepseek"}"#.into()),
+        connection_config: None,
     };
 
     let (imported, skipped) = apply_payload(&conn, &payload).unwrap();
@@ -239,18 +436,17 @@ fn apply_upserts_feeds_and_overrides_settings() {
     // 源总数：原有 1 + 导入 3 = 4
     let feeds = db::list_feeds(&conn).unwrap();
     assert_eq!(feeds.len(), 4);
-    // 已存在的源未被覆盖改名
+    // 已存在的源标题应被更新
     let a = feeds
         .iter()
         .find(|f| f.feed_url == "https://a.com/rss")
         .unwrap();
-    assert_eq!(a.title, "本地已有源A");
+    assert_eq!(a.title, "源A");
+    assert_eq!(a.site_url, Some("https://a.com".to_string()));
 
     // 设置被覆盖
     let s = db::get_setting(&conn, "app_settings").unwrap().unwrap();
     assert!(s.contains("\"fontSize\":18"));
-    let ai = db::get_setting(&conn, "ai_config").unwrap().unwrap();
-    assert!(ai.contains("deepseek"));
     let _ = std::fs::remove_file(&tmp);
 }
 
@@ -313,7 +509,14 @@ async fn full_roundtrip_upload_download_apply() {
     };
 
     // 设备A：本地库构建 payload 并上传
-    let tmp_a = std::env::temp_dir().join("fluxreader_cfgsync_rt_a.db");
+    let tmp_a = std::env::temp_dir().join(format!(
+        "fluxreader_cfgsync_rt_a_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp_a);
     let conn_a = db::open(&tmp_a).unwrap();
     seed_db(&conn_a);
@@ -327,7 +530,14 @@ async fn full_roundtrip_upload_download_apply() {
     .unwrap();
 
     // 设备B：空库下载同一配置并应用
-    let tmp_b = std::env::temp_dir().join("fluxreader_cfgsync_rt_b.db");
+    let tmp_b = std::env::temp_dir().join(format!(
+        "fluxreader_cfgsync_rt_b_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp_b);
     let conn_b = db::open(&tmp_b).unwrap();
     let downloaded = app_lib::config_sync::webdav_get_for_test(&http, &cred)
@@ -346,9 +556,17 @@ async fn full_roundtrip_upload_download_apply() {
     assert!(folders_b
         .iter()
         .any(|f| f.name == "播客" && f.layout == "podcast"));
-    // 设备B 拿到设备A 的设置
+    // 设备B 拿到设备A 的设置（但不包含凭据）
     let s = db::get_setting(&conn_b, "app_settings").unwrap().unwrap();
     assert!(s.contains("fontSize"));
+
+    // 验证设备B 未获得设备A 的凭据
+    let ai_config_b = db::get_setting(&conn_b, "ai_config").unwrap();
+    assert!(ai_config_b.is_none(), "设备B 不应获得设备A 的 ai_config");
+
+    let password_b = db::get_setting(&conn_b, "greader_password").unwrap();
+    assert!(password_b.is_none(), "设备B 不应获得设备A 的密码");
+
     let _ = std::fs::remove_file(&tmp_a);
     let _ = std::fs::remove_file(&tmp_b);
 }
