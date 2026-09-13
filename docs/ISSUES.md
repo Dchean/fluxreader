@@ -7,17 +7,17 @@
 | ISSUE-001 | 验证 / P1 | TASK-002 已实测：前端 8/8、Rust 95 项通过，前端和 Windows 打包通过，格式检查失败 | 初次测量已建立；后续保护与完整验收仍需继续，不能标成全绿发布基线 | 初始测量已完成 |
 | ISSUE-002 | CI / P1 | test:frontend 本机执行 8/8 通过；ci.yml 仍未调用 | 已证明本机可运行，后续应在 CI 既定环境验证并接入；本轮未改 CI | 差异已确认，待后续任务 |
 | ISSUE-003 | 测试分层 / P1 | Rust/Node 测试及 MSI/NSIS 打包通过；没有安装、启动应用或运行真实桌面 UI E2E | 现有测试名称和打包结果不能证明完整桌面交互；需后续驱动能力与关键链路验证 | 未覆盖的边界仍存在 |
-| ISSUE-004 | 发布 / P1 | release.yml 标签/手动触发且 releaseDraft=false；未显式等待同一提交的完整 CI | 需核实平台保护并设计“同一候选提交通过检查 + 用户批准”链路 | 仓库文件已核实，平台规则未知 |
-| ISSUE-005 | 文档 / P1 | 旧 README 的版本、互斥类型、模块名称与源码不同；config_sync 中状态文件常量未证明完整文章状态同步 | 本批已修订入口与现状文档；遗留注释和功能声明仍需追踪 | 文档修订待审阅，相关行为未确认 |
+| ISSUE-004 | 发布 / P1 | release.yml 标签/手动触发且 releaseDraft=false；未显式等待同一提交的完整 CI | BATCH-005（TASK-019）已加固：tagged commit 的 CI 全绿守卫（check-runs 轮询，失败/超时即拒绝发布）+ concurrency 组 + 陈旧 releaseBody 中性化；守卫逻辑待真实发布时首次执行（NOT_RUN） | 文件加固完成；守卫待真实发布验证 |
+| ISSUE-005 | 文档 / P1 | 旧 README 的版本、互斥类型、模块名称与源码不同；config_sync 中状态文件常量未证明完整文章状态同步 | README 已修订（BATCH-001/002 合并）；源码内声明性注释已于 BATCH-005 对齐事实（TASK-018，grep 复核 article_state_sync 残留为 0） | 已解决（注释与声明层面） |
 | ISSUE-006 | 测试隔离 / P1 | 普通测试跳过 23 项，指定 target 后补跑 14 项且通过；仍有 7 项真实服务、2 项外部本地 fixture 未运行 | 保持明确目标列表和服务边界；不使用统一 --ignored 冒充无外部依赖门禁 | 已按计划实测，剩余 9 项未运行 |
 | ISSUE-007 | 兼容性 / P1 | 两协议相关单元/本地 mock 检查已运行；真实 Miniflux/FreshRSS 服务未测 | 兼容组合、版本和操作能力需确认后实测；本机 mock 通过不等于真实服务器兼容 | 待产品确认与实测 |
-| ISSUE-008 | 架构 / P2 | db.rs 注释说 SQL 集中；commands.rs、sync.rs 中存在 query_row/execute | 数据访问边界尚未统一，后续按测试与具体变更评估；不能批量抽层 | 已确认结构事实，方案未定 |
+| ISSUE-008 | 架构 / P2 | db.rs 注释说 SQL 集中；commands.rs、sync.rs 中存在 query_row/execute | M2 试点（BATCH-005，TASK-017）已将 commands.rs 的 13 处直接 SQL 全部收敛至 db.rs 类型化函数（grep 归零，96/0/23 回归通过）；sync.rs 的 17 处为后续整理任务（M2 处置方案已列） | 试点已解决 commands.rs 部分；sync.rs 待后续 |
 | ISSUE-009 | 职责 / P2 | store.ts、SettingsModal.tsx、commands.rs、sync.rs、db.rs 聚合多种职责 | 是候选调查区域；文件长本身不是重写证据，需结合依赖和变更风险 | 待深入分析 |
 | ISSUE-010 | 环境 / P1 | 本次实际使用 Windows build 26200、Node 24.19.0、Rust 1.98.1；CI 前端为 Ubuntu/Node 22，Rust 配置 stable | 本次不是实际 CI 运行，也未证明最低 Rust 1.80；后续需收敛并验证环境 | 已记录真实环境，差异待处理 |
-| ISSUE-011 | 并行隔离 / P2 | ai_e2e、sync_e2e 等仍使用固定临时库名；本轮为各命令设置本次运行专用 TEMP/TMP，Rust 测试命令串行 | 本轮规避跨进程碰撞；测试本身未改，后续多执行器仍需独立临时目录 | 本次隔离执行，长期方案未实施 |
+| ISSUE-011 | 并行隔离 / P2 | ai_e2e、sync_e2e 等仍使用固定临时库名；本轮为各命令设置本次运行专用 TEMP/TMP，Rust 测试命令串行 | BATCH-004（TASK-015）已将全部测试临时库改为进程 ID+纳秒唯一路径（std 方案，无新依赖），连续两轮全量测试通过；测试对 Tauri/全局状态依赖低（M2 分析确认） | 已解决 |
 | ISSUE-012 | 产品范围 / P1 | DEC-008 / DEC-009 已确认所有 OPT 保留；OPT-004 仅同步订阅源、客户端设置与非敏感连接配置，排除 API Key/密码等凭据 | 需求范围问题已解决，任务、测试与验收文档已同步；具体字段清单是后续实现产物 | 已解决（文档范围决定，不表示实现已完成） |
-| ISSUE-013 | 格式 / P2 | cargo fmt --check 返回 1；38 个 Rust 文件共 532 处格式差异 | 后续以独立格式变更处理；该检查未在现有 CI 中，不将本次失败描述成 CI 已失败 | 实测未通过，未修复 |
-| ISSUE-014 | lint / P2 | oxlint 返回 0，6 条警告：回归脚本 3 条未使用项、Reader 1 条 effect 依赖、Overlays 2 条 effect 内 setState | 逐条判断影响；hooks 警告不能靠机械添加依赖或禁用规则处理 | 实测有告警，未修复 |
+| ISSUE-013 | 格式 / P2 | cargo fmt --check 返回 1；38 个 Rust 文件共 532 处格式差异 | TASK-006 已全仓格式化；BATCH-004（TASK-014）在 CI rust 作业新增 cargo fmt --check 门禁并连续多次 CI 通过 | 已解决 |
+| ISSUE-014 | lint / P2 | oxlint 返回 0，6 条警告：回归脚本 3 条未使用项、Reader 1 条 effect 依赖、Overlays 2 条 effect 内 setState | 产品代码 3 条已由 BATCH-003（TASK-010）按分析 Note 修复（lint 6→3）；剩余 3 条来自技能副本（目录约定原样复制，不在范围） | 产品部分已解决；技能副本部分按约定保留 |
 | ISSUE-015 | 工具环境 / P2 | 初次快照与 Vite 构建出现沙箱 EPERM；获准提升运行权限后成功 | 保留首次失败与重跑，区分环境限制和产品缺陷 | 本次执行已解决，记录保留 |
 | ISSUE-016 | 文档依赖 / P2 | 交接时已将现有技能 43 个文件复制至项目 .agents/skills，并核对与源副本的哈希 | 新 agent 可从项目读取；具体版本与复制记录见交接报告 | 已补齐，随交接包验证 |
 
