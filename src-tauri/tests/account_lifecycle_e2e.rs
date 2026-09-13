@@ -11,10 +11,19 @@ use app_lib::db;
 use mock_greader::MockGReader;
 use rusqlite::Connection;
 
-fn fresh_db(name: &str) -> Connection {
-    let tmp = std::env::temp_dir().join(format!("fluxreader_account_{name}.db"));
+fn fresh_db(name: &str) -> (Connection, std::path::PathBuf) {
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_account_{}_{}_{}.db",
+        name,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
-    db::open(&tmp).expect("open db")
+    let conn = db::open(&tmp).expect("open db");
+    (conn, tmp)
 }
 
 /// 本地直连订阅（origin 默认 'local'）+ 一篇文章
@@ -53,7 +62,7 @@ fn seed_local(conn: &Connection) -> (i64, i64) {
 
 #[test]
 fn disconnect_purges_miniflux_data_but_keeps_local() {
-    let mut conn = fresh_db("disconnect");
+    let (mut conn, _path) = fresh_db("disconnect");
     let (local_feed, local_aid) = seed_local(&conn);
 
     // 模拟服务端拉取：origin='remote' 订阅 + 文章 + 绑定 + 队列 + 墓碑
@@ -183,7 +192,7 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
 
 #[test]
 fn cache_cleanup_articles_respects_star_and_age() {
-    let mut conn = fresh_db("cache");
+    let (mut conn, _path) = fresh_db("cache");
     let (feed, _) = seed_local(&conn);
 
     let mk = |guid: &str, days_ago: i64, starred: bool, read: bool| {
@@ -245,7 +254,7 @@ fn cache_cleanup_articles_respects_star_and_age() {
 
 #[test]
 fn cache_cleanup_ai_only_clears_ai_fields() {
-    let mut conn = fresh_db("cache_ai");
+    let (mut conn, _path) = fresh_db("cache_ai");
     let (feed, _) = seed_local(&conn);
     let a = db::NewArticle {
         guid: "ai-1".into(),
@@ -289,7 +298,14 @@ fn cache_cleanup_ai_only_clears_ai_fields() {
 #[ignore = "spins a local mock server"]
 async fn reconnect_other_account_no_mixing() {
     let server = MockGReader::start().await.expect("mock");
-    let tmp = std::env::temp_dir().join("fluxreader_account_mix.db");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_account_mix_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
 
@@ -342,9 +358,7 @@ async fn reconnect_other_account_no_mixing() {
 #[tokio::test]
 async fn sync_local_feeds_pushes_unbound_local_feeds() {
     let server = MockGReader::start().await.expect("start mock");
-    let tmp = std::env::temp_dir().join("fluxreader_account_localsync.db");
-    let _ = std::fs::remove_file(&tmp);
-    let conn = fresh_db("localsync");
+    let (conn, tmp_path) = fresh_db("localsync");
 
     // 未连接时的本地直连源（origin 默认 local）
     let folder = db::create_folder(&conn, "本地", "article").unwrap();
@@ -422,8 +436,8 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
     assert_eq!(report.pushed_feeds, 2, "report counts both");
 
     // 本地两个源绑定上 remote_id
-    let tmp2 = db::open(&tmp).unwrap();
-    let bound_count: i64 = tmp2
+    let conn2 = db::open(&tmp_path).unwrap();
+    let bound_count: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NOT NULL",
             [],
@@ -433,7 +447,7 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
     assert_eq!(bound_count, 3, "2 newly bound + 1 pre-bound");
 
     // 幂等：队列已清空，再入队（无未绑源）→ 0
-    let unbound2: i64 = tmp2
+    let unbound2: i64 = conn2
         .query_row(
             "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL",
             [],
@@ -441,7 +455,7 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
         )
         .unwrap();
     assert_eq!(unbound2, 0, "idempotent: nothing left to push");
-    let _ = std::fs::remove_file(&tmp);
+    let _ = std::fs::remove_file(&tmp_path);
 }
 
 /// create_feed 409 幂等：对 mock 已有的 feed 10 URL（GET /v1/feeds 静态预置）

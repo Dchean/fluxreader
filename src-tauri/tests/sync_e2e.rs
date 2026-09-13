@@ -14,7 +14,14 @@ use mock_greader::MockGReader;
 async fn miniflux_sync_end_to_end() {
     let server = MockGReader::start().await.expect("start mock server");
 
-    let tmp = std::env::temp_dir().join("fluxreader_sync_e2e.db");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_sync_e2e_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     let db = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
