@@ -1,0 +1,520 @@
+{
+  "fields": [
+    {
+      "name": "folders.name",
+      "kind": "subscription",
+      "storage": "folders 表 name 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:27 (folders 表定义), src-tauri/src/config_sync.rs:36-39 (FolderSpec 包含 name)"
+    },
+    {
+      "name": "folders.layout",
+      "kind": "subscription",
+      "storage": "folders 表 layout 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:29, src-tauri/src/config_sync.rs:37 (layout 字段已在当前 SyncPayload 中)"
+    },
+    {
+      "name": "folders.auto_summary",
+      "kind": "subscription",
+      "storage": "folders 表 auto_summary 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:30, src-tauri/src/config_sync.rs:38 (AI 自动摘要开关，订阅源配置)"
+    },
+    {
+      "name": "folders.auto_translate",
+      "kind": "subscription",
+      "storage": "folders 表 auto_translate 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:31, src-tauri/src/config_sync.rs:39 (AI 自动翻译开关，订阅源配置)"
+    },
+    {
+      "name": "folders.position",
+      "kind": "subscription",
+      "storage": "folders 表 position 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:28 (分类排序位置，用户组织偏好)"
+    },
+    {
+      "name": "folders.collapsed",
+      "kind": "client_setting",
+      "storage": "folders 表 collapsed 列",
+      "sensitive": false,
+      "sync_recommendation": "undecided",
+      "evidence": "src-tauri/src/db.rs:32 (侧边栏折叠状态，可能是会话级 UI 状态或跨设备偏好，需产品决策)"
+    },
+    {
+      "name": "folders.remote_id",
+      "kind": "connection_config",
+      "storage": "folders 表 remote_id 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:91 (同步引擎内部绑定，不应跨设备同步)"
+    },
+    {
+      "name": "feeds.feed_url",
+      "kind": "subscription",
+      "storage": "feeds 表 feed_url 列 (UNIQUE)",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:38, src-tauri/src/config_sync.rs:44 (订阅源 URL，核心数据)"
+    },
+    {
+      "name": "feeds.title",
+      "kind": "subscription",
+      "storage": "feeds 表 title 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:40, src-tauri/src/config_sync.rs:45 (订阅源标题)"
+    },
+    {
+      "name": "feeds.folder_id",
+      "kind": "subscription",
+      "storage": "feeds 表 folder_id 列 (通过 folder name 映射)",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:42, src-tauri/src/config_sync.rs:46 (所属分类，通过 folder 名称同步)"
+    },
+    {
+      "name": "feeds.layout",
+      "kind": "subscription",
+      "storage": "feeds 表 layout 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:43, src-tauri/src/config_sync.rs:47 (订阅源布局绑定)"
+    },
+    {
+      "name": "feeds.auto_summary",
+      "kind": "subscription",
+      "storage": "feeds 表 auto_summary 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:44, src-tauri/src/config_sync.rs:48 (源级 AI 摘要开关)"
+    },
+    {
+      "name": "feeds.auto_translate",
+      "kind": "subscription",
+      "storage": "feeds 表 auto_translate 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:45, src-tauri/src/config_sync.rs:49 (源级 AI 翻译开关)"
+    },
+    {
+      "name": "feeds.site_url",
+      "kind": "subscription",
+      "storage": "feeds 表 site_url 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:39 (订阅源网站地址，元数据)"
+    },
+    {
+      "name": "feeds.favicon_url",
+      "kind": "subscription",
+      "storage": "feeds 表 favicon_url 列",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/db.rs:41 (订阅源图标，元数据)"
+    },
+    {
+      "name": "feeds.etag",
+      "kind": "other",
+      "storage": "feeds 表 etag 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:46 (HTTP 缓存头，运行时状态)"
+    },
+    {
+      "name": "feeds.last_modified",
+      "kind": "other",
+      "storage": "feeds 表 last_modified 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:47 (HTTP 缓存头，运行时状态)"
+    },
+    {
+      "name": "feeds.last_fetched_at",
+      "kind": "other",
+      "storage": "feeds 表 last_fetched_at 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:48 (抓取时间戳，运行时状态)"
+    },
+    {
+      "name": "feeds.fetch_error",
+      "kind": "other",
+      "storage": "feeds 表 fetch_error 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:49 (抓取错误信息，运行时状态)"
+    },
+    {
+      "name": "feeds.fetch_failed",
+      "kind": "other",
+      "storage": "feeds 表 fetch_failed 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:50 (抓取失败标志，运行时状态)"
+    },
+    {
+      "name": "feeds.fail_count",
+      "kind": "other",
+      "storage": "feeds 表 fail_count 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:147 (失败计数，退避调度用)"
+    },
+    {
+      "name": "feeds.next_retry_at",
+      "kind": "other",
+      "storage": "feeds 表 next_retry_at 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:148 (下次重试时间，退避调度用)"
+    },
+    {
+      "name": "feeds.remote_id",
+      "kind": "connection_config",
+      "storage": "feeds 表 remote_id 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:94 (同步引擎内部绑定)"
+    },
+    {
+      "name": "feeds.origin",
+      "kind": "connection_config",
+      "storage": "feeds 表 origin 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:189 (订阅来源标记 local/remote，同步引擎内部状态)"
+    },
+    {
+      "name": "feeds.origin_was_local",
+      "kind": "connection_config",
+      "storage": "feeds 表 origin_was_local 列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:198 (hybrid 模式恢复标记，同步引擎内部状态)"
+    },
+    {
+      "name": "articles.*",
+      "kind": "other",
+      "storage": "articles 表全部列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:54-76, docs/DATA-MODEL.md:34 (文章内容、媒体、AI 生成结果、已读/收藏状态，DEC-009 明确排除)"
+    },
+    {
+      "name": "sync_queue.*",
+      "kind": "other",
+      "storage": "sync_queue 表全部列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:98-105 (离线变更队列，同步引擎内部状态)"
+    },
+    {
+      "name": "deduped_urls.*",
+      "kind": "other",
+      "storage": "deduped_urls 表全部列",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:160-165 (去重墓碑，运行时状态)"
+    },
+    {
+      "name": "articles_fts.*",
+      "kind": "other",
+      "storage": "articles_fts FTS5 表",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:112-139 (FTS5 索引，派生数据，由触发器维护)"
+    },
+    {
+      "name": "settings.sync_protocol",
+      "kind": "connection_config",
+      "storage": "settings 表 key='sync_protocol'",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/sync.rs:47-51 (同步协议选择 greader/fever，非敏感连接配置)"
+    },
+    {
+      "name": "settings.greader_endpoint",
+      "kind": "connection_config",
+      "storage": "settings 表 key='greader_endpoint'",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/sync.rs:52 (服务器地址，非敏感连接配置，DEC-009 允许)"
+    },
+    {
+      "name": "settings.greader_username",
+      "kind": "connection_config",
+      "storage": "settings 表 key='greader_username'",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/sync.rs:53 (用户名，用于识别账号，非密码本身)"
+    },
+    {
+      "name": "settings.greader_password",
+      "kind": "credential",
+      "storage": "settings 表 key='greader_password' (DPAPI 加密)",
+      "sensitive": true,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/sync.rs:54, src-tauri/src/credentials.rs:23 (密码，敏感凭据，DEC-009 明确排除)"
+    },
+    {
+      "name": "settings.config_sync_credentials",
+      "kind": "credential",
+      "storage": "settings 表 key='config_sync_credentials' (DPAPI 加密)",
+      "sensitive": true,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/config_sync.rs:179-188, src-tauri/src/credentials.rs:25 (Gist PAT/WebDAV 密码，敏感凭据)"
+    },
+    {
+      "name": "settings.ai_config",
+      "kind": "credential",
+      "storage": "settings 表 key='ai_config' (DPAPI 加密 JSON)",
+      "sensitive": true,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/config_sync.rs:87, src-tauri/src/credentials.rs:24, src-tauri/src/ai.rs:39 (AI 服务配置含 API key，敏感凭据)"
+    },
+    {
+      "name": "settings.miniflux_token",
+      "kind": "credential",
+      "storage": "settings 表 key='miniflux_token' (DPAPI 加密)",
+      "sensitive": true,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/credentials.rs:22 (历史遗留 token，已停用但保留加密)"
+    },
+    {
+      "name": "settings.config_sync_last_upload",
+      "kind": "other",
+      "storage": "settings 表 key='config_sync_last_upload'",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/config_sync.rs:392 (上次上传时间戳，运行时状态)"
+    },
+    {
+      "name": "settings.sync_last_sync",
+      "kind": "other",
+      "storage": "settings 表 key='sync_last_sync'",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:1796-1809 (同步时间戳游标，同步引擎内部状态)"
+    },
+    {
+      "name": "settings.sync_last_entry_id",
+      "kind": "other",
+      "storage": "settings 表 key='sync_last_entry_id'",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src-tauri/src/db.rs:1812-1825 (Fever 协议增量游标，同步引擎内部状态)"
+    },
+    {
+      "name": "settings.app_settings",
+      "kind": "client_setting",
+      "storage": "settings 表 key='app_settings' (JSON，需拆分字段)",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src-tauri/src/config_sync.rs:86, src-tauri/src/commands.rs:15, src/store.ts:220-245 (客户端设置 JSON，当前整体同步但需细化字段清单)"
+    },
+    {
+      "name": "app_settings.autoRefresh",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:221 (自动刷新开关，用户偏好)"
+    },
+    {
+      "name": "app_settings.refreshInterval",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:222 (刷新间隔，用户偏好)"
+    },
+    {
+      "name": "app_settings.fetchConcurrency",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:223 (并发抓取数，用户偏好)"
+    },
+    {
+      "name": "app_settings.markReadOnOpen",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:224 (打开标已读，阅读行为偏好)"
+    },
+    {
+      "name": "app_settings.markReadOnScrollBottom",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:225 (滚动到底标已读，阅读行为偏好)"
+    },
+    {
+      "name": "app_settings.markReadOnScrollOut",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:226 (滚出列表标已读，阅读行为偏好)"
+    },
+    {
+      "name": "app_settings.autoStart",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段 + Windows 注册表 (tauri-plugin-autostart)",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src/store.ts:227, src/components/SettingsModal.tsx:126-159 (开机自启，本地系统特定，不应跨设备同步)"
+    },
+    {
+      "name": "app_settings.startupView",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:228 (启动视图，用户偏好)"
+    },
+    {
+      "name": "app_settings.hideReadOnStartup",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:229 (启动时隐藏已读，用户偏好)"
+    },
+    {
+      "name": "app_settings.themeMode",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:230 (主题模式 dark/light/auto，外观偏好)"
+    },
+    {
+      "name": "app_settings.palette",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:231 (配色方案，外观偏好)"
+    },
+    {
+      "name": "app_settings.fontFamily",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:232 (字体，阅读偏好)"
+    },
+    {
+      "name": "app_settings.fontSize",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:233 (字号，阅读偏好)"
+    },
+    {
+      "name": "app_settings.lineHeight",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:234 (行高，阅读偏好)"
+    },
+    {
+      "name": "app_settings.maxWidth",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:235 (正文最大宽度，阅读偏好)"
+    },
+    {
+      "name": "app_settings.listWidth",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:236 (文章列表列宽，布局偏好)"
+    },
+    {
+      "name": "app_settings.showReadTime",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:237 (显示阅读时间，阅读偏好)"
+    },
+    {
+      "name": "app_settings.defaultOpenMode",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:238 (默认打开模式 rss/fulltext，阅读偏好)"
+    },
+    {
+      "name": "app_settings.smartDedup",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:239, src-tauri/src/commands.rs:14-21 (智能去重开关，内容处理偏好)"
+    },
+    {
+      "name": "app_settings.closeToTray",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "undecided",
+      "evidence": "src/store.ts:240 (关闭到托盘，可能是本地行为偏好或跨设备一致偏好，需产品决策)"
+    },
+    {
+      "name": "app_settings.closePromptShown",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "exclude",
+      "evidence": "src/store.ts:241 (首次关闭询问已展示标志，会话状态)"
+    },
+    {
+      "name": "app_settings.notifyOnNewArticles",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:242 (新文章通知，用户偏好)"
+    },
+    {
+      "name": "app_settings.autoSync",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:243 (后台自动同步开关，同步行为偏好)"
+    },
+    {
+      "name": "app_settings.syncMode",
+      "kind": "client_setting",
+      "storage": "settings 表 app_settings JSON 字段",
+      "sensitive": false,
+      "sync_recommendation": "sync",
+      "evidence": "src/store.ts:244 (同步模式 direct/hybrid，同步行为偏好)"
+    }
+  ],
+  "task_id": "TASK-011",
+  "run_id": "TASK-011-20260913T171500Z",
+  "status": "ready_for_verification",
+  "summary": "已完成 OPT-004 持久化字段清单分析。盘点了 SQLite 数据库全部表（folders, feeds, articles, settings, sync_queue, deduped_urls, articles_fts）与前端持久化模型，识别出 60 个字段/字段组。按 DEC-008/009 边界分类：订阅源数据（feeds/folders 的 URL/标题/分类/布局/AI 开关等 15 字段）、客户端设置（app_settings JSON 的 21 个子字段）、非敏感连接配置（sync_protocol/endpoint/username 3 字段）建议同步；凭据类（4 个密码/token/API key）、文章内容/媒体/AI 生成结果/已读收藏状态、运行时状态（抓取缓存/同步队列/去重墓碑/FTS 索引）建议排除；分类折叠/关闭到托盘等 2 字段标记待定需产品决策。全部字段附代码证据（文件:行号）。当前 config_sync.rs 的 SyncPayload 包含 folders/feeds/app_settings/ai_config 四项，其中 ai_config（含 API key）需按 DEC-009 排除，app_settings 需拆分字段（autoStart/closePromptShown 等本地特定字段不应同步）。"
+}
