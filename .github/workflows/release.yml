@@ -18,8 +18,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ISSUE-004 加固：同一提交的 CI 必须全部成功，才允许进入构建与发布。
-      # 任一 check-run 失败 → 本发布失败；未完成 → 轮询等待；超时 → 失败。
+      # ISSUE-004 加固：tagged commit 的 CI 工作流必须全部成功，才允许进入构建与发布。
+      # 只监视 ci.yml 的运行（本工作流自身也会在该提交上注册 check-run，
+      # 若监视 check-runs 会把自己也算进去造成死锁——v0.13.0 首次运行已验证此坑）。
       - name: Require green CI on the tagged commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -30,14 +31,14 @@ jobs:
           $deadline = (Get-Date).ToUniversalTime().AddMinutes(45)
           while ($true) {
             $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
-            $uri = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/commits/$sha/check-runs?per_page=100"
-            $runs = (Invoke-RestMethod -Uri $uri -Headers $headers).check_runs
-            $pending = @($runs | Where-Object { $_.status -ne 'completed' })
-            $failed = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -ne 'success' })
-            Write-Host "check-runs on ${sha}: total=$($runs.Count) pending=$($pending.Count) failed=$($failed.Count)"
-            if ($failed.Count -gt 0) { throw "CI check-runs failed on tagged commit $sha — refusing to release" }
-            if ($runs.Count -gt 0 -and $pending.Count -eq 0) { Write-Host "All CI checks succeeded on $sha"; break }
-            if ((Get-Date).ToUniversalTime() -gt $deadline) { throw "Timed out waiting for CI check-runs on $sha" }
+            $uri = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/actions/runs?head_sha=$sha&per_page=100"
+            $ci = @((Invoke-RestMethod -Uri $uri -Headers $headers).workflow_runs | Where-Object { $_.path -eq '.github/workflows/ci.yml' })
+            $pending = @($ci | Where-Object { $_.status -ne 'completed' })
+            $failed = @($ci | Where-Object { $_.status -eq 'completed' -and $_.conclusion -ne 'success' })
+            Write-Host "CI runs on ${sha}: total=$($ci.Count) pending=$($pending.Count) failed=$($failed.Count)"
+            if ($failed.Count -gt 0) { throw "CI failed on tagged commit $sha — refusing to release" }
+            if ($ci.Count -gt 0 -and $pending.Count -eq 0) { Write-Host "All CI runs succeeded on $sha"; break }
+            if ((Get-Date).ToUniversalTime() -gt $deadline) { throw "Timed out waiting for CI on $sha" }
             Start-Sleep -Seconds 30
           }
 
