@@ -19,7 +19,8 @@ use tokio::sync::Mutex;
 
 const SCHEMA_VERSION: u32 = 1;
 const CONFIG_FILE_NAME: &str = "fluxreader-config.json";
-/// 文章状态同步文件名（与配置同步共用 Gist/WebDAV 通道，不同文件）
+/// 预留的文章状态文件名常量。当前文章已读/收藏状态通过 Google Reader / Fever
+/// 协议同步（sync.rs），不使用 Gist/WebDAV 通道。
 pub const STATE_FILE_NAME: &str = "fluxreader-article-state.json";
 
 /* ============================================================
@@ -314,7 +315,7 @@ pub async fn read_credentials(
 }
 
 /// Gist：创建（首次）或更新（已有 id）secret gist，内容为 payload JSON。
-/// `file_name`：Gist 文件名（配置同步 = fluxreader-config.json，状态同步 = fluxreader-article-state.json）
+/// `file_name`：Gist 文件名（当前仅用于配置同步 = fluxreader-config.json）
 pub async fn gist_upsert(
     http: &reqwest::Client,
     cred: &SyncCredentials,

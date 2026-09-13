@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "id": "TASK-019",
+  "batch_id": "BATCH-005（提前执行，随 B5 候选合并）",
+  "kind": "ci_change_manager_mechanical",
+  "milestone": "M4",
+  "status": "verified",
+  "title": "release.yml 发布加固（ISSUE-004 + 陈旧 releaseBody）",
+  "objective": "三处加固：① 在构建/发布步骤前新增『tagged commit 的 CI 全部成功』守卫（check-runs 轮询，未绿即失败，40 分钟超时）；② 新增 concurrency 组防并发发布；③ 把硬编码的旧版本（Fever）releaseBody 替换为中性说明，消除下次发布会带旧文案发布的缺陷。",
+  "non_goals": [
+    "不修改触发器",
+    "不改变构建参数/平台",
+    "不新增第三方 action（仅用 actions/* 与 API）",
+    "不执行真实发布（tag 推送仍需用户确认）"
+  ],
+  "requirement_refs": [
+    "docs/ISSUES.md ISSUE-004",
+    "docs/RELEASE-ROLLBACK.md"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    ".github/workflows/release.yml"
+  ],
+  "source_baseline": "main（BATCH-004 合并后）",
+  "dependencies": [],
+  "authorization": {
+    "source": "DEC-013 自主流程授权；属『只增加检查不降低门禁』的 CI 变更，文件为 protected_from_worker 故由管理 agent 机械执行并留全量 diff",
+    "risk_level": "medium——发布链文件，但变更方向全部是收紧"
+  },
+  "blockers": [],
+  "scope": {
+    "allowed_paths": [
+      ".github/workflows/release.yml"
+    ],
+    "protected_paths": "其余全部",
+    "change_definition": "守卫步骤 + concurrency + releaseBody 中性化",
+    "generated_artifacts": [],
+    "network_and_data": "守卫步骤在发布运行时访问 GitHub API（Actions 运行时行为，本仓库不执行）"
+  },
+  "steps": [
+    "实现三处变更",
+    "YAML 语法与逻辑自查",
+    "记录：真实发布路径的守卫逻辑标记 NOT_RUN（仅发布时执行）"
+  ],
+  "acceptance_criteria": [
+    "yaml 可解析、缩进正确",
+    "守卫语义：任一 check-run 失败 → 发布失败；未完成 → 轮询等待；超时 → 失败",
+    "releaseBody 不再含旧版本特性文案",
+    "不新增第三方 action"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "python yaml 解析校验",
+      "diff 逐行审查"
+    ],
+    "real_release_path": "NOT_RUN——仅在真实 tag 发布时执行，发布由用户确认"
+  },
+  "stop_conditions": [],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": null
+  },
+  "outputs": [
+    "加固后的 release.yml"
+  ],
+  "evidence": [],
+  "note_requirement": "不需要独立 Note（ISSUE-004 即记录；变更在批次报告留 diff）",
+  "verification_results": {
+    "verified_at_utc": "BATCH-005 内",
+    "verified_by": "manager",
+    "structure_check": "concurrency 组 + Require green CI 守卫步骤 + releaseBody 中性化；旧 Fever 文案已移除（断言）；无第三方 action 新增",
+    "diff": "29 insertions / 20 deletions，仅 release.yml",
+    "real_release_path": "NOT_RUN——守卫逻辑仅在真实 tag 发布时执行；发布由用户确认，届时该步骤为发布链的强制门"
+  }
+}

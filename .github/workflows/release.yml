@@ -6,6 +6,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     permissions:
@@ -13,6 +17,29 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # ISSUE-004 加固：同一提交的 CI 必须全部成功，才允许进入构建与发布。
+      # 任一 check-run 失败 → 本发布失败；未完成 → 轮询等待；超时 → 失败。
+      - name: Require green CI on the tagged commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sha = (git rev-parse HEAD)
+          $deadline = (Get-Date).ToUniversalTime().AddMinutes(45)
+          while ($true) {
+            $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+            $uri = "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/commits/$sha/check-runs?per_page=100"
+            $runs = (Invoke-RestMethod -Uri $uri -Headers $headers).check_runs
+            $pending = @($runs | Where-Object { $_.status -ne 'completed' })
+            $failed = @($runs | Where-Object { $_.status -eq 'completed' -and $_.conclusion -ne 'success' })
+            Write-Host "check-runs on ${sha}: total=$($runs.Count) pending=$($pending.Count) failed=$($failed.Count)"
+            if ($failed.Count -gt 0) { throw "CI check-runs failed on tagged commit $sha — refusing to release" }
+            if ($runs.Count -gt 0 -and $pending.Count -eq 0) { Write-Host "All CI checks succeeded on $sha"; break }
+            if ((Get-Date).ToUniversalTime() -gt $deadline) { throw "Timed out waiting for CI check-runs on $sha" }
+            Start-Sleep -Seconds 30
+          }
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -39,27 +66,9 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "FluxReader ${{ github.ref_name }}"
           releaseBody: |
-            本版本新增 Fever 协议同步，并支持在 Google Reader 与 Fever 之间下拉切换。
+            FluxReader ${{ github.ref_name }}
 
-            ## 新功能
-
-            - **Fever 协议同步**：完整实现 Fever v3 客户端（`api_key=md5(username:password)` 认证、feeds/groups、items 分页、unread/saved 权威对账、mark 逐条标读/收藏）
-            - **同步协议下拉选择**：设置页可在 **Google Reader（推荐）/ Fever** 之间切换，共用同一套集成凭据，切协议不丢绑定（remote id 同源）
-            - **Fever 半自动化同步**：since_id + with_ids 分页拉取，未读/收藏由 `unread_item_ids`/`saved_item_ids` 精确对账
-
-            ## 改进
-
-            - Google Reader 轻量同步新增 read/starred 权威 id 集合对账，修复「手机很久前标读/收藏」漏同步
-            - 已有条目正文/封面/enclosure 兜底回填（本地为空才补，不覆盖已有内容）
-            - 清理 Miniflux 命名残留（注释/日志 protocol-neutral：`origin='remote'`、后端自动同步）
-
-            ## 修复
-
-            - 修正 mock Google Reader 的 `ot` 游标语义（按 changed_at 过滤）与 read/starred stream 状态过滤，消除 3 个既有同步回归测试失败
-
-            ## 数据迁移
-
-            - 新增 settings 键 `sync_protocol`（greader|fever，默认 greader）与 `sync_last_entry_id`（Fever since_id 游标）；无 schema 迁移
+            完整变更说明见该版本标签对应的提交历史与合并记录；每次发布的变更说明随发布决定单独提供，不再内置于工作流（防止旧版本文案随新版本发布）。
           releaseDraft: false
           prerelease: false
           args: ""
