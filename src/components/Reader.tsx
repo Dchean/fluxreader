@@ -109,7 +109,8 @@ export function Reader() {
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
-  }, [art?.id, settings.markReadOnScrollBottom, art?.content, isRawRenderMode, isShowingTranslatedProse]);
+    // Note: exhaustive-deps — see .agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md
+  }, [art, settings.markReadOnScrollBottom, isRawRenderMode, isShowingTranslatedProse]);
 
   /* 正文点击代理：<a> 走外链（external.ts）；<img> 走灯箱放大；
      视频/音频原生控件点击不拦截 */
