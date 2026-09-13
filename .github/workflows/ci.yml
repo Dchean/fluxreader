@@ -28,6 +28,7 @@ jobs:
       - name: Build (tsc + vite)
         run: npm run build
 
+      # Note: 将前端回归接入 CI 的理由与备选 — 见 .agents/notes/proposed/testing/2026-09-13-frontend-regression-in-ci.md
       - name: Frontend regression (node state-machine checks)
         run: npm run test:frontend
 
