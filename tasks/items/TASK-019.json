@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "TASK-019",
-  "batch_id": "BATCH-005（提前执行，随 B5 候选合并）",
+  "batch_id": "BATCH-005（提前执行，已随 B5 候选合并）",
   "kind": "ci_change_manager_mechanical",
   "milestone": "M4",
   "status": "verified",
