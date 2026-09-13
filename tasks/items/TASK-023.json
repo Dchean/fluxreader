@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "id": "TASK-023",
+  "batch_id": "BATCH-007",
+  "kind": "refactor",
+  "milestone": "M2",
+  "status": "ready",
+  "title": "db.rs 内部模块化（db/ 目录 + 领域子模块，对外路径不变）",
+  "objective": "把 3513 行的 db.rs 拆分为 db.rs（模块根：声明子模块 + pub use 再导出）+ db/ 领域子模块（migrations/folders/feeds/articles/search/settings/sync_queue/dedup/tests 等，按现有函数分组），使 crate::db:: 全部既有调用路径零变化。",
+  "non_goals": [
+    "不改变任何函数签名/行为/SQL",
+    "不改变 lib.rs 的 mod db 声明方式（db.rs 根 + db/ 子目录共存）",
+    "不移动不属于 db 的代码",
+    "不引入新依赖"
+  ],
+  "requirement_refs": [
+    "docs/runs/M2-module-disposition-20260913.md",
+    ".agents/notes/proposed/architecture/2026-09-13-m2-module-disposition.md"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "src-tauri/src/db.rs"
+  ],
+  "source_baseline": "main@0ebd904（TASK-022 合并后）",
+  "dependencies": [
+    "TASK-022"
+  ],
+  "blockers": [],
+  "authorization": {
+    "source": "DEC-013 + 用户『后续所有任务一起跑通』",
+    "risk_level": "medium——纯移动重组，105 测试回归网"
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/db.rs",
+      "src-tauri/src/db/**",
+      "src-tauri/tests/**（如需适配测试模块位置）"
+    ],
+    "protected_paths": "按 EXECUTION-POLICY",
+    "change_definition": "函数体逐字移动到领域子模块；db.rs 保留 use/模块声明/pub use 再导出",
+    "generated_artifacts": [],
+    "network_and_data": "无"
+  },
+  "steps": [
+    "按领域给现有全部函数分组并数出清单",
+    "创建 db/*.rs 子模块并逐段移动（函数体逐字保留，必要时补 use）",
+    "db.rs 收敛为模块根（mod 声明 + pub use 再导出），保证 crate::db:: 既有路径全部不变",
+    "全量验证"
+  ],
+  "acceptance_criteria": [
+    "cargo test 全量 105/0/23 通过、clippy -D warnings 0、fmt --check 0",
+    "grep -rn 'pub fn' src-tauri/src/db.rs（根文件）不再包含实现函数体",
+    "lib.rs 与其他模块的 db:: 调用路径零变化（不改 lib.rs/commands.rs/sync.rs 等）",
+    "移动前后公开函数集合不变（管理 agent 对照）"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "clippy",
+      "fmt",
+      "cargo test",
+      "grep 结构审查",
+      "公开函数集合对照"
+    ]
+  },
+  "stop_conditions": [
+    "发现移动会改变行为时返回 blocked"
+  ],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": null
+  },
+  "outputs": [
+    "db/ 领域子模块",
+    "收敛后的 db.rs 根"
+  ],
+  "evidence": [],
+  "note_requirement": "随 M2 整理序列统一处理"
+}
