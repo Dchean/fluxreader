@@ -19,16 +19,19 @@ async fn device_flow_full_lifecycle() {
 
     // 1. 发起：拿到 user_code / device_code / verification_uri / interval
     let (user_code, device_code, verification_uri, interval) =
-        github_auth::device_code_request_for_test(&http, &mock.base, "cid_test").await.unwrap();
+        github_auth::device_code_request_for_test(&http, &mock.base, "cid_test")
+            .await
+            .unwrap();
     assert_eq!(user_code, "ABCD-1234");
     assert_eq!(device_code, "dc_fixed");
     assert!(verification_uri.contains("/login/device"));
     assert!(interval >= 1, "interval 至少 1 秒");
 
     // 2. 未批准时轮询 → None（authorization_pending）
-    let pending = github_auth::token_poll_once_for_test(&http, &mock.base, "cid_test", &device_code)
-        .await
-        .unwrap();
+    let pending =
+        github_auth::token_poll_once_for_test(&http, &mock.base, "cid_test", &device_code)
+            .await
+            .unwrap();
     assert!(pending.is_none());
 
     // 3. 批准后轮询 → token
@@ -40,7 +43,9 @@ async fn device_flow_full_lifecycle() {
     assert_eq!(token, "gho_testtoken123");
 
     // 4. token 换账户
-    let account = github_auth::fetch_account_for_test(&http, &mock.base, &token).await.unwrap();
+    let account = github_auth::fetch_account_for_test(&http, &mock.base, &token)
+        .await
+        .unwrap();
     assert_eq!(account.login, "testuser");
 }
 
@@ -48,7 +53,10 @@ async fn device_flow_full_lifecycle() {
 async fn bad_token_rejected_by_user_endpoint() {
     let approved = Arc::new(AtomicBool::new(true));
     let mock = spawn_mock(approved);
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
     let bad = github_auth::fetch_account_for_test(&http, &mock.base, "gho_wrong").await;
     assert!(bad.is_err(), "错误 token 拉 /user 应 401 失败");
 }
@@ -70,7 +78,10 @@ fn spawn_mock(approved: Arc<AtomicBool>) -> Mock {
             std::thread::spawn(move || handle(stream, approved));
         }
     });
-    Mock { base: format!("http://127.0.0.1:{port}"), _keep: tx }
+    Mock {
+        base: format!("http://127.0.0.1:{port}"),
+        _keep: tx,
+    }
 }
 
 fn handle(mut stream: std::net::TcpStream, approved: Arc<AtomicBool>) {
@@ -79,7 +90,11 @@ fn handle(mut stream: std::net::TcpStream, approved: Arc<AtomicBool>) {
     let Ok(n) = stream.read(&mut buf) else { return };
     let req = String::from_utf8_lossy(&buf[..n]).to_string();
     let first_line = req.lines().next().unwrap_or("").to_string();
-    let raw_path = first_line.split_whitespace().nth(1).unwrap_or("").to_string();
+    let raw_path = first_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("")
+        .to_string();
     let path = raw_path.split('?').next().unwrap_or("").to_string();
 
     let (status, json_out) = match path.as_str() {
@@ -103,7 +118,13 @@ fn handle(mut stream: std::net::TcpStream, approved: Arc<AtomicBool>) {
         }
         _ => (404, r#"{"error":"not found"}"#.to_string()),
     };
-    let reason = if status == 200 { "OK" } else if status == 401 { "Unauthorized" } else { "Not Found" };
+    let reason = if status == 200 {
+        "OK"
+    } else if status == 401 {
+        "Unauthorized"
+    } else {
+        "Not Found"
+    };
     let resp = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status,

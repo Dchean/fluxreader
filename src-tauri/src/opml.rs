@@ -62,9 +62,13 @@ fn starts_valid_entity(rest: &str) -> bool {
         };
         if let Some(semi) = body.find(';') {
             return semi > 0
-                && body[..semi]
-                    .chars()
-                    .all(|c| if hex { c.is_ascii_hexdigit() } else { c.is_ascii_digit() });
+                && body[..semi].chars().all(|c| {
+                    if hex {
+                        c.is_ascii_hexdigit()
+                    } else {
+                        c.is_ascii_digit()
+                    }
+                });
         }
     }
     false
@@ -129,7 +133,10 @@ pub fn build(feeds: &[(String, String, Option<String>)]) -> AppResult<String> {
             r#type: Some("rss".to_string()),
             ..Outline::default()
         };
-        by_folder.entry(normalised_folder).or_default().push(outline);
+        by_folder
+            .entry(normalised_folder)
+            .or_default()
+            .push(outline);
     }
 
     for (folder, outlines) in by_folder {
@@ -143,7 +150,8 @@ pub fn build(feeds: &[(String, String, Option<String>)]) -> AppResult<String> {
         }
     }
 
-    doc.to_string().map_err(|e| AppError::new("opml", e.to_string()))
+    doc.to_string()
+        .map_err(|e| AppError::new("opml", e.to_string()))
 }
 
 #[cfg(test)]
@@ -178,13 +186,24 @@ mod tests {
     #[test]
     fn build_round_trips_through_parse() {
         let input = vec![
-            ("Folderless".to_string(), "https://x.example/f".to_string(), None),
-            ("In Folder".to_string(), "https://y.example/f".to_string(), Some("Tech".to_string())),
+            (
+                "Folderless".to_string(),
+                "https://x.example/f".to_string(),
+                None,
+            ),
+            (
+                "In Folder".to_string(),
+                "https://y.example/f".to_string(),
+                Some("Tech".to_string()),
+            ),
         ];
         let xml = build(&input).expect("build");
         let feeds = parse(&xml).expect("re-parse");
         assert_eq!(feeds.len(), 2);
-        let foldered = feeds.iter().find(|f| f.feed_url == "https://y.example/f").unwrap();
+        let foldered = feeds
+            .iter()
+            .find(|f| f.feed_url == "https://y.example/f")
+            .unwrap();
         assert_eq!(foldered.folder.as_deref(), Some("Tech"));
     }
 

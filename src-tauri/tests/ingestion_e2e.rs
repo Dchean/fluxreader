@@ -25,7 +25,12 @@ async fn direct_fetch_pipeline_end_to_end() {
         .expect("direct fetch");
     let (bytes, etag, last_modified) = match fetched {
         ingestion::Fetched::NotModified => panic!("first fetch must return body"),
-        ingestion::Fetched::Body { bytes, etag, last_modified, .. } => (bytes, etag, last_modified),
+        ingestion::Fetched::Body {
+            bytes,
+            etag,
+            last_modified,
+            ..
+        } => (bytes, etag, last_modified),
     };
     assert!(!bytes.is_empty(), "feed body should not be empty");
 
@@ -46,14 +51,26 @@ async fn direct_fetch_pipeline_end_to_end() {
         false,
     )
     .unwrap();
-    db::set_feed_fetch_state(&conn, feed_id, false, None, etag.as_deref(), last_modified.as_deref()).unwrap();
+    db::set_feed_fetch_state(
+        &conn,
+        feed_id,
+        false,
+        None,
+        etag.as_deref(),
+        last_modified.as_deref(),
+    )
+    .unwrap();
 
     // 2. 条目全部入库（source='direct'）+ 相对 URL 已解析为绝对
     for a in &parsed.articles {
         db::upsert_article_with_feed(&conn, feed_id, a, false).unwrap();
     }
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM articles WHERE feed_id = ?1", [feed_id], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE feed_id = ?1",
+            [feed_id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(count, 2, "all articles persisted");
 
@@ -65,7 +82,10 @@ async fn direct_fetch_pipeline_end_to_end() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(abs, "http://127.0.0.1:8765/post/1", "relative link resolved");
+    assert_eq!(
+        abs, "http://127.0.0.1:8765/post/1",
+        "relative link resolved"
+    );
 
     // 3. 列表查询路径（与前端 listArticles 同构）
     let items = db::list_articles(
@@ -95,7 +115,11 @@ async fn direct_fetch_pipeline_end_to_end() {
         db::upsert_article_with_feed(&conn, feed_id, a, false).unwrap();
     }
     let count2: i64 = conn
-        .query_row("SELECT COUNT(*) FROM articles WHERE feed_id = ?1", [feed_id], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE feed_id = ?1",
+            [feed_id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(count2, count, "re-upsert must not duplicate");
 
@@ -109,21 +133,30 @@ async fn direct_fetch_pipeline_end_to_end() {
 
     // 6. HTML 消毒：content 中的相对 img 已被 base 重写
     assert!(
-        re.content_html.as_deref().unwrap_or("").contains("127.0.0.1:8765/img/a.png"),
+        re.content_html
+            .as_deref()
+            .unwrap_or("")
+            .contains("127.0.0.1:8765/img/a.png"),
         "relative img resolved in sanitized html"
     );
     println!("sanitized html ok");
 
     // 7. 消毒函数单点验证：事件处理器/js scheme 剥离，img src 重写
-    let dirty = r#"<img src="/x.png" onerror="alert(1)"><a href="javascript:evil()">c</a><p>ok</p>"#;
+    let dirty =
+        r#"<img src="/x.png" onerror="alert(1)"><a href="javascript:evil()">c</a><p>ok</p>"#;
     let clean = app_lib::sanitize::sanitize(dirty, Some("http://127.0.0.1:8765/"));
     assert!(!clean.contains("onerror"), "event handler stripped");
     assert!(!clean.contains("javascript:"), "js scheme stripped");
-    assert!(clean.contains("http://127.0.0.1:8765/x.png"), "img src rewritten");
+    assert!(
+        clean.contains("http://127.0.0.1:8765/x.png"),
+        "img src rewritten"
+    );
     println!("sanitize ok");
 
     // 8. 条件 GET 复请求路径不炸（本地 http.server 不回 ETag，仅验证请求路径）
-    let r2 = ingestion::conditional_get(&client, FEED_URL, etag.as_deref(), last_modified.as_deref()).await;
+    let r2 =
+        ingestion::conditional_get(&client, FEED_URL, etag.as_deref(), last_modified.as_deref())
+            .await;
     assert!(r2.is_ok(), "conditional re-fetch path ok");
 
     let _ = std::fs::remove_file(&tmp);

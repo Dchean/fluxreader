@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "id": "BATCH-002",
+  "status": "completed",
+  "status_detail": "all_three_tasks_verified_pending_owner_review",
+  "policy_ref": "tasks/EXECUTION-POLICY.json",
+  "proposal": "tasks/BATCH-002-PROPOSAL-20260913.md",
+  "task_ids": [
+    "TASK-007",
+    "TASK-008",
+    "TASK-009"
+  ],
+  "started_at": "2026-09-13T14:27:01Z",
+  "tasks_started": 3,
+  "tasks_verified": 3,
+  "active_task": null,
+  "repair_rounds_consumed": {
+    "TASK-007": 0,
+    "TASK-008": 0,
+    "TASK-009": 0
+  },
+  "budget_compliance": {
+    "max_tasks_per_batch": 3,
+    "tasks_used": 3,
+    "max_repair_rounds_per_task": 3,
+    "max_repair_rounds_used": 0,
+    "max_task_wall_minutes": 90,
+    "max_task_wall_minutes_observed": "TASK-007 全程（冻结 14:56 派发 → 验证完成）约 30 分钟，远低于上限",
+    "financial_cap_enabled": false,
+    "model_invocations": "2 次编码/探测调用（TASK-007 worker + TASK-008 探测）+ 2 次可用性探测",
+    "estimated_cost_usd": 0.3026,
+    "cost_note": "CLI 自报估算合计（0.0451625 + 0.049 + 0.1183965 + 0.09 探测近似），非账单依据；TASK-009 为机械操作无模型调用"
+  },
+  "owner_authorization": "用户 2026-09-13 答复『全部批准』（对应提案 P2-1/P2-2/P2-3），预算沿用既定值；另『批准』A-2 推送专用分支取得托管 CI 证据（非合并批准）。已录入 PROJECT.pending_approvals（APPROVAL-BATCH-002-001、APPROVAL-HOSTED-CI-001）。",
+  "task_id_mapping": {
+    "TASK-007": "提案 P2-1 CI Note 反向追溯注释",
+    "TASK-008": "提案 P2-2 契约文件 $schema 键修复",
+    "TASK-009": "提案 P2-3 凭据残留脱敏"
+  },
+  "parallel_actions_not_counting_as_batch_tasks": {
+    "A-2": "推送 ci/batch-001-hosted-verification 分支（BATCH-001 候选 40 文件）属用户已批准的验证动作；PR 创建需用户一键或另行授权（gh 未安装）。CI 结果为合并前置证据，不计入批次任务额度。"
+  },
+  "merge_status": "NOT_MERGED — A-1 合并仍待用户确认",
+  "next_batch_note": "本批同样以 3 个任务为上限，不自动重开。",
+  "completed_at": "2026-09-13T14:44:47Z"
+}

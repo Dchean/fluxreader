@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "id": "TASK-007",
+  "proposal_ref": "tasks/BATCH-002-PROPOSAL-20260913.md#P2-1",
+  "batch_id": "BATCH-002",
+  "kind": "ci_change",
+  "milestone": "M1",
+  "status": "verified",
+  "title": "为 CI 前端回归步骤补 Note 反向追溯注释",
+  "objective": "在 .github/workflows/ci.yml 的 frontend 作业 test:frontend 步骤处补一行注释，建立代码入口到 Note 的反向索引（AGENTS.md 要求；独立审查 R-04 指出的残留）。",
+  "non_goals": [
+    "不修改任何步骤语义、触发器、权限、Node 版本",
+    "不改 release.yml",
+    "不新增 Note 文件（复用现有 testing Note）"
+  ],
+  "requirement_refs": [
+    "AGENTS.md 架构决策留痕规范第 4 条",
+    "docs/runs/BATCH-001-independent-review-20260913.md R-04"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".agents/notes/proposed/testing/2026-09-13-frontend-regression-in-ci.md"
+  ],
+  "source_baseline": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "input_snapshot": {
+    "note": "工作区含 BATCH-001 已验证未提交改动；.github/workflows/ci.yml 当前内容含 TASK-005 的新步骤",
+    "sha256_at_freeze": {
+      ".github/workflows/ci.yml": "596B3C86AC96C5E70FCBF3380CEF5DCFA120B1BBA1C92800FA23A30325FB5031"
+    }
+  },
+  "dependencies": [],
+  "authorization": {
+    "source": "用户批准 BATCH-002 全部三项（APPROVAL-BATCH-002-001）",
+    "risk_level": "low"
+  },
+  "blockers": [],
+  "scope": {
+    "allowed_paths": [
+      ".github/workflows/ci.yml"
+    ],
+    "protected_paths": "按 tasks/EXECUTION-POLICY.json protected_from_worker",
+    "change_definition": "仅在 frontend 作业的『- name: Frontend regression (node state-machine checks)』步骤上方插入一行注释：# Note: 将前端回归接入 CI 的理由与备选 — 见 .agents/notes/proposed/testing/2026-09-13-frontend-regression-in-ci.md",
+    "generated_artifacts": [],
+    "network_and_data": "无网络、无真实数据"
+  },
+  "steps": [
+    "读取 ci.yml，定位 frontend 作业的 Frontend regression 步骤",
+    "在其上方插入任务定义中给出的那行注释（文字必须逐字一致）",
+    "返回结构化结果与实际修改文件"
+  ],
+  "acceptance_criteria": [
+    "git diff 显示 ci.yml 仅新增该注释行，无其他任何变化",
+    "注释中的 Note 路径真实存在",
+    "两个 Note 校验器仍通过（间接：未触碰 Note 树）"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "git diff -- .github/workflows/ci.yml",
+      "npm run lint",
+      "npm run test:frontend"
+    ],
+    "require_comment_only_diff": true
+  },
+  "stop_conditions": [
+    "权限拒绝",
+    "范围越界",
+    "预算耗尽"
+  ],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": 90
+  },
+  "outputs": [
+    "结构化 worker-result",
+    "管理 agent 独立验证记录"
+  ],
+  "evidence": [],
+  "note_requirement": "无需新 Note；本任务即 R-04 残留的 Note 反向绑定补齐",
+  "dispatch_record": {
+    "run_id": "TASK-007-20260913T145630Z",
+    "dispatched_at_utc": "2026-09-13T14:56:30Z",
+    "worker_exit_code": 0,
+    "duration_seconds": 52.8,
+    "num_turns": 6,
+    "cost_usd_estimated": 0.1183965,
+    "permission_denials": "none",
+    "claude_cli_note": "restricted 模式直连仍 Not logged in（用户新配置不生效于 restricted）；按 CLAUDE-WORKER 既有授权回落 --settings 显式传入用户既有 env。证据：.cache/runs/BATCH-002/probe-callability*/。",
+    "evidence_dir": ".cache/runs/BATCH-002/TASK-007/attempt-1/"
+  },
+  "verification_results": {
+    "verified_at_utc": "2026-09-13T14:43:55Z",
+    "verified_by": "manager（独立执行，不采信 worker 自报）",
+    "comment_only_proof": "当前 ci.yml 移除 Note 注释行后 SHA-256 与派发前冻结哈希逐字节相等（596B3C86...），证明 worker 仅新增 1 行注释；git diff 中的另 3 行是 TASK-005 既存未提交改动（对比基准为 index/HEAD）。",
+    "lint": {
+      "exit_code": 0,
+      "warnings": 6,
+      "errors": 0,
+      "note": "与本任务前基线一致，无新增"
+    },
+    "test_frontend": {
+      "exit_code": 0,
+      "passed": "8/8"
+    },
+    "note_validators": "5 篇 Note tree/format 均通过（含 TASK-008 新增 Note）"
+  }
+}

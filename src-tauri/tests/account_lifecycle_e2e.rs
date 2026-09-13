@@ -105,42 +105,78 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
 
     // 远端订阅及其文章消失；本地订阅与文章保留
     let remote_left: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds WHERE id = ?1", [remote_feed], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM feeds WHERE id = ?1",
+            [remote_feed],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(remote_left, 0, "remote feed purged");
     let remote_art: i64 = conn
-        .query_row("SELECT COUNT(*) FROM articles WHERE id = ?1", [remote_aid], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE id = ?1",
+            [remote_aid],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(remote_art, 0, "remote article purged (cascade)");
     let local_left: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds WHERE id = ?1", [local_feed], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM feeds WHERE id = ?1",
+            [local_feed],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(local_left, 1, "local feed kept");
     let local_art: i64 = conn
-        .query_row("SELECT COUNT(*) FROM articles WHERE id = ?1", [local_aid], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE id = ?1",
+            [local_aid],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(local_art, 1, "local article kept");
 
     // 绑定/队列/墓碑/文件夹绑定全部归零
     let bound: i64 = conn
-        .query_row("SELECT COUNT(*) FROM articles WHERE remote_id IS NOT NULL", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE remote_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(bound, 0, "article bindings cleared");
     let feed_bound: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds WHERE remote_id IS NOT NULL", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM feeds WHERE remote_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(feed_bound, 0, "feed bindings cleared");
     let folder_bound: i64 = conn
-        .query_row("SELECT COUNT(*) FROM folders WHERE remote_id IS NOT NULL", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM folders WHERE remote_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(folder_bound, 0, "folder bindings cleared");
-    let queue: i64 = conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0)).unwrap();
+    let queue: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(queue, 0, "sync queue emptied");
-    let tomb: i64 = conn.query_row("SELECT COUNT(*) FROM deduped_urls", [], |r| r.get(0)).unwrap();
+    let tomb: i64 = conn
+        .query_row("SELECT COUNT(*) FROM deduped_urls", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(tomb, 0, "tombstones purged");
     // 远端分类（空了）删除；本地分类保留
     let remote_folder_left: i64 = conn
-        .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [remote_folder], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM folders WHERE id = ?1",
+            [remote_folder],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(remote_folder_left, 0, "empty remote folder removed");
 }
@@ -170,10 +206,12 @@ fn cache_cleanup_articles_respects_star_and_age() {
         };
         let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
         if starred {
-            conn.execute("UPDATE articles SET is_starred = 1 WHERE id = ?1", [aid]).unwrap();
+            conn.execute("UPDATE articles SET is_starred = 1 WHERE id = ?1", [aid])
+                .unwrap();
         }
         if read {
-            conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [aid]).unwrap();
+            conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [aid])
+                .unwrap();
         }
         aid
     };
@@ -190,10 +228,16 @@ fn cache_cleanup_articles_respects_star_and_age() {
         (old, false, "old read article purged"),
         (old_starred, true, "starred preserved"),
         (recent, true, "recent preserved"),
-        (old_unread, true, "old UNREAD preserved (sync would resurrect it)"),
+        (
+            old_unread,
+            true,
+            "old UNREAD preserved (sync would resurrect it)",
+        ),
     ] {
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM articles WHERE id = ?1", [aid], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM articles WHERE id = ?1", [aid], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(n > 0, should_exist, "{why}");
     }
@@ -232,7 +276,10 @@ fn cache_cleanup_ai_only_clears_ai_fields() {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap();
-    assert!(summary.is_none() && translated.is_none(), "ai cache cleared");
+    assert!(
+        summary.is_none() && translated.is_none(),
+        "ai cache cleared"
+    );
     assert!(!body.is_empty(), "body content kept");
 }
 
@@ -251,17 +298,18 @@ async fn reconnect_other_account_no_mixing() {
     db::set_setting(&conn, "greader_username", "token-a").unwrap();
     db::set_setting(&conn, "greader_password", "pw-a").unwrap();
     let http = app_lib::ingestion::build_client(10);
-    let _ = app_lib::sync::feeds_phase(
-        &std::sync::Arc::new(tokio::sync::Mutex::new(conn)),
-        &http,
-    )
-    .await
-    .unwrap();
+    let _ = app_lib::sync::feeds_phase(&std::sync::Arc::new(tokio::sync::Mutex::new(conn)), &http)
+        .await
+        .unwrap();
     // 直接用 mock 的 feed 列表数断言 Pull 生效（2 个远端 feed）
     {
         let conn = db::open(&tmp).unwrap();
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'remote'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE origin = 'remote'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 2, "account A feeds pulled");
     }
@@ -275,15 +323,19 @@ async fn reconnect_other_account_no_mixing() {
     db::set_setting(&conn, "greader_username", "token-b").unwrap();
     db::set_setting(&conn, "greader_password", "pw-b").unwrap();
     let left: i64 = conn
-        .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'remote'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM feeds WHERE origin = 'remote'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(left, 0, "no account A feeds left after purge");
     let _ = std::fs::remove_file(&tmp);
 }
 
 /* ============================================================
-   本地订阅同步到 Miniflux（sync_local_feeds 语义）
-   ============================================================ */
+本地订阅同步到 Miniflux（sync_local_feeds 语义）
+============================================================ */
 
 /// 未连接期间添加的本地源 → 首连后 sync_local_feeds 入队 → push_feeds 推送 →
 /// 服务端收到 create_feed 且本地绑定 remote_id；再跑一次（幂等）不再推送。
@@ -296,10 +348,43 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
 
     // 未连接时的本地直连源（origin 默认 local）
     let folder = db::create_folder(&conn, "本地", "article").unwrap();
-    db::insert_feed(&conn, "http://127.0.0.1:1/a.xml", None, "Local A", None, folder, "inherit", true, false).unwrap();
-    db::insert_feed(&conn, "http://127.0.0.1:1/b.xml", None, "Local B", None, folder, "inherit", true, false).unwrap();
+    db::insert_feed(
+        &conn,
+        "http://127.0.0.1:1/a.xml",
+        None,
+        "Local A",
+        None,
+        folder,
+        "inherit",
+        true,
+        false,
+    )
+    .unwrap();
+    db::insert_feed(
+        &conn,
+        "http://127.0.0.1:1/b.xml",
+        None,
+        "Local B",
+        None,
+        folder,
+        "inherit",
+        true,
+        false,
+    )
+    .unwrap();
     // 已绑定一个（不应重复入队）
-    let bound = db::insert_feed(&conn, "http://127.0.0.1:1/c.xml", None, "Bound", None, folder, "inherit", true, false).unwrap();
+    let bound = db::insert_feed(
+        &conn,
+        "http://127.0.0.1:1/c.xml",
+        None,
+        "Bound",
+        None,
+        folder,
+        "inherit",
+        true,
+        false,
+    )
+    .unwrap();
     db::set_feed_remote_id(&conn, bound, 999).unwrap();
 
     // 连接（复刻 sync_local_feeds 的入队逻辑：未绑本地源 → add_feed 队列）
@@ -323,13 +408,17 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
 
     // 跑 feeds 阶段（推送）：服务端 created_feeds 应收到 2 个 create
     let http = app_lib::ingestion::build_client(10);
-    let report = app_lib::sync::feeds_phase(
-        &std::sync::Arc::new(tokio::sync::Mutex::new(conn)),
-        &http,
-    ).await.expect("feeds phase");
+    let report =
+        app_lib::sync::feeds_phase(&std::sync::Arc::new(tokio::sync::Mutex::new(conn)), &http)
+            .await
+            .expect("feeds phase");
 
     let created = server.created_feeds.lock().unwrap();
-    assert_eq!(created.len(), 2, "both unbound local feeds pushed: {created:?}");
+    assert_eq!(
+        created.len(),
+        2,
+        "both unbound local feeds pushed: {created:?}"
+    );
     assert_eq!(report.pushed_feeds, 2, "report counts both");
 
     // 本地两个源绑定上 remote_id
@@ -345,7 +434,11 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
 
     // 幂等：队列已清空，再入队（无未绑源）→ 0
     let unbound2: i64 = tmp2
-        .query_row("SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM feeds WHERE origin = 'local' AND remote_id IS NULL",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(unbound2, 0, "idempotent: nothing left to push");
     let _ = std::fs::remove_file(&tmp);
@@ -362,11 +455,21 @@ async fn create_feed_conflict_returns_existing_id() {
 
     // mock subscription/list 预置的既有订阅 URL
     let existing_url = "http://127.0.0.1:8765/local_feed.xml";
-    let r = client.quick_add(existing_url).await.expect("quick_add should resolve existing feed");
+    let r = client
+        .quick_add(existing_url)
+        .await
+        .expect("quick_add should resolve existing feed");
     // 幂等：返回既有 feed id 10，不重复创建
-    assert_eq!(r.stream_id.as_deref(), Some("feed/10"), "conflict resolves to the pre-existing feed id");
+    assert_eq!(
+        r.stream_id.as_deref(),
+        Some("feed/10"),
+        "conflict resolves to the pre-existing feed id"
+    );
 
     // 且不重复入 subscribed_urls（幂等，不产生重复创建记录）
     let subscribed = server.subscribed_urls.lock().unwrap();
-    assert!(!subscribed.iter().any(|u| u == existing_url), "no duplicate subscribe recorded");
+    assert!(
+        !subscribed.iter().any(|u| u == existing_url),
+        "no duplicate subscribe recorded"
+    );
 }

@@ -18,8 +18,8 @@ const CONFIG_FILE_NAME: &str = "fluxreader-config.json";
 pub const STATE_FILE_NAME: &str = "fluxreader-article-state.json";
 
 /* ============================================================
-   同步 payload
-   ============================================================ */
+同步 payload
+============================================================ */
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SyncPayload {
@@ -136,8 +136,22 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                 id
             }
         };
-        let title = if f.title.trim().is_empty() { f.url.clone() } else { f.title.clone() };
-        db::insert_feed(conn, &f.url, None, &title, None, folder_id, &f.layout, f.auto_summary, f.auto_translate)?;
+        let title = if f.title.trim().is_empty() {
+            f.url.clone()
+        } else {
+            f.title.clone()
+        };
+        db::insert_feed(
+            conn,
+            &f.url,
+            None,
+            &title,
+            None,
+            folder_id,
+            &f.layout,
+            f.auto_summary,
+            f.auto_translate,
+        )?;
         imported += 1;
     }
 
@@ -159,8 +173,8 @@ fn list_folder_id_by_name(conn: &rusqlite::Connection, name: &str) -> AppResult<
 }
 
 /* ============================================================
-   远端后端：GitHub Gist / WebDAV
-   ============================================================ */
+远端后端：GitHub Gist / WebDAV
+============================================================ */
 
 /// 凭据（settings 键 `config_sync_credentials`）：
 /// Gist 需 classic PAT（gist scope）；WebDAV 用服务器地址+账号密码。
@@ -173,7 +187,9 @@ pub struct SyncCredentials {
     pub gist_id: Option<String>,
 }
 
-pub async fn read_credentials(conn: &Arc<Mutex<rusqlite::Connection>>) -> AppResult<SyncCredentials> {
+pub async fn read_credentials(
+    conn: &Arc<Mutex<rusqlite::Connection>>,
+) -> AppResult<SyncCredentials> {
     let c = conn.lock().await;
     let raw = db::get_setting(&c, "config_sync_credentials")?
         .ok_or_else(|| AppError::not_found("未配置配置同步凭据"))?;
@@ -182,20 +198,30 @@ pub async fn read_credentials(conn: &Arc<Mutex<rusqlite::Connection>>) -> AppRes
 
 /// Gist：创建（首次）或更新（已有 id）secret gist，内容为 payload JSON。
 /// `file_name`：Gist 文件名（配置同步 = fluxreader-config.json，状态同步 = fluxreader-article-state.json）
-pub async fn gist_upsert(http: &reqwest::Client, cred: &SyncCredentials, json: &str, file_name: &str) -> AppResult<String> {
+pub async fn gist_upsert(
+    http: &reqwest::Client,
+    cred: &SyncCredentials,
+    json: &str,
+    file_name: &str,
+) -> AppResult<String> {
     let auth = format!("Bearer {}", cred.token);
     match &cred.gist_id {
         Some(id) => {
             let url = format!("https://api.github.com/gists/{id}");
             let body = serde_json::json!({ "files": { file_name: { "content": json } } });
-            let resp = http.patch(&url)
+            let resp = http
+                .patch(&url)
                 .header("Authorization", &auth)
                 .header("User-Agent", "FluxReader")
                 .json(&body)
                 .timeout(std::time::Duration::from_secs(30))
-                .send().await?;
+                .send()
+                .await?;
             if !resp.status().is_success() {
-                return Err(AppError::network(format!("Gist 更新失败：HTTP {}", resp.status())));
+                return Err(AppError::network(format!(
+                    "Gist 更新失败：HTTP {}",
+                    resp.status()
+                )));
             }
             Ok(id.clone())
         }
@@ -205,18 +231,22 @@ pub async fn gist_upsert(http: &reqwest::Client, cred: &SyncCredentials, json: &
                 "public": false,
                 "files": { file_name: { "content": json } }
             });
-            let resp = http.post("https://api.github.com/gists")
+            let resp = http
+                .post("https://api.github.com/gists")
                 .header("Authorization", &auth)
                 .header("User-Agent", "FluxReader")
                 .json(&body)
                 .timeout(std::time::Duration::from_secs(30))
-                .send().await?;
+                .send()
+                .await?;
             let status = resp.status();
             let text = resp.text().await?;
             if !status.is_success() {
                 /* 字符级截断：字节位置 200 可能落在多字节字符中间（panic） */
                 let head: String = text.chars().take(200).collect();
-                return Err(AppError::network(format!("Gist 创建失败：HTTP {status}：{head}")));
+                return Err(AppError::network(format!(
+                    "Gist 创建失败：HTTP {status}：{head}"
+                )));
             }
             let v: serde_json::Value = serde_json::from_str(&text)?;
             v.get("id")
@@ -228,15 +258,23 @@ pub async fn gist_upsert(http: &reqwest::Client, cred: &SyncCredentials, json: &
 }
 
 /// Gist：读取 payload JSON。
-pub async fn gist_read(http: &reqwest::Client, cred: &SyncCredentials, file_name: &str) -> AppResult<String> {
-    let id = cred.gist_id.as_ref()
+pub async fn gist_read(
+    http: &reqwest::Client,
+    cred: &SyncCredentials,
+    file_name: &str,
+) -> AppResult<String> {
+    let id = cred
+        .gist_id
+        .as_ref()
         .ok_or_else(|| AppError::not_found("尚未上传过同步（无 Gist id）"))?;
     let url = format!("https://api.github.com/gists/{id}");
-    let resp = http.get(&url)
+    let resp = http
+        .get(&url)
         .header("Authorization", format!("Bearer {}", cred.token))
         .header("User-Agent", "FluxReader")
         .timeout(std::time::Duration::from_secs(30))
-        .send().await?;
+        .send()
+        .await?;
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
@@ -250,36 +288,55 @@ pub async fn gist_read(http: &reqwest::Client, cred: &SyncCredentials, file_name
 }
 
 /// WebDAV：PUT 写入。
-pub async fn webdav_put(http: &reqwest::Client, cred: &SyncCredentials, json: &str, file_name: &str) -> AppResult<()> {
+pub async fn webdav_put(
+    http: &reqwest::Client,
+    cred: &SyncCredentials,
+    json: &str,
+    file_name: &str,
+) -> AppResult<()> {
     let url = format!("{}/{}", cred.server.trim_end_matches('/'), file_name);
-    let resp = http.put(&url)
+    let resp = http
+        .put(&url)
         .basic_auth(&cred.username, Some(&cred.token))
         .header("Content-Type", "application/json")
         .body(json.to_string())
         .timeout(std::time::Duration::from_secs(30))
-        .send().await?;
+        .send()
+        .await?;
     if !resp.status().is_success() {
-        return Err(AppError::network(format!("WebDAV 上传失败：HTTP {}", resp.status())));
+        return Err(AppError::network(format!(
+            "WebDAV 上传失败：HTTP {}",
+            resp.status()
+        )));
     }
     Ok(())
 }
 
 /// WebDAV：GET 读取。
-pub async fn webdav_get(http: &reqwest::Client, cred: &SyncCredentials, file_name: &str) -> AppResult<String> {
+pub async fn webdav_get(
+    http: &reqwest::Client,
+    cred: &SyncCredentials,
+    file_name: &str,
+) -> AppResult<String> {
     let url = format!("{}/{}", cred.server.trim_end_matches('/'), file_name);
-    let resp = http.get(&url)
+    let resp = http
+        .get(&url)
         .basic_auth(&cred.username, Some(&cred.token))
         .timeout(std::time::Duration::from_secs(30))
-        .send().await?;
+        .send()
+        .await?;
     if !resp.status().is_success() {
-        return Err(AppError::network(format!("WebDAV 读取失败：HTTP {}", resp.status())));
+        return Err(AppError::network(format!(
+            "WebDAV 读取失败：HTTP {}",
+            resp.status()
+        )));
     }
     Ok(resp.text().await?)
 }
 
 /* ============================================================
-   IPC 命令
-   ============================================================ */
+IPC 命令
+============================================================ */
 
 /// 保存凭据（前端设置页表单）。
 #[tauri::command]
@@ -290,7 +347,11 @@ pub async fn config_sync_save_credentials(
     // 先校验 JSON 形状
     let cred: SyncCredentials = serde_json::from_str(&credentials)?;
     let conn = state.db.lock().await;
-    db::set_setting(&conn, "config_sync_credentials", &serde_json::to_string(&cred)?)?;
+    db::set_setting(
+        &conn,
+        "config_sync_credentials",
+        &serde_json::to_string(&cred)?,
+    )?;
     Ok(())
 }
 
@@ -298,12 +359,15 @@ pub async fn config_sync_save_credentials(
 #[tauri::command]
 pub async fn config_sync_upload(state: State<'_, AppState>) -> AppResult<String> {
     /* 锁内直接读凭据并构建 payload——此前在这里再调 read_credentials(内部二次 lock)
-       会对同一 tokio Mutex 重入挂死（配好 Gist 后一上传即无响应） */
+    会对同一 tokio Mutex 重入挂死（配好 Gist 后一上传即无响应） */
     let (json, mut cred) = {
         let conn = state.db.lock().await;
         let raw = db::get_setting(&conn, "config_sync_credentials")?
             .ok_or_else(|| AppError::not_found("未配置配置同步凭据"))?;
-        (serde_json::to_string(&build_payload(&conn)?)?, serde_json::from_str::<SyncCredentials>(&raw)?)
+        (
+            serde_json::to_string(&build_payload(&conn)?)?,
+            serde_json::from_str::<SyncCredentials>(&raw)?,
+        )
     };
     let http = &state.http;
     match cred.backend.as_str() {
@@ -312,7 +376,11 @@ pub async fn config_sync_upload(state: State<'_, AppState>) -> AppResult<String>
             if cred.gist_id.as_deref() != Some(&id) {
                 cred.gist_id = Some(id);
                 let conn = state.db.lock().await;
-                db::set_setting(&conn, "config_sync_credentials", &serde_json::to_string(&cred)?)?;
+                db::set_setting(
+                    &conn,
+                    "config_sync_credentials",
+                    &serde_json::to_string(&cred)?,
+                )?;
             }
         }
         "webdav" => webdav_put(http, &cred, &json, CONFIG_FILE_NAME).await?,
@@ -343,7 +411,10 @@ pub async fn config_sync_download(state: State<'_, AppState>) -> AppResult<Strin
 
 /// 应用下载的 payload（前端确认后调用）。
 #[tauri::command]
-pub async fn config_sync_apply(state: State<'_, AppState>, payload: String) -> AppResult<serde_json::Value> {
+pub async fn config_sync_apply(
+    state: State<'_, AppState>,
+    payload: String,
+) -> AppResult<serde_json::Value> {
     let p: SyncPayload = serde_json::from_str(&payload)?;
     let conn = state.db.lock().await;
     let (imported, skipped) = apply_payload(&conn, &p)?;
@@ -369,15 +440,22 @@ pub async fn config_sync_status(state: State<'_, AppState>) -> AppResult<serde_j
 }
 
 /* ============================================================
-   集成测试入口（tests/config_sync_e2e.rs）
-   ============================================================ */
+集成测试入口（tests/config_sync_e2e.rs）
+============================================================ */
 
 #[doc(hidden)]
-pub async fn webdav_put_for_test(http: &reqwest::Client, cred: &SyncCredentials, json: &str) -> AppResult<()> {
+pub async fn webdav_put_for_test(
+    http: &reqwest::Client,
+    cred: &SyncCredentials,
+    json: &str,
+) -> AppResult<()> {
     webdav_put(http, cred, json, CONFIG_FILE_NAME).await
 }
 
 #[doc(hidden)]
-pub async fn webdav_get_for_test(http: &reqwest::Client, cred: &SyncCredentials) -> AppResult<String> {
+pub async fn webdav_get_for_test(
+    http: &reqwest::Client,
+    cred: &SyncCredentials,
+) -> AppResult<String> {
     webdav_get(http, cred, CONFIG_FILE_NAME).await
 }

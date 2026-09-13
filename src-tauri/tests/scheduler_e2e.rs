@@ -17,7 +17,11 @@ use tokio::sync::Mutex;
 const FEED_URL: &str = "http://127.0.0.1:8765/local_feed.xml";
 
 /// 搭测试环境：临时 DB + 两个源（一个指向本地 server，一个指向死地址）
-async fn setup() -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client, std::path::PathBuf) {
+async fn setup() -> (
+    Arc<Mutex<rusqlite::Connection>>,
+    reqwest::Client,
+    std::path::PathBuf,
+) {
     let tmp = std::env::temp_dir().join("fluxreader_scheduler_test.db");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
@@ -62,14 +66,32 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
     let good_id = {
         let conn = db.lock().await;
         db::insert_feed(
-            &conn, FEED_URL, None, "Local Test Feed", None, 1, "inherit", true, false,
-        ).unwrap()
+            &conn,
+            FEED_URL,
+            None,
+            "Local Test Feed",
+            None,
+            1,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap()
     };
     let bad_id = {
         let conn = db.lock().await;
         db::insert_feed(
-            &conn, "http://127.0.0.1:1/dead.xml", None, "Dead Feed", None, 1, "inherit", true, false,
-        ).unwrap()
+            &conn,
+            "http://127.0.0.1:1/dead.xml",
+            None,
+            "Dead Feed",
+            None,
+            1,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap()
     };
 
     // ---------- 1. 首轮：两个源都到期，好源抓到 2 条，坏源失败 ----------
@@ -81,15 +103,23 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
     {
         let conn = db.lock().await;
         // 好源：成功清零
-        let (ff, fc, nra): (i64, i64, Option<String>) = conn.query_row(
-            "SELECT fetch_failed, fail_count, next_retry_at FROM feeds WHERE id = ?1",
-            [good_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        let (ff, fc, nra): (i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT fetch_failed, fail_count, next_retry_at FROM feeds WHERE id = ?1",
+                [good_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
         assert_eq!((ff, fc), (0, 0), "good feed must reset failure state");
         assert!(nra.is_none());
         // 坏源：fail_count=1，5 分钟后重试
-        let (ff, fc, nra): (i64, i64, Option<String>) = conn.query_row(
-            "SELECT fetch_failed, fail_count, next_retry_at FROM feeds WHERE id = ?1",
-            [bad_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        let (ff, fc, nra): (i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT fetch_failed, fail_count, next_retry_at FROM feeds WHERE id = ?1",
+                [bad_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
         assert_eq!((ff, fc), (1, 1), "dead feed records first failure");
         assert!(nra.is_some(), "dead feed gets a retry window");
         // 到期判定：坏源在退避窗口内 → 不再 due（interval=0 下好源必然 due，跳过它）
@@ -106,13 +136,18 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
         let conn = db.lock().await;
         conn.execute(
             "UPDATE feeds SET next_retry_at = datetime('now', '-1 minute') WHERE id = ?1",
-            [bad_id]).unwrap();
+            [bad_id],
+        )
+        .unwrap();
     }
     let due: Vec<i64> = {
         let conn = db.lock().await;
         db::feeds_due_for_refresh(&conn, 0, true).unwrap()
     };
-    assert!(due.contains(&bad_id), "expired backoff returns feed to due set");
+    assert!(
+        due.contains(&bad_id),
+        "expired backoff returns feed to due set"
+    );
 
     // ---------- 4. 好源间隔未到 → 不 due；间隔设 0 → due ----------
     {
@@ -126,7 +161,12 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
     // ---------- 5. autoRefresh=false 语义（调度循环里读设置决定，这里验证读取函数可用）----------
     {
         let conn = db.lock().await;
-        db::set_setting(&conn, "app_settings", r#"{"autoRefresh":false,"refreshInterval":45}"#).unwrap();
+        db::set_setting(
+            &conn,
+            "app_settings",
+            r#"{"autoRefresh":false,"refreshInterval":45}"#,
+        )
+        .unwrap();
     }
     let raw = {
         let conn = db.lock().await;
@@ -140,18 +180,38 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
 }
 
 /* ============================================================
-   同步模式（syncMode）过滤语义：hybrid 跳过 Miniflux 源，direct 全含，
-   手动全量入口（feeds_all_ids(true)）不受模式影响。
-   ============================================================ */
+同步模式（syncMode）过滤语义：hybrid 跳过 Miniflux 源，direct 全含，
+手动全量入口（feeds_all_ids(true)）不受模式影响。
+============================================================ */
 
 fn seed_mode_feeds(conn: &rusqlite::Connection) -> (i64, i64) {
     let folder = db::create_folder(conn, "模式", "article").unwrap();
     let direct = db::insert_feed_origin(
-        conn, "http://127.0.0.1:1/direct.xml", None, "Direct", None, folder, "inherit", true, false, "local",
-    ).unwrap();
+        conn,
+        "http://127.0.0.1:1/direct.xml",
+        None,
+        "Direct",
+        None,
+        folder,
+        "inherit",
+        true,
+        false,
+        "local",
+    )
+    .unwrap();
     let mf = db::insert_feed_origin(
-        conn, "http://127.0.0.1:1/remote.xml", None, "Remote", None, folder, "inherit", true, false, "remote",
-    ).unwrap();
+        conn,
+        "http://127.0.0.1:1/remote.xml",
+        None,
+        "Remote",
+        None,
+        folder,
+        "inherit",
+        true,
+        false,
+        "remote",
+    )
+    .unwrap();
     (direct, mf)
 }
 
@@ -164,12 +224,21 @@ fn sync_mode_hybrid_skips_miniflux_feeds_in_due_query() {
 
     // hybrid（include_miniflux=false）：Miniflux 源被跳过
     let due = db::feeds_due_for_refresh(&conn, 0, false).unwrap();
-    assert!(due.contains(&direct), "direct feed still refreshed in hybrid mode");
-    assert!(!due.contains(&mf), "miniflux feed must be skipped in hybrid mode");
+    assert!(
+        due.contains(&direct),
+        "direct feed still refreshed in hybrid mode"
+    );
+    assert!(
+        !due.contains(&mf),
+        "miniflux feed must be skipped in hybrid mode"
+    );
 
     // direct（include_miniflux=true）：全部包含（旧行为）
     let due_all = db::feeds_due_for_refresh(&conn, 0, true).unwrap();
-    assert!(due_all.contains(&direct) && due_all.contains(&mf), "direct mode refreshes all feeds");
+    assert!(
+        due_all.contains(&direct) && due_all.contains(&mf),
+        "direct mode refreshes all feeds"
+    );
 
     // 未设置 syncMode 时 scheduler 默认 direct（read_sync_mode_conn 是私有函数，
     // 通过行为验证：due 查询 include=true 的调用在 scheduler 内部由该默认驱动）
@@ -184,7 +253,10 @@ fn sync_mode_manual_refresh_always_includes_miniflux_feeds() {
 
     // 手动/托盘全量入口：无论模式，始终全部源（模式只影响后台定时）
     let all = db::feeds_all_ids(&conn, true).unwrap();
-    assert!(all.contains(&direct) && all.contains(&mf), "manual refresh includes all feeds");
+    assert!(
+        all.contains(&direct) && all.contains(&mf),
+        "manual refresh includes all feeds"
+    );
 }
 
 #[test]
@@ -200,7 +272,10 @@ fn sync_mode_default_is_direct_when_unset() {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("syncMode").and_then(|m| m.as_str()).map(String::from))
         .unwrap_or_else(|| "direct".into());
-    assert_eq!(mode, "direct", "unset syncMode must default to direct (legacy behavior)");
+    assert_eq!(
+        mode, "direct",
+        "unset syncMode must default to direct (legacy behavior)"
+    );
 
     // 写入 hybrid → 读回 hybrid
     db::set_setting(&conn, "app_settings", r#"{"syncMode":"hybrid"}"#).unwrap();

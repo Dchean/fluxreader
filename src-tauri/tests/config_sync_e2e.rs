@@ -23,9 +23,13 @@ fn start_webdav_mock() -> (u16, std::sync::Arc<std::sync::Mutex<Option<String>>>
             // 读到 header 结束
             loop {
                 let n = stream.read(&mut buf).unwrap_or(0);
-                if n == 0 { return; }
+                if n == 0 {
+                    return;
+                }
                 req.push_str(&String::from_utf8_lossy(&buf[..n]));
-                if req.contains("\r\n\r\n") || req.len() > 1_048_576 { break; }
+                if req.contains("\r\n\r\n") || req.len() > 1_048_576 {
+                    break;
+                }
             }
             let head = req.clone();
             let is_put = head.starts_with("PUT");
@@ -43,7 +47,9 @@ fn start_webdav_mock() -> (u16, std::sync::Arc<std::sync::Mutex<Option<String>>>
                 let mut body = body;
                 while body.len() < cl {
                     let n = stream.read(&mut buf).unwrap_or(0);
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     body.push_str(&String::from_utf8_lossy(&buf[..n]));
                 }
                 *store2.lock().unwrap() = Some(body);
@@ -77,9 +83,36 @@ fn seed_db(conn: &Connection) {
     let f1 = db::create_folder(conn, "技术", "article").unwrap();
     let f2 = db::create_folder(conn, "播客", "podcast").unwrap();
     db::set_folder_ai_flags(conn, f1, true, false).unwrap();
-    db::insert_feed(conn, "https://a.com/rss", Some("https://a.com"), "源A", None, f1, "inherit", true, false).unwrap();
-    db::insert_feed(conn, "https://b.com/feed", None, "源B", None, f2, "social", false, true).unwrap();
-    db::set_setting(conn, "app_settings", r#"{"themeMode":"dark","fontSize":17}"#).unwrap();
+    db::insert_feed(
+        conn,
+        "https://a.com/rss",
+        Some("https://a.com"),
+        "源A",
+        None,
+        f1,
+        "inherit",
+        true,
+        false,
+    )
+    .unwrap();
+    db::insert_feed(
+        conn,
+        "https://b.com/feed",
+        None,
+        "源B",
+        None,
+        f2,
+        "social",
+        false,
+        true,
+    )
+    .unwrap();
+    db::set_setting(
+        conn,
+        "app_settings",
+        r#"{"themeMode":"dark","fontSize":17}"#,
+    )
+    .unwrap();
     db::set_setting(conn, "ai_config", r#"{"preset":"glm"}"#).unwrap();
 }
 
@@ -98,7 +131,11 @@ fn payload_contains_all_config_domains() {
     let tech = p.folders.iter().find(|f| f.name == "技术").unwrap();
     assert!(tech.auto_summary && !tech.auto_translate);
     // 源归属正确映射
-    let feed_b = p.feeds.iter().find(|f| f.url == "https://b.com/feed").unwrap();
+    let feed_b = p
+        .feeds
+        .iter()
+        .find(|f| f.url == "https://b.com/feed")
+        .unwrap();
     assert_eq!(feed_b.folder, "播客");
     assert_eq!(feed_b.layout, "social");
     // 设置原文带出
@@ -114,39 +151,72 @@ fn apply_upserts_feeds_and_overrides_settings() {
     let conn = db::open(&tmp).unwrap();
     // 本地已有：一个同名分类 + 一个同 URL 源
     let f1 = db::create_folder(&conn, "技术", "gallery").unwrap();
-    db::insert_feed(&conn, "https://a.com/rss", None, "本地已有源A", None, f1, "inherit", false, false).unwrap();
+    db::insert_feed(
+        &conn,
+        "https://a.com/rss",
+        None,
+        "本地已有源A",
+        None,
+        f1,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
 
     let payload = SyncPayload {
         schema: 1,
         uploaded_at: "2026-09-01T00:00:00Z".into(),
         folders: vec![
             app_lib::config_sync::FolderSpec {
-                name: "技术".into(), layout: "article".into(), auto_summary: true, auto_translate: false,
+                name: "技术".into(),
+                layout: "article".into(),
+                auto_summary: true,
+                auto_translate: false,
             },
             app_lib::config_sync::FolderSpec {
-                name: "新分类".into(), layout: "podcast".into(), auto_summary: false, auto_translate: true,
+                name: "新分类".into(),
+                layout: "podcast".into(),
+                auto_summary: false,
+                auto_translate: true,
             },
         ],
         feeds: vec![
             // 已存在（同 URL）→ 跳过
             app_lib::config_sync::FeedSpec {
-                url: "https://a.com/rss".into(), title: "源A".into(), folder: "技术".into(),
-                layout: "inherit".into(), auto_summary: true, auto_translate: false,
+                url: "https://a.com/rss".into(),
+                title: "源A".into(),
+                folder: "技术".into(),
+                layout: "inherit".into(),
+                auto_summary: true,
+                auto_translate: false,
             },
             // 新源 → 导入到已有分类
             app_lib::config_sync::FeedSpec {
-                url: "https://new.com/rss".into(), title: "新源".into(), folder: "技术".into(),
-                layout: "inherit".into(), auto_summary: false, auto_translate: false,
+                url: "https://new.com/rss".into(),
+                title: "新源".into(),
+                folder: "技术".into(),
+                layout: "inherit".into(),
+                auto_summary: false,
+                auto_translate: false,
             },
             // 新源 + 新分类名 → 分类创建后导入
             app_lib::config_sync::FeedSpec {
-                url: "https://pod.com/rss".into(), title: "播客源".into(), folder: "新分类".into(),
-                layout: "inherit".into(), auto_summary: false, auto_translate: false,
+                url: "https://pod.com/rss".into(),
+                title: "播客源".into(),
+                folder: "新分类".into(),
+                layout: "inherit".into(),
+                auto_summary: false,
+                auto_translate: false,
             },
             // 未知分类 → 落「导入」分类
             app_lib::config_sync::FeedSpec {
-                url: "https://x.com/rss".into(), title: "未知归属".into(), folder: "不存在".into(),
-                layout: "inherit".into(), auto_summary: false, auto_translate: false,
+                url: "https://x.com/rss".into(),
+                title: "未知归属".into(),
+                folder: "不存在".into(),
+                layout: "inherit".into(),
+                auto_summary: false,
+                auto_translate: false,
             },
         ],
         app_settings: Some(r#"{"themeMode":"light","fontSize":18}"#.into()),
@@ -170,7 +240,10 @@ fn apply_upserts_feeds_and_overrides_settings() {
     let feeds = db::list_feeds(&conn).unwrap();
     assert_eq!(feeds.len(), 4);
     // 已存在的源未被覆盖改名
-    let a = feeds.iter().find(|f| f.feed_url == "https://a.com/rss").unwrap();
+    let a = feeds
+        .iter()
+        .find(|f| f.feed_url == "https://a.com/rss")
+        .unwrap();
     assert_eq!(a.title, "本地已有源A");
 
     // 设置被覆盖
@@ -199,10 +272,15 @@ async fn webdav_roundtrip_via_mock() {
     app_lib::config_sync::webdav_put_for_test(&http, &cred, r#"{"schema":1,"feeds":[]}"#)
         .await
         .unwrap();
-    assert_eq!(store.lock().unwrap().as_deref(), Some(r#"{"schema":1,"feeds":[]}"#));
+    assert_eq!(
+        store.lock().unwrap().as_deref(),
+        Some(r#"{"schema":1,"feeds":[]}"#)
+    );
 
     // 下载（WebDAV GET）→ 内容一致
-    let got = app_lib::config_sync::webdav_get_for_test(&http, &cred).await.unwrap();
+    let got = app_lib::config_sync::webdav_get_for_test(&http, &cred)
+        .await
+        .unwrap();
     assert_eq!(got, r#"{"schema":1,"feeds":[]}"#);
 }
 
@@ -240,15 +318,21 @@ async fn full_roundtrip_upload_download_apply() {
     let conn_a = db::open(&tmp_a).unwrap();
     seed_db(&conn_a);
     let payload_a = build_payload(&conn_a).unwrap();
-    app_lib::config_sync::webdav_put_for_test(&http, &cred, &serde_json::to_string(&payload_a).unwrap())
-        .await
-        .unwrap();
+    app_lib::config_sync::webdav_put_for_test(
+        &http,
+        &cred,
+        &serde_json::to_string(&payload_a).unwrap(),
+    )
+    .await
+    .unwrap();
 
     // 设备B：空库下载同一配置并应用
     let tmp_b = std::env::temp_dir().join("fluxreader_cfgsync_rt_b.db");
     let _ = std::fs::remove_file(&tmp_b);
     let conn_b = db::open(&tmp_b).unwrap();
-    let downloaded = app_lib::config_sync::webdav_get_for_test(&http, &cred).await.unwrap();
+    let downloaded = app_lib::config_sync::webdav_get_for_test(&http, &cred)
+        .await
+        .unwrap();
     let parsed: SyncPayload = serde_json::from_str(&downloaded).unwrap();
     let (imported, skipped) = apply_payload(&conn_b, &parsed).unwrap();
 
@@ -256,8 +340,12 @@ async fn full_roundtrip_upload_download_apply() {
     assert_eq!(skipped, 0);
     // 设备B 拿到与设备A 相同的分类结构
     let folders_b = db::list_folders(&conn_b).unwrap();
-    assert!(folders_b.iter().any(|f| f.name == "技术" && f.layout == "article" && f.auto_summary));
-    assert!(folders_b.iter().any(|f| f.name == "播客" && f.layout == "podcast"));
+    assert!(folders_b
+        .iter()
+        .any(|f| f.name == "技术" && f.layout == "article" && f.auto_summary));
+    assert!(folders_b
+        .iter()
+        .any(|f| f.name == "播客" && f.layout == "podcast"));
     // 设备B 拿到设备A 的设置
     let s = db::get_setting(&conn_b, "app_settings").unwrap().unwrap();
     assert!(s.contains("fontSize"));

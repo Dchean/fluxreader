@@ -1,0 +1,751 @@
+{
+  "schema_version": 1,
+  "task_id": "TASK-002",
+  "run_id": "TASK-002-20260913T041438Z",
+  "status": "measurement_complete",
+  "started_at_utc": "2026-09-13T04:14:38Z",
+  "authorization": {
+    "id": "APPROVAL-BASELINE-001",
+    "status": "approved",
+    "user_confirmation": "批准",
+    "scope": "用户批准执行 TASK-002，包括准备锁定依赖、运行指定检查和桌面构建，仅记录结果，不修改业务代码、测试断言或 CI。"
+  },
+  "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "input_snapshot": {
+    "artifact_directory": "E:\\tik\\fluxreader\\.cache\\baseline\\TASK-002-20260913T041438Z",
+    "manifest_path": "E:\\tik\\fluxreader\\.cache\\baseline\\TASK-002-20260913T041438Z\\input-manifest.json",
+    "manifest_sha256": "4b301a7988eca7acc1ca2ae4729d540da97c80239cb3c974c9ab3c91d72e26c8",
+    "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+    "file_count": 130,
+    "input_bytes": 1956930
+  },
+  "environment": {
+    "recorded_at_utc": "2026-09-13T04:14:32.7055111Z",
+    "os": "Microsoft Windows 10.0.26200",
+    "architecture": "X64",
+    "node": "v24.19.0",
+    "npm": "11.17.0",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "rust_toolchain": "stable-x86_64-pc-windows-msvc (default)",
+    "installed_components": [
+      "cargo-x86_64-pc-windows-msvc",
+      "clippy-x86_64-pc-windows-msvc",
+      "rust-docs-x86_64-pc-windows-msvc",
+      "rust-std-x86_64-pc-windows-msvc",
+      "rust-std-x86_64-unknown-linux-gnu",
+      "rustc-x86_64-pc-windows-msvc",
+      "rustfmt-x86_64-pc-windows-msvc"
+    ],
+    "node_modules_exists": false,
+    "frontend_dist_exists": false,
+    "rust_target_exists": false,
+    "visual_studio_buildtools": "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools"
+  },
+  "environment_differences": [
+    "本机 Windows + Node 24.19.0；CI 前端为 Ubuntu + Node 22。",
+    "本次使用 Rust 1.98.1；CI 配置 stable 未固定具体版本。"
+  ],
+  "artifact_directory": ".cache/baseline/TASK-002-20260913T041438Z",
+  "data_isolation": {
+    "temporary_directory": ".cache/baseline/TASK-002-20260913T041438Z/tmp",
+    "scope": "仅本次命令进程的 TEMP/TMP；不修改系统环境设置，不使用真实应用数据或服务凭据"
+  },
+  "note_applicability": "执行已批准的现有测量方案，不改变产品实现、测试策略、断言或 CI；本次不新增实现/架构决定。后续非平凡改动先记录 proposed Note。",
+  "preparation_events": [
+    {
+      "action": "input_snapshot",
+      "attempt": 1,
+      "status": "ENVIRONMENT_BLOCKED",
+      "detail": "沙箱内 Node 启动 Git 子进程 EPERM；未改产品文件。"
+    },
+    {
+      "action": "input_snapshot",
+      "attempt": 2,
+      "status": "PASS",
+      "detail": "按环境要求取得提升权限后完成；保存 130 个输入文件。"
+    }
+  ],
+  "checks": [
+    {
+      "id": "BASE-DEPS",
+      "cwd": ".",
+      "command": "npm ci",
+      "status": "PASS",
+      "attempts": [
+        {
+          "gate_id": "BASE-DEPS",
+          "attempt": 1,
+          "command": "npm.cmd ci",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:21:32.9866475Z",
+          "finished_at_utc": "2026-09-13T04:21:49.6081090Z",
+          "duration_seconds": 16.614,
+          "exit_code": 0,
+          "status": "PASS",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-DEPS.attempt-1.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null
+        }
+      ]
+    },
+    {
+      "id": "BASE-LINT",
+      "cwd": ".",
+      "command": "npm run lint",
+      "status": "PASS",
+      "attempts": [
+        {
+          "gate_id": "BASE-LINT",
+          "attempt": 1,
+          "command": "npm.cmd run lint",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:23:52.1676532Z",
+          "finished_at_utc": "2026-09-13T04:23:53.2678108Z",
+          "duration_seconds": 1.094,
+          "exit_code": 0,
+          "status": "PASS",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-LINT.attempt-1.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null,
+          "warning_count": 6
+        }
+      ]
+    },
+    {
+      "id": "BASE-WEB-BUILD",
+      "cwd": ".",
+      "command": "npm run build",
+      "status": "PASS",
+      "attempts": [
+        {
+          "gate_id": "BASE-WEB-BUILD",
+          "attempt": 1,
+          "command": "npm.cmd run build",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:23:52.1681884Z",
+          "finished_at_utc": "2026-09-13T04:23:56.6281770Z",
+          "duration_seconds": 4.455,
+          "exit_code": 1,
+          "status": "FAIL",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-WEB-BUILD.attempt-1.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null,
+          "failure_classification": "environment_permission"
+        },
+        {
+          "gate_id": "BASE-WEB-BUILD",
+          "attempt": 2,
+          "command": "npm.cmd run build",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:29:02.2827182Z",
+          "finished_at_utc": "2026-09-13T04:29:06.2326773Z",
+          "duration_seconds": 3.945,
+          "exit_code": 0,
+          "status": "PASS",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-WEB-BUILD.attempt-2.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null
+        }
+      ]
+    },
+    {
+      "id": "BASE-FRONTEND",
+      "cwd": ".",
+      "command": "npm run test:frontend",
+      "status": "PASS",
+      "attempts": [
+        {
+          "gate_id": "BASE-FRONTEND",
+          "attempt": 1,
+          "command": "npm.cmd run test:frontend",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:23:52.1676019Z",
+          "finished_at_utc": "2026-09-13T04:23:54.8872194Z",
+          "duration_seconds": 2.713,
+          "exit_code": 0,
+          "status": "PASS",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-FRONTEND.attempt-1.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null,
+          "assertions": {
+            "passed": 8,
+            "total": 8
+          }
+        }
+      ]
+    },
+    {
+      "id": "BASE-RUST-FMT",
+      "cwd": ".",
+      "command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+      "status": "FAIL",
+      "attempts": [
+        {
+          "gate_id": "BASE-RUST-FMT",
+          "attempt": 1,
+          "command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:21:33.0196829Z",
+          "finished_at_utc": "2026-09-13T04:21:35.6870260Z",
+          "duration_seconds": 2.662,
+          "exit_code": 1,
+          "status": "FAIL",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-RUST-FMT.attempt-1.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null,
+          "failure_classification": "format_drift",
+          "format_diff_sections": 532,
+          "affected_files": [
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\build.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\ai.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\commands.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\config_sync.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\credentials.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\db.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\error.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\extraction.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\fever.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\github_auth.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\greader.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\ingestion.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\lib.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\media.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\opml.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\sanitize.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\scheduler.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\sync.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\src\\main.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\account_lifecycle_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\mock_greader.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\ai_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\config_sync_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\dedup_sync_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\dual_client_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\feed_edit_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\fever_live_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\fever_sync_live_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\github_auth_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\greader_live_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\ingestion_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\migration_test.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\regression_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\scheduler_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\staged_refresh_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\sync_content_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\sync_e2e.rs",
+            "\\\\?\\E:\\tik\\fluxreader\\src-tauri\\tests\\sync_phases_e2e.rs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "BASE-RUST-LINT",
+      "cwd": ".",
+      "command": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
+      "status": "PASS",
+      "attempts": [
+        {
+          "gate_id": "BASE-RUST-LINT",
+          "attempt": 1,
+          "command": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:32:47.9313899Z",
+          "finished_at_utc": "2026-09-13T04:34:33.4074949Z",
+          "duration_seconds": 105.471,
+          "exit_code": 0,
+          "status": "PASS",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-RUST-LINT.attempt-1.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null
+        }
+      ]
+    },
+    {
+      "id": "BASE-RUST-TEST",
+      "cwd": ".",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
+      "status": "PASS",
+      "attempts": [
+        {
+          "gate_id": "BASE-RUST-TEST",
+          "attempt": 1,
+          "command": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:37:39.1073500Z",
+          "finished_at_utc": "2026-09-13T04:42:56.0944327Z",
+          "duration_seconds": 316.981,
+          "exit_code": 0,
+          "status": "PASS",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-RUST-TEST.attempt-1.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null,
+          "rust_test_totals": {
+            "groups": 22,
+            "passed": 81,
+            "failed": 0,
+            "ignored": 23,
+            "filtered_out": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "BASE-MOCK",
+      "cwd": ".",
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --locked --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --ignored",
+      "status": "PASS",
+      "attempts": [
+        {
+          "gate_id": "BASE-MOCK",
+          "attempt": 1,
+          "command": "cargo test --manifest-path src-tauri/Cargo.toml --locked --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --ignored",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:44:57.8302101Z",
+          "finished_at_utc": "2026-09-13T04:46:53.9000774Z",
+          "duration_seconds": 116.065,
+          "exit_code": 0,
+          "status": "PASS",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-MOCK.attempt-1.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null,
+          "rust_test_totals": {
+            "groups": 6,
+            "passed": 14,
+            "failed": 0,
+            "ignored": 0,
+            "filtered_out": 10
+          }
+        }
+      ]
+    },
+    {
+      "id": "BASE-DESKTOP-BUILD",
+      "cwd": ".",
+      "command": "npm run tauri build",
+      "status": "PASS",
+      "attempts": [
+        {
+          "gate_id": "BASE-DESKTOP-BUILD",
+          "attempt": 1,
+          "command": "npm.cmd run tauri build",
+          "working_directory": "E:/tik/fluxreader",
+          "started_at_utc": "2026-09-13T04:49:52.4009892Z",
+          "finished_at_utc": "2026-09-13T04:54:23.1017725Z",
+          "duration_seconds": 270.696,
+          "exit_code": 0,
+          "status": "PASS",
+          "log_path": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/logs/BASE-DESKTOP-BUILD.attempt-1.log",
+          "temporary_directory": "E:/tik/fluxreader/.cache/baseline/TASK-002-20260913T041438Z/tmp",
+          "wrapper_error": null
+        }
+      ]
+    }
+  ],
+  "excluded": [
+    "全部不指定 target 的 --ignored",
+    "三个真实服务 live 测试 target",
+    "依赖外部 feed 服务的 ignored 场景",
+    "真实桌面 UI/AI 质量评估；当前无已批准实现"
+  ],
+  "application_readiness": "已测构建和测试通过，但格式检查失败；完整桌面/真实服务/发布验收尚未完成。",
+  "product_changes": "none",
+  "findings": [
+    {
+      "issue_id": "ISSUE-013",
+      "category": "format",
+      "severity": "P2",
+      "evidence": "BASE-RUST-FMT attempt 1",
+      "finding": "38 个 Rust 文件共 532 处格式差异，检查返回 1；未执行格式化。"
+    },
+    {
+      "issue_id": "ISSUE-014",
+      "category": "lint",
+      "severity": "P2",
+      "evidence": "BASE-LINT attempt 1",
+      "finding": "oxlint 返回 0，但有 3 条测试脚本未使用变量/导入、Reader 的 1 条 effect 依赖及 Overlays 的 2 条 effect 内 setState 警告。"
+    },
+    {
+      "issue_id": "ISSUE-002",
+      "category": "ci_gap",
+      "severity": "P1",
+      "evidence": "BASE-FRONTEND attempt 1 + current ci.yml",
+      "finding": "现有前端逻辑回归 8/8 通过，但仍未接入当前 CI。"
+    },
+    {
+      "issue_id": "ISSUE-003",
+      "category": "coverage_gap",
+      "severity": "P1",
+      "finding": "打包成功与 Rust/Node 测试不证明真实桌面交互正常；未安装或启动应用，未运行桌面 UI E2E。"
+    },
+    {
+      "issue_id": "ISSUE-007",
+      "category": "coverage_gap",
+      "severity": "P1",
+      "finding": "未运行真实服务的 7 项测试；另有 2 项依赖外部本地 feed fixture 的测试未运行。"
+    },
+    {
+      "issue_id": "ISSUE-010",
+      "category": "environment",
+      "severity": "P1",
+      "finding": "本机 Node 24 / Windows 与 CI Node 22 / Ubuntu 前端环境不同；不能将本机结果直接等同 CI 通过。"
+    },
+    {
+      "issue_id": "ISSUE-015",
+      "category": "tool_environment",
+      "severity": "P2",
+      "finding": "初次快照和 Vite 构建遇沙箱 EPERM；按环境要求取得权限后通过，原失败记录保留。"
+    },
+    {
+      "issue_id": "ISSUE-016",
+      "category": "handoff_dependency",
+      "severity": "P2",
+      "finding": "AGENTS 指向的仓库内 write-notes-like-deepseek 技能文件缺失；全局版本可用，移交仍需补齐。"
+    }
+  ],
+  "followup_proposals": [
+    {
+      "id": "FOLLOWUP-01",
+      "title": "接入已经可运行的前端回归门禁",
+      "basis": [
+        "ISSUE-002"
+      ],
+      "candidate_scope": [
+        ".github/workflows/ci.yml",
+        "相关说明与任务元数据"
+      ],
+      "acceptance": "在 CI 的既定 Node 环境执行 test:frontend；保留真实退出码，验证失败会阻止合并所要求的检查。",
+      "authorization": "未授权实施"
+    },
+    {
+      "id": "FOLLOWUP-02",
+      "title": "单独处理格式和 lint 告警",
+      "basis": [
+        "ISSUE-013",
+        "ISSUE-014"
+      ],
+      "candidate_scope": [
+        "格式检查实际涉及的 Rust 文件",
+        "tools/frontend-regression.mjs",
+        "src/components/Reader.tsx",
+        "src/components/Overlays.tsx"
+      ],
+      "acceptance": "格式变更与行为变更分开；逐条判断 hooks 警告，不机械改依赖。按实际改动执行适用验证，不降低规则。",
+      "authorization": "未授权实施"
+    },
+    {
+      "id": "FOLLOWUP-03",
+      "title": "为 OPT-004 建立新数据边界的测试与实现任务",
+      "basis": [
+        "DEC-009",
+        "ISSUE-012"
+      ],
+      "candidate_scope": [
+        "src-tauri/src/config_sync.rs",
+        "src-tauri/tests/config_sync_e2e.rs",
+        "必要的接口与需求文档"
+      ],
+      "acceptance": "先定义字段清单，证明非敏感配置可同步、敏感凭据不进入 payload，导入不应用敏感字段或清空本地凭据；保留旧实现失败与新实现通过的证据。",
+      "authorization": "未授权实施；具体方案需先写 proposed Note"
+    },
+    {
+      "id": "FOLLOWUP-04",
+      "title": "补齐真实桌面和服务兼容性验证",
+      "basis": [
+        "ISSUE-003",
+        "ISSUE-006",
+        "ISSUE-007"
+      ],
+      "candidate_scope": [
+        "后续明确的 E2E/fixture 任务"
+      ],
+      "acceptance": "先确认兼容组合/版本与驱动能力，分别验证桌面交互和真实服务，不能用 mock 替代全部证明。",
+      "authorization": "未授权实施"
+    },
+    {
+      "id": "FOLLOWUP-05",
+      "title": "补齐可移交的决策技能依赖",
+      "basis": [
+        "ISSUE-016"
+      ],
+      "candidate_scope": [
+        "AGENTS 引用与获准的项目技能副本"
+      ],
+      "acceptance": "其他执行环境能解析相同技能与 Note 规则，链接与版本明确。",
+      "authorization": "未授权实施"
+    }
+  ],
+  "validation_status": "PASS_WITH_KNOWN_DOCUMENTATION_GAP",
+  "last_updated_at_utc": "2026-09-13T04:54:41.235Z",
+  "completed_at_utc": "2026-09-13T05:00:32Z",
+  "application_commands_completed_at_utc": "2026-09-13T04:54:23.1017725Z",
+  "summary": {
+    "planned_checks": 9,
+    "passed_checks": 8,
+    "failed_checks": 1,
+    "frontend_assertions": {
+      "passed": 8,
+      "total": 8
+    },
+    "rust_tests": {
+      "normal_passed": 81,
+      "selected_mock_passed": 14,
+      "total_executed": 95,
+      "failed": 0,
+      "still_not_executed": 9
+    },
+    "rust_format": {
+      "status": "FAIL",
+      "affected_files": 38,
+      "diff_sections": 532,
+      "already_required_by_ci": false
+    },
+    "frontend_lint": {
+      "status": "PASS",
+      "warnings": 6
+    },
+    "desktop_build": {
+      "status": "PASS",
+      "bundles": 2,
+      "installed": false,
+      "launched": false
+    },
+    "ci_run": "NOT_RUN; local environment differs from configured CI"
+  },
+  "artifacts": [
+    {
+      "path": "dist/index.html",
+      "bytes": 548,
+      "sha256": "950a44f7308f9bba10c609e91eedf2d4fb8aa961f4d4920dfd605518801530c7"
+    },
+    {
+      "path": "src-tauri/target/release/app.exe",
+      "bytes": 23100416,
+      "sha256": "651cd7c0d4c6401240f698f15d5c9434c721c4f499f9bf45595dd111b84bf4f8"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/msi/FluxReader_0.12.0_x64_en-US.msi",
+      "bytes": 8359936,
+      "sha256": "5e18b3ae096406a35ec1027a94cc99470def17b1d2e20aef3740de4b63f68958"
+    },
+    {
+      "path": "src-tauri/target/release/bundle/nsis/FluxReader_0.12.0_x64-setup.exe",
+      "bytes": 5801156,
+      "sha256": "11ef552228ecb91eee8ec858f316ae7da329395c1ecdfb2d596f830d15da2ab2"
+    }
+  ],
+  "source_integrity": {
+    "input_files_compared": 130,
+    "unexpected_changes": [],
+    "product_source_tests_ci_and_lockfiles": "unchanged",
+    "manifest_path": ".cache/baseline/TASK-002-20260913T041438Z/input-manifest.json",
+    "status": "PASS"
+  },
+  "document_and_evidence_validation": {
+    "status": "PASS_WITH_KNOWN_DOCUMENTATION_GAP",
+    "checks": [
+      {
+        "check": "all nine requested checks recorded",
+        "status": "PASS"
+      },
+      {
+        "check": "BASE-DEPS exit code backed by command record",
+        "status": "PASS"
+      },
+      {
+        "check": "BASE-LINT exit code backed by command record",
+        "status": "PASS"
+      },
+      {
+        "check": "BASE-WEB-BUILD exit code backed by command record",
+        "status": "PASS"
+      },
+      {
+        "check": "BASE-FRONTEND exit code backed by command record",
+        "status": "PASS"
+      },
+      {
+        "check": "BASE-RUST-FMT exit code backed by command record",
+        "status": "PASS"
+      },
+      {
+        "check": "BASE-RUST-LINT exit code backed by command record",
+        "status": "PASS"
+      },
+      {
+        "check": "BASE-RUST-TEST exit code backed by command record",
+        "status": "PASS"
+      },
+      {
+        "check": "BASE-MOCK exit code backed by command record",
+        "status": "PASS"
+      },
+      {
+        "check": "BASE-DESKTOP-BUILD exit code backed by command record",
+        "status": "PASS"
+      },
+      {
+        "check": "Rust counts match raw logs",
+        "status": "PASS"
+      },
+      {
+        "check": "frontend 8/8 backed by raw log",
+        "status": "PASS"
+      },
+      {
+        "check": "six lint warnings recorded",
+        "status": "PASS"
+      },
+      {
+        "check": "format failure accurately counted",
+        "status": "PASS"
+      },
+      {
+        "check": "not a false all-pass summary",
+        "status": "PASS"
+      },
+      {
+        "check": "artifact hash dist/index.html",
+        "status": "PASS"
+      },
+      {
+        "check": "artifact hash src-tauri/target/release/app.exe",
+        "status": "PASS"
+      },
+      {
+        "check": "artifact hash src-tauri/target/release/bundle/msi/FluxReader_0.12.0_x64_en-US.msi",
+        "status": "PASS"
+      },
+      {
+        "check": "artifact hash src-tauri/target/release/bundle/nsis/FluxReader_0.12.0_x64-setup.exe",
+        "status": "PASS"
+      },
+      {
+        "check": "approval and phase synchronized",
+        "status": "PASS"
+      },
+      {
+        "check": "code and CI changes not authorized",
+        "status": "PASS"
+      },
+      {
+        "check": "boards show current tasks",
+        "status": "PASS"
+      },
+      {
+        "check": "whitespace docs/BASELINE.md",
+        "status": "PASS"
+      },
+      {
+        "check": "link docs/BASELINE.md -> ../tasks/runs/TASK-002-20260913T041438Z.json",
+        "status": "PASS"
+      },
+      {
+        "check": "link docs/BASELINE.md -> ../tasks/PROJECT.json",
+        "status": "PASS"
+      },
+      {
+        "check": "link docs/BASELINE.md -> ../src-tauri/target/release/bundle/msi/FluxReader_0.12.0_x64_en-US.msi",
+        "status": "PASS"
+      },
+      {
+        "check": "link docs/BASELINE.md -> ../src-tauri/target/release/bundle/nsis/FluxReader_0.12.0_x64-setup.exe",
+        "status": "PASS"
+      },
+      {
+        "check": "link docs/BASELINE.md -> ISSUES.md",
+        "status": "PASS"
+      },
+      {
+        "check": "whitespace docs/ISSUES.md",
+        "status": "PASS"
+      },
+      {
+        "check": "link docs/ISSUES.md -> ../tasks/runs/TASK-002-20260913T041438Z.json",
+        "status": "PASS"
+      },
+      {
+        "check": "whitespace tasks/BACKLOG.md",
+        "status": "PASS"
+      },
+      {
+        "check": "link tasks/BACKLOG.md -> items/",
+        "status": "PASS"
+      },
+      {
+        "check": "link tasks/BACKLOG.md -> runs/TASK-002-20260913T041438Z.json",
+        "status": "PASS"
+      },
+      {
+        "check": "whitespace tasks/IN_PROGRESS.md",
+        "status": "PASS"
+      },
+      {
+        "check": "link tasks/IN_PROGRESS.md -> items/",
+        "status": "PASS"
+      },
+      {
+        "check": "link tasks/IN_PROGRESS.md -> items/TASK-001.json",
+        "status": "PASS"
+      },
+      {
+        "check": "link tasks/IN_PROGRESS.md -> items/TASK-002.json",
+        "status": "PASS"
+      },
+      {
+        "check": "link tasks/IN_PROGRESS.md -> runs/TASK-002-20260913T041438Z.json",
+        "status": "PASS"
+      },
+      {
+        "check": "link tasks/IN_PROGRESS.md -> ../docs/BASELINE.md",
+        "status": "PASS"
+      },
+      {
+        "check": "whitespace tasks/DONE.md",
+        "status": "PASS"
+      },
+      {
+        "check": "link tasks/DONE.md -> items/",
+        "status": "PASS"
+      },
+      {
+        "check": "issue rows remain one Markdown table",
+        "status": "PASS"
+      },
+      {
+        "check": "input snapshot has no unauthorized changes",
+        "status": "PASS"
+      }
+    ],
+    "failures": [],
+    "relative_links_checked": 14,
+    "changed_inputs": [
+      "docs/BASELINE.md",
+      "docs/ISSUES.md",
+      "tasks/BACKLOG.md",
+      "tasks/IN_PROGRESS.md",
+      "tasks/PROJECT.json",
+      "tasks/items/TASK-001.json",
+      "tasks/items/TASK-002.json"
+    ],
+    "unexpected_changes": [],
+    "known_documentation_gap": {
+      "path": "AGENTS.md",
+      "target": ".agents/skills/write-notes-like-deepseek/SKILL.md",
+      "exists": false,
+      "issue": "ISSUE-016",
+      "classification": "pre-existing handoff dependency; global skill available"
+    }
+  },
+  "final_git_verification": {
+    "status": "PASS",
+    "head": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+    "new_files": [
+      "tasks/runs/TASK-002-20260913T041438Z.json"
+    ],
+    "protected_tree": "unchanged"
+  },
+  "previous_documentation_report": "tasks/runs/M0-scope-20260912.json",
+  "validation_scope": "核对记录、日志计数、产物哈希、修改范围与任务状态；不代表格式检查或未执行的功能验收通过。",
+  "finished_at_utc": "2026-09-13T05:10:24Z"
+}

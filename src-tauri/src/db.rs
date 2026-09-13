@@ -13,14 +13,15 @@ use std::sync::LazyLock;
 use crate::error::AppResult;
 
 /* ============================================================
-   Schema —— 对应实施方案 §3
-   folders/feeds 增 layout/auto_summary/auto_translate 列；
-   articles 增 source 列（'direct' | 'miniflux'）+ fetch_failed 源级状态。
-   ============================================================ */
+Schema —— 对应实施方案 §3
+folders/feeds 增 layout/auto_summary/auto_translate 列；
+articles 增 source 列（'direct' | 'miniflux'）+ fetch_failed 源级状态。
+============================================================ */
 
 pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
     Migrations::new(vec![
-    M::up(r#"
+        M::up(
+            r#"
         CREATE TABLE folders (
             id            INTEGER PRIMARY KEY,
             name          TEXT NOT NULL,
@@ -82,9 +83,11 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-    "#),
-    // Miniflux 同步支持 —— 条目/源/分类的 Miniflux id 映射 + 离线变更队列
-    M::up(r#"
+    "#,
+        ),
+        // Miniflux 同步支持 —— 条目/源/分类的 Miniflux id 映射 + 离线变更队列
+        M::up(
+            r#"
         ALTER TABLE articles ADD COLUMN miniflux_id INTEGER;
         CREATE UNIQUE INDEX idx_articles_miniflux_id ON articles(miniflux_id) WHERE miniflux_id IS NOT NULL;
 
@@ -100,10 +103,12 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
             payload     TEXT,           -- JSON：add_feed 的 title/folder 等附加信息
             created_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
-    "#),
-    // FTS5 全文索引：标题/正文纯文本/作者/AI 摘要/翻译。触发器保持与 articles 同步，
-    // user_version=3。unicode61 分词器：中文按字、英文按词，个人规模足够（无需 ICU）。
-    M::up(r#"
+    "#,
+        ),
+        // FTS5 全文索引：标题/正文纯文本/作者/AI 摘要/翻译。触发器保持与 articles 同步，
+        // user_version=3。unicode61 分词器：中文按字、英文按词，个人规模足够（无需 ICU）。
+        M::up(
+            r#"
         CREATE VIRTUAL TABLE articles_fts USING fts5(
             title, body_text, author, ai_summary, translated_content,
             content='articles', content_rowid='id',
@@ -132,91 +137,110 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
             VALUES (new.id, new.title, new.body_text, COALESCE(new.author, ''),
                     COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
         END;
-    "#),
-    // 后台刷新调度：失败计数 + 下次重试时间（指数退避 5min→30min→2h）。
-    // user_version=4。
-    M::up(r#"
+    "#,
+        ),
+        // 后台刷新调度：失败计数 + 下次重试时间（指数退避 5min→30min→2h）。
+        // user_version=4。
+        M::up(
+            r#"
         ALTER TABLE feeds ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE feeds ADD COLUMN next_retry_at TEXT;
-    "#),
-    // 全文提取标志：1 = 正文已被 Readability 全文覆盖（工具栏按钮状态与
-    // 设置「自动全文」共用此标志，重启不丢）。user_version=5。
-    M::up("ALTER TABLE articles ADD COLUMN fulltext_extracted INTEGER NOT NULL DEFAULT 0;"),
-    // 智能去重墓碑：被丢弃的同 URL 文章记下「保留了哪篇」，关闭去重时
-    // 清空墓碑（尊重用户想让重复文章回来的意图）。墓碑存在期间，任何抓取
-    // 轮次重放同 URL 都直接跳过——否则 feed B 的 guid 稳定，每轮刷新都会
-    // 把被去重的那篇重新插进来（关开关→重影的真正来源）。
-    // url 列存规范化匹配键（v7 起）。user_version=6。
-    M::up(r#"
+    "#,
+        ),
+        // 全文提取标志：1 = 正文已被 Readability 全文覆盖（工具栏按钮状态与
+        // 设置「自动全文」共用此标志，重启不丢）。user_version=5。
+        M::up("ALTER TABLE articles ADD COLUMN fulltext_extracted INTEGER NOT NULL DEFAULT 0;"),
+        // 智能去重墓碑：被丢弃的同 URL 文章记下「保留了哪篇」，关闭去重时
+        // 清空墓碑（尊重用户想让重复文章回来的意图）。墓碑存在期间，任何抓取
+        // 轮次重放同 URL 都直接跳过——否则 feed B 的 guid 稳定，每轮刷新都会
+        // 把被去重的那篇重新插进来（关开关→重影的真正来源）。
+        // url 列存规范化匹配键（v7 起）。user_version=6。
+        M::up(
+            r#"
         CREATE TABLE deduped_urls (
             url     TEXT PRIMARY KEY,
             kept_aid INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
             kept_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-    "#),
-    // 去重精确化：url_norm = URL 规范化匹配键（剥跟踪参数/www./m./尾斜杠/
-    // AMP/锚点，https→http 统一），原始 url 保留用于「打开源网页」。
-    // 同一篇被多个源用不同饰词引用时也能正确去重。
-    // miniflux_dup_ids：服务端同文副本 entry 记账（逗号分隔）——双端场景
-    // （Read You + FluxReader 共用 Miniflux）下，桌面端的已读/收藏变更
-    // 广播到全部副本，手机上任意副本的已读也能被桌面正确跟随。
-    // user_version=7。
-    M::up(r#"
+    "#,
+        ),
+        // 去重精确化：url_norm = URL 规范化匹配键（剥跟踪参数/www./m./尾斜杠/
+        // AMP/锚点，https→http 统一），原始 url 保留用于「打开源网页」。
+        // 同一篇被多个源用不同饰词引用时也能正确去重。
+        // miniflux_dup_ids：服务端同文副本 entry 记账（逗号分隔）——双端场景
+        // （Read You + FluxReader 共用 Miniflux）下，桌面端的已读/收藏变更
+        // 广播到全部副本，手机上任意副本的已读也能被桌面正确跟随。
+        // user_version=7。
+        M::up(
+            r#"
         ALTER TABLE articles ADD COLUMN url_norm TEXT;
         ALTER TABLE articles ADD COLUMN miniflux_dup_ids TEXT NOT NULL DEFAULT '';
         CREATE INDEX idx_articles_url_norm ON articles(url_norm);
         UPDATE articles SET url_norm = lower(url) WHERE url IS NOT NULL AND url != '';
-    "#),
-    // 后续迁移在此追加（M::up），已发布的不可改
-    // 账号数据边界：feeds.origin 标记订阅来源（'local' 用户直连添加 |
-    // 'miniflux' 从服务端拉取）。断开连接时删 miniflux 来源的订阅（级联
-    // 清掉其文章/绑定/队列），本地直连订阅保留——换账号登录不会混杂两份
-    // 订阅列表。user_version=8。
-    M::up(r#"
+    "#,
+        ),
+        // 后续迁移在此追加（M::up），已发布的不可改
+        // 账号数据边界：feeds.origin 标记订阅来源（'local' 用户直连添加 |
+        // 'miniflux' 从服务端拉取）。断开连接时删 miniflux 来源的订阅（级联
+        // 清掉其文章/绑定/队列），本地直连订阅保留——换账号登录不会混杂两份
+        // 订阅列表。user_version=8。
+        M::up(
+            r#"
         ALTER TABLE feeds ADD COLUMN origin TEXT NOT NULL DEFAULT 'local';
-    "#),
-    // 「跟随服务端」（hybrid）模式下，本地直连添加的源（origin='local'）绑定
-    // Miniflux 后转为服务端来源（origin='miniflux'，内容由 Miniflux 提供）。
-    // 但断开连接时需把这类源恢复为 'local'（保留本地直连订阅），而非删除——
-    // origin_was_local 标记「原本是本地直连添加」。user_version=9。
-    M::up(r#"
+    "#,
+        ),
+        // 「跟随服务端」（hybrid）模式下，本地直连添加的源（origin='local'）绑定
+        // Miniflux 后转为服务端来源（origin='miniflux'，内容由 Miniflux 提供）。
+        // 但断开连接时需把这类源恢复为 'local'（保留本地直连订阅），而非删除——
+        // origin_was_local 标记「原本是本地直连添加」。user_version=9。
+        M::up(
+            r#"
         ALTER TABLE feeds ADD COLUMN origin_was_local INTEGER NOT NULL DEFAULT 0;
-    "#),
-    // 订阅源分组默认折叠：新库建表 DEFAULT 已改为 1，这里把已有库的分类
-    // 统一折叠（用户诉求：分组默认收起，腾出滚动区给订阅源列表）。user_version=10。
-    M::up(r#"
+    "#,
+        ),
+        // 订阅源分组默认折叠：新库建表 DEFAULT 已改为 1，这里把已有库的分类
+        // 统一折叠（用户诉求：分组默认收起，腾出滚动区给订阅源列表）。user_version=10。
+        M::up(
+            r#"
         UPDATE folders SET collapsed = 1;
-    "#),
-    // 清理历史重复：旧版在「本地抓取」模式下直连抓取 origin='miniflux' 源，
-    // 产生 source='direct' 文章与已有的 source='miniflux' 文章 URL 重复
-    // （guid 不同 + 智能去重默认关），导致文章翻倍、状态错乱。删除这些重复的
-    // direct 文章（内容/状态已由同 URL 的 miniflux 文章承载）。user_version=11。
-    M::up(r#"
+    "#,
+        ),
+        // 清理历史重复：旧版在「本地抓取」模式下直连抓取 origin='miniflux' 源，
+        // 产生 source='direct' 文章与已有的 source='miniflux' 文章 URL 重复
+        // （guid 不同 + 智能去重默认关），导致文章翻倍、状态错乱。删除这些重复的
+        // direct 文章（内容/状态已由同 URL 的 miniflux 文章承载）。user_version=11。
+        M::up(
+            r#"
         DELETE FROM articles
          WHERE source = 'direct'
            AND url_norm IN (SELECT url_norm FROM articles WHERE source = 'miniflux');
-    "#),
-    // 回填缺失发布时间：某些 RSS 源不提供 pubDate/updated（如 kirikira.moe），
-    // 历史入库的 direct 文章 published_at 为 NULL，前端 publishedAt=0 显示成
-    // 1970-01-01、「今天」过滤与排序失准。用 fetched_at（抓取时间）兜底回填，
-    // 与 map_entry 的新抓取兜底逻辑（Utc::now）口径一致。user_version=12。
-    M::up(r#"
+    "#,
+        ),
+        // 回填缺失发布时间：某些 RSS 源不提供 pubDate/updated（如 kirikira.moe），
+        // 历史入库的 direct 文章 published_at 为 NULL，前端 publishedAt=0 显示成
+        // 1970-01-01、「今天」过滤与排序失准。用 fetched_at（抓取时间）兜底回填，
+        // 与 map_entry 的新抓取兜底逻辑（Utc::now）口径一致。user_version=12。
+        M::up(
+            r#"
         UPDATE articles
            SET published_at = fetched_at
          WHERE published_at IS NULL OR published_at = '';
-    "#),
-    // 协议中立化：miniflux_id → remote_id、miniflux_dup_ids → remote_dup_ids、
-    // origin='miniflux' → origin='remote'。同步层从 Miniflux 专用协议迁移到
-    // 标准协议（Google Reader / Fever），后端可替换（Miniflux/FreshRSS/自建）。
-    // 物理列用 RENAME COLUMN（SQLite 3.25+，bundled 3.46 支持），数据无损。
-    // user_version=13。
-    M::up(r#"
+    "#,
+        ),
+        // 协议中立化：miniflux_id → remote_id、miniflux_dup_ids → remote_dup_ids、
+        // origin='miniflux' → origin='remote'。同步层从 Miniflux 专用协议迁移到
+        // 标准协议（Google Reader / Fever），后端可替换（Miniflux/FreshRSS/自建）。
+        // 物理列用 RENAME COLUMN（SQLite 3.25+，bundled 3.46 支持），数据无损。
+        // user_version=13。
+        M::up(
+            r#"
         ALTER TABLE articles RENAME COLUMN miniflux_id TO remote_id;
         ALTER TABLE articles RENAME COLUMN miniflux_dup_ids TO remote_dup_ids;
         ALTER TABLE feeds RENAME COLUMN miniflux_id TO remote_id;
         ALTER TABLE folders RENAME COLUMN miniflux_id TO remote_id;
         UPDATE feeds SET origin = 'remote' WHERE origin = 'miniflux';
-    "#),
+    "#,
+        ),
     ])
 });
 
@@ -260,8 +284,8 @@ fn backfill_url_norm(conn: &Connection) -> AppResult<()> {
 }
 
 /* ============================================================
-   行类型（前端 IPC 契约）—— 与 src/types.ts 保持同构
-   ============================================================ */
+行类型（前端 IPC 契约）—— 与 src/types.ts 保持同构
+============================================================ */
 
 #[derive(Debug, Serialize)]
 pub struct FolderRow {
@@ -338,8 +362,8 @@ pub struct ArticleListItem {
 }
 
 /* ============================================================
-   Folders
-   ============================================================ */
+Folders
+============================================================ */
 
 pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
     let mut stmt = conn.prepare(
@@ -361,7 +385,11 @@ pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
 
 pub fn create_folder(conn: &Connection, name: &str, layout: &str) -> AppResult<i64> {
     let next_pos: i64 = conn
-        .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM folders", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM folders",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     conn.execute(
         "INSERT INTO folders (name, position, layout, collapsed) VALUES (?1, ?2, ?3, 1)",
@@ -371,7 +399,10 @@ pub fn create_folder(conn: &Connection, name: &str, layout: &str) -> AppResult<i
 }
 
 pub fn rename_folder(conn: &Connection, id: i64, name: &str) -> AppResult<()> {
-    conn.execute("UPDATE folders SET name = ?1 WHERE id = ?2", params![name, id])?;
+    conn.execute(
+        "UPDATE folders SET name = ?1 WHERE id = ?2",
+        params![name, id],
+    )?;
     Ok(())
 }
 
@@ -381,7 +412,10 @@ pub fn delete_folder(conn: &Connection, id: i64) -> AppResult<()> {
 }
 
 pub fn update_folder_layout(conn: &Connection, id: i64, layout: &str) -> AppResult<()> {
-    conn.execute("UPDATE folders SET layout = ?1 WHERE id = ?2", params![layout, id])?;
+    conn.execute(
+        "UPDATE folders SET layout = ?1 WHERE id = ?2",
+        params![layout, id],
+    )?;
     Ok(())
 }
 
@@ -393,7 +427,12 @@ pub fn set_folder_collapsed(conn: &Connection, id: i64, collapsed: bool) -> AppR
     Ok(())
 }
 
-pub fn set_folder_ai_flags(conn: &Connection, id: i64, summary: bool, translate: bool) -> AppResult<()> {
+pub fn set_folder_ai_flags(
+    conn: &Connection,
+    id: i64,
+    summary: bool,
+    translate: bool,
+) -> AppResult<()> {
     conn.execute(
         "UPDATE folders SET auto_summary = ?1, auto_translate = ?2 WHERE id = ?3",
         params![summary as i64, translate as i64, id],
@@ -402,8 +441,8 @@ pub fn set_folder_ai_flags(conn: &Connection, id: i64, summary: bool, translate:
 }
 
 /* ============================================================
-   Feeds
-   ============================================================ */
+Feeds
+============================================================ */
 
 const FEED_COLS: &str = "id, folder_id, feed_url, site_url, title, favicon_url, layout, auto_summary, auto_translate, fetch_failed, fetch_error, last_fetched_at";
 
@@ -432,7 +471,11 @@ pub fn list_feeds(conn: &Connection) -> AppResult<Vec<FeedRow>> {
 
 pub fn find_feed_by_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> {
     let id = conn
-        .query_row("SELECT id FROM feeds WHERE feed_url = ?1", params![url], |r| r.get(0))
+        .query_row(
+            "SELECT id FROM feeds WHERE feed_url = ?1",
+            params![url],
+            |r| r.get(0),
+        )
         .optional()?;
     Ok(id)
 }
@@ -451,7 +494,18 @@ pub fn insert_feed(
     auto_summary: bool,
     auto_translate: bool,
 ) -> AppResult<i64> {
-    insert_feed_origin(conn, feed_url, site_url, title, favicon_url, folder_id, layout, auto_summary, auto_translate, "local")
+    insert_feed_origin(
+        conn,
+        feed_url,
+        site_url,
+        title,
+        favicon_url,
+        folder_id,
+        layout,
+        auto_summary,
+        auto_translate,
+        "local",
+    )
 }
 
 /// 同 insert_feed，带来源标记（'local' 用户直连添加 | 'remote' 服务端拉取）。
@@ -539,7 +593,13 @@ pub fn feeds_all_ids(conn: &Connection, include_remote: bool) -> AppResult<Vec<i
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-pub fn set_feed_title_and_icon(conn: &Connection, id: i64, title: Option<&str>, favicon: Option<&str>, site_url: Option<&str>) -> AppResult<()> {
+pub fn set_feed_title_and_icon(
+    conn: &Connection,
+    id: i64,
+    title: Option<&str>,
+    favicon: Option<&str>,
+    site_url: Option<&str>,
+) -> AppResult<()> {
     let title = title.filter(|t| !t.trim().is_empty());
     let favicon = favicon.filter(|f| !f.trim().is_empty());
     // 只覆盖非空值：用户手动重命名的标题不被下一次抓取冲掉
@@ -555,7 +615,10 @@ pub fn set_feed_title_and_icon(conn: &Connection, id: i64, title: Option<&str>, 
 }
 
 pub fn update_feed_layout(conn: &Connection, id: i64, layout: &str) -> AppResult<()> {
-    conn.execute("UPDATE feeds SET layout = ?1 WHERE id = ?2", params![layout, id])?;
+    conn.execute(
+        "UPDATE feeds SET layout = ?1 WHERE id = ?2",
+        params![layout, id],
+    )?;
     Ok(())
 }
 
@@ -591,7 +654,12 @@ pub fn update_feed(
     Ok(())
 }
 
-pub fn set_feed_ai_flags(conn: &Connection, id: i64, summary: bool, translate: bool) -> AppResult<()> {
+pub fn set_feed_ai_flags(
+    conn: &Connection,
+    id: i64,
+    summary: bool,
+    translate: bool,
+) -> AppResult<()> {
     conn.execute(
         "UPDATE feeds SET auto_summary = ?1, auto_translate = ?2 WHERE id = ?3",
         params![summary as i64, translate as i64, id],
@@ -635,8 +703,8 @@ pub fn feeds_fetch_failed_bound(conn: &Connection) -> AppResult<Vec<FeedRow>> {
 }
 
 /* ============================================================
-   Articles
-   ============================================================ */
+Articles
+============================================================ */
 
 /// 抓取管线产出的新条目（source 由抓取层决定）
 #[derive(Debug)]
@@ -785,7 +853,11 @@ fn article_where(q: &ArticleQuery) -> (Vec<&'static str>, Vec<rusqlite::types::V
 /// 用窗口函数 ROW_NUMBER() OVER (ORDER BY ...) - 1 求位置，供前端「搜索/深层
 /// 打开文章后只加载目标那一页」的双向分页锚定——无需从头拉全量。
 /// 排序与 list_articles 完全同口径（COALESCE(published_at, fetched_at)）。
-pub fn article_index(conn: &Connection, q: &ArticleQuery, article_id: i64) -> AppResult<Option<i64>> {
+pub fn article_index(
+    conn: &Connection,
+    q: &ArticleQuery,
+    article_id: i64,
+) -> AppResult<Option<i64>> {
     let (where_clauses, mut params) = article_where(q);
     let order = if q.newest_first {
         "COALESCE(a.published_at, a.fetched_at) DESC"
@@ -852,7 +924,11 @@ pub fn get_articles(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ArticleRow>
 /// 正文纯文本 + 摘要 + AI 摘要 + AI 翻译；LIKE 通配符 %/_ 按字面转义。
 /// 注：AI 字段纳入命中后（SRH-2），`articles_fts` FTS5 表（unicode61 分词对中文
 /// 不友好，见迁移注释）不再作为搜索入口，仅保留触发器同步作历史遗留。
-pub fn search_articles(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<ArticleListItem>> {
+pub fn search_articles(
+    conn: &Connection,
+    query: &str,
+    limit: i64,
+) -> AppResult<Vec<ArticleListItem>> {
     let q = query.trim();
     if q.is_empty() {
         return Ok(Vec::new());
@@ -860,7 +936,11 @@ pub fn search_articles(conn: &Connection, query: &str, limit: i64) -> AppResult<
     let terms: Vec<String> = q
         .split_whitespace()
         .filter(|t| !t.is_empty())
-        .map(|t| t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
+        .map(|t| {
+            t.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        })
         .collect();
     if terms.is_empty() {
         return Ok(Vec::new());
@@ -927,8 +1007,8 @@ pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
 }
 
 /* ============================================================
-   账号数据边界 / 缓存清理
-   ============================================================ */
+账号数据边界 / 缓存清理
+============================================================ */
 
 /// 断开连接时清理服务端来源的数据：删 origin='remote' 的订阅（级联清
 /// 其文章/绑定/队列/墓碑），清空本地条目上的 Miniflux 绑定与副本记账、
@@ -970,9 +1050,7 @@ pub fn purge_remote_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
 /// 可再生成）。返回 (删文章数, 清 AI 字段数)。
 pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult<(usize, usize)> {
     let tx = conn.transaction()?;
-    let cutoff = format!(
-        "datetime('now', '-{days} days', 'localtime')"
-    );
+    let cutoff = format!("datetime('now', '-{days} days', 'localtime')");
     let (mut deleted, mut ai_cleared) = (0usize, 0usize);
     if scope == "articles" {
         deleted = tx.execute(
@@ -986,7 +1064,10 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
             [],
         )?;
         // 墓碑指向被删文章的清掉（kept_aid 级联已处理，这里兜底空墓碑）
-        tx.execute("DELETE FROM deduped_urls WHERE kept_aid NOT IN (SELECT id FROM articles)", [])?;
+        tx.execute(
+            "DELETE FROM deduped_urls WHERE kept_aid NOT IN (SELECT id FROM articles)",
+            [],
+        )?;
     } else if scope == "ai" {
         ai_cleared = tx.execute(
             &format!(
@@ -1003,21 +1084,50 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
 }
 
 /* ============================================================
-   URL 规范化（去重匹配键）
-   ============================================================ */
+URL 规范化（去重匹配键）
+============================================================ */
 
 /// 已知跟踪/统计参数（utm 系 + 各家统计 SDK）。剥掉后不影响定位同一篇文章。
 const TRACKING_PARAMS: &[&str] = &[
-    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-    "utm_id", "utm_name", "utm_cid", "utm_reader", "utm_social",
-    "gclid", "gclsrc", "dclid", "gbraid", "wbraid",           // Google Ads
-    "fbclid", "fb_action_ids", "fb_action_types", "fb_source", // Facebook
-    "igshid", "igsh",                                          // Instagram
-    "twclid", "t", "s",                                        // X/Twitter（t/s 短链跳转带参）
-    "mc_cid", "mc_eid",                                        // Mailchimp
-    "ref", "ref_src", "ref_url", "referrer",                   // 引荐来源
-    "spm_id", "scm", "share_token", "nsfrom", "nstoken",       // 国内生态（掘金/微信/知乎）
-    "share_source", "tt_from", "group_id", "web_chapter_id",
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "utm_id",
+    "utm_name",
+    "utm_cid",
+    "utm_reader",
+    "utm_social",
+    "gclid",
+    "gclsrc",
+    "dclid",
+    "gbraid",
+    "wbraid", // Google Ads
+    "fbclid",
+    "fb_action_ids",
+    "fb_action_types",
+    "fb_source", // Facebook
+    "igshid",
+    "igsh", // Instagram
+    "twclid",
+    "t",
+    "s", // X/Twitter（t/s 短链跳转带参）
+    "mc_cid",
+    "mc_eid", // Mailchimp
+    "ref",
+    "ref_src",
+    "ref_url",
+    "referrer", // 引荐来源
+    "spm_id",
+    "scm",
+    "share_token",
+    "nsfrom",
+    "nstoken", // 国内生态（掘金/微信/知乎）
+    "share_source",
+    "tt_from",
+    "group_id",
+    "web_chapter_id",
 ];
 
 /// URL 规范化为去重匹配键：同文不同饰（跟踪参数/协议/www./m./尾斜杠/AMP）
@@ -1330,14 +1440,16 @@ pub fn feed_counts(conn: &Connection) -> AppResult<Vec<FeedCounts>> {
 }
 
 /* ============================================================
-   Settings（键值对：同步 Endpoint/凭据、AI/同步相关配置）
-   ============================================================ */
+Settings（键值对：同步 Endpoint/凭据、AI/同步相关配置）
+============================================================ */
 
 pub fn get_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
     let v = conn
-        .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
         .optional()?;
     // 敏感键读时解密（SEC-2）；历史明文无前缀则原样返回（兼容）
     Ok(v.map(|raw: String| {
@@ -1365,8 +1477,8 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
 }
 
 /* ============================================================
-   后端同步 —— id 映射 + 离线变更队列（Google Reader / Fever）
-   ============================================================ */
+后端同步 —— id 映射 + 离线变更队列（Google Reader / Fever）
+============================================================ */
 
 /// 离线变更队列条目
 #[derive(Debug, Serialize)]
@@ -1413,9 +1525,8 @@ fn opposite_action(action: &str) -> &str {
 
 /// 取出全部待推送条目（不删除；成功后由 prune_sync 清除）
 pub fn take_sync_queue(conn: &Connection) -> AppResult<Vec<SyncQueueItem>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, article_id, feed_url, action, payload FROM sync_queue ORDER BY id",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, article_id, feed_url, action, payload FROM sync_queue ORDER BY id")?;
     let rows = stmt.query_map([], |r| {
         Ok(SyncQueueItem {
             id: r.get(0)?,
@@ -1461,14 +1572,14 @@ pub fn article_by_remote_id(conn: &Connection, remote_id: i64) -> AppResult<Opti
 }
 
 /* ============================================================
-   Pull 合并的批量预取映射 —— 消除 N+1
+Pull 合并的批量预取映射 —— 消除 N+1
 
-   同步对账（pull_entries）里，对每个远端 entry 逐条调用
-   article_id_by_url / article_by_remote_id / article_matches_remote_feed /
-   article_has_pending_sync / feed_by_remote_id，首次同步上千条 = 数千次
-   SQLite 查询。这里一次性把全部映射查进内存，循环内改为 HashMap/HashSet
-   查找（O(1)），把「数千次查询」压成「5 次批量查询」。
-   ============================================================ */
+同步对账（pull_entries）里，对每个远端 entry 逐条调用
+article_id_by_url / article_by_remote_id / article_matches_remote_feed /
+article_has_pending_sync / feed_by_remote_id，首次同步上千条 = 数千次
+SQLite 查询。这里一次性把全部映射查进内存，循环内改为 HashMap/HashSet
+查找（O(1)），把「数千次查询」压成「5 次批量查询」。
+============================================================ */
 
 /// Pull 合并所需的全部匹配映射（一次批量预取，替代循环内逐条查询）。
 pub struct SyncMatchMaps {
@@ -1494,7 +1605,8 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     {
         // ORDER BY id：与 article_id_by_url 的 ORDER BY id LIMIT 1 同口径——
         // 同 URL 多篇时保留 id 最小者（or_insert 保留首见，首见即最小 id）
-        let mut stmt = conn.prepare("SELECT url_norm, id FROM articles WHERE url_norm IS NOT NULL ORDER BY id")?;
+        let mut stmt = conn
+            .prepare("SELECT url_norm, id FROM articles WHERE url_norm IS NOT NULL ORDER BY id")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
             let (url_norm, id) = row?;
@@ -1514,7 +1626,11 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
              JOIN feeds f ON f.id = a.feed_id",
         )?;
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+            ))
         })?;
         for row in rows {
             let (id, mf_id, feed_mf_id) = row?;
@@ -1541,7 +1657,8 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     // 5. feed mf_id → feed id
     let mut feed_mf_to_id = HashMap::new();
     {
-        let mut stmt = conn.prepare("SELECT remote_id, id FROM feeds WHERE remote_id IS NOT NULL")?;
+        let mut stmt =
+            conn.prepare("SELECT remote_id, id FROM feeds WHERE remote_id IS NOT NULL")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
             let (mf_id, id) = row?;
@@ -1678,7 +1795,11 @@ pub fn article_has_pending_sync(conn: &Connection, id: i64) -> AppResult<bool> {
 /// 记录上次同步时间戳（Pull 增量游标，unix 秒）
 pub fn last_sync_ts(conn: &Connection) -> AppResult<i64> {
     let v: Option<String> = conn
-        .query_row("SELECT value FROM settings WHERE key = 'sync_last_sync'", [], |r| r.get(0))
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'sync_last_sync'",
+            [],
+            |r| r.get(0),
+        )
         .optional()?;
     Ok(v.and_then(|s| s.parse().ok()).unwrap_or(0))
 }
@@ -1690,7 +1811,11 @@ pub fn set_last_sync_ts(conn: &Connection, ts: i64) -> AppResult<()> {
 /// Fever 协议增量游标：上次同步拉到的最大条目 id（`since_id` 分页用）。
 pub fn last_sync_entry_id(conn: &Connection) -> AppResult<i64> {
     let v: Option<String> = conn
-        .query_row("SELECT value FROM settings WHERE key = 'sync_last_entry_id'", [], |r| r.get(0))
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'sync_last_entry_id'",
+            [],
+            |r| r.get(0),
+        )
         .optional()?;
     Ok(v.and_then(|s| s.parse().ok()).unwrap_or(0))
 }
@@ -1783,27 +1908,79 @@ mod dedup_tests {
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let f1 = create_folder(&conn, "A", "article").unwrap();
         let f2 = create_folder(&conn, "B", "article").unwrap();
-        let feed1 = insert_feed(&conn, "https://x.example/f1", None, "f1", None, f1, "inherit", true, false).unwrap();
-        let feed2 = insert_feed(&conn, "https://x.example/f2", None, "f2", None, f2, "inherit", true, false).unwrap();
+        let feed1 = insert_feed(
+            &conn,
+            "https://x.example/f1",
+            None,
+            "f1",
+            None,
+            f1,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        let feed2 = insert_feed(
+            &conn,
+            "https://x.example/f2",
+            None,
+            "f2",
+            None,
+            f2,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
 
         // feed1 首个入库
-        let (id1, new1) = upsert_article_with_feed(&conn, feed1, &new_article("https://n.example/a", "g1"), true).unwrap();
+        let (id1, new1) = upsert_article_with_feed(
+            &conn,
+            feed1,
+            &new_article("https://n.example/a", "g1"),
+            true,
+        )
+        .unwrap();
         assert!(new1);
 
         // feed2 推来同 URL（不同 guid）→ dedup 拦截
-        let (_, new2) = upsert_article_with_feed(&conn, feed2, &new_article("https://n.example/a", "g2"), true).unwrap();
+        let (_, new2) = upsert_article_with_feed(
+            &conn,
+            feed2,
+            &new_article("https://n.example/a", "g2"),
+            true,
+        )
+        .unwrap();
         assert!(!new2, "same URL cross-feed must be blocked by dedup");
 
         // feed2 不同 URL → 正常入库
-        let (_, new3) = upsert_article_with_feed(&conn, feed2, &new_article("https://n.example/b", "g3"), true).unwrap();
+        let (_, new3) = upsert_article_with_feed(
+            &conn,
+            feed2,
+            &new_article("https://n.example/b", "g3"),
+            true,
+        )
+        .unwrap();
         assert!(new3);
 
         // dedup 关闭时同 URL 也会入库（保持既有行为）
-        let (_, new4) = upsert_article_with_feed(&conn, feed2, &new_article("https://n.example/a", "g4"), false).unwrap();
+        let (_, new4) = upsert_article_with_feed(
+            &conn,
+            feed2,
+            &new_article("https://n.example/a", "g4"),
+            false,
+        )
+        .unwrap();
         assert!(new4, "dedup off must not block");
 
         // 同源 guid 冲突 → 更新而非插入（was_new=false）
-        let (_, new5) = upsert_article_with_feed(&conn, feed1, &new_article("https://n.example/a", "g1"), true).unwrap();
+        let (_, new5) = upsert_article_with_feed(
+            &conn,
+            feed1,
+            &new_article("https://n.example/a", "g1"),
+            true,
+        )
+        .unwrap();
         assert!(!new5);
         let _ = id1;
     }
@@ -1815,7 +1992,18 @@ mod dedup_tests {
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let f = create_folder(&conn, "F", "article").unwrap();
-        let feed = insert_feed(&conn, "https://x.example/f", None, "f", None, f, "inherit", true, false).unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://x.example/f",
+            None,
+            "f",
+            None,
+            f,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
 
         let art = |url: &str, guid: &str, title: &str, body: &str| {
             let mut a = new_article(url, guid);
@@ -1823,17 +2011,37 @@ mod dedup_tests {
             a.body_text = body.into();
             let _ = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
         };
-        art("https://n.example/1", "g1", "科技公司新闻", "今天发布了新产品");
-        art("https://n.example/2", "g2", "无关标题", "正文提到了科技公司");
+        art(
+            "https://n.example/1",
+            "g1",
+            "科技公司新闻",
+            "今天发布了新产品",
+        );
+        art(
+            "https://n.example/2",
+            "g2",
+            "无关标题",
+            "正文提到了科技公司",
+        );
         art("https://n.example/3", "g3", "另一个", "完全没有相关内容");
 
         // 中文子串：标题或正文含「科技」都命中（FTS 时代这条是失败的）
         let r1 = search_articles(&conn, "科技", 50).unwrap();
-        assert_eq!(r1.len(), 2, "chinese substring must match both: {:?}", r1.iter().map(|a| &a.title).collect::<Vec<_>>());
+        assert_eq!(
+            r1.len(),
+            2,
+            "chinese substring must match both: {:?}",
+            r1.iter().map(|a| &a.title).collect::<Vec<_>>()
+        );
 
         // 多词 AND：两个词都命中才返回
         let r2 = search_articles(&conn, "科技 产品", 50).unwrap();
-        assert_eq!(r2.len(), 1, "AND semantics: {:?}", r2.iter().map(|a| &a.title).collect::<Vec<_>>());
+        assert_eq!(
+            r2.len(),
+            1,
+            "AND semantics: {:?}",
+            r2.iter().map(|a| &a.title).collect::<Vec<_>>()
+        );
         assert_eq!(r2[0].title, "科技公司新闻");
 
         // 无命中
@@ -1850,7 +2058,12 @@ mod dedup_tests {
         assert!(r5.is_empty(), "underscore must be literal, not wildcard");
 
         // 含 FTS 特殊字符的词安全
-        art("https://n.example/5", "g5", "node.js 指南", "C++ 与 Rust 对比");
+        art(
+            "https://n.example/5",
+            "g5",
+            "node.js 指南",
+            "C++ 与 Rust 对比",
+        );
         let r6 = search_articles(&conn, "node.js", 50).unwrap();
         assert_eq!(r6.len(), 1);
         let r7 = search_articles(&conn, "C++", 50).unwrap();
@@ -1863,7 +2076,18 @@ mod dedup_tests {
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let f = create_folder(&conn, "F", "article").unwrap();
-        let feed = insert_feed(&conn, "https://x.example/f", None, "f", None, f, "inherit", true, false).unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://x.example/f",
+            None,
+            "f",
+            None,
+            f,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
 
         let mut a = new_article("https://n.example/1", "g1");
         a.title = "普通标题".into();
@@ -1909,11 +2133,18 @@ mod dedup_tests {
 
         // Miniflux 返回：http + 无 www + 无尾斜杠 + 无跟踪参数 → 必须匹配到同一 feed
         let matched = feed_id_by_url_normalized(&conn, "http://example.com/feed").unwrap();
-        assert_eq!(matched, Some(fid), "规范化后不同饰的 feed_url 必须匹配同一本地 feed");
+        assert_eq!(
+            matched,
+            Some(fid),
+            "规范化后不同饰的 feed_url 必须匹配同一本地 feed"
+        );
 
         // 精确匹配（旧函数）对这种情况会漏判——保持旧函数不变，仅新函数规范化
         let exact = feed_id_by_url(&conn, "http://example.com/feed").unwrap();
-        assert!(exact.is_none(), "精确匹配对规范化差异应返回 None（这正是修复前漏判的根因）");
+        assert!(
+            exact.is_none(),
+            "精确匹配对规范化差异应返回 None（这正是修复前漏判的根因）"
+        );
     }
 
     /// article_index 与 list_articles 位置对齐：某篇文章的绝对位置 = list_articles
@@ -1923,7 +2154,18 @@ mod dedup_tests {
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let f = create_folder(&conn, "F", "article").unwrap();
-        let feed = insert_feed(&conn, "https://x.example/f", None, "f", None, f, "inherit", true, false).unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://x.example/f",
+            None,
+            "f",
+            None,
+            f,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
 
         // 插入 5 篇，published_at 递增（最新在最前，newest_first=true）
         let mut ids = Vec::new();
@@ -1956,14 +2198,27 @@ mod dedup_tests {
         // 每篇的 article_index 应与它在列表中的位置一致
         for (pos, row) in all.iter().enumerate() {
             let idx = article_index(&conn, &q, row.id).unwrap();
-            assert_eq!(idx, Some(pos as i64), "article {} should be at pos {}", row.id, pos);
+            assert_eq!(
+                idx,
+                Some(pos as i64),
+                "article {} should be at pos {}",
+                row.id,
+                pos
+            );
         }
 
         // 从某个 offset 拉取，第一条应是 article_index 等于该 offset 的文章
         let target = all[2].id; // 位置 2 的文章
         let idx = article_index(&conn, &q, target).unwrap().unwrap();
         assert_eq!(idx, 2);
-        let page = list_articles(&conn, &ArticleQuery { offset: idx, ..q.clone() }).unwrap();
+        let page = list_articles(
+            &conn,
+            &ArticleQuery {
+                offset: idx,
+                ..q.clone()
+            },
+        )
+        .unwrap();
         assert_eq!(page[0].id, target, "offset={} 的第一条应是目标文章", idx);
     }
 }

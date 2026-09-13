@@ -25,14 +25,29 @@ fn fresh_db() -> (Connection, std::path::PathBuf) {
 }
 
 fn get_feed(conn: &Connection, id: i64) -> db::FeedRow {
-    db::list_feeds(conn).unwrap().into_iter().find(|f| f.id == id).unwrap()
+    db::list_feeds(conn)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.id == id)
+        .unwrap()
 }
 
 #[test]
 fn feed_layout_persists_across_reopen() {
     let (conn, tmp) = fresh_db();
     let cat = db::create_folder(&conn, "技术", "article").unwrap();
-    let feed = db::insert_feed(&conn, "https://x/rss", None, "源A", None, cat, "inherit", true, false).unwrap();
+    let feed = db::insert_feed(
+        &conn,
+        "https://x/rss",
+        None,
+        "源A",
+        None,
+        cat,
+        "inherit",
+        true,
+        false,
+    )
+    .unwrap();
 
     /* 用户设置源独立布局为「画廊」——db::update_feed_layout 直写（对应前端 numericId 修复后的调用） */
     db::update_feed_layout(&conn, feed, "gallery").unwrap();
@@ -42,7 +57,10 @@ fn feed_layout_persists_across_reopen() {
     drop(conn);
     let conn2 = db::open(&tmp).unwrap();
     let row = get_feed(&conn2, feed);
-    assert_eq!(row.layout, "gallery", "独立布局在重启后必须保持（曾因前端 id 解析 NaN 写库失败回退 inherit）");
+    assert_eq!(
+        row.layout, "gallery",
+        "独立布局在重启后必须保持（曾因前端 id 解析 NaN 写库失败回退 inherit）"
+    );
     assert_eq!(get_feed(&conn2, feed).folder_id, cat);
 }
 
@@ -54,7 +72,11 @@ fn category_layout_persists_across_reopen() {
 
     drop(conn);
     let conn2 = db::open(&tmp).unwrap();
-    let cat2 = db::list_folders(&conn2).unwrap().into_iter().find(|f| f.id == cat).unwrap();
+    let cat2 = db::list_folders(&conn2)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.id == cat)
+        .unwrap();
     assert_eq!(cat2.layout, "podcast");
 }
 
@@ -63,7 +85,18 @@ fn ai_flags_default_off_for_new_feeds() {
     let (conn, _tmp) = fresh_db();
     let cat = db::create_folder(&conn, "默认", "article").unwrap();
     /* 不显式传 AI 开关——等价于用户添加源时未勾选（前端默认 false） */
-    let feed = db::insert_feed(&conn, "https://y/rss", None, "源B", None, cat, "inherit", false, false).unwrap();
+    let feed = db::insert_feed(
+        &conn,
+        "https://y/rss",
+        None,
+        "源B",
+        None,
+        cat,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
     let row = get_feed(&conn, feed);
     assert!(!row.auto_summary, "摘要默认关闭");
     assert!(!row.auto_translate, "翻译默认关闭");
@@ -83,7 +116,18 @@ fn ai_flags_default_off_for_new_feeds() {
 fn ai_flags_toggle_persists() {
     let (conn, tmp) = fresh_db();
     let cat = db::create_folder(&conn, "开关", "article").unwrap();
-    let feed = db::insert_feed(&conn, "https://z/rss", None, "源C", None, cat, "inherit", false, false).unwrap();
+    let feed = db::insert_feed(
+        &conn,
+        "https://z/rss",
+        None,
+        "源C",
+        None,
+        cat,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
 
     /* 用户打开摘要开关（前端 numericId 修复后真实落库） */
     db::set_feed_ai_flags(&conn, feed, true, false).unwrap();

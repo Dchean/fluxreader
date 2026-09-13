@@ -21,12 +21,12 @@ pub(crate) fn read_dedup_flag(conn: &rusqlite::Connection) -> bool {
 }
 
 /* ============================================================
-   即时状态推送调度（防抖合批）
-   set_read/set_starred/mark_all_read 入队后调 schedule_state_push：
-   - AtomicBool 防重入：已有一个推送任务在飞时只标记"再来一轮"
-   - 800ms 防抖：快速滚动批量标读只发一次 PUT
-   - 失败静默（队列保留）→ 下次变更或下轮同步自动重推
-   ============================================================ */
+即时状态推送调度（防抖合批）
+set_read/set_starred/mark_all_read 入队后调 schedule_state_push：
+- AtomicBool 防重入：已有一个推送任务在飞时只标记"再来一轮"
+- 800ms 防抖：快速滚动批量标读只发一次 PUT
+- 失败静默（队列保留）→ 下次变更或下轮同步自动重推
+============================================================ */
 
 static STATE_PUSH_FLYING: AtomicBool = AtomicBool::new(false);
 static STATE_PUSH_PENDING: AtomicBool = AtomicBool::new(false);
@@ -64,8 +64,8 @@ pub(crate) fn schedule_state_push(state: &AppState) {
 }
 
 /* ============================================================
-   Folders / Feeds
-   ============================================================ */
+Folders / Feeds
+============================================================ */
 
 #[tauri::command]
 pub async fn list_folders(state: State<'_, AppState>) -> AppResult<Vec<db::FolderRow>> {
@@ -161,7 +161,12 @@ pub async fn add_feed(
         ingestion::Fetched::NotModified => {
             return Err(AppError::new("parse", "unexpected 304 on first fetch"))
         }
-        ingestion::Fetched::Body { bytes, etag, last_modified, .. } => (bytes, etag, last_modified),
+        ingestion::Fetched::Body {
+            bytes,
+            etag,
+            last_modified,
+            ..
+        } => (bytes, etag, last_modified),
     };
     let parsed = ingestion::parse_feed(&bytes, &feed_url)?;
 
@@ -170,7 +175,8 @@ pub async fn add_feed(
     if db::find_feed_by_url(&conn, &feed_url)?.is_some() {
         return Err(AppError::new("duplicate", "该订阅地址已存在"));
     }
-    let final_title = title.filter(|t| !t.trim().is_empty())
+    let final_title = title
+        .filter(|t| !t.trim().is_empty())
         .or(parsed.title.clone())
         .unwrap_or_else(|| feed_url.clone());
     // 未选分类 → 「未分类」文件夹（无则建）。创建失败必须上抛——
@@ -203,7 +209,14 @@ pub async fn add_feed(
         auto_summary,
         auto_translate,
     )?;
-    db::set_feed_fetch_state(&conn, feed_id, false, None, etag.as_deref(), last_modified.as_deref())?;
+    db::set_feed_fetch_state(
+        &conn,
+        feed_id,
+        false,
+        None,
+        etag.as_deref(),
+        last_modified.as_deref(),
+    )?;
     let dedup = read_dedup_flag(&conn);
     for a in &parsed.articles {
         db::upsert_article_with_feed(&conn, feed_id, a, dedup)?;
@@ -213,7 +226,9 @@ pub async fn add_feed(
         let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
         db::enqueue_sync(&conn, None, Some(&feed_url), "add_feed", Some(&payload))?;
     }
-    let row = db::list_feeds(&conn)?.into_iter().find(|f| f.id == feed_id)
+    let row = db::list_feeds(&conn)?
+        .into_iter()
+        .find(|f| f.id == feed_id)
         .ok_or_else(|| AppError::internal("feed row vanished after insert"))?;
     Ok(row)
 }
@@ -249,7 +264,9 @@ pub async fn update_feed(
     auto_summary: Option<bool>,
     auto_translate: Option<bool>,
 ) -> AppResult<()> {
-    let title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let title = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
 
     // 本地落库（Google Reader 下订阅改名/移动分类的远端同步较复杂，
     // 靠下次 pull 对账收敛——本地优先，此处不做远端 best-effort 推送）。
@@ -257,13 +274,23 @@ pub async fn update_feed(
     // 目标分类必须存在（防 UI 传错 id 把源挂飞）
     if let Some(fid) = folder_id {
         let exists: bool = conn
-            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [fid], |r| r.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [fid], |r| {
+                r.get::<_, i64>(0)
+            })
             .map(|n| n > 0)?;
         if !exists {
             return Err(AppError::new("validate", "目标分类不存在"));
         }
     }
-    db::update_feed(&conn, id, title.as_deref(), folder_id, layout.as_deref(), auto_summary, auto_translate)?;
+    db::update_feed(
+        &conn,
+        id,
+        title.as_deref(),
+        folder_id,
+        layout.as_deref(),
+        auto_summary,
+        auto_translate,
+    )?;
     Ok(())
 }
 
@@ -278,10 +305,9 @@ pub async fn set_feed_ai_flags(
     db::set_feed_ai_flags(&conn, id, summary, translate)
 }
 
-
 /* ============================================================
-   Articles
-   ============================================================ */
+Articles
+============================================================ */
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -334,10 +360,7 @@ fn article_query(args: &ArticleListArgs) -> db::ArticleQuery {
 }
 
 #[tauri::command]
-pub async fn get_article(
-    state: State<'_, AppState>,
-    id: i64,
-) -> AppResult<Option<db::ArticleRow>> {
+pub async fn get_article(state: State<'_, AppState>, id: i64) -> AppResult<Option<db::ArticleRow>> {
     let conn = state.db.lock().await;
     db::get_article(&conn, id)
 }
@@ -426,7 +449,9 @@ pub async fn mark_all_read(
                 sql.push_str(&format!(" AND feed_id = {fid}"));
             }
             if let Some(f) = folder_id {
-                sql.push_str(&format!(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {f})"));
+                sql.push_str(&format!(
+                    " AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {f})"
+                ));
             }
             sql
         };
@@ -457,8 +482,8 @@ pub async fn feed_counts(state: State<'_, AppState>) -> AppResult<Vec<db::FeedCo
 }
 
 /* ============================================================
-   刷新（直连抓取）
-   ============================================================ */
+刷新（直连抓取）
+============================================================ */
 
 /// 刷新单个订阅源（直连）。三段式：锁内取条件头 → 锁外 HTTP+解析 → 锁内落库。
 /// 与并发管线共用 refresh_feed_staged，网络 IO 不占数据库写锁。
@@ -480,7 +505,10 @@ pub async fn refresh_all_feeds(state: State<'_, AppState>) -> AppResult<RefreshS
     let db = state.db.clone();
     let http = state.http.clone();
     let (n, f) = crate::scheduler::refresh_all(&db, &http).await;
-    Ok(RefreshSummary { new_articles: n, failed_feeds: f })
+    Ok(RefreshSummary {
+        new_articles: n,
+        failed_feeds: f,
+    })
 }
 
 #[derive(serde::Serialize, Default)]
@@ -490,8 +518,8 @@ pub struct RefreshSummary {
 }
 
 /* ============================================================
-   Settings
-   ============================================================ */
+Settings
+============================================================ */
 
 #[tauri::command]
 pub async fn get_setting(state: State<'_, AppState>, key: String) -> AppResult<Option<String>> {
@@ -518,8 +546,8 @@ pub async fn set_setting(state: State<'_, AppState>, key: String, value: String)
 }
 
 /* ============================================================
-   全文提取（Readability）
-   ============================================================ */
+全文提取（Readability）
+============================================================ */
 
 /// 全文提取：拉文章网页 → Readability 抽正文 → 覆盖该条目 content_html
 /// （「默认打开方式=自动全文」：RSS 摘要型源打开时自动触发）。
@@ -547,16 +575,20 @@ pub async fn extract_fulltext(state: State<'_, AppState>, article_id: i64) -> Ap
         .send()
         .await?;
     if !resp.status().is_success() {
-        return Err(AppError::network(format!("网页拉取失败：HTTP {}", resp.status())));
+        return Err(AppError::network(format!(
+            "网页拉取失败：HTTP {}",
+            resp.status()
+        )));
     }
     let html = resp.text().await?;
 
     // Readability 不是 Send → spawn_blocking 里跑
     let base = url.clone();
     let html2 = html.clone();
-    let extracted = tokio::task::spawn_blocking(move || crate::extraction::extract_article(&html, &base))
-        .await
-        .map_err(|e| AppError::internal(format!("blocking task: {e}")))??;
+    let extracted =
+        tokio::task::spawn_blocking(move || crate::extraction::extract_article(&html, &base))
+            .await
+            .map_err(|e| AppError::internal(format!("blocking task: {e}")))??;
 
     // 头图兜底（正文没封面时）
     let base2 = url.clone();
@@ -598,8 +630,8 @@ pub async fn extract_fulltext(state: State<'_, AppState>, article_id: i64) -> Ap
 }
 
 /* ============================================================
-   图片代理（防盗链兼容）——参考 Papr 方案
-   ============================================================ */
+图片代理（防盗链兼容）——参考 Papr 方案
+============================================================ */
 
 /// 浏览器 UA（部分图床除 Referer 外还检查 UA）。
 const IMAGE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
@@ -671,8 +703,8 @@ pub async fn fetch_image(
 }
 
 /* ============================================================
-   OPML 导入导出
-   ============================================================ */
+OPML 导入导出
+============================================================ */
 
 /// 导入 OPML：按目录建 folder → 插入 feed（已存在的 URL 跳过）→ 入同步队列。
 /// 返回 (新增源数, 跳过数)。
@@ -688,7 +720,10 @@ pub async fn opml_import(
     content: String,
 ) -> AppResult<OpmlImportReport> {
     let feeds = crate::opml::parse(&content)?;
-    let mut report = OpmlImportReport { imported: 0, skipped: 0 };
+    let mut report = OpmlImportReport {
+        imported: 0,
+        skipped: 0,
+    };
     let conn = state.db.lock().await;
 
     // 目录名 → folder_id 缓存（一次导入内同名目录只建一次）
@@ -718,7 +753,17 @@ pub async fn opml_import(
             },
             None => db::create_folder(&conn, "导入", "article")?,
         };
-        db::insert_feed(&conn, &f.feed_url, None, &f.title, None, folder_id, "inherit", true, false)?;
+        db::insert_feed(
+            &conn,
+            &f.feed_url,
+            None,
+            &f.title,
+            None,
+            folder_id,
+            "inherit",
+            true,
+            false,
+        )?;
         // 新增订阅入同步队列（连接 Miniflux 后补推）。payload 必须是含 folder_id
         // 的 JSON——push_feeds 据此把订阅挂到远端对应分类；此前误传标题字符串，
         // serde_json 解析失败导致 payload 丢弃、源被推到远端默认分类（目录丢失）。
@@ -754,8 +799,8 @@ pub async fn opml_export(state: State<'_, AppState>) -> AppResult<String> {
 }
 
 /* ============================================================
-   后端同步
-   ============================================================ */
+后端同步
+============================================================ */
 
 /// 测试连接（轻量）：按协议分派（Google Reader ClientLogin / Fever api_key），
 /// 不落库、不做任何同步。用于填表时快速验证连通性。
@@ -768,7 +813,8 @@ pub async fn sync_test(
     password: String,
 ) -> AppResult<String> {
     let (msg, _) =
-        crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http).await?;
+        crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http)
+            .await?;
     Ok(msg)
 }
 
@@ -786,16 +832,23 @@ pub async fn sync_save(
     password: String,
 ) -> AppResult<String> {
     // 协议归一：未知值回退 greader（前端下拉只有两个合法项）
-    let protocol = if protocol == "fever" { "fever" } else { "greader" }.to_string();
+    let protocol = if protocol == "fever" {
+        "fever"
+    } else {
+        "greader"
+    }
+    .to_string();
 
     // 留空密码且已连接 → 复用旧密码（改地址不动密钥）
     let (endpoint, username, password) = {
         let conn = state.db.lock().await;
         let old = crate::sync::read_credentials(&conn);
         match (&old, password.trim().is_empty()) {
-            (Some((_old_p, _old_ep, old_user, old_pw)), true) => {
-                (endpoint.trim().to_string(), old_user.clone(), old_pw.clone())
-            }
+            (Some((_old_p, _old_ep, old_user, old_pw)), true) => (
+                endpoint.trim().to_string(),
+                old_user.clone(),
+                old_pw.clone(),
+            ),
             (None, true) => {
                 return Err(AppError::new("validate", "请填写密码"));
             }
@@ -823,7 +876,8 @@ pub async fn sync_save(
     };
     // 测试新凭据（失败不保存不动现状）；用户名随凭据落库（设置页动态显示）
     let (msg, _account) =
-        crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http).await?;
+        crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http)
+            .await?;
     {
         let mut conn = state.db.lock().await;
         if account_changed {
@@ -856,7 +910,10 @@ pub async fn sync_save(
             .to_string());
         }
     }
-    Ok(serde_json::json!({ "message": msg, "firstConnect": false, "unboundLocalFeeds": 0 }).to_string())
+    Ok(
+        serde_json::json!({ "message": msg, "firstConnect": false, "unboundLocalFeeds": 0 })
+            .to_string(),
+    )
 }
 
 /// 分步同步：which="feeds"（订阅层，秒级）| "states"（状态+条目层，慢）。
@@ -888,11 +945,10 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
         if !sync_configured(&conn) {
             return Err(AppError::new("notConnected", "未连接后端"));
         }
-        let mut stmt = conn
-            .prepare(
-                "SELECT f.id, f.feed_url, f.folder_id FROM feeds f
+        let mut stmt = conn.prepare(
+            "SELECT f.id, f.feed_url, f.folder_id FROM feeds f
                  WHERE f.origin = 'local' AND f.remote_id IS NULL",
-            )?;
+        )?;
         let rows: Vec<(i64, String, Option<i64>)> = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -928,7 +984,10 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
     // feeds 阶段：push（新入队的 + 队列残留的）+ pull（碰撞绑定 + 远端新订阅）
     let report = crate::sync::feeds_phase(&state.db, &state.http).await?;
     if report.errors.is_empty() {
-        Ok(format!("已同步 {queued} 个本地订阅到后端（推送 {}）", report.pushed_feeds))
+        Ok(format!(
+            "已同步 {queued} 个本地订阅到后端（推送 {}）",
+            report.pushed_feeds
+        ))
     } else {
         Ok(format!(
             "已同步 {queued} 个本地订阅，其中 {} 个失败（下次同步自动重试）：{}",
@@ -951,7 +1010,9 @@ pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<String> {
         db::set_setting(&conn, "sync_last_sync", "0")?;
         r
     };
-    Ok(format!("已断开并清理：移除 {feeds} 个服务端订阅（{articles} 处绑定），本地直连订阅保留"))
+    Ok(format!(
+        "已断开并清理：移除 {feeds} 个服务端订阅（{articles} 处绑定），本地直连订阅保留"
+    ))
 }
 
 /// 缓存清理：删除指定天数前的文章（收藏/待同步项保留）或仅清 AI 缓存。
@@ -1007,9 +1068,13 @@ pub struct SyncStatusInfo {
 #[tauri::command]
 pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo> {
     let conn = state.db.lock().await;
-    let endpoint = db::get_setting(&conn, "greader_endpoint").ok().flatten()
+    let endpoint = db::get_setting(&conn, "greader_endpoint")
+        .ok()
+        .flatten()
         .filter(|e| !e.trim().is_empty());
-    let account = db::get_setting(&conn, "greader_username").ok().flatten()
+    let account = db::get_setting(&conn, "greader_username")
+        .ok()
+        .flatten()
         .filter(|a| !a.trim().is_empty());
     Ok(SyncStatusInfo {
         connected: endpoint.is_some(),
@@ -1024,8 +1089,8 @@ pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo
 }
 
 /* ============================================================
-   AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi 中转）
-   ============================================================ */
+AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi 中转）
+============================================================ */
 
 /// 推给前端的流式事件（camelCase）。
 #[derive(serde::Serialize, Clone)]
@@ -1087,13 +1152,25 @@ async fn load_prompts(state: &State<'_, AppState>) -> (String, String) {
         let conn = state.db.lock().await;
         db::get_setting(&conn, "ai_config").ok().flatten()
     };
-    match raw.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()) {
+    match raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+    {
         Some(v) => {
-            let summary = v["summaryPrompt"].as_str().unwrap_or(DEFAULT_SUMMARIZE_SYSTEM).to_string();
-            let translate = v["translatePrompt"].as_str().unwrap_or(DEFAULT_TRANSLATE_SYSTEM).to_string();
+            let summary = v["summaryPrompt"]
+                .as_str()
+                .unwrap_or(DEFAULT_SUMMARIZE_SYSTEM)
+                .to_string();
+            let translate = v["translatePrompt"]
+                .as_str()
+                .unwrap_or(DEFAULT_TRANSLATE_SYSTEM)
+                .to_string();
             (summary, translate)
         }
-        None => (DEFAULT_SUMMARIZE_SYSTEM.to_string(), DEFAULT_TRANSLATE_SYSTEM.to_string()),
+        None => (
+            DEFAULT_SUMMARIZE_SYSTEM.to_string(),
+            DEFAULT_TRANSLATE_SYSTEM.to_string(),
+        ),
     }
 }
 

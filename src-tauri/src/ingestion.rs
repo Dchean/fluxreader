@@ -23,8 +23,8 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const NO_STABLE_ID: &str = "\u{1}fluxreader:no-stable-id\u{1}";
 
 /* ============================================================
-   HTTP
-   ============================================================ */
+HTTP
+============================================================ */
 
 pub fn build_client(timeout_secs: u64) -> Client {
     // 直连源站需要能走用户代理（国内网络访问境外 feed 常见需求）。
@@ -50,13 +50,22 @@ pub enum Fetched {
 
 /// 分块读取响应体，超过上限即中止（防 Content-Length 撒谎的流式响应）
 async fn read_capped(mut resp: reqwest::Response) -> AppResult<Vec<u8>> {
-    if resp.content_length().is_some_and(|n| n > MAX_BODY_BYTES as u64) {
-        return Err(AppError::new("responseTooLarge", "feed body exceeds 16 MiB"));
+    if resp
+        .content_length()
+        .is_some_and(|n| n > MAX_BODY_BYTES as u64)
+    {
+        return Err(AppError::new(
+            "responseTooLarge",
+            "feed body exceeds 16 MiB",
+        ));
     }
     let mut buf: Vec<u8> = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
         if buf.len() + chunk.len() > MAX_BODY_BYTES {
-            return Err(AppError::new("responseTooLarge", "feed body exceeds 16 MiB"));
+            return Err(AppError::new(
+                "responseTooLarge",
+                "feed body exceeds 16 MiB",
+            ));
         }
         buf.extend_from_slice(&chunk);
     }
@@ -92,12 +101,17 @@ pub async fn conditional_get(
     let last_modified = header(LAST_MODIFIED);
     let content_type = header(CONTENT_TYPE);
     let bytes = read_capped(resp).await?;
-    Ok(Fetched::Body { bytes, content_type, etag, last_modified })
+    Ok(Fetched::Body {
+        bytes,
+        content_type,
+        etag,
+        last_modified,
+    })
 }
 
 /* ============================================================
-   解析（feed-rs → NewArticle）
-   ============================================================ */
+解析（feed-rs → NewArticle）
+============================================================ */
 
 /// 单次抓取解析出的 feed 元数据 + 条目
 pub struct ParsedFeed {
@@ -235,30 +249,30 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
                     })
                 })
         })
-        .or_else(|| content_html.as_deref().and_then(crate::sanitize::first_image));
+        .or_else(|| {
+            content_html
+                .as_deref()
+                .and_then(crate::sanitize::first_image)
+        });
 
     // 播客 enclosure：音频/视频媒体（type 缺失时按扩展名推断）
-    let enclosure = e
-        .media
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .find_map(|c| {
-            let u = c.url.as_ref()?.to_string();
-            let declared = c
-                .content_type
-                .as_ref()
-                .map(|t| t.to_string().to_ascii_lowercase());
-            let mime = declared.or_else(|| mime_from_url(&u).map(String::from));
-            let is_av = mime
-                .as_deref()
-                .map(|m| m.starts_with("audio") || m.starts_with("video"))
-                .unwrap_or(false);
-            if is_av {
-                Some((u, mime, c.size.map(|s| s as i64)))
-            } else {
-                None
-            }
-        });
+    let enclosure = e.media.iter().flat_map(|m| m.content.iter()).find_map(|c| {
+        let u = c.url.as_ref()?.to_string();
+        let declared = c
+            .content_type
+            .as_ref()
+            .map(|t| t.to_string().to_ascii_lowercase());
+        let mime = declared.or_else(|| mime_from_url(&u).map(String::from));
+        let is_av = mime
+            .as_deref()
+            .map(|m| m.starts_with("audio") || m.starts_with("video"))
+            .unwrap_or(false);
+        if is_av {
+            Some((u, mime, c.size.map(|s| s as i64)))
+        } else {
+            None
+        }
+    });
 
     // 时长（秒）：itunes:duration / media:content duration。注意 enclosure 的
     // size 是文件字节数，不是时长——播客卡片把它显示成 25:00 就是这个混淆。
@@ -304,8 +318,8 @@ fn mime_from_url(url: &str) -> Option<&'static str> {
 }
 
 /* ============================================================
-   单源刷新（direct 优先写库）
-   ============================================================ */
+单源刷新（direct 优先写库）
+============================================================ */
 
 /// 刷新单个源：304 → 不动；成功 → 清除失败标记 + 更新元数据 + upsert 条目；
 /// 失败 → 标记 fetch_failed（Miniflux 兜底路径会查这张表）。
@@ -313,7 +327,12 @@ fn mime_from_url(url: &str) -> Option<&'static str> {
 ///
 /// 注意：此签名在**锁外**调用没有意义——conn 借用即持锁。仅适合
 /// `refresh_feed` 命令（单源、调用方一次只抓一个）与既有测试复用。
-pub async fn refresh_feed(conn: &mut Connection, client: &Client, feed_id: i64, dedup: bool) -> AppResult<usize> {
+pub async fn refresh_feed(
+    conn: &mut Connection,
+    client: &Client,
+    feed_id: i64,
+    dedup: bool,
+) -> AppResult<usize> {
     // feed 行（URL + 条件 GET 头）
     let (feed_url, etag, last_modified): (String, Option<String>, Option<String>) = {
         conn.query_row(
@@ -324,19 +343,45 @@ pub async fn refresh_feed(conn: &mut Connection, client: &Client, feed_id: i64, 
         .map_err(|_| AppError::not_found(format!("feed {feed_id} not found")))?
     };
 
-    let fetched = conditional_get(client, &feed_url, etag.as_deref(), last_modified.as_deref()).await;
+    let fetched =
+        conditional_get(client, &feed_url, etag.as_deref(), last_modified.as_deref()).await;
 
     match fetched {
         Ok(Fetched::NotModified) => {
-            db::set_feed_fetch_state(conn, feed_id, false, None, etag.as_deref(), last_modified.as_deref())?;
+            db::set_feed_fetch_state(
+                conn,
+                feed_id,
+                false,
+                None,
+                etag.as_deref(),
+                last_modified.as_deref(),
+            )?;
             Ok(0)
         }
-        Ok(Fetched::Body { bytes, content_type, etag, last_modified }) => {
+        Ok(Fetched::Body {
+            bytes,
+            content_type,
+            etag,
+            last_modified,
+        }) => {
             let parsed = parse_feed(&bytes, &feed_url)?;
             let _ = content_type; // feed-rs 自带编码探测，无需手动解码
 
-            db::set_feed_title_and_icon(conn, feed_id, parsed.title.as_deref(), parsed.icon.as_deref(), parsed.site_url.as_deref())?;
-            db::set_feed_fetch_state(conn, feed_id, false, None, etag.as_deref(), last_modified.as_deref())?;
+            db::set_feed_title_and_icon(
+                conn,
+                feed_id,
+                parsed.title.as_deref(),
+                parsed.icon.as_deref(),
+                parsed.site_url.as_deref(),
+            )?;
+            db::set_feed_fetch_state(
+                conn,
+                feed_id,
+                false,
+                None,
+                etag.as_deref(),
+                last_modified.as_deref(),
+            )?;
 
             let mut new_count = 0;
             for a in &parsed.articles {
@@ -348,20 +393,30 @@ pub async fn refresh_feed(conn: &mut Connection, client: &Client, feed_id: i64, 
             Ok(new_count)
         }
         Err(e) => {
-            db::set_feed_fetch_state(conn, feed_id, true, Some(&e.message), etag.as_deref(), last_modified.as_deref())?;
+            db::set_feed_fetch_state(
+                conn,
+                feed_id,
+                true,
+                Some(&e.message),
+                etag.as_deref(),
+                last_modified.as_deref(),
+            )?;
             Err(e)
         }
     }
 }
 
 /* ============================================================
-   三段式刷新管线（并发安全版）
-   ============================================================ */
+三段式刷新管线（并发安全版）
+============================================================ */
 
 /// 单源刷新的第一阶段：锁内读 feed 行（URL + 条件 GET 头）。
 /// 读到的快照交给锁外的 `fetch_and_parse`，HTTP 期间不占数据库锁——
 /// 这是并发抓取能真正并行（而非被 Mutex 串行化）的前提。
-pub fn read_feed_for_refresh(conn: &Connection, feed_id: i64) -> AppResult<(String, Option<String>, Option<String>)> {
+pub fn read_feed_for_refresh(
+    conn: &Connection,
+    feed_id: i64,
+) -> AppResult<(String, Option<String>, Option<String>)> {
     conn.query_row(
         "SELECT feed_url, etag, last_modified FROM feeds WHERE id = ?1",
         rusqlite::params![feed_id],
@@ -380,7 +435,15 @@ pub async fn fetch_and_parse(
 ) -> AppResult<(Fetched, ParsedFeed)> {
     let fetched = conditional_get(client, feed_url, etag, last_modified).await?;
     match &fetched {
-        Fetched::NotModified => Ok((fetched, ParsedFeed { title: None, site_url: None, icon: None, articles: Vec::new() })),
+        Fetched::NotModified => Ok((
+            fetched,
+            ParsedFeed {
+                title: None,
+                site_url: None,
+                icon: None,
+                articles: Vec::new(),
+            },
+        )),
         Fetched::Body { bytes, .. } => {
             let parsed = parse_feed(bytes, feed_url)?;
             Ok((fetched, parsed))
@@ -406,9 +469,26 @@ pub fn apply_refresh_result(
             db::set_feed_fetch_state(conn, feed_id, false, None, old_etag, old_last_modified)?;
             Ok(0)
         }
-        Fetched::Body { etag, last_modified, .. } => {
-            db::set_feed_title_and_icon(conn, feed_id, parsed.title.as_deref(), parsed.icon.as_deref(), parsed.site_url.as_deref())?;
-            db::set_feed_fetch_state(conn, feed_id, false, None, etag.as_deref(), last_modified.as_deref())?;
+        Fetched::Body {
+            etag,
+            last_modified,
+            ..
+        } => {
+            db::set_feed_title_and_icon(
+                conn,
+                feed_id,
+                parsed.title.as_deref(),
+                parsed.icon.as_deref(),
+                parsed.site_url.as_deref(),
+            )?;
+            db::set_feed_fetch_state(
+                conn,
+                feed_id,
+                false,
+                None,
+                etag.as_deref(),
+                last_modified.as_deref(),
+            )?;
             let mut new_count = 0;
             for a in &parsed.articles {
                 let (_, was_new) = db::upsert_article_with_feed(conn, feed_id, a, dedup)?;
@@ -438,8 +518,8 @@ pub async fn refresh_feed_staged(
     match fetch_and_parse(client, &feed_url, etag.as_deref(), last_modified.as_deref()).await {
         Ok((fetched, parsed)) => {
             /* favicon 后台发现：feed 未带 icon 且 DB 无缓存且本进程未尝试过 →
-               spawn 独立任务（不占刷新信号量、不拖慢刷新关键路径——favicon 是
-               锦上添花）。负缓存防无 favicon 的站点每轮重付探测超时。 */
+            spawn 独立任务（不占刷新信号量、不拖慢刷新关键路径——favicon 是
+            锦上添花）。负缓存防无 favicon 的站点每轮重付探测超时。 */
             if parsed.icon.is_none() {
                 let (existing_icon, already_tried): (Option<String>, bool) = {
                     let conn = db.lock().await;
@@ -459,7 +539,7 @@ pub async fn refresh_feed_staged(
                     let db = db.clone();
                     let client = client.clone();
                     /* tokio::spawn（非 tauri::async_runtime）：本函数在测试里
-                       无 Tauri 运行时也能跑；调度器/命令均在 tokio 上下文调用 */
+                    无 Tauri 运行时也能跑；调度器/命令均在 tokio 上下文调用 */
                     tokio::spawn(async move {
                         let discovered = match site.as_deref() {
                             Some(s) => discover_favicon(&client, s).await,
@@ -473,16 +553,31 @@ pub async fn refresh_feed_staged(
                             );
                         }
                         /* 失败留在 FAVICON_TRIED（本进程不再重试）；
-                           前端下次 reload 拿到新 favicon（如有） */
+                        前端下次 reload 拿到新 favicon（如有） */
                     });
                 }
             }
             let conn = db.lock().await;
-            apply_refresh_result(&conn, feed_id, &fetched, &parsed, dedup, etag.as_deref(), last_modified.as_deref())
+            apply_refresh_result(
+                &conn,
+                feed_id,
+                &fetched,
+                &parsed,
+                dedup,
+                etag.as_deref(),
+                last_modified.as_deref(),
+            )
         }
         Err(e) => {
             let conn = db.lock().await;
-            let _ = db::set_feed_fetch_state(&conn, feed_id, true, Some(&e.message), etag.as_deref(), last_modified.as_deref());
+            let _ = db::set_feed_fetch_state(
+                &conn,
+                feed_id,
+                true,
+                Some(&e.message),
+                etag.as_deref(),
+                last_modified.as_deref(),
+            );
             Err(e)
         }
     }
@@ -514,8 +609,7 @@ async fn discover_favicon(client: &Client, site_url: &str) -> Option<String> {
         .text()
         .await
         .ok()?;
-    let link_icon = extract_icon_link(&html)
-        .map(|href| resolve_url(&href, &base));
+    let link_icon = extract_icon_link(&html).map(|href| resolve_url(&href, &base));
 
     // ② 兜底 /favicon.ico
     let fallback = format!("{base}/favicon.ico");
@@ -623,27 +717,49 @@ mod favicon_tests {
     fn extract_icon_link_finds_variants() {
         // 常规写法
         let h1 = r#"<head><link rel="icon" href="/Icon.PNG"><title>x</title></head>"#;
-        assert_eq!(extract_icon_link(h1).as_deref(), Some("/Icon.PNG"), "大小写保持原文");
+        assert_eq!(
+            extract_icon_link(h1).as_deref(),
+            Some("/Icon.PNG"),
+            "大小写保持原文"
+        );
         // shortcut icon 变体 + 单引号
         let h2 = r#"<link rel='shortcut icon' href='/f.ico'>"#;
         assert_eq!(extract_icon_link(h2).as_deref(), Some("/f.ico"));
         // 属性顺序不固定（href 在前）
         let h3 = r#"<link href="https://cdn.example/a.svg" rel="icon" type="image/svg+xml">"#;
-        assert_eq!(extract_icon_link(h3).as_deref(), Some("https://cdn.example/a.svg"));
+        assert_eq!(
+            extract_icon_link(h3).as_deref(),
+            Some("https://cdn.example/a.svg")
+        );
         // 大写属性名 + 大小写混合 rel
         let h4 = r#"<LINK REL="Icon" HREF="https://x.example/i.png">"#;
-        assert_eq!(extract_icon_link(h4).as_deref(), Some("https://x.example/i.png"));
+        assert_eq!(
+            extract_icon_link(h4).as_deref(),
+            Some("https://x.example/i.png")
+        );
         // 无 icon link → None
-        assert_eq!(extract_icon_link(r#"<link rel="stylesheet" href="a.css">"#), None);
+        assert_eq!(
+            extract_icon_link(r#"<link rel="stylesheet" href="a.css">"#),
+            None
+        );
         // 非 icon 的 link 不误中（含 "icon" 子串的其他 rel）
         assert_eq!(extract_icon_link(r#"<link rel="iconx" href="a">"#), None);
     }
 
     #[test]
     fn extract_html_attr_all_quote_styles() {
-        assert_eq!(extract_html_attr(r#"rel="icon" href="/a.png" "#, "href").as_deref(), Some("/a.png"));
-        assert_eq!(extract_html_attr("href='/b.ico'", "href").as_deref(), Some("/b.ico"));
-        assert_eq!(extract_html_attr("href=bare.ico ", "href").as_deref(), Some("bare.ico"));
+        assert_eq!(
+            extract_html_attr(r#"rel="icon" href="/a.png" "#, "href").as_deref(),
+            Some("/a.png")
+        );
+        assert_eq!(
+            extract_html_attr("href='/b.ico'", "href").as_deref(),
+            Some("/b.ico")
+        );
+        assert_eq!(
+            extract_html_attr("href=bare.ico ", "href").as_deref(),
+            Some("bare.ico")
+        );
         // 独立属性名判定（X-HREF 不得误中 href）
         assert_eq!(extract_html_attr("data-href='no'", "href"), None);
     }
