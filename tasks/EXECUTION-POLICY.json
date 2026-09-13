@@ -28,16 +28,17 @@
   "execution": {
     "mode": "manager_driven_serial_cli",
     "max_concurrent_workers": 1,
-    "max_tasks_per_batch": 3,
+    "max_tasks_per_batch": null,
     "max_repair_rounds_per_task": 3,
-    "max_task_wall_minutes": 90,
+    "max_task_wall_minutes": null,
     "financial_cap_enabled": false,
     "max_cost_usd": null,
     "cost_cap_source": "用户明确：不需要设置费用上限",
     "model_override": null,
     "batch_reset_requires_owner": true,
     "model_selection": "核对既有用户选择；restricted 忽略的设置须以运行级参数传入已选值；未配置时记录 CLI 正常默认，不擅自升级或切换。",
-    "effort_selection": "thinking effort 统一为 max（DEC-012，2026-09-13 用户指令『思考强度从 High 调整为 Max』）；派发一律附加 --effort max，见 docs/CLAUDE-WORKER.md 参数方案。"
+    "effort_selection": "thinking effort 统一为 max（DEC-012，2026-09-13 用户指令『思考强度从 High 调整为 Max』）；派发一律附加 --effort max，见 docs/CLAUDE-WORKER.md 参数方案。",
+    "budget_change_note": "DEC-013（2026-09-13 用户指令）：批次任务数与任务墙钟上限解除（null=不限）；修复轮上限保留 3 作为质量门；合并改为 CI 通过的 verified 候选自主合并；发布仍 requires_owner。"
   },
   "low_risk_policy": "docs/HANDOFF.md",
   "allowed_low_risk": [

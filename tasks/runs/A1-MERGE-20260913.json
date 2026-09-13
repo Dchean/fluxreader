@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "run_id": "A1-MERGE-20260913",
+  "kind": "merge_record",
+  "recorded_at_utc": "2026-09-13T15:15:00Z",
+  "authorization": {
+    "owner_decision": "用户通过交互问答批准：① 合并 BATCH-001+BATCH-002（先把 BATCH-002 变更补进 PR 分支、CI 重跑通过后合并）；② 治理文档随合并提交入库（workflow-kit 排除）；③ BATCH-003 三项批准（另记）。非自动批准：本记录如实引用用户选项。",
+    "prerequisites": "A-2 托管 CI 证据已在两个提交上取得（6646df9 与 a91943c 双检查 success）"
+  },
+  "merge_input": {
+    "base": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9（原 main）",
+    "branch": "ci/batch-001-hosted-verification",
+    "branch_commits": [
+      "6646df9 BATCH-001 candidate (40 文件)",
+      "33b8bb4 BATCH-002: ci.yml Note back-reference (TASK-007) + worker-result schema $schema key fix (TASK-008)",
+      "a91943c docs: governance, task records, notes, and project skills（106 文件 + README）"
+    ]
+  },
+  "merge_commit": {
+    "sha": "07369d675a6ca03aee001050772c328d0a3c25f6",
+    "parents": [
+      "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+      "a91943c54d2058623b3ab41d53ecf1761a31c8c7"
+    ],
+    "pushed_to": "origin/main（6550a22..07369d6）",
+    "files_changed": 147,
+    "insertions": 16066,
+    "deletions": 968,
+    "committer_time_utc": "2026-09-13T15:15:00+08:00（git log %cI 实测）"
+  },
+  "pr": {
+    "number": 2,
+    "state_after": "closed",
+    "merged": true,
+    "merge_commit_sha_confirmed_via_api": "07369d675a6c"
+  },
+  "workspace_after": {
+    "primary_worktree": "与 main 07369d6 内容一致（原 41 个未提交修改全部转为已跟踪清洁状态）；仅剩未跟踪：tasks/batches/BATCH-003.json、tasks/items/TASK-011.json（BATCH-003 本地状态）、workflow-kit/（按用户决定排除）",
+    "index_incident_note": "update-ref 后索引短暂停留在旧 HEAD，出现 153 个假性 D 状态；git reset（mixed，不动磁盘）刷新后归零。磁盘文件全程未受影响。"
+  },
+  "not_in_this_merge": [
+    "workflow-kit/（用户决定排除）",
+    ".cache/**（gitignore）",
+    "BATCH-003 本地定义文件（随 BATCH-003 合并另行提交）"
+  ],
+  "still_not_done": [
+    "发布（需单独确认）",
+    "真实桌面 UI 完整验收与真实服务验证（TASK-012 冒烟为本批范围，全面验收不在）"
+  ],
+  "tasks_state_after_merge": "TASK-001～009 全部已并入 main；TASK-002/003 的 review 状态按 PROCESS 语义随合并收敛（产物已合入）",
+  "timestamp_correction": {
+    "what": "本记录初稿 recorded_at 曾误标 17:35:00Z（按会话节奏估计，非实测）；已按 git 提交时间戳更正为合并提交的实际时间 15:15:00Z。",
+    "branch_commit_times_measured": {
+      "6646df9": "2026-09-13T14:31:03+08:00",
+      "33b8bb4": "2026-09-13T23:07:15+08:00",
+      "a91943c": "2026-09-13T23:07:35+08:00",
+      "07369d6": "2026-09-13T23:15:00+08:00"
+    },
+    "lesson": "与独立审查 R-02 同源：时间必须来自进程记录/git 提交戳，不得从会话节奏或运行 ID 推导。"
+  }
+}

@@ -9,6 +9,9 @@ import type { ArticleEntry, ContentLayoutType, FeedItem } from '../types';
  *  对话框里选了这类布局时隐藏 AI 开关（勾选值一并归零，避免保存无效配置）。 */
 const LAYOUT_NO_AI: ReadonlySet<string> = new Set(['image', 'podcast']);
 
+/** 稳定空数组：搜索结果空查询分支引用（避免 useMemo 依赖每次渲染都变化） */
+const EMPTY_RESULTS: ArticleEntry[] = [];
+
 /* ============================================================
    全局搜索 / 灯箱 / 新建分类 / 添加订阅源 四个浮层
    ============================================================ */
@@ -68,14 +71,10 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
   /* 文章搜索：后端 FTS5（防抖后触发）；浏览器环境回退内存匹配 */
   useEffect(() => {
     const query = debounced;
-    if (!query) {
-      setResults([]);
-      setSearching(false);
-      setSearchError(false);
-      return;
-    }
-    setSearching(true);
+    // Note: set-state-in-effect — see .agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md
+    if (!query) return;
     const t = setTimeout(() => {
+      setSearching(true);
       api
         .searchArticles(query, 10)
         .then((rows) => {
@@ -104,6 +103,11 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
     }, 250);
     return () => clearTimeout(t);
   }, [debounced]);
+
+  /* 派生值：空查询时渲染归零，避免同步 setState */
+  const resultsEffective = debounced ? results : EMPTY_RESULTS;
+  const searchingEffective = debounced !== '' && searching;
+  const searchErrorEffective = debounced ? searchError : false;
 
   /* 命令表：全部命令（含快捷键 hint）；订阅源/文章按当前过滤 */
   const items = useMemo<PaletteItem[]>(() => {
@@ -148,7 +152,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
     }
 
     if (query) {
-      for (const a of results) {
+      for (const a of resultsEffective) {
         out.push({
           id: `art-${a.id}`,
           group: 'article',
@@ -169,10 +173,16 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
       }
     }
     return out;
-  }, [debounced, feedIndex, results]);
+  }, [debounced, feedIndex, resultsEffective]);
 
-  /* 光标重置 + 查询变化回到列表顶部 */
-  useEffect(() => setCursor(0), [debounced, items.length]);
+  /* 光标重置：渲染期键检测模式，避免 set-state-in-effect */
+  // Note: set-state-in-effect — see .agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md
+  const [prevKey, setPrevKey] = useState({ debounced, itemsLength: 0 });
+  if (prevKey.debounced !== debounced || prevKey.itemsLength !== items.length) {
+    setCursor(0);
+    setPrevKey({ debounced, itemsLength: items.length });
+  }
+
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = 0;
   }, [debounced]);
@@ -258,7 +268,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
       <div className="cp-list" ref={listRef} role="listbox">
         {items.length === 0 ? (
           <div className="search-empty">
-            {searching ? '搜索中…' : searchError ? '搜索失败 — 请检查网络连接' : '没有结果'}
+            {searchingEffective ? '搜索中…' : searchErrorEffective ? '搜索失败 — 请检查网络连接' : '没有结果'}
           </div>
         ) : (
           <>

@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "id": "TASK-010",
+  "batch_id": "BATCH-003",
+  "kind": "bug_fix",
+  "milestone": "M1",
+  "status": "verified",
+  "title": "消除 Reader/Overlays 三条 react-hooks lint 告警",
+  "objective": "按分析 Note 的方案修复 Reader.tsx:112 exhaustive-deps 与 Overlays.tsx:72/175 set-state-in-effect 三条告警，行为保持，lint 警告 6→3。",
+  "non_goals": [
+    "不改 Reader.tsx:95 的既有 eslint-disable",
+    "不处理技能副本的 3 条告警",
+    "不引入新依赖或状态管理方案",
+    "不改产品行为语义"
+  ],
+  "requirement_refs": [
+    "docs/ISSUES.md ISSUE-014",
+    ".agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md"
+  ],
+  "required_reading": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md"
+  ],
+  "source_baseline": "main@07369d675a6ca03aee001050772c328d0a3c25f6（合并后工作区）",
+  "dependencies": [],
+  "authorization": {
+    "source": "用户 AskUserQuestion 批准 BATCH-003（hooks lint 警告修复）",
+    "risk_level": "low"
+  },
+  "blockers": [],
+  "scope": {
+    "allowed_paths": [
+      "src/components/Reader.tsx",
+      "src/components/Overlays.tsx"
+    ],
+    "protected_paths": "按 EXECUTION-POLICY protected_from_worker",
+    "change_definition": "按分析 Note 的三条方案实现；每处修复点留一行反向注释指向该 Note",
+    "generated_artifacts": [],
+    "network_and_data": "无网络"
+  },
+  "steps": [
+    "读分析 Note 与两个组件全文，检索 results/searching/searchError 的全部消费点",
+    "实现三条修复（Note 方案为准，细节可随 lint 实际反馈微调但不得偏离方向）",
+    "自检：无新增 disable 注释、派生值覆盖全部消费点、反向注释就位",
+    "返回结构化结果与实际修改文件"
+  ],
+  "acceptance_criteria": [
+    "lint 警告 6→3（仅技能副本），退出码 0，无新增 eslint-disable",
+    "tsc -b 与 npm run build 通过",
+    "npm run test:frontend 8/8，断言名称与顺序不变",
+    "仅两个允许文件变化",
+    "三处反向注释指向分析 Note"
+  ],
+  "verification": {
+    "owner": "manager",
+    "commands": [
+      "npm run lint",
+      "npx tsc -b",
+      "npm run test:frontend",
+      "npm run build",
+      "git diff --stat"
+    ],
+    "require_no_new_disable": true
+  },
+  "stop_conditions": [
+    "Note 方案与实际代码冲突导致无法保持行为时返回 blocked 并说明",
+    "预算耗尽"
+  ],
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_wall_minutes": 90
+  },
+  "outputs": [
+    "两个组件的修复",
+    "管理 agent 独立验证记录"
+  ],
+  "evidence": [],
+  "note_requirement": "分析 Note 已存在（proposed/bug-fix/2026-09-13-hooks-lint-warnings.md）；落地时随代码提交转 implemented",
+  "dispatch_record": {
+    "run_id_attempt1": "TASK-010-20260913T180500Z（标签时间；实际约 15:40Z）",
+    "attempt1": "exit 0，236.6s 前后？以 worker-process.json 为准——attempt-1 完成，三条告警修复，但独立验证发现新告警（resultsEffective 每次渲染新数组）",
+    "repair_round_1": {
+      "run_id": "TASK-010-20260913T181500Z-R1",
+      "feedback": "lint 4 条：useMemo 依赖 resultsEffective 每次渲染变化（空分支数组字面量）",
+      "fix": "模块顶层提升 EMPTY_RESULTS: ArticleEntry[] 常量，空分支引用稳定",
+      "exit_code": 0,
+      "cost_usd_estimated": 0.40479225
+    },
+    "attempt1_cost_usd_estimated": 0.64744375,
+    "manager_mechanical_action": "两文件注释前缀 Fix: → Note:（AGENTS.md 反向注释格式；注释级修正，不改代码语义，门禁在修正后的内容上运行）",
+    "evidence_dirs": [
+      ".cache/runs/BATCH-003/TASK-010/attempt-1/",
+      ".cache/runs/BATCH-003/TASK-010/attempt-2/"
+    ]
+  },
+  "verification_results": {
+    "verified_at_utc": "见本文件 mtime 与批次报告实测锚点",
+    "verified_by": "manager",
+    "lint": {
+      "warnings": 3,
+      "errors": 0,
+      "note": "6→3 达标，剩余 3 条全部来自技能副本（不在任务范围）"
+    },
+    "tsc": "exit 0（attempt-1 后）",
+    "test_frontend": "8/8 通过，断言名称与顺序不变",
+    "build": "npm run build 独立复跑 exit 0（vite 224ms）；tauri build 全链 exit 0（内含 beforeBuildCommand 前端构建 + NSIS/MSI 打包）",
+    "diff_scope": "仅 src/components/Reader.tsx、src/components/Overlays.tsx；无新增 eslint-disable；Reader.tsx:95 既有 disable 未动",
+    "reverse_comments": "三处修复点均为 // Note: ... — 见 .agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md",
+    "known_behavior_delta": "搜索指示器改为防抖后真实发起时亮（250ms 窗口）；空查询时结果/错误以派生值隐藏。命令面板无自动化覆盖，已在 Note Risks 如实记录。",
+    "consumer_check": "worker 检索全部消费点（items useMemo、search-empty 渲染）改用派生值；管理 agent grep 复核无遗留裸引用"
+  }
+}

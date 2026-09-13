@@ -3,11 +3,11 @@
   "project": "FluxReader",
   "updated_on": "2026-09-13",
   "phase": "managed_delivery",
-  "phase_status": "batch_002_completed_pending_owner_review",
+  "phase_status": "batch_003_completed_pending_owner_review",
   "source_baseline": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
   "current_milestone": "M1",
   "current_task": null,
-  "current_task_note": "BATCH-002 三个任务（TASK-007/008/009）均已 verified；无进行中任务。",
+  "current_task_note": "BATCH-003 三个任务（TASK-010/011/012）均已 verified；无进行中任务。",
   "next_proposed_task": null,
   "authority": "用户明确指令优先；此文件记录授权，不能通过编辑字段创造授权。",
   "permissions": {
@@ -35,7 +35,8 @@
     "DEC-009",
     "DEC-010",
     "DEC-011",
-    "DEC-012"
+    "DEC-012",
+    "DEC-013"
   ],
   "owner_decisions_source": "docs/PRODUCT.md",
   "pending_approvals": [
@@ -82,10 +83,11 @@
     "unattended_execution_authorized": true,
     "retry_time_cost_budgets": {
       "max_repair_rounds_per_task": 3,
-      "max_task_minutes": 90,
-      "max_tasks_per_batch": 3,
+      "max_task_minutes": null,
+      "max_tasks_per_batch": null,
       "financial_cap_enabled": false,
-      "max_cost": null
+      "max_cost": null,
+      "change_source": "DEC-013（2026-09-13 用户指令：解除项目数量和时间限制）"
     },
     "manager_driven_cli_execution_authorized": true,
     "max_concurrent_workers": 1,
@@ -122,8 +124,8 @@
   ],
   "feature_scope_source": "docs/FEATURES.md",
   "latest_documentation_report": "tasks/runs/BATCH-001-review-wrapup-20260913.json",
-  "latest_execution_report": "tasks/runs/BATCH-002-final-20260913.json",
-  "next_action": "A-2 已完成：托管 CI 在候选提交 6646df9 全部通过（PR #2，双检查 success，证据 tasks/runs/A2-HOSTED-CI-20260913.json）。BATCH-002 3/3 verified。等待用户决定 A-1：是否合并（PR https://github.com/Dchean/fluxreader/pull/2 ；合并需用户明确确认）；随后确认下一批（BATCH-003）范围。新决定 DEC-012：CLI 派发一律 --effort max。",
+  "latest_execution_report": "tasks/runs/BATCH-003-final-20260913.json",
+  "next_action": "DEC-013 授权下自主跑完优化重构全流程：BATCH-003 候选合并 → BATCH-004（OPT-004 实现/fmt 门禁/测试隔离）→ BATCH-005（M2 模块处置+试点）→ BATCH-006（release 加固+终验）。发布前停下等用户。",
   "cli_environment": {
     "status": "resolved_within_existing_authority",
     "record": "docs/runs/BATCH-001-env-unblock.json",
@@ -137,7 +139,7 @@
   "handoff_entry": "docs/HANDOFF.md",
   "latest_takeover_record": "docs/runs/BATCH-001-takeover.md",
   "latest_batch_report": "tasks/runs/BATCH-001-final-20260913.json",
-  "current_batch": "BATCH-002",
+  "current_batch": "BATCH-003",
   "next_batch": null,
   "next_batch_requires_owner": true,
   "delegation_loop_verified": true,
