@@ -35,7 +35,9 @@ const IFRAME_HOSTS: &[&str] = &[
 
 fn iframe_host_allowed(host: &str) -> bool {
     let h = host.trim_start_matches("www.").to_ascii_lowercase();
-    IFRAME_HOSTS.iter().any(|d| h == *d || h.ends_with(&format!(".{d}")))
+    IFRAME_HOSTS
+        .iter()
+        .any(|d| h == *d || h.ends_with(&format!(".{d}")))
 }
 
 /// 消毒 feed HTML：安全渲染 + 相对 URL 以 base 重写为绝对。
@@ -54,7 +56,9 @@ pub fn sanitize(html: &str, base: Option<&str>) -> String {
         .add_tags(["video", "audio", "source", "track", "iframe"])
         .add_tag_attributes(
             "video",
-            ["src", "poster", "controls", "preload", "width", "height", "muted", "loop"],
+            [
+                "src", "poster", "controls", "preload", "width", "height", "muted", "loop",
+            ],
         )
         .add_tag_attributes("audio", ["src", "controls", "preload", "loop"])
         .add_tag_attributes("source", ["src", "type", "media"])
@@ -62,7 +66,15 @@ pub fn sanitize(html: &str, base: Option<&str>) -> String {
         // iframe 的 src 已在 filter_iframes 按域名预过滤，这里只放行展示属性
         .add_tag_attributes(
             "iframe",
-            ["src", "width", "height", "allow", "allowfullscreen", "frameborder", "title"],
+            [
+                "src",
+                "width",
+                "height",
+                "allow",
+                "allowfullscreen",
+                "frameborder",
+                "title",
+            ],
         );
 
     if let Some(b) = base.and_then(|b| Url::parse(b).ok()) {
@@ -111,7 +123,7 @@ fn filter_iframes(html: &str) -> String {
             break;
         };
         let tag = &rest[..=gt]; // 含 '<' … '>'
-        // tag[..7] = "<iframe"（纯 ASCII）；gt 是 '>' 字节位置（边界安全）
+                                // tag[..7] = "<iframe"（纯 ASCII）；gt 是 '>' 字节位置（边界安全）
         let attrs = tag.get(7..gt).unwrap_or("");
         let src = extract_attr(attrs, "src");
         let keep = src
@@ -291,8 +303,16 @@ mod tests {
         let out = sanitize(html, None);
         assert!(out.contains("youtube.com/embed"), "youtube kept: {out}");
         assert!(out.contains("bilibili.com/player"), "bilibili kept: {out}");
-        assert_eq!(out.matches("<iframe").count(), 2, "only allowlisted iframes: {out}");
-        assert_eq!(out.matches("在浏览器打开嵌入内容").count(), 2, "demoted to links: {out}");
+        assert_eq!(
+            out.matches("<iframe").count(),
+            2,
+            "only allowlisted iframes: {out}"
+        );
+        assert_eq!(
+            out.matches("在浏览器打开嵌入内容").count(),
+            2,
+            "demoted to links: {out}"
+        );
         // 未放行的 src 不得再以 iframe 形式出现（仅存在于降级外链 href 里）
         assert!(!out.contains("<iframe src=\"https://evil"));
         // 降级链接的 href 指向原地址（用户仍可去浏览器看）
@@ -327,7 +347,10 @@ mod tests {
 
     #[test]
     fn extract_attr_finds_value_in_all_quote_styles() {
-        assert_eq!(extract_attr(r#" src="https://a/b.mp4" "#, "src").as_deref(), Some("https://a/b.mp4"));
+        assert_eq!(
+            extract_attr(r#" src="https://a/b.mp4" "#, "src").as_deref(),
+            Some("https://a/b.mp4")
+        );
         assert_eq!(extract_attr(" src='x' ", "src").as_deref(), Some("x"));
         assert_eq!(extract_attr(" src=bare ", "src").as_deref(), Some("bare"));
         assert_eq!(extract_attr(" data-src=\"y\"", "src"), None);
@@ -348,7 +371,10 @@ mod tests {
         assert_eq!(extract_attr(attrs, "alt").as_deref(), Some("视频说明"));
         // 中文值里再找英文属性（跨多字节推进路径）
         let attrs2 = r#" 描述="说明文字一" src='https://例子/视频.mp4'"#;
-        assert_eq!(extract_attr(attrs2, "src").as_deref(), Some("https://例子/视频.mp4"));
+        assert_eq!(
+            extract_attr(attrs2, "src").as_deref(),
+            Some("https://例子/视频.mp4")
+        );
         assert_eq!(extract_attr(attrs2, "描述").as_deref(), Some("说明文字一"));
         // 整链：含中文 feed HTML 过 filter_iframes + sanitize 不 panic
         let html = r#"<p>频道名：科技频道</p><iframe src="https://www.youtube.com/embed/x" title="视频：测试"></iframe><iframe src="https://恶意.例子.com/e"></iframe>"#;

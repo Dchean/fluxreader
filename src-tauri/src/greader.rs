@@ -20,8 +20,8 @@ use reqwest::Client;
 use serde::Deserialize;
 
 /* ============================================================
-   行类型（Google Reader JSON 的最小子集）
-   ============================================================ */
+行类型（Google Reader JSON 的最小子集）
+============================================================ */
 
 /// ClientLogin 响应（`POST /accounts/ClientLogin?output=json`）
 /// 注意：Miniflux 返回字段名是 `SID`/`LSID`/`Auth`（首字母大写），serde 默认大小写敏感。
@@ -183,8 +183,8 @@ pub struct QuickAddResponse {
 }
 
 /* ============================================================
-   状态 tag 常量
-   ============================================================ */
+状态 tag 常量
+============================================================ */
 
 pub mod tags {
     pub const READ: &str = "user/-/state/com.google/read";
@@ -194,8 +194,8 @@ pub mod tags {
 }
 
 /* ============================================================
-   客户端
-   ============================================================ */
+客户端
+============================================================ */
 
 #[derive(Clone)]
 pub struct GReaderClient {
@@ -210,16 +210,29 @@ impl GReaderClient {
     /// 用已知的 auth token 构建（不重新 ClientLogin）。
     pub fn new(endpoint: &str, token: &str, http: Client) -> Self {
         let base = endpoint.trim_end_matches('/').to_string();
-        Self { base, token: token.to_string(), http }
+        Self {
+            base,
+            token: token.to_string(),
+            http,
+        }
     }
 
     /// 两步认证：先 ClientLogin 换 token，再构建客户端。
     /// `username`/`password` 是 Google Reader 集成凭据（非 Miniflux 账号密码）。
-    pub async fn login(endpoint: &str, username: &str, password: &str, http: Client) -> AppResult<Self> {
+    pub async fn login(
+        endpoint: &str,
+        username: &str,
+        password: &str,
+        http: Client,
+    ) -> AppResult<Self> {
         let base = endpoint.trim_end_matches('/').to_string();
         let resp = http
             .post(format!("{base}/accounts/ClientLogin"))
-            .form(&[("Email", username), ("Passwd", password), ("output", "json")])
+            .form(&[
+                ("Email", username),
+                ("Passwd", password),
+                ("output", "json"),
+            ])
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -232,7 +245,11 @@ impl GReaderClient {
         if body.auth.is_empty() {
             return Err(AppError::network("ClientLogin 响应缺少 Auth token"));
         }
-        Ok(Self { base, token: body.auth, http })
+        Ok(Self {
+            base,
+            token: body.auth,
+            http,
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -263,7 +280,10 @@ impl GReaderClient {
         params.extend_from_slice(form);
         let resp = self.http.post(self.url(path)).form(&params).send().await?;
         if !resp.status().is_success() {
-            return Err(AppError::network(format!("POST {path} → {}", resp.status())));
+            return Err(AppError::network(format!(
+                "POST {path} → {}",
+                resp.status()
+            )));
         }
         Ok(resp.json().await?)
     }
@@ -274,7 +294,10 @@ impl GReaderClient {
         params.extend_from_slice(form);
         let resp = self.http.post(self.url(path)).form(&params).send().await?;
         if !resp.status().is_success() {
-            return Err(AppError::network(format!("POST {path} → {}", resp.status())));
+            return Err(AppError::network(format!(
+                "POST {path} → {}",
+                resp.status()
+            )));
         }
         Ok(())
     }
@@ -283,15 +306,15 @@ impl GReaderClient {
 
     /// 拉订阅列表（含分类归属）。等价于 Miniflux `/v1/feeds` + `/v1/categories`。
     pub async fn subscriptions(&self) -> AppResult<Vec<Subscription>> {
-        let r: SubscriptionListResponse =
-            self.get_json("/reader/api/0/subscription/list?output=json").await?;
+        let r: SubscriptionListResponse = self
+            .get_json("/reader/api/0/subscription/list?output=json")
+            .await?;
         Ok(r.subscriptions)
     }
 
     /// 拉标签列表（starred + 用户分类 label/folder）。
     pub async fn tags(&self) -> AppResult<Vec<TagRef>> {
-        let r: TagListResponse =
-            self.get_json("/reader/api/0/tag/list?output=json").await?;
+        let r: TagListResponse = self.get_json("/reader/api/0/tag/list?output=json").await?;
         Ok(r.tags)
     }
 
@@ -327,8 +350,9 @@ impl GReaderClient {
             return Ok(Vec::new());
         }
         let form: Vec<(&str, String)> = ids.iter().map(|id| ("i", id.to_string())).collect();
-        let r: ItemContentsResponse =
-            self.post_form("/reader/api/0/stream/items/contents?output=json", &form).await?;
+        let r: ItemContentsResponse = self
+            .post_form("/reader/api/0/stream/items/contents?output=json", &form)
+            .await?;
         Ok(r.items)
     }
 
@@ -377,7 +401,8 @@ impl GReaderClient {
         if let Some(v) = ts {
             form.push(("ts", v.to_string()));
         }
-        self.post_form_text("/reader/api/0/mark-all-as-read", &form).await
+        self.post_form_text("/reader/api/0/mark-all-as-read", &form)
+            .await
     }
 
     /// 订阅（`ac=subscribe`，`s=feed/<绝对URL>`）。返回新 feed 的数字 id（若有）。
@@ -386,13 +411,15 @@ impl GReaderClient {
             ("ac", "subscribe".to_string()),
             ("s", format!("feed/{feed_url}")),
         ];
-        self.post_form_text("/reader/api/0/subscription/edit", &form).await
+        self.post_form_text("/reader/api/0/subscription/edit", &form)
+            .await
     }
 
     /// 快速订阅（自动发现 feed，等价旧 `/v1/feeds` 创建 + 幂等）。
     pub async fn quick_add(&self, feed_url: &str) -> AppResult<QuickAddResponse> {
         let form: Vec<(&str, String)> = vec![("quickadd", feed_url.to_string())];
-        self.post_form("/reader/api/0/subscription/quickadd", &form).await
+        self.post_form("/reader/api/0/subscription/quickadd", &form)
+            .await
     }
 
     /// 退订（`ac=unsubscribe`，`s=feed/<数字id>`）。
@@ -401,7 +428,8 @@ impl GReaderClient {
             ("ac", "unsubscribe".to_string()),
             ("s", format!("feed/{feed_numeric_id}")),
         ];
-        self.post_form_text("/reader/api/0/subscription/edit", &form).await
+        self.post_form_text("/reader/api/0/subscription/edit", &form)
+            .await
     }
 
     /// 编辑订阅（`ac=edit`，`s=feed/<数字id>`，可改标题 `t` 或移分类 `a`）。
@@ -421,13 +449,14 @@ impl GReaderClient {
         if let Some(a) = dest_label {
             form.push(("a", a.to_string()));
         }
-        self.post_form_text("/reader/api/0/subscription/edit", &form).await
+        self.post_form_text("/reader/api/0/subscription/edit", &form)
+            .await
     }
 }
 
 /* ============================================================
-   辅助：解析工具
-   ============================================================ */
+辅助：解析工具
+============================================================ */
 
 /// 从 `feed/42` 流 id 提取数字 id。
 pub fn parse_feed_numeric_id(stream_id: &str) -> Option<i64> {
@@ -458,8 +487,8 @@ pub fn has_tag(categories: &[String], tag_suffix: &str) -> bool {
 }
 
 /* ============================================================
-   集成测试入口（供 tests/ 复用）
-   ============================================================ */
+集成测试入口（供 tests/ 复用）
+============================================================ */
 
 #[doc(hidden)]
 pub fn client_login_url(base: &str) -> String {
@@ -467,8 +496,8 @@ pub fn client_login_url(base: &str) -> String {
 }
 
 /* ============================================================
-   单元测试（纯解析逻辑，无网络）
-   ============================================================ */
+单元测试（纯解析逻辑，无网络）
+============================================================ */
 
 #[cfg(test)]
 mod tests {
@@ -485,7 +514,10 @@ mod tests {
     #[test]
     fn parse_item_id_handles_both_formats() {
         // 长格式：tag:google.com,2005:reader/item/0000000000001675 → 十进制 5749
-        assert_eq!(parse_item_id("tag:google.com,2005:reader/item/0000000000001675"), Some(5749));
+        assert_eq!(
+            parse_item_id("tag:google.com,2005:reader/item/0000000000001675"),
+            Some(5749)
+        );
         // 十进制
         assert_eq!(parse_item_id("5749"), Some(5749));
         // 16 位十六进制（无前缀）

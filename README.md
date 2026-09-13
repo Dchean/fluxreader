@@ -1,114 +1,60 @@
 # FluxReader
 
-本地优先（Local-First）的 Windows 桌面 RSS 阅读器。Tauri 2 + Rust 后端 + React 19 前端，全部数据存于本机 SQLite，直连抓取订阅源，可选连接 Miniflux 服务端做双向同步，并支持 GitHub Gist / WebDAV 跨设备同步阅读状态。基于 [Papr](https://github.com/l0ng-ai/papr)（MIT）二次开发。
+本地优先的 Windows 桌面 RSS 客户端，使用 Tauri 2、Rust、React、TypeScript、Zustand 与 SQLite。现有核心能力包括五种内容布局、Google Reader / Fever 协议同步，以及 AI 摘要和翻译。
 
-> 本项目代码由纯 AI 古法生成——没有一滴人工代码，人工仅负责需求定义与验收。
+初始测试与构建基线已完成。项目按“管理 agent 负责规划、调度和独立验收，Claude Code 负责代码”的方式交接；低风险工作按授权自动推进，高风险、超限、合并与发布由用户确认。本次交接准备未启动编码批次，实际执行状态以 PROJECT 为准。
 
-## 功能特性
+## 从这里开始
 
-- **五种内容布局**：文章 / 社交 / 画廊 / 播客 / 通知，按订阅源或分类绑定布局
-- **直连抓取 + Miniflux 双轨**：本机直连源站（第一优先级），连接 Miniflux 后双向同步订阅关系与已读/收藏状态；「本机抓取 / 跟随服务端」两种同步模式
-- **跨设备状态同步**：GitHub Gist / WebDAV 同步已读/收藏状态（OR-合并，多端对齐）
-- **AI 增强**：OpenAI 兼容端点（DeepSeek/OpenAI/GLM 预设 + 自定义）流式摘要与翻译，结果缓存本地
-- **全文提取**：dom_smoothie Readability 智能全文 + og:image 首图，摘要型源自动提取
-- **虚拟滚动**：@tanstack/react-virtual，海量文章流畅滚动；可拖动调整列表/正文分栏宽度
-- **自定义右键菜单**：按上下文（文章卡片/订阅源/正文/空白）提供收藏/已读/复制/编辑/删除等操作
-- **图片防盗链代理**：白名单式防盗链图床走后端 fetch 转 data: URL
-- **播客播放**：内嵌音频/视频播放 + Windows SMTC 系统媒体控制
-- **OPML 导入导出**、全文搜索、键盘流（J/K/S/M）、开机自启、系统托盘、新文章通知
+- [交接入口](docs/HANDOFF.md)：如何在其他管理 agent 中开始，以及 Claude 的调用与验收方式。
+- [管理 agent 启动指令](docs/prompts/MANAGER-START.md)：复制到具备项目文件与终端能力的新会话。
+- [文档入口](docs/README.md)：事实、需求、架构、验证和流程的导航。
+- [项目状态](tasks/PROJECT.json)：当前阶段、用户决定和待批准动作。
+- [执行规则](AGENTS.md)：适用于不同 agent 的公共约定。
+- [任务入口](tasks/README.md)：当前交付、下一步任务和跨 agent 接手提示。
+- [初始基线](docs/BASELINE.md)：前端 8/8、Rust 95 项通过；格式检查失败，未运行范围明确记录。
 
-## 技术栈
+## 功能范围
 
-| 层 | 技术 |
-|----|------|
-| 应用壳 | Tauri 2.11（无边框窗口、WebView2、tray-icon、log / opener / autostart / window-state / single-instance / notification 插件） |
-| 后端 | Rust：rusqlite（bundled SQLite + WAL + FTS5）、feed-rs、ammonia、dom_smoothie、reqwest（rustls）、tokio |
-| 前端 | React 19 + TypeScript + Zustand（store 拆分 selector/types 层）+ @tanstack/react-virtual、Vite |
-| IPC | Tauri commands + `ipc::Channel`（AI 流式增量推送） |
+核心必须保留：文章、社交、画廊、播客、通知五布局；面向 FreshRSS / Miniflux 的 Google Reader / Fever 同步；AI 摘要和翻译。
 
-## 系统结构
+用户已确认保留 OPT-001～003、OPT-005～010：直连抓取、全文提取、OPML、音视频播放、桌面集成、搜索与快捷操作、图片与富媒体、个性化和缓存/去重能力。OPT-004 也保留，但 Gist/WebDAV 同步范围收敛为订阅源与客户端设置数据；允许同步服务地址、模型等非敏感配置，不同步 API Key、密码等敏感凭据。详见 [功能清单](docs/FEATURES.md)。
 
-```
-src-tauri/src/
-  db.rs                # 数据层：rusqlite_migration 迁移链 v1→v12、FTS5 外部内容表 + 触发器同步、
-                       #   参数化查询、智能去重（跨源 URL 查重）、缓存清理、账号数据隔离
-  ingestion.rs         # RSS/Atom 抓取解析（feed-rs）、Conditional GET（etag/last-modified/304）、
-                       #   失败退避状态机（fail_count → 5/5/30/120 分钟 next_retry_at）、无时间戳兜底
-  scheduler.rs         # 后台刷新（Semaphore 并发抓取）+ Miniflux 自动同步 + 文章状态自动同步
-  sync.rs              # Miniflux 双向同步：URL 碰撞合并、sync_queue 出队推送、feeds/states 两阶段、
-                       #   全量对账（未读数漂移收敛）、批量匹配映射（消除 N+1）、多源并发拉取
-  config_sync.rs       # 配置同步（GitHub Gist / WebDAV）：分类/订阅源/设置的上传下载
-  article_state_sync.rs# 文章状态同步（已读/收藏，OR-合并），复用 config_sync 的 Gist/WebDAV 通道
-  ai.rs                # OpenAI 兼容 SSE 流式消费：预设端点 + 自定义 baseUrl、逐 delta 抽取、8MiB 上限
-  opml.rs              # OPML 解析（tidy 修复裸 &）与构建、按 xml_url 去重
-  extraction.rs        # dom_smoothie Readability 全文提取 + og:image 首图（spawn_blocking 隔离）
-  sanitize.rs          # ammonia 白名单消毒 + 相对 URL 重写 + 惰性图片恢复 + 正文富媒体放行
-  credentials.rs       # 敏感凭据 DPAPI 加密（Windows CryptProtectData，非 Windows 回落明文）
-  github_auth.rs       # GitHub 设备流登录（配置同步的网页授权）
-  media.rs             # Windows SMTC 系统媒体控制线程（非 Windows 降级 inactive）
-  miniflux.rs          # Miniflux REST 客户端（对象/裸数组两种响应、enclosure 附件）
-  commands.rs          # 全部 IPC 命令 + 后端抓图（Referer 候选链防盗链兼容）
-  state.rs             # AppState：Arc<Mutex<Connection>>（锁不跨 .await）+ 共享 reqwest Client
+协议客户端存在不等于所有服务端、版本和操作均已通过验证，具体记录见 [接口与兼容性矩阵](docs/API.md)。
 
-src/
-  store.ts             # 全局状态机：导航/筛选/已读保留快照/播放器/AI 打字机/搜索锚定
-  store/selectors.ts   # 派生 selector（selectVisibleEntries 等）+ 布局/视图命名常量
-  store/types.ts       # AppState / SettingsState / ToastMessage 类型
-  components/          # Sidebar（订阅树+角标+失败源警示）/ Timeline（五布局卡片+虚拟滚动）/
-                       #   Reader（顶栏+阅读工具栏+正文灯箱+图片代理）/ PlayerBar / Overlays /
-                       #   ContextMenu（全局右键菜单，替换 WebView2 默认菜单）
-  lib/api.ts           # invoke 封装：Tauri 环境 → 后端；浏览器环境 → 回退演示数据
-  lib/imageProxy.ts    # 图片防盗链代理（HTML 内 img + 单张封面 URL）
-  lib/external.ts      # 外链统一拦截：仅放行 http(s) → 系统浏览器
+## 代码与文档
+
+| 路径 | 职责 |
+| --- | --- |
+| src/ | React 组件、Zustand 状态、IPC 封装与样式 |
+| src-tauri/src/ | Tauri 入口、Rust 业务、协议客户端与 SQLite 数据访问 |
+| src-tauri/tests/ | Rust 集成、迁移、回归及服务测试 |
+| tools/ | 现有前端逻辑回归和 mock 工具 |
+| docs/ | 产品边界、现状架构、基线、问题和流程 |
+| tasks/ | 项目状态、任务定义、看板与运行证据 |
+| .github/workflows/ | 当前 CI 和发布配置；本次没有修改 |
+
+[当前架构](docs/ARCHITECTURE.md)、[数据模型](docs/DATA-MODEL.md) 与 [关键流程](docs/USER-FLOWS.md) 对应已记录的源码基准，不冒充目标设计或运行验证。
+
+## 开发与检查入口
+
+以下是项目已有入口，由管理 agent 在任务范围内选择执行；不要把测试构建与真实应用/服务验收混淆：
+
+```text
+npm ci
+npm run tauri dev
+npm run build
+npm run lint
+npm run test:frontend
+npm run tauri build
 ```
 
-## 关键设计
+npm run build 包含 TypeScript 项目构建检查和 Vite 构建。npm run test:frontend 是 Node 中的前端状态回归，不是桌面 UI E2E。
 
-- **单写连接**：`Arc<Mutex<Connection>>` 串行化全部 SQL；HTTP 等待期间不持锁（三段式：锁内读 → 锁外网络 → 锁内写；同步/抓取/推送全部遵循）
-- **安全边界**：外部 HTML 入库即消毒（ammonia 白名单 + URL 重写 + iframe 域名白名单降级），前端 `dangerouslySetInnerHTML` 只渲染已消毒内容；AI 翻译产物入库前二次消毒；外链点击只放行 http(s)
-- **列表性能**：虚拟滚动（只渲染视口 + overscan 缓冲）、列表快照不含正文（选中时懒加载水合）、搜索锚定（`article_index` 窗口函数定位 + 代际守卫防竞态）
-- **已读语义**：打开 / 滚动到底 / 滚出列表三种触发；未读筛选下已读卡片原地变灰（会话级快照），切视图才移除
-- **AI 流式**：Rust 消费 SSE → `Channel<AiEvent>` 逐 delta 推前端 → 打字机渲染；完成后写缓存列，重复打开零重算；未配置时源级自动触发静默跳过
-- **同步一致性**：Miniflux 批量匹配映射（`sync_match_maps`）消除 N+1 查询；多源并发拉取；read-anywhere-wins 多端已读收敛；文章状态同步用 OR-合并（任一端已读即已读，不覆盖回未读）
-- **播放器**：store ↔ 单 `<audio>` 元素双向同步（store→element: play/rate/seek；element→store: timeupdate/metadata/ended）
-- **正文媒体**：直连源内嵌 video/audio 可播；YouTube/B 站等白名单 iframe 嵌入播放，其余嵌入内容降级为「在浏览器打开」外链
+Rust 与完整基线命令、哪些测试需要本地服务或真实账号，见 [TEST-PLAN](docs/TEST-PLAN.md)。不要将全部 ignored 测试作为无外部依赖的统一门禁。
 
-## 数据模型
-
-SQLite（`%APPDATA%\com.fluxreader.app\fluxreader.db`，WAL）：
-- `folders` / `feeds`（layout 绑定、auto_summary/translate 开关、退避字段、miniflux_id 映射、origin 来源标记）
-- `articles`（guid 唯一约束、enclosure、AI 产物列、url_norm 去重键、部分索引 `idx_articles_unread`）
-- `articles_fts`（FTS5 external content 表，靠触发器与 articles 同步；搜索用 LIKE 子串，此表保留作备用索引）
-- `settings`（键值：app_settings JSON / ai_config / miniflux 凭据 / 配置同步凭据）
-- `sync_queue`（离线变更队列，同步成功后出队）
-
-## 开发
-
-```bash
-npm install           # 前端依赖
-npm run tauri dev     # 开发模式（Vite 固定 5173 + cargo 热重建）
-npm run tauri build   # 生产构建 + 打包
-```
-
-环境：Node 20+、Rust stable、Windows 10/11（WebView2）。
-
-## 测试
-
-```bash
-cd src-tauri
-cargo test                # 单元测试 + 迁移测试
-cargo test -- --ignored   # e2e（内置 mock HTTP/Miniflux/AI 服务，真实 TCP listener）
-
-npx tsc --noEmit          # 前端类型检查
-```
-
-AI 链路可脱离真实 Key 端到端验证：
-
-```bash
-python tools/mock_ai_server.py 8123    # OpenAI 兼容 mock（/v1/models + SSE chat）
-# 设置 → AI服务 → 自定义，BaseURL 填 http://127.0.0.1:8123/v1
-```
+当前 CI 使用 Node 22；本机环境和 Rust 版本记录在 BASELINE。发布需要用户单独确认，见 [发布与回滚](docs/RELEASE-ROLLBACK.md)。
 
 ## License
 
-MIT —— 见 [LICENSE](LICENSE)。衍生自 [Papr](https://github.com/l0ng-ai/papr)，保留其版权声明。
+MIT，见 [LICENSE](LICENSE)。基于 [Papr](https://github.com/l0ng-ai/papr)（MIT）二次开发，保留其版权声明。

@@ -1,0 +1,320 @@
+{
+  "schema_version": 1,
+  "batch_id": "BATCH-001",
+  "run_id": "BATCH-001-final-20260913",
+  "recorded_by": "manager",
+  "status": "completed_pending_owner_review",
+  "source_commit": "6550a223d3e5fb4cae66b07af31fc35c5f1fd6a9",
+  "started_at_utc": "2026-09-13T07:31:56Z",
+  "completed_at_utc": "2026-09-13T08:45:00Z",
+
+  "role_split": {
+    "manager": "项目管理、风险判断、Note 审查、调度、独立验证、代码审查、基础验收、任务状态",
+    "code_writer": "Claude Code CLI"
+  },
+
+  "outcome_summary": "BATCH-001 跑满 3 个任务上限，TASK-004 / TASK-005 / TASK-006 全部 verified。修复轮消耗 0/3。三个任务均未合并、未发布。首个真实的『管理 agent → Claude Code 编码 → 独立验收』闭环已取得证据。",
+
+  "tasks": [
+    {
+      "id": "TASK-004",
+      "title": "清理前端回归脚本的三个未使用绑定",
+      "status": "verified",
+      "executor": "claude_code_cli",
+      "dispatch": {
+        "attempts_total": 2,
+        "attempt_1": "FAIL — 环境错误（--json-schema 拒绝 $schema 键），1.5 秒退出，0 产出，未修改文件，不计入预算",
+        "attempt_2": "SUCCESS — 55.2 秒，退出 0，num_turns=7，permission_denials=[]",
+        "run_directory": ".cache/runs/BATCH-001/TASK-004/attempt-1"
+      },
+      "changed_files": ["tools/frontend-regression.mjs"],
+      "diff_shape": "1 insertion, 4 deletions（净 -3 行，无新增逻辑）",
+      "manager_independent_verification": {
+        "npm run lint": "exit 0 — 警告 9 → 6；本任务范围内 3 条消失",
+        "npm run test:frontend": "exit 0 — 8/8，断言名称与顺序未变",
+        "npm run build": "exit 0",
+        "scope": "仅允许文件变化；受保护文件哈希未变",
+        "assertion_integrity": "check( 调用数 9 → 9 不变"
+      },
+      "acceptance": "PASS（4/4 条）",
+      "repair_rounds": 0,
+      "cost_usd_estimated": 0.325954
+    },
+    {
+      "id": "TASK-005",
+      "title": "将现有前端回归加入 CI",
+      "status": "verified",
+      "executor": "claude_code_cli",
+      "dispatch": {
+        "attempts_total": 1,
+        "attempt_1": "SUCCESS — 38.5 秒，退出 0，num_turns=7，permission_denials=[]",
+        "run_directory": ".cache/runs/BATCH-001/TASK-005/attempt-1"
+      },
+      "changed_files": [".github/workflows/ci.yml"],
+      "diff_shape": "3 insertions, 0 deletions（唯一改动）",
+      "added_step": {
+        "name": "Frontend regression (node state-machine checks)",
+        "run": "npm run test:frontend",
+        "position": "紧随 Build (tsc + vite) 之后、rust 作业之前"
+      },
+      "manager_independent_verification": {
+        "git diff --check": "exit 0",
+        "npm run lint": "exit 0",
+        "npm run test:frontend": "exit 0 — 8/8",
+        "npm run build": "exit 0",
+        "hard_constraints": [
+          "uses: 数量 5 → 5（无新增 action）PASS",
+          "permissions 块 0 → 0 PASS",
+          "continue-on-error / '|| true' / 'set +e' 均为 0 PASS",
+          "node-version 仍为 22 PASS",
+          "触发器 push/pull_request→main 未变 PASS",
+          "rust 作业未变 PASS"
+        ]
+      },
+      "acceptance": "PASS（本地 3/3；托管 CI 为 NOT_RUN，如实记录未伪称通过）",
+      "repair_rounds": 0,
+      "cost_usd_estimated": 0.17672925,
+      "hosted_ci_status": "NOT_RUN",
+      "residual_risk": "本地 Windows/Node 24 与 CI Ubuntu/Node 22 环境不同（ISSUE-010）；--loader 在 Node 22 的真实行为未知"
+    },
+    {
+      "id": "TASK-006",
+      "title": "以独立任务处理 Rust 格式差异",
+      "status": "verified",
+      "executor": "manager_mechanical_action",
+      "mechanical_action": {
+        "id": "ACTION-RUSTFMT-ALL",
+        "command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all",
+        "executed_by": "manager",
+        "exit_code": 0,
+        "worker_dispatched": false,
+        "note": "该操作是任务 JSON 预先定义的机械动作（requested_by: claude, executed_by: manager）；未新增任何未定义命令。"
+      },
+      "changed_files_count": 38,
+      "diff_shape": "38 files changed, 2751 insertions(+), 872 deletions(-)",
+      "manager_independent_verification": {
+        "cargo fmt --check": "exit 0 — 由 FAIL（38 文件）转为通过",
+        "cargo clippy --locked --all-targets -- -D warnings": "exit 0",
+        "cargo test --locked": "exit 0 — 81 passed / 0 failed / 23 ignored（与接手基线完全一致）",
+        "cargo test ... -- --ignored（6 个 target）": "exit 0 — 14 passed / 0 failed",
+        "git diff --check": "exit 0",
+        "allowlist_check": "38/38 精确匹配；清单外 0；清单内未变 0",
+        "semantic_integrity": {
+          "method": "对 38 文件分级归一化后比较 HEAD 与格式化后内容",
+          "whitespace_stripped": "36 文件不一致（rustfmt 增删尾随逗号/重排换行，预期内）",
+          "whitespace_and_commas_stripped": "16 文件不一致（超宽行块包裹，预期内）",
+          "identifier_sequence": "3 文件不一致（均为 use 声明按字母序重排）",
+          "identifier_multiset_sorted": "ALL IDENTICAL — 全部 38 文件无任何标识符增删",
+          "ignore_attributes": "23 → 23（未变）",
+          "cfg_attributes": "36 → 36（未变）"
+        }
+      },
+      "acceptance": "PASS（4/4 条）",
+      "repair_rounds": 0,
+      "model_invocations": 0,
+      "cost_usd": 0
+    }
+  ],
+
+  "acceptance_evidence": {
+    "frontend": {
+      "npm run lint": "exit 0；警告 9 → 6。剩余：技能副本 3（.agents/skills，不在任何任务范围）、Reader/Overlays hooks 3（非本批范围）",
+      "npm run test:frontend": "8/8 通过（接手基线、TASK-004 后、TASK-005 后共复跑多次，结果一致）",
+      "npm run build": "exit 0"
+    },
+    "rust": {
+      "cargo fmt --check": "接手时 FAIL（38 文件 / 528 分节）→ 现在 exit 0",
+      "cargo clippy --locked --all-targets -- -D warnings": "exit 0（格式化前后各一次）",
+      "cargo test --locked": "81 passed / 0 failed / 23 ignored（格式化前后完全一致）",
+      "cargo test -- --ignored（6 个指定 target）": "14 passed / 0 failed"
+    },
+    "ci": {
+      "local_commands": "全部通过",
+      "hosted_ci": "NOT_RUN — 从未运行，本批未伪称通过"
+    },
+    "baseline_recheck": "接手时独立复跑 6 项检查并记录于 docs/runs/BATCH-001-takeover.md；确认 TASK-002 报告未被夸大"
+  },
+
+  "what_was_not_verified": [
+    "托管 CI 从未运行（ISSUE-010）—— TASK-005 的 CI 变更只在本机 Node 24/Windows 验证",
+    "真实桌面 UI E2E 未运行（ISSUE-003）",
+    "真实 FreshRSS/Miniflux 服务兼容性未验证（ISSUE-007）；7 项真实服务测试仍未运行",
+    "2 项依赖外部本地 feed 服务的 ignored 测试未运行",
+    "OPT-004 的非敏感配置同步边界未实现（ISSUE-012 范围已定，实现未做）",
+    "lint 剩余 6 条警告未处理",
+    "TASK-002 报告中的安装包产物哈希未重算（本批不做打包）"
+  ],
+
+  "environment_issues_and_resolutions": [
+    {
+      "id": "BLOCKER-A",
+      "issue": "docs/contracts/worker-result.schema.json 的 $schema 键被本机 Claude Code 2.1.270 拒绝（--json-schema 直接报错）",
+      "resolution": "未修改受保护契约文件；改在每次派发的运行目录内生成去掉 $schema 键的本次运行副本",
+      "authority_basis": "docs/contracts/** 属 EXECUTION-POLICY.protected_from_worker，且不改它即可继续",
+      "residual": "仓库内契约文件仍与工具不兼容，建议后续单独立任务修复（A-3）"
+    },
+    {
+      "id": "BLOCKER-B",
+      "issue": "受限模式下真实模型调用返回 Not logged in；claude auth status 自报已登录但为自报值",
+      "resolution": "为受限调用增加 --settings，把用户既有 ~/.claude/settings.json 的 env 显式传入",
+      "authority_basis": [
+        "CLI help 原文：--restricted『ignores user, project and local settings files (managed settings and --settings still apply)』",
+        "CLAUDE-WORKER.md 第 45 行：restricted 忽略的设置须以运行级参数传入已选值，不得静默换型"
+      ],
+      "isolation_verified_intact": [
+        "bypassPermissions 仍被拒（实测 'Error: bypassPermissions not supported in restricted mode'）",
+        "Bash 仍不可用（实测模型回复无 Bash 工具）",
+        "工具白名单仍为 Read,Edit,Write,Glob,Grep"
+      ],
+      "credential_handling": "未读取或导出凭据明文；settings 文件仅在本机 .cache/ 运行目录，不随 Git 移交",
+      "evidence": "docs/runs/BATCH-001-env-unblock.json"
+    }
+  ],
+
+  "process_findings": [
+    {
+      "id": "F-0",
+      "severity": "manager_process_error_corrected",
+      "what": "TASK-004 的目标改动在管理 agent 接手前已存在于工作区（上一管理 agent 会话 2026-09-13T07:35:50Z 写入）。我起初把它当作普通未提交文件，并错误地把『已修好』的哈希 6F300509... 记为任务输入。",
+      "correction": "已回退该文件到 HEAD 使基线真实，并更正 TASK-004 的 ready_check 记录；证据链见 docs/runs/BATCH-001-takeover.md §5 F-0",
+      "justification_for_revert": "本批目标之一是取得可归因的委派闭环证据；直接接受既存改动会使该验证目标落空",
+      "reversibility": "既存改动内容已留档于 .cache/runs/BATCH-001/TASK-004/previously-existing-version.mjs（SHA-256 6F300509...）",
+      "outcome": "回退后由本轮 Claude 重新实现，产出与既存改动等价，且现在具备完整的 worker-result 与独立验收证据"
+    }
+  ],
+
+  "budget": {
+    "max_tasks_per_batch": 3,
+    "tasks_started": 3,
+    "tasks_verified": 3,
+    "max_repair_rounds_per_task": 3,
+    "repair_rounds_used": {"TASK-004": 0, "TASK-005": 0, "TASK-006": 0},
+    "max_task_wall_minutes": 90,
+    "max_task_wall_minutes_observed": 15,
+    "financial_cap_enabled": false,
+    "model_invocations": 2,
+    "estimated_cost_usd": 0.50268325,
+    "cost_note": "CLI 自报估算值，非账单依据；TASK-006 为机械操作无模型调用",
+    "within_budget": true,
+    "no_reset_used": "未重建任务或批次、未改批次 ID 来重置任何计数"
+  },
+
+  "workspace_changes": {
+    "product_test_ci_code_written_by_claude": [
+      "tools/frontend-regression.mjs（TASK-004）",
+      ".github/workflows/ci.yml（TASK-005）"
+    ],
+    "written_by_manager_mechanical_action": [
+      "src-tauri/** 38 个 .rs 文件（TASK-006，ACTION-RUSTFMT-ALL）"
+    ],
+    "manager_meta_files": [
+      ".agents/notes/proposed/simplification/2026-09-13-frontend-regression-unused-bindings.md",
+      ".agents/notes/proposed/ci/2026-09-13-frontend-regression-in-ci.md",
+      ".agents/notes/proposed/process/2026-09-13-rust-format-unification.md",
+      "docs/runs/BATCH-001-takeover.md",
+      "docs/runs/BATCH-001-env-unblock.json",
+      "tasks/runs/BATCH-001-final-20260913.json",
+      "tasks/items/TASK-004.json、TASK-005.json、TASK-006.json",
+      "tasks/batches/BATCH-001.json",
+      "tasks/PROJECT.json、BACKLOG.md、IN_PROGRESS.md、DONE.md",
+      ".cache/runs/BATCH-001/**（原始 CLI 输出、日志、快照、派发脚本）"
+    ],
+    "protected_files_touched": "none — AGENTS.md / CLAUDE.md / .oxlintrc.json / package.json / package-lock.json / src-tauri/Cargo.toml / src-tauri/Cargo.lock / .github/workflows/release.yml 的 SHA-256 均与派发前一致",
+    "pre_existing_uncommitted_not_from_this_batch": ["README.md"]
+  },
+
+  "notes_status": {
+    "created": 3,
+    "status": "proposed",
+    "reason": "AGENTS.md 要求落地时随同一次代码提交转为 implemented；本仓库尚未提交，故保持 proposed 并在本报告说明。三个 Note 的落地理由均已成立。",
+    "manager_review": "low risk notes reviewed and approved by manager"
+  },
+
+  "pending_owner_approval": [
+    {
+      "id": "A-1",
+      "item": "合并 BATCH-001 的变更",
+      "scope": [
+        "tools/frontend-regression.mjs",
+        ".github/workflows/ci.yml",
+        "src-tauri/** 38 个 .rs 文件"
+      ],
+      "note": "合并前建议一并决定存量未提交文件（README.md、AGENTS.md、CLAUDE.md、docs/**、tasks/**、.agents/**）如何处置",
+      "requires_owner_confirmation": true
+    },
+    {
+      "id": "A-2",
+      "item": "取得托管 CI 的真实运行证据",
+      "reason": "TASK-005 的 CI 变更只在本机验证；托管 CI 从未运行，环境存在差异（ISSUE-010）",
+      "requires_owner_confirmation": true
+    },
+    {
+      "id": "A-3",
+      "item": "修复 docs/contracts/worker-result.schema.json 的 $schema 键",
+      "reason": "该键与本机 Claude Code 2.1.270 不兼容；本批以运行期副本绕过，仓库文件缺陷仍在",
+      "requires_owner_confirmation": true
+    }
+  ],
+
+  "next_action": "等待用户审阅本批结果并决定 A-1 / A-2 / A-3。本批已达任务上限，追加任务或开新批次需用户明确授权；管理 agent 不自行重开批次。",
+  "merge_status": "NOT_MERGED",
+  "release_status": "NOT_RELEASED",
+  "created_at_utc": "2026-09-13T08:50:00Z",
+
+  "budget_corrections_20260913": {
+    "corrected_at_utc": "2026-09-13T14:04:57Z",
+    "corrected_by": "接手管理 agent（BATCH-001 审查收尾，独立审查 R-01/R-02）",
+    "nature": "本节为追加更正。上方原 budget 段按原样保留；以下统计自原始进程记录与 stdout 证据重建，修正遗漏与口径缺失。不改变预算结论：仍未超任务数、修复轮或 90 分钟上限（用户未设费用上限）。",
+    "model_invocations_rebuilt": {
+      "successful_coding_calls": 3,
+      "coding_calls_detail": [
+        {
+          "task": "TASK-004（上一会话运行 TASK-004-20260913T073100Z，attempt-4）",
+          "cost_usd": 0.30165875,
+          "evidence": ".cache/runs/TASK-004-20260913T073100Z/worker.attempt-4.stdout.json（最后写入 07:36:03Z）"
+        },
+        {
+          "task": "TASK-004（本会话重新派发，attempt-1）",
+          "cost_usd": 0.325954,
+          "evidence": ".cache/runs/BATCH-001/TASK-004/attempt-1/claude.stdout.json（进程 07:49:33.18Z–07:50:28.40Z，55.2s）"
+        },
+        {
+          "task": "TASK-005（attempt-1）",
+          "cost_usd": 0.17672925,
+          "evidence": ".cache/runs/BATCH-001/TASK-005/attempt-1/claude.stdout.json（进程 07:51:31.13Z–07:52:09.62Z，38.5s）"
+        }
+      ],
+      "successful_diagnostic_calls": 3,
+      "diagnostic_calls_detail": [
+        { "probe": "probe-restricted-settings", "cost_usd": 0.010118 },
+        { "probe": "probe-shell2", "cost_usd": 0.08216975 },
+        { "probe": "probe-shell3", "cost_usd": 0.10136475 }
+      ],
+      "failed_calls_zero_cost": ["probe-control", "probe-noschema", "TASK-004 attempt-2", "TASK-004 attempt-3"],
+      "total_estimated_cost_usd": 0.9979945,
+      "original_reported_total_usd": 0.50268325,
+      "discrepancy_explanation": "原报告只统计本会话 2 次成功编码调用，遗漏上一会话的成功编码调用（R-01）与本会话 3 次成功诊断探测。费用为 CLI 自报估算值，非账单依据。"
+    },
+    "time_corrections": {
+      "method": "时间以 worker-process.json 进程记录与文件 mtime 为准；不从运行 ID 推导。原报告部分时间为记录撰写时间，不是动作发生时间。",
+      "task_004_successful_dispatch": {
+        "original_summary_start": "2026-09-13T08:15:00Z",
+        "actual_process_start_utc": "2026-09-13T07:49:33.1775447Z",
+        "actual_process_finish_utc": "2026-09-13T07:50:28.4047845Z",
+        "process_duration_seconds": 55.2,
+        "evidence": ".cache/runs/BATCH-001/TASK-004/attempt-1/worker-process.json"
+      },
+      "task_005_successful_dispatch": {
+        "original_summary_start": "2026-09-13T08:22:00Z",
+        "actual_process_start_utc": "2026-09-13T07:51:31.1331302Z",
+        "actual_process_finish_utc": "2026-09-13T07:52:09.6207819Z",
+        "process_duration_seconds": 38.5,
+        "evidence": ".cache/runs/BATCH-001/TASK-005/attempt-1/worker-process.json"
+      },
+      "task_006": "机械操作（cargo fmt），无模型调用；执行与验证时间以任务记录所引日志为准。",
+      "wall_minutes_caveat": "原记录 wall_minutes=4/5 只覆盖派发进程时长，未含首次尝试（TASK-004 首次派发 07:42:56Z，上一会话成功调用完成于 07:36:03Z）、诊断、验证与审查。证据未显示任一任务超过 90 分钟墙钟或超过 3 轮修复；更正不改变预算合规结论。",
+      "record_time_vs_action_time_note": "env-unblock 记录（08:05:00Z）与 TASK-004 回退字段（08:10:00Z）是记录撰写时间；实际动作顺序由进程记录与哈希链固定（回退先于 07:49:33Z 的成功重派发，否则当前脚本哈希不可能是 6F300509...）。"
+    },
+    "no_reset_used": "本次更正未重建任务或批次、未改任何计数来源；原 budget 段保留。"
+  }
+}

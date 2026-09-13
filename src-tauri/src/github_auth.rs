@@ -36,8 +36,8 @@ const POLL_FLOOR_SECS: u64 = 3;
 const DEVICE_TTL_SECS: u64 = 870;
 
 /* ============================================================
-   IPC 返回结构
-   ============================================================ */
+IPC 返回结构
+============================================================ */
 
 /// 第一步（发起登录）返回：前端打开 verification_uri 并展示 user_code。
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -58,8 +58,8 @@ pub struct GitHubAccount {
 }
 
 /* ============================================================
-   内部逻辑（与命令分离，便于测试注入 base URL）
-   ============================================================ */
+内部逻辑（与命令分离，便于测试注入 base URL）
+============================================================ */
 
 /// 设备流第一步：向 GitHub 请求设备码。
 /// 返回 (user_code, device_code, verification_uri, interval)。
@@ -81,7 +81,9 @@ async fn device_code_request(
     if !status.is_success() {
         /* 字符级截断：字节切片在多字节字符上会 panic（历史 bug 模式 A） */
         let head: String = text.chars().take(200).collect();
-        return Err(AppError::network(format!("GitHub 设备码请求失败：HTTP {status}：{head}")));
+        return Err(AppError::network(format!(
+            "GitHub 设备码请求失败：HTTP {status}：{head}"
+        )));
     }
     let v: serde_json::Value = serde_json::from_str(&text)?;
     let user_code = v
@@ -99,7 +101,11 @@ async fn device_code_request(
         .and_then(|c| c.as_str())
         .unwrap_or("https://github.com/login/device")
         .to_string();
-    let interval = v.get("interval").and_then(|i| i.as_u64()).unwrap_or(5).max(POLL_FLOOR_SECS);
+    let interval = v
+        .get("interval")
+        .and_then(|i| i.as_u64())
+        .unwrap_or(5)
+        .max(POLL_FLOOR_SECS);
     Ok((user_code, device_code, verification_uri, interval))
 }
 
@@ -126,7 +132,9 @@ async fn token_poll_once(
     let text = resp.text().await?;
     if !status.is_success() {
         let head: String = text.chars().take(200).collect();
-        return Err(AppError::network(format!("GitHub 轮询失败：HTTP {status}：{head}")));
+        return Err(AppError::network(format!(
+            "GitHub 轮询失败：HTTP {status}：{head}"
+        )));
     }
     let v: serde_json::Value = serde_json::from_str(&text)?;
     if let Some(tok) = v.get("access_token").and_then(|t| t.as_str()) {
@@ -143,7 +151,11 @@ async fn token_poll_once(
 }
 
 /// 用 token 拉 /user 验证并取登录名（顺带确认 token 可用）。
-async fn fetch_account(http: &reqwest::Client, api_base: &str, token: &str) -> AppResult<GitHubAccount> {
+async fn fetch_account(
+    http: &reqwest::Client,
+    api_base: &str,
+    token: &str,
+) -> AppResult<GitHubAccount> {
     let resp = http
         .get(format!("{api_base}/user"))
         .header("User-Agent", "FluxReader")
@@ -153,7 +165,9 @@ async fn fetch_account(http: &reqwest::Client, api_base: &str, token: &str) -> A
         .await?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(AppError::network(format!("GitHub 账户验证失败：HTTP {status}（token 无效或无 gist 权限）")));
+        return Err(AppError::network(format!(
+            "GitHub 账户验证失败：HTTP {status}（token 无效或无 gist 权限）"
+        )));
     }
     let v: serde_json::Value = resp.json().await?;
     let login = v
@@ -165,8 +179,8 @@ async fn fetch_account(http: &reqwest::Client, api_base: &str, token: &str) -> A
 }
 
 /* ============================================================
-   IPC 命令
-   ============================================================ */
+IPC 命令
+============================================================ */
 
 /// 发起 GitHub 登录：返回 user_code + verification_uri。
 /// 前端负责用 opener 打开网页。client_id 参数为空时用 gh CLI 公开 ID
@@ -195,19 +209,25 @@ pub async fn github_login_start(
             }
         }
     }
-    let override_cid = client_id.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+    let override_cid = client_id
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
     let cid = override_cid.unwrap_or_else(|| GH_CLI_CLIENT_ID.to_string());
     let (user_code, device_code, verification_uri, interval) =
         device_code_request(&state.http, GITHUB_BASE, &cid).await?;
     /* device_code 与 interval 存内存态：轮询命令从 AppState 取（单窗口单流程足够；
-       不落库——设备码是一次性短命凭证） */
+    不落库——设备码是一次性短命凭证） */
     let device_flow = DeviceFlowState {
         client_id: cid,
         device_code,
         started_at: std::time::Instant::now(),
     };
     *state.github_flow.lock().await = Some(device_flow);
-    Ok(DeviceLoginStart { user_code, verification_uri, interval })
+    Ok(DeviceLoginStart {
+        user_code,
+        verification_uri,
+        interval,
+    })
 }
 
 /// 轮询授权状态：批准则取 token → 验证 /user → 存凭据（Gist 后端）→ 返回账户。
@@ -225,7 +245,9 @@ pub async fn github_login_poll(state: State<'_, AppState>) -> AppResult<Option<G
         *state.github_flow.lock().await = None;
         return Err(AppError::network("登录等待超时（设备码过期），请重新发起"));
     }
-    let token = match token_poll_once(&state.http, GITHUB_BASE, &flow.client_id, &flow.device_code).await? {
+    let token = match token_poll_once(&state.http, GITHUB_BASE, &flow.client_id, &flow.device_code)
+        .await?
+    {
         Some(t) => t,
         None => return Ok(None), // 仍在等待用户在浏览器授权
     };
@@ -241,7 +263,11 @@ pub async fn github_login_poll(state: State<'_, AppState>) -> AppResult<Option<G
     };
     {
         let conn = state.db.lock().await;
-        db::set_setting(&conn, "config_sync_credentials", &serde_json::to_string(&cred)?)?;
+        db::set_setting(
+            &conn,
+            "config_sync_credentials",
+            &serde_json::to_string(&cred)?,
+        )?;
         /* 记录实际使用的 client_id：默认 gh CLI ID 或用户覆盖值（排障用） */
         db::set_setting(&conn, "github_oauth_client_id", &flow.client_id)?;
         /* OAuth 换来的凭据标注来源：断开后 UI 能提示「已断开 GitHub 登录」 */
@@ -285,8 +311,8 @@ pub async fn github_login_disconnect(state: State<'_, AppState>) -> AppResult<()
 }
 
 /* ============================================================
-   内存态：进行中的设备流（发起 → 轮询完成期间持有）
-   ============================================================ */
+内存态：进行中的设备流（发起 → 轮询完成期间持有）
+============================================================ */
 
 #[derive(Debug, Clone)]
 pub struct DeviceFlowState {
@@ -298,8 +324,8 @@ pub struct DeviceFlowState {
 pub type SharedDeviceFlow = Arc<Mutex<Option<DeviceFlowState>>>;
 
 /* ============================================================
-   测试后门（tests/github_auth_e2e.rs）：注入 mock base URL
-   ============================================================ */
+测试后门（tests/github_auth_e2e.rs）：注入 mock base URL
+============================================================ */
 
 #[doc(hidden)]
 pub async fn device_code_request_for_test(
@@ -321,6 +347,10 @@ pub async fn token_poll_once_for_test(
 }
 
 #[doc(hidden)]
-pub async fn fetch_account_for_test(http: &reqwest::Client, api_base: &str, token: &str) -> AppResult<GitHubAccount> {
+pub async fn fetch_account_for_test(
+    http: &reqwest::Client,
+    api_base: &str,
+    token: &str,
+) -> AppResult<GitHubAccount> {
     fetch_account(http, api_base, token).await
 }

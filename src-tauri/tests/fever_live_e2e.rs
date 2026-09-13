@@ -41,7 +41,11 @@ async fn fever_auth_and_subscriptions() {
         tags.iter().all(|t| t.r#type.as_deref() == Some("folder")),
         "Fever groups 映射为 folder 类型"
     );
-    println!("Fever 认证通过：订阅 {} 个，分类 {} 个", subs.len(), tags.len());
+    println!(
+        "Fever 认证通过：订阅 {} 个，分类 {} 个",
+        subs.len(),
+        tags.len()
+    );
 }
 
 #[tokio::test]
@@ -106,7 +110,10 @@ async fn fever_mark_roundtrip() {
     // 收藏 → 验证
     client.mark_starred(&[id]).await.unwrap();
     let starred = client.items_with_ids(&[id]).await.unwrap();
-    assert!(has_tag(&starred[0].categories, "/com.google/starred"), "应已收藏");
+    assert!(
+        has_tag(&starred[0].categories, "/com.google/starred"),
+        "应已收藏"
+    );
 
     // 恢复原状（未读 + 原星标）
     client.mark_unread(&[id]).await.unwrap();

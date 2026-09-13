@@ -80,7 +80,11 @@ impl AiConfig {
                     .map(|(_, u, _)| u.to_string())
                     .unwrap_or_else(|| "https://api.deepseek.com".to_string())
             });
-        Ok(AiConfig { api_key, model, base_url })
+        Ok(AiConfig {
+            api_key,
+            model,
+            base_url,
+        })
     }
 
     /// 已解析的模型名（key 不外泄）。
@@ -163,7 +167,11 @@ enum LineOutcome {
 }
 
 /// 处理一行 SSE：取 data: 载荷，识别错误，推送增量。
-fn handle_sse_line(line: &str, full: &mut String, sink: &mut DeltaSink<'_>) -> AppResult<LineOutcome> {
+fn handle_sse_line(
+    line: &str,
+    full: &mut String,
+    sink: &mut DeltaSink<'_>,
+) -> AppResult<LineOutcome> {
     let Some(data) = line.trim().strip_prefix("data:") else {
         return Ok(LineOutcome::Continue);
     };
@@ -198,7 +206,10 @@ async fn consume_sse(resp: Response, sink: &mut DeltaSink<'_>) -> AppResult<Chat
     } else {
         let status = resp.status();
         let detail = resp.text().await.unwrap_or_default();
-        return Err(AppError::new("aiStream", format!("AI API {status}: {detail}")));
+        return Err(AppError::new(
+            "aiStream",
+            format!("AI API {status}: {detail}"),
+        ));
     };
 
     let mut buf: Vec<u8> = Vec::new();
@@ -215,7 +226,10 @@ async fn consume_sse(resp: Response, sink: &mut DeltaSink<'_>) -> AppResult<Chat
             match handle_sse_line(&line, &mut full, &mut *sink)? {
                 LineOutcome::Continue => {}
                 LineOutcome::ChannelClosed => {
-                    return Ok(ChatOutcome { text: full, completed: false });
+                    return Ok(ChatOutcome {
+                        text: full,
+                        completed: false,
+                    });
                 }
             }
         }
@@ -226,11 +240,17 @@ async fn consume_sse(resp: Response, sink: &mut DeltaSink<'_>) -> AppResult<Chat
         match handle_sse_line(&line, &mut full, &mut *sink)? {
             LineOutcome::Continue => {}
             LineOutcome::ChannelClosed => {
-                return Ok(ChatOutcome { text: full, completed: false });
+                return Ok(ChatOutcome {
+                    text: full,
+                    completed: false,
+                });
             }
         }
     }
-    Ok(ChatOutcome { text: full, completed: true })
+    Ok(ChatOutcome {
+        text: full,
+        completed: true,
+    })
 }
 
 #[cfg(test)]

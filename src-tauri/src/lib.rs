@@ -7,8 +7,8 @@ pub mod db;
 pub mod error;
 pub mod extraction;
 pub mod fever;
-pub mod greader;
 pub mod github_auth;
+pub mod greader;
 pub mod ingestion;
 pub mod media;
 pub mod opml;
@@ -46,7 +46,9 @@ async fn read_close_to_tray(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Con
 }
 
 /// 首次关闭询问是否已展示过（app_settings.closePromptShown，缺省 false）
-async fn read_close_prompt_shown(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> bool {
+async fn read_close_prompt_shown(
+    db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+) -> bool {
     let conn = db.lock().await;
     crate::db::get_setting(&conn, "app_settings")
         .ok()
@@ -60,7 +62,11 @@ async fn read_close_prompt_shown(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite
 /// remember=true → 持久化 closeToTray + closePromptShown（此后不再问）；
 /// remember=false → 仅本次生效（下次关闭再问）。
 #[tauri::command]
-async fn resolve_close(app: tauri::AppHandle, action: String, remember: bool) -> Result<(), String> {
+async fn resolve_close(
+    app: tauri::AppHandle,
+    action: String,
+    remember: bool,
+) -> Result<(), String> {
     let to_tray = action == "tray";
     let db = app.state::<state::AppState>().db.clone();
     if remember {
@@ -75,7 +81,7 @@ async fn resolve_close(app: tauri::AppHandle, action: String, remember: bool) ->
         v["closePromptShown"] = serde_json::json!(true);
         let _ = crate::db::set_setting(&conn, "app_settings", &v.to_string());
         /* 设置页的开关镜像同步（前端 bootstrapSettings 恢复，当前会话里
-           事件通知前端刷新——见 close-resolved 事件） */
+        事件通知前端刷新——见 close-resolved 事件） */
     }
     if let Some(win) = app.get_webview_window("main") {
         if to_tray {
@@ -115,10 +121,7 @@ pub fn run() {
             }
 
             // 数据库放应用数据目录（LocalAppData/FluxReader/fluxreader.db）
-            let app_dir: PathBuf = app
-                .path()
-                .app_data_dir()
-                .expect("app data dir unavailable");
+            let app_dir: PathBuf = app.path().app_data_dir().expect("app data dir unavailable");
             std::fs::create_dir_all(&app_dir)?;
             let db_path = app_dir.join("fluxreader.db");
             let conn = db::open(&db_path).expect("failed to open sqlite database");
@@ -165,7 +168,11 @@ pub fn run() {
                 })
                 .on_tray_icon_event(|tray, event| {
                     // 左键单击托盘图标 → 显示主窗口
-                    if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, button_state: tauri::tray::MouseButtonState::Up, .. } = event
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
                     {
                         show_main_window(tray.app_handle());
                     }
@@ -200,12 +207,9 @@ pub fn run() {
                             })
                         };
                         let _ = app.emit("close-ask", ());
-                        let acked = tokio::time::timeout(
-                            std::time::Duration::from_secs(10),
-                            rx,
-                        )
-                        .await
-                        .is_ok();
+                        let acked = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+                            .await
+                            .is_ok();
                         app.unlisten(unlisten);
                         if !acked {
                             log::warn!("close-ask 无前端确认，10s 兜底按默认（托盘）执行");
@@ -253,45 +257,45 @@ pub fn run() {
             // 设置
             commands::get_setting,
             commands::set_setting,
-        // Miniflux 同步
-        commands::sync_test,
-        commands::sync_save,
-        commands::sync_phase,
-        commands::sync_disconnect,
-        commands::sync_local_feeds,
-        commands::sync_now,
-        commands::sync_status,
-        // 缓存清理
-        commands::cache_cleanup,
-        // 首次关闭询问
-        resolve_close,
-        // AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi）
-        commands::save_ai_config,
-        commands::get_ai_config,
-        commands::ai_list_models,
-        commands::ai_summarize,
-        commands::ai_translate,
-        // 全文提取
-        commands::extract_fulltext,
-        // 图片代理（防盗链兼容）
-        commands::fetch_image,
-        // OPML 导入导出
-        commands::opml_import,
-        commands::opml_export,
-        // SMTC 系统媒体控制
-        media::media_update_full,
-        media::media_stop,
-        // 配置同步（Gist / WebDAV）
-        config_sync::config_sync_save_credentials,
-        config_sync::config_sync_upload,
-        config_sync::config_sync_download,
-        config_sync::config_sync_apply,
-        config_sync::config_sync_status,
-        // GitHub 设备流登录
-        github_auth::github_login_start,
-        github_auth::github_login_poll,
-        github_auth::github_login_status,
-        github_auth::github_login_disconnect,
+            // Miniflux 同步
+            commands::sync_test,
+            commands::sync_save,
+            commands::sync_phase,
+            commands::sync_disconnect,
+            commands::sync_local_feeds,
+            commands::sync_now,
+            commands::sync_status,
+            // 缓存清理
+            commands::cache_cleanup,
+            // 首次关闭询问
+            resolve_close,
+            // AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi）
+            commands::save_ai_config,
+            commands::get_ai_config,
+            commands::ai_list_models,
+            commands::ai_summarize,
+            commands::ai_translate,
+            // 全文提取
+            commands::extract_fulltext,
+            // 图片代理（防盗链兼容）
+            commands::fetch_image,
+            // OPML 导入导出
+            commands::opml_import,
+            commands::opml_export,
+            // SMTC 系统媒体控制
+            media::media_update_full,
+            media::media_stop,
+            // 配置同步（Gist / WebDAV）
+            config_sync::config_sync_save_credentials,
+            config_sync::config_sync_upload,
+            config_sync::config_sync_download,
+            config_sync::config_sync_apply,
+            config_sync::config_sync_status,
+            // GitHub 设备流登录
+            github_auth::github_login_start,
+            github_auth::github_login_poll,
+            github_auth::github_login_status,
+            github_auth::github_login_disconnect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

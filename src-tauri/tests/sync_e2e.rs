@@ -51,12 +51,25 @@ async fn miniflux_sync_end_to_end() {
         published_at: Some(chrono::Utc::now().to_rfc3339()),
         source: "direct".into(),
     };
-    let (local_article_id, _) = db::upsert_article_with_feed(&conn, local_feed_id, &local_entry, false).unwrap();
+    let (local_article_id, _) =
+        db::upsert_article_with_feed(&conn, local_feed_id, &local_entry, false).unwrap();
 
     // 远端同 URL 条目（已读 + 收藏状态 —— Miniflux 是状态权威）
-    server.add_entry(10, "http://127.0.0.1:8765/post/1", "Remote version of same article", "read", true);
+    server.add_entry(
+        10,
+        "http://127.0.0.1:8765/post/1",
+        "Remote version of same article",
+        "read",
+        true,
+    );
     // 远端另一条目（本地没有 —— 走兜底路径不涉及，状态 Pull 也不该建新条目，因为无 URL 匹配）
-    server.add_entry(11, "http://example.com/only-remote", "Remote only article", "unread", false);
+    server.add_entry(
+        11,
+        "http://example.com/only-remote",
+        "Remote only article",
+        "unread",
+        false,
+    );
 
     // ---------- ① 连接 + 全量同步 ----------
     db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
@@ -65,14 +78,20 @@ async fn miniflux_sync_end_to_end() {
 
     let http = app_lib::ingestion::build_client(10);
     drop(conn);
-    let report = sync::sync_now(&db, &http).await.expect("sync should succeed");
+    let report = sync::sync_now(&db, &http)
+        .await
+        .expect("sync should succeed");
     let conn = db.lock().await;
     println!("sync report: pushed_states={} pushed_feeds={} pulled_feeds={} pulled_entries={} merged={} fallback={}",
         report.pushed_states, report.pushed_feeds, report.pulled_feeds, report.pulled_entries, report.merged_states, report.fallback_entries);
 
     // URL 碰撞合并：本地 feed 绑定了远端 feed id 10
     let bound: Option<i64> = conn
-        .query_row("SELECT remote_id FROM feeds WHERE id = ?1", [local_feed_id], |r| r.get(0))
+        .query_row(
+            "SELECT remote_id FROM feeds WHERE id = ?1",
+            [local_feed_id],
+            |r| r.get(0),
+        )
         .ok()
         .flatten();
     assert_eq!(bound, Some(10), "local feed must bind remote feed id 10");
@@ -90,7 +109,11 @@ async fn miniflux_sync_end_to_end() {
 
     // 远端分类建到本地
     let remote_cat: Option<i64> = conn
-        .query_row("SELECT id FROM folders WHERE name = 'Remote Cat'", [], |r| r.get(0))
+        .query_row(
+            "SELECT id FROM folders WHERE name = 'Remote Cat'",
+            [],
+            |r| r.get(0),
+        )
         .ok();
     assert!(remote_cat.is_some(), "remote category created locally");
 
@@ -99,7 +122,13 @@ async fn miniflux_sync_end_to_end() {
         .query_row(
             "SELECT is_read, is_starred, remote_id FROM articles WHERE id = ?1",
             [local_article_id],
-            |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)? != 0, r.get(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)? != 0,
+                    r.get::<_, i64>(1)? != 0,
+                    r.get(2)?,
+                ))
+            },
         )
         .unwrap();
     assert!(merged.0, "read state pulled from miniflux");
@@ -134,13 +163,30 @@ async fn miniflux_sync_end_to_end() {
 
     // ---------- ③ 兜底：直连失败的源从 Miniflux 拉条目 ----------
     // 把 local_feed 标记为直连失败 + 绑定远端 feed，远端加一条本地没有的条目
-    db::set_feed_fetch_state(&conn, local_feed_id, true, Some("connection refused"), None, None).unwrap();
-    server.add_entry(10, "http://127.0.0.1:8765/new-fallback-entry", "Fallback Entry From Miniflux", "unread", false);
+    db::set_feed_fetch_state(
+        &conn,
+        local_feed_id,
+        true,
+        Some("connection refused"),
+        None,
+        None,
+    )
+    .unwrap();
+    server.add_entry(
+        10,
+        "http://127.0.0.1:8765/new-fallback-entry",
+        "Fallback Entry From Miniflux",
+        "unread",
+        false,
+    );
     drop(conn);
 
     let report3 = sync::sync_now(&db, &http).await.expect("third sync");
     let conn = db.lock().await;
-    println!("fallback report: fallback_entries={}", report3.fallback_entries);
+    println!(
+        "fallback report: fallback_entries={}",
+        report3.fallback_entries
+    );
 
     let fallback: Option<(String, String)> = conn
         .query_row(
@@ -155,7 +201,10 @@ async fn miniflux_sync_end_to_end() {
 
     // 队列清空
     let queue_left = db::take_sync_queue(&conn).unwrap().len();
-    assert_eq!(queue_left, 0, "sync queue must be drained after successful push");
+    assert_eq!(
+        queue_left, 0,
+        "sync queue must be drained after successful push"
+    );
 
     // ---------- ④ 复活防护：跨源同 URL entry 不得覆盖本地状态 ----------
     // 场景：本地文章（feed 10 的 entry）已读；服务端另一源（feed 11）
@@ -163,7 +212,11 @@ async fn miniflux_sync_end_to_end() {
     // 跨源 entry 无权写状态（旧版会按 URL 兜底把未读覆盖回来）
     // 注意：② 推过 unread（mock 真实回写），own entry 现在服务端是 unread；
     // 未读合并只认绑定 entry 是合法语义，所以先把 own 恢复 read（手机读过）
-    conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [local_article_id]).unwrap();
+    conn.execute(
+        "UPDATE articles SET is_read = 1 WHERE id = ?1",
+        [local_article_id],
+    )
+    .unwrap();
     drop(conn);
     {
         let mut es = server.entries.lock().unwrap();
@@ -173,9 +226,17 @@ async fn miniflux_sync_end_to_end() {
     }
     // 模拟跨源同 URL entry（feed 11 = remote-only feed，未读态）
     let cross_url = "http://127.0.0.1:8765/post/1"; // 与本地文章同 URL
-    server.add_entry(11, cross_url, "Cross-feed duplicate of read article", "unread", false);
+    server.add_entry(
+        11,
+        cross_url,
+        "Cross-feed duplicate of read article",
+        "unread",
+        false,
+    );
 
-    let _report4 = sync::sync_now(&db, &http).await.expect("fourth sync (cross-feed guard)");
+    let _report4 = sync::sync_now(&db, &http)
+        .await
+        .expect("fourth sync (cross-feed guard)");
     let conn = db.lock().await;
 
     let (still_read, binding): (bool, i64) = conn
@@ -185,8 +246,14 @@ async fn miniflux_sync_end_to_end() {
             |r| Ok((r.get::<_, i64>(0)? != 0, r.get(1)?)),
         )
         .unwrap();
-    assert!(still_read, "cross-feed unread entry must NOT resurrect the read article");
-    assert_eq!(binding, mf_id, "binding must stay on the original (own-feed) entry");
+    assert!(
+        still_read,
+        "cross-feed unread entry must NOT resurrect the read article"
+    );
+    assert_eq!(
+        binding, mf_id,
+        "binding must stay on the original (own-feed) entry"
+    );
 
     // 同源 entry（feed 10）状态变化仍正常合并（防护不影响正常路径）
     // —— 通过 mock 更新既有 entry 状态为 unread 再同步，本地应跟随
@@ -197,16 +264,31 @@ async fn miniflux_sync_end_to_end() {
         }
     }
     drop(conn);
-    let _report5 = sync::sync_now(&db, &http).await.expect("fifth sync (same-feed still merges)");
+    let _report5 = sync::sync_now(&db, &http)
+        .await
+        .expect("fifth sync (same-feed still merges)");
     let conn = db.lock().await;
     let now_read: bool = conn
-        .query_row("SELECT is_read FROM articles WHERE id = ?1", [local_article_id], |r| r.get::<_, i64>(0).map(|v| v != 0))
+        .query_row(
+            "SELECT is_read FROM articles WHERE id = ?1",
+            [local_article_id],
+            |r| r.get::<_, i64>(0).map(|v| v != 0),
+        )
         .unwrap();
-    assert!(!now_read, "own-feed entry status change still merges (guard doesn't break normal path)");
+    assert!(
+        !now_read,
+        "own-feed entry status change still merges (guard doesn't break normal path)"
+    );
 
     // 连接测试
-    let (msg, username) = sync::test_connection("greader", &server.url(), "mockuser", "mockpass", &http).await.unwrap();
-    assert!(msg.contains("mockuser"), "test_connection returns username: {msg}");
+    let (msg, username) =
+        sync::test_connection("greader", &server.url(), "mockuser", "mockpass", &http)
+            .await
+            .unwrap();
+    assert!(
+        msg.contains("mockuser"),
+        "test_connection returns username: {msg}"
+    );
     assert_eq!(username, "mockuser");
 
     let _ = std::fs::remove_file(&tmp);

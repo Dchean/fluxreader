@@ -146,14 +146,17 @@ pub fn decrypt_secret(stored: &str) -> String {
 fn dpapi_encrypt(plain: &[u8]) -> Result<Vec<u8>, String> {
     use windows::core::w;
     use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
+        CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
 
     let in_blob = CRYPT_INTEGER_BLOB {
         cbData: plain.len() as u32,
         pbData: plain.as_ptr() as *mut u8,
     };
-    let mut out_blob = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+    let mut out_blob = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
     // szdatadescr 描述串（应用名，绑定到密文元数据，非必须但便于识别）
     let desc = w!("FluxReader");
     unsafe {
@@ -169,12 +172,11 @@ fn dpapi_encrypt(plain: &[u8]) -> Result<Vec<u8>, String> {
         if let Err(e) = res {
             return Err(format!("CryptProtectData 失败: {e}"));
         }
-        let bytes =
-            std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
+        let bytes = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
         // 释放 DPAPI 分配的内存（HLOCAL 句柄）
-        let _ = windows::Win32::Foundation::LocalFree(Some(
-            windows::Win32::Foundation::HLOCAL(out_blob.pbData as *mut core::ffi::c_void),
-        ));
+        let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
+            out_blob.pbData as *mut core::ffi::c_void,
+        )));
         Ok(bytes)
     }
 }
@@ -182,14 +184,17 @@ fn dpapi_encrypt(plain: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(windows)]
 fn dpapi_decrypt(cipher: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
 
     let in_blob = CRYPT_INTEGER_BLOB {
         cbData: cipher.len() as u32,
         pbData: cipher.as_ptr() as *mut u8,
     };
-    let mut out_blob = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+    let mut out_blob = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
     let mut desc: windows::core::PWSTR = windows::core::PWSTR(std::ptr::null_mut());
     unsafe {
         let res = CryptUnprotectData(
@@ -204,11 +209,10 @@ fn dpapi_decrypt(cipher: &[u8]) -> Result<Vec<u8>, String> {
         if let Err(e) = res {
             return Err(format!("CryptUnprotectData 失败: {e}"));
         }
-        let bytes =
-            std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
-        let _ = windows::Win32::Foundation::LocalFree(Some(
-            windows::Win32::Foundation::HLOCAL(out_blob.pbData as *mut core::ffi::c_void),
-        ));
+        let bytes = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
+        let _ = windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(
+            out_blob.pbData as *mut core::ffi::c_void,
+        )));
         // 释放描述串（CryptUnprotectData 分配）
         if !desc.0.is_null() {
             let _ = windows::Win32::Foundation::LocalFree(Some(
@@ -277,7 +281,11 @@ mod tests {
         #[cfg(not(windows))]
         assert_eq!(n1, 0, "非 Windows 无 DPAPI，迁移跳过");
         let stored: String = conn
-            .query_row("SELECT value FROM settings WHERE key='miniflux_token'", [], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM settings WHERE key='miniflux_token'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         // 平台分支：Windows 上应为密文（dpapi: 前缀），非 Windows 保持明文。
         // 两个分支都要引用 stored，避免 Linux（cfg(windows)=false）下 stored 未使用
