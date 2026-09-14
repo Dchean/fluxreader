@@ -138,6 +138,17 @@
         "workflow"
       ],
       "source": "User decision 2026-09-14 (this session): widen budget to 180 minutes per task and 6 tasks per batch; add workflow-kit/ and .workbuddy/ to .gitignore; start the first pilot only after adjusting scope/gates."
+    },
+    {
+      "id": "DEC-bb38199e4cc14e448082a603e62b4064",
+      "issuer": "owner",
+      "status": "accepted",
+      "recorded_at_utc": "2026-09-14T13:36:13.140291Z",
+      "statement": "本项目的代码编写改由当前 agent（总控同一上下文）直接进行，不再调用 Claude Code CLI；后续所有编码沿用此方式。因编码与审查同处一个上下文，独立审查不再可行，review_mode 由 independent_required 改为 self_review_allowed，审查结论将明确标注为自审。此变更偏离旧 EXECUTION-POLICY 的 product_code_needs_independent_review=true，属所有者明确指示下的降级；缓解措施：四个必需门禁（fmt / clippy / 测试通过数≥105 / db.rs 根无实现体）由总控在冻结候选上独立执行并留原始日志，代码差异由总控在任务冻结后逐项审查。",
+      "scope": [
+        "workflow"
+      ],
+      "source": "User instruction 2026-09-14 (this session): start the pilot, but do the coding yourself instead of the CLI coder; all subsequent coding is done by the current agent."
     }
   ]
 }

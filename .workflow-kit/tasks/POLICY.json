@@ -4,7 +4,8 @@
     "status": "approved",
     "decision_ids": [
       "DEC-9873537950da450da003e9bb04006117",
-      "DEC-bd3656d1472d4800be99d43e5064b164"
+      "DEC-bd3656d1472d4800be99d43e5064b164",
+      "DEC-bb38199e4cc14e448082a603e62b4064"
     ]
   },
   "project_type": null,
@@ -15,7 +16,7 @@
     },
     "coder": {
       "agent": "coder",
-      "harness": "claude-code-cli"
+      "harness": "current_agent"
     },
     "reviewer": {
       "agent": "reviewer",
@@ -23,18 +24,18 @@
     }
   },
   "role_fusion": {
-    "mode": "manager-worker"
+    "mode": "single-agent-multi-role"
   },
   "responsibilities": {
     "product": "manager",
     "architecture": "manager",
     "design": "manager",
-    "frontend": "coder",
-    "backend": "coder",
-    "implementation": "coder",
+    "frontend": "manager",
+    "backend": "manager",
+    "implementation": "manager",
     "testing": "manager",
-    "visual_review": "reviewer",
-    "review": "reviewer",
+    "visual_review": "manager",
+    "review": "manager",
     "delivery": "manager"
   },
   "capabilities": {
@@ -56,7 +57,7 @@
     "release": "ask"
   },
   "review": {
-    "mode": "independent_required"
+    "mode": "self_review_allowed"
   },
   "ui": {
     "mode": "existing"
