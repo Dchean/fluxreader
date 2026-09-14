@@ -11,7 +11,7 @@
 | ISSUE-005 | 文档 / P1 | 旧 README 的版本、互斥类型、模块名称与源码不同；config_sync 中状态文件常量未证明完整文章状态同步 | README 已修订（BATCH-001/002 合并）；源码内声明性注释已于 BATCH-005 对齐事实（TASK-018，grep 复核 article_state_sync 残留为 0） | 已解决（注释与声明层面） |
 | ISSUE-006 | 测试隔离 / P1 | 普通测试跳过 23 项，指定 target 后补跑 14 项且通过；仍有 7 项真实服务、2 项外部本地 fixture 未运行 | 保持明确目标列表和服务边界；不使用统一 --ignored 冒充无外部依赖门禁 | 已按计划实测，剩余 9 项未运行 |
 | ISSUE-007 | 兼容性 / P1 | 两协议相关单元/本地 mock 检查已运行；真实 Miniflux/FreshRSS 服务未测 | 兼容组合、版本和操作能力需确认后实测；本机 mock 通过不等于真实服务器兼容 | 待产品确认与实测 |
-| ISSUE-008 | 架构 / P2 | db.rs 注释说 SQL 集中；commands.rs、sync.rs 中存在 query_row/execute | M2 试点（BATCH-005，TASK-017）已将 commands.rs 的 13 处直接 SQL 全部收敛至 db.rs 类型化函数（grep 归零，96/0/23 回归通过）；sync.rs 的 17 处为后续整理任务（M2 处置方案已列） | 试点已解决 commands.rs 部分；sync.rs 待后续 |
+| ISSUE-008 | 架构 / P2 | db.rs 注释说 SQL 集中；commands.rs、sync.rs 中存在 query_row/execute | 已全部收敛：commands.rs 的 13 处（BATCH-005，TASK-017）与 sync.rs 的 17 处（BATCH-007，TASK-022，merge 0ebd904）直接 SQL 均移至 db.rs 类型化函数；2026-09-14 实测两文件 `execute(|query_row(|prepare(|query_map(` 计数均为 0，db.rs 为 132 处 | 已解决（SQL 边界收敛完成）；db.rs 内部模块化列为 TASK-023 |
 | ISSUE-009 | 职责 / P2 | store.ts、SettingsModal.tsx、commands.rs、sync.rs、db.rs 聚合多种职责 | 是候选调查区域；文件长本身不是重写证据，需结合依赖和变更风险 | 待深入分析 |
 | ISSUE-010 | 环境 / P1 | 本次实际使用 Windows build 26200、Node 24.19.0、Rust 1.98.1；CI 前端为 Ubuntu/Node 22，Rust 配置 stable | 本次不是实际 CI 运行，也未证明最低 Rust 1.80；后续需收敛并验证环境 | 已记录真实环境，差异待处理 |
 | ISSUE-011 | 并行隔离 / P2 | ai_e2e、sync_e2e 等仍使用固定临时库名；本轮为各命令设置本次运行专用 TEMP/TMP，Rust 测试命令串行 | BATCH-004（TASK-015）已将全部测试临时库改为进程 ID+纳秒唯一路径（std 方案，无新依赖），连续两轮全量测试通过；测试对 Tauri/全局状态依赖低（M2 分析确认） | 已解决 |
