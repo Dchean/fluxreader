@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-023 · db.rs 内部模块化（db/ 领域子模块，对外路径不变）
 
-**状态**：verified
+**状态**：done
 
 **目标**：把当前 3516 行的 src-tauri/src/db.rs 拆分为 db.rs（模块根：子模块声明 + pub use 再导出）加 db/ 领域子模块（按现有函数分组，如 migrations / folders / feeds / articles / search / settings / sync_queue / dedup / tests），函数体逐字移动，使 crate::db:: 的全部既有调用路径零变化。这是渐进重构的首个试点：先验证“大文件按领域拆分”可行且旧行为不变，再决定是否扩大到其他模块。
 
