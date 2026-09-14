@@ -108,24 +108,33 @@
       "timeout_seconds": 1800
     },
     {
-      "id": "cargo-test",
-      "program": "cargo",
+      "id": "cargo-test-baseline",
+      "program": "{python}",
       "args": [
-        "test",
-        "--manifest-path",
-        "src-tauri/Cargo.toml",
-        "--locked"
+        "-c",
+        "import re,subprocess,sys\nr=subprocess.run(['cargo','test','--manifest-path','src-tauri/Cargo.toml','--locked'],capture_output=True,text=True)\nout=r.stdout or ''\nsys.stdout.write(out[-6000:])\nsys.stderr.write((r.stderr or '')[-2000:])\nif r.returncode!=0:\n    sys.exit(r.returncode if 0 < r.returncode < 256 else 2)\nn=sum(int(x) for x in re.findall(r'test result: ok\\. (\\d+) passed',out))\nprint('TOTAL_PASSED='+str(n)+' BASELINE=105')\nsys.exit(0 if n>=105 else 3)\n"
       ],
       "cwd": ".",
       "required": true,
       "timeout_seconds": 2400
+    },
+    {
+      "id": "db-root-no-impl",
+      "program": "{python}",
+      "args": [
+        "-c",
+        "import re,sys\nsrc=open('src-tauri/src/db.rs',encoding='utf-8').read()\npat=re.compile(r'^\\s*(pub(\\([^)]*\\))?\\s+)?(async\\s+)?(unsafe\\s+)?(const\\s+)?fn\\s',re.M)\nhits=pat.findall(src)\nprint('fn_definitions_in_db_root='+str(len(hits)))\nsys.exit(1 if hits else 0)\n"
+      ],
+      "cwd": ".",
+      "required": true,
+      "timeout_seconds": 120
     }
   ],
   "input": {
     "manifest": ".workflow-kit/tasks/evidence/TASK-023-input-02ff0e46f37543c298df3309c76412f1.json",
     "digest": "01949edd62b6799bb071be47a62eb43a2f399762921e3909bf8a2f10fe3309ee",
     "source_revision": null,
-    "definition_digest": "322e3dd9d98ca887b65b397956a85cf76730f989c27fb24de0f48fb39311222f"
+    "definition_digest": "5ecd36f63050a3eecdfc53ec5c77f8ff5f71abc741b3bc17ff901887b534f013"
   },
   "budget": {
     "started_at_utc": null,

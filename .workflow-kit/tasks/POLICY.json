@@ -3,7 +3,8 @@
   "approval": {
     "status": "approved",
     "decision_ids": [
-      "DEC-9873537950da450da003e9bb04006117"
+      "DEC-9873537950da450da003e9bb04006117",
+      "DEC-bd3656d1472d4800be99d43e5064b164"
     ]
   },
   "project_type": null,
@@ -69,8 +70,8 @@
   },
   "budget": {
     "max_repair_rounds": 3,
-    "max_task_wall_minutes": 90,
-    "max_tasks_per_batch": 3,
+    "max_task_wall_minutes": 180,
+    "max_tasks_per_batch": 6,
     "max_concurrent_workers": 1,
     "financial": {
       "mode": "none",

@@ -127,6 +127,17 @@
           "independent_context": true
         }
       }
+    },
+    {
+      "id": "DEC-bd3656d1472d4800be99d43e5064b164",
+      "issuer": "owner",
+      "status": "accepted",
+      "recorded_at_utc": "2026-09-14T13:30:57.937818Z",
+      "statement": "2026-09-14 追加决定：试点预算放宽为每任务 180 分钟、每批 6 个任务（沿用 batch_rollover=allowed 与 financial.mode=none 自动续批）；workflow-kit/ 与 .workbuddy/ 加入 .gitignore、不入库；首个试点在调整范围/门禁之后才启动。",
+      "scope": [
+        "workflow"
+      ],
+      "source": "User decision 2026-09-14 (this session): widen budget to 180 minutes per task and 6 tasks per batch; add workflow-kit/ and .workbuddy/ to .gitignore; start the first pilot only after adjusting scope/gates."
     }
   ]
 }

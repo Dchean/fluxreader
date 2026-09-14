@@ -26,3 +26,7 @@ tmp/
 # ---- Python 编译缓存（工作流脚本）----
 __pycache__/
 *.pyc
+
+# ---- 工作流启动源包与本地记忆（不入库）----
+workflow-kit/
+.workbuddy/
