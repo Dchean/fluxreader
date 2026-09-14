@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "把当前 3516 行的 src-tauri/src/db.rs 拆分为 db.rs（模块根：子模块声明 + pub use 再导出）加 db/ 领域子模块（按现有函数分组，如 migrations / folders / feeds / articles / search / settings / sync_queue / dedup / tests），函数体逐字移动，使 crate::db:: 的全部既有调用路径零变化。这是渐进重构的首个试点：先验证“大文件按领域拆分”可行且旧行为不变，再决定是否扩大到其他模块。",
   "non_goals": [
     "不改变任何函数签名、行为、SQL 文本或锁范围",
@@ -157,9 +157,11 @@
     "candidate_digest": "9ff76a089bca50a886e17ff88293818cdae8db418bc3c57a77e4c15a8c169391",
     "verification_run": "RUN-84d97d3dab0f4626810b73e1501aeb1d",
     "review_run": "RUN-c069f640cd7f46878e35640e213178d1",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-05762c12ec004c42aa72b24118770575-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-05762c12ec004c42aa72b24118770575"
+    ],
+    "merge_ref": "main@fdcf9a2 (direct push; CI run 34857358195 conclusion=success)"
   },
   "snapshot_paths": [
     "src-tauri/src/db.rs",
