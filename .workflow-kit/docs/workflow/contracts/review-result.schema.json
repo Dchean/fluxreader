@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task_id", "candidate_digest", "verdict", "summary", "findings", "ui_review"],
+  "properties": {
+    "task_id": {"type": "string"},
+    "candidate_digest": {"type": "string"},
+    "verdict": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED"]},
+    "summary": {"type": "string"},
+    "findings": {"type": "array", "items": {"type": "string"}},
+    "ui_review": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["contract_ref", "checked_states", "evidence_files"],
+          "properties": {
+            "contract_ref": {"type": "string"},
+            "checked_states": {"type": "array", "items": {"type": "string"}},
+            "evidence_files": {"type": "array", "items": {"type": "string"}}
+          }
+        }
+      ]
+    }
+  }
+}

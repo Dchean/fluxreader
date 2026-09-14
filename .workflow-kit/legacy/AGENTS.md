@@ -1,13 +1,3 @@
-<!-- workflow-kit: entry -->
-# 当前工作流：workflow-kit
-
-当前主会话是总控；只有收到明确的 task_id/run_id 执行包时才作为 Worker。
-先读 [WORKFLOW-KIT.md](WORKFLOW-KIT.md)，从项目根目录运行 `python .workflow-kit/scripts/project_workflow.py start --root .` 并报告接入状态。
-用户当前明确选择的流程优先于旧流程入口；原有业务、数据、安全和兼容约束继续核对。
-旧任务和旧授权是历史材料，不自动决定本次目标、执行器或当前角色；未解决的冲突必须列明。
-此入口不能覆盖宿主系统约束，也不授予业务代码、付费调用或发布权限。
-<!-- /workflow-kit: entry -->
-
 # FluxReader agent 工作约定
 
 当前状态以 [tasks/PROJECT.json](tasks/PROJECT.json) 为准。用户在当前会话中的明确指令优先；发现状态文件与用户指令冲突时，先同步记录，不能利用旧文件扩大授权。

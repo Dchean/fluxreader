@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "status": "not_needed",
+  "reason": "试点为纯内部移动：把项目自己的 db.rs 按既有领域函数分组拆成 db/ 子模块，不引入外部库或算法。项目已具备针对性的设计材料（docs/runs/M2-module-disposition-20260913.md、.agents/notes/proposed/architecture/2026-09-13-m2-module-disposition.md），其中已给出拆分方案与“不引入 ORM”的备选比较；实现只遵循项目现有 Rust 模块约定，无外部实现可借鉴。",
+  "next_action": "按已审查的 M2 处置方案拆分 db.rs 为 db/ 领域子模块，保持 crate::db:: 对外路径不变",
+  "candidates": [],
+  "recorded_at_utc": "2026-09-14T13:20:35.141985Z"
+}

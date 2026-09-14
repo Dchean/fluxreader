@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "workflow_kit": "workflow-kit",
+  "name": "fluxreader",
+  "kind": "refactor",
+  "stage": "delivery",
+  "current_task": null,
+  "current_batch": "BATCH-666c68b8ae4746c19cddee300a37d635",
+  "ui_preview_task": null,
+  "policy": ".workflow-kit/tasks/POLICY.json",
+  "handoff": ".workflow-kit/docs/HANDOFF.md",
+  "created_at_utc": "2026-09-14T12:56:55.416444Z"
+}

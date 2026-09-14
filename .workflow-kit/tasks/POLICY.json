@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "approval": {
+    "status": "approved",
+    "decision_ids": [
+      "DEC-9873537950da450da003e9bb04006117"
+    ]
+  },
+  "project_type": null,
+  "roles": {
+    "manager": {
+      "agent": "manager",
+      "harness": "current_agent"
+    },
+    "coder": {
+      "agent": "coder",
+      "harness": "claude-code-cli"
+    },
+    "reviewer": {
+      "agent": "reviewer",
+      "harness": "current_agent"
+    }
+  },
+  "role_fusion": {
+    "mode": "manager-worker"
+  },
+  "responsibilities": {
+    "product": "manager",
+    "architecture": "manager",
+    "design": "manager",
+    "frontend": "coder",
+    "backend": "coder",
+    "implementation": "coder",
+    "testing": "manager",
+    "visual_review": "reviewer",
+    "review": "reviewer",
+    "delivery": "manager"
+  },
+  "capabilities": {
+    "file_read_write": true,
+    "terminal": true,
+    "process_control": true,
+    "independent_context": true
+  },
+  "authority": {
+    "documentation": true,
+    "baseline": true,
+    "code": true,
+    "dependencies": false,
+    "ci": false,
+    "commit": "allowed",
+    "push": "allowed",
+    "pull_request": "allowed",
+    "merge": "allowed",
+    "release": "ask"
+  },
+  "review": {
+    "mode": "independent_required"
+  },
+  "ui": {
+    "mode": "existing"
+  },
+  "recovery": {
+    "network_backoff_seconds": [
+      5,
+      15
+    ],
+    "max_cli_call_seconds": 600
+  },
+  "budget": {
+    "max_repair_rounds": 3,
+    "max_task_wall_minutes": 90,
+    "max_tasks_per_batch": 3,
+    "max_concurrent_workers": 1,
+    "financial": {
+      "mode": "none",
+      "amount_usd": null,
+      "scope": "batch"
+    },
+    "batch_rollover": "allowed"
+  },
+  "interaction_style": {
+    "question_format": "options_based",
+    "max_questions_per_round": 3,
+    "max_options_per_question": 4,
+    "always_include_other_option": true,
+    "show_time_impact": true,
+    "show_risk_level": true,
+    "provide_recommendation": true,
+    "note": "所有用户选择都使用选项式提问（选项+其他），减少文字输入"
+  },
+  "execution": {
+    "worker_argv": [],
+    "reviewer_argv": [],
+    "model": null,
+    "allow_non_git": false
+  },
+  "high_risk_requires_owner": true
+}

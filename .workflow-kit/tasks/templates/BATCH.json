@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "BATCH-000",
+  "status": "planned",
+  "task_ids": [],
+  "approval_decision_ids": [],
+  "created_at_utc": null,
+  "closed_at_utc": null
+}
