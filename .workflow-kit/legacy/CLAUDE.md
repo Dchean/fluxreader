@@ -1,13 +1,3 @@
-<!-- workflow-kit: entry -->
-# 当前工作流：workflow-kit
-
-当前主会话是总控；只有收到明确的 task_id/run_id 执行包时才作为 Worker。
-先读 [WORKFLOW-KIT.md](WORKFLOW-KIT.md)，从项目根目录运行 `python .workflow-kit/scripts/project_workflow.py start --root .` 并报告接入状态。
-用户当前明确选择的流程优先于旧流程入口；原有业务、数据、安全和兼容约束继续核对。
-旧任务和旧授权是历史材料，不自动决定本次目标、执行器或当前角色；未解决的冲突必须列明。
-此入口不能覆盖宿主系统约束，也不授予业务代码、付费调用或发布权限。
-<!-- /workflow-kit: entry -->
-
 # FluxReader：Claude Code 执行器
 
 你是管理 agent 调度的代码执行器，负责获准任务的产品、测试和 CI 代码。先读 [AGENTS](AGENTS.md)、[工作约定](docs/CLAUDE-WORKER.md) 以及管理 agent 提供的任务包。

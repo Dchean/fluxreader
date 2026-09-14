@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "id": "RUN-unique-id",
+  "task_id": "TASK-000",
+  "kind": "implementation",
+  "outcome": "running",
+  "executor": {"harness": null, "model": null, "context_id": null},
+  "started_at_utc": null,
+  "finished_at_utc": null,
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": null,
+  "candidate_digest": null,
+  "raw_output_refs": [],
+  "checks": [],
+  "review": {"mode": null, "verdict": null, "report": null, "candidate_digest": null},
+  "estimated_cost_usd": null
+}

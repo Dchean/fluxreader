@@ -1,0 +1,21 @@
+{
+  "id": "TASK-001",
+  "title": "",
+  "kind": "implementation",
+  "retry_safe": false,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "objective": "",
+  "requirement_refs": [],
+  "reference_ids": [],
+  "decision_refs": [],
+  "acceptance": [],
+  "non_goals": [],
+  "dependencies": [],
+  "risk": {"level": "low", "decision_ids": []},
+  "snapshot_paths": [],
+  "allowed_paths": [],
+  "protected_paths": [],
+  "gates": []
+}

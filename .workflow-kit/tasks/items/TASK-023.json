@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "id": "TASK-023",
+  "title": "db.rs 内部模块化（db/ 领域子模块，对外路径不变）",
+  "kind": "refactor",
+  "retry_safe": false,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "把当前 3516 行的 src-tauri/src/db.rs 拆分为 db.rs（模块根：子模块声明 + pub use 再导出）加 db/ 领域子模块（按现有函数分组，如 migrations / folders / feeds / articles / search / settings / sync_queue / dedup / tests），函数体逐字移动，使 crate::db:: 的全部既有调用路径零变化。这是渐进重构的首个试点：先验证“大文件按领域拆分”可行且旧行为不变，再决定是否扩大到其他模块。",
+  "non_goals": [
+    "不改变任何函数签名、行为、SQL 文本或锁范围",
+    "不改变 lib.rs 的 mod db 声明方式（db.rs 根文件与 db/ 子目录共存）",
+    "不移动不属于 db 的代码",
+    "不引入新依赖",
+    "不做 db 以外的模块拆分（sync.rs 分层、commands.rs 命令组拆分、store.ts 拆 slice 均不在本任务范围）"
+  ],
+  "requirement_refs": [
+    "docs/runs/M2-module-disposition-20260913.md",
+    ".agents/notes/proposed/architecture/2026-09-13-m2-module-disposition.md",
+    "docs/FEATURES.md",
+    "docs/ISSUES.md"
+  ],
+  "reference_ids": [],
+  "decision_refs": [
+    ".agents/notes/proposed/architecture/2026-09-13-m2-module-disposition.md",
+    "docs/runs/M2-module-disposition-20260913.md"
+  ],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/db.rs",
+      "src-tauri/src/db/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "cargo test 全量通过，通过数不少于基线 105 项（TASK-022 记录 105/0/23）",
+    "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings 退出 0",
+    "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check 退出 0",
+    "db.rs 根文件不再包含函数实现体，仅保留模块声明与 pub use 再导出",
+    "crate::db:: 既有调用路径零变化：lib.rs、commands.rs、sync.rs、scheduler.rs、ingestion.rs、config_sync.rs 等不得被修改",
+    "拆分前后 db 模块公开符号集合一致（管理 agent 对照函数签名清单）",
+    "不改变任何函数签名、SQL 语义、锁纪律与调用时序；不引入新依赖；无数据迁移"
+  ],
+  "gates": [
+    {
+      "id": "cargo-fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "required": true,
+      "timeout_seconds": 300
+    },
+    {
+      "id": "cargo-clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--locked",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": ".",
+      "required": true,
+      "timeout_seconds": 1800
+    },
+    {
+      "id": "cargo-test",
+      "program": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--locked"
+      ],
+      "cwd": ".",
+      "required": true,
+      "timeout_seconds": 2400
+    }
+  ],
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-023-input-02ff0e46f37543c298df3309c76412f1.json",
+    "digest": "01949edd62b6799bb071be47a62eb43a2f399762921e3909bf8a2f10fe3309ee",
+    "source_revision": null,
+    "definition_digest": "322e3dd9d98ca887b65b397956a85cf76730f989c27fb24de0f48fb39311222f"
+  },
+  "budget": {
+    "started_at_utc": null,
+    "deadline_at_utc": null,
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-666c68b8ae4746c19cddee300a37d635",
+  "run_ids": [],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/sync.rs",
+    "src-tauri/src/scheduler.rs",
+    "src-tauri/src/ingestion.rs",
+    "src-tauri/src/config_sync.rs",
+    "src-tauri/tests"
+  ]
+}

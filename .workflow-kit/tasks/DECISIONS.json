@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "decisions": [
+    {
+      "id": "DEC-9873537950da450da003e9bb04006117",
+      "issuer": "owner",
+      "status": "accepted",
+      "recorded_at_utc": "2026-09-14T13:20:26.123738Z",
+      "statement": "渐进重构 FluxReader：以单个模块为试点，按领域把大文件拆分为内聚子模块，用真实测试证明旧行为不变并观察维护收益，再决定是否扩大。首个试点为 db.rs 内部模块化（沿用旧队列 TASK-023 的身份与范围）。保留 FEATURES.md 已确认的核心能力与 OPT-001~010 全部能力，不缩减功能。",
+      "scope": [
+        "workflow"
+      ],
+      "source": "User decision 2026-09-14 (this session): choose incremental refactoring; first pilot = db.rs internal modularization (legacy TASK-023); migrate TASK-023..029 into the new workflow preserving identity and budget; carry over DEC-013 merge authorization (autonomous merge only for CI-green verified candidates; release still needs separate owner confirmation).",
+      "confirmed_brief": {
+        "goal": "渐进重构 FluxReader：以单个模块为试点，按领域把大文件拆分为内聚子模块，用真实测试证明旧行为不变并观察维护收益，再决定是否扩大。首个试点为 db.rs 内部模块化（沿用旧队列 TASK-023 的身份与范围）。保留 FEATURES.md 已确认的核心能力与 OPT-001~010 全部能力，不缩减功能。",
+        "audience": "FluxReader 的维护者（用户本人）与后续接手的 agent；终端用户是桌面 RSS 客户端使用者，其可观察行为必须保持不变。",
+        "acceptance": [
+          "试点 TASK-023 完成后：cargo test 全量通过，且通过数不少于基线 105 项（TASK-022 记录 105/0/23）",
+          "试点 TASK-023 完成后：cargo clippy --locked --all-targets -- -D warnings 退出 0；cargo fmt --all -- --check 退出 0",
+          "db.rs 根文件不再包含函数实现体（仅保留模块声明与 pub use 再导出）；crate::db:: 既有调用路径零改动",
+          "拆分前后 db 模块公开符号集合一致，且未发现可复现的行为差异（管理 agent 独立对照）",
+          "不改变对外行为、接口、数据、配置与 UI；不引入新依赖；不做数据迁移；不访问真实数据库或真实账号",
+          "以证据（变更定位成本、回归面、修复轮数）判断维护收益是否出现；证据不足时收窄或停止，不为了流程凑任务",
+          "旧队列 TASK-023~029 迁入新流程管理，保留原任务 ID、身份与预算，不重建任务绕过计数"
+        ],
+        "non_goals": [
+          "不重写架构、不更换技术栈（不引入 ORM、不替换 Zustand）",
+          "不做数据库结构或数据迁移；不处理旧数据兼容（DEC-004 仅免除兼容要求，不授权删除真实数据）",
+          "不改变 UI 行为与视觉，不做界面改版",
+          "不引入新依赖或大版本升级，不改 CI 门禁",
+          "不缩减 FEATURES.md 已确认的核心与 OPT-001~010 能力",
+          "本阶段不处理未决产品问题 Q-COMPAT-001 / Q-BEHAVIOR-001 / Q-QUALITY-001"
+        ],
+        "compatibility": "保持 src/、src-tauri/、tools/ 现有目录结构；不改变任何函数签名、SQL 语义、锁纪律（锁内读写、锁外 HTTP）、IPC 契约、配置与 UI 行为；不引入新依赖；不做数据或数据库迁移；不访问真实应用数据库，不使用真实账号运行同步测试。",
+        "legacy_review": {
+          "reviewed_paths": [
+            "AGENTS.md",
+            "CLAUDE.md",
+            "tasks/PROJECT.json",
+            "tasks/EXECUTION-POLICY.json",
+            "docs/HANDOFF.md",
+            "docs/PROCESS.md",
+            "docs/EXECUTION-CONTRACT.md",
+            "docs/PRODUCT.md",
+            "docs/FEATURES.md",
+            "docs/ARCHITECTURE.md",
+            "WORKFLOW-KIT.md",
+            ".workflow-kit/binding.json",
+            ".workflow-kit/tasks/PROJECT.json",
+            ".workflow-kit/docs/legacy-review.md",
+            ".workflow-kit/docs/REFACTOR-REVIEW.md",
+            "docs/BASELINE.md",
+            "docs/ISSUES.md",
+            "docs/prompts/MANAGER-RESUME.md",
+            "docs/runs/M2-module-disposition-20260913.md",
+            "tasks/items/TASK-022.json",
+            "tasks/items/TASK-023.json"
+          ],
+          "preserved_constraints": [
+            "核心 4 项（五种布局 / Google Reader·Fever 面向 FreshRSS·Miniflux / AI 摘要 / AI 翻译）与 OPT-001~010 全部必须保留，不得借重构缩减功能",
+            "OPT-004 只同步订阅源与客户端设置，允许服务地址、模型等非敏感配置，排除 API Key、密码等敏感凭据；不得序列化整份 settings/ai_config",
+            "DEC-004 免除旧数据兼容要求，但不授权删除真实数据；不访问真实应用数据库，不使用真实账号运行同步测试",
+            "凭据保护（DPAPI）、HTML 清洗（ammonia）、账号数据边界属共享安全边界，相关变更必须评估；不读取或传递真实服务凭据",
+            "保留 src/、src-tauri/、tools/ 结构；不引入未批准依赖或大版本升级；破坏性架构/数据库/外部契约变更需用户批准",
+            "需求、验收标准、门禁规则与授权字段受控，不得为让实现通过而降低；每任务 3 轮修复；合并与发布分别确认",
+            "服务端 × 协议 × 版本 × 操作能力分别记录，不从协议实现存在推导兼容性已验收"
+          ],
+          "task_disposition": "旧 tasks/items、tasks/batches、tasks/runs 保留原位，不迁移、不删除，不自动成为新流程队列。截至 HEAD 7f4509e：TASK-017（commands.rs 13 处直接 SQL）与 TASK-022（sync.rs 17 处直接 SQL）已 verified 并合入，v0.13.0 已发布；TASK-023~029 为 ready 待办。旧 tasks/PROJECT.json 已过时（current_batch 停在 BATCH-003、next_action 停在 TASK-021~024），以 Git 与 tasks/items 为准。用户已决定：TASK-023~029 迁入新流程继续管理，保留原任务 ID、身份与预算，不重置、不重建。首个试点取 TASK-023。",
+          "workflow_resolution": "当前流程入口为根 WORKFLOW-KIT.md（isolated 布局，工作流文件在 .workflow-kit/）。当前主会话身份为总控（manager），不是旧 CLAUDE.md 描述的 Claude Code 代码执行器；只有收到明确 task_id/run_id 执行包时才是 Worker。旧 AGENTS.md/CLAUDE.md 原文保留并在顶部前置入口，副本在 .workflow-kit/legacy/。代码执行器沿用 claude-code-cli，独立审查由 current_agent（总控）在新上下文中执行，review_mode=independent_required。产品事实继续引用 docs/PRODUCT.md、docs/FEATURES.md，不另建一套。",
+          "unresolved_conflicts": []
+        },
+        "outstanding_items": [
+          "非阻塞观察项（文档漂移）：docs/ISSUES.md 的 ISSUE-008 行与 docs/ARCHITECTURE.md 仍写“sync.rs 仍有 17 处直接 SQL”，与本轮实测 0 处不符（TASK-022 已合并）。属文档同步缺口，非代码缺陷；需单独授权后修正。",
+          "非阻塞观察项（未决产品问题）：Q-COMPAT-001、Q-BEHAVIOR-001、Q-QUALITY-001 仍开放（docs/PRODUCT.md）。不阻塞纯内部移动式重构，但会约束后续兼容性与性能验收范围。",
+          "表示限制：旧决定 DEC-013 解除了任务墙钟与批次任务数上限，但工作流要求这两项必须为明确正整数。此处按 DEC-011 的原始值取 90 分钟 / 每批 3 个任务，并用 batch_rollover=allowed + financial.mode=none 自动续批、以 extend 追加时间；若需其它数值请告知。"
+        ],
+        "ui": {
+          "mode": "existing",
+          "style_intent": "内部逻辑重构，保持现有界面与交互不变",
+          "target_devices": [
+            "Windows 桌面"
+          ]
+        },
+        "recovery": {
+          "network_backoff_seconds": [
+            5,
+            15
+          ],
+          "max_cli_call_seconds": 600
+        },
+        "authority": {
+          "documentation": true,
+          "baseline": true,
+          "code": true,
+          "dependencies": false,
+          "ci": false,
+          "commit": "allowed",
+          "push": "allowed",
+          "pull_request": "allowed",
+          "merge": "allowed",
+          "release": "ask"
+        },
+        "execution": {
+          "coder": "claude-code-cli",
+          "reviewer": "current_agent",
+          "review_mode": "independent_required",
+          "worker_argv": [],
+          "reviewer_argv": [],
+          "model": null,
+          "allow_non_git": false
+        },
+        "financial": {
+          "mode": "none",
+          "amount_usd": null
+        },
+        "budget": {
+          "max_repair_rounds": 3,
+          "max_task_wall_minutes": 90,
+          "max_tasks_per_batch": 3,
+          "max_concurrent_workers": 1,
+          "batch_rollover": "allowed"
+        },
+        "capabilities": {
+          "file_read_write": true,
+          "terminal": true,
+          "process_control": true,
+          "independent_context": true
+        }
+      }
+    }
+  ]
+}

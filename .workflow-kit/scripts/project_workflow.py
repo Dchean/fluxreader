@@ -1,0 +1,824 @@
+#!/usr/bin/env python3
+"""Project records and validation. Execution commands delegate to workflow_runtime."""
+# Note: 非破坏初始化与可核对证据 — 包内 ../.agents/notes/implemented/process/
+# 2026-09-13-portable-project-workflow.md；生成项目见 ../docs/workflow/design-note.md。
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import re
+import sys
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path, PurePosixPath
+
+VERSION = 1
+BOARD_MARKER = "<!-- project-workflow: generated view; edit task JSON instead -->"
+TASK_STATES = {"draft", "ready", "running", "verifying", "review", "verified", "blocked", "done", "cancelled"}
+ACTIVE = {"ready", "running", "verifying", "review"}
+PREPARED = ACTIVE | {"verified", "done"}
+RUN_KINDS = {"implementation", "repair", "probe", "verification", "review"}
+GATE_STATES = {"PASS", "FAIL", "NOT_RUN", "SKIPPED", "BLOCKED", "NOT_APPLICABLE"}
+DENIED_PARTS = {".git", ".claude", ".codex", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+RECOVERY_DEFAULTS = {"network_backoff_seconds": [5, 15], "max_cli_call_seconds": 600}
+ISOLATED_ROOT = ".workflow-kit"
+ISOLATED_BINDING = ".workflow-kit/binding.json"
+CLASSIC_BINDING = "tasks/WORKFLOW_KIT.json"
+
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def iso(value):
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def read_json(path):
+    value = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected JSON object: {path}")
+    return value
+
+
+def encoded(value):
+    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def digest(value):
+    data = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
+
+
+def relative_name(value, pattern=False):
+    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+        raise ValueError(f"Expected portable relative path: {value!r}")
+    parts = PurePosixPath(value)
+    if parts.is_absolute() or ".." in parts.parts or value == ".":
+        raise ValueError(f"Path escapes or names the whole root: {value!r}")
+    if not pattern and any(char in value for char in "*?["):
+        raise ValueError(f"Concrete path required: {value!r}")
+    return value
+
+
+def inside(root, name):
+    relative_name(name)
+    root = Path(root).resolve()
+    target = root / name
+    if not target.resolve().is_relative_to(root):
+        raise ValueError(f"Path escapes project through a link: {name}")
+    cursor = target
+    while cursor != root:
+        if cursor.is_symlink() or (hasattr(cursor, "is_junction") and cursor.is_junction()):
+            raise ValueError(f"Linked path is not supported: {name}")
+        cursor = cursor.parent
+    return target
+
+
+def write_exclusive(path, data):
+    with Path(path).open("xb") as stream:
+        stream.write(data)
+
+
+def workflow_name(root, name):
+    """Resolve owned workflow paths without redirecting product snapshot paths."""
+    relative_name(name)
+    marker = inside(root, ISOLATED_BINDING)
+    if marker.is_file():
+        if inside(root, CLASSIC_BINDING).exists():
+            raise ValueError("Two workflow-kit bindings found; reconcile them before continuing")
+        binding = read_json(marker)
+        if binding.get("package") != "workflow-kit" or binding.get("layout") != "isolated":
+            raise ValueError("Unrecognized .workflow-kit binding; inspect integration before continuing")
+        if name == "tasks" or name.startswith(("tasks/", "docs/workflow/")) or name in {
+            "docs/workflow", "scripts/project_workflow.py", "scripts/workflow_runtime.py", "scripts/workflow_bootstrap.py"
+        }:
+            return ISOLATED_ROOT + "/" + name
+    elif inside(root, ISOLATED_ROOT).exists():
+        raise ValueError("Incomplete or foreign .workflow-kit directory; run bootstrap diagnostics")
+    return name
+
+
+def workflow_inside(root, name):
+    return inside(root, workflow_name(root, name))
+
+
+def workflow_relative(root, name):
+    """Logical owned name for inventory filters; legacy root paths stay distinct."""
+    isolated = inside(root, ISOLATED_BINDING).is_file()
+    if isolated:
+        prefix = ISOLATED_ROOT + "/"
+        return name[len(prefix):] if name.startswith(prefix) else None
+    return name
+
+
+def records(root, folder, prefix, errors):
+    result = {}
+    directory = workflow_inside(root, folder)
+    if not directory.exists():
+        return result
+    for path in sorted(directory.glob("*.json")):
+        try:
+            inside(root, path.relative_to(root).as_posix())
+            item = read_json(path)
+            ident = item.get("id")
+            if not isinstance(ident, str) or not ident.startswith(prefix) or path.stem != ident:
+                raise ValueError("file name must equal id and use the expected prefix")
+            if ident in result:
+                raise ValueError("duplicate id")
+            if item.get("schema_version") != VERSION:
+                raise ValueError("unsupported schema_version")
+            result[ident] = item
+        except (ValueError, OSError) as error:
+            errors.append(f"{path.relative_to(root)}: {error}")
+    return result
+
+
+def is_hash(value):
+    return isinstance(value, str) and re.fullmatch(r"[a-fA-F0-9]{64}", value) is not None
+
+
+def capture(root, roots, allow_missing=False):
+    """Hash explicitly selected trees; reject secret-like paths and links."""
+    root = Path(root).resolve()
+    files, missing = {}, []
+    roots = sorted(set(roots))
+    if not roots:
+        raise ValueError("At least one explicit snapshot path is required")
+    for name in roots:
+        target = inside(root, name)
+        if not target.exists():
+            if allow_missing:
+                missing.append(name)
+                continue
+            raise ValueError(f"Snapshot input does not exist: {name}")
+        pending = [target]
+        while pending:
+            path = pending.pop()
+            rel = path.relative_to(root).as_posix()
+            inside(root, rel)
+            lower = path.name.lower()
+            if any(part.lower() in DENIED_PARTS for part in path.relative_to(root).parts):
+                if path != target:
+                    continue
+                raise ValueError(f"Excluded credential/dependency directory in snapshot: {rel}")
+            if lower.startswith(".env") or lower.endswith((".pem", ".key", ".p12", ".pfx", ".db", ".sqlite", ".sqlite3")) or lower in {"auth.json", "credentials.json", "run-settings.json"}:
+                raise ValueError(f"Secret/data-like file excluded from snapshot: {rel}")
+            if path.is_dir():
+                pending.extend(sorted(path.iterdir(), reverse=True))
+            elif path.is_file():
+                files[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+            else:
+                raise ValueError(f"Unsupported snapshot entry: {rel}")
+    body = {"roots": roots, "files": [{"path": key, "sha256": files[key]} for key in sorted(files)]}
+    if missing:
+        body["missing"] = missing
+    if not files and not missing:
+        raise ValueError("Snapshot must include at least one file")
+    return {"schema_version": VERSION, "captured_at_utc": iso(utc_now()), **body, "digest": digest(body)}
+
+
+def inspect_manifest(root, name, expected, current=False):
+    manifest = read_json(inside(root, name))
+    if manifest.get("schema_version") != VERSION:
+        raise ValueError("unsupported snapshot version")
+    body = {"roots": manifest["roots"], "files": manifest["files"]}
+    if "missing" in manifest:
+        body["missing"] = manifest["missing"]
+    if not is_hash(expected) or manifest.get("digest") != expected or digest(body) != expected:
+        raise ValueError("snapshot digest does not match its content and task")
+    if not isinstance(body["roots"], list) or not body["roots"] or not isinstance(body["files"], list) or (not body["files"] and not body.get("missing")):
+        raise ValueError("empty or invalid snapshot")
+    for name in body["roots"]:
+        inside(root, name)
+    for name in body.get("missing", []):
+        inside(root, name)
+        if name not in body["roots"]:
+            raise ValueError("missing path must be an explicit snapshot root")
+    paths = []
+    for item in body["files"]:
+        inside(root, item["path"])
+        if not is_hash(item.get("sha256")):
+            raise ValueError("invalid file hash")
+        paths.append(item["path"])
+    if len(set(paths)) != len(paths):
+        raise ValueError("duplicate snapshot path")
+    if current and capture(root, body["roots"], allow_missing=bool(body.get("missing")))["digest"] != expected:
+        raise ValueError("candidate changed: files were added, removed or modified after verification")
+
+
+def task_definition(task):
+    """Freeze controlled fields, excluding mutable status, counters and evidence."""
+    keys = ("id", "title", "kind", "objective", "non_goals", "requirement_refs", "dependencies", "risk", "scope", "acceptance", "gates")
+    body = {key: task.get(key) for key in keys}
+    for key in ("reference_ids", "decision_refs", "snapshot_paths", "continuation_of", "retry_safe", "ui_change", "ui_contract_ref", "ui_checks"):
+        if key in task:
+            body[key] = task[key]
+    return digest(body)
+
+
+def task_deadline(task):
+    extensions = task.get("budget", {}).get("extensions", [])
+    return extensions[-1]["deadline_at_utc"] if extensions else task.get("budget", {}).get("deadline_at_utc")
+
+
+def repair_limit(task, policy):
+    return policy["budget"]["max_repair_rounds"] + sum(
+        entry.get("repair_rounds", 0) for entry in task.get("budget", {}).get("extensions", []))
+
+
+def gate_command(gate):
+    return (gate.get("program"), tuple(gate.get("args", [])), gate.get("cwd"))
+
+
+def recovery_policy(policy):
+    return {**RECOVERY_DEFAULTS, **policy.get("recovery", {})}
+
+
+def ui_preview_accepted(root, policy, project, tasks):
+    if policy.get("ui", {}).get("mode", "none") != "preview_first":
+        return True
+    preview = tasks.get(project.get("ui_preview_task"), {})
+    evidence = preview.get("evidence", {})
+    accepted = (preview.get("kind") == "ui_preview" and preview.get("status") == "done"
+                and bool(evidence.get("acceptance_ref")) and bool(evidence.get("owner_decision_ids")))
+    if not accepted:
+        return False
+    try:
+        contract = preview["ui_contract_ref"]
+        manifest = read_json(inside(root, evidence["candidate_manifest"]))
+        recorded = next(item["sha256"] for item in manifest["files"] if item["path"] == contract)
+        return hashlib.sha256(inside(root, contract).read_bytes()).hexdigest() == recorded
+    except (ValueError, OSError, KeyError, TypeError, StopIteration):
+        return False
+
+
+def ui_review_digest(root, task, report):
+    """Bind declared visual/interaction evidence; aesthetic judgment stays human."""
+    if not task.get("ui_change", False):
+        return None
+    review = report.get("ui_review")
+    if not isinstance(review, dict) or review.get("contract_ref") != task.get("ui_contract_ref"):
+        raise ValueError("UI review must reference the task's frozen UI contract")
+    states, files = review.get("checked_states"), review.get("evidence_files")
+    if not isinstance(states, list) or not all(isinstance(value, str) for value in states) or not set(task["ui_checks"]) <= set(states):
+        raise ValueError("UI review must cover every declared component/interaction state")
+    if not isinstance(files, list) or not files or not all(isinstance(value, str) for value in files) or len(set(files)) != len(files):
+        raise ValueError("UI review needs distinct screenshot and interaction-report files")
+    suffixes, evidence = set(), []
+    for name in sorted(files):
+        path = inside(root, name)
+        if not name.startswith(workflow_name(root, "tasks/evidence/")) or not path.is_file() or path.stat().st_size == 0:
+            raise ValueError("UI evidence must be a nonempty file under tasks/evidence/: " + name)
+        suffixes.add(path.suffix.lower())
+        evidence.append({"path": name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    if not suffixes.intersection({".png", ".jpg", ".jpeg", ".webp"}) or not suffixes.intersection({".md", ".json", ".txt"}):
+        raise ValueError("UI review requires a screenshot and an interaction report, not only a build log")
+    return digest({"contract_ref": review["contract_ref"], "checked_states": sorted(states), "files": evidence})
+
+
+def check_project(root, now=None):
+    root = Path(root).resolve()
+    now = now or utc_now()
+    errors, warnings = [], []
+    from workflow_bootstrap import integration_status
+    integration = integration_status(root)
+    if not integration["connected"]:
+        return {"ok": False, "errors": integration["errors"] or ["workflow-kit is not connected; run bootstrap first"],
+                "warnings": [], "counts": {}, "integration": integration}
+
+    def require(condition, message):
+        if not condition:
+            errors.append(message)
+
+    def time_value(value, label, required=True):
+        if value is None and not required:
+            return None
+        try:
+            if not isinstance(value, str):
+                raise ValueError("time missing")
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("timezone missing")
+            return parsed
+        except ValueError:
+            errors.append(f"{label}: expected ISO time with timezone")
+            return None
+
+    def local_ref(value, label):
+        try:
+            require(inside(root, value).is_file(), f"{label}: missing file {value}")
+        except (ValueError, OSError) as error:
+            errors.append(f"{label}: {error}")
+
+    try:
+        project = read_json(workflow_inside(root, "tasks/PROJECT.json"))
+        policy = read_json(workflow_inside(root, project.get("policy", "tasks/POLICY.json")))
+        decisions_file = read_json(workflow_inside(root, "tasks/DECISIONS.json"))
+    except (ValueError, OSError) as error:
+        return {"ok": False, "errors": [str(error)], "warnings": [], "counts": {}}
+
+    for name, item in (("PROJECT", project), ("POLICY", policy), ("DECISIONS", decisions_file)):
+        require(item.get("schema_version") == VERSION, f"{name}: unsupported schema_version")
+    require(project.get("kind") in {"new", "refactor"}, "PROJECT: choose new or refactor")
+    require(project.get("stage") in {"intake", "discovery", "baseline", "delivery", "release", "complete", "paused"}, "PROJECT: unknown stage")
+    local_ref(project.get("handoff"), "PROJECT.handoff")
+    decisions = {}
+    for decision in decisions_file.get("decisions", []):
+        if not isinstance(decision, dict):
+            errors.append("DECISIONS: entries must be objects")
+            continue
+        ident = decision.get("id")
+        require(isinstance(ident, str) and ident not in decisions, "DECISIONS: missing or duplicate id")
+        if isinstance(ident, str):
+            decisions[ident] = decision
+        if decision.get("status") == "accepted":
+            require(decision.get("issuer") == "owner" and bool(decision.get("statement")) and bool(decision.get("scope")) and bool(decision.get("source")), f"{ident}: accepted decision requires owner, statement, scope and source")
+            stamp = time_value(decision.get("recorded_at_utc"), f"{ident}.recorded_at_utc")
+            if stamp:
+                require(stamp <= now + timedelta(seconds=60), f"{ident}: recorded time is in the future")
+
+    def approved_ids(ids):
+        return isinstance(ids, list) and bool(ids) and all(decisions.get(ident, {}).get("status") == "accepted" and decisions[ident].get("issuer") == "owner" for ident in ids if isinstance(ident, str)) and all(isinstance(ident, str) for ident in ids)
+
+    approval = policy.get("approval", {})
+    approved = approval.get("status") == "approved" and approved_ids(approval.get("decision_ids"))
+    require(approval.get("status") in {"pending", "approved"}, "POLICY: unknown approval status")
+    if approval.get("status") == "approved":
+        require(approved, "POLICY: approval requires existing accepted owner decisions")
+    else:
+        warnings.append("Onboarding is pending; this check does not authorize application work.")
+
+    limits = policy.get("budget", {})
+    if approved:
+        for key in ("max_repair_rounds", "max_task_wall_minutes", "max_tasks_per_batch", "max_concurrent_workers"):
+            value = limits.get(key)
+            require(type(value) is int and value >= (0 if key == "max_repair_rounds" else 1), f"POLICY: explicit valid budget required for {key}")
+        for role in ("manager", "coder", "reviewer"):
+            selected = policy.get("roles", {}).get(role, {})
+            require(bool(selected.get("agent")) and bool(selected.get("harness")), f"POLICY: select {role} agent/harness")
+        require(policy.get("review", {}).get("mode") in {"independent_required", "self_review_allowed"}, "POLICY: select explicit review mode")
+        require(limits.get("batch_rollover", "ask") in {"ask", "allowed"}, "POLICY: batch_rollover must be ask or allowed")
+        recovery = recovery_policy(policy)
+        delays = recovery["network_backoff_seconds"]
+        require(isinstance(delays, list) and len(delays) <= 3 and all(type(value) is int and 0 <= value <= 60 for value in delays),
+                "POLICY: network backoff must contain at most three delays of 0..60 seconds")
+        require(type(recovery["max_cli_call_seconds"]) is int and 1 <= recovery["max_cli_call_seconds"] <= 3600,
+                "POLICY: max_cli_call_seconds must be 1..3600")
+        finance = limits.get("financial", {})
+        require(finance.get("mode") in {"none", "limit"}, "POLICY: cost mode must be explicitly none or limit")
+        if finance.get("mode") == "limit":
+            require(type(finance.get("amount_usd")) in {int, float} and math.isfinite(finance["amount_usd"]) and finance["amount_usd"] > 0, "POLICY: positive cost limit required")
+        if finance.get("mode") == "none":
+            require(finance.get("amount_usd") is None, "POLICY: none cost mode must not contain an amount")
+    authority = policy.get("authority", {})
+    require(policy.get("ui", {}).get("mode", "none") in {"none", "existing", "preview_first"}, "POLICY: unknown UI mode")
+    for key in ("commit", "push", "pull_request", "merge", "release"):
+        require(authority.get(key) in {"ask", "allowed", "forbidden"}, f"POLICY: invalid {key} authority")
+
+    tasks = records(root, "tasks/items", "TASK-", errors)
+    batches = records(root, "tasks/batches", "BATCH-", errors)
+    runs = records(root, "tasks/runs", "RUN-", errors)
+    require(project.get("current_task") is None or project["current_task"] in tasks, "PROJECT: current_task does not exist")
+    require(project.get("current_batch") is None or project["current_batch"] in batches, "PROJECT: current_batch does not exist")
+    if project.get("current_task") in tasks:
+        require(tasks[project["current_task"]].get("status") in ACTIVE | {"blocked"}, "PROJECT: current_task points to an inactive task")
+    preview_id = project.get("ui_preview_task")
+    require(preview_id is None or tasks.get(preview_id, {}).get("kind") == "ui_preview", "PROJECT: UI preview task is missing or has the wrong kind")
+
+    by_task = {ident: [] for ident in tasks}
+    for ident, run in runs.items():
+        task_id = run.get("task_id")
+        require(task_id in tasks, f"{ident}: unknown task_id")
+        if task_id in by_task:
+            by_task[task_id].append(run)
+        require(run.get("kind") in RUN_KINDS, f"{ident}: unknown run kind")
+        require(run.get("outcome") in {"running", "completed", "failed", "blocked", "cancelled"}, f"{ident}: unknown outcome")
+        require(bool(run.get("executor", {}).get("harness")), f"{ident}: executor harness missing")
+        start = time_value(run.get("started_at_utc"), f"{ident}.started_at_utc")
+        finish = time_value(run.get("finished_at_utc"), f"{ident}.finished_at_utc", run.get("outcome") != "running")
+        if start:
+            require(start <= now + timedelta(seconds=60), f"{ident}: start is in the future")
+        if finish:
+            require(finish <= now + timedelta(seconds=60), f"{ident}: finish is in the future")
+            if start:
+                require(finish >= start, f"{ident}: finish precedes start")
+        for ref in run.get("raw_output_refs", []):
+            local_ref(ref, ident)
+        cost = run.get("estimated_cost_usd")
+        require(cost is None or (type(cost) in {int, float} and math.isfinite(cost) and cost >= 0), f"{ident}: invalid estimated cost")
+
+    for ident, batch in batches.items():
+        ids = batch.get("task_ids", [])
+        require(isinstance(ids, list) and len(set(ids)) == len(ids), f"{ident}: duplicate or invalid task_ids")
+        require(batch.get("status") in {"planned", "active", "closed"}, f"{ident}: unknown batch status")
+        maximum = limits.get("max_tasks_per_batch")
+        if type(maximum) is int:
+            require(len(ids) <= maximum, f"{ident}: batch task limit exceeded")
+        for task_id in ids:
+            require(task_id in tasks and tasks[task_id].get("batch_id") == ident, f"{ident}: task reference is not bidirectional: {task_id}")
+        if batch.get("status") == "active":
+            require(approved and approved_ids(batch.get("approval_decision_ids")), f"{ident}: active batch lacks approval reference")
+        finance = limits.get("financial", {})
+        if finance.get("mode") == "limit" and type(finance.get("amount_usd")) in {int, float}:
+            known_cost = sum(run.get("estimated_cost_usd") or 0 for run in runs.values() if run.get("task_id") in ids and type(run.get("estimated_cost_usd")) in {int, float})
+            require(known_cost <= finance["amount_usd"], f"{ident}: recorded estimated batch cost exceeds limit")
+
+    visiting, visited = set(), set()
+
+    def visit(task_id):
+        if task_id in visiting:
+            errors.append(f"{task_id}: dependency cycle")
+            return
+        if task_id in visited:
+            return
+        visiting.add(task_id)
+        for dependency in tasks[task_id].get("dependencies", []):
+            if dependency in tasks:
+                visit(dependency)
+        visiting.remove(task_id)
+        visited.add(task_id)
+
+    for task_id in tasks:
+        visit(task_id)
+    writers = [run for run in runs.values() if run.get("kind") in {"implementation", "repair", "probe"} and run.get("outcome") == "running"]
+    if type(limits.get("max_concurrent_workers")) is int:
+        require(len(writers) <= limits["max_concurrent_workers"], "POLICY: concurrent worker limit exceeded")
+    for task_id in tasks:
+        require(sum(run.get("task_id") == task_id for run in writers) <= 1, f"{task_id}: multiple active writers")
+
+    for ident, task in tasks.items():
+        status = task.get("status")
+        require(status in TASK_STATES, f"{ident}: unknown task state")
+        require(isinstance(task.get("blockers"), list), f"{ident}: blockers must be a list")
+        require(type(task.get("retry_safe", False)) is bool, f"{ident}: retry_safe must be a boolean")
+        require(type(task.get("ui_change", False)) is bool, f"{ident}: ui_change must be a boolean")
+        if task.get("kind") == "ui_preview":
+            require(task.get("ui_change") is True, f"{ident}: UI preview must declare a UI change")
+        if task.get("ui_change"):
+            local_ref(task.get("ui_contract_ref"), f"{ident} UI contract")
+            require(isinstance(task.get("ui_checks"), list) and bool(task["ui_checks"])
+                    and all(isinstance(value, str) and value.strip() for value in task["ui_checks"]),
+                    f"{ident}: UI changes need explicit component/interaction checks")
+        if status == "blocked":
+            require(bool(task.get("blockers")), f"{ident}: blocked requires a reason")
+        if status in PREPARED:
+            require(not task.get("blockers"), f"{ident}: {status} contradicts blockers")
+        related = by_task[ident]
+        listed = task.get("run_ids", [])
+        require(isinstance(listed, list) and len(set(listed)) == len(listed) and set(listed) == {run["id"] for run in related}, f"{ident}: run_ids omit, duplicate or misattribute historical runs")
+        batch_id = task.get("batch_id")
+        if batch_id:
+            require(batch_id in batches and ident in batches[batch_id].get("task_ids", []), f"{ident}: missing bidirectional batch membership")
+        budget = task.get("budget", {})
+        repairs = sum(run.get("kind") == "repair" for run in related)
+        require(type(budget.get("repair_rounds_used")) is int and budget["repair_rounds_used"] == repairs, f"{ident}: repair counter differs from run history")
+        started = time_value(budget.get("started_at_utc"), f"{ident}.budget.started_at_utc", bool(related) or status in {"running", "verifying", "review", "verified", "done"})
+        deadline = time_value(budget.get("deadline_at_utc"), f"{ident}.budget.deadline_at_utc", started is not None)
+        original_deadline = deadline
+        extra_repairs = 0
+        for extension in budget.get("extensions", []):
+            decision = decisions.get(extension.get("decision_id"), {})
+            require(approved_ids([extension.get("decision_id")]) and ident in decision.get("scope", [])
+                    and decision.get("budget_extension") == extension,
+                    f"{ident}: budget extension requires its exact accepted owner decision")
+            previous = time_value(extension.get("previous_deadline_at_utc"), f"{ident}.extension.previous")
+            recorded = time_value(extension.get("recorded_at_utc"), f"{ident}.extension.recorded")
+            extended = time_value(extension.get("deadline_at_utc"), f"{ident}.extension.deadline")
+            minutes, rounds = extension.get("minutes"), extension.get("repair_rounds")
+            valid_amount = type(minutes) is int and minutes > 0 and type(rounds) is int and rounds >= 0
+            require(valid_amount, f"{ident}: extension needs positive minutes and nonnegative repair rounds")
+            if previous and recorded and extended and valid_amount:
+                require(previous == deadline and recorded <= now + timedelta(seconds=60)
+                        and extended == max(previous, recorded) + timedelta(minutes=minutes),
+                        f"{ident}: invalid budget extension chain")
+                deadline = extended
+                extra_repairs += rounds
+        if type(limits.get("max_repair_rounds")) is int:
+            require(repairs <= limits["max_repair_rounds"] + extra_repairs, f"{ident}: repair limit exceeded")
+        if started and deadline:
+            require(deadline > started, f"{ident}: deadline must follow original start")
+            if status in ACTIVE:
+                require(now < deadline, f"{ident}: deadline exhausted; record blocked instead of continuing")
+            for run in related:
+                run_start = time_value(run.get("started_at_utc"), run["id"])
+                run_finish = time_value(run.get("finished_at_utc"), run["id"], False)
+                if run_start:
+                    require(run_start >= started, f"{ident}: original task start was reset after an earlier run")
+                if run_finish and status in PREPARED:
+                    require(run_finish <= deadline, f"{ident}: run completed after task deadline")
+            if status in PREPARED and type(limits.get("max_task_wall_minutes")) is int:
+                require(original_deadline <= started + timedelta(minutes=limits["max_task_wall_minutes"]), f"{ident}: deadline exceeds configured wall budget")
+
+        if status not in PREPARED:
+            continue
+        require(approved, f"{ident}: prepared task requires approved policy")
+        if status in ACTIVE:
+            require(project.get("stage") not in {"intake", "paused", "complete"}, f"{ident}: project stage does not permit active work")
+            require(batch_id in batches and batches[batch_id].get("status") == "active", f"{ident}: task needs an active batch")
+            if task.get("kind") not in {"ui_preview", "documentation", "baseline"}:
+                require(ui_preview_accepted(root, policy, project, tasks), f"{ident}: accept the UI preview before production implementation")
+        permission = {"documentation": "documentation", "baseline": "baseline", "ci": "ci"}.get(task.get("kind"), "code")
+        require(authority.get(permission) is True, f"{ident}: task kind lacks {permission} authority")
+        require(bool(task.get("title")) and bool(task.get("objective")) and bool(task.get("requirement_refs")) and bool(task.get("acceptance")), f"{ident}: incomplete objective/requirements/acceptance")
+        level = task.get("risk", {}).get("level")
+        require(level in {"low", "medium", "high"}, f"{ident}: risk not assessed")
+        if level == "high":
+            require(approved_ids(task.get("risk", {}).get("decision_ids")), f"{ident}: high risk requires accepted owner decision references")
+        for dep in task.get("dependencies", []):
+            require(dep != ident and dep in tasks and tasks[dep].get("status") in {"verified", "done"}, f"{ident}: dependency not available: {dep}")
+        scope = task.get("scope", {})
+        require(bool(scope.get("allowed_paths")), f"{ident}: empty allowed_paths")
+        for name in scope.get("allowed_paths", []) + scope.get("protected_paths", []):
+            try:
+                relative_name(name, pattern=True)
+            except ValueError as error:
+                errors.append(f"{ident}: {error}")
+        inputs = task.get("input", {})
+        try:
+            inspect_manifest(root, inputs.get("manifest"), inputs.get("digest"), current=status == "ready" and not related)
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            errors.append(f"{ident}: invalid input snapshot: {error}")
+        require(inputs.get("definition_digest") == task_definition(task), f"{ident}: controlled task definition differs from frozen digest")
+        gates = task.get("gates", [])
+        require(bool(gates), f"{ident}: no verification plan")
+        gate_ids = []
+        for gate in gates:
+            gate_ids.append(gate.get("id"))
+            require(bool(gate.get("id")) and isinstance(gate.get("required"), bool), f"{ident}: gate id/required missing")
+            if gate.get("required"):
+                require(bool(gate.get("program")) and isinstance(gate.get("args"), list) and bool(gate.get("cwd")), f"{ident}: required gate has no concrete command")
+            else:
+                require(bool(gate.get("reason")), f"{ident}: optional gate needs a pre-dispatch reason")
+        require(len(set(gate_ids)) == len(gate_ids), f"{ident}: duplicate gate ids")
+
+        if status not in {"verified", "done"}:
+            continue
+        evidence = task.get("evidence", {})
+        candidate = evidence.get("candidate_digest")
+        successor_id = evidence.get("continued_by")
+        if successor_id:
+            successor = tasks.get(successor_id, {})
+            require(successor.get("status") in PREPARED | {"blocked"} and bool(successor.get("run_ids"))
+                    and ident in successor.get("dependencies", [])
+                    and successor.get("continuation_of", {}).get(ident) == candidate,
+                    f"{ident}: invalid candidate continuation: {successor_id}")
+            required_commands = {gate_command(gate) for gate in gates if gate.get("required")}
+            successor_commands = {gate_command(gate) for gate in successor.get("gates", []) if gate.get("required")}
+            require(required_commands <= successor_commands, f"{ident}: continuation dropped required regression checks")
+            try:
+                previous_roots = read_json(inside(root, evidence["candidate_manifest"]))["roots"]
+                require(set(previous_roots) <= set(successor.get("snapshot_paths", [])),
+                        f"{ident}: continuation does not cover previous candidate roots")
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                errors.append(f"{ident}: invalid continuation snapshot: {error}")
+        try:
+            inspect_manifest(root, evidence.get("candidate_manifest"), candidate, current=status == "verified" and not successor_id)
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            errors.append(f"{ident}: invalid candidate snapshot: {error}")
+        verification = runs.get(evidence.get("verification_run"), {})
+        review = runs.get(evidence.get("review_run"), {})
+        for kind, run in (("verification", verification), ("review", review)):
+            require(run.get("task_id") == ident and run.get("kind") == kind and run.get("outcome") == "completed" and run.get("candidate_digest") == candidate, f"{ident}: invalid or stale {kind} evidence")
+        checks = verification.get("checks", [])
+        check_ids = [item.get("gate_id") for item in checks]
+        require(len(set(check_ids)) == len(check_ids), f"{ident}: duplicate gate results")
+        for item in checks:
+            require(item.get("gate_id") in gate_ids and item.get("status") in GATE_STATES, f"{ident}: unknown gate result")
+        checks_by_id = {item.get("gate_id"): item for item in checks}
+        for gate in gates:
+            if gate.get("required"):
+                item = checks_by_id.get(gate.get("id"), {})
+                require(item.get("status") == "PASS" and type(item.get("exit_code")) is int and item["exit_code"] == 0 and item.get("candidate_digest") == candidate, f"{ident}: required gate lacks current PASS: {gate.get('id')}")
+                local_ref(item.get("log"), f"{ident} gate {gate.get('id')}")
+        review_result = review.get("review", {})
+        require(review_result.get("verdict") == "PASS" and review_result.get("candidate_digest") == candidate, f"{ident}: review did not pass current candidate")
+        local_ref(review_result.get("report"), f"{ident} review")
+        if task.get("ui_change"):
+            try:
+                ui_digest = ui_review_digest(root, task, read_json(inside(root, review_result["report"])))
+                require(review_result.get("ui_evidence_digest") == ui_digest, f"{ident}: UI evidence changed after review")
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                errors.append(f"{ident}: invalid UI evidence: {error}")
+        mode = review_result.get("mode")
+        require(mode in {"independent", "self_review"}, f"{ident}: review mode missing")
+        if policy.get("review", {}).get("mode") == "independent_required":
+            require(mode == "independent", f"{ident}: self review cannot satisfy independent_required")
+        if mode == "independent":
+            context = review.get("executor", {}).get("context_id")
+            writer_contexts = {run.get("executor", {}).get("context_id") for run in related if run.get("kind") in {"implementation", "repair"}}
+            require(bool(context) and context not in writer_contexts, f"{ident}: independent review shares or lacks a distinct context id")
+        verification_start = time_value(verification.get("started_at_utc"), f"{ident}.verification.start")
+        for run in related:
+            require(run.get("outcome") != "running", f"{ident}: verified task still has an active run")
+            if run.get("kind") in {"implementation", "repair"}:
+                finished = time_value(run.get("finished_at_utc"), run["id"], False)
+                if finished and verification_start:
+                    require(finished <= verification_start, f"{ident}: verification precedes later implementation")
+        if status == "done":
+            local_ref(evidence.get("acceptance_ref"), f"{ident} acceptance")
+            require(approved_ids(evidence.get("owner_decision_ids")), f"{ident}: done lacks owner acceptance reference")
+            require(bool(evidence.get("merge_ref")), f"{ident}: done needs merge evidence or explicit not_applicable explanation")
+
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "counts": {"tasks": len(tasks), "runs": len(runs), "batches": len(batches)}}
+
+
+def board_bytes(tasks):
+    groups = {"BACKLOG": {"draft", "ready", "blocked"}, "IN_PROGRESS": {"running", "verifying", "review", "verified"}, "DONE": {"done", "cancelled"}}
+    output = {}
+    for name, states in groups.items():
+        lines = [BOARD_MARKER, f"# {name}", "", "| Task | Title | Status |", "| --- | --- | --- |"]
+        for ident, task in sorted(tasks.items()):
+            if task.get("status") in states:
+                title = str(task.get("title") or "Pending definition").replace("|", "\\|").replace("\n", " ")
+                lines.append(f"| [{ident}](items/{ident}.json) | {title} | {task['status']} |")
+        lines += ["", "verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。", ""]
+        output[f"tasks/{name}.md"] = "\n".join(lines).encode("utf-8")
+    return output
+
+
+def project_state_bytes(project, tasks, helper="scripts/project_workflow.py"):
+    """A disposable recovery index, never a second source of project facts."""
+    lines = [BOARD_MARKER, "# 项目状态", "", "- 项目：" + str(project.get("name") or "待确认"),
+             "- 阶段：" + str(project.get("stage")), "- 当前任务：" + str(project.get("current_task") or "无"),
+             "- 当前批次：" + str(project.get("current_batch") or "无"), "",
+             "| 任务 | 状态 | 最近检查点 / 下一步 |", "| --- | --- | --- |"]
+    for ident, task in sorted(tasks.items()):
+        points = task.get("checkpoints", [])
+        next_step = points[-1]["next_action"] if points else "由 start/next 根据实际记录判断"
+        note = points[-1]["note"] + "；" if points else ""
+        text = (note + next_step).replace("|", "\\|").replace("\n", " ")
+        lines.append(f"| [{ident}](cards/{ident}.md) | {task['status']} | {text} |")
+    lines += ["", "## 当前阻塞", ""]
+    if project.get("ui_preview_task"):
+        preview = tasks.get(project["ui_preview_task"], {})
+        lines += ["- 界面预览：" + project["ui_preview_task"] + "；状态：" + str(preview.get("status")),
+                  "- 预览确认只批准视觉与交互方向，不表示真实数据和后端已经完成。", ""]
+    blockers = [f"- {ident}：{reason}" for ident, task in sorted(tasks.items()) for reason in task.get("blockers", [])]
+    lines += blockers or ["- 无已记录阻塞。未运行的检查不代表通过。"]
+    lines += ["", "运行 `python " + helper + " start --root .` 获取可执行的下一步。",
+              "本文件由 PROJECT、任务和检查点生成；恢复时仍须核对实际文件、运行日志和进程。", ""]
+    return "\n".join(lines).encode("utf-8")
+
+
+def initialization_plan(root, kind, name, allow_existing=False, full_docs=False):
+    root = Path(root).resolve()
+    package = Path(__file__).resolve().parent.parent
+    assets = package / "assets" / "project"
+    if not assets.is_dir():
+        raise ValueError("Run init from the full startup package; the copied project helper supports execution and recovery, not creating another project.")
+    if not name or any(char in name for char in "\r\n"):
+        raise ValueError("Project name must be a nonempty single line")
+    plan = {}
+    for source in sorted(assets.rglob("*")):
+        if source.is_file():
+            rel = source.relative_to(assets).as_posix()
+            optional = rel.startswith(("memory/", "lessons/")) or (
+                rel.startswith("docs/") and rel not in {
+                    "docs/README.md.template", "docs/PRODUCT.md.template", "docs/HANDOFF.md.template",
+                    "docs/ADR/README.md.template", "docs/ADR/DECISION-TEMPLATE.md.template"})
+            if optional and not full_docs and not (kind == "refactor" and rel == "docs/BASELINE.md.template"):
+                continue
+            if rel.endswith(".template"):
+                rel = rel[:-9]
+                plan[rel] = source.read_text(encoding="utf-8").replace("{{PROJECT_NAME}}", name).encode("utf-8")
+            else:
+                plan[rel] = source.read_bytes()
+    project = json.loads(plan["tasks/PROJECT.json"])
+    project.update(name=name, kind=kind, created_at_utc=iso(utc_now()), workflow_kit="workflow-kit")
+    plan["tasks/PROJECT.json"] = encoded(project)
+    plan["tasks/PROJECT_STATE.md"] = project_state_bytes(project, {})
+    for source in sorted((package / "references").rglob("*")):
+        if source.is_file():
+            plan["docs/workflow/" + source.relative_to(package / "references").as_posix()] = source.read_bytes()
+    note = package / ".agents/notes/implemented/process/2026-09-13-portable-project-workflow.md"
+    plan["docs/workflow/design-note.md"] = note.read_bytes()
+    plan["scripts/project_workflow.py"] = Path(__file__).read_bytes()
+    runtime = Path(__file__).with_name("workflow_runtime.py")
+    if runtime.is_file():
+        plan["scripts/workflow_runtime.py"] = runtime.read_bytes()
+    from workflow_bootstrap import classic_binding
+    plan["scripts/workflow_bootstrap.py"] = Path(__file__).with_name("workflow_bootstrap.py").read_bytes()
+    plan.update(board_bytes({}))
+    plan[CLASSIC_BINDING] = encoded(classic_binding(plan))
+    conflicts = [rel for rel in plan if inside(root, rel).exists()]
+    if conflicts and not allow_existing:
+        raise ValueError("Refusing all writes; existing target files: " + ", ".join(sorted(conflicts)))
+    return plan
+
+
+def initialize(root, kind, name, write=False, full_docs=False):
+    root = Path(root).resolve()
+    if inside(root, ISOLATED_BINDING).exists() or inside(root, CLASSIC_BINDING).exists():
+        raise ValueError("Refusing all writes; an existing workflow binding must be resumed or repaired, never initialized again")
+    plan = initialization_plan(root, kind, name, full_docs=full_docs)
+    if not write:
+        return {"written": False, "root": str(root), "files": sorted(plan)}
+    if not root.parent.is_dir():
+        raise ValueError("Target parent must already exist")
+    created_files, created_dirs = [], []
+    try:
+        if not root.exists():
+            root.mkdir()
+            created_dirs.append(root)
+        for rel, data in plan.items():
+            target = inside(root, rel)
+            missing, parent = [], target.parent
+            while not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            for directory in reversed(missing):
+                directory.mkdir()
+                created_dirs.append(directory)
+            with target.open("xb") as stream:
+                created_files.append(target)
+                stream.write(data)
+    except (OSError, ValueError):
+        for path in reversed(created_files):
+            if path.resolve().is_relative_to(root):
+                path.unlink()
+        for path in reversed(created_dirs):
+            if path.resolve() == root or path.resolve().is_relative_to(root):
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
+        raise
+    return {"written": True, "root": str(root), "files": sorted(plan), "application_work_authorized": False}
+
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    runtime_commands = {"bootstrap", "doctor", "start", "adopt", "onboard", "research", "cards", "checkpoint", "prepare", "begin", "finish", "verify", "review", "feedback", "dispatch", "review-cli", "run", "next", "recover", "extend", "batch", "accept"}
+    if argv and argv[0] in runtime_commands:
+        from workflow_runtime import main as runtime_main
+        return runtime_main(argv)
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Workflow commands (each accepts --help): " + ", ".join(sorted(runtime_commands)))
+    sub = parser.add_subparsers(dest="command", required=True)
+    init = sub.add_parser("init", help="Preview or create governance files; never overwrite")
+    init.add_argument("--root", required=True)
+    init.add_argument("--kind", choices=("new", "refactor"), required=True)
+    init.add_argument("--name", required=True)
+    init.add_argument("--write", action="store_true")
+    init.add_argument("--full-docs", action="store_true", help="Also create optional document/memory templates; minimal documents are the default")
+    for command in ("check", "boards"):
+        sub.add_parser(command).add_argument("--root", default=".")
+    snap = sub.add_parser("snapshot", help="Hash explicit source/test/config paths")
+    snap.add_argument("--root", default=".")
+    snap.add_argument("--paths", nargs="+", required=True)
+    snap.add_argument("--output", required=True)
+    snap.add_argument("--allow-missing", action="store_true", help="Record explicitly absent inputs for a new project")
+    sub.add_parser("stamp", help="Print current UTC time and a unique run id")
+    definition = sub.add_parser("definition", help="Compute a task controlled-definition digest without editing it")
+    definition.add_argument("--task", required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "init":
+            result = initialize(args.root, args.kind, args.name, args.write, args.full_docs)
+        elif args.command == "stamp":
+            result = {"utc": iso(utc_now()), "run_id": "RUN-" + uuid.uuid4().hex}
+        elif args.command == "definition":
+            result = {"definition_digest": task_definition(read_json(args.task))}
+        elif args.command == "snapshot":
+            root = Path(args.root).resolve()
+            output = inside(root, args.output)
+            if any(output == inside(root, name) or output.is_relative_to(inside(root, name)) for name in args.paths):
+                raise ValueError("Snapshot output must be outside all selected input paths")
+            result = capture(root, args.paths, allow_missing=args.allow_missing)
+            if output.exists():
+                raise ValueError("Snapshot output exists; choose a new evidence name")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            inside(root, args.output)
+            write_exclusive(output, encoded(result))
+            result = {"manifest": args.output, "digest": result["digest"], "files": len(result["files"])}
+        else:
+            root = Path(args.root).resolve()
+            result = check_project(root)
+            if args.command == "boards" and result["ok"]:
+                errors = []
+                task_items = records(root, "tasks/items", "TASK-", errors)
+                plans = board_bytes(task_items)
+                for rel in plans:
+                    path = workflow_inside(root, rel)
+                    if path.exists() and not path.read_text(encoding="utf-8-sig").startswith(BOARD_MARKER):
+                        raise ValueError(f"Refusing to overwrite manually maintained board: {rel}")
+                for rel, data in plans.items():
+                    path = workflow_inside(root, rel)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                result["boards_written"] = sorted(plans)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok", True) else 1
+    except (ValueError, OSError, KeyError, TypeError, AttributeError) as error:
+        print(json.dumps({"ok": False, "errors": [str(error)]}, ensure_ascii=False), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
