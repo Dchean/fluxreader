@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-b8288335579f46c5addac028c670cf9a",
+  "task_id": "TASK-023",
+  "kind": "review",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "agent-main-20260914-self-coding"
+  },
+  "started_at_utc": "2026-09-14T14:26:13.197679Z",
+  "finished_at_utc": "2026-09-14T14:26:13.489334Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "01949edd62b6799bb071be47a62eb43a2f399762921e3909bf8a2f10fe3309ee",
+  "candidate_digest": "9ff76a089bca50a886e17ff88293818cdae8db418bc3c57a77e4c15a8c169391",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-b8288335579f46c5addac028c670cf9a-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "self_review",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-b8288335579f46c5addac028c670cf9a-review.json",
+    "candidate_digest": "9ff76a089bca50a886e17ff88293818cdae8db418bc3c57a77e4c15a8c169391"
+  },
+  "estimated_cost_usd": null,
+  "failure_kind": "review_failure",
+  "failure_reason": "Review requires changes; inspect the findings"
+}
