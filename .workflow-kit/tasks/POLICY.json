@@ -5,7 +5,8 @@
     "decision_ids": [
       "DEC-9873537950da450da003e9bb04006117",
       "DEC-bd3656d1472d4800be99d43e5064b164",
-      "DEC-bb38199e4cc14e448082a603e62b4064"
+      "DEC-bb38199e4cc14e448082a603e62b4064",
+      "DEC-b91115a20fc0428f9a7b8cb5741ed678"
     ]
   },
   "project_type": null,
@@ -70,9 +71,9 @@
     "max_cli_call_seconds": 600
   },
   "budget": {
-    "max_repair_rounds": 3,
-    "max_task_wall_minutes": 180,
-    "max_tasks_per_batch": 6,
+    "max_repair_rounds": 6,
+    "max_task_wall_minutes": 1440,
+    "max_tasks_per_batch": 20,
     "max_concurrent_workers": 1,
     "financial": {
       "mode": "none",

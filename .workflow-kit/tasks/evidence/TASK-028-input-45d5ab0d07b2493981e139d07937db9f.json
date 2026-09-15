@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-14T15:11:08.740009Z",
+  "roots": [
+    ".agents/notes/implemented/bug-fix",
+    "src-tauri/src/greader.rs",
+    "src-tauri/tests/greader_live_e2e.rs"
+  ],
+  "files": [
+    {
+      "path": "src-tauri/src/greader.rs",
+      "sha256": "aa5ace25ff3e09dbe43a2eec7629a65d02b8b628043559aef488dda96b17ba2f"
+    },
+    {
+      "path": "src-tauri/tests/greader_live_e2e.rs",
+      "sha256": "83cc0877cdabd33a05ab627e3c66a5ac8176f53b8fbc54d5d86b092c9eedae2d"
+    }
+  ],
+  "missing": [
+    ".agents/notes/implemented/bug-fix"
+  ],
+  "digest": "3e6025631c7bb3619032e4e88c0d8d0fb4ff9f98ac7b3c3d9eb3d9499ecb8f45"
+}

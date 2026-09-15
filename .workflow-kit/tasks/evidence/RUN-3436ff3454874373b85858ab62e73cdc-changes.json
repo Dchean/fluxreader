@@ -1,0 +1,6 @@
+{
+  "changed_files": [
+    ".agents/notes/implemented/bug-fix/2026-09-14-greader-clientlogin-text-format.md",
+    "src-tauri/src/greader.rs"
+  ]
+}

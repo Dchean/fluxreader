@@ -1,0 +1,2 @@
+    Checking app v0.13.0 (D:\OneDrive - chean\fluxreader\src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.70s

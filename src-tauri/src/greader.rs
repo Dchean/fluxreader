@@ -36,6 +36,42 @@ pub struct ClientLoginResponse {
     pub auth: String,
 }
 
+/// 解析 ClientLogin 响应并取出 auth token。
+///
+/// 两种响应形态都要支持（REQ-SYNC-001 要求同时面向 Miniflux 与 FreshRSS）：
+/// Miniflux 等尊重 `output=json`，返回 `{"SID":…,"LSID":…,"Auth":…}`；
+/// FreshRSS 忽略 `output=json`，返回经典文本行 `SID=…` / `LSID=…` / `Auth=…`，
+/// 凭据错误时是 `Error=BadAuthentication`。
+/// 先按 JSON 解析以保持 Miniflux 既有行为，失败再按行取 `Auth=`。
+// Note: 双格式登录的理由与被否方案 — 见 .agents/notes/implemented/bug-fix/2026-09-14-greader-clientlogin-text-format.md
+pub fn parse_client_login(body: &str) -> AppResult<String> {
+    if let Ok(parsed) = serde_json::from_str::<ClientLoginResponse>(body) {
+        if !parsed.auth.is_empty() {
+            return Ok(parsed.auth);
+        }
+    }
+    let mut error_code: Option<String> = None;
+    for line in body.lines() {
+        let line = line.trim();
+        if let Some(token) = line.strip_prefix("Auth=") {
+            let token = token.trim();
+            if !token.is_empty() {
+                return Ok(token.to_string());
+            }
+        } else if let Some(code) = line.strip_prefix("Error=") {
+            error_code = Some(code.trim().to_string());
+        }
+    }
+    match error_code {
+        Some(code) if !code.is_empty() => {
+            Err(AppError::network(format!("ClientLogin 失败：{code}")))
+        }
+        _ => Err(AppError::network(
+            "ClientLogin 响应既非 JSON 也未包含 Auth= 行",
+        )),
+    }
+}
+
 /// 订阅（`subscription/list` 的 subscriptions[] 元素）
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -241,15 +277,10 @@ impl GReaderClient {
                 resp.status()
             )));
         }
-        let body: ClientLoginResponse = resp.json().await?;
-        if body.auth.is_empty() {
-            return Err(AppError::network("ClientLogin 响应缺少 Auth token"));
-        }
-        Ok(Self {
-            base,
-            token: body.auth,
-            http,
-        })
+        // 双格式：先 JSON（Miniflux），失败回退经典文本 Auth= 行（FreshRSS）。
+        let body = resp.text().await?;
+        let token = parse_client_login(&body)?;
+        Ok(Self { base, token, http })
     }
 
     fn url(&self, path: &str) -> String {
@@ -502,6 +533,33 @@ pub fn client_login_url(base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Miniflux 尊重 output=json：返回 JSON 形态，字段名首字母大写。
+    #[test]
+    fn parse_client_login_reads_json_body() {
+        let body = r#"{"SID":"sid-value","LSID":"lsid-value","Auth":"user/abc123"}"#;
+        assert_eq!(parse_client_login(body).unwrap(), "user/abc123");
+    }
+
+    /// FreshRSS 忽略 output=json：返回经典文本行形态。
+    #[test]
+    fn parse_client_login_reads_classic_text_body() {
+        let body = "SID=sid-value\nLSID=lsid-value\nAuth=user/xyz789\n";
+        assert_eq!(parse_client_login(body).unwrap(), "user/xyz789");
+    }
+
+    /// 文本形态的 Error= 要带出失败原因；既非 JSON 也无 Auth= 时给出明确错误。
+    #[test]
+    fn parse_client_login_rejects_error_and_garbage() {
+        let err = parse_client_login("Error=BadAuthentication\n").unwrap_err();
+        assert!(
+            err.to_string().contains("BadAuthentication"),
+            "应带出 Error 码：{err}"
+        );
+
+        let err = parse_client_login("{\"SID\":\"only-sid\"}").unwrap_err();
+        assert!(err.to_string().contains("Auth="), "应说明缺少 Auth=：{err}");
+    }
 
     #[test]
     fn parse_feed_numeric_id_works() {
