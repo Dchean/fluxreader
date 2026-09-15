@@ -963,8 +963,15 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
             return Err(AppError::new("notConnected", "未连接后端"));
         }
         let rows = db::list_unbound_local_feeds(&conn)?;
-        let pending_urls: std::collections::HashSet<String> = db::take_sync_queue(&conn)
-            .unwrap_or_default()
+        let queued_items = match db::take_sync_queue(&conn) {
+            Ok(v) => v,
+            Err(e) => {
+                // C-2：读队列失败不再静默当空队列（避免重复入队/漏判待推）
+                log::warn!("sync: 读队列失败: {e}");
+                Vec::new()
+            }
+        };
+        let pending_urls: std::collections::HashSet<String> = queued_items
             .into_iter()
             .filter(|i| i.action == "add_feed")
             .filter_map(|i| i.feed_url)
@@ -984,9 +991,13 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
         // 没有新入队，但可能仍有待推队列项（上次失败的）——检查后再决定
         let has_pending = {
             let conn = state.db.lock().await;
-            db::take_sync_queue(&conn)
-                .map(|q| q.iter().any(|i| i.action == "add_feed"))
-                .unwrap_or(false)
+            match db::take_sync_queue(&conn) {
+                Ok(q) => q.iter().any(|i| i.action == "add_feed"),
+                Err(e) => {
+                    log::warn!("sync: 读队列失败: {e}");
+                    false
+                }
+            }
         };
         if !has_pending {
             return Ok("没有需要同步的本地订阅（全部已绑定或已推送）".into());

@@ -700,3 +700,125 @@ async fn folder_tombstone_cleared_when_remote_drops_label() {
     );
     let _ = server;
 }
+
+/// A-8：超过保留期且仍无法绑定远端的状态队列项被老化清理并记录。
+#[tokio::test]
+async fn stale_unbound_queue_items_are_pruned() {
+    let (db, http, _server) = setup("gap_a8").await;
+    // 本地直连文章：URL 在远端不存在对应 entry → 永不绑定 remote_id
+    let aid = {
+        let conn = db.lock().await;
+        let folder_id = db::create_folder(&conn, "本地分类", "article").unwrap();
+        let feed_id = db::insert_feed(
+            &conn,
+            "http://example.com/never-in-remote.xml",
+            None,
+            "Local Only Feed",
+            None,
+            folder_id,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        let a = db::NewArticle {
+            guid: "guid-a8".into(),
+            url: Some("http://example.com/never-in-remote-post".into()),
+            title: "Local Only Article".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>x</p>".into()),
+            body_text: "x".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some(chrono::Utc::now().to_rfc3339()),
+            source: "direct".into(),
+        };
+        db::upsert_article_with_feed(&conn, feed_id, &a, false)
+            .unwrap()
+            .0
+    };
+    {
+        let conn = db.lock().await;
+        app_lib::commands::record_read_state(&conn, aid, true).expect("enqueue read");
+        // 回填入队时间为 40 天前（超过 30 天保留期）
+        let old = (chrono::Utc::now() - chrono::Duration::days(40))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        conn.execute("UPDATE sync_queue SET created_at = ?1", [old])
+            .unwrap();
+    }
+
+    let report = sync::states_phase(&db, &http, false)
+        .await
+        .expect("states phase");
+
+    let left: i64 = {
+        let conn = db.lock().await;
+        conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(left, 0, "陈旧且无法绑定的队列项应被老化清理");
+    assert!(
+        report.errors.iter().any(|e| e.contains("队列老化")),
+        "应记录老化清理动作，实际 {:?}",
+        report.errors
+    );
+}
+
+/// A-8 对照：保留期内的队列项不受老化影响（避免误清正在等绑定的变更）。
+#[tokio::test]
+async fn fresh_queue_items_survive_aging() {
+    let (db, http, _server) = setup("gap_a8b").await;
+    let aid = {
+        let conn = db.lock().await;
+        let folder_id = db::create_folder(&conn, "本地分类", "article").unwrap();
+        let feed_id = db::insert_feed(
+            &conn,
+            "http://example.com/never-in-remote.xml",
+            None,
+            "Local Only Feed",
+            None,
+            folder_id,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        let a = db::NewArticle {
+            guid: "guid-a8b".into(),
+            url: Some("http://example.com/never-in-remote-post".into()),
+            title: "Local Only Article".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>x</p>".into()),
+            body_text: "x".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some(chrono::Utc::now().to_rfc3339()),
+            source: "direct".into(),
+        };
+        db::upsert_article_with_feed(&conn, feed_id, &a, false)
+            .unwrap()
+            .0
+    };
+    {
+        let conn = db.lock().await;
+        app_lib::commands::record_star_state(&conn, aid, true).expect("enqueue star");
+    }
+
+    let _ = sync::states_phase(&db, &http, false)
+        .await
+        .expect("states phase");
+
+    let left: i64 = {
+        let conn = db.lock().await;
+        conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(left, 1, "保留期内的队列项应保留（等待绑定后补推）");
+}

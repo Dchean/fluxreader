@@ -287,16 +287,37 @@ async fn exec_push(client: &Backend, plan: &PushPlan, report: &mut SyncReport) -
 /// 即时状态推送：只推 sync_queue（read/unread/star/unstar + 副本广播），
 /// 不做任何 pull。set_read/set_starred 变更后 ~1s 内到达服务端。
 /// 失败静默（队列保留，下轮同步重推）——后台同步不打扰用户。
+/// 队列保留期（A-8）：超过该天数仍无远端绑定的状态项视为无法收敛，清理并记录。
+const QUEUE_RETENTION_DAYS: i64 = 30;
+
+/// 老化清理（A-8）：无远端绑定的状态队列项此前会永久滞留（plan_push 跳过但
+/// 保留、pending 保护长期存在、队列无 TTL）。清理结果计入 report 便于诊断。
+fn age_stale_queue(conn: &Connection, report: &mut SyncReport) {
+    // 与 sync_queue.created_at 同格式（SQLite datetime('now')：UTC 无时区后缀）
+    let cutoff = (Utc::now() - chrono::Duration::days(QUEUE_RETENTION_DAYS))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    match db::prune_stale_unbound(conn, &cutoff) {
+        Ok(n) if n > 0 => report.errors.push(format!(
+            "队列老化：清理 {n} 条超过 {QUEUE_RETENTION_DAYS} 天仍未绑定远端的状态变更（本地状态保留，但不再尝试推送）"
+        )),
+        Ok(_) => {}
+        Err(e) => report.errors.push(format!("队列老化清理失败: {e}")),
+    }
+}
+
 pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) {
     let Some(client) = build_client(db, http).await else {
         return;
     };
     // 串行化：与 states_phase/feeds_phase 的推送段互斥（见 PUSH_LOCK 注释）
     let _guard = PUSH_LOCK.lock().await;
-    let plan = {
+    let (plan, mut report) = {
         let conn = db.lock().await;
+        let mut report = SyncReport::default();
+        age_stale_queue(&conn, &mut report);
         match plan_push(&conn) {
-            Ok(p) => p,
+            Ok(p) => (p, report),
             Err(e) => {
                 log::warn!("sync: 读队列失败: {e}");
                 return;
@@ -306,7 +327,6 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
     if plan.status.is_empty() && plan.stars.is_empty() {
         return;
     }
-    let mut report = SyncReport::default();
     let done = exec_push(&client, &plan, &mut report).await;
     if !done.is_empty() {
         let conn = db.lock().await;
@@ -381,8 +401,16 @@ async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
     }
     let items: Vec<PendingFeed> = {
         let conn = db.lock().await;
+        let queued = match db::take_sync_queue(&conn) {
+            Ok(v) => v,
+            Err(e) => {
+                // C-2：读队列失败不再静默当空队列
+                report.errors.push(format!("读取同步队列失败: {e}"));
+                Vec::new()
+            }
+        };
         let mut out = Vec::new();
-        for item in db::take_sync_queue(&conn).unwrap_or_default() {
+        for item in queued {
             if item.action != "add_feed" {
                 continue;
             }
@@ -1237,6 +1265,7 @@ pub async fn states_phase(
         let _guard = PUSH_LOCK.lock().await;
         let plan = {
             let conn = db.lock().await;
+            age_stale_queue(&conn, &mut report);
             plan_push(&conn)?
         };
         let done = exec_push(&client, &plan, &mut report).await;
@@ -1254,6 +1283,7 @@ pub async fn states_phase(
         let _guard = PUSH_LOCK.lock().await;
         let plan = {
             let conn = db.lock().await;
+            age_stale_queue(&conn, &mut report);
             plan_push(&conn)?
         };
         if !plan.status.is_empty() || !plan.stars.is_empty() {

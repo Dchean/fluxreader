@@ -61,7 +61,8 @@ pub use sync_map::{
     update_feed_title_if_empty, SyncMatchMaps,
 };
 pub use sync_queue::{
-    enqueue_sync, prune_sync, purge_remove_feed_zombies, take_sync_queue, SyncQueueItem,
+    enqueue_sync, prune_stale_unbound, prune_sync, purge_remove_feed_zombies, take_sync_queue,
+    SyncQueueItem,
 };
 pub use url_norm::normalize_url;
 

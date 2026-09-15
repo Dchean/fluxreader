@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-15T16:18:38.523756Z",
+  "roots": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/feeds.rs",
+    "src-tauri/src/db/folders.rs",
+    "src-tauri/src/db/migrations.rs",
+    "src-tauri/src/db/sync_map.rs",
+    "src-tauri/src/db/sync_queue.rs",
+    "src-tauri/src/sync.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+      "sha256": "026cd4b7cb8b85fbd8384825f6670105f47a083460f064422e048b0df92f6bf1"
+    },
+    {
+      "path": "src-tauri/src/commands.rs",
+      "sha256": "be648b18f8897ce3d9b6426522025f9815f375ca02d732688664c9bf05c68733"
+    },
+    {
+      "path": "src-tauri/src/db.rs",
+      "sha256": "b27000deb02557dd7b65192e43d5f5732e9504f7095789ba3797f98db111f806"
+    },
+    {
+      "path": "src-tauri/src/db/feeds.rs",
+      "sha256": "1e20452430875113928012509e8e03bda447c1c6bb198a8ace3656dc5ebe3db7"
+    },
+    {
+      "path": "src-tauri/src/db/folders.rs",
+      "sha256": "7abf999270c83470a64c7cd09e8c71b12938c33b31ba0b7eb6c77dbb8dc9d875"
+    },
+    {
+      "path": "src-tauri/src/db/migrations.rs",
+      "sha256": "98e18e5e1cb540336ce3e5879183544fd278e3294880fce275fdc8b712cd4ffb"
+    },
+    {
+      "path": "src-tauri/src/db/sync_map.rs",
+      "sha256": "4027688f4f7849a335f758bdfe4801e50b30e57d26da8fe125e3fd1cf96d3207"
+    },
+    {
+      "path": "src-tauri/src/db/sync_queue.rs",
+      "sha256": "8487b91e0f951d1feddff481900e3a78a5bf051dea53b9a7e7448a96e8c23efd"
+    },
+    {
+      "path": "src-tauri/src/sync.rs",
+      "sha256": "7202a43ec46c953cabdb0911db4ff214614c94a3889b895832b36ac8ad557d63"
+    },
+    {
+      "path": "src-tauri/tests/mock_greader.rs",
+      "sha256": "bf4c302f62d03605e4031fff65bd839c81cfb050d34458a8c14a2d212d73a99c"
+    },
+    {
+      "path": "src-tauri/tests/sync_gap_repro_e2e.rs",
+      "sha256": "a8e8b120dd1b94f5faef3ce8161147870e3b21d0855ff26244e9f4f59476936d"
+    }
+  ],
+  "digest": "52c0a9c1ae48bd380876f12ee2b95e15f31dc014a3f982445022fa5aa61f9afc"
+}
