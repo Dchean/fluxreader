@@ -154,6 +154,9 @@ export interface AppState {
   /** 后端数据加载中（首屏骨架） */
   dataLoading: boolean;
   bootstrapFromBackend: () => Promise<void>;
+  /** 启动装载失败信息（tauri 模式后端异常时展示错误态+重试，绝不回退 mock 演示数据——P0-2） */
+  bootstrapError: string | null;
+  retryBootstrap: () => Promise<void>;
   reloadFromBackend: () => Promise<void>;
   /** 已从后端加载的文章数（分页游标：reload 重置为 PAGE_SIZE，loadMore 累加）。
       避免一次性全量拉取，滚动到底部按需追加，提高同步后重载速度。 */
@@ -201,10 +204,21 @@ export interface AppState {
   summarizeEntry: (id: string, opts?: { silent?: boolean }) => void;
   /** 滚动触发的批量已读（滚出列表/正文到底）：静默、只标未读项 */
   markEntriesReadBulk: (ids: string[]) => void;
+  /** 卡片级翻译（社交/通知卡）：按 id 流式生成该条目译文，不依赖 Reader 选中态（P1-7） */
+  translateEntry: (id: string, opts?: { silent?: boolean }) => void;
+  /** 正在按 id 生成译文（卡片级状态，与全局 translating 单布尔隔离，避免多卡互串） */
+  translatingIds: Record<string, true>;
   /** 正文懒加载水合（选中文章 / 社交卡片挂载） */
   ensureArticleContent: (id: string, opts?: { extractFulltext?: boolean }) => void;
   /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰） */
   hydrateArticleContent: (ids: string[]) => void;
+  /** 正文水合失败重试（卡片内联重试入口）：清错误态后重新入队 */
+  retryHydration: (id: string) => void;
+  /** 正文水合失败的错误信息（id → 消息；成功时清除） */
+  hydrationErrors: Record<string, string>;
+  /** 已完成水合的条目集合（值恒为 true）：空正文条目（content_html 为 NULL）的
+      终态标记——content 为空串不能区分「未水合」与「后端无正文」，需独立集合 */
+  hydratedIds: Record<string, true>;
   /** 手动全文提取（工具栏按钮；已提取时为刷新全文） */
   extractCurrentArticle: () => void;
 

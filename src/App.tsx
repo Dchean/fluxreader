@@ -48,6 +48,7 @@ export default function App() {
   const toasts = useAppStore((s) => s.toasts);
   const playerActive = useAppStore((s) => s.player.isActive);
   const dataLoading = useAppStore((s) => s.dataLoading);
+  const bootstrapError = useAppStore((s) => s.bootstrapError);
 
   /* PlayerBar 活跃 → body 标记类（toast 层上移避让底栏） */
   useEffect(() => {
@@ -272,6 +273,19 @@ export default function App() {
           <div className="app-loading-splash">
             <div className="app-loading-logo"><img src="/logo.svg" alt="" draggable={false} /></div>
             <div className="app-loading-bar" />
+          </div>
+        ) : bootstrapError ? (
+          <div className="app-loading-splash bootstrap-error">
+            <div className="app-loading-logo"><img src="/logo.svg" alt="" draggable={false} /></div>
+            <p className="bootstrap-error-text">启动失败：{bootstrapError}</p>
+            <button
+              className="bootstrap-error-retry"
+              onClick={() => {
+                void useAppStore.getState().retryBootstrap();
+              }}
+            >
+              重试
+            </button>
           </div>
         ) : (
           <>

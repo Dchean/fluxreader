@@ -3282,6 +3282,22 @@ body.has-player .toast-layer {
   line-height: 1.55;
 }
 
+/* 社交卡正文水合失败的内联重试按钮：继承占位样式，弱化为文本链接观感 */
+.social-text .hydrate-retry {
+  display: block;
+  min-height: 60px;
+  line-height: 1.55;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+}
+
 
 /* ============================================================
    全局右键菜单（替换 WebView2 默认菜单）
@@ -3345,4 +3361,26 @@ body.has-player .toast-layer {
 
 .ctx-menu-label {
   flex: 1;
+}
+
+/* 启动失败错误态（P0-2）：复用首屏 splash 容器，附加错误文案与重试按钮 */
+.bootstrap-error .bootstrap-error-text {
+  margin: 16px 0 12px;
+  font-size: 14px;
+  opacity: 0.75;
+  max-width: 420px;
+  text-align: center;
+  word-break: break-all;
+}
+.bootstrap-error .bootstrap-error-retry {
+  padding: 6px 24px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.bootstrap-error .bootstrap-error-retry:hover {
+  opacity: 0.8;
 }

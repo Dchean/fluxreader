@@ -58,6 +58,8 @@ export interface ArticleEntry {
   aiSummary: string;
   /** 正文已被 Readability 全文覆盖（手动按钮/设置自动模式共用状态源，DB 持久化；mock 数据可缺省） */
   fulltextExtracted?: boolean;
+  /** 批量水合已终态（含空正文）：防空正文条目被反复判「未水合」造成重复拉取与永挂占位 */
+  hydrated?: boolean;
 
   /* ---- 布局专属扩展（可空，按布局使用） ---- */
   durationSec?: number;   // 播客：时长秒数

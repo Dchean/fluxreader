@@ -282,6 +282,11 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   const openLightbox = useAppStore((s) => s.openLightbox);
   const binding = useAppStore((s) => s.feedIndex.get(item.feedId));
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
+  /* 正文水合状态：错误态显示内联重试；空正文终态显示「暂无正文」而非永挂「加载正文…」 */
+  const hydrationError = useAppStore((s) => s.hydrationErrors[item.id]);
+  const hydrated = useAppStore((s) => s.hydratedIds[item.id]);
+  /* 卡片级翻译状态（按 id 订阅，生成中指示） */
+  const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
   /* 社交卡片正文直接渲染 item.content：进入视口附近才懒加载水合（避免几百张
      卡片同时 getArticle 卡顿） */
   const hydrateRef = useLazyHydrate(item.id);
@@ -348,16 +353,30 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
             handleArticleLinkClick(e);
           }}
         >
-          {item.content
-            ? <div dangerouslySetInnerHTML={{ __html: item.content }} />
-            : <span className="hydrate-placeholder" style={{ opacity: 0.45 }}>加载正文…</span>}
+          {item.content ? (
+            <div dangerouslySetInnerHTML={{ __html: item.content }} />
+          ) : hydrationError ? (
+            <button
+              className="hydrate-retry"
+              onClick={() => useAppStore.getState().retryHydration(item.id)}
+            >
+              正文加载失败：{hydrationError}（点击重试）
+            </button>
+          ) : hydrated ? (
+            <span className="hydrate-placeholder" style={{ opacity: 0.45 }}>暂无正文</span>
+          ) : (
+            <span className="hydrate-placeholder" style={{ opacity: 0.45 }}>加载正文…</span>
+          )}
         </div>
         {isLong && (
           <button className="notif-expand-btn social-expand-btn" onClick={() => setExpanded(!expanded)}>
             {expanded ? '收起内容 ▲' : '展开更多 ▼'}
           </button>
         )}
-        <div className={"social-translated-block" + (showTranslate ? " show" : "")}>{item.translatedContent}</div>
+        <div className={"social-translated-block" + (showTranslate ? " show" : "")}>
+          {item.translatedContent}
+          {translatingCard ? <span> ⏳ 翻译中…</span> : null}
+        </div>
         <div className="social-actions-bar">
           <button
             className={`social-act-item ${item.isStarred ? 'starred' : ''}`}
@@ -383,8 +402,13 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
             className={`social-act-item ${showTranslate ? 'active-translate' : ''}`}
             onClick={() => {
               const next = !showTranslate;
+              if (next && !item.translatedContent) {
+                /* 无译文：实际触发生成（P1-7 空壳修复） */
+                useAppStore.getState().translateEntry(item.id);
+              } else if (item.translatedContent) {
+                showToast(next ? '已显示正文翻译' : '已隐藏正文翻译');
+              }
               setTransOverride(next);
-              showToast(next ? '已显示正文翻译' : '已隐藏正文翻译');
             }}
           >
             <Icons.globe />
@@ -513,6 +537,7 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
   const summaryError = useAppStore((s) => s.summaryErrors[item.id] || '');
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
+  const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
   const [expanded, setExpanded] = useState(false);
   /* 进入视口附近才水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
      「展开更多」必须展示全文而非同一段截断文本 */
@@ -547,7 +572,13 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
           </button>
           <button
             className={`toggle-action-btn notif-act ${transShow ? 'act-on' : ''}`}
-            onClick={() => setTransOverride(!transShow)}
+            onClick={() => {
+              const next = !transShow;
+              if (next && !item.translatedContent) {
+                useAppStore.getState().translateEntry(item.id);
+              }
+              setTransOverride(next);
+            }}
           >
             <Icons.globe />
             <span>翻译</span>
@@ -585,7 +616,10 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
 
       <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
 
-      <div className={`notif-translated-block ${transShow ? 'show' : ''}`}>{item.translatedContent}</div>
+      <div className={`notif-translated-block ${transShow ? 'show' : ''}`}>
+        {item.translatedContent}
+        {translatingCard ? <span> ⏳ 翻译中…</span> : null}
+      </div>
 
       {isLong && (
         <button className="notif-expand-btn" onClick={() => setExpanded(!expanded)}>

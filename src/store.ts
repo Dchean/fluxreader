@@ -176,6 +176,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   translating: false,
   summaryErrors: {},
   translateErrors: {},
+  translatingIds: {},
+  hydrationErrors: {},
+  hydratedIds: {},
   openedReadIds: {},
 
   /* 启动用空数据 + dataLoading 骨架（不用 mock 先行渲染——曾导致卸载重装后
@@ -213,6 +216,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   /* mock 数据先行渲染；Tauri 环境启动时 bootstrapFromBackend 会整体替换 */
   dataMode: 'mock',
   dataLoading: true,
+  bootstrapError: null,
   articlesLimit: 0,
   articlesLoading: false,
   articlesExhausted: false,
@@ -402,11 +406,28 @@ export const useAppStore = create<AppState>((set, get) => ({
               get().showToast(`全文提取失败：${msg}`, { label: '重试', run: () => get().extractCurrentArticle() });
             });
         }
+      }).catch((e: unknown) => {
+        /* 打开文章的详情拉取失败：Reader 不能静默空白（REQ-001 排查 P1-8） */
+        const msg = extractError(e);
+        set((s) => ({ hydrationErrors: { ...s.hydrationErrors, [id]: msg } }));
+        get().showToast(`正文加载失败：${msg}`, { label: '重试', run: () => get().ensureArticleContent(id, { extractFulltext: true }) });
       });
       return;
     }
-    /* 列表卡片（社交/通知）水合：已水合则短路，否则并入批量队列 */
-    if (art.content) return;
+    /* 列表卡片（社交/通知）水合：已水合（含空正文终态）则短路，否则并入批量队列。
+       不能只判 art.content——content_html 为 NULL 的条目水合后 content 仍为空串，
+       仅按 content 判定会让它每次挂载都重新入队（重复 IPC 洪峰 + 永挂「加载正文…」）。 */
+    if (art.content || get().hydratedIds[id]) return;
+    enqueueHydration(id);
+  },
+
+  /** 水合失败重试：清错误态后重新入队（卡片内联重试入口）。 */
+  retryHydration: (id) => {
+    set((s) => {
+      const next = { ...s.hydrationErrors };
+      delete next[id];
+      return { hydrationErrors: next };
+    });
     enqueueHydration(id);
   },
 
@@ -416,7 +437,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     /* 过滤出「仍存在且未水合」的 id（幂等 + 去重） */
     const pending = ids.filter((id) => {
       const a = get().entries.find((e) => e.id === id);
-      return a && !a.content;
+      return a && !a.content && !get().hydratedIds[id];
     });
     if (pending.length === 0) return;
     void api.getArticles(pending.map(Number)).then((rows) => {
@@ -440,16 +461,107 @@ export const useAppStore = create<AppState>((set, get) => ({
             aiSummary: row.ai_summary ?? a.aiSummary,
             url: row.url ?? a.url,
             fulltextExtracted: row.fulltext_extracted ?? false,
+            hydrated: true,
           };
         });
         if (changed) syncCurrentViewCache(entries);
         return changed ? { entries } : s;
+      });
+      /* 水合成功的条目记入 hydratedIds 终态（空正文也算已水合），并清其错误态 */
+      const hydrated = rows.map((r) => String(r.id));
+      set((s) => {
+        const nextErrors = { ...s.hydrationErrors };
+        for (const id of hydrated) delete nextErrors[id];
+        const nextHydrated = { ...s.hydratedIds };
+        for (const id of hydrated) nextHydrated[id] = true;
+        return { hydrationErrors: nextErrors, hydratedIds: nextHydrated };
+      });
+    }).catch((e: unknown) => {
+      /* 批量水合失败：错误落到对应卡片（社交卡内联重试），不再静默假加载 */
+      const msg = extractError(e);
+      set((s) => {
+        const next = { ...s.hydrationErrors };
+        for (const id of pending) next[id] = msg;
+        return { hydrationErrors: next };
       });
     });
   },
 
   clearReaderSelection: () =>
     set({ activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false, showFulltext: false }),
+
+  /** 卡片级翻译（社交/通知卡）：按 id 流式生成该条目译文，不依赖 Reader 选中态。
+      复用 toggleReaderTranslation 的流式与消毒回读逻辑，但状态按条目隔离
+      （不复用全局 translating 单布尔，避免多卡互串——排查 F4 同类问题的教训）。 */
+  translateEntry: (id, opts) => {
+    const silent = opts?.silent ?? false;
+    if (get().dataMode !== 'tauri') {
+      if (!silent) get().showToast('浏览器演示模式无 AI 服务');
+      return;
+    }
+    const art = get().entries.find((a) => a.id === id);
+    if (!art || art.translatedContent) return;
+    set((st) => ({
+      translatingIds: { ...st.translatingIds, [id]: true },
+      translateErrors: { ...st.translateErrors, [id]: '' },
+    }));
+    void api
+      .aiTranslate(
+        Number(id),
+        (delta) => {
+          set((st) => {
+            const cur = st.entries.find((a) => a.id === id);
+            if (!cur) return st;
+            const next = (cur.translatedContent || '') + delta;
+            return { entries: st.entries.map((a) => (a.id === id ? { ...a, translatedContent: next } : a)) };
+          });
+        },
+        () => {
+          /* 流式结束：回读 DB 的消毒版译文（同 Reader 路径的 XSS 防护） */
+          set((st) => {
+            const nextIds = { ...st.translatingIds };
+            delete nextIds[id];
+            return { translatingIds: nextIds };
+          });
+          void api.getArticle(Number(id)).then((row) => {
+            if (!row) return;
+            const cur = get().entries.find((a) => a.id === id);
+            if (!cur) return;
+            const safe = row.translated_content ?? '';
+            if (!safe) return;
+            set((st) => ({
+              entries: st.entries.map((a) => (a.id === id ? { ...a, translatedContent: safe } : a)),
+            }));
+          });
+        },
+        (msg) => {
+          set((st) => {
+            const nextIds = { ...st.translatingIds };
+            delete nextIds[id];
+            return {
+              translatingIds: nextIds,
+              translateErrors: { ...st.translateErrors, [id]: msg },
+            };
+          });
+          if (!silent) {
+            get().showToast(`翻译失败：${msg}`, { label: '重试', run: () => get().translateEntry(id) });
+          }
+        },
+      )
+      .catch(() => {
+        set((st) => {
+          const nextIds = { ...st.translatingIds };
+          delete nextIds[id];
+          return {
+            translatingIds: nextIds,
+            translateErrors: { ...st.translateErrors, [id]: 'AI 服务未配置或不可达' },
+          };
+        });
+        if (!silent) {
+          get().showToast('翻译失败：AI 服务未配置或不可达', { label: '重试', run: () => get().translateEntry(id) });
+        }
+      });
+  },
 
   /** 手动全文提取：Readability 拉原文网页存 content；rawContent 始终保留 RSS 原文
       （供「全文 ↔ RSS 正文」切换回跳）。提取成功后进入全文视图。 */
@@ -846,6 +958,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       articlesExhausted: articles.length < ARTICLES_PAGE_SIZE,
       dataMode: 'tauri',
       dataLoading: false,
+      /* 新快照不带正文：清空水合终态，让社交/通知卡片重新水合 */
+      hydratedIds: {},
+      hydrationErrors: {},
     }));
     /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
     void api.syncStatus().then((st) => {
@@ -911,7 +1026,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 替换 entries（筛选视图的完整列表），重置分页游标（筛选视图不分页）
     const next = rows.map(articleRowToEntry);
     viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view), next);
-    set({ entries: next, articlesLimit: rows.length, articlesExhausted: true, articlesLoading: false });
+    set({
+      entries: next,
+      articlesLimit: rows.length,
+      articlesExhausted: true,
+      articlesLoading: false,
+      /* 新快照不带正文：清空水合终态，让卡片重新水合 */
+      hydratedIds: {},
+      hydrationErrors: {},
+    });
   },
 
   /** 搜索/深层打开文章：计算目标文章在当前筛选下的绝对位置，从该页加载列表
@@ -953,6 +1076,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       articlesLoading: false,
       activeArticleId: articleId,
       openedReadIds: { ...get().openedReadIds, [articleId]: true },
+      /* 新快照不带正文：清空水合终态，让卡片重新水合 */
+      hydratedIds: {},
+      hydrationErrors: {},
     });
     // 打开文章：触发智能全文（与 selectArticle 一致）
     get().ensureArticleContent(articleId, { extractFulltext: true });
@@ -977,17 +1103,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       await get().reloadFromBackend();
     } catch (e) {
-      /* 后端异常时回退 mock，保证界面可用（Tauri 极少触发） */
+      /* P0-2：后端异常时展示错误态 + 重试入口，绝不回退 mock 演示数据——
+         假订阅/假文章会让用户误以为数据还在，随后任何操作都写库失败 */
       console.error('bootstrap from backend failed:', e);
-      const cats = createInitialCategories();
-      set({
-        categories: cats,
-        entries: createInitialEntries(),
-        feedIndex: buildFeedIndex(cats),
-        dataMode: 'mock',
-        dataLoading: false,
-      });
+      set({ dataLoading: false, bootstrapError: extractError(e) });
     }
+  },
+
+  /** 启动失败重试：清错误态后重新装载（不重载页面） */
+  retryBootstrap: async () => {
+    set({ bootstrapError: null, dataLoading: true });
+    await get().bootstrapFromBackend();
   },
 
   triggerManualSync: () => {
@@ -1052,9 +1178,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       try {
         start = await api.githubLoginStart();
       } catch (first) {
-        /* WebDAV 冲突：确认后带 force 重发（后端错误码 webdavConflict） */
-        const msg = first instanceof Error ? first.message : String(first);
-        if (msg.includes('WebDAV')) {
+        /* WebDAV 冲突：确认后带 force 重发（后端错误码 webdavConflict）。
+           用结构化 code 判定而非 String(e)——Tauri 拒绝值是对象，
+           String() 恒得 [object Object]，此前确认框永不弹出（P1-10） */
+        const code = first && typeof first === 'object' ? (first as { code?: unknown }).code : undefined;
+        const msg = extractError(first);
+        if (code === 'webdavConflict' || msg.includes('WebDAV')) {
           if (!window.confirm(`${msg}
 
 确定切换为 GitHub Gist 同步吗？`)) return;

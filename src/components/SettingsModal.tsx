@@ -718,7 +718,7 @@ function AiTab() {
       await api.saveAiConfig(JSON.stringify(cfg));
       showToast(`连通成功：${list.length} 个可用模型`);
     } catch (e) {
-      showToast(`连通失败：${e}`);
+      showToast(`连通失败：${extractError(e)}`);
     } finally {
       setTesting(false);
     }
