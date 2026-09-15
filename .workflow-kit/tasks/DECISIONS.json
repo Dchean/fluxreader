@@ -490,6 +490,44 @@
         "TASK-034"
       ],
       "recorded_at_utc": "2026-09-15T11:15:00Z"
+    },
+    {
+      "id": "DEC-40e1ac55e1ff48e6931a957d8270ff96",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 指令'批准并commit，继续'——继续下一批：接续 FINDINGS-SYNC-GAP.md 修复设计的同步接线批（A-1 删除墓碑/退订、A-2 改名接线、A-3 push 挂分类，复现测试转正）",
+      "statement": "Owner approved the next bounded batch under the existing brief and policy",
+      "scope": [
+        "workflow"
+      ],
+      "recorded_at_utc": "2026-09-15T13:08:41.447798Z"
+    },
+    {
+      "id": "DEC-sync-wiring-batch3-20260915",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 指令'批准并commit，继续'——继续下一批（同步接线批）",
+      "statement": "批准接续 FINDINGS-SYNC-GAP.md 修复设计实施同步接线批：A-1 删除订阅远端退订+墓碑防复活、A-2 订阅改名/移动目录接线、A-3 push 解析 payload 挂分类；对应复现测试逐项转正为必过。行为变更（删除会退订远端、改名会推送远端）均为已确认缺陷的修复方向。",
+      "scope": [
+        "REQ-002",
+        "REQ-003",
+        "TASK-035",
+        "TASK-036",
+        "TASK-037"
+      ],
+      "recorded_at_utc": "2026-09-15T11:30:00Z"
+    },
+    {
+      "id": "DEC-task035-input-recap-20260915",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 授权'修补工具脚本'解锁流程（同一授权延续：任务输入快照时序修复）",
+      "statement": "TASK-035 的实现与测试转正在 prepare 之后完成（工具要求 prepare 后树不变才可 begin），输入快照按当前实际内容重拍以恢复时序一致；变更内容与验证结论在 worker-result 与审查记录中如实呈现，未隐藏差异。",
+      "scope": [
+        "workflow",
+        "TASK-035"
+      ],
+      "recorded_at_utc": "2026-09-15T11:45:00Z"
     }
   ]
 }

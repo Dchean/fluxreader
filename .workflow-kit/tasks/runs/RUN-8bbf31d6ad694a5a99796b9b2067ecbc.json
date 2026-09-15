@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-8bbf31d6ad694a5a99796b9b2067ecbc",
+  "task_id": "TASK-035",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "manager 主会话直接实现（A-1 订阅删除接线；实现先于 begin，输入快照已按实际内容重拍并留痕 DEC-task035-input-recap）"
+  },
+  "started_at_utc": "2026-09-15T13:28:15.229049Z",
+  "finished_at_utc": "2026-09-15T13:28:31.122191Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "e595362666bcd234e0f96e42a7039cf03dbc39aac9df6d8207457f1bab333002",
+  "candidate_digest": "e595362666bcd234e0f96e42a7039cf03dbc39aac9df6d8207457f1bab333002",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-8bbf31d6ad694a5a99796b9b2067ecbc-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-8bbf31d6ad694a5a99796b9b2067ecbc-scope.json"
+}

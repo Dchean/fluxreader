@@ -1,0 +1,55 @@
+{
+  "task_id": "TASK-035",
+  "candidate_digest": "4de15707e87d854f8cd3c5bf4c9791f404ed764112cd902cabd724b65da581f2",
+  "verification_run": "RUN-86d4f5837c794066af853ac77707623a",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（未参与实现）：墓碑实现正确（add 幂等、remove 精确、脏 JSON 容错），三处 URL 比对统一使用 db::normalize_url；pull_feeds 跳过复活位于 URL 匹配/建 feed 之前，清墓碑仅在远端不再列出时执行；delete_feed 锁不跨 await，墓碑先于删除落库，未连接/Fever/退订失败均保留墓碑；A-1 测试三段真实覆盖（墓碑防复活→退订+清墓碑→退订后不复活），mock unsubscribe 现真实移除订阅且不影响其他套件。审查者带 NO_PROXY 复跑 cargo test 全量 + 四个 ignored e2e 套件全部通过。审查指出的注释错位（push_feeds 文档注释被新函数挤走）已由实现者修正并重新验证（本 candidate）。边界结论留档：删除未绑定订阅仍写墓碑不会永久拦阻本地重订阅（add_feed 不查墓碑，陈旧墓碑会在远端列表不含时自动清扫）；两个窄场景（他端订阅 URL 的墓碑长期保留、离线 add_feed 后立即删除的队项竞态）行为可解释，建议后续批次一并评估。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收四条逐条满足：发送 unsubscribe、墓碑防复活、墓碑清除（退订确认/远端不含）、复现测试转正且门禁全绿",
+      "evidence_files": [
+        "src-tauri/src/sync.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "cargo test 111/0；审查者复跑 sync_phases/sync_e2e/sync_content_e2e/account_lifecycle（--ignored）全过；mock 改动影响面经 grep 确认仅本任务用例",
+      "evidence_files": [
+        "src-tauri/tests/mock_greader.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "未连接/Fever/退订失败/清墓碑失败均有兜底（保留墓碑 + pull 陈旧清扫闭环）；删除不存在的 id 由报错取代静默 Ok，更严格",
+      "evidence_files": [
+        "src-tauri/src/sync.rs",
+        "src-tauri/src/db/feeds.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "墓碑逻辑集中在 db/feeds.rs 并复用 settings 存储（无需迁移）；命令层抽出 record_feed_deletion 便于测试；注释错位已修正",
+      "evidence_files": [
+        "src-tauri/src/db/feeds.rs",
+        "src-tauri/src/commands.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "墓碑为小数组 JSON，读写仅在删除与同步阶段；pull 每轮一次读取 + O(n) 比对，规模可忽略",
+      "evidence_files": [
+        "src-tauri/src/sync.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

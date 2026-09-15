@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-035",
+  "run_id": "RUN-8bbf31d6ad694a5a99796b9b2067ecbc",
+  "status": "ready_for_verification",
+  "summary": "完成 A-1 订阅删除接线（实现先于本 run 完成，输入快照已按实际内容重拍并留痕 DEC-task035-input-recap；本 run 变更清单为空，实际改动文件：src-tauri/src/db/feeds.rs、db.rs、src-tauri/src/sync.rs、src-tauri/src/commands.rs、src-tauri/tests/mock_greader.rs、src-tauri/tests/sync_gap_repro_e2e.rs）。(1) db 层新增删除墓碑：规范化 URL 存 app_settings（add/remove/list）+ feed_remote_info（URL 与远端绑定 id）。(2) commands::record_feed_deletion（命令与测试共用）：写墓碑 → 删本地 → 返回待退订目标（已绑定远端且同步已配置时）；delete_feed 命令锁外 best-effort 退订。(3) sync::unsubscribe_remote：GReader 走已有 unsubscribe（Fever 无端点），成功即清墓碑。(4) pull_feeds：墓碑 URL 跳过复活；远端列表已不含的墓碑清除。(5) 测试：A-1 复现测试转正为必过 deleted_feed_stays_deleted_and_unsubscribes（三段：墓碑防复活 → 退订+墓碑清除 → 退订后不复活）；mock 的 unsubscribe 现真实移除远端订阅；A-2 复现保持 #[ignore]（TASK-036）。门禁：fmt 通过、cargo test 111/0（110 基线 + 转正的 A-1 测试）。",
+  "changed_files": [],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

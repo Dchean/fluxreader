@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "id": "TASK-035",
+  "title": "删除订阅接线：远端退订 + 删除墓碑防复活（A-1）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "修复 A-1：delete_feed 此前只删本地——已绑定远端的订阅不回传退订，且下次 pull 会按远端订阅列表把已删订阅连文章一起复活。实现：本地删除时写入删除墓碑（规范化 URL，存 app_settings，退订失败也防复活）；同步已配置且已绑定远端时 best-effort 调用 GReader unsubscribe（Fever 无端点，仅墓碑）；退订成功或远端列表已不含该 URL 时清除墓碑。A-1 复现测试转正为必过。",
+  "non_goals": [
+    "A-2 改名/移动目录接线（TASK-036）",
+    "A-3 分类挂载（TASK-037）",
+    "Fever 退订端点（协议无此端点）",
+    "分类（folder）墓碑（A-4，后续任务）"
+  ],
+  "requirement_refs": [
+    "REQ-002"
+  ],
+  "reference_ids": [
+    "REF-001"
+  ],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-sync-wiring-batch3-20260915"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "删除已绑定远端的订阅会发送 unsubscribe（mock 收到 ac=unsubscribe）",
+    "删除后再次同步，已删订阅不被远端列表复活（墓碑生效）",
+    "退订成功或远端已不含该 URL 时墓碑清除（不留永久墓碑）",
+    "原复现测试 deleted_feed_revives_on_pull 转正为必过；fmt 与 cargo test 全绿"
+  ],
+  "gates": [
+    {
+      "id": "fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "rust-test",
+      "program": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-15 基线（当前工作区）：cargo test 110/0；三个同步缺口复现测试（A-1/A-2 保持 #[ignore]、离线补推/C-1 已必过）。行为变更：删除订阅现在会向远端退订（GReader）并写墓碑防复活——用户确认的缺陷修复（FINDINGS-SYNC-GAP.md A-1，REQ-002 范围）。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    },
+    "decision_ids": [
+      "DEC-sync-wiring-batch3-20260915"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "Rust 默认测试集与既有同步契约（feeds/states 两阶段、push/pull 语义）",
+        "reason": "既有行为不得回归",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "adapt",
+        "target": "deleted_feed_revives_on_pull 复现测试转正",
+        "reason": "A-1 修复后该场景行为变更为期望行为（不复活+发送退订）",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "墓碑生命周期回归（删除→同步不复活→远端确认后清除）",
+        "reason": "墓碑为新增持久状态，需覆盖其写入与清除",
+        "gate_ids": [
+          "rust-test"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-035-input-68288d7a090141a5be0550c77752a939.json",
+    "digest": "e595362666bcd234e0f96e42a7039cf03dbc39aac9df6d8207457f1bab333002",
+    "source_revision": null,
+    "definition_digest": "ab2d39bd9a686f7232af378c02e41bd231f597cff40ac1b604b2bcae8f8ee174"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T13:28:15.228046Z",
+    "deadline_at_utc": "2026-09-15T14:58:15.228046Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-8016e0ec0d6a45419b5ae140d3808f66",
+  "run_ids": [
+    "RUN-8bbf31d6ad694a5a99796b9b2067ecbc",
+    "RUN-27005df6a70f4e7aa1eeaec1b3eb48d0",
+    "RUN-86d4f5837c794066af853ac77707623a",
+    "RUN-5d79876caef249148b8fdd44e3ef9ba6"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-86d4f5837c794066af853ac77707623a-candidate.json",
+    "candidate_digest": "4de15707e87d854f8cd3c5bf4c9791f404ed764112cd902cabd724b65da581f2",
+    "verification_run": "RUN-86d4f5837c794066af853ac77707623a",
+    "review_run": "RUN-5d79876caef249148b8fdd44e3ef9ba6",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/feeds.rs",
+    "src-tauri/src/sync.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T13:28:15.275410Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T13:28:31.147294Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-15T13:31:22.304817Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T14:13:13.796732Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T14:13:36.382601Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}
