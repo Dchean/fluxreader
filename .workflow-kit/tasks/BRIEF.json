@@ -61,7 +61,8 @@
     "非阻塞观察项（文档漂移）：docs/ISSUES.md 的 ISSUE-008 行与 docs/ARCHITECTURE.md 仍写“sync.rs 仍有 17 处直接 SQL”，与本轮实测 0 处不符（TASK-022 已合并）。属文档同步缺口，非代码缺陷；需单独授权后修正。",
     "非阻塞观察项（未决产品问题）：Q-COMPAT-001、Q-BEHAVIOR-001、Q-QUALITY-001 仍开放（docs/PRODUCT.md）。不阻塞纯内部移动式重构，但会约束后续兼容性与性能验收范围。",
     "表示限制：旧决定 DEC-013 解除了任务墙钟与批次任务数上限，但工作流要求这两项必须为明确正整数。此处按 DEC-011 的原始值取 90 分钟 / 每批 3 个任务，并用 batch_rollover=allowed + financial.mode=none 自动续批、以 extend 追加时间；若需其它数值请告知。",
-    "已降级（2026-09-14 所有者指示）：编码改由当前 agent 承担，product_code_needs_independent_review=true 不再满足；review_mode=self_review_allowed，审查标注为自审，客观证据以四个必需门禁的原始日志为准。"
+    "已降级（2026-09-14 所有者指示）：编码改由当前 agent 承担，product_code_needs_independent_review=true 不再满足；review_mode=self_review_allowed，审查标注为自审，客观证据以四个必需门禁的原始日志为准。",
+    "2026-09-14 所有者指令：解除任务数量与时间限制，按评估路线跑完整项目流程。预算改为 1440 分钟/任务、20 任务/批、6 轮修复（保留真实上限）；路线见 .workflow-kit/docs/REFACTOR-REVIEW.md 与 DEC DEC-b91115a20fc0428f9a7b8cb5741ed678。"
   ],
   "ui": {
     "mode": "existing",

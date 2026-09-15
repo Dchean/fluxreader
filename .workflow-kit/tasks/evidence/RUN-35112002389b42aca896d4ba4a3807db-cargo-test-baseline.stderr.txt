@@ -1,0 +1,26 @@
+IS:<sysroot>\\lib\\rustlib\\etc\\liballoc.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libcore.natvis" "/NATVIS:<sysroot>\\lib\\rustlib\\etc\\libstd.natvis" "/NATVIS:D:\\OneDrive - chean\\fluxreader\\src-tauri\\target\\debug\\deps\\rustcpH8N1v\\scheduler_e2e-0.natvis" "/NATVIS:D:\\OneDrive - chean\\fluxreader\\src-tauri\\target\\debug\\deps\\rustcpH8N1v\\scheduler_e2e-1.natvis" "/NATVIS:D:\\OneDrive - chean\\fluxreader\\src-tauri\\target\\debug\\deps\\rustcpH8N1v\\scheduler_e2e-2.natvis"
+  = note: some arguments are omitted. use `--verbose` to show all linker arguments
+  = note: LINK : fatal error LNK1104: 无法打开文件“D:\OneDrive - chean\fluxreader\src-tauri\target\debug\deps\scheduler_e2e-46c10524a545eda0.exe”
+          
+
+warning: `app` (test "scheduler_e2e") generated 2 warnings
+error: could not compile `app` (test "scheduler_e2e") due to 1 previous error; 2 warnings emitted
+warning: `app` (bin "app") generated 1 warning
+warning: `app` (bin "app" test) generated 1 warning
+warning: `app` (test "mock_greader") generated 1 warning
+warning: `app` (test "github_auth_e2e") generated 1 warning
+warning: `app` (test "regression_e2e") generated 2 warnings
+warning: `app` (test "feed_edit_e2e") generated 2 warnings
+warning: `app` (test "fever_live_e2e") generated 2 warnings
+warning: `app` (test "ai_e2e") generated 1 warning
+warning: `app` (test "dedup_sync_e2e") generated 2 warnings
+warning: `app` (test "greader_live_e2e") generated 2 warnings
+warning: `app` (test "staged_refresh_e2e") generated 1 warning
+warning: `app` (test "fever_sync_live_e2e") generated 1 warning
+warning: `app` (test "ingestion_e2e") generated 1 warning
+warning: `app` (test "config_sync_e2e") generated 1 warning
+warning: `app` (test "account_lifecycle_e2e") generated 1 warning
+warning: `app` (test "sync_content_e2e") generated 1 warning
+warning: `app` (test "sync_phases_e2e") generated 1 warning
+warning: `app` (test "dual_client_e2e") generated 1 warning
+warning: `app` (test "sync_e2e") generated 1 warning
