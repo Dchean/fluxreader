@@ -279,3 +279,57 @@ pub fn feeds_fetch_failed_bound(conn: &Connection) -> AppResult<Vec<FeedRow>> {
 /* ============================================================
 Articles
 ============================================================ */
+
+/* ============================================================
+订阅删除墓碑（A-1）：本地删除后 pull 不得按远端列表复活。
+存 app_settings 的 JSON 数组（规范化 URL），避免为一次删除语义新增迁移；
+退订成功（远端确认）后清除。
+============================================================ */
+const FEED_TOMBSTONE_KEY: &str = "feed_tombstones";
+
+/// 删除订阅的墓碑 URL 列表（规范化）。
+pub fn feed_tombstones(conn: &Connection) -> AppResult<Vec<String>> {
+    let raw = super::get_setting(conn, FEED_TOMBSTONE_KEY)?;
+    Ok(raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default())
+}
+
+fn save_feed_tombstones(conn: &Connection, list: &[String]) -> AppResult<()> {
+    let raw = serde_json::to_string(list).unwrap_or_else(|_| "[]".into());
+    super::set_setting(conn, FEED_TOMBSTONE_KEY, &raw)
+}
+
+/// 写入删除墓碑（幂等，按规范化 URL 去重）。
+pub fn add_feed_tombstone(conn: &Connection, feed_url: &str) -> AppResult<()> {
+    let norm = super::normalize_url(feed_url);
+    let mut list = feed_tombstones(conn)?;
+    if !list.iter().any(|u| u == &norm) {
+        list.push(norm);
+        save_feed_tombstones(conn, &list)?;
+    }
+    Ok(())
+}
+
+/// 清除删除墓碑（远端已确认不再订阅后调用）。
+pub fn remove_feed_tombstone(conn: &Connection, feed_url: &str) -> AppResult<()> {
+    let norm = super::normalize_url(feed_url);
+    let mut list = feed_tombstones(conn)?;
+    let before = list.len();
+    list.retain(|u| u != &norm);
+    if list.len() != before {
+        save_feed_tombstones(conn, &list)?;
+    }
+    Ok(())
+}
+
+/// 订阅的同步信息：URL 与远端绑定 id（删除订阅时用于退订与墓碑）。
+pub fn feed_remote_info(conn: &Connection, id: i64) -> AppResult<(String, Option<i64>)> {
+    conn.query_row(
+        "SELECT feed_url, remote_id FROM feeds WHERE id = ?1",
+        [id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+    )
+    .map_err(Into::into)
+}

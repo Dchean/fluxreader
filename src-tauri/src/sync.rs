@@ -311,6 +311,28 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
 ② Pull：远端 → 本地（订阅关系 + 状态 + 条目）
 ============================================================ */
 
+/// 退订远端订阅（best-effort；仅 GReader 协议有端点——Fever 无退订端点）。
+/// 成功后退订墓碑解除：远端已不再列出该订阅，pull 不会复活。返回远端是否确认。
+pub async fn unsubscribe_remote(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+    remote_id: i64,
+    feed_url: &str,
+) -> bool {
+    let Some(client) = build_client(db, http).await else {
+        return false;
+    };
+    let ok = match client {
+        Backend::GReader(c) => c.unsubscribe(remote_id).await.is_ok(),
+        Backend::Fever(_) => false,
+    };
+    if ok {
+        let conn = db.lock().await;
+        let _ = db::remove_feed_tombstone(&conn, feed_url);
+    }
+    ok
+}
+
 /// 未连接期间本地新增的订阅推到远端（三段式：锁内读队列 → 锁外 HTTP → 锁内落库）
 async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut SyncReport) {
     // add_feed 队列动作：锁内读出全部待处理项（feed_url + 目标分类）
@@ -403,7 +425,19 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
     // 锁内：订阅按 URL 碰撞合并
     {
         let conn = db.lock().await;
+        // A-1：本地已删除（墓碑）的订阅不复活；远端列表已不含的墓碑可清除
+        let tombstones = db::feed_tombstones(&conn).unwrap_or_default();
+        let remote_norm: Vec<String> = remote_subs
+            .iter()
+            .map(|rf| db::normalize_url(&rf.url))
+            .collect();
+        for stale in tombstones.iter().filter(|t| !remote_norm.contains(t)) {
+            let _ = db::remove_feed_tombstone(&conn, stale);
+        }
         for rf in &remote_subs {
+            if tombstones.contains(&db::normalize_url(&rf.url)) {
+                continue; // 本地已删除且远端仍列出：保留墓碑，跳过复活
+            }
             // 用规范化 URL 匹配本地 feed（后端返回的 URL 与本地直连添加时
             // 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成新订阅 → 同一
             // 订阅出现两个本地 feed，文章翻倍、状态分裂、数量对不齐）。

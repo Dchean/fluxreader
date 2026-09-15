@@ -87,58 +87,103 @@ async fn seed_local_article(
     aid
 }
 
-/// A-1（REQ-002）：删除订阅不回传远端，且 pull 会把已删订阅"复活"。
-/// 当前实现：delete_feed 只删本地（无退订、无墓碑），feeds_phase 的 pull_feeds
-/// 按远端订阅列表把同 URL 重新建成 origin=remote 的 feed。
-/// 修复后期望：删除已绑定远端的订阅时调用 unsubscribe（或建立墓碑阻止复活），
-/// 本断言反转为「订阅不再复活 且 收到 unsubscribe 动作」。
+/// A-1 修复后的期望行为（原复现测试转正）：删除已绑定远端的订阅会 best-effort
+/// 退订（GReader），并写入删除墓碑——下次 pull 不得按远端订阅列表复活已删订阅。
 #[tokio::test]
-#[ignore = "REQ-002 repro: delete_feed 不回传远端且 pull 复活（TASK-031 定位，修复任务转正）"]
-async fn deleted_feed_revives_on_pull() {
-    let (db, http, _server) = setup("gap_delete").await;
-    let (conn,) = (db.lock().await,);
-    let folder_id = db::create_folder(&conn, "测试分类", "article").unwrap();
-    let feed_id = db::insert_feed(
-        &conn,
-        "http://127.0.0.1:8765/local_feed.xml", // 与 mock feed 10 同 URL（远端订阅存在）
-        None,
-        "Local Direct Feed",
-        None,
-        folder_id,
-        "inherit",
-        true,
-        false,
-    )
-    .unwrap();
-    drop(conn);
-
-    // 本地删除订阅（对应 commands::delete_feed 的实际行为：仅 db::delete_feed）
+async fn deleted_feed_stays_deleted_and_unsubscribes() {
+    let (db, http, server) = setup("gap_delete").await;
+    let feed_id = {
+        let conn = db.lock().await;
+        let folder_id = db::create_folder(&conn, "测试分类", "article").unwrap();
+        db::insert_feed(
+            &conn,
+            "http://127.0.0.1:8765/local_feed.xml", // 与 mock feed 10 同 URL（远端订阅存在）
+            None,
+            "Local Direct Feed",
+            None,
+            folder_id,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap()
+    };
+    // 绑定远端：feeds_phase 按 URL 匹配写入 remote_id=10
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase (bind)");
     {
         let conn = db.lock().await;
-        db::delete_feed(&conn, feed_id).unwrap();
+        let bound: Option<i64> = conn
+            .query_row(
+                "SELECT remote_id FROM feeds WHERE id = ?1",
+                [feed_id],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        assert_eq!(bound, Some(10), "前置条件：订阅已绑定远端 feed 10");
     }
 
-    // 下一次 feeds 同步（push + pull）
-    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+    // 删除（命令层真实逻辑）：写墓碑 + 删除本地 + 返回待退订的远端 id
+    let unsubscribe = {
+        let conn = db.lock().await;
+        app_lib::commands::record_feed_deletion(&conn, feed_id).expect("record deletion")
+    };
+    assert!(
+        matches!(unsubscribe, Some((10, _))),
+        "已绑定远端且同步已配置时应返回待退订目标"
+    );
 
-    let conn = db.lock().await;
-    let revived: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+    // ① 删除后立即同步：远端订阅列表仍含 feed/10（列表滞后），墓碑必须阻止复活
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase right after delete");
+    let revived = {
+        let conn = db.lock().await;
+        conn.query_row(
+            "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
             [],
-            |r| r.get(0),
+            |r| r.get::<_, i64>(0),
         )
-        .ok();
+        .unwrap()
+    };
+    assert_eq!(revived, 0, "已删除订阅不得被 pull 复活（墓碑生效）");
+
+    // ② 退订远端（best-effort，GReader）：成功后退订墓碑解除
+    let (remote_id, feed_url) = unsubscribe.expect("unsubscribe target");
     assert!(
-        revived.is_some(),
-        "缺口复现：已删除的订阅在 pull 后复活（远端订阅仍在列表中，本地删除未回传）"
+        sync::unsubscribe_remote(&db, &http, remote_id, &feed_url).await,
+        "退订应成功（mock 支持 ac=unsubscribe）"
     );
     assert!(
-        subscription_edit_actions(&_server)
+        subscription_edit_actions(&server)
             .iter()
-            .all(|(ac, _)| ac != "unsubscribe"),
-        "缺口复现：未向远端发送任何 unsubscribe"
+            .any(|(ac, s)| ac == "unsubscribe" && s.contains("feed/10")),
+        "远端应收到 ac=unsubscribe"
     );
+    {
+        let conn = db.lock().await;
+        assert!(
+            db::feed_tombstones(&conn).unwrap().is_empty(),
+            "退订成功（远端确认）后墓碑应清除"
+        );
+    }
+
+    // ③ 墓碑已清、远端已移除该订阅：再次同步仍不复活
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase after unsubscribe");
+    let existed = {
+        let conn = db.lock().await;
+        conn.query_row(
+            "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(existed, 0, "退订后同步不得复活（远端已不再列出该订阅）");
 }
 
 /// A-2（REQ-002）：订阅改名不回传远端（edit_subscription 已实现但从未接线）。

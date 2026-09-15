@@ -219,13 +219,37 @@ pub async fn add_feed(
     Ok(row)
 }
 
+/// 删除订阅的本地记录 + 删除墓碑（命令与测试共用的真实逻辑）。
+/// 返回 Some((remote_id, feed_url))：该订阅已绑定远端且同步已配置，
+/// 调用方应 best-effort 退订远端（GReader）；Fever 或未连接时仅靠墓碑防复活。
+pub fn record_feed_deletion(
+    conn: &rusqlite::Connection,
+    id: i64,
+) -> AppResult<Option<(i64, String)>> {
+    let (feed_url, remote_id) = db::feed_remote_info(conn, id)?;
+    // A-1：墓碑先落，退订失败也不得让 pull 把已删订阅拉回来
+    db::add_feed_tombstone(conn, &feed_url)?;
+    db::delete_feed(conn, id)?;
+    Ok(if sync_configured(conn) {
+        remote_id.map(|rid| (rid, feed_url))
+    } else {
+        None
+    })
+}
+
 #[tauri::command]
 pub async fn delete_feed(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    // 删除语义（SUB-4/SYN-1）：本地删除 ≠ 强删远端，避免误删服务端数据。
-    // 不建 remove_feed 队项（该动作从未被 sync.rs 消费，只会累积僵尸队列）；
-    // 若历史版本残留了 remove_feed 僵尸项，由 sync 阶段统一清理（见 sync.rs）。
-    db::delete_feed(&conn, id)
+    // 删除语义（SUB-4/SYN-1）：本地删除 ≠ 强删远端。
+    // 不建 remove_feed 队项（该动作从未被 sync.rs 消费，只会累积僵尸队列）。
+    let unsubscribe = {
+        let conn = state.db.lock().await;
+        record_feed_deletion(&conn, id)?
+    };
+    // 锁外 best-effort 退订远端：成功则清除墓碑（远端确认），失败仅留墓碑防复活
+    if let Some((remote_id, feed_url)) = unsubscribe {
+        let _ = crate::sync::unsubscribe_remote(&state.db, &state.http, remote_id, &feed_url).await;
+    }
+    Ok(())
 }
 
 #[tauri::command]

@@ -565,6 +565,18 @@ fn route(
                 .unwrap()
                 .push((ac.clone(), s_val));
             match ac.as_str() {
+                "unsubscribe" => {
+                    let s_val = form
+                        .get("s")
+                        .and_then(|v| v.first().cloned())
+                        .unwrap_or_default();
+                    // 真实行为：退订后远端订阅列表不再包含该订阅
+                    srv.subscriptions
+                        .lock()
+                        .unwrap()
+                        .retain(|sub| sub.id != s_val);
+                    (200, "OK".into())
+                }
                 "subscribe" => {
                     let url = form
                         .get("s")
