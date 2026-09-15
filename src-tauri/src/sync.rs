@@ -632,15 +632,23 @@ async fn pull_entries_greader(
     // 漏掉「手机很早前标读 / 收藏、changed_at 早于游标」的旧变更。这里用 read /
     // starred 权威 id 集合补齐（与 Fever 的 unread/saved 对账对称）。
     if !full {
-        let (read_ids, starred_ids) = tokio::join!(
+        // 拉取失败 ≠ 空集合（C-1）：任一权威集合拉取失败即跳过本轮对账，
+        // 避免把网络/服务端错误当成"远端什么都没有"，静默清空本地收藏
+        match tokio::join!(
             fetch_stream_ids(client, greader::tags::READ),
             fetch_stream_ids(client, greader::tags::STARRED),
-        );
-        let read_ids = read_ids.unwrap_or_default();
-        let starred_ids = starred_ids.unwrap_or_default();
-        let conn = db.lock().await;
-        reconcile_reader_state(&conn, &read_ids, &starred_ids, &maps, report);
-        drop(conn);
+        ) {
+            (Ok(read_ids), Ok(starred_ids)) => {
+                let conn = db.lock().await;
+                reconcile_reader_state(&conn, &read_ids, &starred_ids, &maps, report);
+                drop(conn);
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                report.errors.push(format!(
+                    "状态对账跳过：远端状态集合拉取失败（{e}），本轮不合并远端状态"
+                ));
+            }
+        }
     }
 
     // 更新游标（unix 秒）
@@ -814,10 +822,19 @@ async fn pull_entries_fever(
         }
     };
 
-    // ① 权威状态集合（全量 id）：未读 + 收藏
+    // ① 权威状态集合（全量 id）：未读 + 收藏。
+    // 拉取失败 ≠ 空集合（C-1）：失败即跳过本轮对账（下方 ⑤ 用 reconcile_ok 守卫），
+    // 避免静默把本地全部标为已读 / 清空收藏——Fever 对账为远端权威双向语义，误判代价更高。
     let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
-    let unread = unread.unwrap_or_default();
-    let starred = starred.unwrap_or_default();
+    let (unread, starred, reconcile_ok) = match (unread, starred) {
+        (Ok(u), Ok(s)) => (u, s, true),
+        (Err(e), _) | (_, Err(e)) => {
+            report.errors.push(format!(
+                "状态对账跳过：Fever 状态集合拉取失败（{e}），本轮不合并远端状态"
+            ));
+            (Vec::new(), Vec::new(), false)
+        }
+    };
 
     // ② 拉条目正文：增量（since_id>0）或首次种子（since_id=0 → 最近 50 条）
     let mut all_items: Vec<ItemContent> = Vec::new();
@@ -905,7 +922,8 @@ async fn pull_entries_fever(
     }
 
     // ⑤ 权威状态对账：Fever 无法直接拉已读条目，靠「未读/收藏集合」反推。
-    {
+    // 集合拉取失败时整段跳过（C-1），绝不做"空集合 = 远端全变"的对账。
+    if reconcile_ok {
         let conn = db.lock().await;
         reconcile_fever_state(&conn, &unread, &starred, &maps, report);
     }

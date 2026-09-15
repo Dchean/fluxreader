@@ -63,6 +63,10 @@ pub struct MockGReader {
     pub existing_feed_urls: Mutex<Vec<(String, i64)>>,
     /// 远端订阅列表（GET subscription/list 返回）
     pub subscriptions: Mutex<Vec<MockSubscription>>,
+    /// 收到的订阅编辑动作 (ac, s)：ac ∈ subscribe/unsubscribe/edit（edit 携带 t/a 参数由测试按需扩展）
+    pub subscription_edits: Mutex<Vec<(String, String)>>,
+    /// 故障注入：置位后 GET stream/items/ids 返回 500（C-1 对账跳过测试用）
+    pub fail_stream_ids: std::sync::atomic::AtomicBool,
     /// 远端分类（GET tag/list 返回的 folder）
     pub folders: Mutex<Vec<String>>,
     pub next_feed_id: Mutex<i64>,
@@ -76,6 +80,8 @@ impl MockGReader {
         let server = std::sync::Arc::new(Self {
             port,
             entries: Mutex::new(Vec::new()),
+            subscription_edits: Mutex::new(Vec::new()),
+            fail_stream_ids: std::sync::atomic::AtomicBool::new(false),
             status_updates: Mutex::new(Vec::new()),
             subscribed_urls: Mutex::new(Vec::new()),
             created_feeds: Mutex::new(Vec::new()),
@@ -374,6 +380,12 @@ fn route(
         }
         // 条目 id 列表（reading-list 或 feed/数字）
         ("GET", "/reader/api/0/stream/items/ids") => {
+            if srv
+                .fail_stream_ids
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return (500, r#"{"error_message":"injected failure"}"#.into());
+            }
             let q = parse_query(path_query);
             let stream = q.get("s").cloned().unwrap_or_default();
             let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
@@ -544,6 +556,14 @@ fn route(
                 .get("ac")
                 .and_then(|v| v.first().cloned())
                 .unwrap_or_default();
+            let s_val = form
+                .get("s")
+                .and_then(|v| v.first().cloned())
+                .unwrap_or_default();
+            srv.subscription_edits
+                .lock()
+                .unwrap()
+                .push((ac.clone(), s_val));
             match ac.as_str() {
                 "subscribe" => {
                     let url = form
@@ -559,6 +579,12 @@ fn route(
         }
         _ => (404, r#"{"error_message":"not found"}"#.into()),
     }
+}
+
+/// 供测试断言用的便捷读取（跨 test target 共享，未用的 target 会报 dead_code，显式豁免）
+#[allow(dead_code)]
+pub fn subscription_edit_actions(srv: &MockGReader) -> Vec<(String, String)> {
+    srv.subscription_edits.lock().unwrap().clone()
 }
 
 /// 供测试断言用的便捷读取（跨 test target 共享，未用的 target 会报 dead_code，显式豁免）

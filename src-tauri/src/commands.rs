@@ -366,25 +366,41 @@ pub async fn search_articles(
     db::search_articles(&conn, &query, limit.unwrap_or(50))
 }
 
+/// 记录已读状态并写入同步队列（命令与测试共用的真实逻辑）。
+/// A-5：无论是否已配置同步都入队——离线期间的变更保留持久化待推记录，
+/// 连接后由 states_phase 推送段/即时推送补推。此前仅在 sync_configured 时
+/// 入队，离线变更永不补推且可能被远端对账覆盖。
+pub fn record_read_state(conn: &rusqlite::Connection, id: i64, read: bool) -> AppResult<()> {
+    db::set_read(conn, id, read)?;
+    db::enqueue_sync(
+        conn,
+        Some(id),
+        None,
+        if read { "read" } else { "unread" },
+        None,
+    )
+}
+
+/// 同 [`record_read_state`]：收藏状态。
+pub fn record_star_state(conn: &rusqlite::Connection, id: i64, starred: bool) -> AppResult<()> {
+    db::set_starred(conn, id, starred)?;
+    db::enqueue_sync(
+        conn,
+        Some(id),
+        None,
+        if starred { "star" } else { "unstar" },
+        None,
+    )
+}
+
 #[tauri::command]
 pub async fn set_read(state: State<'_, AppState>, id: i64, read: bool) -> AppResult<()> {
     {
         let conn = state.db.lock().await;
-        db::set_read(&conn, id, read)?;
-        // 连接了 Miniflux 才入队；未连接时纯本地生效（连接后首 Pull 全量对齐）
-        if sync_configured(&conn) {
-            db::enqueue_sync(
-                &conn,
-                Some(id),
-                None,
-                if read { "read" } else { "unread" },
-                None,
-            )?;
-        } else {
-            return Ok(());
-        }
+        record_read_state(&conn, id, read)?;
     }
-    // 锁外调度即时推送（防抖合批，~1s 内到达服务端）
+    // 锁外调度即时推送（防抖合批，~1s 内到达服务端）；未配置时 push_states_now
+    // 静默返回，队列项留待连接后的同步补推
     schedule_state_push(&state);
     Ok(())
 }
@@ -393,18 +409,7 @@ pub async fn set_read(state: State<'_, AppState>, id: i64, read: bool) -> AppRes
 pub async fn set_starred(state: State<'_, AppState>, id: i64, starred: bool) -> AppResult<()> {
     {
         let conn = state.db.lock().await;
-        db::set_starred(&conn, id, starred)?;
-        if sync_configured(&conn) {
-            db::enqueue_sync(
-                &conn,
-                Some(id),
-                None,
-                if starred { "star" } else { "unstar" },
-                None,
-            )?;
-        } else {
-            return Ok(());
-        }
+        record_star_state(&conn, id, starred)?;
     }
     schedule_state_push(&state);
     Ok(())
