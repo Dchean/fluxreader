@@ -278,25 +278,71 @@ pub async fn update_feed(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
 
-    // 本地落库（Google Reader 下订阅改名/移动分类的远端同步较复杂，
-    // 靠下次 pull 对账收敛——本地优先，此处不做远端 best-effort 推送）。
-    let conn = state.db.lock().await;
+    let push = {
+        let conn = state.db.lock().await;
+        record_feed_edit(
+            &conn,
+            id,
+            title.as_deref(),
+            folder_id,
+            layout.as_deref(),
+            auto_summary,
+            auto_translate,
+        )?
+    };
+    // 锁外 best-effort 推送远端（GReader ac=edit；Fever no-op）：
+    // 失败仅记日志，本地更新已生效，靠下次 pull 对账/用户重试收敛（A-2）
+    if let Some((remote_id, new_title, dest_label)) = push {
+        let _ = crate::sync::edit_remote_subscription(
+            &state.db,
+            &state.http,
+            remote_id,
+            new_title.as_deref(),
+            dest_label.as_deref(),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// 更新订阅并返回需推送远端的编辑目标（命令与测试共用的真实逻辑，A-2）。
+/// 返回 Some((remote_id, 新标题, 目标分类名))：该订阅已绑定远端且同步已配置。
+pub fn record_feed_edit(
+    conn: &rusqlite::Connection,
+    id: i64,
+    title: Option<&str>,
+    folder_id: Option<i64>,
+    layout: Option<&str>,
+    auto_summary: Option<bool>,
+    auto_translate: Option<bool>,
+) -> AppResult<Option<(i64, Option<String>, Option<String>)>> {
     // 目标分类必须存在（防 UI 传错 id 把源挂飞）
     if let Some(fid) = folder_id {
-        if !db::folder_exists(&conn, fid)? {
+        if !db::folder_exists(conn, fid)? {
             return Err(AppError::new("validate", "目标分类不存在"));
         }
     }
     db::update_feed(
-        &conn,
+        conn,
         id,
-        title.as_deref(),
+        title,
         folder_id,
-        layout.as_deref(),
+        layout,
         auto_summary,
         auto_translate,
     )?;
-    Ok(())
+    if !sync_configured(conn) {
+        return Ok(None);
+    }
+    let (_feed_url, remote_id) = db::feed_remote_info(conn, id)?;
+    let Some(rid) = remote_id else {
+        return Ok(None);
+    };
+    let dest_label = match folder_id {
+        Some(fid) => db::folder_name(conn, fid)?,
+        None => None,
+    };
+    Ok(Some((rid, title.map(|t| t.to_string()), dest_label)))
 }
 
 #[tauri::command]

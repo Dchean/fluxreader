@@ -38,7 +38,7 @@ pub use feeds::{
     update_feed_layout, FeedRow,
 };
 pub use folders::{
-    create_folder, delete_folder, list_folders, rename_folder, set_folder_ai_flags,
+    create_folder, delete_folder, folder_name, list_folders, rename_folder, set_folder_ai_flags,
     set_folder_collapsed, update_folder_layout, FolderRow,
 };
 pub use migrations::open;

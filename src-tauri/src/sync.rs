@@ -73,6 +73,20 @@ impl Backend {
         }
     }
 
+    /// 订阅编辑（改名 `t` / 移动分类 `a`）：GReader 走 ac=edit；
+    /// Fever 协议无订阅编辑端点，视为已完成（本地已生效、无从推送）。
+    async fn edit_subscription(
+        &self,
+        remote_id: i64,
+        title: Option<&str>,
+        dest_label: Option<&str>,
+    ) -> AppResult<()> {
+        match self {
+            Backend::GReader(c) => c.edit_subscription(remote_id, title, dest_label).await,
+            Backend::Fever(_) => Ok(()),
+        }
+    }
+
     async fn tags(&self) -> AppResult<Vec<greader::TagRef>> {
         match self {
             Backend::GReader(c) => c.tags().await,
@@ -310,6 +324,27 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
 /* ============================================================
 ② Pull：远端 → 本地（订阅关系 + 状态 + 条目）
 ============================================================ */
+
+/// 推送订阅编辑（改名 / 移动目录）到远端（best-effort，A-2）。
+/// 失败仅记日志：本地已生效，靠下次 pull 对账或用户重试收敛，不阻塞 UI。
+pub async fn edit_remote_subscription(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+    remote_id: i64,
+    title: Option<&str>,
+    dest_label: Option<&str>,
+) -> bool {
+    let Some(client) = build_client(db, http).await else {
+        return false;
+    };
+    match client.edit_subscription(remote_id, title, dest_label).await {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("sync: 订阅编辑推送失败（本地已生效，待下轮收敛）: {e}");
+            false
+        }
+    }
+}
 
 /// 退订远端订阅（best-effort；仅 GReader 协议有端点——Fever 无退订端点）。
 /// 成功后退订墓碑解除：远端已不再列出该订阅，pull 不会复活。返回远端是否确认。

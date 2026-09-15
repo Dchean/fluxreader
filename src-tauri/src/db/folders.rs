@@ -92,3 +92,10 @@ pub fn set_folder_ai_flags(
 /* ============================================================
 Feeds
 ============================================================ */
+
+/// 分类名（id → name）：订阅编辑推送远端时用于 `a=` 目标分类参数。
+pub fn folder_name(conn: &Connection, id: i64) -> AppResult<Option<String>> {
+    Ok(conn
+        .query_row("SELECT name FROM folders WHERE id = ?1", [id], |r| r.get(0))
+        .ok())
+}

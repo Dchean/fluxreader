@@ -1,10 +1,10 @@
-//! REQ-002/003 双向同步缺口的复现测试（TASK-031）。
+//! REQ-002/003 双向同步的缺口回归与修复验证（TASK-031 起，随修复批次转正）。
 //!
-//! 这些测试**故意失败语义下的当前实现**：每个用例复现一个用户报告的同步缺口，
-//! 断言"当前实现确实不回传/会回滚"。修复任务转正时，把对应断言反转为期望行为
-//! 并去掉 #[ignore]。缺口定位与修复设计见 .workflow-kit/docs/FINDINGS-SYNC-GAP.md。
+//! 约定：修复完成的场景去掉 #[ignore] 并断言期望行为（默认 `cargo test` 即覆盖）；
+//! 尚未修复的场景保留 #[ignore] 与原因标注（复现旧缺陷，修复后转正）。
+//! 缺口定位与修复设计见 .workflow-kit/docs/FINDINGS-SYNC-GAP.md。
 //!
-//! 运行：cargo test --test sync_gap_repro_e2e -- --ignored --nocapture
+//! 运行：cargo test --test sync_gap_repro_e2e（默认集含全部已转正场景）
 
 mod mock_greader;
 
@@ -186,33 +186,38 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
     assert_eq!(existed, 0, "退订后同步不得复活（远端已不再列出该订阅）");
 }
 
-/// A-2（REQ-002）：订阅改名不回传远端（edit_subscription 已实现但从未接线）。
-/// 当前实现：update_feed 只更新本地 DB，不产生任何远端调用；双端标题永久分歧。
-/// 修复后期望：收到 ac=edit 的 subscription/edit 且 t=新标题，断言反转为「已推送」。
+/// A-2 修复后的期望行为（原复现测试转正）：订阅改名/移动目录会 best-effort
+/// 推送远端（GReader ac=edit，t=新标题 / a=目标分类）。
 #[tokio::test]
-#[ignore = "REQ-002 repro: 订阅改名不回传远端（TASK-031 定位，修复任务转正）"]
-async fn feed_rename_never_reaches_backend() {
-    let (db, http, _server) = setup("gap_rename").await;
-    let (conn,) = (db.lock().await,);
-    let folder_id = db::create_folder(&conn, "测试分类", "article").unwrap();
-    let feed_id = db::insert_feed(
-        &conn,
-        "http://127.0.0.1:8765/local_feed.xml",
-        None,
-        "Old Title",
-        None,
-        folder_id,
-        "inherit",
-        true,
-        false,
-    )
-    .unwrap();
-    drop(conn);
-
-    // 本地改名（对应 commands::update_feed 的实际行为：仅 db::update_feed）
-    {
+async fn feed_rename_and_move_push_edit_subscription() {
+    let (db, http, server) = setup("gap_rename").await;
+    let (feed_id, target_folder) = {
         let conn = db.lock().await;
-        db::update_feed(
+        let folder_id = db::create_folder(&conn, "测试分类", "article").unwrap();
+        let target = db::create_folder(&conn, "目标分类", "article").unwrap();
+        let feed_id = db::insert_feed(
+            &conn,
+            "http://127.0.0.1:8765/local_feed.xml", // 与 mock feed 10 同 URL
+            None,
+            "Old Title",
+            None,
+            folder_id,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        (feed_id, target)
+    };
+    // 绑定远端（remote_id=10）
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase (bind)");
+
+    // ① 改名：命令层真实逻辑返回待推送目标（remote_id + 新标题）
+    let push = {
+        let conn = db.lock().await;
+        app_lib::commands::record_feed_edit(
             &conn,
             feed_id,
             Some("Brand New Title"),
@@ -221,22 +226,56 @@ async fn feed_rename_never_reaches_backend() {
             None,
             None,
         )
-        .unwrap();
-    }
-
-    // 下一次 feeds 同步：本地没有 add_feed 队列项，push 无事可做
-    sync::feeds_phase(&db, &http).await.expect("feeds phase");
-
-    let edits = subscription_edit_actions(&_server);
+        .expect("record edit")
+    };
     assert!(
-        !edits
-            .iter()
-            .any(|(ac, s)| ac == "edit" && s.contains("feed/10")),
-        "缺口复现：改名单独发生时未向远端发送 subscription/edit"
+        matches!(&push, Some((10, Some(t), None)) if t == "Brand New Title"),
+        "已绑定远端且已配置时应返回 (10, 新标题, None)，实际 {push:?}"
+    );
+    let (rid, title, label) = push.unwrap();
+    assert!(
+        sync::edit_remote_subscription(&db, &http, rid, title.as_deref(), label.as_deref()).await,
+        "改名推送应成功"
+    );
+    let form = mock_greader::last_subscription_edit_form(&server);
+    let has = |k: &str, v: &str| form.iter().any(|(fk, fv)| fk == k && fv == v);
+    assert!(
+        has("ac", "edit") && has("s", "feed/10"),
+        "远端应收到 ac=edit 且 s=feed/10，实际 {form:?}"
     );
     assert!(
-        !edits.iter().any(|(ac, _)| ac == "edit"),
-        "缺口复现：整个同步过程未发送任何编辑动作"
+        has("t", "Brand New Title"),
+        "远端应收到新标题 t=Brand New Title，实际 {form:?}"
+    );
+
+    // ② 移动目录：a=目标分类名
+    let push2 = {
+        let conn = db.lock().await;
+        app_lib::commands::record_feed_edit(
+            &conn,
+            feed_id,
+            None,
+            Some(target_folder),
+            None,
+            None,
+            None,
+        )
+        .expect("record edit (move)")
+    };
+    assert!(
+        matches!(&push2, Some((10, None, Some(l))) if l == "目标分类"),
+        "移动目录应返回 (10, None, 目标分类名)，实际 {push2:?}"
+    );
+    let (rid2, title2, label2) = push2.unwrap();
+    assert!(
+        sync::edit_remote_subscription(&db, &http, rid2, title2.as_deref(), label2.as_deref())
+            .await,
+        "移动目录推送应成功"
+    );
+    let form2 = mock_greader::last_subscription_edit_form(&server);
+    assert!(
+        form2.iter().any(|(k, v)| k == "a" && v == "目标分类"),
+        "远端应收到 a=目标分类，实际 {form2:?}"
     );
 }
 
@@ -383,4 +422,65 @@ async fn reconcile_skipped_when_state_fetch_fails() {
         )
         .unwrap();
     assert_eq!(starred, 1, "修复期望：拉取失败时本地收藏不被清空");
+}
+
+/// A-2 边界：未绑定远端或未配置同步时，编辑只落本地、不推送、不报错。
+#[tokio::test]
+async fn feed_edit_without_backend_stays_local() {
+    // 不配置任何凭据 = 未连接后端
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_gap_localedit_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let db = Arc::new(Mutex::new(db::open(&tmp).expect("open db")));
+    let feed_id = {
+        let conn = db.lock().await;
+        let folder_id = db::create_folder(&conn, "本地分类", "article").unwrap();
+        db::insert_feed(
+            &conn,
+            "http://127.0.0.1:8765/local_feed.xml",
+            None,
+            "Old Title",
+            None,
+            folder_id,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap()
+    };
+
+    let push = {
+        let conn = db.lock().await;
+        app_lib::commands::record_feed_edit(
+            &conn,
+            feed_id,
+            Some("Locally Renamed"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("record edit (local only)")
+    };
+    assert!(
+        push.is_none(),
+        "未配置同步时不应产生待推送目标，实际 {push:?}"
+    );
+
+    let conn = db.lock().await;
+    let title: String = conn
+        .query_row("SELECT title FROM feeds WHERE id = ?1", [feed_id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        title, "Locally Renamed",
+        "本地改名必须生效（不受推送状态影响）"
+    );
 }
