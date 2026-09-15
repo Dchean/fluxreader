@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-e345c59612a0470eb0964369a530187e",
+  "task_id": "TASK-034",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "manager 主会话直接实现（P1-7 卡片级翻译接线）"
+  },
+  "started_at_utc": "2026-09-15T11:31:49.440642Z",
+  "finished_at_utc": "2026-09-15T11:41:00.368952Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "aad6b35e496177a5cda91b700d01c98a6607ce47dfb2f176c6ea93ccd6839e36",
+  "candidate_digest": "67c20c5edbdbeb65a33d323cd45dd3897f78ffcd9088db027ba08c71aab8f722",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-e345c59612a0470eb0964369a530187e-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-e345c59612a0470eb0964369a530187e-scope.json"
+}

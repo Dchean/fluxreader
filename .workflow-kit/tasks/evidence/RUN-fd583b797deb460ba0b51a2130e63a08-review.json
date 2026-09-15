@@ -1,0 +1,54 @@
+{
+  "task_id": "TASK-030",
+  "candidate_digest": "96dc5b1e823132fe59a333eeaf2b7a9f18af04ef2f51cf439f0e34ff21b53d3c",
+  "verification_run": "RUN-4eb29056be39405fae6ca1f3ed36efb0",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（未参与实现）：git diff 全量复核 6 文件变更。确认修复覆盖 REQ-001 全部验收：水合失败 catch→hydrationErrors→内联重试；hydratedIds 终态防重复水合；三态占位符；打开文章详情 catch+toast；三处快照替换清空水合态；S-2 五条新断言。健壮性确认：两次 set 同步续体无中间态窗口、并发重试幂等、selectView 缓存路径语义自洽、重试按钮无注入风险。审查者复跑 npm run test:frontend 13/13。四条非阻塞改进建议（空响应/部分行缺失的终态处理、详情分支清错误态、ArticleEntry.hydrated 冗余字段）记录于本报告 findings 之外的建议清单，不阻塞验收，供后续批次择机采纳。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收标准逐条满足：社交布局正文加载收敛、新增回归断言、既有测试不回归、根因与修复方式留档（worker-result 摘要）",
+      "evidence_files": [
+        "src/store.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "verify 门禁全过（lint/frontend/fmt/rust-test）；审查者独立复跑前端回归 13/13；原 8 条断言语义未变（diff 仅增量）",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        "src/store.ts"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "失败路径系统性补齐：批量水合与打开文章两条 IPC 链均有 catch；错误文案经 extractError 统一；重试用户驱动无死循环；空正文/行缺失边界已分析（两条苛刻场景留作后续改进）",
+      "evidence_files": [
+        "src/store.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "命名/注释与现有中文注释风格一致；快照重置点集中在三处替换点并说明理由；唯一冗余点（types.ts hydrated 字段）已记录为后续清理项",
+      "evidence_files": [
+        "src/store.ts",
+        "src/store/types.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "修复本身即性能修复：消除空正文条目的重复水合 IPC 洪峰（P1-9）；批量水合单次 set 结构未破坏；subscription 粒度为原始值 selector",
+      "evidence_files": [
+        "src/store.ts"
+      ]
+    }
+  ],
+  "ui_review": null
+}

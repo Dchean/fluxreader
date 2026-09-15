@@ -3,11 +3,12 @@
   "approval": {
     "status": "approved",
     "decision_ids": [
-      "DEC-9873537950da450da003e9bb04006117",
-      "DEC-bd3656d1472d4800be99d43e5064b164",
-      "DEC-bb38199e4cc14e448082a603e62b4064",
-      "DEC-b91115a20fc0428f9a7b8cb5741ed678"
+      "DEC-85857e4038814bd1a7b18de0ed36db04"
     ]
+  },
+  "intake": {
+    "version": 1,
+    "decision_id": "DEC-85857e4038814bd1a7b18de0ed36db04"
   },
   "project_type": null,
   "roles": {
@@ -25,25 +26,25 @@
     }
   },
   "role_fusion": {
-    "mode": "single-agent-multi-role"
+    "mode": "host-agent-independent-review"
   },
   "responsibilities": {
     "product": "manager",
     "architecture": "manager",
     "design": "manager",
-    "frontend": "manager",
-    "backend": "manager",
-    "implementation": "manager",
+    "frontend": "coder",
+    "backend": "coder",
+    "implementation": "coder",
     "testing": "manager",
-    "visual_review": "manager",
-    "review": "manager",
+    "visual_review": "reviewer",
+    "review": "reviewer",
     "delivery": "manager"
   },
   "capabilities": {
-    "file_read_write": true,
-    "terminal": true,
-    "process_control": true,
-    "independent_context": true
+    "file_read_write": null,
+    "terminal": null,
+    "process_control": null,
+    "independent_context": null
   },
   "authority": {
     "documentation": true,
@@ -52,13 +53,15 @@
     "dependencies": false,
     "ci": false,
     "commit": "allowed",
-    "push": "allowed",
-    "pull_request": "allowed",
-    "merge": "allowed",
+    "push": "ask",
+    "pull_request": "ask",
+    "merge": "ask",
     "release": "ask"
   },
   "review": {
-    "mode": "self_review_allowed"
+    "mode": "independent_required",
+    "evidence_version": 1,
+    "high_risk": "independent_required"
   },
   "ui": {
     "mode": "existing"
@@ -71,28 +74,29 @@
     "max_cli_call_seconds": 600
   },
   "budget": {
-    "max_repair_rounds": 6,
-    "max_task_wall_minutes": 1440,
-    "max_tasks_per_batch": 20,
+    "max_repair_rounds": 3,
+    "max_task_wall_minutes": 90,
+    "max_tasks_per_batch": 3,
     "max_concurrent_workers": 1,
     "financial": {
       "mode": "none",
       "amount_usd": null,
       "scope": "batch"
     },
-    "batch_rollover": "allowed"
+    "batch_rollover": "ask"
   },
   "interaction_style": {
-    "question_format": "options_based",
+    "question_format": "question_plus_supplement",
     "max_questions_per_round": 3,
     "max_options_per_question": 4,
     "always_include_other_option": true,
     "show_time_impact": true,
     "show_risk_level": true,
     "provide_recommendation": true,
-    "note": "所有用户选择都使用选项式提问（选项+其他），减少文字输入"
+    "note": "先提一个明确问题，给可理解的选项/建议和简短影响说明，允许补充；按相关性补问，沿用已有真实回答。技术事实由 Agent 检查，默认项不算同意。"
   },
   "execution": {
+    "mode": "agent_only",
     "worker_argv": [],
     "reviewer_argv": [],
     "model": null,

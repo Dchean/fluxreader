@@ -1,13 +1,28 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["task_id", "candidate_digest", "verdict", "summary", "findings", "ui_review"],
+  "required": ["task_id", "candidate_digest", "verification_run", "verdict", "summary", "findings", "review_checks", "ui_review"],
   "properties": {
     "task_id": {"type": "string"},
     "candidate_digest": {"type": "string"},
+    "verification_run": {"type": "string"},
     "verdict": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED"]},
     "summary": {"type": "string"},
     "findings": {"type": "array", "items": {"type": "string"}},
+    "review_checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["area", "status", "analysis", "evidence_files"],
+        "properties": {
+          "area": {"type": "string", "enum": ["requirements", "regression", "failure_paths", "maintainability", "performance"]},
+          "status": {"type": "string", "enum": ["PASS", "FAIL", "NOT_RUN", "NOT_APPLICABLE"]},
+          "analysis": {"type": "string"},
+          "evidence_files": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
     "ui_review": {
       "anyOf": [
         {"type": "null"},

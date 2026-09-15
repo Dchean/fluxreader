@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "id": "TASK-034",
+  "title": "社交/通知卡片翻译按钮接线（P1-7）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "done",
+  "objective": "修复社交/通知卡片'翻译'按钮空壳：当前只切换译文块显示，而译文唯一生成时机是 article 布局打开文章（toggleReaderTranslation 依赖 activeArticleId，社交源文章永远到不了该布局）→ 按钮高亮但译文恒空。改为卡片级翻译：新增按 id 的翻译 action（复用 summarizeEntry 的 per-id 流式模式，走 ai_translate 流式写该条目 translatedContent），卡片按钮触发它；未配置 AI 时静默/提示与现有模式一致；生成中/失败状态按卡片展示（复用 summaryErrors 风格）。",
+  "non_goals": [
+    "翻译按钮样式改版",
+    "Reader 翻译行为调整",
+    "AI 配置页改动"
+  ],
+  "requirement_refs": [
+    "REQ-007"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/**",
+      "tools/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "社交/通知卡片点翻译会实际触发该条目的 ai_translate 并回填 translatedContent",
+    "未配置 AI 时不弹错误风暴（静默或单次提示，与现有 toggleReaderTranslation 的 silent 模式一致）",
+    "生成中/失败有卡片级状态，不出现全局互串（不复用全局单布尔）",
+    "新增回归断言：卡片级翻译流式回填与缓存命中；前端回归与 lint 全绿"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-15 基线：前端回归 13/13；卡片翻译此前为空壳无任何测试覆盖。行为变更仅限：卡片翻译按钮从'只切换显示'改为'实际触发生成'——用户确认的缺陷修复（FINDINGS-REQ-007.md P1-7，REQ-007 范围）。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    },
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "现有 13 项前端逻辑回归",
+        "reason": "Reader 翻译/摘要行为不得回归",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "卡片级翻译流式回填与缓存命中断言",
+        "reason": "P1-7 此前无覆盖",
+        "gate_ids": [
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-034-input-d9e3e0bc206c45839e505a589fe687f7.json",
+    "digest": "aad6b35e496177a5cda91b700d01c98a6607ce47dfb2f176c6ea93ccd6839e36",
+    "source_revision": null,
+    "definition_digest": "beefab46b348abaa106c5f72f9909a3dd56e96b53b47e543d7c4ac65b09f0853"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T11:31:49.439590Z",
+    "deadline_at_utc": "2026-09-15T13:01:49.439590Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-1810073c1e4c482f8a2be8b5590c92df",
+  "run_ids": [
+    "RUN-e345c59612a0470eb0964369a530187e",
+    "RUN-a39313eb0d7240bd9c39b52c665d6c3d",
+    "RUN-17601181ab174847b46908846b0d4104",
+    "RUN-36dc2604de1b497db0b4bef54a301344"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-a39313eb0d7240bd9c39b52c665d6c3d-candidate.json",
+    "candidate_digest": "67c20c5edbdbeb65a33d323cd45dd3897f78ffcd9088db027ba08c71aab8f722",
+    "verification_run": "RUN-a39313eb0d7240bd9c39b52c665d6c3d",
+    "review_run": "RUN-36dc2604de1b497db0b4bef54a301344",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-9b5b2abed1664fc7b69f344f9ed11f44-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-9b5b2abed1664fc7b69f344f9ed11f44"
+    ],
+    "merge_ref": "not_applicable：本地工作区交付，不涉及远端分支合并；用户直接批准当前工作区成果"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src/components/Timeline.tsx",
+    "src/store.ts",
+    "src/store/types.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T11:31:49.487608Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T11:41:00.393891Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-15T11:41:02.307830Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T11:54:59.434617Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

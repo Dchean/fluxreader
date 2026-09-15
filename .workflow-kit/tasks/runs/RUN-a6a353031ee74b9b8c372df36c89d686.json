@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-a6a353031ee74b9b8c372df36c89d686",
+  "task_id": "TASK-031",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "manager 主会话续跑（action_required 解锁后收尾；交付物已完成，仅修正 worker-result 的 unresolved_items 字段）"
+  },
+  "started_at_utc": "2026-09-15T09:01:36.288566Z",
+  "finished_at_utc": "2026-09-15T09:04:01.705480Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "1281b5a5665146a217ee2012238f92cd0928f027ddcdd702e4b19014347370ab",
+  "candidate_digest": "aa2aa4194e8a1aeba8c81a908abf09682892901ebc2a74d78589146cf371504b",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-a6a353031ee74b9b8c372df36c89d686-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-a6a353031ee74b9b8c372df36c89d686-scope.json"
+}

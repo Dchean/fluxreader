@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-ea2583a91c5143d6a8d05721954d7c5a",
+  "task_id": "TASK-030",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "manager 主会话直接实现（REQ-001 社交布局正文加载修复）"
+  },
+  "started_at_utc": "2026-09-15T06:08:23.419385Z",
+  "finished_at_utc": "2026-09-15T07:12:57.170157Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "8cbc68403893f26702a8ba05e9d887a55d34eff85ec8169a5c98852e2176e2d4",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-ea2583a91c5143d6a8d05721954d7c5a-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-ea2583a91c5143d6a8d05721954d7c5a-scope.json",
+  "failure_kind": "scope",
+  "failure_reason": "Out-of-scope changes: dist-test/store.js"
+}

@@ -22,6 +22,7 @@ ACTIVE = {"ready", "running", "verifying", "review"}
 PREPARED = ACTIVE | {"verified", "done"}
 RUN_KINDS = {"implementation", "repair", "probe", "verification", "review"}
 GATE_STATES = {"PASS", "FAIL", "NOT_RUN", "SKIPPED", "BLOCKED", "NOT_APPLICABLE"}
+REVIEW_AREAS = ("requirements", "regression", "failure_paths", "maintainability", "performance")
 DENIED_PARTS = {".git", ".claude", ".codex", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 RECOVERY_DEFAULTS = {"network_backoff_seconds": [5, 15], "max_cli_call_seconds": 600}
 ISOLATED_ROOT = ".workflow-kit"
@@ -214,7 +215,7 @@ def task_definition(task):
     """Freeze controlled fields, excluding mutable status, counters and evidence."""
     keys = ("id", "title", "kind", "objective", "non_goals", "requirement_refs", "dependencies", "risk", "scope", "acceptance", "gates")
     body = {key: task.get(key) for key in keys}
-    for key in ("reference_ids", "decision_refs", "snapshot_paths", "continuation_of", "retry_safe", "ui_change", "ui_contract_ref", "ui_checks"):
+    for key in ("reference_ids", "decision_refs", "snapshot_paths", "continuation_of", "retry_safe", "ui_change", "ui_contract_ref", "ui_checks", "test_review"):
         if key in task:
             body[key] = task[key]
     return digest(body)
@@ -234,8 +235,147 @@ def gate_command(gate):
     return (gate.get("program"), tuple(gate.get("args", [])), gate.get("cwd"))
 
 
+def replaced_gates(task, dependency):
+    """Exceptions are effective only when test_review_errors also accepts the plan."""
+    review = task.get("test_review")
+    actions = review.get("actions", []) if isinstance(review, dict) else []
+    if not isinstance(actions, list):
+        return set()
+    return {item.get("from_gate") for item in actions if isinstance(item, dict)
+            and item.get("from_task") == dependency and isinstance(item.get("from_gate"), str)
+            and item.get("action") in {"adapt", "replace", "retire"}}
+
+
+def test_review_errors(root, project, task, tasks, decisions):
+    """Check the applicability record; semantic equivalence remains a review duty."""
+    ident = task.get("id", "TASK")
+    review = task.get("test_review")
+    required = project.get("kind") == "refactor" and task.get("kind") not in {"documentation", "baseline"}
+    if review is None:
+        return [f"{ident}: refactor work needs test_review before implementation"] if required else []
+    if not isinstance(review, dict):
+        return [f"{ident}: test_review must be an object"]
+    errors = []
+
+    def require(condition, message):
+        if not condition:
+            errors.append(f"{ident}: test_review {message}")
+
+    def nonempty(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    require(review.get("behavior") in {"preserve", "change"}, "must distinguish preserved and changed behavior")
+    baseline = review.get("baseline")
+    if not isinstance(baseline, dict):
+        errors.append(f"{ident}: test_review needs the original baseline and its disposition")
+    else:
+        require(baseline.get("status") in {"PASS", "FAIL", "NOT_RUN", "BLOCKED"}, "baseline status must be explicit")
+        require(nonempty(baseline.get("summary")), "baseline needs a factual summary, including known failures/limits")
+        try:
+            path = inside(root, baseline.get("evidence_ref"))
+            require(path.is_file() and path.stat().st_size > 0, "baseline needs an existing, nonempty evidence file")
+        except (ValueError, OSError, TypeError) as error:
+            errors.append(f"{ident}: test_review baseline evidence: {error}")
+    ids = review.get("decision_ids", [])
+    valid_ids = isinstance(ids, list) and all(isinstance(value, str) for value in ids)
+    require(valid_ids, "decision_ids must be a list")
+    decisions_used = [decisions.get(value, {}) for value in ids] if valid_ids else []
+    require(all(item.get("status") == "accepted" and item.get("issuer") == "owner" and nonempty(item.get("source"))
+                for item in decisions_used), "decision_ids must reference accepted owner decisions")
+    coverage = set(task.get("requirement_refs", [])) | {ident}
+    scoped_choice = bool(decisions_used) and any(coverage.intersection(item.get("scope", [])) for item in decisions_used)
+    if review.get("behavior") == "change":
+        require(scoped_choice, "behavior change needs an owner decision covering this task or its requirements")
+    required_ids = {gate.get("id") for gate in task.get("gates", []) if isinstance(gate, dict) and gate.get("required")}
+    require(bool(required_ids), "must retain an executable required verification gate")
+    actions = review.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return errors + [f"{ident}: test_review needs grouped keep/adapt/add/replace/retire actions"]
+    seen = set()
+    for item in actions:
+        if not isinstance(item, dict):
+            errors.append(f"{ident}: test_review actions must be objects")
+            continue
+        action = item.get("action")
+        require(action in {"keep", "adapt", "add", "replace", "retire"}, "has an unknown test disposition")
+        require(nonempty(item.get("target")) and nonempty(item.get("reason")), "actions need the affected checks and a substantive reason")
+        gate_ids = item.get("gate_ids")
+        valid_gates = isinstance(gate_ids, list) and all(isinstance(value, str) for value in gate_ids)
+        require(valid_gates, "gate_ids must be a list")
+        if action == "retire":
+            require(gate_ids == [], "retired requirements use empty gate_ids, not fake replacements")
+        else:
+            require(valid_gates and bool(gate_ids) and all(value in required_ids for value in gate_ids),
+                    "kept/adapted/new/replacement checks must map to required gates")
+        if action in {"replace", "retire"}:
+            require(review.get("behavior") == "change" and scoped_choice,
+                    "replacing/retiring a behavioral contract requires the corresponding owner choice")
+        dependency, gate_id = item.get("from_task"), item.get("from_gate")
+        if dependency is not None or gate_id is not None:
+            if not isinstance(dependency, str) or not isinstance(gate_id, str):
+                errors.append(f"{ident}: test_review from_task/from_gate must identify an exact prior gate")
+                continue
+            prior = tasks.get(dependency, {})
+            require(dependency in task.get("dependencies", []) and prior.get("status") in {"verified", "done"},
+                    "gate transition must reference an available direct dependency")
+            require(any(gate.get("id") == gate_id and gate.get("required") for gate in prior.get("gates", [])),
+                    "gate transition references a missing or optional prior gate")
+            require(action in {"keep", "adapt", "replace", "retire"}, "new coverage cannot suppress a prior gate")
+            require((dependency, gate_id) not in seen, "has duplicate dispositions for a prior gate")
+            seen.add((dependency, gate_id))
+    return errors
+
+
 def recovery_policy(policy):
     return {**RECOVERY_DEFAULTS, **policy.get("recovery", {})}
+
+
+def required_review_mode(policy, task):
+    if task.get("risk", {}).get("level") == "high":
+        return "independent_required"
+    return policy.get("review", {}).get("mode")
+
+
+def review_quality_digest(root, task, report):
+    """Bind a substantive review to the verified candidate and immutable evidence."""
+    checks = report.get("review_checks")
+    if not isinstance(checks, list) or {item.get("area") for item in checks if isinstance(item, dict)} != set(REVIEW_AREAS) or len(checks) != len(REVIEW_AREAS):
+        raise ValueError("Review needs one evidence-based check for requirements, regression, failure_paths, maintainability and performance")
+    evidence = task.get("evidence", {})
+    if report.get("verification_run") != evidence.get("verification_run"):
+        raise ValueError("Review must identify the actual current verification_run")
+    snapshot = read_json(inside(root, evidence["candidate_manifest"]))
+    candidate_files = {item["path"]: item["sha256"] for item in snapshot["files"]}
+    recorded = {}
+    for check in checks:
+        if not isinstance(check, dict) or check.get("status") not in {"PASS", "NOT_APPLICABLE"}:
+            raise ValueError("Passing review cannot include unresolved or failed review checks")
+        if not isinstance(check.get("analysis"), str) or not check["analysis"].strip():
+            raise ValueError("Review checks need an explanation of what was checked and why it supports the conclusion")
+        if check["status"] == "NOT_APPLICABLE" and (check["area"] in {"requirements", "regression"}
+                or (check["area"] == "failure_paths" and task.get("risk", {}).get("level") == "high")):
+            raise ValueError("Required review coverage cannot be marked NOT_APPLICABLE")
+        files = check.get("evidence_files")
+        if not isinstance(files, list) or not all(isinstance(name, str) for name in files) or (check["status"] == "PASS" and not files):
+            raise ValueError("Passing review checks need actual evidence_files; inapplicable checks still need an explicit list")
+        for name in files:
+            if name in recorded:
+                continue
+            inside(root, name)
+            if name in candidate_files:
+                # Later tasks may legitimately change the source; the prior
+                # review remains bound to its original, verified snapshot.
+                recorded[name] = candidate_files[name]
+            else:
+                path = inside(root, name)
+                if not path.is_file() or path.stat().st_size == 0:
+                    raise ValueError("Review evidence is missing/empty: " + name)
+                recorded[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    verification_name = workflow_name(root, "tasks/runs/" + report["verification_run"] + ".json")
+    if verification_name not in recorded:
+        verification = inside(root, verification_name)
+        recorded[verification_name] = hashlib.sha256(verification.read_bytes()).hexdigest()
+    return digest({"report": report, "candidate": evidence["candidate_digest"], "evidence": recorded})
 
 
 def ui_preview_accepted(root, policy, project, tasks):
@@ -349,6 +489,31 @@ def check_project(root, now=None):
     require(approval.get("status") in {"pending", "approved"}, "POLICY: unknown approval status")
     if approval.get("status") == "approved":
         require(approved, "POLICY: approval requires existing accepted owner decisions")
+        if policy.get("intake", {}).get("version") == 1:
+            from workflow_intake import audit as audit_intake
+            intake_id = policy["intake"].get("decision_id")
+            brief = decisions.get(intake_id, {}).get("confirmed_brief")
+            require(intake_id in approval.get("decision_ids", []), "POLICY: intake decision must remain in approval references")
+            require(isinstance(brief, dict), "POLICY: approved intake needs its confirmed brief and answer sources")
+            if isinstance(brief, dict):
+                interview = audit_intake(brief, project.get("kind"))
+                require(interview["ready_for_onboard"], "POLICY: incomplete or stale intake confirmations: " + ", ".join(interview["missing"]))
+                try:
+                    current_brief = read_json(workflow_inside(root, "tasks/BRIEF.json"))
+                    facts = lambda item: {key: value for key, value in item.items() if key not in {"schema_version", "approval_source"}}
+                    require(facts(current_brief) == facts(brief), "BRIEF: confirmed scope changed without updating its owner decision")
+                except (ValueError, OSError) as error:
+                    errors.append("BRIEF: missing confirmed scope: " + str(error))
+                selected = brief.get("execution", {})
+                require(policy.get("execution", {}).get("mode") == selected.get("mode")
+                        and all(policy.get("roles", {}).get(role, {}).get("harness") == selected.get(role) for role in ("coder", "reviewer")),
+                        "POLICY: execution choice changed; record a new confirmed decision before switching Agent/CLI")
+                require(not policy.get("authority", {}).get("code") or brief.get("authority", {}).get("code") is True,
+                        "POLICY: implementation needs a confirmed code choice; assessment approval cannot authorize it")
+                require(policy.get("review", {}).get("mode") == selected.get("review_mode"),
+                        "POLICY: review choice changed; preserve the confirmed independence requirement")
+        else:
+            warnings.append("Legacy approval has no intake audit; preserve its history and verify the owner's execution and scope choices before expanding work.")
     else:
         warnings.append("Onboarding is pending; this check does not authorize application work.")
 
@@ -361,6 +526,8 @@ def check_project(root, now=None):
             selected = policy.get("roles", {}).get(role, {})
             require(bool(selected.get("agent")) and bool(selected.get("harness")), f"POLICY: select {role} agent/harness")
         require(policy.get("review", {}).get("mode") in {"independent_required", "self_review_allowed"}, "POLICY: select explicit review mode")
+        require(policy.get("review", {}).get("evidence_version") == 1, "POLICY: review evidence requirements cannot be disabled; migrate older records explicitly")
+        require(policy.get("review", {}).get("high_risk") == "independent_required", "POLICY: high-risk review must remain independent")
         require(limits.get("batch_rollover", "ask") in {"ask", "allowed"}, "POLICY: batch_rollover must be ask or allowed")
         recovery = recovery_policy(policy)
         delays = recovery["network_backoff_seconds"]
@@ -463,6 +630,8 @@ def check_project(root, now=None):
             require(isinstance(task.get("ui_checks"), list) and bool(task["ui_checks"])
                     and all(isinstance(value, str) and value.strip() for value in task["ui_checks"]),
                     f"{ident}: UI changes need explicit component/interaction checks")
+        if status in PREPARED | {"blocked"}:
+            errors += test_review_errors(root, project, task, tasks, decisions)
         if status == "blocked":
             require(bool(task.get("blockers")), f"{ident}: blocked requires a reason")
         if status in PREPARED:
@@ -566,7 +735,8 @@ def check_project(root, now=None):
                     and ident in successor.get("dependencies", [])
                     and successor.get("continuation_of", {}).get(ident) == candidate,
                     f"{ident}: invalid candidate continuation: {successor_id}")
-            required_commands = {gate_command(gate) for gate in gates if gate.get("required")}
+            replaced = replaced_gates(successor, ident)
+            required_commands = {gate_command(gate) for gate in gates if gate.get("required") and gate.get("id") not in replaced}
             successor_commands = {gate_command(gate) for gate in successor.get("gates", []) if gate.get("required")}
             require(required_commands <= successor_commands, f"{ident}: continuation dropped required regression checks")
             try:
@@ -597,6 +767,12 @@ def check_project(root, now=None):
         review_result = review.get("review", {})
         require(review_result.get("verdict") == "PASS" and review_result.get("candidate_digest") == candidate, f"{ident}: review did not pass current candidate")
         local_ref(review_result.get("report"), f"{ident} review")
+        if policy.get("review", {}).get("evidence_version") == 1:
+            try:
+                quality_digest = review_quality_digest(root, task, read_json(inside(root, review_result["report"])))
+                require(review_result.get("quality_digest") == quality_digest, f"{ident}: review evidence changed after approval")
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                errors.append(f"{ident}: invalid review evidence: {error}")
         if task.get("ui_change"):
             try:
                 ui_digest = ui_review_digest(root, task, read_json(inside(root, review_result["report"])))
@@ -605,7 +781,7 @@ def check_project(root, now=None):
                 errors.append(f"{ident}: invalid UI evidence: {error}")
         mode = review_result.get("mode")
         require(mode in {"independent", "self_review"}, f"{ident}: review mode missing")
-        if policy.get("review", {}).get("mode") == "independent_required":
+        if required_review_mode(policy, task) == "independent_required":
             require(mode == "independent", f"{ident}: self review cannot satisfy independent_required")
         if mode == "independent":
             context = review.get("executor", {}).get("context_id")
@@ -640,28 +816,15 @@ def board_bytes(tasks):
     return output
 
 
-def project_state_bytes(project, tasks, helper="scripts/project_workflow.py"):
-    """A disposable recovery index, never a second source of project facts."""
-    lines = [BOARD_MARKER, "# 项目状态", "", "- 项目：" + str(project.get("name") or "待确认"),
-             "- 阶段：" + str(project.get("stage")), "- 当前任务：" + str(project.get("current_task") or "无"),
-             "- 当前批次：" + str(project.get("current_batch") or "无"), "",
-             "| 任务 | 状态 | 最近检查点 / 下一步 |", "| --- | --- | --- |"]
-    for ident, task in sorted(tasks.items()):
-        points = task.get("checkpoints", [])
-        next_step = points[-1]["next_action"] if points else "由 start/next 根据实际记录判断"
-        note = points[-1]["note"] + "；" if points else ""
-        text = (note + next_step).replace("|", "\\|").replace("\n", " ")
-        lines.append(f"| [{ident}](cards/{ident}.md) | {task['status']} | {text} |")
-    lines += ["", "## 当前阻塞", ""]
-    if project.get("ui_preview_task"):
-        preview = tasks.get(project["ui_preview_task"], {})
-        lines += ["- 界面预览：" + project["ui_preview_task"] + "；状态：" + str(preview.get("status")),
-                  "- 预览确认只批准视觉与交互方向，不表示真实数据和后端已经完成。", ""]
-    blockers = [f"- {ident}：{reason}" for ident, task in sorted(tasks.items()) for reason in task.get("blockers", [])]
-    lines += blockers or ["- 无已记录阻塞。未运行的检查不代表通过。"]
-    lines += ["", "运行 `python " + helper + " start --root .` 获取可执行的下一步。",
-              "本文件由 PROJECT、任务和检查点生成；恢复时仍须核对实际文件、运行日志和进程。", ""]
-    return "\n".join(lines).encode("utf-8")
+def project_state_bytes(project, tasks, helper="scripts/project_workflow.py", brief=None, policy=None,
+                        research_done=False, ui_accepted=False):
+    """The same human-readable facts used in chat, never a second state store."""
+    from workflow_progress import build
+    progress = build(project, policy or {}, brief or {}, tasks, research_done=research_done, ui_accepted=ui_accepted)
+    text = (BOARD_MARKER + "\n# 项目状态\n\n" + progress["markdown"]
+            + "\n运行 `python " + helper + " progress --root .` 生成对话用进度；start 给出实际下一步。\n"
+            + "本文件由需求、PROJECT、任务和检查点生成；实际证据与进程仍须核对。\n")
+    return text.encode("utf-8")
 
 
 def initialization_plan(root, kind, name, allow_existing=False, full_docs=False):
@@ -702,6 +865,8 @@ def initialization_plan(root, kind, name, allow_existing=False, full_docs=False)
         plan["scripts/workflow_runtime.py"] = runtime.read_bytes()
     from workflow_bootstrap import classic_binding
     plan["scripts/workflow_bootstrap.py"] = Path(__file__).with_name("workflow_bootstrap.py").read_bytes()
+    plan["scripts/workflow_intake.py"] = Path(__file__).with_name("workflow_intake.py").read_bytes()
+    plan["scripts/workflow_progress.py"] = Path(__file__).with_name("workflow_progress.py").read_bytes()
     plan.update(board_bytes({}))
     plan[CLASSIC_BINDING] = encoded(classic_binding(plan))
     conflicts = [rel for rel in plan if inside(root, rel).exists()]
@@ -755,7 +920,7 @@ def main(argv=None):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     argv = list(sys.argv[1:] if argv is None else argv)
-    runtime_commands = {"bootstrap", "doctor", "start", "adopt", "onboard", "research", "cards", "checkpoint", "prepare", "begin", "finish", "verify", "review", "feedback", "dispatch", "review-cli", "run", "next", "recover", "extend", "batch", "accept"}
+    runtime_commands = {"bootstrap", "doctor", "start", "progress", "review-packet", "adopt", "intake", "onboard", "research", "cards", "checkpoint", "prepare", "begin", "finish", "verify", "review", "feedback", "dispatch", "review-cli", "run", "next", "recover", "extend", "batch", "accept"}
     if argv and argv[0] in runtime_commands:
         from workflow_runtime import main as runtime_main
         return runtime_main(argv)

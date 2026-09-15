@@ -1,0 +1,11 @@
+{
+  "changed_files": [
+    "dist-test/store.js",
+    "src/components/Timeline.tsx",
+    "src/store.ts",
+    "src/store/types.ts",
+    "src/styles/base.css",
+    "src/types.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

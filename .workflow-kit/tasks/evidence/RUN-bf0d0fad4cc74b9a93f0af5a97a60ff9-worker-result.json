@@ -1,0 +1,18 @@
+{
+  "task_id": "TASK-033",
+  "run_id": "RUN-bf0d0fad4cc74b9a93f0af5a97a60ff9",
+  "status": "ready_for_verification",
+  "summary": "完成三项前端错误路径修复。(1) P0-2：tauri 模式 bootstrapFromBackend 失败不再回退 mock 演示数据——新增 bootstrapError 状态与 retryBootstrap action，App.tsx 渲染错误屏（启动失败原因 + 重试按钮）；mock 数据严格限定浏览器 dev 分支。(2) P1-10：github_login_start 的 WebDAV 冲突检测改用结构化 code==='webdavConflict' 判定（辅以 extractError 文案），恢复冲突确认框与 force 重发（原 String(e) 恒得 [object Object]，确认框永不弹出）。(3) P1-11：SettingsModal AiTab 连通失败 toast 改用 extractError 显示真实错误。新增 4 条 S-3 回归断言（失败不回退 mock/错误态/重试装载/conflict 确认+force 重发+进入授权流程）。门禁：lint 0/0、前端回归 18/18。",
+  "changed_files": [
+    "src/store.ts",
+    "src/store/types.ts",
+    "src/App.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/styles/base.css",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

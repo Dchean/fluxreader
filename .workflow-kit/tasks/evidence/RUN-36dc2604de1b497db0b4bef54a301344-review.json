@@ -1,0 +1,54 @@
+{
+  "task_id": "TASK-034",
+  "candidate_digest": "67c20c5edbdbeb65a33d323cd45dd3897f78ffcd9088db027ba08c71aab8f722",
+  "verification_run": "RUN-a39313eb0d7240bd9c39b52c665d6c3d",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（未参与实现）：translateEntry 与 toggleReaderTranslation 流式/消毒回读逻辑一致，per-id 状态隔离（translatingIds/translateErrors 键隔离，不触碰全局 translating）；已有译文入口短路；未配置 AI 单次 toast。Timeline 两卡按钮正确接线（无译文触发生成、已有译文切换显示），'翻译中…'指示为响应式订阅。复跑前端回归 21/21、lint 0/0。四条非阻塞建议留档（流中失败后半截译文的重试短路问题属既有模式遗留，建议后续统一修复；双击极小窗口并发可加 translatingIds 守卫；通知卡切换 toast 为既有行为；卡片内联错误文案可作增强）。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收四条逐条满足：卡片翻译实际触发并回填、未配置不错误风暴、per-id 状态隔离、S-4 三条新断言",
+      "evidence_files": [
+        "src/store.ts",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "21/21 通过（Reader 翻译/摘要既有断言语义未变）；lint 0/0",
+      "evidence_files": [
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "失败进 translateErrors + toast 重试；done/catch 两路均清按 id 状态；重试短路问题为既有模式遗留，已留档后续统一修复",
+      "evidence_files": [
+        "src/store.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "复用 Reader 翻译流式模式；注释说明 per-id 隔离理由（F4 教训）；按钮接线直观",
+      "evidence_files": [
+        "src/store.ts",
+        "src/components/Timeline.tsx"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "per-id 选择器订阅粒度细；无新增轮询/全局重渲染",
+      "evidence_files": [
+        "src/components/Timeline.tsx"
+      ]
+    }
+  ],
+  "ui_review": null
+}

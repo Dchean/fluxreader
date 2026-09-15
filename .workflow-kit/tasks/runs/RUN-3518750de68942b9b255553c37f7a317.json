@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-3518750de68942b9b255553c37f7a317",
+  "task_id": "TASK-031",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "manager 主会话直接实现（REQ-002/003 同步缺口定位：复现测试+根因文档，不做大规模修复）"
+  },
+  "started_at_utc": "2026-09-15T08:39:50.176890Z",
+  "finished_at_utc": "2026-09-15T09:00:38.635486Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "1281b5a5665146a217ee2012238f92cd0928f027ddcdd702e4b19014347370ab",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-3518750de68942b9b255553c37f7a317-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-3518750de68942b9b255553c37f7a317-scope.json",
+  "failure_kind": "action_required",
+  "failure_reason": "Worker requests manager action; inspect the result"
+}

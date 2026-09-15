@@ -1,0 +1,14 @@
+{
+ "schema_version": 1,
+ "captured_at_utc": "2026-09-15T08:21:22.513077Z",
+ "roots": [
+  ".workflow-kit/docs/FINDINGS-REQ-007.md"
+ ],
+ "files": [
+  {
+   "path": ".workflow-kit/docs/FINDINGS-REQ-007.md",
+   "sha256": "9ba81304893fb3abef08c391ee6915595e08e587cb3f8492b1784eb39c84228b"
+  }
+ ],
+ "digest": "1f77ad3fecb293e554d91120219186a2a311248646595987eef3a5bc5dd5d572"
+}

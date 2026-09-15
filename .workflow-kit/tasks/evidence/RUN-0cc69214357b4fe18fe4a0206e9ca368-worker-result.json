@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-030",
+  "run_id": "RUN-0cc69214357b4fe18fe4a0206e9ca368",
+  "status": "ready_for_verification",
+  "summary": "续跑收尾：REQ-001 修复代码已在上一 run 完成（水合失败 catch+重试、hydratedIds 终态防重复水合、三态占位符、快照替换清空水合态、打开文章详情 catch+toast；新增 5 条 S-2 回归断言）。本 run 无新增改动；真实变更清单见被 scope 误判阻塞的 RUN-ea2583-changes.json（6 个文件：src/store.ts、src/store/types.ts、src/types.ts、src/components/Timeline.tsx、src/styles/base.css、tools/frontend-regression.mjs）。门禁已于上一 run 全绿：lint 0/0、前端回归 13/13、cargo fmt、cargo test 108/0（中途一次 502 失败为网络调整期代理拦截 localhost，清代理后全绿）。",
+  "changed_files": [],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

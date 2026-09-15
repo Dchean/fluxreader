@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-031",
+  "run_id": "RUN-a6a353031ee74b9b8c372df36c89d686",
+  "status": "ready_for_verification",
+  "summary": "完成 REQ-002/003 同步缺口定位（交付物在上一 run 完成，本 run 无新增改动；因上一 run 的 worker-result.unresolved_items 误填文档性备注被按 action_required 关闭，经授权重分类后以本 run 收尾）。产出：(1) 三个 mock e2e 复现测试（#[ignore]，实跑证实缺口成立）：删除订阅 pull 复活+无退订（A-1）、订阅改名零远端动作（A-2）、离线已读变更连接后不补推（A-5）；(2) 根因与修复设计文档 FINDINGS-SYNC-GAP.md：8 个独立缺口（A-1~A-8）+ 连带缺陷 C-1/C-2，每项含 文件:行 根因、复现状态、分批修复设计；其中 A-7（远端退订是否跟随清理）与 A-6 边界属产品确认事项，已作为文档内'待产品确认'标注，非实现阻塞；(3) MockGreader 扩展 subscription/edit 全动作记录；修正一处初判：对账回滚为 Fever 特有，GReader 为单向合并。门禁：fmt 通过、cargo test 默认集 108/0。",
+  "changed_files": [],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

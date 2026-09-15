@@ -1,0 +1,53 @@
+{
+  "task_id": "TASK-031",
+  "candidate_digest": "aa2aa4194e8a1aeba8c81a908abf09682892901ebc2a74d78589146cf371504b",
+  "verification_run": "RUN-ca5d5da5e86e48f0a2a8554872d9cfc4",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（未参与实现）：三个复现测试实跑（--ignored）3/3 通过，A-1/A-2/A-5 缺口真实复现；文档抽查 9 项文件:行定位全部与源码相符；GReader 单向合并与 Fever 双向回滚的声明与 reconcile_reader_state/reconcile_fever_state 实现一致；默认 cargo test 全绿、改动未越界（仅 tests/ 两文件 + 新文档）。三条非阻塞建议：复现测试可进一步经命令层触发未入队路径；文档第 61 行 exit 101 表述含混建议改写；A-1 行号偏差 1-2 行（容差内）。均在后续修复批次处理。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收标准逐条满足：复现测试存在且 #[ignore] 标注原因、文档指出缺口位置/根因/修复方案、三个缺口独立结论、基线不回归",
+      "evidence_files": [
+        "src-tauri/tests/sync_gap_repro_e2e.rs",
+        ".workflow-kit/docs/FINDINGS-SYNC-GAP.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "默认 cargo test 108/0 全绿；复现测试 #[ignore] 不进默认门禁；mock_greader.rs 改动对既有测试行为中性（仅新增记录与只读 helper）",
+      "evidence_files": [
+        "src-tauri/tests/mock_greader.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "复现测试实跑证实三个失败路径成立；文档额外标注 A-5b（Fever 回滚）与 C-1（对账空集合误判）两个未复现但代码证实的失败路径",
+      "evidence_files": [
+        ".workflow-kit/docs/FINDINGS-SYNC-GAP.md",
+        ".workflow-kit/docs/FINDINGS-SYNC-GAP.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "复现测试注释完整说明复现语义与修复后断言反转方式；文档给出分批修复设计与每项的转正方式",
+      "evidence_files": [
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务为定位与测试，无运行时性能变更；A-8 队列膨胀已作为发现记录供修复批次处理",
+      "evidence_files": [
+        ".workflow-kit/docs/FINDINGS-SYNC-GAP.md"
+      ]
+    }
+  ],
+  "ui_review": null
+}

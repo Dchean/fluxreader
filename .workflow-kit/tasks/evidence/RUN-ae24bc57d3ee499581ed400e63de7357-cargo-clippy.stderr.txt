@@ -1,4 +1,0 @@
-warning: error copying object file `D:\OneDrive - chean\fluxreader\src-tauri\target\debug\deps\libapp_lib-b294cd4d97fa7b0b.rmeta` to incremental directory as `\\?\D:\OneDrive - chean\fluxreader\src-tauri\target\debug\incremental\app_lib-1shcn86g8vbf3\s-hmacyso3h0-0dkqy51-working\metadata.rmeta`: 拒绝访问。 (os error 5)
-
-warning: `app` (lib) generated 1 warning
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.25s

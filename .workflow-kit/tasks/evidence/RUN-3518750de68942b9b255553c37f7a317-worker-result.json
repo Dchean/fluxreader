@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-031",
+  "run_id": "RUN-3518750de68942b9b255553c37f7a317",
+  "status": "ready_for_verification",
+  "summary": "完成 REQ-002/003 同步缺口定位。产出：(1) 三个 mock e2e 复现测试（#[ignore] 标注，实跑证实缺口成立）：删除订阅 pull 复活+无退订（A-1）、订阅改名零远端动作（A-2）、离线已读变更连接后不补推（A-5）；(2) 根因与修复设计文档 FINDINGS-SYNC-GAP.md：共定位 8 个独立缺口（A-1~A-8）+ 连带缺陷 C-1/C-2，每项含 文件:行 根因、复现状态与分批修复设计（第一批 C-1+A-5，第二批 A-1/A-2/A-3，第三批 A-4/A-8/A-7/A-6 待产品确认）；修正了一处初判：对账回滚为 Fever 特有（reconcile_fever_state 双向），GReader 对账为单向合并——测试与文档已按实修正。(3) MockGreader 扩展 subscription/edit 全动作记录。未实施大规模修复（按任务边界）。门禁：fmt 通过、cargo test 默认集 108/0（复现测试 #[ignore] 不影响默认门禁，已单独 --ignored 实跑取证）。",
+  "changed_files": [
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs",
+    ".workflow-kit/docs/FINDINGS-SYNC-GAP.md"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [
+    "A-7（远端退订本地是否跟随清理）与 A-6 边界需产品确认后才可实施"
+  ],
+  "blocked_reason": null
+}

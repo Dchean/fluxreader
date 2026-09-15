@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "id": "TASK-029",
+  "title": "全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）",
+  "kind": "documentation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "done",
+  "objective": "只读排查前端（src/）与后端（src-tauri/src/）中疑似空壳、未接线、未完成的功能与隐藏 Bug 候选：对照 UI 触发点与后端命令的实际接线、TODO/FIXME、mock/演示残留、捕获后吞掉的错误路径；产出 .workflow-kit/docs/FINDINGS-REQ-007.md 清单（每项含证据 文件:行、现状、影响、建议与优先级），供用户逐项确认后才纳入后续批次，不直接修改业务代码。",
+  "non_goals": [
+    "修复发现的 Bug",
+    "重构代码",
+    "修改测试"
+  ],
+  "requirement_refs": [
+    "REQ-007"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      ".workflow-kit/docs/FINDINGS-REQ-007.md"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "清单覆盖 src/ 全部组件与 store 路径、src-tauri/src/ 全部命令模块的空壳/未接线/可疑实现",
+    "每个发现含：证据（文件:行）、现状描述、对用户的影响、建议处理方式与优先级",
+    "明确区分'确认是缺陷'与'疑似待验证'两类，不夸大结论",
+    "清单交用户确认前，不改任何业务代码"
+  ],
+  "gates": [
+    {
+      "id": "findings-file",
+      "program": "python",
+      "args": [
+        "-c",
+        "import os,sys; p='.workflow-kit/docs/FINDINGS-REQ-007.md'; sys.exit(0 if os.path.isfile(p) and os.path.getsize(p)>200 else 1)"
+      ],
+      "cwd": ".",
+      "required": true,
+      "reason": "排查交付物为清单文档，门禁验证其存在且含实质内容"
+    }
+  ],
+  "test_review": null,
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-029-input-50b40090398b4e41b570d3f49a44dcb9.json",
+    "digest": "1a72a02981b862527c78f9108e1e68fcdf99ff1d6ec2b934b65be523f20e9d05",
+    "source_revision": null,
+    "definition_digest": "ce66cbf690a26fd8f0c0516ab9174bcf590aa80900654efa5f856760f57ab0ad"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T04:57:29.398013Z",
+    "deadline_at_utc": "2026-09-15T06:27:29.398013Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-615edeb0215f44d38a852fd2cdaea80f",
+  "run_ids": [
+    "RUN-5f5d77b9747d433586fd207897e876f4",
+    "RUN-4357fa0538bf400090f1612fdff55e1d",
+    "RUN-756ddaa4e1594449823064495bd0dd5d",
+    "RUN-eb3239600a27453dbd17545d8239060b",
+    "RUN-da0a1efb63d54d59b49043f74561d129"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-eb3239600a27453dbd17545d8239060b-candidate.json",
+    "candidate_digest": "1f77ad3fecb293e554d91120219186a2a311248646595987eef3a5bc5dd5d572",
+    "verification_run": "RUN-eb3239600a27453dbd17545d8239060b",
+    "review_run": "RUN-da0a1efb63d54d59b49043f74561d129",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-80d58a8cdf4b4568a6e23dff7280679d-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-80d58a8cdf4b4568a6e23dff7280679d"
+    ],
+    "merge_ref": "not_applicable：本地工作区交付，不涉及远端分支合并；用户直接批准当前工作区成果"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-REQ-007.md"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T04:57:29.445545Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T05:53:01.465345Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-15T05:53:10.087149Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T05:57:30.064348Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-15T06:01:32.675268Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T06:05:36.402201Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "review"
+}

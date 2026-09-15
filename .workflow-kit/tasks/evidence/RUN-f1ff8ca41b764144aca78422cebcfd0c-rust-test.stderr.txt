@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running unittests src\lib.rs (src-tauri\target\debug\deps\app_lib-28af9ca0d34b9f2b.exe)
+     Running unittests src\main.rs (src-tauri\target\debug\deps\app-346650996fae5145.exe)
+     Running tests\account_lifecycle_e2e.rs (src-tauri\target\debug\deps\account_lifecycle_e2e-1bde7be13afb3ab8.exe)
+     Running tests\ai_e2e.rs (src-tauri\target\debug\deps\ai_e2e-bbf1442f8e1fceaf.exe)
+     Running tests\config_sync_e2e.rs (src-tauri\target\debug\deps\config_sync_e2e-0f489e2b2e8a6302.exe)
+     Running tests\dedup_sync_e2e.rs (src-tauri\target\debug\deps\dedup_sync_e2e-f56333fa7bb30a87.exe)
+     Running tests\dual_client_e2e.rs (src-tauri\target\debug\deps\dual_client_e2e-c38f66b60f9a183a.exe)
+     Running tests\feed_edit_e2e.rs (src-tauri\target\debug\deps\feed_edit_e2e-e53b586e16d2c3c0.exe)
+     Running tests\fever_live_e2e.rs (src-tauri\target\debug\deps\fever_live_e2e-100129980607796b.exe)
+     Running tests\fever_sync_live_e2e.rs (src-tauri\target\debug\deps\fever_sync_live_e2e-4bfa0aa1001de08d.exe)
+     Running tests\github_auth_e2e.rs (src-tauri\target\debug\deps\github_auth_e2e-623e8f11bd06e922.exe)
+error: test failed, to rerun pass `--test github_auth_e2e`

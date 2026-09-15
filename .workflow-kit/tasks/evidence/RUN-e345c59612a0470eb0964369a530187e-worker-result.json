@@ -1,0 +1,16 @@
+{
+  "task_id": "TASK-034",
+  "run_id": "RUN-e345c59612a0470eb0964369a530187e",
+  "status": "ready_for_verification",
+  "summary": "完成 P1-7 社交/通知卡片翻译接线。(1) store 新增 translateEntry(id)：按 id 流式生成该条目译文（复用 Reader 路径的 aiTranslate 流式+消毒回读逻辑），状态按条目隔离（translatingIds per-id，不复用全局 translating 单布尔——规避排查 F4 同类互串问题），失败进 translateErrors 并 toast 带重试，已有译文时短路不重复调用。(2) Timeline：社交卡与通知卡的翻译按钮从'只切换显示'改为'无译文时实际触发生成'；译文块增加按 id 的'⏳ 翻译中…'响应式指示。(3) 新增 3 条 S-4 回归断言（流式生成回读消毒版/按 id 状态清除/缓存命中不重复调用）。门禁：lint 0/0、前端回归 21/21。",
+  "changed_files": [
+    "src/store.ts",
+    "src/store/types.ts",
+    "src/components/Timeline.tsx",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

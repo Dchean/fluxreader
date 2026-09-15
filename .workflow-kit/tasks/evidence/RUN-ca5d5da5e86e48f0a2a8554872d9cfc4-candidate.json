@@ -1,0 +1,24 @@
+{
+ "schema_version": 1,
+ "captured_at_utc": "2026-09-15T11:03:26.493501Z",
+ "roots": [
+  ".workflow-kit/docs/FINDINGS-SYNC-GAP.md",
+  "src-tauri/tests/mock_greader.rs",
+  "src-tauri/tests/sync_gap_repro_e2e.rs"
+ ],
+ "files": [
+  {
+   "path": ".workflow-kit/docs/FINDINGS-SYNC-GAP.md",
+   "sha256": "c92f4b70f99e613d0cec72e7f3a126e636dd880f20731e9fb76fa4b2b6332570"
+  },
+  {
+   "path": "src-tauri/tests/mock_greader.rs",
+   "sha256": "1e38be7725e7cf2cc574f3b77135a3470c5cf61a99df039ee434bbcd503906b3"
+  },
+  {
+   "path": "src-tauri/tests/sync_gap_repro_e2e.rs",
+   "sha256": "551b845650ac08d899c36094b7d967e6151053064ef7ab467c81bb8b56c46043"
+  }
+ ],
+ "digest": "aa2aa4194e8a1aeba8c81a908abf09682892901ebc2a74d78589146cf371504b"
+}

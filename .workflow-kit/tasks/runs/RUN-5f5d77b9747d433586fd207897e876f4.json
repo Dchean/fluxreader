@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-5f5d77b9747d433586fd207897e876f4",
+  "task_id": "TASK-029",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "manager 主会话直接执行（documentation 任务，只读排查+清单文档），run RUN-07da73ba4e5d4caa85155c78bdd8de8b"
+  },
+  "started_at_utc": "2026-09-15T04:57:29.399825Z",
+  "finished_at_utc": "2026-09-15T05:53:01.440959Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "1a72a02981b862527c78f9108e1e68fcdf99ff1d6ec2b934b65be523f20e9d05",
+  "candidate_digest": "1f77ad3fecb293e554d91120219186a2a311248646595987eef3a5bc5dd5d572",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-5f5d77b9747d433586fd207897e876f4-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-5f5d77b9747d433586fd207897e876f4-scope.json"
+}

@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "id": "TASK-032",
+  "title": "同步状态链路修复：对账防误判（C-1）+ 离线变更一律入队（A-5）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "done",
+  "objective": "修复同步状态链路两个高优先缺口：(1) C-1——GReader/Fever 状态集合拉取失败时，当前 unwrap_or_default() 把错误当空集合，对账会静默清空本地收藏（GReader）或把本地全部改为已读并可能回滚未读（Fever）；改为任一集合拉取失败即跳过该轮对账并记 report.errors。(2) A-5——set_read/set_starred 仅在 sync_configured 时入队，离线变更无持久化待推记录、连接后不补推；改为无论是否 configured 都入队，推送段在未配置时静默跳过。同步把 offline 复现测试转正为必过（断言反转为：连接后 mock 收到 edit-tag），并新增对账失败跳过的测试。",
+  "non_goals": [
+    "A-1/A-2/A-3 的退订/改名/分类接线（下一批）",
+    "C-2 吞错日志类卫生项",
+    "Fever 回滚语义的协议级改造（A-5 入队后 pending 保护自然覆盖）"
+  ],
+  "requirement_refs": [
+    "REQ-002",
+    "REQ-003"
+  ],
+  "reference_ids": [
+    "REF-001"
+  ],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "GReader/Fever 任一状态集合拉取失败时跳过对账且 report.errors 有记录（新增测试覆盖）",
+    "未配置凭据时 set_read/set_starred 仍写入 sync_queue，配置后连接可补推",
+    "offline_read_change_never_pushed_after_connect 转 正为必过并反转为期望行为",
+    "A-1/A-2 复现测试保持 #[ignore] 不受影响；cargo test 默认集与 fmt 全绿"
+  ],
+  "gates": [
+    {
+      "id": "fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "rust-test",
+      "program": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-15 基线（8966ece）cargo test 108/0；TASK-030/031 后工作区 cargo test 108/0 且新增 3 个 #[ignore] 复现测试（实跑复现成立）。行为变更仅限：拉取失败不再当作空集合对账；离线状态变更改为入队待推。两者均为用户确认的缺陷修复方向（FINDINGS-SYNC-GAP.md 修复设计，REQ-002/003 范围）。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    },
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "Rust 默认测试集与既有 mock e2e 同步契约",
+        "reason": "既有 push/pull/对账期望行为不得回归",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "adapt",
+        "target": "offline_read_change_never_pushed_after_connect 复现测试转正",
+        "reason": "A-5 修复后该场景行为变更为期望行为，断言反转为收到补推",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "对账拉取失败跳过（不再当空集合）的回归测试",
+        "reason": "C-1 此前无覆盖，属破坏性路径",
+        "gate_ids": [
+          "rust-test"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-032-input-8d70b9f8bf944687a74c02f37b105c07.json",
+    "digest": "ec83385b46cdb43210b167790187b0a0b25deecad0f59ed870abb5667ba5a280",
+    "source_revision": null,
+    "definition_digest": "6341cdf84d765dc10845c8bb65297ae3ed8a59e04481a44af10d6d59eecb4201"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T10:00:22.456187Z",
+    "deadline_at_utc": "2026-09-15T11:30:22.456187Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-1810073c1e4c482f8a2be8b5590c92df",
+  "run_ids": [
+    "RUN-d25989b7e9264a4a920532cc117aa041",
+    "RUN-1f23fb96af194297b85e141172527a70",
+    "RUN-e54813bc695d4c848b308703d5a676c7",
+    "RUN-f1ff8ca41b764144aca78422cebcfd0c",
+    "RUN-4f4b972a7a8641778f23d40f7e259624",
+    "RUN-da3e6bd5e55f4aefa4128126dc7d202d",
+    "RUN-b27ce46217664f61a9ff42dabd3fe010",
+    "RUN-d025a20594e04facb909be47421c4f12",
+    "RUN-a1f4f2e1c7914ec08fabb0c57e007426"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-da3e6bd5e55f4aefa4128126dc7d202d-candidate.json",
+    "candidate_digest": "e96868e423c66d0560e9e86fc8512e61b0a17394e847170040dce3c5280a569d",
+    "verification_run": "RUN-da3e6bd5e55f4aefa4128126dc7d202d",
+    "review_run": "RUN-a1f4f2e1c7914ec08fabb0c57e007426",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-9b5b2abed1664fc7b69f344f9ed11f44-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-9b5b2abed1664fc7b69f344f9ed11f44"
+    ],
+    "merge_ref": "not_applicable：本地工作区交付，不涉及远端分支合并；用户直接批准当前工作区成果"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/sync.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T10:00:22.505452Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T10:35:07.434330Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-15T10:35:13.221916Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T10:52:12.613965Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T10:55:05.384751Z",
+      "note": "Required gate failed: rust-test",
+      "next_action": "先核对已有文件及原始日志，再处理 network；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-15T10:55:32.545495Z",
+      "note": "[WinError 5] 拒绝访问。: 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-4f4b972a7a8641778f23d40f7e259624.json.ce752e6799ee4a34a56d0b924d70806b.tmp' -> 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-4f4b972a7a8641778f23d40f7e259624.json'",
+      "next_action": "先核对已有文件及原始日志，再处理 environment；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-15T10:57:48.934539Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T11:06:26.220400Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "verification"
+}

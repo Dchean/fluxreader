@@ -4,6 +4,8 @@
 - WorkBuddy 宿主：[WORKBUDDY](adapters/WORKBUDDY.md)
 
 - 首次问答：[INTAKE](INTAKE.md)
+- 用户可见的阶段与任务：[PRESENTATION](PRESENTATION.md)
+- Agent 包办与独立审查：[SINGLE-AGENT](adapters/SINGLE-AGENT.md)
 - 参考检索：[RESEARCH](RESEARCH.md)
 - 前端预览与控件一致性：[FRONTEND](FRONTEND.md)
 - 新项目：[NEW-PROJECT](NEW-PROJECT.md)

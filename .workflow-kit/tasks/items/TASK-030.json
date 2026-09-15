@@ -1,0 +1,240 @@
+{
+  "schema_version": 1,
+  "id": "TASK-030",
+  "title": "修复社交布局正文无限加载（REQ-001）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "done",
+  "objective": "定位并修复：社交布局下打开文章正文经常一直加载，切换一下布局又能秒加载。先对比社交布局与其他布局的正文加载/提取/缓存路径差异，找到根因（可能是提取请求未走缓存、未复用已提取内容、或加载状态未收敛）；修复后社交布局正文按预期加载。修复行为是让实现回到预期行为，不改变其他布局行为。",
+  "non_goals": [
+    "重构 store.ts 或组件结构",
+    "改变其他布局的加载行为",
+    "引入新依赖"
+  ],
+  "requirement_refs": [
+    "REQ-001"
+  ],
+  "reference_ids": [
+    "REF-002"
+  ],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/**",
+      "src-tauri/src/**",
+      "tools/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "社交布局打开文章正文不再无限加载，与切换布局后的加载表现一致",
+    "tools/frontend-regression.mjs 新增正文加载路径回归断言并通过",
+    "现有前端逻辑回归 8/8 与 Rust 基线不回归",
+    "根因与修复方式在任务记录中留档"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "rust-test",
+      "program": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-15 基线（8966ece）：oxlint 0/0；前端回归 8/8；cargo test 108/0；fmt 通过；mock e2e 14/0。基线测试不含 REQ-001 场景，社交布局正文加载当前无测试覆盖。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "现有 8 项前端逻辑回归（翻译流/toast/缓存命中）",
+        "reason": "修复不得影响已覆盖行为",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "Rust 默认测试集 108 项",
+        "reason": "若根因涉及后端提取管线，后端行为不得回归",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "社交布局正文加载路径回归断言（正文加载收敛、复用已提取内容）",
+        "reason": "REQ-001 此前无任何测试覆盖，需新增强制验证",
+        "gate_ids": [
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-030-input-6267b9a9d6f8457d8f4dffde79d07790.json",
+    "digest": "8cbc68403893f26702a8ba05e9d887a55d34eff85ec8169a5c98852e2176e2d4",
+    "source_revision": null,
+    "definition_digest": "565fa6c5838a45da32eb41e5ea6e4ec46b9b7ecf0bfe647b0e719e5c7705c2fb"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T06:08:23.418198Z",
+    "deadline_at_utc": "2026-09-15T07:38:23.418198Z",
+    "repair_rounds_used": 0,
+    "extensions": [
+      {
+        "decision_id": "DEC-17a7fc68eb224bc184324f886dc50b2a",
+        "recorded_at_utc": "2026-09-15T08:24:56.719659Z",
+        "minutes": 90,
+        "repair_rounds": 0,
+        "previous_deadline_at_utc": "2026-09-15T07:38:23.418198Z",
+        "deadline_at_utc": "2026-09-15T09:54:56.719659Z"
+      }
+    ]
+  },
+  "batch_id": "BATCH-615edeb0215f44d38a852fd2cdaea80f",
+  "run_ids": [
+    "RUN-ea2583a91c5143d6a8d05721954d7c5a",
+    "RUN-0cc69214357b4fe18fe4a0206e9ca368",
+    "RUN-4eb29056be39405fae6ca1f3ed36efb0",
+    "RUN-fd583b797deb460ba0b51a2130e63a08"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-4eb29056be39405fae6ca1f3ed36efb0-candidate.json",
+    "candidate_digest": "96dc5b1e823132fe59a333eeaf2b7a9f18af04ef2f51cf439f0e34ff21b53d3c",
+    "verification_run": "RUN-4eb29056be39405fae6ca1f3ed36efb0",
+    "review_run": "RUN-fd583b797deb460ba0b51a2130e63a08",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-80d58a8cdf4b4568a6e23dff7280679d-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-80d58a8cdf4b4568a6e23dff7280679d"
+    ],
+    "merge_ref": "not_applicable：本地工作区交付，不涉及远端分支合并；用户直接批准当前工作区成果"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/extraction.rs",
+    "src-tauri/src/ingestion.rs",
+    "src/components/Reader.tsx",
+    "src/lib/api.ts",
+    "src/store.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T06:08:23.465317Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T07:12:57.193420Z",
+      "note": "Out-of-scope changes: dist-test/store.js",
+      "next_action": "先核对已有文件及原始日志，再处理 scope；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-15T08:24:56.814319Z",
+      "note": "依据新决定追加预算；原始时钟与失败记录保留",
+      "next_action": "先核对已有成果，再按原任务范围继续"
+    },
+    {
+      "at_utc": "2026-09-15T08:26:48.515075Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T08:27:10.279397Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-15T08:27:18.082652Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T08:39:17.270934Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "implementation"
+}

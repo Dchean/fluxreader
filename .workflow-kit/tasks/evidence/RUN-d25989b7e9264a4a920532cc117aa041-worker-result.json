@@ -1,0 +1,16 @@
+{
+  "task_id": "TASK-032",
+  "run_id": "RUN-d25989b7e9264a4a920532cc117aa041",
+  "status": "ready_for_verification",
+  "summary": "完成 C-1 + A-5 同步状态链路修复。(1) C-1：sync.rs 两处对账不再把拉取失败当空集合——GReader read/starred 流与 Fever unread/saved 集合任一失败即跳过本轮对账并记 report.errors（Fever 条目正文拉取不受影响，仅跳过状态对账段）。(2) A-5：commands.rs 抽出 record_read_state/record_star_state（set_read/set_starred 的命令层真实逻辑），无论是否 sync_configured 都入队——离线变更保留持久化待推记录，连接后由推送段补推；未配置时 push_states_now 静默返回不变。(3) 测试：offline_read_change_never_pushed_after_connect 复现测试转正为必过的 offline_read_change_pushed_after_connect（断言反转为连接后收到 edit-tag read 且队列清空）；新增 reconcile_skipped_when_state_fetch_fails（mock 注入 stream/items/ids 500，断言对账跳过且本地收藏不被清空）；A-1/A-2 复现测试保持 #[ignore]。门禁：fmt 通过、cargo test 110/0（含 2 个新必过测试；期间一次 device_flow 502 为代理拦截 localhost，清代理后全绿，与 TASK-030 同因）。",
+  "changed_files": [
+    "src-tauri/src/sync.rs",
+    "src-tauri/src/commands.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs",
+    "src-tauri/tests/mock_greader.rs"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

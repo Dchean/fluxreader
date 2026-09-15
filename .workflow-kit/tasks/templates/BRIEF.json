@@ -3,7 +3,21 @@
   "audience": "",
   "acceptance": [],
   "non_goals": [],
+  "requirements": [],
+  "quality": {
+    "priority": "quality_first",
+    "maintainability": "",
+    "stability": "",
+    "performance": {"mode": "pending", "workload": "", "targets": [], "rationale": ""}
+  },
   "compatibility": null,
+  "refactor": {
+    "intent": null,
+    "assessment": {"evidence": [], "recommendation": null, "tradeoffs": ""},
+    "decision": null
+  },
+  "delivery": {"target": "", "external_services": "pending", "data_boundary": ""},
+  "confirmations": {},
   "legacy_review": {"reviewed_paths": [], "preserved_constraints": [], "task_disposition": "", "workflow_resolution": "", "unresolved_conflicts": []},
   "ui": {"mode": "pending", "style_intent": "", "target_devices": []},
   "recovery": {"network_backoff_seconds": [5, 15], "max_cli_call_seconds": 600},
@@ -20,6 +34,7 @@
     "release": "ask"
   },
   "execution": {
+    "mode": null,
     "coder": null,
     "reviewer": null,
     "review_mode": null,

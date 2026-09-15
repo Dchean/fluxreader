@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "status": "offline",
+  "reason": "外网查验未完成：vitest.dev 与 zustand.docs.pmnd.rs 请求超时（60s×3），zustand slices-pattern 页返回 404，raw.githubusercontent.com 超时；本会话环境对外网不稳定。按规则如实记录 offline。恢复动作：下次接入稳定网络后补查（a) vitest+@testing-library/react 对 React 19 的组件行为测试支持与许可证版本；（b) zustand 官方 slices/分片拆分模式文档）。在补查完成前，前端行为基线沿用项目内 tools/frontend-regression.mjs 扩展，不引入新依赖。项目内候选已实际查验（源码已读）。",
+  "next_action": "网络恢复后补查外部两项并更新本记录；在此之前第一批任务只引用项目内候选。",
+  "candidates": [
+    {
+      "id": "REF-001",
+      "title": "现有同步管线：sync.rs + db/sync_queue.rs + db/sync_map.rs",
+      "url": "project:src-tauri/src/sync.rs",
+      "inspected_at_utc": "2026-09-15T04:13:57Z",
+      "fit": "REQ-002/003 的复用基础：已存在 instant push 队列、全量对账（full_reconcile）、本地状态优先合并等机制（对应 mock e2e：instant_push_only_pushes_and_drains_queue、full_reconcile_backfills_missing_local_entries 等），双向同步修复应在该管线上定位缺口，而非另起炉灶",
+      "limitations": "用户报告真实环境中订阅操作与状态变更未回传，说明管线某段未接线或条件不满足；机制存在不代表端到端生效",
+      "reuse": "adapt_code",
+      "license": "MIT（本项目）",
+      "revision": "8966ece（当前 HEAD）",
+      "evidence": "读取 sync.rs 结构与 sync_phases_e2e/sync_content_e2e 用例名；cargo test 基线 108 通过"
+    },
+    {
+      "id": "REF-002",
+      "title": "现有前端逻辑回归框架：tools/frontend-regression.mjs + test-loader.mjs",
+      "url": "project:tools/frontend-regression.mjs",
+      "inspected_at_utc": "2026-09-15T04:13:57Z",
+      "fit": "无新增依赖即可为 store.ts 拆分建立行为基线：Node 中直接驱动状态机断言（当前 8/8 通过，覆盖翻译流、toast、缓存命中），拆分前按同模式为将被移动的 store 行为补断言",
+      "limitations": "非桌面 UI E2E，不覆盖渲染与交互细节；组件级动画/文案问题仍需人工在运行的应用中验证",
+      "reuse": "adapt_code",
+      "license": "MIT（本项目）",
+      "revision": "8966ece（当前 HEAD）",
+      "evidence": "npm run test:frontend 本机通过 8/8；CI 以同一命令作门禁"
+    },
+    {
+      "id": "REF-003",
+      "title": "db.rs 拆分试点模式（TASK-023）：领域子模块 + 就地测试模块",
+      "url": "project:src-tauri/src/db.rs",
+      "inspected_at_utc": "2026-09-15T04:13:57Z",
+      "fit": "后端 commands.rs/sync.rs 拆分的直接模板：公开路径不变、按领域拆子模块、测试模块随行，公开 API 兼容由既有 e2e 保证",
+      "limitations": "db 领域边界清晰可直接照搬；commands/sync 的切分维度需按命令族/同步阶段重新设计，不能机械套用",
+      "reuse": "reference_only",
+      "license": "MIT（本项目）",
+      "revision": "8966ece（当前 HEAD）",
+      "evidence": "git 提交 fdcf9a2/259f00d；src-tauri/src/db/ 下 9 领域子模块 + 3 测试模块存在且基线全绿"
+    }
+  ],
+  "recorded_at_utc": "2026-09-15T04:14:27.058449Z"
+}

@@ -12,6 +12,12 @@
 
 由 Agent 作出的技术建议不要冒充用户批准。已有授权范围内的日常技术选择由 Agent 完成；改变功能、兼容性、费用或权限边界时再核对用户决定。
 
+BRIEF 的分轮答案通过 confirmations 区分 proposed 与 confirmed；确认包含实际回答、来源和对应值摘要。初次 onboard 生成带 confirmed_brief 的决定，POLICY.intake.decision_id 指向它。原始消息可同时确认摘要里明确列出的多个主题；没有展示的默认值不能这样补签。
+
+启动后确需改变路线、执行器或增加业务权限时，先提出具体变化并取得适用回答。总控以原 brief 为基础，只更新变动主题与确认，按 workflow_intake.resolve 校验/生成摘要；在 DECISIONS 追加含新 confirmed_brief 的决定，同步 BRIEF、POLICY.intake.decision_id 与 approval.decision_ids，保留旧决定。再运行 check，未通过前不派发。不能用再次 onboard 或直接翻转 code=true 把评估批准变成实现批准。
+
+这是维护原有决定记录，不另建审批队列。正常续批、任务时间或修复额度追加使用 batch/extend，保留原时钟；不要通过重写初始预算改变已经消耗的额度。
+
 ## 何时留下设计记录
 
 未来接手者可能会问“为什么这样改”时记录：重要技术选型、非显然约束、值得防止重犯的缺陷、较大的结构调整。纯格式修改和小动作不用逐一新增 ADR。

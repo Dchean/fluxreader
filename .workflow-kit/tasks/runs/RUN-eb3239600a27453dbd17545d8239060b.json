@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "id": "RUN-eb3239600a27453dbd17545d8239060b",
+  "task_id": "TASK-029",
+  "kind": "verification",
+  "outcome": "completed",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-3586629234f74df8a3e9cd30f1b4ca42"
+  },
+  "started_at_utc": "2026-09-15T06:01:32.461702Z",
+  "finished_at_utc": "2026-09-15T06:01:32.649466Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "1a72a02981b862527c78f9108e1e68fcdf99ff1d6ec2b934b65be523f20e9d05",
+  "candidate_digest": "1f77ad3fecb293e554d91120219186a2a311248646595987eef3a5bc5dd5d572",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-eb3239600a27453dbd17545d8239060b-findings-file.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-eb3239600a27453dbd17545d8239060b-findings-file.stderr.txt"
+  ],
+  "checks": [
+    {
+      "gate_id": "findings-file",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-eb3239600a27453dbd17545d8239060b-findings-file.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-eb3239600a27453dbd17545d8239060b-findings-file.stderr.txt",
+      "candidate_digest": "1f77ad3fecb293e554d91120219186a2a311248646595987eef3a5bc5dd5d572",
+      "command": {
+        "argv": [
+          "C:\\Users\\A\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe",
+          "-c",
+          "import os,sys; p='.workflow-kit/docs/FINDINGS-REQ-007.md'; sys.exit(0 if os.path.isfile(p) and os.path.getsize(p)>200 else 1)"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-15T06:01:32.562106Z",
+        "finished_at_utc": "2026-09-15T06:01:32.619089Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-eb3239600a27453dbd17545d8239060b-findings-file.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-eb3239600a27453dbd17545d8239060b-findings-file.stderr.txt"
+      }
+    }
+  ],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 27716,
+  "controller_pid": 6024,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Users\\A\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe",
+        "-c",
+        "import os,sys; p='.workflow-kit/docs/FINDINGS-REQ-007.md'; sys.exit(0 if os.path.isfile(p) and os.path.getsize(p)>200 else 1)"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-15T06:01:32.562106Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-eb3239600a27453dbd17545d8239060b-findings-file.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-eb3239600a27453dbd17545d8239060b-findings-file.stderr.txt",
+      "finished_at_utc": "2026-09-15T06:01:32.619089Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    }
+  ]
+}

@@ -32,6 +32,8 @@
       "scripts/project_workflow.py",
       "scripts/workflow_runtime.py",
       "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
       "WORKFLOW-KIT.md",
       ".workflow-kit/binding.json",
       ".workflow-kit/tasks/**",
@@ -49,6 +51,7 @@
   },
   "acceptance": [],
   "gates": [],
+  "test_review": null,
   "input": {
     "manifest": null,
     "digest": null,

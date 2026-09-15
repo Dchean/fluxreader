@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "BATCH-615edeb0215f44d38a852fd2cdaea80f",
+  "status": "closed",
+  "task_ids": [
+    "TASK-029",
+    "TASK-030",
+    "TASK-031"
+  ],
+  "approval_decision_ids": [
+    "DEC-85857e4038814bd1a7b18de0ed36db04"
+  ],
+  "created_at_utc": "2026-09-15T04:45:43.324683Z"
+}

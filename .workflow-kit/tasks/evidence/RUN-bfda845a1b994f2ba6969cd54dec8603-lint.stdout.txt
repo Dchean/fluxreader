@@ -1,0 +1,37 @@
+
+> fluxreader@0.13.0 lint
+> oxlint
+
+
+  ! eslint(no-duplicate-case): Duplicate case label
+    ,-[tools/frontend-regression.mjs:32:10]
+ 31 |   switch (cmd) {
+ 32 |     case 'github_login_start': {
+    :          ^^^^^^^^^^|^^^^^^^^^
+    :                    `-- This label here
+ 33 |       // P1-10：首调（不带 force）返回 webdavConflict 结构化错误；force 重发成功
+ 34 |       if (args.force !== true) {
+ 35 |         return Promise.reject({ code: 'webdavConflict', message: 'WebDAV conflict: existing data' });
+ 36 |       }
+ 37 |       return Promise.resolve({ user_code: 'WDJB-MJHT', verification_uri: 'https://github.com/login/device', interval: 3600 });
+ 38 |     }
+ 39 |     case 'list_folders': return Promise.resolve([]);
+ 40 |     case 'list_feeds': return Promise.resolve([]);
+ 41 |     case 'list_articles': return Promise.resolve([articleRow]);
+ 42 |     case 'sync_status': return Promise.resolve({ connected: false });
+ 43 |     case 'get_articles': {
+ 44 |       // S-2 可控行为：成功返回 rows / 失败 reject（默认空）
+ 45 |       if (getArticlesBehavior.reject) return Promise.reject(getArticlesBehavior.error ?? { message: 'db busy' });
+ 46 |       return Promise.resolve(getArticlesBehavior.rows);
+ 47 |     }
+ 48 |     case 'get_article': return Promise.resolve(articleRow);
+ 49 | 
+ 50 |     case 'github_login_start': {
+    :          ^^^^^^^^^^|^^^^^^^^^
+    :                    `-- is duplicated here
+ 51 |       // P1-10：首调（不带 force）返回 webdavConflict 结构化错误；force 重发成功
+    `----
+  help: Remove the duplicated case
+
+Found 1 warning and 0 errors.
+Finished in 28ms on 23 files with 116 rules using 28 threads.

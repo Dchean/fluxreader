@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-15T11:18:36.210606Z",
+  "roots": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src/components/SettingsModal.tsx",
+    "src/store.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+      "sha256": "026cd4b7cb8b85fbd8384825f6670105f47a083460f064422e048b0df92f6bf1"
+    },
+    {
+      "path": "src/components/SettingsModal.tsx",
+      "sha256": "dbdc1157c7fd02b1f273730163a21794023fabb28a4fa8128ce84090fb8edb50"
+    },
+    {
+      "path": "src/store.ts",
+      "sha256": "db8da4deb67c719f9c5336c11b7ab54d6cbc13d70758cdefff5c74916885121e"
+    },
+    {
+      "path": "tools/frontend-regression.mjs",
+      "sha256": "dc668652008f732ec7ca2f32cdc89b13efa9a79aa1984c41292045537cf09121"
+    }
+  ],
+  "digest": "fe5c4091d4e0234e06aa0a3e26c963fc18fa7a2d7247c3dfa13a128e5e191b9d"
+}

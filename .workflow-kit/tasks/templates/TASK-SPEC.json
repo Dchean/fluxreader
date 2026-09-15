@@ -17,5 +17,6 @@
   "snapshot_paths": [],
   "allowed_paths": [],
   "protected_paths": [],
-  "gates": []
+  "gates": [],
+  "test_review": null
 }

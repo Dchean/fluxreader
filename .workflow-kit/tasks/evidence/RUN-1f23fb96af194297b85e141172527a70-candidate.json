@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-15T10:35:07.689845Z",
+  "roots": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/sync.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+      "sha256": "026cd4b7cb8b85fbd8384825f6670105f47a083460f064422e048b0df92f6bf1"
+    },
+    {
+      "path": "src-tauri/src/commands.rs",
+      "sha256": "595ca58b033eae8cae3016c5cb06630ba0f4ce64efa713ca8f0546c606716079"
+    },
+    {
+      "path": "src-tauri/src/sync.rs",
+      "sha256": "c3d631cac594114ba77e4cacfaa1d7e55698e0e831c6c4020815bd02c10ac075"
+    },
+    {
+      "path": "src-tauri/tests/mock_greader.rs",
+      "sha256": "1e38be7725e7cf2cc574f3b77135a3470c5cf61a99df039ee434bbcd503906b3"
+    },
+    {
+      "path": "src-tauri/tests/sync_gap_repro_e2e.rs",
+      "sha256": "e70ff5105a681a10b9d63c91c3124ed247cf1509234d60dedf03884ecd389ced"
+    }
+  ],
+  "digest": "d7325c3ed3e58a2bf1efac81b804204bd2c6a034a8114ea0cae08ecae194efaa"
+}

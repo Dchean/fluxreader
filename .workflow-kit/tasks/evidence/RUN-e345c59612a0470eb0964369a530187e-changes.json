@@ -1,0 +1,8 @@
+{
+  "changed_files": [
+    "src/components/Timeline.tsx",
+    "src/store.ts",
+    "src/store/types.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

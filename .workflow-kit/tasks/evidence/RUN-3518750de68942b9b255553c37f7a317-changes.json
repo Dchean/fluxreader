@@ -1,0 +1,7 @@
+{
+  "changed_files": [
+    ".workflow-kit/docs/FINDINGS-SYNC-GAP.md",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ]
+}

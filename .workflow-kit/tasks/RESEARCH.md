@@ -1,6 +1,56 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # 参考方案调研
 
-状态：not_needed
+状态：searched
 
-试点为纯内部移动：把项目自己的 db.rs 按既有领域函数分组拆成 db/ 子模块，不引入外部库或算法。项目已具备针对性的设计材料（docs/runs/M2-module-disposition-20260913.md、.agents/notes/proposed/architecture/2026-09-13-m2-module-disposition.md），其中已给出拆分方案与“不引入 ORM”的备选比较；实现只遵循项目现有 Rust 模块约定，无外部实现可借鉴。
+用户调整网络后重试成功：WebFetch 工具仍超时，改用 curl 直连取回两页全文并已读要点（zustand Slices Pattern 指南、vitest v5.0.0 文档导航与入门页）。项目内三项候选此前已实际查验源码。调整网络前（2026-09-15 上午）曾连续超时/404，已如实留档。
+
+## REF-001 · 现有同步管线：sync.rs + db/sync_queue.rs + db/sync_map.rs
+
+- 来源：project:src-tauri/src/sync.rs
+- 采用方式：adapt_code
+- 适合之处：REQ-002/003 的复用基础：已存在 instant push 队列、全量对账（full_reconcile）、本地状态优先合并等机制（对应 mock e2e：instant_push_only_pushes_and_drains_queue、full_reconcile_backfills_missing_local_entries 等），双向同步修复应在该管线上定位缺口，而非另起炉灶
+- 限制：用户报告真实环境中订阅操作与状态变更未回传，说明管线某段未接线或条件不满足；机制存在不代表端到端生效
+- 许可证：MIT（本项目）
+- 固定版本：8966ece（当前 HEAD）
+- 查验依据：读取 sync.rs 结构与 sync_phases_e2e/sync_content_e2e 用例名；cargo test 基线 108 通过
+
+## REF-002 · 现有前端逻辑回归框架：tools/frontend-regression.mjs + test-loader.mjs
+
+- 来源：project:tools/frontend-regression.mjs
+- 采用方式：adapt_code
+- 适合之处：无新增依赖即可为 store.ts 拆分建立行为基线：Node 中直接驱动状态机断言（当前 8/8 通过，覆盖翻译流、toast、缓存命中），拆分前按同模式为将被移动的 store 行为补断言
+- 限制：非桌面 UI E2E，不覆盖渲染与交互细节；组件级动画/文案问题仍需人工在运行的应用中验证
+- 许可证：MIT（本项目）
+- 固定版本：8966ece（当前 HEAD）
+- 查验依据：npm run test:frontend 本机通过 8/8；CI 以同一命令作门禁
+
+## REF-003 · db.rs 拆分试点模式（TASK-023）：领域子模块 + 就地测试模块
+
+- 来源：project:src-tauri/src/db.rs
+- 采用方式：reference_only
+- 适合之处：后端 commands.rs/sync.rs 拆分的直接模板：公开路径不变、按领域拆子模块、测试模块随行，公开 API 兼容由既有 e2e 保证
+- 限制：db 领域边界清晰可直接照搬；commands/sync 的切分维度需按命令族/同步阶段重新设计，不能机械套用
+- 许可证：MIT（本项目）
+- 固定版本：8966ece（当前 HEAD）
+- 查验依据：git 提交 fdcf9a2/259f00d；src-tauri/src/db/ 下 9 领域子模块 + 3 测试模块存在且基线全绿
+
+## REF-004 · Zustand 官方 Slices Pattern 指南（含 Testing stores and components 指南入口）
+
+- 来源：https://zustand.docs.pmnd.rs/learn/guides/slices-pattern
+- 采用方式：reference_only
+- 适合之处：store.ts（1493 行）拆分的官方推荐模式：按领域写 createState/createSlice 小仓库，再组合成有界 store；项目已用 zustand 5，无需新增依赖
+- 限制：指南面向新代码组织；本项目 store 与组件、Tauri IPC 耦合较深，拆分需先建行为基线再移动，不能只靠模式套用
+- 许可证：MIT（zustand 官方文档站；仓库许可证未在本会话重新核验）
+- 固定版本：仅参考；未引入代码
+- 查验依据：curl 直连 200 取回全文：'You can divide your main store into smaller individual stores…'（createFishSlice/createBearSlice + combine 模式原文已读）
+
+## REF-005 · Vitest 官方文档（当前稳定版 v5.0.0，含 Component Testing / Browser Mode）
+
+- 来源：https://vitest.dev/guide/
+- 采用方式：reference_only
+- 适合之处：若前端行为基线需要组件级测试（DOM、事件、渲染），vitest+jsdom+testing-library 是生态标准路径；文档确认有 Component Testing 与 Browser Mode 指南
+- 限制：引入即新增 devDependency（dependencies 权限未开，需用户确认）；且项目现有回归框架已覆盖 store 状态机，第一批任务暂不引入
+- 许可证：MIT（文档站声明未逐字核验）
+- 固定版本：仅参考；未引入代码
+- 查验依据：curl 直连 200 取回全文：导航含 Component Testing、Browser Mode、ARIA Snapshots；页面版本标 v5.0.0

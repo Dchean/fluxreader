@@ -1,0 +1,53 @@
+{
+  "task_id": "TASK-033",
+  "candidate_digest": "4b40267c53b5c614109b26568a9bed8161f96265bee5a2a1aa3dbad09b296bac",
+  "verification_run": "RUN-a7bc575a7e224638b8f3478eaa9b2580",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（未参与实现）：P0-2 错误屏与正常 UI 三元互斥渲染（dataLoading→splash / bootstrapError→错误屏 / 正常 UI），tauri 失败不再注入 mock 数据、retryBootstrap 可用；P1-10 的 code==='webdavConflict' 与后端 github_auth.rs:205 AppError::new('webdavConflict',…) 精确一致；P1-11 AiTab toast 已用 extractError。审查者复跑前端回归 18/18。首轮审查 FAIL 指出测试脚本存在重复 github_login_start case（no-duplicate-case 警告，违反任务 0 警告门禁）——已删除重复块并刷新候选重新验证（本 candidate），lint 0/0、18/18 复跑通过。非阻塞建议留档：retryBootstrap 极端双击会并发两次幂等全量 reload（无数据损坏，可加 in-flight 守卫）；首启即失败时 dataMode 实际保持初始 'mock' 值但 entries 为空且错误屏互斥，无 mock 数据可见。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收四条逐条满足：失败不回退 mock（S-3a）、mock 限定浏览器 dev 分支、WebDAV 冲突确认框恢复（S-3b）、AI toast 真实文案；lint/前端回归全绿",
+      "evidence_files": [
+        "src/store.ts",
+        "src/App.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "现有 13 项断言语义未变，18/18 通过；lint 0 警告门禁恢复",
+      "evidence_files": [
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "三处失败路径修复即为任务目标；错误屏与重试入口覆盖启动失败场景",
+      "evidence_files": [
+        "src/App.tsx",
+        "src/store.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "extractError 统一复用；错误屏复用既有 splash 样式并新增最小 CSS；注释说明依据",
+      "evidence_files": [
+        "src/styles/base.css",
+        "src/components/SettingsModal.tsx"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "错误路径修复，无运行时性能影响",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": null
+}

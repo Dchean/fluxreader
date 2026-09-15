@@ -4,6 +4,10 @@
 
 PROJECT 只保存项目阶段和当前任务/批次引用。POLICY 是角色、权限和预算的权威。每个 TASK 只有一个 `status`；不要再加与其冲突的 ready_status / completed / verified 布尔值。文件格式以 `.workflow-kit/tasks/templates/` 为例，模板本身不参与任务调度。
 
+BRIEF 保存分轮问答，confirmations 将真实回答及来源与相应数值绑定；建议保持 proposed。POLICY.intake 引用本轮已确认 brief 所在的用户决定。新增批准需要完整问答，已有项目需有意向、分析及用户选定路线；执行器不能静默切换。旧版已批准记录不清空，补齐缺失选择后再扩展范围，见 [INTAKE](INTAKE.md)。
+
+BRIEF.requirements 是主目标和补充需求的统一清单，in_scope 区分纳入和暂缓，任务用 requirement_refs 关联；quality 记录维护、稳定与性能安排。批准后的 BRIEF 与决定快照一致，不能静默删改。progress、原生面板和 PROJECT_STATE 都从已有事实生成，不作为另一份状态。
+
 ## 阶段与任务
 
 项目阶段：intake → discovery → baseline（重构通常需要）→ delivery → release → complete；paused 表示主动停下。新项目可以从 discovery 进入 delivery 建立第一套代码与测试。阶段改变必须有已有授权，不以编辑 stage 代替批准。
@@ -31,6 +35,8 @@ POLICY 的 approval 必须引用本项目真实的已接受用户决定。角色
 
 风险 high 必须引用适用的用户决定，不能仅由管理者写 low 来改变实质风险。准备任务包时冻结范围、验收和门禁定义的哈希；实现者只获得获准文件的写入权。
 
+已有项目的实施任务还需要 test_review：区分保留行为与需求变化，引用原始基线证据，将 keep/adapt/add/replace/retire 映射到本任务门禁。变化/删除业务契约需要覆盖相应任务或需求的用户决定。记录随任务定义冻结；基线附件加入快照并受保护。纯文档和基线采集可先进行，具体语义见 [GATES](GATES.md)。
+
 ## 输入、候选与证据
 
 `input.manifest` 指向任务开始前的快照，`input.digest` 为其 digest。实现后另建 `evidence.candidate_manifest` / `candidate_digest`，不要覆盖输入快照。辅助工具的 snapshot 输出包含明确 roots 与逐文件哈希；snapshot 只覆盖选择的根，仍需另外检查全仓修改、删除、重命名、未跟踪文件。
@@ -42,6 +48,8 @@ POLICY 的 approval 必须引用本项目真实的已接受用户决定。角色
 task.evidence 只引用 verification_run / review_run 和候选，不抄另一套测试结果。verified/done 的验证与审查摘要必须相同；未经新任务验证的相关改动使证据失效。
 
 后续增量可通过 dependencies 延续同一源码。prepare 将前序快照根和必需回归命令并入新任务，冻结 continuation_of；begin 在前序 evidence 中记录 continued_by。前序 PASS 成为明确的历史记录，最新任务对当前组合版本负责。延续关系不得丢弃前序快照或检查，验收不能只引用过时的前序任务。先验证依赖再 prepare 下一张卡，避免提前冻结输入；总待办范围保存在 PRODUCT/BRIEF。
+
+必需门禁默认继承；唯一例外是经过 test_review 校验、准确指明 from_task/from_gate 的适配、替换或退役。适配/替换必须有新的必需门禁，业务契约变化还须引用相应用户决定。未涉及的回归和原 RUN 保留，不能只编辑后继 gates 把失败检查丢掉。
 
 ## 运行历史与预算
 
@@ -58,6 +66,8 @@ task.evidence 只引用 verification_run / review_run 和候选，不抄另一�
 accept 只接受列出的候选。所有已建任务 done 后仍需核对完整产品范围；只有用户确实确认项目交付，才使用 --project-complete 将 PROJECT.stage 置为 complete。
 
 ## 校验工具边界
+
+审查记录 quality_digest 绑定原始报告、当前 verification_run、候选和引用证据。五项 review_checks 不完整或无实际依据时不能 PASS；高风险必须 independent。这个摘要能发现遗漏字段或变动，不能认证宿主的新上下文或证明分析没有遗漏。
 
 ```text
 python .workflow-kit/scripts/project_workflow.py check --root .

@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "id": "TASK-031",
+  "title": "定位双向同步缺口：订阅与文章状态回传（REQ-002/003）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "done",
+  "objective": "在本地 mock e2e 层复现并定位两个缺口：(1) 订阅操作（订阅/退订/改名/移动目录）与文章状态变更（已读/收藏等）未回传同步后端；(2) 本地抓取模式下本地文章数量与状态和同步后端不一致。产出：根因定位（缺口所在管线位置，文件:行）、修复方案与影响面文档（.workflow-kit/docs/FINDINGS-SYNC-GAP.md），以及标注 #[ignore] 及原因的复现测试（修复任务转正）。本任务不做大规模修复实现。",
+  "non_goals": [
+    "实施修复",
+    "连接真实同步后端验证（留待修复任务单独约定）",
+    "改动同步协议实现"
+  ],
+  "requirement_refs": [
+    "REQ-002",
+    "REQ-003"
+  ],
+  "reference_ids": [
+    "REF-001"
+  ],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/tests/**",
+      ".workflow-kit/docs/FINDINGS-SYNC-GAP.md"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "新增 mock e2e 复现测试明确演示缺口（#[ignore] 标注原因，不影响默认门禁）",
+    "FINDINGS-SYNC-GAP.md 指出缺口位置（文件:行）、根因、修复方案与影响面",
+    "区分'订阅操作回传'、'状态变更回传'、'数量/状态对齐'三个缺口的独立结论",
+    "现有基线测试与 mock e2e 子集不回归"
+  ],
+  "gates": [
+    {
+      "id": "fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "rust-test",
+      "program": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-15 基线（8966ece）：cargo test 108/0；fmt 通过；mock e2e（CI 子集）14/0。基线 mock 测试覆盖 push 队列与全量对账的期望行为，但未覆盖用户报告的回传缺口场景。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "Rust 默认测试集 108 项与既有 mock e2e 期望行为",
+        "reason": "定位阶段不改行为，既有同步契约必须保持",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "REQ-002/003 缺口复现测试（#[ignore] 标注，修复任务转正为必过）",
+        "reason": "缺口场景此前无覆盖，需先固定复现证据",
+        "gate_ids": [
+          "rust-test"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-031-input-13479fb0850f4e38bf78202816f103dc.json",
+    "digest": "1281b5a5665146a217ee2012238f92cd0928f027ddcdd702e4b19014347370ab",
+    "source_revision": null,
+    "definition_digest": "0e60ad322573dbc1f214bed459c00f0a4ec9e536d9f50b6e4b048886a72d66ec"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T08:39:50.175780Z",
+    "deadline_at_utc": "2026-09-15T10:09:50.175780Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-615edeb0215f44d38a852fd2cdaea80f",
+  "run_ids": [
+    "RUN-3518750de68942b9b255553c37f7a317",
+    "RUN-a6a353031ee74b9b8c372df36c89d686",
+    "RUN-ca5d5da5e86e48f0a2a8554872d9cfc4",
+    "RUN-04f01a56a51b48b495e4b5b13f9cd3c8"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-ca5d5da5e86e48f0a2a8554872d9cfc4-candidate.json",
+    "candidate_digest": "aa2aa4194e8a1aeba8c81a908abf09682892901ebc2a74d78589146cf371504b",
+    "verification_run": "RUN-ca5d5da5e86e48f0a2a8554872d9cfc4",
+    "review_run": "RUN-04f01a56a51b48b495e4b5b13f9cd3c8",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-80d58a8cdf4b4568a6e23dff7280679d-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-80d58a8cdf4b4568a6e23dff7280679d"
+    ],
+    "merge_ref": "not_applicable：本地工作区交付，不涉及远端分支合并；用户直接批准当前工作区成果"
+  },
+  "snapshot_paths": [
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs",
+    ".workflow-kit/docs/FINDINGS-SYNC-GAP.md"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T08:39:50.224001Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T09:00:38.658764Z",
+      "note": "Worker requests manager action; inspect the result",
+      "next_action": "先核对已有文件及原始日志，再处理 action_required；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-15T09:01:36.335303Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T09:04:01.732299Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-15T09:04:08.385490Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T09:20:14.651105Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "implementation"
+}

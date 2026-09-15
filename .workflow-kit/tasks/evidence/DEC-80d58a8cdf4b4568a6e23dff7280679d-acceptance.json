@@ -1,0 +1,18 @@
+{
+  "id": "DEC-80d58a8cdf4b4568a6e23dff7280679d",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-15 明确批准验收（'批准并commit，继续'；此前选择先自验再验收）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-029",
+    "TASK-030",
+    "TASK-031"
+  ],
+  "recorded_at_utc": "2026-09-15T12:54:17.979955Z",
+  "candidates": {
+    "TASK-029": "1f77ad3fecb293e554d91120219186a2a311248646595987eef3a5bc5dd5d572",
+    "TASK-030": "96dc5b1e823132fe59a333eeaf2b7a9f18af04ef2f51cf439f0e34ff21b53d3c",
+    "TASK-031": "aa2aa4194e8a1aeba8c81a908abf09682892901ebc2a74d78589146cf371504b"
+  }
+}

@@ -21,10 +21,12 @@ from pathlib import Path
 
 import project_workflow as w
 import workflow_bootstrap as boot
+import workflow_intake as intake_flow
+import workflow_progress as progress_view
 
-COMMANDS = ("bootstrap", "doctor", "start", "adopt", "onboard", "research", "cards", "checkpoint", "prepare", "begin", "finish",
+COMMANDS = ("bootstrap", "doctor", "start", "progress", "review-packet", "adopt", "intake", "onboard", "research", "cards", "checkpoint", "prepare", "begin", "finish",
             "verify", "review", "feedback", "dispatch", "review-cli", "run", "next", "recover", "extend", "batch", "accept")
-HOSTS = {"current_agent", "codex-cli", "claude-code-cli", "custom"}
+HOSTS = intake_flow.HOSTS
 IGNORED = w.DENIED_PARTS | {".cache", "coverage", "htmlcov"}
 RETRYABLE = {"test_failure", "review_failure"}
 
@@ -121,9 +123,53 @@ def selected_snapshot(root, task):
     return w.capture(root, paths, allow_missing=True)
 
 
+
+def _gitignore_matcher(root):
+    """Root .gitignore subset matcher（owner-approved patch 2026-09-15）：
+    注释/空行跳过、'!' 取反（后匹配优先）、尾部 / 仅目录、含非尾部 / 视为锚定根路径、
+    否则按任意层级 basename 匹配。'*' 用 fnmatch（跨 /），对本仓排除构建产物目录足够。
+    目的：inventory 不应把 .gitignore 声明的生成物（dist-test/ 等）计入差异——
+    验证门禁自身重建这些产物曾导致 scope 误判死锁。"""
+    import fnmatch as _fn
+    rules = []
+    try:
+        for raw in (root / ".gitignore").read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            neg = line.startswith("!")
+            if neg:
+                line = line[1:].strip()
+            dir_only = line.endswith("/")
+            if dir_only:
+                line = line.rstrip("/")
+            if not line:
+                continue
+            rules.append((neg, dir_only, "/" in line, line))
+    except OSError:
+        pass
+
+    def ignored(rel_posix, is_dir):
+        matched = False
+        for neg, dir_only, anchored, pattern in rules:
+            if dir_only and not is_dir:
+                continue
+            if anchored:
+                hit = (rel_posix == pattern or rel_posix.startswith(pattern + "/")
+                       or _fn.fnmatchcase(rel_posix, pattern + "/*"))
+            else:
+                hit = _fn.fnmatchcase(rel_posix.rsplit("/", 1)[-1], pattern)
+            if hit:
+                matched = not neg
+        return matched
+
+    return ignored
+
 def inventory(root):
-    """Hash project changes, excluding run outputs, caches and secret/data-like files."""
+    """Hash project changes, excluding run outputs, caches, secret/data-like files,
+    and paths ignored by the project .gitignore（生成物目录，如 dist-test/）."""
     root = Path(root).resolve()
+    gitignore_ignored = _gitignore_matcher(root)
     result = {}
     pending = [root]
     while pending:
@@ -133,6 +179,8 @@ def inventory(root):
             logical = w.workflow_relative(root, rel)
             name = path.name.lower()
             if name in IGNORED or (logical is not None and logical.startswith(("tasks/evidence/", "tasks/runs/", "tasks/runtime/"))):
+                continue
+            if rel != "." and gitignore_ignored(rel, path.is_dir()):
                 continue
             if logical is not None and (logical.startswith("tasks/cards/") or logical in {"tasks/BACKLOG.md", "tasks/IN_PROGRESS.md", "tasks/DONE.md", "tasks/PROJECT_STATE.md"}):
                 continue
@@ -243,11 +291,29 @@ def adopt(root, kind, name, write=False, full_docs=False):
     return result
 
 
+def intake_answers(root, submitted=None):
+    defaults = read(root, "tasks/templates/BRIEF.json")
+    previous = read(root, "tasks/BRIEF.json") if w.workflow_inside(root, "tasks/BRIEF.json").is_file() else {}
+    return intake_flow.resolve(defaults, previous, submitted or {}, read(root, "tasks/PROJECT.json")["kind"])
+
+
+def intake(root, answers=None, write=False):
+    """Audit or save an unfinished interview without approving application work."""
+    if policy_read(root)["approval"]["status"] != "pending":
+        raise ValueError("Onboarding already approved; retain its decisions and use an explicit scope/policy update")
+    brief = intake_answers(root, answers)
+    result = intake_flow.audit(brief, read(root, "tasks/PROJECT.json")["kind"])
+    if write:
+        save(root, "tasks/BRIEF.json", {"schema_version": 1, **brief})
+    return {**result, "written": write, "application_work_authorized": False}
+
+
 def onboard(root, answers, source):
     """Record the owner's confirmed brief and authority, never infer approval from a timeout."""
     policy = policy_read(root)
     if policy["approval"]["status"] != "pending":
         raise ValueError("Onboarding already approved; edit through a new explicit decision, not re-onboarding.")
+    answers = intake_answers(root, answers)
     for key in ("goal", "audience", "acceptance", "non_goals"):
         if key not in answers or (key != "non_goals" and not answers[key]):
             raise ValueError("Confirmed brief is missing " + key)
@@ -293,6 +359,9 @@ def onboard(root, answers, source):
     ui_mode = answers.get("ui", {}).get("mode", "none")
     if ui_mode not in {"none", "existing", "preview_first"}:
         raise ValueError("Choose UI mode none, existing or preview_first from the actual project needs")
+    interview = intake_flow.audit(answers, project["kind"])
+    if not interview["ready_for_onboard"]:
+        raise ValueError("Intake incomplete or unconfirmed: " + ", ".join(interview["missing"]) + "; run intake and ask the missing questions before onboard")
     policy["ui"] = {"mode": ui_mode}
     decision = {"id": fresh("DEC-"), "issuer": "owner", "status": "accepted",
                 "recorded_at_utc": w.iso(w.utc_now()), "statement": answers["goal"],
@@ -300,10 +369,11 @@ def onboard(root, answers, source):
     decisions = read(root, "tasks/DECISIONS.json")
     decisions["decisions"].append(decision)
     policy["approval"] = {"status": "approved", "decision_ids": [decision["id"]]}
+    policy["intake"] = {"version": 1, "decision_id": decision["id"]}
     policy["roles"] = {role: {"agent": role, "harness": execution.get(role, "current_agent")}
                        for role in ("manager", "coder", "reviewer")}
     policy["review"]["mode"] = mode
-    policy["role_fusion"]["mode"] = "single-agent-multi-role" if execution["coder"] == execution["reviewer"] == "current_agent" else "manager-worker"
+    policy["role_fusion"]["mode"] = ("host-agent-independent-review" if mode == "independent_required" else "single-agent-multi-role") if execution["coder"] == execution["reviewer"] == "current_agent" else "manager-worker"
     policy["capabilities"].update(answers.get("capabilities", {}))
     for key, value in authority.items():
         if key not in policy["authority"]:
@@ -315,7 +385,7 @@ def onboard(root, answers, source):
     policy["budget"]["financial"] = {"mode": finance["mode"], "amount_usd": finance.get("amount_usd"), "scope": "batch"}
     if "recovery" in answers:
         policy["recovery"] = {**w.recovery_policy(policy), **answers["recovery"]}
-    for key in ("worker_argv", "reviewer_argv", "model", "allow_non_git"):
+    for key in ("mode", "worker_argv", "reviewer_argv", "model", "allow_non_git"):
         if key in execution:
             policy["execution"][key] = execution[key]
     project["stage"] = "discovery"
@@ -346,7 +416,7 @@ def prepare(root, specification):
     if not references_path.is_file() or read(root, "tasks/REFERENCES.json").get("status") not in {"searched", "offline", "not_needed"}:
         raise ValueError("Record reference research first (including a reason for offline/not_needed).")
     task = read(root, "tasks/templates/TASK.json")
-    for key in ("id", "title", "objective", "acceptance", "requirement_refs", "reference_ids", "decision_refs", "gates", "dependencies", "non_goals", "kind", "risk", "retry_safe", "ui_change", "ui_contract_ref", "ui_checks"):
+    for key in ("id", "title", "objective", "acceptance", "requirement_refs", "reference_ids", "decision_refs", "gates", "dependencies", "non_goals", "kind", "risk", "retry_safe", "ui_change", "ui_contract_ref", "ui_checks", "test_review"):
         if key in specification:
             task[key] = copy.deepcopy(specification[key])
     require_ui_ready(root, task)
@@ -381,10 +451,12 @@ def prepare(root, specification):
         approved_contract = task_read(root, project["ui_preview_task"]).get("ui_contract_ref")
         if approved_contract:
             task["scope"]["protected_paths"].append(approved_contract)
-    # A later slice may extend the same files. Carry earlier regression gates
-    # and snapshot roots forward; the old PASS remains historical evidence.
+    # Retain earlier checks unless an explicit applicability review replaces
+    # them. Original results and snapshot roots always remain historical evidence.
+    dependencies = {}
     for dependency in task["dependencies"]:
         prior = task_read(root, dependency)
+        dependencies[dependency] = prior
         if prior["status"] not in {"verified", "done"}:
             raise ValueError("Prepare this task after its dependency is verified: " + dependency)
         if prior["evidence"].get("continued_by"):
@@ -392,12 +464,23 @@ def prepare(root, specification):
         task.setdefault("continuation_of", {})[dependency] = prior["evidence"]["candidate_digest"]
         paths = sorted(set(paths) | set(read(root, prior["evidence"]["candidate_manifest"])["roots"]))
         existing_commands = {w.gate_command(gate) for gate in task["gates"] if gate.get("required")}
+        replaced = w.replaced_gates(task, dependency)
         for prior_gate in prior["gates"]:
+            if prior_gate.get("id") in replaced:
+                continue
             if prior_gate.get("required") and w.gate_command(prior_gate) not in existing_commands:
                 inherited = copy.deepcopy(prior_gate)
                 inherited["id"] = dependency + "-" + inherited["id"]
                 task["gates"].append(inherited)
                 existing_commands.add(w.gate_command(inherited))
+    decisions = {item["id"]: item for item in read(root, "tasks/DECISIONS.json")["decisions"]}
+    review_errors = w.test_review_errors(root, project, task, dependencies, decisions)
+    if review_errors:
+        raise ValueError("; ".join(review_errors))
+    if task.get("test_review"):
+        evidence_ref = task["test_review"]["baseline"]["evidence_ref"]
+        paths = sorted(set(paths) | {evidence_ref})
+        task["scope"]["protected_paths"].append(evidence_ref)
     task["snapshot_paths"] = paths
     references = read(root, "tasks/REFERENCES.json")
     known_references = {entry["id"] for entry in references.get("candidates", [])}
@@ -522,6 +605,18 @@ def write_card(root, task):
              "**界面检查**：" + (", ".join(task.get("ui_checks", [])) or "不适用"),
              "**修改范围**：" + ", ".join(task.get("scope", {}).get("allowed_paths", [])), "",
              "## 验收标准", ""] + ["- " + item for item in task.get("acceptance", [])]
+    test_review = task.get("test_review")
+    if isinstance(test_review, dict):
+        baseline = test_review.get("baseline", {})
+        labels = {"keep": "保留", "adapt": "适配", "add": "补充", "replace": "替换", "retire": "退役"}
+        lines += ["", "## 测试适用性", "",
+                  "- 既有行为：" + ("保持" if test_review.get("behavior") == "preserve" else "按已确认需求变化"),
+                  "- 原始基线：" + str(baseline.get("status")) + "；" + str(baseline.get("summary")),
+                  "- 基线证据：" + str(baseline.get("evidence_ref")),
+                  "- 需求决定：" + (", ".join(test_review.get("decision_ids", [])) or "沿用既有行为，无新增业务取舍")]
+        for item in test_review.get("actions", []):
+            lines.append("- " + labels.get(item.get("action"), "待核对") + "：" + str(item.get("target"))
+                         + "；" + str(item.get("reason")) + "；验证：" + (", ".join(item.get("gate_ids", [])) or "对应需求已退役"))
     lines += ["", "## 执行与恢复", "", "- 首次开始：" + str(budget.get("started_at_utc")),
               "- 原截止时间：" + str(budget.get("deadline_at_utc")),
               "- 当前截止时间：" + str(w.task_deadline(task)),
@@ -568,7 +663,12 @@ def refresh_project_state(root, tasks=None):
         tasks = w.records(Path(root).resolve(), "tasks/items", "TASK-", errors)
     if errors:
         raise ValueError("; ".join(errors))
-    save(root, path, w.project_state_bytes(read(root, "tasks/PROJECT.json"), tasks, w.workflow_name(root, "scripts/project_workflow.py")))
+    brief = read(root, "tasks/BRIEF.json") if w.workflow_inside(root, "tasks/BRIEF.json").is_file() else {}
+    policy = policy_read(root)
+    project = read(root, "tasks/PROJECT.json")
+    save(root, path, w.project_state_bytes(project, tasks, w.workflow_name(root, "scripts/project_workflow.py"),
+        brief=brief, policy=policy, research_done=w.workflow_inside(root, "tasks/REFERENCES.json").is_file(),
+        ui_accepted=w.ui_preview_accepted(root, policy, project, tasks)))
 
 
 def checkpoint(root, ident, note, next_action):
@@ -632,6 +732,8 @@ def begin(root, ident, context, harness="current_agent"):
     policy = policy_read(root)
     if policy["approval"]["status"] != "approved" or read(root, "tasks/PROJECT.json")["stage"] in {"intake", "paused", "complete"}:
         raise ValueError("Project authorization/stage does not permit execution")
+    if harness != policy["roles"]["coder"]["harness"]:
+        raise ValueError("Use the confirmed coder harness; do not silently switch between Agent and CLI")
     permission = {"documentation": "documentation", "baseline": "baseline", "ci": "ci"}.get(task["kind"], "code")
     if policy["authority"].get(permission) is not True:
         raise ValueError("Task execution authority is not enabled")
@@ -891,9 +993,13 @@ def review(root, ident, report, context, mode="self_review", existing_run=None):
     policy = policy_read(root)
     if policy["approval"]["status"] != "approved":
         raise ValueError("Project authorization does not permit review")
+    if policy["review"].get("evidence_version") != 1:
+        raise ValueError("Review evidence requirements cannot be disabled; inspect an explicit record migration")
+    if existing_run is None and policy["roles"]["reviewer"]["harness"] != "current_agent":
+        raise ValueError("Use the confirmed reviewer harness; do not silently replace CLI review with current Agent review")
     if mode not in {"self_review", "independent"}:
         raise ValueError("Unknown review mode")
-    if policy["review"]["mode"] == "independent_required" and mode != "independent":
+    if w.required_review_mode(policy, task) == "independent_required" and mode != "independent":
         raise ValueError("Self review cannot replace required independent review")
     writers = {read(root, "tasks/runs/" + run_id + ".json")["executor"]["context_id"]
                for run_id in task["run_ids"] if read(root, "tasks/runs/" + run_id + ".json")["kind"] in {"implementation", "repair"}}
@@ -905,6 +1011,9 @@ def review(root, ident, report, context, mode="self_review", existing_run=None):
     if report.get("verdict") not in {"PASS", "FAIL", "BLOCKED"} or not isinstance(report.get("findings"), list) or not report.get("summary"):
         raise ValueError("Review needs verdict, findings and a substantive summary")
     ui_digest = w.ui_review_digest(root, task, report) if report["verdict"] == "PASS" and not report["findings"] else None
+    quality_digest = None
+    if report["verdict"] == "PASS" and not report["findings"] and policy["review"].get("evidence_version") == 1:
+        quality_digest = w.review_quality_digest(root, task, report)
     run = existing_run or start_run(root, task, "review", context, "current_agent")
     path = w.workflow_name(root, "tasks/evidence/" + run["id"] + "-review.json")
     save(root, path, report)
@@ -913,6 +1022,8 @@ def review(root, ident, report, context, mode="self_review", existing_run=None):
     run["review"] = {"mode": mode, "verdict": report["verdict"], "report": path, "candidate_digest": current}
     if ui_digest:
         run["review"]["ui_evidence_digest"] = ui_digest
+    if quality_digest:
+        run["review"]["quality_digest"] = quality_digest
     if report["verdict"] != "PASS" or report["findings"]:
         return block(root, task, run, "Review requires changes; inspect the findings", "review_failure")
     run.update(outcome="completed", finished_at_utc=w.iso(w.utc_now()), exit_code=0)
@@ -1021,11 +1132,27 @@ def packet(root, task, run, review_only=False):
                "read_first": ["AGENTS.md", "WORKFLOW-KIT.md" if w.inside(root, w.ISOLATED_BINDING).is_file() else "WORKFLOW.md"], "candidate_digest": task["evidence"].get("candidate_digest"),
                "deadline_at_utc": w.task_deadline(task)}
     if review_only:
+        context["role"] = "reviewer"
+        context["task"] = {key: value for key, value in task.items() if key != "checkpoints"}
         context["verification"] = read(root, "tasks/runs/" + task["evidence"]["verification_run"] + ".json")
+        context["verification_ref"] = w.workflow_name(root, "tasks/runs/" + task["evidence"]["verification_run"] + ".json")
+        context["required_review_areas"] = list(w.REVIEW_AREAS)
+        context["required_review_mode"] = w.required_review_mode(policy_read(root), task)
+        context["candidate_files"] = read(root, task["evidence"]["candidate_manifest"])["files"]
     if task.get("ui_change"):
         context["read_first"] += [task["ui_contract_ref"], w.workflow_name(root, "docs/workflow/FRONTEND.md")]
         context["ui_evidence_directory"] = w.workflow_name(root, "tasks/evidence/") + task["id"] + "-ui/" + str(task["evidence"].get("verification_run") or "pending") + "/"
     return json.dumps({"instructions": instruction, "task_packet": context}, ensure_ascii=False, indent=2)
+
+
+def review_packet(root, ident):
+    """Read-only neutral handoff; the host supplies a genuinely fresh reviewer."""
+    must_check(root)
+    task = task_read(root, ident)
+    if task["status"] != "review":
+        raise ValueError("Complete verification before preparing review inputs")
+    return {"ok": True, **json.loads(packet(root, task, {"id": None}, review_only=True)),
+            "instruction": "把此输入交给未参与实现的新上下文；同模型即可，不要求 CLI。不要复制作者会话或通过预期。不能创建独立上下文时如实报告，按已确认审查策略处理。"}
 
 
 def cli_result(root, harness, outcome, result_path, run):
@@ -1258,18 +1385,38 @@ def next_action(root):
     if not integration["connected"] and integration["status"] != "not_connected":
         return {"ok": False, "next": "bootstrap" if integration["status"] == "foreign_workflow" else "repair_integration",
                 "integration": integration, "errors": integration["errors"],
+                "questions": intake_flow.initial_questions("refactor") if integration["status"] == "foreign_workflow" else [],
                 "instruction": "尚未接入当前 workflow-kit；不要沿旧工作流继续，也不要清空旧任务。先完成可核对的接入。"}
     result = _next_action(root)
     result["integration"] = integration
+    if integration["connected"]:
+        try:
+            if not result.get("ok"):
+                result["presentation"] = {"markdown": "**进度暂不能确认**：工作流记录或证据未通过校验。\n\n" + "\n".join("- " + str(item) for item in result.get("errors", [])),
+                                          "display_instruction": "说明具体记录/证据缺口，不能把历史完成状态显示为当前已完成；保留原任务排障。"}
+                return result
+            errors = []
+            tasks = w.records(Path(root).resolve(), "tasks/items", "TASK-", errors)
+            project, policy = read(root, "tasks/PROJECT.json"), policy_read(root)
+            brief = read(root, "tasks/BRIEF.json") if w.workflow_inside(root, "tasks/BRIEF.json").is_file() else {}
+            prefix = (Path(root).resolve() / w.workflow_name(root, "tasks/cards")).as_posix() + "/"
+            result["presentation"] = progress_view.build(project, policy, brief, tasks, result, card_prefix=prefix,
+                research_done=w.workflow_inside(root, "tasks/REFERENCES.json").is_file(),
+                ui_accepted=w.ui_preview_accepted(root, policy, project, tasks))
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            result["presentation"] = {"markdown": "进度记录需核对：" + str(error), "display_instruction": "说明当前记录缺口，不猜测完成度。"}
+    else:
+        result["presentation"] = {"markdown": "当前项目尚未核验接入；先确认目标和已有项目意向，再按启动入口继续。",
+                                  "display_instruction": "展示当前状态并提出必要问题，不声称已经开始开发。"}
     return result
 
 
 def _next_action(root):
     root = Path(root).resolve()
     if not w.workflow_inside(root, "tasks/PROJECT.json").is_file():
-        return {"ok": True, "stage": "intake", "next": "ask", "questions": [
-            "你希望做什么，主要给谁使用？", "这是新项目，还是要改善现有项目？", "第一版做到什么程度就可以开始使用？"],
-            "instruction": "先只读检查目录。确认范围后用 init（空目录）或 adopt（已有目录），由 Agent 维护配置。"}
+        existing = root.is_dir() and any(path.name not in {".git", ".gitignore", ".gitkeep"} for path in root.iterdir())
+        return {"ok": True, "stage": "intake", "next": "ask", "questions": intake_flow.initial_questions("refactor" if existing else "new"),
+            "instruction": "先只读辨认目录；已有项目先问重构意向。按已选择工作流完成 bootstrap 接入，再保存分轮答案；不自动授权代码。"}
     policy = policy_read(root)
     project = read(root, "tasks/PROJECT.json")
     errors = []
@@ -1302,7 +1449,11 @@ def _next_action(root):
     if project["stage"] in {"paused", "complete"}:
         return {"ok": True, "stage": project["stage"], "next": project["stage"]}
     if policy["approval"]["status"] != "approved":
-        return {"ok": True, "stage": "intake", "next": "ask", "instruction": "读取已保存的 BRIEF 和用户决定，补充缺失的产品答案并确认执行摘要，再 onboard。"}
+        return intake(root)
+    if project["kind"] == "refactor" and not policy["authority"]["code"] and not tasks:
+        brief = read(root, "tasks/BRIEF.json") if w.workflow_inside(root, "tasks/BRIEF.json").is_file() else {}
+        if brief.get("refactor", {}).get("decision") in {"keep", "assess_only"}:
+            return {"ok": True, "next": "assessment_complete", "instruction": "展示已确认的评估结论与适用范围；无需制造编码任务。用户以后决定实施时记录新决定，保留现有记录。"}
     if not w.workflow_inside(root, "tasks/REFERENCES.json").is_file():
         return {"ok": True, "stage": "research", "next": "research", "instruction": "检索少量类似项目/成熟组件；保存来源、适配性、许可证和采用方式。网络不可用时如实记录 offline 及恢复步骤。"}
     priorities = {"verifying": 0, "review": 1, "ready": 2, "blocked": 3}
@@ -1324,10 +1475,15 @@ def _next_action(root):
         if task["status"] == "blocked" and w.task_deadline(task):
             if datetime.fromisoformat(w.task_deadline(task).replace("Z", "+00:00")) <= w.utc_now():
                 action = "budget_decision"
-        return {"ok": True, "task_id": task["id"], "status": task["status"], "next": action,
+        result = {"ok": True, "task_id": task["id"], "status": task["status"], "next": action,
                 "card": w.workflow_name(root, "tasks/cards/") + task["id"] + ".md", "blockers": task["blockers"],
                 "deadline_at_utc": w.task_deadline(task), "checkpoints": task.get("checkpoints", [])[-3:],
                 "resume_with": "verify" if task.get("resume_phase") in {"verification", "review"} else "begin"}
+        if task["status"] == "review":
+            result["review_mode"] = w.required_review_mode(policy, task)
+            result["instruction"] = ("用 review-packet 提供中立输入；交给未参与实现的新上下文审查，同模型和无 CLI 均可。没有能力时明确阻塞，不能改名字自审。"
+                if result["review_mode"] == "independent_required" else "使用真实验证与五项有证据的审查；自审必须明确标记，不把 PASS 摘要代替检查。")
+        return result
     if not w.ui_preview_accepted(root, policy, project, tasks):
         preview = tasks.get(project.get("ui_preview_task"), {})
         if preview.get("status") == "verified":
@@ -1341,7 +1497,10 @@ def _next_action(root):
     if tasks and all(task["status"] in {"done", "cancelled"} for task in tasks.values()):
         return {"ok": True, "next": "prepare_or_finish_project", "tasks": len(tasks),
                 "instruction": "已建立的任务已验收；核对 BRIEF 是否还有未拆分范围。全部交付后才记录项目完成。"}
-    return {"ok": True, "next": "prepare", "instruction": "Agent 将已确认范围拆成可验证小任务；不要让用户手填任务 JSON。"}
+    instruction = "Agent 将已确认范围拆成可验证小任务；不要让用户手填任务 JSON。"
+    if project["kind"] == "refactor":
+        instruction += " 先按 GATES 对照当前需求审查旧测试/门禁，保存原基线并填写 test_review，再准备实施任务。"
+    return {"ok": True, "next": "prepare", "instruction": instruction}
 
 
 def recover(root, run_id, source):
@@ -1463,6 +1622,11 @@ def accept(root, identifiers, source, merge_ref, project_complete=False):
         all_tasks = w.records(Path(root).resolve(), "tasks/items", "TASK-", errors)
         if errors or any(task["id"] not in identifiers and task["status"] not in {"done", "cancelled"} for task in all_tasks.values()):
             raise ValueError("Project completion requires all recorded tasks to be accepted or cancelled")
+        brief = read(root, "tasks/BRIEF.json") if w.workflow_inside(root, "tasks/BRIEF.json").is_file() else {}
+        covered = {ref for task in all_tasks.values() if task["status"] == "done" or task["id"] in identifiers for ref in task.get("requirement_refs", [])}
+        missing = [item["id"] for item in brief.get("requirements", []) if item.get("in_scope") and item["id"] not in covered]
+        if missing:
+            raise ValueError("Project still has confirmed requirements without accepted tasks: " + ", ".join(missing))
     decisions = read(root, "tasks/DECISIONS.json")
     decision = {"id": fresh("DEC-"), "issuer": "owner", "status": "accepted", "source": source,
                 "statement": "Owner accepted the complete project" if project_complete else "Owner accepted the listed candidate versions and their continuations", "scope": identifiers,
@@ -1510,6 +1674,13 @@ def main(argv=None):
             item.add_argument("--full-docs", action="store_true")
         if command in {"onboard", "research", "prepare", "finish", "review"}:
             item.add_argument("--file", required=True, help="Agent-prepared JSON file; users do not need to edit it")
+        if command == "intake":
+            item.add_argument("--file", help="Optional partial answers prepared by the Agent")
+            item.add_argument("--write", action="store_true", help="Save draft answers only; never approve work")
+        if command == "progress":
+            item.add_argument("--format", choices=("json", "markdown"), default="markdown", help="Ready-to-display progress; never infer an overall percentage")
+        if command == "review-packet":
+            item.add_argument("--task", required=True)
         if command in {"onboard", "recover", "accept", "extend", "feedback"}:
             item.add_argument("--source", required=True, help="Reference to the actual user approval/recovery decision")
         if command == "batch":
@@ -1542,14 +1713,18 @@ def main(argv=None):
             return boot.bootstrap(root, args.kind, args.name, args.source, args.host, args.write, args.full_docs)
         if command == "doctor":
             return doctor(root)
-        if command in {"start", "next"}:
+        if command in {"start", "next", "progress"}:
             return next_action(root)
+        if command == "review-packet":
+            return review_packet(root, args.task)
         if command == "cards":
             return refresh_views(root)
         if command == "adopt":
             return adopt(root, args.kind, args.name, args.write, args.full_docs)
         if command == "onboard":
             return onboard(root, w.read_json(args.file), args.source)
+        if command == "intake":
+            return intake(root, w.read_json(args.file) if args.file else None, args.write)
         if command == "research":
             return record_research(root, w.read_json(args.file))
         if command == "prepare":
@@ -1579,7 +1754,7 @@ def main(argv=None):
         return accept(root, args.tasks, args.source, args.merge_ref, args.project_complete)
 
     try:
-        if args.command in {"bootstrap", "doctor", "start", "next", "adopt", "recover"}:
+        if args.command in {"bootstrap", "doctor", "start", "next", "progress", "review-packet", "adopt", "recover"} or (args.command == "intake" and not args.write):
             result = execute()
         else:
             integration = boot.integration_status(root)
@@ -1590,7 +1765,10 @@ def main(argv=None):
             with project_lock(root):
                 result = execute()
                 refresh_views(root)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.command == "progress" and args.format == "markdown":
+            print(result.get("presentation", {}).get("markdown") or "当前接入或状态需要处理，请先查看 start 输出。")
+        else:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok") else 1
     except (ValueError, OSError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
         print(json.dumps({"ok": False, "errors": [str(error)]}, ensure_ascii=False), file=sys.stderr)

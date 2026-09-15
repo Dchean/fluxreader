@@ -1,0 +1,34 @@
+{
+ "schema_version": 1,
+ "captured_at_utc": "2026-09-15T11:29:11.028926Z",
+ "roots": [
+  ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+  "src/components/Timeline.tsx",
+  "src/store.ts",
+  "src/store/types.ts",
+  "tools/frontend-regression.mjs"
+ ],
+ "files": [
+  {
+   "path": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+   "sha256": "026cd4b7cb8b85fbd8384825f6670105f47a083460f064422e048b0df92f6bf1"
+  },
+  {
+   "path": "src/components/Timeline.tsx",
+   "sha256": "1d009e8cf19d8c2155709de0fc1059d86d419cded4197a65110f4f4bf6f3f395"
+  },
+  {
+   "path": "src/store.ts",
+   "sha256": "db8da4deb67c719f9c5336c11b7ab54d6cbc13d70758cdefff5c74916885121e"
+  },
+  {
+   "path": "src/store/types.ts",
+   "sha256": "dd9631d142f1f21ed986a92b1a85e1052aa74ad14894907528f1bc70273592a1"
+  },
+  {
+   "path": "tools/frontend-regression.mjs",
+   "sha256": "fae8c80d3f5c336428820f69ee9343cbf86d5efa35d5d6365fdd82f29f85e506"
+  }
+ ],
+ "digest": "aad6b35e496177a5cda91b700d01c98a6607ce47dfb2f176c6ea93ccd6839e36"
+}
