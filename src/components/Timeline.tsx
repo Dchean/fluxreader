@@ -533,7 +533,7 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const summarizeEntry = useAppStore((s) => s.summarizeEntry);
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
-  const summaryGenerating = useAppStore((s) => s.summaryGenerating);
+  const summaryGenerating = useAppStore((s) => s.summarizingIds[item.id]);
   const summaryError = useAppStore((s) => s.summaryErrors[item.id] || '');
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);

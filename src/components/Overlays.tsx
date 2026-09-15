@@ -73,11 +73,14 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
     const query = debounced;
     // Note: set-state-in-effect — see .agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md
     if (!query) return;
+    /* F20：代际守卫——慢查询晚于新查询返回时不得覆盖新结果 */
+    let alive = true;
     const t = setTimeout(() => {
       setSearching(true);
       api
         .searchArticles(query, 10)
         .then((rows) => {
+          if (!alive) return;
           setSearchError(false);
           if (!rows) {
             const lower = query.toLowerCase();
@@ -96,12 +99,18 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
           setResults(rows.map(articleRowToEntry));
         })
         .catch(() => {
+          if (!alive) return;
           setSearchError(true);
           setResults([]);
         })
-        .finally(() => setSearching(false));
+        .finally(() => {
+          if (alive) setSearching(false);
+        });
     }, 250);
-    return () => clearTimeout(t);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
   }, [debounced]);
 
   /* 派生值：空查询时渲染归零，避免同步 setState */

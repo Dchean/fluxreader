@@ -516,13 +516,17 @@ pub async fn mark_all_read(
     state: State<'_, AppState>,
     feed_id: Option<i64>,
     folder_id: Option<i64>,
+    starred_only: Option<bool>,
+    since_ms: Option<i64>,
 ) -> AppResult<usize> {
+    let starred_only = starred_only.unwrap_or(false);
     let n = {
         let conn = state.db.lock().await;
         // 先收集「即将被标读」的未读文章 id（标读后再查 is_read=0 会得到空集，
-        // 导致「全部已读」从不推送到 Miniflux——历史 bug）。
-        let ids = db::list_unread_ids_scoped(&conn, feed_id, folder_id)?;
-        let n = db::mark_all_read(&conn, feed_id, folder_id)?;
+        // 导致「全部已读」从不推送到 Miniflux——历史 bug）。F8：收集与标读
+        // 必须同口径（同样带视图过滤），否则会把范围外文章的状态也推给远端。
+        let ids = db::list_unread_ids_scoped(&conn, feed_id, folder_id, starred_only, since_ms)?;
+        let n = db::mark_all_read(&conn, feed_id, folder_id, starred_only, since_ms)?;
         if sync_configured(&conn) {
             // 逐条入队（量级可控：个人订阅日常几十条）
             for id in ids {
