@@ -1,0 +1,55 @@
+{
+  "task_id": "TASK-036",
+  "candidate_digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+  "verification_run": "RUN-e6fb6491154b498ca606e6777677a2aa",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（未参与实现）：A-2 接线正确——Backend::edit_subscription（GReader ac=edit&s=feed/<n>&t/a，Fever no-op）、record_feed_edit 抽出本地落库+待推送目标、update_feed 锁外 best-effort 推送失败仅 log::warn；锁纪律正确（无跨 await 持锁）；A-1 墓碑与两阶段同步契约未被触碰；复现测试已转正（feed_rename_and_move_push_edit_subscription，mock 记录 ac/s/t/a 全字段）。审查者复跑 cargo test 112/0 + fmt 干净。审查提出的三项覆盖缺口与两点健壮性建议：其中（a）陈旧的 --ignored 运行说明与（b）未配置/未绑定不推送的断言已由实现者补强（新增 feed_edit_without_backend_stays_local，注释与 FINDINGS-SYNC-GAP.md 同步修正），复验 113/0；其余留档——update_feed 命令层推送块本身未被直接断言（建议后续抽 apply_feed_edit 以守卫接线）、a=分类名对真实 Miniflux 兼容层需 live 验证、推送失败无重试载体（建议入队一条 edit 动作）、仅改 layout 时多余推送可跳过。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "A-2 验收逐条满足：改名/移动目录推送远端（t/a 参数）、未绑定/未配置仅本地、Fever no-op、复现测试转正",
+      "evidence_files": [
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/sync.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "cargo test 113/0（含全部转正场景）；A-1 删除/墓碑与 feeds_phase/states_phase 契约测试全绿；fmt 通过",
+      "evidence_files": [
+        "src-tauri/tests/sync_gap_repro_e2e.rs",
+        "src-tauri/tests/mock_greader.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "推送失败仅记日志不影响本地；未配置/未绑定返回 None 分支已新增断言覆盖",
+      "evidence_files": [
+        "src-tauri/src/commands.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "record_feed_edit 与既有 record_* 模式一致；注释说明设计依据；陈旧运行说明已修正",
+      "evidence_files": [
+        "src-tauri/src/sync.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "推送在锁外、单次往返；仅改 layout 的冗余推送已留档待优化，无性能回归",
+      "evidence_files": [
+        "src-tauri/src/commands.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

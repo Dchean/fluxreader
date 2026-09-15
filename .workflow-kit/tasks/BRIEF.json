@@ -203,14 +203,14 @@
     },
     "budget": {
       "status": "confirmed",
-      "answer": "每任务修复上限3轮、单任务90分钟、每批3任务、单写入者、网络退避5/15秒；financial=none（Agent 全包无 CLI 费用）；batch_rollover=ask",
-      "source": "用户在 intake 第三轮选择'按这份摘要确认'（2026-09-15）",
-      "value_digest": "07c2e3e74457152711463ce2aa1a5fcd54f0eb8476a7ae375c895c66daf88e1d"
+      "answer": "解除上限：单任务 240 分钟、每批 12 任务、批次自动续接；修复上限 4 轮；financial=none",
+      "source": "用户 2026-09-15：'解除时间和任务数量限制……跑完全部流程'",
+      "value_digest": "562e52396c66a3ed6382343dece43f468d1403fd15de23153c534033ae724f1b"
     },
     "authority": {
       "status": "confirmed",
-      "answer": "文档/基线/业务代码允许；依赖与 CI 暂不允许（需另行确认）；commit/push/PR/merge/release=ask",
-      "source": "用户在 intake 第三轮选择'按这份摘要确认'（2026-09-15）",
+      "answer": "文档/基线/代码/commit 允许；依赖与 CI 暂不允许；push/PR/merge/release=ask",
+      "source": "用户 2026-09-15：'批准并commit，继续'（其余沿用既有确认）",
       "value_digest": "35bb766c3d75a22acac11c29bfa698babec1bed830a30325de708cb77f2e06cf"
     }
   },
@@ -278,11 +278,16 @@
     "amount_usd": null
   },
   "budget": {
-    "max_repair_rounds": 3,
-    "max_task_wall_minutes": 90,
-    "max_tasks_per_batch": 3,
+    "max_repair_rounds": 4,
+    "max_task_wall_minutes": 240,
+    "max_tasks_per_batch": 12,
     "max_concurrent_workers": 1,
-    "batch_rollover": "ask"
+    "financial": {
+      "mode": "none",
+      "amount_usd": null,
+      "scope": "batch"
+    },
+    "batch_rollover": "allowed"
   },
   "capabilities": {
     "file_read_write": null,
