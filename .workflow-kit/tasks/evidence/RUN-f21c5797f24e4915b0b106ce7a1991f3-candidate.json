@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-15T16:52:59.369930Z",
+  "roots": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-004-008.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/extraction.rs",
+    "src-tauri/src/ingestion.rs",
+    "src/App.tsx",
+    "src/components/Overlays.tsx",
+    "src/components/PlayerBar.tsx",
+    "src/components/Reader.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/primitives.tsx",
+    "src/lib/api.ts",
+    "src/store.ts",
+    "src/store/types.ts",
+    "src/styles/base.css",
+    "tools/frontend-regression.mjs"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/docs/UI-CONTRACT-REQ-004-008.md",
+      "sha256": "eaba98d6b988be640cf2b2b97d4db39b400039d565a69ad4b90034a1f340ac2b"
+    },
+    {
+      "path": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+      "sha256": "026cd4b7cb8b85fbd8384825f6670105f47a083460f064422e048b0df92f6bf1"
+    },
+    {
+      "path": "src-tauri/src/extraction.rs",
+      "sha256": "77f71ab36b1b64caccda1ef85f612d7ed148c871142e466f0efdda7e20e116e1"
+    },
+    {
+      "path": "src-tauri/src/ingestion.rs",
+      "sha256": "754cc1deedb8ed0db70377838691b7f5ab46cd021ae8e15108d7ae59451903fd"
+    },
+    {
+      "path": "src/App.tsx",
+      "sha256": "493e22e8b971d13da1807bd7ab1dabfbc14f15d8b74efe212da286a84e6a810f"
+    },
+    {
+      "path": "src/components/Overlays.tsx",
+      "sha256": "6b936e8f0d3319b53cd1cb8524395352e39081a5a4227a1c987d506620558d5e"
+    },
+    {
+      "path": "src/components/PlayerBar.tsx",
+      "sha256": "4bd8f573947eaa113ce254d027afc6c758c51ed5ba31c9fa26cd99c6343e8efb"
+    },
+    {
+      "path": "src/components/Reader.tsx",
+      "sha256": "cbce079994057cbbff4483c9e4400294608acfbc27e2a3b925763d7df7c903e1"
+    },
+    {
+      "path": "src/components/SettingsModal.tsx",
+      "sha256": "44a92e73c825ed9a113b7085819440504b97596d7d8cacc09ea8f8264a05a39c"
+    },
+    {
+      "path": "src/components/Timeline.tsx",
+      "sha256": "42b99944e5096599e184e6e735fe0f2ea267169338a6ab359628eadd873eb12b"
+    },
+    {
+      "path": "src/components/primitives.tsx",
+      "sha256": "b8a335141b630d42458e21624032496f97c71a48bad817d155987eedd3847bb7"
+    },
+    {
+      "path": "src/lib/api.ts",
+      "sha256": "12a806700bcc63ed106075419f16b7b815e96cc68ef42265cc19ec7039a7ffda"
+    },
+    {
+      "path": "src/store.ts",
+      "sha256": "8be84cb1802706cb70d500116d366e9b1ba5fb4a146f7d750df59aa299ec496d"
+    },
+    {
+      "path": "src/store/types.ts",
+      "sha256": "950945b6b299f12bc2b457ceafe3e4bdca6bdf39caa9642dc8836efee9cfc9d1"
+    },
+    {
+      "path": "src/styles/base.css",
+      "sha256": "60a432d63b318fd41489a2437456521e70471347283423793e69842cba2f7f9a"
+    },
+    {
+      "path": "tools/frontend-regression.mjs",
+      "sha256": "63d548c3b420914714583b6a3aee47d2f06233975d07b6f1c360f4cfbefe8606"
+    }
+  ],
+  "digest": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6"
+}

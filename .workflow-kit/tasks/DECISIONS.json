@@ -850,6 +850,19 @@
         "TASK-036"
       ],
       "recorded_at_utc": "2026-09-15T15:10:00Z"
+    },
+    {
+      "id": "DEC-review-evidence-scope-20260915",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 授权'解除限制、按判定路线跑完全部流程'（同一授权延续：审查证据引用一致性）",
+      "statement": "TASK-030/033 的审查报告 evidence_files 引用了各自候选快照之外的前端文件（store/types.ts、App.tsx、base.css），被后续任务（TASK-034/039）改动后 quality_digest 漂移。修复：证据引用收敛到候选内文件并重算 quality_digest。约定（后续任务遵守）：审查报告只引用本任务候选内文件；跨任务文件状态由后继任务的审查覆盖。",
+      "scope": [
+        "workflow",
+        "TASK-030",
+        "TASK-033"
+      ],
+      "recorded_at_utc": "2026-09-15T18:02:13Z"
     }
   ]
 }

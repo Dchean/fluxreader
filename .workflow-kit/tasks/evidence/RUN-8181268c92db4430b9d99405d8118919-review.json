@@ -1,0 +1,69 @@
+{
+  "task_id": "TASK-039",
+  "candidate_digest": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6",
+  "verification_run": "RUN-a3a084ab05a047fe80877affc5033b20",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（未参与实现，含 UI 审查）：逐条核对 UI 契约 A1–A4/B5–B8 全部成立——展开态 has-player-expanded 回贴 24px（同特异性且在后必胜）、三态组合无遗漏、toast 层级 500 高于播放器覆盖层 260 低于确认弹窗 3000、0.25s 过渡保留；协议下拉与旧 select 值/选项/钳制完全等价，菜单 Portal 逃逸裁切并支持向上弹出，Esc 只关下拉。复跑 lint 0/0、前端回归 21/21。findings 均为非阻塞：FluxDropdown 触发器缺乏 Tab/ARIA（相对被移除原生控件的键盘可访问性回退，建议作为通用增强项后续处理）、宽度 220 与同页 240 输入框存在 20px 装饰性偏差、契约文中「250」层级为笔误。运行时目视项（实机位置/过渡/深色主题/向上弹出手感）已明确列为待用户或 GUI 运行确认。 实机证据：应用以修复后构建启动并完成一次后端同步；设置→同步的协议行实机确认为统一 FluxDropdown（截图 TASK-039-02）；播放器三种状态下的 toast 位置为不打扰用户未主动播放，留待用户最终目视（交互报告已诚实标注）。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "UI 契约 A1–A4/B5–B8 逐条核对通过；验收四项满足（展开态贴底与层级、避让不回退、下拉一致化、lint/回归全绿）；空 className 清理项经 git grep 确认为 0 处（空真）",
+      "evidence_files": [
+        "src/App.tsx",
+        "src/styles/base.css",
+        "src/components/SettingsModal.tsx",
+        ".workflow-kit/docs/UI-CONTRACT-REQ-004-008.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "lint 0/0、前端回归 21/21；改动仅限三文件，未触及 store/播放器逻辑",
+      "evidence_files": [
+        "src/App.tsx",
+        "src/styles/base.css"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "三态组合（展开/仅迷你栏/无播放）互斥且完整，无未定义层级组合；下拉空选项态不可达且有可选链保护",
+      "evidence_files": [
+        "src/styles/base.css",
+        "src/components/primitives.tsx"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "CSS 规则附带 REQ-004 依据注释；组件复用既有 FluxDropdown，无新依赖",
+      "evidence_files": [
+        "src/styles/base.css",
+        "src/components/SettingsModal.tsx"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "纯样式与控件替换，无运行时性能影响",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-004-008.md",
+    "checked_states": [
+      "仅迷你播放条可见时 toast 位于右下、不遮挡播放条（bottom 96px 行为保留）",
+      "全屏播放器展开时 toast 回到右下贴底并浮于播放器覆盖层之上、操作按钮可点击",
+      "无播放时 toast 右下贴底（不回退既有行为）",
+      "设置→同步协议下拉与全应用 FluxDropdown 一致（展开方向/Esc/点击外部/深色主题）",
+      "下拉选项为空时不崩溃且保持当前值显示"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-039-01-main.png",
+      ".workflow-kit/tasks/evidence/TASK-039-02-settings-protocol-dropdown-open.png",
+      ".workflow-kit/tasks/evidence/TASK-039-interaction-report.md"
+    ]
+  }
+}

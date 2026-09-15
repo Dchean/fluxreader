@@ -47,6 +47,7 @@ export default function App() {
   const updateSettings = useAppStore((s) => s.updateSettings);
   const toasts = useAppStore((s) => s.toasts);
   const playerActive = useAppStore((s) => s.player.isActive);
+  const playerExpanded = useAppStore((s) => s.playerExpanded);
   const dataLoading = useAppStore((s) => s.dataLoading);
   const bootstrapError = useAppStore((s) => s.bootstrapError);
 
@@ -54,6 +55,12 @@ export default function App() {
   useEffect(() => {
     document.body.classList.toggle('has-player', playerActive);
   }, [playerActive]);
+
+  /* 全屏播放器展开（REQ-004）：迷你播放条隐藏，toast 层须回到右下贴底——
+     否则 has-player 的 96px 抬高会让 toast 悬浮遮挡播放器中下部 */
+  useEffect(() => {
+    document.body.classList.toggle('has-player-expanded', playerExpanded && playerActive);
+  }, [playerExpanded, playerActive]);
 
   /* ---------- 数据源装载：Tauri 环境从 SQLite 拉全量；浏览器保持 mock ---------- */
   useEffect(() => {
