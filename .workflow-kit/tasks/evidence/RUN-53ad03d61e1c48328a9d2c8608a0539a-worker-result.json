@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-037",
+  "run_id": "RUN-53ad03d61e1c48328a9d2c8608a0539a",
+  "status": "ready_for_verification",
+  "summary": "完成 A-3 + A-4。(1) A-3：push_feeds 解析队列 payload 的 folder_id → 锁内解析为目标分类名，quick_add 成功并绑定 remote_id 后锁外补发 edit_subscription(remote_id, None, Some(label))（best-effort，失败记 report.errors），OPML/add_feed 选择的目录结构不再在远端丢失。(2) A-4：新增分类墓碑（db/folders.rs，复用 feed 墓碑的 settings JSON 机制）+ record_folder_rename/record_folder_delete（commands.rs，命令与测试共用真实逻辑）——改名写旧 label 墓碑、删除写目录墓碑并为其内每个订阅补 feed 墓碑（否则订阅随目录复活）；pull_feeds 建目录前跳过墓碑中的 label，远端不再列出时清墓碑。(3) 新增 3 个回归测试（分类挂载、改名防复活、删除防复活含订阅），sync_gap_repro_e2e 8/8。门禁：fmt 通过、cargo test 116/0（113 基线 + 3 新增）。",
+  "changed_files": [
+    "src-tauri/src/sync.rs",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/folders.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

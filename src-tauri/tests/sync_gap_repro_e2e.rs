@@ -484,3 +484,219 @@ async fn feed_edit_without_backend_stays_local() {
         "本地改名必须生效（不受推送状态影响）"
     );
 }
+
+/// A-3：add_feed 队列携带的目标分类在推送后补挂到远端（quick_add 只有 URL，
+/// 若不补 edit_subscription(a=label)，OPML/add_feed 选的目录在远端会落默认分类）。
+#[tokio::test]
+async fn add_feed_pushes_folder_membership() {
+    let (db, http, server) = setup("gap_a3").await;
+    let url = "http://example.com/new-feed.xml";
+    let _folder_id = {
+        let conn = db.lock().await;
+        let fid = db::create_folder(&conn, "目标分类", "article").unwrap();
+        // 本地先落订阅行（推送绑定时按 URL 匹配）
+        db::insert_feed(
+            &conn, url, None, "New Feed", None, fid, "inherit", true, false,
+        )
+        .unwrap();
+        // 命令层等价入队：payload 携带目标分类 id
+        db::enqueue_sync(
+            &conn,
+            None,
+            Some(url),
+            "add_feed",
+            Some(&serde_json::json!({ "folder_id": fid }).to_string()),
+        )
+        .unwrap();
+        fid
+    };
+
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+
+    // quick_add 收到订阅
+    assert!(
+        server
+            .subscribed_urls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| u == url),
+        "远端应收到 quick_add 订阅"
+    );
+    // 补挂分类：最后一次 subscription/edit 应为 a=目标分类（远端 feed 101）
+    let form = mock_greader::last_subscription_edit_form(&server);
+    let get = |k: &str| form.iter().find(|(fk, _)| fk == k).map(|(_, v)| v.clone());
+    assert_eq!(
+        get("ac").as_deref(),
+        Some("edit"),
+        "应补发 ac=edit，实际 {form:?}"
+    );
+    assert_eq!(
+        get("a").as_deref(),
+        Some("目标分类"),
+        "应携带 a=目标分类（A-3），实际 {form:?}"
+    );
+    assert_eq!(
+        get("s").as_deref(),
+        Some("feed/101"),
+        "应指向 quick_add 返回的远端 id"
+    );
+
+    // 本地绑定远端 id（quick_add 返回 feed/101）
+    let conn = db.lock().await;
+    let bound: Option<i64> = conn
+        .query_row(
+            "SELECT remote_id FROM feeds WHERE feed_url = ?1",
+            [url],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(bound, Some(101), "本地订阅应绑定 quick_add 返回的远端 id");
+}
+
+/// A-4：分类改名后，远端旧 label 不再被 pull 复活成重复空目录。
+#[tokio::test]
+async fn folder_rename_does_not_revive_old_label() {
+    let (db, http, _server) = setup("gap_a4r").await;
+    // 远端 tag/list 默认含 "Default"；本地同名分类改名后应留下墓碑
+    let folder_id = {
+        let conn = db.lock().await;
+        db::create_folder(&conn, "Default", "article").unwrap()
+    };
+    sync::feeds_phase(&db, &http).await.expect("feeds phase 1");
+
+    {
+        let conn = db.lock().await;
+        app_lib::commands::record_folder_rename(&conn, folder_id, "重命名分类").expect("rename");
+        assert!(
+            db::folder_tombstones(&conn)
+                .unwrap()
+                .iter()
+                .any(|l| l == "Default"),
+            "改名应写入旧 label 墓碑"
+        );
+    }
+
+    sync::feeds_phase(&db, &http).await.expect("feeds phase 2");
+
+    let conn = db.lock().await;
+    let revived: Option<i64> = conn
+        .query_row("SELECT id FROM folders WHERE name = 'Default'", [], |r| {
+            r.get(0)
+        })
+        .ok();
+    let renamed: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM folders WHERE name = '重命名分类'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    assert!(
+        revived.is_none(),
+        "旧 label 不应被 pull 复活为空目录（A-4）"
+    );
+    assert!(renamed.is_some(), "新名称保留");
+}
+
+/// A-4：删除分类后，目录与其内订阅均不复活（目录墓碑 + 订阅补墓碑）。
+#[tokio::test]
+async fn folder_delete_does_not_revive_folder_or_feeds() {
+    let (db, http, _server) = setup("gap_a4d").await;
+    let feed_url = "http://127.0.0.1:8765/local_feed.xml"; // 远端订阅列表含该 URL
+    let folder_id = {
+        let conn = db.lock().await;
+        let fid = db::create_folder(&conn, "Default", "article").unwrap();
+        db::insert_feed(
+            &conn,
+            feed_url,
+            None,
+            "Feed In Default",
+            None,
+            fid,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        fid
+    };
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase (bind)");
+
+    {
+        let conn = db.lock().await;
+        app_lib::commands::record_folder_delete(&conn, folder_id).expect("delete folder");
+        let t = db::folder_tombstones(&conn).unwrap();
+        let ft = db::feed_tombstones(&conn).unwrap();
+        assert!(t.iter().any(|l| l == "Default"), "删除应写入目录墓碑");
+        assert!(
+            ft.iter().any(|u| u.contains("local_feed.xml")),
+            "应为其内订阅补墓碑"
+        );
+    }
+
+    sync::feeds_phase(&db, &http).await.expect("feeds phase 2");
+
+    let conn = db.lock().await;
+    let folder: Option<i64> = conn
+        .query_row("SELECT id FROM folders WHERE name = 'Default'", [], |r| {
+            r.get(0)
+        })
+        .ok();
+    let feed: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM feeds WHERE feed_url = ?1",
+            [feed_url],
+            |r| r.get(0),
+        )
+        .ok();
+    assert!(folder.is_none(), "删除的目录不应复活（A-4）");
+    assert!(feed.is_none(), "目录内订阅不应随目录复活（A-4 补墓碑）");
+}
+
+/// A-4：分类墓碑在远端不再列出该 label 后被清除（避免墓碑永久堆积）。
+#[tokio::test]
+async fn folder_tombstone_cleared_when_remote_drops_label() {
+    let (db, http, server) = setup("gap_a4c").await;
+    sync::feeds_phase(&db, &http).await.expect("feeds phase 1");
+
+    {
+        let conn = db.lock().await;
+        // 手工写入一个远端 tag/list 已不含的 label 墓碑（模拟远端已删除该分类）
+        db::add_folder_tombstone(&conn, "已消失分类").unwrap();
+        assert!(
+            db::folder_tombstones(&conn)
+                .unwrap()
+                .iter()
+                .any(|l| l == "已消失分类"),
+            "前置：墓碑已写入"
+        );
+    }
+
+    // 远端 tag/list 不含该 label（mock 默认 folders 无此项）→ pull 应清墓碑
+    sync::feeds_phase(&db, &http).await.expect("feeds phase 2");
+
+    let conn = db.lock().await;
+    assert!(
+        !db::folder_tombstones(&conn)
+            .unwrap()
+            .iter()
+            .any(|l| l == "已消失分类"),
+        "远端已不含的 label 墓碑应被清除"
+    );
+    // 仍未消失的标签（远端含）其墓碑保留：补一个正例对照
+    db::add_folder_tombstone(&conn, "Default").unwrap();
+    drop(conn);
+    sync::feeds_phase(&db, &http).await.expect("feeds phase 3");
+    let conn = db.lock().await;
+    assert!(
+        db::folder_tombstones(&conn)
+            .unwrap()
+            .iter()
+            .any(|l| l == "Default"),
+        "远端仍列出的 label 墓碑应保留（继续阻挡复活）"
+    );
+    let _ = server;
+}

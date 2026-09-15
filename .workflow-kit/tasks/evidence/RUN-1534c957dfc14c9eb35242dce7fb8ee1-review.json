@@ -1,0 +1,55 @@
+{
+  "task_id": "TASK-037",
+  "candidate_digest": "71a87fa1b35c81e47d7457e14a423c28d503a444c88b50b92d8e515c585e38ed",
+  "verification_run": "RUN-09052397fdbd4acca220968527eff320",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（未参与实现）：A-3 锁内解析 payload folder_id→分类名、quick_add 成功绑定 remote_id 后锁外补 edit_subscription(a=label)，三处入队端 payload 格式一致，best-effort 失败仅记 errors；A-4 墓碑写入时机正确（rename 取旧名后写、delete 在级联删除前收集订阅 URL 并规范化），pull_feeds 仅在 tags/subscriptions 都成功时结算墓碑、远端仍列出则保留、不再列出则清除；三个主测试断言强度足以在无修复时失败。审查指出的覆盖缺口（墓碑清除分支无断言，验收第 4 条要求「代码路径+断言」）已由实现者补测 folder_tombstone_cleared_when_remote_drops_label（含保留侧对照），复验 117/0。其余留档建议：删除分类不会拉回其内订阅的行为建议在用户文档说明；改名后远端仅存于旧 label 的新订阅会落默认分类（次要映射缺口）；墓碑在远端不改写 label 期间长期驻留属设计取舍。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收五条满足：分类挂载断言（ac=edit/a=目标分类/s=feed/101）、改名防复活、删除防复活含订阅、墓碑清除路径+断言、fmt 与 117/0 全绿",
+      "evidence_files": [
+        "src-tauri/src/sync.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/db/folders.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "cargo test 117/0（116 基线 + 墓碑清除测试）；A-1/A-2/A-5/C-1 既有场景全绿；fmt 通过",
+      "evidence_files": [
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "推送失败仅记 errors 不影响订阅推送本身；tags/subscriptions 失败早退不误清墓碑（避免误判复活）",
+      "evidence_files": [
+        "src-tauri/src/sync.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "墓碑机制与 feed 墓碑同构（settings JSON），命令层抽出 record_folder_* 可测；注释说明 A-3/A-4 依据",
+      "evidence_files": [
+        "src-tauri/src/db/folders.rs",
+        "src-tauri/src/commands.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "补挂分类为单次额外往返且仅在带分类的入队项上发生；墓碑为内存级 JSON 读写，无热路径开销",
+      "evidence_files": [
+        "src-tauri/src/sync.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

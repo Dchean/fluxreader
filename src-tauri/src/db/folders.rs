@@ -99,3 +99,52 @@ pub fn folder_name(conn: &Connection, id: i64) -> AppResult<Option<String>> {
         .query_row("SELECT name FROM folders WHERE id = ?1", [id], |r| r.get(0))
         .ok())
 }
+
+/* ============================================================
+分类墓碑（A-4）：与 feed 墓碑同机制（app_settings JSON label 列表）。
+改名/删除分类后，pull 不得按远端旧 label 复活目录——改名会留下重复空目录，
+删除会让目录连同其内订阅一起回来。远端 tag/list 不再列出该 label 后清除。
+============================================================ */
+const FOLDER_TOMBSTONE_KEY: &str = "folder_tombstones";
+
+/// 分类墓碑 label 列表。
+pub fn folder_tombstones(conn: &Connection) -> AppResult<Vec<String>> {
+    let raw = super::get_setting(conn, FOLDER_TOMBSTONE_KEY)?;
+    Ok(raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+        .unwrap_or_default())
+}
+
+fn save_folder_tombstones(conn: &Connection, list: &[String]) -> AppResult<()> {
+    let raw = serde_json::to_string(list).unwrap_or_else(|_| "[]".into());
+    super::set_setting(conn, FOLDER_TOMBSTONE_KEY, &raw)
+}
+
+/// 写入分类墓碑（幂等，按名称去重）。
+pub fn add_folder_tombstone(conn: &Connection, label: &str) -> AppResult<()> {
+    let mut list = folder_tombstones(conn)?;
+    if !list.iter().any(|l| l == label) {
+        list.push(label.to_string());
+        save_folder_tombstones(conn, &list)?;
+    }
+    Ok(())
+}
+
+/// 清除分类墓碑（远端已确认不再列出该 label 后调用）。
+pub fn remove_folder_tombstone(conn: &Connection, label: &str) -> AppResult<()> {
+    let mut list = folder_tombstones(conn)?;
+    let before = list.len();
+    list.retain(|l| l != label);
+    if list.len() != before {
+        save_folder_tombstones(conn, &list)?;
+    }
+    Ok(())
+}
+
+/// 某分类下的订阅 URL 列表（删除分类时为其订阅补 feed 墓碑，避免订阅随目录复活）。
+pub fn feed_urls_in_folder(conn: &Connection, folder_id: i64) -> AppResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT feed_url FROM feeds WHERE folder_id = ?1")?;
+    let rows = stmt.query_map([folder_id], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}

@@ -82,23 +82,45 @@ pub async fn create_folder(
     db::create_folder(&conn, &name, &layout)
 }
 
+/// 分类改名（命令与测试共用的真实逻辑）：本地改名 + 旧 label 墓碑（A-4）——
+/// 否则下次 pull 按远端旧 label 重新 create_folder，留下重复空目录。
+pub fn record_folder_rename(conn: &rusqlite::Connection, id: i64, new_name: &str) -> AppResult<()> {
+    if let Some(old) = db::folder_name(conn, id)? {
+        if old != new_name {
+            db::add_folder_tombstone(conn, &old)?;
+        }
+    }
+    db::rename_folder(conn, id, new_name)
+}
+
+/// 删除分类（命令与测试共用的真实逻辑）：为目录 label 及其内每个订阅写墓碑，
+/// 再删目录（级联删订阅）。否则下次 pull 会把目录与订阅全部拉回（A-4）。
+pub fn record_folder_delete(conn: &rusqlite::Connection, id: i64) -> AppResult<()> {
+    if let Some(label) = db::folder_name(conn, id)? {
+        db::add_folder_tombstone(conn, &label)?;
+        for url in db::feed_urls_in_folder(conn, id)? {
+            db::add_feed_tombstone(conn, &url)?;
+        }
+    }
+    db::delete_folder(conn, id)
+}
+
 #[tauri::command]
 pub async fn rename_folder(state: State<'_, AppState>, id: i64, name: String) -> AppResult<()> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::new("validate", "分类名称不能为空"));
     }
-    // Google Reader 协议下分类是 label（无数字 id），改名远端同步较复杂；
-    // 此处仅本地改名，靠下次 pull 对账按 label 名收敛（本地优先）。
+    // 本地改名 + 旧 label 墓碑（A-4）：远端分类是 label 名，不做远端改写，
+    // 但必须阻挡 pull 按旧 label 复活空目录。
     let conn = state.db.lock().await;
-    db::rename_folder(&conn, id, &name)?;
-    Ok(())
+    record_folder_rename(&conn, id, &name)
 }
 
 #[tauri::command]
 pub async fn delete_folder(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     let conn = state.db.lock().await;
-    db::delete_folder(&conn, id)
+    record_folder_delete(&conn, id)
 }
 
 #[tauri::command]

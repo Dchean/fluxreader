@@ -167,7 +167,8 @@
     "owner_decision_ids": [
       "DEC-9b5b2abed1664fc7b69f344f9ed11f44"
     ],
-    "merge_ref": "not_applicable：本地工作区交付，不涉及远端分支合并；用户直接批准当前工作区成果"
+    "merge_ref": "not_applicable：本地工作区交付，不涉及远端分支合并；用户直接批准当前工作区成果",
+    "continued_by": "TASK-037"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",

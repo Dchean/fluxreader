@@ -374,6 +374,10 @@ async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
     struct PendingFeed {
         queue_id: i64,
         url: String,
+        /// A-3：队列 payload 携带的目标分类名（本地 folder id → name 解析）。
+        /// quick_add 只传 URL，订阅会落到远端默认分类——推送后需补一次
+        /// edit_subscription(a=label) 才能保住 OPML/add_feed 选择的目录结构。
+        folder_label: Option<String>,
     }
     let items: Vec<PendingFeed> = {
         let conn = db.lock().await;
@@ -383,9 +387,16 @@ async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
                 continue;
             }
             let Some(url) = item.feed_url else { continue };
+            let folder_label = item
+                .payload
+                .as_deref()
+                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                .and_then(|v| v.get("folder_id").and_then(|f| f.as_i64()))
+                .and_then(|fid| db::folder_name(&conn, fid).ok().flatten());
             out.push(PendingFeed {
                 queue_id: item.id,
                 url,
+                folder_label,
             });
         }
         out
@@ -401,15 +412,27 @@ async fn push_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
                 report.pushed_feeds += 1;
                 done.push(it.queue_id);
                 // 锁内：绑定本地 feed（URL 匹配），若 quick_add 返回了数字 id
-                let conn = db.lock().await;
-                if let Some(local_id) = db::feed_id_by_url(&conn, &it.url).ok().flatten() {
-                    if let Some(stream_id) = r.stream_id.as_deref() {
-                        if let Some(nid) = greader::parse_feed_numeric_id(stream_id) {
-                            let _ = db::set_feed_remote_id(&conn, local_id, nid);
+                let bound_remote_id = {
+                    let conn = db.lock().await;
+                    let mut nid = None;
+                    if let Some(local_id) = db::feed_id_by_url(&conn, &it.url).ok().flatten() {
+                        if let Some(stream_id) = r.stream_id.as_deref() {
+                            if let Some(n) = greader::parse_feed_numeric_id(stream_id) {
+                                let _ = db::set_feed_remote_id(&conn, local_id, n);
+                                nid = Some(n);
+                            }
                         }
                     }
+                    nid
+                };
+                // A-3：锁外补挂目标分类（best-effort，失败仅记日志——订阅已推送）
+                if let (Some(nid), Some(label)) = (bound_remote_id, it.folder_label.as_deref()) {
+                    if let Err(e) = client.edit_subscription(nid, None, Some(label)).await {
+                        report
+                            .errors
+                            .push(format!("订阅 {} 挂载分类「{label}」失败: {e}", it.url));
+                    }
                 }
-                drop(conn);
             }
             Err(e) => report.errors.push(format!("推送订阅 {} 失败: {e}", it.url)),
         }
@@ -441,15 +464,26 @@ async fn pull_feeds(db: &Arc<Mutex<Connection>>, client: &Backend, report: &mut 
     // 简单起见：按 label 名 upsert 本地 folder，不维护 remote_id（分类碰撞用名字）。
     {
         let conn = db.lock().await;
-        for tag in &remote_tags {
-            if tag.r#type.as_deref() != Some("folder") {
-                continue; // 只处理 folder 类型（分类），跳过 starred/state
+        let remote_labels: Vec<String> = remote_tags
+            .iter()
+            .filter(|t| t.r#type.as_deref() == Some("folder"))
+            .filter_map(|t| t.label.clone())
+            .filter(|l| !l.is_empty())
+            .collect();
+        // A-4：分类墓碑——改名/删除过的 label 不复活；远端已不再列出即清墓碑
+        let tombstones = db::folder_tombstones(&conn).unwrap_or_default();
+        let mut active: Vec<String> = Vec::new();
+        for stale in tombstones {
+            if remote_labels.iter().any(|l| l == &stale) {
+                active.push(stale);
+            } else {
+                let _ = db::remove_folder_tombstone(&conn, &stale);
             }
-            let label = tag.label.as_deref().unwrap_or_default();
-            if label.is_empty() {
-                continue;
+        }
+        for label in &remote_labels {
+            if active.iter().any(|t| t == label) {
+                continue; // 本地已改名/删除：不按远端旧 label 复活目录
             }
-            // 按名称匹配本地 folder
             let existing = db::find_folder_by_name(&conn, label).ok().flatten();
             if existing.is_none() {
                 let _ = db::create_folder(&conn, label, "article");
