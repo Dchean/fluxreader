@@ -178,7 +178,8 @@
     "review_run": "RUN-08bd54dd3de9467c9cfeca77d1be013f",
     "acceptance_ref": null,
     "owner_decision_ids": [],
-    "merge_ref": null
+    "merge_ref": null,
+    "continued_by": "TASK-040"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-004-008.md",
