@@ -1,0 +1,59 @@
+{
+  "task_id": "TASK-040",
+  "candidate_digest": "4b916d0075b8d43e59bedb63b6241b5fe26927d197543b00b3098a1120247dfb",
+  "verification_run": "RUN-5cbf0b3dff6440b2b074f6b2cdc7cef4",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（reviewer 未参与该任务实现，新上下文）。先确认审查对象确为候选本身：src/store.ts、src-tauri/src/db/articles.rs、src/components/Overlays.tsx 的 sha256 与 RUN-5cbf0b3dff6440b2b074f6b2cdc7cef4-candidate.json 完全一致。亲自执行的命令与真实结果：(1) npm run lint → Found 0 warnings and 0 errors（23 文件）；(2) npm run test:frontend → 26/26 通过，含本任务新增的 5 条 S-5 断言（F4 按 id 隔离与清理、F7 anchor 打开标读、F8 starredOnly、F8 sinceMs）；(3) cargo test --manifest-path src-tauri/Cargo.toml --lib mark_all_read_view_filters → 1 passed / 0 failed（构建已热，0.45s）。全量套件未复跑（约 4.5 分钟，超出时限），改为读取管理者门禁日志：lint 0/0、frontend 26/26、rust-test 全部 test result: ok 且 0 failed（各二进制合计 120 passed，lib 目标 71 项含 mark_all_read_view_filters，另有约 50 项被过滤/忽略的 e2e）、fmt 的 stdout 与 stderr 均为 0 字节即 cargo fmt --check 干净。逐项核对：F4 —— summarizingIds 为按文章 id 的映射，summarizeEntry 按 id 置位、在完成/出错/catch 三处按 id 清除，Timeline.tsx 与 Reader.tsx 各按自身 id 读取，全局 summaryGenerating 状态字段已不存在；F7 —— anchorToArticle 与 selectArticle 使用同一谓词（tauri 模式且 markReadOnOpen 且未读），调用 api.setRead 后本地标读，回归断言 set_read{read:true} 与本地 isRead；F8 —— markCurrentViewAllRead 由 activeViewFilter 推导，收藏视图传 starredOnly、今天视图传 startOfLocalDayMs()，后端 mark_all_read 增加 is_starred=1 与 datetime(published_at) >= datetime(?,unixepoch) 谓词，本地集合用 selectVisibleEntries（同一谓词），且 commands.rs 改为用同步扩展后的 db::list_unread_ids_scoped 以完全相同的过滤收集 id 再落库，因此入队推送集合与实际更新集合相等（这正是避免两端状态分歧的关键点）；Rust 测试是真实断言：收藏过滤恰更新 1 条、1 小时 since_ms 恰更新 1 条、另有 1 条在两个过滤之外保持未读；F20 —— Overlays 的搜索 effect 内 alive 标志在每次防抖查询时重置，在 then/catch/finally 中检查、在 cleanup 中清除，故 250ms 防抖下的过期响应无法覆盖新查询结果。非阻塞观察（记入 summary，不构成阻塞）：(a) anchorToArticle 是复制那三行标读谓词而非与 selectArticle 共用同一个 helper，语义一致，属可维护性（日后漂移）提示而非缺陷；(b) 后端 since_ms 只是下界，而 UI 的今天视图用 isSameLocalDay 是双侧判断，故未来日期的 published_at（本仓库 format.ts 已明确承认该现象存在）会被后端标读却不在今天视图可见，标读集合是轻微超集；(c) 后端谓词不含内容布局过滤，故在全部/分类范围下混合布局订阅也会连带标记非当前布局文章，此行为早于 F8 存在，效果是重载后未读状态一致；(d) 本地乐观标记只覆盖已加载页而后端覆盖整个范围，属有意为之，因为数据库是权威来源。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "四个缺陷的验收逐条成立且经真实断言覆盖：F4 按 id 隔离（新增断言 A 生成中不影响 B 卡片判定，并验证按 id 清理）；F7 anchorToArticle 复用 markReadOnOpen 语义（断言 set_read{read:true} 与本地 isRead）；F8 收藏视图只影响收藏文章（Rust 测试断言恰更新 1 条，1 条保持未读）、今天视图用 since_ms（断言恰更新 1 条，1 条在两个过滤外）；F20 搜索竞态有代际守卫（alive 标志在 then/catch/finally 检查、cleanup 清除，代码路径闭合）。lint 0/0、前端回归 26/26、cargo test 0 failed、fmt 干净。",
+      "evidence_files": [
+        "src/store.ts",
+        "src/components/Overlays.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "既有门禁未回归：审查者亲自复跑 npm run lint（0 warnings / 0 errors，23 文件）与 npm run test:frontend（26/26，基线 21 项全部保留，新增 5 项）；Rust 侧复跑定向 lib 测试 1 passed / 0 failed，并核对管理者门禁日志 RUN-5cbf0b3dff6440b2b074f6b2cdc7cef4 的 rust-test 为全部 test result: ok、0 failed（合计 120 passed），fmt 的 stdout/stderr 均 0 字节。候选文件 sha256 与候选清单逐一相符，排除审查错对象。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        "src-tauri/src/db/commands_extraction_tests.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "失败与边界路径已覆盖：F4 在完成、出错与 catch 三处都按 id 清除 summarizingIds，不会留下永久转圈或跨卡片污染；F20 的 alive 标志在 cleanup 中清除，过期响应被丢弃而非覆盖新结果；F8 最关键的失败模式（入队推送集合与实际标记集合不一致，会再次制造两端状态分歧）已被消除——commands.rs 改用 db::list_unread_ids_scoped 以与落库完全相同的过滤收集 id；Rust 测试断言了过滤之外的文章保持未读，即未越界标记。",
+      "evidence_files": [
+        "src/store.ts",
+        "src/components/Overlays.tsx",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/db/sync_map.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "本任务以按 id 的数据结构取代全局布尔，消除了多卡片共享单一状态的隐式耦合，方向正确；新增断言写进既有 tools/frontend-regression.mjs 状态机用例，未另建平行测试体系；Rust 侧复用既有 commands_extraction_tests 归属，过滤谓词集中在 db 层而非散落命令层。非阻塞提示：anchorToArticle 复制了三行标读谓词而未与 selectArticle 共用 helper，语义当前一致，但日后改动存在漂移风险，建议后续重构时收敛（不阻塞本任务）。",
+      "evidence_files": [
+        "src/store.ts",
+        "src-tauri/src/db/articles.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "本任务未设性能目标。改动性质为：把全局布尔换成按 id 映射（常数级）、F20 仅为 effect 内标志位（无额外 IO）、F8 后端多一次按范围收集未读 id 的 SELECT 且与实际更新使用同一谓词（不引入逐篇往返）。门禁表现为前端回归 26/26 在毫秒级完成、lint 0/0、cargo test 0 failed，未见性能或行为回归。",
+      "evidence_files": [
+        "src/store.ts",
+        "src-tauri/src/db/sync_map.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

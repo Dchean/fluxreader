@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "ready",
+  "status": "done",
   "objective": "修复四个已定位缺陷。(1) F4：summaryGenerating 是全局单布尔，为任一文章生成摘要时所有空摘要卡片同时显示「正在生成…」；改为按 id 的 summarizingIds 集合，卡片与 Reader 按自身 id 判定。(2) F7：anchorToArticle（搜索/命令面板打开）不执行「打开时标已读」，与列表点开行为分叉；改为复用 selectArticle 的 markReadOnOpen 逻辑。(3) F8：markAllRead 只传订阅范围，在收藏/今天视图下会把范围内全部文章（含未显示的）标已读，与 toast 文案不符；后端 mark_all_read 增加 view 过滤参数（all/unread/today/starred），前端传入当前视图。(4) F20：Overlays 搜索结果 Promise 无代际守卫，慢查询返回可覆盖新查询结果；加 alive/代际守卫。",
   "non_goals": [
     "读者界面的视觉调整",
@@ -158,21 +158,36 @@
   "budget": {
     "started_at_utc": "2026-09-15T18:07:10.832732Z",
     "deadline_at_utc": "2026-09-15T22:07:10.832732Z",
-    "repair_rounds_used": 0
+    "repair_rounds_used": 0,
+    "extensions": [
+      {
+        "decision_id": "DEC-07f38dc8107f4fc78e6f8c7a8715bec7",
+        "recorded_at_utc": "2026-09-16T01:41:23.579006Z",
+        "minutes": 240,
+        "repair_rounds": 4,
+        "previous_deadline_at_utc": "2026-09-15T22:07:10.832732Z",
+        "deadline_at_utc": "2026-09-16T05:41:23.579006Z"
+      }
+    ]
   },
   "batch_id": "BATCH-8016e0ec0d6a45419b5ae140d3808f66",
   "run_ids": [
-    "RUN-7f8179e9998644c6b7e7b94d6b40c0e7"
+    "RUN-7f8179e9998644c6b7e7b94d6b40c0e7",
+    "RUN-c31ac3ef851841159bce712f63a7ab74",
+    "RUN-5cbf0b3dff6440b2b074f6b2cdc7cef4",
+    "RUN-be295d52d6ac40058ef9410ef43ce3bd"
   ],
   "blockers": [],
   "evidence": {
-    "candidate_manifest": null,
-    "candidate_digest": null,
-    "verification_run": null,
-    "review_run": null,
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-5cbf0b3dff6440b2b074f6b2cdc7cef4-candidate.json",
+    "candidate_digest": "4b916d0075b8d43e59bedb63b6241b5fe26927d197543b00b3098a1120247dfb",
+    "verification_run": "RUN-5cbf0b3dff6440b2b074f6b2cdc7cef4",
+    "review_run": "RUN-be295d52d6ac40058ef9410ef43ce3bd",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-56b4a45bc1ae488f86f37df34c7e4e19-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-56b4a45bc1ae488f86f37df34c7e4e19"
+    ],
+    "merge_ref": "40d005d (merge: workflow-kit governed defect fixes and refactor batch TASK-029..040 into main)"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-004-008.md",
@@ -207,8 +222,32 @@
       "at_utc": "2026-09-15T23:30:33.158403Z",
       "note": "Out-of-scope changes: .worker-result-040.json",
       "next_action": "先核对已有文件及原始日志，再处理 scope；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-16T01:41:24.097948Z",
+      "note": "依据新决定追加预算；原始时钟与失败记录保留",
+      "next_action": "先核对已有成果，再按原任务范围继续"
+    },
+    {
+      "at_utc": "2026-09-16T01:50:42.653946Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-16T01:52:42.239130Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-16T02:07:32.877881Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-16T02:21:01.000867Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
     }
   ],
-  "failure_kind": "environment",
   "resume_phase": "implementation"
 }

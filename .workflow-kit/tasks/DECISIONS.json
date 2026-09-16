@@ -875,6 +875,79 @@
         "TASK-040"
       ],
       "recorded_at_utc": "2026-09-15T19:05:00Z"
+    },
+    {
+      "id": "DEC-toolfix-extend-deadlock-20260915",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 授权：'批准并commit，继续，并且解除时间和任务数量限制，直接按照你判定最合适的路线跑完全部流程，将项目一次性优化重构完'；并在此前明确授权'在工具脚本缺陷阻塞流程时修补工具脚本'",
+      "statement": "工具缺陷修复（workflow_runtime.extend_budget）：预算追加此前要求 check_project 全绿，但'预算耗尽'本身就会让 check_project 失败，于是补救手段不可达——TASK-038（候选过期）与 TASK-040（截止时间耗尽）因此互相锁死，任何变更命令都会因 must_check 失败而回滚。现改为：先采集追加前既有的项目错误，仅在本次追加'新引入'错误时回滚；与该次追加无关的既有错误不再阻止追加。安全性保留：追加引入的任何新问题仍会回滚，且仍不重写原始时钟与运行历史。详见 .workflow-kit/docs/TOOL-FIX-extend-deadlock.md",
+      "scope": [
+        "workflow"
+      ],
+      "recorded_at_utc": "2026-09-16T01:41:14.146846Z"
+    },
+    {
+      "id": "DEC-07f38dc8107f4fc78e6f8c7a8715bec7",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "user 2026-09-15: 批准并commit，继续，并且解除时间和任务数量限制，直接按照你判定最合适的路线跑完全部流程，将项目一次性优化重构完（TASK-040 截止时间耗尽，代码已于 18faeb7 提交，需重新走 finish→verify→review）",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-040"
+      ],
+      "recorded_at_utc": "2026-09-16T01:41:23.579006Z",
+      "budget_extension": {
+        "decision_id": "DEC-07f38dc8107f4fc78e6f8c7a8715bec7",
+        "recorded_at_utc": "2026-09-16T01:41:23.579006Z",
+        "minutes": 240,
+        "repair_rounds": 4,
+        "previous_deadline_at_utc": "2026-09-15T22:07:10.832732Z",
+        "deadline_at_utc": "2026-09-16T05:41:23.579006Z"
+      }
+    },
+    {
+      "id": "DEC-b91dccb583f5472eb5dc42555d688e01",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "user 2026-09-15: 解除时间和任务数量限制，按最合适路线跑完全部流程（TASK-038 候选因后继任务改动共享文件而失效，需重新验证当前候选）",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-038"
+      ],
+      "recorded_at_utc": "2026-09-16T01:41:31.542769Z",
+      "budget_extension": {
+        "decision_id": "DEC-b91dccb583f5472eb5dc42555d688e01",
+        "recorded_at_utc": "2026-09-16T01:41:31.542769Z",
+        "minutes": 240,
+        "repair_rounds": 4,
+        "previous_deadline_at_utc": "2026-09-15T20:06:22.839607Z",
+        "deadline_at_utc": "2026-09-16T05:41:31.542769Z"
+      }
+    },
+    {
+      "id": "DEC-56b4a45bc1ae488f86f37df34c7e4e19",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15：'合并并继续' + '批准并commit，继续，并且解除时间和任务数量限制，直接按照你判定最合适的路线跑完全部流程，将项目一次性优化重构完'；本轮在解除 advertise 死锁后完成 TASK-038 重新验证与 TASK-040 收尾，两者均已独立审查 PASS",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-035",
+        "TASK-036",
+        "TASK-037",
+        "TASK-038",
+        "TASK-039",
+        "TASK-040"
+      ],
+      "recorded_at_utc": "2026-09-16T02:21:16.748363Z",
+      "candidates": {
+        "TASK-035": "4de15707e87d854f8cd3c5bf4c9791f404ed764112cd902cabd724b65da581f2",
+        "TASK-036": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+        "TASK-037": "71a87fa1b35c81e47d7457e14a423c28d503a444c88b50b92d8e515c585e38ed",
+        "TASK-038": "86feabe5c9ce2ba9eab5a4735b74dcd2bd7e6d174bf203c11eaddae9d2df1b61",
+        "TASK-039": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6",
+        "TASK-040": "4b916d0075b8d43e59bedb63b6241b5fe26927d197543b00b3098a1120247dfb"
+      }
     }
   ]
 }

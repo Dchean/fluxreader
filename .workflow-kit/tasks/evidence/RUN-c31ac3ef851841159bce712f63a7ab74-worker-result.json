@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-040",
+  "run_id": "RUN-c31ac3ef851841159bce712f63a7ab74",
+  "status": "ready_for_verification",
+  "summary": "F4/F7/F8/F20 的实现已完成并提交于 18faeb7：按 id 的摘要生成态（summarizingIds 取代全局 summaryGenerating）、anchorToArticle 复用 markReadOnOpen 的打开即标读、后端 mark_all_read 增加 starredOnly/sinceMs 视图过滤并由前端传入当前视图、Overlays 搜索结果 Promise 增加代际守卫。此前 RUN-7f8179e9998644c6b7e7b94d6b40c0e7 因把交付文件写在仓库根目录被判定 scope，其后又因截止时间耗尽被 blocked；本次运行只重建运行记录：核对工作区与 begin 时快照完全一致（0 处差异），无新增文件改动。",
+  "changed_files": [],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）
 
-**状态**：verified
+**状态**：done
 
 **目标**：修复两个订阅/分类同步缺口。A-3：push_feeds 只取 feed_url、丢弃队列 payload 里的 folder_id——OPML 导入/add_feed 选的分类在远端全部落到默认分类；改为锁内解析 payload 目标分类名（本地 folder id→name），quick_add 成功绑定 remote_id 后追加 edit_subscription(remote_id, None, Some(label))。A-4：分类改名/删除后，pull_feeds 按远端 tag/list 旧 label 重新 create_folder（改名产生重复空目录、删除目录连带订阅一起复活）；引入 folder 墓碑（复用 feed 墓碑的 settings JSON 机制）：rename_folder 记录旧 label 墓碑、delete_folder 记录 label 墓碑并为其内每个 feed 补 feed 墓碑（否则订阅随目录复活），pull_feeds 建目录/建订阅前查墓碑并按「远端已不含即清墓碑」收敛。新增回归测试覆盖两个缺口。
 

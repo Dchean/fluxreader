@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-c31ac3ef851841159bce712f63a7ab74",
+  "task_id": "TASK-040",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "manager 主会话收尾（F4/F7/F8/F20 实现已提交于 18faeb7；此前运行仅因 scope 记录与截止时间被 blocked，本运行核对既有实现，预期无新增文件改动）"
+  },
+  "started_at_utc": "2026-09-16T01:50:42.570466Z",
+  "finished_at_utc": "2026-09-16T01:52:42.206663Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "4667cd1d2a0f3665680ccf19b50d4026e54c169d9225805bb5e1b7200c34f555",
+  "candidate_digest": "4b916d0075b8d43e59bedb63b6241b5fe26927d197543b00b3098a1120247dfb",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-c31ac3ef851841159bce712f63a7ab74-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-c31ac3ef851841159bce712f63a7ab74-scope.json"
+}

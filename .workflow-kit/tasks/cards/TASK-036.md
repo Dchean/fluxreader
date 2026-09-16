@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-036 · 订阅改名/移动目录接线：edit_subscription 推送远端（A-2）
 
-**状态**：verified
+**状态**：done
 
 **目标**：修复 A-2：update_feed 此前只更新本地（greader.edit_subscription 已实现但全仓零调用，Backend 未暴露）——改名/移动目录后远端标题与分类永久分歧。实现：Backend 暴露 edit_subscription（GReader 真实调用；Fever 协议无编辑端点，按 no-op 跳过）；命令层抽出 record_feed_edit（本地更新 + 返回待推送目标：remote_id、新标题、目标分类 label），update_feed 在锁外 best-effort 推送远端，失败仅记日志不影响本地生效。A-2 复现测试转正为必过。
 

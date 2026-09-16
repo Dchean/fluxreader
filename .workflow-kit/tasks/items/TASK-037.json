@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "修复两个订阅/分类同步缺口。A-3：push_feeds 只取 feed_url、丢弃队列 payload 里的 folder_id——OPML 导入/add_feed 选的分类在远端全部落到默认分类；改为锁内解析 payload 目标分类名（本地 folder id→name），quick_add 成功绑定 remote_id 后追加 edit_subscription(remote_id, None, Some(label))。A-4：分类改名/删除后，pull_feeds 按远端 tag/list 旧 label 重新 create_folder（改名产生重复空目录、删除目录连带订阅一起复活）；引入 folder 墓碑（复用 feed 墓碑的 settings JSON 机制）：rename_folder 记录旧 label 墓碑、delete_folder 记录 label 墓碑并为其内每个 feed 补 feed 墓碑（否则订阅随目录复活），pull_feeds 建目录/建订阅前查墓碑并按「远端已不含即清墓碑」收敛。新增回归测试覆盖两个缺口。",
   "non_goals": [
     "A-8 队列老化（下一任务）",
@@ -154,9 +154,11 @@
     "candidate_digest": "71a87fa1b35c81e47d7457e14a423c28d503a444c88b50b92d8e515c585e38ed",
     "verification_run": "RUN-09052397fdbd4acca220968527eff320",
     "review_run": "RUN-1534c957dfc14c9eb35242dce7fb8ee1",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-56b4a45bc1ae488f86f37df34c7e4e19-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-56b4a45bc1ae488f86f37df34c7e4e19"
+    ],
+    "merge_ref": "40d005d (merge: workflow-kit governed defect fixes and refactor batch TASK-029..040 into main)",
     "continued_by": "TASK-038"
   },
   "snapshot_paths": [

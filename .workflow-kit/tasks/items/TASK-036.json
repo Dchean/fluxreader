@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "修复 A-2：update_feed 此前只更新本地（greader.edit_subscription 已实现但全仓零调用，Backend 未暴露）——改名/移动目录后远端标题与分类永久分歧。实现：Backend 暴露 edit_subscription（GReader 真实调用；Fever 协议无编辑端点，按 no-op 跳过）；命令层抽出 record_feed_edit（本地更新 + 返回待推送目标：remote_id、新标题、目标分类 label），update_feed 在锁外 best-effort 推送远端，失败仅记日志不影响本地生效。A-2 复现测试转正为必过。",
   "non_goals": [
     "A-3 push 时挂分类（TASK-037）",
@@ -161,9 +161,11 @@
     "candidate_digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
     "verification_run": "RUN-e6fb6491154b498ca606e6777677a2aa",
     "review_run": "RUN-e894342f8329469a8127b5f4c1b4bbcf",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-56b4a45bc1ae488f86f37df34c7e4e19-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-56b4a45bc1ae488f86f37df34c7e4e19"
+    ],
+    "merge_ref": "40d005d (merge: workflow-kit governed defect fixes and refactor batch TASK-029..040 into main)",
     "continued_by": "TASK-037"
   },
   "snapshot_paths": [

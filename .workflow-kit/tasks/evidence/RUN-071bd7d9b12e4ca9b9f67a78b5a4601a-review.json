@@ -1,0 +1,58 @@
+{
+  "task_id": "TASK-038",
+  "candidate_digest": "86feabe5c9ce2ba9eab5a4735b74dcd2bd7e6d174bf203c11eaddae9d2df1b61",
+  "verification_run": "RUN-d2eddbbf65514c4290d360c50faf5e9b",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（reviewer 未参与该任务实现，新上下文）。复跑 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check → exit 0；复跑 cargo test --manifest-path src-tauri/Cargo.toml（输出经 tail -80 截取）全程无任何失败行，可见的 test result: 行均为 0 failed，含 sync_gap_repro_e2e 11 passed/0 failed（本任务两个新测试 stale_unbound_queue_items_are_pruned 与 fresh_queue_items_survive_aging 均通过）、staged_refresh_e2e 3/3、scheduler_e2e 3/3、sync_content_e2e 1/1，且运行推进到 Doc-tests 即完整结束。审查者如实声明其局限：因输出被 tail 截断，lib 单元测试与字母序靠前的集成二进制的结果行未被本人直接观察到，故未由审查者本人看到完整汇总计数；候选自身的门禁日志 RUN-d2eddbbf65514c4290d360c50faf5e9b 中 rust-test 为 exit 0 且日志完整，汇总计数以该门禁日志为准。代码核对确认验收各条：prune_stale_unbound 的删除谓词（created_at < cutoff AND action IN (read,unread,star,unstar) AND (article_id IS NULL OR article_id IN (SELECT id FROM articles WHERE remote_id IS NULL))）恰是 plan_push 绑定判定（get_article_remote_id().ok().flatten() 为 Some）的补集，不会误删本可推送的项；cutoff 由 sync.rs::age_stale_queue 以 Utc::now() 减 30 天、按 %Y-%m-%d %H:%M:%S 生成，与仓库统一采用的 UTC datetime('now') 文本格式一致，字典序比较有效；enqueue_sync 现显式写入 created_at = datetime('now')；老化在 push_states_now 与 states_phase 的两段 push（pull 前、pull 后）中均在 PUSH_LOCK 内执行；驱逐计数进入 report.errors（新测试断言含『队列老化』）。created_at 列在 v2 的 CREATE TABLE sync_queue 中本已存在（ebb4653 与 fdcf9a2 均可核对），未改动不可变 M::up 迁移，旧库（user_version>=2）天然兼容。C-2 三处 take_sync_queue 均已改为可诊断路径：sync.rs::push_feeds 并入 report.errors，commands.rs::sync_local_feeds 两处（约 970 行与 998 行）log::warn!。TASK-040 在 commands.rs / db/sync_map.rs 的越界改动未破坏 TASK-038 行为（states_phase 端到端测试同时覆盖二者且通过）。非阻塞观察（已记入 summary，不构成阻塞）：(a) commands.rs 两处只写日志，未并入 report 或返回消息，且读失败时 has_pending=false 仍返回成功文案『没有需要同步的本地订阅（全部已绑定或已推送）』，该路径仅日志可追溯；(b) push_states_now 中老化错误留在局部 SyncReport，被空计划的提前返回（约 327 行）丢弃，故当仅有被清理的队列项时不会记日志，而返回 report 的 states_phase 路径可呈现，新测试断言的正是该路径；(c) 首轮老化发生在 pull_entries 之前，同一次运行本可绑定的超 30 天项会先被清理，符合『超过保留期且当前未绑定』的字面规格，并由 pull 后的第二轮缓解。以上均不违反既定验收标准。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收五条逐条成立：created_at 复用既有列（v2 CREATE TABLE 已含该列，无需新迁移，旧库兼容）；超过保留期且仍无绑定的队列项被清理并记入 errors（新测试 stale_unbound_queue_items_are_pruned 断言）；保留期内的有效待推项不受老化影响（新测试 fresh_queue_items_survive_aging 对照）；take_sync_queue 失败不再静默（三处均落到日志或 report）；fmt 与 cargo test 全绿（门禁 RUN-d2eddbbf65514c4290d360c50faf5e9b 的 rust-test 为 exit 0）。",
+      "evidence_files": [
+        "src-tauri/src/db/sync_queue.rs",
+        "src-tauri/src/sync.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "既有同步契约未回归：本次复跑中 sync_gap_repro_e2e 为 11 passed / 0 failed，staged_refresh_e2e 3/3、scheduler_e2e 3/3、sync_content_e2e 1/1 均通过；依赖本地 mock 服务的 sync_e2e 与 sync_phases_e2e 为 5 ignored——按本项目约定需显式 --ignored 才会启动 mock 服务器，属预期跳过而非回归。cargo fmt --check 为 exit 0。",
+      "evidence_files": [
+        "src-tauri/tests/sync_gap_repro_e2e.rs",
+        "src-tauri/tests/mock_greader.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "失败路径已从静默吞掉改为可诊断：三处 take_sync_queue 不再以 unwrap_or_default 把 DB 错误当作空队列（sync.rs::push_feeds 并入 report.errors；commands.rs::sync_local_feeds 两处 log::warn!）。老化删除谓词与 plan_push 的绑定判定互补，因此不会清掉本可推送的项；sync_queue.article_id 为 ON DELETE CASCADE 且 foreign_keys 开启，不存在遗留孤儿行的缺口。读失败时回退语义（视为无需推送）与改动前一致，未改变对外行为。",
+      "evidence_files": [
+        "src-tauri/src/sync.rs",
+        "src-tauri/src/commands.rs",
+        "src-tauri/src/db/sync_queue.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "保留期以常量集中表达，截止时间统一格式化为 %Y-%m-%d %H:%M:%S，与仓库既定的 UTC datetime('now') 文本格式一致，避免了跨格式比较这一隐蔽隐患；未触碰不可变 M::up 迁移（created_at 本已存在于 v2 建表语句），撤销冗余 ALTER 的判断正确；驱逐原因进入 report.errors，便于后续诊断而非静默消失。",
+      "evidence_files": [
+        "src-tauri/src/db/migrations.rs",
+        "src-tauri/src/db/sync_queue.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "本任务未设性能目标，改动仅为一处有界 DELETE 与三处错误日志：老化仅在 push 规划路径、复用既有 PUSH_LOCK 内执行，不在文章读取路径上，未新增逐篇处理工作；谓词是对常量截止时间的比较。以门禁全绿体现无性能与行为回归。",
+      "evidence_files": [
+        "src-tauri/src/sync.rs",
+        "src-tauri/src/db/sync_queue.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

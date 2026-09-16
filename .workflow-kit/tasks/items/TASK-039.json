@@ -13,7 +13,7 @@
     "设置→同步协议下拉与全应用 FluxDropdown 一致（展开方向/Esc/点击外部/深色主题）",
     "下拉选项为空时不崩溃且保持当前值显示"
   ],
-  "status": "verified",
+  "status": "done",
   "objective": "修复 REQ-004 与 REQ-008。(1) toast 位置：全屏播放器（playerExpanded，覆盖层 z-index 260）展开时迷你播放条已隐藏，但 body.has-player 仍把 toast 层抬高 96px，导致 toast 悬浮遮挡全屏播放器中下部；新增 has-player-expanded 标记（App 随 playerExpanded 切换），展开时 toast 回到右下贴底（24px），并确认 toast 层浮于播放器之上而低于二次确认弹窗。(2) 控件一致性：设置→同步的协议选择是全应用唯一的原生 <select>，改为统一组件 FluxDropdown；同时清理两处残留空 className。",
   "non_goals": [
     "播放器视觉改版",
@@ -176,9 +176,11 @@
     "candidate_digest": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6",
     "verification_run": "RUN-a3a084ab05a047fe80877affc5033b20",
     "review_run": "RUN-08bd54dd3de9467c9cfeca77d1be013f",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-56b4a45bc1ae488f86f37df34c7e4e19-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-56b4a45bc1ae488f86f37df34c7e4e19"
+    ],
+    "merge_ref": "40d005d (merge: workflow-kit governed defect fixes and refactor batch TASK-029..040 into main)",
     "continued_by": "TASK-040"
   },
   "snapshot_paths": [

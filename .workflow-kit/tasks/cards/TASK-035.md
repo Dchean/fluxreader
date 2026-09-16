@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-035 · 删除订阅接线：远端退订 + 删除墓碑防复活（A-1）
 
-**状态**：verified
+**状态**：done
 
 **目标**：修复 A-1：delete_feed 此前只删本地——已绑定远端的订阅不回传退订，且下次 pull 会按远端订阅列表把已删订阅连文章一起复活。实现：本地删除时写入删除墓碑（规范化 URL，存 app_settings，退订失败也防复活）；同步已配置且已绑定远端时 best-effort 调用 GReader unsubscribe（Fever 无端点，仅墓碑）；退订成功或远端列表已不含该 URL 时清除墓碑。A-1 复现测试转正为必过。
 

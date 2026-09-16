@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "修复 A-1：delete_feed 此前只删本地——已绑定远端的订阅不回传退订，且下次 pull 会按远端订阅列表把已删订阅连文章一起复活。实现：本地删除时写入删除墓碑（规范化 URL，存 app_settings，退订失败也防复活）；同步已配置且已绑定远端时 best-effort 调用 GReader unsubscribe（Fever 无端点，仅墓碑）；退订成功或远端列表已不含该 URL 时清除墓碑。A-1 复现测试转正为必过。",
   "non_goals": [
     "A-2 改名/移动目录接线（TASK-036）",
@@ -158,9 +158,11 @@
     "candidate_digest": "4de15707e87d854f8cd3c5bf4c9791f404ed764112cd902cabd724b65da581f2",
     "verification_run": "RUN-86d4f5837c794066af853ac77707623a",
     "review_run": "RUN-5d79876caef249148b8fdd44e3ef9ba6",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-56b4a45bc1ae488f86f37df34c7e4e19-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-56b4a45bc1ae488f86f37df34c7e4e19"
+    ],
+    "merge_ref": "40d005d (merge: workflow-kit governed defect fixes and refactor batch TASK-029..040 into main)",
     "continued_by": "TASK-036"
   },
   "snapshot_paths": [

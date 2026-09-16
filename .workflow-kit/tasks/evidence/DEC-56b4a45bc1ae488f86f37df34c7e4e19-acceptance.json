@@ -1,0 +1,24 @@
+{
+  "id": "DEC-56b4a45bc1ae488f86f37df34c7e4e19",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-15：'合并并继续' + '批准并commit，继续，并且解除时间和任务数量限制，直接按照你判定最合适的路线跑完全部流程，将项目一次性优化重构完'；本轮在解除 advertise 死锁后完成 TASK-038 重新验证与 TASK-040 收尾，两者均已独立审查 PASS",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-035",
+    "TASK-036",
+    "TASK-037",
+    "TASK-038",
+    "TASK-039",
+    "TASK-040"
+  ],
+  "recorded_at_utc": "2026-09-16T02:21:16.748363Z",
+  "candidates": {
+    "TASK-035": "4de15707e87d854f8cd3c5bf4c9791f404ed764112cd902cabd724b65da581f2",
+    "TASK-036": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+    "TASK-037": "71a87fa1b35c81e47d7457e14a423c28d503a444c88b50b92d8e515c585e38ed",
+    "TASK-038": "86feabe5c9ce2ba9eab5a4735b74dcd2bd7e6d174bf203c11eaddae9d2df1b61",
+    "TASK-039": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6",
+    "TASK-040": "4b916d0075b8d43e59bedb63b6241b5fe26927d197543b00b3098a1120247dfb"
+  }
+}

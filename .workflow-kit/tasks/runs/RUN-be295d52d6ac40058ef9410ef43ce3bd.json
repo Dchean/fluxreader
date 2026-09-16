@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-be295d52d6ac40058ef9410ef43ce3bd",
+  "task_id": "TASK-040",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "独立上下文审查 agent-explore（未参与实现；新上下文复审当前候选：先校验候选文件 sha256 一致，再复跑 npm lint 0/0、npm test:frontend 26/26、定向 cargo lib 测试 1 passed，并读全量门禁日志）"
+  },
+  "started_at_utc": "2026-09-16T02:21:00.655905Z",
+  "finished_at_utc": "2026-09-16T02:21:00.687269Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "4667cd1d2a0f3665680ccf19b50d4026e54c169d9225805bb5e1b7200c34f555",
+  "candidate_digest": "4b916d0075b8d43e59bedb63b6241b5fe26927d197543b00b3098a1120247dfb",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-be295d52d6ac40058ef9410ef43ce3bd-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-be295d52d6ac40058ef9410ef43ce3bd-review.json",
+    "candidate_digest": "4b916d0075b8d43e59bedb63b6241b5fe26927d197543b00b3098a1120247dfb",
+    "quality_digest": "fdfde93862187805fb48acf783c2aa6fb420f67ceff3aeff6dd11c39e3073693"
+  },
+  "estimated_cost_usd": null
+}

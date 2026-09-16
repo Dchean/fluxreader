@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "修复同步队列两个卫生缺口。(1) A-8：无远端绑定的队列项（远端无对应条目/源）永久滞留——plan_push 跳过后保留、sync_map pending_ids 长期保护、sync_queue 无 TTL；改为队列项写入时带 created_at，push/pull 规划时清理超过保留期（30 天）且仍无法绑定的项，并在清出时记 report.errors 供诊断。(2) C-2：take_sync_queue 的 DB 错误被 unwrap_or_default 当空队列静默吞掉（push_feeds、sync_local_feeds 三处）；改为记录 log::warn 并把错误并入 SyncReport.errors，避免订阅推送静默延迟无痕。新增回归测试覆盖老化清理。",
   "non_goals": [
     "重写队列为独立表结构",
@@ -138,24 +138,38 @@
   "budget": {
     "started_at_utc": "2026-09-15T16:06:22.839607Z",
     "deadline_at_utc": "2026-09-15T20:06:22.839607Z",
-    "repair_rounds_used": 0
+    "repair_rounds_used": 0,
+    "extensions": [
+      {
+        "decision_id": "DEC-b91dccb583f5472eb5dc42555d688e01",
+        "recorded_at_utc": "2026-09-16T01:41:31.542769Z",
+        "minutes": 240,
+        "repair_rounds": 4,
+        "previous_deadline_at_utc": "2026-09-15T20:06:22.839607Z",
+        "deadline_at_utc": "2026-09-16T05:41:31.542769Z"
+      }
+    ]
   },
   "batch_id": "BATCH-8016e0ec0d6a45419b5ae140d3808f66",
   "run_ids": [
     "RUN-1297f47fb8b9490b9fe9febbe0b808ce",
     "RUN-c372106d1e4d49d992bfbe622c6cf233",
     "RUN-98cd5ef2c33943f6a4b54d9668b8ed62",
-    "RUN-986d757c1fac4eee923c1f6ba9852d78"
+    "RUN-986d757c1fac4eee923c1f6ba9852d78",
+    "RUN-d2eddbbf65514c4290d360c50faf5e9b",
+    "RUN-071bd7d9b12e4ca9b9f67a78b5a4601a"
   ],
   "blockers": [],
   "evidence": {
-    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-98cd5ef2c33943f6a4b54d9668b8ed62-candidate.json",
-    "candidate_digest": "38dbaedfbdabf5a8b89661d715ddc6b673b4cdc9027ee892bd45dccef30bda85",
-    "verification_run": "RUN-98cd5ef2c33943f6a4b54d9668b8ed62",
-    "review_run": "RUN-986d757c1fac4eee923c1f6ba9852d78",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-d2eddbbf65514c4290d360c50faf5e9b-candidate.json",
+    "candidate_digest": "86feabe5c9ce2ba9eab5a4735b74dcd2bd7e6d174bf203c11eaddae9d2df1b61",
+    "verification_run": "RUN-d2eddbbf65514c4290d360c50faf5e9b",
+    "review_run": "RUN-071bd7d9b12e4ca9b9f67a78b5a4601a",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-56b4a45bc1ae488f86f37df34c7e4e19-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-56b4a45bc1ae488f86f37df34c7e4e19"
+    ],
+    "merge_ref": "40d005d (merge: workflow-kit governed defect fixes and refactor batch TASK-029..040 into main)"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
@@ -196,6 +210,21 @@
     },
     {
       "at_utc": "2026-09-15T16:37:29.281443Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    },
+    {
+      "at_utc": "2026-09-16T01:41:32.130552Z",
+      "note": "依据新决定追加预算；原始时钟与失败记录保留",
+      "next_action": "先核对已有成果，再按原任务范围继续"
+    },
+    {
+      "at_utc": "2026-09-16T01:47:27.187995Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-16T02:05:30.702596Z",
       "note": "当前候选的测试与审查通过",
       "next_action": "继续已授权任务；所属功能完成后请用户验收"
     }

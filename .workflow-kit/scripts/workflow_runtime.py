@@ -1562,10 +1562,16 @@ def extend_budget(root, ident, minutes, repair_rounds, source):
     task["budget"].setdefault("extensions", []).append(extension)
     previous_decisions = read(root, "tasks/DECISIONS.json")
     previous_task = task_read(root, ident)
+    # An exhausted budget is itself reported by check_project, so demanding a
+    # clean project here would make this remedy unreachable. Refuse only an
+    # extension that introduces a problem the project did not already have.
+    pre_existing_errors = set(w.check_project(root)["errors"])
     try:
         save(root, "tasks/DECISIONS.json", decisions)
         task_save(root, task)
-        must_check(root)
+        introduced = [item for item in w.check_project(root)["errors"] if item not in pre_existing_errors]
+        if introduced:
+            raise ValueError("Budget extension introduced a new project error: " + "; ".join(introduced))
     except Exception:
         save(root, "tasks/DECISIONS.json", previous_decisions)
         task_save(root, previous_task)

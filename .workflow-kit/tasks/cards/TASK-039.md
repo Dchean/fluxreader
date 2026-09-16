@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性
 
-**状态**：verified
+**状态**：done
 
 **目标**：修复 REQ-004 与 REQ-008。(1) toast 位置：全屏播放器（playerExpanded，覆盖层 z-index 260）展开时迷你播放条已隐藏，但 body.has-player 仍把 toast 层抬高 96px，导致 toast 悬浮遮挡全屏播放器中下部；新增 has-player-expanded 标记（App 随 playerExpanded 切换），展开时 toast 回到右下贴底（24px），并确认 toast 层浮于播放器之上而低于二次确认弹窗。(2) 控件一致性：设置→同步的协议选择是全应用唯一的原生 <select>，改为统一组件 FluxDropdown；同时清理两处残留空 className。
 
