@@ -13,7 +13,7 @@
     "覆盖层：搜索、命令面板、右键菜单、灯箱、对话框",
     "空状态与错误提示（含 toast）以及演示模式/无服务提示"
   ],
-  "status": "verified",
+  "status": "done",
   "objective": "按 UI 契约收敛前端文案与控件一致性。文案：同一动作统一用词（标为已读/未读、查看原文、刷新、显示全文），省略号一律 …、冒号一律 ：，统一演示模式/无服务提示前缀，删除括号堆叠与解释性尾巴。控件：为所有可交互控件补可见的 focus-visible；布尔开关统一到同一语义（设置页用 Switch、AI 相关用原生 checkbox 的两套做法收敛）；图标按钮尺寸与内边距收敛到一组取值；同类主按钮样式统一。仅改字符串与静态视觉，不改变任何行为、布局结构与状态流转。",
   "non_goals": [
     "转场与动画改动（属 REQ-005，见 TASK-042）",
@@ -179,9 +179,11 @@
     "candidate_digest": "8da38e28771aa800b09fb61e361c3848e8d54b200edd59c1f688829cc9b685ac",
     "verification_run": "RUN-9fa3a8cad77b4cefb83b4a86d2335108",
     "review_run": "RUN-afc288dbee7b490b890a3a2e5bc08241",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-d1e76b1befd140789c9c441d9d0ab053-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-d1e76b1befd140789c9c441d9d0ab053"
+    ],
+    "merge_ref": "e1efdcecfe1a76258471cddbd2dac545c1e312a4"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-006-008.md",

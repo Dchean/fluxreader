@@ -15,5 +15,6 @@
 | [TASK-038](items/TASK-038.json) | 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2） | done |
 | [TASK-039](items/TASK-039.json) | REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性 | done |
 | [TASK-040](items/TASK-040.json) | 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20） | done |
+| [TASK-041](items/TASK-041.json) | 前端体验收尾：文案统一精简（REQ-006）+ 控件一致性（REQ-008） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

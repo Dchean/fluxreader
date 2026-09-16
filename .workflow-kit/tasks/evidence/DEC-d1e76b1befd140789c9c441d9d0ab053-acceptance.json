@@ -1,0 +1,14 @@
+{
+  "id": "DEC-d1e76b1befd140789c9c441d9d0ab053",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户既有授权（2026-09-15 起）：批准并commit、继续，解除时间与任务数量限制，按最合适路线跑完全部流程；DEC-batch4-polish-refactor-20260916 已确认 REQ-006/REQ-008 与 TASK-041 范围。独立审查两轮（首轮 FAIL 定位残留 ASCII 省略号，修复后重新过 verify 与独立审查 PASS）。",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-041"
+  ],
+  "recorded_at_utc": "2026-09-16T09:01:11.944083Z",
+  "candidates": {
+    "TASK-041": "8da38e28771aa800b09fb61e361c3848e8d54b200edd59c1f688829cc9b685ac"
+  }
+}
