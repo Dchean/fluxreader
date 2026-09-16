@@ -5,6 +5,7 @@ import { Icons, LayoutIcon } from './icons';
 import { FluxDropdown, Switch, SwitchInline, SettingCard, ModalOverlay, ConfirmDialog } from './primitives';
 import type { ContentLayoutType } from '../types';
 import { openExternal } from '../lib/external';
+import { useEnteringClass } from './useEnteringClass';
 
 /* ============================================================
    设置中心 —— 沉浸式双栏布局，左侧导航 8 页签
@@ -57,6 +58,10 @@ export function SettingsModal() {
   const switchSettingsTab = useAppStore((s) => s.switchSettingsTab);
   const showToast = useAppStore((s) => s.showToast);
 
+  /* 切换左侧页签时右侧内容区淡入一次（REQ-005） */
+  const paneRef = useRef<HTMLDivElement>(null);
+  useEnteringClass(paneRef, settingsTab, 'pane-entering');
+
   const meta = TAB_META.find((t) => t.id === settingsTab) ?? TAB_META[0];
 
   /* GitHub 等待授权期间锁定弹窗：遮罩点击/Esc 不关闭——切到网页输入代码时
@@ -104,7 +109,7 @@ export function SettingsModal() {
             </div>
           </div>
 
-          <div className="settings-content-pane">
+          <div className="settings-content-pane" ref={paneRef}>
             {settingsTab === 'general' && <GeneralTab />}
             {settingsTab === 'appearance' && <AppearanceTab />}
             {settingsTab === 'reading' && <ReadingTab />}

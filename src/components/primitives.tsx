@@ -27,6 +27,17 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
   const triggerRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
+  /* 入场过渡要「先挂载、再在下一帧置 open 类」：菜单此前挂载时就带着 open，
+     于是 CSS 里 .flux-dropdown-menu 的 from 态（opacity 0 / 上移 4px）永不渲染，
+     声明的过渡等于没写（REQ-005）。等首帧画完再补类名，过渡才会真的播出来。 */
+  useEffect(() => {
+    if (!open) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const raf = requestAnimationFrame(() => el.classList.add('open'));
+    return () => cancelAnimationFrame(raf);
+  }, [open]);
+
   const updatePosition = useCallback(() => {
     const el = triggerRef.current;
     if (!el) return;
@@ -37,10 +48,16 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
     /* 下方放不下且上方更宽敞（或按钮本身已在视口外）→ 向上弹 */
     const openUp = spaceBelow < estHeight && (spaceAbove >= estHeight || spaceAbove > spaceBelow);
     const left = Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8));
+    /* 向上弹出时换一个正确的 from 态方向（样式表 .flux-dropdown-menu.drop-up）。
+       用 classList 而不是 React className：菜单的 open 类是 rAF 直接加上去的，
+       若让 React 重写 className 会把 open 一并抹掉。
+       这里也不再写内联 transform——内联优先级高于样式表，会把 from 态
+       （translateY(-4px) / drop-up 的 translateY(4px)）盖掉，过渡就永远不播。 */
+    menuRef.current?.classList.toggle('drop-up', openUp);
     setMenuStyle(
       openUp
-        ? { position: 'fixed', left, width: rect.width, minWidth: rect.width, bottom: Math.max(8, window.innerHeight - rect.top + 4), top: 'auto', zIndex: 2000, transform: 'none' }
-        : { position: 'fixed', left, width: rect.width, minWidth: rect.width, top: rect.bottom + 4, bottom: 'auto', zIndex: 2000, transform: 'none' },
+        ? { position: 'fixed', left, width: rect.width, minWidth: rect.width, bottom: Math.max(8, window.innerHeight - rect.top + 4), top: 'auto', zIndex: 2000 }
+        : { position: 'fixed', left, width: rect.width, minWidth: rect.width, top: rect.bottom + 4, bottom: 'auto', zIndex: 2000 },
     );
   }, [options.length]);
 
@@ -81,7 +98,7 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
       </div>
       {open &&
         createPortal(
-          <div className="flux-dropdown-menu open" style={menuStyle} ref={menuRef}>
+          <div className="flux-dropdown-menu" style={menuStyle} ref={menuRef}>
             {options.map((opt) => (
               <div
                 key={opt.value}
@@ -252,6 +269,7 @@ export function ModalOverlay({ open, onClose, children, contentWidth }: ModalOve
       }}
     >
       <div
+        className="modal-card"
         onClick={(e) => e.stopPropagation()}
         style={
           contentWidth

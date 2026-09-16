@@ -13,6 +13,7 @@ import { formatRelativeTime, formatDuration } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
 import { proxyImageUrl } from '../lib/imageProxy';
 import type { ArticleEntry } from '../types';
+import { useEnteringClass } from './useEnteringClass';
 
 /* ============================================================
    Timeline —— 顶栏（标题/筛选/排序/全部已读）+ 五布局渲染器
@@ -57,6 +58,13 @@ export function Timeline() {
 
   /* ---------- 滚动出列表视口 → 标已读（markReadOnScrollOut） ---------- */
   const scrollRef = useRef<HTMLDivElement>(null);
+  /* 布局/视图/筛选/排序切换时列表淡入一次（REQ-005）。此前 .list-entering 在
+     CSS 里声明了却从未被应用，是死代码。 */
+  useEnteringClass(
+    scrollRef,
+    `${activeContentLayout}|${activeViewFilter}|${activeFeedFilter}|${timelineFilter}|${timelineSort}`,
+    'list-entering',
+  );
 
   /* 虚拟滚动：只渲染视口 + overscan 缓冲内的条目（约 30 条），滚动时复用 DOM，
      彻底消除「一次性渲染 500 张含正文卡片」的卡顿（成熟 RSS 客户端的共识做法）。 */

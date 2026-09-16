@@ -157,7 +157,7 @@ body {
   opacity: 0;
   pointer-events: none;
   transform: translateY(-4px);
-  transition: opacity 0.15s, transform 0.15s;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -891,7 +891,7 @@ body {
 /* 视图/布局/筛选切换时的一次性淡入过渡（160ms）：
    列表 DOM 整体替换不再"闪一�?，而是轻微上浮淡入 */
 .timeline-scroll-body.list-entering {
-  animation: timelineFadeIn 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: timelineFadeIn var(--transition-fast);
 }
 
 @keyframes timelineFadeIn {
@@ -3486,4 +3486,230 @@ a[href]:focus-visible,
   opacity: 0.45;
   cursor: not-allowed;
   filter: none;
+}
+
+/* ============================================================
+   REQ-005 交互动效补全（TASK-042）
+   本节只补「出现 / 消失 / 展开 / 切换」的过渡，不改布局、层级与配色。
+   时长与曲线一律取自既有词汇表：--transition-fast（0.15s）与
+   0.2s cubic-bezier(0.16, 1, 0.3, 1)（本文件 toast、分组区已在用）。
+   规则追加在文件末尾，作为对上方同名选择器的增量覆盖。
+   ============================================================ */
+
+/* ---------- 新增键帧：只有方向与幅度按场景，时长与曲线仍沿用词汇表 ---------- */
+@keyframes overlayFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes cardScaleIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- 弹窗卡片：随遮罩一起进场（遮罩自身的透明度过渡原本已有） ----------
+   .modal-card 由 ModalOverlay 的卡片容器使用（设置/搜索/关闭询问等所有弹窗共用）。
+   遮罩常驻（display:flex + opacity 0 + pointer-events:none），卡片因此能拿到真正的
+   from 态，这里的过渡才会真的播出来。 */
+.modal-overlay .modal-card {
+  opacity: 0;
+  transform: translateY(8px) scale(0.985);
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.modal-overlay.open .modal-card {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- 确认弹窗与灯箱图片：挂载时 open 已就位，过渡拿不到 from 态 ----------
+   这两者都在「打开」的同一帧才挂载（ConfirmDialog 常带 open 类挂载；灯箱图片只在
+   有 url 时渲染），所以只能用挂载即播的一次性入场动画，不能用 .open 过渡。 */
+.confirm-dialog {
+  animation: cardScaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.lightbox-img {
+  animation: cardScaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ---------- 右键菜单：挂载即播一次淡入（此前完全没有入场过渡） ---------- */
+.ctx-menu {
+  animation: timelineFadeIn var(--transition-fast);
+}
+
+/* ---------- 侧栏订阅树：展开时子列表挂载即播一次淡入 ----------
+   子列表是「折叠时不渲染」的按需结构（Sidebar 的 {!cat.collapsed && ...}），
+   没有常驻元素可挂 .open 过渡，所以用挂载即播的入场动画。 */
+.feed-sub-list {
+  animation: timelineFadeIn var(--transition-fast);
+}
+
+/* ---------- 下拉菜单：移除内联 transform 后，样式表 from 态才真正生效 ----------
+   菜单挂载时不再带 open（rAF 下一帧才补类名），因此 from 态可渲染。
+   向下弹出用样式表默认的 translateY(-4px)（自上而下落回原位）；向上弹出加
+   .drop-up 换成 translateY(4px)（自下而上落回原位），方向才不会相反。
+   .drop-up 由 primitives.tsx 的 updatePosition 用 classList 维护：open 类也是
+   直接加的，若走 React className，React 重写 className 时会把 open 一并抹掉。 */
+.flux-dropdown-menu.drop-up {
+  transform: translateY(4px);
+}
+
+.flux-dropdown-menu.drop-up.open {
+  transform: none;
+}
+
+/* ---------- 底部播放条：常驻挂载 + 双向可见性过渡（此前是 display 硬切） ----------
+   原先 !isActive 时组件 `return null`，元素立即卸载：只有挂载键帧能播出现方向，
+   消失是硬切。改为常驻挂载、只切 .active 类；display 显式列入 transition-property
+   并配合 allow-discrete，none↔flex 才会在过渡开始时翻转，两个方向都过渡。
+   @starting-style 提供出现方向的起始值（此前 display:none，取不到前值）。
+   时长与曲线沿用既有 0.2s cubic-bezier(0.16, 1, 0.3, 1)。 */
+.podcast-bottom-bar {
+  opacity: 0;
+  transform: translateY(100%);
+  transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.2s cubic-bezier(0.16, 1, 0.3, 1),
+              display 0.2s cubic-bezier(0.16, 1, 0.3, 1) allow-discrete;
+}
+
+.podcast-bottom-bar.active {
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- 全屏播放器：常驻挂载 + 双向可见性过渡（遮罩淡入 + 卡片轻微上浮） ----------
+   与播放条同理：display 进入 transition-property + allow-discrete，none↔flex
+   两个方向都过渡。隐藏时仍是 display:none（不可聚焦、读屏不可达），
+   Esc / 点遮罩 / 收起按钮的关闭路径不变。 */
+.player-full-overlay {
+  display: none;
+  opacity: 0;
+  transition: opacity var(--transition-fast),
+              display var(--transition-fast) allow-discrete;
+}
+
+.player-full-overlay.open {
+  display: flex;
+  opacity: 1;
+}
+
+.player-full-card {
+  opacity: 0;
+  transform: translateY(8px) scale(0.985);
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.player-full-overlay.open .player-full-card {
+  opacity: 1;
+  transform: none;
+}
+
+/* 出现方向的起始值：这三者此前是 display:none（未渲染），没有可取的「前值」 */
+@starting-style {
+  .podcast-bottom-bar.active {
+    opacity: 0;
+    transform: translateY(100%);
+  }
+  .player-full-overlay.open {
+    opacity: 0;
+  }
+  .player-full-overlay.open .player-full-card {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+}
+
+/* ---------- 设置页分区切换：内容淡入（类由 SettingsModal 切换分区时挂上） ---------- */
+.settings-content-pane.pane-entering {
+  animation: timelineFadeIn var(--transition-fast);
+}
+
+/* ---------- 阅读器：切换文章时内容淡入（类由 Reader 在文章变化时挂上） ---------- */
+.reader-active-view.reader-entering {
+  animation: timelineFadeIn var(--transition-fast);
+}
+
+/* ---------- 加载更多：指示器出现时淡入（旋转动画保持不变） ---------- */
+.load-more-spinner {
+  animation: loadMoreSpin 0.7s linear infinite, overlayFadeIn var(--transition-fast);
+}
+
+/* ---------- AI / 通知区块：display 硬切 → 可过渡的离散过渡 ----------
+   根因：这两块用 display:none → display:block 硬切，display 不可插值，
+   所以「声明了过渡也没用」。改用 transition-behavior: allow-discrete +
+   把 display 列入 transition-property + @starting-style：仍然由 display 参与
+   布局（隐藏时彻底不占位、不可聚焦、不被读屏读到），且出现与消失**双向**都会
+   过渡——allow-discrete 只对列在 transition-property 里的离散属性生效，漏掉
+   display 就会让消失方向退化成瞬时硬切（这是本轮修掉的缺陷）。
+   旧内核不支持这两个特性时自动退化为原来的瞬时切换，不影响正确性。 */
+.notif-ai-box {
+  display: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity var(--transition-fast), transform var(--transition-fast), display var(--transition-fast);
+  transition-behavior: allow-discrete;
+}
+
+.notif-ai-box.open {
+  display: block;
+  opacity: 1;
+  transform: none;
+}
+
+.ai-reader-box {
+  display: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity var(--transition-fast), transform var(--transition-fast), display var(--transition-fast);
+  transition-behavior: allow-discrete;
+}
+
+.ai-reader-box.open {
+  display: block;
+  opacity: 1;
+  transform: none;
+}
+
+@starting-style {
+  .notif-ai-box.open,
+  .ai-reader-box.open {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+/* ---------- prefers-reduced-motion（REQ-005） ----------
+   系统开启「减弱动态效果」时，本文件全部过渡与动画压缩到近瞬时。
+   用 0.01ms 而不是 none：transitionend / animationend 仍会触发，依赖这些
+   事件的代码不会因为过渡被移除而停在中间状态。
+   下面显式 animation:none 的是本任务新增的挂载即播入场动画；
+   播放条 / 全屏播放器 / 下拉菜单 / AI / 通知区块用的是 transition
+   （含 display 的 allow-discrete 离散过渡），由上面的全局
+   transition-duration: 0.01ms 一并压平，两个方向都不会有可感知动效。
+   例外：加载指示器是进度反馈而非装饰动效，保留旋转——停转会让用户误判
+   「卡死了」，这比动效本身更糟。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+
+  .timeline-scroll-body.list-entering,
+  .ctx-menu,
+  .feed-sub-list,
+  .settings-content-pane.pane-entering,
+  .reader-active-view.reader-entering,
+  .confirm-dialog,
+  .lightbox-img {
+    animation: none !important;
+  }
+
+  .load-more-spinner {
+    animation: loadMoreSpin 0.7s linear infinite !important;
+  }
 }

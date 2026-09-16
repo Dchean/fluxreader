@@ -187,15 +187,19 @@ export function PlayerBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [player.isActive]);
 
-  if (!player.isActive) return null;
+  /* 关闭播放条不再卸载整个组件（见下方 return 的常驻挂载）：原先这里
+     `if (!player.isActive) return null;` 会让元素立即卸载，消失方向只能硬切。 */
 
   const pct = player.durationSec > 0 ? Math.min(100, (player.positionSec / player.durationSec) * 100) : 0;
 
   return (
     <>
-      <div className="podcast-bottom-bar active">
-        {/* 单例 audio：随 isActive 挂载/卸载，src 变更即换剧集。续播 seek 在 onMeta 做。 */}
-        <audio ref={audioRef} src={player.audioUrl} preload="metadata" />
+      {/* 常驻挂载：可见性交给 .active + display 离散过渡（base.css REQ-005 段），
+          出现与消失两个方向都会过渡。原先 !isActive 时直接 return null，
+          元素被立即卸载，只有挂载键帧能播出现方向，消失仍是硬切。 */}
+      <div className={`podcast-bottom-bar ${player.isActive ? 'active' : ''}`}>
+        {/* 单例 audio：仍随 isActive 挂载/卸载（播放生命周期与原先一致），src 变更即换剧集。续播 seek 在 onMeta 做。 */}
+        {player.isActive && <audio ref={audioRef} src={player.audioUrl} preload="metadata" />}
 
         <div className="player-track-info">
           {player.cover && <img src={player.cover} className="player-cover" alt="cover" referrerPolicy="no-referrer" />}
@@ -254,27 +258,30 @@ export function PlayerBar() {
         </div>
       </div>
 
-      {/* Full Player 大浮层：复用同一 store 播放源（audio 在 Mini 常驻），仅提供更大视图与控制 */}
-      {playerExpanded && (
-        <PlayerFullOverlay
-          player={player}
-          onPlayPause={togglePlayerPlay}
-          onSeek={seekPlayer}
-          onSkip={skipPlayer}
-          onSpeed={cyclePlaybackSpeed}
-          onClose={() => togglePlayerExpanded()}
-          onStop={closePodcastBar}
-          formatClock={formatClock}
-        />
-      )}
+      {/* Full Player 大浮层：复用同一 store 播放源（audio 在 Mini 常驻），仅提供更大视图与控制。
+          常驻挂载，可见性由 open 类驱动（.player-full-overlay.open 的 display 离散过渡），
+          出现/消失双向都过渡；Esc（App.tsx 全局键）、点遮罩、收起按钮的关闭行为不变。 */}
+      <PlayerFullOverlay
+        open={playerExpanded && player.isActive}
+        player={player}
+        onPlayPause={togglePlayerPlay}
+        onSeek={seekPlayer}
+        onSkip={skipPlayer}
+        onSpeed={cyclePlaybackSpeed}
+        onClose={() => togglePlayerExpanded()}
+        onStop={closePodcastBar}
+        formatClock={formatClock}
+      />
     </>
   );
 }
 
 /** Full Player 覆盖层：封面/标题/大进度条/控制钮；无独立 audio（复用底部条的音源）。 */
 function PlayerFullOverlay({
-  player, onPlayPause, onSeek, onSkip, onSpeed, onClose, onStop, formatClock,
+  open, player, onPlayPause, onSeek, onSkip, onSpeed, onClose, onStop, formatClock,
 }: {
+  /** 可见性：true 时挂 .open（display:flex + opacity 1），false 时 display:none（不可聚焦、读屏不可达） */
+  open: boolean;
   player: ReturnType<typeof useAppStore.getState>['player'];
   onPlayPause: () => void;
   onSeek: (sec: number) => void;
@@ -292,7 +299,7 @@ function PlayerFullOverlay({
     onSeek(Math.max(0, Math.min(1, ratio)) * player.durationSec);
   };
   return (
-    <div className="player-full-overlay" role="dialog" aria-modal="true" onClick={onClose}>
+    <div className={`player-full-overlay ${open ? 'open' : ''}`} role="dialog" aria-modal="true" onClick={onClose}>
       <div className="player-full-card" onClick={(e) => e.stopPropagation()}>
         <div className="player-full-cover-wrap">
           {player.cover

@@ -5,6 +5,7 @@ import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
 import { proxyImagesInHtml } from '../lib/imageProxy';
+import { useEnteringClass } from './useEnteringClass';
 
 /* ============================================================
    Reader —— 右侧沉浸阅读器
@@ -38,6 +39,9 @@ export function Reader() {
   const art = useAppStore((s) =>
     s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) ?? null : null,
   );
+  /* 文章之间切换、以及原文↔译文视图切换时，正文淡入一次（REQ-005） */
+  const readerViewRef = useRef<HTMLDivElement>(null);
+  useEnteringClass(readerViewRef, `${art?.id ?? ''}|${isShowingTranslatedProse}`, 'reader-entering');
   /* 正文图片代理（防盗链）：对少数派等白名单式防盗链域名，走后端 fetch_image
      拿 bytes 转 data: URL 替换。代理目标 = 当前要显示的基础 HTML（全文或 RSS 原文），
      按 baseHtml 缓存，避免每次渲染重复抓图。 */
@@ -143,7 +147,7 @@ export function Reader() {
       )}
 
       {art && (
-        <div className="reader-active-view visible">
+        <div className="reader-active-view visible" ref={readerViewRef}>
           {/* 顶栏（不随正文滚动）：文章状态操作——标为已读/收藏/源网页/播放 */}
           <div className="reader-topbar">
             <button className="toggle-action-btn" onClick={toggleCurrentReadStatus} title={art.isRead ? '标为未读' : '标为已读'}>
