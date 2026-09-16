@@ -1,0 +1,10 @@
+{
+  "changed_files": [
+    "src/components/Reader.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/primitives.tsx",
+    "src/hooks/useEnteringClass.ts",
+    "src/styles/base.css"
+  ]
+}

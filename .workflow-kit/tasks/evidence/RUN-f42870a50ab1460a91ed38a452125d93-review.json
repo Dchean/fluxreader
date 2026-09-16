@@ -1,0 +1,99 @@
+{
+  "task_id": "TASK-042",
+  "candidate_digest": "c06b22d7b7a3e5cdbe7391f751d4af40f0ed78becb784ba007ad93344f41d4bc",
+  "verification_run": "RUN-9c9414c0e7f94834b7221abca7acd88d",
+  "verdict": "FAIL",
+  "summary": "I independently re-ran all three gates from D:\\fluxreader: lint = 0 warnings / 0 errors (24 files, 116 rules), build = pass (tsc -b + vite build, dist/index.html 0.54 kB, index CSS 58.34 kB), frontend regression = 26/26 pass. I also re-hashed all 16 files in RUN-9c9414c0e7f94834b7221abca7acd88d-candidate.json against the worktree: zero mismatches, so the reviewed tree is exactly the candidate. The core deliverables of REQ-005 are real and verifiable: .list-entering is no longer dead CSS - src/hooks/useEnteringClass.ts really does add it to the .timeline-scroll-body element (src/components/Timeline.tsx:167 carries ref={scrollRef}); the same hook wires reader-entering and pane-entering; the dropdown menu is now mounted without `open` and gets it from requestAnimationFrame in src/components/primitives.tsx:33-39; ModalOverlay's overlay is genuinely persistent (.modal-overlay is display:flex/opacity:0 and never unmounts, SettingsModal/SearchModal render it unconditionally) so .modal-overlay.open .modal-card can really transition; all durations/easings come from the existing vocabulary (--transition-fast, and the pre-existing 0.2s cubic-bezier(0.16,1,0.3,1) used at base.css:2215/2227/2964) with no newly invented values, no new dependency, no grid-template-columns transition on .app-root (the documented base.css:225-228 trade-off is respected), and the reduced-motion block covers every animation/transition this task added (global 0.01ms + explicit animation:none list, spinner exemption disclosed). REQ-008/TASK-041 styling is untouched, the temporarily-forced settingsOpen edit really was rolled back (src/store.ts is clean), and no layout/behaviour change was smuggled in. However three transition paths are still not what the report claims, and each is exactly the class of defect this task exists to remove: (a) ui_check #4 asks for the bottom player bar and fullscreen player 出现/消失 transition, but only the 出现 half exists - both elements are unmounted instantly on close, and this gap is not disclosed in the report's honesty section; (b) the dropdown's newly-'fixed' from state is only half fixed - updatePosition writes inline transform:'none', which outranks the stylesheet, so the declared transform:translateY(-4px) transition still cannot play; (c) the AI/notification blocks omit display from transition-property, so only the appear direction fades while hiding is still an instant cut, contradicting the base.css comment and the report. Each is minor on its own, but the rules require a defect to be reported rather than absorbed, so the verdict is FAIL with three minor findings rather than PASS.",
+  "findings": [
+    {
+      "severity": "minor",
+      "area": "播放过渡缺失消失方向（ui_checks #4）",
+      "detail": "ui_check #4 明确要求「底部播放条与全屏播放器的出现/消失过渡」，但只实现了出现方向：src/components/PlayerBar.tsx:191 `if (!player.isActive) return null;`，全屏播放器为 `{playerExpanded && <PlayerFullOverlay .../>}` 条件挂载（同文件 266-275 行附近）。关闭播放条（✕/closePodcastBar）或收起全屏播放器时元素被立即卸载，base.css:3554 `.podcast-bottom-bar.active { animation: barSlideIn ... }`、3559 `.player-full-overlay { animation: overlayFadeIn ... }`、3563 `.player-full-card { animation: cardScaleIn ... }` 只在挂载瞬间播一次，消失方向仍是瞬时硬切。契约「当前是 display 硬切」的原始问题只解决了一半。.workflow-kit/tasks/evidence/TASK-042-interaction-report.md 第 2 节表格第 4/5 行只描述「挂载时」触发场景，第 3 节「未覆盖/不适用」也未披露该缺口。"
+    },
+    {
+      "severity": "minor",
+      "area": "下拉菜单入场 from 态仍有死过渡（transform）",
+      "detail": "src/components/primitives.tsx:41-56 的 updatePosition 在向上/向下两个分支都写入内联 `transform: 'none'`（第 53、54 行）。内联样式优先级高于样式表，直接覆盖 base.css:159 `.flux-dropdown-menu { transform: translateY(-4px) }` 的 from 态，也覆盖 3554 行同族规则；菜单的 className 变化不再引起 transform 计算值变化，因此声明在 160 行 `transition: opacity var(--transition-fast), transform var(--transition-fast)` 里的 transform 过渡无法按预期播放（最坏情况完全不播，最好情况被随后落下的内联值截断），实际只有 opacity 淡入生效。报告第 2 行称 from 态「opacity 0 + 上移 4px」已经能渲染，属过度声明；这正是本任务要消灭的「声明了却不渲染」类型缺陷。"
+    },
+    {
+      "severity": "minor",
+      "area": "AI/通知区块隐藏方向仍是硬切",
+      "detail": "base.css:3588-3621 的 .notif-ai-box / .ai-reader-box 只把 opacity、transform 列入 transition-property（`transition: opacity var(--transition-fast), transform var(--transition-fast); transition-behavior: allow-discrete;`），display 未进入 transition-property，而 allow-discrete 只对处于过渡列表中的离散属性生效。因此 `display: block → none`（移除 .open）时元素立刻不可渲染，收起方向仍是一次瞬时硬切；@starting-style 只保证出现方向的淡入。base.css:3584 的注释「出现与消失会补一段淡入淡出」与报告第 2 节第 13 行对该块的描述与实现不符（另注：src/hooks/useEnteringClass.ts 未被 TASK-042.snapshot_paths 覆盖，候选摘要只封存了 16 个文件、不含 src/hooks，审查者只能直接读取未跟踪文件）。"
+    }
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "逐条核对 7 个 ui_checks：1 通过（useEnteringClass 真的把 .list-entering 挂到 .timeline-scroll-body，键=布局|视图|订阅|未读|排序，先摘类名 + 强制重排再挂上，动画可重放；CSS 时长改为既有 token）；2 部分通过（菜单确实改成先挂载、rAF 才加 open，primitives.tsx:33-39；但内联 transform:'none' 使 from 态的 4px 位移永远不渲染，见 finding 2）；3 部分通过（Reader 以 art.id|isShowingTranslatedProse 为键给 .reader-active-view 挂 reader-entering，文章间与原文↔译文切换有淡入；但渲染/源码、全文/RSS 原文这类视图切换未纳入键，且移出阅读器无过渡）；4 不通过（只有出现方向，消失方向直接卸载，契约明写「出现/消失」）；5 部分通过（侧栏 .feed-sub-list 为 {!cat.collapsed} 按需挂载、动画在展开瞬间播；AI/译文/通知块改用 allow-discrete+@starting-style 且隐藏语义保持 display:none；但隐藏方向仍硬切，且设置页没有可折叠分组——报告中已如实说明）；6 通过（.modal-card 真的有类名、.modal-overlay 常驻 display:flex+opacity:0 且 SettingsModal/SearchModal 无条件渲染 ModalOverlay，from 态可渲染；lightbox-img 条件挂载即播；settings-content-pane.pane-entering 由 store 页签驱动；load-more-spinner 叠加 overlayFadeIn 且保留旋转）；7 通过（见 failure_paths）。另核：时长/曲线全部来自既有词汇表，--transition-fast 与既有 0.2s cubic-bezier(0.16,1,0.3,1) 之外没有新造值，无新依赖，.app-root 未加 grid-template-columns 过渡（base.css:225-228 的记录被保留）。",
+      "evidence_files": [
+        ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+        ".workflow-kit/tasks/items/TASK-042.json",
+        "src/styles/base.css",
+        "src/styles/tokens.css",
+        "src/components/primitives.tsx",
+        "src/hooks/useEnteringClass.ts"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "独立重跑 npm run test:frontend 得 26/26 全绿（S-1..S-5、bootstrap/dataMode 全部通过），且 tools/frontend-regression.mjs 未被本次修改（git status 无该文件），测试没有被削弱。npm run lint 0 警告 0 错误（24 文件）、npm run build 通过（tsc -b + vite build，52 modules）。行为面无回归：改动只在渲染后补类名/加动画，未触及 store 与状态机；报告声称临时把 settingsOpen 初值置 true 后已回滚，核对 git status 确认 src/store.ts 未被修改。REQ-008/TASK-041 的静态控件外观未被触碰（diff 未含控件规则），新增 .modal-card 类在 base.css 中此前不存在同名规则，只是首次启用，打开态仍是 transform:none/opacity:1，静态外观不变。布局未变：.app-root 与 2col/3col 无过渡改动，也未新增任何 position/尺寸规则。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-9c9414c0e7f94834b7221abca7acd88d-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-9c9414c0e7f94834b7221abca7acd88d-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-9c9414c0e7f94834b7221abca7acd88d-build.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "reduced-motion 覆盖完整：base.css:3630 起的 @media (prefers-reduced-motion: reduce) 用通配规则把全部过渡/动画压到 0.01ms 并保留 transitionend/animationend，同时对本任务新增的 10 个动画显式 animation:none。逐项比对本次新增/修改的动效（list-entering、pane-entering、reader-entering、ctx-menu、feed-sub-list、podcast-bottom-bar.active、player-full-overlay、player-full-card、confirm-dialog、lightbox-img、load-more-spinner 的叠加 fade、notif-ai-box/ai-reader-box 与 modal-card 的 transition）无遗漏；仅有 .load-more-spinner 保留旋转，报告已显式声明理由，属可接受的显式例外（该旋转不是本次新增）。无 JS 依赖 transitionend/animationend（grep 全仓仅命中注释），所以把时长压到 0.01ms 不会留下停在中间态的元素。useEnteringClass 的清理函数移除监听与类名，key 变化时先摘类名再重挂，元素卸载时不会残留 list-entering/pane-entering。旧内核不支持 transition-behavior/@starting-style 时退化为原来的瞬时切换（display 仍由 .open 控制），不会出现可见性错误。",
+      "evidence_files": [
+        "src/hooks/useEnteringClass.ts",
+        "src/styles/base.css",
+        "src/components/Timeline.tsx"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "新增 31 行的单一职责 hook（ref + key + className），直接操作 DOM 避免切换时额外渲染，注释说明了「摘类名→强制重排→重挂」的原因；三个调用点（Timeline/Reader/SettingsModal）键的语义清晰。CSS 增量集中追加在 base.css 末尾并带小节说明，无新增依赖、无新的时长/曲线常量、无重复 @keyframes（overlayFadeIn/cardScaleIn/barSlideIn 在文件中各只定义一次，未覆盖既有同名键帧）。选择器全部有对应元素，无死选择器：ctx-menu、feed-sub-list、lightbox-img、confirm-dialog、modal-card、notif-ai-box、ai-reader-box、load-more-spinner、player-full-overlay/card、settings-content-pane.pane-entering、reader-active-view.reader-entering 均在源码中确认存在。可改进项（非本次缺陷）：候选摘要的 snapshot_paths 未包含 src/hooks，导致承载核心机制的 useEnteringClass.ts 不在 digest 覆盖范围内。",
+      "evidence_files": [
+        "src/components/primitives.tsx",
+        "src/components/Reader.tsx",
+        "src/components/SettingsModal.tsx",
+        "src/components/Sidebar.tsx",
+        "src/components/ContextMenu.tsx"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "遵守既有性能取舍：未对 .app-root / .content-grid 的 grid-template-columns 加过渡，切换布局改为列表内容淡入（.timeline-scroll-body.list-entering），避免逐帧整列 reflow。所有新增动效只作用于 opacity/transform（合成器友好），未动画 width/height/display 之外的布局属性；.podcast-bottom-bar.active 的 translateY(100%) 与 .player-full-card 的 scale 都是合成层操作。useEnteringClass 每次切换做一次 void el.offsetWidth 强制重排，仅发生在筛选/布局切换（低频交互）且只针对一个容器元素，代价可接受。notif-ai-box/ai-reader-box 使用 allow-discrete 保持 display 参与布局，隐藏时不占位，未引入常驻全屏图层或额外 DOM。模态卡片在关闭态带有 transform，但由于遮罩 opacity:0 且无 fixed 后代（全仓 position:fixed 仅 immersive-win-controls/podcast-bottom-bar/modal-overlay/toast-layer/player-full-overlay），不会产生额外的包含块或命中测试代价。",
+      "evidence_files": [
+        "src/styles/base.css",
+        "src/components/Timeline.tsx",
+        "src/components/PlayerBar.tsx"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+    "checked_states": [
+      "列表与视图切换：切换布局/筛选/订阅时列表内容淡入（含 .list-entering 死代码修复）",
+      "下拉菜单与右键菜单：打开时的入场过渡（先挂载、下一帧置 open）",
+      "阅读器：视图切换与文章之间的切换过渡",
+      "播放：底部播放条与全屏播放器的出现/消失过渡",
+      "折叠与展开：侧栏订阅树、设置页分组、通知/译文/AI 区块",
+      "覆盖层：弹窗卡片入场、灯箱图片、设置页分区切换、加载更多状态",
+      "无障碍：prefers-reduced-motion: reduce 下关闭或显著削弱上述全部过渡"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-042-01-main-view.png",
+      ".workflow-kit/tasks/evidence/TASK-042-02-settings.png",
+      ".workflow-kit/tasks/evidence/TASK-042-interaction-report.md"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "task_id": "TASK-042",
+  "run_id": "RUN-6f0e832a53404f5aba4395e9b5d4fd7c",
+  "status": "ready_for_verification",
+  "summary": "REQ-005 交互动效补全。CSS 侧（base.css 末尾 REQ-005 段）补齐列表/菜单/播放/覆盖层/折叠/加载更多/设置分区/阅读器等入场与切换过渡，并把两处 display 硬切（.notif-ai-box / .ai-reader-box）改为 transition-behavior: allow-discrete + @starting-style，隐藏语义仍是 display:none。JS 侧修掉三处「声明了却没生效」：.list-entering 从未被应用（现由 Timeline 按布局/视图/订阅/筛选/排序为键挂类）、.flux-dropdown-menu 挂载即带 open 导致 from 态永不渲染（现改为先挂载、下一帧 rAF 再补 open）、ModalOverlay 卡片容器缺 modal-card 类（现补上，使 .modal-overlay.open 的过渡真正生效）。新增 src/hooks/useEnteringClass.ts（ref + useLayoutEffect，切换时摘类名→强制重排→再挂上以重放动画，不走 state）。新增 prefers-reduced-motion 保护：全局压到 0.01ms，本任务新增入场动画显式 animation:none，仅保留加载指示器旋转。未新增依赖、未改布局/层级/配色与 REQ-008 控件外观。",
+  "changed_files": [
+    "src/styles/base.css",
+    "src/hooks/useEnteringClass.ts",
+    "src/components/Timeline.tsx",
+    "src/components/Reader.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/primitives.tsx"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

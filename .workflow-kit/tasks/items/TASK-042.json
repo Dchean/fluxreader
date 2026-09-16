@@ -1,0 +1,239 @@
+{
+  "schema_version": 1,
+  "id": "TASK-042",
+  "title": "交互动画打磨（REQ-005）：补全过渡与 prefers-reduced-motion",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+  "ui_checks": [
+    "列表与视图切换：切换布局/筛选/订阅时列表内容淡入（含 .list-entering 死代码修复）",
+    "下拉菜单与右键菜单：打开时的入场过渡（先挂载、下一帧置 open）",
+    "阅读器：视图切换与文章之间的切换过渡",
+    "播放：底部播放条与全屏播放器的出现/消失过渡",
+    "折叠与展开：侧栏订阅树、设置页分组、通知/译文/AI 区块",
+    "覆盖层：弹窗卡片入场、灯箱图片、设置页分区切换、加载更多状态",
+    "无障碍：prefers-reduced-motion: reduce 下关闭或显著削弱上述全部过渡"
+  ],
+  "status": "blocked",
+  "objective": "按 UI 契约（.workflow-kit/docs/UI-CONTRACT-REQ-005.md）打磨交互过渡：把已声明却从未被应用的 .list-entering 真正接到列表内容上；下拉/右键菜单改为先挂载、下一帧再置 open；阅读器视图与文章切换、播放条与全屏播放器、折叠展开区块、覆盖层与加载更多改用可过渡的可见性方案；为本次新增或修改的全部过渡补 prefers-reduced-motion 保护。只改过渡与时长曲线、复用既有 token 与曲线，不改布局结构、信息层级、配色与行为。",
+  "non_goals": [
+    "引入新依赖或动画库",
+    "布局结构、信息层级与配色主题调整",
+    "视差或纯装饰性动画",
+    "REQ-008 的静态控件外观（属已完成的 TASK-041）",
+    "后端、同步与数据逻辑"
+  ],
+  "requirement_refs": [
+    "REQ-005"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-16-task042.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "每个改动点都能在代码中定位到具体选择器与时长/曲线，且取值来自既有动效词汇表（--transition-fast、0.2s 同曲线）",
+    ".list-entering 真正被应用到元素上，不再是被声明却未使用的死代码",
+    "下拉与右键菜单入场为先挂载、下一帧置 open，而不是初始即带 open",
+    "以 display 切换的区块（AI/译文/通知等）改为可过渡的可见性方案，且不可见时仍不可聚焦、不被读屏读到",
+    "prefers-reduced-motion: reduce 覆盖本次新增或修改的全部过渡",
+    "不改行为与布局：前端状态机回归 26/26 全绿",
+    "lint 0/0、build 通过",
+    "UI 证据齐备：主视图与设置页截图 + 逐条「选择器 → 原状态 → 改后时长/曲线 → 触发场景」报告，并区分代码核对与实机观察"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-16（CI 门禁修复后）基线：lint 0/0（23 文件）、build 通过、前端状态机回归 26/26、cargo fmt --check 干净、cargo clippy -D warnings 零告警、cargo test 全绿、CI 选定 mock e2e 全绿；CI run 35085964805 两 job 全步成功。本任务只改过渡与可见性方案，不改变行为契约；前端回归不检查动画细节，动画正确性依靠代码定位与实机观察证据。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-16-task042.md"
+    },
+    "decision_ids": [
+      "DEC-batch4-polish-refactor-20260916"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "既有前端状态机回归 26 项（S-1..S-5）",
+        "reason": "动画改动不得改变交互行为与状态流转，回归必须保持全绿",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "lint 与 TypeScript/Vite 构建门禁",
+        "reason": "样式与组件改动仍需类型正确、可构建",
+        "gate_ids": [
+          "lint",
+          "build"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-042-input-0d749d16110e4cde80205230a2a9535a.json",
+    "digest": "35928e58e51aa93fb785d1cc9471fe1835482194a2390b951b44ec348898ad0f",
+    "source_revision": null,
+    "definition_digest": "9f2801451172a0c1ba22846ba82c2013fc2340012cf193f153aebaf7453be2b3"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-16T10:58:57.780748Z",
+    "deadline_at_utc": "2026-09-16T14:58:57.780748Z",
+    "repair_rounds_used": 1,
+    "extensions": [
+      {
+        "decision_id": "DEC-c22ab3708da24d5399b817d9180edf09",
+        "recorded_at_utc": "2026-09-16T15:25:07.968690Z",
+        "minutes": 30,
+        "repair_rounds": 1,
+        "previous_deadline_at_utc": "2026-09-16T14:58:57.780748Z",
+        "deadline_at_utc": "2026-09-16T15:55:07.968690Z"
+      }
+    ]
+  },
+  "batch_id": "BATCH-7cbc4d36369a4c4d8f5a7dcfeac9f898",
+  "run_ids": [
+    "RUN-6f0e832a53404f5aba4395e9b5d4fd7c",
+    "RUN-144b9715e60a4c09a2316f513c554b27",
+    "RUN-9c9414c0e7f94834b7221abca7acd88d",
+    "RUN-f42870a50ab1460a91ed38a452125d93",
+    "RUN-d96df0d47425428dba073a2de084409f"
+  ],
+  "blockers": [
+    "Worker changed_files does not match the observed project diff"
+  ],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-9c9414c0e7f94834b7221abca7acd88d-candidate.json",
+    "candidate_digest": "c06b22d7b7a3e5cdbe7391f751d4af40f0ed78becb784ba007ad93344f41d4bc",
+    "verification_run": "RUN-9c9414c0e7f94834b7221abca7acd88d",
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-16-task042.md",
+    "src/App.tsx",
+    "src/components",
+    "src/store.ts",
+    "src/styles",
+    "tools/frontend-regression.mjs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-16T10:58:57.841392Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-16T13:19:56.351821Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-16T13:21:21.344469Z",
+      "note": "[WinError 5] 拒绝访问。: 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-144b9715e60a4c09a2316f513c554b27.json.8942a561224446318b34c8423c297ac8.tmp' -> 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-144b9715e60a4c09a2316f513c554b27.json'",
+      "next_action": "先核对已有文件及原始日志，再处理 environment；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-16T13:43:29.932495Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-16T14:27:16.058095Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-16T14:29:02.298626Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-16T15:12:57.447289Z",
+      "note": "Worker changed_files does not match the observed project diff",
+      "next_action": "先核对已有文件及原始日志，再处理 protocol；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-16T15:25:08.644455Z",
+      "note": "依据新决定追加预算；原始时钟与失败记录保留",
+      "next_action": "先核对已有成果，再按原任务范围继续"
+    }
+  ],
+  "resume_phase": "repair",
+  "failure_kind": "protocol"
+}
