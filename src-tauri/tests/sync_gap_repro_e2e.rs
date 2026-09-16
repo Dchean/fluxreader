@@ -329,17 +329,18 @@ async fn offline_read_change_pushed_after_connect() {
     sync::push_states_now(&db, &http).await;
 
     // 修复期望：离线变更被补推到远端
-    let updates = server.status_updates.lock().unwrap();
-    assert!(
-        updates.iter().any(|(_eid, st)| *st == "read"),
-        "修复期望：离线已读变更在连接后被补推（收到 edit-tag read）"
-    );
+    {
+        let updates = server.status_updates.lock().unwrap();
+        assert!(
+            updates.iter().any(|(_eid, st)| *st == "read"),
+            "修复期望：离线已读变更在连接后被补推（收到 edit-tag read）"
+        );
+    }
     let remains: i64 = {
         let conn = db.lock().await;
         conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
             .unwrap()
     };
-    drop(updates);
     assert_eq!(remains, 0, "补推完成后队列应清空");
 }
 

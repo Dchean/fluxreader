@@ -370,7 +370,12 @@ mod tests {
     #[test]
     fn api_key_is_md5_of_username_colon_password() {
         // 与 `python3 -c "hashlib.md5(b'REDACTED_USER:REDACTED_PASSWORD').hexdigest()"` 一致
-        let c = FeverClient::new("https://sync.example.invalid", "REDACTED_USER", "REDACTED_PASSWORD", Client::new());
+        let c = FeverClient::new(
+            "https://sync.example.invalid",
+            "REDACTED_USER",
+            "REDACTED_PASSWORD",
+            Client::new(),
+        );
         assert_eq!(c.api_key, "6ac0be0ba0aa8e8a4972b225d7cea926");
     }
 

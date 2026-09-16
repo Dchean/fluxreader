@@ -327,6 +327,9 @@ pub async fn update_feed(
     Ok(())
 }
 
+/// 远端订阅编辑的推送目标：远端 id、新标题（None 表示不改标题）、目标分类名（None 表示未移动分类）。
+pub type FeedEditPush = (i64, Option<String>, Option<String>);
+
 /// 更新订阅并返回需推送远端的编辑目标（命令与测试共用的真实逻辑，A-2）。
 /// 返回 Some((remote_id, 新标题, 目标分类名))：该订阅已绑定远端且同步已配置。
 pub fn record_feed_edit(
@@ -337,7 +340,7 @@ pub fn record_feed_edit(
     layout: Option<&str>,
     auto_summary: Option<bool>,
     auto_translate: Option<bool>,
-) -> AppResult<Option<(i64, Option<String>, Option<String>)>> {
+) -> AppResult<Option<FeedEditPush>> {
     // 目标分类必须存在（防 UI 传错 id 把源挂飞）
     if let Some(fid) = folder_id {
         if !db::folder_exists(conn, fid)? {

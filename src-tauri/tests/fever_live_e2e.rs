@@ -13,7 +13,8 @@ fn test_creds() -> (String, String, String) {
     let endpoint = std::env::var("FLUXREADER_TEST_ENDPOINT")
         .unwrap_or_else(|_| "https://sync.example.invalid".to_string());
     let username = std::env::var("FLUXREADER_TEST_USER").unwrap_or_else(|_| "test".to_string());
-    let password = std::env::var("FLUXREADER_TEST_PASS").unwrap_or_else(|_| "REDACTED_PASSWORD".to_string());
+    let password =
+        std::env::var("FLUXREADER_TEST_PASS").unwrap_or_else(|_| "REDACTED_PASSWORD".to_string());
     (endpoint, username, password)
 }
 
