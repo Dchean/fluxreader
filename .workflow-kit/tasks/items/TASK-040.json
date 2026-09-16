@@ -187,7 +187,7 @@
     "owner_decision_ids": [
       "DEC-56b4a45bc1ae488f86f37df34c7e4e19"
     ],
-    "merge_ref": "40d005d (merge: workflow-kit governed defect fixes and refactor batch TASK-029..040 into main)"
+    "merge_ref": "d2473b8 (merge: workflow-kit governed defect fixes and refactor batch TASK-029..040; 2026-09-16 历史重写后的等价提交，原记录 40d005d)"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-004-008.md",
