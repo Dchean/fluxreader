@@ -21,7 +21,11 @@ export function useEnteringClass<T extends HTMLElement>(
     el.classList.remove(className);
     void el.offsetWidth;
     el.classList.add(className);
-    const clear = () => el.classList.remove(className);
+    const clear = (event: AnimationEvent) => {
+      // animationend 会冒泡：子孙元素的动画结束不该摘掉宿主自身的入场类。
+      if (event.target !== el) return;
+      el.classList.remove(className);
+    };
     el.addEventListener('animationend', clear);
     return () => {
       el.removeEventListener('animationend', clear);

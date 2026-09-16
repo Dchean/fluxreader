@@ -3671,9 +3671,60 @@ a[href]:focus-visible,
   transform: none;
 }
 
+/* ---------- 译文块（社交 / 通知）：同一根因，display 硬切 → 可过渡 ----------
+   ui_check #5 的「通知/译文/AI 区块」里，上一轮只改了 AI 摘要与通知容器，
+   这两个译文块仍是无过渡的瞬时硬切。写法与上面的 .notif-ai-box 一致。 */
+.social-translated-block {
+  display: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity var(--transition-fast), transform var(--transition-fast), display var(--transition-fast);
+  transition-behavior: allow-discrete;
+}
+
+.social-translated-block.show {
+  display: block;
+  opacity: 1;
+  transform: none;
+}
+
+.notif-translated-block {
+  display: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity var(--transition-fast), transform var(--transition-fast), display var(--transition-fast);
+  transition-behavior: allow-discrete;
+}
+
+.notif-translated-block.show {
+  display: block;
+  opacity: 1;
+  transform: none;
+}
+
+/* ---------- 设置页分类分组（ui_check #5「设置页分组」）----------
+   原先是「收起即卸载」，展开没有任何过渡；改为常驻 + display 离散过渡，
+   隐藏时仍为 display:none，不占位、不可聚焦、不被读屏读到。 */
+.group-mgr-body {
+  display: none;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity var(--transition-fast), transform var(--transition-fast), display var(--transition-fast);
+  transition-behavior: allow-discrete;
+}
+
+.group-mgr-body.open {
+  display: block;
+  opacity: 1;
+  transform: none;
+}
+
 @starting-style {
   .notif-ai-box.open,
-  .ai-reader-box.open {
+  .ai-reader-box.open,
+  .social-translated-block.show,
+  .notif-translated-block.show,
+  .group-mgr-body.open {
     opacity: 0;
     transform: translateY(-4px);
   }
@@ -3684,9 +3735,10 @@ a[href]:focus-visible,
    用 0.01ms 而不是 none：transitionend / animationend 仍会触发，依赖这些
    事件的代码不会因为过渡被移除而停在中间状态。
    下面显式 animation:none 的是本任务新增的挂载即播入场动画；
-   播放条 / 全屏播放器 / 下拉菜单 / AI / 通知区块用的是 transition
-   （含 display 的 allow-discrete 离散过渡），由上面的全局
-   transition-duration: 0.01ms 一并压平，两个方向都不会有可感知动效。
+   播放条 / 全屏播放器 / 下拉菜单 / AI / 通知区块 / 译文块 / 设置页
+   分类分组用的是 transition（含 display 的 allow-discrete 离散过渡），
+   由上面的全局 transition-duration: 0.01ms 一并压平，两个方向都不会有
+   可感知动效。
    例外：加载指示器是进度反馈而非装饰动效，保留旋转——停转会让用户误判
    「卡死了」，这比动效本身更糟。 */
 @media (prefers-reduced-motion: reduce) {

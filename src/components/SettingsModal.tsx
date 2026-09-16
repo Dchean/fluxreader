@@ -544,85 +544,83 @@ function FeedsTab() {
               </div>
             </div>
 
-            {!cat.settingsCollapsed && (
-              <div className="group-mgr-body">
-                {cat.feeds.length === 0 && (
-                  <div className="group-mgr-empty">该分类还没有订阅源</div>
-                )}
-                {cat.feeds.map((f) => {
-                  /* AI 开关只对使用 AI 的布局有意义（文章/通知/社交——翻译）；
-                     画廊/播客布局下隐藏，避免无效开关误导 */
-                  const effLayout = f.layout === 'inherit' ? cat.layout : (f.layout as ContentLayoutType);
-                  const noAi = LAYOUT_NO_AI.has(effLayout);
-                  return (
-                  <div className="group-mgr-child-row" key={f.id}>
-                    <div className="group-mgr-feed-info">
-                      {f.favicon ? (
-                        <img src={f.favicon} alt="" className="feed-favicon" referrerPolicy="no-referrer" />
-                      ) : (
-                        <span className="feed-favicon-fallback"><Icons.dot /></span>
-                      )}
-                      <div className="group-mgr-feed-text">
-                        <div className="group-mgr-feed-name">{f.name}</div>
-                        <div className="group-mgr-feed-url">{f.url}</div>
-                      </div>
-                    </div>
-                    <div className="group-mgr-feed-controls">
-                      <label
-                        className="mgr-checkbox-label"
-                        title="该源新文章自动生成 AI 摘要"
-                        style={noAi ? { display: 'none' } : undefined}
-                      >
-                        <SwitchInline
-                          compact
-                          checked={f.autoSummary}
-                          onChange={(v) => toggleFeedSummary(cat.id, f.id, v)}
-                        />
-                        摘要
-                      </label>
-                      <label
-                        className="mgr-checkbox-label"
-                        title="该源新文章自动翻译正文"
-                        style={noAi ? { display: 'none' } : undefined}
-                      >
-                        <SwitchInline
-                          compact
-                          checked={f.autoTranslate}
-                          onChange={(v) => toggleFeedTranslate(cat.id, f.id, v)}
-                        />
-                        翻译
-                      </label>
-                      <FluxDropdown
-                        width={96}
-                        value={f.layout}
-                        onChange={(v) => updateFeedLayout(cat.id, f.id, v)}
-                        options={[
-                          { value: 'inherit', label: '继承组' },
-                          ...LAYOUT_OPTIONS,
-                        ]}
-                      />
-                      <button
-                        className="toggle-action-btn icon-btn"
-                        title="编辑该订阅源（重命名/移动分类/布局/AI 开关）"
-                        onClick={() => openEditFeedModal(f.id)}
-                      >
-                        <Icons.edit />
-                      </button>
-                      <button
-                        className="toggle-action-btn btn-danger-text"
-
-                        title="删除该订阅源"
-                        onClick={() => setPending({ kind: 'feed', catId: cat.id, catName: cat.name, feedId: f.id, feedName: f.name })}
-                      >
-                        <Icons.trash />
-                        <span>删除</span>
-                      </button>
+            <div className={`group-mgr-body${cat.settingsCollapsed ? '' : ' open'}`}>
+              {cat.feeds.length === 0 && (
+                <div className="group-mgr-empty">该分类还没有订阅源</div>
+              )}
+              {cat.feeds.map((f) => {
+                /* AI 开关只对使用 AI 的布局有意义（文章/通知/社交——翻译）；
+                   画廊/播客布局下隐藏，避免无效开关误导 */
+                const effLayout = f.layout === 'inherit' ? cat.layout : (f.layout as ContentLayoutType);
+                const noAi = LAYOUT_NO_AI.has(effLayout);
+                return (
+                <div className="group-mgr-child-row" key={f.id}>
+                  <div className="group-mgr-feed-info">
+                    {f.favicon ? (
+                      <img src={f.favicon} alt="" className="feed-favicon" referrerPolicy="no-referrer" />
+                    ) : (
+                      <span className="feed-favicon-fallback"><Icons.dot /></span>
+                    )}
+                    <div className="group-mgr-feed-text">
+                      <div className="group-mgr-feed-name">{f.name}</div>
+                      <div className="group-mgr-feed-url">{f.url}</div>
                     </div>
                   </div>
-                  );
-                })}
-              </div>
-            )}
+                  <div className="group-mgr-feed-controls">
+                    <label
+                      className="mgr-checkbox-label"
+                      title="该源新文章自动生成 AI 摘要"
+                      style={noAi ? { display: 'none' } : undefined}
+                    >
+                      <SwitchInline
+                        compact
+                        checked={f.autoSummary}
+                        onChange={(v) => toggleFeedSummary(cat.id, f.id, v)}
+                      />
+                      摘要
+                    </label>
+                    <label
+                      className="mgr-checkbox-label"
+                      title="该源新文章自动翻译正文"
+                      style={noAi ? { display: 'none' } : undefined}
+                    >
+                      <SwitchInline
+                        compact
+                        checked={f.autoTranslate}
+                        onChange={(v) => toggleFeedTranslate(cat.id, f.id, v)}
+                      />
+                      翻译
+                    </label>
+                    <FluxDropdown
+                      width={96}
+                      value={f.layout}
+                      onChange={(v) => updateFeedLayout(cat.id, f.id, v)}
+                      options={[
+                        { value: 'inherit', label: '继承组' },
+                        ...LAYOUT_OPTIONS,
+                      ]}
+                    />
+                    <button
+                      className="toggle-action-btn icon-btn"
+                      title="编辑该订阅源（重命名/移动分类/布局/AI 开关）"
+                      onClick={() => openEditFeedModal(f.id)}
+                    >
+                      <Icons.edit />
+                    </button>
+                    <button
+                      className="toggle-action-btn btn-danger-text"
+
+                      title="删除该订阅源"
+                      onClick={() => setPending({ kind: 'feed', catId: cat.id, catName: cat.name, feedId: f.id, feedName: f.name })}
+                    >
+                      <Icons.trash />
+                      <span>删除</span>
+                    </button>
+                  </div>
+                </div>
+                );
+              })}
+            </div>
           </div>
         );
       })}
