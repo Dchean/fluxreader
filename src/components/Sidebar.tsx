@@ -68,9 +68,9 @@ export function Sidebar() {
   const isBusy = syncStatus === 'syncing' || backgroundSyncing;
   const syncLabel =
     syncStatus === 'syncing'
-      ? '正在同步...'
+      ? '刷新中…'
       : backgroundSyncing
-        ? '后台同步中...'
+        ? '刷新中…'
         : syncStatus === 'error'
           ? '同步失败'
           : syncConnected
@@ -91,7 +91,7 @@ export function Sidebar() {
         <div className="sidebar-search-pill" onClick={openSearch} role="button" tabIndex={0}
           onKeyDown={(e) => e.key === 'Enter' && openSearch()}>
           <Icons.search />
-          <span>全局搜索...</span>
+          <span>全局搜索…</span>
           <span className="kbd-tag">Ctrl K</span>
         </div>
 
@@ -180,7 +180,7 @@ export function Sidebar() {
                   <span>{cat.name}</span>
                 </div>
                 <div className="feed-folder-right">
-                  <span className="feed-count-badge" title="当前视图筛选下的条目数">{treeCounts.get(cat.id) ?? 0}</span>
+                  <span className="feed-count-badge" title="当前筛选下的条数">{treeCounts.get(cat.id) ?? 0}</span>
                   <button
                     className="feed-row-act-btn"
                     onClick={(e) => {
@@ -238,7 +238,7 @@ export function Sidebar() {
                         {f.fetchFailed && (
                           <span
                             className="feed-error-dot"
-                            title="最近一次刷新抓取失败（点击 ↻ 重试）"
+                            title="最近抓取失败，点击重试"
                           >
                             ⚠
                           </span>
@@ -267,7 +267,7 @@ export function Sidebar() {
                             <Icons.edit />
                           </button>
                         </span>
-                        <span className="feed-count-badge" title="当前视图筛选下的条目数">{treeCounts.get(f.id) ?? 0}</span>
+                        <span className="feed-count-badge" title="当前筛选下的条数">{treeCounts.get(f.id) ?? 0}</span>
                       </div>
                     </div>
                   ))}
@@ -288,7 +288,7 @@ export function Sidebar() {
           <button
             className={`sync-refresh-btn ${isBusy ? 'spinning' : ''}`}
             onClick={triggerManualSync}
-            title="手动同步"
+            title="刷新全部订阅源"
           >
             <Icons.refresh />
           </button>
@@ -299,7 +299,7 @@ export function Sidebar() {
           disabled={isBusy}
         >
           <Icons.refresh />
-          <span>{isBusy ? '刷新中…' : '刷新所有订阅源'}</span>
+          <span>{isBusy ? '刷新中…' : '刷新全部订阅源'}</span>
         </button>
         <button className="nav-tab-item" onClick={openSettings}>
           <span className="nav-icon"><Icons.settings /></span>

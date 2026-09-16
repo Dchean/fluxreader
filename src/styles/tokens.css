@@ -10,6 +10,14 @@
   --radius-lg: 12px;
   --shadow-elevation: 0 16px 40px rgba(0, 0, 0, 0.45);
   --transition-fast: 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+  /* 控件尺寸档位（REQ-008）：图标按钮命中区与开关各只保留两档，
+     新增控件必须复用其中一档，不再出现 18/20/22 与自定义宽度混用 */
+  --icon-btn-hit-sm: 20px;   /* 行内操作、订阅树折叠按钮 */
+  --icon-btn-hit-md: 22px;   /* 订阅行 / 工具栏图标按钮 */
+  --switch-w-md: 40px;       /* 常规开关：设置页卡片、对话框开关行 */
+  --switch-h-md: 22px;
+  --switch-w-sm: 32px;       /* 紧凑开关：分类管理这类定宽密集控制列 */
+  --switch-h-sm: 18px;
   /* 语义色（主题无关） */
   --star-color: #e2a90e;         /* 收藏星标：深浅模式均醒目 */
   --sync-ok: #2fae57;            /* 同步成功 */

@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-041",
+  "run_id": "RUN-690ead3974ce403b875d858f808cd2fc",
+  "status": "ready_for_verification",
+  "summary": "按 UI 契约收敛前端文案与控件一致性，只改字符串与静态样式，未改行为、布局结构与状态流转。(1) 文案（REQ-006）：统一动作词（全部已读/标为已读、查看原文、刷新、显示全文），省略号一律 …、冒号一律 ：，演示模式/无服务提示统一前缀，删除括号堆叠与解释性尾巴；涉及 store.ts 与 Reader/Sidebar/Timeline/SettingsModal/Overlays/ContextMenu 共 7 个文件 118 处映射（见交互报告逐条表）。(2) 布尔控件统一：新增 SwitchInline 变体（不渲染自身 label，供外层 label 包裹，避免 label 嵌套与点击双触发），替换 10 处原生 checkbox——对话框行 6 处（自动摘要/自动翻译/同步到后端/记住我的选择，常规档 40×22）与分类管理行 4 处（分类与订阅源的摘要/翻译，紧凑档 32×18，并把该定宽列由 44px 调整为 60px 以容纳开关）。(3) 图标按钮收敛：新增 --icon-btn-hit-sm/md 两档，icon-sub-btn/feed-row-act-btn/folder-chevron-btn 统一为 padding:0 + inline-flex 居中 + flex-shrink:0；折叠按钮 18×18 并入 sm 档 20×20；窗口按钮与圆形播放动作列为例外并写明理由。(4) 主按钮统一：btn-primary/btn-danger/btn-danger-text 由 .toggle-action-btn 限定改为不带前提的变体类（删除原重复声明），并补上此前的缺失禁用态（opacity .45 + not-allowed）。(5) 焦点可见（REQ-008）：新增 button/input/textarea/select/a[href]/[role=button]/[tabindex] 的 :focus-visible accent 焦点环，以及开关的滑块焦点环；选择器特异性高于文件中散落的 outline:none，故未改动那些声明；鼠标用户所见界面不变。验证：lint 0/0（23 文件）、build（tsc + vite）通过、前端回归 26/26 全绿；产物 dist/assets/index-C5bTmR8B.css 中确认含 8 处 focus-visible 与全部新增规则。UI 证据：实机（npm run tauri dev）截图 5 张（主视图/设置页/命令面板/添加订阅源对话框/焦点尝试）+ 交互报告 1 份，报告含 118 行「文件:行 → 原文 → 改后」映射与诚实声明（合成 Tab 未驱动 WebView2 焦点遍历，按钮/开关焦点环仅有代码级证据）。另在实机采集时发现应用数据目录为空（详见报告「实机发现」），与本任务改动无关，本次仅只读检查数据库。",
+  "changed_files": [
+    "src/components/ContextMenu.tsx",
+    "src/components/Overlays.tsx",
+    "src/components/Reader.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/Sidebar.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/primitives.tsx",
+    "src/store.ts",
+    "src/styles/base.css",
+    "src/styles/tokens.css"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

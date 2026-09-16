@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
 import { api, extractError } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
-import { FluxDropdown, Switch, SettingCard, ModalOverlay, ConfirmDialog } from './primitives';
+import { FluxDropdown, Switch, SwitchInline, SettingCard, ModalOverlay, ConfirmDialog } from './primitives';
 import type { ContentLayoutType } from '../types';
 import { openExternal } from '../lib/external';
 
@@ -181,7 +181,7 @@ function GeneralTab() {
           <span className="range-value-tag">{settings.refreshInterval} 分钟</span>
         </div>
       </SettingCard>
-      <SettingCard title="并发抓取数" desc="同时请求的订阅源数量。源多可调高；个别源站限流时调低（1 为逐个抓取）">
+      <SettingCard title="并发抓取数" desc="同时抓取的源数量。源多可调高，被限流时调低。">
         <div className="range-slider-wrap">
           <input
             type="range"
@@ -401,7 +401,7 @@ function FeedsTab() {
     e.target.value = ''; // 允许重复选同一文件
     if (!file) return;
     void file.text().then((content) => api.opmlImport(content)).then((r) => {
-      if (!r) { showToast('浏览器环境不支持导入'); return; }
+      if (!r) { showToast('演示模式不支持导入'); return; }
       showToast(`OPML 导入完成：新增 ${r.imported} 个源${r.skipped > 0 ? `，跳过 ${r.skipped} 个已存在` : ''}`);
       return reloadFromBackend();
     }).catch((err) => showToast(`OPML 导入失败：${err}`));
@@ -410,7 +410,7 @@ function FeedsTab() {
   /* OPML 导出：后端生成 → Blob 下载 */
   const handleOpmlExport = () => {
     void api.opmlExport().then((xml) => {
-      if (!xml) { showToast('浏览器环境不支持导出'); return; }
+      if (!xml) { showToast('演示模式不支持导出'); return; }
       const blob = new Blob([xml], { type: 'text/xml' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -491,11 +491,10 @@ function FeedsTab() {
                   title="分类内新文章自动生成 AI 摘要"
                   style={LAYOUT_NO_AI.has(cat.layout) ? { display: 'none' } : undefined}
                 >
-                  <input
-                    type="checkbox"
+                  <SwitchInline
+                    compact
                     checked={cat.autoSummary}
-                    onChange={(e) => toggleCatSummary(cat.id, e.target.checked)}
-                    style={{ accentColor: 'var(--accent)' }}
+                    onChange={(v) => toggleCatSummary(cat.id, v)}
                   />
                   摘要
                 </label>
@@ -504,11 +503,10 @@ function FeedsTab() {
                   title="分类内新文章自动翻译正文"
                   style={LAYOUT_NO_AI.has(cat.layout) ? { display: 'none' } : undefined}
                 >
-                  <input
-                    type="checkbox"
+                  <SwitchInline
+                    compact
                     checked={cat.autoTranslate}
-                    onChange={(e) => toggleCatTranslate(cat.id, e.target.checked)}
-                    style={{ accentColor: 'var(--accent)' }}
+                    onChange={(v) => toggleCatTranslate(cat.id, v)}
                   />
                   翻译
                 </label>
@@ -544,7 +542,7 @@ function FeedsTab() {
             {!cat.settingsCollapsed && (
               <div className="group-mgr-body">
                 {cat.feeds.length === 0 && (
-                  <div className="group-mgr-empty">该分类暂无订阅源，点击「添加源」创建</div>
+                  <div className="group-mgr-empty">该分类还没有订阅源</div>
                 )}
                 {cat.feeds.map((f) => {
                   /* AI 开关只对使用 AI 的布局有意义（文章/通知/社交——翻译）；
@@ -570,11 +568,10 @@ function FeedsTab() {
                         title="该源新文章自动生成 AI 摘要"
                         style={noAi ? { display: 'none' } : undefined}
                       >
-                        <input
-                          type="checkbox"
+                        <SwitchInline
+                          compact
                           checked={f.autoSummary}
-                          onChange={(e) => toggleFeedSummary(cat.id, f.id, e.target.checked)}
-                          style={{ accentColor: 'var(--accent)' }}
+                          onChange={(v) => toggleFeedSummary(cat.id, f.id, v)}
                         />
                         摘要
                       </label>
@@ -583,11 +580,10 @@ function FeedsTab() {
                         title="该源新文章自动翻译正文"
                         style={noAi ? { display: 'none' } : undefined}
                       >
-                        <input
-                          type="checkbox"
+                        <SwitchInline
+                          compact
                           checked={f.autoTranslate}
-                          onChange={(e) => toggleFeedTranslate(cat.id, f.id, e.target.checked)}
-                          style={{ accentColor: 'var(--accent)' }}
+                          onChange={(v) => toggleFeedTranslate(cat.id, f.id, v)}
                         />
                         翻译
                       </label>
@@ -713,7 +709,7 @@ function AiTab() {
     setTesting(true);
     try {
       const list = await api.aiListModels(cfg.baseUrl.trim(), cfg.apiKey.trim());
-      if (!list) { showToast('浏览器环境无法测试'); return; }
+      if (!list) { showToast('演示模式无法测试'); return; }
       setModels(list);
       await api.saveAiConfig(JSON.stringify(cfg));
       showToast(`连通成功：${list.length} 个可用模型`);
@@ -764,7 +760,7 @@ function AiTab() {
         <input
           type="password"
           className="setting-input"
-          placeholder="sk-..."
+          placeholder="sk-…"
           value={cfg.apiKey}
           onChange={(e) => setCfg((c) => ({ ...c, apiKey: e.target.value }))}
         />
@@ -938,7 +934,7 @@ function SyncTab() {
    * 幂等：已绑定的跳过、服务端已有同 URL（409）回查绑定不报错 */
   const doSyncLocal = async () => {
     if (dataMode !== 'tauri') {
-      showToast('浏览器演示模式无同步能力');
+      showToast('演示模式不支持同步');
       return;
     }
     setSyncingLocal(true);
@@ -994,7 +990,7 @@ function SyncTab() {
       </SettingCard>
       <SettingCard
         title="同步协议"
-        desc="Google Reader 与 Fever 共用 Miniflux「集成」凭据。切协议不丢数据（remote id 同源）。"
+        desc="两种协议共用 Miniflux「集成」凭据，切换不丢数据。"
       >
         {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
             深浅主题外观与展开行为都与 FluxDropdown 不一致 */}
@@ -1065,9 +1061,8 @@ function SyncTab() {
         )}
       </div>
       <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        「测试连接」只验证连通性（秒级）；「保存并同步」保存后立即在后台拉取订阅与文章状态——
-        期间可关闭设置继续阅读。已读/收藏等状态变更会即时推送到服务端（约 1 秒内）。
-        断开连接会移除服务端拉取的订阅与文章（本地直连添加的保留）。
+        「测试连接」只验证连通性（秒级）；「保存并同步」会立即在后台拉取订阅与文章状态。
+        已读/收藏等变更约 1 秒内推送到服务端；断开连接会移除服务端拉取的订阅与文章。
       </div>
 
       <div className="settings-group-title" style={{ marginTop: 20 }}>自动同步</div>
@@ -1320,7 +1315,7 @@ function ConfigSyncSection() {
           desc="跳转浏览器完成 GitHub 授权，登录后配置同步到你的私有 Gist"
         >
           <button className="toggle-action-btn btn-primary" disabled={ghLoggingIn} onClick={() => void doGhLogin()}>
-            {ghLoggingIn ? '发起中...' : '登录 GitHub'}
+            {ghLoggingIn ? '发起中…' : '登录 GitHub'}
           </button>
         </SettingCard>
       )}
@@ -1350,7 +1345,7 @@ function ConfigSyncSection() {
           <input
             type="password"
             className="setting-input"
-            placeholder="ghp_..."
+            placeholder="ghp_…"
             value={token}
             onChange={(e) => setToken(e.target.value)}
           />
@@ -1389,7 +1384,7 @@ function ConfigSyncSection() {
           保存凭据
         </button>
         <button className="toggle-action-btn btn-primary" disabled={busy || !status?.configured} onClick={() => void doUpload()}>
-          {busy ? '处理中...' : '上传配置'}
+          {busy ? '处理中…' : '上传配置'}
         </button>
         <button className="toggle-action-btn" disabled={busy || !status?.configured} onClick={() => void doDownload()}>
           下载并应用

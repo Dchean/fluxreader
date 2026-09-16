@@ -2196,8 +2196,8 @@ body {
 .switch-control {
   position: relative;
   display: inline-block;
-  width: 40px;
-  height: 22px;
+  width: var(--switch-w-md);
+  height: var(--switch-h-md);
   flex-shrink: 0;
 }
 
@@ -2219,8 +2219,8 @@ body {
 .switch-slider:before {
   position: absolute;
   content: "";
-  height: 16px;
-  width: 16px;
+  height: calc(var(--switch-h-md) - 6px);
+  width: calc(var(--switch-h-md) - 6px);
   left: 3px;
   bottom: 3px;
   background-color: white;
@@ -2233,7 +2233,7 @@ body {
 }
 
 .switch-control input:checked + .switch-slider:before {
-  transform: translateX(18px);
+  transform: translateX(calc(var(--switch-w-md) - var(--switch-h-md)));
 }
 
 .range-slider-wrap {
@@ -2449,7 +2449,8 @@ body {
   cursor: pointer;
   color: var(--text-secondary);
   /* 定宽列：分类行与源行的摘�?翻译复选框同宽，右对齐后垂直成�?*/
-  flex: 0 0 44px;
+  flex: 0 0 60px;
+  /* 60px = 紧凑开关 32 + 间距 4 + 两个汉字（分类行与源行文字等宽，列宽恒定） */
 }
 
 .group-mgr-body {
@@ -2566,36 +2567,8 @@ body {
   flex: 0 0 auto;
 }
 
-/* ---------- 主操作按钮（�?background:var(--accent)"内联样式类化�?---------- */
-.toggle-action-btn.btn-primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #ffffff;
-}
-
-.toggle-action-btn.btn-primary:hover {
-  background: var(--accent-light);
-  border-color: var(--accent-light);
-}
-
-.toggle-action-btn.btn-danger-text {
-  color: var(--danger);
-}
-
-.toggle-action-btn.btn-danger-text:hover {
-  border-color: var(--danger);
-}
-
-/* 实心 danger 按钮（确认弹窗的确认动作�?*/
-.toggle-action-btn.btn-danger {
-  background: var(--danger);
-  border-color: var(--danger);
-  color: #ffffff;
-}
-
-.toggle-action-btn.btn-danger:hover {
-  filter: brightness(1.12);
-}
+/* 主操作 / 危险操作按钮变体（btn-primary、btn-danger、btn-danger-text）的样式
+   统一在文件末尾「控件一致性收尾（REQ-008）」一节定义，不带 .toggle-action-btn 前提。 */
 
 /* ---------- 二次确认弹窗 ----------
    层级最高：盖过设置弹窗�?50）与下拉菜单�?000�?*/
@@ -3389,4 +3362,128 @@ body.has-player-expanded .toast-layer {
 }
 .bootstrap-error .bootstrap-error-retry:hover {
   opacity: 0.8;
+}
+
+/* ============================================================
+   控件一致性收尾（REQ-008）
+   1) 焦点可见性：键盘导航才出现的 accent 焦点环
+   2) 图标按钮命中区收敛到两档
+   3) 布尔开关紧凑档（同一语义，按密度取尺寸）
+   4) 主按钮 / 危险按钮变体统一（含禁用态）
+   ============================================================ */
+
+/* ---------- 1. 焦点可见性 ----------
+   特异性说明：`input:focus-visible` 这类选择器含伪类，特异性 (0,1,1)，
+   高于散落在本文件各处的 `.setting-input { outline: none }` 一类声明
+   (0,1,0)，所以本节能直接覆盖那些 outline 归零，无需改动原声明。
+   鼠标点击不会匹配 :focus-visible，指针用户看到的界面与改动前完全一致。 */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+a[href]:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 开关的 input 不可见（opacity:0 且 0×0），焦点环画在滑块上 */
+.switch-control input:focus-visible + .switch-slider {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---------- 2. 图标按钮命中区收敛 ----------
+   纯图标按钮只保留两档命中区（--icon-btn-hit-sm / -md），
+   内边距恒为 0、内容由 flex 居中；两组按钮由此共享同一盒模型。
+   刻意不并入本档位的例外：
+   - .win-btn 是窗口标题栏按钮，尺寸随 OS 标题栏惯例（32×26）
+   - .podcast-play-circle / .player-full-play 是圆形播放动作，不是图标按钮 */
+.icon-sub-btn,
+.feed-row-act-btn,
+.folder-chevron-btn {
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.icon-sub-btn {
+  width: var(--icon-btn-hit-md);
+  height: var(--icon-btn-hit-md);
+}
+
+/* 原为 18×18：并入 sm 档，与订阅行操作按钮同一命中区 */
+.folder-chevron-btn {
+  width: var(--icon-btn-hit-sm);
+  height: var(--icon-btn-hit-sm);
+}
+
+.feed-row-act-btn {
+  width: var(--icon-btn-hit-sm);
+  height: var(--icon-btn-hit-sm);
+}
+
+/* ---------- 3. 布尔开关：紧凑档 ----------
+   对话框开关行空间充裕，用常规档（40×22）；
+   设置页分类管理是定宽密集控制列，用紧凑档（32×18）维持列宽与行高。
+   两档共用同一 DOM 结构、同一滑块语言，只是尺寸档位不同。 */
+.switch-control.compact {
+  width: var(--switch-w-sm);
+  height: var(--switch-h-sm);
+}
+
+.switch-control.compact .switch-slider:before {
+  width: calc(var(--switch-h-sm) - 6px);
+  height: calc(var(--switch-h-sm) - 6px);
+}
+
+.switch-control.compact input:checked + .switch-slider:before {
+  transform: translateX(calc(var(--switch-w-sm) - var(--switch-h-sm)));
+}
+
+/* ---------- 4. 主按钮 / 危险按钮变体统一 ----------
+   原先只对 .toggle-action-btn 组合生效；这里改为不带前提的变体类，
+   任何元素加上 btn-primary / btn-danger / btn-danger-text 都得到同一套
+   处理。本节位于文件末尾，同特异性下按源码顺序覆盖 .toggle-action-btn
+   的底色、边框与悬停态。 */
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-light);
+  border-color: var(--accent-light);
+}
+
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #ffffff;
+}
+
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(1.12);
+}
+
+.btn-danger-text {
+  color: var(--danger);
+}
+
+.btn-danger-text:hover:not(:disabled) {
+  border-color: var(--danger);
+}
+
+/* 禁用态：此前实心主按钮禁用后与可用状态外观完全相同，看不出不可点 */
+.toggle-action-btn:disabled,
+.btn-primary:disabled,
+.btn-danger:disabled,
+.btn-danger-text:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: none;
 }

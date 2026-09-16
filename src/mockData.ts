@@ -87,7 +87,7 @@ export function createInitialEntries(): ArticleEntry[] {
     {
       id: 'art-1', feedId: 'f-openai',
       title: 'DeepSeek-V3 架构解析与多头潜在注意力机制探讨',
-      snippet: '现代大语言模型推理阶段的核心瓶颈往往不在算力，而在于高并发与长上下文下的内存带宽限制。本文深度探讨 MLA 机制如何减少 KV 缓存显存占用...',
+      snippet: '现代大语言模型推理阶段的核心瓶颈往往不在算力，而在于高并发与长上下文下的内存带宽限制。本文深度探讨 MLA 机制如何减少 KV 缓存显存占用…',
       publishedAt: NOW - 2 * H,
       source: 'direct', isRead: false, isStarred: false, tags: ['人工智能'],
       author: 'Yann LeCun',
@@ -100,7 +100,7 @@ export function createInitialEntries(): ArticleEntry[] {
     {
       id: 'art-2', feedId: 'f-rust',
       title: 'Rust 2024 Edition 核心特性预览与内存安全演进',
-      snippet: 'Rust 2024 版本带来了全新的 RPITIT 语法支持、异步闭包以及更严格的生命周期推导规则，进一步巩固系统级软件的高性能底座...',
+      snippet: 'Rust 2024 版本带来了全新的 RPITIT 语法支持、异步闭包以及更严格的生命周期推导规则，进一步巩固系统级软件的高性能底座…',
       publishedAt: NOW - 5 * H,
       source: 'direct', isRead: true, isStarred: true, tags: ['系统开发'],
       author: 'Niko Matsakis',
@@ -112,7 +112,7 @@ export function createInitialEntries(): ArticleEntry[] {
     {
       id: 'art-3', feedId: 'f-ars',
       title: 'Windows 11 Mica 材质与 Fluent 2 在桌面应用中的渲染优化实践',
-      snippet: '如何在使用 Tauri 2 与 Rust 桌面封装时，实现接近系统原生的亚克力半透明与 Mica 材质性能优化...',
+      snippet: '如何在使用 Tauri 2 与 Rust 桌面封装时，实现接近系统原生的亚克力半透明与 Mica 材质性能优化…',
       publishedAt: NOW - 26 * H,
       source: 'direct', isRead: false, isStarred: false, tags: ['桌面开发'],
       author: 'Andrew Cunningham',

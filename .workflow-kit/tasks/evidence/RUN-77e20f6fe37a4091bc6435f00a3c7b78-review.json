@@ -1,0 +1,129 @@
+{
+  "task_id": "TASK-041",
+  "candidate_digest": "551d943313cee099f716bb329ef81ae697743e4001e017b04f246add0d4a2512",
+  "verification_run": "RUN-e219f76f7b034958b9f5c6701f2749ce",
+  "verdict": "FAIL",
+  "summary": "Byte-identity passed: sha256sum of all 10 changed files on disk matches the candidate manifest exactly (store.ts, Reader/Sidebar/Timeline/SettingsModal/Overlays/ContextMenu/primitives.tsx, base.css, tokens.css), so the reviewed artifact is the verified one. Scope is confined: git status/diff shows modified files only among those 10 under src/**, plus workflow metadata under .workflow-kit/tasks/** maintained by the tooling; tools/frontend-regression.mjs is untouched and App.tsx/icons.tsx are snapshot roots, not modified. Gates re-read as text (not exit codes): lint 'Found 0 warnings and 0 errors'; build 'tsc -b && vite build' succeeded (51 modules, built in 115ms, dist/assets/index-C5bTmR8B.css 56.17 kB); frontend regression printed all 26 assertions plus '26/26 通过'. The CSS specificity claim holds: the appended rules button/input/textarea/select/a[href]/[role=button]/[tabindex]:focus-visible are (0,1,1) versus the pre-existing .range-input/.setting-input/.setting-prompt-textarea/.search-modal-input 'outline: none' at (0,1,0); (0,1,1) > (0,1,0), no !important and no higher-specificity outline reset anywhere else (only base.css declares outline and index.css imports base.css last), so the override is genuine and order-independent. The .setting-prompt-textarea:focus rule is (0,2,0) but sets border-color only, so it does not conflict. Switch unification is behavior-preserving: all 10 checkbox->SwitchInline conversions keep the same controlled `checked` source and route onChange through the same handler with an equivalent boolean ((v)=>handler(id,v) vs (e)=>handler(id,e.target.checked)); SwitchInline renders <span class=\"switch-control\"> inside the outer <label>, which is valid (no nested label) and yields exactly one toggle because the label forwards activation to its single labeled control once and does not re-forward when the target is the control. The two-tier switch (40x22 dialog / 32x18 compact in the dense category column) is a defensible reading of item 6 vs item 7: the frozen contract explicitly sanctions control '尺寸' and '布尔控件外观' changes, a wider switch cannot fit the old ~13px checkbox box, and the flex 0 0 44px -> 60px adjustment is a local, declared metric change that preserves the column's fixed-width property, row structure and alignment rather than restructuring layout. Icon convergence is real but minimal: .icon-sub-btn 22->22, .feed-row-act-btn 20->20, only .folder-chevron-btn 18->20, and the display:flex->inline-flex is a no-op for a flex item. Exclamation check passes (no ！ and no user-facing ASCII !; the only ! hits are code negations). However the headline punctuation acceptance item is genuinely UNMET: 6 occurrences of ASCII three dots remain in user-facing strings, one of which is rendered in the submitted evidence screenshot TASK-041-01-main.png ('全局搜索...'), so the ellipsis sweep that fixed store.ts:1195/1449, SettingsModal.tsx:1318/1387 and Timeline.tsx:611 was simply left incomplete. The interaction report is otherwise honest about its synthetic-Tab focus-ring failure (TASK-041-06 is byte-visually identical to TASK-041-05), the missing compact-switch screenshot and the empty data directory, and its build/CSS and U+FFFD claims verify (dist CSS 'focus-visible' x8; base.css 115 U+FFFD vs HEAD 118), but it does not disclose the leftover ASCII ellipses, including the one visible in its own screenshot. Verdict is FAIL on the unmet acceptance item 2 / frozen contract line '不得再出现 ...'.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "blocking",
+      "area": "requirements",
+      "acceptance_item": "省略号一律 …、冒号一律 ：，不再出现 ... 与 ASCII 冒号混用",
+      "contract_clause": "标点统一：省略号一律 …（U+2026），冒号一律 ：；不得再出现 ... 或 ASCII :",
+      "description": "The ellipsis sweep is incomplete: 6 ASCII '...' occurrences remain in user-facing strings in the frozen candidate. (1) src/components/Sidebar.tsx:94 renders <span>全局搜索...</span> in the primary sidebar search entry point and is visibly present in the submitted evidence image TASK-041-01-main.png. (2) src/components/Reader.tsx:258 renders '正在根据提示词生成摘要...' in the AI summary block, while the analogous Timeline.tsx:611 hint was converted to '…' - inconsistent treatment of the same hint class. (3) src/components/SettingsModal.tsx:763 and :1348 use placeholder=\"sk-...\" / \"ghp_...\". (4) src/mockData.ts:90,103,115 end demo article snippets with '...' that render as article text in demo mode. The sweep did correctly fix '...' at store.ts:1195, store.ts:1449, SettingsModal.tsx:1318, SettingsModal.tsx:1387 and Timeline.tsx:611, which shows the remaining six are omissions rather than an intentional exception (no declared exclusion exists for them in the report or CSS comments).",
+      "evidence": [
+        "src/components/Sidebar.tsx:94",
+        "src/components/Reader.tsx:258",
+        "src/components/SettingsModal.tsx:763",
+        "src/components/SettingsModal.tsx:1348",
+        "src/mockData.ts:90",
+        "src/mockData.ts:103",
+        "src/mockData.ts:115",
+        ".workflow-kit/tasks/evidence/TASK-041-01-main.png"
+      ]
+    },
+    {
+      "id": "F2",
+      "severity": "minor",
+      "area": "maintainability",
+      "acceptance_item": "去除括号堆叠与解释性尾巴",
+      "description": "Timeline.tsx:611 removed the ⏳ emoji but left a stray leading space in the JSX text node: byte layout is '>' 0x20 '正在生成摘要…' '<', so the rendered hint carries an unintended leading space, while the analogous Reader.tsx:258 hint still keeps '⏳'. The two same-class 'generating summary' hints are therefore still treated inconsistently.",
+      "evidence": [
+        "src/components/Timeline.tsx:611",
+        "src/components/Reader.tsx:258"
+      ]
+    },
+    {
+      "id": "F3",
+      "severity": "minor",
+      "area": "requirements",
+      "acceptance_item": "UI 证据齐备：主视图/设置页/覆盖层截图 + 逐条『文件:行 → 原文 → 改后』核对报告",
+      "description": "TASK-041-interaction-report.md is honest about its coverage gaps (synthetic Tab did not produce focus rings; compact switch has no screenshot; empty data directory), and its verifiable numeric claims check out (dist CSS contains 8 focus-visible occurrences; base.css has 115 U+FFFD vs 118 at HEAD). However the report's per-item mapping and its '未覆盖 / 受限项' section do not disclose the remaining ASCII ellipses (F1), even though one of them ('全局搜索...') is plainly rendered in its own TASK-041-01-main.png. The evidence set therefore proves the deliverable less completely than the report implies for the copy-unification criterion.",
+      "evidence": [
+        ".workflow-kit/tasks/evidence/TASK-041-interaction-report.md",
+        ".workflow-kit/tasks/evidence/TASK-041-01-main.png"
+      ]
+    }
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "Mechanism checks pass but one headline acceptance item does not; see findings F1/F3 for the blocking gap. Verified as met: focus indicators exist for buttons/inputs/textareas/selects/links/role=button/tabindex and for the visually hidden switch input via '.switch-control input:focus-visible + .switch-slider'; the specificity claim holds by computation ((0,1,1) > (0,1,0)) and base.css is imported last, so the pre-existing .range-input/.setting-input/.setting-prompt-textarea/.search-modal-input 'outline: none' are genuinely overridden; empirically the command-palette input shows an accent ring in TASK-041-03-command-palette.png after keyboard Ctrl+K, and the hidden-switch case is at least code-level correct. Boolean controls are unified to one component: only primitives.tsx:131 contains 'type=\"checkbox\"' (grep confirmed zero outside primitives), the 10 conversions preserve controlled state and handler semantics, SwitchInline emits a <span> so no invalid nested label exists, and the outer label forwards a single activation (no double toggle). Icon buttons converge to 20/22 tokens with padding:0 and inline-flex; only .folder-chevron-btn actually changes size (18->20). Main-button variants are unified: the removed '.toggle-action-btn.btn-primary' block is superseded by end-of-file bare .btn-primary/.btn-danger/.btn-danger-text, and every usage site still pairs the class with .toggle-action-btn, so no element's appearance regresses; the new :disabled opacity is an added static state. Copy: exclamation check clean; demo/no-service toasts uniformly use the '演示模式' prefix. Not met: acceptance item 2 (ellipsis uniformity) - 6 ASCII '...' remain, one visible in the evidence screenshot. Judged defensible (not a defect): the two-tier switch and the 44px->60px fixed column, because the frozen contract explicitly permits control size/appearance changes and the adjustment preserves the column's fixed-width property, row structure and alignment; see summary for the full reasoning.",
+      "evidence_files": [
+        "src/components/primitives.tsx",
+        "src/components/SettingsModal.tsx",
+        "src/components/Overlays.tsx",
+        "src/components/Sidebar.tsx",
+        ".workflow-kit/docs/UI-CONTRACT-REQ-006-008.md",
+        ".workflow-kit/tasks/evidence/TASK-041-05-add-feed-dialog.png",
+        ".workflow-kit/tasks/evidence/TASK-041-03-command-palette.png"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "Read the gate text rather than trusting exit codes. lint: 'Found 0 warnings and 0 errors. Finished in 29ms on 23 files with 116 rules'. build: 'tsc -b && vite build' completed, '✓ 51 modules transformed', '✓ built in 115ms'. frontend: all 26 assertions printed and the suite ended with '=== 前端逻辑回归 26/26 通过 ==='; the stderr line 'bootstrap from backend failed: { code: db_corrupt ... }' is the suite's own simulated failure path (S-3a), not a gate failure. Static-analysis confirmation that no behavior changed: store.ts diff hunks are exclusively showToast string literals (22/22 lines), Reader/Sidebar/Timeline/ContextMenu diffs are strings only, SettingsModal/Overlays diffs are strings plus checkbox->SwitchInline with identical controlled state and equivalent onChange, primitives.tsx adds a compact prop and a span-based variant without changing Switch's existing behavior, and the CSS changes are tokens, size values and focus/disabled styling. High-risk specifics checked: the removed '.toggle-action-btn.btn-primary' rules are superseded with equal-or-higher specificity at end of file (.btn-primary:hover:not(:disabled) is (0,3,0) vs .toggle-action-btn:hover (0,2,0)) and all 12 btn-primary + 4 btn-danger/btn-danger-text usages remain paired with .toggle-action-btn, so no current element changes appearance; display:flex->inline-flex on .folder-chevron-btn is a no-op because inline-level display blockifies for a flex item.",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-e219f76f7b034958b9f5c6701f2749ce-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-e219f76f7b034958b9f5c6701f2749ce-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-e219f76f7b034958b9f5c6701f2749ce-frontend.stdout.txt",
+        "src/styles/base.css",
+        "src/styles/tokens.css",
+        "src/components/primitives.tsx"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "The changed error/toast paths keep their control flow: every edited toast sits inside the unchanged early-return / catch branch (e.g. store.ts translateEntry/summarizeEntry/refreshOneFeed 'dataMode !== tauri' guards still return before any work, the api.opmlExport null check still returns, the nested resolveClose catch chain is untouched apart from its message, and updateCatLayout/updateFeedLayout still fire-and-forget with the same .catch). The new '.toggle-action-btn:disabled, .btn-primary:disabled, .btn-danger:disabled, .btn-danger-text:disabled { opacity:.45; cursor:not-allowed; filter:none }' rule adds only a visual disabled state and cannot alter event handling; 'cursor:not-allowed' does not suppress pointer events. The focus-visible additions cannot break pointer interaction because :focus-visible does not match mouse-initiated focus, so pointer users see the pre-change rendering (the report states this and the command-palette image is consistent with it). No new exception, retry or state-machine branch was introduced anywhere in the 10 files.",
+      "evidence_files": [
+        "src/store.ts",
+        "src/components/Overlays.tsx",
+        "src/components/SettingsModal.tsx",
+        ".workflow-kit/tasks/evidence/RUN-e219f76f7b034958b9f5c6701f2749ce-build.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "The control-size story is now tokenized in tokens.css (--icon-btn-hit-sm:20px, --icon-btn-hit-md:22px, --switch-w-md:40px/--switch-h-md:22px, --switch-w-sm:32px/--switch-h-sm:18px) with a comment requiring new controls to reuse a tier, and the large magic numbers in base.css were replaced by calc() expressions over those variables, so the switch scale is single-sourced. primitives.tsx factors the shared DOM and slider markup into SwitchTrack and exposes two thin wrappers (Switch with its own label for setting cards, SwitchInline without for outer-label rows), documented with the reason nested labels would be invalid - a sound separation. The appended CSS section is grouped and commented, and the residual risks are declared in-code (the 44->60 column arithmetic, the deliberately excluded .win-btn and circular play buttons). Verified the comments' factual claims where checkable (U+FFFD 115 vs HEAD 118; dist CSS focus-visible x8). Residual debt, recorded as minor finding F2: the Timeline hint lost its emoji but kept a stray leading space, and the same hint class in Reader still keeps the emoji.",
+      "evidence_files": [
+        "src/styles/tokens.css",
+        "src/components/primitives.tsx",
+        "src/styles/base.css",
+        ".workflow-kit/tasks/evidence/TASK-041-interaction-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "No runtime logic was added: the diff contains no new effects, subscriptions, renders or list operations, and store.ts changes are string literals only. The CSS delta is additive rules plus token indirection; the build reports dist/assets/index-C5bTmR8B.css at 56.17 kB / 10.38 kB gzip and the JS bundle at 373.82 kB / 112.61 kB gzip, and the build completed in 115ms over 51 modules. The focus-visible rules are pseudo-class driven and impose no style recalculation cost beyond what native focus already triggers, and the icon-button box-model change (padding:0, inline-flex) does not introduce layout thrash. No measurable performance regression is plausible or observable from this change set.",
+      "evidence_files": [
+        "src/styles/base.css",
+        ".workflow-kit/tasks/evidence/RUN-e219f76f7b034958b9f5c6701f2749ce-build.stdout.txt"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-006-008.md",
+    "checked_states": [
+      "主视图：时间线四种布局卡片、工具栏、侧栏（视图筛选与订阅树）",
+      "阅读器：正文区、AI 区块、文章操作按钮行",
+      "设置页：各分区标签与说明文字、连接与同步区、危险操作确认",
+      "覆盖层：搜索、命令面板、右键菜单、灯箱、对话框",
+      "空状态与错误提示（含 toast）以及演示模式/无服务提示"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-041-01-main.png",
+      ".workflow-kit/tasks/evidence/TASK-041-02-settings.png",
+      ".workflow-kit/tasks/evidence/TASK-041-03-command-palette.png",
+      ".workflow-kit/tasks/evidence/TASK-041-04-focus-visible.png",
+      ".workflow-kit/tasks/evidence/TASK-041-05-add-feed-dialog.png",
+      ".workflow-kit/tasks/evidence/TASK-041-06-focus-ring-switch.png",
+      ".workflow-kit/tasks/evidence/TASK-041-interaction-report.md",
+      ".workflow-kit/tasks/evidence/RUN-e219f76f7b034958b9f5c6701f2749ce-frontend.stdout.txt"
+    ]
+  }
+}

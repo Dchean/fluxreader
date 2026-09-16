@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
 import { api, articleRowToEntry } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
-import { ModalOverlay, FluxDropdown } from './primitives';
+import { ModalOverlay, FluxDropdown, SwitchInline } from './primitives';
 import type { ArticleEntry, ContentLayoutType, FeedItem } from '../types';
 
 /** 不使用 AI 的布局（与 SettingsModal 的判定一致）：卡片不渲染摘要/翻译，
@@ -125,7 +125,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
     const out: PaletteItem[] = [];
 
     const commands: { label: string; hint: string; run: () => void }[] = [
-      { label: '同步并刷新所有订阅源', hint: '', run: () => s.triggerManualSync() },
+      { label: '刷新全部订阅源', hint: '', run: () => s.triggerManualSync() },
       { label: '将当前列表全部标为已读', hint: '', run: () => s.markCurrentViewAllRead() },
       { label: '切换 未读/全部 筛选', hint: '', run: () => s.toggleTimelineFilter() },
       { label: '切换深色 / 浅色模式', hint: '', run: () => {
@@ -277,7 +277,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
       <div className="cp-list" ref={listRef} role="listbox">
         {items.length === 0 ? (
           <div className="search-empty">
-            {searchingEffective ? '搜索中…' : searchErrorEffective ? '搜索失败 — 请检查网络连接' : '没有结果'}
+            {searchingEffective ? '搜索中…' : searchErrorEffective ? '搜索失败，请检查网络' : '没有结果'}
           </div>
         ) : (
           <>
@@ -452,8 +452,7 @@ function AddFeedModalBody({
             onChange={(e) => setUrl(e.target.value)}
           />
           <div className="mini-dialog-hint">
-            不连接后端也可添加：客户端将直连源站抓取（第一优先级），
-            连接后自动同步订阅关系并兜底直连失败的源。
+            未连接后端也能添加：客户端会直接抓取源站，连接后端后自动同步。
           </div>
         </div>
 
@@ -486,33 +485,18 @@ function AddFeedModalBody({
           {!noAi && (
             <>
               <label className="mini-dialog-checkbox">
-                <input
-                  type="checkbox"
-                  checked={autoSummary}
-                  onChange={(e) => setAutoSummary(e.target.checked)}
-                  style={{ accentColor: 'var(--accent)' }}
-                />
+                <SwitchInline checked={autoSummary} onChange={(v) => setAutoSummary(v)} />
                 自动摘要
               </label>
               <label className="mini-dialog-checkbox">
-                <input
-                  type="checkbox"
-                  checked={autoTranslate}
-                  onChange={(e) => setAutoTranslate(e.target.checked)}
-                  style={{ accentColor: 'var(--accent)' }}
-                />
+                <SwitchInline checked={autoTranslate} onChange={(v) => setAutoTranslate(v)} />
                 自动翻译
               </label>
             </>
           )}
           {syncConnected && (
             <label className="mini-dialog-checkbox">
-              <input
-                type="checkbox"
-                checked={syncToBackend}
-                onChange={(e) => setSyncToBackend(e.target.checked)}
-                style={{ accentColor: 'var(--accent)' }}
-              />
+              <SwitchInline checked={syncToBackend} onChange={(v) => setSyncToBackend(v)} />
               同步到后端
             </label>
           )}
@@ -641,21 +625,11 @@ function EditFeedModalBody({
           return (
             <>
               <label className="mini-dialog-checkbox">
-                <input
-                  type="checkbox"
-                  checked={autoSummary}
-                  onChange={(e) => setAutoSummary(e.target.checked)}
-                  style={{ accentColor: 'var(--accent)' }}
-                />
+                <SwitchInline checked={autoSummary} onChange={(v) => setAutoSummary(v)} />
                 自动摘要
               </label>
               <label className="mini-dialog-checkbox">
-                <input
-                  type="checkbox"
-                  checked={autoTranslate}
-                  onChange={(e) => setAutoTranslate(e.target.checked)}
-                  style={{ accentColor: 'var(--accent)' }}
-                />
+                <SwitchInline checked={autoTranslate} onChange={(v) => setAutoTranslate(v)} />
                 自动翻译
               </label>
             </>
@@ -757,13 +731,8 @@ export function CloseAskDialog() {
         </div>
         <div className="mini-dialog-checkbox-row" style={{ marginTop: 10 }}>
           <label className="mini-dialog-checkbox">
-            <input
-              type="checkbox"
-              checked={remember}
-              onChange={(e) => setRemember(e.target.checked)}
-              style={{ accentColor: 'var(--accent)' }}
-            />
-            记住我的选择（之后可在 设置 → 通用 修改）
+            <SwitchInline checked={remember} onChange={(v) => setRemember(v)} />
+            记住我的选择（可在 设置 → 通用 修改）
           </label>
         </div>
         <div className="mini-dialog-actions">

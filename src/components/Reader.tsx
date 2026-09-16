@@ -137,7 +137,7 @@ export function Reader() {
           <div style={{ fontSize: 32, marginBottom: 12 }}>📖</div>
           <h4 className="reader-empty-title">未选择文章</h4>
           <p className="reader-empty-desc">
-            从列表中点击卡片即可在右侧载入正文并激活 AI 辅助阅读。
+            在左侧选择一篇文章开始阅读。
           </p>
         </div>
       )}
@@ -157,13 +157,13 @@ export function Reader() {
             <button
               className="toggle-action-btn"
               onClick={() => {
-                if (!art.url) { showToast('该条目没有原文网页地址'); return; }
+                if (!art.url) { showToast('该条目没有原文链接'); return; }
                 void openExternal(art.url).catch(() => showToast('打开失败'));
               }}
-              title="在浏览器打开源网页"
+              title="在浏览器中查看原文"
             >
               <Icons.externalLink />
-              <span>源网页</span>
+              <span>查看原文</span>
             </button>
             {art.enclosureUrl && (
               <button
@@ -255,7 +255,7 @@ export function Reader() {
               </div>
               <div className="ai-body-content">
                 {summaryGenerating ? (
-                  <span className="ai-generating-hint">⏳ 正在根据提示词生成摘要...</span>
+                  <span className="ai-generating-hint">正在根据提示词生成摘要…</span>
                 ) : summaryError ? (
                   <div className="ai-error-row">
                     <span className="ai-error-text" title={summaryError}>摘要生成失败：{summaryError}</span>

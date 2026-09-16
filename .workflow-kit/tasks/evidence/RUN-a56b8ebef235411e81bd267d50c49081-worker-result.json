@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-041",
+  "run_id": "RUN-a56b8ebef235411e81bd267d50c49081",
+  "status": "ready_for_verification",
+  "summary": "修复轮：处理独立审查（RUN-77e20f6fe37a4091bc6435f00a3c7b78，FAIL）指出的阻断项 F1 与次要项 F2。(1) F1：补齐用户可见的 ASCII 省略号 7 处，改为 …（U+2026）——Sidebar.tsx:94 全局搜索…、Reader.tsx:258 生成中提示、SettingsModal.tsx:763 placeholder sk-…、:1348 placeholder ghp_…、mockData.ts 三处 snippet 结尾。修复后按「... 紧跟 < 或引号」复核 src/ 全目录用户可见 ASCII 省略号 = 0（JS 展开语法不计）。(2) F2：同类「生成中」提示两处统一为不带 ⏳、统一使用 …，并去掉 Timeline.tsx:611 的多余前导空格。仅改字符串，无行为/布局/状态流转变更。changed_files 即本轮相对上一候选（551d9433…）的 5 个文件。门禁：lint 0/0（23 文件）、build（tsc+vite）通过、前端回归 26/26 全绿。交互报告已追加「修复轮记录」，含审查结论、逐条映射、门禁结果，并如实声明 TASK-041-01-main.png 属修复前采集（其中可见 全局搜索... 即 F1 现场）、修复后状态由静态复核 + 运行时目视 + 门禁三重确认，本环境未能重新入库修复后位图（抓取脚本 DPI 不一致失败）。",
+  "changed_files": [
+    "src/components/Reader.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/Sidebar.tsx",
+    "src/components/Timeline.tsx",
+    "src/mockData.ts"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

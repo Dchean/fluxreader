@@ -326,7 +326,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     markEntriesRead(ids);
     set({ openedReadIds: {} });
-    get().showToast('已将当前视图范围内的内容标记为已读');
+    get().showToast('已全部标为已读');
   },
 
   /* ================= 阅读器 ================= */
@@ -508,7 +508,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   translateEntry: (id, opts) => {
     const silent = opts?.silent ?? false;
     if (get().dataMode !== 'tauri') {
-      if (!silent) get().showToast('浏览器演示模式无 AI 服务');
+      if (!silent) get().showToast('演示模式不支持 AI 服务');
       return;
     }
     const art = get().entries.find((a) => a.id === id);
@@ -583,7 +583,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const art = entries.find((a) => a.id === activeArticleId);
     if (!art) return;
     if (!art.url) {
-      showToast('该条目没有原文网页地址');
+      showToast('该条目没有原文链接');
       return;
     }
     showToast(art.fulltextExtracted ? '正在刷新全文…' : '正在提取全文…');
@@ -629,7 +629,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!art) return;
     if (dataMode === 'tauri') void api.setRead(Number(activeArticleId), !art.isRead);
     flipEntryFlag(activeArticleId, 'isRead');
-    get().showToast(art.isRead ? '已标记为未读' : '已标记为已读');
+    get().showToast(art.isRead ? '已标为未读' : '已标为已读');
   },
 
   toggleCurrentStar: () => {
@@ -660,7 +660,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     /* 无缓存 → 流式生成（打字机效果落到 translatedContent） */
     if (s.dataMode !== 'tauri') {
-      if (!silent) get().showToast('浏览器演示模式无 AI 服务');
+      if (!silent) get().showToast('演示模式不支持 AI 服务');
       return;
     }
     const articleId = art.id;
@@ -763,7 +763,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     if (s.dataMode !== 'tauri') {
-      if (!silent) get().showToast('浏览器演示模式无 AI 服务');
+      if (!silent) get().showToast('演示模式不支持 AI 服务');
       return;
     }
     /* 重试语义：清掉上次的错误与半截摘要，重新走完整流 */
@@ -858,7 +858,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         seekToSec: null,
       },
     });
-    get().showToast(`正在播放: ${title}`);
+    get().showToast(`正在播放：${title}`);
     /* 点播放即视为已读（与打开文章同语义） */
     if (entryId) get().markEntriesReadBulk([entryId]);
   },
@@ -914,7 +914,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     api.resolveClose(action, remember)
       .catch(() =>
         api.resolveClose(action, remember).catch(() =>
-          get().showToast('关闭操作未生效，请再点一次关闭按钮'),
+          get().showToast('关闭失败，请重试'),
         ),
       );
   },
@@ -1177,11 +1177,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         .then((summary: RefreshSummary | null) => {
           set({ syncStatus: 'synced' });
           if (summary && summary.failed_feeds > 0) {
-            get().showToast(`刷新完成：新增 ${summary.new_articles} 条，${summary.failed_feeds} 个源直连失败`);
+            get().showToast(`已刷新，新增 ${summary.new_articles} 条，${summary.failed_feeds} 个源直连失败`);
           } else if (summary) {
-            get().showToast(`刷新完成：新增 ${summary.new_articles} 条`);
+            get().showToast(`已刷新，新增 ${summary.new_articles} 条`);
           } else {
-            get().showToast('刷新完成');
+            get().showToast('已刷新，无新文章');
           }
         })
         .catch((e: unknown) => {
@@ -1192,10 +1192,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     set({ syncStatus: 'syncing' });
-    get().showToast('正在后台增量同步...');
+    get().showToast('刷新中…');
     setTimeout(() => {
       set({ syncStatus: 'synced' });
-      get().showToast('后端同步完成');
+      get().showToast('已刷新');
     }, 1100);
   },
 
@@ -1229,7 +1229,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       set({ githubFlow: start });
       await openExternal(start.verification_uri);
-      get().showToast('浏览器已打开授权页，代码已常驻显示在本页');
+      get().showToast('已在浏览器打开授权页');
       scheduleGithubPoll(start.interval);
     } catch (e) {
       get().showToast(`发起登录失败：${extractError(e)}`);
@@ -1409,7 +1409,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (next.autoTranslate !== cur.autoTranslate) args.autoTranslate = next.autoTranslate;
       if (args.title === undefined && args.folderId === undefined && args.layout === undefined
         && args.autoSummary === undefined && args.autoTranslate === undefined) {
-        get().showToast('没有需要保存的更改');
+        get().showToast('未做任何修改');
         return;
       }
       void api
@@ -1443,15 +1443,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshOneFeed: (feedId) => {
     if (get().dataMode !== 'tauri') {
-      get().showToast('浏览器演示模式无直连能力');
+      get().showToast('演示模式不支持直连');
       return;
     }
-    get().showToast('正在刷新该订阅源...');
+    get().showToast('正在刷新该订阅源…');
     void api
       .refreshFeed(Number(feedId))
       .then((n) => {
         if (n === null) return;
-        get().showToast(n > 0 ? `刷新完成：新增 ${n} 条` : '刷新完成：没有新文章');
+        get().showToast(n > 0 ? `已刷新，新增 ${n} 条` : '已刷新，无新文章');
         return get().reloadFromBackend();
       })
       .catch((e: unknown) => {
@@ -1465,10 +1465,10 @@ export const useAppStore = create<AppState>((set, get) => ({
      落库 fire-and-forget，失败 toast 提醒（本地状态不回滚，下次同步对齐）。 */
   updateCatLayout: (catId, layout) => {
     set((s) => reconcileCategories(s, s.categories.map((c) => (c.id === catId ? { ...c, layout } : c))));
-    get().showToast('已更新分类布局并即时生效');
+    get().showToast('布局已更新');
     void api
       .updateFolderLayout(Number(catId.replace('cat-', '')), layout)
-      .catch(() => get().showToast('布局保存失败（界面已生效，重启后可能回退）'));
+      .catch(() => get().showToast('布局未能保存，重启后可能回退'));
   },
 
   updateFeedLayout: (catId, feedId, layout) => {
@@ -1486,10 +1486,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         ),
       ),
     );
-    get().showToast('已更新订阅源布局并即时生效');
+    get().showToast('布局已更新');
     void api
       .updateFeedLayout(numericId(feedId), next)
-      .catch(() => get().showToast('布局保存失败（界面已生效，重启后可能回退）'));
+      .catch(() => get().showToast('布局未能保存，重启后可能回退'));
   },
 
   toggleCatSummary: (catId, val) => {

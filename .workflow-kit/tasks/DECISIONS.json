@@ -948,6 +948,48 @@
         "TASK-039": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6",
         "TASK-040": "4b916d0075b8d43e59bedb63b6241b5fe26927d197543b00b3098a1120247dfb"
       }
+    },
+    {
+      "id": "DEC-batch4-polish-refactor-20260916",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15：'批准并commit，继续，并且解除时间和任务数量限制，直接按照你判定最合适的路线跑完全部流程，将项目一次性优化重构完'；此前已确认 REQ-005（交互生硬、动画不丝滑）、REQ-006（文案冗长、AI 口癖重）、REQ-008（UI 不统一，如下拉框）均为 in_scope，并明确'沿用现有 UI，但把不统一的地方调整一致'",
+      "statement": "Owner authorized the batch-4 scope under the existing confirmed brief: 文案统一精简（REQ-006）、交互动画打磨含 prefers-reduced-motion（REQ-005）、控件一致性收尾（REQ-008）、已确认未实现的兜底路径与残余隐藏 Bug（REQ-007）、以及前后端单体模块拆分（可维护性）。预算沿用批次上限（每任务 240 分钟、修复 4 轮）；提交沿用既有授权；推送/发布仍需另行询问。",
+      "scope": [
+        "REQ-005",
+        "REQ-006",
+        "REQ-007",
+        "REQ-008",
+        "refactor",
+        "TASK-041",
+        "TASK-042",
+        "TASK-043",
+        "TASK-044",
+        "TASK-045",
+        "TASK-046",
+        "TASK-047",
+        "TASK-048"
+      ],
+      "recorded_at_utc": "2026-09-16T02:31:54.244681Z"
+    },
+    {
+      "id": "DEC-9dc13198c20b4a1ba5c85c7ca41a1c31",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 起生效的既有授权：批准并commit、继续，并且解除时间和任务数量限制，直接按最合适路线跑完全部流程；DEC-batch4-polish-refactor-20260916 已把 REQ-006 / REQ-008 与 TASK-041 纳入范围，并写明预算沿用批次上限（每任务 240 分钟、修复 4 轮）。本次追加用于独立审查指出的必须修复项：用户可见文案仍残留 ASCII 省略号（3 个点），违反已冻结 UI 契约。保留原任务身份、原始时钟与既有失败记录。",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-041"
+      ],
+      "recorded_at_utc": "2026-09-16T06:38:42.884169Z",
+      "budget_extension": {
+        "decision_id": "DEC-9dc13198c20b4a1ba5c85c7ca41a1c31",
+        "recorded_at_utc": "2026-09-16T06:38:42.884169Z",
+        "minutes": 90,
+        "repair_rounds": 2,
+        "previous_deadline_at_utc": "2026-09-16T06:32:30.867882Z",
+        "deadline_at_utc": "2026-09-16T08:08:42.884169Z"
+      }
     }
   ]
 }

@@ -113,11 +113,20 @@ interface SwitchProps {
   checked: boolean;
   onChange: (val: boolean) => void;
   id?: string;
+  /** 紧凑档：定宽密集控制列用 32×18，常规档为 40×22 */
+  compact?: boolean;
 }
 
-export function Switch({ checked, onChange, id }: SwitchProps) {
+/** 开关骨架：两档共用同一 DOM 结构与同一滑块语言，只有尺寸不同 */
+function SwitchTrack({
+  checked,
+  onChange,
+  id,
+  compact,
+  Container,
+}: SwitchProps & { Container: 'label' | 'span' }) {
   return (
-    <label className="switch-control">
+    <Container className={compact ? 'switch-control compact' : 'switch-control'}>
       <input
         type="checkbox"
         id={id}
@@ -125,7 +134,23 @@ export function Switch({ checked, onChange, id }: SwitchProps) {
         onChange={(e) => onChange(e.target.checked)}
       />
       <span className="switch-slider" />
-    </label>
+    </Container>
+  );
+}
+
+/** 独立开关：自带 label，整块可点（设置卡片右侧） */
+export function Switch({ checked, onChange, id, compact }: SwitchProps) {
+  return (
+    <SwitchTrack checked={checked} onChange={onChange} id={id} compact={compact} Container="label" />
+  );
+}
+
+/** 行内开关：不渲染自身 label，供外层 label 包裹。
+ *  嵌套 label 是无效 HTML，且点文字会双触发；用非 label 容器后，
+ *  外层 label 的文字与开关共用一次点击语义。 */
+export function SwitchInline({ checked, onChange, id, compact }: SwitchProps) {
+  return (
+    <SwitchTrack checked={checked} onChange={onChange} id={id} compact={compact} Container="span" />
   );
 }
 

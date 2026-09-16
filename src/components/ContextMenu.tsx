@@ -135,7 +135,7 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
         },
         ...(art.url
           ? [{
-              label: '打开源网页',
+              label: '查看原文',
               icon: <Icons.externalLink />,
               onSelect: () => { void openExternal(art.url); },
             },
@@ -195,7 +195,7 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
           onSelect: () => st.toggleCurrentReadStatus(),
         });
         items.push({
-          label: st.showFulltext ? 'RSS 原文' : '全文',
+          label: st.showFulltext ? 'RSS 原文' : '显示全文',
           icon: <Icons.doc />,
           onSelect: () => st.toggleReaderFulltext(),
         });
@@ -229,7 +229,7 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
           onSelect: () => st.openAddFeedModal(''),
         },
         {
-          label: '刷新全部订阅',
+          label: '刷新全部订阅源',
           icon: <Icons.refresh />,
           onSelect: () => st.triggerManualSync(),
         },

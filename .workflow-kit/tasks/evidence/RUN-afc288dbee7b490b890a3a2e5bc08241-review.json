@@ -1,0 +1,87 @@
+{
+  "task_id": "TASK-041",
+  "candidate_digest": "8da38e28771aa800b09fb61e361c3848e8d54b200edd59c1f688829cc9b685ac",
+  "verification_run": "RUN-9fa3a8cad77b4cefb83b4a86d2335108",
+  "verdict": "PASS",
+  "summary": "Re-review after repair round; verdict flips FAIL -> PASS. Byte-identity: all 12 files listed in the new candidate manifest match on-disk sha256 byte-for-byte, including the four repaired ones (Sidebar 27b1cbb2…, Reader 2e086ab3…, Timeline 59e18a47…, SettingsModal 49533e05…) and the six files that the repair must not have touched (ContextMenu 7e05e085…, Overlays 41f898f8…, primitives 7c0b7e31…, store 254a20e6…, base.css b77a7dd1…, tokens 096c40ae…), which is itself proof that the repair was confined to the 5 declared files; src/mockData.ts is deliberately outside the snapshot roots, so I verified it by content instead (its 3 snippet lines 90/103/115 now end in … and 'grep -c \"\\.\\.\\.\" src/mockData.ts' = 0). F1 re-check: user-facing ASCII three-dots is now genuinely 0 across src/. I ran two independent matchers — a per-occurrence Python classifier walking src/ for .ts/.tsx/.css that skips only spread/rest forms ('...' immediately followed by [A-Za-z0-9_$] or one of ( [ {) and reported 'NON-SPREAD ... count: 0', and a bash line filter 'grep -rn \"\\.\\.\\.\" src/ --include=*.ts --include=*.tsx | grep -vP \"\\.\\.\\.\\s*[A-Za-z_$([{]\"' which returned no lines; 94 raw '...' tokens exist in src/ and every one is spread/rest syntax, so no prose ellipsis survives. The specific fixes are confirmed present on disk: Sidebar.tsx:94 '全局搜索…', Reader.tsx:258 and Timeline.tsx:611 both now '…' with no ⏳, SettingsModal.tsx:763 'sk-…' and :1348 'ghp_…' (both still inside intact <input type=\"password\" className=\"setting-input\" value/onChange> JSX), and mockData.ts snippets 90/103/115. F2 is fixed: Timeline.tsx:611 is byte-verified as '>' 0xe6ada3 (正) with no leading 0x20 and no emoji, Reader.tsx:258 likewise renders 正 immediately after '>', so both ai-generating-hint sites now read identically (no ⏳, U+2026). F3: the appended '修复轮记录' section is now honest and sufficient — it reproduces my FAIL and F1/F2/F3, gives a per-file fix table, states the post-repair grep rule and count of 0, reproduces the green gates, and explicitly discloses that TASK-041-01-main.png was captured BEFORE the repair and still shows 全局搜索... rather than passing it off as post-repair state; it further states that a post-repair bitmap could not be captured because the window-capture helper failed with DPI-virtualization BAD_RECT, substitutes three verification routes (grep count 0, live desktop observation, green gates) and lists the missing post-repair bitmap as a leftover TODO. File mtimes corroborate the disclosure (PNG 13:01:05 < repaired sources 14:53:16 < report 15:12:37). I judge the missing post-repair bitmap NOT a blocker: for a single-character text substitution the source bytes plus their sha256 binding to the candidate digest and a deterministic grep of 0 are strictly stronger evidence than a bitmap, U+2026 rendering is already demonstrated in the pre-repair captures (palette entries 添加订阅源…, 搜索中…, 刷新中…, 演示模式 toasts), and the contract's own evidence clause demands honest labelling of dynamic vs static proof, which is now satisfied rather than evaded. Gates re-read as text for this run: lint 'Found 0 warnings and 0 errors' (23 files); build 'tsc -b && vite build' succeeded (51 modules, built in 121ms, JS chunk rotated to index-C1JcgHvC.js while the CSS chunk stayed index-C5bTmR8B.css, consistent with a strings-only repair); frontend all 26 assertions plus '26/26 通过'. No new defect introduced: the SettingsModal diff has 21 hunks and every added line falls in the copy/control allowlist (no stray logic), the other repaired files' diffs are string-only, mockData changes are 3 snippet literals, no test or tool references any changed string, exclamation check is still clean (no ！ and no user-facing ASCII !), no native checkbox exists outside primitives.tsx, and no ASCII-colon misuse appears in JSX text. Residual non-blocking notes (unchanged from the first review, not new blockers): the SyncTab card is still titled 浏览器开发模式 while the toasts use the 演示模式 prefix, the pre-existing 115 U+FFFD comment corruption in base.css remains, the compact switch tier and several states are still unverified visually, the light theme is unverified, and the claimed post-repair live observation of 全局搜索… is unsubstantiated by me but unnecessary given the frozen-artifact proof.",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "All nine acceptance items now hold. Item 1 (one wording per action): 刷新全部订阅源 appears consistently in Sidebar button/title, ContextMenu and the command palette; 查看原文 in Reader title+label and ContextMenu; 显示全文 in Reader and ContextMenu; 标为已读/标为未读 in Timeline. Item 2 (punctuation): the blocking gap is closed — my two independent matchers report 0 non-spread '...' across src/ (94 raw tokens, all JS spread/rest), and no ASCII colon appears in JSX text or in any prose string (the only ':' hits are URL schemes such as https://dav.example.com/fluxreader, which are not the mixing the contract bans). Item 3: every demo/no-service toast uses the 演示模式 prefix (不支持导入/导出/同步/直连, 无法测试, 不支持 AI 服务 x3); the residual SyncTab card title 浏览器开发模式 is a distinct environment/architecture label, judged acceptable as in round 1. Item 4: no ！ and no user-facing ASCII !; parenthetical stacking/tails removed in the desc/hint rewrites. Item 5: the global focus-visible rule set is specificity-verified ((0,1,1) > the pre-existing (0,1,0) outline:none on .setting-input/.search-modal-input/.range-input/.setting-prompt-textarea, with base.css imported last) and its base.css/tokens.css hashes are unchanged from the round-1 candidate, so the earlier conclusion carries over; the command-palette input's accent ring is visible in TASK-041-03-command-palette.png, and the switch ring is drawn on .switch-slider because the real input is 0x0/opacity:0. Item 6: Boolean controls are unified to one component family with only primitives.tsx:131 containing type=\"checkbox\"; all 10 conversions keep the same controlled state and equivalent boolean onChange with no double-toggle (SwitchInline emits a span so the outer label stays valid and forwards one activation); icon hit areas converge to the 20/22 tokens with only .folder-chevron-btn changing (18->20); the btn-primary/btn-danger/btn-danger-text variants are a single end-of-file definition covering all 16 usage sites. Item 7: every diff hunk in the repair set is a string or a control-size/style value, and gates stay green, so behavior/state flow are preserved; the 44px->60px fixed column is a declared static metric adjustment permitted by the contract's control-size clause. Items 8 and 9 verified under regression and ui_review respectively.",
+      "evidence_files": [
+        "src/components/Sidebar.tsx",
+        "src/components/Reader.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/SettingsModal.tsx",
+        "src/mockData.ts",
+        ".workflow-kit/tasks/evidence/TASK-041-05-add-feed-dialog.png",
+        ".workflow-kit/tasks/evidence/TASK-041-interaction-report.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "New run logs read as text, not exit codes. lint: 'Found 0 warnings and 0 errors. Finished in 31ms on 23 files with 116 rules'. build: 'tsc -b && vite build' completed, '✓ 51 modules transformed', '✓ built in 121ms', dist/index.html 0.54 kB, dist/assets/index-C5bTmR8B.css 56.17 kB (gzip 10.38) — the CSS chunk hash is identical to the previous candidate, which independently confirms no CSS change in the repair — and the JS entry rotated to dist/assets/index-C1JcgHvC.js 373.82 kB (gzip 112.60). frontend: all 26 assertions printed and the suite closed with '=== 前端逻辑回归 26/26 通过 ==='; the stderr 'bootstrap from backend failed: {code: db_corrupt}' and the loader ExperimentalWarning are the suite's own simulated S-3a path and a Node deprecation notice, not gate failures. Independent regression reasoning beyond the gates: the repair touches only literals (Sidebar 8/8, Reader 5/5, Timeline 5/5, SettingsModal 26/31, mockData 3/3 lines) and the +1/+1/+2 delta in numstat versus the round-1 candidate exactly matches the six declared string edits; the SettingsModal audit shows all 21 hunks consist of copy or checkbox->SwitchInline changes with no stray logic; and grep confirms no test or tool file references 全局搜索 / 正在生成摘要 / sk- / ghp_, so the suite could not have been silently weakened by the repair (tools/frontend-regression.mjs hash is unchanged anyway).",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-9fa3a8cad77b4cefb83b4a86d2335108-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-9fa3a8cad77b4cefb83b4a86d2335108-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-9fa3a8cad77b4cefb83b4a86d2335108-frontend.stdout.txt",
+        "src/styles/base.css",
+        "src/components/SettingsModal.tsx"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "The repair replaced only literal text, so every error/early-return path keeps its shape: the Reader AI-hint and Timeline notif-hint substitutions sit inside the existing summaryGenerating branches, the Sidebar search pill keeps its onClick/role/keyboard handling with only the caption changed, and the two SettingsModal placeholders remain inside unchanged <input type=\"password\" ... value={...} onChange={...}/> elements so no input wiring changed. store.ts (dataMode !== tauri guards and the fire-and-forget catches) and Overlays.tsx are byte-identical to the previously verified candidate, so the round-1 failure-path conclusions carry over unchanged; the added :disabled { opacity:.45; cursor:not-allowed; filter:none } rule is purely visual and does not suppress pointer events. Nothing in the repair removes a null/undefined guard, alters a return, or introduces a new branch, and the frontend suite's error-state scenarios (S-2 hydration failure, S-3a bootstrap failure, S-3b conflict force-retry, C-3 extract failure toast) all remain green.",
+      "evidence_files": [
+        "src/store.ts",
+        "src/components/Overlays.tsx",
+        "src/components/Reader.tsx",
+        ".workflow-kit/tasks/evidence/RUN-9fa3a8cad77b4cefb83b4a86d2335108-build.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "The repair improves consistency without adding debt: the two ai-generating-hint sites (Reader.tsx:258, Timeline.tsx:611) now share the same shape — no ⏳, U+2026, no stray leading space (byte-verified: '>' followed directly by 0xe6ada3), which resolves the round-1 F2 divergence instead of leaving two treatments of the same concept. Ellipsis handling is now uniform across the whole src/ tree, so future copy edits have a single convention to follow, and the placeholders sk-… / ghp_… still read as sensible prefix-plus-continuation hints. Control sizing remains tokenized (--icon-btn-hit-sm/md, --switch-w/h-md/sm) and the base.css/tokens.css hashes are unchanged, so the round-1 maintainability conclusions (single-sourced switch scale, SwitchTrack factored shared markup with documented rationale) still apply. The appended '修复轮记录' section documents each edit as file:line -> before -> after and states the verification rule used, which keeps the evidence auditable on its own. Residual, non-blocking: the pre-existing 115 U+FFFD characters in base.css comments remain (disclosed, comment-only), the SyncTab card title still says 浏览器开发模式 while toasts say 演示模式, and the report still carries pre-repair limitation entries alongside the newer repair section.",
+      "evidence_files": [
+        "src/components/Timeline.tsx",
+        "src/components/Reader.tsx",
+        "src/styles/tokens.css",
+        ".workflow-kit/tasks/evidence/TASK-041-interaction-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "The repair is six literal substitutions, so there is no runtime cost: no new effects, subscriptions, renders, list work or event handlers were added, and the byte-identical store.ts/Overlays.tsx confirm the state machine is untouched. Bundle accounting is stable and consistent with a strings-only change — CSS stays at dist/assets/index-C5bTmR8B.css 56.17 kB (gzip 10.38, same hash as the previous candidate) and JS is 373.82 kB / gzip 112.60, with the build finishing in 121ms across 51 modules. The focus-visible rules, icon box-model tokens and switch size variables are unchanged from the previously reviewed candidate, so no style-recalculation or layout-thrash cost was introduced by this round either.",
+      "evidence_files": [
+        "src/styles/base.css",
+        ".workflow-kit/tasks/evidence/RUN-9fa3a8cad77b4cefb83b4a86d2335108-build.stdout.txt"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-006-008.md",
+    "checked_states": [
+      "主视图：时间线四种布局卡片、工具栏、侧栏（视图筛选与订阅树）",
+      "阅读器：正文区、AI 区块、文章操作按钮行",
+      "设置页：各分区标签与说明文字、连接与同步区、危险操作确认",
+      "覆盖层：搜索、命令面板、右键菜单、灯箱、对话框",
+      "空状态与错误提示（含 toast）以及演示模式/无服务提示"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-041-01-main.png",
+      ".workflow-kit/tasks/evidence/TASK-041-02-settings.png",
+      ".workflow-kit/tasks/evidence/TASK-041-03-command-palette.png",
+      ".workflow-kit/tasks/evidence/TASK-041-04-focus-visible.png",
+      ".workflow-kit/tasks/evidence/TASK-041-05-add-feed-dialog.png",
+      ".workflow-kit/tasks/evidence/TASK-041-06-focus-ring-switch.png",
+      ".workflow-kit/tasks/evidence/TASK-041-interaction-report.md",
+      ".workflow-kit/tasks/evidence/RUN-9fa3a8cad77b4cefb83b4a86d2335108-frontend.stdout.txt"
+    ]
+  }
+}

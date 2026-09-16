@@ -211,9 +211,9 @@ export function Timeline() {
             {articlesLoading ? (
               <span className="load-more-spinner" aria-label="加载中" />
             ) : articlesExhausted ? (
-              <span className="load-more-end">— 已到底 —</span>
+              <span className="load-more-end">没有更多了</span>
             ) : (
-              <span className="load-more-idle">下拉加载更多</span>
+              <span className="load-more-idle">滚动加载更多</span>
             )}
           </div>
         )}
@@ -417,7 +417,7 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
           <button
             className="social-act-item"
             onClick={() => {
-              if (!item.url) { showToast('该条目没有原文网页地址'); return; }
+              if (!item.url) { showToast('该条目没有原文链接'); return; }
               void openExternal(item.url).catch(() => showToast('打开失败'));
             }}
           >
@@ -489,7 +489,7 @@ const GalleryCard = memo(function GalleryCard({ item }: { item: ArticleEntry }) 
               className={`toggle-action-btn notif-act ${item.isRead ? 'act-on' : ''}`}
               onClick={(e) => { e.stopPropagation(); toggleEntryFlag(item.id, 'isRead'); }}
             >
-              <span>{item.isRead ? '标未读' : '标已读'}</span>
+              <span>{item.isRead ? '标为未读' : '标为已读'}</span>
             </button>
           </div>
         </div>
@@ -608,7 +608,7 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
             <button className="ai-retry-btn" onClick={() => summarizeEntry(item.id)}>重试</button>
           </div>
         ) : summaryGenerating && !item.aiSummary ? (
-          <div className="notif-ai-text ai-generating-hint">⏳ 正在生成摘要...</div>
+          <div className="notif-ai-text ai-generating-hint">正在生成摘要…</div>
         ) : (
           <div className="notif-ai-text">{item.aiSummary}</div>
         )}
