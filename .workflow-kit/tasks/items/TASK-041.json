@@ -183,7 +183,7 @@
     "owner_decision_ids": [
       "DEC-d1e76b1befd140789c9c441d9d0ab053"
     ],
-    "merge_ref": "e1efdcecfe1a76258471cddbd2dac545c1e312a4"
+    "merge_ref": "af4fd1e78f84780b9eb4fc9d3e75d2bfe92b61cb"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-006-008.md",
