@@ -1023,6 +1023,25 @@
         "previous_deadline_at_utc": "2026-09-16T14:58:57.780748Z",
         "deadline_at_utc": "2026-09-16T15:55:07.968690Z"
       }
+    },
+    {
+      "id": "DEC-84488ccd38b2403599258ae3cf3e24f6",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "user 2026-09-16: 授权台账订正，并继续（TASK-042 修复轮因 worker 声明漏列被删除的 src/hooks/useEnteringClass.ts 被判 protocol，CLI 无恢复入口；owner 授权订正该记录后继续走 verify→review→accept，原任务身份、原始时钟与既有失败记录保留）",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-042"
+      ],
+      "recorded_at_utc": "2026-09-16T16:40:24.523381Z",
+      "budget_extension": {
+        "decision_id": "DEC-84488ccd38b2403599258ae3cf3e24f6",
+        "recorded_at_utc": "2026-09-16T16:40:24.523381Z",
+        "minutes": 180,
+        "repair_rounds": 2,
+        "previous_deadline_at_utc": "2026-09-16T15:55:07.968690Z",
+        "deadline_at_utc": "2026-09-16T19:40:24.523381Z"
+      }
     }
   ]
 }

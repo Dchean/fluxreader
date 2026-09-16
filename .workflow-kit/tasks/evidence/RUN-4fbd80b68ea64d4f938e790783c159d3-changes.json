@@ -1,0 +1,7 @@
+{
+  "changed_files": [
+    "src/components/SettingsModal.tsx",
+    "src/components/useEnteringClass.ts",
+    "src/styles/base.css"
+  ]
+}

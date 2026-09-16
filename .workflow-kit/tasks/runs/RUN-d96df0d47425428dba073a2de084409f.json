@@ -3,7 +3,7 @@
   "id": "RUN-d96df0d47425428dba073a2de084409f",
   "task_id": "TASK-042",
   "kind": "repair",
-  "outcome": "blocked",
+  "outcome": "completed",
   "executor": {
     "harness": "current_agent",
     "model": null,
@@ -11,10 +11,10 @@
   },
   "started_at_utc": "2026-09-16T14:29:02.238288Z",
   "finished_at_utc": "2026-09-16T15:12:57.416109Z",
-  "exit_code": null,
+  "exit_code": 0,
   "timed_out": false,
   "input_digest": "35928e58e51aa93fb785d1cc9471fe1835482194a2390b951b44ec348898ad0f",
-  "candidate_digest": null,
+  "candidate_digest": "f3f0744675f72956b1253cb885184c9b80279fef66939434590b14d05e821e1a",
   "raw_output_refs": [
     ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-worker-result.json"
   ],
@@ -27,6 +27,25 @@
   },
   "estimated_cost_usd": null,
   "scope_manifest": ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-scope.json",
-  "failure_kind": "protocol",
-  "failure_reason": "Worker changed_files does not match the observed project diff"
+  "ledger_correction": {
+    "at_utc": "2026-09-16T16:43:50.473297Z",
+    "authorized_by": "user 2026-09-16: 授权台账订正，并继续",
+    "reason": "Worker 声明漏列被删除的 src/hooks/useEnteringClass.ts（声明 7 个，实际差异 8 个）；代码未变，仅补全声明并闭合该运行记录",
+    "original_outcome": "blocked",
+    "original_failure_kind": "protocol",
+    "original_failure_reason": "Worker changed_files does not match the observed project diff",
+    "original_worker_result_ref": ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-worker-result-asrecorded.json",
+    "original_run_ref": ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-run-asrecorded.json",
+    "corrected_changed_files": [
+      "src/components/PlayerBar.tsx",
+      "src/components/Reader.tsx",
+      "src/components/SettingsModal.tsx",
+      "src/components/Timeline.tsx",
+      "src/components/primitives.tsx",
+      "src/components/useEnteringClass.ts",
+      "src/hooks/useEnteringClass.ts",
+      "src/styles/base.css"
+    ],
+    "note": "finished_at_utc 保留原始记录时间；未改动任何源码、候选或受控定义字段"
+  }
 }

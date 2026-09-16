@@ -1,0 +1,15 @@
+{
+  "task_id": "TASK-042",
+  "run_id": "RUN-4fbd80b68ea64d4f938e790783c159d3",
+  "status": "ready_for_verification",
+  "summary": "第 2 轮修复：处理独立审查 RUN-c765ce94d3b4418aa71e503db85c104b 的三条 finding。(1) 社交/通知两个译文块（.social-translated-block/.show、.notif-translated-block/.show）此前是 display 硬切，现按 .notif-ai-box 的同一写法补上 transition(opacity/transform/display) + transition-behavior: allow-discrete + @starting-style，出现与消失双向过渡，隐藏态仍为 display:none（不占位、不可聚焦、读屏不可达），契约 ui_check #5 的「通知/译文/AI 区块」至此完整覆盖。(2) 设置页分类分组 .group-mgr-body 原先收起即卸载、展开无过渡，改为常驻挂载并由 .open 类驱动 display:none↔block 的双向离散过渡（aria-expanded 与 chevron 行为不变）；同时更正交互报告第 3 节「设置页不存在折叠语义」这处与代码不符的断言。(3) useEnteringClass 的 animationend 回调加 event.target 校验：animationend 会冒泡，否则 .load-more-spinner 新增的 overlayFadeIn 结束时会提前摘掉宿主的 list-entering。时长与曲线沿用既有词汇表（--transition-fast），未新增依赖，未改布局/配色与 REQ-008 控件外观；交互报告已按第 2 轮真实机制更新并补上两个漏做对象。",
+  "changed_files": [
+    "src/components/SettingsModal.tsx",
+    "src/components/useEnteringClass.ts",
+    "src/styles/base.css"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

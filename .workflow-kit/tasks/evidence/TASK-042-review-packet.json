@@ -1,0 +1,780 @@
+{
+  "ok": true,
+  "instructions": "# 审查执行器\n\n读取明确指定的审查包。任务的角色是 reviewer，输入包括 task_id、candidate_digest、原始需求/验收、质量目标、当前源码、完整差异、验证 RUN 与必要参考。先依据这些事实形成结论，不采用作者的“应该通过”。\n\nindependent 必须来自没有参与实现的新上下文。同一模型可以；同一上下文改名字不可以。Agent 包办不要求 CLI，宿主提供独立上下文即可。自审只能在策略允许且任务不是高风险时使用，并如实标记。\n\n## 五项核对\n\n- requirements：逐项对照用户的当前需求，包括 Bug、新增功能和兼容限制；检查是否漏做、顺带改变行为或扩大范围。\n- regression：阅读实际验证命令、原始输出及测试断言，检查它们是否能发现目标缺陷，是否弱化了仍有效的保护。\n- failure_paths：核对实际相关的异常、空输入、重复执行、恢复、数据/权限边界；需要时验证具体反例。不要只走成功路径。\n- maintainability：检查职责、依赖方向、重复规则、命名、模块边界及新增维护负担。工作量大不是拒绝必要改进的理由，抽象层数也不等于质量。\n- performance：检查代表性负载下的测量和回归；静态分析须明确其范围，不能伪称实测提升。不受影响时解释不适用，不强造基准。\n\n每项保存 status、简短的结论依据 analysis 和 evidence_files。报告记录可核对事实，不要求披露内部推理过程。requirements/regression 不能标不适用；高风险的 failure_paths 也不能。未完成检查时用顶层 BLOCKED，有待修问题用 FAIL；不能留下 NOT_RUN/FAIL 项却给总体 PASS。\n\n自审前暂停编码，从原需求和完整差异重新检查，包括新增、删除、重命名、未跟踪文件。发现问题后回到原任务修复，重新验证再审，不在审查阶段改验收、预算或代码放行。\n\n## 适用性与 UI\n\n重构核对 test_review：原测试、CI、mock/fixture 和快照是否仍适用，适配是否保留行为，替换/退役是否有对应需求决定，新需求是否有覆盖。原始基线和已知失败应保留；命令没变不代表断言没弱化。\n\nui_change=true 时检查 UI 约定、当前截图、交互报告与 ui_checks，实际操作适用控件的展开、焦点、错误、窄屏和键盘状态。没有真实视觉依据不能把构建成功写成界面通过。\n\n## 输出\n\n使用 contracts/review-result.schema.json 的完整结构。以下只是字段形状，标识、依据和路径必须替换为实际值：\n\n~~~json\n{\n  \"task_id\": \"TASK-actual\",\n  \"candidate_digest\": \"当前候选摘要\",\n  \"verification_run\": \"RUN-actual-verification\",\n  \"verdict\": \"PASS\",\n  \"summary\": \"审查范围及实际结论\",\n  \"findings\": [],\n  \"review_checks\": [\n    {\"area\": \"requirements\", \"status\": \"PASS\", \"analysis\": \"具体需求与差异如何对应\", \"evidence_files\": [\"实际源码或证据路径\"]},\n    {\"area\": \"regression\", \"status\": \"PASS\", \"analysis\": \"实际测试如何保护目标行为\", \"evidence_files\": [\"实际验证记录路径\"]},\n    {\"area\": \"failure_paths\", \"status\": \"PASS\", \"analysis\": \"已核对的异常和恢复场景\", \"evidence_files\": [\"实际证据路径\"]},\n    {\"area\": \"maintainability\", \"status\": \"PASS\", \"analysis\": \"具体结构变化和维护影响\", \"evidence_files\": [\"实际源码路径\"]},\n    {\"area\": \"performance\", \"status\": \"NOT_APPLICABLE\", \"analysis\": \"仅在确实不涉及运行性能时填写具体理由\", \"evidence_files\": []}\n  ],\n  \"ui_review\": null\n}\n~~~\n\n每个 finding 说明位置、触发条件、影响和建议。UI PASS 用包含 contract_ref、checked_states、evidence_files 的对象替代 ui_review=null；文件含实际截图和交互报告。不得复制示例中的不适用理由给任意项目。\n\n报告与当前 verification_run、候选和证据绑定；改动后旧结论不能继续放行。程序核对完整性、关联与变更，不能自动判断分析有无遗漏或证明上下文独立。\n",
+  "task_packet": {
+    "task_id": "TASK-042",
+    "run_id": null,
+    "task": {
+      "schema_version": 1,
+      "id": "TASK-042",
+      "title": "交互动画打磨（REQ-005）：补全过渡与 prefers-reduced-motion",
+      "kind": "implementation",
+      "retry_safe": true,
+      "ui_change": true,
+      "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+      "ui_checks": [
+        "列表与视图切换：切换布局/筛选/订阅时列表内容淡入（含 .list-entering 死代码修复）",
+        "下拉菜单与右键菜单：打开时的入场过渡（先挂载、下一帧置 open）",
+        "阅读器：视图切换与文章之间的切换过渡",
+        "播放：底部播放条与全屏播放器的出现/消失过渡",
+        "折叠与展开：侧栏订阅树、设置页分组、通知/译文/AI 区块",
+        "覆盖层：弹窗卡片入场、灯箱图片、设置页分区切换、加载更多状态",
+        "无障碍：prefers-reduced-motion: reduce 下关闭或显著削弱上述全部过渡"
+      ],
+      "status": "review",
+      "objective": "按 UI 契约（.workflow-kit/docs/UI-CONTRACT-REQ-005.md）打磨交互过渡：把已声明却从未被应用的 .list-entering 真正接到列表内容上；下拉/右键菜单改为先挂载、下一帧再置 open；阅读器视图与文章切换、播放条与全屏播放器、折叠展开区块、覆盖层与加载更多改用可过渡的可见性方案；为本次新增或修改的全部过渡补 prefers-reduced-motion 保护。只改过渡与时长曲线、复用既有 token 与曲线，不改布局结构、信息层级、配色与行为。",
+      "non_goals": [
+        "引入新依赖或动画库",
+        "布局结构、信息层级与配色主题调整",
+        "视差或纯装饰性动画",
+        "REQ-008 的静态控件外观（属已完成的 TASK-041）",
+        "后端、同步与数据逻辑"
+      ],
+      "requirement_refs": [
+        "REQ-005"
+      ],
+      "reference_ids": [],
+      "decision_refs": [],
+      "dependencies": [],
+      "blocks": [],
+      "risk": {
+        "level": "low",
+        "decision_ids": []
+      },
+      "scope": {
+        "allowed_paths": [
+          "src/**",
+          "tools/frontend-regression.mjs"
+        ],
+        "protected_paths": [
+          "AGENTS.md",
+          "CLAUDE.md",
+          "WORKFLOW.md",
+          "tasks/**",
+          "docs/PRODUCT.md",
+          "docs/FEATURES.md",
+          "docs/workflow/**",
+          "scripts/project_workflow.py",
+          "scripts/workflow_runtime.py",
+          "scripts/workflow_bootstrap.py",
+          "scripts/workflow_intake.py",
+          "scripts/workflow_progress.py",
+          "WORKFLOW-KIT.md",
+          ".workflow-kit/binding.json",
+          ".workflow-kit/tasks/**",
+          ".workflow-kit/scripts/**",
+          ".workflow-kit/docs/workflow/**",
+          ".workflow-kit/legacy/**",
+          ".workflow-kit/AGENTS.md",
+          ".workflow-kit/CLAUDE.md",
+          ".workflow-kit/WORKFLOW.md",
+          ".workflow-kit/docs/PRODUCT.md",
+          ".workflow-kit/docs/FEATURES.md",
+          ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+          ".workflow-kit/tasks/evidence/baseline-2026-09-16-task042.md"
+        ],
+        "network": "none",
+        "data": "synthetic_only"
+      },
+      "acceptance": [
+        "每个改动点都能在代码中定位到具体选择器与时长/曲线，且取值来自既有动效词汇表（--transition-fast、0.2s 同曲线）",
+        ".list-entering 真正被应用到元素上，不再是被声明却未使用的死代码",
+        "下拉与右键菜单入场为先挂载、下一帧置 open，而不是初始即带 open",
+        "以 display 切换的区块（AI/译文/通知等）改为可过渡的可见性方案，且不可见时仍不可聚焦、不被读屏读到",
+        "prefers-reduced-motion: reduce 覆盖本次新增或修改的全部过渡",
+        "不改行为与布局：前端状态机回归 26/26 全绿",
+        "lint 0/0、build 通过",
+        "UI 证据齐备：主视图与设置页截图 + 逐条「选择器 → 原状态 → 改后时长/曲线 → 触发场景」报告，并区分代码核对与实机观察"
+      ],
+      "gates": [
+        {
+          "id": "lint",
+          "program": "npm",
+          "args": [
+            "run",
+            "lint"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "build",
+          "program": "npm",
+          "args": [
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "frontend",
+          "program": "npm",
+          "args": [
+            "run",
+            "test:frontend"
+          ],
+          "cwd": ".",
+          "required": true
+        }
+      ],
+      "test_review": {
+        "behavior": "preserve",
+        "baseline": {
+          "status": "PASS",
+          "summary": "2026-09-16（CI 门禁修复后）基线：lint 0/0（23 文件）、build 通过、前端状态机回归 26/26、cargo fmt --check 干净、cargo clippy -D warnings 零告警、cargo test 全绿、CI 选定 mock e2e 全绿；CI run 35085964805 两 job 全步成功。本任务只改过渡与可见性方案，不改变行为契约；前端回归不检查动画细节，动画正确性依靠代码定位与实机观察证据。",
+          "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-16-task042.md"
+        },
+        "decision_ids": [
+          "DEC-batch4-polish-refactor-20260916"
+        ],
+        "actions": [
+          {
+            "action": "keep",
+            "target": "既有前端状态机回归 26 项（S-1..S-5）",
+            "reason": "动画改动不得改变交互行为与状态流转，回归必须保持全绿",
+            "gate_ids": [
+              "frontend"
+            ]
+          },
+          {
+            "action": "keep",
+            "target": "lint 与 TypeScript/Vite 构建门禁",
+            "reason": "样式与组件改动仍需类型正确、可构建",
+            "gate_ids": [
+              "lint",
+              "build"
+            ]
+          }
+        ]
+      },
+      "input": {
+        "manifest": ".workflow-kit/tasks/evidence/TASK-042-input-0d749d16110e4cde80205230a2a9535a.json",
+        "digest": "35928e58e51aa93fb785d1cc9471fe1835482194a2390b951b44ec348898ad0f",
+        "source_revision": null,
+        "definition_digest": "9f2801451172a0c1ba22846ba82c2013fc2340012cf193f153aebaf7453be2b3"
+      },
+      "budget": {
+        "started_at_utc": "2026-09-16T10:58:57.780748Z",
+        "deadline_at_utc": "2026-09-16T14:58:57.780748Z",
+        "repair_rounds_used": 1,
+        "extensions": [
+          {
+            "decision_id": "DEC-c22ab3708da24d5399b817d9180edf09",
+            "recorded_at_utc": "2026-09-16T15:25:07.968690Z",
+            "minutes": 30,
+            "repair_rounds": 1,
+            "previous_deadline_at_utc": "2026-09-16T14:58:57.780748Z",
+            "deadline_at_utc": "2026-09-16T15:55:07.968690Z"
+          },
+          {
+            "decision_id": "DEC-84488ccd38b2403599258ae3cf3e24f6",
+            "recorded_at_utc": "2026-09-16T16:40:24.523381Z",
+            "minutes": 180,
+            "repair_rounds": 2,
+            "previous_deadline_at_utc": "2026-09-16T15:55:07.968690Z",
+            "deadline_at_utc": "2026-09-16T19:40:24.523381Z"
+          }
+        ]
+      },
+      "batch_id": "BATCH-7cbc4d36369a4c4d8f5a7dcfeac9f898",
+      "run_ids": [
+        "RUN-6f0e832a53404f5aba4395e9b5d4fd7c",
+        "RUN-144b9715e60a4c09a2316f513c554b27",
+        "RUN-9c9414c0e7f94834b7221abca7acd88d",
+        "RUN-f42870a50ab1460a91ed38a452125d93",
+        "RUN-d96df0d47425428dba073a2de084409f",
+        "RUN-a1989b4a32874dfcb4bd2ef82ca3161f"
+      ],
+      "blockers": [],
+      "evidence": {
+        "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-candidate.json",
+        "candidate_digest": "f3f0744675f72956b1253cb885184c9b80279fef66939434590b14d05e821e1a",
+        "verification_run": "RUN-a1989b4a32874dfcb4bd2ef82ca3161f",
+        "review_run": null,
+        "acceptance_ref": null,
+        "owner_decision_ids": [],
+        "merge_ref": null,
+        "ledger_correction": {
+          "at_utc": "2026-09-16T16:43:50.473297Z",
+          "authorized_by": "user 2026-09-16: 授权台账订正，并继续",
+          "reason": "Worker 声明漏列被删除的 src/hooks/useEnteringClass.ts（声明 7 个，实际差异 8 个）；代码未变，仅补全声明并闭合该运行记录",
+          "original_outcome": "blocked",
+          "original_failure_kind": "protocol",
+          "original_failure_reason": "Worker changed_files does not match the observed project diff",
+          "original_worker_result_ref": ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-worker-result-asrecorded.json",
+          "original_run_ref": ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-run-asrecorded.json",
+          "corrected_changed_files": [
+            "src/components/PlayerBar.tsx",
+            "src/components/Reader.tsx",
+            "src/components/SettingsModal.tsx",
+            "src/components/Timeline.tsx",
+            "src/components/primitives.tsx",
+            "src/components/useEnteringClass.ts",
+            "src/hooks/useEnteringClass.ts",
+            "src/styles/base.css"
+          ],
+          "note": "finished_at_utc 保留原始记录时间；未改动任何源码、候选或受控定义字段"
+        }
+      },
+      "snapshot_paths": [
+        ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-16-task042.md",
+        "src/App.tsx",
+        "src/components",
+        "src/store.ts",
+        "src/styles",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    "brief": {
+      "schema_version": 1,
+      "goal": "fluxreader（Tauri 桌面 RSS 阅读器）可维护、稳定的改造：修复同步/加载缺陷，把最大的单体模块拆小，交互与文案更顺滑自然",
+      "audience": "项目作者本人日常使用的桌面端 RSS/播客阅读器",
+      "acceptance": [
+        "社交布局正文不再无限加载（REQ-001）",
+        "订阅操作与文章状态变更可双向同步到后端（REQ-002）",
+        "本地抓取模式文章数量与状态和后端对齐（REQ-003）",
+        "播客页 toast 位置正确（REQ-004）",
+        "关键交互动画流畅自然（REQ-005）",
+        "文案统一、简洁、无 AI 口癖（REQ-006）",
+        "空壳功能/隐藏 Bug 排查清单经确认后逐项处理（REQ-007）",
+        "UI 控件风格统一，下拉框等不一致组件对齐（REQ-008）",
+        "后端 commands.rs/sync.rs 与前端 SettingsModal/store.ts 拆分完成，拆分过程测试不回归"
+      ],
+      "non_goals": [
+        "更换技术栈或迁移框架",
+        "重新设计全新 UI",
+        "新增大型功能"
+      ],
+      "requirements": [
+        {
+          "id": "REQ-001",
+          "kind": "bug",
+          "description": "社交布局下正文经常一直加载，切换一下布局又能秒加载",
+          "in_scope": true,
+          "acceptance": [
+            "社交布局打开文章正文按预期加载，不再无限加载"
+          ]
+        },
+        {
+          "id": "REQ-002",
+          "kind": "bug",
+          "description": "双向同步未真正做到：订阅操作与文章状态变更未回传同步后端",
+          "in_scope": true,
+          "acceptance": [
+            "订阅操作与文章状态变更（已读/收藏等）双向同步，与后端一致"
+          ]
+        },
+        {
+          "id": "REQ-003",
+          "kind": "bug",
+          "description": "本地抓取模式下，本地文章数量与状态和同步后端不一致",
+          "in_scope": true,
+          "acceptance": [
+            "本地抓取模式文章数量与状态与后端对齐"
+          ]
+        },
+        {
+          "id": "REQ-004",
+          "kind": "bug",
+          "description": "播客页面的 toast 提示位置不正确",
+          "in_scope": true,
+          "acceptance": [
+            "播客页 toast 显示位置正确"
+          ]
+        },
+        {
+          "id": "REQ-005",
+          "kind": "improvement",
+          "description": "客户端使用生硬，动画不够丝滑优雅",
+          "in_scope": true,
+          "acceptance": [
+            "关键交互动画流畅自然，可观察验证"
+          ]
+        },
+        {
+          "id": "REQ-006",
+          "kind": "improvement",
+          "description": "多处文案不规整、太啰嗦、AI 口癖重",
+          "in_scope": true,
+          "acceptance": [
+            "文案统一风格、简洁自然"
+          ]
+        },
+        {
+          "id": "REQ-007",
+          "kind": "improvement",
+          "description": "疑似存在空壳/未完成功能与隐藏 Bug，先由 Agent 排查列出清单",
+          "in_scope": true,
+          "acceptance": [
+            "排查清单列出发现与建议，逐项经用户确认后才纳入实施"
+          ]
+        },
+        {
+          "id": "REQ-008",
+          "kind": "improvement",
+          "description": "UI 控件风格不统一（如下拉选择框），需调整一致",
+          "in_scope": true,
+          "acceptance": [
+            "控件风格统一，下拉框等不一致组件对齐一致"
+          ]
+        }
+      ],
+      "quality": {
+        "priority": "quality_first",
+        "maintainability": "单体模块拆分为领域模块（延续 db.rs 试点模式），前端补行为测试，lint/typecheck/test 作为门禁",
+        "stability": "现有 Rust e2e 与前端回归不回归；同步、抓取、播放主流程稳定",
+        "performance": {
+          "mode": "measure",
+          "workload": "大量订阅与文章（万级）下的启动、布局切换、正文加载",
+          "targets": [
+            "社交布局正文加载不再无限等待，与切换布局后的秒开对齐"
+          ],
+          "rationale": "REQ-001/003 涉及加载性能，需以实际测量判断"
+        }
+      },
+      "compatibility": [
+        "保留现有 SQLite 数据库与迁移",
+        "保留 Fever/GReader/本地抓取等同步协议行为",
+        "保留现有 UI 布局与交互习惯（重构不改版）",
+        "未提交的工作区修改与旧任务记录不动"
+      ],
+      "refactor": {
+        "intent": "refactor",
+        "assessment": {
+          "evidence": [
+            "后端 11.1k 行：db.rs 拆分已完成（TASK-023），剩 commands.rs 1254 行、sync.rs 1201 行、ingestion.rs 766 行；src-tauri/tests 约 18 个 e2e 测试",
+            "前端 7.8k 行：SettingsModal.tsx 1512 行、store.ts 1493 行为最大单体；无组件级行为测试，仅类型检查式回归"
+          ],
+          "recommendation": "incremental",
+          "tradeoffs": "总量较大但每步有验证点；前端需先补行为测试，起步成本高于后端"
+        },
+        "decision": "incremental"
+      },
+      "delivery": {
+        "target": "本机运行（tauri dev / 本地构建），Windows 桌面端",
+        "external_services": "production",
+        "data_boundary": "调试双向同步时连接用户已有的 Fever/GReader 同步后端与 GitHub OAuth，仅读写用户授权账号的订阅数据；不引入新外部服务，不产生费用"
+      },
+      "confirmations": {
+        "refactor_intent": {
+          "status": "confirmed",
+          "answer": "已决定重构，确认范围后实施",
+          "source": "用户在 intake 第一轮选项中选择'已决定重构'（2026-09-15）",
+          "value_digest": "b5cd6f3690daa0017f3a8c2c99ed807812b3bdf228d2df0de1ea8bd1007112b4"
+        },
+        "execution": {
+          "status": "confirmed",
+          "answer": "由当前 Agent 全部处理编码",
+          "source": "用户在 intake 第一轮选项中选择'当前 Agent 全部处理 (推荐)'（2026-09-15）",
+          "value_digest": "aedbce00770df608509b60515240a2eac7850d9855894b3b79bc16b7d7420d92"
+        },
+        "requirements": {
+          "status": "confirmed",
+          "answer": "REQ-001~008 全部纳入；REQ-007 先排查后逐项确认；REQ-008 来自用户第三轮补充'目前有些地方UI不统一，比如下拉选择框……需要调整一致'",
+          "source": "用户第二、三轮补充原文（2026-09-15）",
+          "value_digest": "9260d4b7bf09dca410def3a39194dedeb546abc4ba3d7830c02757849dc36f5f"
+        },
+        "refactor_decision": {
+          "status": "confirmed",
+          "answer": "渐进重构（incremental）：后端延续 db 试点拆 commands/sync，前端先补行为测试再拆单体",
+          "source": "用户在 intake 第二轮选择'两端渐进（推荐）'并在第三轮确认摘要（2026-09-15）",
+          "value_digest": "5c2ff96fc3decffb13909ed427a6ba4dc362a42622b38d3dc8e6afbec772ba4f"
+        },
+        "review": {
+          "status": "confirmed",
+          "answer": "独立上下文审查（independent_required）：每任务由未参与实现的新 Agent 上下文独立复查；高风险任务强制独立审查",
+          "source": "用户在 intake 第二轮选择'独立上下文审查 (推荐)'（2026-09-15）",
+          "value_digest": "5ffdc00a290ed6551cb7d2a553f72ec6e8872381e85febb0a31eaab1dd9855d8"
+        },
+        "goal": {
+          "status": "confirmed",
+          "answer": "修复同步/加载缺陷（REQ-001~004），排查空壳功能与隐藏 Bug（REQ-007），两端单体模块渐进拆分，动画与文案打磨（REQ-005/006）",
+          "source": "用户在 intake 第三轮选择'按这份摘要确认'（2026-09-15）",
+          "value_digest": "529c1cc982277b850a63cefffcb7aa000f1ba5de8d7757cc2de9df18a78e449e"
+        },
+        "scope": {
+          "status": "confirmed",
+          "answer": "按摘要验收清单；非目标：换技术栈/迁移框架、全新 UI 改版、新增大型功能",
+          "source": "用户在 intake 第三轮选择'按这份摘要确认'（2026-09-15）",
+          "value_digest": "6e5528b7959e62210efb0eae56a8f1e51046c93114d1f6e3f9061b4093c6501a"
+        },
+        "quality": {
+          "status": "confirmed",
+          "answer": "质量优先：领域模块拆分+前端行为测试+lint/typecheck/test 门禁；性能按万级订阅文章实测（启动/布局切换/正文加载）",
+          "source": "用户在 intake 第三轮选择'按这份摘要确认'（2026-09-15）",
+          "value_digest": "55313bda5a23bb70e0d652120bac0fa557b020115aa11ae8fe4d4338a261ee38"
+        },
+        "compatibility": {
+          "status": "confirmed",
+          "answer": "保留 SQLite 数据库与迁移、Fever/GReader/本地抓取协议行为、现有 UI 布局与交互习惯、未提交修改与旧任务记录",
+          "source": "用户在 intake 第三轮选择'按这份摘要确认'（2026-09-15）",
+          "value_digest": "5ca7476ab2953f56092b4bc7261fe2e8f81d2184087e1d260cbc46f05272fab8"
+        },
+        "ui": {
+          "status": "confirmed",
+          "answer": "沿用现有 UI 不改版；统一控件风格（下拉选择框等），打磨动画与文案",
+          "source": "用户在 intake 第三轮选择'沿用现有UI'并补充控件不统一问题（2026-09-15）",
+          "value_digest": "6516349700a5a7987eb539bbe52fd7d35ed22fccc7808cdf969e3e48e8e32785"
+        },
+        "delivery": {
+          "status": "confirmed",
+          "answer": "本机运行（tauri dev / 本地构建），Windows 桌面端；外部服务=production：调试连用户已有同步后端，仅读写授权账号订阅数据",
+          "source": "用户在 intake 第三轮选择'本机运行+真实后端验证 (推荐)'（2026-09-15）",
+          "value_digest": "c4f67a714f92c81cb6f2b7fe8d53cb208796243befd97878cba60a937c44be24"
+        },
+        "services": {
+          "status": "confirmed",
+          "answer": "仅用户已有的 Fever/GReader 同步后端与 GitHub OAuth，读写授权账号的订阅数据；不引入新外部服务，不产生费用",
+          "source": "用户在 intake 第三轮确认交付与调试边界（2026-09-15）",
+          "value_digest": "1bc1e23d621a3029737977bf1684085984bdaec607d37a947ae0b3e452b7d65f"
+        },
+        "budget": {
+          "status": "confirmed",
+          "answer": "解除上限：单任务 240 分钟、每批 12 任务、批次自动续接；修复上限 4 轮；financial=none",
+          "source": "用户 2026-09-15：'解除时间和任务数量限制……跑完全部流程'",
+          "value_digest": "562e52396c66a3ed6382343dece43f468d1403fd15de23153c534033ae724f1b"
+        },
+        "authority": {
+          "status": "confirmed",
+          "answer": "文档/基线/代码/commit 允许；依赖与 CI 暂不允许；push/PR/merge/release=ask",
+          "source": "用户 2026-09-15：'批准并commit，继续'（其余沿用既有确认）",
+          "value_digest": "35bb766c3d75a22acac11c29bfa698babec1bed830a30325de708cb77f2e06cf"
+        }
+      },
+      "legacy_review": {
+        "reviewed_paths": [
+          "README.md（含旧流程说明、OPT-001~010 保留决定）",
+          "AGENTS.md 旧版 76 行（git HEAD：工作约定/阶段边界/角色与交付/变更纪律/预算/Note 规范）",
+          "CLAUDE.md 旧版（git HEAD：Claude Code 执行器角色与交付契约）",
+          ".workflow-kit/ 旧版安装（git HEAD 150 个文件，含 legacy/ 副本）",
+          "docs/ 旧文档（git HEAD 81 个文件：HANDOFF/PROCESS/EXECUTION-CONTRACT/FEATURES/BASELINE 等）",
+          "tasks/ 旧任务目录（git HEAD：PROJECT.json/EXECUTION-POLICY.json/items）",
+          ".agents/ 旧笔记与 write-notes-like-deepseek 技能（git HEAD，工作区已删除）",
+          "最近提交 26a6a51..8966ece（TASK-023 db.rs 拆分试点、TASK-028 greader ClientLogin 修复）"
+        ],
+        "preserved_constraints": [
+          "五种内容布局（文章/社交/画廊/播客/通知）、GReader/Fever 同步、AI 摘要与翻译为核心能力，必须保留",
+          "OPT-001~003、OPT-005~010 已确认保留；OPT-004 配置同步仅限订阅源与客户端设置，不同步 API Key/密码等敏感凭据",
+          "不随任务附带升级依赖、全仓格式化或重写历史迁移",
+          "本仓库 ignored 测试包含真实服务器测试，不得统一运行 cargo test -- --ignored",
+          "保留 src/、src-tauri/、tools/ 结构直到具体迁移任务获准",
+          "不删除用户数据；不要求兼容旧数据不代表允许删除用户数据"
+        ],
+        "task_disposition": "旧任务 TASK-023（db.rs 拆分）与 TASK-028（greader ClientLogin）已按提交完成，不重复计数。旧任务队列 tasks/、旧文档 docs/、旧 .workflow-kit/ 与 .agents/ 笔记体系在工作区被用户未提交删除：按用户指示保留该删除状态，不恢复、不转换为当前队列；需要时从 git 历史查阅。新队列自 .workflow-kit/tasks/ 重新规划。",
+        "workflow_resolution": "当前流程入口为根 WORKFLOW-KIT.md 与 .workflow-kit/（本次新接入 connected=true，isolated 布局，工具 digest 1574d860）。主会话为总控，Worker 仅在明确 task_id/run_id 时指定。旧角色模型（管理 agent 调度 Claude Code CLI 编码）由用户本次明确选择取代：agent_only + 独立上下文审查（independent_required）。旧约束'不使用真实账号运行同步测试'由用户本次明确选择取代：允许连接用户已有同步后端做真实验证（仅读写授权账号订阅数据）。旧版 workflow-kit 安装由本次 bootstrap 重置为当前版本；旧运行无未完成批次需要迁移。",
+        "unresolved_conflicts": []
+      },
+      "ui": {
+        "mode": "existing",
+        "style_intent": "保持现有布局与交互习惯，重构不改版；统一控件风格（下拉选择框等不一致组件对齐一致），打磨动画流畅度与文案",
+        "target_devices": [
+          "Windows 桌面端"
+        ]
+      },
+      "recovery": {
+        "network_backoff_seconds": [
+          5,
+          15
+        ],
+        "max_cli_call_seconds": 600
+      },
+      "authority": {
+        "documentation": true,
+        "baseline": true,
+        "code": true,
+        "dependencies": false,
+        "ci": false,
+        "commit": "ask",
+        "push": "ask",
+        "pull_request": "ask",
+        "merge": "ask",
+        "release": "ask"
+      },
+      "execution": {
+        "mode": "agent_only",
+        "coder": "current_agent",
+        "reviewer": "current_agent",
+        "review_mode": "independent_required",
+        "worker_argv": [],
+        "reviewer_argv": [],
+        "model": null,
+        "allow_non_git": false
+      },
+      "financial": {
+        "mode": "none",
+        "amount_usd": null
+      },
+      "budget": {
+        "max_repair_rounds": 4,
+        "max_task_wall_minutes": 240,
+        "max_tasks_per_batch": 12,
+        "max_concurrent_workers": 1,
+        "financial": {
+          "mode": "none",
+          "amount_usd": null,
+          "scope": "batch"
+        },
+        "batch_rollover": "allowed"
+      },
+      "capabilities": {
+        "file_read_write": null,
+        "terminal": null,
+        "process_control": null,
+        "independent_context": null
+      },
+      "approval_source": "用户 2026-09-15 intake 三轮确认（refactor_intent/execution/review/refactor_decision/摘要含预算与权限）及原始指令'我授权新增工作流文件和规则入口，保留原文、旧任务、业务代码及未提交修改'"
+    },
+    "reference_candidates": [],
+    "read_first": [
+      "AGENTS.md",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+      ".workflow-kit/docs/workflow/FRONTEND.md"
+    ],
+    "candidate_digest": "f3f0744675f72956b1253cb885184c9b80279fef66939434590b14d05e821e1a",
+    "deadline_at_utc": "2026-09-16T19:40:24.523381Z",
+    "role": "reviewer",
+    "verification": {
+      "schema_version": 1,
+      "id": "RUN-a1989b4a32874dfcb4bd2ef82ca3161f",
+      "task_id": "TASK-042",
+      "kind": "verification",
+      "outcome": "completed",
+      "executor": {
+        "harness": "local_process",
+        "model": null,
+        "context_id": "tool-538ebd24d4bf4ccbaa6ff7937d38ceb0"
+      },
+      "started_at_utc": "2026-09-16T16:44:27.926787Z",
+      "finished_at_utc": "2026-09-16T16:44:31.452720Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "input_digest": "35928e58e51aa93fb785d1cc9471fe1835482194a2390b951b44ec348898ad0f",
+      "candidate_digest": "f3f0744675f72956b1253cb885184c9b80279fef66939434590b14d05e821e1a",
+      "raw_output_refs": [
+        ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-lint.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-build.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-frontend.stderr.txt"
+      ],
+      "checks": [
+        {
+          "gate_id": "lint",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-lint.stderr.txt",
+          "candidate_digest": "f3f0744675f72956b1253cb885184c9b80279fef66939434590b14d05e821e1a",
+          "command": {
+            "argv": [
+              "C:\\Program Files\\nodejs\\node.EXE",
+              "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "lint"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-09-16T16:44:27.991400Z",
+            "finished_at_utc": "2026-09-16T16:44:28.258487Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-lint.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-lint.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "build",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-build.stderr.txt",
+          "candidate_digest": "f3f0744675f72956b1253cb885184c9b80279fef66939434590b14d05e821e1a",
+          "command": {
+            "argv": [
+              "C:\\Program Files\\nodejs\\node.EXE",
+              "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "build"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-09-16T16:44:28.267485Z",
+            "finished_at_utc": "2026-09-16T16:44:30.082783Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-build.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-build.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "frontend",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-frontend.stderr.txt",
+          "candidate_digest": "f3f0744675f72956b1253cb885184c9b80279fef66939434590b14d05e821e1a",
+          "command": {
+            "argv": [
+              "C:\\Program Files\\nodejs\\node.EXE",
+              "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "test:frontend"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-09-16T16:44:30.091679Z",
+            "finished_at_utc": "2026-09-16T16:44:31.424447Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-frontend.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-frontend.stderr.txt"
+          }
+        }
+      ],
+      "review": {
+        "mode": null,
+        "verdict": null,
+        "report": null,
+        "candidate_digest": null
+      },
+      "estimated_cost_usd": null,
+      "pid": 38532,
+      "controller_pid": 11344,
+      "commands": [
+        {
+          "argv": [
+            "C:\\Program Files\\nodejs\\node.EXE",
+            "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "lint"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-09-16T16:44:27.991400Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-lint.stderr.txt",
+          "finished_at_utc": "2026-09-16T16:44:28.258487Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "C:\\Program Files\\nodejs\\node.EXE",
+            "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-09-16T16:44:28.267485Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-build.stderr.txt",
+          "finished_at_utc": "2026-09-16T16:44:30.082783Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "C:\\Program Files\\nodejs\\node.EXE",
+            "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "test:frontend"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-09-16T16:44:30.091679Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-a1989b4a32874dfcb4bd2ef82ca3161f-frontend.stderr.txt",
+          "finished_at_utc": "2026-09-16T16:44:31.424447Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        }
+      ]
+    },
+    "verification_ref": ".workflow-kit/tasks/runs/RUN-a1989b4a32874dfcb4bd2ef82ca3161f.json",
+    "required_review_areas": [
+      "requirements",
+      "regression",
+      "failure_paths",
+      "maintainability",
+      "performance"
+    ],
+    "required_review_mode": "independent_required",
+    "candidate_files": [
+      {
+        "path": ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+        "sha256": "a37926e15835298f8856cd7b7e03985fdbe459fee29c6b4c2ed06dc24e8cf77d"
+      },
+      {
+        "path": ".workflow-kit/tasks/evidence/baseline-2026-09-16-task042.md",
+        "sha256": "664ce7165ae61ac687c66b6b77d2e577ae22c73835f8ec55a6a52ae99cdf543c"
+      },
+      {
+        "path": "src/App.tsx",
+        "sha256": "493e22e8b971d13da1807bd7ab1dabfbc14f15d8b74efe212da286a84e6a810f"
+      },
+      {
+        "path": "src/components/ContextMenu.tsx",
+        "sha256": "7e05e08504eb6a0dd4a4e6342fd28756d8ff59431c0b7e572a0b9371c4202e3e"
+      },
+      {
+        "path": "src/components/Overlays.tsx",
+        "sha256": "41f898f8877a29042f97b9a7d5610c2b1db9c9c0ec1bd6967dcdcc1d83be7f7f"
+      },
+      {
+        "path": "src/components/PlayerBar.tsx",
+        "sha256": "594370743c4fa6283def46b173ffd3ceb95f519fab57e0ccbef3a9d120d22202"
+      },
+      {
+        "path": "src/components/Reader.tsx",
+        "sha256": "9f4de1bdeae9223ad0073f2479915ae350dcecacdeff09a30b3d6400c2d830ac"
+      },
+      {
+        "path": "src/components/SettingsModal.tsx",
+        "sha256": "da61ebb9d690d995314b52ae86cd13ec33e43df739638a0c9dc6208086414ac0"
+      },
+      {
+        "path": "src/components/Sidebar.tsx",
+        "sha256": "27b1cbb25102a296802a2f84e61868851944087ad2084661310d2e75e83c50cf"
+      },
+      {
+        "path": "src/components/Timeline.tsx",
+        "sha256": "590a15e1cce9270ea6bc15360d7408d093bd5c456e945e452e7f1588621ff592"
+      },
+      {
+        "path": "src/components/icons.tsx",
+        "sha256": "3145b720c29b014c8daca4524a1565576f74f7ea1c390909850a33c9af4d3935"
+      },
+      {
+        "path": "src/components/primitives.tsx",
+        "sha256": "5fc76054f76b189f75608db5751311222279f90d2a677c988aedc99ab5f2258a"
+      },
+      {
+        "path": "src/components/useEnteringClass.ts",
+        "sha256": "4c509ea1cf81db32f870431136b4d542218ae0816473c645063237d7a2f0734f"
+      },
+      {
+        "path": "src/store.ts",
+        "sha256": "254a20e63b0e5a473c54d0fa24cd0742d0d9ccd69e9d5a2040fea663813f06b6"
+      },
+      {
+        "path": "src/styles/base.css",
+        "sha256": "d9f7fa44f51730cf520408207562ca8025dac04d19f49ff85999a17c17b7089f"
+      },
+      {
+        "path": "src/styles/tokens.css",
+        "sha256": "096c40ae8a7ad8923237c780f1611c784990340674ae09b2850274f02335fa2b"
+      },
+      {
+        "path": "tools/frontend-regression.mjs",
+        "sha256": "fb1174a9f4d0bc478512a70ea29990a346e9ee372e1f99a8bd1fd3e747208517"
+      }
+    ],
+    "ui_evidence_directory": ".workflow-kit/tasks/evidence/TASK-042-ui/RUN-a1989b4a32874dfcb4bd2ef82ca3161f/"
+  },
+  "instruction": "把此输入交给未参与实现的新上下文；同模型即可，不要求 CLI。不要复制作者会话或通过预期。不能创建独立上下文时如实报告，按已确认审查策略处理。"
+}

@@ -15,7 +15,7 @@
     "覆盖层：弹窗卡片入场、灯箱图片、设置页分区切换、加载更多状态",
     "无障碍：prefers-reduced-motion: reduce 下关闭或显著削弱上述全部过渡"
   ],
-  "status": "verified",
+  "status": "blocked",
   "objective": "按 UI 契约（.workflow-kit/docs/UI-CONTRACT-REQ-005.md）打磨交互过渡：把已声明却从未被应用的 .list-entering 真正接到列表内容上；下拉/右键菜单改为先挂载、下一帧再置 open；阅读器视图与文章切换、播放条与全屏播放器、折叠展开区块、覆盖层与加载更多改用可过渡的可见性方案；为本次新增或修改的全部过渡补 prefers-reduced-motion 保护。只改过渡与时长曲线、复用既有 token 与曲线，不改布局结构、信息层级、配色与行为。",
   "non_goals": [
     "引入新依赖或动画库",
@@ -182,55 +182,40 @@
     "RUN-c765ce94d3b4418aa71e503db85c104b",
     "RUN-4fbd80b68ea64d4f938e790783c159d3",
     "RUN-36c2bbeca0fd40ce853fe75faa4133d4",
-    "RUN-509596721679456e9133448dbf6959a6",
-    "RUN-22754520e36a4bb0ba66ec40f88f422e"
+    "RUN-509596721679456e9133448dbf6959a6"
   ],
-  "blockers": [],
+  "blockers": [
+    "TASK-042: review evidence changed after approval"
+  ],
   "evidence": {
     "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-36c2bbeca0fd40ce853fe75faa4133d4-candidate.json",
     "candidate_digest": "059880b67681d553cc85cc6dd8db81211f9027eac79828e00ced121dd28be133",
     "verification_run": "RUN-36c2bbeca0fd40ce853fe75faa4133d4",
-    "review_run": "RUN-22754520e36a4bb0ba66ec40f88f422e",
+    "review_run": "RUN-509596721679456e9133448dbf6959a6",
     "acceptance_ref": null,
     "owner_decision_ids": [],
     "merge_ref": null,
-    "ledger_corrections": [
-      {
-        "at_utc": "2026-09-16T16:43:50.473297Z",
-        "authorized_by": "user 2026-09-16: 授权台账订正，并继续",
-        "reason": "Worker 声明漏列被删除的 src/hooks/useEnteringClass.ts（声明 7 个，实际差异 8 个）；代码未变，仅补全声明并闭合该运行记录",
-        "original_outcome": "blocked",
-        "original_failure_kind": "protocol",
-        "original_failure_reason": "Worker changed_files does not match the observed project diff",
-        "original_worker_result_ref": ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-worker-result-asrecorded.json",
-        "original_run_ref": ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-run-asrecorded.json",
-        "corrected_changed_files": [
-          "src/components/PlayerBar.tsx",
-          "src/components/Reader.tsx",
-          "src/components/SettingsModal.tsx",
-          "src/components/Timeline.tsx",
-          "src/components/primitives.tsx",
-          "src/components/useEnteringClass.ts",
-          "src/hooks/useEnteringClass.ts",
-          "src/styles/base.css"
-        ],
-        "note": "finished_at_utc 保留原始记录时间；未改动任何源码、候选或受控定义字段"
-      },
-      {
-        "at_utc": "2026-09-16T17:29:44.667372Z",
-        "authorized_by": "user 2026-09-16: 授权台账订正，并继续",
-        "reason": "审查自锁：报告把 .workflow-kit/tasks/items/TASK-042.json 列为证据，而 review() 在算出 review_quality_digest 之后又会改写该任务记录，check_project 随即判 'review evidence changed after approval'，任务落入 failure_kind=evidence（CLI 无恢复入口）。订正只恢复审查阶段状态，并改用不含可改写台账文件的报告；代码、候选与审查结论均未改动",
-        "original_status": "blocked",
-        "original_failure_kind": "evidence",
-        "original_blockers": [
-          "TASK-042: review evidence changed after approval"
-        ],
-        "superseded_review_run": "RUN-509596721679456e9133448dbf6959a6",
-        "invalid_evidence_path": ".workflow-kit/tasks/items/TASK-042.json",
-        "archived_task_ref": ".workflow-kit/tasks/evidence/RUN-509596721679456e9133448dbf6959a6-task-asrecorded.json",
-        "archived_run_ref": ".workflow-kit/tasks/evidence/RUN-509596721679456e9133448dbf6959a6-run-asrecorded.json"
-      }
-    ]
+    "ledger_correction": {
+      "at_utc": "2026-09-16T16:43:50.473297Z",
+      "authorized_by": "user 2026-09-16: 授权台账订正，并继续",
+      "reason": "Worker 声明漏列被删除的 src/hooks/useEnteringClass.ts（声明 7 个，实际差异 8 个）；代码未变，仅补全声明并闭合该运行记录",
+      "original_outcome": "blocked",
+      "original_failure_kind": "protocol",
+      "original_failure_reason": "Worker changed_files does not match the observed project diff",
+      "original_worker_result_ref": ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-worker-result-asrecorded.json",
+      "original_run_ref": ".workflow-kit/tasks/evidence/RUN-d96df0d47425428dba073a2de084409f-run-asrecorded.json",
+      "corrected_changed_files": [
+        "src/components/PlayerBar.tsx",
+        "src/components/Reader.tsx",
+        "src/components/SettingsModal.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/primitives.tsx",
+        "src/components/useEnteringClass.ts",
+        "src/hooks/useEnteringClass.ts",
+        "src/styles/base.css"
+      ],
+      "note": "finished_at_utc 保留原始记录时间；未改动任何源码、候选或受控定义字段"
+    }
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
@@ -316,16 +301,8 @@
       "at_utc": "2026-09-16T17:16:48.943000Z",
       "note": "预先定义的必需测试全部通过，日志已保存",
       "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
-    },
-    {
-      "at_utc": "2026-09-16T17:29:44.696760Z",
-      "note": "台账订正（owner 授权）：审查证据引用了工具会改写的任务记录而自锁，恢复审查阶段",
-      "next_action": "用不含可改写台账文件的报告重新记录审查"
-    },
-    {
-      "at_utc": "2026-09-16T17:32:40.035398Z",
-      "note": "当前候选的测试与审查通过",
-      "next_action": "继续已授权任务；所属功能完成后请用户验收"
     }
-  ]
+  ],
+  "resume_phase": "review",
+  "failure_kind": "evidence"
 }

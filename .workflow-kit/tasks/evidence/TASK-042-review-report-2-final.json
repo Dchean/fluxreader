@@ -1,0 +1,100 @@
+{
+  "task_id": "TASK-042",
+  "candidate_digest": "059880b67681d553cc85cc6dd8db81211f9027eac79828e00ced121dd28be133",
+  "verification_run": "RUN-36c2bbeca0fd40ce853fe75faa4133d4",
+  "verdict": "PASS",
+  "summary": "本轮为第二轮独立审查，我未参与实现，结论全部来自对仓库当前状态的直接核对，不采信作者声明。核对方式：先用候选清单对工作区逐文件重算 sha256（17/17 全部一致，构建后复算仍一致，被审对象确为该候选）；再对比两轮候选，确认本轮相对上一候选只有 3 个文件不同（src/components/SettingsModal.tsx、src/components/useEnteringClass.ts、src/styles/base.css），其余 14 个文件与上一轮我逐行核对过的完全同哈希，因此上轮已验证的播放条/下拉菜单/覆盖层/无障碍等结论对本报继续有效；随后阅读这三个文件的完整工作区差异与相关原始 CSS 上下文，最后独立重跑三个门禁并重看证据。三条上轮 finding 均已真实修复：(1) base.css:3677-3703 新增 .social-translated-block/.show 与 .notif-translated-block/.show 的 transition(opacity/transform/display)+transition-behavior: allow-discrete，@starting-style（base.css:3722-3731）也补入这两个 .show 选择器；与原始中段规则（base.css:1148-1163、1470-1484）逐属性对照：追加规则同特异度且更靠后因而胜出，原始 .show 只声明 display:block、不含 transform，不会反向破坏 from 态；隐藏态仍为 display:none；两块的字体/边框/内边距等视觉属性由原始规则按属性级联保留。(2) 设置页分类分组改为常驻挂载（SettingsModal.tsx:547 `group-mgr-body${cat.settingsCollapsed ? '' : ' open'}`）配 base.css:3708-3720 的 display 离散过渡；原始 .group-mgr-body 规则（base.css:2456）只设 padding: 10px 0，追加规则未覆盖该属性，内边距保留；收起态 display:none 故仍不可聚焦、不被读屏读到；aria-expanded（SettingsModal.tsx:474）与 chevron（:477）逻辑未改；分组体内只有受控的 SwitchInline/FluxDropdown（其 effect 均以 open 为前提，无挂载副作用）与按钮，没有任何依赖「收起即卸载」的逻辑，全仓也没有焦点陷阱或 querySelectorAll('.group-mgr-body') 之类依赖其缺席的代码。(3) useEnteringClass.ts:24-28 的 animationend 回调加了 event.target !== el 早退，我确认这正是我上轮指出的冒泡路径（.load-more-spinner 的有限 overlayFadeIn 结束事件冒泡到宿主 .timeline-scroll-body），修复后只有宿主自身动画结束才摘类名。门禁实跑：lint 0 警告 0 错误（24 文件）、build 通过、前端状态机回归 26/26，与提供的日志一致；产物无新依赖。交互报告已修正：删除了「设置页不存在折叠语义」这处与代码不符的断言，新增第 14/15 行覆盖两个译文块与设置页分组、第 16 行覆盖 reduced-motion，并记录了 hook 的 target 校验。证据边界需要明确：以上全部为代码路径核对与门禁实跑所得，我按约束未启动桌面应用；两张 PNG 与上轮字节完全相同（哈希未变），仍是修复轮之前的静帧，只能证明静态布局/配色/控件外观未被破坏，不能证明任何过渡真的在播放——报告中对此已显式声明且未用静帧冒充动态证据，故不做扣分；我另行以代码核对确认静态结果未被破坏（三个新增过渡对象的可见态与收起态在视觉上与改动前一致：展开态 display:block/opacity 1/transform none，收起态 display:none）。综合判定 PASS，未发现需要修复的缺陷。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐条复核 7 个 ui_checks 在代码中的落点、时长/曲线来源，并确认本轮补上的两处：1）列表与视图切换：useEnteringClass 挂在 .timeline-scroll-body（Timeline.tsx:63-67、167），base.css:893 的 .list-entering 已被真正应用，时长取自 --transition-fast；2）下拉与右键菜单：菜单先挂载、下一帧 rAF 补 open（primitives.tsx:33-39、101），内联 transform 已移除并用 classList 维护 drop-up（primitives.tsx:56-61），层叠顺序（base.css:143-172、3554-3560）使 from 态可渲染；.ctx-menu 按需挂载 + 入场动画（ContextMenu.tsx:90、base.css:3537）；3）阅读器：reader-entering 以 art.id|isShowingTranslatedProse 为键（Reader.tsx:44、147）；4）播放：播放条与全屏播放器常驻挂载、由 .active/.open 驱动（PlayerBar.tsx:200、264-274、302），base.css:3568-3621 用 display 入表 + allow-discrete + @starting-style 双向过渡；5）折叠与展开，本轮补齐后完整：侧栏订阅树 .feed-sub-list（base.css:3544 挂载即播动画）、设置页分类分组 .group-mgr-body（base.css:3708-3720 双向离散过渡，SettingsModal.tsx:547 常驻 + .open）、通知/AI 区块 .notif-ai-box/.ai-reader-box（base.css:3646-3680）、译文块 .social-translated-block/.notif-translated-block（base.css:3677-3703，本轮新增，对应 Timeline.tsx:384、627 的 .show 切换），四类都做到了隐藏态 display:none，不可聚焦、不被读屏读到；6）覆盖层：ModalOverlay 卡片补 modal-card 类（primitives.tsx:272）配 base.css:3514-3523，灯箱与确认弹窗用 cardScaleIn（base.css:3528-3534），设置页分区 pane-entering（SettingsModal.tsx:63、112），加载更多 .load-more-spinner 追加 overlayFadeIn 且保留旋转（base.css:3634-3636）；7）无障碍：base.css:3744-3767 的 reduce 块用通配把全部过渡/动画压到 0.01ms、对本次新增挂载动画显式 animation:none，本轮新增的三处过渡（译文块、设置页分组）均由全局 transition-duration 一并压平，注释也已同步更新。另核：时长/曲线全部来自既有词汇表（--transition-fast 与既有 0.2s cubic-bezier(0.16,1,0.3,1)），本轮新增 CSS 无任何自造时长；未引入依赖（package.json 不在任何改动内，构建产物无新 chunk 依赖）；未给 .app-root/2col/3col 加 grid-template-columns 过渡（base.css:225-228 既有取舍保留）；无布局结构、配色、信息层级与 REQ-008 控件外观改动（本轮 base.css 差异仅为 REQ-005 段尾追加 + @starting-style 选择器列表 + reduce 段注释，4 处删除全是注释/选择器行的改写，无功能规则被移除）。 说明：任务记录 / 卡片（.workflow-kit/tasks/items/TASK-042.json 等）在核对需求与验收条款时被查阅，但不列入 evidence_files——工作流工具在处理本次审查时会重写该台账文件，它作为被绑定的证据会因写入后哈希变化而不可用。",
+      "evidence_files": [
+        ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+        "src/styles/base.css",
+        "src/styles/tokens.css",
+        "src/components/SettingsModal.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/primitives.tsx",
+        "src/components/PlayerBar.tsx",
+        "src/components/Reader.tsx",
+        "src/components/ContextMenu.tsx",
+        "src/components/useEnteringClass.ts"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "独立重跑三个门禁并与本轮日志对照：npm run lint = Found 0 warnings and 0 errors（24 files / 116 rules）；npm run build = tsc -b && vite build 通过（52 modules，dist CSS 59.90 kB，本轮日志 59.90 kB 亦一致）；npm run test:frontend = 「前端逻辑回归 26/26 通过」，逐条 S-1..S-5 与 bootstrap/dataMode 全部 ✅，三个 stderr 均为空或不含失败（frontend stderr 仅 Node loader 弃用告警与测试内故意触发的 db_corrupt 信息）。行为契约未被弱化：tools/frontend-regression.mjs 两轮候选哈希完全相同（fb1174a9f4d0bc478512a70ea29990a346e9ee372e1f99a8bd1fd3e747208517），本轮工作区未修改它，26 项断言原样保留，无替换或退役。改动面核对：本轮工作区改动恰为声明中的 3 个文件（SettingsModal.tsx / useEnteringClass.ts / base.css），其余 14 个候选文件与上一候选同哈希且与 HEAD 提交一致，未夹带无关改动。门禁检出能力如实说明：前端回归只覆盖状态流转、不检查动画细节，因此它无法发现本任务这类「过渡未生效/未覆盖」的缺陷，动画正确性只能靠代码定位；任务卡、基线与交互报告均如实声明了这一点，不存在用测试绿灯冒充动画通过。另核 SettingsModal 侧：分组体改为常驻后，删除/编辑/开关等控件仍全部由事件驱动，收起态 display:none 使其不可点击，无回归路径被打开。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-36c2bbeca0fd40ce853fe75faa4133d4-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-36c2bbeca0fd40ce853fe75faa4133d4-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-36c2bbeca0fd40ce853fe75faa4133d4-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-36c2bbeca0fd40ce853fe75faa4133d4-candidate.json",
+        ".workflow-kit/tasks/evidence/RUN-4fbd80b68ea64d4f938e790783c159d3-changes.json",
+        "src/store.ts"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "复核上轮唯一失败路径缺陷并逐个走异常分支。(1) animationend 冒泡：useEnteringClass.ts:24-28 现以 event.target !== el 早退，我确认触发源正是 .timeline-scroll-body 的子孙 .load-more-spinner（Timeline.tsx:220，本轮保留了 base.css:3635 追加的有限 overlayFadeIn），修复后子孙动画结束不再摘掉宿主的 list-entering；监听仍以同一函数引用注册/注销，cleanup 逻辑未变，不会泄漏。(2) reduced-motion：base.css:3744-3767 通配把 animation/transition duration 压到 0.01ms、iteration-count 压到 1，本次新增的三处过渡（译文块、设置页分类分组）都由全局 transition-duration 压平，display 的 allow-discrete 在 0.01ms 下近乎瞬时，两个方向均无可感知动效；.load-more-spinner 以更高优先级的 !important 保留旋转，属显式且有理由的例外。已知无害副作用（不作为 finding）：reduce 下 animationend 不触发，entering 类不会被摘掉，但对应规则只声明 animation，残留类无视觉效果。(3) 重复快速切换：hook 每次 key 变化先摘类、强制重排、再挂类，cleanup 移除旧监听；译文块的 .show 与分组的 .open 都是纯类切换，反复切换不会累积状态，display 离散过渡按规范在两个方向都保持元素可渲染直到过渡结束。(4) 元素永不触发 animationend：只在 reduce 或动画被外部移除时发生，残留类无副作用，未发现依赖 animationend 做功能切换的代码。(5) 卸载清理：hook cleanup 同时移除监听与类名；虚拟滚动下卡片卸载不会残留。(6) 菜单向上弹（drop-up）：classList 维护 drop-up、rAF 维护 open，React 因 className 属性值跨渲染不变不会重写该属性，层叠顺序（.drop-up 0,2,0 在 .open 之后、.drop-up.open 0,3,0 再覆盖）保证两个方向 from 态正确。(7) 隐藏态是否仍阻挡交互：译文块、AI/通知块、设置页分组、播放条、全屏播放器隐藏时均为 display:none，不可聚焦、不被读屏读到，也不拦截点击。(8) 本轮新加的常驻挂载是否打开新失败路径：设置页分组体常驻后，其内部 FluxDropdown 的两个 effect 均以 open 为前提（无挂载副作用）、SwitchInline 为受控无状态；全仓无焦点陷阱、无 querySelectorAll 依赖该元素缺席（仅 imageProxy 使用 querySelectorAll 处理图片），因此折叠态不会残留可聚焦的隐藏控件，也不会产生「聚焦到不可见元素」的问题。未发现需要修复的缺陷。",
+      "evidence_files": [
+        "src/components/useEnteringClass.ts",
+        "src/components/Timeline.tsx",
+        "src/components/SettingsModal.tsx",
+        "src/components/primitives.tsx",
+        "src/styles/base.css"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "本轮改动结构清晰、可读性好。useEnteringClass.ts 的修复是最小改动：clear 由无参改为 (event: AnimationEvent)，加两行注释说明冒泡原因并早退，未改动 hook 的 API（ref + key + className 三参数）与三个调用点的用法，泛型与 deps 不变。SettingsModal 的分组体改动是把条件渲染去掉、改由模板字符串拼 .open 类，嵌套结构按层重新缩进，语义与原来一一对应，没有抽取多余抽象；分组体的所有视觉属性（内边距）仍由原规则承担，新规则只负责可见性机制，职责边界干净。CSS 侧三处新规则与既有 .notif-ai-box/.ai-reader-box 写法完全一致（同一属性表、同一 transition-behavior、集中放在同一段 @starting-style），复用既有 --transition-fast，未新增时长常量、未新增键帧、无重复定义；重复的三段 transition 属性表虽是复制，但在 CSS 中属可接受的同构写法，且都带注释说明根因，不会造成理解负担。依赖方向正确：hook 只依赖 react，组件依赖 hook，动画经类名解耦样式与逻辑。轻微观察（非缺陷、不构成 finding）：侧栏订阅树用「挂载即播动画」而设置页分组用「常驻 + .open 过渡」，同一仓库内两种折叠实现并存；这是两者折叠方向要求不同（前者只需展开、后者要求折叠与展开双向）导致的合理差异，两处注释都写明了理由。另有流程性观察一并记录（非缺陷）：交互报告是契约要求的关键证据，但不在 TASK-042 的 snapshot_paths 内，因此不受 candidate_digest 约束；本轮它被合法更新（修正不实断言、补两行），但如果将来需要「证据与候选严格绑定」，应把该报告纳入 snapshot_paths，属后续任务定义层面的改进项，不是本次交付的问题。",
+      "evidence_files": [
+        "src/components/useEnteringClass.ts",
+        "src/components/SettingsModal.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/Reader.tsx",
+        "src/styles/base.css",
+        ".workflow-kit/tasks/evidence/TASK-042-interaction-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "以下为静态分析结论，未做任何实测基准，也不声称性能提升；范围限定为本次改动涉及的 CSS 与渲染路径。新增的三处动效只作用于 opacity 与 transform（合成器友好），display 参与的是 allow-discrete 离散切换而非逐帧布局动画，未动画 width/height/padding 等触发布局的属性。设置页分组改为常驻挂载后，折叠分组的内容行会留在 DOM 中（此前收起即卸载、不渲染），代价是折叠分类的源行与其 favicon <img> 会一并渲染/请求；影响有界：默认 settingsCollapsed 为 false（store.ts:1273），即默认本就全量渲染，只有用户主动收起的分类才多出这部分节点，且限于设置页而非主列表，未发现测量得到的回归，也不据此声称改善。useEnteringClass 每次切换做一次 void el.offsetWidth 强制重排，仅发生在布局/筛选/订阅切换这类低频交互且只针对单个容器元素；退出动画靠 CSS transition/离散过渡，不随 React 渲染重新触发，没有在 render 中创建动画对象或监听器，每帧无新增 JS 工作。未使用 will-change，无额外常驻层提升。播放条/全屏播放器/弹窗卡片等常驻挂载元素在隐藏态均为 display:none（全屏播放器的 backdrop-filter 在 display:none 下不产生模糊开销），不占布局也不参与绘制。唯一的可留意项是 .timeline-scroll-body 与 .group-mgr-body 在过渡期间带 transform，会短暂成为绝对/固定后代的包含块，但两者内部都没有 position:fixed 后代（下拉菜单经 createPortal 挂到 body，不受该包含块影响），未发现实际影响。",
+      "evidence_files": [
+        "src/styles/base.css",
+        "src/components/SettingsModal.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/useEnteringClass.ts",
+        "src/components/primitives.tsx"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+    "checked_states": [
+      "列表与视图切换：切换布局/筛选/订阅时列表内容淡入（含 .list-entering 死代码修复）",
+      "下拉菜单与右键菜单：打开时的入场过渡（先挂载、下一帧置 open）",
+      "阅读器：视图切换与文章之间的切换过渡",
+      "播放：底部播放条与全屏播放器的出现/消失过渡",
+      "折叠与展开：侧栏订阅树、设置页分组、通知/译文/AI 区块",
+      "覆盖层：弹窗卡片入场、灯箱图片、设置页分区切换、加载更多状态",
+      "无障碍：prefers-reduced-motion: reduce 下关闭或显著削弱上述全部过渡",
+      "附加核对：本轮新覆盖的两个译文块（.social-translated-block / .notif-translated-block）双向过渡与隐藏态 display:none",
+      "附加核对：本轮新覆盖的设置页分类分组（.group-mgr-body/.open）常驻挂载后 aria-expanded、chevron 与折叠态不可聚焦语义",
+      "附加核对：useEnteringClass 的 animationend 冒泡守卫（event.target 校验）"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-042-01-main-view.png",
+      ".workflow-kit/tasks/evidence/TASK-042-02-settings.png",
+      ".workflow-kit/tasks/evidence/TASK-042-interaction-report.md",
+      ".workflow-kit/tasks/evidence/RUN-36c2bbeca0fd40ce853fe75faa4133d4-frontend.stdout.txt",
+      ".workflow-kit/tasks/evidence/RUN-4fbd80b68ea64d4f938e790783c159d3-worker-result.json"
+    ]
+  }
+}

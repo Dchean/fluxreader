@@ -1,8 +1,10 @@
 # TASK-042 交互报告（REQ-005 交互动效补全）
 
-> 本文件已在**审查反馈修复轮后**更新：修正了「播放条/全屏播放器只做了出现方向」「下拉菜单
-> transform 的 from 态被内联样式盖住」「AI/通知区块收起方向仍是硬切」三处与实现不符的描述，
-> 并修正新增 hook 的路径。下表每条都按修复后的代码重新核对过。
+> 本文件已在**审查反馈修复轮后**更新（第 1 轮修 4 处、第 2 轮修 3 处）：修正了「播放条/全屏播放器
+> 只做了出现方向」「下拉菜单 transform 的 from 态被内联样式盖住」「AI/通知区块收起方向仍是硬切」
+> 三处与实现不符的描述；补上第 2 轮独立审查指出的两个**漏做对象**（社交/通知译文块、设置页分类
+> 分组）；修正新增 hook 的路径，以及「设置页不存在折叠语义」这处与代码不符的断言。下表每条都按
+> 修复后的代码重新核对过。
 
 ## 0. 证据边界（先声明，避免把静帧当成动态证据）
 
@@ -39,13 +41,17 @@
 | 11 | 确认弹窗 | `.confirm-dialog` | 无入场（挂载即带 `open`，无法用过渡） | `cardScaleIn 0.2s` | 删除分类/订阅等确认框 |
 | 12 | 加载更多 | `.load-more-spinner` | 只有旋转 | 追加 `overlayFadeIn var(--transition-fast)`，旋转动画不变 | 滚动到底部加载更多 |
 | 13 | 通知/AI 区块 | `.notif-ai-box` / `.ai-reader-box` | `display:none → block` 硬切；且 `display` 被漏在 `transition-property` 之外——`allow-discrete` 只对**列在过渡列表里**的离散属性生效，所以只有出现方向淡入，**收起仍是瞬时硬切** | 修复轮：`transition: opacity / transform / display var(--transition-fast)` + `transition-behavior: allow-discrete` + `@starting-style` → `display:none↔block` 与透明度/位移**双向**过渡；隐藏时仍是 `display:none`（不占位、不可聚焦、读屏不可达） | 展开 / 收起摘要 |
-| 14 | 无障碍 | `@media (prefers-reduced-motion: reduce)` | 无保护 | 全局过渡/动画压到 `0.01ms`（保留 `transitionend`/`animationend` 触发）；本任务新增的**挂载即播**入场动画显式 `animation: none`；播放条 / 全屏播放器 / 下拉菜单 / AI / 通知区块走的是 transition（含 `display` 的 `allow-discrete`），由全局 `transition-duration: 0.01ms` 一并压平，两个方向都无可感知动效；**加载指示器保留旋转**（进度反馈，停转会被误判为卡死） | 系统开启「减弱动态效果」 |
+| 14 | 折叠与展开（社交 / 通知**译文块**） | `.social-translated-block` / `.social-translated-block.show`、`.notif-translated-block` / `.notif-translated-block.show` | `display:none → block` 硬切，**没有任何过渡**。第 2 轮独立审查指出：契约 ui_check #5 明确写了「通知/译文/AI 区块」，而第 1 轮只改了 AI 摘要框与通知容器，这两个译文块既未实现也未在报告里披露 | 第 2 轮：`transition: opacity / transform / display var(--transition-fast)` + `transition-behavior: allow-discrete` + `@starting-style` → 出现与消失**双向**过渡；隐藏时仍是 `display:none`（不占位、不可聚焦、读屏不可达） | 卡片上点「翻译 / 显示译文」显示或隐藏译文 |
+| 15 | 折叠与展开（**设置页分类分组**） | `.group-mgr-body` / `.group-mgr-body.open` | 原先是「收起即卸载」（`{!cat.settingsCollapsed && …}`），展开**没有任何过渡**，只有 `.group-mgr-chevron` 的既有旋转在动；本报告第 3 节还曾错误断言设置页「不存在折叠语义」 | 第 2 轮：改为**常驻挂载**，由 `.open` 类驱动 `display:none ↔ block`（`allow-discrete`）+ `opacity` / `transform var(--transition-fast)`，展开与收起**双向**过渡；`aria-expanded`、chevron 状态与隐藏态不可聚焦的语义均未改 | 设置 → 订阅页签内点分类标题展开 / 收起 |
+| 16 | 无障碍 | `@media (prefers-reduced-motion: reduce)` | 无保护 | 全局过渡/动画压到 `0.01ms`（保留 `transitionend`/`animationend` 触发）；本任务新增的**挂载即播**入场动画显式 `animation: none`；播放条 / 全屏播放器 / 下拉菜单 / AI / 通知区块 / 译文块 / 设置页分类分组走的是 transition（含 `display` 的 `allow-discrete`），由全局 `transition-duration: 0.01ms` 一并压平，两个方向都无可感知动效；**加载指示器保留旋转**（进度反馈，停转会被误判为卡死） | 系统开启「减弱动态效果」 |
 
-新增文件：`src/components/useEnteringClass.ts`（ref + `useLayoutEffect`，切换时先摘类名、强制重排、再挂上，使动画可重放；不经 state，避免整列表额外渲染）。修复轮把它从 `src/hooks/` 移到 `src/components/`，使其落入 TASK-042 的 `snapshot_paths`（含 `src/components`）覆盖范围；**hook 逻辑未改**，三个引用方（`Timeline.tsx` / `Reader.tsx` / `SettingsModal.tsx`）改为 `./useEnteringClass`。
+新增文件：`src/components/useEnteringClass.ts`（ref + `useLayoutEffect`，切换时先摘类名、强制重排、再挂上，使动画可重放；不经 state，避免整列表额外渲染）。修复轮把它从 `src/hooks/` 移到 `src/components/`，使其落入 TASK-042 的 `snapshot_paths`（含 `src/components`）覆盖范围；三个引用方（`Timeline.tsx` / `Reader.tsx` / `SettingsModal.tsx`）改为 `./useEnteringClass`。
+
+第 2 轮另加了一处防御：`animationend` 会**冒泡**，因此摘类名的回调只在 `event.target === el` 时生效。否则 `.timeline-scroll-body` 的子孙 `.load-more-spinner`（本轮新追加了有限时长的 `overlayFadeIn`）动画结束时会把宿主的 `list-entering` 提前摘掉，使列表淡入被中途截断——这是本轮新增动画自己引入的耦合计时缺陷，由第 2 轮独立审查发现。
 
 ## 3. 未覆盖 / 不适用（诚实说明）
 
-- 设置页的「分组」是静态标题 + 页签切换，**不存在折叠语义**，由第 7 条覆盖分区切换。
+- 设置页**存在**带 `aria-expanded` 的分类折叠分组（`.group-mgr-title` 切换 `.group-mgr-body`），第 2 轮已补上双向过渡，见第 15 条。**更正**：本行此前写「设置页的『分组』…不存在折叠语义」，与代码不符（`SettingsModal.tsx` 的分类管理里确有展开/收起），该断言已删除；分区切换仍由第 7 条单独覆盖。
 - 2col/3col 布局切换**不加** `grid-template-columns` 过渡（`base.css` 有既有性能取舍记录），改为让**内容**淡入，即第 1 条。
 - 未引入动画库、未做视差或装饰性动画；未改 REQ-008 的静态控件外观（属 TASK-041）。
 - 依赖 `transition-behavior: allow-discrete` 与 `@starting-style`（WebView2 / Chromium 现代内核）：不支持时的降级就是原来的瞬时切换，不影响正确性；本轮未在旧内核上实测降级行为。
@@ -53,5 +59,7 @@
 ## 4. 门禁结果（修复轮实跑）
 
 - `npm run lint`：`Found 0 warnings and 0 errors.`（oxlint，24 files / 116 rules）
-- `npm run build`：通过（`tsc -b && vite build`，`✓ built`，dist CSS 58.98 kB）
+- `npm run build`：通过（`tsc -b && vite build`，`✓ built`，dist CSS 59.90 kB）
 - `npm run test:frontend`：26/26 通过（`=== 前端逻辑回归 26/26 通过 ===`）
+
+以上为**第 2 轮修复后**实跑结果；`verify` 会在账本里另存一份带时间戳的门禁日志。

@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-16T16:44:27.887739Z",
+  "roots": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-16-task042.md",
+    "src/App.tsx",
+    "src/components",
+    "src/store.ts",
+    "src/styles",
+    "tools/frontend-regression.mjs"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/docs/UI-CONTRACT-REQ-005.md",
+      "sha256": "a37926e15835298f8856cd7b7e03985fdbe459fee29c6b4c2ed06dc24e8cf77d"
+    },
+    {
+      "path": ".workflow-kit/tasks/evidence/baseline-2026-09-16-task042.md",
+      "sha256": "664ce7165ae61ac687c66b6b77d2e577ae22c73835f8ec55a6a52ae99cdf543c"
+    },
+    {
+      "path": "src/App.tsx",
+      "sha256": "493e22e8b971d13da1807bd7ab1dabfbc14f15d8b74efe212da286a84e6a810f"
+    },
+    {
+      "path": "src/components/ContextMenu.tsx",
+      "sha256": "7e05e08504eb6a0dd4a4e6342fd28756d8ff59431c0b7e572a0b9371c4202e3e"
+    },
+    {
+      "path": "src/components/Overlays.tsx",
+      "sha256": "41f898f8877a29042f97b9a7d5610c2b1db9c9c0ec1bd6967dcdcc1d83be7f7f"
+    },
+    {
+      "path": "src/components/PlayerBar.tsx",
+      "sha256": "594370743c4fa6283def46b173ffd3ceb95f519fab57e0ccbef3a9d120d22202"
+    },
+    {
+      "path": "src/components/Reader.tsx",
+      "sha256": "9f4de1bdeae9223ad0073f2479915ae350dcecacdeff09a30b3d6400c2d830ac"
+    },
+    {
+      "path": "src/components/SettingsModal.tsx",
+      "sha256": "da61ebb9d690d995314b52ae86cd13ec33e43df739638a0c9dc6208086414ac0"
+    },
+    {
+      "path": "src/components/Sidebar.tsx",
+      "sha256": "27b1cbb25102a296802a2f84e61868851944087ad2084661310d2e75e83c50cf"
+    },
+    {
+      "path": "src/components/Timeline.tsx",
+      "sha256": "590a15e1cce9270ea6bc15360d7408d093bd5c456e945e452e7f1588621ff592"
+    },
+    {
+      "path": "src/components/icons.tsx",
+      "sha256": "3145b720c29b014c8daca4524a1565576f74f7ea1c390909850a33c9af4d3935"
+    },
+    {
+      "path": "src/components/primitives.tsx",
+      "sha256": "5fc76054f76b189f75608db5751311222279f90d2a677c988aedc99ab5f2258a"
+    },
+    {
+      "path": "src/components/useEnteringClass.ts",
+      "sha256": "4c509ea1cf81db32f870431136b4d542218ae0816473c645063237d7a2f0734f"
+    },
+    {
+      "path": "src/store.ts",
+      "sha256": "254a20e63b0e5a473c54d0fa24cd0742d0d9ccd69e9d5a2040fea663813f06b6"
+    },
+    {
+      "path": "src/styles/base.css",
+      "sha256": "d9f7fa44f51730cf520408207562ca8025dac04d19f49ff85999a17c17b7089f"
+    },
+    {
+      "path": "src/styles/tokens.css",
+      "sha256": "096c40ae8a7ad8923237c780f1611c784990340674ae09b2850274f02335fa2b"
+    },
+    {
+      "path": "tools/frontend-regression.mjs",
+      "sha256": "fb1174a9f4d0bc478512a70ea29990a346e9ee372e1f99a8bd1fd3e747208517"
+    }
+  ],
+  "digest": "f3f0744675f72956b1253cb885184c9b80279fef66939434590b14d05e821e1a"
+}

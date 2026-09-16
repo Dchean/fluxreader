@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "id": "RUN-509596721679456e9133448dbf6959a6",
+  "task_id": "TASK-042",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "independent-reviewer-2:agent_7bc76871-f898-4957-ba12-ae6497de6070（第二轮复核候选 059880b6，未参与实现）"
+  },
+  "started_at_utc": "2026-09-16T17:25:24.588466Z",
+  "finished_at_utc": "2026-09-16T17:25:24.619336Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "35928e58e51aa93fb785d1cc9471fe1835482194a2390b951b44ec348898ad0f",
+  "candidate_digest": "059880b67681d553cc85cc6dd8db81211f9027eac79828e00ced121dd28be133",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-509596721679456e9133448dbf6959a6-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-509596721679456e9133448dbf6959a6-review.json",
+    "candidate_digest": "059880b67681d553cc85cc6dd8db81211f9027eac79828e00ced121dd28be133",
+    "ui_evidence_digest": "895cb88b989373c1a9b62ae48b043b58e4344acadc095c06d324ee499bfc5c99",
+    "quality_digest": "fa106da71d679abb63188f7746c21de59ad14e044fa2ac7591e763766fd39cfd"
+  },
+  "estimated_cost_usd": null,
+  "ledger_correction": {
+    "at_utc": "2026-09-16T17:29:44.667389Z",
+    "authorized_by": "user 2026-09-16: 授权台账订正，并继续",
+    "note": "该 run 的 PASS 结论本身有效，但其 review_quality_digest 绑定了一个工具自身会改写的任务记录（.workflow-kit/tasks/items/TASK-042.json），因此不能作为有效证据绑定。已用不含该路径的报告重新记录审查。本记录原样保留以备审计，不再是当前 review_run",
+    "invalid_evidence_path": ".workflow-kit/tasks/items/TASK-042.json",
+    "replacement_report": ".workflow-kit/tasks/evidence/TASK-042-review-report-2-final.json"
+  }
+}
