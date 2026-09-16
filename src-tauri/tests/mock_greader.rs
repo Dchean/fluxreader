@@ -67,6 +67,8 @@ pub struct MockGReader {
     pub subscription_edits: Mutex<Vec<(String, String)>>,
     /// 故障注入：置位后 GET stream/items/ids 返回 500（C-1 对账跳过测试用）
     pub fail_stream_ids: std::sync::atomic::AtomicBool,
+    /// 最近一次 subscription/edit 请求的表单键值（A-2 断言 t=/a= 参数）
+    pub last_subscription_edit_form: Mutex<Vec<(String, String)>>,
     /// 远端分类（GET tag/list 返回的 folder）
     pub folders: Mutex<Vec<String>>,
     pub next_feed_id: Mutex<i64>,
@@ -82,6 +84,7 @@ impl MockGReader {
             entries: Mutex::new(Vec::new()),
             subscription_edits: Mutex::new(Vec::new()),
             fail_stream_ids: std::sync::atomic::AtomicBool::new(false),
+            last_subscription_edit_form: Mutex::new(Vec::new()),
             status_updates: Mutex::new(Vec::new()),
             subscribed_urls: Mutex::new(Vec::new()),
             created_feeds: Mutex::new(Vec::new()),
@@ -311,25 +314,27 @@ fn parse_form(body: &str) -> HashMap<String, Vec<String>> {
 }
 
 fn url_decode(s: &str) -> String {
-    let mut out = String::new();
+    /* 按字节解码 %XX 后再整体按 UTF-8 解释：逐个字节 `as char` 会把多字节
+    UTF-8（中文分类名等）解成 Latin-1 乱码（A-2 的 a=目标分类 断言暴露）。 */
+    let mut out: Vec<u8> = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v as char);
+                out.push(v);
                 i += 3;
                 continue;
             }
         }
         if bytes[i] == b'+' {
-            out.push(' ');
+            out.push(b' ');
         } else {
-            out.push(bytes[i] as char);
+            out.push(bytes[i]);
         }
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// 十进制 id → Google Reader 长格式 item id（tag:google.com,2005:reader/item/<16位hex>）
@@ -564,6 +569,13 @@ fn route(
                 .lock()
                 .unwrap()
                 .push((ac.clone(), s_val));
+            {
+                let mut form_out = srv.last_subscription_edit_form.lock().unwrap();
+                form_out.clear();
+                for (k, v) in form.iter() {
+                    form_out.push((k.clone(), v.first().cloned().unwrap_or_default()));
+                }
+            }
             match ac.as_str() {
                 "unsubscribe" => {
                     let s_val = form
@@ -591,6 +603,12 @@ fn route(
         }
         _ => (404, r#"{"error_message":"not found"}"#.into()),
     }
+}
+
+/// 最近一次 subscription/edit 请求的表单键值（A-2 断言 t=/a=）。
+#[allow(dead_code)]
+pub fn last_subscription_edit_form(srv: &MockGReader) -> Vec<(String, String)> {
+    srv.last_subscription_edit_form.lock().unwrap().clone()
 }
 
 /// 供测试断言用的便捷读取（跨 test target 共享，未用的 target 会报 dead_code，显式豁免）

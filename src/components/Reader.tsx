@@ -15,7 +15,10 @@ export function Reader() {
   const isShowingTranslatedProse = useAppStore((s) => s.isShowingTranslatedProse);
   const isRawRenderMode = useAppStore((s) => s.isRawRenderMode);
   const showFulltext = useAppStore((s) => s.showFulltext);
-  const summaryGenerating = useAppStore((s) => s.summaryGenerating);
+  /* F4：按当前文章 id 判定生成态，避免别的文章在生成时本文章误显「生成中」 */
+  const summaryGenerating = useAppStore(
+    (s) => (s.activeArticleId ? s.summarizingIds[s.activeArticleId] === true : false),
+  );
   const translating = useAppStore((s) => s.translating);
   const settings = useAppStore((s) => s.settings);
   const openLightbox = useAppStore((s) => s.openLightbox);

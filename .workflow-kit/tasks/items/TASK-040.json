@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "id": "TASK-040",
+  "title": "前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "修复四个已定位缺陷。(1) F4：summaryGenerating 是全局单布尔，为任一文章生成摘要时所有空摘要卡片同时显示「正在生成…」；改为按 id 的 summarizingIds 集合，卡片与 Reader 按自身 id 判定。(2) F7：anchorToArticle（搜索/命令面板打开）不执行「打开时标已读」，与列表点开行为分叉；改为复用 selectArticle 的 markReadOnOpen 逻辑。(3) F8：markAllRead 只传订阅范围，在收藏/今天视图下会把范围内全部文章（含未显示的）标已读，与 toast 文案不符；后端 mark_all_read 增加 view 过滤参数（all/unread/today/starred），前端传入当前视图。(4) F20：Overlays 搜索结果 Promise 无代际守卫，慢查询返回可覆盖新查询结果；加 alive/代际守卫。",
+  "non_goals": [
+    "读者界面的视觉调整",
+    "摘要/翻译生成逻辑本身",
+    "F16/F17/F18/F19（下一任务）"
+  ],
+  "requirement_refs": [
+    "REQ-007"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-039"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/**",
+      "tools/**",
+      "src-tauri/src/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "摘要生成中状态按 id 隔离（新增断言：A 生成中不影响 B 卡片判定）",
+    "anchorToArticle 打开文章后按 markReadOnOpen 标已读（新增断言）",
+    "mark_all_read 支持视图过滤：收藏视图只影响收藏文章（Rust 测试或新断言覆盖）",
+    "搜索结果竞态有代际守卫（代码路径 + 审查核对）",
+    "lint 0/0、前端回归与 cargo test 全绿"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "rust-test",
+      "program": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "TASK-039-TASK-030-fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-15 基线：lint 0/0、前端回归 21/21、cargo test 119/0。行为变更仅限四处缺陷修复（按 id 摘要态、搜索打开标读、全部已读视图口径、搜索竞态守卫），均为 FINDINGS-REQ-007.md 已确认缺陷（REQ-007 范围）。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    },
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "既有 21 项前端回归与 Rust 全量测试",
+        "reason": "不得回归",
+        "gate_ids": [
+          "frontend",
+          "rust-test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "按 id 摘要态与搜索打开标读断言",
+        "reason": "F4/F7 此前无覆盖",
+        "gate_ids": [
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-040-input-dd691a96ca364cb69668db69c54d6343.json",
+    "digest": "4667cd1d2a0f3665680ccf19b50d4026e54c169d9225805bb5e1b7200c34f555",
+    "source_revision": null,
+    "definition_digest": "25b44f9ec4efb880c2e517f255561c4c47c16785107eeb50baff3958714871f9"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T18:07:10.832732Z",
+    "deadline_at_utc": "2026-09-15T22:07:10.832732Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-8016e0ec0d6a45419b5ae140d3808f66",
+  "run_ids": [
+    "RUN-7f8179e9998644c6b7e7b94d6b40c0e7"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-004-008.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/extraction.rs",
+    "src-tauri/src/ingestion.rs",
+    "src/App.tsx",
+    "src/components/Overlays.tsx",
+    "src/components/PlayerBar.tsx",
+    "src/components/Reader.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/primitives.tsx",
+    "src/lib/api.ts",
+    "src/store.ts",
+    "src/store/types.ts",
+    "src/styles/base.css",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-039": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T18:07:10.913006Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T23:30:33.158403Z",
+      "note": "Out-of-scope changes: .worker-result-040.json",
+      "next_action": "先核对已有文件及原始日志，再处理 scope；不要新建任务或重置预算"
+    }
+  ],
+  "failure_kind": "environment",
+  "resume_phase": "implementation"
+}

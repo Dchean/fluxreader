@@ -2969,6 +2969,12 @@ body.has-player .toast-layer {
   bottom: 96px; /* PlayerBar 高度 + 间距 */
 }
 
+/* 全屏播放器展开（REQ-004）：迷你栏已隐藏 → toast 回到右下贴底，
+   并保持在播放器覆盖层（z-index 260）之上 */
+body.has-player-expanded .toast-layer {
+  bottom: 24px;
+}
+
 .toast-pill {
   position: relative;
   background: var(--bg-elevated);

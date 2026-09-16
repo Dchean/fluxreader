@@ -996,14 +996,17 @@ function SyncTab() {
         title="同步协议"
         desc="Google Reader 与 Fever 共用 Miniflux「集成」凭据。切协议不丢数据（remote id 同源）。"
       >
-        <select
-          className="setting-input"
+        {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
+            深浅主题外观与展开行为都与 FluxDropdown 不一致 */}
+        <FluxDropdown
+          width={220}
           value={protocol}
-          onChange={(e) => setProtocol(e.target.value === 'fever' ? 'fever' : 'greader')}
-        >
-          <option value="greader">Google Reader（推荐）</option>
-          <option value="fever">Fever</option>
-        </select>
+          onChange={(v) => setProtocol(v === 'fever' ? 'fever' : 'greader')}
+          options={[
+            { value: 'greader', label: 'Google Reader（推荐）' },
+            { value: 'fever', label: 'Fever' },
+          ]}
+        />
       </SettingCard>
       <SettingCard title="后端 Endpoint" desc="例如 https://reader.example.com（支持 Google Reader / Fever 协议）">
         <input

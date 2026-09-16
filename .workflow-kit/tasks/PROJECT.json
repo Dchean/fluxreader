@@ -4,7 +4,7 @@
   "name": "fluxreader",
   "kind": "refactor",
   "stage": "delivery",
-  "current_task": null,
+  "current_task": "TASK-040",
   "current_batch": "BATCH-8016e0ec0d6a45419b5ae140d3808f66",
   "ui_preview_task": null,
   "policy": ".workflow-kit/tasks/POLICY.json",

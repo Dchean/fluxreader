@@ -1,0 +1,56 @@
+{
+  "task_id": "TASK-038",
+  "candidate_digest": "38dbaedfbdabf5a8b89661d715ddc6b673b4cdc9027ee892bd45dccef30bda85",
+  "verification_run": "RUN-98cd5ef2c33943f6a4b54d9668b8ed62",
+  "verdict": "PASS",
+  "summary": "独立上下文审查（未参与实现）：老化谓词只清 read/unread/star/unstar 且 article.remote_id 为空、超 30 天项；时间格式两侧统一为 UTC 'YYYY-MM-DD HH:MM:SS'，字典序比较可靠；created_at 列本已存在，撤销冗余 ALTER 正确且旧库兼容；三处 unwrap_or_default 改为可诊断路径且回退语义不变；三次调用均在 PUSH_LOCK+锁内、plan_push 之前，无重复删除/竞态。两个新测试含对照且无实现时必失败。复跑 119/0、fmt 干净。审查提出的两点由实现者即时修正并复验：老化清理文案改为『本地状态保留，但不再尝试推送』（避免过强表述）、commands.rs 变量遮蔽改名。留档后续项：老化清出项在后续绑定回滚本地的语义风险（建议绑定回填时对曾老化项做本地优先保护）、add_feed 项暂无 TTL（幂等 quick_add 下可自愈，跟踪即可）、以及三条建议级测试覆盖扩展（已绑定项保留、add_feed 豁免、30 天边界）。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收五条满足：created_at 复用既有列（无需迁移）、陈旧无绑定项被清理并记 errors（新测试）、保留期内项不受影响（新测试对照）、take_sync_queue 失败不再静默（三处）、fmt 与 119/0 全绿",
+      "evidence_files": [
+        "src-tauri/src/db/sync_queue.rs",
+        "src-tauri/src/sync.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "cargo test 119/0（117 基线 + 2 新增）；既有队列/推送/墓碑场景全绿；读队列失败的回退值与旧行为一致，重复入队判断未变",
+      "evidence_files": [
+        "src-tauri/src/commands.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "老化为失败收敛路径：清理不可绑定项防止无限滞留；读队列失败进日志/report；清理计数可诊断",
+      "evidence_files": [
+        "src-tauri/src/sync.rs",
+        "src-tauri/src/db/sync_queue.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "老化逻辑集中在 prune_stale_unbound + age_stale_queue；注释说明保留期与格式约定；文案与变量命名按审查修正",
+      "evidence_files": [
+        "src-tauri/src/db/sync_queue.rs",
+        "src-tauri/src/sync.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "老化只做一次索引/全表轻量 DELETE，位于推送规划前，无热路径开销",
+      "evidence_files": [
+        "src-tauri/src/db/sync_queue.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

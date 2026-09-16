@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "id": "TASK-036",
+  "title": "订阅改名/移动目录接线：edit_subscription 推送远端（A-2）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "修复 A-2：update_feed 此前只更新本地（greader.edit_subscription 已实现但全仓零调用，Backend 未暴露）——改名/移动目录后远端标题与分类永久分歧。实现：Backend 暴露 edit_subscription（GReader 真实调用；Fever 协议无编辑端点，按 no-op 跳过）；命令层抽出 record_feed_edit（本地更新 + 返回待推送目标：remote_id、新标题、目标分类 label），update_feed 在锁外 best-effort 推送远端，失败仅记日志不影响本地生效。A-2 复现测试转正为必过。",
+  "non_goals": [
+    "A-3 push 时挂分类（TASK-037）",
+    "Fever 端标题/分类推送（协议无端点）",
+    "分类改名向远端收敛（A-4）"
+  ],
+  "requirement_refs": [
+    "REQ-002"
+  ],
+  "reference_ids": [
+    "REF-001"
+  ],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-035"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-sync-wiring-batch3-20260915"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "改名后向远端发送 ac=edit 且 t=新标题（mock 断言）",
+    "移动目录后发送 a=目标分类名（mock 断言）",
+    "Fever 后端为 no-op，不报错、不影响本地更新",
+    "未绑定远端或未配置同步时仅本地更新（不推送、不报错）",
+    "原复现测试 feed_rename_never_reaches_backend 转正为必过；fmt 与 cargo test 全绿"
+  ],
+  "gates": [
+    {
+      "id": "fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "rust-test",
+      "program": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-15 基线（TASK-035 后）：cargo test 111/0。行为变更：订阅改名/移动目录现在会 best-effort 推送远端（GReader ac=edit），此前仅本地生效——用户确认的缺陷修复（FINDINGS-SYNC-GAP.md A-2，REQ-002 范围）。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    },
+    "decision_ids": [
+      "DEC-sync-wiring-batch3-20260915"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "Rust 默认测试集与既有同步契约",
+        "reason": "既有行为不得回归",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "adapt",
+        "target": "feed_rename_never_reaches_backend 复现测试转正",
+        "reason": "A-2 修复后改名会推送远端，断言反转为已推送",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "移动目录推送（a=分类名）回归断言",
+        "reason": "改名与移动目录为两条独立参数路径",
+        "gate_ids": [
+          "rust-test"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-036-input-9ea816fdb3974833ae41e8ca7bc656b7.json",
+    "digest": "9f0adecf612360df3f1ce9f5db7b41758e86f6776b84e7ed19d6f1fff7493202",
+    "source_revision": null,
+    "definition_digest": "87109b504dac4b3fc95d242f40f42e419dadec062f2bd5b13cf0c780ecbba733"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T14:16:12.871780Z",
+    "deadline_at_utc": "2026-09-15T15:46:12.871780Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-8016e0ec0d6a45419b5ae140d3808f66",
+  "run_ids": [
+    "RUN-29d7d97da4e5462aa387986fc0f33347",
+    "RUN-4dab8cfd113b45b69752423529b40e8e",
+    "RUN-e6fb6491154b498ca606e6777677a2aa",
+    "RUN-aa106880d22c4764aac1ff05b1d56bb9",
+    "RUN-e894342f8329469a8127b5f4c1b4bbcf"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-candidate.json",
+    "candidate_digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+    "verification_run": "RUN-e6fb6491154b498ca606e6777677a2aa",
+    "review_run": "RUN-e894342f8329469a8127b5f4c1b4bbcf",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null,
+    "continued_by": "TASK-037"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/feeds.rs",
+    "src-tauri/src/db/folders.rs",
+    "src-tauri/src/sync.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "continuation_of": {
+    "TASK-035": "4de15707e87d854f8cd3c5bf4c9791f404ed764112cd902cabd724b65da581f2"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T14:16:12.944130Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T14:24:37.003341Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-15T14:24:43.890207Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T15:09:25.651284Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T15:12:53.475807Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

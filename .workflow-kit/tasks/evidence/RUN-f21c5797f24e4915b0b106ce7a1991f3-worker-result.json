@@ -1,0 +1,15 @@
+{
+  "task_id": "TASK-039",
+  "run_id": "RUN-f21c5797f24e4915b0b106ce7a1991f3",
+  "status": "ready_for_verification",
+  "summary": "完成 REQ-004 + REQ-008。(1) REQ-004：全屏播放器展开时迷你播放条隐藏，但 body.has-player 仍把 toast 层抬高 96px，导致 toast 悬浮遮挡播放器中下部；新增 has-player-expanded 标记（App 订阅 playerExpanded && playerActive 切换），CSS 展开态 toast 回到右下贴底 24px，同时保持 toast 层（z-index 500）位于播放器覆盖层（260）之上、二次确认弹窗（3000）之下。(2) REQ-008：设置→同步的协议选择由全仓唯一原生 <select> 改为统一组件 FluxDropdown（与全应用下拉一致：展开方向自适应、Esc/点击外部关闭、深色主题外观）。(3) 清理：确认无残留空 className（此前排查项已在他人提交中消失）。门禁：lint 0/0、前端回归 21/21。UI 契约 .workflow-kit/docs/UI-CONTRACT-REQ-004-008.md 的运行时目视状态（A2/B5–B8）需在 npm run tauri dev 下最终确认，留给用户验收时核对。",
+  "changed_files": [
+    "src/components/SettingsModal.tsx",
+    "src/App.tsx",
+    "src/styles/base.css"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

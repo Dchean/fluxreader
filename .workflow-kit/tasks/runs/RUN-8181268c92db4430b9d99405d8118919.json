@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-8181268c92db4430b9d99405d8118919",
+  "task_id": "TASK-039",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "独立上下文审查 agent-explore（未参与实现；UI 契约逐条核对 + 实机截图/交互报告 + 21/21 复跑）"
+  },
+  "started_at_utc": "2026-09-15T18:02:27.760269Z",
+  "finished_at_utc": "2026-09-15T18:02:27.794723Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "21501d6909094567d6cf9078a7da1d0dbdf4875f4aa4c001d088d0c6d0b08b74",
+  "candidate_digest": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-8181268c92db4430b9d99405d8118919-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-8181268c92db4430b9d99405d8118919-review.json",
+    "candidate_digest": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6",
+    "ui_evidence_digest": "c5d227dbf33cc1a4888043464871dd6ff7bf4d409f19a269ce3249bfc7537b5f",
+    "quality_digest": "df352d5adbcb7960aaf362b80acdb3a4191186a139df0954912fe9c6bd966e73"
+  },
+  "estimated_cost_usd": null
+}

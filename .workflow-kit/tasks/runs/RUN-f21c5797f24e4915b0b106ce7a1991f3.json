@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-f21c5797f24e4915b0b106ce7a1991f3",
+  "task_id": "TASK-039",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "manager 主会话直接实现（UI 契约 REQ-004-008）"
+  },
+  "started_at_utc": "2026-09-15T16:46:04.687695Z",
+  "finished_at_utc": "2026-09-15T16:52:59.372853Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "21501d6909094567d6cf9078a7da1d0dbdf4875f4aa4c001d088d0c6d0b08b74",
+  "candidate_digest": "f8c270d023b1137a46ea226fe86648ced0fa4ec5ca909da6684f27424f44ffa6",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-f21c5797f24e4915b0b106ce7a1991f3-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-f21c5797f24e4915b0b106ce7a1991f3-scope.json"
+}

@@ -38,7 +38,8 @@ pub use feeds::{
     update_feed_layout, FeedRow,
 };
 pub use folders::{
-    create_folder, delete_folder, list_folders, rename_folder, set_folder_ai_flags,
+    add_folder_tombstone, create_folder, delete_folder, feed_urls_in_folder, folder_name,
+    folder_tombstones, list_folders, remove_folder_tombstone, rename_folder, set_folder_ai_flags,
     set_folder_collapsed, update_folder_layout, FolderRow,
 };
 pub use migrations::open;
@@ -60,7 +61,8 @@ pub use sync_map::{
     update_feed_title_if_empty, SyncMatchMaps,
 };
 pub use sync_queue::{
-    enqueue_sync, prune_sync, purge_remove_feed_zombies, take_sync_queue, SyncQueueItem,
+    enqueue_sync, prune_stale_unbound, prune_sync, purge_remove_feed_zombies, take_sync_queue,
+    SyncQueueItem,
 };
 pub use url_norm::normalize_url;
 

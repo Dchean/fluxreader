@@ -61,4 +61,4 @@
 - deleted_feed_revives_on_pull：断言通过 = 订阅删除后 pull 复活 + 无 unsubscribe（exit 101 原始失败语义按设计保留 3 项中的 2 项成立）
 - feed_rename_never_reaches_backend：断言通过 = 无任何 subscription/edit 动作
 - offline_read_change_never_pushed_after_connect：断言通过 = 连接后无 edit-tag 补推
-- 三测试当前 #[ignore]，默认门禁不受影响；cargo test 默认集 108 项全绿不变。
+- 复现测试随修复批次转正：#[ignore] 逐步移除并断言期望行为（默认 `cargo test` 覆盖）；A-2/A-5 已转正，A-1 随 TASK-035 转正，A-3/A-4/A-8 待后续批次。

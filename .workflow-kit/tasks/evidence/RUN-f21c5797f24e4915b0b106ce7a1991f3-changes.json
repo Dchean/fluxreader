@@ -1,0 +1,7 @@
+{
+  "changed_files": [
+    "src/App.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/styles/base.css"
+  ]
+}

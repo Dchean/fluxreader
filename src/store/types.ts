@@ -88,7 +88,9 @@ export interface AppState {
   isRawRenderMode: boolean;
   /** 全文视图开关：true=显示 Readability 全文，false=显示 RSS 原文 */
   showFulltext: boolean;
-  summaryGenerating: boolean;
+  /** 正在生成摘要的文章 id 集合（F4：此前为全局单布尔，任一文章生成时
+      所有空摘要卡片同时显示「正在生成…」） */
+  summarizingIds: Record<string, true>;
   /** AI 翻译流式生成中 */
   translating: boolean;
   /** 摘要失败：文章 id → 错误信息（卡片内联展示 + 重试依据） */

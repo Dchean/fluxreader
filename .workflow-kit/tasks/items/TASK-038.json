@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "id": "TASK-038",
+  "title": "同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "修复同步队列两个卫生缺口。(1) A-8：无远端绑定的队列项（远端无对应条目/源）永久滞留——plan_push 跳过后保留、sync_map pending_ids 长期保护、sync_queue 无 TTL；改为队列项写入时带 created_at，push/pull 规划时清理超过保留期（30 天）且仍无法绑定的项，并在清出时记 report.errors 供诊断。(2) C-2：take_sync_queue 的 DB 错误被 unwrap_or_default 当空队列静默吞掉（push_feeds、sync_local_feeds 三处）；改为记录 log::warn 并把错误并入 SyncReport.errors，避免订阅推送静默延迟无痕。新增回归测试覆盖老化清理。",
+  "non_goals": [
+    "重写队列为独立表结构",
+    "pending_ids 保护语义调整（仅在老化清理时联动释放）",
+    "真实服务端验证"
+  ],
+  "requirement_refs": [
+    "REQ-002",
+    "REQ-003"
+  ],
+  "reference_ids": [
+    "REF-001"
+  ],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-037"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "队列表新增 created_at（迁移幂等，旧库兼容）",
+    "超过保留期且仍无绑定/无法绑定的队列项被清理并记 errors（新测试断言）",
+    "有效的待推项不受老化影响（保留期内正常推送，新测试断言）",
+    "take_sync_queue 失败不再静默（错误进日志与 report）",
+    "fmt 与 cargo test 全绿，既有同步契约不回归"
+  ],
+  "gates": [
+    {
+      "id": "fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "rust-test",
+      "program": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-15 基线：cargo test 117/0。行为变更仅限：无法绑定的陈旧队列项会被老化清理（记 errors）；队列读取失败不再静默。均为 FINDINGS-SYNC-GAP.md A-8/C-2（REQ-002/003 范围），不影响正常推送路径。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    },
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "既有同步契约与队列推送测试",
+        "reason": "不得回归",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "队列老化清理与保留期保护的回归测试",
+        "reason": "A-8 此前无覆盖",
+        "gate_ids": [
+          "rust-test"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-038-input-a3aa4deb8aec4c5faf715d480b5d9e06.json",
+    "digest": "c1cc01e118c148eca8fcd95aaf11bec484d1c005c8bc78bda470372a50649575",
+    "source_revision": null,
+    "definition_digest": "e9b3701e43f79c4667880ebb3f75cc92577fceb0da475b65e936543c5931624d"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T16:06:22.839607Z",
+    "deadline_at_utc": "2026-09-15T20:06:22.839607Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-8016e0ec0d6a45419b5ae140d3808f66",
+  "run_ids": [
+    "RUN-1297f47fb8b9490b9fe9febbe0b808ce",
+    "RUN-c372106d1e4d49d992bfbe622c6cf233",
+    "RUN-98cd5ef2c33943f6a4b54d9668b8ed62",
+    "RUN-986d757c1fac4eee923c1f6ba9852d78"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-98cd5ef2c33943f6a4b54d9668b8ed62-candidate.json",
+    "candidate_digest": "38dbaedfbdabf5a8b89661d715ddc6b673b4cdc9027ee892bd45dccef30bda85",
+    "verification_run": "RUN-98cd5ef2c33943f6a4b54d9668b8ed62",
+    "review_run": "RUN-986d757c1fac4eee923c1f6ba9852d78",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/feeds.rs",
+    "src-tauri/src/db/folders.rs",
+    "src-tauri/src/db/migrations.rs",
+    "src-tauri/src/db/sync_map.rs",
+    "src-tauri/src/db/sync_queue.rs",
+    "src-tauri/src/sync.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "continuation_of": {
+    "TASK-037": "71a87fa1b35c81e47d7457e14a423c28d503a444c88b50b92d8e515c585e38ed"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T16:06:22.910774Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T16:18:38.155248Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-15T16:18:45.134553Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T16:37:09.766066Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T16:37:29.281443Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

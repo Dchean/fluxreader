@@ -82,23 +82,45 @@ pub async fn create_folder(
     db::create_folder(&conn, &name, &layout)
 }
 
+/// 分类改名（命令与测试共用的真实逻辑）：本地改名 + 旧 label 墓碑（A-4）——
+/// 否则下次 pull 按远端旧 label 重新 create_folder，留下重复空目录。
+pub fn record_folder_rename(conn: &rusqlite::Connection, id: i64, new_name: &str) -> AppResult<()> {
+    if let Some(old) = db::folder_name(conn, id)? {
+        if old != new_name {
+            db::add_folder_tombstone(conn, &old)?;
+        }
+    }
+    db::rename_folder(conn, id, new_name)
+}
+
+/// 删除分类（命令与测试共用的真实逻辑）：为目录 label 及其内每个订阅写墓碑，
+/// 再删目录（级联删订阅）。否则下次 pull 会把目录与订阅全部拉回（A-4）。
+pub fn record_folder_delete(conn: &rusqlite::Connection, id: i64) -> AppResult<()> {
+    if let Some(label) = db::folder_name(conn, id)? {
+        db::add_folder_tombstone(conn, &label)?;
+        for url in db::feed_urls_in_folder(conn, id)? {
+            db::add_feed_tombstone(conn, &url)?;
+        }
+    }
+    db::delete_folder(conn, id)
+}
+
 #[tauri::command]
 pub async fn rename_folder(state: State<'_, AppState>, id: i64, name: String) -> AppResult<()> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::new("validate", "分类名称不能为空"));
     }
-    // Google Reader 协议下分类是 label（无数字 id），改名远端同步较复杂；
-    // 此处仅本地改名，靠下次 pull 对账按 label 名收敛（本地优先）。
+    // 本地改名 + 旧 label 墓碑（A-4）：远端分类是 label 名，不做远端改写，
+    // 但必须阻挡 pull 按旧 label 复活空目录。
     let conn = state.db.lock().await;
-    db::rename_folder(&conn, id, &name)?;
-    Ok(())
+    record_folder_rename(&conn, id, &name)
 }
 
 #[tauri::command]
 pub async fn delete_folder(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     let conn = state.db.lock().await;
-    db::delete_folder(&conn, id)
+    record_folder_delete(&conn, id)
 }
 
 #[tauri::command]
@@ -278,25 +300,71 @@ pub async fn update_feed(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
 
-    // 本地落库（Google Reader 下订阅改名/移动分类的远端同步较复杂，
-    // 靠下次 pull 对账收敛——本地优先，此处不做远端 best-effort 推送）。
-    let conn = state.db.lock().await;
+    let push = {
+        let conn = state.db.lock().await;
+        record_feed_edit(
+            &conn,
+            id,
+            title.as_deref(),
+            folder_id,
+            layout.as_deref(),
+            auto_summary,
+            auto_translate,
+        )?
+    };
+    // 锁外 best-effort 推送远端（GReader ac=edit；Fever no-op）：
+    // 失败仅记日志，本地更新已生效，靠下次 pull 对账/用户重试收敛（A-2）
+    if let Some((remote_id, new_title, dest_label)) = push {
+        let _ = crate::sync::edit_remote_subscription(
+            &state.db,
+            &state.http,
+            remote_id,
+            new_title.as_deref(),
+            dest_label.as_deref(),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// 更新订阅并返回需推送远端的编辑目标（命令与测试共用的真实逻辑，A-2）。
+/// 返回 Some((remote_id, 新标题, 目标分类名))：该订阅已绑定远端且同步已配置。
+pub fn record_feed_edit(
+    conn: &rusqlite::Connection,
+    id: i64,
+    title: Option<&str>,
+    folder_id: Option<i64>,
+    layout: Option<&str>,
+    auto_summary: Option<bool>,
+    auto_translate: Option<bool>,
+) -> AppResult<Option<(i64, Option<String>, Option<String>)>> {
     // 目标分类必须存在（防 UI 传错 id 把源挂飞）
     if let Some(fid) = folder_id {
-        if !db::folder_exists(&conn, fid)? {
+        if !db::folder_exists(conn, fid)? {
             return Err(AppError::new("validate", "目标分类不存在"));
         }
     }
     db::update_feed(
-        &conn,
+        conn,
         id,
-        title.as_deref(),
+        title,
         folder_id,
-        layout.as_deref(),
+        layout,
         auto_summary,
         auto_translate,
     )?;
-    Ok(())
+    if !sync_configured(conn) {
+        return Ok(None);
+    }
+    let (_feed_url, remote_id) = db::feed_remote_info(conn, id)?;
+    let Some(rid) = remote_id else {
+        return Ok(None);
+    };
+    let dest_label = match folder_id {
+        Some(fid) => db::folder_name(conn, fid)?,
+        None => None,
+    };
+    Ok(Some((rid, title.map(|t| t.to_string()), dest_label)))
 }
 
 #[tauri::command]
@@ -448,13 +516,17 @@ pub async fn mark_all_read(
     state: State<'_, AppState>,
     feed_id: Option<i64>,
     folder_id: Option<i64>,
+    starred_only: Option<bool>,
+    since_ms: Option<i64>,
 ) -> AppResult<usize> {
+    let starred_only = starred_only.unwrap_or(false);
     let n = {
         let conn = state.db.lock().await;
         // 先收集「即将被标读」的未读文章 id（标读后再查 is_read=0 会得到空集，
-        // 导致「全部已读」从不推送到 Miniflux——历史 bug）。
-        let ids = db::list_unread_ids_scoped(&conn, feed_id, folder_id)?;
-        let n = db::mark_all_read(&conn, feed_id, folder_id)?;
+        // 导致「全部已读」从不推送到 Miniflux——历史 bug）。F8：收集与标读
+        // 必须同口径（同样带视图过滤），否则会把范围外文章的状态也推给远端。
+        let ids = db::list_unread_ids_scoped(&conn, feed_id, folder_id, starred_only, since_ms)?;
+        let n = db::mark_all_read(&conn, feed_id, folder_id, starred_only, since_ms)?;
         if sync_configured(&conn) {
             // 逐条入队（量级可控：个人订阅日常几十条）
             for id in ids {
@@ -895,8 +967,15 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
             return Err(AppError::new("notConnected", "未连接后端"));
         }
         let rows = db::list_unbound_local_feeds(&conn)?;
-        let pending_urls: std::collections::HashSet<String> = db::take_sync_queue(&conn)
-            .unwrap_or_default()
+        let queued_items = match db::take_sync_queue(&conn) {
+            Ok(v) => v,
+            Err(e) => {
+                // C-2：读队列失败不再静默当空队列（避免重复入队/漏判待推）
+                log::warn!("sync: 读队列失败: {e}");
+                Vec::new()
+            }
+        };
+        let pending_urls: std::collections::HashSet<String> = queued_items
             .into_iter()
             .filter(|i| i.action == "add_feed")
             .filter_map(|i| i.feed_url)
@@ -916,9 +995,13 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
         // 没有新入队，但可能仍有待推队列项（上次失败的）——检查后再决定
         let has_pending = {
             let conn = state.db.lock().await;
-            db::take_sync_queue(&conn)
-                .map(|q| q.iter().any(|i| i.action == "add_feed"))
-                .unwrap_or(false)
+            match db::take_sync_queue(&conn) {
+                Ok(q) => q.iter().any(|i| i.action == "add_feed"),
+                Err(e) => {
+                    log::warn!("sync: 读队列失败: {e}");
+                    false
+                }
+            }
         };
         if !has_pending {
             return Ok("没有需要同步的本地订阅（全部已绑定或已推送）".into());

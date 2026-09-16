@@ -1,0 +1,18 @@
+{
+  "task_id": "TASK-036",
+  "run_id": "RUN-29d7d97da4e5462aa387986fc0f33347",
+  "status": "ready_for_verification",
+  "summary": "完成 A-2 订阅改名/移动目录接线。(1) sync.rs：Backend 新增 edit_subscription（GReader 调 ac=edit；Fever 协议无端点视为 no-op）+ 公开 edit_remote_subscription（best-effort，失败仅 log::warn 不影响本地生效）。(2) commands.rs：抽出 record_feed_edit（校验目标分类存在 → 本地更新 → 返回待推送目标 (remote_id, 新标题, 目标分类名)；未绑定远端/未配置同步返回 None），update_feed 锁外推送。(3) db：新增 folder_name（id→name）用于 a= 参数。(4) mock：新增 last_subscription_edit_form 记录；修复 url_decode 的多字节 UTF-8 解码（原先逐字节 as char 把中文分类名解成 Latin-1 乱码——A-2 断言暴露的 mock 缺陷）。(5) 测试：A-2 复现测试转正为必过 feed_rename_and_move_push_edit_subscription（改名 t=、移动目录 a= 两条参数路径均断言），复现测试文件现无遗留 ignore。门禁：fmt 通过、cargo test 112/0。",
+  "changed_files": [
+    "src-tauri/src/sync.rs",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db/folders.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs",
+    "src-tauri/tests/mock_greader.rs"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

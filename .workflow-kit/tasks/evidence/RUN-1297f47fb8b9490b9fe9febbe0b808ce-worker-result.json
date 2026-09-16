@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-038",
+  "run_id": "RUN-1297f47fb8b9490b9fe9febbe0b808ce",
+  "status": "ready_for_verification",
+  "summary": "完成 A-8 + C-2。(1) A-8 队列老化：建成同步队列项老化清理——sync_queue.created_at 列本就存在（建表默认 datetime('now')，UTC 'YYYY-MM-DD HH:MM:SS'），实现中统一按该格式读写（撤销了先写的冗余 ALTER 迁移）；新增 db::prune_stale_unbound（只清理 read/unread/star/unstar 且 article.remote_id 为空、超过保留期的项），sync.rs 新增 age_stale_queue（保留期 30 天）并在 push_states_now 与 states_phase 推送段调用，清理条数记入 report.errors 供诊断。(2) C-2 吞错：push_feeds 与 sync_local_feeds 两处 take_sync_queue 的 unwrap_or_default 改为记录 log::warn 并把错误并入 report/日志，不再静默当空队列。新增 2 个回归测试（陈旧无绑定项被清理并记录、保留期内项不受影响），sync_gap_repro_e2e 11/11。门禁：fmt 通过、cargo test 119/0（117 基线 + 2 新增）。",
+  "changed_files": [
+    "src-tauri/src/sync.rs",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/sync_queue.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

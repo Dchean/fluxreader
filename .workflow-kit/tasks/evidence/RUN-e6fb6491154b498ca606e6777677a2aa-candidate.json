@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-15T15:09:20.042325Z",
+  "roots": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/feeds.rs",
+    "src-tauri/src/db/folders.rs",
+    "src-tauri/src/sync.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+      "sha256": "026cd4b7cb8b85fbd8384825f6670105f47a083460f064422e048b0df92f6bf1"
+    },
+    {
+      "path": "src-tauri/src/commands.rs",
+      "sha256": "a68b68c0d0c9abd38b2110827b32672ab1cec211cd24743d075507a176ecd30a"
+    },
+    {
+      "path": "src-tauri/src/db.rs",
+      "sha256": "fa07ca532c3b549a3e0dbe43f23497ce3558ab76fabbbe38b633301e0d0d1dcc"
+    },
+    {
+      "path": "src-tauri/src/db/feeds.rs",
+      "sha256": "1e20452430875113928012509e8e03bda447c1c6bb198a8ace3656dc5ebe3db7"
+    },
+    {
+      "path": "src-tauri/src/db/folders.rs",
+      "sha256": "6f5fcedc9cc49035247c83780864b95bab66d8d7860577a3b72d390faa4ae403"
+    },
+    {
+      "path": "src-tauri/src/sync.rs",
+      "sha256": "6e0ef496ff02f3136da04572a52a1f44c50ddab2013b74e2d622edfe01cc36a9"
+    },
+    {
+      "path": "src-tauri/tests/mock_greader.rs",
+      "sha256": "bf4c302f62d03605e4031fff65bd839c81cfb050d34458a8c14a2d212d73a99c"
+    },
+    {
+      "path": "src-tauri/tests/sync_gap_repro_e2e.rs",
+      "sha256": "d0e9731cad65a54ec82317a6cb4dcfbdefc1dd84af57c25419f12fc1fc226d75"
+    }
+  ],
+  "digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f"
+}

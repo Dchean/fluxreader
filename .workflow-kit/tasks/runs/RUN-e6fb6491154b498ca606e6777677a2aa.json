@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "id": "RUN-e6fb6491154b498ca606e6777677a2aa",
+  "task_id": "TASK-036",
+  "kind": "verification",
+  "outcome": "completed",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-b38021e456654d67951bdc4b3f275e2f"
+  },
+  "started_at_utc": "2026-09-15T15:09:20.064075Z",
+  "finished_at_utc": "2026-09-15T15:09:25.626207Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "9f0adecf612360df3f1ce9f5db7b41758e86f6776b84e7ed19d6f1fff7493202",
+  "candidate_digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-fmt.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-fmt.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-rust-test.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-rust-test.stderr.txt"
+  ],
+  "checks": [
+    {
+      "gate_id": "fmt",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-fmt.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-fmt.stderr.txt",
+      "candidate_digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+          "fmt",
+          "--manifest-path",
+          "src-tauri/Cargo.toml",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-15T15:09:20.114525Z",
+        "finished_at_utc": "2026-09-15T15:09:20.369442Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-fmt.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-fmt.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "rust-test",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-rust-test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-rust-test.stderr.txt",
+      "candidate_digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+          "test",
+          "--manifest-path",
+          "src-tauri/Cargo.toml"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-15T15:09:20.377555Z",
+        "finished_at_utc": "2026-09-15T15:09:25.616132Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-rust-test.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-rust-test.stderr.txt"
+      }
+    }
+  ],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 50696,
+  "controller_pid": 41716,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-15T15:09:20.114525Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-fmt.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-fmt.stderr.txt",
+      "finished_at_utc": "2026-09-15T15:09:20.369442Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-15T15:09:20.377555Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-rust-test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-e6fb6491154b498ca606e6777677a2aa-rust-test.stderr.txt",
+      "finished_at_utc": "2026-09-15T15:09:25.616132Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    }
+  ]
+}

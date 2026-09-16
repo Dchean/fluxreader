@@ -255,9 +255,20 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('set_starred', { id, starred }) as null) : null;
   },
-  async markAllRead(feedId: number | null, folderId: number | null): Promise<number | null> {
+  async markAllRead(
+    feedId: number | null,
+    folderId: number | null,
+    opts?: { starredOnly?: boolean; sinceMs?: number },
+  ): Promise<number | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('mark_all_read', { feedId, folderId }) as number) : null;
+    return inv
+      ? (await inv('mark_all_read', {
+          feedId,
+          folderId,
+          starredOnly: opts?.starredOnly ?? false,
+          sinceMs: opts?.sinceMs ?? null,
+        }) as number)
+      : null;
   },
   async refreshAllFeeds(): Promise<RefreshSummary | null> {
     const inv = await getInvoke();

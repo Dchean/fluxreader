@@ -367,18 +367,30 @@ pub fn list_unread_ids_scoped(
     conn: &Connection,
     feed_id: Option<i64>,
     folder_id: Option<i64>,
+    starred_only: bool,
+    since_ms: Option<i64>,
 ) -> AppResult<Vec<i64>> {
     let mut sql = String::from("SELECT id FROM articles WHERE is_read = 0");
+    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(fid) = feed_id {
-        sql.push_str(&format!(" AND feed_id = {fid}"));
+        sql.push_str(" AND feed_id = ?");
+        binds.push(Box::new(fid));
     }
     if let Some(f) = folder_id {
-        sql.push_str(&format!(
-            " AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {f})"
-        ));
+        sql.push_str(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = ?)");
+        binds.push(Box::new(f));
     }
+    // 与 db::mark_all_read 同口径（F8）：入队集合必须与实际标读集合一致
+    if starred_only {
+        sql.push_str(" AND is_starred = 1");
+    }
+    if let Some(ms) = since_ms {
+        sql.push_str(" AND datetime(published_at) >= datetime(?, 'unixepoch')");
+        binds.push(Box::new(ms / 1000));
+    }
+    let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], |r| r.get(0))?;
+    let rows = stmt.query_map(refs.as_slice(), |r| r.get(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 

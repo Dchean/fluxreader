@@ -1,0 +1,16 @@
+{
+  "changed_files": [
+    ".worker-result-040.json",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/db/commands_extraction_tests.rs",
+    "src-tauri/src/db/sync_map.rs",
+    "src/components/Overlays.tsx",
+    "src/components/Reader.tsx",
+    "src/components/Timeline.tsx",
+    "src/lib/api.ts",
+    "src/store.ts",
+    "src/store/types.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

@@ -647,17 +647,30 @@ pub fn mark_all_read(
     conn: &Connection,
     feed_id: Option<i64>,
     folder_id: Option<i64>,
+    starred_only: bool,
+    since_ms: Option<i64>,
 ) -> AppResult<usize> {
     let mut sql = String::from("UPDATE articles SET is_read = 1 WHERE is_read = 0");
+    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(fid) = feed_id {
-        sql.push_str(&format!(" AND feed_id = {fid}"));
+        sql.push_str(" AND feed_id = ?");
+        binds.push(Box::new(fid));
     }
     if let Some(folder) = folder_id {
-        sql.push_str(&format!(
-            " AND feed_id IN (SELECT id FROM feeds WHERE folder_id = {folder})"
-        ));
+        sql.push_str(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = ?)");
+        binds.push(Box::new(folder));
     }
-    let n = conn.execute(&sql, [])?;
+    // F8：视图口径过滤——收藏视图只影响收藏文章；今天视图只影响当日文章
+    // （since_ms 由前端按本地日界计算传入，datetime() 统一归一化后再比较）
+    if starred_only {
+        sql.push_str(" AND is_starred = 1");
+    }
+    if let Some(ms) = since_ms {
+        sql.push_str(" AND datetime(published_at) >= datetime(?, 'unixepoch')");
+        binds.push(Box::new(ms / 1000));
+    }
+    let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    let n = conn.execute(&sql, refs.as_slice())?;
     Ok(n)
 }
 

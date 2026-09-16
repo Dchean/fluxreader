@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "id": "TASK-037",
+  "title": "同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "修复两个订阅/分类同步缺口。A-3：push_feeds 只取 feed_url、丢弃队列 payload 里的 folder_id——OPML 导入/add_feed 选的分类在远端全部落到默认分类；改为锁内解析 payload 目标分类名（本地 folder id→name），quick_add 成功绑定 remote_id 后追加 edit_subscription(remote_id, None, Some(label))。A-4：分类改名/删除后，pull_feeds 按远端 tag/list 旧 label 重新 create_folder（改名产生重复空目录、删除目录连带订阅一起复活）；引入 folder 墓碑（复用 feed 墓碑的 settings JSON 机制）：rename_folder 记录旧 label 墓碑、delete_folder 记录 label 墓碑并为其内每个 feed 补 feed 墓碑（否则订阅随目录复活），pull_feeds 建目录/建订阅前查墓碑并按「远端已不含即清墓碑」收敛。新增回归测试覆盖两个缺口。",
+  "non_goals": [
+    "A-8 队列老化（下一任务）",
+    "真实 Miniflux live 验证（需凭据，另行安排）",
+    "分类的远端数字 id 映射重构"
+  ],
+  "requirement_refs": [
+    "REQ-002",
+    "REQ-003"
+  ],
+  "reference_ids": [
+    "REF-001"
+  ],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-032",
+    "TASK-036"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "add_feed 携带分类的队列项在推送后，远端收到 edit 且 a=目标分类名（新测试断言）",
+    "改名后的旧分类名不再被 pull 复活为空目录；新名本地保留（新测试断言）",
+    "删除分类后其目录与其内订阅均不复活（新测试断言）",
+    "墓碑在远端确认不含后被清除（代码路径 + 断言）",
+    "fmt 与 cargo test 全绿，既有同步契约不回归"
+  ],
+  "gates": [
+    {
+      "id": "fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "rust-test",
+      "program": "cargo",
+      "args": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-15 基线：cargo test 113/0（含 A-1/A-2/A-5/C-1 转正场景）。行为变更仅限：推送订阅时携带目标分类；分类改名/删除不再被 pull 复活（墓碑）。均为用户确认的缺陷修复方向（FINDINGS-SYNC-GAP.md A-3/A-4，REQ-002/003 范围）。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+    },
+    "decision_ids": [
+      "DEC-defect-batch2-20260915"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "既有同步契约测试（feeds/states 两阶段、A-1 墓碑、A-2 编辑推送）",
+        "reason": "不得回归",
+        "gate_ids": [
+          "rust-test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "A-3 分类挂载与 A-4 分类防复活回归测试",
+        "reason": "两缺口此前无覆盖",
+        "gate_ids": [
+          "rust-test"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-037-input-05811656168343b18aba03b909a60b12.json",
+    "digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+    "source_revision": null,
+    "definition_digest": "7c077a855200d0f308e9788acdbbf905dd39fffeacf81f972dfda1b015aaad2f"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-15T15:16:49.113575Z",
+    "deadline_at_utc": "2026-09-15T19:16:49.113575Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-8016e0ec0d6a45419b5ae140d3808f66",
+  "run_ids": [
+    "RUN-53ad03d61e1c48328a9d2c8608a0539a",
+    "RUN-6afc8885c6754049af6ada84faa3a863",
+    "RUN-09052397fdbd4acca220968527eff320",
+    "RUN-1534c957dfc14c9eb35242dce7fb8ee1"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-09052397fdbd4acca220968527eff320-candidate.json",
+    "candidate_digest": "71a87fa1b35c81e47d7457e14a423c28d503a444c88b50b92d8e515c585e38ed",
+    "verification_run": "RUN-09052397fdbd4acca220968527eff320",
+    "review_run": "RUN-1534c957dfc14c9eb35242dce7fb8ee1",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null,
+    "continued_by": "TASK-038"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/feeds.rs",
+    "src-tauri/src/db/folders.rs",
+    "src-tauri/src/sync.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "continuation_of": {
+    "TASK-032": "e96868e423c66d0560e9e86fc8512e61b0a17394e847170040dce3c5280a569d",
+    "TASK-036": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-15T15:16:49.219430Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-15T15:37:34.423252Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-15T15:37:40.787416Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T15:54:09.923358Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-15T15:54:52.450878Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

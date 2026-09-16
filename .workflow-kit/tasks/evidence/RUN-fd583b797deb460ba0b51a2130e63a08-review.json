@@ -37,8 +37,7 @@
       "status": "PASS",
       "analysis": "命名/注释与现有中文注释风格一致；快照重置点集中在三处替换点并说明理由；唯一冗余点（types.ts hydrated 字段）已记录为后续清理项",
       "evidence_files": [
-        "src/store.ts",
-        "src/store/types.ts"
+        "src/store.ts"
       ]
     },
     {

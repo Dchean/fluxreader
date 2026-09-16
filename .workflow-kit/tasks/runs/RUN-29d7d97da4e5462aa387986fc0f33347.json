@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-29d7d97da4e5462aa387986fc0f33347",
+  "task_id": "TASK-036",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "manager 主会话直接实现（A-2 订阅改名/移动目录接线）"
+  },
+  "started_at_utc": "2026-09-15T14:16:12.873327Z",
+  "finished_at_utc": "2026-09-15T14:24:36.976326Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "9f0adecf612360df3f1ce9f5db7b41758e86f6776b84e7ed19d6f1fff7493202",
+  "candidate_digest": "7c38442e242e7b1eb2389a34330ff04cfb9e4fb1b6ffc69846d94267b3d60ece",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-29d7d97da4e5462aa387986fc0f33347-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-29d7d97da4e5462aa387986fc0f33347-scope.json"
+}

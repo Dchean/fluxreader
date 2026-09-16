@@ -107,6 +107,13 @@ const viewEntriesCache = new Map<string, ArticleEntry[]>();
 
 /** 视图缓存 key：布局 × 视图（订阅范围 'all' 单独缓存；具体 feed/分类范围不缓存——
     范围切换频繁且数据量小，直接拉取更快，避免缓存膨胀） */
+/** 本地零点毫秒（F8：今天视图的标读边界，与列表「今天」筛选同口径） */
+function startOfLocalDayMs(): number {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
 function viewCacheKey(layout: ContentLayoutType, view: ViewFilterType): string {
   return `${layout}|${view}`;
 }
@@ -172,7 +179,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   isShowingTranslatedProse: false,
   isRawRenderMode: false,
   showFulltext: false,
-  summaryGenerating: false,
+  summarizingIds: {},
   translating: false,
   summaryErrors: {},
   translateErrors: {},
@@ -310,11 +317,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       const scope = get().activeFeedFilter;
       const feedId = scope.startsWith('cat-') ? null : scope === 'all' ? null : numericId(scope);
       const folderId = scope.startsWith('cat-') ? numericId(scope) : null;
-      void api.markAllRead(feedId, folderId);
+      /* F8：视图口径必须与界面一致——收藏/今天视图只标该视图可见的文章，
+         否则会把范围内未显示的文章一并标读（并推给远端），与文案不符 */
+      const view = get().activeViewFilter;
+      const starredOnly = view === 'starred';
+      const sinceMs = view === 'today' ? startOfLocalDayMs() : undefined;
+      void api.markAllRead(feedId, folderId, { starredOnly, sinceMs });
     }
     markEntriesRead(ids);
     set({ openedReadIds: {} });
-    get().showToast('已将当前筛选的所有内容标记为已读');
+    get().showToast('已将当前视图范围内的内容标记为已读');
   },
 
   /* ================= 阅读器 ================= */
@@ -748,7 +760,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!art) return;
     /* 已有缓存 → 直接展示（ai_summarize 后端也会短路，这里前端提前判断） */
     if (art.aiSummary) {
-      set({ summaryGenerating: false });
       return;
     }
     if (s.dataMode !== 'tauri') {
@@ -757,7 +768,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     /* 重试语义：清掉上次的错误与半截摘要，重新走完整流 */
     set((st) => ({
-      summaryGenerating: true,
+      summarizingIds: { ...st.summarizingIds, [id]: true },
       summaryErrors: { ...st.summaryErrors, [id]: '' },
       entries: st.entries.map((a) => (a.id === id ? { ...a, aiSummary: '' } : a)),
     }));
@@ -772,17 +783,33 @@ export const useAppStore = create<AppState>((set, get) => ({
             return { entries: st.entries.map((a) => (a.id === id ? { ...a, aiSummary: next } : a)) };
           });
         },
-        () => set({ summaryGenerating: false }),
+        () =>
+          set((st) => {
+            const nextIds = { ...st.summarizingIds };
+            delete nextIds[id];
+            return { summarizingIds: nextIds };
+          }),
         (msg) => {
           /* 内联错误（卡片上直接可见）+ 非 silent 时 toast 带重试 */
-          set((st) => ({ summaryGenerating: false, summaryErrors: { ...st.summaryErrors, [id]: msg } }));
+          set((st) => {
+            const nextIds = { ...st.summarizingIds };
+            delete nextIds[id];
+            return { summarizingIds: nextIds, summaryErrors: { ...st.summaryErrors, [id]: msg } };
+          });
           if (!silent) {
             get().showToast(`摘要失败：${msg}`, { label: '重试', run: () => get().summarizeEntry(id) });
           }
         },
       )
       .catch(() => {
-        set((st) => ({ summaryGenerating: false, summaryErrors: { ...st.summaryErrors, [id]: 'AI 服务未配置或不可达' } }));
+        set((st) => {
+          const nextIds = { ...st.summarizingIds };
+          delete nextIds[id];
+          return {
+            summarizingIds: nextIds,
+            summaryErrors: { ...st.summaryErrors, [id]: 'AI 服务未配置或不可达' },
+          };
+        });
         if (!silent) {
           get().showToast('摘要失败：请先在设置中配置 AI 服务', { label: '重试', run: () => get().summarizeEntry(id) });
         }
@@ -1080,6 +1107,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       hydratedIds: {},
       hydrationErrors: {},
     });
+    // F7：与 selectArticle 同口径——打开时按设置标已读（此前搜索/命令面板
+    // 打开的文章不标读，与列表点开行为分叉）
+    const { settings: stSettings, dataMode: stMode } = get();
+    const target = get().entries.find((a) => a.id === articleId);
+    if (stMode === 'tauri' && stSettings.markReadOnOpen && target && !target.isRead) {
+      void api.setRead(Number(articleId), true);
+      markEntriesRead(new Set([articleId]));
+    }
     // 打开文章：触发智能全文（与 selectArticle 一致）
     get().ensureArticleContent(articleId, { extractFulltext: true });
   },

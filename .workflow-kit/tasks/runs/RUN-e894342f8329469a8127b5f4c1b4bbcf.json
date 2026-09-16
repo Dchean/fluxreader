@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-e894342f8329469a8127b5f4c1b4bbcf",
+  "task_id": "TASK-036",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "独立上下文审查 agent-explore（未参与实现；diff 复核 + 113/0 复跑复核）"
+  },
+  "started_at_utc": "2026-09-15T15:12:53.260669Z",
+  "finished_at_utc": "2026-09-15T15:12:53.287154Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "9f0adecf612360df3f1ce9f5db7b41758e86f6776b84e7ed19d6f1fff7493202",
+  "candidate_digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-e894342f8329469a8127b5f4c1b4bbcf-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-e894342f8329469a8127b5f4c1b4bbcf-review.json",
+    "candidate_digest": "8e9901917197dd15cacf3870274088b2d80abf9a8fd16e67d1a98c4b4a11ff4f",
+    "quality_digest": "536d5f416210645bd45e4962bd0f2381482677147f34a2df45bf3a10de606d83"
+  },
+  "estimated_cost_usd": null
+}

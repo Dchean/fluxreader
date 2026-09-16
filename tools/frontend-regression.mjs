@@ -29,6 +29,7 @@ globalThis.__INVOKE__ = (cmd, args) => {
     return Promise.reject({ code: 'db_corrupt', message: 'DB locked by migration' });
   }
   switch (cmd) {
+    case 'article_index': return Promise.resolve(0);
     case 'github_login_start': {
       // P1-10：首调（不带 force）返回 webdavConflict 结构化错误；force 重发成功
       if (args.force !== true) {
@@ -205,6 +206,50 @@ check('S-4: 生成完成后按 id 状态清除', store.getState().translatingIds
 store.getState().translateEntry(s4id);
 check('S-4: 已有译文时不再触发 ai_translate',
   invokeCalls.filter((c) => c.cmd === 'ai_translate').length === beforeAiCalls + 1);
+
+// ---- S-5：F4 按 id 摘要态 / F7 锚定打开标读 / F8 全部已读视图口径 ----
+// F4：A 生成中不应影响 B 的卡片判定
+store.setState({ entries: [socialEntry('21'), socialEntry('22')], summarizingIds: {}, summaryErrors: {} });
+store.getState().summarizeEntry('21');
+/* 生成态在调用同步段内即置位；api 完成是异步的，故立即断言再等清除 */
+const isolatedAtStart =
+  store.getState().summarizingIds['21'] === true && store.getState().summarizingIds['22'] === undefined;
+check('S-5: 摘要生成态按 id 隔离', isolatedAtStart);
+await new Promise((r) => setTimeout(r, 40));
+check('S-5: 摘要完成后清除该 id 状态', store.getState().summarizingIds['21'] === undefined);
+
+// F7：搜索/命令面板打开（anchorToArticle）按 markReadOnOpen 标已读
+store.getState().updateSettings({ markReadOnOpen: true });
+store.setState({
+  activeViewFilter: 'all',
+  activeFeedFilter: 'all',
+  dataMode: 'tauri',
+});
+invokeCalls.length = 0;
+await store.getState().anchorToArticle('1');
+await new Promise((r) => setTimeout(r, 10));
+const readCall = invokeCalls.find((c) => c.cmd === 'set_read');
+check(
+  'S-5: 锚定打开按设置标已读',
+  !!readCall && readCall.args.read === true && store.getState().entries.find((a) => a.id === '1')?.isRead === true,
+);
+
+// F8：全部已读的视图口径（收藏 → starredOnly；今天 → sinceMs）
+store.setState({ activeViewFilter: 'starred', activeFeedFilter: 'all' });
+invokeCalls.length = 0;
+store.getState().markCurrentViewAllRead();
+await new Promise((r) => setTimeout(r, 10)); // api.markAllRead 内部 await getInvoke()，需让出微任务
+const starredCall = invokeCalls.find((c) => c.cmd === 'mark_all_read');
+check(
+  'S-5: 收藏视图全部已读带 starredOnly',
+  !!starredCall && starredCall.args.starredOnly === true && (starredCall.args.sinceMs === null || starredCall.args.sinceMs === undefined),
+);
+store.setState({ activeViewFilter: 'today' });
+invokeCalls.length = 0;
+store.getState().markCurrentViewAllRead();
+await new Promise((r) => setTimeout(r, 10));
+const todayCall = invokeCalls.find((c) => c.cmd === 'mark_all_read');
+check('S-5: 今天视图全部已读带 sinceMs', !!todayCall && typeof todayCall.args.sinceMs === 'number' && todayCall.args.sinceMs > 0);
 
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);

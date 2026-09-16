@@ -1,0 +1,23 @@
+{
+  "task_id": "TASK-040",
+  "run_id": "RUN-7f8179e9998644c6b7e7b94d6b40c0e7",
+  "status": "ready_for_verification",
+  "summary": "完成四项缺陷修复。(1) F4：summaryGenerating 全局单布尔改为按 id 的 summarizingIds——summarizeEntry 按 id 置位/清除（onDone/onError/catch 三路径），NotifCard 与 Reader 改为按自身 id 判定，消除「任一文章生成时所有空摘要卡片同时显示生成中」。(2) F7：anchorToArticle（搜索/命令面板打开）补上 markReadOnOpen 逻辑，与 selectArticle 同口径（tauri + 设置开 + 未读）。 (3) F8：mark_all_read 增加视图口径（starred_only + since_ms），db::mark_all_read 与 db::list_unread_ids_scoped 同步扩展（收集与标读必须同口径，否则把范围外状态推给远端），SQL 参数化；前端按当前视图传参（收藏→starredOnly、今天→本地日界 sinceMs），toast 文案改为「当前视图范围内」；新增 Rust 测试 mark_all_read_view_filters。(4) F20：Overlays 搜索加代际守卫（alive），慢查询不覆盖新结果、finally 不误清 searching。测试：前端 S-5 四条新增断言，回归 26/26；Rust 120/0；lint 0/0；fmt 通过。",
+  "changed_files": [
+    "src/store.ts",
+    "src/store/types.ts",
+    "src/lib/api.ts",
+    "src/components/Timeline.tsx",
+    "src/components/Reader.tsx",
+    "src/components/Overlays.tsx",
+    "tools/frontend-regression.mjs",
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/db/sync_map.rs",
+    "src-tauri/src/db/commands_extraction_tests.rs"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

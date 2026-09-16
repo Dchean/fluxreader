@@ -160,7 +160,8 @@
     "review_run": "RUN-5d79876caef249148b8fdd44e3ef9ba6",
     "acceptance_ref": null,
     "owner_decision_ids": [],
-    "merge_ref": null
+    "merge_ref": null,
+    "continued_by": "TASK-036"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-15.md",

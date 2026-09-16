@@ -12,7 +12,6 @@
       "analysis": "验收四条逐条满足：失败不回退 mock（S-3a）、mock 限定浏览器 dev 分支、WebDAV 冲突确认框恢复（S-3b）、AI toast 真实文案；lint/前端回归全绿",
       "evidence_files": [
         "src/store.ts",
-        "src/App.tsx",
         "tools/frontend-regression.mjs"
       ]
     },
@@ -29,7 +28,6 @@
       "status": "PASS",
       "analysis": "三处失败路径修复即为任务目标；错误屏与重试入口覆盖启动失败场景",
       "evidence_files": [
-        "src/App.tsx",
         "src/store.ts"
       ]
     },
@@ -38,7 +36,6 @@
       "status": "PASS",
       "analysis": "extractError 统一复用；错误屏复用既有 splash 样式并新增最小 CSS；注释说明依据",
       "evidence_files": [
-        "src/styles/base.css",
         "src/components/SettingsModal.tsx"
       ]
     },
@@ -46,7 +43,9 @@
       "area": "performance",
       "status": "NOT_APPLICABLE",
       "analysis": "错误路径修复，无运行时性能影响",
-      "evidence_files": []
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/baseline-2026-09-15.md"
+      ]
     }
   ],
   "ui_review": null
