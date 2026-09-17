@@ -1,0 +1,15 @@
+{
+  "changed_files": [
+    "src/store.ts",
+    "src/store/internals.ts",
+    "src/store/slices/ai.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/feeds.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/player.ts",
+    "src/store/slices/reader.ts",
+    "src/store/slices/settings.ts",
+    "src/store/slices/sync.ts",
+    "src/store/slices/ui.ts"
+  ]
+}

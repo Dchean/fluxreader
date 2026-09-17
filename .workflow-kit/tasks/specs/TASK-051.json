@@ -1,0 +1,115 @@
+{
+  "id": "TASK-051",
+  "title": "修复全部已发现缺陷：D1–D5 + 低优先观察 + REQ-007 残余项（先盘点后逐项修）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "draft",
+  "objective": "按 owner 2026-09-17 指令『把发现的问题都修复』（DEC-fix-all-findings-20260917）逐项修复已发现缺陷。**第一步必须先盘点**（工作流要求「清单经确认后才纳入处理」，owner 已就「全部修复」预授权，故盘点结果在本任务报告里给出并逐项落实，不再单独等待确认）：(A) 重新验证 FINDINGS-REQ-007.md 中被 TASK-030~047 处理后**仍然存在**的残余项，产出确切清单（每项含 文件:行、现状、复现、影响、修复方案）；(B) TASK-048 写测试时发现的 store 缺陷 D1–D5；(C) TASK-048 报告记录的低优先观察。第二步按清单逐项修，每项都要有可复跑的验证（优先落到 tools/frontend-regression.mjs 的断言上）。",
+  "non_goals": [
+    "改动工作流（owner 明确『工作流我另外修复』）",
+    "改变同步协议行为或引入新的同步语义（除非某缺陷的修复必须如此，且须在报告中论证并单独标注）",
+    "引入新依赖",
+    "改写 TASK-048 建立的 141 项回归网的既有语义（可新增断言、可更新那些「把现状写成期望」的观察项断言，但不得削弱既有保护；每处改动须逐条说明）",
+    "重构/拆分代码结构（那是 TASK-049/050 的事）",
+    "修复本任务盘点清单之外的「顺手看到」的问题（发现新问题只记录，另立任务）"
+  ],
+  "requirement_refs": [
+    "REQ-007"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": ["TASK-049", "TASK-050"],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": ["DEC-fix-all-findings-20260917"]
+  },
+  "allowed_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task051.md",
+    "src/**",
+    "src-tauri/src/**",
+    "tools/frontend-regression.mjs"
+  ],
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task051.md",
+    "src",
+    "src-tauri/src",
+    "tools/frontend-regression.mjs"
+  ],
+  "acceptance": [
+    "报告开头给出**盘点的确切残余清单**：FINDINGS-REQ-007.md 中仍存在项（逐项：ID / 文件:行 / 现状 / 是否仍存在 / 处置）+ D1–D5 + 低优先观察；明确列出哪些**经复核已不存在**（避免把已修的当未修）",
+    "清单中每一项都有处置结论：已修（附改动位置与验证）/ 不修（附理由，如属协议限制或设计边界）/ 另立任务",
+    "D1 修复：AI 摘要/翻译流先产出半截文本再报错后，toast「重试」必须能真正重新发起该 id 的请求（`ai_summarize`/`ai_translate` 调用数 +1），且错误态被正确清理",
+    "D2 修复：`loadMoreArticles` 失败必须对用户可见（toast 或等价错误态），不再静默吞错",
+    "D3 修复：竞态丢弃分支必须复位 `articlesLoading`（建议在 `finally` 收口），保证入口守卫不会永久挡住后续加载；并给出「只改游标不改 loading」场景下的可复跑验证",
+    "D4 修复：`bootstrapSettings` 的 startupView 白名单与设置页下拉选项**一致**（要么去掉死选项，要么让白名单接受它——二者择一并在报告说明取向）",
+    "D5 修复：`updateSettings` 对数值型设置做范围校验（与组件里的 range 约束一致），非法值不得落库",
+    "低优先观察项：`markEntriesReadBulk` 的 O(n·m) 若修则须证明语义不变；selectors 对缺失 feed_counts 的处理须明确为「有意的保守设计」或修正，二者择一并说明",
+    "每项修复都有可复跑验证：`npm run test:frontend` 通过且新增/更新的断言确实覆盖该缺陷（**修前失败、修后通过**的证据，可为一次临时反证）",
+    "npm run lint 0 warnings / 0 errors；npm run build 通过；若改到 Rust 侧则 cargo test 仍 120 passed / 0 failed / 23 ignored",
+    "更新 TASK-048 中「把现状写成期望」的观察项断言（D2/D5 邻域），并逐条说明改动理由",
+    "文本文件必须 LF 行尾"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": ["run", "lint"],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": ["build"],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": ["run", "test:frontend"],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": ["test"],
+      "cwd": "src-tauri",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 基线：npm run lint 0/0；npm run build ✓；npm run test:frontend 141/141（既有 26 + TASK-048 新增 115）退出码 0，连跑 4 次一致，并经 9 组变异测试验证有鉴别力；cargo test 120 passed / 0 failed / 23 ignored。**本任务行为会变**（这正是目的），故回归基线不是「保持不变」而是「既有保护不削弱 + 每处行为变化都有对应断言更新与理由」。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task051.md"
+    },
+    "decision_ids": ["DEC-fix-all-findings-20260917"],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "TASK-048 建立的 141 项断言中的既有 26 项（TASK-029~047 累积的行为契约）",
+        "reason": "这些是历史验收的行为契约；本任务意在修缺陷，不应削弱既有保护",
+        "gate_ids": ["frontend"]
+      },
+      {
+        "action": "adapt",
+        "target": "TASK-048 中把 D2/D5 邻域现状写成期望的观察项断言",
+        "reason": "修好缺陷后这些「观察项」必然失败；必须同步更新为修复后的期望，并逐条说明——审查者已预先标注这两条需要同步",
+        "gate_ids": ["frontend"]
+      },
+      {
+        "action": "add",
+        "target": "每个缺陷的定向断言（修前失败、修后通过）",
+        "reason": "修复必须有可复跑的验证，而不是只靠人工观察；这也是 TASK-048 建立的机制的正确用法",
+        "gate_ids": ["frontend"]
+      }
+    ]
+  }
+}

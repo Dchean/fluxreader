@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-f171c12a8b4d473f8a820ee3af2b2854",
+  "task_id": "TASK-049",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "总控会话直接实现（POLICY coder=current_agent）；store.ts 按 Zustand slice 拆分，行为严格保持不变（含 D1-D5 现状），141 项回归网为唯一行为契约"
+  },
+  "started_at_utc": "2026-09-17T09:37:03.338040Z",
+  "finished_at_utc": "2026-09-17T10:00:19.885145Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "84cff53c33f2bac6e6c77b2961468797f53079d0c6f09241c75a5c25cc0cc86b",
+  "candidate_digest": "aa579c8fead37ab40e57637bc55db7298b496dab807ededbb80395b6b5b04d43",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-f171c12a8b4d473f8a820ee3af2b2854-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-f171c12a8b4d473f8a820ee3af2b2854-scope.json"
+}

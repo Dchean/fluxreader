@@ -1,0 +1,323 @@
+{
+  "schema_version": 1,
+  "id": "TASK-049",
+  "title": "前端拆分一：store.ts 按领域拆为 Zustand slice（行为保持不变）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "把 src/store.ts 拆小。现状：文件 1657 行（可信口径），其中 171–1650 行是**一个 `create<AppState>((set, get) => ({ ... }))` 内的巨型对象字面量**——因此本任务不是「把函数搬到别的文件」，而是按 **Zustand slice 模式**把状态与 action 切成领域模块，再由 store.ts 组合。目标结构：store/slices/ 下按领域分文件（建议 bootstrap / ui / feeds / articles / reader / player / settings 七个 slice，实现者可调整并说明理由），每个 slice 用 `StateCreator<AppState, [], [], XxxSlice>` 形态；store.ts 只保留组合、公共入口与既有再导出。**硬要求：行为逐项保持不变**——包括当前已知缺陷（D1–D5）的现状行为，它们属独立的缺陷修复任务，不得在本任务顺手改。",
+  "non_goals": [
+    "改变任何行为：状态初值、action 语义、派生选择器结果、错误路径、文案一律不变",
+    "顺手修 D1–D5 或 TASK-048 报告里列出的任何缺陷（它们属 REQ-007 修复任务）",
+    "改动 src/components/**（组件不在本任务范围）",
+    "改动 src-tauri/** 后端",
+    "引入新依赖（不得为拆分引入 immer/combine 等库）",
+    "改动 tools/frontend-regression.mjs 的既有断言（那 141 项是本次拆分的回归网，只许通过不许改）",
+    "改 src/store/types.ts 与 src/store/selectors.ts 的对外形状（可在内部整理，但导出面不变）"
+  ],
+  "requirement_refs": [
+    "MAINT-FRONTEND-SPLIT"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-048"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task049.md",
+      "src/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task049.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "src/store.ts 拆为 store/ 下的领域 slice；**每个文件 ≤400 行**（行数用可信口径：LF 字节数 = Python splitlines() = .NET ReadAllLines()；不得用 PowerShell Measure-Object -Line）",
+    "对外导出面不变：`useAppStore` 仍从 src/store.ts 导出且其**公开类型（AppState 及其成员）不变**；`export * from './store/selectors'` 与类型再导出保持可用；所有既有 import 路径（组件 import { useAppStore } from '../store'）零改动",
+    "行为不变：npm run test:frontend **141/141 全部通过**（既有 26 + TASK-048 新增 115），且 tools/frontend-regression.mjs **未被改动**",
+    "slice 间通过 get()/set() 的交叉调用仍成立；**不得出现同名 key 被后展开的 slice 覆盖**（需给出检测证据）",
+    "每个 slice 的 state 片段类型有独立命名（如 XxxSlice），AppState = 各 slice 的交集，且组合后类型可编译（tsc -b 通过）",
+    "npm run lint 0 warnings / 0 errors；npm run build 通过",
+    "不得改变 D1–D5 的现状行为：测试 141 项通过即包含这一点；若为完成拆分必须改动某处行为，**停下来报告**而不是自行决定",
+    "提供「纯搬运」证据：对拆分前后做 store 的**行为等价核对**（可用既有 141 项 + 额外说明哪些 action 被放在哪个 slice），并列出 state 键与 action 名的**完整清单**证明无遗漏、无重复",
+    "文本文件必须 LF 行尾（.gitattributes 为 * text=auto eol=lf）；用脚本写文件时显式指定行尾"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "TASK-048-build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 基线（TASK-048 之后）：npm run lint 0 warnings/0 errors；npm run build ✓；npm run test:frontend 141/141（既有 26 + 新增 115）退出码 0，连跑 4 次断言序列逐行一致。该套件为纯状态机测试（无 DOM/网络/Tauri），已被独立审查以 9 组变异测试验证有鉴别力（9/9 被杀死且失败项落在对应领域）——因此它是本次拆分**唯一可信的行为回归网**。Rust 侧 120 passed/0 failed/23 ignored（本任务不改 Rust）。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task049.md"
+    },
+    "decision_ids": [
+      "DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "tools/frontend-regression.mjs 的 141 项断言（含既有 26 与 TASK-048 新增 115）",
+        "reason": "拆分必须证明行为未变；该套件是唯一的行为契约保护，且已经过变异测试验证其鉴别力。只许通过，不许改",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "src/store.ts 的对外导出面与 AppState 公开类型",
+        "reason": "组件与其他模块按既有路径 import；导出面变化会波及全仓，超出「拆小」的目的",
+        "gate_ids": [
+          "build",
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "D1–D5 的现状行为",
+        "reason": "本任务是结构重排不是修缺陷；把两者混在一起会让审查无法区分「搬错了」与「改对了」",
+        "gate_ids": [
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-049-input-05e8070f4a7c471fa52f8a3a568ca7e4.json",
+    "digest": "84cff53c33f2bac6e6c77b2961468797f53079d0c6f09241c75a5c25cc0cc86b",
+    "source_revision": null,
+    "definition_digest": "85f08a5afd741d4325e62bc5f27ed8d341fb3fea68460f30eca6afdffd9c9cf9"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-17T09:37:03.336785Z",
+    "deadline_at_utc": "2026-09-17T13:37:03.336785Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-ed8c3c3553684e2d82ef8608df08b24c",
+  "run_ids": [
+    "RUN-f171c12a8b4d473f8a820ee3af2b2854",
+    "RUN-3a52c7f3295f4b17a6b367358ace8f54",
+    "RUN-ca4f154f15a24c09b76007d05d05295c",
+    "RUN-cdc48b7973a949f2bd4a2fcd37b10436",
+    "RUN-14d97a98ac1041f1b6c115c11197bb46",
+    "RUN-2e661bc6630e4644884173fb8c89cb2f",
+    "RUN-e8c080056d39447795165143a4fc5836",
+    "RUN-3109bd90df2b408b844736ad26612e4b",
+    "RUN-9de75af90f76452d879c109e77e53c11",
+    "RUN-64219aaa03d141a48ae0e7ae8a7ae73c",
+    "RUN-6ff6952446b04f1cacb175095075dd31"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-64219aaa03d141a48ae0e7ae8a7ae73c-candidate.json",
+    "candidate_digest": "aa579c8fead37ab40e57637bc55db7298b496dab807ededbb80395b6b5b04d43",
+    "verification_run": "RUN-64219aaa03d141a48ae0e7ae8a7ae73c",
+    "review_run": "RUN-6ff6952446b04f1cacb175095075dd31",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null,
+    "ledger_correction": {
+      "at_utc": "2026-09-17T10:29:51.017146Z",
+      "authorized_by": "用户 2026-09-17：『授权订正（推荐）』（针对 build 门禁写法错误的记录级订正）",
+      "reason": "我在 TASK-049 任务卡里把 build 门禁写成 args=['build']（npm 缺 run 子命令），verify 因此执行 `npm build` 并报 `Unknown command: \"build\"` → failure_kind=test_failure「Required gate failed: build」。实际 `npm run build` 为 exit 0，代码本身无问题。",
+      "original_gates": [
+        {
+          "id": "lint",
+          "program": "npm",
+          "args": [
+            "run",
+            "lint"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "build",
+          "program": "npm",
+          "args": [
+            "build"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "frontend",
+          "program": "npm",
+          "args": [
+            "run",
+            "test:frontend"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "TASK-048-build",
+          "program": "npm",
+          "args": [
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "required": true
+        }
+      ],
+      "original_definition_digest": "c21a188b16f26ca699b6f58c521af3163e260e3a4bf49fed6e069b871143172a",
+      "original_failure_kind": "test_failure",
+      "original_blockers": [
+        "Required gate failed: build"
+      ],
+      "note": "只订正这一处参数写法并重算 definition_digest；**不放宽任何门禁**——订正后该门禁从「无效命令」变为真正执行 npm run build，强度是提高而非降低。原始失败 run RUN-9de75af90f76452d879c109e77e53c11 原样保留。"
+    }
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task049.md",
+    "package.json",
+    "src",
+    "tools",
+    "tools/frontend-regression.mjs",
+    "tsconfig.test.json"
+  ],
+  "continuation_of": {
+    "TASK-048": "d1314e2f0e9a027126f57a1017d8bc1441253bc041d5127615468728b8852231"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-17T09:37:03.425175Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T10:00:19.916095Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-17T10:01:08.318456Z",
+      "note": "Required gate failed: build",
+      "next_action": "先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T10:01:14.288429Z",
+      "note": "Required gate failed: build",
+      "next_action": "先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T10:01:20.176928Z",
+      "note": "Required gate failed: build",
+      "next_action": "先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T10:01:26.070706Z",
+      "note": "Required gate failed: build",
+      "next_action": "先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T10:01:31.999446Z",
+      "note": "Required gate failed: build",
+      "next_action": "先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T10:01:37.921653Z",
+      "note": "Required gate failed: build",
+      "next_action": "先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T10:01:43.800003Z",
+      "note": "Required gate failed: build",
+      "next_action": "先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T10:01:49.700853Z",
+      "note": "Required gate failed: build",
+      "next_action": "先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T10:30:03.080758Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T10:40:56.428682Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

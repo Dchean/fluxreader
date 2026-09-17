@@ -175,7 +175,8 @@
     "owner_decision_ids": [
       "DEC-51678d64ca294286afa1561ea0247a7f"
     ],
-    "merge_ref": "47ca4e0 (test(frontend): TASK-048 补 store.ts 行为回归网（115 项，拆分前置）)"
+    "merge_ref": "47ca4e0 (test(frontend): TASK-048 补 store.ts 行为回归网（115 项，拆分前置）)",
+    "continued_by": "TASK-049"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md",

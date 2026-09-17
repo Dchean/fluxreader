@@ -1,0 +1,102 @@
+{
+  "task_id": "TASK-049",
+  "candidate_digest": "aa579c8fead37ab40e57637bc55db7298b496dab807ededbb80395b6b5b04d43",
+  "verification_run": "RUN-64219aaa03d141a48ae0e7ae8a7ae73c",
+  "verdict": "PASS",
+  "summary": "独立复核 TASK-049（store.ts 1657 行 → 组合根 57 行 + internals 122 + 9 slice）。全部关键结论由审查者自写脚本/探针独立算出，未复用实现方脚本，且未采信实现方自述。\n\n【门禁（本会话实跑，退出码重定向到文件后读取；npm.ps1 被执行策略拒绝，改用 cmd /c npm）】lint exit=0（Found 0 warnings and 0 errors，34 files）；build exit=0（tsc -b + vite built）；test:frontend exit=0，141/141（既有 26 + 新增 115，与实现方计数机制独立核对：check() 定义外 26 次调用、checkNew() 定义外 115 次调用）。tools/frontend-regression.mjs 与 HEAD 逐字节相同（git diff HEAD --numstat 为空），src/components/**、src/App.tsx、src/store/types.ts、src/store/selectors.ts 亦零改动。\n\n【键集完整性（自写 tokenizer，不复用实现方脚本）】拆前 create<AppState> 顶层 key = 122（首 key 在原文第 172 行，与基线「171-1650 为对象字面量」一致）；9 个 slice 实际 key 合计 = 122；遗漏 0 / 多余 0 / 同名重复 0；集合相等 true。各 slice 实际 key 数与报告逐项相同（nav 11 / reader 19 / ai 9 / bootstrap 16 / player 11 / ui 28 / sync 9 / feeds 16 / settings 3）；每个 slice 的 Pick<AppState, …> 声明与其源码实际 key 集合**逐项顺序一致**（9/9 OK）；9 个 slice 两两相交对数 = 0。\n\n【逐行搬移】对 122 个 key 逐个把 slice 内属性块与原文同名属性块做「去空白规范化后的正文比对」：不一致 0 处；每个 slice 内部 key 相对顺序与原文一致（0 处乱序）。反向完整性：原文 head（1-170 行：imports + bootstrapGithubAuth + 模块级 helper/常量）与 tail（create 收尾 + 再导出）在新文件中均有落点；原文中「在新文件里找不到的整行」恰好只有这些类别：(a) 9 处 import 语句因目录层级变化改写（'./types'→'../types' 等）；(b) 声明改写（const viewEntriesCache→export const、function flipEntryFlag→export function、新增 export function bindAppStore/appStore、let appStoreRef）；(c) 12 处 useAppStore.getState()/setState()→appStore().getState()/setState()（晚绑定收口，行为等价：改用后实际读写同一 store 实例）;(d) export const useAppStore = create<AppState>((set, get) => ({→((...a) => ({ ...a))（把 (set,get,store) 三元组原样透传给 9 个 slice，语义与手写三参完全一致，已由 tsc -b 通过证明类型可行）。没有任何丢失的业务表达式。\n\n【运行时探针（审查者自建，与 dist-test 构建产物交互）】default state own key = 122；73 个 action 键 + 49 个状态键；导出名 14 个 = useAppStore + bootstrapGithubAuth + selectors 12 项（与拆前 export 语句清单逐项相同：useAppStore / bootstrapGithubAuth / export * from selectors / 4 个 type 导出）。在 mock+tauri 双环境下把全部 73 个 action 各轮换 4 轮全量派发（含 selectLayout×4 布局、selectView×4 视图、selectFeed×3 形态、markCurrentViewAllRead、hydrate/reload/anchor 等），**异常 0、缺失 0**，事后 key 数仍为 122（无键增删）。internals 晚绑定句柄经实际动作验证有效：toggleEntryFlag('p1') 与 markCurrentViewAllRead() 均正确改写 entries 与 feedCounts。\n\n【Object.keys 键插入顺序】实测：拆前声明顺序 ≠ 拆后 Object.getOwnPropertyNames(getState()) 顺序（首个分歧在 index 5：原文 activeArticleId，现为 selectLayout），即报告主动披露的属性成立。但键**集合**相同（122/122），且全仓扫描确认无任何作用于 state 根的 Object.keys/entries/values/assign/fromEntries：仅测试对 openedReadIds/hydratedIds 子对象取 keys，源码仅对 settings/AI_PRESETS 取 entries、对 unread 集合用 Object.fromEntries。JSON.stringify 只作用于 settings/AI config/playback 子对象，无「整 state 序列化后比较」的代码或断言。无 persist middleware、无 devtools 选项。故键序变化在本仓库无可观察影响。\n\n【D1-D5 现状行为】按行核对全部保留、本任务未修：D1a slices/ai.ts:192（art.aiSummary 早退，与原文 :762-764 同形）；D1b slices/ai.ts:39（!art || art.translatedContent 早退 = 原文 :515）；D2 slices/bootstrap.ts:150-151（catch 只重置 articlesLoading、无 toast = 原文 :1030-1032）；D3 slices/bootstrap.ts:127（入口守卫 = 原文 :1007）+ :133（竞态丢弃分支不复位 articlesLoading = 原文 :1013，自愈耦合未被破坏 -  - 全仓 articlesLimit 写入方仍全部在 bootstrap slice + 一处 nav 视图缓存恢复）；D4 slices/settings.ts:75（白名单 = 原文 :1581）；D5 slices/settings.ts:45（updateSettings 无校验 = 原文 :1551-1557）。报告 §7 附的 D5 行号「45-46」实为第 45 行，属报告引用的轻微笔误，不影响结论。\n\n【行数/行尾】可信口径（.NET ReadAllLines 与 Python splitlines() 一致）：store.ts 57、internals.ts 122、nav 113、reader 359、ai 254、bootstrap 273、player 84、ui 113、sync 168、feeds 327、settings 86  -  -  最大 359 ≤ 400，全部合规；12 个文件 CR 字节数均为 0（纯 LF，含新增 slice 文件）。\n\n【候选绑定与越界】candidate 清单 41 个文件逐一重算 sha256，**41/41 与工作区一致**，digest=aa579c8f…4d43 与任务卡/运行记录一致（提示中的「30 项哈希」与本候选实际的 41 项不符，但候选清单本身自洽且全部匹配）。verification run 记录显示 lint/build/frontend/TASK-048-build 四门禁 exit_code=0、candidate_digest 一致。project_workflow.py check 本会话复跑 exit=0，ok=true、errors=[]、warnings=[]（tasks 21 / runs 124 / batches 7）。越界处置恰当：仓库内与 git 中均无 .agents 残留（Test-Path False，git status -uall 无匹配）；DECISIONS.json 与 HEAD 完全一致（无 diff），TASK-051 spec 已恢复为 status=draft 且引用 DEC-fix-all-findings-20260917，items/TASK-051.json 不存在（未凭空建任务）。\n\n【遗留观察（不构成需修项，故不列入 findings）】(1) bootstrapGithubAuth 由 store.ts 模块级函数改为 bootstrap slice 内的 export + store.ts 再导出，内部 useAppStore.setState→appStore().setState()；这是全仓唯一未被 141 项断言触及的迁移点（测试未调用该函数），但语义等价且等价性由文本比对证实。(2) internals 的 appStore() 是未校验的 as StoreApi 断言，若 bindAppStore 未被调用会在首次访问抛错；现状 store.ts 在 create() 后同步注入，且无模块求值期调用 helper，实际不可达。(3) help 函数 layoutNeedsBody/startOfLocalDayMs/ARTICLES_PAGE_SIZE/reloadGeneration/toastId 随其唯一使用方落入 bootstrap/nav/ui slice（grep 确认无跨 slice 引用），划分合理但报告 §1 未逐项列出。(4) 报告 §7 已自述 dist-test 为拆分后产物、A/B 编译产物对比不可原样复跑；审查者未采信该 A/B 结论，改以逐 key 正文等价 + 运行时探针替代，结论独立成立。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务卡的 9 条 acceptance 逐条独立核验：(1) 拆为 store/ 下 9 slice + internals + 组合根，单文件最大 359 行 ≤ 400（可信口径 ReadAllLines/splitlines） -  - PASS；(2) 对外导出面不变：store.ts 保留 useAppStore、bootstrapGithubAuth、export * from selectors、4 个 type 再导出；spans/comps 的 9 处 import 路径全部零改动；运行时导出名 14 项与拆前清单逐项相同 -  - PASS；(3) test:frontend 141/141（26+115，独立计数核对）退出码 0，tools/frontend-regression.mjs 与 HEAD 逐字节相同 -  - PASS；(4) slice 间 get()/set() 交叉调用成立（73 个 action 全量派发 4 轮零异常），无同名 key 覆盖（9 slice 两两相交 0，键集合 122=122） -  - PASS；(5) 每个 slice 有独立命名类型 XxxSlice = Pick<AppState, …>，AppState 未改，tsc -b 通过 -  - PASS；(6) lint 0 warnings/0 errors、build 通过（本会话实跑 exit 0） -  - PASS；(7) D1-D5 现状行为逐行保留、未顺手修 -  - PASS；(8) 提供纯搬运证据：审查者独立复算键集 122/122 无遗漏无重复，且逐 key 正文等价 0 处不一致 -  - PASS（报告 §7 自述其 key 清单出自实现方脚本并要求审查者独立复核，本审查已独立重算，未复用它）；(9) 全部 12 个相关文件 CR=0 纯 LF -  - PASS。另：任务卡要求的「若必须改行为应停下报告」未被触发（无行为改动）。范围上，实际改动仅落在 allowed_paths 的 src/** 内（tools/frontend-regression.mjs 一行未动），越界写入的 .agents 笔记已删除且无残留，两处台账已回到原状。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-049-report.md",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task049.md",
+        ".workflow-kit/tasks/evidence/RUN-64219aaa03d141a48ae0e7ae8a7ae73c-candidate.json",
+        ".workflow-kit/tasks/runs/RUN-64219aaa03d141a48ae0e7ae8a7ae73c.json",
+        ".workflow-kit/tasks/evidence/REVIEW-049-gates.txt",
+        ".workflow-kit/tasks/evidence/REVIEW-049-lint.out.txt",
+        ".workflow-kit/tasks/evidence/REVIEW-049-build.out.txt",
+        ".workflow-kit/tasks/evidence/REVIEW-049-frontend.out.txt",
+        "src/store.ts",
+        "src/store/internals.ts",
+        "src/store/slices/nav.ts",
+        "src/store/slices/reader.ts",
+        "src/store/slices/ai.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/player.ts",
+        "src/store/slices/ui.ts",
+        "src/store/slices/sync.ts",
+        "src/store/slices/feeds.ts",
+        "src/store/slices/settings.ts"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "充分性判断：对本次「结构重排、行为零变化」的改动，141 项断言（26 既有 + 115 TASK-048 新增，已由 9 组变异测试验证鉴别力）在**行为层面是充分的**。理由是本次改动的可观察行为面被拆成三段，每段都有独立证据：①默认状态与全部 action 语义  -  -  由审查者的逐 key 正文等价（122/122 去空白后完全一致，含所有表达式、常量、分支、注释）证明，比断言快照更强（断言只覆盖被触发的路径，文本等价覆盖全部 122 个键）；②组合与交叉调用  -  -  由审查者在 dist-test 上把 73 个 action 全量派发 4 轮零异常、且事后键数仍为 122 证明；③既有行为契约  -  -  由 141/141 与实现方基线（连跑 4 次断言序列一致）证明。此外 slice 后 set/state 的合并语义未变（Zustand v5 默认 Object.assign 浅合并，与拆前一致）。\n\n141 项**不能**覆盖哪些（明确列出）：(1) bootstrapGithubAuth 的启动恢复路径 -  - 测试全文件从未调用它或 githubLoginStatus，而它恰是本次唯一从 store.ts 模块级函数改为 slice 导出 + 晚绑定句柄的迁移点，其等价性只由文本比对与人工推理保证，无自动断言；(2) 组件层渲染与派生数据在真实数据下的表现（tsconfig.test.json 不编译 .tsx，这是 TASK-048 已登记的长期缺口，本任务未改变）；(3) React 渲染/订阅时序、StrictMode 双执行、并发水合与轮询在真实事件循环下的交错（dist-test 是纯状态机驱动）；(4) Tauri IPC 与 SQLite 真实往返、真实同步协议（本任务不改 Rust）；(5) 打包产物层面的 tree-shaking/循环依赖告警（本次 build 无新增告警，但断言不看这个）；(6) Object.keys(state) 的键插入顺序（已确认全仓无依赖，见 maintainability/performance 分析）。以上未覆盖项在「无行为改动」的前提下不构成失败理由，但应作为后续任务（TASK-051 及组件测试补齐）的输入。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task049.md",
+        ".workflow-kit/tasks/evidence/REVIEW-049-frontend.out.txt",
+        "tools/frontend-regression.mjs",
+        "tsconfig.test.json",
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "三条风险路径逐一验证：\n\n(1) slice 间 get()/set() 交叉调用。每个 slice 的 StateCreator<AppState, [], [], XxxSlice> 把 T=AppState，故 get() 返回完整 AppState（跨 slice 读别的 slice 的键在类型上合法），set 只接受 XxxSlice 局部更新（单 slice 越权写别的键会在编译期被拦）。实测跨 slice 依赖全部成立：reader→ui(showToast)、reader→ai 状态、nav→bootstrap(reloadFromBackend/reloadFilteredEntries)、nav→ui(showToast)、bootstrap→sync(syncConnected)、sync→ui(showToast)、feeds→ui(showToast) 等。审查者把 73 个 action 在 mock 与 tauri 两种 dataMode 下各轮换 4 轮全量派发，异常 0、缺失 0；含边界入参（不存在的 id、越界 seek、空数组、负数）。\n\n(2) bindAppStore 的注入时序。实测等价性：原实现中 flipEntryFlag/markEntriesRead/syncCurrentViewCache 直接闭包引用模块级 useAppStore；现在它们读 appStoreRef，而 store.ts 在 create() 同步返回后**同一模块求值内**立即 bindAppStore(useAppStore)。两者对「在这些函数被调用时读到哪个实例」是同一答案；且无任何 slice 在工厂函数体内调用 helper（已对 9 个 slice 的来源逐行核对，工厂体内只有对象字面量成员），模块求值期不触发 helper 是可达性前提，已成立。探针里 toggleEntryFlag 与 markCurrentViewAllRead 实际改写了 entries/feedCounts，证明晚绑定句柄真的工作（不是「没被调用所以看不出坏」）。残余理论风险：appStore() 是未校验的 as StoreApi<AppState> 断言，若未来出现第二个 store 实例或 bindAppStore 被移除，helper 会在首次访问抛 undefined 错误而非给出明确提示 -  - 建议后续把断言改成显式 throw（属代码质量改进，不是本候选的缺陷）。\n\n(3) slice 展开顺序。顺序确实参与键**插入顺序**（实测与拆前声明顺序不同），但不参与**取值**：9 个 slice 的 Pick 键集两两相交 0、合计 122=原文 122，故不存在「同名 key 被后展开覆盖」；组合结果不是 AppState 时 tsc -b 直接失败，多余键触发多余属性检查。即「顺序敏感」这一失效模式被类型系统与不相交性共同排除，而唯一真实变化（键序）在全仓无消费者。\n\n另核对的失效路径：跨模块循环依赖 -  - internals.ts 对 AppState 用 import type（仅类型，运行时擦除），store.ts 不再被任何 slice/internals 反向 import（grep 确认），故不存在运行时环；模块级可变状态（viewEntriesCache/reloadGeneration/toastId）各自只有一个写入方模块，无跨 slice 分裂。",
+      "evidence_files": [
+        "src/store.ts",
+        "src/store/internals.ts",
+        "src/store/slices/nav.ts",
+        "src/store/slices/reader.ts",
+        "src/store/slices/ai.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/sync.ts",
+        "src/store/slices/ui.ts",
+        "src/store/slices/feeds.ts",
+        "src/store/slices/settings.ts",
+        "src/store/slices/player.ts",
+        "src/store/selectors.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "划分合理性：9 个 slice 的边界与「谁改这个状态」一致（nav=布局/视图/范围/时间流、reader=选中+水合+标读收藏、ai=流式生成按 id 隔离、bootstrap=数据源与分页/筛选拉取、player=播放器状态机、ui=弹层与 toast、sync=手动同步+设备流、feeds=分类/订阅源管理、settings=设置项）。实现者偏离任务卡建议的 7 个 slice 并给出理由（建议的 articles/reader 两域原文各约 700 行，单文件放不下 400 行上限），理由与实测规模一致（reader 359 + ai 254 拆分后最大 359，恰好在限额内的唯一可行切法），属任务卡显式允许的「实现者可调整并说明理由」。跨 slice 共用的 7 个模块级 helper 与视图缓存收口到 internals.ts 是正确取舍 -  - 不这样做就只能靠循环 import 或把 helper 复制进多个 slice（后者会破坏 viewEntriesCache 的单例语义）。\n\n「Pick 即键集」手法评价：这是本次拆分最大的可维护性增益 -  - 键集完整性从「人工核对」变成**类型系统强制**（少一个键 → 组合结果不再是 AppState，编译失败；多一个键 → 多余属性检查报错），且审查者已独立验证 9 个 Pick 声明与各自实际 key 集合逐项一致、并集恰好等于 AppState。长期成本上，新增一个 store 键需要同时改 AppState + 某个 slice 的 Pick + 实现，比在单文件里加一行略重，但换来的收益是「slice 之间不可能悄悄互相覆盖」这一结构不变量，对 1657 行单文件拆分的场景明显划算。\n\nbindAppStore 晚绑定的时序风险：已在 failure_paths 详述，结论是当前不可达（create() 同步返回后立即注入、模块求值期无 helper 调用、无第二实例），属可接受的既有模式的延续（原实现也是「模块求值后才用 useAppStore」）。建议的轻微改进（把 as 断言换成显式错误）已记入 summary 的遗留观察，不影响本次验收。\n\n长期维护成本观察：slice 正文是逐行搬移的，故每行都还能用原文行号回溯（审查者已按此方式独立核对 D1-D5）；代价是 slice 文件里保留了原文的行内注释与「= 刷新列表」这类跨 slice 心智（例如 nav 的 selectLayout 会 set 属于 reader/ui 的键 activeArticleId/showFulltext/openedReadIds），这在 Zustand slice 模式里是正常写法（set 接受 Partial，跨域键的写权限由 Pick 之外的键不参与类型检查来兜底），但审阅者需要知道「一个 action 可能改多个 slice 的键」。store.ts 保留组合根 + 无悬空指针（代码注释已改为自包含，未指向被删除的 .agents 笔记），符合「重要决策沿用项目 ADR/Note 体系」的要求在本任务授权范围内的最小做法。",
+      "evidence_files": [
+        "src/store.ts",
+        "src/store/internals.ts",
+        "src/store/slices/nav.ts",
+        "src/store/slices/reader.ts",
+        "src/store/slices/ai.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/ui.ts",
+        "src/store/slices/sync.ts",
+        "src/store/slices/feeds.ts",
+        "src/store/slices/settings.ts",
+        "src/store/slices/player.ts",
+        ".workflow-kit/tasks/evidence/TASK-049-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "运行时开销可忽略，且方向上是**持平或更优**，不是「不适用」而是「可证的可忽略」：\n\n(1) 状态创建：拆前创建 1 个 1420 行对象字面量（122 键）；拆后 9 次 StateCreator 调用各返回一个对象，再由 store.ts 做 9 次对象展开合并。二者都在模块加载期各执行一次，代价是 9 次小对象分配 + 一次展开；122 个键的赋值总次数相同（无重复键 → 无覆盖写），量级为微秒级、只发生一次，相对应用启动（SQLite 打开 + 首次 IPC）不可测量。\n\n(2) 状态更新路径：set 的语义完全相同（Zustand v5 默认浅合并），每次 set 仍只遍历被更新的键，slice 边界不影响 React 订阅与选择器重算；selectors.ts 一行未改，派生的过滤/排序/计数计算量不变。\n\n(3) 惰性/缓存副产物：viewEntriesCache（视图切换零延迟恢复）与 reloadGeneration/toastId 等模块级状态保持单例、无新增跨模块查找；internals 的 helper 相比拆前多一次闭包内变量读取（appStoreRef）与一次函数调用（appStore()），在 markEntriesRead 这类 O(n) 循环里位于循环外，不改变复杂度；flipEntryFlag/markEntriesRead/syncCurrentViewCache 仍是原来的一次遍历 + 惰性 Map 复制，未引入新的 Map/数组复制。\n\n(4) 打包体积/加载：build 输出与拆前同为单 chunk（index-*.js 377.85 kB，控制台显示与 TASK-048 基线同一量级），rollup 把 9 个 slice 静态内联，「按文件拆分」不产生新的运行时 chunk 或额外 HTTP 请求；无新增依赖（package.json 未改，与「不得引入 immer/combine」一致）。\n\n(5) 唯一可观察的差异是 Object.keys(getState()) 的键插入顺序改变（审查者已实测：首个分歧在 index 5）。全仓无任何代码对 state 根做键遍历或依赖键序的序列化（无 Object.keys/entries/values/assign/fromEntries 作用于 state；JSON.stringify 只作用于 settings/AI config/playback 子对象；无 persist/devtools 选项），故不产生任何运行时开销或行为差异。\n\n结论：性能无退化，无需为本任务做基准测试；若未来要做，建议的观测点是启动阶段 store 创建耗时（当前量级过小，测不出差异）。",
+      "evidence_files": [
+        "src/store.ts",
+        "src/store/internals.ts",
+        "src/store/selectors.ts",
+        "package.json",
+        ".workflow-kit/tasks/evidence/REVIEW-049-build.out.txt",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/reader.ts"
+      ]
+    }
+  ],
+  "ui_review": null
+}

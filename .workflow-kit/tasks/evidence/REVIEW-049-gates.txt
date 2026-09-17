@@ -1,0 +1,7 @@
+=== reviewer independent gate rerun for TASK-049 (verification_run RUN-64219aaa03d141a48ae0e7ae8a7ae73c) ===
+note: npm.ps1 is blocked by the PowerShell execution policy, so gates were run as: cmd /c "npm run X > log 2>&1" and $LASTEXITCODE was read from the file-backed redirect (no pipe).
+lint     exit=0  :: Found 0 warnings and 0 errors. (34 files)
+build    exit=0  :: tsc -b passed; vite built OK
+frontend exit=0  :: 141/141 (existing 26 + new 115)  [raw summary lines below, mojibake from cmd's console codepage]
+  === 鏃㈡湁鍥炲綊 26/26 閫氳繃锛堟湰鏂囦欢鍘熸湁鏂█锛屾湭鏀瑰姩涓€琛岋級 === || === 鏂板 store 琛屼负鏂█ 115/115 閫氳繃 馃啎 === || === 鍓嶇閫昏緫鍥炲綊鍚堣 141/141 閫氳繃 ===
+tools/frontend-regression.mjs: git diff HEAD --numstat empty (unchanged)
