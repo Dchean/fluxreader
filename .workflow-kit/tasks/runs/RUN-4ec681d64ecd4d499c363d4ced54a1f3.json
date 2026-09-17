@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-4ec681d64ecd4d499c363d4ced54a1f3",
+  "task_id": "TASK-048",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "总控会话直接实现（POLICY coder=current_agent）；为 store.ts 拆分补行为回归网，只加测试不改实现（owner 授权 DEC-a2c6584f）"
+  },
+  "started_at_utc": "2026-09-17T09:09:32.124817Z",
+  "finished_at_utc": "2026-09-17T09:26:43.574554Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "6b554ac789af0867b02e0dd3ea30d871e1ba6d4e5553ce114b10e558d73ddccb",
+  "candidate_digest": "d1314e2f0e9a027126f57a1017d8bc1441253bc041d5127615468728b8852231",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-4ec681d64ecd4d499c363d4ced54a1f3-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-4ec681d64ecd4d499c363d4ced54a1f3-scope.json"
+}

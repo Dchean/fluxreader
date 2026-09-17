@@ -22,5 +22,6 @@
 | [TASK-045](items/TASK-045.json) | 后端单体拆分二：sync.rs 按领域拆分为子模块（可维护性） | done |
 | [TASK-046](items/TASK-046.json) | 流程工具修复：prepare 读取 scope.allowed_paths 并对静默回退报错（消除二次命中的死锁缺口） | cancelled |
 | [TASK-047](items/TASK-047.json) | 可访问性修复：关闭态浮层不可聚焦（inert），消除 Tab 进入不可见控件 | done |
+| [TASK-048](items/TASK-048.json) | 前端拆分前置：补 store.ts 行为测试（为拆分建立回归网） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

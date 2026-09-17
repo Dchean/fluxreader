@@ -1,0 +1,14 @@
+{
+  "id": "DEC-51678d64ca294286afa1561ea0247a7f",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-17 明确授权：范围选择『完整收尾：前端拆分 + REQ-007 残余项』、前端拆分方式选择『先补 store 行为测试，再拆』（DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf）。TASK-048 候选 d1314e2f… 已通过 verify（RUN-93bba576…，lint/build/frontend 三门禁 PASS）与独立审查 PASS（findings 为空；审查者另做 9 组变异测试打在 tsc 产物上，9/9 全被杀死且失败项落在对应领域；并用 run 起点 238 文件快照重算确认源码树仅该测试文件变化）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-048"
+  ],
+  "recorded_at_utc": "2026-09-17T09:35:41.087019Z",
+  "candidates": {
+    "TASK-048": "d1314e2f0e9a027126f57a1017d8bc1441253bc041d5127615468728b8852231"
+  }
+}

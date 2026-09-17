@@ -1163,6 +1163,31 @@
       "candidates": {
         "TASK-047": "e68f9a78f1035ad5ee2754a8d00c0d4d89956b30c7aa444fea9bed40eee1e30c"
       }
+    },
+    {
+      "id": "DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 明确授权（本轮对话，两项 AskUserQuestion 选择）：(1) 范围选择『完整收尾：前端拆分 + REQ-007 残余项（推荐）』；(2) 前端拆分方式选择『先补 store 行为测试，再拆（推荐）』。用户同时明确：'先暂时向我申请授权对项目进行优化重构，而不是动工作流，工作流我另外修复，先把本项目的优化重构全部完成再说，但是申请授权要按照工作流如实记录，保证原工作流的理念'——即本轮只做**项目**的优化重构，工作流缺口由用户自行修复、不纳入本批次。据此关闭 BATCH-cdd487dc（TASK-044/045 done、TASK-046 cancelled、TASK-047 done），开启收尾批次：①补 store.ts 行为测试（前端拆分前置，BRIEF 评估已指出前端无组件级行为测试）；②拆分 store.ts；③拆分 SettingsModal.tsx；④REQ-007 残余项（先按工作流要求重新盘点出确切清单再逐项处理）。沿用既有预算（每任务 240 分钟、修复 4 轮），commit 沿用既有授权，push/release 仍需确认",
+      "statement": "Owner approved the next bounded batch under the existing brief and policy",
+      "scope": [
+        "workflow"
+      ],
+      "recorded_at_utc": "2026-09-17T09:07:51.374519Z"
+    },
+    {
+      "id": "DEC-51678d64ca294286afa1561ea0247a7f",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 明确授权：范围选择『完整收尾：前端拆分 + REQ-007 残余项』、前端拆分方式选择『先补 store 行为测试，再拆』（DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf）。TASK-048 候选 d1314e2f… 已通过 verify（RUN-93bba576…，lint/build/frontend 三门禁 PASS）与独立审查 PASS（findings 为空；审查者另做 9 组变异测试打在 tsc 产物上，9/9 全被杀死且失败项落在对应领域；并用 run 起点 238 文件快照重算确认源码树仅该测试文件变化）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-048"
+      ],
+      "recorded_at_utc": "2026-09-17T09:35:41.087019Z",
+      "candidates": {
+        "TASK-048": "d1314e2f0e9a027126f57a1017d8bc1441253bc041d5127615468728b8852231"
+      }
     }
   ]
 }

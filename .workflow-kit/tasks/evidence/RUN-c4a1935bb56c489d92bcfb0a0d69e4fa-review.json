@@ -1,0 +1,75 @@
+{
+  "task_id": "TASK-048",
+  "candidate_digest": "d1314e2f0e9a027126f57a1017d8bc1441253bc041d5127615468728b8852231",
+  "verification_run": "RUN-93bba5769406494c869c1f0f81b41c22",
+  "verdict": "PASS",
+  "summary": "独立审查（我未参与实现；结论只来自我本人的取文件比对、实跑门禁与定向 mutation 实验）。候选绑定成立：RUN-93bba5769406494c869c1f0f81b41c22-candidate.json 的 30/30 个文件 sha256 与当前工作区逐一重算一致，其中 tools/frontend-regression.mjs = 9959467488b9…（我写盘前后各算一次，均为该值）。**只加测试、未改实现**经三重独立确认：`git diff HEAD -- src` 与 `git diff HEAD -- package.json tsconfig.test.json` 均为 0 行；`git diff HEAD --numstat -- tools/frontend-regression.mjs` = +893/-3，`git status --porcelain=v1 -uall` 里除 .workflow-kit 台账外只有该文件；更强的一步是我拿编码 run 起点的全仓快照 RUN-4ec681d64ecd4d499c363d4ced54a1f3-scope.json（238 个文件）与当前工作区重算比对——源码树中**只有** tools/frontend-regression.mjs 由 fb1174a9… 变为 9959467488b9…，其余 20 个变化项全部是 .workflow-kit/tasks/items/TASK-0*.json 这类由工具自己改写的账本。既有 26 项逐字保留经逐行比对成立（详见 requirements）。三门禁我重定向退出码后独立复跑：lint exit 0（Found 0 warnings and 0 errors）、build exit 0（✓ built）、test:frontend 连跑两次均 exit 0 且输出「既有回归 26/26 / 新增 store 行为断言 115/115 / 合计 141/141」。新增 115 项（≥25）覆盖 a–l 全部 12 领域，实测分布与作者自述逐项一致（a=8 b=11 c=13 d=8 e=6 f=12 g=8 h=7 i=5 j=11 k=10 l=16），且 115 条断言**无一条缺比较/集合判定**（无 toBeDefined 类恒真式）。鉴别力不靠自述：我按作者列的领域做了两类独立实验——(1) 把 1 条新增断言改成必假，`npm run test:frontend` 立即 exit 1 且打印「新增 114/115」，失败行正是我改的那条，随后还原并核对 sha256 与候选一致；(2) 在 tsc 产物 dist-test/store.js 上做 9 处定向行为 mutation（去 seek 夹取、toast 上限 4→5、分页恒 offset 0、去 anchor 的 3 处代际守卫、分类 folderId 置 null、starredOnly 恒 false、translatingIds 改成常量键、去掉 loadMoreArticles 的游标竞态守卫、去掉 reloadFilteredEntries 的视图守卫），9/9 全部被杀死，且失败项精确落在对应领域（分别 2/1/3/2/1/1(+既有 S-5)/2/1/1 条），每次实验后 dist-test/store.js 均还原为逐字节相同。D1 声明属实（详见 requirements 分析）：测试只断言「无半截文本时重试可用」，未把「重试失效」固化成期望，后续修 D1 不会被反向阻挡。文件行尾为纯 LF（实测 CRLF=0、lone CR=0，`.gitattributes` 对应该文件 text=auto / eol=lf）。用户数据库只读核验：%APPDATA%\\com.fluxreader.app\\fluxreader.db 的 feeds/folders/articles/sync_queue 均 0 行，mtime 仍为 2026-09-16T12:42:23（早于本次 run），测试全程走 tools/test-loader.mjs 的 mock，不依赖 Tauri。**未做**：没有启动 Tauri 应用、没有做组件级渲染测试（本任务非目标）；(h) 组件级竞态缺口与两条「观察项」被写进期望一事我在下面 areas 里逐条列明，均判为非阻断（理由见对应 analysis），故 verdict=PASS 且 findings 为空。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐条对表任务卡 acceptance。1) **既有 26 项逐字保留**：我用 `git show HEAD:tools/frontend-regression.mjs` 取原文件（261 行，sha256 fb1174a9f4d0bc478512a70ea29990a346e9ee372e1f99a8bd1fd3e747208517，与 RUN-4ec681… scope 快照记录的原哈希一致），脚本提取全部 `check(` 调用行共 26 条，逐条 `-ceq` 在现文件（1151 行）中查找：缺失 0 条，且映射回的行号与原文一一对应（唯一歧义是原文第 232/243 两行文本完全相同，现文件同样各出现一次，非改动）。`git diff HEAD -U0` 的删除侧**恰好 3 行**，全部是旧汇总块（`console.log(\\n=== 前端逻辑回归 …===)`、`if (failed.length) {`、`console.error('失败项:'…)`），不含任何含 `check` 的行——我的脚本单独对删除侧做了 `check` 子串检索，命中 0。旧文件的 `process.exit(1)` / `process.exit(0)` 作为上下文保留。2) **未改实现**：见 summary 的三重确认；`src`、`package.json`、`tsconfig.test.json` 均零 diff。3) **新增 ≥25 且覆盖 a–l 每一领域**：115 条，实测分布与自述完全一致；每条都断言具体因果（例：`(f) 分类范围 → folderId=数字、feedId=null（cat- 前缀不被当作源 id）` 同时校验 IPC 参数与「分类外条目不受影响」两端；`(j) seekPlayer 负数夹取为 0` 校验 `seekToSec` 与 `positionSec` 双字段；`(l) 按 id 隔离：A 仍在生成时 B 已收尾` 用 holdIds 挂起 201、202 正常收尾后比对两个 id 的标志位），无「仅不抛错」式断言。4) **门禁**：我复跑 lint/build/frontend 均 exit 0，frontend 两次 141/141，输出显式分三行给出「既有/新增/合计」，与 acceptance 第 4 条一致；RUN-93… 的三份 stdout 与我复跑结果逐项吻合（lint 0 warnings/0 errors、build ✓ built、frontend 141/141），未发现证据与实跑不符。5) **可重复且不碰用户库**：见 performance 与 summary。6) **D1 声明核实（关键）**：作者称其测试只断言「无半截文本时重试可用」。我读了 store.ts 实证——`summarizeEntry` 的缓存短路 `if (art.aiSummary) return;` 在 store.ts:762-764，而「重试语义：清掉上次的错误与半截摘要」的 `set` 在其后的 store.ts:769-774；`translateEntry` 同理，`if (!art || art.translatedContent) return;` 在 store.ts:515，清理 `set` 在 516-519。所以只有「已写入半截文本」时重试才会早退。测试第 1057-1070 行构造的失败场景是 `aiSum = { deltas: [], error: 'AI 限流', … }`（零 delta → aiSummary 保留为 ''，falsy），因此重试**未被**短路，断言写成「重试按钮真正重新发起该 id 的摘要请求（并先清掉上次错误）」并校验 `ai_summarize` 调用数 === 1——即**没有**任何断言把「重试失效」写成期望。我另全文检索 `重试|短路|不重复请求` 的 18 处命中，唯一涉及该守卫的是第 1053 行「已有摘要缓存时直接短路（不重复请求 AI）」，它喂的是完整缓存（delta+done 后的成品），属正当缓存语义，D1 修好后（无论把清理挪到守卫前还是区分「完整/半截」）该断言仍应通过，**不会反向阻挡修 D1**。7) **(h) 的覆盖折衷是否诚实充分**：作者称「真身在组件 Overlays.tsx:76-113 的 alive 代际 + 180ms 防抖，tsconfig.test.json 不编译组件」——我核对属实且引用精确：Overlays.tsx:65-69 是 180ms 防抖、76-113 是 `let alive = true` 代际 + cleanup 置 false（另有 109 行 250ms 二次延迟）；tsconfig.test.json 的 include 只列 store.ts/mockData.ts/types.ts/lib/{api,format,external}.ts（传递引入 store/selectors.ts），确实不含任何 .tsx。该替代**足以支撑 (h) 在本任务经批准边界（store 状态机）内的验收**，但**不足以覆盖 (h) 字面上的「搜索结果列表竞态」**：测试覆盖的是点击搜索结果真正走的 store 路径（openSearch/closeSearch 的面板态，以及 anchorToArticle 的 reloadGeneration：两次导航同时在途 → 旧导航先返回 → 不发 list_articles、不抢选中态 → 只有最新一次生效），我用「删掉 anchorToArticle 的 3 处代际守卫」做 mutation，恰好杀死 (a)(h) 各一条，证明该守卫的断言是真有牙齿的；未被覆盖的是 Overlays 里 FTS 结果列表被慢查询覆盖的那一层。鉴于（a）任务 non_goals 明写「组件级渲染测试…不在前端拆分前置的最小必要范围内」、（b）non_goals 同时禁止引入新测试框架/依赖，而编译 .tsx 并 mock react 需要新依赖、（c）该守卫位于 Overlays.tsx，TASK-049 拆 store.ts 不会动它，替代不削弱本次的实际保护目标、（d）作者在报告 summary 与 validation_requests 里主动逐条披露——我判定披露诚实、充分，替代可接受，不构成 FAIL；缺口应作为「组件级行为测试专项」或 TASK-049 之后的长期待办明确登记。8) 两条把**观察项写进期望**的断言（第 820-821 行「分页失败被静默吞掉：无 toast、无错误态（用户侧零提示——记录为观察项）」断言 `toasts.length === 0`；第 995-996 行「非法值仍原样写进 settings.startupView（只拦「应用」不校验「值」——观察项）」）确实冻结了 D2/D5 邻域的现状。这**不是隐瞒**：断言名自带「观察项」字样，报告也把 D2/D5 列为缺陷并声明只记录不修改；且任务 test_review.actions 明确要求 `keep: src/store.ts 的实现与行为`，为「保行为」的回归网冻结当前行为是正确取舍。代价是后续修 D2/D5 的任务需要同步改这两条断言——作为非阻断提示留给那个任务，不在本任务要求修。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-93bba5769406494c869c1f0f81b41c22-candidate.json",
+        ".workflow-kit/tasks/evidence/RUN-4ec681d64ecd4d499c363d4ced54a1f3-scope.json",
+        ".workflow-kit/tasks/evidence/RUN-4ec681d64ecd4d499c363d4ced54a1f3-changes.json",
+        ".workflow-kit/tasks/evidence/RUN-93bba5769406494c869c1f0f81b41c22-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-93bba5769406494c869c1f0f81b41c22-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-93bba5769406494c869c1f0f81b41c22-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md",
+        ".workflow-kit/tasks/evidence/TASK-048-worker-result.json",
+        "src/store.ts",
+        "src/components/Overlays.tsx",
+        "tsconfig.test.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "本任务本身就是回归能力建设，所以这里问的是「新网能不能保护 TASK-049 的拆分、以及仍然保护不了什么」。**能保护的**（我用 mutation 逐项证伪过，不是推断）：拆分最容易弄坏的是跨模块搬运后语义漂移，新网对这些点都有可判死的断言——(a) bootstrap 三态（tauri 成功 / 无 IPC 回退 mock / 失败不回退假数据）与 reload 代际丢弃；(b) activeFeedFilter 三种形态（'all'/纯数字/'cat-'）的范围解析 + selectTreeCounts/selectViewCounts 的角标算术（含「选中源不属于当前布局时计数全 0」这条容易在搬运中丢掉的边界）；(c) selectView 的缓存快照恢复语义（游标=快照长度、articlesExhausted=true、后台静默刷新不改结论）与 timelineFilter/timelineSort 的派生集合；(d) 布局解析链（feed 级覆盖 → 分类布局）与「切布局是纯本地过滤、entries 引用不变」；(e)(f) isRead/isStarred 的乐观更新与 feedCounts 联动、markAllRead 的范围语义（feedId/folderId/starredOnly/sinceMs 四参数各自的取值与 null 约定）、批量标读的合并语义与空列表 no-op；(g) 游标推进、防抖、到底、失败复位；(h) 搜索面板态与 anchor 代际；(i) toast 的追加/上限/两段式生命周期；(j) 播放器全部字段与 seek/skip 夹取、倍速循环；(k) bootstrapSettings 的逐键类型合并、maxWidth 旧默认迁移、白名单、坏 JSON 容错、updateSettings 的全量落库载荷；(l) AI 的 per-id 生成态、流式增量落位、done/error/reject 三条收尾路径、silent、缓存短路、mock 分支。**仍不能覆盖的**（与 TASK-049 无关但必须写明）：组件层——React 渲染与 effect 时序、Overlays.tsx:76-113 的搜索结果 alive 代际、Reader/Timeline/SettingsModal 的交互；真实 Tauri 边界——本网把 `@tauri-apps/api/core` 整个 mock 掉，IPC 序列化、Channel 真身、DB 层 SQL 与事务、错误码形状都无法证伪（作者已用一条断言把「Channel onmessage 契约」间接钉住，但那是 mock 契约不是真实契约）；非 store 模块——triggerManualSync 分步链路、answerCloseAsk 的重试、OPML、图片代理、GitHub 轮询（作者在报告里已列为未覆盖）；以及既有 26 项仍是纯状态机断言（baseline 记录的 `focus|querySelector|tabIndex|role=` 命中 0 依旧成立）。**回归保护完整性**：既有 26 项在文件中仍处于最前（断言序列索引 0-25，新增从 26 开始），未被改写，我复跑 26/26；新加的 115 项用独立 `checkNew()`/`newResults` 计数并以 🆕 标记，摘要分三行，避免了「新增」被误读成「既有保护的增强」这一 baseline 明确点名的口径风险。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md",
+        ".workflow-kit/tasks/evidence/RUN-93bba5769406494c869c1f0f81b41c22-frontend.stdout.txt",
+        "src/store.ts",
+        "src/components/Overlays.tsx"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "逐个失败面查证（只读 + mutation）：**IPC/bootstrap 失败**——(a) 注入 `failReload` 后断言 `bootstrapError === '数据库损坏'`、`dataLoading === false`、`dataMode` 保持 tauri、entries/categories 为空（绝不回退 mock 假数据），并单独断言 retryBootstrap 清错误态后重新装载 8 条：失败态与恢复态两端都在。**分页失败**——(g) 用 `listPlan={mode:'reject'}` 断言 `articlesLoading === false`（不永挂加载动画）、`articlesLimit` 与 entries 不被破坏，并**显式**断言「无 toast、无错误态（用户侧零提示——记录为观察项）」，即 D2 的吞错行为是被测出来并标注的，不是没测。我删掉编译产物里的 `if (get().articlesLimit !== offset) return;` 后，「加载期间游标被 reload 重置：过期追加被丢弃」这条**恰好**失败（exit 1，114/115），证明该守卫有牙齿。**竞态丢弃**——三处都覆盖：reload 代际（两次 reload 同时在途 → 旧代际结果被丢弃，entries 保持最新）、视图守卫（reloadFilteredEntries 在途时切走视图 → entries 与游标不被旧视图覆盖，我用删除 mutation 杀死）、anchor 代际（两次 article_index 在途 → 过期导航不发 list_articles、不抢 activeArticleId；用删除 3 处代际守卫杀死）。**AI 失败**——(l) 覆盖流内 `error` 事件（summaryErrors/translateErrors 按 id 记录 + 清生成态 + toast 带重试）、Promise `reject`（落到「AI 服务未配置或不可达」）、`silent` 不弹 toast、mock 模式给提示且不发 IPC，共 4 类；成功后还有「回读 DB 消毒译文覆盖流式产物、无 <script> 残留」。**no-op / 防御路径**——无选中文章、选中 id 不在 entries、空 id 列表批量标读、mock 模式下 markAllRead/anchorToArticle 不发 IPC，均有断言。**设置失败**——坏 JSON 被 try/catch 吞掉且不破坏当前设置（并统计 console.error 恰为 1 次）。**缺口（作者已披露，我确认未覆盖且不影响本任务验收）**：refreshOneFeed/triggerManualSync 的失败链、answerCloseAsk 的两次重试与 toast、OPML 导入失败、图片代理失败、GitHub 设备流轮询失败——这些不属于 acceptance 点名的 12 领域，登记为后续组件/集成测试的输入。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        "src/store.ts",
+        ".workflow-kit/tasks/evidence/RUN-93bba5769406494c869c1f0f81b41c22-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "**组织方式**：新增段落在同一文件内以 `/* (a) … (l) */` 十二个分节注释线性排列，每节先给规范假数据再给用例；断言名统一带 `(x)` 领域前缀，`checkNew` 独立计数 + 🆕 标记 + 三行摘要，读输出即可定位领域，后续 TASK-049 弄坏哪块可直接跳到对应节。**假后端可维护性**：单点驱动——`FOLDERS/FEEDS/COUNTS/BASE_ROWS` 是规范夹具，`queryRows()` 用内存实现复刻后端 list_articles 的范围/未读/收藏/今天/排序/分页语义，`resetStore()`/`bootFixture()` 在每个领域开头做全字段复位（含 feedIndex/feedCounts 这类 Map），可变行为（`failReload`/`listPlan`/`indexPlan`/`aiSum`/`aiTr`/`detailImpl`/`settingsRaw`）都在 `resetStore` 里显式归零，避免隐式耦合；竞态用手动 resolve 的 deferred 驱动，而不是靠 sleep 抢时序——这是这套网最值得保留的设计。`globalThis.__INVOKE__` 在新增块开头整体替换，旧 26 项（先跑）不受影响，边界清晰。**长期负担**：文件 261 → 1151 行，单文件偏大但线性、无嵌套框架、零新依赖（沿用 tsc + node --loader + check()），符合 non_goals。三处非阻断的维护性观察：（i）第 832-834 行那条 (g) 断言里的 `articlesLoading === false` 合取项是被测试自己在上一行的 `setState({… articlesLoading: false })` 保证的，属无信息量合取——但整条断言仍有鉴别力（删除守卫的 mutation 被杀死），只是该合取项可在后续清理时删掉以免误导；（ii）`(k)` 与 `(g)` 两条把 D2/D5 邻域的现状写进期望（名字里标明「观察项」），后续修缺陷的任务需同步更新这两条；（iii）顺带发现 src/store/selectors.ts 第 11-14 与 16-18 行有一段完全重复的注释块，属 TASK-049 拆分时可顺手清理的既有噪声，与本任务无关、不影响判定。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        "src/store/selectors.ts",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "**运行时间**：我实测 `npm run test:frontend` 单次墙钟约 7s（tsc 编译到 dist-test/ 约 1s + 断言段约 5-6s，其中约 4.7s 是 toast 生命周期那一段的真实等待）；lint 约 29ms（24 files / 116 rules）、build 约 124-136ms；三门禁合计不到 1 分钟，作为拆分前的回归网与 TASK-049 的每步验证点完全可接受。**确定性**：连续两次 `npm run test:frontend` 均 exit 0，141 条断言行**逐行逐字节一致**（规范化后唯一差异是 node `--experimental-loader` 警告里的进程号与 PowerShell 自身的错误上下文行），结论一致；叠加作者自报的 4 次共 6 次运行一致。**计时依赖盘点**（作者声明「只有 toast 生命周期依赖真实计时」，基本属实，但有两处需补充说明）：(1) toast：`showToast` 是 stay = 2200ms（无 action）/ 4200ms（有 action）+ 200ms 退场（store.ts:941-949），测试在 2800ms 采样「无 action 已卸载、有 action 仍在且未 leaving」，再等 1900ms（累计 4700ms）采样「全部消失」。对 2400ms/4400ms 两个阈值的余量实际是 **400ms 与 300ms**，作者写「各留 400ms 余量」对第二处略乐观 100ms；另外「仍在且未 leaving」要求 4200ms 定时器**不得提前**触发，余量 1400ms，方向安全（机器负载只会让定时器晚触发，利好「已消失」类检查），故可接受。(2) 作者未提到的第二处时间耦合：`(c) 今天视图只含本地当天条目` 用 `localDayKey(Date.now())` 与夹具中的 `NOW` 比对，若测试正好跨越本地午夜执行会失稳——窗口是测试启动到该断言之间的数十毫秒，概率极低，且可复跑，登记为非阻断。其余同步一律用 `nTick(0/5/20)` 让出宏任务 + 手动 resolve 的 deferred，理论上对「动态 import 首次解析慢于一个宏任务」有极小的潜在抖动，但 6/6 运行一致、且该 import 在新增段之前已被旧用例预热，实测无风险。**不适用项**：本任务不引入运行时路径（唯一改动是测试脚本），无产品侧性能可测——按「无基准可测」而非「未测」记录；三门禁耗时与 baseline 相比无劣化（lint 29ms vs 30ms、build 124ms vs 121ms、frontend 从 26 项扩到 141 项后仍在个位数秒）。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        "src/store.ts",
+        ".workflow-kit/tasks/evidence/RUN-93bba5769406494c869c1f0f81b41c22-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-93bba5769406494c869c1f0f81b41c22-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-93bba5769406494c869c1f0f81b41c22-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md"
+      ]
+    }
+  ],
+  "ui_review": null
+}

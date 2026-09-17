@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-048",
+  "run_id": "RUN-4ec681d64ecd4d499c363d4ced54a1f3",
+  "status": "ready_for_verification",
+  "summary": "为 TASK-049（拆分 store.ts）建立行为回归网。只加测试、未改任何实现：唯一改动的 tracked 文件是 tools/frontend-regression.mjs（+893/-3，LF 行尾 0 CRLF），src/** diff 为空，package.json 与 tsconfig.test.json 未动。断言分布：既有 26 项**逐字保留**（我已独立复核：原文件行首 check( 共 26 行，现文件仍 26 行，缺失 0；git diff 删除侧仅 3 行旧汇总块 console.log/if(failed.length)/console.error，不含任何 check 行）；新增 115 项（要求 ≥25），用独立 checkNew() 计数并带 🆕 标记，摘要分三行输出「既有回归 26/26」「新增 store 行为断言 115/115」「合计 141/141」，避免新增被误当成既有保护的增强。12 个领域分布：a=8 b=11 c=13 d=8 e=6 f=12 g=8 h=7 i=5 j=11 k=10 l=16；断言为因果断言而非「不抛错」，并自带内存假后端（folders/feeds/feed_counts/list_articles 支持范围/未读/收藏/今天/排序/分页、article_index、get_article、get_setting/set_setting、AI channel），竞态用手动 resolve 的 deferred 驱动，无网络、无 Tauri、不碰用户数据库。门禁（本会话我独立复跑，重定向后读退出码）：npm run lint exit 0 且 0 warnings/0 errors；npm run build exit 0；npm run test:frontend exit 0 且 141/141。作者另做牙齿验证：故意把 1 条新增断言改成必假 → exit 1 并打印「既有 26/26；新增 114/115」，恢复后 sha256 不变；连跑 4 次断言序列逐行一致。写测试过程中发现 store 的 5 处真实缺陷 + 2 处低优先观察，**按任务要求只记录不修改实现**：D1 summarizeEntry/translateEntry 的 toast「重试」是死按钮（半截文本先写入后满足 if(art.aiSummary) return / if(art.translatedContent) return，重试不再发 IPC、summaryErrors 不清；探针实测调用数 1→1）；D2 loadMoreArticles 失败路径 catch { set({articlesLoading:false}) } 完全吞错（无 toast、无错误态，对照 refreshOneFeed 等都有 toast）；D3 竞态丢弃分支 if(get().articlesLimit!==offset) return 不复位 articlesLoading（探针证明只改游标时该标志永久为真，进而被入口守卫永久挡住后续加载；今天自愈仅因所有写 articlesLimit 的路径都顺手置 false，拆分迁移时极易漏掉）；D4「启动时打开」白名单（all|today|unread|starred）与设置页下拉选项（unread|all|today|article）不同步，用户选「文章」会落库但启动时静默失效；D5 updateSettings 无运行时校验（探针 fontSize:-5/refreshInterval:0/fetchConcurrency:99/listWidth:99999 全部进内存并落库），范围约束只在组件，与 bootstrapSettings 的 typeof 拦截形成「写入不校验/读回丢弃」的不对称。低优先：markEntriesReadBulk 逐 id find 为 O(n·m)（与 markEntriesRead 的一次遍历优化不一致）、selectViewCounts/selectTreeCounts 对 feed_counts 缺失的源直接 continue（角标空且不计入「全部」数字但条目仍列出）。未覆盖已在报告说明：(h) 搜索竞态守卫的真身在组件（Overlays.tsx 的 alive 代际 + 防抖），tsconfig.test.json 不编译组件，故以 store 侧等价守卫（anchorToArticle 的 reloadGeneration、reloadFilteredEntries 视图守卫）替代并断言；toast 生命周期是唯一依赖真实时间的断言（采样 2.8s/4.7s，各留 400ms 余量）；triggerManualSync 分步链路、answerCloseAsk、OPML、图片代理、GitHub 轮询未纳入；组件级断言超出本网能力边界。",
+  "changed_files": [
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "请独立复核「既有 26 项逐字未改」：用 git show HEAD:tools/frontend-regression.mjs 取原文件，逐行比对 26 条 check(...) 是否全部原文存在；git diff 删除侧不得含任何 check 行",
+    "请独立复核「未改实现」：git diff HEAD -- src 必须为空；package.json / tsconfig.test.json 未改动",
+    "请独立复跑三条门禁（重定向到文件后读退出码）并核对 npm run test:frontend 输出确为「既有 26/26 + 新增 115/115 = 141/141」、exit 0",
+    "请复核新增断言是否**真有鉴别力**：抽查若干条（尤其领域 f/g/h/j/l），确认断言的是具体因果而非恒真式；建议自行验证「把某条改成必假会失败」（作者做过一次牙齿验证）",
+    "请复核新增断言**未把已知缺陷锁成预期**：作者声明 D1（AI 重试死按钮）的测试只断言「无半截文本时重试可用」，未把缺陷固化为期望；请核对该声明属实（这关系到后续修 D1 时测试不会反向阻挡）",
+    "请复核测试的确定性：连续跑两次结论一致；并指出哪些断言依赖真实计时（作者声明只有 toast 生命周期）",
+    "请复核 5 处缺陷（D1–D5）的复现描述是否与代码相符（只读核对，不要求修）",
+    "请复核测试不写用户数据库、不依赖 Tauri 运行时（%APPDATA%\\com.fluxreader.app\\fluxreader.db 应仍为 0 行）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}
