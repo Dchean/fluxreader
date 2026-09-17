@@ -1,0 +1,14 @@
+{
+  "id": "DEC-96f1706571024602a4ba3bcc137441c5",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-17 授权范围『完整收尾：前端拆分 + REQ-007 残余项』与『把发现的问题都修复』（DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf / DEC-fix-all-findings-20260917）。TASK-049 候选 aa579c8f… 已通过 verify（RUN-64219aaa…，lint/build/frontend 三门禁 PASS）与独立审查 PASS（findings 为空；审查者自写 tokenizer 独立算出 122 个 key 零遗漏零重复、逐 key 正文等价 122/122、在产物上派发全部 73 个 action 各 4 轮无异常）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-049"
+  ],
+  "recorded_at_utc": "2026-09-17T10:41:34.271843Z",
+  "candidates": {
+    "TASK-049": "aa579c8fead37ab40e57637bc55db7298b496dab807ededbb80395b6b5b04d43"
+  }
+}

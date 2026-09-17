@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-049 · 前端拆分一：store.ts 按领域拆为 Zustand slice（行为保持不变）
 
-**状态**：verified
+**状态**：done
 
 **目标**：把 src/store.ts 拆小。现状：文件 1657 行（可信口径），其中 171–1650 行是**一个 `create<AppState>((set, get) => ({ ... }))` 内的巨型对象字面量**——因此本任务不是「把函数搬到别的文件」，而是按 **Zustand slice 模式**把状态与 action 切成领域模块，再由 store.ts 组合。目标结构：store/slices/ 下按领域分文件（建议 bootstrap / ui / feeds / articles / reader / player / settings 七个 slice，实现者可调整并说明理由），每个 slice 用 `StateCreator<AppState, [], [], XxxSlice>` 形态；store.ts 只保留组合、公共入口与既有再导出。**硬要求：行为逐项保持不变**——包括当前已知缺陷（D1–D5）的现状行为，它们属独立的缺陷修复任务，不得在本任务顺手改。
 

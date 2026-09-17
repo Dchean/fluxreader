@@ -1206,6 +1206,20 @@
       "statement": "修复 review_quality_digest 把「可变产物」按活动内容绑定的缺陷：绑定范围收敛为「候选快照内文件 + 记录区 tasks/evidence/** + 该次 verification_run 的 JSON」，源码/配置/工具脚本/binding/其它运行记录不再纳入篡改判据（它们由各自任务的候选快照与 git 约束）。连带对账 5 条历史审查的派生摘要（TASK-040/041/043/044/045），每例先验证 P1（确有被排除的可变产物，即失配可由规则变更解释）与 P2（仍被绑定的记录区证据相对 HEAD 干净，防止洗掉真实篡改）。**不放宽任何门禁**：记录区证据仍按活动内容强绑定，ui_review_digest 口径未变；候选内文件仍绑快照。如实记录作者失误：对账第一次因自建副本漏算 verification_run 分量而写出错值，后改用真实函数做权威对账才收敛。文档见 .workflow-kit/docs/TOOL-GAP-review-source-evidence-binding.md。",
       "scope": "workflow tooling (project_workflow.py, binding.json)",
       "recorded_at_utc": "2026-09-17T10:28:05.559316Z"
+    },
+    {
+      "id": "DEC-96f1706571024602a4ba3bcc137441c5",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 授权范围『完整收尾：前端拆分 + REQ-007 残余项』与『把发现的问题都修复』（DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf / DEC-fix-all-findings-20260917）。TASK-049 候选 aa579c8f… 已通过 verify（RUN-64219aaa…，lint/build/frontend 三门禁 PASS）与独立审查 PASS（findings 为空；审查者自写 tokenizer 独立算出 122 个 key 零遗漏零重复、逐 key 正文等价 122/122、在产物上派发全部 73 个 action 各 4 轮无异常）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-049"
+      ],
+      "recorded_at_utc": "2026-09-17T10:41:34.271843Z",
+      "candidates": {
+        "TASK-049": "aa579c8fead37ab40e57637bc55db7298b496dab807ededbb80395b6b5b04d43"
+      }
     }
   ]
 }

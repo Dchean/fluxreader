@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "把 src/store.ts 拆小。现状：文件 1657 行（可信口径），其中 171–1650 行是**一个 `create<AppState>((set, get) => ({ ... }))` 内的巨型对象字面量**——因此本任务不是「把函数搬到别的文件」，而是按 **Zustand slice 模式**把状态与 action 切成领域模块，再由 store.ts 组合。目标结构：store/slices/ 下按领域分文件（建议 bootstrap / ui / feeds / articles / reader / player / settings 七个 slice，实现者可调整并说明理由），每个 slice 用 `StateCreator<AppState, [], [], XxxSlice>` 形态；store.ts 只保留组合、公共入口与既有再导出。**硬要求：行为逐项保持不变**——包括当前已知缺陷（D1–D5）的现状行为，它们属独立的缺陷修复任务，不得在本任务顺手改。",
   "non_goals": [
     "改变任何行为：状态初值、action 语义、派生选择器结果、错误路径、文案一律不变",
@@ -190,9 +190,11 @@
     "candidate_digest": "aa579c8fead37ab40e57637bc55db7298b496dab807ededbb80395b6b5b04d43",
     "verification_run": "RUN-64219aaa03d141a48ae0e7ae8a7ae73c",
     "review_run": "RUN-6ff6952446b04f1cacb175095075dd31",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-96f1706571024602a4ba3bcc137441c5-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-96f1706571024602a4ba3bcc137441c5"
+    ],
+    "merge_ref": "bb8fc63 (refactor(frontend): TASK-049 拆分 store.ts 为 Zustand slice（行为不变）)",
     "ledger_correction": {
       "at_utc": "2026-09-17T10:29:51.017146Z",
       "authorized_by": "用户 2026-09-17：『授权订正（推荐）』（针对 build 门禁写法错误的记录级订正）",
