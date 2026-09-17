@@ -1,0 +1,28 @@
+{
+  "task_id": "TASK-045",
+  "run_id": "RUN-7130172f81a245d88917e5e1793fda6f",
+  "status": "ready_for_verification",
+  "summary": "sync.rs（1352 行）按职责拆为 sync/ 8 个子模块，承接 TASK-044 完成 BRIEF 验收目标的第二步。结果：mod.rs 64（模块文档 + SyncReport + 声明与重导出）、credentials.rs 138、push.rs 193、subscriptions.rs 264、entries.rs 289、greader_pull.rs 178、fever_pull.rs 197、phases.rs 133；最大 289 行（验收 ≤400，行数用可信口径 LF 字节数=splitlines=ReadAllLines 交叉验证）。拆分前 Pull 章节 883 行超过 400，故按职责细分为 subscriptions/entries/greader_pull/fever_pull 四块而非照搬章节边界。与 TASK-044 的关键区别：本任务含不可省略的可见性放大，已按 acceptance 要求逐项声明——共 19 项 private→pub(super)（credentials.build_client + Backend 的 8 个方法、push 的 PUSH_LOCK/plan_push/exec_push/age_stale_queue、PushPlan 与 PushStatus 及其字段、subscriptions 的 push_feeds/pull_feeds、entries 的 item_numeric_id/merge_pulled_entry/pull_entries、greader_pull.pull_entries_greader、fever_pull.pull_entries_fever），放大依据是先做跨文件引用分析、只对确实被别文件引用的项放宽，其余保持 private。pub(super) 只在 sync 模块内可见、不新增对外 API，故 crate::sync:: 的公开面与拆分前一致；mod.rs 对含 pub 项的 4 个模块 pub use 重导出以保持既有调用路径，entries/greader_pull/fever_pull 无 pub 项故改用模块内私有 glob。行为未变已证明：脚本按 fn 切分比对，原 40 / 新 40 个函数，函数体逐字零差异；4 个签名归一化后有差异，字符级定位确认仅因加 pub(super) 后超宽被 cargo fmt 折行并补尾随逗号（Rust 中参数尾随逗号无语义）。门禁（重定向后读退出码）：cargo build exit 0（唯一 warning 为既有 linker 提示，TASK-044 同样存在）、cargo fmt --all -- --check exit 0、cargo clippy --all-targets -- -D warnings exit 0、cargo test exit 0 且 120 passed / 0 failed / 23 ignored，与基线逐项一致。实施中三次返工均由编译器/工具抓出：PushPlan 字段漏放大致 2 处 E0616、credentials.rs 多余 use super::* 致 unused import、3 处无 pub 项的 pub use 触发 glob 告警。",
+  "changed_files": [
+    "src-tauri/src/sync.rs",
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/src/sync/credentials.rs",
+    "src-tauri/src/sync/push.rs",
+    "src-tauri/src/sync/subscriptions.rs",
+    "src-tauri/src/sync/entries.rs",
+    "src-tauri/src/sync/greader_pull.rs",
+    "src-tauri/src/sync/fever_pull.rs",
+    "src-tauri/src/sync/phases.rs"
+  ],
+  "validation_requests": [
+    "请复核可见性放大确为『最小必要』：报告 §3 列了 19 项并各自标注使用者，请抽查若干项是否真的被别的文件引用（若某项从未被外部引用却被放大，即为过度放宽，应指出）",
+    "请复核 pub(super) 未新增对外 API：crate::sync:: 的公开面应与拆分前一致（pub(super) 在 sync 模块外不可见）",
+    "请复核『行为未变』：独立比对 git show HEAD:src-tauri/src/sync.rs 与新 sync/*.rs，确认函数体逐字一致；对 4 个签名差异（build_client/exec_push/push_feeds/pull_feeds）确认为 rustfmt 折行补的尾随逗号而非语义变化",
+    "请复核 mod.rs 对无 pub 项的 3 个模块改用私有 glob 是正确取舍（而非掩盖告警），以及 use super::* 是否会造成项遮蔽",
+    "请复核既有调用点零改动：lib.rs / commands/* / scheduler / ingestion 对 crate::sync::<fn> 的引用应未改（git diff 应为空）",
+    "请独立复跑四条门禁并以日志 test result 行交叉核对 120/0/23（本环境用管道读退出码可能被掩盖；重定向到文件后读退出码）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

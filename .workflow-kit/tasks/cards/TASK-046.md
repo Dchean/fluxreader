@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-046 · 流程工具修复：prepare 读取 scope.allowed_paths 并对静默回退报错（消除二次命中的死锁缺口）
 
-**状态**：ready
+**状态**：cancelled
 
 **目标**：修复已两次导致任务被 scope 门禁卡死（且 CLI 无任何恢复入口）的流程工具缺口。缺口记录于 .workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md：workflow_runtime.py:435 只从 spec 的**顶层**读 allowed_paths（specification.get('allowed_paths', paths)），而项目自带模板 tasks/templates/TASK.json 把该字段放在 **scope.allowed_paths**（嵌套）；Agent 按模板形状书写时会被**静默忽略**并回退为目录式 snapshot_paths，因 matches() 是纯 fnmatch（目录名不匹配具体文件），导致 finish 把全部改动文件误判越界。首次命中 TASK-043，第二次命中 TASK-044（均由 owner 授权做记录级订正解锁）。本任务实施缺口文档「建议的工具修复」第 1 项（优先项）：让 prepare 同时接受顶层与 scope.allowed_paths（嵌套优先，因为它更具体），并在「spec 里存在 scope.allowed_paths 却与生效值不一致」时**直接报错退出**而不是静默回退。
 
@@ -33,19 +33,22 @@
 
 ## 执行与恢复
 
-- 首次开始：None
-- 原截止时间：None
-- 当前截止时间：None
+- 首次开始：2026-09-17T07:31:55.879636Z
+- 原截止时间：2026-09-17T11:31:55.879636Z
+- 当前截止时间：2026-09-17T11:31:55.879636Z
 - 已用修复轮：0
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：先核对已有文件及原始日志，再处理 scope；不要新建任务或重置预算
 
 ## 最近检查点
 
+- 2026-09-17T07:31:55.945239Z：开始执行，保留原任务身份和截止时间；下一步：完成当前修改后调用 finish，再运行 verify
+- 2026-09-17T07:38:39.441210Z：Out-of-scope changes: .workflow-kit/binding.json, .workflow-kit/scripts/tests/test_allowed_paths.py, .workflow-kit/scripts/workflow_runtime.py；下一步：先核对已有文件及原始日志，再处理 scope；不要新建任务或重置预算
 
 ## 原始证据
 
 [唯一状态记录](../items/TASK-046.json)
 
+- [RUN-3df9bad45a3946ea8f1e3da51effe38f](../runs/RUN-3df9bad45a3946ea8f1e3da51effe38f.json)
 
 卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

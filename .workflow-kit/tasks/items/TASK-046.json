@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "ready",
+  "status": "cancelled",
   "objective": "修复已两次导致任务被 scope 门禁卡死（且 CLI 无任何恢复入口）的流程工具缺口。缺口记录于 .workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md：workflow_runtime.py:435 只从 spec 的**顶层**读 allowed_paths（specification.get('allowed_paths', paths)），而项目自带模板 tasks/templates/TASK.json 把该字段放在 **scope.allowed_paths**（嵌套）；Agent 按模板形状书写时会被**静默忽略**并回退为目录式 snapshot_paths，因 matches() 是纯 fnmatch（目录名不匹配具体文件），导致 finish 把全部改动文件误判越界。首次命中 TASK-043，第二次命中 TASK-044（均由 owner 授权做记录级订正解锁）。本任务实施缺口文档「建议的工具修复」第 1 项（优先项）：让 prepare 同时接受顶层与 scope.allowed_paths（嵌套优先，因为它更具体），并在「spec 里存在 scope.allowed_paths 却与生效值不一致」时**直接报错退出**而不是静默回退。",
   "non_goals": [
     "修改 matches() 的语义或让目录名匹配其下文件（缺口文档第 2 项，会改变越界判定语义，本次不做）",
@@ -142,12 +142,14 @@
     "definition_digest": "1a83e769ffa8f7a5a2c79a9f139c0ce7478dc3679d56a1ec16947ec9c88277a5"
   },
   "budget": {
-    "started_at_utc": null,
-    "deadline_at_utc": null,
+    "started_at_utc": "2026-09-17T07:31:55.879636Z",
+    "deadline_at_utc": "2026-09-17T11:31:55.879636Z",
     "repair_rounds_used": 0
   },
   "batch_id": "BATCH-cdd487dcfaea4e03a31cb2b85db2591e",
-  "run_ids": [],
+  "run_ids": [
+    "RUN-3df9bad45a3946ea8f1e3da51effe38f"
+  ],
   "blockers": [],
   "evidence": {
     "candidate_manifest": null,
@@ -156,11 +158,37 @@
     "review_run": null,
     "acceptance_ref": null,
     "owner_decision_ids": [],
-    "merge_ref": null
+    "merge_ref": null,
+    "ledger_correction": {
+      "at_utc": "2026-09-17T08:09:08.437168Z",
+      "authorized_by": "用户 2026-09-17 明确选择：『授权：改为总控级提交 + 订正 TASK-046 记录（推荐）』；并沿用既有授权 DEC-toolfix-extend-deadlock-20260915（『在工具脚本缺陷阻塞流程时修补工具脚本』）",
+      "reason": "finish 判 failure_kind=scope：本任务改动的 .workflow-kit/binding.json 与 .workflow-kit/scripts/** 命中**任务模板自带的 protected_paths**。该保护由 workflow_bootstrap.py:193-195 在安装时写入 tasks/templates/TASK.json，即**每个任务**都继承它——任务在设计上永远不能修改工作流工具本身。故本任务作为『任务』无法交付该修复，这与实现质量无关。项目先例（提交 61563e6「accept TASK-035..040 ... and tool fix」）表明：工具修复以**总控级基础设施提交**的方式交付，而非任务产物。",
+      "disposition": "记录状态由 blocked 改为 cancelled（语义：撤回本任务，改由基础设施提交交付）。修复内容不变：workflow_runtime.resolve_allowed_paths 同时接受顶层与 scope.allowed_paths、冲突时报错、缺失时回退 snapshot_paths；回归自测 .workflow-kit/scripts/tests/test_allowed_paths.py 7/7 通过；缺口文档 docs/TOOL-GAP-prepare-allowed-paths.md 已标记第 1 项为已实施；binding.json 的受管摘要与 tool_digest 已按先例刷新。原始失败记录保留在 run RUN-3df9bad45a3946ea8f1e3da51effe38f。",
+      "original_status": "blocked",
+      "original_failure_kind": "scope",
+      "original_blockers": [
+        "Out-of-scope changes: .workflow-kit/binding.json, .workflow-kit/scripts/tests/test_allowed_paths.py, .workflow-kit/scripts/workflow_runtime.py"
+      ],
+      "tool_gap_ref": ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+      "precedent_ref": "61563e6"
+    }
   },
   "snapshot_paths": [
     ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
     ".workflow-kit/scripts",
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task046.md"
-  ]
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-17T07:31:55.945239Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T07:38:39.441210Z",
+      "note": "Out-of-scope changes: .workflow-kit/binding.json, .workflow-kit/scripts/tests/test_allowed_paths.py, .workflow-kit/scripts/workflow_runtime.py",
+      "next_action": "先核对已有文件及原始日志，再处理 scope；不要新建任务或重置预算"
+    }
+  ],
+  "failure_kind": null
 }

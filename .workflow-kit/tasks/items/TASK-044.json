@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "按 BRIEF 验收目标「后端 commands.rs/sync.rs 拆分完成，拆分过程测试不回归」，沿用 db.rs 试点模式（领域子模块 + 就地测试模块），把 src-tauri/src/commands.rs（1157 行）按既有章节边界拆分为 commands/ 子模块，纯搬运不改行为。目标结构：commands/mod.rs 保留模块声明与共享辅助（即时状态推送调度、公共 import 重导出）；按现有章节注释拆出 folders.rs（Folders/Feeds）、articles.rs（Articles + 刷新）、settings.rs（Settings + 全文提取 + 图片代理）、opml.rs（OPML 导入导出）、sync.rs（后端同步）、ai.rs（AI 引擎）。所有 #[tauri::command] 函数名、签名、可见性、lib.rs 的 invoke_handler 注册列表保持不变；仅调整文件归属与模块路径。",
   "non_goals": [
     "改变任何函数签名、行为、错误文案或命令名（前端零改动）",
@@ -163,9 +163,11 @@
     "candidate_digest": "d94165d3e9abc5a8aef9a6639685b358ca9ba13dc7bbd13f38797432140b6719",
     "verification_run": "RUN-99dc89f06091432db82439b04cdfe69d",
     "review_run": "RUN-73de1b583d12486697e705275bd0cd75",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-45a20546a3c043ccbcdfa12232151083-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-45a20546a3c043ccbcdfa12232151083"
+    ],
+    "merge_ref": "d283547 (refactor(rust): TASK-044 拆分 commands.rs 为领域子模块)",
     "ledger_correction": {
       "at_utc": "2026-09-17T06:08:25.855270Z",
       "authorized_by": "用户 2026-09-15 明确授权『在工具脚本缺陷阻塞流程时修补工具脚本』（DEC-toolfix-extend-deadlock-20260915）；用户 2026-09-17 指令『按照你推荐的继续推进完成项目优化重构，确保你说的这些问题也修复』（DEC-3d2de2111cd84cb988eca14276e2c61f）",
@@ -183,7 +185,8 @@
       "original_resume_phase": "implementation",
       "tool_gap_ref": ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
       "note": "源码未改：订正前后工作区内容一致（commands.rs 删除 + commands/ 7 个新文件）。原始失败 run RUN-697b5cc69ebe4310b4c0a7d3dc0818c6 与 blockers 原样保留。**这是该工具缺口第二次致阻塞**（首次为 TASK-043），已据此另立工具修复任务，使 prepare 同时接受顶层与 scope.allowed_paths 并对静默回退报错。"
-    }
+    },
+    "continued_by": "TASK-045"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task044.md",

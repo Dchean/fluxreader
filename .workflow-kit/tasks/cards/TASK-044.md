@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-044 · 后端单体拆分一：commands.rs 按领域拆分为子模块（可维护性）
 
-**状态**：verified
+**状态**：done
 
 **目标**：按 BRIEF 验收目标「后端 commands.rs/sync.rs 拆分完成，拆分过程测试不回归」，沿用 db.rs 试点模式（领域子模块 + 就地测试模块），把 src-tauri/src/commands.rs（1157 行）按既有章节边界拆分为 commands/ 子模块，纯搬运不改行为。目标结构：commands/mod.rs 保留模块声明与共享辅助（即时状态推送调度、公共 import 重导出）；按现有章节注释拆出 folders.rs（Folders/Feeds）、articles.rs（Articles + 刷新）、settings.rs（Settings + 全文提取 + 图片代理）、opml.rs（OPML 导入导出）、sync.rs（后端同步）、ai.rs（AI 引擎）。所有 #[tauri::command] 函数名、签名、可见性、lib.rs 的 invoke_handler 注册列表保持不变；仅调整文件归属与模块路径。
 

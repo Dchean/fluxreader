@@ -1,0 +1,113 @@
+{
+  "id": "TASK-047",
+  "title": "可访问性修复：关闭态浮层不可聚焦（inert），消除 Tab 进入不可见控件",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
+  "ui_checks": [
+    "默认（全部浮层关闭）状态下，Tab 遍历不得停留在任何不可见控件上",
+    "设置弹窗打开时，其内部控件可正常 Tab 进入并可见焦点环",
+    "设置弹窗关闭后，焦点若原在弹窗内应回到触发元素或 body，且弹窗内控件不再可 Tab",
+    "命令面板（搜索）打开/关闭时同上：关闭后其控件不可 Tab",
+    "灯箱打开时 Esc 可关闭，关闭后其控件不可 Tab",
+    "右键菜单关闭后其菜单项不可 Tab",
+    "小弹窗（新建分类 / 添加源 / 编辑源 / 重命名分类 / 确认对话框）关闭后其控件不可 Tab",
+    "Tab 顺序仍为：窗口控件 → 侧栏搜索 → 视图 → 布局 → 工具栏 → 内容区，不因本次改动新增停靠点"
+  ],
+  "status": "draft",
+  "objective": "修复复核报告 B-3：关闭态浮层内的控件仍在 Tab 序列中。根因已定位——src/components/primitives.tsx 的 ModalOverlay（:298-318）**无条件渲染** children，只用 `className={`modal-overlay ${open ? 'open' : ''}`}` 切换类名；而 src/styles/base.css:1962 的 .modal-overlay 关闭态仅 `opacity: 0; pointer-events: none`（不改可聚焦性），故关闭时内部约 20 个控件仍可被 Tab 命中——用户会 Tab 进一个看不见的对话框。同一模式还用于 Overlays.tsx:314 的灯箱。修法：利用 React 19 对 `inert` 属性的支持，在浮层未打开时加 `inert`，使其整棵子树不可聚焦、不可交互且从无障碍树中移除；并在关闭时把焦点从浮层内移出（避免焦点留在 inert 子树内）。灯箱、命令面板、右键菜单、小弹窗按同一原则处理。",
+  "non_goals": [
+    "改变任何浮层的视觉样式、动画或布局",
+    "改变浮层的开合条件、关闭行为或 Esc 语义",
+    "改动浮层内的表单逻辑、校验、提交行为或文案",
+    "引入新的焦点陷阱（focus trap）——本次只做「关闭时不可聚焦」，不做「打开时困住焦点」",
+    "改动后端、数据库或同步逻辑",
+    "改动本轮 TASK-044/045 的 Rust 产物"
+  ],
+  "requirement_refs": [
+    "MAINT-A11Y-INERT"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": []
+  },
+  "allowed_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md",
+    "src/**",
+    "tools/frontend-regression.mjs"
+  ],
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md",
+    "src",
+    "tools/frontend-regression.mjs"
+  ],
+  "acceptance": [
+    "所有关闭态浮层的子树带 inert（或等效的 aria-hidden + tabindex 管理），实测不可 Tab 进入",
+    "浮层打开时其控件可正常 Tab 进入，`:focus-visible` 焦点环可见（沿用既有 accent 语言，不新增颜色）",
+    "关闭浮层后焦点不停留在 inert 子树内（回到触发元素或 body）",
+    "默认全关状态下，主视图 Tab 停靠点数量与 TASK-043 记录的 16 个一致（不因本次改动增减可见控件）",
+    "不改既有鼠标行为：点击结果、Esc 关闭链、开合状态流转一律不变",
+    "前端回归 26/26 通过且 tools/frontend-regression.mjs 未被改动",
+    "lint 0 warnings / 0 errors、build 通过",
+    "提供实机证据：关闭态 Tab 不进入浮层控件、打开态可进入且焦点环可见、关闭后焦点位置正确"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": ["run", "lint"],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": ["run", "build"],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": ["run", "test:frontend"],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 基线（TASK-044/045 后）：前端 lint 0/0、build 通过、前端逻辑回归 26/26（纯 Zustand 状态机测试，退出码 0）；Rust 侧 120 passed / 0 failed / 23 ignored（本任务不改 Rust）。该套件不覆盖焦点/可聚焦性（grep focus|querySelector|getComputedStyle|tabIndex|role= 命中 0），故本任务的正确性依靠 UI 证据与人工核对，回归套件只证明状态流转与 IPC 未被破坏。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md"
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "tools/frontend-regression.mjs 的 26 项断言",
+        "reason": "本次改动不涉及状态机；既有断言必须原样通过，不得削弱或跳过",
+        "gate_ids": ["frontend"]
+      },
+      {
+        "action": "keep",
+        "target": "既有浮层开合与 Esc 关闭链（App.tsx:199-211）",
+        "reason": "inert 只影响可聚焦性与交互，不得改变 Esc 逐层关闭的既有行为",
+        "gate_ids": ["frontend", "lint"]
+      },
+      {
+        "action": "add",
+        "target": "UI 契约 .workflow-kit/docs/UI-CONTRACT-REQ-047.md",
+        "reason": "本次是可感知的交互语义变更，须先冻结验收标准再实现（沿用 TASK-043 的做法）",
+        "gate_ids": []
+      }
+    ]
+  }
+}

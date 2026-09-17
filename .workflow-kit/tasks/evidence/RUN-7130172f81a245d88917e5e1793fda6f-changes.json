@@ -1,0 +1,13 @@
+{
+  "changed_files": [
+    "src-tauri/src/sync.rs",
+    "src-tauri/src/sync/credentials.rs",
+    "src-tauri/src/sync/entries.rs",
+    "src-tauri/src/sync/fever_pull.rs",
+    "src-tauri/src/sync/greader_pull.rs",
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/src/sync/phases.rs",
+    "src-tauri/src/sync/push.rs",
+    "src-tauri/src/sync/subscriptions.rs"
+  ]
+}

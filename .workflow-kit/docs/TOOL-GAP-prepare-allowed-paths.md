@@ -81,14 +81,32 @@ begin -> {"ok": false, "errors": ["Resolve this blocker explicitly before resumi
 **不放松任何门禁**——被改动的 8 个文件全部在 `src/**` 内（任务本意就是改 `src/**`），
 契约与基线仍在 `protected_paths` 中不可写，`verify` / `review` 仍需照常重跑。
 
-## 建议的工具修复（未实施）
+## 建议的工具修复
 
-择一即可，且都应保留旧记录：
+### 第 1 项 —— **已实施**（TASK-046，2026-09-17）
 
-1. **优先**：让 `prepare` 同时接受顶层与 `scope.allowed_paths`（后者优先），
-   或在发现 spec 里有 `scope.allowed_paths` 却未生效时**报错退出**而不是静默回退；
-2. 让 `matches()` 支持目录前缀匹配（`src/components` 命中其下所有文件），
-   避免候选快照根与授权路径语义混用；
-3. 最低限度：把 `scope` 纳入 `begin` 的放行集合，并让 `next` / `progress`
-   把 `scope` 标注为「无 CLI 恢复入口，需 owner 决定」；
-4. 补一个 `cancel` 命令，使单个卡死任务不至于冻结整个批次续接。
+让 `prepare` 同时接受顶层与 `scope.allowed_paths`，并在两者**冲突时报错退出**。
+实现落在新抽出的纯函数 `workflow_runtime.resolve_allowed_paths(specification, fallback)`：
+
+- 两处都给且不一致 → `raise ValueError`（不静默择一）；
+- 只给嵌套 / 只给顶层 → 用给出的那个（**嵌套优先**，因为它更具体）；
+- 都没给 → 回退 `fallback`（即 `snapshot_paths`，保持既有 spec 兼容）。
+
+回归自测：`.workflow-kit/scripts/tests/test_allowed_paths.py`（7 例，覆盖
+仅顶层 / 仅嵌套 / 一致 / 冲突 / 都无 / `scope` 非 dict / 深拷贝隔离），
+退出码 0 即通过。因该缺口**两次静默致阻塞**，故留可复跑测试。
+
+连带变更：`workflow_runtime.py` 是受管文件，按先例（提交 `61563e6`）
+刷新了 `binding.json` 的 `managed_files[".workflow-kit/scripts/workflow_runtime.py"]`
+与 `tool_digest`（`04957ba0…` → `78ebdc48…`；`82c680b4…` → `531d13a8…`），
+否则 `start` 会报 `integration_needs_repair`。
+
+### 第 2–4 项 —— 仍未实施（本次刻意不做）
+
+2. **让 `matches()` 支持目录前缀匹配** —— **不采纳**：会放宽越界判定语义
+   （目录名将命中其下全部文件），属降低门禁强度，与「只修入参读取」的边界冲突。
+3. **把 `scope` 纳入 `begin` 的放行集合** —— **不采纳**：同样属放宽门禁；
+   应另行评估「`scope` 是否该有合法恢复入口」这一治理问题。
+4. **补 `cancel` 命令** —— **未做**：独立功能，另立任务；
+   它仍是「单个卡死任务冻结整批续接」的根因。
+

@@ -1,0 +1,8 @@
+{
+  "changed_files": [
+    ".workflow-kit/binding.json",
+    ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+    ".workflow-kit/scripts/tests/test_allowed_paths.py",
+    ".workflow-kit/scripts/workflow_runtime.py"
+  ]
+}

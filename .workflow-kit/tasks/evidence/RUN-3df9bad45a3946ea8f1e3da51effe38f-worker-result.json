@@ -1,0 +1,23 @@
+{
+  "task_id": "TASK-046",
+  "run_id": "RUN-3df9bad45a3946ea8f1e3da51effe38f",
+  "status": "ready_for_verification",
+  "summary": "修复已两次（TASK-043、TASK-044）静默致阻塞的流程工具缺口：prepare 只从 spec 顶层读 allowed_paths，而项目自带模板把该字段放在 scope.allowed_paths（嵌套），于是按模板书写的 spec 被静默忽略并回退为目录式 snapshot_paths；finish 的 matches() 是纯 fnmatch，目录名不匹配任何文件路径，导致全部改动被误判越界，且 failure_kind=scope 无任何 CLI 恢复入口、并连带冻结批次续接。实现：抽出纯函数 workflow_runtime.resolve_allowed_paths(specification, fallback)，prepare 改为调用它；规则为两处都给且不一致则 raise（不静默择一）、只给一处则用该处（嵌套优先，因更具体）、都没给才回退 fallback（保持既有 spec 兼容）。缺口文档 docs/TOOL-GAP-prepare-allowed-paths.md 的第 1 项已标记为已实施并写明实现方式与验证证据；第 2、3 项（让 matches() 支持目录前缀、把 scope 加入 begin 放行集合）刻意不采纳——两者都会放宽门禁强度，与「只修入参读取」的边界冲突；第 4 项（补 cancel 命令）属独立功能未做。新增回归自测 .workflow-kit/scripts/tests/test_allowed_paths.py 共 7 例（仅顶层／仅嵌套／两者一致／两者冲突／都无／scope 非 dict／深拷贝隔离），本会话实跑 7/7 通过、exit 0，其中「仅 scope.allowed_paths → 采用嵌套值」一例正是修复点，修复前必然失败。因 workflow_runtime.py 是受管文件，按先例（提交 61563e6）刷新了 binding.json 的 managed_files 摘要与 tool_digest（04957ba0→78ebdc48、82c680b4→531d13a8），否则 start 会报 integration_needs_repair；随后 start 返回 connected=true，check 全绿（18 任务 / 0 errors / 0 warnings）。未改任何业务代码、任务定义、验收标准或既有任务记录，未放宽任何门禁。",
+  "changed_files": [
+    ".workflow-kit/scripts/workflow_runtime.py",
+    ".workflow-kit/scripts/tests/test_allowed_paths.py",
+    ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+    ".workflow-kit/binding.json"
+  ],
+  "validation_requests": [
+    "请独立复核修复语义：resolve_allowed_paths 是否真的做到「两处冲突则报错、只给一处则采用、都没给才回退」，且未改动 finish/verify/review 的任何判定逻辑（尤其 matches() 与越界判定必须逐字未变）",
+    "请复核没有放宽门禁：对比 git diff，确认 finish 的 prohibited 判定、matches()、begin 的 failure_kind 放行集合均未改动",
+    "请复核回归自测的有效性：test_allowed_paths.py 的 7 例是否真能覆盖该缺口（尤其「仅嵌套」一例在修复前应当失败——建议用 git stash / 临时还原 resolve_allowed_paths 验证该例确会失败，即测试有鉴别力）",
+    "请复核 binding.json 的刷新是否必要且最小：只应改 managed_files 中 workflow_runtime.py 一项与 tool_digest，其余 43 个受管条目与 entry_digests 应逐字未变",
+    "请复核未改业务代码与既有任务记录：git diff 应不涉及 src/、src-tauri/、tasks/items/、tasks/runs/",
+    "请复跑 start（应 connected=true）与 check（应全绿）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

@@ -4,7 +4,8 @@
   "status": "active",
   "task_ids": [
     "TASK-044",
-    "TASK-046"
+    "TASK-046",
+    "TASK-045"
   ],
   "approval_decision_ids": [
     "DEC-3d2de2111cd84cb988eca14276e2c61f"

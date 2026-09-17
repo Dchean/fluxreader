@@ -1,0 +1,277 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-17T07:15:02.286790Z",
+  "roots": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task044.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task045.md",
+    "src-tauri/src",
+    "src-tauri/tests"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task044.md",
+      "sha256": "002c12e0b542f1db1da5606a729899351f76a7f9d5575ed872519631f04ada4a"
+    },
+    {
+      "path": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task045.md",
+      "sha256": "70c31d35c897c47b7fc87286911b88dbf781b6451f64d35efc62ff4eaaf002b3"
+    },
+    {
+      "path": "src-tauri/src/ai.rs",
+      "sha256": "1da892169d3c8242c93b9bb0eefb33d02cbb07f0f3eeac6bb9a00c8d9f2e6f1c"
+    },
+    {
+      "path": "src-tauri/src/commands/ai.rs",
+      "sha256": "5c865278c360e4c1137d26c6e0f92301f34269ae6504f0b723ee6bf4ef3f0a9e"
+    },
+    {
+      "path": "src-tauri/src/commands/articles.rs",
+      "sha256": "e58075c578dfc45be4892faa27959813c6bc59b5d3d8f434ef1b4bea62cdf05b"
+    },
+    {
+      "path": "src-tauri/src/commands/folders.rs",
+      "sha256": "cf13fe9a64d1d11b6059a583d165f578120e4b457a479859e653cafd892c53b3"
+    },
+    {
+      "path": "src-tauri/src/commands/mod.rs",
+      "sha256": "ea6effcb7923e9dc3f68cdc1ad7c6a678881d9df7c855f72adcc02b21f28f114"
+    },
+    {
+      "path": "src-tauri/src/commands/opml.rs",
+      "sha256": "4bcd47d09b08071c35ae6e25611d067a080dfc5d3b03de8e4abaa90a9fb48b8e"
+    },
+    {
+      "path": "src-tauri/src/commands/settings.rs",
+      "sha256": "6b68a1e554f8f094ec7459fc618a2f71ae6a84ca72633fa2746518630e1919e1"
+    },
+    {
+      "path": "src-tauri/src/commands/sync.rs",
+      "sha256": "2e02a7a06559f7ea18cb2494ae4f1243639c4b3cbde8e76c6519ead9d0893c28"
+    },
+    {
+      "path": "src-tauri/src/config_sync.rs",
+      "sha256": "9dca77eea66337a3e866c4b6c67fbc9ff6e07a93ae580e94c9eff887972c5c86"
+    },
+    {
+      "path": "src-tauri/src/credentials.rs",
+      "sha256": "23c2c920c8ff0297ee73f3d94023990fe0f92c1125376c246b57fbc2f477bc9f"
+    },
+    {
+      "path": "src-tauri/src/db.rs",
+      "sha256": "b27000deb02557dd7b65192e43d5f5732e9504f7095789ba3797f98db111f806"
+    },
+    {
+      "path": "src-tauri/src/db/articles.rs",
+      "sha256": "5630190daf7f4a5194208510e30a29afc3e17f1f1ec51a8dbd7960e06a9ec8ad"
+    },
+    {
+      "path": "src-tauri/src/db/commands_extraction_tests.rs",
+      "sha256": "de98e87d863a8de544a19596aadb7c398242624ca5050ecf933a8ef4e2aa044b"
+    },
+    {
+      "path": "src-tauri/src/db/dedup_tests.rs",
+      "sha256": "deac1624126430e2f86a8b15b1ef8d12130fc318faabc5cbc29c64e703291a5c"
+    },
+    {
+      "path": "src-tauri/src/db/feeds.rs",
+      "sha256": "1e20452430875113928012509e8e03bda447c1c6bb198a8ace3656dc5ebe3db7"
+    },
+    {
+      "path": "src-tauri/src/db/folders.rs",
+      "sha256": "7abf999270c83470a64c7cd09e8c71b12938c33b31ba0b7eb6c77dbb8dc9d875"
+    },
+    {
+      "path": "src-tauri/src/db/migrations.rs",
+      "sha256": "98e18e5e1cb540336ce3e5879183544fd278e3294880fce275fdc8b712cd4ffb"
+    },
+    {
+      "path": "src-tauri/src/db/settings.rs",
+      "sha256": "3c075a961f31853aaf6a97bafe9d96d9d0a13f779019f1c50969e20d385b8cde"
+    },
+    {
+      "path": "src-tauri/src/db/sync_extraction_tests.rs",
+      "sha256": "565f8c95cc8105c3ea6968cd313f235c5efd5cfe37f6351bd42d11a3d4469cb6"
+    },
+    {
+      "path": "src-tauri/src/db/sync_map.rs",
+      "sha256": "f54912e2a1264f0f5c037757d6e8eaf41645f5caa12f87eef3ff896740123e0a"
+    },
+    {
+      "path": "src-tauri/src/db/sync_queue.rs",
+      "sha256": "8487b91e0f951d1feddff481900e3a78a5bf051dea53b9a7e7448a96e8c23efd"
+    },
+    {
+      "path": "src-tauri/src/db/url_norm.rs",
+      "sha256": "930e332a4883b65e42ea06f71c4b3f9488227375112b0169df8868ce623ad308"
+    },
+    {
+      "path": "src-tauri/src/error.rs",
+      "sha256": "eae55f5577c34770e082cd873bdbe691da31c71d6b1cdf31d3137ad1bff0132e"
+    },
+    {
+      "path": "src-tauri/src/extraction.rs",
+      "sha256": "77f71ab36b1b64caccda1ef85f612d7ed148c871142e466f0efdda7e20e116e1"
+    },
+    {
+      "path": "src-tauri/src/fever.rs",
+      "sha256": "b7c57dd6cc8fe3b712dd316063e1d1c6d02aeb1ea07e74f5bb2f7d21a4cff07e"
+    },
+    {
+      "path": "src-tauri/src/github_auth.rs",
+      "sha256": "e2317105e3d5f21d2b01c9af0693780651566597304e40bacca0fcade043e45e"
+    },
+    {
+      "path": "src-tauri/src/greader.rs",
+      "sha256": "735dcffc904f201ff9b3c55da90a4db9d70a9880bb4e2ae1c95d1acf67bd4e98"
+    },
+    {
+      "path": "src-tauri/src/ingestion.rs",
+      "sha256": "754cc1deedb8ed0db70377838691b7f5ab46cd021ae8e15108d7ae59451903fd"
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "sha256": "fc18824db237de9fcb08d253a257db0a1382ac0abb72a413706dd99932ce756a"
+    },
+    {
+      "path": "src-tauri/src/main.rs",
+      "sha256": "e5dfab54c7a9843285d54ff5a783c00813cd3f28d1bb2f6982aa348697cbb1c4"
+    },
+    {
+      "path": "src-tauri/src/media.rs",
+      "sha256": "dab7146de3a9433b83f70f29a2ddda31347b0b3f3ff2c5e20b9a1762220f84ae"
+    },
+    {
+      "path": "src-tauri/src/opml.rs",
+      "sha256": "e65ae3ae7a3846b90042550c4072f1431e7a4b585215c64752c53f4acef2a9c0"
+    },
+    {
+      "path": "src-tauri/src/sanitize.rs",
+      "sha256": "319778ace4e57b93f0f494b8d0ec08afd0561dd04a635963c596be91af45d373"
+    },
+    {
+      "path": "src-tauri/src/scheduler.rs",
+      "sha256": "280f653dbe8a0c0d4943513702541984ac5ddaf718d31702143b37c8d9eff722"
+    },
+    {
+      "path": "src-tauri/src/state.rs",
+      "sha256": "31519b71581e8d0ca8ea43874c7c18c119f2811921bcf7db9e5534be62e3f06b"
+    },
+    {
+      "path": "src-tauri/src/sync/credentials.rs",
+      "sha256": "14b4d333c14259d5047c790f3ab68b37f46fa69c570eb807bef766142f54f3cf"
+    },
+    {
+      "path": "src-tauri/src/sync/entries.rs",
+      "sha256": "bfa8d9113488a61302f142e15cfc6cf6cd1d78b9ce8ae25c3abde375e4644d38"
+    },
+    {
+      "path": "src-tauri/src/sync/fever_pull.rs",
+      "sha256": "69837ed247cd8e224c8e78b4254b911c154581d139ea741b3fd838d7aaba2b95"
+    },
+    {
+      "path": "src-tauri/src/sync/greader_pull.rs",
+      "sha256": "c336050196046f6635ee968e0080cc69f9d179d9c4d5db3753b09c4804a2e82b"
+    },
+    {
+      "path": "src-tauri/src/sync/mod.rs",
+      "sha256": "0086f45108f4cac61d9245d2cb2d6f24f02373fc86188e68a59ca66f3450f204"
+    },
+    {
+      "path": "src-tauri/src/sync/phases.rs",
+      "sha256": "c5a07b54464fd3c80663ddfce1e3750bee5073cb1ab60d7cd723ac859324ea18"
+    },
+    {
+      "path": "src-tauri/src/sync/push.rs",
+      "sha256": "a6c7a6fdeac68803932a14ca77ca2d05ea8f8415ca4f3d6cda62e7b4f740893b"
+    },
+    {
+      "path": "src-tauri/src/sync/subscriptions.rs",
+      "sha256": "3ca9089bea4fa5c0a7810df4f376671154a26125ed0ce788c1fc83d102efb162"
+    },
+    {
+      "path": "src-tauri/tests/account_lifecycle_e2e.rs",
+      "sha256": "ca72e369c592757b05012c6731c30d6044c23c6a7975e31a04083ab049eb8050"
+    },
+    {
+      "path": "src-tauri/tests/ai_e2e.rs",
+      "sha256": "cd461e9d03acaed3e6c4bc786b4250ab746532dd93ba767dd16c76f4ef5377b8"
+    },
+    {
+      "path": "src-tauri/tests/config_sync_e2e.rs",
+      "sha256": "fa2e75e060c65ce6343b7e859f2b1b61975f18d642f6b940308a573dfa8b06bc"
+    },
+    {
+      "path": "src-tauri/tests/dedup_sync_e2e.rs",
+      "sha256": "061aa60c29c3d484034533da044376d741af6307452690d155454e4435b0d0d7"
+    },
+    {
+      "path": "src-tauri/tests/dual_client_e2e.rs",
+      "sha256": "dc56cb03805a517422b74ef72decbf5eea97588295c04bf93f6d517442a33e60"
+    },
+    {
+      "path": "src-tauri/tests/feed_edit_e2e.rs",
+      "sha256": "e3f7971f0e5f5fd403c2923bae45ad36a46cd61ac4bbe12a5efb79eb1e1b6e62"
+    },
+    {
+      "path": "src-tauri/tests/fever_live_e2e.rs",
+      "sha256": "fa9aaa9414ee5e2ae7a16c8fabcd4bd41399edd96f3b06938225a93ea2dd0a3b"
+    },
+    {
+      "path": "src-tauri/tests/fever_sync_live_e2e.rs",
+      "sha256": "bee37ab5345ab7c6d9692d882c9882d54ae923a3193e1367bdd222194239eb72"
+    },
+    {
+      "path": "src-tauri/tests/fixtures/local_feed.xml",
+      "sha256": "5a813b1eb4b55276f85fa54eb7fef5289b8917bba5e34cdd21bc2140f3426fdc"
+    },
+    {
+      "path": "src-tauri/tests/github_auth_e2e.rs",
+      "sha256": "8fb76733f9c9d75515a660409d35481145f6a229011b512579c09b9d91c3ec05"
+    },
+    {
+      "path": "src-tauri/tests/greader_live_e2e.rs",
+      "sha256": "ab512153565af72f9befc12987c74647df81d02d02189d9fb1f844267d958531"
+    },
+    {
+      "path": "src-tauri/tests/ingestion_e2e.rs",
+      "sha256": "16369f90a445fb960451ea7034b724efa27c7398f178d96557192fc5ab9b2a74"
+    },
+    {
+      "path": "src-tauri/tests/migration_test.rs",
+      "sha256": "f976cf7a1a3c9658b57f433944e9378470af34d8d685031136643ca70966e446"
+    },
+    {
+      "path": "src-tauri/tests/mock_greader.rs",
+      "sha256": "bf4c302f62d03605e4031fff65bd839c81cfb050d34458a8c14a2d212d73a99c"
+    },
+    {
+      "path": "src-tauri/tests/regression_e2e.rs",
+      "sha256": "637446c3d3f372ab27c5e9c4968947e79c840f2b89367a3f3b00c27ef83a663d"
+    },
+    {
+      "path": "src-tauri/tests/scheduler_e2e.rs",
+      "sha256": "ea450284c4d3463794049aa3a2f251bb838958e14d34e4491a08c077492cfa2f"
+    },
+    {
+      "path": "src-tauri/tests/staged_refresh_e2e.rs",
+      "sha256": "f7fad3e6548c41d3d7a617bf6af0a1f695dc26682b850e3a7fe091b60f029ede"
+    },
+    {
+      "path": "src-tauri/tests/sync_content_e2e.rs",
+      "sha256": "d4afb66d29c5bc2fe10a242caec3e0e5b89e5ba3102875618ee81ecc81578d99"
+    },
+    {
+      "path": "src-tauri/tests/sync_e2e.rs",
+      "sha256": "c5e630ac7717a9a4ed1e35e57ac75e9880c04fae61bdf2b210517c4ea77cbf93"
+    },
+    {
+      "path": "src-tauri/tests/sync_gap_repro_e2e.rs",
+      "sha256": "636b4b3e82869762cb9e2a621c520312ff24bcec39b02470c8794d653a2494a7"
+    },
+    {
+      "path": "src-tauri/tests/sync_phases_e2e.rs",
+      "sha256": "ff25d86c6f085a15c4aefcdaa584ec9e840f841f1edd2e5c0ca8e791b17d9ec9"
+    }
+  ],
+  "digest": "5b316761e2d88f5914a3394189a774f7908e4f6767bf0f2d9ecf1b036aba95eb"
+}

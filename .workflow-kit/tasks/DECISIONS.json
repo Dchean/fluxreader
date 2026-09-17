@@ -1112,6 +1112,43 @@
       "statement": "授权对 TASK-044 做**记录级**台账订正以解除 scope 阻塞：prepare 时 allowed_paths 误置于 spec 的 scope.* 嵌套层，workflow_runtime.prepare(:435) 只读顶层 specification.get('allowed_paths')，静默回退为目录式 snapshot_paths，finish 的 matches() 是纯 fnmatch 故全部误判越界。订正内容：scope.allowed_paths 目录式 → glob 式（src-tauri/src/**、src-tauri/tests/**）、重算 definition_digest（961231ee→b337e4c1）、清除 failure_kind/blockers。**边界**：只修授权写法，不放宽任何门禁、不改一行源码；原始失败 run RUN-697b5cc6 与 blockers 原样保留于 evidence.ledger_correction。独立审查已用候选对比证实：9062d870…→d94165d3… 之间 58 个文件中唯一变化的是 baseline 文档，src-tauri/ 下 57 个文件字节完全相同。这是该工具缺口的**第二次命中**，修复已另立 TASK-046。",
       "scope": "TASK-044",
       "recorded_at_utc": "2026-09-17T06:45:18.107992Z"
+    },
+    {
+      "id": "DEC-45a20546a3c043ccbcdfa12232151083",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 起生效的既有授权：'批准并commit，继续，并且解除时间和任务数量限制，直接按照你判定最合适的路线跑完全部流程，将项目一次性优化重构完'；用户 2026-09-17 明确指令：'按照你推荐的继续推进完成项目优化重构，确保你说的这些问题也修复'（DEC-3d2de2111cd84cb988eca14276e2c61f）。TASK-044（BRIEF 验收目标『后端 commands.rs/sync.rs 拆分』的第一步）候选 d94165d3… 已通过 verify（RUN-99dc89f0…，cargo_fmt/cargo_clippy/cargo_test 三门禁 PASS）与独立审查 PASS（findings 为空；审查者自写 Rust 扫描器独立比出 62 个函数零差异、独立复跑 cargo test 得 120/0/23 与基线一致、四法交叉验证行数口径并复现 Measure-Object -Line 少算诊断）；台账订正 DEC-task044-ledger-fix-20260917 被判定未越界（候选对比证实 src-tauri/ 下 57 个文件字节未变）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-044"
+      ],
+      "recorded_at_utc": "2026-09-17T06:49:12.000091Z",
+      "candidates": {
+        "TASK-044": "d94165d3e9abc5a8aef9a6639685b358ca9ba13dc7bbd13f38797432140b6719"
+      }
+    },
+    {
+      "id": "DEC-task046-infra-delivery-20260917",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 明确选择：『授权：改为总控级提交 + 订正 TASK-046 记录（推荐）』；沿用 DEC-toolfix-extend-deadlock-20260915 的工具修补授权",
+      "statement": "工具缺口的修复改由**总控级基础设施提交**交付，不作为任务产物：任务模板自带 protected_paths（含 .workflow-kit/scripts/**、binding.json），由 workflow_bootstrap.py 安装时写入，故任务无法修改工作流工具。TASK-046 记录订正为 cancelled（撤回），原始 scope 阻塞与 run 原样保留。修复内容：prepare 的 allowed_paths 同时接受顶层与 scope.allowed_paths、两处冲突则报错退出、都未给才回退 snapshot_paths；刻意不采纳「matches() 支持目录前缀」与「把 scope 加入 begin 放行集合」两项建议——二者都会放宽门禁强度。",
+      "scope": "TASK-046",
+      "recorded_at_utc": "2026-09-17T08:09:08.464253Z"
+    },
+    {
+      "id": "DEC-5de009d3b8874a3fbcc833204d0768ca",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 起生效的既有授权（批准并commit、解除时间与任务数量限制、按最合适路线跑完全部流程）；用户 2026-09-17 指令'按照你推荐的继续推进完成项目优化重构，确保你说的这些问题也修复'。TASK-045（BRIEF 验收目标『后端 commands.rs/sync.rs 拆分』第二步）候选 4bec98fa… 已通过 verify（RUN-2a86101c…，fmt/clippy/test 三门禁 PASS）与独立审查 PASS（第 3 轮，findings 为空；第 2 轮 FAIL 系我引入的 CRLF 缺陷，已修复并用双向 hash oracle 证明『仅行尾变化、内容未变』）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-045"
+      ],
+      "recorded_at_utc": "2026-09-17T08:10:03.989013Z",
+      "candidates": {
+        "TASK-045": "4bec98faac27e6c6175504f29aa606a96900f5c638aaa1524ae065150e4adb54"
+      }
     }
   ]
 }

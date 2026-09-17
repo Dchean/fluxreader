@@ -8,7 +8,7 @@
   "entry": "WORKFLOW-KIT.md",
   "project_file": ".workflow-kit/tasks/PROJECT.json",
   "helper": ".workflow-kit/scripts/project_workflow.py",
-  "tool_digest": "82c680b40dc3694d022b6afe0567300f9db621c8d538196bb0d8a4569c6fee04",
+  "tool_digest": "531d13a867dd895f8d24ebc4592e25e770751cb4a533e4c1188322091c36ff35",
   "entry_digests": {
     "AGENTS.md": "fe7018dd97848e76b182d096858dae45b6ca44d744cc1fc41784222b672a5006",
     "CLAUDE.md": "fe7018dd97848e76b182d096858dae45b6ca44d744cc1fc41784222b672a5006"
@@ -53,7 +53,7 @@
     ".workflow-kit/docs/workflow/TOOLING.md": "d0fcb857bdc4a803dcaa62779d6213a0daec994f8a00cec8c23b3a7d0206ef75",
     ".workflow-kit/docs/workflow/design-note.md": "c23f2ee0d8421ae65f79dcd822374dd1216b0e2076ae552da3e4518c9d7ad2c0",
     ".workflow-kit/scripts/project_workflow.py": "3028cfe3bfa7fc5efc9961471429428371b2abf5ab884e453f1be2d6a01237a4",
-    ".workflow-kit/scripts/workflow_runtime.py": "04957ba0d2bc8afac11656ce2129bb17f347d015f70aa9f91a218537a36794ab",
+    ".workflow-kit/scripts/workflow_runtime.py": "78ebdc48efc22a2bd89fdc796b2414409a0532564581825c9f215a95fbbcf7ec",
     ".workflow-kit/scripts/workflow_bootstrap.py": "209f79973a9f8ff812fa6bf2572a07c2b0ff97184e3470109a3fa683b8d47ab7",
     ".workflow-kit/scripts/workflow_intake.py": "023dc703dfc013796175afd6a196b63116eba35a8d8070cad36399ac88c30525",
     ".workflow-kit/scripts/workflow_progress.py": "5c729bc1f142d9119c7f3a7db27f3848515e72b21f8f994aab364b46feb4a7a6",

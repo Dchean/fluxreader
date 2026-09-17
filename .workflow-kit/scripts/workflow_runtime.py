@@ -35,6 +35,32 @@ def fresh(prefix):
     return prefix + uuid.uuid4().hex
 
 
+def resolve_allowed_paths(specification, fallback):
+    """解析 spec 里的 allowed_paths，返回应写入 scope.allowed_paths 的列表。
+
+    背景（见 docs/TOOL-GAP-prepare-allowed-paths.md）：模板 tasks/templates/TASK.json
+    把该字段放在 `scope.allowed_paths`（嵌套），而本函数的历史调用点只读**顶层**，
+    于是按模板书写的 spec 会被**静默忽略**并回退为目录式 `snapshot_paths`；
+    finish 的 matches() 是纯 fnmatch，目录名不匹配任何文件路径，
+    导致全部改动被误判越界——TASK-043 与 TASK-044 各因此被卡死一次。
+
+    规则：
+    - 两处都给且不一致 → 抛错（不静默择一，避免再次出现「以为生效其实没生效」）；
+    - 只给嵌套 / 只给顶层 → 用给出的那个（嵌套优先，因为它更具体）；
+    - 都没给 → 回退 fallback（保持既有 spec 兼容）。
+    """
+    top = specification.get("allowed_paths")
+    scope = specification.get("scope")
+    nested = scope.get("allowed_paths") if isinstance(scope, dict) else None
+    if top is not None and nested is not None and top != nested:
+        raise ValueError(
+            "allowed_paths 在顶层与 scope.allowed_paths 同时给出且不一致；"
+            "请只保留一处，避免静默择一："
+            f" top={top!r} scope={nested!r}")
+    chosen = nested if nested is not None else top
+    return copy.deepcopy(chosen if chosen is not None else fallback)
+
+
 def read(root, name):
     return w.read_json(w.workflow_inside(root, name))
 
@@ -432,7 +458,7 @@ def prepare(root, specification):
     if not isinstance(paths, list) or not paths:
         raise ValueError("Explicit snapshot_paths required (absent new files are supported)")
     task["snapshot_paths"] = paths
-    task["scope"]["allowed_paths"] = copy.deepcopy(specification.get("allowed_paths", paths))
+    task["scope"]["allowed_paths"] = resolve_allowed_paths(specification, paths)
     task["scope"]["protected_paths"] += specification.get("protected_paths", [])
     task["risk"] = specification.get("risk", {"level": "low", "decision_ids": []})
     if task.get("ui_change"):

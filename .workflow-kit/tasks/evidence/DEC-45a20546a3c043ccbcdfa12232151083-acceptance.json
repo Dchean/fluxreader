@@ -1,0 +1,14 @@
+{
+  "id": "DEC-45a20546a3c043ccbcdfa12232151083",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-15 起生效的既有授权：'批准并commit，继续，并且解除时间和任务数量限制，直接按照你判定最合适的路线跑完全部流程，将项目一次性优化重构完'；用户 2026-09-17 明确指令：'按照你推荐的继续推进完成项目优化重构，确保你说的这些问题也修复'（DEC-3d2de2111cd84cb988eca14276e2c61f）。TASK-044（BRIEF 验收目标『后端 commands.rs/sync.rs 拆分』的第一步）候选 d94165d3… 已通过 verify（RUN-99dc89f0…，cargo_fmt/cargo_clippy/cargo_test 三门禁 PASS）与独立审查 PASS（findings 为空；审查者自写 Rust 扫描器独立比出 62 个函数零差异、独立复跑 cargo test 得 120/0/23 与基线一致、四法交叉验证行数口径并复现 Measure-Object -Line 少算诊断）；台账订正 DEC-task044-ledger-fix-20260917 被判定未越界（候选对比证实 src-tauri/ 下 57 个文件字节未变）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-044"
+  ],
+  "recorded_at_utc": "2026-09-17T06:49:12.000091Z",
+  "candidates": {
+    "TASK-044": "d94165d3e9abc5a8aef9a6639685b358ca9ba13dc7bbd13f38797432140b6719"
+  }
+}

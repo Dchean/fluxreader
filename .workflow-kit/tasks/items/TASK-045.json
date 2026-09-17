@@ -1,0 +1,248 @@
+{
+  "schema_version": 1,
+  "id": "TASK-045",
+  "title": "后端单体拆分二：sync.rs 按领域拆分为子模块（可维护性）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "done",
+  "objective": "按 BRIEF 验收目标「后端 commands.rs/sync.rs 拆分完成，拆分过程测试不回归」，承接 TASK-044（commands.rs 已完成），把 src-tauri/src/sync.rs（1352 行）按既有章节边界拆为 sync/ 子模块。目标结构：sync/mod.rs 保留模块文档、SyncReport 等公共类型、以及**总入口**函数（feeds_phase / states_phase / sync_now / sync_light / test_connection，因为它们是跨领域编排，需要用到 Push 与 Pull 两侧的内部项）；sync/credentials.rs（凭据：Backend、read_credentials、build_client 及各协议客户端方法）；sync/push.rs（① Push：本地状态变更 → 后端）；sync/pull.rs（② Pull：远端 → 本地，含 GReader/Fever 两条实现）。所有 pub 项签名与行为保持不变；crate::sync::<fn> 的既有调用路径经 mod.rs 的 pub use 重导出保持逐字不变。",
+  "non_goals": [
+    "改变任何函数签名、行为、错误文案或日志",
+    "改动 commands/ 下 TASK-044 的产物",
+    "改动 db/ 下的领域模块",
+    "拆分 ingestion.rs（766 行，独立后续任务）",
+    "前端改动",
+    "重写 Pull 的 GReader/Fever 逻辑或调整协议行为"
+  ],
+  "requirement_refs": [
+    "MAINT-SPLIT-BACKEND"
+  ],
+  "reference_ids": [
+    "REF-003"
+  ],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-044"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task045.md",
+      "src-tauri/src/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task045.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "sync.rs 已拆为 sync/ 子模块，单文件均不超过 400 行（用可信口径：LF 字节数 / splitlines / ReadAllLines 三种方法交叉验证，不得使用 PowerShell Measure-Object -Line）",
+    "所有 pub 项的签名与可见性保持不变（可用脚本对 git show HEAD 版与新文件做函数体逐字比对证明）",
+    "crate::sync::<fn> 的既有调用路径不变：lib.rs / commands/ / scheduler / ingestion 等调用点零改动",
+    "跨子模块共用的内部项只做**最小必要的可见性放大**（private → pub(super)），且必须在报告中逐项列出「哪些项、因何放大」，不得冒充零改动",
+    "cargo test 全量保持 120 passed / 0 failed（与 TASK-044 后的基线一致），ignored 数不增加",
+    "cargo fmt --all -- --check 与 cargo clippy --all-targets -- -D warnings 零告警",
+    "无行为改动：无新增依赖、无逻辑重写、无错误文案变更"
+  ],
+  "gates": [
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 拆分前基线（本会话实跑）：cargo test 合计 120 passed / 0 failed / 23 ignored；cargo fmt --all -- --check 与 cargo clippy --all-targets -- -D warnings 全绿。本任务为模块拆分，不改变任何 pub 项签名与行为；判据是同一套测试在拆分后仍全绿且 ignored 数不增。与 TASK-044 的区别：sync.rs 的总入口章节会用到 Push/Pull 的内部项，故无法做到「零可见性改动」，必须在报告中逐项声明最小必要的 private→pub(super) 放大，并按此复核。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task045.md"
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "src-tauri/tests 下 20 个 e2e 套件与 src/ 内联测试模块",
+        "reason": "拆分必须证明对外行为未变；这些测试是唯一的行为契约保护，必须逐条保持通过且不得删改断言",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "cargo fmt 与 cargo clippy 门禁",
+        "reason": "拆分产生新文件，仍需格式与 lint 达标；clippy 的 -D warnings 可捕获可见性放大导致的未使用项告警",
+        "gate_ids": [
+          "cargo_fmt",
+          "cargo_clippy"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "crate::sync::<fn> 的全部既有调用点",
+        "reason": "mod.rs 用 pub use 重导出以保持路径不变，调用点零改动是「无行为改动」的直接证据",
+        "gate_ids": [
+          "cargo_test",
+          "cargo_clippy"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-045-input-635647fc70dd4d488a2ff5e11dac6cce.json",
+    "digest": "95c86e71dc9adcdff3c1446ccc01ad911bc269f3662c173f6ab9852d6968ed81",
+    "source_revision": null,
+    "definition_digest": "25d2226df38a27ea4a77ee75d830c72cb1ac91a6fafb98c85895192951e801a2"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-17T06:50:44.165254Z",
+    "deadline_at_utc": "2026-09-17T10:50:44.165254Z",
+    "repair_rounds_used": 1
+  },
+  "batch_id": "BATCH-cdd487dcfaea4e03a31cb2b85db2591e",
+  "run_ids": [
+    "RUN-7130172f81a245d88917e5e1793fda6f",
+    "RUN-42e12876a3a3400b8c3a2034ef3f4267",
+    "RUN-f497bfbd1e844dbdbac44df49ae00a0d",
+    "RUN-7167281d8bb04c70bf3475c7d6b22972",
+    "RUN-753547645c574634ae3b1592965d181a",
+    "RUN-1aa3a553fd514aa199ea4ece844ca736",
+    "RUN-2a86101c239a4c02abc7c453cd6d2596",
+    "RUN-a30233ae24264dab9f38fce22854e6d8"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-2a86101c239a4c02abc7c453cd6d2596-candidate.json",
+    "candidate_digest": "4bec98faac27e6c6175504f29aa606a96900f5c638aaa1524ae065150e4adb54",
+    "verification_run": "RUN-2a86101c239a4c02abc7c453cd6d2596",
+    "review_run": "RUN-a30233ae24264dab9f38fce22854e6d8",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-5de009d3b8874a3fbcc833204d0768ca-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-5de009d3b8874a3fbcc833204d0768ca"
+    ],
+    "merge_ref": "85eacf3 (refactor(rust): TASK-045 拆分 sync.rs 为领域子模块)"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task044.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task045.md",
+    "src-tauri/src",
+    "src-tauri/tests"
+  ],
+  "continuation_of": {
+    "TASK-044": "d94165d3e9abc5a8aef9a6639685b358ca9ba13dc7bbd13f38797432140b6719"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-17T06:50:44.265751Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T07:15:02.348496Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-17T07:15:42.953013Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T07:28:34.692075Z",
+      "note": "[WinError 5] 拒绝访问。: 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-f497bfbd1e844dbdbac44df49ae00a0d.json.d0adc11f0f9349e484adc3571439dbff.tmp' -> 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-f497bfbd1e844dbdbac44df49ae00a0d.json'",
+      "next_action": "先核对已有文件及原始日志，再处理 environment；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T07:28:48.194290Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T07:41:51.026415Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T07:42:44.632801Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T07:57:20.634635Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-17T07:57:47.474247Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T08:07:28.559014Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "review"
+}

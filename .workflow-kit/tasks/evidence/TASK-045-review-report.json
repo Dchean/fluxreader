@@ -1,0 +1,78 @@
+{
+  "task_id": "TASK-045",
+  "candidate_digest": "4bec98faac27e6c6175504f29aa606a96900f5c638aaa1524ae065150e4adb54",
+  "verification_run": "RUN-2a86101c239a4c02abc7c453cd6d2596",
+  "verdict": "PASS",
+  "summary": "独立审查结论：PASS（findings 为空）。我未参与实现，全部结论来自本会话亲自执行并复现的核对。(1) 行尾修复彻底：我用发现该缺陷的同一口径（原始字节 CRLF 计数）全树复验——src-tauri/src 43 个文件 CRLF=0、src 24 个文件 CRLF=0、src-tauri/tests 21 个文件 CRLF=0；sync/ 8 个文件全部 LF（bareCR=0），其中 4 个被修文件的字节数恰为各自 LF 文本长度（mod.rs 2459 / credentials.rs 4912 / push.rs 7486 / entries.rs 11082）。(2) 『仅行尾变化、内容未变』由反向 hash oracle 证明（我自建，用旧候选 sha256 当判定器）：把新文件文本重新编码为 CRLF，sha256 恰好等于上一候选 32cae71d… 中同名文件的 sha256——mod.rs 0c66826c9406、credentials.rs f335dfae5919、push.rs 62993160fd42、entries.rs 6dab252d69c8，四例全中；再把文本插回 HEAD 同名横幅块，sha256 又恰好等于更早候选 5b316761… 的 sha256（0086f45108f4 / 14b4d333c142 / a6c7a6fdeac6 / bfa8d9113488），四例亦全中。故本轮文件 = 上一候选去行尾差异 = 原始拆分结果减去 4 处孤立横幅，无任何代码增删；另 4 个未改动子模块（fever_pull/greader_pull/phases/subscriptions）与上一候选、上上候选的 sha256 均相同。与上一候选清单逐文件比较，全仓 66 个文件中仍只有这 4 个文件不同。(3) 新候选有效：候选清单 66 个文件 sha256 与工作区 66/66 相符，manifest digest = 4bec98faac27e6c6175504f29aa606a96900f5c638aaa1524ae065150e4adb54（与指定值一致）；RUN-2a86101c239a4c02abc7c453cd6d2596 三项 checks 均 status=PASS、exit_code=0 且 candidate_digest 与 run 一致；我自跑三门禁 fmt/clippy/test 全部 exit 0（重定向到工作区外临时文件后读退出码），日志 23 个 test result 块合计 120 passed / 0 failed / 23 ignored，与基线及作者日志逐数字一致。(4) 前两轮结论在本候选上逐项复核无变化：40/40 个 fn、函数体逐字节相同、71 个字符串字面量多重集相同；19 行签名差异仍仅为 pub(super) 前缀（含 4 例 rustfmt 折行尾随逗号）；24 处 pub(super) 放大构成不变且仍属最小必要（22 项有真实跨文件引用；PushPlan/PushStatus 由 private_interfaces 规则强制）；pub 面 11 项零丢失零新增、7 个子模块均私有 mod；反向『private 却被跨模块引用』命中 0；调用点 git diff HEAD -- lib.rs commands scheduler.rs ingestion.rs 为空；行数三法一致、最大 285 ≤ 400。(5) 关于 changed_files: []：我核对了修复轮记录 RUN-1aa3a553fd514aa199ea4ece844ca736（kind=repair，outcome=completed，candidate_digest=4bec98fa…，started 2026-09-17T07:42:44.536Z），4 个源文件的 mtime 为 2026-09-17T07:42:17Z，确实早于该 run 的 begin（早 27 秒），故『行尾修复发生在 begin 之前、inventory 自然观测不到』的说明成立；此外工具的变化清单只覆盖本任务 allowed_paths，因此 run 窗口内（07:56 前后）对 evidence/ 与 binding.json 的写入同样不会出现在该清单里。该空清单不掩盖任何东西——我已用清单哈希 + hash oracle 独立重建了完整差异。(6) 非阻塞披露（均不构成本候选的缺陷，故 findings 为空）：a) 作者称『现未提交文件中含 CRLF 的数量为 0』在我复核时**不成立**：.workflow-kit/binding.json 处于未提交（M）状态且含 64 个 CRLF，其 HEAD 版本为 LF；其与 HEAD 的内容差异是 tool_digest 与 workflow_runtime.py 摘要字段被重算 + 补了末尾换行，且 mtime 为 07:56:55Z（在作者修完行尾之后、verify 之前），证据指向**工作流工具自身**在文本模式下的写入，而非作者本轮脚本——该文件不在候选清单内（清单根为两个基线 + src-tauri/src + src-tauri/tests），也不在本任务 allowed_paths 内且属 protected_paths，故不影响本候选；git 自身也提示『CRLF will be replaced by LF the next time Git touches it』。若希望状态文件行尾也统一，建议工具侧把写入改为显式 newline 或二进制模式（属工具修复范畴，非本任务范围）。b) `TASK-045-report-corrections.md` 更正 3 的收尾句『残留仅限 sync/』偏宽：同类『章节横幅落在文件末尾』的历史残留还有 4 处，位于 db/articles.rs:707、db/migrations.rs:269、db/settings.rs:37、db/sync_map.rs:663（本次任务未触碰 db/，git status 与 diff 均为空），建议改写为『本次拆分引入的残留仅限 sync/』。c) 更正 2 中『phases.rs（2 处）』的口径：两符号在 phases.rs 各只有 1 处代码调用（:25 push_feeds / :26 pull_feeds），第 2 处出现在 :12 的文档注释里；其实质结论（entries.rs 未引用二者）正确。d) 更正 1/4/5/6 我逐项复核与我的实测完全一致（24 = 19 fn + 3 类型/静态 + 2 字段；行数 60/134/189/285 且每文件恰减 4 行、最大 285；CRLF 计数 60/134/189/285；修后全树 CRLF=0），无需改动。未做：未在全新 target 目录做冷编译（复跑与验证运行均命中 cargo 增量缓存，但 120 个用例确实执行）；未执行 23 个 ignored 的 live/联网 e2e；未做前端核对（ui_change=false）。审查脚本与自跑日志一律写在仓库外（%TEMP%\\task045-review、%TEMP%\\task045-review3），工作区只新增本报告文件。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "七条验收在新候选上逐条成立，且本轮修复主张亦独立验证通过。①『拆为 sync/ 子模块、单文件 ≤400』：行数用三法交叉一致（LF 字节数 = Python splitlines = .NET ReadAllLines）——mod.rs 60、credentials.rs 134、push.rs 189、subscriptions.rs 264、entries.rs 285、greader_pull.rs 178、fever_pull.rs 197、phases.rs 133，最大 285 ≤ 400。②『所有 pub 项签名与可见性不变』：拆分前 crate::sync 的 11 个 pub 项集合与拆分后可经 mod.rs pub use 到达的集合完全相同（零丢失零新增）；9 个 pub fn 签名字节全等、pub struct SyncReport 与 pub enum Backend 定义逐字节全等，且无一出现在 19 行 pub(super) 前缀变化中。③『crate::sync::<fn> 调用路径不变』：git diff HEAD -- src-tauri/src/lib.rs src-tauri/src/commands src-tauri/src/scheduler.rs src-tauri/src/ingestion.rs 输出为空；相关文件 sha256 与候选清单一致，tests 侧的 app_lib::sync::* 引用随 120 个用例编译执行通过。④『最小必要放大并逐项列出』：24 处声明（19 fn + PUSH_LOCK + PushPlan/PushStatus + status/stars 字段）全部有据——22 项有真实跨文件引用，PushPlan/PushStatus 由 private_interfaces 规则强制（-D warnings 下为 error），无过度放宽、无漏放大；报告逐项列出（更正文件另已补齐口径）。⑤『cargo test 120/0、ignored 不增』：我自跑 exit 0、120 passed / 0 failed / 23 ignored，与 RUN-2a86101c… 及基线一致。⑥『fmt/clippy 零告警』：run 三项 PASS，我复跑 exit 0，fmt 输出 0 字节、clippy 除 Finished 行外无输出。⑦『无行为改动』：40 个函数体逐字节相同、71 个字符串字面量集合相同、无依赖或 Cargo.toml 改动。本轮修复主张『仅行尾归一 LF、内容字节未变』亦成立：反向 hash oracle 同时命中上一候选与更早候选的 sha256，证明内容等价链完整（见 summary 第 2 点）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-2a86101c239a4c02abc7c453cd6d2596-candidate.json",
+        ".workflow-kit/tasks/runs/RUN-2a86101c239a4c02abc7c453cd6d2596.json",
+        ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-candidate.json",
+        ".workflow-kit/tasks/evidence/RUN-42e12876a3a3400b8c3a2034ef3f4267-candidate.json",
+        ".workflow-kit/tasks/evidence/TASK-045-split-report.md",
+        ".workflow-kit/tasks/evidence/TASK-045-report-corrections.md",
+        ".gitattributes",
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/sync/credentials.rs",
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/entries.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "该套件能证明什么：20 个集成测试二进制 + lib 单测 + main + doc-tests 共 23 个 test result 块、120 个用例，在 sync/ 新布局与 LF 行尾下全部编译并通过（我自跑 exit 0、120 passed / 0 failed / 23 ignored，与基线逐数字一致）；由于 Rust 只有在模块路径与可见性可解析时才编译，这也再次证明 crate::sync::<fn> 的既有调用面（含 6 个测试套件的 app_lib::sync::* 引用）逐字可用。不能证明什么：① 23 个 ignored（live/联网与 mock server 路径）本次未执行，GReader/Fever 联网路径未重新走一遍（与基线同口径）；② 测试无法一般性证明『无行为改动』——真正的保证是函数体逐字节比对（40/40，含锁顺序、await 点、错误文案与 71 个字符串字面量）；③ 上一轮的教训在本轮得到印证：fmt/clippy/test 三门禁对行尾/元信息类逐字节差异完全不敏感（rustfmt newline_style=Auto 会保留 CRLF），所以本轮『行尾修复是否彻底、内容是否未变』只能用候选清单哈希 + 反向 hash oracle + 原始字节 CRLF 计数来证，我三项都做了，结论为彻底且等价。缓存说明：复跑与验证运行均命中 cargo 增量缓存（clippy/test 秒级），但指纹按内容计算，23 个测试块各带耗时、120 用例确实执行。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-2a86101c239a4c02abc7c453cd6d2596-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-2a86101c239a4c02abc7c453cd6d2596-cargo_test.stderr.txt",
+        ".workflow-kit/tasks/evidence/TASK-045-cargo-test.log",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task045.md"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "前两轮结论在新候选上逐项复核成立，本轮改动（行尾归一）不引入任何新的失败路径。① 放大范围仍限定在 sync 内部：pub(super) 于子模块中即 pub(in crate::sync)，7 个子模块一律私有 mod，crate::sync::push::… 等新路径在 crate 外不可达；crate::sync 可达 pub 项集合新旧同为 11 项。② 越界引用 pub(super) 项 → E0603 编译失败；漏放大同样即刻暴露（反向扫描『未加 pub(super) 却被别的文件引用的私有 fn』命中 0；报告称保持 private 的 12 个项我逐一确认仍为 private）。③ private_interfaces 规则已用 rustc 实验验证（私有类型出现在 pub(super) 字段/签名中默认 warn、-D warnings 下 error），既解释 PushPlan/PushStatus 的放大是被强制的，也说明 clippy 门禁能兜住放大不当。④ 模块环：Rust 不禁止兄弟模块互引，pub(super) 既不掩盖也不制造模块环，真正的求值环仍是 E0391/E0393。⑤ 私有 glob 链路：父模块私有 glob 仍可经子模块 use super::* 使用（实验通过）；误改成 pub use 会报『glob import doesn't reexport anything with visibility pub』。⑥ 行尾维度：三门禁不敏感意味着行尾类缺陷**不会**以运行失败的形式暴露，只能靠逐字节核对拦截——本轮已按该口径复核为 0 残留。",
+      "evidence_files": [
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/sync/phases.rs",
+        ".workflow-kit/tasks/evidence/RUN-2a86101c239a4c02abc7c453cd6d2596-candidate.json"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "结构性结论与上两轮一致，并在计数层面复核到新候选：8 文件（mod 60 / credentials 134 / push 189 / subscriptions 264 / entries 285 / greader_pull 178 / fever_pull 197 / phases 133，最大 285）沿原章节边界划分，原 Pull 章节 883 行因 400 行上限再细分为四块，职责清晰、依赖单向无环；mod.rs 保留原设计说明并解释了重导出策略与 3 个私有 glob 的理由（更正文件另补强了『显式 pub use 会新增对外路径、违反验收②』这一更强理由）；6 个子模块的 use super::* 作用域限于 sync 内部，8 模块零重名（无遮蔽、无 E0659 风险）；24 处 pub(super) 的使用点集中在 phases.rs 与个别兄弟模块，规模可控。上轮我披露的『4 处孤立横幅注释』已彻底清理（8 个 sync 文件横幅扫描为空），且作者把 CRLF 缺陷的完整根因、影响与教训写进了 TASK-045-report-corrections.md 更正 6（文本模式写入自动翻译行尾、三门禁对此不敏感、改用二进制写入）——这是一条有价值的可复用教训。仓库行尾一致性：src-tauri/src、src、src-tauri/tests 全树 CRLF=0，`.gitattributes` 的 `* text=auto eol=lf` 得到满足。两处非阻塞观察（不构成本候选缺陷，见 summary 第 6 点）：(a) `.workflow-kit/binding.json` 仍为 CRLF 且处于未提交状态，证据指向工作流工具自身的写入（内容差异为工具重算的摘要字段），该文件不在候选清单内、不属本任务 allowed_paths 且是 protected_paths，建议由工具侧显式指定行尾；(b) 更正 3 的收尾句『残留仅限 sync/』偏宽——db/articles.rs:707、db/migrations.rs:269、db/settings.rs:37、db/sync_map.rs:663 尚有 4 处同类历史横幅残留（本任务未触碰 db/），建议收窄措辞为『本次拆分引入的残留仅限 sync/』。",
+      "evidence_files": [
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/sync/credentials.rs",
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/src/sync/phases.rs",
+        ".gitattributes",
+        ".workflow-kit/binding.json",
+        ".workflow-kit/tasks/evidence/TASK-045-report-corrections.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "不适用，理由具体：本次改动是同 crate 内的文件归属重排 + 注释横幅删除 + 行尾归一，未新增或删除任何运行时实体——40 个函数体逐字节相同（锁顺序、await 点、HTTP/SQLite 调用与错误文案一字未动），PUSH_LOCK 仍是同一个 tokio static（全局唯一实例语义与所在文件无关），没有新增分配、加锁、IO、异步任务或依赖（Cargo.toml 未改）。模块边界在编译期即被抹平，行尾风格对运行时绝无影响，故对吞吐/延迟/内存既无可测量也无可推理的影响；本次三门禁亦不含性能基准。唯一与拆分相关的成本在编译期（crate 内多切 7 个编译单元，对增量编译略有影响），不属运行时性能，也不在本任务验收范围；与 TASK-044（同类拆分）审查对 performance 的处理口径一致。",
+      "evidence_files": [
+        "src-tauri/src/sync/mod.rs",
+        ".workflow-kit/tasks/evidence/RUN-2a86101c239a4c02abc7c453cd6d2596-cargo_clippy.stderr.txt",
+        ".workflow-kit/tasks/evidence/TASK-045-split-report.md"
+      ]
+    }
+  ],
+  "ui_review": null
+}

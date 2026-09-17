@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "id": "RUN-7167281d8bb04c70bf3475c7d6b22972",
+  "task_id": "TASK-045",
+  "kind": "verification",
+  "outcome": "completed",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-6418d83287eb4d66936e49cee0d2a6c8"
+  },
+  "started_at_utc": "2026-09-17T07:28:41.401911Z",
+  "finished_at_utc": "2026-09-17T07:28:48.130306Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "95c86e71dc9adcdff3c1446ccc01ad911bc269f3662c173f6ab9852d6968ed81",
+  "candidate_digest": "32cae71d5abdd5ee434b1b2fb58c8d91e827b64042cea048869cfcc3bee4a759",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_fmt.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_fmt.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_clippy.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_clippy.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_test.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_test.stderr.txt"
+  ],
+  "checks": [
+    {
+      "gate_id": "cargo_fmt",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_fmt.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_fmt.stderr.txt",
+      "candidate_digest": "32cae71d5abdd5ee434b1b2fb58c8d91e827b64042cea048869cfcc3bee4a759",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "cwd": "src-tauri",
+        "started_at_utc": "2026-09-17T07:28:41.469641Z",
+        "finished_at_utc": "2026-09-17T07:28:41.741376Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_fmt.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_fmt.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "cargo_clippy",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_clippy.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_clippy.stderr.txt",
+      "candidate_digest": "32cae71d5abdd5ee434b1b2fb58c8d91e827b64042cea048869cfcc3bee4a759",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+          "clippy",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "cwd": "src-tauri",
+        "started_at_utc": "2026-09-17T07:28:41.751336Z",
+        "finished_at_utc": "2026-09-17T07:28:42.397160Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_clippy.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_clippy.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "cargo_test",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_test.stderr.txt",
+      "candidate_digest": "32cae71d5abdd5ee434b1b2fb58c8d91e827b64042cea048869cfcc3bee4a759",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+          "test"
+        ],
+        "cwd": "src-tauri",
+        "started_at_utc": "2026-09-17T07:28:42.406422Z",
+        "finished_at_utc": "2026-09-17T07:28:48.056562Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_test.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_test.stderr.txt"
+      }
+    }
+  ],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 41008,
+  "controller_pid": 48432,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "started_at_utc": "2026-09-17T07:28:41.469641Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_fmt.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_fmt.stderr.txt",
+      "finished_at_utc": "2026-09-17T07:28:41.741376Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "started_at_utc": "2026-09-17T07:28:41.751336Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_clippy.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_clippy.stderr.txt",
+      "finished_at_utc": "2026-09-17T07:28:42.397160Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "started_at_utc": "2026-09-17T07:28:42.406422Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-7167281d8bb04c70bf3475c7d6b22972-cargo_test.stderr.txt",
+      "finished_at_utc": "2026-09-17T07:28:48.056562Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    }
+  ]
+}
