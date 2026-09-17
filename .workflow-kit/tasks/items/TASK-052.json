@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "修掉 P1-14 的另一半。现状（TASK-051 已修其「吞错」半边，此半边被明确留下）：`loadMoreArticles` 请求下一页时不带当前范围筛选（`feed_id` / `folder_id` / `only_unread` / `only_starred` 等），因此在单源或单分类视图下，分页是按**全局序列**的游标走的——`articlesLimit` 实际是「全局查询」的 offset。后果：在某个订阅源视图里不断下滚，取回的并不是该源的后续文章；且当列表为空时 `Timeline` 的滚动哨兵（`items.length > 0` 才渲染）根本不渲染，导致**该源的老文章永远够不到**。本任务按 owner 裁决『另立任务重设计』做 **per-scope 游标**改造，使分页与当前视图的筛选口径一致。",
   "non_goals": [
     "顺手修 TASK-051 报告里列出的其它未修项（同步协议侧 P1-5/P1-6、Rust 侧 P2-9/P2-10 后半/P2-11/P2-12、P3-x、P1-7 残留、组件层 P2-2/P2-5/P2-6）",
@@ -168,9 +168,11 @@
     "candidate_digest": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0",
     "verification_run": "RUN-3e8fce275f4b450795c20cb0c3299b46",
     "review_run": "RUN-4eebe01dbdc94b998697427ee73f819c",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-ae26ee2885294af1938a60f4614b9741-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-ae26ee2885294af1938a60f4614b9741"
+    ],
+    "merge_ref": "f75c512 (fix(paging): TASK-052 per-scope 分页游标（P1-14 口径半边）+ 命令面板锚定顺序)",
     "ledger_correction": {
       "scope_correction": {
         "at_utc": "2026-09-17T23:20:56.402151Z",

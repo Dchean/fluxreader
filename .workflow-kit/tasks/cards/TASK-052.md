@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-052 · P1-14 口径半边：分页带上当前范围筛选（per-scope 游标重设计）
 
-**状态**：verified
+**状态**：done
 
 **目标**：修掉 P1-14 的另一半。现状（TASK-051 已修其「吞错」半边，此半边被明确留下）：`loadMoreArticles` 请求下一页时不带当前范围筛选（`feed_id` / `folder_id` / `only_unread` / `only_starred` 等），因此在单源或单分类视图下，分页是按**全局序列**的游标走的——`articlesLimit` 实际是「全局查询」的 offset。后果：在某个订阅源视图里不断下滚，取回的并不是该源的后续文章；且当列表为空时 `Timeline` 的滚动哨兵（`items.length > 0` 才渲染）根本不渲染，导致**该源的老文章永远够不到**。本任务按 owner 裁决『另立任务重设计』做 **per-scope 游标**改造，使分页与当前视图的筛选口径一致。
 
