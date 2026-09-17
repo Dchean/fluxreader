@@ -336,6 +336,20 @@ def required_review_mode(policy, task):
     return policy.get("review", {}).get("mode")
 
 
+# 审查摘要只绑定「设计上不可变」的证据：候选快照内的文件 + 记录区
+# （<workflow>/tasks/evidence/**，即审查者产出的报告/日志/截图）。
+# 其余一律**可变**：源码（src/ src-tauri/ tools/）会被后续任务合法修改；
+# 工具脚本与 binding.json 会在获授权的工具升级时合法变更；
+# .gitattributes 等配置同理。把它们按「活动内容」绑进历史审查，
+# 会让任何一次合法改动永久撞坏那条历史审查（TASK-049 重写 src/store.ts、
+# 以及两次工具升级刷新 binding.json 都触发过）。
+# 见 docs/TOOL-GAP-review-source-evidence-binding.md。
+def is_immutable_review_evidence(root, name):
+    """是否为「设计上不可变」的审查证据（记录区文件）。"""
+    prefix = workflow_name(root, "tasks/evidence/")
+    return name.startswith(prefix)
+
+
 def review_quality_digest(root, task, report):
     """Bind a substantive review to the verified candidate and immutable evidence."""
     checks = report.get("review_checks")
@@ -366,11 +380,16 @@ def review_quality_digest(root, task, report):
                 # Later tasks may legitimately change the source; the prior
                 # review remains bound to its original, verified snapshot.
                 recorded[name] = candidate_files[name]
-            else:
+            elif is_immutable_review_evidence(root, name):
                 path = inside(root, name)
                 if not path.is_file() or path.stat().st_size == 0:
                     raise ValueError("Review evidence is missing/empty: " + name)
                 recorded[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            else:
+                # 可变产物（源码 / 配置 / 工具脚本 / binding 等）：不纳入本审查的篡改判据。
+                # 它们由候选快照与 git 约束；强行按活动内容绑定会让后续合法改动
+                # 永久撞坏历史审查（TASK-040/041/043/045 都因此失配过）。
+                continue
     verification_name = workflow_name(root, "tasks/runs/" + report["verification_run"] + ".json")
     if verification_name not in recorded:
         verification = inside(root, verification_name)

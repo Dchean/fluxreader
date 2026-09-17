@@ -25,7 +25,7 @@
     "report": ".workflow-kit/tasks/evidence/RUN-afc288dbee7b490b890a3a2e5bc08241-review.json",
     "candidate_digest": "8da38e28771aa800b09fb61e361c3848e8d54b200edd59c1f688829cc9b685ac",
     "ui_evidence_digest": "6ade71bf89e5c278f19f29c290f5f10fd71164f4ce78564a6953146b3c9ca7fa",
-    "quality_digest": "b42e8cf365001862e14c981f6160da2ebdd222013e518785c561f5c75e9032c6"
+    "quality_digest": "86aeb56d96a3ddf83fa4e5ae69c238a21d9d49b4b406e2d74262bfd06cf2a355"
   },
   "estimated_cost_usd": null
 }

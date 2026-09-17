@@ -1188,6 +1188,24 @@
       "candidates": {
         "TASK-048": "d1314e2f0e9a027126f57a1017d8bc1441253bc041d5127615468728b8852231"
       }
+    },
+    {
+      "id": "DEC-fix-all-findings-20260917",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 明确指令（本轮对话原文）：『把发现的问题都修复，如需越权的操作和之前一样向我申请并记录』。此前同一轮已授权范围『完整收尾：前端拆分 + REQ-007 残余项』（DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf）。",
+      "statement": "授权修复**全部已发现的问题**，范围含：(1) TASK-048 写测试时发现的 store 缺陷 D1–D5——D1 AI toast「重试」是死按钮、D2 loadMoreArticles 失败静默吞错（≡REQ-007 P1-14）、D3 竞态丢弃不复位 articlesLoading（拆分高危不变量）、D4「启动时打开」白名单与 UI 选项不同步（≡REQ-007 P1-15）、D5 updateSettings 无运行时校验；(2) REQ-007 残余项（先按工作流要求重新盘点出确切清单）；(3) TASK-048 报告记录的低优先观察（markEntriesReadBulk 的 O(n·m)、selectViewCounts/selectTreeCounts 对缺失 feed_counts 的源直接 continue）。**边界**：仍不动工作流（用户明确『工作流我另外修复』）；不改同步协议行为；不引入新依赖；每项修复须走 verify + 独立审查 + 验收。**越权情形**：若某项因工具缺口被不可恢复的 failure_kind 卡死，按既有先例向 owner 申请**记录级订正**并留痕（本会话已有 TASK-043/044/046 先例）。",
+      "scope": "TASK-050, TASK-051",
+      "recorded_at_utc": "2026-09-17T09:43:28.018945Z"
+    },
+    {
+      "id": "DEC-toolfix-review-evidence-binding-20260917",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 在被告知两个卡点后选择：『我授权你先修复工作流的这个问题』（即授权先修工作流侧的审查证据绑定缺陷）。",
+      "statement": "修复 review_quality_digest 把「可变产物」按活动内容绑定的缺陷：绑定范围收敛为「候选快照内文件 + 记录区 tasks/evidence/** + 该次 verification_run 的 JSON」，源码/配置/工具脚本/binding/其它运行记录不再纳入篡改判据（它们由各自任务的候选快照与 git 约束）。连带对账 5 条历史审查的派生摘要（TASK-040/041/043/044/045），每例先验证 P1（确有被排除的可变产物，即失配可由规则变更解释）与 P2（仍被绑定的记录区证据相对 HEAD 干净，防止洗掉真实篡改）。**不放宽任何门禁**：记录区证据仍按活动内容强绑定，ui_review_digest 口径未变；候选内文件仍绑快照。如实记录作者失误：对账第一次因自建副本漏算 verification_run 分量而写出错值，后改用真实函数做权威对账才收敛。文档见 .workflow-kit/docs/TOOL-GAP-review-source-evidence-binding.md。",
+      "scope": "workflow tooling (project_workflow.py, binding.json)",
+      "recorded_at_utc": "2026-09-17T10:28:05.559316Z"
     }
   ]
 }

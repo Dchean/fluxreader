@@ -24,7 +24,7 @@
     "verdict": "PASS",
     "report": ".workflow-kit/tasks/evidence/RUN-be295d52d6ac40058ef9410ef43ce3bd-review.json",
     "candidate_digest": "4b916d0075b8d43e59bedb63b6241b5fe26927d197543b00b3098a1120247dfb",
-    "quality_digest": "fdfde93862187805fb48acf783c2aa6fb420f67ceff3aeff6dd11c39e3073693"
+    "quality_digest": "3eb48cc2f469adf6ce2e3769718004c8ff36df509b129a7613c2f66d1b101d51"
   },
   "estimated_cost_usd": null
 }
