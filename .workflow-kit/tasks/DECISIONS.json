@@ -1042,6 +1042,20 @@
         "previous_deadline_at_utc": "2026-09-16T15:55:07.968690Z",
         "deadline_at_utc": "2026-09-16T19:40:24.523381Z"
       }
+    },
+    {
+      "id": "DEC-f7376cf8e82a4de189272754bcd6aa56",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "user 2026-09-15 起生效的既有授权：批准并commit，继续，并且解除时间和任务数量限制，直接按照你判定最合适的路线跑完全部流程，将项目一次性优化重构完；user 2026-09-16 明确：授权台账订正，并继续。TASK-042（REQ-005）候选 059880b67681d553 已通过 verify（RUN-36c2bbeca0fd40ce853fe75faa4133d4）与第二轮独立审查（含一次 owner 授权的台账订正后重新记录），交付提交 fff7474",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-042"
+      ],
+      "recorded_at_utc": "2026-09-16T17:34:23.671719Z",
+      "candidates": {
+        "TASK-042": "059880b67681d553cc85cc6dd8db81211f9027eac79828e00ced121dd28be133"
+      }
     }
   ]
 }

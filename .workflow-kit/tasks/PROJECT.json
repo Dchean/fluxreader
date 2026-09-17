@@ -8,6 +8,6 @@
   "current_batch": "BATCH-7cbc4d36369a4c4d8f5a7dcfeac9f898",
   "ui_preview_task": null,
   "policy": ".workflow-kit/tasks/POLICY.json",
-  "handoff": ".workflow-kit/docs/HANDOFF.md",
+  "handoff": ".workflow-kit/tasks/PROJECT_STATE.md",
   "created_at_utc": "2026-09-15T02:43:39.554309Z"
 }

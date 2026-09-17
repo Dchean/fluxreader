@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-042 · 交互动画打磨（REQ-005）：补全过渡与 prefers-reduced-motion
 
-**状态**：verified
+**状态**：done
 
 **目标**：按 UI 契约（.workflow-kit/docs/UI-CONTRACT-REQ-005.md）打磨交互过渡：把已声明却从未被应用的 .list-entering 真正接到列表内容上；下拉/右键菜单改为先挂载、下一帧再置 open；阅读器视图与文章切换、播放条与全屏播放器、折叠展开区块、覆盖层与加载更多改用可过渡的可见性方案；为本次新增或修改的全部过渡补 prefers-reduced-motion 保护。只改过渡与时长曲线、复用既有 token 与曲线，不改布局结构、信息层级、配色与行为。
 
