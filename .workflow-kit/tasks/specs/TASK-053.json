@@ -1,0 +1,82 @@
+{
+  "id": "TASK-053",
+  "title": "P1-5 离线期间的「全部已读」不入队：改为无论是否已配置都入队待推",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "draft",
+  "objective": "修复 P1-5 的残留：`mark_all_read`（以及同源路径）**仍以 `sync_configured` 作为入队条件**，导致离线期间的「全部已读」不写入待推队列；连接后首次全量对账会按远端状态把本地已读**翻回未读**——用户看到的「已读」会自己变回去。owner 已明确裁决『另立任务修（需授权改协议行为）』，故本任务**获授权改变同步协议行为**（仅限本缺陷所必需）。参照同一批次已完成的 A-5 修复先例（`set_read`/`set_starred` 已改为『无论是否 configured 都入队，推送段在未配置时静默跳过』），本任务应把 `mark_all_read` 等剩余路径对齐到同一语义。",
+  "non_goals": [
+    "修 P1-6（本地条目无回写远端接口的设计边界）——那是接口缺口，不在本次授权范围",
+    "顺手修 FINDINGS-REQ-007.md 里其它未修项（P2-9/P2-10 后半/P2-11/P2-12、P3-x、P1-7 残留等）",
+    "改变除「入队条件」以外的同步协议语义（推送顺序、冲突解决策略、对账口径一律不动）",
+    "引入新依赖",
+    "改动工作流（.workflow-kit/**）",
+    "改前端组件（本缺陷在后端入队路径；若判断必须改前端，停下来报告）"
+  ],
+  "requirement_refs": ["REQ-002", "REQ-007"],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": ["TASK-052"],
+  "blocks": [],
+  "risk": {
+    "level": "high",
+    "decision_ids": ["DEC-c22f890a49524130a32d3d8254d742cb"]
+  },
+  "allowed_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    "src-tauri/src/**",
+    "src-tauri/tests/**"
+  ],
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    "src-tauri/src",
+    "src-tauri/tests"
+  ],
+  "acceptance": [
+    "**协议语义变更须显式论证**：在报告中写清「改了什么语义」「为什么必要」「对既有后端/其它客户端的兼容影响」，并说明为何**不**影响推送顺序与冲突解决",
+    "`mark_all_read` 的入队条件不再依赖 `sync_configured`：无论是否已配置远端，离线期间的「全部已读」都写入待推队列；推送段在未配置时静默跳过（与 A-5 先例一致）",
+    "**逐一排查同源残留**：全仓搜索 `sync_configured` 的入队前置判断，列出所有仍在用它作为「是否入队」条件的路径，并判断每个路径应否对齐；未对齐的须逐条说明理由",
+    "**可复跑测试**：新增或转正一个离线复现测试（测试名与意图写明），断言「未配置/离线时 mark_all_read 入队成功，且连接后推送段确实把该动作推给后端」；该测试必须**修前失败、修后通过**（给出修前失败的证据）",
+    "既有 Rust 测试不得回退：`cargo test` 通过（基线 120 passed / 0 failed / 23 ignored；通过数可增不可减，`#[ignore]` 数不得增加除非有说明）",
+    "不引入新依赖；`Cargo.toml` / `Cargo.lock` 零改动；不改前端（本缺陷在后端）",
+    "文本文件必须 LF 行尾；台账改动须在 begin 之前完成"
+  ],
+  "gates": [
+    { "id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": true },
+    { "id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true },
+    { "id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true },
+    { "id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 基线（TASK-052 之后）：npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 241/241（既有 26 + 新增 215）、cargo test 120 passed / 0 failed / 23 ignored。**本任务有意改变行为**（同步协议入队语义），故基线不是「保持不变」，而是「既有后端保护不削弱 + 语义变更显式论证 + 每处变化有对应测试」。Rust 侧既有同步测试（含 TASK-032 起为 A-5/C-1 转正的 offline 复现测试）是本任务的直接回归网。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md"
+    },
+    "decision_ids": ["DEC-c22f890a49524130a32d3d8254d742cb"],
+    "actions": [
+      {
+        "action": "add",
+        "target": "离线 mark_all_read 入队与连接后推送的复现测试",
+        "reason": "该缺陷的修复是行为变更，必须有可复跑证据；并参照 A-5 的先例把复现测试转正为必过",
+        "gate_ids": ["cargo_test"]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部既有 Rust 测试（含 A-5/C-1 转正的同步测试）",
+        "reason": "本任务只改「是否入队」这一条件，不得借机改动推送顺序、冲突解决或对账口径；既有同步测试正是这些语义的保护",
+        "gate_ids": ["cargo_test"]
+      },
+      {
+        "action": "keep",
+        "target": "前端 241 项断言",
+        "reason": "本任务不改前端；该套件证明前端契约未被波及",
+        "gate_ids": ["frontend"]
+      }
+    ]
+  }
+}
