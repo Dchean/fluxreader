@@ -127,6 +127,12 @@ body {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
+/* 键盘高亮项：与鼠标 :hover 同一视觉语言（方向键浏览时给出明确落点） */
+.flux-dropdown-option.kb-active {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+}
+
 .flux-dropdown-trigger .chevron-svg {
   width: 11px;
   height: 11px;
@@ -667,7 +673,9 @@ body {
   gap: 4px;
 }
 
-/* 左下角「刷新所有订阅源」主入口：比状态行更醒目，单行文案 */
+/* 左下角「刷新全部订阅源」主入口：比状态行更醒目，单行文案。
+   颜色/禁用态一律交给统一变体类 .btn-primary（见文件末尾「主按钮变体统一」），
+   这里只保留它作为整行主入口的布局与字号差异。 */
 .sidebar-refresh-all {
   display: flex;
   align-items: center;
@@ -675,25 +683,15 @@ body {
   gap: 6px;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
-  background: var(--accent);
-  border: none;
-  color: #ffffff;
+  border: 1px solid transparent;
   font-size: 11.5px;
   font-weight: 600;
   cursor: pointer;
   font-family: inherit;
-  transition: filter var(--transition-fast), opacity var(--transition-fast);
+  transition: background var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-fast);
 }
 
-.sidebar-refresh-all:hover {
-  filter: brightness(1.1);
-}
-
-.sidebar-refresh-all:disabled {
-  opacity: 0.6;
-  cursor: default;
-  filter: none;
-}
+/* 悬停与禁用态一律随 .btn-primary（见文件末尾「主按钮变体统一」），此处不再覆盖 */
 
 .sync-status-row {
   display: flex;
@@ -835,10 +833,9 @@ body {
   white-space: nowrap;
 }
 
-/* 纯图标功能按钮（订阅管理行「添加源」）：正方形、图标居中，含义�?title 提示 */
-.toggle-action-btn.icon-btn {
-  padding: 4px 7px;
-}
+/* 纯图标功能按钮（订阅管理行「添加源」）的命中区与盒模型，
+   统一在文件末尾「控件一致性收尾（REQ-008）」一节定义（padding:0 + 两档令牌），
+   此处不再保留旧的 padding 声明，避免同一选择器出现互相覆盖的重复规则。 */
 
 .toggle-action-btn:hover {
   background: var(--bg-card-hover);
@@ -3394,6 +3391,17 @@ a[href]:focus-visible,
   outline-offset: 2px;
 }
 
+/* 画廊卡片的可聚焦图片/无图占位：环必须画在**内侧**。
+   原因：.gallery-card 有 overflow:hidden 且无 padding，图片铺满内容盒，
+   而外描边需要 2px + 1px offset = 3px，会超出裁剪框 → 上/左/右三边被裁掉，
+   屏幕上只剩底边一条线（等于「有焦点但看不见焦点环」）。
+   改用负 offset 的**内描边**，环带整个落在图片盒内，任何方向上都不会被裁。 */
+.gallery-card img:focus-visible,
+.gallery-card .gallery-no-image:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 /* ---------- 2. 图标按钮命中区收敛 ----------
    纯图标按钮只保留两档命中区（--icon-btn-hit-sm / -md），
    内边距恒为 0、内容由 flex 居中；两组按钮由此共享同一盒模型。
@@ -3402,7 +3410,8 @@ a[href]:focus-visible,
    - .podcast-play-circle / .player-full-play 是圆形播放动作，不是图标按钮 */
 .icon-sub-btn,
 .feed-row-act-btn,
-.folder-chevron-btn {
+.folder-chevron-btn,
+.toggle-action-btn.icon-btn {
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -3422,6 +3431,14 @@ a[href]:focus-visible,
 }
 
 .feed-row-act-btn {
+  width: var(--icon-btn-hit-sm);
+  height: var(--icon-btn-hit-sm);
+}
+
+/* 分类/订阅编辑按钮：纯图标（仅一枚 <Icons.edit/>），并入 sm 档；
+   此前散落在 .toggle-action-btn.icon-btn 的 padding: 4px 7px，盒模型与
+   上面三组不一致。命中区与同类图标按钮对齐。 */
+.toggle-action-btn.icon-btn {
   width: var(--icon-btn-hit-sm);
   height: var(--icon-btn-hit-sm);
 }

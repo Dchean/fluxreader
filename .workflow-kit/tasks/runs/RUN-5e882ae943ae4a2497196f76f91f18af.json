@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-5e882ae943ae4a2497196f76f91f18af",
+  "task_id": "TASK-043",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "订正后恢复执行（owner 授权 DEC-task043-ledger-fix-20260917）；源码与订正前一致，直接 finish"
+  },
+  "started_at_utc": "2026-09-17T02:16:22.999514Z",
+  "finished_at_utc": "2026-09-17T02:16:28.793069Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "3a637f0ecb0811e929c0b96ccd4b0257f3eea6621798f8e5b4eb4b3db8cd1abb",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-5e882ae943ae4a2497196f76f91f18af-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-5e882ae943ae4a2497196f76f91f18af-scope.json",
+  "failure_kind": "protocol",
+  "failure_reason": "Worker changed_files does not match the observed project diff"
+}

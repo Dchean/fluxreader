@@ -66,11 +66,13 @@ export function Sidebar() {
   );
 
   const isBusy = syncStatus === 'syncing' || backgroundSyncing;
+  /* 提示语一律用「同步」口径：本指示器描述的是与后端的同步状态，
+     与「刷新此源 / 刷新全部订阅源」这类抓取动作是两件事，不得混用。 */
   const syncLabel =
     syncStatus === 'syncing'
-      ? '刷新中…'
+      ? '同步中…'
       : backgroundSyncing
-        ? '刷新中…'
+        ? '同步中…'
         : syncStatus === 'error'
           ? '同步失败'
           : syncConnected
@@ -294,7 +296,7 @@ export function Sidebar() {
           </button>
         </div>
         <button
-          className={`sidebar-refresh-all ${isBusy ? 'sync-refresh-all-busy' : ''}`}
+          className="sidebar-refresh-all btn-primary"
           onClick={triggerManualSync}
           disabled={isBusy}
         >

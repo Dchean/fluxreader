@@ -973,8 +973,8 @@ function SyncTab() {
     return (
       <>
         <div className="settings-group-title">后端配置</div>
-        <SettingCard title="浏览器开发模式" desc="同步功能需要运行在 Tauri 客户端内（npm run tauri dev）">
-          <span className="about-arch-tag">Mock 模式</span>
+        <SettingCard title="演示模式" desc="同步功能需要运行在 Tauri 客户端内（npm run tauri dev）">
+          <span className="about-arch-tag">不支持同步</span>
         </SettingCard>
       </>
     );

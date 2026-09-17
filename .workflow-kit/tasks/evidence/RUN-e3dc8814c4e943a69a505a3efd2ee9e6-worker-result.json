@@ -1,0 +1,15 @@
+{
+  "task_id": "TASK-043",
+  "run_id": "RUN-e3dc8814c4e943a69a505a3efd2ee9e6",
+  "status": "ready_for_verification",
+  "summary": "【三 run 记录说明，全部保留在账本】RUN-e9391e4fc6cd40d591b4a38b2aac19c1 实际写入了本次全部 8 个文件（其 changes.json 记录在案），但其 finish 被 prepare 期 allowed_paths 写错嵌套层导致的 scope 误判卡死（根因与工具缺口见 .workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md，订正授权见 DEC-task043-ledger-fix-20260917）；RUN-5e882ae943ae4a2497196f76f91f18af 是订正后的恢复尝试，因改动已由前一 run 写入而实测零差异；本 run（RUN-e3dc8814…）在台账订正完成后执行，**未再改动任何文件**，故 changed_files 为空——零改动是本 run 的真实观测。候选快照按 snapshot_paths 从磁盘捕获，因此完整包含这 8 个文件的实际内容，验证对象未缩水；请审查者把三者的 changes.json 与工作区实际内容一并核对。\n\n按冻结契约 UI-CONTRACT-REQ-043.md 收尾 TASK-041 独立复核确认的遗留项，只加无障碍属性、统一用户可见文案、收敛控件样式归属，不改行为。分项：(1) 焦点可达性——FluxDropdown 触发器补 role=combobox/tabIndex/aria-expanded/aria-haspopup/onKeyDown（方向键移动、Enter/Space 开合与提交），菜单补 role=listbox、选项补 role=option+aria-selected并新增键盘高亮 .kb-active；右键菜单补 role=menu/menuitem+tabIndex+aria-disabled+onKeyDown；文章卡片与播客卡片补 role=button+roving tabIndex+方向键移动；画廊图片与无图占位补 role=button+roving tabIndex；全屏播放器进度条补 role=slider+tabIndex+aria-value*+方向键 seek（与迷你条语义一致）。(2) 措辞统一——侧栏同步状态指示器忙碌态由「刷新中…」改为「同步中…」（该指示器描述后端同步状态，同一三元里还有「同步失败/后端已同步」，此前一个状态机混用两套词）；store 单源刷新 toast 由「正在刷新该订阅源…」统一为「正在刷新此源…」。(3) 演示模式口径——设置页「浏览器开发模式 / Mock 模式」改为「演示模式 / 不支持同步」，与既有 toast 的「演示模式不支持…」前缀一致。(4) 控件收敛——.toggle-action-btn.icon-btn 由 padding:4px 7px 并入图标按钮共享盒模型并使用 --icon-btn-hit-sm；侧栏最显眼主按钮改用统一变体类 .btn-primary（移除自带底色与独立禁用态 .6，改吃统一的 .45），并删除全仓无样式定义的死类名 sync-refresh-all-busy。(5) 残留清理——两处「 ⏳ 翻译中…」改为「翻译中…」，全仓 ⏳ 计数 0。实施中发现并更正了独立复核报告 B-1 的三处误报（feed-folder-title / feed-leaf-item / 迷你进度条早已带 role+tabIndex+onKeyDown，系初版用朴素正则解析 JSX 时被箭头函数中的 '>' 截断所致），缺口由 12 处修正为 9 处，并已在报告内留更正注记。健壮性：roving 焦点索引对列表长度做夹取，避免筛选/切换订阅后越界导致没有任何卡片可 Tab 进入。门禁三门全绿（lint 0/0、build 通过、前端回归 26/26 且退出码 0；均重定向到文件后读退出码判定，不用管道的屏幕文字——管道会掩盖真实退出码）。\n\n【必须与候选一并阅读的未覆盖 / 限制项（诚实披露，不冒充通过）】①实机键盘观察未做：本环境合成按键无法驱动 WebView2 焦点遍历（TASK-041 复核时已确认同样限制），故「焦点环在真实 WebView2 中可见」「焦点顺序不跳乱」「roving 在虚拟列表滚动后仍正确」三条只有代码依据、无实机证据，需使用者用真实键盘 Tab 复核一遍——这是本任务最实质的验收缺口。②本轮未提供截图：改动为无障碍属性与样式归属，静帧无法证明焦点可达性，按契约 §5 不以截图冒充动态证据。③浅色主题下的焦点环外观未核对。④复核报告 B-3（关闭态弹窗仍可被 Tab 聚焦，无 inert/aria-hidden）为既有结构问题、非 TASK-041 遗留，且涉及交互语义变更，未纳入本任务，建议另立任务。⑤两轮 run 的记录拆分见上文，请审查者核对三者 changes.json 与工作区实际内容一致。详见 .workflow-kit/tasks/evidence/TASK-043-interaction-report.md 第 5 节。",
+  "changed_files": [],
+  "validation_requests": [
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

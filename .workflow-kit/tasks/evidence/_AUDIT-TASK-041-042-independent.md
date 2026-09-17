@@ -48,37 +48,45 @@
 
 ### B-1 焦点可见性覆盖不到自定义可点击元素（契约第 5 条，实质缺口）
 
+> **2026-09-17 更正（TASK-043 实施时发现）**：本节初版用正则匹配 JSX 开标签，
+> 而 JSX 属性里的箭头函数 `onClick={() => …}` 含 `>`，导致标签在 `>` 处被提前截断，
+> 于是**已带 `role`/`tabIndex` 的元素被误判为缺失**。改为括号/引号感知的解析后，
+> 确认以下 3 处初版**误报**，实际早已合规（且已带 `onKeyDown`）：
+>
+> - `Sidebar.tsx` 的 `.feed-folder-title`（`role="button"` + `tabIndex={0}` + Enter）
+> - `Sidebar.tsx` 的 `.feed-leaf-item`（同上）
+> - `PlayerBar.tsx` 的迷你 `.player-progress-track`（`role="slider"` + `tabIndex={0}` + aria-value*）
+>
+> 下表与计数已按更正后重算；**结论方向不变**（覆盖仍不完整），
+> 但真实缺口由 12 处修正为 **9 处**。教训：JSX 结构核对不能用朴素行/标签正则。
+
 契约要求「所有可交互控件（按钮、输入框、文本域、图标按钮、开关）都有可见的 focus-visible 指示」。
 焦点规则（`base.css:3380-3389`）只命中 `button / input / textarea / select / a[href] / [role=button] / [tabindex]`。
 
-但主界面大量核心交互是 `div`/`img` + `onClick`，**既无 `role` 也无 `tabIndex`**，
-因此既不进入 Tab 序列，也命中不到任何焦点规则。经多行 JSX 解析并逐个人工区分
-「真实交互控件」与「仅阻止冒泡的容器」后，**确认为真实控件且缺 role/tabIndex 的共 14 处**：
+以下元素是 `div`/`img` + `onClick` 且**既无 `role` 也无 `tabIndex`**，
+因此既不进 Tab 序列、也命中不到任何焦点规则：
 
 | # | 元素 | 位置 | 用户后果 |
 |---|---|---|---|
-| 1 | `.article-card` | `Timeline.tsx:256` | 打开文章的主入口（列表/画廊/社交/通知布局下键盘不可达） |
-| 2 | `.feed-leaf-item` | `Sidebar.tsx:210` | 切换订阅源 |
-| 3 | `.feed-folder-title` | `Sidebar.tsx:172` | 展开/收起分类 |
-| 4 | `.flux-dropdown-trigger` | `primitives.tsx:95` | 全应用所有自定义下拉的触发器 |
-| 5 | `.flux-dropdown-option` | `primitives.tsx:103` | 下拉选项 |
-| 6 | `.ctx-menu-item` | `ContextMenu.tsx:92` | 右键菜单项 |
-| 7 | `.player-progress-track` | `PlayerBar.tsx:227` | 迷你播放条 seek |
-| 8 | `.player-progress-track.player-full-track` | `PlayerBar.tsx:313` | 全屏播放器 seek |
-| 9 | `.podcast-card` | `Timeline.tsx:515` | 播客卡片播放 |
-| 10 | `.social-text` | `Timeline.tsx:348` | 社交正文展开/收起 |
-| 11 | `.gallery-no-image` | `Timeline.tsx:482` | 画廊无图占位点击开图 |
-| 12 | 画廊 `<img>` | `Timeline.tsx:480` | 点图开灯箱 |
-| 13 | `.sidebar-search-pill` 之外的侧栏检索入口 | `Sidebar.tsx:91` | 已带 role/tabIndex，**合规**（列此仅作对照，不计入缺口） |
-| 14 | `.lightbox-overlay` | `Overlays.tsx:314` | 点遮罩关闭灯箱（次要，有 Esc 兜底） |
+| 1 | `.article-card` | `Timeline.tsx:256` | 打开文章的主入口（列表/社交/通知布局下键盘不可达） |
+| 2 | `.podcast-card` | `Timeline.tsx:515` | 播客卡片播放 |
+| 3 | `.flux-dropdown-trigger` | `primitives.tsx:95` | 全应用所有自定义下拉的触发器 |
+| 4 | `.flux-dropdown-option` | `primitives.tsx:103` | 下拉选项 |
+| 5 | `.ctx-menu-item` | `ContextMenu.tsx:92` | 右键菜单项 |
+| 6 | `.player-progress-track.player-full-track` | `PlayerBar.tsx:313` | 全屏播放器 seek（迷你条已合规） |
+| 7 | 画廊 `<img>` | `Timeline.tsx:480` | 点图开灯箱 |
+| 8 | `.gallery-no-image` | `Timeline.tsx:482` | 画廊无图占位点击开图 |
+| 9 | `.social-text` | `Timeline.tsx:348` | 正文区代理点击（IMG→灯箱 / A→外链）；展开/收起另有真实 `<button>`（`Timeline.tsx:380`），故此项可选 |
 
-以下 8 处经核实**只是事件容器**（仅 `stopPropagation` 或承载子控件），不计入缺口：
+以下经核实**只是事件容器或已合规**，不计入缺口：
 `ContextMenu.tsx:90`、`primitives.tsx:238/239/265/271`、`SettingsModal.tsx:80/484`、
-`PlayerBar.tsx:303`、`Reader.tsx:283`（正文区代理点击 `<a>`，由子元素语义承担）。
+`PlayerBar.tsx:302`（`role="dialog"`）/`303`、
+`Reader.tsx:283`（正文容器，链接由子元素语义承担）、
+`Overlays.tsx:243`（`role="option"`，属 listbox 模式，由输入框方向键驱动）、
+`Overlays.tsx:314`（灯箱遮罩，Esc 已可关闭）。
 
-其中第 4、5、6 项（下拉触发器与选项、右键菜单项）影响面最大：
-设置页所有 FluxDropdown 与所有右键菜单都只能鼠标操作。契约要求「所有可交互控件都有可见焦点」，
-这 12 处真实控件既不进 Tab 序列也无焦点环（第 13 项合规、第 14 项次要），且报告未披露。
+其中第 3、4、5 项（下拉触发器与选项、右键菜单项）影响面最大：
+设置页所有 FluxDropdown 与所有右键菜单都只能鼠标操作。
 
 报告对此的表述是验收标准原文「**所有**可交互控件具备可见的 focus-visible 指示」，
 但报告同时承认「按钮、开关、文本域的焦点环本轮未获实机目视确认」——

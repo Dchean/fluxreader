@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-9af613615df449bd84323fbdccd1dac5",
+  "task_id": "TASK-043",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "独立审查者 r3（未参与实现的新上下文；由总控委派，前两轮为 r1/r2，均判 FAIL 并已归档）。该上下文全程只读，仅产出本审查报告"
+  },
+  "started_at_utc": "2026-09-17T05:20:43.086354Z",
+  "finished_at_utc": "2026-09-17T05:20:43.120201Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "3a637f0ecb0811e929c0b96ccd4b0257f3eea6621798f8e5b4eb4b3db8cd1abb",
+  "candidate_digest": "6fa96b0b9efe82244a0df1e8b82c9eacd989347ef37cb6011eea2a9b252bea4e",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-9af613615df449bd84323fbdccd1dac5-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-9af613615df449bd84323fbdccd1dac5-review.json",
+    "candidate_digest": "6fa96b0b9efe82244a0df1e8b82c9eacd989347ef37cb6011eea2a9b252bea4e",
+    "ui_evidence_digest": "72de2a469453f46fe34cee79ef624de880300a85d16ce0b4cb1e7b279f49c9ba",
+    "quality_digest": "3330370fccba287c46db33b99014853188d1b562968880527916c8e4425f0903"
+  },
+  "estimated_cost_usd": null
+}

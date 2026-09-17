@@ -1,0 +1,119 @@
+{
+  "id": "TASK-043",
+  "title": "TASK-041 遗留收尾：焦点可达性 + 措辞口径 + 按钮收敛（REQ-006/008）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+  "ui_checks": [
+    "主视图：时间线卡片（列表/社交/通知/画廊/播客）可用键盘聚焦并看到焦点环；侧栏订阅项与分类标题同理",
+    "下拉控件：FluxDropdown 触发器与选项可聚焦、可操作、焦点环可见",
+    "右键菜单：菜单项可聚焦并有可见焦点指示",
+    "播放：迷你播放条与全屏播放器的进度条可聚焦（seek 有键盘路径）",
+    "文案：侧栏同步状态指示器不再混用「刷新/同步」；单源刷新措辞全应用一致",
+    "控件：2 处纯图标按钮并入两档命中区；最显眼主按钮使用统一变体类与统一禁用态",
+    "残留：社交/通知卡片的「翻译中」提示不再带 ⏳ 与前导空格",
+    "无障碍：聚焦顺序合理，不破坏既有布局与状态流转；prefers-reduced-motion 不受影响"
+  ],
+  "status": "draft",
+  "objective": "按冻结契约 .workflow-kit/docs/UI-CONTRACT-REQ-043.md 收尾 TASK-041 独立复核确认的遗留项，只做必要的可达性与一致性修复，不改行为、不重构结构：(1) 焦点可达性——为既有 div/img + onClick 的真实交互控件补 role 与 tabIndex，使 §1 焦点规则真正命中，键盘可 Tab 到并看到焦点环（含焦点顺序不跳乱）；(2) 措辞统一——同一动作用一套说法：侧栏同步状态指示器不再在「刷新中…/同步失败/后端已同步」间混用，单源刷新在全应用统一为「刷新此源」，手动全量刷新统一为「刷新全部订阅源」；(3) 控件收敛——2 处纯图标按钮（SettingsModal 的编辑按钮）并入既有两档命中区令牌，最显眼主按钮（侧栏「刷新全部订阅源」）改用与其它主按钮相同的变体类与统一禁用态；(4) 清理「翻译中…」提示残留的 ⏳ emoji 与前导空格。",
+  "non_goals": [
+    "改变任何点击行为、跳转目标、计数口径或状态流转",
+    "布局结构、信息层级、配色主题调整",
+    "引入新依赖、组件库或设计系统",
+    "后端、同步与数据逻辑",
+    "模块拆分（独立后续任务）",
+    "重写既有测试断言语义；tools/frontend-regression.mjs 只允许新增用例，不得削弱既有断言"
+  ],
+  "requirement_refs": [
+    "REQ-006",
+    "REQ-008"
+  ],
+  "reference_ids": [
+    "REF-002"
+  ],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task043.md",
+      ".workflow-kit/docs/UI-CONTRACT-REQ-043.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task043.md",
+    "src/App.tsx",
+    "src/components",
+    "src/styles",
+    "tools/frontend-regression.mjs"
+  ],
+  "acceptance": [
+    "契约 §1 列出的每一处控件都进入 Tab 序列且可获得可见焦点环（逐条给出 文件:行 与所加属性）",
+    "焦点顺序合理：主视图 Tab 顺序为侧栏 → 工具栏 → 列表卡片，不出现焦点跳入不可见区域",
+    "同一动作措辞唯一：侧栏状态指示器、单源刷新、全量刷新各自全应用一套说法（逐条列 文件:行 → 原文 → 改后）",
+    "2 处纯图标按钮使用既有两档命中区令牌之一，尺寸与同类按钮一致",
+    "主按钮使用统一变体类，禁用态与其它主按钮一致（同一 opacity/游标语言）",
+    "「翻译中…」提示不再包含 ⏳ 与前导空格",
+    "行为、布局与状态流转不变：前端回归 26/26 保持全绿（允许新增用例，不得减少或削弱既有断言）",
+    "lint 0/0、build 通过",
+    "UI 证据：主视图与设置页截图，并区分「代码核对」与「实机观察」；静帧不得冒充动态证据"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": ["run", "lint"],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": ["run", "build"],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": ["run", "test:frontend"],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 基线（本次提交 fee0934 之上实测）：lint 0 warnings / 0 errors（24 文件，116 规则）；build 通过（tsc -b && vite build，产物 dist/assets/index-Bt9W-GZ6.css 59.90 kB）；前端回归 26/26 且退出码 0；TASK-042 候选 059880b6… 的 17 个文件与当时工作区逐一 sha256 一致。本任务只加无障碍属性、统一文案与收敛静态样式，不改变行为契约；前端回归是纯 Zustand 状态机测试（不加载 CSS、不渲染组件），因此焦点与文案正确性依靠契约逐条核对与实机证据，不依赖该套件。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task043.md"
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "既有前端状态机回归 26 项",
+        "reason": "无障碍属性与文案改动不得改变交互行为与状态流转，回归必须保持全绿；允许新增用例覆盖新增的焦点属性与措辞，但不得削弱既有断言",
+        "gate_ids": ["frontend"]
+      },
+      {
+        "action": "keep",
+        "target": "lint 与 TypeScript/Vite 构建门禁",
+        "reason": "属性与样式改动仍需类型正确、可构建",
+        "gate_ids": ["lint", "build"]
+      }
+    ]
+  }
+}

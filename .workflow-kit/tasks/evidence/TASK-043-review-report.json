@@ -1,0 +1,105 @@
+{
+  "task_id": "TASK-043",
+  "candidate_digest": "6fa96b0b9efe82244a0df1e8b82c9eacd989347ef37cb6011eea2a9b252bea4e",
+  "verification_run": "RUN-6e516601e79642c98ec51cfe26fcdc2d",
+  "verdict": "PASS",
+  "summary": "独立审查（第 3 轮，未参与实现；不采信作者自述，全部结论来自我本人的源码核对与实机复现）。候选有效性：候选清单 16 个文件的 sha256 与当前工作区逐一重算 16/16 一致，故 RUN-6e516601… 的三门禁证据对当前代码仍然有效；该 run 的 checks 三项 status 均为 PASS、exit_code 均 0、且三条 check 的 candidate_digest 都等于本候选摘要，run 在候选采集后 0.065s 启动，证据链时效成立。候选采集期间两次 WinError 5（OneDrive 瞬时文件锁）失败的两个 run（RUN-64c7b457…、RUN-d2f41d9b…）未产出 checks，最终 RUN-6e516601… 为完整成功，环境抖动未污染候选。**第 2 轮阻断缺陷确已真正修好**：源码中 src/App.tsx:220 的 Space 分支内确有 `if (e.defaultPrevented) return;`，且 git diff 显示该文件本轮只增 7 行、仅此一处逻辑（另有 5 行解释性注释），未触及 Esc/Ctrl+K/Ctrl+,/S/M/J/K 任何分支。我用 headless Edge + 独立临时 profile + CDP（Input.dispatchKeyEvent 直达渲染器，不经系统输入层、不抢窗口焦点、用户库零写入）实测：A) 焦点在 .article-card（DIV role=button tabIndex=0, data-card-index=0）按真实 Space → activeArticleId null→art-1（控件动作执行）、togglePlayerPlay 计数 **0**；B) 对照焦点在 body 按 Space → togglePlayerPlay **1**、isPlaying false→true（既有播放/暂停能力保留）；C) 对照 Enter → togglePlayerPlay **0**、卡片动作正常；D) .flux-dropdown-trigger 按 Space → aria-expanded false→true、菜单 listbox 4 选项、键盘高亮 1 项、togglePlayerPlay **0**。与报告 §7.8 声称的 A=0/B=1/C=0/D=0 完全一致。更关键的是我做了**消融对照**：用 CDP Fetch 在响应阶段把该行从内存中删掉重放，同一次 .article-card+Space 立刻变为 activeArticleId→art-1 **且** togglePlayerPlay=1（调用栈 `at Object.togglePlayerPlay >> at onKey (src/App.tsx:197)`），即该守卫正是双重动作的修复点、且我的方法确实能检出第 2 轮缺陷——不是换了个说法。我还用第二组消融检验并**纠正了作者 §7.8 给出的理由**：把守卫从分支内上移到 onKey 顶部（作者称会破坏 ConfirmDialog 的 Esc）后实测 ConfirmDialog Esc 仍正常关闭、设置弹窗/灯箱/下拉 Esc 均照常，故「上移会破坏既有语义」这一顾虑在实测下不成立——但这是**理由表述不精确**，不是实现缺陷：作者选择外科式改法本身正确、范围最小、无副作用，不构成返工项，仅记入 maintainability 供后续参考。前两轮 finding 保持情况：r1 finding 1（画廊焦点环被 overflow:hidden 裁掉）**保持修好**——源码 base.css:3399-3403 的内描边规则仍在、构建产物 dist CSS 中可 grep 到 `outline-offset:-2px`，我另取当前候选实机截图做**消融对照**：offset=-2px 时图片盒四边精确 accent 命中 上293/306、下306/306、左401/408、右402/408（四边可见），强制改回 +1px 后变为 上0/306、下1/306、左0/408、右0/408（只剩底边），与 r1 缺陷表征一致，证明修复真实改变了渲染结果。r1 finding 2 收敛：TASK-043-13-gallery-roving.png 确不存在，14 号确含四边闭环。r1 finding 3/4：§5.0 表（第 143 行）与 §5.2（第 197 行）两处归因失准**均已更正**，明确写「既有、本轮未改、仅作选择器命中例证」与「范围有限…确实存在跳入不可见区域」。r1 finding 5：store.ts:1195 确属 mock 分支（triggerManualSync 的 tauri 分支以 1192 `return;` 结束），豁免理由经我独立核实属实。r2 finding 2：报告已不再宣称一组唯一像素数（改为「本会话 300+/审查者 上600下630左823右823，结论一致」）。r2 finding 3：已改。契约 §1 十二项逐条成立、§1.1 roving 不变式在 0/1/2 张卡下实测均「恰 1 张可 Tab」、§2 措辞唯一、§3 按钮收敛（图标按钮实测 padding 0 / 20×20 = --icon-btn-hit-sm；主按钮 .btn-primary 禁用态实测 opacity .45 / cursor not-allowed）、§4 ⏳=0、tools/frontend-regression.mjs 未改且 check() 调用点 26 处。用户库只读核验 feeds/folders/articles/sync_queue 仍 0 行、mtime 仍为 9/16，本轮所有 mock 注入均在内存。结论：第 2 轮唯一阻断缺陷已真正消除且可复现，前两轮其余 finding 全部保持修好，无新增需修问题，判 PASS。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "(a) 第 2 轮阻断缺陷（本轮审查重点）逐项核实。源码：`git diff HEAD -- src/App.tsx` 显示本轮该文件唯一逻辑改动是在 `if (e.key === ' ' && s.player.isActive) {` 之后插入 `if (e.defaultPrevented) return;`（现 App.tsx:220），另增 5 行注释；全文件 preventDefault 另有 :190(Ctrl+K)、:195(Ctrl+,)、:258(列宽拖动)，均未被本轮触及，证明改动范围确实只在 Space 分支。作者「不在 onKey 顶部统一判断」的解释我做了两种解释的对照实证：(1) 事件路径实测 ConfirmDialog 的 Esc 监听注册在 document capture 且 stopPropagation+preventDefault（primitives.tsx:270-275），实测其 Esc 时 window 冒泡阶段**根本收不到**该事件（探针输出仅 ['win-capture(pd=false)']），说明「上移会被 ConfirmDialog 破坏」在事件传播上并不成立；(2) 我用 CDP Fetch 把守卫上移到 onKey 顶部重放，ConfirmDialog Esc 仍关闭、设置弹窗 Esc 仍关闭、灯箱 Esc 仍关闭、下拉 Esc 仍关闭，进一步证明该理由不精确。**但这只影响理由的表述**：现有外科式实现本身正确、范围最小、无副作用，故不作为缺陷。功能实证（headless Edge + 独立临时 profile + CDP Input.dispatchKeyEvent，不经系统输入层、不抢焦点、不写库）：A) 经真实 Tab 序列（第 31 个停靠点）到达 .article-card（DIV role=button tabIndex=0 data-card-index=0 fv=true）按 Space → activeArticleId null→art-1、togglePlayerPlay 计数 0、无调用栈；B) 对照焦点在 body 按 Space → togglePlayerPlay 1、isPlaying false→true、栈 `at Object.togglePlayerPlay >> at onKey (src/App.tsx:197)`；C) 对照同卡片 Enter → togglePlayerPlay 0、selectArticle('art-1')；D) .flux-dropdown-trigger（role=combobox tabIndex=0，第 63 个 Tab 停靠点）按 Space → aria-expanded false→true、role=listbox、4 选项、kb-active 恰 1、togglePlayerPlay 0。A=0/B=1/C=0/D=0 与报告 §7.8 声称完全一致、可复现。补充边界：player.isActive=false 时卡片 Space 仍执行控件动作（selectCalls=['art-1']）且 togglePlayerPlay 0，而全局 Space 在 isActive=false 时本就不该响应，行为正确。消融对照（决定性）：用 CDP Fetch 在响应阶段把 `if (e.defaultPrevented) return;` 从内存删除后重放同一场景，A 立刻变为 activeArticleId→art-1 **且** togglePlayerPlay=1（栈指向 App.tsx:197 的 onKey）——即该守卫正是双重动作的消除点，且我的方法具备检出第 2 轮缺陷的能力。(b) 前两轮其余 finding 保持情况：r1 finding 1（画廊焦点环不可见）**保持修好**——源码 base.css:3399-3403 规则仍在、dist/assets 构建产物 grep 到 `outline-offset:-2px`；我不依赖作者旧截图，另取当前候选实机截图（Page.captureScreenshot）对 .gallery-card img（focus-visible=true, outline solid 2px rgb(72,128,200), offset -2px, rect [279,91,306,408], 父 .gallery-card overflow:hidden / padding 0 / border 1px）做四边精确取样：上 y=91-92 命中 293/306、下 y=497-498 命中 306/306、左 x=279-280 命中 401/408、右 x=583-584 命中 402/408，**四边均可见**；消融把 offset 改回 +1px 后同元素变为 上0/下1/左0/右0（仅底边一条），与 r1 缺陷表征一致。r1 finding 2：TASK-043-13-gallery-roving.png 确已不存在（Test-Path=False），现存 13 张 PNG 的 sha256 互不相同（无逐字节重复），14 号经我独立逐行/逐列统计确认存在闭合矩形环（长行 y=154/155/156 与 656/657/658，长列 x=476/477/478 与 852/853/854）。r1 finding 3/4：§5.0 表第 143 行与 §5.2 第 197 行两处归因失准均已更正为「既有（HEAD Sidebar.tsx:91-92）、本轮未改、仅作选择器命中例证」与「范围有限…确实存在跳入不可见区域」。r1 finding 5：store.ts:1195 确位于 triggerManualSync 的 dataMode!=='tauri' 演示分支（tauri 分支以 :1192 `return;` 结束），豁免理由经我读源码独立核实属实。r2 finding 2：报告已不再宣称唯一像素数。r2 finding 3：已改。候选与前轮比对：r3 与 r2 候选 16 个文件逐一比对**仅 src/App.tsx 一个哈希变化**，其余 15 个字节相同，确认无夹带。(c) 契约 §1 十二项逐条到源码核对：1 .article-card（Timeline.tsx:296-308 role=button + roving tabIndex + Enter/Space onSelect + 方向键）✓；2 .feed-leaf-item（Sidebar.tsx:216-218）✓ 既有；3 .feed-folder-title（Sidebar.tsx:177-179）✓ 既有；4 .flux-dropdown-trigger（primitives.tsx:126-131 role=combobox/tabIndex=0/aria-haspopup/aria-expanded/aria-label/onKeyDown）✓ 实机 ArrowDown 打开→ArrowDown 移动高亮(kb-active 由 idx 0→1)→Enter 提交且取值真变（标签「未读」→「全部」、菜单关闭、aria-expanded=false）✓；5 .flux-dropdown-option（role=option/aria-selected/onMouseEnter 同步高亮；选项本身 tabIndex=-1，采用触发器键盘高亮模型，与原生 select 一致，可接受）✓ 实测 4 项全部 role=option、tabIndex 全 -1、menuRole=listbox；6 .ctx-menu-item（role=menuitem/tabIndex 禁用 -1 + aria-disabled + Enter/Space 执行）✓ 实机派发 contextmenu 后菜单真弹出（role=menu、2 项 role=menuitem、ti=[0,0]），聚焦首项按 Space → 菜单关闭且收藏状态 false→true（与鼠标点击同一 close()+onSelect 路径）、togglePlayerPlay 0；7 迷你 .player-progress-track（role=slider/tabIndex=0/aria-label=播放进度/aria-value 0/0/100 + onKeyDown ±5s/Home）✓，durationSec=0 时实测 ArrowRight+Home 后 positionSec 保持 0、seekToSec null、无 NaN、渲染器存活；8 全屏 .player-full-track ✓ 实测 role=slider/ti=0/aria-valuenow=17/min=0/max=100/label=播放进度，聚焦后 ArrowRight 使 positionSec 30→35、Home 使其→0，与鼠标点击同源；9 .podcast-card（Timeline.tsx:601-611）✓ 实测 role=button/ti=0/tabbable 1，聚焦按 Space → togglePlayerPlay 0、toast「该剧集没有可播放的音频地址」（mock 无 enclosureUrl 的数据限制，非激活缺陷）；10 .social-text 仍未加 role/tabIndex（实测 roles=[null]、ti=[-1]），但契约该项必需结果为「展开/收起可由键盘触发（或在报告中说明为何不需要）」，展开/收起确有真实 button（Timeline.tsx:430），且该组数据下 isLong=false 故未渲染展开按钮——与 r1/r2 同口径，属轻微记录缺失、不单列 finding；11 画廊 <img> 与 .gallery-no-image ✓ 两支实测均 role=button + roving tabIndex + fv=true + outline solid 2px offset -2px，Space 开灯箱（lightboxUrl 置位）；12 .lightbox-overlay 契约写「Esc 已存在则说明即可」——Esc 链在 App.tsx:199-207 末端有 `s.lightboxUrl` 分支，我实测点击画廊图后 overlay 出现、按 Esc 后 lightboxUrl 置 null ✓。§1.1 roving：Timeline.tsx:78 `tabbableIndex = items.length === 0 ? -1 : Math.min(focusIndex, items.length - 1)`；我走应用自身筛选按钮（未读/收藏/今天/全部）改变组大小实测 2 张→tabbable 恰 1、1 张→恰 1、0 张→0，未出现「非空但 0 张可 Tab」的坏态；方向键实测 ArrowDown 使焦点与 tabIndex 由 idx0→idx1（ti 由 [0,-1]→[-1,0]）、ArrowUp 回到 idx0。§2 措辞：单源刷新「刷新此源」3 处且唯一（Sidebar.tsx:257/ContextMenu.tsx:169/store.ts:1449），「刷新该订阅源」0 处；全量「刷新全部订阅源」4 处；侧栏指示器「同步中…」2 处、「刷新中…」0 处。§3：图标按钮实测 padding 0 / 20×20 = --icon-btn-hit-sm（令牌值 20px）；主按钮 className 实测 `sidebar-refresh-all btn-primary`，禁用态 opacity 0.45 + cursor not-allowed（与其它主按钮同 .btn-primary:disabled 规则）。§4：全仓 src ⏳ 计数 0。",
+      "evidence_files": [
+        ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+        ".workflow-kit/tasks/evidence/TASK-043-interaction-report.md",
+        ".workflow-kit/tasks/evidence/TASK-043-review-report-r1-FAIL.json",
+        ".workflow-kit/tasks/evidence/TASK-043-review-report-r2-FAIL.json",
+        ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-candidate.json",
+        ".workflow-kit/tasks/evidence/TASK-043-14-gallery-focus-inset.png",
+        ".workflow-kit/tasks/evidence/TASK-043-12-list-roving.png",
+        "src/App.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/primitives.tsx",
+        "src/components/ContextMenu.tsx",
+        "src/components/Sidebar.tsx",
+        "src/styles/base.css"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "验证运行 RUN-6e516601e79642c98ec51cfe26fcdc2d 我逐字段读过原始 run 记录与三份日志（非引用摘要）：outcome=completed、exit_code=0、timed_out=false，checks 三项 lint/build/frontend 的 status **均为 PASS**、exit_code 均为 0，且三条 check 各自携带的 candidate_digest 都等于本候选 6fa96b0b…，与 run 顶层 candidate_digest 一致。日志内容：lint `Found 0 warnings and 0 errors.`（Finished in 30ms on 24 files with 116 rules）；build `tsc -b && vite build` 通过（dist/assets/index-BW4djGd6.js 377.52 kB、index-CTvuyV99.css 60.03 kB、✓ built in 122ms）exit=0；test:frontend `=== 前端逻辑回归 26/26 通过 ===` exit=0，stderr 里的 `bootstrap from backend failed: { code: 'db_corrupt', message: 'DB locked by migration' }` 是套件自身的 S-3a 负路径夹具（tools/frontend-regression.mjs:28-29 构造），不是真实失败。候选有效性：我重算候选清单 16 个文件的 sha256 与当前工作区 **16/16 一致**，故该 run 的门禁证据对当前工作区代码仍然有效；时序上候选采集于 04:49:47.183Z、run 启动于 04:49:47.248Z（相隔 0.065s）、10 个门禁命令均在候选摘要下执行，证据链时效成立。环境抖动核验（本轮特别项）：任务卡 checkpoint 记录本轮有两次 `[WinError 5] 拒绝访问` 的 run 文件改名失败（RUN-64c7b45731af42c7a1046222ebe41691、RUN-d2f41d9bbf23456faba2d91db4fe2fe9，failure_kind=environment）；我核对该两个 run 记录均**未产出 checks**（无 PASS/FAIL 判定），最终 RUN-6e516601… 才产生完整三条 PASS，说明 OneDrive 同步的瞬时文件锁只造成重试、未污染候选内容与门禁判定，与任务卡描述一致。保护是否被弱化：`git diff HEAD -- tools/frontend-regression.mjs` 为空、其 sha256 fb1174a9f4d0bc478512a70ea29990a346e9ee372e1f99a8bd1fd3e747208517 与候选清单一致；我用 node 精确统计 `check(` 出现 27 次、其中 `function check(` 定义 1 处，故**调用点恰 26 处**，与 26/26 相符，无删减、无断言削弱，符合任务卡「只允许新增用例，不得削弱既有断言」（本轮既未新增也未减少）。该套件能证明什么／不能证明什么：它是无浏览器的 Zustand 状态机 + IPC 口径测试（伪造 __TAURI_INTERNALS__、以 __INVOKE__ mock 后端命令），不加载 CSS、不渲染组件，因此对 role/tabIndex/焦点环/文案措辞**不能**提供任何证据；本轮唯一实质改动（Space 双重动作修复）恰落在它的能力盲区，26/26 全绿不覆盖它——这正是我另做 CDP 实机复现与消融对照的原因，任务卡 baseline 与报告均未把「26/26 全绿 ⇒ 可达性正确」当结论，口径准确、无夸大。文案回归风险独立核实：本轮改动的中文字串（刷新此源、翻译中…、演示模式、不支持同步）在该 mjs 中 0 命中，而套件确实断言的中文串是 `全文提取失败`(:119) 与 `重试`(:120)，故文案改动不会触发该套件回归。与前一候选的回归面比对：r3 相对 r2 候选只有 src/App.tsx 变化，未触及任何被门禁覆盖的配置、依赖或测试文件。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-frontend.stderr.txt",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task043.md",
+        ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-candidate.json",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "按指定清单逐项到源码与实机核验边界，未发现会导致崩溃/NaN/空操作/双重动作的缺陷。(i) FluxDropdown 空 options 守卫：primitives.tsx:98-120 —— `onTriggerKeyDown` 先 `e.preventDefault()`，随即 `if (options.length === 0) return;`(:102)，位于任何取模之前，故 `(i+1) % 0` 的 NaN 路径确被堵死；且 open 状态在空列表下也不会被键盘置起（先 return）。提交分支另有 `const opt = options[activeIndex]; if (opt)` 二次兜底，activeIndex 越界时静默不动而非提交 undefined。可达性交叉核实：全部 16 个 FluxDropdown 调用点的 options 均为常量数组或以 `categories.map(...)` 构造（Overlays.tsx:440/603、SettingsModal.tsx:750/777/1158 等），`categories` 为空时确实会产生空 options —— 该守卫因此不是死代码，是真实可达的防御路径。(ii) Timeline 的 tabbableIndex 夹取：Timeline.tsx:78 对空列表返回 -1（无卡可 Tab，语义正确）、非空返回 min(focusIndex, len-1)。实机（走应用自身筛选按钮改列表长度，非直接改内部状态）：2 张卡→tabbable 恰 1、1 张→恰 1、0 张→0，未出现「非空但 0 张可 Tab」的坏态。focusIndex 无负值来源（setFocusIndex 仅由 moveCardFocus 的 next>=0 分支与 activeArticleId 命中 idx>=0 的 effect 触发）；moveCardFocus 自身另有 `next < 0 || next >= items.length` 越界早退，与夹取互补。残留风险（已披露、非缺陷）：目标下标未被虚拟化渲染时 `root?.querySelector(...)` 返回 null → el?.focus() 空操作。我尝试构造该场景（用真实滚轮/滚动把 .timeline-scroll-body 推到 中/末位）但当前 mock 仅 2 张卡、scrollHeight==clientHeight==829（无滚动空间），**未能触发虚拟化复用路径**，此路径维持「未实机验证」状态；报告 §5.5.3/§6.2 已如实标注「虚拟列表滚动后的 roving 正确性未验证（mock 仅 3 条）」，符合契约 §5「未验证须标注」，故不作为 finding。(iii) 两个进度条 durationSec<=0：迷你条 PlayerBar.tsx:244-254 对 Arrow 分支先 preventDefault 再 `if (player.durationSec <= 0) return;`，Home 分支 `seekPlayer(0)`；seekPlayer（store.ts:877-878）只做 Math.max(0, sec) 并置 seekToSec/positionSec，正向 seek 另有 Math.min(player.durationSec, ...) 上界夹取。实机把 player 置 isActive=true/durationSec=0/positionSec=0 后，聚焦真实 Tab 到达的迷你条按 ArrowRight 与 Home：positionSec 保持 0、seekToSec 为 null、Number.isNaN=false、元素仍存活、togglePlayerPlay 0，未出现「可聚焦但按键报错/产生 NaN」。全屏条 PlayerBar.tsx:338-346 的 Arrow 走 onSkip→skipPlayer（store.ts:880-883，`Math.max(0, p.positionSec + deltaSec)`，不引用 durationSec），Home 走 onSeek(0)；其实机在 durationSec=180 下 ArrowRight 使 30→35、Home→0，Home 不夹上界但与既有「后退 15 秒」按钮同语义，未引入新行为。(iv) **本轮新增 Space/Enter 分支的边界**（指定重点）：a) player.isActive=false 时卡片按 Space → 控件自身动作照常执行（selectArticle('art-1')）、togglePlayerPlay 0（全局分支因 isActive 前置条件本就不响应），等价性保留；b) isActive=true 时同一卡片 Space → 仅控件动作、全局计数 0（守卫生效）；c) Enter 在任何 isActive 组合下均只触发控件动作、计数 0（Enter 不在全局分支内，未被本轮改动影响）；d) 空 options 下触发器按 Space/Enter → 只 preventDefault 后 early return，不开菜单、不移动高亮、不触发全局播放；e) 下拉**已打开**时再按 Space → 菜单关闭（Enter/Space 提交分支命中 activeIndex 对应项）、计数 0，实测两次 Space 后 aria-expanded true→false、togglePlayerPlay 0；f) 右键菜单**禁用项**（tabIndex=-1、aria-disabled）按 Space/Enter → onKeyDown 首行 `if (it.disabled) return;` 早退，不执行动作；g) 既有 role=button 的侧栏搜索入口（HEAD 已有、本轮未改，onKeyDown 只认 Enter）按 Space → 其自身不响应但全局 Space 仍切换播放（计数 1），这是**既有**行为组合、非本轮引入（该元素本轮之前就已可聚焦），且正是本轮守卫所采用「控件不消费则全局照旧」语义的体现，不属新增缺陷。(v) 交叉核对：App.tsx 全局 J/K 有 `activeContentLayout !== 'article'` 早退、Esc 浮层链有序（search→mini modals→settings→lightbox→playerExpanded→clearReaderSelection），与新增的方向键/Home 机制无冲突（方向键仅在卡片/进度条获得 DOM 焦点时触发）；我实测 Esc 链在灯箱场景确实生效、在设置弹窗场景确实生效。",
+      "evidence_files": [
+        "src/components/primitives.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/PlayerBar.tsx",
+        "src/components/ContextMenu.tsx",
+        "src/store.ts",
+        "src/App.tsx",
+        ".workflow-kit/tasks/evidence/TASK-043-interaction-report.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "本轮改动面（相对 r2 候选）**仅 src/App.tsx 一个文件**，16 文件逐一 sha256 比对确认无夹带；diff 为 +7/-1（1 处逻辑 + 5 行注释 + 1 处原注释扩写），是本任务能做到的最小外科式改动，未新增依赖、未改模块边界、未改任何类型签名。(1) §7.6 自曝项（本轮指定核对点）「旧 padding: 4px 7px 是否真已删」我按「去注释后 grep」核实：**结论为真已删除，但报告另有一处残留失准**。全仓 `4px 7px` 仅 1 处命中，位于 base.css:3439 的解释性注释内（「此前散落在 .toggle-action-btn.icon-btn 的 padding: 4px 7px，盒模型与…」），该注释不含任何声明块、不产生层叠效果；构建产物 dist CSS 中字面 `4px 7px` 计数为 **0**。`.toggle-action-btn.icon-btn` 现共 4 处出现且分工明确：base.css:2562-2564 是既有的 `.group-mgr-controls/.group-mgr-feed-controls` 后代规则（`flex: 0 0 auto`，与本轮无关）、:3414 并入共享盒模型组（padding:0 + inline-flex 居中）、:3441-3444 赋 width/height:var(--icon-btn-hit-sm)；不存在声明冲突的重复定义。运行时实测该按钮 padding 0 / 20×20 / display flex / 居中，与源码归属自洽。附带说明：§2.4 表第 81 行虽仍含「原散落规则删除」字样，但同格已加注「（**第一次没收干净，见 §7.6**）」，属如实带更正指针的表述，不构成失准。**报告残留失准（非代码缺陷，仅一处）**：§7.7 表第 378 行在陈述 r1 finding 1 的处置时，仍给出「上 367 / 下 371 / 左 493 / 右 491 命中」这组第 2 轮审查已判定「无法按其字面复现」的绝对数字——即 r2 finding 2 只在 §5.0（:152）与 §5.4（:245）两处改成了不宣称唯一数值，**§7.7 第 378 行这一处同类表述未同步更正**，同一事实在报告内仍是两种口径。我独立复测该组数字同样无法复现（严格 accent 取样下四边为 293/306、306/306、401/408、402/408，长行 y=154-156 计数 359/363/367、y=656-658 为 379/379/379，长列 x=476-478 为 495/497/499、x=852-854 为 499/497/495——其中仅「上 367」在长行 y=156 处恰好出现，下 371/左 493/右 491 均不出现），与 r2 结论一致。**定性结论不受影响**（四边均可见我已用当前候选实机截图 + offset 消融双向确证），且该数字既非本轮改动内容、也未被 r2 列为阻断项，属报告文档卫生问题而非代码或证据效力问题，故**不单列 finding、不判 FAIL**，仅在此记录建议下轮一并把 §7.7 该行改为定性表述以彻底消除口径分叉。(2) App.tsx 新增注释/分支清晰度：新增的 5 行注释准确说明了「为什么」而非「是什么」——点明触发条件是「卡片/下拉/菜单等补了 role+tabIndex 后可按 Space 激活自身（见 REQ-008）」，点明后果是「同一次 Space 既执行控件动作、又切换播放」，并显式声明作用域边界「只在此分支判断 defaultPrevented，不动其它快捷键的既有语义」，与实现完全一致、无过度承诺。守卫位置在 `e.key === ' ' && s.player.isActive` 之内、`e.preventDefault()` 之前，语义正确（必须先判断是否已被更具体的控件消费，再决定是否接管）。(3) 已知的轻微冗余（沿用 r1/r2 记录、非本轮新增、非缺陷）：三个卡片组件各自内联一份结构相同的 onKeyDown，GalleryCard 因两支渲染再复制一次，全文件共 4 份近同代码；后续可抽局部 hook 统一并显式声明事件消费边界——本轮新增的 Space 冲突正是「键盘处理器分散多处」的代价，此项仍是建议而非必须返工。(4) 未新增颜色或令牌：新规则复用 --accent / --bg-card-hover / --text-primary；.gallery-card 内描边规则特异性 (0,2,1) 高于通用组 `[tabindex]:focus-visible` (0,2,0)，是有意的定点特化（仅改 outline-offset 1px→-2px），与既有规则构成「通用 + 特化」而非重复定义。",
+      "evidence_files": [
+        "src/styles/base.css",
+        "src/App.tsx",
+        "src/components/Timeline.tsx",
+        ".workflow-kit/tasks/evidence/TASK-043-interaction-report.md",
+        ".workflow-kit/tasks/evidence/TASK-043-review-report-r2-FAIL.json"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "结论：对本轮新增改动无可测性能影响，也不适用 NOT_APPLICABLE（本轮确有运行时改动，故逐点给出依据）。(1) 本轮唯一代码改动是 App.tsx 全局 onKey 的 Space 分支内一条 `if (e.defaultPrevented) return;`：这是布尔属性读取 + 提前返回，位于键盘事件回调内、非渲染或滚动热路径，仅在**播放器激活且按下 Space**时才会执行到，单次成本为常数级、无分配、无 DOM 访问——相较该回调既有的 `useAppStore.getState()`、`target.tagName` 判断等开销可忽略，不可能构成可测回归。(2) 既有新增机制的性能面（沿用 r1/r2 已核结论，本轮 diff 未触及）：focusIndex 的 useEffect 依赖 activeArticleId，做一次 items.findIndex 的 O(n)，且仅在同一组件既有等价 effect 之外多一次、只在「选中文章变化」时触发，不在滚动/每帧；方向键移动焦点为每次按键一次限定在 scrollRef 子树内的 querySelector + 一次 scrollToIndex + 一个 rAF，属按键频率量级；focusIndex 变化只改变一个布尔 prop，四个卡片组件均为 memo，实际只有「失去可 Tab 的旧卡」与「获得可 Tab 的新卡」两张重渲染，不影响 useVirtualizer 的 overscan/getItemSize 口径。(3) CSS 层：本轮未改任何 CSS。既有新增焦点规则只作用于 :focus-visible（outline 不参与布局、不触发 reflow），键盘聚焦是低频事件，鼠标路径完全不匹配该选择器，零额外绘制成本。(4) 未新增过渡、动画、阴影或 backdrop-filter，未触及 TASK-042 冻结的动效词汇表。(5) 未改变任何网络/IO 行为；前端体积同量级（build 产物 index-BW4djGd6.js 377.52 kB，与前一候选 377.49 kB 相当）。",
+      "evidence_files": [
+        "src/App.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/PlayerBar.tsx",
+        ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-build.stdout.txt"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+    "checked_states": [
+      "主视图：时间线卡片（列表/社交/通知/画廊/播客）可用键盘聚焦并看到焦点环；侧栏订阅项与分类标题同理",
+      "下拉控件：FluxDropdown 触发器与选项可聚焦、可操作、焦点环可见",
+      "右键菜单：菜单项可聚焦并有可见焦点指示",
+      "播放：迷你播放条与全屏播放器的进度条可聚焦（seek 有键盘路径）",
+      "文案：侧栏同步状态指示器不再混用「刷新/同步」；单源刷新措辞全应用一致",
+      "控件：2 处纯图标按钮并入两档命中区；最显眼主按钮使用统一变体类与统一禁用态",
+      "残留：社交/通知卡片的「翻译中」提示不再带 ⏳ 与前导空格",
+      "无障碍：聚焦顺序合理，不破坏既有布局与状态流转；prefers-reduced-motion 不受影响"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-043-14-gallery-focus-inset.png",
+      ".workflow-kit/tasks/evidence/TASK-043-12-list-roving.png",
+      ".workflow-kit/tasks/evidence/TASK-043-01-main.png",
+      ".workflow-kit/tasks/evidence/TASK-043-05-focus-search-entry.png",
+      ".workflow-kit/tasks/evidence/TASK-043-07-focus-primary-button.png",
+      ".workflow-kit/tasks/evidence/TASK-043-interaction-report.md",
+      ".workflow-kit/tasks/evidence/TASK-043-review-report-r2-FAIL.json",
+      ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-candidate.json",
+      ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-frontend.stdout.txt"
+    ]
+  }
+}

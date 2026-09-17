@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "RUN-e9391e4fc6cd40d591b4a38b2aac19c1",
+  "task_id": "TASK-043",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "总控会话直接实现（agent_only，POLICY coder=current_agent）；契约 UI-CONTRACT-REQ-043.md 与基线已先于实现冻结"
+  },
+  "started_at_utc": "2026-09-17T01:58:59.633141Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "3a637f0ecb0811e929c0b96ccd4b0257f3eea6621798f8e5b4eb4b3db8cd1abb",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-e9391e4fc6cd40d591b4a38b2aac19c1-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-e9391e4fc6cd40d591b4a38b2aac19c1-scope.json",
+  "ledger_correction": {
+    "at_utc": "2026-09-17T02:17:16.935713Z",
+    "authorized_by": "user 2026-09-17: 授权订正，继续完成 TASK-043（推荐）",
+    "reason": "本 run 的 scope 误判根因已由 DEC-task043-ledger-fix-20260917 订正（allowed_paths 写法）。该 run 的 scope 快照摄于改动之前，其前后差异恰好等于本任务真实的 8 个文件改动，因此它是唯一能如实闭合本次工作的 run；RUN-5e882ae9… 是其后的恢复尝试，因改动已由本 run 写入而实测零差异。此处仅恢复本 run 的可闭合状态，原始 outcome/failure_kind/failure_reason/finished_at_utc 全部保留在下方字段。 处置：不重开本 run（本 run 之后台账文件又发生合法变更，重开会让这些受保护路径再次被判越界）；改为如实保留本 run 的 blocked/scope 原状，其写入的 8 个文件内容由后续 run 的候选快照承载并接受验证。",
+    "original_outcome": "blocked",
+    "original_failure_kind": "scope",
+    "original_failure_reason": "Out-of-scope changes: src/components/ContextMenu.tsx, src/components/PlayerBar.tsx, src/components/SettingsModal.tsx, src/components/Sidebar.tsx, src/components/Timeline.tsx, src/components/primitives.tsx, src/store.ts, src/styles/base.css",
+    "original_finished_at_utc": "2026-09-17T02:08:42.853355Z"
+  },
+  "failure_kind": "scope",
+  "failure_reason": "Out-of-scope changes: src/components/ContextMenu.tsx, src/components/PlayerBar.tsx, src/components/SettingsModal.tsx, src/components/Sidebar.tsx, src/components/Timeline.tsx, src/components/primitives.tsx, src/store.ts, src/styles/base.css",
+  "finished_at_utc": "2026-09-17T02:08:42.853355Z"
+}

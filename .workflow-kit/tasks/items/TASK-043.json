@@ -1,0 +1,339 @@
+{
+  "schema_version": 1,
+  "id": "TASK-043",
+  "title": "TASK-041 遗留收尾：焦点可达性 + 措辞口径 + 按钮收敛（REQ-006/008）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+  "ui_checks": [
+    "主视图：时间线卡片（列表/社交/通知/画廊/播客）可用键盘聚焦并看到焦点环；侧栏订阅项与分类标题同理",
+    "下拉控件：FluxDropdown 触发器与选项可聚焦、可操作、焦点环可见",
+    "右键菜单：菜单项可聚焦并有可见焦点指示",
+    "播放：迷你播放条与全屏播放器的进度条可聚焦（seek 有键盘路径）",
+    "文案：侧栏同步状态指示器不再混用「刷新/同步」；单源刷新措辞全应用一致",
+    "控件：2 处纯图标按钮并入两档命中区；最显眼主按钮使用统一变体类与统一禁用态",
+    "残留：社交/通知卡片的「翻译中」提示不再带 ⏳ 与前导空格",
+    "无障碍：聚焦顺序合理，不破坏既有布局与状态流转；prefers-reduced-motion 不受影响"
+  ],
+  "status": "verified",
+  "objective": "按冻结契约 .workflow-kit/docs/UI-CONTRACT-REQ-043.md 收尾 TASK-041 独立复核确认的遗留项，只做必要的可达性与一致性修复，不改行为、不重构结构：(1) 焦点可达性——为既有 div/img + onClick 的真实交互控件补 role 与 tabIndex，使 §1 焦点规则真正命中，键盘可 Tab 到并看到焦点环（含焦点顺序不跳乱）；(2) 措辞统一——同一动作用一套说法：侧栏同步状态指示器不再在「刷新中…/同步失败/后端已同步」间混用，单源刷新在全应用统一为「刷新此源」，手动全量刷新统一为「刷新全部订阅源」；(3) 控件收敛——2 处纯图标按钮（SettingsModal 的编辑按钮）并入既有两档命中区令牌，最显眼主按钮（侧栏「刷新全部订阅源」）改用与其它主按钮相同的变体类与统一禁用态；(4) 清理「翻译中…」提示残留的 ⏳ emoji 与前导空格。",
+  "non_goals": [
+    "改变任何点击行为、跳转目标、计数口径或状态流转",
+    "布局结构、信息层级、配色主题调整",
+    "引入新依赖、组件库或设计系统",
+    "后端、同步与数据逻辑",
+    "模块拆分（独立后续任务）",
+    "重写既有测试断言语义；tools/frontend-regression.mjs 只允许新增用例，不得削弱既有断言"
+  ],
+  "requirement_refs": [
+    "REQ-006",
+    "REQ-008"
+  ],
+  "reference_ids": [
+    "REF-002"
+  ],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task043.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "契约 §1 列出的每一处控件都进入 Tab 序列且可获得可见焦点环（逐条给出 文件:行 与所加属性）",
+    "焦点顺序合理：主视图 Tab 顺序为侧栏 → 工具栏 → 列表卡片，不出现焦点跳入不可见区域",
+    "同一动作措辞唯一：侧栏状态指示器、单源刷新、全量刷新各自全应用一套说法（逐条列 文件:行 → 原文 → 改后）",
+    "2 处纯图标按钮使用既有两档命中区令牌之一，尺寸与同类按钮一致",
+    "主按钮使用统一变体类，禁用态与其它主按钮一致（同一 opacity/游标语言）",
+    "「翻译中…」提示不再包含 ⏳ 与前导空格",
+    "行为、布局与状态流转不变：前端回归 26/26 保持全绿（允许新增用例，不得减少或削弱既有断言）",
+    "lint 0/0、build 通过",
+    "UI 证据：主视图与设置页截图，并区分「代码核对」与「实机观察」；静帧不得冒充动态证据"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 基线（本次提交 fee0934 之上实测）：lint 0 warnings / 0 errors（24 文件，116 规则）；build 通过（tsc -b && vite build，产物 dist/assets/index-Bt9W-GZ6.css 59.90 kB）；前端回归 26/26 且退出码 0；TASK-042 候选 059880b6… 的 17 个文件与当时工作区逐一 sha256 一致。本任务只加无障碍属性、统一文案与收敛静态样式，不改变行为契约；前端回归是纯 Zustand 状态机测试（不加载 CSS、不渲染组件），因此焦点与文案正确性依靠契约逐条核对与实机证据，不依赖该套件。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task043.md"
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "既有前端状态机回归 26 项",
+        "reason": "无障碍属性与文案改动不得改变交互行为与状态流转，回归必须保持全绿；允许新增用例覆盖新增的焦点属性与措辞，但不得削弱既有断言",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "lint 与 TypeScript/Vite 构建门禁",
+        "reason": "属性与样式改动仍需类型正确、可构建",
+        "gate_ids": [
+          "lint",
+          "build"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-043-input-412c3e98ce524b0aa39e74018aecfad0.json",
+    "digest": "3a637f0ecb0811e929c0b96ccd4b0257f3eea6621798f8e5b4eb4b3db8cd1abb",
+    "source_revision": null,
+    "definition_digest": "9ff03e3ebf37b6ca7996edf60f484520b92f4f71f4930082fc33bb65997d03ae"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-17T01:58:59.631944Z",
+    "deadline_at_utc": "2026-09-17T05:58:59.631944Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-76b4bc0d7eca48e5ac0681756ae7c837",
+  "run_ids": [
+    "RUN-e9391e4fc6cd40d591b4a38b2aac19c1",
+    "RUN-5e882ae943ae4a2497196f76f91f18af",
+    "RUN-e3dc8814c4e943a69a505a3efd2ee9e6",
+    "RUN-f7b320f00a684f7c91038da4a3e8bac5",
+    "RUN-a774146e81904d2684a69ad2ef1d261c",
+    "RUN-841432684f0445d1ab885699ec7d3a4f",
+    "RUN-88ea55d56c4b473ba5df670b0ce9351c",
+    "RUN-04a3344b391a41eeb3501ee42225fdcb",
+    "RUN-8627013544ea45e3a629612ed8d85832",
+    "RUN-684a4e84abbf4e7bac0f8b6adf43b9ba",
+    "RUN-64c7b45731af42c7a1046222ebe41691",
+    "RUN-d2f41d9bbf23456faba2d91db4fe2fe9",
+    "RUN-6e516601e79642c98ec51cfe26fcdc2d",
+    "RUN-9af613615df449bd84323fbdccd1dac5"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-candidate.json",
+    "candidate_digest": "6fa96b0b9efe82244a0df1e8b82c9eacd989347ef37cb6011eea2a9b252bea4e",
+    "verification_run": "RUN-6e516601e79642c98ec51cfe26fcdc2d",
+    "review_run": "RUN-9af613615df449bd84323fbdccd1dac5",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null,
+    "ledger_correction": {
+      "at_utc": "2026-09-17T02:16:11.335830Z",
+      "authorized_by": "user 2026-09-17: 授权订正，继续完成 TASK-043（推荐）",
+      "reason": "prepare 时把 allowed_paths 写在 spec 的 scope.* 嵌套层，而 workflow_runtime.prepare (:435) 只读顶层 specification.get('allowed_paths')，于是静默回退为目录式 snapshot_paths；finish 的 matches() 是纯 fnmatch，目录名不匹配任何文件路径，导致 8 个 src/ 文件被误判越界。订正只修正这一处授权写法并重算 definition_digest，不放宽任何门禁。",
+      "original_allowed_paths": [
+        ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task043.md",
+        "src/App.tsx",
+        "src/components",
+        "src/styles",
+        "tools/frontend-regression.mjs"
+      ],
+      "original_definition_digest": "743f8476e516d5debdc12ee52f298ae537305c645b8eadd236007efa73979670",
+      "original_blockers": [
+        "Out-of-scope changes: src/components/ContextMenu.tsx, src/components/PlayerBar.tsx, src/components/SettingsModal.tsx, src/components/Sidebar.tsx, src/components/Timeline.tsx, src/components/primitives.tsx, src/store.ts, src/styles/base.css"
+      ],
+      "original_failure_kind": "scope",
+      "original_resume_phase": "implementation",
+      "tool_gap_ref": ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+      "note": "源码未改：订正前后工作区 8 个文件内容一致；原始失败 run 与 changes.json 记录保留"
+    },
+    "ledger_corrections": [
+      {
+        "at_utc": "2026-09-17T02:17:16.935713Z",
+        "authorized_by": "user 2026-09-17: 授权订正，继续完成 TASK-043（推荐）",
+        "reason": "两 run 分工订正：功能改动归属 RUN-e9391e4f…（0→8 差异、其 changes.json 已记录），RUN-5e882ae9… 为零改动的恢复尝试。清 protocol 阻塞以闭合 RUN-e9391e4f…。",
+        "original_failure_kind": "protocol",
+        "original_blockers": [
+          "Worker changed_files does not match the observed project diff"
+        ]
+      },
+      {
+        "at_utc": "2026-09-17T02:18:17.033813Z",
+        "authorized_by": "user 2026-09-17: 授权订正，继续完成 TASK-043（推荐）",
+        "reason": "把披露项从 unresolved_items 移到 summary 后重开 RUN-e3dc8814…；披露内容未删。",
+        "original_failure_kind": "action_required",
+        "original_blockers": [
+          "Worker requests manager action; inspect the result"
+        ]
+      }
+    ]
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task043.md",
+    "src/App.tsx",
+    "src/components",
+    "src/styles",
+    "tools/frontend-regression.mjs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-17T01:58:59.692933Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T02:08:42.889742Z",
+      "note": "Out-of-scope changes: src/components/ContextMenu.tsx, src/components/PlayerBar.tsx, src/components/SettingsModal.tsx, src/components/Sidebar.tsx, src/components/Timeline.tsx, src/components/primitives.tsx, src/store.ts, src/styles/base.css",
+      "next_action": "先核对已有文件及原始日志，再处理 scope；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T02:16:23.070427Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T02:16:28.827237Z",
+      "note": "Worker changed_files does not match the observed project diff",
+      "next_action": "先核对已有文件及原始日志，再处理 protocol；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T02:17:47.374087Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T02:17:56.126601Z",
+      "note": "Worker requests manager action; inspect the result",
+      "next_action": "先核对已有文件及原始日志，再处理 action_required；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T02:18:17.601434Z",
+      "note": "Out-of-scope changes: .workflow-kit/tasks/items/TASK-043.json",
+      "next_action": "先核对已有文件及原始日志，再处理 scope；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T02:19:04.118358Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T02:19:09.922526Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-17T02:19:22.559268Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T02:20:52.703312Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T03:08:46.673003Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T03:19:49.468857Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T04:03:59.006981Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T04:04:26.155056Z",
+      "note": "第1轮独立审查判 FAIL（5 条 finding：1 为真缺陷——画廊焦点环被 overflow:hidden 裁掉；2 为无效证据——该截图确无焦点环，已删；3/4 为报告失准，已更正；5 为口径豁免，已写明理由）。已修复并重新验证，候选 f8c4638b…。流程说明：修复发生在记录 review 之前，故 review_failure 未能按工具路径计入 repair_rounds（该字段仍为 0），FAIL 报告已归档为 TASK-043-review-report-r1-FAIL.json 保留历史",
+      "next_action": "对新候选 f8c4638b… 重新发起独立审查"
+    },
+    {
+      "at_utc": "2026-09-17T04:48:23.284647Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T04:48:37.638359Z",
+      "note": "[WinError 5] 拒绝访问。: 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-64c7b45731af42c7a1046222ebe41691.json.732d1d2ae54c43c0b12c4e6100cc04d4.tmp' -> 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-64c7b45731af42c7a1046222ebe41691.json'",
+      "next_action": "先核对已有文件及原始日志，再处理 environment；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T04:49:16.459692Z",
+      "note": "[WinError 5] 拒绝访问。: 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-d2f41d9bbf23456faba2d91db4fe2fe9.json.73fc78805aae4544b5acb49b1867ed79.tmp' -> 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-d2f41d9bbf23456faba2d91db4fe2fe9.json'",
+      "next_action": "先核对已有文件及原始日志，再处理 environment；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T04:49:50.946512Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T05:20:43.625925Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "verification"
+}

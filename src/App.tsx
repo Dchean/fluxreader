@@ -211,8 +211,13 @@ export default function App() {
       }
       if (inInput) return;
 
-      /* Space：播放器激活时播放/暂停（快捷键表承诺） */
+      /* Space：播放器激活时播放/暂停（快捷键表承诺）。
+         但若该按键已被更具体的控件消费（卡片/下拉/菜单等补了 role+tabIndex 后
+         可按 Space 激活自身，见 REQ-008），则让路——否则同一次 Space 会
+         既执行控件动作、又切换播放（双重动作）。
+         只在此分支判断 defaultPrevented，不动其它快捷键的既有语义。 */
       if (e.key === ' ' && s.player.isActive) {
+        if (e.defaultPrevented) return;
         e.preventDefault();
         s.togglePlayerPlay();
         return;

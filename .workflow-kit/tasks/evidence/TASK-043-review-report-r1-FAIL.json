@@ -1,0 +1,102 @@
+{
+  "task_id": "TASK-043",
+  "candidate_digest": "504e7b9152683be37bf2417e1993111ae884c536533c5abea42da17da4cc881f",
+  "verification_run": "RUN-04a3344b391a41eeb3501ee42225fdcb",
+  "verdict": "FAIL",
+  "summary": "独立审查（未参与实现）。候选完整性先行核实：候选清单 16 个文件的 sha256 与当前工作区逐一重算 16/16 一致，故 RUN-04a3344b… 的三门禁证据对当前代码仍然有效；三门禁我已独立复跑（lint 0/0 exit=0、build exit=0、test:frontend 26/26 exit=0），tools/frontend-regression.mjs 确未被改动（git diff 为空，sha256 与清单一致），13 张 TASK-043 截图 sha256 互不相同（无逐字节重复），报『13 张哈希互不相同』属实；全仓 src/ 的 ⏳ 计数确为 0；git diff HEAD -- src 确为 8 个文件；用户库（%APPDATA%\\com.fluxreader.app\\fluxreader.db）只读核验 feeds/folders/articles/sync_queue 均 0 行且 mtime 仍为 9/16，内存 mock 注入未写库。报告的诚实度整体明显优于 TASK-041：§7 主动披露了 ⏳ 清理第一次没收干净、空 options 的 NaN 边界、迷你进度条『可聚焦但不可操作』、以及 §7.6『旧 CSS 规则第一次没删干净且报告曾失准』——这四项我逐一回源码核对，全部属实（旧 padding:4px 7px 规则确已删除，只余注释；空 options 守卫位置正确；迷你条已补 onKeyDown）。但存在一处必须返工的实质缺口：契约 §1 第 11 项（画廊 <img> 与 .gallery-no-image）的焦点环在真实几何下不可见——.gallery-card{overflow:hidden}（base.css:1222）+ .gallery-card img{width:100%;display:block}（1232-1235）使其上/左/右三边被裁掉，我用 headless Edge 实按 Tab 键复现：img 确实拿到 :focus-visible=true 与 outline: solid 2px rgb(72,128,200) off=1px，但仅剩底边一条 2px 线；而在被报告当作证据引用的 TASK-043-13-gallery-roving.png 里，三张卡的图片边缘 0 个 accent 像素（连那条底边线也没有），与报告 §5.0/§5.4『图片卡片获得焦点环…为证』不符，落入契约 §5『不得用截图冒充动态证据』。另有证据归因失准：§5.2 把侧栏搜索入口的 role=\"button\"+tabIndex 称为『本轮新增』，而 HEAD 版本（git cat-file -p HEAD:src/components/Sidebar.tsx:91）早已具备该属性且本轮 diff 完全未触及该元素。综合：主体实现真实、门禁可复现、报告多处自曝准确，但 acceptance 第 1 条『契约 §1 列出的每一处控件…可获得可见焦点环』对画廊项未达成，且对应 UI 证据与结论不成立，故判 FAIL。",
+  "findings": [
+    "【实质缺口·阻断】契约 §1 第 11 项（画廊 <img> 与 .gallery-no-image，Timeline.tsx:535-562）焦点环实际不可见。.gallery-card 的 overflow:hidden（src/styles/base.css:1222）配合 .gallery-card img{width:100%;display:block}（base.css:1232-1235）使图片紧贴卡片 padding box（四边仅余卡片自身 1px 边框），而焦点环需要 2px 描边 + 1px offset = 3px 环带，故上/左/右三边被裁掉。我用 headless Edge（独立临时 profile，不经过系统输入层、不抢焦点）+ CDP Input.dispatchKeyEvent 实按 Tab 复现：该 img 拿到 document.activeElement、:focus-visible=true、computed outline = solid 2px rgb(72,128,200) off=1px，但屏幕上仅剩图片底边一条 2px 线，实测 accent 像素 bbox 仅 (41,238)-(338,239)，`clippedTop/Left/Right` 均为 true。即：本轮补的 role=\"button\" 让规则命中、也让键盘能开灯箱，却仍未让用户『看到焦点环』——契约 §1 开头正是把『拿不到焦点环』列为要修的根因，acceptance 第 1 条也明确要求『获得可见焦点环』。",
+    "【证据不成立】TASK-043-13-gallery-roving.png 并不包含报告所称的焦点环。报告 §5.0 表把该图标注为『画廊布局 roving：图片卡片获得焦点环』，§5.4 又写『截图 TASK-043-13-gallery-roving.png（画廊：图片卡带焦点环）为证』。我对 2102×1351 全图逐像素核验：三张画廊卡（星云/斗牛犬/海滩）的图片上、左、右、下边缘（card1 图底 y=658、card2 y=437、card3 y=626 各 ±8 行）accent 像素均为 0；内容区不存在任何矩形 accent 轮廓（聚类最大外接框面积占比 0.025 的那个属星云照片自身蓝色）。作为对照，TASK-043-12-list-roving.png 中 .article-card 确有完整的一圈 accent 描边（bbox (471,428)-(1149,659)，因 .article-card.read 的 opacity:.65 而略暗），说明列表项取证有效、画廊项无效。该图被当作动态证据引用，与冻结契约 §5『不得用截图冒充动态证据』相抵。",
+    "【报告失准】§5.2 的证据归因错误：报告写『tab 6 是 DIV[role=button] ti=0——正是本轮补 role=\"button\" 的侧栏搜索入口；修复前该元素既不在 Tab 序列也无焦点环』。实测 HEAD 版本 `git cat-file -p HEAD:src/components/Sidebar.tsx` 第 91-92 行即 `className=\"sidebar-search-pill\" ... role=\"button\" tabIndex={0} onKeyDown={...}`，且 `git diff HEAD -- src/components/Sidebar.tsx` 中不含任何 search-pill 改动——该元素本轮根本没被改。上游复核 _AUDIT-TASK-041-042-independent.md 的 B-1 表第 13 项也已把它列为『已带 role/tabIndex，合规（列此仅作对照，不计入缺口）』。因此这条『修复前不可达』的实机对照不成立，属把既有合规项记为本轮成果。",
+    "【判定过强】§5.2 判『未跳入不可见区域：成立』与报告自身 §5.7 矛盾。§5.7 用 CDP 测得『已关闭的设置弹窗内仍有 20 个可 Tab 控件（inert=false、ariaHidden=null，仅 opacity:0 + pointer-events:none）』，并在同节写明『本轮实机中也确实观察到该现象：设置弹窗关闭时其内部下拉仍能被键盘打开』——TASK-043-08 截图本身即由该不可见弹窗内的下拉产生。既然关闭态弹窗控件确在 Tab 序列中，§5.2 的『未跳入不可见区域』就不能作为已成立结论（本次仅遍历 16 个停靠点后停止，未覆盖该区域）。B-3 属既有问题、超出本任务范围这一点报告已如实披露，故此项是表述过强而非隐瞒，但 acceptance 第 2 条的判定依据需要更正。",
+    "【口径残留·需明确是否豁免】『刷新中…』仍存两处，与契约 §2『同一动作一套说法』的口径未完全收敛：src/components/Sidebar.tsx:304（侧栏主按钮忙碌态 `{isBusy ? '刷新中…' : '刷新全部订阅源'}`）与 src/store.ts:1195（全量刷新在演示模式分支的 `showToast('刷新中…')`）。契约 §2.2 要求『刷新全部订阅源：全应用统一为「刷新全部订阅源」』，而上游复核 B-5 的混用清单原本就把 `store.ts:1195` 的『刷新中…』列为实例之一。§2.1 的侧栏状态指示器（Sidebar.tsx:71-80）确已收敛为『同步中…/同步失败/后端已同步』，故本条仅要求下轮明确判定『进行态是否豁免于命名统一』：若豁免应在契约/报告中写明，若不豁免则应统一，不应留作未定。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "(a) 契约 §1 十二项逐条到源码核对（按要求用括号/引号感知的 JSX 开标签解析器全仓扫描，而非朴素正则）：1 .article-card → Timeline.tsx:296-308 role=\"button\"+roving tabIndex+Enter/Space 调 onSelect ✓；2 .feed-leaf-item → Sidebar.tsx:216-218 ✓（HEAD 已有，本轮未改，属既有合规）；3 .feed-folder-title → Sidebar.tsx:177-179 ✓（同上，既有）；4 .flux-dropdown-trigger → primitives.tsx:126-131 role=combobox/tabIndex=0/aria-haspopup/aria-expanded/aria-label/onKeyDown ✓；5 .flux-dropdown-option → primitives.tsx:144-149 role=option+aria-selected+onMouseEnter 同步高亮 ✓（选项本身不给 tabIndex，采用触发器键盘高亮模型，与原生 select 一致，可接受）；6 .ctx-menu-item → ContextMenu.tsx:94-104 role=menuitem + tabIndex(禁用 -1) + aria-disabled + Enter/Space 执行 ✓；7 迷你 .player-progress-track → PlayerBar.tsx:227-254 role=slider + aria-value* + onKeyDown(±5s/Home) ✓（§7.5 所述缺口确已补）；8 全屏条 → PlayerBar.tsx:331-347 ✓；9 .podcast-card → Timeline.tsx:601-611 ✓；10 .social-text → Timeline.tsx:398-413 仍未加 role/tabIndex，但契约该项必需结果写的是『展开/收起可由键盘触发（或在报告中说明为何不需要）』，而展开/收起确有真实 <button>（Timeline.tsx:430），故必需结果成立；仅『或在报告中说明』这一替代路径未走、报告也未提及该行，属轻微记录缺失；11 画廊 <img>/ .gallery-no-image → Timeline.tsx:535-562 属性已补、Enter/Space 开灯箱成立，但『可见焦点环』不成立（见 findings 第 1、2 条）✗；12 .lightbox-overlay → 契约写明『Esc 已存在则说明即可』，Esc 路径确在（App.tsx:199-207，灯箱在链末），报告未点明该点，属轻微缺失。激活等价性抽查：三个 roving 卡片的 Enter/Space 均调用与 onClick 同一个闭包（onSelect/play/openImage），未出现『能聚焦但按键无反应』。(b) §1.1 roving：Timeline.tsx:78 `tabbableIndex = items.length === 0 ? -1 : Math.min(focusIndex, items.length - 1)`，列表变短时恰有一张卡 tabIndex=0；为空时 -1（无卡可 Tab 属正确语义）。画廊 gallery-masonry-grid 用数组下标 idx，虚拟列表用 vi.index，两处均满足『组内只暴露一个可 Tab』。(c) §2 措辞 grep 穷举：单源刷新『刷新此源』3 处且唯一（Sidebar.tsx:257 title、ContextMenu.tsx:169 label、store.ts:1449 toast），『刷新该订阅源』0 处；全量刷新『刷新全部订阅源』4 处（Sidebar.tsx:293/304、ContextMenu.tsx:245、Overlays.tsx:128）且唯一；侧栏状态指示器『刷新中…』0 处（Sidebar.tsx:73/75 已是『同步中…』）——但『刷新中…』作为进行态在 Sidebar.tsx:304 与 store.ts:1195 仍有残留（见 findings 第 5 条）。(d) §3：SettingsModal.tsx 的 2 处纯图标按钮（:529、:604 `toggle-action-btn icon-btn`）已并入 sm 档共用盒模型（base.css:3400-3409 共享 padding:0 + inline-flex，3430-3433 width/height:var(--icon-btn-hit-sm)），我以编译后 dist CSS 做 headless 计算样式实测得 20×20 / padding:0，与 feed-row-act-btn、folder-chevron-btn 完全一致（icon-sub-btn 为 md 档 22×22，符合两档设计）；侧栏主按钮 Sidebar.tsx:299 已改 `className=\"sidebar-refresh-all btn-primary\"`，实测 bg=rgb(72,128,200)、border=rgb(72,128,200)、color=#fff，禁用态 opacity:0.45 / cursor:not-allowed，与另一 .btn-primary 主按钮逐项相同（改造前 .sidebar-refresh-all:disabled 为 0.6）；`sync-refresh-all-busy` 全仓 0 处样式定义，确为死类名，删除正确。(e) §4 全仓 ⏳：src/ 下 0 处（Timeline.tsx:436、723 均为 `<span>翻译中…</span>`，无 emoji 无前导空格）；剩余 17 处命中全部位于 .workflow-kit 契约/任务/历史证据与 docs，属记录文本而非可发布代码。(f) acceptance 第 6 条：`git diff HEAD -- tools/frontend-regression.mjs` 输出为空 → 未改动；file sha256 = fb1174a9f4d0bc478512a70ea29990a346e9ee372e1f99a8bd1fd3e747208517，与候选清单一致；`check(` 调用点恰好 26 处，日志 26/26，断言数未减少、未削弱。acceptance 其余各条：第 7 条三门禁全绿我已独立复跑通过 ✓；第 8 条 lint 0/0 + build 通过 ✓；第 9 条『UI 证据…静帧不得冒充动态证据』↗ 部分不成立（findings 第 2 条）。结论：十二项中 11 项成立、第 11 项焦点环不成立，且 acceptance 第 1 条与 ui_checks 第 1 条对『画廊…看到焦点环』的要求未满足 → FAIL。",
+      "evidence_files": [
+        ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+        ".workflow-kit/tasks/evidence/TASK-043-interaction-report.md",
+        ".workflow-kit/tasks/evidence/TASK-043-13-gallery-roving.png",
+        ".workflow-kit/tasks/evidence/TASK-043-12-list-roving.png",
+        ".workflow-kit/tasks/evidence/_AUDIT-TASK-041-042-independent.md",
+        ".workflow-kit/tasks/evidence/RUN-04a3344b391a41eeb3501ee42225fdcb-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "验证命令与原始输出我逐字读过，并已独立复跑（npm.cmd run lint / test:frontend / build，非引用日志）：lint `Found 0 warnings and 0 errors.`（24 files / 116 rules）exit=0；build `tsc -b && vite build` → 52 modules、`✓ built in 125ms`、dist/assets/index-C2Re-TMF.js 377.49 kB、CSS 59.90 kB exit=0；test:frontend `=== 前端逻辑回归 26/26 通过 ===` exit=0（stderr 里的 `bootstrap from backend failed: { code: 'db_corrupt' }` 是套件 S-3a 的负路径夹具，不是真实失败）。保护是否被弱化：tools/frontend-regression.mjs 未被本轮改动（git diff 为空、哈希与候选清单一致），check() 调用点 26 处与 26/26 一致，无删减、无断言削弱。该套件对本次改动能证明什么：它是无浏览器的 Zustand 状态机测试（伪造 window.__TAURI_INTERNALS__、以 __INVOKE__ mock 后端命令），我 grep `focus|querySelector|document\\.|getComputedStyle|classList|tabIndex|role=` 命中 0 处，故它对 role/tabIndex/焦点环/文案措辞**不能**提供任何证据；它能证明的是状态流转与 IPC 调用口径未被破坏——这与任务卡 test_review 与 baseline 的自我表述完全一致，无夸大。文案回归风险的独立核实：本轮改动的三个串（刷新此源、翻译中…、演示模式）在 mjs 中命中数均为 0，而套件确实断言的用户可见中文串是『全文提取失败』(:119) 与『重试』(:120)（台账 E-3 的更正我复核为真），故本轮文案改动不会触发该套件回归；『26/26 全绿 ⇒ 文案/可达性正确』是不成立的推理，任务卡与报告均已明确不这么用，这里是准确的。附时序核对：候选清单在 RUN 启动前 0.06s 采集（03:19:45.694 vs 03:19:45.751），三门禁均在候选摘要下执行，我重算 16/16 文件哈希与当前工作区一致，故证据链时效性成立。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-04a3344b391a41eeb3501ee42225fdcb-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-04a3344b391a41eeb3501ee42225fdcb-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-04a3344b391a41eeb3501ee42225fdcb-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task043.md",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "逐项到源码核验边界，未发现会导致崩溃/NaN/空操作的新缺陷。(i) FluxDropdown 空 options 守卫：primitives.tsx:99-120 —— `if (options.length === 0) return;` 位于 e.preventDefault() 之后、任何取模之前，故 `(i+1) % 0` 的 NaN 路径确被堵死；且 open 状态在空列表下也不会被键盘置起（先 return）。§7.3 所述『verify 之后才发现并重验』的留痕属实，当前候选含该修复。打开态的 Enter 分支有 `const opt = options[activeIndex]; if (opt)` 二次兜底，activeIndex 越界时静默不动而非提交 undefined，安全。(ii) Timeline 的 tabbableIndex 夹取：Timeline.tsx:78 对空列表返回 -1（无卡 → 无 tabIndex=0，正确）、非空返回 min(focusIndex, len-1)（保证恰有一张卡可 Tab，不会出现『修完反而进不去列表』）。focusIndex 不存在负值来源：setFocusIndex 仅由 moveCardFocus(idx, delta)（已检查 next>=0）与 activeArticleId 命中 idx>=0 触发，故无需 Math.max。moveCardFocus 自身也有 `next<0||next>=items.length` 的越界早退（:65），与夹取互补。残留风险（已披露、非缺陷）：目标下标未被虚拟化渲染时 `root?.querySelector(...)` 返回 null → el?.focus() 空操作，此时 tabIndex 已移到新卡而 DOM 焦点仍留在旧卡（旧卡已 -1），用户再按 Tab 会离开列表；报告 §5.5.3/§6.2 明确写『虚拟列表滚动后的 roving 正确性未验证（mock 仅 3 条）』并说明原因，符合契约 §5 的『未验证须标注』要求，此处不作为 finding，仅记录为下轮建议覆盖项。(iii) 迷你/全屏进度条在 durationSec<=0 下的键盘 seek：迷你条 PlayerBar.tsx:244-254 对 Arrow 分支先 preventDefault 再 `if (player.durationSec <= 0) return;`，Home 分支无条件 `seekPlayer(0)`——seekPlayer（store.ts:877-878）只做 Math.max(0, sec) 并置 seekToSec/positionSec，消费端 PlayerBar.tsx:97-101 有 `if (!el || player.seekToSec == null) return;`，播放器未激活时 el 为 null 直接返回，故不会对空播放器写 currentTime，也不会产生 NaN；正向 seek 另有 `Math.min(player.durationSec, ...)` 上界夹取。全屏条 PlayerBar.tsx:338-346 的 Arrow 走 onSkip→skipPlayer（store.ts:880-883），其实现为 `Math.max(0, p.positionSec + delta)`，不引用 durationSec，故 durationSec=0 时不会产生 NaN 或非法值；这与既有『后退 15 秒』按钮的既有语义一致（同样不夹上界），未引入新行为。两侧均未出现『可聚焦但按键报错』的路径。数据/键盘互斥也核对过：App.tsx 全局 J/K 有 `activeContentLayout !== 'article'` 早退、Space 有 `s.player.isActive` 前置条件，与新增的卡片方向键、进度条 Home/方向键无冲突（卡片方向键仅在卡片获得 DOM 焦点时触发）。",
+      "evidence_files": [
+        "src/components/primitives.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/PlayerBar.tsx",
+        "src/store.ts",
+        ".workflow-kit/tasks/evidence/TASK-043-interaction-report.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "职责与依赖方向：本轮未新增依赖、未改模块边界，组件仍单向依赖 store（components → store/store.selectors），无循环引用；新增的 focusIndex/moveCardFocus/tabbableIndex 三个概念集中在 Timeline 组件内（:54-78），职责单一且有解释性注释说明『为何用 roving』与『为何必须夹取』，可读性良好。§7.6 自曝项（本次审查重点）我按『去注释后 grep』核实：`git cat-file -p HEAD:src/styles/base.css` 第 839-841 行确有 `.toggle-action-btn.icon-btn { padding: 4px 7px; }`，当前工作区该规则**已真实删除**——全文件 `4px 7px` 仅剩 1 处命中，位于 base.css:3428 的解释性注释内（『此前散落在 .toggle-action-btn.icon-btn 的 padding: 4px 7px』），注释不含任何声明块，不产生层叠效果；`.toggle-action-btn.icon-btn` 现仅两处出现且分工明确：3403 并入共享盒模型组（padding:0 + inline-flex 居中），3430 赋 width/height:var(--icon-btn-hit-sm)，二者选择器特异性同为 (0,2,0) 且声明互不重叠，不存在『文件末尾仍有同选择器重复定义』的情况。43 处 overflow:hidden 中与本次相关者（.gallery-card:1222）已在 requirements 中处理。重复与命名：3 个卡片组件各自内联了一份结构相同的 onKeyDown（Enter/Space + 双方向键），GalleryCard 因两支渲染再复制一次，全文件共 4 份近同代码；这是可维护性上的轻微冗余（下轮可抽 useRovingCardHandler 一类的局部 hook 或共用 props 辅助），属建议而非缺陷，且新增代码量可控（Timeline +118 行）。命名一致（cardIndex/tabbable/onMoveFocus 三处同名同序），data-card-index 作为查询锚点由生产者与消费者共用同一常量语义。新增维护负担：.flux-dropdown-option.kb-active（base.css:130-133）复用既有 --bg-card-hover/--text-primary，未引入新颜色或新令牌，符合契约 §1 约束 5；base.css:836-838 留下一条指向末尾小节的空注释（原规则删除后的锚点），是有意的，但会长期以『无规则注释』存在，属可接受。注释质量普遍高于仓库既有水平，且多处解释了『为什么』而非『是什么』（如为何不能逐个 tabIndex=0、为何必须夹取、为何 mini 条仍需 Home 分支）。",
+      "evidence_files": [
+        "src/styles/base.css",
+        "src/styles/tokens.css",
+        "src/components/Timeline.tsx",
+        ".workflow-kit/tasks/evidence/TASK-043-interaction-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "结论：对运行性能无可测影响，无需 NOT_APPLICABLE 处理。理由与依据：(1) 新增运行时开销全部落在用户事件或既有选择变更上，而非渲染/滚动热路径——focusIndex 的 useEffect 依赖 activeArticleId（Timeline.tsx:55-60），做一次 items.findIndex 的 O(n)（n 为当前筛选结果条数）；同一组件内既有 :142-148 的 effect 早已在做完全相同的 findIndex，故本轮只是把该 O(n) 从一处变为两处，且仅在『选中文章变化』时触发一次，不在滚动、不在每帧。(2) 箭头键移动焦点的成本是每次按键一次 querySelector + 一次 scrollToIndex + 一个 rAF（:63-73），属按键频率量级，与页面滚动无关；querySelector 限定在 scrollRef 子树内，选择器为属性精确匹配。(3) 重渲染面：focusIndex 变化只改变 `tabbable` 这一个布尔 prop，因三个卡片组件均为 memo，实际只有『失去可 Tab 的旧卡』与『获得可 Tab 的新卡』两张重渲染，不触发列表整体重渲染，也不影响既有 useVirtualizer 的 overscan/getItemSize 口径（:102-110 未改）。(4) CSS 层净变化为：删除 1 条散落规则 + 删除 .sidebar-refresh-all 的 :hover/:disabled 两条 + 新增 .kb-active 1 条与 .toggle-action-btn.icon-btn 尺寸 1 条；.sidebar-refresh-all 的 transition 由 `filter, opacity` 改为 `background, border-color, opacity`（base.css:688），三者均为可合成/廉价属性，且元素是单例侧栏按钮，不存在列表内高频重绘。(5) 未新增过渡、动画、阴影或 backdrop-filter，未触及 TASK-042 冻结的动效词汇表；@tanstack/virtual-core 的 scrollToIndex 在画廊（enabled:false）路径下经我核对源码 dist/esm/index.js:973-978 在 measurementsCache 为空时直接 return undefined，scrollToIndex:1018-1021 随即返回，确为安全 no-op（报告 §7.4 的判断属实）。(6) 未改变任何网络/IO 行为，前端体积影响可忽略（build 产物 index-C2Re-TMF.js 377.49 kB，与基线同量级）。",
+      "evidence_files": [
+        "src/components/Timeline.tsx",
+        "src/components/primitives.tsx",
+        "src/styles/base.css",
+        ".workflow-kit/tasks/evidence/RUN-04a3344b391a41eeb3501ee42225fdcb-build.stdout.txt"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-043.md",
+    "checked_states": [
+      "主视图：时间线卡片（列表/社交/通知/画廊/播客）可用键盘聚焦并看到焦点环；侧栏订阅项与分类标题同理",
+      "下拉控件：FluxDropdown 触发器与选项可聚焦、可操作、焦点环可见",
+      "右键菜单：菜单项可聚焦并有可见焦点指示",
+      "播放：迷你播放条与全屏播放器的进度条可聚焦（seek 有键盘路径）",
+      "文案：侧栏同步状态指示器不再混用「刷新/同步」；单源刷新措辞全应用一致",
+      "控件：2 处纯图标按钮并入两档命中区；最显眼主按钮使用统一变体类与统一禁用态",
+      "残留：社交/通知卡片的「翻译中」提示不再带 ⏳ 与前导空格",
+      "无障碍：聚焦顺序合理，不破坏既有布局与状态流转；prefers-reduced-motion 不受影响"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-043-13-gallery-roving.png",
+      ".workflow-kit/tasks/evidence/TASK-043-12-list-roving.png",
+      ".workflow-kit/tasks/evidence/TASK-043-05-focus-search-entry.png",
+      ".workflow-kit/tasks/evidence/TASK-043-06-focus-view-button.png",
+      ".workflow-kit/tasks/evidence/TASK-043-07-focus-primary-button.png",
+      ".workflow-kit/tasks/evidence/TASK-043-08-dropdown-keyboard-open.png",
+      ".workflow-kit/tasks/evidence/TASK-043-10-settings-focus-ring.png",
+      ".workflow-kit/tasks/evidence/TASK-043-11-focus-icon-button.png",
+      ".workflow-kit/tasks/evidence/TASK-043-01-main.png",
+      ".workflow-kit/tasks/evidence/TASK-043-interaction-report.md",
+      ".workflow-kit/tasks/evidence/RUN-04a3344b391a41eeb3501ee42225fdcb-frontend.stdout.txt",
+      ".workflow-kit/tasks/evidence/RUN-04a3344b391a41eeb3501ee42225fdcb-candidate.json"
+    ]
+  }
+}

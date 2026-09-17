@@ -46,6 +46,37 @@ export function Timeline() {
   /* 返回新数组的派生 selector 必须包 useShallow */
   const items = useAppStore(useShallow(selectVisibleEntries));
 
+  /* ---------- 列表卡片的 roving tabindex（REQ-008 焦点可达性） ----------
+     成组卡片不能各自可 Tab：否则 Tab 会逐个走过几十张可见卡片。
+     组内只保留一个可 Tab 进入（tabIndex=0），组内用方向键移动——
+     与既有 J/K 键盘流同一语义，不新增第二套导航。
+     focusIndex 跟随 activeArticleId（搜索/命令面板/J-K 选中后焦点同步）。 */
+  const [focusIndex, setFocusIndex] = useState(0);
+  useEffect(() => {
+    if (!activeArticleId) return;
+    const idx = items.findIndex((a) => a.id === activeArticleId);
+    if (idx >= 0) setFocusIndex(idx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeArticleId]);
+
+  /* 方向键在卡片间移动：目标可能未被虚拟化渲染，先 scrollToIndex 再于下一帧聚焦 */
+  const moveCardFocus = (from: number, delta: number) => {
+    const next = from + delta;
+    if (next < 0 || next >= items.length) return;
+    setFocusIndex(next);
+    rowVirtualizer.scrollToIndex(next, { align: 'auto' });
+    requestAnimationFrame(() => {
+      const root = scrollRef.current;
+      const el = root?.querySelector<HTMLElement>(`[data-card-index="${next}"]`);
+      el?.focus();
+    });
+  };
+
+  /* 列表长度变化（筛选/切换订阅/重新加载）后 focusIndex 可能越界——
+     越界会导致没有任何卡片 tabIndex=0，键盘就再也进不了列表。
+     这里夹取到一个必然存在的下标，保证列表中**始终有一张卡可 Tab 进入**。 */
+  const tabbableIndex = items.length === 0 ? -1 : Math.min(focusIndex, items.length - 1);
+
   /* 筛选上下文变化 → 滚动归零。不再用 key 重挂载整个列表 DOM（此前每次
      布局/视图/排序切换都强制卸载重建全部卡片 + 重建全部 IntersectionObserver/
      ResizeObserver，是「切换卡顿 + 加载正文闪动」的主因）；改为复用 DOM，
@@ -178,9 +209,9 @@ export function Timeline() {
         {/* 画廊（瀑布流多列）：不虚拟化，保持全量渲染（图片数量通常较少） */}
         {activeContentLayout === 'image' && (
           <div className="gallery-masonry-grid">
-            {items.map((img) => (
+            {items.map((img, idx) => (
               <div key={img.id} data-card-id={img.id}>
-                <GalleryCard item={img} />
+                <GalleryCard item={img} cardIndex={idx} tabbable={idx === tabbableIndex} onMoveFocus={moveCardFocus} />
               </div>
             ))}
           </div>
@@ -203,9 +234,9 @@ export function Timeline() {
                   className="timeline-virtual-item"
                   style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
                 >
-                  {activeContentLayout === 'article' && <ArticleCard art={item} onSelect={selectArticle} />}
+                  {activeContentLayout === 'article' && <ArticleCard art={item} onSelect={selectArticle} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
                   {activeContentLayout === 'social' && <SocialCard item={item} />}
-                  {activeContentLayout === 'podcast' && <PodcastCard item={item} />}
+                  {activeContentLayout === 'podcast' && <PodcastCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
                   {activeContentLayout === 'notification' && <NotifCard item={item} />}
                 </div>
               );
@@ -247,7 +278,13 @@ function useLazyHydrate(id: string): React.RefObject<HTMLDivElement | null> {
 
 /* ---------- 文章卡片 ---------- */
 
-const ArticleCard = memo(function ArticleCard({ art, onSelect }: { art: ArticleEntry; onSelect: (id: string) => void }) {
+const ArticleCard = memo(function ArticleCard({ art, onSelect, cardIndex, tabbable, onMoveFocus }: {
+  art: ArticleEntry;
+  onSelect: (id: string) => void;
+  cardIndex: number;
+  tabbable: boolean;
+  onMoveFocus: (from: number, delta: number) => void;
+}) {
   const activeArticleId = useAppStore((s) => s.activeArticleId);
   const feedName = useAppStore((s) => s.feedIndex.get(art.feedId)?.feed.name ?? '');
   const selected = activeArticleId === art.id;
@@ -256,6 +293,19 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect }: { art: ArticleE
     <div
       className={`article-card ${art.isRead ? 'read' : ''} ${selected ? 'active-selected' : ''}`}
       onClick={() => onSelect(art.id)}
+      role="button"
+      data-card-index={cardIndex}
+      tabIndex={tabbable ? 0 : -1}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect(art.id);
+          return;
+        }
+        /* 方向键在卡片间移动（roving）：按当前卡片的视觉位置决定上下游 */
+        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
+        else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+      }}
       data-ctx="article"
       data-id={art.id}
     >
@@ -383,7 +433,7 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
         )}
         <div className={"social-translated-block" + (showTranslate ? " show" : "")}>
           {item.translatedContent}
-          {translatingCard ? <span> ⏳ 翻译中…</span> : null}
+          {translatingCard ? <span>翻译中…</span> : null}
         </div>
         <div className="social-actions-bar">
           <button
@@ -440,7 +490,12 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
 
 /* ---------- 画廊卡片 ---------- */
 
-const GalleryCard = memo(function GalleryCard({ item }: { item: ArticleEntry }) {
+const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMoveFocus }: {
+  item: ArticleEntry;
+  cardIndex: number;
+  tabbable: boolean;
+  onMoveFocus: (from: number, delta: number) => void;
+}) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const openLightbox = useAppStore((s) => s.openLightbox);
   const selectArticle = useAppStore((s) => s.selectArticle);
@@ -477,9 +532,34 @@ const GalleryCard = memo(function GalleryCard({ item }: { item: ArticleEntry }) 
   return (
     <div className={`gallery-card ${item.isRead ? 'read' : ''}`} data-ctx="article" data-id={item.id}>
       {imgSrc ? (
-        <img src={imgSrc} loading="lazy" onClick={openImage} alt={item.title} referrerPolicy="no-referrer" />
+        <img
+          src={imgSrc}
+          loading="lazy"
+          onClick={openImage}
+          role="button"
+          data-card-index={cardIndex}
+          tabIndex={tabbable ? 0 : -1}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(); return; }
+            if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
+            else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+          }}
+          alt={item.title}
+          referrerPolicy="no-referrer"
+        />
       ) : (
-        <div className="gallery-no-image" onClick={openImage}>无图</div>
+        <div
+          className="gallery-no-image"
+          onClick={openImage}
+          role="button"
+          data-card-index={cardIndex}
+          tabIndex={tabbable ? 0 : -1}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(); return; }
+            if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
+            else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+          }}
+        >无图</div>
       )}
       <div className="gallery-meta">
         <div className="gallery-title">{item.title}</div>
@@ -508,13 +588,27 @@ const GalleryCard = memo(function GalleryCard({ item }: { item: ArticleEntry }) 
 
 /* ---------- 播客卡片 ---------- */
 
-const PodcastCard = memo(function PodcastCard({ item }: { item: ArticleEntry }) {
+const PodcastCard = memo(function PodcastCard({ item, cardIndex, tabbable, onMoveFocus }: {
+  item: ArticleEntry;
+  cardIndex: number;
+  tabbable: boolean;
+  onMoveFocus: (from: number, delta: number) => void;
+}) {
   const playPodcastEpisode = useAppStore((s) => s.playPodcastEpisode);
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
+  const play = () => playPodcastEpisode(item.title, feedName, item.cover ?? '', item.enclosureUrl ?? '', item.id);
   return (
     <div
       className={`podcast-card ${item.isRead ? 'read' : ''}`}
-      onClick={() => playPodcastEpisode(item.title, feedName, item.cover ?? '', item.enclosureUrl ?? '', item.id)}
+      onClick={play}
+      role="button"
+      data-card-index={cardIndex}
+      tabIndex={tabbable ? 0 : -1}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); play(); return; }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
+        else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+      }}
       data-ctx="article"
       data-id={item.id}
     >
@@ -626,7 +720,7 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
 
       <div className={`notif-translated-block ${transShow ? 'show' : ''}`}>
         {item.translatedContent}
-        {translatingCard ? <span> ⏳ 翻译中…</span> : null}
+        {translatingCard ? <span>翻译中…</span> : null}
       </div>
 
       {isLong && (

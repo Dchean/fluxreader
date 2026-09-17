@@ -26,6 +26,8 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
   const triggerRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  /* 键盘高亮项：与选中项分开——方向键移动高亮，Enter 才提交（与原生 select 一致） */
+  const [activeIndex, setActiveIndex] = useState(-1);
 
   /* 入场过渡要「先挂载、再在下一帧置 open 类」：菜单此前挂载时就带着 open，
      于是 CSS 里 .flux-dropdown-menu 的 from 态（opacity 0 / 上移 4px）永不渲染，
@@ -89,20 +91,62 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
   }, [open, updatePosition]);
 
   const current = options.find((o) => o.value === value) ?? options[0];
+  const selectedIndex = Math.max(0, options.findIndex((o) => o.value === current?.value));
+
+  /* 键盘：触发器上用方向键/Enter/Space 打开；打开后用方向键移动高亮、Enter 提交、
+     Esc 关闭（Esc 已由上面的 document 捕获处理）。全部动作与鼠标点击等价。 */
+  const onTriggerKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      /* 空选项列表：不打开、不移动（否则下面的取模会得到 NaN）。 */
+      if (options.length === 0) return;
+      if (!open) {
+        setActiveIndex(selectedIndex);
+        setOpen(true);
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        setActiveIndex((i) => (i + 1) % options.length);
+      } else if (e.key === 'ArrowUp') {
+        setActiveIndex((i) => (i - 1 + options.length) % options.length);
+      } else {
+        const opt = options[activeIndex];
+        if (opt) {
+          onChange(opt.value);
+          setOpen(false);
+        }
+      }
+    }
+  };
 
   return (
     <div className={`flux-dropdown ${open ? 'open' : ''}`} ref={triggerRef} style={{ width }}>
-      <div className="flux-dropdown-trigger" onClick={() => setOpen((v) => !v)}>
+      <div
+        className="flux-dropdown-trigger"
+        role="combobox"
+        tabIndex={0}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={current?.label}
+        onKeyDown={onTriggerKeyDown}
+        onClick={() => setOpen((v) => {
+          if (!v) setActiveIndex(selectedIndex);
+          return !v;
+        })}
+      >
         <span className="flux-dropdown-label">{current?.label}</span>
         <svg className="svg-icon chevron-svg" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
       </div>
       {open &&
         createPortal(
-          <div className="flux-dropdown-menu" style={menuStyle} ref={menuRef}>
-            {options.map((opt) => (
+          <div className="flux-dropdown-menu" style={menuStyle} ref={menuRef} role="listbox">
+            {options.map((opt, i) => (
               <div
                 key={opt.value}
-                className={`flux-dropdown-option ${opt.value === value ? 'active' : ''}`}
+                className={`flux-dropdown-option ${opt.value === value ? 'active' : ''} ${i === activeIndex ? 'kb-active' : ''}`}
+                role="option"
+                aria-selected={opt.value === value}
+                onMouseEnter={() => setActiveIndex(i)}
                 onClick={() => {
                   onChange(opt.value);
                   setOpen(false);

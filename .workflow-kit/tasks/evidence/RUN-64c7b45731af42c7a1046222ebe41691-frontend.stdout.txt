@@ -1,0 +1,32 @@
+
+> fluxreader@0.13.0 test:frontend
+> tsc -p tsconfig.test.json && node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs
+
+✅ bootstrap 后 dataMode=tauri
+✅ bootstrap 后 entries 有 1 条
+✅ S-1: 流式结束后 translatedContent 被回读为消毒版
+✅ S-1: 翻译后不再残留 <script>
+✅ C-3: 全文提取失败后出现 toast 提示
+✅ C-3: toast 带「重试」action
+✅ 缓存命中：已有译文直接展示，不触发 ai_translate
+✅ 缓存命中：未新增 ai_translate 调用
+✅ S-2: 水合成功填充正文并置终态
+✅ S-2: 水合成功清除错误态
+✅ S-2: 空正文条目置终态且不重复水合
+✅ S-2: 水合失败记录错误态（不再静默假加载）
+✅ S-2: 重试后正文填充且错误态清除
+✅ S-3a: tauri bootstrap 失败进入错误态
+✅ S-3a: 失败时不回退 mock（dataMode 保持 tauri、无假数据）
+✅ S-3a: 重试后装载成功且错误态清除
+✅ S-3b: webdavConflict 弹确认并 force 重发
+✅ S-3b: force 成功后进入授权流程
+✅ S-4: 卡片级翻译流式生成并回读消毒版
+✅ S-4: 生成完成后按 id 状态清除
+✅ S-4: 已有译文时不再触发 ai_translate
+✅ S-5: 摘要生成态按 id 隔离
+✅ S-5: 摘要完成后清除该 id 状态
+✅ S-5: 锚定打开按设置标已读
+✅ S-5: 收藏视图全部已读带 starredOnly
+✅ S-5: 今天视图全部已读带 sinceMs
+
+=== 前端逻辑回归 26/26 通过 ===

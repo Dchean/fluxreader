@@ -1446,7 +1446,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().showToast('演示模式不支持直连');
       return;
     }
-    get().showToast('正在刷新该订阅源…');
+    get().showToast('正在刷新此源…');
     void api
       .refreshFeed(Number(feedId))
       .then((n) => {

@@ -1,0 +1,12 @@
+{
+  "changed_files": [
+    "src/components/ContextMenu.tsx",
+    "src/components/PlayerBar.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/Sidebar.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/primitives.tsx",
+    "src/store.ts",
+    "src/styles/base.css"
+  ]
+}

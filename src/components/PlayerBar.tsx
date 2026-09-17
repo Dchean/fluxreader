@@ -233,10 +233,25 @@ export function PlayerBar() {
                 seekPlayer(Math.max(0, Math.min(1, ratio)) * player.durationSec);
               }}
               role="slider"
+              aria-label="播放进度"
               aria-valuenow={Math.round(pct)}
               aria-valuemin={0}
               aria-valuemax={100}
               tabIndex={0}
+              /* 可聚焦就必须可操作（契约 §1.2 激活等价）：此前只有 onClick，
+                 键盘 Tab 到这里后按任何键都无反应。方向键与全屏条同源（±5 秒），
+                 Home 回到起点，均走同一个 seekPlayer。 */
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                  e.preventDefault();
+                  if (player.durationSec <= 0) return;
+                  const delta = e.key === 'ArrowRight' ? 5 : -5;
+                  seekPlayer(Math.max(0, Math.min(player.durationSec, player.positionSec + delta)));
+                } else if (e.key === 'Home') {
+                  e.preventDefault();
+                  seekPlayer(0);
+                }
+              }}
             >
               <div className="player-progress-fill" style={{ width: `${pct}%` }} />
             </div>
@@ -310,7 +325,25 @@ function PlayerFullOverlay({
           <div className="player-full-show">{player.showName}</div>
           <div className="player-full-title">{player.title}</div>
           <div className="player-full-progress">
+            {/* 全屏进度条：此前只能鼠标点击 seek（无 role/tabIndex）。
+                这里补齐与迷你条一致的 slider 语义 + 键盘 seek（方向键 ±5 秒），
+                键盘动作与鼠标点击同源（都走 onSeek）。 */}
             <div className="player-progress-track player-full-track"
+              role="slider"
+              tabIndex={0}
+              aria-label="播放进度"
+              aria-valuenow={Math.round(pct)}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                  e.preventDefault();
+                  onSkip(e.key === 'ArrowRight' ? 5 : -5);
+                } else if (e.key === 'Home') {
+                  e.preventDefault();
+                  onSeek(0);
+                }
+              }}
               onClick={(e) => seekByRatio(e.clientX, e.currentTarget)}>
               <div className="player-progress-fill" style={{ width: `${pct}%` }} />
             </div>

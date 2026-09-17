@@ -1056,6 +1056,28 @@
       "candidates": {
         "TASK-042": "059880b67681d553cc85cc6dd8db81211f9027eac79828e00ced121dd28be133"
       }
+    },
+    {
+      "id": "DEC-b65826d2acf944898d62f8041bc82617",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 批准：'批准，并且清理交接文件，现在我不打算交接了，清理已经不适用于本项目的遗留或者冗余，注意git提交只提交本项目内容，像是mimosa这种无关内容不要提交，并继续推进项目'。据此关闭 BATCH-7cbc4d36（TASK-041/042 均已 done），开启修复批次：承接独立复核确认的 TASK-041 遗留项（焦点可达性/刷新同步措辞/图标按钮与主按钮收敛/⏳残留/演示模式口径）与台账更正；沿用既有预算（每任务 240 分钟、修复 4 轮），commit 沿用既有授权，push/release 仍需确认",
+      "statement": "Owner approved the next bounded batch under the existing brief and policy",
+      "scope": [
+        "workflow"
+      ],
+      "recorded_at_utc": "2026-09-17T01:57:50.752408Z"
+    },
+    {
+      "id": "DEC-task043-ledger-fix-20260917",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17：'批准，并且清理交接文件……并继续推进项目'；在报告 TASK-043 被 scope 门禁卡死（无 CLI 恢复入口）后，用户选择『授权订正，继续完成 TASK-043（推荐）』",
+      "statement": "Owner authorized a records-only ledger correction for TASK-043: its prepare-time spec put allowed_paths under the nested scope.* key, which workflow_runtime.prepare ignores (it reads the top level only), silently falling back to directory-style snapshot_paths that fnmatch cannot match against file paths. The correction rewrites allowed_paths to ['src/**', 'tools/frontend-regression.mjs'] and recomputes the controlled definition_digest; no gate is relaxed, the original failure run and its changes.json are retained, and verify/review must still run.",
+      "scope": [
+        "TASK-043"
+      ],
+      "recorded_at_utc": "2026-09-17T02:16:16.720910Z"
     }
   ]
 }

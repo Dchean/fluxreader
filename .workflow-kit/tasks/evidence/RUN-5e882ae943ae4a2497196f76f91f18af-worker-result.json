@@ -1,0 +1,29 @@
+{
+  "task_id": "TASK-043",
+  "run_id": "RUN-5e882ae943ae4a2497196f76f91f18af",
+  "status": "ready_for_verification",
+  "summary": "按冻结契约 UI-CONTRACT-REQ-043.md 收尾 TASK-041 独立复核确认的遗留项，只加无障碍属性、统一用户可见文案、收敛控件样式归属，不改行为。分项：(1) 焦点可达性——FluxDropdown 触发器补 role=combobox/tabIndex/aria-expanded/onKeyDown（方向键+Enter/Space 开合与提交），菜单补 role=listbox、选项补 role=option+aria-selected，新增键盘高亮 .kb-active；右键菜单补 role=menu/menuitem+tabIndex+aria-disabled+onKeyDown；文章卡片与播客卡片补 role=button+roving tabIndex+方向键移动；画廊图片与无图占位补 role=button+roving tabIndex；全屏播放器进度条补 role=slider+tabIndex+aria-value*+方向键 seek。(2) 措辞——侧栏同步状态指示器忙碌态由「刷新中…」改为「同步中…」（该指示器描述后端同步状态，同三元里还有「同步失败/后端已同步」，此前一个状态机混用两套词）；store 单源刷新 toast 由「正在刷新该订阅源…」统一为「正在刷新此源…」。(3) 演示模式口径——设置页「浏览器开发模式 / Mock 模式」改为「演示模式 / 不支持同步」，与 toast 已有的「演示模式不支持…」前缀一致。(4) 控件收敛——.toggle-action-btn.icon-btn 由 padding:4px 7px 并入图标按钮共享盒模型并使用 --icon-btn-hit-sm；侧栏主按钮改用统一变体类 .btn-primary（并移除其自带底色与独立禁用态 .6，改吃统一的 .45），顺带删除全仓无定义的死类名 sync-refresh-all-busy。(5) 残留——两处「 ⏳ 翻译中…」清理为「翻译中…」，全仓 ⏳ 计数 0。实施中发现并更正了独立复核报告 B-1 的三处误报（feed-folder-title / feed-leaf-item / 迷你进度条早已带 role+tabIndex+onKeyDown，系初版用朴素正则解析 JSX 时被箭头函数中的 '>' 截断所致），缺口由 12 处修正为 9 处，已在报告内留更正注记。健壮性：roving 焦点索引对列表长度做夹取，避免筛选后越界导致「没有任何卡片可 Tab 进入」。门禁三门全绿（lint 0/0、build 通过、前端回归 26/26 且退出码 0，均重定向读退出码判定，不用管道文字）。",
+  "changed_files": [
+    "src/components/ContextMenu.tsx",
+    "src/components/PlayerBar.tsx",
+    "src/components/SettingsModal.tsx",
+    "src/components/Sidebar.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/primitives.tsx",
+    "src/store.ts",
+    "src/styles/base.css"
+  ],
+  "validation_requests": [
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [
+    "实机键盘观察未做：本环境合成按键无法驱动 WebView2 焦点遍历（TASK-041 复核时已确认同样限制），故「焦点环在真实 WebView2 中可见」「焦点顺序不跳乱」「roving 在虚拟列表滚动后仍正确」三条只有代码依据、无实机证据，需使用者用真实键盘 Tab 复核一遍。",
+    "本轮未提供截图：改动为无障碍属性与样式归属，静帧无法证明焦点可达性，按契约 §5 不以截图冒充动态证据。",
+    "浅色主题下的焦点环外观未核对。",
+    "复核报告 B-3（关闭态弹窗仍可被 Tab 聚焦，无 inert/aria-hidden）为既有结构问题、非 TASK-041 遗留，且涉及交互语义变更，未纳入本任务，建议独立任务处理。"
+  ],
+  "blocked_reason": null
+}

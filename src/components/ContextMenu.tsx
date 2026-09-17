@@ -87,11 +87,24 @@ export function ContextMenuHost() {
   };
 
   return createPortal(
-    <div className="ctx-menu" style={style} ref={menuRef} onClick={(e) => e.stopPropagation()}>
+    /* role=menu：菜单项可被键盘 Tab 进入并操作（此前仅鼠标可达）。
+       ref 上仍是同一个 mousedown/Esc/scroll 关闭逻辑，行为未变。 */
+    <div className="ctx-menu" style={style} ref={menuRef} role="menu" onClick={(e) => e.stopPropagation()}>
       {menu.items.map((it, i) => (
         <div
           key={i}
           className={`ctx-menu-item ${it.danger ? 'danger' : ''} ${it.disabled ? 'disabled' : ''}`}
+          role="menuitem"
+          tabIndex={it.disabled ? -1 : 0}
+          aria-disabled={it.disabled || undefined}
+          onKeyDown={(e) => {
+            if (it.disabled) return;
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              close();
+              it.onSelect();
+            }
+          }}
           onClick={() => {
             if (it.disabled) return;
             close();

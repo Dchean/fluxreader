@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "id": "RUN-e3dc8814c4e943a69a505a3efd2ee9e6",
+  "task_id": "TASK-043",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "第三轮：前两轮已写入全部源码改动（RUN-1 写入、RUN-2 零改动恢复尝试）。本轮不改文件，仅用候选快照承载真实内容以闭合任务；两轮历史与订正依据均保留在账本"
+  },
+  "started_at_utc": "2026-09-17T02:17:47.301242Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "3a637f0ecb0811e929c0b96ccd4b0257f3eea6621798f8e5b4eb4b3db8cd1abb",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-e3dc8814c4e943a69a505a3efd2ee9e6-worker-result.json",
+    ".workflow-kit/tasks/evidence/RUN-e3dc8814c4e943a69a505a3efd2ee9e6-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-e3dc8814c4e943a69a505a3efd2ee9e6-scope.json",
+  "ledger_correction": {
+    "at_utc": "2026-09-17T02:18:17.033813Z",
+    "authorized_by": "user 2026-09-17: 授权订正，继续完成 TASK-043（推荐）",
+    "reason": "首次 finish 时把「未覆盖/限制项披露」写进了 worker-result 的 unresolved_items；工具把该字段非空一律判为 action_required 并关闭 run（workflow_runtime.py:829-830），而 action_required 不在 RETRYABLE、begin 不放行 → 又一处无 CLI 恢复入口。订正只把披露内容移到 summary（内容一字未删，仍在报告第 5 节），并使 run 恢复可闭合；原始 outcome/failure_kind/reason/finished_at 全部保留。 第二次订正尝试（重开本 run 后再 finish）暴露了下一个环节：tasks/items/*.json 会被 inventory 计入（仅剔除 checkpoints），而 .workflow-kit/tasks/** 是受保护路径——因此在 begin 之后对任务台账的任何写入都会被判越界。正确做法是让任务文件在 begin 之前就处于最终状态，begin 之后再不动它。本 run 保持原始 blocked 记录不变。",
+    "original_outcome": "blocked",
+    "original_failure_kind": "action_required",
+    "original_failure_reason": "Worker requests manager action; inspect the result",
+    "original_finished_at_utc": "2026-09-17T02:17:56.093988Z"
+  },
+  "finished_at_utc": "2026-09-17T02:17:56.093988Z",
+  "failure_kind": "action_required",
+  "failure_reason": "Worker requests manager action; inspect the result"
+}
