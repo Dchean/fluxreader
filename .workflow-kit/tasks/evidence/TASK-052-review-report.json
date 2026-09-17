@@ -1,0 +1,80 @@
+{
+  "task_id": "TASK-052",
+  "candidate_digest": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0",
+  "verification_run": "RUN-3e8fce275f4b450795c20cb0c3299b46",
+  "verdict": "PASS",
+  "summary": "独立审查（未参与实现）通过。核心口径由审查者自写探针（tmp/task052/rev-probe.mjs，**全新 fixture：源30/31 + 分类 cat-7 + 源40**，不复用实现方 ab-probe）独立证实：单源首批与第2页均带 feed_id 且 500 条全属该源、第2页首条 = 该源序列第501条(30500) 而非全局序列(index500=30240 且混入源31，全局第2页 feed30=250/feed31=250)、单分类走 folder_id 且排除分类外源、per-scope 游标互不污染（切未加载源归 0、翻页用各自游标 offset=500、切回恢复 1000）、空范围首批立即收敛 exhausted=true 且游标=0。25/25 全部 PASS。三条门禁由审查者独立重跑（退出码重定向到文件后读取，cmd /c npm）：lint exit 0 / build exit 0 / test:frontend exit 0 且 241/241（既有 26/26 + 新增 215/215）。既有断言比对（脚本比对 HEAD 与当前 harness 的 check()/checkNew() 名字集合）确认：既有 26 条 check() **一行未动**（REMOVED=0/ADDED=0），仅 checkNew 中 1 条被替换（『(a) 首批分页游标 = PAGE_SIZE(500)』→『= 实际行数 8 && articlesCursor.all===8』），新增 56 条；该替换把『游标与实际行数无关』这条**缺陷本身**的期望改正，属必要契约变化而非为绿灯改测试。D2/D3 未回退：代码层 catch 分支保留 articlesLoading:false + toast『加载更多失败：…』且 action.run 直接重发 get().loadMoreArticles()；竞态丢弃分支同样复位。D3 判据确为**收紧**（新增 scopePageKey(get().activeFeedFilter) !== scopeKey），并以『数值相同(都500)但范围不同』场景断言证明其强于旧判据。owner 授权的锚定顺序修复已核实为『先导航、后锚定』(Overlays.tsx L184 循环 → L189 anchorToArticle)，anchorScopeNav 步骤序（selectFeed→selectView→toggleTimelineFilter）与语义一致。那条读源码字符串的 (h2) 顺序断言**独立复现成功**：审查者用脚本把 Overlays.tsx 还原成旧顺序后跑全量 → exit 1 且**恰好该 1 条失败**（合计 240/241、既有 26/26 不变），随后已还原文件（git diff 复核回到 17+/7- 的原状）。tools/ui-loader.mjs 零新增依赖经独立核实：rolldown **不在** package.json 的 deps/devDeps 中，仅由 node_modules/rolldown(v1.2.6) 即 Vite 依赖树提供；package.json / package-lock.json / src-tauri 均零改动（git diff 空）；10 个改动文件全部纯 LF（crlf=0）。实现方自陈的两处脆弱性经实证：loader 注册顺序耦合**真实存在**（颠倒注册顺序后解析 src/ 省略扩展名依赖直接 ENOENT src\\store.js 失败，harness 顺序则 OK），披露充分；UI_LOADER_SOURCE 订正属实（全仓仅 ui-loader.mjs 自身注释提及，harness 用 register(new URL('./ui-loader.mjs')) 直接引用，无内联复刻、无字节一致断言）。5 项 review_checks 全部 PASS，未发现需修问题。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "5 个验收点逐条独立核对，全部成立。(1) 单源视图连续翻页按该源筛选：审查者自写探针（tmp/task052/rev-probe.mjs，fixture 为源30/31 各 1200 条交错 + 源40 20 条，与实现方 ab-probe 完全不同）P1.1-P1.5 PASS——首批 list_articles 参数 {feed_id:30, folder_id:null, offset:0}，500 条全属源30；第2页 {feed_id:30, offset:500}，500 条全属源30，与第1页 id 集合零重叠，且第2页首条 = 30500 = 源30 序列第501条；对照全局口径 index500=30240 且全局第2页 feed30=250/feed31=250（混入源31），证明旧口径确实错页。(2) 单分类用 folder_id 口径：P2.1-P2.5 PASS——{folder_id:7, feed_id:null, offset:0/500}，两页均只含分类内源30/31、排除分类外源40，游标 articlesCursor['cat-7']=1000 独立记账。(3) 列表为空也能触发加载：P5.1/P5.2 PASS——源40 首批 20 条(<500) 立即 exhausted=true 且游标=20；不存在源(99) 首批 entries=0/游标=0/exhausted=true（不再假称还有 500 条）；且 Timeline.tsx 的 sentinelMode 判定已从 items.length>0 放宽为 sentinel!=='hidden'，JSX 直接消费纯函数返回值（P6.1 PASS，源码交叉验证无残留旧门）。(4) per-scope 游标互不污染：P3.1-P3.4 PASS——切到未加载的源31 游标归 0（不继承源30 的 1000）、源31 首批 offset=0、翻页用源31 自己的 offset=500 而非源30 的 1000、切回源30 恢复 1000。(5) 既有断言影响逐条说明：已独立比对确认仅 1 条被替换且属 owner 授权的 (b) 组相邻范围（见 regression）。acceptance 的 lint/build/test 三项由审查者重跑确认（241/241、exit 0）。不引入新依赖、package.json/lock 零改动、LF 行尾均已核实。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
+        ".workflow-kit/tasks/evidence/TASK-052-worker-result.json",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+        "tmp/task052/rev-probe.mjs",
+        "tmp/task052/rev-probe.log",
+        "tmp/task052/rev-probe.exit",
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/nav.ts",
+        "src/components/Timeline.tsx",
+        "src/components/timelineSentinel.ts"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "本任务**有意改变行为**（分页口径 + 一处锚定顺序），故按『既有保护未被削弱 + 每处变化都有对应断言与理由』核。独立比对方法：把 HEAD 版 harness 导出到 tmp/task052/head-harness.mjs，用脚本（tmp/task052/rev-checknames.mjs）分别抽取 check() 与 checkNew() 的断言名集合与当前文件对照。结果：check() HEAD=26 / CUR=26，REMOVED=0、ADDED=0 —— 既有 26 条**一行未动**（harness 汇总行亦自证『既有回归 26/26 通过（本文件原有断言，未改动一行）』）。checkNew() HEAD=160 / CUR=215，REMOVED=1、ADDED=56（净增 55 ⇒ 总数 186→241），唯一移除项是『(a) 首批分页游标 = PAGE_SIZE(500)、8 行<500 视为已到底、加载态收起』，被『(a) 首批分页游标 = 实际行数（per-scope：不再硬编码 PAGE_SIZE）』取代：旧期望 `entries.length===8 && articlesLimit===500 && exhausted===true && loading===false`，新期望把 articlesLimit===500 改为 ===8 并增 articlesCursor.all===8，其余三个条件不变。该替换属**必要契约变化而非为绿灯改测试**：旧期望把『游标(全局 offset)与实际拉回行数无关』写成契约，正是 P1-14 缺陷本身；per-scope 下首批游标必须等于该范围已加载行数。该条位于 owner 授权可动的 (b) 组相邻范围（ledger_correction 明示授权 adapt 该组）。除它之外无任何既有断言被删改或削弱。D2/D3 未回退有代码与断言双重证据（见 failure_paths）。(s5/D3) 场景更被**加强**：新增 scopeKey 比较并配『数值相同但范围不同』的定向断言，强于旧判据。锚定顺序的行为变化属 owner 授权第二项，且该变化使原本『目标不在旧范围筛选内 ⇒ article_index 返回 null ⇒ 静默打不开』的缺陷被修掉，(h2) 组 8 条断言覆盖。回归总数的 gate 侧确认：241/241、exit 0，与基线 186/186 的差异全部来自新增断言。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+        "tmp/task052/head-harness.mjs",
+        "tmp/task052/rev-checknames.mjs",
+        "tmp/task052/rev-names.txt",
+        "tmp/task052/R-frontend.log",
+        "tmp/task052/R-frontend.exit",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "四类失败路径逐条核对，均有代码 + 断言双重覆盖。**分页失败(D2)**：src/store/slices/bootstrap.ts L185-191 catch 分支保留 `set({ articlesLoading: false })` 与 `get().showToast('加载更多失败：' + extractError(e), { label: '重试', run: () => void get().loadMoreArticles() })`——未见 TASK-051 吞错回退。断言 (s5/D2) 3 条：toast 文案含『加载更多失败』与错误详情、action.label==='重试'且 run 为函数；失败路径不破坏游标/条目；点击重试确实重发（断言 IPC 参数带当前范围 feed_id=10/offset=100，非死按钮）。(A5/D2) 另确认修前修后一致（未回退）。**竞态丢弃(D3)**：L163 判据为 `scopePageKey(get().activeFeedFilter) !== scopeKey || get().articlesLimit !== offset`，丢弃分支 `set({ articlesLoading: false })` 复位。审查者确认该判据相对 TASK-051 的旧判据（仅比 `get().articlesLimit !== offset`）确为**收紧而非放松**：新增的 scopeKey 比较覆盖『A 源在途时切到 B 源、且 B 的游标数值恰好等于 offset(如都 500)』这一旧判据漏判场景，此场景在 per-scope 下真实可达。断言 (s5/D3) 4 条覆盖：在途加载态为真 → 切范围(游标数值相同) → 迟到页被丢弃且 loading 复位 → 守卫未被锁死(下次分页照常发出且用新范围) → 同范围内游标被重置的**既有**竞态语义仍成立（兼顾不放松）。(A5/D3) 确认修前修后一致。**空列表**：P5.1/P5.2 独立证实空范围首批收敛 exhausted=true 且游标=实际行数，不再『空列表却假装还有 500 条』；Timeline 增空列表补拉 effect 且 loadMoreArticles 入口守卫(在途/已到底)防重复；断言 (s3) 5 条覆盖『空且未到底仍可推进』『空页收敛』『收敛后不再打后端』。(A3) 确认修前 articlesExhausted=false 的缺陷形态。**锚定失败**：anchorToArticle 在 pos==null 时 return（不改状态），代际守卫 gen!==reloadGeneration 丢弃过期结果；(h2) 断言覆盖『目标确实被锚定打开』（修前旧顺序下 article_index 落在源10 内查不到 201 ⇒ pos=null ⇒ 静默不打开）。残余风险：锚定失败时无 toast（静默 return）——但这是修前既有行为、非本次引入，且实现方将其归入 §2.6 已说明的语义范围，未夸大。",
+      "evidence_files": [
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/nav.ts",
+        "tools/frontend-regression.mjs",
+        "tmp/task052/rev-probe.mjs",
+        "tmp/task052/ab-diff.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "总体清晰，抽象方向正确。**口径收口**：scopeQueryArgs/scopePageKey 收口在 internals.ts，四条写入路径(reloadFromBackend/loadMoreArticles/reloadFilteredEntries/anchorToArticle)与 markCurrentViewAllRead 共用同一份范围→参数映射，消除了此前 markCurrentViewAllRead 内联 feed/folder 判定的重复（旧代码 `scope.startsWith('cat-') ? null : ...` 与新口径合一），这是净收益。'all' 作为一等范围键（而非空串/缺省）的取舍合理且有注释说明。**纯函数抽取**：anchorScopeNav / timelineSentinel 抽成独立文件的做法正确——组件文件 export 非组件函数会触发 oxlint react/only-export-components，且组件与回归网共用同一份定义，避免『断言一套、渲染一套』；两文件均有契约注释。**viewCacheKey 收紧**为『布局×视图×范围』是必要且正确的：reloadFromBackend 现在按范围拉取，缓存不带范围会把源A 首批当成『全部』首批恢复（内容与标题错配）；已由 (s6) 断言覆盖。**长期维护负担（已充分披露，非阻断）**：(1) (h2) 那条**读源码字符串**的断言（Overlays.tsx L969-977，用 indexOf 定位 'id: `art-${a.id}`' / 'anchorScopeNav(st)' / 'void st.anchorToArticle(a.id);' 的先后）确有脆弱性——将来重构 run()（如抽成独立函数、改变调用写法、加入同类命令项）会使定位串失配；实现方在 REPORT §7.5 明确披露『若将来有人重构命令面板…定位串可能失配而使该断言变得无意义地通过或报错——届时需要同步维护』。该手法本身**可接受**：在无真实 DOM 的环境下，行为断言只能复刻『正确顺序』（把组件改回去照样通过），唯有读源码能钉住**组件实现本身**；且它已被证明有效（见下）。(2) ui-loader 注册顺序耦合已在 ui-loader.mjs L67-69 与 harness L284-286 双处注释，实现方 REPORT §7.6 也披露；实证该风险真实（颠倒顺序 ENOENT src\\store.js）。**建议（非阻断）**：把 (h2) 的源码断言改为对 run() 做一次更结构化的定位（如匹配『导航循环整块的结束位置 < anchorToArticle 调用位置』），或用 sentinel 标记注释锚定；并可在 ui-loader 里加一条自检，在注册顺序错误时抛出可读错误而非 ENOENT。二者均为可选改进，不影响本次结论。",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/components/anchorScopeNav.ts",
+        "src/components/timelineSentinel.ts",
+        "src/components/Overlays.tsx",
+        "tools/ui-loader.mjs",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "分页口径变化对查询/渲染的影响经核对为**净改善或中性**，未引入额外负载。**查询量**：每条写入路径仍为单次 list_articles（limit=500）；loadMoreArticles 仍为单次调用。差别仅在参数——旧口径不带范围筛选、新口径带 feed_id/folder_id，后端在带筛选时返回的行数通常**更少**（单源视图下 500 行全属该源，而非从全局序列里挑出的少量该源行），且抵消掉了旧口径下『取回大量属于其它源的条目、被 selectVisibleEntries 过滤丢弃』的无效传输，属**少查不少查、有效载荷更少**。唯一新增查询是 Timeline 的空列表补拉 effect，但它被 loadMoreArticles 入口守卫(articlesLoading || articlesExhausted)拦住，且 (s3) 断言明确覆盖『空范围+已到底 ⇒ 不发 IPC』『收敛后不再发 IPC』，不会反复打后端/不产生 IPC 空转。**已知的『多拉一次』**：selectView 缓存命中路径的 articlesExhausted 语义偏保守（非 all 视图置 true、all 视图置 false），若缓存快照其实完整会多触发一次 loadMore（拉回空页后收敛）——实现方在 REPORT §7.2 如实披露并判断『多拉一次优于错标到底导致老文章取不回』；审查者认同该取舍（一次性、可收敛、且守卫防重复）。**渲染**：entries 内容与数量上限不变（仍为每页 500 追加），viewCacheKey 增加范围维度后缓存条目数上限随『布局×视图×范围』组合增长，但只有实际被 reload/切视图的组合会建档（注释已说明与既有『具体范围不缓存』取舍等价），不构成无界增长。虚拟滚动、水合路径未改动。综上，performance 无回退。",
+      "evidence_files": [
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/nav.ts",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs",
+        "tmp/task052/rev-probe.log"
+      ]
+    }
+  ],
+  "ui_review": null
+}

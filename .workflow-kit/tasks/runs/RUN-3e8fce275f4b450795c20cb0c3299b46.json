@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "id": "RUN-3e8fce275f4b450795c20cb0c3299b46",
+  "task_id": "TASK-052",
+  "kind": "verification",
+  "outcome": "completed",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-478bf14127be49378439b9638c10468b"
+  },
+  "started_at_utc": "2026-09-17T23:26:48.245663Z",
+  "finished_at_utc": "2026-09-17T23:26:57.829330Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "a0280c4ac813b5125c6871a01ab7e03a0137374b7b757d04f2c6afa0db4a5a7d",
+  "candidate_digest": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-lint.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-lint.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-build.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-build.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-frontend.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-frontend.stderr.txt"
+  ],
+  "checks": [
+    {
+      "gate_id": "lint",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-lint.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-lint.stderr.txt",
+      "candidate_digest": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\nodejs\\node.EXE",
+          "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "lint"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-17T23:26:48.307843Z",
+        "finished_at_utc": "2026-09-17T23:26:48.552902Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-lint.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-lint.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "build",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-build.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-build.stderr.txt",
+      "candidate_digest": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\nodejs\\node.EXE",
+          "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "build"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-17T23:26:48.563012Z",
+        "finished_at_utc": "2026-09-17T23:26:50.362541Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-build.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-build.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "frontend",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-frontend.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-frontend.stderr.txt",
+      "candidate_digest": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\nodejs\\node.EXE",
+          "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "test:frontend"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-17T23:26:50.372445Z",
+        "finished_at_utc": "2026-09-17T23:26:57.763335Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-frontend.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-frontend.stderr.txt"
+      }
+    }
+  ],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 44744,
+  "controller_pid": 42052,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-17T23:26:48.307843Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-lint.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-lint.stderr.txt",
+      "finished_at_utc": "2026-09-17T23:26:48.552902Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-17T23:26:48.563012Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-build.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-build.stderr.txt",
+      "finished_at_utc": "2026-09-17T23:26:50.362541Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-17T23:26:50.372445Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-frontend.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-frontend.stderr.txt",
+      "finished_at_utc": "2026-09-17T23:26:57.763335Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    }
+  ]
+}

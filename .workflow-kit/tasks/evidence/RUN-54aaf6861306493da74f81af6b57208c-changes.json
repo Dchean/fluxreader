@@ -1,0 +1,14 @@
+{
+  "changed_files": [
+    "src/components/Overlays.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/anchorScopeNav.ts",
+    "src/components/timelineSentinel.ts",
+    "src/store/internals.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "src/store/types.ts",
+    "tools/frontend-regression.mjs",
+    "tools/ui-loader.mjs"
+  ]
+}

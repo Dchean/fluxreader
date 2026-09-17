@@ -281,6 +281,15 @@ function checkNew(name, cond) {
 const nTick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
 
 await (async () => {
+  /* 组件侧与 .tsx 断言都需要 ui-loader（.tsx/.ts 就地转译）。
+     注册顺序：Node loader 链后注册者先跑；test-loader 会给无扩展名相对路径盲加
+     .js，故 ui-loader 必须最后注册（先处理 src/ 下的解析）。 */
+  {
+    const { register } = await import('node:module');
+    register(new URL('./test-loader.mjs', import.meta.url).href, new URL('../', import.meta.url).href);
+    register(new URL('./ui-loader.mjs', import.meta.url).href, new URL('../', import.meta.url).href);
+  }
+
   const nSel = await import('../dist-test/store.js');
   const { selectVisibleEntries, selectScopeEntries, selectRawEntries, selectTreeCounts, selectViewCounts } = nSel;
 
@@ -471,8 +480,13 @@ await (async () => {
     aOk.dataMode === 'tauri' && aOk.dataLoading === false && aOk.bootstrapError === null
     && aOk.categories.map((c) => c.id).join(',') === 'cat-1,cat-2'
     && aOk.feedIndex.size === 4 && aOk.feedCounts.get('10')?.unread === 3);
-  checkNew('(a) 首批分页游标 = PAGE_SIZE(500)、8 行 < 500 视为已到底、加载态收起',
-    aOk.entries.length === 8 && aOk.articlesLimit === 500
+  /* 【TASK-052 改动理由】(a) 组这一条把「游标 = PAGE_SIZE，与实际拉回的行数无关」
+     写成了期望——那正是缺陷 P1-14「口径」半边本身：游标是**全局查询的 offset**，
+     于是首批无论真实返回多少行，游标都停在 500（后续 loadMore 从全局第 500 条
+     继续），与「当前范围已加载 8 条」脱节。per-scope 游标下首批游标 = 实际行数，
+     并且按范围键（此处 'all'）记进 articlesCursor。 */
+  checkNew('(a) 首批分页游标 = 实际行数（per-scope：不再硬编码 PAGE_SIZE）、8 行 < 500 视为已到底、加载态收起',
+    aOk.entries.length === 8 && aOk.articlesLimit === 8 && aOk.articlesCursor.all === 8
     && aOk.articlesExhausted === true && aOk.articlesLoading === false);
 
   store.setState({ hydratedIds: { '101': true }, hydrationErrors: { '102': '旧错误' } });
@@ -936,6 +950,68 @@ await (async () => {
   await store.getState().anchorToArticle('101');
   checkNew('(h) mock 模式下锚定打开为 no-op（无 IPC，不伪造定位结果）',
     invokeCalls.length === 0 && store.getState().activeArticleId === null);
+
+  /* ============================================================
+     (h2) TASK-052 锚定顺序契约：命令面板必须「先导航、后锚定」
+
+     这是一处**行为变化**：改造前顺序是先 anchorToArticle、再前置导航。两种顺序在
+     改造前等价（分页/锚定查询都不带订阅范围）；per-scope 落地后 anchorToArticle
+     按**调用时**的范围构造 article_index / list_articles，旧顺序会让锚定按**旧范围**
+     取位置 —— 位置与该位置的列表不同口径，锚定错位甚至直接失败。
+     A/B 证据见 tmp/task052/anchor-order-*.json 与 anchor-order-diff.txt（5 项翻转）。
+     ============================================================ */
+  {
+    const { anchorScopeNav } = await import('../src/components/anchorScopeNav.ts');
+
+    /* 源码顺序契约：直接读取 Overlays.tsx 里「文章」命令项 run() 的实际调用顺序。
+       上面的端到端复刻只证明「这套顺序是对的」，证明不了**组件里确实这么写**——
+       把顺序改回去它照样通过。这条读源码，因此能真正钉住组件实现（修前失败）。 */
+    {
+      const { readFileSync } = await import('node:fs');
+      const ov = readFileSync(new URL('../src/components/Overlays.tsx', import.meta.url), 'utf8');
+      const artAt = ov.indexOf('id: `art-${a.id}`');
+      const navAt = ov.indexOf('anchorScopeNav(st)', artAt);
+      const anchorAt = ov.indexOf('void st.anchorToArticle(a.id);', artAt);
+      checkNew('(h2) 源码顺序：命令面板「文章」项先归一导航、后调用 anchorToArticle（修前：先 anchor、后导航）',
+        artAt >= 0 && navAt > artAt && anchorAt > navAt);
+    }
+
+    checkNew('(h2) 归一动作顺序：范围 → 视图 → 时间流筛选（数组序即执行序）',
+      anchorScopeNav({ activeFeedFilter: '10', activeViewFilter: 'starred', timelineFilter: 'unread' })
+        .map((s) => s.action).join(',') === 'selectFeed,selectView,toggleTimelineFilter');
+    checkNew('(h2) 已在「全部范围 × 全部视图 × 非未读」时无需任何前置导航（幂等，不产生多余切换）',
+      anchorScopeNav({ activeFeedFilter: 'all', activeViewFilter: 'all', timelineFilter: 'all' }).length === 0);
+
+    /* 端到端：复刻命令面板点击，按修后顺序执行，断言锚定用的是**新范围** */
+    await resetStore();
+    backendRows = [
+      mkRow({ id: 101, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 201, feed_id: 11, published_at: iso(NOW - 1000) }),
+    ];
+    store.setState({ activeFeedFilter: '10', activeViewFilter: 'starred', timelineFilter: 'unread' });
+    await store.getState().reloadFromBackend();
+    invokeCalls.length = 0;
+    /* 修后顺序：先导航（用 anchorScopeNav 的产物），后锚定 */
+    const st0 = store.getState();
+    for (const step of anchorScopeNav(st0)) {
+      if (step.action === 'selectFeed') store.getState().selectFeed(step.arg ?? 'all');
+      else if (step.action === 'selectView') store.getState().selectView('all');
+      else store.getState().toggleTimelineFilter();
+    }
+    await store.getState().anchorToArticle('201');
+    const h2Idx = invokeCalls.find((c) => c.cmd === 'article_index');
+    const h2List = invokeCalls.find((c) => c.cmd === 'list_articles');
+    checkNew('(h2) 锚定的 article_index 按**新范围**取（feed_id=null；修前：feed_id=10 旧范围）',
+      (h2Idx?.args?.args?.feed_id ?? null) === null && (h2Idx?.args?.args?.folder_id ?? null) === null);
+    checkNew('(h2) article_index 与随后的 list_articles 同口径（位置与列表对齐，不会错位）',
+      (h2Idx?.args?.args?.feed_id ?? null) === (h2List?.args?.args?.feed_id ?? null)
+      && (h2Idx?.args?.args?.folder_id ?? null) === (h2List?.args?.args?.folder_id ?? null));
+    checkNew('(h2) 目标文章确实被锚定打开（修前旧顺序下 article_index 落在源10 内查不到 201 ⇒ pos=null ⇒ 静默不打开）',
+      store.getState().activeArticleId === '201' && store.getState().entries.some((e) => e.id === '201'));
+    checkNew('(h2) 锚定完成后范围/视图/筛选均已归一（命令面板点击的最终态）',
+      store.getState().activeFeedFilter === 'all' && store.getState().activeViewFilter === 'all'
+      && store.getState().timelineFilter === 'all');
+  }
 
   /* ============================================================
      (i) toast 的生成与消失
@@ -1445,7 +1521,418 @@ await (async () => {
     && shouldOfferUpdate('0.7.9', '0.8.0') === false);
   checkNew('(P2-7) 多段版本号（0.10.1 > 0.9.9）比较正确，不走字符串序',
     shouldOfferUpdate('0.10.1', '0.9.9') === true && shouldOfferUpdate('0.9.9', '0.10.1') === false);
+  /* ============================================================
+     TASK-052：per-scope 分页游标（缺陷 P1-14「口径」半边）
+     覆盖 (s1)…(s6)，全部为本轮新增断言（checkNew）。
+
+     被验证的口径：分页请求必须带当前订阅范围（feed_id / folder_id），
+     游标按范围分桶；单源/单分类视图下「第 2 页」= 该范围的第 501..1000 条，
+     而不是全局序列的第 501..1000 条。同时锚定 051 的 D2/D3 两条修复不回退。
+
+     修前失败证据（见回归产出 run-before.log）：本组在改造前跑，
+     §(s1) 会因 `loadMoreArticles` 不发 feed_id 而拿到全局下一页（含其他源的行）；
+     §(s4) 会因只有单一全局游标而让 B 源续着 A 源的游标；§(s3) 会因游标恒为
+     首批 PAGE_SIZE 而永远「未到底」，空列表场景无法收敛。
+     ============================================================ */
+  const { scopeQueryArgs, scopePageKey, viewEntriesCache } = await import('../dist-test/store/internals.js');
+  checkNew('(s0) 范围键与查询参数口径：纯数字/前缀 id 都归一到数字，cat- 走 folder_id，all 两者皆 null，排序进 newest_first',
+    scopePageKey('all') === 'all' && scopePageKey('10') === '10' && scopePageKey('cat-1') === 'cat-1'
+    && JSON.stringify(scopeQueryArgs('all', 'newest')) === JSON.stringify({ feed_id: null, folder_id: null, newest_first: true })
+    && JSON.stringify(scopeQueryArgs('12', 'oldest')) === JSON.stringify({ feed_id: 12, folder_id: null, newest_first: false })
+    && JSON.stringify(scopeQueryArgs('feed-12', 'newest')) === JSON.stringify({ feed_id: 12, folder_id: null, newest_first: true })
+    && JSON.stringify(scopeQueryArgs('cat-1', 'newest')) === JSON.stringify({ feed_id: null, folder_id: 1, newest_first: true }));
+
+  /* ---------- (s1) 单源视图：连续翻页取回该源的后续文章，且两页不重叠 ----------
+     数据：源A(feed 10) 1200 条（按时间降序，id 6000+i），源B(feed 11) 1200 条
+     （id 7000+i）。全局序列是「源A 6000.. 与 源B 7000.. 交错」——改造前分页
+     不带 feed_id，第 2 页会取到全局第 500..999 条（混着源B），断言随即失败。 */
+  await resetStore();
+  const s1Rows = [];
+  for (let i = 0; i < 1200; i += 1) {
+    s1Rows.push(mkRow({ id: 6000 + i, feed_id: 10, title: `A${i}`, published_at: iso(NOW - i * 1000) }));
+    s1Rows.push(mkRow({ id: 7000 + i, feed_id: 11, title: `B${i}`, published_at: iso(NOW - i * 1000 - 500) }));
+  }
+  backendRows = s1Rows;
+  store.getState().selectFeed('10');
+  await store.getState().reloadFromBackend();
+  const s1First = store.getState();
+  checkNew('(s1) 单源视图首批：查询带 feed_id，条目全部属于该源，游标 = 该范围已加载数（500）',
+    s1First.entries.length === 500 && s1First.entries.every((e) => e.feedId === '10')
+    && s1First.articlesLimit === 500 && s1First.articlesCursor['10'] === 500
+    && s1First.articlesExhausted === false);
+  invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  const s1Page2Call = invokeCalls.find((c) => c.cmd === 'list_articles');
+  const s1Second = store.getState();
+  /* 源A 的第 1 页 = 源A 里时间最新的 500 条（s1Rows 是源A/源B 交错的，不能直接切前 500 行） */
+  const s1Ids1 = new Set(
+    s1Rows.filter((r) => r.feed_id === 10)
+      .sort((x, y) => Date.parse(y.published_at) - Date.parse(x.published_at))
+      .slice(0, 500)
+      .map((r) => String(r.id)),
+  );
+  const s1Page2 = s1Second.entries.slice(500).map((e) => e.id);
+  checkNew('(s1) 第 2 页请求沿用同一范围与游标（feed_id=10 / offset=500 / newest_first）',
+    s1Page2Call?.args.args.feed_id === 10 && s1Page2Call?.args.args.folder_id === null
+    && s1Page2Call?.args.args.offset === 500 && s1Page2Call?.args.args.newest_first === true);
+  checkNew('(s1) 第 2 页取回该源的后续文章：全部属于 feed 10，且与第 1 页 id 集合不重叠',
+    s1Second.entries.length === 1000 && s1Second.entries.every((e) => e.feedId === '10')
+    && s1Page2.length === 500 && s1Page2.every((id) => !s1Ids1.has(id))
+    && s1Page2[0] === '6500' && s1Page2[499] === '6999'
+    && s1Second.articlesLimit === 1000 && s1Second.articlesCursor['10'] === 1000);
+
+  /* ---------- (s4) per-scope 游标互不污染：A 源翻到第 2 页后切 B 源，B 从第 1 页开始 ---------- */
+  store.getState().selectFeed('11');
+  const s4Switch = store.getState();
+  checkNew('(s4) 切到未曾加载的源B：游标从 0 起步（不继承源A 的 1000）',
+    s4Switch.activeFeedFilter === '11' && s4Switch.articlesLimit === 0
+    && s4Switch.articlesCursor['10'] === 1000 && s4Switch.articlesCursor['11'] === undefined);
+  invokeCalls.length = 0;
+  await store.getState().reloadFromBackend();
+  const s4FirstCall = invokeCalls.find((c) => c.cmd === 'list_articles');
+  const s4First = store.getState();
+  checkNew('(s4) 源B 首批：查询按源B 的第 1 页取（feed_id=11 / offset=0，不是源A 的 1000），条目全属源B',
+    s4FirstCall?.args.args.feed_id === 11 && s4FirstCall?.args.args.offset === 0
+    && s4First.entries.length === 500 && s4First.entries.every((e) => e.feedId === '11')
+    && s4First.articlesCursor['11'] === 500 && s4First.articlesCursor['10'] === 1000
+    && s4First.entries.slice(0, 500).every((e) => !s1Ids1.has(e.id)));
+  invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  const s4Call = invokeCalls.find((c) => c.cmd === 'list_articles');
+  checkNew('(s4) 源B 翻页用**源B 自己的游标**（offset=500 而非源A 的 1000）',
+    s4Call?.args.args.feed_id === 11 && s4Call?.args.args.offset === 500
+    && store.getState().articlesCursor['11'] === 1000 && store.getState().articlesCursor['10'] === 1000);
+  /* 切回源A：游标被恢复（而不是从 0 重来，也不是继承源B） */
+  store.getState().selectFeed('10');
+  checkNew('(s4) 切回源A 恢复它自己的游标（1000），两源游标互不污染',
+    store.getState().articlesLimit === 1000 && store.getState().articlesCursor['10'] === 1000
+    && store.getState().articlesCursor['11'] === 1000);
+
+  /* ---------- (s2) 单分类视图：同一口径成立（folder_id） ----------
+     分类 cat-1 = 源10 + 源12；每源 600 条，全局 1200 条。分类的第 2 页
+     必须是该分类内第 500..999 条（改造前会取到全局第 500..999 条 = 混入源20）。 */
+  await resetStore();
+  const s2Rows = [];
+  for (let i = 0; i < 600; i += 1) {
+    s2Rows.push(mkRow({ id: 8000 + i, feed_id: 10, title: `A${i}`, published_at: iso(NOW - i * 1000) }));
+    s2Rows.push(mkRow({ id: 9000 + i, feed_id: 12, title: `D${i}`, published_at: iso(NOW - i * 1000 - 300) }));
+    s2Rows.push(mkRow({ id: 9500 + i, feed_id: 20, title: `C${i}`, published_at: iso(NOW - i * 1000 - 600) }));
+  }
+  backendRows = s2Rows;
+  store.getState().selectFeed('cat-1');
+  await store.getState().reloadFromBackend();
+  const s2First = store.getState();
+  const s2First50 = s2First.entries.map((e) => e.id);
+  checkNew('(s2) 单分类视图首批：查询带 folder_id，条目只含该分类的源，游标 500',
+    s2First.entries.length === 500 && s2First.entries.every((e) => e.feedId === '10' || e.feedId === '12')
+    && s2First.articlesLimit === 500 && s2First.articlesCursor['cat-1'] === 500);
+  invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  const s2Call = invokeCalls.find((c) => c.cmd === 'list_articles');
+  const s2Second = store.getState();
+  checkNew('(s2) 第 2 页请求沿用分类口径（folder_id=1 / feed_id=null / offset=500）',
+    s2Call?.args.args.folder_id === 1 && s2Call?.args.args.feed_id === null
+    && s2Call?.args.args.offset === 500);
+  checkNew('(s2) 第 2 页取回该分类的后续文章（不含分类外源C），且与第 1 页不重叠',
+    s2Second.entries.length === 1000 && s2Second.entries.every((e) => e.feedId === '10' || e.feedId === '12')
+    && s2Second.entries.slice(500).every((e) => !s2First50.includes(e.id))
+    && s2Second.articlesCursor['cat-1'] === 1000);
+
+  /* ---------- (s3) 列表为空也能推进：单源视图下该源没有文章时，游标不再被首批截断 ----------
+     改造前：首批游标恒为 PAGE_SIZE(500)，即使 `entries` 里一条该源的文章都没有，
+     `articlesLimit=500`、`articlesExhausted=false`；列表为空 ⇒ 哨兵不渲染 ⇒ 无滚动 ⇒
+     老文章永远够不到。改造后单源首批查询带 feed_id：该源确实没有文章时后端返回
+     空页 ⇒ 立即收敛为「已到底」，空列表有终态而不是假装还有 500 条。 */
+  await resetStore();
+  backendRows = [mkRow({ id: 111, feed_id: 20, title: '只有源C 有文章' })];
+  store.getState().selectFeed('10');
+  await store.getState().reloadFromBackend();
+  const s3Empty = store.getState();
+  checkNew('(s3) 空范围首批：查询带 feed_id、游标 = 实际 0 行、立即收敛为已到底（不再假称还有 500 条）',
+    s3Empty.entries.length === 0 && s3Empty.articlesLimit === 0 && s3Empty.articlesCursor['10'] === 0
+    && s3Empty.articlesExhausted === true && s3Empty.articlesLoading === false);
+  invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  checkNew('(s3) 空范围 + 已到底：入口守卫拦住无意义请求（不产生 IPC 空转）',
+    invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0);
+  /* 反例（改造前会停在这里）：首批满页但全部被范围筛掉 ⇒ 未到底 + 空列表 ⇒ 必须还能推进 */
+  backendRows = [];
+  for (let i = 0; i < 503; i += 1) {
+    backendRows.push(mkRow({ id: 4000 + i, feed_id: 20, title: `C${i}`, published_at: iso(NOW - i * 1000) }));
+  }
+  await resetStore();
+  backendRows = [];
+  for (let i = 0; i < 503; i += 1) {
+    backendRows.push(mkRow({ id: 4000 + i, feed_id: 20, title: `C${i}`, published_at: iso(NOW - i * 1000) }));
+  }
+  store.setState({ dataMode: 'tauri', activeFeedFilter: '10' });
+  /* 模拟改造前的口径：首批按全局拉满 500 行，范围里一条都没有 */
+  store.setState({ entries: [], articlesLimit: 500, articlesCursor: { '10': 500 }, articlesExhausted: false });
+  invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  const s3Advance = invokeCalls.find((c) => c.cmd === 'list_articles');
+  checkNew('(s3) 列表为空且未到底时仍可发起下一页：请求带当前范围（feed_id=10 / offset=500）', 
+    s3Advance?.args.args.feed_id === 10 && s3Advance?.args.args.offset === 500);
+  checkNew('(s3) 该源确无更多数据时空页把状态收敛为「已到底 + 空列表」（补拉不会无限循环）',
+    store.getState().entries.length === 0 && store.getState().articlesExhausted === true
+    && store.getState().articlesLoading === false && store.getState().articlesCursor['10'] === 500);
+  /* 再触发：守卫挡住（已到底） */
+  invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  checkNew('(s3) 收敛后再触发不再发 IPC（空列表补拉不会反复打后端）',
+    invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0);
+
+  /* ---------- (s5) D2/D3 守住（051 修复不回退） ---------- */
+  await resetStore();
+  store.setState({ dataMode: 'tauri', activeFeedFilter: '10', entries: [], articlesLimit: 100, articlesCursor: { '10': 100 }, articlesExhausted: false, toasts: [] });
+  listPlan = { mode: 'reject', error: { message: 'db busy' } };
+  invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  const s5Fail = store.getState();
+  checkNew('(s5/D2) 分页失败仍给出可见 toast（文案 + 「重试」action），不是静默吞错',
+    s5Fail.toasts.length === 1 && s5Fail.toasts[0].text.includes('加载更多失败')
+    && s5Fail.toasts[0].text.includes('db busy') && s5Fail.toasts[0].action?.label === '重试'
+    && typeof s5Fail.toasts[0].action?.run === 'function');
+  checkNew('(s5/D2) 失败路径同样复位加载态且不破坏游标/条目',
+    s5Fail.articlesLoading === false && s5Fail.articlesLimit === 100
+    && s5Fail.articlesCursor['10'] === 100 && s5Fail.entries.length === 0);
+  /* D2 的重试按钮真的能重发（把后端恢复后点重试） */
+  listPlan = null;
+  invokeCalls.length = 0;
+  s5Fail.toasts[0].action.run();
+  await nTick(20);
+  checkNew('(s5/D2) 失败 toast 的「重试」确实重发分页请求（按当前范围，不是死按钮）',
+    invokeCalls.filter((c) => c.cmd === 'list_articles').length >= 1
+    && invokeCalls.some((c) => c.cmd === 'list_articles' && c.args.args.feed_id === 10 && c.args.args.offset === 100));
+  listPlan = null;
+
+  /* D3：竞态丢弃分支必须复位 articlesLoading（且新增的 scopeKey 收紧后依然如此）。
+     场景：在途加载期间用户切到另一个范围（selectFeed 会把游标换成新范围的值，
+     可能恰好等于 in-flight 的 offset——旧的「只比数值」判据会漏判）。 */
+  await resetStore();
+  store.setState({ dataMode: 'tauri', activeFeedFilter: '10', entries: [], articlesLimit: 100, articlesCursor: { '10': 100, '11': 100 }, articlesExhausted: false, articlesLoading: false });
+  listPlan = { mode: 'defer' };
+  const s5Race = store.getState().loadMoreArticles();
+  await nTick(0);
+  checkNew('(s5/D3) 竞态场景成立：分页请求在途且加载态为真', store.getState().articlesLoading === true && pendingList.length === 1);
+  store.getState().selectFeed('11');   // 切范围：游标换成源B 的 100（数值与 offset 相同）
+  pendingList[0].resolve([mkRow({ id: 6001, feed_id: 10, title: '源A 的迟到数据' })]);
+  await s5Race;
+  const s5RaceAfter = store.getState();
+  checkNew('(s5/D3) 范围已变（scopeKey 不同）⇒ 迟到页被丢弃，且 articlesLoading 复位（不永久为真）',
+    s5RaceAfter.articlesLoading === false && s5RaceAfter.activeFeedFilter === '11'
+    && s5RaceAfter.entries.length === 0);
+  listPlan = null;   // 退出 defer 模式：下面这一次必须真的走完（否则永远挂起）
+  invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  checkNew('(s5/D3) 竞态丢弃后入口守卫没被锁死：下一次分页照常发出（且用新范围源B）',
+    invokeCalls.filter((c) => c.cmd === 'list_articles').length === 1
+    && invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args.feed_id === 11);
+
+  /* 同范围内的「游标被 reload 重置」这条既有 D3 场景，在新判据下也必须仍然丢弃 */
+  await resetStore();
+  store.setState({ dataMode: 'tauri', activeFeedFilter: '10', entries: [], articlesLimit: 100, articlesCursor: { '10': 100 }, articlesExhausted: false });
+  listPlan = { mode: 'defer' };
+  const s5Race2 = store.getState().loadMoreArticles();
+  await nTick(0);
+  store.setState({ articlesLimit: 0, articlesCursor: { '10': 0 } });   // 同范围内游标被重置
+  pendingList[pendingList.length - 1].resolve([mkRow({ id: 6100, feed_id: 10 })]);
+  await s5Race2;
+  listPlan = null;
+  checkNew('(s5/D3) 同范围内游标被重置：迟到页仍被丢弃并复位加载态（既有竞态语义不变）',
+    store.getState().articlesLoading === false && store.getState().entries.length === 0
+    && store.getState().articlesLimit === 0);
+
+  /* ---------- (s6) 视图/范围切换时游标与内容一致（缓存也不串范围） ---------- */
+  await resetStore();
+  /* 清掉前面用例留下的视图缓存：本组要独立验证「缓存按 布局×视图×范围 分桶」 */
+  viewEntriesCache.clear();
+  const s6Rows = [];
+  for (let i = 0; i < 40; i += 1) {
+    s6Rows.push(mkRow({ id: 2000 + i, feed_id: 10, title: `A${i}`, published_at: iso(NOW - i * 1000), is_starred: i < 3 }));
+    s6Rows.push(mkRow({ id: 3000 + i, feed_id: 12, title: `D${i}`, published_at: iso(NOW - i * 1000 - 400), is_starred: i < 2 }));
+  }
+  backendRows = s6Rows;
+  store.getState().selectFeed('10');
+  await store.getState().reloadFromBackend();
+  const s6A = store.getState();
+  checkNew('(s6) 单源首批：40 条全属源A、游标 40、因不足一页而到底',
+    s6A.entries.length === 40 && s6A.entries.every((e) => e.feedId === '10')
+    && s6A.articlesLimit === 40 && s6A.articlesExhausted === true);
+  /* 同源切视图（收藏）：口径 = 同一范围 + 更窄筛选，游标 = 该筛选结果行数 */
+  store.getState().selectView('starred');
+  await nTick(20);
+  const s6Starred = store.getState();
+  checkNew('(s6) 同源切「收藏」：查询仍带 feed_id，游标 = 该筛选实际行数（不是 40）',
+    s6Starred.entries.length === 3 && s6Starred.entries.every((e) => e.feedId === '10')
+    && s6Starred.articlesLimit === 3 && s6Starred.articlesCursor['10'] === 3
+    && s6Starred.articlesExhausted === true);
+  /* 视图缓存必须按范围分桶：切回 all 时不能把「源A 收藏」当成「源A 全部」恢复。
+     关键证据是**同步恢复**那一步（缓存命中在 reload 之前同步生效，后台刷新随后才到）：
+     缓存若不按视图分桶，切回 all 会拿「收藏的 3 条」冒充「全部的 40 条」。 */
+  listPlan = { mode: 'defer' };   // 冻结后台刷新，只观察缓存恢复本身
+  store.getState().selectView('all');
+  const s6BackSync = store.getState();
+  /* exhausted 这里为 false 是正确的：游标 40 来自「收藏视图只有 3 条」那次拉取，
+     但切回「全部」时 entries 换成了 40 条的首批，我们并不知道「全部」是否已经到底，
+     未到底（保守地允许下一次 loadMore）才是安全语义——若错标已到底，源A 更老的
+     文章就再也取不回来了。 */
+  checkNew('(s6) 切回「全部」缓存命中：同步恢复的是源A 的 40 条（不拿收藏视图的 3 条冒充），游标随之对齐且不误标已到底',
+    s6BackSync.entries.length === 40 && s6BackSync.entries.every((e) => e.feedId === '10')
+    && s6BackSync.articlesLimit === 40 && s6BackSync.articlesCursor['10'] === 40
+    && s6BackSync.articlesExhausted === false && s6BackSync.articlesLoading === false);
+  listPlan = null;
+  await nTick(20);
+  checkNew('(s6) 后台静默刷新完成后结论不变（仍是源A 的 40 条）',
+    store.getState().entries.length === 40 && store.getState().entries.every((e) => e.feedId === '10'));
+  /* 切到另一范围：列表必须换成新范围，且不继承源A 的游标 */
+  store.getState().selectFeed('12');
+  checkNew('(s6) 切源D：游标从 0 起步（源D 尚未加载，不继承源A 的 40）', store.getState().articlesLimit === 0);
+  await store.getState().reloadFromBackend();
+  const s6D = store.getState();
+  checkNew('(s6) 源D 首批：只含源D 条目（源A 的列表不残留），游标按源D 起步',
+    s6D.entries.length === 40 && s6D.entries.every((e) => e.feedId === '12')
+    && s6D.articlesLimit === 40 && s6D.articlesExhausted === true);
+  checkNew('(s6) per-scope 游标并存：源A 的 40 与源D 的 40 各自记账，互不覆盖',
+    s6D.articlesCursor['12'] === 40 && s6D.articlesCursor['10'] === 40);
+
+  /* ============================================================
+     TASK-052 §A/B：口径修复的可观察判据（同一组判据在修前/修后分别跑过）
+     每条都对应「修前为假 → 修后为真」的可观察量。完整 A/B 明细见
+     tmp/task052/ab-before.json / ab-after.json / ab-diff.txt（11 项翻转）。
+     ============================================================ */
+  {
+    const scopeArgsOf = (calls) => [...calls].reverse().find((c) => c.cmd === 'list_articles')?.args?.args;
+
+    /* A1：单源视图连续翻页取回该源的后续文章 */
+    await resetStore();
+    backendRows = [];
+    for (let i = 0; i < 1200; i += 1) {
+      backendRows.push(mkRow({ id: 6000 + i, feed_id: 10, published_at: iso(NOW - i * 1000) }));
+      backendRows.push(mkRow({ id: 7000 + i, feed_id: 11, published_at: iso(NOW - i * 1000 - 500) }));
+    }
+    store.getState().selectFeed('10');
+    await store.getState().reloadFromBackend();
+    const a1First = store.getState().entries.map((e) => e.id);
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles();
+    const a1Args = scopeArgsOf(invokeCalls);
+    const a1Second = store.getState().entries.slice(a1First.length).map((e) => e.id);
+    checkNew('(A1) 单源翻页带上范围参数 feed_id=10（修前：不带 ⇒ 拿全局下一页）',
+      a1Args?.feed_id === 10);
+    checkNew('(A1) 单源两页条目全部属于该源（修前：混入源B）',
+      store.getState().entries.every((e) => e.feedId === '10'));
+    checkNew('(A1) 第 2 页是该源的后续序列（修前：取到全局第 501 条，不是 6500）',
+      a1Second[0] === '6500' && a1Second.length === 500);
+    checkNew('(A1) 两页 id 集合不重叠', a1Second.every((id) => !a1First.includes(id)));
+
+    /* A2：单分类视图（folder_id 口径） */
+    await resetStore();
+    backendRows = [];
+    for (let i = 0; i < 600; i += 1) {
+      backendRows.push(mkRow({ id: 8000 + i, feed_id: 10, published_at: iso(NOW - i * 1000) }));
+      backendRows.push(mkRow({ id: 9000 + i, feed_id: 12, published_at: iso(NOW - i * 1000 - 300) }));
+      backendRows.push(mkRow({ id: 9500 + i, feed_id: 20, published_at: iso(NOW - i * 1000 - 600) }));
+    }
+    store.getState().selectFeed('cat-1');
+    await store.getState().reloadFromBackend();
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles();
+    const a2Args = scopeArgsOf(invokeCalls);
+    checkNew('(A2) 单分类翻页带上 folder_id=1 且 feed_id=null（修前：两者都不带）',
+      a2Args?.folder_id === 1 && a2Args?.feed_id === null);
+    checkNew('(A2) 分类两页条目只含该分类的源（修前：混入分类外源C）',
+      store.getState().entries.every((e) => e.feedId === '10' || e.feedId === '12')
+      && !store.getState().entries.some((e) => e.feedId === '20'));
+
+    /* A4：per-scope 游标互不污染 */
+    await resetStore();
+    backendRows = [];
+    for (let i = 0; i < 1200; i += 1) {
+      backendRows.push(mkRow({ id: 6000 + i, feed_id: 10, published_at: iso(NOW - i * 1000) }));
+      backendRows.push(mkRow({ id: 7000 + i, feed_id: 11, published_at: iso(NOW - i * 1000 - 500) }));
+    }
+    store.getState().selectFeed('10');
+    await store.getState().reloadFromBackend();
+    await store.getState().loadMoreArticles();
+    store.getState().selectFeed('11');
+    checkNew('(A4) 切到源B 后游标从 0 起步（修前：继承源A 的 1000）',
+      store.getState().articlesLimit === 0);
+    invokeCalls.length = 0;
+    await store.getState().reloadFromBackend();
+    checkNew('(A4) 源B 首批按 feed_id=11 取（修前：不带范围 ⇒ 拿全局首批，混入源A）',
+      scopeArgsOf(invokeCalls)?.feed_id === 11
+      && store.getState().entries.every((e) => e.feedId === '11'));
+
+    /* A3：空范围首批收敛（修前：游标硬编码 500、永远假装还有数据） */
+    await resetStore();
+    backendRows = [mkRow({ id: 111, feed_id: 20 })];
+    store.getState().selectFeed('10');
+    await store.getState().reloadFromBackend();
+    checkNew('(A3) 空范围首批立即收敛为「已到底」（修前：articlesExhausted=false，空列表却假装还有 500 条）',
+      store.getState().entries.length === 0 && store.getState().articlesExhausted === true);
+
+    /* A5：D2/D3 —— A/B 探针显示修前修后一致（均 true），固化为防回退断言 */
+    await resetStore();
+    store.setState({ articlesLimit: 100 });
+    listPlan = { mode: 'reject', error: { message: 'db busy' } };
+    await store.getState().loadMoreArticles();
+    listPlan = null;
+    const a5 = store.getState();
+    checkNew('(A5/D2) 失败 toast + 可调用重试（修前修后一致：不回退）',
+      a5.toasts.length === 1 && a5.toasts[0].text.includes('加载更多失败')
+      && a5.toasts[0].text.includes('db busy')
+      && typeof a5.toasts[0].action?.run === 'function');
+    checkNew('(A5/D3) 竞态丢弃复位 articlesLoading（修前修后一致：不回退）',
+      a5.articlesLoading === false);
+  }
 })();
+
+/* ============================================================
+   TASK-052 组件侧证据（(d1)…(d5)）：哨兵在空列表下必须仍然可渲染/可推进
+
+   证据强度（如实说明，不夸大）：
+   - 本 harness **不含真实 DOM**，仓库也没有 jsdom/happy-dom 之类的依赖
+     （约束禁止新增依赖），因此拿不到「浏览器里滚动真的触发了分页」的运行证据。
+   - 但哨兵的可见性判定已从 JSX 里抽成纯函数 \`sentinelMode()\`（src/components/timelineSentinel.ts），
+     并且 **JSX 直接消费该函数的返回值**——所以下面的断言锚定的是组件真实的
+     渲染分支，而不是另写一份平行逻辑。
+   - 再叠加 SSR 渲染（react-dom/server + rolldown 就地转译 .tsx，均来自既有依赖）
+     断言「非空列表时组件确实产出了哨兵节点」，覆盖「函数接进 JSX」这一步。
+   ============================================================ */
+{
+  const { sentinelMode } = await import('../src/components/timelineSentinel.ts');
+
+  checkNew('(d1) 哨兵判定：空列表 + 未到底 ⇒ idle（#timeline-load-more 可渲染、可被滚动触发）',
+    sentinelMode(0, false, false) === 'idle');
+  checkNew('(d1) 哨兵判定：空列表 + 补拉中 ⇒ loading（用户看得到「正在取更多」）',
+    sentinelMode(0, false, true) === 'loading');
+  checkNew('(d2) 哨兵判定：空列表 + 已到底 ⇒ hidden（不与「暂无匹配内容」重复）',
+    sentinelMode(0, true, false) === 'hidden' && sentinelMode(0, true, true) === 'hidden');
+  checkNew('(d3) 哨兵判定：非空列表三态照旧（待滚动 / 加载中 / 已到底），051 前行为不变',
+    sentinelMode(5, false, false) === 'idle' && sentinelMode(5, false, true) === 'loading'
+    && sentinelMode(5, true, false) === 'end');
+  /* 修前对照：旧判据是 items.length > 0 ⇒ 空列表一律 hidden，永远等不到补拉 */
+  const legacyVisible = (n) => n > 0;
+  checkNew('(d4) 修前判据可复现：items.length > 0 会让「空列表 + 未到底」被判为不可见（老文章够不到的根因）',
+    legacyVisible(0) === false && sentinelMode(0, false, false) !== 'hidden');
+
+  /* SSR 渲染：确认 sentinelMode 真的接进了 JSX（组件在非空列表时产出哨兵节点）。
+     注意 SSR 下 zustand 读 getInitialState（server snapshot），故这里只用
+     「与初值一致」的状态做形态断言，避免读到与预期不符的读数。 */
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { createElement } = await import('react');
+  const { Timeline } = await import('../src/components/Timeline.tsx');
+  /* SSR 读的是 store 创建时的 server snapshot；显式落一次「与初值一致」的空态，
+     让读数确定（zustand 的 getInitialState 与 setState 在这里被同时对齐）。 */
+  store.setState({ entries: [], articlesLimit: 0, articlesCursor: {}, articlesExhausted: false, articlesLoading: false });
+  const html = renderToStaticMarkup(createElement(Timeline));
+  checkNew('(d5) SSR：组件渲染出滚动容器与空态（组件树可被实际执行，不是只过类型检查）',
+    html.includes('id="timelineContentScroll"') && html.includes('timeline-empty-state'));
+  checkNew('(d5) SSR：空列表未到底态哨兵落在滚动容器内 ⇒ 节点确实被渲染',
+    html.includes('timeline-load-more') && html.includes('load-more-idle')
+    && html.indexOf('id="timelineContentScroll"') < html.indexOf('timeline-load-more'));
+}
 
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);

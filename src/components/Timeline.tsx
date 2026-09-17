@@ -14,6 +14,7 @@ import { openExternal, handleArticleLinkClick } from '../lib/external';
 import { proxyImageUrl } from '../lib/imageProxy';
 import type { ArticleEntry } from '../types';
 import { useEnteringClass } from './useEnteringClass';
+import { sentinelMode } from './timelineSentinel';
 
 /* ============================================================
    Timeline —— 顶栏（标题/筛选/排序/全部已读）+ 五布局渲染器
@@ -157,6 +158,19 @@ export function Timeline() {
     }
   };
 
+  /* TASK-052 空列表补拉：列表为空且未到底（首批满页但当前范围/视图筛掉了全部条目，
+     例如单源视图下首 500 条里没有该源的文章）时，容器不可滚动 ⇒ onScroll 永不触发
+     ⇒ 分页永远停在第 1 页。这里在挂载与筛选口径变化后主动补拉一次。
+     loadMoreArticles 自带入口守卫（在途/已到底直接返回），挂载期重复调用是安全的；
+     若该范围真的没有更多数据，拉回空页后会置 articlesExhausted，本 effect 自然收敛。 */
+  useEffect(() => {
+    if (items.length > 0 || articlesExhausted) return;
+    void loadMoreArticles();
+  }, [filterKey, items.length, articlesExhausted, loadMoreArticles]);
+
+  /* 哨兵形态：判定收口在 timelineSentinel.sentinelMode（纯函数，回归网直接断言） */
+  const sentinel = sentinelMode(items.length, articlesExhausted, articlesLoading);
+
   /* 标题：布局名 [· 视图筛选] [(分类/源名称)] */
   let base = LAYOUT_NAMES[activeContentLayout] ?? '内容';
   if (activeViewFilter !== 'all') base += ` · ${VIEW_NAMES[activeViewFilter]}`;
@@ -244,12 +258,16 @@ export function Timeline() {
           </div>
         )}
 
-        {/* 分页加载指示：加载中显示动画；到底显示「已到底」；否则占位等待滚动 */}
-        {items.length > 0 && (
+        {/* 分页加载指示 / 滚动哨兵：加载中显示动画；到底显示「已到底」；否则占位等待滚动。
+            TASK-052：此前整块被 `items.length > 0` 挡住——列表为空时哨兵不渲染，
+            滚动事件无从触发，「该范围的老文章永远够不到」。列表为空但**批次已满**
+            （articlesExhausted=false）时同样渲染：空列表 + 未到底 = 还有数据待取。
+            真正到底（空且已到底）时不渲染，避免「没有更多了」与「暂无匹配内容」重复。 */}
+        {sentinel !== 'hidden' && (
           <div className="timeline-load-more">
-            {articlesLoading ? (
+            {sentinel === 'loading' ? (
               <span className="load-more-spinner" aria-label="加载中" />
-            ) : articlesExhausted ? (
+            ) : sentinel === 'end' ? (
               <span className="load-more-end">没有更多了</span>
             ) : (
               <span className="load-more-idle">滚动加载更多</span>

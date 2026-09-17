@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-052 · P1-14 口径半边：分页带上当前范围筛选（per-scope 游标重设计）
 
-**状态**：ready
+**状态**：verified
 
 **目标**：修掉 P1-14 的另一半。现状（TASK-051 已修其「吞错」半边，此半边被明确留下）：`loadMoreArticles` 请求下一页时不带当前范围筛选（`feed_id` / `folder_id` / `only_unread` / `only_starred` 等），因此在单源或单分类视图下，分页是按**全局序列**的游标走的——`articlesLimit` 实际是「全局查询」的 offset。后果：在某个订阅源视图里不断下滚，取回的并不是该源的后续文章；且当列表为空时 `Timeline` 的滚动哨兵（`items.length > 0` 才渲染）根本不渲染，导致**该源的老文章永远够不到**。本任务按 owner 裁决『另立任务重设计』做 **per-scope 游标**改造，使分页与当前视图的筛选口径一致。
 
@@ -9,7 +9,7 @@
 **参考方案**：见 ../RESEARCH.md
 **界面约定**：不涉及界面
 **界面检查**：不适用
-**修改范围**：.workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md, src/**, tools/frontend-regression.mjs
+**修改范围**：.workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md, src/**, tools/frontend-regression.mjs, tools/ui-loader.mjs
 
 ## 验收标准
 
@@ -34,19 +34,26 @@
 
 ## 执行与恢复
 
-- 首次开始：None
-- 原截止时间：None
-- 当前截止时间：None
+- 首次开始：2026-09-17T22:41:08.797768Z
+- 原截止时间：2026-09-18T02:41:08.797768Z
+- 当前截止时间：2026-09-18T02:41:08.797768Z
 - 已用修复轮：0
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 最近检查点
 
+- 2026-09-17T22:41:08.861880Z：开始执行，保留原任务身份和截止时间；下一步：完成当前修改后调用 finish，再运行 verify
+- 2026-09-17T23:26:43.543871Z：编码结果已记录，差异范围已核对；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-17T23:26:57.915939Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-17T23:32:33.781799Z：当前候选的测试与审查通过；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 原始证据
 
 [唯一状态记录](../items/TASK-052.json)
 
+- [RUN-54aaf6861306493da74f81af6b57208c](../runs/RUN-54aaf6861306493da74f81af6b57208c.json)
+- [RUN-3e8fce275f4b450795c20cb0c3299b46](../runs/RUN-3e8fce275f4b450795c20cb0c3299b46.json)
+- [RUN-4eebe01dbdc94b998697427ee73f819c](../runs/RUN-4eebe01dbdc94b998697427ee73f819c.json)
 
 卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

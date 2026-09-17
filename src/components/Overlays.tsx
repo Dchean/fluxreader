@@ -4,6 +4,7 @@ import { api, articleRowToEntry } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
 import { ModalOverlay, FluxDropdown, SwitchInline } from './primitives';
 import type { ArticleEntry, ContentLayoutType, FeedItem } from '../types';
+import { anchorScopeNav } from './anchorScopeNav';
 
 /** 不使用 AI 的布局（与 SettingsModal 的判定一致）：卡片不渲染摘要/翻译，
  *  对话框里选了这类布局时隐藏 AI 开关（勾选值一并归零，避免保存无效配置）。 */
@@ -168,14 +169,23 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
           label: a.title,
           hint: feedIndex.get(a.feedId)?.feed.name ?? '',
           run: () => {
-            /* 文章：锚定打开——计算该文章在「全部」视图下的绝对位置，从目标页
-               加载列表（而非从头拉 500 篇），正确定位到很老的文章。 */
+            /* 文章：锚定打开——计算该文章在当前筛选下的绝对位置，从目标页
+               加载列表（而非从头拉 500 篇），正确定位到很老的文章。
+
+               【TASK-052 行为变化】顺序是「先导航、后锚定」。此前是先 anchorToArticle
+               再前置导航；改造前分页/锚定的查询都不带订阅范围，两者结果相同，故顺序
+               无关痛痒。per-scope 游标落地后 anchorToArticle 改为按**调用时**的
+               activeFeedFilter / activeViewFilter / timelineFilter 构造查询（与
+               loadMoreArticles 同一口径 scopeQueryArgs），于是旧顺序会让锚定按**旧
+               范围**取位置——位置与该位置的列表不在同一筛选口径下，锚定结果错位。
+               现改为按**新范围**取位置，与列表口径一致。
+               归一动作由 anchorScopeNav 给出（纯函数，回归网直接断言顺序）。 */
             const st = useAppStore.getState();
-            // 统一在「全部订阅源」范围锚定（搜索结果可能来自任意 feed）
-            if (st.activeFeedFilter !== 'all') st.selectFeed('all');
-            // 未读/今天等视图会过滤掉目标文章，先切到「全部」视图
-            if (st.activeViewFilter !== 'all') st.selectView('all');
-            if (st.timelineFilter === 'unread') st.toggleTimelineFilter();
+            for (const step of anchorScopeNav(st)) {
+              if (step.action === 'selectFeed') st.selectFeed(step.arg ?? 'all');
+              else if (step.action === 'selectView') st.selectView('all');
+              else st.toggleTimelineFilter();
+            }
             void st.anchorToArticle(a.id);
           },
         });

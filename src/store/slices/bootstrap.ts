@@ -1,8 +1,7 @@
 import type { StateCreator } from 'zustand';
 import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
-import { appStore, buildFeedIndex, markEntriesRead, reconcileCategories, viewCacheKey, viewEntriesCache } from '../internals';
-import { numericId } from '../selectors';
+import { appStore, buildFeedIndex, markEntriesRead, reconcileCategories, scopePageKey, scopeQueryArgs, viewCacheKey, viewEntriesCache } from '../internals';
 import type { AppState } from '../types';
 import type { ContentLayoutType } from '../../types';
 
@@ -22,6 +21,7 @@ export type BootstrapSlice = Pick<
   | 'articlesLimit'
   | 'articlesLoading'
   | 'articlesExhausted'
+  | 'articlesCursor'
   | 'reloadFromBackend'
   | 'loadMoreArticles'
   | 'reloadFilteredEntries'
@@ -66,6 +66,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   dataLoading: true,
   bootstrapError: null,
   articlesLimit: 0,
+  /* TASK-052：per-scope 游标表（'all' | feedId | 'cat-N' → 已加载条数） */
+  articlesCursor: {},
   articlesLoading: false,
   articlesExhausted: false,
 
@@ -73,14 +75,22 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
 
   /** 从后端拉全量快照（folders + feeds + articles）替换本地状态。
       代际守卫：并发调用只接受最新一次的结果——后台刷新事件与用户操作
-      同时触发 reload 时，旧快照不会覆盖新快照（布局显示回退的根因）。 */
+      同时触发 reload 时，旧快照不会覆盖新快照（布局显示回退的根因）。
+
+      TASK-052：首批查询带上**当前订阅范围**（feed_id / folder_id）。此前不带，
+      于是 articlesLimit 是全局 offset，而 selectVisibleEntries 按范围过滤——
+      「当前范围已加载了多少条」与列表实际能显示多少条脱节：单源视图下首批
+      500 条里可能一条属于该源，且游标直接跳到 500（该源的老文章永远够不到）。
+      范围由 get() 在**发起时**读取：异步等待期间用户切范围，结果交由下面
+      reloadGeneration 代际守卫整体丢弃（与既有的「旧代际 reload 被丢弃」同口径）。 */
   reloadFromBackend: async () => {
     const gen = ++reloadGeneration;
     const layout = get().activeContentLayout;
+    const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort);
     const [folders, feeds, articles, counts] = await Promise.all([
       api.listFolders(),
       api.listFeeds(),
-      api.listArticles({ limit: ARTICLES_PAGE_SIZE, offset: 0, newest_first: true, with_content: layoutNeedsBody(layout) }),
+      api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset: 0, with_content: layoutNeedsBody(layout) }),
       api.feedCounts(),
     ]);
     if (gen !== reloadGeneration) return; // 已有更新的 reload 在途/完成
@@ -94,13 +104,19 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       }
     }
     const nextEntries = articles.map(articleRowToEntry);
-    // 缓存「全部」视图快照：切回时零延迟恢复（视图切换卡顿的根治）
-    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, 'all'), nextEntries);
+    /* 分页游标写回**发起 reload 时**的范围键（不是完成时的 activeFeedFilter：
+       两者可能已被用户改过，而游标属于发起时的查询口径）。 */
+    const scopeKey = scopePageKey(get().activeFeedFilter);
+    // 缓存「全部」视图快照：切回时零延迟恢复（视图切换卡顿的根治）。
+    // TASK-052：快照就是**该范围**的首批，故缓存键必须带范围，否则源A 的首批
+    // 会被当成「全部」的首批恢复（数据错配）。
+    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, 'all', scopeKey), nextEntries);
     set((s) => ({
       ...reconcileCategories(s, categories),
       entries: nextEntries,
       feedCounts,
-      articlesLimit: ARTICLES_PAGE_SIZE,
+      articlesLimit: articles.length,
+      articlesCursor: { ...s.articlesCursor, [scopeKey]: articles.length },
       articlesLoading: false,
       articlesExhausted: articles.length < ARTICLES_PAGE_SIZE,
       dataMode: 'tauri',
@@ -120,21 +136,31 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   },
 
   /** 滚动到底部按需拉取下一批文章（追加到 entries，不覆盖已加载的）。
-      分页游标 articlesLimit 随每次加载累加；若已有更多在途则跳过（防抖）。 */
+      TASK-052：请求带**当前订阅范围**（feed_id / folder_id）与排序，游标取自该
+      范围自己的 per-scope 游标（articlesCursor[scopeKey]，经 articlesLimit 镜像），
+      因此「第 2 页」= 该范围的第 501..1000 条，而不是全局序列的第 501..1000 条。
+      若已有更多在途则跳过（防抖）。 */
   loadMoreArticles: async () => {
     const st = get();
     if (st.dataMode !== 'tauri') return;
     if (st.articlesLoading || st.articlesExhausted) return; // 已在加载 / 已到底
+    /* 发起时快照「范围 + 排序 + 游标」：三者必须来自同一时刻，否则请求参数与
+       竞态比较的基准会互相错位（例如请求用旧范围、比较用新范围）。 */
+    const scope = st.activeFeedFilter;
+    const scopeKey = scopePageKey(scope);
+    const scopeArgs = scopeQueryArgs(scope, st.timelineSort);
     const offset = st.articlesLimit;
     set({ articlesLoading: true });
     try {
-      const rows = await api.listArticles({ limit: ARTICLES_PAGE_SIZE, offset, newest_first: true, with_content: layoutNeedsBody(get().activeContentLayout) });
-      // 竞态保护：加载期间游标被重置（reload / selectView 命中缓存恢复快照），
-      // 丢弃本次追加。必须顺手复位 articlesLoading（D3）：否则该标志永久为 true，
-      // 被入口守卫（articlesLoading || articlesExhausted）永久挡住后续所有
-      // loadMoreArticles —— 列表停在半截且加载动画常驻。此前"自愈"只因所有写
-      // articlesLimit 的路径都顺手置了 false，一旦有不置位的写路径就会锁死。
-      if (get().articlesLimit !== offset) {
+      const rows = await api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset, with_content: layoutNeedsBody(get().activeContentLayout) });
+      // 竞态保护：加载期间游标被重置（reload / selectView 命中缓存恢复快照 / 切换
+      // 范围加载了该范围自己的游标），丢弃本次追加。必须顺手复位 articlesLoading
+      // （D3）：否则该标志永久为 true，被入口守卫（articlesLoading || articlesExhausted）
+      // 永久挡住后续所有 loadMoreArticles —— 列表停在半截且加载动画常驻。
+      // TASK-052 把比较基准从「全局 articlesLimit」收紧为「该范围的游标」：A 源在途时
+      // 切到 B 源，B 源自己的游标可能与 offset 数值相同（例如都是 500），若只比数值会
+      // 把属于 A 的迟到数据错接到 B 的列表上；带上 scopeKey 后这种串台也会被丢弃。
+      if (scopePageKey(get().activeFeedFilter) !== scopeKey || get().articlesLimit !== offset) {
         set({ articlesLoading: false });
         return;
       }
@@ -144,6 +170,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         set((s) => ({
           entries: next.length ? [...s.entries, ...next] : s.entries,
           articlesLimit: offset + next.length,
+          articlesCursor: { ...s.articlesCursor, [scopeKey]: offset + next.length },
           articlesLoading: false,
           articlesExhausted: true,
         }));
@@ -151,6 +178,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         set((s) => ({
           entries: [...s.entries, ...next],
           articlesLimit: offset + next.length,
+          articlesCursor: { ...s.articlesCursor, [scopeKey]: offset + next.length },
           articlesLoading: false,
         }));
       }
@@ -166,13 +194,18 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   /** 切换视图到收藏/未读/今天时，按后端筛选拉取完整列表（不分页）。
       这些视图的文章数通常远小于「全部」，一次性拉全可接受；且必须拉全——
       「全部」视图的 entries 是分页快照，收藏/未读的老文章（排在最新 N 篇外）
-      不在其中，否则筛选视图会漏显示（「收藏视图不显示列表」的根因）。 */
+      不在其中，否则筛选视图会漏显示（「收藏视图不显示列表」的根因）。
+
+      TASK-052：查询同样带**当前订阅范围**（feed_id / folder_id）。同源下切视图
+      是同一范围、更窄的口径（视图筛选是范围的子集），两条路径共用范围游标。 */
   reloadFilteredEntries: async (view) => {
     if (get().dataMode !== 'tauri') return;
+    const scopeKey = scopePageKey(get().activeFeedFilter);
+    const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort);
     const rows = await api.listArticles({
+      ...scopeArgs,
       limit: 100000,
       offset: 0,
-      newest_first: true,
       only_unread: view === 'unread' ? true : undefined,
       only_starred: view === 'starred' ? true : undefined,
       only_today: view === 'today' ? true : undefined,
@@ -183,16 +216,17 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (get().activeViewFilter !== view) return;
     // 替换 entries（筛选视图的完整列表），重置分页游标（筛选视图不分页）
     const next = rows.map(articleRowToEntry);
-    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view), next);
-    set({
+    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view, scopeKey), next);
+    set((s) => ({
       entries: next,
       articlesLimit: rows.length,
+      articlesCursor: { ...s.articlesCursor, [scopeKey]: rows.length },
       articlesExhausted: true,
       articlesLoading: false,
       /* 新快照不带正文：清空水合终态，让卡片重新水合 */
       hydratedIds: {},
       hydrationErrors: {},
-    });
+    }));
   },
 
   /** 搜索/深层打开文章：计算目标文章在当前筛选下的绝对位置，从该页加载列表
@@ -206,14 +240,14 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     // 结果失效，避免其覆盖本锚定结果（竞态）。
     const gen = ++reloadGeneration;
     const st = get();
-    // 映射当前订阅范围 → feed_id / folder_id（与 markCurrentViewAllRead 同口径）
+    /* 映射当前订阅范围 → feed_id / folder_id（与 markCurrentViewAllRead 同口径）。
+       TASK-052：与 loadMoreArticles 共用 scopeQueryArgs，两个入口的口径不再各写一份。
+       注意顺序契约：本 action 按**调用时**的范围/排序构造查询，调用方（命令面板）
+       必须先完成 selectFeed/selectView 的前置导航。 */
     const scope = st.activeFeedFilter;
-    const feedId = scope.startsWith('cat-') ? null : scope === 'all' ? null : numericId(scope);
-    const folderId = scope.startsWith('cat-') ? numericId(scope) : null;
+    const scopeKey = scopePageKey(scope);
     const args = {
-      feed_id: feedId,
-      folder_id: folderId,
-      newest_first: st.timelineSort === 'newest',
+      ...scopeQueryArgs(scope, st.timelineSort),
       limit: ARTICLES_PAGE_SIZE,
       offset: 0,
       with_content: layoutNeedsBody(st.activeContentLayout),
@@ -227,9 +261,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (gen !== reloadGeneration) return;
     if (!rows) return;
     const next = rows.map(articleRowToEntry);
-    set({
+    set((s) => ({
       entries: next,
       articlesLimit: offset + next.length,
+      articlesCursor: { ...s.articlesCursor, [scopeKey]: offset + next.length },
       articlesExhausted: next.length < ARTICLES_PAGE_SIZE,
       articlesLoading: false,
       activeArticleId: articleId,
@@ -237,7 +272,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       /* 新快照不带正文：清空水合终态，让卡片重新水合 */
       hydratedIds: {},
       hydrationErrors: {},
-    });
+    }));
     // F7：与 selectArticle 同口径——打开时按设置标已读（此前搜索/命令面板
     // 打开的文章不标读，与列表点开行为分叉）
     const { settings: stSettings, dataMode: stMode } = get();

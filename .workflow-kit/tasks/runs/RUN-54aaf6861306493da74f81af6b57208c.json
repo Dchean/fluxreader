@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-54aaf6861306493da74f81af6b57208c",
+  "task_id": "TASK-052",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "总控会话直接实现（POLICY coder=current_agent）；per-scope 分页游标重设计（P1-14 口径半边），须守住 TASK-051 刚修好的 D2/D3 不回退，且组件侧无渲染级证据须如实披露"
+  },
+  "started_at_utc": "2026-09-17T22:41:08.799024Z",
+  "finished_at_utc": "2026-09-17T23:26:43.513028Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "a0280c4ac813b5125c6871a01ab7e03a0137374b7b757d04f2c6afa0db4a5a7d",
+  "candidate_digest": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-54aaf6861306493da74f81af6b57208c-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-54aaf6861306493da74f81af6b57208c-scope.json"
+}

@@ -160,9 +160,12 @@ export interface AppState {
   bootstrapError: string | null;
   retryBootstrap: () => Promise<void>;
   reloadFromBackend: () => Promise<void>;
-  /** 已从后端加载的文章数（分页游标：reload 重置为 PAGE_SIZE，loadMore 累加）。
-      避免一次性全量拉取，滚动到底部按需追加，提高同步后重载速度。 */
+  /** 当前视图的分页游标（= 当前范围已从后端加载的文章数）。每次 reload /
+      视图切换 / 范围切换时，按该范围自己的 per-scope 游标恢复（TASK-052）。 */
   articlesLimit: number;
+  /** per-scope 分页游标表：scopeKey（'all' | feedId | 'cat-N'）→ 已加载条数。
+      详见 internals.scopePageKey 的取舍说明。 */
+  articlesCursor: Record<string, number>;
   /** 正在加载下一批文章（列表底部加载动画） */
   articlesLoading: boolean;
   /** 已加载完所有文章（列表底部显示「到底了」） */
@@ -187,6 +190,10 @@ export interface AppState {
   selectLayout: (layout: ContentLayoutType) => void;
   selectView: (view: ViewFilterType) => void;
   selectFeed: (feedId: string) => void;
+  /** 同步恢复分页游标（per-scope 游标表的唯一镜像写入点）：写 articlesLimit /
+      articlesCursor / articlesExhausted / articlesLoading 四处，entries 由调用方
+      保证与该游标匹配（缓存恢复路径）。 */
+  applyArticlesCursor: (scopeKey: string, limit: number, exhausted: boolean) => void;
   toggleTimelineFilter: () => void;
   toggleTimelineSort: () => void;
   markCurrentViewAllRead: () => void;

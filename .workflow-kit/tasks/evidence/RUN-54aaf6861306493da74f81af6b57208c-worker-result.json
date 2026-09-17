@@ -1,0 +1,31 @@
+{
+  "task_id": "TASK-052",
+  "run_id": "RUN-54aaf6861306493da74f81af6b57208c",
+  "status": "ready_for_verification",
+  "summary": "按 owner 裁决『另立任务重设计』完成 P1-14 的『口径』半边：把分页改为 **per-scope 游标**，使翻页与当前视图的筛选口径一致。**设计**：范围键收口在 internals.scopeQueryArgs/scopePageKey，取值 'all' | feedId（'10'/'feed-10' 归一到数字）| 'cat-N'；关键取舍是**游标键只含订阅范围、不含视图与排序**——因为 entries 是共享单数组、切视图会整体替换它，若键含视图则游标与内容脱节、loadMore 的 offset 会越过列表内容静默丢文章（正是 D3 当时可达的形态）；视图的影响改由**值**承担（每条写入路径都用本次查询实际返回的行数写游标）。四条写入路径（reloadFromBackend / loadMoreArticles / reloadFilteredEntries / anchorToArticle）全部带范围口径并原子写入 entries 与游标，另加镜像写入点 applyArticlesCursor（仅 selectView 缓存命中走）。selectFeed 改为按 per-scope 游标恢复（未加载过则 0）且**不触发 reload**，保持原『切换零延迟』契约。连带收紧 viewCacheKey 为『布局×视图×范围』（不带范围会把源A首批当成『全部』首批恢复）——这是本改造引入的新不变量。**5 个验收点均有 A/B 翻转证据**（探针只依赖 store 可观察行为、不 import 新导出；修前版本取自 git show HEAD:<path> 并已还原），ab-diff.txt 共 11 项翻转：(1) 单源翻页 a1_scopeArgSent/a1_allRowsInFeed/a1_secondPageIsFeedSeq 全 false→true（修前条目混入源B、取到全局第 501 条而非第 6500 条）；(2) 单分类 a2_folderArgSent/a2_onlyFolderFeeds/a2_noFeed20 全 false→true；(3) 空列表 a3_emptyScopeExhausted false→true（修前空列表却 articlesExhausted=false，假装还有 500 条）；(4) per-scope 互不污染 a4_switchCursor 1000→0、a4_bScoped/a4_bOnly false→true；(5) D2/D3 五项 a5_* **修前修后均 true**（未回退的直接证据）。**D3 判据被主动收紧**（非放松）：新增 scopePageKey(get().activeFeedFilter) !== scopeKey 比较——A 源在途时切到 B 源，两范围游标数值可能恰好相同（如都是 500），只比数值会把 A 的迟到数据错接到 B；已加断言覆盖，并保留一条覆盖原有『同范围内游标被重置』场景。**空列表哨兵**：判定抽成纯函数 src/components/timelineSentinel.ts:sentinelMode()，JSX 直接消费其返回值；空列表且未到底→渲染 idle，另加空列表补拉 useEffect（空列表不可滚动 ⇒ onScroll 永不触发）。**既有断言仅 1 条被替换**（在 owner 授权的 (b) 组相邻范围）：原『(a) 首批分页游标 = PAGE_SIZE(500)』→ 新期望『articlesLimit === 8 && articlesCursor.all === 8』（游标 = 实际行数）；理由是原期望把『游标与实际拉回行数无关』写成契约，**而那正是缺陷本身**。脚本比对 HEAD 与当前 harness 的断言名集合确认：既有 26 条一行未动、移除/改名 1 条、新增 56 条（净增 55，总数 186→241）。**owner 授权的第二项已一并完成**：修正 Overlays.tsx 命令面板的锚定顺序错位（先 anchorToArticle 后 selectFeed/selectView → 改为先导航后锚定）。用户已授权在 TASK-052 内修，理由是改造前游标全局、顺序无关，**是 per-scope 让该顺序开始出错**。实际后果比预估更严重：修前当目标文章不在旧范围筛选结果内时 article_index 返回 null → **锚定静默失败、文章根本打不开**（不只是位置错位）；修后按新范围取位置，与 list_articles 同口径。实现方式为把归一动作抽成纯函数 src/components/anchorScopeNav.ts（返回按执行序排列的步骤，组件遍历执行后再锚定），**未改 anchorToArticle 的公共签名**——已说明取舍：改签名会波及全部调用点，而调用方本就该先定视图再锚定，抽纯函数改动面最小且可被断言。A/B 探针（legacy/fixed 两模式）5 项翻转，含 indexFeedId 10→null、sameScope false→true、activeArticleId **null→'201'**（从打不开到打开）。**门禁（本会话实跑，退出码重定向后读）**：npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0（tsc -b + vite）、npm run test:frontend 连跑两次均 exit 0 且**既有 26/26 + 新增 215/215 = 241/241**。约束核对：git status -- src-tauri 空、package.json 与 lock 零改动（未引入依赖）、10 个改动文件全部 LF（crlf=0）。**台账订正（owner 授权）**：把 tools/ui-loader.mjs 纳入 allowed_paths（我原只开了 tools/frontend-regression.mjs 一个 tools 文件；该文件是零新增依赖的 SSR 测试辅助，复用 Vite 依赖树里已有的 rolldown，为组件侧首次提供可执行证据），记录在 evidence.ledger_correction.scope_correction 与 anchor_order_authorization。**未完成/不确定（不掩饰）**：(1) 组件侧仍无真实 DOM 证据——真实滚动触发分页与空列表补拉 effect 的实际时机只有 tsc + oxlint + 代码审查 + SSR 节点存在性为证（仓库无 jsdom、约束禁新增依赖）；(2) selectView 缓存命中时 articlesExhausted 偏保守（可能多一次 loadMore），判断非定论；(3) anchorToArticle 游标沿用 offset + next.length，锚定落在尾部时中间文章可能跳过——**修前即如此，非本次引入**；(4) 已翻多页后切换排序/未读筛选不重置游标，边界场景可能少量重复或跳过（已知未处理边界，未加断言）；(5) 新增的源码顺序断言靠字符串定位，将来若把命令面板 run() 抽成独立函数会失配，需同步维护——这是无 DOM 环境下钉住组件行为的取舍，非完备方案；(6) loader 注册顺序存在顺序耦合（Node 的 loader 链后注册者先跑，而 test-loader.mjs 会给无扩展名相对路径盲加 .js，当前靠 ui-loader 后注册抢先），将来新增第三个 loader 需重新确认。",
+  "changed_files": [
+    "src/components/Overlays.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/anchorScopeNav.ts",
+    "src/components/timelineSentinel.ts",
+    "src/store/internals.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "src/store/types.ts",
+    "tools/frontend-regression.mjs",
+    "tools/ui-loader.mjs"
+  ],
+  "validation_requests": [
+    "请独立复核 per-scope 游标的**核心口径**：单源视图翻页是否真的按该源筛选取页（不混入其它源的条目）、单分类是否用 folder_id 口径；建议自己写探针或在 mock 后端上验证，不要复用实现方的 ab-probe",
+    "请复核「游标键只含订阅范围、不含视图与排序」这一关键取舍是否成立——特别是切视图后游标与共享 entries 是否会脱节；以及 viewCacheKey 收紧为『布局×视图×范围』是否必要且正确",
+    "请独立复核 D2/D3 **未回退**：失败仍有 toast + 可调用重试；竞态丢弃仍复位 articlesLoading；并复核 D3 判据被『收紧』（新增 scopePageKey 比较）是否确为更强而非更弱",
+    "请复核**仅 1 条既有断言被替换**且属授权的 (b) 组相邻范围：用 git show HEAD:tools/frontend-regression.mjs 逐条比对，确认既有 26 条一行未动、且除该 1 条外无其它断言被删改或削弱",
+    "请独立复核空列表哨兵：sentinelMode 纯函数被 JSX 真实消费（而非平行逻辑）；SSR 证据是否真能证明哨兵节点产出并落在正确容器内；以及组件侧证据的**实际强度**（实现方自陈无真实 DOM，请判断该披露是否诚实充分）",
+    "请独立复核 owner 授权的锚定顺序修复：Overlays.tsx 是否确为先导航后锚定；anchorScopeNav 的步骤顺序是否与语义一致；**尤其请复核那条『直接读源码字符串定位』的断言**——它是否真的能钉住组件顺序（实现方称还原旧顺序时恰好该 1 条失败，请独立复现），以及该手法是否可接受",
+    "请复核 tools/ui-loader.mjs 是否真正零新增依赖（rolldown 来自 Vite 依赖树）且 package.json/lock 零改动；以及 loader 注册顺序的顺序耦合风险披露是否充分",
+    "请复核未完成/不确定清单（6 条）是否诚实充分，是否有该修而未修且未说明的项"
+  ],
+  "unresolved_items": [],
+  "requested_actions": [],
+  "blocked_reason": null
+}

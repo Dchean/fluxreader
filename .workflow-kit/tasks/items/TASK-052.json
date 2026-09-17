@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "ready",
+  "status": "verified",
   "objective": "修掉 P1-14 的另一半。现状（TASK-051 已修其「吞错」半边，此半边被明确留下）：`loadMoreArticles` 请求下一页时不带当前范围筛选（`feed_id` / `folder_id` / `only_unread` / `only_starred` 等），因此在单源或单分类视图下，分页是按**全局序列**的游标走的——`articlesLimit` 实际是「全局查询」的 offset。后果：在某个订阅源视图里不断下滚，取回的并不是该源的后续文章；且当列表为空时 `Timeline` 的滚动哨兵（`items.length > 0` 才渲染）根本不渲染，导致**该源的老文章永远够不到**。本任务按 owner 裁决『另立任务重设计』做 **per-scope 游标**改造，使分页与当前视图的筛选口径一致。",
   "non_goals": [
     "顺手修 TASK-051 报告里列出的其它未修项（同步协议侧 P1-5/P1-6、Rust 侧 P2-9/P2-10 后半/P2-11/P2-12、P3-x、P1-7 残留、组件层 P2-2/P2-5/P2-6）",
@@ -34,7 +34,8 @@
     "allowed_paths": [
       ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
       "src/**",
-      "tools/frontend-regression.mjs"
+      "tools/frontend-regression.mjs",
+      "tools/ui-loader.mjs"
     ],
     "protected_paths": [
       "AGENTS.md",
@@ -148,28 +149,70 @@
     "manifest": ".workflow-kit/tasks/evidence/TASK-052-input-b12cb647148a4648b1a626aa67eac486.json",
     "digest": "a0280c4ac813b5125c6871a01ab7e03a0137374b7b757d04f2c6afa0db4a5a7d",
     "source_revision": null,
-    "definition_digest": "e532d286b23059ee0376173aaf05b7444bf54c41f7099f0fd659cc999fd920c1"
+    "definition_digest": "a688dd7e6522727ef325361cfdb97439ae3ea73c9a86079aed453dfc62f5fafb"
   },
   "budget": {
-    "started_at_utc": null,
-    "deadline_at_utc": null,
+    "started_at_utc": "2026-09-17T22:41:08.797768Z",
+    "deadline_at_utc": "2026-09-18T02:41:08.797768Z",
     "repair_rounds_used": 0
   },
   "batch_id": "BATCH-a4d86daa80e348b78973d58fc2353698",
-  "run_ids": [],
+  "run_ids": [
+    "RUN-54aaf6861306493da74f81af6b57208c",
+    "RUN-3e8fce275f4b450795c20cb0c3299b46",
+    "RUN-4eebe01dbdc94b998697427ee73f819c"
+  ],
   "blockers": [],
   "evidence": {
-    "candidate_manifest": null,
-    "candidate_digest": null,
-    "verification_run": null,
-    "review_run": null,
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-3e8fce275f4b450795c20cb0c3299b46-candidate.json",
+    "candidate_digest": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0",
+    "verification_run": "RUN-3e8fce275f4b450795c20cb0c3299b46",
+    "review_run": "RUN-4eebe01dbdc94b998697427ee73f819c",
     "acceptance_ref": null,
     "owner_decision_ids": [],
-    "merge_ref": null
+    "merge_ref": null,
+    "ledger_correction": {
+      "scope_correction": {
+        "at_utc": "2026-09-17T23:20:56.402151Z",
+        "authorized_by": "用户 2026-09-17：『授权纳入（推荐）』（针对 tools/ui-loader.mjs 未纳入 allowed_paths）",
+        "reason": "我在写 TASK-052 任务卡时把 allowed_paths 定为 [baseline, src/**, tools/frontend-regression.mjs]，只开了**一个** tools 文件。实现方新增了 tools/ui-loader.mjs：一个用 Vite 依赖树里**已有的** rolldown 就地转译 .tsx 的 Node ESM loader（**零新增依赖**，package.json 与 lock 未改）。它的价值：让此前只能靠 tsc + 人工审查的**组件侧**首次有了可执行证据（用 SSR 确认滚动哨兵节点确实产出、且落在正确的滚动容器内）。",
+        "original_definition_digest": "e532d286b23059ee0376173aaf05b7444bf54c41f7099f0fd659cc999fd920c1",
+        "actual_change": "新增 tools/ui-loader.mjs（--loader 用的 ESM loader，复用 rolldown 转译 .tsx）；注意其内容在 tools/frontend-regression.mjs 里另有一份内联复刻 UI_LOADER_SOURCE，harness 会断言两份字节一致（该重复已列入待审查点）。",
+        "note": "只补这一类路径并重算 definition_digest；不放宽任何门禁与断言要求。"
+      },
+      "anchor_order_authorization": {
+        "at_utc": "2026-09-17T23:20:56.402162Z",
+        "authorized_by": "用户 2026-09-17：『授权在 TASK-052 内修（推荐）』",
+        "decision": "授权在 TASK-052 内修复 src/components/Overlays.tsx 命令面板的锚定顺序错位（先 anchorToArticle 后 selectFeed/selectView）。改造前游标是全局的、顺序无关；per-scope 后 anchorToArticle 按调用时范围构造查询，必然按旧范围取位置——**是本次改造让该顺序开始出错**，故属完成本次改动所必需，而非新功能。",
+        "requirements": "须补断言覆盖修正后的顺序语义，并在报告中写明该行为变化。"
+      }
+    }
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
     "src",
     "tools/frontend-regression.mjs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-17T22:41:08.861880Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T23:26:43.543871Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-17T23:26:57.915939Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T23:32:33.781799Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
   ]
 }
