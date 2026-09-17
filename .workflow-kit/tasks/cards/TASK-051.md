@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-051 · 修复全部已发现缺陷：D1–D5 + 低优先观察 + REQ-007 残余项（先盘点后逐项修）
 
-**状态**：verified
+**状态**：done
 
 **目标**：按 owner 2026-09-17 指令『把发现的问题都修复』（DEC-fix-all-findings-20260917）逐项修复已发现缺陷。**第一步必须先盘点**（工作流要求「清单经确认后才纳入处理」，owner 已就「全部修复」预授权，故盘点结果在本任务报告里给出并逐项落实，不再单独等待确认）：(A) 重新验证 FINDINGS-REQ-007.md 中被 TASK-030~047 处理后**仍然存在**的残余项，产出确切清单（每项含 文件:行、现状、复现、影响、修复方案）；(B) TASK-048 写测试时发现的 store 缺陷 D1–D5；(C) TASK-048 报告记录的低优先观察。第二步按清单逐项修，每项都要有可复跑的验证（优先落到 tools/frontend-regression.mjs 的断言上）。
 

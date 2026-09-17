@@ -1,0 +1,14 @@
+{
+  "id": "DEC-88ecb0c0bdb24a278cc9581f7b33844b",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-17 明确授权『把发现的问题都修复，如需越权的操作和之前一样向我申请并记录』（DEC-fix-all-findings-20260917），并逐项裁定了 tsconfig.test.json 订正（授权）、P1-14（另立任务重设计）、P1-5（另立任务修）。TASK-051 候选 826a858c… 已通过 verify（RUN-361c62f5…，lint/build/frontend 186-186/cargo_test 四门禁 PASS）与独立审查 PASS（findings 为空；审查者自行 revert 源文件复现修前失败、还原后 103 个候选文件 SHA256 零不匹配、使用括号平衡提取器证明既有 26 条逐字未改、独立证伪 NaN 情报）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-051"
+  ],
+  "recorded_at_utc": "2026-09-17T20:29:23.516694Z",
+  "candidates": {
+    "TASK-051": "826a858ce8e686c5f5e42049ac8e827b90771be9a6823f08d1734379a46cf2f5"
+  }
+}
