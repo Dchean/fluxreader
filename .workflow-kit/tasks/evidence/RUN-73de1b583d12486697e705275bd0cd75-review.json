@@ -1,0 +1,72 @@
+{
+  "task_id": "TASK-044",
+  "candidate_digest": "d94165d3e9abc5a8aef9a6639685b358ca9ba13dc7bbd13f38797432140b6719",
+  "verification_run": "RUN-99dc89f06091432db82439b04cdfe69d",
+  "verdict": "PASS",
+  "summary": "独立复核结论：PASS。我未参与实现，全部结论来自本会话亲自执行的四类核对，未采信作者自述。(1) 逐字比对（自写 Rust 感知扫描器，非作者脚本）：从 git show HEAD:src-tauri/src/commands.rs 取原文件，与 commands/*.rs 比对全部 fn 项——原 62 个 / 新 62 个（作者报告称 61，少算了 impl Drop 里的 drop；我按『含嵌套 fn』口径得 62，缺 0、增 0），并额外比对了作者未列的口径：可见性/async 限定符、属性块（#[tauri::command]/#[test]）、签名字面、函数体（去注释后按空白归一与全空白剥离两种口径）全部零差异；把整份文件剔除 fn 后做 token 级 diff，差异仅限 use 语句与 mod/pub use 声明（导入重分布 + 测试模块随宿主文件迁移），无任何语句跨函数搬移。(2) 路径不变性：git diff HEAD -- src-tauri/src/lib.rs 与 -- src-tauri/tests 均为空；lib.rs 的 43 处 commands::<fn>（不是 44，见下）与 tests/sync_gap_repro_e2e.rs 的 10 处 app_lib::commands::<fn> 全部能在新模块中解析到同名 fn。(3) 测试未削弱：我用自跑 cargo test（重定向到文件后读退出码）得 EXIT=0、23 个 test result 行合计 120 passed / 0 failed / 23 ignored，与基线日志逐数字一致；两套日志的测试名行数均为 143，名字集合仅 6 项因模块路径变化而改名（5 个 image_proxy_tests → commands::settings::…、1 个 ai_event_tests → commands::ai::…），无删除、无新增、无新增 #[ignore]；ignored 名单逐名一致。(4) 行数口径：用四种独立方法交叉验证，LF 字节数 = Python splitlines = .NET ReadAllLines = 216/209/327/90/81/212/296（ai/articles/folders/mod/opml/settings/sync），与报告 §1 逐一相符，最大 327 ≤ 400；我还把 HEAD 版原始字节还原到临时文件，Get-Content | Measure-Object -Line 恰好报 1157（.NET 报 1369），即作者 §6.3 的『少算』诊断可精确复现。候选完整性：候选清单 58 个文件的 sha256 与当前工作区逐一致；改动仅 src-tauri/src/commands.rs 删除 + src-tauri/src/commands/ 7 个新文件（未跟踪目录），lib.rs/tests/Cargo.toml/前端/db/ 全未触碰。台账订正判断：订正只改了 scope.allowed_paths 的写法（目录式→等价 glob）、重算 definition_digest、清 blockers，未放宽门禁（同一套三门禁仍在该候选上重跑并 PASS，验收/非目标/protected_paths 未动，未为过检改任何源码）；最强证据是候选清单对比——9062d870…（订正前）→ d94165d3…（订正后）之间 58 个文件中唯一变化的是 .workflow-kit/tasks/evidence/baseline-2026-09-17-task044.md，src-tauri/ 下 57 个文件字节完全相同，故『订正未改源码』成立。工具修复建议：应当另立（并尽快排期）——该缺口第二次命中且 CLI 无恢复入口；据查 owner 已批准的路线图里已有 .workflow-kit/tasks/specs/TASK-046.json『流程工具修复：prepare 读取 scope.allowed_paths 并对静默回退报错』，且 TASK-045/046 的 spec 都把 allowed_paths 写在顶层（即订正后确认过的正确写法），但 TASK-046 目前只有 spec、没有 item/run（items 只到 TASK-044，active 批次只含 TASK-044），故台账 note 里的『已据此另立工具修复任务』只能算以 spec 形态部分成立，需要 owner 确认把它排成正式任务执行。另有两处报告行文不准确，均不影响任何验收判据，作为非阻塞项披露：§3 的『44 处 commands::<fn>』实为 43（两种方法计数一致，且等于原/新 #[tauri::command] 数 43）；§2 末句称『ai.rs 内测试引用改为 use super::settings::referer_candidates』与代码不符（referer 测试模块实际随 settings.rs 并在其中 use super::referer_candidates；ai.rs 的测试模块只用 super::AiEvent）。未做项：未做 Tauri 实机/前端 invoke 冒烟（本任务 ui_change=false 且前端零改动，无对应门禁），未复跑 cargo build（非门禁）、未验证 23 个 ignored 用例涉及的联网/mock-server 路径。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "七条验收逐条核对，全部成立，且均由我独立复现而非引用作者结论。①『拆为 commands/ 子模块、单文件 ≤400、mod.rs 只留模块声明与共享辅助』：commands/ 下 7 个文件；可信行数（LF 字节数 / Python splitlines / .NET ReadAllLines 三法一致）为 mod.rs 90、folders.rs 327、articles.rs 209、settings.rs 212、opml.rs 81、sync.rs 296、ai.rs 216，最大 327 ≤ 400；mod.rs 内容仅为模块文档、read_dedup_flag/schedule_state_push/sync_configured 三个共享项（含 FlyingGuard/两个 AtomicBool/一个 const）、6 个 mod 声明与 6 行 pub use 重导出。②『命令名与签名逐字不变』：我对 62 个 fn 项比对（含 #[tauri::command] 属性、pub/async 限定符、签名字面、函数体）零差异；原/新 #[tauri::command] 计数均为 43，分布 13+11+4+2+8+5。③『invoke_handler 逐字未变』：git diff HEAD -- src-tauri/src/lib.rs 为空，lib.rs sha256 与候选一致，43 个注册名全部解析到新模块中的同名 fn。此处报告 §3 称『44 处 commands::<fn>』不准确：我用 Python 正则计数与 PowerShell 逐行列出两种方法均得 43（43 个不同名字，一一对应 43 个命令函数），44 可能是把 lib.rs 内另行注册的 resolve_close 一并计入所致；因该数字不影响判据（注册列表逐字未变），列为非阻塞行文误差。④『cargo test 120 passed / 0 failed』：验证运行日志与我自跑复现均为 120/0（详见 regression）。⑤『fmt/clippy 零告警』：RUN-99dc89f06091432db82439b04cdfe69d.json 三项 checks 均 status=PASS、exit_code=0；fmt 日志空（--check 干净即无输出），clippy 日志含 Finished 且全文匹配 warning/error 为 0 次。⑥『ignored 不增』：23 = 23，ignored 名单逐名一致，无新增 #[ignore]。⑦『无行为改动』：无新增依赖（Cargo.toml 未改）、函数体 token 级相同（错误文案即字符串字面量随函数体一起被证明未变）、无逻辑重写。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-044-split-report.md",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task044.md",
+        ".workflow-kit/tasks/evidence/RUN-99dc89f06091432db82439b04cdfe69d-candidate.json",
+        ".workflow-kit/tasks/runs/RUN-99dc89f06091432db82439b04cdfe69d.json",
+        "src-tauri/src/commands/mod.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "该套件能证明什么：20 个集成测试二进制（tests/*.rs）+ lib/main 单测共 23 个 test result 块、120 个用例，在拆分后的模块布局下仍全部编译并通过（我自跑：EXIT=0，120 passed / 0 failed / 23 ignored，与基线日志逐数字相同）；由于测试名集合两版均为 143 行且仅 6 项因父模块路径改名（commands::image_proxy_tests::* → commands::settings::image_proxy_tests::*、commands::ai_event_tests::* → commands::ai::ai_event_tests::*），可确认没有测试被删除、改写或新增忽略。cargo test 编译 tests/sync_gap_repro_e2e.rs 时，10 处 app_lib::commands::<fn> 与 lib.rs 的 43 处 commands::<fn> 都必须通过重导出解析成功，而 tauri::generate_handler! 还会对每个命令做签名/类型层面的编译期检查——这一点比普通『路径还在』更强，它同时证明了命令函数仍满足 tauri 命令的签名约束。不能证明什么：① 前端 invoke 名称没有任何 Rust 测覆盖（前端契约无门禁，本任务 ui_change=false 且前端零改动，故未做前端冒烟）；② 23 个 ignored（mock server / 联网 live 路径）本次未执行，实时同步路径未被重新走一遍；③ 任何测试都无法证明『未改行为』的全部面，本次真正给出该保证的是我做的函数级 token 完全一致比对（对纯搬运来说强于任何测试）。补充：验证运行与我的复跑都命中 cargo 增量缓存（clippy 0.5s、test 5.5s，Finished 行可见），但 cargo 指纹按内容计算，且 120 个用例确实实际执行（各测试块有独立耗时），缓存不削弱结论。证据：本会话自跑日志 D:\\Users\\Temp\\t044\\rerun_cargo_test.out.txt（EXIT=0，工作区外临时目录，不改仓库）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-99dc89f06091432db82439b04cdfe69d-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-99dc89f06091432db82439b04cdfe69d-cargo_test.stderr.txt",
+        ".workflow-kit/tasks/evidence/baseline-rust-tests-2026-09-17.log"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "私有项跨子模块误引用：Rust 允许子模块访问祖先模块的私有项，当前实现正是这样用的——三个共享项留在模块根（read_dedup_flag 与 schedule_state_push 为 pub(crate)，sync_configured 为私有 fn），folders.rs/articles.rs/settings.rs 以 use super::{...} 引用，sync.rs 以 use super::sync_configured 引用；引用关系我已逐一 grep 落实（read_dedup_flag 被 folders:173 / articles:187 / settings:25 使用；schedule_state_push 被 articles:126/136/162 使用；sync_configured 被 folders:178/200/304、articles:156、sync:147 使用），与报告 §2 的归位理由一致，且下沉到任一领域模块都会造成跨模块私有引用或循环依赖，留在根是正确选择；当前整包已编译通过（fmt/clippy/test 三项 exit 0），说明不存在未解析引用。误引用时的失败模式是编译期硬错误（E0432 未解析导入 / E0603 私有项不可访问），作者 §6 记录的两次返工恰好就是这两类错误，证明该风险不可能静默漏到运行时。referer_candidates 的可见性处理正确：它保持私有 fn 定义在 settings.rs（图片代理段），调用方 fetch_image 与测试模块 image_proxy_tests 都在同一文件内，测试用 use super::referer_candidates，无需放宽为 pub、也未跨模块引用；我的限定符比对确认全过程没有任何 pub 被添加或删除（含非 fn 项：struct/enum/const/static 的文本在整文件 token diff 中无差异），ai.rs 的测试模块则用 use super::AiEvent 引用同文件的 pub enum AiEvent。glob 重导出的遮蔽风险：6 行 pub use <mod>::* 会把各子模块的公开项引入 commands 名字空间，我逐模块列出全部条目（fn/struct/enum/const/static/mod/use）后确认——没有任何名称在两个子模块中重复（唯一重复的是 use crate/use super/use tauri，而这些是非 pub 的 use，不参与重导出）；也没有子模块项与 mod.rs 自有项（read_dedup_flag/schedule_state_push/sync_configured/FlyingGuard/STATE_PUSH_*/STATE_PUSH_DEBOUNCE_MS）同名，故无遮蔽；glob 与显式项冲突时显式项优先，glob 与 glob 冲突在使用点报 E0659 硬错误（不会静默选错），因此即便未来新增同名项也是编译期暴露而非行为漂移。",
+      "evidence_files": [
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/commands/settings.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "模块边界沿既有章节注释而非重新设计：folders.rs 17 个 fn（Folders/Feeds）、articles.rs 14（Articles + 刷新）、settings.rs 9（Settings + 全文提取 + 图片代理，含 image_proxy_tests）、opml.rs 2、sync.rs 8、ai.rs 8（含 ai_event_tests）、根 4（drop + 三个共享项），与基线 §『既有章节边界』表逐段对应，用户/维护者原有的心智模型不需要重建。模块文档说明了『为什么』：mod.rs 开头的 //! 说明命令面职责与本次拆分动机，并显式写明『子模块经 pub use 重导出，使 crate::commands::<fn> 路径保持不变，故 lib.rs 与 tests/ 的既有引用无需改动』；三个共享项各自带注释解释为何不下沉（模块根共享项段与 sync_configured 的 doc 注释），这是本次拆分最关键的设计决策且已就地留痕。glob 重导出 vs 显式列名的取舍：glob 让 43 处 lib.rs 引用与 10 处 tests 引用零改动，代价是符号归属不可见、`use` 补全与检索更依赖 IDE；考虑到 6 个模块之间当前零重名、且冲突会以 E0659 编译错误暴露（非静默），选择 glob 在『本任务要求路径逐字不变』的约束下是合理权衡；建议在模块集合稳定后（TASK-045 拆 sync.rs 之后）改为显式 pub use <mod>::{...} 列表，以显式化对外命令面，属可选优化、非本任务缺陷。体量：1369 行 → 1431 行（+62，约 +4.5%），增量全部是模块声明、pub use 块、每文件 use 语句与重复的模块文档，无逻辑膨胀。可读性小瑕疵：crate::commands::sync（本次新建）与 crate::sync（既有，TASK-045 将再拆为 crate::sync/）同名不同层，检索时需注意层级，但不构成缺陷。报告可维护性相关行文另有两处不准确（§3 的 44 应为 43；§2 末句关于 ai.rs 引用 referer_candidates 的描述与代码不符——实际是测试模块随 settings.rs 并用 super::referer_candidates），属文档层面，不影响代码与本任务判据，建议后续订正报告，不阻塞验收。",
+      "evidence_files": [
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/commands/settings.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/commands/ai.rs",
+        ".workflow-kit/tasks/evidence/TASK-044-split-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "不适用，理由具体：本次改动是同一 crate 内的文件归属与模块路径调整，未新增/删除任何运行时实体——我把整份代码剔除 fn 后做 token 级比对，差异仅为 use/mod/pub use 声明，函数体（含锁顺序、await 点、spawn/AtomicBool 防抖逻辑、HTTP 与 SQLite 调用）token 级完全相同；未新增依赖（Cargo.toml 未改），未新增分配、加锁、IO 或异步任务，模块边界在编译期即被抹平，故对运行时吞吐/延迟/内存无可测量也无理论上的影响，本次门禁亦未包含任何性能基准。唯一可讨论的编译期成本是模块数增加带来的编译单元切分（对增量编译略有影响），与运行时性能无关，且不属本任务验收范围。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-044-split-report.md",
+        "src-tauri/src/commands/mod.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

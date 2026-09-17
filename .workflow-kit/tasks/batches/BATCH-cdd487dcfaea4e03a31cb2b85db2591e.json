@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "BATCH-cdd487dcfaea4e03a31cb2b85db2591e",
+  "status": "active",
+  "task_ids": [
+    "TASK-044",
+    "TASK-046"
+  ],
+  "approval_decision_ids": [
+    "DEC-3d2de2111cd84cb988eca14276e2c61f"
+  ],
+  "created_at_utc": "2026-09-17T05:52:08.434210Z"
+}

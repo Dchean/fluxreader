@@ -1,0 +1,12 @@
+{
+  "changed_files": [
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/commands/ai.rs",
+    "src-tauri/src/commands/articles.rs",
+    "src-tauri/src/commands/folders.rs",
+    "src-tauri/src/commands/mod.rs",
+    "src-tauri/src/commands/opml.rs",
+    "src-tauri/src/commands/settings.rs",
+    "src-tauri/src/commands/sync.rs"
+  ]
+}

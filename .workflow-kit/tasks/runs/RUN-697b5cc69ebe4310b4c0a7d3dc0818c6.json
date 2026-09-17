@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-697b5cc69ebe4310b4c0a7d3dc0818c6",
+  "task_id": "TASK-044",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "总控会话直接实现（POLICY coder=current_agent）；纯文件搬运式模块拆分，基线 120 passed/0 failed 已实测存档"
+  },
+  "started_at_utc": "2026-09-17T05:55:13.883493Z",
+  "finished_at_utc": "2026-09-17T06:06:03.561459Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "b21bd2edd1b0b9bd0155f8bbae6a0ff939051050a4e47a106983efff51432a63",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-697b5cc69ebe4310b4c0a7d3dc0818c6-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-697b5cc69ebe4310b4c0a7d3dc0818c6-scope.json",
+  "failure_kind": "scope",
+  "failure_reason": "Out-of-scope changes: src-tauri/src/commands.rs, src-tauri/src/commands/ai.rs, src-tauri/src/commands/articles.rs, src-tauri/src/commands/folders.rs, src-tauri/src/commands/mod.rs, src-tauri/src/commands/opml.rs, src-tauri/src/commands/settings.rs, src-tauri/src/commands/sync.rs"
+}

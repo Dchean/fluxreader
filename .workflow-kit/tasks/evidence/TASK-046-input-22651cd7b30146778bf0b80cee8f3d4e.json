@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-17T06:40:27.211332Z",
+  "roots": [
+    ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+    ".workflow-kit/scripts",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task046.md"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+      "sha256": "fa0df8ca73a8784bac0e302248c67596da55fe6d2277ccc12f5a22d6693958d6"
+    },
+    {
+      "path": ".workflow-kit/scripts/project_workflow.py",
+      "sha256": "3028cfe3bfa7fc5efc9961471429428371b2abf5ab884e453f1be2d6a01237a4"
+    },
+    {
+      "path": ".workflow-kit/scripts/workflow_bootstrap.py",
+      "sha256": "209f79973a9f8ff812fa6bf2572a07c2b0ff97184e3470109a3fa683b8d47ab7"
+    },
+    {
+      "path": ".workflow-kit/scripts/workflow_intake.py",
+      "sha256": "023dc703dfc013796175afd6a196b63116eba35a8d8070cad36399ac88c30525"
+    },
+    {
+      "path": ".workflow-kit/scripts/workflow_progress.py",
+      "sha256": "5c729bc1f142d9119c7f3a7db27f3848515e72b21f8f994aab364b46feb4a7a6"
+    },
+    {
+      "path": ".workflow-kit/scripts/workflow_runtime.py",
+      "sha256": "04957ba0d2bc8afac11656ce2129bb17f347d015f70aa9f91a218537a36794ab"
+    },
+    {
+      "path": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task046.md",
+      "sha256": "5828aafd25b1b1fae195e0d6de7b7a49360ef26c32501bbfc3221321f13e88bb"
+    }
+  ],
+  "digest": "7ea57e98c0a07e91f99d6dae84732585bad247ac2ad11095ddb8ec82740637b5"
+}

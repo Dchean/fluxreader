@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "RUN-303404165dfb4e98b953dd6b5971ccb9",
+  "task_id": "TASK-044",
+  "kind": "verification",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-66a0557bbdc24aa28dac1bd95aeab1d4"
+  },
+  "started_at_utc": "2026-09-17T06:08:49.870548Z",
+  "finished_at_utc": "2026-09-17T06:08:49.960797Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "b21bd2edd1b0b9bd0155f8bbae6a0ff939051050a4e47a106983efff51432a63",
+  "candidate_digest": "9062d870a8b59f9449ee13c5cf48a95cac4ba39669c59e07aa438be9e4ca8664",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-303404165dfb4e98b953dd6b5971ccb9-cargo_fmt.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-303404165dfb4e98b953dd6b5971ccb9-cargo_fmt.stderr.txt"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 45668,
+  "controller_pid": 42280,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "started_at_utc": "2026-09-17T06:08:49.939233Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-303404165dfb4e98b953dd6b5971ccb9-cargo_fmt.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-303404165dfb4e98b953dd6b5971ccb9-cargo_fmt.stderr.txt"
+    }
+  ],
+  "failure_kind": "environment",
+  "failure_reason": "[WinError 5] 拒绝访问。: 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-303404165dfb4e98b953dd6b5971ccb9.json.957d756fc3d34c5dadd332327160297d.tmp' -> 'D:\\\\fluxreader\\\\.workflow-kit\\\\tasks\\\\runs\\\\RUN-303404165dfb4e98b953dd6b5971ccb9.json'"
+}

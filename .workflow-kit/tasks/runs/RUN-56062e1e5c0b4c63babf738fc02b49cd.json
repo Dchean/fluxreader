@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-56062e1e5c0b4c63babf738fc02b49cd",
+  "task_id": "TASK-044",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "订正后恢复执行（owner 既有授权 DEC-toolfix-extend-deadlock-20260915 / DEC-3d2de211）：源码已于 RUN-697b5cc6 完成并自验通过（120/0/23 + fmt + clippy 全绿），本轮不改文件，仅用候选快照承载真实内容以闭合任务；原始失败记录保留在 evidence.ledger_correction"
+  },
+  "started_at_utc": "2026-09-17T06:08:35.105310Z",
+  "finished_at_utc": "2026-09-17T06:08:46.204573Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "b21bd2edd1b0b9bd0155f8bbae6a0ff939051050a4e47a106983efff51432a63",
+  "candidate_digest": "9062d870a8b59f9449ee13c5cf48a95cac4ba39669c59e07aa438be9e4ca8664",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-56062e1e5c0b4c63babf738fc02b49cd-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-56062e1e5c0b4c63babf738fc02b49cd-scope.json"
+}

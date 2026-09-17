@@ -1,0 +1,26 @@
+{
+  "task_id": "TASK-044",
+  "run_id": "RUN-697b5cc69ebe4310b4c0a7d3dc0818c6",
+  "status": "ready_for_verification",
+  "summary": "commands.rs（1157 行）按既有章节边界拆为 commands/ 领域子模块，纯搬运不改行为。结果：mod.rs 67 行（模块文档 + 3 个共享项 read_dedup_flag/schedule_state_push/sync_configured + 子模块声明与 pub use 重导出）、folders.rs 281、articles.rs 180、settings.rs 181、opml.rs 70、sync.rs 258、ai.rs 172（最大 281 行，满足 ≤400）。共享项由拆前的跨区块符号引用分析确定：read_dedup_flag 被 folders/refresh/settings 用、schedule_state_push 被 articles 用、sync_configured 被 folders/articles/sync 用，故三者留在模块根。referer_candidates 定义在图片代理段（随 settings.rs），而 ai.rs 的测试要用它，故 ai.rs 内测试引用改为 use super::settings::referer_candidates。为保持 crate::commands::<fn> 路径逐字不变（lib.rs 的 invoke_handler 44 处 + tests/sync_gap_repro_e2e.rs 10 处 app_lib::commands:: 引用），mod.rs 用 pub use <mod>::* 重导出，lib.rs 未改（git diff 为空）。纯搬运已用脚本证明：按顶层 fn 切分并去注释/空白后逐一比对，原 61 个函数 → 新 61 个，缺失 0、新增 0、函数体有改动 0。门禁本会话实跑（均重定向后读退出码）：cargo build exit 0（0 error/0 warning）、cargo fmt --all -- --check exit 0、cargo clippy --all-targets -- -D warnings exit 0、cargo test exit 0 且 120 passed / 0 failed / 23 ignored，与拆前基线 120/0/23 逐项一致。实施中两次返工均由编译器抓出：生成器未剥注释导致 14 个 unused import；mod.rs 漏搬 header 区块致 E0432（3 处），补齐后又因重复保留 //! 模块文档行触发 E0753，一并修正。",
+  "changed_files": [
+    "src-tauri/src/commands.rs",
+    "src-tauri/src/commands/mod.rs",
+    "src-tauri/src/commands/folders.rs",
+    "src-tauri/src/commands/articles.rs",
+    "src-tauri/src/commands/settings.rs",
+    "src-tauri/src/commands/opml.rs",
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/commands/ai.rs"
+  ],
+  "validation_requests": [
+    "请复核这是纯搬运：用脚本或人工确认原 commands.rs 的 61 个函数在新 commands/*.rs 中逐字存在、无逻辑改动（报告 §4 给了比对方法与结论，请独立复算）",
+    "请复核 lib.rs 与 tests/ 的引用路径确实未改动：git diff HEAD -- src-tauri/src/lib.rs 应为空；tests/sync_gap_repro_e2e.rs 的 10 处 app_lib::commands::record_* 应仍可编译通过（cargo test 已覆盖）",
+    "请复核 mod.rs 的 pub use 重导出是否引入命名冲突或遮蔽（7 个函数名曾在同一模块内天然唯一，但跨子模块重导出后需确认无重名）",
+    "请复核 3 个共享项留在模块根是必要而非随意：若把某一项下沉到领域模块，是否会形成循环依赖或私有项跨模块引用",
+    "请独立复跑四条门禁并以日志中 test result 行交叉核对 120/0/23（本环境用管道读退出码可能被掩盖，曾见 exit 1 而实际全绿）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

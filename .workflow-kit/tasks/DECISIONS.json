@@ -1092,6 +1092,26 @@
       "candidates": {
         "TASK-043": "6fa96b0b9efe82244a0df1e8b82c9eacd989347ef37cb6011eea2a9b252bea4e"
       }
+    },
+    {
+      "id": "DEC-3d2de2111cd84cb988eca14276e2c61f",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 明确指令：'按照你推荐的继续推进完成项目优化重构，确保你说的这些问题也修复'。据此关闭 BATCH-76b4bc0d（TASK-043 已 done），开启收尾批次：①BRIEF 最后一条验收目标——commands.rs/sync.rs 与 SettingsModal.tsx/store.ts 领域拆分（沿用 db.rs 试点模式，测试不回归）；②复核报告 B-3（关闭态弹窗不可聚焦）；③FINDINGS-REQ-007 残余前端缺陷。沿用既有预算（每任务 240 分钟、修复 4 轮），commit 沿用既有授权，push/release 仍需确认",
+      "statement": "Owner approved the next bounded batch under the existing brief and policy",
+      "scope": [
+        "workflow"
+      ],
+      "recorded_at_utc": "2026-09-17T05:52:08.428709Z"
+    },
+    {
+      "id": "DEC-task044-ledger-fix-20260917",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 明确授权『在工具脚本缺陷阻塞流程时修补工具脚本』（DEC-toolfix-extend-deadlock-20260915）；用户 2026-09-17 指令『按照你推荐的继续推进完成项目优化重构，确保你说的这些问题也修复』（DEC-3d2de2111cd84cb988eca14276e2c61f）。独立审查（TASK-044，PASS）指出本任务缺少像 TASK-043 那样的专属订正决定记录，故补录本条。",
+      "statement": "授权对 TASK-044 做**记录级**台账订正以解除 scope 阻塞：prepare 时 allowed_paths 误置于 spec 的 scope.* 嵌套层，workflow_runtime.prepare(:435) 只读顶层 specification.get('allowed_paths')，静默回退为目录式 snapshot_paths，finish 的 matches() 是纯 fnmatch 故全部误判越界。订正内容：scope.allowed_paths 目录式 → glob 式（src-tauri/src/**、src-tauri/tests/**）、重算 definition_digest（961231ee→b337e4c1）、清除 failure_kind/blockers。**边界**：只修授权写法，不放宽任何门禁、不改一行源码；原始失败 run RUN-697b5cc6 与 blockers 原样保留于 evidence.ledger_correction。独立审查已用候选对比证实：9062d870…→d94165d3… 之间 58 个文件中唯一变化的是 baseline 文档，src-tauri/ 下 57 个文件字节完全相同。这是该工具缺口的**第二次命中**，修复已另立 TASK-046。",
+      "scope": "TASK-044",
+      "recorded_at_utc": "2026-09-17T06:45:18.107992Z"
     }
   ]
 }

@@ -1,0 +1,99 @@
+{
+  "id": "TASK-044",
+  "title": "后端单体拆分一：commands.rs 按领域拆分为子模块（可维护性）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "draft",
+  "objective": "按 BRIEF 验收目标「后端 commands.rs/sync.rs 拆分完成，拆分过程测试不回归」，沿用 db.rs 试点模式（领域子模块 + 就地测试模块），把 src-tauri/src/commands.rs（1157 行）按既有章节边界拆分为 commands/ 子模块，纯搬运不改行为。目标结构：commands/mod.rs 保留模块声明与共享辅助（即时状态推送调度、公共 import 重导出）；按现有章节注释拆出 folders.rs（Folders/Feeds）、articles.rs（Articles + 刷新）、settings.rs（Settings + 全文提取 + 图片代理）、opml.rs（OPML 导入导出）、sync.rs（后端同步）、ai.rs（AI 引擎）。所有 #[tauri::command] 函数名、签名、可见性、lib.rs 的 invoke_handler 注册列表保持不变；仅调整文件归属与模块路径。",
+  "non_goals": [
+    "改变任何函数签名、行为、错误文案或命令名（前端零改动）",
+    "调整 lib.rs 的 invoke_handler 注册顺序或内容",
+    "改动 db/ 下的领域模块",
+    "拆分 sync.rs / ingestion.rs（独立后续任务）",
+    "前端改动"
+  ],
+  "requirement_refs": [
+    "MAINT-SPLIT-BACKEND"
+  ],
+  "reference_ids": ["REF-003"],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/**"
+    ],
+    "protected_paths": [
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task044.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task044.md",
+    "src-tauri/src",
+    "src-tauri/tests"
+  ],
+  "acceptance": [
+    "commands.rs 已拆为 commands/ 子模块，单文件均不超过 400 行；mod.rs 只保留模块声明与共享辅助",
+    "所有 #[tauri::command] 函数名与签名逐字不变（可用 git diff 证明仅移动、无重写）",
+    "lib.rs 的 invoke_handler 注册列表逐字未变",
+    "cargo test 全量保持 120 passed / 0 failed（与拆分前基线一致）",
+    "cargo fmt --all -- --check 与 cargo clippy --all-targets -- -D warnings 零告警",
+    "cargo test 的 ignored 数不增加（不得用 #[ignore] 掩盖问题）",
+    "无行为改动：无新增依赖、无逻辑重写、无错误文案变更"
+  ],
+  "gates": [
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": ["fmt", "--all", "--", "--check"],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": ["clippy", "--all-targets", "--", "-D", "warnings"],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": ["test"],
+      "cwd": "src-tauri",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 拆分前基线（本会话实跑）：cargo test 合计 120 passed / 0 failed / 23 ignored（完整日志存 baseline-rust-tests-2026-09-17.log）；cargo fmt --all -- --check 与 cargo clippy --all-targets -- -D warnings 此前 CI 已复跑通过。本任务为纯文件搬运（模块拆分），不改变任何函数签名与行为；判据是同一套测试在拆分后仍全绿且 ignored 数不增。前端回归与本任务无关（未改前端）。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task044.md"
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "src-tauri/tests 下 20 个 e2e 套件与 src/ 内联测试模块",
+        "reason": "拆分必须证明对外行为未变；这些测试是唯一的行为契约保护，必须逐条保持通过且不得删改断言",
+        "gate_ids": ["cargo_test"]
+      },
+      {
+        "action": "keep",
+        "target": "cargo fmt 与 cargo clippy 门禁",
+        "reason": "拆分产生新文件，仍需格式与 lint 达标；clippy 的 -D warnings 可捕获模块边界导致的可见性/未使用告警",
+        "gate_ids": ["cargo_fmt", "cargo_clippy"]
+      }
+    ]
+  }
+}
