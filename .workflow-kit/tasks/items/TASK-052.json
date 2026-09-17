@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "id": "TASK-052",
+  "title": "P1-14 口径半边：分页带上当前范围筛选（per-scope 游标重设计）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "修掉 P1-14 的另一半。现状（TASK-051 已修其「吞错」半边，此半边被明确留下）：`loadMoreArticles` 请求下一页时不带当前范围筛选（`feed_id` / `folder_id` / `only_unread` / `only_starred` 等），因此在单源或单分类视图下，分页是按**全局序列**的游标走的——`articlesLimit` 实际是「全局查询」的 offset。后果：在某个订阅源视图里不断下滚，取回的并不是该源的后续文章；且当列表为空时 `Timeline` 的滚动哨兵（`items.length > 0` 才渲染）根本不渲染，导致**该源的老文章永远够不到**。本任务按 owner 裁决『另立任务重设计』做 **per-scope 游标**改造，使分页与当前视图的筛选口径一致。",
+  "non_goals": [
+    "顺手修 TASK-051 报告里列出的其它未修项（同步协议侧 P1-5/P1-6、Rust 侧 P2-9/P2-10 后半/P2-11/P2-12、P3-x、P1-7 残留、组件层 P2-2/P2-5/P2-6）",
+    "改变同步协议行为",
+    "引入新依赖",
+    "改动 src-tauri/**（本任务只改前端分页口径；若发现必须改后端查询接口，停下来报告）",
+    "改动工作流（.workflow-kit/**）",
+    "改 TASK-048 建立的 141/186 项回归网中与本次口径无关的断言"
+  ],
+  "requirement_refs": [
+    "REQ-007"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-c22f890a49524130a32d3d8254d742cb"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+      "src/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "在**单源视图**下连续翻页取回的是该源的后续文章（不再是全局序列的下一段）：给出可复跑断言，断言第 2 页的条目 id 集合确实属于该 feed，且与第 1 页不重叠",
+    "在**单分类视图**下同样成立（筛选用 folder_id 口径）",
+    "**列表为空时也能触发加载**：单源视图下该源没有文章时，滚动哨兵必须可渲染/可触发（不再因 items.length>0 而不渲染导致够不到）；给出断言",
+    "游标语义明确：**每个范围各自持有一个游标**（per-scope），切换范围不得互相污染——给出断言（例如在 A 源翻到第 2 页后切到 B 源，B 源应从第 1 页开始）",
+    "既有断言的影响须**逐条说明**：本任务被 owner 授权可动到既有『selectFeed 不 reload』契约断言；除该组外不得削弱其它断言。若有断言必须更新，须在报告中逐条列出并说明理由与新旧期望",
+    "npm run lint 0 warnings / 0 errors；npm run build 通过；npm run test:frontend 全部通过且退出码 0（通过计数可为 186 或更多；若因契约更新而数量变化须说明）",
+    "不引入新依赖；package.json / lock 零改动",
+    "文本文件必须 LF 行尾；台账改动须在 begin 之前完成"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 基线（TASK-051 之后）：lint exit 0（0 warnings/0 errors，53 files）、build exit 0、test:frontend exit 0 且 186/186（既有 26 + TASK-048/051 新增 160）、cargo test exit 0。**本任务有意改变行为**（分页口径），故基线不是「保持不变」，而是「既有保护除被授权的 selectFeed 组外不削弱 + 每处行为变化都有对应断言更新与理由」。既有断言中与分页直接相关的是 (g) 组（分页游标推进/不足一页置 exhausted/在途防抖/失败复位/游标竞态丢弃）与 (b) 组（selectFeed 范围与派生树）。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md"
+    },
+    "decision_ids": [
+      "DEC-c22f890a49524130a32d3d8254d742cb"
+    ],
+    "actions": [
+      {
+        "action": "adapt",
+        "target": "(b) 组中与『selectFeed 不 reload』相关的契约断言",
+        "reason": "owner 已授权本任务动到该组：per-scope 游标的实现可能需要切换范围时触发按范围拉取或重置该范围游标，这与原契约『切源不重新拉取』存在张力，必须显式更新并说明",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部既有断言（含 (g) 组的失败路径、既有 26 项）",
+        "reason": "它们是累计的行为契约；本次只改分页口径，不得借机削弱其它保护",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "按范围翻页、空列表可触发、per-scope 游标互不污染 的定向断言",
+        "reason": "本任务的核心行为变化必须有可复跑证据，而非只靠人工观察",
+        "gate_ids": [
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-052-input-b12cb647148a4648b1a626aa67eac486.json",
+    "digest": "a0280c4ac813b5125c6871a01ab7e03a0137374b7b757d04f2c6afa0db4a5a7d",
+    "source_revision": null,
+    "definition_digest": "e532d286b23059ee0376173aaf05b7444bf54c41f7099f0fd659cc999fd920c1"
+  },
+  "budget": {
+    "started_at_utc": null,
+    "deadline_at_utc": null,
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-a4d86daa80e348b78973d58fc2353698",
+  "run_ids": [],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    "src",
+    "tools/frontend-regression.mjs"
+  ]
+}

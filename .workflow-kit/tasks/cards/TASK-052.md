@@ -1,0 +1,52 @@
+<!-- project-workflow: generated view; edit task JSON instead -->
+# TASK-052 · P1-14 口径半边：分页带上当前范围筛选（per-scope 游标重设计）
+
+**状态**：ready
+
+**目标**：修掉 P1-14 的另一半。现状（TASK-051 已修其「吞错」半边，此半边被明确留下）：`loadMoreArticles` 请求下一页时不带当前范围筛选（`feed_id` / `folder_id` / `only_unread` / `only_starred` 等），因此在单源或单分类视图下，分页是按**全局序列**的游标走的——`articlesLimit` 实际是「全局查询」的 offset。后果：在某个订阅源视图里不断下滚，取回的并不是该源的后续文章；且当列表为空时 `Timeline` 的滚动哨兵（`items.length > 0` 才渲染）根本不渲染，导致**该源的老文章永远够不到**。本任务按 owner 裁决『另立任务重设计』做 **per-scope 游标**改造，使分页与当前视图的筛选口径一致。
+
+**依赖**：无
+**参考方案**：见 ../RESEARCH.md
+**界面约定**：不涉及界面
+**界面检查**：不适用
+**修改范围**：.workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md, src/**, tools/frontend-regression.mjs
+
+## 验收标准
+
+- 在**单源视图**下连续翻页取回的是该源的后续文章（不再是全局序列的下一段）：给出可复跑断言，断言第 2 页的条目 id 集合确实属于该 feed，且与第 1 页不重叠
+- 在**单分类视图**下同样成立（筛选用 folder_id 口径）
+- **列表为空时也能触发加载**：单源视图下该源没有文章时，滚动哨兵必须可渲染/可触发（不再因 items.length>0 而不渲染导致够不到）；给出断言
+- 游标语义明确：**每个范围各自持有一个游标**（per-scope），切换范围不得互相污染——给出断言（例如在 A 源翻到第 2 页后切到 B 源，B 源应从第 1 页开始）
+- 既有断言的影响须**逐条说明**：本任务被 owner 授权可动到既有『selectFeed 不 reload』契约断言；除该组外不得削弱其它断言。若有断言必须更新，须在报告中逐条列出并说明理由与新旧期望
+- npm run lint 0 warnings / 0 errors；npm run build 通过；npm run test:frontend 全部通过且退出码 0（通过计数可为 186 或更多；若因契约更新而数量变化须说明）
+- 不引入新依赖；package.json / lock 零改动
+- 文本文件必须 LF 行尾；台账改动须在 begin 之前完成
+
+## 测试适用性
+
+- 既有行为：按已确认需求变化
+- 原始基线：PASS；2026-09-17 基线（TASK-051 之后）：lint exit 0（0 warnings/0 errors，53 files）、build exit 0、test:frontend exit 0 且 186/186（既有 26 + TASK-048/051 新增 160）、cargo test exit 0。**本任务有意改变行为**（分页口径），故基线不是「保持不变」，而是「既有保护除被授权的 selectFeed 组外不削弱 + 每处行为变化都有对应断言更新与理由」。既有断言中与分页直接相关的是 (g) 组（分页游标推进/不足一页置 exhausted/在途防抖/失败复位/游标竞态丢弃）与 (b) 组（selectFeed 范围与派生树）。
+- 基线证据：.workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md
+- 需求决定：DEC-c22f890a49524130a32d3d8254d742cb
+- 适配：(b) 组中与『selectFeed 不 reload』相关的契约断言；owner 已授权本任务动到该组：per-scope 游标的实现可能需要切换范围时触发按范围拉取或重置该范围游标，这与原契约『切源不重新拉取』存在张力，必须显式更新并说明；验证：frontend
+- 保留：其余全部既有断言（含 (g) 组的失败路径、既有 26 项）；它们是累计的行为契约；本次只改分页口径，不得借机削弱其它保护；验证：frontend
+- 补充：按范围翻页、空列表可触发、per-scope 游标互不污染 的定向断言；本任务的核心行为变化必须有可复跑证据，而非只靠人工观察；验证：frontend
+
+## 执行与恢复
+
+- 首次开始：None
+- 原截止时间：None
+- 当前截止时间：None
+- 已用修复轮：0
+- 阻塞：无
+- 下一步：执行 start/next 获取可继续的动作
+
+## 最近检查点
+
+
+## 原始证据
+
+[唯一状态记录](../items/TASK-052.json)
+
+
+卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

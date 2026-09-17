@@ -1257,6 +1257,19 @@
       "candidates": {
         "TASK-051": "826a858ce8e686c5f5e42049ac8e827b90771be9a6823f08d1734379a46cf2f5"
       }
+    },
+    {
+      "id": "DEC-c22f890a49524130a32d3d8254d742cb",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 就 TASK-051 报告并列出未修项后逐项裁决：(1) P1-14 口径半边（loadMoreArticles 不带范围筛选、须 per-scope 游标重设计）选择『另立任务重设计』；(2) P1-5 离线期间『全部已读』不入队（mark_all_read 仍以 sync_configured 为入队条件）选择『另立任务修（需授权改协议行为）』。据此关闭已全部完成的批次 BATCH-ed8c3c3553684e2d82ef8608df08b24c（TASK-048/049/050/051 全 done），开启新批次处理这两项。**授权边界（本轮新增）**：本批次授权**改变同步协议行为**（仅为 P1-5 所必需，且该项修复须在报告中论证协议语义变更与兼容影响）；P1-14 的 per-scope 游标改造授权动到既有『selectFeed 不 reload』契约断言并同步更新。仍不动工作流。沿用既有预算（每任务 240 分钟、修复 4 轮），commit 沿用既有授权，push/release 仍需确认",
+      "statement": "Owner approved the next bounded batch under the existing brief and policy",
+      "scope": [
+        "TASK-052",
+        "TASK-053",
+        "REQ-007"
+      ],
+      "recorded_at_utc": "2026-09-17T20:30:01.387438Z"
     }
   ]
 }
