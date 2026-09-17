@@ -53,6 +53,20 @@ export function PlayerBar() {
   /** 落库节流：记录上次写入的整秒 */
   const lastSaveRef = useRef(-1);
 
+  /** 续播 seek：只有元数据就绪（readyState ≥ HAVE_METADATA = 1）后才能安全设
+      currentTime。两个触发点共用：① loadedmetadata/durationchange 事件；
+      ② 续播记录（异步 IPC）返回时若元数据早已就绪。缺 ② 就是 P2-2 ——
+      本地文件/强缓存下 metadata 先于 IPC 到达，onMeta 早就跑完，
+      pendingResumeRef 才被填上，这次 seek 永远没人执行（续播静默失效）。 */
+  const applyPendingResume = (el: HTMLAudioElement | null, url: string) => {
+    const pr = pendingResumeRef.current;
+    if (!el || !pr || pr.url !== url || pr.pos <= 0) return;
+    if (el.readyState < 1) return;      // 元数据未就绪 → 交给 loadedmetadata
+    el.currentTime = pr.pos;
+    syncPlayerProgress(pr.pos, el.duration || 0);
+    pendingResumeRef.current = null;
+  };
+
   /* 换剧集时读续播记录：命中同 URL 且未播完 → 记录待 seek */
   useEffect(() => {
     if (!player.isActive || !player.audioUrl) return;
@@ -69,6 +83,8 @@ export function PlayerBar() {
         // 命中同一集、有有效位置、且未接近结束（< 时长-5s）→ 续播
         if (r.url === player.audioUrl && pos > 0 && (dur <= 0 || pos < dur - 5)) {
           pendingResumeRef.current = { url: r.url, pos };
+          /* P2-2：元数据若已就绪（本地文件/缓存命中）立即续播，否则等 onMeta */
+          applyPendingResume(audioRef.current, player.audioUrl);
         }
       } catch { /* 坏记录忽略 */ }
     });
@@ -107,12 +123,7 @@ export function PlayerBar() {
     const onMeta = () => {
       syncPlayerProgress(el.currentTime, el.duration || 0);
       // 续播：元数据就绪后再 seek（此时可安全设 currentTime）
-      const pr = pendingResumeRef.current;
-      if (pr && pr.url === player.audioUrl && pr.pos > 0) {
-        el.currentTime = pr.pos;
-        syncPlayerProgress(pr.pos, el.duration || 0);
-        pendingResumeRef.current = null;
-      }
+      applyPendingResume(el, player.audioUrl);
     };
     const onTime = () => {
       syncPlayerProgress(el.currentTime, el.duration || 0);

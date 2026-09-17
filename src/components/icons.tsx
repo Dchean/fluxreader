@@ -64,8 +64,3 @@ export const LayoutIcon: Record<string, () => React.ReactElement> = {
   podcast: Icons.podcast,
   notification: Icons.notification,
 };
-
-export const LAYOUT_LABELS: Record<string, string> = {
-  article: '文章', social: '社交', image: '画廊', podcast: '播客', notification: '通知',
-  inherit: '继承组',
-};

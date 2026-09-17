@@ -11,6 +11,28 @@ export type ViewFilterType = 'all' | 'today' | 'unread' | 'starred';
 export type PaletteTheme = 'blue' | 'zinc' | 'purple' | 'emerald' | 'terracotta';
 export type ThemeMode = 'dark' | 'light' | 'auto';
 
+/* ---- 设置项的运行时取值清单（D4/D5） ----
+   同一份声明既供设置页下拉渲染，又供 store 的写/读校验使用：两份清单
+   曾经漂移过——设置页提供「文章」('article') 而 bootstrapSettings 的白名单
+   不含它，用户选中后静默失效（白名单里的 'starred' 又没有任何 UI 入口）。
+   新增取值只改这里一处，UI 与校验不可能再对不上。 */
+export const STARTUP_VIEW_OPTIONS: { value: ViewFilterType; label: string }[] = [
+  { value: 'unread', label: '未读' },
+  { value: 'all', label: '全部' },
+  { value: 'today', label: '今天' },
+  { value: 'starred', label: '收藏' },
+];
+/** 「启动时打开」可接受的视图取值（= 上面选项集合，顺序无关） */
+export const STARTUP_VIEWS: string[] = STARTUP_VIEW_OPTIONS.map((o) => o.value);
+/** 主题模式白名单（与 AppearanceTab 的选项一致） */
+export const THEME_MODES: ThemeMode[] = ['light', 'dark', 'auto'];
+/** 配色白名单（与 shared.ts 的 PALETTES 的 id 一致） */
+export const PALETTE_THEMES: PaletteTheme[] = ['blue', 'zinc', 'purple', 'emerald', 'terracotta'];
+/** 默认打开方式白名单（与 ReadingTab 的选项一致） */
+export const DEFAULT_OPEN_MODES: ('rss' | 'fulltext')[] = ['rss', 'fulltext'];
+/** 同步模式白名单（与 SyncTab 的选项一致） */
+export const SYNC_MODES: ('direct' | 'hybrid')[] = ['direct', 'hybrid'];
+
 export interface FeedItem {
   id: string;
   name: string;
@@ -79,8 +101,3 @@ export type TabName =
   | 'sync'
   | 'shortcuts'
   | 'about';
-
-export interface ToastMessage {
-  id: number;
-  text: string;
-}

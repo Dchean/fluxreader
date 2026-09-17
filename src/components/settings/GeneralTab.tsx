@@ -1,4 +1,5 @@
 import { useAppStore } from '../../store';
+import { STARTUP_VIEW_OPTIONS } from '../../types';
 import { FluxDropdown, Switch, SettingCard } from '../primitives';
 import { AutoStartSwitch } from './AutoStartSwitch';
 
@@ -62,16 +63,14 @@ export function GeneralTab() {
         <Switch checked={settings.notifyOnNewArticles} onChange={(v) => updateSettings({ notifyOnNewArticles: v })} />
       </SettingCard>
       <SettingCard title="启动时打开" desc="下次打开应用时默认进入的视图">
+        {/* D4：选项与 store 的启动白名单（STARTUP_VIEWS）同源——此前的
+            「文章」('article') 不在白名单内，选中后静默失效，已移除；
+            白名单里的「收藏」补上了 UI 入口。 */}
         <FluxDropdown
           width={130}
           value={settings.startupView}
           onChange={(v) => updateSettings({ startupView: v })}
-          options={[
-            { value: 'unread', label: '未读' },
-            { value: 'all', label: '全部' },
-            { value: 'today', label: '今天' },
-            { value: 'article', label: '文章' },
-          ]}
+          options={STARTUP_VIEW_OPTIONS}
         />
       </SettingCard>
       <SettingCard title="启动时隐藏已读" desc="仅展示未读流内容">

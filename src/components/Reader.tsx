@@ -72,8 +72,11 @@ export function Reader() {
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const summaryOpen = summaryOverride ?? (config.autoSummary || summaryGenerating || !!summaryError);
 
-  /* 阅读时间估算（中文 ~400字/分钟，英文 ~220词/分钟） */
-  const readTime = art
+  /* 阅读时间估算（中文 ~400字/分钟，英文 ~220词/分钟）。
+     P2-5：正文未水合时 content 是空串，按它算出来恒为「1 分钟阅读」，
+     水合后又会跳到真实值（假数字 + 跳变）。未水合就不显示——
+     宁可暂时没有这一项，也不显示一个确定错的数字。 */
+  const readTime = art && art.content
     ? `${Math.max(1, Math.round(art.content.replace(/<[^>]+>/g, '').length / 400))} 分钟阅读`
     : '';
 
@@ -198,7 +201,7 @@ export function Reader() {
                   <span>{art.tags.join(' / ')}</span>
                 </>
               )}
-              {settings.showReadTime && (
+              {settings.showReadTime && readTime && (
                 <>
                   <span>·</span>
                   <span>{readTime}</span>

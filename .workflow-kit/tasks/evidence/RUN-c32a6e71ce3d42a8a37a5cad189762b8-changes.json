@@ -1,0 +1,26 @@
+{
+  "changed_files": [
+    "src/components/PlayerBar.tsx",
+    "src/components/Reader.tsx",
+    "src/components/icons.tsx",
+    "src/components/settings/AboutTab.tsx",
+    "src/components/settings/AiTab.tsx",
+    "src/components/settings/AutoStartSwitch.tsx",
+    "src/components/settings/FeedsTab.tsx",
+    "src/components/settings/GeneralTab.tsx",
+    "src/components/settings/aiConfig.ts",
+    "src/components/settings/compareVersions.ts",
+    "src/lib/format.ts",
+    "src/store/internals.ts",
+    "src/store/selectors.ts",
+    "src/store/settingsValidation.ts",
+    "src/store/slices/ai.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/reader.ts",
+    "src/store/slices/settings.ts",
+    "src/types.ts",
+    "tools/frontend-regression.mjs",
+    "tsconfig.test.json"
+  ]
+}

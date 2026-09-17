@@ -1,0 +1,69 @@
+{
+  "task_id": "TASK-051",
+  "candidate_digest": "826a858ce8e686c5f5e42049ac8e827b90771be9a6823f08d1734379a46cf2f5",
+  "verification_run": "RUN-361c62f585d946e19f98c4b7166a1578",
+  "verdict": "PASS",
+  "summary": "独立审查（未参与实现）：逐项自跑核对，结论 PASS。关键复现均自行完成，未采信报告自述：(1)『修前失败→修后通过』用自行 revert 复现 5 组——revert src/store/slices/ai.ts 使 6 条 D1a/D1b/D1c 断言由通过转失败（186→180）；revert slices/bootstrap.ts 使 2 条 D2 + 2 条 D3 断言失败（→182）；revert slices/settings.ts 使 5 条 D5 + 2 条 D4 断言失败（→178）；revert store/internals.ts 使 E2 断言失败（→185）；revert slices/reader.ts 使 2 条 P2-10 断言失败（→184）。每组 revert 后既有 26 项始终 26/26 通过。所有被 revert 的文件均已还原，还原后逐文件 SHA256 与候选清单 103 个文件的记录值**零不匹配**，证明未留下未提交破坏。(2) 既有 26 项断言：用自定义括号平衡提取器对 HEAD 版与工作区版逐块归一化比对，26/26 完全一致（含 check 函数定义共 27 块全同）；checkNew 旧块中恰好且仅有 2 块被替换，正是任务卡 test_review.actions 预先授权 adapt 的那两条『把现状写成期望』的观察项（(g) D2 静默吞错、(k) D5 非法值落库），净增 47 块、总数 161，与 186 = 26 + 160 自洽。(3) D4 单源已核实：STARTUP_VIEW_OPTIONS 在 src/types.ts 定义，GeneralTab 以 options={STARTUP_VIEW_OPTIONS} 渲染，设置校验用 oneOf(STARTUP_VIEWS) 而 STARTUP_VIEWS 由该数组派生；'article' 已从选项数组移除（仅存注释说明），'starred' 新入口对应的启动路径完整（bootstrapSettings 写 activeViewFilter → reloadFromBackend → reloadFilteredEntries 发 only_starred: true）。(4) D5 读写共用一张表已核实：settingsValidation.SETTINGS_VALIDATORS 同时被 updateSettings(sanitizeSettingsPatch) 与 bootstrapSettings(isValidSetting) 使用；revert 该文件后越界/非法枚举/未知键断言全部失败。(5) E1 三条断言确经晚绑定句柄写入 store.githubAccount（含 null 不误清空、IPC reject 静默不抛），E2 已改为显式 throw（revert 后该断言失败）。(6) 台账两段订正合规：实际 diff 仅 include 新增 3 行、compilerOptions 未动、未引依赖；RUN-361 的 build 门禁 argv 实为 npm run build（订正是收紧而非放宽），两段均引 owner 明确授权且与 DEC-fix-all-findings-20260917『越权情形…记录级订正』一致。(7) 被证伪情报经我独立实测确认：compareVersions(remote,'') 返回 9 而非 NaN（''.split('.') === ['']，Number('') === 0），实施方结论正确，NaN 说法不成立；(8) 门禁自跑（退出码重定向后读取）：lint exit 0、build exit 0、test:frontend exit 0 且 186/186（26 既有 + 160 新增）、cargo test exit 0。未做项：未启动 Tauri 应用、未做真机 UI 交互（任务卡 ui_change=false 且本任务无需启动应用，符合要求）；组件层 P2-2/P2-5/P2-6 因 harness 无 DOM，我同样只能以 tsc+oxlint+代码审查为证，未取得渲染级证据（理由成立，详见 regression 与 requirements）。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收项逐条核对：A 类 D1a/D1b/D2/D3/D4/D5 全部落实并有可复跑断言（我自行 revert 复现了失败→通过翻转）；复核中新发现的同源 D1c（slices/ai.ts toggleReaderTranslation 的 if (art.translatedContent) 短路）一并修复，属任务卡『全部已发现缺陷』授权范围内的同源缺陷，处理正当。B 类：L1 已改为 Map 索引（我独立实测 n=20000/m=5000 时 225.92ms→3.04ms 且结果与顺序完全一致，语义等价成立，绝对数值与本机 JIT 有关但与报告同一量级）；L2 选择『保持保守设计』而非改码，理由成立——feedCounts 为后端精确计数，缺项跳过只会使数字偏小，退回按 entries（当前分页快照，最多 500/页）计数反而会重新引入该函数注释点明的『数字不准确』根因，且以 2 条断言锚定该取舍，属『有意的保守设计 + 说明并锚定』，符合任务卡二择一要求。C 类：文档实为 41 条编号项（我独立 regex 统计确认 41，非口述的 45 条），报告给出 17 条经复核已不存在、8 条本轮修复及 P3-1/P3-12 的逐项处置。D 类 E1/E2 均已落实。逐项处置均标注了『已修/不修+理由』，未发现该修而未修且未说明的项。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-051-worker-result.json",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task051.md",
+        ".workflow-kit/docs/FINDINGS-REQ-007.md",
+        ".workflow-kit/tasks/evidence/TASK-051-gate-BEFORE-failures.txt"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "本任务有意改变行为（修缺陷），故『既有保护未被削弱』须逐项证明，我以事实而非自述验证：(a) 既有 26 项断言在归一化块比对下 26/26 与 HEAD 完全一致，一行未删改——我分别在 5 组 revert 实验（ai.ts / bootstrap.ts / settings.ts / internals.ts / reader.ts）中观察到既有 26 项始终 26/26 通过，未被任何修复牵连。(b) 新增 160 项覆盖 D1a/D1b/D1c/D2/D3/D4/D5/E1/E2/L1/L2/P2-4/P2-7/P2-10，且其中 21 条在修前确认失败（我复现的子集与其 BEFORE 日志清单逐条吻合）。(c) 那两条被更新的观察项断言属『必要的契约变化』而非『为让测试变绿而改测试』：二者原文明确把 D2 的『静默吞错、用户侧零提示』与 D5 的『非法值仍原样写进 settings』写成期望并自标『记录为观察项』；缺陷一经修复，原断言必然失败。改后的期望与修复目标同向且更强（(g) 要求出现含文案的 toast + 可调用的重试 action；(k) 要求非法 startupView 不写进 settings），并且任务卡 test_review.actions 已预先声明 adapt 这两条、baseline 文档的边界也写明『可更新那条把现状写成期望的观察项断言，但须逐条说明』——属事先授权的契约变更，非事后放宽。(d) 未发现任何既有断言被删除或弱化，也未发现为迁就实现而放松门禁。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/_rev501-harness.diff",
+        ".workflow-kit/tasks/evidence/_rev501-D1-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/_rev501-D3-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/_rev501-D5-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/_rev501-E2-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/_rev501-L1-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/_rev501-gate-frontend.txt",
+        ".workflow-kit/tasks/evidence/TASK-051-gate-test-run1.txt",
+        ".workflow-kit/tasks/evidence/TASK-051-gate-test-run2.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "D1/D2/D3 本身就是失败路径缺陷，我以定向 revert 逐一证明断言确有鉴别力：D1a/D1b/D1c（AI 流先产出半截文本再报错后，toast 的『重试』曾是死按钮）——revert slices/ai.ts 后恰 6 条断言失败，确认修复前 requests 不重发、错误态不清；D2（loadMoreArticles 失败静默吞错）——revert slices/bootstrap.ts 后 2 条断言失败，确认修后失败路径给出可见 toast 且 action.run 可再次触发分页；D3（竞态丢弃分支不复位 articlesLoading，致入口守卫永久锁死后续加载）——同次 revert 后 2 条断言失败，修复在丢弃分支 set({articlesLoading:false})，且断言还验证『下一次分页请求照常发出』的守卫解锁语义，覆盖到位。E1 第 3 条断言覆盖 IPC reject 路径（github_login_status → Promise.reject）：要求不抛出、不污染既有状态，revert 无法测该路径（因 bootstrapGithubAuth 本任务未改），但我核对了断言体与假后端分支实现，reject 分支确实返回 Promise.reject 且断言捕获抛出标志。P2-10 覆盖全文提取『防退化原样返回』的失败路径（revert reader.ts 后 2 条失败）。未发现失败路径被忽略或仅以 happy path 覆盖的情况。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/_rev501-D1-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/_rev501-D3-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/_rev501-L1-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/TASK-051-gate-BEFORE-failures.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "新增三个模块职责清晰且各自单一：src/store/settingsValidation.ts 只负责设置项的键级校验（每个键一张校验器 + sanitizeSettingsPatch 过滤补丁），并以 Record<keyof SettingsState, …> 声明，使 SettingsState 新增键而漏配校验器时被 tsc -b 拦下（该断言亦由回归固化）；src/components/settings/aiConfig.ts 只负责『只改指定字段』的 AI 配置 JSON 合并，把 P2-4 的端点配置保留语义从组件中抽出可单测；src/components/settings/compareVersions.ts 只负责版本可比性判定与『是否有可用更新』收口，调用方对不可比情形给『无法确定』而非『已是最新』，消除了 compareVersions(remote,'') 把空串当 0.0.0 的误判面。D4 的『单一来源』确为实质收敛：STARTUP_VIEW_OPTIONS 是唯一取值声明，STARTUP_VIEWS 由它派生（map），设置页下拉直接消费该数组、store 白名单经 STARTUP_VIEWS 消费同一数组——两份清单在结构上不再可能漂移，优于『只删死选项』（那仍会保留两份清单）。删选项『文章』附理由（语义等于『全部』、旧标签残留），补『收藏』UI 入口使白名单取值与 UI 可达性对齐。同时可见：三个新模块均被 tsconfig.test.json 的 include 纳入以供 emit 断言，属测试编译配置而非放宽门禁。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-051-worker-result.json",
+        ".workflow-kit/tasks/evidence/_rev501-D5-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/_rev501-E2-BEFORE.txt"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "L1 的复杂度改进有实测且经我独立复现：报告称 n=20000×m=5000 时 163.4ms→2.42ms；我用等价的旧实现（逐 id entries.find）与新实现（先建 Map<id,entry> 再 filter）在同一负载（n=20000 entries、m=5002 ids 含 2 个未知 id）实测为旧 225.92ms、新 3.04ms（约 74x），并断言两者返回的 id 序列逐元素相同（含未知 id 被忽略、顺序保持），证明只改复杂度、未改行为契约。绝对值与报告不同属机器与 JIT 差异，量级一致，结论方向可靠。语义等价另有既有回归作为护栏：revert reader.ts 时 L1 相关 4 条断言并未失败（失败的是同文件的 P2-10 两条），符合『纯优化不应改变可观察行为』的预期签名。除 L1 外本任务无其他性能主张（D1–D5 为正确性修复，不以性能为卖点）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/_rev501-L1-perf.cjs",
+        ".workflow-kit/tasks/evidence/_rev501-L1-BEFORE.txt",
+        ".workflow-kit/tasks/evidence/_rev501-gate-frontend.txt"
+      ]
+    }
+  ],
+  "ui_review": null
+}

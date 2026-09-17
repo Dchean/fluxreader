@@ -51,10 +51,12 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       /* 切换布局 = 刷新列表，清除"已读保留"快照 */
       openedReadIds: {},
     });
-    /* 不触发 reload：entries 已统一附带正文（with_content 全量），布局切换是
-       纯本地过滤（selectVisibleEntries 按新布局 resolve feed 布局），内容立即
-       可见、零延迟。之前在此触发 reload 会在切换瞬间显示旧布局的空 content
-       条目（「加载正文」闪动）+ 异步等待，是「切换卡顿/不直接查看」的根因。 */
+    /* 不触发 reload：布局切换是纯本地过滤（selectVisibleEntries 按新布局
+       resolve feed 布局），零延迟。列表快照本身不带正文（with_content 恒 false，
+       正文由 useLazyHydrate 按视口批量水合，见 bootstrap.ts 的 layoutNeedsBody），
+       因此新布局的卡片正文会在挂载时水合——不会出现「切换瞬间渲染旧布局正文」
+       的错配。之前在此触发 reload 会带来异步等待 + 空列表闪动，是「切换卡顿」
+       的根因。 */
   },
 
   selectView: (view) => {

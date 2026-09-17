@@ -128,6 +128,13 @@ export function selectViewCounts(
     // 订阅范围过滤：'cat-xxx' 只算该分类，单个 feed 只算该 feed
     if (s.activeFeedFilter.startsWith('cat-') && binding.cat.id !== s.activeFeedFilter) continue;
     if (s.activeFeedFilter !== 'all' && !s.activeFeedFilter.startsWith('cat-') && feedId !== s.activeFeedFilter) continue;
+    /* L2（有意为之的保守设计，保持不改）：feedCounts 缺该源时直接跳过，不退回
+       按 entries 计数。原因：entries 是「当前分页快照」（列表最多 500 条/页），
+       按它计数会重新引入本函数注释开头点明的「数字不准确」根因；feedCounts 是
+       后端精确计数，缺项只会让数字偏小（保守），不会虚高或与列表口径打架。
+       代价：该源的角标为空、其条目不计入「全部」数字，但条目仍正常列出——
+       由回归断言「(L2) feedCounts 缺项：该源不计入「全部」总数，树角标也不建
+       该行（保守设计）」+「(L2) 但该源条目仍正常列出」锚定。 */
     const c = s.feedCounts.get(feedId);
     if (!c) continue;
     total += c.total;
@@ -164,6 +171,8 @@ export function selectTreeCounts(
   const bump = (key: string, n: number) => counts.set(key, (counts.get(key) ?? 0) + n);
   for (const [feedId, binding] of s.feedIndex) {
     if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
+    /* L2：feedCounts 缺该源 → 不建角标（与 selectViewCounts 同一取舍：精确计数
+       缺失时保守留空，不退回受分页截断的 entries 计数）。 */
     const c = s.feedCounts.get(feedId);
     if (!c) continue;
     // 「显示: 未读」只在「全部」视图生效（与 selectVisibleEntries 同口径），

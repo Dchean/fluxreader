@@ -25,8 +25,16 @@ export function bindAppStore(api: StoreApi<AppState>): void {
   appStoreRef = api;
 }
 
+/** store 句柄读取：未注入即显式抛错。
+    此前是 `appStoreRef as StoreApi<AppState>` —— 类型上由断言强行伪装成已就绪，
+    一旦某个 helper 在 bindAppStore 之前被调用（模块求值期、或未来新增的调用点），
+    拿到的是 undefined，报错点会漂移到 `undefined.getState is not a function`
+    这种与真实原因无关的位置。改成显式抛错，把失败点固定在根因处。 */
 export function appStore(): StoreApi<AppState> {
-  return appStoreRef as StoreApi<AppState>;
+  if (!appStoreRef) {
+    throw new Error('appStore() 在 bindAppStore() 之前被调用：store 尚未创建（模块求值期不得读写 store）');
+  }
+  return appStoreRef;
 }
 
 /** 视图切换缓存：key = 「布局 × 视图」→ 该视图最近一次拉取的 entries 快照。

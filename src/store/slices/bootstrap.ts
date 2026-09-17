@@ -129,8 +129,15 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     set({ articlesLoading: true });
     try {
       const rows = await api.listArticles({ limit: ARTICLES_PAGE_SIZE, offset, newest_first: true, with_content: layoutNeedsBody(get().activeContentLayout) });
-      // 竞态保护：加载期间发生了 reload（游标被重置），丢弃本次追加
-      if (get().articlesLimit !== offset) return;
+      // 竞态保护：加载期间游标被重置（reload / selectView 命中缓存恢复快照），
+      // 丢弃本次追加。必须顺手复位 articlesLoading（D3）：否则该标志永久为 true，
+      // 被入口守卫（articlesLoading || articlesExhausted）永久挡住后续所有
+      // loadMoreArticles —— 列表停在半截且加载动画常驻。此前"自愈"只因所有写
+      // articlesLimit 的路径都顺手置了 false，一旦有不置位的写路径就会锁死。
+      if (get().articlesLimit !== offset) {
+        set({ articlesLoading: false });
+        return;
+      }
       const next = rows ? rows.map(articleRowToEntry) : [];
       if (next.length < ARTICLES_PAGE_SIZE) {
         // 不足一页 → 已到底
@@ -147,8 +154,12 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
           articlesLoading: false,
         }));
       }
-    } catch {
+    } catch (e) {
+      /* D2：此前这里完全吞错（只复位加载态）——用户侧零提示，滚动加载静默
+         停摆、也无人知道原因。与 refreshOneFeed / extractCurrentArticle 同口径：
+         复位加载态 + 可见 toast + 一键重试。 */
       set({ articlesLoading: false });
+      get().showToast(`加载更多失败：${extractError(e)}`, { label: '重试', run: () => void get().loadMoreArticles() });
     }
   },
 

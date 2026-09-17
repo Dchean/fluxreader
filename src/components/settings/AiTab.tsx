@@ -4,6 +4,7 @@ import { api, extractError } from '../../lib/api';
 import { Icons } from '../icons';
 import { FluxDropdown, SettingCard } from '../primitives';
 import { AI_PRESETS, DEFAULT_PROMPTS, type AiConfigState } from './shared';
+import { mergeConfigFields, mergePromptsOnly } from './aiConfig';
 
 /* ---------- TAB 5: AI服务 ---------- */
 
@@ -69,11 +70,17 @@ export function AiTab() {
     }
   };
 
-  /** 仅保存提示词（不动端点配置） */
+  /** 仅保存提示词（不动端点配置）：先读回库里的现有配置，只覆盖两个提示词字段。
+      P2-4：此前直接 JSON.stringify(cfg) 落库，等于把端点配置（含未确认可用的
+      API Key）一起保存，与按钮语义相反。 */
   const savePrompts = async () => {
     setSavingPrompts(true);
     try {
-      await api.saveAiConfig(JSON.stringify(cfg));
+      const persisted = await api.getAiConfig();
+      await api.saveAiConfig(mergePromptsOnly(persisted, {
+        summaryPrompt: cfg.summaryPrompt,
+        translatePrompt: cfg.translatePrompt,
+      }));
       showToast('提示词已保存');
     } catch {
       showToast('保存失败');
@@ -84,6 +91,21 @@ export function AiTab() {
 
   const modelOptions = (models.length > 0 ? models : [cfg.model || '（先测试连通性）'])
     .map((m) => ({ value: m, label: m }));
+
+  /** 切换模型即落库（P2-4 前半）：只在连通性测试成功后模型下拉才出现，此时库里
+      已有测试时保存的端点配置；此前改模型只改本地表单，不点「测试连通性并保存」
+      就不生效（后端 load_ai_config 读的是库里的 model）——用户以为换了模型，
+      实际仍用旧模型。这里只覆盖 model 一个字段，不动其它端点配置。 */
+  const selectModel = async (v: string) => {
+    setCfg((c) => ({ ...c, model: v }));
+    try {
+      const persisted = await api.getAiConfig();
+      await api.saveAiConfig(mergeConfigFields(persisted, { model: v }));
+      showToast(`已切换模型：${v}`);
+    } catch (e) {
+      showToast(`模型保存失败：${extractError(e)}`);
+    }
+  };
 
   return (
     <>
@@ -119,7 +141,7 @@ export function AiTab() {
           <FluxDropdown
             width={200}
             value={cfg.model}
-            onChange={(v) => setCfg((c) => ({ ...c, model: v }))}
+            onChange={(v) => void selectModel(v)}
             options={modelOptions}
           />
         ) : (

@@ -1,0 +1,200 @@
+
+> fluxreader@0.13.0 test:frontend
+> tsc -p tsconfig.test.json && node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs
+
+(node:16324) ExperimentalWarning: `--experimental-loader` may be removed in the future; instead use `register()`:
+--import 'data:text/javascript,import { register } from "node:module"; import { pathToFileURL } from "node:url"; register("./tools/test-loader.mjs", pathToFileURL("./"));'
+(Use `node --trace-warnings ...` to show where the warning was created)
+✅ bootstrap 后 dataMode=tauri
+✅ bootstrap 后 entries 有 1 条
+✅ S-1: 流式结束后 translatedContent 被回读为消毒版
+✅ S-1: 翻译后不再残留 <script>
+✅ C-3: 全文提取失败后出现 toast 提示
+✅ C-3: toast 带「重试」action
+✅ 缓存命中：已有译文直接展示，不触发 ai_translate
+✅ 缓存命中：未新增 ai_translate 调用
+✅ S-2: 水合成功填充正文并置终态
+✅ S-2: 水合成功清除错误态
+✅ S-2: 空正文条目置终态且不重复水合
+✅ S-2: 水合失败记录错误态（不再静默假加载）
+✅ S-2: 重试后正文填充且错误态清除
+bootstrap from backend failed: { code: 'db_corrupt', message: 'DB locked by migration' }
+✅ S-3a: tauri bootstrap 失败进入错误态
+✅ S-3a: 失败时不回退 mock（dataMode 保持 tauri、无假数据）
+✅ S-3a: 重试后装载成功且错误态清除
+✅ S-3b: webdavConflict 弹确认并 force 重发
+✅ S-3b: force 成功后进入授权流程
+✅ S-4: 卡片级翻译流式生成并回读消毒版
+✅ S-4: 生成完成后按 id 状态清除
+✅ S-4: 已有译文时不再触发 ai_translate
+✅ S-5: 摘要生成态按 id 隔离
+✅ S-5: 摘要完成后清除该 id 状态
+✅ S-5: 锚定打开按设置标已读
+✅ S-5: 收藏视图全部已读带 starredOnly
+✅ S-5: 今天视图全部已读带 sinceMs
+✅ 🆕 (a) 无 Tauri IPC 时 bootstrap 回退 mock 并装载演示数据（骨架不永挂）
+✅ 🆕 (a) tauri bootstrap 建立 categories/feedIndex/feedCounts 并进入 tauri 模式
+✅ 🆕 (a) 首批分页游标 = PAGE_SIZE(500)、8 行 < 500 视为已到底、加载态收起
+✅ 🆕 (a) 新快照清空 hydratedIds/hydrationErrors（正文按需重新水合，不复用旧终态）
+bootstrap from backend failed: { code: 'db_corrupt', message: '数据库损坏' }
+✅ 🆕 (a) tauri bootstrap 失败：错误态可见、骨架收起、绝不回退 mock 假数据
+✅ 🆕 (a) retryBootstrap 清错误态并重新装载成功
+✅ 🆕 (a) 并发 reload 时两次 list_articles 同时在途（代际守卫场景成立）
+✅ 🆕 (a) 旧代际 reload 结果被丢弃：entries 保持最新代际快照（布局不回退）
+✅ 🆕 (b) selectFeed 写入 activeFeedFilter 并清空「已读保留」快照
+✅ 🆕 (b) 范围过滤叠加布局解析：源B 是 social，article 布局下 scope 为空
+✅ 🆕 (b) 切到 social 布局后 scope 出现源B 两条（范围 × 布局双重过滤）
+✅ 🆕 (b) selectFeed(分类) 覆盖该分类下当前布局的源，不含其他分类
+✅ 🆕 (b) 同一分类在 article 布局下覆盖源A+源D（5 条）
+✅ 🆕 (b) 树角标 = 布局 × 视图 × 显示筛选后的后端计数（「显示: 未读」→ 未读数）
+✅ 🆕 (b) 显示切回「全部」后树角标变总数（分类聚合 = 各源之和）
+✅ 🆕 (b) 视图为收藏时树角标按收藏数（0 也建档，行与源一一对应）
+✅ 🆕 (b) selectFeed 后视图计数随订阅范围收敛（cat-1 只算源B）
+✅ 🆕 (b) 单源范围视图计数 = 该源计数（源C：显示未读 → 1）
+✅ 🆕 (b) 选中的源不属于当前布局时：scope 空、计数全 0（布局不串台）
+✅ 🆕 (c) 收藏视图拉取走 only_starred：entries 只剩 3 条收藏（跨布局，布局在派生层过滤）
+✅ 🆕 (c) selectView 命中视图缓存：同步恢复快照（零延迟、游标=快照长度、标记已到底）
+✅ 🆕 (c) 缓存命中后的后台静默刷新不改变收藏视图结论
+✅ 🆕 (c) selectView(unread) 立即切视图并清空已读保留快照
+✅ 🆕 (c) 未读视图走 only_unread 拉全量：只剩 6 条未读、游标=行数、不再分页
+✅ 🆕 (c) 今天视图只含本地当天条目（与列表「今天」判定同口径）
+✅ 🆕 (c) 全部视图 + 显示全部：article 布局可见 5 条，按发布时间降序
+✅ 🆕 (c) toggleTimelineFilter → 未读：已读条目从可见集合移除，未读保留
+✅ 🆕 (c) 再次 toggle 回「全部」：已读条目重新可见（可逆）
+✅ 🆕 (c) toggleTimelineSort 反向排序：oldest 为时间升序
+✅ 🆕 (c) 收藏视图不受「显示: 未读」影响：已读但收藏的 102 仍在可见集合
+✅ 🆕 (c) 本次会话打开过的已读条目在未读筛选下原地保留（openedReadIds 生效）
+✅ 🆕 (c) 拉取期间切走视图：过期筛选结果被丢弃（entries/游标不被旧视图覆盖）
+✅ 🆕 (d) selectLayout 切布局并复位范围/选中/阅读器态（视图筛选保留）
+✅ 🆕 (d) 布局切换是纯本地过滤：entries 引用不变（不触发 reload、不闪空）
+✅ 🆕 (d) 派生集合按布局解析：article = 源A+源D，social = 源B+源C
+✅ 🆕 (d) image 布局无绑定源 → 派生集合为空（不串其他布局条目）
+✅ 🆕 (d) podcast 布局初始为空（布局是绑定派生的解析结果，不是条目属性）
+✅ 🆕 (d) updateFeedLayout 落库：纯数字 id 提取 + 布局原样写入（不被强转 inherit）
+✅ 🆕 (d) 改绑定后条目即时迁移到新布局视图（不搬动数据：entries 仍 8 条）
+✅ 🆕 (d) updateCatLayout 后 inherit 源的条目跟随分类布局迁移（源C 进 podcast）
+✅ 🆕 (e) 标已读：落库 read=true + 条目置位 + 该源未读 -1 + toast 文案正确
+✅ 🆕 (e) 再切回未读：落库 read=false + 未读计数回到 3 + toast 文案正确
+✅ 🆕 (e) 收藏切换：落库 starred=true + 收藏计数 +1 + 未读计数不受影响 + 不弹 toast
+✅ 🆕 (e) 无选中文章：已读/收藏切换均为 no-op（无 IPC、无 toast、数据不变）
+✅ 🆕 (e) 选中 id 不在 entries 中时同样 no-op（防悬空 id 误写库）
+✅ 🆕 (e) 后端计数已为 0 时标读不产生负数（未读计数夹取在 0）
+✅ 🆕 (f) 收藏视图全部已读：范围参数 starredOnly=true，且只标该视图可见条目
+✅ 🆕 (f) 全部已读只减被标条目所属源的未读数（源A 3→2，源D 不动）
+✅ 🆕 (f) 全部已读后清空「已读保留」快照（列表不再保留灰色卡片）
+✅ 🆕 (f) 全部已读给出 toast 反馈
+✅ 🆕 (f) 分类范围 → folderId=数字、feedId=null（cat- 前缀不被当作源 id）
+✅ 🆕 (f) 分类范围只标该分类可见条目，分类外条目不受影响
+✅ 🆕 (f) 单源范围 → feedId=12（纯数字 id 提取，不截成 NaN）且只标该源条目
+✅ 🆕 (f) mock 模式全部已读：本地生效但不发 IPC（无库可写，绝不伪造落库）
+✅ 🆕 (f) 批量标读只对未读项发 IPC（已读项不重复写库刷同步队列）
+✅ 🆕 (f) 批量标读的保留快照是「合并」而非替换（既有记录不丢）
+✅ 🆕 (f) 批量标读按源聚合未读减量（源A 标 2 条 → 3-2=1）
+✅ 🆕 (f) 空 id 列表批量标读为 no-op（不发 IPC）
+✅ 🆕 (g) 首批 = 500 行：游标 500、未到底、加载态已复位
+✅ 🆕 (g) 追加加载以游标为 offset：500→503，条目顺序连续不重复
+✅ 🆕 (g) 不足一页 → 置 articlesExhausted 且游标按实际行数推进
+✅ 🆕 (g) 已到底后再触发不产生新 IPC（无效请求被挡）
+✅ 🆕 (g) 在途加载中重复触发被防抖（不产生并发 IPC）
+✅ 🆕 (g) 分页失败：articlesLoading 复位（不永挂加载动画）且游标/条目不被破坏
+❌ 🆕 (g) 分页失败给出可见 toast（不再是静默吞错：文案 + 「重试」action —— D2 修复项）
+❌ 🆕 (g) 失败 toast 的「重试」直接重发分页请求（不是死按钮）
+✅ 🆕 (g) 加载期间游标被 reload 重置：过期追加被丢弃（不产生错位条目）
+❌ 🆕 (g) 过期追加被丢弃时复位 articlesLoading（D3 修复项：加载态不永久为真）
+❌ 🆕 (g) 竞态丢弃后入口守卫不再被永久锁死：下一次分页请求照常发出（D3 修复项）
+✅ 🆕 (h) openSearch/closeSearch 只切换搜索面板态，不动其他弹层与列表
+✅ 🆕 (h) 搜索结果锚定：按绝对位置拉取该页并选中（不再从头拉 500 篇）
+✅ 🆕 (h) 两次导航同时在途（article_index 各一次，竞态场景成立）
+✅ 🆕 (h) 过期的搜索定位结果被代际守卫丢弃：不再发 list_articles、不抢选中态
+✅ 🆕 (h) 只有最新一次导航生效（activeArticleId=301、列表为其所在页）
+✅ 🆕 (h) 目标不在当前筛选内（article_index=null）：不改列表与选中态
+✅ 🆕 (h) mock 模式下锚定打开为 no-op（无 IPC，不伪造定位结果）
+✅ 🆕 (i) showToast 追加条目、id 单调递增、action 负载原样保留
+✅ 🆕 (i) toast 上限 4 条：超出丢弃最旧、保留最新（错误循环不无限堆叠）
+✅ 🆕 (i) 无 action 的 toast 在 ~2.4s 后自动卸载
+✅ 🆕 (i) 带 action 的 toast 停留更久（2.8s 时仍在且未进入退场）
+✅ 🆕 (i) 带 action 的 toast 最终也会消失（两段式生命周期收敛，不泄漏 DOM）
+✅ 🆕 (j) 无音频地址时不进入播放态，只给提示
+✅ 🆕 (j) 播放剧集：激活 + 播放中 + 位置/时长归零 + seek 清空 + 标题信息写入
+✅ 🆕 (j) 点播放即视为已读（与打开文章同语义）：104 标读 + 该源未读 -1 + 播放 toast
+✅ 🆕 (j) togglePlayerPlay 双向切换且不动其他播放器字段
+✅ 🆕 (j) skipPlayer 负向越界夹取到 0（seekToSec 与 positionSec 同步下发）
+✅ 🆕 (j) skipPlayer 正向按当前位置推进（0 → 50）
+✅ 🆕 (j) seekPlayer 负数夹取为 0（不把负时间写进 audio.currentTime）
+✅ 🆕 (j) seekPlayer 正常值原样落到 seekToSec + positionSec
+✅ 🆕 (j) playerEnded 停止播放并归零位置/清 seek，但保留剧集信息与时长（可重播）
+✅ 🆕 (j) 倍速在 1/1.25/1.5/2 内循环（2.0 → 1.0）并给出 toast
+✅ 🆕 (j) 关闭播放条：停止并收起（isActive/isPlaying/seek 复位 + 大播放器收起）
+✅ 🆕 (k) 逐键合并：类型相符生效、类型不符回落默认（fontSize 收到字符串 → 保留 16）
+✅ 🆕 (k) maxWidth 旧默认迁移：760 → 860
+✅ 🆕 (k) startupView 白名单生效：合法值直接应用为启动视图
+✅ 🆕 (k) hideReadOnStartup=false → 启动时间流显示全部（不隐藏已读）
+✅ 🆕 (k) 非法 startupView 被白名单拦下：activeViewFilter 保持原值不被污染
+✅ 🆕 (k) 非法 startupView 也不写进 settings（读回与写入共用同一张校验表 —— D5 修复项）
+✅ 🆕 (k) 显式 maxWidth=900 不被迁移覆盖；hideReadOnStartup=true 回到未读筛选
+✅ 🆕 (k) 后端无存量设置时不改动内存设置（不把默认值反向写回）
+✅ 🆕 (k) 坏 JSON 被 try/catch 吞掉：记录错误但不破坏当前设置
+✅ 🆕 (k) updateSettings 合并进内存并以单键 JSON 全量落库（含新值且不丢其他键）
+✅ 🆕 (D5) 越界数值被写入路径拦下：fontSize/refreshInterval/fetchConcurrency/listWidth 保持原值
+✅ 🆕 (D5) 整份补丁全非法 → 连落库 IPC 都不发（不留无效写、不空转落库）
+✅ 🆕 (D5) 非法枚举被拦下：themeMode/syncMode/defaultOpenMode/startupView 保持原值
+✅ 🆕 (D5) 未知键不进 settings（不认识的键不落库），同一补丁里的合法键照常生效
+✅ 🆕 (D5) 滑杆边界值合法可写：13px / 240% / 1100px / 5min / 1路 / 280px
+✅ 🆕 (D5) 合法补丁照常落库（校验不误伤正常路径）
+✅ 🆕 (D5) 校验表与设置键一一对应（漏配校验器会被 tsc 的 Record<keyof SettingsState,…> 拦下）
+✅ 🆕 (D4) 死选项 article 已从两侧移除；余下取值都能通过校验（含此前无 UI 入口的 starred）
+✅ 🆕 (D4) 写入路径拒绝死选项（settings.startupView 不落 article）
+✅ 🆕 (D4) 读回路径同样拒绝 article（旧库里的历史值不再进入 settings）
+✅ 🆕 (D4) 同一份读回里的合法键照常生效（fontSize 18）
+✅ 🆕 (D4) 收藏视图可作启动视图：白名单里的取值确实被应用为 activeViewFilter
+✅ 🆕 (l) summarizeEntry 生成态按 id 置位、流未结束时保持（不误报完成）
+✅ 🆕 (l) 流式 delta 增量落到该条目的 aiSummary（其他条目不受影响）
+✅ 🆕 (l) done 清除 summarizingIds[id]（不残留「生成中」占位）
+✅ 🆕 (l) 已有摘要缓存时直接短路（不重复请求 AI）
+✅ 🆕 (l) 摘要流内 error 事件：按 id 记录错误 + 清生成态 + toast 带重试
+✅ 🆕 (l) 重试按钮真正重新发起该 id 的摘要请求（并先清掉上次错误）
+✅ 🆕 (l) 摘要请求 reject：落到「AI 服务未配置或不可达」错误态并清生成态
+✅ 🆕 (l) silent 模式失败不弹 toast（源级自动摘要不打扰用户）
+✅ 🆕 (l) translateEntry 流式增量先落到 translatedContent（打字机原样展示、未收尾）
+✅ 🆕 (l) 流结束（done）立即清 translatingIds[id]（不等回读完成）
+✅ 🆕 (l) 流结束后回读 DB 消毒译文覆盖流式产物（无 <script> 残留）
+✅ 🆕 (l) 已有译文缓存时不再触发 ai_translate
+✅ 🆕 (l) 按 id 隔离：A 仍在生成时 B 已收尾，两个 id 状态互不串台
+✅ 🆕 (l) 翻译流内 error：记录 translateErrors[id] + 清生成态 + toast 带重试
+✅ 🆕 (l) translateEntry reject →「AI 服务未配置或不可达」，silent 时不弹 toast
+✅ 🆕 (l) mock 模式不支持 AI：给出提示且不发 IPC
+✅ 🆕 (E2) internals.appStore() 在 bindAppStore 之前调用 → 显式抛错（不再静默返回 undefined 冒充 StoreApi）
+✅ 🆕 (E2) store 创建之后（bind 之后）句柄正常可用，不误抛
+✅ 🆕 (E1) 后端有登录态 → 经晚绑定句柄写入 store.githubAccount（登录态启动即恢复）
+✅ 🆕 (E1) 后端未登录（null）→ 不误清空现有登录态
+✅ 🆕 (E1) 后端不可用（IPC 失败）→ 静默忽略：不抛出、不污染状态
+✅ 🆕 (D1a) 半截摘要 + 报错后点「重试」：真的重发 ai_summarize（修前被 if (art.aiSummary) 短路挡住）
+✅ 🆕 (D1a) 重试同步清掉上次错误与半截摘要（不再与错误并存，卡片可自愈）
+✅ 🆕 (D1b) 半截译文 + 报错后点「重试」：真的重发 ai_translate（修前被 art.translatedContent 短路挡住）
+✅ 🆕 (D1b) 重试清空半截译文与上次错误（与 Reader 路径的重试语义对齐，不把半截当缓存）
+✅ 🆕 (D1c) Reader 翻译半截 + 报错：错误态可见、译文块收起（半截译文仍留在条目上）
+✅ 🆕 (D1c) 半截译文 + 报错后点「重试」：真的重发 ai_translate 并重新进入生成态（修前把半截当缓存直接展示）
+✅ 🆕 (D1c) 重试清空半截译文（原有清空逻辑在修前根本走不到）
+✅ 🆕 (L1) 索引化批量标读：未读项全部标读、已读项不重复写库（8 条中 6 条未读 → 6 次 set_read）
+✅ 🆕 (L1) 未读计数仍按源聚合扣减：源10 3→1、源12 2→0、源11 2→1、源20 1→0
+✅ 🆕 (L1) 「已读保留」快照按被标读的未读项写入（6 条；本就已读的 102/202 不重复记）
+✅ 🆕 (L1) 未知 id 被忽略：不发 IPC、不改状态
+✅ 🆕 (L2) feedCounts 缺项：该源不计入「全部」总数（7 → 5），树角标也不建该行（保守设计）
+✅ 🆕 (L2) 但该源条目仍正常列出（计数缺失不影响内容可见性）
+✅ 🆕 (P2-4) 保存提示词保留库里的端点配置（preset/baseUrl/apiKey/model 原样不动）
+✅ 🆕 (P2-4) 两个提示词字段被更新为表单值
+✅ 🆕 (P2-4) 库里尚无配置时只落提示词：不把未确认可用的 baseUrl/apiKey 顺带写库
+✅ 🆕 (P2-4) 库里 JSON 损坏时保存仍成功（以提示词重建，不让保存动作失败）
+✅ 🆕 (P2-10) 防退化原样返回原文时：不置 fulltextExtracted、不切全文视图（修前都会发生）
+✅ 🆕 (P2-10) 且提示为「无法提取全文…」而不是「全文提取完成」
+✅ 🆕 (P2-10) 正常提取路径不受影响：置标志 + 进入全文视图 + 报「全文提取完成」
+✅ 🆕 (P2-7) 修前误判根因可复现：compareVersions(remote, "") 把空串当 0.0.0 → 恒判远端更新
+✅ 🆕 (P2-7) 本地版本未就绪（空串）→ 不给「有更新」结论（未知 ≠ 有更新）
+✅ 🆕 (P2-7) 不可比版本（非数字点分 / 回退值以外的脏数据）同样不误判
+✅ 🆕 (P2-7) 两端都可比时判定照旧：远端更高 → true，同版/更低 → false
+✅ 🆕 (P2-7) 多段版本号（0.10.1 > 0.9.9）比较正确，不走字符串序
+
+=== 既有回归 26/26 通过（本文件原有断言，未改动一行） ===
+=== 新增 store 行为断言 156/160 通过 🆕 ===
+=== 前端逻辑回归合计 182/186 通过 ===
+新增失败项: (g) 分页失败给出可见 toast（不再是静默吞错：文案 + 「重试」action —— D2 修复项）; (g) 失败 toast 的「重试」直接重发分页请求（不是死按钮）; (g) 过期追加被丢弃时复位 articlesLoading（D3 修复项：加载态不永久为真）; (g) 竞态丢弃后入口守卫不再被永久锁死：下一次分页请求照常发出（D3 修复项）

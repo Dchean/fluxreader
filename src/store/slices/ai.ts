@@ -36,10 +36,18 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
       return;
     }
     const art = get().entries.find((a) => a.id === id);
-    if (!art || art.translatedContent) return;
+    if (!art) return;
+    /* 已有译文 → 短路（不重复烧 token）。失败态必须放行：流先产出半截译文
+       再报错时，这行会把 toast 的「重试」变成死按钮——不重发请求、
+       translateErrors 也不清，卡片永久停在「半截译文 + 错误」并存态（D1b）。 */
+    if (art.translatedContent && !get().translateErrors[id]) return;
+    /* 重试语义（与 toggleReaderTranslation 对齐）：清上次的错误**和半截译文**，
+       再重新走完整流。此前只清错误不清译文——重试成功后新 delta 会追加在旧半截
+       译文后面（打字机里出现「半截+完整」的重复内容）。 */
     set((st) => ({
       translatingIds: { ...st.translatingIds, [id]: true },
       translateErrors: { ...st.translateErrors, [id]: '' },
+      entries: st.entries.map((a) => (a.id === id ? { ...a, translatedContent: '' } : a)),
     }));
     void api
       .aiTranslate(
@@ -109,8 +117,9 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     }
     const art = s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) : null;
     if (!art) return;
-    /* 已有缓存译文 → 直接切换展示 */
-    if (art.translatedContent) {
+    /* 已有缓存译文 → 直接切换展示；失败态同样放行（D1b 同源）：流内先出半截
+       译文再报错时，重试必须真的重发请求，而不是把半截译文当缓存展示 */
+    if (art.translatedContent && !s.translateErrors[art.id]) {
       set({ isShowingTranslatedProse: true });
       return;
     }
@@ -188,8 +197,11 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     const s = get();
     const art = s.entries.find((a) => a.id === id);
     if (!art) return;
-    /* 已有缓存 → 直接展示（ai_summarize 后端也会短路，这里前端提前判断） */
-    if (art.aiSummary) {
+    /* 已有缓存 → 直接短路（ai_summarize 后端也会短路，这里前端提前判断）。
+       失败态除外：摘要流先产出半截文本再报错时，若在这里 return，toast 的
+       「重试」就是死按钮——不重发 ai_summarize、summaryErrors 也不清，卡片
+       永久停在与错误并存的半截摘要上（D1a）。 */
+    if (art.aiSummary && !s.summaryErrors[id]) {
       return;
     }
     if (s.dataMode !== 'tauri') {

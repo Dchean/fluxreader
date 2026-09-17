@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "id": "RUN-2562ccdc5431478ab1fec40ce216e379",
+  "task_id": "TASK-051",
+  "kind": "verification",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-9dc1a1270094452b9c6ca8ac2c9aa9ff"
+  },
+  "started_at_utc": "2026-09-17T20:21:26.713307Z",
+  "finished_at_utc": "2026-09-17T20:21:27.181574Z",
+  "exit_code": 1,
+  "timed_out": false,
+  "input_digest": "bfa63f0a9fc19f324f9a0c74cc50d9af1edd547527321bd9e067fb33dd659096",
+  "candidate_digest": "826a858ce8e686c5f5e42049ac8e827b90771be9a6823f08d1734379a46cf2f5",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-lint.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-lint.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-build.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-build.stderr.txt"
+  ],
+  "checks": [
+    {
+      "gate_id": "lint",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-lint.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-lint.stderr.txt",
+      "candidate_digest": "826a858ce8e686c5f5e42049ac8e827b90771be9a6823f08d1734379a46cf2f5",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\nodejs\\node.EXE",
+          "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "lint"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-17T20:21:26.780612Z",
+        "finished_at_utc": "2026-09-17T20:21:27.041993Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-lint.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-lint.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "build",
+      "status": "FAIL",
+      "exit_code": 1,
+      "log": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-build.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-build.stderr.txt",
+      "candidate_digest": "826a858ce8e686c5f5e42049ac8e827b90771be9a6823f08d1734379a46cf2f5",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\nodejs\\node.EXE",
+          "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "build"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-17T20:21:27.052305Z",
+        "finished_at_utc": "2026-09-17T20:21:27.176367Z",
+        "exit_code": 1,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-build.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-build.stderr.txt"
+      }
+    }
+  ],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 7356,
+  "controller_pid": 3140,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-17T20:21:26.780612Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-lint.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-lint.stderr.txt",
+      "finished_at_utc": "2026-09-17T20:21:27.041993Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "build"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-17T20:21:27.052305Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-build.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-2562ccdc5431478ab1fec40ce216e379-build.stderr.txt",
+      "finished_at_utc": "2026-09-17T20:21:27.176367Z",
+      "exit_code": 1,
+      "timed_out": false,
+      "cancelled": false
+    }
+  ],
+  "failure_kind": "test_failure",
+  "failure_reason": "Required gate failed: build"
+}

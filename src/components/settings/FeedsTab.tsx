@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useAppStore } from '../../store';
-import { api } from '../../lib/api';
+import { api, extractError } from '../../lib/api';
 import { Icons } from '../icons';
 import { FluxDropdown, SwitchInline, ConfirmDialog } from '../primitives';
 import type { ContentLayoutType } from '../../types';
@@ -43,7 +43,7 @@ export function FeedsTab() {
       if (!r) { showToast('演示模式不支持导入'); return; }
       showToast(`OPML 导入完成：新增 ${r.imported} 个源${r.skipped > 0 ? `，跳过 ${r.skipped} 个已存在` : ''}`);
       return reloadFromBackend();
-    }).catch((err) => showToast(`OPML 导入失败：${err}`));
+    }).catch((err) => showToast(`OPML 导入失败：${extractError(err)}`));
   };
 
   /* OPML 导出：后端生成 → Blob 下载 */

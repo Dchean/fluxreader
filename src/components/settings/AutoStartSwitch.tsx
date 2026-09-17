@@ -27,6 +27,10 @@ export function AutoStartSwitch() {
       setRegEnabled(v);
     } catch {
       showToast('自启动设置失败');
+      /* P2-6：开关真实读写注册表，失败时必须把设置镜像回滚 —— 否则
+         app_settings 里留下一个与注册表不符的 autoStart（并且已落库），
+         重开设置页要等异步读注册表才被纠正，中间显示的是错值。 */
+      updateSettings({ autoStart: !v });
       setRegEnabled(!v);
     }
   };

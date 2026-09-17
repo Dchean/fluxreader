@@ -24,12 +24,6 @@ export function formatRelativeTime(ts: number, now: number = Date.now()): string
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-/** 时刻 HH:MM（通知类条目的元信息行） */
-export function formatClock(ts: number): string {
-  const d = new Date(ts);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
-
 /** 时长（秒）→ m:ss 或 h:mm:ss（播客） */
 export function formatDuration(sec: number): string {
   const s = Math.max(0, Math.round(sec));

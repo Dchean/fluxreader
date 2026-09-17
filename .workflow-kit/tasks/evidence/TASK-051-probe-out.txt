@@ -1,0 +1,9 @@
+(node:13304) ExperimentalWarning: `--experimental-loader` may be removed in the future; instead use `register()`:
+--import 'data:text/javascript,import { register } from "node:module"; import { pathToFileURL } from "node:url"; register("./tools/test-loader.mjs", pathToFileURL("./"));'
+(Use `node --trace-warnings ...` to show where the warning was created)
+[P2-4] 旧实现落库 JSON 含 apiKey/baseUrl/model : true true true
+[P2-4] 新实现在库里无配置时的落库键      : summaryPrompt,translatePrompt
+[P2-7] 旧判定 compareVersions("0.9.0", "")     = 9 → >0 即「有更新」（本地版本未知时误报）
+[P2-7] 旧判定 compareVersions("0.13.0","0.8.0") = 5 → 本机真实 0.13.0，回退值 0.8.0 依然误报「有更新」
+[P2-7] 新判定 shouldOfferUpdate("0.9.0","")     = false
+[L1] n=20000 entries × m=5000 ids —— 旧：163.4ms，新：2.42ms（提速 68×，结果一致：true）

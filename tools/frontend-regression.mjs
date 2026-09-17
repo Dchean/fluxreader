@@ -75,6 +75,16 @@ globalThis.__INVOKE__ = (cmd, args) => {
 };
 
 // 4) import 编译后的 store（loader 会 mock @tauri-apps/api）
+//    4a) E2 探针：必须在 store.js 被求值（其模块末尾 bindAppStore）之前调用
+//        internals.appStore()，才能观察到「句柄尚未注入」这条路径的真实行为。
+//        只是新增几行探测代码，不触碰上面任何一条既有断言。
+const internalsBeforeBind = await import('../dist-test/store/internals.js');
+let appStoreUnbound = { threw: false, error: null, value: undefined };
+try {
+  appStoreUnbound.value = internalsBeforeBind.appStore();
+} catch (e) {
+  appStoreUnbound = { threw: true, error: e, value: undefined };
+}
 const { useAppStore } = await import('../dist-test/store.js');
 
 const store = useAppStore;
@@ -326,6 +336,8 @@ await (async () => {
   let aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
   let heldAi = [];            // hold 模式挂起项 { cmd, id, ch }
   let settingsRaw = null;     // get_setting('app_settings') 的返回值
+  let ghLoginStatus = null;   // github_login_status 的返回值：null | {login} | 'reject'
+  let extractResult = null;   // extract_fulltext 的返回值：字符串 | 'reject' | null
 
   const localDayKey = (ms) => {
     const d = new Date(ms);
@@ -380,6 +392,16 @@ await (async () => {
       case 'get_articles': return Promise.resolve([]);
       case 'get_setting': return Promise.resolve(settingsRaw);
       case 'set_setting': return Promise.resolve(null);
+      /* E1：GitHub 登录态恢复（bootstrapGithubAuth 定向断言用；null / {login} / 'reject'） */
+      case 'github_login_status':
+        return ghLoginStatus === 'reject'
+          ? Promise.reject({ message: 'ipc down' })
+          : Promise.resolve(ghLoginStatus);
+      /* P2-10：全文提取返回值可控（'reject' = 网络失败；字符串 = 提取结果） */
+      case 'extract_fulltext':
+        return extractResult === 'reject'
+          ? Promise.reject({ message: '网页拉取失败：HTTP 503' })
+          : Promise.resolve(extractResult);
       case 'ai_summarize':
       case 'ai_translate': {
         const plan = cmd === 'ai_summarize' ? aiSum : aiTr;
@@ -403,6 +425,8 @@ await (async () => {
     indexPlan = null;
     pendingIndex = [];
     settingsRaw = null;
+    ghLoginStatus = null;
+    extractResult = null;
     heldAi = [];
     aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
     aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
@@ -817,8 +841,13 @@ await (async () => {
   checkNew('(g) 分页失败：articlesLoading 复位（不永挂加载动画）且游标/条目不被破坏',
     gFail.articlesLoading === false && gFail.articlesLimit === 100
     && gFail.entries.length === 0 && gFail.articlesExhausted === false);
-  checkNew('(g) 分页失败被静默吞掉：无 toast、无错误态（用户侧零提示——记录为观察项）',
-    gFail.toasts.length === 0);
+  /* 【改动理由】原断言把 D2 的现状（失败被静默吞掉、用户侧零提示）写成了期望，
+     标注为「观察项」。D2 修复后失败路径给出可见 toast + 一键重试，故改为断言修复后的行为。 */
+  checkNew('(g) 分页失败给出可见 toast（不再是静默吞错：文案 + 「重试」action —— D2 修复项）',
+    gFail.toasts.length === 1 && gFail.toasts[0].text.includes('加载更多失败')
+    && gFail.toasts[0].action?.label === '重试');
+  checkNew('(g) 失败 toast 的「重试」直接重发分页请求（不是死按钮）',
+    typeof gFail.toasts[0]?.action?.run === 'function');
   listPlan = null;
 
   store.setState({ articlesLoading: false, articlesExhausted: false, articlesLimit: 100, entries: [] });
@@ -832,6 +861,26 @@ await (async () => {
   checkNew('(g) 加载期间游标被 reload 重置：过期追加被丢弃（不产生错位条目）',
     store.getState().entries.length === 0 && store.getState().articlesLimit === 0
     && store.getState().articlesLoading === false);
+
+  /* D3：竞态丢弃分支必须复位 articlesLoading。上面那条场景在丢弃前手动置了
+     articlesLoading=false，把这个缺陷掩盖了 —— 这里保留在途加载态（模拟真实
+     竞态：加载期间 selectView 命中视图缓存恢复快照，只写游标不碰 loading），
+     修前 articlesLoading 会永久停在 true，入口守卫随即永久挡住后续所有分页。 */
+  store.setState({ articlesLoading: false, articlesExhausted: false, articlesLimit: 100, entries: [] });
+  listPlan = { mode: 'defer' };
+  const pRace = store.getState().loadMoreArticles();
+  await nTick(0);
+  store.setState({ articlesLimit: 0 });          // 期间游标被重置，加载态仍为 true
+  pendingList[pendingList.length - 1].resolve([mkRow({ id: 7100, feed_id: 10 })]);
+  await pRace;
+  listPlan = null;
+  checkNew('(g) 过期追加被丢弃时复位 articlesLoading（D3 修复项：加载态不永久为真）',
+    store.getState().articlesLoading === false && store.getState().entries.length === 0
+    && store.getState().articlesLimit === 0);
+  invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  checkNew('(g) 竞态丢弃后入口守卫不再被永久锁死：下一次分页请求照常发出（D3 修复项）',
+    invokeCalls.filter((c) => c.cmd === 'list_articles').length === 1);
 
   /* ============================================================
      (h) 搜索开关与结果竞态守卫
@@ -992,8 +1041,12 @@ await (async () => {
   await store.getState().bootstrapSettings();
   checkNew('(k) 非法 startupView 被白名单拦下：activeViewFilter 保持原值不被污染',
     store.getState().activeViewFilter === 'starred');
-  checkNew('(k) …但非法值仍原样写进 settings.startupView（只拦「应用」不校验「值」——观察项）',
-    store.getState().settings.startupView === 'bogus');
+  /* 【改动理由】原断言把 D5 的现状（读回路径只做 typeof 拦截、非法值照样写进
+     settings.startupView）写成了期望，标注为「观察项」。D5 修复后读回路径与
+     写入路径共用同一张校验表（settingsValidation），非法值不再落进 settings，
+     故改为断言「不被污染」（与上一条 activeViewFilter 的判定同向）。 */
+  checkNew('(k) 非法 startupView 也不写进 settings（读回与写入共用同一张校验表 —— D5 修复项）',
+    store.getState().settings.startupView === 'starred');
 
   settingsRaw = JSON.stringify({ maxWidth: 900, hideReadOnStartup: true });
   await store.getState().bootstrapSettings();
@@ -1025,6 +1078,66 @@ await (async () => {
     store.getState().settings.fontSize === 20 && kWrite?.args.key === 'app_settings'
     && kPayload.fontSize === 20 && kPayload.themeMode === 'light'
     && typeof kPayload.markReadOnOpen === 'boolean' && kPayload.listWidth === store.getState().settings.listWidth);
+
+  /* ---------- D5：updateSettings 运行时校验（写入与读回对称） ---------- */
+  const k5 = await import('../dist-test/store/settingsValidation.js');
+  const kTypes = await import('../dist-test/types.js');
+  const k5Before = store.getState().settings;
+  invokeCalls.length = 0;
+  store.getState().updateSettings({ fontSize: -5, refreshInterval: 0, fetchConcurrency: 99, listWidth: 99999 });
+  const k5Bad = store.getState().settings;
+  checkNew('(D5) 越界数值被写入路径拦下：fontSize/refreshInterval/fetchConcurrency/listWidth 保持原值',
+    k5Bad.fontSize === k5Before.fontSize && k5Bad.refreshInterval === k5Before.refreshInterval
+    && k5Bad.fetchConcurrency === k5Before.fetchConcurrency && k5Bad.listWidth === k5Before.listWidth);
+  await nTick(0);   // api.setSetting 内部 await getInvoke()：等一拍才能观察到「有没有落库」
+  checkNew('(D5) 整份补丁全非法 → 连落库 IPC 都不发（不留无效写、不空转落库）',
+    invokeCalls.filter((c) => c.cmd === 'set_setting').length === 0);
+  store.getState().updateSettings({ themeMode: 'neon', syncMode: 'p2p', defaultOpenMode: 'pdf', startupView: 'article' });
+  const k5Enum = store.getState().settings;
+  checkNew('(D5) 非法枚举被拦下：themeMode/syncMode/defaultOpenMode/startupView 保持原值',
+    k5Enum.themeMode === k5Before.themeMode && k5Enum.syncMode === k5Before.syncMode
+    && k5Enum.defaultOpenMode === k5Before.defaultOpenMode && k5Enum.startupView === k5Before.startupView);
+  await nTick(0);
+  store.getState().updateSettings({ bogusKey: 1, fontSize: 20 });
+  await nTick(0);   // 让这次落库 IPC 先落地，避免与下一段的调用计数串台
+  checkNew('(D5) 未知键不进 settings（不认识的键不落库），同一补丁里的合法键照常生效',
+    !('bogusKey' in store.getState().settings) && store.getState().settings.fontSize === 20);
+  invokeCalls.length = 0;
+  store.getState().updateSettings({ fontSize: 13, lineHeight: 240, maxWidth: 1100, refreshInterval: 5, fetchConcurrency: 1, listWidth: 280 });
+  await nTick(0);   // api.setSetting 内部 await getInvoke()
+  const k5Edge = store.getState().settings;
+  checkNew('(D5) 滑杆边界值合法可写：13px / 240% / 1100px / 5min / 1路 / 280px',
+    k5Edge.fontSize === 13 && k5Edge.lineHeight === 240 && k5Edge.maxWidth === 1100
+    && k5Edge.refreshInterval === 5 && k5Edge.fetchConcurrency === 1 && k5Edge.listWidth === 280);
+  checkNew('(D5) 合法补丁照常落库（校验不误伤正常路径）',
+    invokeCalls.filter((c) => c.cmd === 'set_setting').length === 1);
+  const kSetKeys = Object.keys(store.getState().settings);
+  checkNew('(D5) 校验表与设置键一一对应（漏配校验器会被 tsc 的 Record<keyof SettingsState,…> 拦下）',
+    kSetKeys.every((key) => typeof k5.SETTINGS_VALIDATORS[key] === 'function')
+    && kSetKeys.length === Object.keys(k5.SETTINGS_VALIDATORS).length);
+
+  /* ---------- D4：启动视图白名单与设置页下拉同源 ---------- */
+  checkNew('(D4) 死选项 article 已从两侧移除；余下取值都能通过校验（含此前无 UI 入口的 starred）',
+    !kTypes.STARTUP_VIEW_OPTIONS.some((o) => o.value === 'article')
+    && kTypes.STARTUP_VIEW_OPTIONS.length === 4
+    && kTypes.STARTUP_VIEW_OPTIONS.every((o) => k5.isValidSetting('startupView', o.value))
+    && kTypes.STARTUP_VIEW_OPTIONS.some((o) => o.value === 'starred')
+    && !k5.isValidSetting('startupView', 'article'));
+  /* 先显式落一个合法值作为对照基准（修前 updateSettings 会把它改成 'article'） */
+  store.getState().updateSettings({ startupView: 'today' });
+  const k4Keep = store.getState().settings.startupView;
+  store.getState().updateSettings({ startupView: 'article' });
+  checkNew('(D4) 写入路径拒绝死选项（settings.startupView 不落 article）',
+    k4Keep !== 'article' && store.getState().settings.startupView === k4Keep);
+  settingsRaw = JSON.stringify({ startupView: 'article', fontSize: 18 });
+  await store.getState().bootstrapSettings();
+  checkNew('(D4) 读回路径同样拒绝 article（旧库里的历史值不再进入 settings）',
+    store.getState().settings.startupView === k4Keep);
+  checkNew('(D4) 同一份读回里的合法键照常生效（fontSize 18）', store.getState().settings.fontSize === 18);
+  settingsRaw = JSON.stringify({ startupView: 'starred' });
+  await store.getState().bootstrapSettings();
+  checkNew('(D4) 收藏视图可作启动视图：白名单里的取值确实被应用为 activeViewFilter',
+    store.getState().activeViewFilter === 'starred');
 
   /* ============================================================
      (l) AI per-id 流式写入与失败标记
@@ -1133,6 +1246,205 @@ await (async () => {
   checkNew('(l) mock 模式不支持 AI：给出提示且不发 IPC',
     invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 0
     && store.getState().toasts[store.getState().toasts.length - 1]?.text === '演示模式不支持 AI 服务');
+
+  /* ============================================================
+     (m) 本轮缺陷修复的定向断言（D1a/D1b/D1c、D4/D5 见 (k)、E1、E2、
+         L1、L2、P2-4、P2-7、P1-7 邻域）
+
+     全部为「新增」计数：上面 (a)…(l) 除两条 D2/D5 邻域「观察项」按修复
+     更新外一行未改。每条都对应一个已确认缺陷，且能在修复前复现失败
+     （见实施报告 §2 的修前/修后对照）。
+     ============================================================ */
+
+  /* ---------- E2：internals.appStore() 未注入时必须显式抛错 ---------- */
+  checkNew('(E2) internals.appStore() 在 bindAppStore 之前调用 → 显式抛错（不再静默返回 undefined 冒充 StoreApi）',
+    appStoreUnbound.threw === true
+    && /bindAppStore/.test(String(appStoreUnbound.error && appStoreUnbound.error.message)));
+  let e2BoundOk = false;
+  try { e2BoundOk = typeof internalsBeforeBind.appStore().getState === 'function'; } catch { e2BoundOk = false; }
+  checkNew('(E2) store 创建之后（bind 之后）句柄正常可用，不误抛', e2BoundOk === true);
+
+  /* ---------- E1：bootstrapGithubAuth（唯一「slice 导出 + 晚绑定句柄」迁移点） ---------- */
+  await resetStore();
+  const { bootstrapGithubAuth } = await import('../dist-test/store.js');
+  ghLoginStatus = { login: 'octocat' };
+  store.setState({ githubAccount: null });
+  await bootstrapGithubAuth();
+  checkNew('(E1) 后端有登录态 → 经晚绑定句柄写入 store.githubAccount（登录态启动即恢复）',
+    store.getState().githubAccount?.login === 'octocat'
+    && invokeCalls.some((c) => c.cmd === 'github_login_status'));
+  ghLoginStatus = null;
+  store.setState({ githubAccount: { login: 'keep' } });
+  await bootstrapGithubAuth();
+  checkNew('(E1) 后端未登录（null）→ 不误清空现有登录态',
+    store.getState().githubAccount?.login === 'keep');
+  ghLoginStatus = 'reject';
+  store.setState({ githubAccount: { login: 'keep' } });
+  let e1Threw = false;
+  try { await bootstrapGithubAuth(); } catch { e1Threw = true; }
+  checkNew('(E1) 后端不可用（IPC 失败）→ 静默忽略：不抛出、不污染状态',
+    e1Threw === false && store.getState().githubAccount?.login === 'keep');
+  ghLoginStatus = null;
+
+  /* ---------- D1a：摘要「先出半截文本再报错」后，重试必须真的重发 ---------- */
+  await bootFixture();
+  store.setState({ toasts: [] });
+  aiSum = { deltas: ['半截摘要'], error: 'AI 限流', reject: null, finish: true, holdIds: [] };
+  store.getState().summarizeEntry('105');
+  await nTick(5);
+  const d1a = store.getState();
+  const d1aPartial = d1a.entries.find((a) => a.id === '105')?.aiSummary;
+  invokeCalls.length = 0;
+  d1a.toasts[0]?.action?.run();                       // 点 toast 的「重试」
+  const d1aCleared = store.getState().summaryErrors['105'] === '';
+  await nTick(5);
+  checkNew('(D1a) 半截摘要 + 报错后点「重试」：真的重发 ai_summarize（修前被 if (art.aiSummary) 短路挡住）',
+    d1aPartial === '半截摘要' && invokeCalls.filter((c) => c.cmd === 'ai_summarize').length === 1);
+  checkNew('(D1a) 重试同步清掉上次错误与半截摘要（不再与错误并存，卡片可自愈）',
+    d1aCleared === true && store.getState().summaryErrors['105'] === 'AI 限流');
+
+  /* ---------- D1b：卡片翻译「先出半截译文再报错」后，重试必须真的重发 ---------- */
+  await bootFixture();
+  store.setState({ toasts: [] });
+  aiTr = { deltas: ['半截译文'], error: '限流', reject: null, finish: true, holdIds: [] };
+  store.getState().translateEntry('201');
+  await nTick(5);
+  const d1bPartial = store.getState().entries.find((a) => a.id === '201')?.translatedContent;
+  aiTr = { deltas: [], error: null, reject: null, finish: false, holdIds: [201] };   // 重试：挂起观察
+  invokeCalls.length = 0;
+  store.getState().toasts[0]?.action?.run();
+  await nTick(5);
+  const d1b = store.getState();
+  checkNew('(D1b) 半截译文 + 报错后点「重试」：真的重发 ai_translate（修前被 art.translatedContent 短路挡住）',
+    d1bPartial === '半截译文' && invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1);
+  checkNew('(D1b) 重试清空半截译文与上次错误（与 Reader 路径的重试语义对齐，不把半截当缓存）',
+    d1b.entries.find((a) => a.id === '201')?.translatedContent === '' && d1b.translateErrors['201'] === '');
+  heldAi[heldAi.length - 1]?.ch.onmessage?.({ type: 'done' });
+  await nTick(20);
+
+  /* ---------- D1c：Reader 翻译同源路径（error 后 translatedContent 残留半截） ---------- */
+  await bootFixture();
+  /* 先把正文置成与 detailImpl 相同的内容：selectArticle 会异步水合详情，
+     若 content 为空则会被回填成 translated_content='' —— 那会把流式半截译文冲掉，
+     掩盖本用例要观察的状态。 */
+  store.setState((s) => ({
+    toasts: [], isShowingTranslatedProse: false,
+    entries: s.entries.map((a) => (a.id === '201' ? { ...a, content: '<p>详情</p>' } : a)),
+  }));
+  store.getState().selectArticle('201');
+  aiTr = { deltas: ['半截译文'], error: '限流', reject: null, finish: true, holdIds: [] };
+  store.getState().toggleReaderTranslation();
+  await nTick(5);
+  const d1c = store.getState();
+  checkNew('(D1c) Reader 翻译半截 + 报错：错误态可见、译文块收起（半截译文仍留在条目上）',
+    d1c.translateErrors['201'] === '限流' && d1c.isShowingTranslatedProse === false
+    && d1c.entries.find((a) => a.id === '201')?.translatedContent === '半截译文');
+  aiTr = { deltas: [], error: null, reject: null, finish: false, holdIds: [201] };
+  invokeCalls.length = 0;
+  d1c.toasts[d1c.toasts.length - 1]?.action?.run();
+  await nTick(5);
+  checkNew('(D1c) 半截译文 + 报错后点「重试」：真的重发 ai_translate 并重新进入生成态（修前把半截当缓存直接展示）',
+    invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1
+    && store.getState().translating === true);
+  checkNew('(D1c) 重试清空半截译文（原有清空逻辑在修前根本走不到）',
+    store.getState().entries.find((a) => a.id === '201')?.translatedContent === '');
+  heldAi[heldAi.length - 1]?.ch.onmessage?.({ type: 'done' });
+  await nTick(20);
+
+  /* ---------- L1：批量标读索引化后语义不变（只增复杂度优化，行为契约不变） ---------- */
+  await bootFixture();
+  const l1Ids = store.getState().entries.map((e) => e.id);
+  invokeCalls.length = 0;
+  store.getState().markEntriesReadBulk(l1Ids);
+  await nTick(0);   // api.setRead 内部 await getInvoke()，落库是异步 fire-and-forget
+  const l1 = store.getState();
+  checkNew('(L1) 索引化批量标读：未读项全部标读、已读项不重复写库（8 条中 6 条未读 → 6 次 set_read）',
+    l1.entries.every((e) => e.isRead) && invokeCalls.filter((c) => c.cmd === 'set_read').length === 6);
+  checkNew('(L1) 未读计数仍按源聚合扣减：源10 3→1、源12 2→0、源11 2→1、源20 1→0',
+    l1.feedCounts.get('10')?.unread === 1 && l1.feedCounts.get('12')?.unread === 0
+    && l1.feedCounts.get('11')?.unread === 1 && l1.feedCounts.get('20')?.unread === 0);
+  checkNew('(L1) 「已读保留」快照按被标读的未读项写入（6 条；本就已读的 102/202 不重复记）',
+    Object.keys(l1.openedReadIds).length === 6
+    && l1.openedReadIds['101'] === true && l1.openedReadIds['105'] === true
+    && l1.openedReadIds['102'] === undefined);
+  invokeCalls.length = 0;
+  store.getState().markEntriesReadBulk(['不存在的id']);
+  checkNew('(L1) 未知 id 被忽略：不发 IPC、不改状态', invokeCalls.length === 0);
+
+  /* ---------- L2：feedCounts 缺项 → 有意的保守设计（本断言即该设计的锚） ---------- */
+  await bootFixture();
+  const l2Before = selectViewCounts(store.getState()).all;
+  const l2Counts = new Map(store.getState().feedCounts);
+  l2Counts.delete('12');                               // 模拟后端精确计数缺该源
+  store.setState({ feedCounts: l2Counts });
+  const l2View = selectViewCounts(store.getState());
+  const l2Tree = selectTreeCounts(store.getState());
+  checkNew('(L2) feedCounts 缺项：该源不计入「全部」总数（7 → 5），树角标也不建该行（保守设计）',
+    l2Before === 7 && l2View.all === 5 && l2Tree.get('all') === 5 && !l2Tree.has('12'));
+  const l2Visible = selectVisibleEntries(store.getState());
+  checkNew('(L2) 但该源条目仍正常列出（计数缺失不影响内容可见性）',
+    l2Visible.filter((e) => e.feedId === '12').length === 2);
+
+  /* ---------- P2-4：AI「保存提示词」只写提示词，不再顺带覆盖端点配置 ---------- */
+  const { mergePromptsOnly } = await import('../dist-test/components/settings/aiConfig.js');
+  const p24 = JSON.parse(mergePromptsOnly(
+    JSON.stringify({ preset: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'sk-keep', model: 'deepseek-chat', summaryPrompt: '旧摘要', translatePrompt: '旧翻译' }),
+    { summaryPrompt: '新摘要', translatePrompt: '新翻译' },
+  ));
+  checkNew('(P2-4) 保存提示词保留库里的端点配置（preset/baseUrl/apiKey/model 原样不动）',
+    p24.preset === 'deepseek' && p24.baseUrl === 'https://api.deepseek.com'
+    && p24.apiKey === 'sk-keep' && p24.model === 'deepseek-chat');
+  checkNew('(P2-4) 两个提示词字段被更新为表单值',
+    p24.summaryPrompt === '新摘要' && p24.translatePrompt === '新翻译');
+  const p24Fresh = JSON.parse(mergePromptsOnly(null, { summaryPrompt: 'a', translatePrompt: 'b' }));
+  checkNew('(P2-4) 库里尚无配置时只落提示词：不把未确认可用的 baseUrl/apiKey 顺带写库',
+    !('apiKey' in p24Fresh) && !('baseUrl' in p24Fresh)
+    && p24Fresh.summaryPrompt === 'a' && p24Fresh.translatePrompt === 'b');
+  const p24Broken = JSON.parse(mergePromptsOnly('{ 坏 JSON', { summaryPrompt: 'a', translatePrompt: 'b' }));
+  checkNew('(P2-4) 库里 JSON 损坏时保存仍成功（以提示词重建，不让保存动作失败）',
+    p24Broken.summaryPrompt === 'a' && p24Broken.translatePrompt === 'b');
+
+  /* ---------- P2-10：防退化路径（后端原样返回原文）不得显示成「提取成功」 ---------- */
+  await bootFixture();
+  store.setState((s) => ({
+    toasts: [],
+    activeArticleId: '104',
+    showFulltext: false,
+    entries: s.entries.map((a) => (a.id === '104'
+      ? { ...a, content: '<p>RSS 原文</p>', rawContent: '<p>RSS 原文</p>', url: 'https://x.example/a', fulltextExtracted: false }
+      : a)),
+  }));
+  extractResult = '<p>RSS 原文</p>';          // 后端防退化：原样返回原文（未真正提取）
+  store.getState().extractCurrentArticle();
+  await nTick(20);
+  const p210 = store.getState();
+  checkNew('(P2-10) 防退化原样返回原文时：不置 fulltextExtracted、不切全文视图（修前都会发生）',
+    p210.entries.find((a) => a.id === '104')?.fulltextExtracted === false && p210.showFulltext === false);
+  checkNew('(P2-10) 且提示为「无法提取全文…」而不是「全文提取完成」',
+    p210.toasts.some((t) => t.text.includes('无法提取全文'))
+    && !p210.toasts.some((t) => t.text === '全文提取完成'));
+  extractResult = '<p>真正的全文正文，明显更长的一段内容。</p>';
+  store.getState().extractCurrentArticle();
+  await nTick(20);
+  const p210ok = store.getState();
+  checkNew('(P2-10) 正常提取路径不受影响：置标志 + 进入全文视图 + 报「全文提取完成」',
+    p210ok.entries.find((a) => a.id === '104')?.fulltextExtracted === true && p210ok.showFulltext === true
+    && p210ok.toasts.some((t) => t.text === '全文提取完成'));
+  extractResult = null;
+
+  /* ---------- P2-7：版本号未就绪/不可比时不再误判「有更新」 ---------- */
+  const { compareVersions, isComparableVersion, shouldOfferUpdate } = await import('../dist-test/components/settings/compareVersions.js');
+  checkNew('(P2-7) 修前误判根因可复现：compareVersions(remote, "") 把空串当 0.0.0 → 恒判远端更新',
+    compareVersions('0.9.0', '') > 0 && !isComparableVersion(''));
+  checkNew('(P2-7) 本地版本未就绪（空串）→ 不给「有更新」结论（未知 ≠ 有更新）',
+    shouldOfferUpdate('0.9.0', '') === false && shouldOfferUpdate('0.9.0', '   ') === false);
+  checkNew('(P2-7) 不可比版本（非数字点分 / 回退值以外的脏数据）同样不误判',
+    shouldOfferUpdate('0.9.0', 'v0.8.0') === false && shouldOfferUpdate('bad-tag', '0.8.0') === false);
+  checkNew('(P2-7) 两端都可比时判定照旧：远端更高 → true，同版/更低 → false',
+    shouldOfferUpdate('0.9.0', '0.8.0') === true && shouldOfferUpdate('0.8.0', '0.8.0') === false
+    && shouldOfferUpdate('0.7.9', '0.8.0') === false);
+  checkNew('(P2-7) 多段版本号（0.10.1 > 0.9.9）比较正确，不走字符串序',
+    shouldOfferUpdate('0.10.1', '0.9.9') === true && shouldOfferUpdate('0.9.9', '0.10.1') === false);
 })();
 
 // ---- 汇总 ----

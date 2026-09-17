@@ -166,7 +166,8 @@
     "owner_decision_ids": [
       "DEC-eae7a1e8009f4cf68743b2b9bf2ee150"
     ],
-    "merge_ref": "eab3176 (refactor(frontend): TASK-050 SettingsModal.tsx 按既有函数边界拆为设置页子模块（纯移动）)"
+    "merge_ref": "eab3176 (refactor(frontend): TASK-050 SettingsModal.tsx 按既有函数边界拆为设置页子模块（纯移动）)",
+    "continued_by": "TASK-051"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md",
