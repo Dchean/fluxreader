@@ -246,7 +246,8 @@
         "Required gate failed: build"
       ],
       "note": "只订正这一处参数写法并重算 definition_digest；**不放宽任何门禁**——订正后该门禁从「无效命令」变为真正执行 npm run build，强度是提高而非降低。原始失败 run RUN-9de75af90f76452d879c109e77e53c11 原样保留。"
-    }
+    },
+    "continued_by": "TASK-050"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md",

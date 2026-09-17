@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""TASK-050 独立审查脚本（reviewer 自写，不使用实现方脚本）。
+
+核验项：
+  A. 14 个顶层单元的函数体：HEAD 原文 vs 拆分后（去空白规范化 / 保留缩进两种口径）
+  B. 10 项模块级共享物：原文 vs 现状，各出现一次且等价
+  C. 反向完整性：原文中「在当前 src 树里找不到的整行」+ 归类
+  D. 多重集合守恒
+  E. 行数（splitlines 口径）与行尾（LF/CRLF）
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+from collections import Counter
+
+ROOT = r"D:\fluxreader"
+OUT = []
+
+
+def out(s=""):
+    OUT.append(s)
+    print(s)
+
+
+def read_text(path):
+    with open(path, "rb") as f:
+        raw = f.read()
+    return raw.decode("utf-8")
+
+
+def norm_ws(s):
+    """去空白规范化：所有空白序列折叠，整体去首尾空白。"""
+    return re.sub(r"\s+", "", s)
+
+
+def norm_lines(s):
+    """每行去首尾空白后丢弃空行，再拼接（保留行序，忽略缩进差异）。"""
+    return "\n".join(ln.strip() for ln in s.splitlines() if ln.strip())
+
+
+# ---------------------------------------------------------------- 大括号扫描
+ASSIGN_OPS = ("=>", "=")
+
+
+def find_decl_end(src, start):
+    """从声明起始位置找到该顶层声明的结束下标（不含尾随换行）。
+
+    以顶层（深度 0）的 ';' 结束；若先遇到 '}' 且其后下一个非空字符不是 ';' ，
+    则在该 '}' 处结束。
+    """
+    depth = 0
+    i = start
+    n = len(src)
+    state = None  # None | 'line' | 'block' | "'" | '"' | '`'
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if state is None:
+            if c == "/" and nxt == "/":
+                state = "line"
+                i += 2
+                continue
+            if c == "/" and nxt == "*":
+                state = "block"
+                i += 2
+                continue
+            if c in "'\"`":
+                state = c
+                i += 1
+                continue
+            if c in "([{":
+                depth += 1
+            elif c in ")]}":
+                depth -= 1
+                if depth == 0:
+                    j = i + 1
+                    while j < n and src[j] in " \t\r\n":
+                        j += 1
+                    # 仅当后面既不是 ';' 也不是表达式延续符时才认定声明结束
+                    if not (j < n and src[j] in ";.)]}=,+&|?"):
+                        return i + 1
+            elif c == ";" and depth == 0:
+                return i + 1
+        elif state == "line":
+            if c == "\n":
+                state = None
+        elif state == "block":
+            if c == "*" and nxt == "/":
+                state = None
+                i += 2
+                continue
+        else:  # 字符串
+            if c == "\\":
+                i += 2
+                continue
+            if c == state:
+                state = None
+        i += 1
+    return n
+
+
+def comment_mask(src):
+    """返回与 src 等长的布尔数组：True 表示该字符落在 // 或 /* */ 注释内。"""
+    n = len(src)
+    mask = [False] * n
+    state = None  # None | 'line' | 'block' | "'" | '"' | '`'
+    i = 0
+    while i < n:
+        c = src[i]
+        nxt = src[i + 1] if i + 1 < n else ""
+        if state is None:
+            if c == "/" and nxt == "/":
+                state = "line"
+                mask[i] = True
+                i += 1
+                continue
+            if c == "/" and nxt == "*":
+                state = "block"
+                mask[i] = True
+                i += 1
+                continue
+            if c in "'\"`":
+                state = c
+        elif state == "line":
+            if c == "\n":
+                state = None
+            else:
+                mask[i] = True
+        elif state == "block":
+            mask[i] = True
+            if c == "*" and nxt == "/":
+                mask[i + 1] = True
+                state = None
+                i += 2
+                continue
+        else:  # 字符串：注释符在里面不算注释
+            if c == "\\":
+                i += 2
+                continue
+            if c == state:
+                state = None
+        i += 1
+    return mask
+
+
+def split_units(src, names):
+    """把源码切成顶层单元：{name: (start, end)}，跳过注释内的伪声明。"""
+    decl_re = re.compile(
+        r"^(?:export\s+)?(?:default\s+)?"
+        r"(?:(?:abstract|declare)\s+)?"
+        r"(?:async\s+)?"
+        r"(?:function|const|let|var|interface|type|class|enum)\s+"
+        r"([A-Za-z_$][\w$]*)",
+        re.M,
+    )
+    mask = comment_mask(src)
+    spans = {}
+    for m in decl_re.finditer(src):
+        if mask[m.start()]:
+            continue  # 位于块/行注释内，不算声明
+        name = m.group(1)
+        # 仅接受位于行首（允许前导空白）的声明
+        line_start = src.rfind("\n", 0, m.start()) + 1
+        if src[line_start:m.start()].strip() != "":
+            continue
+        end = find_decl_end(src, m.start())
+        if name in names and name not in spans:
+            spans[name] = (m.start(), end)
+        else:
+            spans.setdefault("__other__", []).append((name, m.start(), end))
+    return spans
+
+
+def unit_text(src, span, strip_export=False):
+    txt = src[span[0]:span[1]]
+    if strip_export:
+        txt = re.sub(r"^export\s+(?=(?:async\s+)?(?:function|const|let|var|class|interface|type|enum)\b)",
+                     "", txt, count=1)
+    return txt
+
+
+NAMES = [
+    "SettingsModal", "AutoStartSwitch", "GeneralTab", "AppearanceTab", "ReadingTab",
+    "FeedsTab", "AiTab", "SyncTab", "CacheCleanupSection", "ConfigSyncSection",
+    "ShortcutsTab", "SettingsSidebarFooter", "AboutTab", "compareVersions",
+]
+
+SHARED = [
+    "TAB_META", "PALETTES", "FONT_OPTIONS", "LAYOUT_OPTIONS", "LAYOUT_NO_AI",
+    "PendingDelete", "AI_PRESETS", "AiConfigState", "DEFAULT_PROMPTS", "CACHE_PERIODS",
+]
+
+TARGET_FILES = [
+    "src/components/SettingsModal.tsx",
+    "src/components/settings/shared.ts",
+    "src/components/settings/layoutOptions.tsx",
+    "src/components/settings/AutoStartSwitch.tsx",
+    "src/components/settings/GeneralTab.tsx",
+    "src/components/settings/AppearanceTab.tsx",
+    "src/components/settings/ReadingTab.tsx",
+    "src/components/settings/FeedsTab.tsx",
+    "src/components/settings/AiTab.tsx",
+    "src/components/settings/SyncTab.tsx",
+    "src/components/settings/CacheCleanupSection.tsx",
+    "src/components/settings/ConfigSyncSection.tsx",
+    "src/components/settings/ShortcutsTab.tsx",
+    "src/components/settings/SettingsSidebarFooter.tsx",
+    "src/components/settings/AboutTab.tsx",
+    "src/components/settings/compareVersions.ts",
+]
+
+
+def main():
+    original = subprocess.run(
+        ["git", "-C", ROOT, "show", "HEAD:src/components/SettingsModal.tsx"],
+        capture_output=True, check=True,
+    ).stdout.decode("utf-8")
+
+    cur = {}
+    for rel in TARGET_FILES:
+        p = os.path.join(ROOT, rel.replace("/", os.sep))
+        if not os.path.exists(p):
+            out("!! 目标文件缺失: %s" % rel)
+            continue
+        cur[rel] = read_text(p)
+
+    cur_all = "\n".join(cur.values())
+
+    out("=" * 78)
+    out("A. 14 个顶层单元函数体等价性（独立脚本）")
+    out("=" * 78)
+
+    spans = split_units(original, set(NAMES))
+    missing_units = [n for n in NAMES if n not in spans]
+    if missing_units:
+        out("!! 原文中未识别到单元: %s" % missing_units)
+
+    n_bad = 0
+    n_exact = 0
+    for name in NAMES:
+        if name not in spans:
+            continue
+        orig_body = unit_text(original, spans[name], strip_export=True)
+        # 在当前树中定位该声明
+        found = None
+        found_file = None
+        for rel, txt in cur.items():
+            sp = split_units(txt, {name})
+            if name in sp:
+                found = unit_text(txt, sp[name], strip_export=True)
+                found_file = rel
+                break
+        if found is None:
+            out("!! %-24s 在拆分后文件中未找到" % name)
+            n_bad += 1
+            continue
+        ok_fold = norm_ws(orig_body) == norm_ws(found)
+        ok_line = norm_lines(orig_body) == norm_lines(found)
+        ok_exact = orig_body.replace("\r\n", "\n") == found.replace("\r\n", "\n")
+        if ok_exact:
+            n_exact += 1
+        if not (ok_fold and ok_line):
+            n_bad += 1
+        out("  %-24s -> %-46s fold=%-5s line=%-5s exact=%-5s (%d行->%d行)" % (
+            name, found_file, ok_fold, ok_line, ok_exact,
+            len(orig_body.splitlines()), len(found.splitlines())))
+
+    out("")
+    out("单元等价: 共 %d 个；去空白规范化不一致 = %d；仅忽略缩进不一致 = %d；完全逐字相同 = %d"
+        % (len(NAMES), n_bad, n_bad, n_exact))
+
+    out("")
+    out("=" * 78)
+    out("B. 10 项模块级共享物")
+    out("=" * 78)
+    shared_bad = 0
+    for name in SHARED:
+        sp_o = split_units(original, {name})
+        if name not in sp_o:
+            out("!! 原文缺少共享物 %s" % name)
+            shared_bad += 1
+            continue
+        ob = unit_text(original, sp_o[name], strip_export=True)
+        hits = []
+        for rel, txt in cur.items():
+            sp = split_units(txt, {name})
+            if name in sp:
+                hits.append((rel, unit_text(txt, sp[name], strip_export=True)))
+        if len(hits) != 1:
+            out("!! %-16s 出现次数 = %d %s" % (name, len(hits), [h[0] for h in hits]))
+            shared_bad += 1
+            continue
+        rel, fb = hits[0]
+        ok = norm_ws(ob) == norm_ws(fb)
+        if not ok:
+            shared_bad += 1
+        out("  %-16s x1 in %-46s fold_equal=%s" % (name, rel, ok))
+    out("共享物不一致/出现次数异常 = %d" % shared_bad)
+
+    out("")
+    out("=" * 78)
+    out("C. 反向完整性：原文中在现存 src 树里找不到的整行 + 归类")
+    out("=" * 78)
+    # 收集现存 src 全部文件的整行集合
+    src_root = os.path.join(ROOT, "src")
+    live_lines = set()
+    live_files = []
+    for dp, _dn, fn in os.walk(src_root):
+        for f in fn:
+            p = os.path.join(dp, f)
+            live_files.append(p)
+            try:
+                for ln in read_text(p).splitlines():
+                    live_lines.add(ln.strip())
+            except Exception as e:
+                out("  (跳过 %s: %s)" % (p, e))
+    out("现存 src 文件数 = %d" % len(live_files))
+
+    orig_lines = original.splitlines()
+    missing = []
+    for idx, ln in enumerate(orig_lines, 1):
+        if ln.strip() == "":
+            continue
+        if ln.strip() not in live_lines:
+            missing.append((idx, ln))
+            # 放宽：去空白后再找
+            if norm_ws(ln) in {norm_ws(x) for x in live_lines}:
+                out("  (仅缩进差异) %d: %s" % (idx, ln.strip()[:100]))
+
+    out("")
+    out("原文总行数(splitlines) = %d；非空行 = %d" % (
+        len(orig_lines), sum(1 for l in orig_lines if l.strip())))
+    out("找不到的整行(去首尾空白后) = %d" % len(missing))
+
+    cat = {"import": [], "export_decl": [], "OTHER": []}
+    for idx, ln in missing:
+        s = ln.strip()
+        if s.startswith("import "):
+            cat["import"].append((idx, s))
+        elif re.match(r"^export\s+(?=(?:async\s+)?(?:function|const|let|var|class|interface|type|enum)\b)", s):
+            cat["export_decl"].append((idx, s))
+        else:
+            cat["OTHER"].append((idx, s))
+    out("归类: import=%d  export修饰声明行=%d  OTHER(无法归类)=%d" % (
+        len(cat["import"]), len(cat["export_decl"]), len(cat["OTHER"])))
+    out("")
+    out("--- import 类 ---")
+    for i, s in cat["import"]:
+        out("  %4d: %s" % (i, s))
+    out("--- export 修饰声明行 ---")
+    for i, s in cat["export_decl"]:
+        out("  %4d: %s" % (i, s))
+    out("--- OTHER（业务表达式丢失/改写嫌疑）---")
+    for i, s in cat["OTHER"]:
+        out("  %4d: %s" % (i, s))
+
+    out("")
+    out("=" * 78)
+    out("D. 多重集合守恒（非空行计数）")
+    out("=" * 78)
+    orig_nonblank = Counter(l.strip() for l in orig_lines if l.strip())
+    new_nonblank = Counter()
+    for rel, txt in cur.items():
+        for l in txt.splitlines():
+            if l.strip():
+                new_nonblank[l.strip()] += 1
+    # 去掉新增 import 行与 export 修饰行的影响：直接看差集
+    added = new_nonblank - orig_nonblank
+    lost = orig_nonblank - new_nonblank
+    out("原文非空行(计重) = %d；现存非空行(计重) = %d" % (sum(orig_nonblank.values()), sum(new_nonblank.values())))
+    out("新增行种类 = %d (行数 %d)" % (len(added), sum(added.values())))
+    out("丢失行种类 = %d (行数 %d)" % (len(lost), sum(lost.values())))
+    for s, c in sorted(lost.items()):
+        out("  LOST x%d: %s" % (c, s[:120]))
+    for s, c in sorted(added.items()):
+        out("  ADD  x%d: %s" % (c, s[:120]))
+
+    out("")
+    out("=" * 78)
+    out("E. 行数与行尾（splitlines / LF / CRLF）")
+    out("=" * 78)
+    over400 = 0
+    crlf_total = 0
+    for rel in TARGET_FILES:
+        p = os.path.join(ROOT, rel.replace("/", os.sep))
+        if not os.path.exists(p):
+            continue
+        raw = open(p, "rb").read()
+        crlf = raw.count(b"\r\n")
+        lone_cr = raw.count(b"\r") - crlf
+        lf = raw.count(b"\n") - crlf
+        lines = read_text(p).splitlines()
+        crlf_total += crlf + lone_cr
+        flag = "  <<< >400" if len(lines) > 400 else ""
+        if len(lines) > 400:
+            over400 += 1
+        out("  %-46s lines=%-4d crlf=%-3d lone_cr=%-3d lf=%-4d%s" % (
+            rel, len(lines), crlf, lone_cr, lf, flag))
+    out("超过 400 行的文件数 = %d；总 CRLF 数 = %d" % (over400, crlf_total))
+
+    txt = "\n".join(OUT) + "\n"
+    with open(os.path.join(ROOT, ".workflow-kit", "tasks", "evidence",
+                           "TASK-050-review-verification.txt"), "w",
+              encoding="utf-8", newline="\n") as f:
+        f.write(txt)
+
+
+if __name__ == "__main__":
+    main()

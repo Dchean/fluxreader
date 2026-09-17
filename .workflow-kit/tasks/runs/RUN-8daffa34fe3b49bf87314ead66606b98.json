@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-8daffa34fe3b49bf87314ead66606b98",
+  "task_id": "TASK-050",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "总控会话直接实现（POLICY coder=current_agent）；SettingsModal.tsx 按既有 14 个顶层函数边界纯移动到 components/settings/，JSX/逻辑/文案逐字不变；验证=函数体逐字比对 + lint/build + CDP 实机冒烟（不引入组件测试依赖）"
+  },
+  "started_at_utc": "2026-09-17T15:33:43.337052Z",
+  "finished_at_utc": "2026-09-17T16:17:56.201456Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "04d16e959c839c5b5ac2fc327b333616cf11afb063c00f48f0b02af38b9db0e2",
+  "candidate_digest": "7931539783001d6310fa4f0e2615afe896736ddb4f8fbde63f618b1e22555c5c",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-8daffa34fe3b49bf87314ead66606b98-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-8daffa34fe3b49bf87314ead66606b98-scope.json"
+}

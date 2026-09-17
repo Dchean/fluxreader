@@ -1,0 +1,193 @@
+==============================================================================
+A. 14 个顶层单元函数体等价性（独立脚本）
+==============================================================================
+  SettingsModal            -> src/components/SettingsModal.tsx               fold=True  line=True  exact=True  (1行->1行)
+  AutoStartSwitch          -> src/components/settings/AutoStartSwitch.tsx    fold=True  line=True  exact=True  (1行->1行)
+  GeneralTab               -> src/components/settings/GeneralTab.tsx         fold=True  line=True  exact=True  (1行->1行)
+  AppearanceTab            -> src/components/settings/AppearanceTab.tsx      fold=True  line=True  exact=True  (1行->1行)
+  ReadingTab               -> src/components/settings/ReadingTab.tsx         fold=True  line=True  exact=True  (1行->1行)
+  FeedsTab                 -> src/components/settings/FeedsTab.tsx           fold=True  line=True  exact=True  (1行->1行)
+  AiTab                    -> src/components/settings/AiTab.tsx              fold=True  line=True  exact=True  (1行->1行)
+  SyncTab                  -> src/components/settings/SyncTab.tsx            fold=True  line=True  exact=True  (1行->1行)
+  CacheCleanupSection      -> src/components/settings/CacheCleanupSection.tsx fold=True  line=True  exact=True  (1行->1行)
+  ConfigSyncSection        -> src/components/settings/ConfigSyncSection.tsx  fold=True  line=True  exact=True  (1行->1行)
+  ShortcutsTab             -> src/components/settings/ShortcutsTab.tsx       fold=True  line=True  exact=True  (1行->1行)
+  SettingsSidebarFooter    -> src/components/settings/SettingsSidebarFooter.tsx fold=True  line=True  exact=True  (1行->1行)
+  AboutTab                 -> src/components/settings/AboutTab.tsx           fold=True  line=True  exact=True  (1行->1行)
+  compareVersions          -> src/components/settings/compareVersions.ts     fold=True  line=True  exact=True  (1行->1行)
+
+单元等价: 共 14 个；去空白规范化不一致 = 0；仅忽略缩进不一致 = 0；完全逐字相同 = 14
+
+==============================================================================
+B. 10 项模块级共享物
+==============================================================================
+  TAB_META         x1 in src/components/settings/shared.ts              fold_equal=True
+  PALETTES         x1 in src/components/settings/shared.ts              fold_equal=True
+  FONT_OPTIONS     x1 in src/components/settings/shared.ts              fold_equal=True
+  LAYOUT_OPTIONS   x1 in src/components/settings/layoutOptions.tsx      fold_equal=True
+  LAYOUT_NO_AI     x1 in src/components/settings/shared.ts              fold_equal=True
+  PendingDelete    x1 in src/components/settings/shared.ts              fold_equal=True
+  AI_PRESETS       x1 in src/components/settings/shared.ts              fold_equal=True
+  AiConfigState    x1 in src/components/settings/shared.ts              fold_equal=True
+  DEFAULT_PROMPTS  x1 in src/components/settings/shared.ts              fold_equal=True
+  CACHE_PERIODS    x1 in src/components/settings/shared.ts              fold_equal=True
+共享物不一致/出现次数异常 = 0
+
+==============================================================================
+C. 反向完整性：原文中在现存 src 树里找不到的整行 + 归类
+==============================================================================
+现存 src 文件数 = 49
+
+原文总行数(splitlines) = 1513；非空行 = 1412
+找不到的整行(去首尾空白后) = 24
+归类: import=3  export修饰声明行=0  OTHER(无法归类)=21
+
+--- import 类 ---
+     3: import { api, extractError } from '../lib/api';
+     5: import { FluxDropdown, Switch, SwitchInline, SettingCard, ModalOverlay, ConfirmDialog } from './primitives';
+     6: import type { ContentLayoutType } from '../types';
+--- export 修饰声明行 ---
+--- OTHER（业务表达式丢失/改写嫌疑）---
+    14: const TAB_META: { id: string; title: string; subtitle: string; icon: () => React.ReactElement }[] = [
+    25: const PALETTES = [
+    36: const FONT_OPTIONS = [
+   131: function AutoStartSwitch() {
+   166: function GeneralTab() {
+   245: function AppearanceTab() {
+   287: function ReadingTab() {
+   376: interface PendingDelete {
+   384: function FeedsTab() {
+   643: const AI_PRESETS: Record<string, { url: string; model: string; label: string }> = {
+   650: interface AiConfigState {
+   659: const DEFAULT_PROMPTS = {
+   664: function AiTab() {
+   833: function SyncTab() {
+  1118: const CACHE_PERIODS = [
+  1126: function CacheCleanupSection() {
+  1189: function ConfigSyncSection() {
+  1407: function ShortcutsTab() {
+  1432: function SettingsSidebarFooter() {
+  1447: function AboutTab() {
+  1504: function compareVersions(a: string, b: string): number {
+
+==============================================================================
+D. 多重集合守恒（非空行计数）
+==============================================================================
+原文非空行(计重) = 1412；现存非空行(计重) = 1468
+新增行种类 = 64 (行数 86)
+丢失行种类 = 30 (行数 30)
+  LOST x1: const AI_PRESETS: Record<string, { url: string; model: string; label: string }> = {
+  LOST x1: const CACHE_PERIODS = [
+  LOST x1: const DEFAULT_PROMPTS = {
+  LOST x1: const FONT_OPTIONS = [
+  LOST x1: const LAYOUT_NO_AI: ReadonlySet<string> = new Set(['image', 'podcast']);
+  LOST x1: const LAYOUT_OPTIONS = CONTENT_LAYOUTS.map((l) => {
+  LOST x1: const PALETTES = [
+  LOST x1: const TAB_META: { id: string; title: string; subtitle: string; icon: () => React.ReactElement }[] = [
+  LOST x1: function AboutTab() {
+  LOST x1: function AiTab() {
+  LOST x1: function AppearanceTab() {
+  LOST x1: function AutoStartSwitch() {
+  LOST x1: function CacheCleanupSection() {
+  LOST x1: function ConfigSyncSection() {
+  LOST x1: function FeedsTab() {
+  LOST x1: function GeneralTab() {
+  LOST x1: function ReadingTab() {
+  LOST x1: function SettingsSidebarFooter() {
+  LOST x1: function ShortcutsTab() {
+  LOST x1: function SyncTab() {
+  LOST x1: function compareVersions(a: string, b: string): number {
+  LOST x1: import type { ContentLayoutType } from '../types';
+  LOST x1: import { FluxDropdown, Switch, SwitchInline, SettingCard, ModalOverlay, ConfirmDialog } from './primitives';
+  LOST x1: import { Icons, LayoutIcon } from './icons';
+  LOST x1: import { api, extractError } from '../lib/api';
+  LOST x1: import { openExternal } from '../lib/external';
+  LOST x1: import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
+  LOST x1: import { useEffect, useRef, useState } from 'react';
+  LOST x1: interface AiConfigState {
+  LOST x1: interface PendingDelete {
+  ADD  x1: export const AI_PRESETS: Record<string, { url: string; model: string; label: string }> = {
+  ADD  x1: export const CACHE_PERIODS = [
+  ADD  x1: export const DEFAULT_PROMPTS = {
+  ADD  x1: export const FONT_OPTIONS = [
+  ADD  x1: export const LAYOUT_NO_AI: ReadonlySet<string> = new Set(['image', 'podcast']);
+  ADD  x1: export const LAYOUT_OPTIONS = CONTENT_LAYOUTS.map((l) => {
+  ADD  x1: export const PALETTES = [
+  ADD  x1: export const TAB_META: { id: string; title: string; subtitle: string; icon: () => React.ReactElement }[] = [
+  ADD  x1: export function AboutTab() {
+  ADD  x1: export function AiTab() {
+  ADD  x1: export function AppearanceTab() {
+  ADD  x1: export function AutoStartSwitch() {
+  ADD  x1: export function CacheCleanupSection() {
+  ADD  x1: export function ConfigSyncSection() {
+  ADD  x1: export function FeedsTab() {
+  ADD  x1: export function GeneralTab() {
+  ADD  x1: export function ReadingTab() {
+  ADD  x1: export function SettingsSidebarFooter() {
+  ADD  x1: export function ShortcutsTab() {
+  ADD  x1: export function SyncTab() {
+  ADD  x1: export function compareVersions(a: string, b: string): number {
+  ADD  x1: export interface AiConfigState {
+  ADD  x1: export interface PendingDelete {
+  ADD  x1: import type { ContentLayoutType } from '../../types';
+  ADD  x1: import { AI_PRESETS, DEFAULT_PROMPTS, type AiConfigState } from './shared';
+  ADD  x1: import { AboutTab } from './settings/AboutTab';
+  ADD  x1: import { AiTab } from './settings/AiTab';
+  ADD  x1: import { AppearanceTab } from './settings/AppearanceTab';
+  ADD  x1: import { AutoStartSwitch } from './AutoStartSwitch';
+  ADD  x1: import { CACHE_PERIODS } from './shared';
+  ADD  x1: import { CONTENT_LAYOUTS, LAYOUT_NAMES } from '../../store';
+  ADD  x1: import { CacheCleanupSection } from './CacheCleanupSection';
+  ADD  x1: import { ConfigSyncSection } from './ConfigSyncSection';
+  ADD  x1: import { FONT_OPTIONS } from './shared';
+  ADD  x1: import { FeedsTab } from './settings/FeedsTab';
+  ADD  x2: import { FluxDropdown, SettingCard } from '../primitives';
+  ADD  x1: import { FluxDropdown, SettingCard, ConfirmDialog } from '../primitives';
+  ADD  x2: import { FluxDropdown, Switch, SettingCard } from '../primitives';
+  ADD  x1: import { FluxDropdown, Switch, SettingCard, ConfirmDialog } from '../primitives';
+  ADD  x1: import { FluxDropdown, SwitchInline, ConfirmDialog } from '../primitives';
+  ADD  x1: import { GeneralTab } from './settings/GeneralTab';
+  ADD  x3: import { Icons } from '../icons';
+  ADD  x1: import { LAYOUT_NO_AI, type PendingDelete } from './shared';
+  ADD  x1: import { LAYOUT_OPTIONS } from './layoutOptions';
+  ADD  x1: import { LayoutIcon } from '../icons';
+  ADD  x1: import { ModalOverlay } from './primitives';
+  ADD  x1: import { PALETTES } from './shared';
+  ADD  x1: import { ReadingTab } from './settings/ReadingTab';
+  ADD  x1: import { SettingCard } from '../primitives';
+  ADD  x1: import { SettingsSidebarFooter } from './settings/SettingsSidebarFooter';
+  ADD  x1: import { ShortcutsTab } from './settings/ShortcutsTab';
+  ADD  x1: import { Switch, SettingCard } from '../primitives';
+  ADD  x1: import { SyncTab } from './settings/SyncTab';
+  ADD  x1: import { TAB_META } from './settings/shared';
+  ADD  x1: import { api } from '../../lib/api';
+  ADD  x4: import { api, extractError } from '../../lib/api';
+  ADD  x1: import { compareVersions } from './compareVersions';
+  ADD  x2: import { openExternal } from '../../lib/external';
+  ADD  x10: import { useAppStore } from '../../store';
+  ADD  x1: import { useAppStore } from '../store';
+  ADD  x6: import { useEffect, useState } from 'react';
+  ADD  x1: import { useRef } from 'react';
+  ADD  x1: import { useRef, useState } from 'react';
+  ADD  x1: import { useState } from 'react';
+
+==============================================================================
+E. 行数与行尾（splitlines / LF / CRLF）
+==============================================================================
+  src/components/SettingsModal.tsx               lines=92   crlf=0   lone_cr=0   lf=92  
+  src/components/settings/shared.ts              lines=75   crlf=0   lone_cr=0   lf=75  
+  src/components/settings/layoutOptions.tsx      lines=7    crlf=0   lone_cr=0   lf=7   
+  src/components/settings/AutoStartSwitch.tsx    lines=39   crlf=0   lone_cr=0   lf=39  
+  src/components/settings/GeneralTab.tsx         lines=82   crlf=0   lone_cr=0   lf=82  
+  src/components/settings/AppearanceTab.tsx      lines=44   crlf=0   lone_cr=0   lf=44  
+  src/components/settings/ReadingTab.tsx         lines=85   crlf=0   lone_cr=0   lf=85  
+  src/components/settings/FeedsTab.tsx           lines=272  crlf=0   lone_cr=0   lf=272 
+  src/components/settings/AiTab.tsx              lines=175  crlf=0   lone_cr=0   lf=175 
+  src/components/settings/SyncTab.tsx            lines=291  crlf=0   lone_cr=0   lf=291 
+  src/components/settings/CacheCleanupSection.tsx lines=68   crlf=0   lone_cr=0   lf=68  
+  src/components/settings/ConfigSyncSection.tsx  lines=222  crlf=0   lone_cr=0   lf=222 
+  src/components/settings/ShortcutsTab.tsx       lines=25   crlf=0   lone_cr=0   lf=25  
+  src/components/settings/SettingsSidebarFooter.tsx lines=15   crlf=0   lone_cr=0   lf=15  
+  src/components/settings/AboutTab.tsx           lines=63   crlf=0   lone_cr=0   lf=63  
+  src/components/settings/compareVersions.ts     lines=11   crlf=0   lone_cr=0   lf=11  
+超过 400 行的文件数 = 0；总 CRLF 数 = 0

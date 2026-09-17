@@ -1,0 +1,237 @@
+// TASK-050 独立审查：用 TypeScript 编译器自身的解析器做「纯移动」判定。
+// 覆盖 A(14 单元等价) / B(10 共享物) / C(反向完整性) / D(多重集合守恒)。
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
+const ts = require('typescript');
+
+const ROOT = 'D:\\fluxreader';
+const OUTP = path.join(ROOT, '.workflow-kit', 'tasks', 'evidence', 'TASK-050-review-ts-verify.txt');
+const L = [];
+const out = (s = '') => { L.push(s); };
+
+const NAMES = ['SettingsModal', 'AutoStartSwitch', 'GeneralTab', 'AppearanceTab', 'ReadingTab',
+  'FeedsTab', 'AiTab', 'SyncTab', 'CacheCleanupSection', 'ConfigSyncSection',
+  'ShortcutsTab', 'SettingsSidebarFooter', 'AboutTab', 'compareVersions'];
+const SHARED = ['TAB_META', 'PALETTES', 'FONT_OPTIONS', 'LAYOUT_OPTIONS', 'LAYOUT_NO_AI',
+  'PendingDelete', 'AI_PRESETS', 'AiConfigState', 'DEFAULT_PROMPTS', 'CACHE_PERIODS'];
+const TARGETS = [
+  'src/components/SettingsModal.tsx',
+  'src/components/settings/shared.ts',
+  'src/components/settings/layoutOptions.tsx',
+  'src/components/settings/AutoStartSwitch.tsx',
+  'src/components/settings/GeneralTab.tsx',
+  'src/components/settings/AppearanceTab.tsx',
+  'src/components/settings/ReadingTab.tsx',
+  'src/components/settings/FeedsTab.tsx',
+  'src/components/settings/AiTab.tsx',
+  'src/components/settings/SyncTab.tsx',
+  'src/components/settings/CacheCleanupSection.tsx',
+  'src/components/settings/ConfigSyncSection.tsx',
+  'src/components/settings/ShortcutsTab.tsx',
+  'src/components/settings/SettingsSidebarFooter.tsx',
+  'src/components/settings/AboutTab.tsx',
+  'src/components/settings/compareVersions.ts',
+];
+
+const originalSrc = execFileSync('git', ['-C', ROOT, 'show', 'HEAD:src/components/SettingsModal.tsx'],
+  { maxBuffer: 1 << 28 }).toString('utf8');
+const origFile = ts.createSourceFile('original.tsx', originalSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+
+/** 收集顶层语句：{name, start, end, text, exported} */
+function topLevel(file, src) {
+  const items = [];
+  for (const st of file.statements) {
+    let name = null;
+    if (st.name && ts.isIdentifier(st.name)) name = st.name.text;
+    else if (ts.isVariableStatement(st) && st.declarationList.declarations.length) {
+      const d = st.declarationList.declarations[0];
+      if (ts.isIdentifier(d.name)) name = d.name.text;
+    }
+    const mods = ts.canHaveModifiers(st) ? ts.getModifiers(st) : undefined;
+    const exported = !!(mods && mods.some((m) => m.kind === ts.SyntaxKind.ExportKeyword));
+    items.push({ name, start: st.getStart(file), end: st.getEnd(), text: st.getText(file), exported, kind: ts.SyntaxKind[st.kind] });
+  }
+  return items;
+}
+
+const origItems = topLevel(origFile, originalSrc);
+const cur = new Map();
+for (const rel of TARGETS) {
+  const p = path.join(ROOT, rel.split('/').join(path.sep));
+  const src = fs.readFileSync(p, 'utf8');
+  const f = ts.createSourceFile(path.basename(rel), src, ts.ScriptTarget.Latest, true,
+    rel.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+  cur.set(rel, { src, items: topLevel(f, src) });
+}
+
+const fold = (s) => s.replace(/\s+/g, '');
+const indentInsensitive = (s) => s.split(/\r?\n/).map((l) => l.trim()).filter((l) => l).join('\n');
+const stripExport = (s) => s.replace(/^export\s+(?=(?:async\s+)?(?:function|const|let|var|class|interface|type|enum|declare)\b)/, '');
+
+function findDecl(rel, name) {
+  const e = cur.get(rel);
+  if (!e) return null;
+  const hit = e.items.filter((it) => it.name === name);
+  if (hit.length !== 1) return null;
+  return hit[0];
+}
+
+out('='.repeat(78));
+out('A. 14 个顶层单元等价性 —— 判定器 = TypeScript 编译器 API (ts.createSourceFile)');
+out('='.repeat(78));
+let eqBad = 0, exactAll = 0, dupProblem = 0;
+out('  unit                      | 原文行 | 现状行 | 所属文件                                | foldEq lineEq charEq');
+for (const name of NAMES) {
+  const o = origItems.filter((it) => it.name === name);
+  if (o.length !== 1) { out(`!! 原文中 ${name} 顶层声明数 = ${o.length}`); eqBad++; continue; }
+  // 定位现状
+  const locs = [];
+  for (const [rel, e] of cur) for (const it of e.items) if (it.name === name) locs.push({ rel, it });
+  if (locs.length !== 1) { out(`!! 现状中 ${name} 出现次数 = ${locs.length} (${locs.map((x) => x.rel)})`); dupProblem++; continue; }
+  const ob = o[0].text, fb = locs[0].it.text;
+  const obS = stripExport(ob), fbS = stripExport(fb);
+  const f1 = fold(obS) === fold(fbS);
+  const f2 = indentInsensitive(obS).split('\n').join('\n') === indentInsensitive(fbS).split('\n').join('\n');
+  const f3 = obS.replace(/\r\n/g, '\n') === fbS.replace(/\r\n/g, '\n');
+  if (f3) exactAll++;
+  if (!f1 || !f2 || !f3) eqBad++;
+  out(`  ${name.padEnd(24)} | ${String(ob.split('\n').length).padStart(6)} | ${String(fb.split('\n').length).padStart(6)} | ${locs[0].rel.padEnd(39)} | ${f1} ${f2} ${f3}`);
+}
+out('');
+out(`单元等价汇总: 14 单元；fold不一致=${eqBad}；char级(去export后)不一致=${14 - exactAll}；重复/缺失=${dupProblem}`);
+out(`  ⇒ 逐字等价(去空白规范化)=${eqBad === 0 ? '全部一致' : '存在不一致'}；完全字符级相同(仅去掉 export 前缀)=${exactAll}/14`);
+
+// 额外：export 修饰差异是否只有一处
+out('');
+out('  声明行 export 修饰差异（原文 exported -> 现状 exported）:');
+for (const name of NAMES) {
+  const o = origItems.find((it) => it.name === name);
+  const loc = [...cur].flatMap(([rel, e]) => e.items.filter((it) => it.name === name).map((it) => ({ rel, it })))[0];
+  if (o && loc) out(`    ${name.padEnd(24)} ${String(o.exported).padEnd(5)} -> ${loc.it.exported}   (${loc.rel})`);
+}
+
+out('');
+out('='.repeat(78));
+out('B. 10 项模块级共享物：出现次数 + 等价性');
+out('='.repeat(78));
+let sharedBad = 0;
+for (const name of SHARED) {
+  const o = origItems.filter((it) => it.name === name);
+  const locs = [];
+  for (const [rel, e] of cur) for (const it of e.items) if (it.name === name) locs.push({ rel, it });
+  if (o.length !== 1 || locs.length !== 1) {
+    out(`!! ${name.padEnd(16)} 原文=${o.length} 现状=${locs.length} ${locs.map((x) => x.rel)}`);
+    sharedBad++; continue;
+  }
+  const obS = stripExport(o[0].text), fbS = stripExport(locs[0].it.text);
+  const ok = fold(obS) === fold(fbS) && obS.replace(/\r\n/g, '\n') === fbS.replace(/\r\n/g, '\n');
+  if (!ok) sharedBad++;
+  out(`  ${name.padEnd(16)} x1 in ${locs[0].rel.padEnd(44)} charEq=${obS === fbS} foldEq=${fold(obS) === fold(fbS)}`);
+}
+out(`共享物异常数 = ${sharedBad}`);
+
+out('');
+out('='.repeat(78));
+out('C. 反向完整性（规范化口径：忽略前导缩进；判定「原文有、现状无」的行）');
+out('='.repeat(78));
+const srcRoot = path.join(ROOT, 'src');
+const liveByRaw = new Set();
+const liveByLstripped = new Set();
+const liveByTrimmed = new Set();
+const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+  const p = path.join(d, e.name);
+  if (e.isDirectory()) walk(p);
+  else { const s = fs.readFileSync(p, 'utf8');
+    for (const ln of s.split(/\r?\n/)) { liveByRaw.add(ln); liveByLstripped.add(ln.replace(/^\s+/, '')); liveByTrimmed.add(ln.trim()); } }
+} };
+walk(srcRoot);
+
+const origLines = originalSrc.split(/\r?\n/);
+const nonBlank = origLines.filter((l) => l.trim() !== '');
+const unmatched = nonBlank.filter((l) => !liveByTrimmed.has(l.trim()));
+const unmatchedLoose = nonBlank.filter((l) => !liveByLstripped.has(l.replace(/^\s+/, '')));
+out(`原文总行(splitlines 等价口径)=${origLines.length}；非空行=${nonBlank.length}`);
+out(`找不到的行(整体 trim 口径)=${unmatched.length}`);
+out(`找不到的行(忽略前导缩进口径)=${unmatchedLoose.length}`);
+// 修正口径：前导缩进 + export 前缀都不算语义变化，故分类时先去掉再比对，
+// 并把「仅新增 export 前缀即命中」的行单独归类验证。
+const liveNoExportSet = new Set([...liveByLstripped].map((l) => l.replace(/^export\s+/, '')));
+const cat = { import: [], export_extra: [], other: [] };
+for (const ln of unmatchedLoose) {
+  const s = ln.replace(/^\s+/, '');
+  if (/^import\b/.test(s)) cat.import.push(ln);
+  else if (liveNoExportSet.has(s)) cat.export_extra.push(ln); // 去掉新增 export 后逐字命中
+  else cat.other.push(ln);
+}
+out(`（分类口径：去掉前导缩进与 export 前缀后仍能逐字命中的 -> export 修饰行）`);
+// 反向：现状里有、原文没有的「export 修饰声明行」条数，应与 cat.export_extra 一致
+const origLineSet = new Set(origLines.map((l) => l.replace(/^\s+/, '')));
+let exportAddedNow = 0;
+const exportAddedLines = [];
+for (const [rel, e] of cur) {
+  for (const it of e.items) {
+    if (!it.exported) continue;
+    const line = it.text.split(/\r?\n/)[0].replace(/^\s+/, '');
+    if (/^export\s+/.test(line) && !origLineSet.has(line) && origLineSet.has(line.replace(/^export\s+/, ''))) {
+      exportAddedNow++; exportAddedLines.push(`${rel} :: ${line.slice(0, 80)}`);
+    }
+  }
+}
+out(`现状新增 export 前缀的顶层声明数 = ${exportAddedNow}（应等于 export 修饰行数 ${cat.export_extra.length}）`);
+exportAddedLines.forEach((l) => out('    ' + l));
+out(`归类: import=${cat.import.length}  新增export修饰的声明行=${cat.export_extra.length}  OTHER(业务表达式丢失/改写嫌疑)=${cat.other.length}`);
+out('');
+out('--- import 类（原文前缀与新文件后缀不同）---');
+cat.import.forEach((l) => out('  ' + l.replace(/^\s+/, '')));
+out('--- 仅新增 export 修饰的声明行 ---');
+cat.export_extra.forEach((l) => out('  ' + l.replace(/^\s+/, '')));
+out('--- OTHER（必须为空，否则有业务表达式丢失/改写）---');
+cat.other.forEach((l, i) => out(`  [${i + 1}] ${l}`));
+out(`OTHER 计数 = ${cat.other.length}`);
+
+out('');
+out('='.repeat(78));
+out('D. 多重集合守恒（对原文每一非空行：现状出现次数是否 >= 原文出现次数）');
+out('='.repeat(78));
+const cnt = (arr) => { const m = new Map(); for (const x of arr) m.set(x, (m.get(x) || 0) + 1); return m; };
+const origCnt = cnt(nonBlank.map((l) => l.trim()));
+const liveArr = [];
+for (const rel of TARGETS) for (const ln of fs.readFileSync(path.join(ROOT, rel.split('/').join(path.sep)), 'utf8').split(/\r?\n/)) if (ln.trim()) liveArr.push(ln.trim());
+const liveCnt = cnt(liveArr);
+let deficits = 0;
+out(`原文非空行(计重)=${nonBlank.length}；16 个目标文件非空行(计重)=${liveArr.length}`);
+for (const [line, c] of origCnt) {
+  const now = liveCnt.get(line) || 0;
+  if (now < c) { out(`  DEFICIT 原x${c} 现x${now}: ${line.slice(0, 110)}`); deficits++; }
+}
+out(`出现次数不足的行种类 = ${deficits}`);
+// 去掉 export 前缀后重新核对
+let deficitsNoExport = 0;
+const liveNoExport = cnt(liveArr.map((l) => l.replace(/^export\s+/, '')));
+for (const [line, c] of origCnt) {
+  const now = liveNoExport.get(line.replace(/^export\s+/, '')) || 0;
+  if (now < c) { out(`  DEFICIT(去export) 原x${c} 现x${now}: ${line.slice(0, 110)}`); deficitsNoExport++; }
+}
+out(`去 export 前缀后出现次数不足的行种类 = ${deficitsNoExport}`);
+
+out('');
+out('='.repeat(78));
+out('E. 行数与行尾（splitlines 口径 / LF / CRLF / 末尾换行）');
+out('='.repeat(78));
+let over400 = 0, crlfTotal = 0, noEol = 0;
+for (const rel of TARGETS) {
+  const p = path.join(ROOT, rel.split('/').join(path.sep));
+  const buf = fs.readFileSync(p);
+  const s = buf.toString('utf8');
+  const crlf = (s.match(/\r\n/g) || []).length;
+  const loneCr = (s.match(/\r(?!\n)/g) || []).length;
+  const lines = s.split('\n'); if (lines[lines.length - 1] === '') lines.pop();
+  if (!s.endsWith('\n')) noEol++;
+  crlfTotal += crlf + loneCr;
+  if (lines.length > 400) over400++;
+  out(`  ${rel.padEnd(48)} lines=${String(lines.length).padStart(4)}  crlf=${crlf}  loneCR=${loneCr}  ${lines.length > 400 ? '<<< OVER 400' : ''}`);
+}
+out(`超过 400 行的文件数=${over400}；CRLF+loneCR 总数=${crlfTotal}；结尾无换行的文件数=${noEol}`);
+
+fs.writeFileSync(OUTP, L.join('\n') + '\n', 'utf8');

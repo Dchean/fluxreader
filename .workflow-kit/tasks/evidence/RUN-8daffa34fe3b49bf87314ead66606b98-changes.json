@@ -1,0 +1,20 @@
+{
+  "changed_files": [
+    "src/components/SettingsModal.tsx",
+    "src/components/settings/AboutTab.tsx",
+    "src/components/settings/AiTab.tsx",
+    "src/components/settings/AppearanceTab.tsx",
+    "src/components/settings/AutoStartSwitch.tsx",
+    "src/components/settings/CacheCleanupSection.tsx",
+    "src/components/settings/ConfigSyncSection.tsx",
+    "src/components/settings/FeedsTab.tsx",
+    "src/components/settings/GeneralTab.tsx",
+    "src/components/settings/ReadingTab.tsx",
+    "src/components/settings/SettingsSidebarFooter.tsx",
+    "src/components/settings/ShortcutsTab.tsx",
+    "src/components/settings/SyncTab.tsx",
+    "src/components/settings/compareVersions.ts",
+    "src/components/settings/layoutOptions.tsx",
+    "src/components/settings/shared.ts"
+  ]
+}

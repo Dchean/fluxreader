@@ -1,0 +1,205 @@
+// TASK-050 独立审查：headless Edge + 页面级 WebSocket CDP，判定那条 console 错误到底由谁触发。
+// 不注入系统级键鼠、不抢占焦点（--headless=new --no-first-run + 独立临时 profile）。
+const { spawn } = require('child_process');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const EDGE = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+const PORT = 9443;
+const TARGET_URL = process.argv[2] || 'http://127.0.0.1:4187/';
+const PROF = path.join(process.env.TEMP || 'C:\\Windows\\Temp', 'task050-review-edge-profile2');
+const LOGF = path.join('D:\\fluxreader', '.review-cdp-log.txt');
+const L = [];
+const log = (s) => { L.push(s); console.log(s); };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+fs.rmSync(PROF, { recursive: true, force: true });
+
+const child = spawn(EDGE, [
+  '--headless=new', `--remote-debugging-port=${PORT}`, `--user-data-dir=${PROF}`,
+  '--no-first-run', '--no-default-browser-check', '--disable-extensions',
+  '--no-proxy-server', '--window-size=1400,900', TARGET_URL,
+], { stdio: 'ignore', windowsHide: true });
+
+function httpGet(url) {
+  return new Promise((res, rej) => {
+    http.get(url, (r) => { let d = ''; r.on('data', (c) => (d += c)); r.on('end', () => res(d)); }).on('error', rej);
+  });
+}
+
+class CDP {
+  constructor(ws) { this.ws = ws; this.id = 0; this.pending = new Map(); this.handlers = []; }
+  static async connect(url) {
+    const ws = new WebSocket(url);
+    await new Promise((res, rej) => {
+      ws.addEventListener('open', res, { once: true });
+      ws.addEventListener('error', (e) => rej(new Error('ws error: ' + (e.message || 'unknown'))), { once: true });
+    });
+    const c = new CDP(ws);
+    ws.addEventListener('message', (ev) => {
+      const m = JSON.parse(typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data).toString('utf8'));
+      if (m.id && c.pending.has(m.id)) {
+        const { res, rej } = c.pending.get(m.id); c.pending.delete(m.id);
+        m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result);
+      } else if (m.method) for (const h of c.handlers) h(m);
+    });
+    return c;
+  }
+  on(fn) { this.handlers.push(fn); }
+  send(method, params = {}) {
+    const id = ++this.id;
+    return new Promise((res, rej) => { this.pending.set(id, { res, rej }); this.ws.send(JSON.stringify({ id, method, params })); });
+  }
+  async evalJs(expr) {
+    const r = await this.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+    if (r.exceptionDetails) return { __error: r.exceptionDetails.text || JSON.stringify(r.exceptionDetails) };
+    return r.result && r.result.value;
+  }
+}
+
+const events = [];
+const CONSOLE_ERR = [];
+let t0 = 0;
+
+async function main() {
+  let page = null;
+  for (let i = 0; i < 80; i++) {
+    try {
+      const list = JSON.parse(await httpGet(`http://127.0.0.1:${PORT}/json/list`));
+      page = list.find((t) => t.type === 'page' && t.webSocketDebuggerUrl);
+      if (page) break;
+    } catch { /* 未就绪 */ }
+    await sleep(300);
+  }
+  if (!page) throw new Error('未找到 page target');
+  log(`page target: ${page.url}`);
+  log(`ws: ${page.webSocketDebuggerUrl}`);
+
+  const cdp = await CDP.connect(page.webSocketDebuggerUrl);
+  cdp.on((m) => {
+    if (m.method === 'Network.requestWillBeSent') events.push({ t: Date.now(), type: 'req', id: m.params.requestId, url: m.params.request.url, kind: m.params.type });
+    if (m.method === 'Network.loadingFailed') events.push({ t: Date.now(), type: 'fail', id: m.params.requestId, err: m.params.errorText, blocked: m.params.blockedReason });
+    if (m.method === 'Network.responseReceived') events.push({ t: Date.now(), type: 'resp', id: m.params.requestId, url: m.params.response.url, status: m.params.response.status, blocked: m.params.response.blockedReason });
+    if (m.method === 'Runtime.consoleAPICalled' && ['error', 'warning'].includes(m.params.type))
+      CONSOLE_ERR.push({ t: Date.now(), level: m.params.type, text: m.params.args.map((a) => a.value || a.description || a.type).join(' ') });
+    if (m.method === 'Log.entryAdded') {
+      const e = m.params.entry;
+      if (e.level === 'error' || e.level === 'warning') CONSOLE_ERR.push({ t: Date.now(), level: e.level, text: e.text, url: e.url || '' });
+    }
+  });
+  for (const d of ['Runtime.enable', 'Network.enable', 'Log.enable', 'Page.enable']) await cdp.send(d);
+  log('domains enabled: Runtime/Network/Log/Page');
+
+  const dumpState = () => cdp.evalJs(`(() => {
+    const sm = document.querySelector('.settings-modal');
+    const imgs = [...document.querySelectorAll('img')].map(i => ({ src: i.getAttribute('src') || '', cls: i.className || '', inSettings: !!i.closest('.settings-modal'), complete: i.complete, nw: i.naturalWidth }));
+    const openai = imgs.filter(i => (i.src || '').includes('openai.com'));
+    return {
+      settingsOpen: !!sm,
+      navCount: document.querySelectorAll('.settings-nav-item').length,
+      imgTotal: imgs.length,
+      openaiImgTotal: openai.length,
+      openaiInSettings: openai.filter(i => i.inSettings).length,
+      openaiInSidebar: openai.filter(i => !i.inSettings).length,
+      openaiLoaded: openai.filter(i => i.nw > 0).length,
+      faviconImgs: document.querySelectorAll('img.feed-favicon').length,
+      navLabels: [...document.querySelectorAll('.settings-nav-item')].map(i => (i.textContent || '').trim()),
+    };
+  })()`);
+
+  const marks = [];
+  const mark = async (label) => {
+    const st = await dumpState();
+    marks.push({ label, state: st });
+    log(`  [mark] ${label}: ${JSON.stringify(st)}`);
+  };
+
+  const openSettings = () => cdp.evalJs(`(() => {
+    const cand = [...document.querySelectorAll('button,[role=button],.win-btn')];
+    const btn = cand.find(b => (b.getAttribute('title') || '').includes('设置'))
+      || cand.find(b => (b.textContent || '').trim() === '设置');
+    if (btn) { btn.click(); return 'clicked ' + (btn.className || '') + ' title=' + (btn.getAttribute('title') || ''); }
+    return 'notfound';
+  })()`);
+
+  const clickTab = (title) => cdp.evalJs(`(() => {
+    const items = [...document.querySelectorAll('.settings-nav-item')];
+    const t = items.find(i => (i.textContent || '').trim() === ${JSON.stringify(title)});
+    if (!t) return 'tab not found: ' + items.map(i => (i.textContent || '').trim()).join('|');
+    t.click();
+    return 'clicked ' + ${JSON.stringify(title)} + ' (index ' + items.indexOf(t) + ')';
+  })()`);
+
+  // ---------- 阶段 0：加载完成，未打开设置 ----------
+  log('\n=== 阶段 0：应用加载完成（不打开设置） ===');
+  await cdp.send('Page.navigate', { url: TARGET_URL });
+  await sleep(6000);
+  t0 = Date.now();
+  await mark('P0');
+  const n0 = CONSOLE_ERR.length;
+  log(`  控制台错误/警告累计: ${n0}`);
+  CONSOLE_ERR.forEach((e) => log(`    - [${e.level}] ${e.text}`));
+
+  // ---------- 阶段 1：只打开设置（默认页签） ----------
+  log('\n=== 阶段 1：打开设置，停在默认页签（不点「订阅」） ===');
+  log('  openSettings -> ' + await openSettings());
+  await sleep(3000);
+  await mark('P1');
+  const n1 = CONSOLE_ERR.length;
+  log(`  相对阶段 0 新增错误: ${n1 - n0}`);
+  log(`  openai 请求时间线（截止此刻）:`);
+  events.filter((e) => /openai\.com/.test(e.url || '')).forEach((e) => log(`    ${e.type} ${e.err || e.blocked || e.status || ''} ${e.url}`));
+
+  // ---------- 阶段 2：切到「订阅」页签 ----------
+  log('\n=== 阶段 2：切到「订阅」页签（FeedsTab） ===');
+  log('  clickTab -> ' + await clickTab('订阅'));
+  await sleep(3000);
+  await mark('P2');
+  const n2 = CONSOLE_ERR.length;
+  log(`  相对阶段 1 新增错误: ${n2 - n1}`);
+  CONSOLE_ERR.slice(n1).forEach((e) => log(`    + [${e.level}] ${e.text} ${e.url || ''}`));
+
+  // ---------- 阶段 3：遍历其余 7 个页签 ----------
+  log('\n=== 阶段 3：遍历其余 7 个页签 ===');
+  for (const t of ['通用', '外观', '阅读', 'AI服务', '同步', '快捷键', '关于']) {
+    const r = await clickTab(t);
+    await sleep(800);
+    log(`  ${t}: ${r} | 累计错误=${CONSOLE_ERR.length}`);
+  }
+  await mark('P3');
+
+  log('\n=== 全部网络请求（去重） ===');
+  const seen = new Set();
+  for (const r of events.filter((e) => e.type === 'req')) { if (seen.has(r.url)) continue; seen.add(r.url); log(`  ${r.kind} ${r.url}`); }
+
+  log('\n=== 失败 / 被拦请求 ===');
+  for (const e of events.filter((x) => x.type === 'fail')) {
+    const req = events.find((x) => x.type === 'req' && x.id === e.id);
+    log(`  loadingFailed: ${e.err} blocked=${e.blocked || '-'} url=${req ? req.url : '(unknown)'}`);
+  }
+  for (const e of events.filter((x) => x.type === 'resp' && x.blocked)) {
+    const req = events.find((x) => x.type === 'req' && x.id === e.id);
+    log(`  responseBlocked: blockedReason=${e.blocked} status=${e.status} url=${req ? req.url : e.url}`);
+  }
+
+  log('\n=== openai favicon 完整时间线（相对 t0） ===');
+  for (const e of events.filter((x) => /openai\.com/.test(x.url || ''))) log(`  +${e.t - t0}ms ${e.type} ${e.err || e.blocked || e.status || ''} ${e.url}`);
+
+  log('\n=== 控制台错误汇总（按顺序） ===');
+  CONSOLE_ERR.forEach((e, i) => log(`  ${i + 1}. [${e.level}] ${e.text} ${e.url || ''}`));
+
+  log('\n=== 标记点状态 ===');
+  for (const m of marks) log(`  ${m.label}: ${JSON.stringify(m.state)}`);
+
+  fs.writeFileSync(LOGF, L.join('\n') + '\n', 'utf8');
+  try { child.kill(); } catch {}
+  process.exit(0);
+}
+
+main().catch((e) => {
+  log('FATAL: ' + (e && e.stack ? e.stack : e));
+  fs.writeFileSync(LOGF, L.join('\n') + '\n', 'utf8');
+  try { child.kill(); } catch {}
+  process.exit(1);
+});

@@ -1,0 +1,83 @@
+# TASK-050 实机冒烟：SettingsModal 拆分后渲染与交互
+# 环境：真实 Tauri WebView2 + CDP；未注入系统级键鼠、未抢占窗口焦点
+
+注入 mock: {"ok":true}
+
+## 打开设置：{"open":true,"inert":false,"navCount":8,"nav":["通用","外观","阅读","订阅","AI服务","同步","快捷键","关于"]}
+   标签页数 8  => ✓ 8 个标签页
+
+## 逐标签页切换
+   [1/8] 通用       内容长度=  399  ✓
+   [2/8] 外观       内容长度=  127  ✓
+   [3/8] 阅读       内容长度=  292  ✓
+   [4/8] 订阅       内容长度=  766  ✓
+   [5/8] AI服务     内容长度=  255  ✓
+   [6/8] 同步       内容长度=  128  ✓
+   [7/8] 快捷键      内容长度=  176  ✓
+   [8/8] 关于       内容长度=  174  ✓
+   => 全部标签页渲染出内容：✓ 成立
+
+## 交互验证
+   开关点击：{"ok":true,"before":"true","after":"false","changed":true}
+   下拉选择：{"ok":true,"labelBefore":"文章","labelAfter":"通知","changed":true,"optCount":5}
+
+## 关闭后：{"open":false}  => ✓ 已关闭
+
+## console 错误/异常：1 条
+   - Failed to load resource: net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin
+
+## 判定
+   8 标签页全渲染: true
+   无 console 错误: false
+   开关交互生效: true
+   下拉交互生效: true
+   => 冒烟 ⚠ 见上
+
+## 附：那条 console 错误的根因判定（不是本次拆分引入）
+
+冒烟中出现 1 条：
+```
+Failed to load resource: net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin
+涉及的资源 URL: https://openai.com/favicon.ico
+```
+
+### 判定过程（分阶段定位）
+
+用「先不打开设置、再打开设置」两阶段分别计数：
+
+```
+阶段 A（注入 mock，**未打开设置**，等 4s）       : 0 条
+阶段 B（打开设置并遍历 8 页签）                  : 1 条  ← 仅此
+→ 初步结论：与打开设置相关，需进一步排查
+```
+
+### 根因
+
+继续追该 URL 的出处：
+
+| 线索 | 证据 |
+| --- | --- |
+| 源码里没有 `openai.com/favicon.ico` 字面量 | `src/**` 全量 grep `favicon\|openai\.com\|rel=.icon` 无该 URL |
+| 它来自 **mock 数据** | `src/mockData.ts:27`：`{ id: 'f-openai', name: 'OpenAI Blog', …, favicon: 'https://openai.com/favicon.ico' }` |
+| 由侧栏渲染 | `src/components/Sidebar.tsx:227`：`<img src={f.favicon} …>` |
+| 被 WebView 拦下 | 跨源远程资源，`ERR_BLOCKED_BY_RESPONSE.NotSameOrigin` |
+
+### 为什么与本次拆分无关（三重证据）
+
+1. **`git diff HEAD -- src/mockData.ts` 为空**——该 favicon 不是本次加的；
+2. **`git show HEAD:src/mockData.ts:27` 该行已存在**，逐字相同；
+3. **`git diff HEAD -- src/components/Sidebar.tsx` 为空**——渲染它的组件本次未动。
+
+第 4 重：本任务只移动了 `SettingsModal.tsx` 的 14 个函数，而该 URL 与设置页**毫无关系**
+（设置页的 AI 页签只含 `placeholder="https://your-newapi.example.com/v1"` 之类的**文本占位符**，
+不加载任何远程资源）。
+
+### 结论
+
+该错误是**测试环境的产物**：我为冒烟注入了 mock 数据，其中「OpenAI Blog」源指向真实的
+`https://openai.com/favicon.ico`，被 WebView 的跨源响应策略拦下。
+**真实用户环境下，订阅源 favicon 由其自己的数据决定**；此错误既非本次拆分引入，
+也不是应用自身的缺陷。
+
+**故冒烟判定按「8 页签全渲染 + 2 处交互生效 + 可正常关闭」为通过；
+该条错误单独列出并标注为环境产物，不计入本次结论。**

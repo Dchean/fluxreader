@@ -1,0 +1,36 @@
+
+> fluxreader@0.13.0 lint
+> oxlint
+
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+    ,-[.workflow-kit/tasks/evidence/task050-review-cdp-attribution.cjs:44:9]
+ 43 |         const { res, rej } = c.pending.get(m.id); c.pending.delete(m.id);
+ 44 |         m.error ? rej(new Error(JSON.stringify(m.error))) : res(m.result);
+    :         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 45 |       } else if (m.method) for (const h of c.handlers) h(m);
+    `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-vars): Parameter 'src' is declared but never used. Unused parameters should start with a '_'.
+    ,-[.workflow-kit/tasks/evidence/task050-review-ts-verify.cjs:42:25]
+ 41 | /** 收集顶层语句：{name, start, end, text, exported} */
+ 42 | function topLevel(file, src) {
+    :                         ^|^
+    :                          `-- 'src' is declared here
+ 43 |   const items = [];
+    `----
+  help: Consider removing this parameter.
+
+  ! eslint(no-unused-vars): Function 'findDecl' is declared but never used.
+    ,-[.workflow-kit/tasks/evidence/task050-review-ts-verify.cjs:72:10]
+ 71 | 
+ 72 | function findDecl(rel, name) {
+    :          ^^^^|^^^
+    :              `-- 'findDecl' is declared here
+ 73 |   const e = cur.get(rel);
+    `----
+  help: Consider removing this declaration.
+
+Found 3 warnings and 0 errors.
+Finished in 23ms on 51 files with 116 rules using 28 threads.

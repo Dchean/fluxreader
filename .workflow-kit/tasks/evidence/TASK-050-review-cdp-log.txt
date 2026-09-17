@@ -1,0 +1,70 @@
+page target: http://127.0.0.1:4187/
+ws: ws://127.0.0.1:9443/devtools/page/C8C24544FCA6AA47C6D2321E322A9DFD
+domains enabled: Runtime/Network/Log/Page
+
+=== 阶段 0：应用加载完成（不打开设置） ===
+  [mark] P0: {"settingsOpen":true,"navCount":8,"imgTotal":6,"openaiImgTotal":1,"openaiInSettings":0,"openaiInSidebar":1,"openaiLoaded":0,"faviconImgs":3,"navLabels":["通用","外观","阅读","订阅","AI服务","同步","快捷键","关于"]}
+  控制台错误/警告累计: 1
+    - [error] Failed to load resource: net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin
+
+=== 阶段 1：打开设置，停在默认页签（不点「订阅」） ===
+  openSettings -> clicked win-btn close title=关闭设置 (Esc)
+  [mark] P1: {"settingsOpen":true,"navCount":8,"imgTotal":6,"openaiImgTotal":1,"openaiInSettings":0,"openaiInSidebar":1,"openaiLoaded":0,"faviconImgs":3,"navLabels":["通用","外观","阅读","订阅","AI服务","同步","快捷键","关于"]}
+  相对阶段 0 新增错误: 0
+  openai 请求时间线（截止此刻）:
+    req  https://openai.com/favicon.ico
+
+=== 阶段 2：切到「订阅」页签（FeedsTab） ===
+  clickTab -> clicked 订阅 (index 3)
+  [mark] P2: {"settingsOpen":true,"navCount":8,"imgTotal":12,"openaiImgTotal":2,"openaiInSettings":1,"openaiInSidebar":1,"openaiLoaded":0,"faviconImgs":9,"navLabels":["通用","外观","阅读","订阅","AI服务","同步","快捷键","关于"]}
+  相对阶段 1 新增错误: 1
+    + [error] Failed to load resource: net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin https://openai.com/favicon.ico
+
+=== 阶段 3：遍历其余 7 个页签 ===
+  通用: clicked 通用 (index 0) | 累计错误=2
+  外观: clicked 外观 (index 1) | 累计错误=2
+  阅读: clicked 阅读 (index 2) | 累计错误=2
+  AI服务: clicked AI服务 (index 4) | 累计错误=2
+  同步: clicked 同步 (index 5) | 累计错误=2
+  快捷键: clicked 快捷键 (index 6) | 累计错误=2
+  关于: clicked 关于 (index 7) | 累计错误=2
+  [mark] P3: {"settingsOpen":true,"navCount":8,"imgTotal":6,"openaiImgTotal":1,"openaiInSettings":0,"openaiInSidebar":1,"openaiLoaded":0,"faviconImgs":3,"navLabels":["通用","外观","阅读","订阅","AI服务","同步","快捷键","关于"]}
+
+=== 全部网络请求（去重） ===
+  Other http://127.0.0.1:4187/logo.svg
+  Document http://127.0.0.1:4187/
+  Script http://127.0.0.1:4187/assets/index-DJDttAQf.js
+  Stylesheet http://127.0.0.1:4187/assets/index-CTvuyV99.css
+  Script http://127.0.0.1:4187/assets/app-BliqCAkJ.js
+  Script http://127.0.0.1:4187/assets/core-D8n9Wfto.js
+  Script http://127.0.0.1:4187/assets/image-DDF1yaoM.js
+  Image https://openai.com/favicon.ico
+  Image https://www.rust-lang.org/static/images/favicon.ico
+  Image https://arstechnica.com/favicon.ico
+  Image https://picsum.photos/seed/deepseek/160/120
+  Image https://picsum.photos/seed/windows11/160/120
+  Image https://rust-lang.org/static/images/favicon.ico
+  Image https://fastly.picsum.photos/id/495/160/120.jpg?hmac=lK8ctgG_HLUQGJfp5jY9DZ0ZtIjvY71eYwBBGCRaMHM
+  Image https://fastly.picsum.photos/id/609/160/120.jpg?hmac=n1Ss1tuycstMd08ri806S6Cy96w1FM5cVlA-wA5ON60
+  Image https://www.nasa.gov/favicon.ico
+  Image https://unsplash.com/favicon.ico
+  Image https://github.githubassets.com/favicons/favicon.png
+
+=== 失败 / 被拦请求 ===
+  loadingFailed: net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin blocked=corp-not-same-origin url=https://openai.com/favicon.ico
+  loadingFailed: net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin blocked=corp-not-same-origin url=https://openai.com/favicon.ico
+  loadingFailed: net::ERR_BLOCKED_BY_ORB blocked=- url=https://www.nasa.gov/favicon.ico
+
+=== openai favicon 完整时间线（相对 t0） ===
+  +-5919ms req  https://openai.com/favicon.ico
+  +3067ms req  https://openai.com/favicon.ico
+
+=== 控制台错误汇总（按顺序） ===
+  1. [error] Failed to load resource: net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin https://openai.com/favicon.ico
+  2. [error] Failed to load resource: net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin https://openai.com/favicon.ico
+
+=== 标记点状态 ===
+  P0: {"settingsOpen":true,"navCount":8,"imgTotal":6,"openaiImgTotal":1,"openaiInSettings":0,"openaiInSidebar":1,"openaiLoaded":0,"faviconImgs":3,"navLabels":["通用","外观","阅读","订阅","AI服务","同步","快捷键","关于"]}
+  P1: {"settingsOpen":true,"navCount":8,"imgTotal":6,"openaiImgTotal":1,"openaiInSettings":0,"openaiInSidebar":1,"openaiLoaded":0,"faviconImgs":3,"navLabels":["通用","外观","阅读","订阅","AI服务","同步","快捷键","关于"]}
+  P2: {"settingsOpen":true,"navCount":8,"imgTotal":12,"openaiImgTotal":2,"openaiInSettings":1,"openaiInSidebar":1,"openaiLoaded":0,"faviconImgs":9,"navLabels":["通用","外观","阅读","订阅","AI服务","同步","快捷键","关于"]}
+  P3: {"settingsOpen":true,"navCount":8,"imgTotal":6,"openaiImgTotal":1,"openaiInSettings":0,"openaiInSidebar":1,"openaiLoaded":0,"faviconImgs":3,"navLabels":["通用","外观","阅读","订阅","AI服务","同步","快捷键","关于"]}

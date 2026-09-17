@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "id": "TASK-050",
+  "title": "前端拆分二：SettingsModal.tsx 按既有函数边界拆为设置页子模块（纯移动）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "把 src/components/SettingsModal.tsx（1513 行）拆小。可行性评估的关键事实：该文件**已经天然分解为 14 个顶层函数**（每个标签页/区块一个，最大 SyncTab 293 行），因此本任务是**纯移动**而非重写——就是把既有函数搬到 src/components/settings/ 下的子模块，模块级共享常量与接口搬到该子目录的共享模块。目标：src/components/SettingsModal.tsx 保留 `export function SettingsModal()`（外壳，App.tsx:7 按 './components/SettingsModal' 导入、:317 渲染，**导入路径必须不变**），其余单元移入 src/components/settings/。硬要求：**JSX、逻辑、文案、类名、布局一律逐字不变**，仅调整文件归属与 import。",
+  "non_goals": [
+    "改变任何 JSX 结构、类名、文案、布局或交互行为",
+    "拆分/重写任何单个标签页的内部实现（哪怕它看起来可以更清晰）",
+    "引入新依赖（**特别是不引入 jsdom / @testing-library/react 等组件测试库**——本任务用「函数体逐字比对 + lint/build + CDP 实机冒烟」验证，不需要它们）",
+    "改动 src/store.ts 及其 slice（TASK-049 产物）",
+    "改动其它组件（icons/primitives/Overlays 等）",
+    "顺手修 D1–D5 或 TASK-048 报告里的任何缺陷（属 TASK-051）",
+    "改动 tools/frontend-regression.mjs 的既有断言"
+  ],
+  "requirement_refs": [
+    "MAINT-FRONTEND-SPLIT"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-049"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task050.md",
+      "src/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task050.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "src/components/SettingsModal.tsx 只保留**外壳** `export function SettingsModal()`；其余 13 个单元移入 src/components/settings/ 下的子模块；**每个文件 ≤400 行**（可信口径：LF 字节数 = Python splitlines() = .NET ReadAllLines()；不得用 PowerShell Measure-Object -Line）",
+    "**导出面与导入路径不变**：App.tsx 仍 `import { SettingsModal } from './components/SettingsModal'` 且渲染点不变；`git diff HEAD -- src/App.tsx` 应为空",
+    "**纯移动可机械核验**：提供脚本证据，证明每个被移动单元的函数体（去空白规范化后）与拆分前**逐字等价**——不一致处必须为 0；若因 import 调整而有整行差异，须逐类列出且全部可解释（只许 import/声明/导出修饰，不得有业务表达式增删）",
+    "npm run lint 0 warnings / 0 errors；npm run build 通过（`tsc -b` 会类型检查 JSX）",
+    "npm run test:frontend **141/141** 通过且 tools/frontend-regression.mjs 未被改动（证明未波及 store 契约）",
+    "**CDP 实机冒烟证据**（真实 Tauri WebView2，不得注入系统级键鼠、不得抢占用户焦点）：打开设置弹窗，逐个切换全部 8 个标签页（通用/外观/阅读/订阅/AI服务/同步/快捷键/关于），每个标签页都确认 (a) 渲染出预期内容、(b) **无 console 错误**；并至少验证 2 处交互接线仍有效（如切换一个开关、改一个下拉值）",
+    "不得引入新依赖：package.json 与 lock 文件不得改动（git diff 应为空）",
+    "文本文件必须 LF 行尾（.gitattributes 为 * text=auto eol=lf）；用脚本写文件时显式指定行尾"
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-17 基线（TASK-049 之后）：npm run lint exit 0（0 warnings/0 errors）；npm run build exit 0；npm run test:frontend exit 0 且 141/141（既有 26 + TASK-048 新增 115），tools/frontend-regression.mjs 未改动。**关键限制**：该套件是纯 Zustand 状态机测试，tsconfig.test.json 的 include 只含 store/mockData/types/lib 而**不含任何 .tsx**，因此它对本任务的 JSX 与渲染时序**不提供任何证据**；devDependencies 里也没有 jsdom/RTL 等组件测试基建。故本任务的行为证据由「函数体逐字等价证明 + lint/build 的类型检查 + CDP 实机冒烟」三者共同构成，并如实披露组件级自动断言的长期缺口仍未补。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task050.md"
+    },
+    "decision_ids": [
+      "DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "src/components/SettingsModal.tsx 的导出面与 App.tsx 的导入路径",
+        "reason": "App.tsx 是唯一调用方；导入路径变化会波及全仓且无收益",
+        "gate_ids": [
+          "build"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "tools/frontend-regression.mjs 的 141 项断言",
+        "reason": "证明本次拆分未波及 store 契约；只许通过不许改",
+        "gate_ids": [
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-050-input-d195c5d26401448f96c89a8815ea7008.json",
+    "digest": "04d16e959c839c5b5ac2fc327b333616cf11afb063c00f48f0b02af38b9db0e2",
+    "source_revision": null,
+    "definition_digest": "797fe19849e1bcebef53be7aa0b4061b40e9dc2b6d588c49d5594c0ac41c9c58"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-17T15:33:43.335890Z",
+    "deadline_at_utc": "2026-09-17T19:33:43.335890Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-ed8c3c3553684e2d82ef8608df08b24c",
+  "run_ids": [
+    "RUN-8daffa34fe3b49bf87314ead66606b98",
+    "RUN-3c350415fa5241879c634b0d48b99132",
+    "RUN-9226e9e12b2447538bdc6030b2f90063"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-3c350415fa5241879c634b0d48b99132-candidate.json",
+    "candidate_digest": "7931539783001d6310fa4f0e2615afe896736ddb4f8fbde63f618b1e22555c5c",
+    "verification_run": "RUN-3c350415fa5241879c634b0d48b99132",
+    "review_run": "RUN-9226e9e12b2447538bdc6030b2f90063",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task049.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task050.md",
+    "package.json",
+    "src",
+    "tools",
+    "tools/frontend-regression.mjs",
+    "tsconfig.test.json"
+  ],
+  "continuation_of": {
+    "TASK-049": "aa579c8fead37ab40e57637bc55db7298b496dab807ededbb80395b6b5b04d43"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-17T15:33:43.429565Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T16:17:56.231675Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-17T16:18:23.551921Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T16:32:26.036267Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

@@ -1,0 +1,179 @@
+==============================================================================
+A. 14 个顶层单元等价性 —— 判定器 = TypeScript 编译器 API (ts.createSourceFile)
+==============================================================================
+  unit                      | 原文行 | 现状行 | 所属文件                                | foldEq lineEq charEq
+  SettingsModal            |     73 |     73 | src/components/SettingsModal.tsx        | true true true
+  AutoStartSwitch          |     34 |     34 | src/components/settings/AutoStartSwitch.tsx | true true true
+  GeneralTab               |     76 |     76 | src/components/settings/GeneralTab.tsx  | true true true
+  AppearanceTab            |     39 |     39 | src/components/settings/AppearanceTab.tsx | true true true
+  ReadingTab               |     79 |     79 | src/components/settings/ReadingTab.tsx  | true true true
+  FeedsTab                 |    255 |    255 | src/components/settings/FeedsTab.tsx    | true true true
+  AiTab                    |    166 |    166 | src/components/settings/AiTab.tsx       | true true true
+  SyncTab                  |    282 |    282 | src/components/settings/SyncTab.tsx     | true true true
+  CacheCleanupSection      |     60 |     60 | src/components/settings/CacheCleanupSection.tsx | true true true
+  ConfigSyncSection        |    214 |    214 | src/components/settings/ConfigSyncSection.tsx | true true true
+  ShortcutsTab             |     23 |     23 | src/components/settings/ShortcutsTab.tsx | true true true
+  SettingsSidebarFooter    |     12 |     12 | src/components/settings/SettingsSidebarFooter.tsx | true true true
+  AboutTab                 |     55 |     55 | src/components/settings/AboutTab.tsx    | true true true
+  compareVersions          |      9 |      9 | src/components/settings/compareVersions.ts | true true true
+
+单元等价汇总: 14 单元；fold不一致=0；char级(去export后)不一致=0；重复/缺失=0
+  ⇒ 逐字等价(去空白规范化)=全部一致；完全字符级相同(仅去掉 export 前缀)=14/14
+
+  声明行 export 修饰差异（原文 exported -> 现状 exported）:
+    SettingsModal            true  -> true   (src/components/SettingsModal.tsx)
+    AutoStartSwitch          false -> true   (src/components/settings/AutoStartSwitch.tsx)
+    GeneralTab               false -> true   (src/components/settings/GeneralTab.tsx)
+    AppearanceTab            false -> true   (src/components/settings/AppearanceTab.tsx)
+    ReadingTab               false -> true   (src/components/settings/ReadingTab.tsx)
+    FeedsTab                 false -> true   (src/components/settings/FeedsTab.tsx)
+    AiTab                    false -> true   (src/components/settings/AiTab.tsx)
+    SyncTab                  false -> true   (src/components/settings/SyncTab.tsx)
+    CacheCleanupSection      false -> true   (src/components/settings/CacheCleanupSection.tsx)
+    ConfigSyncSection        false -> true   (src/components/settings/ConfigSyncSection.tsx)
+    ShortcutsTab             false -> true   (src/components/settings/ShortcutsTab.tsx)
+    SettingsSidebarFooter    false -> true   (src/components/settings/SettingsSidebarFooter.tsx)
+    AboutTab                 false -> true   (src/components/settings/AboutTab.tsx)
+    compareVersions          false -> true   (src/components/settings/compareVersions.ts)
+
+==============================================================================
+B. 10 项模块级共享物：出现次数 + 等价性
+==============================================================================
+  TAB_META         x1 in src/components/settings/shared.ts            charEq=true foldEq=true
+  PALETTES         x1 in src/components/settings/shared.ts            charEq=true foldEq=true
+  FONT_OPTIONS     x1 in src/components/settings/shared.ts            charEq=true foldEq=true
+  LAYOUT_OPTIONS   x1 in src/components/settings/layoutOptions.tsx    charEq=true foldEq=true
+  LAYOUT_NO_AI     x1 in src/components/settings/shared.ts            charEq=true foldEq=true
+  PendingDelete    x1 in src/components/settings/shared.ts            charEq=true foldEq=true
+  AI_PRESETS       x1 in src/components/settings/shared.ts            charEq=true foldEq=true
+  AiConfigState    x1 in src/components/settings/shared.ts            charEq=true foldEq=true
+  DEFAULT_PROMPTS  x1 in src/components/settings/shared.ts            charEq=true foldEq=true
+  CACHE_PERIODS    x1 in src/components/settings/shared.ts            charEq=true foldEq=true
+共享物异常数 = 0
+
+==============================================================================
+C. 反向完整性（规范化口径：忽略前导缩进；判定「原文有、现状无」的行）
+==============================================================================
+原文总行(splitlines 等价口径)=1514；非空行=1412
+找不到的行(整体 trim 口径)=24
+找不到的行(忽略前导缩进口径)=24
+（分类口径：去掉前导缩进与 export 前缀后仍能逐字命中的 -> export 修饰行）
+现状新增 export 前缀的顶层声明数 = 23（应等于 export 修饰行数 21）
+    src/components/settings/shared.ts :: export const TAB_META: { id: string; title: string; subtitle: string; icon: () =
+    src/components/settings/shared.ts :: export const PALETTES = [
+    src/components/settings/shared.ts :: export const FONT_OPTIONS = [
+    src/components/settings/shared.ts :: export const LAYOUT_NO_AI: ReadonlySet<string> = new Set(['image', 'podcast']);
+    src/components/settings/shared.ts :: export interface PendingDelete {
+    src/components/settings/shared.ts :: export const AI_PRESETS: Record<string, { url: string; model: string; label: str
+    src/components/settings/shared.ts :: export interface AiConfigState {
+    src/components/settings/shared.ts :: export const DEFAULT_PROMPTS = {
+    src/components/settings/shared.ts :: export const CACHE_PERIODS = [
+    src/components/settings/layoutOptions.tsx :: export const LAYOUT_OPTIONS = CONTENT_LAYOUTS.map((l) => {
+    src/components/settings/AutoStartSwitch.tsx :: export function AutoStartSwitch() {
+    src/components/settings/GeneralTab.tsx :: export function GeneralTab() {
+    src/components/settings/AppearanceTab.tsx :: export function AppearanceTab() {
+    src/components/settings/ReadingTab.tsx :: export function ReadingTab() {
+    src/components/settings/FeedsTab.tsx :: export function FeedsTab() {
+    src/components/settings/AiTab.tsx :: export function AiTab() {
+    src/components/settings/SyncTab.tsx :: export function SyncTab() {
+    src/components/settings/CacheCleanupSection.tsx :: export function CacheCleanupSection() {
+    src/components/settings/ConfigSyncSection.tsx :: export function ConfigSyncSection() {
+    src/components/settings/ShortcutsTab.tsx :: export function ShortcutsTab() {
+    src/components/settings/SettingsSidebarFooter.tsx :: export function SettingsSidebarFooter() {
+    src/components/settings/AboutTab.tsx :: export function AboutTab() {
+    src/components/settings/compareVersions.ts :: export function compareVersions(a: string, b: string): number {
+归类: import=3  新增export修饰的声明行=21  OTHER(业务表达式丢失/改写嫌疑)=0
+
+--- import 类（原文前缀与新文件后缀不同）---
+  import { api, extractError } from '../lib/api';
+  import { FluxDropdown, Switch, SwitchInline, SettingCard, ModalOverlay, ConfirmDialog } from './primitives';
+  import type { ContentLayoutType } from '../types';
+--- 仅新增 export 修饰的声明行 ---
+  const TAB_META: { id: string; title: string; subtitle: string; icon: () => React.ReactElement }[] = [
+  const PALETTES = [
+  const FONT_OPTIONS = [
+  function AutoStartSwitch() {
+  function GeneralTab() {
+  function AppearanceTab() {
+  function ReadingTab() {
+  interface PendingDelete {
+  function FeedsTab() {
+  const AI_PRESETS: Record<string, { url: string; model: string; label: string }> = {
+  interface AiConfigState {
+  const DEFAULT_PROMPTS = {
+  function AiTab() {
+  function SyncTab() {
+  const CACHE_PERIODS = [
+  function CacheCleanupSection() {
+  function ConfigSyncSection() {
+  function ShortcutsTab() {
+  function SettingsSidebarFooter() {
+  function AboutTab() {
+  function compareVersions(a: string, b: string): number {
+--- OTHER（必须为空，否则有业务表达式丢失/改写）---
+OTHER 计数 = 0
+
+==============================================================================
+D. 多重集合守恒（对原文每一非空行：现状出现次数是否 >= 原文出现次数）
+==============================================================================
+原文非空行(计重)=1412；16 个目标文件非空行(计重)=1468
+  DEFICIT 原x1 现x0: import { useEffect, useRef, useState } from 'react';
+  DEFICIT 原x1 现x0: import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
+  DEFICIT 原x1 现x0: import { api, extractError } from '../lib/api';
+  DEFICIT 原x1 现x0: import { Icons, LayoutIcon } from './icons';
+  DEFICIT 原x1 现x0: import { FluxDropdown, Switch, SwitchInline, SettingCard, ModalOverlay, ConfirmDialog } from './primitives';
+  DEFICIT 原x1 现x0: import type { ContentLayoutType } from '../types';
+  DEFICIT 原x1 现x0: import { openExternal } from '../lib/external';
+  DEFICIT 原x1 现x0: const TAB_META: { id: string; title: string; subtitle: string; icon: () => React.ReactElement }[] = [
+  DEFICIT 原x1 现x0: const PALETTES = [
+  DEFICIT 原x1 现x0: const FONT_OPTIONS = [
+  DEFICIT 原x1 现x0: const LAYOUT_OPTIONS = CONTENT_LAYOUTS.map((l) => {
+  DEFICIT 原x1 现x0: const LAYOUT_NO_AI: ReadonlySet<string> = new Set(['image', 'podcast']);
+  DEFICIT 原x1 现x0: function AutoStartSwitch() {
+  DEFICIT 原x1 现x0: function GeneralTab() {
+  DEFICIT 原x1 现x0: function AppearanceTab() {
+  DEFICIT 原x1 现x0: function ReadingTab() {
+  DEFICIT 原x1 现x0: interface PendingDelete {
+  DEFICIT 原x1 现x0: function FeedsTab() {
+  DEFICIT 原x1 现x0: const AI_PRESETS: Record<string, { url: string; model: string; label: string }> = {
+  DEFICIT 原x1 现x0: interface AiConfigState {
+  DEFICIT 原x1 现x0: const DEFAULT_PROMPTS = {
+  DEFICIT 原x1 现x0: function AiTab() {
+  DEFICIT 原x1 现x0: function SyncTab() {
+  DEFICIT 原x1 现x0: const CACHE_PERIODS = [
+  DEFICIT 原x1 现x0: function CacheCleanupSection() {
+  DEFICIT 原x1 现x0: function ConfigSyncSection() {
+  DEFICIT 原x1 现x0: function ShortcutsTab() {
+  DEFICIT 原x1 现x0: function SettingsSidebarFooter() {
+  DEFICIT 原x1 现x0: function AboutTab() {
+  DEFICIT 原x1 现x0: function compareVersions(a: string, b: string): number {
+出现次数不足的行种类 = 30
+  DEFICIT(去export) 原x1 现x0: import { useEffect, useRef, useState } from 'react';
+  DEFICIT(去export) 原x1 现x0: import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
+  DEFICIT(去export) 原x1 现x0: import { api, extractError } from '../lib/api';
+  DEFICIT(去export) 原x1 现x0: import { Icons, LayoutIcon } from './icons';
+  DEFICIT(去export) 原x1 现x0: import { FluxDropdown, Switch, SwitchInline, SettingCard, ModalOverlay, ConfirmDialog } from './primitives';
+  DEFICIT(去export) 原x1 现x0: import type { ContentLayoutType } from '../types';
+  DEFICIT(去export) 原x1 现x0: import { openExternal } from '../lib/external';
+去 export 前缀后出现次数不足的行种类 = 7
+
+==============================================================================
+E. 行数与行尾（splitlines 口径 / LF / CRLF / 末尾换行）
+==============================================================================
+  src/components/SettingsModal.tsx                 lines=  92  crlf=0  loneCR=0  
+  src/components/settings/shared.ts                lines=  75  crlf=0  loneCR=0  
+  src/components/settings/layoutOptions.tsx        lines=   7  crlf=0  loneCR=0  
+  src/components/settings/AutoStartSwitch.tsx      lines=  39  crlf=0  loneCR=0  
+  src/components/settings/GeneralTab.tsx           lines=  82  crlf=0  loneCR=0  
+  src/components/settings/AppearanceTab.tsx        lines=  44  crlf=0  loneCR=0  
+  src/components/settings/ReadingTab.tsx           lines=  85  crlf=0  loneCR=0  
+  src/components/settings/FeedsTab.tsx             lines= 272  crlf=0  loneCR=0  
+  src/components/settings/AiTab.tsx                lines= 175  crlf=0  loneCR=0  
+  src/components/settings/SyncTab.tsx              lines= 291  crlf=0  loneCR=0  
+  src/components/settings/CacheCleanupSection.tsx  lines=  68  crlf=0  loneCR=0  
+  src/components/settings/ConfigSyncSection.tsx    lines= 222  crlf=0  loneCR=0  
+  src/components/settings/ShortcutsTab.tsx         lines=  25  crlf=0  loneCR=0  
+  src/components/settings/SettingsSidebarFooter.tsx lines=  15  crlf=0  loneCR=0  
+  src/components/settings/AboutTab.tsx             lines=  63  crlf=0  loneCR=0  
+  src/components/settings/compareVersions.ts       lines=  11  crlf=0  loneCR=0  
+超过 400 行的文件数=0；CRLF+loneCR 总数=0；结尾无换行的文件数=0

@@ -1,0 +1,75 @@
+{
+  "task_id": "TASK-050",
+  "candidate_digest": "7931539783001d6310fa4f0e2615afe896736ddb4f8fbde63f618b1e22555c5c",
+  "verification_run": "RUN-3c350415fa5241879c634b0d48b99132",
+  "verdict": "PASS",
+  "summary": "独立审查（未参与实现）以「自己算」的方式复核了纯移动性质，结论为 PASS，findings 为空。关键实测：(1) 逐字等价——不再采信实现方脚本，改用 TypeScript 编译器自身的解析器（ts.createSourceFile，node_modules/typescript 6.0.2，零新依赖）抽取 HEAD 原文与现状的全部顶层语句，14 个单元（SettingsModal/AutoStartSwitch/GeneralTab/AppearanceTab/ReadingTab/FeedsTab/AiTab/SyncTab/CacheCleanupSection/ConfigSyncSection/ShortcutsTab/SettingsSidebarFooter/AboutTab/compareVersions）在「去空白规范化」「仅忽略缩进」两种口径下不一致数均为 0，且去掉唯一新增的 export 前缀后为 14/14 完全字符级相同（行数亦逐一相同，如 SyncTab 282、FeedsTab 255）；10 项模块级共享物各出现一次且字符级等价。(2) 反向完整性——原文 1513 行/1412 非空行中，在现存 49 个 src 文件里找不到的非空行仅 24 条，严格归类为 import 语句 3 条 + 仅新增 export 修饰的声明行 21 条 + 无法归类 0 条（无任何业务表达式丢失或改写）。(3) 门禁自跑——lint exit 0（纯净树 0 warnings/0 errors，49 files）、build exit 0（tsc -b + vite build）、test:frontend exit 0 且 141/141。(4) 候选绑定有效——candidate manifest 57 个文件 sha256 全部重算一致，digest 与任务卡一致。(5) 导出面零改动——git diff HEAD 对 src/App.tsx、package.json、package-lock.json、tsconfig*.json、tools/ 均为空，App.tsx 仍从 './components/SettingsModal' 导入。(6) 行数与行尾——16 文件全部 ≤400 行（最大 SyncTab.tsx 291），按字节统计 CRLF=0、loneCR=0。对那条 console 错误做了独立的 headless Edge + 原生 WebSocket CDP 判别实验（未注入系统级键鼠、未抢占焦点），实测该错误有**两个互相独立的触发源**：sidebar 的 .feed-favicon（加载即触发）与设置「订阅」页签的 img.feed-favicon（切到该页签时另触发一次，两次 loadingFailed 的 blockedReason 均为 corp-not-same-origin）；该 img 元素在 HEAD 的 SettingsModal.tsx:559-562 已逐字存在，故属既有的、由冒烟注入的 mock 数据（src/mockData.ts:27 'OpenAI Blog' favicon）导致的环境产物，与本次拆分无关。未做项：未复跑实现方的 8 页签 CDP 冒烟（按要求只读日志与截图）；未提供组件级渲染/挂载断言——该缺口已在 regression 与 maintainability 中明确登记，属长期基建缺口而非本任务缺陷。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐条对照任务卡 8 条 acceptance，全部满足且均有本人独立复算的证据。①外壳与文件数：SettingsModal.tsx 92 行，仅保留 export function SettingsModal()，另 13 个单元 + AUTO 独立文件共 15 个新文件（git status -uall 与我的文件清单一致，16 个文本文件）；无待删除/重命名遗漏。②单文件 ≤400 行：按字节/分割行口径最大 SyncTab.tsx 291 行，无超限（未使用会少算的 PowerShell Measure-Object -Line）。③导出面与导入路径不变：git diff HEAD -- src/App.tsx 为空（并另行以 Node 逐字节比对 App.tsx 与 git show HEAD:src/App.tsx 完全相等），第 7 行仍为 import { SettingsModal } from './components/SettingsModal'。④纯移动机械可核验：见 regression 领域，不一致数 0、OTHER 类 0。⑤lint 0/0、build 通过、test:frontend 141/141 且 tools/frontend-regression.mjs 未改动，本人重跑三条门禁退出码均为 0。⑥CDP 实机冒烟证据：由总控执行，我只读日志与截图复核——日志记录 8 个页签逐个切换且内容长度 127~766、2 处交互接线生效（开关 true→false；FluxDropdown 文章→通知，5 选项）、关闭后 open=false；同时如实记录 1 条 console 错误并单独讨论。⑦不得引入新依赖：package.json / package-lock.json 的 git diff 为空，devDependencies 仍无 jsdom/RTL。⑧行尾：16 个文件字节级 CRLF=0、孤立 CR=0，且全部文件以换行结尾。另核：候选 manifest 57 文件 sha256 重算全部一致，说明审查对象就是被验证的那份候选。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-050-review-ts-verify.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-review-lint-PRISTINE.out.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-review-build.out.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-review-frontend.out.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-smoke-log.txt",
+        ".workflow-kit/tasks/evidence/RUN-3c350415fa5241879c634b0d48b99132-candidate.json",
+        "src/components/SettingsModal.tsx",
+        "src/components/settings/SyncTab.tsx"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "「行为未变」由三条独立证据链支撑，我逐一复算。A 逐字等价证明：以 TypeScript 编译器 API（ts.createSourceFile 解析 HEAD 原文与 16 个现状文件，按顶层语句逐一配对）作判定器，避免自写正则/大括号匹配的近似性——过程中我确实先发现自写启发式解析器会把多行函数体截断成 1 行（虽两侧同样截断故仍误报相等），遂废弃该口径改用它；最终 14 个单元 fold/line/char 三种口径不一致数均为 0，去掉唯一新增 export 前缀后 14/14 字符级相同（含行数），10 项共享物各 1 处且字符级等价。B 反向完整性：原文非空行 1412 条中仅 24 条在现存 src 中找不到，分类为 import 3 条（相对路径由 '../lib/api' 变 '../../lib/api' 等，功能等价）与仅新增 export 修饰的声明行 21 条，OTHER=0，即无业务表达式丢失或改写；多重集合守恒显示丢失行种类 30 = 21 条 export 修饰行 + 7 条原始 import 行 + 2 条 SettingsModal 原有导出行（被 export 版掩盖），全部可解释。C 类型与打包：tsc -b 全量类型检查通过（build exit 0），CDP 冒烟在 8 个页签均渲染出内容且 2 处交互生效。三条证据的**互补边界**须讲清：逐字等价只覆盖「函数体与共享物」，它不看 import 绑定、不看模块副作用；tsc 覆盖 import 绑定的存在性与解析，但不覆盖运行时渲染顺序；CDP 冒烟覆盖真实 WebView2 下的挂载、页签切换与交互接线，但只有 8 页签 + 2 交互这一次性样本，且不覆盖错误态/边界态。三者合起来足以支撑「本次拆分未改变行为」这一结论（因为被移动的文本逐字相同，唯一语义面变化是 import 与 export 修饰，且二者均被 tsc 与运行验证覆盖）。**仍缺什么**：缺组件级自动断言——141 项断言是纯 Zustand store 层测试，tsconfig.test.json 的 include 不含任何 .tsx，故它对本任务的 JSX 与渲染时序零证据；本次仅以一次性 CDP 冒烟替代，回归网里没有可重复的组件断言。该缺口不阻断本任务（纯移动不改变组件内部逻辑），但必须登记为长期基建缺口，见 maintainability 与本 summary 末段。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-050-review-ts-verify.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-review-ts-verify.cjs.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-review-build.out.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-review-frontend.out.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-smoke-log.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-01-settings-first-tab.png",
+        ".workflow-kit/tasks/evidence/TASK-050-02-settings-interaction.png"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "逐条检查拆分后可能失效的引用路径。①外壳引用：SettingsModal.tsx 只 import 自身需要的 useRef/useAppStore/ModalOverlay/useEnteringClass + TAB_META + 8 个 Tab + SettingsSidebarFooter，8 个 settingsTab 分支（general/appearance/reading/feeds/ai/sync/shortcuts/about）与 TAB_META 的 8 个 id 一一对应，无漏渲染分支；ModalOverlay 的 open/onClose 接线与 githubFlow 锁定关闭逻辑逐字未变。②各 Tab 引用：FeedsTab 依赖 layoutOptions(LAYOUT_OPTIONS) 与 shared(LAYOUT_NO_AI, PendingDelete)，AiTab 依赖 shared(AI_PRESETS, DEFAULT_PROMPTS, AiConfigState)，GeneralTab 依赖 AutoStartSwitch 与 shared(FONT_OPTIONS)，AppearanceTab 依赖 shared(PALETTES)，SyncTab 依赖 shared(CACHE_PERIODS)，AboutTab 依赖 compareVersions，SettingsSidebarFooter 自包含——依赖图为单向无环（shared.ts 与 layoutOptions.tsx 只 import ../icons 与 ../../store，不反向 import 任何 settings 子模块），不存在循环依赖。③类型检查层面已闭合：tsc -b 通过，任何漏 import/错路径都会直接编译失败；CDP 冒烟进一步证明 8 个页签在真实运行时都能渲染出内容。④AutoStartSwitch 由私有变 export 的影响面：该名字在 HEAD 与现状的 16 个文件范围内均为 1 处定义 + 1 处引用（GeneralTab），无同名冲突、无桶文件（无 index.ts）二次扩散，新增的只是模块级可见性，不产生额外运行时副作用。⑤失败面证据缺口（观察项，非本任务缺陷）：冒烟日志把「无 console 错误」判为 false 并只记录 1 条 net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin。我用 headless Edge + 原生 WebSocket CDP 在同等 mock 数据下做了独立判别实验：全流程共观察到 **2 次** openai.com/favicon.ico 的 loadingFailed（blockedReason 均为 corp-not-same-origin）与 2 条对应 console 错误——第 1 次在应用加载完成、尚未打开设置时就已发生（标记点 P0：openaiInSidebar=1、openaiInSettings=0、openaiLoaded=0），第 2 次恰好发生在点击「订阅」页签之后（标记点 P2：openaiInSettings=1、img.feed-favicon 由 3 增至 9）。据此：(a) 实现方「来自 Sidebar 的 mock favicon」这一归因**方向正确且有我的实验支持**（加载即触发，且在设置未打开时就在侧栏）；(b) 但它**不完整**——设置「订阅」页签自身也是一个独立触发源，因为该页签渲染的 img.feed-favicon 与 HEAD 的 SettingsModal.tsx:559-562 逐字相同（现状位于 FeedsTab.tsx:193-196），在 cat.settingsCollapsed=false 时同样会发起该跨源请求；(c) 无论哪一路，该错误都**不是本次拆分引入**：src/mockData.ts 与 src/components/Sidebar.tsx 的 git diff HEAD 均为空（零改动），且 SettingsModal 在 HEAD 就已渲染同一 img，属既有的、由注入 mock 数据触发的环境产物（同一批 mock 里 www.nasa.gov/favicon.ico 另被 ERR_BLOCKED_BY_ORB 拦下，进一步说明是远程资源策略问题而非本仓代码问题）。风险提示：「打开设置后无 console 错误」这一条在同等 mock 数据下不可达，后续同类 UI 任务应把该 URL 视为已知环境噪声（或在冒烟前把 mock favicon 换成本地资源），不要为凑该条而调参。另：本仓没有任何自动化冒烟/CDP 脚本（tools/ 下仅 frontend-regression.mjs、mock_ai_server.py、test-loader.mjs），我这次的 headless 判别脚本可作为后续沉淀的雏形，但本任务不改任何工具文件。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-050-review-cdp-attribution.cjs.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-review-cdp-log.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-smoke-log.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-review-ts-verify.txt",
+        "src/components/settings/FeedsTab.tsx",
+        "src/components/settings/AutoStartSwitch.tsx"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "①划分：14 个单元 → 13 个独立文件 + 1 个外壳，最大 SyncTab.tsx 291 行、FeedsTab.tsx 272 行、ConfigSyncSection.tsx 222 行，全部 ≤400，且划分边界就是原文既有的顶层函数边界（不是新造抽象），因此审阅成本与认知负担都下降而非上升；共享常量/接口集中在 shared.ts（75 行，9 项）与 layoutOptions.tsx（7 行，1 项），形成清晰的「常量/类型层 → 组件层 → 外壳层」单向依赖，没有引入 index.ts 桶文件，import 路径显式可追。②shared.ts 与 layoutOptions.tsx 拆两个的理由（oxlint react/only-export-components）**我做了实测验证，成立**，不是事后编故事：把 shared.ts 的内容原样复制并只追加一行含 JSX 的导出（镜像被否决的单文件设计），oxlint 报 **7 warnings**（与实现方所述「首版实测 7 warnings」数字一致），而单独按现状 layoutOptions.tsx 的形状检查为 **0 warnings**。同时确认 .oxlintrc.json 未被改动（git diff 为空，规则为 react/only-export-components: warn + allowConstantExport: true），且 16 个目标文件中**没有任何** oxlint-disable/eslint-disable/@ts-ignore/@ts-expect-error 注释（我 grep 过，为空）——即用「多拆一个 7 行文件」换取「不加抑制注释、不放宽规则」，取舍正确，且避免了 allowConstantExport 单独因 new 表达式被判非组件而被迫放宽全局规则的更差选项。③长期负担评估：多出的成本是每个 Tab 多 1~6 行 import、以及 Tab 数量增长时需同时维护外壳的 8 个分支与 TAB_META 的 8 项（这是原有结构固有的，非本次引入）；收益是单文件从 1513 行降到 92 行、单文件最大从 293 行降到 291 行但文件数变多而每个文件职责单一。总体净收益为正，未发现为通过 lint 而产生的结构性扭曲。④长期缺口登记建议（不在本任务范围、不应据此判 FAIL）：组件级自动断言缺失——141 项为 store 层测试，tsconfig.test.json 的 include 不含 .tsx，devDependencies 无 jsdom/RTL；建议后续单开一个「前端组件测试基建」任务（引入 vitest+jsdom 或等价方案 + 至少覆盖设置页 8 页签的挂载/交互冒烟），并把本次的 headless CDP 脚本沉淀为可复跑的门禁，替代现在这种一次性人工/总控冒烟。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-050-review-ts-verify.txt",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task050.md",
+        ".oxlintrc.json",
+        "src/components/settings/shared.ts",
+        "src/components/settings/layoutOptions.tsx"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "拆分对运行时性能可忽略，理由具体如下（不适用 NOT_APPLICABLE：本次确有可讨论的性能面，只是影响经论证为中性）。①打包后不存在额外运行时开销：vite build 产出的入口 chunk 仍为单个 index-*.js（377.86 kB / gzip 113.73 kB，与实现方报告量级一致），拆分为多源文件只改变构建期的模块图与 tree-shaking 入口，模块在打包阶段被合并回同一 chunk，不产生额外网络请求、不引入动态 import、不改变 code-splitting 边界。②组件层无新增工作：14 个单元的函数体在去掉 export 前缀后与原文**逐字相同**（已由 TypeScript 解析器证明），挂载时的 hook 调用顺序、useMemo/useCallback 的记忆化边界、内联箭头函数的创建次数、JSX 结构与 props 均未变，故渲染次数与提交（commit）开销不变。③模块级常量与对象身份未变：TAB_META/PALETTES/FONT_OPTIONS/LAYOUT_OPTIONS/LAYOUT_NO_AI/AI_PRESETS/DEFAULT_PROMPTS/CACHE_PERIODS 均仍是各自模块内的一次性求值单例（LAYOUT_OPTIONS 仍是模块求值的 CONTENT_LAYOUTS.map，未改成每次渲染重算），因此不会破坏下游的引用相等/记忆化假设，也不会造成重复分配。④唯一可测的差异在加载/构建期：ESM 模块数由 1 增至 16，开发态冷启动与 HMR 图略增，生产态首屏多几十字节的模块样板；相对 1513 行单文件带来的编辑/审阅成本下降，该数量级差异可忽略。⑤无性能相关的验收项被本任务触碰，tools/frontend-regression.mjs 与 src/store/** 零改动，故无回归面。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-050-review-build.out.txt",
+        ".workflow-kit/tasks/evidence/TASK-050-review-ts-verify.txt",
+        "src/components/settings/layoutOptions.tsx"
+      ]
+    }
+  ],
+  "ui_review": null
+}
