@@ -24,5 +24,6 @@
 | [TASK-047](items/TASK-047.json) | 可访问性修复：关闭态浮层不可聚焦（inert），消除 Tab 进入不可见控件 | done |
 | [TASK-048](items/TASK-048.json) | 前端拆分前置：补 store.ts 行为测试（为拆分建立回归网） | done |
 | [TASK-049](items/TASK-049.json) | 前端拆分一：store.ts 按领域拆为 Zustand slice（行为保持不变） | done |
+| [TASK-050](items/TASK-050.json) | 前端拆分二：SettingsModal.tsx 按既有函数边界拆为设置页子模块（纯移动） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

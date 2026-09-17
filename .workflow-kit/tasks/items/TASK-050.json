@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "把 src/components/SettingsModal.tsx（1513 行）拆小。可行性评估的关键事实：该文件**已经天然分解为 14 个顶层函数**（每个标签页/区块一个，最大 SyncTab 293 行），因此本任务是**纯移动**而非重写——就是把既有函数搬到 src/components/settings/ 下的子模块，模块级共享常量与接口搬到该子目录的共享模块。目标：src/components/SettingsModal.tsx 保留 `export function SettingsModal()`（外壳，App.tsx:7 按 './components/SettingsModal' 导入、:317 渲染，**导入路径必须不变**），其余单元移入 src/components/settings/。硬要求：**JSX、逻辑、文案、类名、布局一律逐字不变**，仅调整文件归属与 import。",
   "non_goals": [
     "改变任何 JSX 结构、类名、文案、布局或交互行为",
@@ -162,9 +162,11 @@
     "candidate_digest": "7931539783001d6310fa4f0e2615afe896736ddb4f8fbde63f618b1e22555c5c",
     "verification_run": "RUN-3c350415fa5241879c634b0d48b99132",
     "review_run": "RUN-9226e9e12b2447538bdc6030b2f90063",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-eae7a1e8009f4cf68743b2b9bf2ee150-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-eae7a1e8009f4cf68743b2b9bf2ee150"
+    ],
+    "merge_ref": "eab3176 (refactor(frontend): TASK-050 SettingsModal.tsx 按既有函数边界拆为设置页子模块（纯移动）)"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task048.md",

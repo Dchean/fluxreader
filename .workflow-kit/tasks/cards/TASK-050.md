@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-050 · 前端拆分二：SettingsModal.tsx 按既有函数边界拆为设置页子模块（纯移动）
 
-**状态**：verified
+**状态**：done
 
 **目标**：把 src/components/SettingsModal.tsx（1513 行）拆小。可行性评估的关键事实：该文件**已经天然分解为 14 个顶层函数**（每个标签页/区块一个，最大 SyncTab 293 行），因此本任务是**纯移动**而非重写——就是把既有函数搬到 src/components/settings/ 下的子模块，模块级共享常量与接口搬到该子目录的共享模块。目标：src/components/SettingsModal.tsx 保留 `export function SettingsModal()`（外壳，App.tsx:7 按 './components/SettingsModal' 导入、:317 渲染，**导入路径必须不变**），其余单元移入 src/components/settings/。硬要求：**JSX、逻辑、文案、类名、布局一律逐字不变**，仅调整文件归属与 import。
 

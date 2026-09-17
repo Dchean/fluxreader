@@ -1220,6 +1220,20 @@
       "candidates": {
         "TASK-049": "aa579c8fead37ab40e57637bc55db7298b496dab807ededbb80395b6b5b04d43"
       }
+    },
+    {
+      "id": "DEC-eae7a1e8009f4cf68743b2b9bf2ee150",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 授权范围『完整收尾：前端拆分 + REQ-007 残余项』（DEC-a2c6584f8d4442daa3a65eb0bcc7ddaf）。TASK-050 候选 7931…5c5c 已通过 verify（RUN-3c350415…，lint/build/frontend 三门禁 PASS）与独立审查 PASS（findings 为空；审查者改用 TypeScript 编译器自身解析器作逐字等价判定器并自查证伪了自建口径，14/14 字符级相同、反向完整性 OTHER=0、候选 57 文件 sha256 全一致）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-050"
+      ],
+      "recorded_at_utc": "2026-09-17T16:33:36.664915Z",
+      "candidates": {
+        "TASK-050": "7931539783001d6310fa4f0e2615afe896736ddb4f8fbde63f618b1e22555c5c"
+      }
     }
   ]
 }
