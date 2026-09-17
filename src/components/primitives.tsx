@@ -308,6 +308,12 @@ export function ModalOverlay({ open, onClose, children, contentWidth }: ModalOve
   return (
     <div
       className={`modal-overlay ${open ? 'open' : ''}`}
+      /* 关闭态必须整棵子树不可聚焦：本组件**无条件渲染** children，
+         只用类名切 opacity（styles/base.css 的 .modal-overlay 关闭态
+         仅 opacity:0 + pointer-events:none，不改可聚焦性）。
+         没有 inert 时，关闭的弹窗内控件仍会被 Tab 命中——
+         键盘用户会「跳进一个看不见的对话框」。见 REQ-047。 */
+      inert={!open}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}

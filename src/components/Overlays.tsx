@@ -311,7 +311,13 @@ export function Lightbox() {
   const lightboxUrl = useAppStore((s) => s.lightboxUrl);
   const closeLightbox = useAppStore((s) => s.closeLightbox);
   return (
-    <div className={`modal-overlay lightbox-overlay ${lightboxUrl ? 'open' : ''}`} onClick={closeLightbox}>
+    <div
+      className={`modal-overlay lightbox-overlay ${lightboxUrl ? 'open' : ''}`}
+      /* 同 ModalOverlay：外层常驻 DOM，关闭时只切类名，
+         故必须靠 inert 让关闭态不可聚焦（见 REQ-047）。 */
+      inert={!lightboxUrl}
+      onClick={closeLightbox}
+    >
       {lightboxUrl && (
         <img
           src={lightboxUrl}
