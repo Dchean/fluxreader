@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-5bd0750260a349ee88748800987b7d25",
+  "task_id": "TASK-047",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "总控会话直接实现（POLICY coder=current_agent）；修 B-3：给常驻浮层加 inert，使其关闭时不可聚焦。契约 UI-CONTRACT-REQ-047.md 与基线已先于实现冻结"
+  },
+  "started_at_utc": "2026-09-17T08:17:24.694545Z",
+  "finished_at_utc": "2026-09-17T08:27:30.939597Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "d7a0e6e5b86dd315dbd438be63097efe403c09640e09f37bf61f6128e57c4ae6",
+  "candidate_digest": "e68f9a78f1035ad5ee2754a8d00c0d4d89956b30c7aa444fea9bed40eee1e30c",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-5bd0750260a349ee88748800987b7d25-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-5bd0750260a349ee88748800987b7d25-scope.json"
+}

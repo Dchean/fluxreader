@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-047",
+  "run_id": "RUN-5bd0750260a349ee88748800987b7d25",
+  "status": "ready_for_verification",
+  "summary": "修复复核报告 B-3：关闭态浮层内控件仍在 Tab 序列中。根因是 ModalOverlay（primitives.tsx:298-318）与 Lightbox（Overlays.tsx:314）**无条件渲染** children，关闭时只摘掉 .open 类名，而 .modal-overlay 关闭态仅 opacity:0 + pointer-events:none（base.css:1962），不改可聚焦性。改动仅 2 处、各加一个 inert：ModalOverlay 根节点 inert={!open}、Lightbox 根节点 inert={!lightboxUrl}（React 19 接受布尔 inert，build 的 tsc 通过）。ConfirmDialog（primitives.tsx:279 已 if(!open) return null）与 ContextMenu（ContextMenu.tsx:77 已 if(!menu) return null）本就条件渲染，未改动。按契约 §3.1 刻意不实现 focus trap（不在打开时把焦点困在浮层内），其既有局限已在报告 §5.1 披露。契约 §4 的 8 条验收标准全部实测成立（真实 WebView2 + CDP，未注入系统级键鼠、未抢焦点）：(1) 全关态 32 个 Tab 停靠点中浮层内 0 个，8 个 .modal-overlay 全部 inert=true；(2) 设置弹窗打开时 51 个停靠点中浮层内 20 个（等于名义可 Tab 数），20/20 :focus-visible=true；(3) 关闭后 activeElement 的 inertAncestor=false 且停靠点浮层内 0；(4) 命令面板打开时浮层内 1 个、关闭后 0；(5) 灯箱 Esc 后 open=false 且 inert=true、关闭后浮层内 0；(6) 关闭态 DOM 中 .ctx-menu 不存在；(7) .confirm-overlay 关闭态不在 DOM，小弹窗均为 ModalOverlay 实例由第 1 条覆盖；(8) Tab 顺序与契约一致。另做消融对照证明 inert 即生效点：有 inert 时浮层内 0 → 临时移除 8 个节点的 inert 后浮层内 1（控件重新可 Tab）→ 还原后回到 0，可复现。门禁：npm run lint 0 warnings and 0 errors；npm run build ✓ built（含 tsc 类型检查）；npm run test:frontend 26/26 通过 exit 0 且 tools/frontend-regression.mjs 未改动。测试数据经 Vite 模块图 setState 注入、纯内存，用户库实测仍 feeds=0/folders=0/articles=0。实施中两次返工均为**验证脚本**缺陷而非应用缺陷：首版循环判定用「连续两个停靠点同类名」导致设置弹窗 7 个同名导航项被误判为循环而提前终止；次版遍历上限 30 小于主视图 31 个停靠点（弹窗 portal 渲染在 body 末尾）而走不到弹窗；两次都先用独立调试脚本确认应用侧行为正常才回头修脚本。另删除两张名不副实的证据图（首轮遍历有缺陷时拍摄）。",
+  "changed_files": [
+    "src/components/Overlays.tsx",
+    "src/components/primitives.tsx"
+  ],
+  "validation_requests": [
+    "请独立复核第 1 条（最关键）：默认全关状态下用真实 Tab 遍历走满一圈，确认停靠点中不含任何 .modal-overlay 子树内的元素；并核对 8 个 .modal-overlay 均带 inert。注意遍历的循环判定请用稳定元素身份，不要用「同类名即视为重复」（设置弹窗有 7 个 settings-nav-item，会误判）",
+    "请独立复核第 2 条：打开设置弹窗后 Tab 需走满一圈（弹窗 portal 在 body 末尾，前面约 31 个主视图停靠点），确认能进入浮层内控件且带 :focus-visible",
+    "请做消融对照：临时移除浮层的 inert 属性后，关闭态浮层控件应重新进入 Tab 序列；还原后应再次消失。若移除前后无差异，说明 inert 未生效，应判 FAIL",
+    "请复核只加 inert、未引入 focus trap：弹窗打开时背景应仍可 Tab（这是契约 §3.1 明确的非目标，属既有行为，不应作为缺陷，但请确认我的披露属实）",
+    "请复核未改既有行为：ConfirmDialog 与 ContextMenu 仍是条件渲染（关闭态不在 DOM）；Esc 关闭链、点击遮罩关闭、开合条件均未变（git diff 应只有那两处 inert 及其注释）",
+    "请独立复跑三条门禁（lint/build/test:frontend）并确认 26/26、且 tools/frontend-regression.mjs 未被改动",
+    "请复核证据真实性：TASK-047-01/02/03 三张 PNG 互不相同、内容确为所述场景（02 应显示设置弹窗打开且某控件聚焦），且与既有 TASK-041/043 证据无逐字节重复"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

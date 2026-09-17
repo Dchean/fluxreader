@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "id": "TASK-047",
   "title": "可访问性修复：关闭态浮层不可聚焦（inert），消除 Tab 进入不可见控件",
   "kind": "implementation",
@@ -15,7 +16,7 @@
     "小弹窗（新建分类 / 添加源 / 编辑源 / 重命名分类 / 确认对话框）关闭后其控件不可 Tab",
     "Tab 顺序仍为：窗口控件 → 侧栏搜索 → 视图 → 布局 → 工具栏 → 内容区，不因本次改动新增停靠点"
   ],
-  "status": "draft",
+  "status": "done",
   "objective": "修复复核报告 B-3：关闭态浮层内的控件仍在 Tab 序列中。根因已定位——src/components/primitives.tsx 的 ModalOverlay（:298-318）**无条件渲染** children，只用 `className={`modal-overlay ${open ? 'open' : ''}`}` 切换类名；而 src/styles/base.css:1962 的 .modal-overlay 关闭态仅 `opacity: 0; pointer-events: none`（不改可聚焦性），故关闭时内部约 20 个控件仍可被 Tab 命中——用户会 Tab 进一个看不见的对话框。同一模式还用于 Overlays.tsx:314 的灯箱。修法：利用 React 19 对 `inert` 属性的支持，在浮层未打开时加 `inert`，使其整棵子树不可聚焦、不可交互且从无障碍树中移除；并在关闭时把焦点从浮层内移出（避免焦点留在 inert 子树内）。灯箱、命令面板、右键菜单、小弹窗按同一原则处理。",
   "non_goals": [
     "改变任何浮层的视觉样式、动画或布局",
@@ -36,18 +37,43 @@
     "level": "medium",
     "decision_ids": []
   },
-  "allowed_paths": [
-    ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
-    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md",
-    "src/**",
-    "tools/frontend-regression.mjs"
-  ],
-  "snapshot_paths": [
-    ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
-    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md",
-    "src",
-    "tools/frontend-regression.mjs"
-  ],
+  "scope": {
+    "allowed_paths": [
+      ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md",
+      "src/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
   "acceptance": [
     "所有关闭态浮层的子树带 inert（或等效的 aria-hidden + tabindex 管理），实测不可 Tab 进入",
     "浮层打开时其控件可正常 Tab 进入，`:focus-visible` 焦点环可见（沿用既有 accent 语言，不新增颜色）",
@@ -117,5 +143,86 @@
         ]
       }
     ]
-  }
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-047-input-668aa427380e4c57bef98b63421b07f6.json",
+    "digest": "d7a0e6e5b86dd315dbd438be63097efe403c09640e09f37bf61f6128e57c4ae6",
+    "source_revision": null,
+    "definition_digest": "7c1f3ad022ab46ba18d0cdb10559cef05cfeeb2c0f437cbe21a76b0ee521e3a4"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-17T08:17:24.693223Z",
+    "deadline_at_utc": "2026-09-17T12:17:24.693223Z",
+    "repair_rounds_used": 1
+  },
+  "batch_id": "BATCH-cdd487dcfaea4e03a31cb2b85db2591e",
+  "run_ids": [
+    "RUN-5bd0750260a349ee88748800987b7d25",
+    "RUN-21b2f218b6cb40088dc8692da7f18704",
+    "RUN-09eb35b7655744e3a1c7fcfdff72570c",
+    "RUN-bb470e5e13dd4b6fa5717ba80b4349bc",
+    "RUN-4683feec76e44f74a8ae9ebd34cc6dfc",
+    "RUN-5aef5bbd84344a8c962c1b031792593c"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-4683feec76e44f74a8ae9ebd34cc6dfc-candidate.json",
+    "candidate_digest": "e68f9a78f1035ad5ee2754a8d00c0d4d89956b30c7aa444fea9bed40eee1e30c",
+    "verification_run": "RUN-4683feec76e44f74a8ae9ebd34cc6dfc",
+    "review_run": "RUN-5aef5bbd84344a8c962c1b031792593c",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-d9e2897fceb649e1a3b9eeccea4f730b-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-d9e2897fceb649e1a3b9eeccea4f730b"
+    ],
+    "merge_ref": "5b29792 (fix(a11y): TASK-047 关闭态浮层不可聚焦（inert）)"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md",
+    "src",
+    "tools/frontend-regression.mjs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-17T08:17:24.754983Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T08:27:30.969387Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-17T08:27:45.219375Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T08:39:26.683548Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T08:39:27.656864Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T08:44:20.867732Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-17T08:44:59.705500Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T08:52:23.976329Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "review"
 }

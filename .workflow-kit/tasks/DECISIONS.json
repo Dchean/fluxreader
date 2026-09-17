@@ -1149,6 +1149,20 @@
       "candidates": {
         "TASK-045": "4bec98faac27e6c6175504f29aa606a96900f5c638aaa1524ae065150e4adb54"
       }
+    },
+    {
+      "id": "DEC-d9e2897fceb649e1a3b9eeccea4f730b",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 起生效的既有授权（批准并commit、解除时间与任务数量限制）；用户 2026-09-17 指令'按照你推荐的继续推进完成项目优化重构，确保你说的这些问题也修复'及'如果是现有工作流有问题，可以陈述现状和理由向我申请授权，现在先等待审查结果验收提交'。TASK-047（复核报告 B-3）候选 e68f9a78… 已通过 verify（RUN-4683feec…，lint/build/frontend 三门禁 PASS）与第 2 轮独立审查 PASS（findings 为空；第 1 轮 FAIL 的 2 条均为证据/报告准确性问题，源码无需改动，已按意见重生成实机日志并更正报告消融数字）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-047"
+      ],
+      "recorded_at_utc": "2026-09-17T08:53:14.043955Z",
+      "candidates": {
+        "TASK-047": "e68f9a78f1035ad5ee2754a8d00c0d4d89956b30c7aa444fea9bed40eee1e30c"
+      }
     }
   ]
 }

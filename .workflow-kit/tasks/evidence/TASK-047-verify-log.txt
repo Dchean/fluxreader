@@ -1,0 +1,61 @@
+# TASK-047 实机验证日志（修复轮重生成，取代 16:22 那版有缺陷的输出）
+# 环境：真实 Tauri WebView2 + CDP（Input.dispatchKeyEvent / Runtime.evaluate / Page.captureScreenshot）
+# 方法：从 body 起按 Tab 直至回到首个停靠点；循环判定用「首次聚焦打元素标记」（不用同类名）；上限 240
+# 未注入系统级键鼠、未抢占窗口焦点；测试数据经 Vite 模块图 setState 注入（纯内存）
+
+## 注入内存 mock
+{"ok":true}
+
+## 1) 默认（全部浮层关闭）
+   浮层 modal-overlay  open=false inert=true inertVal="" aria-hidden=null 名义可Tab=20
+   浮层 modal-overlay  open=false inert=true inertVal="" aria-hidden=null 名义可Tab=1
+   浮层 modal-overlay lightbox-overlay  open=false inert=true inertVal="" aria-hidden=null 名义可Tab=0
+   浮层 modal-overlay  open=false inert=true inertVal="" aria-hidden=null 名义可Tab=4
+   浮层 modal-overlay  open=false inert=true inertVal="" aria-hidden=null 名义可Tab=8
+   浮层 modal-overlay  open=false inert=true inertVal="" aria-hidden=null 名义可Tab=0
+   浮层 modal-overlay  open=false inert=true inertVal="" aria-hidden=null 名义可Tab=0
+   浮层 modal-overlay  open=false inert=true inertVal="" aria-hidden=null 名义可Tab=3
+   Tab 走满一圈：停靠点 32 个（主视图 32 + 回绕锚点 1）
+   其中位于浮层内：0 个  => 验收第 1 条 ✓ 成立
+   其中有效不透明度为 0 的：0 个  => 不停留在不可见控件 ✓
+   :focus-visible=true 的：32/32
+   停靠点序列：BUTTON.win-btn → DIV.sidebar-search-pill → BUTTON.nav-tab-item → BUTTON.nav-tab-item → BUTTON.nav-tab-item → BUTTON.nav-tab-item → BUTTON.nav-tab-item → BUTTON.nav-tab-item → BUTTON.nav-tab-item → BUTTON.nav-tab-item → BUTTON.nav-tab-item → BUTTON.icon-sub-btn → BUTTON.icon-sub-btn → BUTTON.icon-sub-btn → BUTTON.feed-leaf-item → DIV.feed-folder-title → BUTTON.feed-row-act-btn → BUTTON.folder-chevron-btn → DIV.feed-leaf-item → DIV.feed-leaf-item → DIV.feed-leaf-item → BUTTON.sync-status-pill → BUTTON.sync-refresh-btn → BUTTON.sidebar-refresh-all → BUTTON.nav-tab-item → BUTTON.toggle-action-btn → BUTTON.toggle-action-btn → BUTTON.toggle-action-btn → DIV.article-card → BUTTON.win-btn → BUTTON.win-btn → BUTTON.win-btn
+
+## 2) 消融对照：临时移除全部 inert 后重走
+   已移除 inert 的节点数：8
+   停靠点 69 个（主视图 32）；其中浮层内 37 个
+   浮层内停靠点中有效不透明度为 0 的：37 个
+   => 移除 inert 后关闭态浮层控件重新进入 Tab 序列：✓ 证明 inert 是生效点
+   主视图停靠点：有 inert 时 32 → 移除后 32（应相同；差异只应出现在浮层内）
+   已还原 inert 的节点数：8
+   还原后：停靠点 32 个（主视图 32），浮层内 0 个  => ✓ 恢复
+
+## 3) 打开设置弹窗
+   打开中的浮层：open=true inert=false（打开态不应有 inert）名义可Tab=20
+   Tab 停靠点 52 个（主视图 32 + 浮层内 20）
+   浮层内带 :focus-visible 的：20/20  => 验收第 2 条 ✓ 成立
+   进入浮层前需经过的主视图停靠点数：26
+
+## 4) 关闭设置弹窗
+   activeElement：{"tag":"BUTTON","inOverlay":false,"inertAncestor":false}  => 验收第 3 条 ✓ 不在 inert 子树内
+   关闭后 Tab 停靠点 32（主视图 32），浮层内 0  => ✓
+
+## 5) 命令面板（搜索）
+   打开：停靠点 34，浮层内 3  => ✓ 可进入
+   Esc 关闭后：停靠点 32，浮层内 0  => 验收第 4 条 ✓
+
+## 6) 灯箱
+   打开：{"open":true,"inert":false}
+   Esc 后：{"open":false,"inert":true}  => 验收第 5 条 ✓ 可关闭且关闭后 inert
+   关闭后 Tab 浮层内 0  => ✓
+
+## 7) 右键菜单 / 确认框（条件渲染，预期本就通过）
+   关闭态 DOM 中存在：{"ctx":false,"confirm":false}  => 验收第 6/7 条 ✓ 均不在 DOM
+
+## 8) 口径说明（回应审查 finding 02）
+   验收第 4 条（Tab 顺序/不新增停靠点）的锚点「TASK-043 记录的 16 个」是在**空库**下测得的；
+   本日志在注入 mock 数据（3 个源、分类、文章卡片）后测得主视图 32 个，属**不同数据状态**，两者不可直接比较。
+   注：主视图停靠点会随动态内容小幅浮动（同步状态胶囊/加载态等），
+   独立审查者在同一候选上测得主视图 31、总数 33/70，与本日志的 32/32/69 属同量级差异。
+   本次能证成的是「不新增停靠点」：源码 diff 仅 2 处 inert（不新增任何 DOM 节点），
+   且消融对照显示主视图停靠点在「有/无 inert」两态均为 32 / 32，差异全部出现在浮层内。

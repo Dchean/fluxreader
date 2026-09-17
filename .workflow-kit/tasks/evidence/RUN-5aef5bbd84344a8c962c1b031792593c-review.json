@@ -1,0 +1,84 @@
+{
+  "task_id": "TASK-047",
+  "candidate_digest": "e68f9a78f1035ad5ee2754a8d00c0d4d89956b30c7aa444fea9bed40eee1e30c",
+  "verification_run": "RUN-4683feec76e44f74a8ae9ebd34cc6dfc",
+  "verdict": "PASS",
+  "summary": "修复轮复核（独立、未参与实现；结论只来自我本人的源码核对与实机复跑）。**上轮 2 条 finding 均已真正解决，本轮判 PASS，findings 为空。** 候选未变：新运行 RUN-4683feec76e44f74a8ae9ebd34cc6dfc 的三项 checks 全部 status=PASS / exit_code=0 / candidate_digest=e68f9a78…，新候选清单 digest 同为 e68f9a78…（27 个文件 sha256 与工作区逐一重算 27/27 一致），`git diff HEAD -- src` 与上轮**逐字节相同**（同一 blob 对 index 2deca25→dc29ed2、df4a4af→5fb7b5a；仅 2 hunk：`inert={!open}`、`inert={!lightboxUrl}` 与说明「为什么」的注释），故上轮对该候选的实机结论继续有效，本轮我又独立复跑了一遍关键项。finding 01（过期未标注的失败日志）已解决：TASK-047-verify-log.txt 已整份重新生成，首行明写「修复轮重生成，取代 16:22 那版有缺陷的输出」，全文再无与报告矛盾的旧数字——我逐节交叉核对（§1 32/浮层内 0 ↔ 报告第 1 行；§3 52=32+20、20/20 fv ↔ 第 2 行；§4 32/0 ↔ 第 3 行；§5 34/3→32/0 ↔ 第 4 行；§6 灯箱 ↔ 第 5 行；§7 ctx/confirm ↔ 第 6/7 行；§2 与 §2.1 一致；§8 口径说明）全部自洽；作者并顺带修掉了脚本自身的真实缺陷（元素标记写成 JS 属性却用属性选择器清理 → 旧标记残留 → 新一代计数器撞号 → 遍历提前终止），改为按代标记。finding 02（消融数字与归因错误）已解决：§2.1 现为 32/0 → 69/37（37/37 有效不透明度为 0）→ 32/0，并明确写出「主视图停靠点在两态同为 32、差异全部出现在浮层内」，且保留更正说明、如实承认初版「27/1」与「主视图 31 vs 26 = 动态内容浮动」是错的、真因是脚本撞号；§2 表格第 1/2/3/4/8 行数字已同步（32、52、34、32）；验收第 4 条锚点「TASK-043 记录的 16 个」与本次注入 mock 后的计数属不同数据状态、不可直接比较，这一点已写进日志 §8 与报告 §2.1/§5.1。我的独立复跑（headless Edge 153 同源 Chromium + Vite 5173 + CDP，按键直达渲染器，未注入系统级键鼠、未开窗口抢焦点；每场景 Page.navigate 全新加载后注入应用自身内存 mock；按代标记 g{gen}_{n} 判环；上限 240）：关闭态**连续三跑完全一致**——主视图 **31** 个不同停靠点（原始 Tab 33 次 = 31 + body + 回绕锚点），浮层内 **0**、不可见 0，8/8 `.modal-overlay` 带 inert（属性值空串）；消融移除 8 个 inert → **主视图仍为 31**、浮层内 **37**、其中 **37/37 有效不透明度为 0**（原始 Tab 70 次）；重载还原 → 33 次 / 浮层内 0。即「主视图停靠点在移除 inert 前后相同、差异全部出现在浮层内」这一不变式由我独立复现（我 31=31，作者 32=32，是计数口径差 1，见下）。同轮另测：设置弹窗打开 → 打开态浮层**无** inert 属性、名义可 Tab 20，遍历 31 主视图 + 20 浮层内（原始 53），浮层内 **20/20 `:focus-visible=true`**，且我用真实 Tab 逐个聚焦 + 截图比对（裁剪区 = 元素矩形 ∪ 其 label 容器并外扩 8px，聚焦态 vs 失焦基线）验证 **20/20 在屏幕上确有像素变化**（含 8 个 opacity:0、0×0 的视觉隐藏 checkbox——其 switch 代理确有可见焦点环），故 ui_checks 第 2 条的「可见焦点环」不只是 :focus-visible 属性成立；从浮层内按 Esc → 关闭、activeElement=BODY、不在浮层/inert 子树、其后遍历浮层内 0；命令面板 开→浮层内 2（均 fv）/Esc 后 0；灯箱 开（无 inert、img 在）→ Esc 后 open=false、inert=true、浮层内 0；右键菜单 关闭态不在 DOM → 真实 contextmenu 后 role=menu/4 项 → Esc 后不在 DOM，确认框亦不在 DOM；点击遮罩关闭仍生效。证据真实性：三张 PNG 本轮**已全部重拍**（sha256 AB6EAC8E…/7B77D2E9…/900FFDDB…，互不相同，且与 evidence 目录内其它 24 张无逐字节重复——目录内仅有的两组重复是既有 TASK-041 的两对，与本任务无关）；我逐张目视：01=主视图、无浮层、右上 ✕ 带 accent 焦点环；02=设置弹窗确为打开态、「通用」导航项带 accent 焦点环（名实相符）；03=主界面变暗 + 中央灯箱图片（名实相符）。用户库：data 表 folders/feeds/articles/sync_queue/deduped_urls 仍 **0 行**（settings 仅 1 行既有 app_settings JSON），db mtime 仍 9/16 12:42、wal mtime 仍 9/17 10:38（仅 -shm 因应用启动被触及）→ 实现轮与修复轮均未写用户库，纯内存注入属实。**非阻断的剩余瑕疵（已逐条列出，未隐瞒，判定不需再开修复轮）**：(i) 日志第 18 行「停靠点 32 个（主视图 32 + 回绕锚点 1）」括注自相矛盾（32≠32+1），严格口径下不同主视图停靠点为 **31**（原始 33 次含 body），报告与日志的「主视图 32」把回绕锚点计入了——但它所支撑的不变式（两态相等）我已独立证实（我 31=31、作者 32=32），不影响验收第 8 条；(ii) 报告 §5.1 写「25 个主视图停靠点」而日志 §3 写「26」（该数值两处都声明随动态内容浮动，属 ±1 级）；(iii) 报告 §4.1 叙述写「设置弹窗的 7 个导航项」，实测 `.settings-nav-item` 为 **8** 个（我运行时计数，源码 SettingsModal.tsx 由 TAB_META 无条件渲染）——该括注是返工叙事，7 或 8 都不改变「同类名多停靠点会误判」的结论。以上三处均为措辞级瑕疵、不触及任何验收项，故不作为 finding；如 owner 要求文档零瑕疵，可在下次触及该文档时顺手订正。未做项（据实声明）：(a) 未启动 Tauri app.exe/WebView2 实机窗口，改用同源 Chromium 的 headless Edge（理由：不得抢占用户焦点；作者的 Tauri 侧数字与我的逐项互印：8 个浮层名义可 Tab 数 20/1/0/4/8/0/0/3 完全相同，消融浮层内均为 37）；(b) 未复测浅色主题（diff 内无 CSS，inert 不产生视觉变化）；(c) 未做性能基准（见 performance 项理由）；(d) 未在空库真实态下测绝对停靠点数（故未把 TASK-043 的 16 与本次 31/32 直接比较）。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "契约 §4 八条在修复轮由我同轮重测（headless Edge 153 + CDP 真实 Tab；每场景全新加载 + 内存 mock；按代标记判环；上限 240）。1) 默认全关：三跑完全一致，主视图 31 个不同停靠点（原始 Tab 33 次 = 31 + body + 回绕锚点），**浮层内 0、不可见 0**，8/8 `.modal-overlay` 带 inert（属性值空串，inertProp=true；名义可 Tab 数 20/1/0/4/8/0/0/3）。2) 设置打开：打开态浮层**无** inert 属性；31 主视图 + 20 浮层内（原始 53），浮层内 **20/20 `:focus-visible=true`**，且我按真实 Tab 逐个聚焦后与失焦基线做**渲染像素比对（裁剪=元素矩形 ∪ label 容器，外扩 8px）：20/20 有像素变化**，焦点环为既有 accent（`2px solid rgb(72,128,200)` 等同族值），本轮 diff 无任何 CSS/令牌改动 → 未新增颜色。3) 从浮层内 Esc：关闭 + activeElement=BODY + inOverlay=false + inertAncestor=false，其后遍历浮层内 0（上轮另测程序化关闭同效）。4) 命令面板：打开后浮层内 2 个停靠点（均 fv），Esc 后 0。5) 灯箱：开（无 inert、img 在、名义可 Tab 0）→ Esc 后 open=false、inert=true、浮层内 0（该子树本身无控件，「关闭后不可 Tab」按构造成立，实质是 Esc 可关 + inert 已加，均实测）。6) 关闭态 `.ctx-menu` 不在 DOM → 真实 contextmenu 后在 DOM（role=menu、4 项）→ Esc 后不在。7) `.confirm-overlay` 关闭态不在 DOM；小弹窗（添加源/编辑源/重命名分类/托盘询问/命令面板/设置）全部为同一 ModalOverlay 实例（7 处调用 + 灯箱），由第 1 条整体 inert 覆盖；ConfirmDialog（primitives.tsx:279）与 ContextMenu（ContextMenu.tsx:77）仍是条件渲染（源码 + 运行时双证）。8) Tab 顺序实测：win-btn×3 → sidebar-search-pill → nav-tab-item(视图 全部/今天/未读/收藏) → nav-tab-item(布局 文章/社交/画廊/播客/通知) → icon-sub-btn×3 → 订阅树(全部订阅源/feed-folder-title/feed-row-act-btn/folder-chevron-btn/feed-leaf-item×3) → sync-status-pill/sync-refresh-btn/sidebar-refresh-all → 设置中心 → toggle-action-btn×3 → article-card；不变式「不新增停靠点」由两点证成：源码 diff 仅 2 处 inert（不新增 DOM 节点），且消融显示**主视图计数在两态相同**（我 31=31，原始 33 vs 70 的差额 37 全部落在浮层内）。口径说明：验收第 4 条锚点「TASK-043 记录的 16 个」为空库态，与本次注入 mock 后的 31/32 属不同数据状态、不可直接比较（日志 §8 与报告 §2.1/§5.1 已写明）。修复轮未改源码，故上轮结论全部沿用并被本轮复现。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-047-report.md",
+        ".workflow-kit/tasks/evidence/TASK-047-verify-log.txt",
+        ".workflow-kit/tasks/evidence/TASK-047-01-closed-no-overlay-focus.png",
+        ".workflow-kit/tasks/evidence/TASK-047-02-settings-open-focus-ring.png",
+        ".workflow-kit/tasks/evidence/TASK-047-03-lightbox-open.png"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "候选未变（新候选清单 digest=e68f9a78…、27/27 哈希与工作区一致），故 tools/frontend-regression.mjs 仍与上轮同哈希（fb1174a9…）未被改动，其中 `focus|querySelector|tabIndex|role=` 命中 0（另查 inert|activeElement|getComputedStyle 亦 0）——作者「该套件对可聚焦性不能提供任何证据」的表述属实，本任务正确性实际依赖：(a) 实机 Tab 遍历 + 消融对照（见 requirements/failure_paths），(b) 2 行 diff 与 `inert` 布尔语义的源码核对，(c) 本轮未触及状态机/开合条件（App.tsx、store.ts 均不在 diff）。门禁绑定：RUN-4683feec… 的 lint（0 warnings/0 errors, exit 0）、build（tsc -b + vite build 成功, exit 0）、frontend（26/26 通过, exit 0）三项 checks 均 PASS 且三条都携带 candidate_digest=e68f9a78…；被取代的 RUN-21b2f218… 未再作为本轮依据。既有行为回归由我实机复测：Esc 逐层关闭（设置/命令面板/灯箱/右键菜单）、点击遮罩关闭、ctx 与 confirm 仍条件渲染、store 开合字段未变。无断言被削弱或跳过。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-4683feec76e44f74a8ae9ebd34cc6dfc-candidate.json",
+        ".workflow-kit/tasks/evidence/RUN-4683feec76e44f74a8ae9ebd34cc6dfc-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-4683feec76e44f74a8ae9ebd34cc6dfc-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-4683feec76e44f74a8ae9ebd34cc6dfc-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "三个失效面本轮再测并保持成立。a) 快速开合：上轮以 6 轮无等待 true/false 压测后 8/8 关闭态仍带 inert、遍历浮层内 0；本轮连续三次全新加载的关闭态遍历结果完全一致（主视图 31、浮层内 0），未出现中间态漏挂 inert。b) 多个浮层同时关闭：默认态即 8 个浮层全关，8/8 inert、浮层内 0；一次性移除 8 个 inert 后浮层内**同时**冒出 37 个停靠点且 37/37 有效不透明度为 0（37 ≈ 8 个浮层名义可 Tab 数之和 36 + 1 动态），说明 inert 是按浮层各自生效；叠加态（设置 + 命令面板同开）两者都 open 且都无 inert，Esc 只关最上层、再 Esc 关下一层，每次关完后「所有关闭态浮层均 inert」为真。c) inert 与 Esc 链：Esc 监听在 window（App.tsx:199-211，未改），inert 只影响可聚焦性/交互命中、不收走键盘事件；实测焦点在打开态浮层内按 Esc 仍关闭，且关闭瞬间焦点迁出 inert 子树（activeElement=BODY、inertAncestor=false），上轮另测**程序化关闭**（不按 Esc）同样迁出，未出现「焦点卡在 inert 子树内」。d) 附加：对关闭态浮层控件直接 `focus()` 被忽略（上轮实测，脚本聚焦未进入浮层）。e) 修复轮新增的脚本缺陷（旧标记残留导致遍历提前终止）已由作者修掉，且该缺陷只在作者脚本内、不涉及产品代码——我用按代标记法复跑未复现任何异常终止（三跑 term 均为回到首个停靠点）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-047-report.md",
+        ".workflow-kit/tasks/evidence/TASK-047-verify-log.txt",
+        ".workflow-kit/tasks/evidence/TASK-047-03-lightbox-open.png"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "两处 `inert` 位置与写法清晰、负担极小：均落在浮层**根节点**这一唯一共享位置（primitives.tsx 的 ModalOverlay 一处覆盖 7 个调用点；Overlays.tsx 的灯箱一处），条件直接复用既有开合变量（`!open` / `!lightboxUrl`），未新增 prop、状态、effect、CSS 令牌；注释写的是**为什么**（无条件渲染 children、关闭态只切类名、base.css 的 .modal-overlay 关闭态只改 opacity/pointer-events 不改可聚焦性，故必须靠 inert）并引用 REQ-047。两文件重复同一模式属可接受的刻意对称。唯一潜在陷阱是 React 版本语义：React ≤18 会把 `inert={false}` 序列化成 `inert=\"false\"`（真值 → 反而把打开态弹窗也变成 inert），本仓库 react/react-dom 为 ^19.2.8、实际 19.2.8，我实测打开态浮层**无** inert 属性、关闭态属性值为空串，当前正确；若将来降级 React 需重新核对（建议非阻断地在注释补一句版本前提）。本轮修复只动证据与报告，源码 diff 与上轮逐字节相同（同一 blob 对），维护面无新增负担。附：报告 §4.1 的「7 个导航项」与实测 8 个 `.settings-nav-item` 不符，属返工叙事的措辞瑕疵，不影响结论（已记入 summary 非阻断项）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-047-report.md",
+        ".workflow-kit/tasks/evidence/RUN-4683feec76e44f74a8ae9ebd34cc6dfc-candidate.json"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "`inert` 对运行时开销可忽略：改动只是给 8 个**已经渲染**的常驻节点加/去一个布尔属性，值仅在 open/lightboxUrl 翻转时变化（不在渲染循环或高频路径），不新增监听、不触发布局或绘制（diff 内无 CSS；inert 不参与渲染），子树结构不变——唯一被影响的是引擎本就每次聚焦都要做的「可聚焦性」判定。实测侧无异常：本轮跑满多次完整遍历（关闭 33 次 Tab ×3 轮、消融 70 次、设置打开 53 次、命令面板 35 次）在固定节流（35–60ms/步）下均按预期走满，无卡顿、无超时、无渲染器异常；消融态多出 37 个停靠点仍正常完成。因改动不含可测量的新运行时路径，我没有单独做微基准（正确结论是「无基准可测」而非「未测」）；门禁耗时亦无变化（build 121ms、lint 29ms、前端回归 26/26）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-4683feec76e44f74a8ae9ebd34cc6dfc-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/TASK-047-report.md"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
+    "checked_states": [
+      "默认（全部浮层关闭）状态下，Tab 遍历不得停留在任何不可见控件上",
+      "设置弹窗打开时，其内部控件可正常 Tab 进入并可见焦点环",
+      "设置弹窗关闭后，焦点若原在弹窗内应回到触发元素或 body，且弹窗内控件不再可 Tab",
+      "命令面板（搜索）打开/关闭时同上：关闭后其控件不可 Tab",
+      "灯箱打开时 Esc 可关闭，关闭后其控件不可 Tab",
+      "右键菜单关闭后其菜单项不可 Tab",
+      "小弹窗（新建分类 / 添加源 / 编辑源 / 重命名分类 / 确认对话框）关闭后其控件不可 Tab",
+      "Tab 顺序仍为：窗口控件 → 侧栏搜索 → 视图 → 布局 → 工具栏 → 内容区，不因本次改动新增停靠点"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-047-01-closed-no-overlay-focus.png",
+      ".workflow-kit/tasks/evidence/TASK-047-02-settings-open-focus-ring.png",
+      ".workflow-kit/tasks/evidence/TASK-047-03-lightbox-open.png",
+      ".workflow-kit/tasks/evidence/TASK-047-report.md",
+      ".workflow-kit/tasks/evidence/TASK-047-verify-log.txt",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md",
+      ".workflow-kit/tasks/evidence/RUN-4683feec76e44f74a8ae9ebd34cc6dfc-candidate.json"
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-bb470e5e13dd4b6fa5717ba80b4349bc",
+  "task_id": "TASK-047",
+  "kind": "repair",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "修复轮（review_failure）：仅修证据与报告（源码无需改动）。按审查意见①用修正后的脚本重新生成实机验证日志；②按审查者干净复跑的数字更正报告消融对照，并说明验收第 4 条锚点 16 与实测 31 属不同数据状态。"
+  },
+  "started_at_utc": "2026-09-17T08:39:27.600355Z",
+  "finished_at_utc": "2026-09-17T08:44:20.838375Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "d7a0e6e5b86dd315dbd438be63097efe403c09640e09f37bf61f6128e57c4ae6",
+  "candidate_digest": "e68f9a78f1035ad5ee2754a8d00c0d4d89956b30c7aa444fea9bed40eee1e30c",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-bb470e5e13dd4b6fa5717ba80b4349bc-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-bb470e5e13dd4b6fa5717ba80b4349bc-scope.json"
+}

@@ -1,0 +1,87 @@
+{
+  "task_id": "TASK-047",
+  "candidate_digest": "e68f9a78f1035ad5ee2754a8d00c0d4d89956b30c7aa444fea9bed40eee1e30c",
+  "verification_run": "RUN-21b2f218b6cb40088dc8692da7f18704",
+  "verdict": "FAIL",
+  "summary": "独立审查（未参与实现；不采信作者自述，全部结论来自我本人的源码核对与实机复跑）。实现本身经我独立实测**确认真实且正确**，但交付的证据/报告包存在两处必须修补的准确性问题，故判 FAIL（修补为文档/证据层面，源码无需改动）。绑定：候选清单 27 个文件 sha256 与工作区逐一重算 27/27 一致（digest=e68f9a78…），故 RUN-21b2f218… 的门禁证据对当前代码有效；该 run 的 lint / build / frontend 三项 checks 均 status=PASS、exit_code=0、candidate_digest=e68f9a78…，与 OneDrive WinError 5 抖动无关（那两次失败 run 未产出 checks）。方法与边界：我用 headless Edge 153（与 WebView2 同源 Chromium）+ Vite dev(5173) + CDP `Input.dispatchKeyEvent`，按键直达渲染器，**未注入系统级键鼠、未抢占窗口焦点**（有意不启动 app.exe 窗口，避免抢用户屏幕 A 的焦点）；每个场景先 Page.navigate 全新加载再注入应用自身的内存 mock（categories=5 / entries=11），遍历以**首次聚焦打标记的元素身份**判环（不用同类名判定，避开 settings-nav-item 陷阱），上限 220–240（避开 portal 在 body 末尾、31 个主视图停靠点之前走不到弹窗的陷阱）。实测数字：①默认全关：走满一圈 33 个原始停靠点（31 个主视图 + body + 回绕），**浮层内 0**、不可见(effOpacity<0.05) 0，8/8 `.modal-overlay` 带 `inert`（属性值 \"\"，是真布尔属性而非 inert=\"false\"）。②消融对照（决定性）：移除 8 个 inert 后同一遍历得 70 个停靠点，**浮层内 37 个且 37/37 effOpacity=0（不可见控件重新进入 Tab 序列）**；重载还原后回到 33 / 浮层内 0。③设置弹窗打开：31 主视图 + 20 浮层内 = 53，**浮层内 20/20 `:focus-visible=true`**，且打开态浮层 `hasAttribute('inert')=false`（React 19.2.8 布尔语义正确，无 inert=\"false\" 真值陷阱）；从浮层内按 Esc：关闭、activeElement=BODY、inOverlay=false、inertAncestor=false，之后遍历浮层内 0。④命令面板：打开 2 个浮层内停靠点（INPUT.search-modal-input、DIV.cp-list，均 fv），Esc 后 0。⑤灯箱：打开 `hasInertAttr=false`+img 在，Esc 后 open=false 且 inert=true，遍历浮层内 0。⑥右键菜单：真实 contextmenu 派发后 role=menu/4 项在 DOM，Esc 后不在 DOM；`.confirm-overlay` 关闭态也不在 DOM（两者仍是条件渲染）。⑦失败路径：快速开合 ×6 后 8/8 inert、遍历 33/浮层内 0；焦点在打开态浮层内改用 setState 程序化关闭（非 Esc）后 activeElement=BODY 且不在 inert 子树；设置+命令面板叠加时 Esc 逐层关闭（先关面板、后关设置），每次关完所有关闭态浮层均 inert；脚本对关闭态浮层控件调 `focus()` 被忽略（焦点未进入浮层）。⑧无障碍树：Accessibility.getFullAXTree 中「通用/外观/刷新间隔/自动刷新」在关闭态命中 0 个未忽略节点、打开态 6/3/3/3，证明 inert 确实把子树移出无障碍树。⑨契约 §3：`git diff HEAD -- src` 只有 2 个 hunk/2 个文件，内容仅 `inert={!open}`、`inert={!lightboxUrl}` 与说明「为什么」的注释，无 CSS/令牌/状态/开合条件改动，App.tsx 未动；`git status --porcelain=v1 -uall` 中 src 下仅这两个文件被改。⑩用户库只读核验：`%APPDATA%\\com.fluxreader.app\\fluxreader.db`(+wal) 快照读得 folders/feeds/articles/sync_queue 均 0 行（settings=1 行为迁移/设置行），db mtime 仍 9/16、wal mtime 仍 9/17 10:38（早于本任务实现时段 16:17–16:27），可证作者测试数据确为纯内存注入、未写用户库。⑪证据图：三张 PNG sha256 互不相同，且与既有 TASK-039/041/042/043 全部 24 张 PNG 无逐字节重复；我逐张目视：01=主视图、无浮层、无浮层内焦点环；02=设置弹窗确为打开态、左侧「通用」导航项带 accent 焦点环（内容与命名相符）；03=全屏变暗、中央为灯箱图片（内容与命名相符）。FAIL 的两条原因（均为证据/报告准确性，源码无需改）：(1) 被列为「实机验证日志」的 TASK-047-verify-log.txt 是**修正前脚本版本**的输出，其 §2 仍写「Tab 停靠点 30；位于浮层内 0 个 => 可进入: ❌」「焦点环可见: ❌」，与报告 §2 第 2 条声称的「51 停靠点/浮层内 20/20 fv」直接矛盾，且文件内没有任何「已作废/被取代」标注（其 mtime 16:22:00 早于最终证据图 16:23:37 与报告 16:26:22，可证）；契约 §5 要求实机遍历留证、证据内容真实，读者若照单采信该日志会认为验收第 2 条不通过。(2) 报告 §2.1 的消融数字与解释来自作者自己已识别的脚本提前终止缺陷：「[有 inert]31/浮层内 0、移除 inert 27/浮层内 1、还原 31/0」并把主视图「31 vs 26」解释为「动态内容小幅浮动」；我的干净复跑为 33/0（不可见 0） vs 70/37（37/37 不可见） vs 还原 33/0，**主视图停靠点在两种状态下同为 31**（不存在 26），差异全部来自 37 个关闭态浮层内控件（约等于 8 个浮层名义可 Tab 数之和 36）；同一处报告也未把验收第 4 条的锚点「TASK-043 记录的 16 个」与实测 31–32 的口径差异讲清楚（16 与 31 是不同数据状态下的计数，本次可证的是「不新增停靠点」这一不变式，已由 2 行 diff 与「主视图 31=31」证实）。未做项（据实声明）：(a) 未启动 Tauri app.exe/WebView2 实机窗口，改用同源 Chromium 的 headless Edge（理由：不得抢占用户焦点；作者已有 Tauri 侧证据，我的数字与其相互印证：其 §1 八个浮层名义可 Tab 数 20/1/0/4/8/0/0/3 与我逐项完全一致）；(b) 未复测浅色主题（diff 内无 CSS，inert 不产生视觉变化；我实测焦点环为既有 accent：打开态 `2px solid rgb(72,128,200)`，与主视图既有 `2px solid rgb(79,131,197)` 同族）；(c) 未做性能基准（见 performance 项理由）；(d) 未在空库（真实用户态）下测停靠点绝对数。",
+  "findings": [
+    "【证据一致性·需修】列为「实机验证日志」的 .workflow-kit/tasks/evidence/TASK-047-verify-log.txt 内容属于**修正前的脚本版本**，其 §2「设置弹窗打开」仍记录「Tab 停靠点 30；位于浮层内 0 个 => 可进入: ❌」与「浮层内带 :focus-visible 的 0 个 => 焦点环可见: ❌」，与报告 §2 第 2 条最终结论（51 个停靠点、浮层内 20 个、20/20 :focus-visible=true）**直接矛盾**，而文件内没有任何「已作废 / 已被后续运行取代」的标注。文件 mtime 为 16:22:00，早于最终证据图 TASK-047-02-settings-open-focus-ring.png（16:23:37）与 TASK-047-report.md（16:26:22），可证明它就是报告 §4.1/§4.2 所述缺陷版本那一次的输出。契约 §5 要求「必须提供实机证据：关闭态停靠点清单…」「证据图必须内容真实」「报告中必须写明未覆盖项，不得冒充通过」——此处的缺陷不是冒充通过，而是**未被标注的过期失败记录**：任何按任务卡清单直接采信该日志的人都会认为验收第 2 条不通过，因而必须人工交叉到报告 §4 才能自洽。要求：用修正后的脚本重新生成该日志（覆盖或新增 TASK-047-verify-log-r2.txt 并在报告中指明取代关系），或在文件内显式标注 §2 已作废并附最终一次运行的原始输出。我的独立复跑支持报告结论（关闭态 33/浮层内 0；打开态 53/浮层内 20、20/20 fv），因此这是证据修补，不是行为缺陷。",
+    "【报告准确性·需修】报告 §2.1「消融对照」的数字与解释不准确。报告给出的三次结果是有 inert 31/浮层内 0、移除 inert 27/浮层内 1、还原 31/浮层内 0，并把消融轮里「主视图停靠点 31 vs 26」解释为「循环判定提前终止…不是主视图控件被增删；三次有 inert 的主视图停靠点稳定在 31–32（动态内容有小幅浮动）」。我在同一候选、同一引擎上以元素身份判环、走满一圈重测：有 inert = 33 个原始停靠点（31 主视图 + body + 回绕）/ 浮层内 0 / 不可见 0；移除 8 个 inert = 70 个（31 主视图 + **37 浮层内，37/37 effOpacity=0**）；重载还原 = 33 / 浮层内 0。即 **主视图停靠点在两种状态下同为 31**，报告中「26」与「动态内容浮动」的说法并不成立——那个差额同样出自作者自己已识别的遍历提前终止缺陷，属未被修正的遗留描述；而「浮层内 1」也把效应量低估了两个数量级（真实为 37，且恰好约等于 8 个浮层名义可 Tab 数之和 36，可自洽解释）。同一节的附带口径问题：验收第 4 条以「TASK-043 记录的 16 个」为锚，报告只给 31–32 而未说明两者属不同数据状态、不可直接比较（本次能证成的是「不新增停靠点」：2 行 diff 不新增任何节点，且主视图 31 = 31）。要求：把 §2.1 换成可复现的正确数字与正确归因（37 个关闭态浮层内不可见控件、主视图不变），并把与 16 锚点的关系写明。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "契约 §4 八条逐条由我实机复核（headless Edge 153 + CDP，真实 Tab 键事件，每场景全新加载，元素身份判环）。1) 默认全关：整圈 33 个原始停靠点中浮层内 0、不可见 0；8/8 `.modal-overlay` 带 inert（attr=\"\"，inertProp=true）。2) 设置打开：浮层内 20 个停靠点，20/20 `:focus-visible=true`，焦点环 `2px solid rgb(72,128,200)`（既有 accent，本轮 diff 无任何 CSS）；打开态浮层无 inert 属性。3) 从浮层内 Esc：关闭 + activeElement=BODY + inOverlay=false + inertAncestor=false，之后遍历浮层内 0；另测**程序化关闭**（setState，非 Esc）同样把焦点移到 body。4) 命令面板：Ctrl+K 打开后可 Tab 进入（2 个：search-modal-input、cp-list，均 fv），Esc 后浮层内 0。5) 灯箱：注入 lightboxUrl 后 open、无 inert、img 在；Esc 后 open=false、inert=true、浮层内 0（注意：灯箱子树本身 0 个名义可 Tab 控件，故「关闭后其控件不可 Tab」按构造成立，该条的实质是 Esc 可关 + inert 已加，二者均实测成立）。6) 真实 contextmenu 后 `.ctx-menu` 在 DOM（role=menu/4 项），Esc 后不在；`.confirm-overlay` 关闭态不在 DOM。7) 小弹窗（添加源/编辑源/重命名分类/托盘询问/命令面板/设置）全部是同一 ModalOverlay 组件实例（git grep：7 处调用 + 灯箱），由第 1 条的整体 inert 覆盖；ConfirmDialog（primitives.tsx:279 `if (!open) return null`）与 ContextMenu（ContextMenu.tsx:77 `if (!menu) return null`）仍条件渲染（源码 + 运行时双向核对）。8) Tab 顺序实测：win-btn×3 → sidebar-search-pill → nav-tab-item(视图 全部/今天/未读/收藏) → nav-tab-item(布局 文章/社交/画廊/播客/通知) → icon-sub-btn×3 → 订阅树(全部订阅源/feed-folder-title/feed-row-act-btn/folder-chevron-btn/feed-leaf-item×3) → sync-status-pill/sync-refresh-btn/sidebar-refresh-all → 设置中心 → toggle-action-btn×3 → article-card；有/无 inert 两次遍历的主视图序列与计数完全一致（31），本次改动只**移除**浮层内停靠点、不新增任何停靠点（结构性证据：src 下 diff 仅 2 hunk，无新增 DOM/控件）。附：验收第 4 条的绝对数锚点 16 与实测 31–32 属不同数据状态，不可直接比较；我未在空库真实态下测绝对数（见 summary 未做项 d），但不变式成立。上述判定不因 findings 的两条证据/报告缺陷而改变：它们是证据包的准确性问题，源码行为经我独立实测全部成立。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-047-report.md",
+        ".workflow-kit/tasks/evidence/TASK-047-01-closed-no-overlay-focus.png",
+        ".workflow-kit/tasks/evidence/TASK-047-02-settings-open-focus-ring.png",
+        ".workflow-kit/tasks/evidence/TASK-047-03-lightbox-open.png",
+        ".workflow-kit/tasks/evidence/TASK-047-verify-log.txt"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "作者关于回归套件的表述**属实**：tools/frontend-regression.mjs 与候选清单 sha256（fb1174a9…）一致、未被改动，我在其中 grep `focus|querySelector|tabIndex|role=` 命中 **0**（另查 inert|activeElement|getComputedStyle 亦为 0），全套 26 项是纯 Zustand 状态机断言，**对可聚焦性不能提供任何证据**——因此本任务的正确性实际依赖：(a) 我的实机 Tab 遍历与消融对照（见 requirements/failure_paths），(b) 对 2 行 diff 与 `inert` 布尔语义的源码核对，(c) 「本轮未触及状态机/开合条件」这一范围事实（App.tsx 与 store.ts 均不在 diff 内）。门禁绑定：RUN-21b2f218… 的 lint（0 warnings/0 errors, exit 0）、build（tsc -b + vite build 成功, exit 0）、frontend（26/26 通过, exit 0）三项 checks 均 PASS 且三条都携带 candidate_digest=e68f9a78…；候选 27 个文件哈希与工作区 27/27 一致。既有行为回归由我独立实测：Esc 逐层关闭（设置/命令面板/灯箱/右键菜单 4 条路径）、点击遮罩关闭（真实 MouseEvent 派发到 overlay 根，target===currentTarget → 关闭）、ctx 与 confirm 仍条件渲染、开合条件与 store 状态字段未变（diff 只含 2 行 inert）。无削弱或跳过任何断言。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-21b2f218b6cb40088dc8692da7f18704-candidate.json",
+        ".workflow-kit/tasks/evidence/RUN-21b2f218b6cb40088dc8692da7f18704-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-21b2f218b6cb40088dc8692da7f18704-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-21b2f218b6cb40088dc8692da7f18704-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "按题面三个失效面实测，全部成立。a) **快速开合**：对 settingsOpen 连做 6 轮 true/false（无等待）后，8/8 浮层关闭且 inert 齐备，整圈遍历 33 / 浮层内 0——不存在「刚关又开时 inert 漏挂」的中间态（React 每次提交都按 open 重算属性）。b) **多个浮层同时关闭**：默认态即 8 个浮层全部关闭，8/8 inert、浮层内 0；消融移除 8 个 inert 后浮层内一次性冒出 37 个不可见停靠点（37/37 effOpacity=0），说明 inert 生效面是**每个浮层各自**而不是某一个；叠加态（设置 + 命令面板同时打开）实测两者都 open 且都无 inert，第一次 Esc 只关最上层（面板），第二次 Esc 关设置，两次关完后「所有关闭态浮层均 inert」为真——逐层关闭语义未被 inert 改变。c) **inert 与 Esc 链的交互**：Esc 监听在 window（App.tsx:199-211，本轮未改，diff 不含该文件），inert 只影响可聚焦性/交互命中，不收走键盘事件；实测焦点在打开态浮层内按 Esc 仍能关闭，且关闭瞬间焦点从 inert 子树迁出（activeElement=BODY、inertAncestor=false）——包括我额外构造的**程序化关闭**（不按 Esc，直接 setState）路径，Chromium 同样把焦点移出，未出现「焦点卡在 inert 子树内」的坏态。d) 附加：对关闭态浮层控件直接调 `focus()` 也被忽略（脚本聚焦尝试失败，activeElement 仍在浮层外），覆盖契约 §2.1「Tab 或脚本聚焦」两种途径。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-047-report.md",
+        ".workflow-kit/tasks/evidence/TASK-047-verify-log.txt",
+        ".workflow-kit/tasks/evidence/TASK-047-03-lightbox-open.png"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "两处 `inert` 的位置与写法清晰、负担极小：均落在浮层**根节点**这一唯一共享位置（primitives.tsx 的 ModalOverlay 一处覆盖 7 个调用点；Overlays.tsx 的灯箱一处），条件表达式直接复用既有开合变量（`!open` / `!lightboxUrl`），没有新增 prop、状态、effect 或 CSS 令牌；注释写的是**为什么**（该组件无条件渲染 children、关闭态只靠类名切 opacity、base.css 的 .modal-overlay 关闭态只有 opacity/pointer-events 不改可聚焦性，故必须靠 inert）并引用 REQ-047，符合「注释解释原因而非复述代码」。两文件重复同一模式属可接受的刻意对称（同一根因、同一修法）。唯一值得记录的潜在陷阱是 React 版本语义：React ≤18 会把 `inert={false}` 序列化成 `inert=\"false\"`（真值 → 反而把打开的弹窗也变成 inert），本仓库 package.json 为 react/react-dom ^19.2.8、实际安装 19.2.8，我实测**打开态浮层无 inert 属性、关闭态属性值为空串**，故当前正确；将来若降级 React 需要重新核对——建议（非阻断）在注释里补一句版本前提。未引入任何维护负担或隐式契约；`git diff` 的 2 个 hunk 之外无任何改动，reviewer 一眼可核。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-047-report.md",
+        ".workflow-kit/tasks/evidence/RUN-21b2f218b6cb40088dc8692da7f18704-candidate.json"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "`inert` 对运行时开销可忽略，且有具体依据：改动只是给 8 个**已经渲染**的常驻节点加/去一个布尔属性，属性值仅在 open/lightboxUrl 翻转时变化（不在渲染循环或高频路径上），不新增事件监听、不触发样式重算或布局（diff 内无 CSS；inert 不参与绘制），也不改变子树结构——唯一被影响的引擎内部计算是「该子树是否可聚焦」，而浏览器本来就在每次 Tab/聚焦时做同样的可聚焦性判定，inert 只是让判定提前短路。实测侧无异常：一次完整 Tab 遍历（关闭态 33 步 / 打开态 53 步）与消融态（70 步）在脚本固定节流（35–45ms/步）下均按预期走满，无卡顿、无超时、无渲染器异常（70 步的消融轮虽多出 37 个停靠点仍正常完成）。因改动不含可测量的新运行时路径，我没有单独做微基准（若必须给数字，正确结论是「无基准可测」而非「未测」）；构建产物体积与门禁耗时无变化（build 133ms、lint 29ms、前端回归正常通过）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-21b2f218b6cb40088dc8692da7f18704-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/TASK-047-report.md"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-047.md",
+    "checked_states": [
+      "默认（全部浮层关闭）状态下，Tab 遍历不得停留在任何不可见控件上",
+      "设置弹窗打开时，其内部控件可正常 Tab 进入并可见焦点环",
+      "设置弹窗关闭后，焦点若原在弹窗内应回到触发元素或 body，且弹窗内控件不再可 Tab",
+      "命令面板（搜索）打开/关闭时同上：关闭后其控件不可 Tab",
+      "灯箱打开时 Esc 可关闭，关闭后其控件不可 Tab",
+      "右键菜单关闭后其菜单项不可 Tab",
+      "小弹窗（新建分类 / 添加源 / 编辑源 / 重命名分类 / 确认对话框）关闭后其控件不可 Tab",
+      "Tab 顺序仍为：窗口控件 → 侧栏搜索 → 视图 → 布局 → 工具栏 → 内容区，不因本次改动新增停靠点"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-047-01-closed-no-overlay-focus.png",
+      ".workflow-kit/tasks/evidence/TASK-047-02-settings-open-focus-ring.png",
+      ".workflow-kit/tasks/evidence/TASK-047-03-lightbox-open.png",
+      ".workflow-kit/tasks/evidence/TASK-047-report.md",
+      ".workflow-kit/tasks/evidence/TASK-047-verify-log.txt",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-17-task047.md",
+      ".workflow-kit/tasks/evidence/RUN-21b2f218b6cb40088dc8692da7f18704-candidate.json"
+    ]
+  }
+}
