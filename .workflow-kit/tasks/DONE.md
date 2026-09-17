@@ -17,5 +17,6 @@
 | [TASK-040](items/TASK-040.json) | 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20） | done |
 | [TASK-041](items/TASK-041.json) | 前端体验收尾：文案统一精简（REQ-006）+ 控件一致性（REQ-008） | done |
 | [TASK-042](items/TASK-042.json) | 交互动画打磨（REQ-005）：补全过渡与 prefers-reduced-motion | done |
+| [TASK-043](items/TASK-043.json) | TASK-041 遗留收尾：焦点可达性 + 措辞口径 + 按钮收敛（REQ-006/008） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

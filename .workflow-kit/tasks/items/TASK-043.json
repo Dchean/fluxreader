@@ -16,7 +16,7 @@
     "残留：社交/通知卡片的「翻译中」提示不再带 ⏳ 与前导空格",
     "无障碍：聚焦顺序合理，不破坏既有布局与状态流转；prefers-reduced-motion 不受影响"
   ],
-  "status": "verified",
+  "status": "done",
   "objective": "按冻结契约 .workflow-kit/docs/UI-CONTRACT-REQ-043.md 收尾 TASK-041 独立复核确认的遗留项，只做必要的可达性与一致性修复，不改行为、不重构结构：(1) 焦点可达性——为既有 div/img + onClick 的真实交互控件补 role 与 tabIndex，使 §1 焦点规则真正命中，键盘可 Tab 到并看到焦点环（含焦点顺序不跳乱）；(2) 措辞统一——同一动作用一套说法：侧栏同步状态指示器不再在「刷新中…/同步失败/后端已同步」间混用，单源刷新在全应用统一为「刷新此源」，手动全量刷新统一为「刷新全部订阅源」；(3) 控件收敛——2 处纯图标按钮（SettingsModal 的编辑按钮）并入既有两档命中区令牌，最显眼主按钮（侧栏「刷新全部订阅源」）改用与其它主按钮相同的变体类与统一禁用态；(4) 清理「翻译中…」提示残留的 ⏳ emoji 与前导空格。",
   "non_goals": [
     "改变任何点击行为、跳转目标、计数口径或状态流转",
@@ -180,9 +180,11 @@
     "candidate_digest": "6fa96b0b9efe82244a0df1e8b82c9eacd989347ef37cb6011eea2a9b252bea4e",
     "verification_run": "RUN-6e516601e79642c98ec51cfe26fcdc2d",
     "review_run": "RUN-9af613615df449bd84323fbdccd1dac5",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-a630f4dc418e48c080db04a1f534adfb-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-a630f4dc418e48c080db04a1f534adfb"
+    ],
+    "merge_ref": "8efc26b (feat(a11y)!: TASK-043 TASK-041 遗留收尾：键盘可达性 + 措辞口径 + 控件收敛)",
     "ledger_correction": {
       "at_utc": "2026-09-17T02:16:11.335830Z",
       "authorized_by": "user 2026-09-17: 授权订正，继续完成 TASK-043（推荐）",

@@ -1078,6 +1078,20 @@
         "TASK-043"
       ],
       "recorded_at_utc": "2026-09-17T02:16:16.720910Z"
+    },
+    {
+      "id": "DEC-a630f4dc418e48c080db04a1f534adfb",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-15 起生效的既有授权：'批准并commit，继续，并且解除时间和任务数量限制，直接按照你判定最合适的路线跑完全部流程'；用户 2026-09-17 再次明确：'批准，并且清理交接文件……并继续推进项目'。TASK-043（REQ-006/REQ-008，TASK-041 遗留收尾）候选 6fa96b0b… 已通过 verify（RUN-6e516601…，三门禁 PASS）与第 3 轮独立审查（PASS，findings 为空；前两轮 FAIL 各抓出一处真实缺陷均已修复并归档），交付提交 8efc26b",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-043"
+      ],
+      "recorded_at_utc": "2026-09-17T05:23:31.301663Z",
+      "candidates": {
+        "TASK-043": "6fa96b0b9efe82244a0df1e8b82c9eacd989347ef37cb6011eea2a9b252bea4e"
+      }
     }
   ]
 }
