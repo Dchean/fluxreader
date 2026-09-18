@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "`sync/subscriptions.rs:46-49` 在 `unsubscribe_remote` **返回成功时清除删除墓碑**，但『成功』的判据是 `greader.rs:462 post_form_text` 的 `resp.status().is_success()`——**只要 HTTP 2xx 即视为『远端已确认退订』**。GReader 的 `subscription/edit` 端点在 token 失效、权限不足或 `s=feed/<id>` 目标不存在等情况下**可能返回 2xx + 错误体**。此时墓碑被清除，而远端仍列出该订阅，下次 `feeds_phase` 的 pull 分支（`:204-207` 只用墓碑挡复活）便**把已删除的订阅重新建回本地**——用户现象：『删掉的订阅自己回来了』。本任务把这个误判的清除点在**源头**去掉，只保留 `:201-202` 那条**有证据支撑**的清除条件（远端订阅列表确认已不含该 URL 时才清墓碑）。",
   "non_goals": [
     "**不改 `post_form_text` 的 2xx 判据**（那是 greader.rs 的通用 POST 语义，改动面波及全部写接口；本任务只在墓碑清除这一处收紧判据）。若判断必须改，停下来报告",
@@ -200,9 +200,11 @@
     "candidate_digest": "401b6221c040cfac36557974c31b9a64db9482fecd905b930c0e6dd660af0097",
     "verification_run": "RUN-576384bc45f04335be92267425a4555e",
     "review_run": "RUN-785b0d2f53124c0994ca98efdd598bac",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-450bcd3415b141be863566a41e52a2c6-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-450bcd3415b141be863566a41e52a2c6"
+    ],
+    "merge_ref": "a2236fb",
     "ledger_correction": {
       "reason": "解除 failure_kind=protocol 阻断（changed_files 声明错误，非交付缺陷）。",
       "authorization": "DEC-task055-protocol-unblock-20260918",

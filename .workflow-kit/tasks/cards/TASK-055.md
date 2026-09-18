@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-055 · 修 subscriptions.rs 墓碑误清除：已删订阅被 pull 复活（P1）
 
-**状态**：verified
+**状态**：done
 
 **目标**：`sync/subscriptions.rs:46-49` 在 `unsubscribe_remote` **返回成功时清除删除墓碑**，但『成功』的判据是 `greader.rs:462 post_form_text` 的 `resp.status().is_success()`——**只要 HTTP 2xx 即视为『远端已确认退订』**。GReader 的 `subscription/edit` 端点在 token 失效、权限不足或 `s=feed/<id>` 目标不存在等情况下**可能返回 2xx + 错误体**。此时墓碑被清除，而远端仍列出该订阅，下次 `feeds_phase` 的 pull 分支（`:204-207` 只用墓碑挡复活）便**把已删除的订阅重新建回本地**——用户现象：『删掉的订阅自己回来了』。本任务把这个误判的清除点在**源头**去掉，只保留 `:201-202` 那条**有证据支撑**的清除条件（远端订阅列表确认已不含该 URL 时才清墓碑）。
 
