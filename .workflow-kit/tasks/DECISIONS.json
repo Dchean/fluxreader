@@ -1442,6 +1442,31 @@
       "candidates": {
         "TASK-056": "ceaef9df5c9ded50496b2f73d4a0f81c5cc450f07f5dbb4b3c08b5af85bdc3e7"
       }
+    },
+    {
+      "id": "DEC-ca2a6fb72229413893a6c293cf7667c1",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "DEC-user-testing-bugs-20260918",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-057"
+      ],
+      "recorded_at_utc": "2026-09-18T11:41:05.259329Z",
+      "candidates": {
+        "TASK-057": "353cb3c73f687ef37f7ae4e051f7ad3d385cc66467feb24e4553f62418c9db12"
+      }
+    },
+    {
+      "id": "DEC-b324fa956a3c4cc193b243da8c460d35",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "DEC-user-testing-bugs-20260918",
+      "statement": "Owner approved the next bounded batch under the existing brief and policy",
+      "scope": [
+        "workflow"
+      ],
+      "recorded_at_utc": "2026-09-18T11:41:59.815757Z"
     }
   ]
 }

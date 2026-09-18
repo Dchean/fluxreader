@@ -14,7 +14,7 @@
     "深色与浅色两套主题下文案与提示均完整可读、不截断、不溢出",
     "既有「测试连接」与「保存并同步」按钮行为、禁用态与加载态不变"
   ],
-  "status": "verified",
+  "status": "done",
   "objective": "用户实测：**直接填写域名无法登录**（`https://demo.freshrss.org` 连不上），必须填**完整 API 路径** `https://demo.freshrss.org/api/greader.php` 才行。根因经实证定位：`greader.rs` 把 endpoint **原样当作根 URL**（`let base = endpoint.trim_end_matches('/')`，随后拼接 `/accounts/ClientLogin`），从不规范化、也不识别 API 路径。而两种协议的真实布局不同——**Miniflux** 的 GReader API 位于站点**根**（`https://reader.example.com/accounts/ClientLogin`），**FreshRSS** 位于**子路径** `/api/greader.php`（`https://主机/api/greader.php/accounts/ClientLogin`）。实测对照：`POST https://demo.freshrss.org/accounts/ClientLogin` → **404**（HTML 错误页，端点不存在）；`POST https://demo.freshrss.org/api/greader.php/accounts/ClientLogin` → **401**（端点存在，仅凭据不对）。设置页当前文案『例如 https://reader.example.com』**只教了 Miniflux 的填法**，FreshRSS 用户按提示填写必然失败。**owner 明确裁决『不改探测逻辑，只改文案与错误提示』**——即本任务**不新增自动探测/回退请求**，只让用户能填对、并在填错时看得懂为什么。",
   "non_goals": [
     "**不新增 endpoint 自动探测或回退逻辑**（owner 明确选择『不改探测逻辑』）；不得在根路径失败后自动尝试 `/api/greader.php`",
@@ -205,9 +205,11 @@
     "candidate_digest": "353cb3c73f687ef37f7ae4e051f7ad3d385cc66467feb24e4553f62418c9db12",
     "verification_run": "RUN-4e0352510dc74b358cf02e1799e6fe1b",
     "review_run": "RUN-c845c9bc1af14e02b22b2f81a62483a3",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-ca2a6fb72229413893a6c293cf7667c1-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-ca2a6fb72229413893a6c293cf7667c1"
+    ],
+    "merge_ref": "7346430"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

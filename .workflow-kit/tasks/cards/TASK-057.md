@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-057 · 修 Endpoint 填法指引与失败提示：直填 FreshRSS 域名登录失败（Bug 1）
 
-**状态**：verified
+**状态**：done
 
 **目标**：用户实测：**直接填写域名无法登录**（`https://demo.freshrss.org` 连不上），必须填**完整 API 路径** `https://demo.freshrss.org/api/greader.php` 才行。根因经实证定位：`greader.rs` 把 endpoint **原样当作根 URL**（`let base = endpoint.trim_end_matches('/')`，随后拼接 `/accounts/ClientLogin`），从不规范化、也不识别 API 路径。而两种协议的真实布局不同——**Miniflux** 的 GReader API 位于站点**根**（`https://reader.example.com/accounts/ClientLogin`），**FreshRSS** 位于**子路径** `/api/greader.php`（`https://主机/api/greader.php/accounts/ClientLogin`）。实测对照：`POST https://demo.freshrss.org/accounts/ClientLogin` → **404**（HTML 错误页，端点不存在）；`POST https://demo.freshrss.org/api/greader.php/accounts/ClientLogin` → **401**（端点存在，仅凭据不对）。设置页当前文案『例如 https://reader.example.com』**只教了 Miniflux 的填法**，FreshRSS 用户按提示填写必然失败。**owner 明确裁决『不改探测逻辑，只改文案与错误提示』**——即本任务**不新增自动探测/回退请求**，只让用户能填对、并在填错时看得懂为什么。
 
