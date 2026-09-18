@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "修复 P1-5 的残留：`mark_all_read`（以及同源路径）**仍以 `sync_configured` 作为入队条件**，导致离线期间的「全部已读」不写入待推队列；连接后首次全量对账会按远端状态把本地已读**翻回未读**——用户看到的「已读」会自己变回去。owner 已明确裁决『另立任务修（需授权改协议行为）』，故本任务**获授权改变同步协议行为**（仅限本缺陷所必需）。参照同一批次已完成的 A-5 修复先例（`set_read`/`set_starred` 已改为『无论是否 configured 都入队，推送段在未配置时静默跳过』），本任务应把 `mark_all_read` 等剩余路径对齐到同一语义。",
   "non_goals": [
     "修 P1-6（本地条目无回写远端接口的设计边界）——那是接口缺口，不在本次授权范围",
@@ -185,9 +185,11 @@
     "candidate_digest": "05ef6a4f1d1c77328badf0d0c28f1c6dc0cbf369c697db0294c129fea4b36d28",
     "verification_run": "RUN-d804e57c6d1c4370a711f658abba62c9",
     "review_run": "RUN-183beae08354498983b7b0c4dd35dc34",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-fa4c50c572884dec87b03b4cbf616cee-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-fa4c50c572884dec87b03b4cbf616cee"
+    ],
+    "merge_ref": "450f5c4 (fix(sync): TASK-053 离线「全部已读」改为无条件入队（P1-5）+ 补齐三条状态路径的离线入队保护)",
     "ledger_correction": {
       "claim_correction": {
         "at_utc": "2026-09-18T00:16:39.341100Z",

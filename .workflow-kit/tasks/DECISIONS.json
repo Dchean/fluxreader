@@ -1284,6 +1284,20 @@
       "candidates": {
         "TASK-052": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0"
       }
+    },
+    {
+      "id": "DEC-fa4c50c572884dec87b03b4cbf616cee",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-17 裁决：P1-5『另立任务修（需授权改协议行为）』（DEC-c22f890a49524130a32d3d8254d742cb），并授权清理我造成的 protocol 阻断（『授权订正（推荐）』）。TASK-053 候选 05ef6a4f… 已通过 verify（RUN-d804e57c…，cargo_test/lint/build/frontend 四门禁 PASS，cargo 122 passed/0 failed/23 ignored）与**第 3 轮**独立审查 PASS（findings 为空；前两轮 FAIL 的具体命题已分别经实证反证/更正/补测闭环；审查者亲手复现 star 测试捕获性并额外用第二种等价回退写法验证）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-053"
+      ],
+      "recorded_at_utc": "2026-09-18T00:50:13.599631Z",
+      "candidates": {
+        "TASK-053": "05ef6a4f1d1c77328badf0d0c28f1c6dc0cbf369c697db0294c129fea4b36d28"
+      }
     }
   ]
 }
