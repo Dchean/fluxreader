@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-058 · 同步失败对用户可见：前端消费 SyncReport.errors
 
-**状态**：verified
+**状态**：done
 
 **目标**：TASK-056 已让后端把 pull 失败写入 `report.errors`，但**前端没有任何代码读取该字段**，导致**同步实际失败时界面仍提示「后端同步完成」**——用户看到成功、数据却没进来。已实证：TASK-056 的端到端测试用测试库触发器注入真实插入失败，修复后的应用返回 `errors:["拉取订阅 … 建本地失败: [db] e2e injected insert failure", …]`，界面**依然**弹「后端同步完成」。根因：`src-tauri/src/sync/phases.rs` 在 errors 非空时仍返回 `Ok(report)`，故 `SyncTab.tsx` 的 `.catch()` 对该路径永不触发；而两处 `syncPhase` 调用点（`SyncTab.tsx` 的保存后后台链、`store/slices/sync.ts` 的 `triggerManualSync`）都**丢弃了返回的 report**。本任务让前端消费该字段，把「同步完成但有 N 项失败」真实告知用户。
 

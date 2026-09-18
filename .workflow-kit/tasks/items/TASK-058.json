@@ -14,7 +14,7 @@
     "深色与浅色两套主题下提示完整可读、不截断、不溢出",
     "错误明细可查看：提示中或其后能获知具体失败原因（非仅计数）"
   ],
-  "status": "verified",
+  "status": "done",
   "objective": "TASK-056 已让后端把 pull 失败写入 `report.errors`，但**前端没有任何代码读取该字段**，导致**同步实际失败时界面仍提示「后端同步完成」**——用户看到成功、数据却没进来。已实证：TASK-056 的端到端测试用测试库触发器注入真实插入失败，修复后的应用返回 `errors:[\"拉取订阅 … 建本地失败: [db] e2e injected insert failure\", …]`，界面**依然**弹「后端同步完成」。根因：`src-tauri/src/sync/phases.rs` 在 errors 非空时仍返回 `Ok(report)`，故 `SyncTab.tsx` 的 `.catch()` 对该路径永不触发；而两处 `syncPhase` 调用点（`SyncTab.tsx` 的保存后后台链、`store/slices/sync.ts` 的 `triggerManualSync`）都**丢弃了返回的 report**。本任务让前端消费该字段，把「同步完成但有 N 项失败」真实告知用户。",
   "non_goals": [
     "改 Rust 源码或同步协议语义（`src-tauri/**` 须零改动；后端已在 TASK-056 上报，本任务只做前端消费）",
@@ -214,9 +214,11 @@
     "candidate_digest": "9f90a6b3ab10afc37ac6e4af89f6c8e3dcd36ef90486e53a35a233125d12cc70",
     "verification_run": "RUN-1d654a01e98c499382916771f20acec8",
     "review_run": "RUN-99e553929986422baffb9c416e758752",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-bc751840397d40639a4e8f47ab3ce5cd-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-bc751840397d40639a4e8f47ab3ce5cd"
+    ],
+    "merge_ref": "a9d6292"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

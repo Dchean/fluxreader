@@ -32,5 +32,6 @@
 | [TASK-055](items/TASK-055.json) | 修 subscriptions.rs 墓碑误清除：已删订阅被 pull 复活（P1） | done |
 | [TASK-056](items/TASK-056.json) | 修 pull 建订阅的外键违约 + 静默吞错：FreshRSS 登录成功却拉不到订阅 | done |
 | [TASK-057](items/TASK-057.json) | 修 Endpoint 填法指引与失败提示：直填 FreshRSS 域名登录失败（Bug 1） | done |
+| [TASK-058](items/TASK-058.json) | 同步失败对用户可见：前端消费 SyncReport.errors | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。
