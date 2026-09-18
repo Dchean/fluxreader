@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "id": "TASK-056",
+  "title": "修 pull 建订阅的外键违约 + 静默吞错：FreshRSS 登录成功却拉不到订阅",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "用户实测：用 `https://demo.freshrss.org/api/greader.php` 登录**成功**，但**一条订阅都没拉进来**。根因经实证定位为两处叠加：**(1) 外键违约**——`sync/subscriptions.rs` 在 pull 建本地订阅时用 `db::get_first_folder_id(&conn).ok().flatten()).unwrap_or(1)` 兜底 folder_id，而**新装应用的 folders 表为空**（用户真实库复制件实测 `folders: 0`），于是硬编码的 `1` 指向不存在的目录；`feeds.folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE` 且连接开启了 `PRAGMA foreign_keys=ON`，插入必然抛 `FOREIGN KEY constraint failed`（已实测复现）。**(2) 错误被静默吞掉**——`if let Ok(fid) = inserted { ... }` **没有 else 分支**，插入失败既不记入 `report.errors` 也不上抛，`feeds_phase` 照常返回 Ok，前端因此弹出『已拉取订阅源』『后端同步完成』，用户看到的是成功、实际零订阅。仓库**已有**正确兜底函数 `db::ensure_uncategorized_folder()`（不存在则创建『未分类』并返回其 id；`add_feed` 路径的 `commands/folders.rs:152` 正在使用），pull 路径却未使用它。本任务改用该既有函数，并把失败写入 `report.errors` 让前端既有 toast 能真实报错。",
+  "non_goals": [
+    "修 Bug 1（endpoint 填法/文案）——那是同批次另一个任务（TASK-057）",
+    "改 endpoint 解析或新增自动探测/回退逻辑",
+    "改 `feeds`/`folders` 表结构或外键约束（不是约束的问题，是兜底值非法 + 吞错）",
+    "改同步协议语义、推送顺序、对账口径",
+    "改前端（后端已有 report.errors 通道，前端 SyncTab 既有 catch 会显示；若发现前端仍需改，停下报告）",
+    "补强 TASK-054 遗留的 P1/P4 弱断言测试（独立后续项）",
+    "引入新依赖",
+    "改动工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-002",
+    "REQ-003"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-055"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "high",
+    "decision_ids": [
+      "DEC-user-testing-bugs-20260918"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+      "src-tauri/src/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "**复现测试先证缺陷成立**：新增一个**零 folder 的空库**场景测试（这是此前测试网的整体盲区——所有既有 e2e 都先 `create_folder` 再插 feed），断言「远端有订阅时，pull 后本地应确实建立该订阅」，并给出**修复前的失败证据**（修复前该断言必须失败）",
+    "**修复后转正必过 + 证明捕获性**：同一测试修复后通过；并用变异测试（把兜底改回 `unwrap_or(1)`）证明回退后会失败——须确认出现 `Compiling app` 才采信结果（cargo mtime 指纹可能复用陈旧 rlib）",
+    "**兜底改用既有函数**：不再硬编码 `unwrap_or(1)`，改用 `db::ensure_uncategorized_folder()`（或等效的『确保存在』语义）；报告中说明为何这是正确兜底（目录必须真实存在才满足外键）",
+    "**静默吞错必须消除**：pull 建订阅失败时**必须**写入 `report.errors`（含失败 URL 与错误原因），不得再用无 else 的 `if let Ok(...)` 吞掉。报告中给出修复前「report.errors 为空却零订阅」与修复后「report.errors 含具体原因」的对照证据",
+    "**逐一排查同类吞错**：全仓搜索 `subscriptions.rs` / `entries.rs` 及其它 sync 路径中**插入/写入失败被静默忽略**的位置（`if let Ok(...)` 无 else、`let _ =` 忽略有意义返回值等），逐条判断应否上报；未改的须说明理由。**特别核对 `entries.rs` 的 pull 条目插入路径是否有同类问题**",
+    "**不得只修一半**：验证时须覆盖「零 folder 新库」与「已有 folder 的库」两种情形，确认后者行为不回归",
+    "既有 Rust 测试不得回退：`cargo test` 通过（基线 **137 passed / 0 failed / 9 ignored**，即 TASK-055 之后的值；通过数可增不可减，ignored 不得增加）",
+    "四门禁全绿：`cargo test`、`npm run lint`、`npm run build`、`npm run test:frontend`（前端 241/241）",
+    "不引入新依赖；`Cargo.toml`/`Cargo.lock` 零改动；不改前端；不改表结构",
+    "文本文件必须 LF 行尾；台账改动须在 begin 之前完成；行数以 `splitlines()` 口径报告（不得用 `Measure-Object -Line`）",
+    "**用户真实数据库不得写入**：`%APPDATA%\\com.fluxreader.app` 下任何文件只读使用（如需诊断，复制到临时目录后操作）；不得在其中创建/修改数据"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-18 基线（TASK-055 之后）：`npm run lint` exit 0（0 warnings/0 errors）、`npm run build` exit 0、`npm run test:frontend` exit 0 且 241/241、`cargo test` **137 passed / 0 failed / 9 ignored**（+1 为 TASK-055 新增的墓碑复现测试）。**本任务有意改变行为**：pull 建订阅的目录兜底由『硬编码 1』改为『确保『未分类』存在』，且插入失败由**静默**改为**写入 report.errors 上报**。前者修复外键违约（功能从『零订阅』变为『正常拉取』），后者是**可观测性契约变化**（失败的同步不再对外表现为成功），已由 DEC-user-testing-bugs-20260918 覆盖（owner 明确选择『一并修复静默吞错』）。**基线盲区须如实记录**：现有 Rust e2e 与前端回归**全部**在插入 feed 前先 `create_folder`，**没有任何测试覆盖『零 folder 的新库』**——这正是本例逃过既有测试网的结构性原因，本任务必须补上该场景。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md"
+    },
+    "decision_ids": [
+      "DEC-user-testing-bugs-20260918"
+    ],
+    "actions": [
+      {
+        "action": "add",
+        "target": "『零 folder 空库 + 远端有订阅 ⇒ pull 后本地确实建立订阅』的复现测试（含修复前失败证据）",
+        "reason": "该场景是既有测试网的整体盲区（所有 e2e 都先建目录），缺陷恰在此逃逸；必须有可复跑且经变异证明具备捕获力的证据。",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "『pull 建订阅失败 ⇒ report.errors 非空且含原因』的可观测性测试",
+        "reason": "静默吞错是本缺陷难排障的根源；owner 明确要求一并修复，须有断言锁定『失败必须可见』这一新契约，防止回退成静默。",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "adapt",
+        "target": "`sync/subscriptions.rs` pull 建订阅分支的目录兜底与错误处理（含相关文档注释）",
+        "reason": "兜底值从非法常量改为确保存在的目录；错误处理从吞掉改为上报。这是本任务的核心行为变更，注释须与新语义一致。",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "既有 sync_gap_repro_e2e.rs 全部 15 个测试（含 TASK-055 新增的墓碑复现测试与 A-1 防复活保护）",
+        "reason": "这些是 REQ-002/003 的直接回归网；本任务只改 pull 建订阅的兜底与错误处理，不得削弱防复活、离线入队、对账防误判等既有保证。",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部 Rust 测试（合计 137 passed）与前端 241 项断言",
+        "reason": "本任务改同步拉取路径，须证明推送顺序、对账口径、状态保护与前端契约均未被波及。",
+        "gate_ids": [
+          "cargo_test",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-056-input-207b5495289b47dabc286a3b68360187.json",
+    "digest": "61c1e706ed0cfb0ffb6956fdb19baa38706e85017faa20c4160ca64bc61844d7",
+    "source_revision": null,
+    "definition_digest": "4263884631303a5a6036e126ba4e82a534a7a5e8e97cd0901fa50c8f69964813"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-18T08:27:39.988860Z",
+    "deadline_at_utc": "2026-09-18T12:27:39.988860Z",
+    "repair_rounds_used": 1
+  },
+  "batch_id": "BATCH-68ca4c8d0dff468fb49faef5eea686fb",
+  "run_ids": [
+    "RUN-7a6709f6a502438095cb1336d784e8b0",
+    "RUN-cc94765bf5dc402bb66910f51e752071",
+    "RUN-5ea21cd8294949a3b6961747c1d9650a",
+    "RUN-3409f1a1d0ae42efb51ef197b4d0a386",
+    "RUN-9d76e4a7a5b8409cb0ccfe38b337c8da",
+    "RUN-d2a1d3663f0247239682eb94ba4ed412"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-9d76e4a7a5b8409cb0ccfe38b337c8da-candidate.json",
+    "candidate_digest": "ceaef9df5c9ded50496b2f73d4a0f81c5cc450f07f5dbb4b3c08b5af85bdc3e7",
+    "verification_run": "RUN-9d76e4a7a5b8409cb0ccfe38b337c8da",
+    "review_run": "RUN-d2a1d3663f0247239682eb94ba4ed412",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null,
+    "ledger_correction": {
+      "reason": "解除修复轮 1 的 failure_kind=protocol 阻断（changed_files 声明口径错误，非交付缺陷）。",
+      "authorization": "DEC-task056-repair-protocol-unblock-20260918",
+      "original": {
+        "status": "blocked",
+        "failure_kind": "protocol",
+        "resume_phase": "repair",
+        "blockers": [
+          "Worker changed_files does not match the observed project diff"
+        ]
+      },
+      "corrected_to": "review",
+      "worker_fault": true
+    }
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-055": "401b6221c040cfac36557974c31b9a64db9482fecd905b930c0e6dd660af0097"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-18T08:27:40.096800Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-18T08:45:03.732882Z",
+      "note": "Worker requests manager action; inspect the result",
+      "next_action": "先核对已有文件及原始日志，再处理 action_required；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-18T08:54:47.972300Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-18T09:39:48.149020Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-18T10:17:09.484218Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-18T10:17:18.905227Z",
+      "note": "Worker changed_files does not match the observed project diff",
+      "next_action": "先核对已有文件及原始日志，再处理 protocol；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-18T10:22:02.652785Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-18T10:58:19.588519Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

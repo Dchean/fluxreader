@@ -1,0 +1,45 @@
+{
+  "task_id": "TASK-056",
+  "candidate_digest": "b52bfacbd6bba93959f74d499adee344d6ec620bce33860a5573751479a2b68e",
+  "verification_run": "RUN-cc94765bf5dc402bb66910f51e752071",
+  "verdict": "FAIL",
+  "summary": "第 1 轮独立审查确认**核心缺陷与修复均为真**（审查者独立复算候选快照 124/124 哈希一致；独立复现两个 fail-before：回退目录兜底后 fresh_empty_db 测试 exit 101、panic 文案含两条 FOREIGN KEY constraint failed；把兜底与错误上报一并回退后 pull_feed_failure 测试 exit 101 并打印 local_feeds=0 report.errors=[]；并独立重建了作者所述『原版测试空转』的形态：未清 mock folders 时 local_feeds=1、兜底分支从未进入，证实报告 §3.1 的自我诊断属实而非粉饰）。四门禁在还原后的树上重跑全绿（cargo 139/0/9 exit 0、lint 0/0、build exit 0、frontend 241/241）。但**判 FAIL**，两条主因+一条次要：**①『失败必须可见』这一契约未被任何测试锁定**——审查者做 Probe C：保留正确兜底、只把 `Err => report.errors.push(...)` 改回 `if let Ok(fid) = inserted`，强制重编译后**全量 cargo test 仍 139 passed / 0 failed / 9 ignored exit 0**，两个新测试都通过。原因是 pull_feed_failure 的断言是析取式 `local_feeds > 0 || !report.errors.is_empty()`，兜底修好后左式恒真，**静默吞错的回归完全不可检测**；全仓无任何测试断言新增的错误文案（`建本地失败`/`建目录失败` 只出现在源码里）。entries.rs 的 Err 分支同理（回退后仍 139/0/9）。而本任务 spec 的 test_review action 明确要求「锁定『失败必须可见』这一新契约，**防止回退成静默**」，故报告 §3『一个防建不出、一个防静默』的说法对已提交测试集**不成立**。**②报告 §7 的前端论断不实，且跳过了 spec 的 non_goal 闸门**——报告称「未改前端（后端 report.errors 通道已具备，前端既有 catch 会显示）」，但审查者穷举 grep 证实：`src/` 与 `tools/` 中**没有任何代码读取 `SyncReport.errors`**（`api.ts:96-104` 只声明类型；两处 `syncPhase` 调用点 `SyncTab.tsx:87-91` 与 `store/slices/sync.ts:75-80` 都丢弃了返回的 report；`phases.rs` 即使 errors 非空仍返回 `Ok(report)`，故 `SyncTab.tsx:102` 的 `.catch()` 对该路径永不触发；只有 scheduler 记 `errors.len()`）。后果：对任何非外键的插入失败，UI 依旧弹『后端同步完成』，spec 声称的可观测契约变化未交付。TASK-056 non_goals 写明「若发现前端仍需改，**停下报告**」——该条件成立却未停止，反而在未核对的情况下断言了相反结论。**③次要**：§4 中 `if let Ok(n) = sync_mark_read_if_unread(...)` 的『保留』理由只覆盖了 0 行语义（正确但不完整），未说明真实 `Err`（SQLITE_BUSY/IO）也被一并丢弃；且该审计不完整——`entries.rs:63/92/132/137/213/225/260` 的 `let _ = set_article_remote_id / sync_set_article_status / add_article_dup_entry` 等未列入表中，其中 `subscriptions.rs:191` 的 `let _ = create_folder` 若静默失败会让后续 find_folder_by_name 落空、订阅被改挂『未分类』，属与本缺陷同族的静默丢失用户目录结构。审查者已逐字节还原全部探针文件并复核哈希与候选摘要一致，临时探针与日志均已删除。**结论：核心交付（零订阅缺陷修复）真实且已证明，但『失败可见』契约未被测试锁定、且报告中存在一条未经核对即写下的不实论断，须修复后重审。**",
+  "findings": [
+    "【主因】『pull 失败必须可见』契约未被任何测试锁定：保留正确兜底、仅回退 `Err => report.errors.push(...)` 为 `if let Ok(fid) = inserted`（强制重编译确认 Compiling app）后，全量 cargo test 仍 139 passed/0 failed/9 ignored exit 0，两个新测试均通过。pull_feed_failure_is_reported_not_swallowed 的断言为析取式 `local_feeds > 0 || !report.errors.is_empty()`，兜底修好后左式恒真，静默吞错的回归不可检测；全仓无测试断言 `建本地失败`/`建目录失败` 文案。entries.rs 的 Err 分支同理。spec 的 test_review action 要求锁定该契约，报告 §3『一个防静默』对已提交测试不成立。",
+    "【主因】报告 §7 断言『未改前端（后端 report.errors 通道已具备，前端既有 catch 会显示）』为不实：src/ 与 tools/ 中无任何代码读取 SyncReport.errors（api.ts 仅声明类型、两处 syncPhase 调用点丢弃返回的 report、phases.rs 在 errors 非空时仍返回 Ok(report) 故 SyncTab 的 .catch() 永不触发，仅 scheduler 记 errors.len()）。故对非外键的插入失败 UI 仍弹『后端同步完成』。且 TASK-056 non_goals 明确『若发现前端仍需改，停下报告』——该条件成立却既未停止、也未报告，反而作了未经核对的相反断言。",
+    "【次要】§4 的『保留』判定不完整：`if let Ok(n) = db::sync_mark_read_if_unread(...)`（greader_pull.rs:166-174、fever_pull.rs:183-193）只论证了 0 行为正常语义（正确），未说明真实 Err（SQLITE_BUSY/IO/磁盘满）也被丢弃；且审计范围不足——entries.rs:63/92/132/137/213/225/260 的 `let _ =` 系列未列入，其中 subscriptions.rs:191 的 `let _ = db::create_folder` 静默失败会使目录结构丢失（订阅改挂『未分类』），与本缺陷同族。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "任务的核心功能要求（零 folder 新库必须真正建出订阅）已达成并可复现：审查者独立回退兜底后 fresh_empty_db 测试 exit 101，panic 文案显示两条订阅均因 FOREIGN KEY constraint failed 未建。但另一项明确验收要求——test_review action 规定的『锁定失败必须可见、防止回退成静默』——**未达成**：Probe C 证明回退错误上报后全套测试仍全绿。此外 spec 声称的可观测契约变化（失败不再对外表现为成功）因前端不读 report.errors 而未交付，且报告对此作了不实断言。故 requirements 判 FAIL。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-review-notes.md"]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "审查者在还原后的树上强制重编译并独立复跑四门禁：cargo test 139 passed / 0 failed / 9 ignored exit 0（= 基线 137 + 2 新增，ignored 未增）、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend 241/241 exit 0。范围核对：git diff 仅 3 个声明文件，Cargo.toml/Cargo.lock、src/**、tools/**、package.json、.workflow-kit/scripts/** 均未改动。既有 sync_gap_repro_e2e 全部测试通过，未见回退。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-review-notes.md"]
+    },
+    {
+      "area": "failure_paths",
+      "status": "FAIL",
+      "analysis": "缺陷本身的失败路径已被真实覆盖：两个新测试均非『空转』（审查者独立重建了原版未清 mock folders 的形态，得 local_feeds=1、兜底分支未进入，证实 §3.1 的自诊断准确），且各自在对应回退下 exit 101。但**目标失败路径之一——『插入失败被静默吞掉』的回归防护缺失**：Probe C 与 Probe D 分别回退 subscriptions.rs 与 entries.rs 的错误上报分支后，全量套件仍 139/0/9 全绿。即『失败必须可见』这条路径在测试层面无任何守卫。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-review-notes.md"]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "修复方式复用了仓库既有的 `ensure_uncategorized_folder`（add_feed 路径早已在用），比原来的硬编码兜底更正确也更有自解释性；订阅与条目两处均改为显式 match 并在 Err 分支写入 report.errors，附有说明为何此前会静默的注释。报告 §3.1 如实记录了作者自身的方法失误（测试空转）并给出可复现的机理，审查者独立验证其真实性。文档与代码注释对后来者足够。唯一不足是 §4 审计表的完整性（见次要 finding），属文档完备性问题、不影响可维护性判定。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-review-notes.md"]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务只改 pull 建订阅的目录兜底取值与错误处理分支（成功路径多一次 ensure_uncategorized_folder 的 SELECT，失败路径多一次字符串格式化），不触及查询复杂度、渲染或网络时序；无性能主张需要证据。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-review-notes.md"]
+    }
+  ],
+  "ui_review": null
+}

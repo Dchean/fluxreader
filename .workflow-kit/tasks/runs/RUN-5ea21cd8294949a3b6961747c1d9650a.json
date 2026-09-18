@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-5ea21cd8294949a3b6961747c1d9650a",
+  "task_id": "TASK-056",
+  "kind": "review",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "independent reviewer: fresh non-writer context, reproduced both fail-befores, ran probe C/D for contract lock analysis"
+  },
+  "started_at_utc": "2026-09-18T09:39:47.556620Z",
+  "finished_at_utc": "2026-09-18T09:39:48.061834Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "61c1e706ed0cfb0ffb6956fdb19baa38706e85017faa20c4160ca64bc61844d7",
+  "candidate_digest": "b52bfacbd6bba93959f74d499adee344d6ec620bce33860a5573751479a2b68e",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-5ea21cd8294949a3b6961747c1d9650a-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "FAIL",
+    "report": ".workflow-kit/tasks/evidence/RUN-5ea21cd8294949a3b6961747c1d9650a-review.json",
+    "candidate_digest": "b52bfacbd6bba93959f74d499adee344d6ec620bce33860a5573751479a2b68e"
+  },
+  "estimated_cost_usd": null,
+  "failure_kind": "review_failure",
+  "failure_reason": "Review requires changes; inspect the findings"
+}

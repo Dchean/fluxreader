@@ -1,0 +1,21 @@
+{
+  "task_id": "TASK-056",
+  "run_id": "RUN-7a6709f6a502438095cb1336d784e8b0",
+  "status": "ready_for_verification",
+  "summary": "修复用户实测的『FreshRSS 登录成功却拉不到订阅』。根因三处叠加：(1) subscriptions.rs pull 建本地订阅的目录兜底是 get_first_folder_id().unwrap_or(1)，新装应用 folders 表为空（用户真实库复制件实测 folders=0），硬编码 id 1 指向不存在目录，而 feeds.folder_id REFERENCES folders(id) 且连接开启 PRAGMA foreign_keys=ON，插入抛 FOREIGN KEY constraint failed；(2) if let Ok(fid) = inserted 无 else，错误被静默吞掉、report.errors 保持为空、feeds_phase 仍返回 Ok；(3) 前端据此弹『已拉取订阅源』『后端同步完成』，用户看到成功、实际零订阅。修复：兜底改用仓库既有但 pull 未用的 db::ensure_uncategorized_folder()（不存在则创建『未分类』，保证外键成立）；插入失败写入 report.errors。同类缺陷一并处理：entries.rs 的条目插入 if let Ok((aid,_)) 同样无 else，改为 match 并上报。新增 2 个测试（零 folder 新库功能契约 + 失败可见性契约），并证明 fail-before/pass-after（回退兜底后 fresh_empty_db 测试 exit 101，report.errors=[] 复现用户所见；兜底与上报一并回退后 pull_feed_failure 测试 exit 101）。已排查同类吞错：greader_pull/fever_pull 的状态标记与 id 解析属正常语义（0 行/非数字 id 合法），保留并说明理由；backfill_entry_content 为 best-effort 补内容，保留。门禁：cargo test 139 passed/0 failed/9 ignored（139=137+2，ignored 未增）、lint 0/0、build exit 0、frontend 241/241。如实记录作者失误：写第二个测试时未清空 mock folders 致其空转，靠『回退后仍通过』的反常信号自查纠正。",
+  "changed_files": [
+    "src-tauri/src/sync/subscriptions.rs",
+    "src-tauri/src/sync/entries.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri）：139 passed / 0 failed / 9 ignored",
+    "npm run lint：exit 0，0 warnings / 0 errors",
+    "npm run build：exit 0",
+    "npm run test:frontend：exit 0，241/241",
+    "fail-before 证据：把 subscriptions.rs 的目录兜底回退为 unwrap_or(1) 后，fresh_empty_db_pull_creates_remote_subscriptions exit 101，report.errors=[]（复现用户所见的静默零订阅）；还原后 exit 0（均确认出现 Compiling app）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

@@ -353,6 +353,268 @@ async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
     }
 }
 
+/// TASK-056：**零 folder 的新库**（用户首次连接的真实初始状态）拉取远端订阅时，
+/// 必须真正把订阅建进本地，且失败时必须可见。
+///
+/// 缺陷形态（修复前）：pull 建本地 feed 的目录兜底是
+/// `get_first_folder_id(&conn).ok().flatten()).unwrap_or(1)`——folders 为空时给出
+/// **不存在的目录 id 1**，而 `feeds.folder_id REFERENCES folders(id)` 且连接开启了
+/// `PRAGMA foreign_keys=ON`，插入抛 `FOREIGN KEY constraint failed`；
+/// 随后 `if let Ok(fid) = inserted` **没有 else**，错误被静默吞掉、`report.errors` 保持为空，
+/// 前端却照常提示「已拉取订阅源」「后端同步完成」——用户看到成功、实际零订阅。
+///
+/// 这是既有测试网的整体盲区：其它 e2e 一律先 `create_folder` 再插 feed，
+/// `folders` 从不为空，该兜底分支从未被执行。
+#[tokio::test]
+async fn fresh_empty_db_pull_creates_remote_subscriptions() {
+    let (db, http, server) = setup("gap_empty_db").await;
+
+    // 远端：一条【无分类】订阅 + 一条【有分类】订阅。
+    // 无分类那条才会走 `remote_folder_label = None` → 目录兜底分支（缺陷所在）；
+    // 有分类那条覆盖「远端分类可映射」的正常路径，防止只修一半。
+    // 关键：必须同时清空 mock 的 folders（tag/list），否则 pull 会先建出远端分类目录，
+    // 本地 folders 便不再为空，兜底分支不会被触发（这正是其它测试漏掉该缺陷的原因）。
+    server.folders.lock().unwrap().clear();
+    *server.subscriptions.lock().unwrap() = vec![
+        mock_greader::MockSubscription {
+            id: "feed/10".into(),
+            title: "Uncategorized Remote".into(),
+            url: "http://127.0.0.1:8765/uncategorized.xml".into(),
+            html_url: None,
+            categories: vec![], // ← 无分类：触发目录兜底
+        },
+        mock_greader::MockSubscription {
+            id: "feed/11".into(),
+            title: "Categorized Remote".into(),
+            url: "http://127.0.0.1:8765/categorized.xml".into(),
+            html_url: None,
+            categories: vec![("Remote Cat".into(), "folder".into())],
+        },
+    ];
+
+    // 前置条件：本地**没有任何 folder**（真实新库状态）
+    {
+        let conn = db.lock().await;
+        let folders: i64 = conn
+            .query_row("SELECT COUNT(*) FROM folders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(folders, 0, "前置条件：新库应零 folder");
+        let feeds: i64 = conn
+            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(feeds, 0, "前置条件：新库应零订阅");
+    }
+
+    let report = sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase on fresh db");
+
+    let conn = db.lock().await;
+    let local_feeds: i64 = conn
+        .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        local_feeds, 2,
+        "零 folder 的新库必须把远端订阅（含无分类的）真正建立到本地（TASK-056）；\
+         report.errors={:?}",
+        report.errors
+    );
+
+    // 建立出来的订阅必须挂在**真实存在**的目录上（外键完整性）
+    let orphan: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM feeds f
+             WHERE NOT EXISTS (SELECT 1 FROM folders d WHERE d.id = f.folder_id)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphan, 0, "订阅不得挂在不存在目录上");
+}
+
+/// TASK-056（修复轮 1）：**锁定「失败必须可见」契约本身**。
+///
+/// 第 1 轮独立审查指出：`pull_feed_failure_is_reported_not_swallowed` 的断言是
+/// 析取式 `local_feeds > 0 || !report.errors.is_empty()`，一旦目录兜底修好，
+/// 左式恒真 → **把 `Err` 分支改回静默吞错后全套测试仍全绿**（审查者 Probe C 实证：
+/// 回退错误上报后 cargo test 仍 139 passed / 0 failed），即该契约其实没有任何守卫。
+///
+/// 本测试用**确定性制造一次真实插入失败**来锁定它：在测试库上给 `feeds` 加一条
+/// `BEFORE INSERT` 触发器，遇到目标 URL 时 `RAISE(ABORT)`。
+/// 这是在测试库注入失败的标准做法——**不改生产代码、不依赖任何巧合**，
+/// 且与真实缺陷走同一条代码路径（无分类订阅 → 目录兜底 → 插入 → Err 分支）。
+///
+/// 断言为**强断言**（非析取式）：`report.errors` 必须非空，且必须包含失败的订阅 URL。
+/// 只要把 `Err` 分支改回 `if let Ok(...)` 静默形式，本测试立即失败。
+#[tokio::test]
+async fn pull_feed_insert_failure_must_be_reported() {
+    let (db, http, server) = setup("gap_pull_force_fail").await;
+
+    // 远端：一条无分类订阅（走目录兜底分支，与真实缺陷同路径）
+    server.folders.lock().unwrap().clear();
+    let failing_url = "http://127.0.0.1:8765/will_fail.xml";
+    *server.subscriptions.lock().unwrap() = vec![mock_greader::MockSubscription {
+        id: "feed/10".into(),
+        title: "Will Fail".into(),
+        url: failing_url.into(),
+        html_url: None,
+        categories: vec![],
+    }];
+
+    // 在测试库上注入确定性失败：插该 URL 时 RAISE(ABORT)
+    {
+        let conn = db.lock().await;
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER t056_fail_insert BEFORE INSERT ON feeds
+             WHEN NEW.feed_url = '{failing_url}'
+             BEGIN SELECT RAISE(ABORT, 't056 injected insert failure'); END;"
+        ))
+        .expect("install fault-injection trigger");
+    }
+
+    let report = sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase should still return Ok（失败经 report.errors 上报，不上抛）");
+
+    // ① 强断言：错误必须被上报（静默吞错则此处失败）
+    assert!(
+        !report.errors.is_empty(),
+        "注入的插入失败必须写入 report.errors（不得静默吞掉，TASK-056）；\
+         report.errors={:?}",
+        report.errors
+    );
+    // ② 强断言：错误信息必须包含出错的订阅 URL，可定位
+    assert!(
+        report.errors.iter().any(|e| e.contains(failing_url)),
+        "错误信息应包含失败的订阅 URL 以便定位；report.errors={:?}",
+        report.errors
+    );
+    // ③ 该订阅确实没被建出来（确认失败真的发生了，而非触发器未生效）
+    {
+        let conn = db.lock().await;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                [failing_url],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "触发器应阻止该订阅插入（前置条件校验）");
+    }
+}
+
+/// TASK-056（修复轮 1）：**锁定条目路径的「失败必须可见」契约**。
+///
+/// 与 `pull_feed_insert_failure_must_be_reported` 同理，但针对 `entries.rs` 的
+/// pull 条目插入分支——第 1 轮审查的 Probe D 证实：把该处 `Err` 上报回退为
+/// `if let Ok(...)` 静默形式后，全套测试仍 139 passed / 0 failed，即该契约同样无守卫。
+///
+/// 手段：给 `articles` 加一条 `BEFORE INSERT` 触发器，遇到目标 guid 时 `RAISE(ABORT)`。
+/// 订阅与文章都预先造好，确保走到「远端条目 → 建本地文章」这条路径。
+#[tokio::test]
+async fn pull_entry_insert_failure_must_be_reported() {
+    let (db, http, server) = setup("gap_entry_force_fail").await;
+
+    // 本地：一个已绑定远端的 feed（文章要挂到它下面）
+    let feed_id = {
+        let conn = db.lock().await;
+        let folder_id = db::create_folder(&conn, "条目测试", "article").unwrap();
+        let fid = db::insert_feed(
+            &conn,
+            "http://127.0.0.1:8765/local_feed.xml",
+            None,
+            "Local",
+            None,
+            folder_id,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        db::set_feed_remote_id(&conn, fid, 10).unwrap();
+        fid
+    };
+    let _ = feed_id;
+
+    // 远端：feed/10 上一条条目（本地没有 → 走 upsert 新建分支）
+    let entry_url = "http://127.0.0.1:8765/post/will_fail";
+    let entry_id = server.add_entry_ret(10, entry_url, "Will Fail", false, false);
+
+    // 注入确定性失败：插该 guid 的文章时 RAISE(ABORT)
+    let guid = format!("remote-{entry_id}");
+    {
+        let conn = db.lock().await;
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER t056_fail_entry BEFORE INSERT ON articles
+             WHEN NEW.guid = '{guid}'
+             BEGIN SELECT RAISE(ABORT, 't056 injected entry insert failure'); END;"
+        ))
+        .expect("install entries fault trigger");
+    }
+
+    let report = sync::states_phase(&db, &http, true)
+        .await
+        .expect("states phase should still return Ok（失败经 report.errors 上报）");
+
+    // 强断言：条目插入失败必须被上报，且含可定位的 URL
+    assert!(
+        !report.errors.is_empty(),
+        "注入的条目插入失败必须写入 report.errors（不得静默吞掉，TASK-056）；\
+         report.errors={:?}",
+        report.errors
+    );
+    assert!(
+        report.errors.iter().any(|e| e.contains(entry_url)),
+        "条目错误信息应包含失败的条目 URL 以便定位；report.errors={:?}",
+        report.errors
+    );
+}
+
+/// TASK-056：pull 建订阅**不得静默失败**——要么真的建出来，要么必须给出原因。
+///
+/// **本测试的定位（经第 1 轮独立审查订正）**：它的断言是**析取式**
+/// `local_feeds > 0 || !report.errors.is_empty()`。目录兜底修好后左式恒真，
+/// 因此它**不能**单独守住「失败必须可见」这条契约（审查者 Probe C 实证：
+/// 回退错误上报后本测试仍通过）。该契约现由
+/// `pull_feed_insert_failure_must_be_reported`（注入确定性插入失败 + 强断言）锁定。
+///
+/// 本测试保留的价值：作为**缺陷复现锁**——把目录兜底回退为 `unwrap_or(1)` 后，
+/// 本地订阅为 0 且 errors 为空，两者同时为假 → 失败。即它防的是「再次建不出」，
+/// 而非「再次静默」。
+///
+/// 必须清空 mock 的 folders（tag/list）与给订阅**无分类**，否则 pull 会先按远端分类
+/// 建出目录、本地 folders 不再为空，便走不到目录兜底分支（这正是其它测试漏掉该缺陷的原因）。
+#[tokio::test]
+async fn pull_feed_failure_is_reported_not_swallowed() {
+    let (db, http, server) = setup("gap_pull_visible").await;
+    // 清空远端分类 + 只留一条无分类订阅 → 必然走目录兜底分支
+    server.folders.lock().unwrap().clear();
+    *server.subscriptions.lock().unwrap() = vec![mock_greader::MockSubscription {
+        id: "feed/10".into(),
+        title: "Remote".into(),
+        url: "http://127.0.0.1:8765/local_feed.xml".into(),
+        html_url: None,
+        categories: vec![],
+    }];
+
+    let report = sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase");
+
+    let conn = db.lock().await;
+    let local_feeds: i64 = conn
+        .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .unwrap();
+
+    // 契约：要么真的建出来了；要么没建出来但必须给出原因（不得静默）
+    assert!(
+        local_feeds > 0 || !report.errors.is_empty(),
+        "零订阅且零错误 = 静默失败，禁止（TASK-056）；\
+         local_feeds={local_feeds} report.errors={:?}",
+        report.errors
+    );
+}
+
 /// A-2 修复后的期望行为（原复现测试转正）：订阅改名/移动目录会 best-effort
 /// 推送远端（GReader ac=edit，t=新标题 / a=目标分类）。
 #[tokio::test]

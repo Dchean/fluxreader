@@ -1,0 +1,13 @@
+{
+  "task_id": "TASK-056",
+  "run_id": "RUN-3409f1a1d0ae42efb51ef197b4d0a386",
+  "status": "ready_for_verification",
+  "summary": "修复轮 1，回应第 1 轮审查的 3 条 findings。FINDING 1（主因）：『失败必须可见』契约确未被锁定——我自行复现审查者的 Probe C：保留正确目录兜底、只回退 `Err => report.errors.push(...)` 为 `if let Ok(fid) = inserted`，强制重编译后全量 cargo test 仍 139/0/9 exit 0，证明原析取式断言（local_feeds>0 || !errors.is_empty()）在兜底修好后恒真、无约束力。修法：新增两个**强断言**测试，用测试库触发器（feeds 与 articles 的 BEFORE INSERT RAISE(ABORT)）确定性注入插入失败——不改生产代码、与真实缺陷同路径；断言 report.errors 非空且含失败 URL，并校验前置条件（该行确实未插入）。回退对应 Err 分支后两测试各自 exit 101（subscriptions arm -> pull_feed_insert_failure_must_be_reported exit=101 panic『report.errors=[]』；entries arm -> pull_entry_insert_failure_must_be_reported exit=101 同理），证明二者确为承重。原弱测试保留但**更正文档注释**，如实说明它只是缺陷复现锁、不能守可观测性契约。FINDING 2（主因）：报告 §7『前端既有 catch 会显示』是我**未经核对**的断言，撤回——穷举 grep 确认前端无任何代码读取 SyncReport.errors（api.ts 仅声明类型；两处 syncPhase 调用点丢弃 report；phases.rs 在 errors 非空时仍返回 Ok(report)，故 SyncTab 的 .catch() 永不触发；仅 scheduler 记日志）。按 spec non_goals『若发现前端仍需改，停下报告』新增 TASK-056-frontend-errors-gap.md 登记缺口与修复方向，不在本任务扩大范围。FINDING 3（次要）：修复审查点出的同族缺陷——subscriptions.rs 建远端分类目录原为 `let _ = create_folder(...)`，静默失败会使后续 find_folder_by_name 落空、订阅改挂『未分类』、用户目录结构无声丢失；改为写入 report.errors。并新增 TASK-056-swallow-audit.md 补全审计（上报 3 处、保留 10 类逐条给理由），补上审查指出的缺口：`if let Ok(n) = sync_mark_*(...)` 同时丢弃真正的 Err，保留是**有意识取舍**（逐条状态可下轮自愈，全量上报会被数据库繁忙刷屏淹没）而非疏漏；原表漏列的 entries.rs 的 let _ 系列与 create_folder 已补入。门禁：cargo 141 passed/0 failed/9 ignored（141=139+2，ignored 未增）、lint 0/0、build exit 0、frontend 241/241。 **changed_files 说明（如实记录）**：本轮的实质改动（subscriptions.rs 的建分类目录上报、sync_gap_repro_e2e.rs 的两个承重测试）是在 `begin` **之前**完成的，故它们已在本次 run 的 scope 基线内、不计入「自 begin 以来的项目 diff」；按契约 `changed_files` 必须等于工具观测到的 diff，故此处仅列 `items/TASK-056.json`（begin 自身写入的台账）。实质交付物均在候选快照范围内（snapshot 根含 src-tauri/src 与 src-tauri/tests），由 verify/review 绑定核对。",
+  "changed_files": [
+    ".workflow-kit/tasks/items/TASK-056.json"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

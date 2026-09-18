@@ -247,14 +247,24 @@ fn upsert_remote_entry(
             published_at: Some(published),
             source: "miniflux".into(),
         };
-        if let Ok((aid, _)) = db::upsert_article_with_feed(conn, feed_id, &a, false) {
-            if let Some(eid) = item_numeric_id(e) {
-                let _ = db::set_article_remote_id(conn, aid, eid);
-                maps.id_to_mf_id.insert(aid, Some(eid));
-                maps.mf_id_to_article.insert(eid, aid);
+        // TASK-056：失败必须可见。此前是无 else 的 `if let Ok((aid, _))`——
+        // 条目插入失败既不记 report.errors 也不上抛，同步对外表现为成功，
+        // 用户看到「同步完成」但文章数不变（与订阅路径同一类静默吞错）。
+        match db::upsert_article_with_feed(conn, feed_id, &a, false) {
+            Ok((aid, _)) => {
+                if let Some(eid) = item_numeric_id(e) {
+                    let _ = db::set_article_remote_id(conn, aid, eid);
+                    maps.id_to_mf_id.insert(aid, Some(eid));
+                    maps.mf_id_to_article.insert(eid, aid);
+                }
+                let _ = db::sync_set_article_status(conn, aid, remote_read, remote_starred);
+                report.pulled_entries += 1;
             }
-            let _ = db::sync_set_article_status(conn, aid, remote_read, remote_starred);
-            report.pulled_entries += 1;
+            Err(err) => {
+                report
+                    .errors
+                    .push(format!("拉取条目 {} 建本地失败: {err}", item_url(e).unwrap_or_default()));
+            }
         }
     }
 }

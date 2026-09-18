@@ -1,0 +1,41 @@
+{
+  "task_id": "TASK-056",
+  "candidate_digest": "ceaef9df5c9ded50496b2f73d4a0f81c5cc450f07f5dbb4b3c08b5af85bdc3e7",
+  "verification_run": "RUN-9d76e4a7a5b8409cb0ccfe38b337c8da",
+  "verdict": "PASS",
+  "summary": "第 2 轮独立审查（未参与实现的独立上下文）逐项复跑全部核对项，全部通过。审查者**独立复现第 1 轮的 Probe C 并确认其现在会失败**（这是本轮的核心）：保留正确目录兜底、只把 subscriptions.rs 的 `Err => report.errors.push(...)` 回退为 `if let Ok(fid) = inserted`，强制重编译并**确认出现 `Compiling app v0.13.0`** 后，cargo test **exit 101 / 135 passed / 1 failed / 9 ignored**，失败为 `pull_feed_insert_failure_must_be_reported` panic 于 `sync_gap_repro_e2e.rs:480:5`『注入的插入失败必须写入 report.errors；report.errors=[]』——而第 1 轮同一变更得到的是 139/0/9 全绿。entries.rs 同理：回退其 `Err` 分支后 exit 101 / 135 passed / 1 failed，panic 于 `:560:5`，行号与修复报告所述**完全一致**。**反作弊验证（决定性）**：审查者在未变异的生产代码上自加断言，要求上报的错误文本包含触发器自身的消息 `t056 injected insert failure`（该字符串只可能来自 SQLite 真正 RAISE(ABORT)），两测试均通过；并为条目测试补上缺失的前置条件 `articles WHERE guid=? == 0`，通过；对照实验把 `RAISE(ABORT)` 换成 `SELECT 1` 后该测试在同一断言处失败，证明断言确实依赖 abort 发生。**F2 判定为诚实处置**：确认假声明确被**显式撤回**（修复报告 §2.1 逐字引用原句并标注『未经核对的断言』、§2.2 记录撤回、缺口文档复述），未在任何地方复述；独立确认缺口为真——`grep '\\.errors'` 在 `src/**/*.{ts,tsx}` 仅 1 处命中且是 `api.ts:103` 的类型声明，`tools/` 零命中，`phases.rs` 在 :27 与 :78 **无条件** `Ok(report)` 故非空 errors 永不变成 Err、`SyncTab.tsx:102` 的 `.catch()` 不可达，`SyncTab.tsx:86-105` 的 `.then` 不接收参数（report 被丢弃）、`store/slices/sync.ts:75-83` 的 `feedsReport` 仅用于判真；其余消费者只有 `commands/sync.rs:193,201,202`（另一命令拼字符串）与 `scheduler.rs:238`（仅日志）。并确认 **`git diff --stat -- src` 与 `-- tools` 均为空**，即按 non_goals『停下报告』未扩大改动。**F3 判定为『代码修复正确、审计基本完整但有一处措辞过度声称』**：`create_folder` 改为上报**正确**（位于 `existing.is_none()` 守卫内，每个 Err 都是真失败、无误报；错误量以远端**分类**数为界、不会刷屏；且目录建失败时后续 `find_folder_by_name` 落空会回落 ensure_uncategorized 使插入**成功**，用户因此恰好得到一条可操作错误而非静默丢失目录结构）。审查者自行枚举发现 `let _ = db::` 实际 **22 处**而审计表约列 13 处，未列者（`prune_sync` ×3、`purge_remove_feed_zombies`、`set_last_sync_ts` ×2、`set_last_sync_entry_id`、`update_feed_title_if_empty`）均为幂等/自愈清理或游标写入，需数据库级错误才可达；另有查询侧 `.ok().flatten()`/`.unwrap_or_default()` 吞错未纳入声明形态，最值得注意的是 `feed_tombstones()/folder_tombstones().unwrap_or_default()`（数据库错误会静默得到空墓碑集合，理论上可能让已删订阅复活）——审查者判定同样**需数据库级错误**、非本次逻辑缺陷，故建议**只改文档措辞、不必重跑**。**该建议已被采纳**：作者据此订正 §三 的『已穷举』为如实清单（列出未逐一列入的位点与判定）。**回归与范围**：审查者在还原后的树上重跑 cargo test **141 passed / 0 failed / 9 ignored exit 0**（139+2，ignored 未增）、lint 0/0、build exit 0、frontend 241/241；`git diff --stat -- src-tauri` 恰为两个源码文件 + 测试文件；`src/**`、`tools/**`、`.workflow-kit/scripts/**`、`Cargo.toml`、`Cargo.lock`、`package.json` 均未改动；**独立重算候选摘要 = ceaef9df…（与记录完全一致）且 124/124 文件哈希与工作区一致**。findings 为空。**诚实性评估**：审查者判定『**确有实质改进，而非换个说法的复述**』，给出三条独立信号——(1) 作者主动拿第 1 轮的 Probe C 打自己的成果并打印 `FINDING 1 CONFIRMED`，随后点名根因习惯『结论先于验证』并对齐本会话五次同类失误，属具体可证伪的自我诊断；(2) 假声明被在两份文档中显著撤回而非删除或悄悄改写，且遵守 non_goals 停止闸门、写出含两个候选修法且明标『不代表已获授权』的缺口文档；(3) 探针证据开始附 `compiled=True`，表明已内化陈旧 rlib 陷阱。审查者另特别记录它**自己**也踩到该陷阱一次（用 Copy-Item 还原 entries.rs 恢复了更旧的 mtime → cargo 复用陈旧 rlib → 反作弊探针出现假阴性），touch 重编译后通过，进一步印证该陷阱真实存在。唯一残留是审计 §三 的『穷举』措辞（已在收到建议后订正）。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "三条 findings 均已闭合且经独立复现：F1（契约未锁定）——Probe C 在 subscriptions.rs 与 Probe D 在 entries.rs 上现在均导致 exit 101 且 panic 行号（480/560）与修复报告所述完全一致，证明两个新测试确为承重；反作弊三法（错误文本含触发器独有消息、条目行数前置条件、RAISE 换 SELECT 的对照）排除『测试碰巧通过』。F2（不实断言与 non_goal 闸门）——假声明被逐字引用并显式撤回，缺口经独立 grep 与调用链分析确认为真，前端按 non_goal 未改（diff 为空）并另文登记修复方向。F3（审计）——代码修复正确，审计措辞经审查指出后订正为如实清单。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-repair-round-report.md"]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "审查者在逐字节还原后的树上强制重编译并独立复跑四门禁：cargo test 141 passed / 0 failed / 9 ignored exit 0（= 修复前 139 + 2 新增，ignored 未增）、lint exit 0（0 warnings/0 errors）、build exit 0、frontend 241/241 exit 0，无 FAILED/panicked/error[。范围核对：`git diff --stat -- src-tauri` 恰为 entries.rs、subscriptions.rs、sync_gap_repro_e2e.rs；`src/**`、`tools/**`、`.workflow-kit/scripts/**`、Cargo.toml、Cargo.lock、package.json 均无改动；src-tauri 下无未跟踪文件。既有 16 个 sync_gap 测试与其余套件全部通过，未见回退。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-repair-round-report.md"]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "本任务的核心失败路径即『插入失败被静默吞掉』。第 1 轮该路径无任何守卫（Probe C 全绿）；本轮新增的触发器注入测试使其现在**确实**在回退时失败（两处 arm 各自 exit 101 并打印 report.errors=[]），且经反作弊验证确由 SQLite 真 RAISE(ABORT) 触发。审查者另记录了非阻断残留：`ensure_uncategorized_folder` 自身的 Err 分支未被直接锁定（回退它后套件仍绿，Probe E 141/0/9），但其实测表明该情形下失败仍由**下一个** arm（拉取订阅…建本地失败）上报，用户可见性未丢失，属纵深防御而非缺陷。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-repair-round-report.md"]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "修复复用仓库既有的 ensure_uncategorized_folder；两处插入与建分类目录改为显式 Err 上报并附说明注释；新增的审计文档逐条列出上报/保留判定与理由，并（经审查指出后）如实改正了『已穷举』的措辞、列出未逐一列入的位点及其判定；前端缺口另文登记问题、穷举证据与两个候选修复方向，并明标需授权。审查者判定 create_folder 改动无误报、无刷屏、无重复上报（目录建失败时订阅会回落未分类并使插入成功，用户恰好收到一条可操作错误）。文档对后来者足够。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-swallow-audit.md"]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务只改 pull 建订阅/建条目的失败上报与目录兜底取值（成功路径多一次 ensure_uncategorized_folder 的 SELECT；失败路径多一次字符串格式化），不触及查询复杂度、渲染或网络时序；审核者未发现性能主张需要证据。",
+      "evidence_files": [".workflow-kit/tasks/evidence/TASK-056-repair-round-report.md"]
+    }
+  ],
+  "ui_review": null
+}

@@ -1,0 +1,7 @@
+{
+  "changed_files": [
+    "src-tauri/src/sync/entries.rs",
+    "src-tauri/src/sync/subscriptions.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "id": "RUN-7a6709f6a502438095cb1336d784e8b0",
+  "task_id": "TASK-056",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "host agent implementation: fix pull feed insert FK violation (hardcoded folder_id fallback) + eliminate silent error swallow, add zero-folder empty-db regression test"
+  },
+  "started_at_utc": "2026-09-18T08:27:39.989989Z",
+  "finished_at_utc": "2026-09-18T08:45:03.672166Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "61c1e706ed0cfb0ffb6956fdb19baa38706e85017faa20c4160ca64bc61844d7",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-7a6709f6a502438095cb1336d784e8b0-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-7a6709f6a502438095cb1336d784e8b0-scope.json",
+  "evidence": {
+    "prior": null,
+    "ledger_correction": {
+      "reason": "requested_actions/unresolved_items 非空触发 action_required 阻断；作者误把这两个『要求管理者行动』的字段当作审查建议与遗留项载体。交付本身已完成、四门禁通过。",
+      "authorization": "DEC-task056-action-required-unblock-20260918",
+      "original": {
+        "outcome": "blocked",
+        "failure_kind": "action_required",
+        "failure_reason": "Worker requests manager action; inspect the result",
+        "blockers": null
+      },
+      "original_requested_actions": [
+        "审查请重点核对：(1) 零 folder 新库场景是否真实成立（请确认测试确实清空了 mock 的 folders 且订阅无分类，否则该测试会空转——这正是作者第一次写错的地方）；(2) fail-before 是否可自行复现（回退兜底或一并回退兜底+上报，注意 cargo mtime 指纹需强制重编译确认 Compiling app）；(3) 同类吞错排查的『保留』判定是否合理（特别是 greader_pull/fever_pull 的 if let Ok(n) 状态标记，请独立判断 0 行是否为正常语义）；(4) entries.rs 的同类改动是否引入行为回归"
+      ],
+      "original_unresolved_items": [
+        "db::get_first_folder_id 在本任务后生产代码已无调用点（仅剩其自身单测引用）；因是 pub 且被 db.rs re-export，clippy 不报 dead_code。未删除——属独立清理决策，如实记录供后续判断",
+        "Bug 1（endpoint 填法与失败提示）为同批次 TASK-057，不在本任务范围",
+        "未验证真实 FreshRSS 实例的端到端拉取（demo.freshrss.org 的演示凭据不可得，ClientLogin 回 401）；本任务的验证基于 mock 复现 + 用户真实库结构的只读复制件",
+        "TASK-054 遗留的 P1/P4 弱断言测试仍未补强（独立后续项）"
+      ],
+      "substance_preserved_in": ".workflow-kit\\tasks\\evidence\\TASK-056-review-notes.md",
+      "corrected_to": "completed",
+      "original_record": "RUN-7a6709f6a502438095cb1336d784e8b0-run-asrecorded.json",
+      "original_worker_result": "RUN-7a6709f6a502438095cb1336d784e8b0-worker-result-asrecorded.json",
+      "worker_fault": true
+    }
+  }
+}

@@ -1,0 +1,50 @@
+fix(sync): TASK-056 修 pull 建订阅外键违约 + 静默吞错（用户实测：登录成功却零订阅）
+
+问题（用户实测）
+- 用 FreshRSS 的 https://demo.freshrss.org/api/greader.php 登录**成功**，但**一条订阅都没拉进来**，
+  界面却提示「已拉取订阅源」「后端同步完成」。
+- 三处叠加：
+  1) subscriptions.rs 的 pull 建本地订阅用 get_first_folder_id().unwrap_or(1) 兜底，
+     而**新装应用 folders 表为空**（用户真实库复制件实测 folders=0），硬编码 1 指向不存在目录；
+     feeds.folder_id REFERENCES folders(id) 且连接开启 PRAGMA foreign_keys=ON → 插入抛
+     FOREIGN KEY constraint failed（已复现）。
+  2) `if let Ok(fid) = inserted` **无 else**：错误被静默吞掉、report.errors 保持为空、
+     feeds_phase 仍返回 Ok。
+  3) 前端据此弹「成功」。
+- 既有测试整体漏掉的结构性原因：所有 e2e 都先 create_folder 再插 feed，
+  且 mock 的 tag/list 默认非空，**「零 folder 新库」这一场景此前完全无覆盖**。
+
+改动
+- src-tauri/src/sync/subscriptions.rs：兜底改用仓库既有但 pull 未用的
+  db::ensure_uncategorized_folder()（不存在则建「未分类」，保证外键成立）；插入失败写入 report.errors。
+  修复轮 1 另修同族缺陷：建远端分类目录原为 `let _ = create_folder(...)`，
+  静默失败会让后续 find_folder_by_name 落空、订阅改挂「未分类」、**用户目录结构无声丢失** →
+  改为写入 report.errors。
+- src-tauri/src/sync/entries.rs：条目插入 if let Ok((aid,_)) 同样无 else（同类缺陷），
+  改为 match 并在失败时写入 report.errors。
+- src-tauri/tests/sync_gap_repro_e2e.rs：新增 4 个测试。
+
+验证
+- fail-before/pass-after：回退目录兜底后 fresh_empty_db 测试 exit 101，
+  report.errors=[]（复现用户所见的静默零订阅）；把兜底与错误上报一并回退后
+  pull_feed_failure 测试 exit 101。
+- 修复轮 1（第 1 轮独立审查 FAIL 的 3 条 findings）：
+  F1「失败必须可见」契约未被任何测试锁定——审查者 Probe C 实证：只回退错误上报后全套仍
+     139/0/9 全绿。修法：新增两个**强断言**测试，用测试库 BEFORE INSERT 触发器
+     RAISE(ABORT) 确定性注入插入失败（不改生产代码、与真实缺陷同路径）；
+     回退对应 Err 分支后两测试各自 exit 101（panic 行号 480/560）。
+     原弱测试保留但更正注释，如实说明它只是缺陷复现锁、不能守可观测性契约。
+  F2 报告中「前端既有 catch 会显示 report.errors」是**未经核对的断言**，已撤回：
+     `src/` 与 `tools/` 中无任何代码读取 SyncReport.errors，phases.rs 在 errors 非空时仍返回
+     Ok(report)，故 SyncTab 的 .catch() 永不触发。按 spec non_goals「若发现前端仍需改，停下报告」
+     未改前端，另立 docs 登记缺口与修复方向（建议由 TASK-057 承载）。
+  F3 补全同类吞错审计（上报 3 处 / 保留 10 类逐条给理由），补上「if let Ok 同时吞真正 Err」
+     的说明（保留是**有意识取舍**：逐条状态可下轮自愈，全量上报会被数据库繁忙刷屏淹没）。
+- 门禁：cargo test 141 passed / 0 failed / 9 ignored（141=139+2；基线 137+2+2）、
+  lint 0/0、build exit 0、frontend 241/241。
+- 独立审查：第 1 轮 FAIL（3 条 findings 均属实）→ 修复轮 1 → 第 2 轮 PASS
+  （审查者独立复现 Probe C/D 现在会失败，并以三种反作弊手段验证测试非侥幸；
+   独立重算候选摘要 ceaef9df… 与 124/124 文件哈希一致）。
+- 未改前端、未改表结构、未引入新依赖、未写用户真实数据库（诊断全程用只读复制件）。
+
+owner 裁决见 DEC-user-testing-bugs-20260918；记录级订正见 DEC-task056-*。

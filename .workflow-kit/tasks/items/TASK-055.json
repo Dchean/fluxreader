@@ -218,7 +218,8 @@
       },
       "corrected_to": "verifying",
       "worker_fault": true
-    }
+    },
+    "continued_by": "TASK-056"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

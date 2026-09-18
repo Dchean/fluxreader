@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-d2a1d3663f0247239682eb94ba4ed412",
+  "task_id": "TASK-056",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "independent reviewer round2: fresh non-writer context, reproduced Probe C/D as failing, anti-cheat probes, verified F2/F3 handling"
+  },
+  "started_at_utc": "2026-09-18T10:58:18.205575Z",
+  "finished_at_utc": "2026-09-18T10:58:18.312023Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "61c1e706ed0cfb0ffb6956fdb19baa38706e85017faa20c4160ca64bc61844d7",
+  "candidate_digest": "ceaef9df5c9ded50496b2f73d4a0f81c5cc450f07f5dbb4b3c08b5af85bdc3e7",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-d2a1d3663f0247239682eb94ba4ed412-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-d2a1d3663f0247239682eb94ba4ed412-review.json",
+    "candidate_digest": "ceaef9df5c9ded50496b2f73d4a0f81c5cc450f07f5dbb4b3c08b5af85bdc3e7",
+    "quality_digest": "0f19e9c8bfa239a1e2580430ca6644546963798e5a04ad257d99dcd15baaf937"
+  },
+  "estimated_cost_usd": null
+}

@@ -1383,6 +1383,51 @@
         "workflow"
       ],
       "recorded_at_utc": "2026-09-18T05:33:38.708604Z"
+    },
+    {
+      "id": "DEC-user-testing-bugs-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 实测反馈（唤醒应用后自行测试）：「一个是直接填写域名无法登录，需要填写 https://demo.freshrss.org/api/greader.php 这种完整的，这个是 freshrss 官方的 demo 实例，https://demo.freshrss.org 无法连接上，另一个是我使用了 https://demo.freshrss.org/api/greader.php 登录，没有拉取到订阅」。经定位后逐项裁决：(1) 范围『两个都立，各一任务（推荐）』；(2) Bug 1 修法『不改探测逻辑，只改文案与错误提示』；(3) Bug 2 的静默吞错『一并修复静默吞错（推荐）』。",
+      "statement": "授权为两个用户实测发现的缺陷各立一个任务：**① Bug 1（Endpoint 填法）**：`greader.rs` 把 endpoint 原样当根 URL（`trim_end_matches('/')` 后直接拼 `/accounts/ClientLogin`），而 Miniflux 的 GReader API 在站点根、FreshRSS 在子路径 `/api/greader.php`；实测 `POST https://demo.freshrss.org/accounts/ClientLogin` → 404，`POST https://demo.freshrss.org/api/greader.php/accounts/ClientLogin` → 401（端点存在）。设置页现文案『例如 https://reader.example.com』只教了 Miniflux 填法。**owner 明确选择『不改探测逻辑，只改文案与错误提示』**——即**不**新增自动回退探测请求，只把 FreshRSS 填法写清楚并在失败时给出可操作提示。**② Bug 2（拉不到订阅）**：`sync/subscriptions.rs` 建本地订阅时用 `get_first_folder_id().unwrap_or(1)` 兜底，而**新装应用 folders 表为空**→ folder_id=1 不存在 → `feeds.folder_id REFERENCES folders(id)` 外键违约（已用用户真实库复制件实测复现）；且 `if let Ok(fid) = inserted` **无 else，错误被静默吞掉、report.errors 为空**，前端仍弹『已拉取订阅源』『后端同步完成』——用户看到成功但一条都没拉进来。仓库已有正确的 `ensure_uncategorized_folder()`（add_feed 路径在用），pull 路径未用。**owner 选择『一并修复静默吞错』**——兜底改用既有函数 + 拉取失败写入 report.errors。**边界**：仍不动工作流（用户明确『工作流我另外修复』）；不引入新依赖；Bug 1 不改端点解析/探测语义（仅文案与错误提示）；每项须走 verify + 独立审查 + 验收。沿用既有预算（每任务 240 分钟、修复 4 轮），commit 沿用既有授权，push/release 仍需确认。",
+      "scope": [
+        "REQ-002",
+        "REQ-003"
+      ],
+      "recorded_at_utc": "2026-09-18T08:20:00Z"
+    },
+    {
+      "id": "DEC-task056-action-required-unblock-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 在被如实告知 TASK-056 因 worker-result 的 requested_actions/unresolved_items 非空而落 blocked/failure_kind=action_required、CLI 无恢复入口后，选择『授权记录级订正（推荐）』。沿用 TASK-054/055 的同一先例。",
+      "statement": "授权对 TASK-056 作**记录级**订正以解除 action_required 阻断。**根因是作者对 worker-result 契约的理解错误**：`workflow_runtime.py:855` 规定 `status != ready_for_verification || requested_actions 非空 || unresolved_items 非空 || blocked_reason 非空` 即判为『worker 要求管理者行动』并**直接阻断**；我却把这两个字段当成写审查建议与遗留项的地方。TASK-054/055 同样填了，能通过是因为那两次先后被 protocol 阻断、订正时未走到该分支——**即这不是规范用法，只是被其它阻断掩盖了的同一错误**，本任务首次暴露。订正内容：归档原始 worker-result 与原始 run 记录；`requested_actions` 与 `unresolved_items` 改为**空数组**（真正的遗留项与审查关注点本身已在 `TASK-056-report.md`、`baseline-2026-09-18-task056.md` 与 git 提交信息中如实记录，**不依赖这两个字段承载**）；run outcome blocked→completed、任务 blocked→verifying 并清除 failure_kind/resume_phase/blockers；原始内容与订正依据存入双处 ledger_correction，不删除历史。**边界**：只改账本，不放宽任何门禁——四门禁与独立审查仍须重跑，候选仍须与实际文件逐一一致；不改一行源码、不新建任务、不重置时钟。**工具缺口留痕**：`action_required` 与 `scope`/`protocol` 同属『无官方 CLI 恢复路径』的 failure_kind，已记入 .workflow-kit/docs/TOOL-GAP-protocol-recovery.md（用户明确『工作流我另外修复』）。",
+      "scope": [
+        "TASK-056"
+      ],
+      "recorded_at_utc": "2026-09-18T08:50:00Z"
+    },
+    {
+      "id": "DEC-task057-reprepare-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 在被如实告知 TASK-057 因其 input 快照在 prepare 之后失效、导致 check 报错并阻断全部工作流命令（含 TASK-056 的修复轮）后，选择『授权重组 TASK-057（推荐）』。",
+      "statement": "授权**重组 TASK-057**（Bug 1：Endpoint 填法指引与失败提示）以解除 check 阻断。**根因是作者的 prepare 顺序错误**：我在 TASK-056 尚未完成时就把 TASK-057 prepare 出来（并把它误写成依赖 TASK-055），而两者快照根重叠（均含 `src-tauri/**`），TASK-056 随后修改了同一棵树，导致 TASK-057 的 input 快照失效。由于 `check` 报错会阻断全部工作流命令（`must_check`），TASK-056 的修复轮亦无法 begin。**重组内容**：归档原 ready 卡片为 `TASK-057-stale-input-card-archived.json`；删除该 ready 卡片与其陈旧 input 快照；按当前树重新 `prepare`，并**把依赖由 TASK-055 改为 TASK-056**（正确的顺序依赖）。**无损性依据（已核验）**：该卡**从未开始执行**——`run_ids` 为空、`budget.started_at_utc` 为空、`evidence.verification_run` 为空、`checkpoints` 为空，故不存在任何运行历史、时钟或证据被丢弃；其需求内容（Endpoints 文案、失败提示、UI 契约）原样保留在 spec 与 UI 契约文件中。**边界**：仅重组**未执行过**的卡片；不放宽任何门禁；不新建重复任务编号；不改任何源码。沿用既有预算（每任务 240 分钟、修复 4 轮），commit 沿用既有授权。",
+      "scope": [
+        "TASK-057"
+      ],
+      "recorded_at_utc": "2026-09-18T09:50:00Z"
+    },
+    {
+      "id": "DEC-task056-repair-protocol-unblock-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 在被如实告知 TASK-056 修复轮 1 因 `changed_files` 声明口径错误再次落 blocked/failure_kind=protocol、CLI 无恢复入口后，选择『授权记录级订正（推荐）』。沿用 DEC-task054/055 的同一先例。",
+      "statement": "授权对 TASK-056 修复轮 1（RUN-3409f1a1d0ae42efb51ef197b4d0a386）作**记录级**订正以解除 protocol 阻断。**根因**：本轮实质改动（`src-tauri/src/sync/subscriptions.rs` 建分类目录失败上报、`src-tauri/tests/sync_gap_repro_e2e.rs` 两个承重测试）是在 `begin` **之前**完成的，故已在本次 run 的 scope 基线内、不计入「自 begin 以来的项目 diff」；而我把这两个文件写进了 `changed_files`，与工具观测（仅 `items/TASK-056.json`）不符。**这是我的声明口径错误**——『begin 前完成的改动不计入 changed_files』这条契约我此前未内化，本会话已因同类声明错误三次触发 protocol（TASK-055 把 evidence/** 列入、本次把 begin 前的改动列入）。订正内容：归档原始 worker-result 与原始 run 记录；run outcome blocked→completed；任务 blocked→verifying 并清除 failure_kind/resume_phase/blockers；原始失败原因与订正依据存入双处 ledger_correction，不删除历史。**边界**：只改账本，不放宽任何门禁——四门禁与独立审查仍须重跑，候选仍须与实际文件逐一一致；不改一行源码、不新建任务、不重置时钟；本轮已消耗的 1 个修复额度保留计数。",
+      "scope": [
+        "TASK-056"
+      ],
+      "recorded_at_utc": "2026-09-18T10:10:00Z"
     }
   ]
 }

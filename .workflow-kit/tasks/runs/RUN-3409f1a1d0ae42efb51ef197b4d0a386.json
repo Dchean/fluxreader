@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "RUN-3409f1a1d0ae42efb51ef197b4d0a386",
+  "task_id": "TASK-056",
+  "kind": "repair",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "repair round 1: load-bearing observability tests, retract false frontend claim, extend swallow audit"
+  },
+  "started_at_utc": "2026-09-18T10:17:09.347523Z",
+  "finished_at_utc": "2026-09-18T10:17:18.870589Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "61c1e706ed0cfb0ffb6956fdb19baa38706e85017faa20c4160ca64bc61844d7",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-3409f1a1d0ae42efb51ef197b4d0a386-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-3409f1a1d0ae42efb51ef197b4d0a386-scope.json",
+  "evidence": {
+    "prior": null,
+    "ledger_correction": {
+      "reason": "changed_files 声明口径错误：本轮实质改动在 begin 之前完成、已含在 scope 基线内，不应列入 changed_files；工具观测的 diff 仅 items/TASK-056.json。交付本身已完成、四门禁通过。",
+      "authorization": "DEC-task056-repair-protocol-unblock-20260918",
+      "original": {
+        "outcome": "blocked",
+        "failure_kind": "protocol",
+        "failure_reason": "Worker changed_files does not match the observed project diff",
+        "blockers": null
+      },
+      "corrected_to": "completed",
+      "original_record": "RUN-3409f1a1d0ae42efb51ef197b4d0a386-run-asrecorded.json",
+      "original_worker_result": "RUN-3409f1a1d0ae42efb51ef197b4d0a386-worker-result-asrecorded.json",
+      "worker_fault": true
+    }
+  }
+}

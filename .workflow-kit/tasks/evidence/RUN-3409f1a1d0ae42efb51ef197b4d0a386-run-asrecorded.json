@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-3409f1a1d0ae42efb51ef197b4d0a386",
+  "task_id": "TASK-056",
+  "kind": "repair",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "repair round 1: load-bearing observability tests, retract false frontend claim, extend swallow audit"
+  },
+  "started_at_utc": "2026-09-18T10:17:09.347523Z",
+  "finished_at_utc": "2026-09-18T10:17:18.870589Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "61c1e706ed0cfb0ffb6956fdb19baa38706e85017faa20c4160ca64bc61844d7",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-3409f1a1d0ae42efb51ef197b4d0a386-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-3409f1a1d0ae42efb51ef197b4d0a386-scope.json",
+  "failure_kind": "protocol",
+  "failure_reason": "Worker changed_files does not match the observed project diff"
+}

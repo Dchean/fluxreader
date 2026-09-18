@@ -188,7 +188,14 @@ pub(super) async fn pull_feeds(
             }
             let existing = db::find_folder_by_name(&conn, label).ok().flatten();
             if existing.is_none() {
-                let _ = db::create_folder(&conn, label, "article");
+                // TASK-056 修复轮 1（审查 FINDING 3）：此前是 `let _ = create_folder(...)`。
+                // 静默失败会让后续 find_folder_by_name 落空 → 该分类下的订阅被改挂「未分类」，
+                // **用户的目录结构无声丢失**——与本任务修复的外键缺陷同族。
+                if let Err(e) = db::create_folder(&conn, label, "article") {
+                    report
+                        .errors
+                        .push(format!("建远端分类「{label}」失败: {e}"));
+                }
             }
         }
     }
@@ -238,11 +245,29 @@ pub(super) async fn pull_feeds(
                 }
                 None => {
                     // 本地没有 → 建本地 feed（挂到远端分类对应的本地 folder）
-                    let folder_id: i64 = remote_folder_label
+                    //
+                    // 目录兜底（TASK-056）：远端无分类（或 label 在本地找不到）时必须挂到一个
+                    // **真实存在**的 folder。此前是 `get_first_folder_id().unwrap_or(1)`，
+                    // 而新装应用 folders 表为空 → 硬编码的 1 指向不存在目录 →
+                    // `feeds.folder_id REFERENCES folders(id)` 外键违约（连接开启了
+                    // `PRAGMA foreign_keys=ON`）→ 插入失败。改用既有
+                    // `ensure_uncategorized_folder`（不存在则创建「未分类」），保证外键成立。
+                    let folder_id: i64 = match remote_folder_label
                         .as_deref()
                         .and_then(|label| db::find_folder_by_name(&conn, label).ok().flatten())
-                        .or_else(|| db::get_first_folder_id(&conn).ok().flatten())
-                        .unwrap_or(1);
+                    {
+                        Some(fid) => fid,
+                        None => match db::ensure_uncategorized_folder(&conn) {
+                            Ok(fid) => fid,
+                            Err(e) => {
+                                report.errors.push(format!(
+                                    "订阅 {} 建目录失败: {e}",
+                                    rf.url
+                                ));
+                                continue;
+                            }
+                        },
+                    };
                     let inserted = db::insert_feed_origin(
                         &conn,
                         &rf.url,
@@ -255,11 +280,21 @@ pub(super) async fn pull_feeds(
                         false,
                         "remote",
                     );
-                    if let Ok(fid) = inserted {
-                        if let Some(nid) = remote_feed_id {
-                            let _ = db::set_feed_remote_id(&conn, fid, nid);
+                    // TASK-056：失败必须可见。此前是无 else 的 `if let Ok(fid)`，
+                    // 错误被静默吞掉、report.errors 保持为空，前端仍提示「已拉取订阅源」
+                    // 「后端同步完成」——用户看到成功、实际零订阅。
+                    match inserted {
+                        Ok(fid) => {
+                            if let Some(nid) = remote_feed_id {
+                                let _ = db::set_feed_remote_id(&conn, fid, nid);
+                            }
+                            report.pulled_feeds += 1;
                         }
-                        report.pulled_feeds += 1;
+                        Err(e) => {
+                            report
+                                .errors
+                                .push(format!("拉取订阅 {} 建本地失败: {e}", rf.url));
+                        }
                     }
                 }
             }

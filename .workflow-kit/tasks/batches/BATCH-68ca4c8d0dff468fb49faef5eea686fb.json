@@ -2,7 +2,9 @@
   "schema_version": 1,
   "id": "BATCH-68ca4c8d0dff468fb49faef5eea686fb",
   "status": "active",
-  "task_ids": [],
+  "task_ids": [
+    "TASK-056"
+  ],
   "approval_decision_ids": [
     "DEC-35d56631bafc4a62972260efb7bb7dde"
   ],

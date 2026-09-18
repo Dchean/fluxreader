@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-7a6709f6a502438095cb1336d784e8b0",
+  "task_id": "TASK-056",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "host agent implementation: fix pull feed insert FK violation (hardcoded folder_id fallback) + eliminate silent error swallow, add zero-folder empty-db regression test"
+  },
+  "started_at_utc": "2026-09-18T08:27:39.989989Z",
+  "finished_at_utc": "2026-09-18T08:45:03.672166Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "61c1e706ed0cfb0ffb6956fdb19baa38706e85017faa20c4160ca64bc61844d7",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-7a6709f6a502438095cb1336d784e8b0-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-7a6709f6a502438095cb1336d784e8b0-scope.json",
+  "failure_kind": "action_required",
+  "failure_reason": "Worker requests manager action; inspect the result"
+}
