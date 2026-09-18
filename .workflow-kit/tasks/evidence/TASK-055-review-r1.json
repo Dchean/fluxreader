@@ -1,0 +1,51 @@
+{
+  "task_id": "TASK-055",
+  "candidate_digest": "401b6221c040cfac36557974c31b9a64db9482fecd905b930c0e6dd660af0097",
+  "verification_run": "RUN-576384bc45f04335be92267425a4555e",
+  "verdict": "PASS",
+  "summary": "第 1 轮独立审查（未参与实现的独立上下文）逐项复跑全部 9 项核对，全部通过。审查者**自行复现 fail-before / pass-after 各两次**并每次强制重编译（确认出现 Compiling app，规避 cargo mtime 指纹复用陈旧 rlib 的坑）：把旧代码（`let ok = ...; if ok { remove_feed_tombstone(...) } ok`）重新插回 unsubscribe_remote 后，新测试 panic 于 sync_gap_repro_e2e.rs:303:9『2xx 但未确认远端已删除时，删除墓碑必须保留（TASK-055）』、exit 101；还原后（sha256 2415B8A0… 前后一致）复跑 exit 0 通过。**墓碑清除点已确认移除**：unsubscribe_remote 只返回『请求被接受』的布尔值。**全仓清墓碑调用点逐一枚举**：仅 subscriptions.rs 两处（remove_feed_tombstone 判据为远端 subscription/list 响应体的 remote_norm；remove_folder_tombstone 判据为 tag/list 响应体的 remote_labels），**均为读响应体的证据型判据，已无任何以 2xx/Ok 为依据的清除点**；且审查者指出 tombstones 在清除循环前已快照，故 :206 的清除不会在同一轮内削弱 :209 的防复活判断。**目录墓碑无同类缺陷已独立确认**（比较 remote_labels，与任何写请求成败无关）。**A-1 断言适配判定为『增强而非削弱』**：被改动的仅是一行取反（is_empty→!is_empty，仍留在第 ② 段），『墓碑应清除』的检查**未被删除而是移到第 246 行**（位于第 230 行 feeds_phase 之后、mock 已真正移除订阅之时），该测试的墓碑断言由 1 条增至 2 条；其余三组断言（L176 bound==Some(10)、L202 revived==0、L217 ac=unsubscribe+feed/10）与 HEAD **逐字节相同**。**范围干净**：改动仅 4 个声明文件，Cargo.toml/Cargo.lock 零改动（git diff --quiet 退出码 0），无前端与工作流脚本改动、无新依赖。**四门禁独立复跑全过**：cargo test 137 passed/0 failed/9 ignored（exit 0，逐解析全部 23 个测试二进制的 test result 行；= 基线 136 + 恰好 1 条新测试）、lint 0/0、build exit 0、frontend 241/241。findings 为空。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务要求全部满足并经独立复现：墓碑清除点从 unsubscribe_remote 移除（审查者读码确认，并注意到 `let _ = feed_url;` 使移除自证）；新增故障注入与复现测试具备真实的 fail-before（审查者亲手回退修复复现 exit 101）与 pass-after；『逐一排查其它清墓碑点』已由审查者独立完成枚举——全仓仅两处且均为响应体证据型判据；『核对目录墓碑是否有同类误判』由审查者独立确认无同类缺陷。验收项要求的『不得只展示修复后通过』已由 fail-before 证据满足。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-055-report.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "审查者独立复跑 cargo test = 137 passed / 0 failed / 9 ignored、exit 0（其特别说明：先前一次经 PowerShell 管道过滤得到的 exit 1 是 $LASTEXITCODE 传递的管道产物、非测试失败；改为不接管道直跑确认 exit 0，并逐行解析全部 23 个测试二进制的结果行求聚合，未轻信单行）。137 = 136（TASK-054 基线）+ 1（本任务新增），ignored 未增。A-1 既有测试经适配后通过，其未受影响的断言与 HEAD 逐字节相同。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-055-report.md"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "本任务的核心失败路径即『退订回 2xx 但远端未生效』。审查者把旧行为代码原样插回并强制重编译后，新测试确实失败（panic 文案即断言本缺陷、exit 101），证明该测试对目标缺陷具备捕获力而非恒真；还原后通过。审查者亦独立确认了防复活防线在同一轮内不被自身清除动作削弱（tombstones 在清除循环前快照）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-055-report.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "unsubscribe_remote 的文档注释已说明『返回值≠远端已删除』及其原因（post_form_text 看不到响应体），调用方注释同步更新，避免后来者重蹈该误判；FINDINGS-SYNC-GAP.md 记录该缺陷的根因、为何既有测试漏掉（旧断言恰在断言过宽判据本身）、修复与同类路径核对结论。审查者另指出报告对目录墓碑『收敛段』的措辞易被误读为本次改动（实际该段代码未被改动）——属表述可改进项、不影响正确性，已在本轮摘要与文档中保留该事实。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-055-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务只改收到退订响应后的本地处理（不再清墓碑）与注释，不触及查询、渲染或同步请求时序；墓碑在远端确认前多留一段，有 pull 收敛路径且远端确认后必被清除。无性能主张需要证据。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-055-report.md"
+      ]
+    }
+  ],
+  "ui_review": null
+}

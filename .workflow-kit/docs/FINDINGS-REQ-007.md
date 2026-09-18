@@ -70,7 +70,15 @@
 
 - 前端 50 个 invoke 命令在后端全部有对应 #[tauri::command] 注册，无"调用不存在的命令"。
 - notifyOnNewArticles/autoRefresh/refreshInterval/fetchConcurrency/smartDedup/syncMode 虽前端只写不读，但 scheduler/commands 实时消费，非空壳。
-- 快捷键表 6 项在实现中均有对应处理（独立审查补充：App.tsx:206-211 另有 Space 播放/暂停快捷键未列入设置页快捷键表，或注释与表不符——归入 P3 备注）；无 TODO/FIXME/unimplemented!；tests 的 #[ignore] 均为真实服务器 live 测试。
+- 快捷键表 6 项在实现中均有对应处理（独立审查补充：App.tsx:206-211 另有 Space 播放/暂停快捷键未列入设置页快捷键表，或注释与表不符——归入 P3 备注）；无 TODO/FIXME/unimplemented!。
+- ~~tests 的 `#[ignore]` 均为真实服务器 live 测试~~ —— **本项已被 TASK-054 实证推翻并订正**（2026-09-18）。
+  排查当时未逐条核对 ignore 的**理由是否成立**，得出了一条错误结论：实际共 23 个 `#[ignore]` 属性行，
+  其中 **14 个的理由 `spins a local mock server` 不成立**（同目录 `sync_gap_repro_e2e.rs` 用**同一个 mock**
+  且默认运行，说明该理由与实际不符），这 14 个已由 TASK-054 转正；另 9 个（需真实 Miniflux 账号+网络、
+  或需固定 `127.0.0.1:8765` 外部服务）理由成立，保持忽略。
+  完整清单、判定依据与计数闭合见 [`FINDINGS-IGNORED-TESTS.md`](FINDINGS-IGNORED-TESTS.md)。
+  **教训**：排查「排除项」时，仅凭 `#[ignore]` 的存在与理由**字样**不足以判定其成立，须逐条核对
+  「该理由描述的环境依赖是否真实存在」。
 
 ## 统计与建议批次归属
 

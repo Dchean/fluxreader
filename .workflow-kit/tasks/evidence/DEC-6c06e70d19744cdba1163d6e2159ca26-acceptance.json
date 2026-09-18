@@ -1,0 +1,14 @@
+{
+  "id": "DEC-6c06e70d19744cdba1163d6e2159ca26",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "DEC-tombstone-and-ignored-tests-20260918",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-054"
+  ],
+  "recorded_at_utc": "2026-09-18T03:25:27.937922Z",
+  "candidates": {
+    "TASK-054": "d8e71f424b034a5a8fa7b67c5eb42852d632870233bfa8af5434c039fa533e48"
+  }
+}

@@ -67,6 +67,9 @@ pub struct MockGReader {
     pub subscription_edits: Mutex<Vec<(String, String)>>,
     /// 故障注入：置位后 GET stream/items/ids 返回 500（C-1 对账跳过测试用）
     pub fail_stream_ids: std::sync::atomic::AtomicBool,
+    /// 故障注入（TASK-055）：置位后退订仍返回 200，但**服务端保留该订阅**——
+    /// 模拟真实 GReader 后端在 token 失效/权限不足/目标不存在时「2xx + 未生效」的响应。
+    pub unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool,
     /// 最近一次 subscription/edit 请求的表单键值（A-2 断言 t=/a= 参数）
     pub last_subscription_edit_form: Mutex<Vec<(String, String)>>,
     /// 远端分类（GET tag/list 返回的 folder）
@@ -84,6 +87,7 @@ impl MockGReader {
             entries: Mutex::new(Vec::new()),
             subscription_edits: Mutex::new(Vec::new()),
             fail_stream_ids: std::sync::atomic::AtomicBool::new(false),
+            unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
             last_subscription_edit_form: Mutex::new(Vec::new()),
             status_updates: Mutex::new(Vec::new()),
             subscribed_urls: Mutex::new(Vec::new()),
@@ -582,11 +586,17 @@ fn route(
                         .get("s")
                         .and_then(|v| v.first().cloned())
                         .unwrap_or_default();
-                    // 真实行为：退订后远端订阅列表不再包含该订阅
-                    srv.subscriptions
-                        .lock()
-                        .unwrap()
-                        .retain(|sub| sub.id != s_val);
+                    // 真实行为：退订后远端订阅列表不再包含该订阅。
+                    // TASK-055 故障注入：置位时仍回 200 但保留订阅（「2xx 但未生效」）。
+                    if !srv
+                        .unsubscribe_returns_2xx_without_removing
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        srv.subscriptions
+                            .lock()
+                            .unwrap()
+                            .retain(|sub| sub.id != s_val);
+                    }
                     (200, "OK".into())
                 }
                 "subscribe" => {

@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "14 个测试标注 `#[ignore = \"spins a local mock server\"]`，即『该测试需要起一个本地 mock server，故默认不跑』。**该理由已被实证证伪**：同目录 `sync_gap_repro_e2e.rs` 使用**同一个 `mod mock_greader`**，其 13 个测试默认全部运行（本机 `cargo test` 基线 120 passed）。被忽略的 14 个测试实跑（`--ignored`）**全部通过、0 失败、合计约 0.4 秒**，其中包含真实保护（`full_reconcile_backfills_missing_local_entries`、`instant_push_only_pushes_and_drains_queue`、`stale_remote_read_converges_via_full_reconcile`、`pending_local_read_wins_over_stale_remote_in_upsert`、`light_sync_converges_stale_remote_read_via_unread_ids` 等）。本任务**去掉这 14 个失效的 `#[ignore]`**，让既存保护回到默认门禁，并把 baseline 的 ignored 计数由 23 更正为实际应有值。这是**恢复既存保护**，不是新增需求，也不是降低标准。**9 个理由成立的 `#[ignore]`（环境依赖型）保持不动**，仅在文档登记。计数口径经机械核对：14（失效）+ 9（环境依赖）= 23（当前 ignored 总数），闭合。",
   "non_goals": [
     "修 `subscriptions.rs:48` 墓碑缺陷（P1）——那是同批次下一个任务（补网之后再修缺陷）",
@@ -191,9 +191,11 @@
     "candidate_digest": "d8e71f424b034a5a8fa7b67c5eb42852d632870233bfa8af5434c039fa533e48",
     "verification_run": "RUN-2e20089a9bc8406f8cacfee05b1a24db",
     "review_run": "RUN-3104a608120d487dba1a48735927f8f7",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-6c06e70d19744cdba1163d6e2159ca26-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-6c06e70d19744cdba1163d6e2159ca26"
+    ],
+    "merge_ref": "793d308",
     "ledger_correction": {
       "reason": "解除 failure_kind=protocol 阻断（worker-result 声明格式错误，非交付缺陷）。",
       "authorization": "DEC-task054-protocol-unblock-20260918",
@@ -207,7 +209,8 @@
       },
       "corrected_to": "verifying",
       "worker_fault": true
-    }
+    },
+    "continued_by": "TASK-055"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

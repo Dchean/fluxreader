@@ -1,0 +1,8 @@
+{
+  "changed_files": [
+    "src-tauri/src/commands/folders.rs",
+    "src-tauri/src/sync/subscriptions.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ]
+}

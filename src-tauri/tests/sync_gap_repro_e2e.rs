@@ -201,11 +201,15 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
     };
     assert_eq!(revived, 0, "已删除订阅不得被 pull 复活（墓碑生效）");
 
-    // ② 退订远端（best-effort，GReader）：成功后退订墓碑解除
+    // ② 退订远端（best-effort，GReader）。
+    // 注意（TASK-055 语义变更）：返回值 true 只表示**请求被后端接受（2xx）**，
+    // **不再等价于「远端已删除」**，因此此处**不清墓碑**——墓碑改由后续 pull
+    // 在「远端列表确认已不含该 URL」时收敛清除（见 ③ 之后的断言）。
+    // 修复前此处按 2xx 清墓碑，导致「2xx 但远端未生效」时已删订阅复活。
     let (remote_id, feed_url) = unsubscribe.expect("unsubscribe target");
     assert!(
         sync::unsubscribe_remote(&db, &http, remote_id, &feed_url).await,
-        "退订应成功（mock 支持 ac=unsubscribe）"
+        "退订请求应被后端接受（mock 回 200）"
     );
     assert!(
         subscription_edit_actions(&server)
@@ -216,12 +220,13 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
     {
         let conn = db.lock().await;
         assert!(
-            db::feed_tombstones(&conn).unwrap().is_empty(),
-            "退订成功（远端确认）后墓碑应清除"
+            !db::feed_tombstones(&conn).unwrap().is_empty(),
+            "仅收到 2xx 不足以确认远端已删除，墓碑必须保留（TASK-055）"
         );
     }
 
-    // ③ 墓碑已清、远端已移除该订阅：再次同步仍不复活
+    // ③ 再次同步：此时 mock 已按真实行为把该订阅从远端列表移除，
+    //    pull 得以确认「远端已不含」→ 墓碑才被收敛清除，且不复活
     sync::feeds_phase(&db, &http)
         .await
         .expect("feeds phase after unsubscribe");
@@ -235,6 +240,117 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
         .unwrap()
     };
     assert_eq!(existed, 0, "退订后同步不得复活（远端已不再列出该订阅）");
+    {
+        let conn = db.lock().await;
+        assert!(
+            db::feed_tombstones(&conn).unwrap().is_empty(),
+            "远端列表确认已不含该 URL 后，墓碑应由 pull 收敛清除"
+        );
+    }
+}
+
+/// TASK-055：退订请求返回 **2xx 但远端实际未删除**时，不得清除删除墓碑，
+/// 更不得让已删订阅被下次 pull 复活。
+///
+/// 缺陷形态（修复前）：`sync::unsubscribe_remote` 以 `post_form_text` 的
+/// `resp.status().is_success()` 作为「远端已确认退订」，据此 `remove_feed_tombstone`；
+/// 而真实 GReader 在 token 失效/权限不足/`s=feed/<id>` 不存在时可能回 2xx + 错误体。
+/// 墓碑被清后，`pull_feeds` 的防复活唯一防线消失 → 远端仍列出该订阅 → 复活。
+#[tokio::test]
+async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
+    let (db, http, server) = setup("gap_unsub_2xx").await;
+    let feed_id = {
+        let conn = db.lock().await;
+        let folder_id = db::create_folder(&conn, "测试分类", "article").unwrap();
+        db::insert_feed(
+            &conn,
+            "http://127.0.0.1:8765/local_feed.xml", // 与 mock feed 10 同 URL（远端订阅存在）
+            None,
+            "Local Direct Feed",
+            None,
+            folder_id,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap()
+    };
+    // 绑定远端：feeds_phase 按 URL 匹配写入 remote_id=10
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase (bind)");
+
+    // 删除（命令层真实逻辑）：写墓碑 + 删除本地 + 返回待退订的远端 id
+    let (remote_id, feed_url) = {
+        let conn = db.lock().await;
+        app_lib::commands::record_feed_deletion(&conn, feed_id)
+            .expect("record deletion")
+            .expect("已绑定远端且已配置：应返回待退订目标")
+    };
+
+    // 故障注入：退订回 200，但服务端**保留**该订阅（模拟 2xx 但未生效）
+    server
+        .unsubscribe_returns_2xx_without_removing
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let accepted = sync::unsubscribe_remote(&db, &http, remote_id, &feed_url).await;
+    assert!(accepted, "请求被后端接受（2xx），返回值应为 true");
+
+    // ① 墓碑必须仍在：请求成功 ≠ 远端已删除，不能据此清墓碑
+    {
+        let conn = db.lock().await;
+        let tombstones = db::feed_tombstones(&conn).unwrap();
+        assert!(
+            tombstones
+                .iter()
+                .any(|u| u.contains("local_feed.xml")),
+            "2xx 但未确认远端已删除时，删除墓碑必须保留（TASK-055）"
+        );
+    }
+
+    // ② 再次同步：远端仍列出该订阅，但其墓碑在 → 不得复活
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase after 2xx-without-removal");
+    {
+        let conn = db.lock().await;
+        let revived = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            revived, 0,
+            "2xx 但远端未删除时不得复活已删订阅（TASK-055）"
+        );
+    }
+
+    // ③ 远端最终确认删除后：墓碑才应由 pull 收敛清除（唯一有证据的清除条件）
+    server
+        .subscriptions
+        .lock()
+        .unwrap()
+        .retain(|s| s.id != format!("feed/{remote_id}"));
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase after remote removal");
+    {
+        let conn = db.lock().await;
+        assert!(
+            db::feed_tombstones(&conn).unwrap().is_empty(),
+            "远端列表确认已不含该 URL 后，墓碑应由 pull 收敛清除"
+        );
+        let revived = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://127.0.0.1:8765/local_feed.xml'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(revived, 0, "远端确认删除后仍不得复活");
+    }
 }
 
 /// A-2 修复后的期望行为（原复现测试转正）：订阅改名/移动目录会 best-effort

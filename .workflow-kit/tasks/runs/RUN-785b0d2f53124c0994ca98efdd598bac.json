@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-785b0d2f53124c0994ca98efdd598bac",
+  "task_id": "TASK-055",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "independent reviewer: fresh non-writer context, reproduced fail-before/pass-after twice with forced rebuilds, enumerated all tombstone call sites"
+  },
+  "started_at_utc": "2026-09-18T05:32:13.581661Z",
+  "finished_at_utc": "2026-09-18T05:32:13.856387Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "b319e4045e6d38c1389f16b4c222e81aca0bc8644084bd5d51f31cc8319c2323",
+  "candidate_digest": "401b6221c040cfac36557974c31b9a64db9482fecd905b930c0e6dd660af0097",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-785b0d2f53124c0994ca98efdd598bac-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-785b0d2f53124c0994ca98efdd598bac-review.json",
+    "candidate_digest": "401b6221c040cfac36557974c31b9a64db9482fecd905b930c0e6dd660af0097",
+    "quality_digest": "caec9dd3eb8afb00b0c3dad54bc0a6d4f2d71996b6fb56973036b1fee60918a7"
+  },
+  "estimated_cost_usd": null
+}

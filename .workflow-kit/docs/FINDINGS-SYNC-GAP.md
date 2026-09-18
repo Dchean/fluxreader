@@ -62,3 +62,26 @@
 - feed_rename_never_reaches_backend：断言通过 = 无任何 subscription/edit 动作
 - offline_read_change_never_pushed_after_connect：断言通过 = 连接后无 edit-tag 补推
 - 复现测试随修复批次转正：#[ignore] 逐步移除并断言期望行为（默认 `cargo test` 覆盖）；A-2/A-5 已转正，A-1 随 TASK-035 转正，A-3/A-4/A-8 待后续批次。
+
+## A-1 的残留缺陷（TASK-055，2026-09-18 实证并修复）
+
+A-1 的修复（TASK-035）引入了删除墓碑机制，但**墓碑的清除点判据过宽**，构成一处独立的 P1：
+
+- **位置**：`src-tauri/src/sync/subscriptions.rs` 的 `unsubscribe_remote`——原先在 `unsubscribe` 返回 `Ok` 时
+  调用 `db::remove_feed_tombstone`。
+- **根因**：该 `Ok` 来自 `greader.rs:323-334 post_form_text`，判据仅 `resp.status().is_success()`，
+  **看不到响应体**。真实 GReader/MiniFlux 兼容后端在 token 失效、权限不足或 `s=feed/<id>` 不存在时
+  **可能返回 2xx + 错误体**，此时客户端误判为「远端已确认退订」。
+- **后果**：墓碑（`pull_feeds` 防复活的**唯一防线**）被误清 → 远端仍列出该订阅 → 已删订阅被重新建回本地
+  （用户现象：「删掉的订阅自己回来了」）。
+- **为何既有测试没抓到**：`deleted_feed_stays_deleted_and_unsubscribes` 覆盖的是**正常路径**——
+  mock 的 `ac=unsubscribe` 分支确实把订阅从列表移除，于是「远端不再列出 ⇒ 不复活」自然成立；
+  且旧断言「2xx 后墓碑应清除」**断言的正是这个过宽判据本身**。缺陷只在**异常路径**上，此前无覆盖。
+- **修复**：删除该清除点；墓碑清除条件收口为唯一一处——`pull_feeds` 中「远端订阅列表**实际已不含**该 URL」
+  （读响应体，唯一有证据的判据）。
+- **验证**：新增 `unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive`，
+  经 mock 故障注入（`unsubscribe_returns_2xx_without_removing`）证明 **fail-before（exit 101）/ pass-after（exit 0）**。
+- **同类路径核对**：目录墓碑（folder tombstone）的清除判据取自**远端 tag/list 的实际 label**，
+  与请求是否 2xx 无关，**无同类缺陷**。
+- **协议影响**：不改任何对外请求的内容与顺序，只改收到响应后的本地处理；墓碑会多留一段直到远端确认。
+  经 owner 裁决记于 `DEC-tombstone-and-ignored-tests-20260918`。

@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-054 · 恢复被失效 #[ignore] 理由掩盖的 14 个测试（先补网）
 
-**状态**：verified
+**状态**：done
 
 **目标**：14 个测试标注 `#[ignore = "spins a local mock server"]`，即『该测试需要起一个本地 mock server，故默认不跑』。**该理由已被实证证伪**：同目录 `sync_gap_repro_e2e.rs` 使用**同一个 `mod mock_greader`**，其 13 个测试默认全部运行（本机 `cargo test` 基线 120 passed）。被忽略的 14 个测试实跑（`--ignored`）**全部通过、0 失败、合计约 0.4 秒**，其中包含真实保护（`full_reconcile_backfills_missing_local_entries`、`instant_push_only_pushes_and_drains_queue`、`stale_remote_read_converges_via_full_reconcile`、`pending_local_read_wins_over_stale_remote_in_upsert`、`light_sync_converges_stale_remote_read_via_unread_ids` 等）。本任务**去掉这 14 个失效的 `#[ignore]`**，让既存保护回到默认门禁，并把 baseline 的 ignored 计数由 23 更正为实际应有值。这是**恢复既存保护**，不是新增需求，也不是降低标准。**9 个理由成立的 `#[ignore]`（环境依赖型）保持不动**，仅在文档登记。计数口径经机械核对：14（失效）+ 9（环境依赖）= 23（当前 ignored 总数），闭合。
 

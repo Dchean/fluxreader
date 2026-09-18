@@ -1,0 +1,29 @@
+{
+  "task_id": "TASK-055",
+  "run_id": "RUN-b7427f9111624a43b095cf8059657ff0",
+  "status": "ready_for_verification",
+  "summary": "修复 subscriptions.rs 的墓碑误清除：unsubscribe_remote 原先把 HTTP 2xx 当作『远端已确认退订』并据此 remove_feed_tombstone，而 greader::post_form_text 只判 resp.status().is_success()、看不到错误体；真实 GReader 在 token 失效/权限不足/目标不存在时可能回 2xx + 错误体，此时墓碑（pull 防复活的唯一防线）被误清，远端仍列出该订阅便使其复活（用户现象：删掉的订阅自己回来了）。修复：删除该清除点，墓碑清除条件收口为唯一一处——pull_feeds 中『远端订阅列表实际已不含该 URL』（读响应体，唯一有证据的判据）。签名未变，返回值语义细化为『请求是否被后端接受』，唯一调用方本就忽略返回值故行为无变化。新增 mock 故障注入开关 unsubscribe_returns_2xx_without_removing 与复现测试 unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive，并证明 fail-before（回退修复后 exit 101 失败）/pass-after（exit 0 通过）。适配 A-1 既有测试中被本任务有意改变的断言（原断言『2xx 后墓碑应清除』正在断言旧行为）。已核对目录墓碑无同类误判（其判据取自远端 tag/list 实际内容，与 2xx 无关）。门禁：cargo test 137 passed/0 failed/9 ignored（137=136+1，ignored 未增）、lint 0/0、build exit 0、frontend 241/241。",
+  "changed_files": [
+    "src-tauri/src/sync/subscriptions.rs",
+    "src-tauri/src/commands/folders.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri）：137 passed / 0 failed / 9 ignored",
+    "npm run lint：exit 0，0 warnings / 0 errors",
+    "npm run build：exit 0",
+    "npm run test:frontend：exit 0，241/241",
+    "fail-before 证据：回退 subscriptions.rs 的修复后，unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive exit 101 失败；还原后 exit 0 通过（均确认出现 Compiling app）"
+  ],
+  "requested_actions": [
+    "审查请重点核对：(1) 墓碑清除点是否确实只剩 pull_feeds 一处、且其判据读的是响应体内容；(2) 新增测试的 fail-before 是否真实可复现（请自行回退修复复跑，注意 cargo mtime 指纹需强制重编译）；(3) A-1 测试的断言适配是否为『增强』而非『削弱』——请对照 git diff 判断被改的行是否仅限那条断言旧行为的断言；(4) 目录墓碑是否确无同类误判",
+    "【记录级订正】原始 changed_files 误把两个证据文件（.workflow-kit/tasks/evidence/**）列为交付改动；inventory() 明确排除 tasks/evidence/**，故已订正为实际改动的 4 个文件。原始声明：['src-tauri/src/sync/subscriptions.rs', 'src-tauri/src/commands/folders.rs', 'src-tauri/tests/mock_greader.rs', 'src-tauri/tests/sync_gap_repro_e2e.rs', '.workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md', '.workflow-kit/tasks/evidence/TASK-055-report.md']。授权：DEC-task055-protocol-unblock-20260918。"
+  ],
+  "unresolved_items": [
+    "未修 TASK-054 发现的 P1（pending_local_read_wins_over_stale_remote_in_upsert）与 P4（full_reconcile_backfills_missing_local_entries）两个弱断言测试——独立后续项，不在本任务范围",
+    "未改 greader::post_form_text 的通用 2xx 判据（波及全部写接口，超出本任务范围）；若后续要彻底区分『2xx + 错误体』，需另立任务并评估影响面",
+    "墓碑在远端确认前会多留一段（设计如此，有 pull 收敛路径，不会无限增长）"
+  ],
+  "blocked_reason": null
+}

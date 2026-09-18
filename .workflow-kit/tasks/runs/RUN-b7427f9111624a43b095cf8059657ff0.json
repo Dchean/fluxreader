@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "id": "RUN-b7427f9111624a43b095cf8059657ff0",
+  "task_id": "TASK-055",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "host agent implementation run for TASK-055: remove the mis-scoped tombstone clearing in unsubscribe_remote; add mock fault injection and a regression test proving deleted subscription cannot revive on 2xx-without-removal"
+  },
+  "started_at_utc": "2026-09-18T03:25:40.645851Z",
+  "finished_at_utc": "2026-09-18T03:35:05.421237Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "b319e4045e6d38c1389f16b4c222e81aca0bc8644084bd5d51f31cc8319c2323",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-b7427f9111624a43b095cf8059657ff0-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-b7427f9111624a43b095cf8059657ff0-scope.json",
+  "evidence": {
+    "prior": null,
+    "ledger_correction": {
+      "reason": "changed_files 声明错误：把 tasks/evidence/** 下的证据文件列为交付改动（inventory 排除该区），且临时诊断脚本未清理。交付本身已完成、四门禁通过。",
+      "authorization": "DEC-task055-protocol-unblock-20260918",
+      "original": {
+        "outcome": "blocked",
+        "failure_kind": "protocol",
+        "failure_reason": "Worker changed_files does not match the observed project diff",
+        "blockers": null
+      },
+      "original_changed_files": [
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+        ".workflow-kit/tasks/evidence/TASK-055-report.md"
+      ],
+      "corrected_to": "completed",
+      "original_record": "RUN-b7427f9111624a43b095cf8059657ff0-run-asrecorded.json",
+      "original_worker_result": "RUN-b7427f9111624a43b095cf8059657ff0-worker-result-asrecorded.json",
+      "worker_fault": true
+    }
+  }
+}

@@ -28,5 +28,6 @@
 | [TASK-051](items/TASK-051.json) | 修复全部已发现缺陷：D1–D5 + 低优先观察 + REQ-007 残余项（先盘点后逐项修） | done |
 | [TASK-052](items/TASK-052.json) | P1-14 口径半边：分页带上当前范围筛选（per-scope 游标重设计） | done |
 | [TASK-053](items/TASK-053.json) | P1-5 离线期间的「全部已读」不入队：改为无论是否已配置都入队待推 | done |
+| [TASK-054](items/TASK-054.json) | 恢复被失效 #[ignore] 理由掩盖的 14 个测试（先补网） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

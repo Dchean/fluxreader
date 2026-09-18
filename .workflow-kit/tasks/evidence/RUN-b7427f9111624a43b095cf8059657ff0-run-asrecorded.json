@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-b7427f9111624a43b095cf8059657ff0",
+  "task_id": "TASK-055",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "host agent implementation run for TASK-055: remove the mis-scoped tombstone clearing in unsubscribe_remote; add mock fault injection and a regression test proving deleted subscription cannot revive on 2xx-without-removal"
+  },
+  "started_at_utc": "2026-09-18T03:25:40.645851Z",
+  "finished_at_utc": "2026-09-18T03:35:05.421237Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "b319e4045e6d38c1389f16b4c222e81aca0bc8644084bd5d51f31cc8319c2323",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-b7427f9111624a43b095cf8059657ff0-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-b7427f9111624a43b095cf8059657ff0-scope.json",
+  "failure_kind": "protocol",
+  "failure_reason": "Worker changed_files does not match the observed project diff"
+}

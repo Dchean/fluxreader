@@ -1333,6 +1333,31 @@
         "TASK-054"
       ],
       "recorded_at_utc": "2026-09-18T02:45:00Z"
+    },
+    {
+      "id": "DEC-6c06e70d19744cdba1163d6e2159ca26",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "DEC-tombstone-and-ignored-tests-20260918",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-054"
+      ],
+      "recorded_at_utc": "2026-09-18T03:25:27.937922Z",
+      "candidates": {
+        "TASK-054": "d8e71f424b034a5a8fa7b67c5eb42852d632870233bfa8af5434c039fa533e48"
+      }
+    },
+    {
+      "id": "DEC-task055-protocol-unblock-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 在被如实告知 TASK-055 因 worker-result 的 changed_files 声明错误而落 blocked/failure_kind=protocol、CLI 已无恢复入口后，选择『授权记录级订正（推荐）』。沿用 DEC-task054-protocol-unblock-20260918 与 TASK-042/053 的同一先例。",
+      "statement": "授权对 TASK-055 作**记录级**订正以解除 protocol 阻断。两次声明错误均为作者失误，与交付内容无关：(1) 把两个**证据文件**（`.workflow-kit/tasks/evidence/TASK-055-report.md`、`.workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md`）写进 `changed_files`，而 `inventory()` 明确排除 `tasks/evidence/**`（它们按记录区处理，不计入项目 diff）；(2) 自己的临时诊断脚本 `.workflow-kit/_tmp_scopediff.py` 未清理即留在树中。**实际交付改动为 4 个文件**：src-tauri/src/sync/subscriptions.rs、src-tauri/src/commands/folders.rs、src-tauri/tests/mock_greader.rs、src-tauri/tests/sync_gap_repro_e2e.rs。订正内容：归档原始 worker-result 与原始 run 记录；run outcome blocked→completed；任务 blocked→verifying 并清除 failure_kind/resume_phase/blockers；原始失败原因与订正依据存入双处 ledger_correction，不删除历史。**边界**：只改账本，不放宽任何门禁——四门禁与独立审查仍须重跑，候选仍须与实际文件逐一一致；不改一行源码、不新建任务、不重置时钟。",
+      "scope": [
+        "TASK-055"
+      ],
+      "recorded_at_utc": "2026-09-18T04:10:00Z"
     }
   ]
 }

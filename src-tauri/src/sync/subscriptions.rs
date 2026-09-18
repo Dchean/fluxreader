@@ -29,25 +29,29 @@ pub async fn edit_remote_subscription(
 }
 
 /// 退订远端订阅（best-effort；仅 GReader 协议有端点——Fever 无退订端点）。
-/// 成功后退订墓碑解除：远端已不再列出该订阅，pull 不会复活。返回远端是否确认。
+///
+/// 返回值仅表示**请求是否被后端接受**（HTTP 2xx），**不等于「远端已删除该订阅」**：
+/// GReader 的 `subscription/edit` 在 token 失效、权限不足或 `s=feed/<id>` 目标不存在时
+/// 可能返回 2xx + 错误体（`greader::post_form_text` 只见状态码，看不到错误体）。
+///
+/// **因此这里不清除删除墓碑**。墓碑只由 `pull_feeds` 在「远端订阅列表实际已不含该 URL」
+/// 时清除（见本文件下方 tombstone 收敛段）——那是唯一有证据支撑的清除条件。
+/// 曾经在此处按 `ok` 清墓碑，会导致 2xx 但远端未生效时清掉唯一防线，
+/// 下次 pull 见远端仍列出该订阅便把它**复活**（用户现象：「删掉的订阅自己回来了」）。
 pub async fn unsubscribe_remote(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
     remote_id: i64,
     feed_url: &str,
 ) -> bool {
+    let _ = feed_url; // 保留签名：调用方语义不变；墓碑不再由此处清除
     let Some(client) = build_client(db, http).await else {
         return false;
     };
-    let ok = match client {
+    match client {
         Backend::GReader(c) => c.unsubscribe(remote_id).await.is_ok(),
         Backend::Fever(_) => false,
-    };
-    if ok {
-        let conn = db.lock().await;
-        let _ = db::remove_feed_tombstone(&conn, feed_url);
     }
-    ok
 }
 
 /// 未连接期间本地新增的订阅推到远端（三段式：锁内读队列 → 锁外 HTTP → 锁内落库）

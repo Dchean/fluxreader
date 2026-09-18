@@ -212,7 +212,9 @@ pub async fn delete_feed(state: State<'_, AppState>, id: i64) -> AppResult<()> {
         let conn = state.db.lock().await;
         record_feed_deletion(&conn, id)?
     };
-    // 锁外 best-effort 退订远端：成功则清除墓碑（远端确认），失败仅留墓碑防复活
+    // 锁外 best-effort 退订远端。注意：**成功仅意味着请求被后端接受（2xx），不代表远端已删除**，
+    // 故此处不清墓碑——墓碑由后续 pull 在「远端列表确认已不含该 URL」时收敛清除。
+    // 若按请求成功就清墓碑，2xx 但未生效时会让已删订阅在下次 pull 复活（TASK-055 修复）。
     if let Some((remote_id, feed_url)) = unsubscribe {
         let _ = crate::sync::unsubscribe_remote(&state.db, &state.http, remote_id, &feed_url).await;
     }
