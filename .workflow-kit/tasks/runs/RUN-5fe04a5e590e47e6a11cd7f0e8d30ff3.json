@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-5fe04a5e590e47e6a11cd7f0e8d30ff3",
+  "task_id": "TASK-058",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "host agent implementation for TASK-058: make sync failures visible in the frontend by consuming SyncReport.errors at both syncPhase call sites"
+  },
+  "started_at_utc": "2026-09-18T12:05:05.525467Z",
+  "finished_at_utc": "2026-09-18T12:16:07.879876Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "b63f41d395fe970b512da3180d1c0d470537730dd12e5c51166d54abef61a80c",
+  "candidate_digest": "f8df22ec595440ced3cd3f424ba2ad289a6e0c59a92814c55a6239e3f8eef3f4",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-5fe04a5e590e47e6a11cd7f0e8d30ff3-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-5fe04a5e590e47e6a11cd7f0e8d30ff3-scope.json"
+}

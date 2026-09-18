@@ -1,0 +1,9 @@
+{
+  "changed_files": [
+    "src/components/settings/SyncTab.tsx",
+    "src/store/slices/sync.ts",
+    "src/store/syncErrors.ts",
+    "tools/frontend-regression.mjs",
+    "tsconfig.test.json"
+  ]
+}

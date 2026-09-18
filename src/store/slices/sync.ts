@@ -2,6 +2,7 @@ import type { StateCreator } from 'zustand';
 import { api, extractError, type RefreshSummary } from '../../lib/api';
 import { openExternal } from '../../lib/external';
 import { appStore } from '../internals';
+import { syncFailureMessage } from '../syncErrors';
 import type { AppState } from '../types';
 
 /** 同步 slice：手动刷新状态机 + GitHub 设备流登录（模块级常驻轮询）。
@@ -70,14 +71,22 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
       /* 分步同步：feeds（订阅层）→ states（状态对账，只写状态不重拉列表）→
          refreshAllFeeds（内容抓取）。状态先落库、内容再抓取，最后只 reload 一次
          带出「最新内容 + 最新状态」，避免多次 reload 造成的列表闪动
-         （「获取内容后再次同步状态导致闪动」的解耦）。 */
+         （「获取内容后再次同步状态导致闪动」的解耦）。
+         TASK-058：后端在 errors 非空时仍返回 Ok（单项失败不中断整链），故必须
+         **主动读取** report.errors，否则「同步有失败」在界面上表现为「成功」。 */
+      const syncFailures: string[] = [];
       void api
         .syncPhase('feeds')
         .catch(() => null) // 未连接（notConnected）→ 走纯直连刷新
         .then(async (feedsReport) => {
           if (feedsReport) {
-            get().showToast('订阅同步完成，正在同步文章状态…');
-            return api.syncPhase('states', true);
+            const fail = syncFailureMessage(feedsReport);
+            if (fail) syncFailures.push(fail);
+            else get().showToast('订阅同步完成，正在同步文章状态…');
+            const statesReport = await api.syncPhase('states', true);
+            const sfail = syncFailureMessage(statesReport);
+            if (sfail) syncFailures.push(sfail);
+            return statesReport;
           }
           return null;
         })
@@ -89,13 +98,23 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
         .then((summary: RefreshSummary | null) => get().reloadFromBackend().then(() => summary))
         .then((summary: RefreshSummary | null) => {
           set({ syncStatus: 'synced' });
-          if (summary && summary.failed_feeds > 0) {
-            get().showToast(`已刷新，新增 ${summary.new_articles} 条，${summary.failed_feeds} 个源直连失败`);
-          } else if (summary) {
-            get().showToast(`已刷新，新增 ${summary.new_articles} 条`);
-          } else {
-            get().showToast('已刷新，无新文章');
-          }
+          /* TASK-058：同步失败信息与「N 个源直连失败」是两类不同失败，须**共存**
+             （此前只报后者，前者被吞）。
+
+             文案口径（严格遵守 owner 边界「成功路径文案逐字不变」）：
+             - **无同步失败**时，`base` 三个分支与改动前**逐字相同**（含既有
+               `已刷新，新增 N 条，M 个源直连失败` 的顺序与分隔符）；
+             - **有同步失败**时，把失败**前置**——本次修复的意义就是让失败被看到，
+               而提示同时含「已刷新，新增 N 条」等正常信息时，若失败排在末尾，
+               用户第一眼读到的是「成功」。前置不改变任何既有文案本身，只调先后。 */
+          const base = summary
+            ? summary.failed_feeds > 0
+              ? `已刷新，新增 ${summary.new_articles} 条，${summary.failed_feeds} 个源直连失败`
+              : `已刷新，新增 ${summary.new_articles} 条`
+            : '已刷新，无新文章';
+          get().showToast(
+            syncFailures.length > 0 ? `${syncFailures.join('，')}，${base}` : base,
+          );
         })
         .catch((e: unknown) => {
           const msg = extractError(e);

@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-058",
+  "run_id": "RUN-5fe04a5e590e47e6a11cd7f0e8d30ff3",
+  "status": "ready_for_verification",
+  "summary": "修『同步失败对用户不可见』：TASK-056 已让后端把 pull 失败写入 report.errors，但前端无任何代码读取该字段（phases.rs 在 errors 非空时仍返回 Ok，故 .catch() 永不触发；两处 syncPhase 调用点都丢弃了 report）。改动：新增纯模块 src/store/syncErrors.ts（syncFailureMessage / hasSyncFailures），有失败项时返回「同步完成，但有 N 项失败：<前2条具体原因>」，无失败项时返回 null 使调用方完全走原分支（结构上保证成功文案不被改写）；SyncTab.tsx 保存并同步链与 store/slices/sync.ts 的 triggerManualSync 两处都消费 report，手动链另把同步失败与既有「N 个源直连失败」共存（此前只报后者）。验证：①单元——把 helper 模拟为『任何输入返回 null』(=修复前静默)后 5 条新断言失败；把一处调用点的消费去掉后『两处都消费』断言失败（只改一处会被挡）；还原后 268/268 通过。②端到端（契约要求必做，已完成）——真实运行的应用 + 本地 GReader 协议服务端（仅 /api/greader.php，与真实 FreshRSS 一致）+ 测试库 BEFORE INSERT 触发器注入真实插入失败：失败时实测 toast『同步完成，但有 2 项失败：拉取订阅 …/uncat.xml 建本地失败: [db] t058 injected insert failure；…』；移除触发器后实测仍为『已拉取订阅源…』→『后端同步完成』（脚本判定 success present=True / failure present=False）。证据：深色 TASK-058-e2e-failure-visible.png、浅色 TASK-058-ui-light-failure.png。门禁：cargo test 141/0/9（Rust 侧零改动）、lint 0/0、build exit 0、frontend 268/268。边界：src-tauri/** 零改动、未把 errors 非空改成抛错、未引入新依赖、成功路径文案逐字未变。用户真实数据库测前备份测后逐字节还原（{'db': True, '-wal': True}）。如实记录一次自查纠正：首次浅色证据因主题未生效而与深色字节相同（标签错误），已删除并改从真实 UI 控件切换 + 脚本加硬校验（不 light 则中止不产文件）。",
+  "changed_files": [
+    "src/store/syncErrors.ts",
+    "src/components/settings/SyncTab.tsx",
+    "src/store/slices/sync.ts",
+    "tools/frontend-regression.mjs",
+    "tsconfig.test.json"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

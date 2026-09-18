@@ -5,6 +5,7 @@ import { FluxDropdown, Switch, SettingCard, ConfirmDialog } from '../primitives'
 import { CacheCleanupSection } from './CacheCleanupSection';
 import { ConfigSyncSection } from './ConfigSyncSection';
 import { ENDPOINT_DESC, ENDPOINT_PLACEHOLDER, endpointHint } from './endpointHint';
+import { syncFailureMessage } from '../../store/syncErrors';
 
 /* ---------- TAB 6: 同步 ---------- */
 
@@ -83,22 +84,31 @@ export function SyncTab() {
       if (result?.firstConnect && result.unboundLocalFeeds > 0) {
         setPendingLocalSync(result.unboundLocalFeeds);
       }
-      /* 全后台链：feeds 阶段（快）→ states 阶段（慢，含全量对账）→ 直连抓新源 */
+      /* 全后台链：feeds 阶段（快）→ states 阶段（慢，含全量对账）→ 直连抓新源。
+         TASK-058：后端在 errors 非空时仍返回 Ok（单项失败不中断整链），故失败必须
+         在此**主动读取** report 才能被用户看到。成功路径的既有文案与顺序逐字不变。 */
+      const failures: string[] = [];
       void api
         .syncPhase('feeds')
-        .then(async () => {
+        .then(async (feedsReport) => {
           await reloadFromBackend();
-          showToast('已拉取订阅源，正在同步文章状态…');
+          const fail = syncFailureMessage(feedsReport);
+          if (fail) failures.push(fail);
+          else showToast('已拉取订阅源，正在同步文章状态…');
           return api.syncPhase('states', true);
         })
-        .then(async () => {
+        .then(async (statesReport) => {
           await reloadFromBackend();
+          const fail = syncFailureMessage(statesReport);
+          if (fail) failures.push(fail);
           return api.refreshAllFeeds().catch(() => null);
         })
         .then(() => reloadFromBackend())
         .then(() => {
           useAppStore.setState({ syncStatus: 'synced', syncConnected: true });
-          showToast('后端同步完成');
+          /* 有失败项时给出「有 N 项失败」而不是纯粹的「后端同步完成」；
+             errors 为空则与改动前**逐字相同**。 */
+          showToast(failures.length > 0 ? failures.join('；') : '后端同步完成');
         })
         .catch((e: unknown) => {
           const m = extractError(e);

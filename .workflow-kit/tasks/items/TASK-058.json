@@ -1,0 +1,273 @@
+{
+  "schema_version": 1,
+  "id": "TASK-058",
+  "title": "同步失败对用户可见：前端消费 SyncReport.errors",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+  "ui_checks": [
+    "同步过程中后端返回非空 errors 时，用户能看到明示「有 N 项失败」的提示（不再是「后端同步完成」）",
+    "提示与既有 toast 风格一致（沿用 showToast，不新造控件/弹窗）",
+    "成功路径（errors 为空）文案与顺序完全不变：仍提示「后端同步完成」",
+    "同时存在「直连抓取失败」与「同步 errors」时两类信息都在，不互相覆盖",
+    "深色与浅色两套主题下提示完整可读、不截断、不溢出",
+    "错误明细可查看：提示中或其后能获知具体失败原因（非仅计数）"
+  ],
+  "status": "verified",
+  "objective": "TASK-056 已让后端把 pull 失败写入 `report.errors`，但**前端没有任何代码读取该字段**，导致**同步实际失败时界面仍提示「后端同步完成」**——用户看到成功、数据却没进来。已实证：TASK-056 的端到端测试用测试库触发器注入真实插入失败，修复后的应用返回 `errors:[\"拉取订阅 … 建本地失败: [db] e2e injected insert failure\", …]`，界面**依然**弹「后端同步完成」。根因：`src-tauri/src/sync/phases.rs` 在 errors 非空时仍返回 `Ok(report)`，故 `SyncTab.tsx` 的 `.catch()` 对该路径永不触发；而两处 `syncPhase` 调用点（`SyncTab.tsx` 的保存后后台链、`store/slices/sync.ts` 的 `triggerManualSync`）都**丢弃了返回的 report**。本任务让前端消费该字段，把「同步完成但有 N 项失败」真实告知用户。",
+  "non_goals": [
+    "改 Rust 源码或同步协议语义（`src-tauri/**` 须零改动；后端已在 TASK-056 上报，本任务只做前端消费）",
+    "把「errors 非空」改成抛错（`phases.rs` 的 `Ok(report)` 语义是有意的：失败不应中断整个同步链）",
+    "改动成功路径的既有文案与顺序（`已拉取订阅源…` / `后端同步完成` 等须逐字不变）",
+    "补强 TASK-054 遗留的 P1/P4 弱断言测试（独立后续项）",
+    "修 REQ-007 其余未修项",
+    "引入新依赖",
+    "改动工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-002",
+    "REQ-003"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-057"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-sync-errors-visibility-20260918"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md",
+      ".workflow-kit/tasks/evidence/TASK-058-*",
+      "src/**",
+      "tools/**",
+      "tsconfig.test.json"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+      ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "**建立可复跑的失败场景**：新增测试确定性构造「后端返回非空 errors」的 `SyncReport`，断言前端**确实**产生失败提示（而非成功提示）。该断言须**修前失败、修后通过**，并给出修前失败证据",
+    "**成功路径逐字不变**：errors 为空时，既有文案（`已拉取订阅源，正在同步文章状态…`、`后端同步完成`、`订阅同步完成，正在同步文章状态…`）与调用顺序**一字不改**；须以断言或 diff 证据证明",
+    "**两处调用点都覆盖**：`SyncTab.tsx`（保存并同步的后台链）与 `store/slices/sync.ts`（`triggerManualSync`）**都要**消费 report.errors；只改一处不算完成",
+    "**错误明细可获知**：提示须让用户能看到**具体失败原因**（可含计数 + 首条原因，或可展开），不得只给一个孤立数字",
+    "**不覆盖既有失败信息**：`triggerManualSync` 末端已有「N 个源直连失败」提示，两类失败信息须共存（不互相吞掉）",
+    "**UI 证据（ui_change=true）**：提供**深色与浅色两套主题**下的实机截图，覆盖 `ui_checks` 全部条目；须为运行中应用的截图（非设计稿），并附交互报告说明验证方式与操作路径",
+    "**端到端验证（本任务特有，须做）**：用真实运行的应用 + 本地协议服务端，注入真实插入失败，实测**界面出现失败提示**；给出实际 toast 文本。若无法达成，须停下来报告而不是改断言",
+    "既有前端回归不回归：`npm run test:frontend` 通过（基线 **255/255**，可增不可减）",
+    "既有 Rust 测试不得回退：`cargo test` 通过（基线 **141 passed / 0 failed / 9 ignored**）",
+    "四门禁全绿：`cargo test`、`npm run lint`、`npm run build`、`npm run test:frontend`",
+    "**`src-tauri/**` 零改动**（给出 `git diff --stat -- src-tauri` 为空的证据）；不引入新依赖（`package.json` 零改动）",
+    "文本文件必须 LF 行尾；台账改动须在 begin 之前完成；行数以 `splitlines()` 口径报告（不得用 `Measure-Object -Line`）",
+    "**用户真实数据库不得写入**：`%APPDATA%\\com.fluxreader.app` 只读使用；端到端测试如需改数据，须先备份并在结束后逐字节还原（给出哈希一致的证据）"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-18 基线（TASK-057 之后）：`npm run lint` exit 0（0 warnings/0 errors）、`npm run build` exit 0、`npm run test:frontend` exit 0 且 **255/255**（既有 26 + 新增 229）、`cargo test` **141 passed / 0 failed / 9 ignored**。**本任务有意改变行为**：同步在「完成但存在失败项」时对用户的呈现，由『提示成功』改为『提示成功 + 明示 N 项失败及原因』——这是**用户可见文案与可观测性契约变化**，已由 DEC-sync-errors-visibility-20260918 覆盖。**基线盲区须如实记录**：前端 229 条新增断言中**没有一条**针对 `SyncReport.errors` 的消费（全仓 `src/**` 与 `tools/**` 无任何代码读取 `.errors`），因此该路径此前完全无覆盖；本任务必须补上，否则同类失败仍会对用户不可见。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md"
+    },
+    "decision_ids": [
+      "DEC-sync-errors-visibility-20260918"
+    ],
+    "actions": [
+      {
+        "action": "add",
+        "target": "『后端返回非空 errors ⇒ 前端产生失败提示』的可复跑断言（含修前失败证据）",
+        "reason": "该路径此前完全无覆盖（无任何代码读取 errors）。须有断言锁定新契约，防止回退成『静默报成功』。",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "『errors 为空 ⇒ 既有成功文案逐字不变』的断言",
+        "reason": "本次改动触及同步提示链，必须锁定成功路径未被改坏——否则修复失败可见性的同时会破坏既有已验收交互。",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "adapt",
+        "target": "`src/components/settings/SyncTab.tsx` 与 `src/store/slices/sync.ts` 中两处 `syncPhase` 调用点的 report 消费",
+        "reason": "这两个调用点当前丢弃 report（`.then(async () => …)` 不接收参数 / `feedsReport` 仅用于判真）。需改为读取 errors 并提示；若既有断言引用了旧提示文案，须相应适配而非删除。",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "其余前端断言（含 TASK-057 的 14 条 Endpoint 文案/提示断言、TASK-052 分页口径、TASK-051 store 行为）",
+        "reason": "本任务只改同步失败提示的呈现，不得波及已验收的文案、分页与 store 行为；它们是『改动未外溢』的直接证据。",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "全部 Rust 测试（141 passed / 9 ignored，含 TASK-055/056 的墓碑与零 folder 新库回归网）",
+        "reason": "本任务按边界不改 Rust（`src-tauri/**` 零改动）；Rust 侧全绿即证明同步引擎语义未被触碰。",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-058-input-869500a5c08b47568e4297e6b99ed78a.json",
+    "digest": "b63f41d395fe970b512da3180d1c0d470537730dd12e5c51166d54abef61a80c",
+    "source_revision": null,
+    "definition_digest": "7208b94a4486a2f05211d4ac3f6b80c35162e4e8addcbfc2a3eea913e7f4c4d2"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-18T12:05:05.524260Z",
+    "deadline_at_utc": "2026-09-18T16:05:05.524260Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-6108ba756ba5490f924879b7f22b2f18",
+  "run_ids": [
+    "RUN-5fe04a5e590e47e6a11cd7f0e8d30ff3",
+    "RUN-0cdedd59c05544b8b2dd7a3508448af8",
+    "RUN-9e2e3d0f136b4f5eb7b33f82f9d29861",
+    "RUN-1d654a01e98c499382916771f20acec8",
+    "RUN-99e553929986422baffb9c416e758752"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-1d654a01e98c499382916771f20acec8-candidate.json",
+    "candidate_digest": "9f90a6b3ab10afc37ac6e4af89f6c8e3dcd36ef90486e53a35a233125d12cc70",
+    "verification_run": "RUN-1d654a01e98c499382916771f20acec8",
+    "review_run": "RUN-99e553929986422baffb9c416e758752",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-057.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task057.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-057": "353cb3c73f687ef37f7ae4e051f7ad3d385cc66467feb24e4553f62418c9db12"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-18T12:05:05.632949Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-18T12:16:07.916993Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-18T12:16:29.368054Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-18T12:31:07.073931Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-18T12:54:44.572502Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-18T13:08:41.262163Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

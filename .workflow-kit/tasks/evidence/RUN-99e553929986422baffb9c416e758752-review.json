@@ -1,0 +1,68 @@
+{
+  "task_id": "TASK-058",
+  "candidate_digest": "9f90a6b3ab10afc37ac6e4af89f6c8e3dcd36ef90486e53a35a233125d12cc70",
+  "verification_run": "RUN-1d654a01e98c499382916771f20acec8",
+  "verdict": "PASS",
+  "summary": "第 3 轮独立审查（未参与实现的独立上下文）逐项复跑全部 11 项核对，全部通过、findings 为空。审查者用 `project_workflow.py::capture()` 在同样的 15 个快照根上独立重算候选摘要 → `9f90a6b3…` **一致**，133/133 文件哈希与工作区逐一相符。**核心：第 2 轮的两条 findings 均已真正闭环**。(D) 参数解包——审查者**直接取证而非读报告**：临时在 (f5) mock 里加 console.log 跑套件，原始输出 `sync_phase rawArgs={\"which\":\"feeds\",\"full\":false}` / `{\"which\":\"states\",\"full\":true}`，证明**不存在嵌套 `.args`**（旧写法 `args.args.which` 必为 undefined、两阶段都回落 'feeds'），与 `api.ts:485-488` 的 `inv('sync_phase', { which, full })` 相符；随后做**删改闭环**：只删掉 `sync.ts` 里 states 的消费 → `npm.cmd run test:frontend` **exit 1**、合计 **278/280**，恰好 2 条失败 `(f5-st) 运行时·仅 states 阶段失败也必须被呈现` 与 `(f5-st) 仅 states 失败时成功子句仍完整保留在后`——而第 2 轮同一改动是 **275/275 全绿**，故该盲区确已封闭；并确认 (f5-st) 只驱动 states（feeds.errors 为空、断言要求含 'states boom'）；另做反向验证：把失败移回末尾 → exit 1 / 278-280，`(f4)`+`(f5)` 顺序断言失败，证明「失败前置」也是承重的。还原哈希 `sync.ts = 7C686518…`（实验前后一致）。(E) 窄窗口——审查者在**运行中的应用上经 CDP 实测**（真实 WebView2）：向真实 `.toast-layer` 注入 `.toast-pill visible`、等 400ms 让 `.2s` transition 落定（其指出未等落定会因 `scale(.96)` 读数失真），读 `getBoundingClientRect()` vs `innerWidth`：长失败串的左侧溢出 viewport 400→0（修前 761.97）、500→0（661.97）、600→0（561.97）、**847（=980px 窗口，应用 minWidth）→0（修前 314.6）**、953→0（208.75）、1084→0（77.76）、1250→0、1400→0；**即修前问题比作者报告更严重**（作者量 315/209/78，审查者 314.6/208.75/77.76 吻合，并补测出更窄视口下 762px 溢出）。短提示几何**逐字节未变**：`后端同步完成` 116.15px（与旧版相同，吻合作者的 116px）、`已刷新，新增 12 条` 141.6px、`已刷新，新增 3 条，2 个源直连失败` 230.69px，均 1 行、溢出 0；所有修后用例 `scrollWidth == clientWidth`（无内部截断），长文案在 460px 下换行约 3 行。审查者另主动检查未要求项 `.toast-pill.with-action` 重声明 `max-width: 460px`（比新增的 100% 更具体），实测两种真实重试 toast 在 400–1250px 下溢出均为 0（因 layer 的 min() 钳制），判为非缺陷但记下「若 layer 钳制将来改变，这条会最先失效」。**既有性质复确认**：成功文案——审查者从工作区与 `git show 4b496c0:` 各自抽取**全部 showToast 字面量**做字节比对，30 条旧字面量逐字仍在（含 6 条关键串）；失败前置顺序源码+运行时双证；边界——`git diff --stat -- src-tauri` 与 `git status --porcelain -- src-tauri` 均空、package/lock 未改、`phases.rs` 仍为 `Ok(report)`（27/78/92 行）且 `report.errors.extend(states.errors)`，errors 不抛错。**门禁**（审查者自行重跑）：cargo 141 passed / 0 failed / 9 ignored exit 0、lint exit 0（0 warnings/0 errors，58 文件）、build exit 0、frontend **280/280**（26 既有 + 254 新增）；产物 diff 恰为 6 个文件。**UI 证据按像素判定**（审查者自行用 node:zlib 解码 + Windows zh-Hans OCR 引擎识别）：`TASK-058-e2e-failure-visible.png` 2102x1351 平均亮度 **29.43**、角落 rgb(7,8,10) → 确为深色；OCR 读到 y≈1269 处 toast 全文与「已连接：e2euser（2 个订阅）」；`TASK-058-ui-light-failure.png` 平均亮度 **209.18**、角落 rgb(~160) → 确为浅色，同一文案 OCR 清晰可读；两张 toast 文本与「保存并同步链的失败替换成功文案」这一当前实现**一致**（该链无顺序问题）。审查者另指出 `TASK-058-ui-narrow-980.png` 当时**无 toast**（故作为窄窗口证据不足）——该点我已修正：重跑完整端到端（真实触发器 + 真实点击）在 980px 下捕获到真实 toast，实测宽 459px、`overflowLeft: 0`、未截断、换行 3 行、失败标记完整可见，文件已覆盖。**诚实性评估**：审查者判定 §6（修复 D/E）与 §10（5 条自身失误）**准确且自省**——D 点名了确切错误表达式、确切后果与危害（「我为修零覆盖打的补丁自身零覆盖」）、并用与审查者相同的删改实验自证；§10 逐条标注发现者（2 条自查、3 条审查发现）；报告未过度声称。两处不精确（均不影响结论、已订正）：长 toast 行数（我写 4 行，审查者实测约 2.96 行）与窄窗口截图当时无 toast。审查者清理完毕：其创建的 8 个临时文件全删、CDP device-metrics 覆盖已清、6 个产物文件哈希与候选清单一致；其期间 lint 一度报 5 warnings 系其自身临时脚本所致，清理后恢复 0。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务要求全部满足且经独立实测：后端已上报的失败现在对用户可见（失败提示含 2 条具体原因，深/浅/窄窗口三份实机证据齐备）；「错误明细可获知」满足（内联前 2 条 + 总数）；「两类失败信息共存」由 (f4) 断言与运行时 (f5) 锁定；「成功路径文案逐字不变」由审查者 30 条字面量字节比对 + 运行时 toast 捕获双重确认。owner 边界（不改 Rust、不把 errors 改成抛错、不改成功文案）经 diff 为空 + phases.rs 三处 Ok(report) + 字节比对三重证明。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-058-report.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "审查者独立重跑四门禁：cargo 141 passed / 0 failed / 9 ignored exit 0、lint exit 0（0 warnings/0 errors）、build exit 0、frontend 280/280 exit 0（26 既有 + 254 新增）。既有 26 条回归断言未改动一行。短提示几何逐字节未变（116.15px vs 旧版 116.15px）——CSS 改动未波及既有提示观感。产物 diff 恰为 6 个声明文件，`src-tauri/**`、package/lock、工作流脚本均未改。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-058-interaction-report.md"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "本任务的核心失败路径即「同步失败对用户不可见」。审查者以三组独立实验证明其已被覆盖且可被回归捕获：(1) 中和 helper → exit 1 / 267-280，8 条依赖 helper 的断言（含两条运行时）失败，证同义反复断言确已换成非平凡断言；(2) 删掉 states 消费 → exit 1 / 278-280，`(f5-st)` 两条失败（第 2 轮为全绿，盲区已封闭）；(3) 把失败移回末尾 → exit 1 / 278-280，`(f4)`+`(f5)` 顺序断言失败。另有 SyncTab 半回退 → exit 1 / 274-280 命中「后端同步完成只在 errors 为空的分支」。窄窗口这条失败路径亦已闭合（溢出 315→0）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-058-report.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "逻辑抽为纯模块 `syncErrors.ts`（无副作用），沿用项目既有可测做法；helper 以「无失败返回 null」把成功路径的分支选择交给调用方，结构上防止误改既有文案。(f4) 兼顾源码文本与运行时断言，(f5)/(f5-st) 用 invoke mock 真实驱动而非只比字符串；(f6) 锁定 CSS 契约。审查者指出 `.toast-pill.with-action` 的 `max-width: 460px` 比新增的 `100%` 更具体，是将来若改动 layer 钳制时最先失效的一条——已作为观察记入报告，未夸大为缺陷。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-058-interaction-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务只改同步提示的文案映射与 toast 容器的宽度/换行样式（纯前端字符串处理与 CSS），不触及查询、渲染路径复杂度或同步时序；无性能主张需要证据。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-058-report.md"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+    "checked_states": [
+      "同步过程中后端返回非空 errors 时，用户能看到明示「有 N 项失败」的提示（不再是「后端同步完成」）",
+      "提示与既有 toast 风格一致（沿用 showToast，不新造控件/弹窗）",
+      "成功路径（errors 为空）文案与顺序完全不变：仍提示「后端同步完成」",
+      "同时存在「直连抓取失败」与「同步 errors」时两类信息都在，不互相覆盖",
+      "深色与浅色两套主题下提示完整可读、不截断、不溢出",
+      "错误明细可查看：提示中或其后能获知具体失败原因（非仅计数）"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-058-e2e-failure-visible.png",
+      ".workflow-kit/tasks/evidence/TASK-058-ui-light-failure.png",
+      ".workflow-kit/tasks/evidence/TASK-058-ui-narrow-980.png",
+      ".workflow-kit/tasks/evidence/TASK-058-interaction-report.md",
+      ".workflow-kit/tasks/evidence/TASK-058-report.md"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "task_id": "TASK-058",
+  "run_id": "RUN-5fe04a5e590e47e6a11cd7f0e8d30ff3",
+  "status": "ready_for_verification",
+  "summary": "修『同步失败对用户不可见』：后端 TASK-056 已把 pull 失败写入 report.errors，但前端无任何代码读取该字段（phases.rs 在 errors 非空时仍返回 Ok，故 .catch() 永不触发；两处 syncPhase 调用点都丢弃 report）。改动：新增纯模块 src/store/syncErrors.ts（syncFailureMessage 有失败项返回『同步完成，但有 N 项失败：<前2条原因>』、无失败项返回 null 使调用方走原分支）；SyncTab.tsx 与 store/slices/sync.ts 两处消费 report，手动链把失败**前置**于既有「已刷新…」；base.css 收紧 toast 层宽度并在窄窗口允许换行。**审查历史（两轮，均 PASS/FAIL 后按意见改动，故候选两度变更）**：第 1 轮 PASS（findings 空），但指出两条我未报告的缺陷：①手动链把失败排末尾，而 showToast 只留最后 4 条、每条 2.2s 消失 → 最该被看到的失败最易被挤掉（属实，已改为前置；其『会按 219px 被截断』的推论不成立——219px 是 Endpoint 输入框宽度，我实测真实 .toast-pill 为 666/1142/883px、scrollWidth==clientWidth 未截断，故只采纳顺序结论）；②(f1) 一条断言是同义反复（修复前后都成立），已改为模拟旧调用点真实形态。第 2 轮 FAIL，指出**我为回应第 1 轮而新增的 (f5) 自身有缺陷**：mock 误写 `args.args.which`，而 api.syncPhase 的形态是 `inv('sync_phase', { which, full })`（第二参数即 args 本身），导致两阶段都回落 feeds——states 消费点零覆盖（审查实证：删掉 states 消费后全套仍 275/275 全绿）。我复核源码确认后修正解包，并新增 (f5-st)『仅 states 阶段失败』用例；闭环验证：删掉 states 消费现在 exit 1（2 条失败），修前为全绿。第 2 轮另指出窄窗口下 nowrap 右对齐 pill 向左溢出；我实测比其报告更严重（980px 窗口/847px 视口溢出 315px，恰把『有 N 项失败』标记推出屏幕）——已把 layer 改为 max-width: min(460px, calc(100vw - 40px))、pill 改为可换行；修后三种宽度溢出均为 0，短提示宽度未变（后端同步完成 116px），并加 (f6) 断言锁定。门禁：cargo 141/0/9（Rust 零改动）、lint 0/0、build exit 0、frontend 280/280。边界：src-tauri/** 零改动、未把 errors 非空改成抛错、成功路径文案逐字未变、未引入新依赖；端到端重跑通过、用户库还原哈希一致。作者失误汇总见报告 §10（含『为覆盖率打的补丁自身也需覆盖率验证』）。",
+  "changed_files": [
+    "src/store/syncErrors.ts",
+    "src/components/settings/SyncTab.tsx",
+    "src/store/slices/sync.ts",
+    "src/styles/base.css",
+    "tools/frontend-regression.mjs",
+    "tsconfig.test.json"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

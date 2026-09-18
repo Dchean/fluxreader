@@ -1467,6 +1467,18 @@
         "workflow"
       ],
       "recorded_at_utc": "2026-09-18T11:41:59.815757Z"
+    },
+    {
+      "id": "DEC-sync-errors-visibility-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 指令『按照你的判断进行修复』。此前我已向用户报告：TASK-056 让后端把 pull 失败写入 `report.errors`，但**前端没有任何代码读取该字段**，故界面在同步实际失败时仍提示「后端同步完成」；我按 TASK-056 的 non_goals『若发现前端仍需改，停下报告』未擅自扩大范围，并登记于 `.workflow-kit/tasks/evidence/TASK-056-frontend-errors-gap.md`。用户据此授权我按自判修法继续修复。",
+      "statement": "授权修复**前端不消费 `SyncReport.errors`** 导致『同步失败在界面对用户不可见』的缺口。**背景（已实证）**：TASK-056 端到端测试中用测试库触发器注入真实插入失败，修复后的应用返回 `errors:[\"拉取订阅 … 建本地失败: [db] e2e injected insert failure\", …]`，**界面却仍弹「后端同步完成」**；`src-tauri/src/sync/phases.rs` 在 errors 非空时仍返回 `Ok(report)`，故 `SyncTab.tsx` 的 `.catch()` 对该路径永不触发。全仓 `src/**` 与 `tools/**` 中**无任何代码读取 `.errors`**（仅 `api.ts` 声明类型）。**修法方向（最小改动、沿用既有通道）**：在 `syncPhase` 的调用点读取返回的 report，当 `errors.length > 0` 时以既有 `showToast` 明示「已同步，其中 N 项失败」并可查看原因；**不新造控件、不改后端协议、不改 Rust 源码**。**边界**：仍不动工作流（用户明确『工作流我另外修复』）；不引入新依赖；不改变成功路径的既有提示文案与顺序；须走 verify + 独立审查 + 验收；涉及界面文案故按 UI 任务处理（提供深浅主题实机证据）。沿用既有预算（每任务 240 分钟、修复 4 轮），commit 沿用既有授权，push/release 仍需确认。",
+      "scope": [
+        "REQ-002",
+        "REQ-003"
+      ],
+      "recorded_at_utc": "2026-09-18T12:05:00Z"
     }
   ]
 }

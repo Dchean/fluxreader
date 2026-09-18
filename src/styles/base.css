@@ -2931,7 +2931,13 @@ body {
   gap: 8px;
   z-index: 500;
   pointer-events: none;
-  max-width: 460px;
+  /* TASK-058：窄窗口下不让长提示溢出屏幕左侧。
+     此前 layer 与 pill 都无宽度约束，而 pill 是 `white-space: nowrap` 的右对齐元素，
+     于是「同步完成，但有 N 项失败：…」这类长文案会向左溢出视口——
+     实测 980px（应用最小宽度）下溢出 315px，**恰好把失败标记本身推到屏幕外**，
+     等于让本任务要交付的「失败可见」在窄窗口失效。
+     保持既有 460px 上限，同时允许收窄到视口内（并给右侧 20px 留位）。 */
+  max-width: min(460px, calc(100vw - 40px));
   transition: bottom 0.25s ease;
 }
 
@@ -2960,7 +2966,14 @@ body.has-player-expanded .toast-layer {
   transform: translateY(12px) scale(0.96);
   transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   text-align: center;
-  white-space: nowrap;
+  /* TASK-058：由 `nowrap` 改为可换行。
+     原为 `nowrap` + 无宽度约束的右对齐元素 → 长文案向左溢出视口（实测最小宽度下 315px，
+     把「有 N 项失败」标记本身推出屏幕）。改为正常换行后，
+     短提示在 layer 上限内仍是一行（观感不变），长提示换行显示、原因不被吞。
+     `overflow-wrap: anywhere` 让超长 URL/错误串必要时断行而不撑破容器。 */
+  white-space: normal;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .toast-pill.visible {

@@ -2002,8 +2002,215 @@ await (async () => {
     && notFound.startsWith('ClientLogin → 404'));
   checkNew('(e5) 空串/异常输入不抛错（健壮性）',
     endpointHint('') === '' && endpointHint('   ') === '   ');
-}
 
+  /* ============================================================
+     TASK-058：同步失败对用户可见（前端消费 SyncReport.errors）
+
+     背景：后端 feeds_phase/states_phase 在 report.errors 非空时**仍返回 Ok**
+     （有意语义：单项失败不中断整链），故 .catch() 永不触发；两处 syncPhase 调用点
+     此前都丢弃 report，失败对用户完全不可见。
+
+     实证（TASK-056 端到端）：后端返回 errors 含 2 条 FOREIGN KEY 失败，
+     界面却弹「后端同步完成」、本地 feeds 为 0。
+
+     本组锁定：(f1) 有失败项 ⇒ 必须产生「有 N 项失败」提示（修前为 null → 失败）；
+     (f2) 无失败项 ⇒ 返回 null，使调用方能保持既有成功文案**逐字不变**。
+     ============================================================ */
+  const { syncFailureMessage, hasSyncFailures, MAX_DETAIL } =
+    await import('../dist-test/store/syncErrors.js');
+
+  /* (f1) 有失败项必须可见——这是本任务的核心契约 */
+  const withErrors = {
+    errors: [
+      '拉取订阅 http://x/uncat.xml 建本地失败: [db] FOREIGN KEY constraint failed',
+      '拉取订阅 http://x/cat.xml 建本地失败: [db] FOREIGN KEY constraint failed',
+    ],
+  };
+  const msg = syncFailureMessage(withErrors);
+  checkNew('(f1) 后端返回非空 errors ⇒ 产生「有 N 项失败」提示（修前该值为 null，失败静默）',
+    typeof msg === 'string' && msg.includes('2 项失败') && hasSyncFailures(withErrors) === true);
+  checkNew('(f1) 提示必须含**具体失败原因**可定位，不得只给一个孤立数字',
+    !!msg && msg.includes('FOREIGN KEY constraint failed') && msg.includes('uncat.xml'));
+  checkNew('(f1) 修前行为可复现：**丢弃 report** 时无从得知有失败（旧调用点形态的真实后果）',
+    // 旧代码是 `.then(async () => …)`——回调**不收参数**，故 report 根本没进作用域。
+    // 用与旧代码同形的调用模拟：丢弃返回值后，调用方拿不到任何失败信号。
+    (() => {
+      const callSiteLikeOld = (_report) => null;   // 旧调用点等价：忽略入参、不返回信号
+      const signal = callSiteLikeOld(withErrors);
+      return signal === null && syncFailureMessage(withErrors) !== null;
+    })());
+
+  /* (f1b) 多条时截断，避免 toast 过长；但仍告知总数 */
+  const many = { errors: Array.from({ length: 7 }, (_, i) => `失败项 ${i + 1}`) };
+  const manyMsg = syncFailureMessage(many);
+  checkNew('(f1b) 失败项过多时只列前若干条，但仍给出总数（不丢「有 7 项」这一事实）',
+    !!manyMsg && manyMsg.includes('7 项失败') && manyMsg.includes('失败项 1')
+    && !manyMsg.includes(`失败项 ${MAX_DETAIL + 3}`));
+  checkNew('(f1b) 单条失败也正常报出，不出现多余分隔',
+    syncFailureMessage({ errors: ['单条原因'] }) === '同步完成，但有 1 项失败：单条原因');
+
+  /* (f2) 成功路径必须「无信号」，以便调用方保持既有文案逐字不变 */
+  checkNew('(f2) errors 为空数组 ⇒ 返回 null（调用方据此保持既有成功文案逐字不变）',
+    syncFailureMessage({ errors: [] }) === null && hasSyncFailures({ errors: [] }) === false);
+  checkNew('(f2) report 缺失 / errors 字段缺失 / 非数组 ⇒ 一律返回 null（不误报失败）',
+    syncFailureMessage(null) === null && syncFailureMessage(undefined) === null
+    && syncFailureMessage({}) === null
+    && syncFailureMessage({ errors: null }) === null
+    && syncFailureMessage({ errors: 'oops' }) === null);
+
+  /* (f3) 健壮性：errors 非空但内容不可读时，仍须让用户知道「有失败」 */
+  const blanks = syncFailureMessage({ errors: ['   ', ''] });
+  checkNew('(f3) errors 非空但内容全空白 ⇒ 仍提示有失败（只是无原因），不退回静默',
+    !!blanks && blanks.includes('1 项失败') === false && blanks.includes('2 项失败')
+    && blanks.includes('原因未提供'));
+
+  /* (f4) 既有成功文案一字未改——用**源码文本**核对，而不是只断言常量存在 */
+  const fs = await import('node:fs');
+  const syncTabSrc = fs.readFileSync(new URL('../src/components/settings/SyncTab.tsx', import.meta.url), 'utf8');
+  const syncSliceSrc = fs.readFileSync(new URL('../src/store/slices/sync.ts', import.meta.url), 'utf8');
+  checkNew('(f4) 成功路径文案逐字保留在源码中（改动前就有、改动后仍在）',
+    syncTabSrc.includes("'已拉取订阅源，正在同步文章状态…'")
+    && syncTabSrc.includes("'后端同步完成'")
+    && syncSliceSrc.includes("'订阅同步完成，正在同步文章状态…'"));
+  checkNew('(f4) 「后端同步完成」只在 errors 为空的分支出现（不被失败路径复用）',
+    /failures\.length > 0 \? failures\.join\('；'\) : '后端同步完成'/.test(syncTabSrc));
+  checkNew('(f4) 两处调用点**都**消费了 report 的 errors（只改一处不算完成）',
+    syncTabSrc.includes('syncFailureMessage(') && syncSliceSrc.includes('syncFailureMessage('));
+  checkNew('(f4) 手动链保留既有「N 个源直连失败」信息，且与同步失败信息**共存**（不互相吞掉）',
+    syncSliceSrc.includes('个源直连失败') && syncSliceSrc.includes('syncFailures'));
+  /* 审查 FINDING 1 修订：失败必须**前置**。showToast 只保留最后 4 条（ui.ts 的
+     `.slice(-4)`）且每条 2.2s 消失；失败若排在末尾，多提示连发时最该被看到的
+     失败反而最先被挤掉——那等于让本任务要解决的问题在提示层复活。 */
+  checkNew('(f4) 有同步失败时，失败文案**前置**于「已刷新…」（否则第一眼读到的是成功）',
+    /\$\{syncFailures\.join\('，'\)\}，\$\{base\}/.test(syncSliceSrc));
+  checkNew('(f4) 无同步失败时走 `base` 原分支：既有三条成功文案逐字保留（含顺序与分隔符）',
+    /已刷新，新增 \$\{summary\.new_articles\} 条，\$\{summary\.failed_feeds\} 个源直连失败/.test(syncSliceSrc)
+    && /已刷新，新增 \$\{summary\.new_articles\} 条`/.test(syncSliceSrc)
+    && syncSliceSrc.includes("'已刷新，无新文章'"));
+  checkNew('(f4) 提示为纯函数：同输入两次结果一致、不改动入参',
+    (() => {
+      const r = { errors: ['a', 'b'] };
+      const before = JSON.stringify(r);
+      const a = syncFailureMessage(r);
+      const b = syncFailureMessage(r);
+      return a === b && JSON.stringify(r) === before;
+    })());
+
+  /* ---------- (f5) 运行时驱动真实 triggerManualSync（此前零运行时覆盖） ----------
+     审查指出：上述 (f4) 多为**源码文本**断言。这里改为**实际调用**手动同步链，
+     捕获它真正发出的 toast 文本，与改动前的模板逐字比对。
+     两类场景：(a) 同步无失败 ⇒ 必须与旧文案逐字相同；
+              (b) 同步有失败 ⇒ 失败必须出现，且**前置**于「已刷新…」。 */
+  const syncPhasePlan = { feeds: { errors: [] }, states: { errors: [] } };
+  const refreshPlan = { value: { new_articles: 3, failed_feeds: 0 } };
+  const prevInvoke = globalThis.__INVOKE__;
+  globalThis.__INVOKE__ = (cmd, args) => {
+    invokeCalls.push({ cmd, args });
+    switch (cmd) {
+      case 'sync_phase': {
+        /* api.syncPhase 的调用形态是 `inv('sync_phase', { which, full })`——
+           第二参数**就是** args 对象本身（不像 list_articles 那样再包一层 `{ args }`）。
+           此处曾误写成 `args.args.which`，导致两个阶段都回落到 'feeds'，
+           于是 states 阶段的消费点**完全没有被 (f5) 覆盖**（审查 FINDING 实测：
+           删掉 states 的消费后全套仍 275/275）。 */
+        const which = (args && args.which) || 'feeds';
+        return Promise.resolve({
+          pushed_states: 0, pushed_feeds: 0, pulled_feeds: 0, pulled_entries: 0,
+          merged_states: 0, fallback_entries: 0,
+          errors: (syncPhasePlan[which] && syncPhasePlan[which].errors) || [],
+        });
+      }
+      case 'refresh_all_feeds': return Promise.resolve(refreshPlan.value);
+      case 'list_folders': return Promise.resolve([]);
+      case 'list_feeds': return Promise.resolve([]);
+      case 'list_articles': return Promise.resolve([]);
+      case 'article_counts': return Promise.resolve({});
+      default: return Promise.resolve(null);
+    }
+  };
+
+  const captureToasts = async (fn) => {
+    const seen = [];
+    const orig = store.getState().showToast;
+    store.setState({ showToast: (t) => { seen.push(t); } });
+    try { await fn(); } finally { store.setState({ showToast: orig }); }
+    return seen;
+  };
+
+  // (a) 无失败：文案必须与改动前逐字相同
+  syncPhasePlan.feeds = { errors: [] };
+  syncPhasePlan.states = { errors: [] };
+  refreshPlan.value = { new_articles: 3, failed_feeds: 0 };
+  let toasts = await captureToasts(async () => {
+    store.getState().triggerManualSync();
+    for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 5));
+  });
+  checkNew('(f5) 运行时·无失败：最终 toast 逐字为「已刷新，新增 3 条」（与改动前相同）',
+    toasts.includes('已刷新，新增 3 条'), JSON.stringify(toasts));
+
+  refreshPlan.value = { new_articles: 3, failed_feeds: 2 };
+  toasts = await captureToasts(async () => {
+    store.getState().triggerManualSync();
+    for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 5));
+  });
+  checkNew('(f5) 运行时·无同步失败但有直连失败：逐字为「已刷新，新增 3 条，2 个源直连失败」',
+    toasts.includes('已刷新，新增 3 条，2 个源直连失败'), JSON.stringify(toasts));
+
+  refreshPlan.value = null;
+  toasts = await captureToasts(async () => {
+    store.getState().triggerManualSync();
+    for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 5));
+  });
+  checkNew('(f5) 运行时·无新文章：逐字为「已刷新，无新文章」',
+    toasts.includes('已刷新，无新文章'), JSON.stringify(toasts));
+
+  // (b) 有失败：必须出现，且前置
+  syncPhasePlan.feeds = { errors: ['拉取订阅 http://x/a.xml 建本地失败: boom'] };
+  syncPhasePlan.states = { errors: [] };
+  refreshPlan.value = { new_articles: 3, failed_feeds: 0 };
+  toasts = await captureToasts(async () => {
+    store.getState().triggerManualSync();
+    for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 5));
+  });
+  const failToast = toasts.find((t) => t.includes('项失败'));
+  checkNew('(f5) 运行时·同步有失败：最终 toast 确实含失败（修前此处只有「已刷新…」）',
+    !!failToast && failToast.includes('boom'), JSON.stringify(toasts));
+  checkNew('(f5) 运行时·失败文案**前置**：失败出现在「已刷新」之前（第一眼先读到失败）',
+    !!failToast && failToast.indexOf('项失败') < failToast.indexOf('已刷新'),
+    String(failToast));
+
+  /* (f5-st) **仅 states 阶段**失败——这一例专门防「mock 参数解包写错、两个阶段都
+     回落到 feeds」的盲区（审查 FINDING）。若 mock 只驱动 feeds，则删掉 states 的
+     消费后本断言仍会通过；加上它之后该缺陷即被捕获。 */
+  syncPhasePlan.feeds = { errors: [] };
+  syncPhasePlan.states = { errors: ['状态阶段失败: [db] states boom'] };
+  refreshPlan.value = { new_articles: 4, failed_feeds: 0 };
+  toasts = await captureToasts(async () => {
+    store.getState().triggerManualSync();
+    for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 5));
+  });
+  const stToast = toasts.find((t) => t.includes('项失败'));
+  checkNew('(f5-st) 运行时·**仅 states 阶段**失败也必须被呈现（防 mock 只驱动 feeds 的盲区）',
+    !!stToast && stToast.includes('states boom'), JSON.stringify(toasts));
+  checkNew('(f5-st) 仅 states 失败时，成功子句仍完整保留在后（未相互吞掉）',
+    !!stToast && stToast.includes('已刷新，新增 4 条'), String(stToast));
+
+  /* (f6) 窄窗口不把失败提示推出屏幕（审查 FINDING 2 修订）。
+     缺陷形态：`.toast-pill` 原为 `white-space: nowrap` 且与 layer 均无宽度约束，
+     右对齐元素向左溢出 → 实测应用最小宽度（980px 窗口 / 847px 视口）下溢出 **315px**，
+     **恰好把「有 N 项失败」这个标记本身推到屏幕外**——本任务要交付的可见性在窄窗失效。
+     修法：layer 加 `max-width: min(460px, calc(100vw - 40px))`、pill 改为可换行。 */
+  const cssSrc = fs.readFileSync(new URL('../src/styles/base.css', import.meta.url), 'utf8');
+  checkNew('(f6) toast 层宽度受视口约束（防窄窗口下长提示溢出屏幕左侧）',
+    /\.toast-layer\s*\{[^}]*max-width:\s*min\(460px,\s*calc\(100vw - 40px\)\)/s.test(cssSrc));
+  checkNew('(f6) toast 文案允许换行（防长失败提示被截断而看不到原因）',
+    /\.toast-pill\s*\{[^}]*white-space:\s*normal/s.test(cssSrc)
+    && /\.toast-pill\s*\{[^}]*overflow-wrap:\s*anywhere/s.test(cssSrc));
+  checkNew('(f6) 修前形态可复现：`.toast-pill` 原为 nowrap（对照基线证据中的 315px 溢出）',
+    !/\.toast-pill\s*\{[^}]*white-space:\s*nowrap/s.test(cssSrc));
+
+  globalThis.__INVOKE__ = prevInvoke;
+}
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);
 const newFailed = newResults.filter((r) => !r.pass);
