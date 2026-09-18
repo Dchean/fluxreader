@@ -1,11 +1,11 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-057 · 修 Endpoint 填法指引与失败提示：直填 FreshRSS 域名登录失败（Bug 1）
 
-**状态**：ready
+**状态**：verified
 
 **目标**：用户实测：**直接填写域名无法登录**（`https://demo.freshrss.org` 连不上），必须填**完整 API 路径** `https://demo.freshrss.org/api/greader.php` 才行。根因经实证定位：`greader.rs` 把 endpoint **原样当作根 URL**（`let base = endpoint.trim_end_matches('/')`，随后拼接 `/accounts/ClientLogin`），从不规范化、也不识别 API 路径。而两种协议的真实布局不同——**Miniflux** 的 GReader API 位于站点**根**（`https://reader.example.com/accounts/ClientLogin`），**FreshRSS** 位于**子路径** `/api/greader.php`（`https://主机/api/greader.php/accounts/ClientLogin`）。实测对照：`POST https://demo.freshrss.org/accounts/ClientLogin` → **404**（HTML 错误页，端点不存在）；`POST https://demo.freshrss.org/api/greader.php/accounts/ClientLogin` → **401**（端点存在，仅凭据不对）。设置页当前文案『例如 https://reader.example.com』**只教了 Miniflux 的填法**，FreshRSS 用户按提示填写必然失败。**owner 明确裁决『不改探测逻辑，只改文案与错误提示』**——即本任务**不新增自动探测/回退请求**，只让用户能填对、并在填错时看得懂为什么。
 
-**依赖**：TASK-055
+**依赖**：TASK-056
 **参考方案**：见 ../RESEARCH.md
 **界面约定**：.workflow-kit/docs/UI-CONTRACT-REQ-057.md
 **界面检查**：设置 → 同步 → 「后端 Endpoint」卡片：说明文案同时给出 Miniflux 与 FreshRSS 两种填法, Endpoint 输入框 placeholder 反映两种协议的真实填法（不再只给 Miniflux 形式）, 填入纯域名（如 https://demo.freshrss.org）保存失败时，错误提示**可操作**：明确指出 Endpoint 需指向 API 路径、并给出 FreshRSS 的完整写法, 错误提示与既有 toast 风格一致（沿用 extractError / showToast，不新造控件）, 深色与浅色两套主题下文案与提示均完整可读、不截断、不溢出, 既有「测试连接」与「保存并同步」按钮行为、禁用态与加载态不变
@@ -39,19 +39,28 @@
 
 ## 执行与恢复
 
-- 首次开始：None
-- 原截止时间：None
-- 当前截止时间：None
+- 首次开始：2026-09-18T10:59:14.734062Z
+- 原截止时间：2026-09-18T14:59:14.734062Z
+- 当前截止时间：2026-09-18T14:59:14.734062Z
 - 已用修复轮：0
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 最近检查点
 
+- 2026-09-18T10:59:14.831009Z：开始执行，保留原任务身份和截止时间；下一步：完成当前修改后调用 finish，再运行 verify
+- 2026-09-18T11:09:08.214252Z：编码结果已记录，差异范围已核对；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-18T11:09:28.112097Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-18T11:29:47.148975Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-18T11:40:46.285909Z：当前候选的测试与审查通过；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 原始证据
 
 [唯一状态记录](../items/TASK-057.json)
 
+- [RUN-2c493374821e440bb88b5a04adcb6c50](../runs/RUN-2c493374821e440bb88b5a04adcb6c50.json)
+- [RUN-6f6e5982cce04f1084c998e960f70a64](../runs/RUN-6f6e5982cce04f1084c998e960f70a64.json)
+- [RUN-4e0352510dc74b358cf02e1799e6fe1b](../runs/RUN-4e0352510dc74b358cf02e1799e6fe1b.json)
+- [RUN-c845c9bc1af14e02b22b2f81a62483a3](../runs/RUN-c845c9bc1af14e02b22b2f81a62483a3.json)
 
 卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

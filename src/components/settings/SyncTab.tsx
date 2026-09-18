@@ -4,6 +4,7 @@ import { api, extractError } from '../../lib/api';
 import { FluxDropdown, Switch, SettingCard, ConfirmDialog } from '../primitives';
 import { CacheCleanupSection } from './CacheCleanupSection';
 import { ConfigSyncSection } from './ConfigSyncSection';
+import { ENDPOINT_DESC, ENDPOINT_PLACEHOLDER, endpointHint } from './endpointHint';
 
 /* ---------- TAB 6: 同步 ---------- */
 
@@ -51,7 +52,7 @@ export function SyncTab() {
       const msg = await api.syncTest(protocol, endpoint.trim(), username.trim(), password.trim());
       showToast(msg ?? '连接成功');
     } catch (e) {
-      showToast(`连接失败：${extractError(e)}`);
+      showToast(`连接失败：${endpointHint(extractError(e))}`);
     } finally {
       setTesting(false);
     }
@@ -104,7 +105,7 @@ export function SyncTab() {
           showToast(`后台同步失败：${m}`, { label: '重试', run: () => { void doSaveAndSync(); } });
         });
     } catch (e) {
-      showToast(`保存失败：${extractError(e)}`);
+      showToast(`保存失败：${endpointHint(extractError(e))}`);
     } finally {
       setSaving(false);
     }
@@ -184,11 +185,11 @@ export function SyncTab() {
           ]}
         />
       </SettingCard>
-      <SettingCard title="后端 Endpoint" desc="例如 https://reader.example.com（支持 Google Reader / Fever 协议）">
+      <SettingCard title="后端 Endpoint" desc={ENDPOINT_DESC}>
         <input
           type="text"
           className="setting-input"
-          placeholder="https://reader.example.com"
+          placeholder={ENDPOINT_PLACEHOLDER}
           value={endpoint}
           onChange={(e) => setEndpoint(e.target.value)}
         />

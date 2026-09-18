@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-c845c9bc1af14e02b22b2f81a62483a3",
+  "task_id": "TASK-057",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "independent reviewer round2: measured live app over CDP, resolved width discrepancy, reproduced revert experiment"
+  },
+  "started_at_utc": "2026-09-18T11:40:44.762843Z",
+  "finished_at_utc": "2026-09-18T11:40:44.803513Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "083d513b68f042d6bb8788ffe534dba2417e177e86b6c13669b01066b7facef5",
+  "candidate_digest": "353cb3c73f687ef37f7ae4e051f7ad3d385cc66467feb24e4553f62418c9db12",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-c845c9bc1af14e02b22b2f81a62483a3-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-c845c9bc1af14e02b22b2f81a62483a3-review.json",
+    "candidate_digest": "353cb3c73f687ef37f7ae4e051f7ad3d385cc66467feb24e4553f62418c9db12",
+    "ui_evidence_digest": "520c53fa5a14ed1827c7ea42591127a356088be9b8396449934b89a1d850293e",
+    "quality_digest": "bb09abca4d80904cb04910f3339df61ce8565ac495e043130406e24a02e38a30"
+  },
+  "estimated_cost_usd": null
+}

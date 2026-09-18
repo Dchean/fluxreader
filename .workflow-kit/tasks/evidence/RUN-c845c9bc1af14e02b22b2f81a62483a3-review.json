@@ -1,0 +1,68 @@
+{
+  "task_id": "TASK-057",
+  "candidate_digest": "353cb3c73f687ef37f7ae4e051f7ad3d385cc66467feb24e4553f62418c9db12",
+  "verification_run": "RUN-4e0352510dc74b358cf02e1799e6fe1b",
+  "verdict": "PASS",
+  "summary": "第 2 轮独立审查（未参与实现的独立上下文，**在运行中的应用上经 CDP 实测**而非复用他人数字）逐项复跑全部 10 项核对，全部通过。**核心：第 1 轮指出的 placeholder 宽度问题已真正解决**——审查者用两种方法独立测内容盒：`clientWidth(239) − padding(20) = 219.0px`；严格口径 `rect(239.9945) − padding(20) − border(0.584795×2) = 218.8249px`，并裁定第 1 轮报的 218 与实现者报的 219 **是同一盒子的截断与进位之差、非两次不同测量**。当前取值 `如 https://主机/api/greader.php` 实测 advance **162.088px**（canvas measureText，计算字体确认为 `12px Arial`——input 不继承 body 的 Segoe 13px），墨迹范围 162.41px，在**更严格的 218.82px** 下仍有 **56.74px** 余量 → **两种口径下都通过**。**审查者同时反驳了第 1 轮的裁字结论**：以像素级真值探针（真实 input 与同字体同原点的未裁剪 span 叠放对比，DPR 1.71）未能复现末位 `p` 被裁——input 墨迹右边缘反而比对照 span 宽 0.44 CSS px，`p` 及下伸部完整渲染；即该串确实超出内容盒 0.63px 的 advance，但渲染器并未裁掉字形。**边界与无自动探测**：`git diff --stat -- src-tauri` 与 `git status --porcelain -- src-tauri` 均为**空**；`endpointHint.ts` 经 grep 证明为纯函数（fetch/await/async/invoke/XMLHttpRequest/setTimeout/import 零命中），`src/**` 中 `greader.php` 仅出现在该文件的注释、两个字符串常量与提示串中；设置页唯一的 `fetch(`（AboutTab 的 GitHub releases）为既有且未触碰。**回退实验仍失败**：把 endpointHint.ts 退回旧行为后 `npm.cmd run test:frontend` **exit 1 / 250-255**，**恰好 5 条失败**（2×(e1)+3×(e3)，与报告列表逐字一致），还原后 sha256 = B35539B5… 与实验前逐字节相同、复跑 exit 0 / 255-255。**凭据安全**：18 个凭据/认证/网络字符串经真实编译模块探测 → **0 误报**，全部原样返回；`\\b(404|405|410)\\b` 正确忽略 `1404`/`4041`/`feeds/404notfound`；并独立复确认根因（`POST demo.freshrss.org/accounts/ClientLogin` → 404，`/api/greader.php/accounts/ClientLogin` → 401）。**UI 证据三张均为真且标签正确**（按像素内容而非文件名判定）：dark-sync-tab 平均亮度 26.83、角像素 RGB(7,8,10)；light-sync-tab 206.24、面板 RGB(239,242,249)；dark-404-hint 28.49。**placeholder 现确实可见**（第 1 轮的抱怨已修正——输入框已清空）：两主题下放大 5 倍裁剪均完整读出 `如 https://主机/api/greader.php`、右侧余量充足、无裁切；404 toast 逐字读到 `连接失败：ClientLogin → 404 Not Found（该地址下没有 GReader API：请确认 Endpoint 是否需指向 API 路径。Miniflux 填站点根，FreshRSS 需填 https://主机/api/greader.php）`。**门禁**：cargo test **141 passed / 0 failed / 9 ignored**、lint exit 0、build exit 0、frontend **255/255**（既有 26 + 新增 229）；范围为恰好 4 个预期文件（3 改 1 新），`package.json`/`package-lock.json` 无改动。findings 为空。**诚实性评估**：审查者判定『**诚实且具体**』——报告以专节列出两次宽度失误、点名第 2 次的确切机制（用 `getBoundingClientRect().width` 外框 240px 当门槛 → 偏乐观 21px）、承认第 1 次『根本没量宽度』、给出正确的元教训（『我量过了』不等于『我量对了』），并把第 2 次的发现归功于第 1 轮审查；其 162.09/219.46/310.16 三个数字经审查者独立复现全部吻合。两处非阻断的准确性缺陷：**(a) 报告门禁表陈旧**——写 254/254，而本候选实测 **255/255**（第 4 条 (e1) 宽度断言在 RUN-6f6e5982 记 254 之后才加入；报告在 RUN-4e03 之后重写却未同步计数），**数字偏小、非夸大**；**(b) 被否决的 219.46px 串被描述为『末位字符被裁』，审查者像素级未能复现**。审查者另登记一条断言强度边界：新增宽度断言是**字符预算代理而非宽度测量**，可用真实字宽绕过（`@@@@@@@@@@@@@@/api/greader.php`，30 字符 257.28px，能通过全部 (e1) 断言却溢出），因该串是同文件常量且注释已明示口径而接受。**本报告已据上述三点订正。**",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务要求全部满足且经独立实测：desc 同时给出 Miniflux 与 FreshRSS 两种填法（截图逐字核对）；placeholder 经**两次修正**后真正适配内容盒（严格口径 218.82px 下余量 56.74px）；纯域名失败提示可操作（对真实 FreshRSS 实例实测 404 并逐字核对 toast）；凭据类失败不误报（18 例探测 0 误报）；深/浅两主题证据齐备且标签正确。owner 的硬边界『不改探测逻辑』经 diff 为空 + grep 零命中双重证明。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-057-report.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "审查者独立复跑四门禁：cargo test 141 passed / 0 failed / 9 ignored（分 16 个测试二进制累加）、lint exit 0（0 warnings/0 errors）、build exit 0、frontend 255/255 exit 0（既有 26 + 新增 229）。回退实验后复跑确认 exit 0/255，且 4 个产品文件与审查前哈希逐一相同。范围恰为 4 个预期文件，无新依赖（package.json 与 package-lock.json 均无改动）。既有 26 条回归断言未改动一行。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-057-interaction-report.md"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "本任务的失败路径即『用户填纯域名 → 404 → 只看到状态码无从下手』。审查者对真实 FreshRSS 实例实测复现 404，并确认现提示给出可操作指引且逐字正确；反向路径（凭据错 401/403/BadAuthentication/网络错误）经 18 例探测确认**不被误报**为 Endpoint 问题，边界正则正确忽略 1404/4041 等含数字的干扰串。回退实验证实 5 条断言真正守住这些行为。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-057-report.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "逻辑抽为纯模块 endpointHint.ts（无副作用，grep 证明），沿用 compareVersions/aiConfig 的既有可测做法；代码注释写明内容盒口径与两次宽度误判的机制；报告以专节记录失误并把结论写成断言防回归。审查者指出宽度断言是字符预算代理而非真测量，并给出可绕过反例——该局限已在报告与断言注释中如实登记，未声称通用保证。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-057-interaction-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务只改设置页一处文案与错误提示的字符串映射（纯函数、无网络与 IO），不触及查询、渲染或同步时序；无性能主张需要证据。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-057-report.md"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-057.md",
+    "checked_states": [
+      "设置 → 同步 → 「后端 Endpoint」卡片：说明文案同时给出 Miniflux 与 FreshRSS 两种填法",
+      "Endpoint 输入框 placeholder 反映两种协议的真实填法（不再只给 Miniflux 形式）",
+      "填入纯域名（如 https://demo.freshrss.org）保存失败时，错误提示**可操作**：明确指出 Endpoint 需指向 API 路径、并给出 FreshRSS 的完整写法",
+      "错误提示与既有 toast 风格一致（沿用 extractError / showToast，不新造控件）",
+      "深色与浅色两套主题下文案与提示均完整可读、不截断、不溢出",
+      "既有「测试连接」与「保存并同步」按钮行为、禁用态与加载态不变"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-057-ui-dark-sync-tab.png",
+      ".workflow-kit/tasks/evidence/TASK-057-ui-light-sync-tab.png",
+      ".workflow-kit/tasks/evidence/TASK-057-ui-dark-404-hint.png",
+      ".workflow-kit/tasks/evidence/TASK-057-interaction-report.md",
+      ".workflow-kit/tasks/evidence/TASK-057-report.md"
+    ]
+  }
+}

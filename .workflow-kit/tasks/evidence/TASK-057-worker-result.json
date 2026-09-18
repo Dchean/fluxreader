@@ -1,0 +1,16 @@
+{
+  "task_id": "TASK-057",
+  "run_id": "RUN-2c493374821e440bb88b5a04adcb6c50",
+  "status": "ready_for_verification",
+  "summary": "修用户实测 Bug 1：直填 FreshRSS 域名无法登录（须填完整 API 路径）。根因：greader.rs 把 Endpoint 原样当根 URL 拼 {base}/accounts/ClientLogin，而 Miniflux 的 GReader API 在站点根、FreshRSS 在子路径 /api/greader.php（实测 POST https://demo.freshrss.org/accounts/ClientLogin → 404；POST https://demo.freshrss.org/api/greader.php/accounts/ClientLogin → 401，端点存在仅凭据不对）。设置页原文案『例如 https://reader.example.com』只教 Miniflux 填法，且失败提示只回显状态码。**owner 明确边界：不改探测逻辑，只改文案与错误提示。** 改动：新增纯模块 src/components/settings/endpointHint.ts（ENDPOINT_DESC / ENDPOINT_PLACEHOLDER / isMissingPathError / endpointHint），SyncTab.tsx 的 Endpoint 卡片 desc/placeholder 改用之、两处失败 toast（测试连接、保存并同步）改走 endpointHint(extractError(e))：仅对路径类失败（404/405/410）附加可操作指引，凭据类（401/403/BadAuthentication/网络错误）保持原样不误报。前端新增 13 条 (e1)-(e5) 断言并含宽度防回归项；tsconfig.test.json include 加入该模块。验证：修前对照实验 5 条新断言失败（exit 1）→ 修后 frontend 254/254 通过；实机 UI 证据（CDP 驱动运行中的应用、未注入 OS 级键鼠）：深/浅两主题 Endpoint 卡片各一张 + 对真实 FreshRSS 实例填纯域名点测试连接的 404 提示一张，并逐条核对 ui_checks 记入 TASK-057-interaction-report.md。**一次自查修正**：placeholder 初版写「两种填法并列」，实机测量 310px > 输入框 240px 会被截断并截掉关键的 /api/greader.php，已改为实测可完整显示的单一示例（219px）并把两种填法说明交给会换行的 desc，同时加宽度防回归断言。门禁：cargo test 141/0/9（Rust 侧零改动）、lint 0/0、build exit 0、frontend 254/254。**边界遵守**：新增零自动探测/回退请求；src-tauri/src/** 零改动（greader.rs 未触碰）；未改认证流程与表结构；未引入新依赖（package.json 零改动）。**限制如实记录**：demo.freshrss.org 公开演示凭据不可得（任意组合均回 401），故『填对完整路径后登录成功』的真实端到端路径本轮未走通，其拉取行为由 TASK-056 的 mock e2e 覆盖，不声称已验证。",
+  "changed_files": [
+    "src/components/settings/SyncTab.tsx",
+    "src/components/settings/endpointHint.ts",
+    "tools/frontend-regression.mjs",
+    "tsconfig.test.json"
+  ],
+  "validation_requests": [],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

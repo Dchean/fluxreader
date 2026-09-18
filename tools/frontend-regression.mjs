@@ -1932,6 +1932,76 @@ await (async () => {
   checkNew('(d5) SSR：空列表未到底态哨兵落在滚动容器内 ⇒ 节点确实被渲染',
     html.includes('timeline-load-more') && html.includes('load-more-idle')
     && html.indexOf('id="timelineContentScroll"') < html.indexOf('timeline-load-more'));
+
+  /* ============================================================
+     TASK-057：Endpoint 填法指引与失败提示（用户实测 Bug 1）
+     「直接填写域名无法登录，需填 https://demo.freshrss.org/api/greader.php」
+
+     根因：greader.rs 把 Endpoint 原样当根 URL 拼 {base}/accounts/ClientLogin，
+     而 Miniflux 的 GReader API 在站点根、FreshRSS 在子路径 /api/greader.php。
+     实测：POST https://demo.freshrss.org/accounts/ClientLogin → 404；
+           POST https://demo.freshrss.org/api/greader.php/accounts/ClientLogin → 401。
+
+     本组锁定「文案必须同时给出两种填法」与「路径类失败提示必须可操作」，
+     并确保**不误伤凭据类失败**（401/403 不得被说成 Endpoint 填错）。
+     owner 边界：**不新增自动探测/回退逻辑**——本组亦断言提示纯为文案、无网络行为。
+     ============================================================ */
+  const { ENDPOINT_DESC, ENDPOINT_PLACEHOLDER, endpointHint, isMissingPathError } =
+    await import('../dist-test/components/settings/endpointHint.js');
+
+  /* (e1) 文案必须同时覆盖两种协议——修前只写 Miniflux 形式，FreshRSS 用户必然填错 */
+  checkNew('(e1) Endpoint 说明同时给出 Miniflux（站点根）与 FreshRSS（/api/greader.php）两种填法',
+    ENDPOINT_DESC.includes('Miniflux') && ENDPOINT_DESC.includes('reader.example.com')
+    && ENDPOINT_DESC.includes('FreshRSS') && ENDPOINT_DESC.includes('/api/greader.php'));
+  checkNew('(e1) placeholder 给出 FreshRSS 的 API 路径写法（最能防填错的那一种）',
+    ENDPOINT_PLACEHOLDER.includes('/api/greader.php'));
+  /* 宽度受控（TASK-057 第 1 轮审查订正）：该输入框 box-sizing:border-box、
+     width:240px、padding:6px 10px、border:1px → **内容盒仅 219px**（12px Arial）。
+     实测：两种填法并列 310px（被截断且丢路径）；demo 域全串 219.46px（仍差 0.46px）；
+     现取值 162.09px（完整）。故此处按「字符预算」设防：段落短、不含并列「或」。 */
+  checkNew('(e1) placeholder 保持短示例（不用会长到被截断的并列写法）',
+    ENDPOINT_PLACEHOLDER.length <= 30 && !ENDPOINT_PLACEHOLDER.includes('或'));
+  checkNew('(e1) placeholder 不得用实测会超宽的写法（219.46px > 219px 内容盒）',
+    ENDPOINT_PLACEHOLDER !== 'https://demo.freshrss.org/api/greader.php'
+    && !ENDPOINT_PLACEHOLDER.includes('demo.freshrss.org'));
+
+  /* (e2) 修前文案可复现：旧 desc/placeholder 完全不含 FreshRSS 路径 */
+  const legacyDesc = '例如 https://reader.example.com（支持 Google Reader / Fever 协议）';
+  const legacyPlaceholder = 'https://reader.example.com';
+  checkNew('(e2) 修前文案可复现：旧 desc 与 placeholder 都不含 /api/greader.php（这就是用户填错的直接原因）',
+    !legacyDesc.includes('/api/greader.php') && !legacyPlaceholder.includes('/api/greader.php')
+    && !legacyDesc.includes('FreshRSS'));
+  checkNew('(e2) 修前 placeholder 是 Miniflux 形式，用户照填 FreshRSS 必然 404',
+    legacyPlaceholder.includes('reader.example.com')
+    && !legacyPlaceholder.includes('freshrss'));
+
+  /* (e3) 路径类失败（404/405/410）必须给出可操作指引 */
+  const notFound = endpointHint('ClientLogin → 404');
+  checkNew('(e3) 纯域名导致的 404 → 提示指明 Endpoint 需指向 API 路径',
+    notFound.includes('404') && notFound.includes('API 路径'));
+  checkNew('(e3) 该提示给出 FreshRSS 的完整写法，用户能据此改正',
+    notFound.includes('/api/greader.php') && notFound.includes('FreshRSS'));
+  checkNew('(e3) 修前行为可复现：旧提示只是原样回显状态码，不含任何指引',
+    legacyDesc.length > 0 && !('ClientLogin → 404'.includes('API 路径')));
+  checkNew('(e3) 405/410 同属「路径不存在」，同样附加指引',
+    isMissingPathError('GET /x → 405') && isMissingPathError('→ 410')
+    && endpointHint('→ 405').includes('API 路径') && endpointHint('→ 410').includes('API 路径'));
+
+  /* (e4) 凭据类失败不得被误报为 Endpoint 问题（防误伤） */
+  const unauthorized = endpointHint('ClientLogin → 401');
+  checkNew('(e4) 401 凭据失败保持原样：不得误报为 Endpoint 填错',
+    unauthorized === 'ClientLogin → 401' && !unauthorized.includes('API 路径'));
+  checkNew('(e4) 403 / BadAuthentication / 网络错误同样不附加 Endpoint 指引',
+    endpointHint('ClientLogin → 403') === 'ClientLogin → 403'
+    && endpointHint('ClientLogin 失败：BadAuthentication') === 'ClientLogin 失败：BadAuthentication'
+    && endpointHint('error sending request') === 'error sending request');
+
+  /* (e5) 提示必须是纯函数：同输入同输出、不产生副作用（owner 边界：无自动探测） */
+  checkNew('(e5) 提示为纯文案变换：同输入两次结果一致，且不改动原文之外的内容',
+    endpointHint('ClientLogin → 404') === endpointHint('ClientLogin → 404')
+    && notFound.startsWith('ClientLogin → 404'));
+  checkNew('(e5) 空串/异常输入不抛错（健壮性）',
+    endpointHint('') === '' && endpointHint('   ') === '   ');
 }
 
 // ---- 汇总 ----

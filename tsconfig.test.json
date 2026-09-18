@@ -23,6 +23,7 @@
     "src/lib/external.ts",
     "src/store/settingsValidation.ts",
     "src/components/settings/compareVersions.ts",
-    "src/components/settings/aiConfig.ts"
+    "src/components/settings/aiConfig.ts",
+    "src/components/settings/endpointHint.ts"
   ]
 }

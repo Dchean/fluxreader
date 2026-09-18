@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-056 · 修 pull 建订阅的外键违约 + 静默吞错：FreshRSS 登录成功却拉不到订阅
 
-**状态**：verified
+**状态**：done
 
 **目标**：用户实测：用 `https://demo.freshrss.org/api/greader.php` 登录**成功**，但**一条订阅都没拉进来**。根因经实证定位为两处叠加：**(1) 外键违约**——`sync/subscriptions.rs` 在 pull 建本地订阅时用 `db::get_first_folder_id(&conn).ok().flatten()).unwrap_or(1)` 兜底 folder_id，而**新装应用的 folders 表为空**（用户真实库复制件实测 `folders: 0`），于是硬编码的 `1` 指向不存在的目录；`feeds.folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE` 且连接开启了 `PRAGMA foreign_keys=ON`，插入必然抛 `FOREIGN KEY constraint failed`（已实测复现）。**(2) 错误被静默吞掉**——`if let Ok(fid) = inserted { ... }` **没有 else 分支**，插入失败既不记入 `report.errors` 也不上抛，`feeds_phase` 照常返回 Ok，前端因此弹出『已拉取订阅源』『后端同步完成』，用户看到的是成功、实际零订阅。仓库**已有**正确兜底函数 `db::ensure_uncategorized_folder()`（不存在则创建『未分类』并返回其 id；`add_feed` 路径的 `commands/folders.rs:152` 正在使用），pull 路径却未使用它。本任务改用该既有函数，并把失败写入 `report.errors` 让前端既有 toast 能真实报错。
 

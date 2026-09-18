@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "用户实测：用 `https://demo.freshrss.org/api/greader.php` 登录**成功**，但**一条订阅都没拉进来**。根因经实证定位为两处叠加：**(1) 外键违约**——`sync/subscriptions.rs` 在 pull 建本地订阅时用 `db::get_first_folder_id(&conn).ok().flatten()).unwrap_or(1)` 兜底 folder_id，而**新装应用的 folders 表为空**（用户真实库复制件实测 `folders: 0`），于是硬编码的 `1` 指向不存在的目录；`feeds.folder_id INTEGER REFERENCES folders(id) ON DELETE CASCADE` 且连接开启了 `PRAGMA foreign_keys=ON`，插入必然抛 `FOREIGN KEY constraint failed`（已实测复现）。**(2) 错误被静默吞掉**——`if let Ok(fid) = inserted { ... }` **没有 else 分支**，插入失败既不记入 `report.errors` 也不上抛，`feeds_phase` 照常返回 Ok，前端因此弹出『已拉取订阅源』『后端同步完成』，用户看到的是成功、实际零订阅。仓库**已有**正确兜底函数 `db::ensure_uncategorized_folder()`（不存在则创建『未分类』并返回其 id；`add_feed` 路径的 `commands/folders.rs:152` 正在使用），pull 路径却未使用它。本任务改用该既有函数，并把失败写入 `report.errors` 让前端既有 toast 能真实报错。",
   "non_goals": [
     "修 Bug 1（endpoint 填法/文案）——那是同批次另一个任务（TASK-057）",
@@ -204,9 +204,11 @@
     "candidate_digest": "ceaef9df5c9ded50496b2f73d4a0f81c5cc450f07f5dbb4b3c08b5af85bdc3e7",
     "verification_run": "RUN-9d76e4a7a5b8409cb0ccfe38b337c8da",
     "review_run": "RUN-d2a1d3663f0247239682eb94ba4ed412",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null,
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-07caa6cca8e5494f80f839d6914025ab-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-07caa6cca8e5494f80f839d6914025ab"
+    ],
+    "merge_ref": "0b5e9cb",
     "ledger_correction": {
       "reason": "解除修复轮 1 的 failure_kind=protocol 阻断（changed_files 声明口径错误，非交付缺陷）。",
       "authorization": "DEC-task056-repair-protocol-unblock-20260918",
@@ -220,7 +222,8 @@
       },
       "corrected_to": "review",
       "worker_fault": true
-    }
+    },
+    "continued_by": "TASK-057"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

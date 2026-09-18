@@ -1,0 +1,14 @@
+{
+  "id": "DEC-07caa6cca8e5494f80f839d6914025ab",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "DEC-user-testing-bugs-20260918",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-056"
+  ],
+  "recorded_at_utc": "2026-09-18T10:58:51.017529Z",
+  "candidates": {
+    "TASK-056": "ceaef9df5c9ded50496b2f73d4a0f81c5cc450f07f5dbb4b3c08b5af85bdc3e7"
+  }
+}

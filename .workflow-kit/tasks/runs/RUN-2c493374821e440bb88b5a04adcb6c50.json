@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-2c493374821e440bb88b5a04adcb6c50",
+  "task_id": "TASK-057",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "host agent implementation for TASK-057: endpoint guidance text covering both Miniflux root and FreshRSS /api/greader.php, plus actionable failure hint; no auto-probe logic"
+  },
+  "started_at_utc": "2026-09-18T10:59:14.735202Z",
+  "finished_at_utc": "2026-09-18T11:09:08.177678Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "083d513b68f042d6bb8788ffe534dba2417e177e86b6c13669b01066b7facef5",
+  "candidate_digest": "dc61184baf11ee2e46f817768b26b9cd2b6d1955eb4ace993f858a202f7e11b5",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-2c493374821e440bb88b5a04adcb6c50-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-2c493374821e440bb88b5a04adcb6c50-scope.json"
+}
