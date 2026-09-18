@@ -1,6 +1,6 @@
 //! commands 的 articles 领域子模块（TASK-044 从 commands.rs 按既有章节拆分，纯搬运）。
 
-use super::{read_dedup_flag, schedule_state_push, sync_configured};
+use super::{read_dedup_flag, schedule_state_push};
 use crate::db;
 use crate::error::AppResult;
 use crate::ingestion;
@@ -148,22 +148,42 @@ pub async fn mark_all_read(
     let starred_only = starred_only.unwrap_or(false);
     let n = {
         let conn = state.db.lock().await;
-        // 先收集「即将被标读」的未读文章 id（标读后再查 is_read=0 会得到空集，
-        // 导致「全部已读」从不推送到 Miniflux——历史 bug）。F8：收集与标读
-        // 必须同口径（同样带视图过滤），否则会把范围外文章的状态也推给远端。
-        let ids = db::list_unread_ids_scoped(&conn, feed_id, folder_id, starred_only, since_ms)?;
-        let n = db::mark_all_read(&conn, feed_id, folder_id, starred_only, since_ms)?;
-        if sync_configured(&conn) {
-            // 逐条入队（量级可控：个人订阅日常几十条）
-            for id in ids {
-                db::enqueue_sync(&conn, Some(id), None, "read", None)?;
-            }
-            drop(conn);
-            schedule_state_push(&state);
-            return Ok(n);
-        }
-        n
+        apply_mark_all_read(&conn, feed_id, folder_id, starred_only, since_ms)?
     };
+    // 锁外调度即时推送；未配置时 push_states_now 内 build_client 返回 None 而
+    // 静默返回，队列项留待连接后的同步补推（与 set_read/set_starred 一致）
+    schedule_state_push(&state);
+    Ok(n)
+}
+
+/// 「全部已读」的标读与入队（命令与测试共用的真实逻辑）。
+///
+/// 入队口径（A-5，TASK-053 对齐）：**无论是否已配置同步后端都入队**——与
+/// [`record_read_state`] / [`record_star_state`] 完全同语义。此前这里以
+/// `sync_configured` 作为入队前置条件，造成「有的状态变更离线会入队、有的不会」
+/// 的不一致：离线期间的「全部已读」不写待推队列，连接后首次全量对账按远端状态
+/// 把本地已读翻回未读（用户现象：「刚标的已读自己变回去了」）。
+///
+/// 推送侧无需改动：未配置时 `push_states_now` / `states_phase` 经 `build_client`
+/// 拿不到 client 而静默跳过（队列保留，连接后补推），这正是 A-5 建立的
+/// 「无论是否 configured 都入队，推送段在未配置时静默跳过」语义。
+///
+/// 返回实际标读条数。入队集合由 [`db::list_unread_ids_scoped`] 在标读**前**收集，
+/// 与 [`db::mark_all_read`] 同口径（F8）——标读后再查 `is_read = 0` 会得到空集，
+/// 「全部已读」将永远不推送（历史 bug）。
+pub fn apply_mark_all_read(
+    conn: &rusqlite::Connection,
+    feed_id: Option<i64>,
+    folder_id: Option<i64>,
+    starred_only: bool,
+    since_ms: Option<i64>,
+) -> AppResult<usize> {
+    let ids = db::list_unread_ids_scoped(conn, feed_id, folder_id, starred_only, since_ms)?;
+    let n = db::mark_all_read(conn, feed_id, folder_id, starred_only, since_ms)?;
+    // A-5：无论是否已配置同步都入队。逐条入队（量级可控：个人订阅日常几十条）
+    for id in ids {
+        db::enqueue_sync(conn, Some(id), None, "read", None)?;
+    }
     Ok(n)
 }
 

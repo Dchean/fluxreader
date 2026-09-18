@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-5b202743d8b44abc86134ada2c4bd827",
+  "task_id": "TASK-053",
+  "kind": "repair",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "repair 轮 2：处理第 2 轮审查的唯一阻断项 —— record_star_state(set_starred) 的 A-5 离线入队无任何测试保护，而它与本次改动同文件同族且『三条状态路径入队语义对齐』正是本任务授权核心。采纳审查者建议①：补一条与 offline_read_change_pushed_after_connect 同形的 star 版测试（含显式 read_credentials 为 None 的前置断言）。纯测试添加，不改行为。"
+  },
+  "started_at_utc": "2026-09-18T00:26:10.315710Z",
+  "finished_at_utc": "2026-09-18T00:34:02.221240Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "6943e767db7964a5d83afe8e4989c8e9b441c175e2c10c8f6af4d383edaecccb",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-5b202743d8b44abc86134ada2c4bd827-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-5b202743d8b44abc86134ada2c4bd827-scope.json",
+  "failure_kind": "protocol",
+  "failure_reason": "Worker changed_files does not match the observed project diff"
+}

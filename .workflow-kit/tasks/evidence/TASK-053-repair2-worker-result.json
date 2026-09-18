@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-053",
+  "run_id": "RUN-5b202743d8b44abc86134ada2c4bd827",
+  "status": "ready_for_verification",
+  "summary": "【本次 run 的 changed_files 说明】本轮 run 的基线是在**上一轮 repair 完成之后**取的，因此生产代码的 TASK-053 改动（src-tauri/src/commands/articles.rs 与 mod.rs）在 begin 时**已在树中**、不构成本次差异；**本次 run 实际只改了测试文件**（+287 行纯新增），与工具观测到的 changed_files（仅 sync_gap_repro_e2e.rs）一致。候选仍覆盖全部 TASK-053 改动（候选按 snapshot_paths 生成，与 diff 无关）。\n\nrepair 轮 2：处理第 2 轮独立审查的唯一阻断项，采纳其建议①（放行前补测，而非另立任务推走）。**补一条与既有 offline_read_change_pushed_after_connect 同形的 star 版测试** offline_star_change_pushed_after_connect（src-tauri/tests/sync_gap_repro_e2e.rs:526，+287 行**纯新增**），走 record_star_state（即 set_starred 的真实代码路径）。**这是纯测试添加，未改任何生产代码**：git diff HEAD --numstat 仍为 36/16（articles.rs）、1/1（mod.rs）——与第 1 轮**逐字相同**；新增行全在测试文件（287/0）。**测试断言**（照抄既有 read 版两段结构：离线 → 配置 → feeds_phase → states_phase(full=true)）：(0) 显式离线前置断言 assert!(sync::read_credentials(&conn).is_none(), \"前置条件：离线阶段必须未配置同步凭据\")，在调用 record_star_state **之前**、同一把锁内；(1) 未配置时确实入队——sync_queue 必须恰为 [(Some(aid), \"star\")]，并附带断言本地 articles.is_starred == 1（命令层落库半边）；(2) 配置后推送段确实推给后端——断言 mock 的 bookmark_toggles 非空（该 mock 的 edit-tag 处理器**只在**收到 com.google/starred 标签 add/remove 时才记录，见 tests/mock_greader.rs:501-517），并进一步断言被 toggle 的 entry 在 mock 里 starred == true（即 star 而非 unstar 语义）；(3) 推送后队列清空——sync_queue 计数为 0（与 read 版逐字同口径）。**修前失败→修后通过证据**：把 record_star_state（articles.rs:107）的入队临时改回 A-5 前语义（在 db::set_starred 之后插入 `if crate::sync::read_credentials(conn).is_none() { return Ok(()); }`）→ `cargo test --test sync_gap_repro_e2e offline_star_change_pushed_after_connect` **EXIT=101**，`panicked at tests\\sync_gap_repro_e2e.rs:569:5: assertion left == right failed: 修复期望：未配置时收藏变更也入队（A-5），实际 []  left: []  right: [(Some(1), \"star\")]  → test result: FAILED. 0 passed; 1 failed; 12 filtered out`；该失败发生在**生产代码**上、由**新测试**捕获，证明测试确实保护该分支。**还原后复跑通过**（EXIT=0，新测试 ok，13 passed/0 failed），并核对 git diff -- src-tauri/src/commands/articles.rs 与还原前逐字节一致、探针残留匹配数 0、临时产物已全部删除、git ls-files --others -- src-tauri 为空。**门禁（退出码重定向后读）**：cargo test（src-tauri）exit 0 且 **passed=122 / failed=0 / ignored=23**（基线 121/0/23 → **精确 +1 passed**、ignored 未增）、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0（built in 898ms）、npm run test:frontend exit 0 且 **241/241**。**为何采纳建议①而非②**：本任务**正是**建立该族保护的合适位置——三条状态路径（set_read/set_starred/mark_all_read）的入队语义对齐是本任务的授权核心，且 test_review.actions 要求不得削弱保护；把该空白推给「另立任务」是用流程边界掩盖验证空白。审查者的表述准确：认同修复轮「扩测非本任务授权」的判断，但不认同据此放行——那是把「越界」与「已验证」混为一谈。修复轮按边界停下报告**行为本身是对的**，但「停下来」不等于「可以放行」。**约束核验**：未改生产代码、未改 Cargo.toml/lock、未改前端、未改 .workflow-kit/**、未 commit、未启动 Tauri、未动用户数据库；两个改动文件 CR 字节数均为 0（LF）；测试用 DB 全在 %TEMP% 下独立临时文件。**未完成/不确定（不掩饰）**：(1) 它验证的「修前」回退是**守卫整个入队**（行为等价于 if sync_configured），未对每一种等价回退写法单独验证——但这正是审查者所指的「离线入队无保护」分支，行为等价即足以证明捕获面；(2) 断言(2) 用的是 mock 的 bookmark_toggles（star 专用）而非 read 版的 status_updates（只记 read/unread），两者都是「后端确实收到该动作」的等价证据，语义与该要求一致；(3) **顺带发现（未改，仅供 owner 判断是否立新任务）**：tests/sync_phases_e2e.rs 里的 mock server 测试被 #[ignore]（文件头注明 \"spins a local mock server\"），而 tests/sync_gap_repro_e2e.rs 的同类测试是跑的——**ignore 策略在两个文件间不一致**，这大概是那 23 个 ignored 的来源之一；不在本任务授权内，未动。",
+  "changed_files": [
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "validation_requests": [
+    "请独立复核新测试 offline_star_change_pushed_after_connect **真能捕获该缺陷**：自行把 record_star_state 的入队改回 A-5 前语义（或等价门控），确认该测试确实失败；随后**务必还原**并复跑确认通过",
+    "请复核该测试是否真的走了**离线**分支（显式 read_credentials 为 None 的前置断言是否在调用前、同一把锁内），以及三段断言（入队/推送/清队列）是否都落到实处而非只断言不报错",
+    "请复核断言(2) 的 star 语义：mock 的 bookmark_toggles 是否确实只在收到 com.google/starred 标签变更时记录，且断言的是 star 而非 unstar",
+    "请复核**生产代码零改动**：git diff HEAD --numstat 应仍为 36/16、1/1（与第 1 轮逐字相同），新增行全在测试文件",
+    "请独立复跑四条门禁（退出码重定向后读）并核对 cargo test 为 **122 passed / 0 failed / 23 ignored**（基线 121/0/23，ignored 未增）、frontend 241/241",
+    "请复核第 2 轮审查提出的阻断项已被闭环：即 set_starred 的 A-5 离线入队现在**有**测试保护",
+    "请复核实现方如实披露的两处口径边界是否可接受：『修前回退只验证了行为等价的那一种写法』与『断言(2) 用 bookmark_toggles 而非 status_updates』",
+    "请复核它顺带发现的『两个测试文件 ignore 策略不一致』是否属实（仅作为信息，不在本任务范围内）"
+  ],
+  "unresolved_items": [],
+  "requested_actions": [],
+  "blocked_reason": null
+}

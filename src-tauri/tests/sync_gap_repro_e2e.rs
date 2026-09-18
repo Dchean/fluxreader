@@ -87,6 +87,57 @@ async fn seed_local_article(
     aid
 }
 
+/// 本地造一个直连订阅 + 若干未读文章（同一 feed 多篇：seed_local_article 每次
+/// 新建 feed，会在 `feeds.feed_url` 唯一约束上冲突，故多篇场景用这个）。
+/// 每篇对应远端同 URL entry（feed 10），供连接后的绑定回填。
+async fn seed_local_articles_in_one_feed(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    server: &MockGReader,
+    urls: &[&str],
+) -> Vec<i64> {
+    let mut ids = Vec::new();
+    for url in urls {
+        server.add_entry(10, url, "Remote Entry", "unread", false);
+    }
+    let conn = db.lock().await;
+    let folder_id = db::create_folder(&conn, "测试分类", "article").unwrap();
+    let feed_id = db::insert_feed(
+        &conn,
+        "http://127.0.0.1:8765/local_feed.xml", // 与 mock feed 10 同 URL
+        None,
+        "Local Direct Feed",
+        None,
+        folder_id,
+        "inherit",
+        true,
+        false,
+    )
+    .unwrap();
+    for url in urls {
+        let a = db::NewArticle {
+            guid: format!("guid-{url}"),
+            url: Some((*url).into()),
+            title: format!("Local Article {url}"),
+            author: None,
+            summary: None,
+            content_html: Some("<p>local</p>".into()),
+            body_text: "local".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some(chrono::Utc::now().to_rfc3339()),
+            source: "direct".into(),
+        };
+        ids.push(
+            db::upsert_article_with_feed(&conn, feed_id, &a, false)
+                .unwrap()
+                .0,
+        );
+    }
+    ids
+}
+
 /// A-1 修复后的期望行为（原复现测试转正）：删除已绑定远端的订阅会 best-effort
 /// 退订（GReader），并写入删除墓碑——下次 pull 不得按远端订阅列表复活已删订阅。
 #[tokio::test]
@@ -336,6 +387,242 @@ async fn offline_read_change_pushed_after_connect() {
             "修复期望：离线已读变更在连接后被补推（收到 edit-tag read）"
         );
     }
+    let remains: i64 = {
+        let conn = db.lock().await;
+        conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(remains, 0, "补推完成后队列应清空");
+}
+
+/// A-5 同源残留修复（TASK-053 / P1-5）：离线（未配置凭据）期间的「全部已读」
+/// 也必须入队——mark_all_read 此前仍以 sync_configured 作为入队前置条件，
+/// 离线标读永不补推，且连接后首次全量对账按远端状态把本地已读翻回未读
+/// （用户现象：「刚标的已读自己变回去了」）。
+///
+/// 断言两段（与 offline_read_change_pushed_after_connect 同口径，只是入口换成
+/// mark_all_read 的范围标读路径）：
+///   ① 未配置时 commands::apply_mark_all_read 仍写入 sync_queue（入队不受配置影响）；
+///   ② 连接后 states_phase 推送段确实把该动作推给后端（远端收到 edit-tag read），
+///      且推送完成后队列清空。
+#[tokio::test]
+async fn offline_mark_all_read_queued_and_pushed_after_connect() {
+    // "离线"阶段：未配置任何凭据
+    let server = MockGReader::start().await.expect("start mock server");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_gap_offline_all_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let db = Arc::new(Mutex::new(db::open(&tmp).expect("open db")));
+    let http = app_lib::ingestion::build_client(10);
+
+    // 离线阶段：造两篇未读本地文章（URL 与 mock feed 10 的远端 entry 对齐，
+    // 供连接后的绑定回填）
+    let aids = seed_local_articles_in_one_feed(
+        &db,
+        &server,
+        &[
+            "http://127.0.0.1:8765/post/all-1",
+            "http://127.0.0.1:8765/post/all-2",
+        ],
+    )
+    .await;
+    let (a1, a2) = (aids[0], aids[1]);
+
+    // 命令层真实逻辑（mark_all_read 的范围标读 + 入队）；此处显式前置断言
+    // "未配置"以证明测试确实覆盖离线分支
+    let (n, scoped) = {
+        let conn = db.lock().await;
+        assert!(
+            sync::read_credentials(&conn).is_none(),
+            "前置条件：离线阶段必须未配置同步凭据"
+        );
+        let ids = db::list_unread_ids_scoped(&conn, None, None, false, None).unwrap();
+        let n = app_lib::commands::apply_mark_all_read(&conn, None, None, false, None)
+            .expect("mark_all_read (offline)");
+        (n, ids)
+    };
+    assert_eq!(n, 2, "离线「全部已读」应标读两篇未读文章");
+    assert_eq!(scoped.len(), 2, "前置条件：入队集合应含两篇未读文章");
+
+    // ① 入队成功：未配置也必须写入待推队列（修复点）
+    let queued: Vec<(Option<i64>, String)> = {
+        let conn = db.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT article_id, action FROM sync_queue ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(
+        queued.len(),
+        2,
+        "修复期望：未配置时「全部已读」也入队（A-5），实际 {queued:?}"
+    );
+    for id in [a1, a2] {
+        assert!(
+            queued
+                .iter()
+                .any(|(aid, act)| *aid == Some(id) && act == "read"),
+            "修复期望：文章 {id} 应有 read 待推项，实际 {queued:?}"
+        );
+    }
+
+    // "连接"：配置凭据后做全量同步（feeds 绑定订阅 → states 绑定条目并补推）
+    {
+        let conn = db.lock().await;
+        db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+        db::set_setting(&conn, "greader_username", "test").unwrap();
+        db::set_setting(&conn, "greader_password", "test-token").unwrap();
+    }
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase (bind feed)");
+    sync::states_phase(&db, &http, true)
+        .await
+        .expect("states phase (bind articles)");
+
+    // ② 连接后推送段确实把该动作推给后端（远端收到 edit-tag read）
+    {
+        let updates = server.status_updates.lock().unwrap();
+        assert!(
+            updates.iter().any(|(_eid, st)| st == "read"),
+            "修复期望：离线「全部已读」在连接后被推送到后端（收到 edit-tag read），实际 {updates:?}"
+        );
+    }
+
+    let remains: i64 = {
+        let conn = db.lock().await;
+        conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(remains, 0, "补推完成后队列应清空");
+}
+
+/// A-5 同源测试补测（TASK-053 repair 轮 2）：离线（未配置凭据）期间的**收藏**
+/// 变更（commands::record_star_state = set_starred 的真实代码路径）也必须入队，
+/// 连接后 states_phase 推送段补推。既有两处 record_star_state 调用
+/// （reconcile_skipped_when_state_fetch_fails / fresh_queue_items_survive_aging）
+/// 都在已配置态，离线入队分支无测试保护——本测试补上该分支。
+///
+/// 与 offline_read_change_pushed_after_connect 同形（同样的"离线 → 连接 → 补推"
+/// 两段结构），只是把 read 换成 star（Google Reader 的收藏语义：add/remove
+/// `com.google/starred` 标签，非 toggle）。
+///
+/// 断言两段：
+///   ① 未配置时 record_star_state 仍写入 sync_queue（action=star）；
+///   ② 连接后 states_phase 补推段确实把该动作推给后端（mock 收到 edit-tag 的
+///      starred 标签变更），且推送完成后队列清空。
+#[tokio::test]
+async fn offline_star_change_pushed_after_connect() {
+    // "离线"阶段：未配置任何凭据
+    let server = MockGReader::start().await.expect("start mock server");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_gap_offline_star_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let db = Arc::new(Mutex::new(db::open(&tmp).expect("open db")));
+    let http = app_lib::ingestion::build_client(10);
+
+    // 离线阶段：造一篇未读未收藏的本地文章（URL 与 mock feed 10 的远端 entry
+    // 对齐，供连接后的绑定回填）
+    let aid = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/star-1", false).await;
+
+    // 命令层真实逻辑（set_starred → record_star_state = 落库 + 入队）；此处显式
+    // 前置断言"未配置"以证明测试确实覆盖离线分支
+    {
+        let conn = db.lock().await;
+        assert!(
+            sync::read_credentials(&conn).is_none(),
+            "前置条件：离线阶段必须未配置同步凭据"
+        );
+        app_lib::commands::record_star_state(&conn, aid, true).expect("record star");
+    }
+
+    // ① 入队成功：未配置也必须写入待推队列（A-5）
+    let queued: Vec<(Option<i64>, String)> = {
+        let conn = db.lock().await;
+        let mut stmt = conn
+            .prepare("SELECT article_id, action FROM sync_queue ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(
+        queued,
+        vec![(Some(aid), "star".to_string())],
+        "修复期望：未配置时收藏变更也入队（A-5），实际 {queued:?}"
+    );
+    // 本地状态同批落库（命令层真实路径的落库半边）
+    {
+        let conn = db.lock().await;
+        let starred: i64 = conn
+            .query_row(
+                "SELECT is_starred FROM articles WHERE id = ?1",
+                [aid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(starred, 1, "离线收藏应落在本地");
+    }
+
+    // "连接"：配置凭据后做全量同步（feeds 绑定订阅 → states 绑定条目并补推）
+    {
+        let conn = db.lock().await;
+        db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+        db::set_setting(&conn, "greader_username", "test").unwrap();
+        db::set_setting(&conn, "greader_password", "test-token").unwrap();
+    }
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase (bind feed)");
+    sync::states_phase(&db, &http, true)
+        .await
+        .expect("states phase (bind article)");
+
+    // ② 连接后推送段确实把该动作推给后端：mock 的 edit-tag 处理器只在收到
+    //    com.google/starred 标签变更时记录 bookmark_toggles（star 与 unstar 都记）
+    {
+        let toggles = server.bookmark_toggles.lock().unwrap();
+        assert!(
+            !toggles.is_empty(),
+            "修复期望：离线收藏变更在连接后被推送到后端（收到 edit-tag starred），实际 {toggles:?}"
+        );
+    }
+    let remote_starred: i64 = {
+        let toggles = server.bookmark_toggles.lock().unwrap();
+        let entries = server.entries.lock().unwrap();
+        let eid = toggles[0];
+        entries
+            .iter()
+            .find(|e| e.id == eid)
+            .map(|e| i64::from(e.starred))
+            .unwrap_or(-1)
+    };
+    assert_eq!(
+        remote_starred, 1,
+        "修复期望：后端 entry 应被标为已收藏（edit-tag a=starred）"
+    );
+
+    // ③ 补推完成后队列清空
     let remains: i64 = {
         let conn = db.lock().await;
         conn.query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))

@@ -188,7 +188,8 @@
         "decision": "授权在 TASK-052 内修复 src/components/Overlays.tsx 命令面板的锚定顺序错位（先 anchorToArticle 后 selectFeed/selectView）。改造前游标是全局的、顺序无关；per-scope 后 anchorToArticle 按调用时范围构造查询，必然按旧范围取位置——**是本次改造让该顺序开始出错**，故属完成本次改动所必需，而非新功能。",
         "requirements": "须补断言覆盖修正后的顺序语义，并在报告中写明该行为变化。"
       }
-    }
+    },
+    "continued_by": "TASK-053"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",

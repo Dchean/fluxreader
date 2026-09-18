@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-e4f0b7b7ff7d4f89b6688ba1eb849210",
+  "task_id": "TASK-053",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "repair 轮 2 重新交付（protocol 阻断经 owner 授权记录级订正）：新 run 基线=当前树，全部改动已在其中，故按实际差异声明 changed_files"
+  },
+  "started_at_utc": "2026-09-18T00:43:07.563461Z",
+  "finished_at_utc": "2026-09-18T00:43:30.498336Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "6943e767db7964a5d83afe8e4989c8e9b441c175e2c10c8f6af4d383edaecccb",
+  "candidate_digest": "05ef6a4f1d1c77328badf0d0c28f1c6dc0cbf369c697db0294c129fea4b36d28",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-e4f0b7b7ff7d4f89b6688ba1eb849210-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-e4f0b7b7ff7d4f89b6688ba1eb849210-scope.json"
+}

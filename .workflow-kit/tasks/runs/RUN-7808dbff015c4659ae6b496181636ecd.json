@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-7808dbff015c4659ae6b496181636ecd",
+  "task_id": "TASK-053",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "总控会话直接实现（POLICY coder=current_agent）；P1-5：mark_all_read 不再以 sync_configured 为入队条件，对齐 A-5 先例（无论是否 configured 都入队、推送段未配置时静默跳过）；本任务获 owner 授权改同步协议行为，但仅限入队条件"
+  },
+  "started_at_utc": "2026-09-17T23:33:36.718232Z",
+  "finished_at_utc": "2026-09-17T23:48:45.663733Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "6943e767db7964a5d83afe8e4989c8e9b441c175e2c10c8f6af4d383edaecccb",
+  "candidate_digest": "e2f5efcab5f5c82d81611a82731edb10f37949e83462c2326f05fb44372a28ac",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-7808dbff015c4659ae6b496181636ecd-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-7808dbff015c4659ae6b496181636ecd-scope.json"
+}

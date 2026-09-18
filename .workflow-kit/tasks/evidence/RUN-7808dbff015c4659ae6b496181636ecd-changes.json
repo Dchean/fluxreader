@@ -1,0 +1,7 @@
+{
+  "changed_files": [
+    "src-tauri/src/commands/articles.rs",
+    "src-tauri/src/commands/mod.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ]
+}

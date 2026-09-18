@@ -1,0 +1,19 @@
+{
+  "task_id": "TASK-053",
+  "run_id": "RUN-e4f0b7b7ff7d4f89b6688ba1eb849210",
+  "status": "ready_for_verification",
+  "summary": "本 run 是对 repair 轮 2 的**重新交付**：上一轮 run（RUN-5b202743…）因**我自己的声明错误**被 protocol 阻断——我把 changed_files 写成 3 个文件（两个生产文件 + 测试文件），而该轮基线取自更早一轮 repair 之后、生产代码改动当时**已在树中**，故观测差异只有 1 个（tests/sync_gap_repro_e2e.rs）。实现方无任何过错。工作流对 protocol **没有官方恢复路径**（finish 拒绝非活动 run、begin 被 workflow_runtime.py:755 拒绝），故经 owner 授权（『授权订正（推荐）』）做记录级订正清除阻断，随后以**新 run（基线=当前树）**重新交付——因此**本 run 的观测差异为空，changed_files=[] 是正确声明**（tools 已确认 changed=[]、越界=无）。订正全过程记入 evidence.ledger_correction.protocol_unblock。**候选内容与 repair 轮 2 完全一致**（候选按 snapshot_paths 生成，与 diff 无关）：TASK-053 的全部改动 = src-tauri/src/commands/articles.rs（36/16）、src-tauri/src/commands/mod.rs（1/1）、src-tauri/tests/sync_gap_repro_e2e.rs（287/0，即新增 star 版测试 offline_star_change_pushed_after_connect）。**本轮交付所承载的实质工作**（即 repair 轮 2 的成果）：采纳第 2 轮审查建议①，补一条与既有 offline_read_change_pushed_after_connect 同形的 star 版测试，覆盖 record_star_state（set_starred）的 A-5 离线入队 + 连接后推送。**纯测试添加、未改任何生产代码**（生产文件 numstat 与第 1 轮逐字相同）。测试断言：(0) 显式离线前置 assert!(sync::read_credentials(&conn).is_none())，在调用前、同一把锁内；(1) 未配置时确实入队——sync_queue 恰为 [(Some(aid), \"star\")]，并断言本地 is_starred == 1；(2) 配置后推送段确实推给后端——mock 的 bookmark_toggles 非空（该 mock 只在收到 com.google/starred 标签变更时记录），且被 toggle 的 entry 在 mock 里 starred == true（star 而非 unstar）；(3) 推送后队列清空。**修前失败→修后通过证据**：把 record_star_state 的入队临时改回 A-5 前语义 → `cargo test --test sync_gap_repro_e2e offline_star_change_pushed_after_connect` **EXIT=101**、`assertion left == right failed: 修复期望：未配置时收藏变更也入队（A-5），实际 []  left: []  right: [(Some(1), \"star\")]`；还原后 EXIT=0、新测试 ok、13 passed/0 failed，且 articles.rs 与还原前逐字节一致、探针残留 0、临时产物已删净。**门禁（在冻结候选上重跑，退出码重定向后读）**：cargo test exit 0 且 **122 passed / 0 failed / 23 ignored**（基线 121/0/23 → 精确 +1、ignored 未增）、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 **241/241**。**为何采纳建议①而非②（另立任务）**：本任务正是建立该族保护的合适位置——三条状态路径（set_read/set_starred/mark_all_read）的入队语义对齐是授权核心；把空白推给『另立任务』是用流程边界掩盖验证空白。第 2 轮审查者的表述准确：认同修复轮『扩测非本任务授权』的判断，但不认同据此放行——那是把『越界』与『已验证』混为一谈；修复轮按边界停下报告**行为本身是对的**，但『停下来』不等于『可以放行』。**约束核验**：未改生产代码（除 TASK-053 原有改动）、未改 Cargo.toml/lock、未改前端、未改 .workflow-kit/tasks/**（除管理角色的订正）、未 commit、未启动 Tauri、未动用户数据库；改动文件 CR 字节数均为 0（LF）；测试 DB 全在 %TEMP%。**未完成/不确定（不掩饰）**：(1) 所验证的『修前』回退是**守卫整个入队**（行为等价于 if sync_configured），未逐一验证每种等价回退写法——但这正是审查者所指的『离线入队无保护』分支，行为等价即足以证明捕获面；(2) 断言(2) 用 mock 的 bookmark_toggles（star 专用）而非 read 版的 status_updates（只记 read/unread），两者同为『后端确实收到该动作』的等价证据；(3) **顺带发现（未改，供 owner 判断是否立新任务）**：tests/sync_phases_e2e.rs 的 mock server 测试被 #[ignore]（文件头注明 spins a local mock server），而 tests/sync_gap_repro_e2e.rs 的同类测试在跑——**ignore 策略两文件不一致**，大概是那 23 个 ignored 的来源之一；不在本任务授权内。",
+  "changed_files": [],
+  "validation_requests": [
+    "请复核**本 run 的 changed_files 为空是正确声明**：新 run 的基线取自当前树（全部改动已在其中），tools 观测差异确为 []；并确认候选内容与 repair 轮 2 一致（articles.rs 36/16、mod.rs 1/1、测试文件 287/0）",
+    "请复核该 protocol 阻断的处置是否恰当：确认它确属**声明错误**（非实现方过错）、原始失败 run 保留、订正过程留痕于 evidence.ledger_correction.protocol_unblock，且未借订正放宽任何门禁或验收",
+    "请独立复核新测试 offline_star_change_pushed_after_connect **真能捕获缺陷**：自行把 record_star_state 的入队改回 A-5 前语义，确认它确实失败（exit 101、left [] vs right [(Some(1),\"star\")]）；随后**务必还原**并复跑确认通过",
+    "请复核该测试是否真的走了**离线**分支（read_credentials 为 None 的前置断言在调用前、同一把锁内），三段断言是否都落到实处",
+    "请独立复跑四条门禁（退出码重定向后读）并核对 cargo test 为 **122 passed / 0 failed / 23 ignored**（ignored 未增）、frontend 241/241",
+    "请复核第 2 轮审查的阻断项已闭环：set_starred 的 A-5 离线入队现在**有**测试保护",
+    "请复核实现方如实披露的两处口径边界是否可接受（修前回退只验证行为等价写法；断言(2) 用 bookmark_toggles 而非 status_updates）"
+  ],
+  "unresolved_items": [],
+  "requested_actions": [],
+  "blocked_reason": null
+}

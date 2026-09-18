@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "ready",
+  "status": "verified",
   "objective": "修复 P1-5 的残留：`mark_all_read`（以及同源路径）**仍以 `sync_configured` 作为入队条件**，导致离线期间的「全部已读」不写入待推队列；连接后首次全量对账会按远端状态把本地已读**翻回未读**——用户看到的「已读」会自己变回去。owner 已明确裁决『另立任务修（需授权改协议行为）』，故本任务**获授权改变同步协议行为**（仅限本缺陷所必需）。参照同一批次已完成的 A-5 修复先例（`set_read`/`set_starred` 已改为『无论是否 configured 都入队，推送段在未配置时静默跳过』），本任务应把 `mark_all_read` 等剩余路径对齐到同一语义。",
   "non_goals": [
     "修 P1-6（本地条目无回写远端接口的设计边界）——那是接口缺口，不在本次授权范围",
@@ -122,7 +122,7 @@
     "behavior": "change",
     "baseline": {
       "status": "PASS",
-      "summary": "2026-09-17 基线（TASK-052 之后）：npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 241/241（既有 26 + 新增 215）、cargo test 120 passed / 0 failed / 23 ignored。**本任务有意改变行为**（同步协议入队语义），故基线不是「保持不变」，而是「既有后端保护不削弱 + 语义变更显式论证 + 每处变化有对应测试」。Rust 侧既有同步测试（含 TASK-032 起为 A-5/C-1 转正的 offline 复现测试）是本任务的直接回归网。",
+      "summary": "2026-09-17 基线（TASK-052 之后）：npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 241/241（既有 26 + 新增 215）、cargo test 120 passed / 0 failed / 23 ignored。**本任务有意改变行为**（同步协议入队语义），故基线不是「保持不变」，而是「既有后端保护不削弱 + 语义变更显式论证 + 每处变化有对应测试」。**更正（2026-09-17，review_failure 修复轮后）**：我原先在此声称「Rust 侧既有同步测试是本任务的直接回归网」——**该陈述不实，已由独立审查实证 + 修复轮独立复现推翻**：既有 offline_read_change_pushed_after_connect 只覆盖 set_read，**根本不覆盖 mark_all_read**（其内部用 return 门控逐字复刻该测试、在回退后的代码上跑得 exit 0 / 1 passed）。正确表述：**本缺陷在既有回归网中原本未受保护**，保护是由本任务**新增**的 offline_mark_all_read_queued_and_pushed_after_connect 才建立的。修复轮另扩展出覆盖矩阵（逐条回退跑完整 cargo test）：set_read ✅ 有保护；**set_starred ❌ 空白**（审查者未报的新发现，已记录未修）；mark_all_read ⚠️ 原本空白。教训：把「有测试」当成「有保护」——未逐条核对覆盖关系。详见 .workflow-kit/tasks/evidence/TASK-053-repair-round-report.md。",
       "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md"
     },
     "decision_ids": [
@@ -159,24 +159,59 @@
     "manifest": ".workflow-kit/tasks/evidence/TASK-053-input-fb15233240b8483d9c2c651df8cd42ef.json",
     "digest": "6943e767db7964a5d83afe8e4989c8e9b441c175e2c10c8f6af4d383edaecccb",
     "source_revision": null,
-    "definition_digest": "d35660a2872dc47dd02cc73dfc7b0e3fce4d7807e82b0bc73be270e869b4ffd4"
+    "definition_digest": "c4ac7a738ebec49e910fc688b0a9cc5bce8ee08f6e2838b9f8ad0050c7ee71e1"
   },
   "budget": {
-    "started_at_utc": null,
-    "deadline_at_utc": null,
-    "repair_rounds_used": 0
+    "started_at_utc": "2026-09-17T23:33:36.716995Z",
+    "deadline_at_utc": "2026-09-18T03:33:36.716995Z",
+    "repair_rounds_used": 2
   },
   "batch_id": "BATCH-a4d86daa80e348b78973d58fc2353698",
-  "run_ids": [],
+  "run_ids": [
+    "RUN-7808dbff015c4659ae6b496181636ecd",
+    "RUN-5d5e382638e84c259904235c78a778ae",
+    "RUN-c265e3f09bbc425cbf569b6c25121ef5",
+    "RUN-29f39e45a77f4976843ffc6f68735ad1",
+    "RUN-5d40a928c96340e199c7e902120f89e1",
+    "RUN-9b3dbc2ec07e4306a0f07b362ff0a90a",
+    "RUN-5b202743d8b44abc86134ada2c4bd827",
+    "RUN-e4f0b7b7ff7d4f89b6688ba1eb849210",
+    "RUN-d804e57c6d1c4370a711f658abba62c9",
+    "RUN-183beae08354498983b7b0c4dd35dc34"
+  ],
   "blockers": [],
   "evidence": {
-    "candidate_manifest": null,
-    "candidate_digest": null,
-    "verification_run": null,
-    "review_run": null,
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-d804e57c6d1c4370a711f658abba62c9-candidate.json",
+    "candidate_digest": "05ef6a4f1d1c77328badf0d0c28f1c6dc0cbf369c697db0294c129fea4b36d28",
+    "verification_run": "RUN-d804e57c6d1c4370a711f658abba62c9",
+    "review_run": "RUN-183beae08354498983b7b0c4dd35dc34",
     "acceptance_ref": null,
     "owner_decision_ids": [],
-    "merge_ref": null
+    "merge_ref": null,
+    "ledger_correction": {
+      "claim_correction": {
+        "at_utc": "2026-09-18T00:16:39.341100Z",
+        "authorized_by": "管理角色职责（更正自己写错的记录）；依据独立审查的实证 findings 与修复轮的独立复现",
+        "reason": "我在 TASK-053 的 test_review.baseline.summary 里声称既有 Rust 同步测试是本任务的直接回归网，但独立审查者用 return 门控逐字复刻既有测试、在回退后的代码上跑得 exit 0 / 1 passed，证明该测试只覆盖 set_read、不覆盖 mark_all_read；修复轮独立复现并扩展出覆盖矩阵。故该陈述不实，予以更正。",
+        "note": "只更正陈述本身，不改任何门禁与验收要求；同时把本次 run 的基线中该台账文件一条对齐。"
+      },
+      "protocol_unblock": {
+        "at_utc": "2026-09-18T00:42:59.282105Z",
+        "authorized_by": "用户 2026-09-17：『授权订正（推荐）』（针对 protocol 阻断）",
+        "worker_fault": false,
+        "reason": "repair 轮 2 的 run（RUN-5b202743d8b44abc86134ada2c4bd827）基线取自**上一轮 repair 完成之后**，因此生产代码的 TASK-053 改动（src-tauri/src/commands/articles.rs 与 mod.rs）在 begin 时**已在树中**、不构成本轮差异；本轮实际只有测试文件被改。但我在交付里把 changed_files 写成了 3 个文件，与工具观测到的 1 个不符 → finish 报 protocol『Worker changed_files does not match the observed project diff』。**这是我的声明错误，实现方无任何过错。**",
+        "impact": "候选不受影响——候选按 snapshot_paths 生成，与 diff 无关；四门禁在冻结候选上全绿（cargo 122/0/23、lint 0/0、build 0、frontend 241/241）；补的 star 版测试及其『修前失败→修后通过』证据均已完成。",
+        "why_record_level": "工作流对 protocol/scope/action_required **没有官方恢复路径**：finish 拒绝非活动 run（Only an active implementation run can finish）；begin 被 workflow_runtime.py:755 拒绝（blocked 且 failure_kind 不在可重试白名单）。同 TASK-043/044 先例。",
+        "original_state": {
+          "status": "blocked",
+          "failure_kind": "protocol",
+          "blockers": [
+            "Worker changed_files does not match the observed project diff"
+          ]
+        },
+        "note": "清除 failure_kind 与 blockers，使 begin 可用；随后以新 run 的基线重新交付，并按**新基线下的实际差异**声明 changed_files（预计为空，因为全部改动此时都已在树中）。原始失败 run 与本次订正均保留。 状态置为 ready（begin 要求 ready 或可恢复的已记录阻断）。"
+      }
+    }
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
@@ -188,5 +223,77 @@
   ],
   "continuation_of": {
     "TASK-052": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0"
-  }
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-17T23:33:36.812643Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-17T23:48:45.709039Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-17T23:49:05.837769Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-17T23:55:09.483544Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-17T23:55:17.440994Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-18T00:17:04.231941Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-18T00:17:27.728154Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-18T00:26:01.758877Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-18T00:26:10.405500Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-18T00:34:02.285516Z",
+      "note": "Worker changed_files does not match the observed project diff",
+      "next_action": "先核对已有文件及原始日志，再处理 protocol；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-18T00:43:07.651372Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后调用 finish，再运行 verify"
+    },
+    {
+      "at_utc": "2026-09-18T00:43:30.528551Z",
+      "note": "编码结果已记录，差异范围已核对",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-18T00:43:52.499522Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-18T00:49:26.352497Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
 }

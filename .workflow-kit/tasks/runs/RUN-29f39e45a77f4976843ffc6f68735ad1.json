@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-29f39e45a77f4976843ffc6f68735ad1",
+  "task_id": "TASK-053",
+  "kind": "repair",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "repair 轮：处理独立审查的 4 条 findings —— (a) 离线删除动作在连接后被投递导致 subscriptions.rs 墓碑清除逻辑被削弱（TASK-035 保护受损）；(b) 任务卡『既有同步测试是直接回归网』不实（既有 offline_read_change_pushed_after_connect 只覆盖 set_read）；(c) schedule_state_push 改无条件后 feeds_phase 在未配置时返回 Err 且被 let _ = 吞掉，与 A-5 静默跳过语义相抵；(d) 披露不充分"
+  },
+  "started_at_utc": "2026-09-17T23:55:17.353903Z",
+  "finished_at_utc": "2026-09-18T00:17:04.200624Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "6943e767db7964a5d83afe8e4989c8e9b441c175e2c10c8f6af4d383edaecccb",
+  "candidate_digest": "e2f5efcab5f5c82d81611a82731edb10f37949e83462c2326f05fb44372a28ac",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-29f39e45a77f4976843ffc6f68735ad1-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-29f39e45a77f4976843ffc6f68735ad1-scope.json"
+}

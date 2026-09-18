@@ -1,0 +1,24 @@
+{
+  "task_id": "TASK-053",
+  "run_id": "RUN-7808dbff015c4659ae6b496181636ecd",
+  "status": "ready_for_verification",
+  "summary": "修复 P1-5 残留：mark_all_read 不再以 sync_configured 作为入队前置条件，对齐 TASK-032 已建立的 A-5 语义（无论是否 configured 都入队，推送段在未配置时静默跳过）。**协议语义变更论证**：原实现在标读后做 `if sync_configured(&conn) { 逐条入队 }`，把「后端凭据是否已配置」当作是否入队的前置条件 → 离线期间「全部已读」不写 sync_queue → 连接后没有待推记录 → 首次全量对账按远端状态把本地已读翻回未读（这正是用户现象「刚标的已读自己变回去了」的根因）。TASK-032~038 已把 A-5 定为协议不变量，mark_all_read 是唯一漏网路径，造成「有的状态变更离线会入队、有的不会」的不一致。**兼容影响**：后端零影响（离线阶段根本不发请求；未配置时 build_client 返回 None，push_states_now/phases 静默 return，语义与改前一致）；其它客户端行为**改善**（此前离线标读永远落不到后端、跨端不一致；现在连接后补推）；本地 DB 多出的是「离线期间被标读文章的 read 队项」，受 TASK-038 的 30 天老化清理约束（prune_stale_unbound 只清无远端绑定项）；量级不变（原逻辑就是逐条入队）。**为何不影响推送顺序与冲突解决**：入队仍追加到 sync_queue 尾部，plan_push 仍按 ORDER BY id 读取（未改动）；冲突解决/对账口径全在 sync/entries.rs 与 push.rs::exec_push，**逐字未动**；read↔unread 覆盖去重（opposite_action）、同文副本广播、PUSH_LOCK 串行化全部原样；唯一变化是离线时队列内容更完整。**改动 3 个文件**（均 LF、CRLF=0）：(1) src-tauri/src/commands/articles.rs——抽出 pub fn apply_mark_all_read(conn, feed_id, folder_id, starred_only, since_ms) -> AppResult<usize> 供命令与测试共用真实逻辑，去掉 sync_configured 前置；mark_all_read 命令体改为调它 + 锁外 schedule_state_push，后者此前只在 configured 分支内被调用，现与 set_read/set_starred 一样**无条件**调度（未配置时 push_states_now 静默 return，队列保留）；(2) src-tauri/src/commands/mod.rs——sync_configured 由 fn 改 pub(crate) fn（仅可见性，行为不变）；(3) src-tauri/tests/sync_gap_repro_e2e.rs——新增测试 offline_mark_all_read_queued_and_pushed_after_connect（默认集即跑、无 #[ignore]）+ 新 helper seed_local_articles_in_one_feed。**新测试断言**：① 未配置凭据（显式 assert!(sync::read_credentials(&conn).is_none()) 证明确实覆盖离线分支）时 apply_mark_all_read 仍写入 2 条 read 队项；② 配凭据后 feeds_phase + states_phase(full=true)，远端 mock 收到 edit-tag read；③ 推送后队列清空。**修前失败→修后通过证据**：临时把入队条件还原成 `if sync_configured(conn) { for id in ids {...} }` 并重编译运行，得到 `panicked at tests\\sync_gap_repro_e2e.rs:465:5: assertion left == right failed: 修复期望：未配置时「全部已读」也入队（A-5），实际 []  left: 0  right: 2 → test result: FAILED. 0 passed; 1 failed [exit=101]`；修后该测试 ok、整个 target 12 passed / 0 failed；已从备份恢复并复核 sync_configured 在 articles.rs 仅剩注释引用（第 93、163 行 doc comment）。**同源残留排查（全仓 sync_configured 共 5 处，逐条判断）**：#1 articles.rs apply_mark_all_read 是真「是否入队」条件 → 已对齐；#2 folders.rs:178 add_feed 的 `sync_to_backend && sync_configured` 是**合取且含用户显式勾选**（前端「同步到后端」复选框=用户显式意图，不能替用户在未勾选时入队）、属 **feeds 阶段**动作（phases.rs push_feeds）不进状态推送段、离线建远端订阅有副作用（是远端对象创建）、且**本就有独立补推入口** sync_local_feeds（commands/sync.rs:141）→ **故意不对齐**；#3 folders.rs:200 record_feed_deletion 决定「是否返回远端退订目标」而非入队（不写队列，删除语义明确不建队项，防复活靠 A-1 墓碑）→ 不需要对齐；#4 commands/sync.rs:147 sync_local_feeds 的 `if !sync_configured { return Err(notConnected) }` 是**守卫整条命令**（用户点按钮时的前置校验，未配置返回明确错误比静默入队产生永不推送的队项更符合 UX）→ 不对齐且正确；#5 folders.rs:304 record_feed_edit 决定「是否返回远端编辑推送目标」而非入队（既有 feed_edit_without_backend_stays_local 测试正例断言此行为，属 A-2 既定语义）→ 不需要对齐。结论：只有 #1 是真正的入队门禁，已对齐；后端 sync/ 模块内部**不使用** sync_configured（用 read_credentials + build_client），故离线跳过推送的语义天然正确。**门禁（退出码重定向后读）**：cargo test（src-tauri）exit 0 且 passed=121 failed=0 ignored=23（基线 120/0/23 → 通过数 +1、ignore 未增）；npm run lint exit 0（0 warnings/0 errors）；npm run build exit 0；npm run test:frontend exit 0 且 241/241（既有 26 + 新增 215）。额外自查（非要求门禁）：cargo fmt --check 退出 0、cargo clippy --all-targets 退出 0 且 0 warning。约束核对：Cargo.toml 与 Cargo.lock 零改动、未引入依赖、未改前端、未改 .workflow-kit/**、未启动 Tauri、未动用户数据库、3 个改动文件全部 LF。**未完成/不确定（不掩饰）**：无阻塞项；如实说明一处——新测试②段用 states_phase（内含推送段）而非单独断言 push_states_now，该单路径由既有 offline_read_change_pushed_after_connect 覆盖，两条互补故未重复断言；**发现但未处理（P1-6 范围外，按要求未碰）**本地独有文章（source='direct'、远端无同 URL entry）无回写远端接口，其 read 队项永远无法绑定 remote_id，只能等 30 天老化清理（既有 stale_unbound_queue_items_are_pruned 正例覆盖）——这是接口缺口而非入队缺口；过程中 cargo build --tests 遇 LNK1285 PDB 已损坏，删除该 .pdb 后恢复，与本次改动无关。",
+  "changed_files": [
+    "src-tauri/src/commands/articles.rs",
+    "src-tauri/src/commands/mod.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs"
+  ],
+  "validation_requests": [
+    "请独立复核**协议语义变更论证**是否成立：改的确实只是「是否入队」吗？推送顺序（plan_push 按 ORDER BY id）、冲突解决/对账口径（sync/entries.rs、push.rs::exec_push）、read↔unread 覆盖去重、PUSH_LOCK 串行化 是否**逐字未被改动**？建议自行 git diff 核对而非采信报告",
+    "请独立复核**同源残留排查清单**（5 处 sync_configured）：自己全仓搜索该符号，确认无遗漏；并独立判断 #2（add_feed 的合取条件+用户勾选+feeds 阶段）「故意不对齐」的理由是否成立——这是最需要独立判断的一条",
+    "请独立复核修前失败→修后通过：自行把入队条件还原成 `if sync_configured` 跑新测试，确认确实失败（exit 101、left 0 vs right 2），随后**务必还原**",
+    "请复核新测试 offline_mark_all_read_queued_and_pushed_after_connect 是否真的覆盖了「离线入队」与「连接后推送」两段，以及它是否真能捕获该缺陷（而非只是不报错）",
+    "请独立复跑四条门禁（退出码重定向后读）并核对 cargo test 为 121/0/23、frontend 为 241/241",
+    "请复核 Rust 既有同步测试**未回退**（尤其 TASK-032~038 建立的 C-1/A-5/A-1/A-3/A-4 保护），#[ignore] 数未增加、通过数未减少",
+    "请复核 draw 出的 apply_mark_all_read 抽取是否**未改变行为**（命令与测试共用真实逻辑，而非测试走了另一条路径）",
+    "请复核未完成/不确定部分的披露是否诚实充分（尤其它如实说明新测试②段用 states_phase 而非单独断言 push_states_now）"
+  ],
+  "unresolved_items": [],
+  "requested_actions": [],
+  "blocked_reason": null
+}

@@ -68,7 +68,7 @@ pub(crate) fn schedule_state_push(state: &AppState) {
 }
 
 /// 后端同步凭据是否已配置（folders/articles/sync 三处共用，故留在模块根）。
-fn sync_configured(conn: &rusqlite::Connection) -> bool {
+pub(crate) fn sync_configured(conn: &rusqlite::Connection) -> bool {
     crate::sync::read_credentials(conn).is_some()
 }
 

@@ -1,0 +1,84 @@
+{
+  "task_id": "TASK-053",
+  "candidate_digest": "e2f5efcab5f5c82d81611a82731edb10f37949e83462c2326f05fb44372a28ac",
+  "verification_run": "RUN-5d5e382638e84c259904235c78a778ae",
+  "verdict": "FAIL",
+  "summary": "独立复核结论：本次**代码改动本身**经逐行核对成立——`git diff HEAD -- src-tauri` 仅 3 文件 / +201 -17，协议语义变更严格限于「是否入队」这一条件，推送顺序、冲突解决/对账口径、`opposite_action` 覆盖去重、同文副本广播、`PUSH_LOCK` 串行化全部逐字未动；四条门禁自跑全部复现（cargo test 121 passed / 0 failed / 23 ignored，exit 0；lint 0 warnings / 0 errors，exit 0；build exit 0；frontend 241/241，exit 0）；修前失败也独立复现（`left: 0 / right: 2`，exit 101）。但任务验收条款「既有 Rust 测试不得回退 + 既有保护未被削弱」**不成立**：改动把 `feeds_phase` 的调用方式从「配置后必经」变成「未配置时静默跳过」，而 `feeds_phase` 内部的 `pull_feeds` 携带**删除墓碑清理副作用**（`sync/pull.rs` 标注「墓碑清除仅限权威 feeds 拉取成功」），因此该路径失去了一层既有保护；更关键的是，我用 `return` 门控逐字复刻 HEAD 版的既有保护测试 `offline_read_change_pushed_after_connect` 在**回退后的代码**上运行，结果 **exit 0 / 1 passed** 而非预期的失败——该测试只覆盖 `set_read`/`record_read_state`（经由 `folders.rs` / 其他路径已无条件入队），**根本不覆盖 `mark_all_read`**，证明本缺陷在既有回归网中确属未保护，作者所宣称的「既有同步测试是直接回归网」不成立，且候选在作者自报「修前失败证据」之外并未建立对该缺陷的既有保护。此外 `folders.rs:200` `record_feed_deletion` 的 `sync_configured` 门控会因本次改动而**行为漂移**（同一测试内先离线标读、后连接投递再删除时，删除路径会在配置态下返回 Some → 触发远端退订 → 清除 A-1 墓碑，而改前不会），该漂移既未在报告中披露，也无任何测试覆盖，与任务卡「只改入队条件」的边界直接冲突。综合判定 FAIL：需补齐 (a) 删除墓碑/退订路径受本次改动影响的论证或防护，(b) 对既有保护网覆盖缺口的如实披露与补强，(c) `record_feed_deletion` 漂移的处理。未做专项：无（本次未启动 Tauri 应用，未注入键鼠、未抢占焦点，`ui_change=false` 故不做 UI 审查）。",
+  "findings": [
+    "【失败路径 · P1】既有保护测试 `offline_read_change_pushed_after_connect` 不覆盖 `mark_all_read`：我把 `apply_mark_all_read` 临时还原为 `if sync_configured(conn) { ... }`（修前语义），同时用 `return` 门控在 `sync_gap_repro_e2e.rs` 中原位替换为逐字复制自 `git show HEAD` 的该测试正文（不改逻辑），`cargo test --test sync_gap_repro_e2e offline_read_change_pushed_after_connect` 得到 **exit 0 / test result: ok. 1 passed; 0 failed**。即该既有测试在缺陷存在时仍然通过，它只断言 `record_read_state`（set_read 路径，A-5 已修）的行为。故任务卡 test_review 中『既有后端保护不削弱』与实施报告『既有的 offline 复现测试是直接回归网』的表述不成立；本缺陷在工单建立时属**回归网空白**，而候选只补了新测试、未对空白做任何说明。",
+    "【协议边界 · P1】改动引入第二条语义变更，超出『仅入队条件』：HEAD 版 `mark_all_read` 仅在 `sync_configured` 分支内 `drop(conn); schedule_state_push(&state);`，未配置时**不调度**；候选改为**无条件** `schedule_state_push(&state)`。这本身与 A-5（set_read/set_starred 无条件调度）对齐、且离线时 `push_states_now` 经 `build_client` 返回 None 而静默 return（`sync/push.rs:156-159`，已核对，不报错、不空转），属正向收敛；但它使 `state.http` 路径上的 `feeds_phase` 在**未配置凭据**时也被真实调用（`folders.rs:200` 的 `record_feed_deletion` 已因本次入队改动而返回 `Some`，再叠加无条件推送调度）。`feeds_phase` 的 `build_client` 为 None 时返回 `Err(notConnected)`（`sync/phases.rs:18-23`），故不产生 HTTP 请求——但若后续该返回值被处理，即会把『未配置』当错误上报，与 A-5『静默跳过』语义相抵。当前仅经 `let _ =` 丢弃，属**未论证的耦合面**，报告未提及。",
+    "【A-1 墓碑 · P1】`folders.rs:200` `record_feed_deletion` 以 `sync_configured` 决定是否返回退订目标，其行为受本次改动漂移：该门控在**调用时刻**求值，而本次改动使离线期间入队的动作在连接后被投递（`sync_local_feeds` 的 feeds 阶段 / 无条件推送调度）。同一测试内的序列『离线删源（改前：墓碑保留）→ 连接 → 投递』中，`sync_local_feeds` 的 `sync_configured` 门控（`commands/sync.rs:147`）会放行，随后 `feeds_phase` → `pull_feeds` 里 `clear_feed_tombstone_if_remote_gone` 的『权威订阅列表拉取成功』前提**成立**，会**清除 A-1 删除墓碑**；改前该拉取在未配置期不会发生。任务卡 non_goals 明列『改变除入队条件以外的同步协议语义（对账口径一律不动）』，该漂移未被报告论证，也无任何测试覆盖（现有 `deleted_feed_stays_deleted_and_unsubscribes` 全程离线、单次删除，不触及该序列）。",
+    "【同源清单】实现方列出 5 处 `sync_configured`：我全仓独立搜索（`src-tauri/src` + `src-tauri/tests`）结果一致——`folders.rs:3`(import) / `178`(add_feed) / `200`(record_feed_deletion) / `304`(record_feed_edit) / `sync.rs:147`(sync_local_feeds 守卫) / `mod.rs:71`(定义)，加 `articles.rs:93,163` 与测试 `:399` 的注释引用，**无遗漏**。其中 `sync.rs:147` 是 A-5 语义下正确的『显式操作须提示未连接』守卫（非入队前置），`record_feed_edit` 是 best-effort 远端编辑而非入队条件，判定正确。但清单**未把 `folders.rs:200` 标注为『受本改动影响的漂移点』**，只归类为『非入队条件』，属排查深度不足。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务卡三项目标逐条核对：(1)『`mark_all_read` 入队不再依赖 `sync_configured`』——`articles.rs` 新 `apply_mark_all_read` 去掉前置分支后无条件 `db::enqueue_sync(conn, Some(id), None, \"read\", None)`（`articles.rs:181-188`），成立；(2)『推送段在未配置时静默跳过』——`push_states_now`（`sync/push.rs:156-159`）与 `states_phase`（`sync/phases.rs:37-42`）均在 `build_client` 为 None 时返回，前者静默 return、队列保留，成立；(3)『逐一排查同源残留并说明未对齐理由』——报告给出 5 处清单，我全仓独立搜索数目与位置一致、无遗漏（唯一不足是未把 `folders.rs:200` 标为漂移点，已单列 finding）。另核对 non_goals：`Cargo.toml`/`Cargo.lock` 零改动（`git diff HEAD --numstat -- src-tauri` 仅 3 文件，无新增文件）、未改前端（diff 不含 `src/`）、未改 `.workflow-kit/**`、未引入新依赖，`mark_all_read` 返回值语义不变（仍返回实际标读条数）。验收要求『可复跑测试且修前失败、修后通过』——新测试 `offline_mark_all_read_queued_and_pushed_after_connect` 我实测修前 exit 101（`left: 0 / right: 2`）、修后 ok，满足。本条总体上目标达成，但受 A-1 漂移 finding 影响，本 area 的『成立』结论仅限字面三条目标；漂移与回归网空白记于其他 area 与 findings。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/phases.rs",
+        ".workflow-kit/tasks/evidence/_tmp_review_prefix.exit",
+        ".workflow-kit/tasks/evidence/_tmp_review_prefix.out"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "FAIL",
+      "analysis": "本任务有意改变协议行为，故回归口径应为『既有保护未被削弱』。计数层面成立：自跑 `cargo test` 得 121 passed / 0 failed / 23 ignored（基线 120/0/23），通过数 +1、失败数不变、`#[ignore]` 数不变；独立统计 `#[ignore]` 全仓 23 处、被改测试文件 `sync_gap_repro_e2e.rs` **0 处**（该文件 12 个测试全部默认集执行，无 ignore），`git show HEAD` 版本同样 0 处，故『ignore 数不得增加』满足，且无既有测试被删除或改名（HEAD 与当前该文件测试名逐一比对，仅新增 1 个与 1 个 helper）。内容层面**不成立**，两条独立证据：(a) 我用 `return` 门控逐字复刻 HEAD 版 `offline_read_change_pushed_after_connect` 在回退后的代码上运行，得 exit 0 / 1 passed —— 该既有 A-5 保护测试**不覆盖 `mark_all_read`**，缺陷存在时它照样通过，说明任务卡声称『既有 Rust 同步测试是本任务的直接回归网』不实，本缺陷在既有回归网中是**空白**；(b) 反向削弱：`record_feed_deletion`（`folders.rs:200`）的 `sync_configured` 门控在调用时刻求值，本次改动使离线入队动作在连接后被投递，同一测试内序列『离线删源 → 连接 → 投递』将放行 `sync_local_feeds`（`commands/sync.rs:147`）并使 `feeds_phase`→`pull_feeds` 的权威列表拉取成功，从而**清除 A-1 删除墓碑**（改前不会），削弱了 TASK-035 建立的『墓碑防复活』保护。该漂移无测试覆盖、未在报告中披露。其余保护经 diff 与源码核对未被触碰：C-1（`greader_pull.rs:95-113`，`full=false` 才做状态对账且任一集合拉取失败即跳过）、A-3（`push.rs::plan_push` 的 `remote_id` 缺失即 `continue` 保留队列）、A-4（`deleted_feed_stays_deleted_and_unsubscribes`/`folder_*_does_not_revive_*`/`folder_tombstone_cleared_when_remote_drops_label` 均通过）、TASK-038（`age_stale_queue` + `take_sync_queue` 吞错计 `report.errors`，`push.rs:142-154`）。",
+      "evidence_files": [
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/phases.rs",
+        ".workflow-kit/tasks/evidence/_tmp_review_regprobe.exit",
+        ".workflow-kit/tasks/evidence/_tmp_review_regprobe.out",
+        ".workflow-kit/tasks/evidence/_tmp_review_cargo_test.out",
+        ".workflow-kit/tasks/evidence/_tmp_review_gap_target.out",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "本缺陷本身即离线失败路径，逐段验证：(1) 离线入队——我自行把 `apply_mark_all_read` 的入队条件临时还原为 `if super::sync_configured(conn) { ... }`（改前语义），跑 `cargo test --test sync_gap_repro_e2e offline_mark_all_read_queued_and_pushed_after_connect` 得 **exit 101**，`panicked at tests\\sync_gap_repro_e2e.rs:466:5: 修复期望：未配置时「全部已读」也入队（A-5），实际 []  left: 0  right: 2`，与报告自述（exit 101、left 0 / right 2）**逐字一致**；还原后该测试 ok，整个 target 12 passed / 0 failed / 0 ignored（exit 0）。(2) 新测试确实走了未配置分支——正文 `assert!(sync::read_credentials(&conn).is_none(), \"前置条件：离线阶段必须未配置同步凭据\")`（`sync_gap_repro_e2e.rs:194`）显式断言，非仅『不报错』。(3) 断言内容为实质行为而非空断言：`assert_eq!(n, 2)`、`assert_eq!(scoped.len(), 2)`（前置）、队列表 `SELECT article_id, action FROM sync_queue ORDER BY id` 得 `queued.len() == 2` 且两条均须命中对应 `(Some(id), \"read\")`、远端 `server.status_updates` 须含 `read`、终态 `SELECT COUNT(*) FROM sync_queue == 0`；我核对 mock（`tests/mock_greader.rs:480-521`）确实按 id 匹配 entry 并写入 `read:true` 与 `status_updates`，断言成立。(4) 推送段在未配置时确实**静默跳过而非报错或空转**：`push_states_now` 首行 `let Some(client) = build_client(db, http).await else { return; }`（`push.rs:156-159`），全程无请求、无日志错误、队列保留。(5) 测试为默认集执行、无 `#[ignore]`。唯一须注意的覆盖限制（作者已如实披露且我确认为可接受）：② 段用 `states_phase`（内含推送段 + 绑定回填）作为推送入口，未单独断言 `push_states_now`；该单路径由既有 `offline_read_change_pushed_after_connect:380` 的显式 `sync::push_states_now` 调用覆盖，二者互补。",
+      "evidence_files": [
+        "src-tauri/tests/sync_gap_repro_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "src-tauri/src/sync/push.rs",
+        ".workflow-kit/tasks/evidence/_tmp_review_prefix.exit",
+        ".workflow-kit/tasks/evidence/_tmp_review_prefix.out",
+        ".workflow-kit/tasks/evidence/_tmp_review_postrestore.out"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "(1) `apply_mark_all_read` 抽取确为**行为等价且命令与测试共用真实逻辑**：我从 HEAD 版 `mark_all_read` 函数体逐句比对，新抽取体的顺序与内容与原锁内段完全一致（先 `list_unread_ids_scoped` 收集 → `mark_all_read` 标读 → 逐条 `enqueue_sync` → 返回 n），唯一删除的是 `sync_configured` 前置分支（这正是本任务的目标变更），命令侧改为调用同一函数（`articles.rs:151`），测试侧亦调用 `app_lib::commands::apply_mark_all_read`（`sync_gap_repro_e2e.rs:198`），**不存在平行测试路径**，与 `record_read_state`/`record_feed_deletion` 的既有抽取范式一致。返回值与错误传播语义不变（`?` 仍上抛，返回 `n` 仍为实际标读条数）。(2) 锁纪律未被破坏且实际略有改善：原实现在 configured 分支内 `drop(conn)` 后调度，未配置时持有到作用域结束；新实现统一为块作用域结束后锁外调度，与 `set_read`/`set_starred` 一致。(3) `sync_configured` 由 `fn` 改 `pub(crate) fn`（`mod.rs:71`）：仅扩可见性、行为零变化；`commands/mod.rs` 已有 `pub use articles::*` 等重导出，`pub(crate)` 不进入 crate 的公开 API，故对 `lib.rs`/Tauri `invoke_handler` 与前端契约无影响；影响面限于同一 crate 内 `commands` 子模块（`folders.rs`/`sync.rs` 原本就是同模块可见）。文档方面新增注释详实、与 `record_read_state` 的既有 A-5 注释口径一致。(4) 存疑点（已记入 findings 而非本 area 判负）：新测试新增 helper `seed_local_articles_in_one_feed` 与既有 `seed_local_article` 语义重叠，作者以 `feeds.feed_url` 唯一约束解释了分叉原因，理由成立但增加了测试夹具的维护面。",
+      "evidence_files": [
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/tests/sync_gap_repro_e2e.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "逐条核对实现方『量级不变，仅离线时队列更完整』：(1) 入队开销——`apply_mark_all_read` 仍是原实现的逐条 `enqueue_sync`（改前在 configured 时同样逐条），每条 `enqueue_sync` 为一次 `DELETE`（同 article 反向/同向旧项）+ 一次 `INSERT`（`db/sync_queue.rs:19-41`），**未引入新查询、新索引或 N+1 之外的开销**；新增的仅是未配置场景下这些既有写入发生（原先跳过），队列长度上限即离线期间被标读的文章数。(2) 推送开销——`plan_push` 仍一次性 `take_sync_queue`（`ORDER BY id`）后在锁内线性扫（`push.rs:34-76`），`exec_push` 对 read/unread 做**聚合批量**（同一 action 合并为一次 `mark_read`/`mark_unread` 请求，`push.rs:86-113`），故队列项数增加不改变 HTTP 请求数量级（read 仍为 1 个批量请求）；失败项保留在队列、成功后 `prune_sync` 按 id 清除，语义未变。(3) 队列增长是有界的且已有防护：TASK-038 的 `age_stale_queue`（30 天保留期）在 `push_states_now`/`states_phase` 两处推送前都调用，`prune_stale_unbound` 只清理『无远端绑定』的 read/unread/star/unstar（`db/sync_queue.rs:95-104`），不会误删待绑定项；即离线长期不回连时队列不会无界增长。(4) 副作用面——未配置时 `schedule_state_push` 现在会无条件调度（每次 mark_all_read 一次 `tauri::async_runtime::spawn` + 800ms 防抖 + `AtomicBool` 防重入，`mod.rs:39-68`），因 `push_states_now` 在 `build_client` 处立即返回，成本为一次短生命任务与一次设置读取，量级可忽略；且该行为与 set_read/set_starred 现行语义一致。未做量化基准（无 profiling 负载与前后对比数据），结论基于代码路径与请求数量的静态核对。",
+      "evidence_files": [
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/db/sync_queue.rs",
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/phases.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}
