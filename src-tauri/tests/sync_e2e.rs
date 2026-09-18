@@ -10,7 +10,6 @@ use app_lib::sync;
 use mock_greader::MockGReader;
 
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn miniflux_sync_end_to_end() {
     let server = MockGReader::start().await.expect("start mock server");
 

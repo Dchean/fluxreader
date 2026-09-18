@@ -1,0 +1,51 @@
+{
+  "task_id": "TASK-054",
+  "candidate_digest": "90a9c96400bad77bbc57826139d515a651b692d8df7e847954341a273f457446",
+  "verification_run": "RUN-cb8d3741da14429cb8b0782012c95c74",
+  "verdict": "FAIL",
+  "summary": "独立审查逐项复跑 6 项核对：5 项确认实现者（diff 确为 0 增 14 删且全部是被删的 #[ignore] 属性行、零非 ignore 删除、未触碰任何断言/测试体/fixture；sync_gap_repro_e2e 确用同一 mod mock_greader 且默认运行、MockGReader 绑随机端口 127.0.0.1:0；9 个保留 ignore 确为真实外部依赖（fever/greader live 测试默认端点 sync.example.invalid + 真实凭据，ingestion/scheduler 需固定 127.0.0.1:8765）；cargo test 实跑 136 passed/0 failed/9 ignored 且 exit 0，属性行机械计数 = 9；src/ 与 Cargo.toml/Cargo.lock 零改动）。但第 6 项**推翻报告的捕获性结论**：报告称 miniflux_existing_entry_backfills_cover『未捕获』，审查者按报告写明的变异点（删除 entries.rs:143 的 backfill_entry_content 调用）自行复现，得到**硬失败** exit 101 / `left: None, right: Some(\"https://img.example.com/backfill.jpg\")`，即该测试**确实具备捕获力**。故 4 个代表用例中至少 2 个具备捕获力，而非报告所称 1 个。该假阴性已传播到 TASK-054-report.md §3 表、FINDINGS-IGNORED-TESTS.md §五、worker-result unresolved_items 三处，并据此建议『另立任务补强该测试』——而该测试无需补强。审查者另指出一处轻微行号归属偏差（mock_greader.rs edit-tag 的 read 分支实为 494-495，报告写 494-495 附近，实质机理正确）。审查者已独立复现 3 项阴性结果（P1 两种变异、P4）并逐字节还原、校验哈希与候选摘要一致；最终 src/ 干净。**结论：实现本身正确且完整（不该动断言、不该改生产代码两点判断均被审查者确认正确），失败仅限报告与 findings 文档中一处被当作已验证事实的失实结论，须订正后再判 verified。**",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务要求『去除 14 个失效 #[ignore]；9 个环境依赖型保持不动并登记；不得改断言；须证明捕获性且如实呈现负面结果』。前两项由审查者独立复跑确认：diff 恰为 0 增 14 删、14 行全部是被删的 #[ignore 属性行、零非 ignore 删除；9 个保留项逐文件读源码确认依赖真实外部环境。『不得改断言』已确认遵守。第四项（捕获性）**判定为不达标**：报告在 3 份产物中把 1 个具备捕获力的测试写成『未捕获』，属未经验证的失实结论。第 3 项（如实呈现负面结果）意图正确、确有主动披露负面的行为，但数据精度不足。审查者据此判 FAIL 并要求订正。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "审查者独立实跑 cargo test（最终状态）聚合得 136 passed / 0 failed / 9 ignored、exit 0；属性行机械计数（`^\\s*#[ignore`）跨 src-tauri/tests/** 恰为 9（fever_live 3、fever_sync_live 1、greader_live 3、ingestion 1、scheduler 1），并正确排除 sync_gap_repro_e2e.rs 第 3/4 行文档注释中的字样（与实现者口径一致）。136=122+14、9=23-14 计数闭合成立。既有 sync_gap_repro_e2e 的 13 个默认测试未受影响。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "FAIL",
+      "analysis": "本任务的核心失败路径检查即『转正后的测试在缺陷复现时是否真的失败』。审查者按报告写明的变异点复现 miniflux_existing_entry_backfills_cover，得到硬失败（exit 101，断言 `existing 分支必须回填 Miniflux 正文第一图作封面`，left None vs right Some(backfill.jpg)），**与报告的『未捕获』直接矛盾**。审查者同时独立确认 P1 两种变异（删除守卫包装、反转守卫）与 P4（sync_map.rs pending 查询去掉 read/unread）确为阴性，故报告的问题不是全面失实，而是其中一个条目的结论错误。审查者附带提醒：cargo 的 mtime 指纹会复用陈旧 app_lib rlib，还原后必须出现 `Compiling app` 才可采信结果（该坑审查者本人也踩到并说明）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "新增 FINDINGS-IGNORED-TESTS.md 登记两类 #[ignore] 清单、判定依据与计数闭合，并以属性行为准排除文档注释字样，口径可复算；baseline 证据文件独立存在且非空。审查者确认 .workflow-kit/scripts 未被改动。文档中一度存在的 P3 失实条目已被要求订正（见 findings 与 requirements 项）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务仅删除测试属性行使 14 个已存在的测试回到默认门禁，不涉及运行时性能路径、查询或渲染改动。审查者实测这些测试合计约 0.31s，对门禁时长影响可忽略；无性能主张需要证据。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    }
+  ],
+  "ui_review": null
+}

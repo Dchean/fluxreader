@@ -1,0 +1,33 @@
+{
+  "task_id": "TASK-054",
+  "run_id": "RUN-e86a7063796948cb978f914c9a87e633",
+  "status": "ready_for_verification",
+  "summary": "去除 14 个理由已被实证证伪的 #[ignore = \"spins a local mock server\"] 属性（0 增 14 删，只删属性行、未改任何断言/测试体/fixture），使既存测试回到默认门禁；9 个环境依赖型 #[ignore] 保持原样并登记于 .workflow-kit/docs/FINDINGS-IGNORED-TESTS.md。默认 cargo test 由 122 passed/23 ignored 变为 136 passed/0 failed/9 ignored（136=122+14，9=23-14，两侧精确闭合）。src/ 生产代码零改动（捕获性变异测试的改动已逐字节还原并校验 sha256）。四个门禁全绿。捕获性验证：4 个代表用例中 2 个（miniflux_enclosure_is_not_used_as_cover、miniflux_existing_entry_backfills_cover）具备捕获力，2 个（pending_local_read_wins_over_stale_remote_in_upsert、full_reconcile_backfills_missing_local_entries）变异后仍通过、断言强度不足。**本结果已订正**：初版把 miniflux_existing_entry_backfills_cover 误记为『未捕获』，根因是探针脚本缩进写错（搜索 8 空格，实际 12 空格）导致该例被静默 SKIP 却仍写成结论；独立审查复现出硬失败后，我自行复现确认其确实具有捕获力。订正后仅 P1/P4 需要补强。另记录方法教训：变异测试须确认出现 Compiling app 才采信结果（cargo mtime 指纹可能用陈旧 rlib）。",
+  "changed_files": [
+    "src-tauri/tests/account_lifecycle_e2e.rs",
+    "src-tauri/tests/ai_e2e.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/TASK-054-report.md"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri）：136 passed / 0 failed / 9 ignored",
+    "npm run lint：exit 0，0 warnings / 0 errors",
+    "npm run build：exit 0",
+    "npm run test:frontend：exit 0，241/241"
+  ],
+  "requested_actions": [
+    "审查请重点核对：(1) diff 确为 0 增 14 删、未触碰任何断言或测试体；(2) 14 个去除项与 9 个保留项的清单是否与仓库实际一致；(3) 计数闭合 136=122+14 与 9=23-14；(4) 捕获性结论是否如实呈现，未被淡化——4 个代表用例中 P2/P3 具备捕获力、P1/P4 不具备（本项曾因探针脚本静默跳过而误报 P3，已订正，详见 unresolved_items 与 TASK-054-report.md §3.2）"
+  ],
+  "unresolved_items": [
+    "pending_local_read_wins_over_stale_remote_in_upsert 断言强度不足：pending 守卫删除包装/反转条件后测试仍通过（P1，已实证证伪；根因是 mock 的 edit-tag 在 push 成功时会把远端翻成 read，使该断言在现 fixture 下恒真）",
+    "full_reconcile_backfills_missing_local_entries 断言强度不足：db/sync_map.rs 的 pending 查询去掉 read/unread 动作后测试仍通过（P4，由独立审查复现）",
+    "建议另立任务补强上述 P1 与 P4 两个测试的断言强度，使「缺陷复现 ⇒ 测试失败」成立；本任务授权为只删 #[ignore]、不改断言，故未处理",
+    "【已订正】miniflux_existing_entry_backfills_cover 初版被误记为『未捕获』，实际具备捕获力（删除 entries.rs:143 调用后 exit 101 失败）；该项无需补强。订正详情见 TASK-054-report.md §3.2",
+    "9 个环境依赖型 #[ignore] 若将来要纳入 CI，需 ci=true 授权与门禁脚本改动，本轮未做"
+  ],
+  "blocked_reason": null
+}

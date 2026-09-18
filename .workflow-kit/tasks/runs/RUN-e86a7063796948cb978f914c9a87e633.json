@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "RUN-e86a7063796948cb978f914c9a87e633",
+  "task_id": "TASK-054",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "host agent implementation run for TASK-054: remove 14 disproven #[ignore] attributes from Rust e2e tests, keep 9 environment-dependent ignores, document in FINDINGS-IGNORED-TESTS.md"
+  },
+  "started_at_utc": "2026-09-18T02:24:52.764016Z",
+  "finished_at_utc": "2026-09-18T02:36:25.203277Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "53acbef2c71701d679d9f0390b36d8bb05a7a0a5c27cee7b58ac47a6969ca80f",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-e86a7063796948cb978f914c9a87e633-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-e86a7063796948cb978f914c9a87e633-scope.json",
+  "evidence": {
+    "ledger_correction": {
+      "reason": "worker-result 未满足契约（缺 status/validation_requests/requested_actions/unresolved_items/blocked_reason 五个必填字段），finish 将本次 implementation run 置为 blocked/failure_kind=protocol；交付内容本身已完成且四门禁通过。",
+      "authorization": "DEC-task054-protocol-unblock-20260918",
+      "original": {
+        "outcome": "blocked",
+        "failure_kind": "protocol",
+        "failure_reason": "Worker result must match the complete worker-result contract",
+        "blockers": null
+      },
+      "original_record": "RUN-e86a7063796948cb978f914c9a87e633-run-asrecorded.json",
+      "original_worker_result": "RUN-e86a7063796948cb978f914c9a87e633-worker-result-asrecorded.json",
+      "corrected_to": "completed",
+      "worker_fault": true,
+      "note": "只改账本，不放宽任何门禁；verify/review 仍须在订正后的候选上重跑。"
+    }
+  }
+}

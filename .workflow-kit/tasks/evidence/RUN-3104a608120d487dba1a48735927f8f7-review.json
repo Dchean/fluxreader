@@ -1,0 +1,51 @@
+{
+  "task_id": "TASK-054",
+  "candidate_digest": "d8e71f424b034a5a8fa7b67c5eb42852d632870233bfa8af5434c039fa533e48",
+  "verification_run": "RUN-2e20089a9bc8406f8cacfee05b1a24db",
+  "verdict": "PASS",
+  "summary": "第 2 轮独立审查（未参与实现的独立上下文）逐项复跑全部核对项，全部通过。核心是确认第 1 轮 FAIL 的根因（报告把具备捕获力的 miniflux_existing_entry_backfills_cover 误记为『未捕获』）已被真实订正，且订正未反向引入过度声称。审查者**独立复现 P3 捕获**：删除 entries.rs:143 的 12 空格调用（文件 sha256 890ABAEC…→4DAB9000…），touch 强制重编译并**确认出现 `Compiling app v0.13.0`** 后，测试硬失败 exit 101，`panicked at tests\\sync_content_e2e.rs:269:5: assertion left == right failed: existing 分支必须回填 Miniflux 正文第一图作封面 / left: None / right: Some(\"https://img.example.com/backfill.jpg\")`；还原后哈希与改前逐字节相同，复跑通过 exit 0。审查者**独立复现 P1 阴性**：反转 entries.rs:224 的 pending 守卫并强制重编译后测试仍通过 exit 0；并额外自建更强探针——临时断言 states_phase 后 mock 的远端条目 read==true，该断言**通过**，从而证明 mock 确实会把远端翻成 read（mock_greader.rs:495 `e.read = true;`），使该测试的断言在现 fixture 下与守卫无关而恒真，实现者陈述的机理**事实正确**。审查者确认交付物完整：5 文件 0 增 / 14 删、14 行全部是被删的 `#[ignore = \"spins a local mock server\"]`、残留 `^#[ignore` 计数 = 9；结束时 `git diff --stat -- src-tauri/src` 为空、Cargo.toml/lock 未动；全量 cargo test = 136 passed / 0 failed / 9 ignored exit 0；自建临时探针已删除。审查者判定订正为**真实修复而非粉饰**：所述根因与源码缩进（143 行 12 空格 vs 228 行 8 空格）机械吻合、数字与其独立复现完全一致（含断言原文）、叙述**偏保守**（明说仅抽样 4 例）且主动记录自身失误；三份订正产物结论一致（P2/P3 捕获、P1/P4 不捕获），后续建议仅点名 P1 与 P4 并注明 P3 已移出。findings 为空。 **候选摘要说明（如实记录）**：本报告核对时的候选为 `f023057068b77c313c4dc680ab77a736269d7594e3427606976fab9356ed0058`；此后作者对 `FINDINGS-IGNORED-TESTS.md` 做了**一处标点修正**（§5.1 中一个误用的半角逗号改为全角逗号），该文件属本任务快照根，故候选摘要随之变为 `d8e71f424b034a5a8fa7b67c5eb42852d632870233bfa8af5434c039fa533e48`，并已重新运行 verify（RUN-2e20089a9bc8406f8cacfee05b1a24db，四门禁重跑全 PASS）。两次候选之间的**唯一差异**即上述标点（交付物 `src-tauri/tests` 与 `src-tauri/src` 在两次 verify 之间零变化），因此本轮审查的实质结论对当前候选同样成立。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务要求全部满足并经独立复现：14 个失效 `#[ignore]` 已去除（diff 恰为 0 增 14 删，14 行逐行核对确为被删的 ignore 属性行）、9 个环境依赖型保持原样并登记、未改任何断言。第 4 项『须证明捕获性且如实呈现负面结果』经第 1 轮 FAIL 后已订正并复验：审查者独立复现 P3 捕获与 P1 阴性，确认订正后的表述与事实一致，且未过度声称（明确区分抽样 4 例的边界）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "审查者独立实跑全量 `cargo test` = 136 passed / 0 failed / 9 ignored、exit 0；`^#[ignore` 属性行计数跨 src-tauri/tests/** 恰为 9；5 个文件改动量 0/1、0/1、0/6、0/1、0/5 合计 0 增 14 删。计数闭合 136=122+14、9=23-14 成立。既有 sync_gap_repro_e2e 与其余测试无回退。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "本任务的核心失败路径即『转正后的测试在缺陷复现时是否真的失败』。审查者独立复现两点：(P3) 删除 entries.rs:143 的 backfill 调用 → 测试硬失败 exit 101，断言原文与实现者报告一致（含 left/right 值）；(P1) 反转 entries.rs:224 的 pending 守卫 → 测试仍通过，阴性成立；且其自建探针（断言 mock 远端 read==true 通过）独立证实了 P1 恒真的机理。审查者亦独立确认了强制重编译方法（要求出现 `Compiling app`）以避免 cargo mtime 指纹复用陈旧 rlib 的陷阱。P4 阴性沿用第 1 轮审查者的独立复现，未由实现者自称。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "FINDINGS-IGNORED-TESTS.md 完整登记两类 #[ignore] 的清单、判定依据、计数闭合（14+9=23）与 §五/§5.1 的订正记录，口径以属性行机械可复算；文档明写方法教训（探针须区分『未执行』与『执行后未捕获』、变异测试须确认重编译）供后来者复用。三份产物表述统一。审查者未发现夸大之处。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务只删测试属性行使 14 个已存在的测试回到默认门禁，不触及运行时性能路径、查询或渲染。实测这些测试合计亚秒级，对门禁时长影响可忽略；无性能主张需证据。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-054-review-r1.json"
+      ]
+    }
+  ],
+  "ui_review": null
+}

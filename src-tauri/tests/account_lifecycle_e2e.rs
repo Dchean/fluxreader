@@ -295,7 +295,6 @@ fn cache_cleanup_ai_only_clears_ai_fields() {
 /// 集成：断开 → 重连另一账号（mock）→ pull 只出现新账号的订阅。
 /// （模拟用户报告的「断开后换账号，本地与远端订阅混杂」）
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn reconnect_other_account_no_mixing() {
     let server = MockGReader::start().await.expect("mock");
     let tmp = std::env::temp_dir().join(format!(

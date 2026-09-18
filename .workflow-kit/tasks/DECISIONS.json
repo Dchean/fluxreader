@@ -1298,6 +1298,41 @@
       "candidates": {
         "TASK-053": "05ef6a4f1d1c77328badf0d0c28f1c6dc0cbf369c697db0294c129fea4b36d28"
       }
+    },
+    {
+      "id": "DEC-tombstone-and-ignored-tests-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 指令『根据你判断的最佳路线继续推进，但是注意之前的几次优化重构是没有问题都落实了的』。据此先做实证复核：四个单体（store.ts 57 行 / SettingsModal.tsx 92 行 / commands.rs 已拆为 commands/ 7 文件 / sync.rs 已拆为 sync/ 8 文件）确认全部落实、无回退，工作区干净、check 全绿。复核中另经实跑挖出两个新问题并向 owner 逐项裁决（本轮对话两项选择题）：(1) 范围选择『两项都做，先补网后修缺陷（推荐）』——先立任务把 14 个被站不住理由掩盖的 #[ignore] 测试转正，再立任务修墓碑缺陷；理由是先用回归网兜住再动同步正确性代码，风险最低。(2) ignore 策略选择『保持忽略，但把理由写准确并在文档登记（推荐）』——8 个环境依赖型 #[ignore] 不改运行行为，只消除『同类测试一半跑一半不跑』的困惑。",
+      "statement": "授权新批次处理两个新发现问题，**先补网后修缺陷**：①『14 个测试的 #[ignore] 理由不成立』修复任务——sync_phases_e2e.rs(5)、sync_content_e2e.rs(6)、sync_e2e.rs(1)、account_lifecycle_e2e.rs(1)、ai_e2e.rs(1) 共 14 个测试标注 #[ignore = \"spins a local mock server\"]，但同目录 sync_gap_repro_e2e.rs 使用**同一个 mock_greader** 且 13 个测试默认运行，该理由已被实证证伪；14 个测试实跑（--ignored）**全部通过、0 失败、合计 0.4 秒**，其中含 full_reconcile_backfills_missing_local_entries、instant_push_only_pushes_and_drains_queue 等真实保护。去除这些 #[ignore] 并将 baseline 的 ignored 计数由 23 更正为 9；9 个**理由成立**的 #[ignore]（fever_live_e2e 3、fever_sync_live_e2e 1、greader_live_e2e 3、ingestion_e2e 1、scheduler_e2e 1，共 9）保持忽略不动，仅在文档登记环境依赖。计数经机械核对闭合：14 失效 + 9 环境依赖 = 23 = cargo test 报出的 ignored 总数。②『subscriptions.rs:48 墓碑清除点致已删订阅复活』修复任务——实证链路：greader.rs:462 post_form_text 仅判 resp.status().is_success()，真实 GReader 在 token 失效/目标不存在时可能返回 2xx + 错误体；此时 unsubscribe_remote 误判『远端已确认』并清除墓碑（探针实测返回 true、墓碑已清除），下次 feeds_phase 见远端仍列出该订阅即复活（探针实测该订阅行数由 0 变 1）。修法：删 subscriptions.rs:46-49 的清除点，只保留 :201-202『远端列表确认已不含才清墓碑』这一唯一有证据支撑的清除条件。**边界**：仍不动工作流（用户明确『工作流我另外修复』）；不改同步协议语义（仅收紧『远端确认』判据）；不引入新依赖；每项须走 verify + 独立审查 + 验收。测试转正任务动到 baseline ignored 计数属**恢复既存保护**而非降低验收标准，须在报告中论证并保留原基线证据。沿用既有预算（每任务 240 分钟、修复 4 轮），commit 沿用既有授权，push/release 仍需确认。",
+      "scope": [
+        "workflow",
+        "REQ-002",
+        "REQ-003"
+      ],
+      "recorded_at_utc": "2026-09-18T01:20:00Z"
+    },
+    {
+      "id": "DEC-9303ee16d28d49f38c3c537ebe7813e7",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "DEC-tombstone-and-ignored-tests-20260918",
+      "statement": "Owner approved the next bounded batch under the existing brief and policy",
+      "scope": [
+        "workflow"
+      ],
+      "recorded_at_utc": "2026-09-18T02:23:10.410205Z"
+    },
+    {
+      "id": "DEC-task054-protocol-unblock-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 在被如实告知 TASK-054 因 worker-result 声明漏字段而落 blocked/failure_kind=protocol、CLI 已无恢复入口后，选择『授权记录级订正（推荐）』。沿用 DEC-toolfix-extend-deadlock-20260915 起、TASK-042/053 已两次适用的既有先例。",
+      "statement": "授权对 TASK-054 作**记录级**订正以解除 protocol 阻断：首次 `finish` 因 worker-result 未满足契约（我只写了 5 个字段，契约要求恰好 9 个：task_id/run_id/status/summary/changed_files/validation_requests/requested_actions/unresolved_items/blocked_reason）而把该 run 置为 blocked/failure_kind=protocol——这是**纯声明格式错误**，与交付内容无关。订正内容：归档原始 worker-result 与原始 run 记录；把该 run 的 outcome 由 blocked 改为 completed、把任务由 blocked 置回 verifying 并清除 failure_kind/resume_phase；原始失败原因、原始字段与订正依据全部存入 run.evidence.ledger_correction 与 task.evidence.ledger_correction，不删除历史。**边界**：只改账本，**不放宽任何门禁**——四个门禁仍须在订正后的候选上重跑，候选仍须与实际文件逐一一致，独立审查仍不可省略，预算与截止时间沿用原记录；不改一行源码、不新建任务、不重置时钟。**同时如实记录作者失误**：这已是本会话第三次因『自建口径与权威契约不一致』而触发阻断（前两次为 changed_files 声明错误与门禁笔误），已列入 FINDINGS 供后续核查。",
+      "scope": [
+        "TASK-054"
+      ],
+      "recorded_at_utc": "2026-09-18T02:45:00Z"
     }
   ]
 }

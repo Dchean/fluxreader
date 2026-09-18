@@ -213,7 +213,8 @@
         },
         "note": "清除 failure_kind 与 blockers，使 begin 可用；随后以新 run 的基线重新交付，并按**新基线下的实际差异**声明 changed_files（预计为空，因为全部改动此时都已在树中）。原始失败 run 与本次订正均保留。 状态置为 ready（begin 要求 ready 或可恢复的已记录阻断）。"
       }
-    }
+    },
+    "continued_by": "TASK-054"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",

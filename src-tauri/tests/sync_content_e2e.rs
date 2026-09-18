@@ -41,7 +41,6 @@ async fn setup(
 
 /// ① 服务端来源（origin='remote'）源：后台增量同步（full=false）必须拉取新条目。
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
     let (db, http, server) = setup("origin_pull").await;
 
@@ -97,7 +96,6 @@ async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
 
 /// ② 本地待推变更保护：upsert_miniflux_entry 不得用远端旧状态覆盖本地未推的已读。
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn pending_local_read_wins_over_stale_remote_in_upsert() {
     let (db, http, server) = setup("pending_upsert").await;
 
@@ -168,7 +166,6 @@ async fn pending_local_read_wins_over_stale_remote_in_upsert() {
 /// ⑥ 封面污染回归：Miniflux entry 带音频 enclosure（播客），enclosure 是
 /// mp3 不是图片——image_url 必须是正文第一图，绝不能是 enclosure URL。
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn miniflux_enclosure_is_not_used_as_cover() {
     let (db, http, server) = setup("enclosure_cover").await;
     sync::feeds_phase(&db, &http).await.expect("feeds phase");
@@ -219,7 +216,6 @@ async fn miniflux_enclosure_is_not_used_as_cover() {
 /// 之后 Miniflux 端正文带图，重同步时 existing 分支必须回填 image_url
 /// （此前 existing 分支从不补封面 → 「部分文章不显示封面」根因）。
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn miniflux_existing_entry_backfills_cover() {
     let (db, http, server) = setup("cover_backfill").await;
 
@@ -332,7 +328,6 @@ fn article_id_by_url_uses_normalized_match() {
 /// 会漏掉发布时间早于游标的历史文章——这是「跟随服务端」模式下客户端文章数
 /// 少于 Miniflux、且已读状态对不齐的根因。
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
     let (db, http, server) = setup("history_pull").await;
 
@@ -388,7 +383,6 @@ async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
 /// 收敛为已读。此前只靠 changed_after 增量，会永久漏掉这条旧变更，导致
 /// 「Miniflux 已读但本地未读」与未读数漂移。
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn light_sync_converges_stale_remote_read_via_unread_ids() {
     let (db, http, server) = setup("stale_read").await;
 

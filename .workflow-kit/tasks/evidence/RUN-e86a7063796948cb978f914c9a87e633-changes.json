@@ -1,0 +1,10 @@
+{
+  "changed_files": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    "src-tauri/tests/account_lifecycle_e2e.rs",
+    "src-tauri/tests/ai_e2e.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs"
+  ]
+}

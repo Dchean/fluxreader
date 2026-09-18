@@ -84,7 +84,6 @@ async fn seed_local_article(
 }
 
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn instant_push_only_pushes_and_drains_queue() {
     let (db, http, server) = setup("instant").await;
     let (aid, _mf_id) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
@@ -131,7 +130,6 @@ async fn instant_push_only_pushes_and_drains_queue() {
 }
 
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn instant_push_read_broadcasts_dup_entries() {
     let (db, http, server) = setup("broadcast").await;
     let (aid, _mf_id) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
@@ -162,7 +160,6 @@ async fn instant_push_read_broadcasts_dup_entries() {
 }
 
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn feeds_and_states_phases_run_independently() {
     let (db, http, _server) = setup("phases").await;
     let (aid, _mf) = seed_local_article(&db, &_server, "http://127.0.0.1:8765/post/1").await;
@@ -196,7 +193,6 @@ async fn feeds_and_states_phases_run_independently() {
 /// 未读数漂移根因回归：远端 changed_at 早于增量游标（手机很久前标读），
 /// light 增量拉不到，full 对账必须收敛。
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn stale_remote_read_converges_via_full_reconcile() {
     let (db, http, server) = setup("stale").await;
     let (aid, mf_id) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
@@ -251,7 +247,6 @@ async fn stale_remote_read_converges_via_full_reconcile() {
 /// 若 feed 只提供摘要/漏了几条，本地永久缺失。现在 full 对账会对已绑定源
 /// 的远端条目逐一 upsert 补齐（幂等，不重复、不覆盖已有正文/已读）。
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn full_reconcile_backfills_missing_local_entries() {
     let (db, http, server) = setup("backfill").await;
     // 本地造一篇直连文章 + 绑定远端 feed 10

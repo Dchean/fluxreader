@@ -1,0 +1,16 @@
+{
+  "task_id": "TASK-054",
+  "summary": "去除 14 个理由已被实证证伪的 #[ignore = \"spins a local mock server\"] 属性，使既存测试回到默认门禁；9 个环境依赖型 #[ignore] 保持原样并登记。默认 cargo test 由 122 passed/23 ignored 变为 136 passed/9 ignored（计数精确闭合）。",
+  "changed_files": [
+    "src-tauri/tests/account_lifecycle_e2e.rs",
+    "src-tauri/tests/ai_e2e.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs"
+  ],
+  "evidence": [
+    ".workflow-kit/tasks/evidence/TASK-054-report.md",
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md"
+  ],
+  "notes": "全部为 0 增 14 删（只删属性行，未改任何断言/测试体/fixture）。src/ 生产代码零改动（变异测试改动已逐字节还原并校验 sha256）。四个门禁全绿：cargo_test 136/0/9、lint 0/0、build exit 0、frontend 241/241。捕获性验证发现 4 个代表用例中仅 1 个（miniflux_enclosure_is_not_used_as_cover）具备捕获力，另 3 个（pending_local_read_wins_over_stale_remote_in_upsert、miniflux_existing_entry_backfills_cover、full_reconcile_backfills_missing_local_entries）断言强度不足、变异后仍通过——已如实上报并建议另立任务补强，本任务授权不允许改断言故未改。"
+}

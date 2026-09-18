@@ -74,7 +74,6 @@ fn test_config(port: u16) -> AiConfig {
 }
 
 #[tokio::test]
-#[ignore = "spins a local mock server"]
 async fn ai_summarize_translate_and_cache_pipeline() {
     let port = start_mock_openai();
     let client = app_lib::ingestion::build_client(30);
