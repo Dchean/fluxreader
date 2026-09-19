@@ -192,7 +192,11 @@ fn article_where(q: &ArticleQuery) -> (Vec<&'static str>, Vec<rusqlite::types::V
         where_clauses.push("a.is_starred = 1");
     }
     if q.only_today {
-        where_clauses.push("date(a.published_at) = date('now', 'localtime')");
+        // TASK-064 N5：两侧统一本地时区——published_at 存 RFC3339（常带 offset），
+        // SQLite 的 date() 对带 offset 值归一到 UTC，直接 date(a.published_at) 会
+        // 与 date('now','localtime') 错位：非 UTC 时区用户本地凌晨（+08:00 的
+        // 00:00-08:00）发布的文章不进「今天」视图。
+        where_clauses.push("date(a.published_at, 'localtime') = date('now', 'localtime')");
     }
     (where_clauses, params)
 }
@@ -687,9 +691,11 @@ pub struct FeedCounts {
 }
 
 pub fn feed_counts(conn: &Connection) -> AppResult<Vec<FeedCounts>> {
+    // TASK-064 N5：today 判定与 only_today 同口径（本地时区两侧对齐），理由见
+    // list_articles 的 where 构建处。
     let mut stmt = conn.prepare(
         "SELECT feed_id, COUNT(*), SUM(is_read = 0), SUM(is_starred = 1),
-                SUM(date(published_at) = date('now', 'localtime'))
+                SUM(date(published_at, 'localtime') = date('now', 'localtime'))
          FROM articles GROUP BY feed_id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -707,3 +713,79 @@ pub fn feed_counts(conn: &Connection) -> AppResult<Vec<FeedCounts>> {
 /* ============================================================
 Settings（键值对：同步 Endpoint/凭据、AI/同步相关配置）
 ============================================================ */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{create_folder, insert_feed, upsert_article_with_feed, MIGRATIONS};
+    use chrono::{Local, TimeZone};
+    use rusqlite::Connection;
+
+    fn conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    fn na(guid: &str, published_at: Option<String>) -> NewArticle {
+        NewArticle {
+            guid: guid.into(),
+            url: Some(format!("https://e.example/{guid}")),
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "b".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at,
+            source: "direct".into(),
+        }
+    }
+
+    /// N5：「今天」判定两侧时区必须一致。published_at 存 RFC3339（带 offset），
+    /// SQLite 的 date() 对带 offset 值归一到 UTC——修前 date(a.published_at)
+    /// （UTC 日期）对比 date('now','localtime')（本地日期），非 UTC 时区的本地
+    /// 凌晨文章（+08:00 的 00:00-08:00 → UTC 前一日）不进「今天」。
+    /// 用本地今天 01:00 构造确定性形态；判定力依赖主机时区非 UTC（本项目环境
+    /// +08:00；UTC 主机上修前同样命中——不误报，只是失去判别力）。
+    #[test]
+    fn early_morning_local_article_counts_as_today() {
+        let conn = conn();
+        let fid = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://f.example/rss", None, "f", None, fid, "inherit", true, false).unwrap();
+
+        let today = Local::now().date_naive();
+        let one_am_local = Local
+            .from_local_datetime(&today.and_hms_opt(1, 0, 0).unwrap())
+            .single()
+            .expect("01:00 local exists");
+        let yesterday_1am = Local
+            .from_local_datetime(&(today - chrono::Duration::days(1)).and_hms_opt(1, 0, 0).unwrap())
+            .single()
+            .expect("yesterday 01:00 local exists");
+
+        upsert_article_with_feed(&conn, feed, &na("today-1am", Some(one_am_local.to_rfc3339())), false).unwrap();
+        upsert_article_with_feed(&conn, feed, &na("yesterday-1am", Some(yesterday_1am.to_rfc3339())), false).unwrap();
+
+        let counts = feed_counts(&conn).unwrap();
+        let today_count = counts.iter().find(|c| c.feed_id == feed).map(|c| c.today).unwrap_or(0);
+        assert_eq!(today_count, 1, "本地今天 01:00 的文章必须计入 today（N5 修前为 0）");
+
+        let q = ArticleQuery {
+            feed_id: Some(feed),
+            folder_id: None,
+            only_unread: false,
+            only_starred: false,
+            only_today: true,
+            newest_first: true,
+            limit: 100,
+            offset: 0,
+            with_content: false,
+        };
+        let ids: Vec<i64> = list_articles(&conn, &q).unwrap().into_iter().map(|a| a.id).collect();
+        assert_eq!(ids.len(), 1, "only_today 必须只含本地今天 01:00 的文章（N5 修前为 0，昨天的不计入）");
+    }
+}

@@ -71,6 +71,10 @@ fn import_feeds(
             true,
             false,
         )?;
+        // TASK-064 N4：同 add_feed——重新导入 = 用户改变主意的最强证据，清掉
+        // 同 URL 的删除墓碑，否则 pull 永久跳过该源（不绑 remote_id）、其未推送
+        // 状态 30 天后被 prune_stale_unbound 物理删除。
+        db::remove_feed_tombstone(conn, &f.feed_url)?;
         // 新增订阅入同步队列（连接 Miniflux 后补推）。payload 必须是含 folder_id
         // 的 JSON——push_feeds 据此把订阅挂到远端对应分类；此前误传标题字符串，
         // serde_json 解析失败导致 payload 丢弃、源被推到远端默认分类（目录丢失）。
@@ -161,5 +165,27 @@ mod tests {
         .unwrap();
         assert_eq!(report.imported, 1);
         assert_eq!(report.skipped, 1);
+    }
+
+    /// N4：重新导入清墓碑——先删源留墓碑，再导入同 URL，墓碑必须消失
+    /// （否则 pull 永久跳过该源，其未推送状态 30 天后被老化物理删除）。
+    /// 注意墓碑按 normalize_url 存储（https 统一为 http）。
+    #[test]
+    fn reimporting_a_url_clears_its_tombstone() {
+        let conn = conn();
+        db::add_feed_tombstone(&conn, "https://a.example/rss").unwrap();
+        assert!(
+            db::feed_tombstones(&conn)
+                .unwrap()
+                .contains(&"http://a.example/rss".to_string())
+        );
+        let report = import_feeds(&conn, &[feed("https://a.example/rss", "A", None)]).unwrap();
+        assert_eq!(report.imported, 1);
+        assert!(
+            !db::feed_tombstones(&conn)
+                .unwrap()
+                .contains(&"http://a.example/rss".to_string()),
+            "重新导入后墓碑必须清除（N4：否则 pull 永久跳过该源）"
+        );
     }
 }

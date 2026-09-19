@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-a64dc5a037374fddb1c8f37dcc6994a4",
+  "task_id": "TASK-064",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260919-t064"
+  },
+  "started_at_utc": "2026-09-19T15:20:10.510163Z",
+  "finished_at_utc": "2026-09-19T16:08:22.684034Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "52e32277efda7e8c235863539ffb3b79c44ca08d9815023493acfe40803bafb5",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-a64dc5a037374fddb1c8f37dcc6994a4-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-a64dc5a037374fddb1c8f37dcc6994a4-scope.json",
+  "failure_kind": "protocol",
+  "failure_reason": "Worker changed_files does not match the observed diff; declared but unchanged: src-tauri/src/db/articles_tests.rs; declare either the task's cumulative changes [\"src-tauri/src/commands/folders.rs\", \"src-tauri/src/commands/opml.rs\", \"src-tauri/src/config_sync.rs\", \"src-tauri/src/db/articles.rs\", \"src-tauri/src/scheduler.rs\", \"src-tauri/tests/config_sync_e2e.rs\", \"src-tauri/tests/refresh_dedup_e2e.rs\"] or this run's changes [\"src-tauri/src/commands/folders.rs\", \"src-tauri/src/commands/opml.rs\", \"src-tauri/src/config_sync.rs\", \"src-tauri/src/db/articles.rs\", \"src-tauri/src/scheduler.rs\", \"src-tauri/tests/config_sync_e2e.rs\", \"src-tauri/tests/refresh_dedup_e2e.rs\"]"
+}

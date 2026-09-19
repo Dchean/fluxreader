@@ -75,8 +75,11 @@ pub async fn refresh_all(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
 ) -> (usize, usize) {
-    let concurrency = read_refresh_config(db).await.3;
-    refresh_feeds_inner_with_concurrency(db, http, None, concurrency).await
+    // TASK-064 N3：smartDedup 照常生效——此前写死 false，开智能去重的用户手动
+    // 全刷会放行跨源同文（文章翻倍且不可逆）。手动语义只解除「到期时间与同步
+    // 模式对 remote 源的跳过」，不解除去重。
+    let (_, _, dedup, concurrency) = read_refresh_config(db).await;
+    refresh_feeds_inner_with_concurrency(db, http, None, dedup, concurrency).await
 }
 /// 抓取所有到期源（后台调度入口，并发上限 = 设置 fetchConcurrency，默认 4）。
 /// HTTP 在锁外执行（refresh_feed_staged），写库时短暂持锁。
@@ -88,25 +91,26 @@ async fn refresh_due_feeds(
     http: &reqwest::Client,
 ) -> (usize, usize) {
     let (_, interval_min, dedup, concurrency) = read_refresh_config(db).await;
-    refresh_feeds_inner_with_concurrency(db, http, Some((interval_min, dedup)), concurrency).await
+    refresh_feeds_inner_with_concurrency(db, http, Some(interval_min), dedup, concurrency).await
 }
 
-/// 抓取实现：`Some((interval, dedup))` 只抓到期源（模式过滤在查询内做），
-/// `None` 全量（手动语义，始终含 Miniflux 源）。
+/// 抓取实现：`Some(interval_min)` 只抓到期源（模式过滤在查询内做），
+/// `None` 全量（手动语义，始终含 Miniflux 源）；`dedup` 透传给入库管线
+/// （TASK-064 N3：两条路径都读设置，不再对手动全量写死 false）。
 /// 并发上限取设置值（全量入口同样尊重 fetchConcurrency）。
 async fn refresh_feeds_inner_with_concurrency(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     http: &reqwest::Client,
-    due_filter: Option<(i64, bool)>,
+    due_filter: Option<i64>,
+    dedup: bool,
     concurrency: usize,
 ) -> (usize, usize) {
     use tokio::sync::Semaphore;
-    let dedup = due_filter.map(|(_, d)| d).unwrap_or(false);
     let due: Vec<i64> = {
         let conn = db.lock().await;
         match due_filter {
             // 调度路径：模式判定在锁内一次完成（读 settings + 查询同临界区）
-            Some((interval_min, _)) => {
+            Some(interval_min) => {
                 let include_remote = read_sync_mode_conn(&conn) != "hybrid";
                 crate::db::feeds_due_for_refresh(&conn, interval_min, include_remote)
             }

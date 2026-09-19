@@ -570,3 +570,59 @@ async fn full_roundtrip_upload_download_apply() {
     let _ = std::fs::remove_file(&tmp_a);
     let _ = std::fs::remove_file(&tmp_b);
 }
+
+/// TASK-064 N6：apply_payload 原子性——中途失败必须全量回滚，不留半套已应用
+/// 配置（此前无事务：已建的 folders / 已插的 feeds 残留，重试得到叠加结果）。
+/// 失败注入点：app_settings 传非法 JSON（merge_app_settings 的 serde 解析必失败），
+/// 此时 folders/feeds 已应用完毕——回滚后两者都必须为零。
+#[test]
+fn apply_failure_rolls_back_the_whole_payload() {
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_cfgsync_test_rollback_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+
+    let payload = SyncPayload {
+        schema: 1,
+        uploaded_at: "2026-09-01T00:00:00Z".into(),
+        folders: vec![app_lib::config_sync::FolderSpec {
+            name: "回滚目录".into(),
+            layout: "article".into(),
+            auto_summary: false,
+            auto_translate: false,
+            position: 0,
+        }],
+        feeds: vec![app_lib::config_sync::FeedSpec {
+            url: "https://rollback.example/rss".into(),
+            title: "回滚源".into(),
+            folder: "回滚目录".into(),
+            layout: "article".into(),
+            auto_summary: false,
+            auto_translate: false,
+            site_url: None,
+            favicon_url: None,
+        }],
+        app_settings: Some("{invalid json".into()),
+        connection_config: None,
+    };
+
+    let err = apply_payload(&conn, &payload).unwrap_err();
+    let _ = err; // 失败即可，错误文案不锁死
+
+    let folder_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM folders", [], |r| r.get(0))
+        .unwrap();
+    let feed_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(folder_count, 0, "中途失败必须回滚：不得残留已建目录");
+    assert_eq!(feed_count, 0, "中途失败必须回滚：不得残留已插源");
+
+    let _ = std::fs::remove_file(&tmp);
+}

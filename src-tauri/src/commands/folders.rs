@@ -138,52 +138,157 @@ pub async fn add_feed(
 
     // 2. 入库（feed 元数据 + 全量条目，source='direct'）
     let conn = state.db.lock().await;
-    if db::find_feed_by_url(&conn, &feed_url)?.is_some() {
-        return Err(AppError::new("duplicate", "该订阅地址已存在"));
-    }
-    let final_title = title
-        .filter(|t| !t.trim().is_empty())
-        .or(parsed.title.clone())
-        .unwrap_or_else(|| feed_url.clone());
-    // 未选分类 → 「未分类」文件夹（无则建）。创建失败必须上抛——
-    // 兜底到 id=1 会在 folder 1 不存在时触发外键违约，文章静默丢失。
-    let folder_id = match folder_id {
-        Some(fid) => fid,
-        None => db::ensure_uncategorized_folder(&conn)?,
-    };
-    let feed_id = db::insert_feed(
+    persist_new_feed(
         &conn,
         &feed_url,
-        parsed.site_url.as_deref(),
-        &final_title,
-        parsed.icon.as_deref(),
+        &parsed,
+        title.as_deref(),
+        etag.as_deref(),
+        last_modified.as_deref(),
         folder_id,
         &layout,
         auto_summary,
         auto_translate,
+        sync_to_backend,
+    )
+}
+
+/// add_feed 抓取验证后的入库段（TASK-064 抽出以便脱离 Tauri State 测试）。
+/// 查重 → 标题兜底 → 「未分类」兜底 → 插入 → 清同 URL 删除墓碑（N4）→
+/// 写抓取状态 → 建文章 → 按需入队推送。
+#[allow(clippy::too_many_arguments)]
+fn persist_new_feed(
+    conn: &rusqlite::Connection,
+    feed_url: &str,
+    parsed: &ingestion::ParsedFeed,
+    title: Option<&str>,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+    folder_id: Option<i64>,
+    layout: &str,
+    auto_summary: bool,
+    auto_translate: bool,
+    sync_to_backend: bool,
+) -> AppResult<db::FeedRow> {
+    if db::find_feed_by_url(conn, feed_url)?.is_some() {
+        return Err(AppError::new("duplicate", "该订阅地址已存在"));
+    }
+    let final_title = title
+        .filter(|t| !t.trim().is_empty())
+        .map(String::from)
+        .or_else(|| parsed.title.clone())
+        .unwrap_or_else(|| feed_url.to_string());
+    // 未选分类 → 「未分类」文件夹（无则建）。创建失败必须上抛——
+    // 兜底到 id=1 会在 folder 1 不存在时触发外键违约，文章静默丢失。
+    let folder_id = match folder_id {
+        Some(fid) => fid,
+        None => db::ensure_uncategorized_folder(conn)?,
+    };
+    let feed_id = db::insert_feed(
+        conn,
+        feed_url,
+        parsed.site_url.as_deref(),
+        &final_title,
+        parsed.icon.as_deref(),
+        folder_id,
+        layout,
+        auto_summary,
+        auto_translate,
     )?;
+    // TASK-064 N4：重新添加 = 用户改变主意的最强证据——清掉同 URL 的删除
+    // 墓碑。此前墓碑只在 pull 的「远端不再列出」分支清除，重新添加的源被永久
+    // 压制：pull 跳过绑定、其未推送状态 30 天后被 prune_stale_unbound 物理删除。
+    db::remove_feed_tombstone(conn, feed_url)?;
     db::set_feed_fetch_state(
-        &conn,
+        conn,
         feed_id,
         false,
         None,
-        etag.as_deref(),
-        last_modified.as_deref(),
+        etag,
+        last_modified,
     )?;
-    let dedup = read_dedup_flag(&conn);
+    let dedup = read_dedup_flag(conn);
     for a in &parsed.articles {
-        db::upsert_article_with_feed(&conn, feed_id, a, dedup)?;
+        db::upsert_article_with_feed(conn, feed_id, a, dedup)?;
     }
     // 勾选「同步到后端」且已连接 → 入队推送新订阅（feeds 阶段推远端）
-    if sync_to_backend && sync_configured(&conn) {
+    if sync_to_backend && sync_configured(conn) {
         let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
-        db::enqueue_sync(&conn, None, Some(&feed_url), "add_feed", Some(&payload))?;
+        db::enqueue_sync(conn, None, Some(feed_url), "add_feed", Some(&payload))?;
     }
-    let row = db::list_feeds(&conn)?
+    let row = db::list_feeds(conn)?
         .into_iter()
         .find(|f| f.id == feed_id)
         .ok_or_else(|| AppError::internal("feed row vanished after insert"))?;
     Ok(row)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    fn test_conn() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    fn minimal_parsed() -> ingestion::ParsedFeed {
+        ingestion::parse_feed(
+            br#"<?xml version="1.0"?><rss version="2.0"><channel><title>T</title>
+<item><title>a</title><link>https://e.example/1</link><guid>g1</guid></item>
+</channel></rss>"#,
+            "https://f.example/rss",
+        )
+        .unwrap()
+    }
+
+    /// N4：重新添加清墓碑——先删源留墓碑，再 persist 同 URL，墓碑必须消失
+    /// （否则 pull 永久跳过该源，其未推送状态 30 天后被老化物理删除）。
+    #[test]
+    fn republishing_a_url_clears_its_tombstone() {
+        let conn = test_conn();
+        db::add_feed_tombstone(&conn, "https://f.example/rss").unwrap();
+        assert!(db::feed_tombstones(&conn).unwrap().contains(&"http://f.example/rss".to_string()));
+
+        let parsed = minimal_parsed();
+        let row = persist_new_feed(
+            &conn,
+            "https://f.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(row.feed_url, "https://f.example/rss");
+        assert!(
+            !db::feed_tombstones(&conn).unwrap().contains(&"http://f.example/rss".to_string()),
+            "重新添加后墓碑必须清除（N4：否则 pull 永久跳过该源）"
+        );
+    }
+
+    /// 重复 URL 仍被拒绝（既有行为锚定，抽取不改变查重）
+    #[test]
+    fn duplicate_url_is_rejected() {
+        let conn = test_conn();
+        let parsed = minimal_parsed();
+        persist_new_feed(
+            &conn, "https://f.example/rss", &parsed, None, None, None, None, "inherit", true, false, false,
+        )
+        .unwrap();
+        let err = persist_new_feed(
+            &conn, "https://f.example/rss", &parsed, None, None, None, None, "inherit", true, false, false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "duplicate");
+    }
 }
 
 /// 删除订阅的本地记录 + 删除墓碑（命令与测试共用的真实逻辑）。

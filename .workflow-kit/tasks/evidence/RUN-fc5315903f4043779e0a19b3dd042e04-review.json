@@ -1,0 +1,79 @@
+{
+  "task_id": "TASK-064",
+  "candidate_digest": "4eae986f5f1b83b4d403bf196847615475500f63e62ab9bcdea3b1fe2c431ed4",
+  "verification_run": "RUN-177672cf4733428eb607b1645ca11e9d",
+  "verdict": "PASS",
+  "summary": "独立复核通过。工作区 7 个改动文件与候选清单逐字节一致（122 个 src 文件 sha256 全部匹配）。N3：dedup 从 due_filter 元组拆为独立参数，refresh_all 读 read_refresh_config 传入，refresh_due_feeds 传 Some(interval_min)+dedup；None 路径仍走 feeds_all_ids + read_sync_mode_conn，到期/退避/同步模式过滤语义未动。N4：persist_new_feed 与 import_feeds 均在 insert_feed 成功后（? 早退之后）调 remove_feed_tombstone（内部 normalize_url 匹配）；persist_new_feed 对照 HEAD add_feed 原入库段逐行比对为纯搬运（仅机械性借用调整），唯一新增行为即清墓碑行。N5：article_where 与 feed_counts 两处统一为 date(x,'localtime')=date('now','localtime')，全库无残留 UTC 口径 date 比较，ORDER BY 未动。N6：apply_payload 以 unchecked_transaction 包裹全部写路径（folders/feeds/app_settings/connection_config），成功才 commit、Err drop 回滚；两处 create_folder(...).unwrap_or(0) 已全部改为 ? 上抛（grep 零残留），update_folder_layout/set_folder_ai_flags 的 let _ = 按声明保留。四门禁原始输出核实：cargo 171 passed/0 failed/9 ignored（164+7 新增，ignored 不增）、lint 0/0、build exit 0、frontend 286/286；既有测试一行未动，Cargo.toml/Cargo.lock/package.json 零改动，文件纯 LF。四次变异自证全部按预期失败且还原后全部通过（M1 dedup 写死 false→on 分支断言 2≠1 失败；M2 删 opml 清墓碑调用→reimporting 失败；M3 还原 date(a.published_at)→early_morning 断言 only_today=0≠1 失败（本机 +08:00）；M4 去事务→rollback 测试断言残留 folder 1≠0 失败）；每次还原后 sha256 与候选一致，git status 仅剩候选内 7 文件。一处非阻塞观察（不计 finding）：任务 objective 中 persist_new_feed 签名速记漏列了实际必需的 title: Option<&str> 参数，代码本身正确且纯搬运成立。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "N3：refresh_feeds_inner_with_concurrency 签名改为 (db, http, due_filter: Option<i64>, dedup: bool, concurrency)，dedup 经 refresh_feed_staged 透传入库管线（scheduler.rs:101-147）；refresh_all 解构 read_refresh_config 取 dedup（scheduler.rs:81-82），refresh_due_feeds 传 Some(interval_min)+dedup（:93-94）；手动语义不变——None 分支仍 feeds_all_ids(include_remote) 且 include_remote 仍由 read_sync_mode_conn 判定（:121-124），到期分支仍 feeds_due_for_refresh（:113-116），与声明一致。N4：folders.rs persist_new_feed 中 insert_feed()? 成功后才调 remove_feed_tombstone（folders.rs:200-201），插入失败 ? 早退不会执行清除，顺序核对无误；opml.rs import_feeds 同样 insert 后清除（opml.rs:77）；remove_feed_tombstone 内部按 normalize_url 匹配（db/feeds.rs:316）；pull_feeds 墓碑清除分支（sync/subscriptions.rs:213）与墓碑存储结构未动。persist_new_feed 对照 git show HEAD 的 add_feed 入库段逐行比对：查重/标题兜底/未分类兜底/insert_feed/抓取状态/文章入库/入队/list_feeds 回读全部逐字对应，差异仅为引用 mechanically 调整（&conn→conn、Option<String> 所有权→Option<&str> 借用 + map(String::from)/or_else、feed_url.clone()→to_string()，语义等价）与新增清墓碑行——纯搬运成立。N5：article_where 的 only_today 与 feed_counts 的 SUM 两处均改为 date(x,'localtime')=date('now','localtime')（articles.rs:199、:698），grep 确认无其他 UTC 口径 date 比较；ORDER BY COALESCE 按 non_goals 未动。N6：apply_payload 以 conn.unchecked_transaction() 包裹（config_sync.rs:152），folders upsert、feeds 查/插/改、merge_app_settings、set_setting×3 全部经 &tx，tx.commit()? 仅在成功路径（:273），Err 路径 Transaction drop 自动回滚；签名 &Connection 未变；两处 create_folder(...).unwrap_or(0) 均改为 match+? 上抛（:187-192、:222-227），grep 确认 config_sync.rs 中 unwrap_or(0) 零残留；update_folder_layout/set_folder_ai_flags 的 let _ = 三处按声明保留。非阻塞观察：objective 的 persist_new_feed 签名速记漏列实际必需的 title 参数，属任务文本笔误，代码正确、验收条款（纯搬运+清墓碑）不受影响。",
+      "evidence_files": [
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/config_sync.rs",
+        "src-tauri/src/db/feeds.rs",
+        "src-tauri/src/db/url_norm.rs",
+        "src-tauri/tests/refresh_dedup_e2e.rs",
+        "src-tauri/tests/config_sync_e2e.rs",
+        ".workflow-kit/tasks/evidence/RUN-177672cf4733428eb607b1645ca11e9d-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "四门禁原始输出独立核实：cargo_test.stdout 合计 171 passed / 0 failed / 9 ignored（基线 164+新增 7：refresh_dedup_e2e 2、folders.rs 2、opml.rs 1、articles.rs 1、config_sync_e2e 1；9 个 ignored 与基线一致不增）；7 个新测试名逐一在门禁日志中出现且 ok；lint 0 warnings/0 errors；build exit 0；frontend 286/286。既有测试逐字未动：diff 中测试改动仅为新增（folders.rs/opml.rs/articles.rs 新增 #[cfg(test)] 模块或用例、config_sync_e2e.rs 纯追加、refresh_dedup_e2e.rs 新文件），scheduler_e2e/mock_greader 等既有测试文件不在 diff。refresh_due_feeds 调度语义未被参数拆分破坏：feeds_due_for_refresh(conn, interval_min, include_remote) 调用原样保留、include_remote 仍在锁内读 sync_mode；scheduler_e2e 的 sync_mode_* 测试（ignored）直接对未改动的 SQL 函数 feeds_due_for_refresh/feeds_all_ids 断言，代码核对语义保持（hybrid 跳 remote、manual 全量）。Cargo.toml/Cargo.lock/package.json 不在 git status 改动列表；7 个文件均为 allowed_paths 内且纯 LF（字节级 0 CR）；工作区 122 个 src 文件 sha256 与候选清单全部匹配，确认所审即所验。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-177672cf4733428eb607b1645ca11e9d-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-177672cf4733428eb607b1645ca11e9d-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-177672cf4733428eb607b1645ca11e9d-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-177672cf4733428eb607b1645ca11e9d-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
+        ".workflow-kit/tasks/evidence/RUN-177672cf4733428eb607b1645ca11e9d-candidate.json",
+        "src-tauri/tests/scheduler_e2e.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "四次变异独立施加、运行、还原（备份/还原逐一 sha256 比对，还原后与候选字节一致，最终 git status --short src-tauri/ 仅剩候选 7 文件）：M1 refresh_all 的 dedup 写死 false → refresh_dedup_e2e 的 manual_refresh_all_respects_smart_dedup_when_on 失败（left:2 right:1，跨源同文放行），off 测试通过——开关语义双向锚定成立；还原后 2 passed。M2 删除 opml.rs 的 db::remove_feed_tombstone 调用 → reimporting_a_url_clears_its_tombstone 失败（墓碑残留）；还原后 4 passed（folders.rs 侧 republishing 测试同机制，门禁日志亦 ok）。M3 还原 only_today 为 date(a.published_at)（本机 +08:00）→ early_morning_local_article_counts_as_today 失败（only_today 命中 0≠1；feed_counts 断言先通过、列表断言后失败，双锚点独立生效）；还原后 1 passed。N5 测试 UTC 主机失去判别力属缺陷本身的固有属性（UTC 主机上新旧表达式语义相同，无可检出的缺陷），且与 date('now','localtime') 对比在不 mock 时钟的前提下无法构造出判别形态——已声明的局限是当前可得的最优构造，昨天文章锚点防误报。M4 apply_payload 去事务（&tx→conn、删 tx 创建与 commit）→ apply_failure_rolls_back_the_whole_payload 失败（folder_count 残留 1≠0，正是「半套已应用配置」缺陷形态）；还原后 1 passed。回滚测试的失败注入点（app_settings 非法 JSON 在 folders/feeds 循环之后处理）确实覆盖「先应用后失败」时序，且同时断言 folders 与 feeds 零残留；merge_app_settings 先解析后写库，该注入不会产生部分 settings 写入，因此 folders/feeds 断言即为有效校验。",
+      "evidence_files": [
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/config_sync.rs",
+        "src-tauri/tests/refresh_dedup_e2e.rs",
+        "src-tauri/tests/config_sync_e2e.rs",
+        ".workflow-kit/tasks/evidence/RUN-177672cf4733428eb607b1645ca11e9d-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "add_feed 抽取后收敛为「抓取+校验 → 委托 persist_new_feed」的薄命令层，persist_new_feed 文档注释列出完整步骤序（查重→标题兜底→未分类兜底→插入→清墓碑→抓取状态→建文章→入队），#[allow(clippy::too_many_arguments)] 显式标注；文件内测试脱离 Tauri State 直接测纯函数，并锚定重复 URL 仍拒绝（抽取不改查重）。四处修复注释均如实引用 TASK-064 且机理经核对为真：N3「手动语义只解除到期与模式跳过、不解除去重」与代码一致；N4 墓碑压制链（pull 跳过绑定→30 天 prune 物理删除）与审计机理一致；N5 SQLite date() 对带 offset 值归一到 UTC 的表述正确；N6 Err 路径 Transaction drop 回滚表述正确。测试注释如实声明局限：refresh_dedup_e2e 头注声明「修前 on 分支失败」（M1 证实）；articles.rs 测试声明 UTC 主机失去判别力但不误报；opml 测试注明墓碑按 normalize_url 存储（https→http）。",
+      "evidence_files": [
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/config_sync.rs",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/tests/refresh_dedup_e2e.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "N3：refresh_all 改动并未新增 read_refresh_config 读取——原代码已调用一次取 concurrency（read_refresh_config(db).await.3），现改为同一次调用解构三个字段，锁获取次数与 DB 读取次数均不变，运行时开销为零。N6：事务包裹的是用户显式确认后调用的一次性命令（config_sync_apply），连接本就在 tokio Mutex 独占临界区内，BEGIN/COMMIT 对小体积配置 payload（数十目录/源）成本可忽略，单一连接上无新增锁竞争面；原子性收益（消除重试叠加）远大于代价。两项均实测核对，非免检。",
+      "evidence_files": [
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/src/config_sync.rs",
+        ".workflow-kit/tasks/evidence/RUN-177672cf4733428eb607b1645ca11e9d-candidate.json"
+      ]
+    }
+  ],
+  "ui_review": null
+}

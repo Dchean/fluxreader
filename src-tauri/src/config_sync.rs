@@ -146,25 +146,30 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
         )));
     }
 
+    // TASK-064 N6：全程单事务——中途失败（如某步 SQL 约束违约）全量回滚，
+    // 不留「半套已应用配置」（此前已建的 folders / 已插的 feeds 会残留，
+    // 用户重试得到叠加结果）。Err 路径 Transaction drop 自动回滚。
+    let tx = conn.unchecked_transaction()?;
+
     // 分类按名称 upsert（已存在则更新布局/AI 标志/位置）
     let mut folder_ids: std::collections::HashMap<String, i64> = Default::default();
     for f in &p.folders {
-        let existing = list_folder_id_by_name(conn, &f.name)?;
+        let existing = list_folder_id_by_name(&tx, &f.name)?;
         let id = match existing {
             Some(id) => {
-                let _ = db::update_folder_layout(conn, id, &f.layout);
-                let _ = db::set_folder_ai_flags(conn, id, f.auto_summary, f.auto_translate);
+                let _ = db::update_folder_layout(&tx, id, &f.layout);
+                let _ = db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate);
                 // 更新位置
-                conn.execute(
+                tx.execute(
                     "UPDATE folders SET position = ?1 WHERE id = ?2",
                     rusqlite::params![f.position, id],
                 )?;
                 id
             }
             None => {
-                let id = db::create_folder(conn, &f.name, &f.layout)?;
-                let _ = db::set_folder_ai_flags(conn, id, f.auto_summary, f.auto_translate);
-                conn.execute(
+                let id = db::create_folder(&tx, &f.name, &f.layout)?;
+                let _ = db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate);
+                tx.execute(
                     "UPDATE folders SET position = ?1 WHERE id = ?2",
                     rusqlite::params![f.position, id],
                 )?;
@@ -178,20 +183,23 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
     let mut imported = 0usize;
     let mut skipped = 0usize;
     for f in &p.feeds {
-        match db::find_feed_by_url(conn, &f.url)? {
+        match db::find_feed_by_url(&tx, &f.url)? {
             Some(existing_id) => {
                 // 已存在：更新白名单字段（title, folder, layout, AI flags, site_url, favicon_url）
                 let folder_id = match folder_ids.get(&f.folder) {
                     Some(id) => *id,
                     None => {
-                        let id = list_folder_id_by_name(conn, "导入")?.unwrap_or_else(|| {
-                            db::create_folder(conn, "导入", "article").unwrap_or(0)
-                        });
+                        // N6：兜底目录创建失败必须上抛（此前 unwrap_or(0) 产生
+                        // folder_id=0 → insert_feed 外键违约且半套配置残留）
+                        let id = match list_folder_id_by_name(&tx, "导入")? {
+                            Some(id) => id,
+                            None => db::create_folder(&tx, "导入", "article")?,
+                        };
                         folder_ids.insert("导入".to_string(), id);
                         id
                     }
                 };
-                conn.execute(
+                tx.execute(
                     "UPDATE feeds SET title = ?1, folder_id = ?2, layout = ?3, auto_summary = ?4, auto_translate = ?5, site_url = ?6, favicon_url = ?7 WHERE id = ?8",
                     rusqlite::params![
                         f.title,
@@ -211,9 +219,11 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                 let folder_id = match folder_ids.get(&f.folder) {
                     Some(id) => *id,
                     None => {
-                        let id = list_folder_id_by_name(conn, "导入")?.unwrap_or_else(|| {
-                            db::create_folder(conn, "导入", "article").unwrap_or(0)
-                        });
+                        // N6：同上，失败上抛进事务回滚
+                        let id = match list_folder_id_by_name(&tx, "导入")? {
+                            Some(id) => id,
+                            None => db::create_folder(&tx, "导入", "article")?,
+                        };
                         folder_ids.insert("导入".to_string(), id);
                         id
                     }
@@ -224,7 +234,7 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                     f.title.clone()
                 };
                 db::insert_feed(
-                    conn,
+                    &tx,
                     &f.url,
                     f.site_url.as_deref(),
                     &title,
@@ -241,22 +251,23 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
 
     // app_settings 字段级合并：只更新白名单字段，保留本地特定字段
     if let Some(remote_settings) = &p.app_settings {
-        merge_app_settings(conn, remote_settings)?;
+        merge_app_settings(&tx, remote_settings)?;
     }
 
     // 非敏感连接配置应用（保留凭据字段不变）
     if let Some(cc) = &p.connection_config {
         if let Some(v) = &cc.sync_protocol {
-            db::set_setting(conn, "sync_protocol", v)?;
+            db::set_setting(&tx, "sync_protocol", v)?;
         }
         if let Some(v) = &cc.greader_endpoint {
-            db::set_setting(conn, "greader_endpoint", v)?;
+            db::set_setting(&tx, "greader_endpoint", v)?;
         }
         if let Some(v) = &cc.greader_username {
-            db::set_setting(conn, "greader_username", v)?;
+            db::set_setting(&tx, "greader_username", v)?;
         }
     }
 
+    tx.commit()?;
     Ok((imported, skipped))
 }
 

@@ -1,0 +1,11 @@
+{
+  "changed_files": [
+    "src-tauri/src/commands/folders.rs",
+    "src-tauri/src/commands/opml.rs",
+    "src-tauri/src/config_sync.rs",
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/scheduler.rs",
+    "src-tauri/tests/config_sync_e2e.rs",
+    "src-tauri/tests/refresh_dedup_e2e.rs"
+  ]
+}

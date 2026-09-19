@@ -1,0 +1,24 @@
+{
+  "task_id": "TASK-064",
+  "run_id": "RUN-a64dc5a037374fddb1c8f37dcc6994a4",
+  "status": "ready_for_verification",
+  "summary": "REQ-102 后端 P2 四项修复（AUDIT-20260919-v2.md N3~N6）。【N3】scheduler.rs：dedup 从 due_filter 元组拆出为独立参数，refresh_all 读 read_refresh_config 的 smartDedup 传入（修前手动全刷写死 false，开智能去重的用户手动刷新放行跨源同文）；refresh_due_feeds 传 Some(interval_min), dedup；手动语义（全量源、忽略到期、同步模式过滤）不变。【N4】commands/folders.rs add_feed 的入库段抽为纯函数 persist_new_feed（除修复点外纯搬运）并在插入成功后 db::remove_feed_tombstone；commands/opml.rs import_feeds 同样在插入成功后清墓碑——重新添加/导入=用户改变主意的最强证据，否则 pull 永久跳过该源、其未推送状态 30 天后被 prune_stale_unbound 物理删除（TASK-055 防复活防线在反场景的陷阱）。【N5】db/articles.rs 两处 today 判定统一本地时区：date(a.published_at,'localtime')=date('now','localtime')（修前 UTC 日期对本地日期，+08:00 用户本地凌晨文章不进「今天」/计数少 1）。【N6】config_sync.rs apply_payload 以 unchecked_transaction 包裹全程（Err 路径 drop 自动回滚），两处 create_folder(...).unwrap_or(0) 改 ? 上抛。新增测试 7 条：refresh_dedup_e2e.rs（进程内 TcpListener HTTP server，smartDedup on→跨源同文 1 篇 / off→2 篇双向锚定）；folders.rs 文件内 2 条（重加清墓碑、重复 URL 拒绝锚定）；opml.rs 文件内 1 条（重导入清墓碑，注意墓碑按 normalize_url 存储 https→http）；db/articles.rs 文件内 1 条（本地今天 01:00 文章计入 today，判定力依赖主机时区非 UTC，已在测试注释声明）；config_sync_e2e.rs 追加 1 条（app_settings 非法 JSON 注入中途失败→folders/feeds 零残留全量回滚）。变异取证成对（M1 dedup 写死 false / M2 移除清墓碑调用 / M3 还原 UTC date / M4 去事务全直连 conn）：各自新增测试失败、其余锚定测试通过，还原后全绿。四门禁实测：cargo test 171 passed / 0 failed / 9 ignored（164+7）、lint 0 warnings/0 errors exit 0、build exit 0、frontend 286/286。LF 行尾（folders.rs 与 refresh_dedup_e2e.rs 曾混入 CRLF 已统一转换）。",
+  "changed_files": [
+    "src-tauri/src/scheduler.rs",
+    "src-tauri/src/commands/folders.rs",
+    "src-tauri/src/commands/opml.rs",
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/config_sync.rs",
+    "src-tauri/tests/refresh_dedup_e2e.rs",
+    "src-tauri/tests/config_sync_e2e.rs"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri，门禁 cargo_test）",
+    "npm run lint（门禁 lint）",
+    "npm run build（门禁 build）",
+    "npm run test:frontend（门禁 frontend）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}
