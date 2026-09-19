@@ -233,7 +233,7 @@ pub mod tags {
 客户端
 ============================================================ */
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GReaderClient {
     /// 后端根 URL（去尾部斜杠），如 `https://sync.example.invalid`
     base: String,
@@ -255,13 +255,65 @@ impl GReaderClient {
 
     /// 两步认证：先 ClientLogin 换 token，再构建客户端。
     /// `username`/`password` 是 Google Reader 集成凭据（非 Miniflux 账号密码）。
+    ///
+    /// **端点自动适配（TASK-059）**：`endpoint` 可以是**纯域名**——依次尝试
+    /// `{域名}` 与 `{域名}/api/greader.php`（FreshRSS 形态），
+    /// 以 **404 = 路径不存在**、**其它状态码 = 路径存在** 判定。
+    /// 凭据错误（401/403/400）会**立即停止探测**并报凭据原因，
+    /// 绝不会被误报成「找不到 API」（见 `endpoint_resolve` 模块文档）。
     pub async fn login(
         endpoint: &str,
         username: &str,
         password: &str,
         http: Client,
     ) -> AppResult<Self> {
-        let base = endpoint.trim_end_matches('/').to_string();
+        let candidates = crate::endpoint_resolve::greader_candidates(endpoint);
+        let mut tried: Vec<String> = Vec::new();
+
+        for base in candidates {
+            tried.push(base.clone());
+            match Self::login_at(&base, username, password, &http).await? {
+                Some(client) => return Ok(client),
+                // 404：该候选下没有 API，继续试下一个
+                None => continue,
+            }
+        }
+
+        Err(AppError::network(format!(
+            "在该地址下找不到 GReader API（HTTP 404，已尝试：{}）。请确认域名是否正确",
+            tried.join("、")
+        )))
+    }
+
+    /// 用**已解析**的 API 根直接登录，**不做任何探测**。
+    ///
+    /// `base` 来自上次解析结果（`endpoint_resolve::cached_base`）——同一个 endpoint
+    /// 被反复登录时（每次同步的 `build_client`）省掉探测请求：唯一候选即命中。
+    pub async fn login_resolved(
+        base: &str,
+        username: &str,
+        password: &str,
+        http: Client,
+    ) -> AppResult<Self> {
+        let base = base.trim().trim_end_matches('/').to_string();
+        match Self::login_at(&base, username, password, &http).await? {
+            Some(client) => Ok(client),
+            None => Err(AppError::network(format!(
+                "在该地址下找不到 GReader API（HTTP 404，已尝试：{base}）。请确认域名是否正确"
+            ))),
+        }
+    }
+
+    /// 在**单个**候选地址上做 ClientLogin。
+    ///
+    /// `Ok(Some)` = 成功；`Ok(None)` = **404，该路径下不存在 API**（调用方可继续试下一个）；
+    /// `Err` = 路径存在但请求失败——**凭据类问题必须走这里**，绝不能被上层当成「路径不对」。
+    async fn login_at(
+        base: &str,
+        username: &str,
+        password: &str,
+        http: &Client,
+    ) -> AppResult<Option<Self>> {
         let resp = http
             .post(format!("{base}/accounts/ClientLogin"))
             .form(&[
@@ -271,20 +323,39 @@ impl GReaderClient {
             ])
             .send()
             .await?;
+        let status = resp.status().as_u16();
+
+        if !crate::endpoint_resolve::path_exists(status) {
+            return Ok(None);
+        }
         if !resp.status().is_success() {
+            // 路径存在但请求被拒（多为凭据问题）——立即停下，如实报错，
+            // 不得继续尝试其它候选而掩盖真实原因。
             return Err(AppError::network(format!(
-                "ClientLogin → {}",
+                "ClientLogin → {}（已定位 API：{base}）",
                 resp.status()
             )));
         }
         // 双格式：先 JSON（Miniflux），失败回退经典文本 Auth= 行（FreshRSS）。
         let body = resp.text().await?;
         let token = parse_client_login(&body)?;
-        Ok(Self { base, token, http })
+        Ok(Some(Self {
+            base: base.to_string(),
+            token,
+            http: http.clone(),
+        }))
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
+    }
+
+    /// 实际使用的 API 根（TASK-059 端点自动适配的结果）。
+    ///
+    /// 供测试与诊断使用：用户填的是纯域名时，这里会显示**解析后**的真实地址
+    /// （如 `https://demo.freshrss.org/api/greader.php`）。
+    pub fn resolved_base(&self) -> &str {
+        &self.base
     }
 
     /// GET 请求（带 `Authorization: GoogleLogin auth=<token>`）。

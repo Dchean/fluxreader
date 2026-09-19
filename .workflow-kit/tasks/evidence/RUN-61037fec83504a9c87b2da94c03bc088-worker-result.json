@@ -1,0 +1,36 @@
+{
+  "task_id": "TASK-059",
+  "run_id": "RUN-61037fec83504a9c87b2da94c03bc088",
+  "status": "ready_for_verification",
+  "summary": "Endpoint 自动适配（只填域名即可连接，FreshRSS / Miniflux 双协议）。接手前一位执行者的半成品（mock 有重复片段无法编译、探测结果未被采用、缓存与前端文案均未做），补齐为完整交付：新增 endpoint_resolve（候选表 + 只有 404 视为路径不存在 + 解析缓存）、greader login_at/login_resolved、fever resolve/at_resolved/api_entry、build_client 与 test_connection 接线、sync_save 落库解析结果；Fever 版本校验放宽到 >=3 且 auth 校验不放松；前端 Endpoint 文案与 404 提示改为「只填域名」，并修掉说明区被 line-clamp 截断的问题（旧文案实测需 4 行、一直在被截断）。四门禁全绿：cargo test 160 passed/0 failed/9 ignored（基线 141/0/9，+19）、lint 0/0、build exit 0、frontend 282/282（基线 280/280）。新增 Rust e2e 13 条（纯域名两形态、旧用法首候选命中、探测有界、凭据错与路径错可区分、缓存生效不重探、Fever 版本与 auth）与前端断言（修前 274/281 失败 7 条、修后 282/282）。实机证据：真实运行应用 + 本地 FreshRSS 形态服务端，7 场景全过（只填域名连通 / 旧路径兼容 / 凭据错如实报 401 / Fever 纯域名连通 / 双主题截图）。事故如实记录：实机验证误写用户真实库（APPDATA 对 Tauri 无效），已按 WAL 帧重放逐字节还原，哈希一致，并给驱动加装强制备份与还原校验。",
+  "changed_files": [
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/endpoint_resolve.rs",
+    "src-tauri/src/fever.rs",
+    "src-tauri/src/greader.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/sync/credentials.rs",
+    "src-tauri/src/sync/phases.rs",
+    "src-tauri/tests/endpoint_autodetect_e2e.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src/components/settings/endpointHint.ts",
+    "tools/frontend-regression.mjs",
+    "tools/mock_greader_ui_server.py",
+    "tools/t059_cdp.mjs",
+    "tools/t059_check_real_db.py",
+    "tools/t059_restore_db.py",
+    "tools/t059_ui_e2e.mjs",
+    "tools/t059_ui_probe.mjs",
+    "tools/t059_wal_recover.py"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

@@ -287,7 +287,7 @@ async fn miniflux_sync_end_to_end() {
     );
 
     // 连接测试
-    let (msg, username) =
+    let (msg, username, resolved_base) =
         sync::test_connection("greader", &server.url(), "mockuser", "mockpass", &http)
             .await
             .unwrap();
@@ -296,6 +296,11 @@ async fn miniflux_sync_end_to_end() {
         "test_connection returns username: {msg}"
     );
     assert_eq!(username, "mockuser");
+    assert_eq!(
+        resolved_base,
+        server.url(),
+        "Miniflux 形态下解析结果应就是站点根（首个候选命中）"
+    );
 
     let _ = std::fs::remove_file(&tmp);
     println!("=== SYNC E2E PASS ===");

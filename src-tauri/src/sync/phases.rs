@@ -102,32 +102,43 @@ pub async fn sync_light(
 
 /// 测试连接（设置页「测试连接」按钮）。
 /// 按协议分派：Google Reader 走 ClientLogin，Fever 走 `api_key` 认证。
-/// 返回 (展示消息, 用户名)——用户名供 sync_save 落库做账号显示。
+/// 返回 (展示消息, 用户名, 解析出的 API 根)——用户名供 sync_save 落库做账号显示，
+/// API 根供其写入解析缓存（TASK-059：后续同步不必重复探测）。
 pub async fn test_connection(
     protocol: &str,
     endpoint: &str,
     username: &str,
     password: &str,
     http: &reqwest::Client,
-) -> AppResult<(String, String)> {
+) -> AppResult<(String, String, String)> {
     if endpoint.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
         return Err(AppError::new(
             "notConnected",
             "请先填写 Endpoint、用户名和密码",
         ));
     }
-    let subs = match protocol {
+    // 两个协议都要先**解析端点**（用户只填域名时自动适配），再用解析出的地址拉订阅。
+    let (subs, base) = match protocol {
         "fever" => {
-            let client = fever::FeverClient::new(endpoint, username, password, http.clone());
-            client.subscriptions().await?.len()
+            let client = fever::FeverClient::new(endpoint, username, password, http.clone())
+                .resolve()
+                .await?;
+            (
+                client.subscriptions().await?.len(),
+                client.resolved_base().to_string(),
+            )
         }
         _ => {
             let client = GReaderClient::login(endpoint, username, password, http.clone()).await?;
-            client.subscriptions().await?.len()
+            (
+                client.subscriptions().await?.len(),
+                client.resolved_base().to_string(),
+            )
         }
     };
     Ok((
         format!("已连接：{username}（{subs} 个订阅）"),
         username.to_string(),
+        base,
     ))
 }

@@ -1,0 +1,94 @@
+{
+ "task_id": "TASK-059",
+ "candidate_digest": "e57efa820099cab2ff788b0a1468c0c118495cb1f7f35de99a6d150cd9888b83",
+ "verification_run": "RUN-d2817bd098784e2fa67e55afedadc2b2",
+ "verdict": "PASS",
+ "summary": "第 2 轮独立审查（同一审查者、未参与实现的新上下文；不采信作者自述，结论来自我本人的源码核对、门禁复跑、证据目视与只读核对）。绑定核对：按 R2 审查包 candidate_files 逐一重算 **144/144 个文件 sha256 全部一致**（含 fever.rs=81b4297015a2…、greader.rs=b8cba2088dcd…、endpoint_autodetect_e2e.rs=388144917166…、mock_greader.rs=071b16638a89…、frontend-regression.mjs=e6d667b3130c…；endpointHint.ts / endpoint_resolve.rs / sync/credentials.rs / commands/sync.rs 与 R1 同值，未改动），且候选清单 `.workflow-kit/tasks/evidence/RUN-d2817bd098784e2fa67e55afedadc2b2-candidate.json` 的 digest 与 RUN json 的 candidate_digest 均等于 e57efa82…，与我算得的一致；工作区改动集仍是任务卡内那 19 个文件，无越界。故 RUN-d2817bd… 的四门禁证据对当前候选有效。我独立复跑的实际数字：`cargo test`（src-tauri）**161 passed / 0 failed / 9 ignored**（R1 为 160/0/9，+1 = 新增 fever_write_path_uses_resolved_endpoint_too；ignored 未增）；`npm run test:frontend` **283/283**（R1 为 282/282，+1 = 后端真实消息形状的 404 指引断言）；`npm run lint` exit 0（0 warnings / 0 errors）；`npm run build` exit 0（✓ built in 137ms）。作者 run 的门禁日志我另行复算：cargo 24 条 test result 求和 = 161/0/9，frontend 结尾 = 283/283，与我的实测逐项一致。R1 六项发现的处置我逐条验过：**F1 已真正修复**——fever.rs 的 mark_items 改用 self.api_entry()，且我 grep 全文确认 fever.rs 中再没有任何绕过 api_entry() 的地址拼接（self.base 只出现在 api_entry 自身、resolve 的候选来源、resolved_base 返回处），Miniflux 形态拼出的字符串与修复前逐字相同（{base}/fever/?api…），成功路径语义未变；**F2 已修复**——mock 的 Fever 分支改为 `path != expected` 精确相等，我按代码推演确认 `…/api/fever.php/fever/?api` 会被判 404 而不再被 starts_with 放过；**F6 已修复**——greader.rs:283/302 与 fever.rs:227 的『找不到 API』消息补上 `HTTP 404`，/\b(404|…)\b/ 对该形状命中，且新增断言喂的是后端真实消息（不再只是合成串 'ClientLogin → 404'）；**F4 已订正**——报告 §8 改为『endpoint_resolved 不会随配置同步走（config_sync.rs 白名单）』，与源码一致；**F3、F5 为已知残留**，我在下文明确列出并说明为何判为不阻塞（见 failure_paths / maintainability / ui_review 的 analysis）。新增回归网 fever_write_path_uses_resolved_endpoint_too 我判为**非自证式、有效**：它先真实 resolve()，再断言写请求全部落在 /api/fever.php 且**不出现** /api/fever.php/fever/ 的叠加拼接——在当前『精确相等』的 mock 下，mark_items 一旦退回写死 /fever/ 就会拼出被 404 的叠加路径，`.expect(\"标记已读应成功\")` 必然 panic，故该断言能真正拦住 F1 回归（其价值依赖 F2 的 mock 收紧，两者是一组，作者已在报告中说明）。鉴于四门禁全绿且我实测复现、R1 的功能缺陷已修复并有有效回归网、UI 证据经我目视与哈希核对仍然有效、无新增问题，本轮判 PASS。",
+ "findings": [],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "逐条对照 acceptance（我本人核对源码 + 复跑测试 + 只读证据）：①纯域名两形态各一测——bare_domain_resolves_freshrss_layout（解析到 /api/greader.php）与 bare_domain_resolves_miniflux_layout（保持站点根）我本地跑通；②旧用法不回退——full_path_still_works_first_try 且 probing_is_bounded_and_full_path_does_not_extra_probe 断言完整路径恰好 1 次 ClientLogin；③路径不存在 vs 凭据错可区分——missing_path_vs_bad_credentials_are_distinguished（401 时不得含『找不到 GReader API』），我确认该断言在『401 继续探测』的实现下必失败；④探测有界有序——greader_candidates/fever_candidates 为常量表（每协议 ≤2），path_exists 仅在 404 时为 false，任一非 404 立即返回/报错；⑤解析结果缓存且有实证——cache_hits_on_same_input_and_invalidates_on_change + second_sync_reuses_cached_endpoint_without_probing（首轮恰好 2 次、次轮恰好 1 次且打在解析出的端点，我逐行读过断言，非空断言）；⑥用户输入原样保留——sync_status 只读 greader_endpoint，endpoint_resolved 不出现在任何 IPC 返回值（我 grep 全仓确认只存在于 endpoint_resolve.rs 与 tools 脚本）；⑦**Fever 路径形态（本轮重点）**——读路径走 api_entry()，且 R1 发现的写路径绕过已修复：mark_items 现用 api_entry()，新增测试锁定『写请求必须打在 /api/fever.php、不得叠加成 /api/fever.php/fever/』，故『同时支持 {域名}/fever/ 与 {域名}/api/fever.php』在读写两条路径上均成立；Miniflux 形态的拼串与修复前逐字相同，non_goal『不改成功路径既有行为语义』未被破坏；⑧Fever 版本放宽为 >=3 且 auth!=1 仍拒绝（fever_accepts_api_version_4 / fever_rejects_api_version_below_3 / fever_still_rejects_bad_auth）；⑨前端文案与提示更正——desc/placeholder 改『只填域名』，旧『需填 /api/greader.php』指引移除（endpointHint.ts 与 (e1)–(e5) 断言）；⑩四门禁与基线——见 regression；⑪无新依赖（Cargo.toml/Cargo.lock/package.json 不在改动集，我核对 git status 与候选清单均无这三个文件）；⑫不改对外请求语义——greader/fever 的认证、订阅、状态推送的参数与顺序未动（仅地址构造与错误文案），sync 语义未触碰；⑬用户真实库只读——见 failure_paths。",
+   "evidence_files": [
+    "src-tauri/src/endpoint_resolve.rs",
+    "src-tauri/src/greader.rs",
+    "src-tauri/src/fever.rs",
+    "src-tauri/src/sync/credentials.rs",
+    "src-tauri/src/sync/phases.rs",
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/tests/endpoint_autodetect_e2e.rs",
+    ".workflow-kit/tasks/evidence/RUN-d2817bd098784e2fa67e55afedadc2b2-candidate.json"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "我独立复跑（不引用作者日志）：`cargo test` 161 passed / 0 failed / 9 ignored（基线 141/0/9；+20 = endpoint_autodetect_e2e 14 条 + endpoint_resolve 单测 6 条；ignored 仍 9，未增）。作者 run 日志复算得同样 161/0/9。`npm run test:frontend` 283/283（基线 280/280；+3 = 文案方向断言改写 + TASK-059 新增 + 本轮新增的『真实消息形状』断言；既有 26 条未改动一行，套件自报并可从 diff 核对）。`npm run lint` 0 warnings/0 errors、`npm run build` exit 0。目标缺陷可被发现：R1 的核心缺陷（Fever+FreshRSS 可拉不可推）在修复前无任何测试覆盖，本轮新增 fever_write_path_uses_resolved_endpoint_too 补上，且**我判定它不是自证式断言**——它走真实 resolve() 后发起 mark_read/mark_starred，用 mock 的路由规则（Fever 路径必须精确等于 /api/fever.php）来校验实际请求 URL；若 mark_items 退回写死 `{base}/fever/?api`，请求路径变成 /api/fever.php/fever/ 被 mock 精确匹配规则拒绝为 404，`.expect(\"标记已读应成功\")` 即 panic，同时 `!log.contains(\"/api/fever.php/fever/\")` 也会失败。覆盖充分性：写路径的四个入口（mark_read/mark_unread/mark_starred/mark_unstarred）共用 mark_items 一个函数体，测试覆盖其中两条 + 断言 URL 构造规则，等价覆盖；测试直接打 FeverClient 而非经 sync::push 的 exec_push/Backend，但 Backend::mark_read 到 FeverClient::mark_read 只是 3 行 match 转发（我读过 push.rs:97/117 与 credentials.rs:66-92），故直接用客户端级断言是合理的等价取证，不构成盲区（作为残留观察记录，不判为缺陷）。既有保护未见弱化：TASK-055 墓碑/2xx 未生效、TASK-056 零 folder 与失败可见性、A-1 防复活、分页与 store 断言全部仍通过（sync_gap_repro_e2e 18/18、sync_phases_e2e 5/5、sync_content_e2e 7/7 等我逐条在输出中看到 ok）。mock 收紧后我也检查了不会误伤既有用例：Miniflux 形态（expected=/fever/）与 FreshRSS 形态（expected=/api/fever.php）下的既有 Fever 用例全部仍通过。",
+   "evidence_files": [
+    "src-tauri/tests/endpoint_autodetect_e2e.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/tasks/evidence/RUN-d2817bd098784e2fa67e55afedadc2b2-cargo_test.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-d2817bd098784e2fa67e55afedadc2b2-frontend.stdout.txt"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "已核对并（除注明者外）已消除的异常/边界：①两候选都 404 ⇒ 报『在该地址下找不到 … API（HTTP 404，已尝试：a、b）』，且该文案现有测试与前端断言双重覆盖；②路径正确但凭据被拒（401）⇒ login_at 立即 Err、消息含状态码与已定位 API，不继续试下一候选（Rust e2e + UI 实机 toast 一致）；③Fever 非 404 的 HTTP 失败 ⇒ resolve 立即报『Fever 认证被拒 → status（已定位 API：base）』；④Fever auth!=1 / api_version<3 ⇒ 分别报认证失败 / 版本不支持；⑤输入归一（尾斜杠、空白）与换协议、改地址导致缓存失效（单测）；⑥缓存命中路径不再探测（e2e 断言恰好 1 次认证请求）；⑦**R1 的 F1（Fever+FreshRSS 状态推送 404、队列永久重试）已修复**：mark_items 走 api_entry()，FreshRSS 形态拼出 `{域名}/api/fever.php?api&mark=item&as=…&id=…`（与读路径同形态），并有回归网；⑧**F3（缓存陈旧不自愈）为已记录的残留、我判不阻塞**：命中缓存后若地址失效，build_client 返回 None、同步报 notConnected，用户需重新『保存并同步』才会重写缓存——理由是任务 acceptance 只要求『用户修改地址后缓存须失效并重新解析』（已满足且有测试），并未要求缓存自愈；且自愈会引入新的失败模式（缓存陈旧时自动重探可能掩盖真实凭据问题）。作者已在报告 §9 与 §8 如实记录，故按『已知限制』接收，建议后续任务补『缓存命中认证失败 ⇒ 清缓存并回退一次完整 resolve』。另记录我核对过但不判为缺陷的残余风险：判定规则为『只有 404 = 路径不存在』（owner 在 acceptance 第 4 条明确要求），故若域名根对 POST 返回非 404（CDN/WAF 对未知 POST 回 403，或站点对任意路径回 200 但响应体非 ClientLogin 格式），首个候选会被判『路径存在』并立即停止，用户会看到 `ClientLogin → 403` / 解析失败类消息而不去试 /api/greader.php——这是 owner 指定的取舍，代码与文档一致；同时我确认子目录安装（https://host/freshrss/ 或 https://host/miniflux/）因『首个候选 = 用户原样输入』而仍能工作。另核对用户真实库：`%APPDATA%\\com.fluxreader.app\\fluxreader.db` 现为 sha256=419b118e050a08c204a50603f2d5188d8132fa94d75ea417392fe7e984293550 / 90112 B，-wal 与 -shm 均不存在，与事故报告及 ui-e2e-result.json 的 0./Z. 两节一致（我只读复制计算哈希，未打开写入）。",
+   "evidence_files": [
+    "src-tauri/src/fever.rs",
+    "src-tauri/src/greader.rs",
+    "src-tauri/src/endpoint_resolve.rs",
+    "src-tauri/src/sync/credentials.rs",
+    "src-tauri/src/sync/push.rs",
+    "src-tauri/tests/endpoint_autodetect_e2e.rs",
+    ".workflow-kit/tasks/evidence/TASK-059-incident-real-db-write.md"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "结构：地址解析收敛在 endpoint_resolve.rs（候选表 + path_exists + 缓存），greader/fever 只保留协议差异，sync/credentials.rs 的 build_client 是解析唯一入口；候选表为常量、每协议 ≤2、无隐藏重试。本轮修复提升了内部一致性：fever.rs 中**所有**请求地址现在都出自同一个 api_entry()（我 grep 全文确认 self.base 仅出现在 api_entry 本身、resolve 的候选来源、resolved_base 返回处），F1 那种『同一文件内绕过公共构造点』的抽象不一致已消除；mock 的 GReader 与 Fever 两个布局分支现在都是精确相等判定，规则一致且有注释说明为什么不能用 starts_with。命名与注释保持高水准（模块文档写明实测依据、不可回退的方向、以及本次修复的原因）。新增维护负担有限：一个 197 行新模块 + 14 条 e2e（多为纯函数或本地 mock，跑得快）+ mock 的布局/故障注入能力（这是『探测有界』『缓存生效』可取证的前提）。残留（不阻塞）：F5 —— 审查包声明的 ui_evidence_directory（.workflow-kit/tasks/evidence/TASK-059-ui/RUN-d2817bd098784e2fa67e55afedadc2b2/）实际不存在，3 张截图与 e2e JSON 仍平铺在 tasks/evidence/ 下；作者已在报告 §9 明确记录该不对齐。我判不阻塞的理由：截图内容我逐张目视核对为真实、主题与文件名相符、说明文字未截断，文件存在且可核对，任务的 UI 验收（深/浅主题实机截图 + 交互报告）已满足，此项是路径约定/自动化发现性的问题，不影响本任务的功能与证据真伪；仍建议下一步把证据落到声明的 run 级目录或修正声明，以免后续自动化按声明路径取不到证据。另有 tools/ 下 7 个 t059_* 一次性驱动脚本（其中 t059_ui_e2e.mjs 会写用户真实库，已加强制备份/还原与警示）留在仓库，属长期维护面，建议收尾时决定归档或加更醒目警示——同样不阻塞。",
+   "evidence_files": [
+    "src-tauri/src/endpoint_resolve.rs",
+    "src-tauri/src/fever.rs",
+    "src-tauri/src/sync/credentials.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "tools/t059_ui_e2e.mjs",
+    ".workflow-kit/tasks/evidence/TASK-059-report.md"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "NOT_APPLICABLE",
+   "analysis": "本任务 acceptance 无性能目标（brief 的 measure 工作负载指向 REQ-001/003 的正文加载与布局切换，与地址解析无关），改动不触碰查询、数据量或渲染路径，故不造基准、也不伪称实测提升。静态分析范围限于『解析期网络请求次数』：未命中缓存时每协议最多 2 个候选、仅 404 继续，任一非 404 立即停止；命中缓存后候选收敛为唯一地址，只保留一次必需的认证请求——有直接证据（second_sync_reuses_cached_endpoint_without_probing 断言首轮恰好 2 次、次轮恰好 1 次且打在解析出的端点）。本轮 F1 修复（mark_items 走 api_entry）不改变请求次数与顺序，仅修正 URL 形态，故对性能无影响。",
+   "evidence_files": [
+    "src-tauri/src/endpoint_resolve.rs",
+    "src-tauri/tests/endpoint_autodetect_e2e.rs"
+   ]
+  }
+ ],
+ "ui_review": {
+  "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+  "checked_states": [
+   "设置 → 同步 → 「后端 Endpoint」：说明文案改为**只填域名**（不再要求 /api/greader.php 这类后缀）",
+   "placeholder 给出纯域名示例（如 https://demo.freshrss.org）",
+   "填入纯域名后点「测试连接」：FreshRSS 与 Miniflux 均应连接成功（不再报 404）",
+   "已填完整 API 路径的旧用法**仍然可用**（向后兼容，不回退）",
+   "解析成功后设置页显示的仍是**用户填写的原始值**（不把内部解析结果回显成后缀，避免让用户以为必须填后缀）",
+   "连接确实失败时，提示须如实说明（凭据错报凭据错、地址不可达报不可达），不得把凭据问题说成填法问题",
+   "深色与浅色两套主题下文案完整可读、不截断、不溢出"
+  ],
+  "evidence_files": [
+   ".workflow-kit/tasks/evidence/TASK-059-ui-dark-bare-domain-connected.png",
+   ".workflow-kit/tasks/evidence/TASK-059-ui-light-bare-domain-connected.png",
+   ".workflow-kit/tasks/evidence/TASK-059-ui-dark-bad-credential.png",
+   ".workflow-kit/tasks/evidence/TASK-059-ui-e2e-result.json",
+   ".workflow-kit/tasks/evidence/TASK-059-interaction-report.md",
+   ".workflow-kit/tasks/evidence/TASK-059-report.md"
+  ]
+ }
+}

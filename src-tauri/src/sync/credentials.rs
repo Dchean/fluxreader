@@ -104,6 +104,10 @@ impl Backend {
 }
 
 /// 锁内读凭据 → 锁外按协议构建 client。
+///
+/// **端点解析结果走缓存（TASK-059）**：`build_client` 在每次同步（feeds/states/订阅/
+/// 推送）都会被调用，若不缓存就会**每轮都重复探测**。命中缓存时直接使用上次解析出的
+/// API 根（候选收敛为唯一地址，不再发探测请求）；未命中才探测，并把结果落库。
 pub(super) async fn build_client(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
@@ -112,23 +116,66 @@ pub(super) async fn build_client(
         let conn = db.lock().await;
         read_credentials(&conn)?
     };
-    match protocol.as_str() {
+    let cached = {
+        let conn = db.lock().await;
+        crate::endpoint_resolve::cached_base(&conn, &protocol, &endpoint)
+    };
+
+    // 两条路径都产出「已认证 + 端点已确定」的客户端：
+    // 命中缓存 ⇒ 候选收敛为唯一地址，这一次请求只做认证（不探测）；
+    // 未命中 ⇒ 客户端自己探测，探测成功即已认证，无需再登录一次。
+    let (backend, resolved) = match protocol.as_str() {
         "fever" => {
-            let client = fever::FeverClient::new(&endpoint, &username, &password, http.clone());
-            match client.verify().await {
-                Ok(()) => Some(Backend::Fever(client)),
+            let probe = fever::FeverClient::new(&endpoint, &username, &password, http.clone());
+            let client = match &cached {
+                Some(base) => {
+                    let client = probe.at_resolved(base);
+                    match client.verify().await {
+                        Ok(()) => client,
+                        Err(e) => {
+                            log::warn!("sync: Fever 认证失败: {e}");
+                            return None;
+                        }
+                    }
+                }
+                None => match probe.resolve().await {
+                    Ok(client) => client,
+                    Err(e) => {
+                        log::warn!("sync: Fever 端点解析/认证失败: {e}");
+                        return None;
+                    }
+                },
+            };
+            let base = client.resolved_base().to_string();
+            (Backend::Fever(client), base)
+        }
+        _ => {
+            let logged_in = match &cached {
+                Some(base) => {
+                    GReaderClient::login_resolved(base, &username, &password, http.clone()).await
+                }
+                None => GReaderClient::login(&endpoint, &username, &password, http.clone()).await,
+            };
+            match logged_in {
+                Ok(client) => {
+                    let base = client.resolved_base().to_string();
+                    (Backend::GReader(client), base)
+                }
                 Err(e) => {
-                    log::warn!("sync: Fever 认证失败: {e}");
-                    None
+                    log::warn!("sync: ClientLogin 失败: {e}");
+                    return None;
                 }
             }
         }
-        _ => match GReaderClient::login(&endpoint, &username, &password, http.clone()).await {
-            Ok(c) => Some(Backend::GReader(c)),
-            Err(e) => {
-                log::warn!("sync: ClientLogin 失败: {e}");
-                None
-            }
-        },
+    };
+
+    // 只有「这一轮真的探测过」才落库；命中缓存时无需重复写。
+    if cached.is_none() {
+        let conn = db.lock().await;
+        if let Err(e) = crate::endpoint_resolve::remember_base(&conn, &protocol, &endpoint, &resolved)
+        {
+            log::warn!("sync: 端点解析结果落库失败（不影响本次同步）: {e}");
+        }
     }
+    Some(backend)
 }

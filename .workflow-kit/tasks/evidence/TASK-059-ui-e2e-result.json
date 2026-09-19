@@ -1,0 +1,149 @@
+[
+  {
+    "name": "0. 真实库备份（改动前，哈希取证）",
+    "dir": "C:/Users/A/AppData/Local/Temp/t059-evidence/real-db-backup",
+    "files": {
+      "fluxreader.db": {
+        "sha256": "419b118e050a08c204a50603f2d5188d8132fa94d75ea417392fe7e984293550",
+        "size": 90112
+      },
+      "fluxreader.db-wal": {
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "size": 0
+      },
+      "fluxreader.db-shm": {
+        "sha256": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb",
+        "size": 32768
+      }
+    }
+  },
+  {
+    "name": "A. 文案：只填域名（深色主题）",
+    "endpointCard": {
+      "desc": "只填域名即可：FreshRSS / Miniflux 自动适配",
+      "placeholder": "如 https://demo.freshrss.org",
+      "value": ""
+    },
+    "theme": "dark"
+  },
+  {
+    "name": "S1. 纯域名 + FreshRSS 形态 ⇒ 连接成功",
+    "用户输入": "http://127.0.0.1:8901",
+    "回显值": "http://127.0.0.1:8901",
+    "回显等于用户输入": true,
+    "toast": "已连接：demo（2 个订阅）",
+    "截图": {
+      "file": "C:/Users/A/AppData/Local/Temp/t059-evidence/TASK-059-ui-dark-bare-domain-connected.png",
+      "theme": "dark",
+      "modalBg": "rgb(30, 34, 42)"
+    }
+  },
+  {
+    "name": "S2. 保存并同步：解析结果被用于真实同步",
+    "首条toast": "已连接：demo（2 个订阅）",
+    "后续状态": {
+      "toasts": [],
+      "navFirst": [
+        "全部6",
+        "今天0",
+        "未读6",
+        "收藏0"
+      ],
+      "accountTag": [
+        "demo",
+        "未配置"
+      ]
+    }
+  },
+  {
+    "name": "S3. 旧用法（完整路径）仍一次成功",
+    "toast": "已连接：demo（2 个订阅）"
+  },
+  {
+    "name": "S4. 凭据错 ⇒ 如实报凭据/HTTP 失败，不得报「找不到 API」",
+    "toast": "连接失败：ClientLogin → 401 Unauthorized（已定位 API：http://127.0.0.1:8901/api/greader.php）",
+    "含401或凭据字样": true,
+    "误报为找不到API": false,
+    "截图": {
+      "file": "C:/Users/A/AppData/Local/Temp/t059-evidence/TASK-059-ui-dark-bad-credential.png",
+      "theme": "dark",
+      "modalBg": "rgb(30, 34, 42)"
+    }
+  },
+  {
+    "name": "S5. Fever + 纯域名（FreshRSS 形态）⇒ 成功",
+    "toast": "已连接：demo（1 个订阅）"
+  },
+  {
+    "name": "S6. 浅色主题下同一操作",
+    "toast": "已连接：demo（2 个订阅）",
+    "endpointCard": {
+      "desc": "只填域名即可：FreshRSS / Miniflux 自动适配",
+      "placeholder": "如 https://demo.freshrss.org",
+      "value": "http://127.0.0.1:8901"
+    },
+    "截图": {
+      "file": "C:/Users/A/AppData/Local/Temp/t059-evidence/TASK-059-ui-light-bare-domain-connected.png",
+      "theme": "light",
+      "modalBg": "rgb(255, 255, 255)"
+    }
+  },
+  {
+    "name": "R. 后端收到的请求序列（证明探测行为）",
+    "total": 27,
+    "lines": [
+      "REQ POST /accounts/ClientLogin -> 404",
+      "REQ POST /api/greader.php/accounts/ClientLogin -> 401",
+      "REQ POST /accounts/ClientLogin -> 404",
+      "REQ POST /api/greader.php/accounts/ClientLogin -> 200",
+      "REQ GET /api/greader.php/reader/api/0/subscription/list?output=json -> 200",
+      "REQ POST /accounts/ClientLogin -> 404",
+      "REQ POST /api/greader.php/accounts/ClientLogin -> 200",
+      "REQ GET /api/greader.php/reader/api/0/subscription/list?output=json -> 200",
+      "REQ POST /api/greader.php/accounts/ClientLogin -> 200",
+      "REQ GET /api/greader.php/reader/api/0/tag/list?output=json -> 200",
+      "REQ GET /api/greader.php/reader/api/0/subscription/list?output=json -> 200",
+      "REQ POST /api/greader.php/accounts/ClientLogin -> 200",
+      "REQ GET /api/greader.php/reader/api/0/stream/items/ids?output=json&s=user/-/state/com.google/reading-list&ot=0&n=1000 -> 200",
+      "REQ POST /api/greader.php/reader/api/0/stream/items/contents?output=json -> 200",
+      "REQ GET /feed1.xml -> 200",
+      "REQ GET /feed2.xml -> 200",
+      "REQ POST /api/greader.php/accounts/ClientLogin -> 200",
+      "REQ GET /api/greader.php/reader/api/0/subscription/list?output=json -> 200",
+      "REQ POST /accounts/ClientLogin -> 404",
+      "REQ POST /api/greader.php/accounts/ClientLogin -> 401",
+      "REQ POST /fever/?api&api_key=d6d10fc25705e43d0cb705f0ac061ebb -> 404",
+      "REQ POST /api/fever.php?api&api_key=d6d10fc25705e43d0cb705f0ac061ebb -> 200",
+      "REQ POST /api/fever.php?api&api_key=d6d10fc25705e43d0cb705f0ac061ebb&feeds -> 200",
+      "REQ POST /api/fever.php?api&api_key=d6d10fc25705e43d0cb705f0ac061ebb&groups -> 200",
+      "REQ POST /accounts/ClientLogin -> 404",
+      "REQ POST /api/greader.php/accounts/ClientLogin -> 200",
+      "REQ GET /api/greader.php/reader/api/0/subscription/list?output=json -> 200"
+    ]
+  },
+  {
+    "name": "Z. 真实库还原（逐字节 + 哈希一致）",
+    "dir": "C:\\Users\\A\\AppData\\Roaming\\com.fluxreader.app",
+    "allOk": true,
+    "files": [
+      {
+        "file": "fluxreader.db-wal",
+        "restored": "removed",
+        "ok": true
+      },
+      {
+        "file": "fluxreader.db-shm",
+        "restored": "removed",
+        "ok": true
+      },
+      {
+        "file": "fluxreader.db",
+        "restored": "from-snapshot",
+        "snapshot": "C:/Users/A/AppData/Local/Temp/t059-pre-launch.db",
+        "expected": "419b118e050a08c204a50603f2d5188d8132fa94d75ea417392fe7e984293550",
+        "actual": "419b118e050a08c204a50603f2d5188d8132fa94d75ea417392fe7e984293550",
+        "ok": true
+      }
+    ]
+  }
+]

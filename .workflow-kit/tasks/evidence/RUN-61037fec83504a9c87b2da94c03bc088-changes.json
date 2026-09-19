@@ -1,0 +1,23 @@
+{
+  "changed_files": [
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/endpoint_resolve.rs",
+    "src-tauri/src/fever.rs",
+    "src-tauri/src/greader.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/sync/credentials.rs",
+    "src-tauri/src/sync/phases.rs",
+    "src-tauri/tests/endpoint_autodetect_e2e.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src/components/settings/endpointHint.ts",
+    "tools/frontend-regression.mjs",
+    "tools/mock_greader_ui_server.py",
+    "tools/t059_cdp.mjs",
+    "tools/t059_check_real_db.py",
+    "tools/t059_restore_db.py",
+    "tools/t059_ui_e2e.mjs",
+    "tools/t059_ui_probe.mjs",
+    "tools/t059_wal_recover.py"
+  ]
+}

@@ -1934,69 +1934,82 @@ await (async () => {
     && html.indexOf('id="timelineContentScroll"') < html.indexOf('timeline-load-more'));
 
   /* ============================================================
-     TASK-057：Endpoint 填法指引与失败提示（用户实测 Bug 1）
-     「直接填写域名无法登录，需填 https://demo.freshrss.org/api/greader.php」
+     TASK-059：Endpoint 自动适配（只填域名）
+     owner 2026-09-18 纠正需求：用户**只需填域名**，不必知道 /api/greader.php；
+     此前 TASK-057 的文案反过来教用户填完整后缀 —— 方向是错的。
 
-     根因：greader.rs 把 Endpoint 原样当根 URL 拼 {base}/accounts/ClientLogin，
-     而 Miniflux 的 GReader API 在站点根、FreshRSS 在子路径 /api/greader.php。
-     实测：POST https://demo.freshrss.org/accounts/ClientLogin → 404；
-           POST https://demo.freshrss.org/api/greader.php/accounts/ClientLogin → 401。
-
-     本组锁定「文案必须同时给出两种填法」与「路径类失败提示必须可操作」，
-     并确保**不误伤凭据类失败**（401/403 不得被说成 Endpoint 填错）。
-     owner 边界：**不新增自动探测/回退逻辑**——本组亦断言提示纯为文案、无网络行为。
+     本组锁定「文案必须按自动适配来说」，并保留 TASK-057 的防误伤边界：
+     路径类失败（404/405/410）才附加指引，凭据类失败（401/403）一律原样。
      ============================================================ */
   const { ENDPOINT_DESC, ENDPOINT_PLACEHOLDER, endpointHint, isMissingPathError } =
     await import('../dist-test/components/settings/endpointHint.js');
 
-  /* (e1) 文案必须同时覆盖两种协议——修前只写 Miniflux 形式，FreshRSS 用户必然填错 */
-  checkNew('(e1) Endpoint 说明同时给出 Miniflux（站点根）与 FreshRSS（/api/greader.php）两种填法',
-    ENDPOINT_DESC.includes('Miniflux') && ENDPOINT_DESC.includes('reader.example.com')
-    && ENDPOINT_DESC.includes('FreshRSS') && ENDPOINT_DESC.includes('/api/greader.php'));
-  checkNew('(e1) placeholder 给出 FreshRSS 的 API 路径写法（最能防填错的那一种）',
-    ENDPOINT_PLACEHOLDER.includes('/api/greader.php'));
-  /* 宽度受控（TASK-057 第 1 轮审查订正）：该输入框 box-sizing:border-box、
+  /* (e1) 文案方向：只填域名 + 自动适配；不得再要求用户填 API 后缀 */
+  checkNew('(e1) Endpoint 说明要求「只填域名」并说明应用自动适配',
+    ENDPOINT_DESC.includes('域名') && ENDPOINT_DESC.includes('自动')
+    && (ENDPOINT_DESC.includes('FreshRSS') && ENDPOINT_DESC.includes('Miniflux')));
+  checkNew('(e1) Endpoint 说明不得再教用户填 /api/greader.php 后缀（那是被纠正掉的方向）',
+    !ENDPOINT_DESC.includes('/api/greader.php'));
+  /* **长度预算（实机实测）**：`.setting-card-text p` 宽 234px、`-webkit-line-clamp: 2`
+     → 超过两行会被截断成「…」。TASK-057 的旧文案需 4 行（69px vs 35px），**一直在被截断**；
+     现取值 227px 单行。此处按估算宽度设防（CJK 11.5px / ASCII 5.9px，与 canvas 实测一致）：
+     上限取 460px（= 两行容量 468px 留余量），防止再次写出会被截断的说明。 */
+  const estWidth = (s) =>
+    [...s].reduce((w, ch) => w + (ch.charCodeAt(0) > 0x2e80 ? 11.5 : 5.9), 0);
+  checkNew('(e1) Endpoint 说明控制在两行内，不会被 line-clamp 截断（实测容量 234px×2）',
+    estWidth(ENDPOINT_DESC) <= 460 && !ENDPOINT_DESC.includes('…'));
+  checkNew('(e1) placeholder 给出纯域名示例（不含 /api 后缀）',
+    ENDPOINT_PLACEHOLDER.includes('://') && !ENDPOINT_PLACEHOLDER.includes('/api/'));
+  /* 宽度受控（TASK-057 审查订正的事实，仍然有效）：输入框 box-sizing:border-box、
      width:240px、padding:6px 10px、border:1px → **内容盒仅 219px**（12px Arial）。
-     实测：两种填法并列 310px（被截断且丢路径）；demo 域全串 219.46px（仍差 0.46px）；
-     现取值 162.09px（完整）。故此处按「字符预算」设防：段落短、不含并列「或」。 */
-  checkNew('(e1) placeholder 保持短示例（不用会长到被截断的并列写法）',
+     故 placeholder 必须短于 30 字符且不含并列「或」，且不得用实测 219.46px 的超宽串。 */
+  checkNew('(e1) placeholder 保持短示例（内容盒 219px 内可完整显示）',
     ENDPOINT_PLACEHOLDER.length <= 30 && !ENDPOINT_PLACEHOLDER.includes('或'));
-  checkNew('(e1) placeholder 不得用实测会超宽的写法（219.46px > 219px 内容盒）',
+  checkNew('(e1) placeholder 不得用实测超宽（219.46px > 219px）的完整路径写法',
     ENDPOINT_PLACEHOLDER !== 'https://demo.freshrss.org/api/greader.php'
-    && !ENDPOINT_PLACEHOLDER.includes('demo.freshrss.org'));
+    && !ENDPOINT_PLACEHOLDER.includes('/api/greader.php'));
 
-  /* (e2) 修前文案可复现：旧 desc/placeholder 完全不含 FreshRSS 路径 */
+  /* (e2) 修前文案可复现：TASK-057 交付的旧 desc 完全不含 FreshRSS 路径，
+     用户据此填域名必然 404 —— 这正是本任务要消掉的现象。 */
   const legacyDesc = '例如 https://reader.example.com（支持 Google Reader / Fever 协议）';
   const legacyPlaceholder = 'https://reader.example.com';
-  checkNew('(e2) 修前文案可复现：旧 desc 与 placeholder 都不含 /api/greader.php（这就是用户填错的直接原因）',
+  checkNew('(e2) 修前文案可复现：旧 desc 与 placeholder 都不含 /api/greader.php',
     !legacyDesc.includes('/api/greader.php') && !legacyPlaceholder.includes('/api/greader.php')
     && !legacyDesc.includes('FreshRSS'));
-  checkNew('(e2) 修前 placeholder 是 Miniflux 形式，用户照填 FreshRSS 必然 404',
-    legacyPlaceholder.includes('reader.example.com')
-    && !legacyPlaceholder.includes('freshrss'));
+  checkNew('(e2) TASK-057 的错误方向可复现：旧提示教用户去填 API 路径，而不是自动适配',
+    'ClientLogin → 404（该地址下没有 GReader API：请确认 Endpoint 是否需指向 API 路径）'
+      .includes('API 路径'));
 
-  /* (e3) 路径类失败（404/405/410）必须给出可操作指引 */
+  /* (e3) 路径类失败（404/405/410）的提示方向必须已更正：
+     现在 404 意味着「已把所有候选路径试过了」，提示应指向域名/后端，而不是让用户填后缀。 */
   const notFound = endpointHint('ClientLogin → 404');
-  checkNew('(e3) 纯域名导致的 404 → 提示指明 Endpoint 需指向 API 路径',
-    notFound.includes('404') && notFound.includes('API 路径'));
-  checkNew('(e3) 该提示给出 FreshRSS 的完整写法，用户能据此改正',
-    notFound.includes('/api/greader.php') && notFound.includes('FreshRSS'));
+  checkNew('(e3) 404 提示不再要求用户填 API 后缀（自动适配后该说法会反向误导）',
+    !notFound.includes('/api/greader.php') && !notFound.includes('需指向 API 路径'));
+  checkNew('(e3) 404 提示仍可操作：说明已自动尝试并指向域名/后端核对',
+    notFound.includes('404') && notFound.includes('域名') && notFound.includes('自动'));
+  /* 自动适配后，后端「找不到 API」的真实消息形如
+     「在该地址下找不到 GReader API（HTTP 404，已尝试：…）」。它必须能命中该分支，
+     否则用户看到的就是一条没有任何指引的裸错误（审查发现的缺口）。 */
+  const realNotFound = endpointHint('在该地址下找不到 GReader API（HTTP 404，已尝试：https://x、https://x/api/greader.php）。请确认域名是否正确');
+  checkNew('(e3) 后端真实的「找不到 API」消息能命中指引分支（修前该形状不含 404，指引永不触发）',
+    isMissingPathError('在该地址下找不到 GReader API（HTTP 404，已尝试：https://x）')
+    && realNotFound.includes('域名') && realNotFound.includes('自动'));
+  checkNew('(e3) 405/410 同属「路径不存在」，同样附加该指引',
+    isMissingPathError('GET /x → 405') && isMissingPathError('→ 410')
+    && endpointHint('→ 405').includes('域名') && endpointHint('→ 410').includes('域名'));
   checkNew('(e3) 修前行为可复现：旧提示只是原样回显状态码，不含任何指引',
     legacyDesc.length > 0 && !('ClientLogin → 404'.includes('API 路径')));
-  checkNew('(e3) 405/410 同属「路径不存在」，同样附加指引',
-    isMissingPathError('GET /x → 405') && isMissingPathError('→ 410')
-    && endpointHint('→ 405').includes('API 路径') && endpointHint('→ 410').includes('API 路径'));
 
-  /* (e4) 凭据类失败不得被误报为 Endpoint 问题（防误伤） */
+  /* (e4) 凭据类失败不得被误报为 Endpoint 问题（防误伤，TASK-057 的边界继续有效） */
   const unauthorized = endpointHint('ClientLogin → 401');
   checkNew('(e4) 401 凭据失败保持原样：不得误报为 Endpoint 填错',
-    unauthorized === 'ClientLogin → 401' && !unauthorized.includes('API 路径'));
+    unauthorized === 'ClientLogin → 401' && !unauthorized.includes('域名'));
   checkNew('(e4) 403 / BadAuthentication / 网络错误同样不附加 Endpoint 指引',
     endpointHint('ClientLogin → 403') === 'ClientLogin → 403'
     && endpointHint('ClientLogin 失败：BadAuthentication') === 'ClientLogin 失败：BadAuthentication'
     && endpointHint('error sending request') === 'error sending request');
 
-  /* (e5) 提示必须是纯函数：同输入同输出、不产生副作用（owner 边界：无自动探测） */
+  /* (e5) 提示必须是纯函数：同输入同输出、不产生副作用 */
   checkNew('(e5) 提示为纯文案变换：同输入两次结果一致，且不改动原文之外的内容',
     endpointHint('ClientLogin → 404') === endpointHint('ClientLogin → 404')
     && notFound.startsWith('ClientLogin → 404'));

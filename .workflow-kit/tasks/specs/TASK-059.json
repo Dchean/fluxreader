@@ -1,0 +1,135 @@
+{
+  "id": "TASK-059",
+  "title": "Endpoint 自动适配：只填域名即可连接（FreshRSS / Miniflux 双协议）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+  "ui_checks": [
+    "设置 → 同步 → 「后端 Endpoint」：说明文案改为**只填域名**（不再要求 /api/greader.php 这类后缀）",
+    "placeholder 给出纯域名示例（如 https://demo.freshrss.org）",
+    "填入纯域名后点「测试连接」：FreshRSS 与 Miniflux 均应连接成功（不再报 404）",
+    "已填完整 API 路径的旧用法**仍然可用**（向后兼容，不回退）",
+    "解析成功后设置页显示的仍是**用户填写的原始值**（不把内部解析结果回显成后缀，避免让用户以为必须填后缀）",
+    "连接确实失败时，提示须如实说明（凭据错报凭据错、地址不可达报不可达），不得把凭据问题说成填法问题",
+    "深色与浅色两套主题下文案完整可读、不截断、不溢出"
+  ],
+  "status": "draft",
+  "objective": "**需求（owner 明确纠正）**：不管后端是 FreshRSS 还是 Miniflux，用户**只需要填写域名**，**不需要**知道或填写 `/api/greader.php` 这类 API 后缀。此前作者误读了需求（把用户的故障描述当成『用户想知道该填什么后缀』），并据错误理解裁决了『不改探测逻辑、只改文案』，导致 TASK-057 交付的是『教用户填完整路径』——方向反了。本任务改为**由应用自动适配**。**实证依据**：(1) GReader——`POST {域名}/accounts/ClientLogin` → **404**（端点不存在）、`POST {域名}/api/greader.php/accounts/ClientLogin` → **401**（端点存在、凭据被拒），即 **404 与 401/403/400 可可靠区分『路径不存在』与『路径正确但凭据错』**；(2) Fever——FreshRSS 真实端点在 `{域名}/api/fever.php?api`（实测 200 `{\"api_version\":4,\"auth\":0}`），而现有客户端写死拼 `{base}/fever/?api`（实测 FreshRSS 上 **404**），即 **Fever + FreshRSS 当前根本连不上**，与本缺陷同源（路径形态假设写死）。本任务让两个协议都支持『只填域名』，并保留旧用法兼容。",
+  "non_goals": [
+    "**不改变成功路径的既有行为语义**：已能连通的配置（域名根 + Miniflux、或完整路径 + FreshRSS）必须继续连通，且**不得要求用户改回域名**",
+    "不把『凭据错误』伪装成『地址错误』（探测必须能区分二者并按真实原因报错）",
+    "不改 ClientLogin 的认证流程与解析（双格式 JSON/文本行为保持）",
+    "**不放松 Fever 的 `auth` 校验**（只放宽 `api_version` 的兼容范围，认证失败仍须报错）",
+    "不改同步协议语义（推送顺序、对账口径、入队条件一律不动）",
+    "不改 TASK-058 的同步失败可见性实现（SyncReport.errors 的前端消费）",
+    "不修 TASK-054 遗留的 P1/P4 弱断言测试（独立后续项）",
+    "引入新依赖",
+    "改动工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": ["REQ-002", "REQ-003"],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": ["TASK-058"],
+  "blocks": [],
+  "risk": {
+    "level": "high",
+    "decision_ids": ["DEC-endpoint-autodetect-20260918"]
+  },
+  "allowed_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+    ".workflow-kit/tasks/evidence/TASK-059-*",
+    "src/**",
+    "src-tauri/src/**",
+    "src-tauri/tests/**",
+    "tools/**",
+    "tsconfig.test.json"
+  ],
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools"
+  ],
+  "acceptance": [
+    "**纯域名必须能连（两个协议各一测）**：对**只填域名**的输入，FreshRSS 形态的 mock 与 Miniflux 形态的 mock **都要**连接成功；给出两者的实测通过证据",
+    "**旧用法不得回退**：已填完整 API 路径（`.../api/greader.php`）的输入仍须一次成功，且**不应**产生多余探测请求（首个候选即命中）",
+    "**必须区分『路径不存在』与『凭据错误』**：给出测试证明——(a) 路径全错时给出『未找到 API 端点』类错误；(b) 路径正确但凭据错时给出**凭据类**错误（不得报成地址错）。这是本任务最容易做错的地方",
+    "**探测有界且有序**：候选地址数量固定且有限（不得无限尝试）；任一候选返回『凭据被拒』(401/403/400) 时**立即停止**并报凭据错，不得继续尝试其余候选而掩盖真实原因",
+    "**解析结果要缓存**：解析成功后须持久化，避免每次同步阶段都重复探测（`build_client` 在 `feeds_phase`/`states_phase`/调度同步中被反复调用）。给出缓存生效的证据（如第二次同步不再发探测请求）",
+    "**用户输入原样保留**：设置页回显的仍应是用户填写的原始值（纯域名），不得把内部解析出的后缀回显给用户；用户修改地址后缓存须失效并重新解析",
+    "**Fever 路径形态修正**：Fever 客户端须同时支持 `{域名}/fever/`（Miniflux 形态）与 `{域名}/api/fever.php`（FreshRSS 形态）；给出 FreshRSS 形态的实测通过证据",
+    "**Fever 版本校验放宽（owner 追加授权）**：`fever.rs` 现写死 `if env.api_version != 3` 即拒绝；而 FreshRSS 的 Fever 实测返回 `{\"api_version\":4,\"auth\":0}`，故**仅修路径仍会报『不支持的 Fever API 版本 4』**。须放宽为**兼容 3 及以上**（信封结构与认证字段两者一致），并在报告中论证该放宽的依据与风险；`auth` 校验不得放松",
+    "**前端文案与提示同步更正**：Endpoint 卡片的 desc/placeholder 改为『只填域名』；TASK-057 遗留的『需填 /api/greader.php』类文案与 404 提示**必须一并更正**（否则界面在教用户做已经不需要的事）。给出修改前后对照",
+    "**UI 证据（ui_change=true）**：深色与浅色两套主题下的实机截图，覆盖 `ui_checks`；须为运行中应用的截图（非设计稿），并附交互报告",
+    "**前端断言**：为文案更正补可复跑断言，须**修前失败、修后通过**，给出修前失败证据",
+    "既有测试不得回退：`cargo test`（基线 **141 passed / 0 failed / 9 ignored**）与 `npm run test:frontend`（基线 **280/280**）均须通过；通过数可增不可减，ignored 不得增加",
+    "四门禁全绿：`cargo test`、`npm run lint`、`npm run build`、`npm run test:frontend`",
+    "不引入新依赖；`Cargo.toml`/`Cargo.lock` 与 `package.json` 零改动",
+    "**不改任何对外请求的语义**（除地址解析外）：认证、订阅、状态推送的请求内容与顺序不变",
+    "文本文件必须 LF 行尾；台账改动须在 begin 之前完成；行数以 `splitlines()` 口径报告（不得用 `Measure-Object -Line`）",
+    "**用户真实数据库不得写入**：`%APPDATA%\\com.fluxreader.app` 只读使用；端到端测试如需改数据，须先备份并在结束后逐字节还原（给出哈希一致的证据）"
+  ],
+  "gates": [
+    { "id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": true },
+    { "id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true },
+    { "id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true },
+    { "id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "2026-09-18 基线（TASK-058 之后）：`npm run lint` exit 0（0 warnings/0 errors）、`npm run build` exit 0、`npm run test:frontend` exit 0 且 **280/280**（既有 26 + 新增 254）、`cargo test` **141 passed / 0 failed / 9 ignored**。**本任务有意改变行为**：Endpoint 的解析由『原样当作 API 根』改为『按候选地址探测并自动适配』，并修正 Fever 的路径形态——这是**用户可见的连接行为变更**，已由 DEC-endpoint-autodetect-20260918 覆盖（owner 明确纠正需求并要求两个协议都做到只填域名）。**基线盲区须如实记录**：既有 Rust e2e 与前端回归**全部**使用『已知正确的 endpoint』（mock 的 `server.url()` 直接就是 API 根），**没有任何测试覆盖『用户填的是纯域名』这一输入形态**——这正是本缺陷此前逃过测试网、并且作者误读需求后又被 TASK-057 反向固化的原因。本任务必须补上该形态的测试。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md"
+    },
+    "decision_ids": ["DEC-endpoint-autodetect-20260918"],
+    "actions": [
+      {
+        "action": "add",
+        "target": "『只填域名 ⇒ 自动适配成功』的 Rust 测试（FreshRSS 形态与 Miniflux 形态各一，含 Fever）",
+        "reason": "该输入形态此前完全无覆盖（所有测试都用已知正确的 endpoint）。须有断言锁定新契约，防止回退成『必须填后缀』。",
+        "gate_ids": ["cargo_test"]
+      },
+      {
+        "action": "add",
+        "target": "『路径不存在 vs 凭据错误』可区分的测试（含『凭据错时不得继续尝试其余候选』）",
+        "reason": "这是自动探测最容易做错的地方：若把 401 也当成『路径不对』继续试，用户会在凭据填错时收到误导性的『找不到 API』，比原来的行为更糟。必须有测试守住。",
+        "gate_ids": ["cargo_test"]
+      },
+      {
+        "action": "add",
+        "target": "『旧用法（完整路径）仍一次成功且不产生多余探测』的测试",
+        "reason": "行为变更须证明向后兼容，否则会破坏已能正常工作的用户配置。",
+        "gate_ids": ["cargo_test"]
+      },
+      {
+        "action": "adapt",
+        "target": "`src-tauri/src/greader.rs` 与 `src-tauri/src/fever.rs` 的地址构造，以及 `sync/phases.rs` 的 test_connection 与 `sync/credentials.rs` 的 build_client",
+        "reason": "这几处共同决定『用户输入 → 实际请求地址』的映射，是本任务的核心改动点。",
+        "gate_ids": ["cargo_test"]
+      },
+      {
+        "action": "adapt",
+        "target": "`src/components/settings/SyncTab.tsx` 与 `endpointHint.ts` 中『需填 /api/greader.php』的文案与 404 提示",
+        "reason": "TASK-057 按其时（错误理解的）需求教用户填完整路径；本任务改为自动适配后该文案会**反向误导**用户，必须同步更正。既有引用旧文案的前端断言须相应适配而非删除。",
+        "gate_ids": ["frontend"]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部 Rust 测试（含 TASK-055 墓碑、TASK-056 零 folder 新库与失败可见性、A-1 防复活等回归网）",
+        "reason": "本任务只改地址解析，不得改动推送顺序、对账口径、入队条件与墓碑语义；这些测试正是那些语义的保护。",
+        "gate_ids": ["cargo_test"]
+      },
+      {
+        "action": "keep",
+        "target": "其余前端断言（含 TASK-058 的同步失败可见性与 TASK-052 分页口径）",
+        "reason": "本任务只改 Endpoint 文案与连接提示，不得波及已验收的失败可见性、分页与 store 行为。",
+        "gate_ids": ["frontend"]
+      }
+    ]
+  }
+}

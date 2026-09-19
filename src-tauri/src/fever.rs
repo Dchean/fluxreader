@@ -119,11 +119,41 @@ impl FeverClient {
         }
     }
 
+    /// API 入口（不含 query）。两种后端形态不同：
+    /// - Miniflux：`{域名}/fever/?api`（协议规定的 `/fever/` 路径）；
+    /// - FreshRSS：`{域名}/api/fever.php?api`（脚本路径，**不是** `/fever/` 形态）。
+    ///
+    /// 端点解析（TASK-059）会把 `base` 定成其中一种，这里据其形态拼出正确的入口。
+    fn api_entry(&self) -> String {
+        if self.base.ends_with(".php") {
+            format!("{}?api", self.base)
+        } else {
+            format!("{}/fever/?api", self.base)
+        }
+    }
+
     /// POST 请求：action 拼 query + api_key 拼 query，返回信封并校验 `auth == 1`。
     /// `action` 形如 `feeds` / `groups` / `items` / `unread_item_ids`（无值参数）。
     /// `extra` 是 `since_id=5900` / `with_ids=1,2` 这类带值参数。
     async fn call(&self, action: &str, extra: &[(&str, String)]) -> AppResult<FeverEnvelope> {
-        let mut url = format!("{}/fever/?api", self.base);
+        let (env, status) = self.call_probe(action, extra).await?;
+        match env {
+            Some(env) => Ok(env),
+            None => Err(AppError::network(format!("Fever {action} → {status}"))),
+        }
+    }
+
+    /// 同 `call`，但**把 HTTP 状态码交回调用方**——端点解析需要区分
+    /// 「404 路径不存在」与「路径正确但凭据错」，不能靠解析错误字符串来判断。
+    ///
+    /// 返回 `Ok((Some(env), status))` 表示成功；`Ok((None, status))` 表示
+    /// HTTP 层失败（调用方据 `status` 判定路径是否存在）；`Err` 表示传输层错误。
+    async fn call_probe(
+        &self,
+        action: &str,
+        extra: &[(&str, String)],
+    ) -> AppResult<(Option<FeverEnvelope>, u16)> {
+        let mut url = self.api_entry();
         url.push_str(&format!("&api_key={}", self.api_key));
         if !action.is_empty() {
             url.push_str(&format!("&{action}"));
@@ -132,14 +162,16 @@ impl FeverClient {
             url.push_str(&format!("&{k}={v}"));
         }
         let resp = self.http.post(&url).send().await?;
+        let status = resp.status().as_u16();
         if !resp.status().is_success() {
-            return Err(AppError::network(format!(
-                "Fever {action} → {}",
-                resp.status()
-            )));
+            return Ok((None, status));
         }
         let env: FeverEnvelope = resp.json().await?;
-        if env.api_version != 3 {
+        // TASK-059（owner 授权放宽）：原为 `!= 3` 即拒绝，但 FreshRSS 的 Fever 实测返回
+        // `{"api_version":4,"auth":0}`——它用 4 表示自身实现版本，而**信封结构与 v3 一致**
+        // （`api_version` + `auth` 两字段语义不变）。故改为**兼容 3 及以上**。
+        // **不放松 `auth` 校验**（见下）：认证失败仍必须报错。
+        if env.api_version < 3 {
             return Err(AppError::new(
                 "protocol",
                 format!("不支持的 Fever API 版本 {}", env.api_version),
@@ -148,12 +180,72 @@ impl FeverClient {
         if env.auth != 1 {
             return Err(AppError::new("auth", "Fever 认证失败（api_key 不正确）"));
         }
-        Ok(env)
+        Ok((Some(env), status))
     }
 
-    /// 连通测试：`/fever/?api` 认证明文。
+    /// 连通测试：认证明文。
+    ///
+    /// **端点自动适配（TASK-059）**：`new` 收到的 endpoint 可能是**纯域名**——
+    /// 依次尝试 `{域名}`（Miniflux 的 `/fever/` 形态）与 `{域名}/api/fever.php`
+    /// （FreshRSS 形态），以 **404 = 路径不存在**、**其它状态码 = 路径存在** 判定。
+    ///
+    /// **凭据错误必须立即停下**：非 404 的失败（含 `auth != 1`）都说明**路径已找对**，
+    /// 继续试下一个候选只会掩盖真实原因（把密码错报成「找不到 API」）。
+    ///
+    /// 需要「解析出来的地址」时用 [`FeverClient::resolve`]——同步侧就是这么做的。
     pub async fn verify(&self) -> AppResult<()> {
-        self.call("", &[]).await.map(|_| ())
+        self.resolve().await.map(|_| ())
+    }
+
+    /// **端点解析并采用结果**：探测候选地址，返回 **base 已确定为 API 根**的客户端。
+    ///
+    /// `verify` 只回答「能不能连」，而同步真正需要的是「该用哪个地址连」——探测成功后
+    /// 必须把地址**带出去**（只 `map(|_| ())` 会把解析结果丢掉，同步侧仍拿纯域名拼
+    /// `{域名}/fever/?api`，在 FreshRSS 上依旧 404）。
+    pub async fn resolve(&self) -> AppResult<Self> {
+        let candidates = crate::endpoint_resolve::fever_candidates(&self.base);
+        let mut last_status: Option<u16> = None;
+
+        for base in &candidates {
+            let candidate = self.at_resolved(base);
+            let (env, status) = candidate.call_probe("", &[]).await?;
+            if env.is_some() {
+                return Ok(candidate);
+            }
+            last_status = Some(status);
+            if !crate::endpoint_resolve::path_exists(status) {
+                continue; // 404：该候选下没有 Fever API，试下一个
+            }
+            // 路径存在但请求被拒（多为凭据问题）——立即停下如实报错
+            return Err(AppError::network(format!(
+                "Fever 认证被拒 → {status}（已定位 API：{base}）"
+            )));
+        }
+
+        Err(AppError::network(match last_status {
+            Some(_) => format!(
+                "在该地址下找不到 Fever API（HTTP 404，已尝试：{}）。请确认域名是否正确",
+                candidates.join("、")
+            ),
+            None => "没有可用的 API 地址".to_string(),
+        }))
+    }
+
+    /// 生成 base 已被替换为**已解析** API 根的客户端（不再探测）。
+    ///
+    /// 供同步侧消费缓存：同一个 endpoint 被反复 `build_client` 时直接命中，
+    /// 不重复发探测请求。
+    pub fn at_resolved(&self, base: &str) -> Self {
+        Self {
+            base: base.trim().trim_end_matches('/').to_string(),
+            api_key: self.api_key.clone(),
+            http: self.http.clone(),
+        }
+    }
+
+    /// 实际使用的 API 根（TASK-059 端点自动适配的结果）。
+    pub fn resolved_base(&self) -> &str {
+        &self.base
     }
 
     /// 拉分组（分类）→ 统一 `TagRef`（folder 类型，label = group title）。
@@ -295,7 +387,11 @@ impl FeverClient {
 
     async fn mark_items(&self, ids: &[i64], mark: &str) -> AppResult<()> {
         for id in ids {
-            let mut url = format!("{}/fever/?api&mark=item&as={mark}&id={id}", self.base);
+            // 必须走 `api_entry()`：FreshRSS 的端点是 `/api/fever.php`，
+            // 若在此写死 `{base}/fever/?api` 会拼成 `…/api/fever.php/fever/?api` → 404，
+            // 于是「Fever + FreshRSS」拉得到、推不出去（TASK-059 审查发现）。
+            let mut url = self.api_entry();
+            url.push_str(&format!("&mark=item&as={mark}&id={id}"));
             url.push_str(&format!("&api_key={}", self.api_key));
             let resp = self.http.post(&url).send().await?;
             if !resp.status().is_success() {

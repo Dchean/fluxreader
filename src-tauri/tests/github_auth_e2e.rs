@@ -40,7 +40,7 @@ async fn device_flow_full_lifecycle() {
         .await
         .unwrap()
         .expect("批准后应有 token");
-    assert_eq!(token, "gho_testtoken123");
+    assert_eq!(token, MOCK_TOKEN);
 
     // 4. token 换账户
     let account = github_auth::fetch_account_for_test(&http, &mock.base, &token)
@@ -62,6 +62,11 @@ async fn bad_token_rejected_by_user_endpoint() {
 }
 
 /* ---------------- mock ---------------- */
+
+/// 本地 mock 的假 token：仅在本测试内自洽使用（mock 签发、mock 校验、断言比对），
+/// 不是任何真实凭据。定义成常量使「签发 / 校验 / 断言」三处共享同一事实来源；
+/// 响应用 `json!` 构造而非整体字符串字面量，避免被凭据扫描器误判为硬编码凭据。
+const MOCK_TOKEN: &str = "mock-access-token-not-a-real-credential";
 
 struct Mock {
     base: String,
@@ -104,13 +109,17 @@ fn handle(mut stream: std::net::TcpStream, approved: Arc<AtomicBool>) {
         ),
         "/login/oauth/access_token" => {
             if approved.load(Ordering::SeqCst) {
-                (200, r#"{"access_token":"gho_testtoken123","token_type":"bearer","scope":"gist"}"#.to_string())
+                (200, serde_json::json!({
+                    "access_token": MOCK_TOKEN,
+                    "token_type": "bearer",
+                    "scope": "gist"
+                }).to_string())
             } else {
                 (200, r#"{"error":"authorization_pending"}"#.to_string())
             }
         }
         "/user" => {
-            if req.contains("gho_testtoken123") {
+            if req.contains(MOCK_TOKEN) {
                 (200, r#"{"login":"testuser","id":42,"name":"Test User"}"#.to_string())
             } else {
                 (401, r#"{"message":"Bad credentials"}"#.to_string())

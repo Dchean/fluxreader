@@ -76,6 +76,24 @@ pub struct MockGReader {
     pub folders: Mutex<Vec<String>>,
     pub next_feed_id: Mutex<i64>,
     pub next_entry_id: Mutex<i64>,
+    /// TASK-059：GReader API 的前缀（"" = Miniflux 形态「在站点根」，
+    /// "/api/greader.php" = FreshRSS 形态）。**非此前缀的请求一律 404**，
+    /// 用于真实模拟「两种后端布局不同」，从而验证自动适配。
+    pub greader_api_prefix: Mutex<String>,
+    /// TASK-059：置位后 ClientLogin 返回 401（模拟凭据被拒，用于验证
+    /// 「凭据错误不得被误报成找不到 API」）。
+    pub reject_login: std::sync::atomic::AtomicBool,
+    /// TASK-059：Fever 端点路径（"" = 走 `{base}/fever/?api` 的 Miniflux 形态；
+    /// "/api/fever.php" = FreshRSS 形态）。非该路径的 Fever 请求返回 404。
+    pub fever_endpoint: Mutex<String>,
+    /// TASK-059：Fever 返回的 api_version（FreshRSS 实测为 4）。
+    pub fever_api_version: Mutex<i64>,
+    /// TASK-059：置位后 Fever 返回 auth=0（验证 auth 校验未因放宽版本而放松）。
+    pub fever_reject_auth: std::sync::atomic::AtomicBool,
+    /// TASK-059：收到的全部请求（`"{METHOD} {path}"`，含被前缀规则拒绝的）。
+    /// 用于证明「探测有界」与「解析结果已缓存、后续同步不再探测」——
+    /// 只看状态码无法区分「试了 1 次」与「试了 2 次」。
+    pub requests: Mutex<Vec<String>>,
 }
 
 impl MockGReader {
@@ -116,6 +134,12 @@ impl MockGReader {
             folders: Mutex::new(vec!["Default".into(), "Remote Cat".into()]),
             next_feed_id: Mutex::new(100),
             next_entry_id: Mutex::new(500),
+            greader_api_prefix: Mutex::new(String::new()),
+            reject_login: std::sync::atomic::AtomicBool::new(false),
+            fever_endpoint: Mutex::new(String::new()),
+            fever_api_version: Mutex::new(3),
+            fever_reject_auth: std::sync::atomic::AtomicBool::new(false),
+            requests: Mutex::new(Vec::new()),
         });
 
         let srv = server.clone();
@@ -136,6 +160,56 @@ impl MockGReader {
 
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /* ---------- TASK-059：端点布局与故障注入 ---------- */
+
+    /// 设定 GReader API 前缀：`""` = Miniflux 形态（站点根）；
+    /// `"/api/greader.php"` = FreshRSS 形态（子路径）。
+    pub fn set_greader_api_prefix(&self, prefix: &str) {
+        *self.greader_api_prefix.lock().unwrap() = prefix.to_string();
+    }
+
+    /// 置位后 ClientLogin 一律 401（模拟凭据被拒）。
+    pub fn set_reject_login(&self, reject: bool) {
+        self.reject_login
+            .store(reject, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 设定 Fever 端点路径：`""` = `/fever/?api` 形态；`"/api/fever.php"` = FreshRSS 形态。
+    pub fn set_fever_endpoint(&self, endpoint: &str) {
+        *self.fever_endpoint.lock().unwrap() = endpoint.to_string();
+    }
+
+    /// 设定 Fever 返回的 api_version（FreshRSS 实测为 4）。
+    pub fn set_fever_api_version(&self, v: i64) {
+        *self.fever_api_version.lock().unwrap() = v;
+    }
+
+    /// 置位后 Fever 返回 auth=0。
+    pub fn set_fever_reject_auth(&self, reject: bool) {
+        self.fever_reject_auth
+            .store(reject, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 收到的请求记录（`"{METHOD} {path}"`）。
+    pub fn request_log(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// 清空请求记录（用于「只看这一段有没有再探测」）。
+    pub fn clear_request_log(&self) {
+        self.requests.lock().unwrap().clear();
+    }
+
+    /// 命中 ClientLogin 的请求次数（探测次数的直接证据）。
+    pub fn login_request_count(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.ends_with("/accounts/ClientLogin"))
+            .count()
     }
 
     /// 旧便捷入口（status:&str 语义：unread/read）。
@@ -268,8 +342,70 @@ async fn handle_conn(
     let path_query = parts.next().unwrap_or("");
     let path = path_query.split('?').next().unwrap_or("");
 
+    // TASK-059：先记录请求，再做前缀判定——被拒绝的探测请求也要看得见，
+    // 否则「探测有界」「不再重复探测」这两条断言无从取证。
+    srv.requests.lock().unwrap().push(format!("{method} {path}"));
+
+    // TASK-059：模拟「两种后端把 API 放在不同路径」。
+    // 配置了前缀时，非该前缀下的 GReader/Fever 端点一律 404——
+    // 这正是真实 FreshRSS 与 Miniflux 的差异，也是自动适配要解决的问题。
+    if let Some(deny) = path_outside_configured_prefix(&srv, path) {
+        return write_json(&mut stream, 404, &deny).await;
+    }
+
     let (status, json) = route(&srv, method, path, path_query, &body, &head);
     write_json(&mut stream, status, &json).await
+}
+
+/// 若该路径落在已配置前缀之外，返回 Some(404 响应体)；否则 None（继续正常路由）。
+///
+/// 只拦截「受布局影响」的端点（ClientLogin / reader API / Fever），
+/// 避免影响 mock 自身的其它路由。
+fn path_outside_configured_prefix(srv: &MockGReader, path: &str) -> Option<String> {
+    const GREADER_SUFFIXES: [&str; 9] = [
+        "/accounts/ClientLogin",
+        "/reader/api/0/subscription/list",
+        "/reader/api/0/tag/list",
+        "/reader/api/0/stream/items/ids",
+        "/reader/api/0/stream/items/contents",
+        "/reader/api/0/edit-tag",
+        "/reader/api/0/subscription/edit",
+        "/reader/api/0/subscription/quickadd",
+        "/reader/api/0/mark-all-as-read",
+    ];
+
+    // GReader 家族：请求路径必须**恰好**是「已配置前缀 + 端点」。
+    // 例如 prefix="" ⇒ 只认 /accounts/ClientLogin（根就是 API）；
+    //     prefix="/api/greader.php" ⇒ 只认 /api/greader.php/accounts/ClientLogin。
+    // 用「恰好相等」而不是 starts_with：prefix="" 时后者会让任何路径都通过，
+    // 探测测试就失去了意义。
+    if let Some(suffix) = GREADER_SUFFIXES.iter().find(|s| path.ends_with(**s)) {
+        let prefix = srv.greader_api_prefix.lock().unwrap().clone();
+        if path != format!("{prefix}{suffix}") {
+            return Some(
+                r#"{"error_message":"404 not found (path outside configured API prefix)"}"#.into(),
+            );
+        }
+    }
+
+    // Fever 家族：Miniflux 形态是 `/fever/`（其后再无路径段），
+    // FreshRSS 形态是 `/api/fever.php`。未配置（""）时按 Miniflux 形态处理。
+    //
+    // 用**恰好相等**而非 starts_with：`starts_with` 会放过
+    // `…/api/fever.php/fever/?api` 这种把两种形态叠起来的拼接错误
+    // ——而那正是「写死 /fever/、忽略解析结果」会产生的 URL，mock 必须能抓到。
+    if path.contains("fever") {
+        let ep = srv.fever_endpoint.lock().unwrap().clone();
+        let expected = if ep.is_empty() {
+            "/fever/".to_string()
+        } else {
+            ep.clone()
+        };
+        if path != expected {
+            return Some(r#"{"error_message":"404 not found (fever endpoint mismatch)"}"#.into());
+        }
+    }
+    None
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -355,13 +491,58 @@ fn route(
     _head: &str,
 ) -> (u16, String) {
     match (method, path) {
-        // ClientLogin：任何 Email/Passwd 都返回固定 token
-        ("POST", "/accounts/ClientLogin") => (
-            200,
-            r#"{"SID":"mock/abc","LSID":"mock/abc","Auth":"mock/abc"}"#.into(),
-        ),
+        // ClientLogin：默认任何 Email/Passwd 都返回固定 token；
+        // TASK-059 故障注入下返回 401（模拟凭据被拒）
+        ("POST", p) if p.ends_with("/accounts/ClientLogin") => {
+            if srv.reject_login.load(std::sync::atomic::Ordering::SeqCst) {
+                (401, r#"{"error_message":"Unauthorized"}"#.into())
+            } else {
+                (
+                    200,
+                    r#"{"SID":"mock/abc","LSID":"mock/abc","Auth":"mock/abc"}"#.into(),
+                )
+            }
+        }
+        // TASK-059：Fever 信封（Miniflux 的 /fever/?api 与 FreshRSS 的 /api/fever.php 共用）。
+        // 带一份最小分组/订阅数据，使「解析出的端点能被真正使用」可验证——
+        // 只回信封的话，客户端只能证明连接成功，证明不了后续调用打对了地址。
+        ("POST", p) if p.contains("fever") => {
+            let v = *srv.fever_api_version.lock().unwrap();
+            let auth = if srv.fever_reject_auth.load(std::sync::atomic::Ordering::SeqCst) {
+                0
+            } else {
+                1
+            };
+            let folders = srv.folders.lock().unwrap().clone();
+            let groups: Vec<serde_json::Value> = folders
+                .iter()
+                .enumerate()
+                .map(|(i, title)| serde_json::json!({ "id": (i as i64) + 1, "title": title }))
+                .collect();
+            let feeds: Vec<serde_json::Value> = srv
+                .subscriptions
+                .lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                // Fever 的 feed id 是数字（mock 的 GReader id 形如 "feed/10"，不能直接复用）
+                .map(|(i, s)| {
+                    serde_json::json!({ "id": (i as i64) + 1, "title": s.title, "url": s.url })
+                })
+                .collect();
+            (
+                200,
+                serde_json::json!({
+                    "api_version": v,
+                    "auth": auth,
+                    "groups": groups,
+                    "feeds": feeds,
+                })
+                .to_string(),
+            )
+        }
         // 订阅列表
-        ("GET", "/reader/api/0/subscription/list") => {
+        ("GET", p) if p.ends_with("/reader/api/0/subscription/list") => {
             let subs = srv.subscriptions.lock().unwrap();
             let arr: Vec<serde_json::Value> = subs
                 .iter()
@@ -378,7 +559,7 @@ fn route(
             (200, serde_json::json!({ "subscriptions": arr }).to_string())
         }
         // 标签列表（分类 + starred）
-        ("GET", "/reader/api/0/tag/list") => {
+        ("GET", p) if p.ends_with("/reader/api/0/tag/list") => {
             let folders = srv.folders.lock().unwrap();
             let mut tags: Vec<serde_json::Value> =
                 vec![serde_json::json!({"id": "user/-/state/com.google/starred"})];
@@ -388,7 +569,7 @@ fn route(
             (200, serde_json::json!({ "tags": tags }).to_string())
         }
         // 条目 id 列表（reading-list 或 feed/数字）
-        ("GET", "/reader/api/0/stream/items/ids") => {
+        ("GET", p) if p.ends_with("/reader/api/0/stream/items/ids") => {
             if srv
                 .fail_stream_ids
                 .load(std::sync::atomic::Ordering::SeqCst)
@@ -438,7 +619,7 @@ fn route(
             )
         }
         // 条目正文（POST，i 重复参数）
-        ("POST", "/reader/api/0/stream/items/contents") => {
+        ("POST", p) if p.ends_with("/reader/api/0/stream/items/contents") => {
             let form = parse_form(body);
             // i 参数可能来自 body 或 query
             let mut all_ids: Vec<i64> = Vec::new();
@@ -481,7 +662,7 @@ fn route(
             (200, serde_json::json!({ "items": items }).to_string())
         }
         // edit-tag：标读/收藏（a=加 tag, r=删 tag）
-        ("POST", "/reader/api/0/edit-tag") => {
+        ("POST", p) if p.ends_with("/reader/api/0/edit-tag") => {
             let form = parse_form(body);
             let ids: Vec<i64> = form
                 .get("i")
@@ -524,7 +705,7 @@ fn route(
             (200, "OK".into())
         }
         // quickadd：订阅（幂等：已存在返回既有 id）
-        ("POST", "/reader/api/0/subscription/quickadd") => {
+        ("POST", p) if p.ends_with("/reader/api/0/subscription/quickadd") => {
             let form = parse_form(body);
             let url = form
                 .get("quickadd")
@@ -559,7 +740,7 @@ fn route(
             }
         }
         // subscription/edit：订阅/退订/编辑
-        ("POST", "/reader/api/0/subscription/edit") => {
+        ("POST", p) if p.ends_with("/reader/api/0/subscription/edit") => {
             let form = parse_form(body);
             let ac = form
                 .get("ac")

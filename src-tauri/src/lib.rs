@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config_sync;
 pub mod credentials;
 pub mod db;
+pub mod endpoint_resolve;
 pub mod error;
 pub mod extraction;
 pub mod fever;

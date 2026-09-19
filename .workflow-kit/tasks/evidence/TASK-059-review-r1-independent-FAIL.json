@@ -1,0 +1,104 @@
+{
+  "task_id": "TASK-059",
+  "candidate_digest": "63ca6a97c932744d1df511d07656c0c6ffb2a083449ccc2b8644caf8150d23d9",
+  "verification_run": "RUN-9a12519e47ed45e7abc860bba84d047f",
+  "verdict": "FAIL",
+  "summary": "独立审查（未参与实现；不采信作者自述，结论全部来自我本人的源码核对、门禁复跑、截图目视与只读数据库核对）。绑定核对：按审查包 candidate_files 重算 15 个关键文件 sha256，15/15 与工作区逐字节一致（含 endpoint_resolve.rs=ee491489…、fever.rs=854b816a…、greader.rs=29f3a0be…、endpointHint.ts=01bddaee…、mock_greader.rs=5c76dae4…），且 git status 显示的改动集恰为任务所述 19 个文件（7 后端源码 + 3 Rust 测试 + 1 前端模块 + 1 前端回归 + 7 tools），无越界改动，故 RUN-9a12519e… 的四门禁证据对当前候选有效。我独立复跑的门禁（本人实测，非引用）：cargo test → 160 passed / 0 failed / 9 ignored（基线 141/0/9，+19 = endpoint_autodetect_e2e 13 条 + endpoint_resolve 单测 6 条，ignored 未增）；npm run test:frontend → 282/282（基线 280/280，+2）；npm run lint → exit 0，Found 0 warnings and 0 errors；npm run build → exit 0（✓ built in 124ms）。核心目标经我逐条核对确实成立：纯域名对 FreshRSS（/api/greader.php）与 Miniflux（站点根）两种布局都能自动适配（新 e2e 的 bare_domain_* 两条我本地跑通），旧完整路径首个候选即命中（probing_is_bounded_* 断言恰好 1 次），404 与 401/403/400 可区分且凭据错立即停止（missing_path_vs_bad_credentials_are_distinguished 断言 401 时不得出现「找不到 GReader API」——我确认若回退成「401 继续探测」该断言必失败），缓存按「协议+用户原始输入」为键自动失效且次轮不再探测（second_sync_reuses_cached_endpoint_without_probing 断言首轮恰好 2 次、次轮恰好 1 次 ClientLogin 且打在解析出的端点——确实是真断言），Fever 版本放宽为 >=3 但 auth!=1 仍拒绝，回显仍是用户原始输入（sync_status 只读 greader_endpoint，endpoint_resolved 不进入任何 IPC 返回值），用户真实库已按事故报告逐字节还原（我以只读方式核对 %APPDATA%\\com.fluxreader.app\\fluxreader.db 现为 sha256=419b118e050a08c204a50603f2d5188d8132fa94d75ea417392fe7e984293550、90112 字节，-wal/-shm 均不存在，与报告及 ui-e2e-result.json 的 0./Z. 两节完全一致）。判 FAIL 的原因是发现一处真实功能缺陷与若干证据/保真度问题（详见 findings），其中首条落在本任务 acceptance「Fever 客户端须同时支持 {域名}/fever/ 与 {域名}/api/fever.php」的写路径上：Fever+FreshRSS 现已能连、能拉，但「已读/收藏/未读」状态推送仍走写死的 /fever/ 形态，在该形态下必然 404。",
+  "findings": [
+    "【功能缺陷·需修·中高】location=src-tauri/src/fever.rs:388-392（mark_items）。trigger=Fever 协议 + FreshRSS 形态（解析后 base 形如 {域名}/api/fever.php）+ 任意本地已读/未读/收藏变更触发的状态推送（src-tauri/src/sync/push.rs:97 与 :117 经 Backend::mark_read/mark_starred 落到 FeverClient::mark_items）。impact=mark_items 仍写死 `format!(\"{}/fever/?api&mark=item&as={mark}&id={id}\", self.base)`，未走本任务新增的 api_entry()，于是实际请求 URL 被拼成 `{域名}/api/fever.php/fever/?api&mark=item&as=read&id=N`（正确形态应为 `{域名}/api/fever.php?api&mark=item…`），真实 FreshRSS 上必然 404，exec_push 把它记入 SyncReport.errors（「状态推送失败: Fever mark read N → 404」）且队列保留永久重试——即本任务新解锁的 Fever+FreshRSS 组合「读得到、写不回」，读/收藏状态永远不收敛。这与本任务根因同类（『路径形态假设写死』），属同一文件内未一并适配的遗漏；acceptance 第 7 条『Fever 客户端须同时支持两种形态』在写路径上未达成，而报告 §3/§6 声称已完成且未披露该限制。suggestion=mark_items 改为使用 self.api_entry()（与 call_probe 保持一致），并补一条 Fever + FreshRSS 形态的 mark 断言（读/未读/收藏各一）。",
+    "【测试保真度·需修·低中】location=src-tauri/tests/mock_greader.rs:391-403。trigger=Fever 路径判定用 `if !path.starts_with(&expected)`。impact=该前缀判定过宽：上一条 finding 拼出的畸形路径 `/api/fever.php/fever/?api…` 恰好以 `/api/fever.php` 开头，会被 mock 当作合法 Fever 请求并返回 200 信封，因此即使日后补写 Rust 测试也抓不到该缺陷（GReader 分支已被作者改为『恰好等于 前缀+端点』并注明原因，Fever 分支漏改，属同类不一致）。suggestion=把 Fever 分支改成与 GReader 同样的精确匹配（剥离 query 后 path == 端点），否则 mock 无法为 Fever 的写路径形态背书。",
+    "【缓存自愈缺失·需修·低】location=src-tauri/src/sync/credentials.rs:111-181 与 src-tauri/src/endpoint_resolve.rs:110-133。trigger=缓存命中后认证/路径失败（例如后端改了布局、或缓存来自更早的验证、或解析出的子路径被撤下）。impact=命中缓存即走 login_resolved / at_resolved，不再有探测回退，也没有清缓存动作：build_client 直接返回 None，同步统一报 notConnected（『未配置同步后端』），用户永远看不到『缓存陈旧』这一真实原因，必须手动重新『保存并同步』才会重写缓存。acceptance 只要求『改地址/换协议即失效』（已满足），故不构成验收失败，但属可维护性/失败路径的真实缺口。suggestion=缓存命中但认证失败时清空 endpoint_resolved 并回退一次完整 resolve（或至少把该原因写入 SyncReport.errors 而非只 log::warn）。",
+    "【报告准确性·低】location=.workflow-kit/tasks/evidence/TASK-059-report.md §8 末条与 §6 边界表。trigger=报告称缓存键 endpoint_resolved『是普通设置项，会随既有设置同步走』。impact=与源码不符：src-tauri/src/config_sync.rs 是白名单同步（SyncPayload 只含 folders/feeds/app_settings/connection_config，connection_config 仅 sync_protocol+greader_endpoint+greader_username），endpoint_resolved 既不上传也不下载。因此『未专门验证其跨设备行为』这条限制说明建立在错误前提上（不构成功能缺陷，但会误导后续维护者以为缓存会跨设备传播）。suggestion=更正为『endpoint_resolved 为本地缓存，不参与配置同步』。",
+    "【证据位置·低】location=.workflow-kit/tasks/evidence/ 与审查包声明的 ui_evidence_directory=.workflow-kit/tasks/evidence/TASK-059-ui/RUN-9a12519e47ed45e7abc860bba84d047f/。trigger=按包内声明路径取 UI 证据。impact=该目录不存在（ls 报 No such file or directory），三张截图与 ui-e2e-result.json 实际平铺在 evidence/ 根下（TASK-059-ui-*.png 等）。截图本身真实有效（三张 sha256 互异、mtime 2026-09-19 02:36 晚于代码改动），不影响证据效力，但声明目录落空会让自动核验/后续复用找不到文件。suggestion=把 UI 证据落到声明目录，或把包内 ui_evidence_directory 更正为实际位置。",
+    "【提示可达性·低】location=src/components/settings/endpointHint.ts:46-65。trigger=后端新的『找不到 API』文案（greader.rs:282『在该地址下找不到 GReader API（已尝试：…）』、fever.rs:225『在该地址下找不到 Fever API（已尝试：…）』）不含 404/405/410 任何状态码。impact=isMissingPathError 不命中，TASK-059 新写的『已自动尝试该域名下的常见 API 路径：请确认域名是否正确，以及后端是否已启用…』提示在其最主要场景（两个候选都 404）不会出现；前端新增断言只喂了合成的 'ClientLogin → 404' 字符串，代表性不足（不违反契约——该文案本身已指向域名，故仅低）。suggestion=让『找不到 API』类文案携带可识别标记（或让 endpointHint 同时匹配该文案），并把断言输入换成后端真实产出的文案。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "逐条对照 acceptance 与 ui_checks：已满足并有本人复跑/目视证据的有——纯域名对 FreshRSS 与 Miniflux 两种布局均自动适配（endpoint_autodetect_e2e 的 bare_domain_resolves_freshrss_layout / bare_domain_resolves_miniflux_layout，我本地跑通；前者解析到 /api/greader.php，后者保持站点根）；旧完整路径首个候选即命中且无多余探测（probing_is_bounded_and_full_path_does_not_extra_probe 断言纯域名 2 次、完整路径 1 次）；404 与 401/403/400 可区分且凭据错立即停止（missing_path_vs_bad_credentials_are_distinguished 断言 401 时不得出现『找不到 GReader API』；我核对该断言在『把 401 当路径缺失继续探测』的实现下必失败，属有效锁定）；探测有界（候选表为常量、每协议最多 2 个）；解析结果缓存且按输入/协议自动失效、次轮不再探测（cache_hits_on_same_input_and_invalidates_on_change、second_sync_reuses_cached_endpoint_without_probing）；回显为用户原始输入（SyncTab.tsx:40 取 sync_status.endpoint，sync_status 只读 greader_endpoint；endpoint_resolved 未出现在任何 IPC 返回值）；Fever 版本放宽为 >=3 且 auth!=1 仍拒绝（fever_accepts_api_version_4 / fever_rejects_api_version_below_3 / fever_still_rejects_bad_auth）；前端文案已改为『只填域名』且旧 404 指引被移除（endpointHint.ts 与 (e1)–(e5) 断言重写，我复跑 282/282）。未满足的部分：acceptance『Fever 客户端须同时支持 {域名}/fever/ 与 {域名}/api/fever.php』只覆盖了读路径（resolve/call_probe 走 api_entry()），写路径 mark_items 仍写死 /fever/ 形态（见 finding 1），因此该验收项在 Fever+FreshRSS 下未达成，报告亦未披露。",
+      "evidence_files": [
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/src/greader.rs",
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/sync/credentials.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src/components/settings/endpointHint.ts",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-059-report.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "我本人复跑（未引用作者日志）：cargo test 160 passed / 0 failed / 9 ignored（基线 141/0/9；+19 = 13 条 endpoint_autodetect_e2e + 6 条 endpoint_resolve 单测；ignored 未增，仍为需真实服务器的 live 测试）；npm run test:frontend 282/282（基线 280/280；+2 = TASK-059 新增/改写后的 Endpoint 文案断言组，既有 26 条『未改动一行』由套件自身输出佐证，我另行核对 diff 确认 (e1)–(e5) 是改写而非删除，并保留了『401/403 一律原样透出』的防误伤边界）；npm run lint exit 0（0 warnings / 0 errors）、npm run build exit 0。目标缺陷可被测试发现：纯域名输入形态此前无任何覆盖（所有既有 e2e 都用 mock 的 server.url() 作为 API 根），本任务补上的 bare_domain_* 正是能发现该缺陷的断言——我确认在旧实现（base=用户输入、无候选表）下 fresh RSS 布局那条会 404 失败。既有保护未见弱化：TASK-055 墓碑/2xx 未生效、TASK-056 零 folder 与失败可见性、A-1 防复活、分页与 store 断言全部仍在且通过（sync_gap_repro_e2e 18/18、sync_phases_e2e 5/5 等我本地逐条看到 ok）。唯一保留意见是 mock 的 Fever 前缀判定过宽（finding 2），它不会误伤既有断言，但会掩盖写路径的形态缺陷。",
+      "evidence_files": [
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "src-tauri/tests/sync_e2e.rs",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+        ".workflow-kit/tasks/runs/RUN-9a12519e47ed45e7abc860bba84d047f.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "FAIL",
+      "analysis": "已核对的异常与边界：①两候选都不存在 → greader login 报『在该地址下找不到 GReader API（已尝试：a、b）』（e2e 覆盖）；②路径正确但凭据被拒（401）→ 立即 Err 且消息含状态码与已定位 API，不继续试下一候选（e2e 断言 + UI e2e S4 实机 toast 一致）；③Fever 非 404 的 HTTP 失败 → resolve 立即报『Fever 认证被拒 → status（已定位 API：base）』；④Fever auth!=1 与 api_version<3 → 分别报认证失败/版本不支持（e2e 覆盖）；⑤输入归一（尾斜杠/空白）与换协议/改地址导致缓存失效（单测覆盖）；⑥缓存命中路径不再探测（e2e 覆盖）。发现的问题：Fever+FreshRSS 的写路径失败（finding 1，read/star 推送 404 且永久重试、状态不收敛）；缓存陈旧时无自愈、只表现为 notConnected（finding 3）。另记录两项我核对过但不判为缺陷的残余风险：其一，判定规则是『只有 404 = 路径不存在』，因此若域名根对 POST 返回非 404（例如 CDN/WAF 对未知 POST 回 403，或站点对任意路径回 200 但响应体非 ClientLogin 格式），首个候选会被判为『路径存在』而立即停止并报 `ClientLogin → 403`／`ClientLogin 响应既非 JSON 也未包含 Auth= 行`，不会再去试 /api/greader.php——这是 owner 在 acceptance 中明确要求的行为（『任一候选返回凭据被拒立即停止』），属有意取舍，但这类用户会收到『已定位 API：根』的断言式措辞，措辞可再保守；其二，greader login_at 在 200 但响应体无法解析时返回 Err 并终止探测，同样是 404-only 判据的延伸。",
+      "evidence_files": [
+        "src-tauri/src/greader.rs",
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/src/sync/credentials.rs",
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-059-ui-e2e-result.json"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "结构上把『用户输入 → 实际 API 根』的映射收敛到一个新模块 src-tauri/src/endpoint_resolve.rs（候选表 + path_exists + 缓存读写），greader/fever 各自只保留协议差异，sync/credentials.rs 的 build_client 成为唯一解析入口，职责与依赖方向清晰；候选表是常量、每协议 ≤2 个，无隐藏重试；缓存键同时含 protocol 与归一化后的用户输入，用『来源输入』代替额外失效钩子，避免了『改了地址仍按旧地址同步』这类难查状态——这个取舍是合理的。命名与注释质量高（模块文档写明实测依据与不可回退的方向，api_entry 的 .php 形态判定有说明）。新增维护负担有限：一个 197 行新模块 + 一个 13 条测试的新 e2e 文件 + mock 的布局/故障注入能力（这些能力是『探测有界』『缓存生效』可取证的前提，属必要投入）。保留意见（已在 findings 记录，不重复计为 FAIL）：同一文件内 mark_items 绕过 api_entry 造成同类抽象不一致；缓存命中失败时缺自愈路径；tools/ 下 7 个 t059_* 一次性驱动脚本留在仓库（其中 t059_ui_e2e.mjs 会写用户真实库，虽有强制备份/还原，仍是长期维护面，建议在任务收尾时决定是否归档或加更醒目的警示）。",
+      "evidence_files": [
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/src/sync/credentials.rs",
+        "src-tauri/src/fever.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "tools/t059_ui_e2e.mjs",
+        "tools/t059_wal_recover.py"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务的 acceptance 没有任何性能目标（brief 里的 measure 工作负载指向 REQ-001/003 的正文加载与布局切换，与地址解析无关），改动也不触碰查询、数据量或渲染路径，故不做基准也不伪称实测提升。静态范围仅限『解析期网络请求次数』：未命中缓存时每协议最多 2 个候选、命中 404 才继续，任一非 404 立即停止（greader_candidates / fever_candidates / path_exists，常量表、无循环重试）；命中缓存后候选收敛为唯一地址，只保留一次必需的认证请求——这一条有直接证据：second_sync_reuses_cached_endpoint_without_probing 断言首轮恰好 2 次 ClientLogin、次轮恰好 1 次且打在解析出的端点，UI e2e 请求序列（TASK-059-ui-e2e-result.json 的 R 节，27 条）同样显示首轮探测后各同步阶段不再出现 404 探测。故运行性能不受影响、无需测量。",
+      "evidence_files": [
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-059-ui-e2e-result.json"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    "checked_states": [
+      "设置 → 同步 → 「后端 Endpoint」：说明文案改为**只填域名**（不再要求 /api/greader.php 这类后缀）",
+      "placeholder 给出纯域名示例（如 https://demo.freshrss.org）",
+      "填入纯域名后点「测试连接」：FreshRSS 与 Miniflux 均应连接成功（不再报 404）",
+      "已填完整 API 路径的旧用法**仍然可用**（向后兼容，不回退）",
+      "解析成功后设置页显示的仍是**用户填写的原始值**（不把内部解析结果回显成后缀，避免让用户以为必须填后缀）",
+      "连接确实失败时，提示须如实说明（凭据错报凭据错、地址不可达报不可达），不得把凭据问题说成填法问题",
+      "深色与浅色两套主题下文案完整可读、不截断、不溢出"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-059-ui-dark-bare-domain-connected.png",
+      ".workflow-kit/tasks/evidence/TASK-059-ui-light-bare-domain-connected.png",
+      ".workflow-kit/tasks/evidence/TASK-059-ui-dark-bad-credential.png",
+      ".workflow-kit/tasks/evidence/TASK-059-ui-e2e-result.json",
+      ".workflow-kit/tasks/evidence/TASK-059-interaction-report.md",
+      ".workflow-kit/tasks/evidence/TASK-059-report.md",
+      ".workflow-kit/docs/UI-CONTRACT-REQ-059.md"
+    ]
+  }
+}

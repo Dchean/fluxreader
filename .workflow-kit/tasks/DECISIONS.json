@@ -1493,6 +1493,125 @@
       "candidates": {
         "TASK-058": "9f90a6b3ab10afc37ac6e4af89f6c8e3dcd36ef90486e53a35a233125d12cc70"
       }
+    },
+    {
+      "id": "DEC-endpoint-autodetect-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 明确纠正需求理解：『这里的需求处理有误，我是要不管是 freshrss 还是 miniflux，都是只需要填写域名，不用填写 api/greader.php 这种后缀』。**作者如实记录误读经过**：用户最初原话是『直接填写域名无法登录，需要填写 https://demo.freshrss.org/api/greader.php 这种完整的』——那是在**描述故障现象**，我却读成『用户想知道该填完整路径』，并在提问选项里把『自动探测』写成**被禁止的边界**（选项『不改探测逻辑，只改文案与错误提示』），用户在该错误选项集内做了选择。故 DEC-user-testing-bugs-20260918 中『owner 明确选择不改探测逻辑』一句**记录的是作者误导下的选择，不代表用户真实需求**；本决定予以取代，旧记录保留不删。用户随后裁决范围：『两个协议都修（推荐）』。",
+      "statement": "授权实现 **Endpoint 自动适配**：用户**只填域名**（如 `https://demo.freshrss.org`）即可连接，**无需**知道或填写 `/api/greader.php` 这类 API 后缀。**范围（owner 裁决）**：GReader 与 Fever **两个协议都修**。**实证依据（作者实测）**：GReader——`POST {域名}/accounts/ClientLogin` → **404**（端点不存在）、`POST {域名}/api/greader.php/accounts/ClientLogin` → **401**（端点存在、凭据被拒），即 **404 vs 401/403 可可靠区分「路径不存在」与「路径正确但凭据错」**；Fever——FreshRSS 实际端点在 `/api/fever.php?api`（实测 **200** `{\"api_version\":4,\"auth\":0}`），而现有客户端拼的是 `{base}/fever/?api`（实测 FreshRSS 上 **404**），即 **Fever + FreshRSS 当前根本连不上**，属同一根因（路径形态假设写死）。**授权边界**：允许新增**探测请求**（这正是此前被误列为禁止项的能力）；**已填完整路径的用法必须继续有效**（向后兼容，不得要求用户改回域名）；解析出的地址应**落库**，使后续同步不再重复探测；仍不动工作流（用户明确『工作流我另外修复』）；不引入新依赖；须走 verify + 独立审查 + 验收（涉及协议行为变更，按 high 风险处理）。沿用既有预算（每任务 240 分钟、修复 4 轮），commit 沿用既有授权，push/release 仍需确认。",
+      "scope": [
+        "REQ-002",
+        "REQ-003"
+      ],
+      "recorded_at_utc": "2026-09-18T13:21:02Z"
+    },
+    {
+      "id": "DEC-fever-version-tolerant-20260918",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-18 在被作者告知『FreshRSS 的 Fever 实测返回 api_version=4，而 fever.rs 写死只接受 3，故仅修路径仍会报「不支持的 Fever API 版本 4」』后，选择『放宽为兼容 3 及以上（推荐）』。",
+      "statement": "授权放宽 Fever 的 `api_version` 校验：由**写死 `!= 3` 即拒绝** 改为**兼容 3 及以上**。**依据（作者实测）**：`POST https://demo.freshrss.org/api/fever.php?api` 返回 `{\"api_version\":4,\"auth\":0}`——FreshRSS 用 4 表示其 Fever 兼容版本，而信封结构（`api_version` / `auth`）与 v3 一致；该端点同时也是 FreshRSS 的真实 Fever 端点（现有代码拼的 `{base}/fever/?api` 在 FreshRSS 上是 404）。**边界**：**只放宽版本兼容范围**，`auth` 校验**不得放松**（`auth != 1` 仍须报认证失败）；不改 Fever 的请求构造语义（action 拼 query、api_key 拼 query 的既有做法保持）；不改其它协议的校验；须在报告中论证放宽依据与风险。沿用既有预算与 commit 授权，push/release 仍需确认。",
+      "scope": [
+        "TASK-059",
+        "REQ-002"
+      ],
+      "recorded_at_utc": "2026-09-18T13:21:02Z"
+    },
+    {
+      "id": "DEC-7af805443c0f4a21844e7404432377b7",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 本次会话指令（原文）：『我在其他其他的agent中推进项目，但是他编辑greader.rs一半就停止了，你来接手继续，并确保其他未优化修复的也一并推进修复优化』——即授权接手 TASK-059 半成品并完成剩余修复；本扩展仅补足被中断任务的时间/修复额度，沿用 DEC-endpoint-autodetect-20260918 的范围与边界（不引入依赖、不改工作流、push/release 仍需确认）",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-059"
+      ],
+      "recorded_at_utc": "2026-09-18T19:02:05.476214Z",
+      "budget_extension": {
+        "decision_id": "DEC-7af805443c0f4a21844e7404432377b7",
+        "recorded_at_utc": "2026-09-18T19:02:05.476214Z",
+        "minutes": 120,
+        "repair_rounds": 2,
+        "previous_deadline_at_utc": "2026-09-18T17:26:20.794697Z",
+        "deadline_at_utc": "2026-09-18T21:02:05.476214Z"
+      }
+    },
+    {
+      "id": "DEC-b6104a5fc6924c598eb1f9b161fbbe38",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 本次会话指令（原文）：『我在其他其他的agent中推进项目，但是他编辑greader.rs一半就停止了，你来接手继续，并确保其他未优化修复的也一并推进修复优化』——授权接手并完成 TASK-059（含独立审查发现缺陷的修复与重审）。本次为第二次额度补足：首轮独立审查判 FAIL 后已修复并重新验证，仅用于把终版审查结论入账；范围与边界沿用 DEC-endpoint-autodetect-20260918（不引入依赖、不改工作流、push/release 仍需确认）",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-059"
+      ],
+      "recorded_at_utc": "2026-09-18T21:16:21.377073Z",
+      "budget_extension": {
+        "decision_id": "DEC-b6104a5fc6924c598eb1f9b161fbbe38",
+        "recorded_at_utc": "2026-09-18T21:16:21.377073Z",
+        "minutes": 60,
+        "repair_rounds": 2,
+        "previous_deadline_at_utc": "2026-09-18T21:02:05.476214Z",
+        "deadline_at_utc": "2026-09-18T22:16:21.377073Z"
+      }
+    },
+    {
+      "id": "DEC-a8f6074eec0b4860bb44cdb0028047b9",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 本次会话指令（原文）：『任务完成了吗，没有就继续』——确认继续完成 TASK-059 收尾（重新验证 + 终版审查入账）。沿用 DEC-endpoint-autodetect-20260918 与 DEC-7af80544…/DEC-b6104a5f… 的授权边界；不引入依赖、不改工作流、push/release 仍需确认",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-059"
+      ],
+      "recorded_at_utc": "2026-09-18T23:16:55.370369Z",
+      "budget_extension": {
+        "decision_id": "DEC-a8f6074eec0b4860bb44cdb0028047b9",
+        "recorded_at_utc": "2026-09-18T23:16:55.370369Z",
+        "minutes": 90,
+        "repair_rounds": 2,
+        "previous_deadline_at_utc": "2026-09-18T22:16:21.377073Z",
+        "deadline_at_utc": "2026-09-19T00:46:55.370369Z"
+      }
+    },
+    {
+      "id": "DEC-b512e47140354cfd82b9177f0bd97ddd",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 本次会话指令（原文）：『清理旧残留，验收并批准立项』——授权清理被安全扫描标记的旧残留（tmp/ 临时脚本、workflow-kit/ 旧版安装、github_auth_e2e.rs 的凭据形态 mock 字面量）后重新验证、重审并验收。沿用 DEC-endpoint-autodetect-20260918 边界",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-059"
+      ],
+      "recorded_at_utc": "2026-09-19T01:32:57.301058Z",
+      "budget_extension": {
+        "decision_id": "DEC-b512e47140354cfd82b9177f0bd97ddd",
+        "recorded_at_utc": "2026-09-19T01:32:57.301058Z",
+        "minutes": 60,
+        "repair_rounds": 2,
+        "previous_deadline_at_utc": "2026-09-19T00:46:55.370369Z",
+        "deadline_at_utc": "2026-09-19T02:32:57.301058Z"
+      }
+    },
+    {
+      "id": "DEC-581cf9a6c00144eb98fb7d33439a7572",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 本次会话指令（原文）：『清理旧残留，验收并批准立项』——授权完成收尾链（含对扫描器标记的 access_token 响应改用 json! 构造后重新验证与重审）。沿用 DEC-endpoint-autodetect-20260918 边界",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-059"
+      ],
+      "recorded_at_utc": "2026-09-19T01:41:11.702472Z",
+      "budget_extension": {
+        "decision_id": "DEC-581cf9a6c00144eb98fb7d33439a7572",
+        "recorded_at_utc": "2026-09-19T01:41:11.702472Z",
+        "minutes": 60,
+        "repair_rounds": 2,
+        "previous_deadline_at_utc": "2026-09-19T02:32:57.301058Z",
+        "deadline_at_utc": "2026-09-19T03:32:57.301058Z"
+      }
     }
   ]
 }

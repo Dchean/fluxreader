@@ -1,0 +1,93 @@
+{
+  "task_id": "TASK-059",
+  "candidate_digest": "e57efa820099cab2ff788b0a1468c0c118495cb1f7f35de99a6d150cd9888b83",
+  "verification_run": "RUN-a197554176ae4222aabea1b5cfcc1756",
+  "verdict": "PASS",
+  "summary": "第 3 轮独立审查——按任务说明这是一次**换绑（re-bind）复核**而非全面重审：代码候选与第 2 轮 PASS 的候选完全相同（e57efa82…），仅两份文档证据（TASK-059-report.md、TASK-059-interaction-report.md）在审查后更新，工作流因此要求把结论重新绑定到**当前证据**与**新的验证 run**。我逐项复核如下。(1) 绑定：按 R3 审查包 candidate_files 重算 **144/144 个文件 sha256 全部一致、0 缺失**；我抽样的 11 个关键文件（fever.rs=81b4297015a2…、greader.rs=b8cba2088dcd…、endpoint_resolve.rs=ee491489…、sync/credentials.rs=1b804db4…、sync/phases.rs=262fb22a…、commands/sync.rs=723cd7ab…、endpoint_autodetect_e2e.rs=38814491…、mock_greader.rs=071b1663…、frontend-regression.mjs=e6d667b3…、endpointHint.ts=01bddaee…、SyncTab.tsx=44b15bd0…）与第 2 轮我核对过的值逐一相同，**代码确未改动**。(2) 新 run：RUN-a197554176ae4222aabea1b5cfcc1756 四门禁全部 PASS（exit 0）；我从其日志独立复算——cargo_test.stdout 24 条 test result 求和 = **161 passed / 0 failed / 9 ignored**（且 `fever_write_path_uses_resolved_endpoint_too ... ok` 在日志中）、frontend.stdout 结尾 = **283/283**、lint = `Found 0 warnings and 0 errors`、build = `✓ built in 1.20s`。(3) 我本人再次独立复跑（非引用）：`cargo test` **161 / 0 / 9**、`npm run test:frontend` **283/283**、`npm run lint` 0 warnings / 0 errors、`npm run build` exit 0（✓ built in 133ms）——与该 run 日志逐项吻合。(4) 两份更新后的文档（当前 sha256 前缀 6ce7af97dffe8610… 与 7a833f17be80e339…，与包内预期一致）我逐节重读并与我第 1、2 轮的实测记录比对：报告 §5 的修复后门禁列（161/0/9、0/0、exit 0、283/283）与我的复跑数字完全一致；§9 对第 1 轮 6 项发现（FAIL）与第 2 轮结论（PASS、findings 空、performance NOT_APPLICABLE）的转述与两份审查结论文件（TASK-059-review-r1-independent-FAIL.json、TASK-059-review-r2-independent-PASS.json，我已打开核对 verdict/digest/run 均相符）一致，无夸大、无失实；交互报告新增的『UI 证据与终版候选的时间差』如实披露截图采集于第 1 轮之前的候选（63ca6a97…），并说明修复仅动后端、不改变任何截图所示文案——该说明我独立核实为真：4 个 UI 证据文件自第 1 轮起逐字节未变（cd02766e…/140a356d…/d5a5bde2…/1784b603…），前端可见面（endpointHint.ts、SyncTab.tsx）哈希未变，修复唯一改动的『找不到 … API（HTTP 404…）』消息不出现在任何截图中（截取的 toast 只有成功与 401 两条，均为未改动的字符串），且『不重采以避免再写用户真实库』的理由与任务卡约束一致。(5) F3（缓存陈旧不自愈）与 F5（UI 证据平铺于 tasks/evidence/ 而非声明的 run 级目录）维持第 2 轮判定：已如实记录为已知限制，不构成验收缺口，不阻塞——理由见 failure_paths / maintainability 的 analysis。结论：绑定更新后，第 2 轮的全部 PASS 判定对当前候选与当前证据继续成立，维持 PASS。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "本轮为换绑复核：代码与第 2 轮 PASS 的候选逐字节相同（144/144 候选文件 sha256 一致；抽样的 11 个关键源码/测试文件哈希与第 2 轮我核对值逐一相同），因此第 2 轮对 acceptance 的逐条核对结论继续成立，无需重推。要点回顾（均为我本人在第 1–2 轮实测或源码核对过的事实）：纯域名对 FreshRSS（/api/greader.php）与 Miniflux（站点根）两形态自动适配各有 e2e；旧完整路径首个候选即命中且恰 1 次请求；404 与 401/403/400 可区分、凭据错立即停止；候选表常量有界（每协议 ≤2）；解析缓存按『协议+用户原始输入』为键自动失效且次轮不再探测（断言首轮恰 2 次、次轮恰 1 次打在解析出的端点）；设置页回显用户原始输入（endpoint_resolved 不进任何 IPC 返回值）；Fever 版本放宽为 >=3 且 auth!=1 仍拒绝；Fever 读写两条路径都走 api_entry()（R1 的 F1 已修并有回归网）；前端文案为『只填域名』方向且旧后缀指引移除；无新依赖；sync 协议语义未触碰。本轮新增核对：两份更新文档对上述事实的转述与我掌握的证据一致（报告 §5 修复后列 161/0/9、0/0、exit 0、283/283 = 我的复跑值；§9 对两轮审查结论的转述与两份结论 JSON 逐项相符）。",
+      "evidence_files": [
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/greader.rs",
+        "src-tauri/src/sync/credentials.rs",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-059-report.md",
+        ".workflow-kit/tasks/evidence/RUN-a197554176ae4222aabea1b5cfcc1756-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "我本人第 3 轮再次独立复跑：`cargo test` 161 passed / 0 failed / 9 ignored（基线 141/0/9；+20 = endpoint_autodetect_e2e 14 条 + endpoint_resolve 单测 6 条；ignored 未增）；`npm run test:frontend` 283/283（基线 280/280）；lint 0 warnings / 0 errors；build exit 0。与 RUN-a197554176ae4222aabea1b5cfcc1756 的门禁日志逐项吻合（cargo 24 条 result 行求和 161/0/9，frontend 尾行 283/283，lint Found 0 warnings and 0 errors，build ✓）。报告 §5.1 现在同时给出『审查修复前（160/0/9、282/282）』与『修复后终版（161/0/9、283/283）』两列，两列分别与我第 1 轮和第 2/3 轮的实测一致，+20/+3 的口径正确（141+20=161，280+3=283）。既有保护未弱化：TASK-055 墓碑/2xx 未生效、TASK-056 零 folder 与失败可见性、A-1 防复活等既有断言在本轮 cargo 输出中全部仍 ok；前端既有 26 条原样保留。新增守卫 fever_write_path_uses_resolved_endpoint_too 在本轮日志中 ok，其有效性（依赖 mock 精确匹配、非同义反复）我在第 2 轮已逐行核过，代码未变，结论沿用。",
+      "evidence_files": [
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-a197554176ae4222aabea1b5cfcc1756-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-a197554176ae4222aabea1b5cfcc1756-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-a197554176ae4222aabea1b5cfcc1756-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-a197554176ae4222aabea1b5cfcc1756-build.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "沿用第 2 轮核对（代码未变）：①两候选全 404 ⇒『在该地址下找不到 … API（HTTP 404，已尝试：…）』，有 Rust e2e 与前端『真实消息形状』断言双覆盖；②路径正确但凭据被拒（401）⇒ 立即 Err、不继续试下一候选（Rust e2e + 实机 S4 toast 一致）；③Fever 非 404 ⇒『Fever 认证被拒 → status（已定位 API：base）』；④auth!=1 / api_version<3 ⇒ 分别报认证失败 / 版本不支持；⑤输入归一与改地址/换协议的缓存失效；⑥缓存命中不再探测；⑦R1 的 F1（Fever+FreshRSS 状态推送 404）已修：mark_items 走 api_entry()，FreshRSS 形态拼出 `{域名}/api/fever.php?api&mark=item…`，与读路径同形态。F3（缓存陈旧不自愈）维持为已知限制、不阻塞：acceptance 只要求『改地址/换协议即失效』（已满足并有测试），自愈会引入把真实凭据问题掩盖成地址问题的新失败模式，作者已在报告 §8/§9 如实记录。用户真实库只读核对（第 2 轮实测，本轮文档未再触碰它）：%APPDATA%\\com.fluxreader.app\\fluxreader.db = sha256 419b118e…、90112 B、-wal/-shm 不存在，与事故报告及 ui-e2e-result.json 的 0./Z. 两节一致；本轮两份文档更新只涉及 .workflow-kit/tasks/evidence/ 下的 markdown，未触碰应用数据。",
+      "evidence_files": [
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/greader.rs",
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-059-incident-real-db-write.md",
+        ".workflow-kit/tasks/evidence/TASK-059-report.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "结构结论沿用第 2 轮（代码未变）：地址解析收敛于 endpoint_resolve.rs；fever.rs 所有请求地址出自唯一的 api_entry()（self.base 仅出现在 api_entry 自身、resolve 的候选来源与 resolved_base 返回处）；mock 的 GReader/Fever 布局分支统一为精确相等判定；候选表常量有界、无隐藏重试；缓存以『来源输入』为键自动失效。本轮新增核对：报告 §9 对第 1 轮发现与第 2 轮结论的记录准确、克制（明确写明第 1 项是『我的测试网漏掉的真实用户可见缺陷』，未淡化），引用的两份审查结论文件确实存在且 verdict/digest/run 相符——文档层面的可追溯性良好。F5（UI 证据平铺在 tasks/evidence/ 根下、与审查包声明的 run 级目录不一致）维持第 2 轮判定：已由作者在报告 §9 与交互报告『未覆盖/限制』中如实记录，属路径约定/自动化发现性问题，不构成证据真伪或验收缺口，不阻塞；建议后续把证据落入声明的 run 级目录或修正声明。tools/ 下 7 个 t059_* 一次性驱动脚本（含会写真实库的 t059_ui_e2e.mjs，已加强制备份/还原与警示）仍是长期维护面，建议收尾时决定归档——同样不阻塞。",
+      "evidence_files": [
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/src/fever.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "tools/t059_ui_e2e.mjs",
+        ".workflow-kit/tasks/evidence/TASK-059-review-r1-independent-FAIL.json",
+        ".workflow-kit/tasks/evidence/TASK-059-review-r2-independent-PASS.json"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "与本任务验收无关（brief 的 measure 工作负载指向 REQ-001/003 的正文加载与布局切换，地址解析不在其中），不造基准、不伪称实测提升。静态范围仍是『解析期请求次数』：未命中缓存每协议最多 2 个候选、仅 404 继续、任一非 404 立即停止；命中缓存后只保留一次必需认证（second_sync_reuses_cached_endpoint_without_probing 断言首轮恰 2 次、次轮恰 1 次）。本轮代码零改动，故第 2 轮结论直接沿用。",
+      "evidence_files": [
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    "checked_states": [
+      "设置 → 同步 → 「后端 Endpoint」：说明文案改为**只填域名**（不再要求 /api/greader.php 这类后缀）",
+      "placeholder 给出纯域名示例（如 https://demo.freshrss.org）",
+      "填入纯域名后点「测试连接」：FreshRSS 与 Miniflux 均应连接成功（不再报 404）",
+      "已填完整 API 路径的旧用法**仍然可用**（向后兼容，不回退）",
+      "解析成功后设置页显示的仍是**用户填写的原始值**（不把内部解析结果回显成后缀，避免让用户以为必须填后缀）",
+      "连接确实失败时，提示须如实说明（凭据错报凭据错、地址不可达报不可达），不得把凭据问题说成填法问题",
+      "深色与浅色两套主题下文案完整可读、不截断、不溢出"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-059-ui-dark-bare-domain-connected.png",
+      ".workflow-kit/tasks/evidence/TASK-059-ui-light-bare-domain-connected.png",
+      ".workflow-kit/tasks/evidence/TASK-059-ui-dark-bad-credential.png",
+      ".workflow-kit/tasks/evidence/TASK-059-ui-e2e-result.json",
+      ".workflow-kit/tasks/evidence/TASK-059-interaction-report.md",
+      ".workflow-kit/tasks/evidence/TASK-059-report.md"
+    ]
+  }
+}

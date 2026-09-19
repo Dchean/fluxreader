@@ -20,7 +20,7 @@ pub async fn sync_test(
     username: String,
     password: String,
 ) -> AppResult<String> {
-    let (msg, _) =
+    let (msg, _, _) =
         crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http)
             .await?;
     Ok(msg)
@@ -83,7 +83,7 @@ pub async fn sync_save(
         }
     };
     // 测试新凭据（失败不保存不动现状）；用户名随凭据落库（设置页动态显示）
-    let (msg, _account) =
+    let (msg, _account, resolved_base) =
         crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http)
             .await?;
     {
@@ -100,6 +100,16 @@ pub async fn sync_save(
         db::set_setting(&conn, "greader_endpoint", &endpoint)?;
         db::set_setting(&conn, "greader_username", &username)?;
         db::set_setting(&conn, "greader_password", &password)?;
+        // 端点解析结果落库（TASK-059）：设置页刚刚已验证过，同步侧直接复用，
+        // 不必每轮再探测一遍。`greader_endpoint` 存的仍是用户原始输入。
+        if let Err(e) = crate::endpoint_resolve::remember_base(
+            &conn,
+            &protocol,
+            &endpoint,
+            &resolved_base,
+        ) {
+            log::warn!("sync: 端点解析结果落库失败（不影响本次连接）: {e}");
+        }
         // 新连接：清增量游标（GReader 时间戳 / Fever 条目 id），让首同步从全量开始
         db::set_setting(&conn, "sync_last_sync", "0")?;
         db::set_setting(&conn, "sync_last_entry_id", "0")?;

@@ -1,0 +1,81 @@
+{
+ "schema_version": 1,
+ "id": "RUN-6bafc20f36494ba7a702defabddd64c7",
+ "task_id": "TASK-059",
+ "kind": "verification",
+ "outcome": "blocked",
+ "executor": {
+  "harness": "local_process",
+  "model": null,
+  "context_id": "tool-6bafc20f36494ba7a"
+ },
+ "started_at_utc": "2026-09-18T19:15:50Z",
+ "finished_at_utc": "2026-09-18T19:16:08Z",
+ "exit_code": null,
+ "timed_out": false,
+ "input_digest": "79f9d2ce709889ae60c72f0cbaae6024b06d70229ef34c3a72ef9814ea775428",
+ "candidate_digest": "63ca6a97c932744d1df511d07656c0c6ffb2a083449ccc2b8644caf8150d23d9",
+ "raw_output_refs": [
+  ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-cargo_test.stdout.txt",
+  ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-cargo_test.stderr.txt",
+  ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-lint.stdout.txt",
+  ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-lint.stderr.txt"
+ ],
+ "checks": [
+  {
+   "gate_id": "cargo_test",
+   "status": "PASS",
+   "exit_code": 0,
+   "log": ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-cargo_test.stdout.txt",
+   "stderr": ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-cargo_test.stderr.txt",
+   "candidate_digest": "63ca6a97c932744d1df511d07656c0c6ffb2a083449ccc2b8644caf8150d23d9",
+   "command": {
+    "argv": [
+     "cargo"
+    ],
+    "cwd": ".",
+    "started_at_utc": "2026-09-18T19:15:51Z",
+    "finished_at_utc": "2026-09-18T19:16:07Z",
+    "exit_code": 0,
+    "timed_out": false,
+    "cancelled": false,
+    "stdout": ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-cargo_test.stdout.txt",
+    "stderr": ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-cargo_test.stderr.txt"
+   }
+  },
+  {
+   "gate_id": "lint",
+   "status": "PASS",
+   "exit_code": 0,
+   "log": ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-lint.stdout.txt",
+   "stderr": ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-lint.stderr.txt",
+   "candidate_digest": "63ca6a97c932744d1df511d07656c0c6ffb2a083449ccc2b8644caf8150d23d9",
+   "command": {
+    "argv": [
+     "npm"
+    ],
+    "cwd": ".",
+    "started_at_utc": "2026-09-18T19:16:07Z",
+    "finished_at_utc": "2026-09-18T19:16:07Z",
+    "exit_code": 0,
+    "timed_out": false,
+    "cancelled": false,
+    "stdout": ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-lint.stdout.txt",
+    "stderr": ".workflow-kit/tasks/evidence/RUN-6bafc20f36494ba7a702defabddd64c7-lint.stderr.txt"
+   }
+  }
+ ],
+ "review": {
+  "mode": null,
+  "verdict": null,
+  "report": null,
+  "candidate_digest": null
+ },
+ "estimated_cost_usd": null,
+ "pid": null,
+ "controller_pid": null,
+ "commands": [],
+ "failure_kind": "environment",
+ "failure_reason": "\"[WinError 5] 拒绝访问。: RUN-6bafc20f36494ba7a702defabddd64c7.json.*.tmp -> RUN-6bafc20f36494ba7a702defabddd64c7.json\"",
+ "record_note": "本记录由执行者重建：该 run 的 json 曾被一次本地复现测试误写为 {}（复现 os.replace 时选错了目标文件名）。重建只填可核实的事实（两门禁的 PASS 与其真实日志文件），无法核实的时间/pid 等字段留空，未虚构门禁结果。"
+}

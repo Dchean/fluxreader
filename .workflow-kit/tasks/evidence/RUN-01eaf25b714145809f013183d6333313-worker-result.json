@@ -1,0 +1,16 @@
+{
+  "task_id": "TASK-059",
+  "run_id": "RUN-01eaf25b714145809f013183d6333313",
+  "status": "ready_for_verification",
+  "summary": "续跑记录（本 run 未再改动文件，changed_files 为空属如实记录）：TASK-059 的实现改动已在前一次运行 RUN-61037fec83504a9c87b2da94c03bc088 中完成，其 19 个改动文件已由该运行的 -changes.json 取证；当时因任务原始截止时间（2026-09-18T17:26:20Z）用尽而被判 budget 阻塞，owner 本次会话指令授权接手并完成，故按流程 extend 预算后用本 run 续跑并提交验证。代码交付内容：Endpoint 自动适配（只填域名即可连接，FreshRSS / Miniflux 双协议）——新增 endpoint_resolve（候选表 + 只有 404 视为路径不存在 + 解析结果缓存）、greader 的 login_at/login_resolved、fever 的 resolve/at_resolved/api_entry 与版本校验放宽到 >=3（auth 校验不放松）、build_client 与 test_connection 接线、sync_save 落库解析结果；前端 Endpoint 文案与 404 提示改为「只填域名」，并修掉说明区被 line-clamp 截断（旧文案实测需 4 行、一直在被截断）。四门禁全绿：cargo test 160 passed/0 failed/9 ignored（基线 141/0/9，+19）、lint 0 warnings/0 errors、build exit 0、frontend 282/282（基线 280/280）。新增 Rust e2e 13 条与前端断言 7 条（修前 274/281 失败、修后 282/282）。实机证据：真实运行应用 + 本地 FreshRSS 形态服务端，7 场景全过（只填域名连通 / 旧路径兼容 / 凭据错如实报 401 / Fever 纯域名连通 / 双主题截图）。另如实记录一起事故：实机验证误写用户真实库（APPDATA 环境变量对 Tauri 的 app_data_dir 无效），已按 WAL 帧重放逐字节还原（哈希一致），并给驱动加装强制备份与还原校验。",
+  "changed_files": [],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}
