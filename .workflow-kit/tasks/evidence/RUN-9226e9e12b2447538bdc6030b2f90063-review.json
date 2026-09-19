@@ -55,7 +55,7 @@
       "evidence_files": [
         ".workflow-kit/tasks/evidence/TASK-050-review-ts-verify.txt",
         ".workflow-kit/tasks/evidence/baseline-2026-09-17-task050.md",
-        ".oxlintrc.json",
+        ".workflow-kit/tasks/evidence/TASK-050-review-oxlintrc.json-9828c8f.json",
         "src/components/settings/shared.ts",
         "src/components/settings/layoutOptions.tsx"
       ]
@@ -71,5 +71,16 @@
       ]
     }
   ],
-  "ui_review": null
+  "ui_review": null,
+  "citation_repair": {
+    "date_utc": "2026-09-19",
+    "reason": "workflow-kit 升级 2026-09-18.3：审查证据引用面收敛为候选文件或 tasks/evidence/、tasks/runs/ 附件；原报告引用的候选外工作区文件/已删除临时探针/可变任务记录按 RECOVERY 指引改指等价不可变记录，分析文字未改动。",
+    "replacements": [
+      {
+        "from": ".oxlintrc.json",
+        "to": ".workflow-kit/tasks/evidence/TASK-050-review-oxlintrc.json-9828c8f.json",
+        "git_snapshot": "9828c8f330d224c355264c6ff84783ffe2de9ba7"
+      }
+    ]
+  }
 }

@@ -17,7 +17,7 @@
         ".workflow-kit/tasks/evidence/RUN-42e12876a3a3400b8c3a2034ef3f4267-candidate.json",
         ".workflow-kit/tasks/evidence/TASK-045-split-report.md",
         ".workflow-kit/tasks/evidence/TASK-045-report-corrections.md",
-        ".gitattributes",
+        ".workflow-kit/tasks/evidence/TASK-045-review-gitattributes-9828c8f.txt",
         "src-tauri/src/sync/mod.rs",
         "src-tauri/src/sync/credentials.rs",
         "src-tauri/src/sync/push.rs",
@@ -58,8 +58,8 @@
         "src-tauri/src/sync/entries.rs",
         "src-tauri/src/sync/subscriptions.rs",
         "src-tauri/src/sync/phases.rs",
-        ".gitattributes",
-        ".workflow-kit/binding.json",
+        ".workflow-kit/tasks/evidence/TASK-045-review-gitattributes-9828c8f.txt",
+        ".workflow-kit/tasks/evidence/TASK-045-review-binding.json-61563e6.json",
         ".workflow-kit/tasks/evidence/TASK-045-report-corrections.md"
       ]
     },
@@ -74,5 +74,21 @@
       ]
     }
   ],
-  "ui_review": null
+  "ui_review": null,
+  "citation_repair": {
+    "date_utc": "2026-09-19",
+    "reason": "workflow-kit 升级 2026-09-18.3：审查证据引用面收敛为候选文件或 tasks/evidence/、tasks/runs/ 附件；原报告引用的候选外工作区文件/已删除临时探针/可变任务记录按 RECOVERY 指引改指等价不可变记录，分析文字未改动。",
+    "replacements": [
+      {
+        "from": ".gitattributes",
+        "to": ".workflow-kit/tasks/evidence/TASK-045-review-gitattributes-9828c8f.txt",
+        "git_snapshot": "9828c8f330d224c355264c6ff84783ffe2de9ba7"
+      },
+      {
+        "from": ".workflow-kit/binding.json",
+        "to": ".workflow-kit/tasks/evidence/TASK-045-review-binding.json-61563e6.json",
+        "git_snapshot": "61563e6c87890d5c171f1c694c330546272d02c7"
+      }
+    ]
+  }
 }

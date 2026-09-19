@@ -1,16 +1,75 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["task_id", "run_id", "status", "summary", "changed_files", "validation_requests", "requested_actions", "unresolved_items", "blocked_reason"],
+  "required": [
+    "task_id",
+    "run_id",
+    "status",
+    "summary",
+    "changed_files",
+    "validation_requests",
+    "requested_actions",
+    "unresolved_items",
+    "blocked_reason"
+  ],
   "properties": {
-    "task_id": {"type": "string"},
-    "run_id": {"type": "string"},
-    "status": {"type": "string", "enum": ["ready_for_verification", "action_requested", "blocked"]},
-    "summary": {"type": "string"},
-    "changed_files": {"type": "array", "items": {"type": "string"}},
-    "validation_requests": {"type": "array", "items": {"type": "string"}},
-    "requested_actions": {"type": "array", "items": {"type": "string"}},
-    "unresolved_items": {"type": "array", "items": {"type": "string"}},
-    "blocked_reason": {"type": ["string", "null"]}
+    "task_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ready_for_verification",
+        "action_requested",
+        "blocked"
+      ]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "changed_files": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "string",
+          "enum": [
+            "auto"
+          ]
+        }
+      ],
+      "description": "Files changed by this run (or the task's cumulative changes); \"auto\" lets the manager tool fill it from the observed diff."
+    },
+    "validation_requests": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requested_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolved_items": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "blocked_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
   }
 }

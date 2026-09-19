@@ -13,7 +13,7 @@
       "evidence_files": [
         ".workflow-kit/tasks/evidence/TASK-051-worker-result.json",
         ".workflow-kit/tasks/evidence/baseline-2026-09-17-task051.md",
-        ".workflow-kit/docs/FINDINGS-REQ-007.md",
+        ".workflow-kit/tasks/evidence/TASK-051-review-FINDINGS-REQ-007.md-98456af.md",
         ".workflow-kit/tasks/evidence/TASK-051-gate-BEFORE-failures.txt"
       ]
     },
@@ -65,5 +65,16 @@
       ]
     }
   ],
-  "ui_review": null
+  "ui_review": null,
+  "citation_repair": {
+    "date_utc": "2026-09-19",
+    "reason": "workflow-kit 升级 2026-09-18.3：审查证据引用面收敛为候选文件或 tasks/evidence/、tasks/runs/ 附件；原报告引用的候选外工作区文件/已删除临时探针/可变任务记录按 RECOVERY 指引改指等价不可变记录，分析文字未改动。",
+    "replacements": [
+      {
+        "from": ".workflow-kit/docs/FINDINGS-REQ-007.md",
+        "to": ".workflow-kit/tasks/evidence/TASK-051-review-FINDINGS-REQ-007.md-98456af.md",
+        "git_snapshot": "98456af1e443c60b56861a3e9ae25f9b120f1579"
+      }
+    ]
+  }
 }

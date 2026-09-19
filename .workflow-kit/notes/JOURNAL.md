@@ -1,0 +1,13 @@
+<!-- project-workflow: append-only journal; use checkpoint/note -->
+# 项目日志
+
+工具在每个关键事件后追加一行；Agent 用 note 追加上下文、决策、待办和教训。不要手工改写历史行。
+
+- 2026-09-19T03:25:19.045418Z · recompute · TASK-040 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
+- 2026-09-19T03:25:19.750979Z · recompute · TASK-041 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
+- 2026-09-19T03:25:20.490975Z · recompute · TASK-043 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
+- 2026-09-19T03:25:21.179514Z · recompute · TASK-045 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
+- 2026-09-19T03:25:21.866347Z · recompute · TASK-050 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
+- 2026-09-19T03:25:22.852941Z · recompute · TASK-051 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
+- 2026-09-19T03:25:23.563066Z · recompute · TASK-052 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
+- 2026-09-19T03:25:24.273133Z · recompute · TASK-060 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动

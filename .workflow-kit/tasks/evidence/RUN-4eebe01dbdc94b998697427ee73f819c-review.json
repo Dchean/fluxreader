@@ -14,9 +14,9 @@
         ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
         ".workflow-kit/tasks/evidence/TASK-052-worker-result.json",
         ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
-        "tmp/task052/rev-probe.mjs",
-        "tmp/task052/rev-probe.log",
-        "tmp/task052/rev-probe.exit",
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
         "src/store/internals.ts",
         "src/store/slices/bootstrap.ts",
         "src/store/slices/nav.ts",
@@ -30,11 +30,11 @@
       "analysis": "本任务**有意改变行为**（分页口径 + 一处锚定顺序），故按『既有保护未被削弱 + 每处变化都有对应断言与理由』核。独立比对方法：把 HEAD 版 harness 导出到 tmp/task052/head-harness.mjs，用脚本（tmp/task052/rev-checknames.mjs）分别抽取 check() 与 checkNew() 的断言名集合与当前文件对照。结果：check() HEAD=26 / CUR=26，REMOVED=0、ADDED=0 —— 既有 26 条**一行未动**（harness 汇总行亦自证『既有回归 26/26 通过（本文件原有断言，未改动一行）』）。checkNew() HEAD=160 / CUR=215，REMOVED=1、ADDED=56（净增 55 ⇒ 总数 186→241），唯一移除项是『(a) 首批分页游标 = PAGE_SIZE(500)、8 行<500 视为已到底、加载态收起』，被『(a) 首批分页游标 = 实际行数（per-scope：不再硬编码 PAGE_SIZE）』取代：旧期望 `entries.length===8 && articlesLimit===500 && exhausted===true && loading===false`，新期望把 articlesLimit===500 改为 ===8 并增 articlesCursor.all===8，其余三个条件不变。该替换属**必要契约变化而非为绿灯改测试**：旧期望把『游标(全局 offset)与实际拉回行数无关』写成契约，正是 P1-14 缺陷本身；per-scope 下首批游标必须等于该范围已加载行数。该条位于 owner 授权可动的 (b) 组相邻范围（ledger_correction 明示授权 adapt 该组）。除它之外无任何既有断言被删改或削弱。D2/D3 未回退有代码与断言双重证据（见 failure_paths）。(s5/D3) 场景更被**加强**：新增 scopeKey 比较并配『数值相同但范围不同』的定向断言，强于旧判据。锚定顺序的行为变化属 owner 授权第二项，且该变化使原本『目标不在旧范围筛选内 ⇒ article_index 返回 null ⇒ 静默打不开』的缺陷被修掉，(h2) 组 8 条断言覆盖。回归总数的 gate 侧确认：241/241、exit 0，与基线 186/186 的差异全部来自新增断言。",
       "evidence_files": [
         ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
-        "tmp/task052/head-harness.mjs",
-        "tmp/task052/rev-checknames.mjs",
-        "tmp/task052/rev-names.txt",
-        "tmp/task052/R-frontend.log",
-        "tmp/task052/R-frontend.exit",
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
         "tools/frontend-regression.mjs"
       ]
     },
@@ -46,8 +46,8 @@
         "src/store/slices/bootstrap.ts",
         "src/store/slices/nav.ts",
         "tools/frontend-regression.mjs",
-        "tmp/task052/rev-probe.mjs",
-        "tmp/task052/ab-diff.txt"
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json",
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
       ]
     },
     {
@@ -59,7 +59,7 @@
         "src/components/anchorScopeNav.ts",
         "src/components/timelineSentinel.ts",
         "src/components/Overlays.tsx",
-        "tools/ui-loader.mjs",
+        ".workflow-kit/tasks/evidence/TASK-052-review-ui-loader.mjs-f75c512.mjs",
         "tools/frontend-regression.mjs"
       ]
     },
@@ -72,9 +72,56 @@
         "src/store/slices/nav.ts",
         "src/components/Timeline.tsx",
         "tools/frontend-regression.mjs",
-        "tmp/task052/rev-probe.log"
+        ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
       ]
     }
   ],
-  "ui_review": null
+  "ui_review": null,
+  "citation_repair": {
+    "date_utc": "2026-09-19",
+    "reason": "workflow-kit 升级 2026-09-18.3：审查证据引用面收敛为候选文件或 tasks/evidence/、tasks/runs/ 附件；原报告引用的候选外工作区文件/已删除临时探针/可变任务记录按 RECOVERY 指引改指等价不可变记录，分析文字未改动。",
+    "replacements": [
+      {
+        "from": "tmp/task052/rev-probe.mjs",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
+      },
+      {
+        "from": "tmp/task052/rev-probe.log",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
+      },
+      {
+        "from": "tmp/task052/rev-probe.exit",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
+      },
+      {
+        "from": "tmp/task052/head-harness.mjs",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
+      },
+      {
+        "from": "tmp/task052/rev-checknames.mjs",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
+      },
+      {
+        "from": "tmp/task052/rev-names.txt",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
+      },
+      {
+        "from": "tmp/task052/R-frontend.log",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
+      },
+      {
+        "from": "tmp/task052/R-frontend.exit",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
+      },
+      {
+        "from": "tmp/task052/ab-diff.txt",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-report.json"
+      },
+      {
+        "from": "tools/ui-loader.mjs",
+        "to": ".workflow-kit/tasks/evidence/TASK-052-review-ui-loader.mjs-f75c512.mjs",
+        "git_snapshot": "f75c5121ffea9567484fdddd5df425f9dd54fc12"
+      }
+    ]
+  }
 }

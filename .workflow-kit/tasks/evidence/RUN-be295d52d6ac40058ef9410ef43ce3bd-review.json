@@ -22,7 +22,7 @@
       "analysis": "既有门禁未回归：审查者亲自复跑 npm run lint（0 warnings / 0 errors，23 文件）与 npm run test:frontend（26/26，基线 21 项全部保留，新增 5 项）；Rust 侧复跑定向 lib 测试 1 passed / 0 failed，并核对管理者门禁日志 RUN-5cbf0b3dff6440b2b074f6b2cdc7cef4 的 rust-test 为全部 test result: ok、0 failed（合计 120 passed），fmt 的 stdout/stderr 均 0 字节。候选文件 sha256 与候选清单逐一相符，排除审查错对象。",
       "evidence_files": [
         "tools/frontend-regression.mjs",
-        "src-tauri/src/db/commands_extraction_tests.rs"
+        ".workflow-kit/tasks/evidence/TASK-040-review-commands_extraction_tests.rs-748e42b.rs"
       ]
     },
     {
@@ -33,7 +33,7 @@
         "src/store.ts",
         "src/components/Overlays.tsx",
         "src-tauri/src/commands.rs",
-        "src-tauri/src/db/sync_map.rs"
+        ".workflow-kit/tasks/evidence/TASK-040-review-sync_map.rs-748e42b.rs"
       ]
     },
     {
@@ -51,9 +51,25 @@
       "analysis": "本任务未设性能目标。改动性质为：把全局布尔换成按 id 映射（常数级）、F20 仅为 effect 内标志位（无额外 IO）、F8 后端多一次按范围收集未读 id 的 SELECT 且与实际更新使用同一谓词（不引入逐篇往返）。门禁表现为前端回归 26/26 在毫秒级完成、lint 0/0、cargo test 0 failed，未见性能或行为回归。",
       "evidence_files": [
         "src/store.ts",
-        "src-tauri/src/db/sync_map.rs"
+        ".workflow-kit/tasks/evidence/TASK-040-review-sync_map.rs-748e42b.rs"
       ]
     }
   ],
-  "ui_review": null
+  "ui_review": null,
+  "citation_repair": {
+    "date_utc": "2026-09-19",
+    "reason": "workflow-kit 升级 2026-09-18.3：审查证据引用面收敛为候选文件或 tasks/evidence/、tasks/runs/ 附件；原报告引用的候选外工作区文件/已删除临时探针/可变任务记录按 RECOVERY 指引改指等价不可变记录，分析文字未改动。",
+    "replacements": [
+      {
+        "from": "src-tauri/src/db/commands_extraction_tests.rs",
+        "to": ".workflow-kit/tasks/evidence/TASK-040-review-commands_extraction_tests.rs-748e42b.rs",
+        "git_snapshot": "748e42b20af94e90ce1b63ae70a1d49af2f83f33"
+      },
+      {
+        "from": "src-tauri/src/db/sync_map.rs",
+        "to": ".workflow-kit/tasks/evidence/TASK-040-review-sync_map.rs-748e42b.rs",
+        "git_snapshot": "748e42b20af94e90ce1b63ae70a1d49af2f83f33"
+      }
+    ]
+  }
 }

@@ -37,6 +37,7 @@
       "WORKFLOW-KIT.md",
       ".workflow-kit/binding.json",
       ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
       ".workflow-kit/scripts/**",
       ".workflow-kit/docs/workflow/**",
       ".workflow-kit/legacy/**",

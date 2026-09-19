@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 
 VERSION = 1
+# Release of the startup package; stored in each project binding so upgrades are visible.
+KIT_RELEASE = "2026-09-18.3"
 BOARD_MARKER = "<!-- project-workflow: generated view; edit task JSON instead -->"
 TASK_STATES = {"draft", "ready", "running", "verifying", "review", "verified", "blocked", "done", "cancelled"}
 ACTIVE = {"ready", "running", "verifying", "review"}
@@ -24,7 +26,15 @@ RUN_KINDS = {"implementation", "repair", "probe", "verification", "review"}
 GATE_STATES = {"PASS", "FAIL", "NOT_RUN", "SKIPPED", "BLOCKED", "NOT_APPLICABLE"}
 REVIEW_AREAS = ("requirements", "regression", "failure_paths", "maintainability", "performance")
 DENIED_PARTS = {".git", ".claude", ".codex", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+SECRET_NAMES = {"auth.json", "credentials.json", "run-settings.json"}
+SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
+DATA_SUFFIXES = (".db", ".sqlite", ".sqlite3")
 RECOVERY_DEFAULTS = {"network_backoff_seconds": [5, 15], "max_cli_call_seconds": 600}
+# Records the tool itself rewrites while a task is open. They are never task
+# evidence and never count as a worker's change.
+MUTABLE_RECORDS = ("tasks/items/", "tasks/cards/", "tasks/runtime/", "notes/")
+MUTABLE_FILES = {"tasks/DECISIONS.json", "tasks/PROJECT.json", "tasks/PROJECT_STATE.md", "tasks/BACKLOG.md",
+                 "tasks/IN_PROGRESS.md", "tasks/DONE.md", "tasks/REFERENCES.json", "tasks/RESEARCH.md"}
 ISOLATED_ROOT = ".workflow-kit"
 ISOLATED_BINDING = ".workflow-kit/binding.json"
 CLASSIC_BINDING = "tasks/WORKFLOW_KIT.json"
@@ -94,8 +104,9 @@ def workflow_name(root, name):
         binding = read_json(marker)
         if binding.get("package") != "workflow-kit" or binding.get("layout") != "isolated":
             raise ValueError("Unrecognized .workflow-kit binding; inspect integration before continuing")
-        if name == "tasks" or name.startswith(("tasks/", "docs/workflow/")) or name in {
-            "docs/workflow", "scripts/project_workflow.py", "scripts/workflow_runtime.py", "scripts/workflow_bootstrap.py"
+        if name in {"tasks", "notes", "docs/workflow"} or name.startswith(("tasks/", "docs/workflow/", "notes/")) or name in {
+            "scripts/project_workflow.py", "scripts/workflow_runtime.py", "scripts/workflow_bootstrap.py",
+            "scripts/workflow_intake.py", "scripts/workflow_progress.py"
         }:
             return ISOLATED_ROOT + "/" + name
     elif inside(root, ISOLATED_ROOT).exists():
@@ -142,10 +153,22 @@ def is_hash(value):
     return isinstance(value, str) and re.fullmatch(r"[a-fA-F0-9]{64}", value) is not None
 
 
+def secret_kind(name):
+    """'secret' must never be hashed; 'data' is skipped and recorded; None is ordinary."""
+    lower = name.lower()
+    if lower in SECRET_NAMES or lower.endswith(SECRET_SUFFIXES):
+        return "secret"
+    if lower.startswith(".env"):
+        return "data" if lower.endswith((".example", ".sample", ".template", ".dist")) else "secret"
+    if lower.endswith(DATA_SUFFIXES):
+        return "data"
+    return None
+
+
 def capture(root, roots, allow_missing=False):
-    """Hash explicitly selected trees; reject secret-like paths and links."""
+    """Hash explicitly selected trees; refuse secrets, record skipped data files and links."""
     root = Path(root).resolve()
-    files, missing = {}, []
+    files, missing, excluded = {}, [], []
     roots = sorted(set(roots))
     if not roots:
         raise ValueError("At least one explicit snapshot path is required")
@@ -161,13 +184,16 @@ def capture(root, roots, allow_missing=False):
             path = pending.pop()
             rel = path.relative_to(root).as_posix()
             inside(root, rel)
-            lower = path.name.lower()
             if any(part.lower() in DENIED_PARTS for part in path.relative_to(root).parts):
                 if path != target:
                     continue
                 raise ValueError(f"Excluded credential/dependency directory in snapshot: {rel}")
-            if lower.startswith(".env") or lower.endswith((".pem", ".key", ".p12", ".pfx", ".db", ".sqlite", ".sqlite3")) or lower in {"auth.json", "credentials.json", "run-settings.json"}:
-                raise ValueError(f"Secret/data-like file excluded from snapshot: {rel}")
+            kind = secret_kind(path.name)
+            if kind == "secret":
+                raise ValueError(f"Secret file excluded from snapshot; move it out of the selected paths: {rel}")
+            if kind == "data":
+                excluded.append(rel)
+                continue
             if path.is_dir():
                 pending.extend(sorted(path.iterdir(), reverse=True))
             elif path.is_file():
@@ -177,6 +203,8 @@ def capture(root, roots, allow_missing=False):
     body = {"roots": roots, "files": [{"path": key, "sha256": files[key]} for key in sorted(files)]}
     if missing:
         body["missing"] = missing
+    if excluded:
+        body["excluded"] = sorted(excluded)
     if not files and not missing:
         raise ValueError("Snapshot must include at least one file")
     return {"schema_version": VERSION, "captured_at_utc": iso(utc_now()), **body, "digest": digest(body)}
@@ -187,8 +215,9 @@ def inspect_manifest(root, name, expected, current=False):
     if manifest.get("schema_version") != VERSION:
         raise ValueError("unsupported snapshot version")
     body = {"roots": manifest["roots"], "files": manifest["files"]}
-    if "missing" in manifest:
-        body["missing"] = manifest["missing"]
+    for key in ("missing", "excluded"):
+        if key in manifest:
+            body[key] = manifest[key]
     if not is_hash(expected) or manifest.get("digest") != expected or digest(body) != expected:
         raise ValueError("snapshot digest does not match its content and task")
     if not isinstance(body["roots"], list) or not body["roots"] or not isinstance(body["files"], list) or (not body["files"] and not body.get("missing")):
@@ -224,6 +253,35 @@ def task_definition(task):
 def task_deadline(task):
     extensions = task.get("budget", {}).get("extensions", [])
     return extensions[-1]["deadline_at_utc"] if extensions else task.get("budget", {}).get("deadline_at_utc")
+
+
+def as_list(value):
+    """Owner decisions sometimes record scope as one string; never iterate its characters."""
+    if isinstance(value, str):
+        return [value]
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def is_mutable_record(root, name):
+    logical = workflow_relative(root, name)
+    return logical is not None and (logical.startswith(MUTABLE_RECORDS) or logical in MUTABLE_FILES)
+
+
+def gate_argv_problems(gate):
+    """Reject argument shapes that are known to fail before any verification runs."""
+    program = str(gate.get("program") or "")
+    args = gate.get("args") if isinstance(gate.get("args"), list) else []
+    stem = PurePosixPath(program.replace("\\", "/")).stem.lower()
+    first = str(args[0]).lower() if args else ""
+    if stem == "npm" and first in {"build", "lint", "dev", "start:dev", "typecheck", "check"}:
+        return f"npm has no '{first}' command; use args [\"run\", \"{first}\"]"
+    if stem in {"pnpm", "yarn"} and first == "build" and len(args) == 1:
+        return f"{stem} build usually needs [\"run\", \"build\"] unless the project defines a build binary"
+    if stem == "cargo" and first == "run" and len(args) > 1 and str(args[1]).lower() in {"test", "build", "check", "clippy"}:
+        return f"cargo {args[1]} is a subcommand; use args [\"{args[1]}\"] instead of [\"run\", \"{args[1]}\"]"
+    if stem in {"python", "python3", "{python}"} and first == "pytest":
+        return "run pytest as a module: args [\"-m\", \"pytest\"]"
+    return None
 
 
 def repair_limit(task, policy):
@@ -283,9 +341,11 @@ def test_review_errors(root, project, task, tasks, decisions):
     require(all(item.get("status") == "accepted" and item.get("issuer") == "owner" and nonempty(item.get("source"))
                 for item in decisions_used), "decision_ids must reference accepted owner decisions")
     coverage = set(task.get("requirement_refs", [])) | {ident}
-    scoped_choice = bool(decisions_used) and any(coverage.intersection(item.get("scope", [])) for item in decisions_used)
+    scoped_choice = bool(decisions_used) and any(coverage.intersection(as_list(item.get("scope"))) for item in decisions_used)
     if review.get("behavior") == "change":
-        require(scoped_choice, "behavior change needs an owner decision covering this task or its requirements")
+        require(scoped_choice, "behavior change needs an owner decision whose scope lists this task or one of its requirement_refs; "
+                "task coverage is " + json.dumps(sorted(coverage), ensure_ascii=False) + ", decision scopes are "
+                + json.dumps([as_list(item.get("scope")) for item in decisions_used], ensure_ascii=False))
     required_ids = {gate.get("id") for gate in task.get("gates", []) if isinstance(gate, dict) and gate.get("required")}
     require(bool(required_ids), "must retain an executable required verification gate")
     actions = review.get("actions")
@@ -336,30 +396,29 @@ def required_review_mode(policy, task):
     return policy.get("review", {}).get("mode")
 
 
-# 审查摘要只绑定「设计上不可变」的证据：候选快照内的文件 + 记录区
-# （<workflow>/tasks/evidence/**，即审查者产出的报告/日志/截图）。
-# 其余一律**可变**：源码（src/ src-tauri/ tools/）会被后续任务合法修改；
-# 工具脚本与 binding.json 会在获授权的工具升级时合法变更；
-# .gitattributes 等配置同理。把它们按「活动内容」绑进历史审查，
-# 会让任何一次合法改动永久撞坏那条历史审查（TASK-049 重写 src/store.ts、
-# 以及两次工具升级刷新 binding.json 都触发过）。
-# 见 docs/TOOL-GAP-review-source-evidence-binding.md。
-def is_immutable_review_evidence(root, name):
-    """是否为「设计上不可变」的审查证据（记录区文件）。"""
-    prefix = workflow_name(root, "tasks/evidence/")
-    return name.startswith(prefix)
-
-
 def review_quality_digest(root, task, report):
-    """Bind a substantive review to the verified candidate and immutable evidence."""
+    """Bind a substantive review to the verified candidate and immutable evidence.
+
+    The reference surface is closed: evidence is either a file of the verified
+    candidate (hash taken from the candidate manifest, so later tasks may change
+    the source) or an immutable run/evidence attachment. Records the tool itself
+    rewrites (task items, cards, decisions, notes) would make the review
+    invalidate itself and are rejected with an explicit reason.
+    """
     checks = report.get("review_checks")
-    if not isinstance(checks, list) or {item.get("area") for item in checks if isinstance(item, dict)} != set(REVIEW_AREAS) or len(checks) != len(REVIEW_AREAS):
-        raise ValueError("Review needs one evidence-based check for requirements, regression, failure_paths, maintainability and performance")
+    kind = task.get("kind")
+    required_areas = {"requirements", "regression"} if kind in {"documentation", "baseline"} else set(REVIEW_AREAS)
+    areas = [item.get("area") for item in checks if isinstance(item, dict)] if isinstance(checks, list) else []
+    if (not isinstance(checks, list) or not required_areas <= set(areas) or not set(areas) <= set(REVIEW_AREAS)
+            or len(checks) != len(areas) or len(set(areas)) != len(areas)):
+        raise ValueError("Review needs one evidence-based check per area: " + ", ".join(sorted(required_areas))
+                         + (" (failure_paths, maintainability, performance are optional for documentation/baseline tasks)" if kind in {"documentation", "baseline"} else ""))
     evidence = task.get("evidence", {})
     if report.get("verification_run") != evidence.get("verification_run"):
         raise ValueError("Review must identify the actual current verification_run")
     snapshot = read_json(inside(root, evidence["candidate_manifest"]))
     candidate_files = {item["path"]: item["sha256"] for item in snapshot["files"]}
+    attachments = tuple(workflow_name(root, prefix) for prefix in ("tasks/evidence/", "tasks/runs/"))
     recorded = {}
     for check in checks:
         if not isinstance(check, dict) or check.get("status") not in {"PASS", "NOT_APPLICABLE"}:
@@ -377,19 +436,18 @@ def review_quality_digest(root, task, report):
                 continue
             inside(root, name)
             if name in candidate_files:
-                # Later tasks may legitimately change the source; the prior
-                # review remains bound to its original, verified snapshot.
                 recorded[name] = candidate_files[name]
-            elif is_immutable_review_evidence(root, name):
-                path = inside(root, name)
-                if not path.is_file() or path.stat().st_size == 0:
-                    raise ValueError("Review evidence is missing/empty: " + name)
-                recorded[name] = hashlib.sha256(path.read_bytes()).hexdigest()
-            else:
-                # 可变产物（源码 / 配置 / 工具脚本 / binding 等）：不纳入本审查的篡改判据。
-                # 它们由候选快照与 git 约束；强行按活动内容绑定会让后续合法改动
-                # 永久撞坏历史审查（TASK-040/041/043/045 都因此失配过）。
                 continue
+            if is_mutable_record(root, name):
+                raise ValueError("Review evidence cannot cite a record the tool rewrites (task items, cards, decisions, notes): " + name
+                                 + "; cite candidate files, tasks/runs/ or tasks/evidence/ instead")
+            if not name.startswith(attachments):
+                raise ValueError("Review evidence must be a file of the verified candidate or an attachment under tasks/evidence/ or tasks/runs/: "
+                                 + name + "; add other sources to the task's snapshot_paths before verification")
+            path = inside(root, name)
+            if not path.is_file() or path.stat().st_size == 0:
+                raise ValueError("Review evidence is missing/empty: " + name)
+            recorded[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     verification_name = workflow_name(root, "tasks/runs/" + report["verification_run"] + ".json")
     if verification_name not in recorded:
         verification = inside(root, verification_name)
@@ -415,6 +473,19 @@ def ui_preview_accepted(root, policy, project, tasks):
         return False
 
 
+def ui_check_ids(task):
+    """ui_checks entries are either "select.open" strings or {"id": ..., "description": ...} objects."""
+    ids = []
+    for item in task.get("ui_checks", []) or []:
+        if isinstance(item, str):
+            ids.append(item.strip())
+        elif isinstance(item, dict) and isinstance(item.get("id"), str):
+            ids.append(item["id"].strip())
+        else:
+            ids.append("")
+    return ids
+
+
 def ui_review_digest(root, task, report):
     """Bind declared visual/interaction evidence; aesthetic judgment stays human."""
     if not task.get("ui_change", False):
@@ -423,8 +494,12 @@ def ui_review_digest(root, task, report):
     if not isinstance(review, dict) or review.get("contract_ref") != task.get("ui_contract_ref"):
         raise ValueError("UI review must reference the task's frozen UI contract")
     states, files = review.get("checked_states"), review.get("evidence_files")
-    if not isinstance(states, list) or not all(isinstance(value, str) for value in states) or not set(task["ui_checks"]) <= set(states):
-        raise ValueError("UI review must cover every declared component/interaction state")
+    if not isinstance(states, list) or not all(isinstance(value, str) for value in states):
+        raise ValueError("UI review checked_states must list the ids of the checked ui_checks")
+    declared = set(ui_check_ids(task))
+    checked = {value.strip() for value in states}
+    if not declared <= checked:
+        raise ValueError("UI review must cover every declared ui_check id; missing: " + ", ".join(sorted(declared - checked)))
     if not isinstance(files, list) or not files or not all(isinstance(value, str) for value in files) or len(set(files)) != len(files):
         raise ValueError("UI review needs distinct screenshot and interaction-report files")
     suffixes, evidence = set(), []
@@ -437,6 +512,50 @@ def ui_review_digest(root, task, report):
     if not suffixes.intersection({".png", ".jpg", ".jpeg", ".webp"}) or not suffixes.intersection({".md", ".json", ".txt"}):
         raise ValueError("UI review requires a screenshot and an interaction report, not only a build log")
     return digest({"contract_ref": review["contract_ref"], "checked_states": sorted(states), "files": evidence})
+
+
+def budget_clock(policy):
+    """'active' counts only writer runs (implementation/repair/probe); 'wall' is the legacy deadline."""
+    return policy.get("budget", {}).get("clock", "wall")
+
+
+def allowance_seconds(task, policy):
+    minutes = policy.get("budget", {}).get("max_task_wall_minutes", 0)
+    extra = sum(entry.get("minutes", 0) for entry in task.get("budget", {}).get("extensions", []) if type(entry.get("minutes")) is int)
+    return (minutes + extra) * 60
+
+
+def consumed_seconds(task, runs, now):
+    total = 0.0
+    for run in runs:
+        if run.get("kind") not in {"implementation", "repair", "probe"}:
+            continue
+        try:
+            start = datetime.fromisoformat(str(run.get("started_at_utc")).replace("Z", "+00:00"))
+            finish = datetime.fromisoformat(str(run.get("finished_at_utc")).replace("Z", "+00:00")) if run.get("finished_at_utc") else now
+        except ValueError:
+            continue
+        total += max(0.0, (finish - start).total_seconds())
+    return total
+
+
+def committed_evidence_problem(root, name):
+    """Optional strict gate: acceptance evidence must be tracked by git with no pending changes."""
+    import shutil
+    import subprocess
+    git = shutil.which("git")
+    if not git:
+        return "git is not available for the strict acceptance check"
+    try:
+        tracked = subprocess.run([git, "-C", str(root), "ls-files", "--error-unmatch", "--", name], capture_output=True, timeout=20)
+        if tracked.returncode != 0:
+            return "acceptance evidence is not tracked by git: " + name
+        pending = subprocess.run([git, "-C", str(root), "status", "--porcelain", "--", name], capture_output=True, text=True, encoding="utf-8", timeout=20)
+        if pending.stdout.strip():
+            return "acceptance evidence has uncommitted changes: " + name
+    except (OSError, subprocess.SubprocessError) as error:
+        return "strict acceptance check failed: " + str(error)
+    return None
 
 
 def check_project(root, now=None):
@@ -548,6 +667,9 @@ def check_project(root, now=None):
         require(policy.get("review", {}).get("evidence_version") == 1, "POLICY: review evidence requirements cannot be disabled; migrate older records explicitly")
         require(policy.get("review", {}).get("high_risk") == "independent_required", "POLICY: high-risk review must remain independent")
         require(limits.get("batch_rollover", "ask") in {"ask", "allowed"}, "POLICY: batch_rollover must be ask or allowed")
+        require(limits.get("clock", "wall") in {"wall", "active"}, "POLICY: budget.clock must be wall or active")
+        require(type(policy.get("acceptance", {}).get("require_committed_evidence", False)) is bool,
+                "POLICY: acceptance.require_committed_evidence must be a boolean")
         recovery = recovery_policy(policy)
         delays = recovery["network_backoff_seconds"]
         require(isinstance(delays, list) and len(delays) <= 3 and all(type(value) is int and 0 <= value <= 60 for value in delays),
@@ -646,9 +768,9 @@ def check_project(root, now=None):
             require(task.get("ui_change") is True, f"{ident}: UI preview must declare a UI change")
         if task.get("ui_change"):
             local_ref(task.get("ui_contract_ref"), f"{ident} UI contract")
-            require(isinstance(task.get("ui_checks"), list) and bool(task["ui_checks"])
-                    and all(isinstance(value, str) and value.strip() for value in task["ui_checks"]),
-                    f"{ident}: UI changes need explicit component/interaction checks")
+            ids = ui_check_ids(task)
+            require(isinstance(task.get("ui_checks"), list) and bool(ids) and all(ids) and len(set(ids)) == len(ids),
+                    f"{ident}: UI changes need explicit component/interaction checks with unique ids")
         if status in PREPARED | {"blocked"}:
             errors += test_review_errors(root, project, task, tasks, decisions)
         if status == "blocked":
@@ -670,7 +792,7 @@ def check_project(root, now=None):
         extra_repairs = 0
         for extension in budget.get("extensions", []):
             decision = decisions.get(extension.get("decision_id"), {})
-            require(approved_ids([extension.get("decision_id")]) and ident in decision.get("scope", [])
+            require(approved_ids([extension.get("decision_id")]) and ident in as_list(decision.get("scope"))
                     and decision.get("budget_extension") == extension,
                     f"{ident}: budget extension requires its exact accepted owner decision")
             previous = time_value(extension.get("previous_deadline_at_utc"), f"{ident}.extension.previous")
@@ -689,14 +811,20 @@ def check_project(root, now=None):
             require(repairs <= limits["max_repair_rounds"] + extra_repairs, f"{ident}: repair limit exceeded")
         if started and deadline:
             require(deadline > started, f"{ident}: deadline must follow original start")
-            if status in ACTIVE:
-                require(now < deadline, f"{ident}: deadline exhausted; record blocked instead of continuing")
+            # Only writing phases consume the clock. Verification and review are
+            # read-only gates and may still finish after the deadline.
+            if status in {"ready", "running"}:
+                if budget_clock(policy) == "active":
+                    require(consumed_seconds(task, related, now) < allowance_seconds(task, policy),
+                            f"{ident}: active-time allowance exhausted; record blocked or extend instead of continuing")
+                else:
+                    require(now < deadline, f"{ident}: deadline exhausted; record blocked instead of continuing")
             for run in related:
                 run_start = time_value(run.get("started_at_utc"), run["id"])
                 run_finish = time_value(run.get("finished_at_utc"), run["id"], False)
                 if run_start:
                     require(run_start >= started, f"{ident}: original task start was reset after an earlier run")
-                if run_finish and status in PREPARED:
+                if run_finish and status in PREPARED and run.get("kind") in {"implementation", "repair"} and budget_clock(policy) == "wall":
                     require(run_finish <= deadline, f"{ident}: run completed after task deadline")
             if status in PREPARED and type(limits.get("max_task_wall_minutes")) is int:
                 require(original_deadline <= started + timedelta(minutes=limits["max_task_wall_minutes"]), f"{ident}: deadline exceeds configured wall budget")
@@ -750,7 +878,7 @@ def check_project(root, now=None):
         successor_id = evidence.get("continued_by")
         if successor_id:
             successor = tasks.get(successor_id, {})
-            require(successor.get("status") in PREPARED | {"blocked"} and bool(successor.get("run_ids"))
+            require(successor.get("status") in PREPARED | {"blocked"}
                     and ident in successor.get("dependencies", [])
                     and successor.get("continuation_of", {}).get(ident) == candidate,
                     f"{ident}: invalid candidate continuation: {successor_id}")
@@ -789,7 +917,8 @@ def check_project(root, now=None):
         if policy.get("review", {}).get("evidence_version") == 1:
             try:
                 quality_digest = review_quality_digest(root, task, read_json(inside(root, review_result["report"])))
-                require(review_result.get("quality_digest") == quality_digest, f"{ident}: review evidence changed after approval")
+                require(review_result.get("quality_digest") == quality_digest,
+                        f"{ident}: review evidence changed after approval (if only the tool changed, run recompute --task {ident} --source ...)")
             except (ValueError, OSError, KeyError, TypeError) as error:
                 errors.append(f"{ident}: invalid review evidence: {error}")
         if task.get("ui_change"):
@@ -817,8 +946,31 @@ def check_project(root, now=None):
             local_ref(evidence.get("acceptance_ref"), f"{ident} acceptance")
             require(approved_ids(evidence.get("owner_decision_ids")), f"{ident}: done lacks owner acceptance reference")
             require(bool(evidence.get("merge_ref")), f"{ident}: done needs merge evidence or explicit not_applicable explanation")
+            if policy.get("acceptance", {}).get("require_committed_evidence") is True and isinstance(evidence.get("acceptance_ref"), str):
+                problem = committed_evidence_problem(root, evidence["acceptance_ref"])
+                require(problem is None, f"{ident}: {problem}")
 
     return {"ok": not errors, "errors": errors, "warnings": warnings, "counts": {"tasks": len(tasks), "runs": len(runs), "batches": len(batches)}}
+
+
+def error_owner(message):
+    """Task-attributed errors start with the task id; everything else is global."""
+    match = re.match(r"(TASK-[A-Za-z0-9_-]+)(?=[\s:.])", message)
+    return match.group(1) if match else None
+
+
+def relevant_errors(errors, task_ids=(), baseline=()):
+    """Errors that should stop the current operation.
+
+    Global errors always count. Errors attributed to other tasks do not block
+    work on this task, and errors that already existed before this operation
+    (baseline) are not blamed on it. This is the pattern extend_budget used;
+    it is now the single rule for every mutation.
+    """
+    task_ids = set(task_ids)
+    baseline = set(baseline)
+    return [message for message in errors if message not in baseline
+            and (error_owner(message) is None or not task_ids or error_owner(message) in task_ids)]
 
 
 def board_bytes(tasks):
@@ -844,6 +996,31 @@ def project_state_bytes(project, tasks, helper="scripts/project_workflow.py", br
             + "\n运行 `python " + helper + " progress --root .` 生成对话用进度；start 给出实际下一步。\n"
             + "本文件由需求、PROJECT、任务和检查点生成；实际证据与进程仍须核对。\n")
     return text.encode("utf-8")
+
+
+def resume_bytes(project, tasks, journal_text, helper="scripts/project_workflow.py", brief=None, policy=None,
+                 research_done=False, ui_accepted=False, action=None, notes_prefix="../"):
+    """DeepSeek-style handoff note: current facts, open items, recent events, how to continue."""
+    from workflow_progress import build
+    progress = build(project, policy or {}, brief or {}, tasks, action=action, card_prefix=notes_prefix + "tasks/cards/",
+                     research_done=research_done, ui_accepted=ui_accepted)
+    lines = [journal_line for journal_line in journal_text.splitlines() if journal_line.startswith("- ")]
+    recent = lines[-12:]
+    open_notes = [line for line in lines if " · note/todo · " in line or " · note/decision · " in line or " · note/context · " in line][-12:]
+    lessons = [line for line in lines if " · note/lesson · " in line][-8:]
+    text = [BOARD_MARKER, "# 接手与恢复笔记", "",
+            "任何 Agent 接手前先读本文件，再运行 `python " + helper + " resume --root .`。本文件由任务记录、检查点和日志生成；事实以 JSON 记录和原始证据为准。", "",
+            "## 当前状态", "", progress["markdown"].rstrip(), "",
+            "## 未完成的上下文、决策与待办（Agent 笔记）", ""]
+    text += open_notes or ["- 暂无记录；用 `note --kind context|decision|todo --text ...` 保存需要延续的判断。"]
+    text += ["", "## 教训", ""] + (lessons or ["- 暂无记录。"])
+    text += ["", "## 最近事件", ""] + (recent or ["- 暂无事件。"])
+    text += ["", "## 如何继续", "",
+             "1. 运行 resume；有 controller.lock 或 running 的 RUN 先核对进程，再决定 recover。",
+             "2. 阻塞任务先读任务卡的最近检查点和原始日志；scope/protocol/action_required/evidence 类阻塞用 `unblock --task --source --note` 带说明解锁，不新建任务。",
+             "3. 已确认但尚未拆分的需求见上表；只有全部需求关联到已验收任务并获用户确认才 `accept --project-complete`。",
+             "4. 完整日志：[JOURNAL.md](JOURNAL.md)；任务总览：[PROJECT_STATE.md](" + notes_prefix + "tasks/PROJECT_STATE.md)。", ""]
+    return "\n".join(text).encode("utf-8")
 
 
 def initialization_plan(root, kind, name, allow_existing=False, full_docs=False):
@@ -886,6 +1063,10 @@ def initialization_plan(root, kind, name, allow_existing=False, full_docs=False)
     plan["scripts/workflow_bootstrap.py"] = Path(__file__).with_name("workflow_bootstrap.py").read_bytes()
     plan["scripts/workflow_intake.py"] = Path(__file__).with_name("workflow_intake.py").read_bytes()
     plan["scripts/workflow_progress.py"] = Path(__file__).with_name("workflow_progress.py").read_bytes()
+    plan["notes/JOURNAL.md"] = (BOARD_MARKER.replace("generated view; edit task JSON instead", "append-only journal; use checkpoint/note")
+                                + "\n# 项目日志\n\n工具在每个关键事件后追加一行；Agent 用 note 追加上下文、决策、待办和教训。不要手工改写历史行。\n\n").encode("utf-8")
+    plan["notes/RESUME.md"] = resume_bytes(project, {}, plan["notes/JOURNAL.md"].decode("utf-8"))
+    plan["tasks/.gitattributes"] = b"# workflow-kit records and evidence are hashed byte-for-byte; never convert line endings.\n* -text\n"
     plan.update(board_bytes({}))
     plan[CLASSIC_BINDING] = encoded(classic_binding(plan))
     conflicts = [rel for rel in plan if inside(root, rel).exists()]
@@ -939,7 +1120,8 @@ def main(argv=None):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
     argv = list(sys.argv[1:] if argv is None else argv)
-    runtime_commands = {"bootstrap", "doctor", "start", "progress", "review-packet", "adopt", "intake", "onboard", "research", "cards", "checkpoint", "prepare", "begin", "finish", "verify", "review", "feedback", "dispatch", "review-cli", "run", "next", "recover", "extend", "batch", "accept"}
+    runtime_commands = {"bootstrap", "doctor", "start", "progress", "review-packet", "adopt", "intake", "onboard", "research", "cards", "checkpoint", "prepare", "begin", "finish", "verify", "review", "feedback", "dispatch", "review-cli", "run", "next", "recover", "extend", "batch", "accept",
+                        "unblock", "cancel", "diff", "note", "recompute", "rebind", "resume"}
     if argv and argv[0] in runtime_commands:
         from workflow_runtime import main as runtime_main
         return runtime_main(argv)

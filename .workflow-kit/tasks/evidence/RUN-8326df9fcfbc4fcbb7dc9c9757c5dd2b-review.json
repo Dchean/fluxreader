@@ -11,7 +11,7 @@
       "status": "PASS",
       "analysis": "任务目标（补强 P1/P4 使缺陷复现导致测试失败，产品代码零改动）逐项达成。P4 捕获力由审查者本人复现：M-P4 变异下 P4 测试失败（panic sync_phases_e2e.rs:346:9「pending 守卫必须生效」），还原后通过——成对证据完整。P1 捕获力：M-P4 变异下 P1 测试同样失败（panic sync_content_e2e.rs:187:5，与作者报告一致）；其记载变异点 :224 实为先于本任务存在的不可达死代码（本候选对 src-tauri/src/** 零改动，non_goals 明确排除产品改动，故非本交付缺陷，见 summary 遗留事项 (a)），作者以真实守卫路径（merge_remote_status :76，M-P1a）达成捕获意图并如实记录 :224 不可捕获，未伪造证据。非目标全部遵守：git diff src-tauri/src/ 为空、无新依赖（Cargo.toml/Cargo.lock/package.json 零改动）、.workflow-kit/scripts 与 binding.json 未动、allowed_paths 中的 tools/** 未被越权使用。test_review 三动作（adapt P1 / adapt P4 / keep 其余）与实际 diff 一一对应。",
       "evidence_files": [
-        ".workflow-kit/tasks/items/TASK-060.json",
+        ".workflow-kit/tasks/evidence/TASK-060-input-62bce69bf4e74fb9afe935b317e94cd7.json",
         ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
         "src-tauri/tests/sync_content_e2e.rs",
         "src-tauri/tests/sync_phases_e2e.rs",
@@ -62,5 +62,15 @@
       "evidence_files": []
     }
   ],
-  "ui_review": null
+  "ui_review": null,
+  "citation_repair": {
+    "date_utc": "2026-09-19",
+    "reason": "workflow-kit 升级 2026-09-18.3：审查证据引用面收敛为候选文件或 tasks/evidence/、tasks/runs/ 附件；原报告引用的候选外工作区文件/已删除临时探针/可变任务记录按 RECOVERY 指引改指等价不可变记录，分析文字未改动。",
+    "replacements": [
+      {
+        "from": ".workflow-kit/tasks/items/TASK-060.json",
+        "to": ".workflow-kit/tasks/evidence/TASK-060-input-62bce69bf4e74fb9afe935b317e94cd7.json"
+      }
+    ]
+  }
 }

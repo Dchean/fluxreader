@@ -49,7 +49,7 @@
         "src/components/Timeline.tsx",
         "src/components/PlayerBar.tsx",
         "src/components/ContextMenu.tsx",
-        "src/store.ts",
+        ".workflow-kit/tasks/evidence/TASK-043-review-store.ts-01a176a.ts",
         "src/App.tsx",
         ".workflow-kit/tasks/evidence/TASK-043-interaction-report.md"
       ]
@@ -100,6 +100,17 @@
       ".workflow-kit/tasks/evidence/TASK-043-review-report-r2-FAIL.json",
       ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-candidate.json",
       ".workflow-kit/tasks/evidence/RUN-6e516601e79642c98ec51cfe26fcdc2d-frontend.stdout.txt"
+    ]
+  },
+  "citation_repair": {
+    "date_utc": "2026-09-19",
+    "reason": "workflow-kit 升级 2026-09-18.3：审查证据引用面收敛为候选文件或 tasks/evidence/、tasks/runs/ 附件；原报告引用的候选外工作区文件/已删除临时探针/可变任务记录按 RECOVERY 指引改指等价不可变记录，分析文字未改动。",
+    "replacements": [
+      {
+        "from": "src/store.ts",
+        "to": ".workflow-kit/tasks/evidence/TASK-043-review-store.ts-01a176a.ts",
+        "git_snapshot": "01a176a1d59db8f772f22774d5bc3ea407c470a0"
+      }
     ]
   }
 }

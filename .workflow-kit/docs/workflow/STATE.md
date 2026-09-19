@@ -8,6 +8,10 @@ BRIEF 保存分轮问答，confirmations 将真实回答及来源与相应数值
 
 BRIEF.requirements 是主目标和补充需求的统一清单，in_scope 区分纳入和暂缓，任务用 requirement_refs 关联；quality 记录维护、稳定与性能安排。批准后的 BRIEF 与决定快照一致，不能静默删改。progress、原生面板和 PROJECT_STATE 都从已有事实生成，不作为另一份状态。
 
+## 笔记
+
+notes/JOURNAL.md 是只追加的项目日志：onboard、research、prepare、检查点、阻塞、解锁、验收、续批、追加预算和 Agent 的 note 各占一行。notes/RESUME.md 由记录、检查点和日志生成，供接手者先读；两者都在受保护路径内，工具在改动比对时忽略它们。blocked 任务的处置写入 task.dispositions，取消写入同一字段；review 运行的派生摘要重算记录在 run.recomputed。
+
 ## 阶段与任务
 
 项目阶段：intake → discovery → baseline（重构通常需要）→ delivery → release → complete；paused 表示主动停下。新项目可以从 discovery 进入 delivery 建立第一套代码与测试。阶段改变必须有已有授权，不以编辑 stage 代替批准。
@@ -19,13 +23,15 @@ BRIEF.requirements 是主目标和补充需求的统一清单，in_scope 区分�
 - running / verifying / review：分别记录实现、工具验证和审查；只有明确问题才进入 blocked。
 - verified：适用验证与审查通过，证据绑定当前候选；还没代表合并或发布。
 - done：所属交付已验收，所需合并已有证据或确实不适用。
-- blocked：必须有原因和恢复动作；解阻后重新核对原记录，不能换 ID 清零。
+- blocked：必须有原因和恢复动作；解阻后重新核对原记录，不能换 ID 清零。scope/protocol/action_required/evidence 用 unblock 记录处置，其他类别按 run/begin 的既有规则接续。
+- cancelled：由 cancel 记录理由与来源；有未完成依赖任务时不能取消。
+- done 的可选严格门禁：POLICY.acceptance.require_committed_evidence=true 时，验收记录必须已被 git 跟踪且无未提交改动；accept 本身放行一次并返回 commit_required 清单，之后的 check/next 持续报告直到提交。
 
 ## UI 与预览确认
 
 POLICY.ui.mode 保存 none / existing / preview_first；PROJECT.ui_preview_task 指向当前预览任务。preview_first 在该任务实际 accept 前阻止正式实现，文档、基线和 UI 预览可先进行。预览 verified 不能代替用户确认；feedback 将尚未接受的预览交回原任务修复，不清空时钟和历史。
 
-ui_change、ui_contract_ref、ui_checks 和 retry_safe 属于冻结定义。UI 任务的候选包含约定文件；审查记录 ui_review 的截图、交互报告和覆盖状态摘要。已确认约定改变会重新触发预览确认；纯后台任务不要求视觉产物。
+ui_change、ui_contract_ref、ui_checks 和 retry_safe 属于冻结定义。ui_checks 条目可以是 "select.open" 这样的 id 字符串，或 {"id", "description"} 对象；审查的 checked_states 按 id 匹配，描述措辞可以自由写。UI 任务的候选包含约定文件；审查记录 ui_review 的截图、交互报告和覆盖状态摘要。已确认约定改变会重新触发预览确认；纯后台任务不要求视觉产物。
 
 ## Ready 条件
 
@@ -59,7 +65,7 @@ task.evidence 只引用 verification_run / review_run 和候选，不抄另一�
 
 同一任务的所有运行记录都必须出现在 run_ids；接手方同时扫描 runs/ 防止遗漏。implementation 是首次实现；重放也记录为新的 implementation，不能抹掉旧调用。repair 只表示反馈代码/审查缺陷后的修复轮；probe 单列但照样计入墙钟时间和可取得的费用。
 
-首次开始时持久化 task.budget.started_at_utc 和 deadline_at_utc。截止时间包括实现、诊断、重放、测试、审查与等待；恢复不得重设。新决定可通过 extend 追加 extensions，记录原有效期限、追加时间/修复额度及决定 ID；原始字段不变，当前有效期限取最后一条扩展记录。repair_rounds_used 仍等于全部 repair 记录数。追加时间不改变美元限额。
+首次开始时持久化 task.budget.started_at_utc 和 deadline_at_utc。POLICY.budget.clock 决定时钟含义：active（默认）只累计实现/修复/探测运行的时长，等待、断网和只读门禁不计，额度 = max_task_wall_minutes + 各次 extend 的分钟；wall 为旧语义，按截止时刻计。两种时钟都只约束写入阶段；验证和审查过期后仍可运行。恢复不得重设。新决定可通过 extend 追加 extensions，记录原有效期限、追加时间/修复额度及决定 ID；原始字段不变，当前有效期限取最后一条扩展记录。repair_rounds_used 仍等于全部 repair 记录数。追加时间不改变美元限额。
 
 批次 task_ids 与任务的 batch_id 双向一致；已启动任务不从批次移除以释放额度。达到上限后，由 batch 关闭已完成批次再开新批次。明确确认 batch_rollover=allowed 且 financial.mode=none 时 prepare 可自动续批；其余情况使用真实续批决定。自动推进只覆盖已经确认的产品范围。
 
@@ -67,7 +73,9 @@ accept 只接受列出的候选。所有已建任务 done 后仍需核对完整�
 
 ## 校验工具边界
 
-审查记录 quality_digest 绑定原始报告、当前 verification_run、候选和引用证据。五项 review_checks 不完整或无实际依据时不能 PASS；高风险必须 independent。这个摘要能发现遗漏字段或变动，不能认证宿主的新上下文或证明分析没有遗漏。
+审查记录 quality_digest 绑定原始报告、当前 verification_run、候选和引用证据。documentation/baseline 任务只强制 requirements 和 regression 两项，其余三项可省略；其他任务五项齐全。证据引用面是封闭的：候选内文件按候选清单取哈希，.workflow-kit/tasks/runs 与 .workflow-kit/tasks/evidence 附件按当前字节取哈希，其他路径拒绝。五项 review_checks 不完整或无实际依据时不能 PASS；高风险必须 independent。这个摘要能发现遗漏字段或变动，不能认证宿主的新上下文或证明分析没有遗漏。工具语义变更导致摘要过期时用 recompute 重算并留痕。
+
+check 的错误以任务 ID 开头时归属该任务；变更命令只被全局错误和本任务的新错误阻止，其他任务的记录问题通过 start/next 的 record_errors 展示。
 
 ```text
 python .workflow-kit/scripts/project_workflow.py check --root .

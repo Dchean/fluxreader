@@ -9,8 +9,9 @@
 | 命令 | 实际行为 |
 | --- | --- |
 | bootstrap --root --kind [--host] [--write --source] | 预览或建立独立接入，保留旧文件，给出可核验回执；已有绑定只检查 |
-| start / next | 只读返回当前阶段、恢复线索和下一步；不启动聊天窗口 |
-| progress [--format markdown/json] | 只读生成可直接展示的阶段目标、任务状态、未拆分需求和下一步；默认 Markdown |
+| start / next [--format json/markdown/compact] | 只读返回当前阶段、恢复线索和下一步；日常用 --format compact，返回 read_next 指出本步只需读的文档 |
+| resume [--format markdown/json] | 接手一页：紧凑进度、Agent 留下的判断与待办、需要用户决定的事、下一条可直接运行的命令、先读哪些文档 |
+| progress [--format markdown/compact/json] | 只读生成可直接展示的进度；json 含 native_tasks、native_plan、compact、needs_user，供有面板的宿主同步 |
 | review-packet --task | 只读生成独立审查输入，不复制作者检查点或会话；宿主 Agent 或 CLI 均可使用 |
 | doctor | 只读检查目录、Python、Git、可用 CLI；不调用模型 |
 | init | 预览空目录初始化；加 --write 才写入，冲突整体拒绝 |
@@ -20,19 +21,25 @@
 | research --file | 保存参考清单、历史与可读调研报告 |
 | prepare --file | 生成任务、输入快照、批次关联和卡片；检查定义与依赖 |
 | begin --task --context | 宿主 Agent 开始一项实现，先落盘 RUN、时钟与范围快照 |
-| finish --run --file | 核对实现结果与实际改动，保存候选；不会直接标通过 |
+| finish --run --file | 核对实现结果与实际改动，保存候选；changed_files 可写 "auto" 由工具按 diff 填入 |
 | dispatch --task | 使用已选择的 CLI 执行一次编码 |
-| verify --task | 实际运行预先定义的测试，保存 stdout/stderr、退出码和候选 |
+| verify --task | 实际运行预先定义的测试，保存 stdout/stderr、退出码和候选；快照远大于实际改动时返回 snapshot_hint 建议收窄 |
 | review --task --file --context --mode | 记录真实审查报告；mode 为 self_review 或 independent |
 | feedback --task --note --source | 记录尚未接受的 UI 预览反馈，在原任务与预算内继续修复 |
 | review-cli --task | 在新的 CLI 进程中审查当前候选 |
 | run --task | 推进单任务；有限修复和安全网络退避重试，无进展时返回 replan |
-| checkpoint --task --note --next-action | 保存已观察事实与下一步，更新任务卡和状态页 |
+| checkpoint --task --note --next-action | 保存已观察事实与下一步，更新任务卡、状态页和项目日志 |
+| note --kind context/decision/todo/lesson/progress --text [--task] | 追加一条 Agent 笔记到 notes/JOURNAL.md，并重新生成 notes/RESUME.md |
+| diff --run | 只读列出该运行基线以来的实际改动，按范围内/受保护/越界分组；changed_files 直接取它的结果 |
+| unblock --task --source --note [--to ready/verifying] | 记录阻塞处置后让任务回到可执行阶段；保留身份、时钟、历史，不新建任务 |
+| cancel --task --reason --source | 作废任务并记录理由；有未完成的依赖任务时拒绝 |
+| recompute --task --source | 在有审计依据的工具变更后，用当前函数重算审查派生摘要，不手写摘要 |
+| rebind --source [--upgrade-tools] | 入口块或工具被审计修改后重新核验绑定；--upgrade-tools 从新版启动包升级引擎、契约、提示词、流程文档、模板和入口块，记录不动，改动的文档先备份，活动运行存在时拒绝 |
 | recover --run --source | 确认进程退出后关闭中断记录；省略 --run 可恢复孤立控制器锁 |
 | extend --task --minutes --source | 依据新决定追加任务时间；可加 --repair-rounds，原时钟与费用限额保留 |
 | batch [--source] | 关闭已完成批次并开启下一批，保留全部成员和记录 |
-| accept --tasks --source --merge-ref | 记录用户对具体候选的验收；完整项目获确认后加 --project-complete |
-| check | 只读核对状态、定义、依赖、历史、证据和预算 |
+| accept --tasks --source --merge-ref | 记录用户对具体候选的验收；完整项目获确认后加 --project-complete。策略 acceptance.require_committed_evidence=true 时返回 commit_required 清单，提交后 check 才通过 |
+| check | 只读核对状态、定义、依赖、历史、证据和预算；错误按所属任务分区，其他任务的记录问题不阻止当前任务 |
 | cards | 重新生成任务卡、三个看板和 PROJECT_STATE，不覆盖手写文件 |
 | boards | 校验后重新生成三个看板 |
 | snapshot / definition / stamp | 底层快照、定义摘要和时间辅助；普通任务由 prepare/begin 自动处理 |
@@ -42,7 +49,7 @@
 ~~~text
 python "【启动包】/workflow.py" bootstrap --root "【目标项目】" --kind refactor --host "【当前宿主名称】"
 python "【启动包】/workflow.py" bootstrap --root "【目标项目】" --kind refactor --host "【当前宿主名称】" --source "实际用户选择工作流的指令" --write
-python .workflow-kit/scripts/project_workflow.py start --root "【目标项目】"
+python .workflow-kit/scripts/project_workflow.py resume --root "【目标项目】"
 ~~~
 
 新项目将 kind 换成 new。bootstrap 不带 --write 只预览，不能把预览的 ok 当作已连接。默认生成必要文档，--full-docs 才生成额外模板。初次接入另一个项目使用完整包；已接入项目可由其配套工具核对状态。
@@ -105,7 +112,7 @@ self_review 仅在政策允许时使用。JSON 形状见 .workflow-kit/tasks/tem
 
 Agent 包办不强制自审。需要独立审查时先运行 review-packet --task，把中立输入交给未参与实现的新 Agent 上下文（同模型可用），再由总控以实际审查上下文 ID 记录 review --mode independent。高风险任务也要求独立。不能只改 --context 的字符串，也不能把作者会话复制后称为新审查。
 
-所有通过报告提供 verification_run 和五项 review_checks：requirements、regression、failure_paths、maintainability、performance，每项给 status、analysis、evidence_files。PASS 必须有真实证据，未检查项不能靠空摘要放行。报告与当前验证和候选绑定，规则及完整结构见 [REVIEW](prompts/REVIEW.md)。
+所有通过报告提供 verification_run 和五项 review_checks：requirements、regression、failure_paths、maintainability、performance，每项给 status、analysis、evidence_files。PASS 必须有真实证据，未检查项不能靠空摘要放行。evidence_files 只能是候选快照内的文件，或 .workflow-kit/tasks/runs、.workflow-kit/tasks/evidence 下的附件；引用任务条目、卡片、决定或笔记会被拒绝，因为这些文件由工具改写，会让审查自我失效。报告与当前验证和候选绑定，规则及完整结构见 [REVIEW](prompts/REVIEW.md)。
 
 ## 已有项目的测试适用性
 
@@ -141,7 +148,7 @@ DEC-sort-order 的 scope 须覆盖本任务 ID 或 requirement_refs 中的需求
 
 behavior=preserve 表示原有行为保持，可新增覆盖或以 adapt 调整测试入口/夹具，无需再要求用户批准技术适配。replace/retire 用于改变/删除业务契约，需要对应用户决定；retire 的 gate_ids 为空，其他必需检查不能消失。纯新项目可继续用普通 gates；该字段默认 null，已有项目在实施前由 Agent 填写。
 
-prepare 检查这份记录、固定原始基线附件并冻结计划，只对准确列出的前序门禁停止继承，其他检查继续带入。检查只能核对引用与结构；审查者还须判断新测试是否真正证明需求，没有删掉仍有效的保护。
+prepare 检查这份记录、固定原始基线附件并冻结计划，只对准确列出的前序门禁停止继承，其他检查继续带入。检查只能核对引用与结构；审查者还须判断新测试是否真正证明需求，没有删掉仍有效的保护。prepare 一次返回全部问题并给出字段的正确形态；决定的 scope 写成字符串会按单元素列表处理并在报错中显示双方实际值。已知会失败的门禁参数（如 `npm build`、`cargo run test`）在 prepare 阶段就被拒绝。
 
 ## 有界面的项目
 
@@ -151,9 +158,25 @@ UI 变更用 ui_change=true，review 报告提供 ui_review：约定路径、che
 
 依赖任务通过后才 prepare 下一张卡。dependencies 继承前序快照根和仍有效的必需回归命令；经 test_review 明确适配/替换/退役的门禁除外。历史原始结果保留，当前范围不自动扩大写权限。任务粒度以一个可验证增量为准，不为每个小编辑建卡。
 
+## 阻塞的出口
+
+失败类别有两族。test_failure / review_failure / network / interrupted / environment / budget 由 run 或 begin 按既有规则接续；scope / protocol / action_required / evidence 需要一次明确处置：先读任务卡最近检查点和 `<RUN>-changes.json`，撤销越界改动或确认归属，再运行：
+
+~~~text
+python .workflow-kit/scripts/project_workflow.py unblock --task TASK-001 --source "用户或总控的决定" --note "核对了什么、为何可以继续"
+~~~
+
+unblock 默认把任务放回 ready（重新 begin/finish），evidence 类默认回到 verifying；可用 --to 指定。解锁或修复轮的 begin 记住本任务先前的基线（中间没有其他任务运行时），diff 同时给出本任务累计改动 changed_files 和本次运行改动 changed_this_run，finish 接受其中任一列表。放弃任务用 cancel。
+
+finish 的 protocol 报错会直接列出漏报（含删除）和多报的文件；先运行 `diff --run` 再填 changed_files 可以避免这类往返。工具自己改写的记录（任务条目、卡片、决定、日志、笔记）、各级目录 .gitignore 命中的路径（支持 ! 否定和目录规则）、常见构建目录都不计入改动。
+
+## 控制上下文消耗
+
+大项目最容易失败的不是某个命令，而是一个会话里读了太多东西。规则：日常轮次用 `next --format compact`，不贴完整 JSON、整份 BRIEF 或所有任务卡；start/next 的 read_next 只列本步需要的文档，其余按需再读；任务包和审查包只带本任务相关的需求、验收、兼容和质量目标；一个会话建议只做一张任务卡，每完成可恢复步骤就 checkpoint，影响后续判断的事实用 note 记下，然后新会话用 `resume` 接手。笔记和卡片都有长度上限：RESUME 最近 12 条事件、任务卡最近 8 个检查点、compact 十行。
+
 ## 恢复与预算
 
-先运行 start/next。仍有活动进程时检查日志并等待；不能启动第二个写入者。只有确认进程已退出，才用 recover 关闭未结束记录。未分配 RUN 的孤立锁也可以恢复。
+先运行 resume 或 start/next。仍有活动进程时检查日志并等待；不能启动第二个写入者。只有确认进程已退出，才用 recover 关闭未结束记录。未分配 RUN 的孤立锁也可以恢复。
 
 ~~~text
 python .workflow-kit/scripts/project_workflow.py recover --run "真实RUN编号" --source "已经核对进程、文件和日志的记录"
@@ -161,7 +184,7 @@ python .workflow-kit/scripts/project_workflow.py recover --source "孤立控制�
 python .workflow-kit/scripts/project_workflow.py extend --task TASK-001 --minutes 90 --repair-rounds 1 --source "用户明确同意追加额度的决定"
 ~~~
 
-追加预算保留原始截止时间，通过扩展记录给出新的有效期限；若旧期限已过，从本次决定的记录时间起追加。不能用示例 source 文本代替真实授权。原始费用限额不会随时间追加而改变。
+追加预算保留原始截止时间，通过扩展记录给出新的有效期限；若旧期限已过，从本次决定的记录时间起追加。不能用示例 source 文本代替真实授权。原始费用限额不会随时间追加而改变。默认时钟按活动时间计（clock=active）：只有实现/修复运行在跑时才消耗额度，断网、等待用户和只读门禁不计；extend 追加的分钟直接加到额度上。时钟只约束写入阶段：过期后 verify 和 review 仍可对已有候选运行，begin 需要先 extend。任务卡显示已用/额度。
 
 retry_safe 是准备任务时冻结的重复执行判断，默认 false。可重复任务的短时网络错误由 run 自动按原始 RUN 计数并退避，默认额外两次，等待 5、15 秒；不是无限恢复。CLI 单次默认 600 秒且受原任务剩余时间限制。连续相同失败而候选不变时返回 replan，由主 Agent 换方法，细节见 [RECOVERY](RECOVERY.md)。
 

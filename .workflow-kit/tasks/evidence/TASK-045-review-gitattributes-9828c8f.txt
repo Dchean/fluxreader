@@ -1,0 +1,5 @@
+# 统一仓库内为 LF，检出按平台；锁文件保持原样
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary

@@ -25,7 +25,19 @@
     "report": ".workflow-kit/tasks/evidence/RUN-9af613615df449bd84323fbdccd1dac5-review.json",
     "candidate_digest": "6fa96b0b9efe82244a0df1e8b82c9eacd989347ef37cb6011eea2a9b252bea4e",
     "ui_evidence_digest": "72de2a469453f46fe34cee79ef624de880300a85d16ce0b4cb1e7b279f49c9ba",
-    "quality_digest": "ff3c504199ecd67224f74d71c6cc0593616e81918bff63ec7d290d2275b943f6"
+    "quality_digest": "fb0690f2843d3f69c813693f615bcf525338caa6ea139f41d1c981e807898b22"
   },
-  "estimated_cost_usd": null
+  "estimated_cost_usd": null,
+  "recomputed": [
+    {
+      "at_utc": "2026-09-19T03:25:20.487354Z",
+      "source": "升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动",
+      "changed": {
+        "quality_digest": [
+          "ff3c504199ecd67224f74d71c6cc0593616e81918bff63ec7d290d2275b943f6",
+          "fb0690f2843d3f69c813693f615bcf525338caa6ea139f41d1c981e807898b22"
+        ]
+      }
+    }
+  ]
 }

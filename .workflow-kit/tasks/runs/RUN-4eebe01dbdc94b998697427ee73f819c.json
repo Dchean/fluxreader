@@ -24,7 +24,19 @@
     "verdict": "PASS",
     "report": ".workflow-kit/tasks/evidence/RUN-4eebe01dbdc94b998697427ee73f819c-review.json",
     "candidate_digest": "0002e6fcc83a8d4b6bb2622b225b2768712d6f150c788d5d59663afc0bdcb7e0",
-    "quality_digest": "3a5613140ce8ccedfa29641d5c562a77cdd90fe6ac4e6c94fd4340f451d23f50"
+    "quality_digest": "f54efb3273d25d326b55f99506e9e1bb6575dfcbf5368585f21b430c0658b472"
   },
-  "estimated_cost_usd": null
+  "estimated_cost_usd": null,
+  "recomputed": [
+    {
+      "at_utc": "2026-09-19T03:25:23.559598Z",
+      "source": "升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动",
+      "changed": {
+        "quality_digest": [
+          "3a5613140ce8ccedfa29641d5c562a77cdd90fe6ac4e6c94fd4340f451d23f50",
+          "f54efb3273d25d326b55f99506e9e1bb6575dfcbf5368585f21b430c0658b472"
+        ]
+      }
+    }
+  ]
 }

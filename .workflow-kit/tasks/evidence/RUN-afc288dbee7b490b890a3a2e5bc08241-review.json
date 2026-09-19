@@ -15,7 +15,7 @@
         "src/components/Reader.tsx",
         "src/components/Timeline.tsx",
         "src/components/SettingsModal.tsx",
-        "src/mockData.ts",
+        ".workflow-kit/tasks/evidence/TASK-041-review-mockData.ts-1aeaa07.ts",
         ".workflow-kit/tasks/evidence/TASK-041-05-add-feed-dialog.png",
         ".workflow-kit/tasks/evidence/TASK-041-interaction-report.md"
       ]
@@ -82,6 +82,17 @@
       ".workflow-kit/tasks/evidence/TASK-041-06-focus-ring-switch.png",
       ".workflow-kit/tasks/evidence/TASK-041-interaction-report.md",
       ".workflow-kit/tasks/evidence/RUN-9fa3a8cad77b4cefb83b4a86d2335108-frontend.stdout.txt"
+    ]
+  },
+  "citation_repair": {
+    "date_utc": "2026-09-19",
+    "reason": "workflow-kit 升级 2026-09-18.3：审查证据引用面收敛为候选文件或 tasks/evidence/、tasks/runs/ 附件；原报告引用的候选外工作区文件/已删除临时探针/可变任务记录按 RECOVERY 指引改指等价不可变记录，分析文字未改动。",
+    "replacements": [
+      {
+        "from": "src/mockData.ts",
+        "to": ".workflow-kit/tasks/evidence/TASK-041-review-mockData.ts-1aeaa07.ts",
+        "git_snapshot": "1aeaa079a5072e2408bb7def4f95362d12513920"
+      }
     ]
   }
 }

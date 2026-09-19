@@ -30,7 +30,7 @@ UI 约定同时记录实际用到的组件及状态：关闭/展开、默认/悬
 
 优先让预览代码直接演进为产品前端。不要先画一套静态页面，落地时再用另一套组件重写。mock 和真实接口保持相同数据结构，确认后逐步替换适配层。预览确认的是外观和交互，性能、真实权限、数据一致性等仍要在接入后验证。
 
-准备 kind=ui_preview 的任务。ui_change 自动为 true，必须提供 ui_contract_ref 和非空 ui_checks，例如实际使用下拉框时包含 select.closed、select.open、select.keyboard；还应包含目标设备的布局和核心交互检查。ui_checks 是这张任务需要验证的事实，不是装饰性字段。
+准备 kind=ui_preview 的任务。ui_change 自动为 true，必须提供 ui_contract_ref 和非空 ui_checks，例如实际使用下拉框时包含 select.closed、select.open、select.keyboard；还应包含目标设备的布局和核心交互检查。条目可以是 id 字符串，也可以是 {"id": "select.open", "description": "展开后选项完整、焦点环可见"}，审查按 id 匹配，描述只给人读。ui_checks 是这张任务需要验证的事实，不是装饰性字段。
 
 ## 真实检查和确认
 

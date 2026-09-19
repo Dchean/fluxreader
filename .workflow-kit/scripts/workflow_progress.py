@@ -93,9 +93,54 @@ def build(project, policy, brief, tasks, action=None, card_prefix="cards/", rese
     value["native_plan"] = [{"step": phase["title"] + "：" + phase["goal"],
         "status": "completed" if phase["status"] in {"已完成", "不适用"} else "in_progress" if phase["status"] == "当前" else "pending"}
         for phase in phases if phase["status"] != "不适用"]
+    # Host-neutral task list: the shape most todo/plan/task panels accept.
+    generic = {"running": "in_progress", "verifying": "in_progress", "review": "in_progress", "blocked": "blocked",
+               "ready": "pending", "draft": "pending", "verified": "completed", "done": "completed", "cancelled": "completed"}
+    value["native_tasks"] = [{"id": item["id"], "title": str(item["title"] or item["id"]),
+        "status": generic.get(item["status"], "pending"), "detail": item["status_label"],
+        "next": str(item.get("next_action") or "")} for item in items]
+    value["needs_user"] = user_decisions(value, action)
+    value["compact"] = render_compact(value)
     value["markdown"] = render(value)
-    value["display_instruction"] = "在对话中展示阶段目标、当前任务、阻塞与下一步；宿主确有原生计划/任务工具时按真实接口同步，否则直接展示 markdown。文件已生成不等于用户已看到。不要推算全项目百分比。"
+    value["display_instruction"] = ("展示分三档，按宿主实际能力选最高一档：1) 有原生任务/计划面板：用 native_tasks 同步任务、native_plan 同步阶段，对话里只说变化；"
+        "2) 没有面板：日常轮次贴 compact，首次、阶段切换、验收和阻塞时贴 markdown；3) 只能输出文本：同 2。"
+        "needs_user 非空时必须单独列出等用户决定的事项。文件已生成不等于用户已看到；不要推算全项目百分比。")
     return value
+
+
+def user_decisions(value, action):
+    """Everything waiting on the owner, so the user never has to search the transcript."""
+    items = ["回答：" + clean(question.get("question")) for question in action.get("questions", []) or []]
+    hints = {"accept_ui_preview": "查看可点击预览并确认视觉与交互（accept 或 feedback）",
+             "accept_or_prepare_next_authorized_task": "验收已验证的成果，或确认继续下一项已确认范围",
+             "budget_decision": "决定是否为当前任务追加时间/修复额度（extend）",
+             "unblock": "确认阻塞处置：撤销越界改动或认可归属后解锁（unblock）",
+             "prepare_or_finish_project": "核对未拆分需求；全部完成才确认项目交付",
+             "replan": "阅读失败证据后同意换一种实现方法",
+             "assessment_complete": "阅读评估结论，选择保持现状、局部修补、渐进重构或迁移"}
+    if action.get("next") in hints:
+        items.append(hints[action["next"]])
+    return items
+
+
+def render_compact(value):
+    """About ten lines: enough for a routine turn without re-pasting the whole board."""
+    counts = value["task_counts"]
+    lines = ["**" + clean(value["project"]) + " · " + clean(value["stage"]) + "**：" + clean(value["stage_goal"])]
+    active = [item for item in value["tasks"] if item["status"] in {"running", "verifying", "review", "blocked", "ready"}][:3]
+    for item in active:
+        lines.append("- " + clean(item["id"] + " " + str(item["title"])) + "：" + item["status_label"]
+                     + ("，下一步 " + clean(item["next_action"]) if item.get("next_action") else ""))
+    if not active and not value["tasks"]:
+        lines.append("- 尚未建立实施任务（不等于完成）")
+    lines.append(f"- 任务 {value['known_tasks']}：已验收 {counts.get('done', 0)}，待验收 {counts.get('verified', 0)}，阻塞 {counts.get('blocked', 0)}"
+                 + (f"；未拆分需求 {len(value['unplanned_requirements'])}" if value["unplanned_requirements"] else ""))
+    if value["blockers"]:
+        lines.append("- 阻塞：" + clean(value["blockers"][0]) + (f"（另 {len(value['blockers']) - 1} 项）" if len(value["blockers"]) > 1 else ""))
+    lines.append("- 下一步：" + value["next_action"])
+    if value["needs_user"]:
+        lines.append("- **需要你决定**：" + "；".join(value["needs_user"][:3]))
+    return "\n".join(lines) + "\n"
 
 
 def render(value):
@@ -132,6 +177,8 @@ def render(value):
     if value["deferred_requirements"]:
         lines += ["", "**本轮暂缓**：" + "；".join(clean(item["description"]) for item in value["deferred_requirements"])]
     lines += ["", "**阻塞**：" + ("；".join(clean(item) for item in value["blockers"][:3]) or "无已记录阻塞"),
-              "", "**下一步**：" + value["next_action"], "",
-              "任务数量只描述已建立的工作；完整目标、尚未拆分需求和最终验收仍须核对。"]
+              "", "**下一步**：" + value["next_action"]]
+    if value.get("needs_user"):
+        lines += ["", "**需要你决定**：" + "；".join(value["needs_user"])]
+    lines += ["", "任务数量只描述已建立的工作；完整目标、尚未拆分需求和最终验收仍须核对。"]
     return "\n".join(lines) + "\n"
