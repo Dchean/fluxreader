@@ -37,5 +37,6 @@
 | [TASK-060](items/TASK-060.json) | 补强 TASK-054 遗留的两个弱断言测试（P1/P4：缺陷复现必须导致测试失败） | done |
 | [TASK-061](items/TASK-061.json) | 删除 upsert_remote_entry 不可达的 existing 守卫分支（sync/entries.rs 死代码清理） | done |
 | [TASK-062](items/TASK-062.json) | 修复 OPML 导入每条根级订阅重复新建「导入」文件夹（REQ-101/N1） | done |
+| [TASK-063](items/TASK-063.json) | 接线 selectFeed 范围切换拉取：缓存命中同步恢复 + 未命中重拉，修复跨范围污染与重复卡片（REQ-101/N2） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

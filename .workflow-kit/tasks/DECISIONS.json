@@ -2093,6 +2093,20 @@
       "candidates": {
         "TASK-062": "92aea7ddd7d32f9bbbfe47b44b7fccc1b8e1ae7119de17ead396f9a2a7b6e235"
       }
+    },
+    {
+      "id": "DEC-120bbe0f72274742bb61f66049da6dc4",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户选择：验收 TASK-063，继续下一批（验收问答 2026-09-19）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-063"
+      ],
+      "recorded_at_utc": "2026-09-19T15:11:54.089438Z",
+      "candidates": {
+        "TASK-063": "7681dafd62b26c750a867fc5a698a59de46a225b11d4d4fd288590706484fbd2"
+      }
     }
   ]
 }

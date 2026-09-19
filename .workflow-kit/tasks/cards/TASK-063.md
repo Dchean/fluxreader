@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-063 · 接线 selectFeed 范围切换拉取：缓存命中同步恢复 + 未命中重拉，修复跨范围污染与重复卡片（REQ-101/N2）
 
-**状态**：verified
+**状态**：done
 
 **目标**：AUDIT-20260919-v2.md 新发现 N2（REQ-101，前端排查确认，P1）：nav.ts 的 selectFeed 只写 per-scope 游标镜像，注释宣称「由调用方随后拉取」，但 Sidebar.tsx 与 Overlays.tsx 的全部调用点均未接线任何 reload——点击订阅源后 entries 停留旧范围快照：① 目标源不在快照时空列表补拉 effect（Timeline.tsx 空列表分支）触发 loadMoreArticles，把该范围第 1 页**追加**进旧快照（全链路无按 id 去重）→ 切回「全部」同文双卡、虚拟滚动 duplicate key；② 目标源在快照中少量条目且不可滚动 → 该源自己的第 1 页永远拉不到；③ 可滚动场景 offset=0 补拉与旧快照交集重复。关键证据：回归测试 (s4) 在 selectFeed 后**手工调用 reloadFromBackend() 才通过**——测试模拟了 UI 中不存在的一步。修复（与 selectView 的缓存优先契约同构）：tauri 模式下 selectFeed 写完游标镜像后，查 viewEntriesCache（layout|view|新 scopeKey）——命中则同步恢复该范围快照（entries + applyArticlesCursor 收口游标 + 清 hydratedIds/hydrationErrors）并后台刷新；未命中直接后台重拉（view!=='all' 走 reloadFilteredEntries(view)，否则 reloadFromBackend()，两者都在发起时读取刚写入的 activeFeedFilter 且自带代际/竞态守卫）；mock 模式保持纯游标镜像不变。附带修复同类隐患：selectView 缓存命中恢复同样不清水合状态——水合守卫（reader.ts ensureArticleContent 的 art.content || hydratedIds[id] 短路）会对缓存快照（无正文）误判已水合，恢复到后台刷新落地之间社交/通知卡片正文空白且不会重水合；两处恢复统一补 hydratedIds:{}, hydrationErrors:{}（后台刷新本就会整体替换并清空，补齐消除空窗）。契约变更如实声明：范围切换的恢复语义从「保留旧 limit 数值但 entries 从不对齐」（缺陷行为）改为「恢复该范围快照并刷新（'all' 视图游标=快照长度，可继续翻页；筛选视图标记已到底）」——(s4) 末段「切回源A 恢复它自己的游标（1000）」随之更新为新契约。不改 loadMoreArticles 的追加逻辑与 Timeline 的补拉 effect（瞬态重复由重拉整体替换自愈，窗口亚秒级且 id 相同渲染无感）。
 
