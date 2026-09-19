@@ -67,6 +67,9 @@ pub struct MockGReader {
     pub subscription_edits: Mutex<Vec<(String, String)>>,
     /// 故障注入：置位后 GET stream/items/ids 返回 500（C-1 对账跳过测试用）
     pub fail_stream_ids: std::sync::atomic::AtomicBool,
+    /// 故障注入（TASK-060）：置位后 edit-tag 返回 500——推送失败、队列保留，
+    /// 用于构造「本地变更已入队未推送（pending）+ 远端陈旧状态」的场景。
+    pub fail_edit_tag: std::sync::atomic::AtomicBool,
     /// 故障注入（TASK-055）：置位后退订仍返回 200，但**服务端保留该订阅**——
     /// 模拟真实 GReader 后端在 token 失效/权限不足/目标不存在时「2xx + 未生效」的响应。
     pub unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool,
@@ -105,6 +108,7 @@ impl MockGReader {
             entries: Mutex::new(Vec::new()),
             subscription_edits: Mutex::new(Vec::new()),
             fail_stream_ids: std::sync::atomic::AtomicBool::new(false),
+            fail_edit_tag: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
             last_subscription_edit_form: Mutex::new(Vec::new()),
             status_updates: Mutex::new(Vec::new()),
@@ -168,6 +172,12 @@ impl MockGReader {
     /// `"/api/greader.php"` = FreshRSS 形态（子路径）。
     pub fn set_greader_api_prefix(&self, prefix: &str) {
         *self.greader_api_prefix.lock().unwrap() = prefix.to_string();
+    }
+
+    /// 置位后 edit-tag 返回 500（推送失败，客户端应保留队列待重试）。
+    pub fn set_fail_edit_tag(&self, fail: bool) {
+        self.fail_edit_tag
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 置位后 ClientLogin 一律 401（模拟凭据被拒）。
@@ -663,6 +673,9 @@ fn route(
         }
         // edit-tag：标读/收藏（a=加 tag, r=删 tag）
         ("POST", p) if p.ends_with("/reader/api/0/edit-tag") => {
+            if srv.fail_edit_tag.load(std::sync::atomic::Ordering::SeqCst) {
+                return (500, r#"{"error_message":"injected edit-tag failure"}"#.into());
+            }
             let form = parse_form(body);
             let ids: Vec<i64> = form
                 .get("i")

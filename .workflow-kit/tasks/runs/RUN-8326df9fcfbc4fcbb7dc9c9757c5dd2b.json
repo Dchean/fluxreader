@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-8326df9fcfbc4fcbb7dc9c9757c5dd2b",
+  "task_id": "TASK-060",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "independent-reviewer:agent_fece29ae-eeb6-40fc-83aa-0476b7636af8 (fresh context, did not write the code; independently reproduced M-P4 mutation capture)"
+  },
+  "started_at_utc": "2026-09-19T03:01:26.315466Z",
+  "finished_at_utc": "2026-09-19T03:01:26.357932Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "f379e9aa5bac383ffd7843f5514c2104b83f88b26f4b9bbbd2750a4dbd58d4c6",
+  "candidate_digest": "b78bd59472f1b2039667d7887f58177dfb3813c83b8b4a821a7cfd05c086687e",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-8326df9fcfbc4fcbb7dc9c9757c5dd2b-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-8326df9fcfbc4fcbb7dc9c9757c5dd2b-review.json",
+    "candidate_digest": "b78bd59472f1b2039667d7887f58177dfb3813c83b8b4a821a7cfd05c086687e",
+    "quality_digest": "85f58a231eccbba34cc5aad8dec88c19833eb2240dc9714472513644b53950f5"
+  },
+  "estimated_cost_usd": null
+}

@@ -1,0 +1,66 @@
+{
+  "task_id": "TASK-060",
+  "candidate_digest": "b78bd59472f1b2039667d7887f58177dfb3813c83b8b4a821a7cfd05c086687e",
+  "verification_run": "RUN-e6040878c41e4d729e86380954385c7d",
+  "verdict": "PASS",
+  "summary": "独立复查通过，本候选无需任何修改。审查者本人复现了变异 M-P4（db/sync_map.rs:91 pending 查询去掉 'read','unread' → IN ('star','unstar')）：P1（sync_content_e2e.rs::pending_local_read_wins_over_stale_remote_in_upsert）与 P4（sync_phases_e2e.rs::full_reconcile_backfills_missing_local_entries）在变异下双双失败（panic 分别位于 sync_content_e2e.rs:187:5 与 sync_phases_e2e.rs:346:9，与作者报告逐字一致），还原后（sha256 f54912e2… 与候选包一致，git diff src-tauri/src/ 为空）双双通过。四门禁全部由审查者本人重跑：cargo 161 passed / 0 failed / 9 ignored、lint 0 warnings / 0 errors（exit 0）、build exit 0、frontend 283/283，与绑定验证运行 RUN-e6040878c41e4d729e86380954385c7d（同一候选 b78bd594… 上的复核运行，四门禁 PASS，日志经审查者核查：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283）及 RUN-f156ccf35dd04532a6b85ad8d40023fd 记录和基线一致，两次运行之间工作区逐字节未变（关键文件 sha256 复验一致）。候选清单 145 个文件逐一 sha256 比对与工作区逐字节一致，验证运行确实跑在该候选上。产品代码零改动；改动仅限 3 个测试文件（+13/0、+33/6、+43/1，删除行均在两个目标测试体内），既有断言无弱化、无改名、无删除；无依赖改动；行尾 LF。作者关于 entries.rs:224 pending 守卫为不可达死代码的论证经静态追踪确认正确（merge_pulled_entry 的 aid 两路查找是 upsert_remote_entry 的 existing 两路查找的超集，且中间无 map 变更；upsert 仅有一个调用点），未删除该死分支（测试任务边界 + 待 owner 确认）是正确处置，:224 变异不可捕获被如实记录而非伪造。遗留事项（不阻塞本验收、不属于本候选的修改项）：(a) entries.rs:209-228 的 pending 守卫分支（:224）是先于本任务就存在的不可达死代码——本候选对 src-tauri/src/** 零改动，任务 non_goals 明确排除产品改动，故它是对 owner 的遗留跟进项而非本交付的缺陷；建议 owner 确认后另立产品代码任务删除该分支或就地加注释指明真实守卫位于 merge_remote_status:76，避免后续任务再按错误行号做捕获性验证。(b) 因审查授权仅允许变异 sync_map.rs，M-P1a（entries.rs:76 守卫删除）未由审查者本人实测复现，改为静态路径追踪确认其必然使 P1 失败，与作者提供的失败输出一致。verdict=PASS。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务目标（补强 P1/P4 使缺陷复现导致测试失败，产品代码零改动）逐项达成。P4 捕获力由审查者本人复现：M-P4 变异下 P4 测试失败（panic sync_phases_e2e.rs:346:9「pending 守卫必须生效」），还原后通过——成对证据完整。P1 捕获力：M-P4 变异下 P1 测试同样失败（panic sync_content_e2e.rs:187:5，与作者报告一致）；其记载变异点 :224 实为先于本任务存在的不可达死代码（本候选对 src-tauri/src/** 零改动，non_goals 明确排除产品改动，故非本交付缺陷，见 summary 遗留事项 (a)），作者以真实守卫路径（merge_remote_status :76，M-P1a）达成捕获意图并如实记录 :224 不可捕获，未伪造证据。非目标全部遵守：git diff src-tauri/src/ 为空、无新依赖（Cargo.toml/Cargo.lock/package.json 零改动）、.workflow-kit/scripts 与 binding.json 未动、allowed_paths 中的 tools/** 未被越权使用。test_review 三动作（adapt P1 / adapt P4 / keep 其余）与实际 diff 一一对应。",
+      "evidence_files": [
+        ".workflow-kit/tasks/items/TASK-060.json",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
+        "src-tauri/tests/sync_content_e2e.rs",
+        "src-tauri/tests/sync_phases_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        ".workflow-kit/tasks/evidence/TASK-060-report.md",
+        ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
+        ".workflow-kit/tasks/evidence/TASK-054-report.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "四门禁由审查者本人重跑实测：cargo test 161 passed / 0 failed / 9 ignored（=基线，passed 未减、ignored 未增）；npm run lint 0 warnings / 0 errors exit 0；npm run build exit 0；npm run test:frontend 283/283（26 既有回归 + 257 新增断言全过）。作者 RUN-f156ccf35dd04532a6b85ad8d40023fd 的四份 stdout 证据经核查与本人实测数字完全一致，且候选清单 145 个文件 sha256 与当前工作区逐一相符（missing=0, mismatch=0），证明该 RUN 确实跑在此候选上。git diff --numstat 显示改动仅 3 个测试文件（mock_greader +13/-0、sync_content_e2e +33/-6、sync_phases_e2e +43/-1），删除行全部位于两个目标测试体内（旧注释/旧断言文案替换、_aid→aid 改名），其余 15 个 Rust e2e 文件与全部前端文件零改动——无既有保护被弱化、删除或改名。变异-还原配对完整：M-P4 下两测试失败，还原（sha256 复验 f54912e2…）后两测试通过，且全量 cargo 0 failed。审查范围说明（非交付缺陷）：审查授权仅允许临时变异 sync_map.rs，故 M-P1a（entries.rs:76）与 M-P1b（entries.rs:224）未由审查者本人实测复现——M-P1a 的「变异⇒失败」证据依赖作者提供的失败输出（panic 位置 sync_content_e2e.rs:187:5 与审查者本人 M-P4 复现的 panic 位置相同，机理一致，并经审查者静态路径追踪确认：守卫删除后 accept_unread=true 必然覆盖本地已读使断言失败）；M-P1b「变异⇒仍通过」由该分支的静态不可达性证明背书（见 summary 遗留事项 (a)）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-f156ccf35dd04532a6b85ad8d40023fd-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-f156ccf35dd04532a6b85ad8d40023fd-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-f156ccf35dd04532a6b85ad8d40023fd-candidate.json",
+        ".workflow-kit/tasks/runs/RUN-f156ccf35dd04532a6b85ad8d40023fd.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "两个补强测试本身就是失败路径测试，审查者核对了其机制链路的每一环：(1) 注入 fail_edit_tag 使 mock 的 edit-tag 路由返回 500；(2) greader mark_read 走 POST edit-tag（greader.rs:477-481）报错；(3) exec_push 失败项不进 done、prune_sync 只清 done（push.rs:101-112,178-183）⇒ 队列保留；(4) pull 构建 sync_match_maps 时 sync_map.rs:91 的查询命中队列 ⇒ pending_ids 包含该 aid；(5) 条目按 URL/remote-id 命中 is_own 路径 ⇒ merge_remote_status 的 :76 守卫跳过覆盖 ⇒ 本地已读存活。测试在断言状态前先断言 report.errors 非空与队列保留（前提自检），防止前提失效时断言恒真——这正是旧版弱断言的病根。M-P4 实测（审查者本人）：切断第 (4) 环后两测试立即失败，证明断言对守卫输入真实敏感。反向场景（无 pending 时远端已读按对账收敛）由既有测试 stale_remote_read_converges_via_full_reconcile 继续覆盖，双向语义无回归。entries.rs:224 死分支作为失败路径核对的一部分已静态确认不可达（真实守卫在 merge_remote_status:76），属先于本任务存在的遗留项，见 summary 遗留事项 (a)。",
+      "evidence_files": [
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/tests/sync_content_e2e.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "mock 注入完全沿用既有 fail_stream_ids 模式（AtomicBool 字段 + set_ 前缀 setter + 路由入口单点检查），无新抽象、无重复；两个测试内嵌注释准确记录了「函数名沿用历史命名、真实保护路径在 merge_remote_status」这一坑位，直接回应了 TASK-054 按行号补强的失误根源，降低后续维护者重复踩坑概率。测试复用既有 setup/seed_local_article 助手，未复制粘贴基础设施。作者对 entries.rs:224 死分支的处置（实测探针确认不可达、报告如实记录、搁置待 owner 确认，而非在测试任务里顺手删产品代码）符合 non_goals 边界纪律；该死分支是先于本任务存在的遗留维护负担，建议的后续处置（owner 确认后另立产品任务删除或加注释指路）已载入 summary 遗留事项 (a)，不构成本候选的修改项。唯一保留的命名瑕疵（测试名 ..._in_upsert 实走 merge 路径）是任务约束「不改名」下的正确取舍，注释已就地说明。",
+      "evidence_files": [
+        "src-tauri/tests/mock_greader.rs",
+        "src-tauri/tests/sync_phases_e2e.rs",
+        "src-tauri/tests/sync_content_e2e.rs",
+        "src-tauri/src/sync/entries.rs",
+        ".workflow-kit/tasks/evidence/TASK-060-report.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本任务为纯测试改动（3 个测试文件），产品代码 src-tauri/src/** 与前端 src/** 逐字节未变（git diff 为空，145 文件 sha256 与候选一致），不存在任何运行时性能面。被测试的消费方 sync_match_maps 本身已是批量预取设计（5 次批量查询替代 N+1），本轮未触碰其查询形态（M-P4 变异仅在取证期间临时存在且已逐字节还原）。",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": null
+}

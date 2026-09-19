@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-91767d08e28d4534830e31b4fe3a37ed",
+  "task_id": "TASK-060",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "host agent implementation: strengthen the two weak tests left by TASK-054 (P1 pending_local_read_wins_over_stale_remote_in_upsert, P4 full_reconcile_backfills_missing_local_entries) so the documented mutations are caught; test-only, no product behavior change"
+  },
+  "started_at_utc": "2026-09-19T02:04:54.153667Z",
+  "finished_at_utc": "2026-09-19T02:33:16.404834Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "f379e9aa5bac383ffd7843f5514c2104b83f88b26f4b9bbbd2750a4dbd58d4c6",
+  "candidate_digest": "b78bd59472f1b2039667d7887f58177dfb3813c83b8b4a821a7cfd05c086687e",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-91767d08e28d4534830e31b4fe3a37ed-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-91767d08e28d4534830e31b4fe3a37ed-scope.json"
+}

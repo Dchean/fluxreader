@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-060 · 补强 TASK-054 遗留的两个弱断言测试（P1/P4：缺陷复现必须导致测试失败）
 
-**状态**：ready
+**状态**：verified
 
 **目标**：TASK-054 的捕获性验证发现 4 个代表用例中 2 个不具备捕获力：P1（sync_content_e2e.rs::pending_local_read_wins_over_stale_remote_in_upsert，变异 entries.rs:224 的 pending 守卫后仍通过——根因是 mock 的 edit-tag 在 push 成功时把远端条目翻成 read，pull 读回的状态与本地一致，断言无法区分）与 P4（sync_phases_e2e.rs::full_reconcile_backfills_missing_local_entries，变异 db/sync_map.rs 的 pending 查询去掉 read/unread 动作过滤后仍通过，独立审查复现）。本任务补强这两个测试，使「缺陷复现 ⇒ 测试失败」成立，并以变异验证留证：对每个测试施加其文档记载的变异，测试必须失败；还原变异后必须通过。不改任何产品代码语义，不动推送顺序/对账口径/入队条件/墓碑语义。
 
@@ -34,19 +34,33 @@
 
 ## 执行与恢复
 
-- 首次开始：None
-- 原截止时间：None
-- 当前截止时间：None
-- 已用修复轮：0
+- 首次开始：2026-09-19T02:04:54.152302Z
+- 原截止时间：2026-09-19T06:04:54.152302Z
+- 当前截止时间：2026-09-19T06:04:54.152302Z
+- 已用修复轮：1
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 最近检查点
 
+- 2026-09-19T02:04:54.265323Z：开始执行，保留原任务身份和截止时间；下一步：完成当前修改后调用 finish，再运行 verify
+- 2026-09-19T02:33:16.463645Z：编码结果已记录，差异范围已核对；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-19T02:33:48.875662Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-19T02:47:38.372339Z：Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-09-19T02:51:01.659718Z：开始执行，保留原任务身份和截止时间；下一步：完成当前修改后调用 finish，再运行 verify
+- 2026-09-19T02:51:27.545682Z：编码结果已记录，差异范围已核对；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-19T02:51:46.973977Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-19T03:01:28.081270Z：当前候选的测试与审查通过；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 原始证据
 
 [唯一状态记录](../items/TASK-060.json)
 
+- [RUN-91767d08e28d4534830e31b4fe3a37ed](../runs/RUN-91767d08e28d4534830e31b4fe3a37ed.json)
+- [RUN-f156ccf35dd04532a6b85ad8d40023fd](../runs/RUN-f156ccf35dd04532a6b85ad8d40023fd.json)
+- [RUN-92df5bb83b6148cc81737f31e8cffc5b](../runs/RUN-92df5bb83b6148cc81737f31e8cffc5b.json)
+- [RUN-0dc38d4a8dce4f78817f4315a0594c77](../runs/RUN-0dc38d4a8dce4f78817f4315a0594c77.json)
+- [RUN-e6040878c41e4d729e86380954385c7d](../runs/RUN-e6040878c41e4d729e86380954385c7d.json)
+- [RUN-8326df9fcfbc4fcbb7dc9c9757c5dd2b](../runs/RUN-8326df9fcfbc4fcbb7dc9c9757c5dd2b.json)
 
 卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

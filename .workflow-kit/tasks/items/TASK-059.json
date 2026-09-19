@@ -294,7 +294,8 @@
     "owner_decision_ids": [
       "DEC-0a8661d6173f4d80840991f9f6b4a3af"
     ],
-    "merge_ref": "commit d9dcb16 fix(sync): TASK-059 Endpoint 自动适配——只填域名即可连接（FreshRSS/Miniflux 双协议）；push/release 仍按 DEC-endpoint-autodetect-20260918 待 owner 单独确认"
+    "merge_ref": "commit d9dcb16 fix(sync): TASK-059 Endpoint 自动适配——只填域名即可连接（FreshRSS/Miniflux 双协议）；push/release 仍按 DEC-endpoint-autodetect-20260918 待 owner 单独确认",
+    "continued_by": "TASK-060"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

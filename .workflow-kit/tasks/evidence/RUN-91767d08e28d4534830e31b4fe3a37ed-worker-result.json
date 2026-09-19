@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-060",
+  "run_id": "RUN-91767d08e28d4534830e31b4fe3a37ed",
+  "status": "ready_for_verification",
+  "summary": "补强 TASK-054 遗留的两个弱断言测试（测试侧改动，产品代码零改动：git diff src-tauri/src/ 为空）。共同前提：mock 新增 fail_edit_tag 注入（edit-tag 500 → 推送失败、队列保留 → pull 时本地变更仍 pending，同时远端保持陈旧未读）。P1（sync_content_e2e::pending_local_read_wins_over_stale_remote_in_upsert）重写场景并三段断言（报告含注入失败 / 队列保留 / 本地已读存活）；探针实测确认本场景真正保护路径是 merge_remote_status（entries.rs:76）的 pending 守卫，而非 upsert（:224）——并发现 :224 的 Some 分支从当前调用图不可达（merge 与 upsert 的 existing 查找完全相同，进 upsert 时 existing 必为 None），属死代码，已作为发现上报（测试侧不掩盖：对 :224 施加变异测试仍通过，如实记录为「分支不可达」而非伪造捕获）。P4（sync_phases_e2e::full_reconcile_backfills_missing_local_entries）追加 pending 保护段（守卫消费 db/sync_map.rs:91 的共享 pending 查询）。变异取证（成对）：M-P1a 删除 :76 守卫 → P1 测试 FAILED；M-P4 pending 查询去掉 read/unread → P1 与 P4 测试均 FAILED；还原后全部通过，git diff src-tauri/src/ 为空。四门禁全绿：cargo 161/0/9（基线 161/0/9，不改测试数）、lint 0/0、build exit 0、frontend 283/283。证据：.workflow-kit/tasks/evidence/TASK-060-report.md。",
+  "changed_files": [
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

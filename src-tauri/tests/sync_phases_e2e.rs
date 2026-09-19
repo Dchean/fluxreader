@@ -250,7 +250,7 @@ async fn stale_remote_read_converges_via_full_reconcile() {
 async fn full_reconcile_backfills_missing_local_entries() {
     let (db, http, server) = setup("backfill").await;
     // 本地造一篇直连文章 + 绑定远端 feed 10
-    let (_aid, _mf) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
+    let (aid, _mf) = seed_local_article(&db, &server, "http://127.0.0.1:8765/post/1").await;
     // feeds 阶段绑定本地 feed → 远端 feed 10
     sync::feeds_phase(&db, &http)
         .await
@@ -306,4 +306,46 @@ async fn full_reconcile_backfills_missing_local_entries() {
             .unwrap()
     };
     assert_eq!(before, after, "二次 full 同步不应重复入库（幂等）");
+
+    // ---- 补强（TASK-054 P4）：对账补拉时，本地「已入队未推送」的已读不得被
+    // 远端陈旧未读覆盖。之前这个测试完全没有 pending 数据，所以「pending 查询
+    // 去掉 read/unread 动作过滤」的变异无法被观察到（TASK-054 捕获性验证结论）。
+    //
+    // 构造：edit-tag 返回 500 → 推送失败、队列保留（pending 命中守卫）；
+    // 远端条目保持未读（服务端没有应用我们的标记）。守卫消费的是
+    // db/sync_map.rs:91 的共享 pending 查询——该查询的变异由本段捕获。
+    server.set_fail_edit_tag(true);
+    {
+        let conn = db.lock().await;
+        db::set_read(&conn, aid, true).unwrap();
+        db::enqueue_sync(&conn, Some(aid), None, "read", None).unwrap();
+    }
+    let report = sync::states_phase(&db, &http, true)
+        .await
+        .expect("full reconcile with pending read");
+    assert!(
+        !report.errors.is_empty(),
+        "前置条件：edit-tag 注入的失败应体现在同步报告里"
+    );
+    {
+        let conn = db.lock().await;
+        // 队列必须还在（推送确实失败了，本地变更仍待推）——pending 是本段的前提
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE article_id = ?1 AND action = 'read'",
+                [aid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(queued > 0, "推送失败后队列应保留（pending 前提）");
+        let is_read: bool = conn
+            .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| {
+                r.get::<_, i64>(0).map(|v| v != 0)
+            })
+            .unwrap();
+        assert!(
+            is_read,
+            "pending 守卫必须生效：本地已读不得被陈旧的远端未读覆盖"
+        );
+    }
 }

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-92df5bb83b6148cc81737f31e8cffc5b",
+  "task_id": "TASK-060",
+  "kind": "review",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "independent-reviewer:agent_fece29ae-eeb6-40fc-83aa-0476b7636af8 (fresh context, did not write the code; independently reproduced M-P4 mutation capture)"
+  },
+  "started_at_utc": "2026-09-19T02:47:37.958638Z",
+  "finished_at_utc": "2026-09-19T02:47:38.335489Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "f379e9aa5bac383ffd7843f5514c2104b83f88b26f4b9bbbd2750a4dbd58d4c6",
+  "candidate_digest": "b78bd59472f1b2039667d7887f58177dfb3813c83b8b4a821a7cfd05c086687e",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-92df5bb83b6148cc81737f31e8cffc5b-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-92df5bb83b6148cc81737f31e8cffc5b-review.json",
+    "candidate_digest": "b78bd59472f1b2039667d7887f58177dfb3813c83b8b4a821a7cfd05c086687e"
+  },
+  "estimated_cost_usd": null,
+  "failure_kind": "review_failure",
+  "failure_reason": "Review requires changes; inspect the findings"
+}

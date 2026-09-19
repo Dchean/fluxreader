@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-0dc38d4a8dce4f78817f4315a0594c77",
+  "task_id": "TASK-060",
+  "kind": "repair",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "repair: 终版审查 PASS（findings 重定界后），无代码改动；重新入账"
+  },
+  "started_at_utc": "2026-09-19T02:51:01.536663Z",
+  "finished_at_utc": "2026-09-19T02:51:27.506558Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "f379e9aa5bac383ffd7843f5514c2104b83f88b26f4b9bbbd2750a4dbd58d4c6",
+  "candidate_digest": "b78bd59472f1b2039667d7887f58177dfb3813c83b8b4a821a7cfd05c086687e",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-0dc38d4a8dce4f78817f4315a0594c77-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-0dc38d4a8dce4f78817f4315a0594c77-scope.json"
+}

@@ -94,10 +94,23 @@ async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
     }
 }
 
-/// ② 本地待推变更保护：upsert_miniflux_entry 不得用远端旧状态覆盖本地未推的已读。
+/// ② 本地待推变更保护：本地已读已入队未推送（推送失败、队列保留）时，
+/// pull 读回的**陈旧远端未读**不得把本地翻回未读（防乒乓）。
+///
+/// **路径说明（补强时实测确认）**：本场景（同 feed、同 URL 绑定）走
+/// `merge_remote_status` 的 pending 守卫——不是 `upsert_remote_entry` 里那份
+/// （函数名沿用 TASK-054 的历史命名）。补强时用探针实测：旧版场景里 mock 的
+/// edit-tag 会把远端翻成已读，pull 读回的状态与本地一致，**守卫删掉也照样通过**
+/// ——这正是 TASK-054 P1「变异未捕获」的根因。本版让远端保持陈旧未读
+/// （edit-tag 500 ⇒ 推送失败 ⇒ 队列保留 ⇒ pending 命中守卫），
+/// 删除守卫的变异会使本测试失败（取证见任务证据）。
 #[tokio::test]
 async fn pending_local_read_wins_over_stale_remote_in_upsert() {
     let (db, http, server) = setup("pending_upsert").await;
+
+    // 注入：edit-tag 返回 500 → 推送失败、队列保留 → pull 时本地变更仍处于 pending；
+    // 同时远端条目保持未读（服务端没有应用我们的标记——陈旧视图）
+    server.set_fail_edit_tag(true);
 
     // 服务端 feed 10 已有该条目（unread），拿到真实 entry id
     let mf_id = server.add_entry_ret(
@@ -142,25 +155,39 @@ async fn pending_local_read_wins_over_stale_remote_in_upsert() {
         };
         let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
         db::set_article_remote_id(&conn, aid, mf_id).unwrap();
-        // 本地标读并入队（待推），服务端仍是 unread
+        // 本地标读并入队（待推）；edit-tag 失败 ⇒ pull 时仍是 pending
         db::set_read(&conn, aid, true).unwrap();
         db::enqueue_sync(&conn, Some(aid), None, "read", None).unwrap();
         aid
     };
 
-    // 直接跑 states 阶段（full）：push 阶段会把 read 推上去（mock 回写 read），
-    // 随后 pull 阶段全量条目里该 entry 已是 read。关键验证：本地已读不被覆盖。
-    let _ = sync::states_phase(&db, &http, true)
+    let report = sync::states_phase(&db, &http, true)
         .await
         .expect("states phase");
+    assert!(
+        !report.errors.is_empty(),
+        "前置条件：edit-tag 注入的失败应体现在同步报告里"
+    );
 
     let conn = db.lock().await;
+    // 队列必须还在（推送确实失败了，本地变更仍待推）——pending 是本测试的前提
+    let queued: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE action = 'read'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(queued > 0, "推送失败后队列应保留（pending 前提）");
     let is_read: bool = conn
         .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| {
             r.get::<_, i64>(0).map(|v| v != 0)
         })
         .unwrap();
-    assert!(is_read, "local read must survive (no ping-pong)");
+    assert!(
+        is_read,
+        "pending 守卫必须生效：本地已读不得被陈旧的远端未读覆盖"
+    );
 }
 
 /// ⑥ 封面污染回归：Miniflux entry 带音频 enclosure（播客），enclosure 是
