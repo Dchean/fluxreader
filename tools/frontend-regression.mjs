@@ -440,6 +440,11 @@ await (async () => {
     aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
     aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
     detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
+    /* TASK-063：视图缓存是模块级 Map，跨用例残留会让下一个用例的 selectFeed
+       命中上一个夹具的快照（跨夹具污染）。每个用例独立起步（(s6) 此前已就地
+       手工 clear，这里收口为公共 hygiene；动态导入与 (s) 块同一模块实例）。 */
+    const { viewEntriesCache } = await import('../dist-test/store/internals.js');
+    viewEntriesCache.clear();
     store.setState({
       dataMode: 'tauri', dataLoading: false, bootstrapError: null,
       activeContentLayout: 'article', activeViewFilter: 'all', activeFeedFilter: 'all',
@@ -1582,16 +1587,19 @@ await (async () => {
     && s1Second.articlesLimit === 1000 && s1Second.articlesCursor['10'] === 1000);
 
   /* ---------- (s4) per-scope 游标互不污染：A 源翻到第 2 页后切 B 源，B 从第 1 页开始 ---------- */
+  /* TASK-063：selectFeed 自带接线（缓存命中恢复 / 未命中自动重拉）——此处不再
+     手工调用 reloadFromBackend（旧写法模拟了 UI 中不存在的一步，掩盖了 Sidebar
+     未接线的事实），改为等待 selectFeed 自身触发的重拉落地。 */
+  invokeCalls.length = 0;
   store.getState().selectFeed('11');
   const s4Switch = store.getState();
   checkNew('(s4) 切到未曾加载的源B：游标从 0 起步（不继承源A 的 1000）',
     s4Switch.activeFeedFilter === '11' && s4Switch.articlesLimit === 0
     && s4Switch.articlesCursor['10'] === 1000 && s4Switch.articlesCursor['11'] === undefined);
-  invokeCalls.length = 0;
-  await store.getState().reloadFromBackend();
+  await nTick(30);
   const s4FirstCall = invokeCalls.find((c) => c.cmd === 'list_articles');
   const s4First = store.getState();
-  checkNew('(s4) 源B 首批：查询按源B 的第 1 页取（feed_id=11 / offset=0，不是源A 的 1000），条目全属源B',
+  checkNew('(s4) selectFeed 自动重拉：源B 首批查询按源B 的第 1 页取（feed_id=11 / offset=0），条目全属源B',
     s4FirstCall?.args.args.feed_id === 11 && s4FirstCall?.args.args.offset === 0
     && s4First.entries.length === 500 && s4First.entries.every((e) => e.feedId === '11')
     && s4First.articlesCursor['11'] === 500 && s4First.articlesCursor['10'] === 1000
@@ -1602,11 +1610,39 @@ await (async () => {
   checkNew('(s4) 源B 翻页用**源B 自己的游标**（offset=500 而非源A 的 1000）',
     s4Call?.args.args.feed_id === 11 && s4Call?.args.args.offset === 500
     && store.getState().articlesCursor['11'] === 1000 && store.getState().articlesCursor['10'] === 1000);
-  /* 切回源A：游标被恢复（而不是从 0 重来，也不是继承源B） */
+  /* 切回源A：TASK-063 新契约——缓存命中同步恢复该范围快照（零延迟，不经 await），
+     游标=快照长度（500，可继续翻页）；源B 的游标 1000 不被污染。恢复时清水合
+     状态（缓存快照无正文，滞留的已水合标记会阻断重水合）。 */
+  store.setState({ hydratedIds: { '999': true }, hydrationErrors: { '998': 'x' } });
   store.getState().selectFeed('10');
-  checkNew('(s4) 切回源A 恢复它自己的游标（1000），两源游标互不污染',
-    store.getState().articlesLimit === 1000 && store.getState().articlesCursor['10'] === 1000
-    && store.getState().articlesCursor['11'] === 1000);
+  const s4Back = store.getState();
+  checkNew('(s4) 切回源A：同步恢复该范围快照（零延迟），游标=快照长度且两源互不污染，滞留水合状态被清空',
+    s4Back.entries.length === 500 && s4Back.entries.every((e) => e.feedId === '10')
+    && s4Back.articlesLimit === 500 && s4Back.articlesCursor['10'] === 500
+    && s4Back.articlesCursor['11'] === 1000
+    && Object.keys(s4Back.hydratedIds).length === 0 && Object.keys(s4Back.hydrationErrors).length === 0);
+  await nTick(30);
+  checkNew('(s4) 切回源A 后的后台刷新保持该范围快照结论',
+    store.getState().entries.every((e) => e.feedId === '10') && store.getState().articlesCursor['10'] === 500);
+
+  /* ---------- (s4b) TASK-063 附加契约：selectView 缓存恢复同契约清滞留水合状态；mock 模式不接线 ---------- */
+  await bootFixture();
+  store.setState({ activeViewFilter: 'starred' });
+  await store.getState().reloadFilteredEntries('starred');
+  store.setState({ activeViewFilter: 'all', entries: [], hydratedIds: { '888': true }, hydrationErrors: { '887': 'y' } });
+  store.getState().selectView('starred');
+  checkNew('(s4b) selectView 缓存命中恢复：滞留水合状态被清空（缓存快照无正文，防「永不重水合」空窗）',
+    store.getState().activeViewFilter === 'starred'
+    && store.getState().entries.length > 0
+    && Object.keys(store.getState().hydratedIds).length === 0
+    && Object.keys(store.getState().hydrationErrors).length === 0);
+
+  await resetStore({ dataMode: 'mock' });
+  invokeCalls.length = 0;
+  store.getState().selectFeed('11');
+  checkNew('(s4b) mock 模式 selectFeed 保持纯游标镜像：不触发 IPC、不翻转数据模式',
+    store.getState().dataMode === 'mock' && store.getState().activeFeedFilter === '11'
+    && !invokeCalls.some((c) => c.cmd === 'list_articles'));
 
   /* ---------- (s2) 单分类视图：同一口径成立（folder_id） ----------
      分类 cat-1 = 源10 + 源12；每源 600 条，全局 1200 条。分类的第 2 页

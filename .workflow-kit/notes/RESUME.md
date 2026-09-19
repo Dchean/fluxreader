@@ -28,11 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 34 项：已验收 32，待验收 1，阻塞 0。
+已建任务 35 项：已验收 33，待验收 1，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-062 · 修复 OPML 导入每条根级订阅重复新建「导入」文件夹（REQ-101/N1）](<../tasks/cards/TASK-062.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-063 · 接线 selectFeed 范围切换拉取：缓存命中同步恢复 + 未命中重拉，修复跨范围污染与重复卡片（REQ-101/N2）](<../tasks/cards/TASK-063.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -45,7 +45,7 @@
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 22 项记录可在任务总览查看。
+另有 23 项记录可在任务总览查看。
 
 **已确认但尚未拆分的需求**：体检发现的 P2 缺陷逐项修复（N3~N11）：手动刷新全部忽略 smartDedup（scheduler.rs:104）；已删订阅重新添加墓碑不清→pull 永久跳过+队列老化物理删除（folders.rs:141-186/opml.rs:52）；「今天」视图时区错位（db/articles.rs:195,692）；config_sync_apply 无事务中途失败留半套（config_sync.rs:141-261）；anchorToArticle 不复位译文/全文/原始渲染标志（bootstrap.ts:264-275）；卡片译文按纯文本渲染 HTML 契约不一致（Timeline.tsx:452-455,739-742）；列宽拖拽逐像素落库（App.tsx:256-271）；前端 async action 无 catch 静默脱节（bootstrap/nav/reader/feeds/设置页多处）；流式翻译未消毒 HTML 进 DOM 且回读失败残留（Reader.tsx:294-298、slices/ai.ts:70-79,156-167）；结构性硬化：pull 分块失败时不推进增量游标（greader_pull.rs:77-90,116-119 与 fever_pull 对称）；app_settings JSON blob 逐字段解析收口为类型化助手（lib.rs:38-96、commands/mod.rs:18、scheduler.rs:62,201-222 共 6+ 处）；lib/api.ts 行类型契约加 serde fixture 往返断言防漂移；仓库根目录垃圾文件清理与 .gitignore 补全；死代码/空壳集群处置与 P3 卫生项：删除零生产调用代码（db/feeds.rs:245,257,269 Miniflux 兜底三查询、ingestion.rs:330-407 旧版 refresh_feed、greader.rs:501-518 未用方法、db/sync_map.rs 被取代的逐条查询、sync/mod.rs:29 fallback_entries 恒 0 与模块注释修订、lib/api.ts:503 api.syncNow、AiEvent::Error 删或接通）；P3 项逐条处置（吞错 warn 化、sync_save 留空只复用 password、purge_remote_data 范围、cleanup_cache 时区、LIMIT 绑定、normalize 去重一致化、gist 孤儿、init unwrap 加固、快捷键浮层让路、播放中同集切换、批量标读合并等）；设计边界项 P2-12（配置同步删除语义）/P3-11（远端退订本地删除）与 P2-10 后半/P2-11 修复立项前逐项请 owner 裁决；ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块（conditional_get/parse_feed/map_entry/staged 刷新/favicon 发现），沿用先补断言→纯搬运→四门禁配方，crate::ingestion 路径不变，行为零变化
 
@@ -67,18 +67,18 @@
 
 ## 最近事件
 
-- 2026-09-19T08:26:52.374893Z · checkpoint · TASK-061 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
-- 2026-09-19T08:27:39.212281Z · note/lesson · TASK-061 · 审查登记规则：本项目工具要求 verdict=PASS 且 findings 为空才接受审查报告；即使审查者自己标注「非阻塞、不要求返工」的备注，只要列进 findings 就会触发 review_failure。处置方式是如实落地备注所指的小修（本轮：注释措辞从「完全一致」改为精确子集论证表述并补维护警示），同一独立审查上下文复核后 findings 清空重报，而不是让审查者撤回发现
-- 2026-09-19T08:50:53.575264Z · accept · 验收 TASK-061；依据：用户选择：验收 TASK-061——接受死分支删除与两轮独立审查结论（验收问答 2026-09-19）
-- 2026-09-19T09:25:32.113666Z · note/decision · REQ-007 清单遗留项归档为已知限制（owner 2026-09-19 选择记录项目级验收，遗留项随项目归档、后续想做再另立任务）：需产品决策的设计边界 P1-6（本地直连新文章不回写远端，协议限制）/P2-12（配置同步无删除语义）/P3-11（远端退订本地永不删，疑有意保守设计）；P2 残留 P2-9（Miniflux 兜底路径未实现）/P2-10 后半/P2-11/P1-7 残留（卡片挂载自动生成译文 effect）；P3 卫生 P3-2（sync_now 两份实现漂移）/P3-4/P3-5（吞错点）/P3-6/P3-7/P3-8（错误处理边角）/P3-9（init 期 panic 风险点三处）/P3-10（AiEvent::Error 从不发送）；证据缺口 P2-2/P2-5/P2-6（代码已修，测试 harness 无 DOM 无渲染级证据）。来源：TASK-051 报告逐项处置清单（DEC-fix-all-findings-20260917 框架）
-- 2026-09-19T09:25:41.467350Z · accept · 项目整体验收；依据：用户选择：记录项目级验收——33 项任务全部验收（含 TASK-060/061 本日验收），REQ-007 遗留项作为已知限制随项目归档（验收问答 2026-09-19）
-- 2026-09-19T09:40:09.510616Z · note/decision · 新周期 legacy_review（owner 2026-09-19 指令：以更新后的 workflow-kit 从零启动新一轮分析）。已读来源：.workflow-kit/tasks/ 全部记录（PROJECT.json stage=complete、DECISIONS 79 条、33 任务、194 运行）、PROJECT_STATE.md、JOURNAL.md、docs/FINDINGS-REQ-007.md、docs/FINDINGS-IGNORED-TESTS.md。保留约束：BRIEF.compatibility 确认继续有效（SQLite 与迁移、Fever/GReader/本地抓取协议行为、现有 UI 布局与交互习惯）；回归底线=161 条 Rust 测试 + 283 条前端断言 + lint/build 门禁不弱化。旧任务处置：33 任务全部验收（TASK-046 按流程取消），stage=complete；归档的约 15 项已知限制（见 2026-09-19 note）仅作为本轮排查线索重新验证，不自动纳入实施。流程冲突结论：旧授权（含 DEC-fix-all-findings「把发现的问题都修复」）仅限旧周期，不自动延续；新周期运行边界经用户确认沿用（DEC 本日新周期启动条目），重构路线待体检证据呈现后由 owner 重新选择。角色结论：当前会话是总控；Worker 身份只来自明确 task_id/run_id 执行包
 - 2026-09-19T10:09:25.809826Z · batch · 关闭 BATCH-e4114a0450f2403c9fe42b2561eed78a，开启 BATCH-4f9d7067e5b04d5bbedfdcf3a2b021ee；依据：owner 路线问答 2026-09-19：渐进重构路线确认（DEC-992f64fd15714ca2a614fe66d5a144ec），首批立项 REQ-101 P1 缺陷修复（TASK-062 OPML 重复文件夹）；旧周期批次 BATCH-e4114a04 随 TASK-061 验收关闭
 - 2026-09-19T13:53:52.470325Z · prepare · TASK-062 · 任务已冻结：修复 OPML 导入每条根级订阅重复新建「导入」文件夹（REQ-101/N1）；范围 src-tauri/src/commands/opml.rs
 - 2026-09-19T13:53:56.408691Z · checkpoint · TASK-062 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-19T14:05:00.062895Z · checkpoint · TASK-062 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/opml.rs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-19T14:05:20.654022Z · checkpoint · TASK-062 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-19T14:16:21.928772Z · checkpoint · TASK-062 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-19T14:21:48.945612Z · accept · 验收 TASK-062；依据：用户选择：验收 TASK-062，继续 N2（验收问答 2026-09-19）
+- 2026-09-19T14:32:09.572300Z · prepare · TASK-063 · 任务已冻结：接线 selectFeed 范围切换拉取：缓存命中同步恢复 + 未命中重拉，修复跨范围污染与重复卡片（REQ-101/N2）；范围 src/store/slices/nav.ts, tools/frontend-regression.mjs
+- 2026-09-19T14:32:13.050314Z · checkpoint · TASK-063 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-19T14:48:58.576662Z · checkpoint · TASK-063 · 编码结果已记录，差异范围已核对：src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-19T14:49:18.751695Z · checkpoint · TASK-063 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-19T15:05:13.355906Z · checkpoint · TASK-063 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 如何继续
 

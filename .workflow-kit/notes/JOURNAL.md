@@ -34,3 +34,9 @@
 - 2026-09-19T14:05:00.062895Z · checkpoint · TASK-062 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/opml.rs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-19T14:05:20.654022Z · checkpoint · TASK-062 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-19T14:16:21.928772Z · checkpoint · TASK-062 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-19T14:21:48.945612Z · accept · 验收 TASK-062；依据：用户选择：验收 TASK-062，继续 N2（验收问答 2026-09-19）
+- 2026-09-19T14:32:09.572300Z · prepare · TASK-063 · 任务已冻结：接线 selectFeed 范围切换拉取：缓存命中同步恢复 + 未命中重拉，修复跨范围污染与重复卡片（REQ-101/N2）；范围 src/store/slices/nav.ts, tools/frontend-regression.mjs
+- 2026-09-19T14:32:13.050314Z · checkpoint · TASK-063 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-19T14:48:58.576662Z · checkpoint · TASK-063 · 编码结果已记录，差异范围已核对：src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-19T14:49:18.751695Z · checkpoint · TASK-063 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-19T15:05:13.355906Z · checkpoint · TASK-063 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收

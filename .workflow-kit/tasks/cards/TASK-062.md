@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-062 · 修复 OPML 导入每条根级订阅重复新建「导入」文件夹（REQ-101/N1）
 
-**状态**：verified
+**状态**：done
 
 **目标**：AUDIT-20260919-v2.md 新发现 N1（REQ-101，三路体检后端排查确认）：src-tauri/src/commands/opml.rs 的 opml_import 在 f.folder==None 分支每条都无条件 db::create_folder("导入")，folders.name 无 UNIQUE 约束且该分支不查不写 folder_ids 缓存（对照 Some 分支有缓存），导致导入含 N 条根级（无文件夹包裹）outline 的 OPML 后侧栏出现 N 个同名「导入」目录；且与 add_feed 路径的「未分类」兜底约定不一致（本任务不改兜底命名，只修重复创建）。修复方案：把目录解析统一为单一路径——folder 名取 f.folder.as_deref().unwrap_or("导入")，Some/None 共用同一 folder_ids 缓存（get→or_insert create_folder）；为使缺陷可测，把导入循环从 async command 中抽为纯函数 import_feeds(conn: &Connection, feeds: &[crate::opml::ImportedFeed]) -> AppResult<OpmlImportReport>（除修复点外逐字纯搬运），opml_import 持锁后调用。并在该文件补 #[cfg(test)] 测试（沿用 db/commands_extraction_tests.rs 的 open_in_memory + MIGRATIONS.to_latest 模式）：① 两条根级订阅导入后名为「导入」的目录数==1、feeds 表 2 条、report.imported==2；② 两条订阅带同名目录 → 该目录数==1（锚定缓存既有行为）；③ 重复 URL 第二条跳过（report.skipped==1，锚定既有行为）。不改其他文件，不动 src/opml.rs 的解析与导出。
 

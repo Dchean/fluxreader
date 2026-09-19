@@ -1,0 +1,76 @@
+{
+  "task_id": "TASK-063",
+  "candidate_digest": "7681dafd62b26c750a867fc5a698a59de46a225b11d4d4fd288590706484fbd2",
+  "verification_run": "RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8",
+  "verdict": "PASS",
+  "summary": "独立复核通过。代码 diff 仅含 src/store/slices/nav.ts 与 tools/frontend-regression.mjs（其余工作树改动均为 .workflow-kit 台账/上游任务闭环记录，无代码文件）；selectFeed 接线与声明逐字一致（tauri 下缓存命中同步恢复 entries+applyArticlesCursor 收口+清 hydratedIds/hydrationErrors+后台刷新，未命中后台重拉且 view!=='all' 走 reloadFilteredEntries，mock 纯游标镜像早退），selectView 缓存命中补清水合。变异自证独立完成：把 selectFeed 还原为纯游标镜像后恰好声明的 4 条断言失败（282/286），还原后 sha256=daa8c0c3…b68674b 与候选清单一致且重跑 286/286。四门禁独立核实：cargo 164/0/9、lint 0/0、build exit 0、frontend 286/286（=283 存量+净增 3，本人两次重跑均复现）。竞态面：(a) 'all' 视图快速连点由 reloadFromBackend 代际守卫保证最终态属最后一次切换；(b) 缓存未命中瞬态窗口的错接追加被 loadMoreArticles 的 scopeKey+limit 守卫丢弃，append-先于-reload 的瞬态重复属任务显式声明接受且由重拉整体替换自愈；(c) reloadFilteredEntries 仅 view 维度守卫属 bootstrap.ts 既有局限（本任务 non_goals 显式保留，selectView 路径改动前同样可达），非本候选引入。结论 PASS，findings 为空。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐条对照 acceptance：(1) git diff HEAD 核实代码改动仅 src/store/slices/nav.ts 与 tools/frontend-regression.mjs（其余为 .workflow-kit 台账与 TASK-062 闭环记录）；nav.ts:119-137 selectFeed 与声明一致——先写游标镜像，dataMode!=='tauri' 早退保持 mock 纯镜像（nav.ts:128），tauri 下查 viewEntriesCache(viewCacheKey(layout,view,scopeKey))，命中 set entries+articlesExhausted(view!=='all')+hydratedIds:{}/hydrationErrors:{} 并 applyArticlesCursor(scopeKey,cached.length,view!=='all')（nav.ts:131-134），未命中 view!=='all' 走 reloadFilteredEntries 否则 reloadFromBackend（nav.ts:135-136）；selectView 缓存命中分支补 hydratedIds:{}/hydrationErrors:{}（nav.ts:92）。(2) 变异成对证据独立复现（见 failure_paths）。(3) (s4) 假步骤（手工 reloadFromBackend）已移除改为 await nTick(30) 等待 selectFeed 自身重拉，末段按新契约断言（entries 全属源A/游标=快照长度500/源B 1000 不被污染/水合状态清空）；harness diff 恰 3 个 hunk（resetStore 清缓存、(s4) adapt、(s4b) 新增），(b) 块与其余既有断言逐字未动。(4) 四门禁原始输出核实：cargo 独立汇总 164 passed/0 failed/9 ignored（ignored 不增）、lint 'Found 0 warnings and 0 errors'、build exit 0、frontend 286/286=283 存量+净增 3（26 既有回归+260 新增），本人重跑两次均 286/286。(5) package.json/Cargo.toml/Cargo.lock 零改动（git diff 无这些文件）。(6) 两文件 0 个 CR 字节（LF）；台账改动属工作流闭环记录。(7) 改动为前端 store 接线+harness mock IPC，无任何真实库写入路径。non_goals 全部遵守：bootstrap.ts/reader.ts/Timeline.tsx/internals.ts 均不在 diff 中，无新依赖，mock 行为语义不变（(s4b) mock 断言锚定）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8-candidate.json",
+        ".workflow-kit/tasks/runs/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8.json",
+        ".workflow-kit/tasks/evidence/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8-frontend.stdout.txt",
+        "src/store/slices/nav.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "四门禁原始输出核实通过并自行重跑 npm run test:frontend 两次均 286/286。竞态面逐项审查：(a) 快速连点多源（'all' 视图）：每次 selectFeed 触发 void reloadFromBackend，bootstrap.ts:87 gen=++reloadGeneration、bootstrap.ts:96 丢弃非最新代际——最终状态必属最后一次切换；途中每次缓存命中同步恢复使 entries 始终对齐最新点击的范围。anchorScopeNav 的 selectFeed('all')+selectView('all') 序列第二次 gen 压掉第一次、同范围同结果，无错。(b) 缓存未命中瞬态窗口（entries=旧快照、游标=新范围0）内滚动/空列表补拉（Timeline.tsx:166-169）发起的 loadMoreArticles：若 reload 先落地，bootstrap.ts:163 的 scopePageKey+articlesLimit 双比较丢弃迟到追加并复位 loading（含跨范围串台丢弃，TASK-052 守卫）；若 append 先落地则产生瞬态混合列表——此为任务 objective/non_goals 显式声明接受的行为（重拉整体替换自愈、窗口亚秒级），非守卫缺陷。(c) reloadFilteredEntries 完成守卫仅查 activeViewFilter（bootstrap.ts:216），无代际与范围维度：筛选视图（收藏/未读/今天）下快速连点两个源且 IPC 完成顺序倒挂时，旧范围调用会以完成时的 activeFeedFilter 写 entries/游标/缓存，造成短暂错范围展示，直到下一次导航重拉自愈（同时重写缓存条目）。定性：这是 bootstrap.ts 未改动代码的既有守卫局限，本任务 non_goals 显式保留其语义，且改动前经 selectView 触发的同型序列（selectView 筛选视图在途→点击订阅源）同样可达，非本候选引入的新竞态类别，且相对 N2 缺陷（entries 永久不对齐）是严格改进。附带发现（不计入 findings）：nav.ts:114 注释「自带代际/竞态守卫丢弃过期结果」对 reloadFromBackend（代际）准确，对 reloadFilteredEntries（仅 view 维度）表述偏宽——机理如实记录于此供后续任务参考。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8-frontend.stdout.txt",
+        "src/store/slices/nav.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "变异主张独立验证：备份 nav.ts（sha256=daa8c0c3b5a0850db6dc29e7e6b57c96cfe16f3daf28eae3808b3088bb68674b，与候选清单一致）→ 将 selectFeed 接线段还原为纯游标镜像（移除 nav.ts:128-136 整段）→ npm run test:frontend 得 282/286，失败项恰为声明的 4 条：「(s4) selectFeed 自动重拉」「(s4) 源B 翻页用源B 自己的游标」「(s4) 切回源A 同步恢复该范围快照」「(s4) 切回源A 后的后台刷新保持该范围快照结论」，其余 256 条新增与 26 条既有回归全过（含 (s4b) selectView 水合与 mock 两条，证明变异只打在 selectFeed 接线上）→ 从备份还原 → sha256 与候选清单比对一致 → 还原后重跑 286/286。mock/tauri 误判审查：dataMode 写入点仅 bootstrap.ts:65（初始 mock）、:122（reloadFromBackend 成功→tauri）、:299（无 __TAURI_INTERNALS__ 回退 mock），健康 tauri 会话在交互前必为 'tauri'，selectFeed 早退不会误判；残留边界是 tauri 会话 bootstrap 失败时保持 'mock'+错误态+重试入口，此时 selectFeed 纯镜像与 loadMoreArticles（bootstrap.ts:145）/anchorToArticle（:238）/markCurrentViewAllRead 的既有同门控口径一致，非新引入混淆。anchorToArticle 代际交互：Overlays.tsx:184-187 命令面板按 anchorScopeNav 顺序先 selectFeed/selectView 归一再 void anchorToArticle；anchorToArticle 在 bootstrap.ts:241 自 bump reloadGeneration，使 selectFeed 触发的在途 reload 在 bootstrap.ts:96 被丢弃，锚定结果正确胜出，bootstrap.ts:245-246 与 anchorScopeNav.ts 记载的顺序契约在新接线下保持成立。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8-candidate.json",
+        ".workflow-kit/tasks/evidence/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8-frontend.stdout.txt",
+        "src/store/slices/nav.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/components/Overlays.tsx",
+        "src/components/anchorScopeNav.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "注释如实性核实：nav.ts:86-88 与 115-117 所述水合机理与代码事实吻合——reader.ts:184 守卫确为 art.content||hydratedIds[id] 短路，缓存快照无正文而 hydratedIds 滞留时确实永不重水合；清 hydrationErrors 与既有三个快照写入者（bootstrap.ts:125-126/227-228/273-274）终态口径一致。nav.ts:108-112 对 N2 缺陷机理的描述与 AUDIT-20260919-v2.md N2 及代码现实吻合（Sidebar.tsx:152/176/215 及键盘路径、Overlays.tsx:159/185 全部调用点确无 reload 接线；Timeline.tsx:166-169 空列表补拉确走 loadMoreArticles 追加）。selectView/selectFeed 两条缓存恢复路径存在约 6 行同构块（set+applyArticlesCursor+reload 尾），但两处前导状态不同（selectView 管 activeViewFilter/openedReadIds，selectFeed 复用镜像写入），当前仅两处且刻意镜像既有 selectView 形态、保持最小 diff，收口收益不明确，不构成缺陷。(s4b) 注释如实说明 selectView 同契约与 mock 不接线的动机；resetStore 清缓存注释如实（(s6) 手工 clear 仍在 frontend-regression.mjs:1785，动态导入与 (s) 块同一模块实例——已核实），跨夹具污染动机成立。",
+      "evidence_files": [
+        "src/store/slices/nav.ts",
+        "src/store/slices/reader.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/components/Sidebar.tsx",
+        "src/components/Overlays.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "适用（范围切换是热路径且本任务新增 IPC 调用）。缓存命中：同步恢复零延迟先行（(s4) 同步断言不经 await 锚定），后台一次刷新 IPC，与 selectView 既有缓存优先契约完全同构，零延迟恢复未被破坏。缓存未命中：每次选择一次整页重拉（reloadFromBackend 附带 folders/feeds/counts，成本等级与既有 selectView('all') 未命中路径及 feeds-updated 事件重拉相同）；快速连点产生的过期 reload 会被代际守卫丢弃（浪费的查询与用户点击频率同阶，未加防抖——与 selectView 既有行为同类，未恶化）。anchorScopeNav 归一引入的 selectFeed('all')+selectView('all') 双重 reload 多一次被丢弃的冗余 IPC，量级可忽略。viewEntriesCache 存储结构与键未改（non_goal 遵守），容量仍受「实际访问过的 布局×视图×范围」组合约束。",
+      "evidence_files": [
+        "src/store/slices/nav.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/internals.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

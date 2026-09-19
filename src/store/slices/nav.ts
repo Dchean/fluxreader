@@ -82,11 +82,14 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        再后台异步刷新保证数据最新。数量悬殊切换（收藏19 ↔ 全部2122）不再经历
        「清空 → 拉取 → 一次性渲染数百张卡片」的卡顿。
        TASK-052：缓存键带上订阅范围（源A 的首批≠全部的首批）；缓存里只有内容，
-       游标仍需经 applyArticlesCursor 收口写入（不裸写 articlesLimit）。 */
+       游标仍需经 applyArticlesCursor 收口写入（不裸写 articlesLimit）。
+       TASK-063：恢复时必须清水合状态——缓存快照不带正文，水合守卫
+       （ensureArticleContent 的 hydratedIds 短路）会把上次会话的滞留标记误判为
+       「已水合」，社交/通知卡片在后台刷新落地前空白且不会重水合。 */
     const scopeKey = scopePageKey(get().activeFeedFilter);
     const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, scopeKey));
     if (cached) {
-      set({ activeViewFilter: view, openedReadIds: {}, entries: cached, articlesExhausted: view !== 'all' });
+      set({ activeViewFilter: view, openedReadIds: {}, entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       if (view !== 'all') void get().reloadFilteredEntries(view);
@@ -101,9 +104,18 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
   },
 
   /* TASK-052：切换订阅范围时按 per-scope 游标恢复分页游标；该范围从未加载过
-     （游标表中无该键）则从 0 起步——即「B 源从第 1 页开始」。不触发 reload：
-     列表内容仍是旧范围，由调用方随后拉取（App 启动 / 订阅变更 / selectFeed 的
-     调用点），entries 与游标在下一次原子写入中重新对齐。 */
+     （游标表中无该键）则从 0 起步——即「B 源从第 1 页开始」。
+     TASK-063（N2）：范围切换必须让 entries 与游标重新对齐。此前只写游标镜像，
+     注释宣称「由调用方随后拉取」，但 Sidebar/Overlays 的全部调用点都未接线：
+     旧范围快照残留（跨范围重复卡片 + duplicate key），空列表补拉走
+     loadMoreArticles 的追加路径（offset=0 与旧快照交集重复），目标源不在旧
+     快照且不可滚动时其第一页永远拉不到。
+     与 selectView 同构：tauri 模式下缓存命中同步恢复该范围快照（零延迟）并
+     后台刷新；未命中直接后台重拉——两个 reload 都在发起时读取刚写入的
+     activeFeedFilter，自带代际/竞态守卫丢弃过期结果。恢复时清水合状态
+     （理由同 selectView：缓存快照不带正文，滞留的已水合标记会造成
+     「永不重水合」的正文空白）。mock 模式保持纯游标镜像（不触发 IPC、
+     不把 mock 会话翻成 tauri）。 */
   selectFeed: (feedId) => {
     const scopeKey = scopePageKey(feedId);
     set((s) => ({
@@ -113,6 +125,15 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       articlesExhausted: false,
       articlesLoading: false,
     }));
+    if (get().dataMode !== 'tauri') return;
+    const view = get().activeViewFilter;
+    const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, scopeKey));
+    if (cached) {
+      set({ entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
+      get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
+    }
+    if (view !== 'all') void get().reloadFilteredEntries(view);
+    else void get().reloadFromBackend();
   },
 
   toggleTimelineFilter: () =>

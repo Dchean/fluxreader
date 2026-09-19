@@ -1,0 +1,19 @@
+{
+  "task_id": "TASK-063",
+  "run_id": "RUN-ab44d829b4fd42c68c4c935a5f8e60d5",
+  "status": "ready_for_verification",
+  "summary": "修复 AUDIT-20260919-v2.md N2（REQ-101，P1）：selectFeed 范围切换不拉取导致旧快照残留（跨范围重复卡片/duplicate key）、空列表补拉走追加路径造成污染、部分场景该源第一页永远拉不到。改动仅 src/store/slices/nav.ts 与 tools/frontend-regression.mjs：① selectFeed 接线（与 selectView 缓存优先契约同构）——tauri 模式下写完游标镜像后查 viewEntriesCache（layout|view|新 scopeKey）：命中同步恢复该范围快照（entries + applyArticlesCursor 收口游标 + 清 hydratedIds/hydrationErrors）并后台刷新；未命中后台重拉（view!=='all' 走 reloadFilteredEntries，否则 reloadFromBackend，二者在发起时读取刚写入的 activeFeedFilter 且自带代际/竞态守卫）；mock 模式早退保持纯游标镜像（不触发 IPC、不翻转数据模式）。② selectView 缓存命中恢复同样补清水合状态——分析中发现水合守卫（ensureArticleContent 的 art.content || hydratedIds[id] 短路）会对缓存快照误判已水合，滞留标记造成「永不重水合」的正文空白空窗（后台刷新落地前），同类隐患一并修复。③ 契约变更如实声明并更新 (s4)：移除 selectFeed 后手工 reloadFromBackend 的假步骤（测试模拟了 UI 中不存在的步骤），末段「切回源A 恢复游标 1000」更新为新契约（同步恢复快照、游标=快照长度 500、源B 游标 1000 不污染）；新增 (s4b)（selectView 恢复清水合状态 + mock 模式不接线）；resetStore 收口 viewEntriesCache.clear()（防跨夹具污染，(s6) 已有就地先例）。变异取证成对：把 selectFeed 还原为纯游标镜像后 4 条新契约断言失败（自动重拉/同步恢复/后台刷新结论），还原后全过。四门禁实测：cargo test 164 passed / 0 failed / 9 ignored（不回退）、lint 0 warnings/0 errors exit 0、build exit 0、frontend 286/286（283 存量不回退 + 净增 3，存量断言除声明适配的 (s4) 两条外一行未动）。LF 行尾（CRLF 计数 0）。",
+  "changed_files": [
+    "src/store/slices/nav.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri，门禁 cargo_test）",
+    "npm run lint（门禁 lint）",
+    "npm run build（门禁 build）",
+    "npm run test:frontend（门禁 frontend）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}
