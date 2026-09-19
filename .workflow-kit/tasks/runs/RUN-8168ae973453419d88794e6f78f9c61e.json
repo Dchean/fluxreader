@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-8168ae973453419d88794e6f78f9c61e",
+  "task_id": "TASK-059",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "independent-reviewer:agent_3bd07e98-865c-4ac8-af6c-505b104a1c68 (fresh context, did not write the code; round 5 re-bind after mock-token json! refactor)"
+  },
+  "started_at_utc": "2026-09-19T01:47:23.109647Z",
+  "finished_at_utc": "2026-09-19T01:47:23.159253Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "79f9d2ce709889ae60c72f0cbaae6024b06d70229ef34c3a72ef9814ea775428",
+  "candidate_digest": "22f7b85823272365d7148407398de733fa360de0794e41ca05af5308aa6b0ff3",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-8168ae973453419d88794e6f78f9c61e-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-8168ae973453419d88794e6f78f9c61e-review.json",
+    "candidate_digest": "22f7b85823272365d7148407398de733fa360de0794e41ca05af5308aa6b0ff3",
+    "ui_evidence_digest": "a8a85a7c5c647d34f232805b330d3c2acd39412fcaf96ff79ad0527ef0207399",
+    "quality_digest": "50e0a21984f0a3fafe655ce351b7451cd5f8f3a72e8ce9d494f77405096ac3cb"
+  },
+  "estimated_cost_usd": null
+}

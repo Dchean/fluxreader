@@ -1612,6 +1612,20 @@
         "previous_deadline_at_utc": "2026-09-19T02:32:57.301058Z",
         "deadline_at_utc": "2026-09-19T03:32:57.301058Z"
       }
+    },
+    {
+      "id": "DEC-0a8661d6173f4d80840991f9f6b4a3af",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-19 本次会话指令（原文）：『清理旧残留，验收并批准立项』——在执行者汇报 TASK-059 已实现、四门禁全绿（cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283）、实机验证 7 场景全过、且经四轮独立审查（R1 FAIL 修复后 R2-R5 PASS）后下达。验收对象：candidate 22f7b85823272365d7148407398de733fa360de0794e41ca05af5308aa6b0ff3（提交 d9dcb16）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-059"
+      ],
+      "recorded_at_utc": "2026-09-19T01:47:39.949786Z",
+      "candidates": {
+        "TASK-059": "22f7b85823272365d7148407398de733fa360de0794e41ca05af5308aa6b0ff3"
+      }
     }
   ]
 }

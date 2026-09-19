@@ -1,0 +1,87 @@
+{
+  "task_id": "TASK-059",
+  "candidate_digest": "22f7b85823272365d7148407398de733fa360de0794e41ca05af5308aa6b0ff3",
+  "verification_run": "RUN-dd4206433d6e4f0e94987020e9e5db29",
+  "verdict": "PASS",
+  "summary": "第 5 轮独立审查——提交前的最终机械换绑（re-bind）。声明的增量只有一处：`src-tauri/tests/github_auth_e2e.rs` 把 mock 令牌提为命名常量 `MOCK_TOKEN`（值不变，仍为 `mock-access-token-not-a-real-credential`），并把 mock 的 /login/oauth/access_token 响应从整体字符串字面量改为 `serde_json::json!` 构造，以通过凭据扫描器对 `\"access_token\":\"…\"` 赋值形态的规则。我逐项核实：(1) **增量范围**——R4 与 R5 审查包的 candidate_files 逐项对比：144 个条目中**恰好 1 个不同**（github_auth_e2e.rs：6150442f… → 7b7dc15a…），0 删除、0 新增；磁盘 144/144 文件 sha256 与 R5 包完全一致；工作区已干净（本轮工作连同前几轮成果已作为提交 d9dcb16『fix(sync): TASK-059 Endpoint 自动适配…』入库，git status 无未提交的源码改动）。(2) **改动内容核实**（逐行读过 diff 与现文件）：`const MOCK_TOKEN: &str = \"mock-access-token-not-a-real-credential\"`（值与 R4 相同）为唯一事实来源，断言（:43）与 mock /user 校验（:122）都引用它，消除了 R4 时值的三处重复；mock 响应改用 `serde_json::json!({\"access_token\": MOCK_TOKEN, \"token_type\":\"bearer\", \"scope\":\"gist\"})`，载荷与旧字符串字面量语义等价（客户端按字段解析，键序无关）；负例测试 `bad_token_rejected_by_user_endpoint`（:60 用故意错误的 `gho_wrong`）未被触碰，与『never flagged』的说法一致；**测试未被削弱**（断言仍是精确相等，/user 仍要求令牌匹配才 200）。(3) **新 run 门禁**：RUN-dd4206433d6e4f0e94987020e9e5db29 四门禁全部 PASS；我从其日志独立复算——cargo 24 条 test result 求和 = **161 passed / 0 failed / 9 ignored**（含 github_auth_e2e 的 2 条 ok：bad_token_rejected_by_user_endpoint、device_flow_full_lifecycle）、frontend = **283/283**、lint = `Found 0 warnings and 0 errors`、build = `✓ built in 124ms`。(4) **我本人独立复跑**：`cargo test` **161 / 0 / 9**（github_auth 二进制 2 条 ok）、`npm run test:frontend` **283/283**、lint 0 warnings / 0 errors、build exit 0（125ms）——与新 run 日志逐项吻合。(5) **文档与 UI 证据未变**：TASK-059-report.md=6ce7af97…、TASK-059-interaction-report.md=7a833f17…、三张截图=cd02766e…/140a356d…/d5a5bde2…、ui-e2e-result.json=1784b603…，全部与第 3/4 轮核过哈希一致；真实库只读复核仍为 419b118e… / 90112 B、-wal/-shm 不存在。第 1–4 轮的全部结论（R1 FAIL 的 6 项发现 → R2–R4 的修复与 PASS）在本候选上继续成立，唯一变化是测试夹具的构造方式，不影响任何被审功能。判 PASS。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "本轮为机械换绑：R4→R5 候选清单 diff 恰好 1 个条目（github_auth_e2e.rs），0 删除 0 新增，磁盘 144/144 与 R5 包一致——声明的增量范围属实。该唯一改动把 mock 令牌提为常量 `MOCK_TOKEN`（值不变）并用 `json!` 构造响应：mock 签发、mock 校验、断言三处共享同一事实来源，语义与 R4 完全等价（客户端按字段解析 JSON，键序无关），测试未削弱（断言仍精确相等，/user 仍要求令牌匹配）。因此第 3/4 轮（及其引用的第 2 轮）对 acceptance 的全部逐条核对结论原样成立：纯域名对 FreshRSS/Miniflux 两形态自动适配各有 e2e、旧完整路径一次命中、404 与凭据错可区分且凭据错立即停止、候选表常量有界（每协议 ≤2）、解析缓存按『协议+用户原始输入』失效且次轮不再探测、设置页回显用户原始输入（endpoint_resolved 不进任何 IPC 返回值）、Fever 版本放宽为 >=3 且 auth!=1 仍拒绝、Fever 读写两路径都走 api_entry()（R1 的 F1 已修并有回归网）、前端文案『只填域名』且旧后缀指引移除、无新依赖、sync 协议语义未动、真实库只读（本轮复核仍为 419b118e…/90112B、无 -wal/-shm）。",
+      "evidence_files": [
+        "src-tauri/tests/github_auth_e2e.rs",
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/greader.rs",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        ".workflow-kit/tasks/evidence/RUN-dd4206433d6e4f0e94987020e9e5db29-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "我本人第 5 轮独立复跑：`cargo test` 161 passed / 0 failed / 9 ignored——与 R3/R4 完全相同（夹具改名不影响任何计数），其中 github_auth_e2e 二进制 2 条测试（bad_token_rejected_by_user_endpoint、device_flow_full_lifecycle）均 ok；`npm run test:frontend` 283/283；lint 0 warnings / 0 errors；build exit 0（125ms）。RUN-dd4206433d6e4f0e94987020e9e5db29 的日志独立复算结果一致（cargo 24 条 result 行求和 161/0/9、frontend 283/283、lint 0/0、build ✓，且日志中 github_auth 的 2 条测试均为 ok）。其余 143 个候选文件逐字节未变，既有回归网（TASK-055 墓碑/2xx 未生效、TASK-056 零 folder 与失败可见性、A-1 防复活、Fever 写路径回归网 fever_write_path_uses_resolved_endpoint_too、前端 26 条既有断言与 257 条 store 断言）的通过状态沿用第 2/3/4 轮实测。",
+      "evidence_files": [
+        "src-tauri/tests/github_auth_e2e.rs",
+        ".workflow-kit/tasks/evidence/RUN-dd4206433d6e4f0e94987020e9e5db29-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-dd4206433d6e4f0e94987020e9e5db29-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-dd4206433d6e4f0e94987020e9e5db29-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-dd4206433d6e4f0e94987020e9e5db29-build.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "沿用第 2–4 轮核对（本轮代码增量仅为测试夹具构造方式，不触及任何被审失败路径）：两候选全 404 ⇒『找不到 … API（HTTP 404，已尝试…）』有 Rust e2e 与前端『真实消息形状』断言双覆盖；401 凭据错立即停止、不试下一候选（Rust e2e + 实机 S4 toast 一致）；Fever 非 404 ⇒『Fever 认证被拒 → status（已定位 API：base）』；auth!=1 / api_version<3 仍拒绝；缓存按输入/协议失效、命中不重探；Fever+FreshRSS 写路径走 api_entry()（R1 F1 已修，回归网仍在）。本轮改动的 github_auth_e2e 还保留并验证了负例路径：bad_token_rejected_by_user_endpoint 用故意错误的令牌验证 /user 返回 401 被拒（源码与 cargo 输出均确认 ok）。用户真实库只读约束继续遵守：本轮只读复核 %APPDATA%\\com.fluxreader.app\\fluxreader.db 仍为 sha256 419b118e… / 90112 B、-wal 与 -shm 不存在，未启动应用、未运行会写库的 e2e 驱动。",
+      "evidence_files": [
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/greader.rs",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        "src-tauri/tests/github_auth_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-059-incident-real-db-write.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "增量的维护影响为正：mock 令牌从三处重复的字面量收敛为单一常量 `MOCK_TOKEN`（签发/校验/断言共享同一事实来源），响应改用 `json!` 构造后不再呈现 `\"access_token\":\"…\"` 的凭据赋值字面量形态，扫描器误报源消除；改动有注释说明动机与边界（『不是任何真实凭据』），负例路径保留。审查追溯链完整：R1 FAIL（TASK-059-review-r1-independent-FAIL.json，6 项发现）→ R2/R3 PASS → 本轮，报告 §5/§9 与交互报告『未覆盖/限制』的表述在第 3/4 轮已核对为准确，本轮文档逐字节未变。残留（不阻塞，非本轮增量）：github_auth_e2e.rs:60 的 `gho_wrong`（故意错误令牌、早于 TASK-059 即存在）仍带 `gho_` 前缀——R4 已记录；本轮作者声明扫描器未标记它（规则匹配的是凭据赋值形态而非令牌值），与『提交已通过扫描器』的事实相互印证。tools/ 下 7 个 t059_* 一次性驱动脚本（含会写真实库的 t059_ui_e2e.mjs）仍在仓库，属长期维护面，建议收尾时决定归档或加更醒目警示——不阻塞。",
+      "evidence_files": [
+        "src-tauri/tests/github_auth_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-059-report.md",
+        ".workflow-kit/tasks/evidence/TASK-059-review-r3-independent-PASS.json",
+        ".workflow-kit/tasks/evidence/TASK-059-review-r4-independent-PASS.json"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "与本任务验收无关（brief 的 measure 工作负载指向 REQ-001/003 的正文加载与布局切换，地址解析不在其中），不造基准、不伪称实测提升。静态范围仍是『解析期请求次数』：未命中缓存每协议最多 2 个候选、仅 404 继续、任一非 404 立即停止；命中缓存后只保留一次必需认证（second_sync_reuses_cached_endpoint_without_probing 断言首轮恰 2 次、次轮恰 1 次）。本轮相对第 4 轮代码零改动（仅测试夹具构造方式），结论直接沿用。",
+      "evidence_files": [
+        "src-tauri/src/endpoint_resolve.rs",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    "checked_states": [
+      "设置 → 同步 → 「后端 Endpoint」：说明文案改为**只填域名**（不再要求 /api/greader.php 这类后缀）",
+      "placeholder 给出纯域名示例（如 https://demo.freshrss.org）",
+      "填入纯域名后点「测试连接」：FreshRSS 与 Miniflux 均应连接成功（不再报 404）",
+      "已填完整 API 路径的旧用法**仍然可用**（向后兼容，不回退）",
+      "解析成功后设置页显示的仍是**用户填写的原始值**（不把内部解析结果回显成后缀，避免让用户以为必须填后缀）",
+      "连接确实失败时，提示须如实说明（凭据错报凭据错、地址不可达报不可达），不得把凭据问题说成填法问题",
+      "深色与浅色两套主题下文案完整可读、不截断、不溢出"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-059-ui-dark-bare-domain-connected.png",
+      ".workflow-kit/tasks/evidence/TASK-059-ui-light-bare-domain-connected.png",
+      ".workflow-kit/tasks/evidence/TASK-059-ui-dark-bad-credential.png",
+      ".workflow-kit/tasks/evidence/TASK-059-ui-e2e-result.json",
+      ".workflow-kit/tasks/evidence/TASK-059-interaction-report.md",
+      ".workflow-kit/tasks/evidence/TASK-059-report.md"
+    ]
+  }
+}

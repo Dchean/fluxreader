@@ -33,5 +33,6 @@
 | [TASK-056](items/TASK-056.json) | 修 pull 建订阅的外键违约 + 静默吞错：FreshRSS 登录成功却拉不到订阅 | done |
 | [TASK-057](items/TASK-057.json) | 修 Endpoint 填法指引与失败提示：直填 FreshRSS 域名登录失败（Bug 1） | done |
 | [TASK-058](items/TASK-058.json) | 同步失败对用户可见：前端消费 SyncReport.errors | done |
+| [TASK-059](items/TASK-059.json) | Endpoint 自动适配：只填域名即可连接（FreshRSS / Miniflux 双协议） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

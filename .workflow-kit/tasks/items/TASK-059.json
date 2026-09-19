@@ -15,7 +15,7 @@
     "连接确实失败时，提示须如实说明（凭据错报凭据错、地址不可达报不可达），不得把凭据问题说成填法问题",
     "深色与浅色两套主题下文案完整可读、不截断、不溢出"
   ],
-  "status": "review",
+  "status": "done",
   "objective": "**需求（owner 明确纠正）**：不管后端是 FreshRSS 还是 Miniflux，用户**只需要填写域名**，**不需要**知道或填写 `/api/greader.php` 这类 API 后缀。此前作者误读了需求（把用户的故障描述当成『用户想知道该填什么后缀』），并据错误理解裁决了『不改探测逻辑、只改文案』，导致 TASK-057 交付的是『教用户填完整路径』——方向反了。本任务改为**由应用自动适配**。**实证依据**：(1) GReader——`POST {域名}/accounts/ClientLogin` → **404**（端点不存在）、`POST {域名}/api/greader.php/accounts/ClientLogin` → **401**（端点存在、凭据被拒），即 **404 与 401/403/400 可可靠区分『路径不存在』与『路径正确但凭据错』**；(2) Fever——FreshRSS 真实端点在 `{域名}/api/fever.php?api`（实测 200 `{\"api_version\":4,\"auth\":0}`），而现有客户端写死拼 `{base}/fever/?api`（实测 FreshRSS 上 **404**），即 **Fever + FreshRSS 当前根本连不上**，与本缺陷同源（路径形态假设写死）。本任务让两个协议都支持『只填域名』，并保留旧用法兼容。",
   "non_goals": [
     "**不改变成功路径的既有行为语义**：已能连通的配置（域名根 + Miniflux、或完整路径 + FreshRSS）必须继续连通，且**不得要求用户改回域名**",
@@ -281,17 +281,20 @@
     "RUN-23e61f6b9bc646b0a6944e60c440d50f",
     "RUN-e59bda5f9aff4ca889210ac8b68d5ca9",
     "RUN-50d36a6bbfaf4e2984d4b79a828fe66a",
-    "RUN-dd4206433d6e4f0e94987020e9e5db29"
+    "RUN-dd4206433d6e4f0e94987020e9e5db29",
+    "RUN-8168ae973453419d88794e6f78f9c61e"
   ],
   "blockers": [],
   "evidence": {
     "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-dd4206433d6e4f0e94987020e9e5db29-candidate.json",
     "candidate_digest": "22f7b85823272365d7148407398de733fa360de0794e41ca05af5308aa6b0ff3",
     "verification_run": "RUN-dd4206433d6e4f0e94987020e9e5db29",
-    "review_run": null,
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "review_run": "RUN-8168ae973453419d88794e6f78f9c61e",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-0a8661d6173f4d80840991f9f6b4a3af-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-0a8661d6173f4d80840991f9f6b4a3af"
+    ],
+    "merge_ref": "commit d9dcb16 fix(sync): TASK-059 Endpoint 自动适配——只填域名即可连接（FreshRSS/Miniflux 双协议）；push/release 仍按 DEC-endpoint-autodetect-20260918 待 owner 单独确认"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
@@ -415,6 +418,11 @@
       "at_utc": "2026-09-19T01:41:34.451107Z",
       "note": "预先定义的必需测试全部通过，日志已保存",
       "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-19T01:47:24.877007Z",
+      "note": "当前候选的测试与审查通过",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
     }
   ],
   "resume_phase": "verification"
