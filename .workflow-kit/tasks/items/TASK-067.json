@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "id": "TASK-067",
+  "title": "交互落库与错误可见性收尾：列宽拖拽松手持久化 + 异步失败可见（REQ-102/N9/N10）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "AUDIT-20260919-v2.md 的 N9/N10（REQ-102，REQ-102 前端最后两项）：\n\n【N9 · 列宽拖拽每像素落库】src/App.tsx 的 startDragListWidth 在 onMove（每像素）调用 updateSettings（整包 JSON.stringify + set_setting IPC + 全 App 重渲染），与注释「松手持久化」相反——一次拖动几十上百次 IPC、SQLite 写放大、拖动手感发涩。修复：拖动期间只更新本地拖拽态（useState 的 dragWidth，渲染用 effectiveListWidth = dragWidth ?? settings.listWidth），mouseup 时一次性 updateSettings 落库并清除拖拽态。\n\n【N10 · 一批 async action 无 catch：IPC 失败 → unhandled rejection + 本地与后端静默脱节】逐点修复（口径与既有 loadMoreArticles/refreshOneFeed/updateCatLayout 的「失败 toast」一致）：\n① bootstrap.ts reloadFromBackend：Promise.all 无 catch——后台刷新事件/范围切换路径失败完全不可见。修复：内部 try/catch → toast「刷新失败：…」后 rethrow（bootstrapFromBackend 的 bootstrapError 路径保持）；\n② bootstrap.ts 的 api.syncStatus().then（顺带刷新连接态）补 .catch(() => {})（纯提示性刷新，失败无需打扰）；\n③ bootstrap.ts reloadFilteredEntries：try/catch → toast「筛选列表加载失败：…」；\n④ bootstrap.ts anchorToArticle：try/catch → toast「打开文章失败：…」；\n⑤ nav.ts markCurrentViewAllRead 的 void api.markAllRead：补 .catch → toast「全部已读未能保存：…」（修前本地已全标读、计数已扣、无任何提示，重启后全部回退未读）；\n⑥ reader.ts selectArticle 的 void api.setRead：补 .catch → toast「标读失败：…」；\n⑦ reader.ts toggleCurrentRead 的 setRead 与 toggleCurrentStar 的 setStarred：补 .catch → toast；\n⑧ reader.ts markEntriesReadBulk 的逐条 for 循环 void api.setRead：改为 Promise.allSettled → 任一失败单条 toast「部分文章标读失败」（避免批量失败时 toast 洪峰）；\n⑨ feeds.ts 六个 AI/折叠开关（toggleCatSummary/toggleCatTranslate/toggleFeedSummary/toggleFeedTranslate/toggleFolderCollapse/toggleAllFolders 的落库调用）：补 .catch → toast「…未能保存，重启后可能回退」（镜像同文件 updateCatLayout 既有口径）；\n⑩ 设置页三处挂载期状态拉取（SyncTab 的 syncStatus、ConfigSyncSection 的 configSyncStatus、AiTab 的 getAiConfig）：补 .catch(() => {})（挂载期默认态兜底，非用户动作，不弹 toast；消除 unhandled rejection）。\n\nApp.tsx 的 feeds-updated 监听调用 reloadFromBackend 无需单独处理（①的内部 catch 已覆盖）。",
+  "non_goals": [
+    "不改乐观更新语义（本地先行、失败提示、重启回退的既有模式保持）",
+    "不改 loadMoreArticles/refreshOneFeed/extractCurrentArticle 等已有 catch 的行为",
+    "不改 bootstrapFromBackend 的 bootstrapError 错误态语义（绝不回退 mock）",
+    "不为设置页挂载期拉取引入 toast（非用户动作，console 静默兜底）",
+    "不引入新依赖，不改 Cargo.toml/Cargo.lock/package.json",
+    "不改工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-102"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-066"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": [
+      "DEC-992f64fd15714ca2a614fe66d5a144ec"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/App.tsx",
+      "src/store/slices/bootstrap.ts",
+      "src/store/slices/nav.ts",
+      "src/store/slices/reader.ts",
+      "src/store/slices/feeds.ts",
+      "src/components/settings/SyncTab.tsx",
+      "src/components/settings/ConfigSyncSection.tsx",
+      "src/components/settings/AiTab.tsx",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      "src-tauri/**",
+      "src/lib/**",
+      "src/store/internals.ts",
+      "src/store/types.ts",
+      "src/components/Timeline.tsx",
+      "src/components/Reader.tsx",
+      "package.json",
+      ".workflow-kit/tasks/runs/RUN-e7b42163aaa14d45b754261992f5214d.json"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "diff 仅含 allowed_paths 内 9 文件；N9 拖拽本地态+松手落库；N10 各点按声明口径补 catch/toast（reloadFromBackend rethrow 保持 bootstrapError 路径；markEntriesReadBulk 用 allSettled 单条 toast 防洪峰；挂载期拉取静默兜底）",
+    "变异可检出：(p) 失败可见性断言与 N9 源码断言在对应缺陷还原后必须失败（如还原 onMove 内 updateSettings → N9 断言失败）",
+    "四门禁全绿：cargo test 171/0/9 不回退、lint 0/0、build exit 0、frontend 通过数 ≥295 且存量不回退",
+    "不引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；文本文件 LF 行尾；台账改动须在 begin 之前完成；用户真实数据库不得写入"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-e7b42163aaa14d45b754261992f5214d.json",
+      "summary": "2026-09-19 基线（TASK-066 终版候选验证 RUN-e7b42163，提交 f2cd034）：cargo test 171 passed / 0 failed / 9 ignored、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 295/295。本任务 behavior=change 的范围如实声明：① IPC 失败从「静默/unhandled rejection」变为「用户可见 toast」（N10 各点）——失败提示是新增行为；② 列宽拖拽从「每像素落库」变为「松手一次性持久化」（N9，交互时序变化，最终持久化语义不变）；③ 挂载期拉取失败从 unhandled rejection 变为 console 兜底。既有断言中与失败路径相关的 (a) bootstrap 失败测试在 toast 新增后仍应通过（其断言不含 toast 排除）。",
+      "decision_ids": [
+        "DEC-992f64fd15714ca2a614fe66d5a144ec"
+      ]
+    },
+    "decision_ids": [
+      "DEC-992f64fd15714ca2a614fe66d5a144ec"
+    ],
+    "actions": [
+      {
+        "action": "add",
+        "target": "(p) 失败可见性行为断言（harness 加通用 rejectCmds 注入旋钮）：① mark_all_read 拒绝 → markCurrentViewAllRead 后出现「全部已读未能保存」toast；② set_read 拒绝 → selectArticle 后出现「标读失败」toast；③ failReload → reloadFromBackend 后出现「刷新失败」toast 且既有 (a) bootstrapError 断言不回退",
+        "reason": "静默失败此前零覆盖；失败注入是 harness 既有能力（failReload/reject 模式）",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "(p) N9 源码形态断言（沿用 (n8) 风格）：App.tsx 的 onMove 回调内不得出现 updateSettings（拖动中不落库），onUp 内必须出现（松手持久化）——修前 onMove 内有 updateSettings → 断言失败",
+        "reason": "拖拽交互无 DOM harness，源码形态断言是既有风格的等价替代",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部既有断言（295 条存量）逐字不动",
+        "reason": "除新增断言块外契约不变",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-067-input-4ef0684370a3422282a9504f95158fc4.json",
+    "digest": "3612bb499db86d4ad4d79c44cfb0ca91d62a3e264163cd8be108abaa1b725670",
+    "source_revision": null,
+    "definition_digest": "8a09344a46b7494fc2ea1ff1cba149a1e4f5a45d0cf032efa445ce55d6d22c19"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-19T23:05:00.182876Z",
+    "deadline_at_utc": "2026-09-20T03:05:00.182876Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-4f9d7067e5b04d5bbedfdcf3a2b021ee",
+  "run_ids": [
+    "RUN-4d2026072d8a436e89e7bfd557c0fc63",
+    "RUN-73a92538633d4f40a218a7dcb5097c76",
+    "RUN-e54ccca37ce84aaea60189a339104193"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-73a92538633d4f40a218a7dcb5097c76-candidate.json",
+    "candidate_digest": "fa34e56ffa1a6cae1e3a62d5f1aa967596ec1ff4776cbeb6861e7f10b043da06",
+    "verification_run": "RUN-73a92538633d4f40a218a7dcb5097c76",
+    "review_run": "RUN-e54ccca37ce84aaea60189a339104193",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-057.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task057.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
+    ".workflow-kit/tasks/runs/RUN-0259efca5b644b909fcf022fefeaeb73.json",
+    ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
+    ".workflow-kit/tasks/runs/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8.json",
+    ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
+    ".workflow-kit/tasks/runs/RUN-e6040878c41e4d729e86380954385c7d.json",
+    ".workflow-kit/tasks/runs/RUN-e7b42163aaa14d45b754261992f5214d.json",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "tools",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-066": "3e672fc39cf046d4ace39024b4df73a77b4ca068f193ac6affa50005ef36113d"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-19T23:05:00.345489Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-19T23:17:49.535651Z",
+      "note": "编码结果已记录，差异范围已核对：src/App.tsx, src/components/settings/AiTab.tsx, src/components/settings/ConfigSyncSection.tsx, src/components/settings/SyncTab.tsx, src/store/slices/bootstrap.ts, src/store/slices/feeds.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-19T23:18:10.127053Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-19T23:37:22.313130Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

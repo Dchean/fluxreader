@@ -272,13 +272,13 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
   toggleCatSummary: (catId, val) => {
     set((s) => ({ categories: s.categories.map((c) => (c.id === catId ? { ...c, autoSummary: val } : c)) }));
     const cat = get().categories.find((c) => c.id === catId);
-    if (cat) void api.setFolderAiFlags(numericId(catId), val, cat.autoTranslate);
+    if (cat) void api.setFolderAiFlags(numericId(catId), val, cat.autoTranslate).catch(() => get().showToast('AI 摘要开关未能保存，重启后可能回退'));
   },
 
   toggleCatTranslate: (catId, val) => {
     set((s) => ({ categories: s.categories.map((c) => (c.id === catId ? { ...c, autoTranslate: val } : c)) }));
     const cat = get().categories.find((c) => c.id === catId);
-    if (cat) void api.setFolderAiFlags(numericId(catId), cat.autoSummary, val);
+    if (cat) void api.setFolderAiFlags(numericId(catId), cat.autoSummary, val).catch(() => get().showToast('AI 翻译开关未能保存，重启后可能回退'));
   },
 
   toggleFeedSummary: (catId, feedId, val) => {
@@ -287,7 +287,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
         c.id === catId ? { ...c, feeds: c.feeds.map((f) => (f.id === feedId ? { ...f, autoSummary: val } : f)) } : c,
       ),
     }));
-    void api.setFeedAiFlags(numericId(feedId), val, get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId)?.autoTranslate ?? false);
+    void api.setFeedAiFlags(numericId(feedId), val, get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId)?.autoTranslate ?? false).catch(() => get().showToast('AI 摘要开关未能保存，重启后可能回退'));
   },
 
   toggleFeedTranslate: (catId, feedId, val) => {
@@ -296,7 +296,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
         c.id === catId ? { ...c, feeds: c.feeds.map((f) => (f.id === feedId ? { ...f, autoTranslate: val } : f)) } : c,
       ),
     }));
-    void api.setFeedAiFlags(numericId(feedId), get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId)?.autoSummary ?? false, val);
+    void api.setFeedAiFlags(numericId(feedId), get().categories.find((c) => c.id === catId)?.feeds.find((f) => f.id === feedId)?.autoSummary ?? false, val).catch(() => get().showToast('AI 翻译开关未能保存，重启后可能回退'));
   },
 
   toggleFolderCollapse: (catId) => {
@@ -305,7 +305,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
     }));
     /* 落库：分类折叠状态 */
     const cat = get().categories.find((c) => c.id === catId);
-    if (cat) void api.setFolderCollapsed(numericId(catId), cat.collapsed);
+    if (cat) void api.setFolderCollapsed(numericId(catId), cat.collapsed).catch(() => get().showToast('折叠状态未能保存，重启后可能回退'));
   },
 
   toggleAllFolders: () => {
@@ -314,7 +314,9 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
     get().showToast(anyOpen ? '已收起全部分类' : '已展开全部分类');
     /* 批量落库折叠状态 */
     if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-      for (const c of get().categories) void api.setFolderCollapsed(numericId(c.id), anyOpen);
+      for (const c of get().categories) {
+        void api.setFolderCollapsed(numericId(c.id), anyOpen).catch(() => get().showToast('折叠状态未能保存，重启后可能回退'));
+      }
     }
   },
 

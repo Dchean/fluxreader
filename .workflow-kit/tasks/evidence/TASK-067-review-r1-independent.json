@@ -1,0 +1,80 @@
+{
+  "task_id": "TASK-067",
+  "candidate_digest": "fa34e56ffa1a6cae1e3a62d5f1aa967596ec1ff4776cbeb6861e7f10b043da06",
+  "verification_run": "RUN-73a92538633d4f40a218a7dcb5097c76",
+  "verdict": "PASS",
+  "summary": "独立复核确认：审查者以 candidate.json 的 roots/files 逐字节重算候选摘要得 fa34e56f…（与声明一致），且当前工作区 152 个快照文件 sha256 全部与候选清单一致——所审 diff 与 RUN-73a92538 验证对象完全同一。N9 与 N10 十个声明点（①-⑩）全部按 objective 口径落地：① toast+rethrow 且 bootstrapFromBackend 的 bootstrapError 语义保持（bootstrap.ts:338-345 catch rethrow，(a) 测试与 stderr 证据均通过）；② syncStatus .catch 静默；③/④ try/catch+toast；⑤ markAllRead .catch+toast；⑥⑦ setRead/setStarred .catch+toast；⑧ allSettled 单条 toast 防洪峰；⑨ feeds 六开关镜像 updateCatLayout「未能保存，重启后可能回退」口径；⑩ 三处挂载拉取 .catch(() => {}) 无 toast。diff 恰含 9 个 allowed_paths 文件、全 LF、package.json/Cargo.toml/Cargo.lock 零改动、.workflow-kit/scripts 与 binding.json 未动、无新依赖。四门禁原始证据核实：cargo test 自求和恰 171 passed/0 failed/9 ignored、lint 0/0、build exit 0、frontend 299/299（断言名集合比对：HEAD 295 条零删除零改名、顺序保持，净增恰 (p1)-(p4) 4 条；harness diff 仅 rejectCmds 三处旋钮+两个 (p) 断言块，旋钮在 resetStore 每用例复位不影响其他块）。审查者自行重跑 npm run test:frontend 两次得 299/299 exit 0。两项变异自证均以 exit 1 检出并完整还原：M1（onMove 还原每像素 updateSettings）→ (p4) ❌、合计 298/299、exit 1；M2（删 nav.ts markAllRead 的 catch）→ Node v24.19.0 以 ERR_UNHANDLED_REJECTION 崩溃、exit 1（(p1) 是唯一 mark_all_read 拒绝注入点，harness 无 unhandledRejection 兜底）；还原后 9 文件 sha256 与候选清单逐一一致、git status 仅剩候选文件、pristine 重跑 299/299。遗漏面清查：除声明点外仍存 3 处同类未接住点（bootstrap.ts:315 anchorToArticle 的 void setRead、reader.ts:386-387 toggleEntryFlag 的 void setRead/setStarred、SyncTab.tsx:79 doSave 后的 syncStatus().then），均为修前既有（HEAD 即存在）且不在审计 N10 行号清单与任务 ①-⑩ 枚举内，属审计枚举缺口而非本候选缺陷，已在 failure_paths 如实留痕供后续任务收口。五项核对全部 PASS。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐条对照 objective 九组修复点与 non_goals，全部按声明落地：N9——App.tsx 拖动改为 useState dragWidth 本地态（onMove 仅 setDragWidth），渲染用 effectiveListWidth = dragWidth ?? listWidth（App.tsx:47-49/291），onUp 经函数式 setState 一次性 updateSettings({listWidth: Math.round(w)}) 并清拖拽态，注释引用 TASK-067 N9 且如实描述修前「每像素 set_setting IPC」；N10——① bootstrap.ts reloadFromBackend 的 Promise.all 包 try/catch → showToast(`刷新失败：…`) 后 throw e，rethrow 由 bootstrapFromBackend 现有 catch 接住置 bootstrapError（bootstrap.ts:338-345），错误态语义保持（既有 (a) bootstrap 失败测试通过、run 的 frontend stderr 仍见两条 'bootstrap from backend failed' console.error）；② syncStatus().then 补 .catch(() => {})；③ reloadFilteredEntries try/catch → toast「筛选列表加载失败：…」；④ anchorToArticle 的 articleIndex 与 listArticles 两处 await 各包 try/catch → toast「打开文章失败：…」；⑤ nav.ts markAllRead 补 .catch → toast「全部已读未能保存，重启后可能回退」（乐观更新 markEntriesRead 保持在 catch 之外，语义未动）；⑥ selectArticle setRead .catch → toast「标读失败：…」；⑦ toggleCurrentRead/toggleCurrentStar .catch → toast「标读/收藏状态保存失败：…」；⑧ markEntriesReadBulk 改 Promise.allSettled → 任一 rejected 单条 toast「部分文章标读失败」（无洪峰）；⑨ feeds.ts 六开关（toggleCatSummary/toggleCatTranslate/toggleFeedSummary/toggleFeedTranslate/toggleFolderCollapse/toggleAllFolders）逐一 .catch → toast「…未能保存，重启后可能回退」，镜像同文件 updateCatLayout 口径；⑩ SyncTab.tsx:35/ConfigSyncSection.tsx:36/AiTab.tsx:27 三处挂载拉取补 .catch(() => {}) 静默兜底、无 toast。App.tsx:89 feeds-updated 的 void reloadFromBackend 未单独处理与 objective 声明一致（① 内部 catch+toast 已覆盖可见性）。范围核查：git diff HEAD 仅含 9 个 allowed_paths 文件（.workflow-kit 台账文件为工作流自身产出，非代码改动）；九文件全 LF；package.json/Cargo.toml/Cargo.lock 零改动；.workflow-kit/scripts/** 与 binding.json 未动；无新依赖；non_goals 六项全部遵守（乐观更新语义、既有 catch 行为、bootstrapError 语义、挂载拉取不弹 toast 均未破坏）。",
+      "evidence_files": [
+        "src/App.tsx",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/nav.ts",
+        "src/store/slices/reader.ts",
+        "src/store/slices/feeds.ts",
+        "src/components/settings/SyncTab.tsx",
+        "src/components/settings/ConfigSyncSection.tsx",
+        "src/components/settings/AiTab.tsx",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+        ".workflow-kit/tasks/evidence/RUN-73a92538633d4f40a218a7dcb5097c76-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "四门禁原始输出逐项核实：cargo_test stdout 自求和恰 171 passed / 0 failed / 9 ignored（26 个 test result 行汇总，run 记录四门禁 exit 0 且绑定候选摘要 fa34e56f…）；lint「Found 0 warnings and 0 errors」exit 0；build exit 0（vite built in 129ms）；frontend 证据「既有回归 26/26 + 新增 273/273 = 合计 299/299」exit 0（295 存量 + 4 新增，数目自洽且日志无任何 ❌）。审查者自行重跑 npm run test:frontend 得 299/299 exit 0（变异还原后又 pristine 重跑一次仍 299/299）。存量保护：以正则提取 HEAD 与工作区 harness 的断言名集合比对——HEAD 恰 295 条、工作区 299 条、零删除零改名、公共断言顺序完全保持，净增恰 (p1)-(p4) 四条；harness diff 仅 rejectCmds 三处旋钮（声明、__INVOKE__ 顶部拒绝检查、resetStore 复位）加两个纯新增 (p) 断言块。兼容性：既有 (a) bootstrap 失败两条（含 failReload 注入与「绝不回退 mock」断言）在新 toast 后通过（其断言不含 toast 排除）；(c)/(s) 系列（含 (s4) selectFeed 手工 reload、(s5) 锚定打开标读）与 (l) 系列（含 (l2) 翻译流时序）全部通过；S-5 全部已读参数测试在 markAllRead catch 新增后通过（成功路径无 rejection）。rejectCmds 旋钮在 resetStore 每用例复位（与 failReload=null 同点），(p1)/(p2)/(p3) 各自 bootFixture 起步，不污染其他块。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-73a92538633d4f40a218a7dcb5097c76-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-73a92538633d4f40a218a7dcb5097c76-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-73a92538633d4f40a218a7dcb5097c76-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-73a92538633d4f40a218a7dcb5097c76-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "两项变异主张独立复现并完整还原（工作区与候选逐字节一致的前提下施加）：M1——将 App.tsx onMove 还原为修前的 `const next = …; updateSettings({ listWidth: Math.round(next) });` → 重跑 frontend 门禁输出 ❌ (p4)「列宽拖动中不落库、松手才持久化」、合计 298/299、exit 1，精准命中且其余 298 条通过（断言与源码形态绑定而非恒真）；M2——删除 nav.ts markAllRead 的 .catch（还原为裸 void api.markAllRead）→ (p1) 注入 mark_all_read 拒绝后 Node v24.19.0 以 ERR_UNHANDLED_REJECTION 崩溃、exit 1（harness 无 process.on('unhandledRejection') 兜底，(p1) 是全 harness 唯一 mark_all_read 拒绝注入点，因果闭合）。每次变异后均还原并以候选清单 sha256 逐一核对（M1 后 src/App.tsx 匹配；M2 后 9 个候选文件全部匹配），git status --short src/ tools/ 仅剩 9 个候选文件，pristine 重跑 299/299 exit 0，工作区无残留临时文件。遗漏面清查（grep src/store src/components src/App.tsx 的 `void api.`/`void get().`/`void useAppStore`/`.then(` 并逐一核对多行链收尾）：全仓其余链路均有兜底——feeds.ts 六条 .then 链与 sync.ts/SyncTab doSaveAndSync 链有末端 .catch；reader.ts 四条水合/全文提取链有 .catch+toast；ai.ts 两处 onDone 有 .catch（TASK-066 N11 修复）；PlayerBar/settings 落库与 AboutTab/AutoStartSwitch/SettingsSidebarFooter 挂载拉取有静默 .catch；Overlays 搜索链有 .catch；Timeline proxyImageUrl 与 githubLoginDisconnect/bootstrapSettings 均内部 try/catch 永不 reject。除任务声明的 ①-⑩ 外仍存 3 处同类未接住点，均为修前既有（git show HEAD 核对在案）且不在审计 N10 行号清单（bootstrap 237-286、reader 88/319/329/349、SyncTab:35）与任务枚举内：(1) bootstrap.ts:315 anchorToArticle 的 void api.setRead（F7 与 selectArticle 同口径的标读落库，搜索/命令面板打开+markReadOnOpen 时失败静默回退，审计区间 237-286 恰止于此行之前）；(2) reader.ts:386-387 toggleEntryFlag 的 void api.setRead/setStarred（时间流卡片星标/已读按钮与 ContextMenu 的落库）；(3) SyncTab.tsx:79 doSave 保存成功后的 void api.syncStatus().then（非挂载期拉取，⑩「三处」计数未含）。另 settings.ts:56 updateSettings 的 void api.setSetting（N9 持久化的最终落库点）同类，但该文件不在 allowed_paths、结构上超出本任务可修范围。判定：候选对 ①-⑩ 全部落地且未引入新缺口，上述残留属审计/任务定义的枚举缺口而非本候选缺陷（对照任务声明的修复组无遗漏），如实留痕供后续任务收口，不构成本项 FAIL。",
+      "evidence_files": [
+        "src/App.tsx",
+        "src/store/slices/nav.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/reader.ts",
+        "src/components/settings/SyncTab.tsx",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-73a92538633d4f40a218a7dcb5097c76-candidate.json"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "toast 文案口径与既有一致：feeds 六开关与 nav markAllRead 沿用 updateCatLayout 的「…未能保存，重启后可能回退」句式；reader 三处用「标读/收藏状态保存失败：…」与「标读失败：…」，与 loadMoreArticles「加载更多失败：…」、refreshOneFeed 链「刷新失败：…」的 extractError+前缀句式一致；⑧ 的「部分文章标读失败」与声明逐字相同。注释引用任务号且如实：App.tsx N9 注释准确描述修前「onMove 每像素 updateSettings（整包序列化 + set_setting IPC + 全 App 重渲染）」与修后时序；bootstrap.ts/nav.ts/reader.ts 及三个设置组件的 N10 注释均引用 TASK-067 N10 且与实际行为相符（rethrow 保持 bootstrapError、静默兜底不打扰等表述准确）；feeds.ts 六开关无新增注释，但镜像的 updateCatLayout 既有组注释（乐观更新+失败 toast）已覆盖该模式，属文件既有风格。(p) 断言干净：rejectCmds 在 resetStore 与 failReload 同点复位、__INVOKE__ 顶部先于 switch 检查（拒绝语义对所有 mock 一致）、三个行为块各自 bootFixture 且 (p3) 的 failReload 由下一块 bootFixture 复位；(p4) 沿用 (n8) 源码切片风格，切片标记（onMove/onUp 边界）经 M1 变异证明真实可失败。一处次要观察（不计缺陷）：onUp 在函数式 setState 更新器内调用 updateSettings（更新器内含副作用），React StrictMode（main.tsx 已启用）在 dev 下会双调用更新器导致开发构建一次松手写两次相同 set_setting；生产构建单次调用、行为正确且幂等，N9「消除每像素 IPC 与写放大」的目标不受影响，建议后续改为更新器外取值（如经 ref）使更新器纯化。",
+      "evidence_files": [
+        "src/App.tsx",
+        "src/store/slices/nav.ts",
+        "src/store/slices/reader.ts",
+        "src/store/slices/feeds.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/components/settings/SyncTab.tsx",
+        "src/components/settings/AiTab.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "拖拽期间渲染路径为净改善而非回归：修前 onMove 每像素触发 updateSettings → JSON.stringify 整包设置 + set_setting IPC + zustand set（App 及 listWidth 订阅者重渲染）；修后 onMove 仅 setDragWidth（React 本地态，App 重渲染为视觉反馈所必需——CSS 变量 --list-width 必须逐帧更新才能看到列宽跟手，effectiveListWidth = dragWidth ?? listWidth 渲染正确），IPC 与序列化从每像素一次降为松手一次（onUp），SQLite 写放大与「手感发涩」根因消除；松手时 updateSettings 与 setDragWidth(null) 在同一事件内被 React 批处理为单次重渲染，无闪烁。mouse 拖动中不再触达 zustand store，其他 store 订阅组件零波及。markEntriesReadBulk 的 allSettled 不改变并发度（仍并行逐条 IPC），仅收敛失败提示为单条，无额外开销；(p4) 静态断言仅启动时读一次源文件，开销可忽略。",
+      "evidence_files": [
+        "src/App.tsx",
+        "src/store/slices/reader.ts"
+      ]
+    }
+  ],
+  "ui_review": null
+}

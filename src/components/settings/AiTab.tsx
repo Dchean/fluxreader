@@ -38,7 +38,7 @@ export function AiTab() {
           translatePrompt: saved.translatePrompt ?? c.translatePrompt,
         }));
       } catch { /* 忽略坏 JSON */ }
-    });
+    }).catch(() => { /* TASK-067 N10：挂载期配置恢复失败静默兜底（默认配置可用） */ });
   }, []);
 
   const applyPreset = (p: string) => {

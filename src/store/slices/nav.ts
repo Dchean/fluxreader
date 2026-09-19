@@ -161,7 +161,11 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       const view = get().activeViewFilter;
       const starredOnly = view === 'starred';
       const sinceMs = view === 'today' ? startOfLocalDayMs() : undefined;
-      void api.markAllRead(feedId, folderId, { starredOnly, sinceMs });
+      /* TASK-067 N10：全部已读失败必须可见——此前静默失败会让本地已全标读、
+         计数已扣，重启后全部回退未读 */
+      void api.markAllRead(feedId, folderId, { starredOnly, sinceMs }).catch(() => {
+        get().showToast('全部已读未能保存，重启后可能回退');
+      });
     }
     markEntriesRead(ids);
     set({ openedReadIds: {} });

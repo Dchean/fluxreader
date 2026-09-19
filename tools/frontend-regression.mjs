@@ -343,6 +343,7 @@ await (async () => {
   let detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
   let aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
   let aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
+  let rejectCmds = new Set();   // (p) TASK-067 N10：按命令名注入 IPC 失败
   let heldAi = [];            // hold 模式挂起项 { cmd, id, ch }
   let settingsRaw = null;     // get_setting('app_settings') 的返回值
   let ghLoginStatus = null;   // github_login_status 的返回值：null | {login} | 'reject'
@@ -374,6 +375,7 @@ await (async () => {
   /* 替换上面的 S-1…S-5 invoke mock（api 每调用一次都读 globalThis.__INVOKE__） */
   globalThis.__INVOKE__ = (cmd, args) => {
     invokeCalls.push({ cmd, args });
+    if (rejectCmds.has(cmd)) return Promise.reject({ message: '注入失败:' + cmd });
     switch (cmd) {
       case 'list_folders': return failReload ? Promise.reject(failReload) : Promise.resolve(FOLDERS);
       case 'list_feeds': return failReload ? Promise.reject(failReload) : Promise.resolve(FEEDS);
@@ -439,6 +441,7 @@ await (async () => {
     heldAi = [];
     aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
     aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
+    rejectCmds = new Set();
     detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
     /* TASK-063：视图缓存是模块级 Map，跨用例残留会让下一个用例的 selectFeed
        命中上一个夹具的快照（跨夹具污染）。每个用例独立起步（(s6) 此前已就地
@@ -1352,6 +1355,30 @@ await (async () => {
     && store.getState().isRawRenderMode === false
     && store.getState().showFulltext === false
     && store.getState().activeArticleId === '101');
+
+  /* ---------- (p) TASK-067 N9/N10：交互落库与错误可见性 ---------- */
+  await bootFixture();
+  rejectCmds.add('mark_all_read');
+  store.setState({ activeViewFilter: 'all', activeFeedFilter: '10', toasts: [] });
+  store.getState().markCurrentViewAllRead();
+  await nTick(10);
+  checkNew('(p1) 全部已读失败必须可见（修前静默：本地已标读、计数已扣、无提示）',
+    store.getState().toasts.some((t) => t.text === '全部已读未能保存，重启后可能回退'));
+
+  await bootFixture();
+  rejectCmds.add('set_read');
+  store.setState({ toasts: [], settings: { ...store.getState().settings, markReadOnOpen: true } });
+  store.getState().selectArticle('101');
+  await nTick(10);
+  checkNew('(p2) 打开文章标读失败必须可见（修前静默，重启后回退未读）',
+    store.getState().toasts.some((t) => t.text.startsWith('标读失败：')));
+
+  await bootFixture();
+  failReload = { message: 'db busy' };
+  store.setState({ toasts: [] });
+  await store.getState().reloadFromBackend().catch(() => {});
+  checkNew('(p3) reloadFromBackend 失败必须可见（后台刷新/范围切换路径，修前静默）',
+    store.getState().toasts.some((t) => t.text.startsWith('刷新失败：')));
 
   await bootFixture();
   aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
@@ -2335,6 +2362,15 @@ await (async () => {
   checkNew('(n11) Reader 译文渲染含未消毒纯文本分支（流式产物不进 HTML 渲染路径）',
     readerSrc.includes('rawStream')
     && readerSrc.includes('dangerouslySetInnerHTML'));
+
+  {
+    const fsP = await import('node:fs');
+    const appSrc = fsP.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+    const onMoveZone = appSrc.slice(appSrc.indexOf('const onMove = (ev: MouseEvent) => {'), appSrc.indexOf('const onUp = () => {'));
+    const onUpZone = appSrc.slice(appSrc.indexOf('const onUp = () => {'), appSrc.indexOf("window.addEventListener('mousemove'"));
+    checkNew('(p4) 列宽拖动中不落库、松手才持久化（修前 onMove 每像素一次 set_setting IPC）',
+      !onMoveZone.includes('updateSettings') && onUpZone.includes('updateSettings({ listWidth: Math.round(w) })'));
+  }
 
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);

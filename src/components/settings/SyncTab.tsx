@@ -39,7 +39,7 @@ export function SyncTab() {
       setLastSync(st.last_sync);
       if (st.connected && st.endpoint) setEndpoint(st.endpoint);
       setProtocol(st.protocol === 'fever' ? 'fever' : 'greader');
-    });
+    }).catch(() => { /* TASK-067 N10：挂载期状态拉取失败静默兜底（默认态可用） */ });
   }, [dataMode]);
 
   /* 轻量连通测试：不落库不做同步（填表时快速验证） */

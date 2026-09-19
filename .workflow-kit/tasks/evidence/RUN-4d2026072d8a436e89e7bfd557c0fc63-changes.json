@@ -1,0 +1,13 @@
+{
+  "changed_files": [
+    "src/App.tsx",
+    "src/components/settings/AiTab.tsx",
+    "src/components/settings/ConfigSyncSection.tsx",
+    "src/components/settings/SyncTab.tsx",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/feeds.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

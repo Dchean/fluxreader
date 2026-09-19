@@ -85,7 +85,10 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     const shouldMarkRead = dataMode === 'tauri' && settings.markReadOnOpen && !art.isRead;
     if (shouldMarkRead) {
       /* 后端模式：已读落库（不重载快照，本地同步置位即可） */
-      void api.setRead(Number(id), true);
+      /* TASK-067 N10：标读失败对用户可见（此前静默，重启后回退未读） */
+      void api.setRead(Number(id), true).catch((e) => {
+        get().showToast(`标读失败：${extractError(e)}`);
+      });
       markEntriesRead(new Set([id]));
     }
     set((s) => ({
@@ -316,7 +319,11 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     if (!activeArticleId) return;
     const art = entries.find((a) => a.id === activeArticleId);
     if (!art) return;
-    if (dataMode === 'tauri') void api.setRead(Number(activeArticleId), !art.isRead);
+    if (dataMode === 'tauri') {
+      void api.setRead(Number(activeArticleId), !art.isRead).catch((e) => {
+        get().showToast(`标读状态保存失败：${extractError(e)}`);
+      });
+    }
     flipEntryFlag(activeArticleId, 'isRead');
     get().showToast(art.isRead ? '已标为未读' : '已标为已读');
   },
@@ -326,7 +333,11 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     if (!activeArticleId) return;
     const art = entries.find((a) => a.id === activeArticleId);
     if (!art) return;
-    if (dataMode === 'tauri') void api.setStarred(Number(activeArticleId), !art.isStarred);
+    if (dataMode === 'tauri') {
+      void api.setStarred(Number(activeArticleId), !art.isStarred).catch((e) => {
+        get().showToast(`收藏状态保存失败：${extractError(e)}`);
+      });
+    }
     flipEntryFlag(activeArticleId, 'isStarred');
   },
 
@@ -346,7 +357,10 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     });
     if (unread.length === 0) return;
     if (dataMode === 'tauri') {
-      for (const id of unread) void api.setRead(Number(id), true);
+      /* TASK-067 N10：批量标读失败单条提示（allSettled 防 toast 洪峰） */
+      void Promise.allSettled(unread.map((id) => api.setRead(Number(id), true))).then((rs) => {
+        if (rs.some((r) => r.status === 'rejected')) get().showToast('部分文章标读失败');
+      });
     }
     const marked = new Set(unread);
     markEntriesRead(marked);

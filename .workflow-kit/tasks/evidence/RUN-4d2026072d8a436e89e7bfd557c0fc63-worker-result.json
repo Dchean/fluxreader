@@ -1,0 +1,26 @@
+{
+  "task_id": "TASK-067",
+  "run_id": "RUN-4d2026072d8a436e89e7bfd557c0fc63",
+  "status": "ready_for_verification",
+  "summary": "REQ-102 前端收尾两项（AUDIT-20260919-v2.md N9/N10）。【N9】App.tsx 列宽拖拽：拖动期间只更新本地拖拽态（useState dragWidth，渲染用 effectiveListWidth），mouseup 一次性 updateSettings 落库——修前 onMove 每像素一次 set_setting IPC + 全 App 重渲染（一次拖动几十上百次写库）。【N10】异步失败可见性九组：bootstrap.ts reloadFromBackend 内部 catch→toast「刷新失败」后 rethrow（bootstrapError 路径保持）；syncStatus 提示性刷新 catch 静默；reloadFilteredEntries/anchorToArticle catch→toast；nav.ts markAllRead catch→toast「全部已读未能保存，重启后可能回退」（修前本地已标读、计数已扣、无提示，重启回退）；reader.ts selectArticle setRead/toggleCurrentRead/toggleCurrentStar catch→toast；markEntriesReadBulk 改 Promise.allSettled 任一失败单条 toast（防批量 toast 洪峰）；feeds.ts 六个 AI/折叠开关 catch→toast（镜像 updateCatLayout 既有口径）；设置页三处挂载期拉取 catch 静默兜底（非用户动作，消除 unhandled rejection）。新增断言 4 条：(p1) mark_all_read 注入拒绝→toast；(p2) set_read 注入拒绝→selectArticle 后 toast；(p3) failReload→reloadFromBackend 后 toast（既有 (a) bootstrapError 断言不回退）；(p4) N9 源码形态断言（onMove 无 updateSettings、onUp 有）。变异取证成对：M1 还原 onMove 内 updateSettings→(p4) 失败 exit 1；M2 移除 markAllRead catch→Node 以 ERR_UNHANDLED_REJECTION 崩溃 exit 1（正是修复所消除的缺陷形态）。四门禁实测：cargo test 171 passed / 0 failed / 9 ignored（不回退）、lint 0 warnings/0 errors exit 0、build exit 0、frontend 299/299（295 存量 + 净增 4，存量一行未动）。LF 行尾（9 文件全部 CRLF 0）。",
+  "changed_files": [
+    "src/App.tsx",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/reader.ts",
+    "src/store/slices/feeds.ts",
+    "src/components/settings/SyncTab.tsx",
+    "src/components/settings/ConfigSyncSection.tsx",
+    "src/components/settings/AiTab.tsx",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri，门禁 cargo_test）",
+    "npm run lint（门禁 lint）",
+    "npm run build（门禁 build）",
+    "npm run test:frontend（门禁 frontend）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

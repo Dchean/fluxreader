@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-066 · 阅读与翻译一致性三修复收口：锚定复位、卡片译文 HTML 渲染、流式译文消毒时序（REQ-102/N7/N8/N11）
 
-**状态**：verified
+**状态**：done
 
 **目标**：本任务收口被取消的 TASK-065 的同一成果（历史：TASK-065 实施了 AUDIT-20260919-v2.md N7/N8/N11 三项修复并通过四门禁，但独立审查 r1 发现门禁缺陷——(n8) NotifCard 源码断言因切片标记在 SocialCard 内先出现而恒失败、(n8)/(n11) 断言块误置于汇总计算之后永远无法影响退出码、if 行缩进误改；修复已全部落地（NotifCard 切片改在起始位置之后搜索终点、断言块移到汇总计算之前、缩进恢复，重验 295/295 且 M3 变异经退出码 1 检出），因工具按工作区实时候选校验审查绑定、r1 FAIL 报告无法回录，TASK-065 按流程取消，本任务以当前工作区（已含全部修复）走完整的 finish/verify/独立复审/验收闭环绑定候选）。三项修复内容：【N7】bootstrap.ts anchorToArticle 补齐与 selectArticle 同口径的三个复位（isShowingTranslatedProse/isRawRenderMode/showFulltext）——修前搜索/命令面板打开新文章残留旧标志，Reader 按译文模式渲染空译文导致正文整块空白。【N8】Timeline.tsx SocialCard/NotifCard 译文块 rawTranslated 分支渲染：未消毒流式产物按纯文本，消毒后与 Reader 同口径 dangerouslySetInnerHTML——修前消毒译文显示字面标签。【N11】新增 rawTranslatedIds 状态（types.ts + ai slice）：流启动置位、消毒回读成功覆盖后清除、回读失败丢弃未消毒半截 + translateErrors + toast、流错误路径保持（半截内容按纯文本渲染，重试语义不变）；toggleReaderTranslation 缓存命中补 raw 守卫；两处 onDone 的消毒回读补 .catch（修前无 catch：半截未消毒译文永久留在渲染路径 + unhandled rejection）。渲染契约：rawTranslatedIds[id] 存在 → 纯文本；不存在 → HTML（DB 加载的译文后端已消毒）。translatingIds/translating 维持既有时序，消毒时序由 rawTranslatedIds 承担。r1 审查发现低优先级缺口（done→回读窗口内的重入可在毫秒级窗口内让新流未消毒 delta 短暂走 HTML 路径且自恢复）已如实记录于日志，作为已知限制不在本任务处理。
 

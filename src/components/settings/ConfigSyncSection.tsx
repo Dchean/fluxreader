@@ -38,7 +38,7 @@ export function ConfigSyncSection() {
         setStatus(st);
         if (st.backend === 'webdav') setBackend('webdav');
       }
-    });
+    }).catch(() => { /* TASK-067 N10：挂载期状态拉取失败静默兜底 */ });
   }, [ghAccount]);
 
   const doSave = async () => {

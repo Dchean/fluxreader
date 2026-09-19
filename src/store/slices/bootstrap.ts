@@ -87,12 +87,21 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const gen = ++reloadGeneration;
     const layout = get().activeContentLayout;
     const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort);
-    const [folders, feeds, articles, counts] = await Promise.all([
-      api.listFolders(),
-      api.listFeeds(),
-      api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset: 0, with_content: layoutNeedsBody(layout) }),
-      api.feedCounts(),
-    ]);
+    let folders, feeds, articles, counts;
+    try {
+      [folders, feeds, articles, counts] = await Promise.all([
+        api.listFolders(),
+        api.listFeeds(),
+        api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset: 0, with_content: layoutNeedsBody(layout) }),
+        api.feedCounts(),
+      ]);
+    } catch (e) {
+      /* TASK-067 N10：后台刷新事件/范围切换路径的失败此前完全不可见（bootstrap
+         路径另有 bootstrapError，但 void 调用点无人接住）。toast 后 rethrow——
+         bootstrapFromBackend 的错误态语义保持。 */
+      get().showToast(`刷新失败：${extractError(e)}`);
+      throw e;
+    }
     if (gen !== reloadGeneration) return; // 已有更新的 reload 在途/完成
     if (!folders || !feeds || articles === null) return;
 
@@ -128,7 +137,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
     void api.syncStatus().then((st) => {
       if (st && gen === reloadGeneration) set({ syncConnected: st.connected });
-    });
+    }).catch(() => { /* TASK-067 N10：纯提示性刷新，失败不打扰 */ });
     // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
     // （状态/内容可能变化，entries 需同步刷新为筛选结果）
     const view = get().activeViewFilter;
@@ -202,15 +211,22 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (get().dataMode !== 'tauri') return;
     const scopeKey = scopePageKey(get().activeFeedFilter);
     const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort);
-    const rows = await api.listArticles({
-      ...scopeArgs,
-      limit: 100000,
-      offset: 0,
-      only_unread: view === 'unread' ? true : undefined,
-      only_starred: view === 'starred' ? true : undefined,
-      only_today: view === 'today' ? true : undefined,
-      with_content: layoutNeedsBody(get().activeContentLayout),
-    });
+    let rows;
+    try {
+      rows = await api.listArticles({
+        ...scopeArgs,
+        limit: 100000,
+        offset: 0,
+        only_unread: view === 'unread' ? true : undefined,
+        only_starred: view === 'starred' ? true : undefined,
+        only_today: view === 'today' ? true : undefined,
+        with_content: layoutNeedsBody(get().activeContentLayout),
+      });
+    } catch (e) {
+      /* TASK-067 N10：筛选视图拉取失败对用户可见（此前静默，列表停留旧快照） */
+      get().showToast(`筛选列表加载失败：${extractError(e)}`);
+      return;
+    }
     if (!rows) return;
     // 竞态保护：拉取期间用户又切了视图，丢弃过期结果
     if (get().activeViewFilter !== view) return;
@@ -252,12 +268,24 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       offset: 0,
       with_content: layoutNeedsBody(st.activeContentLayout),
     };
-    const pos = await api.articleIndex(args, Number(articleId));
+    let pos;
+    try {
+      pos = await api.articleIndex(args, Number(articleId));
+    } catch (e) {
+      get().showToast(`打开文章失败：${extractError(e)}`);
+      return;
+    }
     if (gen !== reloadGeneration) return; // 期间又有更新的导航操作
     if (pos == null) return;
     // 从目标位置加载一页（若位置靠前，offset 为负会被 SQLite 截断为 0，安全）
     const offset = Math.max(0, pos);
-    const rows = await api.listArticles({ ...args, offset });
+    let rows;
+    try {
+      rows = await api.listArticles({ ...args, offset });
+    } catch (e) {
+      get().showToast(`打开文章失败：${extractError(e)}`);
+      return;
+    }
     if (gen !== reloadGeneration) return;
     if (!rows) return;
     const next = rows.map(articleRowToEntry);

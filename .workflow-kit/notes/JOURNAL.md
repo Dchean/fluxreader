@@ -69,3 +69,10 @@
 - 2026-09-19T22:46:33.724965Z · checkpoint · TASK-066 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-19T22:51:39.467326Z · checkpoint · TASK-066 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-19T22:51:40.263382Z · note/lesson · TASK-066 · 两个流程教训：① 审查 FAIL 报告的回录要求工作区与冻结候选逐字一致——修复轮改动后无法回录（selected_snapshot 按工作区实时重算），本轮因先改后录被迫取消 TASK-065 并以 TASK-066 收口；正确顺序是先回录 FAIL 触发 review_failure，再在修复轮 begin 内整改。② 自研门禁的新增断言必须放在汇总统计之前（checkNew 只 push 不抛错，汇总后的断言永远无法影响退出码），且以退出码而非日志行核对变异检出
+- 2026-09-19T23:03:07.434381Z · accept · 验收 TASK-066；依据：用户选择：验收 TASK-066，继续（验收问答 2026-09-19）
+- 2026-09-19T23:04:56.391849Z · prepare · TASK-067 · 任务已冻结：交互落库与错误可见性收尾：列宽拖拽松手持久化 + 异步失败可见（REQ-102/N9/N10）；范围 src/App.tsx, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, src/store/slices/feeds.ts, src/components/settings/SyncTab.tsx, src/components/settings/ConfigSyncSection.tsx, src/components/settings/AiTab.tsx, tools/frontend-regression.mjs
+- 2026-09-19T23:05:00.346713Z · checkpoint · TASK-067 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-19T23:17:49.536699Z · checkpoint · TASK-067 · 编码结果已记录，差异范围已核对：src/App.tsx, src/components/settings/AiTab.tsx, src/components/settings/ConfigSyncSection.tsx, src/components/settings/SyncTab.tsx, src/store/slices/bootstrap.ts, src/store/slices/feeds.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-19T23:18:10.128148Z · checkpoint · TASK-067 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-19T23:37:22.314217Z · checkpoint · TASK-067 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-19T23:37:23.137875Z · note/todo · TASK-067 · 审查清查补充（TASK-067 r1 PASS，非本候选缺陷）：N10 枚举外仍有 3 处同类未接住点为修前既有——bootstrap.ts:315（anchorToArticle 的 void setRead）、reader.ts:386-387（toggleEntryFlag 的 void setRead/setStarred，时间流卡片按钮路径）、SyncTab.tsx:79（doSave 后 syncStatus().then）；另 settings.ts:56 void setSetting（N9 最终落库点）。建议并入 REQ-104 P3 卫生批次收口

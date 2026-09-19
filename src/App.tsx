@@ -44,6 +44,9 @@ export default function App() {
   const themeMode = useAppStore((s) => s.settings.themeMode);
   const palette = useAppStore((s) => s.settings.palette);
   const listWidth = useAppStore((s) => s.settings.listWidth);
+  /* TASK-067 N9：拖动期间的本地列宽（松手前不落库） */
+  const [dragWidth, setDragWidth] = useState<number | null>(null);
+  const effectiveListWidth = dragWidth ?? listWidth;
   const updateSettings = useAppStore((s) => s.updateSettings);
   const toasts = useAppStore((s) => s.toasts);
   const playerActive = useAppStore((s) => s.player.isActive);
@@ -253,18 +256,24 @@ export default function App() {
 
   const gridClass = activeContentLayout === 'article' ? 'layout-3col' : 'layout-2col';
 
-  /* 列表列宽拖动：拖动分隔条调整文章列表列宽（280–560px），松手持久化 */
+  /* 列表列宽拖动：拖动分隔条调整文章列表列宽（280–560px），松手持久化。
+     TASK-067 N9：拖动期间只更新本地拖拽态——此前 onMove 每像素调一次
+     updateSettings（整包序列化 + set_setting IPC + 全 App 重渲染），一次拖动
+     几十上百次写库；松手才一次性持久化。 */
   const startDragListWidth = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
     const startWidth = listWidth;
     const onMove = (ev: MouseEvent) => {
-      const next = Math.min(560, Math.max(280, startWidth + (ev.clientX - startX)));
-      updateSettings({ listWidth: Math.round(next) });
+      setDragWidth(Math.min(560, Math.max(280, startWidth + (ev.clientX - startX))));
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      setDragWidth((w) => {
+        if (w != null) updateSettings({ listWidth: Math.round(w) });
+        return null;
+      });
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -279,7 +288,7 @@ export default function App() {
         <button className="win-btn close" title="关闭" onClick={closeWindow}>✕</button>
       </div>
 
-      <div className={`app-root ${gridClass}`} id="appRoot" style={{ '--list-width': `${listWidth}px` } as React.CSSProperties}>
+      <div className={`app-root ${gridClass}`} id="appRoot" style={{ '--list-width': `${effectiveListWidth}px` } as React.CSSProperties}>
         {/* 首屏加载骨架：dataLoading 期间不渲染真实 UI（避免空闪/测试数据闪现） */}
         {dataLoading ? (
           <div className="app-loading-splash">
