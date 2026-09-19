@@ -1626,6 +1626,17 @@
       "candidates": {
         "TASK-059": "22f7b85823272365d7148407398de733fa360de0794e41ca05af5308aa6b0ff3"
       }
+    },
+    {
+      "id": "DEC-7be347fba34d4b65957c73f60fde5af7",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-19 本次会话指令（原文）：『清理旧残留，验收并批准立项』——批准立项 TASK-060：补强 TASK-054 遗留的 P1/P4 两个弱断言测试（pending_local_read_wins_over_stale_remote_in_upsert / full_reconcile_backfills_missing_local_entries），使「缺陷复现 ⇒ 测试失败」成立。测试补强不改产品行为，四门禁为验收门禁",
+      "statement": "Owner approved the next bounded batch under the existing brief and policy",
+      "scope": [
+        "workflow"
+      ],
+      "recorded_at_utc": "2026-09-19T01:50:37.767108Z"
     }
   ]
 }
