@@ -1,0 +1,5 @@
+{
+  "changed_files": [
+    "src-tauri/src/sync/entries.rs"
+  ]
+}

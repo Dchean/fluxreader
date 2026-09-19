@@ -5,7 +5,7 @@
   "kind": "refactor",
   "stage": "delivery",
   "current_task": null,
-  "current_batch": "BATCH-eb0897a2645c467eaf92824397f1b8e8",
+  "current_batch": "BATCH-e4114a0450f2403c9fe42b2561eed78a",
   "ui_preview_task": null,
   "policy": ".workflow-kit/tasks/POLICY.json",
   "handoff": ".workflow-kit/tasks/PROJECT_STATE.md",

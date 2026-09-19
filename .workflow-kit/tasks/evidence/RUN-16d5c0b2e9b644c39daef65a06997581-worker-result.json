@@ -1,0 +1,18 @@
+{
+  "task_id": "TASK-061",
+  "run_id": "RUN-16d5c0b2e9b644c39daef65a06997581",
+  "status": "ready_for_verification",
+  "summary": "修复轮 1：处理独立审查 RUN-8858f86c 记录的唯一 finding（非阻塞的注释措辞精度备注）。仅修改 upsert_remote_entry 文档注释：删除「这两个查找与 merge_pulled_entry 的 aid 计算完全一致」的表述（该表述就 get() 表达式属实，但被删 existing 的 URL 分支叠加同源 filter，严格说是子集论证），改为如实陈述「已删除的 existing 守卫分支用的是同一对查找（URL 分支还叠加同源过滤，只会收窄候选集），两个查找都未命中时它必为 None，分支不可达」，并补「若改动 merge_pulled_entry 的查找逻辑或新增调用点，须按 TASK-060 §4 论证重新推导本约定」。代码语义零改动（纯注释），产品代码其余部分与上一候选逐字一致；测试文件零改动。四门禁重新实测：cargo test 161 passed / 0 failed / 9 ignored、npm run lint 0 warnings / 0 errors exit 0、npm run build exit 0、npm run test:frontend 283/283；行尾 LF。",
+  "changed_files": [
+    "src-tauri/src/sync/entries.rs"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri，门禁 cargo_test）",
+    "npm run lint（门禁 lint）",
+    "npm run build（门禁 build）",
+    "npm run test:frontend（门禁 frontend）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "id": "BATCH-eb0897a2645c467eaf92824397f1b8e8",
-  "status": "active",
+  "status": "closed",
   "task_ids": [
     "TASK-060"
   ],

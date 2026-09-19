@@ -1,0 +1,18 @@
+{
+  "task_id": "TASK-061",
+  "run_id": "RUN-b39a86a12204432f8380f48a175b906e",
+  "status": "ready_for_verification",
+  "summary": "删除 upsert_remote_entry 不可达的 existing 守卫分支（src-tauri/src/sync/entries.rs）。改动三部分：① 删除 existing 计算（mf_id_to_article 与 url_to_id 两个查找，与 merge_pulled_entry 的 aid 计算完全相同，能进入本函数的条目 existing 必为 None——TASK-060 报告 §4 论证，本次实施前独立复核一致：merge 先查 url_to_id 再查 mf_id_to_article，upsert 反序且 URL 查找带同源 filter 只会收窄，两处查找在进入 upsert 前均未命中，且两条路径之间 maps 无变更）；② 删除 if let Some(aid) = existing 的不可达分支（含其中 pending 守卫与 backfill_entry_content 调用），else 主体提升为函数体，缩进统一减 4 格，函数签名与唯一调用点不变（else 主体仍使用 maps，无未用参数告警）；③ 函数文档注释更新：移除只适用于死分支的「URL 兜底合并需同源校验」描述，补调用图不变式注释。真实保护路径 merge_remote_status（entries.rs:76 pending 守卫）逐字未动；测试文件零改动。四门禁实测：cargo test 161 passed / 0 failed / 9 ignored（与基线一致）、npm run lint 0 warnings / 0 errors exit 0、npm run build exit 0、npm run test:frontend 283/283；cargo build 0 警告。行尾 LF（CRLF 计数 0）。",
+  "changed_files": [
+    "src-tauri/src/sync/entries.rs"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri，门禁 cargo_test）",
+    "npm run lint（门禁 lint）",
+    "npm run build（门禁 build）",
+    "npm run test:frontend（门禁 frontend）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

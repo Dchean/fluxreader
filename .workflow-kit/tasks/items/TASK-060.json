@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "TASK-054 的捕获性验证发现 4 个代表用例中 2 个不具备捕获力：P1（sync_content_e2e.rs::pending_local_read_wins_over_stale_remote_in_upsert，变异 entries.rs:224 的 pending 守卫后仍通过——根因是 mock 的 edit-tag 在 push 成功时把远端条目翻成 read，pull 读回的状态与本地一致，断言无法区分）与 P4（sync_phases_e2e.rs::full_reconcile_backfills_missing_local_entries，变异 db/sync_map.rs 的 pending 查询去掉 read/unread 动作过滤后仍通过，独立审查复现）。本任务补强这两个测试，使「缺陷复现 ⇒ 测试失败」成立，并以变异验证留证：对每个测试施加其文档记载的变异，测试必须失败；还原变异后必须通过。不改任何产品代码语义，不动推送顺序/对账口径/入队条件/墓碑语义。",
   "non_goals": [
     "不改任何产品代码（src-tauri/src/** 的行为语义零改动）",
@@ -181,9 +181,12 @@
     "candidate_digest": "b78bd59472f1b2039667d7887f58177dfb3813c83b8b4a821a7cfd05c086687e",
     "verification_run": "RUN-e6040878c41e4d729e86380954385c7d",
     "review_run": "RUN-8326df9fcfbc4fcbb7dc9c9757c5dd2b",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-0126898ab7284c73881f86220cfb5827-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-0126898ab7284c73881f86220cfb5827"
+    ],
+    "merge_ref": "4c67a07",
+    "continued_by": "TASK-061"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

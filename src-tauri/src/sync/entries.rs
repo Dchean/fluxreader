@@ -167,7 +167,11 @@ pub(super) async fn pull_entries(
 }
 
 /// 后端条目入库（source='miniflux'，不覆盖直连正文）。
-/// URL 兜底合并需同源校验：跨源同 URL entry 不写状态、不抢绑定。
+/// 调用约定（不变式）：merge_pulled_entry 仅在 URL 与 remote_id 两个查找都未命中时
+/// 才调用本函数，本地必然没有该条目。已删除的 existing 守卫分支用的是同一对查找
+/// （URL 分支还叠加同源过滤，只会收窄候选集），两个查找都未命中时它必为 None，
+/// 分支不可达（TASK-060 §4 论证）。若改动 merge_pulled_entry 的查找逻辑或新增调用点，
+/// 须按该论证重新推导本约定。
 /// enclosure（播客音频/视频）与图片一并落库——播放器与卡片封面依赖。
 fn upsert_remote_entry(
     conn: &Connection,
@@ -176,23 +180,6 @@ fn upsert_remote_entry(
     maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
 ) {
-    let existing = item_numeric_id(e)
-        .and_then(|eid| maps.mf_id_to_article.get(&eid).copied())
-        .or_else(|| {
-            item_url(e)
-                .as_deref()
-                .and_then(|u| maps.url_to_id.get(&db::normalize_url(u)).copied())
-                .filter(|aid| {
-                    maps.id_to_mf_pair
-                        .get(aid)
-                        .map(|(entry_mf, feed_mf)| match entry_mf {
-                            Some(_) => *feed_mf == item_feed_id(e),
-                            None => true,
-                        })
-                        .unwrap_or(false)
-                })
-        });
-
     let published = item_published_at(e);
     let content_html = item_content_html(e);
 
@@ -206,65 +193,43 @@ fn upsert_remote_entry(
     let remote_read = greader::has_tag(&e.categories, "/com.google/read");
     let remote_starred = greader::has_tag(&e.categories, "/com.google/starred");
 
-    if let Some(aid) = existing {
-        // 状态以后端为准；正文仅在本地为空时补。
-        // 待推保护：本地有未推送的读/收藏变更时，跳过状态覆盖（本地优先，防乒乓）。
-        if let Some(eid) = item_numeric_id(e) {
-            let _ = db::set_article_remote_id(conn, aid, eid);
-            maps.id_to_mf_id.insert(aid, Some(eid));
-            maps.id_to_mf_pair.insert(
-                aid,
-                (
-                    Some(eid),
-                    maps.id_to_mf_pair.get(&aid).map(|p| p.1).unwrap_or(None),
-                ),
-            );
-            maps.mf_id_to_article.insert(eid, aid);
-        }
-        if !maps.pending_ids.contains(&aid) {
+    let a = NewArticle {
+        guid: item_numeric_id(e)
+            .map(|eid| format!("remote-{eid}"))
+            .unwrap_or_else(|| format!("remote-{}", e.id)),
+        url: item_url(e),
+        title: e.title.clone(),
+        author: e.author.clone(),
+        summary: None,
+        content_html: Some(crate::sanitize::sanitize(
+            &content_html,
+            item_url(e).as_deref(),
+        )),
+        body_text: strip_html_text(&content_html),
+        image_url: crate::sanitize::first_image(&content_html),
+        enclosure_url: enc_url,
+        enclosure_mime: enc_mime,
+        duration_sec: None,
+        published_at: Some(published),
+        source: "miniflux".into(),
+    };
+    // TASK-056：失败必须可见。此前是无 else 的 `if let Ok((aid, _))`——
+    // 条目插入失败既不记 report.errors 也不上抛，同步对外表现为成功，
+    // 用户看到「同步完成」但文章数不变（与订阅路径同一类静默吞错）。
+    match db::upsert_article_with_feed(conn, feed_id, &a, false) {
+        Ok((aid, _)) => {
+            if let Some(eid) = item_numeric_id(e) {
+                let _ = db::set_article_remote_id(conn, aid, eid);
+                maps.id_to_mf_id.insert(aid, Some(eid));
+                maps.mf_id_to_article.insert(eid, aid);
+            }
             let _ = db::sync_set_article_status(conn, aid, remote_read, remote_starred);
+            report.pulled_entries += 1;
         }
-        // 封面回填：正文第一图，本地已有封面不覆盖（COALESCE）
-        backfill_entry_content(conn, aid, e);
-    } else {
-        let a = NewArticle {
-            guid: item_numeric_id(e)
-                .map(|eid| format!("remote-{eid}"))
-                .unwrap_or_else(|| format!("remote-{}", e.id)),
-            url: item_url(e),
-            title: e.title.clone(),
-            author: e.author.clone(),
-            summary: None,
-            content_html: Some(crate::sanitize::sanitize(
-                &content_html,
-                item_url(e).as_deref(),
-            )),
-            body_text: strip_html_text(&content_html),
-            image_url: crate::sanitize::first_image(&content_html),
-            enclosure_url: enc_url,
-            enclosure_mime: enc_mime,
-            duration_sec: None,
-            published_at: Some(published),
-            source: "miniflux".into(),
-        };
-        // TASK-056：失败必须可见。此前是无 else 的 `if let Ok((aid, _))`——
-        // 条目插入失败既不记 report.errors 也不上抛，同步对外表现为成功，
-        // 用户看到「同步完成」但文章数不变（与订阅路径同一类静默吞错）。
-        match db::upsert_article_with_feed(conn, feed_id, &a, false) {
-            Ok((aid, _)) => {
-                if let Some(eid) = item_numeric_id(e) {
-                    let _ = db::set_article_remote_id(conn, aid, eid);
-                    maps.id_to_mf_id.insert(aid, Some(eid));
-                    maps.mf_id_to_article.insert(eid, aid);
-                }
-                let _ = db::sync_set_article_status(conn, aid, remote_read, remote_starred);
-                report.pulled_entries += 1;
-            }
-            Err(err) => {
-                report
-                    .errors
-                    .push(format!("拉取条目 {} 建本地失败: {err}", item_url(e).unwrap_or_default()));
-            }
+        Err(err) => {
+            report
+                .errors
+                .push(format!("拉取条目 {} 建本地失败: {err}", item_url(e).unwrap_or_default()));
         }
     }
 }

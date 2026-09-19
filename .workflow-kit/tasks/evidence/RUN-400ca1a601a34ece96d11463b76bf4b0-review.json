@@ -1,0 +1,63 @@
+{
+  "task_id": "TASK-061",
+  "candidate_digest": "b7a76688223f4a46766786c30aaaa68ca5e895a251085b5b352200514b0ce12c",
+  "verification_run": "RUN-52a9b197256c41c0bf409052cd17f8dd",
+  "verdict": "PASS",
+  "summary": "修复轮独立复审通过。r1 报告唯一发现（文档注释把被删 existing 计算表述为与 merge_pulled_entry 的 aid 计算完全一致，未点明 URL 分支叠加同源 filter 的子集关系）已由修复轮落地：两候选清单（RUN-0b6…-candidate.json 与 RUN-52a9…-candidate.json）逐文件 sha256 比对仅 src-tauri/src/sync/entries.rs 一个文件变化；git diff HEAD 逐字核对确认相对上一候选的差异仅为 upsert_remote_entry 文档注释三行改五行（后两个 hunk 头因注释 +2 行整体偏移，删除/新增的代码行与上轮逐字相同），零语义改动。新注释如实给出子集论证（同一对查找 + URL 分支同源过滤只会收窄候选集 + 两查找都未命中时必为 None + 分支不可达），并新增查找逻辑/调用点变更时的重推导警示，无新误导。不可达论证本体沿用 r1 的独立重推结论（本轮源码代码部分与上轮候选逐字一致，论证前提未变）。新验证运行 RUN-52a9b197256c41c0bf409052cd17f8dd 四门禁全绿：cargo 161 passed / 0 failed / 9 ignored（python 逐行重计）、lint 0 warnings / 0 errors、build exit 0、frontend 283/283；P1/P4 安全网测试均 ok，测试文件相对基线仍零改动（候选间仅 entries.rs 变化已由清单哈希证明）。findings 为空。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "修复轮范围核对（方法：两候选清单逐文件 sha256 比对 + git diff HEAD 逐字核对）：RUN-0b6… 与 RUN-52a9… 两个候选清单之间仅 src-tauri/src/sync/entries.rs 一个文件哈希变化，其余全部文件（含 18 个测试文件、Cargo.toml/lock、package.json、前端源码）逐字节一致；git status 确认产品代码仅 entries.rs 处于修改态。相对上一候选的全部差异逐字核对：仅 upsert_remote_entry 文档注释 hunk 变化（+3 行变 +5 行，多 2 行注释导致 @@ -176/-206 两个 hunk 头 +2 行偏移），两轮 diff 中被删除的 existing 计算与 Some 分支、被提升的 else 主体代码行逐字相同——纯注释改动，零语义混入。新注释满足 r1 备注的修复要求：以「同一对查找 + URL 分支叠加同源过滤只会收窄候选集 + 两查找都未命中时必为 None」如实陈述子集论证，替换了原「完全一致」的过强措辞；并补「若改动 merge_pulled_entry 的查找逻辑或新增调用点，须按该论证重新推导本约定」。r1 其余结论在本候选上原样成立：diff 仅含 entries.rs、删除范围精确、函数签名与唯一调用点（entries.rs:150）不变、merge_remote_status 与测试零改动、无新依赖、LF 行尾、non_goals 全部满足。",
+      "evidence_files": [
+        "src-tauri/src/sync/entries.rs",
+        ".workflow-kit/tasks/evidence/RUN-52a9b197256c41c0bf409052cd17f8dd-candidate.json",
+        ".workflow-kit/tasks/evidence/RUN-0b6ec07d02634da6a4d99a57243dd20f-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "新验证运行 RUN-52a9b197256c41c0bf409052cd17f8dd 四项检查 exit_code 均为 0、candidate_digest 均为 b7a76688…，与基线逐位一致：cargo_test stdout 24 个 result 块全部 ok，python 正则逐行重计 passed=161 / failed=0 / ignored=9（3+1+3+1+1，与基线 161/0/9 一致；r2 初核时 awk 字段切分误报 ignored=0，已用精确重计纠正），无 FAILED、无 panicked；lint「Found 0 warnings and 0 errors」exit 0；build exit 0（✓ built in 908ms）；frontend「前端逻辑回归合计 283/283 通过」（26/26 既有 + 257/257 新增）exit 0。删除安全网专项核对：P1 = sync_content_e2e.rs:108 pending_local_read_wins_over_stale_remote_in_upsert、P4 = sync_phases_e2e.rs:250 full_reconcile_backfills_missing_local_entries 在本次 cargo 输出中均 ok；两候选间清单哈希比对证明测试文件与上轮候选（相对基线零改动）逐字节一致，安全网未弱化、真实执行并通过。",
+      "evidence_files": [
+        ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
+        ".workflow-kit/tasks/evidence/RUN-52a9b197256c41c0bf409052cd17f8dd-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-52a9b197256c41c0bf409052cd17f8dd-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-52a9b197256c41c0bf409052cd17f8dd-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-52a9b197256c41c0bf409052cd17f8dd-frontend.stdout.txt",
+        "src-tauri/tests/sync_content_e2e.rs",
+        "src-tauri/tests/sync_phases_e2e.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "r1 的独立不可达论证（方法：git show 6fd382e 取删除前形态人工重推调用图）在本候选上原样成立：本轮代码部分与上轮候选逐字一致（两候选清单间仅注释 hunk 变化），论证前提未变——被删 existing 是 merge_pulled_entry 同一对查找（url_to_id[normalize(item_url(e))] 与 mf_id_to_article[item_numeric_id(e)]）并集的 filter 收窄子集；upsert_remote_entry 全仓唯一调用点在 None 臂（两查找均已未命中），查找到 existing 计算之间无任何 map 写入或 DB 调用，故 existing 恒为 None、分支不可达。删除后路径核对：Ok 臂（set_article_remote_id、id_to_mf_id.insert、mf_id_to_article.insert、sync_set_article_status、report.pulled_entries += 1）与 Err 臂（report.errors.push，TASK-056 语义）逐字来自原 else 主体；被删 Some 分支内容（id_to_mf_pair 回写、:224 pending 守卫、backfill_entry_content）仅经不可达路径可达。cargo 全绿与 P1/P4 通过继续支持「若可达则删除会改变行为并被捕获」的安全网声明。新注释对本论证的复述（同一对查找、URL 分支同源过滤收窄、两查找未命中必为 None）与代码事实逐项相符。",
+      "evidence_files": [
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/tests/sync_content_e2e.rs",
+        "src-tauri/tests/sync_phases_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-060-report.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "r1 备注已闭环：注释不再声称「完全一致」，改为如实的子集论证（「URL 分支还叠加同源过滤，只会收窄候选集」），消除了可能被读成严格等价的歧义；并新增维护警示——改动 merge_pulled_entry 查找逻辑或新增调用点时须按 TASK-060 §4 论证重新推导调用约定，这正是 r1 指出的「前提失效提示」缺口。逐句核对新注释与代码事实：不变式句与 entries.rs None 臂吻合；「同一对查找」与被删代码的两个 get() 表达式吻合；「同源过滤只会收窄」与被删 Option::filter 语义吻合；「必为 None / 不可达」与 r1 独立推导结论一致。无误导性残留，无新增耦合，函数仍为单一执行路径。",
+      "evidence_files": [
+        "src-tauri/src/sync/entries.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "修复轮相对 r1 候选为纯注释改动（两候选清单哈希比对 + diff 逐字核对证明），运行时路径与 r1 完全相同：被删分支不可达，else 主体逐字提升，无新增分配、无新增查找；相对基线仍为微小正向（省去每次调用恒为 None 的两次 map 查找 + normalize_url + 闭包构造），非可测量变化。",
+      "evidence_files": [
+        "src-tauri/src/sync/entries.rs",
+        ".workflow-kit/tasks/evidence/RUN-52a9b197256c41c0bf409052cd17f8dd-candidate.json"
+      ]
+    }
+  ],
+  "ui_review": null
+}

@@ -28,11 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 32 项：已验收 30，待验收 1，阻塞 0。
+已建任务 33 项：已验收 31，待验收 1，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-060 · 补强 TASK-054 遗留的两个弱断言测试（P1/P4：缺陷复现必须导致测试失败）](<../tasks/cards/TASK-060.md>) | 已验证，待验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-061 · 删除 upsert_remote_entry 不可达的 existing 守卫分支（sync/entries.rs 死代码清理）](<../tasks/cards/TASK-061.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -45,7 +45,7 @@
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 20 项记录可在任务总览查看。
+另有 21 项记录可在任务总览查看。
 
 **阻塞**：无已记录阻塞
 
@@ -55,22 +55,26 @@
 
 ## 未完成的上下文、决策与待办（Agent 笔记）
 
-- 暂无记录；用 `note --kind context|decision|todo --text ...` 保存需要延续的判断。
+- 2026-09-19T07:45:48.458674Z · note/decision · TASK-060 · owner 确认 TASK-060 报告 §4 的可达性结论成立：upsert_remote_entry 的 pending 守卫分支（entries.rs:224）为死代码，其保护场景由 merge_remote_status（entries.rs:76）承担；owner 选择「确认死代码，立项删除」——将立项新任务删除该死分支并走完整测试与审查流程（来源：验收问答 2026-09-19，同场验收 TASK-060，DEC-0126898ab7284c73881f86220cfb5827）
 
 ## 教训
 
-- 暂无记录。
+- 2026-09-19T08:27:39.212281Z · note/lesson · TASK-061 · 审查登记规则：本项目工具要求 verdict=PASS 且 findings 为空才接受审查报告；即使审查者自己标注「非阻塞、不要求返工」的备注，只要列进 findings 就会触发 review_failure。处置方式是如实落地备注所指的小修（本轮：注释措辞从「完全一致」改为精确子集论证表述并补维护警示），同一独立审查上下文复核后 findings 清空重报，而不是让审查者撤回发现
 
 ## 最近事件
 
-- 2026-09-19T03:25:19.045418Z · recompute · TASK-040 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
-- 2026-09-19T03:25:19.750979Z · recompute · TASK-041 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
-- 2026-09-19T03:25:20.490975Z · recompute · TASK-043 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
-- 2026-09-19T03:25:21.179514Z · recompute · TASK-045 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
-- 2026-09-19T03:25:21.866347Z · recompute · TASK-050 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
-- 2026-09-19T03:25:22.852941Z · recompute · TASK-051 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
-- 2026-09-19T03:25:23.563066Z · recompute · TASK-052 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
-- 2026-09-19T03:25:24.273133Z · recompute · TASK-060 · 重算派生摘要 quality_digest；依据：升级 workflow-kit 2026-09-18.3 后按 RECOVERY 指引修复审查证据引用面：候选外工作区文件改为按审查时 git 提交快照的 tasks/evidence 附件（快照提交号见报告 citation_repair），TASK-052 已删除的 tmp 探针改指存活的 TASK-052-review-report.json，TASK-060 的任务条目引用改指 dispatch 时的 TASK-060-input 附件；分析文字未改动
+- 2026-09-19T07:45:48.458674Z · note/decision · TASK-060 · owner 确认 TASK-060 报告 §4 的可达性结论成立：upsert_remote_entry 的 pending 守卫分支（entries.rs:224）为死代码，其保护场景由 merge_remote_status（entries.rs:76）承担；owner 选择「确认死代码，立项删除」——将立项新任务删除该死分支并走完整测试与审查流程（来源：验收问答 2026-09-19，同场验收 TASK-060，DEC-0126898ab7284c73881f86220cfb5827）
+- 2026-09-19T07:51:20.733605Z · batch · 关闭 BATCH-eb0897a2645c467eaf92824397f1b8e8，开启 BATCH-e4114a0450f2403c9fe42b2561eed78a；依据：owner 验收问答 2026-09-19：确认 TASK-060 报告 §4 的可达性结论成立（upsert_remote_entry 的 existing 守卫分支 entries.rs:224 为死代码），选择「确认死代码，立项删除」；TASK-060 已同场验收（DEC-0126898ab7284c73881f86220cfb5827）。授权立项删除该死分支并走完整测试与审查流程
+- 2026-09-19T07:52:51.695544Z · prepare · TASK-061 · 任务已冻结：删除 upsert_remote_entry 不可达的 existing 守卫分支（sync/entries.rs 死代码清理）；范围 src-tauri/src/sync/entries.rs
+- 2026-09-19T07:53:22.497164Z · checkpoint · TASK-061 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-19T08:03:45.030497Z · checkpoint · TASK-061 · 编码结果已记录，差异范围已核对：src-tauri/src/sync/entries.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-19T08:07:52.680265Z · checkpoint · TASK-061 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-19T08:16:54.566572Z · checkpoint · TASK-061 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-09-19T08:17:56.032413Z · checkpoint · TASK-061 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-19T08:18:38.495263Z · checkpoint · TASK-061 · 编码结果已记录，差异范围已核对：src-tauri/src/sync/entries.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-19T08:22:43.005890Z · checkpoint · TASK-061 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-19T08:26:52.374893Z · checkpoint · TASK-061 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-19T08:27:39.212281Z · note/lesson · TASK-061 · 审查登记规则：本项目工具要求 verdict=PASS 且 findings 为空才接受审查报告；即使审查者自己标注「非阻塞、不要求返工」的备注，只要列进 findings 就会触发 review_failure。处置方式是如实落地备注所指的小修（本轮：注释措辞从「完全一致」改为精确子集论证表述并补维护警示），同一独立审查上下文复核后 findings 清空重报，而不是让审查者撤回发现
 
 ## 如何继续
 

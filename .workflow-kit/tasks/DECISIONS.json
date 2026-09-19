@@ -1637,6 +1637,31 @@
         "workflow"
       ],
       "recorded_at_utc": "2026-09-19T01:50:37.767108Z"
+    },
+    {
+      "id": "DEC-0126898ab7284c73881f86220cfb5827",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户选择：验收 TASK-060——接受补强后的 P1/P4 测试与变异取证成对证据（验收问答 2026-09-19）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-060"
+      ],
+      "recorded_at_utc": "2026-09-19T07:44:13.190558Z",
+      "candidates": {
+        "TASK-060": "b78bd59472f1b2039667d7887f58177dfb3813c83b8b4a821a7cfd05c086687e"
+      }
+    },
+    {
+      "id": "DEC-a8fabc8393064d41ae5b45aaab70cc7d",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 验收问答 2026-09-19：确认 TASK-060 报告 §4 的可达性结论成立（upsert_remote_entry 的 existing 守卫分支 entries.rs:224 为死代码），选择「确认死代码，立项删除」；TASK-060 已同场验收（DEC-0126898ab7284c73881f86220cfb5827）。授权立项删除该死分支并走完整测试与审查流程",
+      "statement": "Owner approved the next bounded batch under the existing brief and policy",
+      "scope": [
+        "workflow"
+      ],
+      "recorded_at_utc": "2026-09-19T07:51:20.722986Z"
     }
   ]
 }

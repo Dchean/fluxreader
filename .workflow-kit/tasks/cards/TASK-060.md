@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-060 · 补强 TASK-054 遗留的两个弱断言测试（P1/P4：缺陷复现必须导致测试失败）
 
-**状态**：verified
+**状态**：done
 
 **目标**：TASK-054 的捕获性验证发现 4 个代表用例中 2 个不具备捕获力：P1（sync_content_e2e.rs::pending_local_read_wins_over_stale_remote_in_upsert，变异 entries.rs:224 的 pending 守卫后仍通过——根因是 mock 的 edit-tag 在 push 成功时把远端条目翻成 read，pull 读回的状态与本地一致，断言无法区分）与 P4（sync_phases_e2e.rs::full_reconcile_backfills_missing_local_entries，变异 db/sync_map.rs 的 pending 查询去掉 read/unread 动作过滤后仍通过，独立审查复现）。本任务补强这两个测试，使「缺陷复现 ⇒ 测试失败」成立，并以变异验证留证：对每个测试施加其文档记载的变异，测试必须失败；还原变异后必须通过。不改任何产品代码语义，不动推送顺序/对账口径/入队条件/墓碑语义。
 
