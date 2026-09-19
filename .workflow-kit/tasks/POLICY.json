@@ -1,107 +1,108 @@
 {
-  "schema_version": 1,
-  "approval": {
-    "status": "approved",
-    "decision_ids": [
-      "DEC-85857e4038814bd1a7b18de0ed36db04",
-      "DEC-budget-unlock-20260915"
-    ]
+ "schema_version": 1,
+ "approval": {
+  "status": "approved",
+  "decision_ids": [
+   "DEC-85857e4038814bd1a7b18de0ed36db04",
+   "DEC-budget-unlock-20260915",
+   "DEC-992f64fd15714ca2a614fe66d5a144ec"
+  ]
+ },
+ "intake": {
+  "version": 1,
+  "decision_id": "DEC-992f64fd15714ca2a614fe66d5a144ec"
+ },
+ "project_type": null,
+ "roles": {
+  "manager": {
+   "agent": "manager",
+   "harness": "current_agent"
   },
-  "intake": {
-    "version": 1,
-    "decision_id": "DEC-budget-unlock-20260915"
+  "coder": {
+   "agent": "coder",
+   "harness": "current_agent"
   },
-  "project_type": null,
-  "roles": {
-    "manager": {
-      "agent": "manager",
-      "harness": "current_agent"
-    },
-    "coder": {
-      "agent": "coder",
-      "harness": "current_agent"
-    },
-    "reviewer": {
-      "agent": "reviewer",
-      "harness": "current_agent"
-    }
+  "reviewer": {
+   "agent": "reviewer",
+   "harness": "current_agent"
+  }
+ },
+ "role_fusion": {
+  "mode": "host-agent-independent-review"
+ },
+ "responsibilities": {
+  "product": "manager",
+  "architecture": "manager",
+  "design": "manager",
+  "frontend": "coder",
+  "backend": "coder",
+  "implementation": "coder",
+  "testing": "manager",
+  "visual_review": "reviewer",
+  "review": "reviewer",
+  "delivery": "manager"
+ },
+ "capabilities": {
+  "file_read_write": null,
+  "terminal": null,
+  "process_control": null,
+  "independent_context": null
+ },
+ "authority": {
+  "documentation": true,
+  "baseline": true,
+  "code": true,
+  "dependencies": false,
+  "ci": false,
+  "commit": "allowed",
+  "push": "ask",
+  "pull_request": "ask",
+  "merge": "ask",
+  "release": "ask"
+ },
+ "review": {
+  "mode": "independent_required",
+  "evidence_version": 1,
+  "high_risk": "independent_required"
+ },
+ "ui": {
+  "mode": "existing"
+ },
+ "recovery": {
+  "network_backoff_seconds": [
+   5,
+   15
+  ],
+  "max_cli_call_seconds": 600
+ },
+ "budget": {
+  "max_repair_rounds": 4,
+  "max_task_wall_minutes": 240,
+  "max_tasks_per_batch": 12,
+  "max_concurrent_workers": 1,
+  "financial": {
+   "mode": "none",
+   "amount_usd": null,
+   "scope": "batch"
   },
-  "role_fusion": {
-    "mode": "host-agent-independent-review"
-  },
-  "responsibilities": {
-    "product": "manager",
-    "architecture": "manager",
-    "design": "manager",
-    "frontend": "coder",
-    "backend": "coder",
-    "implementation": "coder",
-    "testing": "manager",
-    "visual_review": "reviewer",
-    "review": "reviewer",
-    "delivery": "manager"
-  },
-  "capabilities": {
-    "file_read_write": null,
-    "terminal": null,
-    "process_control": null,
-    "independent_context": null
-  },
-  "authority": {
-    "documentation": true,
-    "baseline": true,
-    "code": true,
-    "dependencies": false,
-    "ci": false,
-    "commit": "allowed",
-    "push": "ask",
-    "pull_request": "ask",
-    "merge": "ask",
-    "release": "ask"
-  },
-  "review": {
-    "mode": "independent_required",
-    "evidence_version": 1,
-    "high_risk": "independent_required"
-  },
-  "ui": {
-    "mode": "existing"
-  },
-  "recovery": {
-    "network_backoff_seconds": [
-      5,
-      15
-    ],
-    "max_cli_call_seconds": 600
-  },
-  "budget": {
-    "max_repair_rounds": 4,
-    "max_task_wall_minutes": 240,
-    "max_tasks_per_batch": 12,
-    "max_concurrent_workers": 1,
-    "financial": {
-      "mode": "none",
-      "amount_usd": null,
-      "scope": "batch"
-    },
-    "batch_rollover": "allowed"
-  },
-  "interaction_style": {
-    "question_format": "question_plus_supplement",
-    "max_questions_per_round": 3,
-    "max_options_per_question": 4,
-    "always_include_other_option": true,
-    "show_time_impact": true,
-    "show_risk_level": true,
-    "provide_recommendation": true,
-    "note": "先提一个明确问题，给可理解的选项/建议和简短影响说明，允许补充；按相关性补问，沿用已有真实回答。技术事实由 Agent 检查，默认项不算同意。"
-  },
-  "execution": {
-    "mode": "agent_only",
-    "worker_argv": [],
-    "reviewer_argv": [],
-    "model": null,
-    "allow_non_git": false
-  },
-  "high_risk_requires_owner": true
+  "batch_rollover": "allowed"
+ },
+ "interaction_style": {
+  "question_format": "question_plus_supplement",
+  "max_questions_per_round": 3,
+  "max_options_per_question": 4,
+  "always_include_other_option": true,
+  "show_time_impact": true,
+  "show_risk_level": true,
+  "provide_recommendation": true,
+  "note": "先提一个明确问题，给可理解的选项/建议和简短影响说明，允许补充；按相关性补问，沿用已有真实回答。技术事实由 Agent 检查，默认项不算同意。"
+ },
+ "execution": {
+  "mode": "agent_only",
+  "worker_argv": [],
+  "reviewer_argv": [],
+  "model": null,
+  "allow_non_git": false
+ },
+ "high_risk_requires_owner": true
 }

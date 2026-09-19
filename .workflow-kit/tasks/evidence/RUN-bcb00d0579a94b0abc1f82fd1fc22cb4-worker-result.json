@@ -1,0 +1,18 @@
+{
+  "task_id": "TASK-062",
+  "run_id": "RUN-bcb00d0579a94b0abc1f82fd1fc22cb4",
+  "status": "ready_for_verification",
+  "summary": "修复 AUDIT-20260919-v2.md N1（REQ-101）：OPML 导入每条根级订阅重复新建「导入」文件夹。改动仅 src-tauri/src/commands/opml.rs：① 导入循环从 async command 抽为纯函数 import_feeds(conn, &feeds)（除修复点外逐字纯搬运，opml_import 持锁后调用）；② 目录解析统一为单一路径——folder 名取 f.folder.as_deref().unwrap_or(\"导入\")，Some/None 共用同一 folder_ids 缓存（修前 None 分支每条无条件 create_folder 且不查缓存，folders.name 无 UNIQUE → N 条根级订阅产生 N 个同名目录）。新增 3 条文件内测试（沿用 db/commands_extraction_tests.rs 的 open_in_memory + MIGRATIONS.to_latest 模式）：root_level_feeds_share_one_import_folder（缺陷复现：断言「导入」目录数==1）、same_named_folders_are_created_once（缓存既有行为锚定）、duplicate_urls_are_skipped（跳过既有行为锚定）。变异取证成对：临时还原无条件 create_folder 写法后 root_level_feeds_share_one_import_folder FAILED（panicked at src\\commands\\opml.rs:133 目录数断言），还原后通过。四门禁实测：cargo test 164 passed / 0 failed / 9 ignored（161+3，通过数增加符合验收）、lint 0 warnings/0 errors exit 0、build exit 0、frontend 283/283。diff 仅 opml.rs（+99/-15），LF 行尾（CRLF 计数 0）。",
+  "changed_files": [
+    "src-tauri/src/commands/opml.rs"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri，门禁 cargo_test）",
+    "npm run lint（门禁 lint）",
+    "npm run build（门禁 build）",
+    "npm run test:frontend（门禁 frontend）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

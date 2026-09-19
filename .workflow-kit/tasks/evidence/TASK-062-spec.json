@@ -1,0 +1,149 @@
+{
+  "id": "TASK-062",
+  "title": "修复 OPML 导入每条根级订阅重复新建「导入」文件夹（REQ-101/N1）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "objective": "AUDIT-20260919-v2.md 新发现 N1（REQ-101，三路体检后端排查确认）：src-tauri/src/commands/opml.rs 的 opml_import 在 f.folder==None 分支每条都无条件 db::create_folder(\"导入\")，folders.name 无 UNIQUE 约束且该分支不查不写 folder_ids 缓存（对照 Some 分支有缓存），导致导入含 N 条根级（无文件夹包裹）outline 的 OPML 后侧栏出现 N 个同名「导入」目录；且与 add_feed 路径的「未分类」兜底约定不一致（本任务不改兜底命名，只修重复创建）。修复方案：把目录解析统一为单一路径——folder 名取 f.folder.as_deref().unwrap_or(\"导入\")，Some/None 共用同一 folder_ids 缓存（get→or_insert create_folder）；为使缺陷可测，把导入循环从 async command 中抽为纯函数 import_feeds(conn: &Connection, feeds: &[crate::opml::ImportedFeed]) -> AppResult<OpmlImportReport>（除修复点外逐字纯搬运），opml_import 持锁后调用。并在该文件补 #[cfg(test)] 测试（沿用 db/commands_extraction_tests.rs 的 open_in_memory + MIGRATIONS.to_latest 模式）：① 两条根级订阅导入后名为「导入」的目录数==1、feeds 表 2 条、report.imported==2；② 两条订阅带同名目录 → 该目录数==1（锚定缓存既有行为）；③ 重复 URL 第二条跳过（report.skipped==1，锚定既有行为）。不改其他文件，不动 src/opml.rs 的解析与导出。",
+  "non_goals": [
+    "不改 add_feed 的「未分类」兜底命名或 ensure_uncategorized_folder（兜底命名统一属 REQ-104 批次裁决）",
+    "不改 src/opml.rs 的 parse/build 与其既有测试",
+    "不做 add_feed/OPML 的 normalize_url 去重一致化（体检 A6-9，属 REQ-104）",
+    "不动 folders 表结构与迁移（不引入 UNIQUE 约束）",
+    "不引入新依赖，不改 Cargo.toml/Cargo.lock/package.json",
+    "不改工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-101"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-061"
+  ],
+  "risk": {
+    "level": "low",
+    "decision_ids": []
+  },
+  "snapshot_paths": [
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools"
+  ],
+  "allowed_paths": [
+    "src-tauri/src/commands/opml.rs"
+  ],
+  "protected_paths": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "WORKFLOW.md",
+    "tasks/**",
+    "docs/PRODUCT.md",
+    "docs/FEATURES.md",
+    "docs/workflow/**",
+    "scripts/project_workflow.py",
+    "scripts/workflow_runtime.py",
+    "scripts/workflow_bootstrap.py",
+    "scripts/workflow_intake.py",
+    "scripts/workflow_progress.py",
+    "WORKFLOW-KIT.md",
+    ".workflow-kit/binding.json",
+    ".workflow-kit/tasks/**",
+    ".workflow-kit/scripts/**",
+    ".workflow-kit/docs/workflow/**",
+    ".workflow-kit/legacy/**",
+    ".workflow-kit/AGENTS.md",
+    ".workflow-kit/CLAUDE.md",
+    ".workflow-kit/WORKFLOW.md",
+    ".workflow-kit/docs/PRODUCT.md",
+    ".workflow-kit/docs/FEATURES.md",
+    "src-tauri/tests/**",
+    "src/**",
+    "src-tauri/Cargo.toml",
+    "src-tauri/Cargo.lock",
+    "package.json",
+    "src-tauri/src/opml.rs"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
+      "summary": "2026-09-19 基线（TASK-061 终版候选验证 RUN-52a9b197，提交 5a4de83；其后 HEAD 1075b23/151cfaf 仅含 .workflow-kit 台账与文档，产品代码 src-tauri/src 与 src 逐字一致）：cargo test 161 passed / 0 failed / 9 ignored、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend 283/283。本任务 behavior=change 仅限一处：folder==None 分支从「每条无条件新建目录」改为「共用 folder_ids 缓存」（缺陷修复，非契约变更）；导入循环抽取为纯函数是行为保持的纯搬运。基线盲区如实记录：commands/opml.rs 此前无任何测试，重复目录缺陷在既有 161 条测试下不可见（无覆盖即无保护）——本任务以新增 3 条文件内测试补上该盲区。"
+    },
+    "decision_ids": ["DEC-992f64fd15714ca2a614fe66d5a144ec"],
+    "actions": [
+      {
+        "action": "add",
+        "target": "commands/opml.rs 文件内 #[cfg(test)]：① 两条根级订阅 → 「导入」目录数==1 且 feeds 2 条且 report.imported==2；② 同名目录两条订阅 → 目录数==1；③ 重复 URL → report.skipped==1",
+        "reason": "缺陷此前零覆盖（无覆盖即无保护）；测试沿用 db/commands_extraction_tests.rs 的 open_in_memory + MIGRATIONS.to_latest 模式",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部既有测试（Rust 161 条含 src/opml.rs 的 parse/build 测试、前端 283 条断言）逐字不动",
+        "reason": "除修复点外行为保持；既有回归网是改动安全网",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "acceptance": [
+    "diff 仅含 src-tauri/src/commands/opml.rs：folder 名统一 f.folder.as_deref().unwrap_or(\"导入\")，Some/None 共用 folder_ids 缓存；导入循环抽为 import_feeds 纯函数（除修复点外纯搬运）；opml_import 行为除修复点外不变",
+    "新增 ≥3 条测试并全部通过：根级订阅单目录（缺陷复现⇒测试失败：把修复还原为无条件 create_folder 后测试 ① 必须失败）、同名目录缓存、重复 URL 跳过；cargo 通过数 ≥164（161+新增）、0 failed、9 ignored 不增",
+    "四门禁全绿：cargo test、npm run lint、npm run build、npm run test:frontend",
+    "不引入新依赖；Cargo.toml/Cargo.lock 与 package.json 零改动",
+    "文本文件 LF 行尾；台账改动须在 begin 之前完成",
+    "用户真实数据库不得写入（沿用项目约束）"
+  ]
+}
