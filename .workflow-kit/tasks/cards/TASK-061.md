@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-061 · 删除 upsert_remote_entry 不可达的 existing 守卫分支（sync/entries.rs 死代码清理）
 
-**状态**：verified
+**状态**：done
 
 **目标**：TASK-060 实证 upsert_remote_entry 的 existing 守卫分支（src-tauri/src/sync/entries.rs，if let Some(aid) = existing 块，含其中 :224 附近的 pending 守卫）从当前调用图不可达：merge_pulled_entry 的 aid 计算与 upsert_remote_entry 的 existing 计算使用完全相同的两个查找（mf_id_to_article[entry_numeric_id] 与 url_to_id[normalize(url)]，均无 feed 过滤），只有两个查找都未命中才会进入 upsert_remote_entry，故 existing 恒为 None；该分支保护的场景实际由 merge_remote_status（entries.rs:76 的 pending 守卫）承担。owner 已确认该死代码结论成立并批准立项删除（验收问答 2026-09-19，批次 BATCH-e4114a0450f2403c9fe42b2561eed78a）。本任务删除该不可达分支：existing 计算一并删除，else 主体提升为函数体（else 仍使用 maps，函数签名不变），更新函数文档注释并补一句调用图不变式注释（merge_pulled_entry 仅在两个查找都未命中时才调用本函数），防止未来改动重新引入重复绑定路径时不自知。产品行为零变化：TASK-060 补强后的 P1/P4 测试保护真实守卫路径，若不可达论证有误，删除将改变状态合并行为并被既有测试捕获。四门禁全绿，既有测试一条不改。
 

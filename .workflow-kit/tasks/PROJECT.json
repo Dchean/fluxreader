@@ -3,7 +3,7 @@
   "workflow_kit": "workflow-kit",
   "name": "fluxreader",
   "kind": "refactor",
-  "stage": "delivery",
+  "stage": "complete",
   "current_task": null,
   "current_batch": "BATCH-e4114a0450f2403c9fe42b2561eed78a",
   "ui_preview_task": null,

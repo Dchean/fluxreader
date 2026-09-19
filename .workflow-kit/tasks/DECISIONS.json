@@ -1662,6 +1662,34 @@
         "workflow"
       ],
       "recorded_at_utc": "2026-09-19T07:51:20.722986Z"
+    },
+    {
+      "id": "DEC-ab451c0482fa4f5b8333c928355f6832",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户选择：验收 TASK-061——接受死分支删除与两轮独立审查结论（验收问答 2026-09-19）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-061"
+      ],
+      "recorded_at_utc": "2026-09-19T08:50:51.900632Z",
+      "candidates": {
+        "TASK-061": "b7a76688223f4a46766786c30aaaa68ca5e895a251085b5b352200514b0ce12c"
+      }
+    },
+    {
+      "id": "DEC-e97e6f58d8fa4936b93b9f38979a945c",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户选择：记录项目级验收——33 项任务全部验收（含 TASK-060/061 本日验收），REQ-007 遗留项作为已知限制随项目归档（验收问答 2026-09-19）",
+      "statement": "Owner accepted the complete project",
+      "scope": [
+        "TASK-061"
+      ],
+      "recorded_at_utc": "2026-09-19T09:25:39.729230Z",
+      "candidates": {
+        "TASK-061": "b7a76688223f4a46766786c30aaaa68ca5e895a251085b5b352200514b0ce12c"
+      }
     }
   ]
 }
