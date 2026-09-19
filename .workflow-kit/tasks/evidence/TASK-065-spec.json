@@ -1,0 +1,179 @@
+{
+  "id": "TASK-065",
+  "title": "阅读与翻译一致性三修复：锚定复位阅读视图标志、卡片译文按 HTML 渲染、流式译文消毒时序（REQ-102/N7/N8/N11）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "objective": "AUDIT-20260919-v2.md 的 N7/N8/N11（REQ-102，阅读与翻译路径的一致性与安全修复）：\n\n【N7 · anchorToArticle 不复位阅读视图标志】src/store/slices/bootstrap.ts 的 anchorToArticle 只写 activeArticleId/openedReadIds，对照 selectArticle（reader.ts）缺 isShowingTranslatedProse/isRawRenderMode/showFulltext 三个复位——文章 A 开着「译文模式/全文视图」时经搜索或命令面板打开文章 B，Reader 按旧标志渲染 B（译文通常为空 → 正文整块空白）。修复：anchorToArticle 的 set 补齐三个复位（与 selectArticle 同口径）。\n\n【N8 · 卡片译文按纯文本渲染 HTML】src/components/Timeline.tsx 的 SocialCard（约 452 行）与 NotifCard（约 739 行）译文块用 {item.translatedContent} 纯文本插值，而后端契约与 Reader 路径均按 HTML 处理（commands/ai.rs 落库前 ammonia 消毒、Reader dangerouslySetInnerHTML）——同一译文两种口径，卡片显示 <p>…</p> 字面标签基本不可读。修复：与 Reader 同口径按 HTML 渲染。\n\n【N11 · 流式译文未消毒进 DOM + 回读失败常驻】译文流式期间 delta 是模型原始输出（未消毒），Reader/卡片直接渲染进 DOM；流结束的消毒回读（api.getArticle 取 DB 消毒版覆盖）无 .catch——回读失败时半截未消毒译文永久留在渲染路径 + unhandled rejection。修复引入 rawTranslatedIds 标记（store 新状态，语义=「该 id 的 translatedContent 当前是未消毒的流式产物」）：流启动时置位；消毒回读成功替换内容后清除；回读失败清除 translatedContent（丢弃未消毒半截）+ toast + 保持清除；流错误路径不清（半截未消毒内容保留供重试语义，按纯文本渲染）。渲染契约：rawTranslatedIds[id] 存在 → 译文按纯文本渲染（转义，模型输出的 HTML 标签以字面呈现）；不存在 → 按 HTML 渲染（Reader 与卡片四处分支统一）。DB 加载的译文（articleRowToEntry / getArticle 直读）后端落库前已消毒，无标记 → 正常 HTML 渲染。onDone 的回读补 .catch（toast「译文回读失败」+ 丢弃未消毒半截）。翻译中提示（翻译中…）随在途标记自然延长到回读完成，属如实状态呈现。",
+  "non_goals": [
+    "不引入前端消毒库（不加依赖；消毒以「未消毒内容不进 HTML 渲染路径」的时序契约实现）",
+    "不改后端 ai_translate/ai_summarize 的流式协议与落库消毒逻辑",
+    "不改 toggleReaderSummary/摘要流（同构问题另行评估）",
+    "不改 D1 重试语义（失败保留半截译文供用户查看，重试时清空重发）",
+    "不改 selectArticle 的复位集合",
+    "不引入新依赖，不改 Cargo.toml/Cargo.lock/package.json",
+    "不改工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-102"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-064"
+  ],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-992f64fd15714ca2a614fe66d5a144ec"
+    ]
+  },
+  "snapshot_paths": [
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools"
+  ],
+  "allowed_paths": [
+    "src/store/types.ts",
+    "src/store/slices/ai.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/components/Reader.tsx",
+    "src/components/Timeline.tsx",
+    "tools/frontend-regression.mjs"
+  ],
+  "protected_paths": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "WORKFLOW.md",
+    "tasks/**",
+    "docs/PRODUCT.md",
+    "docs/FEATURES.md",
+    "docs/workflow/**",
+    "scripts/project_workflow.py",
+    "scripts/workflow_runtime.py",
+    "scripts/workflow_bootstrap.py",
+    "scripts/workflow_intake.py",
+    "scripts/workflow_progress.py",
+    "WORKFLOW-KIT.md",
+    ".workflow-kit/binding.json",
+    ".workflow-kit/tasks/**",
+    ".workflow-kit/scripts/**",
+    ".workflow-kit/docs/workflow/**",
+    ".workflow-kit/legacy/**",
+    ".workflow-kit/AGENTS.md",
+    ".workflow-kit/CLAUDE.md",
+    ".workflow-kit/WORKFLOW.md",
+    ".workflow-kit/docs/PRODUCT.md",
+    ".workflow-kit/docs/FEATURES.md",
+    "src-tauri/**",
+    "src/lib/**",
+    "src/store/slices/reader.ts",
+    "src/store/slices/nav.ts",
+    "src/App.tsx",
+    "package.json"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
+      "summary": "2026-09-19 基线（TASK-064 终版候选验证 RUN-177672cf，提交 6e36fdb）：cargo test 171 passed / 0 failed / 9 ignored、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 286/286。本任务 behavior=change 的范围如实声明：① anchorToArticle 复位三个阅读视图标志（搜索/锚定路径与列表点开路径对齐，缺陷修复）；② 卡片译文从纯文本插值改为 HTML 渲染（消毒后内容渲染口径与 Reader 统一，修前显示字面标签）；③ 流式期间与回读失败时译文按纯文本渲染（新安全契约：未消毒内容不进 HTML 渲染路径）；④ 新增 rawTranslatedIds 状态键（store 形状扩展，纯标记无持久化）。既有 286 条断言预期全部保持：S-4 翻译流测试的时序在 onDone 重构后仍成立（回读替换语义不变，仅补充标记维护与 catch）。",
+      "decision_ids": [
+        "DEC-992f64fd15714ca2a614fe66d5a144ec"
+      ]
+    },
+    "decision_ids": [
+      "DEC-992f64fd15714ca2a614fe66d5a144ec"
+    ],
+    "actions": [
+      {
+        "action": "add",
+        "target": "N7：anchorToArticle 复位断言——预置 isShowingTranslatedProse/showFulltext/isRawRenderMode 为 true，锚定打开另一篇文章后三者必须为 false（复用 harness 既有锚定测试的 article_index/list_articles mock 模式）",
+        "reason": "搜索/锚定路径的复位此前零覆盖",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "N11：rawTranslatedIds 生命周期断言——translateEntry 流式期间标记为真；消毒回读成功后标记清除且内容为 DB 消毒版；回读被拒时 toast 出现、未消毒半截被丢弃、标记清除；流错误路径标记保持（半截内容按纯文本渲染语义）",
+        "reason": "消毒时序契约此前零覆盖；S-4 既有流式 mock（heldAi/aiTr）提供确定性驱动",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "N8+Reader 渲染分支静态断言（沿用 harness 既有 CSS/源码正则烟测风格）：Timeline.tsx 的 social-translated-block 与 notif-translated-block、Reader.tsx 的译文渲染必须包含 rawTranslatedIds 分支与 dangerouslySetInnerHTML（修前为纯文本插值 → 断言失败）",
+        "reason": "组件渲染分支无 DOM harness，源码形态断言是既有测试风格的等价替代；配合 N11 行为断言覆盖契约",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部既有断言（含 S-4 翻译流、(s) 系列、286 条存量）逐字不动",
+        "reason": "除新增断言块外契约不变",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "acceptance": [
+    "diff 仅含 allowed_paths 内 6 文件：bootstrap.ts 补三个复位；ai.ts 新增 rawTranslatedIds 状态并按生命周期维护（流启动置位、回读成功清除、回读失败清内容+toast+清除、流错误保持）；types.ts AppState 扩展该键；Reader/Timeline 四处译文渲染分支（raw→纯文本、否则 dangerouslySetInnerHTML）",
+    "N7/N11 行为断言 + N8 渲染分支静态断言全部通过；变异取证成对：① 还原 anchorToArticle（删除三复位行）→ N7 断言失败；② 删除 rawTranslatedIds 维护（回读后不清除）→ N11 生命周期断言失败；③ Timeline 译文块还原纯文本插值 → N8 静态断言失败；还原后全过",
+    "既有 286 条断言一行不动且全部通过（S-4 翻译流时序在 onDone 重构后保持）",
+    "四门禁全绿：cargo test 171/0/9 不回退、lint 0/0、build exit 0、frontend 通过数 ≥286 且存量不回退",
+    "不引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动",
+    "文本文件 LF 行尾；台账改动须在 begin 之前完成",
+    "用户真实数据库不得写入（沿用项目约束）"
+  ]
+}

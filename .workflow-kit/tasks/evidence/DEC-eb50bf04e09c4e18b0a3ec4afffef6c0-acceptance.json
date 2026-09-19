@@ -1,0 +1,14 @@
+{
+  "id": "DEC-eb50bf04e09c4e18b0a3ec4afffef6c0",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户选择：验收 TASK-064，继续（验收问答 2026-09-19）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-064"
+  ],
+  "recorded_at_utc": "2026-09-19T21:51:42.796360Z",
+  "candidates": {
+    "TASK-064": "4eae986f5f1b83b4d403bf196847615475500f63e62ab9bcdea3b1fe2c431ed4"
+  }
+}

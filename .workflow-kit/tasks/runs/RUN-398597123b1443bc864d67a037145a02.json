@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-398597123b1443bc864d67a037145a02",
+  "task_id": "TASK-065",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260919-t065"
+  },
+  "started_at_utc": "2026-09-19T21:55:06.594179Z",
+  "finished_at_utc": "2026-09-19T22:13:44.723721Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "c49313c4c191c4b25291e89f6a94237e51c74264e9316d9dda912b8562bf5245",
+  "candidate_digest": "ae09aa48da3cfd8126e41be028f1e726e42e028dbe83ce4ce71e7a6ef3f2c49a",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-398597123b1443bc864d67a037145a02-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-398597123b1443bc864d67a037145a02-scope.json"
+}

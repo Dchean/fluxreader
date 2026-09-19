@@ -51,3 +51,21 @@
 - 2026-09-19T16:09:46.367472Z · checkpoint · TASK-064 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/folders.rs, src-tauri/src/commands/opml.rs, src-tauri/src/config_sync.rs, src-tauri/src/db/articles.rs, src-tauri/src/scheduler.rs, src-tauri/tests/config_sync_e2e.rs, src-tauri/tests/refresh_dedup_e2e.rs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-19T16:13:13.659714Z · checkpoint · TASK-064 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-19T16:29:23.005948Z · checkpoint · TASK-064 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-19T21:51:44.910366Z · accept · 验收 TASK-064；依据：用户选择：验收 TASK-064，继续（验收问答 2026-09-19）
+- 2026-09-19T21:55:02.365135Z · prepare · TASK-065 · 任务已冻结：阅读与翻译一致性三修复：锚定复位阅读视图标志、卡片译文按 HTML 渲染、流式译文消毒时序（REQ-102/N7/N8/N11）；范围 src/store/types.ts, src/store/slices/ai.ts, src/store/slices/bootstrap.ts, src/components/Reader.tsx, src/components/Timeline.tsx, tools/frontend-regression.mjs
+- 2026-09-19T21:55:06.750068Z · checkpoint · TASK-065 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-19T22:13:44.775836Z · checkpoint · TASK-065 · 编码结果已记录，差异范围已核对：src/components/Reader.tsx, src/components/Timeline.tsx, src/store/slices/ai.ts, src/store/slices/bootstrap.ts, src/store/types.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-19T22:14:05.478978Z · checkpoint · TASK-065 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-19T22:43:47.813264Z · checkpoint · TASK-065 · 任务已取消：review_failure 的修复已落地但审查绑定无法回录（工作区已前移、冻结候选重建未果）；取消任务身份，成果并入新任务收口，历史与证据完整保留；下一步：如需同一目标，准备新的任务并引用本任务作为历史
+- 2026-09-19T22:43:47.887154Z · cancel · TASK-065 · review_failure 的修复已落地但审查绑定无法回录（工作区已前移、冻结候选重建未果）；取消任务身份，成果并入新任务收口，历史与证据完整保留；依据：总控处置 2026-09-19（owner 验收问答授权的修复轮延续）：独立审查 r1 结论 FAIL——(n8) NotifCard 切片标记恒失败、(n8)/(n11) 断言块位于汇总计算后不影响退出码、if 行缩进误改。修复已落地并重验（295/295 exit 0，M3 变异经退出码 1 检出），但工具按工作区实时候选校验审查绑定，r1 FAIL 报告无法在修复后的工作区回录（重建冻结候选字节级状态多次未果）。取消本任务身份，同一修复成果以新任务收口，走完整 finish/verify/独立复审/验收闭环；r1 报告保留于 evidence/TASK-065-review-r1-independent.json
+- 2026-09-19T22:44:39.015061Z · prepare · TASK-066 · 任务已冻结：阅读与翻译一致性三修复收口：锚定复位、卡片译文 HTML 渲染、流式译文消毒时序（REQ-102/N7/N8/N11）；范围 src/store/types.ts, src/store/slices/ai.ts, src/store/slices/bootstrap.ts, src/components/Reader.tsx, src/components/Timeline.tsx, tools/frontend-regression.mjs
+- 2026-09-19T22:44:42.799857Z · checkpoint · TASK-066 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-19T22:45:21.442602Z · checkpoint · TASK-066 · Worker changed_files does not match the observed diff; declared but unchanged: src/components/Reader.tsx, src/components/Timeline.tsx, src/store/slices/ai.ts, src/store/slices/bootstrap.ts, src/store/types.ts, tools/frontend-regression.mjs; declare either the task's cumulative changes [] or this run's changes []；下一步：按报错列出的漏报/多报文件修正 worker-result，再 unblock 后 begin；不要新建任务或重置预算
+- 2026-09-19T22:45:21.591111Z · note/lesson · TASK-066 · protocol 失败已出现 4 次：Worker changed_files does not match the observed diff; declared but unchanged: src/components/Reader.tsx, src/components/Timeline.tsx, src/store/slices/ai.ts, s。下次准备/实现前先核对这一点。
+- 2026-09-19T22:45:58.053723Z · checkpoint · TASK-066 · 阻塞已处置（protocol）：核对 RUN-e0b922917a024c5fbf281030e90f14a2 的 diff 回执：观察改动为空（begin 快照已含 TASK-065 全部成果与 r1 整改），worker-result 已改为零改动声明并如实说明成果来源；下一步：begin 重新实现
+- 2026-09-19T22:45:58.104386Z · unblock · TASK-066 · protocol → ready；依据：总控处置：finish 因 changed_files 声明与观察不一致被拒（begin 快照已含全部成果，本任务相对快照为零新增改动）；已按工具观察改为零改动声明，成果内容经由候选快照绑定，无越界
+- 2026-09-19T22:46:01.947316Z · checkpoint · TASK-066 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-19T22:46:13.185204Z · checkpoint · TASK-066 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-19T22:46:33.724965Z · checkpoint · TASK-066 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-19T22:51:39.467326Z · checkpoint · TASK-066 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-19T22:51:40.263382Z · note/lesson · TASK-066 · 两个流程教训：① 审查 FAIL 报告的回录要求工作区与冻结候选逐字一致——修复轮改动后无法回录（selected_snapshot 按工作区实时重算），本轮因先改后录被迫取消 TASK-065 并以 TASK-066 收口；正确顺序是先回录 FAIL 触发 review_failure，再在修复轮 begin 内整改。② 自研门禁的新增断言必须放在汇总统计之前（checkNew 只 push 不抛错，汇总后的断言永远无法影响退出码），且以退出码而非日志行核对变异检出

@@ -269,6 +269,12 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       articlesLoading: false,
       activeArticleId: articleId,
       openedReadIds: { ...get().openedReadIds, [articleId]: true },
+      /* TASK-065 N7：与 selectArticle 同口径复位阅读视图标志——搜索/命令面板
+         打开新文章时残留的「译文模式/全文视图/原始渲染」会让 Reader 按旧标志
+         渲染新文章（译文通常为空 → 正文整块空白）。 */
+      isShowingTranslatedProse: false,
+      isRawRenderMode: false,
+      showFulltext: false,
       /* 新快照不带正文：清空水合终态，让卡片重新水合 */
       hydratedIds: {},
       hydrationErrors: {},

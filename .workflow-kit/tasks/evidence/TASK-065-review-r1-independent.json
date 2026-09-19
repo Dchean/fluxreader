@@ -1,0 +1,79 @@
+{
+  "task_id": "TASK-065",
+  "candidate_digest": "ae09aa48da3cfd8126e41be028f1e726e42e028dbe83ce4ce71e7a6ef3f2c49a",
+  "verification_run": "RUN-5f81dedb4b814346bdb906b9e9cbe421",
+  "verdict": "FAIL",
+  "summary": "三项修复本体（N7 锚定三复位、N8 卡片译文 HTML 渲染分支、N11 rawTranslatedIds 消毒时序 + 缓存守卫 + onDone .catch）均已按任务声明落地，diff 严格限于 6 个 allowed 文件、全 LF、零新依赖，non_goals 全部遵守；变异自证 M1/M2/M3 均能令对应新断言失败且已完整还原（diff 校验和逐一核对一致）。但 FAIL：verified run 自己的 frontend 日志中 (n8) NotifCard 静态断言为 ❌（断言切片标记选错：notif-expand-btn 在 SocialCard 内先于 notif-translated-block 出现，slice 为空串恒失败），而汇总仍打印 292/292 且 exit 0——真实结果是 291/292。根因是 (n8)/(n11) 三条源码形态断言被插在 failed/newFailed/totalAll/totalFailed 计算之后，其结果不计入通过数与退出码，frontend 门禁对这三条断言永远不可能失败（M3 实证：SocialCard 还原纯文本插值后 ❌ 打印但 exit 0）。验收项「N8 渲染分支静态断言全部通过」与「frontend 全过」均不成立，需修复断言标记与汇总顺序后重新验证。",
+  "findings": [
+    "【高】frontend 门禁证据自相矛盾：RUN-5f81dedb4b814346bdb906b9e9cbe421-frontend.stdout.txt 第 298 行为 ❌ (n8) NotifCard 译文块断言失败，但同日志汇总打印「新增 269/269」「合计 292/292」且 exit 0；审查者独立重跑 npm run test:frontend 复现同样结果（打印 295 条、1 ❌、汇总 292/292、exit 0）。真实结果为 291/292（1 失败），验收声明「frontend 292/292=286+6 全过」「N8 渲染分支静态断言全部通过」不成立。",
+    "【高】(n8) NotifCard 断言的切片标记错误导致恒失败：tools/frontend-regression.mjs 用 tlSrc.slice(indexOf('notif-translated-block'), indexOf('notif-expand-btn')) 截取断言块，但 'notif-expand-btn' 在 src/components/Timeline.tsx 的 SocialCard 内（约 450 行 'notif-expand-btn social-expand-btn'）先出现，end < start 使 slice 返回空串，includes 恒为 false——该断言与修复是否存在无关，必然失败。",
+    "【高】frontend 门禁对 (n8)/(n11) 三条断言失去失败能力：(n8) 块（含 const fs 导入）被插在 tools/frontend-regression.mjs 的 failed/newFailed/totalAll/totalFailed 计算之后、汇总打印之前，checkNew 只 push 不抛错，这三条断言的通过与否既不计入汇总数字也不影响 process.exit。变异 M3 实证：将 SocialCard 译文块还原为纯文本插值后，(n8) SocialCard 打印 ❌，但汇总仍打印 292/292、退出码为 0。另该插入 hunk 还附带改动了既有行 `if (totalFailed) {` 的缩进（非断言行、纯空白，但属新块之外的 harness 改动）。",
+    "【低】rawTranslatedIds 生命周期在重入场景存在窄窗口缺口：toggleReaderTranslation 的缓存守卫因 raw 标记会在 done→回读落地窗口内放行新流；此时旧一次回读 .then 落地会清除标记并以 DB 版覆盖 translatedContent，新流后续未消毒 delta 将按 HTML 路径渲染，直到新流自己的回读落地。需毫秒级重入（关-开切换恰逢回读在途）才可触发、影响有界且自恢复，但「未消毒内容不进 HTML 渲染路径」契约在该路径并非严密；建议后续以流代次令牌守卫或在回读 then 中仅在无在途流时收敛状态。",
+    "【提示】M1/M2 变异失败可经退出码观测（(n7)/(l2) 位于汇总计算之前，exit 1）；M3 变异失败只能经日志 ❌ 行观测（exit 仍 0，见第 3 条）——实现者如以退出码核对 M3，会误判还原后与变异后均「通过」。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "三项修复本体均已按 objective 声明落地并核实：(1) N7——src/store/slices/bootstrap.ts 的 anchorToArticle 在唯一生效的最终 set() 中补齐 isShowingTranslatedProse/isRawRenderMode/showFulltext 三个复位，与 src/store/slices/reader.ts 的 selectArticle 复位集合完全同口径（pos==null/rows==null/竞态等早退发生在导航生效前，无需复位；selectArticle 本身未动，符合 non_goals）；(2) N8——Timeline.tsx SocialCard(social-translated-block)与 NotifCard(notif-translated-block)均改为 rawTranslated ? 纯文本插值 : dangerouslySetInnerHTML，与 Reader 同口径；(3) N11——rawTranslatedIds 生命周期与声明一致：两路流启动置位（translateEntry/toggleReaderTranslation）、回读成功以 DB 消毒版覆盖内容后清除、回读失败清内容+translateErrors['译文回读失败']+非 silent toast 带重试+保持清除、流错误路径与外层 aiTranslate .catch 均不清标记（半截内容按纯文本渲染）；toggleReaderTranslation 缓存守卫补上 !s.rawTranslatedIds[art.id]；两处 onDone 回读均补 .catch（同时消除 unhandled rejection）。diff 仅含 6 个 allowed_paths 文件、六文件全 LF、package.json/Cargo.toml/Cargo.lock 零改动（git diff 为空）、无新依赖。但任务验收明确要求「N7/N11 行为断言 + N8 渲染分支静态断言全部通过」，verified run 日志中 (n8) NotifCard 静态断言为 ❌ 且被假汇总掩蔽（详见 findings），该验收项不成立，故 requirements 判 FAIL。",
+      "evidence_files": [
+        "src/store/slices/ai.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/reader.ts",
+        "src/store/types.ts",
+        "src/components/Reader.tsx",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-5f81dedb4b814346bdb906b9e9cbe421-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-5f81dedb4b814346bdb906b9e9cbe421.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "FAIL",
+      "analysis": "四门禁核对：cargo test 证据自求和恰为 171 passed/0 failed/9 ignored（与声明一致）；lint 0 warnings/0 errors exit 0；build exit 0；frontend 在审查者本机重跑复现 ❌(n8) NotifCard + 「合计 292/292」+ exit 0 的矛盾输出（真实 291/292，1 失败）。存量断言保护核实：HEAD 与工作区的断言名集合 diff 为空（既有断言一行未动，文件内 284 个既有断言名全保留），新增恰 9 条（(l2)x5 + (n7)x1 + (n8)x3），harness 仅有两处 hunk：(l2)/(n7) 插入块与 (n8) 插入块（后者附带 const fs 导入与既有行 if(totalFailed){ 的缩进改动）。兼容性核实：既有 (l) 块全部通过（含「done 立即清 translatingIds[id]」「已有译文缓存时不再触发 ai_translate」「回读 DB 消毒译文覆盖」），与 rawTranslatedIds 时序兼容；S-4 翻译流三条断言保持通过；早段 S-5 锚定测试（「锚定打开按设置标已读」等）通过，N7 断言迁入 (l2) 区未对早段产生任何最终 diff 改动。但 (n8)/(n11) 三条断言被排除在汇总数字与退出码之外（变异 M3 实证 exit 0），frontend 门禁完整性被破坏，故 FAIL。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-5f81dedb4b814346bdb906b9e9cbe421-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-5f81dedb4b814346bdb906b9e9cbe421-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-5f81dedb4b814346bdb906b9e9cbe421-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-5f81dedb4b814346bdb906b9e9cbe421-frontend.stdout.txt",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "三项变异独立施加、记录失败、逐一还原并核对（还原后 git diff HEAD -- src/ tools/ 的 sha256 与变异前完全一致，git status 仅剩 6 个候选文件）：M1 删除 anchorToArticle 三复位行 → (n7) 断言 ❌ 且 exit 1；M2 translateEntry 回读成功后不删 rawTranslatedIds[id] → 「(l2) 消毒回读落地：标记清除且内容为 DB 消毒版」❌ 且 exit 1；M3 SocialCard 译文块还原纯文本插值 → 「(n8) SocialCard」❌（因汇总顺序缺陷 exit 仍为 0，失败仅见于日志行——该缺陷本身已计入 regression/requirements 的 FAIL）。渲染点清查：全仓 grep translatedContent 的 DOM 渲染点恰为 4 处——Reader.tsx 纯文本分支（rawStream 命中时）与 HTML 分支（else，此时 isShowingTranslatedProse 为假或 rawStream 已清，__html 只会是原文/消毒译文）、Timeline.tsx SocialCard 与 NotifCard 各自的 rawTranslated 双分支；无第五个渲染点（Timeline 其余命中为 toggle 逻辑，api.ts/reader.ts 为 DB 消毒数据装载）。流错误路径半截未消毒内容保留时 raw 标记保持，四处渲染点均走纯文本，无 HTML 泄漏路径；toggleReaderTranslation 关闭译文的 isShowingTranslatedProse 早退分支仅翻转标志，随后 Reader 渲染的是后端消毒的原文 HTML，安全。残留低危缺口（重入窗口，见 findings 第 4 条）不在本次指示核对范围内、影响有界，不影响本项 PASS 判定。",
+      "evidence_files": [
+        "src/store/slices/ai.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/components/Reader.tsx",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-5f81dedb4b814346bdb906b9e9cbe421-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "FAIL",
+      "analysis": "rawTranslatedIds 生命周期注释如实且质量高：ai.ts 两处 onDone 注释准确说明了 translatingIds 维持「done 即清」既有时序、消毒时序由 rawTranslatedIds 承担的解耦设计，失败路径注释说明丢弃半截与 D1 重试语义的因果关系，与实现逐条相符；types.ts 新键注释准确表达渲染契约；Reader/SocialCard/NotifCard 三处渲染分支口径一致（raw→纯文本插值、否则 dangerouslySetInnerHTML），注释互相呼应；(l2)/(n7) 断言命名清晰、说明与行为相符且变异敏感（M1/M2 均精准命中）。但 (n8) 块失实：块头声称「修前卡片为纯文本插值（无分支、无 dangerouslySetInnerHTML）→ 断言失败」，而 NotifCard 断言因切片标记错误（notif-expand-btn 先于 notif-translated-block 出现）在修复已存在时也必然失败，说明与实际行为不符；且断言块置于汇总计算之后使「断言失败」这一语义本身失效。测试代码的可信度是可维护性的核心，故 FAIL。",
+      "evidence_files": [
+        "src/store/slices/ai.ts",
+        "src/store/types.ts",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "新增三个 selector（Reader 的 rawStream、SocialCard/NotifCard 的 rawTranslated）均按 id/条件取原始值（true/undefined），rawTranslatedIds 每次流事件虽新建对象，但 selector 返回原值不变不触发额外重渲染；流式期间 Reader 对未消毒译文改用单文本节点渲染，代价不高于原 innerHTML HTML 解析路径；回读落地的「清标记+覆写内容」合并在同一次 set，无额外渲染洪峰；entries 的不可变更新对未涉及条目保持引用稳定，卡片 memo 不受影响；(n8) 静态断言仅在启动时同步读取两个源文件，开销可忽略。",
+      "evidence_files": [
+        "src/components/Reader.tsx",
+        "src/components/Timeline.tsx",
+        "src/store/types.ts"
+      ]
+    }
+  ],
+  "ui_review": null
+}

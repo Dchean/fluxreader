@@ -1297,62 +1297,6 @@ await (async () => {
   checkNew('(l) 已有译文缓存时不再触发 ai_translate',
     invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 0);
 
-  /* ---------- (l2) TASK-065 N11：rawTranslatedIds 消毒时序（渲染契约 store 侧锚点） ---------- */
-  await bootFixture();
-  detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
-  aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
-  store.getState().translateEntry('201');
-  await nTick(5);
-  const heldN11 = heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
-  heldN11.ch.onmessage?.({ type: 'delta', data: '<p>未消毒<script>alert(1)</script></p>' });
-  checkNew('(l2) 流式期间 rawTranslatedIds[id]=true（未消毒产物按纯文本渲染）',
-    store.getState().rawTranslatedIds['201'] === true);
-  heldN11.ch.onmessage?.({ type: 'done' });
-  checkNew('(l2) done 后消毒回读未落地：标记仍在（消毒版未到位不得切 HTML 渲染）',
-    store.getState().rawTranslatedIds['201'] === true);
-  await nTick(20);
-  checkNew('(l2) 消毒回读落地：标记清除且内容为 DB 消毒版',
-    store.getState().rawTranslatedIds['201'] === undefined
-    && store.getState().entries.find((a) => a.id === '201')?.translatedContent === '<p>已消毒译文</p>');
-
-  await bootFixture();
-  detailImpl = () => { throw { message: 'ipc down' }; };
-  aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
-  store.getState().translateEntry('201');
-  await nTick(5);
-  const heldN11Fail = heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
-  heldN11Fail.ch.onmessage?.({ type: 'delta', data: '<img src=x onerror=alert(1)>' });
-  heldN11Fail.ch.onmessage?.({ type: 'done' });
-  await nTick(20);
-  checkNew('(l2) 消毒回读失败：丢弃未消毒半截 + 标记清除 + 错误态与 toast 带重试',
-    store.getState().rawTranslatedIds['201'] === undefined
-    && store.getState().entries.find((a) => a.id === '201')?.translatedContent === ''
-    && store.getState().translateErrors['201'] === '译文回读失败'
-    && store.getState().toasts.some((t) => t.text === '译文回读失败'));
-
-  await bootFixture();
-  detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
-  aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
-  store.getState().translateEntry('201');
-  await nTick(5);
-  const heldN11Err = heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
-  heldN11Err.ch.onmessage?.({ type: 'delta', data: '<b>半截' });
-  heldN11Err.ch.onmessage?.({ type: 'error', data: '限流' });
-  checkNew('(l2) 流错误路径：半截未消毒内容保留（重试语义）且标记保持（按纯文本渲染）',
-    store.getState().entries.find((a) => a.id === '201')?.translatedContent === '<b>半截'
-    && store.getState().rawTranslatedIds['201'] === true);
-
-  /* ---------- (n7) TASK-065：锚定打开复位阅读视图标志（与 selectArticle 同口径） ---------- */
-  await bootFixture();
-  store.setState({ isShowingTranslatedProse: true, isRawRenderMode: true, showFulltext: true, activeArticleId: null });
-  await store.getState().anchorToArticle('101');
-  await nTick(20);
-  checkNew('(n7) 锚定打开复位阅读视图标志（译文/全文/原始渲染——修前残留使新文章正文空白）',
-    store.getState().isShowingTranslatedProse === false
-    && store.getState().isRawRenderMode === false
-    && store.getState().showFulltext === false
-    && store.getState().activeArticleId === '101');
-
   await bootFixture();
   aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
   store.getState().translateEntry('201');
@@ -2316,26 +2260,6 @@ await (async () => {
 
   globalThis.__INVOKE__ = prevInvoke;
 }
-  const fs = await import('node:fs');
-/* ============================================================
-     TASK-065 N8/N11：卡片与 Reader 的译文渲染契约（源码形态断言）
-     渲染分支无 DOM harness，以源码文本核对四处分支的存在性：
-     未消毒（rawTranslatedIds 命中）→ 纯文本插值；消毒后 → dangerouslySetInnerHTML。
-     修前卡片为纯文本插值（无分支、无 dangerouslySetInnerHTML）→ 断言失败。
-     ============================================================ */
-  const tlSrc = fs.readFileSync(new URL('../src/components/Timeline.tsx', import.meta.url), 'utf8');
-  const readerSrc = fs.readFileSync(new URL('../src/components/Reader.tsx', import.meta.url), 'utf8');
-  const socialBlock = tlSrc.slice(tlSrc.indexOf('social-translated-block'), tlSrc.indexOf('social-actions-bar'));
-  const notifStart = tlSrc.indexOf('notif-translated-block');
-  const notifBlock = notifStart < 0 ? '' : tlSrc.slice(notifStart, tlSrc.indexOf('notif-expand-btn', notifStart));
-  checkNew('(n8) SocialCard 译文块按 rawTranslated 分支：消毒后 dangerouslySetInnerHTML（修前纯文本插值）',
-    socialBlock.includes('rawTranslated ? (') && socialBlock.includes('dangerouslySetInnerHTML'));
-  checkNew('(n8) NotifCard 译文块同样分支（修前纯文本插值显示字面标签）',
-    notifBlock.includes('rawTranslated ? (') && notifBlock.includes('dangerouslySetInnerHTML'));
-  checkNew('(n11) Reader 译文渲染含未消毒纯文本分支（流式产物不进 HTML 渲染路径）',
-    readerSrc.includes('rawStream')
-    && readerSrc.includes('dangerouslySetInnerHTML'));
-
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);
 const newFailed = newResults.filter((r) => !r.pass);

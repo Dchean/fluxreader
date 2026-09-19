@@ -363,6 +363,8 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   const hydrated = useAppStore((s) => s.hydratedIds[item.id]);
   /* 卡片级翻译状态（按 id 订阅，生成中指示） */
   const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
+  /* TASK-065 N11：译文当前是否为未消毒流式产物（决定纯文本/HTML 渲染路径） */
+  const rawTranslated = useAppStore((s) => s.rawTranslatedIds[item.id]);
   /* 社交卡片正文直接渲染 item.content：进入视口附近才懒加载水合（避免几百张
      卡片同时 getArticle 卡顿） */
   const hydrateRef = useLazyHydrate(item.id);
@@ -450,7 +452,12 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
           </button>
         )}
         <div className={"social-translated-block" + (showTranslate ? " show" : "")}>
-          {item.translatedContent}
+          {/* TASK-065 N8/N11：未消毒流式产物按纯文本渲染；消毒后与 Reader 同口径按 HTML 渲染 */}
+          {rawTranslated ? (
+            <span>{item.translatedContent}</span>
+          ) : (
+            <span dangerouslySetInnerHTML={{ __html: item.translatedContent }} />
+          )}
           {translatingCard ? <span>翻译中…</span> : null}
         </div>
         <div className="social-actions-bar">
@@ -658,6 +665,8 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
+  /* TASK-065 N11：同 SocialCard——未消毒流式产物按纯文本渲染 */
+  const rawTranslated = useAppStore((s) => s.rawTranslatedIds[item.id]);
   const [expanded, setExpanded] = useState(false);
   /* 进入视口附近才水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
      「展开更多」必须展示全文而非同一段截断文本 */
@@ -737,7 +746,12 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
       <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
 
       <div className={`notif-translated-block ${transShow ? 'show' : ''}`}>
-        {item.translatedContent}
+        {/* TASK-065 N8/N11：同 SocialCard——未消毒按纯文本，消毒后按 HTML */}
+        {rawTranslated ? (
+          <span>{item.translatedContent}</span>
+        ) : (
+          <span dangerouslySetInnerHTML={{ __html: item.translatedContent }} />
+        )}
         {translatingCard ? <span>翻译中…</span> : null}
       </div>
 

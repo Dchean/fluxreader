@@ -1,0 +1,23 @@
+{
+  "task_id": "TASK-065",
+  "run_id": "RUN-398597123b1443bc864d67a037145a02",
+  "status": "ready_for_verification",
+  "summary": "REQ-102 阅读与翻译一致性三修复（AUDIT-20260919-v2.md N7/N8/N11）。【N7】bootstrap.ts anchorToArticle 补齐与 selectArticle 同口径的三个复位（isShowingTranslatedProse/isRawRenderMode/showFulltext）——修前搜索/命令面板打开新文章残留旧标志，Reader 按译文模式渲染空译文导致正文整块空白。【N8】Timeline.tsx SocialCard/NotifCard 译文块从纯文本插值改为 rawTranslated 分支渲染：未消毒流式产物按纯文本（转义），消毒后与 Reader 同口径 dangerouslySetInnerHTML（后端落库前已 ammonia 消毒）——修前消毒译文显示 <p> 字面标签。【N11】新增 rawTranslatedIds 状态（types.ts AppState + ai slice）：流启动置位、消毒回读成功覆盖内容后清除、回读失败丢弃未消毒半截 + translateErrors + toast、流错误路径保持（半截内容按纯文本渲染，重试语义不变）；toggleReaderTranslation 缓存命中路径补 raw 标记守卫（未消毒产物不当缓存按 HTML 展示）；translateEntry/toggleReaderTranslation 两处 onDone 的消毒回读补 .catch（修前无 catch：半截未消毒译文永久留在渲染路径 + unhandled rejection）。渲染契约：rawTranslatedIds[id] 存在 → 纯文本；不存在 → HTML（DB 加载的译文后端已消毒，无标记正常 HTML 渲染）。设计说明：translatingIds/translating 维持既有时序（done 即清，被既有 (l) 断言钉住），消毒时序全部由 rawTranslatedIds 承担，渲染分支只看后者。新增断言 9 条：(n7) 锚定复位、(l2) 消毒时序三段（流中置位/done 后保持/回读落地清除）、(l2) 回读失败（丢弃+错误态+toast）、(l2) 流错误路径保持、(n8)(n11) 源码形态三断言（按块切片核对，防止跨块误匹配）。变异取证成对（M1 删三复位行→(n7) 失败；M2 回读后不清标记→(l2) 失败；M3 卡片还原纯文本插值→(n8) 两条失败），全部用文件备份还原。四门禁实测：cargo test 171 passed / 0 failed / 9 ignored（不回退）、lint 0 warnings/0 errors exit 0、build exit 0、frontend 292/292（286 存量 + 净增 6，存量一行未动）。LF 行尾（全部 6 文件 CRLF 计数 0）。",
+  "changed_files": [
+    "src/store/types.ts",
+    "src/store/slices/ai.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/components/Reader.tsx",
+    "src/components/Timeline.tsx",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri，门禁 cargo_test）",
+    "npm run lint（门禁 lint）",
+    "npm run build（门禁 build）",
+    "npm run test:frontend（门禁 frontend）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

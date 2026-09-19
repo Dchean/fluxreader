@@ -217,6 +217,9 @@ export interface AppState {
   translateEntry: (id: string, opts?: { silent?: boolean }) => void;
   /** 正在按 id 生成译文（卡片级状态，与全局 translating 单布尔隔离，避免多卡互串） */
   translatingIds: Record<string, true>;
+  /** TASK-065 N11：该 id 的 translatedContent 当前是未消毒的流式产物——渲染契约：
+      有标记按纯文本渲染（模型原始输出不得进 HTML 渲染路径），消毒回读成功后清除 */
+  rawTranslatedIds: Record<string, true>;
   /** 正文懒加载水合（选中文章 / 社交卡片挂载） */
   ensureArticleContent: (id: string, opts?: { extractFulltext?: boolean }) => void;
   /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰） */

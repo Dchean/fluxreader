@@ -14,6 +14,8 @@ import { useEnteringClass } from './useEnteringClass';
 
 export function Reader() {
   const isShowingTranslatedProse = useAppStore((s) => s.isShowingTranslatedProse);
+  /* TASK-065 N11：该文章的译文当前是否为未消毒流式产物（决定渲染路径） */
+  const rawStream = useAppStore((s) => (s.activeArticleId ? s.rawTranslatedIds[s.activeArticleId] : undefined));
   const isRawRenderMode = useAppStore((s) => s.isRawRenderMode);
   const showFulltext = useAppStore((s) => s.showFulltext);
   /* F4：按当前文章 id 判定生成态，避免别的文章在生成时本文章误显「生成中」 */
@@ -283,20 +285,36 @@ export function Reader() {
             )}
 
             {/* 正文 */}
-            <div
-              className={`article-prose ${isRawRenderMode ? 'raw-render-mode' : ''}`}
-              style={{
-                fontFamily: settings.fontFamily,
-                fontSize: settings.fontSize,
-                lineHeight: settings.lineHeight / 100,
-              }}
-              onClick={handleProseClick}
-              dangerouslySetInnerHTML={{
-                __html: isShowingTranslatedProse
-                  ? art.translatedContent
-                  : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml),
-              }}
-            />
+            {isShowingTranslatedProse && rawStream ? (
+              /* TASK-065 N11：流式/未消毒译文按纯文本渲染——模型原始输出
+                 （未消毒）不进 HTML 渲染路径；消毒回读落地后切回 HTML。 */
+              <div
+                className={`article-prose ${isRawRenderMode ? 'raw-render-mode' : ''}`}
+                style={{
+                  fontFamily: settings.fontFamily,
+                  fontSize: settings.fontSize,
+                  lineHeight: settings.lineHeight / 100,
+                }}
+                onClick={handleProseClick}
+              >
+                {art.translatedContent}
+              </div>
+            ) : (
+              <div
+                className={`article-prose ${isRawRenderMode ? 'raw-render-mode' : ''}`}
+                style={{
+                  fontFamily: settings.fontFamily,
+                  fontSize: settings.fontSize,
+                  lineHeight: settings.lineHeight / 100,
+                }}
+                onClick={handleProseClick}
+                dangerouslySetInnerHTML={{
+                  __html: isShowingTranslatedProse
+                    ? art.translatedContent
+                    : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml),
+                }}
+              />
+            )}
           </div>
         </div>
       )}

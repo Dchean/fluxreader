@@ -1,0 +1,10 @@
+{
+  "changed_files": [
+    "src/components/Reader.tsx",
+    "src/components/Timeline.tsx",
+    "src/store/slices/ai.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/types.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

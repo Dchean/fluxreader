@@ -5,7 +5,9 @@
   "task_ids": [
     "TASK-062",
     "TASK-063",
-    "TASK-064"
+    "TASK-064",
+    "TASK-065",
+    "TASK-066"
   ],
   "approval_decision_ids": [
     "DEC-b0fbb16606754732a2641bef169b7789"

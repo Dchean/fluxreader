@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-064 · 后端 P2 缺陷修复四项：手动全刷去重、重加清墓碑、今天视图时区、配置同步事务（REQ-102/N3~N6）
 
-**状态**：verified
+**状态**：done
 
 **目标**：AUDIT-20260919-v2.md 的 N3/N4/N5/N6（REQ-102，均为后端数据正确性缺陷）逐项修复，每项配「修前失败⇒修后通过」的成对验证：
 

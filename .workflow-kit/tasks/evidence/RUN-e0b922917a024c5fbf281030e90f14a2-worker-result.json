@@ -1,0 +1,16 @@
+{
+ "task_id": "TASK-066",
+ "run_id": "RUN-e0b922917a024c5fbf281030e90f14a2",
+ "status": "ready_for_verification",
+ "summary": "本任务相对其 begin 快照为零新增改动（工具观察一致）：全部成果内容在 begin 之前已存在于工作区（来自被取消的 TASK-065 循环及其审查整改，含 r1 审查驱动的三处 harness 修复），并已包含在 begin 时的候选快照内。本任务的价值在流程收口：对当前工作区状态执行完整的 verify（四门禁）与独立复审（r2，绑定新候选）并验收。三项修复内容（N7 锚定复位三标志 / N8 卡片译文 rawTranslated 分支 HTML 渲染 / N11 rawTranslatedIds 消毒时序 + 缓存守卫 + onDone .catch）与 r1 审查整改（NotifCard 切片改起始后搜索、断言块移到汇总计算之前、缩进恢复）详见任务卡与 TASK-065 取消记录。四门禁实测：cargo test 171 passed / 0 failed / 9 ignored、lint 0 warnings/0 errors exit 0、build exit 0、frontend 295/295（286 存量一行未动 + 净增 9 计入门禁）。LF 行尾。",
+ "changed_files": [],
+ "validation_requests": [
+  "cargo test（src-tauri，门禁 cargo_test）",
+  "npm run lint（门禁 lint）",
+  "npm run build（门禁 build）",
+  "npm run test:frontend（门禁 frontend）"
+ ],
+ "requested_actions": [],
+ "unresolved_items": [],
+ "blocked_reason": null
+}

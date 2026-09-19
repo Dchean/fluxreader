@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "AUDIT-20260919-v2.md 的 N3/N4/N5/N6（REQ-102，均为后端数据正确性缺陷）逐项修复，每项配「修前失败⇒修后通过」的成对验证：\n\n【N3 · 手动「刷新全部」忽略 smartDedup】scheduler.rs:104——refresh_all 走 due_filter=None 路径，dedup 被 unwrap_or(false) 写死；用户开智能去重后点侧栏「刷新」/托盘「刷新全部」会放行跨源同文（文章翻倍且不可逆），与单源 refresh_feed（正确读开关）自相矛盾。修复：把 dedup 从 due_filter 元组中拆出为独立参数——refresh_feeds_inner_with_concurrency 签名改为 (db, http, due_filter: Option<i64>, dedup: bool, concurrency)；refresh_all 读 read_refresh_config 的 dedup 传入（手动语义不变：仍抓全部源、仍忽略到期时间、同步模式过滤不变）；refresh_due_feeds 传 Some(interval_min), dedup。\n\n【N4 · 已删订阅重新添加后墓碑永不清除】commands/folders.rs 的 add_feed 与 commands/opml.rs 的 import_feeds（TASK-062 抽出的纯函数）插入成功后都不调 remove_feed_tombstone，而全库只有 pull_feeds 的「远端不再列出」分支会清墓碑——重新添加的 URL 被墓碑永久压制：pull 跳过绑定（不回填 remote_id/标题）、plan_push 跳过未绑定文章、30 天后 prune_stale_unbound 物理删除其队列项（TASK-055 防复活防线在「用户改变主意」反场景成了陷阱）。修复：两处插入成功后调 db::remove_feed_tombstone（重新添加本身即用户改变主意的最强证据，不存在复活误判面；remove_feed_tombstone 内部按 normalize_url 匹配）。为使 add_feed 路径可测，把 add_feed 抓取验证后的入库段抽为纯函数 persist_new_feed(conn, feed_url, &parsed, etag, last_modified, folder_id, layout, auto_summary, auto_translate, sync_to_backend)（除新增清墓碑行外逐字纯搬运，TASK-062 同款配方）。\n\n【N5 ·「今天」视图/今日计数时区错位】db/articles.rs:195 与 :692——date(a.published_at) 对带 offset 的 RFC3339 值归一到 UTC，与 date('now','localtime')（本地日期）比较，非 UTC 时区用户本地 00:00-08:00 发布的文章不进「今天」视图、today 计数少 1。修复：两处统一为 date(a.published_at, 'localtime') = date('now', 'localtime')。附带说明：同区域 ORDER BY COALESCE(published_at, fetched_at) 的字符串比较混合格式排序错乱问题（体检 N5 附带项）不在本任务（涉及查询语义更广，另行评估）。\n\n【N6 · config_sync_apply 无事务】config_sync.rs apply_payload 全程无事务，中途失败（典型：folder 兜底 create_folder(...).unwrap_or(0) 产生 id=0 → insert_feed 外键违约上抛）会留下半套已应用配置（已建 folders、已插 feeds），重试叠加。修复：apply_payload 以 conn.unchecked_transaction() 包裹（apply_payload 签名 &Connection 不变，Transaction 经 Deref 使用；成功 commit、Err 路径 drop 自动回滚），两处 create_folder(...).unwrap_or(0) 改为 ? 上抛；update_folder_layout/set_folder_ai_flags 的 let _ = 吞错保持（可选标志更新失败不阻断 apply，事务保证一致性）。",
   "non_goals": [
     "不改 published_at 的存储格式与迁移（仍 RFC3339 混合 offset）",
@@ -232,9 +232,12 @@
     "candidate_digest": "4eae986f5f1b83b4d403bf196847615475500f63e62ab9bcdea3b1fe2c431ed4",
     "verification_run": "RUN-177672cf4733428eb607b1645ca11e9d",
     "review_run": "RUN-fc5315903f4043779e0a19b3dd042e04",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-eb50bf04e09c4e18b0a3ec4afffef6c0-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-eb50bf04e09c4e18b0a3ec4afffef6c0"
+    ],
+    "merge_ref": "6e36fdb",
+    "continued_by": "TASK-066"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

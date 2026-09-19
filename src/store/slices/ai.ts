@@ -13,6 +13,7 @@ export type AiSlice = Pick<
   | 'summaryErrors'
   | 'translateErrors'
   | 'translatingIds'
+  | 'rawTranslatedIds'
   | 'translateEntry'
   | 'toggleReaderTranslation'
   | 'summarizeEntry'
@@ -25,6 +26,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
   summaryErrors: {},
   translateErrors: {},
   translatingIds: {},
+  rawTranslatedIds: {},
 
   /** 卡片级翻译（社交/通知卡）：按 id 流式生成该条目译文，不依赖 Reader 选中态。
       复用 toggleReaderTranslation 的流式与消毒回读逻辑，但状态按条目隔离
@@ -46,6 +48,8 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
        译文后面（打字机里出现「半截+完整」的重复内容）。 */
     set((st) => ({
       translatingIds: { ...st.translatingIds, [id]: true },
+      /* TASK-065 N11：流式 delta 是模型原始输出（未消毒），标记期间渲染走纯文本 */
+      rawTranslatedIds: { ...st.rawTranslatedIds, [id]: true },
       translateErrors: { ...st.translateErrors, [id]: '' },
       entries: st.entries.map((a) => (a.id === id ? { ...a, translatedContent: '' } : a)),
     }));
@@ -61,22 +65,42 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           });
         },
         () => {
-          /* 流式结束：回读 DB 的消毒版译文（同 Reader 路径的 XSS 防护） */
+          /* TASK-065 N11：流式结束回读 DB 的消毒版译文。translatingIds 维持既有
+             时序（done 即清）；消毒时序由 rawTranslatedIds 承担——回读成功用
+             消毒版覆盖后才清除（期间渲染按纯文本），失败则丢弃未消毒半截 + toast
+             （此前无 .catch：半截未消毒译文永久留在渲染路径 + unhandled rejection）。 */
           set((st) => {
             const nextIds = { ...st.translatingIds };
             delete nextIds[id];
             return { translatingIds: nextIds };
           });
-          void api.getArticle(Number(id)).then((row) => {
-            if (!row) return;
-            const cur = get().entries.find((a) => a.id === id);
-            if (!cur) return;
-            const safe = row.translated_content ?? '';
-            if (!safe) return;
-            set((st) => ({
-              entries: st.entries.map((a) => (a.id === id ? { ...a, translatedContent: safe } : a)),
-            }));
-          });
+          void api
+            .getArticle(Number(id))
+            .then((row) => {
+              const safe = row?.translated_content ?? '';
+              set((st) => {
+                const nextRaw = { ...st.rawTranslatedIds };
+                delete nextRaw[id];
+                return {
+                  rawTranslatedIds: nextRaw,
+                  /* 回读不到消毒版（含 row 为空）：丢弃未消毒半截，不留 XSS 窗口 */
+                  entries: st.entries.map((a) => (a.id === id ? { ...a, translatedContent: safe } : a)),
+                };
+              });
+            })
+            .catch(() => {
+              set((st) => {
+                const nextRaw = { ...st.rawTranslatedIds };
+                delete nextRaw[id];
+                return {
+                  rawTranslatedIds: nextRaw,
+                  translateErrors: { ...st.translateErrors, [id]: '译文回读失败' },
+                  /* 丢弃未消毒半截：失败态放行重试（D1 语义），不残留渲染风险 */
+                  entries: st.entries.map((a) => (a.id === id ? { ...a, translatedContent: '' } : a)),
+                };
+              });
+              if (!silent) get().showToast('译文回读失败', { label: '重试', run: () => get().translateEntry(id) });
+            });
         },
         (msg) => {
           set((st) => {
@@ -118,8 +142,10 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     const art = s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) : null;
     if (!art) return;
     /* 已有缓存译文 → 直接切换展示；失败态同样放行（D1b 同源）：流内先出半截
-       译文再报错时，重试必须真的重发请求，而不是把半截译文当缓存展示 */
-    if (art.translatedContent && !s.translateErrors[art.id]) {
+       译文再报错时，重试必须真的重发请求，而不是把半截译文当缓存展示。
+       TASK-065 N11：未消毒的流式产物（rawTranslatedIds 未清）也不当缓存——
+       切换展示会把它按 HTML 渲染进 DOM。 */
+    if (art.translatedContent && !s.translateErrors[art.id] && !s.rawTranslatedIds[art.id]) {
       set({ isShowingTranslatedProse: true });
       return;
     }
@@ -133,6 +159,8 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     set((st) => ({
       translating: true,
       isShowingTranslatedProse: true,
+      /* TASK-065 N11：流式 delta 未消毒，标记期间 Reader 按纯文本渲染 */
+      rawTranslatedIds: { ...st.rawTranslatedIds, [articleId]: true },
       translateErrors: { ...st.translateErrors, [articleId]: '' },
       entries: st.entries.map((a) => (a.id === articleId ? { ...a, translatedContent: '' } : a)),
     }));
@@ -149,22 +177,44 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           });
         },
         () => {
-          /* 流式结束：回读 DB 的消毒版译文（后端 ai_translate 落库前已 sanitize，
-             流中 delta 是未消毒原样，若直接保留会把 XSS 窗口留到渲染时）。
-             回读成功后用消毒版覆盖流式产物；失败则回退到已展示的流式内容。 */
+          /* TASK-065 N11：流式结束回读 DB 的消毒版译文（后端 ai_translate 落库前
+             已 sanitize，流中 delta 是未消毒原样）。translating 维持既有时序（done
+             即清）；消毒时序由 rawTranslatedIds 承担——回读成功用消毒版覆盖后才
+             清除并切 HTML 渲染；失败则丢弃未消毒半截 + toast（此前无 .catch：半截
+             未消毒译文永久留在渲染路径 + unhandled rejection）。 */
           set({ translating: false });
-          void api.getArticle(Number(articleId)).then((row) => {
-            if (!row) return;
-            const cur = get().entries.find((a) => a.id === articleId);
-            if (!cur) return;
-            const safe = row.translated_content ?? '';
-            if (!safe) return;
-            set((st) => ({
-              entries: st.entries.map((a) =>
-                a.id === articleId ? { ...a, translatedContent: safe } : a,
-              ),
-            }));
-          });
+          void api
+            .getArticle(Number(articleId))
+            .then((row) => {
+              const safe = row?.translated_content ?? '';
+              set((st) => {
+                const nextRaw = { ...st.rawTranslatedIds };
+                delete nextRaw[articleId];
+                return {
+                  rawTranslatedIds: nextRaw,
+                  /* 回读不到消毒版（含 row 为空）：丢弃未消毒半截，不留 XSS 窗口 */
+                  entries: st.entries.map((a) =>
+                    a.id === articleId ? { ...a, translatedContent: safe } : a,
+                  ),
+                };
+              });
+            })
+            .catch(() => {
+              set((st) => {
+                const nextRaw = { ...st.rawTranslatedIds };
+                delete nextRaw[articleId];
+                return {
+                  rawTranslatedIds: nextRaw,
+                  translateErrors: { ...st.translateErrors, [articleId]: '译文回读失败' },
+                  entries: st.entries.map((a) =>
+                    a.id === articleId ? { ...a, translatedContent: '' } : a,
+                  ),
+                };
+              });
+              if (!silent) {
+                get().showToast('译文回读失败', { label: '重试', run: () => get().toggleReaderTranslation() });
+              }
+            });
         },
         (msg) => {
           /* 内联错误（Reader 正文上方展示）+ 非 silent 时 toast 带重试 */
