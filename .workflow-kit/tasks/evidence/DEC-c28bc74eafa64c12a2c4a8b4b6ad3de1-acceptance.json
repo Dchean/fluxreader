@@ -1,0 +1,14 @@
+{
+  "id": "DEC-c28bc74eafa64c12a2c4a8b4b6ad3de1",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-20 验收问答选择：验收 TASK-069，继续下一项已确认范围（accept_task069 选项 1）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-069"
+  ],
+  "recorded_at_utc": "2026-09-20T03:01:50.191124Z",
+  "candidates": {
+    "TASK-069": "0dfded14ef1a0445f1031129c0c06e15ecc4115fc10adb77153eb60004c2e510"
+  }
+}

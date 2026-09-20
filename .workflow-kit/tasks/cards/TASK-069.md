@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-069 · 结构性硬化收口：pull 游标失败守卫、app_settings 读取收口、行类型 fixture 防漂移、仓库卫生（REQ-103）
 
-**状态**：verified
+**状态**：done
 
 **目标**：本任务收口被取消的 TASK-068 的同一成果（历史：TASK-068 已实施 REQ-103 四项硬化并通过四门禁与三项变异取证，但 finish 的范围检查无法通过——db.rs 导出行（owner 已批准 DEC-ec075000）与事故文件删除（规格 N-硬4）在冻结 allowed_paths 外，任务基线为首次 begin 快照、unblock 循环无法收敛，故按流程取消并以本任务收口；本任务相对 begin 快照为零新增改动，成果经候选快照绑定）。四项内容：【N-硬1 游标守卫】greader_pull.rs 分块失败计数、chunk_failures>0 时不推进 last_sync_ts 并 warn（修前失败块条目只能等全量补回的「偶发漏文章」温床）；fever_pull.rs 对称（三处失败计数、时间戳游标仅无失败时推进；last_sync_entry_id 只计已合并条目本就安全）。【N-硬2 收口】db/settings.rs 新增 app_settings_bool/str 类型化助手（失败/坏 JSON/缺失/类型不符一律返回 default）+ 4 条文件内测试；db.rs 一行 pub use 导出（owner 批准 DEC-ec075000）；调用点收口：lib.rs read_close_to_tray/read_close_prompt_shown、commands/mod.rs read_dedup_flag、scheduler.rs read_sync_mode_conn/autoSync 布尔（refreshInterval 数值留待后续，raw 绑定保留）——默认值语义逐点保持。【N-硬3 fixture 防漂移】tests/fixtures/row_fixture.json 检入规范 FeedRow+ArticleListItem 序列化形态；row_fixture_e2e.rs Rust 侧逐字段比对；frontend-regression (r) 断言读同一 fixture 经 articleRowToEntry/feedRowToItem 映射逐字段核对——双侧共用 fixture，任一侧漂移都被捕获。【N-硬4 卫生】删除根目录 14 个垃圾文件（13 个 *.log + 字面名 ''' + $db + ''' 的脚本事故产物）；.gitignore 补 *.log/tmp/（_rev501-bak/ 出处待 owner 确认仅加入忽略规则）。r1 遗留：TASK-068 取消前未及独立审查，本任务的独立审查按同等标准覆盖全部四项内容。
 

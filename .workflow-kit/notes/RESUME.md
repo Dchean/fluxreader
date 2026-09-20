@@ -9,18 +9,18 @@
 
 目标：以 workflow-kit 2026-09-18.3 新周期对 fluxreader 持续改进：修复全项目体检发现的缺陷（P1/P2），处置功能空壳与死代码确保无未落实的宣称能力，完成 ingestion.rs 拆分与结构性硬化（pull 游标守卫、app_settings 收口），使项目稳定规范、代码与技术路线优雅高效
 
-当前阶段：**验收与交付**
+当前阶段：**分步实施**
 
-阶段目标：核对完整范围，交付可运行成果、使用说明及适用的恢复办法
+阶段目标：落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致
 
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | 需求与目标 | 明确目标、已有 Bug、新功能、其他要求、质量目标和执行边界 | 已完成 |
 | 分析与方案 | 记录参考、原始基线状态与限制，说明维护、稳定和性能取舍，并确认路线 | 已完成 |
 | 界面预览 | 验证关键流程、整体设计和控件完整状态，确认后沿用前端实现 | 不适用 |
-| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 分批推进 |
+| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 当前 |
 | 回归与审查 | 以需求、失败路径、适用界面检查、维护性和性能证据核对当前组合候选 | 分批推进 |
-| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 当前 |
+| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 待推进 |
 
 **完整验收目标**：体检报告 AUDIT-20260919-v2.md 的 P1/P2 缺陷经确认后全部修复并有修前复现/修后验证的成对证据；结构性硬化落地：pull 分块失败不推进增量游标；app_settings 读取收口为类型化助手；ingestion.rs 拆分为领域模块，行为零变化，四门禁不回归；死代码/空壳集群处置完毕（删除或裁决保留），无未落实的宣称能力；设计边界项（P2-12/P3-11 等）经 owner 逐项裁决：实施或注释明示保留；既有质量底线延续：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283 不回退（通过数可增不可减）
 
@@ -28,11 +28,10 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 41 项：已验收 37，待验收 1，阻塞 0。
+已建任务 41 项：已验收 38，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-069 · 结构性硬化收口：pull 游标失败守卫、app_settings 读取收口、行类型 fixture 防漂移、仓库卫生（REQ-103）](<../tasks/cards/TASK-069.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -44,6 +43,7 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
 另有 29 项记录可在任务总览查看。
 
@@ -80,7 +80,6 @@
 
 ## 最近事件
 
-- 2026-09-20T01:27:10.069147Z · checkpoint · TASK-069 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-20T01:31:13.687560Z · note/todo · TASK-069 · 总控只读核查补充（REQ-104 待办，非本候选缺陷，不阻塞 TASK-069）：N-硬1 收口后仍存在同类未接住点——greader_pull.rs:31-59 的 item_ids 分页循环失败时只 push report.errors 后 break，all_item_ids 为空 ⇒ 下游 chunks(100) 循环不执行 ⇒ chunk_failures 仍为 0 ⇒ 第 121-125 行游标照常推进到 now。即『本轮什么都没拉到，窗口却被跳过』，与 N-硬1 修前形态同类（该窗口条目只能等全量同步补回）。已用 git show HEAD:... 逐字节比对该 zone 证明为修前既有、非本候选引入；REQ-103 验收 1 只声明『分块失败』，故本条超出 N-硬1 声明范围，不构成本候选缺陷。建议并入 REQ-104 时与 N-硬1 同批收口（判据：item_ids 分页失败时同样不推进 last_sync_ts）。另注：fever_pull.rs 对称性已核实（三处 fetch_failures 计数 + 时间戳游标守卫；last_sync_entry_id 只计已合并条目，注释所述确实安全）。
 - 2026-09-20T01:31:27.128668Z · note/lesson · TASK-069 · 环境事实（影响后续所有任务的 build 门禁）：在受限文件沙箱下 npm run build 会以 exit 1 失败，报 vite.config.ts 加载失败 + rollup/rolldown 插件 'Error: spawn EPERM'。根因是 Vite 的 windowsSafeRealPathSync → optimizeSafeRealPathSync 用 child_process.exec 抓管道输出（node:child_process spawn），而 DSH 受限沙箱禁止程序开命名管道 —— 这是沙箱边界，不是产品缺陷。同一命令在放宽权限下 exit 0（vite v8.2.2, 84 modules, built in 779ms）。判据：build 失败若堆栈含 spawn EPERM + optimizeSafeRealPathSync，先按沙箱边界处理，不要记为 test_failure 或改代码。另注：PowerShell 里 npm.ps1 被执行策略禁用，手动跑门禁要用 npm.cmd；workflow 的 verify 走 resolve_program → node npm-cli.js，不受影响。
 - 2026-09-20T01:33:49.782611Z · note/todo · TASK-069 · 总控只读核查（REQ-103 验收 2 的残余面，需 owner/审查裁决是否算本候选缺陷）：卡面验收写『N-硬2 六处调用点收口』，但卡面 objective 实际点名只有 5 处（lib.rs read_close_to_tray/read_close_prompt_shown、commands/mod.rs read_dedup_flag、scheduler.rs read_sync_mode_conn/autoSync），候选实际改动也正是这 5 处。REQ-103 原文验收是『app_settings 读取经收口助手，grep 无散落的 from_str 模板复制』——按该口径未完全达成，同类模板仍在：(a) scheduler.rs:256-264 should_notify 的 notifyOnNewArticles 布尔读取（默认 false，未点名、未收口，可直接用 app_settings_bool 收口且 scheduler.rs 在 allowed_paths 内）；(b) scheduler.rs:24-50 read_refresh_config 与 :203-206 的 raw 绑定（卡面明确『refreshInterval 数值留待后续，raw 绑定保留』，属已知延后，其中 smartDedup/autoRefresh 两个布尔本可一并收口）。另 commands/settings.rs:26 解析的是入参 value 而非库读、config_sync.rs:277 是读改写合并、commands/ai.rs:70 读的是 ai_config 键，三者语义不同，不属同类。附带一处小冗余：scheduler.rs:203 取 raw 后 :208 又调 app_settings_bool，同一函数内 app_settings 被读两次（可由审查判定是否值得合并）。以上均为修前既有，非本候选引入。
@@ -92,6 +91,7 @@
 - 2026-09-20T02:45:17.295823Z · note/lesson · TASK-069 · 总控协作教训（本轮实际踩到）：独立审查者在跑变异复现时，总控不应同时对同一工作区做变异/临时改动——本轮总控在审查进行中自行做了 api.ts 的 author 常量变异（虽 1 分钟内已按备份还原并经 git diff 确认与 HEAD 逐字节一致），而审查者同时在改 greader_pull.rs 做 F1 变异。两者叠加会让 selected_snapshot 与冻结 candidate_digest 短暂不一致，既可能污染审查者观察到的现场，也会掩盖『是谁改的』。正确做法：审查运行期间总控只做只读核查（read/grep/git diff 只读、不写产品文件），把变异取证留给审查者或安排在审查开始前/结束后；确需并行时先约定互斥的文件集合。注：本任务审查者的变异属授权行为且会自行还原，报告落盘前以 sha256 复核候选 156 文件全部复原即可。
 - 2026-09-20T02:58:05.042023Z · checkpoint · TASK-069 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-20T02:58:21.973412Z · note/decision · TASK-069 · TASK-069 收口完成（verdict 由独立审查给出后再落库，遵循 TASK-066 教训）：r2 独立审查（RUN-d1c63c73，新上下文 independent-reviewer-r2-20260920-t069-e968ecf8）verdict=PASS、findings=[]，五项 review_checks 全 PASS，F1-F4 逐项经审查者自行变异复现确认修复（F1 还原守卫 ⇒ 新游标测试 FAILED；F2 删除 cover 映射 ⇒ (r) ❌ + exit 1；F3 scheduler get_setting(app_settings) 调用点 4→2；F4 git check-ignore 命中 .gitignore:27）。最终候选 digest=0dfded14…、验证 RUN-5380e8e4（cargo 177/0/9、lint 0/0、build exit 0、frontend 303/303）。本轮共 1 个修复轮（上限 4），任务身份/预算沿用。审查者另报一处环境异常：审查窗口内另有进程改过 src/lib/api.ts 并重生 dist-test（经核对为总控自身 author 常量变异，已还原且 api.ts 与 HEAD 逐字节一致、dist-test 已干净重生 303/303），非候选缺陷，已另记 lesson 约束‘审查期间总控只做只读核查’。REQ-104 待办继续挂账：REQ-103 收口后残余的同类点（不在本候选 allowed_paths 内或属数值型推迟）——greader_pull.rs fetch_stream_ids 仍用旧 and_then(parse) 惯用法（C-1 对账路径，非目标）、scheduler.rs read_refresh_config 的数值型读取、scheduler.rs:203 附近已合并、lib.rs resolve_close 读改写与 let _ = set_setting 吞错、TASK-067 记录的三处前端未接住点与 settings.ts:56。
+- 2026-09-20T03:01:56.237587Z · accept · 验收 TASK-069；依据：用户 2026-09-20 验收问答选择：验收 TASK-069，继续下一项已确认范围（accept_task069 选项 1）
 
 ## 如何继续
 
