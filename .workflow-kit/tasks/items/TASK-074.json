@@ -1,19 +1,19 @@
 {
   "schema_version": 1,
-  "id": "TASK-071",
+  "id": "TASK-074",
   "title": "同步语义行为变更：配置同步删除语义（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）",
   "kind": "implementation",
   "retry_safe": false,
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "cancelled",
-  "objective": "按 owner 2026-09-20 两项设计边界裁决实施行为变更（两项都改数据同步语义，故合并为一个高风险任务并绑定裁决）。A【P2-12 配置同步删除语义，DEC-req104-p2-12-config-delete-20260920】现状：config_sync.rs:141-261 merge_app_settings 只做 upsert，远端删除的配置项在本地不删除；且 skipped 计数实际是『已更新』口径。实施：① 远端白名单字段在远端消失时本地同步删除（回落默认值或删除该键，语义在实现时择一并留证）；② 修正 skipped 计数口径为真实跳过数；③ 保持 autoStart/closePromptShown 等本地专属字段不被远端删除（现白名单已排除，须保持并有断言）。B【P3-11 远端退订同步删本地，DEC-req104-p3-11-remote-unsub-20260920】现状：pull_feeds 无删除分支，远端退订后本地订阅永不删除。实施：① 远端权威集合中消失的『已绑定』订阅在本地删除（只处理曾绑定且远端已消失的源）；② 必须保留本地直连订阅（origin='local'）与未绑定订阅；③ 与 TASK-035 的删除墓碑防复活机制协同——不得被下一轮 pull 建回，也不得误删本地新订阅；④ 明确与 pending 未推送队列的交互：本地刚改名/移动尚未推送时不得被远端快照删除。两项都属行为变更且有数据丢失面，须有成对证据、失败路径测试与独立审查。",
+  "status": "ready",
+  "objective": "按 owner 2026-09-20 两项设计边界裁决实施行为变更（两项都改数据同步语义，故合并为一个高风险任务并绑定裁决）。A【P2-12 配置同步删除语义，DEC-req104-p2-12-config-delete-20260920】现状：config_sync.rs 的 merge_app_settings 只做 upsert，远端删除的配置项在本地不删除；且 skipped 计数实际是『已更新』口径。实施：① 远端白名单字段在远端消失时本地同步删除（删除该键或回落默认值，语义在实现时择一并留证）；② 修正 skipped 计数口径为真实跳过数；③ 保持 autoStart/closePromptShown 等本地专属字段不被远端删除（现白名单已排除，须保持并有断言）。B【P3-11 远端退订同步删本地，DEC-req104-p3-11-remote-unsub-20260920】现状：pull_feeds 无删除分支，远端退订后本地订阅永不删除。实施：④ 远端权威集合中消失的『已绑定』订阅在本地删除（只处理曾绑定且远端已消失的源）；⑤ 必须保留本地直连订阅（origin='local'）与未绑定订阅；⑥ 与 TASK-035 的删除墓碑防复活机制协同——不得被下一轮 pull 建回，也不得误删本地新订阅；⑦ 明确与 pending 未推送队列的交互：本地刚改名/移动尚未推送时不得被远端快照删除。两项都属行为变更且有数据丢失面，须有成对证据（修前复现/修后通过）、失败路径测试与独立审查。",
   "non_goals": [
     "不改本地删除不推远端的既有方向（本地删除仍走 TASK-035 的远端退订+墓碑）",
     "不删除本地直连订阅（origin='local'）或未绑定订阅",
     "不改 config_sync 的白名单字段集合（除删除语义本身）",
-    "不改 pull_feeds 的绑定/碰撞逻辑（只新增删除分支）",
+    "不改 pull_feeds 的绑定/碰撞合并逻辑（只新增删除分支）",
     "不做迁移/表结构变更",
     "不引入新依赖",
     "不改工作流（.workflow-kit/scripts/**、binding.json）"
@@ -24,7 +24,7 @@
   "reference_ids": [],
   "decision_refs": [],
   "dependencies": [
-    "TASK-069"
+    "TASK-070"
   ],
   "blocks": [],
   "risk": {
@@ -73,7 +73,7 @@
       ".workflow-kit/WORKFLOW.md",
       ".workflow-kit/docs/PRODUCT.md",
       ".workflow-kit/docs/FEATURES.md",
-      ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json"
+      ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json"
     ],
     "network": "none",
     "data": "synthetic_only"
@@ -133,8 +133,8 @@
     "behavior": "change",
     "baseline": {
       "status": "PASS",
-      "evidence_ref": ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
-      "summary": "2026-09-20 基线（TASK-069 终版候选验证 RUN-5380e8e4，提交 452e0e2）：cargo test 177 passed / 0 failed / 9 ignored、lint 0/0、build exit 0、frontend 303/303。本任务 behavior=change 且属业务契约变更，依据 owner 2026-09-20 两项裁决：① 配置同步由『只 upsert』改为『远端消失则本地删除』；② 远端退订由『本地永不删』改为『同步删本地』。这两项都推翻了审计记录的现状描述（P2-12『无删除语义』、P3-11『本地永不删，疑有意』），属用户已确认的新行为与旧行为冲突，故按 replace 语义处理：替换断言须引用对应 owner 决定。既有测试预期中与旧行为绑定的部分须改造为断言新行为，其余全部保持。",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json",
+      "summary": "2026-09-20 基线（TASK-070 终版候选验证 RUN-44d4ee12，提交 48e2763）：cargo test 177 passed / 0 failed / 9 ignored、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 303/303。本任务 behavior=change 且属业务契约变更，依据 owner 2026-09-20 两项裁决：① 配置同步由『只 upsert』改为『远端消失则本地删除』；② 远端退订由『本地永不删』改为『同步删本地』。这两项都推翻了审计记录的现状描述（P2-12『无删除语义』、P3-11『本地永不删，疑有意』），属用户已确认的新行为与旧行为冲突，故按 replace 语义处理：替换断言须引用对应 owner 决定。既有测试中与旧行为绑定的部分须改造为断言新行为，其余全部保持。",
       "decision_ids": [
         "DEC-req104-p2-12-config-delete-20260920",
         "DEC-req104-p3-11-remote-unsub-20260920"
@@ -147,7 +147,7 @@
     "actions": [
       {
         "action": "replace",
-        "target": "配置同步的『远端缺失即保留本地』旧断言：改为『远端白名单字段消失后本地同步删除，本地专属字段保留』",
+        "target": "配置同步的『远端缺失即保留本地』旧断言：改为『远端白名单字段消失后本地同步删除，本地专属字段 autoStart/closePromptShown 保留』",
         "reason": "owner 裁决 DEC-req104-p2-12-config-delete-20260920 选择实施删除语义，与旧断言冲突",
         "gate_ids": [
           "cargo_test"
@@ -183,17 +183,17 @@
     ]
   },
   "input": {
-    "manifest": ".workflow-kit/tasks/evidence/TASK-071-input-565e522134ae412ea1e9b7725de76320.json",
-    "digest": "2d40977490b0e8754a187588ff325e52a9af659375f31d9faa3c9cac1a8a057f",
+    "manifest": ".workflow-kit/tasks/evidence/TASK-074-input-0c8f2dafe6484d799526f816b355d18e.json",
+    "digest": "fb5234e1e8b2243aae3a822c590df1a2a982dc88df803b94a2d979e0ae37933c",
     "source_revision": null,
-    "definition_digest": "31db74fff12c06b9b34a862fbf9efeffb8aaf64aba69cbcf23eda00cbe15da66"
+    "definition_digest": "acd2ceefd5270fc7f36a39e462672fea28c4c1498ac67021ec0426c082041d63"
   },
   "budget": {
     "started_at_utc": null,
     "deadline_at_utc": null,
     "repair_rounds_used": 0
   },
-  "batch_id": "BATCH-4f9d7067e5b04d5bbedfdcf3a2b021ee",
+  "batch_id": "BATCH-ab2d0e5d3f7643379a6de1fd2544b549",
   "run_ids": [],
   "blockers": [],
   "evidence": {
@@ -222,6 +222,7 @@
     ".workflow-kit/tasks/runs/RUN-0259efca5b644b909fcf022fefeaeb73.json",
     ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
     ".workflow-kit/tasks/runs/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8.json",
+    ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json",
     ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
     ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
     ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
@@ -237,21 +238,6 @@
     "tools/frontend-regression.mjs"
   ],
   "continuation_of": {
-    "TASK-069": "0dfded14ef1a0445f1031129c0c06e15ecc4115fc10adb77153eb60004c2e510"
-  },
-  "dispositions": [
-    {
-      "at_utc": "2026-09-20T07:28:37.989795Z",
-      "cancelled": true,
-      "reason": "input 快照被 TASK-070 的合法改动作废（同批预建所致）；且依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，重新按『一张卡完成后再 prepare 下一张』立项",
-      "source": "总控处置：批量预建违反 TOOLING『依赖任务通过后才 prepare 下一张卡』，改用逐张 prepare（2026-09-20）"
-    }
-  ],
-  "checkpoints": [
-    {
-      "at_utc": "2026-09-20T07:28:38.038081Z",
-      "note": "任务已取消：input 快照被 TASK-070 的合法改动作废（同批预建所致）；且依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，重新按『一张卡完成后再 prepare 下一张』立项",
-      "next_action": "如需同一目标，准备新的任务并引用本任务作为历史"
-    }
-  ]
+    "TASK-070": "9086e04c46c0f6326f858130d357606eba9236f5b2518b24b017d52bd872cfe7"
+  }
 }

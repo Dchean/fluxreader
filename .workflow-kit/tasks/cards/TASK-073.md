@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-073 · ingestion.rs 拆分为 ingestion/ 领域模块（REQ-105）
 
-**状态**：ready
+**状态**：cancelled
 
 **目标**：把 ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块，沿用 db.rs / sync.rs / commands.rs 的既有试点配方：先补断言 → 纯搬运 → 四门禁不回归。目标结构（按审计建议的领域切分）：conditional_get（条件 GET + read_capped + build_client）、parse_feed（parse_feed/resolve_url/clamp_publish_date/map_entry/mime_from_url 等纯解析）、staged 刷新（refresh_feed_staged/read_feed_for_refresh/apply_refresh_result 等三段式）、favicon 发现（discover_favicon/extract_icon_link/rel_is_icon/extract_html_attr）。同时按 TASK-070 的死代码结论处置旧版 refresh_feed（若 TASK-070 已删则此处无需处理；若保留则随搬运标注）。硬约束：crate::ingestion 的公开路径保持不变（调用点不因拆分而失败，全部走 pub use 重导出），行为零变化——除机械搬运与模块声明外不改任何逻辑。
 
@@ -38,10 +38,11 @@
 - 时钟：未开始
 - 已用修复轮：0
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：如需同一目标，准备新的任务并引用本任务作为历史
 
 ## 最近检查点
 
+- 2026-09-20T07:28:46.194114Z：任务已取消：input 快照被 TASK-070 的合法改动作废（同批预建所致）；依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，等前序卡完成后再立项；下一步：如需同一目标，准备新的任务并引用本任务作为历史
 
 ## 原始证据
 

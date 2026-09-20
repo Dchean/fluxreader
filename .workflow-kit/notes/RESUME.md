@@ -28,13 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 45 项：已验收 39，待验收 0，阻塞 0。
+已建任务 46 项：已验收 39，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-071 · 同步语义行为变更：配置同步删除语义（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）](<../tasks/cards/TASK-071.md>) | 待执行 | 按 owner 2026-09-20 两项设计边界裁决实施行为变更（两项都改数据同步语义，故合并为一个高风险任务并绑定裁决）。A【P2-12 配置同步删除语义，DEC-req104-p2-12-config-delete-20260920】现状：config_sync.rs:141-261 merge_app_settings 只做 upsert，远端删除的配置项在本地不删除；且 skipped 计数实际是『已更新』口径。实施：① 远端白名单字段在远端消失时本地同步删除（回落默认值或删除该键，语义在实现时择一并留证）；② 修正 skipped 计数口径为真实跳过数；③ 保持 autoStart/closePromptShown 等本地专属字段不被远端删除（现白名单已排除，须保持并有断言）。B【P3-11 远端退订同步删本地，DEC-req104-p3-11-remote-unsub-20260920】现状：pull_feeds 无删除分支，远端退订后本地订阅永不删除。实施：① 远端权威集合中消失的『已绑定』订阅在本地删除（只处理曾绑定且远端已消失的源）；② 必须保留本地直连订阅（origin='local'）与未绑定订阅；③ 与 TASK-035 的删除墓碑防复活机制协同——不得被下一轮 pull 建回，也不得误删本地新订阅；④ 明确与 pending 未推送队列的交互：本地刚改名/移动尚未推送时不得被远端快照删除。两项都属行为变更且有数据丢失面，须有成对证据、失败路径测试与独立审查。 |
-| [TASK-072 · 降级可见性与 AI 输入校验：全文提取 degraded 标志（P2-10 后半）+ 摘要空正文与 preset 显式提示（P2-11）（REQ-104）](<../tasks/cards/TASK-072.md>) | 待执行 | 按 owner 2026-09-20 两项裁决修复降级可见性与输入校验。A【P2-10 后半，DEC-req104-p2-10b-fulltext-degraded-20260920】现状：commands/settings.rs 的 extract_fulltext 在无法提取或防退化原样返回时静默回落原文，用户看不出发生了降级。实施：① 提取失败/防退化时给出结构化 degraded 标志（而非只改文案），前端据此显示准确文案；② 保持成功路径行为与文案不变；③ 补失败路径断言（提取失败、防退化返回原文两种形态）。B【P2-11，DEC-req104-p2-11-ai-validation-20260920】现状：commands/ai.rs 的 ai_summarize 无空正文校验（translate 已有，不对称）；未知 preset 静默回退 deepseek-chat。实施：④ ai_summarize 补空正文校验，与 translate 对称（给出可理解错误而不是把空文本送模型）；⑤ 未知 preset 不再静默回退，改为显式提示/报错；⑥ 补断言覆盖空正文与未知 preset 两条路径。 |
-| [TASK-073 · ingestion.rs 拆分为 ingestion/ 领域模块（REQ-105）](<../tasks/cards/TASK-073.md>) | 待执行 | 把 ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块，沿用 db.rs / sync.rs / commands.rs 的既有试点配方：先补断言 → 纯搬运 → 四门禁不回归。目标结构（按审计建议的领域切分）：conditional_get（条件 GET + read_capped + build_client）、parse_feed（parse_feed/resolve_url/clamp_publish_date/map_entry/mime_from_url 等纯解析）、staged 刷新（refresh_feed_staged/read_feed_for_refresh/apply_refresh_result 等三段式）、favicon 发现（discover_favicon/extract_icon_link/rel_is_icon/extract_html_attr）。同时按 TASK-070 的死代码结论处置旧版 refresh_feed（若 TASK-070 已删则此处无需处理；若保留则随搬运标注）。硬约束：crate::ingestion 的公开路径保持不变（调用点不因拆分而失败，全部走 pub use 重导出），行为零变化——除机械搬运与模块声明外不改任何逻辑。 |
+| [TASK-074 · 同步语义行为变更：配置同步删除语义（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）](<../tasks/cards/TASK-074.md>) | 待执行 | 按 owner 2026-09-20 两项设计边界裁决实施行为变更（两项都改数据同步语义，故合并为一个高风险任务并绑定裁决）。A【P2-12 配置同步删除语义，DEC-req104-p2-12-config-delete-20260920】现状：config_sync.rs 的 merge_app_settings 只做 upsert，远端删除的配置项在本地不删除；且 skipped 计数实际是『已更新』口径。实施：① 远端白名单字段在远端消失时本地同步删除（删除该键或回落默认值，语义在实现时择一并留证）；② 修正 skipped 计数口径为真实跳过数；③ 保持 autoStart/closePromptShown 等本地专属字段不被远端删除（现白名单已排除，须保持并有断言）。B【P3-11 远端退订同步删本地，DEC-req104-p3-11-remote-unsub-20260920】现状：pull_feeds 无删除分支，远端退订后本地订阅永不删除。实施：④ 远端权威集合中消失的『已绑定』订阅在本地删除（只处理曾绑定且远端已消失的源）；⑤ 必须保留本地直连订阅（origin='local'）与未绑定订阅；⑥ 与 TASK-035 的删除墓碑防复活机制协同——不得被下一轮 pull 建回，也不得误删本地新订阅；⑦ 明确与 pending 未推送队列的交互：本地刚改名/移动尚未推送时不得被远端快照删除。两项都属行为变更且有数据丢失面，须有成对证据（修前复现/修后通过）、失败路径测试与独立审查。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -44,8 +42,12 @@
 | [TASK-035 · 删除订阅接线：远端退订 + 删除墓碑防复活（A-1）](<../tasks/cards/TASK-035.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-036 · 订阅改名/移动目录接线：edit_subscription 推送远端（A-2）](<../tasks/cards/TASK-036.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 33 项记录可在任务总览查看。
+另有 34 项记录可在任务总览查看。
+
+**已确认但尚未拆分的需求**：ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块（conditional_get/parse_feed/map_entry/staged 刷新/favicon 发现），沿用先补断言→纯搬运→四门禁配方，crate::ingestion 路径不变，行为零变化
 
 **阻塞**：无已记录阻塞
 
@@ -70,7 +72,6 @@
 
 ## 教训
 
-- 2026-09-19T22:51:40.263382Z · note/lesson · TASK-066 · 两个流程教训：① 审查 FAIL 报告的回录要求工作区与冻结候选逐字一致——修复轮改动后无法回录（selected_snapshot 按工作区实时重算），本轮因先改后录被迫取消 TASK-065 并以 TASK-066 收口；正确顺序是先回录 FAIL 触发 review_failure，再在修复轮 begin 内整改。② 自研门禁的新增断言必须放在汇总统计之前（checkNew 只 push 不抛错，汇总后的断言永远无法影响退出码），且以退出码而非日志行核对变异检出
 - 2026-09-20T00:41:49.368937Z · note/lesson · TASK-068 · scope 失败已出现 6 次：Out-of-scope changes: .workflow-kit/tasks/items/TASK-068.json, ''' + $db + ''' (allowed: src-tauri/src/sync/greader_pull.rs, src-tauri/src/sync/fever_pull.rs, s。下次准备/实现前先核对这一点。
 - 2026-09-20T00:43:48.853570Z · note/lesson · TASK-068 · scope 失败已出现 7 次：Out-of-scope changes: ''' + $db + ''', src-tauri/src/db.rs (allowed: src-tauri/src/sync/greader_pull.rs, src-tauri/src/sync/fever_pull.rs, src-tauri/src/db/sett。下次准备/实现前先核对这一点。
 - 2026-09-20T00:51:58.628709Z · note/lesson · TASK-069 · protocol 失败已出现 5 次：Worker changed_files does not match the observed diff; declared but unchanged: .gitignore, src-tauri/src/commands/mod.rs, src-tauri/src/db.rs, src-tauri/src/db/。下次准备/实现前先核对这一点。
@@ -78,21 +79,22 @@
 - 2026-09-20T02:45:17.295823Z · note/lesson · TASK-069 · 总控协作教训（本轮实际踩到）：独立审查者在跑变异复现时，总控不应同时对同一工作区做变异/临时改动——本轮总控在审查进行中自行做了 api.ts 的 author 常量变异（虽 1 分钟内已按备份还原并经 git diff 确认与 HEAD 逐字节一致），而审查者同时在改 greader_pull.rs 做 F1 变异。两者叠加会让 selected_snapshot 与冻结 candidate_digest 短暂不一致，既可能污染审查者观察到的现场，也会掩盖『是谁改的』。正确做法：审查运行期间总控只做只读核查（read/grep/git diff 只读、不写产品文件），把变异取证留给审查者或安排在审查开始前/结束后；确需并行时先约定互斥的文件集合。注：本任务审查者的变异属授权行为且会自行还原，报告落盘前以 sha256 复核候选 156 文件全部复原即可。
 - 2026-09-20T04:51:20.430418Z · note/lesson · TASK-070 · 总控协作纪律（本轮第二次踩到，须固化为硬规则）：**独立审查进行期间，总控一律不得写任何候选文件**。本轮 TASK-070 r2 审查在跑时，总控为改进 F1 注释措辞编辑了 src-tauri/src/sync/mod.rs，导致 selected_snapshot 与冻结的 candidate_digest（f4e1629…）不一致——若审查者此刻计算哈希或复跑测试，会看到『候选与报告不符』或读到半途状态，可能得到无效结论。已立即还原并复核 digest 恢复一致（True）。正确做法：审查窗口内只做只读核查（read/grep/git diff/哈希比对），把一切写操作（包括『只是改注释』）推迟到审查报告落盘之后；若确有必须立即修的问题，先记录待办，等报告写入再 begin 修复轮。此前 TASK-069 审查期间已因同类原因记过一条 lesson（当时是变异实验叠加），本次是注释编辑，说明『只读』的边界要按『是否触碰候选文件』来划，而不是按『改动大小/是否产品逻辑』来划。
 - 2026-09-20T06:27:42.491022Z · note/lesson · TASK-070 · 流程观察（TASK-070 连续三轮独立审查均 FAIL，值得记录以免重犯）：三轮 findings **全部**落在『我写的解释性注释不准确』，没有一条落在删除面本身——每一轮审查都独立确认：九项删除在 HEAD 上确实零生产调用、四门禁真绿（cargo 177/0/9、lint 0/0、build 0、frontend 303/303）、无有效覆盖丢失、断言未被改动、157/157 候选哈希一致、依赖零改动、真实库未写入。三轮回合的缺陷模式完全一致且都是我自己制造的：**在注释里写下未经验证的新断言**。r1=模块头宣称了一条当时不存在的兜底（但没说我改的那句本身是否成立）；r2=我把 r1 的修正升级成『从未实现』这一历史绝对断言（git 证明它实现过，0ba940f 才删掉）；r2 同轮还把另一处改成『本轮不该建新条目』而套件自己的断言就反驳它、并把退避误挂到 fetch_failed 上；r3=又修三处。教训（对后续所有任务的注释写作）：① 改注释时只写**当场核实过**的事实，逐句核对（grep/git show/读 SQL），不写『从未/只/总是/必然』这类全称或历史绝对断言；② 涉及历史的说法一律先用 git 查证（本例 9828c8f/51dc66e/0ba940f 就能定案）；③ 涉及机制的说法必须落到具体行号与调用链，不靠印象；④ 同一 PR 内多处同类注释要一次改齐并互相一致（r2 的 sync/mod.rs 与 sync_e2e.rs 就自相矛盾）。另一条工具陷阱（r3 审查者提供）：变异实验后还原文件会使 mtime 早于已编译 rlib，cargo 跳过重编 → 干净候选出现『确定性失败』假象；遇到可疑的确定性失败先强制重编（cargo clean -p app 或 touch）再下结论。
+- 2026-09-20T07:28:18.140160Z · note/lesson · 流程教训（TASK-070 收口后发现，总控自身操作失误）：我在立项阶段一次性 prepare 了 TASK-070~073 四张卡，违反 TOOLING.md『依赖任务通过后才 prepare 下一张卡』的指导。后果：TASK-071/072/073 的 input 快照取自 TASK-070 开工前的代码状态，而 TASK-070 合法地改动了 snapshot_paths 覆盖的 src / src-tauri/src / src-tauri/tests / tools，于是 check 报三条『invalid input snapshot: candidate changed』，begin 也被拒（工具设计上要求 ready 任务的输入快照与当前树一致，否则开工基线不正确）。另发现两张卡缺少正确依赖边：prepare 时 TASK-070 尚未 verified，故 071/072/073 只依赖 TASK-069，未声明对 TASK-070 的依赖（虽然串行顺序已用笔记约束）。补救（不手工改 digest，避免『rehash 掩盖变化』）：按工具既有先例（TASK-068→TASK-069）cancel 三张过期卡并重新 prepare 新卡，依赖直接写 TASK-070，使快照取当前树、并让依赖继承 TASK-070 的门禁。教训固化：**一张卡 verified/done 之后才 prepare 下一张**，不要为省事批量预建；批量预建在有串行依赖的链上必然作废。
 
 ## 最近事件
 
-- 2026-09-20T05:23:34.271055Z · checkpoint · TASK-070 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
-- 2026-09-20T05:23:43.550526Z · checkpoint · TASK-070 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-09-20T05:40:59.604812Z · checkpoint · TASK-070 · 编码结果已记录，差异范围已核对：src-tauri/src/ingestion.rs, src-tauri/src/sync/mod.rs, src-tauri/tests/mock_greader.rs, src-tauri/tests/sync_e2e.rs；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-09-20T05:41:26.765824Z · checkpoint · TASK-070 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
-- 2026-09-20T05:42:14.033843Z · note/progress · TASK-070 · TASK-070 修复轮 r2 完成并重新验证（候选 19bba4ef…，验证 RUN-ec17efa7），已交第三轮独立审查。r2 独立审查（RUN-15cf7e84，FAIL）的两项发现全部处置，且该审查明确确认 F1/F2/F3 已真正修复、九项删除全部真死、四门禁真绿、无有效覆盖丢失——故两轮修复都只改注释，未动任何行为/断言/删除。N1（medium）= r1 的 F1 替换句『fetch_failed 只驱动指数退避重试』双向过度宣称：① 该列还经 FeedRow(list_feeds)→api.ts fetchFailed→Sidebar feed-error-dot 做前端失败标记；② 退避由 fail_count/next_retry_at 承担（set_feed_fetch_state 写入、feeds_due_for_refresh 按 next_retry_at 过滤），并非由 fetch_failed 驱动。已逐点改写并核实两处指称。N2（low-medium）= 同一不实因果在**在范围且本任务已改过**的 tests/sync_e2e.rs 幸存（文件头与 ③ 段标题）；审查者变异证实真正触发条件是源已绑定 remote_id。已改注释/局部变量/文案，断言逐字未动（fallback→ingested、『兜底拉取』→『已绑定源的远端新条目经 pull 落库』），并顺带修正 :77 与 :225 同类措辞；复查全部 17 个 allowed_paths 文件后确认无残留不实宣称。四门禁：cargo 177/0/9、lint 0/0、build exit 0、frontend 303/303。本轮仅改 2 文件（sync/mod.rs、tests/sync_e2e.rs）。注：两轮修复累计用掉 2/4 修复轮预算。
-- 2026-09-20T06:19:36.799169Z · checkpoint · TASK-070 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
-- 2026-09-20T06:19:54.927995Z · checkpoint · TASK-070 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-09-20T06:25:55.140816Z · checkpoint · TASK-070 · 编码结果已记录，差异范围已核对：src-tauri/src/sync/mod.rs, src-tauri/tests/sync_e2e.rs；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-09-20T06:26:24.910494Z · checkpoint · TASK-070 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-20T06:27:42.491022Z · note/lesson · TASK-070 · 流程观察（TASK-070 连续三轮独立审查均 FAIL，值得记录以免重犯）：三轮 findings **全部**落在『我写的解释性注释不准确』，没有一条落在删除面本身——每一轮审查都独立确认：九项删除在 HEAD 上确实零生产调用、四门禁真绿（cargo 177/0/9、lint 0/0、build 0、frontend 303/303）、无有效覆盖丢失、断言未被改动、157/157 候选哈希一致、依赖零改动、真实库未写入。三轮回合的缺陷模式完全一致且都是我自己制造的：**在注释里写下未经验证的新断言**。r1=模块头宣称了一条当时不存在的兜底（但没说我改的那句本身是否成立）；r2=我把 r1 的修正升级成『从未实现』这一历史绝对断言（git 证明它实现过，0ba940f 才删掉）；r2 同轮还把另一处改成『本轮不该建新条目』而套件自己的断言就反驳它、并把退避误挂到 fetch_failed 上；r3=又修三处。教训（对后续所有任务的注释写作）：① 改注释时只写**当场核实过**的事实，逐句核对（grep/git show/读 SQL），不写『从未/只/总是/必然』这类全称或历史绝对断言；② 涉及历史的说法一律先用 git 查证（本例 9828c8f/51dc66e/0ba940f 就能定案）；③ 涉及机制的说法必须落到具体行号与调用链，不靠印象；④ 同一 PR 内多处同类注释要一次改齐并互相一致（r2 的 sync/mod.rs 与 sync_e2e.rs 就自相矛盾）。另一条工具陷阱（r3 审查者提供）：变异实验后还原文件会使 mtime 早于已编译 rlib，cargo 跳过重编 → 干净候选出现『确定性失败』假象；遇到可疑的确定性失败先强制重编（cargo clean -p app 或 touch）再下结论。
 - 2026-09-20T07:25:24.244665Z · checkpoint · TASK-070 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-20T07:26:10.673575Z · accept · 验收 TASK-070；依据：用户 2026-09-20 指示『继续任务』并选择开始执行 TASK-070（next_step 选项 1）；该任务已完成独立审查 PASS 与四门禁验证
+- 2026-09-20T07:28:18.140160Z · note/lesson · 流程教训（TASK-070 收口后发现，总控自身操作失误）：我在立项阶段一次性 prepare 了 TASK-070~073 四张卡，违反 TOOLING.md『依赖任务通过后才 prepare 下一张卡』的指导。后果：TASK-071/072/073 的 input 快照取自 TASK-070 开工前的代码状态，而 TASK-070 合法地改动了 snapshot_paths 覆盖的 src / src-tauri/src / src-tauri/tests / tools，于是 check 报三条『invalid input snapshot: candidate changed』，begin 也被拒（工具设计上要求 ready 任务的输入快照与当前树一致，否则开工基线不正确）。另发现两张卡缺少正确依赖边：prepare 时 TASK-070 尚未 verified，故 071/072/073 只依赖 TASK-069，未声明对 TASK-070 的依赖（虽然串行顺序已用笔记约束）。补救（不手工改 digest，避免『rehash 掩盖变化』）：按工具既有先例（TASK-068→TASK-069）cancel 三张过期卡并重新 prepare 新卡，依赖直接写 TASK-070，使快照取当前树、并让依赖继承 TASK-070 的门禁。教训固化：**一张卡 verified/done 之后才 prepare 下一张**，不要为省事批量预建；批量预建在有串行依赖的链上必然作废。
+- 2026-09-20T07:28:38.039111Z · checkpoint · TASK-071 · 任务已取消：input 快照被 TASK-070 的合法改动作废（同批预建所致）；且依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，重新按『一张卡完成后再 prepare 下一张』立项；下一步：如需同一目标，准备新的任务并引用本任务作为历史
+- 2026-09-20T07:28:38.088446Z · cancel · TASK-071 · input 快照被 TASK-070 的合法改动作废（同批预建所致）；且依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，重新按『一张卡完成后再 prepare 下一张』立项；依据：总控处置：批量预建违反 TOOLING『依赖任务通过后才 prepare 下一张卡』，改用逐张 prepare（2026-09-20）
+- 2026-09-20T07:28:44.958837Z · checkpoint · TASK-072 · 任务已取消：input 快照被 TASK-070 的合法改动作废（同批预建所致）；依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，等 TASK-071 完成后再逐张立项；下一步：如需同一目标，准备新的任务并引用本任务作为历史
+- 2026-09-20T07:28:45.009059Z · cancel · TASK-072 · input 快照被 TASK-070 的合法改动作废（同批预建所致）；依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，等 TASK-071 完成后再逐张立项；依据：总控处置：批量预建违反 TOOLING『依赖任务通过后才 prepare 下一张卡』（2026-09-20）
+- 2026-09-20T07:28:46.195081Z · checkpoint · TASK-073 · 任务已取消：input 快照被 TASK-070 的合法改动作废（同批预建所致）；依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，等前序卡完成后再立项；下一步：如需同一目标，准备新的任务并引用本任务作为历史
+- 2026-09-20T07:28:46.243075Z · cancel · TASK-073 · input 快照被 TASK-070 的合法改动作废（同批预建所致）；依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，等前序卡完成后再立项；依据：总控处置：批量预建违反 TOOLING『依赖任务通过后才 prepare 下一张卡』（2026-09-20）
+- 2026-09-20T07:29:22.188133Z · batch · 关闭 BATCH-4f9d7067e5b04d5bbedfdcf3a2b021ee，开启 BATCH-ab2d0e5d3f7643379a6de1fd2544b549；策略允许自动续批
+- 2026-09-20T07:29:36.110658Z · prepare · TASK-074 · 任务已冻结：同步语义行为变更：配置同步删除语义（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）；范围 src-tauri/src/config_sync.rs, src-tauri/src/sync/subscriptions.rs, src-tauri/src/sync/mod.rs, src-tauri/src/sync/phases.rs, src-tauri/src/db/feeds.rs, src-tauri/src/commands/sync.rs, src-tauri/tests/config_sync_e2e.rs, src-tauri/tests/account_lifecycle_e2e.rs, src-tauri/tests/mock_greader.rs, src-tauri/tests/sync_e2e.rs, tools/frontend-regression.mjs
 
 ## 如何继续
 

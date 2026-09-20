@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-072 · 降级可见性与 AI 输入校验：全文提取 degraded 标志（P2-10 后半）+ 摘要空正文与 preset 显式提示（P2-11）（REQ-104）
 
-**状态**：ready
+**状态**：cancelled
 
 **目标**：按 owner 2026-09-20 两项裁决修复降级可见性与输入校验。A【P2-10 后半，DEC-req104-p2-10b-fulltext-degraded-20260920】现状：commands/settings.rs 的 extract_fulltext 在无法提取或防退化原样返回时静默回落原文，用户看不出发生了降级。实施：① 提取失败/防退化时给出结构化 degraded 标志（而非只改文案），前端据此显示准确文案；② 保持成功路径行为与文案不变；③ 补失败路径断言（提取失败、防退化返回原文两种形态）。B【P2-11，DEC-req104-p2-11-ai-validation-20260920】现状：commands/ai.rs 的 ai_summarize 无空正文校验（translate 已有，不对称）；未知 preset 静默回退 deepseek-chat。实施：④ ai_summarize 补空正文校验，与 translate 对称（给出可理解错误而不是把空文本送模型）；⑤ 未知 preset 不再静默回退，改为显式提示/报错；⑥ 补断言覆盖空正文与未知 preset 两条路径。
 
@@ -38,10 +38,11 @@
 - 时钟：未开始
 - 已用修复轮：0
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：如需同一目标，准备新的任务并引用本任务作为历史
 
 ## 最近检查点
 
+- 2026-09-20T07:28:44.957786Z：任务已取消：input 快照被 TASK-070 的合法改动作废（同批预建所致）；依赖只声明到 TASK-069、缺 TASK-070 边。按工具纪律取消，等 TASK-071 完成后再逐张立项；下一步：如需同一目标，准备新的任务并引用本任务作为历史
 
 ## 原始证据
 
