@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-aded091805ce4138bc7fb34d754ac472",
+  "task_id": "TASK-069",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260919-t069"
+  },
+  "started_at_utc": "2026-09-20T00:51:13.568378Z",
+  "finished_at_utc": "2026-09-20T00:51:58.424179Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "c13811edd416fee136dacc51b83d16e97a1d5e5a9ca9e603e0d370a8d2cc6651",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-aded091805ce4138bc7fb34d754ac472-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-aded091805ce4138bc7fb34d754ac472-scope.json",
+  "failure_kind": "protocol",
+  "failure_reason": "Worker changed_files does not match the observed diff; declared but unchanged: .gitignore, src-tauri/src/commands/mod.rs, src-tauri/src/db.rs, src-tauri/src/db/settings.rs, src-tauri/src/lib.rs, src-tauri/src/scheduler.rs, src-tauri/src/sync/fever_pull.rs, src-tauri/src/sync/greader_pull.rs, src-tauri/tests/fixtures/row_fixture.json, src-tauri/tests/mock_greader.rs, src-tauri/tests/pull_cursor_e2e.rs, src-tauri/tests/row_fixture_e2e.rs, tools/frontend-regression.mjs; declare either the task's cumulative changes [] or this run's changes []"
+}

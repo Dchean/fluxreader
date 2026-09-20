@@ -16,12 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 读 app_settings JSON 里的 smartDedup 开关（默认关：保持既有抓取行为）。
 pub(crate) fn read_dedup_flag(conn: &rusqlite::Connection) -> bool {
-    db::get_setting(conn, "app_settings")
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("smartDedup").and_then(|f| f.as_bool()))
-        .unwrap_or(false)
+    /* TASK-068：收口为类型化助手（默认值语义不变） */
+    db::app_settings_bool(conn, "smartDedup", false)
 }
 
 /* ============================================================

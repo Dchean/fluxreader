@@ -1,0 +1,34 @@
+{
+  "task_id": "TASK-068",
+  "run_id": "RUN-32258f091f1749feb8ff76a9b78e92c3",
+  "status": "ready_for_verification",
+  "summary": "REQ-103 结构性硬化四项。【N-硬1 游标守卫】greader_pull.rs：item_contents 分块失败计数，chunk_failures>0 时不推进 last_sync_ts（修前无条件推进——失败块条目只能等全量补回的「偶发漏文章」温床）并 log::warn；fever_pull.rs 对称：增量分页/种子/need 补齐三处失败计数，时间戳游标仅无失败时推进（last_sync_entry_id 只计已合并条目本就安全）。【N-硬2 收口】db/settings.rs 新增 app_settings_bool/app_settings_str 类型化助手（get_setting 失败/坏 JSON/字段缺失/类型不符一律返回 default）+ 4 条文件内测试（缺省/坏 JSON/解析/类型不符）；db.rs 一行 pub use 导出（owner 批准的 ledger_correction，DEC-ec075000）；调用点收口：lib.rs read_close_to_tray/read_close_prompt_shown、commands/mod.rs read_dedup_flag、scheduler.rs read_sync_mode_conn/auto_sync_backend 的 autoSync 布尔（refreshInterval 数值读取按声明留待后续，raw 绑定保留）——默认值语义逐点保持。【N-硬3 fixture 防漂移】tests/fixtures/row_fixture.json 检入规范 FeedRow+ArticleListItem 序列化形态；row_fixture_e2e.rs Rust 侧逐字段比对（serde 漂移即失败）；frontend-regression (r) 断言读同一 fixture 经 articleRowToEntry/feedRowToItem 映射逐字段核对（TS 侧漂移即失败）——双侧共用 fixture，任一侧漂移都被捕获。【N-硬4 卫生】删除根目录 14 个垃圾文件（13 个 *.log + 字面名 ''' + $db + ''' 的脚本事故产物，后者为被误提交的跟踪文件一并删除）；.gitignore 补 *.log/tmp/（_rev501-bak/ 出处待 owner 确认仅 gitignore 不删除——实际其未在库中，仅加入忽略规则以防复现）。新增测试 5 条：pull_cursor_e2e 2 条（分块失败守卫/正常推进双向锚定，mock 新增 fail_item_contents 注入旋钮镜像 fail_edit_tag 模式）、settings helper 2 条、row fixture 1 条。变异取证成对：M1 游标无条件推进→守卫断言失败；M2 fixture 字段漂移→Rust 比对失败；M3 TS 适配器删字段映射→(r) 失败 exit 1；还原后全过。四门禁实测：cargo test 176 passed / 0 failed / 9 ignored（171+5）、lint 0 warnings/0 errors exit 0、build exit 0、frontend 301/301（299 存量 + 净增 2，存量一行未动）。LF 行尾。",
+  "changed_files": [
+    "src-tauri/src/sync/greader_pull.rs",
+    "src-tauri/src/sync/fever_pull.rs",
+    "src-tauri/src/db/settings.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/commands/mod.rs",
+    "src-tauri/src/scheduler.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/pull_cursor_e2e.rs",
+    "src-tauri/tests/fixtures/row_fixture.json",
+    "src-tauri/tests/row_fixture_e2e.rs",
+    "tools/frontend-regression.mjs",
+    ".gitignore"
+  ],
+  "validation_requests": [
+    "cargo test（src-tauri，门禁 cargo_test）",
+    "npm run lint（门禁 lint）",
+    "npm run build（门禁 build）",
+    "npm run test:frontend（门禁 frontend）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [
+    "_rev501-bak/ 备份目录出处待 owner 确认（本任务仅 gitignore 防复现，未删除）",
+    "lib.rs resolve_close 的读改写（保留未知字段合并写回）非纯读取模板，未纳入助手收口",
+    "台账说明：db.rs 纳入 allowed_paths 经 owner 批准（DEC-ec07500051dc4fe982de4ba9934816b5）；因 recompute 需已有审查、冻结摘要无法重算，该订正以 finish 时 unblock 豁免的方式落地（记录于 RUN-32258f09 的 unblock 处置），TASK-051 先例为重算 definition_digest——两者等效，均以 owner DEC 为凭"
+  ],
+  "blocked_reason": null
+}

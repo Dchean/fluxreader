@@ -45,7 +45,7 @@ pub use folders::{
 pub use migrations::open;
 #[cfg(test)]
 pub(crate) use migrations::MIGRATIONS;
-pub use settings::{get_setting, set_setting};
+pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
 pub use sync_map::{
     add_article_dup_entry, article_by_remote_id, article_dup_entries, article_has_pending_sync,
     article_id_by_url, article_matches_remote_feed, backfill_article_content,

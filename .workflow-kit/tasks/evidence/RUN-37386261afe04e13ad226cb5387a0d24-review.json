@@ -1,0 +1,92 @@
+{
+  "task_id": "TASK-069",
+  "candidate_digest": "c13811edd416fee136dacc51b83d16e97a1d5e5a9ca9e603e0d370a8d2cc6651",
+  "verification_run": "RUN-152b43e855c246849a5227eb31c2b633",
+  "verdict": "FAIL",
+  "summary": "独立复查 TASK-069 的四项交付（N-硬1 pull 游标失败守卫、N-硬2 app_settings 读取收口、N-硬3 行类型 fixture 防漂移、N-硬4 仓库卫生）与全部验收标准。先核对事实：156 个候选文件 sha256 全部匹配 packet 冻结摘要（0 缺失 / 0 不符），`git status --porcelain -uall` 与实验前快照一致，无新依赖（Cargo.toml/Cargo.lock/package.json/package-lock.json diff 为空），13 个改动/新增文本文件均为 LF 无 BOM，用户真实数据库未被写入（com.fluxreader.app/fluxreader.db mtime 仍为 2026-09-19 01:58:09）。独立复跑门禁：cargo test 176 passed / 0 failed / 9 ignored（exit 0）、npm run lint 0 warnings 0 errors（exit 0）、npm run test:frontend 301/301（exit 0），与记录一致；build 未复跑，仅核对原始日志 exit 0。记录数字全部属实：基线 RUN-73a92538 为 171/0/9 与 299/299，增量恰为 +5 Rust 用例（逐用例名核对，无存量用例消失）与 +2 前端断言。三项变异复现也成立：还原 greader_pull 为无条件推进→pull_chunk_failure_keeps_last_sync_ts 失败（left 1789869427 vs right 1700000000）；fixture 改字段→row_fixture_e2e 失败；删 TS 适配器 enclosureUrl 映射→(r) 断言失败且 exit 1。但发现四个真实缺陷，故判 FAIL：① N-硬1 守卫的覆盖范围窄于其宣称目的——同一函数内 `GET stream/items/ids` 整轮失败时 chunk_failures 仍为 0、游标照常推进，实测新文章在随后 4 轮增量拉取中始终缺失，只有全量同步（ot=0）才被救回，即任务声称要关闭的「偶发漏文章」仍可复现，而 :119-120 的注释宣称「仅在本轮分块全部成功时推进」；② N-硬3 的 TS 侧断言只覆盖其列举字段，验收声称「TS 适配器删一个字段映射→(r) 失败」被证伪——整行删除 `cover: row.image_url ?? undefined,`（可选字段，仍可编译）后 301/301 全过、exit 0；③ N-硬2 宣称的「grep 无散落的 from_str 模板复制」未达成——scheduler.rs:259-263 的 notifyOnNewArticles 是与被收口代码逐字相同的布尔模板，且该文件在 allowed_paths 内、换成 app_settings_bool(&conn, \"notifyOnNewArticles\", false) 即可，实际只收口 5 处而非宣称的六处；④ N-硬4 的「.gitignore 补全」未发生——.gitignore 与 HEAD 逐字节相同（sha256 506e3df95732…，*.log/tmp/ 早在 2026-09-17 的 fee0934 就已在库内），objective 承诺的 _rev501-bak/ 忽略规则并不存在，13 个 *.log 从未被 git 跟踪故删除无 git 审计痕迹，且累计 diff 的 DELETED ARTIFACT 段为空。相关源码（cargo_test 命令、门禁原始 stdout/stderr）、逐用例名对比、变异与恢复证据均留存于下方 evidence_files。",
+  "findings": [
+    "N-硬1 游标守卫覆盖不全（真实缺陷，已实测复现漏文章）：src-tauri/src/sync/greader_pull.rs:31-59 的 reading-list id 列举循环失败时只做 report.errors.push + break（第 43-46 行），并不增加 chunk_failures（第 79-94 行只统计 item_contents 分块失败），故第 121 行 chunk_failures == 0 成立、游标照常推进。实测（探针：mock 置 fail_stream_ids=true 制造整轮列举失败）：errors 非空但 last_sync_ts 从 1789869939 推进到 1789869942；该轮之后新抓取的文章 present=0，随后 4 轮增量拉取（errors=0）present 仍为 0，只有 states_phase(full=true) 才 present=1。这正是任务要关闭的「失败也推进游标→条目只能等全量补回」形态，只是发生在列举而非分块路径。同一函数第 119-120 行注释「仅在本轮分块全部成功时推进」与第 77-78 行「关闭偶发漏文章的温床」的表述因此过于宽泛；AUDIT-20260919-v2.md 对改法的表述是「report.errors 含 pull 失败不推进游标」，实现按 chunk_failures 收窄，未覆盖同类失败。fever_pull.rs:49-58 的状态集合拉取失败也只记 errors 而不计 fetch_failures，属同一不对称形态。",
+    "N-硬3 TS 侧防漂移覆盖不完整（验收断言被证伪）：tools/frontend-regression.mjs 的 (r) 断言只逐字段核对 id/feedId/title/snippet/source/isRead/isStarred/enclosureUrl/durationSec/content/fulltextExtracted/url 与 feedItem 的 id/name/url/layout/autoSummary/autoTranslate/fetchFailed，而 src/lib/api.ts:554-579 实际映射更多字段（author/cover/imageUrl/audioUrl/aiSummary/rawContent/translatedContent/publishedAt 等）。实测：整行删除第 567 行 `cover: row.image_url ?? undefined,`（cover?: string 为可选，删除后仍通过 tsc 与门禁）后 npm run test:frontend 输出 301/301、exit code 0；把第 566 行 author 映射改为常量 'DRIFT-AUTHOR' 同样 301/301、exit 0。因此验收标准「③ TS 适配器删一个字段映射→(r) 断言失败（模拟漂移）」只在被列举字段上成立，任务描述「任一侧漂移都被捕获」不成立（Rust 侧因逐值比较 fixture 在字段增删改时确实会被捕获）。",
+    "N-硬2 收口不彻底，REQ-103 验收「grep 无散落的 from_str 模板复制」未达成：src-tauri/src/scheduler.rs:256-264 的 should_notify 仍保留 get_setting(\"app_settings\") → .ok() → .flatten() → serde_json::from_str::<serde_json::Value> → v.get(\"notifyOnNewArticles\").and_then(|b| b.as_bool()) → unwrap_or(false) 这一与被收口的 read_dedup_flag 逐字相同的布尔模板；该字段是纯布尔读取（非被推迟的数值型），scheduler.rs 在 allowed_paths 内，替换为 crate::db::app_settings_bool(&conn, \"notifyOnNewArticles\", false) 即为等价改动。实测 grep `from_str::<serde_json::Value>` 在 src-tauri/src 下仍有 scheduler.rs:35/206/261、commands/settings.rs:26、commands/ai.rs:74、config_sync.rs:280、sync/subscriptions.rs:91 等处。另：任务与 test_review 反复称「六处调用点收口」，实际切换到助手的为 5 处（lib.rs:41,50；commands/mod.rs:20；scheduler.rs:64,208），第 6 处（refreshInterval 数值）已由 objective 声明推迟——数字与措辞不一致。",
+    "N-硬4 的「.gitignore 补全」未发生且相关宣称不实：candidate 内 .gitignore 与 HEAD 版本逐字节相同（sha256 均为 506e3df957323c5fd90ae7b9c3be17e9c1d241c57dd27f8bf39206afe3a3c983），即 *.log 与 tmp/ 早在 fee0934（2026-09-17）就已在库内，本次没有任何忽略规则改动；objective 与 worker-result 承诺的 「_rev501-bak/ …仅加入忽略规则」在 .gitignore 中不存在（grep 无 _rev501），git check-ignore _rev501-bak/anything.txt 返回未忽略，该目录当前为空目录。13 个 *.log 在 HEAD 中从未被跟踪（git ls-tree -r HEAD 无任何 .log），故其删除不产生任何 git 审计痕迹；本次唯一被跟踪的删除是 0 字节事故文件 \"''' + $db + '''\"。同时 TASK-069-cumulative-diff.txt 的 DELETED ARTIFACT 段只有标题、内容为空，因此「删除 13 个 *.log」既无 git 记录也无 diff 证据可核，审查无法确认其数量与是否误删非日志文件。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "逐项对照四项交付与验收标准。(a) 已达成且可核实：候选 156 文件 sha256 全部匹配冻结摘要；无新依赖（Cargo.toml/Cargo.lock/package.json/package-lock.json 相对 HEAD diff 为空）；13 个改动/新增文本文件全为 LF 且无 BOM；用户真实数据库未被写入（AppData\\Roaming\\com.fluxreader.app\\fluxreader.db mtime 停在 2026-09-19 01:58:09，验证运行在 2026-09-20）；diff 仅含 allowed_paths 内文件。N-硬1 的字面要求成立：chunk_failures>0 时不推进 last_sync_ts、log::warn、report.errors 非空（greader_pull.rs:79-94,121-130；fever_pull.rs:63-65,164-168）。N-硬2 五处调用点默认值语义逐点等价（改为 .ok().flatten().and_then(...).unwrap_or(default) 形态，与原 match/ unwrap_or 语义相同）。N-硬3 Rust 侧 row_fixture_e2e 逐值比较生效（变异可检出）。(b) 未达成：N-硬1 的目的（关闭「失败仍推进游标→偶发漏文章」）未达成，整轮 id 列举失败路径仍推进游标并造成可复现的永久漏文章（详见 failure_paths 与 findings[0]）；N-硬2 的 REQ-103 验收「grep 无散落的 from_str 模板复制」不成立（scheduler.rs:259-263 同模板残留，且只收口 5 处而非称的六处）；N-硬4 的「.gitignore 补全」与「_rev501-bak/ 加入忽略规则」均未发生，13 个 *.log 无 git/证据可核。(c) 无越界范围扩张：改动集中在四个交付点，未见附带行为变更（syncMode/autoSync/closeToTray/closePromptShown/smartDedup 默认值均逐点保持）。",
+      "evidence_files": [
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/db/settings.rs",
+        "src-tauri/src/db.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/tests/fixtures/row_fixture.json",
+        "src-tauri/tests/row_fixture_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-069-cumulative-diff.txt",
+        ".workflow-kit/tasks/evidence/RUN-152b43e855c246849a5227eb31c2b633-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "FAIL",
+      "analysis": "读实际门禁命令、原始 stdout/stderr 与断言本身，并独立复跑。记录数字全部核实为真：RUN-152b43e855c246849a5227eb31c2b633-cargo_test.stdout.txt 逐行汇总为 176 passed / 0 failed / 9 ignored；lint stdout「Found 0 warnings and 0 errors」exit 0；build stdout 有 vite built 且 exit 0；frontend stdout 计数 301 个 ✅ / 0 个 ❌、尾部「前端逻辑回归合计 301/301 通过」exit 0。我独立复跑：cargo test → 176/0/9 exit 0；npm run test:frontend → 301/301 exit 0（两次连跑均 301/301，无抖动用例）；npm run lint → 0 warnings/0 errors exit 0。build 未复跑（按指示避免），仅核对原始日志退出码 0。基线对照：RUN-73a92538 为 171/0/9 与 299/299，逐用例名集合比较 candidate 新增恰 5 条（db::settings::tests 两条、pull_chunk_failure_keeps_last_sync_ts、pull_success_advances_last_sync_ts、row_serialization_matches_fixture），消失 0 条，ignored 仍 9 条——与 171+5、299+2 的预期增量完全一致，存量断言未被弱化（frontend 既有 26/26 与新增计数从 273 增至 275，均只增不减）。三项变异我逐一复现并确认可检出：① 把 greader_pull.rs:121 的 if chunk_failures == 0 改成 if true →pull_chunk_failure_keeps_last_sync_ts 失败（left 1789869427 / right 1700000000），pull_success_advances_last_sync_ts 仍通过；② fixture 的 duration_sec 1234→4321 → row_fixture_e2e 失败并指出 ArticleListItem 序列化漂移；③ 删 lib/api.ts 的 enclosureUrl 映射 → (r) articleRowToEntry 断言 ❌、npm run test:frontend exit 1。变异后均 atomically 还原并复核 156 文件哈希全匹配。判 FAIL 的原因：N-硬3 宣称的防漂移覆盖面被证伪——整行删除第 567 行 `cover: row.image_url ?? undefined,`（可选字段，仍可编译通过 tsc）后 301/301、exit 0；author 映射改成常量同样 301/301、exit 0。即「TS 出一侧漂移必失败」不成立，仍存在无保护字段，因此本项新增保护的强度低于其声明（虽然没有任何既有保护被削弱）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-152b43e855c246849a5227eb31c2b633-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-152b43e855c246849a5227eb31c2b633-cargo_test.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-152b43e855c246849a5227eb31c2b633-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-152b43e855c246849a5227eb31c2b633-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-152b43e855c246849a5227eb31c2b633-build.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-152b43e855c246849a5227eb31c2b633.json",
+        ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+        "src-tauri/tests/pull_cursor_e2e.rs",
+        "src-tauri/tests/row_fixture_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "FAIL",
+      "analysis": "不看成功路径，逐条实测异常/空/重复/恢复形态。(1) 整轮 pull 失败（id 列举失败）：实测 mock 置 fail_stream_ids=true → report.errors 有 2 条（「拉取条目 id 失败」+「状态对账跳过」）但游标从 1789869939 推进到 1789869942（ADVANCED=true），该窗口新文章 present=0，随后 4 轮增量拉取 errors=0 而 present 仍全为 0，只有 full=true 的 states_phase 才 present=1 —— 永久漏文章，这是本任务本应关闭的缺陷形态，故本项 FAIL。(2) 分块失败在最后一/任意块：chunk_failures>0 → 不推进游标（pull_chunk_failure_keeps_last_sync_ts 通过），warn 记录；(3) 游标不推进是否死循环：否，states_phase 为拉取式而非循环，失败仅使本轮窗口在下一 tick（scheduler.rs TICK=60s）重试，重试次数不受代码约束但每次都是有限请求，无自旋；(4) 是否重复插入：实测在「失败一轮 + 恢复一轮 + 再两轮」后 articles 总数 1、source='miniflux' 1、第 4 轮后仍为 1，合并幂等成立（merge_pulled_entry 走 URL/remote_id 匹配 + upsert），注释所称「合并幂等，不会产生重复条目」得到证实；(5) 设置行缺失：app_settings 未设置时助手返回 default，db/settings.rs 文件内两条测试覆盖未设置/坏 JSON（\"{broken\"）/字段缺失/类型不符（数字当布尔）四形态且通过；(6) 键存在但类型不符：as_bool/as_str 返回 None → default，语义与收口前一致（无行为变更）；(7) 空集合 vs 拉取失败：greader 与 fever 均保持 C-1 的「失败即跳过对账」，且 sync_gap_repro_e2e::reconcile_skipped_when_state_fetch_fails 仍通过，本地收藏不被空集合清空——但该路径同样只记 errors 不推游标守卫，属 findings[0] 的同一不对称（对账口径本身由 objective 声明保持不变，故不单独计缺陷）。",
+      "evidence_files": [
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/db/settings.rs",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/tests/pull_cursor_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        ".workflow-kit/tasks/evidence/RUN-152b43e855c246849a5227eb31c2b633-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "FAIL",
+      "analysis": "检查职责、依赖方向、重复规则、命名与模块边界，并与周边既有做法对照。做得好的一面：助手放在 db/settings.rs（与 get_setting/set_setting 同模块，读语义归属正确），经 db.rs 单行 pub use 暴露、调用点用 crate::db:: 前缀，依赖方向与项目既有「db 层提供类型化访问器」一致；命名 app_settings_bool/app_settings_str 与 (key, default) 签名一致且自解释；文件内测试与邻近测试风格一致（open_in_memory + MIGRATIONS.to_latest）；greader/fever 两处守卫写法对称、注释说明动机与幂等前提，可读性良好。判 FAIL 的原因有二：① 重复规则未消除——scheduler.rs:256-264 的 notifyOnNewArticles 仍是被收口的同一种「get_setting→from_str→v.get→as_bool→unwrap_or」模板逐字复制，而新助手就在同一文件同一 crate 可用，收口的价值（新增设置项不再各处手抄镜像）在该点未兑现，REQ-103 的 grep 验收亦因此不达标；② 注释与实现不符会误导后续维护——greader_pull.rs:119-120「仅在本轮分块全部成功时推进」在id 列举失败/对账跳过时并不成立（此时本轮明显没有成功却仍推进），fever_pull.rs:163 同款措辞，读者据此会以为「本轮有 errors 就不推进」，从而漏掉真实缺口。新增维护负担很小（两个纯函数 + 5 行导出 + 2 条文件内测试 + 1 个 fixture + 1 条 mock 旋钮），无过度抽象。",
+      "evidence_files": [
+        "src-tauri/src/db/settings.rs",
+        "src-tauri/src/db.rs",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/commands/mod.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "该改动对运行时性能基本不适用，理由是具体的而非泛泛：N-硬1 只在 pull 每轮增加一个 usize 计数（每 100 条一个 chunk 的循环里 +1）与一次整数比较，成功路径的请求数与合并工作量与改前逐字节相同；唯一的行为差异发生在失败路径——某个 chunk 失败时本轮不推进游标，于是下一轮会重拉同一时间窗口，代价是失败情形下多一轮列表/正文请求，而这是守卫的既定目的，不是性能回归；失败情形本身不改变成功路径开销。N-硬2 的助手与被替换代码调用同一 get_setting + serde_json::from_str，解析次数与分配量等价（app_settings_str 返回 String 的分配与改前 scheduler.rs 的 map(String::from) 相同）；N-硬3 只在 cargo test / npm run test:frontend 时读取一个 0.9 KB fixture 并做一次映射，不进生产构建路径（(r) 断言在回归脚本内）；N-硬4 只删文件与忽略规则。因此本项无实测基准，也不声称任何提速：结论来自静态核对调用点与请求/解析次数，且该任务的质量目标（性能 mode=measure 的万级订阅负载）针对的是启动/布局切换/正文加载，与本改动无关。",
+      "evidence_files": [
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/db/settings.rs",
+        "src-tauri/src/scheduler.rs",
+        "tools/frontend-regression.mjs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

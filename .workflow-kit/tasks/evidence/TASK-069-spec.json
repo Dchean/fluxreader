@@ -1,0 +1,181 @@
+{
+ "id": "TASK-069",
+ "title": "结构性硬化收口：pull 游标失败守卫、app_settings 读取收口、行类型 fixture 防漂移、仓库卫生（REQ-103）",
+ "kind": "implementation",
+ "retry_safe": true,
+ "ui_change": false,
+ "ui_contract_ref": null,
+ "ui_checks": [],
+ "objective": "本任务收口被取消的 TASK-068 的同一成果（历史：TASK-068 已实施 REQ-103 四项硬化并通过四门禁与三项变异取证，但 finish 的范围检查无法通过——db.rs 导出行（owner 已批准 DEC-ec075000）与事故文件删除（规格 N-硬4）在冻结 allowed_paths 外，任务基线为首次 begin 快照、unblock 循环无法收敛，故按流程取消并以本任务收口；本任务相对 begin 快照为零新增改动，成果经候选快照绑定）。四项内容：【N-硬1 游标守卫】greader_pull.rs 分块失败计数、chunk_failures>0 时不推进 last_sync_ts 并 warn（修前失败块条目只能等全量补回的「偶发漏文章」温床）；fever_pull.rs 对称（三处失败计数、时间戳游标仅无失败时推进；last_sync_entry_id 只计已合并条目本就安全）。【N-硬2 收口】db/settings.rs 新增 app_settings_bool/str 类型化助手（失败/坏 JSON/缺失/类型不符一律返回 default）+ 4 条文件内测试；db.rs 一行 pub use 导出（owner 批准 DEC-ec075000）；调用点收口：lib.rs read_close_to_tray/read_close_prompt_shown、commands/mod.rs read_dedup_flag、scheduler.rs read_sync_mode_conn/autoSync 布尔（refreshInterval 数值留待后续，raw 绑定保留）——默认值语义逐点保持。【N-硬3 fixture 防漂移】tests/fixtures/row_fixture.json 检入规范 FeedRow+ArticleListItem 序列化形态；row_fixture_e2e.rs Rust 侧逐字段比对；frontend-regression (r) 断言读同一 fixture 经 articleRowToEntry/feedRowToItem 映射逐字段核对——双侧共用 fixture，任一侧漂移都被捕获。【N-硬4 卫生】删除根目录 14 个垃圾文件（13 个 *.log + 字面名 ''' + $db + ''' 的脚本事故产物）；.gitignore 补 *.log/tmp/（_rev501-bak/ 出处待 owner 确认仅加入忽略规则）。r1 遗留：TASK-068 取消前未及独立审查，本任务的独立审查按同等标准覆盖全部四项内容。",
+ "non_goals": [
+  "不做迁移/表结构变更（游标仍是单值 last_sync_ts / since_id）",
+  "不改 pull 的分块大小（100/50）与对账口径（C-1 已修的权威集合跳过逻辑保持）",
+  "不迁移其他设置读取（数值型 fetchConcurrency 等留待后续）",
+  "不引入 codegen/ts-rs/specta 等依赖",
+  "不删除 _rev501-bak/、tmp/、dist-test/ 目录内容（仅 gitignore）",
+  "不改工作流（.workflow-kit/scripts/**、binding.json）"
+ ],
+ "requirement_refs": [
+  "REQ-103"
+ ],
+ "reference_ids": [],
+ "decision_refs": [],
+ "dependencies": [
+  "TASK-067"
+ ],
+ "risk": {
+  "level": "medium",
+  "decision_ids": [
+   "DEC-992f64fd15714ca2a614fe66d5a144ec"
+  ]
+ },
+ "snapshot_paths": [
+  "src",
+  "src-tauri/src",
+  "src-tauri/tests",
+  "tools"
+ ],
+ "allowed_paths": [
+  "src-tauri/src/sync/greader_pull.rs",
+  "src-tauri/src/sync/fever_pull.rs",
+  "src-tauri/src/db/settings.rs",
+  "src-tauri/src/db.rs",
+  "src-tauri/src/lib.rs",
+  "src-tauri/src/commands/mod.rs",
+  "src-tauri/src/scheduler.rs",
+  "src-tauri/tests/mock_greader.rs",
+  "src-tauri/tests/pull_cursor_e2e.rs",
+  "src-tauri/tests/fixtures/row_fixture.json",
+  "src-tauri/tests/row_fixture_e2e.rs",
+  "tools/frontend-regression.mjs",
+  ".gitignore"
+ ],
+ "protected_paths": [
+  "AGENTS.md",
+  "CLAUDE.md",
+  "WORKFLOW.md",
+  "tasks/**",
+  "docs/PRODUCT.md",
+  "docs/FEATURES.md",
+  "docs/workflow/**",
+  "scripts/project_workflow.py",
+  "scripts/workflow_runtime.py",
+  "scripts/workflow_bootstrap.py",
+  "scripts/workflow_intake.py",
+  "scripts/workflow_progress.py",
+  "WORKFLOW-KIT.md",
+  ".workflow-kit/binding.json",
+  ".workflow-kit/tasks/**",
+  ".workflow-kit/scripts/**",
+  ".workflow-kit/docs/workflow/**",
+  ".workflow-kit/legacy/**",
+  ".workflow-kit/AGENTS.md",
+  ".workflow-kit/CLAUDE.md",
+  ".workflow-kit/WORKFLOW.md",
+  ".workflow-kit/docs/PRODUCT.md",
+  ".workflow-kit/docs/FEATURES.md",
+  "src/**",
+  "src-tauri/Cargo.toml",
+  "src-tauri/Cargo.lock",
+  "package.json",
+  "_rev501-bak/**"
+ ],
+ "gates": [
+  {
+   "id": "cargo_test",
+   "program": "cargo",
+   "args": [
+    "test"
+   ],
+   "cwd": "src-tauri",
+   "required": true
+  },
+  {
+   "id": "lint",
+   "program": "npm",
+   "args": [
+    "run",
+    "lint"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "build",
+   "program": "npm",
+   "args": [
+    "run",
+    "build"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "frontend",
+   "program": "npm",
+   "args": [
+    "run",
+    "test:frontend"
+   ],
+   "cwd": ".",
+   "required": true
+  }
+ ],
+ "test_review": {
+  "behavior": "change",
+  "baseline": {
+   "status": "PASS",
+   "evidence_ref": ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+   "summary": "2026-09-19 基线（TASK-067 终版候选验证 RUN-73a92538，提交 dd65408）：cargo test 171 passed / 0 failed / 9 ignored、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 299/299。本任务 behavior=change 的范围如实声明：① pull 分块失败时游标不再推进（缺陷行为=失败也推进）——下一轮会重拉同一窗口，合并幂等所以无重复副作用；② app_settings 读取收口为类型化助手——默认值语义逐点保持（纯搬运重构）；③ 新增 fixture 防漂移测试（纯新增覆盖）；④ 仓库垃圾文件删除（非代码行为）。既有测试预期全部保持。",
+   "decision_ids": [
+    "DEC-992f64fd15714ca2a614fe66d5a144ec"
+   ]
+  },
+  "decision_ids": [
+   "DEC-992f64fd15714ca2a614fe66d5a144ec"
+  ],
+  "actions": [
+   {
+    "action": "add",
+    "target": "pull_cursor_e2e.rs：mock_greader 新增 fail_item_contents 注入（镜像 fail_edit_tag 模式）——注入后 pull 完成时 last_sync_ts 保持旧值且 report.errors 非空；不注入时游标正常推进、条目合并（双向锚定）",
+    "reason": "游标推进守卫此前零覆盖；mock 注入使全链路确定性验证",
+    "gate_ids": [
+     "cargo_test"
+    ]
+   },
+   {
+    "action": "add",
+    "target": "db/settings.rs 文件内测试：app_settings_bool/str 的缺省、解析、坏 JSON 三形态；row_fixture_e2e.rs：serde_json 序列化与 fixture 逐字节比对",
+    "reason": "收口助手与 fixture 防漂移均需直接覆盖",
+    "gate_ids": [
+     "cargo_test"
+    ]
+   },
+   {
+    "action": "add",
+    "target": "frontend-regression 新增 (r) 断言：读 tests/fixtures/row_fixture.json 经 articleRowToEntry/feedRowToItem 映射后逐字段核对",
+    "reason": "TS 侧字段漂移此前无保护",
+    "gate_ids": [
+     "frontend"
+    ]
+   },
+   {
+    "action": "keep",
+    "target": "其余全部既有断言与测试（171+299 存量）逐字不动",
+    "reason": "除新增外契约不变",
+    "gate_ids": [
+     "cargo_test",
+     "lint",
+     "build",
+     "frontend"
+    ]
+   }
+  ]
+ },
+ "acceptance": [
+  "diff 仅含 allowed_paths 内文件；N-硬1 两处 pull 在 chunk_failures>0 时不推进游标且 report.errors 非空；N-硬2 六处调用点收口且默认值逐点保持；N-硬3 双侧共用 fixture；N-硬4 垃圾文件删除 + .gitignore 补全",
+  "变异可检出：① 还原 greader_pull 为无条件 set_last_sync_ts → pull_cursor_e2e 的守卫断言失败；② fixture 改动一个字段值 → Rust 比对测试失败；③ TS 适配器删一个字段映射 → (r) 断言失败（模拟漂移）；还原后全过",
+  "四门禁全绿：cargo test 通过数 ≥171+新增 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 通过数 ≥299 且存量不回退",
+  "不引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；文本文件 LF 行尾；台账改动须在 begin 之前完成；用户真实数据库不得写入"
+ ]
+}

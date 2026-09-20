@@ -1,0 +1,36 @@
+{
+  "feed_row": {
+    "id": 7,
+    "folder_id": 1,
+    "feed_url": "https://f.example/rss",
+    "site_url": "https://f.example",
+    "title": "Fixture Feed",
+    "favicon_url": "https://f.example/favicon.ico",
+    "layout": "article",
+    "auto_summary": true,
+    "auto_translate": false,
+    "fetch_failed": false,
+    "fetch_error": null,
+    "last_fetched_at": null
+  },
+  "article_list_item": {
+    "id": 42,
+    "feed_id": 7,
+    "title": "Fixture Article",
+    "author": "Fixture Author",
+    "snippet": "snippet text",
+    "image_url": "https://e.example/img.png",
+    "enclosure_url": "https://e.example/audio.mp3",
+    "enclosure_mime": "audio/mpeg",
+    "duration_sec": 1234,
+    "ai_summary": "fixture summary",
+    "source": "miniflux",
+    "published_at": "2026-09-19T01:00:00+08:00",
+    "is_read": false,
+    "is_starred": true,
+    "url": "https://e.example/a",
+    "content_html": "<p>body</p>",
+    "translated_content": "<p>translated</p>",
+    "fulltext_extracted": false
+  }
+}

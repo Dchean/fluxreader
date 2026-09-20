@@ -1,0 +1,96 @@
+{
+  "task_id": "TASK-069",
+  "candidate_digest": "0dfded14ef1a0445f1031129c0c06e15ecc4115fc10adb77153eb60004c2e510",
+  "verification_run": "RUN-5380e8e45603487db6019495fdb61fb7",
+  "verdict": "PASS",
+  "summary": "独立复审 TASK-069 修复轮（第二候选 0dfded14...，verification_run RUN-5380e8e4...）的四项交付与五项核对，重点核查 r1 四项 FAIL 是否真的修好、以及修复是否引入新问题。结论：四项全部真实修复，且我用变异复现逐条证实，无新增缺陷，判 PASS。（F1）greader_pull.rs 新增 id_failures，游标仅在 id_failures + chunk_failures == 0 时推进，continuation 的 None/空串与不可解析/本页无 id 被区分开；fever_pull.rs 对称计数 fetch_failures + collection_failures；新增 pull_id_listing_failure_keeps_last_sync_ts 用 fail_reading_list_ids 只让 reading-list 列举失败以隔离路径。我把守卫回退为 chunk_failures 单计数后该测试实测 FAILED（left 1789871578 / right 1700000000），还原后全绿。（F2）(r) 断言改为键集合 + 逐键取值（缺键/多键/错值）并带数组感知比较与两条比较器自检；我删掉 src/lib/api.ts:567 的 cover 映射行，实测 302/303 且 (r) articleRowToEntry 判失败、npm exit 1，还原后 303/303。（F3）should_notify 已走 app_settings_bool，scheduler.rs 的 get_setting(\"app_settings\") 由 4 处降到 2 处，auto_sync_backend 的双读合并、默认值语义逐点保持。（F4）.gitignore 已加 _rev501-bak/，git check-ignore -v 命中 .gitignore:27 且 exit 0。复核记录门禁：cargo test 汇总 177 passed / 0 failed / 9 ignored（逐二进制求和、无 FAILED）；frontend 303 个 ✅ / 0 个 ❌，既有 26/26 + 新增 277/277 = 303/303；lint 0 warnings 0 errors exit 0；build 日志 vite built + exit 0。我独立复跑：cargo test exit 0（同样 177/0/9）、npm run lint exit 0（0/0）、npm run test:frontend exit 0（303/303），三项验收变异（无条件推进游标、fixture 改值、TS 删映射）全部可检出。候选完整性：156 个候选文件 sha256 与 packet 逐一匹配（0 缺失 0 不符），修复探针前后各校验一次；git status --porcelain 与审查开始时逐条一致（86 行），HEAD 仍为 dd65408，仓库内未遗留任何探针文件（临时文件都在 %TEMP%）。注意事项（不作为缺陷）：审查期间（本地 10:44）有另一进程短暂改写 src/lib/api.ts 并据其重生成 dist-test（产物里出现 author: 'CONSTANT'），我在收尾时重新校验 156 个候选文件仍全部匹配、并重跑 test:frontend 重新生成 dist-test 得 303/303；dist-test 为 .gitignore 产物、不在候选清单内，故不影响本结论。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐项对照四项交付与验收标准。N-硬1：greader_pull.rs:34 新增 id_failures，143-153 行以 id_failures + chunk_failures == 0 作为推进 last_sync_ts 的唯一条件，否则 log::warn! 记录两类计数（失败时 report.errors 由 49/68/75/106 行保证非空）；62-79 行把 continuation 拆成None | Some(\"\") 正常收尾、Ok(next) 且 got > 0 继续翻页、Ok(_) 且本页无 id 与 Err(_) 计失败并报错三类，fever_pull.rs:51-62/69-76/122/169-176 对称（fetch_failures + collection_failures；last_sync_entry_id 仍只取已合并条目 max，本就安全）。N-硬2：db/settings.rs:44-61 新增 app_settings_bool/str（get_setting 失败/坏 JSON/字段缺失/类型不符一律 default），db.rs:48 一行 pub use 导出；六处调用点（lib.rs:41,50；commands/mod.rs:20；scheduler.rs:68,208,264）默认值逐点保持：closeToTray=true、closePromptShown=false、smartDedup=false、syncMode=\"direct\"、autoSync=true、notifyOnNewArticles=false，与 HEAD 版本逐点等价。N-硬3：fixture 检入规范 FeedRow + ArticleListItem 序列化形态，Rust 侧 row_fixture_e2e.rs 逐字段 assert_eq 值对象，TS 侧 frontend-regression 读同一 fixture 做键集合 + 逐值核对，双侧共用同一文件。N-硬4：.gitignore 新增 _rev501-bak/ 规则（git check-ignore 命中），根目录垃圾文件清理。验收条件核对：不引入新依赖且 package.json / Cargo.toml / Cargo.lock 零改动（git diff --stat 对这四个文件为空）；13 个改动/新增文本文件全部 LF、无 BOM、有结尾换行；用户真实数据库 %APPDATA%\\com.fluxreader.app\\fluxreader.db 的 mtime 仍为 2026-09-19 01:58:09，未被写入；改动文件全部落在 allowed_paths 内（另加工作流台账，属工具自管、不在候选清单）。附带观察（非缺陷）：commands/settings.rs:26-29 仍就地解析写入值里的 smartDedup，但它解析的是「即将写入的 value」而非库内 app_settings 读取，助手签名（需要 conn）无法直接复用，且不在本任务声明的调用点清单内，故不计缺口。",
+      "evidence_files": [
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/db/settings.rs",
+        "src-tauri/src/db.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/tests/pull_cursor_e2e.rs",
+        "src-tauri/tests/row_fixture_e2e.rs",
+        "src-tauri/tests/fixtures/row_fixture.json",
+        "src-tauri/tests/mock_greader.rs",
+        "src/lib/api.ts",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/TASK-069-cumulative-diff-r2.txt",
+        ".workflow-kit/tasks/evidence/RUN-5380e8e45603487db6019495fdb61fb7-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "读实际门禁命令、原始 stdout/stderr 与断言本身，并独立复跑。命令：cargo test（cwd src-tauri）、npm run lint、npm run build、npm run test:frontend（后三者 cwd .），见 runs/RUN-5380e8e4....json 的 commands/checks。记录数字核实为真：cargo_test.stdout.txt 共 27 个 test result 组，逐组求和 177 passed / 0 failed / 9 ignored，且无任何 FAILED 组；frontend.stdout.txt 中 ✅ 计数 303、❌ 计数 0，尾部为「既有回归 26/26」「新增 store 行为断言 277/277」「合计 303/303」；lint.stdout.txt 为 Found 0 warnings and 0 errors、exit 0；build.stdout.txt 有 vite built、exit 0。基线对照：RUN-73a92538 为 171/0/9 与 299/299；本候选 +6 条 Rust 用例（db::settings::tests 两条、pull 三条、row_serialization_matches_fixture 一条）= 177，前端 +4 条 (r) 断言 = 303，ignored 仍 9 条未增，存量断言未见删改（frontend-regression.mjs 的 diff 为纯 +57 行、0 删除行；mock_greader.rs 为纯 +33 行）。我独立复跑：cargo test exit 0，27 组求和同为 177/0/9；npm run lint exit 0（0 warnings / 0 errors）；npm run test:frontend exit 0（303/303）；build 按指示未复跑，仅核对原始日志 exit 0。测试能否抓住目标缺陷——三项验收变异我全部实做并复现：① 把 143 行改回 chunk_failures 单计数 → pull_id_listing_failure_keeps_last_sync_ts FAILED（pull_cursor_e2e.rs:129，left 1789871578 / right 1700000000），另两条游标用例仍通过，说明新用例确实专测 F1 路径；② 把 row_fixture.json 的 duration_sec 1234→4321 → row_fixture_e2e FAILED（row_fixture_e2e.rs:61，ArticleListItem 序列化漂移）；③ 删掉 src/lib/api.ts:567 的 cover 映射行 → (r) articleRowToEntry 判失败、302/303、npm exit 1；另把守卫改成 if true（无条件推进）时pull_chunk_failure 与 pull_id_listing_failure 两条同时 FAILED。三次变异均按字节还原（sha256 复核）后回到全绿。未发现被弱化的既有保护：新增 (r) 是叠加而非替换（原 r1 那 4 行纯字面断言块已不存在于文件中，被同一主题的更强断言取代，属本次交付范围内的加强）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-5380e8e45603487db6019495fdb61fb7-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-5380e8e45603487db6019495fdb61fb7-cargo_test.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-5380e8e45603487db6019495fdb61fb7-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-5380e8e45603487db6019495fdb61fb7-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-5380e8e45603487db6019495fdb61fb7-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+        ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+        "src-tauri/tests/pull_cursor_e2e.rs",
+        "src-tauri/tests/row_fixture_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "按异常/空输入/重复/恢复路径逐条实查，而非只走成功路径。(1) 游标不推进会否死循环或重复插入：不会。states_phase 是「拉取式」而非内部循环，失败只是本轮不写 last_sync_ts，下一轮（scheduler.rs 的 TICK 60s，且 auto_sync_backend 受 refreshInterval，默认 30 分钟）重拉同一窗口；重复插入由 merge_pulled_entry 按 remote_id/URL 匹配 + upsert 保证幂等，新增用例直接断言「失败一轮 + 恢复一轮后 articles 中该 url 计数 == 1」；我复跑的变异也证明该断言是活的。(2) 失败发生在最后一个分块：chunk_failures 在 continue 之前自增，块序号无关，守卫对任意块（含最后一块）一视同仁；既有用例只覆盖单块（100 条以内），多块下逻辑相同但未被用例显式覆盖，属覆盖深度而非缺陷。(3) 全部拉取持续失败：errors 每轮记录、warn 记录、游标保持，不会写入错误游标也不会永久卡死（恢复即补回，用例已证）。(4) continuation 新分支对正常多页是否有回归：无。None 与 Some(\"\") 走静默 break（等价于旧 and_then(parse) → None 的旧行为）；Ok(next) 且 got > 0 与旧代码同语义；只有「不可解析的非空 continuation」和「有 continuation 但本页一个可用 id 都没有」这两类此前被静默 break 吞掉的情形，改为计数 + 报错 + 保持游标——正是 F1 要求的收紧，且 mock 与真实 Miniflux 的 continuation 都是数字 offset 字符串（greader.rs:131 注释亦如此声明）。(5) full=true 路径：greader 的 full 只把 ot 设为 Some(0) 并跳过 read/starred 对账，守卫照常生效；若全量轮失败则游标保持旧值，不影响后续全量补回；fever 的 full（since_id=0）走 items_recent 种子，失败计 fetch_failures 从而保持时间戳游标。(6) 空结果 vs 拉取失败：无失败且窗口内确实无新条目时 all_item_ids 为空、chunks(100) 不执行、failures==0，游标正常推进（正确语义）；列举失败则由 id_failures 兜住，两者不再混淆。(7) 设置助手边界：settings 行缺失 → get_setting 返回 Ok(None) → default；坏 JSON（\"{broken\"）→ from_str 失败 → default；类型不符（数字当布尔）→ as_bool 返回 None → default；查询出错 → .ok() → default。四种形态在 db/settings.rs:75-96 的两条文件内测试中均有断言，我复跑通过。(8) greader 的 read/starred 对账失败（C-1 路径，greader_pull.rs:132-137）不计入游标守卫——这是正确的：该轮条目窗口已完整拿到，对账是可重入的补齐动作，下一轮会再做，不存在永久丢失；与 Fever 的 collection_failures 处理方向一致（对账失败不静默清空收藏）。",
+      "evidence_files": [
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/db/settings.rs",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/tests/pull_cursor_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        ".workflow-kit/tasks/evidence/RUN-5380e8e45603487db6019495fdb61fb7-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "职责与边界：助手放在 db/settings.rs，与 get_setting/set_setting 同模块，读取语义归属正确；经 db.rs:48 一行 pub use 暴露、调用点用 crate::db:: 前缀，依赖方向与项目既有「db 层提供类型化访问器」一致，未引入新的模块或依赖。命名与一致性：app_settings_bool/app_settings_str 的 (conn, key, default) 签名自解释且一致；greader 的 id_failures / chunk_failures 与 fever 的 fetch_failures / collection_failures 命名对称，两处守卫写法一致（求和 → ==0 才推进 → 否则 warn），注释写明动机与「合并幂等」前提，可读性良好；app_settings_str 返回 String 的分配语义与替换前的 map(String::from)/unwrap_or_else(|| \"direct\".into()) 等价。新增测试风格与邻近一致（open_in_memory + MIGRATIONS.to_latest；mock 注入镜像既有 fail_edit_tag 模式）。比较器可理解性：(r) 用 missing/extra/wrong 三个小函数 + 数组感知 sameValue，语义直白；两条「比较器自检」（删 cover 必须被判缺键、cover 接错源必须被判错值）避免断言本身退化为恒真，属于有效的自防。依赖方向正确：自检用合成对象构造，不需要真的改源码，无副作用。维护负担与残留：(a) fetch_stream_ids（greader_pull.rs:157-177）仍是旧的 r.continuation.and_then(parse).ok() 写法，于是同一文件出现两种 continuation 惯用法；该函数属 C-1 对账路径、本任务 non_goals 明确「对账口径保持」，且其静默 break 只是让权威集合变短（对账可重入、下轮补齐），与 F1 的「窗口永久丢失」不同，故记为可读性观察而非缺陷。(b) main 循环里 Ok(_) 与 Err(_) 两个分支的错误文案高度相似，可合并为一个分支，但分开写使「本页无 id」与「无法解析」可区分，收益大于重复。(c) auto_sync_backend 现为 app_settings_bool + 一次数值 raw 读取（共 2 次读，HEAD 为 1 次），注释已说明数值型推迟与放在早退之后的理由，负担可忽略。未见过度抽象、循环依赖或跨层调用。",
+      "evidence_files": [
+        "src-tauri/src/db/settings.rs",
+        "src-tauri/src/db.rs",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "本变更对运行时性能基本不适用，理由具体而非泛泛：N-硬1 只在 pull 每轮增加两个 usize 自增与一次整数求和比较，成功路径的 HTTP 请求次数、分块大小、合并工作量与改前逐字节相同；唯一的行为差异在失败路径——某块失败时本轮不推进游标，于是下一轮重拉同一时间窗口，代价是失败情形下多一轮 id 列举 + 正文请求，这是守卫的既定目的（用可重入的重拉换取不丢文章），不是性能回归；失败情形本身不改变成功路径开销。N-硬2 的助手与被替换代码调用同一个 get_setting + serde_json::from_str，解析次数与分配量等价；唯一可测的差别是 scheduler.rs 的 auto_sync_backend 在 autoSync 开启时由 1 次 app_settings 读变为 2 次，但该函数每个调度 tick（TICK=60s）最多执行一次，且是单行等值查询，与数据规模无关，量级可忽略。N-硬3 只在 cargo test 与 npm run test:frontend 时读取一份约 0.7 KB 的 fixture 并做一次映射，不进生产构建路径（(r) 断言属于 tools/frontend-regression.mjs，dist/src 生产包不含它）。N-硬4 只删文件与加忽略规则，不参与运行时。因此本项无实测基准也无从测得差异，我不声称任何提升，也不编造基准；任务质量目标中 performance mode=measure 的万级订阅负载针对启动/布局切换/正文加载，与本改动无交集。",
+      "evidence_files": [
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/db/settings.rs",
+        "src-tauri/src/scheduler.rs",
+        "tools/frontend-regression.mjs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

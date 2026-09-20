@@ -37,13 +37,8 @@ fn show_main_window(app: &tauri::AppHandle) {
 /// 读取 closeToTray 设置（缺省 true：关闭即最小化到托盘）
 async fn read_close_to_tray(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> bool {
     let conn = db.lock().await;
-    match crate::db::get_setting(&conn, "app_settings") {
-        Ok(Some(raw)) => serde_json::from_str::<serde_json::Value>(&raw)
-            .ok()
-            .and_then(|v| v.get("closeToTray").and_then(|b| b.as_bool()))
-            .unwrap_or(true),
-        _ => true,
-    }
+    /* TASK-068：收口为类型化助手（默认值语义不变） */
+    crate::db::app_settings_bool(&conn, "closeToTray", true)
 }
 
 /// 首次关闭询问是否已展示过（app_settings.closePromptShown，缺省 false）
@@ -51,12 +46,8 @@ async fn read_close_prompt_shown(
     db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>,
 ) -> bool {
     let conn = db.lock().await;
-    crate::db::get_setting(&conn, "app_settings")
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("closePromptShown").and_then(|b| b.as_bool()))
-        .unwrap_or(false)
+    /* TASK-068：收口为类型化助手（默认值语义不变） */
+    crate::db::app_settings_bool(&conn, "closePromptShown", false)
 }
 
 /// 用户在首次关闭询问弹窗里做出选择：

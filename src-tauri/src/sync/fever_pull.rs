@@ -46,10 +46,14 @@ pub(super) async fn pull_entries_fever(
     // ① 权威状态集合（全量 id）：未读 + 收藏。
     // 拉取失败 ≠ 空集合（C-1）：失败即跳过本轮对账（下方 ⑤ 用 reconcile_ok 守卫），
     // 避免静默把本地全部标为已读 / 清空收藏——Fever 对账为远端权威双向语义，误判代价更高。
+    // TASK-069 审查 F1：该失败同时意味着「权威集合没拿全」，与②的分块失败同源，
+    // 故一并计入守卫——否则时间戳游标照常推进，切回 greader 时会跳过这个窗口。
+    let mut collection_failures = 0usize;
     let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
     let (unread, starred, reconcile_ok) = match (unread, starred) {
         (Ok(u), Ok(s)) => (u, s, true),
         (Err(e), _) | (_, Err(e)) => {
+            collection_failures += 1;
             report.errors.push(format!(
                 "状态对账跳过：Fever 状态集合拉取失败（{e}），本轮不合并远端状态"
             ));
@@ -60,6 +64,9 @@ pub(super) async fn pull_entries_fever(
     // ② 拉条目正文：增量（since_id>0）或首次种子（since_id=0 → 最近 50 条）
     let mut all_items: Vec<ItemContent> = Vec::new();
     let mut seen: HashSet<i64> = HashSet::new();
+    // TASK-068：抓取失败计数——时间戳游标仅在无失败时推进（对称 greader 守卫；
+    // last_sync_entry_id 只计已合并条目，本就安全）。
+    let mut fetch_failures = 0usize;
 
     if since_id > 0 {
         // 增量：items&since_id 升序分页，单页 50，不足 50 即拿完
@@ -68,6 +75,7 @@ pub(super) async fn pull_entries_fever(
             let batch = match client.items_since(cursor).await {
                 Ok(b) => b,
                 Err(e) => {
+                    fetch_failures += 1;
                     report.errors.push(format!("拉取增量条目失败: {e}"));
                     break;
                 }
@@ -91,7 +99,10 @@ pub(super) async fn pull_entries_fever(
         // 首次：Fever 无全量历史端点；最近 50 条作已读种子，未读/收藏由下方补齐
         match client.items_recent().await {
             Ok(seed) => collect_fever_items(&mut all_items, &mut seen, seed),
-            Err(e) => report.errors.push(format!("拉取最近条目失败: {e}")),
+            Err(e) => {
+                fetch_failures += 1;
+                report.errors.push(format!("拉取最近条目失败: {e}"));
+            }
         }
     }
 
@@ -108,6 +119,7 @@ pub(super) async fn pull_entries_fever(
         match client.items_with_ids(chunk).await {
             Ok(batch) => collect_fever_items(&mut all_items, &mut seen, batch),
             Err(e) => {
+                fetch_failures += 1;
                 report.errors.push(format!("拉取未读/收藏条目失败: {e}"));
                 break;
             }
@@ -152,7 +164,16 @@ pub(super) async fn pull_entries_fever(
     // ⑥ 更新游标（Fever 用条目 id；时间戳游标也记录，供切换回 greader 后的首拉）
     let conn = db.lock().await;
     let _ = db::set_last_sync_entry_id(&conn, last_id);
-    let _ = db::set_last_sync_ts(&conn, Utc::now().timestamp());
+    // TASK-068/069：时间戳游标仅在「本轮窗口拿全」时推进——抓取失败与权威集合
+    // 失败都算没拿全，否则切回 greader 时会跳过该窗口。
+    let failures = fetch_failures + collection_failures;
+    if failures == 0 {
+        let _ = db::set_last_sync_ts(&conn, Utc::now().timestamp());
+    } else {
+        log::warn!(
+            "fever pull: {fetch_failures} fetch(es) + {collection_failures} collection failure(s); keeping last_sync_ts"
+        );
+    }
     drop(conn);
 }
 

@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "AUDIT-20260919-v2.md 的 N9/N10（REQ-102，REQ-102 前端最后两项）：\n\n【N9 · 列宽拖拽每像素落库】src/App.tsx 的 startDragListWidth 在 onMove（每像素）调用 updateSettings（整包 JSON.stringify + set_setting IPC + 全 App 重渲染），与注释「松手持久化」相反——一次拖动几十上百次 IPC、SQLite 写放大、拖动手感发涩。修复：拖动期间只更新本地拖拽态（useState 的 dragWidth，渲染用 effectiveListWidth = dragWidth ?? settings.listWidth），mouseup 时一次性 updateSettings 落库并清除拖拽态。\n\n【N10 · 一批 async action 无 catch：IPC 失败 → unhandled rejection + 本地与后端静默脱节】逐点修复（口径与既有 loadMoreArticles/refreshOneFeed/updateCatLayout 的「失败 toast」一致）：\n① bootstrap.ts reloadFromBackend：Promise.all 无 catch——后台刷新事件/范围切换路径失败完全不可见。修复：内部 try/catch → toast「刷新失败：…」后 rethrow（bootstrapFromBackend 的 bootstrapError 路径保持）；\n② bootstrap.ts 的 api.syncStatus().then（顺带刷新连接态）补 .catch(() => {})（纯提示性刷新，失败无需打扰）；\n③ bootstrap.ts reloadFilteredEntries：try/catch → toast「筛选列表加载失败：…」；\n④ bootstrap.ts anchorToArticle：try/catch → toast「打开文章失败：…」；\n⑤ nav.ts markCurrentViewAllRead 的 void api.markAllRead：补 .catch → toast「全部已读未能保存：…」（修前本地已全标读、计数已扣、无任何提示，重启后全部回退未读）；\n⑥ reader.ts selectArticle 的 void api.setRead：补 .catch → toast「标读失败：…」；\n⑦ reader.ts toggleCurrentRead 的 setRead 与 toggleCurrentStar 的 setStarred：补 .catch → toast；\n⑧ reader.ts markEntriesReadBulk 的逐条 for 循环 void api.setRead：改为 Promise.allSettled → 任一失败单条 toast「部分文章标读失败」（避免批量失败时 toast 洪峰）；\n⑨ feeds.ts 六个 AI/折叠开关（toggleCatSummary/toggleCatTranslate/toggleFeedSummary/toggleFeedTranslate/toggleFolderCollapse/toggleAllFolders 的落库调用）：补 .catch → toast「…未能保存，重启后可能回退」（镜像同文件 updateCatLayout 既有口径）；\n⑩ 设置页三处挂载期状态拉取（SyncTab 的 syncStatus、ConfigSyncSection 的 configSyncStatus、AiTab 的 getAiConfig）：补 .catch(() => {})（挂载期默认态兜底，非用户动作，不弹 toast；消除 unhandled rejection）。\n\nApp.tsx 的 feeds-updated 监听调用 reloadFromBackend 无需单独处理（①的内部 catch 已覆盖）。",
   "non_goals": [
     "不改乐观更新语义（本地先行、失败提示、重启回退的既有模式保持）",
@@ -217,9 +217,12 @@
     "candidate_digest": "fa34e56ffa1a6cae1e3a62d5f1aa967596ec1ff4776cbeb6861e7f10b043da06",
     "verification_run": "RUN-73a92538633d4f40a218a7dcb5097c76",
     "review_run": "RUN-e54ccca37ce84aaea60189a339104193",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-a9dd4beece9d41a5a69bb771b91a0828-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-a9dd4beece9d41a5a69bb771b91a0828"
+    ],
+    "merge_ref": "dd65408",
+    "continued_by": "TASK-069"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

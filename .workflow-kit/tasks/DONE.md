@@ -41,5 +41,7 @@
 | [TASK-064](items/TASK-064.json) | 后端 P2 缺陷修复四项：手动全刷去重、重加清墓碑、今天视图时区、配置同步事务（REQ-102/N3~N6） | done |
 | [TASK-065](items/TASK-065.json) | 阅读与翻译一致性三修复：锚定复位阅读视图标志、卡片译文按 HTML 渲染、流式译文消毒时序（REQ-102/N7/N8/N11） | cancelled |
 | [TASK-066](items/TASK-066.json) | 阅读与翻译一致性三修复收口：锚定复位、卡片译文 HTML 渲染、流式译文消毒时序（REQ-102/N7/N8/N11） | done |
+| [TASK-067](items/TASK-067.json) | 交互落库与错误可见性收尾：列宽拖拽松手持久化 + 异步失败可见（REQ-102/N9/N10） | done |
+| [TASK-068](items/TASK-068.json) | 结构性硬化：pull 游标失败守卫、app_settings 读取收口、行类型 fixture 防漂移、仓库卫生（REQ-103） | cancelled |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

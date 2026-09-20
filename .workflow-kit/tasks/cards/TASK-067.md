@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-067 · 交互落库与错误可见性收尾：列宽拖拽松手持久化 + 异步失败可见（REQ-102/N9/N10）
 
-**状态**：verified
+**状态**：done
 
 **目标**：AUDIT-20260919-v2.md 的 N9/N10（REQ-102，REQ-102 前端最后两项）：
 

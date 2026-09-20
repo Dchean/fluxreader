@@ -1,0 +1,554 @@
+TASK-069 cumulative change set (baseline for this task = TASK-067 verified commit dd6540893f38bfb6de3a44528c35fdc9220118f5)
+NOTE: the task-level finish recorded changed_files=[] because the implementation landed during the cancelled TASK-068 loop; the real content of the four deliverables is the diff below plus the untracked files.
+============================== TRACKED DIFF (git diff HEAD -- src src-tauri tools .gitignore) ==============================
+diff --git a/src-tauri/src/commands/mod.rs b/src-tauri/src/commands/mod.rs
+index 4b2ff3b..bbc19e2 100644
+--- a/src-tauri/src/commands/mod.rs
++++ b/src-tauri/src/commands/mod.rs
+@@ -16,12 +16,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
+ 
+ /// 读 app_settings JSON 里的 smartDedup 开关（默认关：保持既有抓取行为）。
+ pub(crate) fn read_dedup_flag(conn: &rusqlite::Connection) -> bool {
+-    db::get_setting(conn, "app_settings")
+-        .ok()
+-        .flatten()
+-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+-        .and_then(|v| v.get("smartDedup").and_then(|f| f.as_bool()))
+-        .unwrap_or(false)
++    /* TASK-068：收口为类型化助手（默认值语义不变） */
++    db::app_settings_bool(conn, "smartDedup", false)
+ }
+ 
+ /* ============================================================
+diff --git a/src-tauri/src/db.rs b/src-tauri/src/db.rs
+index c5494b7..c6f3e6f 100644
+--- a/src-tauri/src/db.rs
++++ b/src-tauri/src/db.rs
+@@ -45,7 +45,7 @@ pub use folders::{
+ pub use migrations::open;
+ #[cfg(test)]
+ pub(crate) use migrations::MIGRATIONS;
+-pub use settings::{get_setting, set_setting};
++pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
+ pub use sync_map::{
+     add_article_dup_entry, article_by_remote_id, article_dup_entries, article_has_pending_sync,
+     article_id_by_url, article_matches_remote_feed, backfill_article_content,
+diff --git a/src-tauri/src/db/settings.rs b/src-tauri/src/db/settings.rs
+index 0dc84b8..9fedd3e 100644
+--- a/src-tauri/src/db/settings.rs
++++ b/src-tauri/src/db/settings.rs
+@@ -37,3 +37,61 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
+ /* ============================================================
+ 后端同步 —— id 映射 + 离线变更队列（Google Reader / Fever）
+ ============================================================ */
++
++/// TASK-068：app_settings JSON 的类型化读取助手（收口此前 6+ 处复制的
++/// get_setting → from_str → v.get 模板）。get_setting 失败 / JSON 解析失败 /
++/// 字段缺失 / 类型不符一律返回 default，与各调用点的既有默认值语义一致。
++pub fn app_settings_bool(conn: &Connection, key: &str, default: bool) -> bool {
++    get_setting(conn, "app_settings")
++        .ok()
++        .flatten()
++        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
++        .and_then(|v| v.get(key).and_then(|b| b.as_bool()))
++        .unwrap_or(default)
++}
++
++/// 同上，字符串字段（如 syncMode）。
++pub fn app_settings_str(conn: &Connection, key: &str, default: &str) -> String {
++    get_setting(conn, "app_settings")
++        .ok()
++        .flatten()
++        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
++        .and_then(|v| v.get(key).and_then(|m| m.as_str()).map(String::from))
++        .unwrap_or_else(|| default.to_string())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::db::MIGRATIONS;
++    use rusqlite::Connection;
++
++    fn conn() -> Connection {
++        let mut conn = Connection::open_in_memory().unwrap();
++        MIGRATIONS.to_latest(&mut conn).unwrap();
++        conn
++    }
++
++    #[test]
++    fn app_settings_helpers_return_defaults_when_unset_or_broken() {
++        let conn = conn();
++        // 未设置：默认值
++        assert!(app_settings_bool(&conn, "smartDedup", false) == false);
++        assert_eq!(app_settings_str(&conn, "syncMode", "direct"), "direct");
++        // 坏 JSON：默认值（不 panic）
++        set_setting(&conn, "app_settings", "{broken").unwrap();
++        assert!(app_settings_bool(&conn, "closeToTray", true));
++        assert_eq!(app_settings_str(&conn, "syncMode", "direct"), "direct");
++    }
++
++    #[test]
++    fn app_settings_helpers_read_present_values() {
++        let conn = conn();
++        set_setting(&conn, "app_settings", r#"{"smartDedup":true,"syncMode":"hybrid","n":1}"#).unwrap();
++        assert!(app_settings_bool(&conn, "smartDedup", false));
++        assert_eq!(app_settings_str(&conn, "syncMode", "direct"), "hybrid");
++        // 类型不符（数字当布尔）→ 默认
++        assert!(app_settings_bool(&conn, "n", true) == true);
++        assert!(!app_settings_bool(&conn, "missing", false));
++    }
++}
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 7872bb5..083c507 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -37,13 +37,8 @@ fn show_main_window(app: &tauri::AppHandle) {
+ /// 读取 closeToTray 设置（缺省 true：关闭即最小化到托盘）
+ async fn read_close_to_tray(db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>) -> bool {
+     let conn = db.lock().await;
+-    match crate::db::get_setting(&conn, "app_settings") {
+-        Ok(Some(raw)) => serde_json::from_str::<serde_json::Value>(&raw)
+-            .ok()
+-            .and_then(|v| v.get("closeToTray").and_then(|b| b.as_bool()))
+-            .unwrap_or(true),
+-        _ => true,
+-    }
++    /* TASK-068：收口为类型化助手（默认值语义不变） */
++    crate::db::app_settings_bool(&conn, "closeToTray", true)
+ }
+ 
+ /// 首次关闭询问是否已展示过（app_settings.closePromptShown，缺省 false）
+@@ -51,12 +46,8 @@ async fn read_close_prompt_shown(
+     db: &std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+ ) -> bool {
+     let conn = db.lock().await;
+-    crate::db::get_setting(&conn, "app_settings")
+-        .ok()
+-        .flatten()
+-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+-        .and_then(|v| v.get("closePromptShown").and_then(|b| b.as_bool()))
+-        .unwrap_or(false)
++    /* TASK-068：收口为类型化助手（默认值语义不变） */
++    crate::db::app_settings_bool(&conn, "closePromptShown", false)
+ }
+ 
+ /// 用户在首次关闭询问弹窗里做出选择：
+diff --git a/src-tauri/src/scheduler.rs b/src-tauri/src/scheduler.rs
+index 5244fd5..ec70ac5 100644
+--- a/src-tauri/src/scheduler.rs
++++ b/src-tauri/src/scheduler.rs
+@@ -60,12 +60,8 @@ async fn read_refresh_config(
+ ///
+ /// 锁内读（调用方持 conn）。
+ fn read_sync_mode_conn(conn: &rusqlite::Connection) -> String {
+-    crate::db::get_setting(conn, "app_settings")
+-        .ok()
+-        .flatten()
+-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+-        .and_then(|v| v.get("syncMode").and_then(|m| m.as_str()).map(String::from))
+-        .unwrap_or_else(|| "direct".into())
++    /* TASK-068：收口为类型化助手（默认值语义不变） */
++    crate::db::app_settings_str(conn, "syncMode", "direct")
+ }
+ 
+ /// 全量刷新所有源（托盘「刷新全部订阅」与手动全刷入口，忽略到期时间）。
+@@ -208,10 +204,8 @@ async fn auto_sync_backend(
+             .ok()
+             .flatten()
+             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+-        let on = raw
+-            .as_ref()
+-            .and_then(|v| v.get("autoSync").and_then(|b| b.as_bool()))
+-            .unwrap_or(true);
++        /* TASK-068：autoSync 布尔读取收口为类型化助手（refreshInterval 数值读取留待后续） */
++        let on = crate::db::app_settings_bool(&conn, "autoSync", true);
+         if !on {
+             return;
+         }
+diff --git a/src-tauri/src/sync/fever_pull.rs b/src-tauri/src/sync/fever_pull.rs
+index 813a55d..729ad75 100644
+--- a/src-tauri/src/sync/fever_pull.rs
++++ b/src-tauri/src/sync/fever_pull.rs
+@@ -60,6 +60,9 @@ pub(super) async fn pull_entries_fever(
+     // ② 拉条目正文：增量（since_id>0）或首次种子（since_id=0 → 最近 50 条）
+     let mut all_items: Vec<ItemContent> = Vec::new();
+     let mut seen: HashSet<i64> = HashSet::new();
++    // TASK-068：抓取失败计数——时间戳游标仅在无失败时推进（对称 greader 守卫；
++    // last_sync_entry_id 只计已合并条目，本就安全）。
++    let mut fetch_failures = 0usize;
+ 
+     if since_id > 0 {
+         // 增量：items&since_id 升序分页，单页 50，不足 50 即拿完
+@@ -68,6 +71,7 @@ pub(super) async fn pull_entries_fever(
+             let batch = match client.items_since(cursor).await {
+                 Ok(b) => b,
+                 Err(e) => {
++                    fetch_failures += 1;
+                     report.errors.push(format!("拉取增量条目失败: {e}"));
+                     break;
+                 }
+@@ -91,7 +95,10 @@ pub(super) async fn pull_entries_fever(
+         // 首次：Fever 无全量历史端点；最近 50 条作已读种子，未读/收藏由下方补齐
+         match client.items_recent().await {
+             Ok(seed) => collect_fever_items(&mut all_items, &mut seen, seed),
+-            Err(e) => report.errors.push(format!("拉取最近条目失败: {e}")),
++            Err(e) => {
++                fetch_failures += 1;
++                report.errors.push(format!("拉取最近条目失败: {e}"));
++            }
+         }
+     }
+ 
+@@ -108,6 +115,7 @@ pub(super) async fn pull_entries_fever(
+         match client.items_with_ids(chunk).await {
+             Ok(batch) => collect_fever_items(&mut all_items, &mut seen, batch),
+             Err(e) => {
++                fetch_failures += 1;
+                 report.errors.push(format!("拉取未读/收藏条目失败: {e}"));
+                 break;
+             }
+@@ -152,7 +160,12 @@ pub(super) async fn pull_entries_fever(
+     // ⑥ 更新游标（Fever 用条目 id；时间戳游标也记录，供切换回 greader 后的首拉）
+     let conn = db.lock().await;
+     let _ = db::set_last_sync_entry_id(&conn, last_id);
+-    let _ = db::set_last_sync_ts(&conn, Utc::now().timestamp());
++    // TASK-068：时间戳游标仅在无抓取失败时推进（切回 greader 时不漏失败窗口）
++    if fetch_failures == 0 {
++        let _ = db::set_last_sync_ts(&conn, Utc::now().timestamp());
++    } else {
++        log::warn!("fever pull: {fetch_failures} fetch(es) failed; keeping last_sync_ts");
++    }
+     drop(conn);
+ }
+ 
+diff --git a/src-tauri/src/sync/greader_pull.rs b/src-tauri/src/sync/greader_pull.rs
+index 3d05915..2fbce2c 100644
+--- a/src-tauri/src/sync/greader_pull.rs
++++ b/src-tauri/src/sync/greader_pull.rs
+@@ -74,10 +74,14 @@ pub(super) async fn pull_entries_greader(
+         })
+     };
+ 
++    // TASK-068：分块失败计数——失败块的条目本轮丢失，若游标照常推进，下一轮
++    // 增量从新游标起步，这些条目就只能等全量同步补回（「偶发漏文章」的温床）。
++    let mut chunk_failures = 0usize;
+     for chunk in all_item_ids.chunks(100) {
+         let entries = match client.item_contents(chunk).await {
+             Ok(v) => v,
+             Err(e) => {
++                chunk_failures += 1;
+                 report.errors.push(format!("拉取条目正文失败: {e}"));
+                 continue;
+             }
+@@ -112,11 +116,18 @@ pub(super) async fn pull_entries_greader(
+         }
+     }
+ 
+-    // 更新游标（unix 秒）
+-    let now = Utc::now().timestamp();
+-    let conn = db.lock().await;
+-    let _ = db::set_last_sync_ts(&conn, now);
+-    drop(conn);
++    // 更新游标（unix 秒）。TASK-068：仅在本轮分块全部成功时推进——失败块靠
++    // 下一轮重拉同一窗口补回（合并幂等，不会产生重复条目）。
++    if chunk_failures == 0 {
++        let now = Utc::now().timestamp();
++        let conn = db.lock().await;
++        let _ = db::set_last_sync_ts(&conn, now);
++        drop(conn);
++    } else {
++        log::warn!(
++            "greader pull: {chunk_failures} chunk(s) failed; keeping last_sync_ts（下一轮重拉同一窗口）"
++        );
++    }
+ }
+ 
+ /// 分页拉取某 Google Reader stream 的全部条目 id（read / starred 权威集合）。
+diff --git a/src-tauri/tests/mock_greader.rs b/src-tauri/tests/mock_greader.rs
+index 85959a1..2692225 100644
+--- a/src-tauri/tests/mock_greader.rs
++++ b/src-tauri/tests/mock_greader.rs
+@@ -70,6 +70,8 @@ pub struct MockGReader {
+     /// 故障注入（TASK-060）：置位后 edit-tag 返回 500——推送失败、队列保留，
+     /// 用于构造「本地变更已入队未推送（pending）+ 远端陈旧状态」的场景。
+     pub fail_edit_tag: std::sync::atomic::AtomicBool,
++    /// 故障注入（TASK-068）：置位后 stream/items/contents 返回 500——pull 分块失败，验证游标不推进守卫
++    pub fail_item_contents: std::sync::atomic::AtomicBool,
+     /// 故障注入（TASK-055）：置位后退订仍返回 200，但**服务端保留该订阅**——
+     /// 模拟真实 GReader 后端在 token 失效/权限不足/目标不存在时「2xx + 未生效」的响应。
+     pub unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool,
+@@ -109,6 +111,7 @@ impl MockGReader {
+             subscription_edits: Mutex::new(Vec::new()),
+             fail_stream_ids: std::sync::atomic::AtomicBool::new(false),
+             fail_edit_tag: std::sync::atomic::AtomicBool::new(false),
++            fail_item_contents: std::sync::atomic::AtomicBool::new(false),
+             unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
+             last_subscription_edit_form: Mutex::new(Vec::new()),
+             status_updates: Mutex::new(Vec::new()),
+@@ -180,6 +183,12 @@ impl MockGReader {
+             .store(fail, std::sync::atomic::Ordering::SeqCst);
+     }
+ 
++    /// 置位后 stream/items/contents 返回 500（TASK-068：pull 分块失败，验证游标守卫）。
++    pub fn set_fail_item_contents(&self, fail: bool) {
++        self.fail_item_contents
++            .store(fail, std::sync::atomic::Ordering::SeqCst);
++    }
++
+     /// 置位后 ClientLogin 一律 401（模拟凭据被拒）。
+     pub fn set_reject_login(&self, reject: bool) {
+         self.reject_login
+@@ -630,6 +639,10 @@ fn route(
+         }
+         // 条目正文（POST，i 重复参数）
+         ("POST", p) if p.ends_with("/reader/api/0/stream/items/contents") => {
++            if srv.fail_item_contents.load(std::sync::atomic::Ordering::SeqCst) {
++                // TASK-068 注入：pull 分块失败（500）
++                return (500, "Internal Server Error".to_string());
++            }
+             let form = parse_form(body);
+             // i 参数可能来自 body 或 query
+             let mut all_ids: Vec<i64> = Vec::new();
+diff --git a/tools/frontend-regression.mjs b/tools/frontend-regression.mjs
+index 259b37e..50eb72f 100644
+--- a/tools/frontend-regression.mjs
++++ b/tools/frontend-regression.mjs
+@@ -2372,6 +2372,26 @@ await (async () => {
+       !onMoveZone.includes('updateSettings') && onUpZone.includes('updateSettings({ listWidth: Math.round(w) })'));
+   }
+ 
++  /* ---------- (r) TASK-068：行类型契约防漂移（与 Rust row_fixture_e2e 共用 fixture） ---------- */
++  {
++    const fsR = await import('node:fs');
++    const fixture = JSON.parse(fsR.readFileSync(new URL('../src-tauri/tests/fixtures/row_fixture.json', import.meta.url), 'utf8'));
++    const { articleRowToEntry, feedRowToItem } = await import('../dist-test/lib/api.js');
++    const entry = articleRowToEntry(fixture.article_list_item);
++    checkNew('(r) articleRowToEntry 全字段映射与 fixture 一致（TS 镜像漂移即失败）',
++      entry.id === '42' && entry.feedId === '7' && entry.title === 'Fixture Article'
++      && entry.snippet === 'snippet text' && entry.source === 'miniflux'
++      && entry.isRead === false && entry.isStarred === true
++      && entry.enclosureUrl === 'https://e.example/audio.mp3' && entry.durationSec === 1234
++      && entry.content === '<p>body</p>' && entry.fulltextExtracted === false
++      && entry.url === 'https://e.example/a');
++    const feedItem = feedRowToItem(fixture.feed_row);
++    checkNew('(r) feedRowToItem 全字段映射与 fixture 一致（漂移即失败）',
++      feedItem.id === '7' && feedItem.name === 'Fixture Feed' && feedItem.url === 'https://f.example/rss'
++      && feedItem.layout === 'article' && feedItem.autoSummary === true && feedItem.autoTranslate === false
++      && feedItem.fetchFailed === false);
++  }
++
+ // ---- 汇总 ----
+ const failed = results.filter((r) => !r.pass);
+ const newFailed = newResults.filter((r) => !r.pass);
+
+============================== UNTRACKED NEW FILES (full content) ==============================
+
+----- FILE: src-tauri/tests/fixtures/row_fixture.json -----
+{
+  "feed_row": {
+    "id": 7,
+    "folder_id": 1,
+    "feed_url": "https://f.example/rss",
+    "site_url": "https://f.example",
+    "title": "Fixture Feed",
+    "favicon_url": null,
+    "layout": "article",
+    "auto_summary": true,
+    "auto_translate": false,
+    "fetch_failed": false,
+    "fetch_error": null,
+    "last_fetched_at": null
+  },
+  "article_list_item": {
+    "id": 42,
+    "feed_id": 7,
+    "title": "Fixture Article",
+    "author": null,
+    "snippet": "snippet text",
+    "image_url": null,
+    "enclosure_url": "https://e.example/audio.mp3",
+    "enclosure_mime": "audio/mpeg",
+    "duration_sec": 1234,
+    "ai_summary": null,
+    "source": "miniflux",
+    "published_at": "2026-09-19T01:00:00+08:00",
+    "is_read": false,
+    "is_starred": true,
+    "url": "https://e.example/a",
+    "content_html": "<p>body</p>",
+    "translated_content": null,
+    "fulltext_extracted": false
+  }
+}
+
+----- FILE: src-tauri/tests/pull_cursor_e2e.rs -----
+//! TASK-068：pull 分块失败时的游标守卫端到端测试。
+//! 缺陷形态（修前）：item_contents 分块失败仅 continue，随后 set_last_sync_ts
+//! 无条件推进——失败块的条目本轮丢失且游标已前移，下一轮增量从新游标起步，
+//! 这些条目只能等全量同步补回（「偶发漏文章」的结构性温床）。
+//! 修后：chunk_failures > 0 时保持旧游标，下一轮重拉同一窗口（合并幂等）。
+//! 运行：cargo test --test pull_cursor_e2e
+
+mod mock_greader;
+
+use app_lib::db;
+use app_lib::sync;
+use mock_greader::MockGReader;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+async fn setup(name: &str) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client, Arc<MockGReader>, std::path::PathBuf) {
+    let server = MockGReader::start().await.expect("start mock server");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_cursor_{}_{}_{}.db",
+        name,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).expect("open db");
+    db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "greader_username", "test").unwrap();
+    db::set_setting(&conn, "greader_password", "test-token").unwrap();
+    let http = app_lib::ingestion::build_client(10);
+    (Arc::new(Mutex::new(conn)), http, server, tmp)
+}
+
+/// 分块失败：report.errors 必须记录失败，且游标保持旧值不推进（守卫核心断言）。
+#[tokio::test]
+async fn pull_chunk_failure_keeps_last_sync_ts() {
+    let (db, http, server, tmp) = setup("guard").await;
+    server.add_entry(10, "https://example.com/a", "A", "unread", false);
+
+    // 种子旧游标 T0
+    let t0: i64 = 1_700_000_000;
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, t0).unwrap();
+    }
+
+    server.set_fail_item_contents(true);
+    let report = sync::states_phase(&db, &http, false).await.expect("states_phase ok");
+    assert!(
+        report.errors.iter().any(|e| e.contains("拉取条目正文失败")),
+        "分块失败必须进入 report.errors"
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            db::last_sync_ts(&conn).unwrap(),
+            t0,
+            "分块失败时游标不得推进（TASK-068 守卫；修前会推进到 now）"
+        );
+    }
+
+    // 解除注入：下一轮重拉同一窗口，条目合并、游标正常推进
+    server.set_fail_item_contents(false);
+    let report2 = sync::states_phase(&db, &http, false).await.expect("states_phase ok");
+    assert!(report2.errors.is_empty(), "恢复后不应再有错误");
+    {
+        let conn = db.lock().await;
+        assert!(
+            db::last_sync_ts(&conn).unwrap() > t0,
+            "恢复后游标正常推进"
+        );
+    }
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 双向锚定：无失败时游标照常推进（守卫不误伤正常路径）。
+#[tokio::test]
+async fn pull_success_advances_last_sync_ts() {
+    let (db, http, server, tmp) = setup("advance").await;
+    server.add_entry(10, "https://example.com/b", "B", "unread", false);
+
+    let t0: i64 = 1_700_000_000;
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, t0).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &http, false).await.expect("states_phase ok");
+    assert!(report.errors.is_empty(), "正常路径不应有错误");
+    {
+        let conn = db.lock().await;
+        assert!(db::last_sync_ts(&conn).unwrap() > t0, "成功后游标推进");
+    }
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+----- FILE: src-tauri/tests/row_fixture_e2e.rs -----
+//! TASK-068 N-硬3：行类型契约防漂移。
+//! lib/api.ts 手写了 Rust Serialize 结构的 TS 镜像——Rust 侧改字段名/可空性，
+//! TS 侧只会在运行时发现。本测试把规范的 FeedRow / ArticleListItem 序列化结果
+//! 与检入的 fixture 逐字段比对：Rust 侧漂移在此处失败；TS 侧漂移由
+//! frontend-regression 读同一 fixture 的映射断言捕获。
+
+use app_lib::db;
+
+#[test]
+fn row_serialization_matches_fixture() {
+    let fixture_raw = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/row_fixture.json"
+    ))
+    .expect("fixture 文件必须存在");
+    let expected: serde_json::Value = serde_json::from_str(&fixture_raw).unwrap();
+
+    let feed = db::FeedRow {
+        id: 7,
+        folder_id: 1,
+        feed_url: "https://f.example/rss".into(),
+        site_url: Some("https://f.example".into()),
+        title: "Fixture Feed".into(),
+        favicon_url: None,
+        layout: "article".into(),
+        auto_summary: true,
+        auto_translate: false,
+        fetch_failed: false,
+        fetch_error: None,
+        last_fetched_at: None,
+    };
+    let article = db::ArticleListItem {
+        id: 42,
+        feed_id: 7,
+        title: "Fixture Article".into(),
+        author: None,
+        snippet: "snippet text".into(),
+        image_url: None,
+        enclosure_url: Some("https://e.example/audio.mp3".into()),
+        enclosure_mime: Some("audio/mpeg".into()),
+        duration_sec: Some(1234),
+        ai_summary: None,
+        source: "miniflux".into(),
+        published_at: Some("2026-09-19T01:00:00+08:00".into()),
+        is_read: false,
+        is_starred: true,
+        url: Some("https://e.example/a".into()),
+        content_html: Some("<p>body</p>".into()),
+        translated_content: None,
+        fulltext_extracted: false,
+    };
+
+    let feed_json = serde_json::to_value(&feed).expect("FeedRow 序列化");
+    let article_json = serde_json::to_value(&article).expect("ArticleListItem 序列化");
+
+    assert_eq!(
+        feed_json,
+        expected["feed_row"],
+        "FeedRow 序列化漂移：Rust 侧字段变更必须同步 fixture 与 lib/api.ts 镜像"
+    );
+    assert_eq!(
+        article_json,
+        expected["article_list_item"],
+        "ArticleListItem 序列化漂移：Rust 侧字段变更必须同步 fixture 与 lib/api.ts 镜像"
+    );
+}
+
+============================== DELETED ARTIFACT (N-hard4 hygiene) ==============================

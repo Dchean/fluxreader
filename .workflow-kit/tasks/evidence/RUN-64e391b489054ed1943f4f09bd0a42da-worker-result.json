@@ -1,0 +1,27 @@
+{
+  "task_id": "TASK-069",
+  "run_id": "RUN-64e391b489054ed1943f4f09bd0a42da",
+  "status": "ready_for_verification",
+  "summary": "TASK-069 修复轮 r1：处置独立审查（RUN-37386261afe04e13ad226cb5387a0d24，verdict=FAIL）的四项发现。F1（真实缺陷，已复现漏文章）：greader_pull.rs 的 reading-list id 列举失败只 push errors + break，all_item_ids 为空 ⇒ 下游 chunks(100) 不执行 ⇒ chunk_failures 仍为 0 ⇒ 游标照常推进、失败窗口被静默跳过。修法：新增 id_failures 计数（列举失败与分页中断均计入），游标守卫改为 id_failures + chunk_failures == 0 才推进；分页 continuation 无法解析/本页无可用 id 也显式计数+记录，不再静默 break。fever_pull.rs 对称收口：权威状态集合拉取失败（原只影响对账）同样计入守卫。新增回归测试 pull_id_listing_failure_keeps_last_sync_ts（mock 新增 fail_reading_list_ids 注入，仅让 reading-list 主列举失败、read/starred 对账照常成功以隔离被验证路径）+ mock 注入点。变异验证：把守卫还原为只计 chunk_failures ⇒ 新测试 FAILED（游标被推进），还原后全过。F2（验收断言被证伪）：(r) 断言原只核对部分字段字面值，整行删除 cover 映射仍 301/301。修法：改为「键集合 + 逐键期望值」全量核对（missing/extra/wrong 三向，数组按项比较避免引用比较误报），并加两条比较器自检断言防断言失效；同时把 fixture 的可空字段改为非空取值（author/image_url/favicon_url/ai_summary/translated_content），使「接错数据源」也能被发现；Rust 侧 row_fixture_e2e 同步更新期望值。变异验证：删除 src/lib/api.ts 的 cover 映射行 ⇒ 新增 (r) 断言 ❌ + exit 1，还原后 303/303。F3（收口不彻底）：scheduler.rs should_notify 的 notifyOnNewArticles 是逐字相同的布尔模板（纯布尔、非推迟的数值型），已改用 app_settings_bool(..., false)；并把 auto_sync_backend 里同一函数内 app_settings 被读两次的冗余合并为早退后单次读取（行为不变）；另在 read_refresh_config 补注释说明数值型读取（refreshInterval/fetchConcurrency）按 N-硬2 明确推迟，避免该发现复发。F4（.gitignore 补全未发生）：补 _rev501-bak/ 忽略规则，git check-ignore 现已命中（exit 0）。四门禁实测：cargo test 177 passed / 0 failed / 9 ignored（基线 171 + 本轮新增 1 + 前序 5 = 177，ignored 未增）；lint 0 warnings / 0 errors；build exit 0（vite v8.2.2 built）；frontend 303/303（既有 26 + 新增 277）。未引入新依赖，package.json/Cargo.toml/Cargo.lock 零改动；改动文本文件均为 LF；用户真实数据库未写入（测试用临时库并清理）。",
+  "changed_files": [
+    ".gitignore",
+    "src-tauri/src/scheduler.rs",
+    "src-tauri/src/sync/fever_pull.rs",
+    "src-tauri/src/sync/greader_pull.rs",
+    "src-tauri/tests/fixtures/row_fixture.json",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/pull_cursor_e2e.rs",
+    "src-tauri/tests/row_fixture_e2e.rs",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

@@ -1,0 +1,16 @@
+{
+  "task_id": "TASK-069",
+  "run_id": "RUN-ade2f7ef40e548b78691b35ee639d2d6",
+  "status": "ready_for_verification",
+  "summary": "本任务收口被取消的 TASK-068 的同一成果（REQ-103 四项结构性硬化）。全部成果已在本任务 begin 之前落于工作区，本 run 相对自身范围基线为零新增改动（diff 的 changed_files 与 changed_this_run 均为空数组），故 changed_files 按工具观察声明为空数组；成果内容经由候选快照（snapshot_paths 覆盖 src、src-tauri/src、src-tauri/tests、tools）进入候选与审查范围，验收对象即当前工作区状态。【N-硬1 游标守卫】greader_pull.rs 新增 chunk_failures 计数（:79 定义、:84 失败自增），仅 chunk_failures==0 时推进 last_sync_ts，否则 warn 并保留旧游标（:121/:128）——修前无条件推进，失败块条目本轮丢失且游标已前移，下一轮增量从新游标起步，只能等全量同步补回，是「偶发漏文章」的结构性温床；fever_pull.rs 对称实现（fetch_failures 在 :65 定义，:74/:99/:118 三处失败自增，:164 仅无失败时推进 last_sync_ts；last_sync_entry_id 只计已合并条目，本就安全）。【N-硬2 收口】db/settings.rs 新增 app_settings_bool（:44）与 app_settings_str（:54）类型化助手：get_setting 失败 / 坏 JSON / 字段缺失 / 类型不符一律返回 default，并附 2 条文件内测试（未设置与坏 JSON 返回默认；正常值与类型不符）；db.rs 一行 pub use 导出（owner 已批准 DEC-ec07500051dc4fe982de4ba9934816b5，且本任务 allowed_paths 自始包含 db.rs）；调用点收口四处六点——lib.rs:41 read_close_to_tray（默认 true）、lib.rs:50 read_close_prompt_shown（默认 false）、commands/mod.rs:20 read_dedup_flag（默认 false）、scheduler.rs:64 read_sync_mode_conn（默认 direct）、scheduler.rs:208 autoSync（默认 true，refreshInterval 数值读取按声明留待后续、raw 绑定保留）；逐点默认值语义与修前一致（纯搬运重构）。【N-硬3 fixture 防漂移】tests/fixtures/row_fixture.json 检入规范 FeedRow + ArticleListItem 序列化形态；row_fixture_e2e.rs 在 Rust 侧构造同值记录、serde_json 序列化后与 fixture 逐字段断言；tools/frontend-regression.mjs 新增 (r) 断言读同一 fixture 经 articleRowToEntry / feedRowToItem 映射后逐字段核对——双侧共用一份 fixture，任一侧漂移都被捕获，且新断言位于汇总统计之前（checkNew 只入列不抛错，置于汇总后则无法影响退出码）。(r) 断言已核对 src/lib/api.ts:524 feedRowToItem 与 :554 articleRowToEntry 的实际映射口径一致。【N-硬4 卫生】根目录 13 个 *.log（均未被 HEAD 跟踪）与脚本事故产物（字面文件名，含 db 变量插值痕迹，HEAD 已跟踪）已删除，事故产物在工作区状态为 D；.gitignore 的 *.log 与 tmp/ 早在 fee0934 已入库，故相对 HEAD 零差异、无需重复添加；_rev501-bak/ 为空目录且未被跟踪，git 不提交空目录，经 owner 处置记录为空目录无动作关闭。新增测试 5 条：pull_cursor_e2e 2 条（mock 新增 fail_item_contents 注入；守卫断言 + 正常推进双向锚定）、settings helper 2 条、row fixture 1 条。变异取证（上一循环实测）：① 还原 greader_pull 为无条件 set_last_sync_ts → pull_cursor_e2e 守卫断言失败；② fixture 改动一个字段值 → Rust 逐字段比对失败；③ TS 适配器删一个字段映射 → (r) 断言失败 exit 1；还原后全过。四门禁本轮由 verify 实测绑定候选（此前仅 Worker 自述，本次以工具实测日志为准）。",
+  "changed_files": [],
+  "validation_requests": [
+    "cargo test（src-tauri，门禁 cargo_test）",
+    "npm run lint（门禁 lint）",
+    "npm run build（门禁 build）",
+    "npm run test:frontend（门禁 frontend）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

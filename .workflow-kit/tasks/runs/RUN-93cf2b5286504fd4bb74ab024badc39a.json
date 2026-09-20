@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "RUN-93cf2b5286504fd4bb74ab024badc39a",
+  "task_id": "TASK-069",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260919-t069-finish"
+  },
+  "started_at_utc": "2026-09-20T00:52:21.278298Z",
+  "finished_at_utc": "2026-09-20T00:52:36.703383Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "c13811edd416fee136dacc51b83d16e97a1d5e5a9ca9e603e0d370a8d2cc6651",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-93cf2b5286504fd4bb74ab024badc39a-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-93cf2b5286504fd4bb74ab024badc39a-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-aded091805ce4138bc7fb34d754ac472-scope.json",
+  "failure_kind": "action_required",
+  "failure_reason": "Worker requests manager action; inspect the result"
+}

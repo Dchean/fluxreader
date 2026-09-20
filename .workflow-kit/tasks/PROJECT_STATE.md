@@ -24,11 +24,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 39 项：已验收 36，待验收 1，阻塞 0。
+已建任务 41 项：已验收 37，待验收 1，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-067 · 交互落库与错误可见性收尾：列宽拖拽松手持久化 + 异步失败可见（REQ-102/N9/N10）](<cards/TASK-067.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-069 · 结构性硬化收口：pull 游标失败守卫、app_settings 读取收口、行类型 fixture 防漂移、仓库卫生（REQ-103）](<cards/TASK-069.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -41,9 +41,9 @@
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 27 项记录可在任务总览查看。
+另有 29 项记录可在任务总览查看。
 
-**已确认但尚未拆分的需求**：结构性硬化：pull 分块失败时不推进增量游标（greader_pull.rs:77-90,116-119 与 fever_pull 对称）；app_settings JSON blob 逐字段解析收口为类型化助手（lib.rs:38-96、commands/mod.rs:18、scheduler.rs:62,201-222 共 6+ 处）；lib/api.ts 行类型契约加 serde fixture 往返断言防漂移；仓库根目录垃圾文件清理与 .gitignore 补全；死代码/空壳集群处置与 P3 卫生项：删除零生产调用代码（db/feeds.rs:245,257,269 Miniflux 兜底三查询、ingestion.rs:330-407 旧版 refresh_feed、greader.rs:501-518 未用方法、db/sync_map.rs 被取代的逐条查询、sync/mod.rs:29 fallback_entries 恒 0 与模块注释修订、lib/api.ts:503 api.syncNow、AiEvent::Error 删或接通）；P3 项逐条处置（吞错 warn 化、sync_save 留空只复用 password、purge_remote_data 范围、cleanup_cache 时区、LIMIT 绑定、normalize 去重一致化、gist 孤儿、init unwrap 加固、快捷键浮层让路、播放中同集切换、批量标读合并等）；设计边界项 P2-12（配置同步删除语义）/P3-11（远端退订本地删除）与 P2-10 后半/P2-11 修复立项前逐项请 owner 裁决；ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块（conditional_get/parse_feed/map_entry/staged 刷新/favicon 发现），沿用先补断言→纯搬运→四门禁配方，crate::ingestion 路径不变，行为零变化
+**已确认但尚未拆分的需求**：死代码/空壳集群处置与 P3 卫生项：删除零生产调用代码（db/feeds.rs:245,257,269 Miniflux 兜底三查询、ingestion.rs:330-407 旧版 refresh_feed、greader.rs:501-518 未用方法、db/sync_map.rs 被取代的逐条查询、sync/mod.rs:29 fallback_entries 恒 0 与模块注释修订、lib/api.ts:503 api.syncNow、AiEvent::Error 删或接通）；P3 项逐条处置（吞错 warn 化、sync_save 留空只复用 password、purge_remote_data 范围、cleanup_cache 时区、LIMIT 绑定、normalize 去重一致化、gist 孤儿、init unwrap 加固、快捷键浮层让路、播放中同集切换、批量标读合并等）；设计边界项 P2-12（配置同步删除语义）/P3-11（远端退订本地删除）与 P2-10 后半/P2-11 修复立项前逐项请 owner 裁决；ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块（conditional_get/parse_feed/map_entry/staged 刷新/favicon 发现），沿用先补断言→纯搬运→四门禁配方，crate::ingestion 路径不变，行为零变化
 
 **阻塞**：无已记录阻塞
 

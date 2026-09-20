@@ -70,6 +70,11 @@ pub struct MockGReader {
     /// 故障注入（TASK-060）：置位后 edit-tag 返回 500——推送失败、队列保留，
     /// 用于构造「本地变更已入队未推送（pending）+ 远端陈旧状态」的场景。
     pub fail_edit_tag: std::sync::atomic::AtomicBool,
+    /// 故障注入（TASK-068）：置位后 stream/items/contents 返回 500——pull 分块失败，验证游标不推进守卫
+    pub fail_item_contents: std::sync::atomic::AtomicBool,
+    /// 故障注入（TASK-069 审查 F1）：置位后仅 reading-list 的 stream/items/ids 返回 500
+    /// （read/starred 对账仍成功）——验证「id 列举失败同样不推进游标」
+    pub fail_reading_list_ids: std::sync::atomic::AtomicBool,
     /// 故障注入（TASK-055）：置位后退订仍返回 200，但**服务端保留该订阅**——
     /// 模拟真实 GReader 后端在 token 失效/权限不足/目标不存在时「2xx + 未生效」的响应。
     pub unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool,
@@ -109,6 +114,8 @@ impl MockGReader {
             subscription_edits: Mutex::new(Vec::new()),
             fail_stream_ids: std::sync::atomic::AtomicBool::new(false),
             fail_edit_tag: std::sync::atomic::AtomicBool::new(false),
+            fail_item_contents: std::sync::atomic::AtomicBool::new(false),
+            fail_reading_list_ids: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
             last_subscription_edit_form: Mutex::new(Vec::new()),
             status_updates: Mutex::new(Vec::new()),
@@ -177,6 +184,19 @@ impl MockGReader {
     /// 置位后 edit-tag 返回 500（推送失败，客户端应保留队列待重试）。
     pub fn set_fail_edit_tag(&self, fail: bool) {
         self.fail_edit_tag
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 置位后 stream/items/contents 返回 500（TASK-068：pull 分块失败，验证游标守卫）。
+    pub fn set_fail_item_contents(&self, fail: bool) {
+        self.fail_item_contents
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 置位后仅 reading-list 的 stream/items/ids 返回 500（TASK-069 审查 F1：
+    /// id 列举失败，验证游标守卫覆盖该路径）。
+    pub fn set_fail_reading_list_ids(&self, fail: bool) {
+        self.fail_reading_list_ids
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -588,6 +608,15 @@ fn route(
             }
             let q = parse_query(path_query);
             let stream = q.get("s").cloned().unwrap_or_default();
+            // TASK-069 审查 F1：只让 reading-list 主列举失败（read/starred 对账照常成功），
+            // 用于证明「id 列举失败也不得推进游标」，且不与 C-1 对账跳过语义互相干扰。
+            if srv
+                .fail_reading_list_ids
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && stream.contains("reading-list")
+            {
+                return (500, r#"{"error_message":"injected reading-list failure"}"#.into());
+            }
             let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
             // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）
@@ -630,6 +659,10 @@ fn route(
         }
         // 条目正文（POST，i 重复参数）
         ("POST", p) if p.ends_with("/reader/api/0/stream/items/contents") => {
+            if srv.fail_item_contents.load(std::sync::atomic::Ordering::SeqCst) {
+                // TASK-068 注入：pull 分块失败（500）
+                return (500, "Internal Server Error".to_string());
+            }
             let form = parse_form(body);
             // i 参数可能来自 body 或 query
             let mut all_ids: Vec<i64> = Vec::new();

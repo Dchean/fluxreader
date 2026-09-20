@@ -2372,6 +2372,63 @@ await (async () => {
       !onMoveZone.includes('updateSettings') && onUpZone.includes('updateSettings({ listWidth: Math.round(w) })'));
   }
 
+  /* ---------- (r) TASK-068：行类型契约防漂移（与 Rust row_fixture_e2e 共用 fixture） ----------
+     TASK-069 审查 F2：修前只核对了部分字段的字面值，整行删除某个映射（如
+     `cover: row.image_url ?? undefined`）仍然 301/301 —— 因为可选字段缺失与
+     「值为 undefined」不可区分。现改为「键集合 + 逐键期望值」全量核对：
+     少一个键、多一个键、键值写错、把字段接错数据源，全部失败。 ---------- */
+  {
+    const fsR = await import('node:fs');
+    const fixture = JSON.parse(fsR.readFileSync(new URL('../src-tauri/tests/fixtures/row_fixture.json', import.meta.url), 'utf8'));
+    const { articleRowToEntry, feedRowToItem } = await import('../dist-test/lib/api.js');
+    const entry = articleRowToEntry(fixture.article_list_item);
+    const feedItem = feedRowToItem(fixture.feed_row);
+
+    // 逐键期望值（键集合即契约：fixture 的非空取值使「接错源」也能被发现）
+    const expectEntry = {
+      id: '42', feedId: '7', title: 'Fixture Article',
+      publishedAt: Date.parse('2026-09-19T01:00:00+08:00'),
+      isRead: false, isStarred: true, tags: [], source: 'miniflux',
+      snippet: 'snippet text', author: 'Fixture Author',
+      cover: 'https://e.example/img.png', imageUrl: 'https://e.example/img.png',
+      audioUrl: 'https://e.example/audio.mp3', enclosureUrl: 'https://e.example/audio.mp3',
+      durationSec: 1234, url: 'https://e.example/a',
+      aiSummary: 'fixture summary', content: '<p>body</p>', rawContent: '<p>body</p>',
+      translatedContent: '<p>translated</p>', fulltextExtracted: false,
+    };
+    const expectFeed = {
+      id: '7', name: 'Fixture Feed', url: 'https://f.example/rss',
+      favicon: 'https://f.example/favicon.ico', layout: 'article',
+      autoSummary: true, autoTranslate: false, fetchFailed: false,
+    };
+
+    const missing = (actual, expected) => Object.keys(expected).filter((k) => !(k in actual));
+    const extra = (actual, expected) => Object.keys(actual).filter((k) => !(k in expected));
+    // 标量用 Object.is；数组按下标逐项比（Object.is 对数组是引用比较，
+    // 直接用会把两个内容相同的 [] 判成不等——那不是漂移）。
+    const sameValue = (a, b) => (Array.isArray(b) && Array.isArray(a))
+      ? a.length === b.length && b.every((v, i) => Object.is(a[i], v))
+      : Object.is(a, b);
+    const wrong = (actual, expected) => Object.keys(expected).filter(
+      (k) => k in actual && !sameValue(actual[k], expected[k]));
+
+    checkNew('(r) articleRowToEntry 键集合与逐键取值全量一致（缺键/多键/错值/接错源任一即失败）',
+      missing(entry, expectEntry).length === 0 && extra(entry, expectEntry).length === 0
+      && wrong(entry, expectEntry).length === 0);
+    checkNew('(r) feedRowToItem 键集合与逐键取值全量一致（缺键/多键/错值任一即失败）',
+      missing(feedItem, expectFeed).length === 0 && extra(feedItem, expectFeed).length === 0
+      && wrong(feedItem, expectFeed).length === 0);
+
+    // 反向自检：断言本身能识别「删除映射」与「接错数据源」——用合成对象证明比较器有效。
+    // （若比较器写成永远为真，这两条会失败，从而避免「断言失效却全绿」）
+    const brokenEntry = { ...entry };
+    delete brokenEntry.cover;
+    checkNew('(r) 比较器自检：删除 cover 映射必须被判定为失败（防断言失效）',
+      missing(brokenEntry, expectEntry).length === 1 && missing(brokenEntry, expectEntry)[0] === 'cover');
+    checkNew('(r) 比较器自检：cover 接错数据源（取 imageUrl 之外的值）必须被判定为失败',
+      wrong({ ...entry, cover: 'https://wrong.example/x.png' }, expectEntry).includes('cover'));
+  }
+
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);
 const newFailed = newResults.filter((r) => !r.pass);

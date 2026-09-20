@@ -21,6 +21,10 @@ pub const MAX_CONCURRENCY: usize = 16;
 
 /// 从 app_settings JSON 里读 autoRefresh / refreshInterval / smartDedup /
 /// fetchConcurrency。async 版：在调度循环（tokio worker）里调用。
+///
+/// 注（TASK-069 审查 F3）：这里保留一次 raw 聚合读取，是因为 refreshInterval 与
+/// fetchConcurrency 是**数值型**（带区间夹取），N-硬2 明确将数值读取推迟到后续任务，
+/// 布尔助手不覆盖该语义。已收口的纯布尔读取仍走 app_settings_bool/app_settings_str。
 async fn read_refresh_config(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
 ) -> (bool, i64, bool, usize) {
@@ -60,12 +64,8 @@ async fn read_refresh_config(
 ///
 /// 锁内读（调用方持 conn）。
 fn read_sync_mode_conn(conn: &rusqlite::Connection) -> String {
-    crate::db::get_setting(conn, "app_settings")
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("syncMode").and_then(|m| m.as_str()).map(String::from))
-        .unwrap_or_else(|| "direct".into())
+    /* TASK-068：收口为类型化助手（默认值语义不变） */
+    crate::db::app_settings_str(conn, "syncMode", "direct")
 }
 
 /// 全量刷新所有源（托盘「刷新全部订阅」与手动全刷入口，忽略到期时间）。
@@ -204,18 +204,17 @@ async fn auto_sync_backend(
 ) {
     let (on, interval_min, connected, last_sync) = {
         let conn = db.lock().await;
-        let raw = crate::db::get_setting(&conn, "app_settings")
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-        let on = raw
-            .as_ref()
-            .and_then(|v| v.get("autoSync").and_then(|b| b.as_bool()))
-            .unwrap_or(true);
+        /* TASK-068/069：autoSync 布尔读取收口为类型化助手（默认值语义不变） */
+        let on = crate::db::app_settings_bool(&conn, "autoSync", true);
         if !on {
             return;
         }
-        let interval = raw
+        // refreshInterval 是数值型（带区间夹取），N-硬2 明确推迟到后续任务；
+        // 仅在 autoSync 开启时才需要解析，故放在早退之后（避免无谓的二次读取）。
+        let interval = crate::db::get_setting(&conn, "app_settings")
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .as_ref()
             .and_then(|v| v.get("refreshInterval").and_then(|i| i.as_i64()))
             .filter(|i| (5..=720).contains(i))
@@ -261,12 +260,8 @@ async fn should_notify(
 ) -> bool {
     let on = {
         let conn = db.lock().await;
-        crate::db::get_setting(&conn, "app_settings")
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v.get("notifyOnNewArticles").and_then(|b| b.as_bool()))
-            .unwrap_or(false)
+        /* TASK-069：notifyOnNewArticles 布尔读取收口为类型化助手（默认值语义不变） */
+        crate::db::app_settings_bool(&conn, "notifyOnNewArticles", false)
     };
     if !on {
         return false;

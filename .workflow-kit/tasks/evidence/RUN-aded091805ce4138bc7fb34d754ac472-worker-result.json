@@ -1,0 +1,19 @@
+{
+ "task_id": "TASK-069",
+ "run_id": "RUN-aded091805ce4138bc7fb34d754ac472",
+ "status": "ready_for_verification",
+ "summary": "收口被取消的 TASK-068 的同一成果（REQ-103 四项结构性硬化；实施已在上一循环完成并保留于工作区，本任务对其执行完整的 finish/verify/独立审查/验收闭环绑定候选）。【N-硬1 游标守卫】greader_pull.rs 分块失败计数、chunk_failures>0 时不推进 last_sync_ts 并 warn（修前无条件推进——失败块条目只能等全量补回的「偶发漏文章」温床）；fever_pull.rs 对称（三处失败计数、时间戳游标仅无失败时推进；last_sync_entry_id 只计已合并条目本就安全）。【N-硬2 收口】db/settings.rs 新增 app_settings_bool/str 类型化助手（失败/坏 JSON/缺失/类型不符一律返回 default）+ 4 条文件内测试；db.rs 一行 pub use 导出（owner 批准 DEC-ec075000，本任务 allowed_paths 从一开始即含 db.rs）；调用点收口：lib.rs read_close_to_tray/read_close_prompt_shown、commands/mod.rs read_dedup_flag、scheduler.rs read_sync_mode_conn/autoSync 布尔（refreshInterval 数值按声明留待后续，raw 绑定保留）——默认值语义逐点保持。【N-硬3 fixture 防漂移】tests/fixtures/row_fixture.json 检入规范 FeedRow+ArticleListItem 序列化形态；row_fixture_e2e.rs Rust 侧逐字段比对；frontend-regression (r) 断言读同一 fixture 经 articleRowToEntry/feedRowToItem 映射逐字段核对——双侧共用 fixture。【N-硬4 卫生】删除根目录 14 个垃圾文件（13 个 *.log + 字面名事故产物，后者为被误提交的跟踪文件）；.gitignore 补 *.log/tmp/（_rev501-bak/ 仅加入忽略规则，出处待 owner 确认）。新增测试 5 条：pull_cursor_e2e 2 条（mock 新增 fail_item_contents 注入旋钮，守卫/正常推进双向锚定）、settings helper 2 条、row fixture 1 条。变异取证成对（上一循环实测）：M1 游标无条件推进→守卫断言失败；M2 fixture 字段漂移→Rust 比对失败；M3 TS 适配器删字段映射→(r) 失败 exit 1；还原后全过。四门禁实测：cargo test 176 passed / 0 failed / 9 ignored（171+5）、lint 0 warnings/0 errors exit 0、build exit 0、frontend 301/301（299 存量 + 净增 2，存量一行未动）。LF 行尾。本任务相对 begin 快照为零新增改动（成果已在 begin 前的工作区），changed_files 按工具观察声明为空数组；全部成果内容经由候选快照（snapshot_paths 覆盖 src、src-tauri/src、src-tauri/tests、tools）进入候选与审查范围，验收对象即当前工作区状态。",
+ "changed_files": [],
+ "validation_requests": [
+  "cargo test（src-tauri，门禁 cargo_test）",
+  "npm run lint（门禁 lint）",
+  "npm run build（门禁 build）",
+  "npm run test:frontend（门禁 frontend）"
+ ],
+ "requested_actions": [],
+ "unresolved_items": [
+  "_rev501-bak/ 备份目录出处待 owner 确认（仅 gitignore，未删除）",
+  "lib.rs resolve_close 的读改写非纯读取模板，未纳入助手收口"
+ ],
+ "blocked_reason": null
+}
