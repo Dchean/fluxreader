@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "id": "TASK-073",
+  "title": "ingestion.rs 拆分为 ingestion/ 领域模块（REQ-105）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "把 ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块，沿用 db.rs / sync.rs / commands.rs 的既有试点配方：先补断言 → 纯搬运 → 四门禁不回归。目标结构（按审计建议的领域切分）：conditional_get（条件 GET + read_capped + build_client）、parse_feed（parse_feed/resolve_url/clamp_publish_date/map_entry/mime_from_url 等纯解析）、staged 刷新（refresh_feed_staged/read_feed_for_refresh/apply_refresh_result 等三段式）、favicon 发现（discover_favicon/extract_icon_link/rel_is_icon/extract_html_attr）。同时按 TASK-070 的死代码结论处置旧版 refresh_feed（若 TASK-070 已删则此处无需处理；若保留则随搬运标注）。硬约束：crate::ingestion 的公开路径保持不变（调用点不因拆分而失败，全部走 pub use 重导出），行为零变化——除机械搬运与模块声明外不改任何逻辑。",
+  "non_goals": [
+    "不改任何抓取/解析/刷新逻辑（纯搬运）",
+    "不改 conditional_get 的条件请求语义（etag/last-modified）",
+    "不改 staged 三段式的锁边界（HTTP 锁外、写库短暂持锁）",
+    "不改 favicon 发现策略",
+    "不新增依赖或模块层级（不在 ingestion/ 下再套子目录）",
+    "不改工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-105"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-069"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-992f64fd15714ca2a614fe66d5a144ec"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/ingestion.rs",
+      "src-tauri/src/ingestion/mod.rs",
+      "src-tauri/src/ingestion/conditional_get.rs",
+      "src-tauri/src/ingestion/parse_feed.rs",
+      "src-tauri/src/ingestion/staged.rs",
+      "src-tauri/src/ingestion/favicon.rs",
+      "src-tauri/src/lib.rs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 拆分后无超过 800 行的生产单体（对照审计口径核对全项目 src-tauri/src 与 src）",
+    "② 行为零变化：四门禁全绿，cargo test 通过数 ≥177 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 通过数 ≥303",
+    "③ 既有断言一行不动（纯搬运；若确需调整仅限模块路径/导入入口，不得弱化契约），测试文件须逐字保持",
+    "④ crate::ingestion 的公开路径不变（build_client/conditional_get/parse_feed/refresh_feed_staged/apply_refresh_result/read_feed_for_refresh 等调用点无需改动即可编译）",
+    "⑤ 拆分不改变并发/锁边界：staged 三段式的 HTTP 锁外与写库持锁位置逐字一致",
+    "⑥ 搬运可为机械 diff 核对：新增模块文件内容来自原文件对应区段，不夹带语义改动（建议在 worker-result 说明各区段来源行号）",
+    "⑦ 不引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；文本文件 LF；用户真实数据库不得写入"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+      "summary": "2026-09-20 基线（TASK-069 终版候选验证 RUN-5380e8e4，提交 452e0e2）：cargo test 177 passed / 0 failed / 9 ignored、lint 0/0、build exit 0、frontend 303/303。本任务 behavior=preserve：纯搬运拆分，不改任何产品行为，故不改动任何既有断言。既有覆盖中与 ingestion 直接相关的是 ingestion_e2e.rs、staged_refresh_e2e.rs、refresh_dedup_e2e.rs、endpoint_autodetect_e2e.rs 等 14 个引用了 ingestion 的测试文件——它们经 crate::ingestion 公开路径调用，拆分后路径不变则无需修改；若因模块化导致路径变化，按 adapt 调整测试的导入入口（只改入口，不动断言语义）。这些测试正是本次拆分的行为保护，必须继续全部执行且逐字保留断言。",
+      "decision_ids": [
+        "DEC-992f64fd15714ca2a614fe66d5a144ec"
+      ]
+    },
+    "decision_ids": [
+      "DEC-992f64fd15714ca2a614fe66d5a144ec"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "全部既有断言与测试（177 条 Rust + 303 条前端）逐字不动；与 ingestion 相关的 14 个测试文件继续经 crate::ingestion 路径执行",
+        "reason": "behavior=preserve 的纯搬运重构，既有断言即本次的行为保护，不得调整",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      },
+      {
+        "action": "adapt",
+        "target": "若模块化导致测试或调用点的导入入口变化：仅调整 use/路径引用，不动断言内容与语义",
+        "reason": "行为不变，测试依赖的是模块路径这一实现细节；按 GATES 对 adapt 的定义只改入口",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-073-input-55716a76839047d2839a29a8021363cb.json",
+    "digest": "2d40977490b0e8754a187588ff325e52a9af659375f31d9faa3c9cac1a8a057f",
+    "source_revision": null,
+    "definition_digest": "dae314a624ed500ec04625b9c5a85e685c10ec174caf15954c13cfe3a0e13550"
+  },
+  "budget": {
+    "started_at_utc": null,
+    "deadline_at_utc": null,
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-4f9d7067e5b04d5bbedfdcf3a2b021ee",
+  "run_ids": [],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-057.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task057.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
+    ".workflow-kit/tasks/runs/RUN-0259efca5b644b909fcf022fefeaeb73.json",
+    ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
+    ".workflow-kit/tasks/runs/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8.json",
+    ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
+    ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+    ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+    ".workflow-kit/tasks/runs/RUN-e6040878c41e4d729e86380954385c7d.json",
+    ".workflow-kit/tasks/runs/RUN-e7b42163aaa14d45b754261992f5214d.json",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "tools",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-069": "0dfded14ef1a0445f1031129c0c06e15ecc4115fc10adb77153eb60004c2e510"
+  }
+}

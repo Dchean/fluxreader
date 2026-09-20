@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "id": "TASK-072",
+  "title": "降级可见性与 AI 输入校验：全文提取 degraded 标志（P2-10 后半）+ 摘要空正文与 preset 显式提示（P2-11）（REQ-104）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "按 owner 2026-09-20 两项裁决修复降级可见性与输入校验。A【P2-10 后半，DEC-req104-p2-10b-fulltext-degraded-20260920】现状：commands/settings.rs 的 extract_fulltext 在无法提取或防退化原样返回时静默回落原文，用户看不出发生了降级。实施：① 提取失败/防退化时给出结构化 degraded 标志（而非只改文案），前端据此显示准确文案；② 保持成功路径行为与文案不变；③ 补失败路径断言（提取失败、防退化返回原文两种形态）。B【P2-11，DEC-req104-p2-11-ai-validation-20260920】现状：commands/ai.rs 的 ai_summarize 无空正文校验（translate 已有，不对称）；未知 preset 静默回退 deepseek-chat。实施：④ ai_summarize 补空正文校验，与 translate 对称（给出可理解错误而不是把空文本送模型）；⑤ 未知 preset 不再静默回退，改为显式提示/报错；⑥ 补断言覆盖空正文与未知 preset 两条路径。",
+  "non_goals": [
+    "不改 extract_fulltext 成功路径的行为与文案",
+    "不改 AI 供应商/模型调用协议与流式通道语义",
+    "不改 preset 的已知取值集合（只改未知取值的处置）",
+    "不新增 UI 组件或布局（沿用既有提示位与文案机制）",
+    "不引入新依赖",
+    "不改工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-104"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-069"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-req104-p2-10b-fulltext-degraded-20260920",
+      "DEC-req104-p2-11-ai-validation-20260920"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/commands/settings.rs",
+      "src-tauri/src/commands/ai.rs",
+      "src-tauri/src/ai.rs",
+      "src/store.ts",
+      "src/store/slices/reader.ts",
+      "src/lib/api.ts",
+      "src/components/Reader.tsx",
+      "src-tauri/tests/ai_e2e.rs",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "A① 提取失败与防退化两条路径都有结构化 degraded 标志（不再静默回落），成功路径行为与文案不变",
+    "A② 失败路径断言覆盖『提取失败』与『防退化返回原文』两种形态，修前复现/修后通过成对留证",
+    "B① ai_summarize 空正文被拦下并给出可理解错误（与 translate 对称），有断言覆盖",
+    "B② 未知 preset 显式提示/报错，不再静默回退 deepseek-chat，有断言覆盖",
+    "③ 四门禁全绿：cargo test 通过数 ≥177 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 通过数 ≥303",
+    "④ 不引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；文本文件 LF；用户真实数据库不得写入"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+      "summary": "2026-09-20 基线（TASK-069 终版候选验证 RUN-5380e8e4，提交 452e0e2）：cargo test 177 passed / 0 failed / 9 ignored、lint 0/0、build exit 0、frontend 303/303。本任务 behavior=change：① 全文提取由『静默回落原文』改为『结构化 degraded 标志 + 准确文案』——审计记录的现状缺陷，owner 裁决修复；② ai_summarize 由『空正文照送模型』改为『先校验并报错』，与 translate 既有行为对齐；③ 未知 preset 由『静默回退 deepseek-chat』改为『显式提示』。既有断言中与旧行为绑定的部分随新行为改造，其余保持；既有 (P2-10) 前端断言口径须同步核对，不得弱化仍有效的保护。",
+      "decision_ids": [
+        "DEC-req104-p2-10b-fulltext-degraded-20260920",
+        "DEC-req104-p2-11-ai-validation-20260920"
+      ]
+    },
+    "decision_ids": [
+      "DEC-req104-p2-10b-fulltext-degraded-20260920",
+      "DEC-req104-p2-11-ai-validation-20260920"
+    ],
+    "actions": [
+      {
+        "action": "replace",
+        "target": "全文提取『失败仍按成功回落原文并报成功』相关断言：改为断言 degraded 标志与非成功文案",
+        "reason": "owner 裁决 DEC-req104-p2-10b-fulltext-degraded-20260920 要求降级可见，与旧断言冲突",
+        "gate_ids": [
+          "cargo_test",
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "ai_summarize 空正文校验、未知 preset 显式提示两条路径的断言",
+        "reason": "本次新行为需要覆盖，且两条都是此前无保护的路径",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部既有断言与测试（177 条 Rust + 303 条前端）逐字不动，含既有 (P2-10) 防退化断言与 AI 流式断言",
+        "reason": "除上述契约变更外行为保持，既有防退化保护继续有效",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-072-input-4464461c6a3340649d2b4d0445e61890.json",
+    "digest": "2d40977490b0e8754a187588ff325e52a9af659375f31d9faa3c9cac1a8a057f",
+    "source_revision": null,
+    "definition_digest": "eba6e18be25619138dffac6225809398897f9a2bcb0d08d2e9cb4c0975ea0ae2"
+  },
+  "budget": {
+    "started_at_utc": null,
+    "deadline_at_utc": null,
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-4f9d7067e5b04d5bbedfdcf3a2b021ee",
+  "run_ids": [],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-057.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task057.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
+    ".workflow-kit/tasks/runs/RUN-0259efca5b644b909fcf022fefeaeb73.json",
+    ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
+    ".workflow-kit/tasks/runs/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8.json",
+    ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
+    ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+    ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+    ".workflow-kit/tasks/runs/RUN-e6040878c41e4d729e86380954385c7d.json",
+    ".workflow-kit/tasks/runs/RUN-e7b42163aaa14d45b754261992f5214d.json",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "tools",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-069": "0dfded14ef1a0445f1031129c0c06e15ecc4115fc10adb77153eb60004c2e510"
+  }
+}

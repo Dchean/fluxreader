@@ -24,10 +24,14 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 41 项：已验收 38，待验收 0，阻塞 0。
+已建任务 45 项：已验收 38，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-070 · 死代码/空壳集群删除：零生产调用代码清理与 SyncReport 字段收口（REQ-104）](<cards/TASK-070.md>) | 待执行 | 删除经 grep 验证零生产调用的死代码/空壳集群，确保无未落实的宣称能力（PI-无空壳）。逐项：① db/feeds.rs 的 Miniflux 兜底三查询 feeds_fetch_failed(:245)/feeds_origin_remote(:257)/feeds_fetch_failed_bound(:269) —— 生产仅被 db.rs:34-35 的 pub use 导出、无任何调用点，且审计判定『Miniflux 兜底路径未实现』（P2-9）：实际兜底由 reading-list pull（GReader）/未读+收藏（Fever）隐式覆盖；② ingestion.rs 旧版 refresh_feed(:330-407，非 staged，持锁跑 HTTP) —— 生产无调用点（命令层 commands/articles.rs:202 已改调 refresh_feed_staged），仅注释提及；③ greader.rs 的 GReaderClient::mark_all_read(:501)/subscribe(:511) —— 客户端级方法零调用点（命令层 mark_all_read 走 db 路径，订阅走 quick_add/edit_subscription）；④ db/sync_map.rs 被 SyncMatchMaps 取代的逐条查询（article_matches_remote_feed/article_id_by_url/article_has_pending_sync/set_folder_remote_id/feed_by_remote_id 等，仅测试引用）—— 按审计建议『统一删除或 #[cfg(test)] 下沉』处置；⑤ sync/mod.rs:29 SyncReport.fallback_entries 恒 0（全库无自增点，仅 phases.rs:90 与 commands/sync.rs:269 互相赋值）—— 删除字段及其赋值点、前端 SyncReport 类型字段与断言，并修订 sync/mod.rs 模块头注释里已不存在的『兜底』宣称；⑥ config_sync.rs:24 STATE_FILE_NAME 预留常量零引用；⑦ lib/api.ts:503 api.syncNow 前端零调用（P3-2 死接口）；⑧ AiEvent::Error 死变体（ai.rs:18 声明，生产从不构造，仅 ai.rs:212 测试构造；前端 'error' 分支因此不可达）—— 按 REQ-104『删或接通』选择删除变体与其测试，并同步清理不可达分支。非目标：不改任何仍被生产调用的函数行为；不动 merge_remote_status 一带同步合并语义（书面不变式，审计明确不建议动）；不拆除 db/sync_map.rs 中仍被 SyncMatchMaps 使用的函数；不改协议客户端与状态库路线。 |
+| [TASK-071 · 同步语义行为变更：配置同步删除语义（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）](<cards/TASK-071.md>) | 待执行 | 按 owner 2026-09-20 两项设计边界裁决实施行为变更（两项都改数据同步语义，故合并为一个高风险任务并绑定裁决）。A【P2-12 配置同步删除语义，DEC-req104-p2-12-config-delete-20260920】现状：config_sync.rs:141-261 merge_app_settings 只做 upsert，远端删除的配置项在本地不删除；且 skipped 计数实际是『已更新』口径。实施：① 远端白名单字段在远端消失时本地同步删除（回落默认值或删除该键，语义在实现时择一并留证）；② 修正 skipped 计数口径为真实跳过数；③ 保持 autoStart/closePromptShown 等本地专属字段不被远端删除（现白名单已排除，须保持并有断言）。B【P3-11 远端退订同步删本地，DEC-req104-p3-11-remote-unsub-20260920】现状：pull_feeds 无删除分支，远端退订后本地订阅永不删除。实施：① 远端权威集合中消失的『已绑定』订阅在本地删除（只处理曾绑定且远端已消失的源）；② 必须保留本地直连订阅（origin='local'）与未绑定订阅；③ 与 TASK-035 的删除墓碑防复活机制协同——不得被下一轮 pull 建回，也不得误删本地新订阅；④ 明确与 pending 未推送队列的交互：本地刚改名/移动尚未推送时不得被远端快照删除。两项都属行为变更且有数据丢失面，须有成对证据、失败路径测试与独立审查。 |
+| [TASK-072 · 降级可见性与 AI 输入校验：全文提取 degraded 标志（P2-10 后半）+ 摘要空正文与 preset 显式提示（P2-11）（REQ-104）](<cards/TASK-072.md>) | 待执行 | 按 owner 2026-09-20 两项裁决修复降级可见性与输入校验。A【P2-10 后半，DEC-req104-p2-10b-fulltext-degraded-20260920】现状：commands/settings.rs 的 extract_fulltext 在无法提取或防退化原样返回时静默回落原文，用户看不出发生了降级。实施：① 提取失败/防退化时给出结构化 degraded 标志（而非只改文案），前端据此显示准确文案；② 保持成功路径行为与文案不变；③ 补失败路径断言（提取失败、防退化返回原文两种形态）。B【P2-11，DEC-req104-p2-11-ai-validation-20260920】现状：commands/ai.rs 的 ai_summarize 无空正文校验（translate 已有，不对称）；未知 preset 静默回退 deepseek-chat。实施：④ ai_summarize 补空正文校验，与 translate 对称（给出可理解错误而不是把空文本送模型）；⑤ 未知 preset 不再静默回退，改为显式提示/报错；⑥ 补断言覆盖空正文与未知 preset 两条路径。 |
+| [TASK-073 · ingestion.rs 拆分为 ingestion/ 领域模块（REQ-105）](<cards/TASK-073.md>) | 待执行 | 把 ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块，沿用 db.rs / sync.rs / commands.rs 的既有试点配方：先补断言 → 纯搬运 → 四门禁不回归。目标结构（按审计建议的领域切分）：conditional_get（条件 GET + read_capped + build_client）、parse_feed（parse_feed/resolve_url/clamp_publish_date/map_entry/mime_from_url 等纯解析）、staged 刷新（refresh_feed_staged/read_feed_for_refresh/apply_refresh_result 等三段式）、favicon 发现（discover_favicon/extract_icon_link/rel_is_icon/extract_html_attr）。同时按 TASK-070 的死代码结论处置旧版 refresh_feed（若 TASK-070 已删则此处无需处理；若保留则随搬运标注）。硬约束：crate::ingestion 的公开路径保持不变（调用点不因拆分而失败，全部走 pub use 重导出），行为零变化——除机械搬运与模块声明外不改任何逻辑。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -36,14 +40,8 @@
 | [TASK-034 · 社交/通知卡片翻译按钮接线（P1-7）](<cards/TASK-034.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-035 · 删除订阅接线：远端退订 + 删除墓碑防复活（A-1）](<cards/TASK-035.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-036 · 订阅改名/移动目录接线：edit_subscription 推送远端（A-2）](<cards/TASK-036.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 29 项记录可在任务总览查看。
-
-**已确认但尚未拆分的需求**：死代码/空壳集群处置与 P3 卫生项：删除零生产调用代码（db/feeds.rs:245,257,269 Miniflux 兜底三查询、ingestion.rs:330-407 旧版 refresh_feed、greader.rs:501-518 未用方法、db/sync_map.rs 被取代的逐条查询、sync/mod.rs:29 fallback_entries 恒 0 与模块注释修订、lib/api.ts:503 api.syncNow、AiEvent::Error 删或接通）；P3 项逐条处置（吞错 warn 化、sync_save 留空只复用 password、purge_remote_data 范围、cleanup_cache 时区、LIMIT 绑定、normalize 去重一致化、gist 孤儿、init unwrap 加固、快捷键浮层让路、播放中同集切换、批量标读合并等）；设计边界项 P2-12（配置同步删除语义）/P3-11（远端退订本地删除）与 P2-10 后半/P2-11 修复立项前逐项请 owner 裁决；ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块（conditional_get/parse_feed/map_entry/staged 刷新/favicon 发现），沿用先补断言→纯搬运→四门禁配方，crate::ingestion 路径不变，行为零变化
+另有 33 项记录可在任务总览查看。
 
 **阻塞**：无已记录阻塞
 

@@ -2174,6 +2174,50 @@
       "candidates": {
         "TASK-069": "0dfded14ef1a0445f1031129c0c06e15ecc4115fc10adb77153eb60004c2e510"
       }
+    },
+    {
+      "id": "DEC-req104-p2-12-config-delete-20260920",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 设计边界裁决 #1（2026-09-20 问答）：P2-12 配置同步删除语义——选项『实施删除语义』被选中（而非把现状注释为保守设计）。背景：AUDIT-20260919-v2.md §二 P2-12 记录 config_sync.rs:141-261 只 upsert、skipped 实为已更新计数，需 owner 裁决是否做删除语义。",
+      "statement": "授权为配置同步实施删除语义：远端白名单字段在远端消失时本地同步删除；修正 skipped 计数口径为真实跳过数；保持 autoStart/closePromptShown 等本地专属字段不被远端删除（现白名单已排除，须保持）。属行为变更（改数据同步语义），须有修前/修后成对证据与独立审查。",
+      "scope": [
+        "REQ-104"
+      ],
+      "recorded_at_utc": "2026-09-20T02:20:00.000000Z"
+    },
+    {
+      "id": "DEC-req104-p3-11-remote-unsub-20260920",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 设计边界裁决 #2（2026-09-20 问答）：P3-11 远端退订本地删除——选项『实施本地删除』被选中（而非把『远端退订本地永不删』确认为有意设计）。背景：AUDIT-20260919-v2.md §二 P3-11 记录 pull_feeds 无删除分支，疑有意，需 owner 裁决。",
+      "statement": "授权让远端退订时同步删除本地订阅：远端权威集合中消失的『已绑定』订阅在本地删除，并与 TASK-035 的删除墓碑防复活机制协同（不得被下一轮 pull 建回，也不得误删本地新订阅）；保留本地直连订阅（origin='local'）与未绑定订阅；明确与 pending 未推送队列的交互（本地刚改名/移动未推送时不得被远端快照删除）。属行为变更且有数据丢失面，须有成对证据、失败路径测试与独立审查。",
+      "scope": [
+        "REQ-104"
+      ],
+      "recorded_at_utc": "2026-09-20T02:21:00.000000Z"
+    },
+    {
+      "id": "DEC-req104-p2-10b-fulltext-degraded-20260920",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 设计边界裁决 #3（2026-09-20 问答）：P2-10 后半 extract_fulltext 静默回落原文——选项『改结构化 degraded 标志 + 准确文案』被选中。背景：AUDIT-20260919-v2.md §二 P2-10 后半记录 commands/settings.rs:90-93 静默回落。",
+      "statement": "授权修复全文提取的降级可见性：提取失败或防退化原样返回时不再静默回落原文，改为结构化 degraded 标志 + 准确文案；须补失败路径断言（提取失败、防退化返回原文两种形态）并保持成功路径不变。",
+      "scope": [
+        "REQ-104"
+      ],
+      "recorded_at_utc": "2026-09-20T02:22:00.000000Z"
+    },
+    {
+      "id": "DEC-req104-p2-11-ai-validation-20260920",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 设计边界裁决 #4（2026-09-20 问答）：P2-11 AI 空正文校验与 preset 回退——选项『补空校验 + preset 未知显式提示』被选中。背景：AUDIT-20260919-v2.md §二 P2-11 记录 ai.rs:118 无空校验（translate 有，不对称）、ai.rs:58-82 未知 preset 静默回退 deepseek-chat。",
+      "statement": "授权修复 AI 输入校验与配置可观测性：ai_summarize 补空正文校验（与 translate 对称）；未知 preset 不再静默回退 deepseek-chat，改为显式提示/报错；须补断言覆盖空正文与未知 preset 两条路径。",
+      "scope": [
+        "REQ-104"
+      ],
+      "recorded_at_utc": "2026-09-20T02:23:00.000000Z"
     }
   ]
 }

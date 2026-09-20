@@ -1,0 +1,242 @@
+{
+  "schema_version": 1,
+  "id": "TASK-071",
+  "title": "同步语义行为变更：配置同步删除语义（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）",
+  "kind": "implementation",
+  "retry_safe": false,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "按 owner 2026-09-20 两项设计边界裁决实施行为变更（两项都改数据同步语义，故合并为一个高风险任务并绑定裁决）。A【P2-12 配置同步删除语义，DEC-req104-p2-12-config-delete-20260920】现状：config_sync.rs:141-261 merge_app_settings 只做 upsert，远端删除的配置项在本地不删除；且 skipped 计数实际是『已更新』口径。实施：① 远端白名单字段在远端消失时本地同步删除（回落默认值或删除该键，语义在实现时择一并留证）；② 修正 skipped 计数口径为真实跳过数；③ 保持 autoStart/closePromptShown 等本地专属字段不被远端删除（现白名单已排除，须保持并有断言）。B【P3-11 远端退订同步删本地，DEC-req104-p3-11-remote-unsub-20260920】现状：pull_feeds 无删除分支，远端退订后本地订阅永不删除。实施：① 远端权威集合中消失的『已绑定』订阅在本地删除（只处理曾绑定且远端已消失的源）；② 必须保留本地直连订阅（origin='local'）与未绑定订阅；③ 与 TASK-035 的删除墓碑防复活机制协同——不得被下一轮 pull 建回，也不得误删本地新订阅；④ 明确与 pending 未推送队列的交互：本地刚改名/移动尚未推送时不得被远端快照删除。两项都属行为变更且有数据丢失面，须有成对证据、失败路径测试与独立审查。",
+  "non_goals": [
+    "不改本地删除不推远端的既有方向（本地删除仍走 TASK-035 的远端退订+墓碑）",
+    "不删除本地直连订阅（origin='local'）或未绑定订阅",
+    "不改 config_sync 的白名单字段集合（除删除语义本身）",
+    "不改 pull_feeds 的绑定/碰撞逻辑（只新增删除分支）",
+    "不做迁移/表结构变更",
+    "不引入新依赖",
+    "不改工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-104"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-069"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "high",
+    "decision_ids": [
+      "DEC-req104-p2-12-config-delete-20260920",
+      "DEC-req104-p3-11-remote-unsub-20260920"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/config_sync.rs",
+      "src-tauri/src/sync/subscriptions.rs",
+      "src-tauri/src/sync/mod.rs",
+      "src-tauri/src/sync/phases.rs",
+      "src-tauri/src/db/feeds.rs",
+      "src-tauri/src/commands/sync.rs",
+      "src-tauri/tests/config_sync_e2e.rs",
+      "src-tauri/tests/account_lifecycle_e2e.rs",
+      "src-tauri/tests/mock_greader.rs",
+      "src-tauri/tests/sync_e2e.rs",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "A① 远端白名单字段在远端消失后本地同步删除（修前保留、修后有断言证明删除），本地专属字段 autoStart/closePromptShown 不被远端删除",
+    "A② skipped 计数口径修正为真实跳过数，并有断言区分『已更新』与『已跳过』",
+    "B① 远端退订的已绑定订阅在本地删除（修前保留、修后有断言），且下一轮 pull 不复活（墓碑协同生效）",
+    "B② 本地直连订阅（origin='local'）与未绑定订阅在远端退订场景下不被删除（防误删断言）",
+    "B③ 本地有未推送变更（pending）的订阅不被远端快照删除（失败路径断言）",
+    "③ 四门禁全绿：cargo test 通过数 ≥177 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 通过数 ≥303",
+    "④ 每项都有修前可复现/修后通过的成对证据（失败路径优先用 mock 注入构造）",
+    "⑤ 不引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；文本文件 LF；用户真实数据库不得写入"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+      "summary": "2026-09-20 基线（TASK-069 终版候选验证 RUN-5380e8e4，提交 452e0e2）：cargo test 177 passed / 0 failed / 9 ignored、lint 0/0、build exit 0、frontend 303/303。本任务 behavior=change 且属业务契约变更，依据 owner 2026-09-20 两项裁决：① 配置同步由『只 upsert』改为『远端消失则本地删除』；② 远端退订由『本地永不删』改为『同步删本地』。这两项都推翻了审计记录的现状描述（P2-12『无删除语义』、P3-11『本地永不删，疑有意』），属用户已确认的新行为与旧行为冲突，故按 replace 语义处理：替换断言须引用对应 owner 决定。既有测试预期中与旧行为绑定的部分须改造为断言新行为，其余全部保持。",
+      "decision_ids": [
+        "DEC-req104-p2-12-config-delete-20260920",
+        "DEC-req104-p3-11-remote-unsub-20260920"
+      ]
+    },
+    "decision_ids": [
+      "DEC-req104-p2-12-config-delete-20260920",
+      "DEC-req104-p3-11-remote-unsub-20260920"
+    ],
+    "actions": [
+      {
+        "action": "replace",
+        "target": "配置同步的『远端缺失即保留本地』旧断言：改为『远端白名单字段消失后本地同步删除，本地专属字段保留』",
+        "reason": "owner 裁决 DEC-req104-p2-12-config-delete-20260920 选择实施删除语义，与旧断言冲突",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "replace",
+        "target": "远端退订后『本地订阅保留』旧断言：改为『已绑定且远端已消失的本地订阅被删除；本地直连/未绑定/pending 保留』",
+        "reason": "owner 裁决 DEC-req104-p3-11-remote-unsub-20260920 选择实施本地删除，与旧断言冲突",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "失败路径与防误删覆盖：本地专属字段不被远端删除、本地直连订阅不被误删、pending 未推送订阅不被删除、删除后下一轮 pull 不复活（墓碑协同）",
+        "reason": "高风险的异常路径必须有覆盖，且这些是本次行为变更最可能造成数据丢失的面",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部既有断言与测试（177 条 Rust + 303 条前端）逐字不动，含 TASK-035 的删除墓碑防复活既有断言",
+        "reason": "除上述两处契约变更外，同步语义其余部分保持",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-071-input-565e522134ae412ea1e9b7725de76320.json",
+    "digest": "2d40977490b0e8754a187588ff325e52a9af659375f31d9faa3c9cac1a8a057f",
+    "source_revision": null,
+    "definition_digest": "31db74fff12c06b9b34a862fbf9efeffb8aaf64aba69cbcf23eda00cbe15da66"
+  },
+  "budget": {
+    "started_at_utc": null,
+    "deadline_at_utc": null,
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-4f9d7067e5b04d5bbedfdcf3a2b021ee",
+  "run_ids": [],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-057.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task057.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
+    ".workflow-kit/tasks/runs/RUN-0259efca5b644b909fcf022fefeaeb73.json",
+    ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
+    ".workflow-kit/tasks/runs/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8.json",
+    ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
+    ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+    ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+    ".workflow-kit/tasks/runs/RUN-e6040878c41e4d729e86380954385c7d.json",
+    ".workflow-kit/tasks/runs/RUN-e7b42163aaa14d45b754261992f5214d.json",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "tools",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-069": "0dfded14ef1a0445f1031129c0c06e15ecc4115fc10adb77153eb60004c2e510"
+  }
+}
