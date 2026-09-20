@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-075 · 同步语义行为变更收口：配置同步删除语义与计数口径（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）
 
-**状态**：verified
+**状态**：done
 
 **目标**：本任务收口被取消的 TASK-074 的同一成果（历史：TASK-074 已完成全部实现——四项门禁实测通过、新增 6 条测试、两条关键行为各有变异取证——但 finish 的范围检查无法通过：owner 批准的 allowed_paths 订正（增加 src/lib/api.ts 与 src/components/settings/ConfigSyncSection.tsx）落盘于该任务 begin 之后，任务基线为订正前的快照，diff 恒把 .workflow-kit/tasks/items/TASK-074.json 判为 protected，unblock 循环无法收敛，故按 TASK-068→TASK-069 先例取消并以本任务收口；本任务相对 begin 快照为零新增改动，成果经候选快照绑定）。内容按 owner 2026-09-20 两项设计边界裁决实施行为变更。A【P2-12 配置同步删除语义，DEC-req104-p2-12-config-delete-20260920】① merge_app_settings 由只 upsert 改为「远端缺失的白名单键本地同步删除」，并新增 is_local_only_setting 单一判定收敛 autoStart/closePromptShown（上传过滤与下载合并共用，避免漂移）；远端 app_settings 非对象时不做删除（防一次坏 payload 清空本地设置）；② 计数口径修正：apply_payload 返回值由 (imported, skipped) 改为 ApplyOutcome{imported, updated, skipped}——此前 skipped 在「已存在并被更新」分支自增、语义实为已更新数却被前端展示为「跳过」；现在先读现值判断有无变化，有变化计 updated、完全一致才计 skipped；前端 api.ts 新增 ConfigSyncApplyResult 类型、ConfigSyncSection.tsx 文案改为如实分别展示「新增/更新/跳过（内容一致）」。B【P3-11 远端退订同步删本地，DEC-req104-p3-11-remote-unsub-20260920】pull_feeds 新增删除段，同时满足三条才删：origin='remote' 且 remote_id IS NOT NULL、规范化 URL 不在本轮远端订阅列表、sync_queue 无该 URL 的未推送变更；刻意不写 feed_tombstone（墓碑语义是「用户本地删除、不许复活」，此处是跟随远端事实删除，服务端重新订阅应能正常建回）；SyncReport 新增 removed_feeds。四项门禁须保持：cargo test 通过数 ≥183 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 通过数 ≥303。
 

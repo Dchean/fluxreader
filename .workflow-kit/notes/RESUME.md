@@ -9,18 +9,18 @@
 
 目标：以 workflow-kit 2026-09-18.3 新周期对 fluxreader 持续改进：修复全项目体检发现的缺陷（P1/P2），处置功能空壳与死代码确保无未落实的宣称能力，完成 ingestion.rs 拆分与结构性硬化（pull 游标守卫、app_settings 收口），使项目稳定规范、代码与技术路线优雅高效
 
-当前阶段：**验收与交付**
+当前阶段：**分步实施**
 
-阶段目标：核对完整范围，交付可运行成果、使用说明及适用的恢复办法
+阶段目标：落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致
 
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | 需求与目标 | 明确目标、已有 Bug、新功能、其他要求、质量目标和执行边界 | 已完成 |
 | 分析与方案 | 记录参考、原始基线状态与限制，说明维护、稳定和性能取舍，并确认路线 | 已完成 |
 | 界面预览 | 验证关键流程、整体设计和控件完整状态，确认后沿用前端实现 | 不适用 |
-| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 分批推进 |
+| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 当前 |
 | 回归与审查 | 以需求、失败路径、适用界面检查、维护性和性能证据核对当前组合候选 | 分批推进 |
-| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 当前 |
+| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 待推进 |
 
 **完整验收目标**：体检报告 AUDIT-20260919-v2.md 的 P1/P2 缺陷经确认后全部修复并有修前复现/修后验证的成对证据；结构性硬化落地：pull 分块失败不推进增量游标；app_settings 读取收口为类型化助手；ingestion.rs 拆分为领域模块，行为零变化，四门禁不回归；死代码/空壳集群处置完毕（删除或裁决保留），无未落实的宣称能力；设计边界项（P2-12/P3-11 等）经 owner 逐项裁决：实施或注释明示保留；既有质量底线延续：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283 不回退（通过数可增不可减）
 
@@ -28,11 +28,10 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 47 项：已验收 39，待验收 1，阻塞 0。
+已建任务 47 项：已验收 40，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-075 · 同步语义行为变更收口：配置同步删除语义与计数口径（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）](<../tasks/cards/TASK-075.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -44,6 +43,7 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
 另有 35 项记录可在任务总览查看。
 
@@ -83,7 +83,6 @@
 
 ## 最近事件
 
-- 2026-09-20T08:02:46.707334Z · note/lesson · TASK-074 · scope 失败已出现 9 次：Interrupted run recovered: 总控核对：该 RUN 为重新 begin 的实现运行，未由 finish 收口；工作区成果（四项门禁已实测通过）保留，按 TASK-068→TASK-069 先例转由新卡收口（2026-09-20）; out-of-scope changes: .workflow-。下次准备/实现前先核对这一点。
 - 2026-09-20T08:02:59.669595Z · checkpoint · TASK-074 · 任务已取消：TASK-074 取消并立案收口说明： 1) 背景：本任务实施 owner 2026-09-20 两项裁决（P2-12 配置同步删除语义、P3-11 远端退订 本地同步删除）。代码**已全部实现并留在工作区**：四项门禁实测通过（cargo 183 passed / 0 failed / 9 ignored、lint 0 warnings/0 errors、build exit 0、frontend 303/303）， 新增 6 条测试，并对两条关键行为各做了变异取证（删掉实现即失败、还原即通过）。 2) 取消原因：**总控的顺序失误**使本任务基线无法收敛，与成果质量无关。 实际顺序：先 begin（07:31Z，基线快照于此冻结）→ 后落盘 owner 批准的范围订正 （allowed_paths 增加 src/lib/api.ts 与 src/components/settings/ConfigSyncSection.tsx） 及对应决定 DEC-req104-t074-scope-frontend-contract-20260920（07:39Z）。 finish 时 diff 相对基线把 .workflow-kit/tasks/items/TASK-074.json（任务自有记录、属 protected）判为越界 → scope 阻塞。unblock 回 ready 并重新 begin 后， task_baseline 仍继承首次 begin 的快照（订正之前），同一越界必然复现，无法收敛。 3) 处置：沿用项目既有先例（TASK-068 取消 → TASK-069 收口：见 TASK-069 卡片目标中 对 TASK-068 的记述，以及 2026-09-20 关于该先例的 lesson）。取消本任务，另立新卡 承载同一成果——新卡 prepare 的输入快照取自当前树（已含全部实现），begin 基线因此 与工作区一致，成果经候选快照绑定，不再产生「相对基线越界」的假阳性。 本记录保留为历史，供追溯实现过程、门禁证据与两次变异取证。 4) 授权依据：owner 2026-09-20 问答选项「乙：扩大范围改前端契约，完整实现」 （DEC-req104-t074-scope-frontend-contract-20260920），以及两项行为变更裁决 DEC-req104-p2-12-config-delete-20260920 与 DEC-req104-p3-11-remote-unsub-20260920。 5) 纪律（已记 lesson）：owner 批准的范围订正必须**先落盘、再 begin**， 避免 begin 基线落在订正之前。 ；下一步：如需同一目标，准备新的任务并引用本任务作为历史
 - 2026-09-20T08:02:59.731216Z · cancel · TASK-074 · TASK-074 取消并立案收口说明： 1) 背景：本任务实施 owner 2026-09-20 两项裁决（P2-12 配置同步删除语义、P3-11 远端退订 本地同步删除）。代码**已全部实现并留在工作区**：四项门禁实测通过（cargo 183 passed / 0 failed / 9 ignored、lint 0 warnings/0 errors、build exit 0、frontend 303/303）， 新增 6 条测试，并对两条关键行为各做了变异取证（删掉实现即失败、还原即通过）。 2) 取消原因：**总控的顺序失误**使本任务基线无法收敛，与成果质量无关。 实际顺序：先 begin（07:31Z，基线快照于此冻结）→ 后落盘 owner 批准的范围订正 （allowed_paths 增加 src/lib/api.ts 与 src/components/settings/ConfigSyncSection.tsx） 及对应决定 DEC-req104-t074-scope-frontend-contract-20260920（07:39Z）。 finish 时 diff 相对基线把 .workflow-kit/tasks/items/TASK-074.json（任务自有记录、属 protected）判为越界 → scope 阻塞。unblock 回 ready 并重新 begin 后， task_baseline 仍继承首次 begin 的快照（订正之前），同一越界必然复现，无法收敛。 3) 处置：沿用项目既有先例（TASK-068 取消 → TASK-069 收口：见 TASK-069 卡片目标中 对 TASK-068 的记述，以及 2026-09-20 关于该先例的 lesson）。取消本任务，另立新卡 承载同一成果——新卡 prepare 的输入快照取自当前树（已含全部实现），begin 基线因此 与工作区一致，成果经候选快照绑定，不再产生「相对基线越界」的假阳性。 本记录保留为历史，供追溯实现过程、门禁证据与两次变异取证。 4) 授权依据：owner 2026-09-20 问答选项「乙：扩大范围改前端契约，完整实现」 （DEC-req104-t074-scope-frontend-contract-20260920），以及两项行为变更裁决 DEC-req104-p2-12-config-delete-20260920 与 DEC-req104-p3-11-remote-unsub-20260920。 5) 纪律（已记 lesson）：owner 批准的范围订正必须**先落盘、再 begin**， 避免 begin 基线落在订正之前。 ；依据：owner 2026-09-20 问答选项『乙』（DEC-req104-t074-scope-frontend-contract-20260920）；处置沿用 TASK-068→TASK-069 取消收口先例
 - 2026-09-20T08:03:36.292365Z · prepare · TASK-075 · 任务已冻结：同步语义行为变更收口：配置同步删除语义与计数口径（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）；范围 src-tauri/src/config_sync.rs, src-tauri/src/sync/mod.rs, src-tauri/src/sync/subscriptions.rs, src-tauri/src/commands/sync.rs, src-tauri/src/sync/phases.rs, src-tauri/src/db/feeds.rs, src-tauri/tests/config_sync_e2e.rs, src-tauri/tests/sync_e2e.rs, src-tauri/tests/mock_greader.rs, src-tauri/tests/account_lifecycle_e2e.rs, src/lib/api.ts, src/components/settings/ConfigSyncSection.tsx, tools/frontend-regression.mjs
@@ -95,6 +94,7 @@
 - 2026-09-20T08:41:13.429370Z · checkpoint · TASK-075 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-20T09:03:17.521241Z · note/context · TASK-075 · 队列形态全覆盖自核（供审查者对照，因中途网络中断未能及时记录，现补记）：全库 enqueue_sync 调用点共 5 处、只有两种形态——① article 级（articles.rs:97 record_read_state、:109 record_star_state、:185 mark_all_read，均 (Some(article_id), None, action, None)）；② feed_url 级（folders.rs:217、opml.rs:82、sync.rs:180，均 (None, Some(feed_url), add_feed, payload)）。修复后的 pending 判定分别经 articles.feed_id 反查与 URL 归一化折算，两者都覆盖，故不存在第三种会被漏判的真实形态。schema 虽允许两列同时为 NULL，但无任何调用点产生该形态；历史 remove_feed 动作由 purge_remove_feed_zombies 清除且从不被消费，不构成 pending 语义。另：spurious 删除的前置条件是订阅列表拉取成功——pull_feeds 在 tags()/subscriptions() 任一失败时直接 return（subscriptions.rs:155-161），删除段在其后，故网络故障不会触发删除。**中断记录**：TASK-075 第二轮独立审查子代理 d1b97aef 因网络中断未产出报告（无 TASK-075-review-report.json）；已核对候选未被污染（158/158 校验一致）、无残留探针与备份文件，任务仍处 review 待审状态。注：第一轮审查子代理 6ce87c03 亦曾崩溃（但已留下探针证明真实缺陷）。后续重启审查时明确要求：**优先尽早写出报告**，避免长时间探索导致进程中断丢结果。
 - 2026-09-20T09:07:43.632277Z · checkpoint · TASK-075 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-20T09:08:10.573908Z · accept · 验收 TASK-075；依据：用户 2026-09-20 裁决两项设计边界（DEC-req104-p2-12-config-delete-20260920、DEC-req104-p3-11-remote-unsub-20260920）并选定路线乙（DEC-req104-t074-scope-frontend-contract-20260920）；任务已完成四门禁验证与独立审查 PASS
 
 ## 如何继续
 

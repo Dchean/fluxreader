@@ -1,0 +1,14 @@
+{
+  "id": "DEC-1ca5e3f8594543a3b08ab593f058c882",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-20 裁决两项设计边界（DEC-req104-p2-12-config-delete-20260920、DEC-req104-p3-11-remote-unsub-20260920）并选定路线乙（DEC-req104-t074-scope-frontend-contract-20260920）；任务已完成四门禁验证与独立审查 PASS",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-075"
+  ],
+  "recorded_at_utc": "2026-09-20T09:08:07.846144Z",
+  "candidates": {
+    "TASK-075": "21bffb8c1d45c84aefbf5d2284705bb37965f62b1633e1c1dabcea30141bae36"
+  }
+}
