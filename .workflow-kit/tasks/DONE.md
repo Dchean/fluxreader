@@ -44,5 +44,6 @@
 | [TASK-067](items/TASK-067.json) | 交互落库与错误可见性收尾：列宽拖拽松手持久化 + 异步失败可见（REQ-102/N9/N10） | done |
 | [TASK-068](items/TASK-068.json) | 结构性硬化：pull 游标失败守卫、app_settings 读取收口、行类型 fixture 防漂移、仓库卫生（REQ-103） | cancelled |
 | [TASK-069](items/TASK-069.json) | 结构性硬化收口：pull 游标失败守卫、app_settings 读取收口、行类型 fixture 防漂移、仓库卫生（REQ-103） | done |
+| [TASK-070](items/TASK-070.json) | 死代码/空壳集群删除：零生产调用代码清理与 SyncReport 字段收口（REQ-104） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

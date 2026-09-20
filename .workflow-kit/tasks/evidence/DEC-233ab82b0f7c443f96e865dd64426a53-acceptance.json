@@ -1,0 +1,14 @@
+{
+  "id": "DEC-233ab82b0f7c443f96e865dd64426a53",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-20 指示『继续任务』并选择开始执行 TASK-070（next_step 选项 1）；该任务已完成独立审查 PASS 与四门禁验证",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-070"
+  ],
+  "recorded_at_utc": "2026-09-20T07:26:02.440907Z",
+  "candidates": {
+    "TASK-070": "9086e04c46c0f6326f858130d357606eba9236f5b2518b24b017d52bd872cfe7"
+  }
+}

@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-070 · 死代码/空壳集群删除：零生产调用代码清理与 SyncReport 字段收口（REQ-104）
 
-**状态**：verified
+**状态**：done
 
 **目标**：删除经 grep 验证零生产调用的死代码/空壳集群，确保无未落实的宣称能力（PI-无空壳）。逐项：① db/feeds.rs 的 Miniflux 兜底三查询 feeds_fetch_failed(:245)/feeds_origin_remote(:257)/feeds_fetch_failed_bound(:269) —— 生产仅被 db.rs:34-35 的 pub use 导出、无任何调用点，且审计判定『Miniflux 兜底路径未实现』（P2-9）：实际兜底由 reading-list pull（GReader）/未读+收藏（Fever）隐式覆盖；② ingestion.rs 旧版 refresh_feed(:330-407，非 staged，持锁跑 HTTP) —— 生产无调用点（命令层 commands/articles.rs:202 已改调 refresh_feed_staged），仅注释提及；③ greader.rs 的 GReaderClient::mark_all_read(:501)/subscribe(:511) —— 客户端级方法零调用点（命令层 mark_all_read 走 db 路径，订阅走 quick_add/edit_subscription）；④ db/sync_map.rs 被 SyncMatchMaps 取代的逐条查询（article_matches_remote_feed/article_id_by_url/article_has_pending_sync/set_folder_remote_id/feed_by_remote_id 等，仅测试引用）—— 按审计建议『统一删除或 #[cfg(test)] 下沉』处置；⑤ sync/mod.rs:29 SyncReport.fallback_entries 恒 0（全库无自增点，仅 phases.rs:90 与 commands/sync.rs:269 互相赋值）—— 删除字段及其赋值点、前端 SyncReport 类型字段与断言，并修订 sync/mod.rs 模块头注释里已不存在的『兜底』宣称；⑥ config_sync.rs:24 STATE_FILE_NAME 预留常量零引用；⑦ lib/api.ts:503 api.syncNow 前端零调用（P3-2 死接口）；⑧ AiEvent::Error 死变体（ai.rs:18 声明，生产从不构造，仅 ai.rs:212 测试构造；前端 'error' 分支因此不可达）—— 按 REQ-104『删或接通』选择删除变体与其测试，并同步清理不可达分支。非目标：不改任何仍被生产调用的函数行为；不动 merge_remote_status 一带同步合并语义（书面不变式，审计明确不建议动）；不拆除 db/sync_map.rs 中仍被 SyncMatchMaps 使用的函数；不改协议客户端与状态库路线。
 
