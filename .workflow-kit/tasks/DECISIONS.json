@@ -2232,6 +2232,18 @@
       "candidates": {
         "TASK-070": "9086e04c46c0f6326f858130d357606eba9236f5b2518b24b017d52bd872cfe7"
       }
+    },
+    {
+      "id": "DEC-req104-t074-scope-frontend-contract-20260920",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-20 问答（TASK-074 路线选择，选项『乙：扩大范围改前端契约，完整实现』）：批准把 src/lib/api.ts 与 src/components/settings/ConfigSyncSection.tsx 纳入 TASK-074 的 allowed_paths，以便完整实现验收 A②『修正 skipped 计数口径为真实跳过数，并有断言区分「已更新」与「已跳过」』。理由：skipped 是跨前后端契约（后端 apply_payload → commands/sync.rs 返回 {imported, skipped} → api.ts:414 声明类型 → ConfigSyncSection.tsx:98 展示「跳过 M 个已存在」），仅改 Rust 无法完成该口径修正。先例：DEC-ec07500051dc4fe982de4ba9934816b5（TASK-068 allowed_paths 增加 db.rs）。",
+      "statement": "批准 TASK-074 的范围订正：allowed_paths 增加 src/lib/api.ts 与 src/components/settings/ConfigSyncSection.tsx，用于把配置同步的应用结果口径从『skipped=已更新数』修正为『skipped=真实跳过数 + updated=已更新数』并同步前端展示。其余范围、非目标与验收不变；B 部分（P3-11 远端退订同步删本地）按 owner 指示先行实施。",
+      "scope": [
+        "REQ-104",
+        "TASK-074"
+      ],
+      "recorded_at_utc": "2026-09-20T07:39:25.046636Z"
     }
   ]
 }

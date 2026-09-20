@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "ready",
+  "status": "running",
   "objective": "按 owner 2026-09-20 两项设计边界裁决实施行为变更（两项都改数据同步语义，故合并为一个高风险任务并绑定裁决）。A【P2-12 配置同步删除语义，DEC-req104-p2-12-config-delete-20260920】现状：config_sync.rs 的 merge_app_settings 只做 upsert，远端删除的配置项在本地不删除；且 skipped 计数实际是『已更新』口径。实施：① 远端白名单字段在远端消失时本地同步删除（删除该键或回落默认值，语义在实现时择一并留证）；② 修正 skipped 计数口径为真实跳过数；③ 保持 autoStart/closePromptShown 等本地专属字段不被远端删除（现白名单已排除，须保持并有断言）。B【P3-11 远端退订同步删本地，DEC-req104-p3-11-remote-unsub-20260920】现状：pull_feeds 无删除分支，远端退订后本地订阅永不删除。实施：④ 远端权威集合中消失的『已绑定』订阅在本地删除（只处理曾绑定且远端已消失的源）；⑤ 必须保留本地直连订阅（origin='local'）与未绑定订阅；⑥ 与 TASK-035 的删除墓碑防复活机制协同——不得被下一轮 pull 建回，也不得误删本地新订阅；⑦ 明确与 pending 未推送队列的交互：本地刚改名/移动尚未推送时不得被远端快照删除。两项都属行为变更且有数据丢失面，须有成对证据（修前复现/修后通过）、失败路径测试与独立审查。",
   "non_goals": [
     "不改本地删除不推远端的既有方向（本地删除仍走 TASK-035 的远端退订+墓碑）",
@@ -36,16 +36,18 @@
   },
   "scope": {
     "allowed_paths": [
+      "src-tauri/src/commands/sync.rs",
       "src-tauri/src/config_sync.rs",
-      "src-tauri/src/sync/subscriptions.rs",
+      "src-tauri/src/db/feeds.rs",
       "src-tauri/src/sync/mod.rs",
       "src-tauri/src/sync/phases.rs",
-      "src-tauri/src/db/feeds.rs",
-      "src-tauri/src/commands/sync.rs",
-      "src-tauri/tests/config_sync_e2e.rs",
+      "src-tauri/src/sync/subscriptions.rs",
       "src-tauri/tests/account_lifecycle_e2e.rs",
+      "src-tauri/tests/config_sync_e2e.rs",
       "src-tauri/tests/mock_greader.rs",
       "src-tauri/tests/sync_e2e.rs",
+      "src/components/settings/ConfigSyncSection.tsx",
+      "src/lib/api.ts",
       "tools/frontend-regression.mjs"
     ],
     "protected_paths": [
@@ -186,15 +188,17 @@
     "manifest": ".workflow-kit/tasks/evidence/TASK-074-input-0c8f2dafe6484d799526f816b355d18e.json",
     "digest": "fb5234e1e8b2243aae3a822c590df1a2a982dc88df803b94a2d979e0ae37933c",
     "source_revision": null,
-    "definition_digest": "acd2ceefd5270fc7f36a39e462672fea28c4c1498ac67021ec0426c082041d63"
+    "definition_digest": "98aa7c21bcd9578e4cae3a0c03bc6baa060c5ebf8ff882fe63b8fe824522c21b"
   },
   "budget": {
-    "started_at_utc": null,
-    "deadline_at_utc": null,
+    "started_at_utc": "2026-09-20T07:31:48.013644Z",
+    "deadline_at_utc": "2026-09-20T11:31:48.013644Z",
     "repair_rounds_used": 0
   },
   "batch_id": "BATCH-ab2d0e5d3f7643379a6de1fd2544b549",
-  "run_ids": [],
+  "run_ids": [
+    "RUN-93cca1ab6b134cd9904f973bbc508d48"
+  ],
   "blockers": [],
   "evidence": {
     "candidate_manifest": null,
@@ -239,5 +243,24 @@
   ],
   "continuation_of": {
     "TASK-070": "9086e04c46c0f6326f858130d357606eba9236f5b2518b24b017d52bd872cfe7"
-  }
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-20T07:31:48.395364Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    }
+  ],
+  "dispositions": [
+    {
+      "at_utc": "2026-09-20T07:39:25.046636Z",
+      "scope_correction": true,
+      "source": "owner 2026-09-20 route choice 乙",
+      "added_allowed_paths": [
+        "src/lib/api.ts",
+        "src/components/settings/ConfigSyncSection.tsx"
+      ],
+      "decision_id": "DEC-req104-t074-scope-frontend-contract-20260920"
+    }
+  ]
 }
