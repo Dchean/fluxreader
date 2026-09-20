@@ -95,7 +95,12 @@ export function ConfigSyncSection() {
       const r = await api.configSyncApply(payload);
       await reloadFromBackend();
       await bootstrapSettings().catch(() => null);
-      showToast(`配置已应用：新增 ${r.imported} 个源${r.skipped > 0 ? `，跳过 ${r.skipped} 个已存在` : ''}`);
+      // TASK-074：如实区分「新增 / 已更新 / 已跳过」——此前把已更新数当成
+      // 「跳过 M 个已存在」展示，数字含义是错的。
+      const parts = [`新增 ${r.imported} 个源`];
+      if (r.updated > 0) parts.push(`更新 ${r.updated} 个`);
+      if (r.skipped > 0) parts.push(`跳过 ${r.skipped} 个（内容一致）`);
+      showToast(`配置已应用：${parts.join('，')}`);
     } catch (e) {
       showToast(`下载失败：${extractError(e)}`);
     } finally {

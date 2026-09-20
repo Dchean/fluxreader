@@ -36,6 +36,8 @@ pub struct SyncReport {
     pub pulled_feeds: usize,
     pub pulled_entries: usize,
     pub merged_states: usize,
+    /// P3-11（TASK-074）：本轮因远端已退订而从本地删除的源数。
+    pub removed_feeds: usize,
     pub errors: Vec<String>,
 }
 

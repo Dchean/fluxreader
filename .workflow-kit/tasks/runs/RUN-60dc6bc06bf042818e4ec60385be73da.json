@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "RUN-60dc6bc06bf042818e4ec60385be73da",
+  "task_id": "TASK-074",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260920-t074-resume"
+  },
+  "started_at_utc": "2026-09-20T08:01:12.161870Z",
+  "finished_at_utc": "2026-09-20T08:02:46.430835Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "fb5234e1e8b2243aae3a822c590df1a2a982dc88df803b94a2d979e0ae37933c",
+  "candidate_digest": null,
+  "raw_output_refs": [],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-60dc6bc06bf042818e4ec60385be73da-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-93cca1ab6b134cd9904f973bbc508d48-scope.json",
+  "recovery": {
+    "source": "总控核对：该 RUN 为重新 begin 的实现运行，未由 finish 收口；工作区成果（四项门禁已实测通过）保留，按 TASK-068→TASK-069 先例转由新卡收口（2026-09-20）",
+    "observed_at_utc": "2026-09-20T08:02:45.658719Z",
+    "actual_process_finish_known": false,
+    "note": "finished_at marks record closure, not a fabricated process completion"
+  },
+  "failure_kind": "scope",
+  "failure_reason": "Interrupted run recovered: 总控核对：该 RUN 为重新 begin 的实现运行，未由 finish 收口；工作区成果（四项门禁已实测通过）保留，按 TASK-068→TASK-069 先例转由新卡收口（2026-09-20）; out-of-scope changes: .workflow-kit/tasks/items/TASK-074.json"
+}

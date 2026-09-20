@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-075",
+  "run_id": "RUN-0c142dcb55c04ffdb3924bc3b825799f",
+  "status": "ready_for_verification",
+  "summary": "TASK-075 收口被取消的 TASK-074 的同一成果（结构性硬化式的『成果已在盘、任务重立收口』，与 TASK-068→TASK-069 先例一致）。本任务相对 begin 快照为零新增改动（diff 的 changed_files 为空、protected/outside 均为空），全部成果经候选快照绑定进入验证与审查范围。**成果内容**：A【P2-12，DEC-req104-p2-12-config-delete-20260920】① config_sync.rs 的 merge_app_settings 由只 upsert 改为「远端缺失的白名单键本地同步删除」，并新增 is_local_only_setting 单一判定收敛原先散在两处的 autoStart/closePromptShown 键名（上传过滤 filter_app_settings 与下载合并共用，消除两侧漂移风险）；远端 app_settings 非对象时不做删除，避免一次坏 payload 清空本地设置。② 计数口径修正：apply_payload 返回值由 (imported, skipped) 改为 ApplyOutcome{imported, updated, skipped}——此前 skipped 在「已存在并被更新」分支自增、语义实为已更新数，前端却展示为「跳过」，用户看到的数字含义是错的；现在先读现值判断有无变化，有变化才计 updated、完全一致才计 skipped；前端 src/lib/api.ts 新增 ConfigSyncApplyResult 类型、ConfigSyncSection.tsx 文案改为如实分别展示「新增/更新/跳过（内容一致）」（前端两文件为 owner 批准的范围订正，见 DEC-req104-t074-scope-frontend-contract-20260920）。B【P3-11，DEC-req104-p3-11-remote-unsub-20260920】sync/subscriptions.rs 的 pull_feeds 末尾新增删除段，同时满足三条才删：origin='remote' 且 remote_id IS NOT NULL、规范化 URL 不在本轮远端订阅列表、sync_queue 无该 URL 的未推送变更；刻意不写 feed_tombstone（墓碑语义是「用户本地删除、不许复活」，此处是跟随远端事实删除，服务端重新订阅应能正常建回，写墓碑反而会永久跳过）；SyncReport 新增 removed_feeds 计数。**测试**：新增 6 条——sync_e2e.rs 4 条（远端退订后本地删除且下一轮不复活、origin='local' 不被误删、未绑定源不被删、有未推送队项的源受保护；为此给 mock_greader 新增 fail_quick_add 注入使 push 失败、队项真实保留，并在用例内先断言队项确实存在，否则该用例验证不到保护逻辑）+ config_sync_e2e.rs 2 条（远端已删白名单键本地必须删除且本地专属字段保留、畸形远端设置不清空本地）。**成对证据（变异实测）**：把删除段候选查询改为恒空（模拟修前 upsert-only）→ remote_unsubscribe_removes_local_remote_feed FAILED；把远端缺失键列表改为恒空 → remote_missing_whitelist_setting_is_deleted_locally FAILED；两次均已逐字节还原并复跑通过。**四门禁实测**：cargo test 183 passed / 0 failed / 9 ignored（基线 177 + 本任务新增 6，ignored 未增）；lint 0 warnings / 0 errors；build exit 0（vite built）；frontend 303/303。未引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；改动文件均 LF；测试用临时库并清理，用户真实数据库未写入。**取消 TASK-074 的原因如实记录**：非成果问题，而是总控顺序失误——先 begin（07:31Z 冻结基线）后落盘 owner 批准的范围订正（07:39Z），使 diff 恒把 .workflow-kit/tasks/items/TASK-074.json 判为 protected，unblock 循环无法收敛；已按先例取消并重立本卡，纪律已记 lesson（范围订正须先落盘再 begin）。",
+  "changed_files": [],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

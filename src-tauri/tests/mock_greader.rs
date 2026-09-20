@@ -75,6 +75,9 @@ pub struct MockGReader {
     /// 故障注入（TASK-069 审查 F1）：置位后仅 reading-list 的 stream/items/ids 返回 500
     /// （read/starred 对账仍成功）——验证「id 列举失败同样不推进游标」
     pub fail_reading_list_ids: std::sync::atomic::AtomicBool,
+    /// 故障注入（TASK-074）：置位后 subscription/quickadd 返回 500——push 失败、
+    /// 队项保留，用于验证「有未推送变更的源不被远端快照删除」
+    pub fail_quick_add: std::sync::atomic::AtomicBool,
     /// 故障注入（TASK-055）：置位后退订仍返回 200，但**服务端保留该订阅**——
     /// 模拟真实 GReader 后端在 token 失效/权限不足/目标不存在时「2xx + 未生效」的响应。
     pub unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool,
@@ -116,6 +119,7 @@ impl MockGReader {
             fail_edit_tag: std::sync::atomic::AtomicBool::new(false),
             fail_item_contents: std::sync::atomic::AtomicBool::new(false),
             fail_reading_list_ids: std::sync::atomic::AtomicBool::new(false),
+            fail_quick_add: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
             last_subscription_edit_form: Mutex::new(Vec::new()),
             status_updates: Mutex::new(Vec::new()),
@@ -200,6 +204,13 @@ impl MockGReader {
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// 置位后 subscription/quickadd 返回 500（TASK-074：让 push_feeds 失败，
+    /// 队项保留在 sync_queue 里 —— 用于验证待推送项的删除保护）。
+    pub fn set_fail_quick_add(&self, fail: bool) {
+        self.fail_quick_add
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// 置位后 ClientLogin 一律 401（模拟凭据被拒）。
     pub fn set_reject_login(&self, reject: bool) {
         self.reject_login
@@ -209,6 +220,25 @@ impl MockGReader {
     /// 设定 Fever 端点路径：`""` = `/fever/?api` 形态；`"/api/fever.php"` = FreshRSS 形态。
     pub fn set_fever_endpoint(&self, endpoint: &str) {
         *self.fever_endpoint.lock().unwrap() = endpoint.to_string();
+    }
+
+    /// TASK-074（P3-11）：从远端订阅列表中移除某个 feed id —— 模拟「用户在服务端退订」。
+    /// 只动 subscriptions 与 folders，不触碰本地库，用于验证 pull 的删除分支。
+    pub fn remove_remote_subscription(&self, feed_id: &str) {
+        self.subscriptions
+            .lock()
+            .unwrap()
+            .retain(|s| s.id != feed_id);
+    }
+
+    /// TASK-074：读取当前远端订阅列表（断言删除后远端已无该源）。
+    pub fn remote_subscription_ids(&self) -> Vec<String> {
+        self.subscriptions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.id.clone())
+            .collect()
     }
 
     /// 设定 Fever 返回的 api_version（FreshRSS 实测为 4）。
@@ -752,6 +782,10 @@ fn route(
         }
         // quickadd：订阅（幂等：已存在返回既有 id）
         ("POST", p) if p.ends_with("/reader/api/0/subscription/quickadd") => {
+            // TASK-074 故障注入：push 失败 → 队项保留在 sync_queue
+            if srv.fail_quick_add.load(std::sync::atomic::Ordering::SeqCst) {
+                return (500, r#"{"error_message":"injected quickadd failure"}"#.into());
+            }
             let form = parse_form(body);
             let url = form
                 .get("quickadd")

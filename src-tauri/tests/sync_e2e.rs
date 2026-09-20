@@ -319,3 +319,315 @@ async fn miniflux_sync_end_to_end() {
     let _ = std::fs::remove_file(&tmp);
     println!("=== SYNC E2E PASS ===");
 }
+
+/* ============================================================
+P3-11（TASK-074，DEC-req104-p3-11-remote-unsub-20260920）：
+远端退订 → 本地同步删除（含防误删与 pending 保护）
+
+修复前：pull_feeds 只有 upsert、没有删除分支，远端退掉的订阅在本地永久残留。
+修复后：满足「origin='remote' 且 remote_id 已绑定」且「规范化 URL 不在本轮远端
+订阅列表」且「队列里没有该 URL 的未推送变更」三条的源，才在本地删除。
+本地直连源（origin='local'）与未绑定源一律保留。
+=========================================================== */
+
+async fn setup_remote_unsub(name: &str) -> (
+    std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    reqwest::Client,
+    std::sync::Arc<MockGReader>,
+) {
+    let server = MockGReader::start().await.expect("start mock server");
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_unsub_{}_{}_{}.db",
+        name,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).expect("open db");
+    db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "greader_username", "test").unwrap();
+    db::set_setting(&conn, "greader_password", "test-token").unwrap();
+    let http = app_lib::ingestion::build_client(10);
+    (
+        std::sync::Arc::new(tokio::sync::Mutex::new(conn)),
+        http,
+        server,
+    )
+}
+
+fn feed_id_by_url(conn: &rusqlite::Connection, url: &str) -> Option<i64> {
+    conn.query_row(
+        "SELECT id FROM feeds WHERE feed_url = ?1",
+        rusqlite::params![url],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+fn feed_origin(conn: &rusqlite::Connection, id: i64) -> Option<String> {
+    conn.query_row("SELECT origin FROM feeds WHERE id = ?1", [id], |r| r.get(0))
+        .ok()
+}
+
+/// B① 远端退订的「服务端来源」订阅必须在本地删除，且下一轮 pull 不复活。
+#[tokio::test]
+async fn remote_unsubscribe_removes_local_remote_feed() {
+    let (db, http, server) = setup_remote_unsub("removes").await;
+
+    // 第一轮：把远端 feed 11（remote-only）拉到本地 → origin='remote' + 绑定 remote_id
+    sync::feeds_phase(&db, &http).await.expect("first pull");
+    let feed_id = {
+        let conn = db.lock().await;
+        let id = feed_id_by_url(&conn, "http://example.com/remote-only.xml")
+            .expect("remote-only feed pulled to local");
+        assert_eq!(
+            feed_origin(&conn, id).as_deref(),
+            Some("remote"),
+            "pulled remote feed must be origin='remote'"
+        );
+        id
+    };
+
+    // 服务端退订 feed 11
+    server.remove_remote_subscription("feed/11");
+    assert!(
+        !server.remote_subscription_ids().contains(&"feed/11".to_string()),
+        "remote no longer lists feed 11"
+    );
+
+    // 第二轮：本地必须同步删除（修复前：残留）
+    let report = sync::feeds_phase(&db, &http).await.expect("second pull");
+    {
+        let conn = db.lock().await;
+        assert!(
+            feed_id_by_url(&conn, "http://example.com/remote-only.xml").is_none(),
+            "remote-unsubscribed feed must be deleted locally (was id {feed_id})"
+        );
+    }
+    assert_eq!(
+        report.removed_feeds, 1,
+        "report must count the locally removed subscription"
+    );
+
+    // 第三轮：不应复活（无墓碑也能保持删除，因为远端确实不再列出）
+    sync::feeds_phase(&db, &http).await.expect("third pull");
+    {
+        let conn = db.lock().await;
+        assert!(
+            feed_id_by_url(&conn, "http://example.com/remote-only.xml").is_none(),
+            "removed feed must not come back on the next pull"
+        );
+    }
+}
+
+/// B② 本地直连源（origin='local'）即便在远端消失也不得被删除。
+#[tokio::test]
+async fn remote_unsubscribe_keeps_local_origin_feed() {
+    let (db, http, server) = setup_remote_unsub("keeps_local").await;
+
+    // 本地直连添加一个与远端 feed 10 同 URL 的源，并绑定远端 id（URL 碰撞合并的结果）
+    {
+        let conn = db.lock().await;
+        let folder = db::create_folder(&conn, "本地分类", "article").unwrap();
+        let fid = db::insert_feed(
+            &conn,
+            "http://127.0.0.1:8765/local_feed.xml",
+            None,
+            "Local Direct Feed",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        db::set_feed_remote_id(&conn, fid, 10).unwrap();
+        assert_eq!(feed_origin(&conn, fid).as_deref(), Some("local"));
+    }
+
+    // 服务端退掉 feed 10
+    server.remove_remote_subscription("feed/10");
+    sync::feeds_phase(&db, &http).await.expect("pull after unsub");
+
+    let conn = db.lock().await;
+    assert!(
+        feed_id_by_url(&conn, "http://127.0.0.1:8765/local_feed.xml").is_some(),
+        "origin='local' feed must survive a remote unsubscribe (data-loss guard)"
+    );
+}
+
+/// B③ 队列里有未推送变更的源不得被远端快照删除（pending 保护）。
+#[tokio::test]
+async fn remote_unsubscribe_keeps_feed_with_pending_queue_item() {
+    let (db, http, server) = setup_remote_unsub("pending").await;
+
+    // 先正常拉取 feed 11 到本地（origin='remote'、已绑定）
+    sync::feeds_phase(&db, &http).await.expect("first pull");
+    {
+        let conn = db.lock().await;
+        assert!(
+            feed_id_by_url(&conn, "http://example.com/remote-only.xml").is_some(),
+            "remote-only feed pulled to local"
+        );
+        // 模拟「本地刚改名、尚未推送」：入队一条该 URL 的变更
+        db::enqueue_sync(
+            &conn,
+            None,
+            Some("http://example.com/remote-only.xml"),
+            "add_feed",
+            Some(r#"{"title":"改名未推送"}"#),
+        )
+        .unwrap();
+    }
+
+    // 服务端退订该源，并让本轮的 push 失败 —— 队项因此保留在 sync_queue
+    // （feeds_phase 先 push 再 pull；push 成功会把队项 prune 掉，那样 pending
+    //  保护就无从验证。注入失败正是「本地变更尚未回传」的真实形态。）
+    server.remove_remote_subscription("feed/11");
+    server.set_fail_quick_add(true);
+    let report = sync::feeds_phase(&db, &http).await.expect("pull after unsub");
+    server.set_fail_quick_add(false);
+
+    let conn = db.lock().await;
+    // 前置：队项确实还在（否则本用例没有验证到保护逻辑）
+    let queued: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE feed_url = ?1",
+            rusqlite::params!["http://example.com/remote-only.xml"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        queued, 1,
+        "precondition: the unsent queue item must still be present"
+    );
+    assert!(
+        feed_id_by_url(&conn, "http://example.com/remote-only.xml").is_some(),
+        "feed with an unsent queued change must NOT be deleted by the remote snapshot"
+    );
+    assert_eq!(
+        report.removed_feeds, 0,
+        "pending-protected feed must not be counted as removed"
+    );
+}
+
+/// B②' 未绑定 remote_id 的源（origin='remote' 但 remote_id 为空）不得被删除。
+#[tokio::test]
+async fn remote_unsubscribe_keeps_unbound_feed() {
+    let (db, http, server) = setup_remote_unsub("unbound").await;
+
+    {
+        let conn = db.lock().await;
+        let folder = db::create_folder(&conn, "分类", "article").unwrap();
+        db::insert_feed_origin(
+            &conn,
+            "http://example.com/never-listed.xml",
+            None,
+            "Unbound Remote",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+            "remote",
+        )
+        .unwrap();
+    }
+
+    server.remove_remote_subscription("feed/11");
+    sync::feeds_phase(&db, &http).await.expect("pull");
+
+    let conn = db.lock().await;
+    assert!(
+        feed_id_by_url(&conn, "http://example.com/never-listed.xml").is_some(),
+        "remote feed without a bound remote_id must not be deleted"
+    );
+}
+
+/// B③' **article 级**未推送队项也算 pending：源与其文章都不得被删除。
+///
+/// 独立审查 FINDING（TASK-075）：原实现只查 `sync_queue.feed_url`，而
+/// commands/articles.rs 的 record_read_state / record_star_state / mark_all_read
+/// 入队的行是 `article_id = Some(id), feed_url = None`。只查 feed_url 时，离线期间
+/// 「标星/已读但未推送」的源会被远端退订连源带文章一起删除，未推送状态也被静默丢弃。
+#[tokio::test]
+async fn remote_unsubscribe_keeps_feed_with_article_scoped_pending() {
+    let (db, http, server) = setup_remote_unsub("pending_article").await;
+
+    // 第一轮：远端 feed 11 拉到本地（origin='remote' + 已绑定）
+    sync::feeds_phase(&db, &http).await.expect("first pull");
+
+    let (article_id, feed_id) = {
+        let conn = db.lock().await;
+        let fid = feed_id_by_url(&conn, "http://example.com/remote-only.xml")
+            .expect("remote-only feed pulled to local");
+        let a = db::NewArticle {
+            guid: "guid-article-scoped-pending".into(),
+            url: Some("http://example.com/post/pending".into()),
+            title: "Offline starred".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "pending".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: None,
+            source: "direct".into(),
+        };
+        let (aid, _) = db::upsert_article_with_feed(&conn, fid, &a, false).unwrap();
+        // 与 commands/articles.rs::record_star_state 逐字同形：article_id=Some, feed_url=None
+        db::enqueue_sync(&conn, Some(aid), None, "star", None).unwrap();
+        (aid, fid)
+    };
+
+    // 前置断言：队项确实存在，且确实是 feed_url IS NULL 的 article 级行
+    // （否则本用例验证不到「article 级」这一路径）
+    {
+        let conn = db.lock().await;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue
+                 WHERE article_id = ?1 AND action = 'star' AND feed_url IS NULL",
+                rusqlite::params![article_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "precondition: an unsent article-scoped queue row must exist");
+    }
+
+    // 服务端退订该源
+    server.remove_remote_subscription("feed/11");
+    let report = sync::feeds_phase(&db, &http).await.expect("pull after unsub");
+
+    let conn = db.lock().await;
+    assert_eq!(
+        feed_id_by_url(&conn, "http://example.com/remote-only.xml"),
+        Some(feed_id),
+        "feed with an unsent ARTICLE-scoped change must NOT be deleted"
+    );
+    let article_alive: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE id = ?1",
+            rusqlite::params![article_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(article_alive, 1, "its article must survive too");
+    let still_queued: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sync_queue WHERE article_id = ?1 AND action = 'star'",
+            rusqlite::params![article_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still_queued, 1, "the unsent state must not be silently dropped");
+    assert_eq!(
+        report.removed_feeds, 0,
+        "pending-protected feed must not be counted as removed"
+    );
+}

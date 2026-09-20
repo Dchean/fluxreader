@@ -124,18 +124,17 @@ fn filter_app_settings(raw: Option<String>) -> AppResult<Option<String>> {
     };
     let mut settings: serde_json::Value = serde_json::from_str(&raw)?;
     if let Some(obj) = settings.as_object_mut() {
-        // 排除本地特定字段（按字段清单）
-        obj.remove("autoStart");
-        obj.remove("closePromptShown");
+        // 排除本地专属字段（与下载侧共用 is_local_only_setting 单一判定）
+        obj.retain(|k, _| !is_local_only_setting(k));
     }
     Ok(Some(serde_json::to_string(&settings)?))
 }
 
 /// 应用下载 payload 到本地库（白名单原则：仅应用允许字段，保留本地凭据）。
-/// 分类/源 upsert（按名称/URL 匹配，已存在跳过），设置字段级覆盖（不整体替换）。
-/// 返回 (新增源数, 跳过数)。
+/// 分类/源 upsert（按名称/URL 匹配），设置字段级覆盖（不整体替换，远端已删的白名单键本地同步删除）。
+/// 返回 [`ApplyOutcome`]（新增/更新/跳过/删除的源数）。
 /// 参考：.agents/notes/implemented/feature/2026-09-13-opt004-config-sync-field-inventory.md
-pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<(usize, usize)> {
+pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<ApplyOutcome> {
     if p.schema > SCHEMA_VERSION {
         return Err(AppError::internal(format!(
             "远端配置版本 v{} 高于本客户端支持的 v{}，请升级客户端",
@@ -177,7 +176,15 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
     }
 
     // 源按 URL upsert；没有分类的落默认分类（建一个「导入」）
+    //
+    // TASK-074（P2-12，DEC-req104-p2-12-config-delete-20260920）：计数口径修正。
+    // 此前 `skipped` 在「已存在并已更新」分支里自增，语义实为「已更新数」，
+    // 前端却把它展示成「跳过 M 个已存在」——用户看到的数字是错的。现在分开：
+    //   imported = 新建的源数
+    //   updated  = 已存在且白名单字段确有变化的源数（真的写了库）
+    //   skipped  = 已存在但内容与远端一致、无需改动的源数（真的跳过）
     let mut imported = 0usize;
+    let mut updated = 0usize;
     let mut skipped = 0usize;
     for f in &p.feeds {
         match db::find_feed_by_url(&tx, &f.url)? {
@@ -196,20 +203,43 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                         id
                     }
                 };
-                tx.execute(
-                    "UPDATE feeds SET title = ?1, folder_id = ?2, layout = ?3, auto_summary = ?4, auto_translate = ?5, site_url = ?6, favicon_url = ?7 WHERE id = ?8",
+                // 先读现值，判断这次到底有没有变化——有变化才算 updated，
+                // 完全一致才计入 skipped（用户看到的「跳过」才是真的跳过）
+                let changed: bool = tx.query_row(
+                    "SELECT (title IS NOT ?1) OR (folder_id IS NOT ?2) OR (layout IS NOT ?3)
+                            OR (auto_summary IS NOT ?4) OR (auto_translate IS NOT ?5)
+                            OR (site_url IS NOT ?6) OR (favicon_url IS NOT ?7)
+                     FROM feeds WHERE id = ?8",
                     rusqlite::params![
                         f.title,
                         folder_id,
                         f.layout,
-                        f.auto_summary,
-                        f.auto_translate,
+                        f.auto_summary as i64,
+                        f.auto_translate as i64,
                         f.site_url,
                         f.favicon_url,
                         existing_id
                     ],
+                    |r| r.get(0),
                 )?;
-                skipped += 1;
+                if changed {
+                    tx.execute(
+                        "UPDATE feeds SET title = ?1, folder_id = ?2, layout = ?3, auto_summary = ?4, auto_translate = ?5, site_url = ?6, favicon_url = ?7 WHERE id = ?8",
+                        rusqlite::params![
+                            f.title,
+                            folder_id,
+                            f.layout,
+                            f.auto_summary,
+                            f.auto_translate,
+                            f.site_url,
+                            f.favicon_url,
+                            existing_id
+                        ],
+                    )?;
+                    updated += 1;
+                } else {
+                    skipped += 1;
+                }
             }
             None => {
                 // 新源导入
@@ -265,10 +295,33 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
     }
 
     tx.commit()?;
-    Ok((imported, skipped))
+    Ok(ApplyOutcome {
+        imported,
+        updated,
+        skipped,
+    })
+}
+
+/// 应用下载配置的结果计数（TASK-074）：把「已更新」与「已跳过」分开，
+/// 供界面如实展示（此前 skipped 实为已更新数，文案却是「跳过」）。
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+pub struct ApplyOutcome {
+    /// 新建的源数
+    pub imported: usize,
+    /// 已存在且白名单字段确有变化、已写库的源数
+    pub updated: usize,
+    /// 已存在但内容与远端一致、无需改动的源数
+    pub skipped: usize,
 }
 
 /// 合并 app_settings：远端白名单字段覆盖本地，本地特定字段保留。
+///
+/// TASK-074（P2-12，DEC-req104-p2-12-config-delete-20260920）：此前只做 upsert——
+/// 远端删掉的配置键在本地永远残留（用户在服务端清掉某设置，本地却仍按旧值运行，
+/// 且下一次上传会把它重新带回远端，形成「删不掉」）。现在的语义：
+/// ① 远端存在且属白名单 → 覆盖本地；
+/// ② 远端**不存在**且属白名单、但本地存在 → 本地同步删除（跟随远端事实）；
+/// ③ 本地专属字段（autoStart / closePromptShown）永不接受远端删除或覆盖。
 fn merge_app_settings(conn: &rusqlite::Connection, remote_raw: &str) -> AppResult<()> {
     let remote: serde_json::Value = serde_json::from_str(remote_raw)?;
     let local_raw = db::get_setting(conn, "app_settings")?;
@@ -279,10 +332,27 @@ fn merge_app_settings(conn: &rusqlite::Connection, remote_raw: &str) -> AppResul
         serde_json::json!({})
     };
 
-    // 远端白名单字段覆盖（排除 autoStart, closePromptShown）
-    if let (Some(remote_obj), Some(merged_obj)) = (remote.as_object(), merged.as_object_mut()) {
+    let remote_obj = remote.as_object();
+    // ② 远端缺失的白名单键 → 本地删除（先算再改，避免借用冲突）
+    if let Some(local_obj) = merged.as_object_mut() {
+        let missing: Vec<String> = match remote_obj {
+            Some(robj) => local_obj
+                .keys()
+                .filter(|k| !is_local_only_setting(k) && !robj.contains_key(*k))
+                .cloned()
+                .collect(),
+            // 远端 app_settings 不是对象（如空串/畸形）→ 不做删除，避免把本地设置整批清掉
+            None => Vec::new(),
+        };
+        for key in missing {
+            local_obj.remove(&key);
+        }
+    }
+
+    // ① 远端白名单字段覆盖（③ 本地专属字段除外）
+    if let (Some(remote_obj), Some(merged_obj)) = (remote_obj, merged.as_object_mut()) {
         for (key, value) in remote_obj {
-            if key != "autoStart" && key != "closePromptShown" {
+            if !is_local_only_setting(key) {
                 merged_obj.insert(key.clone(), value.clone());
             }
         }
@@ -290,6 +360,13 @@ fn merge_app_settings(conn: &rusqlite::Connection, remote_raw: &str) -> AppResul
 
     db::set_setting(conn, "app_settings", &serde_json::to_string(&merged)?)?;
     Ok(())
+}
+
+/// 本地专属配置键：只存本机、不参与远端同步（上传时被 filter_app_settings 剔除，
+/// 应用时既不接受远端覆盖，也不因远端缺失而删除）。TASK-074：此前这两个键名在
+/// 上传过滤与下载合并两处各写一遍，收敛为单一判定，避免两侧漂移。
+fn is_local_only_setting(key: &str) -> bool {
+    matches!(key, "autoStart" | "closePromptShown")
 }
 
 fn list_folder_id_by_name(conn: &rusqlite::Connection, name: &str) -> AppResult<Option<i64>> {
@@ -543,8 +620,13 @@ pub async fn config_sync_apply(
 ) -> AppResult<serde_json::Value> {
     let p: SyncPayload = serde_json::from_str(&payload)?;
     let conn = state.db.lock().await;
-    let (imported, skipped) = apply_payload(&conn, &p)?;
-    Ok(serde_json::json!({ "imported": imported, "skipped": skipped }))
+    let outcome = apply_payload(&conn, &p)?;
+    // TASK-074：如实分开 imported / updated / skipped（此前 skipped 是已更新数）
+    Ok(serde_json::json!({
+        "imported": outcome.imported,
+        "updated": outcome.updated,
+        "skipped": outcome.skipped,
+    }))
 }
 
 /// 状态：远端配置时间戳 vs 本地上次同步时间。

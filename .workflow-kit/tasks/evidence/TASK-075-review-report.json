@@ -1,0 +1,68 @@
+{
+  "task_id": "TASK-075",
+  "candidate_digest": "21bffb8c1d45c84aefbf5d2284705bb37965f62b1633e1c1dabcea30141bae36",
+  "verification_run": "RUN-4386e97bc9044e44b27bc91863c4c3a8",
+  "verdict": "PASS",
+  "summary": "Independent re-review of TASK-075 after the round-1 defect (P3-11 pending guard only checked sync_queue.feed_url, missing article-scoped rows with feed_url IS NULL) was fixed. I read the deletion pass in src-tauri/src/sync/subscriptions.rs, all 6 tests in src-tauri/tests/sync_e2e.rs, and the A-side in src-tauri/src/config_sync.rs. The fix is correct and complete: the guard now folds both queue shapes into a single pending_feed_ids set and all three deletion conditions are genuinely ANDed by continue-guards. I found NO third bypass shape. I ran an independent mutation test (neutering only the article-scoped JOIN) which made exactly the new regression test fail and nothing else, then restored the file byte-identically (sha256 verified) and re-ran to green. CRITICAL PROCESS NOTE: after restoring, the first re-run still reported FAILED - this was a STALE ARTIFACT, not a defect. Per the task's own warning I forced `cargo clean -p app` and re-ran, and all 6 tests passed cleanly. I also verified all four recorded gate numbers against the raw logs and re-checked all 158 candidate file hashes (0 mismatches). No findings.",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "Both owner-adjudicated behaviour changes are implemented and match the acceptance list. (A-side) merge_app_settings now deletes whitelisted keys that are ABSENT from the remote object (config_sync.rs:336-350); the deletion is skipped entirely when `remote.as_object()` is None, so a malformed/non-object payload cannot wipe local settings - acceptance A1 second clause. is_local_only_setting (config_sync.rs:368-370) is a SINGLE predicate shared by the upload filter (line 128) and the download merge (lines 341, 355), so autoStart/closePromptShown are neither overwritten nor deleted, and the two previously duplicated key lists cannot drift - acceptance A1 first clause and the stated maintainability intent. apply_payload now returns ApplyOutcome{imported,updated,skipped} (config_sync.rs:186-188, 206-241, 299-314, 624-628): it reads current values first and counts `updated` only when a whitelist field actually changed, `skipped` only when the existing feed is byte-identical to the remote - acceptance A2. (B-side) The deletion pass (subscriptions.rs:321-408) deletes a local feed only when all three conditions hold, and deliberately writes no feed_tombstone, matching DEC-req104-p3-11. SyncReport gained removed_feeds. Acceptance B3 - the exact criterion the round-1 defect violated - is now satisfied by the article-scoped join. Non-goals respected: no schema/migration change, no dependency change (Cargo.toml/Cargo.lock untouched per git status), no tombstone write, origin='local' and unbound feeds explicitly excluded by the candidate SQL predicate.",
+      "evidence_files": [
+        "src-tauri/src/config_sync.rs",
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/tests/sync_e2e.rs",
+        "src-tauri/tests/config_sync_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-075-cumulative-diff.txt"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "I re-verified the recorded gate numbers against the raw logs rather than trusting the summary. cargo_test.stdout.txt sums to exactly 184 passed / 0 failed / 9 ignored across all binaries (86+6+1+10+3+4+14+4+2+2+3+2+4+1+3+3+7+6+18+5 = 184; ignored 3+1+3+1+1 = 9), matching the 183-before-plus-one-new-test claim. lint.stdout.txt: 'Found 0 warnings and 0 errors', exit 0. build.stdout.txt shows a completed Vite bundle ('built in 880ms'), exit 0. frontend.stdout.txt ends with '前端逻辑回归合计 303/303 通过', exit 0. I independently re-ran `cargo test --test sync_e2e` from a forced-clean build: 6 passed / 0 failed. The new test remote_unsubscribe_keeps_feed_with_article_scoped_pending (sync_e2e.rs:557-633) has a genuine precondition assertion at lines 591-601 requiring the queue row to exist with article_id set, action='star' and feed_url IS NULL, so it cannot pass vacuously. The five pre-existing remote-unsubscribe assertions are preserved verbatim (lines 375-548) and the paired removed_feeds counters are asserted in both directions (==1 for the true deletion at line 410, ==0 for the two protected cases at lines 511 and 629). Mutation evidence confirms the test is load-bearing: neutering the article-scoped half of the guard made it fail and left the other four tests green.",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-4386e97bc9044e44b27bc91863c4c3a8-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-4386e97bc9044e44b27bc91863c4c3a8-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-4386e97bc9044e44b27bc91863c4c3a8-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-4386e97bc9044e44b27bc91863c4c3a8-frontend.stdout.txt",
+        "src-tauri/tests/sync_e2e.rs",
+        ".workflow-kit/tasks/runs/RUN-4386e97bc9044e44b27bc91863c4c3a8.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "This is the highest-risk area and I attacked it directly. (1) Are the three conditions genuinely ANDed? Yes - subscriptions.rs:390-397 uses two `continue` guards (remote URL still present at 392; pending at 395) before the single terminal delete at 398, so the only reachable delete path requires origin='remote' AND remote_id IS NOT NULL (candidate SQL, line 330), URL absent from the remote set, AND feed_id absent from pending_feed_ids. (2) Does the pending set cover both row shapes? Yes, and they are unified into ONE key space: article-scoped rows join articles.feed_id (lines 352-363); feed_url rows are normalized and mapped through a full `SELECT id, feed_url FROM feeds` scan (lines 364-389). Both sides of the URL comparison use db::normalize_url, so the mapping cannot silently mismatch on the same text, and any stale pending URL that matches no local feed simply contributes nothing rather than mis-attributing a deletion. (3) THIRD BYPASS - I looked specifically and found none. Both-columns-NULL rows are unreachable: the only enqueue_sync call sites are commands/articles.rs:97/109/185 (article_id=Some, feed_url=None), commands/folders.rs:217, commands/opml.rs:82, commands/sync.rs:180 (article_id=None, feed_url=Some) - confirming the manager's coverage note. A queue row whose article was cascade-deleted cannot defeat the guard for a still-existing feed: the sync_queue.article_id FK is ON DELETE CASCADE (migrations.rs:83) and foreign_keys=ON is set at migrations.rs:235, so such a row would already be gone with its article, meaning no pending work remains; conversely while the article exists the join maps it back to its feed. Crucially, cleanup_cache explicitly excludes articles referenced by sync_queue (db/articles.rs:414), so the queue cannot be silently decoupled from a live article by cache pruning. Remaining action values are inert: remove_feed is a never-consumed historical action purged by purge_remove_feed_zombies, and add_feed is always paired with feed_url. (4) Network failure cannot trigger deletion: the deletion block sits after the early return on subscription-fetch failure, so a failed pull never reaches it; additionally a candidate-read or prepare error records an error and skips the pass rather than deleting. Verified by reading the control flow around the pass.",
+      "evidence_files": [
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/src/db/sync_queue.rs",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/db/migrations.rs",
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/tests/sync_e2e.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "The change reduces rather than adds duplicated rules. is_local_only_setting replaces two separately-written key lists (upload filter and download merge), which is the correct direction - the previous duplication was the drift risk. The deletion pass is one well-commented block with the owner decision id and the four boundary rules recorded in place, and the two queue shapes are collapsed into a single pending_feed_ids predicate so the loop carries one membership test instead of two divergent ones. The round-1 fix itself improves maintainability by removing a latent asymmetry (URL-keyed vs id-keyed pending checks) in favour of one id-keyed check. ApplyOutcome makes the previously misleading three-way counting explicit and self-documenting. Minor observation, not a defect and not a finding: the guard is implicitly coupled to record_*_state always setting exactly one of article_id/feed_url; the code comments now state this invariant at the call sites, but no test asserts it for future call sites. Given all six current call sites conform and the comment records the invariant, this is adequate for the current change set.",
+      "evidence_files": [
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/src/config_sync.rs",
+        "src-tauri/src/commands/articles.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "Static analysis only; I did not invent benchmarks. The added cost is bounded and paid once per sync round inside the already-held DB lock: one indexed DISTINCT join (sync_queue -> articles on articles.id, the primary key) at subscriptions.rs:352-363, one DISTINCT scan of sync_queue.feed_url at 364-375, and one unindexed sequential scan of the feeds table at 378-389. The feeds scan is the only O(n) term and n is the number of subscriptions (order 10^2 for a personal reader, the stated audience), executed once per round - not per feed and not per article. The candidates loop itself is O(candidate feeds) with HashSet lookups, so no nested-scan blowup. These are dwarfed by the per-round HTTP pulls and entry ingestion that dominate a sync round, so the added cost is negligible in practice and does not regress the project's stated performance targets, which concern article-loading latency rather than sync bookkeeping. No measured regression was recorded or is expected; I claim no speedup.",
+      "evidence_files": [
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/src/db/sync_queue.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

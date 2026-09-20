@@ -3,19 +3,21 @@
   "id": "RUN-93cca1ab6b134cd9904f973bbc508d48",
   "task_id": "TASK-074",
   "kind": "implementation",
-  "outcome": "running",
+  "outcome": "blocked",
   "executor": {
     "harness": "current_agent",
     "model": null,
     "context_id": "zcode-main-20260920-t074"
   },
   "started_at_utc": "2026-09-20T07:31:48.021739Z",
-  "finished_at_utc": null,
+  "finished_at_utc": "2026-09-20T08:00:17.968453Z",
   "exit_code": null,
   "timed_out": false,
   "input_digest": "fb5234e1e8b2243aae3a822c590df1a2a982dc88df803b94a2d979e0ae37933c",
   "candidate_digest": null,
-  "raw_output_refs": [],
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-93cca1ab6b134cd9904f973bbc508d48-worker-result.json"
+  ],
   "checks": [],
   "review": {
     "mode": null,
@@ -24,5 +26,7 @@
     "candidate_digest": null
   },
   "estimated_cost_usd": null,
-  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-93cca1ab6b134cd9904f973bbc508d48-scope.json"
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-93cca1ab6b134cd9904f973bbc508d48-scope.json",
+  "failure_kind": "scope",
+  "failure_reason": "Out-of-scope changes: .workflow-kit/tasks/items/TASK-074.json (allowed: src-tauri/src/commands/sync.rs, src-tauri/src/config_sync.rs, src-tauri/src/db/feeds.rs, src-tauri/src/sync/mod.rs, src-tauri/src/sync/phases.rs, src-tauri/src/sync/subscriptions.rs, src-tauri/tests/account_lifecycle_e2e.rs, src-tauri/tests/config_sync_e2e.rs, src-tauri/tests/mock_greader.rs, src-tauri/tests/sync_e2e.rs, src/components/settings/ConfigSyncSection.tsx, src/lib/api.ts, tools/frontend-regression.mjs)"
 }

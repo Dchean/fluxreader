@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "id": "TASK-075",
+  "title": "同步语义行为变更收口：配置同步删除语义与计数口径（P2-12）+ 远端退订同步删本地（P3-11）（REQ-104）",
+  "kind": "implementation",
+  "retry_safe": false,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "本任务收口被取消的 TASK-074 的同一成果（历史：TASK-074 已完成全部实现——四项门禁实测通过、新增 6 条测试、两条关键行为各有变异取证——但 finish 的范围检查无法通过：owner 批准的 allowed_paths 订正（增加 src/lib/api.ts 与 src/components/settings/ConfigSyncSection.tsx）落盘于该任务 begin 之后，任务基线为订正前的快照，diff 恒把 .workflow-kit/tasks/items/TASK-074.json 判为 protected，unblock 循环无法收敛，故按 TASK-068→TASK-069 先例取消并以本任务收口；本任务相对 begin 快照为零新增改动，成果经候选快照绑定）。内容按 owner 2026-09-20 两项设计边界裁决实施行为变更。A【P2-12 配置同步删除语义，DEC-req104-p2-12-config-delete-20260920】① merge_app_settings 由只 upsert 改为「远端缺失的白名单键本地同步删除」，并新增 is_local_only_setting 单一判定收敛 autoStart/closePromptShown（上传过滤与下载合并共用，避免漂移）；远端 app_settings 非对象时不做删除（防一次坏 payload 清空本地设置）；② 计数口径修正：apply_payload 返回值由 (imported, skipped) 改为 ApplyOutcome{imported, updated, skipped}——此前 skipped 在「已存在并被更新」分支自增、语义实为已更新数却被前端展示为「跳过」；现在先读现值判断有无变化，有变化计 updated、完全一致才计 skipped；前端 api.ts 新增 ConfigSyncApplyResult 类型、ConfigSyncSection.tsx 文案改为如实分别展示「新增/更新/跳过（内容一致）」。B【P3-11 远端退订同步删本地，DEC-req104-p3-11-remote-unsub-20260920】pull_feeds 新增删除段，同时满足三条才删：origin='remote' 且 remote_id IS NOT NULL、规范化 URL 不在本轮远端订阅列表、sync_queue 无该 URL 的未推送变更；刻意不写 feed_tombstone（墓碑语义是「用户本地删除、不许复活」，此处是跟随远端事实删除，服务端重新订阅应能正常建回）；SyncReport 新增 removed_feeds。四项门禁须保持：cargo test 通过数 ≥183 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 通过数 ≥303。",
+  "non_goals": [
+    "不改本地删除不推远端的既有方向（本地删除仍走 TASK-035 的远端退订+墓碑）",
+    "不删除本地直连订阅（origin='local'）或未绑定订阅",
+    "不改 config_sync 的白名单字段集合（除删除语义本身）",
+    "不改 pull_feeds 的绑定/碰撞合并逻辑（只新增删除分支）",
+    "不给远端退订写 feed_tombstone（会阻碍服务端重新订阅后的正常建回）",
+    "不做迁移/表结构变更",
+    "不引入新依赖",
+    "不改工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-104"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-070"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "high",
+    "decision_ids": [
+      "DEC-req104-p2-12-config-delete-20260920",
+      "DEC-req104-p3-11-remote-unsub-20260920",
+      "DEC-req104-t074-scope-frontend-contract-20260920"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/config_sync.rs",
+      "src-tauri/src/sync/mod.rs",
+      "src-tauri/src/sync/subscriptions.rs",
+      "src-tauri/src/commands/sync.rs",
+      "src-tauri/src/sync/phases.rs",
+      "src-tauri/src/db/feeds.rs",
+      "src-tauri/tests/config_sync_e2e.rs",
+      "src-tauri/tests/sync_e2e.rs",
+      "src-tauri/tests/mock_greader.rs",
+      "src-tauri/tests/account_lifecycle_e2e.rs",
+      "src/lib/api.ts",
+      "src/components/settings/ConfigSyncSection.tsx",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "A① 远端白名单字段在远端消失后本地同步删除（有断言证明删除），本地专属字段 autoStart/closePromptShown 不被远端删除；远端 app_settings 畸形时不清空本地",
+    "A② apply_payload 计数口径修正为三口径分离（imported/updated/skipped），有断言区分「已更新」与「已跳过」，前端类型与文案如实对应",
+    "B① 远端退订的已绑定且 origin='remote' 的订阅在本地删除，且下一轮 pull 不复活",
+    "B② 本地直连订阅（origin='local'）与未绑定订阅在远端退订场景下不被删除（防误删断言）",
+    "B③ 有未推送队项（pending）的源不被远端快照删除（失败路径断言，且用例内先证明队项确实还在）",
+    "① 两条关键行为各有修前可复现/修后通过的成对证据（变异实测：删掉实现即失败、还原即通过）",
+    "② 四门禁全绿：cargo test 通过数 ≥183 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 通过数 ≥303",
+    "③ 不引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；文本文件 LF；用户真实数据库不得写入",
+    "④ 台账改动（任务记录/决定）须在 begin 之前完成，避免相对基线越界"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json",
+      "summary": "2026-09-20 基线（TASK-070 终版候选验证 RUN-44d4ee12，提交 48e2763）：cargo test 177 passed / 0 failed / 9 ignored、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 303/303。本任务 behavior=change 且属业务契约变更，依据 owner 2026-09-20 三项裁决：① 配置同步由『只 upsert』改为『远端消失则本地删除』；② 应用结果计数由『skipped=已存在被更新数』改为 imported/updated/skipped 三口径分离（并同步前端类型与文案）；③ 远端退订由『本地永不删』改为『同步删本地（限 origin=remote 且已绑定，且无未推送变更）』。这些都与审计记录的旧行为描述冲突（P2-12『无删除语义』、P3-11『本地永不删，疑有意』），属用户已确认的新行为与旧行为冲突，故按 replace 语义处理：替换断言须引用对应 owner 决定。既有测试中与旧行为绑定的部分改造为断言新行为（config_sync_e2e 的 imported/skipped 断言改为三口径、sync_e2e 的既有断言逐字保持），其余全部保持。注：本任务收口 TASK-074 的成果，其实现与取证已在被取消的 TASK-074 中完成并留在工作区；本任务 begin 快照包含全部成果，故相对基线为零新增改动。",
+      "decision_ids": [
+        "DEC-req104-p2-12-config-delete-20260920",
+        "DEC-req104-p3-11-remote-unsub-20260920",
+        "DEC-req104-t074-scope-frontend-contract-20260920"
+      ]
+    },
+    "decision_ids": [
+      "DEC-req104-p2-12-config-delete-20260920",
+      "DEC-req104-p3-11-remote-unsub-20260920",
+      "DEC-req104-t074-scope-frontend-contract-20260920"
+    ],
+    "actions": [
+      {
+        "action": "replace",
+        "target": "配置同步的『远端缺失即保留本地』旧断言：改为『远端白名单字段消失后本地同步删除，本地专属字段保留，畸形 payload 不清空』",
+        "reason": "owner 裁决 DEC-req104-p2-12-config-delete-20260920 选择实施删除语义，与旧断言冲突",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "replace",
+        "target": "config_sync_e2e 的 imported/skipped 二元断言：改为 imported/updated/skipped 三口径（并核对前端 ConfigSyncApplyResult 与展示文案）",
+        "reason": "owner 裁决 DEC-req104-p2-12-config-delete-20260920 与范围订正 DEC-req104-t074-scope-frontend-contract-20260920 要求口径如实分离并贯通前端",
+        "gate_ids": [
+          "cargo_test",
+          "frontend"
+        ]
+      },
+      {
+        "action": "replace",
+        "target": "远端退订后『本地订阅保留』旧断言：改为『已绑定且 origin=remote 的本地订阅被删除；本地直连/未绑定/pending 保留』",
+        "reason": "owner 裁决 DEC-req104-p3-11-remote-unsub-20260920 选择实施本地删除，与旧断言冲突",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "失败路径与防误删覆盖（4 条）：origin='local' 不被误删、未绑定源不被删、有未推送队项的源受保护（含队项存在性的前置断言）、删除后下一轮不复活；以及远端 app_settings 畸形不清空本地",
+        "reason": "高风险的异常路径必须有覆盖，且这些是本次行为变更最可能造成数据丢失的面",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "其余全部既有断言与测试（177 条 Rust + 303 条前端）逐字不动，含 TASK-035 的删除墓碑防复活既有断言",
+        "reason": "除上述契约变更外，同步语义其余部分保持",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-075-input-49b111724d794396b2621e85d0ccf974.json",
+    "digest": "85022e0d60e76be882f31d0e5077e155d08035edf16729c15ef97f72d316ae5c",
+    "source_revision": null,
+    "definition_digest": "1b7eb67d05725df0f437a0fc4ba5ff2b21f65c011df0da2ea2aefa16b7da1bfd"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-20T08:03:53.638550Z",
+    "deadline_at_utc": "2026-09-20T12:03:53.638550Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-ab2d0e5d3f7643379a6de1fd2544b549",
+  "run_ids": [
+    "RUN-0c142dcb55c04ffdb3924bc3b825799f",
+    "RUN-02dbb418948e438984a2d4ef058cce9d",
+    "RUN-4386e97bc9044e44b27bc91863c4c3a8",
+    "RUN-8af02e46a67f46398e47074b77196a07"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-4386e97bc9044e44b27bc91863c4c3a8-candidate.json",
+    "candidate_digest": "21bffb8c1d45c84aefbf5d2284705bb37965f62b1633e1c1dabcea30141bae36",
+    "verification_run": "RUN-4386e97bc9044e44b27bc91863c4c3a8",
+    "review_run": "RUN-8af02e46a67f46398e47074b77196a07",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-057.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task057.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
+    ".workflow-kit/tasks/runs/RUN-0259efca5b644b909fcf022fefeaeb73.json",
+    ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
+    ".workflow-kit/tasks/runs/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8.json",
+    ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json",
+    ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
+    ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+    ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+    ".workflow-kit/tasks/runs/RUN-e6040878c41e4d729e86380954385c7d.json",
+    ".workflow-kit/tasks/runs/RUN-e7b42163aaa14d45b754261992f5214d.json",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "tools",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-070": "9086e04c46c0f6326f858130d357606eba9236f5b2518b24b017d52bd872cfe7"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-20T08:03:54.062119Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-20T08:04:17.571144Z",
+      "note": "编码结果已记录，差异范围已核对：无文件变化",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-20T08:04:44.547981Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-20T08:41:13.427164Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-20T09:07:43.631282Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

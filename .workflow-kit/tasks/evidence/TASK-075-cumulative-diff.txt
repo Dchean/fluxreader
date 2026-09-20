@@ -1,0 +1,87 @@
+TASK-075 change set — 同步语义行为变更收口 (REQ-104)   [ROUND 2 REVIEW]
+
+*** START HERE: THIS IS A RE-REVIEW AFTER A REAL DEFECT WAS FOUND AND FIXED. ***
+A previous independent reviewer (a subagent that later crashed before writing its report) left a
+probe file that demonstrated a genuine defect in the P3-11 pending guard. That defect is now FIXED
+and a regression test was added. Your job is to (a) verify the fix is correct and complete,
+(b) try to break it again along the same axis, and (c) confirm nothing else regressed.
+
+### THE DEFECT THAT WAS FOUND (please verify it is genuinely fixed)
+The pending guard originally checked ONLY `sync_queue.feed_url`. But `commands/articles.rs`
+enqueues article-scoped changes with `article_id = Some(id)` and **`feed_url = NULL`**:
+  - `record_read_state`  -> enqueue_sync(conn, Some(id), None, "read"/"unread", None)
+  - `record_star_state`  -> enqueue_sync(conn, Some(id), None, "star"/"unstar", None)
+  - `mark_all_read`      -> enqueue_sync(conn, Some(id), None, "read", None)
+Consequence: a user who marks items read/starred while OFFLINE (changes queued, not yet pushed)
+and whose server then unsubscribes that feed would have the feed AND its articles deleted — the
+unsent state silently destroyed. Measured before the fix: removed_feeds=1, feed_alive=0,
+article_alive=0, sync_queue_rows=0. That violated acceptance B3 (pending protection).
+
+### THE FIX
+In `sync/subscriptions.rs` the guard now builds a set of **pending feed ids** and tests membership
+by `feed_id`, covering both sources:
+  (1) rows with a non-NULL `feed_url` -> normalized URL matched against local feeds -> their id;
+  (2) article-scoped rows (`article_id IS NOT NULL`) -> joined through `articles.feed_id`.
+A feed is skipped when `pending_feed_ids.contains(&feed_id)`.
+New regression test: `sync_e2e.rs::remote_unsubscribe_keeps_feed_with_article_scoped_pending`,
+which enqueues exactly the `record_star_state` shape (article_id=Some, feed_url=None), first
+ASSERTS the queue row exists and is feed_url-IS-NULL (a real precondition, so it cannot pass
+vacuously), then asserts the feed, the article and the queue row all survive.
+Paired mutation evidence: forcing the guard back to always-inactive makes that test FAIL.
+
+### WHAT TO DO
+  - Read `src-tauri/src/sync/subscriptions.rs` (the deletion pass) and `src-tauri/tests/sync_e2e.rs`
+    (6 tests) closely. Confirm the three deletion conditions are all genuinely ANDed and that the
+    pending set really covers both row shapes. Look for a THIRD shape you can bypass with
+    (e.g. rows with BOTH article_id and feed_url NULL; a queue row whose article was already
+    cascade-deleted; a feed with a pending row that references it only indirectly).
+  - Independently reproduce the author mutation and run your own adversarial mutation.
+  - Confirm the new test cannot pass vacuously.
+  - Re-check the rest of the change set below (it was reviewed once and found sound apart from this).
+
+==================== THE TWO BEHAVIOUR CHANGES (both owner-adjudicated) ====================
+A. P2-12 config-sync delete semantics (DEC-req104-p2-12-config-delete-20260920)
+   Files: src-tauri/src/config_sync.rs, src/lib/api.ts,
+          src/components/settings/ConfigSyncSection.tsx, src-tauri/tests/config_sync_e2e.rs
+   A1 `merge_app_settings` no longer only upserts: a whitelisted key ABSENT from the remote
+      payload is deleted locally (before, it lingered forever and the next upload carried it back).
+      Local-only keys (autoStart / closePromptShown) are never overwritten nor deleted; a new
+      single predicate `is_local_only_setting` is shared by the upload filter and the download
+      merge. If remote app_settings is not a JSON object, NO deletion happens.
+   A2 `apply_payload` now returns ApplyOutcome { imported, updated, skipped } instead of
+      (imported, skipped) where `skipped` was really the count of EXISTING feeds that got UPDATED
+      while the UI displayed "跳过 M 个已存在". It reads current values first and counts `updated`
+      only when something actually changed. api.ts gained ConfigSyncApplyResult;
+      ConfigSyncSection.tsx reports the three counts honestly.
+
+B. P3-11 remote unsubscribe deletes the local feed (DEC-req104-p3-11-remote-unsub-20260920)
+   Files: src-tauri/src/sync/subscriptions.rs, src-tauri/src/sync/mod.rs,
+          src-tauri/tests/sync_e2e.rs, src-tauri/tests/mock_greader.rs
+   `pull_feeds` gained a deletion pass: a local feed is deleted only when ALL THREE hold —
+     (1) origin = 'remote' AND remote_id IS NOT NULL (server-sourced, already bound);
+     (2) its normalized URL is not in this round's remote subscription list;
+     (3) NO unsent queue work references it (see the fixed guard above).
+   It deliberately does NOT write a feed_tombstone: a tombstone means "the user deleted this
+   locally, never resurrect it", whereas this follows the remote fact — if the user re-subscribes
+   on the server the feed must be able to come back. SyncReport gained `removed_feeds`.
+   NOTE: deleting a feed row cascades to its articles (articles.feed_id ON DELETE CASCADE), so
+   the blast radius is the whole article set — that is why the guards matter so much.
+   A failed subscription fetch returns early before the deletion pass, so a network error cannot
+   trigger deletion. Please confirm that yourself.
+
+==================== GATE RESULTS FOR THIS CANDIDATE ====================
+  cargo test  184 passed / 0 failed / 9 ignored   (was 183 before the new regression test)
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    303/303 exit 0
+  Dependencies unchanged; changed files LF; tests use temp DBs and clean up, so the real user
+  database is untouched.
+
+WHY THIS TASK CARRIES A CANCELLED PREDECESSOR'S OUTCOME: TASK-074 implemented all of this and
+passed its gates, but its `finish` could not pass the scope check (the owner-approved
+allowed_paths correction was recorded AFTER that task's `begin`, so the baseline predated it and
+the diff permanently flagged the task record as a protected change; the unblock loop could not
+converge). Per the project's TASK-068 -> TASK-069 precedent it was cancelled and TASK-075 created
+to carry the identical outcome, with the baseline taken from the already-implemented tree. That is
+why `changed_files` is empty for this task — a process artifact, not an absence of work. Judge the
+files themselves.

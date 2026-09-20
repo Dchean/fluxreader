@@ -93,6 +93,13 @@ export interface RefreshSummary {
   failed_feeds: number;
 }
 
+/** config_sync_apply 的结果计数（TASK-074：updated 与 skipped 语义分离）。 */
+export interface ConfigSyncApplyResult {
+  imported: number;
+  updated: number;
+  skipped: number;
+}
+
 export interface SyncReport {
   pushed_states: number;
   pushed_feeds: number;
@@ -410,11 +417,13 @@ export const api = {
     return (await inv('config_sync_download')) as string;
   },
 
-  /** 应用下载的配置。返回 { imported, skipped }。 */
-  async configSyncApply(payload: string): Promise<{ imported: number; skipped: number }> {
+  /** 应用下载的配置。返回 { imported, updated, skipped }。
+   * TASK-074：updated=已存在且确有改动、已写库的源数；skipped=已存在但内容
+   * 与远端一致、真的无需改动的源数（此前 skipped 实为已更新数）。 */
+  async configSyncApply(payload: string): Promise<ConfigSyncApplyResult> {
     const inv = await getInvoke();
     if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('config_sync_apply', { payload })) as { imported: number; skipped: number };
+    return (await inv('config_sync_apply', { payload })) as ConfigSyncApplyResult;
   },
 
   /* ---- GitHub 设备流登录 ---- */

@@ -280,6 +280,98 @@ fn apply_preserves_local_credentials_and_updates_allowed_fields() {
     let _ = std::fs::remove_file(&tmp);
 }
 
+/// A①（TASK-074，DEC-req104-p2-12-config-delete-20260920）：远端删掉的
+/// app_settings 白名单键必须在本地同步删除（修前只 upsert → 永远残留、
+/// 下次上传还会把它带回远端）；本地专属字段 autoStart/closePromptShown
+/// 即使远端没有也不得被删除。
+#[test]
+fn remote_missing_whitelist_setting_is_deleted_locally() {
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_cfgsync_del_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+
+    // 本地有三个键：themeMode（远端将有）、fontSize（远端将删）、autoStart（本地专属）
+    db::set_setting(
+        &conn,
+        "app_settings",
+        r#"{"themeMode":"light","fontSize":18,"autoStart":true,"closePromptShown":true}"#,
+    )
+    .unwrap();
+
+    // 远端 payload 只带 themeMode —— 即「用户在服务端删掉了 fontSize」
+    let payload = SyncPayload {
+        schema: 1,
+        uploaded_at: "2026-09-01T00:00:00Z".into(),
+        folders: vec![],
+        feeds: vec![],
+        app_settings: Some(r#"{"themeMode":"dark"}"#.into()),
+        connection_config: None,
+    };
+    apply_payload(&conn, &payload).unwrap();
+
+    let raw = db::get_setting(&conn, "app_settings").unwrap().unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["themeMode"], "dark", "远端存在的白名单键应覆盖本地");
+    assert!(
+        v.get("fontSize").is_none(),
+        "远端已删除的白名单键必须本地同步删除（修前会残留 18）"
+    );
+    assert_eq!(v["autoStart"], true, "本地专属字段不得因远端缺失被删除");
+    assert_eq!(
+        v["closePromptShown"], true,
+        "本地专属字段不得因远端缺失被删除"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// A① 对照组：远端 app_settings 为畸形/非对象时，不做删除——避免一次坏
+/// payload 把本地设置整批清空（删除语义的失败路径保护）。
+#[test]
+fn malformed_remote_settings_does_not_wipe_local() {
+    let tmp = std::env::temp_dir().join(format!(
+        "fluxreader_cfgsync_bad_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    db::set_setting(
+        &conn,
+        "app_settings",
+        r#"{"themeMode":"light","fontSize":18}"#,
+    )
+    .unwrap();
+
+    // 非对象（字符串）→ 解析成 Value 但 as_object() 为 None
+    let payload = SyncPayload {
+        schema: 1,
+        uploaded_at: "2026-09-01T00:00:00Z".into(),
+        folders: vec![],
+        feeds: vec![],
+        app_settings: Some(r#""not-an-object""#.into()),
+        connection_config: None,
+    };
+    apply_payload(&conn, &payload).unwrap();
+
+    let raw = db::get_setting(&conn, "app_settings").unwrap().unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["themeMode"], "light", "畸形远端设置不得清掉本地键");
+    assert_eq!(v["fontSize"], 18, "畸形远端设置不得清掉本地键");
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
 #[test]
 fn payload_contains_all_config_domains() {
     let tmp = std::env::temp_dir().join(format!(
@@ -420,9 +512,23 @@ fn apply_upserts_feeds_and_overrides_settings() {
         connection_config: None,
     };
 
-    let (imported, skipped) = apply_payload(&conn, &payload).unwrap();
-    assert_eq!(imported, 3);
-    assert_eq!(skipped, 1);
+    // TASK-074：imported / updated / skipped 三口径分离。
+    // 已存在的那条（https://a.com/rss）若白名单字段与远端一致才算 skipped；
+    // 有差异则计入 updated —— 下列断言按实际语义逐项核对，而不是沿用
+    // 旧的「skipped=已存在数」口径。
+    let outcome = apply_payload(&conn, &payload).unwrap();
+    assert_eq!(outcome.imported, 3, "三条新源：new/pod/未知归属");
+    assert_eq!(
+        outcome.updated + outcome.skipped,
+        1,
+        "已存在的 a.com/rss 必落 updated 或 skipped 之一"
+    );
+    // 该源的 title/folder/layout/AI 标志/site_url 与本地种子值不同 → 应判为 updated
+    assert_eq!(
+        outcome.updated, 1,
+        "白名单字段确有变化：必须计入 updated（旧口径把它错记为 skipped）"
+    );
+    assert_eq!(outcome.skipped, 0, "本次没有内容完全一致的源");
 
     // 分类 upsert：同名分类被更新布局+标志，新分类被创建
     let folders = db::list_folders(&conn).unwrap();
@@ -544,10 +650,11 @@ async fn full_roundtrip_upload_download_apply() {
         .await
         .unwrap();
     let parsed: SyncPayload = serde_json::from_str(&downloaded).unwrap();
-    let (imported, skipped) = apply_payload(&conn_b, &parsed).unwrap();
+    let outcome = apply_payload(&conn_b, &parsed).unwrap();
 
-    assert_eq!(imported, 2, "空库应导入全部 2 个源");
-    assert_eq!(skipped, 0);
+    assert_eq!(outcome.imported, 2, "空库应导入全部 2 个源");
+    assert_eq!(outcome.updated, 0, "空库没有已存在的源可更新");
+    assert_eq!(outcome.skipped, 0, "空库没有可跳过的源");
     // 设备B 拿到与设备A 相同的分类结构
     let folders_b = db::list_folders(&conn_b).unwrap();
     assert!(folders_b

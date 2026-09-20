@@ -300,4 +300,110 @@ pub(super) async fn pull_feeds(
             }
         }
     }
+
+    // ============================================================
+    // P3-11（TASK-074，DEC-req104-p3-11-remote-unsub-20260920）：
+    // 远端退订 → 本地同步删除。此前 pull_feeds 只做 upsert、没有删除分支，
+    // 远端退掉的订阅在本地永久残留（文章与未读计数与远端长期不一致）。
+    //
+    // 边界（owner 裁决的逐条落地）：
+    // ① 只删「服务端来源」的源：origin='remote' 且 remote_id IS NOT NULL。
+    //    本地直连添加（origin='local'）与未绑定源一律保留——即使用户在服务端
+    //    退掉了曾经 URL 碰撞绑定的本地源，也不动本地数据（这是最容易丢数据的
+    //    方向，故从保守侧处理）。
+    // ② 仅当该源的规范化 URL 不在本轮的远端订阅列表里才删。
+    // ③ **不写 feed_tombstone**：墓碑的语义是「用户本地删除、不许复活」。这里
+    //    是跟随远端事实删除；若用户在服务端重新订阅，下一轮 pull 应当把源正常
+    //    建回来。写墓碑反而会让它在服务端重新出现时被永久跳过。
+    // ④ pending 保护：队列里还有未推送的该 URL 变更时不删——本地动作尚未回传，
+    //    不能被远端旧快照抢先抹掉。
+    // ============================================================
+    {
+        let conn = db.lock().await;
+        // 本轮远端订阅的规范化 URL 集合（判据②）
+        let remote_norm_set: std::collections::HashSet<String> = remote_subs
+            .iter()
+            .map(|rf| db::normalize_url(&rf.url))
+            .collect();
+        // 查询失败不阻塞本轮（订阅层是尽力而为）：记错误并跳过删除段
+        let candidates: Vec<(i64, String)> = match conn
+            .prepare("SELECT id, feed_url FROM feeds WHERE origin = 'remote' AND remote_id IS NOT NULL")
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect::<Result<Vec<_>, _>>()
+            }) {
+            Ok(v) => v,
+            Err(e) => {
+                report
+                    .errors
+                    .push(format!("远端退订对账：读取候选源失败，本轮跳过删除: {e}"));
+                Vec::new()
+            }
+        };
+        // 队列里仍有未推送变更的源——这些源本轮不删。
+        //
+        // 两条来源都要覆盖（TASK-075 独立审查 FINDING：只查 feed_url 会漏判）：
+        //  ① feed_url 非空的队项（本地新增/订阅类变更，直接按 URL 记账）；
+        //  ② **article 级队项**（read/unread/star/unstar 由 commands/articles.rs 的
+        //     record_read_state / record_star_state / mark_all_read 入队，这些行的
+        //     feed_url 恒为 NULL，只能经 articles.feed_id 反查所属源）。
+        // 只查 ① 时，离线期间「标星/已读但未推送」的源会被远端退订连源带文章一起删掉，
+        // 未推送状态也被静默丢弃——正是本保护要防的静默数据丢失。
+        let mut pending_feed_ids: std::collections::HashSet<i64> = conn
+            .prepare(
+                "SELECT DISTINCT a.feed_id FROM sync_queue q
+                 JOIN articles a ON a.id = q.article_id
+                 WHERE q.article_id IS NOT NULL",
+            )
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .map(|ids| ids.into_iter().collect())
+            .unwrap_or_default();
+        let pending_urls: std::collections::HashSet<String> = conn
+            .prepare("SELECT DISTINCT feed_url FROM sync_queue WHERE feed_url IS NOT NULL")
+            .and_then(|mut stmt| {
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .map(|urls| {
+                urls.into_iter()
+                    .map(|u| db::normalize_url(&u))
+                    .collect::<std::collections::HashSet<String>>()
+            })
+            .unwrap_or_default();
+        // 地址型队项还要能匹配到具体的源，统一折算成 feed_id，供下面单条件判断
+        if !pending_urls.is_empty() {
+            if let Ok(mut stmt) = conn.prepare("SELECT id, feed_url FROM feeds") {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                }) {
+                    for row in rows.flatten() {
+                        if pending_urls.contains(&db::normalize_url(&row.1)) {
+                            pending_feed_ids.insert(row.0);
+                        }
+                    }
+                }
+            }
+        }
+        for (feed_id, feed_url) in candidates {
+            let norm = db::normalize_url(&feed_url);
+            if remote_norm_set.contains(&norm) {
+                continue; // 远端仍订阅：保留
+            }
+            if pending_feed_ids.contains(&feed_id) {
+                continue; // ④ 本地变更未推送（含 article 级）：不删，等回传后再收敛
+            }
+            match db::delete_feed(&conn, feed_id) {
+                Ok(()) => {
+                    report.removed_feeds += 1;
+                    log::info!("pull_feeds: removed locally-deleted remote subscription {feed_url}");
+                }
+                Err(e) => report
+                    .errors
+                    .push(format!("远端已退订、删除本地源 {feed_url} 失败: {e}")),
+            }
+        }
+    }
 }

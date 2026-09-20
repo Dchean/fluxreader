@@ -1,0 +1,16 @@
+{
+  "task_id": "TASK-074",
+  "run_id": "RUN-93cca1ab6b134cd9904f973bbc508d48",
+  "status": "ready_for_verification",
+  "summary": "TASK-074 实施完成（A=P2-12 配置同步删除语义与计数口径；B=P3-11 远端退订本地同步删除）。两项均为 owner 2026-09-20 裁决的行为变更，故为高风险任务。**B【P3-11，DEC-req104-p3-11-remote-unsub-20260920】**：pull_feeds 新增删除段（sync/subscriptions.rs 末尾），同时满足三条才删——① origin='remote' 且 remote_id IS NOT NULL（只处理服务端来源且已绑定的源）；② 规范化 URL 不在本轮远端订阅列表；③ sync_queue 里没有该 URL 的未推送变更。刻意**不写 feed_tombstone**：墓碑语义是「用户本地删除、不许复活」，而这里是跟随远端事实删除，若服务端重新订阅应当正常建回，写墓碑反而会永久跳过。SyncReport 新增 removed_feeds 计数。新增 4 条测试（sync_e2e.rs）：远端退订后本地删除且下一轮不复活、origin='local' 源不被误删、未绑定源不被删、有未推送队项的源受保护（为此给 mock 新增 fail_quick_add 注入，让 push 失败使队项真实保留，并在用例内先断言队项确实还在，否则该用例没有验证到保护逻辑）。**A【P2-12，DEC-req104-p2-12-config-delete-20260920】**：① merge_app_settings 由只 upsert 改为「远端缺失的白名单键本地同步删除」，并新增 is_local_only_setting 单一判定收敛原先散在两处的 autoStart/closePromptShown 键名（上传过滤与下载合并共用，避免漂移）；远端 app_settings 非对象时不做删除，防止一次坏 payload 清空本地设置。② 计数口径修正：apply_payload 返回值由 (imported, skipped) 改为 ApplyOutcome{imported, updated, skipped}——此前 skipped 在「已存在并被更新」分支自增，语义实为已更新数、前端却展示为「跳过」，用户看到的数字是错的；现在先读现值判断有无变化，有变化才计 updated、完全一致才计 skipped。前端 api.ts 新增 ConfigSyncApplyResult 类型、ConfigSyncSection.tsx 文案改为如实分别展示「新增/更新/跳过（内容一致）」。新增 2 条测试（config_sync_e2e.rs）：远端已删的白名单键本地必须删除且本地专属字段保留、畸形远端设置不清空本地。**配对证据（修前复现/修后通过，均由变异实测）**：把删除段的候选查询改为恒空（模拟修前 upsert-only）→ remote_unsubscribe_removes_local_remote_feed FAILED；把远端缺失键列表改为恒空 → remote_missing_whitelist_setting_is_deleted_locally FAILED；两次均已逐字节还原。**四门禁实测**：cargo test 183 passed / 0 failed / 9 ignored（基线 177 + 本任务新增 6，ignored 未增）；lint 0 warnings / 0 errors；build exit 0（vite built in 871ms）；frontend 303/303。未引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；改动文件均 LF；测试用临时库并清理，用户真实数据库未写入。**流程如实说明（需审查者注意）**：owner 选定路线『乙』后，我先执行了 begin（07:31Z）再落盘范围订正与决定（DEC-req104-t074-scope-frontend-contract-20260920，07:39Z），因此 begin 的基线快照早于范围订正，diff 把 .workflow-kit/tasks/items/TASK-074.json 归入 protected（工具自有记录被我按 owner 授权修改）——这是顺序失误而非越界源码改动：全部产品改动（config_sync.rs、sync/mod.rs、sync/subscriptions.rs、tests×3、api.ts、ConfigSyncSection.tsx）均落在 allowed_paths 内，outside 为空。范围订正依据 owner 2026-09-20 问答选项『乙：扩大范围改前端契约，完整实现』，并已在 DECISIONS 留档（scope 含 REQ-104/TASK-074）。",
+  "changed_files": "auto",
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}
