@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-070",
+  "run_id": "RUN-b0ee99bb02ad4420b1f485168107ecb1",
+  "status": "ready_for_verification",
+  "summary": "TASK-070 修复轮 r2：处置 r2 独立审查（RUN-15cf7e8442784a1a928d4adabfb3f4f8，verdict=FAIL）的两项发现。审查同时确认 F1/F2/F3 已真正修复、九项删除全部真死、四门禁真绿、无有效覆盖丢失，故本轮仍只改注释，不动任何代码行为、断言或删除。N1（medium，requirements+maintainability）= 修复轮 r1 的 F1 替换句「feeds.fetch_failed 只驱动指数退避重试」在两个方向上都过度宣称：① 该列还被序列化给前端作失败标记（FeedRow 经 commands/folders.rs:103 list_feeds 下发 → api.ts fetchFailed → Sidebar.tsx:236 feed-error-dot）；② 退避本身并非由 fetch_failed 驱动，而是由 fail_count/next_retry_at 承担（db/feeds.rs:set_feed_fetch_state 写入 fail_count 与 next_retry_at，feeds_due_for_refresh 按 next_retry_at 过滤）。修法：sync/mod.rs:5-12 模块头改为逐点陈述——remote 源由 reading-list/未读+收藏隐式覆盖、本地无需直连；不存在回退后端拉取路径；fetch_failed 的真实用途是前端失败标记；退避由 fail_count/next_retry_at 承担而非该列。已核实两处指称均属实（FeedRow 派生 Serialize 且含 fetch_failed；set_feed_fetch_state 与 feeds_due_for_refresh 的 SQL 确认）。N2（low-medium，requirements+maintainability）= 同一不实因果在**在范围且本任务已改过**的 src-tauri/tests/sync_e2e.rs 中幸存：文件头（原 :3）写「直连失败源的兜底拉取（source='miniflux'）」、段落标题（原 :170）写「兜底：直连失败的源从 Miniflux 拉条目」；审查者用变异证实该因果不成立（仅删掉 set_feed_fetch_state(...,true,...) 调用，套件仍全绿且条目照常入库——真正触发条件是源已绑定 remote_id）。修法（只改注释与变量/文案，断言语义逐字不变）：文件头改为『已绑定源的远端新条目经 pull 落库为 source='miniflux'』并加注说明真实触发条件与变异结论；段落标题改为同义准确表述；本地变量 fallback→ingested、println 前缀 fallback report→third sync report、两处 expect 文案与断言消息改为描述『已绑定源的远端条目必须入库且 source=miniflux』；另修正 :77 的同类措辞（『走兜底路径不涉及』→『源未绑定，本轮不该建新条目』）与 :225 的『URL 兜底』补注（与 Miniflux 兜底无关）。已在全部 17 个 allowed_paths 文件内复查『兜底』字样：其余命中均为合法语义（add_feed 未指定分类的兜底、favicon 兜底、去重键、AI channel 防御性兜底、extract_fulltext 头图兜底等），无残留不实宣称。四门禁实测：cargo test 177 passed / 0 failed / 9 ignored；lint 0 warnings / 0 errors；build exit 0（vite built in 878ms）；frontend 303/303。本修复轮改动 2 个文件（src-tauri/src/sync/mod.rs、src-tauri/tests/sync_e2e.rs），均在 allowed_paths 内。",
+  "changed_files": [
+    "src-tauri/src/ingestion.rs",
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_e2e.rs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

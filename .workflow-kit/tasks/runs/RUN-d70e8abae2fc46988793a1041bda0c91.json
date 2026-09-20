@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-d70e8abae2fc46988793a1041bda0c91",
+  "task_id": "TASK-070",
+  "kind": "repair",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260920-t070-repair-r1"
+  },
+  "started_at_utc": "2026-09-20T04:29:22.875105Z",
+  "finished_at_utc": "2026-09-20T04:34:55.302054Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "2d40977490b0e8754a187588ff325e52a9af659375f31d9faa3c9cac1a8a057f",
+  "candidate_digest": "f4e16292755163909ffa051ff0b6bc2353a293d33f72da6f2cc29d5801103f0d",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-d70e8abae2fc46988793a1041bda0c91-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-d70e8abae2fc46988793a1041bda0c91-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-d81de29f2076460298a9f0731a6f871c-scope.json"
+}

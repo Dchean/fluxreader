@@ -301,8 +301,13 @@ async fn miniflux_existing_entry_backfills_cover() {
 }
 
 /// ③ 规范化 URL 匹配：同文不同饰（https/http + 尾斜杠）不重复入库。
+///
+/// TASK-070：原断言调用被 SyncMatchMaps 取代的逐条查询 `db::article_id_by_url`
+/// （零生产调用，已删除）。按 test_review 的 adapt 处置，改为经生产入口
+/// `db::sync_match_maps` 的 `url_to_id` 断言同一行为——生产 pull 合并
+/// （sync/entries.rs 的 merge_pulled_entry）正是用它做 URL 兜底匹配。
 #[test]
-fn article_id_by_url_uses_normalized_match() {
+fn normalized_url_match_maps_same_article() {
     let tmp = std::env::temp_dir().join(format!(
         "fluxreader_sync_content_norm_{}_{}.db",
         std::process::id(),
@@ -341,11 +346,16 @@ fn article_id_by_url_uses_normalized_match() {
         published_at: Some(chrono::Utc::now().to_rfc3339()),
         source: "direct".into(),
     };
-    db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+    let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
 
-    // 远端同文但 http + 无尾斜杠 → 必须匹配到同一篇
-    let matched = db::article_id_by_url(&conn, "http://example.com/story").unwrap();
-    assert!(matched.is_some(), "normalized URL must match the local article (https://example.com/story/ vs http://example.com/story)");
+    // 远端同文但 http + 无尾斜杠 → 必须匹配到同一篇（规范化键同源同口径）
+    let maps = db::sync_match_maps(&conn).unwrap();
+    let matched = maps.url_to_id.get(&db::normalize_url("http://example.com/story"));
+    assert_eq!(
+        matched.copied(),
+        Some(aid),
+        "normalized URL must match the local article (https://example.com/story/ vs http://example.com/story)"
+    );
 
     let _ = std::fs::remove_file(&tmp);
 }

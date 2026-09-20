@@ -1,0 +1,926 @@
+TASK-070 REPAIR ROUND r3 change set — 死代码/空壳集群删除 (REQ-104)
+Task baseline commit = 621531a7374169bdbb7ae84b0e8184f57a94f6a6.
+This is the FOURTH candidate of TASK-070. Review history:
+  r1 candidate d0486a39 -> FAIL (F1 sync/mod.rs header claimed a nonexistent fallback; F2 ingestion.rs
+     header same; F3 unreachable mock subscribe arm).
+  r1 repair -> f4e16292 -> FAIL (F1/F2/F3 confirmed fixed; N1 the replacement over-claimed that
+     fetch_failed "only drives backoff"; N2 the same false claim survived in tests/sync_e2e.rs).
+  r2 repair -> 19bba4ef -> FAIL (N1/N2 partly fixed, but 3 new comment-accuracy findings:
+     F-r3-1 "never implemented" was a false historical absolute — git shows the Miniflux fallback
+     WAS implemented and reachable until commit 0ba940f removed it; F-r3-2 a line-77 comment
+     claimed the remote-only entry is not created that round, which the suite itself refutes;
+     F-r3-3 the sync_e2e header listed backoff as a use of fetch_failed while its own parenthesis
+     credited fail_count/next_retry_at).
+  r3 repair (this artifact) -> candidate for review.
+
+IMPORTANT CONTEXT: every review round has confirmed the SUBSTANCE is sound — all nine deletions
+genuinely had zero production call sites, the four gates are genuinely green, no effective test
+coverage was lost, candidate hashes match, dependencies are unchanged, the real user database was
+never written, and no assertion was altered (the r3 review verified the sync_e2e assertions are
+byte-identical in predicate/SQL, with only disclosed message strings and one local rename changed).
+Every finding so far has concerned the accuracy of the explanatory comments I wrote — so please
+scrutinise those comments strictly, clause by clause, and say so if any clause is wrong.
+========================= FULL TRACKED DIFF vs HEAD =========================
+diff --git a/src-tauri/src/commands/ai.rs b/src-tauri/src/commands/ai.rs
+index 6e89d17..e725ca1 100644
+--- a/src-tauri/src/commands/ai.rs
++++ b/src-tauri/src/commands/ai.rs
+@@ -10,12 +10,13 @@ AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi 中转）
+ ============================================================ */
+ 
+ /// 推给前端的流式事件（camelCase）。
++/// TASK-070（REQ-104）：原 `Error(String)` 变体在生产从不构造（失败改由
++/// invoke rejection + 前端 .catch 传达），属未落实的宣称能力，已删除。
+ #[derive(serde::Serialize, Clone)]
+ #[serde(rename_all = "camelCase", tag = "type", content = "data")]
+ pub enum AiEvent {
+     Delta(String),
+     Done,
+-    Error(String),
+ }
+ 
+ /// 读 ai_config JSON；未配置时报 aiNotConfigured。
+@@ -202,6 +203,8 @@ mod ai_event_tests {
+     use super::AiEvent;
+ 
+     /// 前端 api.ts 按 {type, data} 解析；序列化必须严格一致（camelCase tag）。
++    /// TASK-070：原断言还覆盖 `AiEvent::Error`——该变体在生产从不构造
++    /// （失败经 invoke rejection + 前端 .catch 传达），属空壳，已随 REQ-104 删除。
+     #[test]
+     fn ai_event_serialization_matches_frontend() {
+         let delta = serde_json::to_value(AiEvent::Delta("你好".into())).unwrap();
+@@ -209,8 +212,5 @@ mod ai_event_tests {
+         assert_eq!(delta["data"], "你好");
+         let done = serde_json::to_value(AiEvent::Done).unwrap();
+         assert_eq!(done["type"], "done");
+-        let err = serde_json::to_value(AiEvent::Error("失败".into())).unwrap();
+-        assert_eq!(err["type"], "error");
+-        assert_eq!(err["data"], "失败");
+     }
+ }
+diff --git a/src-tauri/src/commands/sync.rs b/src-tauri/src/commands/sync.rs
+index 89ced89..b63f6cb 100644
+--- a/src-tauri/src/commands/sync.rs
++++ b/src-tauri/src/commands/sync.rs
+@@ -258,17 +258,12 @@ pub async fn cache_cleanup(
+ }
+ 
+ /// 手动全量同步（侧栏刷新按钮 / 同步中心）。staged：锁只在 DB 读写时持有。
++///
++/// TASK-070（P3-2）：此前此处内联重写了 feeds_phase + states_phase 的串联与
++/// 合并口径，与 `sync::sync_now` 形成两份实现（易漂移）。改为转调同一实现。
+ #[tauri::command]
+ pub async fn sync_now(state: State<'_, AppState>) -> AppResult<crate::sync::SyncReport> {
+-    // feeds 阶段 → states 阶段（full 对账），两阶段各自内部管理锁
+-    let mut report = crate::sync::feeds_phase(&state.db, &state.http).await?;
+-    let states = crate::sync::states_phase(&state.db, &state.http, true).await?;
+-    // 合并报告（错误聚合，方便前端展示）
+-    report.pushed_states = states.pushed_states;
+-    report.pulled_entries = states.pulled_entries;
+-    report.fallback_entries = states.fallback_entries;
+-    report.errors.extend(states.errors);
+-    Ok(report)
++    crate::sync::sync_now(&state.db, &state.http).await
+ }
+ 
+ /// 同步配置状态（设置页显示用）。account = 连接时记录的服务端用户名。
+diff --git a/src-tauri/src/config_sync.rs b/src-tauri/src/config_sync.rs
+index 2f249f9..c178bee 100644
+--- a/src-tauri/src/config_sync.rs
++++ b/src-tauri/src/config_sync.rs
+@@ -19,9 +19,6 @@ use tokio::sync::Mutex;
+ 
+ const SCHEMA_VERSION: u32 = 1;
+ const CONFIG_FILE_NAME: &str = "fluxreader-config.json";
+-/// 预留的文章状态文件名常量。当前文章已读/收藏状态通过 Google Reader / Fever
+-/// 协议同步（sync.rs），不使用 Gist/WebDAV 通道。
+-pub const STATE_FILE_NAME: &str = "fluxreader-article-state.json";
+ 
+ /* ============================================================
+ 同步 payload
+diff --git a/src-tauri/src/db.rs b/src-tauri/src/db.rs
+index c6f3e6f..9110e22 100644
+--- a/src-tauri/src/db.rs
++++ b/src-tauri/src/db.rs
+@@ -32,10 +32,9 @@ pub use articles::{
+ };
+ pub use feeds::{
+     add_feed_tombstone, delete_feed, feed_remote_info, feed_tombstones, feeds_all_ids,
+-    feeds_due_for_refresh, feeds_fetch_failed, feeds_fetch_failed_bound, feeds_origin_remote,
+-    find_feed_by_url, insert_feed, insert_feed_origin, list_feeds, remove_feed_tombstone,
+-    set_feed_ai_flags, set_feed_fetch_state, set_feed_title_and_icon, update_feed,
+-    update_feed_layout, FeedRow,
++    feeds_due_for_refresh, find_feed_by_url, insert_feed, insert_feed_origin, list_feeds,
++    remove_feed_tombstone, set_feed_ai_flags, set_feed_fetch_state, set_feed_title_and_icon,
++    update_feed, update_feed_layout, FeedRow,
+ };
+ pub use folders::{
+     add_folder_tombstone, create_folder, delete_folder, feed_urls_in_folder, folder_name,
+@@ -47,14 +46,13 @@ pub use migrations::open;
+ pub(crate) use migrations::MIGRATIONS;
+ pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
+ pub use sync_map::{
+-    add_article_dup_entry, article_by_remote_id, article_dup_entries, article_has_pending_sync,
+-    article_id_by_url, article_matches_remote_feed, backfill_article_content,
++    add_article_dup_entry, article_by_remote_id, article_dup_entries, backfill_article_content,
+     count_unbound_local_feeds, ensure_uncategorized_folder, export_feeds_with_folders,
+-    feed_by_remote_id, feed_exists_by_url, feed_id_by_url, feed_id_by_url_normalized,
+-    find_folder_by_name, folder_exists, get_article_content_html, get_article_for_summary,
+-    get_article_for_translation, get_article_remote_id, get_article_url, get_first_folder_id,
+-    last_sync_entry_id, last_sync_ts, list_unbound_local_feeds, list_unread_ids_scoped,
+-    set_article_remote_id, set_feed_remote_id, set_folder_remote_id, set_last_sync_entry_id,
++    feed_exists_by_url, feed_id_by_url, feed_id_by_url_normalized, find_folder_by_name,
++    folder_exists, get_article_content_html, get_article_for_summary, get_article_for_translation,
++    get_article_remote_id, get_article_url, get_first_folder_id, last_sync_entry_id, last_sync_ts,
++    list_unbound_local_feeds,
++    list_unread_ids_scoped, set_article_remote_id, set_feed_remote_id, set_last_sync_entry_id,
+     set_last_sync_ts, sync_mark_read_if_unread, sync_mark_starred_if_unstarred,
+     sync_mark_unread_if_read, sync_mark_unstarred_if_starred, sync_match_maps,
+     sync_set_article_status, update_article_fulltext, update_article_image_if_empty,
+diff --git a/src-tauri/src/db/feeds.rs b/src-tauri/src/db/feeds.rs
+index e5e3c57..04075bc 100644
+--- a/src-tauri/src/db/feeds.rs
++++ b/src-tauri/src/db/feeds.rs
+@@ -241,41 +241,6 @@ pub fn set_feed_ai_flags(
+     Ok(())
+ }
+ 
+-/// 直连失败的源（供 Miniflux 兜底路径查询）
+-pub fn feeds_fetch_failed(conn: &Connection) -> AppResult<Vec<FeedRow>> {
+-    let mut stmt = conn.prepare(&format!(
+-        "SELECT {FEED_COLS} FROM feeds WHERE fetch_failed = 1 ORDER BY id"
+-    ))?;
+-    let rows = stmt.query_map([], feed_row)?;
+-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+-}
+-
+-/// 服务端来源（origin='remote'）的源：内容完全由 Miniflux 提供，本地不直连
+-/// 抓取。同步时**全量拉取**其条目（幂等 upsert），保证数量与状态与 Miniflux
+-/// 完全对齐——用 `after`（published_at）增量会漏掉发布时间早于游标的历史文章。
+-/// 仅返回已绑定 remote_id 的源。
+-pub fn feeds_origin_remote(conn: &Connection) -> AppResult<Vec<FeedRow>> {
+-    let mut stmt = conn.prepare(&format!(
+-        "SELECT {FEED_COLS} FROM feeds
+-         WHERE origin = 'remote' AND remote_id IS NOT NULL
+-         ORDER BY id"
+-    ))?;
+-    let rows = stmt.query_map([], feed_row)?;
+-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+-}
+-
+-/// 直连失败（fetch_failed=1）且已绑定 remote_id 的源：直连失败走 Miniflux
+-/// 兜底，增量拉取（after=上次同步时间）补直连漏掉的条目。
+-pub fn feeds_fetch_failed_bound(conn: &Connection) -> AppResult<Vec<FeedRow>> {
+-    let mut stmt = conn.prepare(&format!(
+-        "SELECT {FEED_COLS} FROM feeds
+-         WHERE fetch_failed = 1 AND remote_id IS NOT NULL
+-         ORDER BY id"
+-    ))?;
+-    let rows = stmt.query_map([], feed_row)?;
+-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+-}
+-
+ /* ============================================================
+ Articles
+ ============================================================ */
+diff --git a/src-tauri/src/db/sync_map.rs b/src-tauri/src/db/sync_map.rs
+index 19cfcd9..d9d55e2 100644
+--- a/src-tauri/src/db/sync_map.rs
++++ b/src-tauri/src/db/sync_map.rs
+@@ -16,27 +16,30 @@ pub fn article_by_remote_id(conn: &Connection, remote_id: i64) -> AppResult<Opti
+ /* ============================================================
+ Pull 合并的批量预取映射 —— 消除 N+1
+ 
+-同步对账（pull_entries）里，对每个远端 entry 逐条调用
+-article_id_by_url / article_by_remote_id / article_matches_remote_feed /
+-article_has_pending_sync / feed_by_remote_id，首次同步上千条 = 数千次
+-SQLite 查询。这里一次性把全部映射查进内存，循环内改为 HashMap/HashSet
+-查找（O(1)），把「数千次查询」压成「5 次批量查询」。
++同步对账（pull_entries）里，原先对每个远端 entry 逐条查询
++（url_norm 匹配 / remote_id 匹配 / 同源判定 / pending 集合 / feed 绑定），
++首次同步上千条 = 数千次 SQLite 查询。这里一次性把全部映射查进内存，
++循环内改为 HashMap/HashSet 查找（O(1)），把「数千次查询」压成「5 次批量查询」。
++
++TASK-070（REQ-104）：被本映射取代的那批逐条查询函数已删除
++（article_id_by_url / article_matches_remote_feed / article_has_pending_sync /
++feed_by_remote_id / set_folder_remote_id），生产零调用。
+ ============================================================ */
+ 
+-/// Pull 合并所需的全部匹配映射（一次批量预取，替代循环内逐条查询）。
++/// Pull 合并所需的全部匹配映射（一次批量预取）。
+ pub struct SyncMatchMaps {
+-    /// 规范化 URL（url_norm）→ article id（替代 article_id_by_url）
++    /// 规范化 URL（url_norm）→ article id
+     pub url_to_id: HashMap<String, i64>,
+-    /// article id → remote_id（替代 `SELECT remote_id FROM articles WHERE id=?`）
++    /// article id → remote_id（None 表示未绑定）
+     pub id_to_mf_id: HashMap<i64, Option<i64>>,
+     /// article id → (文章 remote_id, 所属 feed 的 remote_id)
+-    /// （替代 article_matches_remote_feed 的 JOIN 查询）
++    /// （同源判定的输入：生产据此推导 same_feed_trusted）
+     pub id_to_mf_pair: HashMap<i64, (Option<i64>, Option<i64>)>,
+-    /// 有「已入队未推送」读/收藏变更的 article id 集合（替代 article_has_pending_sync）
++    /// 有「已入队未推送」读/收藏变更的 article id 集合
+     pub pending_ids: HashSet<i64>,
+-    /// feed remote_id → feed id（替代 feed_by_remote_id）
++    /// feed remote_id → feed id
+     pub feed_mf_to_id: HashMap<i64, i64>,
+-    /// article remote_id → article id（替代 article_by_remote_id）
++    /// article remote_id → article id
+     pub mf_id_to_article: HashMap<i64, i64>,
+ }
+ 
+@@ -45,7 +48,7 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
+     // 1. url_norm → id
+     let mut url_to_id = HashMap::new();
+     {
+-        // ORDER BY id：与 article_id_by_url 的 ORDER BY id LIMIT 1 同口径——
++        // ORDER BY id：与规范化 URL 匹配的既有口径一致——
+         // 同 URL 多篇时保留 id 最小者（or_insert 保留首见，首见即最小 id）
+         let mut stmt = conn
+             .prepare("SELECT url_norm, id FROM articles WHERE url_norm IS NOT NULL ORDER BY id")?;
+@@ -118,50 +121,6 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
+     })
+ }
+ 
+-/// URL 兜底匹配的安全校验：本地文章（aid）与远端 entry（mf_entry_id 所属
+-/// feed mf_feed_id）是否同一订阅源。同源 → 服务端说的是同一篇，可合并状态；
+-/// 跨源 → URL 碰巧相同但属于另一个订阅的 entry，只有已绑定的那条才有权
+-/// 写状态（防止未读状态从服务端另一条同 URL entry 复活已读文章）。
+-/// 判定依据：aid 已绑定的 remote_id 所属远端 feed（feeds.remote_id）
+-/// 与远端 entry 的 feed_id 一致，或 aid 尚未绑定（首见，允许建立绑定）。
+-pub fn article_matches_remote_feed(
+-    conn: &Connection,
+-    aid: i64,
+-    mf_feed_id: i64,
+-) -> AppResult<bool> {
+-    let bound: Option<(Option<i64>, Option<i64>)> = conn
+-        .query_row(
+-            "SELECT a.remote_id, f.remote_id FROM articles a
+-             JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?1",
+-            params![aid],
+-            |r| Ok((r.get(0)?, r.get(1)?)),
+-        )
+-        .optional()?;
+-    match bound {
+-        // 文章或 feed 已不存在 → 不匹配（保守）
+-        None => Ok(false),
+-        // 文章已绑定 entry：entry 必须属于同一（远端）feed 才可信
+-        Some((Some(_entry_id), feed_mf)) => Ok(feed_mf == Some(mf_feed_id)),
+-        // 未绑定：首见，允许（绑定回填/兜底合并的正常路径）
+-        Some((None, _)) => Ok(true),
+-    }
+-}
+-
+-/// 按 URL 找本地条目（Pull 合并的兜底匹配键）。
+-/// 用规范化 URL（url_norm）匹配：Miniflux 返回的条目 URL 与本地直连抓取的
+-/// URL 常有跟踪参数/www./m./尾斜杠/AMP/https 等差异，精确匹配会漏判成新条目
+-/// 导致同文重复入库（文章数虚高 + 状态对不齐）。与去重键同源同口径。
+-pub fn article_id_by_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> {
+-    let id = conn
+-        .query_row(
+-            "SELECT id FROM articles WHERE url_norm = ?1 ORDER BY id LIMIT 1",
+-            params![normalize_url(url)],
+-            |r| r.get(0),
+-        )
+-        .optional()?;
+-    Ok(id)
+-}
+-
+ /// 绑定 Miniflux entry id（Pull 时首次见到该条目）
+ pub fn set_article_remote_id(conn: &Connection, id: i64, remote_id: i64) -> AppResult<()> {
+     conn.execute(
+@@ -222,18 +181,6 @@ pub fn article_dup_entries(conn: &Connection, id: i64) -> AppResult<Vec<i64>> {
+         .collect())
+ }
+ 
+-/// 是否存在「已入队未推送」的本地状态变更（读/收藏）。
+-/// 有 → 拉取状态时跳过该文章（本地变更优先推送，防止被服务端旧状态覆盖
+-/// 回来造成乒乓）。绑定回填后下一轮同步即恢复合并。
+-pub fn article_has_pending_sync(conn: &Connection, id: i64) -> AppResult<bool> {
+-    let n: i64 = conn.query_row(
+-        "SELECT COUNT(*) FROM sync_queue WHERE article_id = ?1 AND action IN ('read','unread','star','unstar')",
+-        params![id],
+-        |r| r.get(0),
+-    )?;
+-    Ok(n > 0)
+-}
+-
+ /// 记录上次同步时间戳（Pull 增量游标，unix 秒）
+ pub fn last_sync_ts(conn: &Connection) -> AppResult<i64> {
+     let v: Option<String> = conn
+@@ -266,7 +213,7 @@ pub fn set_last_sync_entry_id(conn: &Connection, id: i64) -> AppResult<()> {
+     set_setting(conn, "sync_last_entry_id", &id.to_string())
+ }
+ 
+-/// feeds/folders 的 remote_id 绑定
++/// feeds 的 remote_id 绑定
+ pub fn set_feed_remote_id(conn: &Connection, feed_id: i64, remote_id: i64) -> AppResult<()> {
+     conn.execute(
+         "UPDATE feeds SET remote_id = ?1 WHERE id = ?2",
+@@ -275,26 +222,6 @@ pub fn set_feed_remote_id(conn: &Connection, feed_id: i64, remote_id: i64) -> Ap
+     Ok(())
+ }
+ 
+-pub fn set_folder_remote_id(conn: &Connection, folder_id: i64, remote_id: i64) -> AppResult<()> {
+-    conn.execute(
+-        "UPDATE folders SET remote_id = ?1 WHERE id = ?2",
+-        params![remote_id, folder_id],
+-    )?;
+-    Ok(())
+-}
+-
+-/// 按 Miniflux feed id 找本地 feed
+-pub fn feed_by_remote_id(conn: &Connection, remote_id: i64) -> AppResult<Option<i64>> {
+-    let id = conn
+-        .query_row(
+-            "SELECT id FROM feeds WHERE remote_id = ?1",
+-            params![remote_id],
+-            |r| r.get(0),
+-        )
+-        .optional()?;
+-    Ok(id)
+-}
+-
+ /// 按 URL 找本地 feed（首次同步的碰撞检测键）
+ pub fn feed_id_by_url(conn: &Connection, feed_url: &str) -> AppResult<Option<i64>> {
+     let id = conn
+@@ -317,7 +244,7 @@ pub fn feed_exists_by_url(conn: &Connection, feed_url: &str) -> AppResult<bool>
+     Ok(exists)
+ }
+ 
+-/// 按规范化 URL 找本地 feed（与 article_id_by_url 同口径）。
++/// 按规范化 URL 找本地 feed（与条目侧的规范化匹配同口径）。
+ /// 用于 pull_feeds 与 Miniflux 的 feed_url 碰撞匹配：Miniflux 返回的 URL 与
+ /// 本地直连添加时的 URL 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成
+ /// 新订阅 → 同一订阅出现两个本地 feed（文章翻倍、状态分裂、数量与未读数
+@@ -556,6 +483,10 @@ pub fn find_folder_by_name(conn: &Connection, name: &str) -> AppResult<Option<i6
+ }
+ 
+ /// 获取第一个 folder id（Pull 段兜底分类用）
++///
++/// TASK-070：本函数零生产调用（生产已改用 ensure_uncategorized_folder），
++/// 但其唯一引用是 crate 内测试 db/sync_extraction_tests.rs（不在本任务
++/// allowed_paths 内），故按范围约束保留，待后续任务连同该测试一并处置。
+ pub fn get_first_folder_id(conn: &Connection) -> AppResult<Option<i64>> {
+     let id = conn
+         .query_row("SELECT id FROM folders LIMIT 1", [], |r| r.get(0))
+diff --git a/src-tauri/src/greader.rs b/src-tauri/src/greader.rs
+index c93fbed..4a43f09 100644
+--- a/src-tauri/src/greader.rs
++++ b/src-tauri/src/greader.rs
+@@ -497,26 +497,6 @@ impl GReaderClient {
+         self.edit_tag(item_ids, &[], &[tags::STARRED]).await
+     }
+ 
+-    /// 全部已读（某 stream 在 ts 之前）。
+-    pub async fn mark_all_read(&self, stream: &str, ts: Option<i64>) -> AppResult<()> {
+-        let mut form: Vec<(&str, String)> = vec![("s", stream.to_string())];
+-        if let Some(v) = ts {
+-            form.push(("ts", v.to_string()));
+-        }
+-        self.post_form_text("/reader/api/0/mark-all-as-read", &form)
+-            .await
+-    }
+-
+-    /// 订阅（`ac=subscribe`，`s=feed/<绝对URL>`）。返回新 feed 的数字 id（若有）。
+-    pub async fn subscribe(&self, feed_url: &str) -> AppResult<()> {
+-        let form: Vec<(&str, String)> = vec![
+-            ("ac", "subscribe".to_string()),
+-            ("s", format!("feed/{feed_url}")),
+-        ];
+-        self.post_form_text("/reader/api/0/subscription/edit", &form)
+-            .await
+-    }
+-
+     /// 快速订阅（自动发现 feed，等价旧 `/v1/feeds` 创建 + 幂等）。
+     pub async fn quick_add(&self, feed_url: &str) -> AppResult<QuickAddResponse> {
+         let form: Vec<(&str, String)> = vec![("quickadd", feed_url.to_string())];
+diff --git a/src-tauri/src/ingestion.rs b/src-tauri/src/ingestion.rs
+index cdb3b4c..bbf8a35 100644
+--- a/src-tauri/src/ingestion.rs
++++ b/src-tauri/src/ingestion.rs
+@@ -1,7 +1,10 @@
+ //! 直连抓取管线（实施方案 §4.2 第一优先级）：
+ //! 条件 GET（ETag/If-Modified-Since）→ feed-rs 解析 → HTML 消毒 → upsert（source='direct'）。
+ //!
+-//! 失败时标记 feeds.fetch_failed=1 供 Miniflux 兜底路径查询。
++//! 失败时标记 feeds.fetch_failed=1 并按指数退避推迟重试（见 db/feeds.rs 的
++//! set_feed_fetch_state 与 feeds_due_for_refresh）。
++//! TASK-070：此处原写「供 Miniflux 兜底路径查询」——该兜底并不存在，且按该列
++//! 过滤的查询（feeds_fetch_failed / feeds_fetch_failed_bound）已作为死代码删除。
+ 
+ use crate::db::{self, NewArticle};
+ use crate::error::{AppError, AppResult};
+@@ -317,95 +320,6 @@ fn mime_from_url(url: &str) -> Option<&'static str> {
+     }
+ }
+ 
+-/* ============================================================
+-单源刷新（direct 优先写库）
+-============================================================ */
+-
+-/// 刷新单个源：304 → 不动；成功 → 清除失败标记 + 更新元数据 + upsert 条目；
+-/// 失败 → 标记 fetch_failed（Miniflux 兜底路径会查这张表）。
+-/// 返回本次新增条目数。dedup：同 URL 跨源去重（智能去重开关）。
+-///
+-/// 注意：此签名在**锁外**调用没有意义——conn 借用即持锁。仅适合
+-/// `refresh_feed` 命令（单源、调用方一次只抓一个）与既有测试复用。
+-pub async fn refresh_feed(
+-    conn: &mut Connection,
+-    client: &Client,
+-    feed_id: i64,
+-    dedup: bool,
+-) -> AppResult<usize> {
+-    // feed 行（URL + 条件 GET 头）
+-    let (feed_url, etag, last_modified): (String, Option<String>, Option<String>) = {
+-        conn.query_row(
+-            "SELECT feed_url, etag, last_modified FROM feeds WHERE id = ?1",
+-            rusqlite::params![feed_id],
+-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+-        )
+-        .map_err(|_| AppError::not_found(format!("feed {feed_id} not found")))?
+-    };
+-
+-    let fetched =
+-        conditional_get(client, &feed_url, etag.as_deref(), last_modified.as_deref()).await;
+-
+-    match fetched {
+-        Ok(Fetched::NotModified) => {
+-            db::set_feed_fetch_state(
+-                conn,
+-                feed_id,
+-                false,
+-                None,
+-                etag.as_deref(),
+-                last_modified.as_deref(),
+-            )?;
+-            Ok(0)
+-        }
+-        Ok(Fetched::Body {
+-            bytes,
+-            content_type,
+-            etag,
+-            last_modified,
+-        }) => {
+-            let parsed = parse_feed(&bytes, &feed_url)?;
+-            let _ = content_type; // feed-rs 自带编码探测，无需手动解码
+-
+-            db::set_feed_title_and_icon(
+-                conn,
+-                feed_id,
+-                parsed.title.as_deref(),
+-                parsed.icon.as_deref(),
+-                parsed.site_url.as_deref(),
+-            )?;
+-            db::set_feed_fetch_state(
+-                conn,
+-                feed_id,
+-                false,
+-                None,
+-                etag.as_deref(),
+-                last_modified.as_deref(),
+-            )?;
+-
+-            let mut new_count = 0;
+-            for a in &parsed.articles {
+-                let (_, was_new) = db::upsert_article_with_feed(conn, feed_id, a, dedup)?;
+-                if was_new {
+-                    new_count += 1;
+-                }
+-            }
+-            Ok(new_count)
+-        }
+-        Err(e) => {
+-            db::set_feed_fetch_state(
+-                conn,
+-                feed_id,
+-                true,
+-                Some(&e.message),
+-                etag.as_deref(),
+-                last_modified.as_deref(),
+-            )?;
+-            Err(e)
+-        }
+-    }
+-}
+-
+ /* ============================================================
+ 三段式刷新管线（并发安全版）
+ ============================================================ */
+diff --git a/src-tauri/src/sync/mod.rs b/src-tauri/src/sync/mod.rs
+index 4b4c96b..40f8ac4 100644
+--- a/src-tauri/src/sync/mod.rs
++++ b/src-tauri/src/sync/mod.rs
+@@ -2,7 +2,17 @@
+ //!
+ //! ① Push：sync_queue 里的本地变更推到后端
+ //! ② Pull：拉远端订阅/分类/条目状态变化，URL 碰撞合并
+-//! ③ 兜底：直连失败的源从后端拉条目（source='miniflux'）
++//! ③ 条目补齐：origin='remote' 的源由 reading-list 全量拉取（GReader）或
++//!    未读+收藏集合补齐（Fever）隐式覆盖，因此本地无需为其直连抓取。
++//!    TASK-070：本条原先宣称「直连失败的源从 Miniflux 拉条目」——该路径在当前
++//!    实现中已不存在。它**曾经存在**：Miniflux 协议时期 pull 里有 failed_feeds
++//!    循环，直接调 feeds_fetch_failed / feeds_fetch_failed_bound；0ba940f
++//!    （协议切换 Google Reader）删掉了该循环，此后 feeds.fetch_failed 在 Rust 侧
++//!    没有读取方，这两条查询也随本任务作为死代码删除。该列的现存用途是经
++//!    FeedRow（commands/folders.rs 的 list_feeds）下发前端做失败标记
++//!    （api.ts 的 fetchFailed → Sidebar 的 feed-error-dot）；抓取退避由
++//!    fail_count / next_retry_at 承担（db/feeds.rs 的 set_feed_fetch_state 写入、
++//!    feeds_due_for_refresh 按 next_retry_at 过滤），与该列无关。
+ //! 本地未连接期间添加的源，首次 Pull 时按 URL 碰撞检测：
+ //!   远端无 → 推送创建；远端有 → 合并（remote id 绑定本地 feed）
+ //!
+@@ -26,7 +36,6 @@ pub struct SyncReport {
+     pub pulled_feeds: usize,
+     pub pulled_entries: usize,
+     pub merged_states: usize,
+-    pub fallback_entries: usize,
+     pub errors: Vec<String>,
+ }
+ 
+diff --git a/src-tauri/src/sync/phases.rs b/src-tauri/src/sync/phases.rs
+index aa37020..1b4e9b9 100644
+--- a/src-tauri/src/sync/phases.rs
++++ b/src-tauri/src/sync/phases.rs
+@@ -87,7 +87,6 @@ pub async fn sync_now(
+     let states = states_phase(db, http, true).await?;
+     report.pushed_states = states.pushed_states;
+     report.pulled_entries = states.pulled_entries;
+-    report.fallback_entries = states.fallback_entries;
+     report.errors.extend(states.errors);
+     Ok(report)
+ }
+diff --git a/src-tauri/tests/account_lifecycle_e2e.rs b/src-tauri/tests/account_lifecycle_e2e.rs
+index c7af312..6e1e74f 100644
+--- a/src-tauri/tests/account_lifecycle_e2e.rs
++++ b/src-tauri/tests/account_lifecycle_e2e.rs
+@@ -100,7 +100,15 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
+     db::set_article_remote_id(&conn, remote_aid, 9001).unwrap();
+     db::set_article_remote_id(&conn, local_aid, 9002).unwrap();
+     db::set_feed_remote_id(&conn, local_feed, 77).unwrap();
+-    db::set_folder_remote_id(&conn, remote_folder, 55).unwrap();
++    // TASK-070：原用 db::set_folder_remote_id（零生产调用，已删除）。生产按
++    // 分类名匹配本地 folder、不维护 folders.remote_id（见 sync/subscriptions.rs）
++    // ——但 purge_remote_data 仍须清掉历史遗留的 folder 绑定，故此处直接落库构造
++    // 该状态，保持「folder 绑定也被清理」这条断言不变。
++    conn.execute(
++        "UPDATE folders SET remote_id = ?1 WHERE id = ?2",
++        rusqlite::params![55, remote_folder],
++    )
++    .unwrap();
+     db::enqueue_sync(&conn, Some(local_aid), None, "read", None).unwrap();
+     db::enqueue_sync(&conn, Some(remote_aid), None, "read", None).unwrap();
+     let _ = conn.execute(
+diff --git a/src-tauri/tests/dedup_sync_e2e.rs b/src-tauri/tests/dedup_sync_e2e.rs
+index 78cda8c..61075e8 100644
+--- a/src-tauri/tests/dedup_sync_e2e.rs
++++ b/src-tauri/tests/dedup_sync_e2e.rs
+@@ -182,9 +182,28 @@ fn tombstone_blocks_resurrection_after_kept_article_deleted() {
+ }
+ 
+ /* ============================================================
+-① 复活防护（article_matches_remote_feed 判定矩阵）
++① 复活防护（同源判定矩阵）
++
++TASK-070：原断言调用被 SyncMatchMaps 取代的逐条查询
++`db::article_matches_remote_feed`（该函数零生产调用，已删除）。按 test_review 的
++adapt 处置，改为经生产入口 `db::sync_match_maps` 校验同一判定的**输入数据**：
++生产代码（sync/entries.rs 的 merge_pulled_entry / 状态合并）用
++`id_to_mf_pair` 的 (entry remote_id, feed remote_id) 推导 same_feed_trusted，
++所以「跨源 entry 不得被信任」这一保护必须继续在 maps 层被证明。
+ ============================================================ */
+ 
++/// 复刻生产判定（sync/entries.rs:82-89 的 same_feed_trusted）：仅用于校验
++/// maps 提供的输入，不替代生产实现。
++fn same_feed_trusted(maps: &db::SyncMatchMaps, aid: i64, remote_feed_id: i64) -> bool {
++    maps.id_to_mf_pair
++        .get(&aid)
++        .map(|(entry_mf, feed_mf)| match entry_mf {
++            Some(_) => *feed_mf == Some(remote_feed_id),
++            None => true,
++        })
++        .unwrap_or(false)
++}
++
+ #[test]
+ fn cross_feed_remote_entry_cannot_write_state_or_steal_binding() {
+     let (conn, tmp) = setup("guard");
+@@ -222,41 +241,52 @@ fn cross_feed_remote_entry_cannot_write_state_or_steal_binding() {
+         db::upsert_article_with_feed(&conn, 1, &article("http://x/news", "ga"), false).unwrap();
+     db::set_article_remote_id(&conn, aid, 100).unwrap();
+ 
+-    // 判定矩阵
++    // 判定矩阵：经生产入口取 maps（每次取最新，模拟生产逐轮构建）
++    let maps = db::sync_match_maps(&conn).unwrap();
+     // 同源 entry（feed 10）：允许
+     assert!(
+-        db::article_matches_remote_feed(&conn, aid, 10).unwrap(),
++        same_feed_trusted(&maps, aid, 10),
+         "same-feed entry is trusted"
+     );
+     // 跨源 entry（feed 20）：拒绝——服务端另一条同 URL entry 无权写状态
+     assert!(
+-        !db::article_matches_remote_feed(&conn, aid, 20).unwrap(),
++        !same_feed_trusted(&maps, aid, 20),
+         "cross-feed entry must be rejected"
+     );
++    // maps 里必须同时带出文章 remote_id 与所属源的 remote_id（判定输入完整）
++    assert_eq!(
++        maps.id_to_mf_pair.get(&aid).copied(),
++        Some((Some(100), Some(10))),
++        "maps must expose (entry remote_id, feed remote_id) for the trust decision"
++    );
++
+     // 未绑定 feed 的文章（feed 无 remote_id 视图下）：绑定后按绑定走
+     let (aid2, _) =
+         db::upsert_article_with_feed(&conn, 2, &article("http://x/other", "gb"), false).unwrap();
+     db::set_article_remote_id(&conn, aid2, 200).unwrap();
++    let maps = db::sync_match_maps(&conn).unwrap();
+     assert!(
+-        !db::article_matches_remote_feed(&conn, aid2, 10).unwrap(),
++        !same_feed_trusted(&maps, aid2, 10),
+         "feed-B article rejects feed-10 entry"
+     );
+     assert!(
+-        db::article_matches_remote_feed(&conn, aid2, 20).unwrap(),
++        same_feed_trusted(&maps, aid2, 20),
+         "own-feed entry is trusted"
+     );
+ 
+     // 不存在的文章 → 保守拒绝
++    let maps = db::sync_match_maps(&conn).unwrap();
+     assert!(
+-        !db::article_matches_remote_feed(&conn, 99999, 10).unwrap(),
++        !same_feed_trusted(&maps, 99999, 10),
+         "missing article: reject"
+     );
+ 
+     // 未绑定 entry 的文章：首见允许（绑定回填的正常路径）
+     let (aid3, _) =
+         db::upsert_article_with_feed(&conn, 1, &article("http://x/fresh", "gc"), false).unwrap();
++    let maps = db::sync_match_maps(&conn).unwrap();
+     assert!(
+-        db::article_matches_remote_feed(&conn, aid3, 10).unwrap(),
++        same_feed_trusted(&maps, aid3, 10),
+         "unbound article: first sight allows binding"
+     );
+ 
+diff --git a/src-tauri/tests/mock_greader.rs b/src-tauri/tests/mock_greader.rs
+index 31d834b..cc7954d 100644
+--- a/src-tauri/tests/mock_greader.rs
++++ b/src-tauri/tests/mock_greader.rs
+@@ -826,15 +826,9 @@ fn route(
+                     }
+                     (200, "OK".into())
+                 }
+-                "subscribe" => {
+-                    let url = form
+-                        .get("s")
+-                        .and_then(|v| v.first().cloned())
+-                        .unwrap_or_default();
+-                    let url = url.strip_prefix("feed/").unwrap_or(&url).to_string();
+-                    srv.subscribed_urls.lock().unwrap().push(url);
+-                    (200, "OK".into())
+-                }
++                // TASK-070：原 `"subscribe" => …` 分支随 GReaderClient::subscribe 的
++                // 删除而不可达（生产侧只发 ac=unsubscribe / ac=edit，订阅走 quickadd），
++                // 故移除；订阅路径的记录由 quickadd 分支负责。
+                 _ => (200, "OK".into()),
+             }
+         }
+diff --git a/src-tauri/tests/sync_content_e2e.rs b/src-tauri/tests/sync_content_e2e.rs
+index 9496d0a..1eff70a 100644
+--- a/src-tauri/tests/sync_content_e2e.rs
++++ b/src-tauri/tests/sync_content_e2e.rs
+@@ -301,8 +301,13 @@ async fn miniflux_existing_entry_backfills_cover() {
+ }
+ 
+ /// ③ 规范化 URL 匹配：同文不同饰（https/http + 尾斜杠）不重复入库。
++///
++/// TASK-070：原断言调用被 SyncMatchMaps 取代的逐条查询 `db::article_id_by_url`
++/// （零生产调用，已删除）。按 test_review 的 adapt 处置，改为经生产入口
++/// `db::sync_match_maps` 的 `url_to_id` 断言同一行为——生产 pull 合并
++/// （sync/entries.rs 的 merge_pulled_entry）正是用它做 URL 兜底匹配。
+ #[test]
+-fn article_id_by_url_uses_normalized_match() {
++fn normalized_url_match_maps_same_article() {
+     let tmp = std::env::temp_dir().join(format!(
+         "fluxreader_sync_content_norm_{}_{}.db",
+         std::process::id(),
+@@ -341,11 +346,16 @@ fn article_id_by_url_uses_normalized_match() {
+         published_at: Some(chrono::Utc::now().to_rfc3339()),
+         source: "direct".into(),
+     };
+-    db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
++    let (aid, _) = db::upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+ 
+-    // 远端同文但 http + 无尾斜杠 → 必须匹配到同一篇
+-    let matched = db::article_id_by_url(&conn, "http://example.com/story").unwrap();
+-    assert!(matched.is_some(), "normalized URL must match the local article (https://example.com/story/ vs http://example.com/story)");
++    // 远端同文但 http + 无尾斜杠 → 必须匹配到同一篇（规范化键同源同口径）
++    let maps = db::sync_match_maps(&conn).unwrap();
++    let matched = maps.url_to_id.get(&db::normalize_url("http://example.com/story"));
++    assert_eq!(
++        matched.copied(),
++        Some(aid),
++        "normalized URL must match the local article (https://example.com/story/ vs http://example.com/story)"
++    );
+ 
+     let _ = std::fs::remove_file(&tmp);
+ }
+diff --git a/src-tauri/tests/sync_e2e.rs b/src-tauri/tests/sync_e2e.rs
+index 6fe8d79..3d3bff7 100644
+--- a/src-tauri/tests/sync_e2e.rs
++++ b/src-tauri/tests/sync_e2e.rs
+@@ -1,6 +1,12 @@
+ //! Miniflux 同步引擎端到端测试：mock 服务端 + 临时数据库。
+ //! 覆盖：连接测试、URL 碰撞合并（§4.4）、远端订阅拉取、状态推送（已读/收藏）、
+-//! 直连失败源的兜底拉取（source='miniflux'）。
++//! 远端新条目经 pull 落库为 source='miniflux'。
++//! 注（TASK-070）：本条原先写作「直连失败源的兜底拉取」——该因果不成立：
++//! 条目落库为 source='miniflux' 取决于远端源/条目的匹配与绑定，而不是把源标记为
++//! 抓取失败（审查者已用变异证实：删掉失败标记调用，本套件仍全绿且条目照常入库）。
++//! 另注：feeds.fetch_failed 在 Rust 侧没有读取方；抓取退避由 fail_count /
++//! next_retry_at 承担（db/feeds.rs 的 set_feed_fetch_state 写入、
++//! feeds_due_for_refresh 按 next_retry_at 过滤），该列现存用途是下发前端做失败标记。
+ //! 运行：cargo test --test sync_e2e -- --ignored --nocapture
+ 
+ mod mock_greader;
+@@ -68,7 +74,10 @@ async fn miniflux_sync_end_to_end() {
+         "read",
+         true,
+     );
+-    // 远端另一条目（本地没有 —— 走兜底路径不涉及，状态 Pull 也不该建新条目，因为无 URL 匹配）
++    // 远端另一条目（属于远端 feed 11，本地尚无对应源）。
++    // TASK-070：此处原写「走兜底路径不涉及」，把本条与 Miniflux 兜底拉取挂钩——
++    // 该因果不成立（见文件头注）。本条实际由 pull 阶段按「远端条目 + 同轮拉到的
++    // 远端源」入库为 source='miniflux'；本文件后续断言即以此为据。
+     server.add_entry(
+         11,
+         "http://example.com/only-remote",
+@@ -88,8 +97,8 @@ async fn miniflux_sync_end_to_end() {
+         .await
+         .expect("sync should succeed");
+     let conn = db.lock().await;
+-    println!("sync report: pushed_states={} pushed_feeds={} pulled_feeds={} pulled_entries={} merged={} fallback={}",
+-        report.pushed_states, report.pushed_feeds, report.pulled_feeds, report.pulled_entries, report.merged_states, report.fallback_entries);
++    println!("sync report: pushed_states={} pushed_feeds={} pulled_feeds={} pulled_entries={} merged={}",
++        report.pushed_states, report.pushed_feeds, report.pulled_feeds, report.pulled_entries, report.merged_states);
+ 
+     // URL 碰撞合并：本地 feed 绑定了远端 feed id 10
+     let bound: Option<i64> = conn
+@@ -167,8 +176,9 @@ async fn miniflux_sync_end_to_end() {
+         "bookmark toggle must be pushed"
+     );
+ 
+-    // ---------- ③ 兜底：直连失败的源从 Miniflux 拉条目 ----------
+-    // 把 local_feed 标记为直连失败 + 绑定远端 feed，远端加一条本地没有的条目
++    // ---------- ③ 已绑定源的远端新条目经 pull 落库（source='miniflux'） ----------
++    // 把 local_feed 标记为直连失败（贴近真实场景）+ 远端加一条本地没有的条目。
++    // 注意：触发落库的是「该源已绑定 remote_id」，不是失败标记本身（见文件头说明）。
+     db::set_feed_fetch_state(
+         &conn,
+         local_feed_id,
+@@ -190,19 +200,22 @@ async fn miniflux_sync_end_to_end() {
+     let report3 = sync::sync_now(&db, &http).await.expect("third sync");
+     let conn = db.lock().await;
+     println!(
+-        "fallback report: fallback_entries={}",
+-        report3.fallback_entries
++        "third sync report: pulled_entries={}",
++        report3.pulled_entries
+     );
+ 
+-    let fallback: Option<(String, String)> = conn
++    let ingested: Option<(String, String)> = conn
+         .query_row(
+             "SELECT title, source FROM articles WHERE url = 'http://127.0.0.1:8765/new-fallback-entry'",
+             [],
+             |r| Ok((r.get(0)?, r.get(1)?)),
+         )
+         .ok();
+-    let fb = fallback.expect("fallback entry ingested from miniflux");
+-    assert_eq!(fb.1, "miniflux", "fallback entry source must be 'miniflux'");
++    let fb = ingested.expect("remote entry on a bound feed must be ingested");
++    assert_eq!(
++        fb.1, "miniflux",
++        "bound-feed remote entry must be stored with source='miniflux'"
++    );
+     assert!(fb.0.contains("Fallback"));
+ 
+     // 队列清空
+@@ -216,6 +229,7 @@ async fn miniflux_sync_end_to_end() {
+     // 场景：本地文章（feed 10 的 entry）已读；服务端另一源（feed 11）
+     // 也有同 URL 的 entry 且未读。同步后本地必须仍是已读——
+     // 跨源 entry 无权写状态（旧版会按 URL 兜底把未读覆盖回来）
++    // 注：此处的「兜底」指 URL 匹配兜底，与 Miniflux 兜底拉取无关
+     // 注意：② 推过 unread（mock 真实回写），own entry 现在服务端是 unread；
+     // 未读合并只认绑定 entry 是合法语义，所以先把 own 恢复 read（手机读过）
+     conn.execute(
+diff --git a/src/lib/api.ts b/src/lib/api.ts
+index 630c2cc..9195543 100644
+--- a/src/lib/api.ts
++++ b/src/lib/api.ts
+@@ -99,7 +99,6 @@ export interface SyncReport {
+   pulled_feeds: number;
+   pulled_entries: number;
+   merged_states: number;
+-  fallback_entries: number;
+   errors: string[];
+ }
+ 
+@@ -314,7 +313,12 @@ export const api = {
+     if (Array.isArray(raw)) return raw as string[];
+     throw new Error(String(raw));
+   },
+-  /** 流式 AI 事件（channel 推送） */
++  /** 流式 AI 事件（channel 推送）
++   *
++   * TASK-070（REQ-104）：后端 `AiEvent::Error` 变体已删除（生产从不构造，
++   * 失败经 invoke rejection 与调用方 .catch 传达）。此处 `'error'` 分支保留为
++   * **防御性兜底**：channel 收到未知/畸形 type 时仍能报错而不是静默丢弃；
++   * 不再有任何 Rust 侧路径会发出它。 */
+   async aiSummarize(
+     articleId: number,
+     onDelta: (text: string) => void,
+@@ -329,7 +333,7 @@ export const api = {
+       const m = msg as { type?: string; data?: unknown };
+       if (m.type === 'delta') onDelta(String(m.data ?? ''));
+       else if (m.type === 'done') onDone();
+-      else if (m.type === 'error') onError(String(m.data ?? 'AI 错误'));
++      else if (m.type === 'error') onError(String(m.data ?? 'AI 错误')); // 防御性兜底，见上方说明
+     };
+     return (await inv('ai_summarize', { articleId, onChannel: channel })) as string;
+   },
+@@ -500,10 +504,6 @@ export const api = {
+     const inv = await getInvoke();
+     if (inv) await inv('resolve_close', { action, remember });
+   },
+-  async syncNow(): Promise<SyncReport | null> {
+-    const inv = await getInvoke();
+-    return inv ? (await inv('sync_now') as SyncReport) : null;
+-  },
+   async syncStatus(): Promise<SyncStatusInfo | null> {
+     const inv = await getInvoke();
+     return inv ? (await inv('sync_status') as SyncStatusInfo) : null;
+diff --git a/tools/frontend-regression.mjs b/tools/frontend-regression.mjs
+index 636f86f..e7603d7 100644
+--- a/tools/frontend-regression.mjs
++++ b/tools/frontend-regression.mjs
+@@ -2248,7 +2248,7 @@ await (async () => {
+         const which = (args && args.which) || 'feeds';
+         return Promise.resolve({
+           pushed_states: 0, pushed_feeds: 0, pulled_feeds: 0, pulled_entries: 0,
+-          merged_states: 0, fallback_entries: 0,
++          merged_states: 0,
+           errors: (syncPhasePlan[which] && syncPhasePlan[which].errors) || [],
+         });
+       }
+
+========================= F-r3-1 / F-r3-2 / F-r3-3 AND WHAT CHANGED IN r3 =========================
+F-r3-1 (medium). The r2 text said the Miniflux fallback was "从未实现" (never implemented). Git
+refutes that absolute: at 9828c8f sync.rs called db::feeds_fetch_failed(conn) inside pull_entries,
+reached through sync_now -> commands::sync_now -> frontend api.syncNow(); 51dc66e kept the path via
+feeds_fetch_failed_bound + a failed_feeds loop; 0ba940f (the Google Reader protocol switch) deleted
+that loop, which is when the column lost its Rust consumer.
+  Fix: the header now states that the path does not exist in the current implementation, and that it
+  DID exist — a failed_feeds loop in the Miniflux-era pull calling feeds_fetch_failed /
+  feeds_fetch_failed_bound — until 0ba940f removed it, after which fetch_failed had no Rust consumer
+  and the two queries were removed by this task as dead code. The false "never implemented" absolute
+  is gone. (Verified with git show of 9828c8f, 51dc66e and 0ba940f.)
+
+F-r3-2 (medium). The r2 comment at tests/sync_e2e.rs said the remote-only entry (remote feed 11) is
+NOT created in that round ("源未绑定 → 本轮不该建新条目"), with the reason "无 URL 匹配". The r3
+reviewer instrumented the test and showed the opposite: after sync 1 the article exists with
+source='miniflux' and feed 11 has remote_id set — matching the suite's own assertions. The real
+rule is sync/entries.rs:145-151: an unmatched remote entry is upserted when its remote feed was
+bound by the same round's pull_feeds (maps.feed_mf_to_id).
+  Fix: the comment now describes that actual rule and drops the false "not created this round"
+  claim and its wrong reason.
+
+F-r3-3 (low). The r2 sync_e2e header listed scheduling backoff as a use of feeds.fetch_failed while
+its own parenthesis correctly said the backoff is computed from fail_count / next_retry_at — the
+same misattribution the r2 round had flagged in the sibling file.
+  Fix: the header now says the backoff is carried by fail_count / next_retry_at (written by
+  set_feed_fetch_state, filtered by feeds_due_for_refresh on next_retry_at) and does not attribute
+  it to fetch_failed, consistent with the sync/mod.rs header.
+
+CHANGED IN THIS ROUND: only these two files, comments only — src-tauri/src/sync/mod.rs and
+src-tauri/tests/sync_e2e.rs. No code behaviour, no assertion, no deletion was touched in ANY repair
+round (r1 additionally removed one unreachable mock match arm).
+
+STILL OUT OF SCOPE (recorded for a later REQ-104 batch; NOT in allowed_paths):
+  src/types.ts:44 and :70, src-tauri/tests/staged_refresh_e2e.rs:195,
+  src-tauri/tests/sync_phases_e2e.rs:246 still carry stale "Miniflux fallback" wording.
+
+GATE RESULTS for THIS candidate (verification run referenced by the packet):
+  cargo test 177 passed / 0 failed / 9 ignored
+  lint 0 warnings / 0 errors exit 0
+  build exit 0
+  frontend 303/303 exit 0
+
+A NOTE ON A TOOLING TRAP (from the r3 reviewer, worth knowing): restoring a mutated file can leave
+its mtime older than the compiled rlib, so cargo skips the rebuild and a stale binary appears to
+fail the clean candidate. If you see a deterministic failure of a clean candidate, force a rebuild
+before concluding anything.

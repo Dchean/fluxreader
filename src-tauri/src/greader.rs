@@ -497,26 +497,6 @@ impl GReaderClient {
         self.edit_tag(item_ids, &[], &[tags::STARRED]).await
     }
 
-    /// 全部已读（某 stream 在 ts 之前）。
-    pub async fn mark_all_read(&self, stream: &str, ts: Option<i64>) -> AppResult<()> {
-        let mut form: Vec<(&str, String)> = vec![("s", stream.to_string())];
-        if let Some(v) = ts {
-            form.push(("ts", v.to_string()));
-        }
-        self.post_form_text("/reader/api/0/mark-all-as-read", &form)
-            .await
-    }
-
-    /// 订阅（`ac=subscribe`，`s=feed/<绝对URL>`）。返回新 feed 的数字 id（若有）。
-    pub async fn subscribe(&self, feed_url: &str) -> AppResult<()> {
-        let form: Vec<(&str, String)> = vec![
-            ("ac", "subscribe".to_string()),
-            ("s", format!("feed/{feed_url}")),
-        ];
-        self.post_form_text("/reader/api/0/subscription/edit", &form)
-            .await
-    }
-
     /// 快速订阅（自动发现 feed，等价旧 `/v1/feeds` 创建 + 幂等）。
     pub async fn quick_add(&self, feed_url: &str) -> AppResult<QuickAddResponse> {
         let form: Vec<(&str, String)> = vec![("quickadd", feed_url.to_string())];

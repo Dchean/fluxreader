@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-070",
+  "run_id": "RUN-23f7391a2bdf4490af6ea0cb4d606455",
+  "status": "ready_for_verification",
+  "summary": "TASK-070 修复轮 r3：处置第三轮独立审查（RUN-d9db4b82befc4db09752598c3a8a0f17，verdict=FAIL）的三项发现。三项都成立（其中 F-r3-1 正是 r2 修复轮自己新引入的过度宣称），已逐条核实后修复；本轮仍只改注释，不动任何代码行为、断言或删除。F-r3-1（medium，requirements+maintainability）= sync/mod.rs 模块头 r2 版写『此前模块头宣称的 Miniflux 兜底能力从未实现』，属历史方向的过度宣称。已用 git 核实：该兜底**确实实现过**——9828c8f 的 sync.rs 在 pull_entries 里调 db::feeds_fetch_failed 并由 sync_now→commands::sync_now→前端 api.syncNow 可达；51dc66e 改为 feeds_fetch_failed_bound + failed_feeds 循环；0ba940f（协议切换 Google Reader）删除该循环，此后才成为死代码。修法：改写为『该路径在当前实现中已不存在；它曾经存在（Miniflux 时期 pull 的 failed_feeds 循环），0ba940f 协议切换时删除，此后 fetch_failed 在 Rust 侧无读取方，两条查询随本任务作为死代码删除』——不再作任何『从未实现』的绝对历史断言。F-r3-2（medium，maintainability）= tests/sync_e2e.rs:77 的 r2 版注释『源未绑定 → 本轮不该建新条目；状态 Pull 只做状态合并，无 URL 匹配』为假：审查者插桩证明首轮同步**确实**创建了该条目（articles 含 feed2 的 miniflux 行）并绑定了 feed 11（remote_id=Some(11)），与本套件 :119-120 的断言一致。已核实真实机制：sync/entries.rs:145-151 在『URL 与 remote_id 两次查找都未命中』且『该条目的远端 feed 已由同轮 pull_feeds 绑定』时 upsert。修法：注释改为描述该真实机制，并注明原措辞与文件头注的因果不成立。F-r3-3（low，maintainability）= tests/sync_e2e.rs 文件头 r2 版把『调度退避』列为 fetch_failed 的用途，与其自身括号（退避按 fail_count/next_retry_at 计算）自相矛盾，且与同轮改好的 sync/mod.rs 表述不一致。修法：改为『fetch_failed 在 Rust 侧没有读取方；抓取退避由 fail_count / next_retry_at 承担（set_feed_fetch_state 写入、feeds_due_for_refresh 按 next_retry_at 过滤），该列现存用途是下发前端做失败标记』——两点均已 grep 核实（fetch_failed 仅出现于字段/FEED_COLS/读取/写入/建列，无消费方；feeds.rs:130-132 与 :155 确认退避列）。四门禁实测：cargo test 177 passed / 0 failed / 9 ignored；lint 0 warnings / 0 errors；build exit 0（vite built in 898ms）；frontend 303/303。本轮改动 2 文件（src-tauri/src/sync/mod.rs、src-tauri/tests/sync_e2e.rs），均在 allowed_paths 内。第三轮审查同时确认：九项删除全部真死、四门禁真绿、无有效覆盖丢失、157/157 候选哈希一致、依赖零改动、真实库未写入、N2 的断言完整性（18 条断言谓词/SQL 逐字一致，仅披露过的消息文案与 fallback→ingested 改名）。",
+  "changed_files": [
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/tests/sync_e2e.rs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

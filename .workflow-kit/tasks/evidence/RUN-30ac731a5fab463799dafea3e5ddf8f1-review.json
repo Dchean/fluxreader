@@ -1,0 +1,138 @@
+{
+  "task_id": "TASK-070",
+  "candidate_digest": "d0486a3922240be56277cd4840f08aad139080bd2aea34db146d3d8d86f68b2d",
+  "verification_run": "RUN-49ba05fcc71e4ddca7298fc20cdb9a4c",
+  "verdict": "FAIL",
+  "summary": "TASK-070（REQ-104 死代码/空壳集群删除）独立审查。我未参与实现，结论全部来自本人重算哈希、复跑门禁、全库 grep 与四处定向 mutation 实验，并已把被改文件逐字节还原。\n\n【候选绑定】packet 的 157 个 candidate_files sha256 全部匹配（0 缺失 / 0 不符）；改动仅落在 allowed_paths 内的 16 个文件（外加工具自管的 .workflow-kit 台账）；package.json / package-lock.json / Cargo.toml / Cargo.lock 相对 HEAD diff 为空（无新依赖）；16 个改动文件全部 LF、CRLF=0；用户真实库 %APPDATA%\\com.fluxreader.app\\fluxreader.db 仍为 sha256 419b118e… / 90112 B / mtime 2026-09-19 01:58:09，早于本次候选验证（2026-09-20 03:59Z），未被写入。\n\n【门禁独立复跑】cargo test exit 0、27 个 suite、177 passed / 0 failed / 9 ignored（与记录及基线 RUN-5380e8e4 逐 suite 计数完全一致）；npm run test:frontend exit 0、既有回归 26/26 + store 断言 277/277 = 303/303；npm run lint exit 0、Found 0 warnings and 0 errors；build 未复跑（按指示采信记录），但我单独跑了门禁里的类型检查半边 `tsc -b` exit 0；自写 hashcheck 脚本重算候选即时通过。逐用例名比对 baseline 与候选日志：候选 186 = 基线 186，唯一差异是 sync_content_e2e 的 article_id_by_url_uses_normalized_match 改名为 normalized_url_match_maps_same_article，无任何其他用例消失。\n\n【删除项是否真死】逐项 grep 复核 HEAD 与工作区：feeds_fetch_failed / feeds_origin_remote / feeds_fetch_failed_bound 全仓仅声明 + db.rs 的 pub use，零调用；ingestion 旧版 refresh_feed 零调用（commands/articles.rs:202 同名函数调的是 refresh_feed_staged）；GReaderClient::mark_all_read / subscribe 无 .mark_all_read( / .subscribe( 调用点；db/sync_map.rs 的 article_matches_remote_feed / article_id_by_url / article_has_pending_sync / feed_by_remote_id / set_folder_remote_id 在 HEAD 上除声明与 re-export 外只被三个测试文件引用；SyncReport.fallback_entries 全库无自增点（仅 phases.rs 与 commands/sync.rs 互相赋值）；api.syncNow 在 HEAD 上零调用；STATE_FILE_NAME 零引用；AiEvent::Error 在 HEAD 上仅被自身测试构造。结论：九项删除的『零生产调用』claim 全部属实，无删错。保留 get_first_folder_id 的裁决成立（唯一引用 db/sync_extraction_tests.rs 不在 allowed_paths），且已加注释移交。\n\n【字符串级/运行期契约】fallback_entries / STATE_FILE_NAME / syncNow 在 src/ 与 src-tauri/ 全库零残留（唯一剩余命中均在 .workflow-kit 台账与审计文档内，不在交付面）。AiEvent::Error 的删除不破坏运行期契约：rustc 对新旧枚举做精确匹配，不存在把类型擦成 no-op 的路径（旧变体无 #[serde(other)]）；生产从不构造它，失败经 invoke rejection + 前端 .catch 传达，且 api.ts 的 'error' 分支连同 onError 形参被保留（aiSummarize 与 aiTranslate 两份），真实消费方 src/store/slices/ai.ts:284-294 的 onError 回调仍可达，未产生未使用形参（否则 tsc 的 noUnusedParameters 会拦）。SyncReport 去掉 fallback_entries 后前端仍只读 errors/pushed_*/pulled_*/merged_states，无字段读取落空。\n\n【被适配测试是否仍有牙齿】不止读代码，我做了四处定向 mutation（每次先把目标文件复制到 %TEMP% 备份，事后按 sha256 逐字节还原，并复核 git status 与全量候选哈希）：① 破坏 normalize_url 的尾斜杠归一 → normalized_url_match_maps_same_article FAILED（sync_content_e2e.rs:354 断言 left/right 不等）；② 把 sync_match_maps 的 id_to_mf_pair 第二个分量改成恒 None → cross_feed_remote_entry_cannot_write_state_or_steal_binding FAILED（dedup_sync_e2e.rs:247）；④ 注释掉 purge_remote_data 的 UPDATE folders SET remote_id = NULL → account_lifecycle_e2e 仍全绿。①②证明两条 adapt 断言对 map 层输入确实有鉴别力；④说明 account_lifecycle 那条『folder 绑定也被清理』断言在我这版 mutation 下不敏感，原因是删除该语句后 purge 步骤 5 的空目录清理会连带删掉远端 folder 行、使 COUNT(*) FROM folders WHERE remote_id IS NOT NULL 仍为 0——这是该断言**先于本次改动就存在**的既有特征（断言对象是 purge 的整体效果，不是单条语句），适配只是把构造方式从 set_folder_remote_id 换成等价 SQL 直写，未削弱原有保护，故不判缺陷。③ 我把 sync/entries.rs 里**两处** same_feed_trusted 派生（:86 与 :125）同时改成恒 true，完整 cargo test 仍 177/0/9 全绿、sync_e2e 的端到端跨源守卫也仍 PASS——即该生产判定当前无任何测试能杀死（属既有覆盖缺口，adapt 后的 dedup 断言只校验 maps 输入、不校验生产派生；本次改动未使其变差，也不属本任务交付面），如实记录为观察项，不计为 TASK-070 缺陷。\n\n【为什么判 FAIL】删除本身正确且四门禁真绿，但验收标准⑤（sync/mod.rs 模块头不得再宣称不存在的 Miniflux 兜底）未达成：改写后的 ③ 仍写『本地直连失败的源另行回退后端拉取（source='miniflux'）』，而全库没有任何按 fetch_failed 触发的回退代码路径（src-tauri/src 内 fetch_failed 只有结构体字段、FEED_COLS、feed_row 与 set_feed_fetch_state 的写入，零读取方；scheduler/phases/entries 都不查它）。同一处错误宣称在本次改动的另一个 allowed_path（ingestion.rs 模块头 :4）也仍原样残留——而该文件正是本次删掉唯一按 fetch_failed 查询的三个函数的地方，即本次改动使这句话变成不实之词却未同步修订。删除任务的首要交付物正是注释/文档诚实性，故按诚实结论判 FAIL，并把 mock_greader.rs 中因本次删除而不可达的 ac=='subscribe' 分支一并列为次要项。",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "medium",
+      "area": "requirements",
+      "title": "验收标准⑤未达成：sync/mod.rs 模块头仍宣称按直连失败触发的后端兜底，而该路径不存在",
+      "location": "src-tauri/src/sync/mod.rs:5-7",
+      "detail": "改写后的 ③ 为『条目补齐：origin='remote' 的源由 reading-list 全量拉取（GReader）或未读+收藏集合补齐（Fever）隐式覆盖；本地直连失败的源另行回退后端拉取（source='miniflux'）。』前半句准确；后半句『本地直连失败的源另行回退后端拉取』仍以 fetch_failed 为触发条件宣称一条独立回退路径，但该路径不存在：src-tauri/src 内 fetch_failed 的全部出现处只有 db/feeds.rs:16（结构体字段）、:21（FEED_COLS）、:34（feed_row 读取）、:125（set_feed_fetch_state 写入）与 migrations.rs:33（建表列），没有任何 SELECT/条件分支消费它；sync/phases.rs、sync/entries.rs、scheduler.rs、commands/ 均不引用。source='miniflux' 的写入只有 sync/entries.rs:214 的 upsert_remote_entry 一处，其调用条件是『远端条目 URL/remote_id 均未命中本地、且该远端 feed 已绑定本地 feed（maps.feed_mf_to_id 命中）』（sync/entries.rs:145-151），与 fetch_failed 无关；未绑定 remote_id 的直连失败源完全没有后端覆盖，只有 db 层退避重试。故『另行回退』把泛化的 Pull 覆盖错记为按失败状态触发的兜底，属本次改写引入/保留的不实宣称，正是 REQ-104 与验收⑤要清除的『未落实的宣称能力』。建议改为类似：『已绑定 remote_id 的源，其条目由上述 Pull 覆盖；未绑定 remote_id 的直连失败源仅靠本地退避重试，无后端兜底。』"
+    },
+    {
+      "id": "F2",
+      "severity": "medium",
+      "area": "maintainability",
+      "title": "ingestion.rs 模块头仍称 fetch_failed 供『Miniflux 兜底路径查询』，而该文件正是本次删除唯一相关查询函数之处",
+      "location": "src-tauri/src/ingestion.rs:4",
+      "detail": "模块头写『失败时标记 feeds.fetch_failed=1 供 Miniflux 兜底路径查询。』本次删除的 feeds_fetch_failed / feeds_fetch_failed_bound 正是全仓唯一按 fetch_failed 过滤的查询（HEAD 上 db/feeds.rs:245,269），删除后不存在任何『兜底路径查询』。任务删掉了旧 refresh_feed 函数体内同义的注释（原 ingestion.rs:394『失败 → 标记 fetch_failed（Miniflux 兜底路径会查这张表）』），却漏了模块头这一处，导致同一文件内『函数体注释已修订、模块头仍是旧宣称』的自相矛盾。ingestion.rs 在 allowed_paths 内且本次已改动，属可修而未修。同类残留（非本任务缺陷，范围外故不计）：src/types.ts:44、src-tauri/tests/staged_refresh_e2e.rs:195、src-tauri/tests/sync_phases_e2e.rs:246 —— 三者均不在 allowed_paths。"
+    },
+    {
+      "id": "F3",
+      "severity": "low",
+      "area": "maintainability",
+      "title": "删除 GReaderClient::subscribe 后，mock_greader.rs 的 ac=='subscribe' 分支变为不可达但未清理",
+      "location": "src-tauri/tests/mock_greader.rs:829-837",
+      "detail": "该分支唯一触发者是本次删除的 GReaderClient::subscribe（ac=subscribe + s=feed/<url>）；生产订阅改走 quick_add（mock 的 /v1/feeds 分支 :774 会推 subscribed_urls）+ edit_subscription/unsubscribe（ac=edit/unsubscribe）。全仓已无任何 ac=subscribe 发送方，该 match 臂与其中的 subscribed_urls.push 成为死分支。mock_greader.rs 明确列在 allowed_paths 内（正是为了让本任务适配测试替身），而任务目标是清除零调用死代码，故属删除不彻底。影响很小（仅测试替身的冗余臂，且 _ => (200,\"OK\") 兜底行为等价），但与本任务『零调用验证』的验收①口径不一致，建议删除该臂或在其中注明保留理由。"
+    }
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "逐项对照删除清单与七条验收标准。①零生产调用：全部九项独立复核属实。feeds_fetch_failed / feeds_origin_remote / feeds_fetch_failed_bound 在 HEAD 上仅 db/feeds.rs 声明 + db.rs:34-35 的 pub use（已用 `git grep -n <sym> HEAD -- src-tauri/src` 确认无调用方，且我核对了 re-export 名字集合：104 → 96，恰好减少这 3 个 + 5 个 sync_map 查询，无意外删减、无新增）；ingestion 旧版 refresh_feed 零调用（现存 `refresh_feed` 命中均为 commands/articles.rs:202 的命令层函数与注释）；GReaderClient::mark_all_read / subscribe 无 `.mark_all_read(` / `.subscribe(` 调用点（其余 grep 命中是 db::mark_all_read / commands::mark_all_read / mock 内部 ac 字符串）；sync_map 五个查询在 HEAD 上除声明与 re-export 外只被 dedup_sync_e2e.rs、sync_content_e2e.rs、account_lifecycle_e2e.rs 引用（其中 article_has_pending_sync / feed_by_remote_id / set_folder_remote_id 连测试都不引用）；fallback_entries 全库无自增点（HEAD 仅 sync/mod.rs:29 声明、phases.rs:90 与 commands/sync.rs:269 互相赋值）；api.syncNow 在 HEAD 上零调用（唯一命中即其自身声明）；STATE_FILE_NAME 零引用；AiEvent::Error 在 HEAD 上仅 ai.rs:212 测试构造。删除后无新增 dead_code/unused 告警：候选与基线的 cargo_test.stderr 逐行 diff 仅『Finished `test` profile in 0.38s/0.37s』一行不同，mock_greader 的 dead_code 告警与 linker stdout 告警两者同文，均为既有。②四门禁全绿且数字属实：我独立复跑 cargo test（exit 0、27 suite、177/0/9，与记录和基线逐 suite 一致）、npm run test:frontend（exit 0、303/303）、npm run lint（exit 0、0 warnings/0 errors）；build 按指示未复跑，改为核对原始日志 exit 0 并单独跑 `tsc -b`（exit 0）。已核对 4 个 gate stdout/stderr 原始文件，数字与 packet 记录一致。③零残留：fallback_entries / STATE_FILE_NAME / syncNow 在 src/ 与 src-tauri/ 全库 grep 为空；剩余命中只在 .workflow-kit 的台账、审计与历史 run 证据中（非交付面，且多为历史记录，不应改）。④AiEvent::Error 选择删除并已如实记录：变体与其专属序列化断言一并删除，前端 'error' 分支保留为防御性兜底并加注释，二选一已明示。⑤**未达成**：sync/mod.rs 模块头仍宣称『本地直连失败的源另行回退后端拉取（source='miniflux'）』，而全库无任何按 fetch_failed 触发的回退代码（见 findings F1），不实宣称未被消除。⑥无新依赖（四个依赖清单文件相对 HEAD diff 为空）、文本文件 LF（16 个改动文件 CRLF=0）、用户真实库未被写入（mtime 仍 2026-09-19 01:58:09，早于 2026-09-20 03:59Z 的验证）。⑦退役断言有等价替代：仅两条断言以死代码为对象被退役（sync_e2e.rs 的 fallback_entries 打印、ai.rs 的 AiEvent::Error 序列化），其余三条改测仍存活的生产入口，逐用例名比对确认 186 个用例名中只有 1 个改名、0 个净消失。顺带范围核对：P3-2 的 commands::sync_now 改转调 sync::sync_now 属任务 objective 明确列出的项（非越界），且转调后语义等价（feeds_phase → states_phase(full=true)，同样搬 pushed_states/pulled_entries/errors，仅少了已被删除的 fallback_entries 赋值）；get_first_folder_id 的保留裁决与理由成立（唯一引用 db/sync_extraction_tests.rs 不在 allowed_paths，且已加注释移交），与 F2/F3 同属『本可顺手清理但受范围或彻底性限制』。因验收⑤未达成，本项判 FAIL。",
+      "evidence_files": [
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/ingestion.rs",
+        "src-tauri/src/db/feeds.rs",
+        "src-tauri/src/db.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/greader.rs",
+        "src-tauri/src/config_sync.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src/lib/api.ts",
+        "tools/frontend-regression.mjs",
+        "src-tauri/src/sync/entries.rs",
+        ".workflow-kit/tasks/evidence/TASK-070-cumulative-diff.txt",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-cargo_test.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c.json",
+        ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "聚焦『适配后的测试是否仍是保护，而不是退化成同义反复』，不信作者自述，用实跑与 mutation 判定。\n(a) 门禁真伪：我独立复跑 cargo test（src-tauri，exit 0），脚本汇总 27 个 suite = 177 passed / 0 failed / 9 ignored，与 RUN-49ba05fc 记录及基线 RUN-5380e8e4 的逐 suite 序列（86/0/0, 0/0/0, 6/0/0, 1/0/0, 8/0/0, 3/0/0, 4/0/0, 14/0/0, 4/0/0, 0/0/3, 0/0/1, 2/0/0, 0/0/3, 0/0/1, 2/0/0, 0/0/0, 3/0/0, 2/0/0, 4/0/0, 1/0/0, 3/0/1, 3/0/0, 7/0/0, 1/0/0, 18/0/0, 5/0/0, 0/0/0）逐项相同。npm run test:frontend exit 0，输出『既有回归 26/26 通过（本文件原有断言，未改动一行）』+『新增 store 行为断言 277/277』+『合计 303/303』，与记录一致；npm run lint exit 0 且『Found 0 warnings and 0 errors…65 files』。\n(b) 覆盖是否被悄悄丢掉：把基线日志的 186 个用例名与候选日志的 186 个用例名做集合比对——基线有而候选无的只有 article_id_by_url_uses_normalized_match，候选有而基线无的只有 normalized_url_match_maps_same_article，即一次改名、零净消失；此外 sync_e2e 的 miniflux_sync_end_to_end 与 dedup_sync_e2e 的三条用例名均在。\n(c) 三条 adapt 是否还有牙齿（mutation 实测，非推理）：①改 normalize_url 去掉尾斜杠归一 → sync_content_e2e 的 normalized_url_match_maps_same_article FAILED（tests/sync_content_e2e.rs:354 `assert_eq!` left/right 不等），证明它真的在断言规范化匹配而不是恒真；②把 sync_match_maps 里 id_to_mf_pair 的 feed remote_id 分量写成恒 None → dedup_sync_e2e 的 cross_feed_remote_entry_cannot_write_state_or_steal_binding FAILED（tests/dedup_sync_e2e.rs:247），证明该套『同源判定矩阵』仍能区分同源/跨源、未绑定/不存在的四种情形，且新增的 `assert_eq!(maps.id_to_mf_pair.get(&aid), Some((Some(100), Some(10))))` 使判定输入完整性可被检出；③注释掉 purge_remote_data 的 `UPDATE folders SET remote_id = NULL` → account_lifecycle_e2e 仍 6/6 绿。对③我追因确认：purge 步骤 5 的空目录清理（db/articles.rs:390-393）会删掉该远端 folder 整行，故 `COUNT(*) FROM folders WHERE remote_id IS NOT NULL` 仍为 0——该断言的对象是 purge 的整体结果而非单条语句，此敏感性缺失在本次改动前就存在（HEAD 版本用 set_folder_remote_id 构造时同样如此），适配仅把构造方式换成等价 SQL 直写、断言语义未降级，故不判为适配导致的弱化。\n(d) 退役断言是否只是死代码：被退役的两条对象确实随删除消失（fallback_entries 恒 0 的字段；生产从不构造的 AiEvent::Error 变体），且 sync_e2e.rs 保留了对 fallback 行为的真实断言（仍在上断言 `source = 'miniflux'` 的条目已入库、标题含 Fallback，只是不再打印恒 0 的计数字段），即行为保护未随打印语句一起消失。\n(e) 未做：按指示未复跑 npm run build（沙箱阻断 Vite 子进程），改为核对 build 原始 stdout（exit 0、84 modules transformed、built in 124ms）并单独跑门禁里的 `tsc -b`（exit 0）；cargo fmt --check 非门禁，我另测发现整仓多处 fmt diff 且改动文件同样如此，属既有状态（基线 HEAD 亦然，非本次引入），不计入。",
+      "evidence_files": [
+        "src-tauri/tests/dedup_sync_e2e.rs",
+        "src-tauri/tests/sync_content_e2e.rs",
+        "src-tauri/tests/account_lifecycle_e2e.rs",
+        "src-tauri/tests/sync_e2e.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/db/url_norm.rs",
+        "src-tauri/src/db/articles.rs",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c.json",
+        ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "针对删除任务真正相关的异常/空/重复/稀有路径逐条查证，未发现被删符号仍在运行期被使用。\n(a) 字符串与事件级引用（symbol 级 grep 会漏的那类）：全部对角检查——①invoke 命令名：全仓无 `'sync_now'` / `\"sync_now\"` 的 IPC 调用（前端全量同步走 api.syncPhase → inv('sync_phase')，见 src/lib/api.ts:489-491、src/store/slices/sync.ts:79-86、src/components/settings/SyncTab.tsx:92-98），命令本身仍在 lib.rs:258 注册，删除的只是前端死接口 api.syncNow；②序列化字段名：SyncReport 的 fallback_entries 已在后端结构体与前端 interface 两侧同时移除，无任何读侧仍在取该键；③DB 列：删除的三个查询只读既有的 feeds.fetch_failed 列，删除函数不涉及 schema，migrations.rs 与该列写入方（db/feeds.rs:125 set_feed_fetch_state）保持不变，旧库兼容性不受影响；④channel 事件 tag：AiEvent 的 serde tag/content 形态与 Delta('delta')/Done('done') 逐字不变，只移除 'error'，而对端匹配分支保留。\n(b) AiEvent::Error 删除能否破坏真实运行期契约：不能。Rust 枚举删除变体后发信端只有 Delta/Done 两条路径（commands/ai.rs:114-115,124,141,161-162,175,197），不存在把类型擦除成 no-op 的编译产物路径（无 #[serde(other)] 之类的兜底反序列化）；失败确实经 invoke rejection 传达（commands/ai.rs 里超时/上游错误走 `?` 上抛 Err），前端调用方 src/store/slices/ai.ts:296-308 有 `.catch` 兜底并写 summaryErrors。该变体在 HEAD 上唯一构造点是它自己的测试，故删除只删掉了『测试构造的不可达分支』。保留的 'error' 分支不产生未使用形参：两份函数都在用 onError（src/lib/api.ts:336、:354），tsconfig.app.json 开了 noUnusedParameters 而 tsc -b exit 0，反证其仍可达/被引用。\n(c) fallback_entries 的运行期消费方：前端全仓没有任何读取点（候选 src/ 与 tools/ 内 grep 为空），tools/frontend-regression.mjs:2251 的 mock 对象同步去掉该键，故不存在『前端读 undefined』的路径；sync_e2e.rs 里原本只是 println! 打印该字段，删后改为打印 pulled_entries，不影响断言。\n(d) 稀有/迁移/特性开关路径：scheduler.rs 的调度与手动全量两条分支都经 feeds_due_for_refresh / feeds_all_ids（:115、:123）取源，二者只按 origin 与到期/退避过滤，从不读 fetch_failed，故删除三个「兜底查询」不影响任何自动或手动抓取路径；同步侧 sync/phases.rs（feeds_phase/states_phase/sync_now）与 sync/entries.rs 全程不引用 fetch_failed；Fever 与 GReader 两条 pull 路径都不依赖被删函数（fever_pull.rs 用 sync_match_maps 与权威集合，greader_pull.rs 用 reading-list + maps）。\n(e) 重复执行/空输入：本次改动未触及任何读写路径或状态机，sync_now 由内联改为转调后仍是同一串行两阶段（feeds→states(full=true)）与同样的错误聚合，重复调用与空库行为不变；cargo test 中 sync/dual/pull_cursor/phases 等 9 条 ignored 的实盘用例数在两个候选间相同（9），未被本次改动唤醒或击穿。\n(f) 用户真实数据边界：命令均为合成库路径（db::open 到 %TEMP% 唯一文件名），实测 %APPDATA%\\com.fluxreader.app\\fluxreader.db mtime 停在 2026-09-19 01:58:09、sha256 419b118e…（与前序审查记录一致），候选验证发生在 2026-09-20 03:59Z 之后，未写入。\n另如实记录一项观察（不计缺陷）：我给 sync/entries.rs 两处 same_feed_trusted 派生同时注入『恒信任』(=跨源也信任)后，完整 cargo test 仍 177/0/9 全绿、连端到端的 sync_e2e 跨源守卫也未失败——说明该生产判定目前无测试可杀。这是既有覆盖缺口（adapt 后的 dedup 断言只校验 maps 提供的输入、不复刻生产派生），本次改动未使其变差，也不在本任务 objective 的删除面内。",
+      "evidence_files": [
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/db/feeds.rs",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/src/lib.rs",
+        "src/lib/api.ts",
+        "src/store/slices/ai.ts",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "FAIL",
+      "analysis": "删除任务的主要交付物是注释/文档诚实性，故本项按『改写后的注释是否与实现一致』逐处核对，并以依赖方向与职责边界复核。\n(a) 达标项：db/sync_map.rs 的模块头已改写为『原先对每个远端 entry 逐条查询（url_norm 匹配 / remote_id 匹配 / 同源判定 / pending 集合 / feed 绑定）』并明列被删的五个函数，与实现一致；SyncMatchMaps 六个字段的『替代 xxx』括注已清掉，`id_to_mf_id` 标注 None 含义、`id_to_mf_pair` 标注为同源判定输入，均准确；`set_feed_remote_id` 的文档由『feeds/folders 的 remote_id 绑定』收敛为『feeds 的 remote_id 绑定』，与 set_folder_remote_id 的删除同步；get_first_folder_id 加了明确的保留理由与移交说明（范围约束下正确处置）；db.rs 的 re-export 名字集合从 104 收敛到 96，无悬空导出（若漏删会在编译期报 unresolved import，而 cargo build/test 全绿亦为佐证）；commands/ai.rs 模块头与 tests 内注释如实记录了变体删除的原因与依据，api.ts 的 'error' 分支注释写明『防御性兜底、不再有 Rust 侧路径发出』，属准确的保留说明；commands/sync.rs:262-266 的注释说明了转调动机（消除两份易漂移实现），职责边界确实收敛为单一实现（sync::sync_now）。\n(b) 不达标项（判 FAIL 依据）：sync/mod.rs:5-7 的 ③ 仍以 fetch_failed 为触发条件宣称一条『另行回退后端拉取』的路径，而实现中不存在该路径（详见 findings F1）——这既是验收⑤的正面违反，也是改写后注释与实现不一致；ingestion.rs:4 的模块头仍称 fetch_failed『供 Miniflux 兜底路径查询』，而本次删除的 feeds_fetch_failed / feeds_fetch_failed_bound 正是全仓唯一按该列过滤的查询，且任务已删掉函数体内同义注释却漏改模块头，形成同文件内自相矛盾（findings F2）。此外 mock_greader.rs:829-837 的 ac=='subscribe' 分支因 GReaderClient::subscribe 删除而不可达却未清理（findings F3）——该文件在 allowed_paths 内，属删除不彻底。\n(c) 范围与依赖方向：改动只在既有模块边界内删码，未新增抽象层或跨层依赖；未拆动 merge_remote_status 一带的书面不变式（sync/entries.rs:97-154 的合并语义逐字未变），符合任务非目标；P3-2 的转调使 commands 层只依赖 sync 层公开 API（不再复制阶段串联口径），方向正确、重复规则减少一处，是本职范围内的正当改进而非范围膨胀。\n(d) 未判为缺陷而如实记录者：src/types.ts:44、src-tauri/tests/staged_refresh_e2e.rs:195、src-tauri/tests/sync_phases_e2e.rs:246 三处同源的『Miniflux 兜底』旧注释仍在，但三者均不在 allowed_paths，按范围约束不改是正确处置（与 get_first_folder_id 同理），应由后续任务一并清理。",
+      "evidence_files": [
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/ingestion.rs",
+        "src-tauri/src/db.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "src/lib/api.ts",
+        "src/types.ts",
+        ".workflow-kit/tasks/evidence/TASK-070-cumulative-diff.txt"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本次改动是纯删除 + 一处等价转调，对运行期性能无可测量的影响，故判不适用并给出具体理由，不编造基准。\n(1) 被删代码在执行期从不运行：三个「Miniflux 兜底」查询、旧版 ingestion::refresh_feed、GReaderClient::mark_all_read/subscribe、五个逐条查询、STATE_FILE_NAME、api.syncNow 均零调用点，删除不改变任何热路径的指令流；SyncMatchMaps 的批量预取路径（真正决定同步复杂度的部分）逐字未改，仍是 5 次批量查询 + 循环内 O(1) 哈希查找。\n(2) 唯一涉及执行的改动是 commands::sync_now 由内联改为转调 sync::sync_now：转调后仍是先 feeds_phase（push_feeds + pull_feeds）再 states_phase(full=true) 的同一串行顺序与同一合并口径，唯一差异是不再执行一行已被删除的 fallback_entries 字段赋值（O(1) 写，量级为纳秒），不构成性能回归；同时它把两份实现收敛为一份，消除了未来两处漂移的维护成本，属结构性收益而非性能取舍。\n(3) AiEvent 少一个枚举变体只影响编译期匹配与序列化 tag 数量，不涉及运行期分发成本；api.ts 少一个方法不改变任何调用次数（该方法零调用）。\n(4) 本任务质量目标里的 performance 诉求（『大量订阅与文章（万级）下的启动、布局切换、正文加载』『社交布局正文加载不再无限等待』）指向 REQ-001/003 的加载性能，与本次删除面无关；任务未声明性能目标，也不存在可对照的负载与基线，故按『不受影响时解释不适用，不强造基准』处置。我未做任何基准测量，本项结论仅为静态范围判定，不声称任何提速。",
+      "evidence_files": [
+        "src-tauri/src/db/feeds.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/ingestion.rs",
+        "src-tauri/src/greader.rs",
+        "src/lib/api.ts",
+        ".workflow-kit/tasks/evidence/TASK-070-cumulative-diff.txt"
+      ]
+    }
+  ],
+  "ui_review": null
+}

@@ -182,8 +182,27 @@ fn tombstone_blocks_resurrection_after_kept_article_deleted() {
 }
 
 /* ============================================================
-① 复活防护（article_matches_remote_feed 判定矩阵）
+① 复活防护（同源判定矩阵）
+
+TASK-070：原断言调用被 SyncMatchMaps 取代的逐条查询
+`db::article_matches_remote_feed`（该函数零生产调用，已删除）。按 test_review 的
+adapt 处置，改为经生产入口 `db::sync_match_maps` 校验同一判定的**输入数据**：
+生产代码（sync/entries.rs 的 merge_pulled_entry / 状态合并）用
+`id_to_mf_pair` 的 (entry remote_id, feed remote_id) 推导 same_feed_trusted，
+所以「跨源 entry 不得被信任」这一保护必须继续在 maps 层被证明。
 ============================================================ */
+
+/// 复刻生产判定（sync/entries.rs:82-89 的 same_feed_trusted）：仅用于校验
+/// maps 提供的输入，不替代生产实现。
+fn same_feed_trusted(maps: &db::SyncMatchMaps, aid: i64, remote_feed_id: i64) -> bool {
+    maps.id_to_mf_pair
+        .get(&aid)
+        .map(|(entry_mf, feed_mf)| match entry_mf {
+            Some(_) => *feed_mf == Some(remote_feed_id),
+            None => true,
+        })
+        .unwrap_or(false)
+}
 
 #[test]
 fn cross_feed_remote_entry_cannot_write_state_or_steal_binding() {
@@ -222,41 +241,52 @@ fn cross_feed_remote_entry_cannot_write_state_or_steal_binding() {
         db::upsert_article_with_feed(&conn, 1, &article("http://x/news", "ga"), false).unwrap();
     db::set_article_remote_id(&conn, aid, 100).unwrap();
 
-    // 判定矩阵
+    // 判定矩阵：经生产入口取 maps（每次取最新，模拟生产逐轮构建）
+    let maps = db::sync_match_maps(&conn).unwrap();
     // 同源 entry（feed 10）：允许
     assert!(
-        db::article_matches_remote_feed(&conn, aid, 10).unwrap(),
+        same_feed_trusted(&maps, aid, 10),
         "same-feed entry is trusted"
     );
     // 跨源 entry（feed 20）：拒绝——服务端另一条同 URL entry 无权写状态
     assert!(
-        !db::article_matches_remote_feed(&conn, aid, 20).unwrap(),
+        !same_feed_trusted(&maps, aid, 20),
         "cross-feed entry must be rejected"
     );
+    // maps 里必须同时带出文章 remote_id 与所属源的 remote_id（判定输入完整）
+    assert_eq!(
+        maps.id_to_mf_pair.get(&aid).copied(),
+        Some((Some(100), Some(10))),
+        "maps must expose (entry remote_id, feed remote_id) for the trust decision"
+    );
+
     // 未绑定 feed 的文章（feed 无 remote_id 视图下）：绑定后按绑定走
     let (aid2, _) =
         db::upsert_article_with_feed(&conn, 2, &article("http://x/other", "gb"), false).unwrap();
     db::set_article_remote_id(&conn, aid2, 200).unwrap();
+    let maps = db::sync_match_maps(&conn).unwrap();
     assert!(
-        !db::article_matches_remote_feed(&conn, aid2, 10).unwrap(),
+        !same_feed_trusted(&maps, aid2, 10),
         "feed-B article rejects feed-10 entry"
     );
     assert!(
-        db::article_matches_remote_feed(&conn, aid2, 20).unwrap(),
+        same_feed_trusted(&maps, aid2, 20),
         "own-feed entry is trusted"
     );
 
     // 不存在的文章 → 保守拒绝
+    let maps = db::sync_match_maps(&conn).unwrap();
     assert!(
-        !db::article_matches_remote_feed(&conn, 99999, 10).unwrap(),
+        !same_feed_trusted(&maps, 99999, 10),
         "missing article: reject"
     );
 
     // 未绑定 entry 的文章：首见允许（绑定回填的正常路径）
     let (aid3, _) =
         db::upsert_article_with_feed(&conn, 1, &article("http://x/fresh", "gc"), false).unwrap();
+    let maps = db::sync_match_maps(&conn).unwrap();
     assert!(
-        db::article_matches_remote_feed(&conn, aid3, 10).unwrap(),
+        same_feed_trusted(&maps, aid3, 10),
         "unbound article: first sight allows binding"
     );
 

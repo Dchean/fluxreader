@@ -19,9 +19,6 @@ use tokio::sync::Mutex;
 
 const SCHEMA_VERSION: u32 = 1;
 const CONFIG_FILE_NAME: &str = "fluxreader-config.json";
-/// 预留的文章状态文件名常量。当前文章已读/收藏状态通过 Google Reader / Fever
-/// 协议同步（sync.rs），不使用 Gist/WebDAV 通道。
-pub const STATE_FILE_NAME: &str = "fluxreader-article-state.json";
 
 /* ============================================================
 同步 payload

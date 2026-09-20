@@ -1,0 +1,34 @@
+{
+  "task_id": "TASK-070",
+  "run_id": "RUN-d81de29f2076460298a9f0731a6f871c",
+  "status": "ready_for_verification",
+  "summary": "TASK-070（REQ-104 死代码/空壳集群删除）实现完成。逐项处置如下。① db/feeds.rs：删除 Miniflux 兜底三查询 feeds_fetch_failed/feeds_origin_remote/feeds_fetch_failed_bound（全库仅被 db.rs 的 pub use 导出、零调用点；P2-9『兜底路径未实现』），并从 db.rs 导出列表移除。② ingestion.rs：删除旧版 refresh_feed（非 staged，conn 借用即持锁跑 HTTP；命令层 commands/articles.rs 早已改调 refresh_feed_staged），连同其独占的『单源刷新（direct 优先写库）』分节标题与注释；三段式管线的 read_feed_for_refresh/fetch_and_parse/apply_refresh_result/refresh_feed_staged 全部保留。③ greader.rs：删除 GReaderClient::mark_all_read 与 subscribe（客户端级方法零调用点——命令层 mark_all_read 走 db 路径，订阅走 quick_add/edit_subscription；已用 \\.subscribe( / \\.mark_all_read( 全仓 grep 复核为空）。④ db/sync_map.rs：删除被 SyncMatchMaps 取代的逐条查询 article_matches_remote_feed/article_id_by_url/article_has_pending_sync/feed_by_remote_id/set_folder_remote_id（生产零调用），同步修订模块头注释（不再把已删函数列为本模块使用者）。get_first_folder_id 虽零生产调用，但其唯一引用是 crate 内测试 db/sync_extraction_tests.rs，该文件不在本任务 allowed_paths，故按范围约束保留并加注释说明，移交后续任务。⑤ sync/mod.rs：删除 SyncReport.fallback_entries（全库无自增点，恒 0；phases.rs 与 commands/sync.rs 只是互相赋值），并修订模块头第③条——原文宣称『直连失败的源从后端拉条目』的兜底能力与实现不符，改为如实描述（remote 源由 reading-list 全量拉取/未读+收藏补齐隐式覆盖，直连失败源另行回退）。⑥ 前端：删除 api.syncNow（零调用）与 SyncReport.fallback_entries 字段，同步更新 frontend-regression 的 mock 报告对象。⑦ config_sync.rs：删除 STATE_FILE_NAME 预留常量（零引用）。⑧ commands/ai.rs：删除 AiEvent::Error 死变体（生产从不构造，失败经 invoke rejection + 前端 .catch 传达）及其专属序列化断言；api.ts 的 'error' 分支保留为防御性兜底并加注释说明（其 onError 形参由 store/slices/ai.ts 提供，该文件不在 allowed_paths）。⑨ 顺带收口 P3-2 的同源问题：commands/sync.rs 的 sync_now 由内联重写 feeds_phase+states_phase 串联改为转调 sync::sync_now，消除两份实现漂移。测试处置（按 test_review）：adapt 4 处——dedup_sync_e2e 的同源判定矩阵改经 db::sync_match_maps 的 id_to_mf_pair 校验（新增 same_feed_trusted 复刻生产推导，并加一条『maps 必须同时带出 entry/feed remote_id』断言）、sync_content_e2e 的规范化 URL 匹配改经 maps.url_to_id、account_lifecycle_e2e 的 folder 绑定改用 SQL 直写以保持『purge 清理 folder 绑定』断言；retire 2 处——sync_e2e 的 fallback_entries 打印断言、ai.rs 的 AiEvent::Error 序列化断言（覆盖对象已删除）。四门禁实测（连续 5 次 cargo 复跑均一致）：cargo test 177 passed / 0 failed / 9 ignored（与基线持平，未因删除死代码丢失有效覆盖）；lint 0 warnings / 0 errors；build exit 0；frontend 303/303。验收③全库 grep 为 0：fallback_entries / syncNow / STATE_FILE_NAME / feeds_fetch_failed / feeds_origin_remote / set_folder_remote_id / ingestion::refresh_feed；其余命中项均为解释性注释。无新增 dead_code/unused 告警（cargo build 无 never used/unused 输出）；依赖零改动；改动文件均 LF。**范围外未尽项（不阻塞本任务，已移交）**：get_first_folder_id（src-tauri/src/db/sync_map.rs）零生产调用，但唯一引用在 crate 内测试 src-tauri/src/db/sync_extraction_tests.rs，该文件不在本任务 allowed_paths 内，故未删除，已在函数上注释说明并留待后续任务与 REQ-104 剩余批次处置。",
+  "changed_files": [
+    "src-tauri/src/commands/ai.rs",
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/config_sync.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/feeds.rs",
+    "src-tauri/src/db/sync_map.rs",
+    "src-tauri/src/greader.rs",
+    "src-tauri/src/ingestion.rs",
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/src/sync/phases.rs",
+    "src-tauri/tests/account_lifecycle_e2e.rs",
+    "src-tauri/tests/dedup_sync_e2e.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src/lib/api.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

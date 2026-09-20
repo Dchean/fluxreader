@@ -10,12 +10,13 @@ AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi 中转）
 ============================================================ */
 
 /// 推给前端的流式事件（camelCase）。
+/// TASK-070（REQ-104）：原 `Error(String)` 变体在生产从不构造（失败改由
+/// invoke rejection + 前端 .catch 传达），属未落实的宣称能力，已删除。
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "type", content = "data")]
 pub enum AiEvent {
     Delta(String),
     Done,
-    Error(String),
 }
 
 /// 读 ai_config JSON；未配置时报 aiNotConfigured。
@@ -202,6 +203,8 @@ mod ai_event_tests {
     use super::AiEvent;
 
     /// 前端 api.ts 按 {type, data} 解析；序列化必须严格一致（camelCase tag）。
+    /// TASK-070：原断言还覆盖 `AiEvent::Error`——该变体在生产从不构造
+    /// （失败经 invoke rejection + 前端 .catch 传达），属空壳，已随 REQ-104 删除。
     #[test]
     fn ai_event_serialization_matches_frontend() {
         let delta = serde_json::to_value(AiEvent::Delta("你好".into())).unwrap();
@@ -209,8 +212,5 @@ mod ai_event_tests {
         assert_eq!(delta["data"], "你好");
         let done = serde_json::to_value(AiEvent::Done).unwrap();
         assert_eq!(done["type"], "done");
-        let err = serde_json::to_value(AiEvent::Error("失败".into())).unwrap();
-        assert_eq!(err["type"], "error");
-        assert_eq!(err["data"], "失败");
     }
 }

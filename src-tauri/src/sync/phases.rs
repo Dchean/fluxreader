@@ -87,7 +87,6 @@ pub async fn sync_now(
     let states = states_phase(db, http, true).await?;
     report.pushed_states = states.pushed_states;
     report.pulled_entries = states.pulled_entries;
-    report.fallback_entries = states.fallback_entries;
     report.errors.extend(states.errors);
     Ok(report)
 }

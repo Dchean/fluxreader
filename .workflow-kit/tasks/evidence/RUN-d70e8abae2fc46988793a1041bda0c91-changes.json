@@ -1,0 +1,21 @@
+{
+  "changed_files": [
+    "src-tauri/src/commands/ai.rs",
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/config_sync.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/feeds.rs",
+    "src-tauri/src/db/sync_map.rs",
+    "src-tauri/src/greader.rs",
+    "src-tauri/src/ingestion.rs",
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/src/sync/phases.rs",
+    "src-tauri/tests/account_lifecycle_e2e.rs",
+    "src-tauri/tests/dedup_sync_e2e.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src/lib/api.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

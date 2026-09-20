@@ -1,7 +1,10 @@
 //! 直连抓取管线（实施方案 §4.2 第一优先级）：
 //! 条件 GET（ETag/If-Modified-Since）→ feed-rs 解析 → HTML 消毒 → upsert（source='direct'）。
 //!
-//! 失败时标记 feeds.fetch_failed=1 供 Miniflux 兜底路径查询。
+//! 失败时标记 feeds.fetch_failed=1 并按指数退避推迟重试（见 db/feeds.rs 的
+//! set_feed_fetch_state 与 feeds_due_for_refresh）。
+//! TASK-070：此处原写「供 Miniflux 兜底路径查询」——该兜底并不存在，且按该列
+//! 过滤的查询（feeds_fetch_failed / feeds_fetch_failed_bound）已作为死代码删除。
 
 use crate::db::{self, NewArticle};
 use crate::error::{AppError, AppResult};
@@ -314,95 +317,6 @@ fn mime_from_url(url: &str) -> Option<&'static str> {
         "webm" => Some("video/webm"),
         "mov" => Some("video/quicktime"),
         _ => None,
-    }
-}
-
-/* ============================================================
-单源刷新（direct 优先写库）
-============================================================ */
-
-/// 刷新单个源：304 → 不动；成功 → 清除失败标记 + 更新元数据 + upsert 条目；
-/// 失败 → 标记 fetch_failed（Miniflux 兜底路径会查这张表）。
-/// 返回本次新增条目数。dedup：同 URL 跨源去重（智能去重开关）。
-///
-/// 注意：此签名在**锁外**调用没有意义——conn 借用即持锁。仅适合
-/// `refresh_feed` 命令（单源、调用方一次只抓一个）与既有测试复用。
-pub async fn refresh_feed(
-    conn: &mut Connection,
-    client: &Client,
-    feed_id: i64,
-    dedup: bool,
-) -> AppResult<usize> {
-    // feed 行（URL + 条件 GET 头）
-    let (feed_url, etag, last_modified): (String, Option<String>, Option<String>) = {
-        conn.query_row(
-            "SELECT feed_url, etag, last_modified FROM feeds WHERE id = ?1",
-            rusqlite::params![feed_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .map_err(|_| AppError::not_found(format!("feed {feed_id} not found")))?
-    };
-
-    let fetched =
-        conditional_get(client, &feed_url, etag.as_deref(), last_modified.as_deref()).await;
-
-    match fetched {
-        Ok(Fetched::NotModified) => {
-            db::set_feed_fetch_state(
-                conn,
-                feed_id,
-                false,
-                None,
-                etag.as_deref(),
-                last_modified.as_deref(),
-            )?;
-            Ok(0)
-        }
-        Ok(Fetched::Body {
-            bytes,
-            content_type,
-            etag,
-            last_modified,
-        }) => {
-            let parsed = parse_feed(&bytes, &feed_url)?;
-            let _ = content_type; // feed-rs 自带编码探测，无需手动解码
-
-            db::set_feed_title_and_icon(
-                conn,
-                feed_id,
-                parsed.title.as_deref(),
-                parsed.icon.as_deref(),
-                parsed.site_url.as_deref(),
-            )?;
-            db::set_feed_fetch_state(
-                conn,
-                feed_id,
-                false,
-                None,
-                etag.as_deref(),
-                last_modified.as_deref(),
-            )?;
-
-            let mut new_count = 0;
-            for a in &parsed.articles {
-                let (_, was_new) = db::upsert_article_with_feed(conn, feed_id, a, dedup)?;
-                if was_new {
-                    new_count += 1;
-                }
-            }
-            Ok(new_count)
-        }
-        Err(e) => {
-            db::set_feed_fetch_state(
-                conn,
-                feed_id,
-                true,
-                Some(&e.message),
-                etag.as_deref(),
-                last_modified.as_deref(),
-            )?;
-            Err(e)
-        }
     }
 }
 

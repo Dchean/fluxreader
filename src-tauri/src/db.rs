@@ -32,10 +32,9 @@ pub use articles::{
 };
 pub use feeds::{
     add_feed_tombstone, delete_feed, feed_remote_info, feed_tombstones, feeds_all_ids,
-    feeds_due_for_refresh, feeds_fetch_failed, feeds_fetch_failed_bound, feeds_origin_remote,
-    find_feed_by_url, insert_feed, insert_feed_origin, list_feeds, remove_feed_tombstone,
-    set_feed_ai_flags, set_feed_fetch_state, set_feed_title_and_icon, update_feed,
-    update_feed_layout, FeedRow,
+    feeds_due_for_refresh, find_feed_by_url, insert_feed, insert_feed_origin, list_feeds,
+    remove_feed_tombstone, set_feed_ai_flags, set_feed_fetch_state, set_feed_title_and_icon,
+    update_feed, update_feed_layout, FeedRow,
 };
 pub use folders::{
     add_folder_tombstone, create_folder, delete_folder, feed_urls_in_folder, folder_name,
@@ -47,14 +46,13 @@ pub use migrations::open;
 pub(crate) use migrations::MIGRATIONS;
 pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
 pub use sync_map::{
-    add_article_dup_entry, article_by_remote_id, article_dup_entries, article_has_pending_sync,
-    article_id_by_url, article_matches_remote_feed, backfill_article_content,
+    add_article_dup_entry, article_by_remote_id, article_dup_entries, backfill_article_content,
     count_unbound_local_feeds, ensure_uncategorized_folder, export_feeds_with_folders,
-    feed_by_remote_id, feed_exists_by_url, feed_id_by_url, feed_id_by_url_normalized,
-    find_folder_by_name, folder_exists, get_article_content_html, get_article_for_summary,
-    get_article_for_translation, get_article_remote_id, get_article_url, get_first_folder_id,
-    last_sync_entry_id, last_sync_ts, list_unbound_local_feeds, list_unread_ids_scoped,
-    set_article_remote_id, set_feed_remote_id, set_folder_remote_id, set_last_sync_entry_id,
+    feed_exists_by_url, feed_id_by_url, feed_id_by_url_normalized, find_folder_by_name,
+    folder_exists, get_article_content_html, get_article_for_summary, get_article_for_translation,
+    get_article_remote_id, get_article_url, get_first_folder_id, last_sync_entry_id, last_sync_ts,
+    list_unbound_local_feeds,
+    list_unread_ids_scoped, set_article_remote_id, set_feed_remote_id, set_last_sync_entry_id,
     set_last_sync_ts, sync_mark_read_if_unread, sync_mark_starred_if_unstarred,
     sync_mark_unread_if_read, sync_mark_unstarred_if_starred, sync_match_maps,
     sync_set_article_status, update_article_fulltext, update_article_image_if_empty,

@@ -99,7 +99,6 @@ export interface SyncReport {
   pulled_feeds: number;
   pulled_entries: number;
   merged_states: number;
-  fallback_entries: number;
   errors: string[];
 }
 
@@ -314,7 +313,12 @@ export const api = {
     if (Array.isArray(raw)) return raw as string[];
     throw new Error(String(raw));
   },
-  /** 流式 AI 事件（channel 推送） */
+  /** 流式 AI 事件（channel 推送）
+   *
+   * TASK-070（REQ-104）：后端 `AiEvent::Error` 变体已删除（生产从不构造，
+   * 失败经 invoke rejection 与调用方 .catch 传达）。此处 `'error'` 分支保留为
+   * **防御性兜底**：channel 收到未知/畸形 type 时仍能报错而不是静默丢弃；
+   * 不再有任何 Rust 侧路径会发出它。 */
   async aiSummarize(
     articleId: number,
     onDelta: (text: string) => void,
@@ -329,7 +333,7 @@ export const api = {
       const m = msg as { type?: string; data?: unknown };
       if (m.type === 'delta') onDelta(String(m.data ?? ''));
       else if (m.type === 'done') onDone();
-      else if (m.type === 'error') onError(String(m.data ?? 'AI 错误'));
+      else if (m.type === 'error') onError(String(m.data ?? 'AI 错误')); // 防御性兜底，见上方说明
     };
     return (await inv('ai_summarize', { articleId, onChannel: channel })) as string;
   },
@@ -499,10 +503,6 @@ export const api = {
   async resolveClose(action: 'tray' | 'exit', remember: boolean): Promise<void> {
     const inv = await getInvoke();
     if (inv) await inv('resolve_close', { action, remember });
-  },
-  async syncNow(): Promise<SyncReport | null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('sync_now') as SyncReport) : null;
   },
   async syncStatus(): Promise<SyncStatusInfo | null> {
     const inv = await getInvoke();

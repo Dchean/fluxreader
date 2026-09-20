@@ -258,17 +258,12 @@ pub async fn cache_cleanup(
 }
 
 /// 手动全量同步（侧栏刷新按钮 / 同步中心）。staged：锁只在 DB 读写时持有。
+///
+/// TASK-070（P3-2）：此前此处内联重写了 feeds_phase + states_phase 的串联与
+/// 合并口径，与 `sync::sync_now` 形成两份实现（易漂移）。改为转调同一实现。
 #[tauri::command]
 pub async fn sync_now(state: State<'_, AppState>) -> AppResult<crate::sync::SyncReport> {
-    // feeds 阶段 → states 阶段（full 对账），两阶段各自内部管理锁
-    let mut report = crate::sync::feeds_phase(&state.db, &state.http).await?;
-    let states = crate::sync::states_phase(&state.db, &state.http, true).await?;
-    // 合并报告（错误聚合，方便前端展示）
-    report.pushed_states = states.pushed_states;
-    report.pulled_entries = states.pulled_entries;
-    report.fallback_entries = states.fallback_entries;
-    report.errors.extend(states.errors);
-    Ok(report)
+    crate::sync::sync_now(&state.db, &state.http).await
 }
 
 /// 同步配置状态（设置页显示用）。account = 连接时记录的服务端用户名。

@@ -16,27 +16,30 @@ pub fn article_by_remote_id(conn: &Connection, remote_id: i64) -> AppResult<Opti
 /* ============================================================
 Pull 合并的批量预取映射 —— 消除 N+1
 
-同步对账（pull_entries）里，对每个远端 entry 逐条调用
-article_id_by_url / article_by_remote_id / article_matches_remote_feed /
-article_has_pending_sync / feed_by_remote_id，首次同步上千条 = 数千次
-SQLite 查询。这里一次性把全部映射查进内存，循环内改为 HashMap/HashSet
-查找（O(1)），把「数千次查询」压成「5 次批量查询」。
+同步对账（pull_entries）里，原先对每个远端 entry 逐条查询
+（url_norm 匹配 / remote_id 匹配 / 同源判定 / pending 集合 / feed 绑定），
+首次同步上千条 = 数千次 SQLite 查询。这里一次性把全部映射查进内存，
+循环内改为 HashMap/HashSet 查找（O(1)），把「数千次查询」压成「5 次批量查询」。
+
+TASK-070（REQ-104）：被本映射取代的那批逐条查询函数已删除
+（article_id_by_url / article_matches_remote_feed / article_has_pending_sync /
+feed_by_remote_id / set_folder_remote_id），生产零调用。
 ============================================================ */
 
-/// Pull 合并所需的全部匹配映射（一次批量预取，替代循环内逐条查询）。
+/// Pull 合并所需的全部匹配映射（一次批量预取）。
 pub struct SyncMatchMaps {
-    /// 规范化 URL（url_norm）→ article id（替代 article_id_by_url）
+    /// 规范化 URL（url_norm）→ article id
     pub url_to_id: HashMap<String, i64>,
-    /// article id → remote_id（替代 `SELECT remote_id FROM articles WHERE id=?`）
+    /// article id → remote_id（None 表示未绑定）
     pub id_to_mf_id: HashMap<i64, Option<i64>>,
     /// article id → (文章 remote_id, 所属 feed 的 remote_id)
-    /// （替代 article_matches_remote_feed 的 JOIN 查询）
+    /// （同源判定的输入：生产据此推导 same_feed_trusted）
     pub id_to_mf_pair: HashMap<i64, (Option<i64>, Option<i64>)>,
-    /// 有「已入队未推送」读/收藏变更的 article id 集合（替代 article_has_pending_sync）
+    /// 有「已入队未推送」读/收藏变更的 article id 集合
     pub pending_ids: HashSet<i64>,
-    /// feed remote_id → feed id（替代 feed_by_remote_id）
+    /// feed remote_id → feed id
     pub feed_mf_to_id: HashMap<i64, i64>,
-    /// article remote_id → article id（替代 article_by_remote_id）
+    /// article remote_id → article id
     pub mf_id_to_article: HashMap<i64, i64>,
 }
 
@@ -45,7 +48,7 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     // 1. url_norm → id
     let mut url_to_id = HashMap::new();
     {
-        // ORDER BY id：与 article_id_by_url 的 ORDER BY id LIMIT 1 同口径——
+        // ORDER BY id：与规范化 URL 匹配的既有口径一致——
         // 同 URL 多篇时保留 id 最小者（or_insert 保留首见，首见即最小 id）
         let mut stmt = conn
             .prepare("SELECT url_norm, id FROM articles WHERE url_norm IS NOT NULL ORDER BY id")?;
@@ -118,50 +121,6 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     })
 }
 
-/// URL 兜底匹配的安全校验：本地文章（aid）与远端 entry（mf_entry_id 所属
-/// feed mf_feed_id）是否同一订阅源。同源 → 服务端说的是同一篇，可合并状态；
-/// 跨源 → URL 碰巧相同但属于另一个订阅的 entry，只有已绑定的那条才有权
-/// 写状态（防止未读状态从服务端另一条同 URL entry 复活已读文章）。
-/// 判定依据：aid 已绑定的 remote_id 所属远端 feed（feeds.remote_id）
-/// 与远端 entry 的 feed_id 一致，或 aid 尚未绑定（首见，允许建立绑定）。
-pub fn article_matches_remote_feed(
-    conn: &Connection,
-    aid: i64,
-    mf_feed_id: i64,
-) -> AppResult<bool> {
-    let bound: Option<(Option<i64>, Option<i64>)> = conn
-        .query_row(
-            "SELECT a.remote_id, f.remote_id FROM articles a
-             JOIN feeds f ON f.id = a.feed_id WHERE a.id = ?1",
-            params![aid],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    match bound {
-        // 文章或 feed 已不存在 → 不匹配（保守）
-        None => Ok(false),
-        // 文章已绑定 entry：entry 必须属于同一（远端）feed 才可信
-        Some((Some(_entry_id), feed_mf)) => Ok(feed_mf == Some(mf_feed_id)),
-        // 未绑定：首见，允许（绑定回填/兜底合并的正常路径）
-        Some((None, _)) => Ok(true),
-    }
-}
-
-/// 按 URL 找本地条目（Pull 合并的兜底匹配键）。
-/// 用规范化 URL（url_norm）匹配：Miniflux 返回的条目 URL 与本地直连抓取的
-/// URL 常有跟踪参数/www./m./尾斜杠/AMP/https 等差异，精确匹配会漏判成新条目
-/// 导致同文重复入库（文章数虚高 + 状态对不齐）。与去重键同源同口径。
-pub fn article_id_by_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> {
-    let id = conn
-        .query_row(
-            "SELECT id FROM articles WHERE url_norm = ?1 ORDER BY id LIMIT 1",
-            params![normalize_url(url)],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(id)
-}
-
 /// 绑定 Miniflux entry id（Pull 时首次见到该条目）
 pub fn set_article_remote_id(conn: &Connection, id: i64, remote_id: i64) -> AppResult<()> {
     conn.execute(
@@ -222,18 +181,6 @@ pub fn article_dup_entries(conn: &Connection, id: i64) -> AppResult<Vec<i64>> {
         .collect())
 }
 
-/// 是否存在「已入队未推送」的本地状态变更（读/收藏）。
-/// 有 → 拉取状态时跳过该文章（本地变更优先推送，防止被服务端旧状态覆盖
-/// 回来造成乒乓）。绑定回填后下一轮同步即恢复合并。
-pub fn article_has_pending_sync(conn: &Connection, id: i64) -> AppResult<bool> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sync_queue WHERE article_id = ?1 AND action IN ('read','unread','star','unstar')",
-        params![id],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
-}
-
 /// 记录上次同步时间戳（Pull 增量游标，unix 秒）
 pub fn last_sync_ts(conn: &Connection) -> AppResult<i64> {
     let v: Option<String> = conn
@@ -266,33 +213,13 @@ pub fn set_last_sync_entry_id(conn: &Connection, id: i64) -> AppResult<()> {
     set_setting(conn, "sync_last_entry_id", &id.to_string())
 }
 
-/// feeds/folders 的 remote_id 绑定
+/// feeds 的 remote_id 绑定
 pub fn set_feed_remote_id(conn: &Connection, feed_id: i64, remote_id: i64) -> AppResult<()> {
     conn.execute(
         "UPDATE feeds SET remote_id = ?1 WHERE id = ?2",
         params![remote_id, feed_id],
     )?;
     Ok(())
-}
-
-pub fn set_folder_remote_id(conn: &Connection, folder_id: i64, remote_id: i64) -> AppResult<()> {
-    conn.execute(
-        "UPDATE folders SET remote_id = ?1 WHERE id = ?2",
-        params![remote_id, folder_id],
-    )?;
-    Ok(())
-}
-
-/// 按 Miniflux feed id 找本地 feed
-pub fn feed_by_remote_id(conn: &Connection, remote_id: i64) -> AppResult<Option<i64>> {
-    let id = conn
-        .query_row(
-            "SELECT id FROM feeds WHERE remote_id = ?1",
-            params![remote_id],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(id)
 }
 
 /// 按 URL 找本地 feed（首次同步的碰撞检测键）
@@ -317,7 +244,7 @@ pub fn feed_exists_by_url(conn: &Connection, feed_url: &str) -> AppResult<bool> 
     Ok(exists)
 }
 
-/// 按规范化 URL 找本地 feed（与 article_id_by_url 同口径）。
+/// 按规范化 URL 找本地 feed（与条目侧的规范化匹配同口径）。
 /// 用于 pull_feeds 与 Miniflux 的 feed_url 碰撞匹配：Miniflux 返回的 URL 与
 /// 本地直连添加时的 URL 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成
 /// 新订阅 → 同一订阅出现两个本地 feed（文章翻倍、状态分裂、数量与未读数
@@ -556,6 +483,10 @@ pub fn find_folder_by_name(conn: &Connection, name: &str) -> AppResult<Option<i6
 }
 
 /// 获取第一个 folder id（Pull 段兜底分类用）
+///
+/// TASK-070：本函数零生产调用（生产已改用 ensure_uncategorized_folder），
+/// 但其唯一引用是 crate 内测试 db/sync_extraction_tests.rs（不在本任务
+/// allowed_paths 内），故按范围约束保留，待后续任务连同该测试一并处置。
 pub fn get_first_folder_id(conn: &Connection) -> AppResult<Option<i64>> {
     let id = conn
         .query_row("SELECT id FROM folders LIMIT 1", [], |r| r.get(0))

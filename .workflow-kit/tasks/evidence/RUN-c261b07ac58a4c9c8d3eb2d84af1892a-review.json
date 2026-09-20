@@ -1,0 +1,122 @@
+{
+  "task_id": "TASK-070",
+  "candidate_digest": "9086e04c46c0f6326f858130d357606eba9236f5b2518b24b017d52bd872cfe7",
+  "verification_run": "RUN-44d4ee12298e4fc6a9a862cbc2c1f93c",
+  "verdict": "PASS",
+  "summary": "TASK-070 (REQ-104 dead-code / shell-capability deletion), independent FOURTH-round review of candidate 9086e04c, focused on the three comment fixes this round claims (F-r3-1 sync/mod.rs header, F-r3-2 sync_e2e.rs line-77 comment, F-r3-3 sync_e2e.rs header backoff attribution) and on whether the new wording introduces yet another inaccuracy. I did not write any of this code. I re-bound the candidate myself (all 157 candidate_files sha256 match the worktree, 0 mismatched/missing; the 17 modified non-.workflow-kit files are all inside allowed_paths; no untracked file outside .workflow-kit), re-ran three of the four gates (cargo test exit 0 = 27 suites / 177 passed / 0 failed / 9 ignored, matching the record and the baseline; npm run lint exit 0 = 0 warnings/0 errors; npm run test:frontend exit 0 = 26/26 + 277/277 = 303/303) and read the recorded build log (exit 0, empty stderr); I also ran tsc -b (the typecheck half of the build gate) exit 0. F-r3-1 is genuinely fixed: the false 'never implemented' absolute is gone and every historical clause now checks out against git (9828c8f sync.rs pull_entries calls db::feeds_fetch_failed inside a failed_feeds loop; 51dc66e keeps it via feeds_fetch_failed_bound; 0ba940f^ still has 'let (since_s, miniflux_feeds, failed_feeds)' and 'for feed in &failed_feeds', while 0ba940f itself deletes both lines and leaves zero feeds_fetch_failed references in sync.rs). F-r3-2 is genuinely fixed: I instrumented the test and dumped the database immediately after sync 1 - articles are [(1, feed 1, direct), (2, feed 2, miniflux, url=http://example.com/only-remote)] and feeds.feed_url = 'http://example.com/remote-only.xml' has remote_id = 11, i.e. the entry IS created in that round by the rule the new comment names (sync/entries.rs:145-151 upserts an unmatched remote entry when maps.feed_mf_to_id has its remote feed). F-r3-3 is genuinely fixed: the header no longer attributes backoff to fetch_failed, and the fail_count/next_retry_at mechanism, the set_feed_fetch_state writer, the feeds_due_for_refresh filter and the FeedRow -> list_feeds -> api.ts fetchFailed -> Sidebar feed-error-dot marker path all verify; the two headers are now mutually consistent. I also re-confirmed the substance: all nine deletions had zero production call sites at HEAD (checked with git grep against HEAD, not only the worktree), zero residue of fallback_entries / syncNow / STATE_FILE_NAME, no new dead_code/unused warnings (warning multisets of baseline and this candidate are identical, 14 lines each), no dependency-file change, LF endings on all 17 changed files, the real user database untouched, and no assertion altered (18 assert macros on both sides of sync_e2e.rs). I found no new false clause this round; the one clause I probed hardest ('本文件后续断言即以此为据') is true of the rule it names, and I recorded the nuance in the maintainability check. Verdict: PASS.",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "Item by item against the seven acceptance criteria. (1) Nine deletions verified zero production call sites against HEAD (git grep <sym> HEAD -- src-tauri/src src src-tauri/tests tools), not just the worktree: feeds_fetch_failed / feeds_fetch_failed_bound / feeds_origin_remote appear only as definitions plus the db.rs pub use; ingestion's non-staged refresh_feed has no caller (production goes through commands/articles.rs:209 and scheduler.rs:147 -> refresh_feed_staged); GReaderClient ::mark_all_read / ::subscribe have zero '.mark_all_read(' / '.subscribe(' call sites; the five superseded sync_map queries appear only as definitions, the re-export and test references; SyncReport.fallback_entries had no increment anywhere (only the two mutually-copying assignments); STATE_FILE_NAME had no reference; api.syncNow had no caller; AiEvent::Error was constructed only by its own test. (2) No new dead_code/unused warnings: I normalised the warning lines of the baseline run (RUN-5380e8e4) and this candidate's recorded run - both are 14 lines, differing only in which per-test target is credited with a duplicate (a scheduling artifact); no warning mentions any deleted item. (3) Four gates green: the recorded cargo_test stdout aggregates to exactly 27 suites / 177 passed / 0 failed / 9 ignored, lint stdout is 'Found 0 warnings and 0 errors' with a 0-byte stderr, build stdout ends in a completed Vite build with exit 0 and a 0-byte stderr, and frontend stdout ends in 26/26, 277/277, 303/303 with zero 'failed'/'FAIL' occurrences. (4) Zero residue: git grep for fallback_entries, syncNow and STATE_FILE_NAME over src, src-tauri/src, src-tauri/tests and tools returns nothing, as does the string 'fluxreader-article-state'; the SQL 'WHERE fetch_failed = 1' no longer exists anywhere in src or src-tauri. (5) The sync/mod.rs header no longer claims a nonexistent fallback and now states '该路径在当前实现中已不存在' with the true history; criterion ⑤ is met. (6) No new dependencies: package.json, package-lock.json, src-tauri/Cargo.toml and src-tauri/Cargo.lock are absent from git diff. (7) All 17 changed files are LF-only (crlf=0) with no BOM; the real user database (C:\\Users\\A\\AppData\\Roaming\\com.fluxreader.app\\fluxreader.db, 90112 B) still carries its pre-task mtime 2026-09-19 01:58:09, earlier than the task start (2026-09-20T03:38Z) and than all verification runs, and the tests open only temp-dir databases. Criterion ④ (AiEvent::Error) is handled as 'delete' and truthfully recorded; the retained frontend 'error' branch is documented as a defensive fallback and is still referenced (tsc -b exit 0 under noUnusedParameters). Criterion ⑦: the retired assertions' objects disappeared with the deletion, and the adapted ones were moved onto surviving production entries (sync_match_maps), which I re-verified by mutation (see regression).",
+      "evidence_files": [
+        "src-tauri/src/db/feeds.rs",
+        "src-tauri/src/db.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/ingestion.rs",
+        "src-tauri/src/greader.rs",
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/config_sync.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src/lib/api.ts",
+        "src-tauri/src/scheduler.rs",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-cargo_test.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/TASK-070-cumulative-diff-r4.txt",
+        ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json",
+        ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "I read the actual gate commands, their raw stdout/stderr and re-ran three gates plus the typecheck half of the fourth. cargo_test: the recorded stdout has 27 'test result:' lines aggregating to exactly 177 passed / 0 failed / 9 ignored; my own run reproduces 27 suites / 177 / 0 / 9 with exit 0 and per-suite pass counts identical to the record; the recorded stderr is composed solely of pre-existing mock_greader dead_code notes and a linker-message note, and its normalised warning multiset is IDENTICAL to the baseline run's (14 lines each; the only difference is which test target is credited with a shared duplicate warning). lint: recorded 'Found 0 warnings and 0 errors' exit 0; my run reproduces it. frontend: recorded 26/26 + 277/277 = 303/303 with exit 0; my run reproduces 303/303 exit 0. build: not re-run (Vite child process is blocked in this sandbox, per instruction); I read the recorded stdout - a completed production build with exit 0 and a 0-byte stderr - and independently ran its typecheck half tsc -b (exit 0). Assertions were not altered: sync_e2e.rs has 18 assert macros on both sides of the change, and a token-level diff of every changed file (comments and string literals stripped) shows the only sync_e2e differences are the removed fallback_entries println, the renamed local fallback->ingested and the reworded assert message - no predicate, SQL literal or expected value changed. The other counts are consistent with the declared test_review: commands/ai.rs 5->3 (the two retired AiEvent::Error assertions), sync_content_e2e.rs 15->15 (assert! -> assert_eq! tightening), account_lifecycle_e2e.rs 28->28 (set_folder_remote_id replaced by the equivalent SQL write), dedup_sync_e2e.rs 14->15 (the disclosed ADD of the maps-input completeness assertion). The adapted tests still have teeth: the r3 round proved by mutation that forcing a None feed component into id_to_mf_pair makes dedup_sync_e2e::cross_feed_remote_entry_cannot_write_state_or_steal_binding fail, and I independently reproduced the mutation the sync_e2e.rs header now cites - removing only the db::set_feed_fetch_state(..., true, ...) call leaves the suite green and still ingests the bound feed's remote entry, so the header's stated real trigger (the remote_id binding, not the failure flag) is correct. Each mutation was made on a backed-up file and restored byte-identically (sync_e2e.rs sha256 b6e4557762daa6f0d700ebceac65e2d51a0b9351938db2e5ed583a9e07345e44 before and after); afterwards all 157 candidate hashes re-match with 0 mismatches and git status shows no untracked file outside .workflow-kit.",
+      "evidence_files": [
+        "src-tauri/tests/sync_e2e.rs",
+        "src-tauri/tests/dedup_sync_e2e.rs",
+        "src-tauri/tests/sync_content_e2e.rs",
+        "src-tauri/tests/account_lifecycle_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/sync/entries.rs",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-cargo_test.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+        ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "For a deletion task I looked specifically for runtime-reachable residue, including references a plain symbol grep could miss. (a) String / IPC level: the removed frontend method api.syncNow was the only sender of the 'sync_now' invoke name - git grep now finds no 'syncNow' and no inv('sync_now') anywhere in src or tools (the only live sync entry points are inv('sync_phase') at api.ts:491 and inv('refresh_feed') at api.ts:220, both untouched) - while the Rust command commands::sync_now remains registered (src-tauri/src/lib.rs:258) and functional because this task changed its body to delegate to sync::sync_now with identical semantics (feeds_phase then states_phase(full=true), same pushed_states/pulled_entries/errors merge), so no IPC surface was orphaned. (b) Serialized field names: 'fallback_entries' was removed from the Rust struct, the TypeScript interface and the frontend regression harness mock in the same change and no reader remains, so there is no 'reads undefined' path; the retained AiEvent tags 'delta'/'done' are byte-identical and the never-emitted 'error' tag was dropped from the emitter while the receiver branch was kept, so a stray/unknown channel message still surfaces an error instead of being silently discarded (the store's onError callback at src/store/slices/ai.ts:284-294 is still reachable and used). (c) Database columns read elsewhere: the deletion removed Rust query helpers, not schema - feeds.fetch_failed still exists (db/migrations.rs), is still written by set_feed_fetch_state (db/feeds.rs:125) and is still read through FeedRow (which derives Serialize and carries the field), handed out by the list_feeds command (commands/folders.rs:103-105, registered at lib.rs:230), typed at src/lib/api.ts:57, mapped to fetchFailed at api.ts:534 and consumed by the sidebar badge at src/components/Sidebar.tsx:240-247; migrations are untouched, so existing databases stay compatible. The now-deleted query helpers were the only remaining SQL that filtered on that column, and nothing replaced them, so no rarely-exercised branch lost its reader silently. (d) Rarely-exercised branches: the mock's ac=='subscribe' arm was removed because its only producer (GReaderClient::subscribe) was deleted; production emits only ac=unsubscribe / ac=edit (src-tauri/src/greader.rs:510/525) and subscription recording still happens in the quickadd branch and via subscription_edits before the match, so the remaining consumers of subscribed_urls (account_lifecycle_e2e.rs:491, sync_gap_repro_e2e.rs:1185) are intact. (e) One probing detail, disclosed rather than hidden: I removed the second server.add_entry (feed 11, only-remote) and the whole suite still passed (1 passed, with a printed sentinel proving the mutated source was the one compiled) - i.e. no assertion in this file depends on that particular entry. That is a pre-existing coverage observation, not a defect of this task (no assertion was weakened, and the file's source='miniflux' ingestion rule is asserted by the ③ section at sync_e2e.rs:207-219), and the new line-77 comment does not claim otherwise: what it says is that the entry is ingested by that rule and that the file's later assertions rest on it, which holds for the rule.",
+      "evidence_files": [
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/db/feeds.rs",
+        "src-tauri/src/db/migrations.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/greader.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "src-tauri/tests/sync_e2e.rs",
+        "src-tauri/tests/account_lifecycle_e2e.rs",
+        "src/lib/api.ts",
+        "src/store/slices/ai.ts",
+        "src/components/Sidebar.tsx"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "This round's entire deliverable is comment honesty, so I judged every rewritten clause strictly, in both directions. F-r3-1 (sync/mod.rs header) - clause by clause: '该路径在当前实现中已不存在' is present-tense and true; '它**曾经存在**：Miniflux 协议时期 pull 里有 failed_feeds 循环，直接调 feeds_fetch_failed / feeds_fetch_failed_bound' is confirmed by git (git show 9828c8f:src-tauri/src/sync.rs has 'let failed_feeds = db::feeds_fetch_failed(conn)' and 'for feed in &failed_feeds' inside pull_entries; 51dc66e:src-tauri/src/sync.rs has the same loop fed by db::feeds_fetch_failed_bound inside pull_entries); '0ba940f（协议切换 Google Reader）删掉了该循环' is confirmed both ways (0ba940f^:src-tauri/src/sync.rs still contains both lines, while 0ba940f:src-tauri/src/sync.rs contains zero 'feeds_fetch_failed' and zero 'failed_feeds' references); '此后 feeds.fetch_failed 在 Rust 侧没有读取方' matches the tree (the column is only written, selected into FeedRow and re-serialized - no Rust branch reads it); '这两条查询也随本任务作为死代码删除' is this task's actual change; '该列的现存用途是经 FeedRow（commands/folders.rs 的 list_feeds）下发前端做失败标记（api.ts 的 fetchFailed → Sidebar 的 feed-error-dot）' verifies end to end; '抓取退避由 fail_count / next_retry_at 承担（set_feed_fetch_state 写入、feeds_due_for_refresh 按 next_retry_at 过滤），与该列无关' matches db/feeds.rs:123-138 and :151-157 exactly, and set_feed_fetch_state is the only writer of both columns. No false historical absolute remains (the r2 '从未实现' wording is gone) and no clause over-claims. F-r3-2 (sync_e2e.rs line 77) - the false 'not created this round / no URL match' claim is gone; the replacement names the real rule and I confirmed it empirically: with the test instrumented to dump the database right after sync 1, articles are [(1, feed 1, 'Local Article', direct), (2, feed 2, 'Remote only article', miniflux, url=http://example.com/only-remote)] and feeds 'http://example.com/remote-only.xml' has remote_id = 11, matching the suite's own assertions at lines 122-123 and the code at src-tauri/src/sync/entries.rs:145-151 (an unmatched remote entry is upserted only when maps.feed_mf_to_id holds its remote feed, which the same round's pull_feeds bound). I also probed the trailing clause '本文件后续断言即以此为据' by mutation (removing that add_entry leaves the suite green) - read as a claim about the described rule it is true, because the file's source='miniflux' assertion at lines 207-219 rests on exactly that rule; read as a claim that a later assertion depends on that one entry it would not hold, so I record the mutation here rather than let it pass unnoticed. The file header's mutation citation ('删掉失败标记调用，本套件仍全绿且条目照常入库') also reproduces: I deleted only that set_feed_fetch_state call and the suite stayed green with the entries ingested. F-r3-3 (sync_e2e.rs header) - 'feeds.fetch_failed 在 Rust 侧没有读取方' is true; backoff is attributed to fail_count / next_retry_at with the correct writer and filter, and is no longer listed as a use of fetch_failed; '该列现存用途是下发前端做失败标记' is true; the two headers are now mutually consistent (both say '在 Rust 侧没有读取方' and both credit fail_count / next_retry_at). Re-scan for other contradictions in the touched files: no stale 'Miniflux 兜底' claim survives in any file this task changed (remaining '兜底' hits are unrelated meanings - default folder, favicon, dedup key, extract cover, URL-match fallback, AI defensive branch - and the sync_e2e.rs:232 note explicitly disambiguates the URL-match '兜底' from the Miniflux one); ingestion.rs:1-7 states the retired claim in the present tense and does not repeat the 'never implemented' error; db/sync_map.rs, commands/ai.rs, commands/sync.rs, mock_greader.rs and get_first_folder_id carry the accurate notes verified in earlier rounds. Two residual staleness spots exist but are OUTSIDE this task's allowed_paths and were recorded for a later batch, so they are not defects of this candidate: src/types.ts:44/:70 ('失败走 Miniflux 兜底 + 退避重试' and the source='miniflux' description; the allowed_paths entry 'src/lib/types.ts' does not exist, so the real file is out of scope) and src-tauri/tests/staged_refresh_e2e.rs:195 plus sync_phases_e2e.rs:246 (stale '供 UI 与 Miniflux 兜底查询' wording); the in-scope sync_content_e2e.rs header still names the pre-rename helper names in its coverage list, but that header is not part of this round's deliverable and its coverage statements remain true of the suite's content.",
+      "evidence_files": [
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/tests/sync_e2e.rs",
+        "src-tauri/src/db/feeds.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/ingestion.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/tests/mock_greader.rs",
+        "src-tauri/tests/sync_content_e2e.rs",
+        "src/lib/api.ts",
+        "src/components/Sidebar.tsx",
+        "src/store/slices/ai.ts",
+        ".workflow-kit/tasks/evidence/TASK-070-cumulative-diff-r4.txt"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "Genuinely not applicable to this change, with a concrete reason instead of an invented benchmark. This task is a pure deletion plus one equivalent delegation, and this round touched only comment text in two files (a per-hunk comparison of the r3 and r4 cumulative-diff artifacts shows the r3->r4 delta is limited to the sync/mod.rs and sync_e2e.rs comment blocks and the artifact's own narrative header - no assertion, setup call, SQL literal or expected value changed). (1) Everything deleted had zero call sites, so none of it executed at runtime: the three Miniflux-era fallback queries, the old non-staged ingestion::refresh_feed, GReaderClient::mark_all_read / subscribe, the five superseded per-item sync_map queries, STATE_FILE_NAME and api.syncNow. (2) The structure that determines sync cost is untouched: sync_match_maps still issues the same fixed set of batch queries and the merge loop still performs O(1) HashMap/HashSet lookups (db/sync_map.rs:47-122, consumed at sync/entries.rs:99-154), so query count and per-entry work are unchanged. (3) The only executed-code change in the whole task, commands::sync_now delegating to sync::sync_now, preserves the sequence feeds_phase (push_feeds + pull_feeds) then states_phase(full=true) and the same error-merge arithmetic (sync/phases.rs:82-92); the single removed operation is one O(1) copy of the deleted fallback_entries counter - nanoseconds against network I/O and SQLite work. (4) The task's quality-goal performance targets (ten-thousand-item startup, layout switching, social-layout article loading) belong to REQ-001/003 and are not on this deletion surface; no workload, baseline or measurement exists for them here, so I fabricated none and claim no speedup.",
+      "evidence_files": [
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/ingestion.rs",
+        "src-tauri/src/greader.rs",
+        "src/lib/api.ts",
+        ".workflow-kit/tasks/evidence/TASK-070-cumulative-diff-r4.txt"
+      ]
+    }
+  ],
+  "ui_review": null
+}

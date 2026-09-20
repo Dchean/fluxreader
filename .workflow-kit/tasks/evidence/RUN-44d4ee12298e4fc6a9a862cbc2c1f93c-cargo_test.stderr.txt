@@ -1,0 +1,172 @@
+warning: linker stdout: 正在创建库 D:\fluxreader\src-tauri\target\debug\deps\app_lib.dll.lib 和对象 D:\fluxreader\src-tauri\target\debug\deps\app_lib.dll.exp
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `app` (lib) generated 1 warning
+warning: multiple methods are never used
+   --> tests\mock_greader.rs:180:12
+    |
+107 | impl MockGReader {
+    | ---------------- methods in this implementation
+...
+180 |     pub fn set_greader_api_prefix(&self, prefix: &str) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+185 |     pub fn set_fail_edit_tag(&self, fail: bool) {
+    |            ^^^^^^^^^^^^^^^^^
+...
+191 |     pub fn set_fail_item_contents(&self, fail: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+198 |     pub fn set_fail_reading_list_ids(&self, fail: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+204 |     pub fn set_reject_login(&self, reject: bool) {
+    |            ^^^^^^^^^^^^^^^^
+...
+210 |     pub fn set_fever_endpoint(&self, endpoint: &str) {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+215 |     pub fn set_fever_api_version(&self, v: i64) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+220 |     pub fn set_fever_reject_auth(&self, reject: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+226 |     pub fn request_log(&self) -> Vec<String> {
+    |            ^^^^^^^^^^^
+...
+231 |     pub fn clear_request_log(&self) {
+    |            ^^^^^^^^^^^^^^^^^
+...
+236 |     pub fn login_request_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: methods `set_fail_edit_tag`, `set_fail_item_contents`, and `set_fail_reading_list_ids` are never used
+   --> tests\mock_greader.rs:185:12
+    |
+107 | impl MockGReader {
+    | ---------------- methods in this implementation
+...
+185 |     pub fn set_fail_edit_tag(&self, fail: bool) {
+    |            ^^^^^^^^^^^^^^^^^
+...
+191 |     pub fn set_fail_item_contents(&self, fail: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+198 |     pub fn set_fail_reading_list_ids(&self, fail: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple methods are never used
+   --> tests\mock_greader.rs:180:12
+    |
+107 | impl MockGReader {
+    | ---------------- methods in this implementation
+...
+180 |     pub fn set_greader_api_prefix(&self, prefix: &str) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+191 |     pub fn set_fail_item_contents(&self, fail: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+198 |     pub fn set_fail_reading_list_ids(&self, fail: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+204 |     pub fn set_reject_login(&self, reject: bool) {
+    |            ^^^^^^^^^^^^^^^^
+...
+210 |     pub fn set_fever_endpoint(&self, endpoint: &str) {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+215 |     pub fn set_fever_api_version(&self, v: i64) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+220 |     pub fn set_fever_reject_auth(&self, reject: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+226 |     pub fn request_log(&self) -> Vec<String> {
+    |            ^^^^^^^^^^^
+...
+231 |     pub fn clear_request_log(&self) {
+    |            ^^^^^^^^^^^^^^^^^
+...
+236 |     pub fn login_request_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: multiple methods are never used
+   --> tests\mock_greader.rs:180:12
+    |
+107 | impl MockGReader {
+    | ---------------- methods in this implementation
+...
+180 |     pub fn set_greader_api_prefix(&self, prefix: &str) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+...
+185 |     pub fn set_fail_edit_tag(&self, fail: bool) {
+    |            ^^^^^^^^^^^^^^^^^
+...
+204 |     pub fn set_reject_login(&self, reject: bool) {
+    |            ^^^^^^^^^^^^^^^^
+...
+210 |     pub fn set_fever_endpoint(&self, endpoint: &str) {
+    |            ^^^^^^^^^^^^^^^^^^
+...
+215 |     pub fn set_fever_api_version(&self, v: i64) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+220 |     pub fn set_fever_reject_auth(&self, reject: bool) {
+    |            ^^^^^^^^^^^^^^^^^^^^^
+...
+226 |     pub fn request_log(&self) -> Vec<String> {
+    |            ^^^^^^^^^^^
+...
+231 |     pub fn clear_request_log(&self) {
+    |            ^^^^^^^^^^^^^^^^^
+...
+236 |     pub fn login_request_count(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `app` (test "sync_gap_repro_e2e") generated 1 warning
+warning: `app` (test "account_lifecycle_e2e") generated 1 warning (1 duplicate)
+warning: `app` (test "sync_e2e") generated 1 warning (1 duplicate)
+warning: `app` (test "endpoint_autodetect_e2e") generated 1 warning
+warning: `app` (test "sync_content_e2e") generated 1 warning
+warning: `app` (test "sync_phases_e2e") generated 1 warning (1 duplicate)
+warning: `app` (test "dual_client_e2e") generated 1 warning (1 duplicate)
+warning: `app` (test "pull_cursor_e2e") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.68s
+     Running unittests src\lib.rs (target\debug\deps\app_lib-28af9ca0d34b9f2b.exe)
+     Running unittests src\main.rs (target\debug\deps\app-346650996fae5145.exe)
+     Running tests\account_lifecycle_e2e.rs (target\debug\deps\account_lifecycle_e2e-1bde7be13afb3ab8.exe)
+     Running tests\ai_e2e.rs (target\debug\deps\ai_e2e-bbf1442f8e1fceaf.exe)
+     Running tests\config_sync_e2e.rs (target\debug\deps\config_sync_e2e-0f489e2b2e8a6302.exe)
+     Running tests\dedup_sync_e2e.rs (target\debug\deps\dedup_sync_e2e-f56333fa7bb30a87.exe)
+     Running tests\dual_client_e2e.rs (target\debug\deps\dual_client_e2e-c38f66b60f9a183a.exe)
+     Running tests\endpoint_autodetect_e2e.rs (target\debug\deps\endpoint_autodetect_e2e-eafdda3a1a42ebae.exe)
+     Running tests\feed_edit_e2e.rs (target\debug\deps\feed_edit_e2e-e53b586e16d2c3c0.exe)
+     Running tests\fever_live_e2e.rs (target\debug\deps\fever_live_e2e-100129980607796b.exe)
+     Running tests\fever_sync_live_e2e.rs (target\debug\deps\fever_sync_live_e2e-4bfa0aa1001de08d.exe)
+     Running tests\github_auth_e2e.rs (target\debug\deps\github_auth_e2e-623e8f11bd06e922.exe)
+     Running tests\greader_live_e2e.rs (target\debug\deps\greader_live_e2e-bb07580ba149e2d4.exe)
+     Running tests\ingestion_e2e.rs (target\debug\deps\ingestion_e2e-7bf25ea9655ceb5d.exe)
+     Running tests\migration_test.rs (target\debug\deps\migration_test-de7c8f6fe7975c84.exe)
+     Running tests\mock_greader.rs (target\debug\deps\mock_greader-01e4c246aa305049.exe)
+     Running tests\pull_cursor_e2e.rs (target\debug\deps\pull_cursor_e2e-bba754e9b31e8312.exe)
+     Running tests\refresh_dedup_e2e.rs (target\debug\deps\refresh_dedup_e2e-ff2f20d384937567.exe)
+     Running tests\regression_e2e.rs (target\debug\deps\regression_e2e-3065c4b6de9409a7.exe)
+     Running tests\row_fixture_e2e.rs (target\debug\deps\row_fixture_e2e-95140af43131d7c1.exe)
+     Running tests\scheduler_e2e.rs (target\debug\deps\scheduler_e2e-46c10524a545eda0.exe)
+     Running tests\staged_refresh_e2e.rs (target\debug\deps\staged_refresh_e2e-d39d07bbbb55b4bf.exe)
+     Running tests\sync_content_e2e.rs (target\debug\deps\sync_content_e2e-ef6c7fe032ea2150.exe)
+     Running tests\sync_e2e.rs (target\debug\deps\sync_e2e-6f5e06498cec7971.exe)
+     Running tests\sync_gap_repro_e2e.rs (target\debug\deps\sync_gap_repro_e2e-7b3e53e2467a8e2c.exe)
+     Running tests\sync_phases_e2e.rs (target\debug\deps\sync_phases_e2e-fca317008f35df12.exe)
+   Doc-tests app_lib

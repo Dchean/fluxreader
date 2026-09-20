@@ -1,0 +1,35 @@
+{
+  "task_id": "TASK-070",
+  "run_id": "RUN-d70e8abae2fc46988793a1041bda0c91",
+  "status": "ready_for_verification",
+  "summary": "TASK-070 修复轮 r1：处置独立审查（RUN-30ac731a5fab463799dafea3e5ddf8f1，verdict=FAIL）的三项发现。三项都成立且已逐条核实后修复；删除面本身经审查确认九项全部真死、无删错、无有效覆盖丢失，故无需回滚任何删除。F1（medium，requirements/验收标准⑤未达成）：sync/mod.rs 模块头③改写后仍宣称『本地直连失败的源另行回退后端拉取（source='miniflux'）』。核实：src-tauri/src 内 fetch_failed 只有字段声明（db/feeds.rs:16）、FEED_COLS（:21）、读取（:34）、写入（db/feeds.rs:125 的 set_feed_fetch_state）与建列（migrations.rs:33），**零读取消费方**；source='miniflux' 唯一写入点 sync/entries.rs:214 的触发条件是『远端条目未命中 + 远端 feed 已绑定』，与失败状态无关。修法：模块头改为如实描述——remote 源由 reading-list/未读+收藏隐式覆盖，本地无需为其直连；并显式写明本地直连失败并不存在回退后端拉取的路径，fetch_failed 只驱动指数退避重试（指向 db/feeds.rs 的 set_feed_fetch_state 与 feeds_due_for_refresh）。F2（medium，maintainability）：ingestion.rs 模块头仍写『失败时标记 feeds.fetch_failed=1 供 Miniflux 兜底路径查询』，而本任务刚删掉的 feeds_fetch_failed/feeds_fetch_failed_bound 正是全仓唯一按该列过滤的查询（同文件内自相矛盾）。修法：改为如实说明失败标记驱动指数退避重试，并注明原『Miniflux 兜底查询』表述不实、对应查询已作为死代码删除。F3（low，maintainability）：tests/mock_greader.rs 的 ac=='subscribe' 分支因 GReaderClient::subscribe 删除而不可达（生产侧只发 ac=unsubscribe / ac=edit，订阅走 quickadd）。修法：删除该分支并加注释说明；subscription_edits 记录仍在上方统一收集，订阅路径记录由 quickadd 分支负责，account_lifecycle_e2e 的『quick_add 幂等不重复入 subscribed_urls』断言继续有效（已验证该测试 6/6 通过，且 subscribed_urls 仍由 quickadd 分支在 mock_greader.rs:774 写入）。四门禁实测：cargo test 177 passed / 0 failed / 9 ignored；lint 0 warnings / 0 errors；build exit 0（vite built in 956ms）；frontend 303/303。本修复轮仅改 3 个文件（sync/mod.rs、ingestion.rs、tests/mock_greader.rs），全部在 allowed_paths 内，protected/outside 均为空。审查报告另记的两项范围外残留（src/types.ts:44『失败走 Miniflux 兜底 + 退避重试』、tests/staged_refresh_e2e.rs:195『供 UI 与 Miniflux 兜底查询』、tests/sync_phases_e2e.rs:246 同源表述）确认不在本任务 allowed_paths 内，未改动，已另记待办移交后续 REQ-104 批次。另：审查者额外探测发现 sync/entries.rs 两处 same_feed_trusted 生产判定目前无测试可杀（既有覆盖缺口，非本次引入），已如实记录为观察项。",
+  "changed_files": [
+    "src-tauri/src/commands/ai.rs",
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/config_sync.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/db/feeds.rs",
+    "src-tauri/src/db/sync_map.rs",
+    "src-tauri/src/greader.rs",
+    "src-tauri/src/ingestion.rs",
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/src/sync/phases.rs",
+    "src-tauri/tests/account_lifecycle_e2e.rs",
+    "src-tauri/tests/dedup_sync_e2e.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src/lib/api.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-070 · 死代码/空壳集群删除：零生产调用代码清理与 SyncReport 字段收口（REQ-104）
 
-**状态**：ready
+**状态**：verified
 
 **目标**：删除经 grep 验证零生产调用的死代码/空壳集群，确保无未落实的宣称能力（PI-无空壳）。逐项：① db/feeds.rs 的 Miniflux 兜底三查询 feeds_fetch_failed(:245)/feeds_origin_remote(:257)/feeds_fetch_failed_bound(:269) —— 生产仅被 db.rs:34-35 的 pub use 导出、无任何调用点，且审计判定『Miniflux 兜底路径未实现』（P2-9）：实际兜底由 reading-list pull（GReader）/未读+收藏（Fever）隐式覆盖；② ingestion.rs 旧版 refresh_feed(:330-407，非 staged，持锁跑 HTTP) —— 生产无调用点（命令层 commands/articles.rs:202 已改调 refresh_feed_staged），仅注释提及；③ greader.rs 的 GReaderClient::mark_all_read(:501)/subscribe(:511) —— 客户端级方法零调用点（命令层 mark_all_read 走 db 路径，订阅走 quick_add/edit_subscription）；④ db/sync_map.rs 被 SyncMatchMaps 取代的逐条查询（article_matches_remote_feed/article_id_by_url/article_has_pending_sync/set_folder_remote_id/feed_by_remote_id 等，仅测试引用）—— 按审计建议『统一删除或 #[cfg(test)] 下沉』处置；⑤ sync/mod.rs:29 SyncReport.fallback_entries 恒 0（全库无自增点，仅 phases.rs:90 与 commands/sync.rs:269 互相赋值）—— 删除字段及其赋值点、前端 SyncReport 类型字段与断言，并修订 sync/mod.rs 模块头注释里已不存在的『兜底』宣称；⑥ config_sync.rs:24 STATE_FILE_NAME 预留常量零引用；⑦ lib/api.ts:503 api.syncNow 前端零调用（P3-2 死接口）；⑧ AiEvent::Error 死变体（ai.rs:18 声明，生产从不构造，仅 ai.rs:212 测试构造；前端 'error' 分支因此不可达）—— 按 REQ-104『删或接通』选择删除变体与其测试，并同步清理不可达分支。非目标：不改任何仍被生产调用的函数行为；不动 merge_remote_status 一带同步合并语义（书面不变式，审计明确不建议动）；不拆除 db/sync_map.rs 中仍被 SyncMatchMaps 使用的函数；不改协议客户端与状态库路线。
 
@@ -34,20 +34,40 @@
 
 ## 执行与恢复
 
-- 首次开始：None
-- 原截止时间：None
-- 当前截止时间：None
-- 时钟：未开始
-- 已用修复轮：0
+- 首次开始：2026-09-20T03:38:00.554027Z
+- 原截止时间：2026-09-20T07:38:00.554027Z
+- 当前截止时间：2026-09-20T07:38:00.554027Z
+- 时钟：按墙钟计：额度 240 分钟，写入阶段已用约 50 分钟
+- 已用修复轮：3
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 最近检查点
 
+- 2026-09-20T05:23:43.549532Z：开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-20T05:40:59.603440Z：编码结果已记录，差异范围已核对：src-tauri/src/ingestion.rs, src-tauri/src/sync/mod.rs, src-tauri/tests/mock_greader.rs, src-tauri/tests/sync_e2e.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-20T05:41:26.764684Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-20T06:19:36.796405Z：Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-09-20T06:19:54.925788Z：开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-20T06:25:55.138056Z：编码结果已记录，差异范围已核对：src-tauri/src/sync/mod.rs, src-tauri/tests/sync_e2e.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-20T06:26:24.908087Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-20T07:25:24.241972Z：当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 原始证据
 
 [唯一状态记录](../items/TASK-070.json)
 
+- [RUN-d81de29f2076460298a9f0731a6f871c](../runs/RUN-d81de29f2076460298a9f0731a6f871c.json)
+- [RUN-49ba05fcc71e4ddca7298fc20cdb9a4c](../runs/RUN-49ba05fcc71e4ddca7298fc20cdb9a4c.json)
+- [RUN-30ac731a5fab463799dafea3e5ddf8f1](../runs/RUN-30ac731a5fab463799dafea3e5ddf8f1.json)
+- [RUN-d70e8abae2fc46988793a1041bda0c91](../runs/RUN-d70e8abae2fc46988793a1041bda0c91.json)
+- [RUN-dafb37cd657a4921a6ae2eec959ad29f](../runs/RUN-dafb37cd657a4921a6ae2eec959ad29f.json)
+- [RUN-15cf7e8442784a1a928d4adabfb3f4f8](../runs/RUN-15cf7e8442784a1a928d4adabfb3f4f8.json)
+- [RUN-b0ee99bb02ad4420b1f485168107ecb1](../runs/RUN-b0ee99bb02ad4420b1f485168107ecb1.json)
+- [RUN-ec17efa7238a4073a5cbc0bbd3267037](../runs/RUN-ec17efa7238a4073a5cbc0bbd3267037.json)
+- [RUN-d9db4b82befc4db09752598c3a8a0f17](../runs/RUN-d9db4b82befc4db09752598c3a8a0f17.json)
+- [RUN-23f7391a2bdf4490af6ea0cb4d606455](../runs/RUN-23f7391a2bdf4490af6ea0cb4d606455.json)
+- [RUN-44d4ee12298e4fc6a9a862cbc2c1f93c](../runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json)
+- [RUN-c261b07ac58a4c9c8d3eb2d84af1892a](../runs/RUN-c261b07ac58a4c9c8d3eb2d84af1892a.json)
 
 卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

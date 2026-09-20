@@ -2,7 +2,17 @@
 //!
 //! ① Push：sync_queue 里的本地变更推到后端
 //! ② Pull：拉远端订阅/分类/条目状态变化，URL 碰撞合并
-//! ③ 兜底：直连失败的源从后端拉条目（source='miniflux'）
+//! ③ 条目补齐：origin='remote' 的源由 reading-list 全量拉取（GReader）或
+//!    未读+收藏集合补齐（Fever）隐式覆盖，因此本地无需为其直连抓取。
+//!    TASK-070：本条原先宣称「直连失败的源从 Miniflux 拉条目」——该路径在当前
+//!    实现中已不存在。它**曾经存在**：Miniflux 协议时期 pull 里有 failed_feeds
+//!    循环，直接调 feeds_fetch_failed / feeds_fetch_failed_bound；0ba940f
+//!    （协议切换 Google Reader）删掉了该循环，此后 feeds.fetch_failed 在 Rust 侧
+//!    没有读取方，这两条查询也随本任务作为死代码删除。该列的现存用途是经
+//!    FeedRow（commands/folders.rs 的 list_feeds）下发前端做失败标记
+//!    （api.ts 的 fetchFailed → Sidebar 的 feed-error-dot）；抓取退避由
+//!    fail_count / next_retry_at 承担（db/feeds.rs 的 set_feed_fetch_state 写入、
+//!    feeds_due_for_refresh 按 next_retry_at 过滤），与该列无关。
 //! 本地未连接期间添加的源，首次 Pull 时按 URL 碰撞检测：
 //!   远端无 → 推送创建；远端有 → 合并（remote id 绑定本地 feed）
 //!
@@ -26,7 +36,6 @@ pub struct SyncReport {
     pub pulled_feeds: usize,
     pub pulled_entries: usize,
     pub merged_states: usize,
-    pub fallback_entries: usize,
     pub errors: Vec<String>,
 }
 

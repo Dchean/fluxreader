@@ -1,6 +1,12 @@
 //! Miniflux 同步引擎端到端测试：mock 服务端 + 临时数据库。
 //! 覆盖：连接测试、URL 碰撞合并（§4.4）、远端订阅拉取、状态推送（已读/收藏）、
-//! 直连失败源的兜底拉取（source='miniflux'）。
+//! 远端新条目经 pull 落库为 source='miniflux'。
+//! 注（TASK-070）：本条原先写作「直连失败源的兜底拉取」——该因果不成立：
+//! 条目落库为 source='miniflux' 取决于远端源/条目的匹配与绑定，而不是把源标记为
+//! 抓取失败（审查者已用变异证实：删掉失败标记调用，本套件仍全绿且条目照常入库）。
+//! 另注：feeds.fetch_failed 在 Rust 侧没有读取方；抓取退避由 fail_count /
+//! next_retry_at 承担（db/feeds.rs 的 set_feed_fetch_state 写入、
+//! feeds_due_for_refresh 按 next_retry_at 过滤），该列现存用途是下发前端做失败标记。
 //! 运行：cargo test --test sync_e2e -- --ignored --nocapture
 
 mod mock_greader;
@@ -68,7 +74,10 @@ async fn miniflux_sync_end_to_end() {
         "read",
         true,
     );
-    // 远端另一条目（本地没有 —— 走兜底路径不涉及，状态 Pull 也不该建新条目，因为无 URL 匹配）
+    // 远端另一条目（属于远端 feed 11，本地尚无对应源）。
+    // TASK-070：此处原写「走兜底路径不涉及」，把本条与 Miniflux 兜底拉取挂钩——
+    // 该因果不成立（见文件头注）。本条实际由 pull 阶段按「远端条目 + 同轮拉到的
+    // 远端源」入库为 source='miniflux'；本文件后续断言即以此为据。
     server.add_entry(
         11,
         "http://example.com/only-remote",
@@ -88,8 +97,8 @@ async fn miniflux_sync_end_to_end() {
         .await
         .expect("sync should succeed");
     let conn = db.lock().await;
-    println!("sync report: pushed_states={} pushed_feeds={} pulled_feeds={} pulled_entries={} merged={} fallback={}",
-        report.pushed_states, report.pushed_feeds, report.pulled_feeds, report.pulled_entries, report.merged_states, report.fallback_entries);
+    println!("sync report: pushed_states={} pushed_feeds={} pulled_feeds={} pulled_entries={} merged={}",
+        report.pushed_states, report.pushed_feeds, report.pulled_feeds, report.pulled_entries, report.merged_states);
 
     // URL 碰撞合并：本地 feed 绑定了远端 feed id 10
     let bound: Option<i64> = conn
@@ -167,8 +176,9 @@ async fn miniflux_sync_end_to_end() {
         "bookmark toggle must be pushed"
     );
 
-    // ---------- ③ 兜底：直连失败的源从 Miniflux 拉条目 ----------
-    // 把 local_feed 标记为直连失败 + 绑定远端 feed，远端加一条本地没有的条目
+    // ---------- ③ 已绑定源的远端新条目经 pull 落库（source='miniflux'） ----------
+    // 把 local_feed 标记为直连失败（贴近真实场景）+ 远端加一条本地没有的条目。
+    // 注意：触发落库的是「该源已绑定 remote_id」，不是失败标记本身（见文件头说明）。
     db::set_feed_fetch_state(
         &conn,
         local_feed_id,
@@ -190,19 +200,22 @@ async fn miniflux_sync_end_to_end() {
     let report3 = sync::sync_now(&db, &http).await.expect("third sync");
     let conn = db.lock().await;
     println!(
-        "fallback report: fallback_entries={}",
-        report3.fallback_entries
+        "third sync report: pulled_entries={}",
+        report3.pulled_entries
     );
 
-    let fallback: Option<(String, String)> = conn
+    let ingested: Option<(String, String)> = conn
         .query_row(
             "SELECT title, source FROM articles WHERE url = 'http://127.0.0.1:8765/new-fallback-entry'",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .ok();
-    let fb = fallback.expect("fallback entry ingested from miniflux");
-    assert_eq!(fb.1, "miniflux", "fallback entry source must be 'miniflux'");
+    let fb = ingested.expect("remote entry on a bound feed must be ingested");
+    assert_eq!(
+        fb.1, "miniflux",
+        "bound-feed remote entry must be stored with source='miniflux'"
+    );
     assert!(fb.0.contains("Fallback"));
 
     // 队列清空
@@ -216,6 +229,7 @@ async fn miniflux_sync_end_to_end() {
     // 场景：本地文章（feed 10 的 entry）已读；服务端另一源（feed 11）
     // 也有同 URL 的 entry 且未读。同步后本地必须仍是已读——
     // 跨源 entry 无权写状态（旧版会按 URL 兜底把未读覆盖回来）
+    // 注：此处的「兜底」指 URL 匹配兜底，与 Miniflux 兜底拉取无关
     // 注意：② 推过 unread（mock 真实回写），own entry 现在服务端是 unread；
     // 未读合并只认绑定 entry 是合法语义，所以先把 own 恢复 read（手机读过）
     conn.execute(

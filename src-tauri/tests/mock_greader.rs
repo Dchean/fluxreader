@@ -826,15 +826,9 @@ fn route(
                     }
                     (200, "OK".into())
                 }
-                "subscribe" => {
-                    let url = form
-                        .get("s")
-                        .and_then(|v| v.first().cloned())
-                        .unwrap_or_default();
-                    let url = url.strip_prefix("feed/").unwrap_or(&url).to_string();
-                    srv.subscribed_urls.lock().unwrap().push(url);
-                    (200, "OK".into())
-                }
+                // TASK-070：原 `"subscribe" => …` 分支随 GReaderClient::subscribe 的
+                // 删除而不可达（生产侧只发 ac=unsubscribe / ac=edit，订阅走 quickadd），
+                // 故移除；订阅路径的记录由 quickadd 分支负责。
                 _ => (200, "OK".into()),
             }
         }

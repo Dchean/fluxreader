@@ -100,7 +100,15 @@ fn disconnect_purges_miniflux_data_but_keeps_local() {
     db::set_article_remote_id(&conn, remote_aid, 9001).unwrap();
     db::set_article_remote_id(&conn, local_aid, 9002).unwrap();
     db::set_feed_remote_id(&conn, local_feed, 77).unwrap();
-    db::set_folder_remote_id(&conn, remote_folder, 55).unwrap();
+    // TASK-070：原用 db::set_folder_remote_id（零生产调用，已删除）。生产按
+    // 分类名匹配本地 folder、不维护 folders.remote_id（见 sync/subscriptions.rs）
+    // ——但 purge_remote_data 仍须清掉历史遗留的 folder 绑定，故此处直接落库构造
+    // 该状态，保持「folder 绑定也被清理」这条断言不变。
+    conn.execute(
+        "UPDATE folders SET remote_id = ?1 WHERE id = ?2",
+        rusqlite::params![55, remote_folder],
+    )
+    .unwrap();
     db::enqueue_sync(&conn, Some(local_aid), None, "read", None).unwrap();
     db::enqueue_sync(&conn, Some(remote_aid), None, "read", None).unwrap();
     let _ = conn.execute(

@@ -2248,7 +2248,7 @@ await (async () => {
         const which = (args && args.which) || 'feeds';
         return Promise.resolve({
           pushed_states: 0, pushed_feeds: 0, pulled_feeds: 0, pulled_entries: 0,
-          merged_states: 0, fallback_entries: 0,
+          merged_states: 0,
           errors: (syncPhasePlan[which] && syncPhasePlan[which].errors) || [],
         });
       }

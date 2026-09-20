@@ -1,0 +1,6 @@
+{
+  "changed_files": [
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/tests/sync_e2e.rs"
+  ]
+}
