@@ -24,10 +24,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 51 项：已验收 43，待验收 0，阻塞 0。
+已建任务 52 项：已验收 43，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-080 · 修复 prepare 静默回退缺口（工程侧守卫 + 让既有回归测试可跑，不改工作流引擎）](<cards/TASK-080.md>) | 待执行 | 修复「按项目模板把 allowed_paths 写在 spec 的嵌套 scope.allowed_paths 时被静默忽略、回退成 snapshot_paths」这一真实缺口——**不修改工作流引擎**（.workflow-kit/scripts/** 与 templates/** 属托管、且用户 2026-09-21 明确要求不动工作流），改为在项目自有范围内交付等效且更稳的防护。背景与根因（已用 git 定案）：① 缺口文档 TOOL-GAP-prepare-allowed-paths.md 记载其建议第 1 项『已实施（TASK-046, 2026-09-17）』——commit a267b1e 曾新增纯函数 resolve_allowed_paths 并让 prepare 调用它；② 但 commit 6fd382e『升级 workflow-kit 至 2026-09-18.3（rebind --upgrade-tools）』把该修复**整段删除**并还原为旧写法 copy.deepcopy(specification.get('allowed_paths', paths))，证据为 git show 6fd382e 中 -def resolve_allowed_paths 与 -task['scope']['allowed_paths'] = resolve_allowed_paths(...) / +...get('allowed_paths', paths)；③ 项目自有的回归测试 .workflow-kit/scripts/tests/test_allowed_paths.py 未被一并回退，故其由通过变为**静默失败**（实测 0/7 通过、exit 1、全部 AttributeError: no attribute 'resolve_allowed_paths'）。当前严重性已核实并如实下调：升级后的 matches() 已支持目录前缀（matches('src-tauri/src/ai.rs', ['src-tauri/src']) == True），故文档当年『目录名匹配不到具体文件 → 全部误判越界』的死锁前提**已不成立**；但**静默篡改仍存在**——仅写嵌套 scope.allowed_paths 时（模拟 line 509）记录里落成 ['src','tools']（即 snapshot_paths），spec 声明的范围被无声丢弃。本任务交付：(A) 项目自有的 prepare 前置校验脚本（放 tools/，纯 Python、零依赖、可独立运行），在任何 prepare 之前校验 spec 并**拒绝**以下形态并给出可操作报错：allowed_paths 只存在于嵌套 scope.allowed_paths（会被静默忽略）、顶层与嵌套同时给出且不一致、缺失/空/非字符串列表、snapshot_paths 缺失或非法；通过时以退出码 0 输出规范化结果（顶层写法），并在存在嵌套写法时明确提示改为顶层。(B) 让防护不依赖那个已损坏的引擎侧测试：.workflow-kit/scripts/tests/test_allowed_paths.py 位于模板默认 protected_paths 覆盖的 .workflow-kit/scripts/** 内，**任何任务都不得修改**（这正是 TASK-046 当初必须走总控级基础设施提交的原因）。在不改引擎、也不越界修改受保护文件的前提下，改为在工程侧 tools/ 内交付**自带完整可复跑自测**的守卫（tools/task-spec-guard-test.py），覆盖原 7 个用例的全部意图（仅顶层/仅嵌套/一致/冲突/都无/scope 非 dict/snapshot_paths 缺失），并在缺口文档中如实说明引擎侧测试当前处于损坏状态、其覆盖由工程侧自测承接。(C) 订正 TOOL-GAP-prepare-allowed-paths.md 的失实记载：把『第 1 项——已实施』订正为『曾实施（a267b1e）→ 被 6fd382e 升级覆盖 → 当前引擎未实施；改由工程侧 TASK-080 守卫兜底』，并新增一条升级注意事项：rebind --upgrade-tools 会覆盖项目本地对引擎的补丁，凡依赖本地引擎补丁的防护都必须改由工程侧或记录级手段承载。(D) 把该前置校验接入项目文档/约定（在缺口文档与 TOOL-GAP 同类文档中写明用法），使后续任务按模板嵌套写法提交 spec 时会被**在 prepare 之前**拦下，而不是等到 finish 才以越界或范围错配爆出。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -39,9 +40,8 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 39 项记录可在任务总览查看。
+另有 40 项记录可在任务总览查看。
 
 **阻塞**：无已记录阻塞
 

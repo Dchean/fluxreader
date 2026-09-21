@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "id": "TASK-080",
+  "title": "修复 prepare 静默回退缺口（工程侧守卫 + 让既有回归测试可跑，不改工作流引擎）",
+  "kind": "implementation",
+  "retry_safe": false,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "修复「按项目模板把 allowed_paths 写在 spec 的嵌套 scope.allowed_paths 时被静默忽略、回退成 snapshot_paths」这一真实缺口——**不修改工作流引擎**（.workflow-kit/scripts/** 与 templates/** 属托管、且用户 2026-09-21 明确要求不动工作流），改为在项目自有范围内交付等效且更稳的防护。背景与根因（已用 git 定案）：① 缺口文档 TOOL-GAP-prepare-allowed-paths.md 记载其建议第 1 项『已实施（TASK-046, 2026-09-17）』——commit a267b1e 曾新增纯函数 resolve_allowed_paths 并让 prepare 调用它；② 但 commit 6fd382e『升级 workflow-kit 至 2026-09-18.3（rebind --upgrade-tools）』把该修复**整段删除**并还原为旧写法 copy.deepcopy(specification.get('allowed_paths', paths))，证据为 git show 6fd382e 中 -def resolve_allowed_paths 与 -task['scope']['allowed_paths'] = resolve_allowed_paths(...) / +...get('allowed_paths', paths)；③ 项目自有的回归测试 .workflow-kit/scripts/tests/test_allowed_paths.py 未被一并回退，故其由通过变为**静默失败**（实测 0/7 通过、exit 1、全部 AttributeError: no attribute 'resolve_allowed_paths'）。当前严重性已核实并如实下调：升级后的 matches() 已支持目录前缀（matches('src-tauri/src/ai.rs', ['src-tauri/src']) == True），故文档当年『目录名匹配不到具体文件 → 全部误判越界』的死锁前提**已不成立**；但**静默篡改仍存在**——仅写嵌套 scope.allowed_paths 时（模拟 line 509）记录里落成 ['src','tools']（即 snapshot_paths），spec 声明的范围被无声丢弃。本任务交付：(A) 项目自有的 prepare 前置校验脚本（放 tools/，纯 Python、零依赖、可独立运行），在任何 prepare 之前校验 spec 并**拒绝**以下形态并给出可操作报错：allowed_paths 只存在于嵌套 scope.allowed_paths（会被静默忽略）、顶层与嵌套同时给出且不一致、缺失/空/非字符串列表、snapshot_paths 缺失或非法；通过时以退出码 0 输出规范化结果（顶层写法），并在存在嵌套写法时明确提示改为顶层。(B) 让防护不依赖那个已损坏的引擎侧测试：.workflow-kit/scripts/tests/test_allowed_paths.py 位于模板默认 protected_paths 覆盖的 .workflow-kit/scripts/** 内，**任何任务都不得修改**（这正是 TASK-046 当初必须走总控级基础设施提交的原因）。在不改引擎、也不越界修改受保护文件的前提下，改为在工程侧 tools/ 内交付**自带完整可复跑自测**的守卫（tools/task-spec-guard-test.py），覆盖原 7 个用例的全部意图（仅顶层/仅嵌套/一致/冲突/都无/scope 非 dict/snapshot_paths 缺失），并在缺口文档中如实说明引擎侧测试当前处于损坏状态、其覆盖由工程侧自测承接。(C) 订正 TOOL-GAP-prepare-allowed-paths.md 的失实记载：把『第 1 项——已实施』订正为『曾实施（a267b1e）→ 被 6fd382e 升级覆盖 → 当前引擎未实施；改由工程侧 TASK-080 守卫兜底』，并新增一条升级注意事项：rebind --upgrade-tools 会覆盖项目本地对引擎的补丁，凡依赖本地引擎补丁的防护都必须改由工程侧或记录级手段承载。(D) 把该前置校验接入项目文档/约定（在缺口文档与 TOOL-GAP 同类文档中写明用法），使后续任务按模板嵌套写法提交 spec 时会被**在 prepare 之前**拦下，而不是等到 finish 才以越界或范围错配爆出。",
+  "non_goals": [
+    "不修改任何托管文件（.workflow-kit/scripts/** 下的引擎脚本、templates/**、docs/workflow/**、binding.json）",
+    "不修改业务产品代码（src/**、src-tauri/src/** 业务逻辑、src-tauri/tests/**）",
+    "不改动门禁强度：不把 scope 加入 begin 放行集合、不放宽 finish 的越界判定、不放松任何 protected_paths",
+    "不恢复引擎内的 resolve_allowed_paths（用户已要求不动工作流；且该补丁已被升级覆盖两次风险高）",
+    "不改 .workflow-kit/scripts/tests/test_allowed_paths.py 的引擎依赖以外的断言意图之外的东西——仅使其按当前真实语义可跑并保留原始 7 个用例的覆盖意图",
+    "不引入新依赖（仅用 Python 标准库）"
+  ],
+  "requirement_refs": [
+    "REQ-104"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-079"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "tools/task-spec-guard.py",
+      "tools/task-spec-guard-test.py",
+      ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/runs/RUN-88d6970ed646409595b4d8694f579944.json"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 交付项目侧前置校验脚本 tools/task-spec-guard.py：对「allowed_paths 仅在嵌套 scope.allowed_paths」的 spec 以非零退出码拒绝并给出明确修复指引；对「顶层与嵌套不一致」同样拒绝；对合法顶层写法退出码 0 并打印规范化结果",
+    "② 该脚本自带可复跑自测 tools/task-spec-guard-test.py，覆盖至少 7 例：仅顶层通过、仅嵌套拒绝、两处一致通过、两处冲突拒绝、都未给拒绝并提示、snapshot_paths 缺失拒绝、非字符串元素拒绝；全部通过时退出码 0",
+    "③ 不改任何受保护文件：git diff 对 .workflow-kit/scripts/**（含那个已损坏的 test_allowed_paths.py）与 .workflow-kit/tasks/templates/** 为空；受保护文件的既有损坏状态只做如实记录，不在本任务修复",
+    "④ .workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md 的『第 1 项——已实施』订正为如实状态（曾实施 a267b1e→被 6fd382e 升级覆盖→当前引擎未实施、改由工程侧 TASK-080 守卫兜底），并如实记载引擎侧测试 test_allowed_paths.py 当前 0/7 通过且位于受保护区不得修改、其覆盖由 tools/task-spec-guard-test.py 承接；新增 rebind --upgrade-tools 会覆盖本地引擎补丁的注意事项",
+    "⑤ 不引入新依赖（仅 Python 标准库）；文本文件 LF；用户真实数据库不得写入",
+    "⑥ 四门禁全绿：cargo test 通过数 ≥193 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 303/303（本任务不触碰产品代码，四门禁应与基线同值）"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-88d6970ed646409595b4d8694f579944.json",
+      "summary": "2026-09-21 基线（TASK-079 终版候选验证 RUN-88d6970e，提交 7a12beb）：cargo test 193 passed / 0 failed / 9 ignored、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 303/303。本任务不触碰业务产品代码与既有测试，故四门禁应保持同一基线值（作为『未误伤产品』的回归保护）。本任务新增的工程侧守卫属于新的可复跑自测，不改动任何既有断言语义；对 .workflow-kit/scripts/tests/test_allowed_paths.py 的改动是修复其静默失败（该文件当前 0/7 通过、exit 1，属真实损坏而非有效基线）。",
+      "decision_ids": []
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "全部既有业务断言（193 条 Rust + 303 条前端）与产品代码逐字不动，作为本任务未误伤产品的回归保护",
+        "reason": "本任务只新增工程侧守卫与文档订正，不改任何产品行为",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "新增工程侧守卫的独立自测 tools/task-spec-guard-test.py（7 例，承接原 test_allowed_paths.py 的全部覆盖意图）",
+        "reason": ".workflow-kit/scripts/tests/test_allowed_paths.py 位于受保护的 .workflow-kit/scripts/** 内、任何任务不得修改，且其依赖的引擎函数已被升级覆盖而 0/7 失败；在不改引擎的约束下，其覆盖意图须由工程侧自测承接",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-080-input-c97ff6d378434230bd6a38d2aee94504.json",
+    "digest": "cb037bb132b2ddc560c185f9deebb9db2739ae0b70c51965b71a7bbf7e3da197",
+    "source_revision": null,
+    "definition_digest": "cd8e788810786d00934b6820dd5609a0d55830786fa953f67ca17f875e705ca5"
+  },
+  "budget": {
+    "started_at_utc": null,
+    "deadline_at_utc": null,
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-ab2d0e5d3f7643379a6de1fd2544b549",
+  "run_ids": [],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-057.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task057.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
+    ".workflow-kit/tasks/runs/RUN-0259efca5b644b909fcf022fefeaeb73.json",
+    ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
+    ".workflow-kit/tasks/runs/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8.json",
+    ".workflow-kit/tasks/runs/RUN-4386e97bc9044e44b27bc91863c4c3a8.json",
+    ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json",
+    ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
+    ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+    ".workflow-kit/tasks/runs/RUN-6aeb3b77f8984b48ad8c1905007b6c5f.json",
+    ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+    ".workflow-kit/tasks/runs/RUN-88d6970ed646409595b4d8694f579944.json",
+    ".workflow-kit/tasks/runs/RUN-e6040878c41e4d729e86380954385c7d.json",
+    ".workflow-kit/tasks/runs/RUN-e7b42163aaa14d45b754261992f5214d.json",
+    ".workflow-kit/tasks/runs/RUN-f5c07ebc890b4519a2f79d843e8d2bcd.json",
+    "src",
+    "src-tauri/src",
+    "src-tauri/src/commands",
+    "src-tauri/src/ingestion.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/scheduler.rs",
+    "src-tauri/tests",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "tools",
+    "tools/frontend-regression.mjs",
+    "tools/task-spec-guard-test.py",
+    "tools/task-spec-guard.py"
+  ],
+  "continuation_of": {
+    "TASK-079": "dbd6608b4fdec26b604cbed2837e664c63cbdd2c65974168c04e40c7436c87fa"
+  }
+}
