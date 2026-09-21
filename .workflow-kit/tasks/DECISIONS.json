@@ -2333,6 +2333,18 @@
       "candidates": {
         "TASK-080": "ce4820837b03a201082df57e11377de06def770894015c9732b8035f0171bff1"
       }
+    },
+    {
+      "id": "DEC-req104-p3-hygiene-disposition-20260921",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-21 指令『先commit，然后继续推进，完成项目优化重构』——授权在既有已确认范围内继续推进优化/重构；本条据此授权实施 REQ-104 验收第三条『P3 项每条有处置结论（修/不修+理由）』，该条本就在 BRIEF 的已确认范围内（BRIEF REQ-104 描述与 acceptance 第三条），此前仅交付了删除面与设计裁决面。",
+      "statement": "授权逐条处置 AUDIT-20260919-v2.md「P3 卫生类」清单（后端 13 条 + 前端 7 条，死代码集群除外——已由 TASK-070/078 完成）：对每条给出「修」或「不修＋理由」的结论并留痕；对判定「修」的项实施修复并补成对断言，优先处置数据正确性类（purge_remote_data 误删用户自建空目录、cleanup_cache 时区混用多删、add_feed/OPML 去重未走 normalize_url）与低风险确定项（吞错 warn 化、重复注释清除）。不改同步合并语义、不拆分 BRIEF non_goals 已排除的模块、不引入新依赖。",
+      "scope": [
+        "REQ-104",
+        "TASK-081"
+      ],
+      "recorded_at_utc": "2026-09-21T08:34:11.605346Z"
     }
   ]
 }

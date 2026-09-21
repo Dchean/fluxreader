@@ -28,10 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 52 项：已验收 44，待验收 0，阻塞 0。
+已建任务 53 项：已验收 44，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-081 · REQ-104 P3 卫生项逐条处置（含不修的理由），闭合验收第三条](<../tasks/cards/TASK-081.md>) | 待执行 | 闭合 REQ-104 的第三项验收标准「P3 项每条有处置结论（修/不修+理由）」——该项此前只交付了删除面（TASK-070/078）与设计裁决面（TASK-075），P3 卫生清单本身尚未逐条处置留痕。来源：.workflow-kit/docs/AUDIT-20260919-v2.md 的「### P3 卫生类」共 13 条后端 + 7 条前端 + 死代码集群（死代码已由 TASK-070/078 完成，本任务不重复）。**已用只读核查确认各项当前真实状态**（审计报告的行号已漂移，故逐项按代码实测重新定位）：后端 [1] 绑定/清理写失败被吞——实测 sync/subscriptions.rs:119,139、sync/entries.rs:63,92,132、sync/phases.rs:55,74、ingestion/staged.rs:153,176 仍是 `let _ =`（未 warn）；[2] 读失败当默认值——commands/ai.rs:26,45,71 仍是 `.ok().flatten()`（未 warn）；[3] sync_save 留空密码复用（需按「留空只复用 password」核对当前实现）；[4] purge_remote_data:391 仍 `DELETE FROM folders WHERE id NOT IN (SELECT ... FROM feeds ...)`（删所有无成员目录，含用户自建空目录）；[5] cleanup_cache:405 仍 `datetime('now','-N days','localtime')`（时区混用可多删最近 N 小时）；[6] apply_refresh_result（现 ingestion/staged.rs:61+）部分失败口径；[7] sync_local_feeds（commands/sync.rs:151+）读队列失败降级→重复入队；[8] search_articles 的 LIMIT 插值；[9] add_feed/OPML 去重仍走精确 URL（commands/folders.rs:173 `find_feed_by_url`，未 normalize_url）；[10] gist_id 落库失败→孤儿 Gist；[12] init/运行期 unwrap；[13] 锁内 sanitize（审计自身标注「记录备查，量级可接受」）。前端：[F1] selectors.ts:11-18 文件头注释块**实测确实整段重复两次**（11-13 与 16-18 完全相同）；[F2] App.tsx:229-249 的 S/M/J/K 快捷键未让路浮层（Space 已有让路逻辑，见 :217-227）；[F3] 播放中同集再点应播放/暂停切换而非重头开播；[F4] reader.ts markEntriesReadBulk 逐条 IPC；[F5] Timeline.tsx lastStartIndexRef 在 filterKey 后未重置；[F6] bootstrap.ts layoutNeedsBody 恒 false（注释已对齐，仅形式残留）；[F7] mock 模式标读不一致。**实施要求**：逐条给出「修」或「不修＋理由」的结论，并写入 AUDIT 文档或等价台账，使验收可核；对判定为「修」的项实施修复并补断言，对判定为「不修」的项说明理由（如审计自身已标『量级可接受』的 [13]、或属产品决策的项），**不得以『工作量大』为由跳过**。优先处置数据正确性类（[4] 误删用户目录、[5] 时区多删、[9] 去重不一致）与低风险高确定性项（[F1] 重复注释、[1][2] 吞错 warn 化）。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -43,9 +44,8 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 40 项记录可在任务总览查看。
+另有 41 项记录可在任务总览查看。
 
 **阻塞**：无已记录阻塞
 
@@ -81,7 +81,6 @@
 
 ## 最近事件
 
-- 2026-09-21T07:46:52.854560Z · note/progress · TASK-080 · TASK-080 实现与四门禁完成（修复 prepare 静默回退缺口，不动引擎，遵 owner 2026-09-21『不动工作流』约束）：交付项目自有 tools/task-spec-guard.py（prepare 前置守卫：拒绝仅嵌套 scope.allowed_paths、顶层与嵌套冲突、缺失/空/非字符串、snapshot_paths 非法；放行时打印将记录的 allowed_paths）+ tools/task-spec-guard-test.py（13/13 通过、exit 0；9 判定用例 + 4 端到端退出码用例；按文件路径加载守卫并复用其用例表，不复制判定逻辑）+ 订正 TOOL-GAP-prepare-allowed-paths.md 的多处失实/过时记载。**事实先核实后动笔**：git 定案 a267b1e 确曾实现 resolve_allowed_paths，6fd382e（rebind --upgrade-tools 升级至 2026-09-18.3）整段删除并还原旧写法，项目自有回归测试未被一并回退故静默失败（实测 0/7、exit 1）；并据实下调严重性——升级后 matches() 已支持目录前缀（实测 True），文档原『目录名匹配不到文件→全部越界』的死锁前提当前不成立，剩余问题是『范围声明被静默篡改』。缺口真实消除的证据：回放历史形态——TASK-043 失败形态被拒（exit 1），TASK-070 与 TASK-080 真实 spec 放行（exit 0，无误报）。自测还抓出我自己的真实缺陷（首版返回 spec 列表引用，深拷贝用例 FAIL），已修。**未触碰任何托管文件**（git status 对 .workflow-kit/scripts/**、templates/**、docs/workflow/**、binding.json 均空）。门禁：cargo 193/0/9（同基线，未误伤产品）、lint 0/0、build exit 0、frontend 303/303。已送独立审查，特别要求审查者用全部历史真实 spec 做误报扫描（守卫若误拦合法 spec 比没有更糟）。
 - 2026-09-21T07:50:54.111291Z · checkpoint · TASK-080 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
 - 2026-09-21T07:51:39.041912Z · checkpoint · TASK-080 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-21T07:52:23.566457Z · checkpoint · TASK-080 · 编码结果已记录，差异范围已核对：.workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md, tools/task-spec-guard-test.py, tools/task-spec-guard.py；下一步：运行 verify；代码完成尚未等于验收通过
@@ -93,6 +92,7 @@
 - 2026-09-21T08:23:00.298814Z · accept · 验收 TASK-080；依据：用户 2026-09-21 指令『不动工作流，修复这个问题，通过新增任务卡或者其他方式』——授权以新增任务卡方式在不修改引擎的前提下修复 prepare 静默回退缺口；任务已完成四门禁验证与两轮独立审查（r1 FAIL 已修，r2 PASS）
 - 2026-09-21T08:26:16.828437Z · note/lesson · refresh_dedup_e2e 时序失败的真实根因（TASK-080 复审者以决定性反例推翻作者原判断，2026-09-21） 结论：**不是**作者先前所说的「refresh_all 并发抓取两源 + upsert 读-改-写窗口使计数为 0 或 2」。 真实根因是**两只用例共用同一个临时 DB 路径**，在同进程并发时互相踩踏。 决定性证据（复审者提供）： 1. 反例：某次运行 panic 在 refresh_dedup_e2e.rs:59:31，即 db::open(&tmp).unwrap()，错误为 SqliteFailure(... "table folders already exists") —— 失败发生在**建库阶段**， 与 dedup / refresh_all 并发毫无关系，作者的解释无法覆盖该现象。 2. 代码反证：staged.rs:163 先取 Mutex，随后 apply_refresh_result 在**同一个临界区内** 完成整个 upsert 循环（含 dedup 判定与插入），故两源实际被完全串行化， 不存在「都查到不存在再都插入」的交错窗口；也无法解释 dedup=off 时出现 left:3。 3. 路径冲突：两只用例都用 fluxreader_dedup_refresh_{process::id()}_{SystemTime::now() 纳秒}.db 同一进程 pid 相同，仅靠纳秒区分 → 会取到同一文件，随后并发 remove/open/migrate 同一 DB。 4. 对照实验：每只用例**单独跑 18/18 全通过**；串行 / --test-threads=1 跑 15 次**0 失败**； 失败只在**两例同进程并发**时出现。 处置建议（独立跟进项，非 TASK-080 范围）： · 修法一：临时库名纳入用例名（per-case 前缀/后缀），使两例路径不同； · 修法二：该测试文件用 --test-threads=1 运行，或把两只用例合并为一只串行用例； · 命名订正：该跟进项此前被记为「并发去重窗口」，应改题为 「e2e 临时库路径未按用例区分」——题目错了会误导后续修复方向； · 影响面：这是**测试基础设施缺陷**而非产品并发缺陷（产品路径中 dedup 判定与插入 本就在同一临界区内），严重性低于作者先前的判断。 纪律教训（已记 lesson）：对 flake 的机理解释必须在写进交付说明**之前**做对照实验 （单跑 vs 并发跑、串行 vs 并行），否则等于用推测污染证据链；本次作者的原解释被复审者 以「建库失败的 panic」一击推翻，即属未做对照实验就下结论。
 - 2026-09-21T08:27:20.902895Z · note/context · 复核复审者对 refresh_dedup_e2e 时序失败的根因订正：**我方独立验证，结论采纳**（2026-09-21） 复审者指出我的原解释（「并发 dedup 读-改-写窗口使计数为 0 或 2」）错误，真实根因是两只用例 共用同一个临时 DB 路径。我逐条独立核对，三处证据都成立： 1. 路径无 per-case 区分符（读码确认）：refresh_dedup_e2e.rs:49-57 的 setup_db 生成 fluxreader_dedup_refresh_{process::id()}_{SystemTime::now() 纳秒}.db， 同一进程 pid 相同、仅靠纳秒区分；该函数被两只用例共同调用（:102 与 :117）。 2. panic 位点吻合：:59 正是 let conn = db::open(&tmp).unwrap();，:58 先 remove_file(&tmp)， 与复审者给出的决定性反例（SqliteFailure "table folders already exists"，发生在建库阶段） 完全对应——非 dedup 路径能产生该错误。 3. 碰撞概率可解释低发生率：实测同进程连续两次构造路径的纳秒差通常非零（本次差 700ns）， 故碰撞是**偶发**；这与我此前 12 次隔离跑 12/12 通过、以及本次并发 20 轮 + 串行 20 轮 均 0 失败一致——即「复现不到」不等于「机理不成立」。 我另外复核了复审者的代码反证：staged.rs 在取 Mutex 后于同一临界区内完成整个 upsert 循环 （含 dedup 判定与插入），两源实际被串行化，故确实不存在我原设想的交错窗口。 订正后的跟进项定义（供后续立项）： · 题目：e2e 临时库路径未按用例区分（原题「并发去重窗口」错误，会误导修复方向）； · 性质：**测试基础设施缺陷**，非产品并发缺陷——严重性低于我先前判断； · 修法：路径纳入 per-case 名，或该文件 --test-threads=1。 纪律教训（已并入既有 lesson）：机理类结论必须先做对照实验再写进交付说明； 本次我未做「单跑 vs 并发」对照就下了结论，被复审者以建库期 panic 一击推翻。
+- 2026-09-21T08:34:31.894236Z · prepare · TASK-081 · 任务已冻结：REQ-104 P3 卫生项逐条处置（含不修的理由），闭合验收第三条；范围 src-tauri/src/sync/subscriptions.rs, src-tauri/src/sync/entries.rs, src-tauri/src/sync/phases.rs, src-tauri/src/ingestion/staged.rs, src-tauri/src/commands/ai.rs, src-tauri/src/commands/sync.rs, src-tauri/src/commands/folders.rs, src-tauri/src/commands/opml.rs, src-tauri/src/db/articles.rs, src-tauri/src/config_sync.rs, src-tauri/src/lib.rs, src/store/selectors.ts, src/App.tsx, src/store/slices/reader.ts, src/components/Timeline.tsx, src/store/slices/bootstrap.ts, .workflow-kit/docs/AUDIT-20260919-v2.md, tools/frontend-regression.mjs
 
 ## 如何继续
 
