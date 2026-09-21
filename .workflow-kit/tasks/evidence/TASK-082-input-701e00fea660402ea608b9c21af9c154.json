@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-21T10:45:04.069462Z",
+  "roots": [
+    ".workflow-kit/docs/AUDIT-20260919-v2.md",
+    ".workflow-kit/tasks/runs/RUN-d8ee5c8ac2374b308f60c97e9f80a446.json",
+    "src-tauri/src/db"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/docs/AUDIT-20260919-v2.md",
+      "sha256": "ce8c608905122b15e805e46d43b83b17573ecea2262a7986a648000356392f41"
+    },
+    {
+      "path": ".workflow-kit/tasks/runs/RUN-d8ee5c8ac2374b308f60c97e9f80a446.json",
+      "sha256": "7e884e3631b7bb9ee84c3aa729dc831924e76f07e095f8814bf899c9f9b0489d"
+    },
+    {
+      "path": "src-tauri/src/db/articles.rs",
+      "sha256": "9ba3caf9ea28c3347e59a932fea2181e5b00c60254c12782ba60a5a896e8d997"
+    },
+    {
+      "path": "src-tauri/src/db/commands_extraction_tests.rs",
+      "sha256": "de98e87d863a8de544a19596aadb7c398242624ca5050ecf933a8ef4e2aa044b"
+    },
+    {
+      "path": "src-tauri/src/db/dedup_tests.rs",
+      "sha256": "deac1624126430e2f86a8b15b1ef8d12130fc318faabc5cbc29c64e703291a5c"
+    },
+    {
+      "path": "src-tauri/src/db/feeds.rs",
+      "sha256": "e5b84609d14e4d77d93c78f4ce3d208c6df3d2ca5b57db2bdf9bb5c439ec302e"
+    },
+    {
+      "path": "src-tauri/src/db/folders.rs",
+      "sha256": "7abf999270c83470a64c7cd09e8c71b12938c33b31ba0b7eb6c77dbb8dc9d875"
+    },
+    {
+      "path": "src-tauri/src/db/migrations.rs",
+      "sha256": "98e18e5e1cb540336ce3e5879183544fd278e3294880fce275fdc8b712cd4ffb"
+    },
+    {
+      "path": "src-tauri/src/db/settings.rs",
+      "sha256": "764bd5fea637b7a3b80480fc2c102b1a063c9ab0b4783dbbd0f6ea9ee8759981"
+    },
+    {
+      "path": "src-tauri/src/db/sync_extraction_tests.rs",
+      "sha256": "565f8c95cc8105c3ea6968cd313f235c5efd5cfe37f6351bd42d11a3d4469cb6"
+    },
+    {
+      "path": "src-tauri/src/db/sync_map.rs",
+      "sha256": "e366ccf645a141a3fcb9f99e87b0057554378e990248290d1a8cab04a55695c0"
+    },
+    {
+      "path": "src-tauri/src/db/sync_queue.rs",
+      "sha256": "8487b91e0f951d1feddff481900e3a78a5bf051dea53b9a7e7448a96e8c23efd"
+    },
+    {
+      "path": "src-tauri/src/db/url_norm.rs",
+      "sha256": "930e332a4883b65e42ea06f71c4b3f9488227375112b0169df8868ce623ad308"
+    }
+  ],
+  "digest": "7d6f5a6d11a8cdc42fd8207b4909898ef0bf434fa40e91a966cac21336661624"
+}

@@ -28,10 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 53 项：已验收 45，待验收 0，阻塞 0。
+已建任务 54 项：已验收 45，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-082 · 修正 db/articles.rs 的失效分节横幅 + 复核 REQ-105 的 800 行口径](<../tasks/cards/TASK-082.md>) | 待执行 | ① 修正 src-tauri/src/db/articles.rs 里三处**失效分节横幅**：`Folders`（行 53）之下实际是 NewArticle/article_row/article_list_item/ArticleQuery/list_articles/search_articles 等**文章域**条目，没有任何 folder 函数；`URL 规范化`（行 473）之下实际是 upsert_article_with_feed/insert_new_article/set_read/set_starred/mark_all_read/feed_counts 等写入与状态条目，没有任何 URL 规范化函数；`Settings`（行 748）是**空横幅**（其后紧接 #[cfg(test)]，内容为零）。这三处是 TASK-023 从 db.rs 拆出 db/ 子模块时的遗留脚手架，会主动误导后续读者，替换为与真实内容一致的分节说明。② 复核 REQ-105 验收①「拆分后无超过 800 行的生产单体」在当前代码库的口径：实测 db/articles.rs 共 998 行 = 生产段 751 行 + 同文件单测 247 行（TASK-081 新增的 P3 单测），**生产代码本身未超限**；评估并记录该文件是否需要按领域拆分（结论与理由写入 AUDIT 报告），供 owner 核对，而不是默认追求行数达标。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -43,9 +44,8 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 41 项记录可在任务总览查看。
+另有 42 项记录可在任务总览查看。
 
 **阻塞**：无已记录阻塞
 
@@ -81,7 +81,6 @@
 
 ## 最近事件
 
-- 2026-09-21T09:58:56.892622Z · checkpoint · TASK-081 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
 - 2026-09-21T10:01:20.407446Z · checkpoint · TASK-081 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-21T10:02:17.887460Z · checkpoint · TASK-081 · 编码结果已记录，差异范围已核对：.workflow-kit/docs/AUDIT-20260919-v2.md, src/components/Timeline.tsx, src/store/selectors.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-21T10:02:44.173958Z · checkpoint · TASK-081 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
@@ -93,6 +92,7 @@
 - 2026-09-21T10:28:56.645825Z · checkpoint · TASK-081 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-21T10:34:12.074074Z · checkpoint · TASK-081 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-21T10:35:14.220515Z · accept · 验收 TASK-081；依据：总控核对：独立审查 PASS（findings 空，五区域全 PASS，candidate fd8c1b71…，verification RUN-d8ee5c8ac2374b308f60c97e9f80a446）；四门禁实测 cargo 202/0/9、lint 0/0、build exit 0、frontend 313/313；REQ-104 验收第三条（P3 项每条有处置结论）已闭合——处置表写入 AUDIT-20260919-v2.md「一之附」，判定为「修」的 13 项各带成对证据（其中 #4/#5/#9 有修前失败证据，F3 三层变异取证计数经实测 2/3/1），判定「不修」的 7 项均写明理由，另有 3 项另立任务遗留已如实登记；全部改动文件均在 allowed_paths 内。验收（2026-09-21）
+- 2026-09-21T10:45:11.433198Z · prepare · TASK-082 · 任务已冻结：修正 db/articles.rs 的失效分节横幅 + 复核 REQ-105 的 800 行口径；范围 src-tauri/src/db, .workflow-kit/docs/AUDIT-20260919-v2.md
 
 ## 如何继续
 

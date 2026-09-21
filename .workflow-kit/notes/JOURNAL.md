@@ -274,3 +274,4 @@
 - 2026-09-21T10:28:56.645825Z · checkpoint · TASK-081 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-21T10:34:12.074074Z · checkpoint · TASK-081 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-21T10:35:14.220515Z · accept · 验收 TASK-081；依据：总控核对：独立审查 PASS（findings 空，五区域全 PASS，candidate fd8c1b71…，verification RUN-d8ee5c8ac2374b308f60c97e9f80a446）；四门禁实测 cargo 202/0/9、lint 0/0、build exit 0、frontend 313/313；REQ-104 验收第三条（P3 项每条有处置结论）已闭合——处置表写入 AUDIT-20260919-v2.md「一之附」，判定为「修」的 13 项各带成对证据（其中 #4/#5/#9 有修前失败证据，F3 三层变异取证计数经实测 2/3/1），判定「不修」的 7 项均写明理由，另有 3 项另立任务遗留已如实登记；全部改动文件均在 allowed_paths 内。验收（2026-09-21）
+- 2026-09-21T10:45:11.433198Z · prepare · TASK-082 · 任务已冻结：修正 db/articles.rs 的失效分节横幅 + 复核 REQ-105 的 800 行口径；范围 src-tauri/src/db, .workflow-kit/docs/AUDIT-20260919-v2.md
