@@ -2319,6 +2319,20 @@
       "candidates": {
         "TASK-079": "dbd6608b4fdec26b604cbed2837e664c63cbdd2c65974168c04e40c7436c87fa"
       }
+    },
+    {
+      "id": "DEC-cbaaa3c8b68b4f87ba7c145c16caef98",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-21 指令『不动工作流，修复这个问题，通过新增任务卡或者其他方式』——授权以新增任务卡方式在不修改引擎的前提下修复 prepare 静默回退缺口；任务已完成四门禁验证与两轮独立审查（r1 FAIL 已修，r2 PASS）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-080"
+      ],
+      "recorded_at_utc": "2026-09-21T08:22:56.716940Z",
+      "candidates": {
+        "TASK-080": "ce4820837b03a201082df57e11377de06def770894015c9732b8035f0171bff1"
+      }
     }
   ]
 }
