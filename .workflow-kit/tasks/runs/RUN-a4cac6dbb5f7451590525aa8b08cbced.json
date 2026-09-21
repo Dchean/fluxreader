@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "RUN-a4cac6dbb5f7451590525aa8b08cbced",
+  "task_id": "TASK-076",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "codex-main-20260920-task076"
+  },
+  "started_at_utc": "2026-09-20T09:18:29.003470Z",
+  "finished_at_utc": "2026-09-21T01:08:32.155771Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "f7d578f83c4ec145db76dab796f76e0012b3a717e0e2549b13348d343dc87500",
+  "candidate_digest": null,
+  "raw_output_refs": [],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-a4cac6dbb5f7451590525aa8b08cbced-scope.json",
+  "recovery": {
+    "source": "TASK-076 于 2026-09-20T09:18Z prepare 后，会话因网络中断终止，该 run 从未被 finish、已随隔夜闲置而超时；现恢复中断记录并申请续期（2026-09-21）",
+    "observed_at_utc": "2026-09-21T01:08:29.339810Z",
+    "actual_process_finish_known": false,
+    "note": "finished_at marks record closure, not a fabricated process completion"
+  },
+  "failure_kind": "interrupted",
+  "failure_reason": "Interrupted run recovered: TASK-076 于 2026-09-20T09:18Z prepare 后，会话因网络中断终止，该 run 从未被 finish、已随隔夜闲置而超时；现恢复中断记录并申请续期（2026-09-21）"
+}

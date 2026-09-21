@@ -2258,6 +2258,25 @@
       "candidates": {
         "TASK-075": "21bffb8c1d45c84aefbf5d2284705bb37965f62b1633e1c1dabcea30141bae36"
       }
+    },
+    {
+      "id": "DEC-04fd490889fb418c84465f15b25c942b",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "2026-09-21 会话在 TASK-076 prepare 后因网络中断终止，任务从未开始实现即隔夜超时；用户指示『继续，按照你的判断进行最佳路线完成后续所有的』，据此为该未开工任务续期一个完整实现窗口（不改变原范围、验收与预算上限）",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-076"
+      ],
+      "recorded_at_utc": "2026-09-21T01:08:40.508722Z",
+      "budget_extension": {
+        "decision_id": "DEC-04fd490889fb418c84465f15b25c942b",
+        "recorded_at_utc": "2026-09-21T01:08:40.508722Z",
+        "minutes": 240,
+        "repair_rounds": 0,
+        "previous_deadline_at_utc": "2026-09-20T13:18:29.000014Z",
+        "deadline_at_utc": "2026-09-21T05:08:40.508722Z"
+      }
     }
   ]
 }
