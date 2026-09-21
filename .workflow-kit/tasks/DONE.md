@@ -53,5 +53,6 @@
 | [TASK-076](items/TASK-076.json) | 降级可见性与 AI 输入校验：全文提取 degraded 标志（P2-10 后半）+ 摘要空正文与 preset 显式提示（P2-11）（REQ-104） | cancelled |
 | [TASK-077](items/TASK-077.json) | 降级可见性与 AI 输入校验收口：全文提取 degraded 标志（P2-10 后半）+ 摘要空正文与 preset 显式提示（P2-11）（REQ-104） | done |
 | [TASK-078](items/TASK-078.json) | REQ-104 收尾清理：删除孤儿 commands::sync_now + 修订陈旧 Miniflux 兜底注释 | done |
+| [TASK-079](items/TASK-079.json) | REQ-105：ingestion.rs（680 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块 | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

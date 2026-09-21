@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-079 · REQ-105：ingestion.rs（680 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块
 
-**状态**：verified
+**状态**：done
 
 **目标**：按 REQ-105 把 src-tauri/src/ingestion.rs（680 行）拆分为 ingestion/ 领域模块，沿用项目既有拆分配方（TASK-044 拆 commands、TASK-045 拆 sync、TASK-023 拆 db）：**先补/确认断言 → 纯搬运 → 四门禁**。拆分目标（按文件内既有的注释分节天然对应）：① conditional_get（HTTP 条件 GET + build_client + Fetched + read_capped）；② parse_feed（feed-rs 解析 + ParsedFeed + resolve_url + clamp_publish_date + map_entry + mime_from_url）；③ staged 三段式刷新（read_feed_for_refresh + fetch_and_parse + apply_refresh_result + refresh_feed_staged）；④ favicon 发现（discover_favicon + extract_icon_link + rel_is_icon + extract_html_attr + FAVICON_TRIED + BROWSER_UA）；⑤ 常量（USER_AGENT / MAX_BODY_BYTES / NO_STABLE_ID）。硬约束：**crate::ingestion::<item> 公开路径必须逐字不变**——全库有 47 处调用点（产品 commands/folders.rs、commands/articles.rs、scheduler.rs、lib.rs；测试 ingestion_e2e / refresh_dedup_e2e / staged_refresh_e2e / scheduler_e2e / sync_* 等），拆分必须用 pub use 重导出保持路径，或适配全部调用点（二者择一，优先前者以最小化改动面）。行为必须零变化：不得改变任何逻辑、SQL、阈值、超时、并发结构（含 tokio::spawn 与 FAVICON_TRIED 负缓存的语义）与函数签名。验收标准另要求「拆分后无超过 800 行的生产单体」——拆分后 ingestion/ 各模块须均远低于该阈值（现状最大为 db/articles.rs 的 791 行，拆完 ingestion 后需复核该结论仍成立）。
 

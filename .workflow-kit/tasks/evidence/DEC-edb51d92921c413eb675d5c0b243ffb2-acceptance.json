@@ -1,0 +1,14 @@
+{
+  "id": "DEC-edb51d92921c413eb675d5c0b243ffb2",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-21 指示『继续，按照你的判断进行最佳路线完成后续所有的』授权完成剩余已确认范围；本卡落实 REQ-105 全部验收标准（无超过 800 行的生产单体、行为零变化且既有断言一行不动、公开路径不变），已完成四门禁验证与独立审查 PASS",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-079"
+  ],
+  "recorded_at_utc": "2026-09-21T07:33:29.711708Z",
+  "candidates": {
+    "TASK-079": "dbd6608b4fdec26b604cbed2837e664c63cbdd2c65974168c04e40c7436c87fa"
+  }
+}
