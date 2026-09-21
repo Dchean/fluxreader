@@ -28,10 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 49 项：已验收 41，待验收 0，阻塞 0。
+已建任务 50 项：已验收 41，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-078 · REQ-104 收尾清理：删除孤儿 commands::sync_now + 修订陈旧 Miniflux 兜底注释](<../tasks/cards/TASK-078.md>) | 待执行 | 清理 TASK-070 移交的三条 REQ-104 卫生项（均不在当时 allowed_paths 内，留待后续任务清理）：① 删除孤儿 IP​C 命令 commands::sync_now——该函数在前端 api.ts 中已无调用方（TASK-070 删除了 api.syncNow），但 lib.rs 仍注册着 commands::sync_now 作为 invoke handler。该命令目前仅为一行转调 sync::sync_now，与前端实际调用的 sync_phase 功能重叠（后者由 api.syncPhase 调用）。删除该注册行的同时可删除 commands/sync.rs 中的包裹函数。② 修订三处「Miniflux 兜底」陈旧注释——src/types.ts:44、src-tauri/tests/staged_refresh_e2e.rs:195、src-tauri/tests/sync_phases_e2e.rs:246，这些描述在当前代码中已不准确（该兜底路径已在 0ba940f 协议切换时移除以使 Miniflux 时代不可达代码失效；当前有且仅有直连抓取一种路径，无兜底逻辑）；将其更新为描述当前的降级语义（set_feed_fetch_state 写 fetch_failed 供前端显示错误标志，仅驱动指数退避重试，不再有「兜底拉取」）。本任务为纯删除 + 注释修订，不引入新行为、不新增依赖。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -43,9 +44,8 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 37 项记录可在任务总览查看。
+另有 38 项记录可在任务总览查看。
 
 **已确认但尚未拆分的需求**：ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块（conditional_get/parse_feed/map_entry/staged 刷新/favicon 发现），沿用先补断言→纯搬运→四门禁配方，crate::ingestion 路径不变，行为零变化
 
@@ -83,7 +83,6 @@
 
 ## 最近事件
 
-- 2026-09-21T01:26:22.212275Z · checkpoint · TASK-076 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-21T01:27:33.728212Z · checkpoint · TASK-076 · Interrupted run recovered: TASK-076 的已实现成果将由新卡收口：本 run 未 finish；按 TASK-068→TASK-069 与 TASK-074→TASK-075 先例，取消本卡并以新卡承载同一成果（allowed_paths 已在记录中订正为真实路径）。2026-09-21; out-of-scope changes: .workflow-kit/tasks/items/TASK-076.json；下一步：核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算
 - 2026-09-21T01:27:33.883118Z · note/lesson · TASK-076 · scope 失败已出现 11 次：Interrupted run recovered: TASK-076 的已实现成果将由新卡收口：本 run 未 finish；按 TASK-068→TASK-069 与 TASK-074→TASK-075 先例，取消本卡并以新卡承载同一成果（allowed_paths 已在记录中订正为真实路径）。2026-09-21。下次准备/实现前先核对这一点。
 - 2026-09-21T01:27:55.944805Z · checkpoint · TASK-076 · 任务已取消：TASK-076 取消并以新卡收口说明： 1) 成果状态：TASK-076 的两项裁决已**全部实现完成**并留在工作区，四门禁实测通过 （cargo 193 passed / 0 failed / 9 ignored、lint 0/0、build exit 0、frontend 303/303）， 新增 9 条单测，两项行为变更各有变异取证（共 4 条失败用例证明测试承重）。 内容：A = 全文提取降级不再静默（ExtractOutcome{html,degraded,reason} + 纯函数 degradation_reason + 前端两条路径改读结构化标志）；B = ai_summarize 补空正文校验、 未知 preset 不再静默回落 deepseek-chat/api.deepseek.com。 2) 取消原因：**总控台账错误导致的基线不收敛**，与成果质量无关。 - 初稿 spec 的 allowed_paths 有 4 条是不存在路径（tests/extraction_e2e.rs、 tests/ai_stream_e2e.rs、tests/settings_e2e.rs、src/stores/reader.ts），而实际改动的 src/store/slices/reader.ts 原本在范围外； - 我在**上一次会话已成功 prepare 之后**才改磁盘 spec，prepare 不回写既有记录； - 本次恢复中断 run 后未重核记录内范围即 begin； - finish 时 relative-to-baseline 的 diff 恒把任务记录判为 protected（scope 阻塞）。 已尝试按工具路径处置（finish → recover → unblock → 重新 begin），但 task_baseline 始终 返回**最早**写入者的 scope 快照（订正之前），故同一越界必然复现，无法收敛。 3) 处置：沿用项目既有先例（TASK-068→TASK-069、TASK-074→TASK-075）——取消本卡，另立新卡 承载同一成果。新卡的 prepare 输入快照取自当前树（已含全部实现），且 allowed_paths 自始就是真实路径，begin 基线与工作区一致，成果经候选快照绑定，不会再有假阳性。 本记录保留为历史，供追溯实现过程与门禁证据。 4) 授权依据：DEC-req104-p2-10b-fulltext-degraded-20260920 与 DEC-req104-p2-11-ai-validation-20260920（owner 2026-09-20）。 5) 纪律（已记 lesson）：prepare 之后再改 spec 文件不会回写记录；恢复中断任务必须先核对 记录内 allowed_paths 再 begin；范围订正一律在 begin 之前落盘。 ；下一步：如需同一目标，准备新的任务并引用本任务作为历史
@@ -95,6 +94,7 @@
 - 2026-09-21T01:31:29.842788Z · note/lesson · TASK-077 · 台账纪律（TASK-076 实际踩到，第三次同族失误，务必固化）：**prepare 会把当时的 spec 内容写进任务记录；此后修改磁盘上的 spec 文件不会回写记录。** 我在 TASK-076 的 spec 初稿里凭印象写了 4 条不存在的 allowed_paths（tests/extraction_e2e.rs、tests/ai_stream_e2e.rs、tests/settings_e2e.rs、src/stores/reader.ts），发现后改了 spec 文件，但该修正发生在『上一次会话已成功 prepare』之后，记录里仍是错误路径；本次会话恢复中断 run 后未重核记录内 allowed_paths 就直接 begin，于是带着错误范围完成实现——实际改动的 src/store/slices/reader.ts 落在范围外（diff 报 outside）。我在 finish 之前如实订正了记录的 allowed_paths（并重算 definition_digest），但这让任务记录相对 begin 基线发生变化，finish 判 protected → scope 阻塞；随后尝试 recover→unblock→重新 begin，仍无法收敛，因为 task_baseline() 返回的是**最早**写入者的 scope 快照（订正之前），每次 begin 都继承它。最终按 TASK-068→TASK-069 / TASK-074→TASK-075 先例取消 TASK-076、以 TASK-077 承载同一成果（新卡 prepare 快照取自当前树、allowed_paths 自始正确，diff 为空、protected/outside 全空）。**三条固化纪律**：① 恢复中断任务后，begin 之前必须**读记录内的 allowed_paths 并逐条 Test-Path 核对存在性**，不能只信自己磁盘上的 spec；② 任何范围订正都必须在**首次 prepare 之前**定稿（TASK-074 同因教训）；③ 若发现记录已错，正确处置是取消并以新卡收口（工具的先例路径），而不是反复 unblock 重试——后者在有 prior writer 基线时数学上不可能收敛。另注：这也解释了为何同类问题在此项目已出现三次（068/074/076），值得在后续任务卡模板里加一步『路径存在性自检』。
 - 2026-09-21T01:39:45.375882Z · checkpoint · TASK-077 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-21T01:40:55.696663Z · accept · 验收 TASK-077；依据：用户 2026-09-20 裁决 DEC-req104-p2-10b-fulltext-degraded-20260920 与 DEC-req104-p2-11-ai-validation-20260920；2026-09-21 用户指示『继续，按照你的判断进行最佳路线完成后续所有的』授权本卡收口 TASK-076 的同一成果。任务已完成四门禁验证与独立审查 PASS
+- 2026-09-21T03:56:08.046873Z · prepare · TASK-078 · 任务已冻结：REQ-104 收尾清理：删除孤儿 commands::sync_now + 修订陈旧 Miniflux 兜底注释；范围 src-tauri/src/commands/sync.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/types.ts, src-tauri/tests/staged_refresh_e2e.rs, src-tauri/tests/sync_phases_e2e.rs
 
 ## 如何继续
 
