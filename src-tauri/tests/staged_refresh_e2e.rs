@@ -192,7 +192,7 @@ async fn staged_refresh_304_keeps_conditional_headers() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// 失败分支：网络错误写回 fetch_failed + fetch_error，供 UI 与 Miniflux 兜底查询。
+/// 失败分支：网络错误写回 fetch_failed + fetch_error，供 UI 错误标志与指数退避重试使用。
 #[tokio::test]
 async fn staged_refresh_failure_marks_feed() {
     let tmp = temp_db("fail");

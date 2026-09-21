@@ -1,0 +1,82 @@
+TASK-078 change set — REQ-104 收尾清理（孤儿 IPC 命令 + 陈旧注释）
+
+本任务风险等级 low，属「纯删除 + 注释修订」，不涉及行为变更。
+改动只有 5 个文件，全部在 allowed_paths 内：
+
+================================================================================
+① 删除孤儿 IPC 命令 commands::sync_now
+================================================================================
+站点：
+  - src-tauri/src/commands/sync.rs  删除了 sync_now 函数本体（含其文档注释）
+  - src-tauri/src/lib.rs            删除了 invoke_handler 中的 commands::sync_now 注册行
+
+为什么判定为孤儿（三层核验，请独立复核）：
+  (a) 产品代码中检索 'sync_now' / "sync_now" / 'sync_now' 三种写法，src/ 与 tools/ 均 0 命中；
+  (b) 前端真正使用的同步入口是 api.syncPhase → inv('sync_phase')，
+      调用点为 src/store/slices/sync.ts:79,86 与 src/components/settings/SyncTab.tsx:92,98；
+  (c) 该 IPC 是 TASK-070 删除 api.syncNow 之后遗留的壳。
+      注意区分：sync::sync_now 核心函数（src-tauri/src/sync/phases.rs:82）**必须保留**，
+      它仍被集成测试直接调用（sync_e2e.rs、dual_client_e2e.rs、fever_sync_live_e2e.rs 等）。
+      本任务只删 commands 层的 IPC 壳与其注册行，未动核心函数。
+
+请重点确认：没有任何运行时路径（含字符串形式的 invoke 名）依赖被删的命令；
+删除后没有产生新的 dead_code/unused 告警。
+
+================================================================================
+② 修订四处陈旧「Miniflux 兜底」注释（仅改文本，不改任何断言/逻辑）
+================================================================================
+这些注释都产生于 Miniflux 专用协议时期。该兜底路径确实存在过，但已在
+0ba940f（协议切换 Miniflux → Google Reader）时随 Miniflux 专用代码一并移除；
+TASK-070 随后删除了它残留的三个查询助手（feeds_fetch_failed /
+feeds_fetch_failed_bound / feeds_origin_remote）。故注释描述的机制已不存在。
+
+改动明细：
+  (a) src/types.ts:44  fetchFailed 注释
+      旧：该源最近一次直连抓取是否失败（失败走 Miniflux 兜底 + 退避重试）
+      新：该源最近一次抓取是否失败（驱动前端错误标志 + 指数退避重试）
+      依据：fetch_failed 列现由 set_feed_fetch_state（db/feeds.rs:115-138）写入，
+            仅驱动 fail_count / next_retry_at 指数退避与前端错误标志。
+  (b) src/types.ts:70  source 注释
+      旧：direct=客户端直连源站（第一优先级） | miniflux=直连失败兜底拉取
+      新：direct=客户端直连源站抓取 | miniflux=经同步后端拉取（历史命名；协议已中立化，与源的 origin 无关）
+      依据：source='miniflux' 由 sync/entries.rs:214 的 upsert_remote_entry 写入，
+            含义是「经同步后端拉回的条目」，与 direct 相对，**不是**「直连失败才兜底」；
+            该字面量沿用历史命名，而源的 origin 字段早已中立化为 local/remote
+            （migrations.rs:224 做过 UPDATE feeds SET origin='remote' WHERE origin='miniflux'）。
+  (c) src-tauri/tests/staged_refresh_e2e.rs:195
+      旧：供 UI 与 Miniflux 兜底查询
+      新：供 UI 错误标志与指数退避重试使用
+  (d) src-tauri/tests/sync_phases_e2e.rs:245-248 与 :284
+      · 根因段保留历史上成立的叙述，并补明该兜底的移除时点：
+        「Miniflux 协议时期 pull_entries 只对『完全失败』的源做兜底拉取
+          （0ba940f 协议切换时该兜底随 Miniflux 专用路径一并移除）」
+        依据：git show 0ba940f^:src-tauri/src/sync.rs 中确有
+              `let (since_s, miniflux_feeds, failed_feeds)` 与
+              `for feed in &failed_feeds`（兜底确曾存在），故该历史陈述为真、不是「从未实现」。
+      · :284 的「来源应标记为 miniflux（兜底补齐）」改为
+        「full 对账从同步后端拉回的条目；该值是与 direct 相对的来源标记，非『兜底』」。
+
+**注释准确性是本任务的核心交付物，请严格逐句核对**：这些注释上一轮同类工作
+（TASK-070）曾因写下不成立的历史断言（「从未实现」）被独立审查连续判 FAIL 三轮。
+请特别验证：
+  - 「0ba940f 时移除」这一时点是否准确（可用 git show 核对）；
+  - 新注释里是否又引入了未经验证的全称/历史断言；
+  - fetch_failed 与 source 两个字段的新描述是否与当前代码逐一相符；
+  - 是否还有**其它**同类陈旧注释残留在改动文件或邻近位置（如有请报告）。
+
+================================================================================
+门禁结果（本候选）
+================================================================================
+  cargo test  193 passed / 0 failed / 9 ignored   （与基线一致；删除未造成回归）
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    303/303, exit 0
+  断言零改动：193 条 Rust + 303 条前端断言逐字未动（test_review behavior=preserve）。
+  未引入新依赖；改动文件均 LF；未触碰用户真实数据库。
+
+建议的独立验证手段：
+  - `cargo build` 确认无新告警；`cargo test --lib` 快速回归；
+  - 自己再 grep 一次 'sync_now'，确认无运行时依赖（含 JSON/IPC 字符串形态）；
+  - 用 `git show 0ba940f^:src-tauri/src/sync.rs` 核对历史叙述；
+  - 若要变异取证：把 lib.rs 的注册行恢复而函数已删 → 应编译失败（证明二者必须同删）；
+    这是本任务最容易出现的半删状态。

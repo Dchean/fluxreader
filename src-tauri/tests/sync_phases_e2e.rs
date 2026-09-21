@@ -243,7 +243,8 @@ async fn stale_remote_read_converges_via_full_reconcile() {
 }
 
 /// 本地直连源漏抓的条目（本地文章数 < 远端）→ full 同步对比拉取补齐。
-/// 根因：此前 pull_entries 只对「完全失败」的源做 Miniflux 兜底，正常直连源
+/// 根因：Miniflux 协议时期 pull_entries 只对「完全失败」的源做兜底拉取
+/// （0ba940f 协议切换时该兜底随 Miniflux 专用路径一并移除），正常直连源
 /// 若 feed 只提供摘要/漏了几条，本地永久缺失。现在 full 对账会对已绑定源
 /// 的远端条目逐一 upsert 补齐（幂等，不重复、不覆盖已有正文/已读）。
 #[tokio::test]
@@ -280,7 +281,7 @@ async fn full_reconcile_backfills_missing_local_entries() {
             )
             .unwrap();
         assert_eq!(count, 1, "远程独有条目应被对比拉取补齐到本地");
-        // 来源应标记为 miniflux（兜底补齐）
+        // 来源应标记为 miniflux（full 对账从同步后端拉回的条目；该值是与 direct 相对的来源标记，非「兜底」）
         let source: String = conn
             .query_row(
                 "SELECT source FROM articles WHERE url = 'http://127.0.0.1:8765/missing/post/999'",

@@ -1,0 +1,23 @@
+{
+  "task_id": "TASK-078",
+  "run_id": "RUN-22565c5de3104040afcb54348d0d9957",
+  "status": "ready_for_verification",
+  "summary": "TASK-078 完成（REQ-104 收尾清理），纯删除 + 注释修订，无行为变更。**① 删除孤儿 IPC 命令 commands::sync_now**：该 Tauri 命令在前端已无任何调用方（TASK-070 删除了 api.syncNow 之后遗留），本次一并删除函数本体（commands/sync.rs:260-267，含其文档注释）与 lib.rs:258 的 invoke_handler 注册行。零调用方经三层核验：git grep 在产品代码（src/ 与 tools/）中检索 'sync_now'、'\"sync_now\"'、\"'sync_now'\" 三种写法均 0 命中；前端实际使用的同步入口是 api.syncPhase → inv('sync_phase')（store/slices/sync.ts:79,86 与 components/settings/SyncTab.tsx:92,98 共 4 处调用点），与 sync_now 无关；sync::sync_now 核心函数本体保留不动（sync/phases.rs:82），其集成测试调用点（sync_e2e.rs、dual_client_e2e.rs、fever_sync_live_e2e.rs 等）全部保持。**② 修订四处陈旧「Miniflux 兜底」注释**（修订前逐条经 git 历史核实，避免写下不成立的历史断言）：(a) src/types.ts:44 fetchFailed 注释由「该源最近一次直连抓取是否失败（失败走 Miniflux 兜底 + 退避重试）」改为「该源最近一次抓取是否失败（驱动前端错误标志 + 指数退避重试）」——依据：Miniflux 兜底路径已在 0ba940f（协议切换 Google Reader）时随 Miniflux 专用代码一并移除，且 TASK-070 已删除其残留的三个查询助手（feeds_fetch_failed / feeds_fetch_failed_bound / feeds_origin_remote）；fetch_failed 列当前由 set_feed_fetch_state（db/feeds.rs:115-138）写入，仅驱动 fail_count/next_retry_at 指数退避与前端错误标志。(b) src/types.ts:70 source 注释由「direct=客户端直连源站（第一优先级） | miniflux=直连失败兜底拉取」改为「direct=客户端直连源站抓取 | miniflux=经同步后端拉取（历史命名；协议已中立化，与源的 origin 无关）」——依据：source='miniflux' 由 sync/entries.rs:214 的 upsert_remote_entry 写入，用于标记「经同步后端拉回的条目」，与 direct 相对，**并非**「直连失败才兜底」；该字面量沿用历史命名，而源的 origin 字段早已中立化为 local/remote（migrations.rs:224）。(c) src-tauri/tests/staged_refresh_e2e.rs:195 由「供 UI 与 Miniflux 兜底查询」改为「供 UI 错误标志与指数退避重试使用」。(d) src-tauri/tests/sync_phases_e2e.rs:245-248 与 :284：前者保留历史上成立的根因叙述并补明「Miniflux 协议时期……0ba940f 协议切换时该兜底随 Miniflux 专用路径一并移除」（经 git show 0ba940f^:src-tauri/src/sync.rs 核对：当时 pull_entries 确有 miniflux_feeds 全量 + failed_feeds 增量两个拉取目标集，兜底确曾存在，故此历史陈述为真），后者把「兜底补齐」改为「full 对账从同步后端拉回的条目；该值是与 direct 相对的来源标记，非『兜底』」。**断言与行为零改动**：全部 193 条 Rust + 303 条前端断言逐字未动（本任务为 test_review behavior=preserve，仅 keep）；四处改动均为注释文本，不触及任何逻辑、SQL、断言或阈值。**门禁实测**：cargo test 193 passed / 0 failed / 9 ignored（与基线一致，删除未造成任何回归）；lint 0 warnings / 0 errors；build exit 0（vite built in 954ms）；frontend 303/303。未引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；改动文件均 LF；未触碰用户真实数据库。",
+  "changed_files": [
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/tests/staged_refresh_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "src/types.ts"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

@@ -41,7 +41,7 @@ export interface FeedItem {
   layout: 'inherit' | ContentLayoutType;
   autoSummary: boolean;
   autoTranslate: boolean;
-  /** 该源最近一次直连抓取是否失败（失败走 Miniflux 兜底 + 退避重试） */
+  /** 该源最近一次抓取是否失败（驱动前端错误标志 + 指数退避重试） */
   fetchFailed?: boolean;
 }
 
@@ -67,7 +67,7 @@ export interface ArticleEntry {
   isStarred: boolean;
   /** RSS item 的 categories 标签（本就是数组） */
   tags: string[];
-  /** 条目获取来源：direct=客户端直连源站（第一优先级） | miniflux=直连失败兜底拉取 */
+  /** 条目获取来源：direct=客户端直连源站抓取 | miniflux=经同步后端拉取（历史命名；协议已中立化，与源的 origin 无关） */
   source: 'direct' | 'miniflux';
 
   /* ---- 正文与增强内容 ---- */

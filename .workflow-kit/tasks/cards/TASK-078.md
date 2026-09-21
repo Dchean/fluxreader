@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-078 · REQ-104 收尾清理：删除孤儿 commands::sync_now + 修订陈旧 Miniflux 兜底注释
 
-**状态**：ready
+**状态**：verified
 
 **目标**：清理 TASK-070 移交的三条 REQ-104 卫生项（均不在当时 allowed_paths 内，留待后续任务清理）：① 删除孤儿 IP​C 命令 commands::sync_now——该函数在前端 api.ts 中已无调用方（TASK-070 删除了 api.syncNow），但 lib.rs 仍注册着 commands::sync_now 作为 invoke handler。该命令目前仅为一行转调 sync::sync_now，与前端实际调用的 sync_phase 功能重叠（后者由 api.syncPhase 调用）。删除该注册行的同时可删除 commands/sync.rs 中的包裹函数。② 修订三处「Miniflux 兜底」陈旧注释——src/types.ts:44、src-tauri/tests/staged_refresh_e2e.rs:195、src-tauri/tests/sync_phases_e2e.rs:246，这些描述在当前代码中已不准确（该兜底路径已在 0ba940f 协议切换时移除以使 Miniflux 时代不可达代码失效；当前有且仅有直连抓取一种路径，无兜底逻辑）；将其更新为描述当前的降级语义（set_feed_fetch_state 写 fetch_failed 供前端显示错误标志，仅驱动指数退避重试，不再有「兜底拉取」）。本任务为纯删除 + 注释修订，不引入新行为、不新增依赖。
 
@@ -28,20 +28,27 @@
 
 ## 执行与恢复
 
-- 首次开始：None
-- 原截止时间：None
-- 当前截止时间：None
-- 时钟：未开始
+- 首次开始：2026-09-21T04:01:57.487834Z
+- 原截止时间：2026-09-21T08:01:57.487834Z
+- 当前截止时间：2026-09-21T08:01:57.487834Z
+- 时钟：按墙钟计：额度 240 分钟，写入阶段已用约 184 分钟
 - 已用修复轮：0
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 最近检查点
 
+- 2026-09-21T04:01:57.868731Z：开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-21T07:06:12.232931Z：编码结果已记录，差异范围已核对：src-tauri/src/commands/sync.rs, src-tauri/src/lib.rs, src-tauri/tests/staged_refresh_e2e.rs, src-tauri/tests/sync_phases_e2e.rs, src/types.ts；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-21T07:06:41.655069Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T07:15:18.732637Z：当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 原始证据
 
 [唯一状态记录](../items/TASK-078.json)
 
+- [RUN-22565c5de3104040afcb54348d0d9957](../runs/RUN-22565c5de3104040afcb54348d0d9957.json)
+- [RUN-6aeb3b77f8984b48ad8c1905007b6c5f](../runs/RUN-6aeb3b77f8984b48ad8c1905007b6c5f.json)
+- [RUN-04b32a8f303546d2aa5b2ca0e54d189d](../runs/RUN-04b32a8f303546d2aa5b2ca0e54d189d.json)
 
 卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

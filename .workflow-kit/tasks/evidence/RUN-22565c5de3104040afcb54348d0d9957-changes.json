@@ -1,0 +1,9 @@
+{
+  "changed_files": [
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/tests/staged_refresh_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "src/types.ts"
+  ]
+}
