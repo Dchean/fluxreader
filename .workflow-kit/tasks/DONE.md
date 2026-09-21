@@ -57,5 +57,6 @@
 | [TASK-080](items/TASK-080.json) | 修复 prepare 静默回退缺口（工程侧守卫 + 让既有回归测试可跑，不改工作流引擎） | done |
 | [TASK-081](items/TASK-081.json) | REQ-104 P3 卫生项逐条处置（含不修的理由），闭合验收第三条 | done |
 | [TASK-082](items/TASK-082.json) | 修正 db/articles.rs 的失效分节横幅 + 复核 REQ-105 的 800 行口径 | done |
+| [TASK-083](items/TASK-083.json) | F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令 | cancelled |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。
