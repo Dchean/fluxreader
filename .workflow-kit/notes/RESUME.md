@@ -28,10 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 57 项：已验收 47，待验收 0，阻塞 0。
+已建任务 58 项：已验收 47，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-086 · F2：单键快捷键让路浮层的判据抽纯函数并补前端断言](<../tasks/cards/TASK-086.md>) | 待执行 | 闭合 AUDIT P3[F2] 遗留的**覆盖缺口**：上一轮（TASK-081）已按审计要求让 S/M/J/K 在任一浮层打开时让路，但该判据**内联在 `src/App.tsx` 的 keydown 闭包里**，无任何断言——「改了行为却无法断言」。处置：按项目既有先例（`timelineSentinel.ts` / `src/store/selectors.ts` 的 `podcastClickAction`）把判据抽成**导出纯函数**`shouldYieldToOverlay(overlayOpen, key, hasModifier)`（新建 `src/components/shortcutYield.ts`，独立成文件以避开 oxlint 的 react/only-export-components），由 App.tsx 的真实 keydown 分支消费，并**由前端回归直接断言**。行为零变化：现有让路语义（浮层打开 + 非 Ctrl/Meta/Alt + 键属 s/S/m/M/j/k）逐条保持。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -43,9 +44,8 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 45 项记录可在任务总览查看。
+另有 46 项记录可在任务总览查看。
 
 **阻塞**：无已记录阻塞
 
@@ -70,7 +70,6 @@
 
 ## 教训
 
-- 2026-09-21T08:22:30.707293Z · note/lesson · TASK-080 · 审查者订正了我的机理判断（记录以免以讹传讹）：我此前把 refresh_dedup_e2e 的 flake 归因为『refresh_all 并发抓取两源 + upsert 的读-改-写窗口，使计数可能为 0 或 2』。复审者独立复现并给出更强证据：隔离运行中**两种断言都曾失败**（on 例 left:0/right:1，off 例 left:3/right:2），而两只用例各自单独跑 18/18 全通过——指向**同进程内两只用例互相干扰**（同一 test binary 内并发执行，共享进程级状态或临时资源），而不是我所述的『单只用例内部并发窗口』。结论：机理订正留给已登记的独立跟进项（refresh_dedup_e2e 时序依赖），不影响 TASK-080 判定（该任务未改任何 Rust 文件）。教训：对 flake 的机理解释若无隔离实验支撑就写进交付说明，等于用推测污染证据链；正确做法是至少做『单跑 N 次 vs 并发跑』的对照，并优先怀疑同 binary 内用例互相干扰。另复审者指出一处既有（非本轮引入）陈旧引用：文档第 67 行引用的 begin 报错原文『Resolve this blocker explicitly before resuming』在当前引擎已被 6fd382e 升级改为『needs a disposition first』——属未触碰的 context 行，承载结论（begin 不放行 scope）仍为真，故按边界记为观察，留待后续同类文档订正时一并处理。
 - 2026-09-21T08:26:16.828437Z · note/lesson · refresh_dedup_e2e 时序失败的真实根因（TASK-080 复审者以决定性反例推翻作者原判断，2026-09-21） 结论：**不是**作者先前所说的「refresh_all 并发抓取两源 + upsert 读-改-写窗口使计数为 0 或 2」。 真实根因是**两只用例共用同一个临时 DB 路径**，在同进程并发时互相踩踏。 决定性证据（复审者提供）： 1. 反例：某次运行 panic 在 refresh_dedup_e2e.rs:59:31，即 db::open(&tmp).unwrap()，错误为 SqliteFailure(... "table folders already exists") —— 失败发生在**建库阶段**， 与 dedup / refresh_all 并发毫无关系，作者的解释无法覆盖该现象。 2. 代码反证：staged.rs:163 先取 Mutex，随后 apply_refresh_result 在**同一个临界区内** 完成整个 upsert 循环（含 dedup 判定与插入），故两源实际被完全串行化， 不存在「都查到不存在再都插入」的交错窗口；也无法解释 dedup=off 时出现 left:3。 3. 路径冲突：两只用例都用 fluxreader_dedup_refresh_{process::id()}_{SystemTime::now() 纳秒}.db 同一进程 pid 相同，仅靠纳秒区分 → 会取到同一文件，随后并发 remove/open/migrate 同一 DB。 4. 对照实验：每只用例**单独跑 18/18 全通过**；串行 / --test-threads=1 跑 15 次**0 失败**； 失败只在**两例同进程并发**时出现。 处置建议（独立跟进项，非 TASK-080 范围）： · 修法一：临时库名纳入用例名（per-case 前缀/后缀），使两例路径不同； · 修法二：该测试文件用 --test-threads=1 运行，或把两只用例合并为一只串行用例； · 命名订正：该跟进项此前被记为「并发去重窗口」，应改题为 「e2e 临时库路径未按用例区分」——题目错了会误导后续修复方向； · 影响面：这是**测试基础设施缺陷**而非产品并发缺陷（产品路径中 dedup 判定与插入 本就在同一临界区内），严重性低于作者先前的判断。 纪律教训（已记 lesson）：对 flake 的机理解释必须在写进交付说明**之前**做对照实验 （单跑 vs 并发跑、串行 vs 并行），否则等于用推测污染证据链；本次作者的原解释被复审者 以「建库失败的 panic」一击推翻，即属未做对照实验就下结论。
 - 2026-09-21T08:47:15.623761Z · note/lesson · P3[5] cleanup_cache 时区问题的**实测机理订正**（2026-09-21，TASK-081） 审计原文称「去掉 'localtime'，否则时区混用会**多删最近 N 小时**」。实测（sqlite 3.50.4）表明 真实机理不同，据此订正记录以免误导后续维护： 实测事实： · published_at 由 `to_rfc3339()` 存，形如 `2026-09-14T18:45:20+12:00`（含 'T' 与偏移）； · 修前 cutoff = `datetime('now','-N days','localtime')` → `2026-09-14 16:45:20`（含空格、本地墙上时间）； · 两者做**裸文本比较**：第 11 字符 `'T'(0x54) > ' '(0x20)`，故**日期部分相同时文章恒被判为「不够旧」**； · localtime 又把阈值整体平移本机偏移量。综合结果：修前的判定退化为「按**日期**粗比 + 随本机时区漂移」。 主要后果是**漏删**（该清的文章留在库里），而非审计所说的「多删」： 构造验证：文章真实瞬时 = now-7d-2h（确实超过 7 天，应当清理），以 +12:00 存储 → 墙上日期 ≥ 阈值日期 → 修前**不删**（漏删）；修后经 datetime() 归一 → 正确删除。 该构造在 TZ=-12…+14 全域稳定成立（已逐时区验证）。 修复：cutoff 去掉 'localtime'（与 UTC 存储同时基），并对两侧都用 `datetime()` 归一 （`WHERE datetime(published_at) < datetime('now','-N days')`），使带任意偏移的 RFC3339 都按真实瞬时比较。 成对证据（本次实测）：把 cutoff/比较改回修前形态 → 新增的 `cleanup_cache_cutoff_is_timezone_normalised` **FAILED**（deleted=0、期望 1），其余两例仍绿； 还原后 3/3 通过。 过程教训（值得记）：我先后写出两版「有齿」测试都**没齿**（变异后仍通过），原因是我凭推导猜 SQLite 的比较语义而未实测；第三版改为**先用真实 sqlite3 逐格式实测**（含微秒、'T' vs 空格、 各时区），再据此构造用例，才真正有齿。**凡涉及 SQL 语义/时区/字符串比较的结论，必须先在 sqlite3 里实测再写断言**，不可用「看起来对」的推导代替。
 - 2026-09-21T09:14:50.436418Z · note/lesson · TASK-081 · scope 失败已出现 12 次：Out-of-scope changes: .workflow-kit/tasks/items/TASK-081.json (allowed: .workflow-kit/docs/AUDIT-20260919-v2.md, src-tauri/src/commands/ai.rs, src-tauri/src/com。下次准备/实现前先核对这一点。
@@ -78,12 +77,10 @@
 - 2026-09-21T09:54:33.315361Z · note/lesson · 教训（TASK-081 审查 F1，性质最重）：**不得宣称未经验证的「成对证据」** 事实：我在 AUDIT 处置表的 F3 行写下「成对证据：新增 3 条断言，去掉守卫后恰好 2 条失败 （换集那条正确保持通过）」。独立审查者按此描述做变异——把 Timeline.tsx 的守卫整段删除—— 结果前端门禁仍 **307/307 全绿、exit 0**。真相是：那 3 条断言只调用了 store 的 `togglePlayerPlay` / `playPodcastEpisode`，从未触达组件内的分支；该守卫**零测试覆盖**， 而我的宣称是可被证伪的不实陈述。 为什么这是最重的一条：它不只是「文档写错」，而是**把没有验证的东西写成了已验证的证据**。 验收②明确要求「判定为『修』的项补成对证据」，我却在缺少覆盖的情况下照抄了「成对证据」的 结论——等于用一句无根据的话把审查与验收的判断依据污染掉了。 正确做法（本轮已照此修复）：把判定抽成**导出纯函数** `podcastClickAction` （放 src/store/selectors.ts，避开 oxlint 的 react/only-export-components；与既有 `timelineSentinel.ts` 同一先例），让 JSX 与回归网**共用同一份判定**，再对**该函数本身** 做变异取证：改回无条件 'play'（修前逻辑）→ 恰好 2 条断言 FAILED；还原 → 310/310。 固化纪律（后续所有任务）： 1. 写「成对证据/变异取证」之前，**必须真的做过那次变异**，并记录命令与观察到的失败用例名； 没做过就写「未加断言/未验证」，不许写「成对证据」。 2. 断言必须打在**被修复的那段代码**上。若判据内联在组件/闭包里而无法断言，正确反应是 **把它抽出来**（纯函数 + 双端消费），而不是退而断言「周边前提」然后宣称覆盖。 3. 「成本高于收益」不是省略断言的通行证：本次被审查者当场指出 harness **已经**在 SSR 渲染 Timeline（:2087），抽函数 + 补断言的实际成本很低——说明「成本高」的判断本身 也可能未经验证。 4. 同轮另一条相关教训：首版把纯函数 export 在组件文件里，触发了 oxlint 的 react/only-export-components（lint 由 0 变 1 条 warning）。**门禁基线是 0 warning**， 所以补断言时也要顺带跑一次 lint，别只看通过数。
 - 2026-09-21T10:03:33.841548Z · note/lesson · 教训（TASK-081 修复轮 2 的两条，都是「修一个错、引一个新错」的同族） 一、改代码位置后必须同步全部引用（R2-F2，我引入的新不实陈述） 计划里的文件是 src/components/podcastClick.ts，实际落到了 src/store/selectors.ts， 但我只改了 import，**没改两处注释**（Timeline.tsx 与 frontend-regression.mjs），于是注释 指向一个从不存在的路径。审查者用 glob + git grep 一击证伪。 纪律：**移动/重命名实现后，必须 `git grep <旧路径>` 扫一遍全库引用**（含注释与文档）， 确认零命中再收工；注释里的路径与文件名属于「可被机械证伪的事实」，写之前要核。 二、「某函数有测试」≠「调用方真的调用它」（R2-F1） 上一轮我把判据抽成纯函数并做了变异取证，据此在台账写了「成对证据」。审查者指出： ① 改纯函数 → 恰 2 条断言失败（这半是真的）；② 但**删掉组件的 toggle 守卫 → 门禁仍全绿**。 即纯函数层的证据**钉不住组件层的调用**，而我的「成对证据」没有限定层次。 处置：加**源码形态断言**（沿用本文件既有的 readFileSync + slice + includes 手法）钉住 「组件确实按 toggle 分支消费判据且该分支 return」，并在台账里**显式分两层**陈述边界、 注明「不可互相冒充」。 纪律：写证据声明时**必须写明它覆盖到哪一层**（函数/调用方/端到端）。当行为由「函数 + 调用点」 共同决定时，两层都要有捕获力，否则该声明是过度概括。 三、元教训（本项目已连续多轮出现） 「修一个错、引一个新错」的根源是我把审查意见当**局部补丁**处理：改完被指出的那行就收工， 没有回头扫同类。正确做法是**把审查意见当模式**——被指出「注释路径写错」时，就该全库扫一遍 路径引用；被指出「证据层次过高」时，就该问「还有哪些声明也超过了实际覆盖」。下一轮收工前 应主动做这两种扫描。
 - 2026-09-21T11:47:46.699802Z · note/lesson · TASK-084 · scope 失败已出现 13 次：Out-of-scope changes: .workflow-kit/tasks/items/TASK-084.json (allowed: src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slic。下次准备/实现前先核对这一点。
+- 2026-09-21T12:04:28.220326Z · note/lesson · 工具坑（TASK-085 独立审查者实测发现，务必记住）：**cargo 的 mtime 指纹会返回陈旧结果**。审查者在变异后用备份文件逐字节还原（sha256 已与候选清单完全一致），但 cargo test 仍连续数次报告**旧的变异失败**；只有 touch 文件（改变 mtime）后才重新编译、给出真实的 4 passed / 0 failed。影响：任何「改动→还原→复跑」的变异取证，若只看 cargo 输出，可能把**陈旧产物**当成真实结论——既可能误判为通过，也可能误判为失败。纪律：变异取证还原后，务必 touch 源文件或显式强制重编（如 cargo clean -p app / 改动一行再改回），再采信测试结果。本项目此前也出现过 stale-rlib 造成的假阴性。
 
 ## 最近事件
 
-- 2026-09-21T11:36:05.157297Z · checkpoint · TASK-084 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
-- 2026-09-21T11:47:28.274353Z · checkpoint · TASK-084 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-09-21T11:47:46.524754Z · checkpoint · TASK-084 · Out-of-scope changes: .workflow-kit/tasks/items/TASK-084.json (allowed: src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs)；下一步：核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算
 - 2026-09-21T11:47:46.699802Z · note/lesson · TASK-084 · scope 失败已出现 13 次：Out-of-scope changes: .workflow-kit/tasks/items/TASK-084.json (allowed: src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slic。下次准备/实现前先核对这一点。
 - 2026-09-21T11:49:44.448875Z · checkpoint · TASK-084 · 任务已取消：任务记录在实现过程中被合法修订（依 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 订正验收⑥ 并把该裁决挂到 test_review），但本卡 repair 运行继承的是首次 begin（RUN-0575c6a1）时的旧基线，导致 .workflow-kit/tasks/items/TASK-084.json 被判越界且无法收敛（TASK-074/076 同类）。实现成果已全部完成且四门禁全绿，按既有先例取消本卡并以新卡收口：新卡从当前已实现的工作树取快照，故 changed_files 为空、成果由候选快照承载。注：Rust 侧 apply_read_bulk 抽取与 4 条等价性断言、前端批量断言与精确 id 集合检查均已就位。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
 - 2026-09-21T11:49:44.533615Z · cancel · TASK-084 · 任务记录在实现过程中被合法修订（依 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 订正验收⑥ 并把该裁决挂到 test_review），但本卡 repair 运行继承的是首次 begin（RUN-0575c6a1）时的旧基线，导致 .workflow-kit/tasks/items/TASK-084.json 被判越界且无法收敛（TASK-074/076 同类）。实现成果已全部完成且四门禁全绿，按既有先例取消本卡并以新卡收口：新卡从当前已实现的工作树取快照，故 changed_files 为空、成果由候选快照承载。注：Rust 侧 apply_read_bulk 抽取与 4 条等价性断言、前端批量断言与精确 id 集合检查均已就位。；依据：总控处置（2026-09-21）
@@ -93,6 +90,9 @@
 - 2026-09-21T11:52:13.562307Z · checkpoint · TASK-085 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-21T12:03:48.271955Z · checkpoint · TASK-085 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-21T12:04:15.939117Z · accept · 验收 TASK-085；依据：总控核对：独立审查 PASS（findings 空，五区域全 PASS，candidate 7545c8f7…，verification RUN-92059f91051f47888cf95db5be2acb76）。审查者**独立重跑了 F1 的两种变异**（绕过 record_read_state / 跳过首 id 入队），均为 1 passed / 3 failed（exit 101），并确认还原后 4 passed——即上一版「装饰性证据」的问题已实质修复；确认 (f)/(L1) 两条改写断言**强度不低于原断言**（(L1) 已由长度改为精确 id 集合）；确认契约变更裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 存在、owner/已接受、scope 覆盖 REQ-104/TASK-084 且被 test_review.decision_ids 引用；确认 set_read_bulk 注释不再夸大原子性；范围仅 5 个文件、commands_extraction_tests.rs 空 diff。四门禁：cargo 206/0/9、lint 0/0、build exit 0、frontend 314/314。**登记审查者发现的一个工具坑**（后续复核须知）：cargo 的 mtime 指纹在本例中会返回旧结果——还原后需 touch 文件或强制重编才能得到真实结果，否则会误信陈旧产物。验收（2026-09-21）
+- 2026-09-21T12:04:28.220326Z · note/lesson · 工具坑（TASK-085 独立审查者实测发现，务必记住）：**cargo 的 mtime 指纹会返回陈旧结果**。审查者在变异后用备份文件逐字节还原（sha256 已与候选清单完全一致），但 cargo test 仍连续数次报告**旧的变异失败**；只有 touch 文件（改变 mtime）后才重新编译、给出真实的 4 passed / 0 failed。影响：任何「改动→还原→复跑」的变异取证，若只看 cargo 输出，可能把**陈旧产物**当成真实结论——既可能误判为通过，也可能误判为失败。纪律：变异取证还原后，务必 touch 源文件或显式强制重编（如 cargo clean -p app / 改动一行再改回），再采信测试结果。本项目此前也出现过 stale-rlib 造成的假阴性。
+- 2026-09-21T12:05:05.844677Z · batch · 关闭 BATCH-ab2d0e5d3f7643379a6de1fd2544b549，开启 BATCH-3b1e9a89eb8a464fb861be8f1bcc3179；策略允许自动续批
+- 2026-09-21T12:05:22.872138Z · prepare · TASK-086 · 任务已冻结：F2：单键快捷键让路浮层的判据抽纯函数并补前端断言；范围 src/App.tsx, src/components/shortcutYield.ts, tools/frontend-regression.mjs
 
 ## 如何继续
 
