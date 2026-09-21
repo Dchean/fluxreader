@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-084 · F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令
 
-**状态**：ready
+**状态**：blocked
 
 **目标**：消除 AUDIT P3[F4] 登记的遗留：`src/store/slices/reader.ts` 的 `markEntriesReadBulk` 目前对每个未读 id 各发一次 `invoke('set_read')`（`reader.ts:365` 的 `Promise.allSettled(unread.map((id) => api.setRead(...)))`），「全部已读」或滚动标读传入几百个 id 时会产生几百次 IPC 往返。改为**一次**批量调用：① Rust 侧在 `src-tauri/src/commands/articles.rs` 新增 `set_read_bulk(ids, read)` 命令，复用既有的 `record_read_state`（每 id 的本地写入 + 入队语义完全不变），整批在**同一次持锁**内完成，锁外只调用一次 `schedule_state_push`；② 前端 `src/lib/api.ts` 新增 `setReadBulk`；③ `reader.ts` 的 `markEntriesReadBulk` 改调它，失败提示语义保持（整批失败给一次 toast，不再逐条）。行为契约不变：本地已读状态、`sync_queue` 入队口径、离线补推语义均与逐条路径一致；唯一变化是 IPC 次数与「部分失败」的粒度（整批原子提交，失败即整批不写）。
 
@@ -31,20 +31,27 @@
 
 ## 执行与恢复
 
-- 首次开始：None
-- 原截止时间：None
-- 当前截止时间：None
-- 时钟：未开始
+- 首次开始：2026-09-21T11:07:10.730498Z
+- 原截止时间：2026-09-21T15:07:10.730498Z
+- 当前截止时间：2026-09-21T15:07:10.730498Z
+- 时钟：按墙钟计：额度 240 分钟，写入阶段已用约 19 分钟
 - 已用修复轮：0
-- 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 阻塞：Review requires changes; inspect the findings
+- 下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
 
 ## 最近检查点
 
+- 2026-09-21T11:07:10.987798Z：开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-21T11:27:04.578457Z：编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-21T11:27:38.182865Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T11:36:05.154652Z：Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
 
 ## 原始证据
 
 [唯一状态记录](../items/TASK-084.json)
 
+- [RUN-0575c6a19eec46d39a73e5fc7f2c1c9b](../runs/RUN-0575c6a19eec46d39a73e5fc7f2c1c9b.json)
+- [RUN-6c954fcfc8064c08ac12dc4b55ec30d0](../runs/RUN-6c954fcfc8064c08ac12dc4b55ec30d0.json)
+- [RUN-cd527f5f149f4ed2a8995e10bf4b53a1](../runs/RUN-cd527f5f149f4ed2a8995e10bf4b53a1.json)
 
 卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

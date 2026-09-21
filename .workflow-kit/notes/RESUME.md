@@ -28,11 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 56 项：已验收 46，待验收 0，阻塞 0。
+已建任务 56 项：已验收 46，待验收 0，阻塞 1。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-084 · F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令](<../tasks/cards/TASK-084.md>) | 待执行 | 消除 AUDIT P3[F4] 登记的遗留：`src/store/slices/reader.ts` 的 `markEntriesReadBulk` 目前对每个未读 id 各发一次 `invoke('set_read')`（`reader.ts:365` 的 `Promise.allSettled(unread.map((id) => api.setRead(...)))`），「全部已读」或滚动标读传入几百个 id 时会产生几百次 IPC 往返。改为**一次**批量调用：① Rust 侧在 `src-tauri/src/commands/articles.rs` 新增 `set_read_bulk(ids, read)` 命令，复用既有的 `record_read_state`（每 id 的本地写入 + 入队语义完全不变），整批在**同一次持锁**内完成，锁外只调用一次 `schedule_state_push`；② 前端 `src/lib/api.ts` 新增 `setReadBulk`；③ `reader.ts` 的 `markEntriesReadBulk` 改调它，失败提示语义保持（整批失败给一次 toast，不再逐条）。行为契约不变：本地已读状态、`sync_queue` 入队口径、离线补推语义均与逐条路径一致；唯一变化是 IPC 次数与「部分失败」的粒度（整批原子提交，失败即整批不写）。 |
+| [TASK-084 · F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令](<../tasks/cards/TASK-084.md>) | 阻塞 | Review requires changes; inspect the findings；先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -47,7 +47,7 @@
 
 另有 44 项记录可在任务总览查看。
 
-**阻塞**：无已记录阻塞
+**阻塞**：Review requires changes; inspect the findings
 
 **下一步**：结合当前任务、验收与实际文件确定下一步
 
@@ -81,10 +81,6 @@
 
 ## 最近事件
 
-- 2026-09-21T10:34:12.074074Z · checkpoint · TASK-081 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
-- 2026-09-21T10:35:14.220515Z · accept · 验收 TASK-081；依据：总控核对：独立审查 PASS（findings 空，五区域全 PASS，candidate fd8c1b71…，verification RUN-d8ee5c8ac2374b308f60c97e9f80a446）；四门禁实测 cargo 202/0/9、lint 0/0、build exit 0、frontend 313/313；REQ-104 验收第三条（P3 项每条有处置结论）已闭合——处置表写入 AUDIT-20260919-v2.md「一之附」，判定为「修」的 13 项各带成对证据（其中 #4/#5/#9 有修前失败证据，F3 三层变异取证计数经实测 2/3/1），判定「不修」的 7 项均写明理由，另有 3 项另立任务遗留已如实登记；全部改动文件均在 allowed_paths 内。验收（2026-09-21）
-- 2026-09-21T10:45:11.433198Z · prepare · TASK-082 · 任务已冻结：修正 db/articles.rs 的失效分节横幅 + 复核 REQ-105 的 800 行口径；范围 src-tauri/src/db, .workflow-kit/docs/AUDIT-20260919-v2.md
-- 2026-09-21T10:45:29.312421Z · checkpoint · TASK-082 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-21T10:54:34.458923Z · checkpoint · TASK-082 · 编码结果已记录，差异范围已核对：.workflow-kit/docs/AUDIT-20260919-v2.md, src-tauri/src/db/articles.rs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-21T10:55:06.943122Z · checkpoint · TASK-082 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-21T10:57:59.679883Z · checkpoint · TASK-082 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
@@ -93,6 +89,10 @@
 - 2026-09-21T11:06:09.859249Z · checkpoint · TASK-083 · 任务已取消：prepare 时 spec 的 allowed_paths 误写在嵌套 scope 下（工具只读顶层，已静默回退为 snapshot_paths，范围偏窄且不可信）；本次工具自带的 task-spec-guard 已捕获该问题。按纪律取消并以订正后的顶层 allowed_paths 重新立项，避免带着错误范围进入 begin（TASK-074/076 同类处置）。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
 - 2026-09-21T11:06:09.914783Z · cancel · TASK-083 · prepare 时 spec 的 allowed_paths 误写在嵌套 scope 下（工具只读顶层，已静默回退为 snapshot_paths，范围偏窄且不可信）；本次工具自带的 task-spec-guard 已捕获该问题。按纪律取消并以订正后的顶层 allowed_paths 重新立项，避免带着错误范围进入 begin（TASK-074/076 同类处置）。；依据：总控处置（2026-09-21）
 - 2026-09-21T11:06:51.337611Z · prepare · TASK-084 · 任务已冻结：F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令；范围 src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs
+- 2026-09-21T11:07:10.990321Z · checkpoint · TASK-084 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-21T11:27:04.582318Z · checkpoint · TASK-084 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-21T11:27:38.185322Z · checkpoint · TASK-084 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T11:36:05.157297Z · checkpoint · TASK-084 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
 
 ## 如何继续
 

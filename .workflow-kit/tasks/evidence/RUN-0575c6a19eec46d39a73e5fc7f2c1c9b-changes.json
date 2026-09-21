@@ -1,0 +1,9 @@
+{
+  "changed_files": [
+    "src-tauri/src/commands/articles.rs",
+    "src-tauri/src/lib.rs",
+    "src/lib/api.ts",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

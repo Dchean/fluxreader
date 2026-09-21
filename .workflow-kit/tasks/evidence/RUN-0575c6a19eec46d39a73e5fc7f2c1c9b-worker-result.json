@@ -1,0 +1,23 @@
+{
+  "task_id": "TASK-084",
+  "run_id": "RUN-0575c6a19eec46d39a73e5fc7f2c1c9b",
+  "status": "ready_for_verification",
+  "summary": "TASK-084 完成：兑现 AUDIT P3[F4] 的遗留处置——把 `markEntriesReadBulk` 的**逐条 IPC** 收敛为**一次批量命令**。① Rust：`src-tauri/src/commands/articles.rs` 新增 `set_read_bulk(ids, read)`，整批在**同一次持锁**内逐 id 调用既有的 `record_read_state`（因此本地 `is_read` 写入、`sync_queue` 入队（action 名 read/unread）、离线补推语义与逐条路径**完全一致**），锁外只调度一次 `schedule_state_push`；空 ids 直接返回。已在 `lib.rs` 注册。② 前端：`src/lib/api.ts` 新增 `setReadBulk`；`src/store/slices/reader.ts` 的 `markEntriesReadBulk` 由 `Promise.allSettled(unread.map((id) => api.setRead(...)))`（N 次 invoke）改为单次 `api.setReadBulk(unread.map(Number), true).catch(...)`，失败提示整批一次且 catch 保证不产生 unhandled rejection。**语义等价的取证**：新增 Rust 单测 `set_read_bulk_is_equivalent_to_per_item_read_state` 把「逐条路径」与「批量路径」跑在**同一份种子数据**上，逐项比对本地已读数与 `sync_queue` 队项（action + article_id 集合）——两者必须完全相同，任一变化即失败；另加 `set_read_bulk_false_queues_unread_actions` 覆盖 read=false 方向。**「只发一次 IPC」的取证**：前端回归原本就把每次 invoke 记进 `invokeCalls`，故直接断言 `set_read_bulk` 调用次数 === 1 且 `set_read` 次数 === 0、载荷恰为未读 id 集合。**成对证据（实测）**：把 reader.ts 回退成逐条 `api.setRead`（修前行为）→ 3 条断言 FAILED（(f) 两条 + L1 一条），还原后 314/314。**需要说明的两处既有断言改写（非「保持不变」）**：`tools/frontend-regression.mjs` 的 `(f) 批量标读只对未读项发 IPC` 与 `(L1) 索引化批量标读…6 次 set_read` 两条**编码的正是修前的逐条 IPC 契约**，本卡按审计要求消除逐条 IPC，故**有意改写**其计数口径为「1 次 set_read_bulk + 载荷 6 个 id」，并**完整保留其原有意图**（已读项不重复写库、未读项全部标读、按源聚合扣减、已读保留快照等邻近断言一行未动）。除此之外既有断言一行未改。**范围处置**：Rust 单测最初写在 `src-tauri/src/db/commands_extraction_tests.rs`，该文件不在 allowed_paths（实测越界 1 项）；未选择扩范围，而是把测试**移入 `commands/articles.rs` 自带的 `mod bulk_read_tests`**（`record_read_state` 就在该文件，是更自然的归属），并把原文件逐字还回基线（`git diff` 为空）。结果全部 5 个改动文件均在范围内、越界数为 0。**过程自查**：写 `set_read_bulk_false_queues_unread_actions` 时我先断言「read→unread 会留下两条队项」，实测**失败**（只剩 unread）——查 `db/sync_queue.rs:26-32` 确认 `enqueue_sync` 对同文章正反方向**互斥合并**，遂按真实语义改写断言并加注说明，而不是把测试改成迁就我的假设。**门禁实测**：cargo test **204 passed / 0 failed / 9 ignored**（基线 202 + 本卡新增 2 条等价性断言）；lint 0 warnings / 0 errors；build exit 0；frontend **314/314**（基线 313 + 净增 1 条：新增 2 条并改写 2 条）。",
+  "changed_files": [
+    "src-tauri/src/commands/articles.rs",
+    "src-tauri/src/lib.rs",
+    "src/lib/api.ts",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

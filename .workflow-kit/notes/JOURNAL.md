@@ -284,3 +284,7 @@
 - 2026-09-21T11:06:09.859249Z · checkpoint · TASK-083 · 任务已取消：prepare 时 spec 的 allowed_paths 误写在嵌套 scope 下（工具只读顶层，已静默回退为 snapshot_paths，范围偏窄且不可信）；本次工具自带的 task-spec-guard 已捕获该问题。按纪律取消并以订正后的顶层 allowed_paths 重新立项，避免带着错误范围进入 begin（TASK-074/076 同类处置）。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
 - 2026-09-21T11:06:09.914783Z · cancel · TASK-083 · prepare 时 spec 的 allowed_paths 误写在嵌套 scope 下（工具只读顶层，已静默回退为 snapshot_paths，范围偏窄且不可信）；本次工具自带的 task-spec-guard 已捕获该问题。按纪律取消并以订正后的顶层 allowed_paths 重新立项，避免带着错误范围进入 begin（TASK-074/076 同类处置）。；依据：总控处置（2026-09-21）
 - 2026-09-21T11:06:51.337611Z · prepare · TASK-084 · 任务已冻结：F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令；范围 src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs
+- 2026-09-21T11:07:10.990321Z · checkpoint · TASK-084 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-21T11:27:04.582318Z · checkpoint · TASK-084 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-21T11:27:38.185322Z · checkpoint · TASK-084 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T11:36:05.157297Z · checkpoint · TASK-084 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算

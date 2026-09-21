@@ -2385,6 +2385,18 @@
       "candidates": {
         "TASK-082": "b35317010fd0bb1a742955bfbe6c5004f2d2aebd20e716e83208091e7af6db39"
       }
+    },
+    {
+      "id": "DEC-t084-replace-per-item-ipc-assertions-20260921",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-21 指令「清理后再核对」——授权清理已登记的遗留项；本条为该授权下 TASK-084 必须的契约变更裁决（履行 REQ-104 P3[F4] 的既定处置）。",
+      "statement": "准许 TASK-084 **改写既有前端断言的计数口径**：`tools/frontend-regression.mjs` 的 `(f) 批量标读只对未读项发 IPC` 与 `(L1) 索引化批量标读…（…6 次 set_read）` 两条断言**编码的正是修前的逐条 IPC 契约**（分别断言 `set_read` 调用 id 集合与 `set_read` 调用次数）。REQ-104 P3[F4] 与 TASK-084 验收① 明确要求消除逐条 IPC，因此「必须整批一次」与「断言 N 次 set_read」在逻辑上不可兼得，故批准把两条断言的计数口径改为 `set_read_bulk`（一次），并**要求其判别强度不低于原断言**：(f) 保留精确 id 集合检查（101,103）；(L1) 由「长度 6」**改为精确 id 集合**（101,103,104,105,201,301），以维持原「set_read 计数 === 6」所隐含的集合级强度（该点由审查 FINDING TASK-084-F2 指出，属本条的有效组成部分）。除这两条外，其余既有断言一律一字不动。",
+      "scope": [
+        "REQ-104",
+        "TASK-084"
+      ],
+      "recorded_at_utc": "2026-09-21T11:40:25.329693Z"
     }
   ]
 }

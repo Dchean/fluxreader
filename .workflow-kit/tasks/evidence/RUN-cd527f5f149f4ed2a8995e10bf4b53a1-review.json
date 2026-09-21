@@ -1,0 +1,103 @@
+{
+  "task_id": "TASK-084",
+  "candidate_digest": "4482c5e6ec3aef13c4dc4cf42409956c29e0f70f98cba060e612067bf7f30a01",
+  "verification_run": "RUN-6c954fcfc8064c08ac12dc4b55ec30d0",
+  "verdict": "FAIL",
+  "summary": "Production code is correct and I independently reproduced the gate results (frontend 314/314 live; cargo 204/0/9 recomputed from the recorded log; lint 0/0; build exit 0; all 5 candidate sha256 match the packet; commands_extraction_tests.rs diff empty; 5 files touched, none outside allowed_paths). The task fails on evidence quality, not on behaviour: (1) the headline 'equivalence' Rust test is MEASURED DECORATIVE - I mutated set_read_bulk to bypass record_read_state and never insert into sync_queue at all, and both bulk_read_tests still passed, because the 'bulk' half of the test inlines the same loop instead of calling the command and its `use super::*` is unused (compiler warning confirms it); (2) TASK-084.md acceptance (6) and this card's own baseline require 'existing assertions untouched / all existing assertions must pass unchanged', yet two were rewritten; (3) the rewrite of the (L1) assertion LOST coverage by dropping the exact payload-id-set check. The frontend 'one IPC not N' assertion is meaningful and sound.",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "high",
+      "area": "regression",
+      "location": "src-tauri/src/commands/articles.rs:322-340 (bulk_read_tests::set_read_bulk_is_equivalent_to_per_item_read_state)",
+      "claim": "The card's core evidence claim - 'Rust test set_read_bulk_is_equivalent_to_per_item_read_state seeds TWO databases identically, runs the per-item path on one and the bulk path on the other' - is FALSE. Both halves of the test call crate::commands::record_read_state(&conn, id, true) directly. set_read_bulk is never invoked; its 'batch' loop (lines 148-153) is copy-pasted into the test body. The module's `use super::*` is unused, and rustc warns 'unused import: `super::*`' - measured proof that no item from super is referenced.",
+      "measured": "Two mutations applied to the real set_read_bulk body and reverted after: (a) `if read { conn.execute(\"UPDATE articles SET is_read = 1 WHERE id = ?1\", [id]); } else { record_read_state(...) }`; (b) full bypass - only `UPDATE articles SET is_read = ?1 WHERE id = ?2`, no record_read_state call, so sync_queue is never written. Both times: `cargo test --lib bulk_read` => '2 passed; 0 failed' (set_read_bulk_is_equivalent_to_per_item_read_state ok, set_read_bulk_false_queues_unread_actions ok). The tests cannot catch the divergence they claim to guard.",
+      "impact": "Acceptance item 2 ('semantic equivalence ... Rust-side assertion covers sync_queue and action names') is unproven. A future edit that breaks the bulk path's is_read write or sync_queue enqueue - exactly the risk this card introduces - would pass the whole suite. The equivalence claim currently rests only on the two commands both calling record_read_state today (which I did verify by reading the code), not on any test.",
+      "recommendation": "Make the test actually exercise the command path. Either (a) extract the bulk logic from set_read_bulk into a testable fn `apply_read_bulk(conn: &Connection, ids: &[i64], read: bool) -> AppResult<()>` that set_read_bulk calls, and have the test drive that fn (then drop the unused `use super::*`), or (b) build a tauri AppState in the test and invoke set_read_bulk. Either way re-run the mutation above and confirm the test now FAILS."
+    },
+    {
+      "id": "F2",
+      "severity": "medium",
+      "area": "regression",
+      "location": "tools/frontend-regression.mjs:1611-1618 ((L1) index-based bulk mark-read)",
+      "claim": "The rewritten (L1) assertion is LESS STRICT than the original, so this is lost coverage and not a pure 'same-intent re-expression'. HEAD: `invokeCalls.filter((c) => c.cmd === 'set_read').length === 6` - the count of per-id write calls was implicitly an exact set check, because a set_read invoke is issued only for an unread id that is about to be written, so 6 calls proved EXACTLY the 6 unread ids were written and each of the 2 already-read ids was not. Rewrite: `set_read_bulk length === 1 && set_read length === 0 && (invokeCalls.find(c => c.cmd === 'set_read_bulk')?.args.ids ?? []).length === 6` - this checks only the payload LENGTH. Note the `?? []` fallback: if the find returns undefined the expression is `[].length === 6` = false, so the assertion would fail - but that is incidental, and nothing in the assertion now pins WHICH ids are in the payload. A regression that marks 6 wrong ids read (e.g. the 2 already-read ones plus 4 unread) passes.",
+      "measured": "git diff HEAD -- tools/frontend-regression.mjs; direct comparison of the two assertion bodies.",
+      "impact": "The genuine surviving intent of (L1) - 'already-read ids are not re-written' - is no longer proven by any id-identity check in that block. This directly contradicts the card's claim that the rewrite preserves the original intent.",
+      "recommendation": "Add the same payload-id-set check the (f) sibling kept, e.g. `&& (invokeCalls.find(c => c.cmd === 'set_read_bulk')?.args.ids ?? []).slice().sort((a,b)=>a-b).join(',') === <expected 6 ids>`."
+    },
+    {
+      "id": "F3",
+      "severity": "medium",
+      "area": "requirements",
+      "location": ".workflow-kit/tasks/cards/TASK-084.md lines 21 and 26",
+      "claim": "The card states 'existing assertions untouched; new assertions must have capture power' and 'behavior=preserve ... therefore ALL existing assertions must pass unchanged, the existing contract must not change'. Two existing assertions were changed (one line replaced by four in the (f) block, one replaced by six in the (L1) block). The card was subsequently edited to say the change was deliberate, but that is the implementer editing its own acceptance criteria after the fact rather than an owner decision, so the contract-change gate was not actually satisfied.",
+      "measured": "git diff HEAD -- tools/frontend-regression.mjs shows 24 changed lines; card line 21/26 text as recorded in the working tree.",
+      "impact": "Process/reporting accuracy, not runtime behaviour. The rewrite is substantively JUSTIFIED by the task objective ('only one IPC' cannot coexist with an assertion mandating N set_read calls), so this is a bookkeeping defect: the card should record an explicit contract-change decision rather than silently amending its own 'no assertion may change' clause.",
+      "recommendation": "Record a DECISIONS entry approving the two assertion rewrites as a contract change, and keep the strengthened checks from F2."
+    },
+    {
+      "id": "F4",
+      "severity": "low",
+      "area": "maintainability",
+      "location": ".workflow-kit/tasks/evidence/_move.py (untracked, mtime 2026-09-21 19:19:51)",
+      "claim": "The implementer's one-shot helper script was left behind in the evidence directory. The task's own instructions require probe/temp files be deleted. It is clearly scratch (path literals to commands_extraction_tests.rs and commands/articles.rs, mojibake string matching), not a deliverable.",
+      "measured": "git status --porcelain shows '?? .workflow-kit/tasks/evidence/_move.py' while the recorded gates ran minutes later.",
+      "impact": "Cosmetic, but it is an uncommitted artefact in a protected evidence path and it is the provenance of a scope move that the review packet does not describe.",
+      "recommendation": "Delete it (or move it to a clearly-named out-of-scope scratch location)."
+    }
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "Acceptance 1, 3, 4 are met: set_read_bulk exists, is the only new command, registered once in lib.rs, takes the DB lock once with ids.is_empty() returning Ok early, schedules exactly one schedule_state_push outside the lock, and reader.ts makes exactly one call with a single .catch() toast so there is no unhandled rejection. I also verified '部分文章标读失败' no longer appears anywhere in src/. Acceptance 2 is NOT met as stated (the 'Rust side asserts sync_queue and action names' evidence is decorative - see F1), and acceptance 6 is contradicted by the card's own 'existing assertions untouched' clause (see F3).",
+      "evidence_files": [
+        "src-tauri/src/commands/articles.rs",
+        "src/lib/api.ts",
+        "src/store/slices/reader.ts",
+        ".workflow-kit/tasks/cards/TASK-084.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "FAIL",
+      "analysis": "Live `& npm.cmd run test:frontend` => 314/314, exit 0, matching the recorded gate. Cargo recomputed from the recorded stdout sums to 204 passed / 0 failed / 9 ignored with both bulk_read tests present, so the gates are honest. But the rewrite JUDGEMENT is negative: the (f) rewrite preserved its exact payload-id-set check and only swapped the transport (arguably even stronger than before), whereas the (L1) rewrite lost its implicit exact-id-set check and now pins only payload length (F2). Worse, the Rust equivalence test that underpins the whole rewrite is mutation-immune - I bypassed record_read_state entirely and it still passed (F1) - so the 'equivalent rewrite' claim is asserted in the diff but not actually guarded.",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-6c954fcfc8064c08ac12dc4b55ec30d0-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-6c954fcfc8064c08ac12dc4b55ec30d0-cargo_test.stdout.txt",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "Judged acceptable with one strictness caveat, and honestly documented. The bulk path is all-or-nothing: record_read_state is called with `?` inside the lock, so the first failing id aborts the loop and returns Err, and schedule_state_push is skipped for the whole batch. Both the Rust contract comment ('整批回滚式返回 Err（不写半批）') and the reader.ts comment ('整批一次（比修前的部分失败粒度更粗）') state this, and the card objective pre-authorises it ('失败即整批不写'). The toast change to '批量标读失败' matches the new granularity and introduces no unhandled rejection; empty ids returns Ok without pushing. Caveat I am flagging without calling it a defect: '不写半批' is only accurate for the in-memory picture, since record_read_state commits per statement with no surrounding transaction, so a mid-loop failure durably keeps the earlier ids' is_read and sync_queue rows while the store has already optimistically marked the whole selection read locally. Observable user impact is nil (the same rows are committed either way, the next successful mark reconciles, and the pre-change path had no partial-success handling of substance either), and wrapping it in a transaction would change record_read_state's signature - explicitly excluded by non_goals.",
+      "evidence_files": [
+        "src-tauri/src/commands/articles.rs",
+        "src/store/slices/reader.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "The production change is small, well-placed and readable (~55 lines of real code + one lib.rs line + 6 + 11 frontend lines). set_read_bulk reuses record_read_state rather than duplicating SQL, which correctly centralises the is_read write and sync_queue enqueue and makes the equivalence claim true by construction in the code (I verified this by reading both functions). The doc comments are unusually honest about the granularity trade-off and even document the incorrect first assumption about enqueue_sync's opposite_action coalescing rather than silently bending the test. Deductions: the new test module carries an unused `use super::*` (a compiler warning in a 'lint 0/0' deliverable - cargo warnings and oxlint are separate, so the recorded lint gate is unaffected), a stray double blank line, and the _move.py scratch file was left in the evidence directory (F4).",
+      "evidence_files": [
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/lib.rs",
+        "src/lib/api.ts",
+        "src/store/slices/reader.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "The change does what the audit item asks, verified structurally rather than by a benchmark. Before: N await inv('set_read') round-trips, each taking the DB mutex independently and each calling schedule_state_push; after: 1 invoke, 1 lock acquisition, N in-process record_read_state calls, 1 schedule_state_push. For the audit's stated hundreds-of-ids scenario that removes hundreds of IPC round-trips and hundreds of independent push reschedulings. The harness asserts exactly 1 set_read_bulk and 0 set_read, which does make the 'one IPC not N' claim meaningful for markEntriesReadBulk. I could not measure wall-clock improvement (mock-mode harness, no real IPC) and am not claiming one. Honest scope limits worth noting: markAllRead still loops per-item api.setRead and per-article flipEntryFlag still issues one set_read, both explicitly excluded by the card's non_goals.",
+      "evidence_files": [
+        "src/lib/api.ts",
+        "src/store/slices/reader.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

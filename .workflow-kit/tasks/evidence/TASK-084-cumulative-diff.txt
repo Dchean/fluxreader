@@ -1,0 +1,99 @@
+TASK-084 change set — AUDIT P3[F4]: markEntriesReadBulk 逐条 IPC → 一次批量命令 (REQ-104)
+
+================================================================================
+WHAT CHANGED
+================================================================================
+Before: `reader.ts` did `Promise.allSettled(unread.map((id) => api.setRead(Number(id), true)))`
+— one `invoke('set_read')` PER id. "Mark all read" or scroll-marking with several hundred ids
+meant several hundred IPC round-trips.
+
+Now:
+  · Rust  `commands/articles.rs`: new `set_read_bulk(ids, read)` command. It takes the DB lock
+    ONCE, loops the ids through the EXISTING `record_read_state(conn, id, read)`, then calls
+    `schedule_state_push` once outside the lock. Empty `ids` returns Ok immediately.
+    Registered in `lib.rs`.
+  · Front `src/lib/api.ts`: new `setReadBulk(ids, read)`.
+  · Front `src/store/slices/reader.ts`: `markEntriesReadBulk` now makes ONE call and reports a
+    single failure toast via `.catch(...)` (so no unhandled rejection).
+
+Because the bulk command reuses `record_read_state`, the semantics are by construction identical
+to the per-item path: local `is_read` write, `sync_queue` enqueue (action `read`/`unread`), and
+"enqueue even when no backend is configured, push段 silently skips" (A-5).
+
+================================================================================
+EVIDENCE — the two claims that matter
+================================================================================
+Claim A ("semantically equivalent to the per-item path"):
+  Rust test `set_read_bulk_is_equivalent_to_per_item_read_state` seeds TWO databases identically,
+  runs the per-item path on one and the bulk path on the other, and compares
+    · count of locally-read articles, and
+    · the full `sync_queue` item set (action + article_id, ordered)
+  They must match exactly. A second test covers the `read=false` direction.
+Claim B ("one IPC, not N"):
+  The harness already records every invoke in `invokeCalls`. The assertions now require
+  `invokeCalls.filter(c => c.cmd === 'set_read_bulk').length === 1`, `... 'set_read').length === 0`,
+  and that the bulk payload contains exactly the unread ids.
+
+PAIRED EVIDENCE (measured): reverting `reader.ts` to the per-item `api.setRead` loop makes 3
+assertions FAIL (the two `(f)` ones and the `(L1)` one); restored → 314/314.
+
+================================================================================
+*** TWO EXISTING ASSERTIONS WERE DELIBERATELY REWRITTEN — PLEASE SCRUTINISE ***
+================================================================================
+`tools/frontend-regression.mjs` had two assertions that ENCODED THE OLD PER-ITEM CONTRACT:
+  · `(f) 批量标读只对未读项发 IPC` — asserted `set_read` calls == 101,103
+  · `(L1) 索引化批量标读…（8 条中 6 条未读 → 6 次 set_read）` — asserted 6 `set_read` calls
+This task's whole point is to remove the per-item IPC, so those two had to change. I rewrote
+them to assert the SAME INTENT (only unread ids are written; already-read ones are not
+re-written) under the new contract (1 × `set_read_bulk`, payload = the 6 unread ids).
+All neighbouring assertions (per-feed unread decrement, openedReadIds snapshot merging, no-op
+on empty list, unknown-id ignored) are untouched.
+
+This is a contract change, so verify it is justified: the AUDIT P3[F4] item and this card's
+acceptance ① explicitly require the per-item IPC to be eliminated. Confirm no OTHER existing
+assertion was silently weakened, and that the rewritten ones are not less strict than before.
+
+================================================================================
+SCOPE NOTE
+================================================================================
+I first put the Rust tests in `src-tauri/src/db/commands_extraction_tests.rs`, which is NOT in
+this task's allowed_paths (measured: 1 out-of-scope file). Rather than expand scope, I MOVED them
+into a `mod bulk_read_tests` inside `commands/articles.rs` (where `record_read_state` lives, so a
+more natural home) and restored the original file byte-identically (`git diff` empty).
+All 5 changed files are now inside allowed_paths; outside/protected empty.
+
+================================================================================
+PROCESS NOTE
+================================================================================
+While writing the `read=false` test I first asserted "read→unread leaves two queue items". It
+FAILED — only `unread` remained. Reading `db/sync_queue.rs:26-32` showed `enqueue_sync`
+mutually-exclusively coalesces opposite directions for the same article. I rewrote the assertion
+to the REAL semantics (and documented it) rather than adjusting the code to match my wrong guess.
+
+================================================================================
+GATES (measured on this candidate)
+================================================================================
+  cargo test  204 passed / 0 failed / 9 ignored   (baseline 202 + 2 new equivalence tests)
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    314/314, exit 0                      (baseline 313; +2 added, 2 rewritten)
+
+No new dependency; no signature change to `set_read`/`set_starred`/`mark_all_read`.
+
+================================================================================
+WHAT TO ATTACK
+================================================================================
+1. **Is the equivalence claim real?** Read `set_read_bulk`; confirm it genuinely reuses
+   `record_read_state` for every id and that the test would catch a divergence (e.g. try
+   skipping the enqueue for one id, or writing `is_read` without enqueueing — the test must fail).
+2. **Is the "one IPC" assertion meaningful, or could it pass while still calling per-item?**
+3. **Was rewriting the two `(f)`/`(L1)` assertions justified, and are they still as strict?**
+   Diff them against HEAD and judge whether any coverage was lost.
+4. **Failure/granularity change**: the bulk path now fails as a whole (no partial success). The
+   UI toast changed from '部分文章标读失败' to '批量标读失败'. Is that acceptable, and is it
+   honestly reflected in the comments? Flag it if you think partial-failure semantics were
+   needed.
+5. Gates: recompute from raw logs; re-run `cargo test --lib` and `& npm.cmd run test:frontend`
+   if cheap. Do NOT run `npm run build` (Vite blocked) or the full 27-suite cargo test.
+
+**Delete any probe/temp files you create** and confirm `git status --porcelain` has no leftovers.
