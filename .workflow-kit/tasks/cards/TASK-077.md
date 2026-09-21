@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-077 · 降级可见性与 AI 输入校验收口：全文提取 degraded 标志（P2-10 后半）+ 摘要空正文与 preset 显式提示（P2-11）（REQ-104）
 
-**状态**：verified
+**状态**：done
 
 **目标**：本任务收口被取消的 TASK-076 的同一成果（历史：TASK-076 已完成全部实现与取证，四门禁实测通过、新增 9 条单测、两项行为变更各有变异取证；但其 allowed_paths 初稿含 4 条不存在路径、订正落盘于 begin 之后，任务基线为订正前快照，diff 恒把任务记录判为 protected，recover/unblock/重新 begin 均无法收敛，故按 TASK-068→TASK-069 / TASK-074→TASK-075 先例取消并以本卡收口；本任务相对 begin 快照为零新增改动，成果经候选快照绑定）。原目标如下。A【P2-10 后半：全文提取 degraded 标志，DEC-req104-p2-10b-fulltext-degraded-20260920】现状：commands/settings.rs 的 extract_fulltext 有「智能防退化」逻辑（提取结果剥标签后不足原文 80% 时保留原文），但降级是静默的——返回裸 String，与「提取成功」无法区分，前端只能靠「返回内容 == 当前正文」的字符串比对去猜。实施：改为结构化 degraded 标志（含原因）+ 准确文案；须补失败路径断言覆盖两种形态（提取失败/空结果、防退化返回原文），并保持成功路径行为不变。B【P2-11：AI 输入校验与配置可观测性，DEC-req104-p2-11-ai-validation-20260920】① ai_summarize 缺少 ai_translate 已有的空正文校验，空正文会白跑一次模型调用；② 未知 preset 静默回落 deepseek-chat / https://api.deepseek.com，用户选的预设不存在时请求被打到其未选择的厂商上。实施：补空正文校验（与 translate 对称）；未知 preset 改为显式提示/报错；须补断言覆盖两条路径。
 

@@ -1,0 +1,14 @@
+{
+  "id": "DEC-7f3b2a706a2744249c00907f8ccbe734",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-20 裁决 DEC-req104-p2-10b-fulltext-degraded-20260920 与 DEC-req104-p2-11-ai-validation-20260920；2026-09-21 用户指示『继续，按照你的判断进行最佳路线完成后续所有的』授权本卡收口 TASK-076 的同一成果。任务已完成四门禁验证与独立审查 PASS",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-077"
+  ],
+  "recorded_at_utc": "2026-09-21T01:40:48.829766Z",
+  "candidates": {
+    "TASK-077": "4f374ae439e12dd8b8b6d7a9dd54d6a2664dc756975b6be356698ab577287568"
+  }
+}
