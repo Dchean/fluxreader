@@ -46,8 +46,15 @@ fn import_feeds(
     let mut folder_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
     for f in feeds {
-        // 已存在（URL 碰撞）→ 跳过
-        if db::feed_exists_by_url(conn, &f.feed_url)? {
+        // 已存在（URL 碰撞）→ 跳过。
+        // P3[9]（REQ-104）：去重改用**规范化 URL**（feed_id_by_url_normalized，与
+        // sync 侧 pull_feeds / add_feed 同口径）。此前只有 feed_exists_by_url 的精确匹配，
+        // 而 feeds.feed_url 的 UNIQUE 也按原串，于是同一订阅只要饰词不同
+        // （https/http、www.、尾斜杠、utm_* 等跟踪参数）就能被再次导入成第二个 feed
+        // → 文章翻倍、已读/收藏状态分裂、未读数与远端对不齐。
+        if db::feed_exists_by_url(conn, &f.feed_url)?
+            || db::feed_id_by_url_normalized(conn, &f.feed_url)?.is_some()
+        {
             report.skipped += 1;
             continue;
         }

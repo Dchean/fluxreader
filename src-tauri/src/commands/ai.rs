@@ -20,10 +20,21 @@ pub enum AiEvent {
 }
 
 /// 读 ai_config JSON；未配置时报 aiNotConfigured。
+///
+/// P3[2]（REQ-104）：此前用 `.ok().flatten()` 把**读库失败**与「没配置过」压成同一个
+/// None，于是数据库读错误会被报成「请先在设置中配置 AI 服务」——用户按提示去填配置，
+/// 却怎么都修不好，属误导性错误。现在把两者区分开：读失败原样上抛（可诊断），
+/// 只有确实没配置时才提示去配置。
 async fn load_ai_config(state: &State<'_, AppState>) -> AppResult<crate::ai::AiConfig> {
     let raw = {
         let conn = state.db.lock().await;
-        db::get_setting(&conn, "ai_config").ok().flatten()
+        match db::get_setting(&conn, "ai_config") {
+            Ok(value) => value,
+            Err(err) => {
+                log::warn!("ai: 读取 ai_config 失败: {err}");
+                return Err(err);
+            }
+        }
     };
     match raw {
         Some(json) => crate::ai::AiConfig::from_json(&json),
@@ -39,10 +50,19 @@ pub async fn save_ai_config(state: State<'_, AppState>, value: String) -> AppRes
 }
 
 /// 读 AI 配置（前端启动时恢复表单）。
+///
+/// P3[2]：读失败不再静默降级成「无配置」——那会让设置页显示成空表单，用户以为
+/// 配置丢了而重新填写。读失败上报并留 warn。
 #[tauri::command]
 pub async fn get_ai_config(state: State<'_, AppState>) -> AppResult<Option<String>> {
     let conn = state.db.lock().await;
-    Ok(db::get_setting(&conn, "ai_config").ok().flatten())
+    match db::get_setting(&conn, "ai_config") {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            log::warn!("ai: 读取 ai_config 失败: {err}");
+            Err(err)
+        }
+    }
 }
 
 /// 连通性测试 + 拉模型列表（官方与 newapi 都支持 /models）。
@@ -65,10 +85,20 @@ const DEFAULT_SUMMARIZE_SYSTEM: &str = "你是一名资讯编辑。请用简洁�
 const DEFAULT_TRANSLATE_SYSTEM: &str = "你是一名专业译者。请把用户提供的 HTML 片段翻译成简体中文：保留所有 HTML 标签和属性原样不动，只翻译标签内的文本内容。直接输出翻译后的 HTML，不要任何解释或代码块包裹。";
 
 /// 读 ai_config JSON 里用户自定义的提示词；未配置用默认。
+///
+/// P3[2]：提示词缺失时回落内置默认是**设计行为**（用户没自定义就该用默认），
+/// 但「读库失败」不该与「没配置」混为一谈——前者会静默用默认提示词覆盖用户的
+/// 自定义感受。故读失败时留 warn 以便诊断，行为仍回落默认（不阻塞摘要/翻译）。
 async fn load_prompts(state: &State<'_, AppState>) -> (String, String) {
     let raw = {
         let conn = state.db.lock().await;
-        db::get_setting(&conn, "ai_config").ok().flatten()
+        match db::get_setting(&conn, "ai_config") {
+            Ok(value) => value,
+            Err(err) => {
+                log::warn!("ai: 读取 ai_config 失败，本次使用内置默认提示词: {err}");
+                None
+            }
+        }
     };
     match raw
         .as_deref()

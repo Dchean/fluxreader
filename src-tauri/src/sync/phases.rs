@@ -52,7 +52,10 @@ pub async fn states_phase(
         let done = exec_push(&client, &plan, &mut report).await;
         if !done.is_empty() {
             let conn = db.lock().await;
-            let _ = db::prune_sync(&conn, &done);
+            // P3[1]：剪除失败此前静默 → 队项残留会被重复推送。改为 warn。
+            if let Err(err) = db::prune_sync(&conn, &done) {
+                log::warn!("sync: 剪除已推送队项失败（states 首次 push）: {err}");
+            }
         }
     }
     pull_entries(db, &client, &mut report, full).await;
@@ -71,7 +74,10 @@ pub async fn states_phase(
             let done = exec_push(&client, &plan, &mut report).await;
             if !done.is_empty() {
                 let conn = db.lock().await;
-                let _ = db::prune_sync(&conn, &done);
+                // P3[1]：同上（pull 后补推段）。
+                if let Err(err) = db::prune_sync(&conn, &done) {
+                    log::warn!("sync: 剪除已推送队项失败（states 补推）: {err}");
+                }
             }
         }
     }

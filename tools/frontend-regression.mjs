@@ -1102,6 +1102,70 @@ await (async () => {
   checkNew('(j) playerEnded 停止播放并归零位置/清 seek，但保留剧集信息与时长（可重播）',
     jEnded.isPlaying === false && jEnded.positionSec === 0 && jEnded.seekToSec === null
     && jEnded.isActive === true && jEnded.durationSec === 300 && jEnded.title === '第 1 集');
+
+  /* ---------- P3[F3]（TASK-081）：同集再点 = 播放/暂停切换，不从头重播 ----------
+     判据是 src/store/selectors.ts 导出的纯函数 `podcastClickAction`。
+     **证据分两层，边界如实说明**（审查 FINDING TASK-081-F1 / R2-F1）：
+       ① 本组断言直接驱动该纯函数，并有变异取证（改回无条件 play → 恰 2 条失败）；
+       ② 但纯函数有牙 ≠ 组件真的调用它：只断言纯函数时，「删掉组件的守卫」依然全绿。
+          故紧随其后另加**源码形态断言**（沿用本文件既有的 readFileSync 核对手法），
+          钉住 Timeline.tsx 的播放入口确实按 toggle 分支走。
+     两层范围不同，不可互相冒充。 */
+  const { podcastClickAction } = await import('../src/store/selectors.ts');
+  checkNew('(P3[F3]) 播放中 + 同 audioUrl ⇒ toggle（播放/暂停切换，不从头重播）',
+    podcastClickAction(true, 'https://a.example/ep2.mp3', 'https://a.example/ep2.mp3') === 'toggle');
+  checkNew('(P3[F3]) 未激活 ⇒ play（首次点某集应正常开始播放）',
+    podcastClickAction(false, '', 'https://a.example/ep2.mp3') === 'play');
+  checkNew('(P3[F3]) 播放中但换了另一集 ⇒ play（换集仍从头播，不得被同集判据拦下）',
+    podcastClickAction(true, 'https://a.example/ep2.mp3', 'https://a.example/ep3.mp3') === 'play');
+  checkNew('(P3[F3]) 无音频地址 ⇒ play（交给 playPodcastEpisode 走它自己的「无可播放地址」提示）',
+    podcastClickAction(true, 'https://a.example/ep2.mp3', '') === 'play');
+  /* 修前对照：旧行为是无条件 playPodcastEpisode（进度被清零重开），
+     即「同集也判 play」——用同一组输入复现修前判据，证明本断言有区分力。 */
+  const legacyAction = () => 'play';
+  checkNew('(P3[F3]) 修前判据可复现：无条件 play 会把「同集」也判为从头重播（进度清零的根因）',
+    legacyAction() === 'play'
+    && podcastClickAction(true, 'https://a.example/ep2.mp3', 'https://a.example/ep2.mp3') !== 'play');
+  /* 行为侧对照：走 toggle 保留进度、走 play 归零（锁住两条路径的实际后果）。 */
+  store.getState().playPodcastEpisode('第 2 集', '节目', null, 'https://a.example/ep2.mp3', null);
+  store.getState().syncPlayerProgress(120, 600);
+  store.getState().togglePlayerPlay();
+  checkNew('(P3[F3]) 走 toggle 路径：暂停且**进度保留**（修前会重头播并清零）',
+    store.getState().player.isPlaying === false && store.getState().player.positionSec === 120);
+  store.getState().playPodcastEpisode('第 3 集', '节目', null, 'https://a.example/ep3.mp3', null);
+  checkNew('(P3[F3]) 走 play 路径（换集）：从头播放、位置归零',
+    store.getState().player.isPlaying === true && store.getState().player.positionSec === 0
+    && store.getState().player.audioUrl === 'https://a.example/ep3.mp3');
+
+  /* 第二层：源码形态断言 —— 钉住「组件确实按 toggle 分支消费该判据、且传对了实参」。
+     没有这一层时：
+       · 删掉 Timeline.tsx 的守卫（改回无条件 playPodcastEpisode）→ 纯函数断言仍全绿
+         （审查 FINDING TASK-081-R2-F1 实测）；
+       · 只做「token 在场」检查也不够：把实参 `cur.audioUrl` 改成 `''`，三处 token 一字未动
+         却让 toggle 分支变成不可达死代码、缺陷完全复现，而门禁仍全绿
+         （审查 FINDING TASK-081-R3-F2 实测）。
+     故本层**必须校验实参表达式本身**（`cur.isActive` / `cur.audioUrl` / `audioUrl` 三者的
+     具体写法），而不是只查函数名与 'toggle' 字面量在场。
+     手法沿用本文件既有的 readFileSync + slice（见 TASK-065 N8/N11 一处）。
+     证据边界如实声明：本层是**源码形态**断言（非 DOM 点击），它证明「调用点写了正确的
+     判定与实参」，不证明运行期 DOM 点击路径；后者需 CDP e2e（本项目暂未建）。 */
+  {
+    const fsT = await import('node:fs');
+    const tlSrc2 = fsT.readFileSync(new URL('../src/components/Timeline.tsx', import.meta.url), 'utf8');
+    const playStart = tlSrc2.indexOf('const play = () => {');
+    const playBlock = playStart < 0 ? '' : tlSrc2.slice(playStart, tlSrc2.indexOf('return (', playStart));
+    /* 实参逐个钉死：任何一处被替换（如 cur.audioUrl → ''）都必须失败 */
+    const callMatch = playBlock.match(/podcastClickAction\(\s*([^)]*)\)/);
+    const args = callMatch ? callMatch[1].split(',').map((a) => a.trim()) : [];
+    checkNew('(P3[F3]) 组件按 toggle 分支消费判据（删掉该守卫即失败）',
+      playBlock.includes('podcastClickAction(') && playBlock.includes("=== 'toggle'")
+      && playBlock.includes('togglePlayerPlay();'));
+    checkNew('(P3[F3]) 判据实参必须取当前播放器状态与卡片音频地址（改实参即失败，非仅查 token 在场）',
+      args.length === 3 && args[0] === 'cur.isActive' && args[1] === 'cur.audioUrl'
+      && args[2] === 'audioUrl');
+    checkNew('(P3[F3]) 组件的 toggle 分支必须 return（否则会继续走 play 造成双重动作）',
+      /===\s*'toggle'\s*\)\s*\{\s*togglePlayerPlay\(\);\s*return;/.test(playBlock));
+  }
   store.setState({ player: { ...store.getState().player, speed: 2.0 } });
   store.getState().cyclePlaybackSpeed();
   checkNew('(j) 倍速在 1/1.25/1.5/2 内循环（2.0 → 1.0）并给出 toast',

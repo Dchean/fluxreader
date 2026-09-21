@@ -133,9 +133,15 @@ pub fn run() {
             let refresh = MenuItem::with_id(app, "refresh", "刷新全部订阅", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &refresh, &quit])?;
-            TrayIconBuilder::with_id("main-tray")
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
+            let mut tray = TrayIconBuilder::with_id("main-tray");
+            // P3[12]（REQ-104）：此前是 `app.default_window_icon().unwrap()`——打包配置
+            // 若缺少窗口图标（或平台拿不到），这里会**直接 panic 导致应用启动即崩**
+            // （托盘只是锦上添花，不该拖垮启动）。改为有则设、无则跳过并留 warn。
+            match app.default_window_icon() {
+                Some(icon) => tray = tray.icon(icon.clone()),
+                None => log::warn!("tray: 未取得默认窗口图标，托盘将使用系统默认图标"),
+            }
+            tray.menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main_window(app),
@@ -192,7 +198,11 @@ pub fn run() {
                         let unlisten = {
                             let tx = tx.clone();
                             app.listen("close-ask-ack", move |_| {
-                                let mut g = tx.lock().unwrap();
+                                // P3[12]：`lock().unwrap()` 在互斥量中毒时会 panic（回调里
+                                // panic 会被吞掉，ack 永远发不出去 → 用户要等满 10s 兜底）。
+                                // 这里用 into_inner 容忍中毒：锁内数据只是 Option<Sender>，
+                                // 中毒不影响其可用性。
+                                let mut g = tx.lock().unwrap_or_else(|e| e.into_inner());
                                 if let Some(tx) = g.take() {
                                     let _ = tx.send(());
                                 }

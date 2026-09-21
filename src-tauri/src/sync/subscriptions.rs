@@ -116,7 +116,13 @@ pub(super) async fn push_feeds(
                     if let Some(local_id) = db::feed_id_by_url(&conn, &it.url).ok().flatten() {
                         if let Some(stream_id) = r.stream_id.as_deref() {
                             if let Some(n) = greader::parse_feed_numeric_id(stream_id) {
-                                let _ = db::set_feed_remote_id(&conn, local_id, n);
+                                // P3[1]：绑定写失败此前静默——绑定缺失会让该源在下次 pull
+                                // 被当作未绑定源重复处理。改为 warn（可自愈，不中断）。
+                                if let Err(err) = db::set_feed_remote_id(&conn, local_id, n) {
+                                    log::warn!(
+                                        "sync: quick_add 后绑定远端 id 失败（feed={local_id} remote={n}）: {err}"
+                                    );
+                                }
                                 nid = Some(n);
                             }
                         }
@@ -136,11 +142,17 @@ pub(super) async fn push_feeds(
         }
     }
     let conn = db.lock().await;
-    let _ = db::prune_sync(&conn, &done);
+    // P3[1]：剪除已推送队项失败此前静默——残留队项会被下一轮重复推送（重复订阅
+    // 动作），且无日志可查。改为 warn（失败不中断：下轮会再尝试剪除）。
+    if let Err(err) = db::prune_sync(&conn, &done) {
+        log::warn!("sync: 剪除已推送队列项失败（{} 项）: {err}", done.len());
+    }
     // remove_feed 语义（SUB-4/SYN-1）：本地删除不推远端。历史版本可能在
     // delete_feed 时建过 remove_feed 队项（从未被消费）——此处统一清僵尸项，
     // 与 delete_feed 命令「不再建 remove_feed」的新语义一致。
-    let _ = db::purge_remove_feed_zombies(&conn);
+    if let Err(err) = db::purge_remove_feed_zombies(&conn) {
+        log::warn!("sync: 清理 remove_feed 僵尸队项失败: {err}");
+    }
     drop(conn);
 }
 

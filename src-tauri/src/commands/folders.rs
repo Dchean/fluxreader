@@ -170,7 +170,11 @@ fn persist_new_feed(
     auto_translate: bool,
     sync_to_backend: bool,
 ) -> AppResult<db::FeedRow> {
-    if db::find_feed_by_url(conn, feed_url)?.is_some() {
+    // P3[9]（REQ-104）：改用**规范化 URL** 去重（与 sync 侧 pull_feeds 同一判据）。
+    // 此前用 find_feed_by_url 精确匹配，而 feeds.feed_url 的 UNIQUE 也是按原串，
+    // 于是同一订阅只要饰词不同（https/http、www.、尾斜杠、utm_* 等跟踪参数）就能
+    // 被重复添加 → 文章翻倍、已读/收藏状态分裂、未读数与远端对不齐。
+    if db::feed_id_by_url_normalized(conn, feed_url)?.is_some() {
         return Err(AppError::new("duplicate", "该订阅地址已存在"));
     }
     let final_title = title
@@ -288,6 +292,33 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, "duplicate");
+    }
+
+    /// P3[9]（REQ-104）：**带饰词**的同一订阅也必须判重。
+    ///
+    /// 修前用精确匹配，`https://f.example/rss?utm_source=x` 或 `http://www.f.example/rss/`
+    /// 都会被当作新源插入 → 同一订阅出现两个 feed（文章翻倍、状态分裂）。
+    #[test]
+    fn dressed_up_duplicate_url_is_rejected() {
+        let conn = test_conn();
+        let parsed = minimal_parsed();
+        persist_new_feed(
+            &conn, "https://f.example/rss", &parsed, None, None, None, None, "inherit", true, false, false,
+        )
+        .unwrap();
+
+        for variant in [
+            "https://f.example/rss?utm_source=newsletter", // 跟踪参数
+            "http://f.example/rss",                        // 协议差异（https→http）
+            "https://www.f.example/rss",                   // www. 前缀
+            "https://f.example/rss/",                      // 尾斜杠
+        ] {
+            let err = persist_new_feed(
+                &conn, variant, &parsed, None, None, None, None, "inherit", true, false, false,
+            )
+            .unwrap_err();
+            assert_eq!(err.code, "duplicate", "变体 {variant} 必须被判重");
+        }
     }
 }
 

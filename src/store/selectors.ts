@@ -12,11 +12,6 @@ import type { AppState } from './types';
    Selector 钩子 —— 派生数据在组件层计算，store 保持精简
    ============================================================ */
 
-
-/* ============================================================
-   Selector 钩子 —— 派生数据在组件层计算，store 保持精简
-   ============================================================ */
-
 export const CONTENT_LAYOUTS: ContentLayoutType[] = ['article', 'social', 'image', 'podcast', 'notification'];
 
 export const LAYOUT_NAMES: Record<ContentLayoutType, string> = {
@@ -197,4 +192,31 @@ export function selectFeedConfig(s: Pick<AppState, 'feedIndex'>, feedId: string)
     autoSummary: binding?.feed.autoSummary ?? false,
     autoTranslate: binding?.feed.autoTranslate ?? false,
   };
+}
+
+/* ============================================================
+   P3[F3]（REQ-104 / TASK-081）：播客卡片「再点同一集」的点击判定
+
+   放在本文件（而非组件内）的理由：组件文件里 export 非组件函数会触发 oxlint 的
+   react/only-export-components（Fast Refresh 约束，与 timelineSentinel.ts 的
+   处理一致）；本文件本就承载纯函数（如 numericId），且被回归网直接断言。
+
+   契约：
+   - 播放器未激活 → 'play'（首次点某集正常从头开始）；
+   - 已激活且是**同一集**（audioUrl 相同）→ 'toggle'（播放/暂停切换，**保留进度**）；
+   - 点了**另一集** → 'play'（正常换集，仍从头播）；
+   - 该集无音频地址 → 'play'（交给 playPodcastEpisode 走它的「无可播放地址」提示）。
+
+   修前行为：卡片点击无条件调 playPodcastEpisode，而该 action 会
+   `positionSec: 0, isPlaying: true` —— 播放中再点同一集会把进度清零重开。
+   ============================================================ */
+export type PodcastClickAction = 'toggle' | 'play';
+
+export function podcastClickAction(
+  playerActive: boolean,
+  currentAudioUrl: string,
+  clickedAudioUrl: string,
+): PodcastClickAction {
+  if (!clickedAudioUrl) return 'play';
+  return playerActive && currentAudioUrl === clickedAudioUrl ? 'toggle' : 'play';
 }

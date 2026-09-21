@@ -48,15 +48,27 @@ pub async fn sync_save(
     .to_string();
 
     // 留空密码且已连接 → 复用旧密码（改地址不动密钥）
+    //
+    // P3[3]（REQ-104）：此前这一分支连**用户名**也一并复用（old_user.clone()），
+    // 于是用户只改用户名、密码留空时，界面上的新用户名被静默丢弃——用户以为换了
+    // 账号，实际仍连旧账号，且没有任何提示。现在只复用 password；
+    // 用户名以本次输入为准（留空则同样回落到旧值，保持「只改地址」的既有便利）。
     let (endpoint, username, password) = {
         let conn = state.db.lock().await;
         let old = crate::sync::read_credentials(&conn);
         match (&old, password.trim().is_empty()) {
-            (Some((_old_p, _old_ep, old_user, old_pw)), true) => (
-                endpoint.trim().to_string(),
-                old_user.clone(),
-                old_pw.clone(),
-            ),
+            (Some((_old_p, _old_ep, old_user, old_pw)), true) => {
+                let typed_user = username.trim();
+                (
+                    endpoint.trim().to_string(),
+                    if typed_user.is_empty() {
+                        old_user.clone()
+                    } else {
+                        typed_user.to_string()
+                    },
+                    old_pw.clone(),
+                )
+            }
             (None, true) => {
                 return Err(AppError::new("validate", "请填写密码"));
             }
@@ -158,14 +170,15 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
             return Err(AppError::new("notConnected", "未连接后端"));
         }
         let rows = db::list_unbound_local_feeds(&conn)?;
-        let queued_items = match db::take_sync_queue(&conn) {
-            Ok(v) => v,
-            Err(e) => {
-                // C-2：读队列失败不再静默当空队列（避免重复入队/漏判待推）
-                log::warn!("sync: 读队列失败: {e}");
-                Vec::new()
-            }
-        };
+        // P3[7]（REQ-104）：读队列失败**不能降级成空队列**再继续入队——那样
+        // pending_urls 变空，下面会把每个未绑定源都重新 enqueue，产生重复 add_feed
+        // 队项（重复推送订阅）。此前是 warn + Vec::new() 后照常入队。
+        // 读失败说明无法判断「谁已在队列」，此时正确做法是中止本次操作：宁可让用户
+        // 重试，也不要写入重复队项（重复是**不可逆**的，重试是幂等的）。
+        let queued_items = db::take_sync_queue(&conn).map_err(|e| {
+            log::warn!("sync: 读队列失败，中止本次推送以免重复入队: {e}");
+            e
+        })?;
         let pending_urls: std::collections::HashSet<String> = queued_items
             .into_iter()
             .filter(|i| i.action == "add_feed")
@@ -183,14 +196,17 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
         n
     };
     if queued == 0 {
-        // 没有新入队，但可能仍有待推队列项（上次失败的）——检查后再决定
+        // 没有新入队，但可能仍有待推队列项（上次失败的）——检查后再决定。
+        // P3[7]：读队列失败时**不能**当作「没有待推项」直接返回「无需同步」——
+        // 那会在队列非空时误导用户以为已同步完。改为按「可能有待推」处理
+        // （继续走 feeds_phase；它是幂等的，多跑一次无害，漏跑才有害）。
         let has_pending = {
             let conn = state.db.lock().await;
             match db::take_sync_queue(&conn) {
                 Ok(q) => q.iter().any(|i| i.action == "add_feed"),
                 Err(e) => {
-                    log::warn!("sync: 读队列失败: {e}");
-                    false
+                    log::warn!("sync: 读队列失败，按「可能有待推项」继续（避免误报无需同步）: {e}");
+                    true
                 }
             }
         };

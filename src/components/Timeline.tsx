@@ -5,6 +5,7 @@ import {
   useAppStore,
   LAYOUT_NAMES,
   VIEW_NAMES,
+  podcastClickAction,
   selectVisibleEntries,
   selectFeedConfig,
 } from '../store';
@@ -620,8 +621,24 @@ const PodcastCard = memo(function PodcastCard({ item, cardIndex, tabbable, onMov
   onMoveFocus: (from: number, delta: number) => void;
 }) {
   const playPodcastEpisode = useAppStore((s) => s.playPodcastEpisode);
+  const togglePlayerPlay = useAppStore((s) => s.togglePlayerPlay);
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
-  const play = () => playPodcastEpisode(item.title, feedName, item.cover ?? '', item.enclosureUrl ?? '', item.id);
+  const play = () => {
+    const audioUrl = item.enclosureUrl ?? '';
+    const cur = useAppStore.getState().player;
+    /* P3[F3]（REQ-104）：判据取自纯函数 `podcastClickAction`，定义在
+       src/store/selectors.ts（放在那里是为了避开 oxlint 的 react/only-export-components
+       约束——组件文件 export 非组件函数会被判 Fast Refresh 违规，与 timelineSentinel.ts
+       同一考虑），本组件与前端回归网消费的是**同一份**判定。
+       证据边界（如实说明，审查 FINDING TASK-081-R2-F1）：回归网对**该纯函数**有变异取证
+       （改回无条件 play → 2 条断言失败）；对**本组件是否真的调用了它**，由回归网里的
+       源码形态断言（检查本处 if 分支存在且调用点带 === 'toggle'）覆盖，而非 DOM 点击。 */
+    if (podcastClickAction(cur.isActive, cur.audioUrl, audioUrl) === 'toggle') {
+      togglePlayerPlay();
+      return;
+    }
+    playPodcastEpisode(item.title, feedName, item.cover ?? '', audioUrl, item.id);
+  };
   return (
     <div
       className={`podcast-card ${item.isRead ? 'read' : ''}`}

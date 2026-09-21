@@ -150,10 +150,15 @@ pub async fn refresh_feed_staged(
                         };
                         if let Some(icon) = discovered {
                             let conn = db.lock().await;
-                            let _ = conn.execute(
+                            // P3[1]：favicon 落库失败此前静默。favicon 是锦上添花，
+                            // 失败不影响抓取，但写不进去会让用户看到「图标一直不出现」
+                            // 却无任何线索。改为 warn。
+                            if let Err(err) = conn.execute(
                                 "UPDATE feeds SET favicon_url = ?1 WHERE id = ?2 AND (favicon_url IS NULL OR favicon_url = '')",
                                 rusqlite::params![icon, feed_id],
-                            );
+                            ) {
+                                log::warn!("ingestion: favicon 落库失败（feed={feed_id}）: {err}");
+                            }
                         }
                         /* 失败留在 FAVICON_TRIED（本进程不再重试）；
                         前端下次 reload 拿到新 favicon（如有） */
@@ -173,14 +178,22 @@ pub async fn refresh_feed_staged(
         }
         Err(e) => {
             let conn = db.lock().await;
-            let _ = db::set_feed_fetch_state(
+            // P3[1]（REQ-104）：失败标记写回此前被 `let _ =` 静默吞掉，后果比一般
+            // 吞错更重——fetch_failed/fail_count/next_retry_at 写不进去，
+            // **指数退避就不会生效**，失败源会被每轮调度反复重抓（放大对站点的压力、
+            // 且前端错误标志不亮）。此处必须显式记录，让现场可诊断。
+            if let Err(err) = db::set_feed_fetch_state(
                 &conn,
                 feed_id,
                 true,
                 Some(&e.message),
                 etag.as_deref(),
                 last_modified.as_deref(),
-            );
+            ) {
+                log::warn!(
+                    "ingestion: 写回抓取失败标记失败（feed={feed_id}）——退避将不生效: {err}"
+                );
+            }
             Err(e)
         }
     }

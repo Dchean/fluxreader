@@ -320,6 +320,11 @@ pub fn search_articles(
         like_args.push(pat.clone());
         like_args.push(pat);
     }
+    // P3[8]（REQ-104）：LIMIT 此前用字符串插值 `LIMIT {limit}`。i64 本身无注入风险，
+    // 但**负数在 SQLite 里表示「不限制」**，调用方一处笔误就会把整个库倒出来；
+    // 且它不是绑定参数、不受参数检查保护。改为绑定参数并把上界收敛：
+    // 非正数 → 回落安全默认（搜索场景没有「不限制」语义），并设上限防误用。
+    let limit: i64 = if limit <= 0 { 100 } else { limit.min(1000) };
     let sql = format!(
         "SELECT a.id, a.feed_id, a.title, a.author,
                 COALESCE(NULLIF(a.summary, ''), substr(a.body_text, 1, 280)) AS snippet,
@@ -329,11 +334,15 @@ pub fn search_articles(
          FROM articles a
          WHERE {}
          ORDER BY a.published_at DESC
-         LIMIT {limit}",
-        where_parts.join(" AND ")
+         LIMIT ?{limit_idx}",
+        where_parts.join(" AND "),
+        limit_idx = like_args.len() + 1
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(like_args), article_list_item)?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(like_args.iter().map(|s| s as &dyn rusqlite::ToSql).chain(std::iter::once(&limit as &dyn rusqlite::ToSql))),
+        article_list_item,
+    )?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -368,6 +377,23 @@ pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
 /// 空目录（pull 建的、没了成员）一并删除。
 pub fn purge_remote_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
     let tx = conn.transaction()?;
+    // P3[4]（REQ-104）：先记下「属于服务端的分类」，供第 5 步只删这些空目录。
+    // 此前第 5 步的 SQL 是「删所有无成员的目录」，注释却写「Pull 建的」——
+    // 于是**用户自建的空目录会被一起删掉**（用户手动建了目录、还没往里放订阅，
+    // 断开一次连接就没了）。这里改用可判定的归属信号：
+    //   ① 仍带着远端绑定的目录（folders.remote_id 非空，pull 建远端分类时写入）；
+    //   ② 其成员订阅属于服务端的目录（origin='remote'，第 1 步会把这些订阅删掉）。
+    // 两者都取不到的用户自建空目录一律保留。
+    let remote_folder_ids: Vec<i64> = {
+        let mut stmt = tx.prepare(
+            "SELECT id FROM folders
+             WHERE remote_id IS NOT NULL
+                OR id IN (SELECT DISTINCT folder_id FROM feeds
+                          WHERE folder_id IS NOT NULL AND origin = 'remote')",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
     // 0. 先恢复「原本是本地直连添加、后被 hybrid 模式转为服务端来源」的订阅
     //    ——这类源在断开连接时应保留（回到纯本地直连），而非随服务端数据删除。
     tx.execute(
@@ -386,11 +412,15 @@ pub fn purge_remote_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
     tx.execute("UPDATE folders SET remote_id = NULL", [])?;
     // 4. 清空待推队列（推给这个账号的变更不再有意义）
     tx.execute("DELETE FROM sync_queue", [])?;
-    // 5. 空目录（Pull 建的远端分类，删完成员后空了）——保留用户建的非空目录
-    tx.execute(
-        "DELETE FROM folders WHERE id NOT IN (SELECT DISTINCT folder_id FROM feeds WHERE folder_id IS NOT NULL)",
-        [],
-    )?;
+    // 5. 只删「服务端来源且已空」的目录：用户自建的空目录保留（P3[4]）。
+    for id in remote_folder_ids {
+        tx.execute(
+            "DELETE FROM folders
+             WHERE id = ?1
+               AND id NOT IN (SELECT DISTINCT folder_id FROM feeds WHERE folder_id IS NOT NULL)",
+            [id],
+        )?;
+    }
     tx.commit()?;
     Ok((feeds, articles))
 }
@@ -402,13 +432,18 @@ pub fn purge_remote_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
 /// 可再生成）。返回 (删文章数, 清 AI 字段数)。
 pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult<(usize, usize)> {
     let tx = conn.transaction()?;
-    let cutoff = format!("datetime('now', '-{days} days', 'localtime')");
+    // P3[5]（REQ-104）：cutoff 此前是 datetime('now','-N days','localtime')，而 published_at
+    // 按 RFC3339 存（多为 UTC）。两者时区不一致 → 在 UTC+8 等时区 cutoff 被推后 8 小时，
+    // **会把「只差一小会儿才到 N 天」的文章也删掉**（用户设 7 天，实际删掉 6 天 16 小时的）。
+    // 改为：两侧都过 datetime() 归一到同一时基（datetime() 会把带 offset 的 RFC3339 转成
+    // UTC 字符串），不再混入 localtime。
+    let cutoff = format!("datetime('now', '-{days} days')");
     let (mut deleted, mut ai_cleared) = (0usize, 0usize);
     if scope == "articles" {
         deleted = tx.execute(
             &format!(
                 "DELETE FROM articles
-                 WHERE published_at < {cutoff}
+                 WHERE datetime(published_at) < {cutoff}
                    AND is_read = 1
                    AND is_starred = 0
                    AND id NOT IN (SELECT article_id FROM sync_queue WHERE article_id IS NOT NULL)"
@@ -787,5 +822,177 @@ mod tests {
         };
         let ids: Vec<i64> = list_articles(&conn, &q).unwrap().into_iter().map(|a| a.id).collect();
         assert_eq!(ids.len(), 1, "only_today 必须只含本地今天 01:00 的文章（N5 修前为 0，昨天的不计入）");
+    }
+
+    /* ---------- P3[4]：purge_remote_data 必须保住用户自建的空目录 ---------- */
+
+    /// 用户自建空目录（无订阅、无远端绑定）在断开连接后必须保留。
+    /// 修前 SQL 是「删所有无成员目录」，该目录会被一起删掉。
+    #[test]
+    fn purge_remote_data_keeps_user_created_empty_folder() {
+        let mut conn = conn();
+        let user_folder = create_folder(&conn, "我的空分类", "article").unwrap();
+
+        let (feeds, _) = purge_remote_data(&mut conn).unwrap();
+
+        assert_eq!(feeds, 0, "没有服务端订阅可删");
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [user_folder], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1, "用户自建的空目录必须保留（P3[4] 修前会被误删）");
+    }
+
+    /// 服务端来源的空目录（其成员是 origin='remote' 订阅）仍应被清掉。
+    #[test]
+    fn purge_remote_data_removes_emptied_remote_folder() {
+        let mut conn = conn();
+        let remote_folder = create_folder(&conn, "远端分类", "article").unwrap();
+        insert_feed_origin(
+            &conn,
+            "https://r.example/feed",
+            None,
+            "R",
+            None,
+            remote_folder,
+            "inherit",
+            false,
+            false,
+            "remote",
+        )
+        .unwrap();
+
+        let (feeds, _) = purge_remote_data(&mut conn).unwrap();
+
+        assert_eq!(feeds, 1, "服务端订阅被删");
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [remote_folder], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "清空后的服务端分类应删除");
+    }
+
+    /// 用户自建但有订阅的目录当然也要保留（回归保护，避免修 4 时误伤）。
+    #[test]
+    fn purge_remote_data_keeps_user_folder_with_local_feed() {
+        let mut conn = conn();
+        let folder = create_folder(&conn, "本地分类", "article").unwrap();
+        insert_feed(&conn, "https://l.example/feed", None, "L", None, folder, "inherit", false, false)
+            .unwrap();
+
+        purge_remote_data(&mut conn).unwrap();
+
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [folder], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1, "本地订阅所属目录必须保留");
+    }
+
+    /* ---------- P3[5]：cleanup_cache 的 cutoff 不得因时区混用而多删 ---------- */
+
+    /// cutoff 必须与 published_at 处于同一时基（P3[5]）。**实测语义**（非推测）：
+    ///
+    /// · published_at 由 `to_rfc3339()` 产生，形如 `2026-09-14T18:45:20+12:00`（含 `T` 与偏移）；
+    /// · 修前 cutoff = `datetime('now','-N days','localtime')`，形如 `2026-09-14 16:45:20`
+    ///   （含空格、本地墙上时间）；
+    /// · 两者做**裸文本比较**：第 11 个字符处 `'T'(0x54) > ' '(0x20)`，故当**日期部分相同**时
+    ///   文章恒被判定为「不够旧」；加上 localtime 把阈值整体挪动，实际判定退化为按**日期**
+    ///   粗比、且随本机时区漂移。
+    ///
+    /// 构造（跨时区稳定）：文章真实瞬时 = now-7d-2h（**确实超过 7 天，应当被删**），
+    /// 但以 `+12:00` 存储 → 其墙上日期 ≥ 阈值日期 → 修前**漏删**（该清的文章留在库里）；
+    /// 修后经 `datetime()` 归一为真实瞬时 → 正确删除。
+    #[test]
+    fn cleanup_cache_cutoff_is_timezone_normalised() {
+        let mut conn = conn();
+        let folder = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://c.example/feed", None, "C", None, folder, "inherit", false, false).unwrap();
+
+        // 真实瞬时：7 天 2 小时前（确实超过 7 天阈值）
+        let inst = chrono::Utc::now() - chrono::Duration::hours(7 * 24 + 2);
+        // 以 +12:00 偏移存储：墙上时间比 UTC 快 12 小时，日期部分因此不早于阈值日期
+        let offset = chrono::FixedOffset::east_opt(12 * 3600).unwrap();
+        let stored = inst.with_timezone(&offset).to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+        assert!(stored.ends_with("+12:00"), "本用例须用 +12:00 偏移，实际: {stored}");
+
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &na("tz-edge", Some(stored)), false).unwrap();
+        set_read(&conn, aid, true).unwrap();
+
+        let (deleted, _) = cleanup_cache(&mut conn, 7, "articles").unwrap();
+
+        assert_eq!(
+            deleted, 1,
+            "真实瞬时已超 7 天的文章必须被清理；修前因 cutoff 时区混用 + 文本比较会漏删（P3[5]）"
+        );
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM articles WHERE id = ?1", [aid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "文章应已被清理");
+    }
+
+    /// 明显年轻于阈值的文章（本机时区无关）绝不能被删——基本防误删回归。
+    #[test]
+    fn cleanup_cache_does_not_delete_recent_articles() {
+        let mut conn = conn();
+        let folder = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://c.example/feed", None, "C", None, folder, "inherit", false, false).unwrap();
+
+        let recent = chrono::Utc::now() - chrono::Duration::days(1);
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &na("recent", Some(recent.to_rfc3339())), false).unwrap();
+        set_read(&conn, aid, true).unwrap();
+
+        let (deleted, _) = cleanup_cache(&mut conn, 7, "articles").unwrap();
+
+        assert_eq!(deleted, 0, "1 天前的文章绝不能被 7 天阈值删除");
+    }
+
+    /// 真正超过 N 天的已读文章仍应被删（确认修复没有把功能关掉）。
+    #[test]
+    fn cleanup_cache_still_deletes_articles_older_than_cutoff() {
+        let mut conn = conn();
+        let folder = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://c.example/feed", None, "C", None, folder, "inherit", false, false).unwrap();
+
+        let old = chrono::Utc::now() - chrono::Duration::days(9);
+        let (aid, _) = upsert_article_with_feed(&conn, feed, &na("old", Some(old.to_rfc3339())), false).unwrap();
+        set_read(&conn, aid, true).unwrap();
+
+        let (deleted, _) = cleanup_cache(&mut conn, 7, "articles").unwrap();
+
+        assert_eq!(deleted, 1, "9 天前的已读未收藏文章应被清理");
+    }
+
+    /* ---------- P3[8]：search_articles 的 LIMIT 必须是绑定参数且有上界 ---------- */
+
+    /// 造一篇标题含 needle 的文章（search_articles 会 LIKE title/body/summary/ai/translated）。
+    fn na_titled(guid: &str, title: &str) -> NewArticle {
+        let mut a = na(guid, None);
+        a.title = title.to_string();
+        a
+    }
+
+    /// 负数 LIMIT 在 SQLite 里意为「不限制」，此前会直接插值进 SQL。
+    /// 修后应回落安全默认值，且**不得报错**。
+    #[test]
+    fn search_articles_negative_limit_is_clamped() {
+        let conn = conn();
+        let folder = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://s.example/feed", None, "S", None, folder, "inherit", false, false).unwrap();
+        for i in 0..5 {
+            upsert_article_with_feed(&conn, feed, &na_titled(&format!("hit-{i}"), "hit"), false).unwrap();
+        }
+        let all = search_articles(&conn, "hit", -1).unwrap();
+        assert_eq!(all.len(), 5, "负数 LIMIT 应回落默认上限（5 条命中全部返回，且不报错）");
+    }
+
+    /// 正数 LIMIT 必须真正生效（绑定参数后仍限定行数）。
+    #[test]
+    fn search_articles_respects_limit() {
+        let conn = conn();
+        let folder = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(&conn, "https://s.example/feed", None, "S", None, folder, "inherit", false, false).unwrap();
+        for i in 0..5 {
+            upsert_article_with_feed(&conn, feed, &na_titled(&format!("hit-{i}"), "hit"), false).unwrap();
+        }
+        let limited = search_articles(&conn, "hit", 2).unwrap();
+        assert_eq!(limited.len(), 2, "LIMIT 2 必须只返回 2 条（绑定参数后仍生效）");
     }
 }

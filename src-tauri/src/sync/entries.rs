@@ -60,7 +60,12 @@ fn merge_remote_status(
         return;
     };
     let feed_id = item_feed_id(e);
-    let _ = db::set_article_remote_id(conn, aid, eid);
+    // P3[1]（REQ-104）：绑定写失败此前被 `let _ =` 静默吞掉。绑定失败会让该条目在
+    // 后续对账中被当作「未绑定」，状态同步与去重判断随之走偏，且现场无任何日志。
+    // 改为 warn 记录（失败仍不中断本轮同步——绑定可在下一轮补上，属可自愈类）。
+    if let Err(err) = db::set_article_remote_id(conn, aid, eid) {
+        log::warn!("sync: 绑定条目远端 id 失败（aid={aid} eid={eid}）: {err}");
+    }
     // 同步 maps 的绑定状态：后续 entry 若 URL 兜底匹配到同一 aid，能读到
     // 「已绑定 eid」而非批量快照里的「未绑定」，避免跨源同 URL 副本被误判
     // 为自己的条目（时序偏差）。
@@ -89,7 +94,11 @@ fn merge_remote_status(
         .unwrap_or(false);
     let accept_unread = local_bound && same_feed_trusted;
     if remote_read || accept_unread {
-        let _ = db::sync_set_article_status(conn, aid, remote_read, remote_starred);
+        // P3[1]：状态写失败此前被静默吞掉——已读/收藏未落库会让「未读数对不齐」
+        // 失去可诊断线索。改为 warn（不中断：下轮对账会再试）。
+        if let Err(err) = db::sync_set_article_status(conn, aid, remote_read, remote_starred) {
+            log::warn!("sync: 写入远端状态失败（aid={aid}）: {err}");
+        }
         report.pulled_entries += 1;
     }
 }
@@ -129,7 +138,11 @@ pub(super) fn merge_pulled_entry(
             if !is_own {
                 // 跨源副本：记账（已读广播对象）。read-anywhere-wins
                 if let Some(eid) = eid {
-                    let _ = db::add_article_dup_entry(conn, aid, eid);
+                    // P3[1]：跨源副本记账失败此前静默——记账缺失会导致同文副本后续被
+                    // 重复计入/漏广播已读。改为 warn。
+                    if let Err(err) = db::add_article_dup_entry(conn, aid, eid) {
+                        log::warn!("sync: 跨源副本记账失败（aid={aid} eid={eid}）: {err}");
+                    }
                 }
                 if greader::has_tag(&e.categories, "/com.google/read")
                     && !maps.pending_ids.contains(&aid)
