@@ -1,0 +1,346 @@
+
+running 104 tests
+test ai::tests::config_from_json_full ... ok
+test ai::tests::sse_line_extracts_delta_and_ignores_null_error ... ok
+test ai::tests::config_defaults_from_preset ... ok
+test ai::tests::empty_preset_with_explicit_config_is_custom ... ok
+test commands::ai::ai_event_tests::ai_event_serialization_matches_frontend ... ok
+test ai::tests::sse_line_sink_close_stops ... ok
+test ai::tests::unknown_preset_with_explicit_model_and_base_url_is_custom ... ok
+test ai::tests::unknown_preset_is_rejected_instead_of_silently_falling_back ... ok
+test ai::tests::unknown_preset_with_only_model_is_rejected ... ok
+test credentials::tests::empty_and_legacy_plaintext_passthrough ... ok
+test ai::tests::sse_line_object_error_is_error ... ok
+test commands::settings::image_proxy_tests::referer_candidates_dedupes_page_equal_to_origin ... ok
+test commands::settings::image_proxy_tests::referer_candidates_skips_non_http_page_url ... ok
+test commands::settings::image_proxy_tests::referer_candidates_tries_none_origin_then_page ... ok
+test commands::settings::image_proxy_tests::referer_candidates_without_page_url ... ok
+test ai::tests::config_missing_key_rejected ... ok
+test credentials::tests::idempotent_on_already_encrypted ... ok
+test credentials::tests::encrypt_decrypt_roundtrip ... ok
+test db::commands_extraction_tests::list_unbound_local_feeds_returns_tuples ... ok
+test db::commands_extraction_tests::list_unread_ids_and_mark_all_read_scope_alignment ... ok
+test commands::opml::tests::same_named_folders_are_created_once ... ok
+test db::articles::tests::purge_remote_data_keeps_user_created_empty_folder ... ok
+test credentials::tests::migrate_legacy_plaintext_upgrades_and_idempotent ... ok
+test db::articles::tests::cleanup_cache_still_deletes_articles_older_than_cutoff ... ok
+test db::articles::tests::cleanup_cache_cutoff_is_timezone_normalised ... ok
+test commands::opml::tests::root_level_feeds_share_one_import_folder ... ok
+test db::commands_extraction_tests::get_article_url_returns_url_or_none ... ok
+test commands::opml::tests::reimporting_a_url_clears_its_tombstone ... ok
+test db::articles::tests::early_morning_local_article_counts_as_today ... ok
+test db::articles::tests::cleanup_cache_does_not_delete_recent_articles ... ok
+test commands::folders::tests::duplicate_url_is_rejected ... ok
+test commands::folders::tests::republishing_a_url_clears_its_tombstone ... ok
+test db::commands_extraction_tests::export_feeds_with_folders_returns_tuples ... ok
+test commands::opml::tests::duplicate_urls_are_skipped ... ok
+test db::commands_extraction_tests::feed_exists_by_url_checks_correctly ... ok
+test db::commands_extraction_tests::count_unbound_local_feeds_counts_correctly ... ok
+test db::commands_extraction_tests::folder_exists_checks_correctly ... ok
+test commands::folders::tests::dressed_up_duplicate_url_is_rejected ... ok
+test endpoint_resolve::tests::fever_bare_domain_yields_root_then_freshrss_endpoint ... ok
+test endpoint_resolve::tests::fever_full_path_keeps_single_candidate ... ok
+test endpoint_resolve::tests::greader_bare_domain_yields_root_then_freshrss_subpath ... ok
+test endpoint_resolve::tests::greader_full_path_keeps_single_candidate ... ok
+test db::articles::tests::purge_remote_data_keeps_user_folder_with_local_feed ... ok
+test endpoint_resolve::tests::only_404_means_path_missing ... ok
+test endpoint_resolve::tests::trailing_slash_and_whitespace_normalized ... ok
+test extraction::tests::degradation_when_extraction_is_much_shorter ... ok
+test extraction::tests::degradation_when_extraction_is_empty ... ok
+test extraction::tests::empty_original_never_degrades_a_nonempty_extraction ... ok
+test extraction::tests::degradation_when_extraction_is_whitespace_only ... ok
+test db::commands_extraction_tests::get_article_for_summary_returns_tuple ... ok
+test extraction::tests::lead_image_reads_og_image ... ok
+test extraction::tests::lead_image_resolves_relative_urls ... ok
+test extraction::tests::no_degradation_when_extraction_is_not_shorter ... ok
+test fever::tests::api_key_is_md5_of_username_colon_password ... ok
+test fever::tests::item_maps_read_and_saved_to_tags ... ok
+test fever::tests::parse_csv_handles_empty_and_trailing ... ok
+test greader::tests::has_tag_matches_suffix ... ok
+test greader::tests::parse_client_login_reads_classic_text_body ... ok
+test greader::tests::parse_client_login_reads_json_body ... ok
+test greader::tests::parse_client_login_rejects_error_and_garbage ... ok
+test greader::tests::parse_feed_numeric_id_works ... ok
+test greader::tests::parse_item_id_handles_both_formats ... ok
+test ingestion::favicon::favicon_tests::extract_html_attr_all_quote_styles ... ok
+test ingestion::favicon::favicon_tests::extract_icon_link_finds_variants ... ok
+test opml::tests::bare_ampersands_are_tolerated ... ok
+test opml::tests::build_round_trips_through_parse ... ok
+test opml::tests::duplicate_feed_url_is_collapsed ... ok
+test opml::tests::parse_rejects_malformed_document ... ok
+test opml::tests::parses_flat_feed_list ... ok
+test opml::tests::parses_feeds_nested_in_a_folder ... ok
+test sanitize::tests::extract_attr_finds_value_in_all_quote_styles ... ok
+test db::commands_extraction_tests::ensure_uncategorized_folder_creates_or_returns_existing ... ok
+test sanitize::tests::iframe_relative_src_demoted_not_absolutized ... ok
+test extraction::tests::extract_article_pulls_main_content ... ok
+test sanitize::tests::iframe_without_src_dropped_entirely ... ok
+test sanitize::tests::extract_attr_with_multibyte_attrs_does_not_panic ... ok
+test sanitize::tests::iframe_allowlist_kept_others_demoted_to_link ... ok
+test sanitize::tests::javascript_src_media_stripped ... ok
+test sanitize::tests::script_still_stripped_with_media_enabled ... ok
+test sanitize::tests::video_audio_survive_with_attributes ... ok
+test db::articles::tests::purge_remote_data_removes_emptied_remote_folder ... ok
+test db::articles::tests::search_articles_negative_limit_is_clamped ... ok
+test db::commands_extraction_tests::get_article_content_html_returns_html ... ok
+test db::commands_extraction_tests::get_article_for_translation_returns_tuple ... ok
+test db::articles::tests::search_articles_respects_limit ... ok
+test db::dedup_tests::article_index_positions_align_with_list ... ok
+test db::settings::tests::app_settings_helpers_read_present_values ... ok
+test db::commands_extraction_tests::mark_all_read_view_filters ... ok
+test db::dedup_tests::search_finds_ai_summary_and_translation ... ok
+test db::settings::tests::app_settings_helpers_return_defaults_when_unset_or_broken ... ok
+test db::dedup_tests::smart_dedup_blocks_cross_feed_same_url ... ok
+test db::commands_extraction_tests::update_article_image_if_empty_only_when_empty ... ok
+test db::dedup_tests::feed_url_normalized_matching_collides_differently_decorated_urls ... ok
+test db::commands_extraction_tests::update_article_fulltext_updates_correctly ... ok
+test db::sync_extraction_tests::backfill_article_content_only_when_empty ... ok
+test db::sync_extraction_tests::find_folder_by_name_returns_id_or_none ... ok
+test db::dedup_tests::search_finds_chinese_substring_and_multi_term_and ... ok
+test db::sync_extraction_tests::sync_mark_read_if_unread_only_when_unread ... ok
+test db::sync_extraction_tests::sync_starred_toggles_correctly ... ok
+test db::sync_extraction_tests::get_article_remote_id_returns_id_or_none ... ok
+test db::sync_extraction_tests::get_first_folder_id_returns_first_or_none ... ok
+test db::sync_extraction_tests::sync_set_article_status_updates_unconditionally ... ok
+test db::sync_extraction_tests::sync_mark_unread_if_read_only_when_read ... ok
+test db::sync_extraction_tests::update_feed_title_if_empty_only_when_title_equals_url ... ok
+
+test result: ok. 104 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+test create_feed_conflict_returns_existing_id ... ok
+test cache_cleanup_ai_only_clears_ai_fields ... ok
+test disconnect_purges_miniflux_data_but_keeps_local ... ok
+test cache_cleanup_articles_respects_star_and_age ... ok
+test sync_local_feeds_pushes_unbound_local_feeds ... ok
+test reconnect_other_account_no_mixing ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+
+running 1 test
+test ai_summarize_translate_and_cache_pipeline ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 10 tests
+test webdav_get_404_maps_to_error ... ok
+test webdav_roundtrip_via_mock ... ok
+test remote_missing_whitelist_setting_is_deleted_locally ... ok
+test payload_excludes_all_credential_fields ... ok
+test payload_contains_all_config_domains ... ok
+test apply_preserves_local_credentials_and_updates_allowed_fields ... ok
+test apply_upserts_feeds_and_overrides_settings ... ok
+test malformed_remote_settings_does_not_wipe_local ... ok
+test apply_failure_rolls_back_the_whole_payload ... ok
+test full_roundtrip_upload_download_apply ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+
+
+running 3 tests
+test cross_feed_remote_entry_cannot_write_state_or_steal_binding ... ok
+test tombstone_blocks_resurrection_after_kept_article_deleted ... ok
+test tombstone_written_on_dedup_and_blocks_replay ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+running 4 tests
+test normalize_url_collapses_known_variants ... ok
+test dedup_uses_normalized_url ... ok
+test pending_local_change_wins_over_stale_remote ... ok
+test read_intent_flows_both_ways_across_feeds ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+running 14 tests
+test candidates_are_bounded_and_shaped_correctly ... ok
+test fever_rejects_api_version_below_3 ... ok
+test fever_still_rejects_bad_auth ... ok
+test full_path_still_works_first_try ... ok
+test bare_domain_resolves_miniflux_layout ... ok
+test fever_accepts_api_version_4 ... ok
+test fever_bare_domain_resolves_freshrss_endpoint ... ok
+test probing_is_bounded_and_full_path_does_not_extra_probe ... ok
+test missing_path_vs_bad_credentials_are_distinguished ... ok
+test bare_domain_resolves_freshrss_layout ... ok
+test fever_resolved_client_actually_uses_resolved_endpoint ... ok
+test fever_write_path_uses_resolved_endpoint_too ... ok
+test cache_hits_on_same_input_and_invalidates_on_change ... ok
+test second_sync_reuses_cached_endpoint_without_probing ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+running 4 tests
+test rename_folder_updates_name ... ok
+test update_feed_all_fields ... ok
+test update_feed_partial_and_empty_title_fallback ... ok
+test feed_counts_counts_by_feed ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+
+running 3 tests
+test fever_auth_and_subscriptions ... ignored, 需真实 Miniflux 测试账号 + 网络
+test fever_mark_roundtrip ... ignored, 需真实 Miniflux 测试账号 + 网络
+test fever_unread_saved_and_items ... ignored, 需真实 Miniflux 测试账号 + 网络
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test fever_sync_end_to_end_on_live_backend ... ignored, 需真实 Miniflux 测试账号 + 网络
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test bad_token_rejected_by_user_endpoint ... ok
+test device_flow_full_lifecycle ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test greader_edit_tag_roundtrip ... ignored, 需真实 Miniflux 测试账号 + 网络
+test greader_item_ids_and_contents ... ignored, 需真实 Miniflux 测试账号 + 网络
+test greader_login_and_subscriptions ... ignored, 需真实 Miniflux 测试账号 + 网络
+
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+test direct_fetch_pipeline_end_to_end ... ignored, requires local feed server on 127.0.0.1:8765
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 2 tests
+test migration_v1_to_v2_preserves_data ... ok
+test migration_v6_to_v7_backfills_precise_url_norm ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test pull_id_listing_failure_keeps_last_sync_ts ... ok
+test pull_success_advances_last_sync_ts ... ok
+test pull_chunk_failure_keeps_last_sync_ts ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+
+running 2 tests
+test manual_refresh_all_keeps_both_when_dedup_off ... ok
+test manual_refresh_all_respects_smart_dedup_when_on ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+running 4 tests
+test ai_flags_default_off_for_new_feeds ... ok
+test category_layout_persists_across_reopen ... ok
+test feed_layout_persists_across_reopen ... ok
+test ai_flags_toggle_persists ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+running 1 test
+test row_serialization_matches_fixture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+test scheduler_due_backoff_and_interval_pipeline ... ignored, requires local feed server on 127.0.0.1:8765
+test sync_mode_hybrid_skips_miniflux_feeds_in_due_query ... ok
+test sync_mode_manual_refresh_always_includes_miniflux_feeds ... ok
+test sync_mode_default_is_direct_when_unset ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+
+running 3 tests
+test staged_refresh_304_keeps_conditional_headers ... ok
+test staged_refresh_http_overlaps_under_concurrency ... ok
+test staged_refresh_failure_marks_feed ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.07s
+
+
+running 7 tests
+test normalized_url_match_maps_same_article ... ok
+test light_sync_converges_stale_remote_read_via_unread_ids ... ok
+test pending_local_read_wins_over_stale_remote_in_upsert ... ok
+test miniflux_origin_feed_pulls_new_entries_in_light_sync ... ok
+test miniflux_enclosure_is_not_used_as_cover ... ok
+test miniflux_origin_pulls_historical_entries_regardless_of_published_at ... ok
+test miniflux_existing_entry_backfills_cover ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+
+running 6 tests
+test remote_unsubscribe_keeps_unbound_feed ... ok
+test remote_unsubscribe_keeps_feed_with_pending_queue_item ... ok
+test remote_unsubscribe_keeps_local_origin_feed ... ok
+test remote_unsubscribe_removes_local_remote_feed ... ok
+test remote_unsubscribe_keeps_feed_with_article_scoped_pending ... ok
+test miniflux_sync_end_to_end ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+
+running 18 tests
+test feed_edit_without_backend_stays_local ... ok
+test stale_unbound_queue_items_are_pruned ... ok
+test fresh_empty_db_pull_creates_remote_subscriptions ... ok
+test pull_feed_insert_failure_must_be_reported ... ok
+test add_feed_pushes_folder_membership ... ok
+test unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive ... ok
+test folder_delete_does_not_revive_folder_or_feeds ... ok
+test folder_rename_does_not_revive_old_label ... ok
+test fresh_queue_items_survive_aging ... ok
+test pull_feed_failure_is_reported_not_swallowed ... ok
+test feed_rename_and_move_push_edit_subscription ... ok
+test pull_entry_insert_failure_must_be_reported ... ok
+test offline_mark_all_read_queued_and_pushed_after_connect ... ok
+test deleted_feed_stays_deleted_and_unsubscribes ... ok
+test offline_star_change_pushed_after_connect ... ok
+test folder_tombstone_cleared_when_remote_drops_label ... ok
+test offline_read_change_pushed_after_connect ... ok
+test reconcile_skipped_when_state_fetch_fails ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+
+
+running 5 tests
+test full_reconcile_backfills_missing_local_entries ... ok
+test feeds_and_states_phases_run_independently ... ok
+test instant_push_only_pushes_and_drains_queue ... ok
+test instant_push_read_broadcasts_dup_entries ... ok
+test stale_remote_read_converges_via_full_reconcile ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

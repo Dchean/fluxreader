@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-081",
+  "run_id": "RUN-a4b42e0e98c942cc87129ddb9a0808e6",
+  "status": "ready_for_verification",
+  "summary": "TASK-081 修复轮 1：订正独立审查的 4 条 FINDING（其中 F1 为我方的失实宣称，性质最重）。**F1（high，regression）「F3 声称的成对证据不存在」——成立且已实质修复**：审查者把 Timeline.tsx 的守卫整段删除后前端门禁仍 307/307 全绿，证明我上一版的 F3 断言只调用了 store 的 togglePlayerPlay / playPodcastEpisode，从未触达组件分支，而 AUDIT 处置表却宣称「去掉守卫后恰好 2 条失败」——那是**可证伪的不实陈述**。处置：按项目既有先例（timelineSentinel.ts）把判定抽成**导出纯函数** `podcastClickAction(playerActive, currentAudioUrl, clickedAudioUrl)`，JSX 与回归网共用同一份判定；断言改为直接驱动该函数（toggles/换集/未激活/无地址四态 + 修前对照）。**新的成对证据已实测**：把该函数改回无条件返回 'play'（修前逻辑）→ 恰好 2 条断言 FAILED、其余全绿；还原后 310/310。**F2（medium，performance）「F4 的不修理由两处失实」——成立并已订正**：审查者指出 N10 的原文范围是「async action 无 catch → 补错误提示」而非批量合并，且 reader.ts 仍是 `Promise.allSettled(unread.map((id) => api.setRead(...)))`、api.setRead 就是一次 invoke('set_read')、Rust 侧无批量命令。我独立复核确认这两点属实，故把 F4 行**订正为如实表述**：逐条 IPC 仍在；真实阻力是修法需同时改 commands/articles.rs（新增批量命令）与 src/lib/api.ts，二者不在本任务 allowed_paths 内——为避免为一处 P3 项扩范围，转为**独立跟进项**并写入报告遗留清单（含建议修法）。**F3（low，maintainability）「#6 的论据说反了」——成立并已订正**：原件称「包事务会跨 HTTP 长时间持锁」，但 apply_refresh_result 的调用点在 staged.rs:168 之后、锁是那时才取的、HTTP 早在 :121 结束，事务不会跨 HTTP；真实阻力只是 `&mut Connection` 签名适配。已把该行改为以**真实理由**支撑同一结论（失败窗口小 + 下一轮幂等 upsert 补齐 + 可见性已由 fetch_failed 写回兜住），并注明原论据错误。**F4（low，maintainability）两处已订正**：(1) #1 的计数「9 处」与同句列举及 git diff 实测的 **10 处**（3/3/2/2）矛盾，已改为 10 处并逐文件列明；(2) 审查者登记的实现期遗留未跟踪脚本 `.workflow-kit/tasks/evidence/_mut5.py`（位于 protected_paths 内，审查者依规未删）已由我清除。另按审查者建议把 **F2 无断言**这一覆盖缺口从「表格理由」提升为报告遗留清单的显式条目（含建议修法：抽纯函数 + 补断言，同 F3 做法）；F3 行亦同步更新为实现位置（selectors.ts）与新的变异证据。**门禁实测（修复轮）**：cargo test 202 passed / 0 failed / 9 ignored；lint **0 warnings** / 0 errors（首版把纯函数 export 在组件文件里触发了 oxlint react/only-export-components 的 1 条警告，已按项目既有先例挪到 selectors.ts 归零）；build exit 0；frontend 310/310（新增 7 条 P3[F3] 断言）。全部 15 个改动文件仍在 allowed_paths 内、outside/protected 为空；candidate 171/171 哈希在修复前后一致（我自己未用 git checkout 还原，全程用备份文件）。",
+  "changed_files": [
+    ".workflow-kit/docs/AUDIT-20260919-v2.md",
+    "src/components/Timeline.tsx",
+    "src/store/selectors.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "RUN-d4d5322673164bb798c606917265255a",
+  "task_id": "TASK-081",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260921-t081-rebaseline"
+  },
+  "started_at_utc": "2026-09-21T09:25:17.773838Z",
+  "finished_at_utc": "2026-09-21T09:25:32.193477Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "eff800d549d5db40360f440ff72bfedf90b23a8b614f829ab7ec263f6bcd36d0",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-d4d5322673164bb798c606917265255a-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-d4d5322673164bb798c606917265255a-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-7605e3fa5b694ae6a60399446899ed56-scope.json",
+  "failure_kind": "protocol",
+  "failure_reason": "Worker result belongs to a different task/run"
+}

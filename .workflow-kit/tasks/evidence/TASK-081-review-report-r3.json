@@ -1,0 +1,117 @@
+{
+  "task_id": "TASK-081",
+  "candidate_digest": "ca8f2df0beb83c4dbe90f656f21d3866d1c38c019cf89d898ac85a28d9b7464d",
+  "verification_run": "RUN-39becef96b16447d95203a33d412cf17",
+  "verdict": "FAIL",
+  "summary": "独立第 3 轮复审（我未参与实现）。候选绑定成立：171/171 个候选文件 sha256 与本工作区逐一重算一致，digest=ca8f2df0…7464d。上一轮的两条 findings 我逐条实测复核：(R2-F1) F3 的组件层缺口**确实已封闭**——我亲自重跑两个变异：(a) 把 src/store/selectors.ts 的 podcastClickAction 改成恒 'play'（sha256 变为 5a0f83a5…）→ 前端 310/312，恰 2 条纯函数断言 FAILED；(b) 删掉 Timeline.tsx 的 toggle 守卫（sha256 变为 7c6dd5b0…，即第 1 轮那条原本全绿的变异）→ 前端 310/312，恰 2 条**源码形态**断言 FAILED。两文件均用备份副本（非 git checkout）逐字节还原，哈希回到 4f093cd4…/8d733e1d…，复跑 312/312 exit 0。(R2-F2) 注释路径已订正：产品代码内 `git grep podcastClick.ts`（src/ tools/ src-tauri/）零命中，仅 .workflow-kit/notes 的两份教训笔记提到该历史错误路径；Timeline.tsx:630 与 harness:1107 都指向 src/store/selectors.ts，harness 注释亦明确写「源码形态断言」而未冒充 DOM 点击。门禁复跑/核对：cargo 记录 202 passed/0 failed/9 ignored（我按 test result 行独立求和）、cargo test --lib 104/0 我实跑 exit 0、lint 我实跑 0 warnings/0 errors exit 0、build 读记录日志 exit 0（未跑，Vite 子进程被沙箱阻断）、frontend 我实跑 312/312 exit 0。范围：sync_map.rs 与 src/store/slices/player.ts 对 HEAD 均 diff 为空；worker 自己的改动记录（RUN-3fdc51e9-changes.json）仅 4 个文件且全在 allowed_paths 内；其余 10 个改动文件是编排器自身的台账/笔记（tools 自动改写），非本次实现越界。**但本轮仍有 1 条真实缺陷**：AUDIT「一之附」第 9 行把「feed_exists_by_url 改为精确命中后回退规范化比较」归给 src-tauri/src/db/sync_map.rs——该文件对 HEAD 逐字节未改（feed_exists_by_url 仍是纯精确 `WHERE feed_url = ?1`），而该「精确命中后回退规范化」模式实际写在 commands/opml.rs:55-56；该断言还与任务自身冻结的范围条件（sync_map.rs 必须 diff 为空）直接互相矛盾。这是本项目反复出现的同一族失误（声称的代码改动与工作区实际不符），故 verdict=FAIL。另记一条 low：F3 第二层证据是**文本在场**判定而非行为判定，实测一个改动调用实参的一行变异（cur.audioUrl → ''）会让 toggle 分支彻底成为死代码，而门禁仍 312/312 全绿。",
+  "findings": [
+    {
+      "id": "TASK-081-R3-F1",
+      "severity": "medium",
+      "area": "maintainability",
+      "summary": "AUDIT-20260919-v2.md §「一之附」第 9 行把「feed_exists_by_url 改为精确命中后回退规范化比较」归给 sync_map.rs，但该文件对 HEAD 逐字节未改、该逻辑实际在 commands/opml.rs；且该表述与任务冻结的范围条件（sync_map.rs 必须 diff 为空）自相矛盾。",
+      "details": "陈述原文（.workflow-kit/docs/AUDIT-20260919-v2.md:136；该行在本任务未提交改动中确为**新增行**——`git diff -- AUDIT-20260919-v2.md` 显示 `+| 9 | …`；至于它是在第 1/2 轮还是第 3 轮写入，我无法证实：本项目的 scope 快照（RUN-*-scope.json）只存 sha256 不存正文，故不臆断具体轮次）：「`find_feed_by_url` → `feed_id_by_url_normalized`（folders.rs），`feed_exists_by_url` 改为精确命中后回退规范化比较（sync_map.rs）」。\n实测反驳：(1) `git diff HEAD -- src-tauri/src/db/sync_map.rs` 为空、`git diff --quiet` 退出 0，即 sync_map.rs 相对 HEAD **无任何改动**；`git log -1 -- src-tauri/src/db/sync_map.rs` 为 48e2763（TASK-070），本任务从未提交过该文件的修改。(2) sync_map.rs:238-245 的 feed_exists_by_url 仍是纯精确匹配（`SELECT EXISTS(SELECT 1 FROM feeds WHERE feed_url = ?1)`），没有「回退规范化比较」这一分支。(3) 「精确命中后回退规范化」的实际实现位置是 src-tauri/src/commands/opml.rs:55-56：`if db::feed_exists_by_url(conn, &f.feed_url)? || db::feed_id_by_url_normalized(conn, &f.feed_url)?.is_some()`，其上方 opml.rs:50-54 的注释才是该改动的正确出处说明。\n前半句「find_feed_by_url → feed_id_by_url_normalized（folders.rs）」属实（folders.rs:177 使用 db::feed_id_by_url_normalized），故缺陷限于 sync_map.rs 这半句。\n为何算缺陷而非无害笔误：验收①要求「P3 清单每条都有明确处置结论…使验收可逐条核对」，而本条把一处**并不存在的代码改动**写成处置证据，使核对者按图索骥会找不到对应实现（本轮我即因此先怀疑工作区被误还原）；更严重的是它与本任务范围条件「src-tauri/src/db/sync_map.rs 必须 EMPTY diff」正面冲突——同一份候选里，台账声称改了该文件、范围核对又要求该文件零改动。这与 R1/R2 连续两轮被判的失误同族（「修一个错、引一个新错」+ 可被机械证伪的路径/位置陈述），故按 medium 记录，建议下一轮把该半句改指 commands/opml.rs。",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src-tauri/src/commands/folders.rs",
+        ".workflow-kit/tasks/evidence/TASK-081-cumulative-diff.txt",
+        ".workflow-kit/tasks/evidence/RUN-39becef96b16447d95203a33d412cf17-candidate.json"
+      ]
+    },
+    {
+      "id": "TASK-081-R3-F2",
+      "severity": "low",
+      "area": "regression",
+      "summary": "F3 第二层的源码形态断言只判定**文本在场**，不是行为判定：实测把调用实参 cur.audioUrl 改成 '' 会让 toggle 分支成为死代码、同集再点重头开播的缺陷完全复现，而门禁仍 312/312 全绿。",
+      "details": "断言本体（tools/frontend-regression.mjs:1144-1153）用 readFileSync + slice + includes/正则检查 Timeline.tsx 的 `const play = () => {` 块内是否出现 'podcastClickAction('、\"=== 'toggle'\"、'togglePlayerPlay();' 以及 /===\\s*'toggle'\\s*\\)\\s*\\{\\s*togglePlayerPlay\\(\\);\\s*return;/。\n判别力实测（我的探针，实验后均逐字节还原）：\n  ① 正向（本轮新增的捕获力）确认真实——删掉整段守卫 → 恰 2 条源码形态断言 FAILED（310/312）；轮 2 同一变异为全绿，故 R2-F1 的缺口确实被补上了。\n  ② 但有假阴性：只把实参 `cur.audioUrl` 替换为 `''`（其余三处 token 一字未动）→ 因契约里 `playerActive && currentAudioUrl === clickedAudioUrl` 永假，`=== 'toggle'` 分支变成不可达死代码、同集再点重新变成从头开播（正是 F3 要修的缺陷），而两条源码形态断言**全部通过**、合计 312/312 exit 0。\n  ③ 同理，在守卫之前插入一行无条件 playPodcastEpisode(...) 也保持全绿（该块内 token 仍在场）。\n为何仍算 low 而非常规的「文档夸大」：台账与注释的措辞**已基本自我设限**——harness:1111 写「源码形态断言」，Timeline.tsx:633-635 明写「由回归网里的源码形态断言…覆盖，而非 DOM 点击」，AUDIT:148 亦写「源码形态断言」并注明「两层范围不同，不可互相冒充」，且断言自身的标签诚实写成「删掉该守卫即失败」（而非「消费正确」）。扣分点是台账②的措辞「对**组件是否真的消费它**另有源码形态断言」——本探针表明「调用点文本在场」弱于「组件真的按该判据消费」，一个改实参的常见改法即可绕过，建议措辞收紧为「调用点文本在场（删段即失败）」或补一条真正驱动组件行为的断言。凡此均属覆盖边界的诚实标注问题，不改变「删守卫已有捕获力」这一本轮核心结论。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        "src/components/Timeline.tsx",
+        "src/store/selectors.ts",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        ".workflow-kit/tasks/runs/RUN-39becef96b16447d95203a33d412cf17.json"
+      ]
+    }
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "对照 REQ-104 验收①「P3 清单每条都有明确处置结论（修/不修+理由），记录在案使验收可逐条核对」逐项核对 §「一之附」：后端 13 条中 #11 标注已由 TASK-070 处置、#10/#13 为「不修+理由」、其余为「修」；前端 F1-F7 同样逐条有结论，13+7 条无遗漏，且 F4/F2 的覆盖缺口被如实登记进遗留清单（F4 的「已由 N10 批量合并」旧说法已订正为不实并说明真因），这部分诚实性较好。实测抽查属实的条目：#1「10 处 let _ = 改 log::warn!」与 git diff 的 3+3+2+2=10 完全吻合（且同步删除了 3+3+2+2 处 let _ =）；#2 commands/ai.rs 三处 warn 属实（ai.rs 已无 .ok().flatten() 生产用法）；#12 lib.rs 托盘 unwrap→match+warn、Mutex lock→unwrap_or_else(into_inner) 属实；#4/#5 的成对证据测试确实存在（db/articles.rs:832 purge_remote_data_keeps_user_created_empty_folder、:904 cleanup_cache_cutoff_is_timezone_normalised）；#9 的成对证据 dressed_up_duplicate_url_is_rejected 确实存在（folders.rs:302，逐一断言 utm_/协议/www./尾斜杠四种变体被判 duplicate）。但同一行 #9 夹杂一条与工作区不符的归属陈述（把改动归给工作区里根本没改的 sync_map.rs），正是验收①「可逐条核对」所防的那类失误，故本项判 FAIL；其余验收②③④（数据正确性类成对证据、吞错 warn 化、F1 重复注释清除）抽查均成立。",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/commands/opml.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/db/articles.rs",
+        ".workflow-kit/tasks/evidence/TASK-081-cumulative-diff.txt"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "门禁由我本会话实跑或读原始日志核对，不采信作者自述：frontend 我实跑 `npm.cmd run test:frontend` → 「既有回归 26/26 / 新增 286/286 / 合计 312/312」exit 0，与任务要求 ≥303 且与候选 digest 一致；lint 我实跑 exit 0（Found 0 warnings and 0 errors，65 files）；cargo 我按 RUN-39becef9 记录日志的 test result 行独立求和 = 202 passed / 0 failed / 9 ignored（与 202/0/9 相符），并按委托另跑 `cargo test --lib` → 104 passed / 0 failed exit 0（未跑 27 套全量）；build 读记录日志（`tsc -b && vite build`，✓ 84 modules transformed、✓ built in 125ms，stderr 为空）exit 0——因 Vite 子进程在本沙箱被阻断，按委托未实跑，此处仅转述日志并已核对 exit_code 字段与 stderr 为空。变异取证我在两个层次各自重跑：(a) selectors.ts 的 podcastClickAction 恒 'play' → 310/312，恰好且仅有 2 条纯函数断言失败（(P3[F3]) 同 audioUrl ⇒ toggle、修前判据可复现），证明确有区分力；(b) 删掉 Timeline.tsx 的 toggle 守卫（round 1 原变异）→ 310/312，恰好且仅有 2 条**源码形态**断言失败，即轮 2 那条「删守卫仍全绿」的缺口已真正封闭。两次实验后两文件均以备份副本逐字节还原（Timeline 4f093cd4…、selectors 8d733e1d…，与候选清单一致），复跑回到 312/312 exit 0，且我另做探针实验证明该源码形态断言仍是文本在场判定（见 finding TASK-081-R3-F2）。既有断言未被弱化：harness 同一处显示「既有回归 26/26（本文件原有断言，未改动一行）」与实际计数一致。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-39becef96b16447d95203a33d412cf17-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-39becef96b16447d95203a33d412cf17-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-39becef96b16447d95203a33d412cf17-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-39becef96b16447d95203a33d412cf17-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-39becef96b16447d95203a33d412cf17.json",
+        "tools/frontend-regression.mjs",
+        "src/store/selectors.ts",
+        "src/components/Timeline.tsx"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "本任务的失败路径主要是「错误被吞」与「错误路径下的数据后果」，逐条核对未发现只剩成功路径：① 吞错类 #1/#2 的修复方向是让失败**可见**（10 处 let _ = → log::warn!，3 处读库失败不再压成「未配置」），我在 diff 中确认 warn 数量为 3/3/2/2=10 且原 let _ 同步消失，即失败分支仍继续执行但留下可查证据（未改成中断或 panic）；② #7 sync_local_feeds 读队列失败不再降级为空队列继续入队（避免不可逆的重复入队），改为中止并 warn——这正是把「失败降级成默认值」这一反模式改成显式失败，方向正确；③ #5 cleanup_cache 的时区归一是失败/边界类修正，且台账还主动**订正**了原报告的机理（实为漏删而非多删），并配 cutoff 归一化的成对测试；④ #12 lib.rs 消除了两条真实 panic 路径（缺图标启动即崩、Mutex 中毒要等满 10s），且保留了 db::open/tauri run 的 expect 并说明属「不可恢复则明确终止」，未顺手滥用 unwrap_or_else 掩盖错误。⑤ 前端 F3 的边界输入有覆盖：空 clickedAudioUrl、未激活、换集三种「非 toggle」路径各有断言，且 store 侧另有「走 toggle 保留进度 / 走 play 归零」的行为对照，避免只测成功分支。唯一相关保留项是 #6（apply_refresh_result 部分失败口径）判为不修，台账已把理由从失实的「事务跨 HTTP 持锁」订正为真实阻力（rusqlite transaction 需 &mut Connection），并说明残余窗口由幂等 upsert 与 fetch_failed 写回兜住——属如实披露的已知残余风险，非隐藏。未发现新增的静默失败或数据破坏路径。",
+      "evidence_files": [
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/db/articles.rs",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "FAIL",
+      "analysis": "职责与依赖方向本身合理：F3 的判据抽到 src/store/selectors.ts 导出的纯函数 podcastClickAction 并附契约注释，组件与回归网消费同一份判定，避免了「判据内联在组件里无法断言」的老问题（该理由在 selectors.ts:195-212 与 Timeline.tsx:629-635 都写清了，且与既有 timelineSentinel.ts 的处理一致）；未引入新依赖、未改 package.json/Cargo.toml。陈旧引用已清：产品代码内 `git grep podcastClick.ts`（src/ tools/ src-tauri/）零命中，该文件确不存在（Test-Path False），残留命中仅在 .workflow-kit/notes/JOURNAL.md:269 与 RESUME.md 的两份**教训笔记**里，内容是复盘「我曾把注释指向这个不存在的路径」，属正当的历史记录而非未订正的代码引用。但我仍判 FAIL，因为台账可核对性出现硬伤：AUDIT:136（#9 行）声称在 sync_map.rs 里把 feed_exists_by_url「改为精确命中后回退规范化比较」，而 sync_map.rs 对 HEAD 逐字节未改、其 feed_exists_by_url 仍是纯精确匹配，真正的实现在 commands/opml.rs:55-56。这让「按台账核对实现」的读者必然对不上代码，并且与任务范围条件（sync_map.rs 必须 EMPTY diff）自相矛盾——同一候选内一边声称改了它、一边要求它零改动。此外 F3 第二层证据的措辞「组件是否真的消费它」略宽于其实际判别力（见 finding TASK-081-R3-F2）。其余维护面良好：新增断言集中在既有回归文件、复用既有 readFileSync+slice+includes 手法（该手法确在harness:2409 起的 TASK-065 N8/N11 源码形态断言块中使用），未另起平行机制；F4/F2 的覆盖缺口诚实登记并给出后续建议。",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src/store/selectors.ts",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "本候选不引入需要基准的稳态负载路径，故按委托以具体范围说明而非编造测量：改动绝大多数是**错误路径**或**一次性**代码——10 处 let _ = → log::warn!（仅在写失败时执行，成功路径零额外开销）、commands/ai.rs 三处读失败 warn（仅在 Err 分支）、lib.rs 托盘图标 start-up 一次取值、前端的 podcastClickAction 是三次比较的纯函数（每次卡片点击调用一次，无可测成本）、新增的 F3 源码形态断言只在回归网里 readFileSync 读一次 Timeline.tsx，属测试期成本、不进产品运行时。唯一涉热路径的是 #9 去重口径改为 normalize_url：folders.rs:177 走 feed_id_by_url_normalized，而该函数（sync_map.rs:252 起）实现为 list_feeds 后**内存**归一化线性匹配，注释已明示「feeds 数量少（个人订阅几十个），内存规范化匹配即可」——在 add_feed/OPML 导入这类低频操作上成立，且不产生每篇文章级别的调用。我在改动列表与 diff 中未发现引入新的每帧/每文章循环、新的 IPC 往返或新的同步持锁段（#6 被明确判为不修，未新增事务跨度）。BRIEF 的 performance.mode=measure 面向「万级文章的启动/布局切换/正文加载」，与本任务路径无交集，故本项不适用基准回归、也不声称任何提速。",
+      "evidence_files": [
+        "src-tauri/src/db/sync_map.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src/store/selectors.ts",
+        ".workflow-kit/tasks/evidence/TASK-081-review-packet.json"
+      ]
+    }
+  ],
+  "ui_review": null
+}

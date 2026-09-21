@@ -1,0 +1,19 @@
+{
+  "changed_files": [
+    ".workflow-kit/docs/AUDIT-20260919-v2.md",
+    "src-tauri/src/commands/ai.rs",
+    "src-tauri/src/commands/folders.rs",
+    "src-tauri/src/commands/opml.rs",
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/ingestion/staged.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/sync/entries.rs",
+    "src-tauri/src/sync/phases.rs",
+    "src-tauri/src/sync/subscriptions.rs",
+    "src/App.tsx",
+    "src/components/Timeline.tsx",
+    "src/store/selectors.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

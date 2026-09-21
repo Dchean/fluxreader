@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-7605e3fa5b694ae6a60399446899ed56",
+  "task_id": "TASK-081",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260921-t081"
+  },
+  "started_at_utc": "2026-09-21T08:35:15.242513Z",
+  "finished_at_utc": "2026-09-21T09:14:50.159480Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "eff800d549d5db40360f440ff72bfedf90b23a8b614f829ab7ec263f6bcd36d0",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-7605e3fa5b694ae6a60399446899ed56-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-7605e3fa5b694ae6a60399446899ed56-scope.json",
+  "failure_kind": "scope",
+  "failure_reason": "Out-of-scope changes: .workflow-kit/tasks/items/TASK-081.json (allowed: .workflow-kit/docs/AUDIT-20260919-v2.md, src-tauri/src/commands/ai.rs, src-tauri/src/commands/folders.rs, src-tauri/src/commands/opml.rs, src-tauri/src/commands/sync.rs, src-tauri/src/config_sync.rs, src-tauri/src/db/articles.rs, src-tauri/src/db/sync_map.rs, src-tauri/src/ingestion/staged.rs, src-tauri/src/lib.rs, src-tauri/src/sync/entries.rs, src-tauri/src/sync/phases.rs, src-tauri/src/sync/subscriptions.rs, src/App.tsx, src/components/Timeline.tsx, src/store/selectors.ts, src/store/slices/bootstrap.ts, src/store/slices/player.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs)"
+}

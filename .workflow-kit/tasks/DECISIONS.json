@@ -2345,6 +2345,32 @@
         "TASK-081"
       ],
       "recorded_at_utc": "2026-09-21T08:34:11.605346Z"
+    },
+    {
+      "id": "DEC-req104-t081-scope-syncmap-player-20260921",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-21 指令『先commit，然后继续推进，完成项目优化重构』——授权在既有已确认范围内继续推进；本条据此授权 TASK-081 的范围订正（同 REQ-104 验收第三条逐条处置所需）。",
+      "statement": "批准 TASK-081 的 allowed_paths 增加 src-tauri/src/db/sync_map.rs 与 src/store/slices/player.ts：前者是 P3[9]「add_feed/OPML 去重未走 normalize_url」的实现处（feed_exists_by_url），后者是 P3[F3]「播放中同集再点应播放/暂停切换」的实现处（playPodcastEpisode 的进度重置）；审计报告只标了调用点，未标实现点。其余范围、非目标与验收不变。",
+      "scope": [
+        "REQ-104",
+        "TASK-081"
+      ],
+      "recorded_at_utc": "2026-09-21T09:11:48.820121Z"
+    },
+    {
+      "id": "DEC-8a8a2e04ab494b7d81b3c786b8dce77e",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "总控核对：独立审查 PASS（findings 空，五区域全 PASS，candidate fd8c1b71…，verification RUN-d8ee5c8ac2374b308f60c97e9f80a446）；四门禁实测 cargo 202/0/9、lint 0/0、build exit 0、frontend 313/313；REQ-104 验收第三条（P3 项每条有处置结论）已闭合——处置表写入 AUDIT-20260919-v2.md「一之附」，判定为「修」的 13 项各带成对证据（其中 #4/#5/#9 有修前失败证据，F3 三层变异取证计数经实测 2/3/1），判定「不修」的 7 项均写明理由，另有 3 项另立任务遗留已如实登记；全部改动文件均在 allowed_paths 内。验收（2026-09-21）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-081"
+      ],
+      "recorded_at_utc": "2026-09-21T10:35:05.598712Z",
+      "candidates": {
+        "TASK-081": "fd8c1b7117e9d2f606945bd53425f9d29ce41617a903f6d151c3f297b6923412"
+      }
     }
   ]
 }

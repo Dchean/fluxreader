@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-081 · REQ-104 P3 卫生项逐条处置（含不修的理由），闭合验收第三条
 
-**状态**：ready
+**状态**：done
 
 **目标**：闭合 REQ-104 的第三项验收标准「P3 项每条有处置结论（修/不修+理由）」——该项此前只交付了删除面（TASK-070/078）与设计裁决面（TASK-075），P3 卫生清单本身尚未逐条处置留痕。来源：.workflow-kit/docs/AUDIT-20260919-v2.md 的「### P3 卫生类」共 13 条后端 + 7 条前端 + 死代码集群（死代码已由 TASK-070/078 完成，本任务不重复）。**已用只读核查确认各项当前真实状态**（审计报告的行号已漂移，故逐项按代码实测重新定位）：后端 [1] 绑定/清理写失败被吞——实测 sync/subscriptions.rs:119,139、sync/entries.rs:63,92,132、sync/phases.rs:55,74、ingestion/staged.rs:153,176 仍是 `let _ =`（未 warn）；[2] 读失败当默认值——commands/ai.rs:26,45,71 仍是 `.ok().flatten()`（未 warn）；[3] sync_save 留空密码复用（需按「留空只复用 password」核对当前实现）；[4] purge_remote_data:391 仍 `DELETE FROM folders WHERE id NOT IN (SELECT ... FROM feeds ...)`（删所有无成员目录，含用户自建空目录）；[5] cleanup_cache:405 仍 `datetime('now','-N days','localtime')`（时区混用可多删最近 N 小时）；[6] apply_refresh_result（现 ingestion/staged.rs:61+）部分失败口径；[7] sync_local_feeds（commands/sync.rs:151+）读队列失败降级→重复入队；[8] search_articles 的 LIMIT 插值；[9] add_feed/OPML 去重仍走精确 URL（commands/folders.rs:173 `find_feed_by_url`，未 normalize_url）；[10] gist_id 落库失败→孤儿 Gist；[12] init/运行期 unwrap；[13] 锁内 sanitize（审计自身标注「记录备查，量级可接受」）。前端：[F1] selectors.ts:11-18 文件头注释块**实测确实整段重复两次**（11-13 与 16-18 完全相同）；[F2] App.tsx:229-249 的 S/M/J/K 快捷键未让路浮层（Space 已有让路逻辑，见 :217-227）；[F3] 播放中同集再点应播放/暂停切换而非重头开播；[F4] reader.ts markEntriesReadBulk 逐条 IPC；[F5] Timeline.tsx lastStartIndexRef 在 filterKey 后未重置；[F6] bootstrap.ts layoutNeedsBody 恒 false（注释已对齐，仅形式残留）；[F7] mock 模式标读不一致。**实施要求**：逐条给出「修」或「不修＋理由」的结论，并写入 AUDIT 文档或等价台账，使验收可核；对判定为「修」的项实施修复并补断言，对判定为「不修」的项说明理由（如审计自身已标『量级可接受』的 [13]、或属产品决策的项），**不得以『工作量大』为由跳过**。优先处置数据正确性类（[4] 误删用户目录、[5] 时区多删、[9] 去重不一致）与低风险高确定性项（[F1] 重复注释、[1][2] 吞错 warn 化）。
 
@@ -32,20 +32,43 @@
 
 ## 执行与恢复
 
-- 首次开始：None
-- 原截止时间：None
-- 当前截止时间：None
-- 时钟：未开始
-- 已用修复轮：0
+- 首次开始：2026-09-21T08:35:15.235054Z
+- 原截止时间：2026-09-21T12:35:15.235054Z
+- 当前截止时间：2026-09-21T12:35:15.235054Z
+- 时钟：按墙钟计：额度 240 分钟，写入阶段已用约 52 分钟
+- 已用修复轮：3
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 最近检查点
 
+- 2026-09-21T10:02:17.886433Z：编码结果已记录，差异范围已核对：.workflow-kit/docs/AUDIT-20260919-v2.md, src/components/Timeline.tsx, src/store/selectors.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-21T10:02:44.171600Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T10:11:24.369636Z：Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-09-21T10:13:35.228042Z：开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-21T10:15:58.112220Z：编码结果已记录，差异范围已核对：.workflow-kit/docs/AUDIT-20260919-v2.md, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-21T10:17:10.190441Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T10:28:56.643483Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T10:34:12.071683Z：当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 原始证据
 
 [唯一状态记录](../items/TASK-081.json)
 
+- [RUN-7605e3fa5b694ae6a60399446899ed56](../runs/RUN-7605e3fa5b694ae6a60399446899ed56.json)
+- [RUN-d4d5322673164bb798c606917265255a](../runs/RUN-d4d5322673164bb798c606917265255a.json)
+- [RUN-d2c519c2227340dbbb516d2c0cf467df](../runs/RUN-d2c519c2227340dbbb516d2c0cf467df.json)
+- [RUN-f84c991aecf84dc290ece265e3a3a963](../runs/RUN-f84c991aecf84dc290ece265e3a3a963.json)
+- [RUN-4ead30c08c0d4b7fa09c1ceeb93c88ea](../runs/RUN-4ead30c08c0d4b7fa09c1ceeb93c88ea.json)
+- [RUN-a4b42e0e98c942cc87129ddb9a0808e6](../runs/RUN-a4b42e0e98c942cc87129ddb9a0808e6.json)
+- [RUN-1be4fce72b17495283bf7d7c6a18cdcf](../runs/RUN-1be4fce72b17495283bf7d7c6a18cdcf.json)
+- [RUN-0de5935451f44ccba0c284347bb49c69](../runs/RUN-0de5935451f44ccba0c284347bb49c69.json)
+- [RUN-3fdc51e9a6e64fc69aa4ffb9bf820ca3](../runs/RUN-3fdc51e9a6e64fc69aa4ffb9bf820ca3.json)
+- [RUN-39becef96b16447d95203a33d412cf17](../runs/RUN-39becef96b16447d95203a33d412cf17.json)
+- [RUN-37efbed38af647729ceff855242701bd](../runs/RUN-37efbed38af647729ceff855242701bd.json)
+- [RUN-9417a6a4d14c4974a897e808254acbe1](../runs/RUN-9417a6a4d14c4974a897e808254acbe1.json)
+- [RUN-d13cc7b3e2b546f98d5282a39a65575f](../runs/RUN-d13cc7b3e2b546f98d5282a39a65575f.json)
+- [RUN-d8ee5c8ac2374b308f60c97e9f80a446](../runs/RUN-d8ee5c8ac2374b308f60c97e9f80a446.json)
+- [RUN-a4f5b89423c74de99e331efa14466caa](../runs/RUN-a4f5b89423c74de99e331efa14466caa.json)
 
 卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

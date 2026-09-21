@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-081",
+  "run_id": "RUN-9417a6a4d14c4974a897e808254acbe1",
+  "status": "ready_for_verification",
+  "summary": "TASK-081 修复轮 3：订正第 3 轮审查的 2 条 FINDING，并就「连续三轮各引入一处新失实」做了**系统性自查**（不只修被点名的那一行）。**R3-F1（medium）「台账第 9 行把 feed_exists_by_url 的规范化回退归给 sync_map.rs，而该文件对 HEAD 逐字节未改」——成立且已订正**：这是我第 1 轮把修复从 sync_map.rs 挪到 opml.rs 调用方后**留在台账里的旧归属**，且它与本任务冻结的范围条件（sync_map.rs 必须 diff 为空）自相矛盾。已把第 9 行改写为如实分述两条入口的真实实现处（commands/folders.rs 的 add_feed 改用 feed_id_by_url_normalized；commands/opml.rs 的去重改为「精确命中**或**规范化命中」），并**显式声明 `db/sync_map.rs` 未改动**及其理由（该函数另有「按原串判存在」的用途，回退逻辑留在调用方可不动其既有语义）。**R3-F2（low）「源码形态断言只判文本在场、不是行为判定」——成立且已实质加强**：审查者实测把实参 `cur.audioUrl` 换成 `''` 后三处 token 一字未动、toggle 分支成为不可达死代码、缺陷完整复现，而门禁仍全绿。已把该层断言从「查 token 在场」升级为**逐个钉死实参表达式**（解析 `podcastClickAction(...)` 的实参并断言 `cur.isActive` / `cur.audioUrl` / `audioUrl` 三者精确匹配），并在注释中如实声明本层是源码形态证据（非 DOM 点击）。**新证据实测**：施加审查者的原变异（`cur.audioUrl` → `''`）→ 新增的实参断言 FAILED、合计 312/313；还原后 313/313。**系统性自查（针对三轮复发）**：写了一次性脚本把台账 20 行里提到的**每个代码文件**与 `git diff --name-only` 逐条比对，检查「文件是否存在」与「声称『修』的文件是否真被本任务改过」。结论：除已订正的第 9 行外，未发现其它「文件不存在」或「声称已修但实际未改」的条目（脚本报出的其余项经人工核对为其自身路径解析局限——短名歧义、`.ts` 命中 `.tsx`、以及把「未改动」的否定句误读为肯定——非台账错误）。**门禁实测（修复轮 3）**：cargo test 202 passed / 0 failed / 9 ignored；lint 0 warnings / 0 errors；build exit 0；frontend **313/313**（较上轮 +1 条实参断言）。全部改动仍在 allowed_paths 内；`src-tauri/src/db/sync_map.rs` 与 `src/store/slices/player.ts` 的 diff 仍为空（与台账新表述一致）。变异取证全程用备份文件还原（未用 git checkout）。",
+  "changed_files": [
+    ".workflow-kit/docs/AUDIT-20260919-v2.md",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

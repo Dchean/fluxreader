@@ -1,0 +1,105 @@
+{
+  "task_id": "TASK-081",
+  "candidate_digest": "450b405de3d3318e27263d8a9d6ba8b46bd181a2dd3fcba8b87aa803411c8a48",
+  "verification_run": "RUN-1be4fce72b17495283bf7d7c6a18cdcf",
+  "verdict": "FAIL",
+  "summary": "TASK-081 第二轮独立复核（REQ-104 P3 卫生项逐条处置）。四门禁与候选摘要全部复核通过：cargo test 日志 27 个 suite 汇总 202 passed / 0 failed / 9 ignored，我方 cargo test --lib 复跑 104 passed / 0 failed / exit 0；npm run lint 复跑 exit 0 且逐字 'Found 0 warnings and 0 errors'（第一轮修复引入的 1 条 warning 已消失，0/0 确认）；build 记录日志 exit 0（vite 121ms，按指示未复跑）；npm run test:frontend 复跑 exit 0 且 26/26 + 284/284 = 310/310。171 个 candidate_files 的 sha256 实算全部匹配，候选摘要可信；14 个改动源文件 + AUDIT 文档全部 crlf=0 且无 BOM；改动文件全部落在 packet 的 allowed_paths 内，outside/protected 为空；src-tauri/src/db/sync_map.rs 与 src/store/slices/player.ts 的 git diff 为空；第一轮遗留的实现期探测脚本 _mut5.py 已不在仓库中。第一轮的 F1（high）确有实质改善：我实做变异把 src/store/selectors.ts 的 podcastClickAction 改回无条件 'play'，npm run test:frontend 恰好 2 条断言 FAILED、exit 1，还原后 sha256 逐字节一致且 310/310 —— 该函数现在真有牙齿。但同一发现的核心缺口仍在：把 Timeline.tsx 中消费该函数的组件守卫整段删除（即第一轮的变异），门禁仍 310/310 全绿 exit 0，而 AUDIT 处置表 F3 行仍以「成对证据」表述该修复，未限定「证据只覆盖纯函数、不覆盖组件消费点」。四条例账订正本身全部核实准确（F4 的 allowed_paths 与技术claim、#6 的事务不跨 HTTP、#1 计数 10 与 3/3/2/2 分解、遗留清单含 F4/F2）；但本轮新增的 Timeline.tsx 注释（及 harness 内复制的同一段文字）声称判据位于 src/components/podcastClick.ts，该文件不存在——属本轮新引入的不实陈述。故判 FAIL：两条缺陷均可低成本修复，其余各方面（范围、门禁、行尾、摘要、行号引用）经实测无误。",
+  "findings": [
+    {
+      "id": "TASK-081-R2-F1",
+      "severity": "medium",
+      "area": "regression",
+      "summary": "F3 的「成对证据」仍只钉住抽取出的纯函数，钉不住组件；删除 Timeline.tsx 的守卫后门禁依旧 310/310 全绿，而台账仍按未限定的「成对证据」表述",
+      "details": "第一轮的 F1 是「删掉守卫后门禁仍 307/307 全绿，而台账宣称去掉守卫恰好 2 条失败」。本轮把判据抽成 src/store/selectors.ts 的导出纯函数 podcastClickAction，由 Timeline.tsx 的 PodcastCard.play()（:634）与 tools/frontend-regression.mjs（:1111-1135）共同消费，我实做两种变异分别取证：\n(a) 把 podcastClickAction 改成无条件 return 'play'（修前逻辑）→ npm run test:frontend exit=1，逐字报「新增 store 行为断言 282/284 通过」「合计 308/310 通过」，失败项恰为「(P3[F3]) 播放中 + 同 audioUrl ⇒ toggle……」与「(P3[F3]) 修前判据可复现……」这 2 条，符合台账描述；用备份文件还原后 sha256 = 8d733e1d02002d16a692a9de453e195d6a0a155d15c0767dc7b4258bb57f31c2，与 candidate manifest 完全一致，且 310/310 exit 0。——这一半是真实改善，纯函数确实有牙齿。\n(b) 但同一发现的根因未消除：我按第一轮的原变异，把 Timeline.tsx 中那段守卫（含 `podcastClickAction(...) === 'toggle'` 分支与 togglePlayerPlay 调用）整段删除，退回修前的无条件 `playPodcastEpisode(item.title, feedName, item.cover ?? '', audioUrl, item.id)`，再跑 npm run test:frontend：exit=0，「既有回归 26/26」「新增 store 行为断言 284/284」「合计 310/310」，零失败；随后以备份还原，sha256 = 5ba6bd01d4221f83100f5b1e95cd1364e5f694cc172a8bc874b0c33f5150cd26，与 candidate 一致。\n即：用户可感的修复（播放中再点同一集改为暂停并保留进度，而非从 0 重播）它的**组件消费点**依然零覆盖；断言只覆盖被抽取的判据函数，「组件是否真的调用它」不受保护。而 AUDIT-20260919-v2.md 第 148 行 F3 行仍写「成对证据：**把该函数改回无条件 `play`（修前逻辑）→ 新增的两条断言 FAILED**，其余全绿」——该句字面为真，但未限定证据范围，读者（含验收方）会据第一轮的原语（「去掉守卫」）理解成修复点已被保护。事实是可删除组件守卫而门禁全绿。\n值得注意的是该缺口修起来并不贵：harness 既已 `await import('../src/components/Timeline.tsx')`（:2086）渲染组件，又在 :2395 用 fs.readFileSync 读同一文件源码，两种组件级钉法（SSR 点击断言或源码顺序/存在性断言）成本都低——第一轮已经指出这一点，本轮仍未补，只在遗留清单里改述为 F2 的建议。",
+      "evidence_files": [
+        "src/store/selectors.ts",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        ".workflow-kit/tasks/evidence/TASK-081-cumulative-diff.txt"
+      ]
+    },
+    {
+      "id": "TASK-081-R2-F2",
+      "severity": "low",
+      "area": "maintainability",
+      "summary": "本轮新增注释指向不存在的文件 src/components/podcastClick.ts（判据实际在 src/store/selectors.ts），且该错误文字被复制进回归网注释——属本轮新引入的不实陈述",
+      "details": "src/components/Timeline.tsx:629-633 本轮新增的注释写道：「判据抽成纯函数 `podcastClickAction`（见 src/components/podcastClick.ts，独立成文件以避开 oxlint 的 react/only-export-components 约束，与 timelineSentinel.ts 同一做法）」。该文件不存在：Get-ChildItem -Recurse -Filter 'podcastClick*' 零命中，git grep 'podcastClick\\.ts' 只命中这一行注释本身。实际实现是 src/store/selectors.ts:213-222（export type PodcastClickAction + export function podcastClickAction），Timeline.tsx:8 也确实是从 '../store' 导入它，且 selectors.ts 的契约注释（:197-212）描述的放置理由（避免在组件文件 export 非组件函数）才是对的。\n同一段不实描述还出现在 tools/frontend-regression.mjs:1107-1110：「判据已抽成 Timeline.tsx 导出的纯函数 `podcastClickAction`……**组件真实消费的分支**」——两处均错：判据既不在 Timeline.tsx 里导出，也不在 podcastClick.ts 里；且「组件真实消费的分支」这一表述与同文件断言的实际内容不符（断言直接调纯函数，不经过组件，见 TASK-081-R2-F1）。\n这正是本项目反复因「不准确宣称」失败的那一类问题，只是本轮换了位置（从台账表格搬进了代码注释与测试注释）。修复成本极低：把两处注释的文件路径改为 src/store/selectors.ts，并把「组件真实消费的分支」改为「判据本身（组件在同一处消费）」这类可核对的说法。",
+      "evidence_files": [
+        "src/components/Timeline.tsx",
+        "src/store/selectors.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    }
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "REQ-104 第三条「P3 项每条有处置结论（修/不修+理由）」成立：AUDIT-20260919-v2.md 第 119-161 行「一之附」表逐条给出后端 13 条 + 前端 7 条结论，无遗漏无空项，末尾第 154-161 行另有「仍未闭环、需另立任务的遗留」清单。验收②点名的三项数据正确性修复我逐项核实存在且有断言：[4] db/articles.rs 的 purge_remote_data 改为先选 remote_folder_ids（remote_id 非空 或 成员 origin='remote'）再逐 id 删，配套 3 条测试 purge_remote_data_keeps_user_created_empty_folder / _keeps_user_folder_with_local_feed / _removes_emptied_remote_folder 均在（:832/:880 附近）；[5] cutoff 改为 datetime('now','-N days') 并与 datetime(published_at) 同侧归一（:435-446），测试 cleanup_cache_cutoff_is_timezone_normalised 在（:904）；[9] commands/folders.rs:177 改用 db::feed_id_by_url_normalized，测试 dressed_up_duplicate_url_is_rejected 在（:302）并覆盖 utm_*/协议/www./尾斜杠四变体。验收③④核实：[1][2] warn 化、[F1] 重复注释块清除、[F2] App.tsx 新增 overlayOpen 判定并让路单键 S/M/J/K（Ctrl/Alt/Meta 组合键不受影响）。但验收②「判定为『修』的项补成对证据」在 F3 上仅部分成立：判据函数的变异证据为真（我实做确认恰好 2 条失败），然而组件消费点仍可被整段删除而门禁全绿（TASK-081-R2-F1），台账未限定证据范围；此外本轮新增注释把判据位置写成不存在的文件（TASK-081-R2-F2）。这两项都落在「交付物中的不实宣称」这一类，故 requirements 判 FAIL。另核实无越界行为：owner 决定 DEC-req104-p3-hygiene-disposition-20260921 已授权逐条处置。",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src/App.tsx",
+        "src/store/selectors.ts",
+        "src/components/Timeline.tsx"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "FAIL",
+      "analysis": "门禁复核（原始日志重算 + 复跑）：cargo_test 日志 27 个 'test result' 行汇总 = 202 passed / 0 failed / 9 ignored，与台账一致（另注：stderr 含 15 条 'warning:' 行，但逐条看均为 linker '正在创建库' 提示与 e2e test target 的 'multiple methods are never used' 死代码告警，非 Rust 编译告警，基线既有、非本轮引入）；我方 cargo test --lib 复跑 = 104 passed / 0 failed，exit 0。npm run lint 复跑 exit 0，逐字 'Found 0 warnings and 0 errors'（确认第一轮修复引入的 1 条 warning 已消除，0/0 成立）。build 记录日志 exit 0（vite 121ms，按指示未复跑）。npm run test:frontend 复跑两次：正常态 exit 0、26/26 + 284/284 = 310/310。变异取证（这是本轮最重要的部分）：(a) 把 src/store/selectors.ts 的 podcastClickAction 改回无条件 'play' → exit 1，恰好 2 条 (P3[F3]) 断言失败（282/284、308/310），还原后 sha256 与 candidate 逐字节一致（8d733e1d…f31c2）并回到 310/310——第一轮 F1 指出的「断言无捕获力」在纯函数层面确已修复，台账「恰好 2 条 ASSERTION FAILED」的说法为真。(b) 但把 Timeline.tsx 的组件守卫整段删除（第一轮的原变异）→ 仍 310/310 全绿、exit 0，还原后 sha256 5ba6bd01…50cd26 与 candidate 一致——组件消费点仍零覆盖。harness 已 import 并 SSR 渲染 Timeline（:2086），组件级断言在现有设施内可行，故该缺口不属「成本高于收益」。据此回归质量仍不达标，判 FAIL。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-1be4fce72b17495283bf7d7c6a18cdcf-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-1be4fce72b17495283bf7d7c6a18cdcf-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-1be4fce72b17495283bf7d7c6a18cdcf-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-1be4fce72b17495283bf7d7c6a18cdcf-build.stdout.txt",
+        "src/store/selectors.ts",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "异常/边界/重复执行路径逐条核对，方向均正确且与处置结论一致。#4：新 SQL 只删「仍带 remote_id 或成员 origin='remote'」且已无成员的目录，用户自建空目录与含本地订阅的目录都有测试保住，仍与原实现同处一个事务；空集边界（remote_folder_ids 为空）退化为不删任何目录，安全。#5：cutoff 去掉 'localtime'，并对被比较列用 datetime(published_at) 归一以吸收 RFC3339 的 'T' 与 'Z'；我确认修后四种样本（真实超龄、边界、新鲜、无偏移）语义一致。#7：读队列失败不再降级为空队列（原先会把每个未绑定源重复 enqueue，不可逆），改为中止并 warn；take_sync_queue 为纯 SELECT，中止不丢队列项，重试幂等。#8：search_articles 的 LIMIT 由插值改绑定参数并收敛上界（非正数 → 100，上限 1000），堵住「负数在 SQLite 意为不限制」的边界。#12：托盘图标 unwrap 改为有则设/无则 warn，ack 互斥量中毒改 unwrap_or_else(into_inner)；db::open 与 tauri run 的 expect 保留并说明为不可恢复入口。#1/#2：错误路径改为可见（含 staged.rs:185 失败标记写回与 commands/ai.rs 读库失败不再压成「未配置」）。本轮新增的 F3 分支本身也在失败路径上正确：无 audioUrl 时返回 'play'，交给 playPodcastEpisode 走它自己的「无可播放地址」提示，未被 toggle 分支吞掉（selectors.ts:220 短路在前）。我未发现新的未处理异常路径或数据/权限边界回退。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src/store/selectors.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "FAIL",
+      "analysis": "范围与结构整体合格：git status 显示的非 workflow 改动共 14 个文件，全部落在 packet 的 allowed_paths 内（outside 为空）；src-tauri/src/db/sync_map.rs 与 src/store/slices/player.ts 的 git diff 为空，确与 candidate 摘要一致；171 个 candidate_files 的 sha256 我逐个实算，0 mismatch / 0 missing；14 个改动源文件与 AUDIT 文档全部 crlf=0、无 BOM；第一轮登记的 protected_paths 内遗留探测脚本 .workflow-kit/tasks/evidence/_mut5.py 已不存在。抽纯函数由 JSX 与回归网共用同一份定义（selectors.ts ↔ Timeline.tsx:8 ↔ harness:1111）是正确的依赖方向，与既有 timelineSentinel 先例一致，且刻意避开 oxlint 的 react/only-export-components——lint 由第一轮的 1 warning 回到 0/0，这条经验已被正确固化。\n但两条维护性问题成立：(1) Timeline.tsx:629-633 与 harness:1107-1110 新增的注释把判据文件写成 src/components/podcastClick.ts（不存在），并把断言描述为「组件真实消费的分支」（断言实际直接调纯函数）——本轮新引入的不实陈述，会误导后续维护者去错误的路径找实现（TASK-081-R2-F2）；(2) F3 的修复点（组件消费守卫）依旧无断言保护，且台账以未限定的「成对证据」表述，使维护者误以为改动有网（TASK-081-R2-F1）。另外沿用既有约定：多处注释记录 P3 编号、修前形态与理由，便于回溯，这一点做得好。",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src/store/selectors.ts",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs",
+        "src-tauri/src/db/sync_map.rs",
+        "src/store/slices/player.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "本任务无基准要求，且改动基本不在热路径或属错误路径/一次性路径，不伪称实测提升：#4 purge_remote_data 是断开/清理时的一次性动作（新增一次只读 SELECT 取 remote_folder_ids，随后按 id 逐条 DELETE，目录数量为个位到十位数，量级可忽略）；#5 cleanup_cache 是手动/低频清理，datetime(published_at) 按列包裹会使该列索引失效，但该语句本就是批量删除语义、清理场景非热路径，可接受；#7/#1/#2/#12 全在错误路径或启动一次性路径，不增加稳态开销；#8 LIMIT 由插值改绑定参数，对搜索结果集无性能影响（仅提升安全性）；#9 的 normalize 去重走 list_feeds 后内存比较（feed 数量为几十，量级可忽略），且换来避免重复订阅导致的文章翻倍——净收益为正。本轮新增的 F3 判据是 O(1) 字符串比较，无性能影响。\n第一轮 F2 关于「markEntriesReadBulk 逐条 IPC」的性能项，本轮核对已落地为真实理由：reader.ts:365 仍是 Promise.allSettled(unread.map((id) => api.setRead(...)))，src/lib/api.ts:264 的 setRead 就是一次 invoke('set_read')，Rust 侧 git grep set_read_bulk/mark_read_bulk 零命中——逐条 IPC 确实仍在；而 AUDIT F4 行现给出的真因（需要改 src-tauri/src/commands/articles.rs 与 src/lib/api.ts）经我对照 packet 的 allowed_paths 逐条确认成立：这两条路径均不在本任务 allowed_paths 内（reader.ts 在，但单改前端无法消除往返），因此转登记为独立跟进项并给出修法是诚实且可辩护的处置，不再是以不成立论据关闭的性能项。唯一遗留陈述问题是同一段「真因」文字被复制到工具链注释时改成了不存在的 podcastClick.ts，属文档准确性问题，已记入 TASK-081-R2-F2，不构成性能结论缺陷。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src/store/slices/reader.ts",
+        "src/lib/api.ts",
+        "src-tauri/src/commands/articles.rs",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md"
+      ]
+    }
+  ],
+  "ui_review": null
+}

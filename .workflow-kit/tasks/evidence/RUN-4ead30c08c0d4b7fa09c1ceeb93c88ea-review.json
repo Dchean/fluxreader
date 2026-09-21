@@ -1,0 +1,120 @@
+{
+  "task_id": "TASK-081",
+  "candidate_digest": "6b298f6aee30bd849b8f7e5110e93ca05bb778b9e002388d198fb2cb430d5c14",
+  "verification_run": "RUN-f84c991aecf84dc290ece265e3a3a963",
+  "verdict": "FAIL",
+  "summary": "独立复核 TASK-081（REQ-104 P3 卫生项逐条处置）。已核实项：AUDIT 新章节「一之附」对后端 13 条 + 前端 7 条逐条给出「修/不修+理由」，验收①成立；四门禁从原始日志重算且我方复跑一致（cargo 202/0/9、lint 0/0、build exit 0、frontend 307/307 exit 0；cargo test --lib 104 passed exit 0）；package.json/Cargo.toml/Cargo.lock 零改动；14 个改动源文件全为 LF；真实用户库 C:\\Users\\A\\AppData\\Roaming\\com.fluxreader.app\\fluxreader.db 的 mtime 为 2026-09-18（早于本任务 08:35Z 开始时刻），未被写入；抽查 171 个 candidate_files 的 sha256 全部匹配；src-tauri/src/db/sync_map.rs 与 src/store/slices/player.ts 的 git diff 为空（作者改走 in-scope 调用点，成立）。我独立做了 4 组变异实验：回退 #4 的目录过滤、#5 的 cutoff（localtime+裸文本比较）、#9 的规范化去重，对应测试均如宣称那样 FAIL（三处均有真实牙齿）；但删除 F3 在 Timeline.tsx 的守卫后，门禁仍 307/307 全绿——即 F3 声称的「成对证据」并不存在。另核实 F4 的「不修」理由与代码/历史事实双重不符。因存在两处不实宣称，判 FAIL。",
+  "findings": [
+    {
+      "id": "TASK-081-F1",
+      "severity": "high",
+      "area": "regression",
+      "summary": "F3 声称的「成对证据」不存在：删掉 Timeline.tsx 的守卫后前端门禁仍 307/307 全绿",
+      "details": "AUDIT 处置表 F3 行宣称「成对证据：新增 3 条断言，去掉守卫后恰好 2 条失败（换集那条正确保持通过）」。我按此描述做变异：把 src/components/Timeline.tsx 中 P3[F3] 的守卫（if (cur.isActive && audioUrl && cur.audioUrl === audioUrl) { togglePlayerPlay(); return; }）整段删除，还原为修前的无条件 playPodcastEpisode，然后运行真实门禁命令 npm run test:frontend：exit=0，「既有回归 26/26」「新增 store 行为断言 281/281」「前端逻辑回归合计 307/307」，无任何失败。说明 tools/frontend-regression.mjs 里 5 条 P3[F3] 断言只调用了 store 的 togglePlayerPlay / playPodcastEpisode，从未触达组件内那个分支；该守卫目前零测试覆盖。注意 harness 注释本身是诚实的（明说「组件内的分支由代码注释记录」），但 AUDIT 处置表给出了相反的、可被证伪的宣称，与验收②「判定为『修』的项补成对证据」的要求不符。且 harness 已在 :2083 直接 import ../src/components/Timeline.tsx，组件级断言在现有设施内可行。",
+      "evidence_files": [
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md"
+      ]
+    },
+    {
+      "id": "TASK-081-F2",
+      "severity": "medium",
+      "area": "performance",
+      "summary": "F4「不修」理由两处与事实不符，且掩盖了一个成本不高的真实修法",
+      "details": "AUDIT 处置表 F4 行称「已由 TASK-067/N10 一带改为『批量标读合并』路径……残余的逐条入队发生在单进程内、每条一次轻量 SQLite 写，非 IPC 往返」。两点均不成立：(1) TASK-067 的 N10 在 AUDIT 原文（第 75-77 行）是「数据层一批 async action 无 catch：IPC 失败 → unhandled rejection + 本地与后端静默脱节」，其最小改法是「统一 extractError + showToast」，即错误可见性，与批量标读无关；把「批量标读合并」归因于 N10 是误引。(2) 逐条 IPC 并未消失：src/store/slices/reader.ts:365 在 markEntriesReadBulk 内仍是Promise.allSettled(unread.map((id) => api.setRead(Number(id), true)))，而 src/lib/api.ts:264 的 setRead 就是await inv('set_read', ...) 的一次 invoke，注释「TASK-067 N10：批量标读失败单条提示（allSettled 防 toast 洪峰）」也印证该处只加了错误提示、未做合并；Rust 侧亦不存在 set_read_bulk（grep set_read_bulk/mark_read_bulk 零命中）。因此「非 IPC 往返」的说法与代码相反——它正是逐条 IPC 往返。结论：disposition「不修」或许仍有讨论空间（单次标读是本地进程轻量写），但给出的理由不成立，并且掩盖了一个成本不高的修法（新增一个 set_read_bulk 命令，或在既有 schedule_state_push 去抖上收口）。",
+      "evidence_files": [
+        "src/store/slices/reader.ts",
+        "src-tauri/src/commands/articles.rs",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md"
+      ]
+    },
+    {
+      "id": "TASK-081-F3",
+      "severity": "low",
+      "area": "maintainability",
+      "summary": "#6 的「不修」理由把事务约束说反了：该事务不会跨越 HTTP",
+      "details": "AUDIT 处置表 #6 行称「改为『包事务』会与三段式『HTTP 不持锁』的设计冲突（事务跨 HTTP 会长时间持锁）」。但 apply_refresh_result 的调用点位于 src-tauri/src/ingestion/staged.rs:168-177，此时 db.lock().await 已取得，HTTP 早在 :121 的 fetch_and_parse 完成；在 :168 之后开启并在 :177 结束的事务完全落在同一次加锁区间内，不会跨越 HTTP，也不会长时间持锁。真实阻力只是签名层面（rusqlite 的 Connection::transaction() 需要 &mut Connection，而当前 conn 为 MutexGuard，可 &mut 解引用取得；调用点需把 apply_refresh_result 的接收参数改成可 Deref 到 Connection 的形式）。disposition 本身（保留现状：失败窗口小、下一轮幂等 upsert 补齐、可见性已由 fetch_failed 写回兜住，见 #1）仍属可辩护，但支撑它的技术理由不准确，属于「不修理由需订正」而非「不修的结论错误」。",
+      "evidence_files": [
+        "src-tauri/src/ingestion/staged.rs",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md"
+      ]
+    },
+    {
+      "id": "TASK-081-F4",
+      "severity": "low",
+      "area": "maintainability",
+      "summary": "计数自相矛盾，且实现期遗留未跟踪探测脚本 _mut5.py 于证据目录",
+      "details": "(1) 计数不一致：AUDIT 处置表 #1 与 TASK-081-cumulative-diff.txt 均写「9 处 let _ = 改为 log::warn!」，但同一句括号内列举为 sync/subscriptions.rs x3 + sync/entries.rs x3 + sync/phases.rs x2 + ingestion/staged.rs x2 = 10；按 git diff 统计这 4 个文件的新增 log::warn! 亦为 3/3/2/2=10。差异方向是少报（不构成夸大），但作为台账数字应订正。(2) 仓库内遗留实现期探测脚本 .workflow-kit/tasks/evidence/_mut5.py（未跟踪，创建于 2026-09-21 16:39 本地时间，早于本次验证 RUN 的 17:26，属实现者遗留；其内容为把 articles.rs 备份为 .wf-bak 并回退 #5 的 cutoff）。该文件位于 protected_paths（.workflow-kit/tasks/**）内，我未删除，仅登记，供总控决定归档或清除。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-081-cumulative-diff.txt",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md"
+      ]
+    }
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "REQ-104 第三条「P3 项每条有处置结论」已满足：AUDIT-20260919-v2.md 新增「一之附：P3 卫生类逐条处置结论」（第 119-159 行）对后端 13 条 + 前端 7 条逐条给出「修」或「不修＋理由」，无遗漏、无空项，末尾另有「仍未闭环」遗留清单。验收②要求「修」项有成对证据并点名 [4][5][9]：这三项我以独立变异实测确认成立——回退 #4 的目录过滤 SQL、#5 的 cutoff（localtime + 裸文本比较）、#9 的原始精确匹配后，对应测试 db::articles::tests::purge_remote_data_keeps_user_created_empty_folder、db::articles::tests::cleanup_cache_cutoff_is_timezone_normalised、commands::folders::tests::dressed_up_duplicate_url_is_rejected 分别 FAILED（cargo exit=101），恢复后 104 passed。验收③（[1][2] warn 化 + [F1] 重复注释块清除）经 diff 核实：4 个 sync/ingestion 文件新增 10 处 log::warn!，selectors.ts 删除了重复的 3 行注释块。验收④ F2 已实现（App.tsx 新增 overlayOpen 判定并让路 S/M/J/K）。但验收②在 F3 上不成立：处置表宣称「去掉守卫后恰好 2 条失败」，实测删掉守卫后门禁全绿（见 TASK-081-F1），交付物含可被证伪的验证宣称，故 requirements 判 FAIL。同时确认 #3/#7 的行为变更属于审计条目本身（审计原文对 #3 即表述为「留空只复用 password」），且由 owner 决定 DEC-req104-p3-hygiene-disposition-20260921（issuer=owner、status=accepted、scope=[REQ-104, TASK-081]、记录于 08:34:11Z，早于任务开始 08:35:15Z）授权「逐条处置并实施判定为修的项」，未见越权项。",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src/App.tsx",
+        "src/store/selectors.ts",
+        ".workflow-kit/tasks/evidence/TASK-081-review-packet.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "FAIL",
+      "analysis": "从原始日志重算门禁与复跑一致：cargo_test 日志 54 条 test result 汇总为 202 passed / 0 failed / 9 ignored、0 条 warning；我方 cargo test --lib 得 104 passed / 0 failed、exit 0；npm run test:frontend exit 0 且逐行输出「既有回归 26/26」「新增 store 行为断言 281/281」「合计 307/307」；lint「Found 0 warnings and 0 errors」exit 0；build 日志 exit 0。基线 193+9 与 303+4 的换算与 accept ⑤ 相符，未见既有断言被弱化。但覆盖真实性有问题：F3 的组件分支零覆盖——删除 Timeline.tsx 的 P3[F3] 守卫后 npm run test:frontend 仍 307/307 通过、exit 0，与处置表所称「去掉守卫后恰好 2 条失败」直接矛盾（见 TASK-081-F1）。相对地，#4/#5/#9 三处确实有牙齿（变异后各自 1 failed、0 passed、exit 101）。据此回归质量不达标：一项被判「修」的用户可感行为改动没有任何断言保护，且台账对此作了不实陈述。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-f84c991aecf84dc290ece265e3a3a963-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-f84c991aecf84dc290ece265e3a3a963-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-f84c991aecf84dc290ece265e3a3a963-lint.stdout.txt",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "逐条核对了异常/边界/重复执行路径，均与处置结论一致且方向正确。#4：新 SQL 只删「仍带 remote_id 或成员为 origin='remote'」且已无成员的目录，用户自建空目录与本地订阅所属目录都有测试（purge_remote_data_keeps_user_created_empty_folder / _keeps_user_folder_with_local_feed / _removes_emptied_remote_folder），且仍在同一事务内提交；变异验证有牙齿。#5：我以 python sqlite3 3.50.4 独立复算了语义——本机时区为 UTC+8，修前 cutoff 比真实 UTC 阈值晚 +8.0h；在 48 个边界样本中修前判错 22 个，其中 21 个是「漏删」（应删未删）、仅 1 个是「多删」（仅当站点存 +offset 远落后于本机时区，如 -11 区、真实龄 167h 的样本）。故作者对审计「多删最近 N 小时」的机理订正把握住了主因（T 与空格在第 11 字符比较时 'T'(0x54) > ' '(0x20)，日期相同即恒判不够旧），方向正确；修后 48/48 全对，datetime() 归一确实消歧。严格说错误符号依赖存储偏移与本机时区的相对关系，故「主要是漏删」而非「只会漏删」，但作为订正已足够准确，未夸大。#7：读队列失败由「降级为空队列继续入队」改为中止并 warn，第二处把读失败当「可能有待推项」（宁可多跑幂等的 feeds_phase）；take_sync_queue 经查是纯 SELECT（不 drain），故中止不丢队列项，重复入队确实不可逆而重试幂等，取舍成立。#12：托盘图标 unwrap 改为有则设/无则 warn，ack 互斥量中毒用 unwrap_or_else(into_inner) 容忍；保留 db::open/tauri run 的 expect 已说明为不可恢复入口，合理。#1/#2：错误路径改为可见（set_feed_fetch_state 写失败会让指数退避失效，此处 warn 化价值最高），load_prompts 保留默认回落属既有设计并已说明。空输入侧：search_articles 非正 LIMIT 回落 100/上限 1000，负值不再等于「不限制」。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/sync/phases.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "范围与卫生整体合格：全部 15 个改动文件均落在 packet 的 allowed_paths 内，outside/protected 为空；src-tauri/src/db/sync_map.rs 与 src/store/slices/player.ts 的 git diff 为空（作者把 #9 落到 commands/opml.rs、把 F3 落到 Timeline.tsx 的播放入口，符合“改 in-scope 调用点”的说法，我实测 hash 与 candidate 一致）。无新增依赖（package.json/package-lock.json/Cargo.toml/Cargo.lock 零改动），14 个改动源文件全为 LF，无新增 dead_code/unused 警告（cargo 日志 0 warning）。注释质量好：多处记录 P3 编号、修前形态与理由，便于回溯。遗留两项低危问题（见 TASK-081-F3/F4）：#6 的「不修」理由把事务约束说反（该事务不会跨越 HTTP，真实阻力仅是 &mut Connection 的签名适配；结论本身仍可辩护）；#1 的计数「9 处」与同句列举的 10 处自相矛盾；证据目录遗留实现期未跟踪脚本 _mut5.py（位于 protected_paths，我未删除，仅登记）。另 F2 无断言一事作者已如实写明「未加前端断言」并记录判据，属诚实披露的覆盖缺口，非隐瞒；结合 harness 可 import 组件，我认为该判定可接受但应在遗留清单中显式登记，目前它只写在表格理由里。",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        ".workflow-kit/tasks/evidence/TASK-081-cumulative-diff.txt",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src/store/slices/player.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "FAIL",
+      "analysis": "本任务无基准要求，且改动基本不在热路径：#4 是断开连接时的一次性清理（新增一次只读 SELECT 取 remote_folder_ids，随后按 id 逐条 DELETE，目录数量为个位到十位数，量级可忽略）；#5 是手动/低频缓存清理，且 datetime(published_at) 按列包裹会使该列索引失效，但该查询本就是全表扫描语义上的批量删除、清理场景非热路径，可接受；#7/#1/#2/#12 全在错误路径或启动一次性路径；#8 的 LIMIT 由插值改为绑定参数，对搜索结果集无性能影响（反而更安全）。真正涉及性能宣称的是 F4「markEntriesReadBulk 逐条 IPC」：作者以「已由 TASK-067 批量路径覆盖、残余为非 IPC 的进程内轻量 SQLite 写」为由判「不修」，但代码事实是 src/store/slices/reader.ts:365 仍对每个 id 调用 api.setRead → invoke('set_read')，即逐条 IPC 往返依然存在，且 Rust 侧无可用的 set_read_bulk（grep 零命中）；TASK-067/N10 的实际交付是补 .catch/错误可见性（AUDIT 第 75-77 行），不是批量合并。因此该性能项是以不成立的论据关闭的，并掩盖了成本不高的收口方案（新增批量命令或复用既有去抖推送）。故 performance 判 FAIL；其余性能相关改动本身无回退风险。",
+      "evidence_files": [
+        "src/store/slices/reader.ts",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/commands/sync.rs",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md"
+      ]
+    }
+  ],
+  "ui_review": null
+}

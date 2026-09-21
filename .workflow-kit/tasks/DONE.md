@@ -55,5 +55,6 @@
 | [TASK-078](items/TASK-078.json) | REQ-104 收尾清理：删除孤儿 commands::sync_now + 修订陈旧 Miniflux 兜底注释 | done |
 | [TASK-079](items/TASK-079.json) | REQ-105：ingestion.rs（680 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块 | done |
 | [TASK-080](items/TASK-080.json) | 修复 prepare 静默回退缺口（工程侧守卫 + 让既有回归测试可跑，不改工作流引擎） | done |
+| [TASK-081](items/TASK-081.json) | REQ-104 P3 卫生项逐条处置（含不修的理由），闭合验收第三条 | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

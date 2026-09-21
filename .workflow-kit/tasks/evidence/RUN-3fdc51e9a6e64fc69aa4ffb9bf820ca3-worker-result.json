@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-081",
+  "run_id": "RUN-3fdc51e9a6e64fc69aa4ffb9bf820ca3",
+  "status": "ready_for_verification",
+  "summary": "TASK-081 修复轮 2：订正独立审查第 2 轮的 2 条 FINDING（含一条我在上轮修复中新引入的不实注释）。**R2-F1（medium，regression）「F3 的成对证据仍只钉住纯函数、钉不住组件」——成立且已实质修复**：审查者做了两种变异并如实区分：① 把 `podcastClickAction` 改回无条件 `'play'` → 恰 2 条断言 FAILED（这一半是真实改善，纯函数确有牙）；② 但重跑第 1 轮的原变异——**删掉 Timeline.tsx 的 toggle 守卫——门禁依然 310/310 全绿**，即「纯函数有牙」不等于「组件真的调用它」，而我上一轮把「成对证据」写得没有限定到纯函数层。处置：新增**源码形态断言**（沿用本文件既有的 `readFileSync` + slice + includes 手法，见 TASK-065 N8/N11 一处），钉住「Timeline.tsx 的播放入口确实按 toggle 分支消费该判据」且「该分支必须 return（否则双重动作）」。**新的两层证据均已实测**：删掉组件守卫 → 恰好 2 条**新增**断言 FAILED（此前该变异全绿）；改回无条件 play → 恰 2 条纯函数断言 FAILED。并把 F3 行的台账改为**显式分两层陈述**（边界不同、不可互相冒充），不再用未限定的「成对证据」表述。**R2-F2（low，maintainability）「本轮新增注释指向不存在的文件」——成立且已订正**：上轮我把纯函数从 `src/components/podcastClick.ts`（我原打算新建的文件名）挪到 `src/store/selectors.ts` 后，**没有同步更新注释**，导致 Timeline.tsx:629-633 与回归网 1107-1110 两处仍在引用那个不存在的路径——这是我在修复轮里新引入的不实陈述，属实。已把两处注释改为指向 `src/store/selectors.ts`，并把回归网里「断言的是组件真实消费的分支」这一不准确表述改为**如实分层的说明**（① 纯函数层有变异取证；② 组件是否调用由源码形态断言覆盖，而非 DOM 点击）。**核实**：产品代码中对 `podcastClick.ts` 的引用已为 0，该文件确实不存在，`selectors.ts:213-219` 确有 `PodcastAction` 类型与函数，Timeline.tsx:8 确从 `../store` 导入。**门禁实测（修复轮 2）**：cargo test 202 passed / 0 failed / 9 ignored；lint 0 warnings / 0 errors；build exit 0；frontend **312/312**（较上轮 +2 条源码形态断言）。全部改动仍在 allowed_paths 内。注：本轮的两次变异取证我都用**备份文件**还原（未用 `git checkout`），还原后逐次复跑确认 312/312。",
+  "changed_files": [
+    ".workflow-kit/docs/AUDIT-20260919-v2.md",
+    "src/components/Timeline.tsx",
+    "src/store/selectors.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

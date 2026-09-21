@@ -1,0 +1,63 @@
+TASK-081 change set — REQ-104 P3 卫生项逐条处置   [ROUND 5 REVIEW — FINAL]
+
+*** ROUND 4 RETURNED FAIL WITH EXACTLY ONE LOW-SEVERITY FINDING.
+    ALL FIVE REVIEW AREAS WERE PASS; THE DEFECT WAS A WRONG COUNT IN ONE LEDGER CELL. ***
+
+WHAT ROUND 4 FOUND AND WHAT WAS DONE
+------------------------------------
+R4-F1 (low) The ledger's F3 row claimed, twice, that deleting the Timeline.tsx toggle guard
+  makes "恰 2 条断言 FAILED". The reviewer measured 3 (310/313). The "2" was correct only for
+  the OTHER mutation in the same row (reverting the pure function), and had been carried over
+  from the round-2 assertion set — round 3 added a third assertion and the count was never
+  updated.
+
+FIX: the F3 row now states THREE evidence layers with counts, each of which I re-measured
+empirically on THIS candidate before writing them (the previous four rounds each shipped a
+count that was never measured, so I treated the numbers as claims requiring evidence):
+    (1) `podcastClickAction` -> always 'play'   => **2** assertions fail (311/313)
+    (2) delete the Timeline.tsx toggle guard    => **3** assertions fail (310/313)
+    (3) call argument `cur.audioUrl` -> `''`    => **1** assertion fails (312/313)
+Measured by running `& npm.cmd run test:frontend` after each mutation, capturing the printed
+"新增失败项" names, restoring from a backup FILE (never `git checkout`), and confirming
+313/313 after each restore. The row also records WHY all three layers are needed: with only
+layer (1), mutation (2) is green (review TASK-081-R2-F1); with only (1)+(2), mutation (3) is
+green (review TASK-081-R3-F2).
+
+ALSO IN THIS CANDIDATE (not a review finding — a self-initiated clarification)
+Row #1's "10 places" now states its counting basis explicitly: the diff removes exactly 10
+`let _ =` lines (staged 2 + entries 3 + phases 2 + subscriptions 3) while adding 16
+`log::warn!` lines in total; the other 6 belong to rows #2/#7/#12. Without that note, "10"
+could be misread as "10 warn! calls in total".
+
+NOTE ON CANDIDATE LINEAGE: the AUDIT edits above were made after the round-3 candidate was
+snapshotted, so that candidate was superseded; the tree was re-verified to produce the current
+candidate. The round-4 review report therefore references the previous digest and is kept only
+as evidence of the defect, not as the current verdict.
+
+WHAT TO VERIFY (round 5 — final allowed repair round)
+-----------------------------------------------------
+1. **Are the three F3 counts correct?** This is the specific thing that failed round 4. Re-run
+   all three mutations yourself and confirm 2 / 3 / 1 respectively, that each fails the
+   intended assertions, and that the tree returns to 313/313 afterwards. Restore from a backup
+   file, NOT `git checkout` (changes are uncommitted).
+2. **Is the row now internally consistent and drift-resistant?** It names which layer each
+   mutation exercises and why the layers are not interchangeable.
+3. **Row #1 counting basis**: verify 10 removed `let _ =` lines and 16 added `log::warn!`
+   lines via `git diff -U0`.
+4. **Sweep for any NEW inaccurate claim** — this has recurred in every round so far. Check every
+   file/function/count attribution in the ledger's 20 rows against the tree and the diff.
+5. **Gates**: cargo 202/0/9, lint 0/0, build exit 0, frontend 313/313.
+6. **Scope**: all changed files inside allowed_paths; empty diffs for
+   `src-tauri/src/db/sync_map.rs` and `src/store/slices/player.ts`.
+
+Do NOT run `npm run build` (Vite's child process is blocked in this sandbox — read the recorded
+log) and do NOT run the full 27-suite `cargo test`.
+
+**Delete any probe/temp files you create** and confirm `git status --porcelain` has no leftovers.
+
+GATE RESULTS FOR THIS CANDIDATE
+-------------------------------
+  cargo test  202 passed / 0 failed / 9 ignored
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    313/313, exit 0

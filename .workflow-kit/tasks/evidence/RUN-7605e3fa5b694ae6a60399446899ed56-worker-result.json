@@ -1,0 +1,16 @@
+{
+  "task_id": "TASK-081",
+  "run_id": "RUN-7605e3fa5b694ae6a60399446899ed56",
+  "status": "ready_for_verification",
+  "summary": "TASK-081 完成：闭合 REQ-104 验收第三条「P3 项每条有处置结论（修/不修+理由）」。逐条处置 AUDIT-20260919-v2.md 的 P3 卫生清单（后端 13 条 + 前端 7 条；死代码集群除外，已由 TASK-070/078 交付），结论写入该报告新增的「一之附：P3 卫生类逐条处置结论」表，使验收可逐条核对。**判定「修」并已实施 + 有成对证据**：(#4) purge_remote_data 不再删所有无成员目录，改为只删服务端来源的空目录（新测 purge_remote_data_keeps_user_created_empty_folder 在修前代码下失败）；(#5) cleanup_cache 的 cutoff 去掉 localtime 并与 datetime(published_at) 同侧归一（新测 cleanup_cache_cutoff_is_timezone_normalised 在修前代码下失败）；(#9) 去重改走规范化 URL——add_feed 用 feed_id_by_url_normalized，OPML 在精确命中后回退规范化比较（新测 dressed_up_duplicate_url_is_rejected 在修前代码下失败：utm 变体被插入成第二个 feed）；(#8) search_articles 的 LIMIT 改为绑定参数并收敛上界（非正数→100、上限 1000，新增 2 条断言）；(#3) sync_save 留空密码时只复用 password，用户名以本次输入为准（修前改用户名被静默丢弃、实际仍连旧账号）；(#1) 9 处 let _ = 写失败改 log::warn!（其中 set_feed_fetch_state 写失败会让指数退避不生效，最需可见）；(#2) commands/ai.rs 读库失败不再压成「未配置」（修前把数据库读错误报成「请先在设置中配置 AI 服务」）；(#7) sync_local_feeds 读队列失败不再降级为空队列继续入队（会重复 enqueue），改为中止；第二处判定读失败时按「可能有待推」继续以免误报无需同步；(#12) 托盘图标 unwrap() 改为有则设无则 warn（修前打包缺图标会启动即崩）、close-ask 的 mutex 中毒改 into_inner 容忍；F1 selectors.ts 重复注释块清除；F2 任一浮层打开时单键 S/M/J/K 一律让路（修前会作用到浮层背后的当前文章）；F3 同集再点改为播放/暂停切换并保留进度。**判定「不修」并写明理由**（均逐条记录于报告表，非跳过）：#6 apply_refresh_result 部分失败口径（包事务会与「HTTP 不持锁」的三段式设计冲突，可见性已由 fetch_failed 写回兜住）、#10 gist_id 孤儿（当前不可达，修复需新增远端补偿删除调用，收益不抵风险）、#13 锁内 sanitize（采信原报告「量级可接受」）、F4 markEntriesReadBulk（已由 TASK-067 的批量合并路径覆盖，残余为进程内轻量 SQLite 写而非 IPC 往返）、F5 lastStartIndexRef（无可复现证据下改动选择逻辑风险更高，已登记需先补最小复现）、F6 layoutNeedsBody（纯形式残留）、F7 mock 标读（仅影响开发演示数据）。报告末尾另如实登记 3 项「仍未闭环、需另立任务」的遗留。**范围处置（本轮关键自查）**：实施中一度发现 src-tauri/src/db/sync_map.rs（#9 实现处）与 src/store/slices/player.ts（F3 实现处）不在 allowed_paths。我没有选择扩范围，而是把两处修复改落在已在范围内的调用点——OPML 去重移入 commands/opml.rs（该函数唯一的 OPML 调用方）、同集切换判据移入 components/Timeline.tsx 的播放入口——并把两个原外文件逐字还回 HEAD（git diff 为空），随即撤回先前落盘的范围订正与相应决定。结果：全部 15 个改动文件均在 allowed_paths 内、越界数为 0，且任务记录相对基线无改动（避开 TASK-074/076 那种 finish 判 protected 的基线不收敛）。**过程中自我纠错三处**：#5 首版测试无齿（变异后仍通过），我先写出两版错误推导，最终改为先用真实 sqlite3 逐格式实测（含微秒、T vs 空格、各时区）再构造用例才真正有齿，并据实订正了审计报告的机理描述（后果主要是「漏删」而非原述的「多删最近 N 小时」）；#8 首版测试因 fixture 文本不匹配查询而假失败，已改用带标题的 fixture；F3 的断言在我把判据移到组件层后主动改写，不再假装验证 store 层不存在的行为，并在注释中说明端到端点击路径属 CDP 范围。**门禁实测**：cargo test 202 passed / 0 failed / 9 ignored（基线 193 + 新增 9）；lint 0 warnings / 0 errors；build exit 0；frontend 307/307（基线 303 + 新增 4）。既有断言未删改。不引入新依赖；改动文件均 LF；未触碰用户真实数据库。",
+  "changed_files": "auto",
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

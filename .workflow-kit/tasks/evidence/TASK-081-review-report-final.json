@@ -1,0 +1,75 @@
+{
+  "task_id": "TASK-081",
+  "candidate_digest": "fd8c1b7117e9d2f606945bd53425f9d29ce41617a903f6d151c3f297b6923412",
+  "verification_run": "RUN-d8ee5c8ac2374b308f60c97e9f80a446",
+  "verdict": "PASS",
+  "summary": "Independent round-5 review of the TASK-081 P3-hygiene disposition ledger (REQ-104 item 3). The round-4 defect was a ledger F3 cell claiming deleting the Timeline.tsx toggle guard fails 'exactly 2 assertions'; I re-measured all three F3 mutations on this candidate and they are now correct: (a) forcing podcastClickAction to always 'play' -> 2 failures (311/313); (b) deleting the Timeline.tsx toggle guard -> 3 failures (310/313); (c) changing the call argument cur.audioUrl to '' -> 1 failure (312/313). Each mutation was applied with a Python literal replace, measured with npm run test:frontend, and restored byte-identically from a backup FILE (never git checkout); the tree returned to 313/313 and the restored sha256 of selectors.ts (8d733e1d...) and Timeline.tsx (4f093cd4...) match the candidate manifest. Row #1's newly added counting basis is also exact: git diff -U0 shows exactly 10 removed 'let _ =' lines (subscriptions 3 + entries 3 + phases 2 + staged 2) and exactly 16 added 'log::warn!' lines, with the other 6 belonging to rows #2 (ai.rs 3), #7 (sync.rs 2) and #12 (lib.rs 1). I swept all 20 ledger rows against the tree and git diff and found NO new inaccurate file/function/count attribution: every claimed function, line reference and test name checked out. All four gates are green in the recorded RUN (cargo 202/0/9, lint 0/0, build exit 0, frontend 313/313); I independently re-ran cargo test --lib (104/104 ok) and npm run test:frontend (313/313). Scope is clean: all changed code files are inside allowed_paths, package.json/Cargo.toml/Cargo.lock are untouched, and src-tauri/src/db/sync_map.rs and src/store/slices/player.ts have empty diffs. All 15 changed files hash-match the candidate manifest. Probe files were deleted; git status --porcelain shows no leftovers. Note: the frontend harness always exits with code 1 (its own convention) even on 313/313, so exit code is not a failure signal there.",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "REQ-104's third acceptance item demands every one of the P3 items (13 backend + 7 frontend) carry an explicit disposition (fix or do-not-fix + reason) recorded so it can be checked item by item. The ledger section '一之附' in .workflow-kit/docs/AUDIT-20260919-v2.md contains a backend table of 13 rows (#1-#13) and a frontend table of 7 rows (F1-F7), each with a '修/不修' verdict and a substantive reason. I verified the claimed state of every fixed row against the tree: #1 10 'let _ =' swallowed errors converted to log::warn! (subscriptions 3, entries 3, phases 2, staged 2 - exact); #2 ai.rs read failures no longer collapsed to None; #3 sync_save now reuses only password (sync.rs:60-68 typed_user logic); #4 purge_remote_data restricted to remote-origin empty folders (articles.rs:387-420 remote_folder_ids); #5 cutoff localtime removed and published_at normalised via datetime() (articles.rs:440,446); #7 sync_local_feeds aborts instead of degrading to an empty queue (sync.rs:178) and treats a read failure as 'may have pending' in the second site (sync.rs:205-208); #8 LIMIT bound as a parameter with clamp 100/1000 (articles.rs:327,337); #9 dedup goes through feed_id_by_url_normalized in both add_feed (folders.rs:177) and opml import (opml.rs:55-56); #11 AiEvent::Error is gone (only Delta/Done remain); #12 tray icon unwrap replaced by match + warn, mutex lock uses unwrap_or_else(into_inner) (lib.rs:205). Frontend F1 duplicate comment block removed, F2 overlay passthrough implemented in App.tsx:217-229, F3 podcastClickAction extracted and consumed at Timeline.tsx:636. The do-not-fix rows #6/#10/#13 and F4/F5/F6/F7 each carry a specific reason, and F4/F5/F2 are additionally registered in an explicit residual list rather than being silently dropped. No item is missing and no out-of-scope behaviour change was introduced.",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src/App.tsx",
+        "src/components/Timeline.tsx",
+        "src/store/selectors.ts"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "The core regression question is whether the tests actually detect the defects they claim to. I re-measured the three F3 mutation layers directly rather than trusting the ledger: forcing podcastClickAction to always return 'play' produced exactly 2 new failures (311/313) - the pure-function assertion and the 'pre-fix behaviour reproducible' assertion; deleting the Timeline.tsx toggle guard produced exactly 3 new failures (310/313) - branch consumption, argument expression, and the mandatory return; changing the call argument cur.audioUrl to '' produced exactly 1 new failure (312/313) - the argument assertion. The ledger's 2/3/1 claims are therefore accurate as of this candidate, and the residual round-4 '恰 2 条' wording is gone from the file. Paired before/after evidence exists for the data-correctness fixes: purge_remote_data_keeps_user_created_empty_folder (articles.rs:832), cleanup_cache_cutoff_is_timezone_normalised (articles.rs:904), search_articles_negative_limit_is_clamped / search_articles_respects_limit (articles.rs:975,988), and dressed_up_duplicate_url_is_rejected (folders.rs). Baseline is preserved rather than weakened: the existing 26 frontend assertions are reported as unchanged and cargo rose 193 -> 202 passed with 0 failed and 9 ignored (ignored count did not increase). I independently re-ran cargo test --lib (104 passed, 0 failed) and npm run test:frontend (313/313). No existing protection was removed or loosened.",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-d8ee5c8ac2374b308f60c97e9f80a446-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-d8ee5c8ac2374b308f60c97e9f80a446-frontend.stdout.txt",
+        "tools/frontend-regression.mjs",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src/store/selectors.ts"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "Most of this candidate is error-path work, so I checked the negative branches specifically. Row #1: the ten previously swallowed write failures now log and continue rather than abort the sync round, with the staged.rs fetch-failure marker explicitly warned because losing it disables exponential backoff - the code at staged.rs:181-196 matches that description. Row #7 is the clearest genuine failure-path correctness fix: on a queue-read failure the code previously degraded to an empty queue and re-enqueued every unbound feed (irreversible duplicate push), and now aborts via map_err + '?' (sync.rs:178) while the second site deliberately proceeds as 'may have pending' (sync.rs:205-208) - the two directions are correctly asymmetric. Row #5's timezone edge is covered by a test that constructs a real instant older than the threshold but stored with a +12:00 offset, which is the case that would be missed under the old bare-text comparison. Row #8 guards the negative-LIMIT-equals-unlimited trap with a fallback rather than an error. Row #4 preserves user-created empty folders while still deleting emptied remote folders, and there is a third test guarding the local-feed case against over-correction. Row #12 removes two panic paths (missing tray icon, poisoned mutex) while deliberately keeping db::open/taui run expect()s, which is a defensible boundary. Row #10's do-not-fix reasoning (orphan Gist is currently unreachable and a fix adds a remote side effect) is sound. No empty-input, duplicate-execution or recovery regression was found.",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/lib.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "The changes improve cohesion rather than adding layers. Row #1's ten call sites adopt one consistent shape (if let Err(err) = ... { log::warn!(...) }), which is uniform and greppable. Row #9 places the normalisation fallback in the two call sites (folders.rs, opml.rs) and deliberately leaves db/sync_map.rs:238 feed_exists_by_url untouched because that function has a separate exact-string purpose - I confirmed sync_map.rs has an empty diff and that feed_id_by_url_normalized lives at sync_map.rs:252, so the ledger's warning about not misreading this as a sync_map change is accurate. The F3 extraction of podcastClickAction into src/store/selectors.ts is a genuine improvement in testability: it gives the frontend regression net and the component a single shared predicate, and the in-code comment honestly discloses the evidence boundary (the harness pins the call-site source shape rather than performing a DOM click). Comments throughout reference the P3 item number, which keeps the ledger and the code cross-navigable. The residual list at the end of the section records the three known gaps (F2 has no assertion, F4 per-item IPC remains, F5 needs a minimal reproduction) instead of hiding them. Naming and module boundaries are consistent with the existing codebase; no new dependency, no abstraction for its own sake.",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/db/sync_map.rs",
+        "src/store/selectors.ts",
+        "src/components/Timeline.tsx",
+        "src-tauri/src/commands/opml.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "No benchmark was invented, because the candidate contains no workload-level performance change. Nearly every edit sits on an error path that a healthy run never reaches: the ten 'let _ =' -> if let Err sites only execute their new log::warn! branch when a write already failed; #2's warnings fire only on a database read error; #7's abort path only on a queue-read failure; #12's branches only when the icon is absent or the mutex is poisoned. Two items have a plausible steady-state cost, and both are negligible and bounded: #4 replaces one bulk 'DELETE FROM folders WHERE ...' with a pre-query plus a loop of per-id DELETEs, but the id set is only 'remote-bound folders' (a handful, not a per-article path) and the statement runs once per disconnect; #8 adds no new query work - it binds the LIMIT as a parameter instead of interpolating it, and the added clamp is two integer comparisons. The read paths that dominate the user-visible workload (list/search/refresh) keep their shape, and the frontend change adds no work to rendering: the overlay check in App.tsx:222-229 is a boolean evaluated inside keydown only. The recorded gates give no signal of regression (frontend suite 313/313 in 11s). The task brief's 'measure' performance target concerns layout-switch body loading, which this candidate does not touch; stating that explicitly rather than fabricating numbers.",
+      "evidence_files": [
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/commands/sync.rs",
+        "src/App.tsx"
+      ]
+    }
+  ],
+  "ui_review": null
+}
