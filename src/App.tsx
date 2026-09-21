@@ -7,6 +7,7 @@ import { PlayerBar } from './components/PlayerBar';
 import { SettingsModal } from './components/SettingsModal';
 import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal, CloseAskDialog } from './components/Overlays';
 import { ContextMenuHost } from './components/ContextMenu';
+import { shouldYieldToOverlay } from './components/shortcutYield';
 /* ============================================================
    Application Shell
 
@@ -218,14 +219,16 @@ export default function App() {
          此前只有 Space 判断了 defaultPrevented，S/M/J/K 不看浮层状态——设置页、
          搜索框、各类弹窗打开时，焦点若不在输入框上，按 S/M 会作用到**浮层背后的
          当前文章**（改了它的收藏/已读却看不见），J/K 还会在背后切换文章。
-         Ctrl+K / Ctrl+, / Escape 属浮层自身操作，在此判断之前已处理，不受影响。 */
+         Ctrl+K / Ctrl+, / Escape 属浮层自身操作，在此判断之前已处理，不受影响。
+         判据已抽成纯函数 shouldYieldToOverlay（src/components/shortcutYield.ts），
+         由回归网直接断言——此前内联在这里，属「改了行为却无法断言」的覆盖缺口
+         （审查 TASK-081-F2 登记的遗留）。 */
       const overlayOpen =
         s.searchOpen || s.settingsOpen || s.newCategoryModalOpen || s.addFeedModalOpen ||
         s.editFeedModalOpen || s.renameCatModalOpen || !!s.lightboxUrl ||
         (s.playerExpanded && s.player.isActive);
-      if (overlayOpen && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const singleKey = ['s', 'S', 'm', 'M', 'j', 'k'].includes(e.key);
-        if (singleKey) return;
+      if (shouldYieldToOverlay(overlayOpen, e.key, e.ctrlKey || e.metaKey || e.altKey) === 'yield') {
+        return;
       }
 
       /* Space：播放器激活时播放/暂停（快捷键表承诺）。

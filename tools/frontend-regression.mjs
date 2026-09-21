@@ -1175,6 +1175,44 @@ await (async () => {
     checkNew('(P3[F3]) 组件的 toggle 分支必须 return（否则会继续走 play 造成双重动作）',
       /===\s*'toggle'\s*\)\s*\{\s*togglePlayerPlay\(\);\s*return;/.test(playBlock));
   }
+
+  /* ---------- P3[F2]（TASK-086）：单键快捷键让路浮层的判据 ----------
+     判据已抽成 src/components/shortcutYield.ts 的纯函数 shouldYieldToOverlay，
+     由 App.tsx 的真实 keydown 分支消费，故这里断言的是**组件实际使用的那份判定**。
+     此前该判据内联在 App.tsx 的闭包里、零断言（审查 TASK-081-F2 登记的覆盖缺口）。 */
+  {
+    const { shouldYieldToOverlay, OVERLAY_YIELD_KEYS } = await import('../src/components/shortcutYield.ts');
+    checkNew('(P3[F2]) 浮层打开 + 单键 S/M/J/K ⇒ 让路（修前会作用到浮层背后的当前文章）',
+      ['s', 'S', 'm', 'M', 'j', 'k'].every((k) => shouldYieldToOverlay(true, k, false) === 'yield'));
+    checkNew('(P3[F2]) 浮层未打开 + 单键 ⇒ 不让路（快捷键照常生效）',
+      ['s', 'S', 'm', 'M', 'j', 'k'].every((k) => shouldYieldToOverlay(false, k, false) === 'proceed'));
+    checkNew('(P3[F2]) 浮层打开 + 带 Ctrl/Meta/Alt ⇒ 不让路（组合键属浮层自身操作，不受影响）',
+      shouldYieldToOverlay(true, 's', true) === 'proceed'
+      && shouldYieldToOverlay(true, 'k', true) === 'proceed');
+    checkNew('(P3[F2]) 浮层打开 + 非目标键 ⇒ 不让路（只拦 S/M/J/K，不误伤其它键）',
+      shouldYieldToOverlay(true, 'a', false) === 'proceed'
+      && shouldYieldToOverlay(true, 'Enter', false) === 'proceed'
+      && shouldYieldToOverlay(true, 'Escape', false) === 'proceed');
+    checkNew('(P3[F2]) 适配性：让路键集合恰为 s/S/m/M/j/k（新增可让路键须同步本表）',
+      OVERLAY_YIELD_KEYS.length === 6 && OVERLAY_YIELD_KEYS.join(',') === 's,S,m,M,j,k');
+    /* 修前对照：旧行为完全不看浮层 → 浮层打开时同集键也照旧执行（不让路）。 */
+    const legacyYield = () => 'proceed';
+    checkNew('(P3[F2]) 修前判据可复现：不看浮层状态时「浮层打开 + S」也不会让路（缺陷根因）',
+      legacyYield() === 'proceed' && shouldYieldToOverlay(true, 's', false) !== 'proceed');
+
+    /* 源码形态断言：钉住 App.tsx 的 keydown **确实调用该判据**——纯函数有牙
+       ≠ 调用方真的用它（TASK-081-R2-F1 的同类教训）。 */
+    const fsS = await import('node:fs');
+    const appSrc = fsS.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+    const yieldAt = appSrc.indexOf('shouldYieldToOverlay(');
+    const yieldBlock = yieldAt < 0 ? '' : appSrc.slice(yieldAt, yieldAt + 200);
+    checkNew('(P3[F2]) App.tsx 的 keydown 消费该判据且按 yield 返回（删掉该分支即失败）',
+      yieldBlock.includes('shouldYieldToOverlay(') && yieldBlock.includes("=== 'yield'")
+      && /===\s*'yield'\s*\)\s*\{\s*return;/.test(yieldBlock));
+    checkNew('(P3[F2]) 判据实参为 overlayOpen + 按键 + 修饰键（改实参即失败）',
+      /shouldYieldToOverlay\(\s*overlayOpen\s*,\s*e\.key\s*,\s*e\.ctrlKey\s*\|\|\s*e\.metaKey\s*\|\|\s*e\.altKey\s*\)/
+        .test(appSrc));
+  }
   store.setState({ player: { ...store.getState().player, speed: 2.0 } });
   store.getState().cyclePlaybackSpeed();
   checkNew('(j) 倍速在 1/1.25/1.5/2 内循环（2.0 → 1.0）并给出 toast',
