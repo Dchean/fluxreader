@@ -2371,6 +2371,20 @@
       "candidates": {
         "TASK-081": "fd8c1b7117e9d2f606945bd53425f9d29ce41617a903f6d151c3f297b6923412"
       }
+    },
+    {
+      "id": "DEC-86c0c7c4066948088a3622e1e2eb98f6",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "总控核对：独立审查 PASS（findings 空，五区域全 PASS，candidate b3531701…，verification RUN-082fcac4ab9e47669883eeac24241e47）；审查者独立复现了行数表（791=716+75 / 998=751+247 / 994=747+247）并确认生产段各时点均 <800、超限来自同文件单测；确认「不拆分」结论可辩护（读写两半互相引用，无更细天然接缝，与 BRIEF 对 sync_map.rs 的既有裁决同类）；确认三处横幅缺陷真实且替换准确（Folders 段 0 个 folder 函数、URL 规范化段 0 个规范化函数、Settings 段 0 个生产条目）、改动为纯注释（+2/−6，无一行代码）；四门禁与基线逐项相同（cargo 202/0/9、lint 0/0、build exit 0、frontend 313/313）。REQ-105 验收①的口径复核结论已写入 AUDIT 报告，并给出「宜按生产段行数衡量」的后续口径建议。验收（2026-09-21）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-082"
+      ],
+      "recorded_at_utc": "2026-09-21T10:58:16.417555Z",
+      "candidates": {
+        "TASK-082": "b35317010fd0bb1a742955bfbe6c5004f2d2aebd20e716e83208091e7af6db39"
+      }
     }
   ]
 }

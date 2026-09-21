@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-082 · 修正 db/articles.rs 的失效分节横幅 + 复核 REQ-105 的 800 行口径
 
-**状态**：verified
+**状态**：done
 
 **目标**：① 修正 src-tauri/src/db/articles.rs 里三处**失效分节横幅**：`Folders`（行 53）之下实际是 NewArticle/article_row/article_list_item/ArticleQuery/list_articles/search_articles 等**文章域**条目，没有任何 folder 函数；`URL 规范化`（行 473）之下实际是 upsert_article_with_feed/insert_new_article/set_read/set_starred/mark_all_read/feed_counts 等写入与状态条目，没有任何 URL 规范化函数；`Settings`（行 748）是**空横幅**（其后紧接 #[cfg(test)]，内容为零）。这三处是 TASK-023 从 db.rs 拆出 db/ 子模块时的遗留脚手架，会主动误导后续读者，替换为与真实内容一致的分节说明。② 复核 REQ-105 验收①「拆分后无超过 800 行的生产单体」在当前代码库的口径：实测 db/articles.rs 共 998 行 = 生产段 751 行 + 同文件单测 247 行（TASK-081 新增的 P3 单测），**生产代码本身未超限**；评估并记录该文件是否需要按领域拆分（结论与理由写入 AUDIT 报告），供 owner 核对，而不是默认追求行数达标。
 
