@@ -1,0 +1,105 @@
+TASK-082 change set — 修正 db/articles.rs 失效分节横幅 + 复核 REQ-105 行数口径 (REQ-105)
+
+================================================================================
+WHY THIS TASK EXISTS
+================================================================================
+My own TASK-081 commit (d46eff2) grew src-tauri/src/db/articles.rs from 751 to 930 lines by
+adding P3 unit tests, which breached REQ-105 acceptance ① ("拆分后无超过 800 行的生产单体").
+The owner instructed: "评估是否有拆分必要，如果没有的话可以不用管" — i.e. assess whether a
+split is actually warranted rather than assume the line-count rule must be satisfied by code.
+
+================================================================================
+DELIVERABLE 1 — ASSESSMENT: the file does NOT need splitting
+================================================================================
+Measured by splitting each revision at the #[cfg(test)] boundary:
+
+  revision                              total   production   in-file tests
+  TASK-064      (6e36fdb)                 791      716            75
+  after TASK-081(d46eff2)                 998      751           247
+  current       (TASK-082)                994      747           247
+
+Production code has ALWAYS been under 800; only the total crossed the line, because unit tests
+live in the same file (Rust convention — they need access to module-private items).
+
+Four reasons the split is not warranted (all evidenced):
+ 1. Single cohesive domain: everything operates on the `articles` table and its immediately
+    adjacent binding/dedup/state columns, sharing `ARTICLE_COLS`, `article_row`, `article_where`.
+    Splitting would trade cohesion for jump cost and force many cross-module exposures.
+ 2. No natural seam: TASK-079 could split `ingestion/` because its four parts (HTTP conditional
+    GET / parsing / staged refresh / favicon) share no internal state. `articles.rs` is the read
+    and write halves of ONE table — it has no such structure.
+ 3. The BRIEF already ruled on this exact class of file: non_goals says verbatim
+    "不拆分 Overlays/Timeline/db/sync_map.rs/base.css 与协议客户端（评估结论：内聚良好，拆了只加跳转成本）".
+    `articles.rs` is the same judgement.
+ 4. Cost/benefit: ~747 production lines of pure movement, cutting 15 `pub fn` (measured: exactly
+    15 in the production section) plus their call sites, plus an independent review round — for
+    a smaller file and no real maintainability gain.
+
+Recorded in `.workflow-kit/docs/AUDIT-20260919-v2.md` §「一之附二」, including a
+recommendation that REQ-105 ① be measured on the PRODUCTION segment (or exclude in-file
+#[cfg(test)]), otherwise any task that adds unit tests to an existing file "violates" it.
+
+================================================================================
+DELIVERABLE 2 — REAL DEFECT FOUND WHILE ASSESSING, AND FIXED
+================================================================================
+`articles.rs` had THREE stale section banners left over from TASK-023's db.rs → db/ submodule
+split. They actively misdirect readers:
+
+  · banner `Folders` (line 53) had ZERO folder functions under it — actually held `article_row`,
+    `article_list_item`, `NewArticle`, `list_articles`, `search_articles`, ... (verified: 10 fns)
+  · banner `URL 规范化（去重匹配键）` (line 473) had ZERO URL-normalization functions — that
+    function lives in `db/url_norm.rs` (verified to exist); the section actually held
+    `upsert_article_with_feed`, `set_read`, `set_starred`, `mark_all_read`, `feed_counts` (8 fns)
+  · banner `Settings（…）` (line 748) was EMPTY — the very next line is `#[cfg(test)]`; settings
+    code lives in `db/settings.rs` (verified to exist)
+
+Fixed: the first two banners renamed to describe their real contents ("读取与检索：行/列表模型、
+分页游标、搜索、按 URL 去重查询" and "写入与状态：文章入库（含智能去重）、已读/收藏、AI 字段、
+未读数"); the empty banner block deleted.
+
+**The change is comment-only**: `git diff -U0` = +2 / -6 lines, zero code lines changed;
+total file 998 → 994 (production 751 → 747).
+
+================================================================================
+GATES (measured on this candidate)
+================================================================================
+  cargo test  202 passed / 0 failed / 9 ignored   — IDENTICAL to baseline, i.e. direct evidence
+                                                   of zero behavioural change
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    313/313, exit 0                      (26 pre-existing + 287 new, none touched)
+
+No #[test] added or removed; no signature or public path changed; no new dependency.
+
+================================================================================
+SELF-CHECK ON THE NUMBERS (this project has failed 5 review rounds on unmeasured figures)
+================================================================================
+The first draft of the audit table was written from memory and was WRONG on every figure
+(I had 791/930/751/183). I then measured each revision with a script and rewrote the table, and
+replaced an unmeasured "1200+ lines" estimate with the measured "~747 lines / 15 pub fn".
+Every falsifiable claim in the new audit section was then checked by script:
+`ingestion/` has the four files; `db/url_norm.rs` and `db/settings.rs` exist; production
+`pub fn` count is 15; the BRIEF non_goals quote is verbatim; and `articles.rs` is indeed the
+largest production segment in the repo (747, next is `config_sync.rs` at 669).
+
+================================================================================
+WHAT TO ATTACK
+================================================================================
+1. **Is the "no split needed" conclusion defensible, or is it rationalising a metric miss?**
+   Check the numbers yourself: is the production segment really under 800 at each revision, and
+   is the "single cohesive domain / no natural seam" claim fair when you read the code? If you
+   think the file SHOULD be split, say so with a concrete proposed seam.
+2. **Are the three banner defects real and are the replacements accurate?** Verify that each
+   renamed banner's section now contains what its title claims, and that no function was
+   orphaned or mis-bucketed. Confirm `url_norm.rs` / `settings.rs` really own those concerns.
+3. **Verify the change is comment-only**: `git diff -U0 -- src-tauri/src/db/articles.rs` must
+   contain no non-comment line. Confirm no #[test] count change and identical gate totals.
+4. **Audit the new audit section for inaccurate figures** — the recurring failure mode. Every
+   number there should be reproducible from git.
+5. **Scope**: only `src-tauri/src/db/articles.rs` and the audit doc changed; `outside`/`protected`
+   empty.
+6. Gates: recompute from the raw logs; re-run `cargo test --lib` and
+   `& npm.cmd run test:frontend` if cheap. Do NOT run `npm run build` (Vite blocked) or the full
+   27-suite cargo test.
+
+**Delete any probe/temp files you create** and confirm `git status --porcelain` has no leftovers.

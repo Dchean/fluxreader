@@ -1,0 +1,65 @@
+{
+  "task_id": "TASK-082",
+  "candidate_digest": "b35317010fd0bb1a742955bfbe6c5004f2d2aebd20e716e83208091e7af6db39",
+  "verification_run": "RUN-082fcac4ab9e47669883eeac24241e47",
+  "verdict": "PASS",
+  "summary": "TASK-082 独立复核通过。三处失效分节横幅确为真实缺陷且已按实际内容改对（Folders 横幅下 0 个 folder 函数、URL 规范化横幅下 0 个规范化函数、Settings 横幅为空且其后紧接 #[cfg(test)]），改动经 git diff -U0 证实为纯注释（+2/-6，无一行代码变化），#[test] 计数 9→9 不变。行数表经独立脚本逐时点 git show 复现，与文档 791=716+75 / 998=751+247 / 994=747+247 逐格一致，生产段各时点均 <800。新的 AUDIT 一之附二段落全部数字（含 202/0/9 门禁、15 个生产 pub fn、747 为全库最大生产段、次大 config_sync.rs 669、+172 测试增量、non_goals 内引文）均可从 git 复现，未发现错误数字。不拆分结论经阅读实际函数后判定为可辩护：写入半区 upsert_article_with_feed 直接依赖读取半区的 existing_article_with_url/normalize_url，两半共享 NewArticle/article_row/ARTICLE_COLS，拆分会引入跨模块 pub(crate) 暴露，属用内聚换跳转成本，与 BRIEF 对 sync_map.rs 的既有裁决同类。未发现任何阻断性缺陷。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "四条验收逐条核对。①三处横幅：在 d46eff2（修前）用脚本按行号切段统计，`Folders`(行 53) 段内 12 个条目全部为文章域（NewArticle/article_row/article_list_item/ArticleQuery/list_articles/article_where/article_index/get_article/get_articles/search_articles/existing_article_with_url/clear_dedup_tombstones），folder 命名的函数在整个生产段为 0（仅三个测试函数名含 folder），确认无 folder 函数；`URL 规范化（去重匹配键）`(行 473) 段内 8 个函数全部为写入与状态（upsert_article_with_feed/insert_new_article/set_read/set_article_ai_fields/set_starred/articles_without_cover/mark_all_read/feed_counts），无任何规范化函数，且 normalize_url 实际定义在 src-tauri/src/db/url_norm.rs:47（已核对存在）；`Settings`(行 748) 段在生产段的函数数为 0，其下一行即 #[cfg(test)]（修前在 752 行），settings 相关实现确在 src-tauri/src/db/settings.rs（get_setting/set_setting/app_settings_bool/app_settings_str）。替换后的两处新标题与各自段内实际内容一一对应（读取与检索段确含行/列表模型、分页游标 article_where、搜索 search_articles、按 URL 去重查询 existing_article_with_url；写入与状态段确含入库去重 upsert_article_with_feed、已读/收藏 set_read/set_starred、AI 字段 set_article_ai_fields、未读数 feed_counts），无函数被孤立或错分。②门禁：从原始日志重算 cargo 27 个套件合计 202 passed/0 failed/9 ignored，全绿；lint 0 warnings/0 errors；build exit 0；frontend 313/313。③#[test] 计数 d46eff2=9、当前=9，未增未减；git diff -U0 无删除或新增测试行。④评估结论已写入 AUDIT-20260919-v2.md §一之附二，含实测生产段/测试段拆分与明确的「不拆分」结论及四条理由，非含糊表述。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        "src-tauri/src/db/url_norm.rs",
+        "src-tauri/src/db/settings.rs",
+        ".workflow-kit/tasks/evidence/TASK-082-cumulative-diff.txt",
+        ".workflow-kit/tasks/evidence/TASK-082-review-packet.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "本任务 behavior=preserve（纯注释），故判据是既有断言逐字保留且原样通过。独立复跑 `cargo test --lib`（cwd src-tauri）得 104 passed/0 failed/0 ignored，与候选一致；独立复跑 `& npm.cmd run test:frontend` 得既有回归 26/26 + 新增 store 断言 287/287 = 313/313，与基线一致，未发生断言弱化或替换。从 RUN 原始日志重算 cargo 全量 27 套件：202 passed/0 failed/9 ignored，与 TASK-081 基线 RUN-d8ee5c8a 的 202/0/9 完全相同，构成零行为变化的直接证据。git diff -U0 -- src-tauri/src/db/articles.rs 的改动仅为两行横幅标题文本与一个 4 行空注释块（+2/-6），无任何语句、签名或测试断言改动，因此不存在「测试仍通过但断言被弱化」的风险面。候选包 13 个文件的 sha256 全部与 packet 记录逐一匹配，确认审查绑定的是当前候选。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        ".workflow-kit/tasks/evidence/RUN-082fcac4ab9e47669883eeac24241e47-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-082fcac4ab9e47669883eeac24241e47-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-082fcac4ab9e47669883eeac24241e47.json",
+        ".workflow-kit/tasks/runs/RUN-d8ee5c8ac2374b308f60c97e9f80a446.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "此区域对本改动基本不适用，理由是改动集合经机械验证不含任何可执行语句——git diff -U0 的全部 +2/-6 行均落在 /* ... */ 注释块内（两处横幅标题改写 + 删除一个 4 行空横幅块），无函数体、无分支、无 SQL、无 IO、无错误处理路径被触碰，因此不存在可新增的异常/空输入/重复执行/恢复路径。作为替代性核对，我验证了改动不会通过「横幅定位」这类间接方式破坏行为：仓库内无任何代码/脚本按横幅文本或行号定位（横幅仅存在于该文件的注释中，无 doc 引用依赖其字面文本），删除的空 Settings 块在生产段本无任何内容，故不改变任何符号边界。cargo 202/0/9 与基线逐项相同，也是「无失败路径被引入或掩盖」的实测旁证。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        ".workflow-kit/tasks/evidence/TASK-082-cumulative-diff.txt",
+        ".workflow-kit/tasks/evidence/RUN-082fcac4ab9e47669883eeac24241e47-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "改动的可维护性收益为正且方向正确：修前三条横幅是 TASK-023 从 db.rs 拆子模块时的遗留脚手架，会主动误导读者（`Folders` 下无 folder 函数、`URL 规范化` 下无规范化函数、`Settings` 为空），新标题与段内实际内容一致，降低后续读者的认知成本。独立评估「不拆分」结论的可辩护性：我阅读了实际函数确认内聚声明成立——写入半区的 upsert_article_with_feed(481) 在 490-491 行直接调用读取半区的 existing_article_with_url 与 normalize_url，读取半区的 get_article/get_articles 复用 article_row(77)，两半共同依赖 NewArticle(59) 与 ARTICLE_COLS(75)，article_list_item 被 list_articles/search_articles/article_index 三处复用；因此「同一张表的读写两侧、共享同一套行映射与列清单」是公允读法，而非为指标辩护。拆分需把上述 4-5 个内部项暴露为 pub(crate) 并切开 15 个 pub fn 及其调用点，属以内聚换跳转成本，与 BRIEF non_goals 对 sync_map.rs 的既有裁决同类。我未能找到比「读取/写入」更细且不互相引用的天然接缝，故认可不拆分；但须指出该结论的指标面：生产段 747 行已接近 800，若后续继续在读取或写入半区加生产代码，届时再评估按读写两分是可追溯的下一步。AUDIT 给出的口径建议（按生产段衡量或显式排除同文件 #[cfg(test)]）方向合理，但属建议非本任务交付，不作为通过条件。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        ".workflow-kit/docs/AUDIT-20260919-v2.md",
+        ".workflow-kit/tasks/evidence/TASK-082-cumulative-diff.txt"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "不适用且已在具体层面说明：改动是纯注释，编译产物不变（build exit 0 且记录日志正常产出 bundle），不改变任何查询、索引使用、锁范围或 IO 次数，因此不存在可测量的性能回归面，且本任务 BRIEF 的性能目标（万级订阅下启动/布局切换/正文加载）与本文件注释无交集。作为不伪称实测的边界说明：我未运行任何基准，因为注释改动无运行时表示可测；可确认的静态事实是生产段逐时点行数由 716→751→747，仅 TASK-081 新增的是 #[cfg(test)] 测试代码，测试段不进发布产物，故运行期代码量实际未增加。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        ".workflow-kit/tasks/evidence/RUN-082fcac4ab9e47669883eeac24241e47-build.stdout.txt"
+      ]
+    }
+  ],
+  "ui_review": null
+}

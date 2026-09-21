@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-082",
+  "run_id": "RUN-5046b2ce1a5a49c9a55f34c28eaa7ed5",
+  "status": "ready_for_verification",
+  "summary": "TASK-082 完成：① 修正 src-tauri/src/db/articles.rs 的三处**失效分节横幅**；② 复核 REQ-105 验收①「无超过 800 行的生产单体」的口径并把评估结论写入 AUDIT 报告。**评估结论：该文件不需要按领域拆分**（owner 2026-09-21 指示「评估是否有拆分必要，如果没有的话可以不用管」），理由四条，均已取证：① 超限来自测试而非生产代码——脚本按 `#[cfg(test)]` 位置切分实测：TASK-064(`6e36fdb`) 全文件 791 = 生产 716 + 单测 75；TASK-081 之后(`d46eff2`) 998 = 生产 751 + 单测 247；当前 994 = **生产 747** + 单测 247，生产段始终 < 800；② 单一领域高度内聚，全文操作 articles 表及紧邻的绑定/去重/状态列，共享 `ARTICLE_COLS`/`article_row`/`article_where` 内部契约，拆开会产生大量跨模块暴露；③ 不存在天然接缝——TASK-079 能拆 ingestion/ 是因为那四部分互不共享内部状态，articles.rs 是同一张表的读写两侧，**没有**这种结构；④ BRIEF 的 `non_goals` 已就同类文件作出书面裁决（原文「不拆分 Overlays/Timeline/db/sync_map.rs/base.css 与协议客户端（评估结论：内聚良好，拆了只加跳转成本）」），articles.rs 属同一类判断；成本上需纯搬运约 747 行生产代码、切开 15 个 pub fn（实测生产段恰 15 个）及其调用点，收益仅为文件更小。故本卡改为修**评估中发现的真实缺陷**：三处横幅是 TASK-023 从 db.rs 拆出子模块时的遗留脚手架，会主动误导读者——`Folders`（行 53）之下**零 folder 函数**（实为 article_row/list_articles/search_articles 等读取检索条目）、`URL 规范化（去重匹配键）`（行 473）之下**零 URL 规范化函数**（该函数实际在 db/url_norm.rs，已核对存在）、`Settings`（行 748）是**空横幅**（其后紧接 #[cfg(test)]，内容为零；settings 代码实际在 db/settings.rs，已核对存在）。三处分别改为「读取与检索：行/列表模型、分页游标、搜索、按 URL 去重查询」「写入与状态：文章入库（含智能去重）、已读/收藏、AI 字段、未读数」，空横幅整块删除。**改动为纯注释**：`git diff -U0` 实测 +2 行 / −6 行，无一行代码变化；文件全行数 998→994。**门禁实测**：cargo test **202 passed / 0 failed / 9 ignored**（与基线逐项相同，即零行为变化的直接证据）、lint 0 warnings / 0 errors、build exit 0、**frontend 313/313**（既有 26 条与新增 287 条一行未动）。未新增/删除任何 #[test]；未改任何函数签名或公开路径。**过程自查**：本节表格的第一个版本我凭记忆写了「791/930/751/183」等数字，随后用脚本逐时点实测发现**全部写错**（真值见上），已按实测值改写；「1200+ 行纯搬运」这一未测估算也改为实测的「约 747 行 / 15 个 pub fn」。这正是本项目连续 5 轮审查都在纠的同一类问题（写入未实测的数字），故本次对新增节里的每条可证伪声明都做了脚本核对：ingestion/ 四文件存在、url_norm.rs 与 settings.rs 存在、生产段 pub fn = 15、BRIEF non_goals 原文含该裁决、articles.rs 确为全库最大生产段（747，其后 config_sync.rs 669）。另在报告末尾给出**口径建议**：REQ-105 验收①宜明确按「生产段行数」衡量或显式排除同文件 `#[cfg(test)]` 段，否则任何给既有文件补单测的任务都会「违反」该验收，而补测试本身是受鼓励的。",
+  "changed_files": [
+    ".workflow-kit/docs/AUDIT-20260919-v2.md",
+    "src-tauri/src/db/articles.rs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}
