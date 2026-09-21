@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-085",
+  "run_id": "RUN-51e74dad3b1e4df88a1c4e42206d4b1a",
+  "status": "ready_for_verification",
+  "summary": "TASK-085 收口 AUDIT P3[F4]：把 `markEntriesReadBulk` 的逐条 IPC 收敛为**一次批量命令**，并订正第 4 轮审查的全部 4 条 FINDING。本卡是 TASK-084 的收口卡——TASK-084 的实现成果**原样沿用**（该卡因「任务记录被合法修订（依 owner 裁决订正验收⑥）而 repair 运行继承旧基线、判 protected 且无法收敛」被取消，与 TASK-074/076 同类处置）。**成果内容**：① Rust `commands/articles.rs` 新增 `set_read_bulk(ids, read)` 并注册于 `lib.rs`；批量循环抽为 `pub fn apply_read_bulk(conn, ids, read)`，**命令与测试共用同一段真实代码**；同锁内整批写完，锁外只调度一次 `schedule_state_push`，空 ids 直接返回。② `src/lib/api.ts` 新增 `setReadBulk`。③ `src/store/slices/reader.ts` 的 `markEntriesReadBulk` 由 N 次 `api.setRead` 改为单次 `api.setReadBulk(...).catch(...)`（整批一次提示，无 unhandled rejection）。**订正的 4 条 FINDING**：**F1（high）** 我上一版的「等价性证据」是**装饰性的**——测试体把批量循环抄了一遍、从不调用 `set_read_bulk`（rustc 的 `unused import: super::*` 即为败露点），审查者对真实命令体做「绕过 record_read_state」「跳过某 id 入队」两种变异都仍全绿。现改为抽 `apply_read_bulk` 并让测试驱动它；**实测**：同样的两种变异现在均为 1 passed / 3 failed（exit 101），还原后 4 passed——证据真正有牙，且 `use super::*` 现被实际使用（无 unused 警告）。**F2（medium）** (L1) 改写只钉了载荷**长度**，弱于原断言（原「set_read 计数 === 6」隐含精确 id 集合检查）。现改为钉**精确 id 集合** `101,103,104,105,201,301`（按猜测先写的 `…201,203` 被测试当场证伪，遂读 `BASE_ROWS` 取真值）；**实测**：施加「同长度 6 但换成错误 id」的变异 → (f) 与 (L1) 双双 FAILED（312/314），还原 314/314。**F3（medium）** 卡片原写「既有断言一行不动」，而本卡必须消除逐条 IPC，二者不可兼得；审查者正确指出这需要 owner 裁决而非实现者自行改标准——已新增 **DEC-t084-replace-per-item-ipc-assertions-20260921** 明确授权改写、并**强制要求强度不低于原断言**（把 F2 的修复写进裁决本体），本卡 test_review 的 keep 动作已挂该 decision_ids、不再声称「全部既有断言原样通过」。**F4（low）** 实现期遗留的未跟踪脚本 `.workflow-kit/tasks/evidence/_move.py` 已删除。**门禁实测**：cargo test **206 passed / 0 failed / 9 ignored**（TASK-081 基线 202 → +4 条本卡断言），无 unused 警告；lint 0 warnings / 0 errors；build exit 0；frontend **314/314**（基线 313，新增 2 条并改写 2 条）。**范围**：全部改动落在 5 个 allowed_paths 内；`src-tauri/src/db/commands_extraction_tests.rs` 保持空 diff（测试曾落该处、已移回 `commands/articles.rs`）。",
+  "changed_files": [],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

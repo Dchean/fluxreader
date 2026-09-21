@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-21T11:51:51.394335Z",
+  "roots": [
+    ".workflow-kit/tasks/runs/RUN-082fcac4ab9e47669883eeac24241e47.json",
+    "src-tauri/src/commands/articles.rs",
+    "src-tauri/src/lib.rs",
+    "src/lib/api.ts",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/tasks/runs/RUN-082fcac4ab9e47669883eeac24241e47.json",
+      "sha256": "afaef55a9a10e9277a12d9a3507040a68146f5cc0826a040e55f68a5215f029a"
+    },
+    {
+      "path": "src-tauri/src/commands/articles.rs",
+      "sha256": "aa04554907e175db3b71e4bbe34787acd50631b435e0c3e327d02c6ed277047e"
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "sha256": "1eb4d9dc629086f0a571a463ac5ca8ce44fc4f693f166edfa9bdc3aab1337d09"
+    },
+    {
+      "path": "src/lib/api.ts",
+      "sha256": "1c68657d25c57474fbdae1c4d39d24008edaa4e92c96e2076e6b7f79aaa64538"
+    },
+    {
+      "path": "src/store/slices/reader.ts",
+      "sha256": "e93f5724c57d1a62a3ba7241ffdccfb99fd4f5b11a0d57b75a2a78e0b3b4d6b6"
+    },
+    {
+      "path": "tools/frontend-regression.mjs",
+      "sha256": "5bca56a40a837c7405282f4a774a5d524f0856579b7e2cc1a65d7c1f3b267e88"
+    }
+  ],
+  "digest": "7545c8f780bd42584a5cb4ffc9440b5c36bc81484fca3fdfe8e790bbce306d45"
+}

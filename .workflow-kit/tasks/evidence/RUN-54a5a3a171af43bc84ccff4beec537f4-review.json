@@ -1,0 +1,60 @@
+{
+  "task_id": "TASK-085",
+  "candidate_digest": "7545c8f780bd42584a5cb4ffc9440b5c36bc81484fca3fdfe8e790bbce306d45",
+  "verification_run": "RUN-92059f91051f47888cf95db5be2acb76",
+  "verdict": "PASS",
+  "summary": "Independent re-verification of TASK-085 (F4 bulk read). Both mandated mutations of apply_read_bulk were re-run and each produced 1 passed / 3 failed, exit 101; the file was restored byte-identically from a backup (sha256 aa04554907e175db3b71e4bbe34787acd50631b435e0c3e327d02c6ed277047e, matching the packet) and 4 passed / 0 failed was re-confirmed after forcing a rebuild. The rewritten (f)/(L1) frontend assertions are strictly stronger than HEAD's. DEC-t084-replace-per-item-ipc-assertions-20260921 exists, accepted, issuer owner, scoped REQ-104/TASK-084, and is referenced in test_review.decision_ids. The doc comments no longer overstate atomicity. Gates recomputed: cargo 206/0/9, lint 0/0, build exit 0, frontend 314/314 (re-run independently).",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "All six acceptance items hold. set_read_bulk is registered in lib.rs and the bulk path routes through apply_read_bulk -> record_read_state (verified: record_read_state = db::set_read + db::enqueue_sync with read/unread), so per-id is_read writes and sync_queue enqueue match the per-item path. reader.ts markEntriesReadBulk now issues a single api.setReadBulk call, and (f)/(L1) assert exactly one set_read_bulk with zero set_read. (L1) pins the exact id set 101,103,104,105,201,301. The replaced assertions are authorised by an owner decision, and no file outside the five allowed paths changed.",
+      "evidence_files": [
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/lib.rs",
+        "src/lib/api.ts",
+        "src/store/slices/reader.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "The equivalence test now calls the real apply_read_bulk rather than a copy-pasted loop. I re-ran both mutations independently: bypassing record_read_state via crate::db::set_read, and skipping enqueue for the first id only, each gave 1 passed / 3 failed at exit 101, so the evidence is load-bearing rather than decorative. The rewritten (f)/(L1) replacements are at least as strict as HEAD: (L1) was upgraded from a payload-length check to the exact sorted id set plus exactly-one-set_read_bulk and zero-set_read, and (f) keeps its exact 101,103 id-set check.",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-085-cumulative-diff.txt",
+        ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "apply_read_bulk_empty_is_noop locks the empty-ids no-write/no-enqueue path, and the command short-circuits empty ids before taking the lock. apply_read_bulk_false_queues_unread_actions locks read=false to is_read=0 plus the mutually exclusive unread enqueue. A mid-batch error propagates via ? and leaves prior ids committed and enqueued; this partial-commit behaviour is now truthfully documented instead of being claimed atomic, and the frontend catches the rejection into a single toast so no unhandled rejection escapes.",
+      "evidence_files": [
+        "src-tauri/src/commands/articles.rs",
+        "src/store/slices/reader.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "Extracting apply_read_bulk mirrors the existing apply_mark_all_read pattern, keeping command and test on one real code path and removing the duplicated-loop hazard that produced the original decorative evidence. The new test module is small and self-contained with focused helpers (seeded/count_read/queued). Naming and the read/unread action strings are unchanged, and no new dependency or module boundary was introduced.",
+      "evidence_files": [
+        "src-tauri/src/commands/articles.rs",
+        "src/lib/api.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "This is a static improvement with no benchmark claimed, which matches the evidence available: the change converts N invoke round-trips into one and holds the DB lock once with a single schedule_state_push instead of one per id. No measured throughput figure is asserted anywhere in the diff, so no unmeasured performance claim is being made. Per-id record_read_state still commits individually, so the win is IPC and lock amortisation rather than write batching.",
+      "evidence_files": [
+        "src/store/slices/reader.ts",
+        "src-tauri/src/commands/articles.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

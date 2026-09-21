@@ -28,11 +28,10 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 57 项：已验收 46，待验收 0，阻塞 0。
+已建任务 57 项：已验收 47，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-085 · F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令（收口 TASK-084）](<../tasks/cards/TASK-085.md>) | 待执行 | TASK-084 的实现成果收口（该卡因任务记录合法修订与旧基线不收敛而取消，见其 dispositions）。内容不变：把 AUDIT P3[F4] 的逐条 IPC 收敛为一次批量命令 —— ① Rust `commands/articles.rs` 新增 `set_read_bulk(ids, read)` 并注册于 lib.rs；批量循环抽为 `apply_read_bulk`，命令与测试共用同一段真实代码，避免「把循环抄进测试」造成的伪证据；② `src/lib/api.ts` 新增 `setReadBulk`；③ `reader.ts` 的 `markEntriesReadBulk` 改单次调用。本轮同时订正审查 FINDING TASK-084-F1/F2/F3/F4：测试驱动真实函数（两种变异实测可致失败）、(L1) 断言钉精确 id 集合而非长度、契约变更由 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 授权、清理实现期遗留脚本。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -44,6 +43,7 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
 另有 45 项记录可在任务总览查看。
 
@@ -81,11 +81,6 @@
 
 ## 最近事件
 
-- 2026-09-21T11:06:09.914783Z · cancel · TASK-083 · prepare 时 spec 的 allowed_paths 误写在嵌套 scope 下（工具只读顶层，已静默回退为 snapshot_paths，范围偏窄且不可信）；本次工具自带的 task-spec-guard 已捕获该问题。按纪律取消并以订正后的顶层 allowed_paths 重新立项，避免带着错误范围进入 begin（TASK-074/076 同类处置）。；依据：总控处置（2026-09-21）
-- 2026-09-21T11:06:51.337611Z · prepare · TASK-084 · 任务已冻结：F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令；范围 src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs
-- 2026-09-21T11:07:10.990321Z · checkpoint · TASK-084 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-09-21T11:27:04.582318Z · checkpoint · TASK-084 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-09-21T11:27:38.185322Z · checkpoint · TASK-084 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-21T11:36:05.157297Z · checkpoint · TASK-084 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
 - 2026-09-21T11:47:28.274353Z · checkpoint · TASK-084 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-21T11:47:46.524754Z · checkpoint · TASK-084 · Out-of-scope changes: .workflow-kit/tasks/items/TASK-084.json (allowed: src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs)；下一步：核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算
@@ -93,6 +88,11 @@
 - 2026-09-21T11:49:44.448875Z · checkpoint · TASK-084 · 任务已取消：任务记录在实现过程中被合法修订（依 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 订正验收⑥ 并把该裁决挂到 test_review），但本卡 repair 运行继承的是首次 begin（RUN-0575c6a1）时的旧基线，导致 .workflow-kit/tasks/items/TASK-084.json 被判越界且无法收敛（TASK-074/076 同类）。实现成果已全部完成且四门禁全绿，按既有先例取消本卡并以新卡收口：新卡从当前已实现的工作树取快照，故 changed_files 为空、成果由候选快照承载。注：Rust 侧 apply_read_bulk 抽取与 4 条等价性断言、前端批量断言与精确 id 集合检查均已就位。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
 - 2026-09-21T11:49:44.533615Z · cancel · TASK-084 · 任务记录在实现过程中被合法修订（依 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 订正验收⑥ 并把该裁决挂到 test_review），但本卡 repair 运行继承的是首次 begin（RUN-0575c6a1）时的旧基线，导致 .workflow-kit/tasks/items/TASK-084.json 被判越界且无法收敛（TASK-074/076 同类）。实现成果已全部完成且四门禁全绿，按既有先例取消本卡并以新卡收口：新卡从当前已实现的工作树取快照，故 changed_files 为空、成果由候选快照承载。注：Rust 侧 apply_read_bulk 抽取与 4 条等价性断言、前端批量断言与精确 id 集合检查均已就位。；依据：总控处置（2026-09-21）
 - 2026-09-21T11:50:45.342707Z · prepare · TASK-085 · 任务已冻结：F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令（收口 TASK-084）；范围 src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs
+- 2026-09-21T11:51:01.762149Z · checkpoint · TASK-085 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-21T11:51:37.587575Z · checkpoint · TASK-085 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-21T11:52:13.562307Z · checkpoint · TASK-085 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T12:03:48.271955Z · checkpoint · TASK-085 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-21T12:04:15.939117Z · accept · 验收 TASK-085；依据：总控核对：独立审查 PASS（findings 空，五区域全 PASS，candidate 7545c8f7…，verification RUN-92059f91051f47888cf95db5be2acb76）。审查者**独立重跑了 F1 的两种变异**（绕过 record_read_state / 跳过首 id 入队），均为 1 passed / 3 failed（exit 101），并确认还原后 4 passed——即上一版「装饰性证据」的问题已实质修复；确认 (f)/(L1) 两条改写断言**强度不低于原断言**（(L1) 已由长度改为精确 id 集合）；确认契约变更裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 存在、owner/已接受、scope 覆盖 REQ-104/TASK-084 且被 test_review.decision_ids 引用；确认 set_read_bulk 注释不再夸大原子性；范围仅 5 个文件、commands_extraction_tests.rs 空 diff。四门禁：cargo 206/0/9、lint 0/0、build exit 0、frontend 314/314。**登记审查者发现的一个工具坑**（后续复核须知）：cargo 的 mtime 指纹在本例中会返回旧结果——还原后需 touch 文件或强制重编才能得到真实结果，否则会误信陈旧产物。验收（2026-09-21）
 
 ## 如何继续
 

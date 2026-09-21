@@ -1,0 +1,197 @@
+{
+  "schema_version": 1,
+  "id": "RUN-92059f91051f47888cf95db5be2acb76",
+  "task_id": "TASK-085",
+  "kind": "verification",
+  "outcome": "completed",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-373c1d0291a34872b93ed7727b8ce502"
+  },
+  "started_at_utc": "2026-09-21T11:51:51.532720Z",
+  "finished_at_utc": "2026-09-21T11:52:13.402229Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "7545c8f780bd42584a5cb4ffc9440b5c36bc81484fca3fdfe8e790bbce306d45",
+  "candidate_digest": "7545c8f780bd42584a5cb4ffc9440b5c36bc81484fca3fdfe8e790bbce306d45",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-cargo_test.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-cargo_test.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-lint.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-lint.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-build.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-build.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-frontend.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-frontend.stderr.txt"
+  ],
+  "checks": [
+    {
+      "gate_id": "cargo_test",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-cargo_test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-cargo_test.stderr.txt",
+      "candidate_digest": "7545c8f780bd42584a5cb4ffc9440b5c36bc81484fca3fdfe8e790bbce306d45",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+          "test"
+        ],
+        "cwd": "src-tauri",
+        "started_at_utc": "2026-09-21T11:51:51.658914Z",
+        "finished_at_utc": "2026-09-21T11:52:00.412165Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-cargo_test.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-cargo_test.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "lint",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-lint.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-lint.stderr.txt",
+      "candidate_digest": "7545c8f780bd42584a5cb4ffc9440b5c36bc81484fca3fdfe8e790bbce306d45",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\nodejs\\node.EXE",
+          "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "lint"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-21T11:52:00.448172Z",
+        "finished_at_utc": "2026-09-21T11:52:00.746556Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-lint.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-lint.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "build",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-build.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-build.stderr.txt",
+      "candidate_digest": "7545c8f780bd42584a5cb4ffc9440b5c36bc81484fca3fdfe8e790bbce306d45",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\nodejs\\node.EXE",
+          "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "build"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-21T11:52:00.773813Z",
+        "finished_at_utc": "2026-09-21T11:52:02.629173Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-build.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-build.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "frontend",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-frontend.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-frontend.stderr.txt",
+      "candidate_digest": "7545c8f780bd42584a5cb4ffc9440b5c36bc81484fca3fdfe8e790bbce306d45",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\nodejs\\node.EXE",
+          "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "test:frontend"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-09-21T11:52:02.655864Z",
+        "finished_at_utc": "2026-09-21T11:52:13.367657Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-frontend.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-frontend.stderr.txt"
+      }
+    }
+  ],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 24936,
+  "controller_pid": 14256,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "started_at_utc": "2026-09-21T11:51:51.658914Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-cargo_test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-cargo_test.stderr.txt",
+      "finished_at_utc": "2026-09-21T11:52:00.412165Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-21T11:52:00.448172Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-lint.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-lint.stderr.txt",
+      "finished_at_utc": "2026-09-21T11:52:00.746556Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-21T11:52:00.773813Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-build.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-build.stderr.txt",
+      "finished_at_utc": "2026-09-21T11:52:02.629173Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-09-21T11:52:02.655864Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-frontend.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-92059f91051f47888cf95db5be2acb76-frontend.stderr.txt",
+      "finished_at_utc": "2026-09-21T11:52:13.367657Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    }
+  ]
+}

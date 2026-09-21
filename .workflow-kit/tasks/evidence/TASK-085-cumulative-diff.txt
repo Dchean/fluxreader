@@ -1,0 +1,96 @@
+TASK-085 change set — AUDIT P3[F4]: markEntriesReadBulk 逐条 IPC → 一次批量命令 (REQ-104)
+
+This card CLOSES OUT TASK-084, which was cancelled because its task record was legitimately
+amended (per an owner decision) and the repair run then inherited a stale baseline and could not
+converge. The implementation is carried over unchanged.
+
+================================================================================
+WHAT THE CHANGE IS
+================================================================================
+Before: `reader.ts` did `Promise.allSettled(unread.map((id) => api.setRead(Number(id), true)))`
+— one `invoke('set_read')` PER id.
+
+Now:
+  · Rust `commands/articles.rs`: `set_read_bulk(ids, read)` (registered in `lib.rs`). Its loop is
+    extracted as `pub fn apply_read_bulk(conn, ids, read)` — **the command and the tests call the
+    same function**. One lock acquisition, one `schedule_state_push` outside it, empty ids → Ok.
+  · Front `src/lib/api.ts`: `setReadBulk(ids, read)`.
+  · Front `reader.ts`: one call + `.catch(...)` (single toast, no unhandled rejection).
+
+================================================================================
+*** THIS CARD FIXES FOUR FINDINGS FROM TASK-084'S REVIEW — VERIFY THEY ARE ACTUALLY FIXED ***
+================================================================================
+**F1 (was high) — the TASK-084 "equivalence" test was DECORATIVE.** It never called
+`set_read_bulk`; it copy-pasted the loop into the test body (the tell was rustc's
+`unused import: super::*`). The reviewer mutated the real command two ways — bypassing
+`record_read_state` entirely (so `sync_queue` is never written), and skipping the enqueue for one
+id — and **both mutants passed**. That means a real regression to the bulk enqueue would have
+sailed through the suite.
+  FIX: the loop now lives in `apply_read_bulk`, and the tests drive THAT.
+  MEASURED NOW: the same two mutations each give **1 passed / 3 failed (exit 101)**;
+  restored → 4 passed. `use super::*` is now genuinely used (no unused-import warning).
+  **Please re-run both mutations yourself** and confirm they fail.
+
+**F2 (was medium) — the `(L1)` rewrite LOST coverage.** The original `set_read count === 6` was
+implicitly an EXACT id-set check; the rewrite pinned only the payload LENGTH, so marking 6 wrong
+ids would pass.
+  FIX: it now pins the exact id set `101,103,104,105,201,301` (I first guessed `…201,203`, the
+  test refuted it, and I read `BASE_ROWS` for the truth).
+  MEASURED: a "same length, wrong ids" mutation fails both `(f)` and `(L1)` (312/314).
+  **Confirm the replacements are now at least as strict as the originals.**
+
+**F3 (was medium) — a contract change needed an OWNER decision, not a silent clause edit.** The
+card said "existing assertions untouched" while the task necessarily rewrote two assertions that
+encoded the old per-item IPC.
+  FIX: owner decision **DEC-t084-replace-per-item-ipc-assertions-20260921** now authorises the
+  rewrite AND mandates the replacements be no weaker (it embeds the F2 fix). The card's
+  `test_review.decision_ids` references it. **Check this decision exists, is owner-issued,
+  accepted, and scoped to REQ-104/TASK-084.**
+
+**F4 (was low)** — the implementer's stray scratch file `.workflow-kit/tasks/evidence/_move.py`
+was deleted.
+
+================================================================================
+EVIDENCE FOR THE TWO CORE CLAIMS
+================================================================================
+Claim A ("semantically equivalent to the per-item path"): tests compare the per-item path
+(`record_read_state` per id) against `apply_read_bulk` on two identically-seeded DBs, checking
+read-count AND the full `sync_queue` item set (action + article_id). Four tests total:
+equivalence, every-id-enqueues, empty-is-noop, read=false direction.
+Claim B ("one IPC, not N"): the harness records every invoke in `invokeCalls`. Assertions require
+`set_read_bulk === 1`, `set_read === 0`, and the exact id set.
+
+================================================================================
+GATES (measured on this candidate)
+================================================================================
+  cargo test  206 passed / 0 failed / 9 ignored   (TASK-081 baseline 202; +4 here)
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    314/314, exit 0                      (baseline 313; +2 added, 2 rewritten)
+
+================================================================================
+WHAT TO ATTACK
+================================================================================
+1. **F1 first**: re-run both mutations on `apply_read_bulk` and confirm the tests now fail. If
+   they still pass, this is decorative evidence again and must FAIL.
+2. **F2**: are the rewritten `(f)`/`(L1)` assertions at least as strict as HEAD's?
+3. **F3**: does the authorising decision exist with the right issuer/scope, and does the card
+   reference it (no silent self-amendment)?
+4. **Honesty of the comments**: `set_read_bulk`'s doc says "整批回滚式返回 Err（不写半批）" was
+   removed — verify the remaining wording is accurate, in particular that a mid-loop failure
+   leaves earlier ids committed (there is no surrounding transaction). Flag anything overstated.
+5. **Scope**: only these 5 files may change — `src-tauri/src/commands/articles.rs`,
+   `src-tauri/src/lib.rs`, `src/lib/api.ts`, `src/store/slices/reader.ts`,
+   `tools/frontend-regression.mjs`; `src-tauri/src/db/commands_extraction_tests.rs` must be empty.
+6. Gates: cargo **206/0/9**, lint 0/0, build exit 0, frontend **314/314**. Recompute cargo from
+   the recorded log (do NOT run the full 27-suite); `& npm.cmd run test:frontend` is fast enough
+   to re-run. Do NOT run `npm run build` (Vite blocked in this sandbox).
+
+**Delete any probe/temp files you create** and confirm `git status --porcelain` has no leftovers.
+
+================================================================================
+TIME DISCIPLINE
+================================================================================
+A previous reviewer of the predecessor card died mid-run and lost its work. Budget ~15 minutes,
+then WRITE THE REPORT. If you mutate files, restore byte-identically from a BACKUP FILE (not
+`git checkout`) and re-verify sha256.
