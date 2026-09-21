@@ -250,6 +250,7 @@ pub fn run() {
             commands::get_articles,
             commands::search_articles,
             commands::set_read,
+            commands::set_read_bulk,
             commands::set_starred,
             commands::mark_all_read,
             commands::feed_counts,

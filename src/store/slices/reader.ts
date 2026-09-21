@@ -361,9 +361,14 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     });
     if (unread.length === 0) return;
     if (dataMode === 'tauri') {
-      /* TASK-067 N10：批量标读失败单条提示（allSettled 防 toast 洪峰） */
-      void Promise.allSettled(unread.map((id) => api.setRead(Number(id), true))).then((rs) => {
-        if (rs.some((r) => r.status === 'rejected')) get().showToast('部分文章标读失败');
+      /* AUDIT P3[F4]（TASK-084）：改为**一次**批量 IPC。
+         修前是 `Promise.allSettled(unread.map((id) => api.setRead(...)))` —— 每个 id 一次
+         invoke，几百个 id 就是几百次往返。Rust 侧 set_read_bulk 在同一把锁内逐 id 走
+         record_read_state（本地写入 + 入队口径与逐条路径完全一致），故语义等价。
+         失败提示：整批一次（比修前的“部分失败”粒度更粗，但不再有 toast 洪峰，
+         且 catch 保证不会产生 unhandled rejection）。 */
+      void api.setReadBulk(unread.map((id) => Number(id)), true).catch(() => {
+        get().showToast('批量标读失败');
       });
     }
     const marked = new Set(unread);

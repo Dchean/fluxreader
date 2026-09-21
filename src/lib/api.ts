@@ -265,6 +265,12 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('set_read', { id, read }) as null) : null;
   },
+  /** 批量标读：一次 IPC 处理整批 id（AUDIT P3[F4]）。语义与逐条 setRead 等价，见
+   *  Rust 侧 set_read_bulk 的契约注释（每个 id 都走 record_read_state + 入队）。 */
+  async setReadBulk(ids: number[], read: boolean): Promise<null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('set_read_bulk', { ids, read }) as null) : null;
+  },
   async setStarred(id: number, starred: boolean): Promise<null> {
     const inv = await getInvoke();
     return inv ? (await inv('set_starred', { id, starred }) as null) : null;

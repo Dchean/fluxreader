@@ -819,8 +819,17 @@ await (async () => {
   invokeCalls.length = 0;
   store.getState().markEntriesReadBulk(['101', '102', '103']);
   await nTick(0);
+  /* AUDIT P3[F4]（TASK-084）：契约由「每个未读项一次 set_read」改为「整批一次
+     set_read_bulk」。原断言（逐条 set_read）编码的是修前的行为，本卡按审计要求
+     消除逐条 IPC，故此处**有意改写**并保留其原有意图（已读项不得重复写库）：
+     ① 只发一次 set_read_bulk；
+     ② 载荷只含未读项（已读的 102 不在其中）。 */
+  checkNew('(f) 批量标读只发**一次** set_read_bulk IPC（修前是 N 次 set_read）',
+    invokeCalls.filter((c) => c.cmd === 'set_read_bulk').length === 1
+    && invokeCalls.filter((c) => c.cmd === 'set_read').length === 0);
   checkNew('(f) 批量标读只对未读项发 IPC（已读项不重复写库刷同步队列）',
-    invokeCalls.filter((c) => c.cmd === 'set_read').map((c) => c.args.id).sort((a, b) => a - b).join(',') === '101,103');
+    (invokeCalls.find((c) => c.cmd === 'set_read_bulk')?.args.ids ?? [])
+      .slice().sort((a, b) => a - b).join(',') === '101,103');
   checkNew('(f) 批量标读的保留快照是「合并」而非替换（既有记录不丢）',
     store.getState().openedReadIds['999'] === true && store.getState().openedReadIds['101'] === true);
   checkNew('(f) 批量标读按源聚合未读减量（源A 标 2 条 → 3-2=1）',
@@ -1592,10 +1601,21 @@ await (async () => {
   const l1Ids = store.getState().entries.map((e) => e.id);
   invokeCalls.length = 0;
   store.getState().markEntriesReadBulk(l1Ids);
-  await nTick(0);   // api.setRead 内部 await getInvoke()，落库是异步 fire-and-forget
+  await nTick(0);   // api.setReadBulk 内部 await getInvoke()，落库是异步 fire-and-forget
   const l1 = store.getState();
-  checkNew('(L1) 索引化批量标读：未读项全部标读、已读项不重复写库（8 条中 6 条未读 → 6 次 set_read）',
-    l1.entries.every((e) => e.isRead) && invokeCalls.filter((c) => c.cmd === 'set_read').length === 6);
+  /* AUDIT P3[F4]（TASK-084）：IPC 契约由「6 次 set_read」改为「1 次 set_read_bulk」。
+     本断言的**原意是「未读项全部标读、已读项不重复写库」**，该意图完整保留。
+     审查 FINDING TASK-084-F2 指出：上一版只钉了载荷**长度**（=== 6），是**弱于**原断言
+     的——原来的「set_read 计数 === 6」其实是一个**精确 id 集合检查**（一个 set_read 只可能
+     为「即将被写入的未读 id」发出），因此 6 次即证明恰是那 6 个未读 id 被写、且 2 个已读 id
+     未被写。现在按原强度把**具体 id 集合**钉死（已读的 102/202 必须不在其中）。 */
+  const l1BulkIds = (invokeCalls.find((c) => c.cmd === 'set_read_bulk')?.args.ids ?? [])
+    .slice().sort((a, b) => a - b).join(',');
+  checkNew('(L1) 索引化批量标读：未读项全部标读、已读项不重复写库（1 次 set_read_bulk，载荷恰为 6 个未读 id 101,103,104,105,201,301）',
+    l1.entries.every((e) => e.isRead)
+    && invokeCalls.filter((c) => c.cmd === 'set_read_bulk').length === 1
+    && invokeCalls.filter((c) => c.cmd === 'set_read').length === 0
+    && l1BulkIds === '101,103,104,105,201,301');
   checkNew('(L1) 未读计数仍按源聚合扣减：源10 3→1、源12 2→0、源11 2→1、源20 1→0',
     l1.feedCounts.get('10')?.unread === 1 && l1.feedCounts.get('12')?.unread === 0
     && l1.feedCounts.get('11')?.unread === 1 && l1.feedCounts.get('20')?.unread === 0);
