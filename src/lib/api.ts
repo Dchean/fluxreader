@@ -100,6 +100,14 @@ export interface ConfigSyncApplyResult {
   skipped: number;
 }
 
+/** extract_fulltext 的结果（TASK-076 / P2-10 后半）：降级不再静默。
+ * degraded=true 时 html 是保留的原文，reason 说明为何没采用提取结果。 */
+export interface ExtractFulltextResult {
+  html: string;
+  degraded: boolean;
+  reason: string | null;
+}
+
 export interface SyncReport {
   pushed_states: number;
   pushed_feeds: number;
@@ -363,10 +371,12 @@ export const api = {
     return (await inv('ai_translate', { articleId, onChannel: channel })) as string;
   },
 
-  /** 全文提取（Readability）：拉原文网页抽正文并覆盖缓存。返回提取的 HTML。 */
-  async extractFulltext(articleId: number): Promise<string | null> {
+  /** 全文提取（Readability）：拉原文网页抽正文并覆盖缓存。
+   * TASK-076：返回结构化结果而非裸字符串——degraded=true 表示本次**没有采用**提取
+   * 结果（html 是保留的原文），reason 给出原因；调用方不必再靠比对字符串去猜。 */
+  async extractFulltext(articleId: number): Promise<ExtractFulltextResult | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('extract_fulltext', { articleId }) as string) : null;
+    return inv ? (await inv('extract_fulltext', { articleId }) as ExtractFulltextResult) : null;
   },
 
   /** 后端抓图（防盗链兼容）：走 Referer 候选链（无→图床 origin→文章 URL）。

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "RUN-d11b91b3fa22412e80b0ede62bebf413",
+  "task_id": "TASK-076",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260921-t076-rebaseline"
+  },
+  "started_at_utc": "2026-09-21T01:26:21.847803Z",
+  "finished_at_utc": "2026-09-21T01:27:33.675355Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "f7d578f83c4ec145db76dab796f76e0012b3a717e0e2549b13348d343dc87500",
+  "candidate_digest": null,
+  "raw_output_refs": [],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-d11b91b3fa22412e80b0ede62bebf413-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-3919e50f13e24ee6a6139eb3a851b110-scope.json",
+  "recovery": {
+    "source": "TASK-076 的已实现成果将由新卡收口：本 run 未 finish；按 TASK-068→TASK-069 与 TASK-074→TASK-075 先例，取消本卡并以新卡承载同一成果（allowed_paths 已在记录中订正为真实路径）。2026-09-21",
+    "observed_at_utc": "2026-09-21T01:27:32.917130Z",
+    "actual_process_finish_known": false,
+    "note": "finished_at marks record closure, not a fabricated process completion"
+  },
+  "failure_kind": "scope",
+  "failure_reason": "Interrupted run recovered: TASK-076 的已实现成果将由新卡收口：本 run 未 finish；按 TASK-068→TASK-069 与 TASK-074→TASK-075 先例，取消本卡并以新卡承载同一成果（allowed_paths 已在记录中订正为真实路径）。2026-09-21; out-of-scope changes: .workflow-kit/tasks/items/TASK-076.json"
+}

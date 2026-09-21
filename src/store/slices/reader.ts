@@ -156,15 +156,21 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         if (mode === 'fulltext' && row.url && !alreadyExtracted && shouldExtractFulltext(html)) {
           void api
             .extractFulltext(Number(id))
-            .then((full) => {
-              if (!full) return;
-              /* P2-10：后端「防退化」路径会原样返回原文（内容未变、也不置库标志）。
-                 这里若照样置 fulltextExtracted=true 并切全文视图，等于把「什么都没
-                 提取到」显示成成功。返回内容 == 当前正文 → 判定未真正提取，保持原状。 */
-              const cur2 = get().entries.find((a) => a.id === id);
-              if (cur2 && full === cur2.content) return;
+            .then((res) => {
+              if (!res) return;
+              /* TASK-076（P2-10 后半，DEC-req104-p2-10b-fulltext-degraded-20260920）：
+                 后端现在直接给结构化 degraded 标志，取代此前「返回内容 == 当前正文」
+                 的字符串比对——那种猜法在正文恰好相同时会误判，而且静默、用户看不到
+                 原因。降级时如实提示并保持原状（不置标志、不切全文视图）。 */
+              if (res.degraded) {
+                get().showToast(
+                  `未采用全文提取：${res.reason ?? '提取结果不可用'}`,
+                  { label: '重试', run: () => get().extractCurrentArticle() },
+                );
+                return;
+              }
               set((s) => ({
-                entries: s.entries.map((a) => (a.id === id ? { ...a, content: full, fulltextExtracted: true } : a)),
+                entries: s.entries.map((a) => (a.id === id ? { ...a, content: res.html, fulltextExtracted: true } : a)),
                 showFulltext: true,
               }));
             })
@@ -271,22 +277,20 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     showToast(art.fulltextExtracted ? '正在刷新全文…' : '正在提取全文…');
     void api
       .extractFulltext(Number(activeArticleId))
-      .then((full) => {
-        if (!full) return;
+      .then((res) => {
+        if (!res) return;
         const id = activeArticleId;
-        /* P2-10：后端防退化时会原样返回原文（内容未变、库标志也不置位）。
-           此时不能置 fulltextExtracted、也不能报「全文提取完成」——否则提示与
-           按钮状态都在说成功，用户看到的却还是 RSS 原文。已提取过的刷新不走
-           这条：那种情况下结果与当前全文相同是正常的，故只在「此前未提取」时
-           按「内容未变化」判定未真正提取。 */
-        const before = get().entries.find((a) => a.id === id);
-        if (before && !before.fulltextExtracted && full === before.content) {
-          showToast('该页面无法提取全文，已保留 RSS 原文');
+        /* TASK-076：改判结构化 degraded 标志。此前靠「返回内容 == 当前正文」猜，
+           且为了绕开「已提取过的刷新本来就会相同」还要额外判断 fulltextExtracted，
+           逻辑脆弱；现在后端直接说明本次是否采用了提取结果，手动刷新与自动全文
+           两条路径用同一判据。 */
+        if (res.degraded) {
+          showToast(`未采用全文提取：${res.reason ?? '提取结果不可用'}`);
           return;
         }
         set((s) => ({
           entries: s.entries.map((a) =>
-            a.id === id ? { ...a, content: full, fulltextExtracted: true } : a,
+            a.id === id ? { ...a, content: res.html, fulltextExtracted: true } : a,
           ),
           showFulltext: true,
         }));

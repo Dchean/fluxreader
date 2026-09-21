@@ -347,7 +347,8 @@ await (async () => {
   let heldAi = [];            // hold 模式挂起项 { cmd, id, ch }
   let settingsRaw = null;     // get_setting('app_settings') 的返回值
   let ghLoginStatus = null;   // github_login_status 的返回值：null | {login} | 'reject'
-  let extractResult = null;   // extract_fulltext 的返回值：字符串 | 'reject' | null
+  let extractResult = null;   // extract_fulltext 的返回值：ExtractFulltextResult | 'reject' | null
+                              // TASK-076：后端改为结构化 { html, degraded, reason }
 
   const localDayKey = (ms) => {
     const d = new Date(ms);
@@ -408,11 +409,18 @@ await (async () => {
         return ghLoginStatus === 'reject'
           ? Promise.reject({ message: 'ipc down' })
           : Promise.resolve(ghLoginStatus);
-      /* P2-10：全文提取返回值可控（'reject' = 网络失败；字符串 = 提取结果） */
+      /* TASK-076：全文提取返回结构化结果（'reject' = 网络失败）。
+         为兼容既有用例仍传裸字符串的写法，这里把字符串折算成「成功」形态：
+         { html, degraded:false, reason:null }。 */
       case 'extract_fulltext':
-        return extractResult === 'reject'
-          ? Promise.reject({ message: '网页拉取失败：HTTP 503' })
-          : Promise.resolve(extractResult);
+        if (extractResult === 'reject') {
+          return Promise.reject({ message: '网页拉取失败：HTTP 503' });
+        }
+        return Promise.resolve(
+          typeof extractResult === 'string'
+            ? { html: extractResult, degraded: false, reason: null }
+            : extractResult,
+        );
       case 'ai_summarize':
       case 'ai_translate': {
         const plan = cmd === 'ai_summarize' ? aiSum : aiTr;
@@ -1568,7 +1576,10 @@ await (async () => {
   checkNew('(P2-4) 库里 JSON 损坏时保存仍成功（以提示词重建，不让保存动作失败）',
     p24Broken.summaryPrompt === 'a' && p24Broken.translatePrompt === 'b');
 
-  /* ---------- P2-10：防退化路径（后端原样返回原文）不得显示成「提取成功」 ---------- */
+  /* ---------- P2-10 / TASK-076：降级（degraded）不得显示成「提取成功」 ----------
+     TASK-076（DEC-req104-p2-10b-fulltext-degraded-20260920）把判据由「返回内容 ==
+     当前正文」的字符串比对改为后端结构化 degraded 标志；本段随之改为直接驱动该标志
+     （mock 现按 { html, degraded, reason } 返回）。保护意图不变。 */
   await bootFixture();
   store.setState((s) => ({
     toasts: [],
@@ -1578,20 +1589,20 @@ await (async () => {
       ? { ...a, content: '<p>RSS 原文</p>', rawContent: '<p>RSS 原文</p>', url: 'https://x.example/a', fulltextExtracted: false }
       : a)),
   }));
-  extractResult = '<p>RSS 原文</p>';          // 后端防退化：原样返回原文（未真正提取）
+  extractResult = { html: '<p>RSS 原文</p>', degraded: true, reason: '提取结果比原正文更短，已保留原正文（原文可能已是全文）' };
   store.getState().extractCurrentArticle();
   await nTick(20);
   const p210 = store.getState();
-  checkNew('(P2-10) 防退化原样返回原文时：不置 fulltextExtracted、不切全文视图（修前都会发生）',
+  checkNew('(P2-10/TASK-076) degraded=true 时：不置 fulltextExtracted、不切全文视图',
     p210.entries.find((a) => a.id === '104')?.fulltextExtracted === false && p210.showFulltext === false);
-  checkNew('(P2-10) 且提示为「无法提取全文…」而不是「全文提取完成」',
-    p210.toasts.some((t) => t.text.includes('无法提取全文'))
+  checkNew('(P2-10/TASK-076) 且如实提示降级原因（后端 reason 原文），而不是报成功',
+    p210.toasts.some((t) => t.text.includes('未采用全文提取') && t.text.includes('已保留原正文'))
     && !p210.toasts.some((t) => t.text === '全文提取完成'));
-  extractResult = '<p>真正的全文正文，明显更长的一段内容。</p>';
+  extractResult = { html: '<p>真正的全文正文，明显更长的一段内容。</p>', degraded: false, reason: null };
   store.getState().extractCurrentArticle();
   await nTick(20);
   const p210ok = store.getState();
-  checkNew('(P2-10) 正常提取路径不受影响：置标志 + 进入全文视图 + 报「全文提取完成」',
+  checkNew('(P2-10/TASK-076) 正常提取路径不受影响：置标志 + 进入全文视图 + 报「全文提取完成」',
     p210ok.entries.find((a) => a.id === '104')?.fulltextExtracted === true && p210ok.showFulltext === true
     && p210ok.toasts.some((t) => t.text === '全文提取完成'));
   extractResult = null;

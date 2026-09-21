@@ -1,0 +1,12 @@
+{
+  "changed_files": [
+    ".workflow-kit/tasks/items/TASK-076.json",
+    "src-tauri/src/ai.rs",
+    "src-tauri/src/commands/ai.rs",
+    "src-tauri/src/commands/settings.rs",
+    "src-tauri/src/extraction.rs",
+    "src/lib/api.ts",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

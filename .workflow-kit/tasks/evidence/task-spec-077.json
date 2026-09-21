@@ -1,0 +1,156 @@
+{
+  "id": "TASK-077",
+  "title": "降级可见性与 AI 输入校验收口：全文提取 degraded 标志（P2-10 后半）+ 摘要空正文与 preset 显式提示（P2-11）（REQ-104）",
+  "kind": "implementation",
+  "retry_safe": false,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "objective": "本任务收口被取消的 TASK-076 的同一成果（历史：TASK-076 已完成全部实现与取证，四门禁实测通过、新增 9 条单测、两项行为变更各有变异取证；但其 allowed_paths 初稿含 4 条不存在路径、订正落盘于 begin 之后，任务基线为订正前快照，diff 恒把任务记录判为 protected，recover/unblock/重新 begin 均无法收敛，故按 TASK-068→TASK-069 / TASK-074→TASK-075 先例取消并以本卡收口；本任务相对 begin 快照为零新增改动，成果经候选快照绑定）。原目标如下。A【P2-10 后半：全文提取 degraded 标志，DEC-req104-p2-10b-fulltext-degraded-20260920】现状：commands/settings.rs 的 extract_fulltext 有「智能防退化」逻辑（提取结果剥标签后不足原文 80% 时保留原文），但降级是静默的——返回裸 String，与「提取成功」无法区分，前端只能靠「返回内容 == 当前正文」的字符串比对去猜。实施：改为结构化 degraded 标志（含原因）+ 准确文案；须补失败路径断言覆盖两种形态（提取失败/空结果、防退化返回原文），并保持成功路径行为不变。B【P2-11：AI 输入校验与配置可观测性，DEC-req104-p2-11-ai-validation-20260920】① ai_summarize 缺少 ai_translate 已有的空正文校验，空正文会白跑一次模型调用；② 未知 preset 静默回落 deepseek-chat / https://api.deepseek.com，用户选的预设不存在时请求被打到其未选择的厂商上。实施：补空正文校验（与 translate 对称）；未知 preset 改为显式提示/报错；须补断言覆盖两条路径。",
+  "non_goals": [
+    "不改全文提取的防退化阈值（仍是原文 80%）与「提取失败保留原文」的基本策略",
+    "不改全文提取成功路径的落库语义（update_article_fulltext 与提取标志）",
+    "不改 ai_translate 的既有校验与落库行为",
+    "不改 AI 流式协议、max_tokens 与 SSE 解析",
+    "不改 PRESETS 预设清单与各预设默认模型",
+    "不新增 AI 厂商或付费调用",
+    "不做迁移/表结构变更",
+    "不引入新依赖",
+    "不改工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-104"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-075"
+  ],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-req104-p2-10b-fulltext-degraded-20260920",
+      "DEC-req104-p2-11-ai-validation-20260920"
+    ]
+  },
+  "snapshot_paths": [
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools"
+  ],
+  "allowed_paths": [
+    "src-tauri/src/commands/settings.rs",
+    "src-tauri/src/commands/ai.rs",
+    "src-tauri/src/ai.rs",
+    "src-tauri/src/extraction.rs",
+    "src-tauri/src/commands/articles.rs",
+    "src/lib/api.ts",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "acceptance": [
+    "A① 全文提取的降级不再静默：调用方能从返回值/事件中明确区分「提取成功」与「保留原文（降级）」，且降级原因可辨",
+    "A② 失败路径断言覆盖两种形态：提取失败（报错/空结果）与防退化返回原文，两者都有断言；成功路径行为与提取标志语义不变",
+    "B① ai_summarize 补空正文校验，与 ai_translate 对称（同样的错误类型与提示语风格），并有断言",
+    "B② 未知 preset 不再静默回落 deepseek-chat / api.deepseek.com，改为显式提示或报错，并有断言证明不会静默换厂商",
+    "① 四门禁全绿：cargo test 通过数 ≥184 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 通过数 ≥303",
+    "② 两项行为变更各有成对证据（修前可复现/修后通过）",
+    "③ 不引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；文本文件 LF；用户真实数据库不得写入",
+    "④ 台账改动（任务记录/决定）须在 begin 之前完成，避免相对基线越界（TASK-074 教训）"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-4386e97bc9044e44b27bc91863c4c3a8.json",
+      "summary": "2026-09-20 基线（TASK-075 终版候选验证 RUN-4386e97b，提交 c3f9db6）：cargo test 184 passed / 0 failed / 9 ignored、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 303/303。本任务 behavior=change 且属业务契约变更，依据 owner 2026-09-20 两项裁决：① 全文提取由「静默保留原文」改为「结构化 degraded 标志 + 准确文案」；② AI 侧由「空正文照跑、未知 preset 静默回落」改为「空正文显式报错、未知 preset 显式提示」。两者都改变了用户可见的错误面与文案，属用户已确认的新行为与旧行为冲突，故按 replace 语义处理：替换断言须引用对应 owner 决定。既有无全文提取测试（extract_fulltext 在 tests/ 下无覆盖）；AI 侧既有测试须核对后保持。",
+      "decision_ids": [
+        "DEC-req104-p2-10b-fulltext-degraded-20260920",
+        "DEC-req104-p2-11-ai-validation-20260920"
+      ]
+    },
+    "decision_ids": [
+      "DEC-req104-p2-10b-fulltext-degraded-20260920",
+      "DEC-req104-p2-11-ai-validation-20260920"
+    ],
+    "actions": [
+      {
+        "action": "replace",
+        "target": "全文提取降级时「静默 return Ok(original)」的隐式契约：改为显式 degraded 结果（含原因），并同步前端读取方式",
+        "reason": "owner 裁决 DEC-req104-p2-10b-fulltext-degraded-20260920 要求降级可见，与静默回落的旧行为冲突",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "replace",
+        "target": "未知 preset 静默回落 deepseek-chat / api.deepseek.com 的旧行为：改为显式提示或报错",
+        "reason": "owner 裁决 DEC-req104-p2-11-ai-validation-20260920 要求显式提示，与静默回落的旧行为冲突",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "失败路径覆盖：全文提取失败（报错/空结果）与防退化返回原文两种形态各一条断言；ai_summarize 空正文断言；未知 preset 断言（证明不会静默换厂商）",
+        "reason": "本次改动核心就是异常路径的可见性，必须有覆盖",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "全文提取成功路径与提取标志语义、防退化阈值、ai_translate 既有校验、AI 流式协议与 PRESETS 清单，以及其余全部既有断言（184 条 Rust + 303 条前端）逐字不动",
+        "reason": "除上述契约变更外，其余行为保持",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  }
+}

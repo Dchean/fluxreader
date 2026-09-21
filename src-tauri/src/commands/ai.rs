@@ -116,6 +116,14 @@ pub async fn ai_summarize(
         return Ok(summary);
     }
 
+    // P2-11（TASK-076，DEC-req104-p2-11-ai-validation-20260920）：空正文显式报错，
+    // 与 ai_translate 的既有校验（"文章无正文可翻译"）对称。此前这里没有检查，
+    // 空正文会照样发一次模型请求：白花 token，且 outcome.text 为空时不落缓存、
+    // 用户只看到「摘要没出来」，无从判断是内容问题还是服务问题。
+    if body.trim().is_empty() {
+        return Err(AppError::not_found("文章无正文可摘要"));
+    }
+
     let user = format!("标题：{title}\n\n正文：\n{body}");
     let (system, _) = load_prompts(&state).await;
     let mut sink = |delta: &str| {

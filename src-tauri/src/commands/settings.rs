@@ -37,10 +37,47 @@ pub async fn set_setting(state: State<'_, AppState>, key: String, value: String)
 全文提取（Readability）
 ============================================================ */
 
+/// 全文提取的结果（TASK-076 / P2-10 后半，DEC-req104-p2-10b-fulltext-degraded-20260920）。
+///
+/// 此前只返回一个 String，「提取成功」与「因防退化保留了原文」在返回值上**无法区分**，
+/// 前端只能靠「返回内容 == 当前正文」的字符串比对来猜（reader.ts 就是这么做的）——
+/// 一旦正文恰好相同就误判，用户也无从知道到底发生了什么。现在改为结构化结果：
+///   `html`     落库/展示用的正文（成功时是提取结果，降级时是保留的原文）
+///   `degraded` 是否降级（true = 本次没有采用提取结果）
+///   `reason`   降级原因；成功时为 None
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractOutcome {
+    pub html: String,
+    pub degraded: bool,
+    pub reason: Option<String>,
+}
+
+impl ExtractOutcome {
+    fn extracted(html: String) -> Self {
+        Self {
+            html,
+            degraded: false,
+            reason: None,
+        }
+    }
+
+    fn degraded(html: String, reason: impl Into<String>) -> Self {
+        Self {
+            html,
+            degraded: true,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
 /// 全文提取：拉文章网页 → Readability 抽正文 → 覆盖该条目 content_html
 /// （「默认打开方式=自动全文」：RSS 摘要型源打开时自动触发）。
 #[tauri::command]
-pub async fn extract_fulltext(state: State<'_, AppState>, article_id: i64) -> AppResult<String> {
+pub async fn extract_fulltext(
+    state: State<'_, AppState>,
+    article_id: i64,
+) -> AppResult<ExtractOutcome> {
     let url: Option<String> = {
         let conn = state.db.lock().await;
         db::get_article_url(&conn, article_id)?
@@ -82,21 +119,24 @@ pub async fn extract_fulltext(state: State<'_, AppState>, article_id: i64) -> Ap
     // 落库覆盖正文（全文 > RSS 摘要）+ 置提取标志（按钮/设置状态共用）。
     // 智能全文防退化：提取结果剥标签后若比原 RSS 正文还短，说明原内容已是
     // 全文或提取失败——保留原内容、不置提取标志（避免把好正文换成更短的）。
+    //
+    // TASK-076：两条「没有采用提取结果」的路径都返回 degraded=true 并带上原因，
+    // 不再让调用方自己去猜（此前提取结果为空时同样落到下面的补丁分支，
+    // 与「防退化」混在一起、无法区分）。
     {
         let conn = state.db.lock().await;
         let original = db::get_article_content_html(&conn, article_id)?;
-        let orig_text_len = crate::sanitize::html_to_text(&original).trim().len();
-        let extracted_text_len = crate::sanitize::html_to_text(&extracted).trim().len();
-        // 提取结果显著更短（不足原文 80%）→ 判定退化，保留原文
-        if extracted_text_len > 0 && extracted_text_len * 5 < orig_text_len * 4 {
-            return Ok(original);
+        // 判定抽到 extraction::degradation_reason（纯函数、可单测），此处只负责
+        // 按判定结果落库或如实返回降级信息。
+        if let Some(reason) = crate::extraction::degradation_reason(&original, &extracted) {
+            return Ok(ExtractOutcome::degraded(original, reason));
         }
         db::update_article_fulltext(&conn, article_id, &extracted, true)?;
         if !image.is_empty() {
             db::update_article_image_if_empty(&conn, article_id, &image)?;
         }
     }
-    Ok(extracted)
+    Ok(ExtractOutcome::extracted(extracted))
 }
 /* ============================================================
 图片代理（防盗链兼容）——参考 Papr 方案
