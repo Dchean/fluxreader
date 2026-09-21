@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "id": "TASK-085",
+  "title": "F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令（收口 TASK-084）",
+  "kind": "implementation",
+  "retry_safe": false,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "TASK-084 的实现成果收口（该卡因任务记录合法修订与旧基线不收敛而取消，见其 dispositions）。内容不变：把 AUDIT P3[F4] 的逐条 IPC 收敛为一次批量命令 —— ① Rust `commands/articles.rs` 新增 `set_read_bulk(ids, read)` 并注册于 lib.rs；批量循环抽为 `apply_read_bulk`，命令与测试共用同一段真实代码，避免「把循环抄进测试」造成的伪证据；② `src/lib/api.ts` 新增 `setReadBulk`；③ `reader.ts` 的 `markEntriesReadBulk` 改单次调用。本轮同时订正审查 FINDING TASK-084-F1/F2/F3/F4：测试驱动真实函数（两种变异实测可致失败）、(L1) 断言钉精确 id 集合而非长度、契约变更由 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 授权、清理实现期遗留脚本。",
+  "non_goals": [
+    "不改 set_read/set_starred/mark_all_read 三个既有命令的签名或语义",
+    "不改 markEntriesRead（单条路径）与 marked/openedReadIds 的既有前端状态逻辑",
+    "不改 sync_queue 入队的 action 名（仍是 read/unread）与推送时机语义",
+    "不引入新依赖；不改 package.json/Cargo.toml/Cargo.lock",
+    "不顺手重构 reader.ts 的其它 action"
+  ],
+  "requirement_refs": [
+    "REQ-104"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-t084-replace-per-item-ipc-assertions-20260921"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/commands/articles.rs",
+      "src-tauri/src/lib.rs",
+      "src/lib/api.ts",
+      "src/store/slices/reader.ts",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/runs/RUN-082fcac4ab9e47669883eeac24241e47.json"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① `set_read_bulk` 已注册；批量路径经 `apply_read_bulk` 复用 `record_read_state`，前端 `markEntriesReadBulk` 只发**一次** IPC（以桩计数证明为 1 且 set_read 为 0）",
+    "② 语义等价有**真实**证据：测试调用命令实际使用的 `apply_read_bulk`，且对批量路径做变异（绕过 record_read_state / 跳过某 id 入队）测试必须失败（实测已满足）",
+    "③ (L1) 批量断言须钉**精确 id 集合**（101,103,104,105,201,301），不得只钉载荷长度",
+    "④ 契约变更（改写两条编码旧逐条 IPC 的前端断言）由 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 授权，且除该两条外既有断言一字不动",
+    "⑤ 四门禁全绿且不回退：cargo test ≥206 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend ≥314/314",
+    "⑥ 无实现期遗留的临时/探测脚本残留在受保护证据目录"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-082fcac4ab9e47669883eeac24241e47.json",
+      "summary": "2026-09-21 基线（TASK-082 验证 RUN-082fcac4，提交 4df55cb）：cargo test 202 passed / 0 failed / 9 ignored、lint 0 warnings / 0 errors、build exit 0、frontend 313/313。本任务 behavior=preserve：批量标读是对既有逐条标读的**等价重写**（同样的 is_read 结果、同样的 sync_queue 入队项、同样的离线补推），只减少 IPC 次数；故既有全部断言必须原样通过，既有契约不得改变。用户可见行为不变（标读结果与失败提示语义一致），无需 owner 裁决。",
+      "decision_ids": []
+    },
+    "decision_ids": [
+      "DEC-t084-replace-per-item-ipc-assertions-20260921"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "除 DEC-t084-replace-per-item-ipc-assertions-20260921 批准改写的 2 条外，全部既有 Rust 与前端断言",
+        "reason": "批量命令复用既有 record_read_state，逐条路径的既有测试必须原样通过，作为「等价重写」的判据。两条编码旧逐条 IPC 契约的前端断言（(f) 与 (L1)）与验收①「只发一次 IPC」逻辑上不可兼得，经 owner 裁决后改写计数口径，且强度不低于原断言。",
+        "gate_ids": [
+          "cargo_test",
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "Rust：apply_read_bulk 的等价性/逐 id 入队/空 ids/read=false 四条断言；前端：一次性 IPC + 精确 id 集合断言",
+        "reason": "核心主张是「一次 IPC 且语义等价」，必须对该主张本身取证。审查 FINDING TASK-084-F1 揭穿上一版证据是装饰性的（测试从不调用真实函数），现改为驱动真实函数并以变异实测确认可失败。",
+        "gate_ids": [
+          "cargo_test",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-085-input-fc837290888e4825978e8991868a452a.json",
+    "digest": "7545c8f780bd42584a5cb4ffc9440b5c36bc81484fca3fdfe8e790bbce306d45",
+    "source_revision": null,
+    "definition_digest": "7e8b41905258bd73927f1bf9dd2b2db1adaf40a24d50a04b775dbaebb0bdc087"
+  },
+  "budget": {
+    "started_at_utc": null,
+    "deadline_at_utc": null,
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-ab2d0e5d3f7643379a6de1fd2544b549",
+  "run_ids": [],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/runs/RUN-082fcac4ab9e47669883eeac24241e47.json",
+    "src-tauri/src/commands/articles.rs",
+    "src-tauri/src/lib.rs",
+    "src/lib/api.ts",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

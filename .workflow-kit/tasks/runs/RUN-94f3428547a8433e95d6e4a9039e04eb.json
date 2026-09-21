@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "RUN-94f3428547a8433e95d6e4a9039e04eb",
+  "task_id": "TASK-084",
+  "kind": "repair",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260921-t084-r1"
+  },
+  "started_at_utc": "2026-09-21T11:47:27.944211Z",
+  "finished_at_utc": "2026-09-21T11:47:46.465124Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "c8c307d99268a5f8760501dd0c0be3facee44d544aba5cf18f3a4cdb26a83cca",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-94f3428547a8433e95d6e4a9039e04eb-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-94f3428547a8433e95d6e4a9039e04eb-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-0575c6a19eec46d39a73e5fc7f2c1c9b-scope.json",
+  "failure_kind": "scope",
+  "failure_reason": "Out-of-scope changes: .workflow-kit/tasks/items/TASK-084.json (allowed: src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs)"
+}

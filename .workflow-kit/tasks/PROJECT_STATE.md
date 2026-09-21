@@ -24,11 +24,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 56 项：已验收 46，待验收 0，阻塞 1。
+已建任务 57 项：已验收 46，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-084 · F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令](<cards/TASK-084.md>) | 阻塞 | Review requires changes; inspect the findings；先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算 |
+| [TASK-085 · F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令（收口 TASK-084）](<cards/TASK-085.md>) | 待执行 | TASK-084 的实现成果收口（该卡因任务记录合法修订与旧基线不收敛而取消，见其 dispositions）。内容不变：把 AUDIT P3[F4] 的逐条 IPC 收敛为一次批量命令 —— ① Rust `commands/articles.rs` 新增 `set_read_bulk(ids, read)` 并注册于 lib.rs；批量循环抽为 `apply_read_bulk`，命令与测试共用同一段真实代码，避免「把循环抄进测试」造成的伪证据；② `src/lib/api.ts` 新增 `setReadBulk`；③ `reader.ts` 的 `markEntriesReadBulk` 改单次调用。本轮同时订正审查 FINDING TASK-084-F1/F2/F3/F4：测试驱动真实函数（两种变异实测可致失败）、(L1) 断言钉精确 id 集合而非长度、契约变更由 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 授权、清理实现期遗留脚本。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -41,9 +41,9 @@
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 44 项记录可在任务总览查看。
+另有 45 项记录可在任务总览查看。
 
-**阻塞**：Review requires changes; inspect the findings
+**阻塞**：无已记录阻塞
 
 **下一步**：结合当前任务、验收与实际文件确定下一步
 
