@@ -28,10 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 50 项：已验收 42，待验收 0，阻塞 0。
+已建任务 51 项：已验收 42，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-079 · REQ-105：ingestion.rs（680 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块](<../tasks/cards/TASK-079.md>) | 待执行 | 按 REQ-105 把 src-tauri/src/ingestion.rs（680 行）拆分为 ingestion/ 领域模块，沿用项目既有拆分配方（TASK-044 拆 commands、TASK-045 拆 sync、TASK-023 拆 db）：**先补/确认断言 → 纯搬运 → 四门禁**。拆分目标（按文件内既有的注释分节天然对应）：① conditional_get（HTTP 条件 GET + build_client + Fetched + read_capped）；② parse_feed（feed-rs 解析 + ParsedFeed + resolve_url + clamp_publish_date + map_entry + mime_from_url）；③ staged 三段式刷新（read_feed_for_refresh + fetch_and_parse + apply_refresh_result + refresh_feed_staged）；④ favicon 发现（discover_favicon + extract_icon_link + rel_is_icon + extract_html_attr + FAVICON_TRIED + BROWSER_UA）；⑤ 常量（USER_AGENT / MAX_BODY_BYTES / NO_STABLE_ID）。硬约束：**crate::ingestion::<item> 公开路径必须逐字不变**——全库有 47 处调用点（产品 commands/folders.rs、commands/articles.rs、scheduler.rs、lib.rs；测试 ingestion_e2e / refresh_dedup_e2e / staged_refresh_e2e / scheduler_e2e / sync_* 等），拆分必须用 pub use 重导出保持路径，或适配全部调用点（二者择一，优先前者以最小化改动面）。行为必须零变化：不得改变任何逻辑、SQL、阈值、超时、并发结构（含 tokio::spawn 与 FAVICON_TRIED 负缓存的语义）与函数签名。验收标准另要求「拆分后无超过 800 行的生产单体」——拆分后 ingestion/ 各模块须均远低于该阈值（现状最大为 db/articles.rs 的 791 行，拆完 ingestion 后需复核该结论仍成立）。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -43,11 +44,8 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 38 项记录可在任务总览查看。
-
-**已确认但尚未拆分的需求**：ingestion.rs（766 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块（conditional_get/parse_feed/map_entry/staged 刷新/favicon 发现），沿用先补断言→纯搬运→四门禁配方，crate::ingestion 路径不变，行为零变化
+另有 39 项记录可在任务总览查看。
 
 **阻塞**：无已记录阻塞
 
@@ -83,7 +81,6 @@
 
 ## 最近事件
 
-- 2026-09-21T01:30:22.863314Z · checkpoint · TASK-077 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-21T01:31:29.842788Z · note/lesson · TASK-077 · 台账纪律（TASK-076 实际踩到，第三次同族失误，务必固化）：**prepare 会把当时的 spec 内容写进任务记录；此后修改磁盘上的 spec 文件不会回写记录。** 我在 TASK-076 的 spec 初稿里凭印象写了 4 条不存在的 allowed_paths（tests/extraction_e2e.rs、tests/ai_stream_e2e.rs、tests/settings_e2e.rs、src/stores/reader.ts），发现后改了 spec 文件，但该修正发生在『上一次会话已成功 prepare』之后，记录里仍是错误路径；本次会话恢复中断 run 后未重核记录内 allowed_paths 就直接 begin，于是带着错误范围完成实现——实际改动的 src/store/slices/reader.ts 落在范围外（diff 报 outside）。我在 finish 之前如实订正了记录的 allowed_paths（并重算 definition_digest），但这让任务记录相对 begin 基线发生变化，finish 判 protected → scope 阻塞；随后尝试 recover→unblock→重新 begin，仍无法收敛，因为 task_baseline() 返回的是**最早**写入者的 scope 快照（订正之前），每次 begin 都继承它。最终按 TASK-068→TASK-069 / TASK-074→TASK-075 先例取消 TASK-076、以 TASK-077 承载同一成果（新卡 prepare 快照取自当前树、allowed_paths 自始正确，diff 为空、protected/outside 全空）。**三条固化纪律**：① 恢复中断任务后，begin 之前必须**读记录内的 allowed_paths 并逐条 Test-Path 核对存在性**，不能只信自己磁盘上的 spec；② 任何范围订正都必须在**首次 prepare 之前**定稿（TASK-074 同因教训）；③ 若发现记录已错，正确处置是取消并以新卡收口（工具的先例路径），而不是反复 unblock 重试——后者在有 prior writer 基线时数学上不可能收敛。另注：这也解释了为何同类问题在此项目已出现三次（068/074/076），值得在后续任务卡模板里加一步『路径存在性自检』。
 - 2026-09-21T01:39:45.375882Z · checkpoint · TASK-077 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-21T01:40:55.696663Z · accept · 验收 TASK-077；依据：用户 2026-09-20 裁决 DEC-req104-p2-10b-fulltext-degraded-20260920 与 DEC-req104-p2-11-ai-validation-20260920；2026-09-21 用户指示『继续，按照你的判断进行最佳路线完成后续所有的』授权本卡收口 TASK-076 的同一成果。任务已完成四门禁验证与独立审查 PASS
@@ -95,6 +92,7 @@
 - 2026-09-21T07:07:38.806311Z · note/progress · TASK-078 · TASK-078 实现与四门禁完成（REQ-104 收尾清理）：① 删除孤儿 IPC 命令 commands::sync_now（commands/sync.rs 函数本体 + lib.rs 注册行），三层核验零调用方（产品代码三种写法各 0 命中；前端同步入口是 api.syncPhase → inv('sync_phase')，4 处调用点；TASK-070 删 api.syncNow 后遗留的壳），核心函数 sync::sync_now 保留不动（仍被 sync_e2e / dual_client_e2e / fever_sync_live_e2e 直接调用）。② 修订四处陈旧「Miniflux 兜底」注释（types.ts:44 fetchFailed、types.ts:70 source、staged_refresh_e2e.rs:195、sync_phases_e2e.rs:245-248 与 :284）。修订前逐条用 git 核实历史：0ba940f^ 的 sync.rs 确有 miniflux_feeds 全量 + failed_feeds 增量两个拉取目标集（兜底确曾存在），0ba940f 协议切换时随 Miniflux 专用路径移除，TASK-070 再删其残留查询助手；source='miniflux' 现由 sync/entries.rs:214 写入、含义是「经同步后端拉回的条目」而非「直连失败兜底」。门禁：cargo 193/0/9（与基线一致，删除无回归）、lint 0/0、build exit 0、frontend 303/303；断言零改动（behavior=preserve）。已送独立审查。工具另提示一条流程改进建议：本任务 snapshot_paths 过宽（冻结 160 个文件而实际只改 5 个），后续任务宜收窄以免候选频繁失效——值得记入方法论。
 - 2026-09-21T07:15:18.734975Z · checkpoint · TASK-078 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-21T07:15:55.171449Z · accept · 验收 TASK-078；依据：用户 2026-09-21 指示『继续，按照你的判断进行最佳路线完成后续所有的』授权完成剩余已确认范围；本卡落实 REQ-104 验收标准中『删除项经 grep 验证零生产调用且四门禁全绿』与『P3 项每条有处置结论』，已完成四门禁验证与独立审查 PASS
+- 2026-09-21T07:18:12.140321Z · prepare · TASK-079 · 任务已冻结：REQ-105：ingestion.rs（680 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块；范围 src-tauri/src/ingestion.rs, src-tauri/src/ingestion, src-tauri/src/lib.rs, src-tauri/src/commands/folders.rs, src-tauri/src/commands/articles.rs, src-tauri/src/scheduler.rs, src-tauri/tests/ingestion_e2e.rs, src-tauri/tests/refresh_dedup_e2e.rs, src-tauri/tests/staged_refresh_e2e.rs, src-tauri/tests/scheduler_e2e.rs
 
 ## 如何继续
 

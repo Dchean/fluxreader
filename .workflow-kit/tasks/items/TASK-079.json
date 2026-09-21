@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "id": "TASK-079",
+  "title": "REQ-105：ingestion.rs（680 行，最后一个未拆旧单体）拆分为 ingestion/ 领域模块",
+  "kind": "implementation",
+  "retry_safe": false,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "按 REQ-105 把 src-tauri/src/ingestion.rs（680 行）拆分为 ingestion/ 领域模块，沿用项目既有拆分配方（TASK-044 拆 commands、TASK-045 拆 sync、TASK-023 拆 db）：**先补/确认断言 → 纯搬运 → 四门禁**。拆分目标（按文件内既有的注释分节天然对应）：① conditional_get（HTTP 条件 GET + build_client + Fetched + read_capped）；② parse_feed（feed-rs 解析 + ParsedFeed + resolve_url + clamp_publish_date + map_entry + mime_from_url）；③ staged 三段式刷新（read_feed_for_refresh + fetch_and_parse + apply_refresh_result + refresh_feed_staged）；④ favicon 发现（discover_favicon + extract_icon_link + rel_is_icon + extract_html_attr + FAVICON_TRIED + BROWSER_UA）；⑤ 常量（USER_AGENT / MAX_BODY_BYTES / NO_STABLE_ID）。硬约束：**crate::ingestion::<item> 公开路径必须逐字不变**——全库有 47 处调用点（产品 commands/folders.rs、commands/articles.rs、scheduler.rs、lib.rs；测试 ingestion_e2e / refresh_dedup_e2e / staged_refresh_e2e / scheduler_e2e / sync_* 等），拆分必须用 pub use 重导出保持路径，或适配全部调用点（二者择一，优先前者以最小化改动面）。行为必须零变化：不得改变任何逻辑、SQL、阈值、超时、并发结构（含 tokio::spawn 与 FAVICON_TRIED 负缓存的语义）与函数签名。验收标准另要求「拆分后无超过 800 行的生产单体」——拆分后 ingestion/ 各模块须均远低于该阈值（现状最大为 db/articles.rs 的 791 行，拆完 ingestion 后需复核该结论仍成立）。",
+  "non_goals": [
+    "不改任何行为、逻辑、SQL、阈值、超时、并发结构或函数签名（纯搬运）",
+    "不改 crate::ingestion:: 的公开路径（47 处调用点应零改动或仅机械适配）",
+    "不删除或新增任何功能（本次不处置死代码——那是 REQ-104 的已验收范围）",
+    "不拆分 db/articles.rs（791 行，未超 800 行阈值，不在本卡范围）",
+    "不改测试断言（行为零变化的直接含义）",
+    "不引入新依赖",
+    "不改工作流（.workflow-kit/scripts/**、binding.json）"
+  ],
+  "requirement_refs": [
+    "REQ-105"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-078"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/ingestion.rs",
+      "src-tauri/src/ingestion",
+      "src-tauri/src/lib.rs",
+      "src-tauri/src/commands/folders.rs",
+      "src-tauri/src/commands/articles.rs",
+      "src-tauri/src/scheduler.rs",
+      "src-tauri/tests/ingestion_e2e.rs",
+      "src-tauri/tests/refresh_dedup_e2e.rs",
+      "src-tauri/tests/staged_refresh_e2e.rs",
+      "src-tauri/tests/scheduler_e2e.rs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/runs/RUN-6aeb3b77f8984b48ad8c1905007b6c5f.json"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 拆分后 crate::ingestion::<item> 的全部既有公开路径仍可用（47 处调用点零语义改动；若机械适配调用点则须逐一列出）",
+    "② 拆分后无超过 800 行的生产单体（复核 ingestion/ 各模块与全库最大文件）",
+    "③ 行为零变化：四门禁全绿——cargo test 通过数 193 不减且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend 303/303",
+    "④ 既有断言一行不动（纯搬运的判据）；公开路径不变或有完整调用点适配清单",
+    "⑤ 不引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；文本文件 LF；用户真实数据库不得写入"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-6aeb3b77f8984b48ad8c1905007b6c5f.json",
+      "summary": "2026-09-21 基线（TASK-078 终版候选验证 RUN-6aeb3b77，提交 a88d0d1）：cargo test 193 passed / 0 failed / 9 ignored、npm run lint exit 0（0 warnings/0 errors）、npm run build exit 0、npm run test:frontend exit 0 且 303/303。本任务是 behavior=preserve 的纯结构搬运（REQ-105 明确要求『行为零变化、既有断言一行不动』），故全部既有断言按其原样保留；拆分只在模块边界上物理移动代码并用 pub use 保持 crate::ingestion 路径，不改变任何可观察行为。ingestion 相关的既有测验面（ingestion_e2e 的条件 GET/解析/消毒、refresh_dedup_e2e 的去重、staged_refresh_e2e 的三段式与失败写回、scheduler_e2e 的调度抓取）即为本次搬运的回归保护，全部原样运行。",
+      "decision_ids": []
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "全部 193 条 Rust + 303 条前端断言逐字不动；ingestion_e2e / refresh_dedup_e2e / staged_refresh_e2e / scheduler_e2e 等 ingestion 相关套件作为搬运的回归保护原样保留",
+        "reason": "REQ-105 验收标准明确『行为零变化：四门禁全绿，既有断言一行不动』，纯搬运不允许改断言",
+        "gate_ids": [
+          "cargo_test",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-079-input-21a2a55a041043d1ababc61093849a54.json",
+    "digest": "3dff1751d634bbbf04464eeda419603b257afd66d6690de4e9053d656c36c6ae",
+    "source_revision": null,
+    "definition_digest": "4991e2fafc0f9834362c023e1b682cf3674218e004e6fdc1f0631343c9a16c30"
+  },
+  "budget": {
+    "started_at_utc": null,
+    "deadline_at_utc": null,
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-ab2d0e5d3f7643379a6de1fd2544b549",
+  "run_ids": [],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-057.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-058.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task052.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-17-task053.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task054.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task055.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task056.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task057.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task058.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-18-task059.md",
+    ".workflow-kit/tasks/evidence/baseline-2026-09-19-task060.md",
+    ".workflow-kit/tasks/runs/RUN-0259efca5b644b909fcf022fefeaeb73.json",
+    ".workflow-kit/tasks/runs/RUN-177672cf4733428eb607b1645ca11e9d.json",
+    ".workflow-kit/tasks/runs/RUN-1a3b0ef069ce4696b3c3bbd75de5a3b8.json",
+    ".workflow-kit/tasks/runs/RUN-4386e97bc9044e44b27bc91863c4c3a8.json",
+    ".workflow-kit/tasks/runs/RUN-44d4ee12298e4fc6a9a862cbc2c1f93c.json",
+    ".workflow-kit/tasks/runs/RUN-52a9b197256c41c0bf409052cd17f8dd.json",
+    ".workflow-kit/tasks/runs/RUN-5380e8e45603487db6019495fdb61fb7.json",
+    ".workflow-kit/tasks/runs/RUN-6aeb3b77f8984b48ad8c1905007b6c5f.json",
+    ".workflow-kit/tasks/runs/RUN-73a92538633d4f40a218a7dcb5097c76.json",
+    ".workflow-kit/tasks/runs/RUN-e6040878c41e4d729e86380954385c7d.json",
+    ".workflow-kit/tasks/runs/RUN-e7b42163aaa14d45b754261992f5214d.json",
+    ".workflow-kit/tasks/runs/RUN-f5c07ebc890b4519a2f79d843e8d2bcd.json",
+    "src",
+    "src-tauri/src",
+    "src-tauri/src/commands",
+    "src-tauri/src/ingestion.rs",
+    "src-tauri/src/lib.rs",
+    "src-tauri/src/scheduler.rs",
+    "src-tauri/tests",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "tools",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-078": "1d95e2effea1d0c81249b9fd7d8fd97e9854445a5bb99b47f955b8e270912d53"
+  }
+}
