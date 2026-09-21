@@ -1,0 +1,21 @@
+{
+  "task_id": "TASK-080",
+  "run_id": "RUN-a1d26701359646dcbd19582092c4dee7",
+  "status": "ready_for_verification",
+  "summary": "TASK-080 修复轮 1：订正独立审查 FINDING（文档自相矛盾）。**FINDING 原文**（审查者判定 FAIL，唯一发现）：.workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md 第 78-79 行新增订正称「cancel 现已是正式命令」，但同文件第 157-158 行「第 4 项 补 cancel 命令 —— 未做：独立功能，另立任务；它仍是『单个卡死任务冻结整批续接』的根因」未被改动，两句直接冲突；审查者实测 cancel --help 退出码 0 证明 cancel 确已存在，故第 78-79 行正确、第 157-158 行「未做」失实。该冲突确为**本次引入**（git diff 显示我的 hunk 止于第 155 行，item 3/4 的 cancel 行与正文均为未改动的上下文行；原文亦无该订正句），审查者判定属本任务 scope 内第 (C) 项文档订正，应走修复轮而非另立任务。**修复**：把「第 2–4 项 —— 仍未实施（本次刻意不做）」整节重写为「逐项状态（2026-09-21 订正后）」——第 2 项改述为「本项目不采纳」（并保留上游已默认存在的注记）、第 3 项改述为「本项目不采纳；scope 现由 unblock 显式处置」、第 4 项由「未做」订正为「**已饱和，不再是缺口**：cancel 已是引擎正式命令（实测 --help 退出码 0），本文件上文『CLI 没有 cancel 命令』的记述已过时，故『单个卡死任务冻结整批续接』的风险不再成立」，并补一段「本节结论（供后续维护者）」明确 scope 阻塞有受控出口（unblock / cancel，均需显式来源）、不存在『无法脱困』状态，真正仍待防的是 spec 范围声明被静默丢弃（已由工程侧守卫兜底）。**系统性复核（不靠目测）**：写了一次性检查脚本逐类扫描该文档是否仍有冲突断言——① 所有 cancel 行：仅第 78/157/160 行提及旧说法且均在「订正/已过时」语境，无残留「未做」类断言；② scope 无出口类绝对断言：仅第 71 行且处订正语境；③ matches() 两种说法各自限定了版本（第 43 行是 2026-09-17 当时的源码引用、第 55/112 行标注为 2026-09-21 订正后行为）；④ 「已实施」仅第 4/100 行且均为订正语境。同时实况复核五项事实：cancel 命令存在(True)、unblock 命令存在(True)、matches 目录前缀(True)、引擎侧测试退出码 1（与文档所述 0/7 损坏一致）。**未改动任何托管文件**（git status 对 .workflow-kit/scripts/**、templates/**、docs/workflow/**、binding.json 仍为空）；守卫与其自测未改动，复跑仍 13/13、exit 0；历史真实 spec 回放仍 TASK-070 exit 0、TASK-080 exit 0（无误报）。**门禁实测**：cargo test 193 passed / 0 failed / 9 ignored（同基线，未误伤产品）；lint 0 warnings / 0 errors；build exit 0；frontend 303/303。不引入新依赖；改动文件 LF；未触碰用户真实数据库。",
+  "changed_files": [
+    ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+    "tools/task-spec-guard-test.py",
+    "tools/task-spec-guard.py"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

@@ -1,0 +1,100 @@
+TASK-080 change set — 修复 prepare 静默回退缺口（工程侧守卫，不动引擎）  [ROUND 2 REVIEW]
+
+*** THIS IS A RE-REVIEW. ROUND 1 RETURNED FAIL WITH EXACTLY ONE FINDING, NOW FIXED. ***
+
+ROUND 1 FINDING (verbatim intent): `.workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md`
+lines 78-79 newly said "cancel 现已是正式命令" while lines 157-158 still said
+"第 4 项 补 cancel 命令 —— 未做 … 它仍是『单个卡死任务冻结整批续接』的根因". A direct
+self-contradiction; `cancel --help` exits 0 proving cancel exists, so the new sentence was
+right and item 4 was false. The reviewer confirmed the contradiction was NEW (the author's
+diff hunk stopped at line 155; the item-3/4 lines were untouched context) and that it fell
+inside TASK-080's own scope item (C), so a repair round — not a new task — was correct.
+
+WHAT THE REPAIR CHANGED (only this doc; nothing else):
+  * The section "### 第 2–4 项 —— 仍未实施（本次刻意不做）" was rewritten as
+    "### 第 2–4 项 —— 逐项状态（2026-09-21 订正后）":
+      - item 2 (matches() directory-prefix): now "本项目不采纳" + note that upstream made the
+        behaviour default, with the semantics-widening caveat preserved;
+      - item 3 (scope in begin's allow-set): now "本项目不采纳" + "scope 现由 unblock 显式处置";
+      - item 4 (add cancel command): changed from "未做" to "**已饱和，不再是缺口**":
+        cancel is now a real engine command (--help exits 0), the earlier "CLI 没有 cancel
+        命令" statement in this same file is therefore outdated, and the
+        "single stuck task freezes the whole batch" risk no longer holds;
+  * A closing blockquote was added: scope blocking HAS controlled exits (unblock / cancel, both
+    requiring an explicit source); there is no "cannot escape" state; the thing still worth
+    guarding is the silent discard of the declared spec scope — covered by the project-side guard.
+  * NOTHING ELSE was touched. The guard and its self-test are unchanged from round 1.
+
+SYSTEMATIC SELF-CHECK RUN BY THE AUTHOR (not eyeballing): a one-off script swept the doc for
+contradiction classes — (1) every line mentioning cancel: only lines 78/157/160 reference the old
+claim and all are inside correction/"已过时" context, no residual "未做" assertion;
+(2) absolute "no way out of scope" claims: only line 71, inside a correction note;
+(3) the two matches() statements are each version-scoped (line 43 quotes the 2026-09-17 source;
+lines 55/112 are marked as post-2026-09-21 behaviour); (4) "已实施" appears only at lines 4/100,
+both in correction context. Live facts re-verified at the same time: cancel exists (True),
+unblock exists (True), matches() directory prefix (True), engine-side test exit code 1
+(consistent with the documented 0/7 breakage).
+
+================================================================================
+STILL-TRUE CONTEXT FROM ROUND 1 (unchanged by the repair)
+================================================================================
+OWNER CONSTRAINT (verbatim): "不动工作流，修复这个问题，通过新增任务卡或者其他方式"
+= do NOT modify the workflow engine; fix it another way. This task touches NO managed file.
+
+The gap: `workflow_runtime.prepare` reads `allowed_paths` ONLY from the spec's TOP LEVEL
+(line 509: `copy.deepcopy(specification.get("allowed_paths", paths))`), while the project's
+task-RECORD template puts it under nested `scope.allowed_paths` → a spec shaped like that
+template is SILENTLY DISCARDED and falls back to `snapshot_paths`.
+
+History (git-verified): commit `a267b1e` implemented a fix (new `resolve_allowed_paths`);
+commit `6fd382e` ("rebind --upgrade-tools", upgrade to workflow-kit 2026-09-18.3) DELETED it and
+restored the old line. The project-owned regression test `test_allowed_paths.py` was NOT
+reverted with it and now fails silently (0/7, exit 1, AttributeError).
+
+SEVERITY, HONESTLY SCOPED: the upgraded `matches()` DOES now support directory prefixes
+(`matches("src-tauri/src/ai.rs", ["src-tauri/src"]) == True`), so the doc's original deadlock
+premise is no longer true on this engine. What remains is the silent DISCARD of declared scope.
+
+DELIVERED (3 files, all project-owned):
+  1. `tools/task-spec-guard.py` — pre-flight guard; rejects nested-only, conflicting
+     top-level+nested, missing/empty/non-string allowed_paths, invalid snapshot_paths; prints the
+     allowed_paths that would be recorded; `--self-test`.
+  2. `tools/task-spec-guard-test.py` — 13/13 pass, exit 0 (9 semantic + 4 end-to-end CLI cases).
+  3. `.workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md` — the corrections described above.
+
+================================================================================
+WHAT TO VERIFY IN ROUND 2
+================================================================================
+1. **The finding is genuinely fixed and NO new contradiction was introduced.** Read the doc end
+   to end. Confirm `cancel` is no longer described as "未做" anywhere except inside an explicit
+   correction note. Hunt for any OTHER internal contradiction or newly false claim — this project
+   has failed reviews repeatedly for inaccurate docs, and round 1 was exactly such a failure.
+2. Re-confirm the guard still works and still has no false positives:
+   `python tools/task-spec-guard-test.py` (expect 13/13, exit 0) and run the guard over the real
+   specs `.workflow-kit/tasks/evidence/task-spec-0*.json` (round 1: all 11 pass, 0 rejections).
+3. Confirm no managed/engine file changed: `git status --porcelain -- .workflow-kit/scripts
+   .workflow-kit/tasks/templates .workflow-kit/docs/workflow .workflow-kit/binding.json` must be
+   empty. Confirm `cancel --help` / `unblock --help` exist, matches() has the dir-prefix
+   behaviour, and `python .workflow-kit/scripts/tests/test_allowed_paths.py` still exits non-zero
+   (the recorded pre-existing breakage).
+4. Product regression: cargo 193/0/9, lint 0/0, build exit 0, frontend 303/303 vs baseline
+   RUN-88d6970e. Re-run cheaply: `& npm.cmd run test:frontend`; cargo already recorded.
+
+NOTE ON A FLAKE YOU MAY SEE (disclosed, not hidden): the re-verify after the repair initially
+failed `cargo_test` on `refresh_dedup_e2e::manual_refresh_all_respects_smart_dedup_when_on`
+(expected 1, got 0). It is a PRE-EXISTING, low-probability timing race in the concurrent
+smart-dedup path (`refresh_all` fetches both feeds concurrently; `upsert_article_with_feed`'s
+dedup check is read-then-insert, so the count can be 0 or 2), NOT related to this task: TASK-080
+changes no Rust file (`git status -- src src-tauri` is empty). Evidence: 12/12 isolated runs pass,
+3/3 full-suite runs on the working tree pass, 6/6 full-suite runs at baseline commit 7a12beb pass,
+and 9 further parallel full-suite runs pass. The re-verify then passed with cargo 193/0/9. If you
+hit it, re-run and report it as an observation; do NOT treat it as a TASK-080 defect. It is
+recorded as a separate follow-up item (independent defect: concurrent dedup window).
+
+================================================================================
+门禁结果（本候选）
+================================================================================
+  cargo test  193 passed / 0 failed / 9 ignored   （重跑通过；与基线 RUN-88d6970e 一致）
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    303/303, exit 0

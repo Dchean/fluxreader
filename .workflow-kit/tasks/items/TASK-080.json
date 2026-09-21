@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "ready",
+  "status": "verified",
   "objective": "修复「按项目模板把 allowed_paths 写在 spec 的嵌套 scope.allowed_paths 时被静默忽略、回退成 snapshot_paths」这一真实缺口——**不修改工作流引擎**（.workflow-kit/scripts/** 与 templates/** 属托管、且用户 2026-09-21 明确要求不动工作流），改为在项目自有范围内交付等效且更稳的防护。背景与根因（已用 git 定案）：① 缺口文档 TOOL-GAP-prepare-allowed-paths.md 记载其建议第 1 项『已实施（TASK-046, 2026-09-17）』——commit a267b1e 曾新增纯函数 resolve_allowed_paths 并让 prepare 调用它；② 但 commit 6fd382e『升级 workflow-kit 至 2026-09-18.3（rebind --upgrade-tools）』把该修复**整段删除**并还原为旧写法 copy.deepcopy(specification.get('allowed_paths', paths))，证据为 git show 6fd382e 中 -def resolve_allowed_paths 与 -task['scope']['allowed_paths'] = resolve_allowed_paths(...) / +...get('allowed_paths', paths)；③ 项目自有的回归测试 .workflow-kit/scripts/tests/test_allowed_paths.py 未被一并回退，故其由通过变为**静默失败**（实测 0/7 通过、exit 1、全部 AttributeError: no attribute 'resolve_allowed_paths'）。当前严重性已核实并如实下调：升级后的 matches() 已支持目录前缀（matches('src-tauri/src/ai.rs', ['src-tauri/src']) == True），故文档当年『目录名匹配不到具体文件 → 全部误判越界』的死锁前提**已不成立**；但**静默篡改仍存在**——仅写嵌套 scope.allowed_paths 时（模拟 line 509）记录里落成 ['src','tools']（即 snapshot_paths），spec 声明的范围被无声丢弃。本任务交付：(A) 项目自有的 prepare 前置校验脚本（放 tools/，纯 Python、零依赖、可独立运行），在任何 prepare 之前校验 spec 并**拒绝**以下形态并给出可操作报错：allowed_paths 只存在于嵌套 scope.allowed_paths（会被静默忽略）、顶层与嵌套同时给出且不一致、缺失/空/非字符串列表、snapshot_paths 缺失或非法；通过时以退出码 0 输出规范化结果（顶层写法），并在存在嵌套写法时明确提示改为顶层。(B) 让防护不依赖那个已损坏的引擎侧测试：.workflow-kit/scripts/tests/test_allowed_paths.py 位于模板默认 protected_paths 覆盖的 .workflow-kit/scripts/** 内，**任何任务都不得修改**（这正是 TASK-046 当初必须走总控级基础设施提交的原因）。在不改引擎、也不越界修改受保护文件的前提下，改为在工程侧 tools/ 内交付**自带完整可复跑自测**的守卫（tools/task-spec-guard-test.py），覆盖原 7 个用例的全部意图（仅顶层/仅嵌套/一致/冲突/都无/scope 非 dict/snapshot_paths 缺失），并在缺口文档中如实说明引擎侧测试当前处于损坏状态、其覆盖由工程侧自测承接。(C) 订正 TOOL-GAP-prepare-allowed-paths.md 的失实记载：把『第 1 项——已实施』订正为『曾实施（a267b1e）→ 被 6fd382e 升级覆盖 → 当前引擎未实施；改由工程侧 TASK-080 守卫兜底』，并新增一条升级注意事项：rebind --upgrade-tools 会覆盖项目本地对引擎的补丁，凡依赖本地引擎补丁的防护都必须改由工程侧或记录级手段承载。(D) 把该前置校验接入项目文档/约定（在缺口文档与 TOOL-GAP 同类文档中写明用法），使后续任务按模板嵌套写法提交 spec 时会被**在 prepare 之前**拦下，而不是等到 finish 才以越界或范围错配爆出。",
   "non_goals": [
     "不修改任何托管文件（.workflow-kit/scripts/** 下的引擎脚本、templates/**、docs/workflow/**、binding.json）",
@@ -153,18 +153,26 @@
     "definition_digest": "cd8e788810786d00934b6820dd5609a0d55830786fa953f67ca17f875e705ca5"
   },
   "budget": {
-    "started_at_utc": null,
-    "deadline_at_utc": null,
-    "repair_rounds_used": 0
+    "started_at_utc": "2026-09-21T07:42:31.007779Z",
+    "deadline_at_utc": "2026-09-21T11:42:31.007779Z",
+    "repair_rounds_used": 1
   },
   "batch_id": "BATCH-ab2d0e5d3f7643379a6de1fd2544b549",
-  "run_ids": [],
+  "run_ids": [
+    "RUN-ee681e49647c4833b10cfe3239cd8de4",
+    "RUN-8479219029eb449393b7cf185ae06e6b",
+    "RUN-084877e4af824f0096a606e833801f00",
+    "RUN-a1d26701359646dcbd19582092c4dee7",
+    "RUN-d541d5cd22ad4161bbe6f32672ae4493",
+    "RUN-891bfe42b74e4a4791c41dcfeb22a4c1",
+    "RUN-44a34fbb9b954b2eaaffcb6139a17f83"
+  ],
   "blockers": [],
   "evidence": {
-    "candidate_manifest": null,
-    "candidate_digest": null,
-    "verification_run": null,
-    "review_run": null,
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-891bfe42b74e4a4791c41dcfeb22a4c1-candidate.json",
+    "candidate_digest": "ce4820837b03a201082df57e11377de06def770894015c9732b8035f0171bff1",
+    "verification_run": "RUN-891bfe42b74e4a4791c41dcfeb22a4c1",
+    "review_run": "RUN-44a34fbb9b954b2eaaffcb6139a17f83",
     "acceptance_ref": null,
     "owner_decision_ids": [],
     "merge_ref": null
@@ -214,5 +222,53 @@
   ],
   "continuation_of": {
     "TASK-079": "dbd6608b4fdec26b604cbed2837e664c63cbdd2c65974168c04e40c7436c87fa"
-  }
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-21T07:42:31.395356Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-21T07:45:42.055355Z",
+      "note": "编码结果已记录，差异范围已核对：.workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md, tools/task-spec-guard-test.py, tools/task-spec-guard.py",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-21T07:46:07.816092Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-21T07:50:54.109035Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-21T07:51:39.039514Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-21T07:52:23.564561Z",
+      "note": "编码结果已记录，差异范围已核对：.workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md, tools/task-spec-guard-test.py, tools/task-spec-guard.py",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-21T07:52:32.134641Z",
+      "note": "Required gate failed: cargo_test",
+      "next_action": "先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-21T08:03:09.852828Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-21T08:21:55.897213Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "verification"
 }

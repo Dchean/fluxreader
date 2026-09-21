@@ -1,0 +1,7 @@
+{
+  "changed_files": [
+    ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+    "tools/task-spec-guard-test.py",
+    "tools/task-spec-guard.py"
+  ]
+}

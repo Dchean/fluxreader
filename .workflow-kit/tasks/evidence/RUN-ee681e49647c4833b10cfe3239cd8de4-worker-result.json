@@ -1,0 +1,21 @@
+{
+  "task_id": "TASK-080",
+  "run_id": "RUN-ee681e49647c4833b10cfe3239cd8de4",
+  "status": "ready_for_verification",
+  "summary": "TASK-080 完成：在不修改工作流引擎的前提下，修复了「prepare 静默忽略 spec 的嵌套 scope.allowed_paths、回退成 snapshot_paths」这一真实缺口。**先核实事实再动手（避免沿用文档旧结论）**：① 缺口文档声称其建议第 1 项『已实施（TASK-046）』——经 git 定案，commit a267b1e 确曾新增 resolve_allowed_paths 并让 prepare 调用它；② 但 commit 6fd382e『升级 workflow-kit 至 2026-09-18.3（rebind --upgrade-tools）』把该修复整段删除并还原为 copy.deepcopy(specification.get('allowed_paths', paths))（diff 中 -def resolve_allowed_paths / +...get('allowed_paths', paths) 可证）；③ 项目自有的回归测试 .workflow-kit/scripts/tests/test_allowed_paths.py 未被一并回退，实测已由通过变为**静默失败**（0/7、exit 1、全部 AttributeError: no attribute 'resolve_allowed_paths'）；④ 严重性据实下调：升级后的 matches() 已支持目录前缀（实测 matches('src-tauri/src/ai.rs', ['src-tauri/src']) == True），故文档当年『目录名匹配不到文件 → 全部越界』的死锁前提**当前已不成立**，但『范围声明被静默篡改』仍在（仅写嵌套时记录里落成 snapshot_paths）。**交付物（均为项目自有、非托管，升级不会覆盖）**：① tools/task-spec-guard.py——prepare 前置守卫（纯标准库、零依赖）：拒绝「allowed_paths 只写在嵌套 scope.allowed_paths」（核心缺口）、「顶层与嵌套同时给出且不一致」（两份真相须作者择一）、「缺失/空/含非字符串元素」、「snapshot_paths 非法」；放行时打印『记录后 allowed_paths』供核对；带 --self-test。② tools/task-spec-guard-test.py——独立可复跑自测，**13/13 通过、exit 0**（9 项判定语义用例 + 4 项端到端 CLI 退出码用例），承接原引擎侧测试 7 项覆盖意图（仅顶层/仅嵌套/一致/冲突/都无/scope 非 dict/深拷贝隔离）并加端到端拦截验证；它按文件路径加载守卫并复用其用例表，不复制判定逻辑（保证『测的就是跑的』）。③ 订正 .workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md 的多处失实/过时记载：『第 1 项——已实施』改为『曾实施(a267b1e)→被 6fd382e 升级覆盖→当前引擎未实施、改由工程侧 TASK-080 守卫兜底』并附时间线表格；补记引擎侧测试当前处于已知损坏状态(0/7)且位于受保护区不得修改、其覆盖已由工程侧自测承接；订正『matches() 是纯 fnmatch、目录名匹配不到文件』（已过时）与『没有任何 CLI 命令能清除 scope』『CLI 没有 cancel 命令』（均已过时，现有 unblock 与 cancel 两条受控出口）；新增『升级注意事项』：rebind --upgrade-tools 会覆盖本地引擎补丁，凡依赖本地补丁的防护都不可靠，必须由工程侧或记录级手段承载。**缺口已真实消除的证明（回放历史形态）**：用 TASK-043 的原始失败形态（allowed_paths 仅嵌套）跑守卫 → 拒绝、exit 1 并给出修复指引；用 TASK-070 与 TASK-080 的真实 spec 跑守卫 → 放行、exit 0（无误报）。**自测还抓出了我自己的一个真实缺陷**：首版 resolve_allowed_paths 返回 spec 的列表引用，深拷贝用例 FAIL（调用方改返回值会影响 spec），已修为返回拷贝后 13/13。**门禁实测（本任务不触碰产品代码，四门禁应与基线同值——实测一致）**：cargo test 193 passed / 0 failed / 9 ignored；lint 0 warnings / 0 errors；build exit 0；frontend 303/303。**未触碰任何托管文件**：git status 对 .workflow-kit/scripts/**（含那个已损坏的 test_allowed_paths.py）、.workflow-kit/tasks/templates/**、.workflow-kit/docs/workflow/**、binding.json 均为空——本任务全程遵守『不动工作流』。不引入新依赖；改动文件 LF；未触碰用户真实数据库。",
+  "changed_files": [
+    ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+    "tools/task-spec-guard-test.py",
+    "tools/task-spec-guard.py"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

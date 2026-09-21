@@ -1,0 +1,67 @@
+{
+  "task_id": "TASK-080",
+  "candidate_digest": "ce4820837b03a201082df57e11377de06def770894015c9732b8035f0171bff1",
+  "verification_run": "RUN-891bfe42b74e4a4791c41dcfeb22a4c1",
+  "verdict": "PASS",
+  "summary": "独立复审 TASK-080 第 2 轮（修复轮）。交付物仅 3 个工程侧文件：tools/task-spec-guard.py（prepare 前置守卫）、tools/task-spec-guard-test.py（13 例自测）、.workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md（订正）。第 1 轮的唯一发现（文档 78-79 说 cancel 已是正式命令，而 157-158 仍写「第 4 项 补 cancel 命令 —— 未做」，自相矛盾且后者失实）经本轮全文逐行核对确认**已真正修复**：全文「未做」出现 0 次；第 4 项已改写为「**已饱和，不再是缺口**（2026-09-21 订正）」，并显式说明上文「CLI 没有 cancel 命令」的记述「为此已过时」；新增的文末结论 blockquote 与「为什么难以自救」一节不再冲突（两处一致表述为「有受控出口、需显式处置」，仅 71 行与 79 行把旧说法作为订正对象引用）。**未发现修轮引入的新矛盾或新失实主张。**所有可实证的断言均已实跑复核为真：cancel --help / unblock --help 退出码 0；matches(\"src-tauri/src/ai.rs\", [\"src-tauri/src\"]) == True；workflow_runtime.py:509 仍只读顶层；RETRYABLE 与 begin 放行集合与文档逐字一致；engine 侧 test_allowed_paths.py 实测 0/7、exit 1、7 条全为 AttributeError（与文档记载一致）；project_workflow.py:216 = task_definition 的受控字段元组（含 scope），引用准确；a267b1e / 6fd382e / 61563e6 三个 commit 及其 diff、binding.json 的 04957ba0→78ebdc48、82c680b4→531d13a8 摘要变更全部与文档表述吻合；文档引用的 workflow_runtime.py:435 / :209 属**历史版本**行号（经 a267b1e^ 实跑核对恰为 deepcopy 行与 def matches 行），非现状描述，且文档已就该类内容标注版本范围。守卫仍然可靠且无误报：自测 13/13 exit 0；对真实历史 spec（evidence/task-spec-0*.json，11 只）全部放行 exit 0；自建 8 例越界 spec 中 7 种非法形态全部非零退出拒绝、2 种合法形态放行，语义与文档描述完全一致。约束遵守：git status --porcelain 对 .workflow-kit/scripts、tasks/templates、docs/workflow、binding.json 为**空**，对 src 与 src-tauri 亦为**空**（本任务确实未触碰任何 Rust/产品文件）。产品回归：本轮自跑 npm run test:frontend 得 303/303 exit 0；记录日志 cargo 实测汇总 193 passed / 0 failed / 9 ignored，与基线 RUN-88d6970e 逐项同值；lint 0/0、build exit 0（build 按指示读记录、未自跑）。候选完整性：packet 列出的 169 个候选文件 sha256 **全部匹配**，含 3 个交付物。两条非阻塞观察（均不构成本任务缺陷，见各 check 与 findings 之外的说明）：(1) TASK-080-cumulative-diff.txt 对已披露 flake 的机理说明与实测不符——我独立复现了该 flake，并在隔离运行中发现**两种**断言都曾失败（on 例 left:0/right:1，off 例 left:3/right:2），而两只用例各自单独跑 18/18 全通过，指向同进程内两只用例互相干扰，而非作者所述的「并发 smart-dedup 路径的读-写窗口，计数可为 0 或 2」；该机理订正应留给已记录的独立跟进项。(2) 文档 67 行引用的 begin 报错原文「Resolve this blocker explicitly before resuming」在当前引擎已不存在（git log -S 显示该串由 6fd382e 升级删除，现文案为 needs a disposition first），属**本轮未触碰的既有上下文**（diff 中为 context 行）、非修轮新引入，其承载的结论（begin 不放行 scope）仍为真，故据「不得以 flake 与既有陈旧引用单独判负」的边界记录为观察而非发现。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐条对照验收①~⑥。① 守卫存在且行为正确：对「allowed_paths 仅在嵌套 scope.allowed_paths」以 exit 1 拒绝并给出可操作指引（实测自建 s1_nested_only exit=1）；对「顶层与嵌套不一致」同样拒绝（s2_conflict exit=1）；对合法顶层写法 exit 0 并打印规范化结果（s8_top_ok exit=0，输出「记录后 allowed_paths = [...]」）。② 自测脚本可复跑，实测 13/13 exit 0，覆盖超出要求的 7 例（9 语义 + 4 端到端 CLI 退出码），含仅顶层/仅嵌套/两处一致/两处冲突/都未给/scope 非 dict/深拷贝隔离/snapshot_paths 缺失/非字符串元素。③ 未改任何受保护文件：git status --porcelain 对 .workflow-kit/scripts .workflow-kit/tasks/templates .workflow-kit/docs/workflow .workflow-kit/binding.json 输出为空；对 src 与 src-tauri 亦为空；候选清单中不含任何 .workflow-kit/scripts/** 或 templates/** 文件。④ 文档订正到位：第 1 项标题改为「曾实施，但已被升级覆盖；现由工程侧守卫兜底」，以三行表格如实记载 2026-09-17 实施（a267b1e）→ 2026-09-18 被 6fd382e 升级整段删除 → 2026-09-21 核实；并如实记载引擎侧测试当前 0/7 损坏、位于受保护区不得修改、覆盖由 tools/task-spec-guard-test.py 承接；并新增「rebind --upgrade-tools 会覆盖项目本地补丁」的升级注意事项。上述 git 事实我均独立复核为真（git show a267b1e:.workflow-kit/scripts/workflow_runtime.py 含 resolve_allowed_paths；git show 6fd382e 该文件 diff 含 -def resolve_allowed_paths 与 -...resolve_allowed_paths(...) → +copy.deepcopy(specification.get(\"allowed_paths\", paths))）。⑤ 零新依赖（守卫仅 import json/sys/pathlib）、三个交付文件均为无 BOM 的 LF 文本、未写真实数据库（探针写临时目录并已删除）。⑥ 四门禁与基线同值（见 regression）。**第 1 轮发现的复核**：原文「第 4 项 补 cancel 命令 —— 未做」已改写为「**已饱和，不再是缺口**」；全文检索「未做」命中 0 次；仅 157-162 行（订正后条目本体）与 78-79、160 行以「该说法已过时」的订正口吻引用旧说法，符合「除显式订正注记外不得称未做」的要求。**未发现新的内部矛盾**：「为什么难以自救」一节（61-79 行）与新增文末结论（164-166 行）表述一致，均为「scope 有受控出口（unblock / cancel，均需显式来源），不存在无法脱困状态，真正仍待防的是范围声明被静默丢弃」；两处 matches() 陈述各有版本限定（43 行标注 2026-09-17 当时版本、55/112 行标注 2026-09-21 订正），不冲突；「已实施」仅出现在 4 行与 100 行，两处均为订正语境（4 行「不再沿用原文的『已实施』记载」、100 行「原文写『已实施』已不成立」）。第 3 项的改写（「本项目不采纳」+「scope 现由 unblock 显式处置」）与 unblock 实际存在一致：unblock --help exit 0，且 workflow_runtime.unblock() 实现确实要求 --source 与 --note、把任务置回 ready/verifying 并记录 dispositions，故「要求给出真实来源与说明而非静默放行」为真。",
+      "evidence_files": [
+        "tools/task-spec-guard.py",
+        "tools/task-spec-guard-test.py",
+        ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md",
+        ".workflow-kit/tasks/evidence/TASK-080-cumulative-diff.txt",
+        ".workflow-kit/tasks/runs/RUN-891bfe42b74e4a4791c41dcfeb22a4c1.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "认定验证证据可用且未弱化既有保护。证据读取：本候选 RUN-891bfe42b74e4a4791c41dcfeb22a4c1，四门禁 checks 全为 PASS/exit_code 0；我按记录日志逐条求和实测 cargo 为 193 passed / 0 failed / 9 ignored，与基线 RUN-88d6970e 日志求和结果（同为 193/0/9）及 frontend 303/303 逐项同值，即「本任务不碰产品代码故四门禁应与基线同值」的回归保护成立且未被放松。前端我本轮自跑复核：npm run test:frontend 输出「前端逻辑回归合计 303/303 通过」、exit 0，与记录一致，说明记录未虚报。lint 记录为 0 warnings / 0 errors exit 0；build 按指示未自跑，读记录为 exit 0 且日志尾部为正常的 Vite 产物清单与 built in 995ms。候选可追溯性：packet 的 169 个候选文件 sha256 我逐一重算，**0 处不匹配**；交付文档当前 sha256 = 29623686111a9a7c5648cbccd1543eafe12ca7cd615e5be7dd5423b55f8806b7，与 packet 登记值一致，证明审阅对象正是被验证的候选，且修复后文档改动未使候选与验证脱钩。新增保护的复跑：tools/task-spec-guard-test.py 13/13 exit 0（含 4 例端到端退出码断言，即不仅断言函数返回值还断言 CLI 进程退出码，能真正发现「守卫被改成永远放行」这类回归）；对 11 只真实历史 spec 跑守卫全部 exit 0，**0 误报**，与第 1 轮结论一致；我对守卫再施加 7 种非法形态（仅嵌套/冲突/空列表/缺失/非字符串元素/snapshot_paths 非列表）全部 exit 1 拒绝，证明其拒绝能力未被削弱。原引擎侧测试 test_allowed_paths.py 仍为 0/7、exit 1（7 条全 AttributeError），即其在受保护区内的既有损坏状态被**如实记录而非掩盖**，且未被本任务以任何方式「修绿」。test_review 声明 behavior=preserve 与 actions（keep 全部既有断言 + add 工程侧自测）与实际改动一致：193 条 Rust 与 303 条前端断言语义未被改动，因为 diff 中根本没有产品/测试源文件变更。",
+      "evidence_files": [
+        ".workflow-kit/tasks/runs/RUN-891bfe42b74e4a4791c41dcfeb22a4c1.json",
+        ".workflow-kit/tasks/runs/RUN-88d6970ed646409595b4d8694f579944.json",
+        ".workflow-kit/tasks/evidence/TASK-080-cumulative-diff.txt",
+        "tools/task-spec-guard-test.py",
+        "tools/task-spec-guard.py"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "逐条验证异常、空输入、重复执行与边界，并自查是否只走成功路径——不，本轮以反例为主。守卫的拒绝路径实测（自建探针 spec，全部经 Python 以 utf-8/LF 写入临时目录并已删除）：仅嵌套 scope.allowed_paths → exit 1；顶层与嵌套冲突 → exit 1；顶层空列表 → exit 1；顶层缺失 → exit 1；顶层含非字符串元素 → exit 1；snapshot_paths 非列表 → exit 1；合法顶层 → exit 0（并打印记录后范围）；两处一致 → exit 0（判为无歧义，不再拒绝）。边界细节审查：resolve_allowed_paths 对 scope 非 dict 不崩溃（返回「缺失」类问题而非异常，自测第 6 例覆盖）；返回值为 list(effective) 深拷贝，自测第 7 例断言改返回值不影响入参；guard() 对文件不存在 / 非法 JSON / 顶层非对象分别给出 exit 1 与明确文案，即 IO 与畸形输入不会静默放行——这点关键，因为静默放行正是本任务要消灭的失效模式。退出码契约自洽：0 合法 / 1 不合法 / 2 用法错误；无参数时打印用法并 return EXIT_USAGE(2)，多文件时 ok = guard(x) and ok 保证「任一只被拒即整体非零」（短路顺序正确，前者先求值）。重复执行幂等：守卫为纯只读校验，不写任何文件、不产生副作用，可反复运行。**唯一未覆盖的边界（如实记录，非缺陷）**：guard 只校验顶层是否为合法列表，不校验 allowed_paths 与 snapshot_paths 的语义包含关系（如 allowed_paths 是否落在 snapshot_paths 内），这超出「拦下会被静默丢弃的写法」的既定目标，且发动机 finish 的越界判定仍会兜底，故不构成漏做，属可接受的职责边界。已披露 flake：我独立复现确认其为**真实存在**（见 summary 与 performance 观察），但本任务对 src 与 src-tauri 的 git status 为空、未改任何 Rust 文件，故与该 flake 无因果关系，同意其不构成本任务缺陷；对该 flake 机理说明的不准确之处已按指示记为观察而非发现。",
+      "evidence_files": [
+        "tools/task-spec-guard.py",
+        "tools/task-spec-guard-test.py",
+        ".workflow-kit/tasks/evidence/TASK-080-cumulative-diff.txt",
+        ".workflow-kit/tasks/runs/RUN-d541d5cd22ad4161bbe6f32672ae4493.json"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "职责与边界：守卫置于项目自有的 tools/（经核 binding.json 的 44 个 managed_files 中不含 tools/，且 templates/TASK.json 的 24 条 protected_paths 中无 tools/**），而 upgrade_selection() 仅覆盖 scripts/、docs/workflow/、tasks/templates/ 与 .gitattributes，故文档所言「放在 tools/ 下、升级不会覆盖」经源码核对为**真**，这是本任务最关键的结构性决策，且与「不动工作流引擎」的 owner 约束一致。依赖方向正确：守卫只依赖 Python 标准库（json/sys/pathlib），不 import 引擎模块、不 import workflow_runtime，因此引擎升级不会像 a267b1e 那样让守卫失效——正是对 6fd382e 事故的正确响应。可读性与可操作性：模块 docstring 交代背景、根因、为何放工程侧、用法与退出码三段契约；拒绝时逐条打印原因 + 修复指引 + 下一步命令（prepare --file），放行时打印「记录后 allowed_paths」以便人工核对后果，错误信息面向使用者而非堆栈。命名清晰（resolve_allowed_paths / guard / self_test / EXIT_* 常量），三段式返回值 (paths, problems, notes) 把「致命」与「提示」分离，避免把提示当错误。重复规则与文档一致性：文档描述的拒绝形态与代码实现逐项对应，无第三条真相；文档中 guard 的用法与退出码与实测一致。维护负担评估：新增 2 个文件、零依赖、零构建集成、自测内嵌于守卫同一文件（13 例，随守卫一起演进，不需要额外测试框架），并通过「升级注意事项」一条把事故教训沉淀为可复用规则，属净减负担而非增加。文档内部一致性经全文检索确认（「未做」0 命中；「已实施」仅 4/100 行且均在订正语境；「已过时」3 处均指向被订正的旧说法），第 1 轮的失实模式未复发。遗留观察：67 行引用的 begin 报错原文已是历史引擎文案（该串由 6fd382e 删除），但该行是本轮未触碰的 context 行、非新引入，其结论（begin 不放行 scope）经实跑仍为真（scope 不在 RETRYABLE|{network,interrupted,environment,budget}），故记录为可选的后续文案打磨项，本次不判负。",
+      "evidence_files": [
+        "tools/task-spec-guard.py",
+        "tools/task-spec-guard-test.py",
+        ".workflow-kit/docs/TOOL-GAP-prepare-allowed-paths.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "结论：本任务对产品运行时性能**无成本**，故不适用产品级基准，不伪造测量。具体论证：交付物仅为一个在 prepare 之前被人工/流程调用一次的 Python 前置校验脚本与一个文档订正，不进入任何产品构建产物——packet 的候选清单虽含大量 src/** 与 src-tauri/** 文件，但 git status --porcelain 对 src 与 src-tauri 均为空，证明这些文件只是快照上下文而非本任务改动，故无任何 Rust/前端运行路径、无新依赖、无热路径改动，产品启动/抓取/布局切换等性能面完全不受影响。该前置校验的实际成本我做了轻量测量以支撑「一次每任务」的说法：对 11 只真实历史 spec 串行执行共 0.62s；单只 spec 含解释器启动约 0.054s（脚本 11,591 字节，仅 json/sys/pathlib 三个标准库导入，无网络与无数据库访问）。即每张任务卡在 prepare 前多付约 50ms 的一次性成本，且该成本发生在开发期流程侧、不在用户运行时。静态分析范围如实声明：以上为「脚本自身执行时间」的实测，不涉及产品算法复杂度或内存；本任务未引入任何算法或数据结构变更，因此无需也不应补产品基准。另作为可观测性交叉验证：记录日志显示 build exit 0（Vite built in 995ms，产物体积正常）、cargo 全量 193 passed 于数秒内完成，与基线一致，无性能回归迹象。",
+      "evidence_files": [
+        "tools/task-spec-guard.py",
+        "tools/task-spec-guard-test.py",
+        ".workflow-kit/tasks/runs/RUN-891bfe42b74e4a4791c41dcfeb22a4c1.json",
+        ".workflow-kit/tasks/runs/RUN-88d6970ed646409595b4d8694f579944.json"
+      ]
+    }
+  ],
+  "ui_review": null
+}
