@@ -1,0 +1,21 @@
+{
+  "task_id": "TASK-086",
+  "run_id": "RUN-a1c7a2d1d43c49d8bc7e68aeb55d48b0",
+  "status": "ready_for_verification",
+  "summary": "TASK-086 完成：闭合 AUDIT P3[F2] 遗留的**覆盖缺口**（TASK-081 已交付让路行为，但判据内联在 App.tsx 的 keydown 闭包里、零断言——「改了行为却无法断言」，当时由审查者登记为遗留）。**做法**：按项目既有先例（`timelineSentinel.ts`、`store/selectors.ts` 的 `podcastClickAction`）新建 `src/components/shortcutYield.ts`，导出纯函数 `shouldYieldToOverlay(overlayOpen, key, hasModifier)` 与 `OVERLAY_YIELD_KEYS`；`App.tsx` 的 keydown 分支改为消费它（`=== 'yield'` 即 return），**行为逐条保持**（浮层打开 + 非 Ctrl/Meta/Alt + 键属 s/S/m/M/j/k → 让路；其余情形照旧）。**新增 8 条断言**覆盖四情形（让路/不让路/带修饰键/非目标键）＋键表适配性＋修前对照＋两源码形态断言。**成对证据（实测三种变异，全部有效）**：A) 把判据改回「永不让路」（修前行为）→ 320/322，恰好 2 条失败；B) 去掉修饰键守卫（Ctrl+K 也会让路）→ 321/322，1 条失败；C) **删掉 App.tsx 里的消费分支**（纯函数仍在）→ 320/322，2 条源码形态断言失败——这一条正是 TASK-081-R2-F1 的教训（「纯函数有牙 ≠ 调用方真的用它」），故本卡从一开始就同时钉了函数与调用点。还原后 322/322。**门禁实测**：cargo test **206 passed / 0 failed / 9 ignored**（与基线逐项相同，即零行为变化的直接证据）；lint **0 warnings** / 0 errors（判据放独立文件，避开了 oxlint 的 react/only-export-components——TASK-081 修复轮曾因在组件文件 export 非组件函数把 lint 从 0 变 1）；build exit 0；frontend **322/322**（基线 314 + 8 条本卡断言）。既有断言一行未动，`既有回归 26/26 通过（未改动一行）` 保持不变。",
+  "changed_files": [
+    "src/App.tsx",
+    "src/components/shortcutYield.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

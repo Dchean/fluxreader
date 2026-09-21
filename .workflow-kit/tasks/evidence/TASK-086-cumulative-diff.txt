@@ -1,0 +1,80 @@
+TASK-086 change set — AUDIT P3[F2]: 单键快捷键让路浮层的判据抽纯函数并补断言 (REQ-104)
+
+================================================================================
+WHY THIS CARD EXISTS
+================================================================================
+AUDIT P3[F2]: with an overlay open (settings/search/modals/lightbox/full player) and focus not
+in an input, pressing S/M acted on the article BEHIND the overlay, and J/K switched articles
+behind it. TASK-081 delivered the fix — but the judgement was INLINE inside App.tsx's keydown
+closure, so it had ZERO assertions ("changed behaviour but cannot assert it"). The TASK-081
+reviewer explicitly registered that coverage gap as a leftover. This card closes it.
+
+================================================================================
+WHAT CHANGED
+================================================================================
+· NEW `src/components/shortcutYield.ts` — exports the pure function
+  `shouldYieldToOverlay(overlayOpen, key, hasModifier)` plus `OVERLAY_YIELD_KEYS`.
+  A separate file follows the project's existing precedent (`timelineSentinel.ts`,
+  `store/selectors.ts`) and avoids oxlint's `react/only-export-components`
+  (TASK-081's repair round pushed lint from 0→1 warning by exporting a non-component from a
+  component file — that mistake is not repeated here).
+· `src/App.tsx` — the keydown branch now consumes it:
+  `if (shouldYieldToOverlay(overlayOpen, e.key, e.ctrlKey || e.metaKey || e.altKey) === 'yield') return;`
+  Behaviour is preserved item by item (overlay open + no Ctrl/Meta/Alt + key ∈ s/S/m/M/j/k).
+· `tools/frontend-regression.mjs` — 8 new assertions (below). No existing assertion touched.
+
+================================================================================
+EVIDENCE — three mutations, all measured
+================================================================================
+A) helper → never yields (the PRE-FIX behaviour)      → 320/322, exactly 2 assertions FAIL
+B) helper ignores the modifier guard (Ctrl+K would)   → 321/322, 1 assertion FAILS
+C) **delete the consumer branch in App.tsx** (the pure function still exists) → 320/322,
+   2 SOURCE-FORM assertions FAIL
+Restored → 322/322.
+
+Mutation C matters: it is precisely the TASK-081-R2-F1 lesson — "the pure function has teeth"
+does NOT mean "the caller actually uses it". Round 2 of TASK-081 failed for exactly that reason,
+so this card pins BOTH the function (A, B) and the call site (C) from the start.
+
+The 8 new assertions cover: yield on overlay+single-key (all six keys); proceed when no overlay;
+proceed with Ctrl/Meta/Alt; proceed for non-target keys (a/Enter/Escape); the exact key table;
+a pre-fix comparison; and two source-form assertions on App.tsx (that it calls the function and
+returns on 'yield', and that the three argument expressions are the real ones).
+
+================================================================================
+GATES (measured on this candidate)
+================================================================================
+  cargo test  206 passed / 0 failed / 9 ignored   — IDENTICAL to baseline (zero behaviour change)
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    322/322, exit 0                      (baseline 314; +8 here)
+
+No existing assertion modified (`既有回归 26/26 通过（本文件原有断言，未改动一行）` unchanged).
+No new dependency.
+
+================================================================================
+WHAT TO ATTACK
+================================================================================
+1. **Do the assertions actually have teeth?** Re-run at least mutation A (helper never yields)
+   and mutation C (delete the App.tsx consumer branch) and confirm each FAILS. Restore
+   byte-identically from a BACKUP FILE (not `git checkout`) and re-verify 322/322.
+   NOTE a known trap: after restoring, cargo/npm fingerprints can serve STALE results — be sure
+   the harness actually re-reads the file (the frontend harness reads sources at import time).
+2. **Is the behaviour genuinely unchanged?** Compare the new `App.tsx` branch against HEAD's
+   inline logic and confirm the truth table is identical (including the Ctrl/Meta/Alt direction
+   and the exact key list). Flag any behaviour drift — this card claims behaviour=preserve.
+3. **Is the source-form assertion meaningful or fragile?** It slices App.tsx around
+   `shouldYieldToOverlay(` and regex-checks the argument expressions. Try to defeat it.
+4. **Scope**: only `src/App.tsx`, `src/components/shortcutYield.ts`,
+   `tools/frontend-regression.mjs` may change.
+5. **Gates**: cargo 206/0/9, lint 0/0, build exit 0, frontend 322/322. Recompute cargo from the
+   recorded log (do NOT run the full 27-suite); `& npm.cmd run test:frontend` is fast — re-run it.
+   Do NOT run `npm run build` (Vite's child process is blocked in this sandbox).
+
+**Delete any probe/temp files you create** and confirm `git status --porcelain` has no leftovers.
+
+================================================================================
+TIME DISCIPLINE
+================================================================================
+A reviewer of a sibling card died mid-run and lost its work. Budget ~15 minutes, then WRITE THE
+REPORT. Write the file early, then refine.

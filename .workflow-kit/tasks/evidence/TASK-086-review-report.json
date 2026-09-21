@@ -1,0 +1,61 @@
+{
+  "task_id": "TASK-086",
+  "candidate_digest": "22d99095f61465aac01f92efb27b4fc217f9201e9672c44a645a8b63f423ce44",
+  "verification_run": "RUN-110241c05b914c77af21d9eed6dc012c",
+  "verdict": "PASS",
+  "summary": "独立复核 TASK-086（AUDIT P3[F2]/REQ-104）：把「单键快捷键是否让路浮层」的判据从 App.tsx 内联闭包抽成 src/components/shortcutYield.ts 的纯函数 shouldYieldToOverlay 并补 8 条前端断言。三份候选文件 sha256 与包内记录逐一相符（App.tsx e6654dd3…、shortcutYield.ts 1083262f…、frontend-regression.mjs 35bc9697…）。变异取证已亲手复现：A（helper 永不让路 → 320/322，恰好 2 条语义断言失败）、C（删掉 App.tsx 消费分支、纯函数保留 → 320/322，恰好 2 条 SOURCE-FORM 断言失败），两者均证实断言有捕获力，且 C 证明「调用方真的用它」被钉住。行为等价性以差集比对确认：App.tsx 的 overlayOpen 表达式与 HEAD 逐字相同，键表 s/S/m/M/j/k 与 HEAD 完全一致，48 组真值表（浮层×键×修饰键）零漂移。门禁独立复算：cargo 206/0/9（自记录日志求和的 27 个 test result 汇总）、lint 0/0 亲自重跑、frontend 322/322 亲自重跑、build exit 0（按指令未重跑）。未发现真实缺陷。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收逐条落实：① 判据确为 src/components/shortcutYield.ts 的导出纯函数，App.tsx 第 230 行真实消费它（非只建不用）；② 新断言覆盖四种情形（浮层开+单键让路 / 浮层关不让路 / 带 Ctrl/Meta/Alt 不让路 / 非 S/M/J/K 键不让路）并有对应 checkNew；③ 变异证据见 regression 项；④ 四门禁全绿；⑤ 前端回归 diff 为 +38/-0，既有断言一行未动（既有回归 26/26 保持）。范围仅动 allowed_paths 三个文件，App.tsx 仅新增 1 行 import 与替换 1 处守卫，Ctrl+K/Ctrl+,/Escape/Space 等 non_goals 分支未被触碰。",
+      "evidence_files": [
+        "src/components/shortcutYield.ts",
+        "src/App.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "变异 A（把 helper 改为恒返回 'proceed'，即修前行为）亲手重跑得 320/322，失败的恰是「浮层打开+单键 ⇒ 让路」与「修前判据可复现」两条；变异 C（删掉 App.tsx 的 shouldYieldToOverlay(...)==='yield' 分支、纯函数原样保留）亲手重跑得 320/322，失败的恰是两条 SOURCE-FORM 断言。C 是 TASK-081-R2-F1 教训的直接覆盖：纯函数有牙不等于调用方在用，此处确被钉住。旧文件 frontend-regression.mjs 本卡 diff 为纯新增 38 行、0 删除，未弱化任何既有保护；cargo 206/0/9 与基线 RUN-92059f91 一致，无回归。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        "src/components/shortcutYield.ts",
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "边界与空输入在纯函数内被穷尽：overlayOpen=false 立即 proceed（浮层未开不误伤快捷键）、hasModifier=true 立即 proceed（组合键归浮层自身操作）、键不在表内 proceed（a/Enter/Escape/空格均不让路，不误伤其它快捷键）。MODIFIER 方向经差集确认与 HEAD 一致：HEAD 为 overlayOpen && !ctrl && !meta && !alt，新代码传入 ctrl||meta||alt 并由函数 !hasModifier 取反，语义等价。键表比较使用严格 includes，大小写分别列出；HEAD 与 helper 均未收录大写 'K'，属既有约定、本卡未引入漂移。恢复路径已实测：从备份文件（非 git checkout）还原后 sha256 逐字节回到候选值，322/322 且 exit 0，无缓存假绿。",
+      "evidence_files": [
+        "src/components/shortcutYield.ts",
+        "src/App.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "抽独立文件而非在组件文件 export 非组件函数，正确规避了 oxlint react/only-export-components（TASK-081 修复轮曾因此把 lint 推到 0→1）；实测 lint 仍为 0 warnings / 0 errors。约定前置注释完整记录了契约、判据来源与修前行为，便于后续维护。键表以 OVERLAY_YIELD_KEYS 导出并被「适配性」断言钉住长度与顺序，未来增删键必须同步该表，降低「断言一套、渲染一套」的分叉风险。唯一可议之处是两条 SOURCE-FORM 断言是文本/正则层面的（见 failure_paths 与 summary 所述的「不可达诱饵」可绕过性），但它们只是「调用方存在」的辅助佐证，语义保证由 A/B 变异覆盖，故不构成缺陷。",
+      "evidence_files": [
+        "src/components/shortcutYield.ts",
+        "tools/frontend-regression.mjs",
+        "src/App.tsx"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "本卡为纯抽取 + 断言补充，不引入新依赖（package.json/Cargo.toml/Cargo.lock 未改），也不进入渲染热路径。shouldYieldToOverlay 仅在 keydown 事件处理器内、且仅在既有 inInput 早退之后调用一次，代价为一次布尔短路与一次 6 元素数组 includes（等价于 HEAD 原有的 ['s',...].includes 调用），无额外分配、无状态、无闭包捕获。该分支此前已在 HEAD 的同一位置执行，故运行时开销与抽函数前不可区分，属静态等价分析的范围，无需基准测试；构建产物 gzip index 116.11 kB，未见异常膨胀。",
+      "evidence_files": [
+        "src/components/shortcutYield.ts",
+        "src/App.tsx"
+      ]
+    }
+  ],
+  "ui_review": null
+}

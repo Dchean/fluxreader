@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-086 · F2：单键快捷键让路浮层的判据抽纯函数并补前端断言
 
-**状态**：ready
+**状态**：done
 
 **目标**：闭合 AUDIT P3[F2] 遗留的**覆盖缺口**：上一轮（TASK-081）已按审计要求让 S/M/J/K 在任一浮层打开时让路，但该判据**内联在 `src/App.tsx` 的 keydown 闭包里**，无任何断言——「改了行为却无法断言」。处置：按项目既有先例（`timelineSentinel.ts` / `src/store/selectors.ts` 的 `podcastClickAction`）把判据抽成**导出纯函数**`shouldYieldToOverlay(overlayOpen, key, hasModifier)`（新建 `src/components/shortcutYield.ts`，独立成文件以避开 oxlint 的 react/only-export-components），由 App.tsx 的真实 keydown 分支消费，并**由前端回归直接断言**。行为零变化：现有让路语义（浮层打开 + 非 Ctrl/Meta/Alt + 键属 s/S/m/M/j/k）逐条保持。
 
@@ -30,20 +30,27 @@
 
 ## 执行与恢复
 
-- 首次开始：None
-- 原截止时间：None
-- 当前截止时间：None
-- 时钟：未开始
+- 首次开始：2026-09-21T12:05:39.937559Z
+- 原截止时间：2026-09-21T16:05:39.937559Z
+- 当前截止时间：2026-09-21T16:05:39.937559Z
+- 时钟：按墙钟计：额度 240 分钟，写入阶段已用约 9 分钟
 - 已用修复轮：0
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 最近检查点
 
+- 2026-09-21T12:05:40.214583Z：开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-21T12:14:46.831927Z：编码结果已记录，差异范围已核对：src/App.tsx, src/components/shortcutYield.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-21T12:15:22.336354Z：预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T12:20:23.362433Z：当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 原始证据
 
 [唯一状态记录](../items/TASK-086.json)
 
+- [RUN-a1c7a2d1d43c49d8bc7e68aeb55d48b0](../runs/RUN-a1c7a2d1d43c49d8bc7e68aeb55d48b0.json)
+- [RUN-110241c05b914c77af21d9eed6dc012c](../runs/RUN-110241c05b914c77af21d9eed6dc012c.json)
+- [RUN-33f88f99fa5c4b99b83539609667c8fd](../runs/RUN-33f88f99fa5c4b99b83539609667c8fd.json)
 
 卡片是自动生成的视图。Agent 修改任务记录、执行命令或保存检查点后重新生成；不手工把状态改成通过。

@@ -28,11 +28,10 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 58 项：已验收 47，待验收 0，阻塞 0。
+已建任务 58 项：已验收 48，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-086 · F2：单键快捷键让路浮层的判据抽纯函数并补前端断言](<../tasks/cards/TASK-086.md>) | 待执行 | 闭合 AUDIT P3[F2] 遗留的**覆盖缺口**：上一轮（TASK-081）已按审计要求让 S/M/J/K 在任一浮层打开时让路，但该判据**内联在 `src/App.tsx` 的 keydown 闭包里**，无任何断言——「改了行为却无法断言」。处置：按项目既有先例（`timelineSentinel.ts` / `src/store/selectors.ts` 的 `podcastClickAction`）把判据抽成**导出纯函数**`shouldYieldToOverlay(overlayOpen, key, hasModifier)`（新建 `src/components/shortcutYield.ts`，独立成文件以避开 oxlint 的 react/only-export-components），由 App.tsx 的真实 keydown 分支消费，并**由前端回归直接断言**。行为零变化：现有让路语义（浮层打开 + 非 Ctrl/Meta/Alt + 键属 s/S/m/M/j/k）逐条保持。 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -44,6 +43,7 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
 另有 46 项记录可在任务总览查看。
 
@@ -81,11 +81,6 @@
 
 ## 最近事件
 
-- 2026-09-21T11:47:46.699802Z · note/lesson · TASK-084 · scope 失败已出现 13 次：Out-of-scope changes: .workflow-kit/tasks/items/TASK-084.json (allowed: src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slic。下次准备/实现前先核对这一点。
-- 2026-09-21T11:49:44.448875Z · checkpoint · TASK-084 · 任务已取消：任务记录在实现过程中被合法修订（依 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 订正验收⑥ 并把该裁决挂到 test_review），但本卡 repair 运行继承的是首次 begin（RUN-0575c6a1）时的旧基线，导致 .workflow-kit/tasks/items/TASK-084.json 被判越界且无法收敛（TASK-074/076 同类）。实现成果已全部完成且四门禁全绿，按既有先例取消本卡并以新卡收口：新卡从当前已实现的工作树取快照，故 changed_files 为空、成果由候选快照承载。注：Rust 侧 apply_read_bulk 抽取与 4 条等价性断言、前端批量断言与精确 id 集合检查均已就位。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
-- 2026-09-21T11:49:44.533615Z · cancel · TASK-084 · 任务记录在实现过程中被合法修订（依 owner 裁决 DEC-t084-replace-per-item-ipc-assertions-20260921 订正验收⑥ 并把该裁决挂到 test_review），但本卡 repair 运行继承的是首次 begin（RUN-0575c6a1）时的旧基线，导致 .workflow-kit/tasks/items/TASK-084.json 被判越界且无法收敛（TASK-074/076 同类）。实现成果已全部完成且四门禁全绿，按既有先例取消本卡并以新卡收口：新卡从当前已实现的工作树取快照，故 changed_files 为空、成果由候选快照承载。注：Rust 侧 apply_read_bulk 抽取与 4 条等价性断言、前端批量断言与精确 id 集合检查均已就位。；依据：总控处置（2026-09-21）
-- 2026-09-21T11:50:45.342707Z · prepare · TASK-085 · 任务已冻结：F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令（收口 TASK-084）；范围 src-tauri/src/commands/articles.rs, src-tauri/src/lib.rs, src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs
-- 2026-09-21T11:51:01.762149Z · checkpoint · TASK-085 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-21T11:51:37.587575Z · checkpoint · TASK-085 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-21T11:52:13.562307Z · checkpoint · TASK-085 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-21T12:03:48.271955Z · checkpoint · TASK-085 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
@@ -93,6 +88,11 @@
 - 2026-09-21T12:04:28.220326Z · note/lesson · 工具坑（TASK-085 独立审查者实测发现，务必记住）：**cargo 的 mtime 指纹会返回陈旧结果**。审查者在变异后用备份文件逐字节还原（sha256 已与候选清单完全一致），但 cargo test 仍连续数次报告**旧的变异失败**；只有 touch 文件（改变 mtime）后才重新编译、给出真实的 4 passed / 0 failed。影响：任何「改动→还原→复跑」的变异取证，若只看 cargo 输出，可能把**陈旧产物**当成真实结论——既可能误判为通过，也可能误判为失败。纪律：变异取证还原后，务必 touch 源文件或显式强制重编（如 cargo clean -p app / 改动一行再改回），再采信测试结果。本项目此前也出现过 stale-rlib 造成的假阴性。
 - 2026-09-21T12:05:05.844677Z · batch · 关闭 BATCH-ab2d0e5d3f7643379a6de1fd2544b549，开启 BATCH-3b1e9a89eb8a464fb861be8f1bcc3179；策略允许自动续批
 - 2026-09-21T12:05:22.872138Z · prepare · TASK-086 · 任务已冻结：F2：单键快捷键让路浮层的判据抽纯函数并补前端断言；范围 src/App.tsx, src/components/shortcutYield.ts, tools/frontend-regression.mjs
+- 2026-09-21T12:05:40.216697Z · checkpoint · TASK-086 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-21T12:14:46.835013Z · checkpoint · TASK-086 · 编码结果已记录，差异范围已核对：src/App.tsx, src/components/shortcutYield.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-21T12:15:22.339320Z · checkpoint · TASK-086 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-21T12:20:23.365243Z · checkpoint · TASK-086 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-21T12:20:46.817921Z · accept · 验收 TASK-086；依据：总控核对：独立审查 PASS（findings 空，五区域全 PASS，candidate 22d99095…，verification RUN-110241c05b914c77af21d9eed6dc012c）。审查者独立重跑两种变异并确认有效：A) 判据改回「永不让路」（修前行为）→ 320/322、恰 2 条语义断言失败；C) 删掉 App.tsx 的消费分支（纯函数仍在）→ 320/322、恰 2 条源码形态断言失败——后者正是 TASK-081-R2-F1 的教训（「纯函数有牙≠调用方真的用它」），本卡已同时钉住函数与调用点。审查者另做 48 例真值表比对（浮层开关 × 12 键 × 修饰键开关），与 HEAD 逐例一致、0 差异，behavior=preserve 成立。四门禁：cargo 206/0/9、lint 0/0、build exit 0、frontend 322/322。审查者记录一条**非阻塞**加固建议：源码形态断言是文本/正则判定，可被「诱饵调用 + 提前 return」绕过（语义保证来自变异 A/B），后续可考虑改 AST 检查——已作为可选改进记录，非缺陷。验收（2026-09-21）
 
 ## 如何继续
 

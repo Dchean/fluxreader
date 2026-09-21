@@ -1,0 +1,594 @@
+{
+  "ok": true,
+  "instructions": "# 审查执行器\n\n读取明确指定的审查包。任务的角色是 reviewer，输入包括 task_id、candidate_digest、原始需求/验收、质量目标、当前源码、完整差异、验证 RUN 与必要参考。先依据这些事实形成结论，不采用作者的“应该通过”。\n\nindependent 必须来自没有参与实现的新上下文。同一模型可以；同一上下文改名字不可以。Agent 包办不要求 CLI，宿主提供独立上下文即可。自审只能在策略允许且任务不是高风险时使用，并如实标记。\n\n## 五项核对\n\n- requirements：逐项对照用户的当前需求，包括 Bug、新增功能和兼容限制；检查是否漏做、顺带改变行为或扩大范围。\n- regression：阅读实际验证命令、原始输出及测试断言，检查它们是否能发现目标缺陷，是否弱化了仍有效的保护。\n- failure_paths：核对实际相关的异常、空输入、重复执行、恢复、数据/权限边界；需要时验证具体反例。不要只走成功路径。\n- maintainability：检查职责、依赖方向、重复规则、命名、模块边界及新增维护负担。工作量大不是拒绝必要改进的理由，抽象层数也不等于质量。\n- performance：检查代表性负载下的测量和回归；静态分析须明确其范围，不能伪称实测提升。不受影响时解释不适用，不强造基准。\n\ndocumentation/baseline 任务只需 requirements 和 regression 两项，其余三项可省略；其他任务五项齐全。每项保存 status、简短的结论依据 analysis 和 evidence_files。evidence_files 只能引用候选快照内的文件，或 .workflow-kit/tasks/runs/、.workflow-kit/tasks/evidence/ 下的附件；不要引用任务条目、任务卡、DECISIONS、PROJECT 或笔记，这些文件由工具改写，引用它们会让审查在保存后立即失效。需要引用其他源文件时，应由总控把它加进任务的 snapshot_paths 再验证。报告记录可核对事实，不要求披露内部推理过程。requirements/regression 不能标不适用；高风险的 failure_paths 也不能。未完成检查时用顶层 BLOCKED，有待修问题用 FAIL；不能留下 NOT_RUN/FAIL 项却给总体 PASS。\n\n自审前暂停编码，从原需求和完整差异重新检查，包括新增、删除、重命名、未跟踪文件。发现问题后回到原任务修复，重新验证再审，不在审查阶段改验收、预算或代码放行。\n\n## 适用性与 UI\n\n重构核对 test_review：原测试、CI、mock/fixture 和快照是否仍适用，适配是否保留行为，替换/退役是否有对应需求决定，新需求是否有覆盖。原始基线和已知失败应保留；命令没变不代表断言没弱化。\n\nui_change=true 时检查 UI 约定、当前截图、交互报告与 ui_checks，实际操作适用控件的展开、焦点、错误、窄屏和键盘状态；checked_states 填 ui_checks 的 id。没有真实视觉依据不能把构建成功写成界面通过。\n\n## 输出\n\n使用 contracts/review-result.schema.json 的完整结构。以下只是字段形状，标识、依据和路径必须替换为实际值：\n\n~~~json\n{\n  \"task_id\": \"TASK-actual\",\n  \"candidate_digest\": \"当前候选摘要\",\n  \"verification_run\": \"RUN-actual-verification\",\n  \"verdict\": \"PASS\",\n  \"summary\": \"审查范围及实际结论\",\n  \"findings\": [],\n  \"review_checks\": [\n    {\"area\": \"requirements\", \"status\": \"PASS\", \"analysis\": \"具体需求与差异如何对应\", \"evidence_files\": [\"实际源码或证据路径\"]},\n    {\"area\": \"regression\", \"status\": \"PASS\", \"analysis\": \"实际测试如何保护目标行为\", \"evidence_files\": [\"实际验证记录路径\"]},\n    {\"area\": \"failure_paths\", \"status\": \"PASS\", \"analysis\": \"已核对的异常和恢复场景\", \"evidence_files\": [\"实际证据路径\"]},\n    {\"area\": \"maintainability\", \"status\": \"PASS\", \"analysis\": \"具体结构变化和维护影响\", \"evidence_files\": [\"实际源码路径\"]},\n    {\"area\": \"performance\", \"status\": \"NOT_APPLICABLE\", \"analysis\": \"仅在确实不涉及运行性能时填写具体理由\", \"evidence_files\": []}\n  ],\n  \"ui_review\": null\n}\n~~~\n\n每个 finding 说明位置、触发条件、影响和建议。UI PASS 用包含 contract_ref、checked_states、evidence_files 的对象替代 ui_review=null；文件含实际截图和交互报告。不得复制示例中的不适用理由给任意项目。\n\n报告与当前 verification_run、候选和证据绑定；改动后旧结论不能继续放行。程序核对完整性、关联与变更，不能自动判断分析有无遗漏或证明上下文独立。\n",
+  "task_packet": {
+    "task_id": "TASK-086",
+    "run_id": null,
+    "task": {
+      "schema_version": 1,
+      "id": "TASK-086",
+      "title": "F2：单键快捷键让路浮层的判据抽纯函数并补前端断言",
+      "kind": "implementation",
+      "retry_safe": false,
+      "ui_change": false,
+      "ui_contract_ref": null,
+      "ui_checks": [],
+      "status": "review",
+      "objective": "闭合 AUDIT P3[F2] 遗留的**覆盖缺口**：上一轮（TASK-081）已按审计要求让 S/M/J/K 在任一浮层打开时让路，但该判据**内联在 `src/App.tsx` 的 keydown 闭包里**，无任何断言——「改了行为却无法断言」。处置：按项目既有先例（`timelineSentinel.ts` / `src/store/selectors.ts` 的 `podcastClickAction`）把判据抽成**导出纯函数**`shouldYieldToOverlay(overlayOpen, key, hasModifier)`（新建 `src/components/shortcutYield.ts`，独立成文件以避开 oxlint 的 react/only-export-components），由 App.tsx 的真实 keydown 分支消费，并**由前端回归直接断言**。行为零变化：现有让路语义（浮层打开 + 非 Ctrl/Meta/Alt + 键属 s/S/m/M/j/k）逐条保持。",
+      "non_goals": [
+        "不改 App.tsx 的其它快捷键语义（Ctrl+K / Ctrl+, / Escape / Space 的既有分支一律不动）",
+        "不新增或改变浮层状态字段（仍用既有 searchOpen/settingsOpen/…/playerExpanded）",
+        "不改 S/M/J/K 触发时的业务动作（toggleCurrentStar/toggleCurrentReadStatus/selectArticle）",
+        "不引入新依赖；不改 package.json/Cargo.toml/Cargo.lock"
+      ],
+      "requirement_refs": [
+        "REQ-104"
+      ],
+      "reference_ids": [],
+      "decision_refs": [],
+      "dependencies": [],
+      "blocks": [],
+      "risk": {
+        "level": "low",
+        "decision_ids": []
+      },
+      "scope": {
+        "allowed_paths": [
+          "src/App.tsx",
+          "src/components/shortcutYield.ts",
+          "tools/frontend-regression.mjs"
+        ],
+        "protected_paths": [
+          "AGENTS.md",
+          "CLAUDE.md",
+          "WORKFLOW.md",
+          "tasks/**",
+          "docs/PRODUCT.md",
+          "docs/FEATURES.md",
+          "docs/workflow/**",
+          "scripts/project_workflow.py",
+          "scripts/workflow_runtime.py",
+          "scripts/workflow_bootstrap.py",
+          "scripts/workflow_intake.py",
+          "scripts/workflow_progress.py",
+          "WORKFLOW-KIT.md",
+          ".workflow-kit/binding.json",
+          ".workflow-kit/tasks/**",
+          ".workflow-kit/notes/**",
+          ".workflow-kit/scripts/**",
+          ".workflow-kit/docs/workflow/**",
+          ".workflow-kit/legacy/**",
+          ".workflow-kit/AGENTS.md",
+          ".workflow-kit/CLAUDE.md",
+          ".workflow-kit/WORKFLOW.md",
+          ".workflow-kit/docs/PRODUCT.md",
+          ".workflow-kit/docs/FEATURES.md",
+          ".workflow-kit/tasks/runs/RUN-92059f91051f47888cf95db5be2acb76.json"
+        ],
+        "network": "none",
+        "data": "synthetic_only"
+      },
+      "acceptance": [
+        "① 判据抽为 `src/components/shortcutYield.ts` 的导出纯函数，且 `App.tsx` 的 keydown **确实调用它**（不得只建函数不用）",
+        "② 前端回归新增断言覆盖四种情形：浮层打开+单键 → 让路；浮层关闭+单键 → 不让路；浮层打开+带 Ctrl/Meta/Alt → 不让路（属浮层自身操作）；非 S/M/J/K 键 → 不让路",
+        "③ 断言须有捕获力并以变异取证：把该函数改回「永不让路」（修前行为）或改变判定条件，必须有断言失败（记录实测的失败用例名）",
+        "④ 行为零变化：四门禁全绿——cargo test ≥206 且 0 failed、9 ignored 不增；lint 0/0（注意不得因在组件文件 export 非组件函数而引入新警告）；build exit 0；frontend ≥314/314 不回退",
+        "⑤ 除本卡新增的断言外，既有前端断言一行不动（`既有回归 26/26 通过（未改动一行）` 与其它新增断言计数不变）"
+      ],
+      "gates": [
+        {
+          "id": "cargo_test",
+          "program": "cargo",
+          "args": [
+            "test"
+          ],
+          "cwd": "src-tauri",
+          "required": true
+        },
+        {
+          "id": "lint",
+          "program": "npm",
+          "args": [
+            "run",
+            "lint"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "build",
+          "program": "npm",
+          "args": [
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "frontend",
+          "program": "npm",
+          "args": [
+            "run",
+            "test:frontend"
+          ],
+          "cwd": ".",
+          "required": true
+        }
+      ],
+      "test_review": {
+        "behavior": "preserve",
+        "baseline": {
+          "status": "PASS",
+          "evidence_ref": ".workflow-kit/tasks/runs/RUN-92059f91051f47888cf95db5be2acb76.json",
+          "summary": "2026-09-21 基线（TASK-085 验证 RUN-92059f91，提交 d50fd60）：cargo test 206 passed / 0 failed / 9 ignored、lint 0 warnings / 0 errors、build exit 0、frontend 314/314。本任务 behavior=preserve：让路语义已经在位（TASK-081 交付），本卡只把**判据抽成可断言的纯函数**并补断言，不改变任何用户可见行为；故既有全部断言必须原样通过。",
+          "decision_ids": []
+        },
+        "decision_ids": [],
+        "actions": [
+          {
+            "action": "keep",
+            "target": "全部既有 206 条 Rust 断言与 314 条前端断言",
+            "reason": "纯抽取 + 补断言，无行为改动；既有断言（尤其 `既有回归 26/26 通过（未改动一行）`）是「零行为变化」的判据。",
+            "gate_ids": [
+              "cargo_test",
+              "frontend"
+            ]
+          },
+          {
+            "action": "add",
+            "target": "shortcutYield 纯函数的四种情形断言（让路/不让路×带修饰键/非目标键）",
+            "reason": "AUDIT P3[F2] 的遗留正是「修复无断言」这一覆盖缺口；新断言必须对该判据本身取证，并以变异确认可失败，而不是只断言周边状态。",
+            "gate_ids": [
+              "frontend"
+            ]
+          }
+        ]
+      },
+      "input": {
+        "manifest": ".workflow-kit/tasks/evidence/TASK-086-input-659950760c7f4d339140b22c6a0917f5.json",
+        "digest": "d93e6c4f4e6203e49a93c7b2d40bc5a59c1f889841e976cc905e3411915c05b3",
+        "source_revision": null,
+        "definition_digest": "a190e3d6008bb14bdefa81e5654c47e4803e6370bc31f34e985d5b10a3fc0abb"
+      },
+      "budget": {
+        "started_at_utc": "2026-09-21T12:05:39.937559Z",
+        "deadline_at_utc": "2026-09-21T16:05:39.937559Z",
+        "repair_rounds_used": 0
+      },
+      "batch_id": "BATCH-3b1e9a89eb8a464fb861be8f1bcc3179",
+      "run_ids": [
+        "RUN-a1c7a2d1d43c49d8bc7e68aeb55d48b0",
+        "RUN-110241c05b914c77af21d9eed6dc012c"
+      ],
+      "blockers": [],
+      "evidence": {
+        "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-candidate.json",
+        "candidate_digest": "22d99095f61465aac01f92efb27b4fc217f9201e9672c44a645a8b63f423ce44",
+        "verification_run": "RUN-110241c05b914c77af21d9eed6dc012c",
+        "review_run": null,
+        "acceptance_ref": null,
+        "owner_decision_ids": [],
+        "merge_ref": null
+      },
+      "snapshot_paths": [
+        ".workflow-kit/tasks/runs/RUN-92059f91051f47888cf95db5be2acb76.json",
+        "src/App.tsx",
+        "src/components",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    "brief": {
+      "goal": "以 workflow-kit 2026-09-18.3 新周期对 fluxreader 持续改进：修复全项目体检发现的缺陷（P1/P2），处置功能空壳与死代码确保无未落实的宣称能力，完成 ingestion.rs 拆分与结构性硬化（pull 游标守卫、app_settings 收口），使项目稳定规范、代码与技术路线优雅高效",
+      "audience": "项目作者本人日常使用的桌面端 RSS/播客阅读器",
+      "acceptance": [
+        "体检报告 AUDIT-20260919-v2.md 的 P1/P2 缺陷经确认后全部修复并有修前复现/修后验证的成对证据",
+        "结构性硬化落地：pull 分块失败不推进增量游标；app_settings 读取收口为类型化助手",
+        "ingestion.rs 拆分为领域模块，行为零变化，四门禁不回归",
+        "死代码/空壳集群处置完毕（删除或裁决保留），无未落实的宣称能力",
+        "设计边界项（P2-12/P3-11 等）经 owner 逐项裁决：实施或注释明示保留",
+        "既有质量底线延续：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283 不回退（通过数可增不可减）"
+      ],
+      "non_goals": [
+        "更换技术栈或迁移框架",
+        "重新设计全新 UI（沿用现有布局与交互习惯）",
+        "不引入新的外部服务或费用",
+        "不拆分 Overlays/Timeline/db/sync_map.rs/base.css 与协议客户端（评估结论：内聚良好，拆了只加跳转成本）",
+        "不动 merge_remote_status 一带同步合并语义（pending 保护/read-anywhere-wins/跨源副本记账，有书面不变式 TASK-060 §4）"
+      ],
+      "compatibility": [
+        "保留现有 SQLite 数据库与迁移",
+        "保留 Fever/GReader/本地抓取等同步协议行为",
+        "保留现有 UI 布局与交互习惯（重构不改版）",
+        "未提交的工作区修改与旧任务记录不动"
+      ],
+      "quality": {
+        "priority": "quality_first",
+        "maintainability": "单体模块拆分为领域模块（延续 db.rs 试点模式），前端补行为测试，lint/typecheck/test 作为门禁",
+        "stability": "现有 Rust e2e 与前端回归不回归；同步、抓取、播放主流程稳定",
+        "performance": {
+          "mode": "measure",
+          "workload": "大量订阅与文章（万级）下的启动、布局切换、正文加载",
+          "targets": [
+            "社交布局正文加载不再无限等待，与切换布局后的秒开对齐"
+          ],
+          "rationale": "REQ-001/003 涉及加载性能，需以实际测量判断"
+        }
+      },
+      "requirements": [
+        {
+          "id": "REQ-104",
+          "kind": "improvement",
+          "description": "死代码/空壳集群处置与 P3 卫生项：删除零生产调用代码（db/feeds.rs:245,257,269 Miniflux 兜底三查询、ingestion.rs:330-407 旧版 refresh_feed、greader.rs:501-518 未用方法、db/sync_map.rs 被取代的逐条查询、sync/mod.rs:29 fallback_entries 恒 0 与模块注释修订、lib/api.ts:503 api.syncNow、AiEvent::Error 删或接通）；P3 项逐条处置（吞错 warn 化、sync_save 留空只复用 password、purge_remote_data 范围、cleanup_cache 时区、LIMIT 绑定、normalize 去重一致化、gist 孤儿、init unwrap 加固、快捷键浮层让路、播放中同集切换、批量标读合并等）；设计边界项 P2-12（配置同步删除语义）/P3-11（远端退订本地删除）与 P2-10 后半/P2-11 修复立项前逐项请 owner 裁决",
+          "in_scope": true,
+          "acceptance": [
+            "删除项经 grep 验证零生产调用且四门禁全绿",
+            "设计裁决项有 owner 真实决定记录（实施或注释明示保留）",
+            "P3 项每条有处置结论（修/不修+理由）"
+          ]
+        }
+      ],
+      "ui": {
+        "mode": "existing",
+        "style_intent": "保持现有布局与交互习惯，重构不改版；统一控件风格（下拉选择框等不一致组件对齐一致），打磨动画流畅度与文案",
+        "target_devices": [
+          "Windows 桌面端"
+        ]
+      }
+    },
+    "reference_candidates": [],
+    "read_first": [
+      "AGENTS.md",
+      "WORKFLOW-KIT.md"
+    ],
+    "candidate_digest": "22d99095f61465aac01f92efb27b4fc217f9201e9672c44a645a8b63f423ce44",
+    "deadline_at_utc": "2026-09-21T16:05:39.937559Z",
+    "role": "reviewer",
+    "verification": {
+      "schema_version": 1,
+      "id": "RUN-110241c05b914c77af21d9eed6dc012c",
+      "task_id": "TASK-086",
+      "kind": "verification",
+      "outcome": "completed",
+      "executor": {
+        "harness": "local_process",
+        "model": null,
+        "context_id": "tool-ef2c2295a7074dd2a2372f22771a2898"
+      },
+      "started_at_utc": "2026-09-21T12:15:00.758349Z",
+      "finished_at_utc": "2026-09-21T12:15:22.203529Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "input_digest": "d93e6c4f4e6203e49a93c7b2d40bc5a59c1f889841e976cc905e3411915c05b3",
+      "candidate_digest": "22d99095f61465aac01f92efb27b4fc217f9201e9672c44a645a8b63f423ce44",
+      "raw_output_refs": [
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-cargo_test.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-lint.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-build.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-frontend.stderr.txt"
+      ],
+      "checks": [
+        {
+          "gate_id": "cargo_test",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-cargo_test.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-cargo_test.stderr.txt",
+          "candidate_digest": "22d99095f61465aac01f92efb27b4fc217f9201e9672c44a645a8b63f423ce44",
+          "command": {
+            "argv": [
+              "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+              "test"
+            ],
+            "cwd": "src-tauri",
+            "started_at_utc": "2026-09-21T12:15:00.882897Z",
+            "finished_at_utc": "2026-09-21T12:15:09.091225Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-cargo_test.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-cargo_test.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "lint",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-lint.stderr.txt",
+          "candidate_digest": "22d99095f61465aac01f92efb27b4fc217f9201e9672c44a645a8b63f423ce44",
+          "command": {
+            "argv": [
+              "C:\\Program Files\\nodejs\\node.EXE",
+              "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "lint"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-09-21T12:15:09.120632Z",
+            "finished_at_utc": "2026-09-21T12:15:09.415036Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-lint.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-lint.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "build",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-build.stderr.txt",
+          "candidate_digest": "22d99095f61465aac01f92efb27b4fc217f9201e9672c44a645a8b63f423ce44",
+          "command": {
+            "argv": [
+              "C:\\Program Files\\nodejs\\node.EXE",
+              "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "build"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-09-21T12:15:09.442076Z",
+            "finished_at_utc": "2026-09-21T12:15:11.317981Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-build.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-build.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "frontend",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-frontend.stderr.txt",
+          "candidate_digest": "22d99095f61465aac01f92efb27b4fc217f9201e9672c44a645a8b63f423ce44",
+          "command": {
+            "argv": [
+              "C:\\Program Files\\nodejs\\node.EXE",
+              "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "test:frontend"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-09-21T12:15:11.351437Z",
+            "finished_at_utc": "2026-09-21T12:15:22.159632Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-frontend.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-frontend.stderr.txt"
+          }
+        }
+      ],
+      "review": {
+        "mode": null,
+        "verdict": null,
+        "report": null,
+        "candidate_digest": null
+      },
+      "estimated_cost_usd": null,
+      "pid": 7952,
+      "controller_pid": 21840,
+      "commands": [
+        {
+          "argv": [
+            "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+            "test"
+          ],
+          "cwd": "src-tauri",
+          "started_at_utc": "2026-09-21T12:15:00.882897Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-cargo_test.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-cargo_test.stderr.txt",
+          "finished_at_utc": "2026-09-21T12:15:09.091225Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "C:\\Program Files\\nodejs\\node.EXE",
+            "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "lint"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-09-21T12:15:09.120632Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-lint.stderr.txt",
+          "finished_at_utc": "2026-09-21T12:15:09.415036Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "C:\\Program Files\\nodejs\\node.EXE",
+            "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-09-21T12:15:09.442076Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-build.stderr.txt",
+          "finished_at_utc": "2026-09-21T12:15:11.317981Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "C:\\Program Files\\nodejs\\node.EXE",
+            "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "test:frontend"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-09-21T12:15:11.351437Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-110241c05b914c77af21d9eed6dc012c-frontend.stderr.txt",
+          "finished_at_utc": "2026-09-21T12:15:22.159632Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        }
+      ]
+    },
+    "verification_ref": ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json",
+    "required_review_areas": [
+      "requirements",
+      "regression",
+      "failure_paths",
+      "maintainability",
+      "performance"
+    ],
+    "required_review_mode": "independent_required",
+    "candidate_files": [
+      {
+        "path": ".workflow-kit/tasks/runs/RUN-92059f91051f47888cf95db5be2acb76.json",
+        "sha256": "4b5bd0c2f840f3d7996879d1c3c03cbe878a0e968aacd0ab72f08c1a74caa279"
+      },
+      {
+        "path": "src/App.tsx",
+        "sha256": "e6654dd33aaed5685351251b1e1c48e99b42f2fec158997a9e2d8184868b7bcc"
+      },
+      {
+        "path": "src/components/ContextMenu.tsx",
+        "sha256": "fdafcac0f57ab24dd0ffa5eda13d2a91dc4e2d9e38d74a38bc3d107f222f29a3"
+      },
+      {
+        "path": "src/components/Overlays.tsx",
+        "sha256": "2823f5852af51c0af66e07cf666906a088ee54de4717c7ece4b4b7a5859b9c1f"
+      },
+      {
+        "path": "src/components/PlayerBar.tsx",
+        "sha256": "716f4af6a553d06cb32e3e9816f633f5c252ce70e45c146e5fc588ceccb0025f"
+      },
+      {
+        "path": "src/components/Reader.tsx",
+        "sha256": "59f23281b11e84c0060709ffc5fa29024bdbf393ffa9b7b193caa5956d5ca032"
+      },
+      {
+        "path": "src/components/SettingsModal.tsx",
+        "sha256": "08ec2b6251cd4426a2cd2eca8d87a0b3dda27e46d5e6d7ad533190b2d8afce43"
+      },
+      {
+        "path": "src/components/Sidebar.tsx",
+        "sha256": "2d85fbc2f6ab46d78d486fa01898835738d67aa310c53c16c7afdab6ff5aa05b"
+      },
+      {
+        "path": "src/components/Timeline.tsx",
+        "sha256": "4f093cd4312249a29719190140b61f78c43b07b1c92e4fca6f84847112502857"
+      },
+      {
+        "path": "src/components/anchorScopeNav.ts",
+        "sha256": "f008ac5e8bc8802033fac247db06c7211ce6a06f2d5790ef0628021f5e4ec5cb"
+      },
+      {
+        "path": "src/components/icons.tsx",
+        "sha256": "d89af55d0519f0ce085eb2cd074b758d21dcf5bca79471acc0d4ac76356e219f"
+      },
+      {
+        "path": "src/components/primitives.tsx",
+        "sha256": "575036b46f285b0871c0e59a259bbde77bdacbb3fc0e7f305bf4439983640192"
+      },
+      {
+        "path": "src/components/settings/AboutTab.tsx",
+        "sha256": "67d1d7db72b45e5d0d527a5d5fc28e1f7e4bc94f18a0f5bca0bc5089700e713b"
+      },
+      {
+        "path": "src/components/settings/AiTab.tsx",
+        "sha256": "61c54528ce65b54448caebb5c7bb33167ef238d40f4073bc0128804868b4d00e"
+      },
+      {
+        "path": "src/components/settings/AppearanceTab.tsx",
+        "sha256": "c6109f35583dde3f72b1275d534c4dc2bfd3f9c12f733c27ff28708d45c8c1a7"
+      },
+      {
+        "path": "src/components/settings/AutoStartSwitch.tsx",
+        "sha256": "0973a70933b82b38097d18495e6b8253d836d62dacf825f6ab4c92c670432be8"
+      },
+      {
+        "path": "src/components/settings/CacheCleanupSection.tsx",
+        "sha256": "b5b0536f42f27d06cecd28280211ad29f658c9286e7e3ba525b3d86ddda9327c"
+      },
+      {
+        "path": "src/components/settings/ConfigSyncSection.tsx",
+        "sha256": "3d87f4e9270377a23461335d59c509ec8656d293050b64d535f26c9e237e95f1"
+      },
+      {
+        "path": "src/components/settings/FeedsTab.tsx",
+        "sha256": "7783fd3c91eb65409983a6705c2dfa739c51fe84dd03cc673be96e884c33c01c"
+      },
+      {
+        "path": "src/components/settings/GeneralTab.tsx",
+        "sha256": "76dcda73c073e29e1b077d011f2ee0f65bf6a6a01c99ccce2caf458ef68ddc46"
+      },
+      {
+        "path": "src/components/settings/ReadingTab.tsx",
+        "sha256": "a6723a232c2b46349c569688234032bb69866f5c1034941cb33fea1b936ee387"
+      },
+      {
+        "path": "src/components/settings/SettingsSidebarFooter.tsx",
+        "sha256": "7921913ee6e5a2562a21b56c72d384dd3a8bc70e705da1b9ffdf86bc4b828f63"
+      },
+      {
+        "path": "src/components/settings/ShortcutsTab.tsx",
+        "sha256": "27dce075bdd87dbcd2fbee3945115033ec12d75ac6f4473f1af7bb01e736af15"
+      },
+      {
+        "path": "src/components/settings/SyncTab.tsx",
+        "sha256": "affca13dd24ad780c6d6289ee482a72556a072c03451a293c08c413b6d9b12f4"
+      },
+      {
+        "path": "src/components/settings/aiConfig.ts",
+        "sha256": "3fa952c1fcdfb53cbb0f91f7ed1b7229759943d8d8bfeb1ebd04cd877133e747"
+      },
+      {
+        "path": "src/components/settings/compareVersions.ts",
+        "sha256": "2ea002c70004f42931e6e3a496d2c2e1a81cbc25c3b6c116ff8f8e25a47de4d6"
+      },
+      {
+        "path": "src/components/settings/endpointHint.ts",
+        "sha256": "01bddaee3639dec14477f204a9480388de9b8d00ebfe4c05cd2031675c9e7096"
+      },
+      {
+        "path": "src/components/settings/layoutOptions.tsx",
+        "sha256": "d97053c551499e62c41f2cf198f483890b3d50157f754634838a957985d67594"
+      },
+      {
+        "path": "src/components/settings/shared.ts",
+        "sha256": "7444ddc08e6510731985427198d672d3ecba1d0a59e9309003de697f52fbc20b"
+      },
+      {
+        "path": "src/components/shortcutYield.ts",
+        "sha256": "1083262f4a6d47807b47e94d6ccd18a0e4e316f5c82aa6b7e05af291b9706127"
+      },
+      {
+        "path": "src/components/timelineSentinel.ts",
+        "sha256": "6da2fbc6999eb463eb2b0f293815857c978841c406cde937f37fbfb3722a5601"
+      },
+      {
+        "path": "src/components/useEnteringClass.ts",
+        "sha256": "dec0d43a3a14cb5808e3a50f862bf245ace7dec1245c5905f584610ebd3e0b89"
+      },
+      {
+        "path": "tools/frontend-regression.mjs",
+        "sha256": "35bc9697b87f7eff7cdddbeb66cab64e3b166754c923e5178c5b8f92818e5bdb"
+      }
+    ],
+    "changed_files": [
+      "src/App.tsx",
+      "src/components/shortcutYield.ts",
+      "tools/frontend-regression.mjs"
+    ]
+  },
+  "instruction": "把此输入交给未参与实现的新上下文；同模型即可，不要求 CLI。不要复制作者会话或通过预期。不能创建独立上下文时如实报告，按已确认审查策略处理。 审查证据只能引用候选文件或 tasks/runs、tasks/evidence 下的附件，不要引用任务记录、卡片或决定文件。"
+}

@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-21T12:15:00.625512Z",
+  "roots": [
+    ".workflow-kit/tasks/runs/RUN-92059f91051f47888cf95db5be2acb76.json",
+    "src/App.tsx",
+    "src/components",
+    "tools/frontend-regression.mjs"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/tasks/runs/RUN-92059f91051f47888cf95db5be2acb76.json",
+      "sha256": "4b5bd0c2f840f3d7996879d1c3c03cbe878a0e968aacd0ab72f08c1a74caa279"
+    },
+    {
+      "path": "src/App.tsx",
+      "sha256": "e6654dd33aaed5685351251b1e1c48e99b42f2fec158997a9e2d8184868b7bcc"
+    },
+    {
+      "path": "src/components/ContextMenu.tsx",
+      "sha256": "fdafcac0f57ab24dd0ffa5eda13d2a91dc4e2d9e38d74a38bc3d107f222f29a3"
+    },
+    {
+      "path": "src/components/Overlays.tsx",
+      "sha256": "2823f5852af51c0af66e07cf666906a088ee54de4717c7ece4b4b7a5859b9c1f"
+    },
+    {
+      "path": "src/components/PlayerBar.tsx",
+      "sha256": "716f4af6a553d06cb32e3e9816f633f5c252ce70e45c146e5fc588ceccb0025f"
+    },
+    {
+      "path": "src/components/Reader.tsx",
+      "sha256": "59f23281b11e84c0060709ffc5fa29024bdbf393ffa9b7b193caa5956d5ca032"
+    },
+    {
+      "path": "src/components/SettingsModal.tsx",
+      "sha256": "08ec2b6251cd4426a2cd2eca8d87a0b3dda27e46d5e6d7ad533190b2d8afce43"
+    },
+    {
+      "path": "src/components/Sidebar.tsx",
+      "sha256": "2d85fbc2f6ab46d78d486fa01898835738d67aa310c53c16c7afdab6ff5aa05b"
+    },
+    {
+      "path": "src/components/Timeline.tsx",
+      "sha256": "4f093cd4312249a29719190140b61f78c43b07b1c92e4fca6f84847112502857"
+    },
+    {
+      "path": "src/components/anchorScopeNav.ts",
+      "sha256": "f008ac5e8bc8802033fac247db06c7211ce6a06f2d5790ef0628021f5e4ec5cb"
+    },
+    {
+      "path": "src/components/icons.tsx",
+      "sha256": "d89af55d0519f0ce085eb2cd074b758d21dcf5bca79471acc0d4ac76356e219f"
+    },
+    {
+      "path": "src/components/primitives.tsx",
+      "sha256": "575036b46f285b0871c0e59a259bbde77bdacbb3fc0e7f305bf4439983640192"
+    },
+    {
+      "path": "src/components/settings/AboutTab.tsx",
+      "sha256": "67d1d7db72b45e5d0d527a5d5fc28e1f7e4bc94f18a0f5bca0bc5089700e713b"
+    },
+    {
+      "path": "src/components/settings/AiTab.tsx",
+      "sha256": "61c54528ce65b54448caebb5c7bb33167ef238d40f4073bc0128804868b4d00e"
+    },
+    {
+      "path": "src/components/settings/AppearanceTab.tsx",
+      "sha256": "c6109f35583dde3f72b1275d534c4dc2bfd3f9c12f733c27ff28708d45c8c1a7"
+    },
+    {
+      "path": "src/components/settings/AutoStartSwitch.tsx",
+      "sha256": "0973a70933b82b38097d18495e6b8253d836d62dacf825f6ab4c92c670432be8"
+    },
+    {
+      "path": "src/components/settings/CacheCleanupSection.tsx",
+      "sha256": "b5b0536f42f27d06cecd28280211ad29f658c9286e7e3ba525b3d86ddda9327c"
+    },
+    {
+      "path": "src/components/settings/ConfigSyncSection.tsx",
+      "sha256": "3d87f4e9270377a23461335d59c509ec8656d293050b64d535f26c9e237e95f1"
+    },
+    {
+      "path": "src/components/settings/FeedsTab.tsx",
+      "sha256": "7783fd3c91eb65409983a6705c2dfa739c51fe84dd03cc673be96e884c33c01c"
+    },
+    {
+      "path": "src/components/settings/GeneralTab.tsx",
+      "sha256": "76dcda73c073e29e1b077d011f2ee0f65bf6a6a01c99ccce2caf458ef68ddc46"
+    },
+    {
+      "path": "src/components/settings/ReadingTab.tsx",
+      "sha256": "a6723a232c2b46349c569688234032bb69866f5c1034941cb33fea1b936ee387"
+    },
+    {
+      "path": "src/components/settings/SettingsSidebarFooter.tsx",
+      "sha256": "7921913ee6e5a2562a21b56c72d384dd3a8bc70e705da1b9ffdf86bc4b828f63"
+    },
+    {
+      "path": "src/components/settings/ShortcutsTab.tsx",
+      "sha256": "27dce075bdd87dbcd2fbee3945115033ec12d75ac6f4473f1af7bb01e736af15"
+    },
+    {
+      "path": "src/components/settings/SyncTab.tsx",
+      "sha256": "affca13dd24ad780c6d6289ee482a72556a072c03451a293c08c413b6d9b12f4"
+    },
+    {
+      "path": "src/components/settings/aiConfig.ts",
+      "sha256": "3fa952c1fcdfb53cbb0f91f7ed1b7229759943d8d8bfeb1ebd04cd877133e747"
+    },
+    {
+      "path": "src/components/settings/compareVersions.ts",
+      "sha256": "2ea002c70004f42931e6e3a496d2c2e1a81cbc25c3b6c116ff8f8e25a47de4d6"
+    },
+    {
+      "path": "src/components/settings/endpointHint.ts",
+      "sha256": "01bddaee3639dec14477f204a9480388de9b8d00ebfe4c05cd2031675c9e7096"
+    },
+    {
+      "path": "src/components/settings/layoutOptions.tsx",
+      "sha256": "d97053c551499e62c41f2cf198f483890b3d50157f754634838a957985d67594"
+    },
+    {
+      "path": "src/components/settings/shared.ts",
+      "sha256": "7444ddc08e6510731985427198d672d3ecba1d0a59e9309003de697f52fbc20b"
+    },
+    {
+      "path": "src/components/shortcutYield.ts",
+      "sha256": "1083262f4a6d47807b47e94d6ccd18a0e4e316f5c82aa6b7e05af291b9706127"
+    },
+    {
+      "path": "src/components/timelineSentinel.ts",
+      "sha256": "6da2fbc6999eb463eb2b0f293815857c978841c406cde937f37fbfb3722a5601"
+    },
+    {
+      "path": "src/components/useEnteringClass.ts",
+      "sha256": "dec0d43a3a14cb5808e3a50f862bf245ace7dec1245c5905f584610ebd3e0b89"
+    },
+    {
+      "path": "tools/frontend-regression.mjs",
+      "sha256": "35bc9697b87f7eff7cdddbeb66cab64e3b166754c923e5178c5b8f92818e5bdb"
+    }
+  ],
+  "digest": "22d99095f61465aac01f92efb27b4fc217f9201e9672c44a645a8b63f423ce44"
+}
