@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "ready",
+  "status": "verified",
   "objective": "本任务收口被取消的 TASK-076 的同一成果（历史：TASK-076 已完成全部实现与取证，四门禁实测通过、新增 9 条单测、两项行为变更各有变异取证；但其 allowed_paths 初稿含 4 条不存在路径、订正落盘于 begin 之后，任务基线为订正前快照，diff 恒把任务记录判为 protected，recover/unblock/重新 begin 均无法收敛，故按 TASK-068→TASK-069 / TASK-074→TASK-075 先例取消并以本卡收口；本任务相对 begin 快照为零新增改动，成果经候选快照绑定）。原目标如下。A【P2-10 后半：全文提取 degraded 标志，DEC-req104-p2-10b-fulltext-degraded-20260920】现状：commands/settings.rs 的 extract_fulltext 有「智能防退化」逻辑（提取结果剥标签后不足原文 80% 时保留原文），但降级是静默的——返回裸 String，与「提取成功」无法区分，前端只能靠「返回内容 == 当前正文」的字符串比对去猜。实施：改为结构化 degraded 标志（含原因）+ 准确文案；须补失败路径断言覆盖两种形态（提取失败/空结果、防退化返回原文），并保持成功路径行为不变。B【P2-11：AI 输入校验与配置可观测性，DEC-req104-p2-11-ai-validation-20260920】① ai_summarize 缺少 ai_translate 已有的空正文校验，空正文会白跑一次模型调用；② 未知 preset 静默回落 deepseek-chat / https://api.deepseek.com，用户选的预设不存在时请求被打到其未选择的厂商上。实施：补空正文校验（与 translate 对称）；未知 preset 改为显式提示/报错；须补断言覆盖两条路径。",
   "non_goals": [
     "不改全文提取的防退化阈值（仍是原文 80%）与「提取失败保留原文」的基本策略",
@@ -188,18 +188,22 @@
     "definition_digest": "6e876b21579f4125a1acb7800f7eb7f4f0daeae298b250d817c40c0121c65522"
   },
   "budget": {
-    "started_at_utc": null,
-    "deadline_at_utc": null,
+    "started_at_utc": "2026-09-21T01:29:19.674330Z",
+    "deadline_at_utc": "2026-09-21T05:29:19.674330Z",
     "repair_rounds_used": 0
   },
   "batch_id": "BATCH-ab2d0e5d3f7643379a6de1fd2544b549",
-  "run_ids": [],
+  "run_ids": [
+    "RUN-5b3e3d8985fb4090a538c5b11616c4c3",
+    "RUN-f5c07ebc890b4519a2f79d843e8d2bcd",
+    "RUN-fc765484a7fb4c72b48dbccc584bead1"
+  ],
   "blockers": [],
   "evidence": {
-    "candidate_manifest": null,
-    "candidate_digest": null,
-    "verification_run": null,
-    "review_run": null,
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-f5c07ebc890b4519a2f79d843e8d2bcd-candidate.json",
+    "candidate_digest": "4f374ae439e12dd8b8b6d7a9dd54d6a2664dc756975b6be356698ab577287568",
+    "verification_run": "RUN-f5c07ebc890b4519a2f79d843e8d2bcd",
+    "review_run": "RUN-fc765484a7fb4c72b48dbccc584bead1",
     "acceptance_ref": null,
     "owner_decision_ids": [],
     "merge_ref": null
@@ -239,5 +243,27 @@
   ],
   "continuation_of": {
     "TASK-075": "21bffb8c1d45c84aefbf5d2284705bb37965f62b1633e1c1dabcea30141bae36"
-  }
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-21T01:29:20.043135Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-21T01:29:47.950304Z",
+      "note": "编码结果已记录，差异范围已核对：无文件变化",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-21T01:30:22.860820Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-21T01:39:45.372870Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
 }

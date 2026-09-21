@@ -1,0 +1,17 @@
+{
+  "task_id": "TASK-077",
+  "run_id": "RUN-5b3e3d8985fb4090a538c5b11616c4c3",
+  "status": "ready_for_verification",
+  "summary": "TASK-077 收口被取消的 TASK-076 的同一成果（REQ-104 降级可见性与 AI 输入校验），两项 owner 裁决均已落地。本任务相对 begin 快照为零新增改动（diff 的 changed_files 为空、protected/outside 均空），全部成果经候选快照绑定进入验证与审查范围。**A【P2-10 后半，DEC-req104-p2-10b-fulltext-degraded-20260920】全文提取降级不再静默**：① commands/settings.rs 新增结构化结果 ExtractOutcome { html, degraded, reason }，替代原先只返回裸 String 的契约——此前「提取成功」与「因防退化保留原文」在返回值上无法区分，前端只能靠「返回内容 == 当前正文」的字符串比对去猜（reader.ts 原本正是如此），正文恰好相同时会误判且用户无从知情。② 判定抽成纯函数 extraction::degradation_reason(original, extracted) -> Option<&'static str>，命令只按判定落库或返回降级信息，使两条降级形态可直接单测。③ 区分并如实报出两种形态：提取结果为空（网页非 HTML/纯脚本页/解析不到主内容）与提取结果显著更短（不足原文 80%，原文可能已是全文）。④ 前端 api.ts 新增 ExtractFulltextResult 类型；store/slices/reader.ts 的自动全文与手动刷新两条路径都改为直接读 degraded 标志（删掉原先脆弱的字符串比对，以及为绕开它而写的 fulltextExtracted 附加判断），降级时统一提示「未采用全文提取：<原因>」并保持原状（不置标志、不切全文视图）。**B【P2-11，DEC-req104-p2-11-ai-validation-20260920】AI 输入校验与配置可观测性**：① commands/ai.rs 的 ai_summarize 补空正文校验（\"文章无正文可摘要\"），与 ai_translate 既有的 \"文章无正文可翻译\" 对称——此前空正文照样发一次模型请求，白花 token，且用户只看到「摘要没出来」。② ai.rs 解析配置时未知 preset 不再静默回落 deepseek-chat / https://api.deepseek.com，改为显式报错（文案点名无法识别的 preset）；现在只有「命中 PRESETS」或「显式提供非空 model + baseUrl（自定义）」两种合法形态。**测试（新增 9 条单测，无需网络）**：ai.rs 4 条（未知 preset 报错且文案含 preset 名；未知 preset 但显式给 model+baseUrl 视为自定义可用；空 preset + 显式配置可用；未知 preset 仅给 model 仍报错）；extraction.rs 5 条（提取为空→降级并给「为空」原因；仅空白也算空；显著更短→降级；不短于原文→不降级；原文为空时非空提取不得误判降级）。**成对证据（变异实测）**：把 ai.rs 两处 return Err(...) 改回静默回落 deepseek-chat / api.deepseek.com → unknown_preset_is_rejected_instead_of_silently_falling_back 与 unknown_preset_with_only_model_is_rejected 双双 FAILED（两条「自定义可用」用例仍绿，证明未误伤自定义路径）；把 degradation_reason 的 extracted_len == 0 → Some(...) 改回 None（修前「空提取不算降级」）→ degradation_when_extraction_is_empty FAILED。共 4 条失败，全部逐字节还原并复跑通过。**门禁实测**：cargo test 193 passed / 0 failed / 9 ignored（基线 184 + 本任务新增 9，ignored 未增）；lint 0 warnings / 0 errors；build exit 0（vite built in 935ms）；frontend 303/303。前端两条 P2-10 断言按 test_review 的 replace 语义改造为直接驱动 degraded 标志（保护意图不变、注释引用裁决号），既有 26 条与其余 275 条新增断言未改动一行。",
+  "changed_files": [],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

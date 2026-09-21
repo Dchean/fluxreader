@@ -1,0 +1,74 @@
+{
+  "task_id": "TASK-077",
+  "candidate_digest": "4f374ae439e12dd8b8b6d7a9dd54d6a2664dc756975b6be356698ab577287568",
+  "verification_run": "RUN-f5c07ebc890b4519a2f79d843e8d2bcd",
+  "verdict": "PASS",
+  "summary": "独立复审 TASK-077 的两项行为变更。A（P2-10 后半）：extract_fulltext 由裸 String 改为 ExtractOutcome{html,degraded,reason}，判定抽为纯函数 extraction::degradation_reason，两种降级形态（空提取 / 不足原文 80%）均有准确原因，成功路径落库与标志语义未变。B（P2-11）：ai_summarize 补上与 ai_translate 对称的空正文校验（位于缓存命中之后、模型请求之前），AiConfig::from_json 对未知 preset 不再静默回落 deepseek。核对全部 7 个改动文件的 sha256 与候选快照逐字节一致；独立复现作者变异 1（ai.rs 回落静默 fallback → 恰好 2 条拒绝类断言失败、2 条自定义路径断言仍绿）并新增自造变异 1（degradation_reason 空分支返回 None → 2 条空提取断言失败）；再以自造前端变异（消去 reader.ts 的 degraded 守卫）证明两条改写后的 P2-10 断言确实守住了「降级不得表现为成功」而非配合实现拟合：手动路径守卫失效被抓出（275/277、301/303），且失败项恰为这两条。门禁实测：cargo lib 95/95、extraction 5 条与 ai 4 条新增单测全绿、frontend 303/303（既有 26/26 未动一行）、lint 0/0、依赖与 LF 均无变化、真实数据库未被写入。边界探针确认 80% 阈值判定与旧实现逐字同式（extracted*5 < orig*4，恰好 80% 不降级），空原文+空提取判降级、空原文+非空提取不降级。唯一观察项：reader.ts 自动路径的 degraded 守卫未被前端用例覆盖（变异后仍 303/303），属既有覆盖缺口、非本任务引入的行为缺陷，已记入 maintainability 与 regression 的 analysis，不影响 PASS。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐条对照验收。A①：extract_fulltext 现返回 ExtractOutcome（html/degraded/reason），调用方可明确区分「提取成功」与「保留原文（降级）」，且 reason 区分两种形态（'提取结果为空…' 与 '提取结果比原正文更短…'），见 commands/settings.rs 的 ExtractOutcome 与 degradation_reason。A②：两条失败路径均有单测（degradation_when_extraction_is_empty / _is_whitespace_only 覆盖形态①，degradation_when_extraction_is_much_shorter 覆盖形态②），成功路径另有 no_degradation_when_extraction_is_not_shorter 守住不降级；成功分支仍调用 db::update_article_fulltext(..., true) 并返回 extracted，落库语义与标志未变。边界探针实测：恰好 80% → None（不降级），79/80 → 降级，与旧实现 compare 式 extracted*5 < orig*4 完全同式（旧代码取自 25d54e5^），故阈值语义零漂移；空原文+空提取 → 判降级（合理，无可展示内容）；空原文+非空提取 → None（不误判）；提取长于原文 → None。B①：ai_summarize 的 body.trim().is_empty() 校验返回 not_found『文章无正文可摘要』，与 ai_translate 的『文章无正文可翻译』同为 not_found 类型与同等提示风格，对称达成；位置在缓存命中 return 之后、stream_chat 之前，故已有摘要的缓存命中仍照常返回（与 translate 的既有顺序一致），不存在「有缓存却因空正文被拒」。B②：from_json 仅在 preset 命中 PRESETS 或显式非空 model+baseUrl 时才构造，否则 Err(aiNotConfigured) 并在文案中回显 preset 名；单测 unknown_preset_is_rejected_instead_of_silently_falling_back 断言报错含 'azure'，unknown_preset_with_only_model_is_rejected 断言只给 model 仍拒绝。非目标项均未越界：阈值、PRESETS 清单、ai_translate 落库、流式协议、max_tokens 均未改。",
+      "evidence_files": [
+        "src-tauri/src/commands/settings.rs",
+        "src-tauri/src/extraction.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/ai.rs",
+        "src/lib/api.ts",
+        ".workflow-kit/tasks/evidence/TASK-077-cumulative-diff.txt"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "实测复跑并核对原始日志。cargo test --lib：95 passed / 0 failed / 0 ignored（本次独立运行，exit 0）；其中 extraction 5 条与 ai::tests 4 条新增单测逐条列名确认存在且通过。记录日志 RUN-f5c07ebc…-cargo_test.stdout.txt 的 27 个 suite 汇总相加为 193 passed / 0 failed / 9 ignored，与验收数字一致（9 ignored 全部为需要真实 Miniflux 账号/网络或本地 feed server 的既有 e2e，未增未减）。frontend 独立复跑 303/303 exit 0，输出逐字确认『既有回归 26/26 通过（本文件原有断言，未改动一行）』与『新增 store 行为断言 277/277 通过』——26 条既有断言无一被弱化或改写。lint 记录日志为 0 warnings / 0 errors。关键回归问题的独立取证：变异 reader.ts 手动路径的 res.degraded 守卫使其恒不触发 → 前端恰好这两条改写断言失败（275/277、301/303），失败项点名 '(P2-10/TASK-076) degraded=true 时：不置 fulltextExtracted、不切全文视图' 与 '且如实提示降级原因…而不是报成功'，证明改写后的断言仍是行为性保护而非拟合实现。B2 回归面核对：前端 AiTab.tsx 在任意预设下都写入 baseUrl 与 model（选择预设时按 AI_PRESETS[p] 填 url/model，custom 时用用户填写值），shared.ts 的 AI_PRESETS 为 deepseek/openai/glm/custom，三个命中后端 PRESETS、custom 走显式路径，故真实 UI 写入的配置无一被新逻辑错误拒绝；pre-existing config_from_json_full（preset:'custom' + 显式 model/baseUrl）在变异中保持绿，佐证自定义路径未被连带破坏。唯一被收窄的输入是「未知 preset 且既无显式 model 也无显式 baseUrl」——旧行为是静默打到 DeepSeek，这正是 DEC-req104-p2-11 明文要求变更的对象，属预期契约替换而非回归。未新增依赖：git status/diff 对 package.json、Cargo.toml、Cargo.lock 均为空。7 个改动文件全部 LF-only（无 CR 字节）。全程未运行 npm run build（按指示读记录日志，build gate exit 0）。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-f5c07ebc890b4519a2f79d843e8d2bcd-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-f5c07ebc890b4519a2f79d843e8d2bcd-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-f5c07ebc890b4519a2f79d843e8d2bcd-lint.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-f5c07ebc890b4519a2f79d843e8d2bcd.json",
+        "tools/frontend-regression.mjs",
+        "src/store/slices/reader.ts",
+        "src/components/settings/shared.ts"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "逐条走了实际的异常与空输入。形态①（空提取）：extract_article 在 content.trim().is_empty() 时已返回 noExtractableContent 错误，故到达 degradation_reason 的空结果来自 sanitize 剥光（纯 script/被过滤标签）或纯空白；探针实测 degradation_reason(\"<script>var x=1;</script>\", \"\") → Some('提取结果为空…')、(\"\", \"  \") → Some，两条空提取断言杀掉后确会失败（自造变异：空分支改返 None → degradation_when_extraction_is_empty 与 degradation_when_extraction_is_whitespace_only 恰好失败，其余 6 条绿）。形态②（不足 80%）：探针实测 63/80 判降级、64/80（恰好 80%）不降级，整数比较无浮点歧义、无溢出（len 为 usize，乘以常数 5/4 在现实体量下不可能溢出）。空/退化输入：original 为空且 extracted 为空 → 判降级（不 panic、不除以零，因判定只用乘法比较）；original 为空而 extracted 非空 → None（不误伤）；extracted 长于 original → None；无 <body> 标签的片段 HTML → html_to_text 走 parse_document 兜底，探针实测仍给出合理判定，不 panic。重复执行/幂等：成功路径仍以 update_article_fulltext 覆盖同一行并置标志，重复调用语义不变；降级路径直接 return，不写库、不置标志、不覆盖 image，故重试不会产生半写入状态。B1 空正文：校验在缓存命中之后，故「已有摘要 + 空正文」仍走缓存返回、不会误报；「无摘要 + 空正文」在发模型请求前即返回 not_found，达成「白跑一次模型调用」的修复目标。B2 未知 preset：两条 Err 分支均带 preset 名，前端可据 aiNotConfigured 展示；错配 fallback 的两条 return Err 被变异还原后立刻被断言杀掉（见 regression 的变异结果），证明该失败路径确实生效且被覆盖。降级路径的前端行为：两条路径均 return（不置 fulltextExtracted、不切 showFulltext），并 toast 真实 reason。",
+      "evidence_files": [
+        "src-tauri/src/extraction.rs",
+        "src-tauri/src/commands/settings.rs",
+        "src-tauri/src/commands/ai.rs",
+        "src-tauri/src/ai.rs",
+        "src/store/slices/reader.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "职责划分明显变好：判定逻辑从命令里抽成纯函数 extraction::degradation_reason（无 IO、无 DB、无网络、确定性），命令只负责「按判定落库或如实返回降级信息」，因此两条降级形态可被直接单测而无须构造 http/db 夹具——这正是本任务新增 5 条纯单测得以廉价存在的原因。ExtractOutcome 自带 extracted()/degraded() 两个构造器与 camelCase 序列化，与前端 interface ExtractFulltextResult 字段一一对应（html/degraded/reason），类型契约在两侧都显式声明，取代了原先靠字符串比对猜测的隐式契约；api.ts 的 JSDoc 说明了 degraded 的语义。命令内注释保留了「为何」（旧行为、误判场景、DEC id），有助后续维护。B2 的两处 match 分支各自 return Err，文案重复一次——属可接受的小重复（两条分支的错误类型与文案需一致，抽常量收益有限），且两条 arms 各自精确表达「缺 model」与「缺 baseUrl」，可读性优于合并判断。命名与模块边界遵循既有约定（commands/ 领域子模块、extraction 模块归 Readability）。唯一维护性观察（非缺陷、不影响 PASS）：reader.ts 中自动路径与手动路径各写了一份结构几乎相同的 degraded 处理块（toast 文案重复、手动路径额外多一条成功 toast），可抽为一个小助手；且自动路径的守卫未被任何前端用例覆盖——我消去该守卫后前端仍 303/303 全绿，说明该分支仅靠代码审阅而非测试保护。这与本任务「两条路径都读取标志」的宣称略有落差，属既有测试覆盖缺口（该分支此前亦无覆盖），建议后续补一条自动路径断言，但不构成本候选的行为缺陷。",
+      "evidence_files": [
+        "src-tauri/src/extraction.rs",
+        "src-tauri/src/commands/settings.rs",
+        "src/lib/api.ts",
+        "src/store/slices/reader.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "结论：新增成本可忽略，未观测到有意义的开销，故不编造基准。静态分析的具体范围与依据：（1）degradation_reason 每次 extract_fulltext 调用只执行 2 次 sanitize::html_to_text + 若干 trim/len，全部是单遍 HTML 解析与线性扫描，O(页面文本长度)；它替换掉的是命令内原先完全相同的两次 html_to_text 调用（旧实现同样计算 orig_text_len 与 extracted_text_len），故字面为零额外开销——不是「新增查询」，是同一计算换了位置。（2）它不引入任何 DB 查询：读库仍是原有的 get_article_url 与 get_article_content_html 两次，成功路径的 update_article_fulltext/update_article_image_if_empty 与降级路径的零写入都与旧实现一致。（3）该函数位于 spawn_blocking 的 Readability 解析之后，而 Readability 解析一份真实网页是毫秒到数十毫秒级，两次 html_to_text 相对微不足道；且整条命令被 30s 网络超时与一次真实网页 HTTP 往返主导，端到端时间由网络决定。（4）B1 的空正文校验为 O(1) 的 trim().is_empty()，且只会提前返回、绝不增加模型调用——方向上减少一次网络请求。（5）B2 的 from_json 改动仅把两个内联默认值换成两个 O(PRESETS.len()=3) 的线性查找与 match，每次调用多至常数级比较；该函数在每次 AI 命令开头调用一次，不在任何热循环内。本任务质量目标未声明需要测量的性能负载（brief 的 performance.targets 指向社交布局正文加载与布局切换，与本改动无交集），故按「不受影响」处理并说明理由，未伪造实测提升。",
+      "evidence_files": [
+        "src-tauri/src/extraction.rs",
+        "src-tauri/src/commands/settings.rs",
+        "src-tauri/src/ai.rs",
+        "src-tauri/src/sanitize.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

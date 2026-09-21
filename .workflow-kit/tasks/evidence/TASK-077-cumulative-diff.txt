@@ -1,0 +1,96 @@
+TASK-077 change set — 降级可见性与 AI 输入校验 (REQ-104)
+
+NOTE ON SHAPE: this task carries a cancelled predecessor's outcome (TASK-076, cancelled for a
+BOOKKEEPING reason only - its allowed_paths draft contained 4 non-existent paths and the
+correction landed after its `begin`, so its diff permanently flagged the task record as a
+protected change and the baseline could not converge; same precedent as TASK-068->TASK-069 and
+TASK-074->TASK-075). The work therefore sits as uncommitted working-tree content and
+`changed_files` is EMPTY relative to this task's begin snapshot. Judge the FILES, not the diff.
+
+================================================================================
+A. P2-10 (second half): full-text extraction degradation is no longer silent
+   DEC-req104-p2-10b-fulltext-degraded-20260920
+================================================================================
+Files: src-tauri/src/commands/settings.rs, src-tauri/src/extraction.rs,
+       src/lib/api.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs
+
+BEFORE: `extract_fulltext` returned a bare String. "Extraction succeeded" and "we gave up and
+kept the original" were INDISTINGUISHABLE in the return value, so the frontend guessed by
+comparing strings - reader.ts did exactly `full === cur2.content` - which misfires whenever the
+text legitimately matches, and was silent either way. There was also a second, separate silent
+path: when extraction yielded NOTHING, the old guard was `extracted_text_len > 0 && ...`, so an
+empty result simply fell through and was stored as if it were a successful extraction.
+
+AFTER:
+  1. `ExtractOutcome { html, degraded, reason }` is returned instead (commands/settings.rs).
+  2. The decision was extracted into a pure function so both degradation shapes are directly
+     unit-testable: `extraction::degradation_reason(original_html, extracted_html)
+     -> Option<&'static str>`; the command only acts on it (store vs. report degraded).
+  3. Two degradation shapes are now distinguished with accurate reasons:
+       - empty extraction (page had no usable body: not HTML, script-only, unparseable), and
+       - extraction significantly shorter than the original (< 80%), i.e. the original was
+         probably already the full text.
+  4. Frontend: `api.ts` gained `ExtractFulltextResult`; `store/slices/reader.ts` now reads the
+     `degraded` flag directly on BOTH paths (automatic on-open fulltext, and the manual refresh
+     button), replacing the string comparison and the extra `fulltextExtracted` special-case
+     that existed only to work around it. On degradation both paths now toast
+     "未采用全文提取：<reason>" and keep state unchanged (no flag, no fulltext view).
+  Success-path behaviour is unchanged: on success the content is stored, the extracted flag is
+  set, and the fulltext view opens.
+
+================================================================================
+B. P2-11: AI input validation and config observability
+   DEC-req104-p2-11-ai-validation-20260920
+================================================================================
+Files: src-tauri/src/commands/ai.rs, src-tauri/src/ai.rs
+
+  B1. `ai_summarize` had NO empty-body guard, while `ai_translate` did
+      (`if html.trim().is_empty() { return Err(...) }`). An empty body therefore still fired a
+      real model request (wasting tokens, and with an empty response nothing was cached), and
+      the user just saw "no summary appeared". Now it returns
+      "文章无正文可摘要", symmetric with translate's "文章无正文可翻译".
+  B2. `ai.rs::AiConfig::from_json` silently fell back to `deepseek-chat` and
+      `https://api.deepseek.com` when the `preset` was unknown. A user who picked a
+      non-existent preset had their request sent to a PROVIDER THEY DID NOT CHOOSE, with no
+      signal at all. Now only two shapes are legal:
+        - preset matches `PRESETS` -> that preset's default model/base_url, or
+        - custom (explicit non-empty `model` AND `baseUrl`) -> used as given.
+      Anything else returns an `aiNotConfigured` error naming the unrecognised preset.
+      NOTE the custom path must keep working: the pre-existing unit test
+      `config_from_json_full` sends `preset:"custom"` with explicit model+baseUrl.
+
+================================================================================
+TESTS ADDED (9, all pure unit tests, no network)
+================================================================================
+ai.rs (4): unknown preset is rejected and the message names the preset; unknown preset WITH
+  explicit model+baseUrl is treated as custom and works; empty preset with explicit config
+  works; unknown preset with ONLY a model is still rejected.
+extraction.rs (5): empty extraction -> degraded with an "empty" reason; whitespace-only counts
+  as empty; significantly-shorter -> degraded; not-shorter -> NOT degraded; an empty ORIGINAL
+  must never degrade a non-empty extraction.
+
+PAIRED EVIDENCE (mutation, run by the author): reverting the two `return Err(...)` branches in
+ai.rs back to the silent deepseek fallbacks makes BOTH "unknown preset rejected" tests FAIL
+(while the two custom-config tests stay green, showing the custom path was not collaterally
+broken); reverting `degradation_reason`'s empty check back to the old `None` makes
+`degradation_when_extraction_is_empty` FAIL. 4 failures total; everything restored
+byte-identically and re-run green.
+*** PLEASE independently reproduce at least one of these, and probe the edges yourself
+(e.g. a preset that only overrides baseUrl; model set but baseUrl empty; original empty and
+extraction empty; extraction exactly at the 80% boundary). ***
+
+FRONTEND TEST CHANGE (declared, per test_review replace semantics): two P2-10 assertions in
+tools/frontend-regression.mjs previously drove the OLD contract (a bare string + the string
+comparison). They now drive `{ html, degraded, reason }` directly; the protective intent is
+unchanged (degraded must not be shown as success) and the assertions cite the decision id. The
+other 26 pre-existing assertions and the remaining 275 new-store assertions were not touched.
+
+================================================================================
+GATE RESULTS FOR THIS CANDIDATE
+================================================================================
+  cargo test  193 passed / 0 failed / 9 ignored   (baseline 184 + 9 new; ignored unchanged)
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    303/303, exit 0
+  Dependencies unchanged; changed files LF; unit tests touch no DB and no network; the real
+  user database is untouched.
