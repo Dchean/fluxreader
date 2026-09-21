@@ -1,0 +1,14 @@
+{
+  "id": "DEC-6729cf98d60f4b1aa891a35cefa24117",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户 2026-09-21 指示『继续，按照你的判断进行最佳路线完成后续所有的』授权完成剩余已确认范围；本卡落实 REQ-104 验收标准中『删除项经 grep 验证零生产调用且四门禁全绿』与『P3 项每条有处置结论』，已完成四门禁验证与独立审查 PASS",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-078"
+  ],
+  "recorded_at_utc": "2026-09-21T07:15:47.681506Z",
+  "candidates": {
+    "TASK-078": "1d95e2effea1d0c81249b9fd7d8fd97e9854445a5bb99b47f955b8e270912d53"
+  }
+}

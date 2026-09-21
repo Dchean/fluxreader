@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-078 · REQ-104 收尾清理：删除孤儿 commands::sync_now + 修订陈旧 Miniflux 兜底注释
 
-**状态**：verified
+**状态**：done
 
 **目标**：清理 TASK-070 移交的三条 REQ-104 卫生项（均不在当时 allowed_paths 内，留待后续任务清理）：① 删除孤儿 IP​C 命令 commands::sync_now——该函数在前端 api.ts 中已无调用方（TASK-070 删除了 api.syncNow），但 lib.rs 仍注册着 commands::sync_now 作为 invoke handler。该命令目前仅为一行转调 sync::sync_now，与前端实际调用的 sync_phase 功能重叠（后者由 api.syncPhase 调用）。删除该注册行的同时可删除 commands/sync.rs 中的包裹函数。② 修订三处「Miniflux 兜底」陈旧注释——src/types.ts:44、src-tauri/tests/staged_refresh_e2e.rs:195、src-tauri/tests/sync_phases_e2e.rs:246，这些描述在当前代码中已不准确（该兜底路径已在 0ba940f 协议切换时移除以使 Miniflux 时代不可达代码失效；当前有且仅有直连抓取一种路径，无兜底逻辑）；将其更新为描述当前的降级语义（set_feed_fetch_state 写 fetch_failed 供前端显示错误标志，仅驱动指数退避重试，不再有「兜底拉取」）。本任务为纯删除 + 注释修订，不引入新行为、不新增依赖。
 
