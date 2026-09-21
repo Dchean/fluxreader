@@ -1,0 +1,24 @@
+{
+  "task_id": "TASK-079",
+  "run_id": "RUN-577d7bd16b294693a37cef6db4ed516c",
+  "status": "ready_for_verification",
+  "summary": "TASK-079 完成（REQ-105：ingestion.rs 拆分），纯搬运、行为零变化。**拆分结果**：原 src-tauri/src/ingestion.rs（680 行）按文件内既有注释分节拆为 ingestion/ 五个子模块——mod.rs(22 行，模块声明 + 重导出)、http.rs(99 行，USER_AGENT/MAX_BODY_BYTES/build_client/Fetched/read_capped/conditional_get)、parse.rs(218 行，NO_STABLE_ID/ParsedFeed/parse_feed/resolve_url/clamp_publish_date/map_entry/mime_from_url)、staged.rs(187 行，read_feed_for_refresh/fetch_and_parse/apply_refresh_result/refresh_feed_staged)、favicon.rs(187 行，FAVICON_TRIED/discover_favicon/extract_icon_link/rel_is_icon/extract_html_attr/BROWSER_UA + favicon_tests 两例)。**① 公开路径逐字不变（验收①）**：crate::ingestion::<item> 的 10 个公开项（build_client/conditional_get/parse_feed/ParsedFeed/Fetched/USER_AGENT/read_feed_for_refresh/fetch_and_parse/apply_refresh_result/refresh_feed_staged）由 mod.rs 用 pub use 全部重导出，机器核对「拆分前后公开面集合完全相等（only-in-before=[]、only-in-after=[]）」，故全库 47 处调用点（commands/folders.rs、commands/articles.rs、scheduler.rs、lib.rs 及 ingestion_e2e/refresh_dedup_e2e/staged_refresh_e2e/scheduler_e2e/sync_* 等测试）零改动。**② 无超过 800 行的生产单体（验收②）**：拆分后 ingestion/ 最大 218 行；全库最大为 db/articles.rs 791 行，复核全库无任何生产文件超过 800 行。**③ 搬运纯度（验收③，机器取证）**：把四个模块正文去头后与原始文件逐行比对——非空行 619 vs 618、序列相似度 0.994341、统一 diff 仅 18 行，且差异全部可解释：3 行是跨模块可见性必需（resolve_url/discover_favicon/FAVICON_TRIED 由私有改为 pub(super)，因原为同文件内可见、拆后需跨子模块访问；为保持原始公开面，discover_favicon 未被 pub use 导出）、1 行是 NO_STABLE_ID 常量随其唯一使用方 parse_feed 迁入 parse.rs（位置移动，非删除）、1 行是 favicon 测试模块内的 use super::* 由模块自身的 use 头等价承担。原始文件 665 行代码中「未出现在任何新模块」的仅上述 3 行可见性关键字差异，无任何逻辑行丢失。**④ 既有断言一行不动（验收④）**：git diff 对 src-tauri/tests 为空——所有测试文件零改动，本任务未触碰任何断言。**⑤ 门禁实测**：cargo test 193 passed / 0 failed / 9 ignored（与基线 RUN-6aeb3b77 完全一致，拆分无回归）；lint 0 warnings / 0 errors；build exit 0（vite built in 866ms）；frontend 303/303。构建无新增告警（拆分过程中曾出现 2 条 unused import 由我引入的子模块头产生，已修净，最终 build 无 unused 警告）。未引入新依赖；package.json/Cargo.toml/Cargo.lock 零改动；改动文件均 LF；未触碰用户真实数据库。原始文件已保留副本于 .workflow-kit/tasks/evidence/_ingestion_orig.rs.bak 供审查对照（非产品文件、不影响构建）。",
+  "changed_files": [
+    "src-tauri/src/ingestion.rs",
+    "src-tauri/src/ingestion/favicon.rs",
+    "src-tauri/src/ingestion/http.rs",
+    "src-tauri/src/ingestion/mod.rs",
+    "src-tauri/src/ingestion/parse.rs",
+    "src-tauri/src/ingestion/staged.rs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

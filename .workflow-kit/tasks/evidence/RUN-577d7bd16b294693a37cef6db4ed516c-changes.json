@@ -1,0 +1,10 @@
+{
+  "changed_files": [
+    "src-tauri/src/ingestion.rs",
+    "src-tauri/src/ingestion/favicon.rs",
+    "src-tauri/src/ingestion/http.rs",
+    "src-tauri/src/ingestion/mod.rs",
+    "src-tauri/src/ingestion/parse.rs",
+    "src-tauri/src/ingestion/staged.rs"
+  ]
+}

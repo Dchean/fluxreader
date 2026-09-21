@@ -1,0 +1,88 @@
+TASK-079 change set — REQ-105: split ingestion.rs into ingestion/ domain modules
+
+THIS IS A PURE-MOVE REFACTOR. Behaviour must be ZERO-CHANGE; the acceptance criterion says
+"既有断言一行不动". Your job is to prove or disprove purity, and to hunt for any behavioural
+drift a mechanical move can smuggle in.
+
+================================================================================
+WHAT CHANGED
+================================================================================
+The 680-line monolith `src-tauri/src/ingestion.rs` was DELETED and replaced by
+`src-tauri/src/ingestion/` with five modules (bodies sliced from the original by verified
+anchors, so the move is mechanically pure):
+
+  ingestion/mod.rs      22 lines   module decls + `pub use` re-exports
+  ingestion/http.rs     99 lines   USER_AGENT, MAX_BODY_BYTES, build_client, Fetched,
+                                   read_capped, conditional_get
+  ingestion/parse.rs   218 lines   NO_STABLE_ID, ParsedFeed, parse_feed, resolve_url,
+                                   clamp_publish_date, map_entry, mime_from_url
+  ingestion/staged.rs  187 lines   read_feed_for_refresh, fetch_and_parse,
+                                   apply_refresh_result, refresh_feed_staged
+  ingestion/favicon.rs 187 lines   FAVICON_TRIED, discover_favicon, extract_icon_link,
+                                   rel_is_icon, extract_html_attr, BROWSER_UA,
+                                   + the two favicon_tests
+
+No test file was touched: `git diff -- src-tauri/tests` is EMPTY.
+No call site was touched: `crate::ingestion::<item>` paths are preserved by `pub use`.
+
+================================================================================
+THE FIVE ACCEPTANCE CRITERIA — how they are claimed to be met
+================================================================================
+① Public paths unchanged: the 10 public items are re-exported from mod.rs. The author's
+   machine check compared the public-surface SET before/after and reports equality
+   (only-in-before = [], only-in-after = []). **Re-derive this yourself** — e.g. list the
+   `pub fn/struct/enum/const` items in the original (a pristine copy is kept at
+   `.workflow-kit/tasks/evidence/_ingestion_orig.rs.bak`) and confirm each is reachable as
+   `crate::ingestion::<name>` now, and that NOTHING became public that was not before.
+   Note in particular: `discover_favicon` and `FAVICON_TRIED` were PRIVATE before and are
+   `pub(super)` now, and `discover_favicon` is deliberately NOT re-exported. Verify they
+   are not newly public from outside the module.
+② No production file over 800 lines: ingestion/ max is 218; the author reports the global
+   max is now db/articles.rs at 791. Re-verify with your own count.
+③ Purity: the author's line-level comparison of module bodies vs the original reports
+   619 vs 618 non-blank lines, similarity 0.994341, an 18-line unified diff, and that every
+   difference is one of: 3 visibility keywords (`fn`→`pub(super) fn` on resolve_url,
+   discover_favicon, FAVICON_TRIED), 1 constant relocation (NO_STABLE_ID moved with its only
+   consumer parse_feed into parse.rs), 1 dropped `use super::*;` inside the favicon test
+   module. **Try to falsify this**: diff the original .bak against the concatenated module
+   bodies yourself and check no executable line was altered, dropped, or duplicated.
+④ Assertions untouched: `git diff -- src-tauri/tests` empty; and `cargo test` count unchanged.
+⑤ Gates: cargo 193 passed / 0 failed / 9 ignored (identical to the TASK-078 baseline
+   RUN-6aeb3b77); lint 0/0; build exit 0; frontend 303/303.
+
+================================================================================
+WHAT TO ATTACK (highest value first)
+================================================================================
+1. **Hidden behaviour drift.** A move can silently change: `use` resolution / glob imports
+   (the favicon test module had `use super::*;` and now relies on module imports), constant
+   visibility, or cfg/feature gating. Read the five files fully and compare against the
+   .bak for anything semantic.
+2. **Anything that BECAME public or PRIVATE.** Cross-module moves require visibility edits —
+   those are the only real changes here. Confirm they do not widen the external API.
+3. **Dead code / lost items.** Is every item from the original present exactly once? Any item
+   only reachable via a `pub use` that no longer exists? `cargo build` must be warning-free
+   (the author claims zero unused-import warnings after fixing two they introduced).
+4. **The relocated constant.** `NO_STABLE_ID` is now in parse.rs. Confirm it is still used
+   only where it was and that its doc/meaning is intact (it is a sentinel for feed-rs id
+   generation — a silent change here would corrupt dedup keys).
+5. **Concurrency semantics.** `refresh_feed_staged` spawns a favicon task and uses the
+   `FAVICON_TRIED` negative cache. Since these are now in two different modules, verify the
+   static is a single shared instance (not duplicated per module) — a duplicated static would
+   silently break the negative cache.
+6. Gate numbers: recompute from the raw logs and re-run something cheap yourself
+   (`cargo test --lib` covers the moved favicon_tests; `cargo build` for warnings).
+
+Useful: `cargo build`, `cargo test --lib`, `cargo test --test ingestion_e2e`, `cargo test --test staged_refresh_e2e`,
+and the pristine original at `.workflow-kit/tasks/evidence/_ingestion_orig.rs.bak`.
+Do NOT run `npm run build` (Vite's child process is blocked in this sandbox — read the recorded log)
+and do NOT run the full 27-suite `cargo test`.
+
+**Delete any probe/temp files you create**, and confirm `git status --porcelain` shows no leftovers.
+
+================================================================================
+门禁结果（本候选）
+================================================================================
+  cargo test  193 passed / 0 failed / 9 ignored   （与 TASK-078 基线一致）
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    303/303, exit 0

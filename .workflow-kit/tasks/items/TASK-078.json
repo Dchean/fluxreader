@@ -165,7 +165,8 @@
     "owner_decision_ids": [
       "DEC-6729cf98d60f4b1aa891a35cefa24117"
     ],
-    "merge_ref": "a88d0d1"
+    "merge_ref": "a88d0d1",
+    "continued_by": "TASK-079"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/FINDINGS-IGNORED-TESTS.md",

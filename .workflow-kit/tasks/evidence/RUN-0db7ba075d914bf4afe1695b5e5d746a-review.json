@@ -1,0 +1,77 @@
+{
+  "task_id": "TASK-079",
+  "candidate_digest": "dbd6608b4fdec26b604cbed2837e664c63cbdd2c65974168c04e40c7436c87fa",
+  "verification_run": "RUN-88d6970ed646409595b4d8694f579944",
+  "verdict": "PASS",
+  "summary": "独立复核 TASK-079（REQ-105：ingestion.rs 680 行单体拆分为 ingestion/ 五个模块）。先独立证明审查基线可信：.workflow-kit/tasks/evidence/_ingestion_orig.rs.bak 的 sha256 = 74840371aac0b4439808f5456a24be79e2a781a4c1493968b6d946e7fd9fac14，与 git show HEAD:src-tauri/src/ingestion.rs 逐字节相同（681 行含结尾空行、无 CRLF、无 BOM），因此该 .bak 是真正的拆分前原件而非作者重写的副本。以它为基准做行级与项级比对：① 五个候选模块 sha256 与 review packet 全部一致；② 逐行 diff（difflib）得到 12 组差异，逐组核对后全部属于「新增文件头 doc/use」或三类已声明的搬运改动，无任何可执行行被改写；③ 归一化（剔除空行/注释/use 行，pub(super) 还原）后，原件与模块并集的代码行多重集完全相等（558 == 558，only-in-orig = []，only-in-union = []），即零丢失、零重复、零改写；④ 原件 25 个项全部且仅出现一次，两处测试函数各一次；⑤ 用一次性外部视角探针（tests 临时文件，编译后已删除）实测公开面：10 个既有公开项全部可解析，resolve_url / discover_favicon / FAVICON_TRIED / NO_STABLE_ID / read_capped / MAX_BODY_BYTES 全部不可达（8 个 E0425/E0603，私有子模块 parse/favicon 亦不可达），没有任何东西变成新公开；⑥ FAVICON_TRIED 全仓仅 1 处定义、1 处共享引用（staged.rs 经 use super::favicon 引入），是单一实例；⑦ NO_STABLE_ID 的常量行与两行文档注释与原件逐字节相同。门禁独立复算：cargo test 27 套件 193 passed / 0 failed / 9 ignored（与 TASK-078 基线 RUN-6aeb3b77 逐项相同）、lint 0 warnings / 0 errors、build exit 0、frontend 303/303（26/26 + 277/277）。自跑复核：cargo build exit 0、cargo test --lib 95 passed / 0 failed、cargo test --lib favicon 2 passed（搬迁后的 favicon_tests）、cargo test --test ingestion_e2e exit 0、cargo test --test staged_refresh_e2e 3 passed / 0 failed。git diff -- src-tauri/tests 为空。未发现任何缺陷。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐条对照 REQ-105 与五项验收标准。① 公开路径不变：mod.rs 用 pub use http::{build_client, conditional_get, Fetched, USER_AGENT}、pub use parse::{parse_feed, ParsedFeed}、pub use staged::{apply_refresh_result, fetch_and_parse, read_feed_for_refresh, refresh_feed_staged} 重导出；用正则提取原件的 pub 项为 10 个，模块并集的 pub 项也是同样的 10 个，集合相等。全库 ingestion:: 调用点实测 47 处，且 git diff 显示 src-tauri/src 下除被删除的 ingestion.rs 外零改动，即调用点确实一字未动。② 无超过 800 行的生产单体：ingestion/ 五文件分别 22/99/218/187/187 行；全库最大的生产 .rs 为 db/articles.rs 791 行，无任何文件超过 800 行。③ 行为零变化：四门禁数字独立复算一致（见 regression）。④ 既有断言一行不动：git diff -- src-tauri/tests 输出为空；搬迁的 2 个 favicon 单元测试断言文本与原件逐字符相同（归一化多重集比对已覆盖）。⑤ 不引入新依赖：git diff 显示 Cargo.toml / Cargo.lock / package.json 零改动，扩散范围仅 src-tauri/src/ingestion.rs 删除 + src-tauri/src/ingestion/ 新增；五个候选文件均为 LF、无 BOM、有结尾换行。唯一超出纯搬运的增量是 mod.rs 中三行新增文档注释（第 9-11 行，说明本次拆分）与各模块的 //! 头/use，属非可执行的文档与导入重排，不构成行为或契约变化；新增注释为中文，符合项目既有风格。",
+      "evidence_files": [
+        "src-tauri/src/ingestion/mod.rs",
+        "src-tauri/src/ingestion/http.rs",
+        "src-tauri/src/ingestion/parse.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/ingestion/favicon.rs",
+        ".workflow-kit/tasks/evidence/_ingestion_orig.rs.bak",
+        "src-tauri/src/lib.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "断言面与门禁面双向核对。断言面：git diff -- src-tauri/tests 为空（ingestion_e2e、refresh_dedup_e2e、staged_refresh_e2e、scheduler_e2e 等搬迁回归保护逐字未动），搬迁进 favicon.rs 的 favicon_tests 两个测试函数体与原件逐字符相同，测试数量未减未增。门禁面：从原始日志独立复算 RUN-88d6970ed646409595b4d8694f579944——cargo_test.stdout 汇总 27 个 test result 行 = 193 passed / 0 failed / 9 ignored，与 TASK-078 基线 RUN-6aeb3b77 日志逐项相同（同样 27 套件 / 193 / 0 / 9）；lint.stdout 为 oxlint『Found 0 warnings and 0 errors』且 exit 0；build.stdout 为 tsc -b && vite build 成功、dist 产物列出、stderr 为空；frontend.stdout 末行为『前端逻辑回归合计 303/303 通过』（既有回归 26/26 + 新增 store 断言 277/277 = 303），exit 0。自跑复现（避免只信作者日志）：cargo build exit 0；cargo test --lib → 95 passed / 0 failed，与日志中 lib 套件的 95 一致；cargo test --lib favicon → 2 passed（extract_icon_link_finds_variants、extract_html_attr_all_quote_styles），证明搬迁后的测试真的在跑而不是被静默丢弃；cargo test --test ingestion_e2e exit 0（该套件 1 条为 #[ignore] 的本地服务器用例，与 9 ignored 基线相符）；cargo test --test staged_refresh_e2e → 3 passed / 0 failed。无任何断言被弱化、跳过或替换。",
+      "evidence_files": [
+        ".workflow-kit/tasks/runs/RUN-88d6970ed646409595b4d8694f579944.json",
+        ".workflow-kit/tasks/runs/RUN-6aeb3b77f8984b48ad8c1905007b6c5f.json",
+        ".workflow-kit/tasks/evidence/RUN-88d6970ed646409595b4d8694f579944-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-88d6970ed646409595b4d8694f579944-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-88d6970ed646409595b4d8694f579944-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-88d6970ed646409595b4d8694f579944-frontend.stdout.txt",
+        "src-tauri/tests/ingestion_e2e.rs",
+        "src-tauri/tests/staged_refresh_e2e.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "纯搬运本身不新增分支，重点是确认搬迁没有把异常/边界路径搬丢或搬变形。（a）错误路径驻留完整：read_capped 的 Content-Length 撒谎与分块超限两条 responseTooLarge 分支、conditional_get 的 304 短路与 error_for_status、fetch_and_parse 的 HTTP/解析统一 Err、refresh_feed_staged 的 Err 分支写回 fetch_failed=1 并返回 Err、apply_refresh_result 的 NotModified 复用 old_etag/old_last_modified（防条件 GET 链断裂）——归一化多重集比对证明这些行逐字符仍在，且 read_capped / clamp_publish_date / map_entry / mime_from_url / rel_is_icon / extract_html_attr 这些内部函数仍各自只定义一次、可见性未变。（b）并发与负缓存语义：FAVICON_TRIED 全仓仅 favicon.rs:8 一处定义（pub(super)），staged.rs:3 以 use super::favicon::{discover_favicon, FAVICON_TRIED} 引入并在 137/140 行读写，不存在每模块一份的重复静态量；tokio::spawn 的结构、插入时机（先 insert 再 spawn）与注释语义均未变。（c）去重键哨兵：NO_STABLE_ID 的常量行与两行文档注释与原件逐字节相同（orig[23:26] == parse[6:9] 为 True），唯一消费者 parse_feed 的 id_generator 与 map_entry 中 e.id != NO_STABLE_ID 判定同步搬入 parse.rs，值未变、比较语义未变，不会污染去重键。（d）空输入/重复执行：这些路径未做任何改写，行为等同拆分前。结论：失败与边界路径与拆分前逐字符等价。",
+      "evidence_files": [
+        "src-tauri/src/ingestion/http.rs",
+        "src-tauri/src/ingestion/parse.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/ingestion/favicon.rs",
+        ".workflow-kit/tasks/evidence/_ingestion_orig.rs.bak"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "拆分边界与文件内既有分节注释天然对应：http（HTTP 层）、parse（feed-rs 解析）、staged（三段式刷新）、favicon（图标发现），职责清晰、无循环依赖（staged → favicon/http/parse，favicon → parse，parse/http 互不依赖），依赖方向单向且与领域分层一致。可见性收口得当：跨模块仅 resolve_url、discover_favicon、FAVICON_TRIED 三处升为 pub(super)，discover_favicon 与 FAVICON_TRIED 刻意不进 pub use 列表，外部视角探针实测二者不可达，crate::ingestion 的公开面严格等于拆分前的 10 项，未扩大公共契约。无死代码、无重复项：原件 25 个项在并集中各出现且仅出现一次（含两个测试函数），模块并集的 pub 项集合与原件相等。导入重排经核算无损：原件 9 条 use 拆为 18 条，唯一被拆开的是 use crate::db::{self, NewArticle}（self 留在 staged.rs 的 use crate::db，NewArticle 移入 parse.rs），其余为新增的 super:: 内部引用，无任何路径丢失。构建告警：cargo build exit 0，stderr 仅 1 条 warning，为 `#[warn(linker_messages)]` 的 MSVC 链接器中文提示（正在创建库 app_lib.dll.lib 与对象 .exp），与本次拆分无关——同一条告警在 .workflow-kit/tasks/evidence 下多个历史 RUN 的 cargo_test.stderr 中同样存在，属既有的环境性链接器输出，不是作者新引入的 unused-import 告警；本次未出现任何 rustc 未使用导入/未使用项告警。维护性净改善：单一 680 行单体降为最大 218 行的四个领域模块，符合项目既有拆分配方，且未引入新抽象层或新依赖。",
+      "evidence_files": [
+        "src-tauri/src/ingestion/mod.rs",
+        "src-tauri/src/ingestion/http.rs",
+        "src-tauri/src/ingestion/parse.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/ingestion/favicon.rs",
+        ".workflow-kit/tasks/evidence/TASK-079-cumulative-diff.txt"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "本次是同一 crate 内的物理搬家，性能中性，无需也不应伪造基准。具体依据：（a）没有跨 crate 边界——五文件都在 app_lib 同一个 crate 内，原 ingestion.rs 中的函数也未单独编译为独立单元，因此内联边界与优化单元不变；（b）构造上不可能改变生成的代码：归一化后模块并集与原件在剔除空行/注释/use 行后的代码行多重集完全相等（558 == 558，无 only-in-orig、无 only-in-union），差异仅限 3 处可见性关键字、1 处常量与消费者的同址搬迁、新增文档注释与 use 重排；可见性由私有升为 pub(super) 只放宽同模块树内可见性，不改变代码生成；（c）热路径的算法、阈值与并发结构逐字未动：16 MiB 上限、timeout 5..300s clamp、connect_timeout 10s、favicon 首页 5s / 探活 3s、FAVICON_TRIED 负缓存（仍为单实例）、三段式锁外 HTTP 的并发重叠语义均无变化，故网络等待、数据库锁持有时长、内存上限与拆分前一致；（d）唯一的静态副作用是 mod.rs 多出的静态字符串（约 22 行内的文档注释/use），不进入运行时路径；（e）实测佐证：cargo build 与各测试套件耗时与历史 RUN 同量级，无异常波动。结论：拆分对启动、刷新吞吐、内存与锁竞争均为中性，符合『纯搬运』预期，未新增性能回归风险。",
+      "evidence_files": [
+        "src-tauri/src/ingestion/http.rs",
+        "src-tauri/src/ingestion/parse.rs",
+        "src-tauri/src/ingestion/staged.rs",
+        "src-tauri/src/ingestion/favicon.rs",
+        ".workflow-kit/tasks/evidence/RUN-88d6970ed646409595b4d8694f579944-candidate.json"
+      ]
+    }
+  ],
+  "ui_review": null
+}
