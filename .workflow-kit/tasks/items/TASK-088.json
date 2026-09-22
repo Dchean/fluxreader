@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "ready",
+  "status": "verified",
   "objective": "修一处**实测发现的**测试基建脆弱点：`src-tauri/tests/refresh_dedup_e2e.rs` 的 mock HTTP 服务器线程原有两个会**杀死整个服务器线程**的出口——(a) `let mut stream = stream.unwrap();` 在某个连接出错时 panic；(b) `if n == 0 { return; }` 在**正常的客户端断开**（响应头带 `Connection: close`）时 return 掉整个 accept 循环，而不是仅结束这一个连接。两者都会让该测试内后续所有请求连不上，症状伪装成「抓取失败」而非「测试基建故障」。改为：连接出错跳过该连接继续 accept（`let Ok(mut stream) = stream else { continue }`）、读端断开只 `break` 当前连接、写回失败仅忽略该连接。本卡是 TASK-087 的收口卡（该卡因任务记录多次合法修订与旧基线不收敛被取消），改动内容一致，只保留测试文件一项。",
   "non_goals": [
     "不改 refresh_dedup_e2e 的两个测试用例的断言、语义与测试名",
@@ -135,18 +135,22 @@
     "definition_digest": "b5af1613526f4bf5c00f42bf4e21bc3e44de81994b83ad8f5702928a478daa79"
   },
   "budget": {
-    "started_at_utc": null,
-    "deadline_at_utc": null,
+    "started_at_utc": "2026-09-22T01:05:44.082900Z",
+    "deadline_at_utc": "2026-09-22T05:05:44.082900Z",
     "repair_rounds_used": 0
   },
   "batch_id": "BATCH-3b1e9a89eb8a464fb861be8f1bcc3179",
-  "run_ids": [],
+  "run_ids": [
+    "RUN-3e828782666b48f599c4095a9989758e",
+    "RUN-a68c998c096f4aabadc88a394521f66d",
+    "RUN-36cd020bc07c48c4a762d53c8406f68d"
+  ],
   "blockers": [],
   "evidence": {
-    "candidate_manifest": null,
-    "candidate_digest": null,
-    "verification_run": null,
-    "review_run": null,
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-candidate.json",
+    "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
+    "verification_run": "RUN-a68c998c096f4aabadc88a394521f66d",
+    "review_run": "RUN-36cd020bc07c48c4a762d53c8406f68d",
     "acceptance_ref": null,
     "owner_decision_ids": [],
     "merge_ref": null
@@ -154,5 +158,27 @@
   "snapshot_paths": [
     ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json",
     "src-tauri/tests/refresh_dedup_e2e.rs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-22T01:05:44.396587Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-22T01:06:12.610722Z",
+      "note": "编码结果已记录，差异范围已核对：无文件变化",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-22T01:06:48.979823Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-22T01:09:49.245943Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
   ]
 }

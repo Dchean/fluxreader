@@ -1,0 +1,58 @@
+{
+  "task_id": "TASK-088",
+  "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
+  "verification_run": "RUN-a68c998c096f4aabadc88a394521f66d",
+  "verdict": "PASS",
+  "summary": "Independent review of TASK-088 (mock HTTP server thread in src-tauri/tests/refresh_dedup_e2e.rs). The candidate file hashes to 1715d7c5... exactly as the packet and RUN candidate manifest record, and is the ONLY source file changed (git diff HEAD --stat: 9 files, of which 8 are workflow-kit generated state/ledger files; the sole code file is the test). git diff HEAD -- .workflow-kit/tasks/BRIEF.json is EMPTY, and the task item's scope confirms allowed_paths == ['src-tauri/tests/refresh_dedup_e2e.rs'] (no BRIEF.json) with '.workflow-kit/tasks/**' in protected_paths. Logic: the two exits are correctly split. I reconstructed the accept loop in a temporary probe test and verified empirically that the fixed version serves 3 sequential fresh connections, survives 5 silent connect+close cycles, and survives 5 aborted partial requests. I also built counterfactual variants: the OLD 'return' dies exactly when a connection is observed with n==0 on its FIRST read (probe_old_return_variant_silent_close_kills_server: served=false), and the OLD 'stream.unwrap()' is NOT reachable from client behaviour at all (20 aborted connections did not kill it). So the fix's read-side branch is a genuine, provable latent-robustness improvement, while the accept-side branch is defensive code whose failure mode I could not reproduce - the card's own framing. On the missing paired evidence: I VERIFIED the card's own mutation claim by an independent route. Two sequential successful requests do NOT distinguish old from new (probe_old_return_variant_sequential_requests: r1/r2/r3 all true), confirming the old behaviour is unobservable through the two existing test cases. The card discloses this openly and claims no paired evidence; it does not overclaim. For this low-risk, test-infrastructure-only chore with behavior=preserve and acceptance (4) explicitly codifying the honest-disclosure obligation, an unobservable-through-existing-tests improvement is acceptable and does not by itself warrant FAIL. I chose a clear verdict rather than manufacturing a defect: PASS. All gates were recomputed from the recorded logs: cargo summed to exactly 206 passed / 0 failed / 9 ignored across 27 suites with zero non-ok suites; lint log reads 'Found 0 warnings and 0 errors'; build log ends 'built in 126ms' with exit 0; frontend log states 26/26 existing + 296/296 new = 322/322. cargo test --test refresh_dedup_e2e re-run independently: 2 passed / 0 failed, exit 0. Probe files were deleted and the candidate was restored byte-identically from a backup file (sha256 re-verified == 1715d7c5...); no git-status leftovers from this review remain. Unverified by me: npm run build and test:frontend were not re-executed (Vite blocked in this sandbox per instructions), so the frontend 322/322 is accepted from the recorded log only.",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "Acceptance (1) requires the mock server to no longer panic the whole thread on a single bad connection nor exit the accept loop on a normal client disconnect, and to keep serving subsequent connections. The diff implements exactly that: 'let Ok(mut stream) = stream else { continue }' at the accept site, 'break' instead of 'return' on the read-side n==0, and an ignored write failure. My probe independently confirmed the fixed server serves 3 sequential fresh connections and survives silent-close and aborted-request clients, which is the observable content of 'keeps serving'. Acceptance (2) holds: the two test names, both assertions and all feed content are untouched by the diff (only the accept loop body changed). Acceptance (4) is honoured as written - the card claims a latent robustness improvement and explicitly disclaims paired evidence rather than asserting one, which matches what I measured.",
+      "evidence_files": [
+        "src-tauri/tests/refresh_dedup_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-088-cumulative-diff.txt",
+        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "This is a behavior=preserve chore; the regression obligation is that every pre-existing assertion still passes unchanged. I recomputed the recorded cargo log rather than trusting the card's prose: summing all 27 'test result:' lines gives exactly 206 passed / 0 failed / 9 ignored, matching the asserted gate and the recorded baseline RUN-110241c0 (206/0/9), with no non-ok suite and no error lines. I also re-ran 'cargo test --test refresh_dedup_e2e' myself: 2 passed / 0 failed, exit 0. Lint reads 'Found 0 warnings and 0 errors' and the build log ends successfully. Critically, the test's protective power is not weakened: the probe showed the OLD code passes the two existing cases too, so the two assertions never covered this accept-loop path in either direction - the diff neither strengthens nor weakens them, it only prevents an intermittent infrastructure fault from masquerading as a fetch failure.",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-lint.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "I exercised the failure paths directly with a temporary probe harness that reproduced the candidate's accept loop verbatim, then deleted it. Bad-connection handling: 5 silent connect+close cycles and 5 partial-request-then-abort cycles all left the server serving later requests, so the 'continue' branch does its job. Read-side split: the counterfactual with the OLD 'return' failed precisely and only when a connection's FIRST read returned n==0 (served=false), whereas the same variant survived three sequential requests - this proves 'break' is the right choice and locates the exact condition under which the old code lost the server. Honest limit: the accept-side 'stream.unwrap()' path was NOT reachable from any client behaviour I could produce (20 aborted connections did not kill it), so that half of the fix is defensive/unfalsified, which the card itself does not overclaim. Repeated execution is safe: per-call PID+nanos temp-DB naming and OS-assigned port 0 are genuinely unique per test, and no shared state or data boundary is touched (data=synthetic_only, network=none beyond loopback).",
+      "evidence_files": [
+        "src-tauri/tests/refresh_dedup_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-088-cumulative-diff.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "The change is confined to the accept loop of one test helper and adds no abstraction, dependency, or public surface. The Rust and Chinese comments sit immediately above the changed lines and explain WHY the thread must survive a single bad connection - including the 'masquerades as a fetch failure' symptom - which is the right place and level of detail for test infrastructure; the write-side comment does the same for the ignored error. The let-else form is idiomatic and keeps the loop body flat rather than nesting. Two nits that are not defects: the comments cite TASK-087 while the shipping card is TASK-088 (the card states TASK-088 is TASK-087's successor with identical content, so the reference is merely stale by one number), and the read loop still has no explicit byte cap before the 8192 check, though that is pre-existing and untouched here.",
+      "evidence_files": [
+        "src-tauri/tests/refresh_dedup_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-088-cumulative-diff.txt"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "No production code path is touched - the diff is entirely inside a #[cfg(test)] integration test's mock server thread - so there is no shippable performance regression to measure and none is claimed. The runtime effect within tests is negligible or positive: the loop now performs one additional enum match per connection and, in the fault case, continues accepting instead of tearing the thread down, which if anything removes latent flakiness and retry cost rather than adding work. The only allocation change is on the pre-existing response-format path, which the diff does not alter. No benchmark is warranted here, and I did not invent one.",
+      "evidence_files": [
+        "src-tauri/tests/refresh_dedup_e2e.rs",
+        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stdout.txt"
+      ]
+    }
+  ],
+  "ui_review": null
+}

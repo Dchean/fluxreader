@@ -320,3 +320,7 @@
 - 2026-09-22T01:04:29.343429Z · checkpoint · TASK-087 · 任务已取消：任务记录在实现中经多次合法修订（撤回 BRIEF.json 的 allowed_paths、改写验收与 objective 以反映引擎对需求定义的保护），导致 repair 运行继承首次 begin 的旧基线、判 .workflow-kit/tasks/items/TASK-087.json 越界且无法收敛（TASK-074/076/084 同类）。按既有先例取消本卡并以新卡收口：BRIEF 措辞的口径结论已由 owner 裁决 DEC-req105-production-segment-basis-20260921 承载（需求定义文件本身按引擎治理保持不动），本卡余下的测试基建修复在工作树中，由新卡取快照承载。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
 - 2026-09-22T01:04:29.404581Z · cancel · TASK-087 · 任务记录在实现中经多次合法修订（撤回 BRIEF.json 的 allowed_paths、改写验收与 objective 以反映引擎对需求定义的保护），导致 repair 运行继承首次 begin 的旧基线、判 .workflow-kit/tasks/items/TASK-087.json 越界且无法收敛（TASK-074/076/084 同类）。按既有先例取消本卡并以新卡收口：BRIEF 措辞的口径结论已由 owner 裁决 DEC-req105-production-segment-basis-20260921 承载（需求定义文件本身按引擎治理保持不动），本卡余下的测试基建修复在工作树中，由新卡取快照承载。；依据：总控处置（2026-09-21）
 - 2026-09-22T01:05:25.867197Z · prepare · TASK-088 · 任务已冻结：refresh_dedup_e2e mock 服务器线程容错（收口 TASK-087）；范围 src-tauri/tests/refresh_dedup_e2e.rs
+- 2026-09-22T01:05:44.399172Z · checkpoint · TASK-088 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-22T01:06:12.611657Z · checkpoint · TASK-088 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-22T01:06:48.984314Z · checkpoint · TASK-088 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-22T01:09:49.248412Z · checkpoint · TASK-088 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收

@@ -1,0 +1,90 @@
+TASK-088 change set — refresh_dedup_e2e mock 服务器线程容错 (REQ-105 收尾)
+
+This card closes out TASK-087 (cancelled for a stale-baseline reason). It changes ONE file.
+
+================================================================================
+THE CHANGE
+================================================================================
+`src-tauri/tests/refresh_dedup_e2e.rs`'s mock HTTP server thread had TWO exits that killed the
+WHOLE server thread rather than just one connection:
+
+  (a) `let mut stream = stream.unwrap();` — panics the thread if a connection errors;
+  (b) `if n == 0 { return; }` — a NORMAL client disconnect (the response carries
+      `Connection: close`) returned out of the entire `for stream in listener.incoming()` accept
+      loop instead of just ending that connection.
+
+Either one makes every SUBSEQUENT request in the same test unable to connect, and the symptom
+masquerades as a "fetch failure" rather than a test-infrastructure fault — which is exactly why
+this is worth fixing.
+
+Now: a bad connection is skipped (`let Ok(mut stream) = stream else { continue }`), a read-side
+disconnect only `break`s the current connection, and a write failure is ignored for that
+connection only.
+
+================================================================================
+EVIDENCE — HONESTLY DISCLOSED, AND DELIBERATELY NOT CLAIMED
+================================================================================
+**I could NOT construct paired evidence for this one, and I am not pretending otherwise.**
+Mutation attempt: revert `n == 0` to the old `return` → the test still reports
+**2 passed / 0 failed (exit 0)**. The two existing tests each need only ONE successful request to
+satisfy their assertions, so the old behaviour is not observable through them.
+
+Therefore this is a **latent robustness improvement, not a fixed observable defect**. The card's
+acceptance ④ says exactly that, and it is repeated here. If you think a robustness change without
+a failing-before test is not worth merging, say so — that is a legitimate review position, and the
+honest framing is deliberate rather than an oversight.
+
+================================================================================
+SCOPE — NOTE THE DELIBERATE EXCLUSION
+================================================================================
+Only `src-tauri/tests/refresh_dedup_e2e.rs` changed. It is **deliberately NOT** changing
+`.workflow-kit/tasks/BRIEF.json`: that file matches the task's `protected_paths`
+(`.workflow-kit/tasks/**`), i.e. the engine forbids implementation cards from rewriting
+requirement definitions. The REQ-105 acceptance-① wording question (whether "800-line production
+monolith" should be measured per production segment) is carried by the owner decision
+`DEC-req105-production-segment-basis-20260921` instead. During the predecessor card I first tried
+to edit BRIEF.json, then tried to sync the intake `confirmed_brief`, found that broke the intake
+audit (`incomplete or stale intake confirmations`), and reverted everything — `git diff` for
+BRIEF.json is EMPTY. Please confirm that.
+
+================================================================================
+ALSO WORTH KNOWING (a registered leftover I investigated and REFUTED)
+================================================================================
+The leftover "refresh_dedup_e2e temp-DB path not distinguished per case" — I could not reproduce
+it in **18 attempts** (12× `cargo test --test refresh_dedup_e2e`, 6× full `cargo test`), and the
+stated mechanism is falsifiable from the code: the path is `fluxreader_dedup_refresh_{pid}_{nanos}.db`
+(unique per call), and the port comes from `TcpListener::bind("127.0.0.1:0")` (OS-assigned).
+So the original attribution does not hold. Recorded as a decision note; **not** treated as a
+defect to fix. If you disagree, the burden is to produce a reproduction.
+
+================================================================================
+GATES (measured on this candidate)
+================================================================================
+  cargo test  206 passed / 0 failed / 9 ignored   — IDENTICAL to baseline (zero behaviour change)
+  lint        0 warnings / 0 errors, exit 0
+  build       exit 0
+  frontend    322/322, exit 0
+
+The test's two existing assertions, semantics and test names are untouched.
+
+================================================================================
+WHAT TO ATTACK
+================================================================================
+1. **Is the change correct?** Reason about the accept loop: after the fix, can a single bad
+   connection still terminate the server? Is `break` (read-side) vs `continue` (accept-side) the
+   right split? Does the mock still serve a SECOND request on a fresh connection?
+2. **Do you agree the missing paired evidence is acceptable here?** If not, say it plainly and
+   score FAIL — but note the card states this openly instead of overclaiming.
+3. **Verify the BRIEF.json exclusion**: `git diff HEAD -- .workflow-kit/tasks/BRIEF.json` must be
+   EMPTY, and the reason (protected_paths) should hold.
+4. **Scope**: only `src-tauri/tests/refresh_dedup_e2e.rs` changed.
+5. **Gates**: cargo 206/0/9, lint 0/0, build exit 0, frontend 322/322. Recompute cargo from the
+   recorded log (do NOT run the full 27-suite); `cargo test --test refresh_dedup_e2e` is fast.
+   Do NOT run `npm run build` (Vite's child process is blocked in this sandbox).
+
+**Delete any probe/temp files you create** and confirm `git status --porcelain` has no leftovers.
+
+================================================================================
+TIME DISCIPLINE
+================================================================================
+Budget ~15 minutes, then WRITE THE REPORT. Write the file early, then refine.
