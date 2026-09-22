@@ -22,12 +22,10 @@ fn start_feed_server() -> u16 {
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            /* TASK-088：单个连接出错（对端提前断开等）不得 panic 掉**整个服务器线程**——
+            /* TASK-087：单个连接出错（对端提前断开等）不得 panic 掉**整个服务器线程**——
                此前 `stream.unwrap()` 一旦 panic，该线程即退出，本测试内后续所有请求都会
                连不上，症状会伪装成「抓取失败」而非「测试基建故障」，极难定位。
-               改为跳过这一个连接、继续 accept 下一个。
-               （注：该 accept 侧的 panic 分支在当前用例下不可稳定触发，属防御性修复；
-                 真正可观测的是下方读端 `n == 0` ——旧代码在那里 `return` 掉整个 accept 循环。） */
+               改为跳过这一个连接、继续 accept 下一个。 */
             let Ok(mut stream) = stream else { continue };
             let mut buf = [0u8; 4096];
             let mut req = String::new();
