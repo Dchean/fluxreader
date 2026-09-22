@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "修一处**实测发现的**测试基建脆弱点：`src-tauri/tests/refresh_dedup_e2e.rs` 的 mock HTTP 服务器线程原有两个会**杀死整个服务器线程**的出口——(a) `let mut stream = stream.unwrap();` 在某个连接出错时 panic；(b) `if n == 0 { return; }` 在**正常的客户端断开**（响应头带 `Connection: close`）时 return 掉整个 accept 循环，而不是仅结束这一个连接。两者都会让该测试内后续所有请求连不上，症状伪装成「抓取失败」而非「测试基建故障」。改为：连接出错跳过该连接继续 accept（`let Ok(mut stream) = stream else { continue }`）、读端断开只 `break` 当前连接、写回失败仅忽略该连接。本卡是 TASK-087 的收口卡（该卡因任务记录多次合法修订与旧基线不收敛被取消），改动内容一致，只保留测试文件一项。",
   "non_goals": [
     "不改 refresh_dedup_e2e 的两个测试用例的断言、语义与测试名",
@@ -143,17 +143,22 @@
   "run_ids": [
     "RUN-3e828782666b48f599c4095a9989758e",
     "RUN-a68c998c096f4aabadc88a394521f66d",
-    "RUN-36cd020bc07c48c4a762d53c8406f68d"
+    "RUN-36cd020bc07c48c4a762d53c8406f68d",
+    "RUN-fc381e1172684e848e401f28d8feae49",
+    "RUN-c82086e5d1e84f608a5dc5213979f101",
+    "RUN-c26da7445cd14b979f84f67c8cb2ce1a"
   ],
   "blockers": [],
   "evidence": {
-    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-candidate.json",
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-c82086e5d1e84f608a5dc5213979f101-candidate.json",
     "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
-    "verification_run": "RUN-a68c998c096f4aabadc88a394521f66d",
-    "review_run": "RUN-36cd020bc07c48c4a762d53c8406f68d",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "verification_run": "RUN-c82086e5d1e84f608a5dc5213979f101",
+    "review_run": "RUN-c26da7445cd14b979f84f67c8cb2ce1a",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-0b945bf04b8d4688936c2892448c3a0e-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-0b945bf04b8d4688936c2892448c3a0e"
+    ],
+    "merge_ref": "3c0907b"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json",
@@ -177,6 +182,21 @@
     },
     {
       "at_utc": "2026-09-22T01:09:49.245943Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    },
+    {
+      "at_utc": "2026-09-22T01:12:12.727677Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-22T01:15:42.564586Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-22T01:17:22.442581Z",
       "note": "当前候选的测试与审查通过（independent）",
       "next_action": "继续已授权任务；所属功能完成后请用户验收"
     }

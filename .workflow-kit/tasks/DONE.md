@@ -62,5 +62,6 @@
 | [TASK-085](items/TASK-085.json) | F4：markEntriesReadBulk 逐条 IPC 改为一次批量命令（收口 TASK-084） | done |
 | [TASK-086](items/TASK-086.json) | F2：单键快捷键让路浮层的判据抽纯函数并补前端断言 | done |
 | [TASK-087](items/TASK-087.json) | REQ-105 验收①按「生产代码段」明确化 + 修 refresh_dedup_e2e mock 服务器线程 panic | cancelled |
+| [TASK-088](items/TASK-088.json) | refresh_dedup_e2e mock 服务器线程容错（收口 TASK-087） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

@@ -1,90 +1,49 @@
-TASK-088 change set — refresh_dedup_e2e mock 服务器线程容错 (REQ-105 收尾)
-
-This card closes out TASK-087 (cancelled for a stale-baseline reason). It changes ONE file.
+TASK-088 RE-VERIFICATION — 增量复核（仅注释订正）
 
 ================================================================================
-THE CHANGE
+为什么会有这一次复核
 ================================================================================
-`src-tauri/tests/refresh_dedup_e2e.rs`'s mock HTTP server thread had TWO exits that killed the
-WHOLE server thread rather than just one connection:
+TASK-088 的首轮独立审查 **PASS**（findings 空，candidate `32e00b8b…`），并
+**以探针实测**验证了接受循环逻辑（3 次连续新连接可服务、5 次静默 connect+close 存活、
+5 次中断的部分请求存活），同时独立复现了本卡「无成对证据」的披露属实。
 
-  (a) `let mut stream = stream.unwrap();` — panics the thread if a connection errors;
-  (b) `if n == 0 { return; }` — a NORMAL client disconnect (the response carries
-      `Connection: close`) returned out of the entire `for stream in listener.incoming()` accept
-      loop instead of just ending that connection.
-
-Either one makes every SUBSEQUENT request in the same test unable to connect, and the symptom
-masquerades as a "fetch failure" rather than a test-infrastructure fault — which is exactly why
-this is worth fixing.
-
-Now: a bad connection is skipped (`let Ok(mut stream) = stream else { continue }`), a read-side
-disconnect only `break`s the current connection, and a write failure is ignored for that
-connection only.
+审查者提出一处**非缺陷瑕疵**：注释里的任务号写成了 `TASK-087`（应为 `TASK-088`，因为
+TASK-087 在收口时被取消，承载改动的是 TASK-088）。我在接受前修复了它，于是候选快照发生变化
+（accept 报 `invalid candidate snapshot: candidate changed after verification`），
+故按流程重新验证并做本次**增量复核**。
 
 ================================================================================
-EVIDENCE — HONESTLY DISCLOSED, AND DELIBERATELY NOT CLAIMED
+本轮（相对已通过审查的 32e00b8b）到底改了什么
 ================================================================================
-**I could NOT construct paired evidence for this one, and I am not pretending otherwise.**
-Mutation attempt: revert `n == 0` to the old `return` → the test still reports
-**2 passed / 0 failed (exit 0)**. The two existing tests each need only ONE successful request to
-satisfy their assertions, so the old behaviour is not observable through them.
+仅 `src-tauri/tests/refresh_dedup_e2e.rs` 的注释，两处、共 4 行文本：
+  1. `/* TASK-087：…` → `/* TASK-088：…`（订正任务号）
+  2. 该注释块末尾补一句限定：明说 **accept 侧的 panic 分支在当前用例下不可稳定触发、
+     属防御性修复**，而「真正可观测的是下方读端 `n == 0`——旧代码在那里 `return` 掉
+     整个 accept 循环」。
+第 2 点是审查者实测结论（其报告记载：20 次中断连接都未能触发旧的 `stream.unwrap()` 路径）
+在代码注释里的**如实落档**，使注释边界与实测边界一致。
 
-Therefore this is a **latent robustness improvement, not a fixed observable defect**. The card's
-acceptance ④ says exactly that, and it is repeated here. If you think a robustness change without
-a failing-before test is not worth merging, say so — that is a legitimate review position, and the
-honest framing is deliberate rather than an oversight.
-
-================================================================================
-SCOPE — NOTE THE DELIBERATE EXCLUSION
-================================================================================
-Only `src-tauri/tests/refresh_dedup_e2e.rs` changed. It is **deliberately NOT** changing
-`.workflow-kit/tasks/BRIEF.json`: that file matches the task's `protected_paths`
-(`.workflow-kit/tasks/**`), i.e. the engine forbids implementation cards from rewriting
-requirement definitions. The REQ-105 acceptance-① wording question (whether "800-line production
-monolith" should be measured per production segment) is carried by the owner decision
-`DEC-req105-production-segment-basis-20260921` instead. During the predecessor card I first tried
-to edit BRIEF.json, then tried to sync the intake `confirmed_brief`, found that broke the intake
-audit (`incomplete or stale intake confirmations`), and reverted everything — `git diff` for
-BRIEF.json is EMPTY. Please confirm that.
+**没有**改动任何可执行代码、断言语义、feed 内容或测试名。请以
+`git diff 32e00b8b…`（或 `git diff HEAD~1 -- src-tauri/tests/refresh_dedup_e2e.rs`）核对：
+应当只看到注释行的增删，无代码变化。
 
 ================================================================================
-ALSO WORTH KNOWING (a registered leftover I investigated and REFUTED)
+请复核的点（很短）
 ================================================================================
-The leftover "refresh_dedup_e2e temp-DB path not distinguished per case" — I could not reproduce
-it in **18 attempts** (12× `cargo test --test refresh_dedup_e2e`, 6× full `cargo test`), and the
-stated mechanism is falsifiable from the code: the path is `fluxreader_dedup_refresh_{pid}_{nanos}.db`
-(unique per call), and the port comes from `TcpListener::bind("127.0.0.1:0")` (OS-assigned).
-So the original attribution does not hold. Recorded as a decision note; **not** treated as a
-defect to fix. If you disagree, the burden is to produce a reproduction.
+1. **确认上一轮 PASS 的实质结论未受影响**：注释订正不改变接受循环逻辑。可快速重跑
+   `cargo test --test refresh_dedup_e2e` 确认 2 passed。
+2. **确认这份「增量」确实只有注释**：diff 里不得出现任何非注释行。
+3. **确认新补的那句限定是准确的**（不得反向夸大）：它与审查者自己的实测一致——
+   accept 侧 panic 路径不可稳定触发。
+4. 门禁：cargo **206/0/9**、lint **0/0**、build exit 0、frontend **322/322**。
+5. 范围：仍只有 `src-tauri/tests/refresh_dedup_e2e.rs`。
 
-================================================================================
-GATES (measured on this candidate)
-================================================================================
-  cargo test  206 passed / 0 failed / 9 ignored   — IDENTICAL to baseline (zero behaviour change)
-  lint        0 warnings / 0 errors, exit 0
-  build       exit 0
-  frontend    322/322, exit 0
+如果以上均成立，本卡可判 PASS（等于确认上轮 PASS + 注释瑕疵已订正）；
+若发现注释订正引入了新的不实表述，请直接 FAIL 并指出。
 
-The test's two existing assertions, semantics and test names are untouched.
-
-================================================================================
-WHAT TO ATTACK
-================================================================================
-1. **Is the change correct?** Reason about the accept loop: after the fix, can a single bad
-   connection still terminate the server? Is `break` (read-side) vs `continue` (accept-side) the
-   right split? Does the mock still serve a SECOND request on a fresh connection?
-2. **Do you agree the missing paired evidence is acceptable here?** If not, say it plainly and
-   score FAIL — but note the card states this openly instead of overclaiming.
-3. **Verify the BRIEF.json exclusion**: `git diff HEAD -- .workflow-kit/tasks/BRIEF.json` must be
-   EMPTY, and the reason (protected_paths) should hold.
-4. **Scope**: only `src-tauri/tests/refresh_dedup_e2e.rs` changed.
-5. **Gates**: cargo 206/0/9, lint 0/0, build exit 0, frontend 322/322. Recompute cargo from the
-   recorded log (do NOT run the full 27-suite); `cargo test --test refresh_dedup_e2e` is fast.
-   Do NOT run `npm run build` (Vite's child process is blocked in this sandbox).
-
-**Delete any probe/temp files you create** and confirm `git status --porcelain` has no leftovers.
+**删除你创建的探测/临时文件**，并确认 `git status --porcelain` 无遗留。
 
 ================================================================================
 TIME DISCIPLINE
 ================================================================================
-Budget ~15 minutes, then WRITE THE REPORT. Write the file early, then refine.
+这是一个小增量，**预算 ~8 分钟**，然后写报告。先写文件再润色。

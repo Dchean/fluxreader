@@ -148,13 +148,15 @@
       "batch_id": "BATCH-3b1e9a89eb8a464fb861be8f1bcc3179",
       "run_ids": [
         "RUN-3e828782666b48f599c4095a9989758e",
-        "RUN-a68c998c096f4aabadc88a394521f66d"
+        "RUN-a68c998c096f4aabadc88a394521f66d",
+        "RUN-36cd020bc07c48c4a762d53c8406f68d",
+        "RUN-fc381e1172684e848e401f28d8feae49"
       ],
       "blockers": [],
       "evidence": {
-        "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-candidate.json",
-        "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
-        "verification_run": "RUN-a68c998c096f4aabadc88a394521f66d",
+        "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-candidate.json",
+        "candidate_digest": "9ea0f217fc025108a62709164f7adb35bdbac659feee342f9e05c55790e75bb4",
+        "verification_run": "RUN-fc381e1172684e848e401f28d8feae49",
         "review_run": null,
         "acceptance_ref": null,
         "owner_decision_ids": [],
@@ -228,66 +230,66 @@
       "AGENTS.md",
       "WORKFLOW-KIT.md"
     ],
-    "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
+    "candidate_digest": "9ea0f217fc025108a62709164f7adb35bdbac659feee342f9e05c55790e75bb4",
     "deadline_at_utc": "2026-09-22T05:05:44.082900Z",
     "role": "reviewer",
     "verification": {
       "schema_version": 1,
-      "id": "RUN-a68c998c096f4aabadc88a394521f66d",
+      "id": "RUN-fc381e1172684e848e401f28d8feae49",
       "task_id": "TASK-088",
       "kind": "verification",
       "outcome": "completed",
       "executor": {
         "harness": "local_process",
         "model": null,
-        "context_id": "tool-3b66275e048043e499072c69dc78b28a"
+        "context_id": "tool-513c9cdb34514977818ff7124f2ab592"
       },
-      "started_at_utc": "2026-09-22T01:06:27.403748Z",
-      "finished_at_utc": "2026-09-22T01:06:48.803532Z",
+      "started_at_utc": "2026-09-22T01:11:51.325794Z",
+      "finished_at_utc": "2026-09-22T01:12:12.575833Z",
       "exit_code": 0,
       "timed_out": false,
       "input_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
-      "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
+      "candidate_digest": "9ea0f217fc025108a62709164f7adb35bdbac659feee342f9e05c55790e75bb4",
       "raw_output_refs": [
-        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stdout.txt",
-        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stderr.txt",
-        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-lint.stdout.txt",
-        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-lint.stderr.txt",
-        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-build.stdout.txt",
-        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-build.stderr.txt",
-        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-frontend.stdout.txt",
-        ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-frontend.stderr.txt"
+        ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-cargo_test.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-lint.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-build.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-frontend.stderr.txt"
       ],
       "checks": [
         {
           "gate_id": "cargo_test",
           "status": "PASS",
           "exit_code": 0,
-          "log": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stdout.txt",
-          "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stderr.txt",
-          "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
+          "log": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-cargo_test.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-cargo_test.stderr.txt",
+          "candidate_digest": "9ea0f217fc025108a62709164f7adb35bdbac659feee342f9e05c55790e75bb4",
           "command": {
             "argv": [
               "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
               "test"
             ],
             "cwd": "src-tauri",
-            "started_at_utc": "2026-09-22T01:06:27.549507Z",
-            "finished_at_utc": "2026-09-22T01:06:35.690510Z",
+            "started_at_utc": "2026-09-22T01:11:51.468807Z",
+            "finished_at_utc": "2026-09-22T01:11:59.524928Z",
             "exit_code": 0,
             "timed_out": false,
             "cancelled": false,
-            "stdout": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stdout.txt",
-            "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stderr.txt"
+            "stdout": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-cargo_test.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-cargo_test.stderr.txt"
           }
         },
         {
           "gate_id": "lint",
           "status": "PASS",
           "exit_code": 0,
-          "log": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-lint.stdout.txt",
-          "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-lint.stderr.txt",
-          "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
+          "log": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-lint.stderr.txt",
+          "candidate_digest": "9ea0f217fc025108a62709164f7adb35bdbac659feee342f9e05c55790e75bb4",
           "command": {
             "argv": [
               "C:\\Program Files\\nodejs\\node.EXE",
@@ -296,22 +298,22 @@
               "lint"
             ],
             "cwd": ".",
-            "started_at_utc": "2026-09-22T01:06:35.722529Z",
-            "finished_at_utc": "2026-09-22T01:06:36.025241Z",
+            "started_at_utc": "2026-09-22T01:11:59.557394Z",
+            "finished_at_utc": "2026-09-22T01:11:59.855909Z",
             "exit_code": 0,
             "timed_out": false,
             "cancelled": false,
-            "stdout": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-lint.stdout.txt",
-            "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-lint.stderr.txt"
+            "stdout": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-lint.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-lint.stderr.txt"
           }
         },
         {
           "gate_id": "build",
           "status": "PASS",
           "exit_code": 0,
-          "log": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-build.stdout.txt",
-          "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-build.stderr.txt",
-          "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
+          "log": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-build.stderr.txt",
+          "candidate_digest": "9ea0f217fc025108a62709164f7adb35bdbac659feee342f9e05c55790e75bb4",
           "command": {
             "argv": [
               "C:\\Program Files\\nodejs\\node.EXE",
@@ -320,22 +322,22 @@
               "build"
             ],
             "cwd": ".",
-            "started_at_utc": "2026-09-22T01:06:36.054746Z",
-            "finished_at_utc": "2026-09-22T01:06:37.977339Z",
+            "started_at_utc": "2026-09-22T01:11:59.886026Z",
+            "finished_at_utc": "2026-09-22T01:12:01.803680Z",
             "exit_code": 0,
             "timed_out": false,
             "cancelled": false,
-            "stdout": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-build.stdout.txt",
-            "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-build.stderr.txt"
+            "stdout": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-build.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-build.stderr.txt"
           }
         },
         {
           "gate_id": "frontend",
           "status": "PASS",
           "exit_code": 0,
-          "log": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-frontend.stdout.txt",
-          "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-frontend.stderr.txt",
-          "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
+          "log": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-frontend.stderr.txt",
+          "candidate_digest": "9ea0f217fc025108a62709164f7adb35bdbac659feee342f9e05c55790e75bb4",
           "command": {
             "argv": [
               "C:\\Program Files\\nodejs\\node.EXE",
@@ -344,13 +346,13 @@
               "test:frontend"
             ],
             "cwd": ".",
-            "started_at_utc": "2026-09-22T01:06:38.011246Z",
-            "finished_at_utc": "2026-09-22T01:06:48.791230Z",
+            "started_at_utc": "2026-09-22T01:12:01.819454Z",
+            "finished_at_utc": "2026-09-22T01:12:12.563100Z",
             "exit_code": 0,
             "timed_out": false,
             "cancelled": false,
-            "stdout": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-frontend.stdout.txt",
-            "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-frontend.stderr.txt"
+            "stdout": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-frontend.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-frontend.stderr.txt"
           }
         }
       ],
@@ -361,8 +363,8 @@
         "candidate_digest": null
       },
       "estimated_cost_usd": null,
-      "pid": 19192,
-      "controller_pid": 21732,
+      "pid": 44256,
+      "controller_pid": 43556,
       "commands": [
         {
           "argv": [
@@ -370,10 +372,10 @@
             "test"
           ],
           "cwd": "src-tauri",
-          "started_at_utc": "2026-09-22T01:06:27.549507Z",
-          "stdout": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stdout.txt",
-          "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-cargo_test.stderr.txt",
-          "finished_at_utc": "2026-09-22T01:06:35.690510Z",
+          "started_at_utc": "2026-09-22T01:11:51.468807Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-cargo_test.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-cargo_test.stderr.txt",
+          "finished_at_utc": "2026-09-22T01:11:59.524928Z",
           "exit_code": 0,
           "timed_out": false,
           "cancelled": false
@@ -386,10 +388,10 @@
             "lint"
           ],
           "cwd": ".",
-          "started_at_utc": "2026-09-22T01:06:35.722529Z",
-          "stdout": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-lint.stdout.txt",
-          "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-lint.stderr.txt",
-          "finished_at_utc": "2026-09-22T01:06:36.025241Z",
+          "started_at_utc": "2026-09-22T01:11:59.557394Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-lint.stderr.txt",
+          "finished_at_utc": "2026-09-22T01:11:59.855909Z",
           "exit_code": 0,
           "timed_out": false,
           "cancelled": false
@@ -402,10 +404,10 @@
             "build"
           ],
           "cwd": ".",
-          "started_at_utc": "2026-09-22T01:06:36.054746Z",
-          "stdout": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-build.stdout.txt",
-          "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-build.stderr.txt",
-          "finished_at_utc": "2026-09-22T01:06:37.977339Z",
+          "started_at_utc": "2026-09-22T01:11:59.886026Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-build.stderr.txt",
+          "finished_at_utc": "2026-09-22T01:12:01.803680Z",
           "exit_code": 0,
           "timed_out": false,
           "cancelled": false
@@ -418,17 +420,17 @@
             "test:frontend"
           ],
           "cwd": ".",
-          "started_at_utc": "2026-09-22T01:06:38.011246Z",
-          "stdout": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-frontend.stdout.txt",
-          "stderr": ".workflow-kit/tasks/evidence/RUN-a68c998c096f4aabadc88a394521f66d-frontend.stderr.txt",
-          "finished_at_utc": "2026-09-22T01:06:48.791230Z",
+          "started_at_utc": "2026-09-22T01:12:01.819454Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-fc381e1172684e848e401f28d8feae49-frontend.stderr.txt",
+          "finished_at_utc": "2026-09-22T01:12:12.563100Z",
           "exit_code": 0,
           "timed_out": false,
           "cancelled": false
         }
       ]
     },
-    "verification_ref": ".workflow-kit/tasks/runs/RUN-a68c998c096f4aabadc88a394521f66d.json",
+    "verification_ref": ".workflow-kit/tasks/runs/RUN-fc381e1172684e848e401f28d8feae49.json",
     "required_review_areas": [
       "requirements",
       "regression",
@@ -444,7 +446,7 @@
       },
       {
         "path": "src-tauri/tests/refresh_dedup_e2e.rs",
-        "sha256": "1715d7c55c9ca0e0239a8722f5664daf69ea9ed921b86c2a92ff79a3dac59c2d"
+        "sha256": "58bdee33f0ff5979bef78667c593635ca5993ffef1514155f9d9f24615829eb1"
       }
     ],
     "changed_files": []

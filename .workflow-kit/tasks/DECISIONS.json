@@ -2437,6 +2437,20 @@
         "TASK-087"
       ],
       "recorded_at_utc": "2026-09-22T00:56:16.649959Z"
+    },
+    {
+      "id": "DEC-0b945bf04b8d4688936c2892448c3a0e",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "总控核对：独立审查 PASS（findings 空，五区域全 PASS，candidate 32e00b8b…）。审查者以**探针实测**验证接受循环逻辑（3 次连续新连接可服务、5 次静默 connect+close 存活、5 次中断的部分请求存活），独立复现了「无成对证据」披露属实（两次连续成功请求无法区分新旧行为），并确认 BRIEF.json 的 git diff 为空、范围仅测试文件、四门禁重算一致（cargo 206/0/9、lint 0/0、build exit 0、frontend 322/322）。**过程如实记录**：① 审查者指出注释里的任务号笔误，我一度在 3c0907b 订正并加注，导致候选失效；因不宜为一次自撰的收尾注释改动再耗一轮独立审查，遂把注释**逐字还原**至已通过审查的状态（sha256 1715d7c5… 与审查者验证值一致），并把任务号订正登记为待办而非夹带进本卡。② 随后的增量复核者进一步指出：my briefing 把该笔误描述为「注释写成了 TASK-087」，而实际是 3c0907b 一次性引入注释块、当时已写 TASK-088——即**我的描述不准确**（笔误在还原前的中间态，非提交历史中的真实状态），审查者据提交历史举证，我接受该订正；不影响结果。③ 本次复核结论与首轮 PASS 实质一致：代码增量恰为两行（stream.unwrap() → let Ok(..) else { continue }、\n == 0 内 \return → \break），其余为注释。验收（2026-09-21）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-088"
+      ],
+      "recorded_at_utc": "2026-09-22T01:17:37.638573Z",
+      "candidates": {
+        "TASK-088": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35"
+      }
     }
   ]
 }
