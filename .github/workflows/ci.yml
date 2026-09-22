@@ -28,7 +28,9 @@ jobs:
       - name: Build (tsc + vite)
         run: npm run build
 
-      # Note: 将前端回归接入 CI 的理由与备选 — 见 .agents/notes/proposed/testing/2026-09-13-frontend-regression-in-ci.md
+      # Note: 前端回归接入 CI 的理由——它是纯逻辑状态机断言（node 直跑，不需浏览器），
+      # 能在几十毫秒内拦住 store/selector 的行为回归；备选是 Playwright 级 UI 测试，
+      # 但更慢更脆，故作为补充而非替代。
       - name: Frontend regression (node state-machine checks)
         run: npm run test:frontend
 
@@ -52,7 +54,8 @@ jobs:
         with:
           workspaces: src-tauri
 
-      # Note: 格式门禁的设立理由与历史 — 见 .agents/notes/implemented/process/2026-09-13-rust-format-unification.md
+      # Note: 格式门禁的设立理由——此前的提交里混用过不同缩进/换行风格，
+      # 产生大量纯排版 diff 干扰代码审查；统一为 rustfmt 默认风格后由 CI 守住。
       - name: Format (cargo fmt --check)
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
@@ -62,5 +65,10 @@ jobs:
       - name: Run tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      # 注意：这里必须用 --include-ignored（跑「非 ignored + ignored 全部」），
+      # 不能用 --ignored（只跑被标 #[ignore] 的）。这 6 个自托管 mock 套件里
+      # 一个 #[ignore] 都没有 —— 若写成 --ignored，本步骤会匹配 0 个用例却依然绿灯，
+      # 等于整条 mock 集成测试通道从未在 CI 里真正跑过。各文件头部文档写的也是
+      # --include-ignored（如 account_lifecycle_e2e.rs 的运行示例）。
       - name: Run self-hosted mock integration tests (core sync/AI protocols)
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --ignored
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --include-ignored

@@ -121,7 +121,8 @@ export function Reader() {
     };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
-    // Note: exhaustive-deps — see .agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md
+    // Note: exhaustive-deps — 依赖被有意收窄（只随目标变化执行一次），
+    // 补全依赖会导致该副作用在无关状态变化时重复触发，故保留并显式标注。
   }, [art, settings.markReadOnScrollBottom, isRawRenderMode, isShowingTranslatedProse]);
 
   /* 正文点击代理：<a> 走外链（external.ts）；<img> 走灯箱放大；

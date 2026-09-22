@@ -134,10 +134,22 @@ pub async fn refresh_feed_staged(
                         )
                         .ok()
                         .flatten();
-                    (icon, FAVICON_TRIED.lock().unwrap().contains(&feed_id))
+                    // P3（2026-09-22 复查）：与 lib.rs 的既有处置一致——`lock().unwrap()`
+                    // 在互斥量中毒时会 panic。锁内只是 HashSet<i64>（「试过 favicon 的源」），
+                    // 中毒不影响其可用性，故用 into_inner 容忍中毒而非 panic。
+                    (
+                        icon,
+                        FAVICON_TRIED
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .contains(&feed_id),
+                    )
                 };
                 if existing_icon.is_none() && !already_tried {
-                    FAVICON_TRIED.lock().unwrap().insert(feed_id);
+                    FAVICON_TRIED
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(feed_id);
                     let site = parsed.site_url.clone().or_else(|| Some(feed_url.clone()));
                     let db = db.clone();
                     let client = client.clone();

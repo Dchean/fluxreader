@@ -13,7 +13,8 @@ use std::sync::LazyLock;
 
 use crate::error::AppResult;
 
-// Note: db/ 按领域拆分子模块、对外接口保持 crate::db:: 不变 — 见 .agents/notes/implemented/architecture/2026-09-14-db-module-split.md
+// Note: db/ 按领域拆分子模块，对外接口保持 crate::db:: 不变（拆分是纯搬运，
+// 调用方无需改动）；延续「单体按领域拆分」的既有做法。
 
 mod articles;
 mod feeds;

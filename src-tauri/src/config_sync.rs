@@ -5,7 +5,8 @@
 //!
 //! 凭据字段排除：greader_password, ai_config, config_sync_credentials, miniflux_token。
 //! 不含正文/媒体/AI 缓存（按设计文档边界 DEC-008/009）。
-//! 字段清单：.agents/notes/implemented/feature/2026-09-13-opt004-config-sync-field-inventory.md
+//! 字段清单：白名单由本模块集中定义（见下方 SYNCED_SETTING_KEYS / 各域读取函数），
+//! 新增可同步字段必须同时在此登记，避免「加了字段但没进同步」的静默缺口。
 //!
 //! 不做冲突合并：下载应用仅更新白名单字段，本地凭据与本地特定设置保持不变。
 
@@ -65,7 +66,7 @@ pub struct FeedSpec {
 
 /// 从本地库构建上传 payload（白名单原则：仅同步字段清单中 sync=允许 的字段）。
 /// 排除全部凭据字段：greader_password, ai_config, config_sync_credentials, miniflux_token。
-/// 参考：.agents/notes/implemented/feature/2026-09-13-opt004-config-sync-field-inventory.md
+/// 排除全部凭据字段（见上方模块说明的白名单口径）。
 pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
     let folders = db::list_folders(conn)?;
     let feeds = db::list_feeds(conn)?;
@@ -133,7 +134,7 @@ fn filter_app_settings(raw: Option<String>) -> AppResult<Option<String>> {
 /// 应用下载 payload 到本地库（白名单原则：仅应用允许字段，保留本地凭据）。
 /// 分类/源 upsert（按名称/URL 匹配），设置字段级覆盖（不整体替换，远端已删的白名单键本地同步删除）。
 /// 返回 [`ApplyOutcome`]（新增/更新/跳过/删除的源数）。
-/// 参考：.agents/notes/implemented/feature/2026-09-13-opt004-config-sync-field-inventory.md
+/// 只应用白名单内的字段；未知/已下线字段一律忽略（防旧客户端覆盖新配置）。
 pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<ApplyOutcome> {
     if p.schema > SCHEMA_VERSION {
         return Err(AppError::internal(format!(

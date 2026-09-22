@@ -113,10 +113,18 @@ pub fn run() {
             }
 
             // 数据库放应用数据目录（LocalAppData/FluxReader/fluxreader.db）
-            let app_dir: PathBuf = app.path().app_data_dir().expect("app data dir unavailable");
+            // P3（2026-09-22 复查）：这两行此前是 `.expect(...)`——与 :140 托盘图标
+            // 已修的同类问题：取不到应用数据目录、或数据库被占用/损坏时，会**直接 panic
+            // 导致启动即崩**，且用户只看到进程消失、没有任何可操作的提示。
+            // 改为返回带上下文的错误：Tauri 会把 setup 的错误报告出来，日志里能看到根因。
+            let app_dir: PathBuf = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("无法确定应用数据目录（app_data_dir 不可用）：{e}"))?;
             std::fs::create_dir_all(&app_dir)?;
             let db_path = app_dir.join("fluxreader.db");
-            let conn = db::open(&db_path).expect("failed to open sqlite database");
+            let conn = db::open(&db_path)
+                .map_err(|e| format!("打开数据库失败（{}）：{e}", db_path.display()))?;
             let http = ingestion::build_client(30);
             // SMTC 媒体控制线程（失败降级为 inactive，不影响播放）
             let media = media::spawn_media_thread(app.handle());

@@ -43,7 +43,9 @@ pub struct ClientLoginResponse {
 /// FreshRSS 忽略 `output=json`，返回经典文本行 `SID=…` / `LSID=…` / `Auth=…`，
 /// 凭据错误时是 `Error=BadAuthentication`。
 /// 先按 JSON 解析以保持 Miniflux 既有行为，失败再按行取 `Auth=`。
-// Note: 双格式登录的理由与被否方案 — 见 .agents/notes/implemented/bug-fix/2026-09-14-greader-clientlogin-text-format.md
+// Note: 双格式登录的理由——不同服务端实现返回的 ClientLogin 响应体格式不一致
+// （经典 text/plain 键值 与 JSON 两种），只认一种会误判为「凭据错误」；
+// 被否方案：按服务端类型硬编码分支（无法覆盖自建/中间层实现）。
 pub fn parse_client_login(body: &str) -> AppResult<String> {
     if let Ok(parsed) = serde_json::from_str::<ClientLoginResponse>(body) {
         if !parsed.auth.is_empty() {

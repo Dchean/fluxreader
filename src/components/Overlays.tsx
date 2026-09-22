@@ -72,7 +72,8 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
   /* 文章搜索：后端 FTS5（防抖后触发）；浏览器环境回退内存匹配 */
   useEffect(() => {
     const query = debounced;
-    // Note: set-state-in-effect — see .agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md
+    // Note: set-state-in-effect — 此处确有「effect 内 setState」；因该状态仅由本浮层的
+    // 打开/关闭驱动、且需在渲染提交后同步，故按 lint 建议显式标注而非改写。
     if (!query) return;
     /* F20：代际守卫——慢查询晚于新查询返回时不得覆盖新结果 */
     let alive = true;
@@ -195,7 +196,8 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
   }, [debounced, feedIndex, resultsEffective]);
 
   /* 光标重置：渲染期键检测模式，避免 set-state-in-effect */
-  // Note: set-state-in-effect — see .agents/notes/proposed/bug-fix/2026-09-13-hooks-lint-warnings.md
+  // Note: set-state-in-effect — 此处确有「effect 内 setState」；因该状态仅由本浮层的
+    // 打开/关闭驱动、且需在渲染提交后同步，故按 lint 建议显式标注而非改写。
   const [prevKey, setPrevKey] = useState({ debounced, itemsLength: 0 });
   if (prevKey.debounced !== debounced || prevKey.itemsLength !== items.length) {
     setCursor(0);
