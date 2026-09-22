@@ -7,7 +7,7 @@ import { PlayerBar } from './components/PlayerBar';
 import { SettingsModal } from './components/SettingsModal';
 import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal, CloseAskDialog } from './components/Overlays';
 import { ContextMenuHost } from './components/ContextMenu';
-import { shouldYieldToOverlay } from './components/shortcutYield';
+import { anyOverlayOpen, shouldYieldToOverlay } from './components/shortcutYield';
 /* ============================================================
    Application Shell
 
@@ -221,12 +221,20 @@ export default function App() {
          当前文章**（改了它的收藏/已读却看不见），J/K 还会在背后切换文章。
          Ctrl+K / Ctrl+, / Escape 属浮层自身操作，在此判断之前已处理，不受影响。
          判据已抽成纯函数 shouldYieldToOverlay（src/components/shortcutYield.ts），
-         由回归网直接断言——此前内联在这里，属「改了行为却无法断言」的覆盖缺口
+         浮层集合由同模块的 anyOverlayOpen 按 OVERLAY_SOURCES 清单求值，
+         两者均由回归网直接断言——此前内联在这里，属「改了行为却无法断言」的覆盖缺口
          （审查 TASK-081-F2 登记的遗留）。 */
-      const overlayOpen =
-        s.searchOpen || s.settingsOpen || s.newCategoryModalOpen || s.addFeedModalOpen ||
-        s.editFeedModalOpen || s.renameCatModalOpen || !!s.lightboxUrl ||
-        (s.playerExpanded && s.player.isActive);
+      const overlayOpen = anyOverlayOpen({
+        searchOpen: s.searchOpen,
+        settingsOpen: s.settingsOpen,
+        newCategoryModalOpen: s.newCategoryModalOpen,
+        addFeedModalOpen: s.addFeedModalOpen,
+        editFeedModalOpen: s.editFeedModalOpen,
+        renameCatModalOpen: s.renameCatModalOpen,
+        lightboxUrl: s.lightboxUrl,
+        playerExpanded: s.playerExpanded,
+        playerActive: s.player.isActive,
+      });
       if (shouldYieldToOverlay(overlayOpen, e.key, e.ctrlKey || e.metaKey || e.altKey) === 'yield') {
         return;
       }

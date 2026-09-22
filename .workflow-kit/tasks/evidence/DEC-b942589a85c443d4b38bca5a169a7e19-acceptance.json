@@ -1,0 +1,14 @@
+{
+  "id": "DEC-b942589a85c443d4b38bca5a169a7e19",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "用户指示：交付并修复剩余问题（2026-09-22）",
+  "statement": "Owner accepted the complete project",
+  "scope": [
+    "TASK-088"
+  ],
+  "recorded_at_utc": "2026-09-22T01:56:28.120598Z",
+  "candidates": {
+    "TASK-088": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35"
+  }
+}

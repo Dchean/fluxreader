@@ -1,4 +1,5 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { scrollAwayRange } from './scrollAwayRead';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useShallow } from 'zustand/react/shallow';
 import {
@@ -114,21 +115,47 @@ export function Timeline() {
   /* markReadOnScrollOut：滚动时，可视区起始 index 递增 → 之间的条目「滚出上方」，
      批量标已读。用 ref 记录上次可视区起始 index，在 onChange 里比较。 */
   const lastStartIndexRef = useRef(0);
+  /* P3[F5]（AUDIT-20260919-v2）：切换 布局/视图/订阅范围/筛选/排序 会换掉整个 items
+     序列并触发上面的 `scrollTo({top: 0})`。但「归零」是异步生效的：在该 effect
+     跑到本 effect 之前，本 effect 仍可能读到**切换前的** range.startIndex
+     （如切换到 image 布局时虚拟化被禁用，range 会保留旧值）。
+     此时 `start > lastStartIndexRef.current` 成立，循环就会把**新序列里**
+     index 0..start 的新条目（用户从未见过的）整段标成已读。
+     影响面与「旧 startIndex 大小 / 新序列长度」正相关：列表越长越容易命中，
+     窗口在滚动归零生效后即关闭——因此表现为「小概率误标已读」，正是 F5 难以复现的原因。
+     处置：两个前提都必须成立才认为条目是「滚出上方」——
+     (1) 筛选上下文未变（换序列时不判滚出；下面的 effect 会同步重置基准）；
+     (2) 本次 startIndex 变化确由**用户滚动**引起（而非筛选切换引发的程序性归零）。 */
+  const scrollDrivenRef = useRef(false);
+  /* 筛选上下文变化 → 重置基准并关闭本帧的滚出判定。
+     与下面的归零 effect 同依赖，按声明顺序先执行 ⇒ 基准与本帧判定都已就绪，
+     不依赖「归零 effect 先跑完」这一时序假设。 */
+  useLayoutEffect(() => {
+    lastStartIndexRef.current = 0;
+    scrollDrivenRef.current = false;
+  }, [filterKey]);
   useEffect(() => {
     if (!useAppStore.getState().settings.markReadOnScrollOut) return;
     if (timelineFilter !== 'unread') return;
     const start = rowVirtualizer.range?.startIndex ?? 0;
-    if (start > lastStartIndexRef.current) {
-      const exitedIds: string[] = [];
-      for (let i = lastStartIndexRef.current; i < start && i < items.length; i++) {
-        const it = items[i];
-        if (it && !it.isRead) exitedIds.push(it.id);
-      }
-      if (exitedIds.length > 0) {
-        useAppStore.getState().markEntriesReadBulk(exitedIds);
-      }
+    const scrollDriven = scrollDrivenRef.current;
+    scrollDrivenRef.current = false; // 本次判定消费完毕，等待下一次真实滚动
+    const { range, nextLastStartIndex } = scrollAwayRange({
+      scrollDriven,
+      startIndex: start,
+      lastStartIndex: lastStartIndexRef.current,
+      itemCount: items.length,
+    });
+    lastStartIndexRef.current = nextLastStartIndex;
+    if (!range) return;
+    const exitedIds: string[] = [];
+    for (let i = range.from; i < range.to; i++) {
+      const it = items[i];
+      if (it && !it.isRead) exitedIds.push(it.id);
     }
-    lastStartIndexRef.current = start;
+    if (exitedIds.length > 0) {
+      useAppStore.getState().markEntriesReadBulk(exitedIds);
+    }
   }, [rowVirtualizer.range?.startIndex, items, timelineFilter]);
 
   /* 选中文章（搜索/命令面板/J/K 导航）→ 滚动定位到该卡片。虚拟化下卡片
@@ -151,6 +178,9 @@ export function Timeline() {
 
   /* 滚动到底部附近 → 按需加载下一批文章（分页，避免一次性全量拉取）。 */
   const handleScroll = () => {
+    /* P3[F5]：标记本次 range 变化源自用户滚动，供上面的「滚出上方」判定使用。
+       scrollToIndex（J/K 定位）与筛选切换的归零都不经过本 handler，故不会被误判。 */
+    scrollDrivenRef.current = true;
     const el = scrollRef.current;
     if (!el) return;
     // 距底部 600px 内视为"到底"，提前预加载，滚动体验更顺滑

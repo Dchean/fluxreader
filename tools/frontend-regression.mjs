@@ -1181,7 +1181,8 @@ await (async () => {
      由 App.tsx 的真实 keydown 分支消费，故这里断言的是**组件实际使用的那份判定**。
      此前该判据内联在 App.tsx 的闭包里、零断言（审查 TASK-081-F2 登记的覆盖缺口）。 */
   {
-    const { shouldYieldToOverlay, OVERLAY_YIELD_KEYS } = await import('../src/components/shortcutYield.ts');
+    const { shouldYieldToOverlay, OVERLAY_YIELD_KEYS, OVERLAY_SOURCES, anyOverlayOpen }
+      = await import('../src/components/shortcutYield.ts');
     checkNew('(P3[F2]) 浮层打开 + 单键 S/M/J/K ⇒ 让路（修前会作用到浮层背后的当前文章）',
       ['s', 'S', 'm', 'M', 'j', 'k'].every((k) => shouldYieldToOverlay(true, k, false) === 'yield'));
     checkNew('(P3[F2]) 浮层未打开 + 单键 ⇒ 不让路（快捷键照常生效）',
@@ -1195,6 +1196,45 @@ await (async () => {
       && shouldYieldToOverlay(true, 'Escape', false) === 'proceed');
     checkNew('(P3[F2]) 适配性：让路键集合恰为 s/S/m/M/j/k（新增可让路键须同步本表）',
       OVERLAY_YIELD_KEYS.length === 6 && OVERLAY_YIELD_KEYS.join(',') === 's,S,m,M,j,k');
+    /* 浮层集合逐项钉死：这是 TASK-086 审查者指出「文本断言可被绕过」的正面修复。
+       此前 overlayOpen 是内联的 `a || b || c`，回归网只能查 token 在场——
+       实测把「全屏播放器」从并集里删掉，322 条断言**全绿**（真实回归零告警）。
+       改为清单求值后，每个浮层必须单独登记，任何一项被删/被改都会被下面两条拦下。 */
+    const baseOverlay = {
+      searchOpen: false, settingsOpen: false, newCategoryModalOpen: false,
+      addFeedModalOpen: false, editFeedModalOpen: false, renameCatModalOpen: false,
+      lightboxUrl: null, playerExpanded: false, playerActive: false,
+    };
+    checkNew('(P3[F2]) 浮层清单恰为 8 项且名称稳定（新增/删除浮层必须同步本表）',
+      OVERLAY_SOURCES.length === 8
+      && OVERLAY_SOURCES.map((o) => o.name).join(',')
+        === 'search,settings,newCategory,addFeed,editFeed,renameCat,lightbox,playerExpanded');
+    /* 逐项：只打开这一项 ⇒ anyOverlayOpen 必须为 true（漏判/少算任一项即失败） */
+    const overlayProbes = [
+      ['search', { searchOpen: true }],
+      ['settings', { settingsOpen: true }],
+      ['newCategory', { newCategoryModalOpen: true }],
+      ['addFeed', { addFeedModalOpen: true }],
+      ['editFeed', { editFeedModalOpen: true }],
+      ['renameCat', { renameCatModalOpen: true }],
+      ['lightbox', { lightboxUrl: 'https://example.com/a.png' }],
+      ['playerExpanded', { playerExpanded: true, playerActive: true }],
+    ];
+    const missed = overlayProbes
+      .filter(([, patch]) => anyOverlayOpen({ ...baseOverlay, ...patch }) !== true)
+      .map(([name]) => name);
+    checkNew('(P3[F2]) 每个浮层单独打开都必须被判为「浮层打开」（漏判任一项即失败，输出缺项名）',
+      missed.length === 0);
+    checkNew('(P3[F2]) 无浮层时 anyOverlayOpen 为 false（不误判为打开，否则快捷键全被吞）',
+      anyOverlayOpen(baseOverlay) === false);
+    /* 全屏播放器是**条件**浮层：仅在播放器激活时才算打开 */
+    checkNew('(P3[F2]) playerExpanded 仅在 playerActive 时算浮层（未激活时不算，避免吞掉快捷键）',
+      anyOverlayOpen({ ...baseOverlay, playerExpanded: true, playerActive: false }) === false
+      && anyOverlayOpen({ ...baseOverlay, playerExpanded: true, playerActive: true }) === true);
+    /* 空字符串 lightboxUrl 等同于「无 lightbox」（防 falsy 误判） */
+    checkNew('(P3[F2]) lightboxUrl 为空串不算浮层（falsy 边界）',
+      anyOverlayOpen({ ...baseOverlay, lightboxUrl: '' }) === false);
+
     /* 修前对照：旧行为完全不看浮层 → 浮层打开时同集键也照旧执行（不让路）。 */
     const legacyYield = () => 'proceed';
     checkNew('(P3[F2]) 修前判据可复现：不看浮层状态时「浮层打开 + S」也不会让路（缺陷根因）',
@@ -1212,6 +1252,10 @@ await (async () => {
     checkNew('(P3[F2]) 判据实参为 overlayOpen + 按键 + 修饰键（改实参即失败）',
       /shouldYieldToOverlay\(\s*overlayOpen\s*,\s*e\.key\s*,\s*e\.ctrlKey\s*\|\|\s*e\.metaKey\s*\|\|\s*e\.altKey\s*\)/
         .test(appSrc));
+    /* overlayOpen 必须由 anyOverlayOpen 求值（而非退回内联并集）。
+       内联写法下「少判一个浮层」无法被断言——见上面清单断言的说明。 */
+    checkNew('(P3[F2]) App.tsx 的 overlayOpen 必须由 anyOverlayOpen 求值（退回内联并集即失败）',
+      /const\s+overlayOpen\s*=\s*anyOverlayOpen\(/.test(appSrc));
   }
   store.setState({ player: { ...store.getState().player, speed: 2.0 } });
   store.getState().cyclePlaybackSpeed();
@@ -1222,6 +1266,59 @@ await (async () => {
   checkNew('(j) 关闭播放条：停止并收起（isActive/isPlaying/seek 复位 + 大播放器收起）',
     store.getState().player.isActive === false && store.getState().player.isPlaying === false
     && store.getState().player.seekToSec === null && store.getState().playerExpanded === false);
+
+  /* ---------- P3[F5]（REQ-102）：滚动出视口标已读，不得把「换序列的异步窗口」误算 ----------
+     缺陷（AUDIT-20260919-v2 F5）：切换 布局/视图/排序 换掉 items 并触发 scrollTo(top:0)，
+     但归零异步生效；期间滚动效应读到**旧** startIndex，就把新序列前段（用户没见过）
+     整段标成已读。列表越长越容易命中，故表现为小概率。
+     判据已抽为纯函数 scrollAwayRange（src/components/scrollAwayRead.ts）。 */
+  {
+    const { scrollAwayRange } = await import('../src/components/scrollAwayRead.ts');
+    const N = 200; // 模拟长列表：旧 startIndex=120，新序列 200 条
+    /* 修前逻辑（内联比较，不看是否用户滚动）的等价复刻：用于证明旧实现在同一输入下
+       确实会误标——不是靠字面量断言，而是真的跑一遍旧算法。 */
+    const legacyAwayRange = (startIndex, lastStartIndex) => (
+      startIndex > lastStartIndex ? { from: lastStartIndex, to: startIndex } : null);
+    checkNew('(P3[F5]) 修前可复现：非用户滚动 + startIndex 从 0 跳到 120 ⇒ 修前逻辑会误标 120 条',
+      JSON.stringify(legacyAwayRange(120, 0)) === JSON.stringify({ from: 0, to: 120 })
+      && scrollAwayRange({ scrollDriven: false, startIndex: 120, lastStartIndex: 0, itemCount: N })
+        .range === null);
+    checkNew('(P3[F5]) 非用户滚动（换布局/视图/排序的异步归零窗口）⇒ 绝不标读',
+      scrollAwayRange({ scrollDriven: false, startIndex: 120, lastStartIndex: 0, itemCount: N })
+        .range === null);
+    checkNew('(P3[F5]) 非用户滚动仍须对齐基准（否则窗口关闭后基准停在旧值、后续真滚动会补标一大段）',
+      scrollAwayRange({ scrollDriven: false, startIndex: 120, lastStartIndex: 0, itemCount: N })
+        .nextLastStartIndex === 120);
+    checkNew('(P3[F5]) 真实滚动 + startIndex 递增 ⇒ 标已读区间恰为 [上次基准, 本次 start)',
+      JSON.stringify(scrollAwayRange({ scrollDriven: true, startIndex: 40, lastStartIndex: 25, itemCount: N }).range)
+        === JSON.stringify({ from: 25, to: 40 }));
+    checkNew('(P3[F5]) 真实滚动但未超过基准（往回滚/抖动）⇒ 不标读，且基准跟随下行不锁定',
+      scrollAwayRange({ scrollDriven: true, startIndex: 10, lastStartIndex: 25, itemCount: N }).range === null
+      && scrollAwayRange({ scrollDriven: true, startIndex: 10, lastStartIndex: 25, itemCount: N })
+        .nextLastStartIndex === 10);
+    checkNew('(P3[F5]) 起始基准 0 + 真实滚动 ⇒ 从第 0 条起标（首屏滚出正常生效，未被误伤）',
+      JSON.stringify(scrollAwayRange({ scrollDriven: true, startIndex: 15, lastStartIndex: 0, itemCount: N }).range)
+        === JSON.stringify({ from: 0, to: 15 }));
+    checkNew('(P3[F5]) 越界夹取：startIndex 超过 itemCount 时不得越界标读（数据切换瞬间的防御）',
+      JSON.stringify(scrollAwayRange({ scrollDriven: true, startIndex: 999, lastStartIndex: 5, itemCount: 50 }).range)
+        === JSON.stringify({ from: 5, to: 50 })
+      && scrollAwayRange({ scrollDriven: true, startIndex: -3, lastStartIndex: 0, itemCount: 50 }).range === null);
+    checkNew('(P3[F5]) 空列表（itemCount=0）恒不标读（避免对 undefined 条目取值）',
+      scrollAwayRange({ scrollDriven: true, startIndex: 5, lastStartIndex: 0, itemCount: 0 }).range === null
+      && scrollAwayRange({ scrollDriven: true, startIndex: 5, lastStartIndex: 0, itemCount: 0 })
+        .nextLastStartIndex === 0);
+
+    /* 源码形态：Timeline 的滚动效应必须消费该判据，且筛选变化时重置基准。 */
+    const fsF5 = await import('node:fs');
+    const tlF5 = fsF5.readFileSync(new URL('../src/components/Timeline.tsx', import.meta.url), 'utf8');
+    checkNew('(P3[F5]) Timeline 的滚动效应必须消费 scrollAwayRange（改回手写比较即失败）',
+      /scrollAwayRange\(\{/.test(tlF5) && tlF5.includes('lastStartIndexRef.current = nextLastStartIndex'));
+    checkNew('(P3[F5]) 筛选上下文变化必须重置 startIndex 基准（filterKey 依赖）',
+      /useLayoutEffect\(\(\)\s*=>\s*\{[^}]*lastStartIndexRef\.current\s*=\s*0[^}]*\}\s*,\s*\[filterKey\]\)/
+        .test(tlF5));
+    checkNew('(P3[F5]) scrollDriven 只能由用户滚动置位（handleScroll 内），非滚动置位处',
+      /const handleScroll = \(\) => \{[^}]*scrollDrivenRef\.current = true;/.test(tlF5));
+  }
 
   /* ============================================================
      (k) 设置合并与校验（bootstrapSettings / updateSettings）

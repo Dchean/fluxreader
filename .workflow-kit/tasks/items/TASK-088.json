@@ -154,11 +154,11 @@
     "candidate_digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
     "verification_run": "RUN-c82086e5d1e84f608a5dc5213979f101",
     "review_run": "RUN-c26da7445cd14b979f84f67c8cb2ce1a",
-    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-0b945bf04b8d4688936c2892448c3a0e-acceptance.json",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-b942589a85c443d4b38bca5a169a7e19-acceptance.json",
     "owner_decision_ids": [
-      "DEC-0b945bf04b8d4688936c2892448c3a0e"
+      "DEC-b942589a85c443d4b38bca5a169a7e19"
     ],
-    "merge_ref": "3c0907b"
+    "merge_ref": "HEAD"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json",
