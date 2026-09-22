@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-44e68063e95b4929a847ec1287505523",
+  "task_id": "TASK-087",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "zcode-main-20260921-t087"
+  },
+  "started_at_utc": "2026-09-22T00:56:59.035388Z",
+  "finished_at_utc": "2026-09-22T00:59:40.688804Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "a37e5fc9ff9c672b733f07a8384a2fb2ac8dd8b5d9fba5d36e921ea80f6ca80d",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-44e68063e95b4929a847ec1287505523-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-44e68063e95b4929a847ec1287505523-scope.json",
+  "failure_kind": "scope",
+  "failure_reason": "Out-of-scope changes: .workflow-kit/tasks/BRIEF.json (allowed: .workflow-kit/tasks/BRIEF.json, src-tauri/tests/refresh_dedup_e2e.rs)"
+}

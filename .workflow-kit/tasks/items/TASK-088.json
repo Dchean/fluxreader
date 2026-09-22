@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "id": "TASK-088",
+  "title": "refresh_dedup_e2e mock 服务器线程容错（收口 TASK-087）",
+  "kind": "chore",
+  "retry_safe": false,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "ready",
+  "objective": "修一处**实测发现的**测试基建脆弱点：`src-tauri/tests/refresh_dedup_e2e.rs` 的 mock HTTP 服务器线程原有两个会**杀死整个服务器线程**的出口——(a) `let mut stream = stream.unwrap();` 在某个连接出错时 panic；(b) `if n == 0 { return; }` 在**正常的客户端断开**（响应头带 `Connection: close`）时 return 掉整个 accept 循环，而不是仅结束这一个连接。两者都会让该测试内后续所有请求连不上，症状伪装成「抓取失败」而非「测试基建故障」。改为：连接出错跳过该连接继续 accept（`let Ok(mut stream) = stream else { continue }`）、读端断开只 `break` 当前连接、写回失败仅忽略该连接。本卡是 TASK-087 的收口卡（该卡因任务记录多次合法修订与旧基线不收敛被取消），改动内容一致，只保留测试文件一项。",
+  "non_goals": [
+    "不改 refresh_dedup_e2e 的两个测试用例的断言、语义与测试名",
+    "不改 db/articles.rs（REQ-105 生产段已达标，无需搬迁单测）",
+    "不改其它测试文件；不引入新依赖",
+    "**不改动 `.workflow-kit/tasks/BRIEF.json`** —— 需求定义文件命中 protected_paths，实现类任务不得改写；REQ-105 验收① 的口径结论由 owner 裁决 DEC-req105-production-segment-basis-20260921 承载"
+  ],
+  "requirement_refs": [
+    "REQ-105"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/tests/refresh_dedup_e2e.rs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① mock 服务器不再因单个连接出错而 panic 掉服务器线程，也不再因客户端正常断开而退出整个 accept 循环；改后能持续服务后续连接",
+    "② 该测试的两个既有断言、语义与测试名一行不动",
+    "③ 四门禁全绿且不回退：cargo test ≥206 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend ≥322/322",
+    "④ 取证如实：本项为**潜在健壮性改进**，若无法构造出可复现的失败须如实记录（本次实测：把 `n == 0` 改回旧的 `return` 后该测试仍 2 passed，即当前用例观测不到差异），不得声称有「成对证据」"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json",
+      "summary": "2026-09-21 基线（TASK-086 验证 RUN-110241c0，提交 2d50c2b）：cargo test 206 passed / 0 failed / 9 ignored、lint 0 warnings / 0 errors、build exit 0、frontend 322/322。本任务 behavior=preserve：只把测试基建里两处「出错即杀死服务器线程」的出口改为容错，不触碰被测行为、feed 内容与任何断言。既有全部断言必须原样通过。",
+      "decision_ids": []
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "全部既有 206 条 Rust 断言（含 refresh_dedup_e2e 的 2 条）与 322 条前端断言",
+        "reason": "本卡只改 mock 服务器的错误处理，不改 feed 内容、响应体或断言语义；既有断言即零行为变化的判据。",
+        "gate_ids": [
+          "cargo_test",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-088-input-32684576f17043e68c259dc0d7c9ecbc.json",
+    "digest": "32e00b8bc728111ae13320944abcb2202f4e1185bc06b2204089dccf26e97f35",
+    "source_revision": null,
+    "definition_digest": "b5af1613526f4bf5c00f42bf4e21bc3e44de81994b83ad8f5702928a478daa79"
+  },
+  "budget": {
+    "started_at_utc": null,
+    "deadline_at_utc": null,
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-3b1e9a89eb8a464fb861be8f1bcc3179",
+  "run_ids": [],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": null,
+    "candidate_digest": null,
+    "verification_run": null,
+    "review_run": null,
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json",
+    "src-tauri/tests/refresh_dedup_e2e.rs"
+  ]
+}
