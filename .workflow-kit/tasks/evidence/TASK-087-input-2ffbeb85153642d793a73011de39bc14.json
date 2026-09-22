@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-22T00:56:21.523269Z",
+  "roots": [
+    ".workflow-kit/tasks/BRIEF.json",
+    ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json",
+    "src-tauri/tests/refresh_dedup_e2e.rs"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/tasks/BRIEF.json",
+      "sha256": "6f7c215eb06948749ce49bd4c9e4f8903e50a24676145387c3828effa9b7776d"
+    },
+    {
+      "path": ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json",
+      "sha256": "fdf8cc3ab1bae77ee91f65d960c65961e7b91c5b467076e9424745be1958be5b"
+    },
+    {
+      "path": "src-tauri/tests/refresh_dedup_e2e.rs",
+      "sha256": "e1e4acbb6f410ab716fd3c1c1197313a6940940d27b0b7a92ccb3b5c1db11cc7"
+    }
+  ],
+  "digest": "a37e5fc9ff9c672b733f07a8384a2fb2ac8dd8b5d9fba5d36e921ea80f6ca80d"
+}

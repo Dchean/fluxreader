@@ -1,0 +1,101 @@
+{
+  "id": "TASK-087",
+  "title": "REQ-105 验收①按「生产代码段」明确化 + 修 refresh_dedup_e2e mock 服务器线程 panic",
+  "objective": "两件收尾事项。① **按 owner 2026-09-21 的裁决**（见 DEC-req105-production-segment-basis-20260921）把 BRIEF REQ-105 的验收① 由「拆分后无超过 800 行的生产单体」明确为「拆分后无超过 800 行的**生产代码段**（以该文件的 `#[cfg(test)]` 为界）」，使其与 REQ-105 描述所述目标（原 `ingestion.rs` 766 行生产单体）口径一致——否则任何给既有文件补单测的任务都会「违反」该验收，而补测试是受鼓励的。TASK-082 的审计节已记录实测依据（`db/articles.rs` 生产段 747 行、同文件单测 247 行）。② 修一处**实测发现的**测试基建脆弱点：`src-tauri/tests/refresh_dedup_e2e.rs:25` 的 mock 服务器线程用 `stream.unwrap()`，连接出错时会 panic 掉整个服务器线程，导致同测试内后续请求全部失败（症状会伪装成「抓取失败」而非「测试基建故障」）。改为忽略单个连接错误并继续 accept。",
+  "requirement_refs": [
+    "REQ-105"
+  ],
+  "non_goals": [
+    "不改 REQ-105 的另外两条验收（行为零变化、公开路径不变）",
+    "不改 db/articles.rs 的任何代码或测试（生产段已达标，无需搬迁）",
+    "不改 refresh_dedup_e2e 的两个测试用例的断言与语义",
+    "不改其它测试文件；不引入新依赖"
+  ],
+  "allowed_paths": [
+    ".workflow-kit/tasks/BRIEF.json",
+    "src-tauri/tests/refresh_dedup_e2e.rs"
+  ],
+  "snapshot_paths": [
+    ".workflow-kit/tasks/BRIEF.json",
+    "src-tauri/tests/refresh_dedup_e2e.rs"
+  ],
+  "acceptance": [
+    "① BRIEF REQ-105 验收① 明确为按「生产代码段（以 #[cfg(test)] 为界）」衡量，措辞不再与「给既有文件补单测」冲突；其余两条验收逐字不变",
+    "② `refresh_dedup_e2e.rs` 的 mock 服务器不再因单个连接出错而 panic 掉服务器线程（改后仍能正常服务后续请求）",
+    "③ 该测试的两个既有断言与语义一行不动；测试名不变",
+    "④ 四门禁全绿且不回退：cargo test ≥206 且 0 failed、9 ignored 不增；lint 0/0；build exit 0；frontend ≥322/322",
+    "⑤ 变异取证（对②）：把 mock 服务器改回「首个连接出错即 panic/退出」的形态，必须有可观测的失败（记录实测结论）；若该路径在当前环境下不可稳定触发，则如实记录「未能构造出可复现的失败」，不得声称已取证"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "risk": {
+    "level": "low",
+    "decision_ids": [
+      "DEC-req105-production-segment-basis-20260921"
+    ]
+  },
+  "kind": "chore",
+  "ui_change": false,
+  "retry_safe": false,
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "evidence_ref": ".workflow-kit/tasks/runs/RUN-110241c05b914c77af21d9eed6dc012c.json",
+      "summary": "2026-09-21 基线（TASK-086 验证 RUN-110241c0，提交 2d50c2b）：cargo test 206 passed / 0 failed / 9 ignored、lint 0 warnings / 0 errors、build exit 0、frontend 322/322。本任务 behavior=preserve：① 只改需求文档措辞（验收口径明确化，无代码行为变化）；② 只把测试基建的 unwrap 改为容错（不触碰被测行为与断言）。故既有全部断言必须原样通过。",
+      "decision_ids": []
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "全部既有 206 条 Rust 断言（含 refresh_dedup_e2e 的 2 条）与 322 条前端断言",
+        "reason": "本卡不改被测行为：BRIEF 措辞变更不影响运行期；mock 服务器容错化只影响「服务器线程是否存活」，不改 feed 内容与断言语义。既有断言即零行为变化的判据。",
+        "gate_ids": [
+          "cargo_test",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "note": "来源：TASK-082 的 REQ-105 口径复核（审计「一之附二」节）+ 本次复核遗留项时实测发现的mock 服务器 panic。另：登记项「refresh_dedup_e2e 临时库路径未按用例区分」经 18 次实测（单测 12 次 + 全量 6 次）**无法复现**，且该路径本就是 pid+纳秒唯一、端口由 OS 分配，原归因不成立——已用 decision note 记录，不再作为待修缺陷。"
+}
