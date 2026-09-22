@@ -24,7 +24,19 @@
     "verdict": "PASS",
     "report": ".workflow-kit/tasks/evidence/RUN-da433ec6d7b04dd49b5b27b471868262-review.json",
     "candidate_digest": "4b40267c53b5c614109b26568a9bed8161f96265bee5a2a1aa3dbad09b296bac",
-    "quality_digest": "a8d3f6cc48d066342029368e2de8c47ac4152ed7fb4dee686a4ba0bf66db99d1"
+    "quality_digest": "bca038fd6e6253e5af89fed5c9132732ae5876f90ac5e67fe873fe8d8b8bbf51"
   },
-  "estimated_cost_usd": null
+  "estimated_cost_usd": null,
+  "recomputed": [
+    {
+      "at_utc": "2026-09-22T07:27:03.252326Z",
+      "source": "证据行尾与 git 规范化形态（blob）对齐后重算派生摘要：24 个受管记录的工作区 CRLF 还原为 blob 的 LF（内容零改动，仅行尾），而 review_quality_digest 按 read_bytes 逐字节哈希被引用的 tasks/evidence、tasks/runs 文件，故 TASK-029/030/031/033 的 verification_run JSON、TASK-043 的 TASK-043-interaction-report.md、TASK-044 的 TASK-044-split-report.md、TASK-051 的 TASK-051-gate-BEFORE-failures.txt 与 _rev501-harness.diff 的原记录值随之失配；已用逐文件行尾穷举复现每个原记录值（精确命中），证明差异仅行尾、无内容改动或篡改。",
+      "changed": {
+        "quality_digest": [
+          "a8d3f6cc48d066342029368e2de8c47ac4152ed7fb4dee686a4ba0bf66db99d1",
+          "bca038fd6e6253e5af89fed5c9132732ae5876f90ac5e67fe873fe8d8b8bbf51"
+        ]
+      }
+    }
+  ]
 }

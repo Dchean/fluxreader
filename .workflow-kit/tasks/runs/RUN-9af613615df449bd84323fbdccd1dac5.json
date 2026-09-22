@@ -24,8 +24,8 @@
     "verdict": "PASS",
     "report": ".workflow-kit/tasks/evidence/RUN-9af613615df449bd84323fbdccd1dac5-review.json",
     "candidate_digest": "6fa96b0b9efe82244a0df1e8b82c9eacd989347ef37cb6011eea2a9b252bea4e",
-    "ui_evidence_digest": "72de2a469453f46fe34cee79ef624de880300a85d16ce0b4cb1e7b279f49c9ba",
-    "quality_digest": "fb0690f2843d3f69c813693f615bcf525338caa6ea139f41d1c981e807898b22"
+    "ui_evidence_digest": "e7db3a2f71b1e17687112996931d2be1cac8fb353daab75b3c1973a4134c2196",
+    "quality_digest": "029b98886c516e97dbbca3e345d0f0a01c1f0af11c97916744240391b78a23da"
   },
   "estimated_cost_usd": null,
   "recomputed": [
@@ -36,6 +36,20 @@
         "quality_digest": [
           "ff3c504199ecd67224f74d71c6cc0593616e81918bff63ec7d290d2275b943f6",
           "fb0690f2843d3f69c813693f615bcf525338caa6ea139f41d1c981e807898b22"
+        ]
+      }
+    },
+    {
+      "at_utc": "2026-09-22T07:27:04.157208Z",
+      "source": "证据行尾与 git 规范化形态（blob）对齐后重算派生摘要：24 个受管记录的工作区 CRLF 还原为 blob 的 LF（内容零改动，仅行尾），而 review_quality_digest 按 read_bytes 逐字节哈希被引用的 tasks/evidence、tasks/runs 文件，故 TASK-029/030/031/033 的 verification_run JSON、TASK-043 的 TASK-043-interaction-report.md、TASK-044 的 TASK-044-split-report.md、TASK-051 的 TASK-051-gate-BEFORE-failures.txt 与 _rev501-harness.diff 的原记录值随之失配；已用逐文件行尾穷举复现每个原记录值（精确命中），证明差异仅行尾、无内容改动或篡改。",
+      "changed": {
+        "quality_digest": [
+          "fb0690f2843d3f69c813693f615bcf525338caa6ea139f41d1c981e807898b22",
+          "029b98886c516e97dbbca3e345d0f0a01c1f0af11c97916744240391b78a23da"
+        ],
+        "ui_evidence_digest": [
+          "72de2a469453f46fe34cee79ef624de880300a85d16ce0b4cb1e7b279f49c9ba",
+          "e7db3a2f71b1e17687112996931d2be1cac8fb353daab75b3c1973a4134c2196"
         ]
       }
     }
