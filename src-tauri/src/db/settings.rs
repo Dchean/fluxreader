@@ -76,7 +76,7 @@ mod tests {
     fn app_settings_helpers_return_defaults_when_unset_or_broken() {
         let conn = conn();
         // 未设置：默认值
-        assert!(app_settings_bool(&conn, "smartDedup", false) == false);
+        assert!(!app_settings_bool(&conn, "smartDedup", false));
         assert_eq!(app_settings_str(&conn, "syncMode", "direct"), "direct");
         // 坏 JSON：默认值（不 panic）
         set_setting(&conn, "app_settings", "{broken").unwrap();
@@ -87,11 +87,16 @@ mod tests {
     #[test]
     fn app_settings_helpers_read_present_values() {
         let conn = conn();
-        set_setting(&conn, "app_settings", r#"{"smartDedup":true,"syncMode":"hybrid","n":1}"#).unwrap();
+        set_setting(
+            &conn,
+            "app_settings",
+            r#"{"smartDedup":true,"syncMode":"hybrid","n":1}"#,
+        )
+        .unwrap();
         assert!(app_settings_bool(&conn, "smartDedup", false));
         assert_eq!(app_settings_str(&conn, "syncMode", "direct"), "hybrid");
         // 类型不符（数字当布尔）→ 默认
-        assert!(app_settings_bool(&conn, "n", true) == true);
+        assert!(app_settings_bool(&conn, "n", true));
         assert!(!app_settings_bool(&conn, "missing", false));
     }
 }

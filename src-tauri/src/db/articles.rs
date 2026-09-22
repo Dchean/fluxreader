@@ -340,7 +340,12 @@ pub fn search_articles(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        rusqlite::params_from_iter(like_args.iter().map(|s| s as &dyn rusqlite::ToSql).chain(std::iter::once(&limit as &dyn rusqlite::ToSql))),
+        rusqlite::params_from_iter(
+            like_args
+                .iter()
+                .map(|s| s as &dyn rusqlite::ToSql)
+                .chain(std::iter::once(&limit as &dyn rusqlite::ToSql)),
+        ),
         article_list_item,
     )?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -786,7 +791,18 @@ mod tests {
     fn early_morning_local_article_counts_as_today() {
         let conn = conn();
         let fid = create_folder(&conn, "F", "article").unwrap();
-        let feed = insert_feed(&conn, "https://f.example/rss", None, "f", None, fid, "inherit", true, false).unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://f.example/rss",
+            None,
+            "f",
+            None,
+            fid,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
 
         let today = Local::now().date_naive();
         let one_am_local = Local
@@ -794,16 +810,39 @@ mod tests {
             .single()
             .expect("01:00 local exists");
         let yesterday_1am = Local
-            .from_local_datetime(&(today - chrono::Duration::days(1)).and_hms_opt(1, 0, 0).unwrap())
+            .from_local_datetime(
+                &(today - chrono::Duration::days(1))
+                    .and_hms_opt(1, 0, 0)
+                    .unwrap(),
+            )
             .single()
             .expect("yesterday 01:00 local exists");
 
-        upsert_article_with_feed(&conn, feed, &na("today-1am", Some(one_am_local.to_rfc3339())), false).unwrap();
-        upsert_article_with_feed(&conn, feed, &na("yesterday-1am", Some(yesterday_1am.to_rfc3339())), false).unwrap();
+        upsert_article_with_feed(
+            &conn,
+            feed,
+            &na("today-1am", Some(one_am_local.to_rfc3339())),
+            false,
+        )
+        .unwrap();
+        upsert_article_with_feed(
+            &conn,
+            feed,
+            &na("yesterday-1am", Some(yesterday_1am.to_rfc3339())),
+            false,
+        )
+        .unwrap();
 
         let counts = feed_counts(&conn).unwrap();
-        let today_count = counts.iter().find(|c| c.feed_id == feed).map(|c| c.today).unwrap_or(0);
-        assert_eq!(today_count, 1, "本地今天 01:00 的文章必须计入 today（N5 修前为 0）");
+        let today_count = counts
+            .iter()
+            .find(|c| c.feed_id == feed)
+            .map(|c| c.today)
+            .unwrap_or(0);
+        assert_eq!(
+            today_count, 1,
+            "本地今天 01:00 的文章必须计入 today（N5 修前为 0）"
+        );
 
         let q = ArticleQuery {
             feed_id: Some(feed),
@@ -816,8 +855,16 @@ mod tests {
             offset: 0,
             with_content: false,
         };
-        let ids: Vec<i64> = list_articles(&conn, &q).unwrap().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids.len(), 1, "only_today 必须只含本地今天 01:00 的文章（N5 修前为 0，昨天的不计入）");
+        let ids: Vec<i64> = list_articles(&conn, &q)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            1,
+            "only_today 必须只含本地今天 01:00 的文章（N5 修前为 0，昨天的不计入）"
+        );
     }
 
     /* ---------- P3[4]：purge_remote_data 必须保住用户自建的空目录 ---------- */
@@ -833,7 +880,11 @@ mod tests {
 
         assert_eq!(feeds, 0, "没有服务端订阅可删");
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [user_folder], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM folders WHERE id = ?1",
+                [user_folder],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(left, 1, "用户自建的空目录必须保留（P3[4] 修前会被误删）");
     }
@@ -861,7 +912,11 @@ mod tests {
 
         assert_eq!(feeds, 1, "服务端订阅被删");
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [remote_folder], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM folders WHERE id = ?1",
+                [remote_folder],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(left, 0, "清空后的服务端分类应删除");
     }
@@ -871,13 +926,27 @@ mod tests {
     fn purge_remote_data_keeps_user_folder_with_local_feed() {
         let mut conn = conn();
         let folder = create_folder(&conn, "本地分类", "article").unwrap();
-        insert_feed(&conn, "https://l.example/feed", None, "L", None, folder, "inherit", false, false)
-            .unwrap();
+        insert_feed(
+            &conn,
+            "https://l.example/feed",
+            None,
+            "L",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
 
         purge_remote_data(&mut conn).unwrap();
 
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM folders WHERE id = ?1", [folder], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM folders WHERE id = ?1",
+                [folder],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(left, 1, "本地订阅所属目录必须保留");
     }
@@ -900,16 +969,33 @@ mod tests {
     fn cleanup_cache_cutoff_is_timezone_normalised() {
         let mut conn = conn();
         let folder = create_folder(&conn, "F", "article").unwrap();
-        let feed = insert_feed(&conn, "https://c.example/feed", None, "C", None, folder, "inherit", false, false).unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://c.example/feed",
+            None,
+            "C",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
 
         // 真实瞬时：7 天 2 小时前（确实超过 7 天阈值）
         let inst = chrono::Utc::now() - chrono::Duration::hours(7 * 24 + 2);
         // 以 +12:00 偏移存储：墙上时间比 UTC 快 12 小时，日期部分因此不早于阈值日期
         let offset = chrono::FixedOffset::east_opt(12 * 3600).unwrap();
-        let stored = inst.with_timezone(&offset).to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
-        assert!(stored.ends_with("+12:00"), "本用例须用 +12:00 偏移，实际: {stored}");
+        let stored = inst
+            .with_timezone(&offset)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+        assert!(
+            stored.ends_with("+12:00"),
+            "本用例须用 +12:00 偏移，实际: {stored}"
+        );
 
-        let (aid, _) = upsert_article_with_feed(&conn, feed, &na("tz-edge", Some(stored)), false).unwrap();
+        let (aid, _) =
+            upsert_article_with_feed(&conn, feed, &na("tz-edge", Some(stored)), false).unwrap();
         set_read(&conn, aid, true).unwrap();
 
         let (deleted, _) = cleanup_cache(&mut conn, 7, "articles").unwrap();
@@ -919,7 +1005,9 @@ mod tests {
             "真实瞬时已超 7 天的文章必须被清理；修前因 cutoff 时区混用 + 文本比较会漏删（P3[5]）"
         );
         let left: i64 = conn
-            .query_row("SELECT COUNT(*) FROM articles WHERE id = ?1", [aid], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM articles WHERE id = ?1", [aid], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(left, 0, "文章应已被清理");
     }
@@ -929,10 +1017,23 @@ mod tests {
     fn cleanup_cache_does_not_delete_recent_articles() {
         let mut conn = conn();
         let folder = create_folder(&conn, "F", "article").unwrap();
-        let feed = insert_feed(&conn, "https://c.example/feed", None, "C", None, folder, "inherit", false, false).unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://c.example/feed",
+            None,
+            "C",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
 
         let recent = chrono::Utc::now() - chrono::Duration::days(1);
-        let (aid, _) = upsert_article_with_feed(&conn, feed, &na("recent", Some(recent.to_rfc3339())), false).unwrap();
+        let (aid, _) =
+            upsert_article_with_feed(&conn, feed, &na("recent", Some(recent.to_rfc3339())), false)
+                .unwrap();
         set_read(&conn, aid, true).unwrap();
 
         let (deleted, _) = cleanup_cache(&mut conn, 7, "articles").unwrap();
@@ -945,10 +1046,23 @@ mod tests {
     fn cleanup_cache_still_deletes_articles_older_than_cutoff() {
         let mut conn = conn();
         let folder = create_folder(&conn, "F", "article").unwrap();
-        let feed = insert_feed(&conn, "https://c.example/feed", None, "C", None, folder, "inherit", false, false).unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://c.example/feed",
+            None,
+            "C",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
 
         let old = chrono::Utc::now() - chrono::Duration::days(9);
-        let (aid, _) = upsert_article_with_feed(&conn, feed, &na("old", Some(old.to_rfc3339())), false).unwrap();
+        let (aid, _) =
+            upsert_article_with_feed(&conn, feed, &na("old", Some(old.to_rfc3339())), false)
+                .unwrap();
         set_read(&conn, aid, true).unwrap();
 
         let (deleted, _) = cleanup_cache(&mut conn, 7, "articles").unwrap();
@@ -971,12 +1085,28 @@ mod tests {
     fn search_articles_negative_limit_is_clamped() {
         let conn = conn();
         let folder = create_folder(&conn, "F", "article").unwrap();
-        let feed = insert_feed(&conn, "https://s.example/feed", None, "S", None, folder, "inherit", false, false).unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://s.example/feed",
+            None,
+            "S",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
         for i in 0..5 {
-            upsert_article_with_feed(&conn, feed, &na_titled(&format!("hit-{i}"), "hit"), false).unwrap();
+            upsert_article_with_feed(&conn, feed, &na_titled(&format!("hit-{i}"), "hit"), false)
+                .unwrap();
         }
         let all = search_articles(&conn, "hit", -1).unwrap();
-        assert_eq!(all.len(), 5, "负数 LIMIT 应回落默认上限（5 条命中全部返回，且不报错）");
+        assert_eq!(
+            all.len(),
+            5,
+            "负数 LIMIT 应回落默认上限（5 条命中全部返回，且不报错）"
+        );
     }
 
     /// 正数 LIMIT 必须真正生效（绑定参数后仍限定行数）。
@@ -984,11 +1114,27 @@ mod tests {
     fn search_articles_respects_limit() {
         let conn = conn();
         let folder = create_folder(&conn, "F", "article").unwrap();
-        let feed = insert_feed(&conn, "https://s.example/feed", None, "S", None, folder, "inherit", false, false).unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://s.example/feed",
+            None,
+            "S",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
         for i in 0..5 {
-            upsert_article_with_feed(&conn, feed, &na_titled(&format!("hit-{i}"), "hit"), false).unwrap();
+            upsert_article_with_feed(&conn, feed, &na_titled(&format!("hit-{i}"), "hit"), false)
+                .unwrap();
         }
         let limited = search_articles(&conn, "hit", 2).unwrap();
-        assert_eq!(limited.len(), 2, "LIMIT 2 必须只返回 2 条（绑定参数后仍生效）");
+        assert_eq!(
+            limited.len(),
+            2,
+            "LIMIT 2 必须只返回 2 条（绑定参数后仍生效）"
+        );
     }
 }

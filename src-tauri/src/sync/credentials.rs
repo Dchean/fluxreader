@@ -172,7 +172,8 @@ pub(super) async fn build_client(
     // 只有「这一轮真的探测过」才落库；命中缓存时无需重复写。
     if cached.is_none() {
         let conn = db.lock().await;
-        if let Err(e) = crate::endpoint_resolve::remember_base(&conn, &protocol, &endpoint, &resolved)
+        if let Err(e) =
+            crate::endpoint_resolve::remember_base(&conn, &protocol, &endpoint, &resolved)
         {
             log::warn!("sync: 端点解析结果落库失败（不影响本次同步）: {e}");
         }

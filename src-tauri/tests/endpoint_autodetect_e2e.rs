@@ -247,7 +247,10 @@ async fn fever_write_path_uses_resolved_endpoint_too() {
 
     server.clear_request_log();
     resolved.mark_read(&[1001]).await.expect("标记已读应成功");
-    resolved.mark_starred(&[1001]).await.expect("标记收藏应成功");
+    resolved
+        .mark_starred(&[1001])
+        .await
+        .expect("标记收藏应成功");
 
     let log = server.request_log();
     assert!(!log.is_empty(), "应发出标记请求");
@@ -372,7 +375,10 @@ async fn second_sync_reuses_cached_endpoint_without_probing() {
         let conn = db.lock().await;
         assert_eq!(
             app_lib::endpoint_resolve::cached_base(&conn, "greader", &server.url()),
-            Some(format!("{}/api/greader.php", server.url().trim_end_matches('/'))),
+            Some(format!(
+                "{}/api/greader.php",
+                server.url().trim_end_matches('/')
+            )),
             "首轮同步后应已把解析结果落库"
         );
     }

@@ -138,7 +138,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.imported, 2);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM folders WHERE name = '导入'"), 1);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM folders WHERE name = '导入'"),
+            1
+        );
         assert_eq!(count(&conn, "SELECT COUNT(*) FROM feeds"), 2);
     }
 
@@ -155,7 +158,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.imported, 2);
-        assert_eq!(count(&conn, "SELECT COUNT(*) FROM folders WHERE name = '技术'"), 1);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM folders WHERE name = '技术'"),
+            1
+        );
     }
 
     /// 重复 URL 跳过（既有行为锚定）
@@ -181,11 +187,9 @@ mod tests {
     fn reimporting_a_url_clears_its_tombstone() {
         let conn = conn();
         db::add_feed_tombstone(&conn, "https://a.example/rss").unwrap();
-        assert!(
-            db::feed_tombstones(&conn)
-                .unwrap()
-                .contains(&"http://a.example/rss".to_string())
-        );
+        assert!(db::feed_tombstones(&conn)
+            .unwrap()
+            .contains(&"http://a.example/rss".to_string()));
         let report = import_feeds(&conn, &[feed("https://a.example/rss", "A", None)]).unwrap();
         assert_eq!(report.imported, 1);
         assert!(

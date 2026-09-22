@@ -350,7 +350,9 @@ fn normalized_url_match_maps_same_article() {
 
     // 远端同文但 http + 无尾斜杠 → 必须匹配到同一篇（规范化键同源同口径）
     let maps = db::sync_match_maps(&conn).unwrap();
-    let matched = maps.url_to_id.get(&db::normalize_url("http://example.com/story"));
+    let matched = maps
+        .url_to_id
+        .get(&db::normalize_url("http://example.com/story"));
     assert_eq!(
         matched.copied(),
         Some(aid),

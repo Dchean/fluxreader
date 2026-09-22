@@ -268,19 +268,26 @@ pub struct RefreshSummary {
     pub failed_feeds: usize,
 }
 
-
 #[cfg(test)]
 mod bulk_read_tests {
     use super::*;
+    use crate::db::{create_folder, insert_feed, upsert_article_with_feed, NewArticle, MIGRATIONS};
     use rusqlite::Connection;
-    use crate::db::{create_folder, insert_feed, upsert_article_with_feed, MIGRATIONS, NewArticle};
 
     fn seeded(n: usize) -> (Connection, Vec<i64>) {
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut conn).unwrap();
         let f = create_folder(&conn, "F", "article").unwrap();
         let feed = insert_feed(
-            &conn, "http://a.example/feed", None, "feed", None, f, "inherit", false, false,
+            &conn,
+            "http://a.example/feed",
+            None,
+            "feed",
+            None,
+            f,
+            "inherit",
+            false,
+            false,
         )
         .unwrap();
         let mut ids = Vec::new();
@@ -307,8 +314,10 @@ mod bulk_read_tests {
     }
 
     fn count_read(c: &Connection) -> i64 {
-        c.query_row("SELECT COUNT(*) FROM articles WHERE is_read = 1", [], |r| r.get(0))
-            .unwrap()
+        c.query_row("SELECT COUNT(*) FROM articles WHERE is_read = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 
     fn queued(c: &Connection) -> Vec<(String, Option<i64>)> {
@@ -316,7 +325,9 @@ mod bulk_read_tests {
             .prepare("SELECT action, article_id FROM sync_queue ORDER BY action, article_id")
             .unwrap();
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)))
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+            })
             .unwrap();
         rows.collect::<Result<Vec<_>, _>>().unwrap()
     }
@@ -397,7 +408,9 @@ mod bulk_read_tests {
         apply_read_bulk(&conn, &[id], false).unwrap();
 
         let is_read: i64 = conn
-            .query_row("SELECT is_read FROM articles WHERE id = ?1", [id], |r| r.get(0))
+            .query_row("SELECT is_read FROM articles WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(is_read, 0, "read=false 必须把文章标回未读");
 

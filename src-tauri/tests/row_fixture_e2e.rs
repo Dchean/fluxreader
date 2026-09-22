@@ -54,13 +54,11 @@ fn row_serialization_matches_fixture() {
     let article_json = serde_json::to_value(&article).expect("ArticleListItem 序列化");
 
     assert_eq!(
-        feed_json,
-        expected["feed_row"],
+        feed_json, expected["feed_row"],
         "FeedRow 序列化漂移：Rust 侧字段变更必须同步 fixture 与 lib/api.ts 镜像"
     );
     assert_eq!(
-        article_json,
-        expected["article_list_item"],
+        article_json, expected["article_list_item"],
         "ArticleListItem 序列化漂移：Rust 侧字段变更必须同步 fixture 与 lib/api.ts 镜像"
     );
 }

@@ -173,6 +173,7 @@ impl MockGReader {
         Ok(server)
     }
 
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
@@ -181,17 +182,20 @@ impl MockGReader {
 
     /// 设定 GReader API 前缀：`""` = Miniflux 形态（站点根）；
     /// `"/api/greader.php"` = FreshRSS 形态（子路径）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_greader_api_prefix(&self, prefix: &str) {
         *self.greader_api_prefix.lock().unwrap() = prefix.to_string();
     }
 
     /// 置位后 edit-tag 返回 500（推送失败，客户端应保留队列待重试）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_fail_edit_tag(&self, fail: bool) {
         self.fail_edit_tag
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 置位后 stream/items/contents 返回 500（TASK-068：pull 分块失败，验证游标守卫）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_fail_item_contents(&self, fail: bool) {
         self.fail_item_contents
             .store(fail, std::sync::atomic::Ordering::SeqCst);
@@ -199,6 +203,7 @@ impl MockGReader {
 
     /// 置位后仅 reading-list 的 stream/items/ids 返回 500（TASK-069 审查 F1：
     /// id 列举失败，验证游标守卫覆盖该路径）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_fail_reading_list_ids(&self, fail: bool) {
         self.fail_reading_list_ids
             .store(fail, std::sync::atomic::Ordering::SeqCst);
@@ -206,24 +211,28 @@ impl MockGReader {
 
     /// 置位后 subscription/quickadd 返回 500（TASK-074：让 push_feeds 失败，
     /// 队项保留在 sync_queue 里 —— 用于验证待推送项的删除保护）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_fail_quick_add(&self, fail: bool) {
         self.fail_quick_add
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 置位后 ClientLogin 一律 401（模拟凭据被拒）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_reject_login(&self, reject: bool) {
         self.reject_login
             .store(reject, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 设定 Fever 端点路径：`""` = `/fever/?api` 形态；`"/api/fever.php"` = FreshRSS 形态。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_fever_endpoint(&self, endpoint: &str) {
         *self.fever_endpoint.lock().unwrap() = endpoint.to_string();
     }
 
     /// TASK-074（P3-11）：从远端订阅列表中移除某个 feed id —— 模拟「用户在服务端退订」。
     /// 只动 subscriptions 与 folders，不触碰本地库，用于验证 pull 的删除分支。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn remove_remote_subscription(&self, feed_id: &str) {
         self.subscriptions
             .lock()
@@ -232,6 +241,7 @@ impl MockGReader {
     }
 
     /// TASK-074：读取当前远端订阅列表（断言删除后远端已无该源）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn remote_subscription_ids(&self) -> Vec<String> {
         self.subscriptions
             .lock()
@@ -242,27 +252,32 @@ impl MockGReader {
     }
 
     /// 设定 Fever 返回的 api_version（FreshRSS 实测为 4）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_fever_api_version(&self, v: i64) {
         *self.fever_api_version.lock().unwrap() = v;
     }
 
     /// 置位后 Fever 返回 auth=0。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_fever_reject_auth(&self, reject: bool) {
         self.fever_reject_auth
             .store(reject, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 收到的请求记录（`"{METHOD} {path}"`）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn request_log(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
 
     /// 清空请求记录（用于「只看这一段有没有再探测」）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn clear_request_log(&self) {
         self.requests.lock().unwrap().clear();
     }
 
     /// 命中 ClientLogin 的请求次数（探测次数的直接证据）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn login_request_count(&self) -> usize {
         self.requests
             .lock()
@@ -280,6 +295,7 @@ impl MockGReader {
     }
 
     /// 添加条目，返回 mock 分配的 entry id。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn add_entry_ret(
         &self,
         feed_id: i64,
@@ -301,6 +317,7 @@ impl MockGReader {
     /// 同 add_entry_ret，但可指定 published（unix 秒，模拟「原文发布时间早、
     /// 但刚被抓取入库」的历史文章）。changed_at 固定为现在（抓取时刻），
     /// 与真实 Google Reader 语义一致：ot 游标按 crawl/change 时间过滤，而非 published。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn add_entry_with_published(
         &self,
         feed_id: i64,
@@ -404,7 +421,10 @@ async fn handle_conn(
 
     // TASK-059：先记录请求，再做前缀判定——被拒绝的探测请求也要看得见，
     // 否则「探测有界」「不再重复探测」这两条断言无从取证。
-    srv.requests.lock().unwrap().push(format!("{method} {path}"));
+    srv.requests
+        .lock()
+        .unwrap()
+        .push(format!("{method} {path}"));
 
     // TASK-059：模拟「两种后端把 API 放在不同路径」。
     // 配置了前缀时，非该前缀下的 GReader/Fever 端点一律 404——
@@ -568,7 +588,10 @@ fn route(
         // 只回信封的话，客户端只能证明连接成功，证明不了后续调用打对了地址。
         ("POST", p) if p.contains("fever") => {
             let v = *srv.fever_api_version.lock().unwrap();
-            let auth = if srv.fever_reject_auth.load(std::sync::atomic::Ordering::SeqCst) {
+            let auth = if srv
+                .fever_reject_auth
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 0
             } else {
                 1
@@ -645,7 +668,10 @@ fn route(
                 .load(std::sync::atomic::Ordering::SeqCst)
                 && stream.contains("reading-list")
             {
-                return (500, r#"{"error_message":"injected reading-list failure"}"#.into());
+                return (
+                    500,
+                    r#"{"error_message":"injected reading-list failure"}"#.into(),
+                );
             }
             let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -689,7 +715,10 @@ fn route(
         }
         // 条目正文（POST，i 重复参数）
         ("POST", p) if p.ends_with("/reader/api/0/stream/items/contents") => {
-            if srv.fail_item_contents.load(std::sync::atomic::Ordering::SeqCst) {
+            if srv
+                .fail_item_contents
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
                 // TASK-068 注入：pull 分块失败（500）
                 return (500, "Internal Server Error".to_string());
             }
@@ -737,7 +766,10 @@ fn route(
         // edit-tag：标读/收藏（a=加 tag, r=删 tag）
         ("POST", p) if p.ends_with("/reader/api/0/edit-tag") => {
             if srv.fail_edit_tag.load(std::sync::atomic::Ordering::SeqCst) {
-                return (500, r#"{"error_message":"injected edit-tag failure"}"#.into());
+                return (
+                    500,
+                    r#"{"error_message":"injected edit-tag failure"}"#.into(),
+                );
             }
             let form = parse_form(body);
             let ids: Vec<i64> = form
@@ -784,7 +816,10 @@ fn route(
         ("POST", p) if p.ends_with("/reader/api/0/subscription/quickadd") => {
             // TASK-074 故障注入：push 失败 → 队项保留在 sync_queue
             if srv.fail_quick_add.load(std::sync::atomic::Ordering::SeqCst) {
-                return (500, r#"{"error_message":"injected quickadd failure"}"#.into());
+                return (
+                    500,
+                    r#"{"error_message":"injected quickadd failure"}"#.into(),
+                );
             }
             let form = parse_form(body);
             let url = form

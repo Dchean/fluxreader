@@ -272,10 +272,9 @@ pub(super) async fn pull_feeds(
                         None => match db::ensure_uncategorized_folder(&conn) {
                             Ok(fid) => fid,
                             Err(e) => {
-                                report.errors.push(format!(
-                                    "订阅 {} 建目录失败: {e}",
-                                    rf.url
-                                ));
+                                report
+                                    .errors
+                                    .push(format!("订阅 {} 建目录失败: {e}", rf.url));
                                 continue;
                             }
                         },
@@ -339,9 +338,12 @@ pub(super) async fn pull_feeds(
             .collect();
         // 查询失败不阻塞本轮（订阅层是尽力而为）：记错误并跳过删除段
         let candidates: Vec<(i64, String)> = match conn
-            .prepare("SELECT id, feed_url FROM feeds WHERE origin = 'remote' AND remote_id IS NOT NULL")
+            .prepare(
+                "SELECT id, feed_url FROM feeds WHERE origin = 'remote' AND remote_id IS NOT NULL",
+            )
             .and_then(|mut stmt| {
-                let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
                 rows.collect::<Result<Vec<_>, _>>()
             }) {
             Ok(v) => v,
@@ -388,9 +390,9 @@ pub(super) async fn pull_feeds(
         // 地址型队项还要能匹配到具体的源，统一折算成 feed_id，供下面单条件判断
         if !pending_urls.is_empty() {
             if let Ok(mut stmt) = conn.prepare("SELECT id, feed_url FROM feeds") {
-                if let Ok(rows) = stmt.query_map([], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-                }) {
+                if let Ok(rows) =
+                    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                {
                     for row in rows.flatten() {
                         if pending_urls.contains(&db::normalize_url(&row.1)) {
                             pending_feed_ids.insert(row.0);
@@ -410,7 +412,9 @@ pub(super) async fn pull_feeds(
             match db::delete_feed(&conn, feed_id) {
                 Ok(()) => {
                     report.removed_feeds += 1;
-                    log::info!("pull_feeds: removed locally-deleted remote subscription {feed_url}");
+                    log::info!(
+                        "pull_feeds: removed locally-deleted remote subscription {feed_url}"
+                    );
                 }
                 Err(e) => report
                     .errors

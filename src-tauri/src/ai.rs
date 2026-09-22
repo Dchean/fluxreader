@@ -342,10 +342,9 @@ mod tests {
     /// 未知 preset 且缺 baseUrl（只有 model）→ 仍须报错（不能替用户选厂商地址）。
     #[test]
     fn unknown_preset_with_only_model_is_rejected() {
-        assert!(AiConfig::from_json(
-            r#"{"preset":"azure","apiKey":"sk-x","model":"gpt-4o"}"#
-        )
-        .is_err());
+        assert!(
+            AiConfig::from_json(r#"{"preset":"azure","apiKey":"sk-x","model":"gpt-4o"}"#).is_err()
+        );
     }
 
     #[test]

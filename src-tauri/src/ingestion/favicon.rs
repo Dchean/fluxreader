@@ -5,8 +5,9 @@ use reqwest::Client;
 
 /// favicon 发现负缓存（feed_id 集合）：发现失败的源本进程生命周期内不重试。
 /// 成功的 icon 已写库（feeds.favicon_url），不依赖此表。
-pub(super) static FAVICON_TRIED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<i64>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+pub(super) static FAVICON_TRIED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<i64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 /// favicon 自动发现：先取站点 HTML 解析 `<link rel~=icon>`（svg/png 优先），
 /// 失败或无 link 则退回 `<origin>/favicon.ico`。返回通过 GET 探活
@@ -184,4 +185,3 @@ mod favicon_tests {
         assert_eq!(extract_html_attr("data-href='no'", "href"), None);
     }
 }
-

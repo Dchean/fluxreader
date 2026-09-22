@@ -97,8 +97,14 @@ async fn miniflux_sync_end_to_end() {
         .await
         .expect("sync should succeed");
     let conn = db.lock().await;
-    println!("sync report: pushed_states={} pushed_feeds={} pulled_feeds={} pulled_entries={} merged={}",
-        report.pushed_states, report.pushed_feeds, report.pulled_feeds, report.pulled_entries, report.merged_states);
+    println!(
+        "sync report: pushed_states={} pushed_feeds={} pulled_feeds={} pulled_entries={} merged={}",
+        report.pushed_states,
+        report.pushed_feeds,
+        report.pulled_feeds,
+        report.pulled_entries,
+        report.merged_states
+    );
 
     // URL 碰撞合并：本地 feed 绑定了远端 feed id 10
     let bound: Option<i64> = conn
@@ -330,7 +336,9 @@ P3-11（TASK-074，DEC-req104-p3-11-remote-unsub-20260920）：
 本地直连源（origin='local'）与未绑定源一律保留。
 =========================================================== */
 
-async fn setup_remote_unsub(name: &str) -> (
+async fn setup_remote_unsub(
+    name: &str,
+) -> (
     std::sync::Arc<tokio::sync::Mutex<rusqlite::Connection>>,
     reqwest::Client,
     std::sync::Arc<MockGReader>,
@@ -394,7 +402,9 @@ async fn remote_unsubscribe_removes_local_remote_feed() {
     // 服务端退订 feed 11
     server.remove_remote_subscription("feed/11");
     assert!(
-        !server.remote_subscription_ids().contains(&"feed/11".to_string()),
+        !server
+            .remote_subscription_ids()
+            .contains(&"feed/11".to_string()),
         "remote no longer lists feed 11"
     );
 
@@ -450,7 +460,9 @@ async fn remote_unsubscribe_keeps_local_origin_feed() {
 
     // 服务端退掉 feed 10
     server.remove_remote_subscription("feed/10");
-    sync::feeds_phase(&db, &http).await.expect("pull after unsub");
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("pull after unsub");
 
     let conn = db.lock().await;
     assert!(
@@ -488,7 +500,9 @@ async fn remote_unsubscribe_keeps_feed_with_pending_queue_item() {
     //  保护就无从验证。注入失败正是「本地变更尚未回传」的真实形态。）
     server.remove_remote_subscription("feed/11");
     server.set_fail_quick_add(true);
-    let report = sync::feeds_phase(&db, &http).await.expect("pull after unsub");
+    let report = sync::feeds_phase(&db, &http)
+        .await
+        .expect("pull after unsub");
     server.set_fail_quick_add(false);
 
     let conn = db.lock().await;
@@ -597,12 +611,17 @@ async fn remote_unsubscribe_keeps_feed_with_article_scoped_pending() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1, "precondition: an unsent article-scoped queue row must exist");
+        assert_eq!(
+            n, 1,
+            "precondition: an unsent article-scoped queue row must exist"
+        );
     }
 
     // 服务端退订该源
     server.remove_remote_subscription("feed/11");
-    let report = sync::feeds_phase(&db, &http).await.expect("pull after unsub");
+    let report = sync::feeds_phase(&db, &http)
+        .await
+        .expect("pull after unsub");
 
     let conn = db.lock().await;
     assert_eq!(
@@ -625,7 +644,10 @@ async fn remote_unsubscribe_keeps_feed_with_article_scoped_pending() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(still_queued, 1, "the unsent state must not be silently dropped");
+    assert_eq!(
+        still_queued, 1,
+        "the unsent state must not be silently dropped"
+    );
     assert_eq!(
         report.removed_feeds, 0,
         "pending-protected feed must not be counted as removed"

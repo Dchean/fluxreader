@@ -114,12 +114,9 @@ pub async fn sync_save(
         db::set_setting(&conn, "greader_password", &password)?;
         // 端点解析结果落库（TASK-059）：设置页刚刚已验证过，同步侧直接复用，
         // 不必每轮再探测一遍。`greader_endpoint` 存的仍是用户原始输入。
-        if let Err(e) = crate::endpoint_resolve::remember_base(
-            &conn,
-            &protocol,
-            &endpoint,
-            &resolved_base,
-        ) {
+        if let Err(e) =
+            crate::endpoint_resolve::remember_base(&conn, &protocol, &endpoint, &resolved_base)
+        {
             log::warn!("sync: 端点解析结果落库失败（不影响本次连接）: {e}");
         }
         // 新连接：清增量游标（GReader 时间戳 / Fever 条目 id），让首同步从全量开始

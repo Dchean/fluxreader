@@ -72,7 +72,9 @@ pub(super) async fn pull_entries_greader(
                 }
                 Err(_) => {
                     id_failures += 1;
-                    report.errors.push(format!("拉取条目 id 分页中断：无法解析 continuation={c}"));
+                    report
+                        .errors
+                        .push(format!("拉取条目 id 分页中断：无法解析 continuation={c}"));
                     break;
                 }
             },

@@ -301,9 +301,7 @@ async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
         let conn = db.lock().await;
         let tombstones = db::feed_tombstones(&conn).unwrap();
         assert!(
-            tombstones
-                .iter()
-                .any(|u| u.contains("local_feed.xml")),
+            tombstones.iter().any(|u| u.contains("local_feed.xml")),
             "2xx 但未确认远端已删除时，删除墓碑必须保留（TASK-055）"
         );
     }
@@ -321,10 +319,7 @@ async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
                 |r| r.get::<_, i64>(0),
             )
             .unwrap();
-        assert_eq!(
-            revived, 0,
-            "2xx 但远端未删除时不得复活已删订阅（TASK-055）"
-        );
+        assert_eq!(revived, 0, "2xx 但远端未删除时不得复活已删订阅（TASK-055）");
     }
 
     // ③ 远端最终确认删除后：墓碑才应由 pull 收敛清除（唯一有证据的清除条件）
@@ -597,9 +592,7 @@ async fn pull_feed_failure_is_reported_not_swallowed() {
         categories: vec![],
     }];
 
-    let report = sync::feeds_phase(&db, &http)
-        .await
-        .expect("feeds phase");
+    let report = sync::feeds_phase(&db, &http).await.expect("feeds phase");
 
     let conn = db.lock().await;
     let local_feeds: i64 = conn

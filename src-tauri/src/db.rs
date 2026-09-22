@@ -51,12 +51,11 @@ pub use sync_map::{
     feed_exists_by_url, feed_id_by_url, feed_id_by_url_normalized, find_folder_by_name,
     folder_exists, get_article_content_html, get_article_for_summary, get_article_for_translation,
     get_article_remote_id, get_article_url, get_first_folder_id, last_sync_entry_id, last_sync_ts,
-    list_unbound_local_feeds,
-    list_unread_ids_scoped, set_article_remote_id, set_feed_remote_id, set_last_sync_entry_id,
-    set_last_sync_ts, sync_mark_read_if_unread, sync_mark_starred_if_unstarred,
-    sync_mark_unread_if_read, sync_mark_unstarred_if_starred, sync_match_maps,
-    sync_set_article_status, update_article_fulltext, update_article_image_if_empty,
-    update_feed_title_if_empty, SyncMatchMaps,
+    list_unbound_local_feeds, list_unread_ids_scoped, set_article_remote_id, set_feed_remote_id,
+    set_last_sync_entry_id, set_last_sync_ts, sync_mark_read_if_unread,
+    sync_mark_starred_if_unstarred, sync_mark_unread_if_read, sync_mark_unstarred_if_starred,
+    sync_match_maps, sync_set_article_status, update_article_fulltext,
+    update_article_image_if_empty, update_feed_title_if_empty, SyncMatchMaps,
 };
 pub use sync_queue::{
     enqueue_sync, prune_stale_unbound, prune_sync, purge_remove_feed_zombies, take_sync_queue,

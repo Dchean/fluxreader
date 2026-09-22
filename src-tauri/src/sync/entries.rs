@@ -240,9 +240,10 @@ fn upsert_remote_entry(
             report.pulled_entries += 1;
         }
         Err(err) => {
-            report
-                .errors
-                .push(format!("拉取条目 {} 建本地失败: {err}", item_url(e).unwrap_or_default()));
+            report.errors.push(format!(
+                "拉取条目 {} 建本地失败: {err}",
+                item_url(e).unwrap_or_default()
+            ));
         }
     }
 }

@@ -13,7 +13,14 @@ use mock_greader::MockGReader;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-async fn setup(name: &str) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client, Arc<MockGReader>, std::path::PathBuf) {
+async fn setup(
+    name: &str,
+) -> (
+    Arc<Mutex<rusqlite::Connection>>,
+    reqwest::Client,
+    Arc<MockGReader>,
+    std::path::PathBuf,
+) {
     let server = MockGReader::start().await.expect("start mock server");
     let tmp = std::env::temp_dir().join(format!(
         "fluxreader_cursor_{}_{}_{}.db",
@@ -47,7 +54,9 @@ async fn pull_chunk_failure_keeps_last_sync_ts() {
     }
 
     server.set_fail_item_contents(true);
-    let report = sync::states_phase(&db, &http, false).await.expect("states_phase ok");
+    let report = sync::states_phase(&db, &http, false)
+        .await
+        .expect("states_phase ok");
     assert!(
         report.errors.iter().any(|e| e.contains("拉取条目正文失败")),
         "分块失败必须进入 report.errors"
@@ -63,14 +72,13 @@ async fn pull_chunk_failure_keeps_last_sync_ts() {
 
     // 解除注入：下一轮重拉同一窗口，条目合并、游标正常推进
     server.set_fail_item_contents(false);
-    let report2 = sync::states_phase(&db, &http, false).await.expect("states_phase ok");
+    let report2 = sync::states_phase(&db, &http, false)
+        .await
+        .expect("states_phase ok");
     assert!(report2.errors.is_empty(), "恢复后不应再有错误");
     {
         let conn = db.lock().await;
-        assert!(
-            db::last_sync_ts(&conn).unwrap() > t0,
-            "恢复后游标正常推进"
-        );
+        assert!(db::last_sync_ts(&conn).unwrap() > t0, "恢复后游标正常推进");
     }
 
     let _ = std::fs::remove_file(&tmp);
@@ -88,7 +96,9 @@ async fn pull_success_advances_last_sync_ts() {
         db::set_last_sync_ts(&conn, t0).unwrap();
     }
 
-    let report = sync::states_phase(&db, &http, false).await.expect("states_phase ok");
+    let report = sync::states_phase(&db, &http, false)
+        .await
+        .expect("states_phase ok");
     assert!(report.errors.is_empty(), "正常路径不应有错误");
     {
         let conn = db.lock().await;
@@ -119,7 +129,9 @@ async fn pull_id_listing_failure_keeps_last_sync_ts() {
 
     // 仅 reading-list 主列举失败：read/starred 对账仍成功（隔离被验证的路径）
     server.set_fail_reading_list_ids(true);
-    let report = sync::states_phase(&db, &http, false).await.expect("states_phase ok");
+    let report = sync::states_phase(&db, &http, false)
+        .await
+        .expect("states_phase ok");
     assert!(
         report.errors.iter().any(|e| e.contains("拉取条目 id 失败")),
         "id 列举失败必须进入 report.errors"
@@ -146,7 +158,9 @@ async fn pull_id_listing_failure_keeps_last_sync_ts() {
 
     // 解除注入：下一轮重拉同一窗口，条目合并、游标正常推进（守卫不永久卡死）
     server.set_fail_reading_list_ids(false);
-    let report2 = sync::states_phase(&db, &http, false).await.expect("states_phase ok");
+    let report2 = sync::states_phase(&db, &http, false)
+        .await
+        .expect("states_phase ok");
     assert!(report2.errors.is_empty(), "恢复后不应再有错误");
     {
         let conn = db.lock().await;

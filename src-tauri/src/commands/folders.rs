@@ -203,14 +203,7 @@ fn persist_new_feed(
     // 墓碑。此前墓碑只在 pull 的「远端不再列出」分支清除，重新添加的源被永久
     // 压制：pull 跳过绑定、其未推送状态 30 天后被 prune_stale_unbound 物理删除。
     db::remove_feed_tombstone(conn, feed_url)?;
-    db::set_feed_fetch_state(
-        conn,
-        feed_id,
-        false,
-        None,
-        etag,
-        last_modified,
-    )?;
+    db::set_feed_fetch_state(conn, feed_id, false, None, etag, last_modified)?;
     let dedup = read_dedup_flag(conn);
     for a in &parsed.articles {
         db::upsert_article_with_feed(conn, feed_id, a, dedup)?;
@@ -254,7 +247,9 @@ mod tests {
     fn republishing_a_url_clears_its_tombstone() {
         let conn = test_conn();
         db::add_feed_tombstone(&conn, "https://f.example/rss").unwrap();
-        assert!(db::feed_tombstones(&conn).unwrap().contains(&"http://f.example/rss".to_string()));
+        assert!(db::feed_tombstones(&conn)
+            .unwrap()
+            .contains(&"http://f.example/rss".to_string()));
 
         let parsed = minimal_parsed();
         let row = persist_new_feed(
@@ -273,7 +268,9 @@ mod tests {
         .unwrap();
         assert_eq!(row.feed_url, "https://f.example/rss");
         assert!(
-            !db::feed_tombstones(&conn).unwrap().contains(&"http://f.example/rss".to_string()),
+            !db::feed_tombstones(&conn)
+                .unwrap()
+                .contains(&"http://f.example/rss".to_string()),
             "重新添加后墓碑必须清除（N4：否则 pull 永久跳过该源）"
         );
     }
@@ -284,11 +281,31 @@ mod tests {
         let conn = test_conn();
         let parsed = minimal_parsed();
         persist_new_feed(
-            &conn, "https://f.example/rss", &parsed, None, None, None, None, "inherit", true, false, false,
+            &conn,
+            "https://f.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            true,
+            false,
+            false,
         )
         .unwrap();
         let err = persist_new_feed(
-            &conn, "https://f.example/rss", &parsed, None, None, None, None, "inherit", true, false, false,
+            &conn,
+            "https://f.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            true,
+            false,
+            false,
         )
         .unwrap_err();
         assert_eq!(err.code, "duplicate");
@@ -303,7 +320,17 @@ mod tests {
         let conn = test_conn();
         let parsed = minimal_parsed();
         persist_new_feed(
-            &conn, "https://f.example/rss", &parsed, None, None, None, None, "inherit", true, false, false,
+            &conn,
+            "https://f.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            true,
+            false,
+            false,
         )
         .unwrap();
 
