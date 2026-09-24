@@ -278,7 +278,7 @@ export const api = {
   async markAllRead(
     feedId: number | null,
     folderId: number | null,
-    opts?: { starredOnly?: boolean; sinceMs?: number },
+    opts?: { starredOnly?: boolean; sinceMs?: number; layout?: string },
   ): Promise<number | null> {
     const inv = await getInvoke();
     return inv
@@ -287,6 +287,7 @@ export const api = {
           folderId,
           starredOnly: opts?.starredOnly ?? false,
           sinceMs: opts?.sinceMs ?? null,
+          layout: opts?.layout ?? null,
         }) as number)
       : null;
   },

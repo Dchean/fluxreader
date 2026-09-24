@@ -804,6 +804,20 @@ await (async () => {
     && fFeed.entries.filter((a) => a.feedId === '12').every((a) => a.isRead)
     && fFeed.entries.find((a) => a.id === '101')?.isRead === false);
 
+  /* 布局维度：后端范围必须与当前布局同口径——修前不带 layout，文章布局点一次
+     会把社交/通知/播客/画廊布局的源一并标读并逐条推远端（审计 round-3 真机：
+     可见 14 张、后端写入 74 条，覆盖 5 个布局）。 */
+  await bootFixture();
+  store.getState().selectLayout('social');
+  store.setState({ activeViewFilter: 'all', timelineFilter: 'unread', openedReadIds: {} });
+  invokeCalls.length = 0;
+  store.getState().markCurrentViewAllRead();
+  await nTick(0);
+  const fLayoutCall = invokeCalls.find((c) => c.cmd === 'mark_all_read');
+  checkNew('(f) 全部已读带当前布局：layout=social（缺此参数则跨布局误标并推远端）',
+    fLayoutCall?.args.layout === 'social' && fLayoutCall?.args.feedId === null
+    && fLayoutCall?.args.folderId === null);
+
   await bootFixture();
   store.setState({ dataMode: 'mock', activeViewFilter: 'all', timelineFilter: 'unread', activeFeedFilter: 'all' });
   invokeCalls.length = 0;
@@ -1561,6 +1575,19 @@ await (async () => {
     store.getState().entries.find((a) => a.id === '201')?.translatedContent === '<b>半截'
     && store.getState().rawTranslatedIds['201'] === true);
 
+  /* 与上一条成对：失败时**无任何 delta**（未消毒产物为空）⇒ 标记必须清除。
+     留着会让后续水合写回的 DB 消毒译文走纯文本分支（卡片字面显示 <p>…</p>，
+     即 P2-9 的标记粘连）；两条一起才锁定「标记只在有未消毒产物时才保留」。 */
+  await bootFixture();
+  detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
+  aiTr = { deltas: [], error: null, reject: { message: 'down' }, finish: true, holdIds: [] };
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(l2) 失败且无未消毒半截：标记清除（否则水合写回的消毒译文被按纯文本渲染）',
+    store.getState().rawTranslatedIds['201'] === undefined
+    && store.getState().entries.find((a) => a.id === '201')?.translatedContent === ''
+    && store.getState().translateErrors['201'] === 'AI 服务未配置或不可达');
+
   /* ---------- (n7) TASK-065：锚定打开复位阅读视图标志（与 selectArticle 同口径） ---------- */
   await bootFixture();
   store.setState({ isShowingTranslatedProse: true, isRawRenderMode: true, showFulltext: true, activeArticleId: null });
@@ -1587,6 +1614,30 @@ await (async () => {
   store.getState().selectArticle('101');
   await nTick(10);
   checkNew('(p2) 打开文章标读失败必须可见（修前静默，重启后回退未读）',
+    store.getState().toasts.some((t) => t.text.startsWith('标读失败：')));
+
+  /* (p2b) CF-04：卡片路径（SocialCard/NotifCard/GalleryCard/右键菜单共用的唯一入口）
+     标读失败必须回滚本地乐观置位并可见——修前乐观置位后静默，重启回退未读。 */
+  await bootFixture();
+  rejectCmds.add('set_read');
+  store.setState({ toasts: [] });
+  const p2bBefore = store.getState().entries.find((e) => e.id === '101')?.isRead;
+  store.getState().toggleEntryFlag('101', 'isRead');
+  checkNew('(p2b) 卡片路径乐观置位：点下去立即生效（未等落库）',
+    store.getState().entries.find((e) => e.id === '101')?.isRead === !p2bBefore);
+  await nTick(20);
+  checkNew('(p2b) 卡片路径标读失败：回滚到点击前状态 + 失败 toast + 未读计数复原',
+    store.getState().entries.find((e) => e.id === '101')?.isRead === p2bBefore
+    && store.getState().feedCounts.get('10')?.unread === 3
+    && store.getState().toasts.some((t) => t.text.startsWith('标读保存失败：')));
+
+  /* (p2c) CF-03：搜索/命令面板锚定打开（anchorToArticle）的标读失败同样可见 */
+  await bootFixture();
+  rejectCmds.add('set_read');
+  store.setState({ toasts: [], settings: { ...store.getState().settings, markReadOnOpen: true } });
+  await store.getState().anchorToArticle('101');
+  await nTick(20);
+  checkNew('(p2c) 锚定打开标读失败必须可见（修前无声：本地已置读、库里没有）',
     store.getState().toasts.some((t) => t.text.startsWith('标读失败：')));
 
   await bootFixture();
@@ -2144,6 +2195,37 @@ await (async () => {
     && s6D.articlesLimit === 40 && s6D.articlesExhausted === true);
   checkNew('(s6) per-scope 游标并存：源A 的 40 与源D 的 40 各自记账，互不覆盖',
     s6D.articlesCursor['12'] === 40 && s6D.articlesCursor['10'] === 40);
+
+  /* ---------- (s7) 排序切换：游标含义随 newest_first 翻转 ⇒ 必须按新排序重拉 ----------
+     只翻转排序键而不重拉时，已加载的是「最新端」首页，而下一页按 oldest 语义取
+     的是「最老端」：整段文章不可达 + 重复卡片（审计 round-1「排序切换游标错位」）。
+     该缺陷在 P0-1（后端此前不认 newest_first）修好后才真正可达。 */
+  await resetStore();
+  viewEntriesCache.clear();
+  const s7Rows = [];
+  for (let i = 0; i < 600; i += 1) {
+    s7Rows.push(mkRow({ id: 5000 + i, feed_id: 10, title: `T${i}`, published_at: iso(NOW - i * 1000) }));
+  }
+  backendRows = s7Rows;
+  store.getState().selectFeed('10');
+  await store.getState().reloadFromBackend();
+  checkNew('(s7) 前置：源A 600 条，newest 首批 = 最新端 500 条（首条 id 5000、游标 500、未到底）',
+    store.getState().entries.length === 500 && store.getState().entries[0]?.id === '5000'
+    && store.getState().articlesCursor['10'] === 500 && store.getState().articlesExhausted === false);
+  invokeCalls.length = 0;
+  store.getState().toggleTimelineSort();
+  await nTick(30);
+  const s7Call = invokeCalls.find((c) => c.cmd === 'list_articles');
+  const s7 = store.getState();
+  checkNew('(s7) 切换「最早」：按新排序重拉该范围首页（feed_id=10 / offset=0 / newest_first=false），游标与 entries 同一次写入',
+    s7Call?.args.args.feed_id === 10 && s7Call?.args.args.folder_id === null
+    && s7Call?.args.args.offset === 0 && s7Call?.args.args.newest_first === false
+    && s7.entries.length === 500 && s7.articlesLimit === 500 && s7.articlesCursor['10'] === 500);
+  checkNew('(s7) 重拉后的首批换到另一端（首条 = 全库最老 id 5599），不再是最新端快照',
+    s7.entries[0]?.id === '5599' && s7.entries[499]?.id === '5100'
+    && s7.entries.every((e) => e.id !== '5000'));
+  checkNew('(s7) 排序键翻转且已读保留快照清空（与视图/范围切换同口径）',
+    s7.timelineSort === 'oldest' && Object.keys(s7.openedReadIds).length === 0);
 
   /* ============================================================
      TASK-052 §A/B：口径修复的可观察判据（同一组判据在修前/修后分别跑过）

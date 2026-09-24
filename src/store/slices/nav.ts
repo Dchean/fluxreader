@@ -142,11 +142,23 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       openedReadIds: {},
     })),
 
-  toggleTimelineSort: () =>
+  /* 排序方向决定 offset 的含义（scopeQueryArgs 的 newest_first）：只翻转排序键
+     而不重拉，已加载的快照（旧排序的首批）会与新排序的下一页错位——继续翻页
+     取回的是另一端的文章，整段不可达 + 重复卡片（审计「排序切换游标错位」）。
+     故丢弃各视图快照缓存，并按新排序重拉：reload 落地时原子改写 entries 与
+     per-scope 游标（游标含义已随排序翻转，必须与 entries 同一次写入）。
+     不清空 entries：本地选择器先按新排序就位（零延迟、无空白闪烁），重拉完成后
+     整体替换——与 selectView 缓存命中路径同构。 */
+  toggleTimelineSort: () => {
+    viewEntriesCache.clear();
     set((s) => ({
       timelineSort: s.timelineSort === 'newest' ? 'oldest' : 'newest',
       openedReadIds: {},
-    })),
+    }));
+    const view = get().activeViewFilter;
+    if (view !== 'all') void get().reloadFilteredEntries(view);
+    else void get().reloadFromBackend();
+  },
 
   markCurrentViewAllRead: () => {
     const ids = new Set(selectVisibleEntries(get()).map((i) => i.id));
@@ -161,9 +173,10 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       const view = get().activeViewFilter;
       const starredOnly = view === 'starred';
       const sinceMs = view === 'today' ? startOfLocalDayMs() : undefined;
+      const layout = get().activeContentLayout;
       /* TASK-067 N10：全部已读失败必须可见——此前静默失败会让本地已全标读、
          计数已扣，重启后全部回退未读 */
-      void api.markAllRead(feedId, folderId, { starredOnly, sinceMs }).catch(() => {
+      void api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout }).catch(() => {
         get().showToast('全部已读未能保存，重启后可能回退');
       });
     }

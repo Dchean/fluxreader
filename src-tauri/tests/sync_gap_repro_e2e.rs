@@ -813,8 +813,8 @@ async fn offline_mark_all_read_queued_and_pushed_after_connect() {
             sync::read_credentials(&conn).is_none(),
             "前置条件：离线阶段必须未配置同步凭据"
         );
-        let ids = db::list_unread_ids_scoped(&conn, None, None, false, None).unwrap();
-        let n = app_lib::commands::apply_mark_all_read(&conn, None, None, false, None)
+        let ids = db::list_unread_ids_scoped(&conn, None, None, false, None, None).unwrap();
+        let n = app_lib::commands::apply_mark_all_read(&conn, None, None, false, None, None)
             .expect("mark_all_read (offline)");
         (n, ids)
     };

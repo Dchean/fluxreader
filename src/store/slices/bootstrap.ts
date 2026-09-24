@@ -312,7 +312,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const { settings: stSettings, dataMode: stMode } = get();
     const target = get().entries.find((a) => a.id === articleId);
     if (stMode === 'tauri' && stSettings.markReadOnOpen && target && !target.isRead) {
-      void api.setRead(Number(articleId), true);
+      void api.setRead(Number(articleId), true).catch((e) => {
+        get().showToast(`标读失败：${extractError(e)}`);
+      });
       markEntriesRead(new Set([articleId]));
     }
     // 打开文章：触发智能全文（与 selectArticle 一致）

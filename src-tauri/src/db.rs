@@ -26,10 +26,10 @@ mod sync_queue;
 mod url_norm;
 
 pub use articles::{
-    article_index, articles_without_cover, cleanup_cache, clear_dedup_tombstones, feed_counts,
-    get_article, get_articles, list_articles, mark_all_read, purge_remote_data, search_articles,
-    set_article_ai_fields, set_read, set_starred, upsert_article_with_feed, ArticleListItem,
-    ArticleQuery, ArticleRow, FeedCounts, NewArticle,
+    article_index, articles_without_cover, cleanup_cache, clear_article_cover_if_matches,
+    clear_dedup_tombstones, feed_counts, get_article, get_articles, list_articles, mark_all_read,
+    purge_remote_data, search_articles, set_article_ai_fields, set_read, set_starred,
+    upsert_article_with_feed, ArticleListItem, ArticleQuery, ArticleRow, FeedCounts, NewArticle,
 };
 pub use feeds::{
     add_feed_tombstone, delete_feed, feed_remote_info, feed_tombstones, feeds_all_ids,

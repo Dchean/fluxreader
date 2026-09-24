@@ -671,19 +671,48 @@ pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
 /// 这里只取直连源（source='direct'）的条目——Miniflux 源在入库时已用
 /// 正文第一图兜底，无需再抓文章页。limit 限制单轮批处理量（避免启动时
 /// 一次性扫全库 + 轰炸源站）。
-pub fn articles_without_cover(conn: &Connection, limit: i64) -> AppResult<Vec<(i64, String)>> {
+///
+/// offset 供调用方**推进候选窗口**（REQ-106①）：补全每轮只看最新 limit 条，
+/// 若这些条目的文章页全部拿不到 og:image，更老的候选就永远轮不到。按
+/// (limit, offset) 分页扫描可让调用方跳过本进程已尝试过的条目继续往后找。
+pub fn articles_without_cover(
+    conn: &Connection,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT id, url FROM articles
          WHERE (image_url IS NULL OR image_url = '')
            AND url IS NOT NULL AND url != ''
            AND source = 'direct'
          ORDER BY published_at DESC
-         LIMIT ?1",
+         LIMIT ?1 OFFSET ?2",
     )?;
-    let rows = stmt.query_map(params![limit], |r| {
+    let rows = stmt.query_map(params![limit, offset], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 清除一个已失效的直连封面，只有上报 URL 仍与库中当前值完全一致时才生效。
+///
+/// source='direct' 是必要边界：Miniflux 文章不进入本地封面补全队列，不能因为
+/// 图片加载失败被清成空值后永久失去封面。
+pub fn clear_article_cover_if_matches(
+    conn: &Connection,
+    article_id: i64,
+    url: &str,
+) -> AppResult<usize> {
+    Ok(conn.execute(
+        "UPDATE articles
+         SET image_url = NULL
+         WHERE id = ?1
+           AND image_url = ?2
+           AND image_url IS NOT NULL
+           AND image_url != ''
+           AND source = 'direct'",
+        params![article_id, url],
+    )?)
 }
 
 /// 全部已读：作用于当前筛选范围（feed/folder/all），与前端「全部已读」按钮语义一致
@@ -693,6 +722,7 @@ pub fn mark_all_read(
     folder_id: Option<i64>,
     starred_only: bool,
     since_ms: Option<i64>,
+    layout: Option<&str>,
 ) -> AppResult<usize> {
     let mut sql = String::from("UPDATE articles SET is_read = 1 WHERE is_read = 0");
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -703,6 +733,11 @@ pub fn mark_all_read(
     if let Some(folder) = folder_id {
         sql.push_str(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = ?)");
         binds.push(Box::new(folder));
+    }
+    if let Some(l) = layout {
+        sql.push_str(" AND feed_id IN (SELECT f.id FROM feeds f JOIN folders fo ON f.folder_id = fo.id WHERE (f.layout != 'inherit' AND f.layout = ?) OR (f.layout = 'inherit' AND fo.layout = ?))");
+        binds.push(Box::new(l.to_string()));
+        binds.push(Box::new(l.to_string()));
     }
     // F8：视图口径过滤——收藏视图只影响收藏文章；今天视图只影响当日文章
     // （since_ms 由前端按本地日界计算传入，datetime() 统一归一化后再比较）

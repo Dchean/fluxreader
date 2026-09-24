@@ -292,6 +292,14 @@ const COVER_BACKFILL_BATCH: i64 = 20;
 const COVER_BACKFILL_CONCURRENCY: usize = 2;
 /// 封面补全循环间隔：60s 醒一次，每轮最多处理一批，处理完下一批等下轮。
 const COVER_BACKFILL_TICK: Duration = Duration::from_secs(60);
+/// 单轮扫描候选的页数上限（每页 COVER_BACKFILL_BATCH 条）。
+///
+/// REQ-106①（封面补全饥饿）：候选按 published_at DESC 排序，页面抓不到
+/// og:image 的条目会**留在队列里**（没有封面可写），因此只看第一页会让窗口
+/// 停在同一批最新条目上——真实库实测：最新 20 条候选全部落在同一域名
+/// （实测 403），更老的可用候选永不被尝试。多扫几页让窗口推进；上限则是
+/// 约束单轮开销（一页一条索引查询，最多 4 页 = 80 条候选的扫描成本）。
+const COVER_BACKFILL_SCAN_PAGES: usize = 4;
 
 /// 封面后台补全循环：摘要型 RSS（少数派等）不带 media 字段，正文也没有图，
 /// 列表卡片无封面。此循环对「无封面 + 有原文 URL 的直连文章」抓文章页
@@ -306,49 +314,14 @@ pub fn spawn_cover_backfill(app: AppHandle) {
         tokio::time::sleep(Duration::from_secs(45)).await;
         let db = app.state::<AppState>().db.clone();
         let http = app.state::<AppState>().http.clone();
-        let tried = std::sync::Arc::new(tokio::sync::Mutex::new(
+        let tried = Arc::new(tokio::sync::Mutex::new(
             std::collections::HashSet::<String>::new(),
         ));
         loop {
-            // 取一批无封面文章（url, 已尝试过的不再取）
-            let targets: Vec<(i64, String)> = {
-                let conn = db.lock().await;
-                let all = crate::db::articles_without_cover(&conn, COVER_BACKFILL_BATCH)
-                    .unwrap_or_default();
-                let tried_guard = tried.lock().await;
-                all.into_iter()
-                    .filter(|(_, url)| !tried_guard.contains(url))
-                    .collect()
-            };
-            if targets.is_empty() {
-                tokio::time::sleep(COVER_BACKFILL_TICK).await;
-                continue;
-            }
-
-            let sem = Arc::new(tokio::sync::Semaphore::new(COVER_BACKFILL_CONCURRENCY));
-            let mut handles = Vec::with_capacity(targets.len());
-            for (aid, url) in targets {
-                let sem = sem.clone();
-                let db = db.clone();
-                let http = http.clone();
-                let tried = tried.clone();
-                handles.push(tokio::spawn(async move {
-                    let _permit = sem.acquire_owned().await;
-                    match backfill_cover_once(&http, &db, &tried, aid, &url).await {
-                        Ok(true) => Some(aid),
-                        _ => None,
-                    }
-                }));
-            }
-            let mut filled = 0usize;
-            for h in handles {
-                if let Ok(Some(_)) = h.await {
-                    filled += 1;
-                }
-            }
+            let filled = cover_backfill_round(&db, &http, &tried).await;
             if filled > 0 {
                 log::info!("scheduler: 封面补全 {} 篇", filled);
-                // 封面变化 → 通知前端重载（列表卡片封面即时补上）
+                // 封面变化 → 通知前端重载（列表卡片即时补上封面）
                 let _ = app.emit(
                     "feeds-updated",
                     serde_json::json!({ "new_articles": 0, "failed_feeds": 0 }),
@@ -359,23 +332,115 @@ pub fn spawn_cover_backfill(app: AppHandle) {
     });
 }
 
-/// 单篇文章封面补全：抓文章页 → lead_image 抽 og:image → 落库（幂等 COALESCE）。
-/// 返回 true=补到了封面；任何失败（网络/无 og:image/超时）记负缓存后返回 false。
+/// 单轮封面补全（可测试入口）：分页扫描候选、跳过本进程已尝试过的 URL，
+/// 并发抓取最多 COVER_BACKFILL_BATCH 篇，返回本轮补到封面的篇数。
+///
+/// 窗口推进（REQ-106①）：候选队列里「抓过但没图」的条目不会被移除，若每轮
+/// 只看 ORDER BY published_at DESC 的第一页，最新一批全部拿不到图时更老的
+/// 候选在本进程内永远轮不到。这里按 (LIMIT, OFFSET) 往后翻页并跳过 tried，
+/// 用 COVER_BACKFILL_SCAN_PAGES 约束单轮扫描量。
+pub async fn cover_backfill_round(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    http: &reqwest::Client,
+    tried: &Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
+) -> usize {
+    // 目标按 URL 分组：同一 URL 一轮只请求一次，但**所有**指向该 URL 的条目都要
+    // 写入封面（不同源可能收录同一篇原文；只填第一篇会让同 URL 的其它条目永久空缺，
+    // 且该 URL 已进负缓存、本进程内不会再轮到它们）。
+    let targets: Vec<(String, Vec<i64>)> = {
+        let conn = db.lock().await;
+        let tried_guard = tried.lock().await;
+        let mut picked: Vec<(String, Vec<i64>)> = Vec::new();
+        let mut picked_urls: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut offset = 0i64;
+        for _ in 0..COVER_BACKFILL_SCAN_PAGES {
+            let page = crate::db::articles_without_cover(&conn, COVER_BACKFILL_BATCH, offset)
+                .unwrap_or_default();
+            if page.is_empty() {
+                break;
+            }
+            offset += page.len() as i64;
+            for (aid, url) in page {
+                if tried_guard.contains(&url) {
+                    continue;
+                }
+                match picked_urls.get(&url) {
+                    // 同 URL 的第二篇及其后：只登记条目，不占用批量额度（不额外发请求）
+                    Some(index) => picked[*index].1.push(aid),
+                    None => {
+                        if picked.len() >= COVER_BACKFILL_BATCH as usize {
+                            continue;
+                        }
+                        picked_urls.insert(url.clone(), picked.len());
+                        picked.push((url, vec![aid]));
+                    }
+                }
+            }
+            if picked.len() >= COVER_BACKFILL_BATCH as usize {
+                break;
+            }
+        }
+        picked
+    };
+    if targets.is_empty() {
+        return 0;
+    }
+
+    let sem = Arc::new(tokio::sync::Semaphore::new(COVER_BACKFILL_CONCURRENCY));
+    let mut handles = Vec::with_capacity(targets.len());
+    for (url, aids) in targets {
+        let sem = sem.clone();
+        let db = db.clone();
+        let http = http.clone();
+        let tried = tried.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            backfill_cover_once(&http, &db, &tried, &aids, &url)
+                .await
+                .ok()
+        }));
+    }
+    let mut filled = 0usize;
+    for h in handles {
+        if let Ok(Some(n)) = h.await {
+            filled += n;
+        }
+    }
+    filled
+}
+
+/// 单个 URL 的封面补全：抓文章页 → lead_image 抽 og:image → 为组内每个条目落库。
+/// 返回写入封面的条目数。
+///
+/// 负缓存时序（REQ-106①）：URL 只在**一次尝试结束后**才记入 tried。此前是在
+/// 发请求前就记，于是「已尝试」包含了「还没发出请求」的条目——配合不推进的
+/// 候选窗口，最新一批全失败后更老的候选在本进程内既不会被尝试也不会被清出
+/// tried，形成饥饿。
 async fn backfill_cover_once(
     http: &reqwest::Client,
     db: &Arc<tokio::sync::Mutex<Connection>>,
     tried: &Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>,
-    aid: i64,
+    aids: &[i64],
     url: &str,
-) -> Result<bool, ()> {
+) -> Result<usize, ()> {
     // 负缓存：本进程已尝试过（失败/无图）的 URL 不再重试
-    {
-        let mut g = tried.lock().await;
-        if g.contains(url) {
-            return Ok(false);
-        }
-        g.insert(url.to_string());
+    if tried.lock().await.contains(url) {
+        return Ok(0);
     }
+    let filled = attempt_cover(http, db, aids, url).await;
+    // 成功/无图/失败都算「本进程已尝试」——但必须发生在尝试**之后**
+    tried.lock().await.insert(url.to_string());
+    Ok(filled)
+}
+
+/// 单次抓取与落库（不含负缓存读写）：返回写入封面的条目数。
+async fn attempt_cover(
+    http: &reqwest::Client,
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    aids: &[i64],
+    url: &str,
+) -> usize {
     // 拉文章页（30s 超时；只取 og:image，不必等整页正文）
     let resp = match http
         .get(url)
@@ -384,11 +449,11 @@ async fn backfill_cover_once(
         .await
     {
         Ok(r) if r.status().is_success() => r,
-        _ => return Ok(false),
+        _ => return 0,
     };
     let html = match resp.text().await {
         Ok(h) => h,
-        Err(_) => return Ok(false),
+        Err(_) => return 0,
     };
     // lead_image 是纯同步（scraper）返回 Option<String>，spawn_blocking 里跑避免阻塞 async worker
     let base = url.to_string();
@@ -398,15 +463,21 @@ async fn backfill_cover_once(
     .await
     {
         Ok(Some(img)) => img,
-        _ => return Ok(false),
+        _ => return 0,
     };
-    // 落库（幂等：已有封面不覆盖）
+    // 落库（幂等：已有封面不覆盖）。NULLIF 把空串也视为「没有封面」——候选查询
+    // （image_url IS NULL OR image_url = ''）把空串计入队列，而 COALESCE 只判 NULL，
+    // 空串行会一直留在队列里且每轮都被算作「已补全」。
     let conn = db.lock().await;
-    let n = conn
-        .execute(
-            "UPDATE articles SET image_url = COALESCE(image_url, ?1) WHERE id = ?2",
-            rusqlite::params![image, aid],
-        )
-        .unwrap_or(0);
-    Ok(n > 0)
+    let mut filled = 0;
+    for aid in aids {
+        let n = conn
+            .execute(
+                "UPDATE articles SET image_url = COALESCE(NULLIF(image_url, ''), ?1) WHERE id = ?2",
+                rusqlite::params![image, aid],
+            )
+            .unwrap_or(0);
+        filled += n;
+    }
+    filled
 }

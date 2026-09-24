@@ -106,8 +106,16 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           set((st) => {
             const nextIds = { ...st.translatingIds };
             delete nextIds[id];
+            const nextRaw = { ...st.rawTranslatedIds };
+            /* TASK-065 N11 × P2-9：清标记的前提是「已无未消毒产物可保护」。
+               流内已落过半截（translatedContent 非空）⇒ 标记必须保留，卡片按
+               纯文本渲染，不得进 HTML 路径；半截为空 ⇒ 标记已无保护对象，
+               留着会让后续水合写回的 DB 消毒译文走纯文本分支（字面显示
+               <p>已消毒译文</p>，即 P2-9 的标记粘连症状）。 */
+            if (!st.entries.find((a) => a.id === id)?.translatedContent) delete nextRaw[id];
             return {
               translatingIds: nextIds,
+              rawTranslatedIds: nextRaw,
               translateErrors: { ...st.translateErrors, [id]: msg },
             };
           });
@@ -120,8 +128,12 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         set((st) => {
           const nextIds = { ...st.translatingIds };
           delete nextIds[id];
+          const nextRaw = { ...st.rawTranslatedIds };
+          /* 同上：清标记与「是否有未消毒半截」绑定 */
+          if (!st.entries.find((a) => a.id === id)?.translatedContent) delete nextRaw[id];
           return {
             translatingIds: nextIds,
+            rawTranslatedIds: nextRaw,
             translateErrors: { ...st.translateErrors, [id]: 'AI 服务未配置或不可达' },
           };
         });

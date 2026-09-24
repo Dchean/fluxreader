@@ -392,8 +392,17 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     if (dataMode === 'tauri') {
       const cur = entries.find((e) => e.id === id);
       if (cur) {
-        if (field === 'isRead') void api.setRead(Number(id), !cur.isRead);
-        else void api.setStarred(Number(id), !cur.isStarred);
+        if (field === 'isRead') {
+          void api.setRead(Number(id), !cur.isRead).catch((e) => {
+            flipEntryFlag(id, 'isRead');
+            get().showToast(`标读保存失败：${extractError(e)}`);
+          });
+        } else {
+          void api.setStarred(Number(id), !cur.isStarred).catch((e) => {
+            flipEntryFlag(id, 'isStarred');
+            get().showToast(`收藏保存失败：${extractError(e)}`);
+          });
+        }
       }
     }
     flipEntryFlag(id, field);

@@ -296,6 +296,7 @@ pub fn list_unread_ids_scoped(
     folder_id: Option<i64>,
     starred_only: bool,
     since_ms: Option<i64>,
+    layout: Option<&str>,
 ) -> AppResult<Vec<i64>> {
     let mut sql = String::from("SELECT id FROM articles WHERE is_read = 0");
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -306,6 +307,11 @@ pub fn list_unread_ids_scoped(
     if let Some(f) = folder_id {
         sql.push_str(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = ?)");
         binds.push(Box::new(f));
+    }
+    if let Some(l) = layout {
+        sql.push_str(" AND feed_id IN (SELECT f.id FROM feeds f JOIN folders fo ON f.folder_id = fo.id WHERE (f.layout != 'inherit' AND f.layout = ?) OR (f.layout = 'inherit' AND fo.layout = ?))");
+        binds.push(Box::new(l.to_string()));
+        binds.push(Box::new(l.to_string()));
     }
     // 与 db::mark_all_read 同口径（F8）：入队集合必须与实际标读集合一致
     if starred_only {

@@ -496,7 +496,6 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
             className={`social-act-item ${item.isStarred ? 'starred' : ''}`}
             onClick={() => {
               toggleEntryFlag(item.id, 'isStarred');
-              showToast(item.isStarred ? '已取消收藏' : '已收藏');
             }}
           >
             <Icons.star />
@@ -506,7 +505,6 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
             className={`social-act-item ${item.isRead ? 'act-on' : ''}`}
             onClick={() => {
               toggleEntryFlag(item.id, 'isRead');
-              showToast(item.isRead ? '已标为未读' : '已标为已读');
             }}
           >
             <Icons.check />

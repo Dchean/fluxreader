@@ -13,7 +13,6 @@ Articles
 ============================================================ */
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ArticleListArgs {
     pub feed_id: Option<i64>,
     pub folder_id: Option<i64>,
@@ -75,6 +74,17 @@ pub async fn get_articles(
 ) -> AppResult<Vec<db::ArticleRow>> {
     let conn = state.db.lock().await;
     db::get_articles(&conn, &ids)
+}
+
+/// 图片位上报当前封面失效；仅在 URL 未被其它更新替换时清空，避免误删新封面。
+#[tauri::command]
+pub async fn report_broken_cover(
+    state: State<'_, AppState>,
+    article_id: i64,
+    url: String,
+) -> AppResult<bool> {
+    let conn = state.db.lock().await;
+    Ok(db::clear_article_cover_if_matches(&conn, article_id, &url)? > 0)
 }
 
 /// 全文搜索（FTS5）：标题/正文/作者/AI 摘要/翻译
@@ -184,11 +194,19 @@ pub async fn mark_all_read(
     folder_id: Option<i64>,
     starred_only: Option<bool>,
     since_ms: Option<i64>,
+    layout: Option<String>,
 ) -> AppResult<usize> {
     let starred_only = starred_only.unwrap_or(false);
     let n = {
         let conn = state.db.lock().await;
-        apply_mark_all_read(&conn, feed_id, folder_id, starred_only, since_ms)?
+        apply_mark_all_read(
+            &conn,
+            feed_id,
+            folder_id,
+            starred_only,
+            since_ms,
+            layout.as_deref(),
+        )?
     };
     // 锁外调度即时推送；未配置时 push_states_now 内 build_client 返回 None 而
     // 静默返回，队列项留待连接后的同步补推（与 set_read/set_starred 一致）
@@ -217,9 +235,10 @@ pub fn apply_mark_all_read(
     folder_id: Option<i64>,
     starred_only: bool,
     since_ms: Option<i64>,
+    layout: Option<&str>,
 ) -> AppResult<usize> {
-    let ids = db::list_unread_ids_scoped(conn, feed_id, folder_id, starred_only, since_ms)?;
-    let n = db::mark_all_read(conn, feed_id, folder_id, starred_only, since_ms)?;
+    let ids = db::list_unread_ids_scoped(conn, feed_id, folder_id, starred_only, since_ms, layout)?;
+    let n = db::mark_all_read(conn, feed_id, folder_id, starred_only, since_ms, layout)?;
     // A-5：无论是否已配置同步都入队。逐条入队（量级可控：个人订阅日常几十条）
     for id in ids {
         db::enqueue_sync(conn, Some(id), None, "read", None)?;
@@ -426,5 +445,32 @@ mod bulk_read_tests {
             vec!["unread"],
             "同文章反向入队应互斥合并，只留最新的 unread（不得留下 read+unread 两条）"
         );
+    }
+
+    /// P0-1: ArticleListArgs 反序列化必须原生支持 snake_case（与前端契约对齐）
+    #[test]
+    fn article_list_args_deserializes_snake_case() {
+        let json_payload = serde_json::json!({
+            "feed_id": 10,
+            "folder_id": 2,
+            "only_unread": true,
+            "only_starred": false,
+            "only_today": true,
+            "newest_first": false,
+            "limit": 50,
+            "offset": 100,
+            "with_content": true,
+        });
+
+        let args: ArticleListArgs = serde_json::from_value(json_payload).unwrap();
+        assert_eq!(args.feed_id, Some(10));
+        assert_eq!(args.folder_id, Some(2));
+        assert_eq!(args.only_unread, Some(true));
+        assert_eq!(args.only_starred, Some(false));
+        assert_eq!(args.only_today, Some(true));
+        assert_eq!(args.newest_first, Some(false));
+        assert_eq!(args.limit, Some(50));
+        assert_eq!(args.offset, Some(100));
+        assert_eq!(args.with_content, Some(true));
     }
 }

@@ -256,6 +256,7 @@ pub fn run() {
             commands::article_index,
             commands::get_article,
             commands::get_articles,
+            commands::report_broken_cover,
             commands::search_articles,
             commands::set_read,
             commands::set_read_bulk,

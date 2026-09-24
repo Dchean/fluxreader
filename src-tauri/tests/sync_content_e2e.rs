@@ -274,11 +274,17 @@ async fn miniflux_existing_entry_backfills_cover() {
         assert_eq!(image, None, "首次入库正文无图，封面应为空");
     }
 
-    // Miniflux 端该条目正文补上图（模拟服务端重新抓取后 content 带图）
+    // Miniflux 端该条目正文补上图（模拟服务端重新抓取后 content 带图）。
+    // changed_at 必须一起前移：真实 Miniflux 重新抓取会更新 crawl/change 时间，而
+    // 增量拉取按 `changed_at >= ot` 过滤，ot 是上一轮同步写入的**墙上时钟秒**
+    // （greader_pull.rs 的 set_last_sync_ts(Utc::now().timestamp())）。只改 content
+    // 不改 changed_at 时，只要首次同步跨过一个秒边界，本条就被判为窗口外、根本不会
+    // 被重拉——断言变成「与机器时钟赛跑」，实测在负载下随机失败（cover 未回填）。
     {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
             e.content = r#"<p>body</p><img src="https://img.example.com/backfill.jpg" />"#.into();
+            e.changed_at = chrono::Utc::now().timestamp();
         }
     }
 

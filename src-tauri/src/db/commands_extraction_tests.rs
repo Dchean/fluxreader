@@ -93,23 +93,23 @@ fn list_unread_ids_and_mark_all_read_scope_alignment() {
     art(feed2, "g3");
 
     // 全部文章未读
-    let all_unread = list_unread_ids_scoped(&conn, None, None, false, None).unwrap();
+    let all_unread = list_unread_ids_scoped(&conn, None, None, false, None, None).unwrap();
     assert_eq!(all_unread.len(), 3);
 
     // feed1 范围
-    let feed1_unread = list_unread_ids_scoped(&conn, Some(feed1), None, false, None).unwrap();
+    let feed1_unread = list_unread_ids_scoped(&conn, Some(feed1), None, false, None, None).unwrap();
     assert_eq!(feed1_unread.len(), 2);
 
     // folder f1 范围
-    let folder1_unread = list_unread_ids_scoped(&conn, None, Some(f1), false, None).unwrap();
+    let folder1_unread = list_unread_ids_scoped(&conn, None, Some(f1), false, None, None).unwrap();
     assert_eq!(folder1_unread.len(), 2);
 
     // 标读 feed1
-    let n = mark_all_read(&conn, Some(feed1), None, false, None).unwrap();
+    let n = mark_all_read(&conn, Some(feed1), None, false, None, None).unwrap();
     assert_eq!(n, 2);
 
     // 剩余未读应该只有 feed2 的一篇
-    let remaining = list_unread_ids_scoped(&conn, None, None, false, None).unwrap();
+    let remaining = list_unread_ids_scoped(&conn, None, None, false, None, None).unwrap();
     assert_eq!(remaining.len(), 1);
 }
 
@@ -175,21 +175,129 @@ fn mark_all_read_view_filters() {
     .unwrap();
 
     // 收藏视图：只标收藏文章（1 篇）
-    let starred_ids = list_unread_ids_scoped(&conn, None, None, true, None).unwrap();
+    let starred_ids = list_unread_ids_scoped(&conn, None, None, true, None, None).unwrap();
     assert_eq!(starred_ids.len(), 1, "收藏口径只应包含收藏文章");
-    let n = mark_all_read(&conn, None, None, true, None).unwrap();
+    let n = mark_all_read(&conn, None, None, true, None, None).unwrap();
     assert_eq!(n, 1, "收藏视图只标 1 篇");
 
     // 今天视图：边界 = 1 小时前 → 只命中 recent 那篇
     let since_ms = (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp_millis();
-    let today_ids = list_unread_ids_scoped(&conn, None, None, false, Some(since_ms)).unwrap();
+    let today_ids = list_unread_ids_scoped(&conn, None, None, false, Some(since_ms), None).unwrap();
     assert_eq!(today_ids.len(), 1, "今天口径只应包含边界之后的文章");
-    let n2 = mark_all_read(&conn, None, None, false, Some(since_ms)).unwrap();
+    let n2 = mark_all_read(&conn, None, None, false, Some(since_ms), None).unwrap();
     assert_eq!(n2, 1, "今天视图只标 1 篇");
 
     // 剩余未读：只有未收藏且较旧的那篇
-    let left = list_unread_ids_scoped(&conn, None, None, false, None).unwrap();
+    let left = list_unread_ids_scoped(&conn, None, None, false, None, None).unwrap();
     assert_eq!(left.len(), 1, "视图口径外的文章不应被标读");
+}
+
+/// 布局隔离：mark_all_read / list_unread_ids_scoped 传入 layout 过滤
+/// 只有属于指定 layout 的 feed（包含 direct layout 与 inherit 继承自 folder）的文章才被标读
+#[test]
+fn mark_all_read_layout_isolation() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    MIGRATIONS.to_latest(&mut conn).unwrap();
+
+    let f_article = create_folder(&conn, "技术", "article").unwrap();
+    let f_social = create_folder(&conn, "社交", "social").unwrap();
+
+    // feed1: folder=article, layout=inherit -> article
+    let feed1 = insert_feed(
+        &conn,
+        "http://a.example/rss",
+        None,
+        "源A",
+        None,
+        f_article,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    // feed2: folder=article, layout=social (feed级显式覆盖) -> social
+    let feed2 = insert_feed(
+        &conn,
+        "http://b.example/rss",
+        None,
+        "源B",
+        None,
+        f_article,
+        "social",
+        false,
+        false,
+    )
+    .unwrap();
+    // feed3: folder=social, layout=inherit -> social
+    let feed3 = insert_feed(
+        &conn,
+        "http://c.example/rss",
+        None,
+        "源C",
+        None,
+        f_social,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+
+    let art = |feed_id: i64, guid: &str| {
+        let a = NewArticle {
+            guid: guid.into(),
+            url: None,
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "b".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: None,
+            source: "direct".into(),
+        };
+        upsert_article_with_feed(&conn, feed_id, &a, false).unwrap();
+    };
+
+    art(feed1, "a1"); // article
+    art(feed2, "b1"); // social (override in folder 1)
+    art(feed3, "c1"); // social (inherit from folder 2)
+
+    // 1. 全局 article layout 未读列表
+    let article_unreads =
+        list_unread_ids_scoped(&conn, None, None, false, None, Some("article")).unwrap();
+    assert_eq!(article_unreads.len(), 1, "article 布局下全局未读只有 1 条");
+
+    // 2. 全局 social layout 未读列表
+    let social_unreads =
+        list_unread_ids_scoped(&conn, None, None, false, None, Some("social")).unwrap();
+    assert_eq!(
+        social_unreads.len(),
+        2,
+        "social 布局下全局未读有 2 条 (源B和源C)"
+    );
+
+    // 3. 在 article 布局下，对分类 f_article (包含源A article 和 源B social) 执行全部已读
+    let n = mark_all_read(&conn, None, Some(f_article), false, None, Some("article")).unwrap();
+    assert_eq!(
+        n, 1,
+        "在 article 布局下对 f_article 标读，只标读了源A，源B(social)不受影响"
+    );
+
+    // 验证源B(social)仍然未读
+    let b_unreads = list_unread_ids_scoped(&conn, Some(feed2), None, false, None, None).unwrap();
+    assert_eq!(b_unreads.len(), 1, "源B保持未读");
+
+    // 4. 在 article 布局下执行全量全部已读 (feed_id=None, folder_id=None)
+    let n_all = mark_all_read(&conn, None, None, false, None, Some("article")).unwrap();
+    assert_eq!(n_all, 0, "article 已无未读，不误标任何 social 条目");
+
+    // 验证 social 未读仍为 2
+    let social_remaining =
+        list_unread_ids_scoped(&conn, None, None, false, None, Some("social")).unwrap();
+    assert_eq!(social_remaining.len(), 2, "social 依然有 2 篇未读");
 }
 
 /// get_article_url：存在返回 url，不存在返回 None
