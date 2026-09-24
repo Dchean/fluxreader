@@ -1,0 +1,288 @@
+{
+  "schema_version": 1,
+  "id": "TASK-091",
+  "title": "失效封面纠正通道：db 清空函数 + tauri 命令 + 回归用例（REQ-106 之④，后端）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "done",
+  "objective": "修用户报告「文章封面部分获取不到」的后端成因之二——失效封面无纠正通道（审计 round-4 §1-D；基线证据 .workflow-kit/tasks/evidence/TASK-091-baseline-broken-cover.md）。现状：articles_without_cover 只选 image_url IS NULL/''，写入是 COALESCE(NULLIF(image_url,''), ?1) 只填空（scheduler.rs），全仓无「图片加载失败」上报入口，四类图片位也没有 onError ⇒ 源站 404／防盗链失败／文件被删的封面会永久破图（审计实测 ldstatic 30 个真实 URL 中 1 个 404；真实库该域名 1431 篇、约 36 篇永久破图）。本卡只做后端：① 新增 db 函数 clear_article_cover_if_matches(conn, article_id, url)——仅当该行 image_url 与上报 URL 完全一致**且该行 source='direct'** 时清空（返回受影响行数）；非 direct 源不清（否则从「破图」退化为「无图且永不补全」，因为补全队列只收 direct）；② 新增 tauri 命令 report_broken_cover(article_id, url) 返回 bool（是否发生清空），注册进 lib.rs 的 invoke_handler；③ 清空后的行重新进入补全队列，下一次 cover_backfill_round 能写入新封面（有测试）。前端 onError 接线与四类图片位统一代理由后续卡承载。",
+  "non_goals": [
+    "不做前端 onError 接线与四类图片位统一代理（后续卡的 REQ-106③）",
+    "不把 miniflux 源纳入封面补全（产品口径需 owner 另行裁决）",
+    "不新增数据库列或迁移（纠正用现有列表达）；不引入新依赖",
+    "不改 .workflow-kit/tasks/BRIEF.json 等受管记录"
+  ],
+  "requirement_refs": [
+    "REQ-106"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-090"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-next-batch-covers-reachability-20260923"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/db.rs",
+      "src-tauri/src/db/articles.rs",
+      "src-tauri/src/commands/articles.rs",
+      "src-tauri/src/lib.rs",
+      "src-tauri/tests/cover_backfill_e2e.rs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/TASK-091-baseline-broken-cover.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① db 函数语义精确：URL 完全一致且 source='direct' 才清空（返回 1），URL 不一致/本已为空/行不存在返回 0 且数据不变；只写 image_url 一列，不影响其他行与其他列",
+    "② 非 direct 源（miniflux）不被清空：报告后 image_url 保持原值、返回 false（不得把「破图」变成「无图且永不补全」）",
+    "③ 清空后可由补全流程填回：清空 → cover_backfill_round 写入新封面（有测试，且断言写入后队列为空）",
+    "④ 命令层：report_broken_cover 返回布尔，参数为 article_id + url，命令注册进 invoke_handler（编译期即可验证注册缺失会导致构建失败）",
+    "⑤ 门禁全绿且不回退：cargo test ≥211 passed / 0 failed / 9 ignored 不增；cargo fmt --check exit 0；cargo clippy --all-targets -- -D warnings 干净；lint 0/0；build exit 0；frontend ≥348/348"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "修前门禁全绿（cargo 211/0/9、frontend 348/348、lint 0/0、build exit 0，TASK-090 验证运行 RUN-96824801cdc0469290553580062d3e5a），但既有测试对「失效封面」零覆盖：没有任何入口能清空已写入的封面，也没有用例断言非 direct 源不被清空。已知限制（本卡不改）：前端仍无 onError 上报；miniflux 源仍不补全。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/TASK-091-baseline-broken-cover.md"
+    },
+    "decision_ids": [
+      "DEC-next-batch-covers-reachability-20260923"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "src-tauri 既有 211 项测试（含 TASK-090 新增的 3 项封面补全用例、sync/dedup 等）",
+        "reason": "本卡为增量后端能力，不改变既有断言语义",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "src-tauri/tests/cover_backfill_e2e.rs 新增：URL 一致才清空（返回 1）/ URL 不一致或本已为空返回 0 且数据不变 / miniflux 源报告后不被清空 / 清空后补全轮次能写入新封面并清空队列",
+        "reason": "新能力需要成对断言；纠正通道的「不清 miniflux」是本卡关键边界（避免从破图退化为永久无图）",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "前端回归网 348 项、lint、build",
+        "reason": "本卡不改前端，作为不回退证据",
+        "gate_ids": [
+          "frontend",
+          "lint",
+          "build"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-091-input-b06506223e4348cda4eedfab14f3956a.json",
+    "digest": "0ba94238d8da819a479a388c2f92cbc383f1dcf9b88b6002ed20ac6cc59021c6",
+    "source_revision": null,
+    "definition_digest": "3505648281cd35429394866bc6b1bc8f82e91969a483604f1639b9d5148c8fd8"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-23T10:27:32.648518Z",
+    "deadline_at_utc": "2026-09-23T14:27:32.648518Z",
+    "repair_rounds_used": 2
+  },
+  "batch_id": "BATCH-3b1e9a89eb8a464fb861be8f1bcc3179",
+  "run_ids": [
+    "RUN-509342e304474a3c84b808e59725ec94",
+    "RUN-f5933128d51943658d34da92ee238757",
+    "RUN-8ed5c806dee44f2a8cd34637df951a35",
+    "RUN-2e5aaca128a0419ebdd40e77994ca29f",
+    "RUN-3859d9c7502d4e299e4329bc2e5d2ff3",
+    "RUN-e15c9865ad984bb8badaf5e9d6e8c315",
+    "RUN-adc900a25aad49d984dec5a9189cd807",
+    "RUN-9a989731d73b43b99fff9dab8fa6e633",
+    "RUN-a0be033b1b054b46a02b83ad19fd4e6e"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-9a989731d73b43b99fff9dab8fa6e633-candidate.json",
+    "candidate_digest": "9eacd271c240146082f305030719ba3b518d553cf99386d69d90e7b330a15468",
+    "verification_run": "RUN-9a989731d73b43b99fff9dab8fa6e633",
+    "review_run": "RUN-a0be033b1b054b46a02b83ad19fd4e6e",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-88b6718915314fc8911dd823abec63e5-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-88b6718915314fc8911dd823abec63e5"
+    ],
+    "merge_ref": "not_applicable:verified_uncommitted_worktree_candidates"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/tasks/evidence/TASK-089-baseline-cover.md",
+    ".workflow-kit/tasks/evidence/TASK-091-baseline-broken-cover.md",
+    "src-tauri/src",
+    "src-tauri/tests"
+  ],
+  "continuation_of": {
+    "TASK-090": "528137e4315f16eeff700c928ed6519d64d21e00efa940e212d3936edbf497fc"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-23T10:27:33.155231Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-23T10:38:26.307143Z",
+      "note": "编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/db.rs, src-tauri/src/db/articles.rs, src-tauri/src/lib.rs, src-tauri/tests/cover_backfill_e2e.rs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-23T10:43:55.714125Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-23T10:59:10.330018Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-23T11:00:10.040271Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-23T11:06:36.002951Z",
+      "note": "编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/db.rs, src-tauri/src/db/articles.rs, src-tauri/src/lib.rs, src-tauri/tests/cover_backfill_e2e.rs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-23T11:07:22.120046Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-23T11:15:57.687699Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-23T11:16:43.998406Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-23T11:20:07.720729Z",
+      "note": "编码结果已记录，差异范围已核对：src-tauri/tests/cover_backfill_e2e.rs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-23T11:21:19.100902Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-23T11:34:50.794625Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "review"
+}

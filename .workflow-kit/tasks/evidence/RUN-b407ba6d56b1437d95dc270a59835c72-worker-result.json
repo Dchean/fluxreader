@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-090",
+  "run_id": "RUN-b407ba6d56b1437d95dc270a59835c72",
+  "status": "ready_for_verification",
+  "summary": "修封面补全饥饿（REQ-106①）。改动三处：① db/articles.rs 的 articles_without_cover 增加 offset 参数（LIMIT/OFFSET 分页），并在文档注释里说明分页是为了让调用方推进候选窗口；② scheduler.rs 抽出可测试入口 cover_backfill_round：按 COVER_BACKFILL_SCAN_PAGES=4 页扫描候选、跳过本进程已尝试项、同一轮内按 URL 去重、去重后最多取 COVER_BACKFILL_BATCH 条，spawn_cover_backfill 改为调用它；③ 负缓存时序修正——backfill_cover_once 只在一次尝试**结束后**才写入 tried 集合（新增 attempt_cover 承载抓取与落库，返回 bool），不再出现「请求还没发就标记为已尝试」。新增 src-tauri/tests/cover_backfill_e2e.rs（本地假文章站，不依赖外网）：最新 20 条候选全 403 时，断言第二轮窗口推进到第 21 条起并真的补上封面；另断言负缓存仍生效（/fail/0 两轮只请求一次）、稳态第三轮零请求、同一 URL 一轮一次去重、「只填空」语义（补全后候选队列为空）。成对证据：把上限改回 1 页并把负缓存移回请求前（等价修前语义）后，窗口断言即失败（panic: 窗口必须推进到第 21 条起的候选），还原后通过。 范围外（后续卡/owner 裁决）：失效封面纠正通道、miniflux 源是否纳入补全。",
+  "changed_files": [
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/scheduler.rs",
+    "src-tauri/tests/cover_backfill_e2e.rs"
+  ],
+  "validation_requests": [
+    "cargo test（含新增 2 项）",
+    "cargo fmt --check",
+    "npm run lint / build / test:frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

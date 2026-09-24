@@ -1,0 +1,7 @@
+{
+  "changed_files": [
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/scheduler.rs",
+    "src-tauri/tests/cover_backfill_e2e.rs"
+  ]
+}

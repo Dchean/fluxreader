@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-b407ba6d56b1437d95dc270a59835c72",
+  "task_id": "TASK-090",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "主会话作为 coder：修 scheduler 封面补全饥饿——负缓存移到尝试结束后 + 候选窗口分页推进（db/articles.rs 增加 offset），并新增 tests/cover_backfill_e2e.rs 用本地假 HTTP 服务做修前失败/修后通过证据。"
+  },
+  "started_at_utc": "2026-09-23T08:29:42.356879Z",
+  "finished_at_utc": "2026-09-23T08:49:58.951855Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "bc8bcd51d607f2a1b88131a36111fdc6b72d6f43d7caa3b9474651ede52eee22",
+  "candidate_digest": "372447d112ccbca00b9ff083c5d92577b2369f2cacec5f37f7a2045c43f8a1ec",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-b407ba6d56b1437d95dc270a59835c72-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-b407ba6d56b1437d95dc270a59835c72-scope.json"
+}

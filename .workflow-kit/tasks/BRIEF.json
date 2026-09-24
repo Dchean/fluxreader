@@ -143,6 +143,39 @@
     "行为零变化：四门禁全绿，既有断言一行不动",
     "公开路径不变或调用点全部适配"
    ]
+  },
+  {
+   "id": "REQ-106",
+   "kind": "bug",
+   "description": "用户报告「文章封面部分获取不到」的封面链路修复（审计 round-4 六因中的 ②③④ 三个可无争议修复项）：② 补全饥饿——scheduler.rs 每轮取 published_at DESC 的 LIMIT 20 候选，且**发请求前**就把 URL 记入进程内 tried 集合，最新 20 条全失败后第 21 条及以后在本进程内永不被尝试（真实库实测：52 条候选中前 20 全属实测 403 的域名，第 27-48 位的可用候选从未被请求）；③ 图片位直连——只有画廊卡片走 proxyImageUrl，文章卡/播客卡/播放条/灯箱直连 + referrerPolicy=no-referrer，白名单式防盗链域名（实测 cdnfile.sspai.com 无 Referer 403×12/12、img*.doubanio.com 418×20/20）必然破图；④ 死链无纠正——articles_without_cover 只判 image_url IS NULL/''，写入是 COALESCE 只填空，且卡片无 onError，实测 ldstatic 域 30 个真实 URL 中 1 个 404（≈3.3%），这些封面永久破图。",
+   "in_scope": true,
+   "acceptance": [
+    "补全不再饥饿：有确定性测试证明同一进程内会尝试到第 N+1 条之后的老候选（修前失败、修后通过）",
+    "四类图片位（文章卡/播客卡/播放条/灯箱）统一走代理或有等价回退，失败时有占位与上报路径",
+    "死链可纠正：被上报失效的封面不会永久保留，且纠正只在 URL 一致时生效",
+    "四门禁全绿且不回退（cargo ≥208/0/9、frontend ≥348/348、lint 0/0、build exit 0）"
+   ]
+  },
+  {
+   "id": "REQ-107",
+   "kind": "bug",
+   "description": "审计 round-4 s7b 真机实测：画廊(5/44)、播客(6/119)、通知(1/20) 三个布局的列表容器不可滚动（scrollHeight==clientHeight），而对应范围在后端仍有内容 ⇒ 用户到不了这些条目；空态旁仍渲染「滚动加载更多」这一不可执行的提示。",
+   "in_scope": true,
+   "acceptance": [
+    "三种布局在条目多于首屏时可滚动并触达全部条目（真机或等价 DOM 证据）",
+    "空态提示与实际可执行的动作一致（不再承诺无法执行的行为）",
+    "四门禁全绿且不回退"
+   ]
+  },
+  {
+   "id": "REQ-108",
+   "kind": "improvement",
+   "description": "SQL 性能与索引加固（审计 route-M，主控已用 EXPLAIN QUERY PLAN 独立复核）：M-5 列表查询因 COALESCE 表达式排序使 idx_articles_published 对 8 个变体全失效（SCAN + USE TEMP B-TREE FOR ORDER BY）；M-7 sync_queue 零索引致每次标读全表扫；M-9 一次全部已读 = 1 SELECT + 1 UPDATE + 2N 往返且全程持锁；M-14 v6→v7 后置回填在事务外且以 user_version 当完成标记（半途中断永不重试）。",
+   "in_scope": false,
+   "acceptance": [
+    "每项有 EXPLAIN QUERY PLAN / 往返计数或迁移中断复现的成对证据",
+    "索引或迁移改动有四门禁与真实库规模下的不回归证据"
+   ]
   }
  ],
  "quality": {
@@ -198,9 +231,9 @@
   },
   "requirements": {
    "status": "confirmed",
-   "answer": "保留 REQ-001~008（上一周期已交付的历史需求），新增 REQ-101~105（体检清单按渐进路线分期：P1 修复/P2 修复/结构性硬化/死代码与裁决项/ingestion 拆分）",
-   "source": "AUDIT-20260919-v2.md（DEC-07806e92 授权的三路体检）+ owner 路线选择「渐进重构（推荐）」2026-09-19",
-   "value_digest": "f37c789e2e9f6c9f1b4ad33a30a293ede7a9ced05921c812bf43a336803d8e15"
+   "answer": "保留 REQ-001~008 与 REQ-101~105；新增 REQ-106（封面链路：补全饥饿 / 四类图片位代理与失败占位 / 死链纠正通道，in_scope=true）与 REQ-107（画廊·播客·通知三种布局列表不可滚动致内容不可达，in_scope=true）；REQ-108（SQL 性能与索引加固 M-5/M-7/M-9/M-14）登记为暂缓（in_scope=false），不静默丢弃",
+   "source": "用户指令 2026-09-23：「根据此次检查结果以及之前的审计和任务卡，严格按照工作流，将项目推进，进行优化修复」；依据 .workflow-kit/docs/AUDIT-20260923-round4-covers-and-feature-matrix.md（封面六因，含真实库与真机实测）、.workflow-kit/docs/AUDIT-20260923-round5-uncovered-checkable.md、JOURNAL 2026-09-23T07:13:57Z（Batch 2 复核与收口）",
+   "value_digest": "7cb03b0a0ebce596597d8e08c42aca82cfc7195b7aa3f6991cd0f6a2fc2235b5"
   },
   "refactor_decision": {
    "status": "confirmed",

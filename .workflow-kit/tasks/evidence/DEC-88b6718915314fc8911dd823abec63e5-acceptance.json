@@ -1,0 +1,16 @@
+{
+  "id": "DEC-88b6718915314fc8911dd823abec63e5",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "2026-09-23 owner：继续；主控只当项目经理；每次处理完自动验收，不需要询问；代码编写和审计交给子代理，独立审查必须开新子代理",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-090",
+    "TASK-091"
+  ],
+  "recorded_at_utc": "2026-09-23T11:56:06.843516Z",
+  "candidates": {
+    "TASK-090": "528137e4315f16eeff700c928ed6519d64d21e00efa940e212d3936edbf497fc",
+    "TASK-091": "9eacd271c240146082f305030719ba3b518d553cf99386d69d90e7b330a15468"
+  }
+}

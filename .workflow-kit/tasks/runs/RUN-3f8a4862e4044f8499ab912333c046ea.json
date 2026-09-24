@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-3f8a4862e4044f8499ab912333c046ea",
+  "task_id": "TASK-089",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "主会话作为 coder：修复 scheduler 封面补全饥饿（负缓存移到尝试之后 + 候选窗口推进）并新增失效封面纠正通道（db 函数 + tauri 命令），补 src-tauri/tests/cover_backfill_e2e.rs 成对证据。"
+  },
+  "started_at_utc": "2026-09-23T08:24:04.274456Z",
+  "finished_at_utc": "2026-09-23T08:27:55.996041Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "bc8bcd51d607f2a1b88131a36111fdc6b72d6f43d7caa3b9474651ede52eee22",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-3f8a4862e4044f8499ab912333c046ea-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-3f8a4862e4044f8499ab912333c046ea-scope.json",
+  "failure_kind": "action_required",
+  "failure_reason": "allowed_paths 缺少 src-tauri/src/db.rs（新 db 函数的再导出点），需重新冻结范围"
+}

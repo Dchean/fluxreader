@@ -1,0 +1,72 @@
+{
+  "task_id": "TASK-091",
+  "candidate_digest": "9eacd271c240146082f305030719ba3b518d553cf99386d69d90e7b330a15468",
+  "verification_run": "RUN-9a989731d73b43b99fff9dab8fa6e633",
+  "verdict": "PASS",
+  "summary": "最终候选满足需求。数据库函数仅在 article_id 命中、image_url 与上报 URL 完全一致且非空、source='direct' 时将 image_url 置为 NULL 并返回受影响行数；URL 不匹配、封面已空、文章不存在及 miniflux 来源均返回 0 且不清空。Tauri report_broken_cover 将受影响行数映射为 bool 并已注册。回归测试覆盖目标文章其它字段、其它文章及同失效 URL 相邻文章的封面隔离，清空后可由 cover_backfill_round 写回并使候选队列为空。候选快照无漂移，六项门禁均通过。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "clear_article_cover_if_matches 的 WHERE 条件限定主键、image_url 完全相等、非 NULL/非空串和 source='direct'，SET 只修改 image_url；report_broken_cover 返回受影响行数是否大于 0，并通过 db.rs 重导出及 lib.rs invoke_handler 注册。测试证明清空后重新进入补全候选并写回替代封面，miniflux 保持原值。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/db.rs",
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/lib.rs",
+        "src-tauri/src/scheduler.rs",
+        "src-tauri/tests/cover_backfill_e2e.rs",
+        ".workflow-kit/tasks/evidence/RUN-9a989731d73b43b99fff9dab8fa6e633-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "回归覆盖 URL 不匹配、NULL 封面、重复上报、不存在 ID、miniflux、成功清空、补全写回和队列清空。ArticleSnapshot 观察 image_url 与非封面字段；相邻文章使用相同失效 URL 并断言整行不变。验证运行 cargo test 213 通过、0 失败、9 忽略；frontend 348/348，fmt、clippy、lint、build 全部通过。",
+      "evidence_files": [
+        "src-tauri/tests/cover_backfill_e2e.rs",
+        ".workflow-kit/tasks/runs/RUN-9a989731d73b43b99fff9dab8fa6e633.json",
+        ".workflow-kit/tasks/evidence/RUN-9a989731d73b43b99fff9dab8fa6e633-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-9a989731d73b43b99fff9dab8fa6e633-cargo_clippy.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-9a989731d73b43b99fff9dab8fa6e633-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-9a989731d73b43b99fff9dab8fa6e633-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-9a989731d73b43b99fff9dab8fa6e633-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "原子条件 UPDATE 防止过期上报清除已替换的新 URL；不存在 ID、URL 不匹配、NULL/空串及非 direct 均无法命中；重复上报返回 0。同 URL 的其它文章不会被误清空。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/tests/cover_backfill_e2e.rs",
+        ".workflow-kit/tasks/evidence/RUN-9a989731d73b43b99fff9dab8fa6e633-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "数据库规则集中在既有 articles 模块，通过 db.rs 重导出；Tauri 命令保持薄边界并沿用统一注册方式。没有新增依赖、迁移、重复 SQL 或跨层业务逻辑。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/db.rs",
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/commands/mod.rs",
+        "src-tauri/src/lib.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "新增路径执行一次参数化 UPDATE，以 INTEGER PRIMARY KEY 的 id 等值定位至多一行；没有新增扫描、网络请求、循环或常驻数据结构。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/db/migrations.rs",
+        ".workflow-kit/tasks/runs/RUN-9a989731d73b43b99fff9dab8fa6e633.json"
+      ]
+    }
+  ],
+  "ui_review": null
+}

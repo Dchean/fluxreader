@@ -63,5 +63,8 @@
 | [TASK-086](items/TASK-086.json) | F2：单键快捷键让路浮层的判据抽纯函数并补前端断言 | done |
 | [TASK-087](items/TASK-087.json) | REQ-105 验收①按「生产代码段」明确化 + 修 refresh_dedup_e2e mock 服务器线程 panic | cancelled |
 | [TASK-088](items/TASK-088.json) | refresh_dedup_e2e mock 服务器线程容错（收口 TASK-087） | done |
+| [TASK-089](items/TASK-089.json) | 封面补全饥饿与死链纠正（补全窗口推进 + 失效封面纠正通道，REQ-106） | cancelled |
+| [TASK-090](items/TASK-090.json) | 封面补全饥饿修复：负缓存语义 + 候选窗口推进（REQ-106 之①） | done |
+| [TASK-091](items/TASK-091.json) | 失效封面纠正通道：db 清空函数 + tauri 命令 + 回归用例（REQ-106 之④，后端） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

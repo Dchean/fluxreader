@@ -1,0 +1,43 @@
+{
+  "task_id": "TASK-091",
+  "candidate_digest": "4ae24dfea60f6b0db1db8e6a7d927430952744135371f9c652380f35004f32b2",
+  "verification_run": "RUN-3859d9c7502d4e299e4329bc2e5d2ff3",
+  "verdict": "FAIL",
+  "summary": "上轮不存在 ID finding 已解决，目标行非封面字段也已有隔离快照；但相邻文章快照不包含 image_url 且使用不同 URL，尚不能检出错误实现扩大 UPDATE 范围并清空其它文章同 URL 封面的回归。实现源码及全部门禁均通过。",
+  "findings": [
+    "[P2] 其它文章的 image_url 隔离仍未被测试保护。位置：src-tauri/tests/cover_backfill_e2e.rs。触发条件：清空目标文章时，错误实现同时清空另一篇持有相同 URL 的文章封面。影响：article_metadata 不读取 image_url，且 neighbor 使用不同封面 URL；现有断言无法证明只更新 article_id 对应行。建议让 neighbor 持有相同 stale URL，并把 image_url 纳入快照，断言 neighbor 整行不变。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "数据库 UPDATE 限制 id、image_url 完全相等、非空及 source='direct'，SET 只修改 image_url；命令返回 bool 并已注册；测试证明清空后可补全且 miniflux 不被清除。",
+      "evidence_files": ["src-tauri/src/db/articles.rs", "src-tauri/src/db.rs", "src-tauri/src/commands/articles.rs", "src-tauri/src/lib.rs", "src-tauri/src/scheduler.rs", "src-tauri/tests/cover_backfill_e2e.rs"]
+    },
+    {
+      "area": "regression",
+      "status": "FAIL",
+      "analysis": "不存在 ID、URL 不匹配、已空、重复、miniflux、目标行非封面字段和回填均有覆盖；但其它文章断言未观察 image_url 且使用不同 URL，未保护核心行级隔离。",
+      "evidence_files": ["src-tauri/tests/cover_backfill_e2e.rs", ".workflow-kit/tasks/evidence/RUN-3859d9c7502d4e299e4329bc2e5d2ff3-cargo_test.stdout.txt", ".workflow-kit/tasks/runs/RUN-3859d9c7502d4e299e4329bc2e5d2ff3.json"]
+    },
+    {
+      "area": "failure_paths",
+      "status": "FAIL",
+      "analysis": "不存在 ID 等失败路径已覆盖；剩余缺口是错误扩大 UPDATE 范围时，测试观察不到其它文章 image_url 被清空。",
+      "evidence_files": ["src-tauri/src/db/articles.rs", "src-tauri/tests/cover_backfill_e2e.rs", ".workflow-kit/tasks/evidence/RUN-3859d9c7502d4e299e4329bc2e5d2ff3-cargo_test.stdout.txt"]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "实现遵循既有数据库领域模块、重导出和 Tauri 命令边界，没有新增迁移、依赖或重复规则。",
+      "evidence_files": ["src-tauri/src/db/articles.rs", "src-tauri/src/db.rs", "src-tauri/src/commands/articles.rs", "src-tauri/src/lib.rs"]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "按 articles.id 主键执行单次 UPDATE，不新增扫描、网络、循环或索引需求。",
+      "evidence_files": ["src-tauri/src/db/articles.rs", ".workflow-kit/tasks/runs/RUN-3859d9c7502d4e299e4329bc2e5d2ff3.json"]
+    }
+  ],
+  "ui_review": null
+}
