@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-d950656abe0943d984d27810525ea8ca",
+  "task_id": "TASK-094",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:review-094 (2026-09-28, general-purpose, 全新实例未参与实现, 只读+唯一写入 tmp/review-094.json)"
+  },
+  "started_at_utc": "2026-09-28T10:16:07.889195Z",
+  "finished_at_utc": "2026-09-28T10:16:07.960076Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "5a9771709912a50e5b28de95af3f9a1e9af1c177716b9e0cdc52763963e73ff3",
+  "candidate_digest": "f655611e989e85d330963f54f1c23dd7fc570ca1c3f3d0baa3b157949158be83",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-d950656abe0943d984d27810525ea8ca-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-d950656abe0943d984d27810525ea8ca-review.json",
+    "candidate_digest": "f655611e989e85d330963f54f1c23dd7fc570ca1c3f3d0baa3b157949158be83",
+    "ui_evidence_digest": "7c38844dae3997d3b1d557f7546a4596516fb468bb110002742b73d7f958ed57",
+    "quality_digest": "e65e68c32aacc4c71692ad985fcb37eef4b1109d2149eb71420e700d1905ce4d"
+  },
+  "estimated_cost_usd": null
+}

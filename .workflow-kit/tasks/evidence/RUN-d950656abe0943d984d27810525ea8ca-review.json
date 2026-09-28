@@ -1,0 +1,83 @@
+{
+  "task_id": "TASK-094",
+  "candidate_digest": "f655611e989e85d330963f54f1c23dd7fc570ca1c3f3d0baa3b157949158be83",
+  "verification_run": "RUN-659123b4e2ea4c1ba8725a34cda6d2d6",
+  "verdict": "PASS",
+  "summary": "独立复核通过，无需改码。核心声明逐条证实：① LAYOUT_FILTER_SQL 在 db/articles.rs:738 一处定义、恰好三处消费（article_where:210、mark_all_read:762、list_unread_ids_scoped:sync_map.rs:314），全仓 grep 布局子查询文本仅命中常量本体，无第四份拷贝；与修前两处内联 SQL 逐字节相同（' AND '+常量），mark_all_read/list_unread_ids_scoped 语义未变；layout=None 时不拼任何子句、绑定不变，SQL 逐字节不变（EXPLAIN 报告 A1 assert 3/3 构造性证实）；article_where 由 list_articles(161) 与 article_index(226) 共用，位置对齐结构性成立。② 4 条新 Rust 测试断言真实（feed 覆盖/分类兜底/None 全量/位置对齐+布局外文章无位置），非恒真；M6（article_where 忽略 layout）4 测试全红、M7（共享常量分类兜底分支改坏）布局测试与 mark_all_read_layout_isolation 同红，三处同源得证。③ 前端 scopeQueryArgs/scopePageKey 含布局、不传 layout 时与修前逐字一致（r7-key 断言锁定）；selectLayout 改为按布局重拉+游标分桶恢复；timelineRefill.refillDecision 纯函数上限 8、可见进展/口径变化重置无死循环；哨兵不可滚动时为原生 button（type=button，Enter/空格原生触发）。④ 变异红证 M1–M7 齐全且方向正确；还原完整性以候选清单为准——12 个改动文件 sha256 与 RUN-659123b4 candidate.json 全部一致（digest 与任务卡相符）。⑤ 门禁实核：cargo 217 passed/0 failed/9 ignored（依赖任务 TASK-093 RUN-193cf241 实测 213/0/9，217≥213、ignored 不增，验收⑤满足）、frontend 412/412（=396+16，既有 26 条回归断言一行未动、无 checkNew 删除，游标键断言为随契约的键格式更新非削弱）、fmt/clippy/lint/build 干净。⑥ UI 取证 s094_result.json 与归档件 sha256 一致，13 项全 PASS；修前复现 prefix-repro.json 逐字命中基线（画廊 5/44、播客 6/119、通知 1/20 不可滚动）；8 张 1440×1400 PNG 在档，抽看 sentinel-button-dark（可见『加载更多』原生按钮）与 prefix-gallery-b1（修前 5 卡+『滚动加载更多』）与记录相符。范围外观察（不阻塞）：a) 主控消息两处数字与实档不符——cargo 实为 217/0/9（消息称 249），M1 实红 23 条（消息称 13），均偏保守、不影响验收结论；b) tmp/task-094/bak-articles.rs 为 cargo fmt 前快照，与还原后文件仅 rustfmt 格式差异（语义相同），其余 4 个 bak-* sha256 逐一吻合；c) 首次 verify（RUN-fb141ccb）失败于 refresh_dedup_e2e \"table folders already exists\"，为 09-24 已定位的临时库文件名碰撞 flaky（JOURNAL:415 有记录），与只改列表查询的候选无关，重跑同 digest 全绿；d) 文章布局首屏可能有一次有界急切预取（续拉判定早于虚拟器首次测量，offsets [0,500] 连续），interaction-report 已如实记录且有上限 8 兜底；e) Timeline 续拉 effect 不监听窗口 resize（哨兵按钮分支监听），极端缩放后自动续拉待下一次状态变化才触发——验收口径内不构成缺陷。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收①：ArticleListArgs.layout 可选 snake_case（commands/articles.rs:26-30），article_query 透传（:65），谓词单点 LAYOUT_FILTER_SQL（db/articles.rs:738）三处共用，layout=None 无子句无参数；4 条 Rust 测试覆盖 feed 覆盖/分类兜底/None/位置对齐（db/articles.rs:930-1112）。验收②：scopeQueryArgs/scopePageKey 含布局（internals.ts:90-115），selectLayout/selectFeed/selectView/reloadFromBackend/reloadFilteredEntries 全部布局键（nav.ts/bootstrap.ts），(r7-switch) 断言各布局首批 offset=0、切回逐位一致。验收③：refillDecision 上限 8 且进展重置（timelineRefill.ts:20-38）、哨兵原生 button、到底『没有更多了』。验收④：13 项真机 PASS、卡片数==后端数（R1 44/44、R2 119、R3 20）。验收⑤：cargo 217/0/9≥213、frontend 412/412、其余门禁 exit 0。R1–R7 由 TASK-094-ui-result.json 13 项逐条覆盖。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/commands/articles.rs",
+        "src/store/slices/nav.ts",
+        ".workflow-kit/tasks/evidence/TASK-094-ui-result.json",
+        ".workflow-kit/tasks/evidence/TASK-094-mutations/M6.log"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "cargo_test 日志逐行求和：217 passed/0 failed/9 ignored；依赖任务 TASK-093 验证运行 RUN-193cf241 同法求和 213/0/9，217≥213 且 ignored 不增（新增恰为 4 条布局测试）。frontend 412/412 = TASK-093 的 396 + 16 新增；diff 中被改断言全部是游标键随契约的机械格式更新（'10'→'article|10' 等，断言强度不减），grep 确认无任何 checkNew 行被删除，『既有回归 26/26 未改动一行』在输出中明示。cargo fmt --check/clippy -D warnings/lint/build 输出干净。12 个改动文件 sha256 与 RUN-659123b4 candidate.json 清单逐一比对全部一致，工作区即受验候选。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-659123b4e2ea4c1ba8725a34cda6d2d6-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-659123b4e2ea4c1ba8725a34cda6d2d6-frontend.stdout.txt",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-659123b4e2ea4c1ba8725a34cda6d2d6-candidate.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "layout=None 兜底：article_where 的 if-let 不命中即不加子句，既有测试 list_articles_layout_none_returns_all 加跨布局判别力断言防恒真；commands 层 without.layout==None 断言锁定缺省行为。死循环防护：refillDecision 对 loading/exhausted/autoCalls≥cap 一律 idle，Timeline effect 中可见进展（items.length 增长）与筛选口径变化（lastFilterKeyRef）重置计数，M4 红证上限逻辑被真实断言，真机 R5.auto-refill-cap 实测恰 8 次后停手交给按钮。空态与哨兵不矛盾：sentinelMode 空且到底为 hidden（R6 证据 .timeline-load-more 不存在），未到底才出按钮，到底只显示『没有更多了』。加载失败路径沿用既有 D2 复位与竞态丢弃（布局在途响应因 scopeKey 含布局而过期，articlesLoading 顺手复位，无卡死）。",
+      "evidence_files": [
+        "src/components/timelineRefill.ts",
+        "src/components/Timeline.tsx",
+        ".workflow-kit/tasks/evidence/TASK-094-mutations/M4.log",
+        ".workflow-kit/tasks/evidence/TASK-094-ui-result.json"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "谓词单点：grep 全仓布局子查询文本（f.layout != 'inherit' ...）仅命中常量定义一处（db/articles.rs:738），article_where/mark_all_read/sync_map.rs:314 三处拼接同一常量；M7 将常量分类兜底分支改坏时布局测试与既有 mark_all_read_layout_isolation 同红，证明三处确无独立拷贝。常量注释说明占位符绑定次序与别名作用域，article_where 注释说明外层 feed_id 无歧义解析。refill 判定收口为纯函数独立文件（与 timelineSentinel 同理由 oxlint react/only-export-components 驱动），被组件与回归网两侧共用，避免『断言一套、渲染一套』；Timeline 只做测量与接线。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/db/sync_map.rs",
+        "src/components/timelineRefill.ts",
+        ".workflow-kit/tasks/evidence/TASK-094-mutations/M7.log"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "TASK-094-explain-query-plan.md 在 3005 行 fixture（n=200 中位）上对比三场景：layout=None 的 EXPLAIN 计划与 SQL 均逐字节相同（脚本内 A1 assert 3/3 通过），计划与耗时必然一致；layout=Some 时 SQLite 自适应为 idx_articles_feed 驱动的 SEARCH+LIST SUBQUERY（含 BLOOM FILTER），实测反而更快（全部·最新 4.194ms→0.138ms；单源 0.365→0.046；单分类 1.249→0.052），TEMP B-TREE 排序为修前既有形态非本次引入；mark_all_read UPDATE 计划与 article_index 窗口计划均正常。non_goal『新增谓词不得让既有查询计划变差』满足。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-094-explain-query-plan.md",
+        "src-tauri/src/db/articles.rs"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md",
+    "checked_states": [
+      "R1.gallery-reach-all",
+      "R2.podcast-reach-all",
+      "R3.notification-reach-all",
+      "R4.article-social-unchanged",
+      "R5.hint-executable",
+      "R6.empty-state-consistent",
+      "R7.layout-switch-cursor"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-094-ui-gallery-dark.png",
+      ".workflow-kit/tasks/evidence/TASK-094-ui-sentinel-button-dark.png",
+      ".workflow-kit/tasks/evidence/TASK-094-ui-prefix-gallery-b1.png",
+      ".workflow-kit/tasks/evidence/TASK-094-ui-result.json",
+      ".workflow-kit/tasks/evidence/TASK-094-interaction-report.md"
+    ]
+  }
+}

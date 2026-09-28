@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "id": "RUN-fb141ccb6b6c46058f675e32e6c5f92a",
+  "task_id": "TASK-094",
+  "kind": "verification",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-5823166778b64453ba77eb3caa171b24"
+  },
+  "started_at_utc": "2026-09-28T10:00:27.819371Z",
+  "finished_at_utc": "2026-09-28T10:00:31.975597Z",
+  "exit_code": 101,
+  "timed_out": false,
+  "input_digest": "5a9771709912a50e5b28de95af3f9a1e9af1c177716b9e0cdc52763963e73ff3",
+  "candidate_digest": "f655611e989e85d330963f54f1c23dd7fc570ca1c3f3d0baa3b157949158be83",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-fb141ccb6b6c46058f675e32e6c5f92a-cargo_test.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-fb141ccb6b6c46058f675e32e6c5f92a-cargo_test.stderr.txt"
+  ],
+  "checks": [
+    {
+      "gate_id": "cargo_test",
+      "status": "FAIL",
+      "exit_code": 101,
+      "log": ".workflow-kit/tasks/evidence/RUN-fb141ccb6b6c46058f675e32e6c5f92a-cargo_test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-fb141ccb6b6c46058f675e32e6c5f92a-cargo_test.stderr.txt",
+      "candidate_digest": "f655611e989e85d330963f54f1c23dd7fc570ca1c3f3d0baa3b157949158be83",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+          "test"
+        ],
+        "cwd": "src-tauri",
+        "started_at_utc": "2026-09-28T10:00:27.948560Z",
+        "finished_at_utc": "2026-09-28T10:00:31.968339Z",
+        "exit_code": 101,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-fb141ccb6b6c46058f675e32e6c5f92a-cargo_test.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-fb141ccb6b6c46058f675e32e6c5f92a-cargo_test.stderr.txt"
+      }
+    }
+  ],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 17988,
+  "controller_pid": 25480,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "started_at_utc": "2026-09-28T10:00:27.948560Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-fb141ccb6b6c46058f675e32e6c5f92a-cargo_test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-fb141ccb6b6c46058f675e32e6c5f92a-cargo_test.stderr.txt",
+      "finished_at_utc": "2026-09-28T10:00:31.968339Z",
+      "exit_code": 101,
+      "timed_out": false,
+      "cancelled": false
+    }
+  ],
+  "failure_kind": "test_failure",
+  "failure_reason": "Required gate failed: cargo_test"
+}

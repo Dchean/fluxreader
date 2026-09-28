@@ -473,3 +473,9 @@
 - 2026-09-28T07:51:14.505014Z · checkpoint · TASK-093 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T08:03:26.358024Z · checkpoint · TASK-093 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-28T08:04:12.586162Z · accept · 验收 TASK-093；依据：owner 2026-09-28 会话指示「先push再继续推进未完成的任务」（DEC-task093-p3-batch-20260928）；独立审查 PASS findings=0
+- 2026-09-28T08:06:31.279846Z · prepare · TASK-094 · 任务已冻结：三布局列表可达性：列表查询加布局维度 + 不足一屏自动续拉 + 可执行的加载提示（REQ-107）；范围 src/**, src-tauri/src/**, src-tauri/tests/**, tools/frontend-regression.mjs
+- 2026-09-28T08:06:43.492674Z · checkpoint · TASK-094 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-28T10:00:14.025005Z · checkpoint · TASK-094 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/db/articles.rs, src-tauri/src/db/dedup_tests.rs, src-tauri/src/db/sync_map.rs, src-tauri/tests/ingestion_e2e.rs, src/components/Timeline.tsx, src/components/timelineRefill.ts, src/lib/api.ts, src/store/internals.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-28T10:00:32.116411Z · checkpoint · TASK-094 · Required gate failed: cargo_test；下一步：先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算
+- 2026-09-28T10:01:36.652877Z · checkpoint · TASK-094 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-28T10:16:12.269472Z · checkpoint · TASK-094 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
