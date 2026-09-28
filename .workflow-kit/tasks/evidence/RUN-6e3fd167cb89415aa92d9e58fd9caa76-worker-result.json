@@ -1,0 +1,27 @@
+{
+  "task_id": "TASK-097",
+  "run_id": "RUN-6e3fd167cb89415aa92d9e58fd9caa76",
+  "status": "ready_for_verification",
+  "summary": "①游标：greader_pull 在 id 列举前取起点候选 pull_now()（doc-hidden 注入口），成功写候选、failures>0 不推进（068/069 不变）。论证：列举后变更 changed_at≥候选⇒下轮必拉（无漏），重复列举幂等（无重），过滤 changed_at>=ot 含边界防同秒漏拉。②pull_window_e2e：mock 首轮列举快照后注入 changed_at=V+100、时钟注入固定V；变异「游标写回结束墙钟」红 exit101（B漏拉），修后绿10/10；日志在 tmp/task-097/。③mock 契约注释+逐点核对：edit-tag 订正前移 changed_at（Miniflux 实证 SET changed_at=now()）；测试写点 dual_client:226、sync_e2e 两处补前移（后续 full 同步、断言零削弱）；sync_content cover=09-23已修仅更新注释；sync_content⑤/sync_phases stale-read=有意拨回不动；add_entry_*、remove_remote_subscription、sync_gap:955只读不动。门禁：cargo 219/0/9（+1）、fmt/clippy/lint/build 0、frontend 412/412。",
+  "changed_files": [
+    "src-tauri/src/sync/greader_pull.rs",
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/tests/dual_client_e2e.rs",
+    "src-tauri/tests/mock_greader.rs",
+    "src-tauri/tests/pull_window_e2e.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_e2e.rs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "cargo_fmt",
+    "cargo_clippy",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

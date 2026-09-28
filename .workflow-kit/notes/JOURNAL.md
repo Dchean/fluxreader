@@ -490,3 +490,8 @@
 - 2026-09-28T10:57:31.161884Z · checkpoint · TASK-096 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T11:08:43.430004Z · checkpoint · TASK-096 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-28T11:09:08.635013Z · accept · 验收 TASK-096；依据：owner 2026-09-28 指示「修复 ci 没过问题」（DEC-route-remaining-20260928）；独立审查 PASS findings=0
+- 2026-09-28T11:10:48.258015Z · prepare · TASK-097 · 任务已冻结：同步增量窗口收口：greader 游标改取拉取起点 + mock_greader changed_at 语义全面核对（REQ-002）；范围 src-tauri/src/**, src-tauri/tests/**
+- 2026-09-28T11:10:54.716120Z · checkpoint · TASK-097 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-28T11:47:55.937815Z · checkpoint · TASK-097 · 编码结果已记录，差异范围已核对：src-tauri/src/sync/greader_pull.rs, src-tauri/src/sync/mod.rs, src-tauri/tests/dual_client_e2e.rs, src-tauri/tests/mock_greader.rs, src-tauri/tests/pull_window_e2e.rs, src-tauri/tests/sync_content_e2e.rs, src-tauri/tests/sync_e2e.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-28T11:48:59.924286Z · checkpoint · TASK-097 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-28T12:01:42.126981Z · checkpoint · TASK-097 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收

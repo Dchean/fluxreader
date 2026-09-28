@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-6e3fd167cb89415aa92d9e58fd9caa76",
+  "task_id": "TASK-097",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:impl-sync-window-097 (2026-09-28, general-purpose, 全新实例——TASK-096 实现者上下文已约 3.6M tokens 复用风险高, 按规则例外换新; 交接含 09-24 游标待办与 09-23 mock 语义修复记录)"
+  },
+  "started_at_utc": "2026-09-28T11:10:54.523006Z",
+  "finished_at_utc": "2026-09-28T11:47:55.876103Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "e7249cbc67428c1e2ec3d3d95933e3d045d9131a73999284c77992346ce864b8",
+  "candidate_digest": "1abfa21d2ddd7569b143ddb101bf96d2ad1a4cc4520af38c1fcad1a0807d9615",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-6e3fd167cb89415aa92d9e58fd9caa76-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-6e3fd167cb89415aa92d9e58fd9caa76-scope.json"
+}

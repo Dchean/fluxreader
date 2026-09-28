@@ -202,7 +202,8 @@
     "owner_decision_ids": [
       "DEC-882cf8c819a249a593cf04b049566bf7"
     ],
-    "merge_ref": "2640504"
+    "merge_ref": "2640504",
+    "continued_by": "TASK-097"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",

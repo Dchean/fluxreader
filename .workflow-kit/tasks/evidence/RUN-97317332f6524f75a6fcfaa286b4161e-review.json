@@ -1,0 +1,64 @@
+{
+  "task_id": "TASK-097",
+  "candidate_digest": "1abfa21d2ddd7569b143ddb101bf96d2ad1a4cc4520af38c1fcad1a0807d9615",
+  "verification_run": "RUN-89d6b3893b924afd9ee3122eb55e3c0a",
+  "verdict": "PASS",
+  "summary": "实现方 5 条声明全部核实为真。①游标候选确在 id 列举前采样（greader_pull.rs:67 先于 :70 ot 与 :77 列举循环），failures==0 写候选、>0 丢弃（:189-198），pull_now 为该文件唯一墙钟入口，clock override 经 sync/mod.rs:73 重导出且全仓唯一消费者是 pull_window_e2e.rs:78,103，Fever/push/scheduler 的 Utc::now() 未动。②无漏无重论证成立：起点游标 C ≤ 列举时刻 L，未列举变更必有 changed_at ≥ C 落下轮窗口；比较方向 changed_at >= ot（mock_greader.rs:782）含等号，严格 > 的同秒漏拉反例成立，重复拉由 merge_pulled_entry 幂等吸收（entries.rs:108-167）且有断言（sync_phases_e2e.rs:288-302 before==after、pull_cursor_e2e.rs:172 count==1）。③pull_window_e2e 确定性成立：V=1_700_000_500 为固定过去值、T_B=V+100，注入经 pending_injection.take() 在首轮 reading-list 快照算定并释放锁后才插入（mock_greader.rs:772-792），无 sleep 无时钟竞态；红证（变异回退结束墙钟→unused cursor_candidate 告警+核心断言 0≠1）绿证（1 passed）与 RUN-89d6b389 全量日志（entry_changed_during_pull … ok, 1 passed）一致。④mock 全面核对属实：edit-tag 路由补 changed_at=now()（mock_greader.rs:880-882），Miniflux SetEntriesStatus/SetEntriesStarredState 均 SET changed_at=now() 已对照上游 internal/storage/entry.go 源码核实为真；dual_client_e2e:228-232、sync_e2e:244-248/287-291 三处直接写点补前移，sync_content_e2e:269-276 仅注释更新；「有意拨回 1 小时/3 天」的旧变更场景（sync_phases_e2e.rs:196-201、sync_content_e2e.rs:371/466-471）确未改动；契约注释 5 条在 mock 顶部（:6-24）；grep 复查无遗漏的未前移写点。⑤门禁全绿：cargo 219/0/9（实测 TASK-096 基线 RUN-ccfdd25e 为 218/0/9，219=218+1 求和成立）、fmt/clippy/lint/build/frontend 六项 exit 0，frontend 412 通过 0 失败；7 个改动文件 sha256 与候选 manifest 逐一相符。观察项（不要求改码）：a) pull_window_e2e.rs:17 把变异证据指向 tmp/task-097/（临时目录），耐久副本实际在 .workflow-kit/tasks/evidence/TASK-097-mutations/；b) red.log 的 panic 行号 112 与最终文件的断言行 116 相差 4 行，系红绿证据取自终稿前的近似版本，测试名与断言消息完全一致且终稿在全量门禁中通过；c) changed_at 恰等于起点 C 的边界值无专测（T_B=V+100 为严格大于），但 >= 方向实现、论证注释与幂等断言齐备。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收①：游标候选在 id 列举开始前采样（greader_pull.rs:67 先于 :70 的 ot 与 :77 起的列举循环），成功写候选（:190-193）；成对测试 pull_window_e2e.rs:63-126 锁定 B 下一轮拉回（:116-119）、A 不重复（:120）、游标==V（:121-126），红证 red.log（变异回退结束墙钟→exit 失败 0≠1）与绿证 green.log（1 passed）齐备，RUN-89d6b389 全量日志含该测试 ok。验收②：failures>0 不推进由未改动的 pull_cursor_e2e.rs:53-64/128-139 锁定，首同步 ot=0 与 >= 方向论证在 greader_pull.rs:60-66。验收③：mock 改写点全部订正或在注释论证、契约 5 条在 mock_greader.rs:6-24、既有断言零削弱；验收④：cargo 219/0/9（=基线 218+1）、fmt/clippy/lint/build exit 0、frontend 412/0 失败。",
+      "evidence_files": [
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/tests/pull_window_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-097-mutations/red.log",
+        ".workflow-kit/tasks/evidence/TASK-097-mutations/green.log",
+        ".workflow-kit/tasks/evidence/RUN-89d6b3893b924afd9ee3122eb55e3c0a-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "git diff 全量核对：7 个代码文件无任何既有断言删除或弱化，仅新增（dual_client_e2e.rs:226-232、sync_e2e.rs:242-248/285-291 为 changed_at 前移；sync_content_e2e.rs:269-276 为注释更新以匹配新游标语义）。Fever/push/scheduler 的 Utc::now() 未动（fever_pull.rs:171、push.rs:144、scheduler.rs:229 均不在改动集），clock override 无生产消费者（全仓 grep 仅 pull_window_e2e.rs:78,103）。cargo 219/0/9 不低于 TASK-096 验证后基线 218（RUN-ccfdd25e 实测 218/0/9），frontend 412 通过 0 失败；既有 add_entry_* 入口 changed_at=now 语义经包装保持不变（mock_greader.rs:352-360）。",
+      "evidence_files": [
+        "src-tauri/tests/pull_cursor_e2e.rs",
+        "src-tauri/tests/sync_phases_e2e.rs",
+        "src-tauri/tests/mock_greader.rs",
+        ".workflow-kit/tasks/evidence/RUN-ccfdd25e7cb04cba8ae611ff62a82442-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-89d6b3893b924afd9ee3122eb55e3c0a-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "failures>0 分支：id_failures+chunk_failures>0 时候选被丢弃、游标保持（greader_pull.rs:189-198），由 pull_cursor_e2e.rs:59-63（分块失败）与 :134-138（id 列举失败）两处 assert_eq!(last_sync_ts, t0) 锁定，恢复轮同窗口重拉不重复（:172 after==1）。首同步 last_sync_ts 空取 0（greader_pull.rs:46-49），ot=0 全窗口列举后写起点候选，与游标 0 视为未同步的既有语义兼容（:65-66）。比较方向 changed_at >= ot（mock_greader.rs:782）含等号：严格 > 会在同秒「列举先于变更」时漏掉 changed_at==起点条目（greader_pull.rs:62-64 反例成立）；重复拉由幂等合并吸收（entries.rs:108-167：命中走 merge_remote_status 同值写 + backfill 只补空位，仅 URL 与 remote_id 双未命中才 upsert），幂等有断言（sync_phases_e2e.rs:288-302 before==after、pull_cursor_e2e.rs:162-172）。",
+      "evidence_files": [
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/tests/pull_cursor_e2e.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "pull_now() 为 greader pull 唯一墙钟入口（greader_pull.rs:20-27，:67 为唯一消费点），修前游标写点的第二处 Utc::now() 已并入，单一职责清晰。set_greader_pull_clock_override 为 #[doc(hidden)] pub（greader_pull.rs:31-34），sync/mod.rs:72-73 显式重导出并在 :51-58 注明是「无 pub 项子模块」的唯一例外，影响面收敛、全仓无其他消费者。mock 顶部 changed_at 语义契约 5 条（mock_greader.rs:6-24），其引用的 Miniflux SetEntriesStatus/SetEntriesStarredState 均 SET changed_at=now() 已对照上游 internal/storage/entry.go 核实为真。",
+      "evidence_files": [
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/tests/mock_greader.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "每轮 pull 的墙钟读取次数不变：修前在游标写点取一次 Utc::now()，修后在起点取一次 pull_now()，为位置迁移而非新增。PULL_CLOCK_OVERRIDE 为 AtomicI64 的 Relaxed 读（greader_pull.rs:21），未注入时直达 Utc::now() 分支，纳秒级。无新增 SQL 查询、网络请求，锁持有范围不变（候选采样在首次 db.lock 之前、列举循环之外）。",
+      "evidence_files": [
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/mod.rs"
+      ]
+    }
+  ],
+  "ui_review": null
+}

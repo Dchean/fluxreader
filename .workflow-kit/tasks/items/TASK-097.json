@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "id": "TASK-097",
+  "title": "同步增量窗口收口：greader 游标改取拉取起点 + mock_greader changed_at 语义全面核对（REQ-002）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "收口两条登记在案的同步增量窗口缺陷（JOURNAL 2026-09-24T05:06:31Z 与 2026-09-23T07:57Z，均建议合并为一卡评估）。① greader_pull.rs 游标语义：src-tauri/src/sync/greader_pull.rs:149 在本轮拉取全部成功后 set_last_sync_ts(Utc::now())（拉取结束墙钟）。id 列举发生在拉取过程内的某个时刻，凡 changed_at 落在「id 列举之后 ~ 拉取结束之前」的服务端变更不在本轮结果里，又因 changed_at < 游标被排除在下一轮增量之外，只能等全量对账补回——拉取耗时越长漏得越多。修法（保持既有基础设施）：在 id 列举开始前取本轮游标候选（pull 起点墙钟，或取本轮实际观察到的最大 changed_at，二者择一并注释论证），成功推进游标时写该值而非结束时刻；明确与既有「failures>0 不推进游标、下一轮重拉同一窗口」语义的组合正确性（起点游标 + 幂等合并 ⇒ 无漏无重）。注意核对增量过滤的比较方向（>= 还是 >）与游标回退/首次同步（last_sync_ts 为空取 0）的边界。② mock_greader.rs changed_at 语义全面核对：09-23 已修一处（sync_content_e2e 的 miniflux_existing_entry_backfills_cover：mock 改正文时未同步前移 changed_at，与真实 Miniflux「重新抓取会更新 crawl/change 时间」语义不符，导致与增量窗口赛跑的假 flaky）。任务：通读 mock_greader.rs 与所有引用它的测试，枚举「mock 修改了条目内容/状态但未更新 changed_at」的全部同类点，逐个对照真实 GReader/Miniflux 服务端语义订正 mock（真实服务端改内容必更新 changed_at），并在 mock 顶部注释写明语义契约；每处订正附说明（为什么该用例的真实服务端行为会更新 changed_at，或该用例确实不涉及变更故无需改）。不改产品同步逻辑的其他部分；Fever/pull_cursor 等既有游标测试语义不动（除受①影响的断言外）。",
+  "non_goals": [
+    "不做 REQ-108 的索引与查询计划优化",
+    "不改 Fever 同步、push 侧与 config_sync 语义",
+    "不处理「全部已读」写入口径与 miniflux 封面补全（仍留 owner 裁决）",
+    "不改 .workflow-kit 受管记录"
+  ],
+  "requirement_refs": [
+    "REQ-002"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-096"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-route-remaining-20260928"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src/**",
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/TASK-095-baseline-flaky.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 游标推进值不再取拉取结束墙钟：拉取成功时写入的游标 ≤ id 列举时刻；有测试锁定「拉取期间服务端变更的条目在下一轮增量被拉回」（修前失败：结束墙钟游标下该条目被跳过；修后通过）",
+    "② failures>0 时不推进游标的既有语义保持并有断言；首次同步（游标 0）与边界比较方向经注释论证无漏",
+    "③ mock_greader changed_at 语义核对全覆盖：所有「改内容/状态不改 changed_at」的同类点已订正或在注释中论证无需订正；mock 顶部有语义契约注释；既有断言无一削弱",
+    "④ 门禁全绿且不回退：cargo test 通过数 ≥ TASK-096 验证后的 218、0 failed、9 ignored 不增；fmt/clippy/lint/build exit 0；frontend ≥412 全部通过"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "FAIL",
+      "summary": "门禁全绿（cargo 218/0/9），但游标取拉取结束墙钟的漏拉窗口真实存在（JOURNAL 09-24 登记待办）；mock_greader 已发现一处语义不符并修（09-23），同类点未全面核对。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/TASK-095-baseline-flaky.md"
+    },
+    "decision_ids": [
+      "DEC-route-remaining-20260928"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "既有同步/游标测试（pull_cursor_e2e 等）",
+        "reason": "游标语义修正后既有行为兼容",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "Rust：拉取期间变更的条目下一轮被拉回的成对测试 + mock changed_at 订正",
+        "reason": "增量窗口正确性需要修前复现",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "fmt/clippy/lint/build/frontend",
+        "reason": "不回退证据",
+        "gate_ids": [
+          "cargo_fmt",
+          "cargo_clippy",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-097-input-ff57ec7abb9f42df9e221fc9f268fce6.json",
+    "digest": "e7249cbc67428c1e2ec3d3d95933e3d045d9131a73999284c77992346ce864b8",
+    "source_revision": null,
+    "definition_digest": "f820e68c3924fac00136be8dd823d2a4966970b3fba3eeea6bdcc8e4bc2fd90e"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-28T11:10:54.519594Z",
+    "deadline_at_utc": "2026-09-28T15:10:54.519594Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-3b1e9a89eb8a464fb861be8f1bcc3179",
+  "run_ids": [
+    "RUN-6e3fd167cb89415aa92d9e58fd9caa76",
+    "RUN-89d6b3893b924afd9ee3122eb55e3c0a",
+    "RUN-97317332f6524f75a6fcfaa286b4161e"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-89d6b3893b924afd9ee3122eb55e3c0a-candidate.json",
+    "candidate_digest": "1abfa21d2ddd7569b143ddb101bf96d2ad1a4cc4520af38c1fcad1a0807d9615",
+    "verification_run": "RUN-89d6b3893b924afd9ee3122eb55e3c0a",
+    "review_run": "RUN-97317332f6524f75a6fcfaa286b4161e",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md",
+    ".workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md",
+    ".workflow-kit/tasks/evidence/TASK-089-baseline-cover.md",
+    ".workflow-kit/tasks/evidence/TASK-091-baseline-broken-cover.md",
+    ".workflow-kit/tasks/evidence/TASK-092-baseline-images.md",
+    ".workflow-kit/tasks/evidence/TASK-094-baseline-reachability.md",
+    ".workflow-kit/tasks/evidence/TASK-095-baseline-flaky.md",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-096": "e7249cbc67428c1e2ec3d3d95933e3d045d9131a73999284c77992346ce864b8"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-28T11:10:54.715166Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T11:47:55.936352Z",
+      "note": "编码结果已记录，差异范围已核对：src-tauri/src/sync/greader_pull.rs, src-tauri/src/sync/mod.rs, src-tauri/tests/dual_client_e2e.rs, src-tauri/tests/mock_greader.rs, src-tauri/tests/pull_window_e2e.rs, src-tauri/tests/sync_content_e2e.rs, src-tauri/tests/sync_e2e.rs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-28T11:48:59.923199Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-28T12:01:42.125876Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}
