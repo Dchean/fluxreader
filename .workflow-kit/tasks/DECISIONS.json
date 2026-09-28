@@ -2549,6 +2549,20 @@
         "previous_deadline_at_utc": "2026-09-24T09:35:16.176680Z",
         "deadline_at_utc": "2026-09-28T09:06:50.470158Z"
       }
+    },
+    {
+      "id": "DEC-f6a7d0182ed6437d9ba9c80eea679172",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-24 授权（JOURNAL 2026-09-24T03:13Z）：任务在定义门禁与新子代理独立审查通过后由主控 accept 并提交 commit；2026-09-28 两轮独立审查 PASS（首轮 1 条 P2 已修复并复审）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-092"
+      ],
+      "recorded_at_utc": "2026-09-28T06:22:13.154761Z",
+      "candidates": {
+        "TASK-092": "5f24f74c28011ea82b7e18de3db5c8804f786e4d1fad45e9925fd823dc30634e"
+      }
     }
   ]
 }

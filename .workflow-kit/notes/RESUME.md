@@ -9,18 +9,18 @@
 
 目标：以 workflow-kit 2026-09-18.3 新周期对 fluxreader 持续改进：修复全项目体检发现的缺陷（P1/P2），处置功能空壳与死代码确保无未落实的宣称能力，完成 ingestion.rs 拆分与结构性硬化（pull 游标守卫、app_settings 收口），使项目稳定规范、代码与技术路线优雅高效
 
-当前阶段：**验收与交付**
+当前阶段：**分步实施**
 
-阶段目标：核对完整范围，交付可运行成果、使用说明及适用的恢复办法
+阶段目标：落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致
 
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | 需求与目标 | 明确目标、已有 Bug、新功能、其他要求、质量目标和执行边界 | 已完成 |
 | 分析与方案 | 记录参考、原始基线状态与限制，说明维护、稳定和性能取舍，并确认路线 | 已完成 |
 | 界面预览 | 验证关键流程、整体设计和控件完整状态，确认后沿用前端实现 | 不适用 |
-| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 分批推进 |
+| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 当前 |
 | 回归与审查 | 以需求、失败路径、适用界面检查、维护性和性能证据核对当前组合候选 | 分批推进 |
-| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 当前 |
+| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 待推进 |
 
 **完整验收目标**：体检报告 AUDIT-20260919-v2.md 的 P1/P2 缺陷经确认后全部修复并有修前复现/修后验证的成对证据；结构性硬化落地：pull 分块失败不推进增量游标；app_settings 读取收口为类型化助手；ingestion.rs 拆分为领域模块，行为零变化，四门禁不回归；死代码/空壳集群处置完毕（删除或裁决保留），无未落实的宣称能力；设计边界项（P2-12/P3-11 等）经 owner 逐项裁决：实施或注释明示保留；既有质量底线延续：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283 不回退（通过数可增不可减）
 
@@ -28,11 +28,10 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 64 项：已验收 51，待验收 1，阻塞 0。
+已建任务 64 项：已验收 52，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-092 · 封面图片位统一代理与失败回退 + 失效上报接线（REQ-106 之③，前端）](<../tasks/cards/TASK-092.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -44,6 +43,7 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
 另有 52 项记录可在任务总览查看。
 
@@ -74,7 +74,6 @@
 
 ## 教训
 
-- 2026-09-22T15:54:56.437870Z · note/lesson · 审计第三轮方法论 lesson（真机 harness 与 mock 忠实性，2026-09-22）。本轮第一次用「真 Chrome + 忠实假后端」取证，过程中踩到两类坑，都值得固化成纪律。 【1. mock 的不忠实会直接变成一条假发现——本轮亲身两次】 (a) 首次运行时出现「成功的『全部已读』同时弹出失败 toast」。按证伪优先去查自己：假后端 `sync_queue` 的列名写成 feed_id（真实是 article_id + feed_url，见 db/sync_queue.rs:20-36），入队抛错 ⇒ 命令 reject ⇒ 前端弹「未能保存」。修正列名并补上同向互斥 DELETE 后，该现象消失（真实行为只有一条成功 toast）。 (b) 同一事故暴露 Python 的隐式事务与 rusqlite 的自动提交语义不一致：`Connection::execute` 在无显式事务时逐条落库，而 Python 默认把多条语句攒在一个未提交事务里 ⇒ 失败后出现「同连接可见、别处不可见」的半批写入，能伪造出「写成功」的假象。修正：运行时连接显式 isolation_level=None 对齐自动提交；fixture 构建另开连接用默认隔离级（合并为一次提交，否则 3005 条逐条 fsync 实测 8 分钟）。 ⇒ 结论：**mock 的每一处都要能指到源码行**；被测语义（命令路径）与测试基建（建数据）要分开对待。 【2. 审计基建自身要防「上次运行残留」】第二次故障是**上一个被放弃的后端进程仍占着 DB 文件**，新进程的显式事务在锁等待后被丢弃，实测耗 8 分 19 秒后以 `cannot commit - no transaction is active` 失败，外在表现是「场景莫名跑不起来」。修正：库文件名带进程号、就绪检查要求端点返回 JSON 数组（不能只判 HTTP 200，否则会被别的静态服务器骗过）、收尾按进程树 `taskkill /T /F`（Windows 上 python/chrome 是启动器 shim，kill() 只杀 shim）。这类问题不进结论，但会大量吃时间并诱导人去怀疑被测对象。 【3. effect 层缺陷只能靠真机取证，静态推理会给出错误机理】上一轮把 P2-15 的机理记为「Reader 列被 CSS 隐藏且 activeArticleId 恒 null」。真机实测 `.reader-col` 在非文章布局**仍然挂载**（display:none 只影响可见性，React effect 照常执行），真实门控是「卡片点击根本不调用 selectArticle」。同理，「补拉 effect 会级联翻库」的猜测被真机推翻（依赖数组在补拉后不变 ⇒ 只拉一次 ⇒ 永久空列表）。 ⇒ 结论：**凡是结论依赖「组件是否挂载 / effect 是否再次触发 / CSS 隐藏是否等价于不渲染」，必须真机取证**，否则会给修复指错方向。 【4. 无效子测试要作废重做，不要将就】场景 4 的 A（搜索浮层选择器不对）与 B（未先选中文章就按 S，导致对照组也为空）两个子测试不成立；我没有用它们的输出下结论，而是在场景 5 用修正版本加**对照组**重做（对照组：无浮层按 S → 收藏 1→0；实验组：弹窗打开按 S → 收藏 0→1）。对照组是这类「穿透/让路」结论的必要条件。 【5. 真机 harness 的复用价值】能力沉淀在 tmp/audit-r3/harness/：mock_backend.py（忠实假后端：真实 schema + 逐字 SQL + 故障注入 + IPC 日志与时间戳）、drive.mjs（Chrome/CDP 驱动 + Tauri IPC shim，含 Channel 流式事件与事件派发 __fire）、s1…s5 场景脚本。上一轮 5 条未证实项中 4 条在本轮一小时内定论，费用远低于再次静态推理。
 - 2026-09-23T07:19:40.883905Z · note/lesson · 门禁结论必须能被独立复跑，且每批改动要有对应记录（主控一手复核，2026-09-23）。本次核对暴露两件流程问题：① 日志里「四门禁实测全绿：npm run test:frontend 340/340」这行数字不成立——该套件总数是 339（26 既有 + 313 新增），而且那条 note 写下之后落地的 batch-2 改动（12:41–12:52）实测为 335/339（4 红），等于一个红的候选被记录成了全绿；② batch-2 的改动没有对应 note，下一手无从知道它的目标、边界与完成程度。纪律：a) 报告「全绿」必须附可重跑命令与脚本实际打印的摘要行（通过数/总数照抄输出，不手写、不估算）；b) 每批改动落地后立刻落一条 note（含候选与门禁输出），否则该批等于不可追溯；c) 门禁集合一旦包含 fmt 就必须在交付前执行——本次 rustfmt 红正是「四门禁」定义里漏掉 fmt 的直接后果；d) 交接前跑一次全量门禁（而不是只沿用上一次的结论），本次 4 条红就是这样发现的。
 - 2026-09-23T10:02:31.741705Z · note/lesson · lesson（2026-09-23）：**成功时静默的门禁不能作为审查证据被引用**。TASK-090 的独立复审结论为 PASS，但 `review` 命令两次拒绝落盘，唯一原因是 review_checks 的 evidence_files 引用了 `cargo fmt --check` 的 stdout 日志——该文件 0 字节（rustfmt 干净时**不输出任何内容**），而工具要求被引用的证据文件存在且非空（防伪造证据）。正确修法不是往日志里补内容（那是伪造证据），而是改引非空证据：验证运行记录 `.workflow-kit/tasks/runs/<RUN>.json`（内含该门禁 status=PASS 与 exit_code=0），或同批非空的门禁日志（如 cargo_test 的 stdout）。推广：① 准备任务卡时，把「成功时静默」的命令（cargo fmt --check、grep -q、test -f 之类）设为**必需门禁**前，要先确定证据面；项目既有的「四门禁」（cargo test / lint / build / frontend）恰好都会打印可引用的摘要行——这大概不是巧合；② 本卡把 cargo_fmt 与 cargo_clippy 加进门禁是对的（覆盖面更全，clippy 也确实抓到一处 manual-ok lint），但下次要么在审查指引里显式要求「引用运行记录而非空日志」，要么让门禁命令天然产出摘要行；③ 工具侧建议（需单独立项，不在任务卡里夹带）：verify 写日志时给每个门禁附一行「命令 + 退出码」页眉，使所有门禁（含静默成功者）都有非空证据，避免审查者与总控在此反复往返。
 - 2026-09-24T05:06:30.595590Z · note/lesson · 订正 2026-09-23T07:13:57Z 那条 Batch 2 记录：其「新增断言 +7，每条都做过修前/修后成对验证」不准确——独立审查实测新增 9 个 checkNew（frontend-regression.mjs 817/1586/1626/1629/1640/2212/2220/2224/2227 行），其中 1626、2212、2227 三条在修前代码下也通过（不具判别力）；合计 348/348 的总数无误。纪律：声称「成对验证」必须附每条断言对应的变异与变红输出，否则只写「新增 N 条」。
@@ -82,12 +81,10 @@
 - 2026-09-28T05:18:30.528502Z · note/lesson · TASK-092 · scope 失败已出现 17 次：Out-of-scope changes: .workflow-kit/binding.json, .workflow-kit/docs/workflow/REFACTOR.md, .workflow-kit/docs/workflow/design-note.md, .workflow-kit/docs/workfl。下次准备/实现前先核对这一点。
 - 2026-09-28T05:20:30.786457Z · note/lesson · TASK-092 · protocol 失败已出现 7 次：Worker result must match the complete worker-result contract。下次准备/实现前先核对这一点。
 - 2026-09-28T05:53:41.267765Z · note/lesson · TASK-092 · protocol 失败已出现 8 次：Worker result must match the complete worker-result contract。下次准备/实现前先核对这一点。
+- 2026-09-28T06:23:16.626668Z · note/lesson · workflow-kit 新引擎（2026-09-28 升级）三处契约坑，下次直接按此准备：①worker-result JSON 键集必须与契约精确相等——finish 成功时工具会自动给文件加 changed_files_source 键并改写 changed_files，从已 finish 的文件复制会带入多余键触发 protocol 阻塞；应始终从 worker 原始 9 键文件重建。②review 报告 ui_review.checked_states 每条必须恰为 ui_check id 字符串（整串相等，不能带结论后缀），evidence_files 只收 tasks/evidence/ 与 tasks/runs/ 下非空文件（截图+报告至少各一）。③PASS 且 findings 为空的报告要求 review_checks 恰好覆盖 5 个规范 area（requirements/regression/failure_paths/maintainability/performance，各一条、无自定义名、无多余条目），每条必带 evidence_files（候选文件或 evidence/runs 附件，tmp/ 无效）；观察性备忘写 summary 与 analysis，不进 findings。M22 变异证据已随 TASK-092 归档可作范例。
 
 ## 最近事件
 
-- 2026-09-28T05:23:05.333090Z · checkpoint · TASK-092 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-09-28T05:25:26.063947Z · checkpoint · TASK-092 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
-- 2026-09-28T05:49:02.438458Z · checkpoint · TASK-092 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
 - 2026-09-28T05:53:25.895237Z · checkpoint · TASK-092 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-28T05:53:41.052551Z · checkpoint · TASK-092 · Worker result must match the complete worker-result contract；下一步：按报错列出的漏报/多报文件修正 worker-result，再 unblock 后 begin；不要新建任务或重置预算
 - 2026-09-28T05:53:41.267765Z · note/lesson · TASK-092 · protocol 失败已出现 8 次：Worker result must match the complete worker-result contract。下次准备/实现前先核对这一点。
@@ -97,6 +94,9 @@
 - 2026-09-28T05:54:16.916472Z · checkpoint · TASK-092 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-28T05:54:48.794925Z · checkpoint · TASK-092 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T06:20:49.538823Z · checkpoint · TASK-092 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-28T06:22:23.067411Z · accept · 验收 TASK-092；依据：owner 2026-09-24 授权（JOURNAL 2026-09-24T03:13Z）：任务在定义门禁与新子代理独立审查通过后由主控 accept 并提交 commit；2026-09-28 两轮独立审查 PASS（首轮 1 条 P2 已修复并复审）
+- 2026-09-28T06:23:03.986674Z · note/progress · TASK-092 · 2026-09-28 会话总结：①启动包按 D:/workflow-kit QUICK_START rebind 升级（connected，check 0 错误；旧版备份 legacy/upgrade-20260928T050448Z；升级前工作区备份 tmp/upgrade-backup-20260928/，按「不提交未审查代码」决定未提前 commit）。②TASK-092 全流程收口：recover 中断证据 → extend 240min（DEC-b672049f，用户会话内确认）→ unblock×3（越界文件均主控行为：09-28 rebind 升级 + 09-24 TASK-094 契约预写）→ 新子代理补交互报告 C9/D10-D12 与 worker-result → 归档 UI 证据 → finish/verify → 首轮独立审查 PASS 含 1 条 P2（代理 img 缺 onError）→ 主控修复 + cov-wire 断言扩展 + M22 变异成对验证 → repair finish/verify → 全新子代理复审 PASS findings=0（增量经字节级核对仅声明两处）→ review 录入 → accept（DEC-f6a7d018，merge-ref 894c3bd）。提交：894c3bd 业务 12 文件、d8573e8 工作流记录。③TASK-092 两轮 P3 备忘（G1 LRU 驱逐重取、G2 readyOrder 重复 push、G3 Number(articleId) 静默拒绝、G4 证据命名、G5 CRLF/reason 确认项）已并入 tmp/task-093-spec.json，prepare TASK-093 时带入。④verify 提示：本任务 snapshot_paths 冻结 139 文件仅改 23 个，后续任务应收窄。
+- 2026-09-28T06:23:16.626668Z · note/lesson · workflow-kit 新引擎（2026-09-28 升级）三处契约坑，下次直接按此准备：①worker-result JSON 键集必须与契约精确相等——finish 成功时工具会自动给文件加 changed_files_source 键并改写 changed_files，从已 finish 的文件复制会带入多余键触发 protocol 阻塞；应始终从 worker 原始 9 键文件重建。②review 报告 ui_review.checked_states 每条必须恰为 ui_check id 字符串（整串相等，不能带结论后缀），evidence_files 只收 tasks/evidence/ 与 tasks/runs/ 下非空文件（截图+报告至少各一）。③PASS 且 findings 为空的报告要求 review_checks 恰好覆盖 5 个规范 area（requirements/regression/failure_paths/maintainability/performance，各一条、无自定义名、无多余条目），每条必带 evidence_files（候选文件或 evidence/runs 附件，tmp/ 无效）；观察性备忘写 summary 与 analysis，不进 findings。M22 变异证据已随 TASK-092 归档可作范例。
 
 ## 如何继续
 

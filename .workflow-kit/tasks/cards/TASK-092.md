@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-092 · 封面图片位统一代理与失败回退 + 失效上报接线（REQ-106 之③，前端）
 
-**状态**：verified
+**状态**：done
 
 **目标**：修用户报告「文章封面部分获取不到」的前端成因（审计 round-4 §1-C/§1-D；基线 .workflow-kit/tasks/evidence/TASK-092-baseline-images.md；UI 契约 .workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md）。现状：只有画廊卡片走 proxyImageUrl，文章卡（Timeline.tsx:374）、播客卡（:685）、迷你播放条（PlayerBar.tsx:216）、全屏播放器（:332）、灯箱（Overlays.tsx:338）全部直连 + no-referrer 且无 onError ⇒ 白名单式防盗链图床（实测 cdnfile.sspai.com 无 Referer 403×12/12、img*.doubanio.com 418×20/20）必然破图，失效封面（TASK-091 已提供 report_broken_cover 后端命令）也没有上报出口。本卡：① 五处图片位统一复用 lib/imageProxy.ts 的既有判定与 api.fetchImage（抽一个共享的封面图片组件或 hook，不新造第二套判定）；② 失败（代理失败/直连失败/字节非图片）时显示占位，同会话不重复请求；③ 失败时经 api 调用 report_broken_cover(article_id, url) 上报，同条目同 URL 幂等只上报一次；④ 补前端回归断言（修前失败、修后通过）与真机 UI 证据（截图 + 交互报告）。
 

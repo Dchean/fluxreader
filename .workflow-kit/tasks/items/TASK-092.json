@@ -56,7 +56,7 @@
       "description": "灯箱图片失败时显示占位，关闭/Esc 行为不变"
     }
   ],
-  "status": "verified",
+  "status": "done",
   "objective": "修用户报告「文章封面部分获取不到」的前端成因（审计 round-4 §1-C/§1-D；基线 .workflow-kit/tasks/evidence/TASK-092-baseline-images.md；UI 契约 .workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md）。现状：只有画廊卡片走 proxyImageUrl，文章卡（Timeline.tsx:374）、播客卡（:685）、迷你播放条（PlayerBar.tsx:216）、全屏播放器（:332）、灯箱（Overlays.tsx:338）全部直连 + no-referrer 且无 onError ⇒ 白名单式防盗链图床（实测 cdnfile.sspai.com 无 Referer 403×12/12、img*.doubanio.com 418×20/20）必然破图，失效封面（TASK-091 已提供 report_broken_cover 后端命令）也没有上报出口。本卡：① 五处图片位统一复用 lib/imageProxy.ts 的既有判定与 api.fetchImage（抽一个共享的封面图片组件或 hook，不新造第二套判定）；② 失败（代理失败/直连失败/字节非图片）时显示占位，同会话不重复请求；③ 失败时经 api 调用 report_broken_cover(article_id, url) 上报，同条目同 URL 幂等只上报一次；④ 补前端回归断言（修前失败、修后通过）与真机 UI 证据（截图 + 交互报告）。",
   "non_goals": [
     "不改布局、字体、间距、颜色、动画与既有类名（仅加必要的回退类）",
@@ -272,9 +272,11 @@
     "candidate_digest": "5f24f74c28011ea82b7e18de3db5c8804f786e4d1fad45e9925fd823dc30634e",
     "verification_run": "RUN-248bfad9c0864267b6b98388f2cccb84",
     "review_run": "RUN-56dc087f1efd48e5bf6a82f13f30c403",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-f6a7d0182ed6437d9ba9c80eea679172-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-f6a7d0182ed6437d9ba9c80eea679172"
+    ],
+    "merge_ref": "894c3bd"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",

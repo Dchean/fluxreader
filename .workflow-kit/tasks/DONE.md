@@ -66,5 +66,6 @@
 | [TASK-089](items/TASK-089.json) | 封面补全饥饿与死链纠正（补全窗口推进 + 失效封面纠正通道，REQ-106） | cancelled |
 | [TASK-090](items/TASK-090.json) | 封面补全饥饿修复：负缓存语义 + 候选窗口推进（REQ-106 之①） | done |
 | [TASK-091](items/TASK-091.json) | 失效封面纠正通道：db 清空函数 + tauri 命令 + 回归用例（REQ-106 之④，后端） | done |
+| [TASK-092](items/TASK-092.json) | 封面图片位统一代理与失败回退 + 失效上报接线（REQ-106 之③，前端） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。
