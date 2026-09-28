@@ -15,6 +15,9 @@ export interface PodcastPlayerState {
   title: string;
   showName: string;
   cover: string;
+  /** cover 所属文章条目 id（TASK-092：封面失效上报用）。新剧集没给 cover 时沿用旧 cover，
+      id 也随之沿用旧值，保证上报的 (id, url) 与实际显示的封面一致；空 = 未知 */
+  coverEntryId?: string;
   /** 真实音频地址（enclosure_url）；空 = 无可播放源 */
   audioUrl: string;
   /** 当前播放位置（秒，PlayerBar 从 audio 元素同步） */
@@ -125,6 +128,8 @@ export interface AppState {
   /** 首次关闭询问弹窗（Rust close-ask 事件驱动） */
   closeAskVisible: boolean;
   lightboxUrl: string | null;
+  /** 灯箱图片所属文章条目 id（封面失效上报用；正文图等非封面场景为 null） */
+  lightboxEntryId: string | null;
   newCategoryModalOpen: boolean;
   addFeedModalOpen: boolean;
   addFeedTargetCatId: string;
@@ -261,7 +266,7 @@ export interface AppState {
   closeSearch: () => void;
   /** 首次关闭询问的应答（Rust resolve_close 执行隐藏/退出；remember 时同步设置镜像） */
   answerCloseAsk: (action: 'tray' | 'exit', remember: boolean) => void;
-  openLightbox: (url: string) => void;
+  openLightbox: (url: string, entryId?: string) => void;
   closeLightbox: () => void;
   openNewCategoryModal: () => void;
   openAddFeedModal: (catId: string) => void;

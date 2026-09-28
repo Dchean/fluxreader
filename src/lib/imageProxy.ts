@@ -21,6 +21,12 @@ export function needsImageProxy(src: string): boolean {
   }
 }
 
+/** 当前环境能否走后端代理（浏览器 mock 无 IPC 时不能）。与 proxyImageUrl/proxyImagesInHtml
+    的入口判断同口径：无 IPC 时调用方应直连原图。 */
+export function canProxyImages(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
 /** 图片字节 → data: URL。Tauri IPC 的 Vec<u8> 在 JS 端是 number[]，需先转 Uint8Array；
     MIME 用字节嗅探（少数派等 CDN URL 带 imageView2 等查询参数，扩展名判断失效）。 */
 function imageDataUrl(src: string, bytes: Uint8Array | number[]): string {
@@ -100,5 +106,45 @@ export async function proxyImageUrl(
     return imageDataUrl(src, bytes);
   } catch {
     return null;
+  }
+}
+
+/** 严格版单图代理结果（封面图片位用，TASK-092）。
+    与 proxyImageUrl 的区别：字节不是可识别的图片（例如图床把登录页 HTML 以 200 返回）
+    时判为失败，**不**注入 DOM；proxyImageUrl（画廊）保持原样不变。 */
+export type ProxiedImageResult =
+  | { ok: true; dataUrl: string }
+  | { ok: false; reason: 'unavailable' | 'empty' | 'not-image' | 'error' };
+
+/** 额外的图片签名（AVIF/HEIC 的 ftyp 盒、BMP、ICO、SVG 文本），仅用于严格判定；
+    PNG/JPEG/GIF/WebP 仍由 sniffImageMime 识别。 */
+function sniffExtraImageMime(b: Uint8Array): string | null {
+  if (b.length >= 12 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+    const brand = String.fromCharCode(b[8], b[9], b[10], b[11]);
+    if (brand === 'avif' || brand === 'avis') return 'image/avif';
+    if (brand === 'heic' || brand === 'heix' || brand === 'mif1') return 'image/heic';
+  }
+  if (b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d) return 'image/bmp';
+  if (b.length >= 4 && b[0] === 0x00 && b[1] === 0x00 && b[2] === 0x01 && b[3] === 0x00) return 'image/x-icon';
+  const head = new TextDecoder().decode(b.subarray(0, 512)).trimStart().toLowerCase();
+  if (head.startsWith('<svg') || (head.startsWith('<?xml') && head.includes('<svg'))) return 'image/svg+xml';
+  return null;
+}
+
+/** 封面图片位的代理取图：需要代理的 URL 走后端 fetch_image，校验字节确为图片后转 data: URL。
+    调用方先用 needsImageProxy 判定是否需要代理（判定规则只在本文件一处）。 */
+export async function fetchProxiedImage(src: string, pageUrl?: string): Promise<ProxiedImageResult> {
+  if (!canProxyImages() || !/^https?:\/\//.test(src)) return { ok: false, reason: 'unavailable' };
+  try {
+    const bytes = await api.fetchImage(src, pageUrl);
+    if (!bytes || bytes.length === 0) return { ok: false, reason: 'empty' };
+    const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (sniffImageMime(arr)) return { ok: true, dataUrl: imageDataUrl(src, arr) };
+    const extra = sniffExtraImageMime(arr);
+    if (!extra) return { ok: false, reason: 'not-image' };
+    const jpegLike = imageDataUrl(src, arr);
+    return { ok: true, dataUrl: `data:${extra};base64,${jpegLike.slice(jpegLike.indexOf(',') + 1)}` };
+  } catch {
+    return { ok: false, reason: 'error' };
   }
 }

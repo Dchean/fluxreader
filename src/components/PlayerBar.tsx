@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
 import { api } from '../lib/api';
+import { CoverImage } from './CoverImage';
 
 /* ============================================================
    播客底部播放条 —— Mini Player
@@ -213,7 +214,8 @@ export function PlayerBar() {
         {player.isActive && <audio ref={audioRef} src={player.audioUrl} preload="metadata" />}
 
         <div className="player-track-info">
-          {player.cover && <img src={player.cover} className="player-cover" alt="cover" referrerPolicy="no-referrer" />}
+          {/* 封面：共享 CoverImage（与卡片/全屏播放器共用同一缓存与上报去重） */}
+          <CoverImage src={player.cover} articleId={player.coverEntryId} className="player-cover" alt="cover" />
           <div className="player-titles">
             <div className="player-title">{player.title}</div>
             <div className="player-subtitle">{player.showName}</div>
@@ -328,9 +330,14 @@ function PlayerFullOverlay({
     <div className={`player-full-overlay ${open ? 'open' : ''}`} role="dialog" aria-modal="true" onClick={onClose}>
       <div className="player-full-card" onClick={(e) => e.stopPropagation()}>
         <div className="player-full-cover-wrap">
-          {player.cover
-            ? <img src={player.cover} className="player-full-cover" alt="" referrerPolicy="no-referrer" />
-            : <div className="player-full-cover player-full-cover-fallback" />}
+          <CoverImage
+            src={player.cover}
+            articleId={player.coverEntryId}
+            className="player-full-cover"
+            alt=""
+            fallbackClassName="player-full-cover player-full-cover-fallback cover-fallback"
+            empty={<div className="player-full-cover player-full-cover-fallback" />}
+          />
         </div>
         <div className="player-full-meta">
           <div className="player-full-show">{player.showName}</div>

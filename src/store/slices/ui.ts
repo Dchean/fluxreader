@@ -13,6 +13,7 @@ export type UiSlice = Pick<
   | 'searchOpen'
   | 'closeAskVisible'
   | 'lightboxUrl'
+  | 'lightboxEntryId'
   | 'newCategoryModalOpen'
   | 'addFeedModalOpen'
   | 'addFeedTargetCatId'
@@ -46,6 +47,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   searchOpen: false,
   closeAskVisible: false,
   lightboxUrl: null,
+  lightboxEntryId: null,
   newCategoryModalOpen: false,
   addFeedModalOpen: false,
   addFeedTargetCatId: '',
@@ -80,8 +82,8 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
         ),
       );
   },
-  openLightbox: (url) => set({ lightboxUrl: url }),
-  closeLightbox: () => set({ lightboxUrl: null }),
+  openLightbox: (url, entryId) => set({ lightboxUrl: url, lightboxEntryId: entryId ?? null }),
+  closeLightbox: () => set({ lightboxUrl: null, lightboxEntryId: null }),
   openNewCategoryModal: () => set({ newCategoryModalOpen: true }),
   openAddFeedModal: (catId) => set({ addFeedModalOpen: true, addFeedTargetCatId: catId }),
   openEditFeedModal: (feedId) => set({ editFeedModalOpen: true, editFeedTargetId: feedId }),

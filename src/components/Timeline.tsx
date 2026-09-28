@@ -14,6 +14,7 @@ import { Icons } from './icons';
 import { formatRelativeTime, formatDuration } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
 import { proxyImageUrl } from '../lib/imageProxy';
+import { CoverImage } from './CoverImage';
 import type { ArticleEntry } from '../types';
 import { useEnteringClass } from './useEnteringClass';
 import { sentinelMode } from './timelineSentinel';
@@ -371,7 +372,8 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect, cardIndex, tabbab
           <h4 className="card-title">{art.title}</h4>
           <p className="card-snippet">{art.snippet}</p>
         </div>
-        {art.cover && <img src={art.cover} className="card-cover-thumb" alt="cover" loading="lazy" referrerPolicy="no-referrer" />}
+        {/* 封面：共享 CoverImage（按 imageProxy 判定代理/直连，失败出占位并幂等上报；无 cover 不渲染） */}
+        <CoverImage src={art.cover} articleId={art.id} pageUrl={art.url} className="card-cover-thumb" alt="cover" loading="lazy" />
       </div>
       <div className="card-footer">
         <span>{art.author}</span>
@@ -576,7 +578,7 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMov
     /* 灯箱用代理后的 data: URL（若有）：豆瓣等防盗链图，原始 URL 在灯箱里
        no-referrer 也会 418；代理成功则用 data: URL 放大。 */
     const lightboxSrc = proxiedSrc ?? item.imageUrl;
-    if (lightboxSrc) openLightbox(lightboxSrc);
+    if (lightboxSrc) openLightbox(lightboxSrc, item.id);
     if (!item.isRead) {
       useAppStore.getState().markEntriesReadBulk([item.id]);
     } else {
@@ -682,7 +684,16 @@ const PodcastCard = memo(function PodcastCard({ item, cardIndex, tabbable, onMov
       data-ctx="article"
       data-id={item.id}
     >
-      <img src={item.cover} className="podcast-cover-box" alt="cover" loading="lazy" referrerPolicy="no-referrer" />
+      {/* 封面：共享 CoverImage；无 cover 时出同尺寸占位（不再渲染无 src 的 img） */}
+      <CoverImage
+        src={item.cover}
+        articleId={item.id}
+        pageUrl={item.url}
+        className="podcast-cover-box"
+        alt="cover"
+        loading="lazy"
+        empty={<div className="podcast-cover-box cover-fallback" data-cover-state="empty" aria-hidden="true" />}
+      />
       <div style={{ flex: 1 }}>
         <div className="podcast-show-name">
           {feedName}

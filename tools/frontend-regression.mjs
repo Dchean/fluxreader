@@ -2741,6 +2741,272 @@ await (async () => {
       wrong({ ...entry, cover: 'https://wrong.example/x.png' }, expectEntry).includes('cover'));
   }
 
+/* ============================================================
+   TASK-092（REQ-106 ③）：封面图片位统一代理 / 失败回退 / 失效上报
+   驱动 src/lib/coverImage.ts（五处图片位共用的状态机，ui-loader 就地转译），
+   fetch_image / report_broken_cover 由本段落临时包一层 __INVOKE__ 可控假后端
+   （段末恢复）。组件是否真的调用这些函数：SSR 渲染 CoverImage + 源码形态断言。
+   ============================================================ */
+{
+  const cov = await import('../src/lib/coverImage.ts');
+  const ip = await import('../src/lib/imageProxy.ts');
+  const fsC = await import('node:fs');
+  const readSrc = (p) => fsC.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const prevInvokeC = globalThis.__INVOKE__;
+  const cCalls = [];
+  const fetchPlan = new Map(); // url -> 'png' | 'html' | 'reject' | 'empty'
+  let reportReject = false;
+  const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+  const HTML = Array.from(new TextEncoder().encode('<!doctype html><html><body>请登录</body></html>'));
+  globalThis.__INVOKE__ = (cmd, args) => {
+    if (cmd === 'fetch_image') {
+      cCalls.push({ cmd, args });
+      const plan = fetchPlan.get(args.url) ?? 'png';
+      if (plan === 'reject') return Promise.reject({ code: 'imageFetch', message: 'HTTP 错误: 403' });
+      if (plan === 'empty') return Promise.resolve([]);
+      return Promise.resolve(plan === 'html' ? HTML : PNG);
+    }
+    if (cmd === 'report_broken_cover') {
+      cCalls.push({ cmd, args });
+      return reportReject ? Promise.reject({ code: 'db', message: 'database is locked' }) : Promise.resolve(true);
+    }
+    return prevInvokeC(cmd, args);
+  };
+  const nCmd = (cmd, url) => cCalls.filter((c) => c.cmd === cmd && (url === undefined || c.args.url === url)).length;
+  const reports = () => cCalls.filter((c) => c.cmd === 'report_broken_cover').map((c) => `${c.args.articleId}|${c.args.url}`);
+  const SSPAI = 'https://cdnfile.sspai.com/2026/09/cover.png?imageView2/2/w/300';
+  const DOUBAN = 'https://img9.doubanio.com/view/photo/l/public/p1.jpg';
+  const PLAIN = 'https://images.example.com/c.jpg';
+  const unhandled = [];
+  const onUnhandled = (e) => { unhandled.push(e); };
+  process.on('unhandledRejection', onUnhandled);
+  const warns = [];
+  const prevWarn = console.warn;
+  console.warn = (...a) => { warns.push(a.map(String).join(' ')); };
+  try {
+    cov.resetCoverCacheForTest();
+
+    /* A1/A2：取图路径只由 imageProxy.needsImageProxy 决定 */
+    checkNew('(cov-a1) 取图路径：sspai/doubanio 走代理，普通图床直连，空 cover 为 none（判定来自 imageProxy）',
+      cov.coverRoute(SSPAI) === 'proxy' && cov.coverRoute(DOUBAN) === 'proxy'
+      && cov.coverRoute(PLAIN) === 'direct' && cov.coverRoute('') === 'none'
+      && cov.coverRoute(null) === 'none' && cov.coverRoute(undefined) === 'none'
+      && cov.coverRoute('data:image/png;base64,AA==') === 'direct');
+    {
+      const cs = readSrc('../src/lib/coverImage.ts');
+      const code = cs.split('\n').filter((l) => !/^\s*(\/\/|\/\*|\*)/.test(l)).join('\n');
+      checkNew('(cov-a1) 判定规则只在 imageProxy.ts 一处：coverImage.ts 调用 needsImageProxy 且代码里不含任何图床域名',
+        code.includes('needsImageProxy(src)') && !/sspai|doubanio/.test(code));
+    }
+
+    /* A1：代理成功 → data: URL，fetch_image 带 pageUrl 只发一次 */
+    cov.driveCover(SSPAI, 'https://sspai.com/post/1', '11');
+    const loadingState = cov.getCoverState(SSPAI).status;
+    await nTick(10);
+    const okState = cov.getCoverState(SSPAI);
+    checkNew('(cov-a1) 代理成功：先 loading，再 ready 为 data:image/png URL；fetch_image 1 次且带 {url,pageUrl}',
+      loadingState === 'loading' && okState.status === 'ready' && okState.src.startsWith('data:image/png;base64,')
+      && nCmd('fetch_image', SSPAI) === 1
+      && cCalls.find((c) => c.cmd === 'fetch_image').args.pageUrl === 'https://sspai.com/post/1');
+    checkNew('(cov-a4) 渲染决策：代理未返回前是占位（pending，不直连防盗链图），返回后是 data: 的 img',
+      cov.coverView(SSPAI, { status: 'loading' }).kind === 'placeholder'
+      && cov.coverView(SSPAI, { status: 'idle' }).kind === 'placeholder'
+      && cov.coverView(SSPAI, okState).kind === 'img' && cov.coverView(SSPAI, okState).direct === false
+      && cov.coverView(SSPAI, okState).src.startsWith('data:'));
+
+    /* A2：直连域名不触发 fetch_image */
+    const fBefore = nCmd('fetch_image');
+    cov.driveCover(PLAIN, 'https://example.com/a', '12');
+    await nTick(10);
+    const plainView = cov.coverView(PLAIN, cov.getCoverState(PLAIN));
+    checkNew('(cov-a2) 不需代理的域名直连：不触发 fetch_image，渲染为原 URL 的直连 img',
+      nCmd('fetch_image') === fBefore && plainView.kind === 'img' && plainView.direct === true && plainView.src === PLAIN);
+
+    /* B5/C8：代理失败 → 占位 + 上报 */
+    fetchPlan.set(DOUBAN, 'reject');
+    cov.driveCover(DOUBAN, 'https://movie.douban.com/x', '21');
+    await nTick(10);
+    cov.driveCover(DOUBAN, 'https://movie.douban.com/x', '21'); // 组件状态变化后 effect 再跑一次
+    await nTick(10);
+    checkNew('(cov-b5) 代理失败（fetch_image 拒绝）→ failed，渲染为占位而非 img',
+      cov.getCoverState(DOUBAN).status === 'failed'
+      && cov.coverView(DOUBAN, cov.getCoverState(DOUBAN)).kind === 'placeholder');
+    const firstReport = cCalls.find((c) => c.cmd === 'report_broken_cover');
+    checkNew('(cov-c8) 失败即上报 report_broken_cover，参数 {articleId:number, url}（Tauri camelCase 契约）',
+      reports().includes(`21|${DOUBAN}`) && firstReport?.args.articleId === 21
+      && Object.keys(firstReport?.args ?? {}).sort().join(',') === 'articleId,url');
+
+    /* B7：同一会话失败 URL 不再请求；C8 幂等 */
+    for (let i = 0; i < 5; i++) cov.driveCover(DOUBAN, 'https://movie.douban.com/x', '21');
+    cov.requestProxiedCover(DOUBAN, 'https://movie.douban.com/x');
+    await nTick(10);
+    checkNew('(cov-b7) 失败的 URL 同会话内不再发 fetch_image（再驱动 6 次后仍只 1 次）',
+      nCmd('fetch_image', DOUBAN) === 1);
+    checkNew('(cov-c8) 同条目同 URL 只上报一次（重复驱动后 report_broken_cover 仍 1 次）',
+      reports().filter((r) => r === `21|${DOUBAN}`).length === 1);
+    /* C9：迷你播放条 + 全屏播放器 + 灯箱展示同一 cover（同一条目 id）→ 共用缓存与去重 */
+    cov.driveCover(DOUBAN, undefined, '21');
+    cov.driveCover(DOUBAN, undefined, '21');
+    cov.driveCover(DOUBAN, undefined, '21');
+    await nTick(10);
+    checkNew('(cov-c9) 播放条/灯箱与卡片展示同一 cover：零新增取图、零新增上报',
+      nCmd('fetch_image', DOUBAN) === 1 && reports().filter((r) => r === `21|${DOUBAN}`).length === 1);
+    cov.driveCover(DOUBAN, undefined, '22');
+    await nTick(10);
+    checkNew('(cov-c8) 另一条目引用同一失效 URL：该条目上报一次，但不重新取图',
+      nCmd('fetch_image', DOUBAN) === 1 && reports().filter((r) => r === `22|${DOUBAN}`).length === 1);
+    checkNew('(cov-c8) 无条目 id（正文图进灯箱）/ data: URL 不上报',
+      cov.reportCoverFailure(null, DOUBAN) === false && cov.reportCoverFailure('', DOUBAN) === false
+      && cov.reportCoverFailure('31', 'data:image/png;base64,AA==') === false);
+
+    /* B5：代理返回空字节 → 占位 */
+    const EMPTYB = 'https://rssfile.sspai.com/empty.jpg';
+    fetchPlan.set(EMPTYB, 'empty');
+    cov.driveCover(EMPTYB, undefined, '41');
+    await nTick(10);
+    checkNew('(cov-b5) 代理返回空字节 → failed（reason=empty）',
+      cov.getCoverState(EMPTYB).status === 'failed' && cov.getCoverState(EMPTYB).reason === 'empty');
+
+    /* D11：字节不是图片 → 占位 + 上报，不注入 DOM */
+    const LOGIN = 'https://cdnfile.sspai.com/login-wall.jpg';
+    fetchPlan.set(LOGIN, 'html');
+    cov.driveCover(LOGIN, undefined, '51');
+    await nTick(10);
+    cov.driveCover(LOGIN, undefined, '51');
+    await nTick(10);
+    checkNew('(cov-d11) 代理字节是 HTML 登录页 → failed(not-image)，不产出 data: URL，渲染占位',
+      cov.getCoverState(LOGIN).status === 'failed' && cov.getCoverState(LOGIN).reason === 'not-image'
+      && cov.coverView(LOGIN, cov.getCoverState(LOGIN)).kind === 'placeholder');
+    checkNew('(cov-d11) 非图片字节同样上报一次', reports().filter((r) => r === `51|${LOGIN}`).length === 1);
+    const strict = await ip.fetchProxiedImage(LOGIN);
+    checkNew('(cov-d11) fetchProxiedImage 对 HTML 字节返回 not-image（严格判定在 imageProxy.ts）',
+      strict.ok === false && strict.reason === 'not-image');
+
+    /* A3：画廊的 proxyImageUrl 行为逐字保留（不做严格判定，仍按 image/jpeg 兜底） */
+    const galleryHtml = await ip.proxyImageUrl(LOGIN);
+    checkNew('(cov-a3) 画廊 proxyImageUrl 行为不变：非图片字节仍按修前逻辑兜底为 data:image/jpeg',
+      typeof galleryHtml === 'string' && galleryHtml.startsWith('data:image/jpeg;base64,'));
+    {
+      const tl = readSrc('../src/components/Timeline.tsx');
+      const gal = tl.slice(tl.indexOf('const GalleryCard = memo('), tl.indexOf('/* ---------- 播客卡片'));
+      checkNew('(cov-a3) 画廊卡片仍走 proxyImageUrl(src, item.url) + proxiedSrc ?? item.imageUrl，未换成 CoverImage',
+        gal.length > 0 && gal.includes('void proxyImageUrl(src, item.url)')
+        && gal.includes('const imgSrc = proxiedSrc ?? item.imageUrl;') && !gal.includes('<CoverImage'));
+    }
+
+    /* 直连失败（img onError）→ 占位 + 上报 + 不再请求 */
+    const DIRECT_BAD = 'https://images.example.com/404.jpg';
+    cov.driveCover(DIRECT_BAD, undefined, '61');
+    const directBefore = cov.coverView(DIRECT_BAD, cov.getCoverState(DIRECT_BAD));
+    cov.onCoverError(DIRECT_BAD);
+    cov.driveCover(DIRECT_BAD, undefined, '61');
+    cov.driveCover(DIRECT_BAD, undefined, '61');
+    await nTick(10);
+    checkNew('(cov-b5) 直连 onError → failed，之后渲染占位（不再挂 img 重新请求）',
+      directBefore.kind === 'img' && cov.getCoverState(DIRECT_BAD).status === 'failed'
+      && cov.coverView(DIRECT_BAD, cov.getCoverState(DIRECT_BAD)).kind === 'placeholder'
+      && nCmd('fetch_image', DIRECT_BAD) === 0);
+    checkNew('(cov-c8) 直连失败上报一次', reports().filter((r) => r === `61|${DIRECT_BAD}`).length === 1);
+
+    /* D10：空 cover 不渲染 img、不代理、不上报 */
+    const beforeEmpty = cCalls.length;
+    cov.driveCover('', 'https://sspai.com/post/2', '71');
+    cov.driveCover(null, undefined, '71');
+    cov.driveCover(undefined, undefined, '71');
+    await nTick(10);
+    checkNew('(cov-d10) 空 cover（空串/null/undefined）：零 fetch_image、零上报、渲染决策为 none',
+      cCalls.length === beforeEmpty && cov.coverView('', { status: 'idle' }).kind === 'none'
+      && cov.coverView(null, { status: 'idle' }).kind === 'none');
+
+    /* 上报本身失败：静默（console.warn），不产生未处理的 rejection */
+    reportReject = true;
+    const RB = 'https://images.example.com/report-fails.jpg';
+    cov.onCoverError(RB);
+    cov.driveCover(RB, undefined, '81');
+    await nTick(30);
+    reportReject = false;
+    checkNew('(cov-c8) report_broken_cover 失败时静默：无 unhandledRejection，仅 console.warn',
+      reports().includes(`81|${RB}`) && unhandled.length === 0 && warns.some((w) => w.includes('report_broken_cover')));
+
+    /* 组件接线：SSR 渲染 CoverImage（组件真的消费 coverView 的决策） */
+    {
+      const { renderToStaticMarkup } = await import('react-dom/server');
+      const { createElement } = await import('react');
+      const { CoverImage } = await import('../src/components/CoverImage.tsx');
+      const r = (props) => renderToStaticMarkup(createElement(CoverImage, { className: 'card-cover-thumb', alt: 'cover', ...props }));
+      const hEmpty = r({ src: '', articleId: '1' });
+      const hPending = r({ src: 'https://cdnfile.sspai.com/never-requested.png', articleId: '1' });
+      const hReady = r({ src: SSPAI, articleId: '11' });
+      const hFailed = r({ src: DOUBAN, articleId: '21' });
+      const hDirect = r({ src: PLAIN, articleId: '12' });
+      checkNew('(cov-d10) SSR：空 cover 不产出任何 <img>',
+        hEmpty === '' && !r({ src: null }).includes('<img'));
+      checkNew('(cov-a4) SSR：代理未返回时渲染同类名占位（card-cover-thumb cover-fallback，pending），无 <img>',
+        !hPending.includes('<img') && hPending.includes('class="card-cover-thumb cover-fallback"')
+        && hPending.includes('data-cover-state="pending"'));
+      checkNew('(cov-a1) SSR：代理成功渲染 data: 的 <img>（沿用原类名）',
+        /<img[^>]*src="data:image\/png;base64,/.test(hReady) && hReady.includes('class="card-cover-thumb"'));
+      checkNew('(cov-b5) SSR：失败渲染占位（failed）+ 图标，无 <img>（不出破图图标）',
+        !hFailed.includes('<img') && hFailed.includes('data-cover-state="failed"') && hFailed.includes('svg-icon'));
+      checkNew('(cov-a2) SSR：直连渲染原 URL + referrerPolicy=no-referrer（与修前一致）',
+        hDirect.includes(`src="${PLAIN}"`) && /referrerpolicy="no-referrer"/i.test(hDirect));
+    }
+
+    /* 组件与五处图片位的源码接线（SSR 读不到 effect / onError / 真实 store，故以源码形态钉住） */
+    {
+      const ci = readSrc('../src/components/CoverImage.tsx');
+      checkNew('(cov-wire) CoverImage：effect 调 driveCover(url, pageUrl, articleId)、渲染走 coverView、代理与直连 img 都挂 onCoverError',
+        /useEffect\(\(\) => \{ driveCover\(url, pageUrl, articleId\); \}/.test(ci)
+        && ci.includes('coverView(url, state)')
+        && (ci.match(/onError=\{\(\) => onCoverError\(url\)\}/g) || []).length === 2
+        && /data-cover-route="proxy"[^>]*onError=\{\(\) => onCoverError\(url\)\}/.test(ci)
+        && /data-cover-route="direct"[\s\S]*?onError=\{\(\) => onCoverError\(url\)\}/.test(ci));
+      const tl = readSrc('../src/components/Timeline.tsx');
+      const pb = readSrc('../src/components/PlayerBar.tsx');
+      const ov = readSrc('../src/components/Overlays.tsx');
+      const cut = (s, a, b) => { const i = s.indexOf(a); return i < 0 ? '' : s.slice(i, s.indexOf(b, i)); };
+      const fiveSites = [
+        ['文章卡', cut(tl, 'card-main-content', 'card-footer'), 'src={art.cover}', 'articleId={art.id}'],
+        ['播客卡', cut(tl, 'className={`podcast-card', 'podcast-show-name'), 'src={item.cover}', 'articleId={item.id}'],
+        ['迷你播放条', cut(pb, 'player-track-info', 'player-titles'), 'src={player.cover}', 'articleId={player.coverEntryId}'],
+        ['全屏播放器', cut(pb, 'player-full-cover-wrap', 'player-full-meta'), 'src={player.cover}', 'articleId={player.coverEntryId}'],
+        ['灯箱', cut(ov, 'export function Lightbox()', 'export function NewCategoryModal()'), 'src={lightboxUrl}', 'articleId={lightboxEntryId}'],
+      ];
+      const badSites = fiveSites.filter(([, blk, a, b]) => !(blk.includes('<CoverImage') && blk.includes(a) && blk.includes(b) && !/<img\b/.test(blk)));
+      checkNew(`(cov-wire) 五处图片位全部改用 CoverImage（带条目 id）且不再有裸 <img>（不合规：${badSites.map((s) => s[0]).join('、') || '无'}）`,
+        badSites.length === 0);
+    }
+
+    /* C9 数据面：播放条 cover 与条目 id 同源；灯箱带条目 id；关闭清空 */
+    {
+      store.getState().playPodcastEpisode('第 A 集', '节目', DOUBAN, 'https://a.example/ea.mp3', '21');
+      const pA = store.getState().player;
+      store.getState().playPodcastEpisode('第 B 集', '节目', '', 'https://a.example/eb.mp3', '22');
+      const pB = store.getState().player;
+      checkNew('(cov-c9) 播放条封面记下所属条目 id；新剧集无 cover 时 cover 与 id 一起沿用（上报对象与显示一致）',
+        pA.cover === DOUBAN && pA.coverEntryId === '21' && pB.cover === DOUBAN && pB.coverEntryId === '21');
+      store.getState().closePodcastBar();
+      store.getState().openLightbox(DOUBAN, '21');
+      const lbOpen = { url: store.getState().lightboxUrl, id: store.getState().lightboxEntryId };
+      store.getState().closeLightbox();
+      store.getState().openLightbox('https://x.example/prose.png');
+      const lbProse = store.getState().lightboxEntryId;
+      store.getState().closeLightbox();
+      checkNew('(cov-c9) 灯箱携带条目 id（画廊）/ 正文图为 null；关闭同时清空 url 与 id',
+        lbOpen.url === DOUBAN && lbOpen.id === '21' && lbProse === null
+        && store.getState().lightboxUrl === null && store.getState().lightboxEntryId === null);
+      const tl = readSrc('../src/components/Timeline.tsx');
+      checkNew('(cov-c9) 画廊打开灯箱时带上条目 id（灯箱失败可按条目上报）',
+        tl.includes('if (lightboxSrc) openLightbox(lightboxSrc, item.id);'));
+    }
+  } finally {
+    globalThis.__INVOKE__ = prevInvokeC;
+    console.warn = prevWarn;
+    process.off('unhandledRejection', onUnhandled);
+    cov.resetCoverCacheForTest();
+  }
+}
+
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);
 const newFailed = newResults.filter((r) => !r.pass);

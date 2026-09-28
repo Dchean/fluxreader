@@ -21,7 +21,7 @@ export type PlayerSlice = Pick<
 >;
 
 export const createPlayerSlice: StateCreator<AppState, [], [], PlayerSlice> = (set, get) => ({
-  player: { isActive: false, isPlaying: false, speed: 1.0, title: '', showName: '', cover: '', audioUrl: '', positionSec: 0, durationSec: 0, seekToSec: null },
+  player: { isActive: false, isPlaying: false, speed: 1.0, title: '', showName: '', cover: '', coverEntryId: '', audioUrl: '', positionSec: 0, durationSec: 0, seekToSec: null },
   playerExpanded: false,
 
   /* ================= 播客 ================= */
@@ -40,6 +40,7 @@ export const createPlayerSlice: StateCreator<AppState, [], [], PlayerSlice> = (s
         title,
         showName,
         cover: cover || get().player.cover,
+        coverEntryId: cover ? (entryId ?? '') : get().player.coverEntryId,
         audioUrl,
         positionSec: 0,
         durationSec: 0,

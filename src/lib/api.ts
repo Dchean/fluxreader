@@ -394,6 +394,14 @@ export const api = {
     return (await inv('fetch_image', { url, pageUrl })) as Uint8Array | number[];
   },
 
+  /** 图片位上报封面失效（TASK-091 后端命令 report_broken_cover(article_id, url)）：
+      后端仅在该行 image_url 仍等于 url 且 source='direct' 时清空，使其重新进入封面补全。
+      Tauri 2 把命令形参 article_id 映射为 camelCase 的 articleId。返回是否真的清空了一行。 */
+  async reportBrokenCover(articleId: number, url: string): Promise<boolean | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('report_broken_cover', { articleId, url }) as boolean) : null;
+  },
+
   /* ---- SMTC 系统媒体控制 ---- */
   /** 播放状态/元数据同步到系统媒体控制（PlayerBar 节流调用）。 */
   async mediaUpdateFull(title: string, show: string, durationSec: number, positionSec: number, playing: boolean): Promise<void> {

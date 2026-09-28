@@ -976,6 +976,29 @@ body {
   border: 1px solid var(--border-subtle);
 }
 
+/* 封面图片位回退占位（TASK-092）：代理未返回 / 加载失败时替代 <img>。
+   与原图共用同一类名（尺寸、圆角、比例不变），背景与图标沿用画廊「无图」占位
+   （.gallery-no-image）的视觉语言；不出现浏览器破图图标。
+   放在各图片位规则之前：全屏播放器的 .player-full-cover-fallback 渐变仍然生效。 */
+.cover-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-card-hover);
+  color: var(--text-tertiary);
+  overflow: hidden;
+}
+/* 灯箱大图没有固有尺寸：占位给一个与内容区相称的框，点击仍冒泡到遮罩关闭 */
+.lightbox-img.cover-fallback {
+  width: min(480px, 70vw);
+  aspect-ratio: 4 / 3;
+}
+.lightbox-img.cover-fallback .svg-icon,
+.player-full-cover.cover-fallback .svg-icon {
+  width: 32px;
+  height: 32px;
+}
+
 .card-title {
   font-size: 14px;
   font-weight: 600;

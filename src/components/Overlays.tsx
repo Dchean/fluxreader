@@ -5,6 +5,7 @@ import { Icons, LayoutIcon } from './icons';
 import { ModalOverlay, FluxDropdown, SwitchInline } from './primitives';
 import type { ArticleEntry, ContentLayoutType, FeedItem } from '../types';
 import { anchorScopeNav } from './anchorScopeNav';
+import { CoverImage } from './CoverImage';
 
 /** 不使用 AI 的布局（与 SettingsModal 的判定一致）：卡片不渲染摘要/翻译，
  *  对话框里选了这类布局时隐藏 AI 开关（勾选值一并归零，避免保存无效配置）。 */
@@ -321,6 +322,7 @@ function hostOf(url: string): string {
 
 export function Lightbox() {
   const lightboxUrl = useAppStore((s) => s.lightboxUrl);
+  const lightboxEntryId = useAppStore((s) => s.lightboxEntryId);
   const closeLightbox = useAppStore((s) => s.closeLightbox);
   return (
     <div
@@ -330,13 +332,9 @@ export function Lightbox() {
       inert={!lightboxUrl}
       onClick={closeLightbox}
     >
+      {/* 大图：共享 CoverImage（按 imageProxy 判定代理/直连；失败出占位，点击/Esc 关闭不变） */}
       {lightboxUrl && (
-        <img
-          src={lightboxUrl}
-          className="lightbox-img"
-          alt="preview"
-          referrerPolicy="no-referrer"
-        />
+        <CoverImage src={lightboxUrl} articleId={lightboxEntryId} className="lightbox-img" alt="preview" />
       )}
     </div>
   );
