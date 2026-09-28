@@ -2694,6 +2694,20 @@
         "previous_deadline_at_utc": "2026-09-28T16:31:41.417952Z",
         "deadline_at_utc": "2026-09-28T21:15:23.036912Z"
       }
+    },
+    {
+      "id": "DEC-ca4d269f1e404583a256050ba8e01be3",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 授权链：2026-09-24「我授权你自行验收和commit」+ 2026-09-28 会话 /goal「将项目推进优化重构完……推送并打tag，发布release」；独立审查 PASS findings=0（subagent:review-req108，全新实例）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-099"
+      ],
+      "recorded_at_utc": "2026-09-28T17:35:43.871138Z",
+      "candidates": {
+        "TASK-099": "cc5367d491a39610cf86c3c11298ae28a7dc02de9f2b4a22d027d0581c6ff52e"
+      }
     }
   ]
 }

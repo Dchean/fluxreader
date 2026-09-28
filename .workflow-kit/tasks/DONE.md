@@ -73,5 +73,6 @@
 | [TASK-096](items/TASK-096.json) | e2e 临时库唯一命名收口：共享 helper 消除 CI flaky 根因 + mock 线程健壮性（REQ-102 测试基建） | done |
 | [TASK-097](items/TASK-097.json) | 同步增量窗口收口：greader 游标改取拉取起点 + mock_greader changed_at 语义全面核对（REQ-002） | done |
 | [TASK-098](items/TASK-098.json) | 前端 reload 异常处理收口：selectView/selectFeed 补 .catch（REQ-102） | done |
+| [TASK-099](items/TASK-099.json) | REQ-108 SQL 性能与迁移加固：M-5 列表索引失效、M-7 sync_queue 索引、M-9 全部已读往返、M-14 迁移回填事务性 | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

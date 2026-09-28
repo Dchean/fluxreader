@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-099 · REQ-108 SQL 性能与迁移加固：M-5 列表索引失效、M-7 sync_queue 索引、M-9 全部已读往返、M-14 迁移回填事务性
 
-**状态**：verified
+**状态**：done
 
 **目标**：实施 REQ-108（审计 route-M 四项，主控已用 EXPLAIN QUERY PLAN 独立复核过定性；DEC-task099-req108-20260928 解除暂缓）。逐项修法方向（实现时按现场核实调整，但每项必须有成对证据）：① M-5：src-tauri/src/db/articles.rs 列表查询以 COALESCE(published_at, fetched_at) 排序使 idx_articles_published 对 8 个查询变体全失效（SCAN + USE TEMP B-TREE FOR ORDER BY，TASK-094 的 EXPLAIN 报告再次确认）。修法候选：迁移把 published_at 为空的存量行用 fetched_at 回填非空（配合应用层写入兜底），使排序退化为纯 ORDER BY published_at 走索引；或等价的重构（union/两段查询），择优并附 EXPLAIN 前后对比。注意与「只填空」语义和 TASK-090 的 COALESCE(NULLIF(image_url,''),?) 口径区分（本项只动 published_at，不动 image_url）。② M-7：sync_queue 零索引（src-tauri/src/db/ 或 migrations 中建表处）——新迁移加覆盖查询所需索引（先 EXPLAIN 确认实际查询形态再定列），附前后对比。③ M-9：一次全部已读 = 1 SELECT + 1 UPDATE + 2N 次往返且全程持锁（mark_all_read 链路）——改为集合化操作（单条 UPDATE + 受影响的 feed 计数批量重算），减少往返与持锁时长；行为语义（含按范围+布局过滤，TASK-094 后的口径）逐字不变，往返计数前后对比入证据。④ M-14：migrations.rs v6→v7 的后置回填在事务外且以 user_version 当完成标记，半途中断永不重试——把回填纳入与版本推进同事务（或新增 settings 完成标记并在迁移事务内落标），并对「已停在 v7 但回填未完成」的存量库做幂等补跑（可重入、有测试）；补迁移中断复现测试（在回填中途模拟失败，断言下次启动会补完）。迁移一律遵循项目既有迁移框架（rusqlite_migrate，见 refresh_dedup 报错信息中的既有形态），新版本号顺延，不改动既有 v1..v7 已发布语义（M-14 的补跑是对存量库的幂等修复，不改 v7 定义本身则无需 bump，若必须 bump 说明理由）。前端 UI 与文案零变化。
 
