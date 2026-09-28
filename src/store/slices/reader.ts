@@ -1,6 +1,6 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
-import { appStore, flipEntryFlag, markEntriesRead, syncCurrentViewCache } from '../internals';
+import { appStore, markEntriesRead, optimisticEntryFlagToggle, syncCurrentViewCache } from '../internals';
 import type { AppState } from '../types';
 
 /** 阅读器 slice：选中文章、正文水合（懒加载 + 批量合批）与卡片就地标读/收藏。
@@ -318,31 +318,34 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     }
   },
 
+  /* F3（Batch 1/2 独立审查 P3）：阅读器两条切换入口与卡片路径共用
+     optimisticEntryFlagToggle——修前这里先弹乐观「已标为已读」再 fire-and-forget，
+     失败既不回滚也留着成功提示（与卡片路径删假成功 toast 的口径相反）。
+     现在：乐观翻转仍立即生效；成功提示经 onSuccess 只在落库成功后出现
+     （P1-5 去假成功同口径）；失败回滚「仅当当前值仍等于乐观值」并给失败 toast
+     （文案沿用既有）。mock 模式 request 立即 resolve：本地翻转 + toast、无 IPC，
+     与修前一致。 */
   toggleCurrentReadStatus: () => {
-    const { activeArticleId, entries, dataMode } = get();
+    const { activeArticleId, dataMode } = get();
     if (!activeArticleId) return;
-    const art = entries.find((a) => a.id === activeArticleId);
-    if (!art) return;
-    if (dataMode === 'tauri') {
-      void api.setRead(Number(activeArticleId), !art.isRead).catch((e) => {
-        get().showToast(`标读状态保存失败：${extractError(e)}`);
-      });
-    }
-    flipEntryFlag(activeArticleId, 'isRead');
-    get().showToast(art.isRead ? '已标为未读' : '已标为已读');
+    optimisticEntryFlagToggle(
+      activeArticleId,
+      'isRead',
+      (next) => (dataMode === 'tauri' ? api.setRead(Number(activeArticleId), next) : Promise.resolve()),
+      (msg) => `标读状态保存失败：${msg}`,
+      (next) => get().showToast(next ? '已标为已读' : '已标为未读'),
+    );
   },
 
   toggleCurrentStar: () => {
-    const { activeArticleId, entries, dataMode } = get();
+    const { activeArticleId, dataMode } = get();
     if (!activeArticleId) return;
-    const art = entries.find((a) => a.id === activeArticleId);
-    if (!art) return;
-    if (dataMode === 'tauri') {
-      void api.setStarred(Number(activeArticleId), !art.isStarred).catch((e) => {
-        get().showToast(`收藏状态保存失败：${extractError(e)}`);
-      });
-    }
-    flipEntryFlag(activeArticleId, 'isStarred');
+    optimisticEntryFlagToggle(
+      activeArticleId,
+      'isStarred',
+      (next) => (dataMode === 'tauri' ? api.setStarred(Number(activeArticleId), next) : Promise.resolve()),
+      (msg) => `收藏状态保存失败：${msg}`,
+    );
   },
 
   toggleReaderRenderMode: () => set((s) => ({ isRawRenderMode: !s.isRawRenderMode })),
@@ -388,23 +391,19 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
   /* ================= 卡片就地操作 ================= */
 
   toggleEntryFlag: (id, field) => {
-    const { dataMode, entries } = get();
-    if (dataMode === 'tauri') {
-      const cur = entries.find((e) => e.id === id);
-      if (cur) {
-        if (field === 'isRead') {
-          void api.setRead(Number(id), !cur.isRead).catch((e) => {
-            flipEntryFlag(id, 'isRead');
-            get().showToast(`标读保存失败：${extractError(e)}`);
-          });
-        } else {
-          void api.setStarred(Number(id), !cur.isStarred).catch((e) => {
-            flipEntryFlag(id, 'isStarred');
-            get().showToast(`收藏保存失败：${extractError(e)}`);
-          });
-        }
-      }
-    }
-    flipEntryFlag(id, field);
+    const { dataMode } = get();
+    /* F2（Batch 1/2 独立审查 P3）：失败回滚改走共用 helper——「仅当当前值仍等于
+       乐观写入值才恢复点击前值」。修前是「再翻一次当前值」：连点两次、第一次
+       失败第二次成功时，第一次迟到的 catch 会把第二次已落库的新值踩回旧值
+       （探针实测 UI isRead=true / DB is_read=false）。失败 toast 文案沿用既有。 */
+    optimisticEntryFlagToggle(
+      id,
+      field,
+      (next) => {
+        if (dataMode !== 'tauri') return Promise.resolve();
+        return field === 'isRead' ? api.setRead(Number(id), next) : api.setStarred(Number(id), next);
+      },
+      (msg) => (field === 'isRead' ? `标读保存失败：${msg}` : `收藏保存失败：${msg}`),
+    );
   },
 });

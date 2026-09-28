@@ -1,4 +1,5 @@
 import type { StoreApi } from 'zustand';
+import { extractError } from '../lib/api';
 import type {
   ArticleEntry,
   CategoryGroup,
@@ -175,4 +176,35 @@ export function markEntriesRead(ids: Set<string>) {
   }
   appStore().setState({ entries, feedCounts });
   syncCurrentViewCache(entries);
+}
+
+/** F2/F3（Batch 1/2 独立审查 P3）收口：乐观标志写的唯一实现——卡片
+    （toggleEntryFlag）与阅读器（toggleCurrentReadStatus / toggleCurrentStar）共用。
+    - 乐观翻转立即生效（点下去不等落库，flipEntryFlag 连动 feedCounts 与视图缓存）；
+    - 失败时**仅当当前值仍等于乐观写入值**才恢复点击前值：回滚若是「再翻一次当前值」，
+      连点两次且第一次失败、第二次成功时，第一次的迟到 catch 会把第二次已落库的
+      新值再踩回旧值——UI 与 DB 脱节（审查探针实测 UI isRead=true / DB is_read=false）；
+    - 失败 toast 由调用方给文案模板（保持各入口既有文案）；成功提示（若有）通过
+      onSuccess 在**落库成功后**出现——与 P1-5「去假成功」同口径，不得提前乐观弹。 */
+export function optimisticEntryFlagToggle(
+  id: string,
+  field: 'isRead' | 'isStarred',
+  request: (next: boolean) => Promise<unknown>,
+  failureText: (msg: string) => string,
+  onSuccess?: (next: boolean) => void,
+): void {
+  const s = appStore().getState();
+  const entry = s.entries.find((e) => e.id === id);
+  if (!entry) return;
+  const prev = entry[field];
+  const optimistic = !prev;
+  flipEntryFlag(id, field);
+  void request(optimistic).then(() => {
+    onSuccess?.(optimistic);
+  }).catch((e: unknown) => {
+    const cur = appStore().getState().entries.find((x) => x.id === id);
+    /* 仅当当前值仍等于乐观写入值时才恢复原值；否则后续点击已接管状态，只提示 */
+    if (cur && cur[field] === optimistic) flipEntryFlag(id, field);
+    appStore().getState().showToast(failureText(extractError(e)));
+  });
 }

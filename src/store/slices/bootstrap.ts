@@ -159,6 +159,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const scopeKey = scopePageKey(scope);
     const scopeArgs = scopeQueryArgs(scope, st.timelineSort);
     const offset = st.articlesLimit;
+    /* F1（Batch 1/2 独立审查 P3）：排序也必须参与竞态比较——offset 的含义随排序
+       翻转（同 offset=500 在 newest/oldest 下指向不同的 500 条）。守卫原本只比
+       scopeKey 与游标：旧排序在途的分页响应若晚于「切排序后的重拉」到达，且重拉
+       后游标恰好仍等于该 offset，就会被放行，把旧排序第 2 页接到新排序列表后
+       （审查探针实测 duplicates 100 / missing 100）。发起时快照排序，返回时排序
+       已翻转 ⇒ 该响应属于另一个查询口径，整体丢弃（与 scopeKey 同一判据粒度）。 */
+    const sortAtStart = st.timelineSort;
     set({ articlesLoading: true });
     try {
       const rows = await api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset, with_content: layoutNeedsBody(get().activeContentLayout) });
@@ -169,7 +176,12 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       // TASK-052 把比较基准从「全局 articlesLimit」收紧为「该范围的游标」：A 源在途时
       // 切到 B 源，B 源自己的游标可能与 offset 数值相同（例如都是 500），若只比数值会
       // 把属于 A 的迟到数据错接到 B 的列表上；带上 scopeKey 后这种串台也会被丢弃。
-      if (scopePageKey(get().activeFeedFilter) !== scopeKey || get().articlesLimit !== offset) {
+      // F1：排序翻转同样使该响应过期（见发起时的 sortAtStart 注释）。
+      if (
+        scopePageKey(get().activeFeedFilter) !== scopeKey
+        || get().articlesLimit !== offset
+        || get().timelineSort !== sortAtStart
+      ) {
         set({ articlesLoading: false });
         return;
       }

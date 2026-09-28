@@ -51,6 +51,12 @@ function emit(): void {
 function setState(url: string, next: CoverState): void {
   states.set(url, next);
   if (next.status === 'ready') {
+    /* G2（TASK-092 审查备忘）：push 前先摘除本 URL 可能残留的旧条目。正常流里
+       驱逐（shift）那一刻已把它同步移出 readyOrder，重成功只会 push 一次；这里
+       去重是把「驱逐 + 重成功不产生重复键」钉成结构不变量——一旦出现重复键，
+       下面的 while 会把上限内的其他 ready 条目提前挤出（300 上限名存实亡）。 */
+    const staleIdx = readyOrder.indexOf(url);
+    if (staleIdx !== -1) readyOrder.splice(staleIdx, 1);
     readyOrder.push(url);
     while (readyOrder.length > READY_CACHE_LIMIT) {
       const old = readyOrder.shift();
@@ -106,7 +112,11 @@ export function markCoverFailed(url: string, reason: CoverFailReason = 'direct-e
 }
 
 /** 上报封面失效：同一条目同一 URL 只上报一次；无条目 id / 无 URL / data: URL 不上报。
-    返回本次是否真的发起了 IPC。上报失败只 console.warn（不产生未处理的 rejection）。 */
+    返回本次是否真的发起了 IPC。上报失败只 console.warn（不产生未处理的 rejection）。
+    G3（TASK-092 审查备忘）：非数字 id 经 Number() 得 NaN 后在此静默拒绝是有意为之——
+    前端条目 id 全部来自 String(row.id)（lib/api.ts articleRowToEntry）的纯数字串，
+    转换无损；mock 会话的前缀 id 不该有封面失效上报（无后端可写），被 NaN 拦下
+    与「无后端不上报」语义一致，不需要额外日志。 */
 export function reportCoverFailure(articleId: string | null | undefined, url: string): boolean {
   if (!articleId || !url || url.startsWith('data:')) return false;
   const id = Number(articleId);

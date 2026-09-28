@@ -229,23 +229,38 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             });
         },
         (msg) => {
-          /* 内联错误（Reader 正文上方展示）+ 非 silent 时 toast 带重试 */
-          set((st) => ({
-            translating: false,
-            isShowingTranslatedProse: false,
-            translateErrors: { ...st.translateErrors, [articleId]: msg },
-          }));
+          /* 内联错误（Reader 正文上方展示）+ 非 silent 时 toast 带重试。
+             F3（Batch 1/2 独立审查 P3）：失败路径与 translateEntry 同口径处理
+             rawTranslatedIds——无半截未消毒产物（translatedContent 为空）即清标记，
+             留着会让后续水合写回的 DB 消毒译文走纯文本分支（字面显示 <p>…</p>，
+             即 P2-9 标记粘连）；有半截则保留，按纯文本渲染（重试语义，D1b）。 */
+          set((st) => {
+            const nextRaw = { ...st.rawTranslatedIds };
+            if (!st.entries.find((a) => a.id === articleId)?.translatedContent) delete nextRaw[articleId];
+            return {
+              translating: false,
+              isShowingTranslatedProse: false,
+              rawTranslatedIds: nextRaw,
+              translateErrors: { ...st.translateErrors, [articleId]: msg },
+            };
+          });
           if (!silent) {
             get().showToast(`翻译失败：${msg}`, { label: '重试', run: () => get().toggleReaderTranslation() });
           }
         },
       )
       .catch(() => {
-        set((st) => ({
-          translating: false,
-          isShowingTranslatedProse: false,
-          translateErrors: { ...st.translateErrors, [articleId]: 'AI 服务未配置或不可达' },
-        }));
+        /* F3：同上——清标记与「是否有未消毒半截」绑定（与 translateEntry 同口径） */
+        set((st) => {
+          const nextRaw = { ...st.rawTranslatedIds };
+          if (!st.entries.find((a) => a.id === articleId)?.translatedContent) delete nextRaw[articleId];
+          return {
+            translating: false,
+            isShowingTranslatedProse: false,
+            rawTranslatedIds: nextRaw,
+            translateErrors: { ...st.translateErrors, [articleId]: 'AI 服务未配置或不可达' },
+          };
+        });
         if (!silent) {
           get().showToast('翻译失败：请先在设置中配置 AI 服务', { label: '重试', run: () => get().toggleReaderTranslation() });
         }

@@ -155,9 +155,19 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       timelineSort: s.timelineSort === 'newest' ? 'oldest' : 'newest',
       openedReadIds: {},
     }));
+    /* F5（Batch 1/2 独立审查 P3）：
+       - dataMode 守卫：mock 模式没有后端，重拉不仅多余，还会在落地时把 mock
+         会话翻成 tauri（reloadFromBackend 成功路径写 dataMode:'tauri'）；
+       - 筛选视图（收藏/未读/今天）拉的本就是全集（limit 100000，不分页），显示
+         顺序由 selectVisibleEntries 按 timelineSort 本地排序——切排序只需本地
+         重排，重拉是纯浪费，不调后端；
+       - reloadFromBackend 失败时 toast 后会重抛，void 调用点必须接住，否则
+         unhandled rejection。失败提示仍由 reloadFromBackend 自己给出，这里只吞掉
+         重抛（与 (p3) 断言「reload 失败必须可见」不冲突）。 */
+    if (get().dataMode !== 'tauri') return;
     const view = get().activeViewFilter;
-    if (view !== 'all') void get().reloadFilteredEntries(view);
-    else void get().reloadFromBackend();
+    if (view !== 'all') return;
+    void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
   },
 
   markCurrentViewAllRead: () => {

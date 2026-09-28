@@ -344,6 +344,7 @@ await (async () => {
   let aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
   let aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
   let rejectCmds = new Set();   // (p) TASK-067 N10：按命令名注入 IPC 失败
+  let rejectWhen = null;        // (p3-f2) TASK-093：按 (cmd, args) 谓词注入失败——连点场景只拒第一次的置位写
   let heldAi = [];            // hold 模式挂起项 { cmd, id, ch }
   let settingsRaw = null;     // get_setting('app_settings') 的返回值
   let ghLoginStatus = null;   // github_login_status 的返回值：null | {login} | 'reject'
@@ -376,7 +377,7 @@ await (async () => {
   /* 替换上面的 S-1…S-5 invoke mock（api 每调用一次都读 globalThis.__INVOKE__） */
   globalThis.__INVOKE__ = (cmd, args) => {
     invokeCalls.push({ cmd, args });
-    if (rejectCmds.has(cmd)) return Promise.reject({ message: '注入失败:' + cmd });
+    if (rejectCmds.has(cmd) || (rejectWhen && rejectWhen(cmd, args))) return Promise.reject({ message: '注入失败:' + cmd });
     switch (cmd) {
       case 'list_folders': return failReload ? Promise.reject(failReload) : Promise.resolve(FOLDERS);
       case 'list_feeds': return failReload ? Promise.reject(failReload) : Promise.resolve(FEEDS);
@@ -450,6 +451,7 @@ await (async () => {
     aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
     aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
     rejectCmds = new Set();
+    rejectWhen = null;
     detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
     /* TASK-063：视图缓存是模块级 Map，跨用例残留会让下一个用例的 selectFeed
        命中上一个夹具的快照（跨夹具污染）。每个用例独立起步（(s6) 此前已就地
@@ -1617,14 +1619,21 @@ await (async () => {
     store.getState().toasts.some((t) => t.text.startsWith('标读失败：')));
 
   /* (p2b) CF-04：卡片路径（SocialCard/NotifCard/GalleryCard/右键菜单共用的唯一入口）
-     标读失败必须回滚本地乐观置位并可见——修前乐观置位后静默，重启回退未读。 */
+     标读失败必须回滚本地乐观置位并可见——修前乐观置位后静默，重启回退未读。
+     TASK-093 加强（审查 F4：本条修前代码下也通过，无判别力）：把「失败后不得
+     残留乐观值 + 失败 toast」并入本条——修前（静默 catch / 回滚被去掉）下本条
+     变红，乐观置位与回滚两侧各有判据。 */
   await bootFixture();
   rejectCmds.add('set_read');
   store.setState({ toasts: [] });
   const p2bBefore = store.getState().entries.find((e) => e.id === '101')?.isRead;
   store.getState().toggleEntryFlag('101', 'isRead');
-  checkNew('(p2b) 卡片路径乐观置位：点下去立即生效（未等落库）',
-    store.getState().entries.find((e) => e.id === '101')?.isRead === !p2bBefore);
+  const p2bOptimistic = store.getState().entries.find((e) => e.id === '101')?.isRead === !p2bBefore;
+  await nTick(20);
+  checkNew('(p2b) 卡片路径乐观置位：点下去立即生效（未等落库），失败后不残留乐观值（TASK-093 加强）',
+    p2bOptimistic
+    && store.getState().entries.find((e) => e.id === '101')?.isRead === p2bBefore
+    && store.getState().toasts.some((t) => t.text.startsWith('标读保存失败：')));
   await nTick(20);
   checkNew('(p2b) 卡片路径标读失败：回滚到点击前状态 + 失败 toast + 未读计数复原',
     store.getState().entries.find((e) => e.id === '101')?.isRead === p2bBefore
@@ -1646,6 +1655,142 @@ await (async () => {
   await store.getState().reloadFromBackend().catch(() => {});
   checkNew('(p3) reloadFromBackend 失败必须可见（后台刷新/范围切换路径，修前静默）',
     store.getState().toasts.some((t) => t.text.startsWith('刷新失败：')));
+
+  /* ============================================================
+     (p3-f2 / p3-f3) TASK-093：乐观回滚收口（Batch 1/2 独立审查 F2/F3）
+     - F2：回滚是「恢复点击前值」而非「再翻一次当前值」——连点两次、第一次
+       失败第二次成功时，第一次迟到的失败不得把第二次已落库的新值踩回
+       （已读 + 收藏各一条）；另补收藏单击失败回滚（审查 M2c：修后回归网
+       对「收藏失败回滚」零保护）。
+     - F3：阅读器 toggleCurrentReadStatus / toggleCurrentStar 与卡片同口径——
+       成功提示只在落库成功后出现（P1-5 去假成功同口径），失败回滚且只出
+       失败提示；翻译失败按「无半截未消毒产物即清 rawTranslatedIds」规则
+       处理（清/留成对断言，Reader 与卡片路径各一组）。
+     每条的修前变红实现（临时回退旧代码）与输出存 tmp/task-093/。
+     ============================================================ */
+
+  /* F2 已读连点：click1 落库失败（乐观置位 true）、click2 落库成功（false）。
+     rejectWhen 只拒 set_read(read=true)——click1 的置位写被拒，click2 的写回
+     成功；两次 toggle 在同一同步帧内完成（连点），click1 的迟到失败在其后才
+     落地。修前（「再翻一次当前值」回滚）：click1 迟到的 catch 把 click2 已落库
+     的 false 再翻回 true——UI=true / DB=false，本条红。 */
+  await bootFixture();
+  rejectWhen = (cmd, args) => cmd === 'set_read' && args.read === true;
+  store.setState({ toasts: [] });
+  const p3f2ReadBefore = store.getState().entries.find((e) => e.id === '101')?.isRead;
+  store.getState().toggleEntryFlag('101', 'isRead');      // click1：乐观→true，set_read(true) 将失败
+  store.getState().toggleEntryFlag('101', 'isRead');      // click2：乐观→false，set_read(false) 成功
+  await nTick(30);
+  checkNew('(p3-f2) 卡片已读连点两次第一次失败：最终 UI 与后端一致（第二次点击的值），迟到失败只提示不踩回',
+    store.getState().entries.find((e) => e.id === '101')?.isRead === p3f2ReadBefore
+    && store.getState().feedCounts.get('10')?.unread === 3
+    && store.getState().toasts.some((t) => t.text.startsWith('标读保存失败：')));
+
+  /* F2 收藏连点（set_starred 路径同形） */
+  await bootFixture();
+  rejectWhen = (cmd, args) => cmd === 'set_starred' && args.starred === true;
+  store.setState({ toasts: [] });
+  const p3f2StarBefore = store.getState().entries.find((e) => e.id === '101')?.isStarred;
+  store.getState().toggleEntryFlag('101', 'isStarred');   // click1：乐观→true，set_starred(true) 将失败
+  store.getState().toggleEntryFlag('101', 'isStarred');   // click2：乐观→false，set_starred(false) 成功
+  await nTick(30);
+  checkNew('(p3-f2) 卡片收藏连点两次第一次失败：最终 UI 与后端一致，迟到失败只提示不踩回',
+    store.getState().entries.find((e) => e.id === '101')?.isStarred === p3f2StarBefore
+    && store.getState().feedCounts.get('10')?.starred === 1
+    && store.getState().toasts.some((t) => t.text.startsWith('收藏保存失败：')));
+
+  /* M2c（审查：收藏失败回滚在修后回归网下全绿）：收藏单击失败必须回滚 + 计数复原 */
+  await bootFixture();
+  rejectCmds.add('set_starred');
+  store.setState({ toasts: [] });
+  const p3f2StarOrig = store.getState().entries.find((e) => e.id === '101')?.isStarred;
+  store.getState().toggleEntryFlag('101', 'isStarred');
+  await nTick(30);
+  checkNew('(p3-f2) 卡片收藏单击失败：回滚到点击前值 + 失败 toast + 收藏计数复原（M2c 变红）',
+    store.getState().entries.find((e) => e.id === '101')?.isStarred === p3f2StarOrig
+    && store.getState().feedCounts.get('10')?.starred === 1
+    && store.getState().toasts.some((t) => t.text.startsWith('收藏保存失败：')));
+
+  /* F3 阅读器 toggleCurrentReadStatus：成功提示只在落库成功后；失败回滚且只出失败提示 */
+  await bootFixture();
+  rejectCmds.add('set_read');
+  store.setState({ activeArticleId: '101', toasts: [] });
+  store.getState().toggleCurrentReadStatus();
+  checkNew('(p3-f3) 阅读器标读：乐观置位立即生效，但不提前弹「已标为已读」（修前先弹假成功）',
+    store.getState().entries.find((a) => a.id === '101')?.isRead === true
+    && !store.getState().toasts.some((t) => t.text === '已标为已读'));
+  await nTick(30);
+  checkNew('(p3-f3) 阅读器标读失败：回滚到点击前值，且只有失败提示（无成功提示残留）',
+    store.getState().entries.find((a) => a.id === '101')?.isRead === false
+    && store.getState().toasts.some((t) => t.text.startsWith('标读状态保存失败：'))
+    && !store.getState().toasts.some((t) => t.text === '已标为已读'));
+
+  await bootFixture();
+  store.setState({ activeArticleId: '101', toasts: [] });
+  store.getState().toggleCurrentReadStatus();
+  await nTick(30);
+  checkNew('(p3-f3) 阅读器标读成功：「已标为已读」提示在落库成功后出现（P1-5 同口径）',
+    store.getState().entries.find((a) => a.id === '101')?.isRead === true
+    && store.getState().toasts.some((t) => t.text === '已标为已读'));
+
+  await bootFixture();
+  rejectCmds.add('set_starred');
+  store.setState({ activeArticleId: '103', toasts: [] });
+  store.getState().toggleCurrentStar();
+  await nTick(30);
+  checkNew('(p3-f3) 阅读器收藏失败：回滚到点击前值 + 失败提示 + 收藏计数复原',
+    store.getState().entries.find((a) => a.id === '103')?.isStarred === true
+    && store.getState().feedCounts.get('10')?.starred === 1
+    && store.getState().toasts.some((t) => t.text.startsWith('收藏状态保存失败：')));
+
+  /* F3 阅读器翻译失败：rawTranslatedIds 按「无半截未消毒产物即清」规则处理（成对） */
+  await bootFixture();
+  aiTr = { deltas: [], error: '限流', reject: null, finish: true, holdIds: [] };
+  store.setState({ toasts: [] });
+  store.getState().selectArticle('201');
+  await nTick(10);
+  store.getState().toggleReaderTranslation();
+  await nTick(20);
+  checkNew('(p3-f3) Reader 翻译流内错误且无半截产物：rawTranslatedIds 清除（修前残留 → 消毒译文被按纯文本渲染）',
+    store.getState().rawTranslatedIds['201'] === undefined
+    && store.getState().translateErrors['201'] === '限流'
+    && store.getState().isShowingTranslatedProse === false);
+
+  await bootFixture();
+  aiTr = { deltas: ['<b>半截'], error: '限流', reject: null, finish: true, holdIds: [] };
+  store.setState((s) => ({
+    toasts: [],
+    entries: s.entries.map((a) => (a.id === '201' ? { ...a, content: '<p>详情</p>' } : a)),
+  }));
+  store.getState().selectArticle('201');
+  await nTick(10);
+  store.getState().toggleReaderTranslation();
+  await nTick(20);
+  checkNew('(p3-f3) Reader 翻译流内错误且有半截产物：标记保留（成对；半截按纯文本渲染）',
+    store.getState().rawTranslatedIds['201'] === true
+    && store.getState().entries.find((a) => a.id === '201')?.translatedContent === '<b>半截');
+
+  await bootFixture();
+  aiTr = { deltas: [], error: null, reject: { message: 'down' }, finish: true, holdIds: [] };
+  store.setState({ toasts: [] });
+  store.getState().selectArticle('201');
+  await nTick(10);
+  store.getState().toggleReaderTranslation();
+  await nTick(20);
+  checkNew('(p3-f3) Reader 翻译 IPC 失败且无半截产物：rawTranslatedIds 清除',
+    store.getState().rawTranslatedIds['201'] === undefined
+    && store.getState().translateErrors['201'] === 'AI 服务未配置或不可达');
+
+  /* M6（审查：onError 路径不清标记在修后回归网下全绿）：卡片翻译流内错误且
+     无半截 → 标记清除（既有 (l2) 只盖 .catch 路径与「有半截保留」侧）。 */
+  await bootFixture();
+  aiTr = { deltas: [], error: '限流', reject: null, finish: true, holdIds: [] };
+  store.setState({ toasts: [] });
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(p3-l2) 卡片翻译流内错误且无半截产物：rawTranslatedIds 清除（M6 变红）',
+    store.getState().rawTranslatedIds['201'] === undefined
+    && store.getState().translateErrors['201'] === '限流');
 
   await bootFixture();
   aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
@@ -2197,9 +2342,14 @@ await (async () => {
     s6D.articlesCursor['12'] === 40 && s6D.articlesCursor['10'] === 40);
 
   /* ---------- (s7) 排序切换：游标含义随 newest_first 翻转 ⇒ 必须按新排序重拉 ----------
-     只翻转排序键而不重拉时，已加载的是「最新端」首页，而下一页按 oldest 语义取
-     的是「最老端」：整段文章不可达 + 重复卡片（审计 round-1「排序切换游标错位」）。
-     该缺陷在 P0-1（后端此前不认 newest_first）修好后才真正可达。 */
+     只翻转排序键而不重拉时，已加载的快照（旧排序的首批）会与新排序的下一页错位——继续翻页
+     取回的是另一端的文章，整段文章不可达 + 重复卡片（审计 round-1「排序切换游标错位」）。
+     该缺陷在 P0-1（后端此前不认 newest_first）修好后才真正可达。
+     TASK-093 加强（审查 F1/F4）：把审查探针场景舞台化——旧排序 loadMore(offset=500)
+     在途，切排序后的重拉先落地（游标仍为 500），旧排序迟到页后到。修前（loadMore
+     竞态守卫不含排序）迟到页被放行接入：duplicates=100 / missing=100（探针实测）；
+     修后在途页整体丢弃。前置条件改在本场景收尾处与竞态结果一并判定（原 2212 行
+     前置断言在修前代码下也通过、无判别力）。 */
   await resetStore();
   viewEntriesCache.clear();
   const s7Rows = [];
@@ -2209,23 +2359,88 @@ await (async () => {
   backendRows = s7Rows;
   store.getState().selectFeed('10');
   await store.getState().reloadFromBackend();
-  checkNew('(s7) 前置：源A 600 条，newest 首批 = 最新端 500 条（首条 id 5000、游标 500、未到底）',
-    store.getState().entries.length === 500 && store.getState().entries[0]?.id === '5000'
-    && store.getState().articlesCursor['10'] === 500 && store.getState().articlesExhausted === false);
+  const s7Pre = store.getState();
+  const s7PreOk = s7Pre.entries.length === 500 && s7Pre.entries[0]?.id === '5000'
+    && s7Pre.articlesCursor['10'] === 500 && s7Pre.articlesExhausted === false;
+  const s7CacheHadSnapshot = viewEntriesCache.size > 0;  // 重拉已把「全部」视图快照写入缓存
+  /* 舞台：list_articles 全部挂起。loadMore 先发（旧排序第 2 页 offset=500），
+     toggle 的重拉后发（新排序首页 offset=0）——按参数匹配挂起项，不按下标。 */
+  listPlan = { mode: 'defer' };
   invokeCalls.length = 0;
+  store.getState().loadMoreArticles();
   store.getState().toggleTimelineSort();
+  const s7CacheCleared = viewEntriesCache.size === 0;    // toggle 同步丢弃各视图快照缓存
+  await nTick(30);                                       // reload 的 folders/feeds/counts 落地，两个 list_articles 挂起
+  const s7StaleCall = pendingList.find((p) => p.args.offset === 500);
+  const s7ReloadCall = pendingList.find((p) => p.args.offset === 0 && p.args.newest_first === false);
+  s7ReloadCall?.resolve(queryRows(s7ReloadCall.args));   // 重拉先落地：游标仍为 500（F1 场景成立的前提）
   await nTick(30);
-  const s7Call = invokeCalls.find((c) => c.cmd === 'list_articles');
+  s7StaleCall?.resolve(queryRows(s7StaleCall.args));     // 旧排序迟到页后到
+  await nTick(30);
+  listPlan = null;
   const s7 = store.getState();
+  const s7Ids = s7.entries.map((e) => e.id);
+  checkNew('(s7) 前置：源A 600 条，newest 首批 = 最新端 500 条（首条 id 5000、游标 500、未到底）；切排序重拉落地后旧排序在途页整体丢弃，列表唯一且无缺失（TASK-093 加强）',
+    s7PreOk
+    && s7.entries.length === 500 && new Set(s7Ids).size === 500
+    && s7Ids[0] === '5599' && s7Ids[499] === '5100');
   checkNew('(s7) 切换「最早」：按新排序重拉该范围首页（feed_id=10 / offset=0 / newest_first=false），游标与 entries 同一次写入',
-    s7Call?.args.args.feed_id === 10 && s7Call?.args.args.folder_id === null
-    && s7Call?.args.args.offset === 0 && s7Call?.args.args.newest_first === false
+    s7ReloadCall?.args.feed_id === 10 && s7ReloadCall?.args.folder_id === null
+    && s7ReloadCall?.args.offset === 0 && s7ReloadCall?.args.newest_first === false
     && s7.entries.length === 500 && s7.articlesLimit === 500 && s7.articlesCursor['10'] === 500);
   checkNew('(s7) 重拉后的首批换到另一端（首条 = 全库最老 id 5599），不再是最新端快照',
     s7.entries[0]?.id === '5599' && s7.entries[499]?.id === '5100'
     && s7.entries.every((e) => e.id !== '5000'));
-  checkNew('(s7) 排序键翻转且已读保留快照清空（与视图/范围切换同口径）',
-    s7.timelineSort === 'oldest' && Object.keys(s7.openedReadIds).length === 0);
+  checkNew('(p3-f1) 旧排序在途页迟到达时被丢弃：无重复、无缺失段（修前 duplicates=100/missing=100，审查探针场景）',
+    s7.entries.length === 500 && new Set(s7Ids).size === s7Ids.length
+    && s7Ids.every((id) => { const n = Number(id); return n >= 5100 && n <= 5599; })
+    && s7.articlesLimit === 500 && s7.articlesCursor['10'] === 500);
+  checkNew('(s7) 排序键翻转且已读保留快照清空、各视图快照缓存同步丢弃（与视图/范围切换同口径；TASK-093 加强，M4/M4b 变红）',
+    s7.timelineSort === 'oldest' && Object.keys(s7.openedReadIds).length === 0
+    && s7CacheHadSnapshot && s7CacheCleared);
+
+  /* ---------- (p3-f5) TASK-093：toggleTimelineSort 的三个口径（审查 F5） ---------- */
+  /* ① 重拉失败不得产生 unhandled rejection（reloadFromBackend toast 后重抛，本入口须接住） */
+  await bootFixture();
+  failReload = { message: 'db busy' };
+  store.setState({ toasts: [] });
+  const p3f5Unhandled = [];
+  const p3f5OnUn = (r) => { p3f5Unhandled.push(r); };
+  process.on('unhandledRejection', p3f5OnUn);
+  store.getState().toggleTimelineSort();
+  await nTick(30);
+  process.off('unhandledRejection', p3f5OnUn);
+  failReload = null;
+  checkNew('(p3-f5) 切换排序的重拉失败：不产生 unhandled rejection（失败提示仍由 reloadFromBackend 给出）',
+    p3f5Unhandled.length === 0
+    && store.getState().toasts.some((t) => t.text.startsWith('刷新失败：')));
+
+  /* ② 非 tauri（mock）模式不调后端：重拉会把 mock 会话翻成 tauri（修前可达） */
+  await bootFixture();
+  store.setState({ dataMode: 'mock' });
+  invokeCalls.length = 0;
+  const p3f5SortBefore = store.getState().timelineSort;
+  store.getState().toggleTimelineSort();
+  await nTick(30);
+  checkNew('(p3-f5) mock 模式切排序：纯本地翻转，不调后端、不把 mock 会话翻成 tauri',
+    store.getState().timelineSort !== p3f5SortBefore
+    && invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0
+    && store.getState().dataMode === 'mock');
+
+  /* ③ 筛选视图（收藏/未读/今天 = 本地排序的全集）只做本地重排，不重拉（IPC 计数） */
+  await bootFixture();
+  store.getState().selectView('starred');
+  await nTick(30);
+  invokeCalls.length = 0;
+  const p3f5StarIds = store.getState().entries.map((e) => e.id).join(',');
+  const p3f5VisNewest = selectVisibleEntries(store.getState())[0]?.id;
+  store.getState().toggleTimelineSort();
+  await nTick(30);
+  const p3f5VisOldest = selectVisibleEntries(store.getState())[0]?.id;
+  checkNew('(p3-f5) 筛选视图切排序：全集本地重排（可见顺序翻转、集合不变），不重拉后端（0 次 list_articles）',
+    invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0
+    && p3f5VisNewest === '102' && p3f5VisOldest === '103'
+    && store.getState().entries.map((e) => e.id).join(',') === p3f5StarIds);
 
   /* ============================================================
      TASK-052 §A/B：口径修复的可观察判据（同一组判据在修前/修后分别跑过）
@@ -2674,6 +2889,17 @@ await (async () => {
   checkNew('(n11) Reader 译文渲染含未消毒纯文本分支（流式产物不进 HTML 渲染路径）',
     readerSrc.includes('rawStream')
     && readerSrc.includes('dangerouslySetInnerHTML'));
+
+  /* (p3-f4) M7（审查：Timeline 删除假成功 toast 在修后回归网下全绿）：SocialCard
+     收藏/标读按钮不得在组件层弹本地假成功 toast——成功态由卡片自身状态呈现，
+     失败提示由 store 收口（optimisticEntryFlagToggle 的失败 toast）。切片取
+     social-actions-bar 到翻译按钮之间（恰为收藏/标读两个按钮）。 */
+  const socialBarSrc = tlSrc.slice(tlSrc.indexOf('social-actions-bar'), tlSrc.indexOf("showTranslate ? 'active-translate'"));
+  checkNew('(p3-f4) SocialCard 收藏/标读按钮不弹本地假成功 toast（M7 变红：恢复组件层 toast 即红）',
+    socialBarSrc.length > 0
+    && socialBarSrc.includes("toggleEntryFlag(item.id, 'isStarred')")
+    && socialBarSrc.includes("toggleEntryFlag(item.id, 'isRead')")
+    && !socialBarSrc.includes('showToast'));
 
   {
     const fsP = await import('node:fs');
