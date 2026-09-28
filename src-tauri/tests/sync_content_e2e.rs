@@ -5,6 +5,7 @@
 //! ③ article_id_by_url 用规范化 URL 匹配，同文不同饰不重复入库。
 //! 运行：cargo test --test sync_content_e2e -- --ignored --nocapture
 
+mod common;
 mod mock_greader;
 
 use app_lib::db;
@@ -21,15 +22,7 @@ async fn setup(
     Arc<MockGReader>,
 ) {
     let server = MockGReader::start().await.expect("start mock server");
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_sync_content_{}_{}_{}.db",
-        name,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("sync_content_{name}"));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
@@ -314,14 +307,7 @@ async fn miniflux_existing_entry_backfills_cover() {
 /// （sync/entries.rs 的 merge_pulled_entry）正是用它做 URL 兜底匹配。
 #[test]
 fn normalized_url_match_maps_same_article() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_sync_content_norm_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("sync_content_norm");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     let folder = db::create_folder(&conn, "F", "article").unwrap();

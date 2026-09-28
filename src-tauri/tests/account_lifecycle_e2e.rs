@@ -5,6 +5,7 @@
 //!    scope=ai 只清 AI 摘要/翻译缓存
 //! 运行：cargo test --test account_lifecycle_e2e -- --include-ignored --nocapture
 
+mod common;
 mod mock_greader;
 
 use app_lib::db;
@@ -12,15 +13,7 @@ use mock_greader::MockGReader;
 use rusqlite::Connection;
 
 fn fresh_db(name: &str) -> (Connection, std::path::PathBuf) {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_account_{}_{}_{}.db",
-        name,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("account_{name}"));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     (conn, tmp)
@@ -305,14 +298,7 @@ fn cache_cleanup_ai_only_clears_ai_fields() {
 #[tokio::test]
 async fn reconnect_other_account_no_mixing() {
     let server = MockGReader::start().await.expect("mock");
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_account_mix_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("account_mix");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
 

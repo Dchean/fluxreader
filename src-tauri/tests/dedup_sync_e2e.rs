@@ -6,14 +6,10 @@
 
 use app_lib::db;
 
+mod common;
+
 fn temp_db(name: &str) -> std::path::PathBuf {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_dedup_{name}_{}.db",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("dedup_{name}"));
     let _ = std::fs::remove_file(&tmp);
     tmp
 }

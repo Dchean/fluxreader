@@ -6,6 +6,7 @@
 //!
 //! 运行：cargo test --test sync_gap_repro_e2e（默认集含全部已转正场景）
 
+mod common;
 mod mock_greader;
 
 use app_lib::db;
@@ -22,15 +23,7 @@ async fn setup(
     Arc<MockGReader>,
 ) {
     let server = MockGReader::start().await.expect("start mock server");
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_gap_{}_{}_{}.db",
-        name,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("gap_{name}"));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
@@ -707,14 +700,7 @@ async fn feed_rename_and_move_push_edit_subscription() {
 async fn offline_read_change_pushed_after_connect() {
     // "离线"阶段：未配置任何凭据
     let server = MockGReader::start().await.expect("start mock server");
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_gap_offline_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("gap_offline");
     let _ = std::fs::remove_file(&tmp);
     let db = Arc::new(Mutex::new(db::open(&tmp).expect("open db")));
     let http = app_lib::ingestion::build_client(10);
@@ -780,14 +766,7 @@ async fn offline_read_change_pushed_after_connect() {
 async fn offline_mark_all_read_queued_and_pushed_after_connect() {
     // "离线"阶段：未配置任何凭据
     let server = MockGReader::start().await.expect("start mock server");
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_gap_offline_all_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("gap_offline_all");
     let _ = std::fs::remove_file(&tmp);
     let db = Arc::new(Mutex::new(db::open(&tmp).expect("open db")));
     let http = app_lib::ingestion::build_client(10);
@@ -897,14 +876,7 @@ async fn offline_mark_all_read_queued_and_pushed_after_connect() {
 async fn offline_star_change_pushed_after_connect() {
     // "离线"阶段：未配置任何凭据
     let server = MockGReader::start().await.expect("start mock server");
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_gap_offline_star_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("gap_offline_star");
     let _ = std::fs::remove_file(&tmp);
     let db = Arc::new(Mutex::new(db::open(&tmp).expect("open db")));
     let http = app_lib::ingestion::build_client(10);
@@ -1087,14 +1059,7 @@ async fn reconcile_skipped_when_state_fetch_fails() {
 #[tokio::test]
 async fn feed_edit_without_backend_stays_local() {
     // 不配置任何凭据 = 未连接后端
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_gap_localedit_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("gap_localedit");
     let _ = std::fs::remove_file(&tmp);
     let db = Arc::new(Mutex::new(db::open(&tmp).expect("open db")));
     let feed_id = {

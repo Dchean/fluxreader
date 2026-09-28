@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+mod common;
+
 /// 慢速 feed server：每个请求先 sleep 再回 RSS（item 数可配，用于 304 用例的 body 变体）。
 /// 返回 (base_url, 命中计数)。
 async fn spawn_slow_feed_server(delay_ms: u64, hits: Arc<AtomicUsize>) -> String {
@@ -53,13 +55,7 @@ async fn spawn_slow_feed_server(delay_ms: u64, hits: Arc<AtomicUsize>) -> String
 }
 
 fn temp_db(name: &str) -> std::path::PathBuf {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_staged_{name}_{}.db",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("staged_{name}"));
     let _ = std::fs::remove_file(&tmp);
     tmp
 }

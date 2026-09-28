@@ -6,6 +6,7 @@
 //!
 //! 运行：cargo test --test endpoint_autodetect_e2e
 
+mod common;
 mod mock_greader;
 
 use app_lib::endpoint_resolve::{fever_candidates, greader_candidates, path_exists};
@@ -301,15 +302,7 @@ async fn probing_is_bounded_and_full_path_does_not_extra_probe() {
 
 /// 建一个临时库（缓存读写需要 settings 表）。
 fn temp_db(name: &str) -> rusqlite::Connection {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_endpoint_cache_{}_{}_{}.db",
-        name,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("endpoint_cache_{name}"));
     let _ = std::fs::remove_file(&tmp);
     app_lib::db::open(&tmp).expect("open db")
 }

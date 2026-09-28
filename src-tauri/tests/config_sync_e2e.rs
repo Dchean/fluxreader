@@ -10,6 +10,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
+mod common;
+
 /// 最小 WebDAV mock：PUT 存内容，GET 回内容，非 2xx 报错。
 fn start_webdav_mock() -> (u16, std::sync::Arc<std::sync::Mutex<Option<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -128,14 +130,7 @@ fn seed_db(conn: &Connection) {
 
 #[test]
 fn payload_excludes_all_credential_fields() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_cfgsync_test_cred_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("cfgsync_test_cred");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     seed_db(&conn);
@@ -186,14 +181,7 @@ fn payload_excludes_all_credential_fields() {
 
 #[test]
 fn apply_preserves_local_credentials_and_updates_allowed_fields() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_cfgsync_test_apply_cred_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("cfgsync_test_apply_cred");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
 
@@ -286,14 +274,7 @@ fn apply_preserves_local_credentials_and_updates_allowed_fields() {
 /// 即使远端没有也不得被删除。
 #[test]
 fn remote_missing_whitelist_setting_is_deleted_locally() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_cfgsync_del_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("cfgsync_del");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
 
@@ -336,14 +317,7 @@ fn remote_missing_whitelist_setting_is_deleted_locally() {
 /// payload 把本地设置整批清空（删除语义的失败路径保护）。
 #[test]
 fn malformed_remote_settings_does_not_wipe_local() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_cfgsync_bad_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("cfgsync_bad");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     db::set_setting(
@@ -374,14 +348,7 @@ fn malformed_remote_settings_does_not_wipe_local() {
 
 #[test]
 fn payload_contains_all_config_domains() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_cfgsync_test1_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("cfgsync_test1");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     seed_db(&conn);
@@ -418,14 +385,7 @@ fn payload_contains_all_config_domains() {
 
 #[test]
 fn apply_upserts_feeds_and_overrides_settings() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_cfgsync_test2_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("cfgsync_test2");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     // 本地已有：一个同名分类 + 一个同 URL 源
@@ -615,14 +575,7 @@ async fn full_roundtrip_upload_download_apply() {
     };
 
     // 设备A：本地库构建 payload 并上传
-    let tmp_a = std::env::temp_dir().join(format!(
-        "fluxreader_cfgsync_rt_a_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp_a = common::unique_db_path("cfgsync_rt_a");
     let _ = std::fs::remove_file(&tmp_a);
     let conn_a = db::open(&tmp_a).unwrap();
     seed_db(&conn_a);
@@ -636,14 +589,7 @@ async fn full_roundtrip_upload_download_apply() {
     .unwrap();
 
     // 设备B：空库下载同一配置并应用
-    let tmp_b = std::env::temp_dir().join(format!(
-        "fluxreader_cfgsync_rt_b_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp_b = common::unique_db_path("cfgsync_rt_b");
     let _ = std::fs::remove_file(&tmp_b);
     let conn_b = db::open(&tmp_b).unwrap();
     let downloaded = app_lib::config_sync::webdav_get_for_test(&http, &cred)
@@ -684,14 +630,7 @@ async fn full_roundtrip_upload_download_apply() {
 /// 此时 folders/feeds 已应用完毕——回滚后两者都必须为零。
 #[test]
 fn apply_failure_rolls_back_the_whole_payload() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_cfgsync_test_rollback_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("cfgsync_test_rollback");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
 

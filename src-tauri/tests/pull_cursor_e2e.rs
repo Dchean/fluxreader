@@ -5,6 +5,7 @@
 //! 修后：chunk_failures > 0 时保持旧游标，下一轮重拉同一窗口（合并幂等）。
 //! 运行：cargo test --test pull_cursor_e2e
 
+mod common;
 mod mock_greader;
 
 use app_lib::db;
@@ -22,15 +23,7 @@ async fn setup(
     std::path::PathBuf,
 ) {
     let server = MockGReader::start().await.expect("start mock server");
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_cursor_{}_{}_{}.db",
-        name,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("cursor_{name}"));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();

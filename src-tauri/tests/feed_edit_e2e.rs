@@ -5,15 +5,10 @@
 use app_lib::db;
 use rusqlite::Connection;
 
+mod common;
+
 fn seed() -> (Connection, std::path::PathBuf) {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_feededit_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos()
-    ));
+    let tmp = common::unique_db_path("feededit");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     let f1 = db::create_folder(&conn, "技术", "article").unwrap();

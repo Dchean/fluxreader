@@ -9,6 +9,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
+mod common;
+
 /// 最小 OpenAI 兼容 mock：/chat/completions 回固定 SSE 流（分 3 个 delta）。
 fn start_mock_openai() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -79,14 +81,7 @@ async fn ai_summarize_translate_and_cache_pipeline() {
     let client = app_lib::ingestion::build_client(30);
     let cfg = test_config(port);
 
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_ai_test_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("ai_test");
     let _ = std::fs::remove_file(&tmp);
     let conn = Connection::open(&tmp).unwrap();
     // 建最小 schema（只建这次测试需要的表）

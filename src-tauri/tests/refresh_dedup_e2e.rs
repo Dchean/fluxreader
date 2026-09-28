@@ -12,6 +12,8 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+mod common;
+
 const RSS: &str = r#"<?xml version="1.0"?><rss version="2.0"><channel><title>Dedup Feed</title>
 <item><title>同一篇</title><link>https://example.com/post-1</link><guid>post-1</guid></item>
 </channel></rss>"#;
@@ -25,8 +27,13 @@ fn start_feed_server() -> u16 {
             /* TASK-088：单个连接出错（对端提前断开等）不得 panic 掉**整个服务器线程**——
             此前 `stream.unwrap()` 一旦 panic，该线程即退出，本测试内后续所有请求都会
             连不上，症状会伪装成「抓取失败」而非「测试基建故障」，极难定位。
-            改为跳过这一个连接、继续 accept 下一个。 */
-            let Ok(mut stream) = stream else { continue };
+            改为跳过这一个连接、继续 accept 下一个。
+            TASK-096 补充：出错留痕——eprintln 进 stderr（cargo test 捕获，
+            失败时可见），不再静默吞掉连接错误。 */
+            let Ok(mut stream) = stream else {
+                eprintln!("[refresh_dedup mock] accept 失败，跳过该连接，继续服务");
+                continue;
+            };
             let mut buf = [0u8; 4096];
             let mut req = String::new();
             loop {
@@ -52,14 +59,7 @@ fn start_feed_server() -> u16 {
 }
 
 fn setup_db(port: u16) -> (Arc<Mutex<rusqlite::Connection>>, std::path::PathBuf) {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_dedup_refresh_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("dedup_refresh");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     let f1 = db::create_folder(&conn, "A", "article").unwrap();

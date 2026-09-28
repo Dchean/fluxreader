@@ -7,19 +7,14 @@
 use app_lib::db;
 use app_lib::ingestion;
 
+mod common;
+
 const FEED_URL: &str = "http://127.0.0.1:8765/local_feed.xml";
 
 #[tokio::test]
 #[ignore = "requires local feed server on 127.0.0.1:8765"]
 async fn direct_fetch_pipeline_end_to_end() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_e2e_test_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("e2e_test");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
 

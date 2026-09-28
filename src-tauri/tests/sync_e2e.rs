@@ -9,6 +9,7 @@
 //! feeds_due_for_refresh 按 next_retry_at 过滤），该列现存用途是下发前端做失败标记。
 //! 运行：cargo test --test sync_e2e -- --ignored --nocapture
 
+mod common;
 mod mock_greader;
 
 use app_lib::db;
@@ -19,14 +20,7 @@ use mock_greader::MockGReader;
 async fn miniflux_sync_end_to_end() {
     let server = MockGReader::start().await.expect("start mock server");
 
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_sync_e2e_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("sync_e2e");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     let db = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
@@ -344,15 +338,7 @@ async fn setup_remote_unsub(
     std::sync::Arc<MockGReader>,
 ) {
     let server = MockGReader::start().await.expect("start mock server");
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_unsub_{}_{}_{}.db",
-        name,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("unsub_{name}"));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();

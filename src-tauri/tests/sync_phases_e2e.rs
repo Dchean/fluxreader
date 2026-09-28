@@ -5,6 +5,7 @@
 //!    （light 路径追不上——分层设计：快路径便宜、慢路径彻底）
 //! 运行：cargo test --test sync_phases_e2e -- --ignored --nocapture
 
+mod common;
 mod mock_greader;
 
 use app_lib::db;
@@ -21,15 +22,7 @@ async fn setup(
     Arc<MockGReader>,
 ) {
     let server = MockGReader::start().await.expect("start mock server");
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_phases_{}_{}_{}.db",
-        name,
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("phases_{name}"));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();

@@ -7,6 +7,8 @@
 
 use app_lib::{db, sync};
 
+mod common;
+
 fn test_creds() -> (String, String, String) {
     let endpoint = std::env::var("FLUXREADER_TEST_ENDPOINT")
         .unwrap_or_else(|_| "https://sync.example.invalid".to_string());
@@ -21,14 +23,7 @@ fn test_creds() -> (String, String, String) {
 async fn fever_sync_end_to_end_on_live_backend() {
     let (endpoint, username, password) = test_creds();
 
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_fever_sync_live_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("fever_sync_live");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     let db = std::sync::Arc::new(tokio::sync::Mutex::new(conn));

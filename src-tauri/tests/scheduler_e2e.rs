@@ -14,6 +14,8 @@ use app_lib::ingestion;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+mod common;
+
 const FEED_URL: &str = "http://127.0.0.1:8765/local_feed.xml";
 
 /// 搭测试环境：临时 DB + 两个源（一个指向本地 server，一个指向死地址）
@@ -22,14 +24,7 @@ async fn setup() -> (
     reqwest::Client,
     std::path::PathBuf,
 ) {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_scheduler_test_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path("scheduler_test");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).expect("open db");
     let client = ingestion::build_client(30);
@@ -224,15 +219,7 @@ fn seed_mode_feeds(conn: &rusqlite::Connection) -> (i64, i64) {
 
 #[test]
 fn sync_mode_hybrid_skips_miniflux_feeds_in_due_query() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_mode_{}_{}_{}.db",
-        line!(),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("mode_{}", line!()));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     let (direct, mf) = seed_mode_feeds(&conn);
@@ -261,15 +248,7 @@ fn sync_mode_hybrid_skips_miniflux_feeds_in_due_query() {
 
 #[test]
 fn sync_mode_manual_refresh_always_includes_miniflux_feeds() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_mode_{}__{}_{}.db",
-        line!(),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("mode_{}_", line!()));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     let (direct, mf) = seed_mode_feeds(&conn);
@@ -284,15 +263,7 @@ fn sync_mode_manual_refresh_always_includes_miniflux_feeds() {
 
 #[test]
 fn sync_mode_default_is_direct_when_unset() {
-    let tmp = std::env::temp_dir().join(format!(
-        "fluxreader_mode_{}_{}_{}.db",
-        line!(),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let tmp = common::unique_db_path(&format!("mode_{}", line!()));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
     // 未写 app_settings → 读到默认 "direct"（scheduler 的判定依赖此默认）

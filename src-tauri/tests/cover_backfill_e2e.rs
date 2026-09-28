@@ -18,6 +18,8 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 /// 假文章站：按路径返回 403（/fail/*）或带 og:image 的 200 页面（/ok/*），
 /// 并统计每个路径被请求的次数（用于断言负缓存与「一轮一次」语义）。
 struct ArticleSite {
@@ -82,14 +84,7 @@ impl ArticleSite {
 }
 
 fn temp_db(name: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "fluxreader_cover_backfill_{name}_{}_{}.db",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let path = common::unique_db_path(&format!("cover_backfill_{name}"));
     let _ = std::fs::remove_file(&path);
     path
 }
