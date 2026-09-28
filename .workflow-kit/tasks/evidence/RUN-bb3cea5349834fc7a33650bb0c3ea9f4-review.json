@@ -1,0 +1,84 @@
+{
+  "task_id": "TASK-093",
+  "candidate_digest": "daf9213b187f63eb85cc60de66b5f2eb2c2ab5f19427a2d507ba44377f47adaf",
+  "verification_run": "RUN-193cf241b3774e198b31c83cf2eacdec",
+  "verdict": "PASS",
+  "summary": "独立复核通过，findings 为空。①F1：bootstrap.ts loadMoreArticles 发起时快照 sortAtStart，返回时与 scopeKey/游标同粒度三判据比较，排序翻转整体丢弃在途页（含 articlesLoading 复位），mock 模式入口早退故无模式分歧；断言 (p3-f1) + 加强 (s7) 前置把审查探针场景舞台化（defer 挂起两个 list_articles、重拉先落地游标仍 500、旧排序迟到页后到）。②F2/F3：internals.ts optimisticEntryFlagToggle 语义核实——乐观翻转后失败仅当 cur[field]===optimistic 才回滚，连点两次（click1 失败/click2 成功）迟到的 catch 不会把已落库新值踩回，且 click1 成功+click2 失败时回滚值恰与 DB 一致；onSuccess 仅在落库成功后触发；reader.ts 三条入口（toggleEntryFlag/toggleCurrentReadStatus/toggleCurrentStar）全部改走 helper，全仓 grep 无残留「再翻一次」回滚、无乐观假成功 toast（唯一成功提示在 reader.ts:336 onSuccess 内）；ai.ts toggleReaderTranslation 两条失败路径的清标记判据与 translateEntry 逐字同口径（translatedContent 为空才清 rawTranslatedIds）。③F5：toggleTimelineSort 补 .catch（吞 reloadFromBackend toast 后的重抛）+ dataMode!=='tauri' 早退（mock 纯本地翻转不翻会话）+ 筛选视图早退（全集本地重排不重拉），(p3-f5) 三条断言分别用 unhandledRejection 监听、invokeCalls IPC 计数、可见顺序翻转验证。④F4：16 条新 (p3-*) 断言逐条有真实判据（rejectWhen 谓词、IPC 计数、时间点断言、成对清/留），十组变异 M-A…M-H 日志全部出现预期变红断言且总数降至 393–395；加强后 1626（M-B1 红）、2212（M-A 红）、2227（M-F 红）修前必失败成立；六个 bak-* 与还原后源码 sha256 逐字节一致。⑤G1–G5：G1 未改码（LRU300 为注释声明权衡，B7 只约束失败 URL，可接受）；G2 ready 分支 push 前 indexOf+splice 去重钉住结构不变量；G3 Number(articleId) NaN 静默拒绝以注释留档；G4/G5 纯核对项无代码。⑥门禁：RUN-193 六项全 exit 0，cargo 汇总 213 passed/0 failed/9 ignored（逐行求和核实），frontend 396/396（既有 26 + 新增 370，checkNew 由 354→370 恰 +16，≥ TASK-092 验证后的 380）。范围：7 个业务文件均在 allowed_paths（src/**、tools/frontend-regression.mjs）；.workflow-kit 下改动属主控记录与证据归档，非 worker 违规。范围外观察项（不进 findings）：(a) nav.ts selectView/selectFeed 的 void reloadFromBackend()（nav.ts:96/103/136）同样无 .catch，reloadFromBackend toast 后重抛 ⇒ 这三处仍有 unhandled rejection 风险——审查未列、本卡未授权、实现方已披露未改动，建议后续收口；(b) frontend-regression.mjs 注释称变异输出存 tmp/task-093/，实际证据已归档至 .workflow-kit/tasks/evidence/TASK-093-mutations/，注释轻微过时；(c) M-A 下 (s7) 切换「最早」连带变红属断言捆绑游标判据的预期连带，非误报。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/reader.ts",
+        "src/store/slices/ai.ts",
+        "src/store/slices/nav.ts",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-A-f1-revert.log",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-B2-f2-reflip.log",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-C-f3-reader-toggles.log",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-G-f5-revert.log",
+        ".workflow-kit/tasks/evidence/TASK-093-gate-frontend-final.log"
+      ],
+      "analysis": "逐条核实验收①–⑥：F1 守卫在 bootstrap.ts:168 发起时快照 sortAtStart、:180-187 扩为「scopeKey+游标+排序」三判据，排序翻转整体丢弃在途页并复位 articlesLoading，(p3-f1)+(s7) 前置两条断言把审查探针场景舞台化（M-A-f1-revert.log 红证）。F2/F3 见 reader.ts:331/343/399 三条入口全部改走 internals.ts:189-210 的共用 helper、ai.ts:231-263 两条失败路径清标记判据与 translateEntry 逐字同口径（M-B2/M-C/M-C2/M-D 红）；F5 见 nav.ts:167-170 补 .catch、dataMode!=='tauri' 早退与筛选视图零重拉，(p3-f5) 三条断言分别以 process.on('unhandledRejection') 监听与 invokeCalls IPC 计数验证（M-G 红）。F4 的 M2c/M4b/M6/M7 四变异分别被 M-B1/M-F/M-E/M-H 变红，加强后的 1626/2212/2227 修前必失败（M-B1/M-A/M-F 红证）。门禁以 RUN-193cf241b3774e198b31c83cf2eacdec-cargo_test.stdout.txt 逐行求和 213 passed/0 failed/9 ignored，TASK-093-gate-frontend-final.log 显示 396/396，不少于 TASK-092 验证后的 380。"
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/TASK-093-gate-frontend-final.log",
+        ".workflow-kit/tasks/evidence/RUN-193cf241b3774e198b31c83cf2eacdec-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-193cf241b3774e198b31c83cf2eacdec-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-193cf241b3774e198b31c83cf2eacdec-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-193cf241b3774e198b31c83cf2eacdec-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-B1-m2c-no-rollback.log",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-E-m6-onerror-no-clear.log",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-F-m4b-no-cache-clear.log",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-H-m7-social-toast.log"
+      ],
+      "analysis": "对 HEAD 与工作区分别 grep checkNew 计数 354→370 恰 +16，总断言 396 = 26 既有 + 370 新增，与实现方声明一致且不少于 TASK-092 验证后的 380。逐一抽查十组变异日志（M-A…M-H），每组均出现与所声明变异对应的变红断言名、总数降至 393–395，还原后 TASK-093-gate-frontend-final.log 恢复 396/396。六个 bak-*（internals/bootstrap/reader/nav/ai/Timeline）与还原后源码 sha256 逐字节一致，证明修前/修后成对验证的「还原」可信。既有断言零削弱：如 M-A 下仅 (s7) 前置/(s7) 切换/(p3-f1) 三条红，其余含全部既有断言的 393 条仍绿。"
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/store/slices/reader.ts",
+        "src/store/slices/ai.ts",
+        "src/store/slices/nav.ts",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-B2-f2-reflip.log",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-C2-success-toast-dropped.log",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-D-f3-translation.log",
+        ".workflow-kit/tasks/evidence/TASK-093-mutations/M-G-f5-revert.log"
+      ],
+      "analysis": "核对 internals.ts:204-209 回滚条件「仅当 cur[field]===optimistic 才 flipEntryFlag 恢复点击前值」：连点两次（click1 失败/click2 成功）时迟到的 catch 因当前值已被第二次点击接管而不回踩；反向时序（click1 成功/click2 失败）回滚值恰与 DB 一致——两种时序 UI 与 DB 均不脱节，M-B2-f2-reflip.log 红证修前「再翻一次」确会踩回。全仓 grep flipEntryFlag 与成功文案确认无残留旧式回滚、无乐观假成功 toast，唯一成功提示在 reader.ts:336 的 onSuccess（落库后触发），M-C2-success-toast-dropped.log 红证该提示不得提前。ai.ts:231-263 两条失败路径按「translatedContent 为空才清 rawTranslatedIds」处理、与 translateEntry（ai.ts:112-140）同口径，M-D-f3-translation.log 红证清/留两侧各有判据。nav.ts:170 的 .catch 吞掉 reloadFromBackend toast 后的重抛（bootstrap.ts:99-101），(p3-f5)① 实测零 unhandled rejection 且「刷新失败：」toast 仍可见，M-G-f5-revert.log 红证修前三口径全破。"
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/store/slices/reader.ts",
+        "src/lib/coverImage.ts",
+        ".workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md"
+      ],
+      "analysis": "reader.ts:331/343/399 三处入口（修前为 4 段重复的 api 选择+回滚+toast 代码）收口到 internals.ts:189-210 单一 helper：失败文案以模板入参保留各入口既有措辞、成功提示经可选 onSuccess 注入，即 BATCH12 独立审查 F2/F3 建议的「卡片与阅读器共用同一 helper」落地。收口后回滚/恢复/提示时序只有一份实现，不存在平行路径口径漂移——M-C/M-C2 变异单点改动即整组断言变红，说明判据确实绑定在该实现上而非旁路。coverImage.ts:54-59（G2 去重不变量）与 :114-119（G3 NaN 静默拒绝语义）以注释就地留档，无需读 TASK-092 移交材料即可理解决策依据。"
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "evidence_files": [
+        "src/lib/coverImage.ts",
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts",
+        ".workflow-kit/tasks/evidence/TASK-093-gate-frontend-final.log"
+      ],
+      "analysis": "F1 守卫只给每次 loadMore 增加一次字符串比较（bootstrap.ts:183），无额外请求或遍历，且 mock 模式入口早退（bootstrap.ts:154）不产生任何开销。coverImage.ts:58-59 的 indexOf+splice 仅在 ready 转换时对 ≤300 的 readyOrder 执行一次，每帧渲染的 coverView 热路径零改动。helper 每次切换仍是一次 find + 一次 map（internals.ts:196-201），与修前复杂度相同；门禁实测无回退（frontend 396/396 全绿、build 838ms）。"
+    }
+  ],
+  "ui_review": null
+}

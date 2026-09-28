@@ -1,0 +1,11 @@
+{
+  "changed_files": [
+    "src/lib/coverImage.ts",
+    "src/store/internals.ts",
+    "src/store/slices/ai.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

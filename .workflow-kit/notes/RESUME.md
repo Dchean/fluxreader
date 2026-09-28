@@ -9,18 +9,18 @@
 
 目标：以 workflow-kit 2026-09-18.3 新周期对 fluxreader 持续改进：修复全项目体检发现的缺陷（P1/P2），处置功能空壳与死代码确保无未落实的宣称能力，完成 ingestion.rs 拆分与结构性硬化（pull 游标守卫、app_settings 收口），使项目稳定规范、代码与技术路线优雅高效
 
-当前阶段：**分步实施**
+当前阶段：**验收与交付**
 
-阶段目标：落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致
+阶段目标：核对完整范围，交付可运行成果、使用说明及适用的恢复办法
 
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | 需求与目标 | 明确目标、已有 Bug、新功能、其他要求、质量目标和执行边界 | 已完成 |
 | 分析与方案 | 记录参考、原始基线状态与限制，说明维护、稳定和性能取舍，并确认路线 | 已完成 |
 | 界面预览 | 验证关键流程、整体设计和控件完整状态，确认后沿用前端实现 | 不适用 |
-| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 当前 |
+| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 分批推进 |
 | 回归与审查 | 以需求、失败路径、适用界面检查、维护性和性能证据核对当前组合候选 | 分批推进 |
-| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 待推进 |
+| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 当前 |
 
 **完整验收目标**：体检报告 AUDIT-20260919-v2.md 的 P1/P2 缺陷经确认后全部修复并有修前复现/修后验证的成对证据；结构性硬化落地：pull 分块失败不推进增量游标；app_settings 读取收口为类型化助手；ingestion.rs 拆分为领域模块，行为零变化，四门禁不回归；死代码/空壳集群处置完毕（删除或裁决保留），无未落实的宣称能力；设计边界项（P2-12/P3-11 等）经 owner 逐项裁决：实施或注释明示保留；既有质量底线延续：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283 不回退（通过数可增不可减）
 
@@ -28,10 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 64 项：已验收 52，待验收 0，阻塞 0。
+已建任务 65 项：已验收 52，待验收 1，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-093 · Batch 1/2 独立审查 P3 收口：竞态守卫含排序、回滚恢复原值、阅读器平行路径、reload 异常与断言补齐（REQ-102）](<../tasks/cards/TASK-093.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -43,9 +44,8 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 52 项记录可在任务总览查看。
+另有 53 项记录可在任务总览查看。
 
 **已确认但尚未拆分的需求**：审计 round-4 s7b 真机实测：画廊(5/44)、播客(6/119)、通知(1/20) 三个布局的列表容器不可滚动（scrollHeight==clientHeight），而对应范围在后端仍有内容 ⇒ 用户到不了这些条目；空态旁仍渲染「滚动加载更多」这一不可执行的提示。
 
@@ -59,7 +59,6 @@
 
 ## 未完成的上下文、决策与待办（Agent 笔记）
 
-- 2026-09-22T10:59:35.618169Z · note/context · 审计轮次进展 7（审计B 中期发现 + 主控独立复核，2026-09-22）。**分类级 AI 开关确认为死设置（P1）：有存储、有 UI、有落库，但零消费点。** 主控独立复核（未采信其结论，逐环节亲自读码）： 写入侧齐全：DB 列 folders.auto_summary/auto_translate（migrations.rs:13-14）→ 读取 folder_rows 映射（db/folders.rs:18,26-27）→ 下发前端（lib/api.ts:572-573 的 folderRowsToCategories → CategoryGroup.autoSummary/autoTranslate）→ UI 开关（components/settings/FeedsTab.tsx:135,147）→ 落库命令（store/slices/feeds.ts:272-282 的 toggleCatSummary/toggleCatTranslate → api.setFolderAiFlags → commands/folders.rs:119-200 → db/folders.rs:86）。**整条写入链路是通的**，用户改了会真实落库。 消费侧为零：全 src 目录 grep 所有 `binding.cat.` 与 `cat.autoSummary/autoTranslate` 的用法，命中仅：selectors.ts:46/122/124/168/182（只读 cat.layout 与 cat.id）、feeds.ts:183（cat.id）、feeds.ts:275/281（**写**开关时回读自身另一个字段以传参，非消费）、Overlays.tsx:558-559（cat.id/cat.layout）、FeedsTab.tsx:135/147（开关自身回显）。 **没有任何渲染或生成路径读取分类的 AI 开关。** 生效判定在 store/selectors.ts:189-195 的 selectFeedConfig，实现逐字为 `autoSummary: binding?.feed.autoSummary ?? false, autoTranslate: binding?.feed.autoTranslate ?? false` —— 只读 feed，从不读 cat。消费点有三处（Timeline.tsx:391/406、Timeline.tsx:706/727-728、Reader.tsx:66/75 与 :102-104），全部只吃 feed 级值。 语义对照：resolveFeedLayout（selectors.ts:24-26）为**布局**建立了「feed 覆盖 → 分类兜底」的两级模型；而**AI 开关**在同一份 CategoryGroup/FeedItem 结构上却没有建立对应的兜底——UI 与数据结构都摆出了两级形态，仅判定函数漏了第二级。 影响：用户在设置页打开「分类级 摘要/翻译」，卡片与阅读页的自动摘要/自动翻译**完全不会触发**（除非逐个 feed 单独打开）。属「宣称存在的能力未落实」，且因写入链路完好、开关状态可正常回显，用户更难发现它无效。 修复方向：selectFeedConfig 增加分类兜底（feed 级为非默认值时用 feed，否则回落 cat 级），与 resolveFeedLayout 同构；并补「分类开、feed 未设 → 生效」的断言。注意需先确定 feed 级「未设」的表达——当前 FeedRow.auto_summary 是 NOT NULL DEFAULT 0，没有三态，故要么引入继承语义（如显式 'inherit'），要么明确「feed 级优先且默认 false 即视为未设」的产品口径。**这一点需 owner 决策**，不在只读审计范围内。 同批（审计B，主控尚未逐条复核）待办：按钮文案夸大范围（与已确认的锚点缺陷同源，其实测称后端标读了列表中不存在的条目）、updateSettings 落库失败静默 + unhandled rejection（settings.ts:56）、Space 快捷键仍未入表（ShortcutsTab 6 行无 Space，但 App.tsx:247-252 有处理、PlayerBar.tsx:230/369 的 title 反而承诺了 Space）。这几条我会在收到其最终报告后一并复核再定性。
 - 2026-09-22T11:02:10.895546Z · note/context · 审计订正（主控自我修正，2026-09-22）——**ARCH2-1 找到了一条更根本的缺陷，它同时推翻了我先前记录的一条 P1 缺陷的现象描述**。按证伪优先原则必须如实订正。 【主控独立证实的新缺陷 ARCH2-1（P0）】ArticleListArgs 的 serde 契约与前端 payload 不匹配，7/9 字段被静默丢弃。 位置：src-tauri/src/commands/articles.rs:15-16 —— `#[derive(Deserialize)] #[serde(rename_all = camelCase)] pub struct ArticleListArgs`，字段为 snake_case（feed_id/folder_id/only_unread/only_starred/only_today/newest_first/limit/offset/with_content）。 而前端 src/store/internals.ts:82-92 的 scopeQueryArgs 发出的正是 snake_case；Tauri 只把**命令形参名** args 转 camelCase，内层对象原样交给 serde ⇒ rename_all 期望 camelCase，于是带下划线的 7 个字段全部落空。 主控独立编译探针证实（tmp/audit-scratch/parent-verify/probe_article_args.rs，rustc 直编 + 链接既有 serde rlib，未用 cargo）：用前端真实 payload 反序列化，实测 feed_id/folder_id/only_unread/only_starred/only_today/newest_first/with_content **7/7 全部为 None**，仅无下划线的 limit/offset 幸存；对照组（移除 rename_all）则 feed_id=Some(7)、newest_first=Some(false) 等全部正确命中。 连带后果（由 articles.rs:51-62 的 article_query unwrap_or 默认值决定）：后端恒定按「feed_id=None, folder_id=None, only_*=false, newest_first=true(DESC), with_content=false」查询 —— 即**全局、降序、无任何筛选**，只认 limit/offset。 严重性依据：默认「全部」视图下 feed_id/folder_id 本就为 null、newest_first 本就 true ⇒ 丢弃后语义等价，所以默认视图完全看不见（这解释了它为何自首个提交 9828c8f 存活至今）；仅单源/单分类、排序=最早、未读/收藏/今天视图三类场景暴露。 附：ArticleListArgs 仅被 list_articles 与 article_index 使用（全仓 grep 4 处），且 src-tauri/src 内无其他调用者，故影响面封闭、修面小。 【订正我先前的一条记录】我在「审计轮次进展 4」中记录的 P1 缺陷「切换最新/最早排序后分页游标语义错位——重复 300 条卡片 + id 1..500 永久不可达」，其**现象描述错误，必须撤回**。 原因：我当时的探针（probe_sort_cursor.mjs）自建的假后端**尊重 newest_first**（会随排序翻转切片方向），而真实后端因 ARCH2-1 **恒为 DESC**（newest_first 恒 true）。我构造的假后端比真实后端更正确，于是把一个不存在于生产的重复现象当成了实测结论 —— 这是本轮我自己的方法失误。 主控用忠实后端重测（tmp/audit-scratch/parent-verify/probe_arch2_faithful.mjs，mock 先按 camelCase 契约丢弃 snake_case 键再套用 unwrap_or 默认值，逐字复刻真实反序列化）： 场景 C：范围=all，切「最早」并翻一页 → 唯一条目 1000、**重复 0**（我先前报的 300 重复不成立）；载荷仍带 newest_first:false，但后端忽略它，故 offset=500 仍取「全局第 501..1000 新」，与首批无交集。 订正后的**真实**缺陷（保留，但换机理与结论）：排序切换后不重拉（nav.ts:145-149），而后端恒 DESC ⇒ 「最早」排序下，列表渲染的是**最新那批的升序**，真正最老的文章要翻遍全库才会出现。实测同一探针 C2：切「最早」后首批可见 id 区间为 [201,1200]，**id 1..200（全库最老的）不在其中**。这才是生产可复现的症状，严重度按 P2 计（内容最终可达，但排序语义错误、需翻全库）。 【顺带证实：TASK-052 声称修好的「单源老文章够不到」在生产下只被部分缓解，且代价极高】 主控决定性探针 tmp/audit-scratch/parent-verify/probe_old_feed_unreachable.mjs：全库 1200 条，源10=较新 600 条(id 601-1200)、源20=较老 600 条(id 1-600)，全局 DESC 前 500 **全部属于源10**。 选中「源20」后立即：entries=500、可见(源20)=**0 条**（列表空白，尽管该源有 600 条）—— 正是 TASK-052 声称修复的症状。 随后连续翻页：翻页1 可见=400、翻页2 可见=600（exhausted=true），最终能取全 600 条、重复 0。 机理：因 feed_id 被丢弃，后端每次都返回全局 DESC 的一页，客户端再用 selectScopeEntries 过滤；所以单源视图靠**把整库翻完**才凑齐该源的条目。TASK-052/063 的「per-scope 游标」在本基线上**并未真正生效**（游标是客户端记的，后端从未收到范围参数）。 恢复机制说明：空白首屏能被 Timeline.tsx:197-200 的空列表补拉 effect 救回（items.length===0 且 exhausted===false ⇒ 触发 loadMoreArticles），该 effect 由源码直接读得；本轮未驱动 React 渲染层，故仅记为源码结论而非 DOM 实测。若该 effect 未触发，则症状为「永久空列表」（P0）；触发则退化为「翻遍整库才显示」（P1 + 性能）。两种分支的结论我会在最终报告里同时标注。 额外连带：article_index（articles.rs:41-48）用同一 ArticleListArgs，故其 feed_id/newest_first 同样被丢弃 ⇒ 它返回的是**全局 DESC 序列**中的位置，而非当前范围的位置，破坏了 bootstrap.ts:248-252 注释宣称的「article_index 与 list_articles 用同一组筛选参数，保证位置与列表对齐」契约。这会影响 anchorToArticle 的锚定分页。 【方法论反省（已写入 lesson）】本轮证伪优先不仅推翻了他人结论，也推翻了我自己的一条：**自建 mock 必须先证明它与真实实现同构，否则 mock 的合理行为会制造出生产不存在的现象**。后续凡涉及边界的探针，mock 必须逐字复刻被验证方的反序列化/默认值逻辑，或直接对真实实现取证。
 - 2026-09-22T11:02:21.675602Z · note/context · 审计轮次进展 8（2026-09-22）：两条收敛确认 + 一条对我方记录的机制订正。 【收敛确认 · NF-09「今天」视图口径不同构】审计G 独立复现，与主控先前的复现一致（结论一致、脚本独立）： 列表口径 db/articles.rs:199 `date(a.published_at,'localtime') = date('now','localtime')`（日期**相等**，隐含上界=本地当日 24:00）； 标读口径 db/articles.rs:712-715 `datetime(published_at) >= datetime(?, 'unixepoch')`（**只有下界，无上界**）；since_ms 由 nav.ts:163 按本地日界给出。 两条独立实测（主控 probe_today_scope.py 与审计G probe_today_scope_parity.py）均得同一结论：published_at 晚于本地当日 24:00 的条目列表看不见、却被标读并推远端。属 CF-01 同类的第二个实例（口径错配）。修法建议与我先前一致：统一走可见集合下传。 【机制订正 · NF-08（由审计G 提出，主控已亲自核实并接受）】我先前在「审计轮次进展 2」记录的 N11 失败路径泄漏，**Reader 路径不可达，真实入口是卡片路径**。 核实过程（主控亲自读码，两处逐字）： Reader.tsx:289 的纯文本分支条件是 `isShowingTranslatedProse && rawStream`（**双条件**）；而 ai.ts:222-224（流内 onError）与 ai.ts:231-236（外层 catch）都把 isShowingTranslatedProse 置回 false ⇒ 失败后该分支恒为假。 进一步看 Reader.tsx:303-317 的 else 分支：isShowingTranslatedProse=false 时渲染的是 `baseHtml`（**原文**），**根本不渲染 translatedContent** ⇒ 即使 rawStream 为真也不会显示译文，故「看到字面 <p> 标签」在 Reader 不可达。我的原记录在这一点上是错的。 卡片路径则**没有**这层前置：Timeline.tsx:487-491 仅以 `rawTranslated` 单条件裁决 ⇒ 失败后 rawTranslatedIds[id] 仍为 true，而卡片懒水合会把 DB 里**后端已 ammonia 消毒的 HTML** 写入 translatedContent（reader.ts:232 hydrateArticleContent）⇒ 走纯文本插值 ⇒ **N8 修好的症状在卡片上回归**，用户看到字面 <p>已消毒译文</p>。该机制与主控先前 probe_n11_consequence.mjs 的实测输出一致（该探针走的正是卡片分支），故结论方向成立、入口判定订正。 为什么 339/339 全绿：回归网 frontend-regression.mjs:1560-1562 的 (l2) 断言主动断言「流错误路径标记保持」——该断言在「已有半截未消毒内容」时是正确的（保护未消毒产物按纯文本渲染），但缺陷出在**失败时无任何 delta、translatedContent 为空**的分支，此时保留标记只留副作用。现有断言把两种情形混为一谈。 修法（供后续决策）：① 清标记条件精确为「失败**且** translatedContent 为空 ⇒ 清」；或 ② 在 hydrateArticleContent/ensureArticleContent 写回**来自 DB 的**译文时一并清该 id 的 rawTranslatedIds（来源可靠即无未消毒风险）。两条都需补「invoke reject（无 delta）→ 标记清除 → 水合后译文块走 HTML 分支」的成对断言。 累计已确认缺陷类别（供最终报告组织）：口径错配（layout/today/visible-set 三实例，同一根因）；serde 契约不匹配（ARCH2-1，P0）；修复只覆盖单分支/单入口（cleanup_cache ai 分支、N10 三入口、P3[1] 六处平行路径）；修复互相打架（N11×N8）；断言形态问题（等号钉死漏项、参数级而非集合级、源码形态断言、把漏项固化为契约）；状态不收敛（exhausted 跨布局、activeFeedFilter 悬空、角标残留、跨布局陈旧快照）；失败静默与虚假成功（CF-04 的成功 toast、settings 落库、updateSettings）。
 - 2026-09-22T11:03:52.961073Z · note/context · 审计轮次进展 9 · **本轮治理层面最重要的一条：口径替换（scope substitution）**（NF-10，由审计G 提出，主控逐环节亲自核实并采纳）。 【事实链，四处原文均已亲自核对】 1) 原声明（两份文档一致，逐字）： FINDINGS-REQ-007.md:50 —— 「P2-12 配置同步无删除语义：**远端删除的订阅/分类本地永不删除**（设计边界，但 skipped 计数易让用户误以为已对齐）」 AUDIT-20260919-v2.md:229 —— 「P2-12 配置同步无删除语义 | **仍存在** | config_sync.rs:141-261 只 upsert；skipped 实为已更新计数。需 owner 裁决是否做删除语义」 2) owner 裁决 DEC-req104-p2-12-config-delete-20260920 的 statement 逐字为：「授权为配置同步实施删除语义：**远端白名单字段**在远端消失时本地同步删除；修正 skipped 计数口径为真实跳过数」——**用的是「白名单字段」，比原声明的「订阅/分类」窄**。 3) TASK-075 实现的正是裁决文本：A① merge_app_settings 由只 upsert 改为「远端缺失的白名单键本地同步删除」+ is_local_only_setting 收敛本地专属键；A② 计数口径改 ApplyOutcome。**未跑偏**。 4) 当前代码实测：`Select-String -Path src-tauri\src\config_sync.rs -Pattern 'DELETE FROM|delete_folder|delete_feed'` → **0 命中**。整个 config_sync 模块**没有任何删除 folders/feeds 的语句**；分类按名称 upsert（config_sync.rs:151-155）、订阅按 URL upsert（:190-193），均无删除分支。 【结论】原发现点名的对象（订阅/分类）**至今零实现**。这不是普通半修，而是**口径替换**：原发现 → owner 裁决（收窄）→ 任务实现（忠实实现裁决文本）。TASK-075 没有跑偏，但**最上游那份描述真正用户痛点的文档从未被任何下游订正或标注「有意收窄」**。后果：用户仍与服务端不一致（服务端整理订阅后本地无限期保留已删项且无提示），而核对者若只读 TASK-075 的 objective 与 config_sync 的测试，会得出「P2-12 已修」的结论。 —— 这正是本轮反复出现的第四种模式的**元层面版本**：修复覆盖了「被改写的目标」，而不是「原始痛点」。前三种（单分支/单入口/互相打架）发生在代码层，这一条发生在**需求与记录层**。 【待 owner 裁决，两个选项】 ① 补做订阅/分类删除语义（判据可与 P3-11 同款：远端列表缺失 + origin='remote' + 无 pending）； ② 确认收窄为有意设计，并在 FINDINGS-REQ-007.md:50 与 AUDIT-20260919-v2.md:229 **显式标注范围收窄**。 不做任何一项的代价：下一轮审计还会把 P2-12 判为未修，或更糟——按 TASK-075 的证据判为已修。 【同批复核（审计G 的两个后台子代理，其关键结论主控已抽查）】 · 独立核对 FINDINGS-REQ-007 全 41 条 → 33 FIXED / 6 PARTIAL 或 NOT-FIXED / 0 NEW-ISSUE。主控已复核属实的有：P2-12 零实现（成因即本条）、P3-5 的 subscriptions.rs:247/:300 平行路径（与 NF-01 互补）、P3-6/P3-8 未修。 · 两个子代理自行订正的两条，主控独立验证**订正正确**：① 回归网 exit 1 是 pwsh 把 node 的 ExperimentalWarning 当 stderr 报错，实测 LASTEXITCODE=0、339/339；② dist-test 不比 src 旧（store.js 16:20:46 晚于 store.ts 16:15:40），无需重编。这两条订正避免了把「工具链噪音」误记为「测试失败」。 · DONE.md 11 条收口链 → 10 条真实交付，046→080 为文书替代（与 NF-07 一致）。
@@ -71,6 +70,7 @@
 - 2026-09-24T03:13:36.175554Z · note/decision · 2026-09-24 owner 授权（本会话原话）：「我授权你自行验收和commit」。据此：任务在定义门禁与新子代理独立审查通过后由主控 accept，并由主控提交 commit（POLICY authority.commit=allowed 一致）；push / PR / merge / release 仍为 ask，未获授权。提交时机：TASK-090/091 已验收的改动与 Batch 1/2 未审改动交织在同一批 Rust 文件中（commands/articles.rs、db/articles.rs、db/sync_map.rs），无法干净拆分，故待 Batch 1/2 独立审查通过（或修复后通过）再一并提交，不提交未经独立审查的代码。
 - 2026-09-24T05:06:31.639391Z · note/todo · 范围外待办（Batch 1/2 独立审查附注）：src-tauri/src/sync/greader_pull.rs:147-149 增量游标 set_last_sync_ts 取拉取结束时的 Utc::now()，拉取过程中服务端变更的条目下一轮增量会漏掉，只能靠全量对账补回。另有 07:57Z 记录的 mock_greader changed_at 语义全面核对待办。二者同属同步增量窗口，建议合并为一张卡评估。
 - 2026-09-28T01:27:17.197991Z · note/decision · TASK-092 · 2026-09-28 owner 指示（本会话原话）：「子代理不成功，后续不重复使用子代理，选择新开」。据此修订 09-23/09-24 的「做过类似问题的子代理继续交付给他」：之后实现/修复一律新开子代理，不续用旧实例（包括失败或停滞的）；新子代理通过交接说明与 tmp/ 下留存产出接手。独立审查仍须新开且未参与实现。本次已停止 impl-frontend-images-2（已恢复但未产出），代码与 m0-backup 一致。
+- 2026-09-28T06:45:40.075663Z · note/decision · TASK-093 · 2026-09-28 owner 修订子代理使用规则（本会话原话）：「代码编写……如果之前处理过什么问题，后续如果遇到同类型的问题就再让他进行代码编写，这样节省token和理解，同时一直复用造成长上下文干扰，但是审查子代理每次都要开全新的子代理，避免污染」。据此取代 2026-09-28T01:27Z 的「一律新开」规则：实现/修复类子代理在存在同类型问题处理经验时优先续用（节省 token 与理解成本），但不无限复用，出现长上下文干扰即换新开；审查类子代理一律全新实例，未参与实现，防污染。TASK-093 实现续用首轮 TASK-092 独立审查子代理（agent_ffb8c60a，其产出含 G1-G3 备忘与 cov-*/M22 断言结构核对，同类型经验最直接）。
 
 ## 教训
 
@@ -85,18 +85,18 @@
 
 ## 最近事件
 
-- 2026-09-28T05:53:25.895237Z · checkpoint · TASK-092 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-09-28T05:53:41.052551Z · checkpoint · TASK-092 · Worker result must match the complete worker-result contract；下一步：按报错列出的漏报/多报文件修正 worker-result，再 unblock 后 begin；不要新建任务或重置预算
-- 2026-09-28T05:53:41.267765Z · note/lesson · TASK-092 · protocol 失败已出现 8 次：Worker result must match the complete worker-result contract。下次准备/实现前先核对这一点。
-- 2026-09-28T05:54:02.897281Z · checkpoint · TASK-092 · 阻塞已处置（protocol）：重建后先本地校验键集再 finish。恢复安全。；下一步：begin 重新实现
-- 2026-09-28T05:54:02.978865Z · unblock · TASK-092 · protocol → ready；依据：主控 2026-09-28 核对：protocol 失败系复制了已被工具改写的 worker-result（含 changed_files_source 键）；契约要求键集精确相等，改从原始 9 键文件重建
-- 2026-09-28T05:54:09.125312Z · checkpoint · TASK-092 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-09-28T05:54:16.916472Z · checkpoint · TASK-092 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-09-28T05:54:48.794925Z · checkpoint · TASK-092 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
-- 2026-09-28T06:20:49.538823Z · checkpoint · TASK-092 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
-- 2026-09-28T06:22:23.067411Z · accept · 验收 TASK-092；依据：owner 2026-09-24 授权（JOURNAL 2026-09-24T03:13Z）：任务在定义门禁与新子代理独立审查通过后由主控 accept 并提交 commit；2026-09-28 两轮独立审查 PASS（首轮 1 条 P2 已修复并复审）
 - 2026-09-28T06:23:03.986674Z · note/progress · TASK-092 · 2026-09-28 会话总结：①启动包按 D:/workflow-kit QUICK_START rebind 升级（connected，check 0 错误；旧版备份 legacy/upgrade-20260928T050448Z；升级前工作区备份 tmp/upgrade-backup-20260928/，按「不提交未审查代码」决定未提前 commit）。②TASK-092 全流程收口：recover 中断证据 → extend 240min（DEC-b672049f，用户会话内确认）→ unblock×3（越界文件均主控行为：09-28 rebind 升级 + 09-24 TASK-094 契约预写）→ 新子代理补交互报告 C9/D10-D12 与 worker-result → 归档 UI 证据 → finish/verify → 首轮独立审查 PASS 含 1 条 P2（代理 img 缺 onError）→ 主控修复 + cov-wire 断言扩展 + M22 变异成对验证 → repair finish/verify → 全新子代理复审 PASS findings=0（增量经字节级核对仅声明两处）→ review 录入 → accept（DEC-f6a7d018，merge-ref 894c3bd）。提交：894c3bd 业务 12 文件、d8573e8 工作流记录。③TASK-092 两轮 P3 备忘（G1 LRU 驱逐重取、G2 readyOrder 重复 push、G3 Number(articleId) 静默拒绝、G4 证据命名、G5 CRLF/reason 确认项）已并入 tmp/task-093-spec.json，prepare TASK-093 时带入。④verify 提示：本任务 snapshot_paths 冻结 139 文件仅改 23 个，后续任务应收窄。
 - 2026-09-28T06:23:16.626668Z · note/lesson · workflow-kit 新引擎（2026-09-28 升级）三处契约坑，下次直接按此准备：①worker-result JSON 键集必须与契约精确相等——finish 成功时工具会自动给文件加 changed_files_source 键并改写 changed_files，从已 finish 的文件复制会带入多余键触发 protocol 阻塞；应始终从 worker 原始 9 键文件重建。②review 报告 ui_review.checked_states 每条必须恰为 ui_check id 字符串（整串相等，不能带结论后缀），evidence_files 只收 tasks/evidence/ 与 tasks/runs/ 下非空文件（截图+报告至少各一）。③PASS 且 findings 为空的报告要求 review_checks 恰好覆盖 5 个规范 area（requirements/regression/failure_paths/maintainability/performance，各一条、无自定义名、无多余条目），每条必带 evidence_files（候选文件或 evidence/runs 附件，tmp/ 无效）；观察性备忘写 summary 与 analysis，不进 findings。M22 变异证据已随 TASK-092 归档可作范例。
+- 2026-09-28T06:28:12.899438Z · prepare · TASK-093 · 任务已冻结：Batch 1/2 独立审查 P3 收口：竞态守卫含排序、回滚恢复原值、阅读器平行路径、reload 异常与断言补齐（REQ-102）；范围 src/**, tools/frontend-regression.mjs
+- 2026-09-28T06:28:35.749551Z · checkpoint · TASK-093 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-28T06:45:40.075663Z · note/decision · TASK-093 · 2026-09-28 owner 修订子代理使用规则（本会话原话）：「代码编写……如果之前处理过什么问题，后续如果遇到同类型的问题就再让他进行代码编写，这样节省token和理解，同时一直复用造成长上下文干扰，但是审查子代理每次都要开全新的子代理，避免污染」。据此取代 2026-09-28T01:27Z 的「一律新开」规则：实现/修复类子代理在存在同类型问题处理经验时优先续用（节省 token 与理解成本），但不无限复用，出现长上下文干扰即换新开；审查类子代理一律全新实例，未参与实现，防污染。TASK-093 实现续用首轮 TASK-092 独立审查子代理（agent_ffb8c60a，其产出含 G1-G3 备忘与 cov-*/M22 断言结构核对，同类型经验最直接）。
+- 2026-09-28T06:58:58.546151Z · checkpoint · TASK-093 · Interrupted run recovered: 2026-09-28 主控核实：续用的实现子代理因长上下文干扰停止（其指控的环境损坏与磁盘真相不符——git status 一致、无伪造文件、无 worker-result）；实际留有部分连贯工作：F1 排序代际守卫完整（bootstrap.ts）、F2/F3 共用 helper 完整（internals.ts optimisticEntryFlagToggle）、reader.ts 仅 import 接线；按 owner 规则（复用出现干扰即换新）改派全新实例接手；下一步：先核对已有文件及原始日志，再处理 interrupted；不要新建任务或重置预算
+- 2026-09-28T06:59:09.728304Z · checkpoint · TASK-093 · 阻塞已处置（interrupted）：中断原因已核实为续用子代理的长上下文读取污染，非环境损坏；工作区部分改动（internals.ts/bootstrap.ts/reader.ts）经主控逐行审阅为合理中间态，保留供新实例接手；无 worker-result、无越界写入。恢复安全。；下一步：begin 重新实现
+- 2026-09-28T06:59:09.786055Z · unblock · TASK-093 · interrupted → ready；依据：owner 2026-09-28 指示「继续推进未完成的任务」+ 子代理规则（DEC note 已记录：复用出现长上下文干扰即换新开）
+- 2026-09-28T06:59:19.756045Z · checkpoint · TASK-093 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-28T07:50:15.291988Z · checkpoint · TASK-093 · 编码结果已记录，差异范围已核对：src/lib/coverImage.ts, src/store/internals.ts, src/store/slices/ai.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-28T07:51:14.505014Z · checkpoint · TASK-093 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-28T08:03:26.358024Z · checkpoint · TASK-093 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 如何继续
 

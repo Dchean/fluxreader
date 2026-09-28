@@ -1,0 +1,7 @@
+{
+  "changed_files": [
+    "src/store/internals.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/reader.ts"
+  ]
+}

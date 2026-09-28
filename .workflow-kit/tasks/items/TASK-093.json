@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "id": "TASK-093",
+  "title": "Batch 1/2 独立审查 P3 收口：竞态守卫含排序、回滚恢复原值、阅读器平行路径、reload 异常与断言补齐（REQ-102）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "收口 Batch 1/2 独立审查（.workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md）的 5 条 P3：F1 bootstrap.ts:172 loadMore 竞态守卫只比 scopeKey 与 articlesLimit===offset、不含排序方向 ⇒ 旧排序在途页可被接到新排序列表（探针实测 duplicates 100 / missing 100）；F2 reader.ts:396-404 卡片失败回滚是「再翻一次当前值」⇒ 连点两次、首次失败时 UI 与 DB 不一致（探针实测 UI isRead=true / DB is_read=false）；F3 阅读器平行路径未收口：reader.ts:321-333 toggleCurrentReadStatus（及同文件同形的收藏入口）先弹乐观成功 toast、失败不回滚，ai.ts:231-252 toggleReaderTranslation 失败路径不按「无半截未消毒产物即清 rawTranslatedIds」规则处理；F4 frontend-regression.mjs 覆盖缺口：收藏失败回滚、onError 路径清标记、viewEntriesCache.clear、SocialCard 删除假成功 toast 四处变异后全绿，且 1626/2212/2227 三条在修前代码下也通过；F5 nav.ts:159-160 toggleTimelineSort 的 reloadFromBackend 无 .catch（unhandled rejection）、缺 dataMode 判断、筛选视图下重拉多余。修法：F1 给分页请求加代际（发起时记录 sort 或 reload 递增的 generation，返回时不一致丢弃）；F2/F3 卡片与阅读器共用一个「乐观写 + 仅当当前值仍等于乐观值才恢复原值 + 失败 toast」的 helper，成功提示只在成功后出现（与 P1-5 去假成功一致）；翻译失败路径共用 ai.ts 已有的清标记规则；F5 调用点 .catch + dataMode 判断，筛选视图（本地排序的全集）只做本地重排不重拉；F4 为以上每一处补断言，并加强 1626/2212/2227 使其具判别力。；另收口 TASK-092 两轮独立审查的 P3 备忘（tmp/review-092.json P2 外条目与 tmp/review-092-round2.json summary）：G1 coverImage.ts ready 缓存 LRU(300) 驱逐成功 URL 后可重新请求（注释已声明权衡，评估是否可接受或收紧）；G2 readyOrder 驱逐后重成功会重复 push 导致上限提前触顶；G3 Number(articleId) 对非数字 id 静默拒绝（当前全为纯数字串无损，评估 mock 前缀 id 语义）；G4 证据引用名与归档名差一个 ui- 前缀、ui-result.json 键名不统一（流程文档层，非代码）；G5 CoverImage.tsx 行尾 LF→CRLF 规范化与代理解码失败 reason=direct-error 不参与决策（确认无需改动即可关闭）。G1–G3 为代码项，G4–G5 核对后可直接关闭。",
+  "non_goals": [
+    "不改「全部已读」的写入口径（按可见集合写入仍待 owner 裁决）",
+    "不改 Rust 代码；不处理 greader_pull 增量游标（已登记待办）",
+    "不改布局、文案（成功/失败提示文字沿用既有）",
+    "不改 .workflow-kit 受管记录"
+  ],
+  "requirement_refs": [
+    "REQ-102"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-092"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": []
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md",
+      ".workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① F1：旧排序在途的 loadMore 晚于新排序重拉到达时被丢弃——有断言复现审查探针场景（修前 duplicates>0，修后 entries 唯一且无缺失）",
+    "② F2：连点两次且第一次失败时，最终 UI 与后端一致（已读与收藏两条路径各一条断言，修前失败修后通过）",
+    "③ F3：阅读器标读/收藏失败时回滚且只出失败提示、成功提示在成功后出现；阅读器翻译失败且无半截产物时 rawTranslatedIds 被清、有半截产物时保留（成对断言）",
+    "④ F5：toggleTimelineSort 不产生 unhandled rejection；非 tauri 模式不调后端；筛选视图不重拉（IPC 计数断言）",
+    "⑤ F4：审查列出的 M2c/M4b/M6/M7 四个变异在修后回归网下全部变红；1626/2212/2227 三条改为修前代码下会失败；每条新增/加强断言附变异与变红输出",
+    "⑥ 门禁全绿且不回退：cargo test ≥213 passed / 0 failed / 9 ignored 不增；fmt/clippy/lint/build exit 0；frontend 通过数不少于 TASK-092 验证后的数目且全部通过"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "Batch 1/2 独立审查复跑门禁全绿（cargo 213/0/9、frontend 348/348），但审查以变异证明 M2c/M4b/M6/M7 四处无断言保护、1626/2212/2227 三条无判别力，并以探针复现 F1/F2。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md"
+    },
+    "decision_ids": [
+      "DEC-task093-p3-batch-20260928"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "前端回归既有断言（含 Batch 1/2 与 TASK-092 新增）",
+        "reason": "修复不改变已确认语义",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "tools/frontend-regression.mjs：F1 排序代际、F2 连点回滚、F3 阅读器回滚/翻译清标记、F5 无 unhandled rejection 与 IPC 计数、M2c/M4b/M6/M7 覆盖；加强 1626/2212/2227",
+        "reason": "审查指出的覆盖缺口需要成对断言",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "src-tauri 既有测试、fmt、clippy、lint、build",
+        "reason": "本卡不改 Rust",
+        "gate_ids": [
+          "cargo_test",
+          "cargo_fmt",
+          "cargo_clippy",
+          "lint",
+          "build"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-093-input-7336258670494b24a81359254fb49ae8.json",
+    "digest": "6dbd93bac95d13ec1eac016b6b4e22428f26847055f992169d893ac52e5e2707",
+    "source_revision": null,
+    "definition_digest": "b25446726814e9ff49b3fa906fb1a811d25d4dcd95528264078c64a56d04e938"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-28T06:28:35.529898Z",
+    "deadline_at_utc": "2026-09-28T10:28:35.529898Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-3b1e9a89eb8a464fb861be8f1bcc3179",
+  "run_ids": [
+    "RUN-44185d04397b4707a659182dfab50f4a",
+    "RUN-51d9865f2f544e01b815eec2ec0aa20c",
+    "RUN-193cf241b3774e198b31c83cf2eacdec",
+    "RUN-bb3cea5349834fc7a33650bb0c3ea9f4"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-193cf241b3774e198b31c83cf2eacdec-candidate.json",
+    "candidate_digest": "daf9213b187f63eb85cc60de66b5f2eb2c2ab5f19427a2d507ba44377f47adaf",
+    "verification_run": "RUN-193cf241b3774e198b31c83cf2eacdec",
+    "review_run": "RUN-bb3cea5349834fc7a33650bb0c3ea9f4",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",
+    ".workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md",
+    ".workflow-kit/tasks/evidence/TASK-089-baseline-cover.md",
+    ".workflow-kit/tasks/evidence/TASK-091-baseline-broken-cover.md",
+    ".workflow-kit/tasks/evidence/TASK-092-baseline-images.md",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-092": "5f24f74c28011ea82b7e18de3db5c8804f786e4d1fad45e9925fd823dc30634e"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-28T06:28:35.748558Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T06:58:58.545151Z",
+      "note": "Interrupted run recovered: 2026-09-28 主控核实：续用的实现子代理因长上下文干扰停止（其指控的环境损坏与磁盘真相不符——git status 一致、无伪造文件、无 worker-result）；实际留有部分连贯工作：F1 排序代际守卫完整（bootstrap.ts）、F2/F3 共用 helper 完整（internals.ts optimisticEntryFlagToggle）、reader.ts 仅 import 接线；按 owner 规则（复用出现干扰即换新）改派全新实例接手",
+      "next_action": "先核对已有文件及原始日志，再处理 interrupted；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-28T06:59:09.727273Z",
+      "note": "阻塞已处置（interrupted）：中断原因已核实为续用子代理的长上下文读取污染，非环境损坏；工作区部分改动（internals.ts/bootstrap.ts/reader.ts）经主控逐行审阅为合理中间态，保留供新实例接手；无 worker-result、无越界写入。恢复安全。",
+      "next_action": "begin 重新实现"
+    },
+    {
+      "at_utc": "2026-09-28T06:59:19.753718Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T07:50:15.289825Z",
+      "note": "编码结果已记录，差异范围已核对：src/lib/coverImage.ts, src/store/internals.ts, src/store/slices/ai.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-28T07:51:14.500505Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-28T08:03:26.355138Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "implementation",
+  "dispositions": [
+    {
+      "at_utc": "2026-09-28T06:59:09.667076Z",
+      "failure_kind": "interrupted",
+      "blockers": [
+        "Interrupted run recovered: 2026-09-28 主控核实：续用的实现子代理因长上下文干扰停止（其指控的环境损坏与磁盘真相不符——git status 一致、无伪造文件、无 worker-result）；实际留有部分连贯工作：F1 排序代际守卫完整（bootstrap.ts）、F2/F3 共用 helper 完整（internals.ts optimisticEntryFlagToggle）、reader.ts 仅 import 接线；按 owner 规则（复用出现干扰即换新）改派全新实例接手"
+      ],
+      "source": "owner 2026-09-28 指示「继续推进未完成的任务」+ 子代理规则（DEC note 已记录：复用出现长上下文干扰即换新开）",
+      "note": "中断原因已核实为续用子代理的长上下文读取污染，非环境损坏；工作区部分改动（internals.ts/bootstrap.ts/reader.ts）经主控逐行审阅为合理中间态，保留供新实例接手；无 worker-result、无越界写入。恢复安全。",
+      "resumed_to": "ready"
+    }
+  ]
+}

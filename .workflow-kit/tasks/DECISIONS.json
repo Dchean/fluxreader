@@ -2563,6 +2563,18 @@
       "candidates": {
         "TASK-092": "5f24f74c28011ea82b7e18de3db5c8804f786e4d1fad45e9925fd823dc30634e"
       }
+    },
+    {
+      "id": "DEC-task093-p3-batch-20260928",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-28 会话指示：「先push再继续推进未完成的任务」；承接 2026-09-24 Batch 1/2 独立审查已验收处置「P3 五条立修复卡（排在 TASK-092 图片卡之后）」（JOURNAL 2026-09-24T05:06Z）与 TASK-092 验收记录 DEC-f6a7d018 移交的 G1-G5 备忘",
+      "statement": "推进已规划任务卡 TASK-093：修复 Batch 1/2 审查五条 P3（竞态守卫、乐观回滚恢复原值、阅读器平行路径、reload 异常处理、断言补齐）并收口 TASK-092 移交的 P3 备忘（G1-G3 代码评估项），允许相应行为变更",
+      "scope": [
+        "TASK-093",
+        "REQ-102"
+      ],
+      "recorded_at_utc": "2026-09-28T06:27:47.777987+00:00"
     }
   ]
 }

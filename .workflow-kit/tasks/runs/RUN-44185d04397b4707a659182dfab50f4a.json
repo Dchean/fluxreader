@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "RUN-44185d04397b4707a659182dfab50f4a",
+  "task_id": "TASK-093",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:impl-p3-batch12 (2026-09-28, general-purpose, 全新实例按 owner 规则不续用旧实例; 交接材料含 BATCH12 审查报告与 tmp/task-092 既有变异工具示例)"
+  },
+  "started_at_utc": "2026-09-28T06:28:35.533728Z",
+  "finished_at_utc": "2026-09-28T06:58:58.484396Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "6dbd93bac95d13ec1eac016b6b4e22428f26847055f992169d893ac52e5e2707",
+  "candidate_digest": null,
+  "raw_output_refs": [],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-44185d04397b4707a659182dfab50f4a-scope.json",
+  "recovery": {
+    "source": "2026-09-28 主控核实：续用的实现子代理因长上下文干扰停止（其指控的环境损坏与磁盘真相不符——git status 一致、无伪造文件、无 worker-result）；实际留有部分连贯工作：F1 排序代际守卫完整（bootstrap.ts）、F2/F3 共用 helper 完整（internals.ts optimisticEntryFlagToggle）、reader.ts 仅 import 接线；按 owner 规则（复用出现干扰即换新）改派全新实例接手",
+    "observed_at_utc": "2026-09-28T06:58:57.504162Z",
+    "actual_process_finish_known": false,
+    "note": "finished_at marks record closure, not a fabricated process completion"
+  },
+  "failure_kind": "interrupted",
+  "failure_reason": "Interrupted run recovered: 2026-09-28 主控核实：续用的实现子代理因长上下文干扰停止（其指控的环境损坏与磁盘真相不符——git status 一致、无伪造文件、无 worker-result）；实际留有部分连贯工作：F1 排序代际守卫完整（bootstrap.ts）、F2/F3 共用 helper 完整（internals.ts optimisticEntryFlagToggle）、reader.ts 仅 import 接线；按 owner 规则（复用出现干扰即换新）改派全新实例接手"
+}
