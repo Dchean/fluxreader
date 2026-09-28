@@ -83,7 +83,6 @@
 
 ## 最近事件
 
-- 2026-09-28T17:13:54.944032Z · checkpoint · TASK-099 · Invalid worker status/summary；下一步：按报错列出的漏报/多报文件修正 worker-result，再 unblock 后 begin；不要新建任务或重置预算
 - 2026-09-28T17:13:58.507375Z · note/lesson · TASK-099 · protocol 失败已出现 9 次：Invalid worker status/summary。下次准备/实现前先核对这一点。
 - 2026-09-28T17:15:40.578747Z · checkpoint · TASK-099 · 依据新决定追加预算；原始时钟与失败记录保留；下一步：先核对已有成果，再按原任务范围继续
 - 2026-09-28T17:15:40.685876Z · extend · TASK-099 · 追加 240 分钟、0 轮修复；依据：owner 2026-09-28 会话 /goal 指令：「将项目推进优化重构完……推送并打tag，发布release」——完成 TASK-099 是该指令的前置；追加时长沿用 owner 在 TASK-092 同类阻塞时「追加 4 小时」的会话内选择（DEC-b672049f）
@@ -95,6 +94,7 @@
 - 2026-09-28T17:34:58.997050Z · checkpoint · TASK-099 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-28T17:35:55.315235Z · accept · 验收 TASK-099；依据：owner 授权链：2026-09-24「我授权你自行验收和commit」+ 2026-09-28 会话 /goal「将项目推进优化重构完……推送并打tag，发布release」；独立审查 PASS findings=0（subagent:review-req108，全新实例）
 - 2026-09-28T17:40:22.723671Z · note/progress · TASK-099 · TASK-099 收口（2026-09-28 17:5xZ）：实现由主控完成（子代理 API 渠道当日多次中断，checkpoint 有记录；审查子代理为全新实例 agent_d988cc2a）。业务提交 aa1a97f（7 文件，cargo 228/0/9、前端 419/419、fmt/clippy/lint/build 全绿）；独立审查 PASS findings=0（5 个不阻塞观察项入其 summary）；验收 DEC-ca4d269f；已推送 4729e8d..7c71ec2，CI run #103 进行中。流程插曲三笔：①首版 worker-result 两处不合契约（status 枚举、validation_requests 须字符串数组）致 protocol 阻塞，按 validate_worker_result 修正后 extend 240min（DEC-d62afaed）→ unblock → 新 run RUN-51527a3d 承接同一现场完成 finish/verify（ lesson：worker-result 的 status 只能是 ready_for_verification/action_requested/blocked，validation_requests/requested_actions 是字符串数组）；②.zcodeignore 为 ZCode 宿主自动生成的机器本地排除文件（内容自 .gitignore 同步），被 run 的全目录 inventory 判为越界——已删除并加入 .git/info/exclude（本地防复活），后续 run 若宿主再生成需同样处置；③审计 round-3 的 O 路结论（COALESCE 排序致 SCAN+TEMP B-TREE）经本次 EXPLAIN 与 Rust 断言双重复核成立并修复。下一步：owner /goal 要求的全项目多子代理自检（Rust/前端/UI 三路，读码非门禁）→ 分诊修复 → 版本号五处同步 + annotated tag 发布 release。
+- 2026-09-28T18:42:18.624332Z · note/progress · 发布前全项目自检收口（2026-09-28）：三路独立子代理（Rust/前端/UI）读码审查共 56 项发现（P0=0；Rust P1×1/P2×1、前端 P1×2/P2×3、UI P1×3/P2×8），核心结论：56 个 invoke 命令无空壳、无桩实现，IPC 契约一致，无假成功。修复 P1×5 + P2×9（Rust 2 项成对红绿证据 tmp/selfcheck-rust-fix/；前端 14 项回归 419→445 +26 断言），独立审查（全新实例）PASS findings=0，门禁 cargo 231/0/9 + frontend 445/445 + lint/build/fmt/clippy 全绿，提交 b4f6f4a 已推送。三份报告归档 .workflow-kit/docs/selfcheck-20260928/。未修复的 P2×2（J/K 键盘口径属产品决策、浮层焦点陷阱）与 P3×27 备忘留在报告中作为后续待办池；另记 P3：base.css 存在 73 行/114 处历史注释乱码（v0.14.0 已有，非本次引入，纯注释不影响 UI，修复需重建原文，列为低优先级）。已知观察项：folder_not_found 错误码与 record_feed_edit 的 validate 不一致（消息一致、无消费方分支）。
 
 ## 如何继续
 
