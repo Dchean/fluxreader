@@ -9,18 +9,18 @@
 
 目标：以 workflow-kit 2026-09-18.3 新周期对 fluxreader 持续改进：修复全项目体检发现的缺陷（P1/P2），处置功能空壳与死代码确保无未落实的宣称能力，完成 ingestion.rs 拆分与结构性硬化（pull 游标守卫、app_settings 收口），使项目稳定规范、代码与技术路线优雅高效
 
-当前阶段：**验收与交付**
+当前阶段：**分步实施**
 
-阶段目标：核对完整范围，交付可运行成果、使用说明及适用的恢复办法
+阶段目标：落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致
 
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | 需求与目标 | 明确目标、已有 Bug、新功能、其他要求、质量目标和执行边界 | 已完成 |
 | 分析与方案 | 记录参考、原始基线状态与限制，说明维护、稳定和性能取舍，并确认路线 | 已完成 |
 | 界面预览 | 验证关键流程、整体设计和控件完整状态，确认后沿用前端实现 | 不适用 |
-| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 分批推进 |
+| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 当前 |
 | 回归与审查 | 以需求、失败路径、适用界面检查、维护性和性能证据核对当前组合候选 | 分批推进 |
-| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 当前 |
+| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 待推进 |
 
 **完整验收目标**：体检报告 AUDIT-20260919-v2.md 的 P1/P2 缺陷经确认后全部修复并有修前复现/修后验证的成对证据；结构性硬化落地：pull 分块失败不推进增量游标；app_settings 读取收口为类型化助手；ingestion.rs 拆分为领域模块，行为零变化，四门禁不回归；死代码/空壳集群处置完毕（删除或裁决保留），无未落实的宣称能力；设计边界项（P2-12/P3-11 等）经 owner 逐项裁决：实施或注释明示保留；既有质量底线延续：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283 不回退（通过数可增不可减）
 
@@ -28,11 +28,10 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 68 项：已验收 54，待验收 1，阻塞 0。
+已建任务 68 项：已验收 55，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-096 · e2e 临时库唯一命名收口：共享 helper 消除 CI flaky 根因 + mock 线程健壮性（REQ-102 测试基建）](<../tasks/cards/TASK-096.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -44,6 +43,7 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
 另有 56 项记录可在任务总览查看。
 
@@ -83,7 +83,6 @@
 
 ## 最近事件
 
-- 2026-09-28T10:01:36.652877Z · checkpoint · TASK-094 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T10:16:12.269472Z · checkpoint · TASK-094 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-28T10:16:42.687365Z · accept · 验收 TASK-094；依据：owner 2026-09-28 会话指示「先push再继续推进未完成的任务」+ DEC-next-batch-covers-reachability-20260923（scope 含 REQ-107）；独立审查 PASS findings=0、ui_review R1-R7 全 PASS
 - 2026-09-28T10:17:14.402393Z · note/progress · 2026-09-28 会话（续）：TASK-093 与 TASK-094 均已验收并推送。TASK-093（REQ-102，bf60d0b）：续用子代理因长上下文干扰中止（其环境损坏指控经主控核实不成立，属读取污染），按 owner 新规则换全新实例接手——保留的部分工作（F1 守卫、F2/F3 helper）经逐行审阅后采纳，接线完成后 10 组变异成对验证、396/396、审查 PASS findings=0。TASK-094（REQ-107，1b0eb6f）：全新实例实现——LAYOUT_FILTER_SQL 一处定义三处拼接（article_where/mark_all_read/list_unread_ids_scoped）、前端游标键含布局、timelineRefill 上限 8 次、哨兵变可点击按钮；EXPLAIN 无退化；R1-R7 真机全 PASS（修前复现命中基线）；首次 verify 失败系 refresh_dedup_e2e 已知 flaky（临时库文件名碰撞，重跑同 digest 全绿）；审查 PASS findings=0。DEC-8311df20 / DEC-6208eedc。推送 a42fe91..f3d0208（中途 TLS 握手瞬时失败，退避后恢复）。范围外备忘：nav.ts selectView/selectFeed 的 void reloadFromBackend 无 .catch（TASK-093 审查观察项，建议下一张卡收口）；REQ-108 仍按 09-23 决定暂缓。
@@ -95,6 +94,7 @@
 - 2026-09-28T10:56:56.926699Z · checkpoint · TASK-096 · 编码结果已记录，差异范围已核对：src-tauri/tests/account_lifecycle_e2e.rs, src-tauri/tests/ai_e2e.rs, src-tauri/tests/common/mod.rs, src-tauri/tests/config_sync_e2e.rs, src-tauri/tests/cover_backfill_e2e.rs, src-tauri/tests/dedup_sync_e2e.rs, src-tauri/tests/dual_client_e2e.rs, src-tauri/tests/endpoint_autodetect_e2e.rs, src-tauri/tests/feed_edit_e2e.rs, src-tauri/tests/fever_sync_live_e2e.rs, src-tauri/tests/ingestion_e2e.rs, src-tauri/tests/migration_test.rs, src-tauri/tests/pull_cursor_e2e.rs, src-tauri/tests/refresh_dedup_e2e.rs, src-tauri/tests/regression_e2e.rs, src-tauri/tests/scheduler_e2e.rs, src-tauri/tests/staged_refresh_e2e.rs, src-tauri/tests/sync_content_e2e.rs, src-tauri/tests/sync_e2e.rs, src-tauri/tests/sync_gap_repro_e2e.rs, src-tauri/tests/sync_phases_e2e.rs, src-tauri/tests/unique_db_path_test.rs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-28T10:57:31.161884Z · checkpoint · TASK-096 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T11:08:43.430004Z · checkpoint · TASK-096 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-28T11:09:08.635013Z · accept · 验收 TASK-096；依据：owner 2026-09-28 指示「修复 ci 没过问题」（DEC-route-remaining-20260928）；独立审查 PASS findings=0
 
 ## 如何继续
 

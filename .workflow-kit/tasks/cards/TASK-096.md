@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-096 · e2e 临时库唯一命名收口：共享 helper 消除 CI flaky 根因 + mock 线程健壮性（REQ-102 测试基建）
 
-**状态**：verified
+**状态**：done
 
 **目标**：修 CI cargo test 偶发失败的根因（CI run #101 c088711 失败、#100 f3d0208 通过，两提交仅差日志文件；失败步 Run tests；本地 verify 同形态复现过）。根因已定位并实测（JOURNAL 2026-09-22T09:26:05Z）：cargo test 同一二进制的多个 #[test] 并发跑在同一进程，std::process::id() 相同，临时库名唯一性只靠时钟纳秒；Windows 时钟密集调用下精度不足（实测 1000 次相邻 as_nanos() 仅 350 个不同值），库名碰撞后两个测试互 remove_file/争用同一 SQLite 文件，db::open 报 "table folders already exists"。实测碰撞率：subsec_nanos 59/2000=2.95%、as_nanos 61/2000=3.05%（同等危险）；as_nanos + 进程内 AtomicU64 计数器 = 0/2000。修复：① 在 src-tauri/tests 下建一处共享 helper（tests/common/mod.rs，pub fn 返回进程内唯一的临时库路径：pid + as_nanos + AtomicU64 递增，保持既有 fluxreader_<base>_…db 命名风格与 remove_file 语义由调用方决定）；② 全部自带临时库命名的 e2e 测试文件改为调用该 helper（grep 核清现有个数，09-22 时为 19 个，此后可能新增），逐文件替换，不得改变各文件既有用例逻辑；③ 新增唯一性压力测试（多线程并发取名 N 轮断言无重复，锁住 helper 的不变量）；④ 顺带收口同属测试基建、09-21 登记备查的脆弱点：tests/refresh_dedup_e2e.rs:25 mock 服务器线程 stream.unwrap() 在连接出错时 panic 掉服务器线程——改为记录并继续/安全退出（不改变用例断言）。产品行为零变化（本卡只动 tests/）。
 

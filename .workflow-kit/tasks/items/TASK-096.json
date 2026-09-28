@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "修 CI cargo test 偶发失败的根因（CI run #101 c088711 失败、#100 f3d0208 通过，两提交仅差日志文件；失败步 Run tests；本地 verify 同形态复现过）。根因已定位并实测（JOURNAL 2026-09-22T09:26:05Z）：cargo test 同一二进制的多个 #[test] 并发跑在同一进程，std::process::id() 相同，临时库名唯一性只靠时钟纳秒；Windows 时钟密集调用下精度不足（实测 1000 次相邻 as_nanos() 仅 350 个不同值），库名碰撞后两个测试互 remove_file/争用同一 SQLite 文件，db::open 报 \"table folders already exists\"。实测碰撞率：subsec_nanos 59/2000=2.95%、as_nanos 61/2000=3.05%（同等危险）；as_nanos + 进程内 AtomicU64 计数器 = 0/2000。修复：① 在 src-tauri/tests 下建一处共享 helper（tests/common/mod.rs，pub fn 返回进程内唯一的临时库路径：pid + as_nanos + AtomicU64 递增，保持既有 fluxreader_<base>_…db 命名风格与 remove_file 语义由调用方决定）；② 全部自带临时库命名的 e2e 测试文件改为调用该 helper（grep 核清现有个数，09-22 时为 19 个，此后可能新增），逐文件替换，不得改变各文件既有用例逻辑；③ 新增唯一性压力测试（多线程并发取名 N 轮断言无重复，锁住 helper 的不变量）；④ 顺带收口同属测试基建、09-21 登记备查的脆弱点：tests/refresh_dedup_e2e.rs:25 mock 服务器线程 stream.unwrap() 在连接出错时 panic 掉服务器线程——改为记录并继续/安全退出（不改变用例断言）。产品行为零变化（本卡只动 tests/）。",
   "non_goals": [
     "不改产品代码（src-tauri/src、src/** 零改动）",
@@ -198,9 +198,11 @@
     "candidate_digest": "e7249cbc67428c1e2ec3d3d95933e3d045d9131a73999284c77992346ce864b8",
     "verification_run": "RUN-ccfdd25e7cb04cba8ae611ff62a82442",
     "review_run": "RUN-e996d4e9298343baa02b73f4a5f76db7",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-882cf8c819a249a593cf04b049566bf7-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-882cf8c819a249a593cf04b049566bf7"
+    ],
+    "merge_ref": "2640504"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",

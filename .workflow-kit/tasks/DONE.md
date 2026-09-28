@@ -70,5 +70,6 @@
 | [TASK-093](items/TASK-093.json) | Batch 1/2 独立审查 P3 收口：竞态守卫含排序、回滚恢复原值、阅读器平行路径、reload 异常与断言补齐（REQ-102） | done |
 | [TASK-094](items/TASK-094.json) | 三布局列表可达性：列表查询加布局维度 + 不足一屏自动续拉 + 可执行的加载提示（REQ-107） | done |
 | [TASK-095](items/TASK-095.json) | e2e 临时库唯一命名收口：共享 helper 消除 CI flaky 根因 + mock 线程健壮性（REQ-102 测试基建） | cancelled |
+| [TASK-096](items/TASK-096.json) | e2e 临时库唯一命名收口：共享 helper 消除 CI flaky 根因 + mock 线程健壮性（REQ-102 测试基建） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。
