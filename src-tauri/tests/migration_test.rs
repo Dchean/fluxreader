@@ -150,6 +150,12 @@ fn migration_v6_to_v7_backfills_precise_url_norm() {
                 miniflux_id INTEGER, fulltext_extracted INTEGER NOT NULL DEFAULT 0, UNIQUE(feed_id, guid));
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE deduped_urls (url TEXT PRIMARY KEY, kept_aid INTEGER NOT NULL, kept_at TEXT NOT NULL DEFAULT (datetime('now')));
+            -- 真实 v6 库在 v2 就有 sync_queue（TASK-099 v14 起对其建索引，
+            -- 夹具必须与真实 v6 形态一致；此前缺失是因为旧迁移从未触碰它）
+            CREATE TABLE sync_queue (id INTEGER PRIMARY KEY,
+                article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
+                feed_url TEXT, action TEXT NOT NULL, payload TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')));
         "#).unwrap();
         conn.execute("INSERT INTO folders (name) VALUES ('Cat')", [])
             .unwrap();

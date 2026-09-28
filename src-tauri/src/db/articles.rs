@@ -140,8 +140,19 @@ pub struct ArticleQuery {
     pub layout: Option<String>,
 }
 
-/// 列表条目（含 body_text 截断生成的 snippet；with_content 时附带正文）
-pub fn list_articles(conn: &Connection, q: &ArticleQuery) -> AppResult<Vec<ArticleListItem>> {
+/// 列表排序表达式（M-5 / REQ-108）：纯 `published_at`——`list_articles` 与
+/// `article_index` 的窗口排序共用同一常量，保证「绝对位置」与「列表顺序」
+/// 同口径。published_at 非空不变量由 v14 迁移的触发器 + 写入兜底固化
+/// （见 db/migrations.rs），使本表达式与旧 `COALESCE(published_at, fetched_at)`
+/// 逐行等价（由 migrations 的排序等价测试锁定），并可直接由
+/// idx_articles_published / idx_articles_feed_published / idx_articles_read_published
+/// 有序驱动，免 TEMP B-TREE 排序（计划断言见本文件测试）。
+pub(crate) const PUBLISHED_ORDER_DESC: &str = "a.published_at DESC";
+pub(crate) const PUBLISHED_ORDER_ASC: &str = "a.published_at ASC";
+
+/// 组装列表查询 SQL + 绑定（`list_articles` 的生产字节；测试对同一产物跑
+/// EXPLAIN QUERY PLAN，见 `list_query_plan_*`）。
+fn list_articles_sql(q: &ArticleQuery) -> (String, Vec<rusqlite::types::Value>) {
     // 正文列只在 with_content 时 SELECT（社交/通知布局需要），其余布局保持轻量查询。
     // 尾部四列顺序与 article_list_item 的索引 14..17 严格对应。
     let content_cols = if q.with_content {
@@ -163,14 +174,20 @@ pub fn list_articles(conn: &Connection, q: &ArticleQuery) -> AppResult<Vec<Artic
         sql.push_str(" WHERE ");
         sql.push_str(&where_clauses.join(" AND "));
     }
-    sql.push_str(if q.newest_first {
-        " ORDER BY COALESCE(a.published_at, a.fetched_at) DESC LIMIT ? OFFSET ?"
+    let order = if q.newest_first {
+        PUBLISHED_ORDER_DESC
     } else {
-        " ORDER BY COALESCE(a.published_at, a.fetched_at) ASC LIMIT ? OFFSET ?"
-    });
+        PUBLISHED_ORDER_ASC
+    };
+    sql.push_str(&format!(" ORDER BY {order} LIMIT ? OFFSET ?"));
     params.push(q.limit.into());
     params.push(q.offset.into());
+    (sql, params)
+}
 
+/// 列表条目（含 body_text 截断生成的 snippet；with_content 时附带正文）
+pub fn list_articles(conn: &Connection, q: &ArticleQuery) -> AppResult<Vec<ArticleListItem>> {
+    let (sql, params) = list_articles_sql(q);
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params), article_list_item)?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -186,7 +203,10 @@ fn article_where(q: &ArticleQuery) -> (Vec<&'static str>, Vec<rusqlite::types::V
         params.push(fid.into());
     }
     if let Some(folder) = q.folder_id {
-        where_clauses.push("a.feed_id IN (SELECT id FROM feeds WHERE folder_id = ?)");
+        // M-5：标量子查询形态（见 FOLDER_FILTER_SQL）——IN 子查询会让规划器
+        // 改走 feed 索引并对结果回退 TEMP B-TREE 排序；标量形态可由
+        // idx_articles_published 有序驱动（实测见 tmp/task-099/explain-query-plan.md）。
+        where_clauses.push(FOLDER_FILTER_SQL);
         params.push(folder.into());
     }
     if q.only_unread {
@@ -206,9 +226,8 @@ fn article_where(q: &ArticleQuery) -> (Vec<&'static str>, Vec<rusqlite::types::V
         // TASK-094：列表查询的布局维度与 mark_all_read / list_unread_ids_scoped
         // 同一段谓词（见 LAYOUT_FILTER_SQL，一处定义三处共用）。
         // 外层 FROM 只有 articles（别名 a），片段里的 feed_id 无歧义地解析到它；
-        // f/fo 是子查询自己的别名，不受影响。
+        // f2/fo2 是子查询自己的别名，不受影响。M-5 起为标量形态，绑定一次。
         where_clauses.push(LAYOUT_FILTER_SQL);
-        params.push(l.clone().into());
         params.push(l.clone().into());
     }
     (where_clauses, params)
@@ -217,17 +236,29 @@ fn article_where(q: &ArticleQuery) -> (Vec<&'static str>, Vec<rusqlite::types::V
 /// 计算某篇文章在当前筛选排序下的绝对位置（0 起）。
 /// 用窗口函数 ROW_NUMBER() OVER (ORDER BY ...) - 1 求位置，供前端「搜索/深层
 /// 打开文章后只加载目标那一页」的双向分页锚定——无需从头拉全量。
-/// 排序与 list_articles 完全同口径（COALESCE(published_at, fetched_at)）。
+/// 排序与 list_articles 完全同口径（[`PUBLISHED_ORDER_DESC`] / [`PUBLISHED_ORDER_ASC`]，
+/// M-5：纯 published_at，与旧 COALESCE 口径逐行等价）。
 pub fn article_index(
     conn: &Connection,
     q: &ArticleQuery,
     article_id: i64,
 ) -> AppResult<Option<i64>> {
+    let (sql, params) = article_index_sql(q, article_id);
+    let pos = conn
+        .prepare(&sql)?
+        .query_row(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))
+        .optional()?;
+    Ok(pos)
+}
+
+/// 组装 article_index 的窗口 SQL + 绑定（生产字节；测试对同一产物跑
+/// EXPLAIN QUERY PLAN，见 `list_query_plan_*`）。
+fn article_index_sql(q: &ArticleQuery, article_id: i64) -> (String, Vec<rusqlite::types::Value>) {
     let (where_clauses, mut params) = article_where(q);
     let order = if q.newest_first {
-        "COALESCE(a.published_at, a.fetched_at) DESC"
+        PUBLISHED_ORDER_DESC
     } else {
-        "COALESCE(a.published_at, a.fetched_at) ASC"
+        PUBLISHED_ORDER_ASC
     };
     let where_sql = if where_clauses.is_empty() {
         "1=1".to_string()
@@ -245,11 +276,7 @@ pub fn article_index(
         where_sql = where_sql,
     );
     params.push(article_id.into());
-    let pos = conn
-        .prepare(&sql)?
-        .query_row(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))
-        .optional()?;
-    Ok(pos)
+    (sql, params)
 }
 
 pub fn get_article(conn: &Connection, id: i64) -> AppResult<Option<ArticleRow>> {
@@ -619,11 +646,14 @@ pub fn upsert_article_with_feed(
 
 /// 插入新文章（upsert_article_with_feed 的兜底路径）。
 fn insert_new_article(conn: &Connection, feed_id: i64, a: &NewArticle) -> AppResult<(i64, bool)> {
+    // M-5：published_at 写入兜底——程序路径不允许产生 NULL（v14 触发器再兜住
+    // 裸 SQL 路径），使「published_at 非空」不变量成立，列表排序可退化为纯
+    // ORDER BY published_at（与旧 COALESCE 口径逐行等价，见 migrations v14 注释）。
     conn.execute(
         "INSERT INTO articles
             (feed_id, guid, url, url_norm, title, author, summary, content_html, body_text, image_url,
              enclosure_url, enclosure_mime, duration_sec, published_at, source)
-         VALUES (?1, ?2, ?3, ?15, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         VALUES (?1, ?2, ?3, ?15, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, COALESCE(?13, datetime('now')), ?14)",
         params![
             feed_id,
             a.guid,
@@ -729,38 +759,54 @@ pub fn clear_article_cover_if_matches(
 }
 
 /// 布局过滤谓词（TASK-094 收口：**一处定义，三处共用**）：feed 级 layout 覆盖 →
-/// 分类 layout 兜底，与前端 resolveFeedLayout 等价。此前 [`mark_all_read`] 与
-/// `list_unread_ids_scoped`（db/sync_map.rs）各持一份逐字相同的拷贝；列表查询
-/// （article_where → list_articles / article_index）加入布局维度后共三处消费，
-/// 故抽为此常量，三处拼接同一段 SQL，杜绝第四份拷贝。
-/// 常量本体不含前导 ` AND `（article_where 走子句 join；另两处拼接时自带）。
-/// 占位符 ? 按序绑定两次：第一次比 feed 级 layout，第二次比分类 layout。
-pub(crate) const LAYOUT_FILTER_SQL: &str = "feed_id IN (SELECT f.id FROM feeds f JOIN folders fo ON f.folder_id = fo.id WHERE (f.layout != 'inherit' AND f.layout = ?) OR (f.layout = 'inherit' AND fo.layout = ?))";
+/// 分类 layout 兜底，与前端 resolveFeedLayout 等价。列表查询（article_where →
+/// list_articles / article_index）、[`mark_all_read`] 与 `list_unread_ids_scoped`
+/// （db/sync_map.rs）三处拼接同一段 SQL，杜绝第四份拷贝。
+///
+/// M-5：谓词用标量子查询形态（原 `feed_id IN (SELECT ...)` 的等价改写）——
+/// IN 子查询会驱动规划器先扫 feeds 再按源取行，排序回退 TEMP B-TREE；
+/// 标量形态可由 idx_articles_published 有序驱动（实测见
+/// tmp/task-099/explain-query-plan.md）。语义逐行等价：feed 的有效布局
+/// （自身覆盖，否则所属分类）等于目标布局 ⇔ 原 IN 判定；无分类的 feed
+/// 两侧都不命中（原 JOIN 为内连接）。
+/// 常量本体不含前导 ` AND `（article_where 走子句 join；其余两处拼接时自带）；
+/// 列名 `feed_id` 不限定表名——三处消费方的目标表都只有 articles（同旧写法）。
+/// 占位符 ? 绑定一次（布局值）。
+pub(crate) const LAYOUT_FILTER_SQL: &str = "(SELECT CASE WHEN f2.layout != 'inherit' THEN f2.layout ELSE fo2.layout END FROM feeds f2 JOIN folders fo2 ON f2.folder_id = fo2.id WHERE f2.id = feed_id) = ?";
 
-/// 全部已读：作用于当前筛选范围（feed/folder/all），与前端「全部已读」按钮语义一致
-pub fn mark_all_read(
-    conn: &Connection,
+/// 分类过滤谓词（M-5）：标量子查询形态（原 `feed_id IN (SELECT id FROM feeds
+/// WHERE folder_id = ?)` 的等价改写），理由同 [`LAYOUT_FILTER_SQL`]——使列表
+/// 查询可由 idx_articles_published 有序驱动。语义逐行等价：feed 的归属分类
+/// 等于目标分类 ⇔ 其 id 在原子查询集合中；无分类（NULL）两侧都不命中。
+pub(crate) const FOLDER_FILTER_SQL: &str =
+    "(SELECT folder_id FROM feeds f2 WHERE f2.id = feed_id) = ?";
+
+/// 范围过滤子句 + 绑定（feed → folder → layout → 收藏 → 时间），
+/// [`mark_all_read`]、[`mark_all_read_with_enqueue`] 与 `list_unread_ids_scoped`
+/// （db/sync_map.rs）三处共用，保证「实际标读集合」与「入队集合」永远同口径（F8）。
+/// 返回的子句自带前导 ` AND `，占位符按序对应返回的绑定。
+pub(crate) fn scope_clause(
     feed_id: Option<i64>,
     folder_id: Option<i64>,
     starred_only: bool,
     since_ms: Option<i64>,
     layout: Option<&str>,
-) -> AppResult<usize> {
-    let mut sql = String::from("UPDATE articles SET is_read = 1 WHERE is_read = 0");
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut sql = String::new();
     let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(fid) = feed_id {
         sql.push_str(" AND feed_id = ?");
         binds.push(Box::new(fid));
     }
     if let Some(folder) = folder_id {
-        sql.push_str(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = ?)");
+        sql.push_str(" AND ");
+        sql.push_str(FOLDER_FILTER_SQL);
         binds.push(Box::new(folder));
     }
     if let Some(l) = layout {
         // 布局谓词与列表查询同源（LAYOUT_FILTER_SQL，TASK-094 收口）
         sql.push_str(" AND ");
         sql.push_str(LAYOUT_FILTER_SQL);
-        binds.push(Box::new(l.to_string()));
         binds.push(Box::new(l.to_string()));
     }
     // F8：视图口径过滤——收藏视图只影响收藏文章；今天视图只影响当日文章
@@ -772,8 +818,65 @@ pub fn mark_all_read(
         sql.push_str(" AND datetime(published_at) >= datetime(?, 'unixepoch')");
         binds.push(Box::new(ms / 1000));
     }
+    (sql, binds)
+}
+
+/// 全部已读：作用于当前筛选范围（feed/folder/all），与前端「全部已读」按钮语义一致
+pub fn mark_all_read(
+    conn: &Connection,
+    feed_id: Option<i64>,
+    folder_id: Option<i64>,
+    starred_only: bool,
+    since_ms: Option<i64>,
+    layout: Option<&str>,
+) -> AppResult<usize> {
+    let (clause, binds) = scope_clause(feed_id, folder_id, starred_only, since_ms, layout);
+    let sql = format!("UPDATE articles SET is_read = 1 WHERE is_read = 0{clause}");
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
     let n = conn.execute(&sql, refs.as_slice())?;
+    Ok(n)
+}
+
+/// 「全部已读」集合化（REQ-108 M-9）：一个事务内完成 入队 + 标读，语句数常数化。
+///
+/// 旧实现 = 1 SELECT（list_unread_ids_scoped 收集未读 id）+ 1 UPDATE + 每条 id
+/// 一次 enqueue_sync（DELETE + INSERT）= 2N+2 条语句，且命令全程持库锁。
+/// 这里固定 3 条语句：
+///   ① 批量删除范围内条目的 read/unread 旧队项（与逐条 enqueue 的「同向互斥
+///      覆盖」语义一致：每个 id 至多保留一条最新 read 队项）；
+///   ② `INSERT ... SELECT` 为范围内全部未读条目入 `read` 队项（feed_url/payload
+///      为 NULL，与 `enqueue_sync(conn, Some(id), None, "read", None)` 逐列相同）；
+///   ③ 单条 UPDATE 标读，返回受影响行数。
+/// ①② 在 ③ 之前求值 `is_read = 0`，入队集合与旧实现「标读前收集」的集合逐行
+/// 相同（F8，由等价性测试锁定）；三条语句同事务——旧实现逐条提交，中途失败会
+/// 留下半批已标读，事务化只会更保守（不多不少）。
+/// created_at 用语句级 `datetime('now')`（旧逐条可能跨秒；老化/补推只做时间序
+/// 比较，语义不受影响）。语句数不随 N 增长的断言见 auth_probe 探针测试。
+pub fn mark_all_read_with_enqueue(
+    conn: &Connection,
+    feed_id: Option<i64>,
+    folder_id: Option<i64>,
+    starred_only: bool,
+    since_ms: Option<i64>,
+    layout: Option<&str>,
+) -> AppResult<usize> {
+    let (clause, binds) = scope_clause(feed_id, folder_id, starred_only, since_ms, layout);
+    let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    let tx = conn.unchecked_transaction()?;
+    let del = format!(
+        "DELETE FROM sync_queue WHERE action IN ('read', 'unread')
+           AND article_id IN (SELECT id FROM articles WHERE is_read = 0{clause})"
+    );
+    tx.execute(&del, refs.as_slice())?;
+    let ins = format!(
+        "INSERT INTO sync_queue (article_id, feed_url, action, payload, created_at)
+         SELECT id, NULL, 'read', NULL, datetime('now')
+           FROM articles WHERE is_read = 0{clause}"
+    );
+    tx.execute(&ins, refs.as_slice())?;
+    let upd = format!("UPDATE articles SET is_read = 1 WHERE is_read = 0{clause}");
+    let n = tx.execute(&upd, refs.as_slice())?;
+    tx.commit()?;
     Ok(n)
 }
 
@@ -1399,6 +1502,341 @@ mod tests {
             limited.len(),
             2,
             "LIMIT 2 必须只返回 2 条（绑定参数后仍生效）"
+        );
+    }
+
+    /* ============================================================
+    REQ-108（M-5 / M-9）：计划断言与集合化等价性
+    ============================================================ */
+
+    /// 大规模夹具：3 分类 × 10 源 × 300 条 = 3000 篇，published_at 递增无并列；
+    /// 未读/收藏混合。直接 SQL 批量插入（upsert 逐条太慢）。
+    fn seed_plan_fixture() -> Connection {
+        let conn = conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        for f in 1..=3i64 {
+            tx.execute(
+                "INSERT INTO folders (name, layout) VALUES (?1, 'article')",
+                params![format!("分类{f}")],
+            )
+            .unwrap();
+        }
+        for fid in 1..=10i64 {
+            tx.execute(
+                "INSERT INTO feeds (feed_url, title, folder_id) VALUES (?1, ?2, ?3)",
+                params![
+                    format!("https://f{fid}.example/rss"),
+                    format!("源{fid}"),
+                    (fid - 1) % 3 + 1
+                ],
+            )
+            .unwrap();
+        }
+        for fid in 1..=10i64 {
+            for i in 0..300i64 {
+                tx.execute(
+                    "INSERT INTO articles (feed_id, guid, title, published_at, is_read, is_starred)
+                     VALUES (?1, ?2, 't', datetime(?3, 'unixepoch'), ?4, ?5)",
+                    params![
+                        fid,
+                        format!("g-{fid}-{i}"),
+                        1_800_000_000 - i * 60 - fid,
+                        (i % 3 != 0) as i64,
+                        (i % 7 == 0) as i64,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        conn
+    }
+
+    fn explain(conn: &Connection, sql: &str, p: &[rusqlite::types::Value]) -> AppResult<String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let rows = stmt.query_map(rusqlite::params_from_iter(p.iter()), |r| {
+            r.get::<_, String>(3)
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?.join(" | "))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn q(
+        feed_id: Option<i64>,
+        folder_id: Option<i64>,
+        only_unread: bool,
+        layout: Option<&str>,
+    ) -> ArticleQuery {
+        ArticleQuery {
+            feed_id,
+            folder_id,
+            only_unread,
+            only_starred: false,
+            only_today: false,
+            newest_first: true,
+            limit: 500,
+            offset: 0,
+            with_content: false,
+            layout: layout.map(|s| s.to_string()),
+        }
+    }
+
+    /// M-5 验收①：列表查询（生产 SQL 字节）在「全部 / 按源 / 按分类」三个验收
+    /// 变体（外加未读视图与布局过滤两个真实主路径）上必须走索引且无
+    /// TEMP B-TREE 排序；article_index 的窗口排序同口径。
+    #[test]
+    fn list_query_plan_is_index_ordered_without_temp_btree() {
+        let conn = seed_plan_fixture();
+        let cases: Vec<(&str, ArticleQuery)> = vec![
+            ("全部", q(None, None, false, None)),
+            ("按源", q(Some(1), None, false, None)),
+            ("按分类", q(None, Some(1), false, None)),
+            ("未读", q(None, None, true, None)),
+            ("布局", q(None, None, false, Some("image"))),
+        ];
+        for (name, query) in &cases {
+            let (sql, p) = list_articles_sql(query);
+            let plan = explain(&conn, &sql, &p).unwrap();
+            assert!(
+                !plan.contains("USE TEMP B-TREE"),
+                "{name} 仍有 TEMP B-TREE 排序：\n{plan}"
+            );
+            assert!(
+                plan.contains("USING INDEX"),
+                "{name} 未走索引（SCAN 不带索引）：\n{plan}"
+            );
+        }
+        let (sql, p) = article_index_sql(&q(None, None, false, None), 1);
+        let plan = explain(&conn, &sql, &p).unwrap();
+        assert!(
+            !plan.contains("USE TEMP B-TREE"),
+            "article_index 窗口仍有 TEMP B-TREE：\n{plan}"
+        );
+    }
+
+    /// 等价性夹具：2 分类 × 4 源 × 12 条，布局覆盖/继承混合（含无分类源），
+    /// 未读/收藏混合，并预置既有 sync_queue 行（read/unread/star/add_feed），
+    /// 覆盖「同向互斥覆盖」「范围外队项保留」「add_feed 不受影响」三个分支。
+    fn seed_equiv_fixture() -> Connection {
+        let conn = conn();
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO folders (name, layout) VALUES ('F0', 'image')",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO folders (name, layout) VALUES ('F1', 'inherit')",
+            [],
+        )
+        .unwrap();
+        // f1：F0+继承（有效布局 image）；f2：F0+podcast 覆盖；f3：F1+继承（article）；
+        // f4：无分类+gallery（分类/布局过滤都不命中）
+        let feeds: [(&str, i64, &str); 4] = [
+            ("https://f1.example/rss", 1, "inherit"),
+            ("https://f2.example/rss", 1, "podcast"),
+            ("https://f3.example/rss", 2, "inherit"),
+            ("https://f4.example/rss", 0, "gallery"),
+        ];
+        for (idx, (url, folder, layout)) in feeds.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO feeds (feed_url, title, folder_id, layout) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    url,
+                    format!("源{}", idx + 1),
+                    if *folder == 0 {
+                        Option::<i64>::None
+                    } else {
+                        Some(*folder)
+                    },
+                    layout
+                ],
+            )
+            .unwrap();
+        }
+        for fid in 1..=4i64 {
+            for i in 0..12i64 {
+                tx.execute(
+                    "INSERT INTO articles (feed_id, guid, title, published_at, is_read, is_starred)
+                     VALUES (?1, ?2, 't', datetime(?3, 'unixepoch'), ?4, ?5)",
+                    params![
+                        fid,
+                        format!("g-{fid}-{i}"),
+                        1_800_000_000 - i * 3600 - fid,
+                        (i % 3 != 0) as i64,
+                        (i % 5 == 0) as i64,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        // 预置队列：范围内外的 read/unread/star 与 add_feed
+        tx.execute_batch(
+            "INSERT INTO sync_queue (article_id, action) VALUES (1, 'unread'), (2, 'read'), (3, 'star'),
+                (20, 'read'), (40, 'unread');
+             INSERT INTO sync_queue (feed_url, action, payload)
+                VALUES ('https://f3.example/rss', 'add_feed', '{\"folder_id\":2}');",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        conn
+    }
+
+    /// 等价性快照：(id, is_read) 列表 + 队列行集（忽略 created_at）+ feed 计数。
+    type EquivSnapshot = (
+        Vec<(i64, i64)>,
+        Vec<(i64, String)>,
+        Vec<(i64, i64, i64, i64, i64)>,
+    );
+    /// 等价性范围用例：(名称, feed_id, folder_id, starred_only, since_ms, layout)。
+    type ScopeCase = (
+        &'static str,
+        Option<i64>,
+        Option<i64>,
+        bool,
+        Option<i64>,
+        Option<&'static str>,
+    );
+
+    fn equiv_snapshot(conn: &Connection) -> EquivSnapshot {
+        let mut reads: Vec<(i64, i64)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, is_read FROM articles ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        reads.sort();
+        let mut queue: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT article_id, action FROM sync_queue WHERE article_id IS NOT NULL ORDER BY article_id, action")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        queue.sort();
+        let counts: Vec<(i64, i64, i64, i64, i64)> = feed_counts(conn)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.feed_id, c.total, c.unread, c.starred, c.today))
+            .collect();
+        (reads, queue, counts)
+    }
+
+    /// 参考旧实现（apply_mark_all_read 修前形态，逐字）：标读前收集 id →
+    /// 单条 UPDATE → 逐 id enqueue_sync。本测试用它作等价性基准（修前语义）。
+    fn reference_mark_all_read(
+        conn: &Connection,
+        feed_id: Option<i64>,
+        folder_id: Option<i64>,
+        starred_only: bool,
+        since_ms: Option<i64>,
+        layout: Option<&str>,
+    ) -> AppResult<usize> {
+        let ids = list_unread_ids_scoped(conn, feed_id, folder_id, starred_only, since_ms, layout)?;
+        let n = mark_all_read(conn, feed_id, folder_id, starred_only, since_ms, layout)?;
+        for id in ids {
+            enqueue_sync(conn, Some(id), None, "read", None)?;
+        }
+        Ok(n)
+    }
+
+    /// M-9 验收③：同一夹具上，新集合化实现与参考旧实现在 all/feed/folder/
+    /// layout/starred/since（含组合）各范围下产生完全相同的 is_read、
+    /// sync_queue 行集（忽略 created_at）与 feed 计数；返回值相同。
+    #[test]
+    fn mark_all_read_with_enqueue_matches_reference_for_all_scopes() {
+        let scopes: Vec<ScopeCase> = vec![
+            ("全部", None, None, false, None, None),
+            ("按源 f1", Some(1), None, false, None, None),
+            ("按分类 F0", None, Some(1), false, None, None),
+            ("布局 podcast", None, None, false, None, Some("podcast")),
+            (
+                "布局 image(分类兜底)",
+                None,
+                None,
+                false,
+                None,
+                Some("image"),
+            ),
+            ("仅收藏", None, None, true, None, None),
+            (
+                "仅今天(零命中)",
+                None,
+                None,
+                false,
+                Some(1_900_000_000_000),
+                None,
+            ),
+            ("源+收藏", Some(1), None, true, None, None),
+            ("无分类源(不命中)", None, None, false, None, Some("gallery")),
+        ];
+        for (name, feed_id, folder_id, starred_only, since_ms, layout) in scopes {
+            let a = seed_equiv_fixture();
+            let na =
+                reference_mark_all_read(&a, feed_id, folder_id, starred_only, since_ms, layout)
+                    .unwrap();
+            let sa = equiv_snapshot(&a);
+            let b = seed_equiv_fixture();
+            let nb =
+                mark_all_read_with_enqueue(&b, feed_id, folder_id, starred_only, since_ms, layout)
+                    .unwrap();
+            let sb = equiv_snapshot(&b);
+            assert_eq!(na, nb, "{name}：返回条数必须一致");
+            assert_eq!(sa, sb, "{name}：is_read / 队列行集 / feed 计数必须逐项一致");
+        }
+    }
+
+    /// M-9 验收③（判别力）：旧实现的事件数随 N 线性增长、新实现恒定——
+    /// 若把集合化回退成逐 id 循环，本测试的恒定断言立即变红。
+    #[test]
+    fn mark_all_read_statement_events_do_not_scale_with_n() {
+        // N=1：1 源 1 篇未读；N=200：1 源 200 篇未读（各自独立夹具，同一代码路径）
+        let run = |n: i64| -> (usize, usize) {
+            let build = || -> (Connection, i64) {
+                let c = conn();
+                let f = insert_feed(
+                    &c,
+                    "https://n.example/rss",
+                    None,
+                    "N",
+                    None,
+                    create_folder(&c, "F", "article").unwrap(),
+                    "inherit",
+                    false,
+                    false,
+                )
+                .unwrap();
+                for i in 0..n {
+                    upsert_article_with_feed(&c, f, &na(&format!("g{i}"), None), false).unwrap();
+                }
+                (c, f)
+            };
+            let (ca, fa) = build();
+            let (out_ref, ev_ref) = crate::db::with_count(&ca, None, || {
+                reference_mark_all_read(&ca, Some(fa), None, false, None, None).unwrap()
+            });
+            let (cb, fb) = build();
+            let (out_new, ev_new) = crate::db::with_count(&cb, None, || {
+                mark_all_read_with_enqueue(&cb, Some(fb), None, false, None, None).unwrap()
+            });
+            assert_eq!(out_ref, n as usize, "参考实现必须标读全部 {n} 条");
+            assert_eq!(out_new, n as usize, "新实现必须标读全部 {n} 条");
+            (ev_ref, ev_new)
+        };
+        let (ref1, new1) = run(1);
+        let (ref200, new200) = run(200);
+        assert!(
+            ref200 > ref1 * 10,
+            "参考旧实现的事件数必须随 N 增长（ref1={ref1}, ref200={ref200}），否则本测试无判别力"
+        );
+        assert_eq!(
+            new1, new200,
+            "新实现语句数必须与 N 无关（new1={new1}, new200={new200}）"
         );
     }
 }

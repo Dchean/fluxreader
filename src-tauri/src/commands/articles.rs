@@ -231,9 +231,11 @@ pub async fn mark_all_read(
 /// 拿不到 client 而静默跳过（队列保留，连接后补推），这正是 A-5 建立的
 /// 「无论是否 configured 都入队，推送段在未配置时静默跳过」语义。
 ///
-/// 返回实际标读条数。入队集合由 [`db::list_unread_ids_scoped`] 在标读**前**收集，
-/// 与 [`db::mark_all_read`] 同口径（F8）——标读后再查 `is_read = 0` 会得到空集，
-/// 「全部已读」将永远不推送（历史 bug）。
+/// 返回实际标读条数。REQ-108 M-9：整条链路已在 [`db::mark_all_read_with_enqueue`]
+/// 集合化（一个事务内 3 条语句，语句数不随未读条目数增长；旧实现为
+/// 1 SELECT + 1 UPDATE + 每 id 一次 DELETE+INSERT = 2N+2 条且全程持库锁），
+/// 入队集合仍按标读**前**的 `is_read = 0` 求值——标读后再查会得到空集，
+/// 「全部已读」将永远不推送（历史 bug，F8 口径由等价性测试锁定）。
 pub fn apply_mark_all_read(
     conn: &rusqlite::Connection,
     feed_id: Option<i64>,
@@ -242,13 +244,7 @@ pub fn apply_mark_all_read(
     since_ms: Option<i64>,
     layout: Option<&str>,
 ) -> AppResult<usize> {
-    let ids = db::list_unread_ids_scoped(conn, feed_id, folder_id, starred_only, since_ms, layout)?;
-    let n = db::mark_all_read(conn, feed_id, folder_id, starred_only, since_ms, layout)?;
-    // A-5：无论是否已配置同步都入队。逐条入队（量级可控：个人订阅日常几十条）
-    for id in ids {
-        db::enqueue_sync(conn, Some(id), None, "read", None)?;
-    }
-    Ok(n)
+    db::mark_all_read_with_enqueue(conn, feed_id, folder_id, starred_only, since_ms, layout)
 }
 
 #[tauri::command]

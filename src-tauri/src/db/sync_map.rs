@@ -288,8 +288,11 @@ pub fn folder_exists(conn: &Connection, folder_id: i64) -> AppResult<bool> {
     Ok(count > 0)
 }
 
-/// 列出指定范围内的未读文章 id（mark_all_read 入队前收集用）。
-/// feed_id/folder_id 为 None 时查全部未读。
+/// 列出指定范围内的未读文章 id（既有的范围筛选一致性测试仍消费；
+/// 「全部已读」的入队已由 [`super::articles::mark_all_read_with_enqueue`] 集合化，
+/// 不再经本函数逐 id 往返）。
+/// feed_id/folder_id 为 None 时查全部未读。范围子句与 db::mark_all_read 同源
+/// （scope_clause，F8/TASK-094 收口）——两处口径永远一致。
 pub fn list_unread_ids_scoped(
     conn: &Connection,
     feed_id: Option<i64>,
@@ -298,31 +301,9 @@ pub fn list_unread_ids_scoped(
     since_ms: Option<i64>,
     layout: Option<&str>,
 ) -> AppResult<Vec<i64>> {
-    let mut sql = String::from("SELECT id FROM articles WHERE is_read = 0");
-    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(fid) = feed_id {
-        sql.push_str(" AND feed_id = ?");
-        binds.push(Box::new(fid));
-    }
-    if let Some(f) = folder_id {
-        sql.push_str(" AND feed_id IN (SELECT id FROM feeds WHERE folder_id = ?)");
-        binds.push(Box::new(f));
-    }
-    if let Some(l) = layout {
-        // 布局谓词与 db::mark_all_read / 列表查询同源（LAYOUT_FILTER_SQL，TASK-094 收口）
-        sql.push_str(" AND ");
-        sql.push_str(super::articles::LAYOUT_FILTER_SQL);
-        binds.push(Box::new(l.to_string()));
-        binds.push(Box::new(l.to_string()));
-    }
-    // 与 db::mark_all_read 同口径（F8）：入队集合必须与实际标读集合一致
-    if starred_only {
-        sql.push_str(" AND is_starred = 1");
-    }
-    if let Some(ms) = since_ms {
-        sql.push_str(" AND datetime(published_at) >= datetime(?, 'unixepoch')");
-        binds.push(Box::new(ms / 1000));
-    }
+    let (clause, binds) =
+        super::articles::scope_clause(feed_id, folder_id, starred_only, since_ms, layout);
+    let sql = format!("SELECT id FROM articles WHERE is_read = 0{clause}");
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(refs.as_slice(), |r| r.get(0))?;

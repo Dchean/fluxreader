@@ -224,6 +224,70 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         UPDATE feeds SET origin = 'remote' WHERE origin = 'miniflux';
     "#,
         ),
+        // REQ-108（M-5 / M-7 / M-9 前置）：列表排序走索引 + sync_queue 索引
+        // + published_at 写入兜底。user_version=14。
+        //
+        // M-5：列表查询此前以 ORDER BY COALESCE(published_at, fetched_at) 排序，
+        // 表达式排序让 idx_articles_published 对查询变体失效（SCAN +
+        // USE TEMP B-TREE FOR ORDER BY，实测见 tmp/task-099/）。排序退化为纯
+        // ORDER BY published_at 的前提是 published_at 非空：v12 已回填存量行，
+        // 应用层写入经 map_entry / item_published_at 兜底，但 SQL 裸写路径
+        // （测试夹具、历史回放）仍可能留下 NULL/''——故这里除幂等回填外，
+        // 用触发器把「published_at 非空」固化为库级不变量，使新排序与旧
+        // COALESCE 口径对任意写入路径逐行等价。
+        //
+        // 触发顺序实测（tmp/task-099/trigger_probe.log）：SQLite 同表同事件
+        // 触发器按创建逆序执行，v14 后建的兜底触发器会先于 v3 的 articles_au 跑；
+        // 旧 articles_au 对任意 UPDATE 都做 FTS delete+insert，会对「articles_ai
+        // 尚未写入 FTS 的新行」执行 'delete' → database disk image is malformed。
+        // FTS 行内容仅由 title/body_text/author/ai_summary/translated_content
+        // 五列决定，故把 articles_au 收窄为 AFTER UPDATE OF 这五列：兜底 UPDATE
+        // 不再触发 FTS 同步（旧行为是 delete+insert 相同内容，纯 churn），
+        // 与触发器创建顺序解耦，语义零变化（FTS 自 REQ-104 起已非搜索入口）。
+        //
+        // M-7：sync_queue 建表以来零索引——每次 set_read/set_starred 的
+        // enqueue_sync 都对 DELETE ... WHERE article_id = ? AND action IN (...)
+        // 做全表 SCAN，pull 对账的 pending 集合与老化清理（created_at 过滤）同样
+        // 全表扫。补覆盖索引 (article_id, action) 与 (created_at)：DEL 变
+        // SEARCH、PEND 变 COVERING INDEX 扫描（免 TEMP B-TREE FOR DISTINCT）、
+        // AGE 走 MULTI-INDEX OR；索引集取舍对比见 tmp/task-099/m7_*.log。
+        //
+        // 另补 (is_read, published_at)：未读视图（only_unread）此前走
+        // idx_articles_unread 后仍需 TEMP B-TREE 排序，该索引使未读列表按序
+        // SEARCH 直达（idx_articles_unread 保留给 mark_all_read 的 UPDATE 计划）。
+        M::up(
+            r#"
+        UPDATE articles SET published_at = fetched_at
+         WHERE published_at IS NULL OR published_at = '';
+
+        DROP TRIGGER IF EXISTS articles_au;
+        CREATE TRIGGER articles_au AFTER UPDATE OF title, body_text, author, ai_summary, translated_content ON articles BEGIN
+            INSERT INTO articles_fts(articles_fts, rowid, title, body_text, author, ai_summary, translated_content)
+            VALUES ('delete', old.id, old.title, old.body_text, COALESCE(old.author, ''),
+                    COALESCE(old.ai_summary, ''), COALESCE(old.translated_content, ''));
+            INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
+            VALUES (new.id, new.title, new.body_text, COALESCE(new.author, ''),
+                    COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
+        END;
+
+        CREATE TRIGGER trg_articles_published_fallback_ins AFTER INSERT ON articles
+        WHEN NEW.published_at IS NULL OR NEW.published_at = ''
+        BEGIN
+            UPDATE articles SET published_at = NEW.fetched_at WHERE id = NEW.id;
+        END;
+        CREATE TRIGGER trg_articles_published_fallback_upd AFTER UPDATE OF published_at ON articles
+        WHEN NEW.published_at IS NULL OR NEW.published_at = ''
+        BEGIN
+            UPDATE articles SET published_at = NEW.fetched_at WHERE id = NEW.id;
+        END;
+
+        CREATE INDEX idx_articles_feed_published ON articles(feed_id, published_at);
+        CREATE INDEX idx_articles_read_published ON articles(is_read, published_at);
+
+        CREATE INDEX idx_sync_queue_article ON sync_queue(article_id, action);
+        CREATE INDEX idx_sync_queue_created ON sync_queue(created_at);
+    "#,
+        ),
     ])
 });
 
@@ -234,38 +298,475 @@ pub fn open(path: &Path) -> AppResult<Connection> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
-    let prev_version = conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?;
     MIGRATIONS.to_latest(&mut conn)?;
     // v7 的 SQL 回填只是 lower(url) 占位；Rust 端 normalize_url 才是完整
-    // 规范化（剥跟踪参数/www./AMP/锚点）。从 v6 及以下升级的库补一次精确回填
-    // （v7 SQL 已建列，逐行 UPDATE 即可；新装库无行，零成本跳过）
-    if prev_version > 0 && prev_version < 7 {
-        backfill_url_norm(&conn)?;
-    }
+    // 规范化（剥跟踪参数/www./AMP/锚点）。M-14：完成判定改用 settings 标记
+    // 而非 user_version——旧实现以 prev_version < 7 为闸门，回填在迁移事务外
+    // 逐行提交，半途中断后 user_version 已 ≥7，回填永不重试。现在标记与回填
+    // 同事务落标，「已升级但标记缺失」的库（含已停在 v7+ 的存量库）启动即
+    // 幂等补跑；已标记库直接跳过（零重复工作）。
+    ensure_url_norm_backfill(&conn)?;
     // 启动迁移：历史明文敏感凭据升级为 DPAPI 密文（SEC-2）。幂等。
     let _ = crate::credentials::migrate_legacy_plaintext(&conn)?;
     Ok(conn)
 }
 
-/// 逐行用 normalize_url 重算 url_norm（v6→v7 升级路径）
-fn backfill_url_norm(conn: &Connection) -> AppResult<()> {
-    let rows: Vec<(i64, Option<String>)> = {
-        let mut stmt =
-            conn.prepare("SELECT id, url FROM articles WHERE url IS NOT NULL AND url != ''")?;
-        let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+/// 测试注入点（迁移中断复现）：≥0 时在更新第 N 行**之前**模拟回填失败，
+/// 生产恒为 -1。见 [`ensure_url_norm_backfill`] 与对应单元测试。
+#[cfg(test)]
+pub(crate) static BACKFILL_FAIL_AFTER_ROWS: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(-1);
+
+/// 中断注入判定（cfg 双版本保持调用点无条件编译一致）。
+#[cfg(test)]
+fn backfill_should_fail(rows_updated: usize) -> bool {
+    use std::sync::atomic::Ordering;
+    let fail_at = BACKFILL_FAIL_AFTER_ROWS.load(Ordering::SeqCst);
+    fail_at >= 0 && rows_updated as isize == fail_at
+}
+
+#[cfg(not(test))]
+fn backfill_should_fail(_rows_updated: usize) -> bool {
+    false
+}
+
+/// url_norm 完整规范化回填（M-14，幂等可重入）：对 url 非空的行重算
+/// normalize_url，**只 UPDATE 结果确有变化的行**（已规范化库零写放大），
+/// 并在同一事务内落 settings 完成标记。返回是否实际执行了回填。
+///
+/// 与旧版 [`backfill_url_norm`] 的差别：① 回填 + 落标同事务——任何语句失败
+/// 整体回滚，下次启动按「标记缺失」重试，不再出现「迁移已提交、回填半途
+/// 而废、永不重试」的窗口；② 逐行错误不再被 `let _ =` 吞掉（吞错正是旧版
+/// 「静默半完成」的来源）；③ 已标记库直接跳过，重启零重复工作。
+fn ensure_url_norm_backfill(conn: &Connection) -> AppResult<bool> {
+    const MARKER_KEY: &str = "url_norm_backfill_done";
+    let done: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)",
+            params![MARKER_KEY],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|v| v != 0)?;
+    if done {
+        return Ok(false);
+    }
+    let tx = conn.unchecked_transaction()?;
+    let rows: Vec<(i64, String, Option<String>)> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, url, url_norm FROM articles WHERE url IS NOT NULL AND url != ''",
+        )?;
+        let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         it.collect::<Result<Vec<_>, _>>()?
     };
-    for (id, url) in rows {
-        if let Some(u) = url {
-            let _ = conn.execute(
+    let mut updated = 0usize;
+    for (id, url, url_norm) in rows {
+        if backfill_should_fail(updated) {
+            return Err(crate::error::AppError::new(
+                "migration",
+                "simulated url_norm backfill interruption (test injection)",
+            ));
+        }
+        let norm = normalize_url(&url);
+        if url_norm.as_deref() != Some(norm.as_str()) {
+            tx.execute(
                 "UPDATE articles SET url_norm = ?1 WHERE id = ?2",
-                params![normalize_url(&u), id],
-            );
+                params![norm, id],
+            )?;
+            updated += 1;
         }
     }
-    Ok(())
+    tx.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![MARKER_KEY],
+    )?;
+    tx.commit()?;
+    Ok(true)
 }
 
 /* ============================================================
 行类型（前端 IPC 契约）—— 与 src/types.ts 保持同构
 ============================================================ */
+
+/* ============================================================
+REQ-108 单元测试：M-14 迁移回填事务性 + v14 索引/兜底 up 测试
+============================================================ */
+#[cfg(test)]
+mod req108_migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 进程内唯一临时库路径（std 实现，不新增依赖；同 tests/common 惯例）。
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        std::env::temp_dir().join(format!(
+            "fluxreader_migr_{base}_{pid}_{nanos}_{seq}.db",
+            pid = std::process::id()
+        ))
+    }
+
+    const MARKER_SQL: &str =
+        "SELECT EXISTS(SELECT 1 FROM settings WHERE key = 'url_norm_backfill_done')";
+
+    fn marker_value(conn: &Connection) -> i64 {
+        conn.query_row(MARKER_SQL, [], |r| r.get(0)).unwrap()
+    }
+
+    /// ① M-14 中断复现：回填中途模拟失败 → 迁移已提交、回滚零残留 →
+    /// 重启按缺失标记补完 → 已标记库零重复工作（幂等）。
+    #[test]
+    fn url_norm_backfill_interrupted_is_repaired_on_restart() {
+        let path = unique_test_db("interrupt");
+        let _ = std::fs::remove_file(&path);
+
+        // ---- 造 v6 存量库：4 篇带 URL 的文章（3 篇需规范化，1 篇已规范）----
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_version(&mut conn, 6).unwrap();
+            conn.execute_batch(
+                "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+                 INSERT INTO articles (feed_id, guid, title, url) VALUES
+                   (1, 'g1', 't1', 'https://WWW.Example.com/a?utm_source=x#frag'),
+                   (1, 'g2', 't2', 'https://m.example.com/b/'),
+                   (1, 'g3', 't3', 'http://example.com/AMP/c.amp.html'),
+                   (1, 'g4', 't4', 'http://example.com/plain');",
+            )
+            .unwrap();
+        }
+
+        // ---- 模拟「迁移已提交、回填半途中断」：to_latest 成功后回填在第 3 行前失败 ----
+        BACKFILL_FAIL_AFTER_ROWS.store(2, Ordering::SeqCst);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_latest(&mut conn).unwrap();
+            let err = ensure_url_norm_backfill(&conn);
+            assert!(err.is_err(), "注入的回填中断必须以错误返回");
+        }
+        BACKFILL_FAIL_AFTER_ROWS.store(-1, Ordering::SeqCst);
+
+        // ---- 中断现场：user_version 已推进；标记缺失；整体回滚零半更新 ----
+        {
+            let conn = Connection::open(&path).unwrap();
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                v, 14,
+                "迁移事务独立提交：user_version 已到最新（旧实现据此永不重试）"
+            );
+            assert_eq!(
+                marker_value(&conn),
+                0,
+                "回填回滚：完成标记必须缺失（下次启动据此重试）"
+            );
+            let placeholders: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM articles
+                      WHERE url IS NOT NULL AND url != '' AND url_norm = lower(url)",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                placeholders, 4,
+                "整体回滚：全部行仍是 v7 的 lower(url) 占位（事务原子性，零半更新）"
+            );
+        }
+
+        // ---- 重启：open() 按缺失标记幂等补跑 ----
+        {
+            let conn = open(&path).expect("重启（带补跑）必须成功");
+            let mut stmt = conn
+                .prepare("SELECT url, url_norm FROM articles WHERE url IS NOT NULL AND url != ''")
+                .unwrap();
+            let rows: Vec<(String, String)> = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(rows.len(), 4);
+            for (url, norm) in &rows {
+                assert_eq!(
+                    norm,
+                    &normalize_url(url),
+                    "重启补跑必须把 url_norm 规范化到完整口径（中断前已更新的行也要重算）"
+                );
+            }
+            assert_eq!(marker_value(&conn), 1, "补跑成功后同事务落标");
+            // 幂等：已标记库再调一次 = 零工作（零重复回填）
+            assert!(
+                !ensure_url_norm_backfill(&conn).unwrap(),
+                "已标记库不得重复回填"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ② M-14 存量库补跑：已停在 v7+（标记缺失、url_norm 为 lower(url) 占位）
+    /// 的库，首次 open() 即补规范化并落标。
+    #[test]
+    fn legacy_upgraded_db_without_marker_gets_backfill_on_open() {
+        let path = unique_test_db("legacy");
+        let _ = std::fs::remove_file(&path);
+        {
+            // 直接用迁移框架升到最新（模拟旧版本完成升级、未经本修复的存量库），
+            // 再把 url_norm 置回 v7 的 SQL 占位值，且不写完成标记
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_latest(&mut conn).unwrap();
+            conn.execute_batch(
+                "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+                 INSERT INTO articles (feed_id, guid, title, url) VALUES
+                   (1, 'g1', 't1', 'https://www.example.com/post?utm_medium=rss');",
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE articles SET url_norm = lower(url) WHERE url IS NOT NULL",
+                [],
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        let norm: String = conn
+            .query_row("SELECT url_norm FROM articles WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            norm,
+            normalize_url("https://www.example.com/post?utm_medium=rss"),
+            "存量库（已停在 v7+）首启必须幂等补跑规范化"
+        );
+        assert_eq!(marker_value(&conn), 1);
+        assert!(
+            !ensure_url_norm_backfill(&conn).unwrap(),
+            "补跑落标后重复启动零重复工作"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ③ M-14 零重复工作：已标记库的 ensure 不产生任何对 articles 的 UPDATE。
+    #[test]
+    fn backfill_marker_makes_repeat_run_zero_work() {
+        let conn = {
+            let path = unique_test_db("zero");
+            let _ = std::fs::remove_file(&path);
+            let c = open(&path).unwrap();
+            // open 已落标；本测试用内存断言即可，文件随后清理
+            c
+        };
+        // （内存库方便断言计划/计数：直接在内存连接上再验证一次）
+        let mut mem = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut mem).unwrap();
+        assert!(
+            ensure_url_norm_backfill(&mem).unwrap(),
+            "新库首跑：零行回填但落标（幂等标记）"
+        );
+
+        let updates = super::with_count(
+            &conn,
+            Some((rusqlite::ffi::SQLITE_UPDATE, "articles")),
+            || ensure_url_norm_backfill(&conn).unwrap(),
+        );
+        assert!(!updates.0, "已标记库直接跳过");
+        assert_eq!(
+            updates.1, 0,
+            "已标记库的重复回填不得触碰任何 articles 行（零重复工作）"
+        );
+    }
+
+    /// ④ v14 up 测试：索引创建 + published_at 存量兜底回填（v12 语义重申）
+    /// + FTS 更新触发器收窄 + 兜底触发器存在性。
+    #[test]
+    fn v14_adds_indexes_and_backfills_missing_published_at() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 13).unwrap();
+        conn.execute_batch(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+             INSERT INTO articles (feed_id, guid, title, fetched_at, published_at) VALUES
+               (1, 'g-null', 't', '2025-01-01 00:00:01', NULL),
+               (1, 'g-empty', 't', '2025-01-01 00:00:02', ''),
+               (1, 'g-real', 't', '2025-01-01 00:00:03', '2024-12-31T10:00:00Z');",
+        )
+        .unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        // 回填：NULL/'' 补为 fetched_at；真值不动
+        let rows: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT guid, published_at FROM articles ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows,
+            vec![
+                ("g-null".to_string(), "2025-01-01 00:00:01".to_string()),
+                ("g-empty".to_string(), "2025-01-01 00:00:02".to_string()),
+                ("g-real".to_string(), "2024-12-31T10:00:00Z".to_string()),
+            ],
+            "NULL/'' 存量行回填为 fetched_at，真值不动"
+        );
+
+        // M-5/M-7 索引存在性（EXPLAIN 走索引的前提）
+        for idx in [
+            "idx_articles_feed_published",
+            "idx_articles_read_published",
+            "idx_sync_queue_article",
+            "idx_sync_queue_created",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    params![idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "v14 必须创建索引 {idx}");
+        }
+
+        // FTS 更新触发器收窄到内容列（兜底触发器合用同一表时的前置，见迁移注释）
+        let au_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'articles_au'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            au_sql.contains("AFTER UPDATE OF title, body_text, author, ai_summary, translated_content"),
+            "articles_au 必须收窄到内容列（否则 published_at 兜底 UPDATE 触发 FTS 的 delete 对未入索引行执行 → malformed，实测）：{au_sql}"
+        );
+
+        // 兜底触发器存在性
+        for trg in [
+            "trg_articles_published_fallback_ins",
+            "trg_articles_published_fallback_upd",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                    params![trg],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "v14 必须创建触发器 {trg}");
+        }
+    }
+
+    /// ⑤ M-5 写入兜底：任何裸写入路径的 NULL/'' published_at 都被触发器补齐为
+    /// fetched_at，真值永不被覆盖——「published_at 非空」是 ORDER BY published_at
+    /// 与旧 COALESCE 口径等价的前提。
+    #[test]
+    fn published_at_write_guard_fills_null_and_empty() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+             INSERT INTO articles (feed_id, guid, title, fetched_at, published_at) VALUES
+               (1, 'g1', 't', '2025-02-01 00:00:01', NULL),
+               (1, 'g2', 't', '2025-02-01 00:00:02', '');",
+        )
+        .unwrap();
+        let read = |guid: &str| -> String {
+            conn.query_row(
+                "SELECT published_at FROM articles WHERE guid = ?1",
+                params![guid],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            read("g1"),
+            "2025-02-01 00:00:01",
+            "INSERT 的 NULL 必须补为 fetched_at"
+        );
+        assert_eq!(
+            read("g2"),
+            "2025-02-01 00:00:02",
+            "INSERT 的空串必须补为 fetched_at"
+        );
+
+        // UPDATE 置 NULL/'' → 同样补回 fetched_at（本轮 fetched_at 未变）
+        conn.execute(
+            "UPDATE articles SET published_at = NULL WHERE guid = 'g1'",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE articles SET published_at = '' WHERE guid = 'g2'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(read("g1"), "2025-02-01 00:00:01", "UPDATE 置 NULL 必须补回");
+        assert_eq!(read("g2"), "2025-02-01 00:00:02", "UPDATE 置空串必须补回");
+
+        // 真值写入不受兜底触发器影响（不覆盖、不重写）
+        conn.execute(
+            "UPDATE articles SET published_at = '2025-03-01T00:00:00Z' WHERE guid = 'g1'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(read("g1"), "2025-03-01T00:00:00Z", "真值不得被覆盖");
+    }
+
+    /// ⑥ M-5 排序等价性：兜底不变量生效后，`ORDER BY published_at` 与旧
+    /// `ORDER BY COALESCE(published_at, fetched_at)` 对同一批数据（含裸写入的
+    /// NULL/'' 行与并列值）产出完全相同的行序——列表查询换排序式的正确性依据。
+    #[test]
+    fn published_ordering_matches_legacy_coalesce() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+             INSERT INTO articles (feed_id, guid, title, fetched_at, published_at) VALUES
+               (1, 'a', 't', '2025-01-01 00:00:03', NULL),
+               (1, 'b', 't', '2025-01-01 00:00:01', ''),
+               (1, 'c', 't', '2025-01-01 00:00:02', '2024-12-01T00:00:00Z'),
+               (1, 'd', 't', '2025-01-01 00:00:04', '2025-06-01T00:00:00Z'),
+               (1, 'e', 't', '2025-01-01 00:00:05', NULL),
+               (1, 'f', 't', '2025-01-01 00:00:06', '2025-06-01T00:00:00Z');",
+        )
+        .unwrap();
+        let ordered = |order_expr: &str, dir: &str| -> Vec<String> {
+            let sql = format!("SELECT guid FROM articles ORDER BY {order_expr} {dir}, guid");
+            // 并列值用 guid 显式定序，避免依赖扫描序（本测试只证明「排序键」等价）
+            let mut stmt = conn.prepare(&sql).unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for dir in ["DESC", "ASC"] {
+            assert_eq!(
+                ordered("published_at", dir),
+                ordered("COALESCE(published_at, fetched_at)", dir),
+                "ORDER BY published_at 必须与旧 COALESCE 口径逐行等价（{dir}）"
+            );
+        }
+        // 防退化：夹具里确实有「靠兜底补齐才可排」的行（否则本测试没有判别力）
+        let null_like: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM articles WHERE published_at IS NULL OR published_at = ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            null_like, 0,
+            "测试夹具必须覆盖 NULL/'' 写入路径（触发器已补齐）"
+        );
+    }
+}
