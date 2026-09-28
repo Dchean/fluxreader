@@ -3,7 +3,8 @@
   "id": "BATCH-d11d22edcd1c4faf8453695d32926081",
   "status": "active",
   "task_ids": [
-    "TASK-098"
+    "TASK-098",
+    "TASK-099"
   ],
   "approval_decision_ids": [
     "DEC-85857e4038814bd1a7b18de0ed36db04",

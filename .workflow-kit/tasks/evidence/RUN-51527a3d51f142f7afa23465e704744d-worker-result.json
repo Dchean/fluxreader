@@ -1,0 +1,26 @@
+{
+  "task_id": "TASK-099",
+  "run_id": "RUN-51527a3d51f142f7afa23465e704744d",
+  "status": "ready_for_verification",
+  "summary": "REQ-108 四项完成（前实例在 migrations.rs 半途 token 耗尽，主控接手收尾并完成 M-5/M-7/M-9）：① M-5 列表排序 COALESCE(published_at,fetched_at) → 纯 published_at（PUBLISHED_ORDER_DESC/ASC 常量，list_articles/article_index 共用），不变量以库级触发器固化（v14：trg_articles_published_fallback_ins/upd 把 NULL/'' 补为 fetched_at，写入端 insert_new_article 再 COALESCE 兜底），分类/布局谓词改标量子查询形态（FOLDER_FILTER_SQL/LAYOUT_FILTER_SQL，语义逐行等价、绑定 2→1），新增 (feed_id,published_at)/(is_read,published_at) 索引；EXPLAIN 前后对比（tmp/task-099/explain-query-plan.md）：全部/按源/按分类/未读/布局五变体修前均 SCAN/SEARCH+TEMP B-TREE、修后全部走索引零排序，article_index 窗口同口径，Rust 固化断言 list_query_plan_is_index_ordered_without_temp_btree（3000 行夹具）。② M-7 v14 补 (article_id,action)+(created_at) 覆盖索引：DEL SCAN→SEARCH、PEND SCAN+TEMP B-TREE FOR DISTINCT→COVERING INDEX 流式去重、AGE→MULTI-INDEX OR、SUBS1→覆盖索引（取舍对比 tmp/task-099/m7_index_probe2.log；SUBS2 维持 SCAN 有记录）；v14 up 测试断言索引存在。③ M-9 apply_mark_all_read 集合化：db::mark_all_read_with_enqueue 单事务 3 语句（批量互斥 DELETE + INSERT..SELECT + UPDATE），替代 1 SELECT+1 UPDATE+每 id DELETE+INSERT（2N+2 条、全程持锁）；等价性 9 范围矩阵 vs 参考旧实现逐项全等（is_read/队列行集/feed 计数/返回值）；语句数 N=1 vs N=200 恒定（authorizer 计数，参考实现 >10 倍增长），3005 行实测 4996.6ms→1112.1ms。④ M-14（前实例已建）收尾：ensure_url_norm_backfill 回填+落标同事务、open() 按标记幂等补跑；单测 6 个（中断复现、存量库补跑、零重复工作、v14 up、写入兜底、排序等价）全绿。成对证据：4 个变异（M-5 退回 COALESCE、M-7 撤索引、M-9 退回逐 id 循环、M-14 退回 prev_version 闸门）目标测试全部变红后恢复（字节级校验），红日志 tmp/task-099/mutations/red-*.log。附带修正：migration_v6_to_v7 手工夹具补建 sync_queue（真实 v6 库 v2 起即有，v14 对其建索引所致；断言未动）、v14 DROP TRIGGER 改 IF EXISTS（夹具可能无 FTS 触发器）。设计要点：兜底触发器与 v3 FTS 触发器冲突（同表触发器逆创建序执行，实测 malformed）已用 articles_au 收窄到内容五列解决（FTS 行内容仅由这五列决定，语义零变化，探针 tmp/task-099/trigger_probe.log）。门禁：cargo test 228 passed/0 failed/9 ignored（基线 219，+9 新用例）、cargo fmt --check 0、cargo clippy --all-targets -D warnings 0、npm lint 0、npm build 0、npm test:frontend 419/419（基线 419）。注：实现由主控执行（子代理 API 渠道当日不稳定，checkpoint 已记录），独立审查仍为新实例。",
+  "changed_files": [
+    "src-tauri/src/db/migrations.rs",
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/db/sync_map.rs",
+    "src-tauri/src/db/auth_probe.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/commands/articles.rs",
+    "src-tauri/tests/migration_test.rs"
+  ],
+  "validation_requests": [
+    "cargo_test: pass — 228 passed / 0 failed / 9 ignored（基线 219/0/9，新增 9 用例）；日志 tmp/task-099/gates/cargo-test.log",
+    "cargo_fmt: pass — cargo fmt --check exit 0",
+    "cargo_clippy: pass — cargo clippy --all-targets -- -D warnings 0 error",
+    "lint: pass — npm run lint exit 0（tmp/task-099/gates/npm-lint.log）",
+    "build: pass — npm run build exit 0（tmp/task-099/gates/npm-build.log）",
+    "frontend: pass — npm run test:frontend 419/419（基线 419，前端零改动；tmp/task-099/gates/npm-frontend.log）"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

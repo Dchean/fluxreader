@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "收口 TASK-093 独立审查披露的范围外观察项（tmp/review-093.json summary）：src/store/slices/nav.ts 的 selectView/selectFeed 路径存在 `void get().reloadFromBackend()` 无 .catch——切视图/切源时后端调用失败（IPC 异常、后端错误）会产生 unhandled rejection 且无用户可见反馈，列表静默停留旧数据。F5 已在 TASK-093 修掉 toggleTimelineSort 的同款（.catch 失败提示由 reloadFromBackend 自身给出），本卡把剩余同款调用点全部收口：① grep src/ 全仓枚举所有 `void reloadFromBackend`（及等价的未处理 promise reload 调用）调用点，逐点补 .catch（失败可见性语义与 F5 同口径：吞掉的是 reloadFromBackend toast 之后的重抛，不新增第二套提示文案）；② 断言：对每个收口点加「后端拒绝时不产生 unhandledRejection」断言（可复用 TASK-093 的 (p3-f5) 模式与 unhandled 捕获装置），成对验证（临时去掉 .catch → 红 → 还原 → 绿，日志存 tmp/task-098/）；③ 既有断言无一削弱。",
   "non_goals": [
     "不改 reloadFromBackend 本体与失败 toast 文案",
@@ -198,9 +198,12 @@
     "candidate_digest": "c36e0941a1d207aee715bfb13f8f27e39954d503bb7496fdcf84b542cc4d6526",
     "verification_run": "RUN-f274bed777c9457d8f1a778a2637f0e5",
     "review_run": "RUN-31169407c9d046078c8839b846a8be66",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-ae5f1bdc13d34a018ffa47f0af0c7c42-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-ae5f1bdc13d34a018ffa47f0af0c7c42"
+    ],
+    "merge_ref": "710edab",
+    "continued_by": "TASK-099"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",

@@ -502,3 +502,17 @@
 - 2026-09-28T12:19:46.659052Z · checkpoint · TASK-098 · 编码结果已记录，差异范围已核对：src/App.tsx, src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-28T12:20:11.303059Z · checkpoint · TASK-098 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T12:29:24.848587Z · checkpoint · TASK-098 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-28T12:29:36.847433Z · accept · 验收 TASK-098；依据：owner 2026-09-28 指示「将未完成的任务进行立卡优化调整完成」（DEC-route-remaining-20260928）；独立审查 PASS findings=0
+- 2026-09-28T12:31:35.082706Z · prepare · TASK-099 · 任务已冻结：REQ-108 SQL 性能与迁移加固：M-5 列表索引失效、M-7 sync_queue 索引、M-9 全部已读往返、M-14 迁移回填事务性；范围 src-tauri/src/**, src-tauri/tests/**
+- 2026-09-28T12:31:41.609040Z · checkpoint · TASK-099 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-28T13:32:37.393144Z · checkpoint · TASK-099 · 2026-09-28 13:28Z 主控核对配额耗尽前子代理的半成品：仅 src-tauri/src/db/migrations.rs 有改动（+298/-17）——v14 迁移（published_at 存量兜底回填 + idx_articles_feed_published + idx_sync_queue_article/created）、M-14 的 ensure_url_norm_backfill（回填与 settings 标记同事务、cfg(test) 中断注入点、open() 改按标记补跑）、以及 3 个已完成单测（中断复现/存量库补跑/零重复工作）；第 4 个测试 v14_adds_indexes_and_backfills_missing_published_at 写到一半被打断（:551 unterminated string，cargo check E0765）。M-5 查询侧（articles.rs COALESCE 排序）、M-7 查询形态核对、M-9 集合化、EXPLAIN/往返计数证据、门禁与 worker-result 全部未做。本文件非变异态（无 m0-backup，改动自洽可续）。；下一步：新开实现子代理接手：先修复 migrations.rs 语法收尾并跑通单测，再完成 M-5/M-7/M-9、成对证据与门禁，写 worker-result；主控随后 diff --run、归档证据、finish、verify、新子代理独立审查
+- 2026-09-28T17:13:54.944032Z · checkpoint · TASK-099 · Invalid worker status/summary；下一步：按报错列出的漏报/多报文件修正 worker-result，再 unblock 后 begin；不要新建任务或重置预算
+- 2026-09-28T17:13:58.507375Z · note/lesson · TASK-099 · protocol 失败已出现 9 次：Invalid worker status/summary。下次准备/实现前先核对这一点。
+- 2026-09-28T17:15:40.578747Z · checkpoint · TASK-099 · 依据新决定追加预算；原始时钟与失败记录保留；下一步：先核对已有成果，再按原任务范围继续
+- 2026-09-28T17:15:40.685876Z · extend · TASK-099 · 追加 240 分钟、0 轮修复；依据：owner 2026-09-28 会话 /goal 指令：「将项目推进优化重构完……推送并打tag，发布release」——完成 TASK-099 是该指令的前置；追加时长沿用 owner 在 TASK-092 同类阻塞时「追加 4 小时」的会话内选择（DEC-b672049f）
+- 2026-09-28T17:15:52.315605Z · checkpoint · TASK-099 · 阻塞已处置（protocol）：protocol 阻塞（Invalid worker status/summary）：worker-result 首版两处不合契约——status 用了 ok（应为 ready_for_verification）、validation_requests 用了对象数组（应为字符串数组）。已按 validate_worker_result 契约重写文件（9 键不变，内容为真实门禁数字）；diff 已核对 outside/protected 为空。预算已 extend 240min（DEC-d62afaed512c416cac7617f43d51adb4）。；下一步：begin 重新实现
+- 2026-09-28T17:15:52.372296Z · unblock · TASK-099 · protocol → ready；依据：主控
+- 2026-09-28T17:16:24.157569Z · checkpoint · TASK-099 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-28T17:16:55.892798Z · checkpoint · TASK-099 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/db.rs, src-tauri/src/db/articles.rs, src-tauri/src/db/auth_probe.rs, src-tauri/src/db/migrations.rs, src-tauri/src/db/sync_map.rs, src-tauri/tests/migration_test.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-28T17:18:54.136771Z · checkpoint · TASK-099 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-28T17:34:58.997050Z · checkpoint · TASK-099 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收

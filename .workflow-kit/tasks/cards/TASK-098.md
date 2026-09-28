@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-098 · 前端 reload 异常处理收口：selectView/selectFeed 补 .catch（REQ-102）
 
-**状态**：verified
+**状态**：done
 
 **目标**：收口 TASK-093 独立审查披露的范围外观察项（tmp/review-093.json summary）：src/store/slices/nav.ts 的 selectView/selectFeed 路径存在 `void get().reloadFromBackend()` 无 .catch——切视图/切源时后端调用失败（IPC 异常、后端错误）会产生 unhandled rejection 且无用户可见反馈，列表静默停留旧数据。F5 已在 TASK-093 修掉 toggleTimelineSort 的同款（.catch 失败提示由 reloadFromBackend 自身给出），本卡把剩余同款调用点全部收口：① grep src/ 全仓枚举所有 `void reloadFromBackend`（及等价的未处理 promise reload 调用）调用点，逐点补 .catch（失败可见性语义与 F5 同口径：吞掉的是 reloadFromBackend toast 之后的重抛，不新增第二套提示文案）；② 断言：对每个收口点加「后端拒绝时不产生 unhandledRejection」断言（可复用 TASK-093 的 (p3-f5) 模式与 unhandled 捕获装置），成对验证（临时去掉 .catch → 红 → 还原 → 绿，日志存 tmp/task-098/）；③ 既有断言无一削弱。
 
