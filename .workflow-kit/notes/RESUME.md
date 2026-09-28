@@ -83,7 +83,6 @@
 
 ## 最近事件
 
-- 2026-09-28T06:59:19.756045Z · checkpoint · TASK-093 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-28T07:50:15.291988Z · checkpoint · TASK-093 · 编码结果已记录，差异范围已核对：src/lib/coverImage.ts, src/store/internals.ts, src/store/slices/ai.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-28T07:51:14.505014Z · checkpoint · TASK-093 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T08:03:26.358024Z · checkpoint · TASK-093 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
@@ -95,6 +94,7 @@
 - 2026-09-28T10:01:36.652877Z · checkpoint · TASK-094 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T10:16:12.269472Z · checkpoint · TASK-094 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-28T10:16:42.687365Z · accept · 验收 TASK-094；依据：owner 2026-09-28 会话指示「先push再继续推进未完成的任务」+ DEC-next-batch-covers-reachability-20260923（scope 含 REQ-107）；独立审查 PASS findings=0、ui_review R1-R7 全 PASS
+- 2026-09-28T10:17:14.402393Z · note/progress · 2026-09-28 会话（续）：TASK-093 与 TASK-094 均已验收并推送。TASK-093（REQ-102，bf60d0b）：续用子代理因长上下文干扰中止（其环境损坏指控经主控核实不成立，属读取污染），按 owner 新规则换全新实例接手——保留的部分工作（F1 守卫、F2/F3 helper）经逐行审阅后采纳，接线完成后 10 组变异成对验证、396/396、审查 PASS findings=0。TASK-094（REQ-107，1b0eb6f）：全新实例实现——LAYOUT_FILTER_SQL 一处定义三处拼接（article_where/mark_all_read/list_unread_ids_scoped）、前端游标键含布局、timelineRefill 上限 8 次、哨兵变可点击按钮；EXPLAIN 无退化；R1-R7 真机全 PASS（修前复现命中基线）；首次 verify 失败系 refresh_dedup_e2e 已知 flaky（临时库文件名碰撞，重跑同 digest 全绿）；审查 PASS findings=0。DEC-8311df20 / DEC-6208eedc。推送 a42fe91..f3d0208（中途 TLS 握手瞬时失败，退避后恢复）。范围外备忘：nav.ts selectView/selectFeed 的 void reloadFromBackend 无 .catch（TASK-093 审查观察项，建议下一张卡收口）；REQ-108 仍按 09-23 决定暂缓。
 
 ## 如何继续
 
