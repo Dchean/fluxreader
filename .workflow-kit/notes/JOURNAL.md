@@ -479,3 +479,4 @@
 - 2026-09-28T10:00:32.116411Z · checkpoint · TASK-094 · Required gate failed: cargo_test；下一步：先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算
 - 2026-09-28T10:01:36.652877Z · checkpoint · TASK-094 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T10:16:12.269472Z · checkpoint · TASK-094 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-28T10:16:42.687365Z · accept · 验收 TASK-094；依据：owner 2026-09-28 会话指示「先push再继续推进未完成的任务」+ DEC-next-batch-covers-reachability-20260923（scope 含 REQ-107）；独立审查 PASS findings=0、ui_review R1-R7 全 PASS

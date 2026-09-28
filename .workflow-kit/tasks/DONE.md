@@ -68,5 +68,6 @@
 | [TASK-091](items/TASK-091.json) | 失效封面纠正通道：db 清空函数 + tauri 命令 + 回归用例（REQ-106 之④，后端） | done |
 | [TASK-092](items/TASK-092.json) | 封面图片位统一代理与失败回退 + 失效上报接线（REQ-106 之③，前端） | done |
 | [TASK-093](items/TASK-093.json) | Batch 1/2 独立审查 P3 收口：竞态守卫含排序、回滚恢复原值、阅读器平行路径、reload 异常与断言补齐（REQ-102） | done |
+| [TASK-094](items/TASK-094.json) | 三布局列表可达性：列表查询加布局维度 + 不足一屏自动续拉 + 可执行的加载提示（REQ-107） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

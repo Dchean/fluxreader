@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-094 · 三布局列表可达性：列表查询加布局维度 + 不足一屏自动续拉 + 可执行的加载提示（REQ-107）
 
-**状态**：verified
+**状态**：done
 
 **目标**：修 REQ-107（基线 .workflow-kit/tasks/evidence/TASK-094-baseline-reachability.md）：画廊/播客/通知布局在后端仍有内容时列表不可滚动、用户到不了条目，且提示「滚动加载更多」不可执行。根因：list_articles/article_index 的查询没有布局维度，后端按全局分页，前端再按布局过滤，稀疏布局首批只剩几条撑不满容器，onScroll 不触发；空列表补拉仅在 items 为 0 时生效。方向（主控确定）：① 后端 ArticleListArgs 增加可选 layout 字段（snake_case，与前端一致），list_articles 与 article_index 复用 mark_all_read / list_unread_ids_scoped 中已审过的同一段布局谓词（抽为一处共享 SQL 片段或 helper，三处共用，避免第四次复制）；② 前端 scopeQueryArgs 传 layout，分页游标键与视图缓存键都含布局（保证 R7）；③ 兜底：列表非空但未撑满视口且未到底时自动续拉（有上限，防止死循环），不可滚动时哨兵改为可点击「加载更多」；④ 补 Rust 与前端断言（修前失败、修后通过）并用真机 harness 取证。
 

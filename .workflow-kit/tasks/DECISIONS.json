@@ -2589,6 +2589,20 @@
       "candidates": {
         "TASK-093": "daf9213b187f63eb85cc60de66b5f2eb2c2ab5f19427a2d507ba44377f47adaf"
       }
+    },
+    {
+      "id": "DEC-6208eedc2bf94aa288ee5187b799157a",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-28 会话指示「先push再继续推进未完成的任务」+ DEC-next-batch-covers-reachability-20260923（scope 含 REQ-107）；独立审查 PASS findings=0、ui_review R1-R7 全 PASS",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-094"
+      ],
+      "recorded_at_utc": "2026-09-28T10:16:38.721307Z",
+      "candidates": {
+        "TASK-094": "f655611e989e85d330963f54f1c23dd7fc570ca1c3f3d0baa3b157949158be83"
+      }
     }
   ]
 }
