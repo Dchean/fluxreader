@@ -1,0 +1,40 @@
+{
+  "task_id": "TASK-096",
+  "run_id": "RUN-f7ab6551d20a4e90b6b073153ceccb2b",
+  "status": "ready_for_verification",
+  "summary": "新增唯一 helper src-tauri/tests/common/mod.rs：pub fn unique_db_path(base:&str)->PathBuf，pid+as_nanos+AtomicU64 递增保证进程内唯一（跨二进制靠 pid），纯 std 无新依赖，remove_file 语义留调用方。20 个测试文件 38 处自拼库名（2 处 subsec_nanos+36 处 as_nanos）全改为调 helper，仅换命名生成，用例逻辑/断言/端口零改动；grep 核清自拼清零。成对证据（tmp/task-096/）：红——退回纯 as_nanos 后压力测试（4 线程×2000 轮 Barrier 同刻采样）确定性失败，8000 次仅 5078 唯一；绿——还原后 1 passed，已入默认门禁。mock：refresh_dedup_e2e 的 stream.unwrap() 已由 TASK-088 改 let-else+continue，本卡按验收③补 eprintln 留痕。门禁全绿：cargo test 218/0/9（基线 217+新增 1 不回退）、fmt/clippy/lint/build/frontend 412/412 全 exit 0；产品代码零改动。",
+  "changed_files": [
+    "src-tauri/tests/account_lifecycle_e2e.rs",
+    "src-tauri/tests/ai_e2e.rs",
+    "src-tauri/tests/common/mod.rs",
+    "src-tauri/tests/config_sync_e2e.rs",
+    "src-tauri/tests/cover_backfill_e2e.rs",
+    "src-tauri/tests/dedup_sync_e2e.rs",
+    "src-tauri/tests/dual_client_e2e.rs",
+    "src-tauri/tests/endpoint_autodetect_e2e.rs",
+    "src-tauri/tests/feed_edit_e2e.rs",
+    "src-tauri/tests/fever_sync_live_e2e.rs",
+    "src-tauri/tests/ingestion_e2e.rs",
+    "src-tauri/tests/migration_test.rs",
+    "src-tauri/tests/pull_cursor_e2e.rs",
+    "src-tauri/tests/refresh_dedup_e2e.rs",
+    "src-tauri/tests/regression_e2e.rs",
+    "src-tauri/tests/scheduler_e2e.rs",
+    "src-tauri/tests/staged_refresh_e2e.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "src-tauri/tests/unique_db_path_test.rs"
+  ],
+  "validation_requests": [
+    "核对 diff 仅涉及 src-tauri/tests/**（20 个修改文件 + 2 个新增：common/mod.rs、unique_db_path_test.rs），产品代码零改动",
+    "核对验收①：grep 确认 tests 下无 pid+时钟自拼库名（subsec_nanos/as_nanos 直拼清零，process::id 仅在 common/mod.rs）",
+    "复核压力测试成对证据：tmp/task-096/red-pure-as_nanos.log（修前实现确定性失败 8000→5078）与 green-helper.log（修后通过）",
+    "复核门禁日志：tmp/task-096/gate-{fmt,clippy,cargo-test,lint,build,frontend}.log，cargo test 218/0/9 不回退"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

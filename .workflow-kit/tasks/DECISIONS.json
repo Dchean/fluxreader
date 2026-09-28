@@ -2603,6 +2603,24 @@
       "candidates": {
         "TASK-094": "f655611e989e85d330963f54f1c23dd7fc570ca1c3f3d0baa3b157949158be83"
       }
+    },
+    {
+      "id": "DEC-route-remaining-20260928",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-28 会话指示：「按照合理的路线将未完成的任务进行立卡优化调整完成，并且现在还有个问题，ci没过，检查是项目问题还是ci已经不适用了，修复这个问题」；承接 09-22 临时库命名根因记录（JOURNAL 353/354 行，当年因 complete 阶段无法立项受阻）与 09-24 同步增量窗口待办",
+      "statement": "批准收口路线四卡：TASK-095 e2e 临时库唯一命名（修 CI flaky 根因，测试基建）；TASK-096 同步增量窗口（greader 游标 + mock changed_at 核对）；TASK-097 nav.ts reload 异常处理；TASK-098 REQ-108 SQL 性能与迁移加固（M-5/M-7/M-9/M-14，解除 09-23 暂缓）。三项产品语义裁决（miniflux 封面/全部已读可见集合/config_sync 删除语义）不在本路线，仍留 owner 裁决。",
+      "scope": [
+        "TASK-095",
+        "TASK-096",
+        "TASK-097",
+        "TASK-098",
+        "REQ-108",
+        "REQ-002",
+        "REQ-003",
+        "REQ-102"
+      ],
+      "recorded_at_utc": "2026-09-28T10:28:46.627038+00:00"
     }
   ]
 }

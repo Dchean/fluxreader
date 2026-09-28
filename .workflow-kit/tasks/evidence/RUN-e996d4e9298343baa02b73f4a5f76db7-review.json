@@ -1,0 +1,64 @@
+{
+  "task_id": "TASK-096",
+  "candidate_digest": "e7249cbc67428c1e2ec3d3d95933e3d045d9131a73999284c77992346ce864b8",
+  "verification_run": "RUN-ccfdd25e7cb04cba8ae611ff62a82442",
+  "verdict": "PASS",
+  "summary": "独立复核通过：实现方 5 条声明逐条属实。① grep 全仓确认 tests 下 pid+时钟直拼清零（subsec_nanos 仅存于 common/mod.rs:10 与 unique_db_path_test.rs:4 的注释；as_nanos/process::id 仅存于 helper common/mod.rs:33,37），helper 单点定义且为 pid+as_nanos+AtomicU64，零新依赖（仅 std）；② 压力测试 4 线程×2000 轮 Barrier 同刻取样、HashSet 断言 8000 路径两两不同，已入 cargo test 门禁，红证 red-pure-as_nanos.log（8000 次调用仅 5078 distinct，确定性 FAILED，unused import Ordering 警告佐证变异即移除 fetch_add）与绿证 green-helper.log 成对闭合；③ 20 个被改文件 diff 逐块核对仅库名生成替换 + mod common 声明，refresh_dedup_e2e 在 TASK-088 既有 let-else 上仅补 eprintln，ai_e2e.rs:18 同类点确认未动（不在范围），scheduler_e2e 的 line!() 区分位（含双下划线变体）保留后语义正确；④ 门禁全绿：cargo 218/0/9（对日志逐行累加，218=217+1，TASK-094 基线 RUN-659123b4 为 217/0/9）、fmt/clippy exit 0、lint 0 警告、build 成功、frontend 412/412。产品代码零改动（git diff src-tauri/src 与 src 为空；候选 changed_files 22 个全部位于 src-tauri/tests 下）。观察项（不要求改代码）：实现方声明 20 文件 38 处调用点，逐文件 grep 实数 39 处（config_sync 9、sync_gap_repro 5、scheduler 4、migration/account_lifecycle/sync_e2e/sync_content 各 2，其余各 1），覆盖完整无残留，属声明计数误差；红证日志中 unused import: Ordering 编译警告是变异副产物，非候选代码问题；mutations 目录另含六门禁日志与 quick-selfcheck.log，与红绿证共同构成完整证据链。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收①：grep 全仓确认 tests 下 subsec_nanos 零代码残留（仅 common/mod.rs:10、unique_db_path_test.rs:4 注释引用基线数字），as_nanos/process::id 仅存于 helper（common/mod.rs:33,37），fn unique_db_path 全仓仅一处定义且为 pid+as_nanos+AtomicU64。验收②：unique_db_path_test.rs:22-56 以 4 线程×2000 轮 Barrier 同刻取样断言 8000 路径两两不同，作为 #[test] 进入 cargo test 门禁（cargo_test 日志中 Running tests/unique_db_path_test.rs 显示 1 passed）。验收③：20 个文件 diff 逐块核对仅库名生成替换与 mod common; 声明，refresh_dedup_e2e.rs:27-36 在 TASK-088 既有 let-else 基础上仅补 eprintln 留痕，用例逻辑/断言/端口分配零改动。验收④：run 记录六门禁 checks 全 PASS exit 0，cargo 218/0/9、frontend 412/412。",
+      "evidence_files": [
+        "src-tauri/tests/common/mod.rs",
+        "src-tauri/tests/unique_db_path_test.rs",
+        "src-tauri/tests/refresh_dedup_e2e.rs",
+        ".workflow-kit/tasks/evidence/RUN-ccfdd25e7cb04cba8ae611ff62a82442-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "对 RUN-ccfdd25e7cb04 的 cargo_test 日志逐行累加 test result 行得 218 passed/0 failed/9 ignored；对 TASK-094 验证运行 RUN-659123b4 的同形日志同法累加得 217/0/9，故 218=217+1 恰为新增压力测试，0 failed、9 ignored 不增。git diff 逐块核对 20 个被改测试文件：改动仅为 mod common; 声明、临时库名生成行替换与 refresh_dedup_e2e.rs 一处 eprintln，无任何断言/用例逻辑/端口分配改动（含 feed_edit_e2e/regression_e2e 两个原 subsec_nanos 文件）。frontend 日志明示 412/412 通过（既有回归 26 + 新增 386），与 TASK-094 后口径一致不回退。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-ccfdd25e7cb04cba8ae611ff62a82442-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-659123b4e2ea4c1ba8725a34cda6d2d6-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-ccfdd25e7cb04cba8ae611ff62a82442-frontend.stdout.txt",
+        "src-tauri/tests/feed_edit_e2e.rs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "唯一性三层完整落地（common/mod.rs:32-40）：pid 区分不同测试二进制（跨进程天然不撞）、as_nanos 作可读前缀、AtomicU64 fetch_add(Relaxed) 保证同进程每次调用必异，时钟异常时 unwrap_or_default 回退 0 也不破坏 seq 唯一性。调用方契约保留：helper 为纯路径构造不触文件系统，diff 核对全部调用点（实数 39 处）均保留 let _ = remove_file(&tmp) 由调用方决定删除的语义。粒度正确：每个集成测试二进制各自编译 common 模块，AtomicU64 为进程内计数恰与碰撞域（同进程线程间）对齐，common/mod.rs:13-15 文档明确说明。红证 red-pure-as_nanos.log 显示移除计数器后 8000 次调用仅得 5078 个不同路径、确定性 FAILED（unused import: Ordering 警告佐证变异即移除 fetch_add），绿证 green-helper.log 还原后通过，成对证据闭合。",
+      "evidence_files": [
+        "src-tauri/tests/common/mod.rs",
+        "src-tauri/tests/unique_db_path_test.rs",
+        ".workflow-kit/tasks/evidence/TASK-096-mutations/red-pure-as_nanos.log",
+        ".workflow-kit/tasks/evidence/TASK-096-mutations/green-helper.log"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "grep 全仓 fn unique_db_path 仅 common/mod.rs:32 一处定义，21 个测试文件以 mod common; 引用，替换形态一致：均保持 fluxreader_<base>_ 命名风格，base 字符串与原文件前缀逐一对应（如 cfgsync_rt_a、gap_offline_star、endpoint_cache_{name}）。scheduler_e2e.rs 的 line!() 区分位完整保留：mode_{line} 变体映射为 base 取 mode_{line}、双下划线变体映射为 base 取 mode_{line}_（scheduler_e2e.rs:222,251,266），经 helper 拼接后区分语义不变。#[allow(dead_code)] 附注释说明跨 test target 共享的死代码豁免理由（同 mock_greader 惯例）。声明 38 处调用点逐文件 grep 实数 39 处，覆盖完整无残留，属声明计数误差，不影响结论。",
+      "evidence_files": [
+        "src-tauri/tests/common/mod.rs",
+        "src-tauri/tests/scheduler_e2e.rs",
+        "src-tauri/tests/config_sync_e2e.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "helper 每次调用为一次时钟读取 + 一次原子 fetch_add(Relaxed) + 一次 format!，相对随后必然发生的 SQLite 建库/迁移开销可忽略；仅用 std 实现，Cargo.toml 零改动、零新依赖（符合 non_goals）。压力测试 4 线程×2000 轮在门禁日志中 finished in 0.02s（RUN-ccfdd25e7cb04 cargo test 全程约 7.8s），对门禁总时长影响可忽略。Barrier 同步为纯内存操作，测试与 helper 均不创建/删除文件，无额外磁盘 IO。",
+      "evidence_files": [
+        "src-tauri/tests/common/mod.rs",
+        "src-tauri/tests/unique_db_path_test.rs",
+        ".workflow-kit/tasks/evidence/RUN-ccfdd25e7cb04cba8ae611ff62a82442-cargo_test.stdout.txt"
+      ]
+    }
+  ],
+  "ui_review": null
+}

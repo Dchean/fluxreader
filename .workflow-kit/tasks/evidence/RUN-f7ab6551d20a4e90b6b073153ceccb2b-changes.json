@@ -1,0 +1,26 @@
+{
+  "changed_files": [
+    "src-tauri/tests/account_lifecycle_e2e.rs",
+    "src-tauri/tests/ai_e2e.rs",
+    "src-tauri/tests/common/mod.rs",
+    "src-tauri/tests/config_sync_e2e.rs",
+    "src-tauri/tests/cover_backfill_e2e.rs",
+    "src-tauri/tests/dedup_sync_e2e.rs",
+    "src-tauri/tests/dual_client_e2e.rs",
+    "src-tauri/tests/endpoint_autodetect_e2e.rs",
+    "src-tauri/tests/feed_edit_e2e.rs",
+    "src-tauri/tests/fever_sync_live_e2e.rs",
+    "src-tauri/tests/ingestion_e2e.rs",
+    "src-tauri/tests/migration_test.rs",
+    "src-tauri/tests/pull_cursor_e2e.rs",
+    "src-tauri/tests/refresh_dedup_e2e.rs",
+    "src-tauri/tests/regression_e2e.rs",
+    "src-tauri/tests/scheduler_e2e.rs",
+    "src-tauri/tests/staged_refresh_e2e.rs",
+    "src-tauri/tests/sync_content_e2e.rs",
+    "src-tauri/tests/sync_e2e.rs",
+    "src-tauri/tests/sync_gap_repro_e2e.rs",
+    "src-tauri/tests/sync_phases_e2e.rs",
+    "src-tauri/tests/unique_db_path_test.rs"
+  ]
+}

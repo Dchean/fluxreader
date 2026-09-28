@@ -1,0 +1,244 @@
+{
+  "schema_version": 1,
+  "id": "TASK-096",
+  "title": "e2e 临时库唯一命名收口：共享 helper 消除 CI flaky 根因 + mock 线程健壮性（REQ-102 测试基建）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "verified",
+  "objective": "修 CI cargo test 偶发失败的根因（CI run #101 c088711 失败、#100 f3d0208 通过，两提交仅差日志文件；失败步 Run tests；本地 verify 同形态复现过）。根因已定位并实测（JOURNAL 2026-09-22T09:26:05Z）：cargo test 同一二进制的多个 #[test] 并发跑在同一进程，std::process::id() 相同，临时库名唯一性只靠时钟纳秒；Windows 时钟密集调用下精度不足（实测 1000 次相邻 as_nanos() 仅 350 个不同值），库名碰撞后两个测试互 remove_file/争用同一 SQLite 文件，db::open 报 \"table folders already exists\"。实测碰撞率：subsec_nanos 59/2000=2.95%、as_nanos 61/2000=3.05%（同等危险）；as_nanos + 进程内 AtomicU64 计数器 = 0/2000。修复：① 在 src-tauri/tests 下建一处共享 helper（tests/common/mod.rs，pub fn 返回进程内唯一的临时库路径：pid + as_nanos + AtomicU64 递增，保持既有 fluxreader_<base>_…db 命名风格与 remove_file 语义由调用方决定）；② 全部自带临时库命名的 e2e 测试文件改为调用该 helper（grep 核清现有个数，09-22 时为 19 个，此后可能新增），逐文件替换，不得改变各文件既有用例逻辑；③ 新增唯一性压力测试（多线程并发取名 N 轮断言无重复，锁住 helper 的不变量）；④ 顺带收口同属测试基建、09-21 登记备查的脆弱点：tests/refresh_dedup_e2e.rs:25 mock 服务器线程 stream.unwrap() 在连接出错时 panic 掉服务器线程——改为记录并继续/安全退出（不改变用例断言）。产品行为零变化（本卡只动 tests/）。",
+  "non_goals": [
+    "不改产品代码（src-tauri/src、src/** 零改动）",
+    "不引入 dev-dependencies（tempfile/rand 等，用 std 即可）",
+    "不改 CI yaml（根因修复后 ci.yml 无需变化；若另有发现单独登记）",
+    "不改 mock_greader changed_at 语义（TASK-096 范围）",
+    "不改 .workflow-kit 受管记录"
+  ],
+  "requirement_refs": [
+    "REQ-102"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-094"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": [
+      "DEC-route-remaining-20260928"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/tests/**"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md",
+      ".workflow-kit/tasks/evidence/TASK-095-baseline-flaky.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 临时库唯一命名逻辑在 tests 下只有一处定义（共享 helper）；grep 确认测试文件中不再有 pid+时钟自拼库名（subsec_nanos/as_nanos 直拼清零）；helper 采用 pid + as_nanos + AtomicU64 计数器",
+    "② 唯一性压力测试入 Cargo 门禁：多线程并发取名（如 4 线程 × 2000 轮，Barrier 同刻采样）断言两两不同，修前实现（无计数器）下该测试确定性失败、修后通过",
+    "③ 既有全部 e2e 用例逻辑不变：仅库名生成方式替换；refresh_dedup_e2e 的 mock 服务器线程不再因连接错误 panic（连接错误被记录，不再传播 unwind）",
+    "④ 门禁全绿且不回退：cargo test 通过数 ≥ TASK-094 验证后的数目（新增用例除外）、0 failed、9 ignored 不增；fmt/clippy/lint/build exit 0；frontend ≥412 全部通过"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "preserve",
+    "baseline": {
+      "status": "PASS",
+      "summary": "门禁与 CI 平时全绿（CI #99/#100 success），但 cargo test 在 Windows 下有实测 ~3% 概率的临时库命名碰撞（09-22 定位：时钟粒度），表现为建库期 \"table folders already exists\" panic；CI #101 与 2026-09-28 本地 verify 各撞中一次。09-21 还登记了 refresh_dedup_e2e mock 服务器线程 stream.unwrap() 脆弱点。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/TASK-095-baseline-flaky.md"
+    },
+    "decision_ids": [],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "全部既有 e2e 用例与断言（仅库名生成方式替换）",
+        "reason": "测试基建修复不改变被测行为",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "tests/：共享唯一命名 helper + 多线程唯一性压力测试 + mock 服务器线程健壮性",
+        "reason": "flaky 根因需要结构性修复与不变量锁",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "fmt/clippy/lint/build/frontend",
+        "reason": "不回退证据",
+        "gate_ids": [
+          "cargo_fmt",
+          "cargo_clippy",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-096-input-a1e24173c61a4f0b925da052b0e1d2e6.json",
+    "digest": "ae04153e2916b0347daf3deb4ba393ed084a0679a38eb30bc86a6a01b532edb8",
+    "source_revision": null,
+    "definition_digest": "8daee5c12b36317eac78cbc0e4aa87cf29da21328c26290bb161efe9cd127ba4"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-28T10:36:13.300490Z",
+    "deadline_at_utc": "2026-09-28T14:36:13.300490Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-3b1e9a89eb8a464fb861be8f1bcc3179",
+  "run_ids": [
+    "RUN-f7ab6551d20a4e90b6b073153ceccb2b",
+    "RUN-ccfdd25e7cb04cba8ae611ff62a82442",
+    "RUN-e996d4e9298343baa02b73f4a5f76db7"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-ccfdd25e7cb04cba8ae611ff62a82442-candidate.json",
+    "candidate_digest": "e7249cbc67428c1e2ec3d3d95933e3d045d9131a73999284c77992346ce864b8",
+    "verification_run": "RUN-ccfdd25e7cb04cba8ae611ff62a82442",
+    "review_run": "RUN-e996d4e9298343baa02b73f4a5f76db7",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",
+    ".workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md",
+    ".workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md",
+    ".workflow-kit/tasks/evidence/TASK-089-baseline-cover.md",
+    ".workflow-kit/tasks/evidence/TASK-091-baseline-broken-cover.md",
+    ".workflow-kit/tasks/evidence/TASK-092-baseline-images.md",
+    ".workflow-kit/tasks/evidence/TASK-094-baseline-reachability.md",
+    ".workflow-kit/tasks/evidence/TASK-095-baseline-flaky.md",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-094": "f655611e989e85d330963f54f1c23dd7fc570ca1c3f3d0baa3b157949158be83"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-28T10:36:13.498575Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T10:56:56.925153Z",
+      "note": "编码结果已记录，差异范围已核对：src-tauri/tests/account_lifecycle_e2e.rs, src-tauri/tests/ai_e2e.rs, src-tauri/tests/common/mod.rs, src-tauri/tests/config_sync_e2e.rs, src-tauri/tests/cover_backfill_e2e.rs, src-tauri/tests/dedup_sync_e2e.rs, src-tauri/tests/dual_client_e2e.rs, src-tauri/tests/endpoint_autodetect_e2e.rs, src-tauri/tests/feed_edit_e2e.rs, src-tauri/tests/fever_sync_live_e2e.rs, src-tauri/tests/ingestion_e2e.rs, src-tauri/tests/migration_test.rs, src-tauri/tests/pull_cursor_e2e.rs, src-tauri/tests/refresh_dedup_e2e.rs, src-tauri/tests/regression_e2e.rs, src-tauri/tests/scheduler_e2e.rs, src-tauri/tests/staged_refresh_e2e.rs, src-tauri/tests/sync_content_e2e.rs, src-tauri/tests/sync_e2e.rs, src-tauri/tests/sync_gap_repro_e2e.rs, src-tauri/tests/sync_phases_e2e.rs, src-tauri/tests/unique_db_path_test.rs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-28T10:57:31.160901Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-28T11:08:43.428973Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}
