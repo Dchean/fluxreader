@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 
 VERSION = 1
 # Release of the startup package; stored in each project binding so upgrades are visible.
-KIT_RELEASE = "2026-09-18.3"
+KIT_RELEASE = "2026-09-21.1"
 BOARD_MARKER = "<!-- project-workflow: generated view; edit task JSON instead -->"
 TASK_STATES = {"draft", "ready", "running", "verifying", "review", "verified", "blocked", "done", "cancelled"}
 ACTIVE = {"ready", "running", "verifying", "review"}

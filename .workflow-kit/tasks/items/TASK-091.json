@@ -211,7 +211,8 @@
     "owner_decision_ids": [
       "DEC-88b6718915314fc8911dd823abec63e5"
     ],
-    "merge_ref": "not_applicable:verified_uncommitted_worktree_candidates"
+    "merge_ref": "not_applicable:verified_uncommitted_worktree_candidates",
+    "continued_by": "TASK-092"
   },
   "snapshot_paths": [
     ".workflow-kit/tasks/evidence/TASK-089-baseline-cover.md",

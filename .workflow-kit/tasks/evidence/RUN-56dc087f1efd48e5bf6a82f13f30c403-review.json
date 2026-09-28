@@ -1,0 +1,86 @@
+{
+  "task_id": "TASK-092",
+  "candidate_digest": "5f24f74c28011ea82b7e18de3db5c8804f786e4d1fad45e9925fd823dc30634e",
+  "verification_run": "RUN-248bfad9c0864267b6b98388f2cccb84",
+  "verdict": "PASS",
+  "summary": "独立复审确认首轮 P2 已正确修复且无未声明改动。修复轮增量经三重证据钉死：两轮候选 139 个快照文件（覆盖 src/**、src-tauri/src、src-tauri/tests、tools/frontend-regression.mjs、契约与基线）sha256 一一对比，恰好只有 CoverImage.tsx 与 frontend-regression.mjs 两个文件变化；以首轮哈希 fe166b39 反推重构，字节级证实 CoverImage.tsx 增量恰为注释一行加代理分支 img 的 onError={() => onCoverError(url)} 属性（无其他行变更）；首轮 gate-frontend.log 与修复轮 M22-restore.log 各 354 条新增断言逐条对比，名称与通过状态唯一差异即 cov-wire 断言本身（直连 img 挂改为代理与直连 img 都挂），其余 353 条完全一致。修复语义正确：onCoverError 收到的是组件闭包内的原始 URL（view.src 才是 data: URL），markCoverFailed 按原始 URL 落 failed 后渲染占位，state 变化经 useEffect 重跑 driveCover 再 reportCoverFailure(原始 URL) 上报，data: 前缀守卫不会被穿透，失败后不再重取（B7 不回退），direct 分支与占位渲染逐字节不变。cov-wire 新断言判别力成立：onError 计数===2 对两分支缺失分别打红，代理/直连两个源码正则分别钉住，M22 变异（移除代理 onError）实测 379/380 仅 cov-wire 红、还原 380/380，M22-onError-proxy.mjs.bak 与修复后代码逐字节一致。首轮关键结论抽查全部复核通过：代理判定单点仍在 imageProxy.ts（src 下唯一域名白名单），report_broken_cover Rust 命令 article_id: i64/url: String 与 api.reportBrokenCover(number,string) 的 camelCase 映射一致，画廊卡片仍走 proxyImageUrl 且被 cov-a3 钉住，cov-d11 三条断言存在且有效。RUN-248bfad9 全门禁复核：cargo 213/0/9 零 FAILED、frontend 380/380（26+354）、lint 0 警告 0 错误、build/fmt/clippy 通过、run 记录 exit 0 且 candidate_digest 与任务登记一致。P3 备忘（均无需本轮改动、不进 findings）：LRU 上限与失败记录不受限的权衡已有源码注释；Number(articleId) 对真实链路纯数字串转换无损（mock 前缀 id 恰被 NaN 守卫拦下，与无后端不上报语义一致）；交互报告与 ui-result 引用截图名与归档文件名存在 ui- 前缀差异（6 张按后缀一一对应）；汇总口径 380=348+32（26+354）自洽。本轮新增观察：CoverImage.tsx 行尾由 LF 规范化为 CRLF（内容行无差异，哈希已证）；代理分支解码失败记 reason='direct-error'（reason 不参与渲染/上报决策，无功能影响）；P2 修复未重跑 UI 取证属合理——修复只覆盖字节嗅探命中但 WebView2 不可解码的第四种情形，UI 取证各场景渲染路径不变，证据（05:18Z 归档）仍有效，新行为由 cov-wire 源码断言与 M22 变异钉住；修复轮 finish 记录的无文件变化系该 begin 段内未再改码，digest 由 5528dea1 到 5f24f74c 证实增量已入候选。验收①至⑥无未满足项，verdict=PASS。 UI 取证逐项结论（ui_review.checked_states 为 12 项声明 id）：A1.proxy-by-policy：PASS——ui-result.json：sspai/doubanio img src=data:image/*、route=proxy、fetch_image 各 1 次、浏览器直连 0 次；与 interaction-report.md A1 节一致；证据文件 mtime 早于修复轮，修复不改变该场景渲染路径。；A2.no-overreach：PASS——ldstatic img 保持 https 原始 src、route=direct、fetch_image=0、浏览器直连 1 次；SSR cov-a2 钉住 no-referrer 直连形态（修复轮仍绿）。；A3.gallery-unchanged：PASS——画廊 6 卡数据逐卡在档，sspai/doubanio 仍经 proxyImageUrl 得 data: URL，ldstatic 死链保持修前直连形态；cov-a3 源码断言修复轮全绿。；A4.no-layout-shift：PASS——350ms 时点占位与返回后 img 同为 82×58、圆角 6px、卡片高 131，无跳变；cov-a4 修复轮绿。；B5.fallback-placeholder：PASS——直连死链与代理失败均渲染 card-cover-thumb cover-fallback state=failed（hasIcon=true、img=null），页面 naturalWidth=0 的封面 img 数=0。P2 修复映射 B5 精神：B5 冻结文本列出的三种失败情形（代理失败/直连失败/非图片字节）修前已全覆盖，P2 揭示的是第四种未列情形（签名命中但 WebView2 不可解码，如 HEIC）；修复把该情形收敛到同一占位加幂等上报通路，属对 B5 不出现破图图标完备性的补强而非契约变更——ui_checks 冻结清单一条未改，cov-b5 断言未削弱，M22 证据钉住新通路；取证各场景中代理分支产出的均为可解码 PNG，onError 不触发，渲染路径不变，故无需重开 UI 取证。；B6.theme-light-dark：PASS——深色 rgba(45,52,65,0.85)、浅色 rgba(228,234,246,0.95) 占位背景与图标色来自 --bg-card-hover/--text-tertiary，covers-dark 与 covers-light 截图在档；占位渲染代码未变。；B7.no-retry-storm：PASS——3 次切源重挂载 fetch_image 总数 5 变 5（失败 URL 新增 0）、死链直连请求 1 变 1；修复后失败态仍只落一次 markCoverFailed（已 failed 早退），driveCover 对 failed 不再请求，无重试风暴回归。；C8.report-idempotent：PASS——死链/代理失败/非图片首轮上报 1/1/1、重挂载 3 轮后仍 1/1/1，实参 articleId:2981 加原始 url（camelCase 契约），后端返回三个 true，库中仅 source='direct' 行被清空；修复新增的代理解码失败上报复用同一幂等通路（M22 钉住），不影响既有计数语义。；C9.shared-cover-handling：PASS——播客卡/迷你条/全屏三处同一 cover：fetch_image 1/1、report 1/1（articleId=3001），灯箱共用处理在 A1c/D12 补证；cov-c9 三条修复轮绿。；D10.empty-cover：PASS——image_url=NULL 卡 img=null、占位=null、以其 id 的 IPC=0/0；coverRoute 到 none 的三层早退未动。；D11.non-image-bytes：PASS——200+HTML 字节出占位 state=failed、fetch_image=1、report_broken_cover(2978)=1、DOM 无 data:text/* img；cov-d11 三条修复轮全绿（M22-run 日志逐条可见 PASS）。；D12.lightbox-failure：PASS——灯箱占位 480×360 icon=true、Esc 关闭行为不变、重开缓存命中不重复请求、真实鼠标点击占位可关闭、上报首开/再开 1/1；Overlays.tsx:337 灯箱 CoverImage 带 lightboxEntryId 未变。；A1b.proxy-podcast-player（补，非 ui_checks）：PASS——播客卡/迷你条/全屏三处同一 sspai 封面 data: 渲染、fetch_image=1、report=0，player-proxy-ok-dark.png 在档。；A1c.lightbox-route（补，非 ui_checks）：PASS——代理成功 data: 直进灯箱零新增取图；画廊死链原始 URL 进灯箱走 fetch_image 失败占位并按条目上报一次；报告如实披露 1 次带 pageUrl 的重取来自画廊自身 useEffect 依赖（既有行为），不夸大。；P2-fix-B5-mapping（复审补充说明）：PASS——修复属对冻结检查项 B5 完备性的补强（覆盖契约未列的第四种失败情形），非 ui_change 契约变更；ui_checks 清单、断言集与 UI 证据均未因修复改动，新行为由 cov-wire 源码断言加 M22 变异证据钉住。（复审曾列作佐证的非 UI 文件：.workflow-kit/tasks/evidence/RUN-248bfad9c0864267b6b98388f2cccb84-candidate.json, .workflow-kit/tasks/evidence/RUN-248bfad9c0864267b6b98388f2cccb84-frontend.stdout.txt, .workflow-kit/tasks/evidence/RUN-248bfad9c0864267b6b98388f2cccb84-cargo_test.stdout.txt, .workflow-kit/tasks/evidence/RUN-4e880e9ee0e94faba25a4ae8aecd012c-candidate.json, tmp/task-092/mutations/M22-run.log, tmp/task-092/mutations/M22-restore.log, tmp/task-092/mutations/M22-onError-proxy.mjs.bak, tmp/task-092/gate-frontend.log, src/components/CoverImage.tsx, src/lib/coverImage.ts, src-tauri/src/commands/articles.rs, tools/frontend-regression.mjs）",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "首轮关键结论逐项独立复核：其一，判定单点——src/lib/coverImage.ts 仅 import 并调用 imageProxy 的 needsImageProxy/canProxyImages（16、67 行），自身无域名规则；src/lib 与 src/components 全域 grep 图床域名，唯一命中 imageProxy.ts 的 PROXY_HOSTS={cdnfile.sspai.com, rssfile.sspai.com} 与 PROXY_HOST_SUFFIXES=['.doubanio.com']（Timeline.tsx:559 为注释），单点成立。其二，report_broken_cover 契约——src-tauri/src/commands/articles.rs:81 的命令签名为 article_id: i64、url: String，api.ts:400 为 reportBrokenCover(articleId: number, url: string)，Tauri 2 camelCase 变 snake_case 映射与同文件 fetch_image 的 pageUrl 变 page_url 同模式，参数契约一致。其三，画廊卡片未换 CoverImage——Timeline.tsx:567 画廊卡仍走 void proxyImageUrl(src, item.url)，cov-a3 两条断言（非图片字节兜底行为加源码形态未换成 CoverImage）在修复轮运行日志中 PASS。其四，cov-d11 非图片字节断言存在且有效——frontend-regression.mjs:2877/2880/2882 三条（not-image 不产出 data: URL、按 51 加 LOGIN 幂等上报一次、fetchProxiedImage 严格判定），首轮 M5 变异曾三条齐红，修复轮日志中全绿。其五，五处接线抽查——Timeline:376/688、PlayerBar:218/333、Overlays:337 全部 CoverImage 组件并带条目 id。验收①至⑥无未满足项。\n\n验收①至⑥逐项证据在档：①五处图片位接线（Timeline.tsx:376/688、PlayerBar.tsx:218/333、Overlays.tsx:337 全部为 CoverImage 并带条目 id），判定单点在 imageProxy.ts（coverImage.ts:67 仅调 needsImageProxy/canProxyImages，src 下唯一域名表 PROXY_HOSTS/PROXY_HOST_SUFFIXES），画廊卡片 Timeline.tsx:567 仍走 proxyImageUrl 且被 cov-a3 源码断言钉住；②三种失败情形（代理失败/直连 onError/非图片字节）均收敛 states failed 态出 cover-fallback 占位，同会话同 URL 由 states.has 守卫不重取（cov-b5/cov-b7 修复轮日志绿）；③report_broken_cover 契约一致（articles.rs:81 article_id: i64/url: String 与 api.ts:400 reportBrokenCover(number,string) 的 Tauri 2 camelCase 映射），幂等键为条目 id 与 URL 组合，空 cover 三层早退零请求零上报（cov-c8/cov-d10 绿）；④新增断言修前红修后绿（M0-M22 变异证据），既有 348 条未削弱；⑤UI 取证 15 节报告、ui-result.json 与 6 张截图在档，mtime 早于修复轮，修复不涉及其取证场景；⑥RUN-248bfad9 门禁 cargo 213/0/9、frontend 380/380、lint 0/0、build/fmt/clippy 通过。验收①至⑥无未满足项。",
+      "evidence_files": [
+        ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",
+        ".workflow-kit/tasks/evidence/TASK-092-ui-result.json",
+        ".workflow-kit/tasks/evidence/TASK-092-interaction-report.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "RUN-248bfad9 门禁日志独立复核：cargo_test 汇总脚本求和 passed=213 failed=0 ignored=9、FAILED 块 0 个（与基线完全一致，本卡不改 Rust）；frontend stdout 尾部既有回归 26/26（本文件原有断言未改动一行）加新增 store 行为断言 354/354 加合计 380/380，cov-wire 在最终 verify 中 PASS；lint Found 0 warnings and 0 errors（69 文件）；build built in 123ms；cargo_fmt --check stdout 0 字节（无差异输出）；cargo_clippy stdout 0 字节（-D warnings 下无告警）；run 记录 outcome=completed、exit_code=0、input_digest 与任务 input.digest 一致、candidate_digest 与任务 evidence 登记一致。两轮 380 组成自洽：380=26+354=348+32。UI 证据文件 mtime 均 2026-09-28T05:18Z（修复轮 05:49-05:54 之前），修复轮未触碰证据，与代码级补强且 UI 行为在各取证场景下不变的判断一致。\n\ncov-wire 断言（frontend-regression.mjs:2958-2963）判别力分析：onError={() => onCoverError(url)} 全文件计数===2，移除任一分支的 onError 计数降为 1 必红；data-cover-route=proxy 后接 onError 的正则要求代理标签内（同一标签、无大于号间隔）出现 onError，单打代理分支缺失；data-cover-route=direct 跨行到 onError 的正则覆盖多行直连标签（readSrc 仅读 CoverImage.tsx 单文件，无其他组件文本可造成假匹配），单打直连分支缺失；两分支若换用别的回调或参数（如 view.src）计数与正则同时打红。经验证据：M22-run.log 尾部 379/380，唯一红项即 cov-wire 组件断言（变异为移除代理 onError，与首轮代码在该断言面前等价——注释行不参与正则匹配），M22-restore.log 380/380 全绿；M22-onError-proxy.mjs.bak 的 sha256=cf566170 与修复后 CoverImage.tsx 逐字节一致，还原忠实；时间线（run 13:52、restore 13:53 本地）与修复轮门禁复跑吻合。修前失败、修后通过对扩展后断言成立。M22 为修复轮新增变异，首轮 mutations.json（M1-M21 共 21 条）不含 M22，单独日志留存，与主控叙述一致。\n\n三重证据：其一，RUN-4e880e9e（首轮候选 5528dea1）与 RUN-248bfad9（修复轮候选 5f24f74c）的 candidate.json 各含 139 文件 sha256，逐一对比新增/删除文件为空，哈希变化恰好只有 src/components/CoverImage.tsx（fe166b39 变为 cf566170）与 tools/frontend-regression.mjs（027db944 变为 a8e76e82）；快照 roots 覆盖 UI-CONTRACT-REQ-106-IMAGES.md、三个 baseline、src、src-tauri/src、src-tauri/tests、tools/frontend-regression.mjs，无遗漏面。其二，CoverImage.tsx 字节级重构：以当前文件删去注释行（代理分支同样挂 onError 那行）并去掉代理 img 的 onError 属性后按 LF 连接，sha256 与首轮候选登记的 fe166b39 完全命中，证明行级增量恰为声明的一行加注释（附带观察：修复轮整文件行尾 LF 变 CRLF，无内容行差异）。其三，frontend-regression.mjs 以断言级对比：首轮干净门禁日志（tmp/task-092/gate-frontend.log，380/380 EXIT=0）与修复轮 M22-restore.log（380/380）各 354 条新增断言的名称与状态逐条 diff，唯一差异为 cov-wire 断言名称由『直连 img 挂 onCoverError』变为『代理与直连 img 都挂 onCoverError』，其余 353 条名称与状态完全一致，两轮断言总数不变（32 条 cov-*），与声明的 cov-wire 段扩展吻合。无未声明改动，无需提出 finding。\n\n未削弱证据：frontend 汇总既有回归 26/26 加新增 354/354 等于 380/380，380=348+32 口径自洽；两轮候选 139 文件哈希对比仅 2 文件变化（均为声明改动），首轮 gate-frontend.log 与修复轮 M22-restore.log 的 354 条新增断言逐条 diff，仅 cov-wire 一条按修复意图变更、其余 353 条名称与状态完全一致。变异成对证据：M22-run.log（移除代理分支 onError 后 379/380，唯一红项即 cov-wire 组件断言，证明扩展后断言对修前形态必红）与 M22-restore.log（还原后 380/380 全绿）；M22-onError-proxy.mjs.bak 的 sha256 与修复后 CoverImage.tsx 逐字节一致（cf566170），还原忠实；并以首轮候选哈希 fe166b39 反推重构字节级证实 M22 变异态与修前代码在该断言面前等价，修前失败、修后通过成对成立。cargo 213/0/9 与基线一致（本卡不改 Rust，仅作不回退证据）。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/TASK-092-M22-run.log",
+        ".workflow-kit/tasks/evidence/TASK-092-M22-restore.log",
+        ".workflow-kit/tasks/evidence/TASK-092-M22-onError-proxy.bak.tsx"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "逐行复核修复后 CoverImage.tsx（63 行）与 coverImage.ts（144 行）：代理分支（data-cover-route=proxy）img 现挂 onError={() => onCoverError(url)}。关键语义核对——onCoverError 收到的确实是原始 URL：coverView 代理 ready 态返回 kind=img、src=state.src、direct=false，state.src 是 fetchProxiedImage 产出的 data: URL，而组件闭包变量 url = src ?? '' 是原始封面 URL，onError 引用的是 url 而非 view.src（CoverImage.tsx:51）；onCoverError 调 markCoverFailed(原始 URL, 'direct-error') 落 states Map（键为原始 URL）后 emit，useSyncExternalStore 重渲染 coverView 得 placeholder failed，出 cover-fallback 占位无破图图标；useEffect 依赖含 state 引用，状态变 failed 后重跑 driveCover 再 reportCoverFailure(articleId, 原始 URL)——原始 URL 为 http(s)，不被 url.startsWith('data:') 守卫拦截，按 id 与 url 组合键幂等上报，与直连分支共用同一通路；markCoverFailed 对已 failed 状态早退，reportCoverFailure 幂等集合去重，无重复上报；failed 后 driveCover 不再发起 requestProxiedCover（仅 idle 才请求），B7 无重试风暴保持。直连分支（52-62 行）与占位渲染（39-49 行）逐字节未变（哈希重构证实），占位/上报语义无回归。观察（不需改码）：代理分支解码失败记 reason='direct-error' 而非专属原因，但 reason 仅是状态类型字段，coverView 与上报逻辑只看 status，无功能影响；HEIC 类嗅探命中但 WebView2 不可解码场景现与直连失败同型收敛到占位加上报，符合 B5 完备性精神。\n\n失败路径逐行复核：代理分支（CoverImage.tsx:51，data-cover-route=proxy）现挂 onError 调 onCoverError(url)，入参为组件闭包内原始 URL（coverView 代理 ready 态返回的 state.src 才是 data: URL，未被误传）；onCoverError 调 markCoverFailed(原始 URL) 落 states Map（已 failed 早退，幂等），emit 后重渲染 coverView 得 placeholder failed，出 cover-fallback 占位且无破图图标；useEffect 依赖 state 重跑 driveCover 调 reportCoverFailure(原始 URL)，http(s) 原始 URL 不被 data: 前缀守卫拦截，按条目 id 加 URL 组合键幂等上报（cov-c8 五条绿），上报失败仅 console.warn 无未处理 rejection；failed 态下 driveCover 不再发起 requestProxiedCover（仅 idle 发起），失败不重取，B7 取证 fetch_image 总数 5 变 5、死链直连请求 1 变 1。直连分支 onError 通路逐字节未变，两条失败路径共用同一处理。观察性备注：代理解码失败记 reason=direct-error，reason 不参与渲染/上报决策，无功能影响。",
+      "evidence_files": [
+        "src/components/CoverImage.tsx",
+        "src/lib/coverImage.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "维护性：修复延续既有分层（纯逻辑 coverImage.ts、渲染 CoverImage.tsx、判定单点 imageProxy.ts），代理分支与直连分支的 onError 处理收敛到同一 onCoverError 通路，无第二套失败处理；新增注释行准确说明修复动机（嗅探命中但不可解码）。安全：onError 闭包仅引用组件内 url 与模块函数，不引入新注入面；失败路径产出的是占位 div 而非 img，data: URL 不会因解码失败被再次传播；上报仍走既有 data: 前缀守卫与幂等集合。P3 观察项复核（均无需本轮改动，留档不进 findings）：READY_CACHE_LIMIT=300 的 LRU 权衡与失败记录不受限的说明在 coverImage.ts:38-40 注释言明；reportCoverFailure 的 Number() 转换对真实链路 String(row.id) 纯数字串无损，mock 前缀 id 恰被 Number.isSafeInteger 守卫拦下且与无后端不上报语义一致；交互报告与 ui-result 引用截图名（TASK-092-covers-dark.png 等 6 个）与归档名（TASK-092-ui 前缀系列）存在 ui- 前缀差异但按后缀一一对应；汇总口径 380=348+32（26+354）自洽；首轮 P3 中的 readyOrder 重复 push、fire-once 上报等设计取舍维持原样，属后续任务备忘。\n\n三层分离保持：纯逻辑 src/lib/coverImage.ts（无 React，回归网直接驱动其导出）、渲染 src/components/CoverImage.tsx（仅 useSyncExternalStore 订阅与按 coverView 决策渲染）、判定单点 src/lib/imageProxy.ts（域名白名单唯一处，coverImage.ts 不另写域名规则）。修复延续既有通路：代理与直连两分支的 onError 收敛到同一 onCoverError 函数，未引入第二套失败处理；新增注释行准确说明修复动机（字节嗅探命中但 WebView2 不可解码时退回占位并幂等上报）。权衡注释在档：READY_CACHE_LIMIT=300 的内存与重复请求取舍、失败记录不受上限影响、fire-once 上报语义均已在源码注释言明（coverImage.ts:38-40 等）。无维护性回归。",
+      "evidence_files": [
+        "src/components/CoverImage.tsx",
+        "src/lib/imageProxy.ts",
+        "src/lib/coverImage.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "有证据支撑的事实：其一，成功取图缓存设 READY_CACHE_LIMIT=300 的 LRU 上限（coverImage.ts:40 与 53-59 的驱逐循环），防长时间滚动把大量 base64 常驻内存，失败记录很小且不受上限影响（注释言明）；其二，单飞请求：requestProxiedCover 以 states.has(url) 守卫，同会话同 URL 只发一次 fetch_image，播放条/灯箱与卡片展示同一 cover 时读同一份缓存（cov-c9 取证零新增取图）；其三，无重试风暴：B7 取证 3 次重挂载 fetch_image 总数 5 变 5、浏览器对死链直连请求 1 变 1，failed 态不再发起请求；其四，修复本身仅增加一个 onError 属性回调，稳态渲染路径（ready 态 img 与占位 div）无额外开销，SSR 渲染路径不变（frontend SSR 断言全绿、build 123ms、UI 证据 mtime 早于修复轮未被触碰）；其五，直连成功不写缓存由浏览器 HTTP 缓存兜底（源码注释与首轮复核一致）。",
+      "evidence_files": [
+        "src/lib/coverImage.ts",
+        ".workflow-kit/tasks/evidence/RUN-248bfad9c0864267b6b98388f2cccb84-frontend.stdout.txt"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",
+    "checked_states": [
+      "A1.proxy-by-policy",
+      "A2.no-overreach",
+      "A3.gallery-unchanged",
+      "A4.no-layout-shift",
+      "B5.fallback-placeholder",
+      "B6.theme-light-dark",
+      "B7.no-retry-storm",
+      "C8.report-idempotent",
+      "C9.shared-cover-handling",
+      "D10.empty-cover",
+      "D11.non-image-bytes",
+      "D12.lightbox-failure"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-092-interaction-report.md",
+      ".workflow-kit/tasks/evidence/TASK-092-ui-result.json",
+      ".workflow-kit/tasks/evidence/TASK-092-ui-covers-dark.png",
+      ".workflow-kit/tasks/evidence/TASK-092-ui-covers-light.png",
+      ".workflow-kit/tasks/evidence/TASK-092-ui-lightbox-failure-light.png",
+      ".workflow-kit/tasks/evidence/TASK-092-ui-lightbox-proxy-dark.png",
+      ".workflow-kit/tasks/evidence/TASK-092-ui-player-failure-light.png",
+      ".workflow-kit/tasks/evidence/TASK-092-ui-player-proxy-ok-dark.png"
+    ]
+  }
+}

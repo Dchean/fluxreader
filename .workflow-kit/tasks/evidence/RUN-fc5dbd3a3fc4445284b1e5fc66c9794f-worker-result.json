@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-092",
+  "run_id": "RUN-fc5dbd3a3fc4445284b1e5fc66c9794f",
+  "status": "ready_for_verification",
+  "summary": "封面图片位统一代理与失败回退 + 失效上报接线（REQ-106③）。新增共享组件 CoverImage.tsx/coverImage.ts，文章卡/播客卡/迷你播放条/全屏播放器/灯箱五处图片位按 imageProxy.ts 既有判定走代理/直连（判定仅 imageProxy.ts 一处，画廊卡片行为不变）；失败（代理失败/直连 onError/字节非图片）显示占位且同会话不重复请求；失败经 api.ts 幂等调用 report_broken_cover(article_id, url)；空 cover 不渲染不代理不上报。前端回归新增 32 条断言；M0 修前基线（缺 coverImage.ts 即崩），M1–M21 变异全红（EXIT=1），32 条新断言均被至少一个变异打红。门禁：cargo 213/0/9，fmt/clippy/lint/build exit 0，frontend 380/380。UI 取证：真机（CDP+假后端）核对 A1–D12+A1b/A1c 共 14 条全 PASS（DOM src、naturalWidth、占位、IPC 计数），浅/深色截图 6 张。",
+  "changed_files": "auto",
+  "validation_requests": [
+    "cargo test（src-tauri）：213 passed / 0 failed / 9 ignored",
+    "cargo fmt --check：exit 0",
+    "cargo clippy --all-targets -- -D warnings：exit 0",
+    "npm run lint：exit 0",
+    "npm run build：exit 0",
+    "npm run test:frontend：380/380 通过"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [
+    "miniflux 源不纳入封面补全、first_image 取图启发式未改（任务定义 non_goals，留后续卡/owner 裁决）",
+    "侧栏 favicon 与设置页 favicon 不在本次范围（任务定义 non_goals）",
+    "画廊卡片行为逐字保留：画廊死链卡仍为直连破图、无回退类（A3 取证确认，属本卡范围外的既有行为）"
+  ],
+  "blocked_reason": null
+}

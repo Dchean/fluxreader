@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "id": "RUN-53130f3d2605478c958b31e4e68ea4a2",
+  "task_id": "TASK-092",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:impl-frontend-images (2026-09-24, general-purpose, 主控派发)"
+  },
+  "started_at_utc": "2026-09-24T05:35:16.180500Z",
+  "finished_at_utc": "2026-09-28T05:03:29.538686Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "0d4d36af6c4b44df50df417ae3280388e32b6d1ac3998edbbc835bbde72661ac",
+  "candidate_digest": null,
+  "raw_output_refs": [],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-53130f3d2605478c958b31e4e68ea4a2-scope.json",
+  "recovery": {
+    "source": "2026-09-28 核对：tasklist+CIM 确认无 fluxreader 相关 python/cargo/chrome 进程（现有 node 进程属 Adobe 与 D:\\NextCreator 其他项目，不属于本任务）；写交互报告的子代理 12:56 追加 C8 段后中断，D10-D12 段与 worker-result 未产出；门禁日志与 UI 取证产物完整留存于 tmp/task-092/",
+    "observed_at_utc": "2026-09-28T05:03:26.396139Z",
+    "actual_process_finish_known": false,
+    "note": "finished_at marks record closure, not a fabricated process completion"
+  },
+  "failure_kind": "scope",
+  "failure_reason": "Interrupted run recovered: 2026-09-28 核对：tasklist+CIM 确认无 fluxreader 相关 python/cargo/chrome 进程（现有 node 进程属 Adobe 与 D:\\NextCreator 其他项目，不属于本任务）；写交互报告的子代理 12:56 追加 C8 段后中断，D10-D12 段与 worker-result 未产出；门禁日志与 UI 取证产物完整留存于 tmp/task-092/; out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md"
+}

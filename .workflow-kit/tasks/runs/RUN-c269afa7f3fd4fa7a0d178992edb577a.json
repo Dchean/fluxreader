@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "RUN-c269afa7f3fd4fa7a0d178992edb577a",
+  "task_id": "TASK-092",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:impl-frontend-images-3 续（2026-09-28, RUN-fc5dbd3a 重开按 RECOVERY.md dispositions 流程, worker-result 与 UI 证据已归档, 代码未改）"
+  },
+  "started_at_utc": "2026-09-28T05:19:26.810345Z",
+  "finished_at_utc": "2026-09-28T05:19:42.659333Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "0d4d36af6c4b44df50df417ae3280388e32b6d1ac3998edbbc835bbde72661ac",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-c269afa7f3fd4fa7a0d178992edb577a-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-c269afa7f3fd4fa7a0d178992edb577a-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-fc5dbd3a3fc4445284b1e5fc66c9794f-scope.json",
+  "failure_kind": "action_required",
+  "failure_reason": "Worker requests manager action; inspect the result"
+}

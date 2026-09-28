@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "RUN-fc5dbd3a3fc4445284b1e5fc66c9794f",
+  "task_id": "TASK-092",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:impl-frontend-images-3 (2026-09-28, general-purpose, 主控派发, 全新实例按 owner 规则不续用旧实例; 交接材料 tmp/task-092/progress.md 与 ui/ 既有产物)"
+  },
+  "started_at_utc": "2026-09-28T05:07:20.504354Z",
+  "finished_at_utc": "2026-09-28T05:18:30.273592Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "0d4d36af6c4b44df50df417ae3280388e32b6d1ac3998edbbc835bbde72661ac",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-fc5dbd3a3fc4445284b1e5fc66c9794f-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-fc5dbd3a3fc4445284b1e5fc66c9794f-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-53130f3d2605478c958b31e4e68ea4a2-scope.json",
+  "failure_kind": "scope",
+  "failure_reason": "Out-of-scope changes: .workflow-kit/binding.json, .workflow-kit/docs/workflow/REFACTOR.md, .workflow-kit/docs/workflow/design-note.md, .workflow-kit/docs/workflow/prompts/REVIEW.md, .workflow-kit/docs/workflow/prompts/WORKER.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/REFACTOR.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/design-note.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/prompts/REVIEW.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/prompts/WORKER.md, .workflow-kit/scripts/project_workflow.py, .workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md (allowed: src/**, tools/frontend-regression.mjs)"
+}

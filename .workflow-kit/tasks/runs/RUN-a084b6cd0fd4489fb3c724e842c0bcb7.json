@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "RUN-a084b6cd0fd4489fb3c724e842c0bcb7",
+  "task_id": "TASK-092",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:impl-frontend-images-3 续（2026-09-28, RUN-c269afa7 重开, worker-result 已修订 unresolved_items 语义）"
+  },
+  "started_at_utc": "2026-09-28T05:20:19.007818Z",
+  "finished_at_utc": "2026-09-28T05:20:30.498810Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "0d4d36af6c4b44df50df417ae3280388e32b6d1ac3998edbbc835bbde72661ac",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-a084b6cd0fd4489fb3c724e842c0bcb7-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-a084b6cd0fd4489fb3c724e842c0bcb7-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-c269afa7f3fd4fa7a0d178992edb577a-scope.json",
+  "failure_kind": "protocol",
+  "failure_reason": "Worker result must match the complete worker-result contract"
+}

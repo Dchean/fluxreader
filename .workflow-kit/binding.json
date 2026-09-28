@@ -8,7 +8,7 @@
   "entry": "WORKFLOW-KIT.md",
   "project_file": ".workflow-kit/tasks/PROJECT.json",
   "helper": ".workflow-kit/scripts/project_workflow.py",
-  "tool_digest": "5387c459893fffdcd09b02818b78dadccf17c1e60f0b823fc62620fd37c83a38",
+  "tool_digest": "b21acfc9d26ae16f4d42c166eb9d1c43322691528c70a32bcef8987f7346b4e0",
   "entry_digests": {
     "AGENTS.md": "87c273b5cc511b3b57b5a55a35189d1b6a4178038ee07749ee1c39bab359a5c0",
     "CLAUDE.md": "87c273b5cc511b3b57b5a55a35189d1b6a4178038ee07749ee1c39bab359a5c0"
@@ -29,7 +29,7 @@
     ".workflow-kit/docs/workflow/PRESENTATION.md": "5efd60fcdfddb25e8920641ae119bb452f124fe86d9ef904ca3a5d264d502d87",
     ".workflow-kit/docs/workflow/PROJECT_TYPES.md": "074b228dce19c2c9a1848b666006d9c27fd3cf9efd74157ff6227203189dd361",
     ".workflow-kit/docs/workflow/RECOVERY.md": "4357916977a8b2d6427e3a9b04ef817810f3038e7ef2bd59787eef78ae439866",
-    ".workflow-kit/docs/workflow/REFACTOR.md": "f4fd38b6bf9cb800a22f0f25795eeffec1616b2d89d2364220e5df2ea35faa37",
+    ".workflow-kit/docs/workflow/REFACTOR.md": "cabd82e027a7e5a8df2145cdd73ef8d954dc0b11ccf796cf1a47212935f79762",
     ".workflow-kit/docs/workflow/RESEARCH.md": "13c4ced43bdad42045ae8ebfc41a48da1e600696fd9a87f190a9e3af7ad59959",
     ".workflow-kit/docs/workflow/ROLE_COLLABORATION.md": "417c1f3967b1b9f4ca99763e8ae001f2c21e62badc3817f41a2dccf34a1f22e8",
     ".workflow-kit/docs/workflow/STATE.md": "a5a0c2428466423f45eef543de3be0e59b03d4e4d78ef8dd1adc85db0b80d2b6",
@@ -42,10 +42,10 @@
     ".workflow-kit/docs/workflow/contracts/empty-mcp.json": "372a7f8c1e988f58480012e741582e13bb1c9c2b2611432f365ae132f519cfe5",
     ".workflow-kit/docs/workflow/contracts/review-result.schema.json": "998057f70750bc745c40ca4363fa297e17a8d5e3bf689cd41ffed9227d7c4e6e",
     ".workflow-kit/docs/workflow/contracts/worker-result.schema.json": "f1718b4115644753b7abb15b03543468b9a5450a98f298ddb7d50f6f60c27858",
-    ".workflow-kit/docs/workflow/design-note.md": "fa669d870ca2cd689747bbb225f2ce6feb52cdb0b0837fdceeff18c51613c6cb",
-    ".workflow-kit/docs/workflow/prompts/REVIEW.md": "5e774280431710d9143fef6d968ca43072a42a9bd2e570d728078ed9c3cf8057",
-    ".workflow-kit/docs/workflow/prompts/WORKER.md": "0f7bb0b12678ad5cbbcd513919e780283fb4d01f863eec89219c99b013974f3e",
-    ".workflow-kit/scripts/project_workflow.py": "62b7c47f73a3042a7a28aba5ff42b1fe4d021348f58a564f274e4e34ca81938c",
+    ".workflow-kit/docs/workflow/design-note.md": "d1916ebf91d7d6edca8647d917f993ecd75d61fdeb423fcbb18e101801e6a0e5",
+    ".workflow-kit/docs/workflow/prompts/REVIEW.md": "10f47fa440ee7b6d66bdc4b0cfa4a95ca22a175b1f47ee57794275eca4c057aa",
+    ".workflow-kit/docs/workflow/prompts/WORKER.md": "0c32fdaae2e2a9e7095dfbcf2aa3f579055875182a284edcdc8f029bf68e4ef6",
+    ".workflow-kit/scripts/project_workflow.py": "83c2821998aeb6fc929b04f4b86e0e33067a4c955748d70fb30b12f76ab89951",
     ".workflow-kit/scripts/workflow_bootstrap.py": "d758b98d1768f0ca96cad8f2bfba6306a127204515ef8275d9006c50020d0de9",
     ".workflow-kit/scripts/workflow_intake.py": "023dc703dfc013796175afd6a196b63116eba35a8d8070cad36399ac88c30525",
     ".workflow-kit/scripts/workflow_progress.py": "cd772614cdb6f251cc3586255ad65050111dcc1f5a6433873bb52832e0150f1e",
@@ -61,7 +61,7 @@
   },
   "legacy_sources": [],
   "note": "File consistency is verifiable; this is not proof of model compliance or application authorization.",
-  "kit_release": "2026-09-18.3",
+  "kit_release": "2026-09-21.1",
   "rebind_history": [
     {
       "at_utc": "2026-09-19T03:07:46.741338Z",
@@ -114,6 +114,33 @@
         "entry_digests": {
           "AGENTS.md": "fe7018dd97848e76b182d096858dae45b6ca44d744cc1fc41784222b672a5006",
           "CLAUDE.md": "fe7018dd97848e76b182d096858dae45b6ca44d744cc1fc41784222b672a5006"
+        },
+        "managed_count": 44
+      }
+    },
+    {
+      "at_utc": "2026-09-28T05:04:48.536875Z",
+      "source": "用户同意升级到 2026-09-28（新版启动包 D:/workflow-kit，MANIFEST package=project-workflow-kit version=1 created 2026-09-21）",
+      "upgraded_files": [
+        ".workflow-kit/docs/workflow/REFACTOR.md",
+        ".workflow-kit/docs/workflow/design-note.md",
+        ".workflow-kit/docs/workflow/prompts/REVIEW.md",
+        ".workflow-kit/docs/workflow/prompts/WORKER.md",
+        ".workflow-kit/scripts/project_workflow.py"
+      ],
+      "backed_up": [
+        ".workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/REFACTOR.md",
+        ".workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/design-note.md",
+        ".workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/prompts/REVIEW.md",
+        ".workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/prompts/WORKER.md"
+      ],
+      "entries_refreshed": [],
+      "kit_release": "2026-09-21.1",
+      "previous": {
+        "tool_digest": "5387c459893fffdcd09b02818b78dadccf17c1e60f0b823fc62620fd37c83a38",
+        "entry_digests": {
+          "AGENTS.md": "87c273b5cc511b3b57b5a55a35189d1b6a4178038ee07749ee1c39bab359a5c0",
+          "CLAUDE.md": "87c273b5cc511b3b57b5a55a35189d1b6a4178038ee07749ee1c39bab359a5c0"
         },
         "managed_count": 44
       }

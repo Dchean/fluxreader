@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "RUN-3ce255de7a9e4a94b590cadf6e1a7bce",
+  "task_id": "TASK-092",
+  "kind": "repair",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:impl-frontend-images-3-repair (2026-09-28, 主控按独立审查 P2 亲自修复: CoverImage 代理分支补 onError + cov-wire 断言扩展 + M22 变异验证, 全新交付)"
+  },
+  "started_at_utc": "2026-09-28T05:53:25.663907Z",
+  "finished_at_utc": "2026-09-28T05:53:40.977040Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "0d4d36af6c4b44df50df417ae3280388e32b6d1ac3998edbbc835bbde72661ac",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-3ce255de7a9e4a94b590cadf6e1a7bce-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-3ce255de7a9e4a94b590cadf6e1a7bce-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-4d1c8e8b311740e99016319aff092af2-scope.json",
+  "failure_kind": "protocol",
+  "failure_reason": "Worker result must match the complete worker-result contract"
+}

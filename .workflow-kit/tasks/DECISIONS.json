@@ -2530,6 +2530,25 @@
         "TASK-090": "528137e4315f16eeff700c928ed6519d64d21e00efa940e212d3936edbf497fc",
         "TASK-091": "9eacd271c240146082f305030719ba3b518d553cf99386d69d90e7b330a15468"
       }
+    },
+    {
+      "id": "DEC-b672049f3f8a4190b5bb0d939f788635",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "用户 2026-09-28 会话内 AskUserQuestion 明确选择「追加 4 小时（推荐）」，用于收尾：补交互报告 D10-D12 段 + worker-result + diff/归档 + finish/verify 全门禁 + 新子代理独立审查",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-092"
+      ],
+      "recorded_at_utc": "2026-09-28T05:06:50.470158Z",
+      "budget_extension": {
+        "decision_id": "DEC-b672049f3f8a4190b5bb0d939f788635",
+        "recorded_at_utc": "2026-09-28T05:06:50.470158Z",
+        "minutes": 240,
+        "repair_rounds": 0,
+        "previous_deadline_at_utc": "2026-09-24T09:35:16.176680Z",
+        "deadline_at_utc": "2026-09-28T09:06:50.470158Z"
+      }
     }
   ]
 }

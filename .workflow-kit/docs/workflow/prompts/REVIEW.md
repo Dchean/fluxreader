@@ -9,7 +9,7 @@ independent 必须来自没有参与实现的新上下文。同一模型可以�
 - requirements：逐项对照用户的当前需求，包括 Bug、新增功能和兼容限制；检查是否漏做、顺带改变行为或扩大范围。
 - regression：阅读实际验证命令、原始输出及测试断言，检查它们是否能发现目标缺陷，是否弱化了仍有效的保护。
 - failure_paths：核对实际相关的异常、空输入、重复执行、恢复、数据/权限边界；需要时验证具体反例。不要只走成功路径。
-- maintainability：检查职责、依赖方向、重复规则、命名、模块边界及新增维护负担。工作量大不是拒绝必要改进的理由，抽象层数也不等于质量。
+- maintainability：检查职责、依赖方向、重复规则、命名、模块边界及新增维护负担。工作量大不是拒绝必要改进的理由，抽象层数也不等于质量。结构调整（拆分、合并、抽取公共层）必须有 REFACTOR 列出的代码证据：变更原因不同、无法单独验证、重复规则、依赖方向、必须隔离的边界或真实并行冲突；只以行数或“太大”为理由的拆分、为将来复用预建的抽象，记为 finding。有证据需要拆而未拆的地方可以指出，不强制。
 - performance：检查代表性负载下的测量和回归；静态分析须明确其范围，不能伪称实测提升。不受影响时解释不适用，不强造基准。
 
 documentation/baseline 任务只需 requirements 和 regression 两项，其余三项可省略；其他任务五项齐全。每项保存 status、简短的结论依据 analysis 和 evidence_files。evidence_files 只能引用候选快照内的文件，或 .workflow-kit/tasks/runs/、.workflow-kit/tasks/evidence/ 下的附件；不要引用任务条目、任务卡、DECISIONS、PROJECT 或笔记，这些文件由工具改写，引用它们会让审查在保存后立即失效。需要引用其他源文件时，应由总控把它加进任务的 snapshot_paths 再验证。报告记录可核对事实，不要求披露内部推理过程。requirements/regression 不能标不适用；高风险的 failure_paths 也不能。未完成检查时用顶层 BLOCKED，有待修问题用 FAIL；不能留下 NOT_RUN/FAIL 项却给总体 PASS。

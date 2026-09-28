@@ -1,0 +1,492 @@
+{
+  "schema_version": 1,
+  "id": "TASK-092",
+  "title": "封面图片位统一代理与失败回退 + 失效上报接线（REQ-106 之③，前端）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",
+  "ui_checks": [
+    {
+      "id": "A1.proxy-by-policy",
+      "description": "文章卡/播客卡/迷你播放条/全屏播放器/灯箱五处在渲染前按 lib/imageProxy.ts 的既有判定决定是否代理；需代理的域名经 api.fetchImage 渲染为 data: URL"
+    },
+    {
+      "id": "A2.no-overreach",
+      "description": "不需代理的域名保持直连，不额外触发 fetch_image"
+    },
+    {
+      "id": "A3.gallery-unchanged",
+      "description": "画廊卡片既有代理行为逐字保留"
+    },
+    {
+      "id": "A4.no-layout-shift",
+      "description": "代理未返回前先出占位，封面容器尺寸/圆角/比例与修前一致"
+    },
+    {
+      "id": "B5.fallback-placeholder",
+      "description": "代理失败或直连失败时显示占位，不出现破图图标、不留空白、不撑破卡片"
+    },
+    {
+      "id": "B6.theme-light-dark",
+      "description": "占位复用既有视觉语言，浅色与深色主题下都可读（各一张截图）"
+    },
+    {
+      "id": "B7.no-retry-storm",
+      "description": "同一会话内失败的图片不被重复请求"
+    },
+    {
+      "id": "C8.report-idempotent",
+      "description": "失败时调用 report_broken_cover(article_id, url)；同一条目同一 URL 只上报一次"
+    },
+    {
+      "id": "C9.shared-cover-handling",
+      "description": "播放条/灯箱展示同一 cover 字段时共用同一处理，不重复上报"
+    },
+    {
+      "id": "D10.empty-cover",
+      "description": "cover 为 null/空串时不渲染 img、不代理、不上报"
+    },
+    {
+      "id": "D11.non-image-bytes",
+      "description": "代理返回的字节不是图片时走占位 + 上报，不注入 DOM"
+    },
+    {
+      "id": "D12.lightbox-failure",
+      "description": "灯箱图片失败时显示占位，关闭/Esc 行为不变"
+    }
+  ],
+  "status": "verified",
+  "objective": "修用户报告「文章封面部分获取不到」的前端成因（审计 round-4 §1-C/§1-D；基线 .workflow-kit/tasks/evidence/TASK-092-baseline-images.md；UI 契约 .workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md）。现状：只有画廊卡片走 proxyImageUrl，文章卡（Timeline.tsx:374）、播客卡（:685）、迷你播放条（PlayerBar.tsx:216）、全屏播放器（:332）、灯箱（Overlays.tsx:338）全部直连 + no-referrer 且无 onError ⇒ 白名单式防盗链图床（实测 cdnfile.sspai.com 无 Referer 403×12/12、img*.doubanio.com 418×20/20）必然破图，失效封面（TASK-091 已提供 report_broken_cover 后端命令）也没有上报出口。本卡：① 五处图片位统一复用 lib/imageProxy.ts 的既有判定与 api.fetchImage（抽一个共享的封面图片组件或 hook，不新造第二套判定）；② 失败（代理失败/直连失败/字节非图片）时显示占位，同会话不重复请求；③ 失败时经 api 调用 report_broken_cover(article_id, url) 上报，同条目同 URL 幂等只上报一次；④ 补前端回归断言（修前失败、修后通过）与真机 UI 证据（截图 + 交互报告）。",
+  "non_goals": [
+    "不改布局、字体、间距、颜色、动画与既有类名（仅加必要的回退类）",
+    "不改后端补全口径（source='direct' 与只填空语义）；不改 Rust 代码",
+    "不把 miniflux 源纳入封面补全；不改 first_image 取图启发式",
+    "不处理侧栏 favicon 与设置页 favicon",
+    "不改 .workflow-kit/tasks/BRIEF.json 等受管记录"
+  ],
+  "requirement_refs": [
+    "REQ-106"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [
+    "TASK-091"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-next-batch-covers-reachability-20260923"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",
+      ".workflow-kit/tasks/evidence/TASK-092-baseline-images.md",
+      ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",
+      ".workflow-kit/tasks/evidence/TASK-092-baseline-images.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 五处图片位（文章卡/播客卡/迷你播放条/全屏播放器/灯箱）按 lib/imageProxy.ts 的既有判定走代理或直连；判定规则只在 imageProxy.ts 一处；画廊卡片行为不变",
+    "② 失败回退：代理失败、直连 onError、字节非图片三种情形都显示占位（无破图图标、无布局跳变），同会话同 URL 不重复请求",
+    "③ 上报：失败时调用 report_broken_cover(article_id, url)（参数名与 Tauri 命令契约一致），同条目同 URL 只上报一次；无 cover 的条目不渲染 img、不代理、不上报",
+    "④ 前端回归新增断言修前失败、修后通过（五处走代理、失败回退、上报幂等、空 cover 不上报）；既有 348 条断言无一削弱",
+    "⑤ 真机 UI 证据：用 tmp/audit-r3/harness 的 Chrome CDP + 忠实假后端核对 ui_checks 全部条目，保存浅色/深色截图与交互报告（DOM src 形态、naturalWidth、占位节点、IPC 计数）到 .workflow-kit/tasks/evidence/TASK-092-*",
+    "⑥ 门禁全绿且不回退：cargo test ≥213 passed / 0 failed / 9 ignored 不增；cargo fmt --check、cargo clippy --all-targets -- -D warnings、lint、build 全部 exit 0；frontend ≥348 且全部通过"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "修前门禁全绿（cargo 213/0/9、frontend 348/348、lint 0/0、build/fmt/clippy exit 0，2026-09-24 主控复跑），但既有前端回归对五处内容图片位的取图方式与失败表现零覆盖：没有断言要求走代理、没有 onError、没有上报。已知限制（本卡不改）：miniflux 源不补全、first_image 启发式。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/TASK-092-baseline-images.md"
+    },
+    "decision_ids": [
+      "DEC-next-batch-covers-reachability-20260923"
+    ],
+    "actions": [
+      {
+        "action": "keep",
+        "target": "前端回归既有 348 项（含画廊卡片代理相关断言）",
+        "reason": "本卡改变的是另外五处图片位的取图方式，画廊与其余行为保持",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "tools/frontend-regression.mjs 新增：五处图片位走代理判定 / 失败占位 / 同 URL 不重复请求 / report_broken_cover 幂等上报 / 空 cover 不渲染不上报 / 非图片字节走回退",
+        "reason": "新行为需要修前失败、修后通过的成对断言",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "src-tauri 既有 213 项测试、fmt、clippy、lint、build",
+        "reason": "本卡不改 Rust，作为不回退证据",
+        "gate_ids": [
+          "cargo_test",
+          "cargo_fmt",
+          "cargo_clippy",
+          "lint",
+          "build"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-092-input-ea7e5d5003fa47dd86506cc86924c5c2.json",
+    "digest": "0d4d36af6c4b44df50df417ae3280388e32b6d1ac3998edbbc835bbde72661ac",
+    "source_revision": null,
+    "definition_digest": "db68b41ee1839521da8f136df2aaa0f0f4c509017ecb2b87af0e7a88a3769991"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-24T05:35:16.176680Z",
+    "deadline_at_utc": "2026-09-24T09:35:16.176680Z",
+    "repair_rounds_used": 1,
+    "extensions": [
+      {
+        "decision_id": "DEC-b672049f3f8a4190b5bb0d939f788635",
+        "recorded_at_utc": "2026-09-28T05:06:50.470158Z",
+        "minutes": 240,
+        "repair_rounds": 0,
+        "previous_deadline_at_utc": "2026-09-24T09:35:16.176680Z",
+        "deadline_at_utc": "2026-09-28T09:06:50.470158Z"
+      }
+    ]
+  },
+  "batch_id": "BATCH-3b1e9a89eb8a464fb861be8f1bcc3179",
+  "run_ids": [
+    "RUN-53130f3d2605478c958b31e4e68ea4a2",
+    "RUN-fc5dbd3a3fc4445284b1e5fc66c9794f",
+    "RUN-c269afa7f3fd4fa7a0d178992edb577a",
+    "RUN-a084b6cd0fd4489fb3c724e842c0bcb7",
+    "RUN-4d1c8e8b311740e99016319aff092af2",
+    "RUN-4e880e9ee0e94faba25a4ae8aecd012c",
+    "RUN-086b2e6bf6444b4fa60146402f6751ee",
+    "RUN-3ce255de7a9e4a94b590cadf6e1a7bce",
+    "RUN-3c369789cecf443892e3db18ff8907b5",
+    "RUN-248bfad9c0864267b6b98388f2cccb84",
+    "RUN-56dc087f1efd48e5bf6a82f13f30c403"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-248bfad9c0864267b6b98388f2cccb84-candidate.json",
+    "candidate_digest": "5f24f74c28011ea82b7e18de3db5c8804f786e4d1fad45e9925fd823dc30634e",
+    "verification_run": "RUN-248bfad9c0864267b6b98388f2cccb84",
+    "review_run": "RUN-56dc087f1efd48e5bf6a82f13f30c403",
+    "acceptance_ref": null,
+    "owner_decision_ids": [],
+    "merge_ref": null
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",
+    ".workflow-kit/tasks/evidence/TASK-089-baseline-cover.md",
+    ".workflow-kit/tasks/evidence/TASK-091-baseline-broken-cover.md",
+    ".workflow-kit/tasks/evidence/TASK-092-baseline-images.md",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools/frontend-regression.mjs"
+  ],
+  "continuation_of": {
+    "TASK-091": "9eacd271c240146082f305030719ba3b518d553cf99386d69d90e7b330a15468"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-24T05:35:16.374232Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-24T09:15:39.279276Z",
+      "note": "实现子代理首轮中途停止（最后输出为过程性一句话，无结果文件）。主控核对：src 11 个文件已改（新增 CoverImage.tsx、coverImage.ts；改 Timeline/PlayerBar/Overlays/api/imageProxy/player/ui/types/base.css）+ frontend-regression.mjs +263 行；与其 m0-backup 校验和逐一一致（未停在变异态）；变异日志 M0–M21 已产出；UI 证据与 worker-result 未产出。已让同一子代理续做（取证、门禁、结果文件）。",
+      "next_action": "等实现子代理交付 worker-result 与 UI 证据；主控随后 diff --run、归档 UI 证据、finish、verify、新子代理独立审查"
+    },
+    {
+      "at_utc": "2026-09-24T10:31:45.455770Z",
+      "note": "原实现子代理 impl-frontend-images 续做后再次停滞（17:50 后无任何产出、无取证进程在跑，排队消息无法送达），owner 指示新开子代理。主控 TaskStop 旧实例；核对工作区与其 m0-backup 校验和一致（非变异态）；已有产出：src 11 文件改动 + frontend-regression +263 行、变异日志 M0–M21、UI 截图 4 张与 s092_result.json。新开实现子代理 impl-frontend-images-2 接手：核对实现与契约、补齐 UI 证据、写交互报告、跑门禁、写 worker-result。同一 RUN（RUN-53130f3d）继续，不新建任务。",
+      "next_action": "等 impl-frontend-images-2 交付；随后 diff --run、归档 UI 证据到 .workflow-kit/tasks/evidence/TASK-092-*、finish、verify、新子代理独立审查"
+    },
+    {
+      "at_utc": "2026-09-28T01:14:32.755296Z",
+      "note": "2026-09-28 核对：接手的实现子代理（impl-frontend-images-2）在上次会话结束前停在门禁步骤（最后产出 09-24 18:44）。代码与 m0-backup 校验和一致（接手后未改代码）；已跑的门禁：cargo test 213 passed / 0 failed / 9 ignored，cargo fmt --check 与 clippy EXIT=0。缺前端三门禁、交互报告、worker-result。已从其保存的上下文恢复继续。",
+      "next_action": "等子代理交付 worker-result 与交互报告；随后 diff --run、归档 UI 证据、finish、verify、新子代理独立审查"
+    },
+    {
+      "at_utc": "2026-09-28T04:35:01.128840Z",
+      "note": "2026-09-28 新开实现子代理完成第 1–5 步后因 API 网关 HTTP 524（服务端超时）中断，非自身停滞。已完成：前端 lint/build/test:frontend EXIT=0（回归 380/380）；M1–M21 变异全部变红、32 条新断言均被至少一个变异打红；A1–D12 + 补充 A1b/A1c 真机取证全 PASS（第 5 次运行，新增深色截图 2 张，进程已清理）；代码核对未发现缺陷、未改代码（与 m0-backup 一致）。按 owner 规则新开子代理只写交互报告与 worker-result，要求分段写入以规避长生成超时。",
+      "next_action": "等 worker-result 与 interaction-report；随后 diff --run、归档 UI 证据、finish、verify、新子代理独立审查"
+    },
+    {
+      "at_utc": "2026-09-28T05:03:29.616200Z",
+      "note": "Interrupted run recovered: 2026-09-28 核对：tasklist+CIM 确认无 fluxreader 相关 python/cargo/chrome 进程（现有 node 进程属 Adobe 与 D:\\NextCreator 其他项目，不属于本任务）；写交互报告的子代理 12:56 追加 C8 段后中断，D10-D12 段与 worker-result 未产出；门禁日志与 UI 取证产物完整留存于 tmp/task-092/; out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md",
+      "next_action": "核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-28T05:06:57.477792Z",
+      "note": "依据新决定追加预算；原始时钟与失败记录保留",
+      "next_action": "先核对已有成果，再按原任务范围继续"
+    },
+    {
+      "at_utc": "2026-09-28T05:07:04.992356Z",
+      "note": "阻塞已处置（scope）：越界文件 .workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md 为主控 2026-09-24T06:30Z 按 09-24 推进安排预写的 TASK-094 UI 契约（JOURNAL 有记录），非 TASK-092 worker 产物。TASK-092 worker 的 11 个 src 文件改动均在 allowed_paths 内。继续安全：代码与 m0-backup 校验和一致，门禁日志与 UI 取证产物完整留存 tmp/task-092/。",
+      "next_action": "begin 重新实现"
+    },
+    {
+      "at_utc": "2026-09-28T05:07:20.704838Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T05:16:08.374627Z",
+      "note": "2026-09-28 额度+240min（DEC-b672049f）后新开 RUN-fc5dbd3a；新子代理已交付 worker-result（ready_for_verification，JSON 校验通过）并补全交互报告 D10/D11/D12 段；C9 正文小节由同一子代理后台补写中（总表已有 C9=PASS，证据在 s092_result.json C9 条目）。代码未改，仍与 m0-backup 一致。",
+      "next_action": "C9 正文补齐后：diff --run RUN-fc5dbd3a、归档 UI 证据到 .workflow-kit/tasks/evidence/TASK-092-*、finish、verify 全门禁、新子代理独立审查"
+    },
+    {
+      "at_utc": "2026-09-28T05:18:30.333168Z",
+      "note": "Out-of-scope changes: .workflow-kit/binding.json, .workflow-kit/docs/workflow/REFACTOR.md, .workflow-kit/docs/workflow/design-note.md, .workflow-kit/docs/workflow/prompts/REVIEW.md, .workflow-kit/docs/workflow/prompts/WORKER.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/REFACTOR.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/design-note.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/prompts/REVIEW.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/prompts/WORKER.md, .workflow-kit/scripts/project_workflow.py, .workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md (allowed: src/**, tools/frontend-regression.mjs)",
+      "next_action": "核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-28T05:18:59.087133Z",
+      "note": "阻塞已处置（scope）：11 个范围外文件全部为主控行为：.workflow-kit/scripts/project_workflow.py、docs/workflow/{REFACTOR,design-note,prompts/REVIEW,prompts/WORKER}.md 与 legacy/upgrade-20260928T050448Z/ 备份来自 2026-09-28 用户批准的启动包 rebind 升级；binding.json 由 rebind 更新；docs/UI-CONTRACT-REQ-107-REACHABILITY.md 为主控 09-24 预写的 TASK-094 契约。worker 实际改动仅 src/** 12 文件 + tools/frontend-regression.mjs，均在 allowed_paths 内且 diff --run 已核对 in_scope。恢复安全：代码冻结与 m0-backup 一致，门禁全绿，UI 取证与 worker-result 已归档。",
+      "next_action": "begin 重新实现"
+    },
+    {
+      "at_utc": "2026-09-28T05:19:27.040489Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T05:19:42.718740Z",
+      "note": "Worker requests manager action; inspect the result",
+      "next_action": "处理执行者提出的请求，再 unblock 后 begin；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-28T05:20:13.129136Z",
+      "note": "阻塞已处置（action_required）：action_required 由 result 字段语义触发而非真实请求；requested_actions 与 blocked_reason 原本即为空。范围外文件归属已于前次 unblock 写入 dispositions，本次 scope 检查已通过（failure_kind 从 scope 变为 action_required 证实）。恢复安全。",
+      "next_action": "begin 重新实现"
+    },
+    {
+      "at_utc": "2026-09-28T05:20:19.208527Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T05:20:30.562975Z",
+      "note": "Worker result must match the complete worker-result contract",
+      "next_action": "按报错列出的漏报/多报文件修正 worker-result，再 unblock 后 begin；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-28T05:22:41.008982Z",
+      "note": "阻塞已处置（protocol）：从子代理原始结果文件重建，移除工具自加键；unresolved_items 已清空（non_goals 并入 summary），requested_actions/blocked_reason 为空。恢复安全。",
+      "next_action": "begin 重新实现"
+    },
+    {
+      "at_utc": "2026-09-28T05:22:46.927674Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T05:23:05.332156Z",
+      "note": "编码结果已记录，差异范围已核对：无文件变化",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-28T05:25:26.062927Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-28T05:49:02.437434Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-28T05:53:25.894229Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T05:53:41.051372Z",
+      "note": "Worker result must match the complete worker-result contract",
+      "next_action": "按报错列出的漏报/多报文件修正 worker-result，再 unblock 后 begin；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-28T05:54:02.896174Z",
+      "note": "阻塞已处置（protocol）：重建后先本地校验键集再 finish。恢复安全。",
+      "next_action": "begin 重新实现"
+    },
+    {
+      "at_utc": "2026-09-28T05:54:09.123195Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-28T05:54:16.915413Z",
+      "note": "编码结果已记录，差异范围已核对：无文件变化",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-28T05:54:48.793890Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-28T06:20:49.536530Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "repair",
+  "dispositions": [
+    {
+      "at_utc": "2026-09-28T05:07:04.929797Z",
+      "failure_kind": "scope",
+      "blockers": [
+        "Interrupted run recovered: 2026-09-28 核对：tasklist+CIM 确认无 fluxreader 相关 python/cargo/chrome 进程（现有 node 进程属 Adobe 与 D:\\NextCreator 其他项目，不属于本任务）；写交互报告的子代理 12:56 追加 C8 段后中断，D10-D12 段与 worker-result 未产出；门禁日志与 UI 取证产物完整留存于 tmp/task-092/; out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md"
+      ],
+      "source": "owner 2026-09-28 决定（JOURNAL 2026-09-28T01:27:17Z）：新开子代理继续 TASK-092；额度经 DEC-b672049f3f8a4190b5bb0d939f788635 追加 240 分钟",
+      "note": "越界文件 .workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md 为主控 2026-09-24T06:30Z 按 09-24 推进安排预写的 TASK-094 UI 契约（JOURNAL 有记录），非 TASK-092 worker 产物。TASK-092 worker 的 11 个 src 文件改动均在 allowed_paths 内。继续安全：代码与 m0-backup 校验和一致，门禁日志与 UI 取证产物完整留存 tmp/task-092/。",
+      "resumed_to": "ready"
+    },
+    {
+      "at_utc": "2026-09-28T05:18:59.024394Z",
+      "failure_kind": "scope",
+      "blockers": [
+        "Out-of-scope changes: .workflow-kit/binding.json, .workflow-kit/docs/workflow/REFACTOR.md, .workflow-kit/docs/workflow/design-note.md, .workflow-kit/docs/workflow/prompts/REVIEW.md, .workflow-kit/docs/workflow/prompts/WORKER.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/REFACTOR.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/design-note.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/prompts/REVIEW.md, .workflow-kit/legacy/upgrade-20260928T050448Z/docs/workflow/prompts/WORKER.md, .workflow-kit/scripts/project_workflow.py, .workflow-kit/docs/UI-CONTRACT-REQ-107-REACHABILITY.md (allowed: src/**, tools/frontend-regression.mjs)"
+      ],
+      "source": "主控 2026-09-28 会话执行记录：rebind 升级（用户明示指令「升级本项目中的项目包」，QUICK_START 升级步骤）与 TASK-094 契约预写（JOURNAL 2026-09-24T06:30Z）均为主控行为，非 TASK-092 worker 产物",
+      "note": "11 个范围外文件全部为主控行为：.workflow-kit/scripts/project_workflow.py、docs/workflow/{REFACTOR,design-note,prompts/REVIEW,prompts/WORKER}.md 与 legacy/upgrade-20260928T050448Z/ 备份来自 2026-09-28 用户批准的启动包 rebind 升级；binding.json 由 rebind 更新；docs/UI-CONTRACT-REQ-107-REACHABILITY.md 为主控 09-24 预写的 TASK-094 契约。worker 实际改动仅 src/** 12 文件 + tools/frontend-regression.mjs，均在 allowed_paths 内且 diff --run 已核对 in_scope。恢复安全：代码冻结与 m0-backup 一致，门禁全绿，UI 取证与 worker-result 已归档。",
+      "resumed_to": "ready"
+    },
+    {
+      "at_utc": "2026-09-28T05:20:13.067386Z",
+      "failure_kind": "action_required",
+      "blockers": [
+        "Worker requests manager action; inspect the result"
+      ],
+      "source": "主控 2026-09-28 核对：worker-result 的 unresolved_items 三条均为任务定义冻结 non_goals 的复述（miniflux/first_image/favicon/画廊既有行为），非新增待决事项；已并入 summary 并清空该字段",
+      "note": "action_required 由 result 字段语义触发而非真实请求；requested_actions 与 blocked_reason 原本即为空。范围外文件归属已于前次 unblock 写入 dispositions，本次 scope 检查已通过（failure_kind 从 scope 变为 action_required 证实）。恢复安全。",
+      "resumed_to": "ready"
+    },
+    {
+      "at_utc": "2026-09-28T05:22:40.944382Z",
+      "failure_kind": "protocol",
+      "blockers": [
+        "Worker result must match the complete worker-result contract"
+      ],
+      "source": "主控 2026-09-28 核对：protocol 失败因复制 worker-result 时带入了工具上轮自动填充的 changed_files_source 键（契约要求键集精确相等）；内容本身合法",
+      "note": "从子代理原始结果文件重建，移除工具自加键；unresolved_items 已清空（non_goals 并入 summary），requested_actions/blocked_reason 为空。恢复安全。",
+      "resumed_to": "ready"
+    },
+    {
+      "at_utc": "2026-09-28T05:54:02.825750Z",
+      "failure_kind": "protocol",
+      "blockers": [
+        "Worker result must match the complete worker-result contract"
+      ],
+      "source": "主控 2026-09-28 核对：protocol 失败系复制了已被工具改写的 worker-result（含 changed_files_source 键）；契约要求键集精确相等，改从原始 9 键文件重建",
+      "note": "重建后先本地校验键集再 finish。恢复安全。",
+      "resumed_to": "ready"
+    }
+  ]
+}

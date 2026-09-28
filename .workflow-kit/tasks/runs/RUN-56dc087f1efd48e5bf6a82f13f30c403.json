@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-56dc087f1efd48e5bf6a82f13f30c403",
+  "task_id": "TASK-092",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:review-092-round2 (2026-09-28, general-purpose, 全新实例未参与实现与首轮审查; 复审内容不变, 报告按 CLI 契约重组为 5 规范 area, M22 证据归档至 tasks/evidence/)"
+  },
+  "started_at_utc": "2026-09-28T06:20:39.263770Z",
+  "finished_at_utc": "2026-09-28T06:20:39.445209Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "0d4d36af6c4b44df50df417ae3280388e32b6d1ac3998edbbc835bbde72661ac",
+  "candidate_digest": "5f24f74c28011ea82b7e18de3db5c8804f786e4d1fad45e9925fd823dc30634e",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-56dc087f1efd48e5bf6a82f13f30c403-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-56dc087f1efd48e5bf6a82f13f30c403-review.json",
+    "candidate_digest": "5f24f74c28011ea82b7e18de3db5c8804f786e4d1fad45e9925fd823dc30634e",
+    "ui_evidence_digest": "1fadc5a60e309ff8cf3d396c8ad4c5825a5624962790320c34cc5e53b948c9fc",
+    "quality_digest": "457018862d8817e08f6c58f65a1c579e85ce76df773939c80cef7650e363c6ef"
+  },
+  "estimated_cost_usd": null
+}

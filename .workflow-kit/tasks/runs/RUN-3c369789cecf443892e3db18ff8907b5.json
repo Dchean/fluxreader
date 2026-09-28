@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-3c369789cecf443892e3db18ff8907b5",
+  "task_id": "TASK-092",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "subagent:impl-frontend-images-3-repair (2026-09-28, 重建结果文件后重开 repair)"
+  },
+  "started_at_utc": "2026-09-28T05:54:08.908664Z",
+  "finished_at_utc": "2026-09-28T05:54:16.848993Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "0d4d36af6c4b44df50df417ae3280388e32b6d1ac3998edbbc835bbde72661ac",
+  "candidate_digest": "5f24f74c28011ea82b7e18de3db5c8804f786e4d1fad45e9925fd823dc30634e",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-3c369789cecf443892e3db18ff8907b5-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-3c369789cecf443892e3db18ff8907b5-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-3ce255de7a9e4a94b590cadf6e1a7bce-scope.json"
+}
