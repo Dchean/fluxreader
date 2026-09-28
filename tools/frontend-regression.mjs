@@ -2455,6 +2455,103 @@ await (async () => {
     && p3f5VisNewest === '102' && p3f5VisOldest === '103'
     && store.getState().entries.map((e) => e.id).join(',') === p3f5StarIds);
 
+  /* ---------- (p3b) TASK-098：selectLayout/selectView/selectFeed 的 void reload 全量收口（F5 同款铺开） ----------
+     TASK-093 的 F5 只收口了 toggleTimelineSort；TASK-098 独立审查把同款暴露铺开收口：
+     selectLayout / selectView（缓存命中与未命中两条路）/ selectFeed 的 void reload
+     此前均无 .catch——reloadFromBackend 失败时 toast 后重抛 ⇒ unhandled rejection。
+     断言复用 (p3-f5) ① 的 unhandled 捕获装置：注入后端拒绝，触发入口，捕获进程级
+     unhandledRejection。App.tsx 的 feeds-updated 事件路径无法在无浏览器装置里驱动
+     组件，另加源码形态断言钉住（readFileSync 手法沿用本文件既有写法）。 */
+  {
+    const fsP3b = await import('node:fs');
+    const navSrcP3b = fsP3b.readFileSync(new URL('../src/store/slices/nav.ts', import.meta.url), 'utf8');
+    const appSrcP3b = fsP3b.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+    const p3bNavReloadLines = navSrcP3b.split('\n').filter((l) => /void get\(\)\.reload(FromBackend|FilteredEntries)\(/.test(l));
+    checkNew('(p3b) nav.ts 全部 void reload 调用点（9 处：selectLayout / selectView 两条路 / selectFeed / toggleTimelineSort）逐行带 .catch（漏一处即失败）',
+      p3bNavReloadLines.length === 9 && p3bNavReloadLines.every((l) => l.includes('.catch(')));
+    checkNew('(p3b) App.tsx 后台刷新事件（feeds-updated）的 void reloadFromBackend 同样带 .catch（删掉即失败）',
+      /void useAppStore\.getState\(\)\.reloadFromBackend\(\)\.catch\(/.test(appSrcP3b));
+
+    /* ① selectView 缓存命中路径：bootFixture 已把「all」快照写进 viewEntriesCache，
+         selectView('all') 命中缓存 → 后台静默刷新失败（toast 后重抛，本入口须接住） */
+    await bootFixture();
+    failReload = { message: 'db busy' };
+    store.setState({ toasts: [] });
+    const p3bUn1 = [];
+    const p3bOn1 = (r) => { p3bUn1.push(r); };
+    process.on('unhandledRejection', p3bOn1);
+    store.getState().selectView('all');
+    await nTick(30);
+    process.off('unhandledRejection', p3bOn1);
+    failReload = null;
+    checkNew('(p3b) selectView 缓存命中路径的后台刷新失败：无 unhandled rejection（失败提示仍由 reloadFromBackend 给出）',
+      p3bUn1.length === 0
+      && store.getState().toasts.some((t) => t.text.startsWith('刷新失败：')));
+
+    /* ② selectView 无缓存路径：清掉快照缓存 → selectView('all') 走直拉路径 */
+    await bootFixture();
+    viewEntriesCache.clear();
+    failReload = { message: 'db busy' };
+    store.setState({ toasts: [] });
+    const p3bUn2 = [];
+    const p3bOn2 = (r) => { p3bUn2.push(r); };
+    process.on('unhandledRejection', p3bOn2);
+    store.getState().selectView('all');
+    await nTick(30);
+    process.off('unhandledRejection', p3bOn2);
+    failReload = null;
+    checkNew('(p3b) selectView 无缓存路径的重拉失败：无 unhandled rejection（失败提示仍由 reloadFromBackend 给出）',
+      p3bUn2.length === 0
+      && store.getState().toasts.some((t) => t.text.startsWith('刷新失败：')));
+
+    /* ③ selectFeed：该范围的快照缓存未命中 → 直接后台重拉 */
+    await bootFixture();
+    failReload = { message: 'db busy' };
+    store.setState({ toasts: [] });
+    const p3bUn3 = [];
+    const p3bOn3 = (r) => { p3bUn3.push(r); };
+    process.on('unhandledRejection', p3bOn3);
+    store.getState().selectFeed('10');
+    await nTick(30);
+    process.off('unhandledRejection', p3bOn3);
+    failReload = null;
+    checkNew('(p3b) selectFeed 的重拉失败：无 unhandled rejection（失败提示仍由 reloadFromBackend 给出）',
+      p3bUn3.length === 0
+      && store.getState().toasts.some((t) => t.text.startsWith('刷新失败：')));
+
+    /* ④ selectLayout：布局切换触发按新布局重拉 */
+    await bootFixture();
+    failReload = { message: 'db busy' };
+    store.setState({ toasts: [] });
+    const p3bUn4 = [];
+    const p3bOn4 = (r) => { p3bUn4.push(r); };
+    process.on('unhandledRejection', p3bOn4);
+    store.getState().selectLayout('social');
+    await nTick(30);
+    process.off('unhandledRejection', p3bOn4);
+    failReload = null;
+    checkNew('(p3b) selectLayout 的重拉失败：无 unhandled rejection（失败提示仍由 reloadFromBackend 给出）',
+      p3bUn4.length === 0
+      && store.getState().toasts.some((t) => t.text.startsWith('刷新失败：')));
+
+    /* ⑤ 筛选视图：selectView('starred') → reloadFilteredEntries。list_articles 拒绝时
+         该函数内部 toast、不重抛——无 unhandled rejection 且失败可见（口径同 F5：
+         可见性由 reload 自身给出，调用点只兜底） */
+    await bootFixture();
+    listPlan = { mode: 'reject', error: { message: 'db busy' } };
+    store.setState({ toasts: [] });
+    const p3bUn5 = [];
+    const p3bOn5 = (r) => { p3bUn5.push(r); };
+    process.on('unhandledRejection', p3bOn5);
+    store.getState().selectView('starred');
+    await nTick(30);
+    process.off('unhandledRejection', p3bOn5);
+    listPlan = null;
+    checkNew('(p3b) 筛选视图 selectView 的拉取失败：无 unhandled rejection，失败提示由 reloadFilteredEntries 自身给出',
+      p3bUn5.length === 0
+      && store.getState().toasts.some((t) => t.text.startsWith('筛选列表加载失败：')));
+  }
+
   /* ============================================================
      TASK-052 §A/B：口径修复的可观察判据（同一组判据在修前/修后分别跑过）
      每条都对应「修前为假 → 修后为真」的可观察量。完整 A/B 明细见

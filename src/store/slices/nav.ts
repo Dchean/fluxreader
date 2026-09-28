@@ -70,8 +70,10 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       set({ entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
     }
-    if (view !== 'all') void get().reloadFilteredEntries(view);
-    else void get().reloadFromBackend();
+    /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
+       reload 自身的 toast 给出，这里只吞掉残余重抛，避免 unhandled rejection。 */
+    if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+    else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
   },
 
   /* TASK-052 契约（per-scope 游标）：游标与列表口径绑定，切换口径时必须让两者
@@ -106,15 +108,17 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       set({ activeViewFilter: view, openedReadIds: {}, entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
-      if (view !== 'all') void get().reloadFilteredEntries(view);
-      else void get().reloadFromBackend();
+      /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
+      if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+      else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
       return;
     }
     set({ activeViewFilter: view, openedReadIds: {} });
     // 非「全部」视图：按后端筛选拉取完整列表替换 entries（收藏/未读的老文章
     // 不在「全部」的分页快照里）；「全部」视图：恢复分页快照。
-    if (view !== 'all') void get().reloadFilteredEntries(view);
-    else void get().reloadFromBackend();
+    /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
+    if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+    else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
   },
 
   /* TASK-052：切换订阅范围时按 per-scope 游标恢复分页游标；该范围从未加载过
@@ -146,8 +150,9 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       set({ entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
     }
-    if (view !== 'all') void get().reloadFilteredEntries(view);
-    else void get().reloadFromBackend();
+    /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
+    if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+    else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
   },
 
   toggleTimelineFilter: () =>
