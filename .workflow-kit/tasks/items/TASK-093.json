@@ -7,7 +7,7 @@
   "ui_change": false,
   "ui_contract_ref": null,
   "ui_checks": [],
-  "status": "verified",
+  "status": "done",
   "objective": "收口 Batch 1/2 独立审查（.workflow-kit/tasks/evidence/BATCH12-independent-review-20260924.md）的 5 条 P3：F1 bootstrap.ts:172 loadMore 竞态守卫只比 scopeKey 与 articlesLimit===offset、不含排序方向 ⇒ 旧排序在途页可被接到新排序列表（探针实测 duplicates 100 / missing 100）；F2 reader.ts:396-404 卡片失败回滚是「再翻一次当前值」⇒ 连点两次、首次失败时 UI 与 DB 不一致（探针实测 UI isRead=true / DB is_read=false）；F3 阅读器平行路径未收口：reader.ts:321-333 toggleCurrentReadStatus（及同文件同形的收藏入口）先弹乐观成功 toast、失败不回滚，ai.ts:231-252 toggleReaderTranslation 失败路径不按「无半截未消毒产物即清 rawTranslatedIds」规则处理；F4 frontend-regression.mjs 覆盖缺口：收藏失败回滚、onError 路径清标记、viewEntriesCache.clear、SocialCard 删除假成功 toast 四处变异后全绿，且 1626/2212/2227 三条在修前代码下也通过；F5 nav.ts:159-160 toggleTimelineSort 的 reloadFromBackend 无 .catch（unhandled rejection）、缺 dataMode 判断、筛选视图下重拉多余。修法：F1 给分页请求加代际（发起时记录 sort 或 reload 递增的 generation，返回时不一致丢弃）；F2/F3 卡片与阅读器共用一个「乐观写 + 仅当当前值仍等于乐观值才恢复原值 + 失败 toast」的 helper，成功提示只在成功后出现（与 P1-5 去假成功一致）；翻译失败路径共用 ai.ts 已有的清标记规则；F5 调用点 .catch + dataMode 判断，筛选视图（本地排序的全集）只做本地重排不重拉；F4 为以上每一处补断言，并加强 1626/2212/2227 使其具判别力。；另收口 TASK-092 两轮独立审查的 P3 备忘（tmp/review-092.json P2 外条目与 tmp/review-092-round2.json summary）：G1 coverImage.ts ready 缓存 LRU(300) 驱逐成功 URL 后可重新请求（注释已声明权衡，评估是否可接受或收紧）；G2 readyOrder 驱逐后重成功会重复 push 导致上限提前触顶；G3 Number(articleId) 对非数字 id 静默拒绝（当前全为纯数字串无损，评估 mock 前缀 id 语义）；G4 证据引用名与归档名差一个 ui- 前缀、ui-result.json 键名不统一（流程文档层，非代码）；G5 CoverImage.tsx 行尾 LF→CRLF 规范化与代理解码失败 reason=direct-error 不参与决策（确认无需改动即可关闭）。G1–G3 为代码项，G4–G5 核对后可直接关闭。",
   "non_goals": [
     "不改「全部已读」的写入口径（按可见集合写入仍待 owner 裁决）",
@@ -201,9 +201,11 @@
     "candidate_digest": "daf9213b187f63eb85cc60de66b5f2eb2c2ab5f19427a2d507ba44377f47adaf",
     "verification_run": "RUN-193cf241b3774e198b31c83cf2eacdec",
     "review_run": "RUN-bb3cea5349834fc7a33650bb0c3ea9f4",
-    "acceptance_ref": null,
-    "owner_decision_ids": [],
-    "merge_ref": null
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-8311df20f0f94720947b02a55085ea2f-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-8311df20f0f94720947b02a55085ea2f"
+    ],
+    "merge_ref": "bf60d0b"
   },
   "snapshot_paths": [
     ".workflow-kit/docs/UI-CONTRACT-REQ-106-IMAGES.md",

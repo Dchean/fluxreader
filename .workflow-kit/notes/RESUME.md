@@ -9,18 +9,18 @@
 
 目标：以 workflow-kit 2026-09-18.3 新周期对 fluxreader 持续改进：修复全项目体检发现的缺陷（P1/P2），处置功能空壳与死代码确保无未落实的宣称能力，完成 ingestion.rs 拆分与结构性硬化（pull 游标守卫、app_settings 收口），使项目稳定规范、代码与技术路线优雅高效
 
-当前阶段：**验收与交付**
+当前阶段：**分步实施**
 
-阶段目标：核对完整范围，交付可运行成果、使用说明及适用的恢复办法
+阶段目标：落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致
 
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | 需求与目标 | 明确目标、已有 Bug、新功能、其他要求、质量目标和执行边界 | 已完成 |
 | 分析与方案 | 记录参考、原始基线状态与限制，说明维护、稳定和性能取舍，并确认路线 | 已完成 |
 | 界面预览 | 验证关键流程、整体设计和控件完整状态，确认后沿用前端实现 | 不适用 |
-| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 分批推进 |
+| 分步实施 | 落实已确认的完整范围，逐步交付并保持已验收行为：社交布局下正文经常一直加载，切换一下布局又能秒加载；双向同步未真正做到：订阅操作与文章状态变更未回传同步后端；本地抓取模式下，本地文章数量与状态和同步后端不一致 | 当前 |
 | 回归与审查 | 以需求、失败路径、适用界面检查、维护性和性能证据核对当前组合候选 | 分批推进 |
-| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 当前 |
+| 验收与交付 | 核对完整范围，交付可运行成果、使用说明及适用的恢复办法 | 待推进 |
 
 **完整验收目标**：体检报告 AUDIT-20260919-v2.md 的 P1/P2 缺陷经确认后全部修复并有修前复现/修后验证的成对证据；结构性硬化落地：pull 分块失败不推进增量游标；app_settings 读取收口为类型化助手；ingestion.rs 拆分为领域模块，行为零变化，四门禁不回归；死代码/空壳集群处置完毕（删除或裁决保留），无未落实的宣称能力；设计边界项（P2-12/P3-11 等）经 owner 逐项裁决：实施或注释明示保留；既有质量底线延续：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283 不回退（通过数可增不可减）
 
@@ -28,11 +28,10 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 65 项：已验收 52，待验收 1，阻塞 0。
+已建任务 65 项：已验收 53，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-093 · Batch 1/2 独立审查 P3 收口：竞态守卫含排序、回滚恢复原值、阅读器平行路径、reload 异常与断言补齐（REQ-102）](<../tasks/cards/TASK-093.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -44,6 +43,7 @@
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
 另有 53 项记录可在任务总览查看。
 
@@ -85,7 +85,6 @@
 
 ## 最近事件
 
-- 2026-09-28T06:23:03.986674Z · note/progress · TASK-092 · 2026-09-28 会话总结：①启动包按 D:/workflow-kit QUICK_START rebind 升级（connected，check 0 错误；旧版备份 legacy/upgrade-20260928T050448Z；升级前工作区备份 tmp/upgrade-backup-20260928/，按「不提交未审查代码」决定未提前 commit）。②TASK-092 全流程收口：recover 中断证据 → extend 240min（DEC-b672049f，用户会话内确认）→ unblock×3（越界文件均主控行为：09-28 rebind 升级 + 09-24 TASK-094 契约预写）→ 新子代理补交互报告 C9/D10-D12 与 worker-result → 归档 UI 证据 → finish/verify → 首轮独立审查 PASS 含 1 条 P2（代理 img 缺 onError）→ 主控修复 + cov-wire 断言扩展 + M22 变异成对验证 → repair finish/verify → 全新子代理复审 PASS findings=0（增量经字节级核对仅声明两处）→ review 录入 → accept（DEC-f6a7d018，merge-ref 894c3bd）。提交：894c3bd 业务 12 文件、d8573e8 工作流记录。③TASK-092 两轮 P3 备忘（G1 LRU 驱逐重取、G2 readyOrder 重复 push、G3 Number(articleId) 静默拒绝、G4 证据命名、G5 CRLF/reason 确认项）已并入 tmp/task-093-spec.json，prepare TASK-093 时带入。④verify 提示：本任务 snapshot_paths 冻结 139 文件仅改 23 个，后续任务应收窄。
 - 2026-09-28T06:23:16.626668Z · note/lesson · workflow-kit 新引擎（2026-09-28 升级）三处契约坑，下次直接按此准备：①worker-result JSON 键集必须与契约精确相等——finish 成功时工具会自动给文件加 changed_files_source 键并改写 changed_files，从已 finish 的文件复制会带入多余键触发 protocol 阻塞；应始终从 worker 原始 9 键文件重建。②review 报告 ui_review.checked_states 每条必须恰为 ui_check id 字符串（整串相等，不能带结论后缀），evidence_files 只收 tasks/evidence/ 与 tasks/runs/ 下非空文件（截图+报告至少各一）。③PASS 且 findings 为空的报告要求 review_checks 恰好覆盖 5 个规范 area（requirements/regression/failure_paths/maintainability/performance，各一条、无自定义名、无多余条目），每条必带 evidence_files（候选文件或 evidence/runs 附件，tmp/ 无效）；观察性备忘写 summary 与 analysis，不进 findings。M22 变异证据已随 TASK-092 归档可作范例。
 - 2026-09-28T06:28:12.899438Z · prepare · TASK-093 · 任务已冻结：Batch 1/2 独立审查 P3 收口：竞态守卫含排序、回滚恢复原值、阅读器平行路径、reload 异常与断言补齐（REQ-102）；范围 src/**, tools/frontend-regression.mjs
 - 2026-09-28T06:28:35.749551Z · checkpoint · TASK-093 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
@@ -97,6 +96,7 @@
 - 2026-09-28T07:50:15.291988Z · checkpoint · TASK-093 · 编码结果已记录，差异范围已核对：src/lib/coverImage.ts, src/store/internals.ts, src/store/slices/ai.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-28T07:51:14.505014Z · checkpoint · TASK-093 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T08:03:26.358024Z · checkpoint · TASK-093 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-28T08:04:12.586162Z · accept · 验收 TASK-093；依据：owner 2026-09-28 会话指示「先push再继续推进未完成的任务」（DEC-task093-p3-batch-20260928）；独立审查 PASS findings=0
 
 ## 如何继续
 
