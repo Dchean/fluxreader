@@ -48,9 +48,10 @@ export const viewEntriesCache = new Map<string, ArticleEntry[]>();
     TASK-052 起**必须带 scope**：条目列表现在是「该范围的首批 N 条」，缓存若不
     带范围，源A 的首批会被当成「全部」的首批恢复——列表内容与标题/角标错配。
     （范围进 key 后缓存条目仍受控：只有实际被 reload / 切视图的「布局×视图×范围」
-    组合会建档，与之前「具体范围不缓存」的取舍等价。） */
+    组合会建档，与之前「具体范围不缓存」的取舍等价。）
+    TASK-094：entries 快照本就按布局分桶（键首段），格式与此前逐字一致。 */
 export function viewCacheKey(layout: ContentLayoutType, view: ViewFilterType, scope = 'all'): string {
-  return `${layout}|${view}|${scopePageKey(scope)}`;
+  return `${layout}|${view}|${scope || 'all'}`;
 }
 
 /* ============================================================
@@ -79,23 +80,33 @@ function scopeNumericId(raw: string): number {
 
 /** 订阅范围 + 排序 → list_articles / article_index 的查询参数。
     'cat-N' → folder_id=N；'all' → 两者皆 null；其余 → feed_id=数字。
-    两种 id 形态（纯数字 '12' / 前缀 'feed-12'）统一走数字提取。 */
+    两种 id 形态（纯数字 '12' / 前缀 'feed-12'）统一走数字提取。
+    TASK-094（REQ-107）：第三参 layout（可选）→ 透传给后端 list_articles /
+    article_index 的布局过滤（feed 级覆盖 → 分类兜底，与 resolveFeedLayout 同口径）。
+    此前布局只在前端本地过滤：后端全局分页、稀疏布局首批撑不满容器且 onScroll
+    不触发，列表永远停在首批。不传 layout 的调用（旧断言/无布局语义的调用点）
+    返回值与修前逐字一致（不含 layout 键）。 */
 export function scopeQueryArgs(
   scope: string,
   sort: 'newest' | 'oldest',
-): { feed_id: number | null; folder_id: number | null; newest_first: boolean } {
+  layout?: ContentLayoutType,
+): { feed_id: number | null; folder_id: number | null; newest_first: boolean; layout?: ContentLayoutType } {
   const isCat = scope.startsWith('cat-');
   return {
     feed_id: scope === 'all' || isCat ? null : scopeNumericId(scope),
     folder_id: isCat ? scopeNumericId(scope) : null,
     newest_first: sort === 'newest',
+    ...(layout ? { layout } : {}),
   };
 }
 
-/** 分页游标键：per-scope。'all' 亦有意作为一等范围键（而非空串/缺省），
-    否则不带 scope 的场景会被误并进 'all' 的游标。 */
-export function scopePageKey(scope: string): string {
-  return scope || 'all';
+/** 分页游标键：per-(布局 × 范围)。'all' 亦有意作为一等范围键（而非空串/缺省），
+    否则不带 scope 的场景会被误并进 'all' 的游标。
+    TASK-094（R7）：键必须含布局——布局切换后 entries 换成另一布局的快照，游标若
+    只按范围记账，「画廊第 2 页」会接着「文章第 1 页」的全局 offset 翻，整段错位。
+    不传 layout 的调用返回值与修前逐字一致（仅旧测试/兼容路径）。 */
+export function scopePageKey(scope: string, layout?: ContentLayoutType): string {
+  return layout ? `${layout}|${scope || 'all'}` : scope || 'all';
 }
 
 /** 由 categories 构建 feedId → { feed, cat } 解析表（每次 categories 变更后重建） */

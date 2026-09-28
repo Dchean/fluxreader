@@ -303,6 +303,7 @@ fn article_index_positions_align_with_list() {
         limit: 500,
         offset: 0,
         with_content: false,
+        layout: None,
     };
 
     // 全量列表顺序：最新（i=4）在最前

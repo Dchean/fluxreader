@@ -146,6 +146,9 @@ export interface ArticleListArgs {
   offset?: number;
   /** 附带正文 HTML（社交/通知布局直接渲染，免逐篇水合） */
   with_content?: boolean;
+  /** 布局过滤（TASK-094 / REQ-107，可选）：后端按 feed 级覆盖 → 分类兜底过滤，
+      列表分页因此带布局维度。省略 = 不过滤。 */
+  layout?: string;
 }
 
 /** 后端聚合的精确条目计数（按 feed 分组）——侧边栏数字用，不受列表分页 limit 影响 */

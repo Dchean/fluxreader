@@ -86,7 +86,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   reloadFromBackend: async () => {
     const gen = ++reloadGeneration;
     const layout = get().activeContentLayout;
-    const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort);
+    const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort, layout);
     let folders, feeds, articles, counts;
     try {
       [folders, feeds, articles, counts] = await Promise.all([
@@ -114,12 +114,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     }
     const nextEntries = articles.map(articleRowToEntry);
     /* 分页游标写回**发起 reload 时**的范围键（不是完成时的 activeFeedFilter：
-       两者可能已被用户改过，而游标属于发起时的查询口径）。 */
-    const scopeKey = scopePageKey(get().activeFeedFilter);
+       两者可能已被用户改过，而游标属于发起时的查询口径）。
+       TASK-094：entries 是该布局的快照，游标键带布局（R7：切布局不串游标）。 */
+    const scopeKey = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
     // 缓存「全部」视图快照：切回时零延迟恢复（视图切换卡顿的根治）。
     // TASK-052：快照就是**该范围**的首批，故缓存键必须带范围，否则源A 的首批
-    // 会被当成「全部」的首批恢复（数据错配）。
-    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, 'all', scopeKey), nextEntries);
+    // 会被当成「全部」的首批恢复（数据错配）。TASK-094：键首段本就是布局。
+    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, 'all', get().activeFeedFilter), nextEntries);
     set((s) => ({
       ...reconcileCategories(s, categories),
       entries: nextEntries,
@@ -153,11 +154,12 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const st = get();
     if (st.dataMode !== 'tauri') return;
     if (st.articlesLoading || st.articlesExhausted) return; // 已在加载 / 已到底
-    /* 发起时快照「范围 + 排序 + 游标」：三者必须来自同一时刻，否则请求参数与
+    /* 发起时快照「范围 + 布局 + 排序 + 游标」：四者必须来自同一时刻，否则请求参数与
        竞态比较的基准会互相错位（例如请求用旧范围、比较用新范围）。 */
     const scope = st.activeFeedFilter;
-    const scopeKey = scopePageKey(scope);
-    const scopeArgs = scopeQueryArgs(scope, st.timelineSort);
+    const layoutAtStart = st.activeContentLayout;
+    const scopeKey = scopePageKey(scope, layoutAtStart);
+    const scopeArgs = scopeQueryArgs(scope, st.timelineSort, layoutAtStart);
     const offset = st.articlesLimit;
     /* F1（Batch 1/2 独立审查 P3）：排序也必须参与竞态比较——offset 的含义随排序
        翻转（同 offset=500 在 newest/oldest 下指向不同的 500 条）。守卫原本只比
@@ -170,15 +172,16 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     try {
       const rows = await api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset, with_content: layoutNeedsBody(get().activeContentLayout) });
       // 竞态保护：加载期间游标被重置（reload / selectView 命中缓存恢复快照 / 切换
-      // 范围加载了该范围自己的游标），丢弃本次追加。必须顺手复位 articlesLoading
+      // 范围或布局加载了该口径自己的游标），丢弃本次追加。必须顺手复位 articlesLoading
       // （D3）：否则该标志永久为 true，被入口守卫（articlesLoading || articlesExhausted）
       // 永久挡住后续所有 loadMoreArticles —— 列表停在半截且加载动画常驻。
       // TASK-052 把比较基准从「全局 articlesLimit」收紧为「该范围的游标」：A 源在途时
       // 切到 B 源，B 源自己的游标可能与 offset 数值相同（例如都是 500），若只比数值会
       // 把属于 A 的迟到数据错接到 B 的列表上；带上 scopeKey 后这种串台也会被丢弃。
       // F1：排序翻转同样使该响应过期（见发起时的 sortAtStart 注释）。
+      // TASK-094（R7）：布局切换改变整个 entries 序列与游标键，布局在途响应一并过期。
       if (
-        scopePageKey(get().activeFeedFilter) !== scopeKey
+        scopePageKey(get().activeFeedFilter, get().activeContentLayout) !== scopeKey
         || get().articlesLimit !== offset
         || get().timelineSort !== sortAtStart
       ) {
@@ -221,8 +224,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       是同一范围、更窄的口径（视图筛选是范围的子集），两条路径共用范围游标。 */
   reloadFilteredEntries: async (view) => {
     if (get().dataMode !== 'tauri') return;
-    const scopeKey = scopePageKey(get().activeFeedFilter);
-    const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort);
+    const scopeKey = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
+    const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort, get().activeContentLayout);
     let rows;
     try {
       rows = await api.listArticles({
@@ -244,7 +247,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (get().activeViewFilter !== view) return;
     // 替换 entries（筛选视图的完整列表），重置分页游标（筛选视图不分页）
     const next = rows.map(articleRowToEntry);
-    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view, scopeKey), next);
+    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view, get().activeFeedFilter), next);
     set((s) => ({
       entries: next,
       articlesLimit: rows.length,
@@ -273,9 +276,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        注意顺序契约：本 action 按**调用时**的范围/排序构造查询，调用方（命令面板）
        必须先完成 selectFeed/selectView 的前置导航。 */
     const scope = st.activeFeedFilter;
-    const scopeKey = scopePageKey(scope);
+    const scopeKey = scopePageKey(scope, st.activeContentLayout);
     const args = {
-      ...scopeQueryArgs(scope, st.timelineSort),
+      ...scopeQueryArgs(scope, st.timelineSort, st.activeContentLayout),
       limit: ARTICLES_PAGE_SIZE,
       offset: 0,
       with_content: layoutNeedsBody(st.activeContentLayout),

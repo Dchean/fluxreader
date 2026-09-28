@@ -134,6 +134,10 @@ pub struct ArticleQuery {
     pub offset: i64,
     /// 附带正文 HTML（社交/通知布局直接渲染，免逐篇水合）
     pub with_content: bool,
+    /// 布局过滤（TASK-094 / REQ-107）：与前端 resolveFeedLayout 同口径
+    /// （feed 级覆盖 → 分类兜底，见 [`LAYOUT_FILTER_SQL`]）。
+    /// None = 不按布局过滤（既有行为逐字不变）。
+    pub layout: Option<String>,
 }
 
 /// 列表条目（含 body_text 截断生成的 snippet；with_content 时附带正文）
@@ -197,6 +201,15 @@ fn article_where(q: &ArticleQuery) -> (Vec<&'static str>, Vec<rusqlite::types::V
         // 与 date('now','localtime') 错位：非 UTC 时区用户本地凌晨（+08:00 的
         // 00:00-08:00）发布的文章不进「今天」视图。
         where_clauses.push("date(a.published_at, 'localtime') = date('now', 'localtime')");
+    }
+    if let Some(l) = &q.layout {
+        // TASK-094：列表查询的布局维度与 mark_all_read / list_unread_ids_scoped
+        // 同一段谓词（见 LAYOUT_FILTER_SQL，一处定义三处共用）。
+        // 外层 FROM 只有 articles（别名 a），片段里的 feed_id 无歧义地解析到它；
+        // f/fo 是子查询自己的别名，不受影响。
+        where_clauses.push(LAYOUT_FILTER_SQL);
+        params.push(l.clone().into());
+        params.push(l.clone().into());
     }
     (where_clauses, params)
 }
@@ -715,6 +728,15 @@ pub fn clear_article_cover_if_matches(
     )?)
 }
 
+/// 布局过滤谓词（TASK-094 收口：**一处定义，三处共用**）：feed 级 layout 覆盖 →
+/// 分类 layout 兜底，与前端 resolveFeedLayout 等价。此前 [`mark_all_read`] 与
+/// `list_unread_ids_scoped`（db/sync_map.rs）各持一份逐字相同的拷贝；列表查询
+/// （article_where → list_articles / article_index）加入布局维度后共三处消费，
+/// 故抽为此常量，三处拼接同一段 SQL，杜绝第四份拷贝。
+/// 常量本体不含前导 ` AND `（article_where 走子句 join；另两处拼接时自带）。
+/// 占位符 ? 按序绑定两次：第一次比 feed 级 layout，第二次比分类 layout。
+pub(crate) const LAYOUT_FILTER_SQL: &str = "feed_id IN (SELECT f.id FROM feeds f JOIN folders fo ON f.folder_id = fo.id WHERE (f.layout != 'inherit' AND f.layout = ?) OR (f.layout = 'inherit' AND fo.layout = ?))";
+
 /// 全部已读：作用于当前筛选范围（feed/folder/all），与前端「全部已读」按钮语义一致
 pub fn mark_all_read(
     conn: &Connection,
@@ -735,7 +757,9 @@ pub fn mark_all_read(
         binds.push(Box::new(folder));
     }
     if let Some(l) = layout {
-        sql.push_str(" AND feed_id IN (SELECT f.id FROM feeds f JOIN folders fo ON f.folder_id = fo.id WHERE (f.layout != 'inherit' AND f.layout = ?) OR (f.layout = 'inherit' AND fo.layout = ?))");
+        // 布局谓词与列表查询同源（LAYOUT_FILTER_SQL，TASK-094 收口）
+        sql.push_str(" AND ");
+        sql.push_str(LAYOUT_FILTER_SQL);
         binds.push(Box::new(l.to_string()));
         binds.push(Box::new(l.to_string()));
     }
@@ -889,6 +913,7 @@ mod tests {
             limit: 100,
             offset: 0,
             with_content: false,
+            layout: None,
         };
         let ids: Vec<i64> = list_articles(&conn, &q)
             .unwrap()
@@ -900,6 +925,210 @@ mod tests {
             1,
             "only_today 必须只含本地今天 01:00 的文章（N5 修前为 0，昨天的不计入）"
         );
+    }
+
+    /* ---------- TASK-094（REQ-107）：列表查询的布局维度 ---------- */
+
+    /// 三布局夹具：
+    ///   · folder_article(layout=article)：feed_override(layout=image，feed 级覆盖)
+    ///     与 feed_inherit(layout=inherit → 兜底 article)；
+    ///   · folder_podcast(layout=podcast)：feed_pod(layout=inherit → 兜底 podcast)。
+    /// 返回 (conn, feed_override, feed_inherit, feed_pod, 覆盖源文章, 继承源文章, 播客源文章)。
+    fn seed_layout_fixture() -> (Connection, i64, i64, i64, Vec<i64>, Vec<i64>, Vec<i64>) {
+        let conn = conn();
+        let folder_article = create_folder(&conn, "图文", "article").unwrap();
+        let folder_podcast = create_folder(&conn, "播客", "podcast").unwrap();
+        let feed_override = insert_feed(
+            &conn,
+            "https://ov.example/rss",
+            None,
+            "覆盖源",
+            None,
+            folder_article,
+            "image",
+            false,
+            false,
+        )
+        .unwrap();
+        let feed_inherit = insert_feed(
+            &conn,
+            "https://inh.example/rss",
+            None,
+            "继承源",
+            None,
+            folder_article,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let feed_pod = insert_feed(
+            &conn,
+            "https://pod.example/rss",
+            None,
+            "播客源",
+            None,
+            folder_podcast,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let plant = |feed: i64, tag: &str, n: usize| -> Vec<i64> {
+            (0..n)
+                .map(|i| {
+                    let a = na(
+                        &format!("{tag}{i}"),
+                        Some(format!("2026-01-01T00:00:{:02}Z", i)),
+                    );
+                    upsert_article_with_feed(&conn, feed, &a, false).unwrap().0
+                })
+                .collect()
+        };
+        let ids_override = plant(feed_override, "ov", 3);
+        let ids_inherit = plant(feed_inherit, "inh", 2);
+        let ids_pod = plant(feed_pod, "pod", 4);
+        (
+            conn,
+            feed_override,
+            feed_inherit,
+            feed_pod,
+            ids_override,
+            ids_inherit,
+            ids_pod,
+        )
+    }
+
+    fn layout_q(layout: Option<&str>) -> ArticleQuery {
+        ArticleQuery {
+            feed_id: None,
+            folder_id: None,
+            only_unread: false,
+            only_starred: false,
+            only_today: false,
+            newest_first: true,
+            limit: 500,
+            offset: 0,
+            with_content: false,
+            layout: layout.map(str::to_string),
+        }
+    }
+
+    fn listed_ids(conn: &Connection, q: &ArticleQuery) -> Vec<i64> {
+        list_articles(conn, q)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect()
+    }
+
+    fn sorted(mut v: Vec<i64>) -> Vec<i64> {
+        v.sort();
+        v
+    }
+
+    /// 情形一：feed 级 layout 覆盖优先——layout=image 只含覆盖源；
+    /// 该源在 layout=article 的查询里被排除（不被分类布局吞并）。
+    #[test]
+    fn list_articles_layout_feed_override() {
+        let (conn, _fo, _fi, _fp, ids_override, ids_inherit, _ip) = seed_layout_fixture();
+        assert_eq!(
+            sorted(listed_ids(&conn, &layout_q(Some("image")))),
+            sorted(ids_override.clone()),
+            "layout=image 必须恰好等于 feed 级覆盖为 image 的源（修前：查询无布局维度，返回全部）"
+        );
+        let article_ids = listed_ids(&conn, &layout_q(Some("article")));
+        assert_eq!(
+            sorted(article_ids.clone()),
+            sorted(ids_inherit),
+            "layout=article 只含分类兜底为 article 的源"
+        );
+        assert!(
+            !article_ids.iter().any(|id| ids_override.contains(id)),
+            "feed 级覆盖必须优先于分类布局：覆盖源不得混进 article 列表"
+        );
+    }
+
+    /// 情形二：分类兜底——inherit 源跟随分类 layout；feed 级覆盖不被兜底吞并。
+    #[test]
+    fn list_articles_layout_folder_fallback() {
+        let (conn, feed_override, _fi, _fp, _io, _ii, ids_pod) = seed_layout_fixture();
+        assert_eq!(
+            sorted(listed_ids(&conn, &layout_q(Some("podcast")))),
+            sorted(ids_pod),
+            "layout=podcast 必须兜底命中 inherit 源所在分类的 podcast 布局"
+        );
+        // feed 级覆盖 + 布局过滤可组合：覆盖源（image）在 layout=podcast 查询下为空集
+        let mut q = layout_q(Some("podcast"));
+        q.feed_id = Some(feed_override);
+        assert!(
+            listed_ids(&conn, &q).is_empty(),
+            "覆盖源（image）在 layout=podcast 查询下必须为空（feed 级覆盖不被分类兜底覆盖）"
+        );
+    }
+
+    /// 情形三：layout=None 行为逐字不变——不做任何布局过滤。
+    #[test]
+    fn list_articles_layout_none_returns_all() {
+        let (conn, _fo, _fi, _fp, ids_override, ids_inherit, ids_pod) = seed_layout_fixture();
+        let mut want = ids_override;
+        want.extend(&ids_inherit);
+        want.extend(&ids_pod);
+        assert_eq!(
+            sorted(listed_ids(&conn, &layout_q(None))),
+            sorted(want),
+            "layout=None 必须返回全部布局的条目（既有行为不变）"
+        );
+        // None 时查询不带布局子查询：对照「某布局过滤」结果数 < None 结果数
+        let image_count = listed_ids(&conn, &layout_q(Some("image"))).len();
+        let all_count = listed_ids(&conn, &layout_q(None)).len();
+        assert!(
+            image_count < all_count,
+            "夹具应跨布局（image {image_count} < 全部 {all_count}），否则本用例无判别力"
+        );
+    }
+
+    /// 情形四：article_index 与按布局过滤后的 list_articles 位置对齐——
+    /// 「绝对位置」必须与「该布局列表顺序」同口径，否则锚定分页会打开错文章。
+    #[test]
+    fn article_index_aligns_with_layout_filtered_list() {
+        let (conn, _fo, _fi, feed_pod, _io, _ii, _ip) = seed_layout_fixture();
+        let q = layout_q(Some("image"));
+        let all = list_articles(&conn, &q).unwrap();
+        assert_eq!(all.len(), 3, "夹具：image 布局 3 篇");
+        for (pos, row) in all.iter().enumerate() {
+            assert_eq!(
+                article_index(&conn, &q, row.id).unwrap(),
+                Some(pos as i64),
+                "layout 过滤下文章 {} 的绝对位置必须等于列表位置 {}",
+                row.id,
+                pos
+            );
+        }
+        // 不属于该布局的文章：过滤后的序列里没有它的位置
+        let pod_article: i64 = conn
+            .query_row(
+                "SELECT id FROM articles WHERE feed_id = ?1 LIMIT 1",
+                [feed_pod],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            article_index(&conn, &q, pod_article).unwrap(),
+            None,
+            "布局外文章在过滤后的序列中无位置（修前会返回全局位置，错配列表）"
+        );
+        // 从位置取页：offset=1 的首条必须是位置 1 的文章（锚定分页的前提）
+        let target = all[1].id;
+        let page = list_articles(
+            &conn,
+            &ArticleQuery {
+                offset: 1,
+                ..q.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(page[0].id, target);
     }
 
     /* ---------- P3[4]：purge_remote_data 必须保住用户自建的空目录 ---------- */

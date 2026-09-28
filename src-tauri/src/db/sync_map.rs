@@ -309,7 +309,9 @@ pub fn list_unread_ids_scoped(
         binds.push(Box::new(f));
     }
     if let Some(l) = layout {
-        sql.push_str(" AND feed_id IN (SELECT f.id FROM feeds f JOIN folders fo ON f.folder_id = fo.id WHERE (f.layout != 'inherit' AND f.layout = ?) OR (f.layout = 'inherit' AND fo.layout = ?))");
+        // 布局谓词与 db::mark_all_read / 列表查询同源（LAYOUT_FILTER_SQL，TASK-094 收口）
+        sql.push_str(" AND ");
+        sql.push_str(super::articles::LAYOUT_FILTER_SQL);
         binds.push(Box::new(l.to_string()));
         binds.push(Box::new(l.to_string()));
     }

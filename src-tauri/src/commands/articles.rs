@@ -23,6 +23,10 @@ pub struct ArticleListArgs {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub with_content: Option<bool>,
+    /// 布局过滤（TASK-094 / REQ-107，可选）：与前端 ContentLayoutType 同词表
+    /// （article/social/image/podcast/notification）。省略 = 不过滤（既有调用
+    /// 逐字不变）；过滤口径与 mark_all_read 同源（feed 级覆盖 → 分类兜底）。
+    pub layout: Option<String>,
 }
 
 #[tauri::command]
@@ -58,6 +62,7 @@ fn article_query(args: &ArticleListArgs) -> db::ArticleQuery {
         limit: args.limit.unwrap_or(500),
         offset: args.offset.unwrap_or(0),
         with_content: args.with_content.unwrap_or(false),
+        layout: args.layout.clone(),
     }
 }
 
@@ -460,6 +465,7 @@ mod bulk_read_tests {
             "limit": 50,
             "offset": 100,
             "with_content": true,
+            "layout": "image",
         });
 
         let args: ArticleListArgs = serde_json::from_value(json_payload).unwrap();
@@ -472,5 +478,10 @@ mod bulk_read_tests {
         assert_eq!(args.limit, Some(50));
         assert_eq!(args.offset, Some(100));
         assert_eq!(args.with_content, Some(true));
+        // TASK-094：可选 layout（snake_case 键名与前端一致）；缺省 = None
+        assert_eq!(args.layout.as_deref(), Some("image"));
+        let without: ArticleListArgs =
+            serde_json::from_value(serde_json::json!({ "limit": 1 })).unwrap();
+        assert_eq!(without.layout, None, "layout 缺省必须是 None（不过滤）");
     }
 }

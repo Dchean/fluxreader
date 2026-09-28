@@ -18,6 +18,7 @@ import { CoverImage } from './CoverImage';
 import type { ArticleEntry } from '../types';
 import { useEnteringClass } from './useEnteringClass';
 import { sentinelMode } from './timelineSentinel';
+import { refillDecision } from './timelineRefill';
 
 /* ============================================================
    Timeline —— 顶栏（标题/筛选/排序/全部已读）+ 五布局渲染器
@@ -190,15 +191,55 @@ export function Timeline() {
     }
   };
 
-  /* TASK-052 空列表补拉：列表为空且未到底（首批满页但当前范围/视图筛掉了全部条目，
-     例如单源视图下首 500 条里没有该源的文章）时，容器不可滚动 ⇒ onScroll 永不触发
-     ⇒ 分页永远停在第 1 页。这里在挂载与筛选口径变化后主动补拉一次。
-     loadMoreArticles 自带入口守卫（在途/已到底直接返回），挂载期重复调用是安全的；
-     若该范围真的没有更多数据，拉回空页后会置 articlesExhausted，本 effect 自然收敛。 */
+  /* TASK-052 空列表补拉 + TASK-094 不足一屏续拉：判定收口在 timelineRefill.refillDecision
+     （纯函数，回归网直接断言）。列表为空、或非空但未撑满视口（scrollHeight<=clientHeight，
+     onScroll 永不触发）且未到底时，主动续拉直到撑满或到底。连续自动调用有上限
+     （AUTO_REFILL_MAX_CALLS）：后端持续返回整页新数据而可见集合不增长时停止，
+     交给哨兵的「加载更多」按钮；可见进展（items 增长）或筛选口径变化即重置计数。
+     loadMoreArticles 自带入口守卫（在途/已到底直接返回），挂载期重复调用是安全的。 */
+  const autoRefillRef = useRef(0);
+  const prevItemCountRef = useRef(0);
+  const lastFilterKeyRef = useRef('');
   useEffect(() => {
-    if (items.length > 0 || articlesExhausted) return;
-    void loadMoreArticles();
-  }, [filterKey, items.length, articlesExhausted, loadMoreArticles]);
+    if (lastFilterKeyRef.current !== filterKey) {
+      lastFilterKeyRef.current = filterKey;
+      autoRefillRef.current = 0;
+      prevItemCountRef.current = items.length;
+    }
+    if (items.length > prevItemCountRef.current) autoRefillRef.current = 0; // 有可见进展 → 重新计数
+    prevItemCountRef.current = items.length;
+    const el = scrollRef.current;
+    /* filledViewport 与下方哨兵的「可滚动」同一测量：scrollHeight 比 clientHeight
+       多出 1px 以上才算撑满（== 视为不可滚动）。 */
+    const filledViewport = !!el && el.scrollHeight - el.clientHeight > 1;
+    if (
+      refillDecision({
+        itemCount: items.length,
+        exhausted: articlesExhausted,
+        loading: articlesLoading,
+        filledViewport,
+        autoCalls: autoRefillRef.current,
+      }) === 'refill'
+    ) {
+      autoRefillRef.current += 1;
+      void loadMoreArticles();
+    }
+  }, [filterKey, items.length, articlesExhausted, articlesLoading, loadMoreArticles]);
+
+  /* 哨兵「滚动加载更多」只在容器确实可滚动时出现（REQ-107：不可滚动的容器上
+     用户执行不了「滚动」）。不可滚动且未到底时改渲染可点击的「加载更多」按钮。
+     测量在 layout effect（paint 前）做：稀疏布局首帧不会闪现「滚动加载更多」。
+     items/筛选口径变化、窗口尺寸变化都会改变可滚性，故一并监听。 */
+  const [listScrollable, setListScrollable] = useState(true);
+  useLayoutEffect(() => {
+    const update = () => {
+      const el = scrollRef.current;
+      if (el) setListScrollable(el.scrollHeight - el.clientHeight > 1);
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, [items, filterKey, activeContentLayout]);
 
   /* 哨兵形态：判定收口在 timelineSentinel.sentinelMode（纯函数，回归网直接断言） */
   const sentinel = sentinelMode(items.length, articlesExhausted, articlesLoading);
@@ -294,13 +335,23 @@ export function Timeline() {
             TASK-052：此前整块被 `items.length > 0` 挡住——列表为空时哨兵不渲染，
             滚动事件无从触发，「该范围的老文章永远够不到」。列表为空但**批次已满**
             （articlesExhausted=false）时同样渲染：空列表 + 未到底 = 还有数据待取。
-            真正到底（空且已到底）时不渲染，避免「没有更多了」与「暂无匹配内容」重复。 */}
+            真正到底（空且已到底）时不渲染，避免「没有更多了」与「暂无匹配内容」重复。
+            TASK-094（REQ-107）：容器不可滚动时「滚动加载更多」不可执行，改为可点击的
+            「加载更多」按钮（原生 button：键盘可聚焦，Enter/空格原生触发）。 */}
         {sentinel !== 'hidden' && (
           <div className="timeline-load-more">
             {sentinel === 'loading' ? (
               <span className="load-more-spinner" aria-label="加载中" />
             ) : sentinel === 'end' ? (
               <span className="load-more-end">没有更多了</span>
+            ) : !listScrollable ? (
+              <button
+                type="button"
+                className="toggle-action-btn load-more-btn"
+                onClick={() => void loadMoreArticles()}
+              >
+                加载更多
+              </button>
             ) : (
               <span className="load-more-idle">滚动加载更多</span>
             )}

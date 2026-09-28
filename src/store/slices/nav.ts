@@ -52,12 +52,26 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       /* 切换布局 = 刷新列表，清除"已读保留"快照 */
       openedReadIds: {},
     });
-    /* 不触发 reload：布局切换是纯本地过滤（selectVisibleEntries 按新布局
-       resolve feed 布局），零延迟。列表快照本身不带正文（with_content 恒 false，
-       正文由 useLazyHydrate 按视口批量水合，见 bootstrap.ts 的 layoutNeedsBody），
-       因此新布局的卡片正文会在挂载时水合——不会出现「切换瞬间渲染旧布局正文」
-       的错配。之前在此触发 reload 会带来异步等待 + 空列表闪动，是「切换卡顿」
-       的根因。 */
+    /* TASK-094（REQ-107）：布局是后端列表查询的维度（list_articles 带 layout），
+       entries 快照只含当前布局的条目——切布局后旧快照对新布局是错的，纯本地过滤
+       不再成立，必须按新布局重拉（与 selectFeed 同构：命中缓存先同步恢复该
+       「布局×视图×范围」快照零延迟显示，再后台刷新；游标按 (布局×范围) 恢复，
+       各布局首批从自己的第 1 页开始，切回不重复不跳页）。 */
+    if (get().dataMode !== 'tauri') return;
+    const scopeKey = scopePageKey(get().activeFeedFilter, layout);
+    set((s) => ({
+      articlesLimit: s.articlesCursor[scopeKey] ?? 0,
+      articlesExhausted: false,
+      articlesLoading: false,
+    }));
+    const view = get().activeViewFilter;
+    const cached = viewEntriesCache.get(viewCacheKey(layout, view, get().activeFeedFilter));
+    if (cached) {
+      set({ entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
+      get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
+    }
+    if (view !== 'all') void get().reloadFilteredEntries(view);
+    else void get().reloadFromBackend();
   },
 
   /* TASK-052 契约（per-scope 游标）：游标与列表口径绑定，切换口径时必须让两者
@@ -86,8 +100,8 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        TASK-063：恢复时必须清水合状态——缓存快照不带正文，水合守卫
        （ensureArticleContent 的 hydratedIds 短路）会把上次会话的滞留标记误判为
        「已水合」，社交/通知卡片在后台刷新落地前空白且不会重水合。 */
-    const scopeKey = scopePageKey(get().activeFeedFilter);
-    const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, scopeKey));
+    const scopeKey = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
+    const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, get().activeFeedFilter));
     if (cached) {
       set({ activeViewFilter: view, openedReadIds: {}, entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
@@ -117,7 +131,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
      「永不重水合」的正文空白）。mock 模式保持纯游标镜像（不触发 IPC、
      不把 mock 会话翻成 tauri）。 */
   selectFeed: (feedId) => {
-    const scopeKey = scopePageKey(feedId);
+    const scopeKey = scopePageKey(feedId, get().activeContentLayout);
     set((s) => ({
       activeFeedFilter: feedId,
       openedReadIds: {},
@@ -127,7 +141,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     }));
     if (get().dataMode !== 'tauri') return;
     const view = get().activeViewFilter;
-    const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, scopeKey));
+    const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, feedId));
     if (cached) {
       set({ entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
@@ -177,7 +191,9 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          与分页/锚定共用 scopeQueryArgs（TASK-052 口径收口），feed id 形态
          （'feed-123' / 纯数字 '123'）的数字提取只此一份。 */
       const scope = get().activeFeedFilter;
-      const { feed_id: feedId, folder_id: folderId } = scopeQueryArgs(scope, get().timelineSort);
+      /* 布局口径由下方 api.markAllRead 的 layout 参数承载（写入口径不变）；
+         scopeQueryArgs 在此只取 feed_id / folder_id。 */
+      const { feed_id: feedId, folder_id: folderId } = scopeQueryArgs(scope, get().timelineSort, get().activeContentLayout);
       /* F8：视图口径必须与界面一致——收藏/今天视图只标该视图可见的文章，
          否则会把范围内未显示的文章一并标读（并推给远端），与文案不符 */
       const view = get().activeViewFilter;
