@@ -71,5 +71,6 @@
 | [TASK-094](items/TASK-094.json) | 三布局列表可达性：列表查询加布局维度 + 不足一屏自动续拉 + 可执行的加载提示（REQ-107） | done |
 | [TASK-095](items/TASK-095.json) | e2e 临时库唯一命名收口：共享 helper 消除 CI flaky 根因 + mock 线程健壮性（REQ-102 测试基建） | cancelled |
 | [TASK-096](items/TASK-096.json) | e2e 临时库唯一命名收口：共享 helper 消除 CI flaky 根因 + mock 线程健壮性（REQ-102 测试基建） | done |
+| [TASK-097](items/TASK-097.json) | 同步增量窗口收口：greader 游标改取拉取起点 + mock_greader changed_at 语义全面核对（REQ-002） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

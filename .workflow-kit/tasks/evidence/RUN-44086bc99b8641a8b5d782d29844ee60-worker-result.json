@@ -1,0 +1,21 @@
+{
+  "task_id": "TASK-098",
+  "run_id": "RUN-44086bc99b8641a8b5d782d29844ee60",
+  "status": "ready_for_verification",
+  "summary": "枚举：9 处 void reload 暴露，均按 F5 口径补 .catch：nav.ts（selectLayout/selectView 两路/selectFeed）8 处＋App.tsx:91 监听。不动：nav.ts:189 为 F5 已修；bootstrap.ts:145 在本体（禁改）且 reloadFilteredEntries 自 catch 不重抛；bootstrap.ts:356、sync、feeds×6、settings 已有 catch。断言 (p3b)×7（复用 (p3-f5)）：源码钉住 nav.ts 9 行与 App.tsx 的 .catch；行为断言 selectView 两路/selectFeed/selectLayout/筛选视图注入失败后无 unhandledRejection、toast 可见。红绿：去 nav.ts:113 .catch → 变红 exit=1 → 还原 419/419 全绿（日志 tmp/task-098/）。门禁全过：cargo test 222/0/9、fmt、clippy、lint、build。未改本体与 Rust。",
+  "changed_files": [
+    "src/App.tsx",
+    "src/store/slices/nav.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "cargo_test",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

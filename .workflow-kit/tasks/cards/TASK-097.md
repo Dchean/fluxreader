@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-097 · 同步增量窗口收口：greader 游标改取拉取起点 + mock_greader changed_at 语义全面核对（REQ-002）
 
-**状态**：verified
+**状态**：done
 
 **目标**：收口两条登记在案的同步增量窗口缺陷（JOURNAL 2026-09-24T05:06:31Z 与 2026-09-23T07:57Z，均建议合并为一卡评估）。① greader_pull.rs 游标语义：src-tauri/src/sync/greader_pull.rs:149 在本轮拉取全部成功后 set_last_sync_ts(Utc::now())（拉取结束墙钟）。id 列举发生在拉取过程内的某个时刻，凡 changed_at 落在「id 列举之后 ~ 拉取结束之前」的服务端变更不在本轮结果里，又因 changed_at < 游标被排除在下一轮增量之外，只能等全量对账补回——拉取耗时越长漏得越多。修法（保持既有基础设施）：在 id 列举开始前取本轮游标候选（pull 起点墙钟，或取本轮实际观察到的最大 changed_at，二者择一并注释论证），成功推进游标时写该值而非结束时刻；明确与既有「failures>0 不推进游标、下一轮重拉同一窗口」语义的组合正确性（起点游标 + 幂等合并 ⇒ 无漏无重）。注意核对增量过滤的比较方向（>= 还是 >）与游标回退/首次同步（last_sync_ts 为空取 0）的边界。② mock_greader.rs changed_at 语义全面核对：09-23 已修一处（sync_content_e2e 的 miniflux_existing_entry_backfills_cover：mock 改正文时未同步前移 changed_at，与真实 Miniflux「重新抓取会更新 crawl/change 时间」语义不符，导致与增量窗口赛跑的假 flaky）。任务：通读 mock_greader.rs 与所有引用它的测试，枚举「mock 修改了条目内容/状态但未更新 changed_at」的全部同类点，逐个对照真实 GReader/Miniflux 服务端语义订正 mock（真实服务端改内容必更新 changed_at），并在 mock 顶部注释写明语义契约；每处订正附说明（为什么该用例的真实服务端行为会更新 changed_at，或该用例确实不涉及变更故无需改）。不改产品同步逻辑的其他部分；Fever/pull_cursor 等既有游标测试语义不动（除受①影响的断言外）。
 

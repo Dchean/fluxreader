@@ -28,11 +28,11 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 69 项：已验收 55，待验收 1，阻塞 0。
+已建任务 70 项：已验收 56，待验收 1，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
-| [TASK-097 · 同步增量窗口收口：greader 游标改取拉取起点 + mock_greader changed_at 语义全面核对（REQ-002）](<../tasks/cards/TASK-097.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
+| [TASK-098 · 前端 reload 异常处理收口：selectView/selectFeed 补 .catch（REQ-102）](<../tasks/cards/TASK-098.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -45,7 +45,7 @@
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 57 项记录可在任务总览查看。
+另有 58 项记录可在任务总览查看。
 
 **本轮暂缓**：SQL 性能与索引加固（审计 route-M，主控已用 EXPLAIN QUERY PLAN 独立复核）：M-5 列表查询因 COALESCE 表达式排序使 idx_articles_published 对 8 个变体全失效（SCAN + USE TEMP B-TREE FOR ORDER BY）；M-7 sync_queue 零索引致每次标读全表扫；M-9 一次全部已读 = 1 SELECT + 1 UPDATE + 2N 往返且全程持锁；M-14 v6→v7 后置回填在事务外且以 user_version 当完成标记（半途中断永不重试）。
 
@@ -83,18 +83,18 @@
 
 ## 最近事件
 
-- 2026-09-28T10:34:36.475189Z · cancel · TASK-095 · 规格缺陷自纠：baseline.evidence_ref 误指 JOURNAL.md（工具自写的可变记录），prepare 追加冻结行后输入快照必然失配；改引不可变证据文件后重立；依据：主控 2026-09-28 自查：prepare 冻结后 begin 校验 candidate changed，对比确认唯一差异为 prepare 自身追加的 JOURNAL 冻结行；任务未 begin、零代码改动
-- 2026-09-28T10:36:07.147131Z · prepare · TASK-096 · 任务已冻结：e2e 临时库唯一命名收口：共享 helper 消除 CI flaky 根因 + mock 线程健壮性（REQ-102 测试基建）；范围 src-tauri/tests/**
-- 2026-09-28T10:36:13.499774Z · checkpoint · TASK-096 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-09-28T10:56:56.926699Z · checkpoint · TASK-096 · 编码结果已记录，差异范围已核对：src-tauri/tests/account_lifecycle_e2e.rs, src-tauri/tests/ai_e2e.rs, src-tauri/tests/common/mod.rs, src-tauri/tests/config_sync_e2e.rs, src-tauri/tests/cover_backfill_e2e.rs, src-tauri/tests/dedup_sync_e2e.rs, src-tauri/tests/dual_client_e2e.rs, src-tauri/tests/endpoint_autodetect_e2e.rs, src-tauri/tests/feed_edit_e2e.rs, src-tauri/tests/fever_sync_live_e2e.rs, src-tauri/tests/ingestion_e2e.rs, src-tauri/tests/migration_test.rs, src-tauri/tests/pull_cursor_e2e.rs, src-tauri/tests/refresh_dedup_e2e.rs, src-tauri/tests/regression_e2e.rs, src-tauri/tests/scheduler_e2e.rs, src-tauri/tests/staged_refresh_e2e.rs, src-tauri/tests/sync_content_e2e.rs, src-tauri/tests/sync_e2e.rs, src-tauri/tests/sync_gap_repro_e2e.rs, src-tauri/tests/sync_phases_e2e.rs, src-tauri/tests/unique_db_path_test.rs；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-09-28T10:57:31.161884Z · checkpoint · TASK-096 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
-- 2026-09-28T11:08:43.430004Z · checkpoint · TASK-096 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
-- 2026-09-28T11:09:08.635013Z · accept · 验收 TASK-096；依据：owner 2026-09-28 指示「修复 ci 没过问题」（DEC-route-remaining-20260928）；独立审查 PASS findings=0
 - 2026-09-28T11:10:48.258015Z · prepare · TASK-097 · 任务已冻结：同步增量窗口收口：greader 游标改取拉取起点 + mock_greader changed_at 语义全面核对（REQ-002）；范围 src-tauri/src/**, src-tauri/tests/**
 - 2026-09-28T11:10:54.716120Z · checkpoint · TASK-097 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-28T11:47:55.937815Z · checkpoint · TASK-097 · 编码结果已记录，差异范围已核对：src-tauri/src/sync/greader_pull.rs, src-tauri/src/sync/mod.rs, src-tauri/tests/dual_client_e2e.rs, src-tauri/tests/mock_greader.rs, src-tauri/tests/pull_window_e2e.rs, src-tauri/tests/sync_content_e2e.rs, src-tauri/tests/sync_e2e.rs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-28T11:48:59.924286Z · checkpoint · TASK-097 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-28T12:01:42.126981Z · checkpoint · TASK-097 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-28T12:01:54.537371Z · accept · 验收 TASK-097；依据：owner 2026-09-28 指示「将未完成的任务进行立卡优化调整完成」（DEC-route-remaining-20260928）；独立审查 PASS findings=0
+- 2026-09-28T12:02:54.294338Z · batch · 关闭 BATCH-3b1e9a89eb8a464fb861be8f1bcc3179，开启 BATCH-d11d22edcd1c4faf8453695d32926081；策略允许自动续批
+- 2026-09-28T12:03:01.969285Z · prepare · TASK-098 · 任务已冻结：前端 reload 异常处理收口：selectView/selectFeed 补 .catch（REQ-102）；范围 src/**, tools/frontend-regression.mjs
+- 2026-09-28T12:03:08.157548Z · checkpoint · TASK-098 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-28T12:19:46.659052Z · checkpoint · TASK-098 · 编码结果已记录，差异范围已核对：src/App.tsx, src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-28T12:20:11.303059Z · checkpoint · TASK-098 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-28T12:29:24.848587Z · checkpoint · TASK-098 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 
 ## 如何继续
 
