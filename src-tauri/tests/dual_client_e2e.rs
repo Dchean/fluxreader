@@ -226,6 +226,10 @@ async fn read_intent_flows_both_ways_across_feeds() {
     server.entries.lock().unwrap().iter_mut().for_each(|e| {
         if e.id == copy_id {
             e.read = true;
+            // TASK-097 契约：状态变更即变更——真实 Miniflux SetEntriesStatus 对
+            // 命中行 SET changed_at=now()，mock 侧直接改状态的写点同样前移
+            // （本用例后续是 full 同步不依赖窗口，但写点须符合 mock 语义契约）
+            e.changed_at = chrono::Utc::now().timestamp();
         }
     });
     let _ = app_lib::sync::sync_now(&db, &http).await.expect("sync 2");

@@ -6,8 +6,32 @@ use crate::error::AppResult;
 use crate::greader::{self, GReaderClient};
 use chrono::Utc;
 use rusqlite::Connection;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// TASK-097 可测性小口子：greader pull 的游标墙钟统一走 `pull_now`，测试可经
+/// `set_greader_pull_clock_override` 注入固定值，避免用例与真实时钟赛跑
+/// （unix 秒在用例中途翻转会把「修前必红 / 修后必绿」退化成概率性）。
+/// 仅 greader pull 消费；Fever / push / scheduler 等仍直接用 `Utc::now()`，语义不变。
+static PULL_CLOCK_OVERRIDE: AtomicI64 = AtomicI64::new(0);
+
+/// greader pull 的「现在」（unix 秒）：未注入时即系统墙钟。
+fn pull_now() -> i64 {
+    let injected = PULL_CLOCK_OVERRIDE.load(Ordering::Relaxed);
+    if injected != 0 {
+        injected
+    } else {
+        Utc::now().timestamp()
+    }
+}
+
+/// 注入 greader pull 的游标墙钟（`None` 恢复真实时钟）。
+/// `#[doc(hidden)]`：仅供集成测试构造确定性时间线（TASK-097 成对测试），非公开 API。
+#[doc(hidden)]
+pub fn set_greader_pull_clock_override(ts: Option<i64>) {
+    PULL_CLOCK_OVERRIDE.store(ts.unwrap_or(0), Ordering::Relaxed);
+}
 
 /// 拉远端条目（新条目 + 状态变化），按 remote_id/URL 匹配合并。
 /// 分页三段式：每页「锁外拉取 → 锁内合并」，锁从不跨分页 HTTP await。
@@ -23,6 +47,24 @@ pub(super) async fn pull_entries_greader(
         let conn = db.lock().await;
         db::last_sync_ts(&conn).unwrap_or(0)
     };
+
+    // TASK-097 游标语义修正：本轮游标候选在 id 列举**开始前**取（拉取起点墙钟），
+    // 拉取成功时写候选，而非修前的「拉取结束墙钟」。论证（起点游标 + 合并幂等 ⇒ 无漏无重）：
+    // - 无漏：设起点候选为 C、id 列举时刻为 L（C ≤ L）。凡列举时刻已存在且
+    //   changed_at ≥ 旧游标的条目已被本轮列举；凡**未被本轮列举**的服务端变更
+    //   （列举之后才入库/变更）必有 changed_at ≥ L ≥ C，必然落进下一轮增量窗口
+    //   （ot = C）。修前写结束墙钟 E 时，changed_at ∈ [L, E) 的变更被排除在下一轮
+    //   之外——只能等全量对账补回（JOURNAL 09-24 登记的漏拉窗口，拉取越慢漏得越多）。
+    // - 无重：本轮已合并的条目凡 changed_at ≥ C，下一轮会重复列举；合并幂等
+    //   （upsert + 状态写同值 + 正文/封面只回填空位），不产生重复数据。
+    // - 比较方向：服务端过滤为 changed_at >= ot（mock_greader.rs 的 ids 路由实现；
+    //   真实 Miniflux main 分支把 ot 映射为 published_at > ot 严格大于，过滤列与
+    //   方向随服务端版本/实现而异）。边界包含（>=）使「changed_at 恰等于起点游标」
+    //   的条目会被重复拉——幂等合并下可接受；若是严格 >，「同一秒内、id 列举先于
+    //   变更」的条目（changed_at == 起点）会被漏掉、重新打开漏拉窗口，故边界必须含入。
+    // - 首次同步：last_sync_ts 为空取 0，ot=0 即全窗口列举，成功后写起点候选，
+    //   与「游标 0 ⇒ 视为未同步」的既有语义兼容；全量（full=true，ot=0）同理写起点。
+    let cursor_candidate = pull_now();
 
     // 拉取目标：reading-list 全部条目 id（分页），full 时 ot=0（全量），增量时 ot=since_s
     let ot = if full { Some(0i64) } else { Some(since_s) };
@@ -142,11 +184,12 @@ pub(super) async fn pull_entries_greader(
     // 更新游标（unix 秒）。TASK-068/069：仅在本轮「窗口确实拿全」时推进——
     // id 列举失败/分页中断（id_failures）与分块失败（chunk_failures）都算没拿全，
     // 下一轮重拉同一窗口补回（合并幂等，不会产生重复条目）。
+    // TASK-097：推进值写「id 列举开始前取的起点候选」（论证见函数头部），
+    // 不再取结束墙钟；failures > 0 时候选被丢弃、游标保持旧值，语义不变。
     let failures = id_failures + chunk_failures;
     if failures == 0 {
-        let now = Utc::now().timestamp();
         let conn = db.lock().await;
-        let _ = db::set_last_sync_ts(&conn, now);
+        let _ = db::set_last_sync_ts(&conn, cursor_candidate);
         drop(conn);
     } else {
         log::warn!(

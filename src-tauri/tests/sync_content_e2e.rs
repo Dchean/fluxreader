@@ -269,10 +269,11 @@ async fn miniflux_existing_entry_backfills_cover() {
 
     // Miniflux 端该条目正文补上图（模拟服务端重新抓取后 content 带图）。
     // changed_at 必须一起前移：真实 Miniflux 重新抓取会更新 crawl/change 时间，而
-    // 增量拉取按 `changed_at >= ot` 过滤，ot 是上一轮同步写入的**墙上时钟秒**
-    // （greader_pull.rs 的 set_last_sync_ts(Utc::now().timestamp())）。只改 content
-    // 不改 changed_at 时，只要首次同步跨过一个秒边界，本条就被判为窗口外、根本不会
-    // 被重拉——断言变成「与机器时钟赛跑」，实测在负载下随机失败（cover 未回填）。
+    // 增量拉取按 `changed_at >= ot` 过滤，ot 是上一轮同步写入的**拉取起点墙钟秒**
+    // （TASK-097 后游标取 id 列举开始前；此前取拉取结束墙钟，窗口更窄）。本条目的
+    // changed_at 停在首次抓取时刻（早于上一轮起点），只改 content 不改 changed_at
+    // 时本条被判为窗口外、根本不会被重拉——断言变成「与机器时钟赛跑」，实测在
+    // 负载下随机失败（cover 未回填）。
     {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {

@@ -51,6 +51,10 @@ entries / greader_pull / fever_pull 三个子模块**不含任何 pub 项**—�
 它们只提供 sync 内部使用的实现细节，全部为 `pub(super)`；
 对它们做 `pub use` 会被 rustc 判为「glob 未重导出任何 pub 项」并告警，
 故改用模块内私有 glob，使其项仍可经 `use super::*` 被兄弟模块使用。
+
+唯一例外（TASK-097）：`greader_pull::set_greader_pull_clock_override` 是
+`#[doc(hidden)] pub` 的可测性小口子（集成测试注入游标墙钟，构造确定性
+时间线），需经下方显式 `pub use` 暴露给 tests/；不影响任何对外行为。
 ============================================================ */
 mod credentials;
 mod entries;
@@ -64,6 +68,9 @@ pub use credentials::*;
 pub use phases::*;
 pub use push::*;
 pub use subscriptions::*;
+
+/// TASK-097：唯一从「无 pub 项」子模块显式重导出的项（见上方例外说明）。
+pub use greader_pull::set_greader_pull_clock_override;
 
 /* 无 pub 项的内部实现模块：私有重导出，仅供 sync 内部（含兄弟子模块）使用 */
 use entries::*;

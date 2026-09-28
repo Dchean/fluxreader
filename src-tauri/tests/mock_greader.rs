@@ -2,6 +2,26 @@
 //! （/accounts/ClientLogin、/reader/api/0/subscription/list、tag/list、
 //! stream/items/ids、stream/items/contents、edit-tag、subscription/edit/quickadd），
 //! 用于同步引擎端到端测试（不依赖真实服务端）。
+//!
+//! ## changed_at 语义契约（TASK-097 全面核对后固化）
+//!
+//! `changed_at`（unix 秒）= 服务端视角「该条目最后入库/变更时刻」，是增量拉取
+//! `stream/items/ids` 的 ot 过滤列（本 mock 实现：`changed_at >= ot`）。对照真实
+//! Miniflux（v2 main，internal/storage/entry.go）语义，任何改写 mock 条目的代码
+//! （mock 路由内部或测试直接改 `entries`）必须遵守：
+//! 1. 条目新增（抓取入库）：changed_at = 抓取时刻（见 `add_entry_with_published`）。
+//! 2. 条目内容变更（重新抓取补正文/封面等）：**必须**前移 changed_at——真实
+//!    Miniflux 重新抓取会更新变更时间；只改内容不改时间会与增量窗口赛跑造成
+//!    假 flaky（09-23 已订正 sync_content_e2e 的
+//!    `miniflux_existing_entry_backfills_cover` 一处）。
+//! 3. 状态变更（read/starred 切换）：真实 Miniflux 的 SetEntriesStatus /
+//!    SetEntriesStarredState 对命中行 `SET changed_at=now()`——本 mock 的
+//!    edit-tag 路由同样前移；测试直接改 `e.read`/`e.starred` 的写点也须随之
+//!    前移（已在 dual_client_e2e / sync_e2e 的直接写点补齐）。
+//! 4. 构造「很久以前的旧变更」时，必须**显式**把 changed_at 拨回过去
+//!    （如 sync_content_e2e / sync_phases_e2e 的 stale-read 用例所做），
+//!    不得只改状态而不动 changed_at。
+//! 5. 订阅/分类层变更（退订、改名、删源）不属于条目变更，不触碰 changed_at。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -105,6 +125,11 @@ pub struct MockGReader {
     /// 用于证明「探测有界」与「解析结果已缓存、后续同步不再探测」——
     /// 只看状态码无法区分「试了 1 次」与「试了 2 次」。
     pub requests: Mutex<Vec<String>>,
+    /// TASK-097：待注入条目。经 `arm_inject_entry_after_first_reading_list_ids`
+    /// 注册后，在**首轮 reading-list id 列举的响应快照计算完成之后**才插入
+    /// entries——模拟「拉取进行中（id 列举之后、游标推进之前）服务端出现的变更」，
+    /// 该条目因此不在本轮结果里，用于锁定「下一轮增量必须拉回它」。
+    pub pending_injection: Mutex<Option<MockEntry>>,
 }
 
 impl MockGReader {
@@ -155,6 +180,7 @@ impl MockGReader {
             fever_api_version: Mutex::new(3),
             fever_reject_auth: std::sync::atomic::AtomicBool::new(false),
             requests: Mutex::new(Vec::new()),
+            pending_injection: Mutex::new(None),
         });
 
         let srv = server.clone();
@@ -327,6 +353,33 @@ impl MockGReader {
         starred: bool,
         published: i64,
     ) -> i64 {
+        self.add_entry_with_times(
+            feed_id,
+            url,
+            title,
+            read,
+            starred,
+            published,
+            chrono::Utc::now().timestamp(),
+        )
+    }
+
+    /// TASK-097：published 与 changed_at 都可指定的底层入口。
+    /// 常规入口（add_entry_ret / add_entry_with_published / add_entry_full）必须
+    /// 保持「changed_at = 抓取时刻」的契约；本入口仅供测试按语义契约 4 显式构造
+    /// 特定 changed_at（如受控时间线里的窗口内既有条目），不得用于绕过契约。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    #[allow(clippy::too_many_arguments)] // 同 add_entry_full：全字段构造入口
+    pub fn add_entry_with_times(
+        &self,
+        feed_id: i64,
+        url: &str,
+        title: &str,
+        read: bool,
+        starred: bool,
+        published: i64,
+        changed_at: i64,
+    ) -> i64 {
         let id = {
             let mut n = self.next_entry_id.lock().unwrap();
             *n += 1;
@@ -343,9 +396,42 @@ impl MockGReader {
             read,
             starred,
             enclosures: Vec::new(),
-            changed_at: chrono::Utc::now().timestamp(),
+            changed_at,
         });
         id
+    }
+
+    /// TASK-097：注册一条「首轮 reading-list id 列举的响应快照计算完成之后」
+    /// 才出现的条目（changed_at 由调用方指定，必须落在受控时间线的
+    /// 「拉取起点游标」与「修前结束墙钟游标」之间）。见 pending_injection 字段说明。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn arm_inject_entry_after_first_reading_list_ids(
+        &self,
+        feed_id: i64,
+        url: &str,
+        title: &str,
+        read: bool,
+        starred: bool,
+        changed_at: i64,
+    ) {
+        let id = {
+            let mut n = self.next_entry_id.lock().unwrap();
+            *n += 1;
+            *n
+        };
+        *self.pending_injection.lock().unwrap() = Some(MockEntry {
+            id,
+            feed_id,
+            url: Some(url.to_string()),
+            title: title.to_string(),
+            author: Some("Mock Author".into()),
+            content: "<p>Injected mid-pull content</p>".into(),
+            published: changed_at,
+            read,
+            starred,
+            enclosures: Vec::new(),
+            changed_at,
+        });
     }
 
     /// 同 add_entry_ret，但可指定正文 HTML 与 enclosures（播客/封面回归用）。
@@ -697,6 +783,13 @@ fn route(
                 .map(|e| e.id)
                 .collect();
             let total = ids.len();
+            // TASK-097：id 列举的响应快照已经算定（entries 锁已释放），此刻插入
+            // 待注入条目——它必然不在本轮响应里，但 changed_at 落在本轮拉取过程中。
+            if stream.contains("reading-list") {
+                if let Some(injected) = srv.pending_injection.lock().unwrap().take() {
+                    srv.entries.lock().unwrap().push(injected);
+                }
+            }
             let page: Vec<i64> = ids.into_iter().take(n).collect();
             let item_refs: Vec<serde_json::Value> = page
                 .iter()
@@ -783,6 +876,10 @@ fn route(
                 if !ids.contains(&e.id) {
                     continue;
                 }
+                // TASK-097 契约（见文件头第 3 条）：状态写入即变更——真实 Miniflux
+                // SetEntriesStatus / SetEntriesStarredState 对命中行 SET changed_at=now()，
+                // 这里同样前移，被推送/被标读的条目保持增量窗口（changed_at >= ot）可见。
+                e.changed_at = chrono::Utc::now().timestamp();
                 for tag in &add {
                     if tag.ends_with("/read") {
                         e.read = true;

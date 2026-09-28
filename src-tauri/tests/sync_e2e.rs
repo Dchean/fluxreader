@@ -242,6 +242,10 @@ async fn miniflux_sync_end_to_end() {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
             e.read = true;
+            // TASK-097 契约：状态变更即变更——真实 Miniflux SetEntriesStatus 对
+            // 命中行 SET changed_at=now()（本用例后续是 full 同步不依赖窗口，
+            // 但 mock 侧直接改状态的写点同样前移）
+            e.changed_at = chrono::Utc::now().timestamp();
         }
     }
     // 模拟跨源同 URL entry（feed 11 = remote-only feed，未读态）
@@ -281,6 +285,10 @@ async fn miniflux_sync_end_to_end() {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
             e.read = false;
+            // TASK-097 契约：状态变更即变更——真实 Miniflux SetEntriesStatus 对
+            // 命中行 SET changed_at=now()（本用例后续是 full 同步不依赖窗口，
+            // 但 mock 侧直接改状态的写点同样前移）
+            e.changed_at = chrono::Utc::now().timestamp();
         }
     }
     drop(conn);
