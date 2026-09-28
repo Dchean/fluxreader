@@ -277,7 +277,7 @@ body {
   border-radius: 8px;
   display: block;
   object-fit: contain;
-  box-shadow: 0 2px 10px rgba(72, 128, 200, 0.22);
+  box-shadow: 0 2px 10px var(--accent-glow, rgba(0, 0, 0, 0.2));
 }
 
 .brand-name {
@@ -1464,8 +1464,11 @@ body {
 .notif-ai-box {
   margin: 8px 0 10px 0;
   padding: 10px 12px;
-  background: rgba(120, 115, 184, 0.08);
-  border: 1px solid rgba(120, 115, 184, 0.2);
+  /* fix-11（自检 UI-P2-4）：底/边框原为硬编码堇紫（写死的 120,115,184 三元组）——
+     唯一不随调色盘/主题变化的区块色。改走 --accent 的 color-mix（堇紫盘下
+     与修前视觉一致，其余四盘自动跟随），与全仓「配色只走 token」口径对齐。 */
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
   border-radius: var(--radius-sm);
   display: none;
 }
@@ -1751,8 +1754,14 @@ body {
 }
 
 .ai-reader-box {
-  background: linear-gradient(135deg, rgba(72, 128, 200, 0.08), rgba(120, 115, 184, 0.08));
-  border: 1px solid rgba(120, 115, 184, 0.25);
+  /* fix-11（自检 UI-P2-4）：原为硬编码蓝→紫双色渐变（72,128,200 与 120,115,184 两个三元组），
+     与调色盘脱钩；改走 --accent 的 color-mix 双档深浅渐变保留层次感。 */
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 8%, transparent),
+    color-mix(in srgb, var(--accent) 4%, transparent)
+  );
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   border-radius: var(--radius-md);
   padding: 14px 16px;
   margin-bottom: 24px;
@@ -2969,7 +2978,7 @@ body.has-player .toast-layer {
 }
 
 /* 全屏播放器展开（REQ-004）：迷你栏已隐藏 → toast 回到右下贴底，
-   并保持在播放器覆盖层（z-index 260）之上 */
+   并保持在播放器覆盖层之上（播放器 z-index 140 < toast 500，fix-7） */
 body.has-player-expanded .toast-layer {
   bottom: 24px;
 }
@@ -3076,8 +3085,11 @@ body.has-player-expanded .toast-layer {
 .reader-translate-error {
   margin: 0 0 16px;
   padding: 8px 12px;
-  background: rgba(229, 72, 77, 0.06);
-  border: 1px solid rgba(229, 72, 77, 0.2);
+  /* fix-12（自检 UI-P2-5）：底/边框原为硬编码正红（写死的 229,72,77 三元组）——同一界面
+     与 .ai-error-row 的 var(--danger)（赤陶）并存两种「危险红」。统一走 --danger
+     的 color-mix，背景/边框口径与 .ai-error-row 一致。 */
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 20%, transparent);
   border-radius: var(--radius-sm);
 }
 
@@ -3214,11 +3226,17 @@ body.has-player-expanded .toast-layer {
 /* ============================================================
    Full Player 覆盖层（播客大播放器）
    复用底部 Mini 的单例 audio，仅提供大视图与控制；Esc 或点遮罩收起。
+   层级（fix-7 / 自检 UI-P1-2）：z-index 140 —— 高于全部应用内 chrome
+   （内容 20 / 底栏 90 / 窗控 100），低于 .modal-overlay(150)：全屏播放期间
+   Ctrl+K / Ctrl+, 打开的搜索/设置、灯箱等浮层可见可操作（修前 260 盖住
+   一切弹窗，表现为快捷键无响应），Esc 链「视觉在上者先关」的顺序随之成立；
+   toast 层(500) 与确认弹窗(3000) 的相对关系不变（REQ-004 契约 A2 的
+   不变量「toast > 播放器覆盖层」继续成立）。
    ============================================================ */
 .player-full-overlay {
   position: fixed;
   inset: 0;
-  z-index: 260;
+  z-index: 140;
   display: flex;
   align-items: center;
   justify-content: center;

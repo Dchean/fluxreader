@@ -52,3 +52,40 @@ export function scrollAwayRange(input: ScrollAwayInput): ScrollAwayDecision {
   if (start <= last) return { range: null, nextLastStartIndex: start };
   return { range: { from: last, to: start }, nextLastStartIndex: start };
 }
+
+/* ============================================================
+   「本次 scroll 事件是否算用户滚动」的判定（fix-2 / 自检报告 F5 修复）。
+
+   背景：scrollAwayRange 的第 1 前提 scrollDriven 由 Timeline 的 onScroll
+   置位。修前 onScroll **无条件**置位——但 scrollToIndex（J/K 定位、K 在顶部
+   回绕到末项、搜索锚定打开老文章）经 element.scrollTo 实现，同样会触发容器
+   的原生 scroll 事件：startIndex 大跳 + scrollDriven=true ⇒ 把用户从未见过的
+   条目整段误标已读并同步远端。scroll 事件本身无法区分来源，必须在**事件之外**
+   记录两类事实再判定：
+   - 真实输入闩（gestureSeen）：wheel / touchmove / pointerdown（含滚动条拖动）
+     / 翻页键发生过 ⇒ 置真；程序性滚动发起时清掉；
+   - 程序性抑制窗口（programmaticUntil）：scrollToIndex / 筛选归零发起前先把
+     窗口推到 now+PROGRAMMATIC_SCROLL_SUPPRESS_MS，窗口内的 scroll 事件一律
+     不算用户滚动（瞬时跳变的 scroll 事件在下一两帧内到达，150ms 足够覆盖）。
+   ============================================================ */
+
+/** 程序性滚动的 scroll 事件抑制窗口时长（毫秒）。 */
+export const PROGRAMMATIC_SCROLL_SUPPRESS_MS = 150;
+
+export interface UserScrollEventInput {
+  /** 自上次程序性滚动发起以来是否见过真实用户输入（wheel/touchmove/pointerdown/翻页键） */
+  gestureSeen: boolean;
+  /** 程序性滚动抑制窗口的结束时刻（performance.now() 毫秒刻度）；0 = 无窗口 */
+  programmaticUntil: number;
+  /** 本次 scroll 事件的时刻（与 programmaticUntil 同刻度） */
+  now: number;
+}
+
+/** 判定一次 scroll 事件是否算「用户滚动」。
+    - 抑制窗口内 ⇒ false（程序性滚动的余波）；
+    - 窗口外但从未见过真实输入 ⇒ false（纯程序性环境的 scroll 事件）；
+    - 见过真实输入且不在窗口内 ⇒ true。 */
+export function isUserScrollEvent(input: UserScrollEventInput): boolean {
+  if (input.now < input.programmaticUntil) return false;
+  return input.gestureSeen;
+}

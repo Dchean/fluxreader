@@ -381,6 +381,9 @@ export function NewCategoryModal() {
           <button className="toggle-action-btn" onClick={() => closeMiniModal('newCategory')}>取消</button>
           <button
             className="toggle-action-btn btn-primary"
+            /* fix-10（自检 UI-P2-3）：空名禁用主按钮（与 RenameCategoryModal 统一），
+               修前「可点但静默 return」，用户不知道为什么提交不了 */
+            disabled={!name.trim()}
             onClick={() => {
               if (!name.trim()) return;
               createCategory(name.trim(), layout);
@@ -522,6 +525,10 @@ function AddFeedModalBody({
           <button className="toggle-action-btn" onClick={onCancel}>取消</button>
           <button
             className="toggle-action-btn btn-primary"
+            /* fix-10（自检 UI-P2-3）：空地址禁用主按钮（与 RenameCategoryModal 统一）。
+               注意只看 url——无分类（全新安装）时不禁用：后端对 folder_id=null 有
+               「自动落到未分类」兜底（见 store.addFeed fix-1）。 */
+            disabled={!url.trim()}
             onClick={() => {
               if (!url.trim()) return;
               onSubmit(catId, url.trim(), title.trim() || url.trim(), layout, noAi ? false : autoSummary, noAi ? false : autoTranslate, syncToBackend);

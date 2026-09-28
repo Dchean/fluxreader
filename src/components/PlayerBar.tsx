@@ -1,12 +1,16 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
 import { api } from '../lib/api';
+import { formatDuration } from '../lib/format';
 import { CoverImage } from './CoverImage';
 
 /* ============================================================
    播客底部播放条 —— Mini Player
    真实播放：单个 <audio> 元素随 isActive 挂载；store 状态 ↔ 元素双向同步。
    续播记忆：进度节流落库 settings(last_playback)；重开同一集从上次位置续播。
+   时长显示统一走 lib/format.formatDuration（h:mm:ss）——fix-6（自检 UI-P1-1）：
+   此前本地 formatClock 只输出 m:ss，61 分钟以上的剧集在迷你条/全屏条显示
+   「61:40」式歧义时间，与播客卡片的 1:01:40 口径分叉。
    ============================================================ */
 
 /** 续播记录 settings 键（含 url/title/show/cover/pos/duration/updatedAt） */
@@ -26,13 +30,6 @@ function persistPlayback(p: {
 function clearPlayback() {
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
   void api.setSetting(PLAYBACK_KEY, '').catch(() => {});
-}
-
-function formatClock(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) return '0:00';
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 export function PlayerBar() {
@@ -236,7 +233,7 @@ export function PlayerBar() {
             <button className="win-btn" onClick={() => skipPlayer(30)} title="快进 30 秒">30 ↻</button>
           </div>
           <div className="player-progress-row">
-            <span className="player-time-tag">{formatClock(player.positionSec)}</span>
+            <span className="player-time-tag">{formatDuration(player.positionSec)}</span>
             <div
               className="player-progress-track"
               onClick={(e) => {
@@ -268,7 +265,7 @@ export function PlayerBar() {
             >
               <div className="player-progress-fill" style={{ width: `${pct}%` }} />
             </div>
-            <span className="player-time-tag">{formatClock(player.durationSec)}</span>
+            <span className="player-time-tag">{formatDuration(player.durationSec)}</span>
           </div>
         </div>
 
@@ -298,7 +295,7 @@ export function PlayerBar() {
         onSpeed={cyclePlaybackSpeed}
         onClose={() => togglePlayerExpanded()}
         onStop={closePodcastBar}
-        formatClock={formatClock}
+        formatDuration={formatDuration}
       />
     </>
   );
@@ -306,7 +303,7 @@ export function PlayerBar() {
 
 /** Full Player 覆盖层：封面/标题/大进度条/控制钮；无独立 audio（复用底部条的音源）。 */
 function PlayerFullOverlay({
-  open, player, onPlayPause, onSeek, onSkip, onSpeed, onClose, onStop, formatClock,
+  open, player, onPlayPause, onSeek, onSkip, onSpeed, onClose, onStop, formatDuration,
 }: {
   /** 可见性：true 时挂 .open（display:flex + opacity 1），false 时 display:none（不可聚焦、读屏不可达） */
   open: boolean;
@@ -317,7 +314,7 @@ function PlayerFullOverlay({
   onSpeed: () => void;
   onClose: () => void;
   onStop: () => void;
-  formatClock: (sec: number) => string;
+  formatDuration: (sec: number) => string;
 }) {
   const pct = player.durationSec > 0 ? Math.min(100, (player.positionSec / player.durationSec) * 100) : 0;
   const seekByRatio = (clientX: number, el: HTMLElement) => {
@@ -366,8 +363,8 @@ function PlayerFullOverlay({
               <div className="player-progress-fill" style={{ width: `${pct}%` }} />
             </div>
             <div className="player-full-times">
-              <span>{formatClock(player.positionSec)}</span>
-              <span>{formatClock(player.durationSec)}</span>
+              <span>{formatDuration(player.positionSec)}</span>
+              <span>{formatDuration(player.durationSec)}</span>
             </div>
           </div>
           <div className="player-full-controls">

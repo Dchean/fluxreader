@@ -184,8 +184,18 @@ fn persist_new_feed(
         .unwrap_or_else(|| feed_url.to_string());
     // 未选分类 → 「未分类」文件夹（无则建）。创建失败必须上抛——
     // 兜底到 id=1 会在 folder 1 不存在时触发外键违约，文章静默丢失。
+    // P1-1（自检 2026-09-29）：显式传入的分类 id 也必须真实存在（对齐
+    // update_feed → record_feed_edit 的既有校验形态）——此前 Some(0)（前端
+    // 无分类时把空 catId 换算成 0）或陈旧分类 id 会直通 insert_feed，在
+    // foreign_keys=ON 下裸报「FOREIGN KEY constraint failed」；现在报可读的
+    // folder_not_found。None 路径保持「未分类」兜底不变。
     let folder_id = match folder_id {
-        Some(fid) => fid,
+        Some(fid) => {
+            if !db::folder_exists(conn, fid)? {
+                return Err(AppError::new("folder_not_found", "目标分类不存在"));
+            }
+            fid
+        }
         None => db::ensure_uncategorized_folder(conn)?,
     };
     let feed_id = db::insert_feed(
@@ -273,6 +283,92 @@ mod tests {
                 .contains(&"http://f.example/rss".to_string()),
             "重新添加后墓碑必须清除（N4：否则 pull 永久跳过该源）"
         );
+    }
+
+    /// P1-1（自检 2026-09-29）：folder_id=Some(不存在的 id) 必须报可读的
+    /// 「目标分类不存在」（folder_not_found），而不是直通 insert_feed 在
+    /// foreign_keys=ON 下裸抛「FOREIGN KEY constraint failed」（修前形态：
+    /// Err{code:"db", message 含 FOREIGN KEY}——前端 toast 只能显示这条裸错误）。
+    /// 修前此用例红：err.code == "db"；修后绿：err.code == "folder_not_found"。
+    #[test]
+    fn add_feed_with_missing_folder_id_is_rejected() {
+        let conn = test_conn();
+        let parsed = minimal_parsed();
+        let err = persist_new_feed(
+            &conn,
+            "https://f.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            Some(999), // folders.id 从 1 起：0（前端无分类时传 0）与 999 均不存在
+            "inherit",
+            true,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.code, "folder_not_found",
+            "必须报 folder_not_found（修前是 db/FOREIGN KEY 裸错）: {err}"
+        );
+        assert!(
+            !err.message.contains("FOREIGN KEY"),
+            "不得把外键违约裸暴露给前端: {err}"
+        );
+        // 不得留下半套数据：feed 未插入
+        let feeds: i64 = conn
+            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(feeds, 0, "校验失败时不得插入 feed");
+    }
+
+    /// P1-1 回归锚：校验不得误伤两条既有正常路径——
+    /// ① None → 「未分类」兜底（与 republishing_a_url_clears_its_tombstone /
+    ///    duplicate_url_is_rejected 的既有 None 路径同源，这里显式断言目录名）；
+    /// ② Some(存在的分类 id) → 正常挂到该分类。
+    #[test]
+    fn add_feed_folder_validation_keeps_valid_paths() {
+        let conn = test_conn();
+        let parsed = minimal_parsed();
+        // ① None：未分类兜底
+        let row = persist_new_feed(
+            &conn,
+            "https://a.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let folder = db::list_folders(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == row.folder_id)
+            .expect("兜底目录必须存在");
+        assert_eq!(folder.name, "未分类", "None 必须落「未分类」兜底");
+        // ② Some(存在)：正常入库
+        let fid = db::create_folder(&conn, "技术", "article").unwrap();
+        let row2 = persist_new_feed(
+            &conn,
+            "https://b.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            Some(fid),
+            "inherit",
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(row2.folder_id, fid, "存在的分类 id 必须原样采用");
     }
 
     /// 重复 URL 仍被拒绝（既有行为锚定，抽取不改变查重）

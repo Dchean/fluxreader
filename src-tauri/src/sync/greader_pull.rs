@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::db;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::greader::{self, GReaderClient};
 use chrono::Utc;
 use rusqlite::Connection;
@@ -199,6 +199,13 @@ pub(super) async fn pull_entries_greader(
 }
 
 /// 分页拉取某 Google Reader stream 的全部条目 id（read / starred 权威集合）。
+///
+/// P2-1（自检 2026-09-29）：分页未走完（continuation 非数字 / 有 continuation
+/// 但本页无可用 id）必须报错中止——与主列举循环的 TASK-069-F1 守卫同口径。
+/// 此前这两种形态被静默 break 当「拿全了」，**截断**的 starred 权威集合进
+/// `reconcile_reader_state` 后，排在截断点之后的已收藏条目被误判为「远端已
+/// 取消收藏」（本地星标静默丢失，无队列记录、无报错）。报 Err 后由调用方的
+/// 既有 C-1 守卫（「失败 ≠ 空集合」）跳过本轮对账，下一轮重拉完整集合。
 async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec<i64>> {
     let mut ids: Vec<i64> = Vec::new();
     let mut continuation: Option<u64> = None;
@@ -213,9 +220,21 @@ async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec
                 got += 1;
             }
         }
-        match r.continuation.and_then(|c| c.parse::<u64>().ok()) {
-            Some(c) if got > 0 => continuation = Some(c),
-            _ => break,
+        match r.continuation.as_deref() {
+            None | Some("") => break,
+            Some(c) => match c.parse::<u64>() {
+                Ok(next) if got > 0 => continuation = Some(next),
+                Ok(_) => {
+                    return Err(AppError::network(format!(
+                        "拉取 {stream} 分页中断：continuation={c} 但本页无可用条目 id"
+                    )));
+                }
+                Err(_) => {
+                    return Err(AppError::network(format!(
+                        "拉取 {stream} 分页中断：无法解析 continuation={c}"
+                    )));
+                }
+            },
         }
     }
     Ok(ids)

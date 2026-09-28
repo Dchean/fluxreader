@@ -95,6 +95,11 @@ pub struct MockGReader {
     /// 故障注入（TASK-069 审查 F1）：置位后仅 reading-list 的 stream/items/ids 返回 500
     /// （read/starred 对账仍成功）——验证「id 列举失败同样不推进游标」
     pub fail_reading_list_ids: std::sync::atomic::AtomicBool,
+    /// 故障注入（P2-1，自检 2026-09-29）：置位后 starred 流的 stream/items/ids
+    /// 只返回首条 id，且 continuation 为非数字垃圾——模拟「还有更多页、但续游标
+    /// 损坏」的服务端异常。修前 fetch_stream_ids 静默 break 拿走截断集合，对账
+    /// 据此把未列出的收藏误判为「远端已取消收藏」；修后必须报错中止本轮对账。
+    pub corrupt_starred_continuation: std::sync::atomic::AtomicBool,
     /// 故障注入（TASK-074）：置位后 subscription/quickadd 返回 500——push 失败、
     /// 队项保留，用于验证「有未推送变更的源不被远端快照删除」
     pub fail_quick_add: std::sync::atomic::AtomicBool,
@@ -144,6 +149,7 @@ impl MockGReader {
             fail_edit_tag: std::sync::atomic::AtomicBool::new(false),
             fail_item_contents: std::sync::atomic::AtomicBool::new(false),
             fail_reading_list_ids: std::sync::atomic::AtomicBool::new(false),
+            corrupt_starred_continuation: std::sync::atomic::AtomicBool::new(false),
             fail_quick_add: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
             last_subscription_edit_form: Mutex::new(Vec::new()),
@@ -233,6 +239,14 @@ impl MockGReader {
     pub fn set_fail_reading_list_ids(&self, fail: bool) {
         self.fail_reading_list_ids
             .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 置位后 starred 流的 stream/items/ids 返回「首条 id + 非数字 continuation」
+    /// （P2-1：权威集合分页中断，验证对账中止、不拿截断集合清星标）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_corrupt_starred_continuation(&self, corrupt: bool) {
+        self.corrupt_starred_continuation
+            .store(corrupt, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 置位后 subscription/quickadd 返回 500（TASK-074：让 push_feeds 失败，
@@ -783,6 +797,25 @@ fn route(
                 .map(|e| e.id)
                 .collect();
             let total = ids.len();
+            // P2-1 故障注入：starred 流首页只回 1 条 + 非数字 continuation，
+            // 模拟「本应还有更多页，但续游标损坏」。客户端拿到的是**截断**的
+            // starred 权威集合（首条之后的收藏不在其中）。
+            if srv
+                .corrupt_starred_continuation
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && stream == "user/-/state/com.google/starred"
+            {
+                let page: Vec<i64> = ids.into_iter().take(1).collect();
+                let item_refs: Vec<serde_json::Value> = page
+                    .iter()
+                    .map(|id| serde_json::json!({"id": id.to_string()}))
+                    .collect();
+                return (
+                    200,
+                    serde_json::json!({ "itemRefs": item_refs, "continuation": "corrupt" })
+                        .to_string(),
+                );
+            }
             // TASK-097：id 列举的响应快照已经算定（entries 锁已释放），此刻插入
             // 待注入条目——它必然不在本轮响应里，但 changed_at 落在本轮拉取过程中。
             if stream.contains("reading-list") {

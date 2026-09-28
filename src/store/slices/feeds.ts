@@ -63,6 +63,12 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
   deleteCategory: (catId) => {
     if (get().dataMode === 'tauri') {
       const id = Number(catId.replace('cat-', ''));
+      /* fix-3（自检 P2-1）：删除当前正浏览的分类 → 范围/选中一并复位（与 mock
+         分支同口径）。否则 entries 按已消失的 cat-N 过滤恒为空，时间流停在
+         幽灵范围显示空白，须用户自行点别处才能恢复。 */
+      if (get().activeFeedFilter === catId) {
+        set({ activeFeedFilter: 'all', activeArticleId: null });
+      }
       void api
         .deleteFolder(id)
         .then(() => get().reloadFromBackend())
@@ -102,7 +108,12 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
 
   addFeed: (catId, url, title, layout, autoSummary, autoTranslate, syncToBackend = true) => {
     if (get().dataMode === 'tauri') {
-      const folderId = Number(catId.replace('cat-', ''));
+      /* fix-1（自检 P1-1）：提不出数字 id（如全新安装 0 个分类时 AddFeedModal 传
+         空串，Number('') === 0）必须传 null——后端 add_feed 对 folder_id=None 有
+         「自动落到未分类（不存在则创建）」的兜底契约；传 0 会直接触发
+         feeds.folder_id 外键违约，首次使用添加订阅必然失败。 */
+      const parsed = Number(catId.replace('cat-', ''));
+      const folderId = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
       set({ syncStatus: 'syncing' });
       void api
         .addFeed(url, title || null, folderId, layout, autoSummary, autoTranslate, syncToBackend)
@@ -153,6 +164,11 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
 
   deleteFeed: (catId, feedId) => {
     if (get().dataMode === 'tauri') {
+      /* fix-3（自检 P2-1）：删除当前正浏览的订阅源 → 范围/选中一并复位
+         （与 mock 分支同口径，理由见 deleteCategory 处注释）。 */
+      if (get().activeFeedFilter === feedId) {
+        set({ activeFeedFilter: 'all', activeArticleId: null });
+      }
       void api
         .deleteFeed(Number(feedId))
         .then(() => get().reloadFromBackend())

@@ -1,5 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { scrollAwayRange } from './scrollAwayRead';
+import { scrollAwayRange, isUserScrollEvent, PROGRAMMATIC_SCROLL_SUPPRESS_MS } from './scrollAwayRead';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useShallow } from 'zustand/react/shallow';
 import {
@@ -7,6 +7,7 @@ import {
   LAYOUT_NAMES,
   VIEW_NAMES,
   podcastClickAction,
+  autoAiBlockOpen,
   selectVisibleEntries,
   selectFeedConfig,
 } from '../store';
@@ -14,6 +15,7 @@ import { Icons } from './icons';
 import { formatRelativeTime, formatDuration } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
 import { proxyImageUrl } from '../lib/imageProxy';
+import { onCoverError } from '../lib/coverImage';
 import { CoverImage } from './CoverImage';
 import type { ArticleEntry } from '../types';
 import { useEnteringClass } from './useEnteringClass';
@@ -69,6 +71,7 @@ export function Timeline() {
     const next = from + delta;
     if (next < 0 || next >= items.length) return;
     setFocusIndex(next);
+    suppressNextScrollEvents();
     rowVirtualizer.scrollToIndex(next, { align: 'auto' });
     requestAnimationFrame(() => {
       const root = scrollRef.current;
@@ -89,7 +92,10 @@ export function Timeline() {
   const filterKey = `${activeContentLayout}|${activeViewFilter}|${activeFeedFilter}|${timelineFilter}|${timelineSort}`;
 
   useEffect(() => {
+    /* 程序性归零：先开抑制窗口再滚，随后到达的 scroll 事件不算用户滚动 */
+    suppressNextScrollEvents();
     document.getElementById('timelineContentScroll')?.scrollTo({ top: 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey]);
 
   /* ---------- 滚动出列表视口 → 标已读（markReadOnScrollOut） ---------- */
@@ -126,9 +132,26 @@ export function Timeline() {
      影响面与「旧 startIndex 大小 / 新序列长度」正相关：列表越长越容易命中，
      窗口在滚动归零生效后即关闭——因此表现为「小概率误标已读」，正是 F5 难以复现的原因。
      处置：两个前提都必须成立才认为条目是「滚出上方」——
-     (1) 筛选上下文未变（换序列时不判滚出；下面的 effect 会同步重置基准）；
-     (2) 本次 startIndex 变化确由**用户滚动**引起（而非筛选切换引发的程序性归零）。 */
+     (1) 本次 startIndex 变化确由**用户滚动**引起（而非筛选切换引发的程序性归零）；
+     (2) 本次 startIndex 相对基准**递增**。
+     修后（自检 fix-2）：「用户滚动」不再由「onScroll 触发了」推断——scrollToIndex
+     （J/K 定位 / K 顶部回绕 / 搜索锚定）经 element.scrollTo 同样触发容器 scroll 事件，
+     修前会被误判成用户滚动而整段标读。现在 scroll 事件必须同时满足
+     「近期有真实输入（wheel/touchmove/pointerdown/翻页键）」且「不在程序性滚动
+     抑制窗口内」才算用户滚动，判定收口在 scrollAwayRead.isUserScrollEvent。 */
   const scrollDrivenRef = useRef(false);
+  /* 真实输入闩：wheel/touchmove/pointerdown/翻页键置真；程序性滚动发起时清掉。 */
+  const userGestureRef = useRef(false);
+  /* 程序性滚动抑制窗口的结束时刻（performance.now() 毫秒）：scrollToIndex /
+     筛选归零发起前推入，窗口内的 scroll 事件一律不算用户滚动。 */
+  const programmaticScrollUntilRef = useRef(0);
+  /* 程序性滚动包装：suppressNextScrollEvents() 必须在每次 scrollToIndex /
+     scrollTo({top:0}) 之前调用——否则随后到达的 scroll 事件可能带着此前残留的
+     输入闩被误判为用户滚动。 */
+  const suppressNextScrollEvents = () => {
+    programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_SUPPRESS_MS;
+    userGestureRef.current = false;
+  };
   /* 筛选上下文变化 → 重置基准并关闭本帧的滚出判定。
      与下面的归零 effect 同依赖，按声明顺序先执行 ⇒ 基准与本帧判定都已就绪，
      不依赖「归零 effect 先跑完」这一时序假设。 */
@@ -136,6 +159,27 @@ export function Timeline() {
     lastStartIndexRef.current = 0;
     scrollDrivenRef.current = false;
   }, [filterKey]);
+  /* 真实输入监听（挂载一次）：四类输入都能启动「用户滚动」的事实——
+     wheel（滚轮/触控板）、touchmove（触屏拖动）、pointerdown（滚动条拖动、
+     触摸按下）、翻页键（焦点在内部控件上时浏览器滚动最近的可滚祖先）。 */
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const latch = () => { userGestureRef.current = true; };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'PageUp' || e.key === 'PageDown' || e.key === 'Home' || e.key === 'End') latch();
+    };
+    el.addEventListener('wheel', latch, { passive: true });
+    el.addEventListener('touchmove', latch, { passive: true });
+    el.addEventListener('pointerdown', latch);
+    el.addEventListener('keydown', onKey);
+    return () => {
+      el.removeEventListener('wheel', latch);
+      el.removeEventListener('touchmove', latch);
+      el.removeEventListener('pointerdown', latch);
+      el.removeEventListener('keydown', onKey);
+    };
+  }, []);
   useEffect(() => {
     if (!useAppStore.getState().settings.markReadOnScrollOut) return;
     if (timelineFilter !== 'unread') return;
@@ -174,15 +218,24 @@ export function Timeline() {
     if (!activeArticleId) return;
     const idx = items.findIndex((a) => a.id === activeArticleId);
     if (idx < 0) return; // 目标不在当前 items（如 anchorToArticle 异步窗口），跳过
+    /* 程序性定位（J/K / 搜索锚定 / focusIndex 跟随）：先开抑制窗口再滚——
+       K 在顶部回绕到末项时 startIndex 0→N，修前会被当成用户滚动整段标读 */
+    suppressNextScrollEvents();
     rowVirtualizer.scrollToIndex(idx, { align: 'auto' });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeArticleId]);
 
   /* 滚动到底部附近 → 按需加载下一批文章（分页，避免一次性全量拉取）。 */
   const handleScroll = () => {
-    /* P3[F5]：标记本次 range 变化源自用户滚动，供上面的「滚出上方」判定使用。
-       scrollToIndex（J/K 定位）与筛选切换的归零都不经过本 handler，故不会被误判。 */
-    scrollDrivenRef.current = true;
+    /* P3[F5]/fix-2：判定收口在 scrollAwayRead.isUserScrollEvent——只有「近期有
+       真实输入且不在程序性滚动抑制窗口内」的 scroll 事件才算用户滚动。
+       保留既有结论（||）：一次拖拽会产生多个 scroll 事件，标读 effect 只消费
+       一次，后续事件不得把已置位的用户滚动结论冲掉。 */
+    scrollDrivenRef.current = scrollDrivenRef.current || isUserScrollEvent({
+      gestureSeen: userGestureRef.current,
+      programmaticUntil: programmaticScrollUntilRef.current,
+      now: performance.now(),
+    });
     const el = scrollRef.current;
     if (!el) return;
     // 距底部 600px 内视为"到底"，提前预加载，滚动体验更顺滑
@@ -447,6 +500,8 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   const hydrated = useAppStore((s) => s.hydratedIds[item.id]);
   /* 卡片级翻译状态（按 id 订阅，生成中指示） */
   const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
+  /* fix-5：卡片级翻译失败信息（内联错误行 + 重试依据，此前只有 toast 一闪而过） */
+  const translateError = useAppStore((s) => s.translateErrors[item.id] || '');
   /* TASK-065 N11：译文当前是否为未消毒流式产物（决定纯文本/HTML 渲染路径） */
   const rawTranslated = useAppStore((s) => s.rawTranslatedIds[item.id]);
   /* 社交卡片正文直接渲染 item.content：进入视口附近才懒加载水合（避免几百张
@@ -456,7 +511,15 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   const feedName = binding ? binding.feed.name : '';
   /* 三态：null=跟随 feed 配置，true=手动展开，false=手动收起 */
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
-  const showTranslate = transOverride ?? feedConfig.autoTranslate;
+  /* fix-8：跟随 auto 配置展开的前提加「有产物/在途/出错」——auto 开但尚无译文时
+     按收起处理，不再渲染空壳译文块（自动生成本身只在 Reader 打开文章时触发，
+     卡片挂载刻意不发起，防滚动 IPC 风暴）；手动点「翻译」仍会就地触发生成。 */
+  const showTranslate = transOverride ?? autoAiBlockOpen(
+    feedConfig.autoTranslate,
+    !!item.translatedContent,
+    !!translatingCard,
+    !!translateError,
+  );
   /* 自动收起：渲染后测高，超过 260px 视为长内容（收起至 6 行 + 展开按钮）；
      与通知卡不同，这里是 HTML（高度比字符数准确——图片/换行/引用都会撑高）。
      ResizeObserver 而非一次性测量：正文里的图片懒加载完成后高度才真正
@@ -543,6 +606,13 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
             <span dangerouslySetInnerHTML={{ __html: item.translatedContent }} />
           )}
           {translatingCard ? <span>翻译中…</span> : null}
+          {/* fix-5：翻译失败内联错误行 + 重试（此前失败只有 toast 一闪，半截译文无恢复入口） */}
+          {translateError && !translatingCard ? (
+            <div className="ai-error-row">
+              <span className="ai-error-text" title={translateError}>翻译失败：{translateError}</span>
+              <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重试</button>
+            </div>
+          ) : null}
         </div>
         <div className="social-actions-bar">
           <button
@@ -567,8 +637,11 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
             className={`social-act-item ${showTranslate ? 'active-translate' : ''}`}
             onClick={() => {
               const next = !showTranslate;
-              if (next && !item.translatedContent) {
-                /* 无译文：实际触发生成（P1-7 空壳修复） */
+              /* fix-5：失败态（translateErrors[id] 存在）时点「翻译」必须重走
+                 translateEntry 重试——旧逻辑在有半截译文时会把它当缓存只切显示，
+                 重试按钮变成死路径（P2-3）。 */
+              if (next && (translateError || !item.translatedContent)) {
+                /* 无译文或上次失败：实际触发生成/重试（P1-7 空壳修复 + fix-5） */
                 useAppStore.getState().translateEntry(item.id);
               } else if (item.translatedContent) {
                 showToast(next ? '已显示正文翻译' : '已隐藏正文翻译');
@@ -621,6 +694,17 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMov
     });
     return () => { alive = false; };
   }, [item.imageUrl, item.url]);
+  /* fix-9（自检 UI-P2-1）：直连再失败不再留浏览器破图——记入共享封面失败态
+     （lib/coverImage 的 onCoverError，与另四处同源）并就地出 cover-fallback 占位，
+     五个封面位的失败视觉语言统一。 */
+  const [imgFailed, setImgFailed] = useState(false);
+  /* 换图源（imageUrl 变化）时清失败态：渲染期对比上一渲染的派生调整
+     （React 官方模式，避免 set-state-in-effect 警告） */
+  const [prevImageUrl, setPrevImageUrl] = useState(item.imageUrl);
+  if (prevImageUrl !== item.imageUrl) {
+    setPrevImageUrl(item.imageUrl);
+    setImgFailed(false);
+  }
   const imgSrc = proxiedSrc ?? item.imageUrl;
   /* 打开灯箱 = 用户"看到"了这张图；画廊布局下无阅读器列，
      以灯箱打开作为已读触发点（与 markReadOnOpen 设置解耦——
@@ -636,13 +720,18 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMov
       selectArticle(item.id);
     }
   };
+  const onImgError = () => {
+    if (imgSrc) onCoverError(imgSrc);
+    setImgFailed(true);
+  };
   return (
     <div className={`gallery-card ${item.isRead ? 'read' : ''}`} data-ctx="article" data-id={item.id}>
-      {imgSrc ? (
+      {imgSrc && !imgFailed ? (
         <img
           src={imgSrc}
           loading="lazy"
           onClick={openImage}
+          onError={onImgError}
           role="button"
           data-card-index={cardIndex}
           tabIndex={tabbable ? 0 : -1}
@@ -656,17 +745,18 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMov
         />
       ) : (
         <div
-          className="gallery-no-image"
+          className={`gallery-no-image${imgFailed ? ' cover-fallback' : ''}`}
           onClick={openImage}
           role="button"
           data-card-index={cardIndex}
           tabIndex={tabbable ? 0 : -1}
+          data-cover-state={imgFailed ? 'failed' : 'empty'}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(); return; }
             if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
             else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
           }}
-        >无图</div>
+        >{imgFailed ? <Icons.image /> : '无图'}</div>
       )}
       <div className="gallery-meta">
         <div className="gallery-title">{item.title}</div>
@@ -775,6 +865,8 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
   /* TASK-065 N11：同 SocialCard——未消毒流式产物按纯文本渲染 */
   const rawTranslated = useAppStore((s) => s.rawTranslatedIds[item.id]);
   const [expanded, setExpanded] = useState(false);
+  /* fix-5：卡片级翻译失败信息（内联错误行 + 重试依据） */
+  const translateError = useAppStore((s) => s.translateErrors[item.id] || '');
   /* 进入视口附近才水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
      「展开更多」必须展示全文而非同一段截断文本 */
   const hydrateRef = useLazyHydrate(item.id);
@@ -784,8 +876,23 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
     : '';
   const displayText = expanded && fullText ? fullText : item.snippet;
   /* 失败后卡片保持展开（展示错误 + 重试按钮） */
-  const summaryOpen = summaryOverride ?? (feedConfig.autoSummary || !!summaryError);
-  const transShow = transOverride ?? feedConfig.autoTranslate;
+  /* fix-8：摘要框跟随 auto 配置展开的前提加「有产物/在途/出错」——auto 开但
+     尚无摘要时按收起处理，不再渲染空壳摘要框（自动生成只在 Reader 打开文章
+     时触发，卡片挂载刻意不发起，防滚动 IPC 风暴）；手动点「摘要」仍会就地
+     触发生成并展开。 */
+  const summaryOpen = summaryOverride ?? autoAiBlockOpen(
+    feedConfig.autoSummary,
+    !!item.aiSummary,
+    summaryGenerating,
+    !!summaryError,
+  );
+  /* fix-8：译文块同口径（见上） */
+  const transShow = transOverride ?? autoAiBlockOpen(
+    feedConfig.autoTranslate,
+    !!item.translatedContent,
+    !!translatingCard,
+    !!translateError,
+  );
   /* 自动收起：按展示源文本判定（全文可得时按全文长度，否则按 snippet），
      短内容直接全文展示、不渲染展开按钮 */
   const isLong = (fullText || item.snippet || '').length > 120;
@@ -810,7 +917,9 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
             className={`toggle-action-btn notif-act ${transShow ? 'act-on' : ''}`}
             onClick={() => {
               const next = !transShow;
-              if (next && !item.translatedContent) {
+              /* fix-5：失败态时点「翻译」必须重走 translateEntry 重试（与
+                 SocialCard 同口径，半截译文不再被当成缓存只切显示） */
+              if (next && (translateError || !item.translatedContent)) {
                 useAppStore.getState().translateEntry(item.id);
               }
               setTransOverride(next);
@@ -860,6 +969,13 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
           <span dangerouslySetInnerHTML={{ __html: item.translatedContent }} />
         )}
         {translatingCard ? <span>翻译中…</span> : null}
+        {/* fix-5：翻译失败内联错误行 + 重试（与 SocialCard 同形态） */}
+        {translateError && !translatingCard ? (
+          <div className="ai-error-row">
+            <span className="ai-error-text" title={translateError}>翻译失败：{translateError}</span>
+            <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重试</button>
+          </div>
+        ) : null}
       </div>
 
       {isLong && (

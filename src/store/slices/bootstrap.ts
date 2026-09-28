@@ -224,7 +224,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       是同一范围、更窄的口径（视图筛选是范围的子集），两条路径共用范围游标。 */
   reloadFilteredEntries: async (view) => {
     if (get().dataMode !== 'tauri') return;
-    const scopeKey = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
+    /* fix-4（自检 P2-2）：发起时快照「范围×布局」口径——与 loadMoreArticles 的
+       守卫判据对齐。此前只比较 view：切范围/切布局后的旧响应仍会放行，把
+       「源A × 旧布局」的收藏列表覆盖进新口径（新请求先返回时旧响应晚到，
+       错列表一直留存），并把游标写过期键。 */
+    const scopeKeyAtStart = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
     const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort, get().activeContentLayout);
     let rows;
     try {
@@ -245,13 +249,16 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (!rows) return;
     // 竞态保护：拉取期间用户又切了视图，丢弃过期结果
     if (get().activeViewFilter !== view) return;
+    // fix-4：拉取期间订阅范围或布局也变了 ⇒ 该响应属于另一个查询口径，整体丢弃
+    //（排序不参与：筛选视图拉的是全集，切排序只是本地重排，entries 仍然有效）
+    if (scopePageKey(get().activeFeedFilter, get().activeContentLayout) !== scopeKeyAtStart) return;
     // 替换 entries（筛选视图的完整列表），重置分页游标（筛选视图不分页）
     const next = rows.map(articleRowToEntry);
     viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view, get().activeFeedFilter), next);
     set((s) => ({
       entries: next,
       articlesLimit: rows.length,
-      articlesCursor: { ...s.articlesCursor, [scopeKey]: rows.length },
+      articlesCursor: { ...s.articlesCursor, [scopeKeyAtStart]: rows.length },
       articlesExhausted: true,
       articlesLoading: false,
       /* 新快照不带正文：清空水合终态，让卡片重新水合 */

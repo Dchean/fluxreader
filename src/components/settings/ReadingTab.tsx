@@ -29,7 +29,7 @@ export function ReadingTab() {
             className="range-input"
             onChange={(e) => updateSettings({ fontSize: Number(e.target.value) })}
           />
-          <span style={{ width: 45 }}>{settings.fontSize}px</span>
+          <span className="range-value-tag">{settings.fontSize}px</span>
         </div>
       </SettingCard>
       <SettingCard title="行高" desc="调整正文段落行间距比例">
@@ -42,7 +42,7 @@ export function ReadingTab() {
             className="range-input"
             onChange={(e) => updateSettings({ lineHeight: Number(e.target.value) })}
           />
-          <span style={{ width: 45 }}>{settings.lineHeight}%</span>
+          <span className="range-value-tag">{settings.lineHeight}%</span>
         </div>
       </SettingCard>
 
@@ -58,7 +58,7 @@ export function ReadingTab() {
             className="range-input"
             onChange={(e) => updateSettings({ maxWidth: Number(e.target.value) })}
           />
-          <span style={{ width: 55 }}>{settings.maxWidth}px</span>
+          <span className="range-value-tag">{settings.maxWidth}px</span>
         </div>
       </SettingCard>
       <SettingCard title="显示预计阅读时间" desc="在文章信息栏显示估算阅读时长">

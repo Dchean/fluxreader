@@ -220,3 +220,28 @@ export function podcastClickAction(
   if (!clickedAudioUrl) return 'play';
   return playerActive && currentAudioUrl === clickedAudioUrl ? 'toggle' : 'play';
 }
+
+/* ============================================================
+   fix-8（自检 UI-P1-3）：通知/社交卡「跟随 auto 配置」的 AI 区块展开判定。
+
+   缺陷背景：summaryOpen / showTranslate 跟随 feedConfig.auto* 直接展开——
+   但自动生成本身只在 Reader 打开文章时触发（卡片挂载只水合正文，刻意不
+   就地发起生成，防滚动 IPC 风暴），于是「auto 开 + 尚无产物」的卡片长期
+   渲染一个空壳框。
+
+   契约：
+   - 出错 → 恒展开（错误行 + 重试按钮必须可见，与 Reader 失败态同口径）；
+   - 非 auto 且无错 → 收起；
+   - auto 开：已有产物 / 正在生成 ⇒ 展开；三者皆无 ⇒ 收起（用户点卡片上的
+     摘要/翻译按钮仍会就地触发生成并展开——手动路径不受影响）。
+   ============================================================ */
+export function autoAiBlockOpen(
+  autoOn: boolean,
+  hasOutput: boolean,
+  generating: boolean,
+  hasError: boolean,
+): boolean {
+  if (hasError) return true;
+  if (!autoOn) return false;
+  return hasOutput || generating;
+}

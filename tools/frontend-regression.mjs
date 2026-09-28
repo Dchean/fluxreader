@@ -1345,8 +1345,9 @@ await (async () => {
     checkNew('(P3[F5]) 筛选上下文变化必须重置 startIndex 基准（filterKey 依赖）',
       /useLayoutEffect\(\(\)\s*=>\s*\{[^}]*lastStartIndexRef\.current\s*=\s*0[^}]*\}\s*,\s*\[filterKey\]\)/
         .test(tlF5));
-    checkNew('(P3[F5]) scrollDriven 只能由用户滚动置位（handleScroll 内），非滚动置位处',
-      /const handleScroll = \(\) => \{[^}]*scrollDrivenRef\.current = true;/.test(tlF5));
+    checkNew('(P3[F5]) scrollDriven 只能由用户滚动置位（handleScroll 内经 isUserScrollEvent 判定；fix-2 更新：scroll 事件不再无条件算用户滚动）',
+      /const handleScroll = \(\) => \{[^]*?scrollDrivenRef\.current = scrollDrivenRef\.current \|\| isUserScrollEvent\(\{/.test(tlF5)
+      && !/scrollDrivenRef\.current = true;/.test(tlF5));
   }
 
   /* ============================================================
@@ -2642,6 +2643,94 @@ await (async () => {
     checkNew('(A5/D3) 竞态丢弃复位 articlesLoading（修前修后一致：不回退）',
       a5.articlesLoading === false);
   }
+
+  /* ============================================================
+     fix-1 / fix-3 / fix-4（发布前自检修复，2026-09-29）：store 级行为断言
+     —— addFeed 空 catId 发 null、删除分类/源复位范围、筛选视图迟到响应按口径丢弃
+     ============================================================ */
+  {
+    /* fix-1（自检 P1-1）：空 catId（全新安装 0 分类时 AddFeedModal 的实参）必须发
+       folder_id=null —— 后端 add_feed 对 None 有「自动落到未分类（不存在则建）」
+       兜底；修前 Number('')===0 直传，触发 feeds.folder_id 外键违约，首用添加必败。
+       断言能抓住回退：payload.folderId 一旦回到 0（回归 Number('') 直传），即红。 */
+    await resetStore();
+    await store.getState().addFeed('', 'https://example.com/rss.xml', '', 'inherit', false, false, false);
+    const fix1Call = invokeCalls.find((c) => c.cmd === 'add_feed');
+    checkNew('(fix-1) 空 catId 的 addFeed payload.folderId === null（后端 None→未分类兜底可达；修前为 0）',
+      !!fix1Call && fix1Call.args.folderId === null && fix1Call.args.feedUrl === 'https://example.com/rss.xml');
+    /* 有数字 id 的路径不受影响 */
+    invokeCalls.length = 0;
+    await store.getState().addFeed('cat-2', 'https://example.com/b.xml', '', 'inherit', false, false, false);
+    const fix1b = invokeCalls.find((c) => c.cmd === 'add_feed');
+    checkNew('(fix-1) 数字 catId 照旧映射（cat-2 → folderId=2）',
+      !!fix1b && fix1b.args.folderId === 2);
+
+    /* fix-3（自检 P2-1）：删除当前正浏览的分类/订阅源 → 范围与选中复位（与 mock
+       分支同口径）。修前 tauri 分支不清理，entries 按已消失的范围过滤恒为空，
+       时间流停在幽灵范围。断言能抓住回退：删掉复位 set 后 activeFeedFilter 仍为
+       已删 id，两条断言即红。 */
+    await bootFixture();
+    store.getState().selectFeed('cat-1');
+    await nTick(20);
+    store.getState().selectArticle('101');
+    checkNew('(fix-3) 前置：已进入 cat-1 范围并选中文章',
+      store.getState().activeFeedFilter === 'cat-1' && store.getState().activeArticleId === '101');
+    await store.getState().deleteCategory('cat-1');
+    await nTick(20);
+    checkNew('(fix-3) 删除正浏览的分类 → activeFeedFilter 复位 all 且清空选中（修前停在幽灵范围）',
+      store.getState().activeFeedFilter === 'all' && store.getState().activeArticleId === null);
+    /* 负向：删除非活动分类不影响当前范围 */
+    await bootFixture();
+    store.getState().selectFeed('cat-2');
+    await nTick(20);
+    await store.getState().deleteCategory('cat-1');
+    await nTick(20);
+    checkNew('(fix-3) 删除非活动分类 → 当前范围保持不变',
+      store.getState().activeFeedFilter === 'cat-2');
+    /* deleteFeed 同口径 */
+    await bootFixture();
+    store.getState().selectFeed('10');
+    await nTick(20);
+    store.getState().selectArticle('101');
+    await store.getState().deleteFeed('cat-1', '10');
+    await nTick(20);
+    checkNew('(fix-3) 删除正浏览的订阅源 → 范围复位 all + 清空选中',
+      store.getState().activeFeedFilter === 'all' && store.getState().activeArticleId === null);
+    await bootFixture();
+    store.getState().selectFeed('11');
+    await nTick(20);
+    await store.getState().deleteFeed('cat-1', '10');
+    await nTick(20);
+    checkNew('(fix-3) 删除非活动订阅源 → 当前范围保持不变',
+      store.getState().activeFeedFilter === '11');
+
+    /* fix-4（自检 P2-2）：reloadFilteredEntries 的口径守卫——「范围×布局」在途时
+       被切换 ⇒ 迟到的旧响应整体丢弃（entries 不被覆盖、过期游标不写入），且
+       新口径自己的响应照常落地。修前守卫只比 view：切范围后旧响应放行，
+       「源A×article」的收藏列表覆盖进源B 视图并持久留存。 */
+    await resetStore();
+    store.setState({ activeViewFilter: 'starred', articlesCursor: {} });
+    listPlan = { mode: 'defer' };
+    const fix4Late = store.getState().reloadFilteredEntries('starred'); // 发起时范围=all
+    await nTick(0);
+    store.getState().selectFeed('11');  // 期间切到源B：它自己的筛选请求也进 defer 队列
+    await nTick(0);
+    checkNew('(fix-4) 竞态场景成立：两个筛选请求都在途（旧口径在前）', pendingList.length === 2);
+    const fix4CursorBefore = JSON.stringify(store.getState().articlesCursor);
+    pendingList[0].resolve([mkRow({ id: 9001, feed_id: 10, is_starred: true, title: '迟到的旧口径数据' })]);
+    await fix4Late;
+    await nTick(20);
+    checkNew('(fix-4) 旧 scope 的迟到筛选响应被丢弃：entries 不被覆盖、过期游标不写入（修前只比 view 会放行）',
+      !store.getState().entries.some((e) => e.id === '9001')
+      && JSON.stringify(store.getState().articlesCursor) === fix4CursorBefore);
+    /* 正向对照：新口径自己的响应照常落地（守卫没有锁死正常路径） */
+    pendingList[1].resolve([mkRow({ id: 9002, feed_id: 11, is_starred: true, title: '源B 的筛选结果' })]);
+    await nTick(20);
+    checkNew('(fix-4) 新口径响应照常落地：源B 的收藏行进列表、游标写在新范围键上',
+      store.getState().entries.some((e) => e.id === '9002')
+      && store.getState().articlesCursor['article|11'] === 1);
+    listPlan = null;
+  }
 })();
 
 /* ============================================================
@@ -3536,6 +3625,108 @@ await (async () => {
       && tl94.includes('<span className="load-more-idle">滚动加载更多</span>')
       && tl94.includes('load-more-spinner') && tl94.includes('<span className="load-more-end">没有更多了</span>'));
   }
+}
+
+/* ============================================================
+   fix-2 / fix-5 / fix-6 / fix-7 / fix-8 / fix-9 / fix-10 / fix-11+12 / fix-13 / fix-14
+   （发布前自检修复，2026-09-29）：纯函数真值表 + 源码形态断言。
+   源级断言说明判别点：无法在无 DOM harness 里点按钮/开窗口的项，
+   以「JSX 分支真实存在 + 调用点形态」为判别；CSS 项直接解析声明值。
+   ============================================================ */
+{
+  const fsFix = await import('node:fs');
+  const srcOf = (p) => fsFix.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const tlFix = srcOf('../src/components/Timeline.tsx');
+
+  /* ---------- fix-2：用户滚动判定收口 isUserScrollEvent ---------- */
+  const { isUserScrollEvent, PROGRAMMATIC_SCROLL_SUPPRESS_MS } =
+    await import('../src/components/scrollAwayRead.ts');
+  checkNew('(fix-2) 程序性滚动抑制窗口内的 scroll 事件不算用户滚动（修前 onScroll 无条件置位）',
+    isUserScrollEvent({ gestureSeen: true, programmaticUntil: 1000, now: 999 }) === false
+    && isUserScrollEvent({ gestureSeen: true, programmaticUntil: 1000, now: 1000 }) === true
+    && PROGRAMMATIC_SCROLL_SUPPRESS_MS > 0);
+  checkNew('(fix-2) 窗口外但无真实输入闩 ⇒ 不算用户滚动（纯程序性环境不标读）',
+    isUserScrollEvent({ gestureSeen: false, programmaticUntil: 0, now: 500 }) === false);
+  checkNew('(fix-2) 窗口外且有真实输入（wheel/触摸/滚动条/翻页键）⇒ 用户滚动',
+    isUserScrollEvent({ gestureSeen: true, programmaticUntil: 0, now: 500 }) === true);
+  checkNew('(fix-2) Timeline 接线：onScroll 判定收口 isUserScrollEvent，修前的无条件置位已移除',
+    tlFix.includes('scrollDrivenRef.current = scrollDrivenRef.current || isUserScrollEvent')
+    && !tlFix.includes('scrollDrivenRef.current = true;'));
+  checkNew('(fix-2) 三处程序性滚动（筛选归零 / J-K 定位 / focus 移动）都必须先开抑制窗口',
+    (tlFix.match(/suppressNextScrollEvents\(\);/g) || []).length >= 3
+    && tlFix.indexOf('suppressNextScrollEvents();') < tlFix.indexOf('rowVirtualizer.scrollToIndex(idx,')
+    && tlFix.includes("el.addEventListener('wheel', latch"));
+
+  /* ---------- fix-5：卡片级翻译失败的内联错误行 + 按钮重试 ---------- */
+  checkNew('(fix-5) Social/Notif 卡补翻译失败内联错误行 + 重试按钮（调 translateEntry）',
+    (tlFix.match(/translateError && !translatingCard \?/g) || []).length === 2
+    && (tlFix.match(/ai-retry-btn" onClick=\{\(\) => useAppStore\.getState\(\)\.translateEntry\(item\.id\)\}/g) || []).length === 2);
+  checkNew('(fix-5) 两卡「翻译」按钮在失败态（translateErrors[id] 存在）改走 translateEntry 重试（修前把半截译文当缓存只切显示）',
+    (tlFix.match(/if \(next && \(translateError \|\| !item\.translatedContent\)\)/g) || []).length === 2);
+
+  /* ---------- fix-8：auto 配置的 AI 区块空态收起 ---------- */
+  const selFix = await import('../dist-test/store.js');
+  checkNew('(fix-8) autoAiBlockOpen 判据：出错恒展开；auto 关收起；auto 开需有产物或在途（空态不再渲染死框）',
+    selFix.autoAiBlockOpen(false, false, false, true) === true
+    && selFix.autoAiBlockOpen(false, true, false, false) === false
+    && selFix.autoAiBlockOpen(true, false, false, false) === false
+    && selFix.autoAiBlockOpen(true, true, false, false) === true
+    && selFix.autoAiBlockOpen(true, false, true, false) === true);
+  checkNew('(fix-8) Timeline 接线：SocialCard/NotifCard 两处跟随 auto 的展开判定改走 autoAiBlockOpen',
+    (tlFix.match(/autoAiBlockOpen\(/g) || []).length >= 2
+    && !tlFix.includes('feedConfig.autoSummary || !!summaryError)')
+    && !tlFix.includes('?? feedConfig.autoTranslate;'));
+
+  /* ---------- fix-6：播放条时长统一 formatDuration ---------- */
+  const pbSrc = srcOf('../src/components/PlayerBar.tsx');
+  checkNew('(fix-6) PlayerBar 删除本地 formatClock，时长统一 lib/format.formatDuration（迷你条/全屏条/进度条两端）',
+    pbSrc.includes("import { formatDuration } from '../lib/format'")
+    && !/function formatClock\b/.test(pbSrc)
+    && (pbSrc.match(/formatDuration\(player\.(positionSec|durationSec)\)/g) || []).length === 4
+    && pbSrc.includes('formatDuration={formatDuration}'));
+
+  /* ---------- fix-7：全屏播放器层级降到弹窗之下 ---------- */
+  const cssFix = srcOf('../src/styles/base.css');
+  const zOf = (sel) => {
+    const m = cssFix.match(new RegExp('\\.' + sel + '\\s*\\{[^}]*?z-index:\\s*(\\d+)', 's'));
+    return m ? Number(m[1]) : -1;
+  };
+  checkNew('(fix-7) .player-full-overlay z-index(140) < .modal-overlay(150)：全屏播放时搜索/设置/灯箱可见可关（修前 260 盖住一切弹窗）',
+    zOf('player-full-overlay') === 140 && zOf('modal-overlay') === 150
+    && zOf('player-full-overlay') < zOf('modal-overlay'));
+
+  /* ---------- fix-9：画廊 img 补 onError + cover-fallback 占位 ---------- */
+  checkNew('(fix-9) 画廊 img 补 onError（记入共享封面失败态）且失败/无图均出占位（与另四处统一）',
+    tlFix.includes("import { onCoverError } from '../lib/coverImage'")
+    && tlFix.includes('onError={onImgError}')
+    && tlFix.includes("imgFailed ? ' cover-fallback' : ''")
+    && tlFix.includes('if (prevImageUrl !== item.imageUrl) {'));
+
+  /* ---------- fix-10：空必填输入禁用主按钮 ---------- */
+  const ovFix = srcOf('../src/components/Overlays.tsx');
+  checkNew('(fix-10) 新建分类/添加订阅空必填输入禁用主按钮（与改名弹窗统一，修前可点但静默 return）',
+    ovFix.includes('disabled={!name.trim()}')
+    && ovFix.includes('disabled={!url.trim()}'));
+
+  /* ---------- fix-11/12：AI 区块与翻译错误行 token 化 ---------- */
+  checkNew('(fix-11/12) base.css 不再含硬编码蓝紫/正红三元组；AI 区块走 --accent、错误行走 --danger 的 color-mix',
+    !cssFix.includes('rgba(120,115,184') && !cssFix.includes('rgba(120, 115, 184')
+    && !cssFix.includes('rgba(72,128,200') && !cssFix.includes('rgba(72, 128, 200')
+    && !cssFix.includes('rgba(229,72,77') && !cssFix.includes('rgba(229, 72, 77')
+    && cssFix.includes('color-mix(in srgb, var(--accent) 8%, transparent)')
+    && cssFix.includes('color-mix(in srgb, var(--danger) 6%, transparent)'));
+
+  /* ---------- fix-13：ReadingTab 数值标签统一 range-value-tag ---------- */
+  const rtFix = srcOf('../src/components/settings/ReadingTab.tsx');
+  checkNew('(fix-13) ReadingTab 三处数值标签改用 range-value-tag（裸内联宽度 span 清零）',
+    (rtFix.match(/className="range-value-tag"/g) || []).length === 3
+    && !rtFix.includes('style={{ width: 45 }}') && !rtFix.includes('style={{ width: 55 }}'));
+
+  /* ---------- fix-14：页脚版本兜底不再显示假版本号 ---------- */
+  const sfFix = srcOf('../src/components/settings/SettingsSidebarFooter.tsx');
+  checkNew("(fix-14) 页脚版本获取失败保持 …（不再回退硬编码假版本 '0.8.0'，与 AboutTab 决策对齐）",
+    !sfFix.includes("'0.8.0'")
+    && sfFix.includes("version || '…'"));
 }
 
 // ---- 汇总 ----
