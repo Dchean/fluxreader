@@ -2734,6 +2734,33 @@
       "candidates": {
         "TASK-100": "15bd751d47f6feeb8be616521f77f30ac5082b7941dcb74c3fcb15df8a658034"
       }
+    },
+    {
+      "id": "DEC-task101-fever-copy-20260929",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-29 会话指示原话：「目前使用fever协议登陆freshrss会显示 连接失败：Fever认证失败(api_key不正确)，但是gr协议则没有问题，检查是哪里出了问题，并且同步页面的文案不行，像是 [测试连接」只验证连通性（秒级）；「保存并同步」会立即在后台拉取订阅与文章状态。已读/收藏等变更约1秒内推送到服务端；断开连接会移除服务端拉取的订阅与文章。这种，又长又不明确，调整为简略清晰的文案，其他方面如果也有这种情况，一并精简优化」",
+      "statement": "修复 Fever 协议对 FreshRSS 的认证缺陷（REQ-002 范畴：协议兼容性，api_key 传参位置）并把设置页冗长提示文案精简为简略清晰口径（REQ-006），连接/同步类错误提示一并按同口径调整。",
+      "scope": [
+        "TASK-101",
+        "REQ-002",
+        "REQ-006"
+      ],
+      "recorded_at_utc": "2026-09-29T14:02:19.117993Z"
+    },
+    {
+      "id": "DEC-2649113d03dd46b9a13b86aad65ff0e9",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-29 会话指示：「检查是哪里出了问题…调整为简略清晰的文案…」+「合并后打tag发版」；TASK-101 双 worker 交付、修复轮 F1 注释闭环、verify RUN-227e8674 全绿、全新独立审查两轮（首轮 PASS findings 2 low → 修复 → 终审 PASS findings=0，agent_70f6fc03/agent_58c8bb19），UI 取证 V1/V2 13/13",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-101"
+      ],
+      "recorded_at_utc": "2026-09-29T15:07:00.441718Z",
+      "candidates": {
+        "TASK-101": "b378aaff9f541fed7723274dfbeb82b7c69ff6452f93dfd76ba9cccf62d1ac41"
+      }
     }
   ]
 }

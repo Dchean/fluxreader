@@ -1,0 +1,71 @@
+{
+  "task_id": "TASK-101",
+  "candidate_digest": "b378aaff9f541fed7723274dfbeb82b7c69ff6452f93dfd76ba9cccf62d1ac41",
+  "verification_run": "RUN-227e86740cba4cceae1461854f4f0314",
+  "verdict": "PASS",
+  "findings": [],
+  "summary": "独立终审通过，前轮两条 low findings 的处置均确认到位。F1：src-tauri/src/fever.rs verify() 文档注释（:212-215）现完整列出三候选——{域名}（Miniflux /fever/ 形态）、{域名}/api/fever.php（FreshRSS 形态）与 {域名}/p/api/fever.php（FreshRSS 新版布局，TASK-101），顺序与 endpoint_resolve.rs fever_candidates()（:72-84）返回顺序一致（根 → /api/fever.php → /p/api/fever.php），且 resolve()（:231）确实遍历 fever_candidates() 返回值，「已填任一布局完整路径不追加」「404 顺延 / 非 404 立即停」纪律未动，注释与实际行为一致；纯注释改动经两路独立证据确认——diff 当前工作区与前轮审查备份快照（tmp/task-101/review-backup/fever.rs，前候选工作区）唯一差异即 :213-215 三行 ///（+76 字节），且对比 RUN-9669a13e 与 RUN-227e8674 两份 144 文件 candidate manifest，唯一 sha256 变化文件就是 fever.rs，endpoint_resolve.rs 与全部前端文件逐字节未变。F2：.workflow-kit/tasks/evidence/TASK-101-fever-red.log 已归档，2787B 非空，sha256（d0ea7dea…）与 tmp/task-101/fever-red.log 完全一致（diff IDENTICAL），内容为真实红记录——test result: FAILED. 0 passed; 5 failed，五条失败消息（a/b/c 报 Fever 认证失败、d 报仅尝试两候选 404、e 报文案缺 API 密码指引）与前轮报告 F2 描述逐条对应，五个失败测试名与现行 e2e 测试一一对应，修前红→修后绿闭环完整。新候选上抽查前轮结论仍成立（工作区经 candidate manifest 核实即本候选：digest 吻合，8 个候选文件 sha256 逐字节一致）：① 本机独立重跑 cargo test --test fever_freshrss_e2e = 5 passed/0 failed（0.58s 增量编译，5 测试名与红证据一一对应）；② SyncTab.tsx 新短文案在位（:275-276 两句 33/32 字，与 V1 报告实测一致），V2 Fever「API 密码」提示在位（:211-214，48 字单行）；③ RUN-227e8674 门禁证据复核：cargo_test.stdout 32 个 test result 汇总 244 passed/0 failed/9 ignored、frontend.stdout 末尾 516/516、六门禁全 PASS（outcome=completed，exit_code=0）。遗留观察（不阻塞、不进 findings）：(a) V1/V2 真机取证报告所测 dist 由前一候选（213c30a48…）构建，但因两候选间前端文件 sha256 逐字节相同且唯一差异为 Rust 注释，该 13/13 取证对新候选仍完全有效；(b) 前轮已记录的观察仍在：t101-v1-e 标签称「SyncTab 恰两块 mini-dialog-hint」实际校验的是 SyncTab.tsx 源文件内恰 2 处（同步页 DOM 因内嵌 CacheCleanup/ConfigSyncSection 共 4 块），断言本身正确、表述范围略窄，后续 dev 轮可顺手改标签文案。",
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "前轮唯一缺口（F2）已处置：修前红证据按要求归档到 .workflow-kit/tasks/evidence/TASK-101-fever-red.log，2787B 非空，sha256 与 tmp/task-101/fever-red.log 一致（d0ea7deac75be881…），内容为真实失败记录（0 passed; 5 failed，五条失败消息含 auth 失败、仅两候选 404、文案缺指引，与验收①的测试集一一对应）。验收⑦的修复 run 补列（F1）亦到位：RUN-227e8674 六门禁 PASS、outcome=completed、exit_code=0，candidate manifest digest=b378aaff… 与工作区 144 文件一致（8 个候选文件 sha256 逐字节核对通过）。本审查为最终独立确认，验收项无遗留缺口。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-101-fever-red.log",
+        ".workflow-kit/tasks/evidence/RUN-227e86740cba4cceae1461854f4f0314-candidate.json",
+        ".workflow-kit/tasks/runs/RUN-227e86740cba4cceae1461854f4f0314.json",
+        "src-tauri/tests/fever_freshrss_e2e.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "本机独立重跑 cargo test --test fever_freshrss_e2e：5 passed/0 failed/0 ignored（0.58s 增量编译、0.01s 执行），五个测试（freshrss_accepts_api_key_only_from_post_body、request_query_never_carries_api_key_on_read_and_write、miniflux_shape_action_in_query_api_key_in_body、freshrss_new_layout_p_api_candidate_resolves_after_404、auth_failure_message_mentions_freshrss_api_password）与红证据中五个失败一一对应，红→绿闭环成立。RUN-227e8674 门禁证据复核：cargo_test.stdout 全部 32 个 test result 行汇总 244 passed/0 failed/9 ignored（与基线 239+5、ignored 9 不增一致），frontend.stdout 末尾 516/516（≥501）。两候选 manifest 对比显示除 fever.rs 注释外全部 143 文件 sha256 未变，回归面零扩大。",
+      "evidence_files": [
+        "src-tauri/tests/fever_freshrss_e2e.rs",
+        ".workflow-kit/tasks/evidence/RUN-227e86740cba4cceae1461854f4f0314-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-227e86740cba4cceae1461854f4f0314-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "在新候选上复核失败路径未受本次注释修复影响：resolve()（fever.rs :230-257）仍遍历 fever_candidates()，404 顺延、非 404（含 auth 被拒）立即停并如实报错，两候选皆 404 时错误信息列出全部已试候选；call_probe/mark_items 的 auth!=1 统一引用 AUTH_FAILED_MSG（含 FreshRSS「API 密码」指引）。红证据五条失败消息正是这些路径在修复前代码上的真实表现（d 条错误信息只列两个候选，与修复前两候选行为吻合），进一步佐证失败路径语义前后一致且修复后由 5/5 绿锁定。",
+      "evidence_files": [
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/endpoint_resolve.rs",
+        ".workflow-kit/tasks/evidence/TASK-101-fever-red.log"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "F1 处置确认：verify() 文档注释（fever.rs :212-215）现与 endpoint_resolve.rs fever_candidates()（:72-84）实际行为一致——三候选、顺序相同（根 → /api/fever.php → /p/api/fever.php）、注释同样交代「已填完整路径不追加」与「404=不存在/非404=存在」判定；resolve() 以 crate::endpoint_resolve::fever_candidates 为唯一候选来源，注释与实现无漂移。纯注释改动经双路证实（前候选快照 diff 仅 :213-215 三行 ///、+76 字节；两 run manifest 对比唯一变化文件为 fever.rs），未触碰任何代码路径。",
+      "evidence_files": [
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/endpoint_resolve.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "本次修复为纯注释改动（+76 字节 /// 行），编译产物运行时行为与前一候选完全一致（其余 143 文件 sha256 未变）；候选整体性能结论沿用前轮：api_key 移入 form body 仅增 ≤~70 字节 body 并从 URL 移除同长度 query，请求次数与形状不变、无新增往返/锁/分配热点，新增第三候选仅在前两候选 404 时多一次探测请求（标准部署零影响）。",
+      "evidence_files": [
+        "src-tauri/src/fever.rs",
+        ".workflow-kit/tasks/evidence/RUN-227e86740cba4cceae1461854f4f0314-candidate.json"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-101-SYNC-COPY.md",
+    "checked_states": [
+      "V1.sync-hint-concise",
+      "V2.fever-api-password-hint"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-101-sync-light.png",
+      ".workflow-kit/tasks/evidence/TASK-101-sync-dark.png",
+      ".workflow-kit/tasks/evidence/TASK-101-sync-report.md"
+    ]
+  }
+}

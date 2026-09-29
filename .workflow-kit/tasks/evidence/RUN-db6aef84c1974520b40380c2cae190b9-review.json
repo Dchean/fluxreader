@@ -1,0 +1,92 @@
+{
+  "task_id": "TASK-101",
+  "candidate_digest": "213c30a48050a530792306484c2449dcda008be060d198f60fe1765af4429165",
+  "verification_run": "RUN-9669a13e2dc64e7fb3e89833f2eb3946",
+  "verdict": "PASS",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "low",
+      "blocking": false,
+      "area": "maintainability",
+      "description": "src-tauri/src/fever.rs 的 verify() 文档注释（约 :211-214，『端点自动适配（TASK-059）…依次尝试 {域名}（Miniflux 的 /fever/ 形态）与 {域名}/api/fever.php（FreshRSS 形态）』）仍只列两个候选，未提及本任务新增的第三候选 {base}/p/api/fever.php（endpoint_resolve.rs 侧文档已同步）。行为无影响：resolve() 实际遍历 fever_candidates() 的返回值。",
+      "recommendation": "后续 dev 轮顺手补一行文档（或主控豁免）；不阻塞本次验收。"
+    },
+    {
+      "id": "F2",
+      "severity": "low",
+      "blocking": false,
+      "area": "requirements",
+      "description": "验收①要求修前红证据『留档 .workflow-kit/tasks/evidence/TASK-101-*』，当前红日志只在 tmp/task-101/fever-red.log（rust-progress 明确把归档留给主控）。审查员已独立复现红证据（仅还原 src-tauri/src 两个文件、保留新测试：0 passed/5 failed，五条失败消息与留档逐字一致），证据真实性无疑，但 tasks/evidence/ 下的归档副本尚缺。",
+      "recommendation": "主控在验收时把 tmp/task-101/fever-red.log 复制为 .workflow-kit/tasks/evidence/TASK-101-fever-red.log（审查员受写文件纪律约束不代做）。"
+    }
+  ],
+  "summary": "独立复核通过。核心修复正确：fever.rs 两处 POST（call_probe/mark_items）的 api_key 已从 URL query 移到 .form() form body（application/x-www-form-urlencoded，FreshRSS $_POST 与 Miniflux r.FormValue 都收），query 中仅剩 action/mark/as/id/with_ids/since_id，md5(username:password) 公式与单测原样保留，认证失败文案两处统一为含 FreshRSS「API 密码」指引的 AUTH_FAILED_MSG；endpoint_resolve.rs 第三候选 {base}/p/api/fever.php 顺序正确（/api/fever.php 之后）、仅 404 顺延、已填任一布局完整路径不追加、「非 404 立即停」纪律未动。修前红证据经审查员独立复现（还原 src 后同一套 mock 测试 0/5 失败、失败原因逐条对上根因），修后同测试 5/5 绿（审查员本机重跑）；Miniflux 形状（action 在 query + api_key 在 body + 探测 query 仅 api）有专项测试锁定；防回退断言（query 无 api_key，含被 404 拒掉的探测）由 mock 在路由前记录 query 实现。前端：SyncTab 点名长句（74 字）整段移除，新短文案两句 33/32 字保留三关键语义与已读/收藏回传语义；Fever「API 密码」提示位于同步协议卡下拉框正下方，48 字单行无分号；三处审计压缩（63/66/69→45/56/56）约束信息零丢失（WebDAV 子路径示例由输入框 placeholder 表达，已核实），九组件静态 desc 基线恰 3 处 >60 字、现全量 ≤56。V1/V2 经 tmp/audit-r3/harness 真机取证（Chrome CDP + 忠实假后端，真实用户路径打开设置→同步，浅/深主题各截图）13/13 DOM 断言 PASS，证据落 tasks/evidence/。门禁独立抽查全绿：cargo test --test fever_freshrss_e2e 5/5、npm run test:frontend 516/516（≥501）；RUN-9669a13e 六门禁 PASS 且 candidate_digest 与工作区 144 个文件逐字节吻合（cargo 244/0/9 = 基线 239+5 新增、ignored 9 不增；fmt/clippy/lint/build exit 0）。两条 low 级非阻塞发现（F1 文档注释、F2 红证据归档位置）见 findings，均可由主控在验收时处置。",
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐条核对验收①-⑦：① 5 例 mock-FreshRSS 行为集成测试修后绿（审查员重跑 5/5），修前红由审查员独立复现（git stash 仅 src 两文件 → 0 passed/5 failed，a/b/c 报 auth 失败、d 报仅尝试两候选 404、e 报文案缺指引，与 tmp/task-101/fever-red.log 逐字一致）；query 无 api_key 断言真实存在且覆盖被 404 拒掉的探测。② 测试 c 锁定 Miniflux 形状（action/mark/as/id 在 query、api_key 在 form body、探测 query 仅 api），公式单测 api_key_is_md5_of_username_colon_password 保留。③ 测试 d + 单测/集成断言三候选形状与 p/api 404 顺延。④ SyncTab 新文案上线（DOM 实证）+ 语义保留断言，frontend 516/516 ≥501 全过。⑤ V1/V2 harness 真机取证完成（本审查产出，入 tasks/evidence/）。⑥ RUN-9669a13e 六门禁 PASS：cargo 244/0/9（239+5，ignored 9 不增）、fmt/clippy 0、lint/build exit 0、frontend 516；candidate digest 与工作区 144 文件 sha256 全部吻合。⑦ 本报告即独立审查。唯一缺口为 F2（红证据归档位置，证据本身已验真）。",
+      "evidence_files": [
+        "src-tauri/tests/fever_freshrss_e2e.rs",
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/endpoint_resolve.rs",
+        ".workflow-kit/tasks/runs/RUN-9669a13e2dc64e7fb3e89833f2eb3946.json",
+        ".workflow-kit/tasks/evidence/RUN-9669a13e2dc64e7fb3e89833f2eb3946-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/TASK-101-sync-report.md"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "cargo 全量 244 passed/0 failed/9 ignored（基线 239/0/9：仅新增 5 例、既有用例零删改、ignored 不增）；endpoint_autodetect_e2e 的候选形状断言同步更新为三候选且补 p/api 完整路径单候选断言；frontend 516/516（既有 26 + store 490 + 新增 15 条 t101-*，≥501 全过）。审查员抽查重跑：cargo test --test fever_freshrss_e2e 5/5 绿、npm run test:frontend 516/516 绿。mock 新增校验默认关闭（fever_expected_api_key 空串 = 旧行为），8 个共享 mock 的既有测试二进制不受影响（全量绿佐证）。",
+      "evidence_files": [
+        "src-tauri/tests/mock_greader.rs",
+        "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-9669a13e2dc64e7fb3e89833f2eb3946-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-9669a13e2dc64e7fb3e89833f2eb3946-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "认证失败路径：call_probe 与 mark_items 的 auth!=1 统一引用 AUTH_FAILED_MSG（含 FreshRSS「API 密码」指引，测试 e 以错误 key 触发 auth=0 验证文案）；resolve() 的『404 顺延 / 非 404 立即停（凭据错误不被误报为路径不存在）』逻辑未改动，path_exists 语义（仅 404=假）由既有断言锁定；mark 的 HTTP 非 2xx 仍报网络错；两候选皆 404 时错误信息仍列出全部已试候选。新增失败面核查：form body 方案在两类后端的失败路径与原 query 方案一致（同状态码、同信封 auth 字段），未引入新的静默失败。",
+      "evidence_files": [
+        "src-tauri/src/fever.rs",
+        "src-tauri/tests/fever_freshrss_e2e.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "两处认证调用共用 AUTH_FAILED_MSG 常量，消除原先两处文案不一致；mock 新增能力（set_fever_expected_api_key/fever_query_log）带 FreshRSS 源码行号出处注释且默认关闭、@allow(dead_code) 处理共享模块的部分使用；fever.rs 模块头与 api_entry/call_probe 文档同步更新，测试文件头注完整交代根因/修前红/锁定点；t101-* 断言对象具体（抽查 v1a/v1-old/v2b/audit-4/audit-5 五条：断言对象与逻辑均为真断言，audit-4 的『基线恰 3 处 >60 字』经审查员对 HEAD 独立复核属实）。小瑕疵见 F1（verify() 文档注释漏列第三候选）与一条观察：t101-v1-e 标签『SyncTab 恰两块 mini-dialog-hint』实际校验的是 SyncTab.tsx 源文件内恰 2 处（同步页 DOM 因内嵌 CacheCleanup/ConfigSyncSection 共 4 块 hint），断言本身正确、标签表述范围略窄。",
+      "evidence_files": [
+        "src-tauri/src/fever.rs",
+        "src-tauri/src/endpoint_resolve.rs",
+        "src/components/settings/SyncTab.tsx",
+        "src/components/settings/ConfigSyncSection.tsx"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "请求次数与形状不变：探测/读/写仍为同数量 POST（每 action 一次、mark 逐条目），api_key 移入 form body 仅增加 ≤~70 字节 body、并从 URL 移除同长度 query，无新增网络往返、无新增锁/分配热点；api_key 不再进 URL 还顺带消除服务器访问日志泄露面（安全旁利）。新增测试为本地 mock 集成测试（0.01s 量级），对门禁耗时影响可忽略；Cargo.toml/lock 未改、零新增依赖。",
+      "evidence_files": [
+        "src-tauri/src/fever.rs"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-101-SYNC-COPY.md",
+    "checked_states": [
+      "V1.sync-hint-concise",
+      "V2.fever-api-password-hint"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-101-sync-light.png",
+      ".workflow-kit/tasks/evidence/TASK-101-sync-dark.png",
+      ".workflow-kit/tasks/evidence/TASK-101-sync-report.md"
+    ]
+  }
+}

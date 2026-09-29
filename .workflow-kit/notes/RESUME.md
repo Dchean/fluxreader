@@ -28,7 +28,7 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 72 项：已验收 59，待验收 0，阻塞 0。
+已建任务 73 项：已验收 60，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
@@ -45,7 +45,7 @@
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 60 项记录可在任务总览查看。
+另有 61 项记录可在任务总览查看。
 
 **本轮暂缓**：SQL 性能与索引加固（审计 route-M，主控已用 EXPLAIN QUERY PLAN 独立复核）：M-5 列表查询因 COALESCE 表达式排序使 idx_articles_published 对 8 个变体全失效（SCAN + USE TEMP B-TREE FOR ORDER BY）；M-7 sync_queue 零索引致每次标读全表扫；M-9 一次全部已读 = 1 SELECT + 1 UPDATE + 2N 往返且全程持锁；M-14 v6→v7 后置回填在事务外且以 user_version 当完成标记（半途中断永不重试）。
 
@@ -83,18 +83,18 @@
 
 ## 最近事件
 
-- 2026-09-29T00:16:21.161460Z · checkpoint · TASK-100 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-09-29T00:17:08.017299Z · checkpoint · TASK-100 · 编码结果已记录，差异范围已核对：README.md, index.html, src-tauri/src/commands/folders.rs, src-tauri/src/commands/opml.rs, src-tauri/src/config_sync.rs, src-tauri/src/db/articles.rs, src-tauri/src/db/folders.rs, src-tauri/src/db/migrations.rs, src-tauri/src/sync/entries.rs, src-tauri/src/sync/subscriptions.rs, src/App.tsx, src/components/ContextMenu.tsx, src/components/Overlays.tsx, src/components/PlayerBar.tsx, src/components/Reader.tsx, src/components/Sidebar.tsx, src/components/Timeline.tsx, src/components/icons.tsx, src/components/primitives.tsx, src/components/settings/AppearanceTab.tsx, src/components/settings/FeedsTab.tsx, src/components/settings/ShortcutsTab.tsx, src/components/settings/SyncTab.tsx, src/lib/api.ts, src/store/internals.ts, src/store/slices/bootstrap.ts, src/store/slices/feeds.ts, src/store/slices/sync.ts, src/styles/base.css, src/styles/tokens.css, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-09-29T00:18:07.954719Z · checkpoint · TASK-100 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
-- 2026-09-29T00:21:36.633622Z · checkpoint · TASK-100 · 2026-09-28T23:5xZ-00:0xZ：RUN-8a60ab6d 承接 finish 通过（candidate_digest=15bd751d），verify RUN-c9ad8ebf 全绿。全新独立审查子代理 agent_ff2cf8d0 已派发（38 项逐项核对 + U1-U8 真机取证 tmp/audit-r3/harness + base.css 规则级独立 diff + U+FFFD 复查），报告将写 tmp/task-100/review-report.json，UI 证据落 tasks/evidence/TASK-100-ui-*（ui_review 契约要求证据必须在 tasks/evidence/ 下）；下一步：审查子代理交付 → 主控 review --mode independent --file 注册（context=审查代理 id）→ PASS 则 accept → 提交推送 → v0.16.0 发布序列
-- 2026-09-29T00:51:25.079820Z · checkpoint · TASK-100 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
-- 2026-09-29T00:52:21.124895Z · accept · 验收 TASK-100；依据：owner 2026-09-29 会话指示：「修复发现的问题并打tag发布，现在可以使用子代理了，记得按工作流派发子代理审计」+ 2026-09-24 授权「我授权你自行验收和commit」；TASK-100 实现双 worker 交付（前端 30 项/Rust 7+1 项）、verify RUN-c9ad8ebf 全绿、全新独立审查 PASS findings=0（U1-U8 真机取证 8/8，agent_ff2cf8d0）
-- 2026-09-29T00:53:05.261629Z · note/progress · TASK-100 收口（2026-09-29 08:5x 本地）：实现双 worker 交付（前端 30 项、回归 419→501；Rust 7+1 项、cargo 239/0/9、v15 迁移 legacy 时间归一），RUN-8a60ab6d finish、verify RUN-c9ad8ebf 全绿，全新独立审查（agent_ff2cf8d0）PASS findings=0，U1-U8 真机取证 8/8（证据 tasks/evidence/TASK-100-ui-*），验收 DEC-0697069a92cf487e9c425bb36dfa6cf4。流程插曲两笔：worker-result 的 unresolved_items 必须为空数组（记录项进 summary），非空会记 action_required 阻塞；unblock 后新 run 承接（基线继承，changed_files 任务累计口径）。下一步：业务+workflow 两笔提交推送 → v0.16.0 发布序列
-- 2026-09-29T01:04:36.685557Z · note/progress · v0.16.0 发布序列执行中（2026-09-29 09:0x 本地）：bump 提交 afa7edf 单独推送、CI 于 09:03 completed:success（head_sha 精确匹配，无 v0.15.0 的 tag 门控错位），annotated tag v0.16.0 已打在 afa7edf（附注=完整发布说明，git tag -n99 可读）并推送。Release workflow 后台轮询中（背景任务 exec_26ae624d）。发布说明定稿于 tmp/release-notes-v0.16.0.md（4 提交、mock addFeed 措辞已修正、门禁数字 239/501）
-- 2026-09-29T01:10:39.609105Z · note/progress · v0.16.0 发布成功（2026-09-29 01:07:58Z，Release run #29 completed:success，CI run 在 afa7edf 上绿）：GitHub Latest「FluxReader v0.16.0」，产物 FluxReader_0.16.0_x64-setup.exe（5,885,745 B）与 FluxReader_0.16.0_x64_en-US.msi（8,491,008 B），target=afa7edf（tag 门控 head_sha 精确匹配）。release body 沿既有约定为短文+指向 tag 附注（本机无 gh/token），完整变更说明在 v0.16.0 tag 附注与 tmp/release-notes-v0.16.0.md。本次 /goal 全链路闭环：自检遗留项收口（TASK-100，双 worker 实现+全新独立审查 PASS）→ 提交 8e688a1/042fd1c → bump afa7edf 单独推 → CI 绿 → annotated tag → Release。owner 决策队列遗留：跨布局 J/K、--text-tertiary 对比度（DEC-task100 记录）
-- 2026-09-29T10:48:03.260746Z · note/decision · 2026-09-29 owner 指示（原话）：「签出一个不含现有工作流的纯项目代码分支作为主分支，现分支作为副分支，后续调整先推送副分支，验证后没有问题再合并进主分支（合并也不添加工作流内容）」。执行：①原 main（含 .workflow-kit 2702 文件 + WORKFLOW-KIT.md + 工作流版 AGENTS/CLAUDE/README 段落）重命名为 dev（0928afd），全部历史与工作流记录保留；②新 main 自 afa7edf（v0.16.0 发布提交）另起一笔 b5499d2——移除 .workflow-kit/ 与 WORKFLOW-KIT.md，AGENTS.md/CLAUDE.md 改写为分支流向约定，README 工作流段落改为指向 dev，.gitignore 增 .workflow-kit/ 防误提交；项目代码（src、src-tauri、tools、public、.github、配置、LICENSE）与 afa7edf 逐字一致（git diff 为空）；未重写历史、无 force push，tag v0.16.0 仍指向 afa7edf 且为 main 祖先。③合并协议（同时写入 main 的 AGENTS.md）：在 main 上 git merge --no-commit --no-ff dev && git rm -r -q .workflow-kit && git commit；AGENTS/CLAUDE/README/.gitignore 冲突保留 main 版。④ci.yml 触发分支补 dev：dev 推送即跑 CI，供合并进 main 前验证。⑤后续发布：bump 与合并顺序——dev 上 bump → 合并进 main（不带工作流）→ 在 main 提交上打 annotated tag（tag 门控要求该提交 CI 绿）。
-- 2026-09-29T13:32:50.022310Z · note/decision · 2026-09-29 owner 指示：「按照项目最新情况更新readme（如果不影响工作流的话），并且规范历史提交的commit文案和release文案」。执行：①README 两分支统一为同一份分支无关版本（分支与发布约定、提交与发布文案约定、能力概述刷新、结构表校准——删不存在的 workflow-kit/ 启动包行、.workflow-kit/ 标注仅 dev），未来 dev→main 合并在 README 上零冲突；②release.yml 的 releaseBody 改为自动取 annotated tag 附注（手动触发回退静态文案），今后发布说明只维护 tag 附注一处，模板见 .workflow-kit/docs/RELEASE-NOTES-TEMPLATE.md；③提交信息约定（type(scope): 中文主题；chore(workflow) 仅 dev）写入 README 并即日生效，本日提交即按此执行；④历史提交文案重写经评估不执行：改写祖先提交须重打全部 9 个已发布 tag（v0.8.0..v0.16.0）并强推，重推 v* tag 会逐个重触发 Release 工作流（旧提交无 CI 运行记录，45 分钟门控必超时失败），且 .workflow-kit 证据与日志引用的提交哈希全部失效——收益远低于破坏面；规范自即日起生效，历史以 tag 附注呈现；若 owner 仍要求改写历史需明确批准并接受「临时停用 Release 触发 + filter-repo + 全 tag 重建 + 双分支强推」流程；⑤已发布 Release 的 web 正文（旧静态文案）本机无 gh/token 不能改，owner 可自行 gh release edit --notes-file 修正（命令见模板文档）。
-- 2026-09-29T13:40:14.717714Z · note/progress · README/文案规范收口（2026-09-29 21:4x 本地）：dev 三笔规范提交（ba42492 docs / 67109aa ci / 410c8b2 chore(workflow)）推 CI 绿（#111）后按协议合并进 main（dca4747）——协议首次实跑发现干净新增的工作流文件需 git rm -f，协议命令已修正为 git rm -r -f -q .workflow-kit 并写入 main 的 AGENTS.md（4b55821，含 README 取 dev 版与发布说明模板指引）。已验证：main/dev 的 README、ci.yml、release.yml 逐字一致；main 树无工作流路径。提交信息约定即日生效；Release 正文自下版起自动取 tag 附注；历史哈希不重写的评估结论见同日 decision note。
+- 2026-09-29T14:31:03.413166Z · checkpoint · TASK-101 · 编码结果已记录，差异范围已核对：src-tauri/src/endpoint_resolve.rs, src-tauri/src/fever.rs, src-tauri/tests/endpoint_autodetect_e2e.rs, src-tauri/tests/fever_freshrss_e2e.rs, src-tauri/tests/mock_greader.rs, src/components/settings/ConfigSyncSection.tsx, src/components/settings/SyncTab.tsx, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-29T14:31:51.039682Z · checkpoint · TASK-101 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-29T14:32:26.925065Z · checkpoint · TASK-101 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-29T14:50:03.454576Z · checkpoint · TASK-101 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-09-29T14:50:19.949107Z · checkpoint · TASK-101 · 阻塞已处置（review_failure）：已核对：审查报告真实（红证据独立复现、候选摘要吻合、V1/V2 真机取证 13/13）；两条 findings 均已在案，F1 修复属注释级改动；下一步：begin 重新实现
+- 2026-09-29T14:50:20.015665Z · unblock · TASK-101 · review_failure → ready；依据：owner 2026-09-29 指示「合并后打tag发版」+ 审查 agent_70f6fc03 verdict=PASS（findings 2 条均 low 非阻塞）：F2 红证据已归档 evidence/TASK-101-fever-red.log（2787B），F1 为 fever.rs verify() 文档注释漏列第三候选（零行为影响），走修复 run 改注释后复审
+- 2026-09-29T14:50:31.685124Z · checkpoint · TASK-101 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-29T14:53:04.113911Z · checkpoint · TASK-101 · 编码结果已记录，差异范围已核对：src-tauri/src/endpoint_resolve.rs, src-tauri/src/fever.rs, src-tauri/tests/endpoint_autodetect_e2e.rs, src-tauri/tests/fever_freshrss_e2e.rs, src-tauri/tests/mock_greader.rs, src/components/settings/ConfigSyncSection.tsx, src/components/settings/SyncTab.tsx, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-29T14:58:56.815957Z · checkpoint · TASK-101 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-29T15:06:47.311026Z · checkpoint · TASK-101 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-29T15:07:04.875561Z · accept · 验收 TASK-101；依据：owner 2026-09-29 会话指示：「检查是哪里出了问题…调整为简略清晰的文案…」+「合并后打tag发版」；TASK-101 双 worker 交付、修复轮 F1 注释闭环、verify RUN-227e8674 全绿、全新独立审查两轮（首轮 PASS findings 2 low → 修复 → 终审 PASS findings=0，agent_70f6fc03/agent_58c8bb19），UI 取证 V1/V2 13/13
+- 2026-09-29T15:07:25.425691Z · note/progress · TASK-101 收口（2026-09-29 22:5x 本地）：Fever+FRESHess 认证修复（api_key→POST form body，根因取证归档）+ 设置页文案精简。双 worker 交付 → finish/verify 绿 → 首轮独立审查 PASS findings 2 low（F1 注释漏列候选/F2 红证据归档位置）→ F2 主控归档 + F1 修复 run RUN-08cfeb97（纯注释）→ verify RUN-227e8674 绿 → 全新复审 PASS findings=0 → 验收 DEC-2649113d03dd46b9a13b86aad65ff0e9。cargo 244/0/9（+5 e2e：mock FreshRSS 只认 POST body，修前红 0/5 留档）、frontend 516/516（+15 t101）。下一步：业务+workflow 提交推 dev → CI 绿 → 协议合并 main → bump 0.16.1 发版（owner 指示「合并后打tag发版」）
 
 ## 如何继续
 

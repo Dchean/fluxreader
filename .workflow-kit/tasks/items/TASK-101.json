@@ -1,0 +1,305 @@
+{
+  "schema_version": 1,
+  "id": "TASK-101",
+  "title": "Fever 协议对 FreshRSS 认证修复（api_key 必须走 POST form body）与设置页冗长文案精简",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-101-SYNC-COPY.md",
+  "ui_checks": [
+    {
+      "id": "V1.sync-hint-concise",
+      "description": "设置页提示文案精简后语义保留：SyncTab 不再出现被点名长句，新短句存在且关键语义（测试连接仅验证/保存并同步才拉取/断开会删除拉取内容）可核对"
+    },
+    {
+      "id": "V2.fever-api-password-hint",
+      "description": "Fever 协议处有「API 密码」简短提示（FreshRSS 的 Fever/GReader 均使用个人设置中的 API 密码）"
+    }
+  ],
+  "status": "done",
+  "objective": "两项独立修复。① Rust（REQ-002）：用户报告 Fever 协议登 FreshRSS 报「Fever认证失败(api_key不正确)」而 GReader 正常——根因已由主控取证（tmp/task-101/fever-analysis.md，含 FreshRSS 官方源码与文档逐行证据）：FreshRSS p/api/fever.php:172 只读 $_POST['api_key']（form body），不读 query；本客户端把 api_key 拼在 URL query 上 POST 空 body，故恒 auth:0。公式 md5(username:api密码) 经官方文档示例逐字验证无误，不改。修法：src-tauri/src/fever.rs 的 call_probe 与 mark_items 把 api_key 从 query 挪到 POST form body（reqwest .form），query 上不再出现 api_key（顺带消除其进服务器访问日志的泄露面）；action/mark/as/id/with_ids/since_id 等参数留在 query（FreshRSS 全部走 $_REQUEST，Miniflux 实证 query 可用，不动）。endpoint_resolve.rs 的 fever_candidates 增补第三候选 {base}/p/api/fever.php（新 FreshRSS 布局，404 后才尝试，顺序在 /api/fever.php 之后）。测试：公式单测保留；新增 mock Fever 服务器集成测试模拟 FreshRSS 行为（api_key 只认 POST body、query 里带了一律当无效），含修前红证据（把 mock 对旧代码跑一遍留档）；断言请求 query 中不含 api_key（防回退）；第三候选顺延有测试。错误文案补充 FreshRSS API 密码指引（「Fever 认证失败（api_key 不正确；FreshRSS 请使用个人设置里的「API 密码」）」口径可微调）。② 前端（REQ-006）：SyncTab 被点名的长提示（「测试连接」只验证连通性（秒级）；「保存并同步」会立即在后台拉取订阅与文章状态。已读/收藏等变更约1秒内推送到服务端；断开连接会移除服务端拉取的订阅与文章。）精简为一两句短文案，语义全保留；对设置页同类冗长提示（多分号长句、>约60字的解释性段落）做一轮精简审计：GeneralTab/ReadingTab/AppearanceTab/AboutTab/FeedsTab/AiTab/ConfigSyncSection/CacheCleanupSection/SyncTab 逐个过，每处给前后对照；Fever 协议入口处补一行简短提示（FreshRSS 的 Fever 使用「API 密码」，在个人设置中设置/重置）；回归断言沿用 frontend-regression 既有 fix-* 风格补 t101-*。",
+  "non_goals": [
+    "不改 GReader 协议实现与认证（工作正常）",
+    "不改 Fever 公式 md5(username:api密码)（经官方文档验证正确）",
+    "不动设置页之外的正文/卡片文案（本轮只收设置页提示类冗长文案）",
+    "不引入新依赖；不改 .workflow-kit 受管记录"
+  ],
+  "requirement_refs": [
+    "REQ-002",
+    "REQ-006"
+  ],
+  "reference_ids": [],
+  "decision_refs": [],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-task101-fever-copy-20260929"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src/**",
+      "src-tauri/src/**",
+      "src-tauri/tests/**",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/docs/UI-CONTRACT-TASK-101-SYNC-COPY.md",
+      ".workflow-kit/tasks/evidence/TASK-101-fever-analysis.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① Fever 修复：mock FreshRSS 行为（api_key 只认 POST body）的集成测试修后绿，且修前红证据（旧代码对同一 mock 失败）留档 .workflow-kit/tasks/evidence/TASK-101-*；请求 query 不含 api_key 有断言",
+    "② Miniflux 兼容不回退：action 在 query、api_key 在 form body 的请求形状被测试锁定（公式单测保留）",
+    "③ fever_candidates 第三候选 p/api/fever.php 有 404 顺延测试",
+    "④ SyncTab 精简文案上线且语义保留断言；设置页冗长文案逐条前后对照（progress 文档），断言总数 ≥501 且全过",
+    "⑤ V1/V2 两条 ui_checks 有 harness 真机取证（SyncTab 截图 + DOM 文案断言），证据入 tasks/evidence/",
+    "⑥ 门禁全绿且不回退：cargo test ≥239 passed/0 failed/9 ignored 不增（新增除外）、fmt/clippy 0、lint/build exit 0、frontend ≥501 全过",
+    "⑦ 独立审查（未参与实现的全新子代理）PASS findings=0 后由主控验收"
+  ],
+  "gates": [
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@a5598cb（v0.16.0 后）：cargo 239/0/9、frontend 501/501、fmt/clippy/lint/build 全绿。Fever+FRESHess 认证为协议兼容缺陷（api_key 传参位置），文案为 REQ-006 范畴的表述冗长，均为缺陷修复而非行为变更。",
+      "evidence_ref": ".workflow-kit/tasks/evidence/TASK-101-fever-analysis.md"
+    },
+    "decision_ids": [
+      "DEC-task101-fever-copy-20260929"
+    ],
+    "actions": [
+      {
+        "action": "add",
+        "target": "Rust：mock FreshRSS 行为的 Fever 认证集成测试（api_key 只认 POST body）+ query 无 api_key 断言 + p/api 候选顺延测试",
+        "reason": "REQ-002 双向同步在 FreshRSS+Fever 下不可用，需成对证据",
+        "gate_ids": [
+          "cargo_test"
+        ]
+      },
+      {
+        "action": "add",
+        "target": "前端：SyncTab 精简文案断言 + Fever API 密码提示断言（t101-* 系列）",
+        "reason": "REQ-006 文案精简需防回退",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "既有 cargo/frontend 断言、fmt/clippy/lint/build",
+        "reason": "不回退证据",
+        "gate_ids": [
+          "cargo_test",
+          "cargo_fmt",
+          "cargo_clippy",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-101-input-25774758ba114e8a8d166bbb890d02f3.json",
+    "digest": "a28cfbd486e475e2daa5f30c2c6e5255e860d7a24169298b2b6d89079723effe",
+    "source_revision": null,
+    "definition_digest": "2032de49bec119e2ca76e9e354752c7fa3f096396eeba3c07e085a4aff87e709"
+  },
+  "budget": {
+    "started_at_utc": "2026-09-29T14:03:52.635880Z",
+    "deadline_at_utc": "2026-09-29T18:03:52.635880Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-d11d22edcd1c4faf8453695d32926081",
+  "run_ids": [
+    "RUN-6b30abdf58d34f7f84ba0b64d8d298a0",
+    "RUN-f27f5c93291241e19ce97050d6486c33",
+    "RUN-9669a13e2dc64e7fb3e89833f2eb3946",
+    "RUN-db6aef84c1974520b40380c2cae190b9",
+    "RUN-08cfeb9730274efb9e2709bbef5ac3ef",
+    "RUN-227e86740cba4cceae1461854f4f0314",
+    "RUN-0a68a7ee5ec345e2ba93000983e9e4fa"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-227e86740cba4cceae1461854f4f0314-candidate.json",
+    "candidate_digest": "b378aaff9f541fed7723274dfbeb82b7c69ff6452f93dfd76ba9cccf62d1ac41",
+    "verification_run": "RUN-227e86740cba4cceae1461854f4f0314",
+    "review_run": "RUN-0a68a7ee5ec345e2ba93000983e9e4fa",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-2649113d03dd46b9a13b86aad65ff0e9-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-2649113d03dd46b9a13b86aad65ff0e9"
+    ],
+    "merge_ref": "dev@HEAD（验收后随本次 push 落 dev，再按协议合并 main；随后 v0.16.1 发版）"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/UI-CONTRACT-TASK-101-SYNC-COPY.md",
+    ".workflow-kit/tasks/evidence/TASK-101-fever-analysis.md",
+    "src",
+    "src-tauri/src",
+    "src-tauri/tests",
+    "tools/frontend-regression.mjs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-09-29T14:03:52.955799Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-29T14:05:28.973328Z",
+      "note": "2026-09-29T14:1xZ 实现派发：根因取证完成（FreshRSS fever.php:172 只读 $_POST['api_key']，query 不收；公式 md5(user:api密码) 经官方文档验证无误），分析归档 tmp/task-101/fever-analysis.md + evidence/TASK-101-fever-analysis.md。旧实例 SendMessage 唤醒不可用（No active local_agent），开全新实例并行：Rust agent_c7d4779e（fever.rs api_key→form body + p/api 第三候选 + mock FreshRSS 行为集成测试修前红/修后绿 + 错误文案补 API 密码指引）、前端 agent_179dd2c9（SyncTab 点名长句精简 + 设置页冗长审计 + Fever API 密码提示 + t101-* 断言 ≥501）。worker-result 9 键契约（unresolved_items 必须空数组）",
+      "next_action": "等两代理交付 → 主控合并 worker-result → diff --run → finish → verify → 全新独立审查子代理（含 V1/V2 真机取证）→ accept → dev 提交推送 → CI 绿 → 按协议合并 main → 推送（不发版，owner 未要求）"
+    },
+    {
+      "at_utc": "2026-09-29T14:31:03.412193Z",
+      "note": "编码结果已记录，差异范围已核对：src-tauri/src/endpoint_resolve.rs, src-tauri/src/fever.rs, src-tauri/tests/endpoint_autodetect_e2e.rs, src-tauri/tests/fever_freshrss_e2e.rs, src-tauri/tests/mock_greader.rs, src/components/settings/ConfigSyncSection.tsx, src/components/settings/SyncTab.tsx, tools/frontend-regression.mjs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-29T14:31:51.037116Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-29T14:32:26.922300Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-29T14:50:03.449815Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-09-29T14:50:19.948087Z",
+      "note": "阻塞已处置（review_failure）：已核对：审查报告真实（红证据独立复现、候选摘要吻合、V1/V2 真机取证 13/13）；两条 findings 均已在案，F1 修复属注释级改动",
+      "next_action": "begin 重新实现"
+    },
+    {
+      "at_utc": "2026-09-29T14:50:31.682315Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-09-29T14:53:04.112853Z",
+      "note": "编码结果已记录，差异范围已核对：src-tauri/src/endpoint_resolve.rs, src-tauri/src/fever.rs, src-tauri/tests/endpoint_autodetect_e2e.rs, src-tauri/tests/fever_freshrss_e2e.rs, src-tauri/tests/mock_greader.rs, src/components/settings/ConfigSyncSection.tsx, src/components/settings/SyncTab.tsx, tools/frontend-regression.mjs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-09-29T14:58:56.811399Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-09-29T15:06:47.310053Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "review",
+  "dispositions": [
+    {
+      "at_utc": "2026-09-29T14:50:19.879439Z",
+      "failure_kind": "review_failure",
+      "blockers": [
+        "Review requires changes; inspect the findings"
+      ],
+      "source": "owner 2026-09-29 指示「合并后打tag发版」+ 审查 agent_70f6fc03 verdict=PASS（findings 2 条均 low 非阻塞）：F2 红证据已归档 evidence/TASK-101-fever-red.log（2787B），F1 为 fever.rs verify() 文档注释漏列第三候选（零行为影响），走修复 run 改注释后复审",
+      "note": "已核对：审查报告真实（红证据独立复现、候选摘要吻合、V1/V2 真机取证 13/13）；两条 findings 均已在案，F1 修复属注释级改动",
+      "resumed_to": "ready"
+    }
+  ]
+}
