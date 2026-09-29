@@ -59,6 +59,22 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # 发布文案规范（v0.16.0 起）：annotated tag 附注即 Release 正文。
+      # 手动触发（无 tag）时回退到静态说明。
+      - name: Set release body from tag annotation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $body = "FluxReader（手动触发，无 tag 附注）`n`n完整变更说明见该提交对应的提交历史与合并记录。"
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $body = git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' $env:GITHUB_REF_NAME
+            if (-not $body -or -not ($body -join '').Trim()) { throw "Tag $($env:GITHUB_REF_NAME) has no annotation; release body would be empty — push an annotated tag (git tag -a)." }
+          }
+          "RELEASE_BODY<<RELEASE_BODY_GITHUB_ENV_EOF" | Add-Content -Path $env:GITHUB_ENV
+          $body | Add-Content -Path $env:GITHUB_ENV
+          "RELEASE_BODY_GITHUB_ENV_EOF" | Add-Content -Path $env:GITHUB_ENV
+          Write-Host "Release body ready ($(@($body).Count) lines)"
+
       - name: Build and release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -66,10 +82,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "FluxReader ${{ github.ref_name }}"
-          releaseBody: |
-            FluxReader ${{ github.ref_name }}
-
-            完整变更说明见该版本标签对应的提交历史与合并记录；每次发布的变更说明随发布决定单独提供，不再内置于工作流（防止旧版本文案随新版本发布）。
+          releaseBody: ${{ env.RELEASE_BODY }}
           releaseDraft: false
           prerelease: false
           args: ""
