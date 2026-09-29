@@ -8,10 +8,13 @@
 
 ```text
 git merge --no-commit --no-ff dev
-git rm -r -q .workflow-kit
+git rm -r -f -q .workflow-kit
 git commit -m "merge: dev → main（不含工作流内容）"
 ```
 
-`AGENTS.md`、`CLAUDE.md`、`README.md`、`.gitignore` 含本分支专有内容，冲突时保留 `main` 版本。
+`README.md` 两分支内容保持一致，合并冲突时取 `dev` 版；`AGENTS.md`、`CLAUDE.md`、`.gitignore`
+含本分支专有内容，冲突时保留 `main` 版本。
 
-发布：版本 bump 提交单独推送并等 CI 绿后，再在其上打 annotated tag（`v*`）。
+发布：版本 bump 提交单独推送并等 CI 绿后，再在其上打 annotated tag（`v*`）——
+tag 附注即 GitHub Release 正文（release.yml 自动提取），模板见 dev 的
+`.workflow-kit/docs/RELEASE-NOTES-TEMPLATE.md`。
