@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # dev 为开发分支（携带工作流记录），推送即跑 CI，供合并进 main 前的验证；
+  # main 为纯项目代码主分支，发布 tag 的 CI 门控依赖本工作流在 main 上的运行。
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
     branches: [main]
 
