@@ -154,8 +154,11 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
         let existing = list_folder_id_by_name(&tx, &f.name)?;
         let id = match existing {
             Some(id) => {
-                let _ = db::update_folder_layout(&tx, id, &f.layout);
-                let _ = db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate);
+                // P3-6（自检 2026-09-29）：吞错改 `?` 对齐模块 N6 事务纪律——
+                // 此前布局/AI 标志写失败被 `let _ =` 吞掉、事务照常提交其余
+                // 字段，留下「半套已应用配置」。事务框架已在，失败应整包回滚。
+                db::update_folder_layout(&tx, id, &f.layout)?;
+                db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate)?;
                 // 更新位置
                 tx.execute(
                     "UPDATE folders SET position = ?1 WHERE id = ?2",
@@ -164,8 +167,9 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                 id
             }
             None => {
+                // P3-6：同上，AI 标志写失败上抛 → 整包回滚（N6 事务纪律）
                 let id = db::create_folder(&tx, &f.name, &f.layout)?;
-                let _ = db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate);
+                db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate)?;
                 tx.execute(
                     "UPDATE folders SET position = ?1 WHERE id = ?2",
                     rusqlite::params![f.position, id],

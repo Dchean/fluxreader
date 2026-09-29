@@ -147,7 +147,13 @@ pub(super) fn merge_pulled_entry(
                 if greader::has_tag(&e.categories, "/com.google/read")
                     && !maps.pending_ids.contains(&aid)
                 {
-                    let _ = db::sync_mark_read_if_unread(conn, aid);
+                    // P3-5（自检 2026-09-29）：跨源副本标读失败此前被 `let _ =` 静默
+                    // 吞掉——read-anywhere-wins 的广播丢失且失败现场无线索。对齐
+                    // 同文件 merge_remote_status 的 warn 纪律（失败不中断：可经
+                    // 下轮对账自愈）。
+                    if let Err(err) = db::sync_mark_read_if_unread(conn, aid) {
+                        log::warn!("sync: 跨源副本标读失败（aid={aid}）: {err}");
+                    }
                 }
                 return;
             }
@@ -232,11 +238,20 @@ fn upsert_remote_entry(
     match db::upsert_article_with_feed(conn, feed_id, &a, false) {
         Ok((aid, _)) => {
             if let Some(eid) = item_numeric_id(e) {
-                let _ = db::set_article_remote_id(conn, aid, eid);
+                // P3-5：绑定写失败此前静默——绑定缺失会让该条目在后续对账中被
+                // 当作「未绑定」重复处理且无线索。对齐 merge_remote_status 的
+                // warn 纪律（可自愈，不中断本轮）。
+                if let Err(err) = db::set_article_remote_id(conn, aid, eid) {
+                    log::warn!("sync: 绑定新条目远端 id 失败（aid={aid} eid={eid}）: {err}");
+                }
                 maps.id_to_mf_id.insert(aid, Some(eid));
                 maps.mf_id_to_article.insert(eid, aid);
             }
-            let _ = db::sync_set_article_status(conn, aid, remote_read, remote_starred);
+            // P3-5：状态写失败此前静默——已读/收藏未落库会让「未读数对不齐」
+            // 失去可诊断线索。对齐 merge_remote_status 的 warn 纪律。
+            if let Err(err) = db::sync_set_article_status(conn, aid, remote_read, remote_starred) {
+                log::warn!("sync: 写入新条目远端状态失败（aid={aid}）: {err}");
+            }
             report.pulled_entries += 1;
         }
         Err(err) => {

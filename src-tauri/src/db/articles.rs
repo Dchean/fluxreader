@@ -180,7 +180,11 @@ fn list_articles_sql(q: &ArticleQuery) -> (String, Vec<rusqlite::types::Value>) 
         PUBLISHED_ORDER_ASC
     };
     sql.push_str(&format!(" ORDER BY {order} LIMIT ? OFFSET ?"));
-    params.push(q.limit.into());
+    // P3-4（自检 2026-09-29）：limit 夹取——负数在 SQLite 的 LIMIT 语义是
+    // 「不限制」，调用方一处笔误就会把整个库倒出来（search_articles 的 P3[8]
+    // 同款修法，见本文件 :367 附近）。负 → 0 行；合法大值（前端
+    // ARTICLES_PAGE_SIZE=100000）原样放行，不设上限。
+    params.push(q.limit.max(0).into());
     params.push(q.offset.into());
     (sql, params)
 }
@@ -482,6 +486,9 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
     // **会把「只差一小会儿才到 N 天」的文章也删掉**（用户设 7 天，实际删掉 6 天 16 小时的）。
     // 改为：两侧都过 datetime() 归一到同一时基（datetime() 会把带 offset 的 RFC3339 转成
     // UTC 字符串），不再混入 localtime。
+    // P3-3（自检 2026-09-29）：ai 分支对齐同一口径——此前 `published_at < cutoff` 是
+    // 裸字符串比较，RFC3339 带 offset 的行（'T' > ' '）在 cutoff 当天漏清，边界差
+    // 几小时。见 v15 迁移前混排格式的同款字符串比较问题（migrations.rs v15 注释）。
     let cutoff = format!("datetime('now', '-{days} days')");
     let (mut deleted, mut ai_cleared) = (0usize, 0usize);
     if scope == "articles" {
@@ -505,7 +512,7 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
             &format!(
                 "UPDATE articles SET ai_summary = NULL, translated_content = NULL
                  WHERE (ai_summary IS NOT NULL OR translated_content IS NOT NULL)
-                   AND published_at < {cutoff}"
+                   AND datetime(published_at) < {cutoff}"
             ),
             [],
         )?;
@@ -1837,6 +1844,148 @@ mod tests {
         assert_eq!(
             new1, new200,
             "新实现语句数必须与 N 无关（new1={new1}, new200={new200}）"
+        );
+    }
+
+    /// P3-3（自检 2026-09-29）：ai 分支与 articles 分支同口径——published_at 必须
+    /// 过 datetime() 归一后再与 cutoff 比较。RFC3339 带 offset 的行（'T' > ' ' 的
+    /// 字符串序恒大于 'YYYY-MM-DD HH:MM:SS' 形态的 cutoff）在 cutoff 当天漏清。
+    /// 取 cutoff（now - 7 天）再前推 4 小时的时刻，折成 +08:00 offset 的 RFC3339：
+    /// UTC 真值早于 cutoff（修后必清），而字符串序恒晚于 cutoff（修前必不清）——
+    /// 两个方向都与运行当日时刻无关，测试确定性成立。
+    #[test]
+    fn cleanup_cache_ai_scope_normalizes_rfc3339_offset_before_cutoff() {
+        let mut conn = conn();
+        let fid = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://f.example/rss",
+            None,
+            "f",
+            None,
+            fid,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+
+        let offset8 = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let cutoff_utc = chrono::Utc::now() - chrono::Duration::days(7);
+        // 边界行：cutoff 前 4 小时，写成 +08:00 offset 的 RFC3339（现行写入形态之一）
+        let boundary = (cutoff_utc - chrono::Duration::hours(4)).with_timezone(&offset8);
+        // 控制组①：RFC3339 UTC 且远新于 cutoff → 永不该清
+        let fresh = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        // 控制组②：legacy 空格格式（v12/v14 回填形态）且早于 cutoff → 两代口径都清
+        let legacy = (cutoff_utc - chrono::Duration::hours(1))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+
+        for (guid, published_at) in [
+            ("offset-stale", boundary.to_rfc3339()),
+            ("utc-fresh", fresh),
+            ("legacy-stale", legacy),
+        ] {
+            let (aid, _) =
+                upsert_article_with_feed(&conn, feed, &na(guid, Some(published_at)), false)
+                    .unwrap();
+            set_article_ai_fields(&conn, aid, Some("s"), None).unwrap();
+        }
+
+        // 判别力锚：边界行在修前的裸字符串比较下确实不满足 < cutoff
+        let old_hit: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM articles WHERE guid = 'offset-stale'
+                  AND published_at < datetime('now', '-7 days')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_hit, 0,
+            "修前裸字符串比较漏掉 offset 边界行（否则本测试无判别力）"
+        );
+
+        let (deleted, ai_cleared) = cleanup_cache(&mut conn, 7, "ai").unwrap();
+        assert_eq!(deleted, 0, "ai scope 不删文章");
+        assert_eq!(
+            ai_cleared, 2,
+            "offset 边界行与 legacy 行必须被清（修前为 1，漏掉 offset 行）"
+        );
+        let kept: Option<String> = conn
+            .query_row(
+                "SELECT ai_summary FROM articles WHERE guid = 'utc-fresh'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("s"), "新于 cutoff 的行不得被清");
+    }
+
+    /// P3-4（自检 2026-09-29）：limit 夹取——负数在 SQLite 的 LIMIT 语义是
+    /// 「不限制」，必须收敛为 0 行；正常分页与前端合法大值（100000）不受影响。
+    #[test]
+    fn list_articles_clamps_negative_limit_to_zero_rows() {
+        let conn = conn();
+        let fid = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://f.example/rss",
+            None,
+            "f",
+            None,
+            fid,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        for i in 0..3 {
+            upsert_article_with_feed(
+                &conn,
+                feed,
+                &na(
+                    &format!("g{i}"),
+                    Some(format!("2026-01-01T00:00:0{i}+00:00")),
+                ),
+                false,
+            )
+            .unwrap();
+        }
+        let q = |limit: i64| ArticleQuery {
+            feed_id: Some(feed),
+            folder_id: None,
+            only_unread: false,
+            only_starred: false,
+            only_today: false,
+            newest_first: true,
+            limit,
+            offset: 0,
+            with_content: false,
+            layout: None,
+        };
+        assert!(
+            list_articles(&conn, &q(-1)).unwrap().is_empty(),
+            "负 limit 必须收敛为 0 行（修前 = 不限制，整库倒出）"
+        );
+        assert!(
+            list_articles(&conn, &q(i64::MIN)).unwrap().is_empty(),
+            "极小值同样夹取"
+        );
+        assert_eq!(
+            list_articles(&conn, &q(0)).unwrap().len(),
+            0,
+            "limit=0 → 0 行（既有语义锚）"
+        );
+        assert_eq!(
+            list_articles(&conn, &q(2)).unwrap().len(),
+            2,
+            "正常分页不受影响"
+        );
+        assert_eq!(
+            list_articles(&conn, &q(100000)).unwrap().len(),
+            3,
+            "前端合法大值（ARTICLES_PAGE_SIZE=100000）必须原样放行"
         );
     }
 }

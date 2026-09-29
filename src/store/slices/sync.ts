@@ -57,6 +57,19 @@ async function doGithubPoll() {
   }
 }
 
+/** TASK-100 P3-3：sync_phase 失败的「未连接」判定。后端未配置/未连接时
+    sync_phase 抛结构化错误 { code: 'notConnected', message: '未连接后端' }
+    （src-tauri/commands/sync.rs）——只有这一类允许静默跳过订阅层同步、走纯直连；
+    此前 .catch(() => null) 把网络故障/超时等全部吞成「未连接」，已连接用户的
+    同步失败不可见（假成功）。 */
+function isNotConnectedError(e: unknown): boolean {
+  if (e && typeof e === 'object') {
+    const rec = e as Record<string, unknown>;
+    if (rec.code === 'notConnected') return true;
+  }
+  return extractError(e).includes('未连接');
+}
+
 export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, get) => ({
   syncStatus: 'synced',
   backgroundSyncing: false,
@@ -77,7 +90,14 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
       const syncFailures: string[] = [];
       void api
         .syncPhase('feeds')
-        .catch(() => null) // 未连接（notConnected）→ 走纯直连刷新
+        // TASK-100 P3-3：仅「未连接」类错误静默跳过（走纯直连刷新）；
+        // 其余错误可见——console.warn + 汇入手动同步的失败提示，不假成功。
+        .catch((e: unknown) => {
+          if (isNotConnectedError(e)) return null;
+          console.warn('手动同步：订阅层同步失败', e);
+          syncFailures.push(`订阅同步失败：${extractError(e)}`);
+          return null;
+        })
         .then(async (feedsReport) => {
           if (feedsReport) {
             const fail = syncFailureMessage(feedsReport);

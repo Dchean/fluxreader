@@ -1,4 +1,5 @@
 import { useAppStore } from '../../store';
+import { Icons } from '../icons';
 import { PALETTES } from './shared';
 
 /* ---------- TAB 2: 外观 ---------- */
@@ -11,17 +12,19 @@ export function AppearanceTab() {
     <>
       <div className="settings-group-title">主题模式</div>
       <div className="theme-mode-grid">
+        {/* TASK-100 U4：主题三按钮改用 Icons SVG（日/月/显示器图形，替代原 emoji），颜色走 currentColor */}
         {([
-          { id: 'light', label: '☀️ 浅色模式' },
-          { id: 'dark', label: '🌙 深色模式' },
-          { id: 'auto', label: '💻 跟随系统' },
+          { id: 'light', label: '浅色模式', icon: Icons.sun },
+          { id: 'dark', label: '深色模式', icon: Icons.moon },
+          { id: 'auto', label: '跟随系统', icon: Icons.monitor },
         ] as const).map((m) => (
           <button
             key={m.id}
             className={`toggle-action-btn theme-mode-btn ${settings.themeMode === m.id ? 'theme-active' : ''}`}
             onClick={() => updateSettings({ themeMode: m.id })}
           >
-            {m.label}
+            <m.icon />
+            <span>{m.label}</span>
           </button>
         ))}
       </div>

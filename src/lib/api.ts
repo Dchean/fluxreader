@@ -114,6 +114,9 @@ export interface SyncReport {
   pulled_feeds: number;
   pulled_entries: number;
   merged_states: number;
+  /** TASK-100 P3-9：对账删除计数——feeds 阶段对账发现远端已删除的订阅源数
+      （后端 sync/mod.rs SyncReport.removed_feeds，此前前端未消费）。纯信息展示。 */
+  removed_feeds?: number;
   errors: string[];
 }
 
@@ -250,7 +253,9 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('article_index', { args, articleId }) as number | null) : null;
   },
-  /** FTS5 全文搜索（标题/正文/作者/AI 摘要/翻译）。浏览器环境返回 null。 */
+  /** 文章搜索：LIKE 子串匹配（标题/正文/摘要/AI 摘要/翻译，词间 AND）。
+   *  TASK-100 D29 更正注释：实际入口从来是 LIKE 子串（src-tauri db/articles.rs
+   *  search_articles），FTS5 只是历史遗留的提法，后端并无 FTS5 表。浏览器环境返回 null。 */
   async searchArticles(query: string, limit?: number): Promise<ArticleListItemRow[] | null> {
     const inv = await getInvoke();
     return inv ? (await inv('search_articles', { query, limit }) as ArticleListItemRow[]) : null;
@@ -551,9 +556,18 @@ export const api = {
    行类型 → 前端模型适配（snake_case → 前端字段语义）
    ============================================================ */
 
-/** ISO 时间字符串 → unix ms（无时间时取 0，排序仍稳定） */
-function parseTs(iso: string | null): number {
+/** 时间字符串 → unix ms（无时间时取 0，排序仍稳定）。
+ *  TASK-100 D30（R-P3-7 前端半边）：SQLite 存量数据中的 `YYYY-MM-DD HH:MM:SS`
+ *  （空格分隔、无时区标记）此前交给 Date.parse 按本地时区解读，UTC 存储的时间
+ *  会偏移一个时区差（排序/「今天」边界随之漂移）。旧格式一律按 UTC 解读——
+ *  Rust 代理正在加 v15 迁移归一存量数据，前端兼容旧格式是双保险；
+ *  标准 ISO 形态（T 分隔 / 带 Z）仍走 Date.parse。 */
+export function parseTs(iso: string | null): number {
   if (!iso) return 0;
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/.exec(iso);
+  if (m) {
+    return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+  }
   const t = Date.parse(iso);
   return Number.isNaN(t) ? 0 : t;
 }

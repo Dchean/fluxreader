@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import {
   useAppStore,
@@ -31,6 +32,25 @@ const VIEW_ITEMS: { id: ViewFilterType; label: string; icon: () => React.ReactEl
 const LAYOUT_ITEMS: { id: ContentLayoutType; label: string; icon: () => React.ReactElement }[] = CONTENT_LAYOUTS.map(
   (id) => ({ id, label: LAYOUT_NAMES[id], icon: Icons[id] }),
 );
+
+/** 订阅源 favicon：加载失败回退到与「无 favicon」相同的 dot 占位（TASK-100 U6）。
+ *  此前 onError 直接 display:none，行首留空槽——同一概念（favicon 不可用）两种视觉。 */
+function FeedFavicon({ src }: { src: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) {
+    return <span className="feed-favicon-fallback"><Icons.dot /></span>;
+  }
+  return (
+    <img
+      src={src}
+      className="feed-favicon"
+      alt=""
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+    />
+  );
+}
 
 export function Sidebar() {
   const categories = useAppStore((s) => s.categories);
@@ -94,7 +114,7 @@ export function Sidebar() {
           onKeyDown={(e) => e.key === 'Enter' && openSearch()}>
           <Icons.search />
           <span>全局搜索…</span>
-          <span className="kbd-tag">Ctrl K</span>
+          <span className="kbd-tag">Ctrl+K</span>
         </div>
 
         {/* Section 1: 视图 */}
@@ -222,25 +242,12 @@ export function Sidebar() {
                       data-cat={cat.id}
                     >
                       <div className="feed-leaf-name">
-                        {f.favicon ? (
-                          <img
-                            src={f.favicon}
-                            className="feed-favicon"
-                            alt=""
-                            loading="lazy"
-                            referrerPolicy="no-referrer"
-                            onError={(e) => {
-                              (e.target as HTMLImageElement).style.display = 'none';
-                            }}
-                          />
-                        ) : (
-                          <span className="feed-favicon-fallback"><Icons.dot /></span>
-                        )}
+                        <FeedFavicon src={f.favicon ?? ''} />
                         <span className="feed-leaf-title">{f.name}</span>
                         {f.fetchFailed && (
                           <span
                             className="feed-error-dot"
-                            title="最近抓取失败，点击重试"
+                            title="最近一次抓取失败"
                           >
                             ⚠
                           </span>
@@ -290,6 +297,7 @@ export function Sidebar() {
           <button
             className={`sync-refresh-btn ${isBusy ? 'spinning' : ''}`}
             onClick={triggerManualSync}
+            disabled={isBusy}
             title="刷新全部订阅源"
           >
             <Icons.refresh />
@@ -306,7 +314,7 @@ export function Sidebar() {
         <button className="nav-tab-item" onClick={openSettings}>
           <span className="nav-icon"><Icons.settings /></span>
           <span>设置中心</span>
-          <span className="kbd-tag">Ctrl ,</span>
+          <span className="kbd-tag">Ctrl+,</span>
         </button>
       </div>
     </aside>

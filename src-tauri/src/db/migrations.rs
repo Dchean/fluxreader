@@ -1,6 +1,19 @@
 use super::*;
 use rusqlite::params;
 
+/// P3-7（自检 2026-09-29）v15 迁移语句：把 legacy SQLite 格式的 published_at
+/// 归一为现行写入格式。抽成常量供幂等测试复用**同一生产字节**，防测试与迁移漂移。
+/// 命中与改写细节见下方 v15 M::up 注释。
+pub(crate) const V15_NORMALIZE_PUBLISHED_AT_SQL: &str = r#"
+        -- legacy 'YYYY-MM-DD HH:MM:SS'（UTC，来自 v12/v14 的 fetched_at 回填）→
+        -- 'YYYY-MM-DDTHH:MM:SS+00:00'（与 map_entry / item_published_at 的
+        -- to_rfc3339() 逐字一致；秒级精度不带小数，因 to_rfc3339 的 AutoSi
+        -- 在纳秒为 0 时省略小数部分）。
+        UPDATE articles
+           SET published_at = replace(published_at, ' ', 'T') || '+00:00'
+         WHERE published_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]';
+    "#;
+
 pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
     Migrations::new(vec![
         M::up(
@@ -288,6 +301,22 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         CREATE INDEX idx_sync_queue_created ON sync_queue(created_at);
     "#,
         ),
+        // P3-7（自检 2026-09-29）：存量库 legacy 时间格式归一。v12/v14 回填把
+        // NULL/'' 的 published_at 写成 fetched_at 的 SQLite 格式
+        // 'YYYY-MM-DD HH:MM:SS'（UTC），而现行写入是 RFC3339 UTC
+        // （ingestion/parse.rs map_entry :91-97 与 sync/entries.rs
+        // item_published_at :38-46 的 to_rfc3339() → 'YYYY-MM-DDTHH:MM:SS[.fff]+00:00'）。
+        // 混排两宗害：① ORDER BY published_at 是字符串比较，同日内 'T' > ' ' 使
+        // RFC3339 行恒排在 legacy 行之后（无视真实时刻）；② 前端 Date.parse 空格
+        // 格式按本地时区解析（+08:00 用户看到偏移）。归一语句见
+        // V15_NORMALIZE_PUBLISHED_AT_SQL（同一常量，测试共用同一生产字节）：
+        // GLOB 模式不含通配符 → 整串匹配，只命中 19 字符空格形态；RFC3339 行
+        // 含 'T'/'+00:00'/小数均不命中 → 迁移天然幂等，重跑 no-op。生产写入
+        // 路径（抓取 map_entry / 同步 item_published_at）恒写 RFC3339，归一后
+        // 不会再产生该形态（v14 兜底触发器只对裸 SQL 写 NULL/'' 的路径生效，
+        // 重引入场景由幂等测试覆盖）。前端 parseTs 对空格格式的解析兼容由
+        // 前端轨道负责，本迁移只做后端归一。user_version=15。
+        M::up(V15_NORMALIZE_PUBLISHED_AT_SQL),
     ])
 });
 
@@ -455,8 +484,17 @@ mod req108_migration_tests {
             let v: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
+            // P3-7 后最新版本为 v15：以「全新库 to_latest 落到的版本」为基准，
+            // 测试随追加式迁移自动跟进，不再硬编码版本号。
+            let latest: i64 = {
+                let mut fresh = Connection::open_in_memory().unwrap();
+                MIGRATIONS.to_latest(&mut fresh).unwrap();
+                fresh
+                    .query_row("PRAGMA user_version", [], |r| r.get(0))
+                    .unwrap()
+            };
             assert_eq!(
-                v, 14,
+                v, latest,
                 "迁移事务独立提交：user_version 已到最新（旧实现据此永不重试）"
             );
             assert_eq!(
@@ -598,9 +636,10 @@ mod req108_migration_tests {
                (1, 'g-real', 't', '2025-01-01 00:00:03', '2024-12-31T10:00:00Z');",
         )
         .unwrap();
-        MIGRATIONS.to_latest(&mut conn).unwrap();
+        MIGRATIONS.to_version(&mut conn, 14).unwrap();
 
-        // 回填：NULL/'' 补为 fetched_at；真值不动
+        // 回填：NULL/'' 补为 fetched_at；真值不动（断言停在 v14 的**当时现场**，
+        // P3-7 的 v15 归一不改变 v12/v14 回填语义，见下方 to_latest 后的接缝断言）
         let rows: Vec<(String, String)> = {
             let mut stmt = conn
                 .prepare("SELECT guid, published_at FROM articles ORDER BY id")
@@ -618,6 +657,34 @@ mod req108_migration_tests {
                 ("g-real".to_string(), "2024-12-31T10:00:00Z".to_string()),
             ],
             "NULL/'' 存量行回填为 fetched_at，真值不动"
+        );
+
+        // 推进到最新（v15 起含 P3-7 归一）：legacy 空格形态（回填产物）归一为
+        // 现行 RFC3339 UTC 写入格式，真值（RFC3339 'Z' 形态）仍不动
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let rows_after_latest: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT guid, published_at FROM articles ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows_after_latest,
+            vec![
+                (
+                    "g-null".to_string(),
+                    "2025-01-01T00:00:01+00:00".to_string()
+                ),
+                (
+                    "g-empty".to_string(),
+                    "2025-01-01T00:00:02+00:00".to_string()
+                ),
+                ("g-real".to_string(), "2024-12-31T10:00:00Z".to_string()),
+            ],
+            "v15 只归一 legacy 空格形态，RFC3339 真值不动"
         );
 
         // M-5/M-7 索引存在性（EXPLAIN 走索引的前提）
@@ -767,6 +834,170 @@ mod req108_migration_tests {
         assert_eq!(
             null_like, 0,
             "测试夹具必须覆盖 NULL/'' 写入路径（触发器已补齐）"
+        );
+    }
+}
+
+/* ============================================================
+P3-7（自检 2026-09-29）v15 单元测试：legacy published_at 归一
+============================================================ */
+#[cfg(test)]
+mod v15_migration_tests {
+    use super::*;
+
+    /// v14 夹具：仅建一个 feed，供逐条插入文章（published_at 由用例自定）。
+    fn seeded_v14_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 14).unwrap();
+        conn.execute_batch(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn published_at(conn: &Connection, guid: &str) -> String {
+        conn.query_row(
+            "SELECT published_at FROM articles WHERE guid = ?1",
+            params![guid],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    const LEGACY_GLOB: &str =
+        "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]";
+
+    /// ① up 测试：legacy 空格格式（v12/v14 回填形态）被归一为与现行写入逐字
+    /// 一致的 RFC3339 UTC（to_rfc3339() 的 UTC 形态：'+00:00' 后缀、秒级精度
+    /// 不带小数）；已是 RFC3339 的真值（含带小数）原样不动。
+    #[test]
+    fn v15_normalizes_legacy_published_at_to_current_rfc3339() {
+        let mut conn = seeded_v14_conn();
+        conn.execute_batch(
+            "INSERT INTO articles (feed_id, guid, title, fetched_at, published_at) VALUES
+               (1, 'legacy', 't', '2025-01-01 00:00:01', '2025-06-01 08:00:00'),
+               (1, 'rfc3339', 't', '2025-01-01 00:00:02', '2025-06-01T02:00:00+00:00'),
+               (1, 'rfc3339-frac', 't', '2025-01-01 00:00:03', '2025-06-01T09:00:00.123456+00:00');",
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        assert_eq!(
+            published_at(&conn, "legacy"),
+            "2025-06-01T08:00:00+00:00",
+            "legacy 空格格式必须归一为现行写入格式（ingestion/parse.rs 与 sync/entries.rs 的 to_rfc3339() 形态）"
+        );
+        assert_eq!(
+            published_at(&conn, "rfc3339"),
+            "2025-06-01T02:00:00+00:00",
+            "已是 RFC3339 的真值不得被改写"
+        );
+        assert_eq!(
+            published_at(&conn, "rfc3339-frac"),
+            "2025-06-01T09:00:00.123456+00:00",
+            "带小数的 RFC3339 真值不得被改写"
+        );
+        let legacy_left: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM articles WHERE published_at GLOB '{LEGACY_GLOB}'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_left, 0, "归一后库内不得再有任何 legacy 形态");
+    }
+
+    /// ② 幂等测试：迁移语句连跑两遍第二遍零改动（GLOB 只命中 legacy 形态，
+    /// 归一后的 RFC3339 不再命中）；并覆盖「迁移后经裸 SQL 重新引入 legacy 行」
+    /// 的重跑场景（v14 兜底触发器写 fetched_at 的形态）。
+    #[test]
+    fn v15_is_idempotent_rerun_changes_zero_rows() {
+        let mut conn = seeded_v14_conn();
+        conn.execute_batch(
+            "INSERT INTO articles (feed_id, guid, title, fetched_at, published_at) VALUES
+               (1, 'legacy', 't', '2025-01-01 00:00:01', '2025-06-01 08:00:00');",
+        )
+        .unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        assert_eq!(
+            published_at(&conn, "legacy"),
+            "2025-06-01T08:00:00+00:00",
+            "up 阶段先归一（前置确认）"
+        );
+
+        // 对已归一的库重跑同一生产语句：零改动
+        let rerun = conn.execute(V15_NORMALIZE_PUBLISHED_AT_SQL, []).unwrap();
+        assert_eq!(rerun, 0, "已归一的库重跑必须 no-op");
+
+        // 模拟迁移后重新引入的 legacy 行：首跑归一、再跑零改动
+        conn.execute_batch(
+            "INSERT INTO articles (feed_id, guid, title, published_at) VALUES
+               (1, 'late-legacy', 't', '2025-07-01 10:00:00');",
+        )
+        .unwrap();
+        let first = conn.execute(V15_NORMALIZE_PUBLISHED_AT_SQL, []).unwrap();
+        assert_eq!(first, 1, "重新引入的 legacy 行必须被归一");
+        assert_eq!(
+            published_at(&conn, "late-legacy"),
+            "2025-07-01T10:00:00+00:00"
+        );
+        let second = conn.execute(V15_NORMALIZE_PUBLISHED_AT_SQL, []).unwrap();
+        assert_eq!(second, 0, "连跑两遍第二遍必须零改动");
+    }
+
+    /// ③ 排序等价测试：同一日的 legacy 行与 RFC3339 行，修前 ORDER BY
+    /// published_at 按字符串比较（'T' > ' ' → RFC3339 行恒排 legacy 行之后，
+    /// 无视真实时刻），修后按真实时刻排序（与 datetime(published_at) 口径逐行
+    /// 等价）。
+    #[test]
+    fn v15_same_day_ordering_follows_true_instant() {
+        let mut conn = seeded_v14_conn();
+        conn.execute_batch(
+            "INSERT INTO articles (feed_id, guid, title, fetched_at, published_at) VALUES
+               (1, 'legacy-08h', 't', '2025-01-01 00:00:01', '2025-06-01 08:00:00'),
+               (1, 'rfc3339-02h', 't', '2025-01-01 00:00:02', '2025-06-01T02:00:00+00:00');",
+        )
+        .unwrap();
+
+        let order = |conn: &Connection| -> Vec<String> {
+            let mut stmt = conn
+                .prepare("SELECT guid FROM articles ORDER BY published_at ASC")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        // 修前锚（v14）：字符串比较使 02:00 的 RFC3339 行排到 08:00 的 legacy 行之后
+        assert_eq!(
+            order(&conn),
+            vec!["legacy-08h".to_string(), "rfc3339-02h".to_string()],
+            "修前锚：同日内 'T' > ' ' 使 RFC3339 行恒排 legacy 行之后（乱序，否则无判别力）"
+        );
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        // 修后：按真实时刻排序（02:00 早于 08:00）
+        assert_eq!(
+            order(&conn),
+            vec!["rfc3339-02h".to_string(), "legacy-08h".to_string()],
+            "修后必须按真实时刻排序"
+        );
+        let mut stmt = conn
+            .prepare("SELECT guid FROM articles ORDER BY datetime(published_at) ASC")
+            .unwrap();
+        let by_true: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            order(&conn),
+            by_true,
+            "ORDER BY published_at 必须与真实时刻口径（datetime 归一）逐行等价"
         );
     }
 }

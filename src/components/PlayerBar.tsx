@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { useAppStore } from '../store';
 import { api } from '../lib/api';
 import { formatDuration } from '../lib/format';
+import { Icons } from './icons';
 import { CoverImage } from './CoverImage';
 
 /* ============================================================
@@ -221,16 +222,23 @@ export function PlayerBar() {
 
         <div className="player-center-controls">
           <div className="player-buttons-row">
-            <button className="win-btn" onClick={() => skipPlayer(-15)} title="后退 15 秒">↺ 15</button>
+            {/* TASK-100 U4：播放器六控件全部 SVG 化（暂停/播放/关闭/快退/快进/全屏图标来自 Icons），颜色走 currentColor */}
+            <button className="win-btn skip-btn" onClick={() => skipPlayer(-15)} title="后退 15 秒">
+              <Icons.rotateCcw />
+              <span>15</span>
+            </button>
             <button
               className="podcast-play-circle"
               onClick={togglePlayerPlay}
               style={{ width: 32, height: 32, fontSize: 11 }}
               title={player.isPlaying ? '暂停 (Space)' : '播放 (Space)'}
             >
-              {player.isPlaying ? '⏸' : '▶'}
+              {player.isPlaying ? <Icons.pause /> : <Icons.play />}
             </button>
-            <button className="win-btn" onClick={() => skipPlayer(30)} title="快进 30 秒">30 ↻</button>
+            <button className="win-btn skip-btn" onClick={() => skipPlayer(30)} title="快进 30 秒">
+              <span>30</span>
+              <Icons.rotateCw />
+            </button>
           </div>
           <div className="player-progress-row">
             <span className="player-time-tag">{formatDuration(player.positionSec)}</span>
@@ -271,7 +279,10 @@ export function PlayerBar() {
 
         <div className="player-right-controls">
           <button className="toggle-action-btn" onClick={togglePlayerExpanded} title="展开全屏播放器"
-            style={{ padding: '2px 8px', fontSize: 11 }}>⛶ 展开</button>
+            style={{ padding: '2px 8px', fontSize: 11 }}>
+            <Icons.maximize />
+            <span>展开</span>
+          </button>
           <button
             className="toggle-action-btn"
             onClick={cyclePlaybackSpeed}
@@ -279,7 +290,7 @@ export function PlayerBar() {
           >
             {player.speed.toFixed(1)}x
           </button>
-          <button className="win-btn" onClick={closePodcastBar} title="关闭播放器">✕</button>
+          <button className="win-btn" onClick={closePodcastBar} title="关闭播放器"><Icons.x /></button>
         </div>
       </div>
 
@@ -368,12 +379,18 @@ function PlayerFullOverlay({
             </div>
           </div>
           <div className="player-full-controls">
-            <button className="win-btn" onClick={() => onSkip(-15)} title="后退 15 秒">↺ 15</button>
+            <button className="win-btn skip-btn" onClick={() => onSkip(-15)} title="后退 15 秒">
+              <Icons.rotateCcw />
+              <span>15</span>
+            </button>
             <button className="podcast-play-circle player-full-play" onClick={onPlayPause}
               title={player.isPlaying ? '暂停 (Space)' : '播放 (Space)'}>
-              {player.isPlaying ? '⏸' : '▶'}
+              {player.isPlaying ? <Icons.pause /> : <Icons.play />}
             </button>
-            <button className="win-btn" onClick={() => onSkip(30)} title="快进 30 秒">30 ↻</button>
+            <button className="win-btn skip-btn" onClick={() => onSkip(30)} title="快进 30 秒">
+              <span>30</span>
+              <Icons.rotateCw />
+            </button>
             <button className="toggle-action-btn" onClick={onSpeed} title="倍速">{player.speed.toFixed(1)}x</button>
           </div>
           <div className="player-full-actions">

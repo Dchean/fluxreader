@@ -202,8 +202,14 @@ export default function App() {
         return;
       }
       if (e.key === 'Escape') {
-        /* 浮层从最顶层开始依次关闭 */
-        if (s.searchOpen) s.closeSearch();
+        /* 浮层从最顶层开始依次关闭。
+           TASK-100 U7：补 closeAskVisible——此前 CloseAskDialog 是唯一 Esc 关不掉
+           的浮层。关序与视觉层级一致（视觉在上者先关）：确认框 3000（自带 Esc，
+           捕获级 stopPropagation）> 各弹窗 150 > 全屏播放器 140。
+           Esc 语义 = 本次按「最小化到托盘」应答且**不记住选择**（不替用户做出
+           「不再询问」的决定，下次关闭仍会询问；记住需显式勾选）。 */
+        if (s.closeAskVisible) s.answerCloseAsk('tray', false);
+        else if (s.searchOpen) s.closeSearch();
         else if (s.newCategoryModalOpen) s.closeMiniModal('newCategory');
         else if (s.addFeedModalOpen) s.closeMiniModal('addFeed');
         else if (s.editFeedModalOpen) s.closeMiniModal('editFeed');

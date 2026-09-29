@@ -122,7 +122,8 @@ export function FeedsTab() {
                   title="在该分类下添加订阅源"
                 >
                   <Icons.plus />
-                  <span>添加源</span>
+                  {/* TASK-100 U2：叫法统一「添加订阅源」（此前「添加源」） */}
+                  <span>添加订阅源</span>
                 </button>
 
                 <label

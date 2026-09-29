@@ -198,8 +198,15 @@ fn persist_new_feed(
         }
         None => db::ensure_uncategorized_folder(conn)?,
     };
+    // P3-1（自检 2026-09-29）：入库段全程单事务（unchecked_transaction 用法对齐
+    // 同库 mark_all_read_with_enqueue，db/articles.rs）——insert_feed → 清墓碑 →
+    // 写抓取状态 → 逐条 upsert 文章 → 按需入队，任一步失败整体回滚（Err 路径
+    // Transaction drop 自动回滚）。此前逐条自动提交：文章 upsert 中途失败会留下
+    // 「feed 已存在而文章残缺」的半套状态，且重试被「该订阅地址已存在」判重
+    // 拦住，用户必须先删再加。查重/分类校验是纯读，留在事务外不影响原子性。
+    let tx = conn.unchecked_transaction()?;
     let feed_id = db::insert_feed(
-        conn,
+        &tx,
         feed_url,
         parsed.site_url.as_deref(),
         &final_title,
@@ -212,17 +219,18 @@ fn persist_new_feed(
     // TASK-064 N4：重新添加 = 用户改变主意的最强证据——清掉同 URL 的删除
     // 墓碑。此前墓碑只在 pull 的「远端不再列出」分支清除，重新添加的源被永久
     // 压制：pull 跳过绑定、其未推送状态 30 天后被 prune_stale_unbound 物理删除。
-    db::remove_feed_tombstone(conn, feed_url)?;
-    db::set_feed_fetch_state(conn, feed_id, false, None, etag, last_modified)?;
-    let dedup = read_dedup_flag(conn);
+    db::remove_feed_tombstone(&tx, feed_url)?;
+    db::set_feed_fetch_state(&tx, feed_id, false, None, etag, last_modified)?;
+    let dedup = read_dedup_flag(&tx);
     for a in &parsed.articles {
-        db::upsert_article_with_feed(conn, feed_id, a, dedup)?;
+        db::upsert_article_with_feed(&tx, feed_id, a, dedup)?;
     }
     // 勾选「同步到后端」且已连接 → 入队推送新订阅（feeds 阶段推远端）
-    if sync_to_backend && sync_configured(conn) {
+    if sync_to_backend && sync_configured(&tx) {
         let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
-        db::enqueue_sync(conn, None, Some(feed_url), "add_feed", Some(&payload))?;
+        db::enqueue_sync(&tx, None, Some(feed_url), "add_feed", Some(&payload))?;
     }
+    tx.commit()?;
     let row = db::list_feeds(conn)?
         .into_iter()
         .find(|f| f.id == feed_id)
@@ -442,6 +450,81 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.code, "duplicate", "变体 {variant} 必须被判重");
         }
+    }
+
+    /// P3-1（自检 2026-09-29）：入库段中途失败必须**整体回滚**——feed 不残留、
+    /// 已 upsert 的文章不残留、事务内的墓碑清除被撤销。生产代码无注入点，用
+    /// 测试侧 RAISE(ABORT) 触发器在第 2 篇文章 upsert 处注入真实失败
+    /// （SQLITE_CONSTRAINT 走的就是生产 Err 路径；修前逐条自动提交会残留半套）。
+    #[test]
+    fn persist_new_feed_midway_failure_rolls_back_everything() {
+        let conn = test_conn();
+        conn.execute_batch(
+            "CREATE TRIGGER test_fail_second_article BEFORE INSERT ON articles
+             WHEN NEW.guid = 'boom' BEGIN
+                 SELECT RAISE(ABORT, 'simulated midway failure');
+             END;",
+        )
+        .unwrap();
+        db::add_feed_tombstone(&conn, "https://f.example/rss").unwrap();
+
+        let mut parsed = minimal_parsed();
+        parsed.articles.push(db::NewArticle {
+            guid: "boom".into(),
+            url: Some("https://e.example/boom".into()),
+            title: "boom".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: String::new(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2025-01-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        });
+
+        let err = persist_new_feed(
+            &conn,
+            "https://f.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            true,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("simulated midway failure"),
+            "必须是注入的约束失败现场: {err}"
+        );
+
+        let feeds: i64 = conn
+            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(feeds, 0, "中途失败必须整体回滚：feed 不得残留（修前残留）");
+        let articles: i64 = conn
+            .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            articles, 0,
+            "中途失败必须整体回滚：先于失败点 upsert 的文章也不得残留"
+        );
+        assert!(
+            db::feed_tombstones(&conn)
+                .unwrap()
+                .contains(&"http://f.example/rss".to_string()),
+            "事务内的墓碑清除必须被回滚（否则半套状态破坏删除语义）"
+        );
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(queued, 0, "add_feed 队项不得残留");
     }
 }
 

@@ -94,10 +94,15 @@ Feeds
 ============================================================ */
 
 /// 分类名（id → name）：订阅编辑推送远端时用于 `a=` 目标分类参数。
+/// P3-2（自检 2026-09-29）：区分「目录不存在」（Ok(None)）与「查询失败」（Err
+/// 上抛）——此前 `.ok()` 把 DB 错误也压成 None，push_feeds 会静默把订阅挂到
+/// 远端默认分类（目录结构丢失）且现场无线索。Err 的处置权交给调用方。
 pub fn folder_name(conn: &Connection, id: i64) -> AppResult<Option<String>> {
-    Ok(conn
-        .query_row("SELECT name FROM folders WHERE id = ?1", [id], |r| r.get(0))
-        .ok())
+    match conn.query_row("SELECT name FROM folders WHERE id = ?1", [id], |r| r.get(0)) {
+        Ok(name) => Ok(Some(name)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /* ============================================================
@@ -147,4 +152,46 @@ pub fn feed_urls_in_folder(conn: &Connection, folder_id: i64) -> AppResult<Vec<S
     let mut stmt = conn.prepare("SELECT feed_url FROM feeds WHERE folder_id = ?1")?;
     let rows = stmt.query_map([folder_id], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P3-2（自检 2026-09-29）：folder_name 必须区分三种结果——存在（Some）、
+    /// 目录不存在（Ok(None)）、查询失败（Err 上抛）。修前 `.ok()` 把 Err 压成
+    /// Ok(None)，push_feeds 据此把订阅静默挂到远端默认分类且无线索。
+    /// 查询失败用「表改名」注入真实 DB 错误（修前此分支返回 Ok(None)）。
+    #[test]
+    fn folder_name_distinguishes_missing_from_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let fid = create_folder(&conn, "技术", "article").unwrap();
+        assert_eq!(
+            folder_name(&conn, fid).unwrap(),
+            Some("技术".to_string()),
+            "存在的目录返回名字"
+        );
+        assert_eq!(
+            folder_name(&conn, 999).unwrap(),
+            None,
+            "目录不存在是 Ok(None)，不是 Err"
+        );
+
+        conn.execute_batch("ALTER TABLE folders RENAME TO folders_backup;")
+            .unwrap();
+        let err = folder_name(&conn, fid).unwrap_err();
+        assert_eq!(
+            err.code, "db",
+            "查询失败必须上抛 Err（修前被 .ok() 压成 Ok(None) 静默降级）"
+        );
+        conn.execute_batch("ALTER TABLE folders_backup RENAME TO folders;")
+            .unwrap();
+        assert_eq!(
+            folder_name(&conn, fid).unwrap(),
+            Some("技术".to_string()),
+            "恢复后查询正常（注入未破坏夹具）"
+        );
+    }
 }

@@ -88,6 +88,8 @@ export function SyncTab() {
          TASK-058：后端在 errors 非空时仍返回 Ok（单项失败不中断整链），故失败必须
          在此**主动读取** report 才能被用户看到。成功路径的既有文案与顺序逐字不变。 */
       const failures: string[] = [];
+      /* TASK-100 P3-9：后端对账删除计数（SyncReport.removed_feeds）——纯信息展示 */
+      let removedFeeds = 0;
       void api
         .syncPhase('feeds')
         .then(async (feedsReport) => {
@@ -95,12 +97,14 @@ export function SyncTab() {
           const fail = syncFailureMessage(feedsReport);
           if (fail) failures.push(fail);
           else showToast('已拉取订阅源，正在同步文章状态…');
+          if (feedsReport?.removed_feeds) removedFeeds += feedsReport.removed_feeds;
           return api.syncPhase('states', true);
         })
         .then(async (statesReport) => {
           await reloadFromBackend();
           const fail = syncFailureMessage(statesReport);
           if (fail) failures.push(fail);
+          if (statesReport?.removed_feeds) removedFeeds += statesReport.removed_feeds;
           return api.refreshAllFeeds().catch(() => null);
         })
         .then(() => reloadFromBackend())
@@ -109,6 +113,8 @@ export function SyncTab() {
           /* 有失败项时给出「有 N 项失败」而不是纯粹的「后端同步完成」；
              errors 为空则与改动前**逐字相同**。 */
           showToast(failures.length > 0 ? failures.join('；') : '后端同步完成');
+          /* TASK-100 P3-9：对账移除了远端已删除的订阅源——纯信息展示，单列一条 */
+          if (removedFeeds > 0) showToast(`本次对账移除 ${removedFeeds} 个已在服务端删除的订阅源`);
         })
         .catch((e: unknown) => {
           const m = extractError(e);
@@ -148,7 +154,14 @@ export function SyncTab() {
       setConnected(false);
       setAccount(null);
       setPassword('');
-      await reloadFromBackend();
+      /* TASK-100 P3-8：断开与「断开后的本地刷新」分开处理——此前 reload 失败
+         重抛被同一个 catch 捕获，把「已断开成功」误报成「断开失败」。 */
+      try {
+        await reloadFromBackend();
+      } catch (reloadErr) {
+        showToast(`已断开连接，但本地刷新失败：${extractError(reloadErr)}`);
+        return;
+      }
       showToast(msg ?? '已断开连接');
     } catch (e) {
       showToast(`断开失败：${extractError(e)}`);

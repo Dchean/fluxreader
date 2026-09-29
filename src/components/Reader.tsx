@@ -194,8 +194,9 @@ export function Reader() {
             <span className="reader-feed-badge">{feedName}</span>
             <h1 className="reader-article-title">{art.title}</h1>
 
-            <div className="reader-byline">
-              {art.author && <span>By {art.author}</span>}
+              <div className="reader-byline">
+                {/* TASK-100：署名中文化（此前 `By {author}` 中英混杂，其余 UI 全中文） */}
+                {art.author && <span>作者：{art.author}</span>}
               {art.author && <span>·</span>}
               <span>{formatRelativeTime(art.publishedAt)}</span>
               {art.tags.length > 0 && (
@@ -265,7 +266,8 @@ export function Reader() {
               </div>
               <div className="ai-body-content">
                 {summaryGenerating ? (
-                  <span className="ai-generating-hint">正在根据提示词生成摘要…</span>
+                  /* TASK-100：生成中文案统一「正在生成摘要…」（与通知卡一致） */
+                  <span className="ai-generating-hint">正在生成摘要…</span>
                 ) : summaryError ? (
                   <div className="ai-error-row">
                     <span className="ai-error-text" title={summaryError}>摘要生成失败：{summaryError}</span>

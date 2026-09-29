@@ -85,12 +85,34 @@ pub(super) async fn push_feeds(
                 continue;
             }
             let Some(url) = item.feed_url else { continue };
-            let folder_label = item
+            // P3-2（自检 2026-09-29）：folder_name 的 Err 不再被 `.ok()` 压成 None。
+            // 处置选择：warn + 记入 report.errors + 跳过该队项（不中止本轮）——
+            // 依据：push_feeds 是 best-effort 阶段（A-2），单条目录名解析失败不应
+            // 阻塞其余订阅的推送；而「静默当作 None」会把订阅挂到远端默认分类
+            // （目录结构丢失）且无线索。跳过的队项不进 done、不被 prune_sync 剪除，
+            // 下一轮自动重试（take_sync_queue 不删除队列行，可自愈）。
+            let folder_id = item
                 .payload
                 .as_deref()
                 .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
-                .and_then(|v| v.get("folder_id").and_then(|f| f.as_i64()))
-                .and_then(|fid| db::folder_name(&conn, fid).ok().flatten());
+                .and_then(|v| v.get("folder_id").and_then(|f| f.as_i64()));
+            let folder_label = match folder_id {
+                Some(fid) => match db::folder_name(&conn, fid) {
+                    Ok(label) => label,
+                    Err(e) => {
+                        log::warn!(
+                            "sync: 解析队列项 {} 的目标分类名失败（folder={fid}，下轮重试）: {e}",
+                            item.id
+                        );
+                        report.errors.push(format!(
+                            "解析订阅 {} 的目标分类名失败（下轮重试）: {e}",
+                            url
+                        ));
+                        continue;
+                    }
+                },
+                None => None,
+            };
             out.push(PendingFeed {
                 queue_id: item.id,
                 url,

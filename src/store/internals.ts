@@ -41,8 +41,45 @@ export function appStore(): StoreApi<AppState> {
 /** 视图切换缓存：key = 「布局 × 视图」→ 该视图最近一次拉取的 entries 快照。
     用途：视图切换（尤其「收藏19 ↔ 全部2122」这类数量悬殊的切换）不再每次
     重新从后端拉取 + 一次性渲染数百张卡片（卡顿根因），而是先同步恢复缓存
-    零延迟显示，再后台异步刷新。模块级（非 store 状态）避免触发重渲染。 */
-export const viewEntriesCache = new Map<string, ArticleEntry[]>();
+    零延迟显示，再后台异步刷新。模块级（非 store 状态）避免触发重渲染。
+    TASK-100 P3-7：容量上限（LRU，8 个「布局×视图×范围」组合键，先淘汰最旧）。
+    此前无上限：筛选视图缓存的是 limit=100000 的全集快照，超大库长会话按组合
+    键持续累积、内存增长无界（与 coverImage 缓存的 300 上限不对称）。8 个键
+    已覆盖「来回切布局/视图/范围」的真实导航深度——命中即刷新新鲜度，淘汰
+    只影响再次进入该组合时的一次重拉（数据由后台刷新补齐），无正确性影响。 */
+const VIEW_ENTRIES_CACHE_MAX = 8;
+
+class LRUMap<V> extends Map<string, V> {
+  private readonly max: number;
+
+  constructor(max: number) {
+    super();
+    this.max = max;
+  }
+
+  /** 命中即刷新为「最新使用」（Map 迭代序 = 插入序，淘汰时删最旧） */
+  get(key: string): V | undefined {
+    const v = super.get(key);
+    if (v !== undefined) {
+      super.delete(key);
+      super.set(key, v);
+    }
+    return v;
+  }
+
+  set(key: string, value: V): this {
+    super.delete(key); // 重复写入先摘除再插入，保证 LRU 新鲜度
+    super.set(key, value);
+    while (super.size > this.max) {
+      const oldest = super.keys().next().value;
+      if (oldest === undefined) break;
+      super.delete(oldest);
+    }
+    return this;
+  }
+}
+
+export const viewEntriesCache: Map<string, ArticleEntry[]> = new LRUMap<ArticleEntry[]>(VIEW_ENTRIES_CACHE_MAX);
 
 /** 视图缓存 key：布局 × 视图 × 订阅范围（scope）。
     TASK-052 起**必须带 scope**：条目列表现在是「该范围的首批 N 条」，缓存若不

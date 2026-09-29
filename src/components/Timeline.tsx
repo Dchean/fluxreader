@@ -375,9 +375,9 @@ export function Timeline() {
                   style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
                 >
                   {activeContentLayout === 'article' && <ArticleCard art={item} onSelect={selectArticle} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
-                  {activeContentLayout === 'social' && <SocialCard item={item} />}
+                  {activeContentLayout === 'social' && <SocialCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
                   {activeContentLayout === 'podcast' && <PodcastCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
-                  {activeContentLayout === 'notification' && <NotifCard item={item} />}
+                  {activeContentLayout === 'notification' && <NotifCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
                 </div>
               );
             })}
@@ -473,15 +473,20 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect, cardIndex, tabbab
       </div>
       <div className="card-main-content">
         <div className="card-text-col">
-          <h4 className="card-title">{art.title}</h4>
-          <p className="card-snippet">{art.snippet}</p>
+          {/* TASK-100 U5：line-clamp 截断文本补 title（=未截断全文） */}
+          <h4 className="card-title" title={art.title}>{art.title}</h4>
+          <p className="card-snippet" title={art.snippet}>{art.snippet}</p>
         </div>
         {/* 封面：共享 CoverImage（按 imageProxy 判定代理/直连，失败出占位并幂等上报；无 cover 不渲染） */}
         <CoverImage src={art.cover} articleId={art.id} pageUrl={art.url} className="card-cover-thumb" alt="cover" loading="lazy" />
       </div>
       <div className="card-footer">
         <span>{art.author}</span>
-        <span>{art.isStarred ? '★ 已收藏' : ''}</span>
+        {/* TASK-100 U3：收藏状态视觉统一 Icons.starFilled（此前页脚为文字加星号字符形态，
+            与 SocialCard/GalleryCard/Reader 三套视觉并存） */}
+        {art.isStarred && (
+          <span className="card-starred-flag" title="已收藏"><Icons.starFilled /></span>
+        )}
       </div>
     </div>
   );
@@ -489,7 +494,12 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect, cardIndex, tabbab
 
 /* ---------- 社交卡片 ---------- */
 
-const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
+const SocialCard = memo(function SocialCard({ item, cardIndex, tabbable, onMoveFocus }: {
+  item: ArticleEntry;
+  cardIndex: number;
+  tabbable: boolean;
+  onMoveFocus: (from: number, delta: number) => void;
+}) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const showToast = useAppStore((s) => s.showToast);
   const openLightbox = useAppStore((s) => s.openLightbox);
@@ -550,7 +560,23 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
   }, [item.content]);
 
   return (
-    <div ref={hydrateRef} className={`social-card ${item.isRead ? 'read' : ''}`} data-ctx="article" data-id={item.id}>
+    /* TASK-100（UI P2-2 轻修）：社交/通知卡补 article 语义角色 + tabIndex，融入卡片级
+       roving tabindex 体系（对照 ArticleCard/PodcastCard）。卡片本体无主行为
+       （正文内链接/图片各自处理，操作按钮在动作条），故只接方向键移动焦点，
+       Enter/Space 不绑定动作。跨布局 J/K 仍为产品决策不做（DEC-task100）。 */
+    <div
+      ref={hydrateRef}
+      className={`social-card ${item.isRead ? 'read' : ''}`}
+      data-ctx="article"
+      data-id={item.id}
+      role="article"
+      data-card-index={cardIndex}
+      tabIndex={tabbable ? 0 : -1}
+      onKeyDown={(e) => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
+        else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+      }}
+    >
       <div className="social-avatar">{feedName.charAt(0) || '?'}</div>
       <div className="social-body">
         {/* 标题：社交布局此前漏显示——正文太长时一眼无法辨识内容主题 */}
@@ -588,9 +614,10 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
               正文加载失败：{hydrationError}（点击重试）
             </button>
           ) : hydrated ? (
-            <span className="hydrate-placeholder" style={{ opacity: 0.45 }}>暂无正文</span>
+            /* TASK-100：占位透明度并入 .hydrate-placeholder 类（此前内联 opacity 两处） */
+            <span className="hydrate-placeholder">暂无正文</span>
           ) : (
-            <span className="hydrate-placeholder" style={{ opacity: 0.45 }}>加载正文…</span>
+            <span className="hydrate-placeholder">加载正文…</span>
           )}
         </div>
         {isLong && (
@@ -621,7 +648,8 @@ const SocialCard = memo(function SocialCard({ item }: { item: ArticleEntry }) {
               toggleEntryFlag(item.id, 'isStarred');
             }}
           >
-            <Icons.star />
+            {/* TASK-100 U3：星标视觉统一——收藏态用 starFilled（与 Reader/右键菜单同源） */}
+            {item.isStarred ? <Icons.starFilled /> : <Icons.star />}
             <span>{item.isStarred ? '取消收藏' : '收藏'}</span>
           </button>
           <button
@@ -759,7 +787,8 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMov
         >{imgFailed ? <Icons.image /> : '无图'}</div>
       )}
       <div className="gallery-meta">
-        <div className="gallery-title">{item.title}</div>
+        {/* TASK-100 U5：截断的画廊标题补 title（=未截断全文） */}
+        <div className="gallery-title" title={item.title}>{item.title}</div>
         <div className="gallery-meta-row">
           <span>{feedName}</span>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -768,7 +797,10 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMov
               onClick={(e) => { e.stopPropagation(); toggleEntryFlag(item.id, 'isStarred'); }}
               title={item.isStarred ? '取消收藏' : '收藏'}
             >
-              <span style={{ color: item.isStarred ? 'var(--star-color)' : 'inherit' }}>{item.isStarred ? '★' : '☆'}</span>
+              {/* TASK-100 U3：星号/空心星字符改 Icons SVG（收藏态 starFilled），颜色仍走 --star-color */}
+              <span style={{ color: item.isStarred ? 'var(--star-color)' : 'inherit', display: 'inline-flex' }}>
+                {item.isStarred ? <Icons.starFilled /> : <Icons.star />}
+              </span>
             </button>
             <button
               className={`toggle-action-btn notif-act ${item.isRead ? 'act-on' : ''}`}
@@ -840,7 +872,7 @@ const PodcastCard = memo(function PodcastCard({ item, cardIndex, tabbable, onMov
           {feedName}
           {item.durationSec != null && ` · ${formatDuration(item.durationSec)}`}
         </div>
-        <div className="podcast-title">{item.title}</div>
+        <div className="podcast-title" title={item.title}>{item.title}</div>
         <div className="podcast-desc">{item.snippet}</div>
       </div>
       <div className="podcast-play-circle">
@@ -852,7 +884,12 @@ const PodcastCard = memo(function PodcastCard({ item, cardIndex, tabbable, onMov
 
 /* ---------- 通知卡片 ---------- */
 
-const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
+const NotifCard = memo(function NotifCard({ item, cardIndex, tabbable, onMoveFocus }: {
+  item: ArticleEntry;
+  cardIndex: number;
+  tabbable: boolean;
+  onMoveFocus: (from: number, delta: number) => void;
+}) {
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
   const summarizeEntry = useAppStore((s) => s.summarizeEntry);
@@ -898,7 +935,20 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
   const isLong = (fullText || item.snippet || '').length > 120;
 
   return (
-    <div ref={hydrateRef} className={`notif-card ${item.isRead ? 'read' : ''}`} data-ctx="article" data-id={item.id}>
+    /* TASK-100（UI P2-2 轻修）：同 SocialCard——补 role/tabIndex 融入 roving 体系 */
+    <div
+      ref={hydrateRef}
+      className={`notif-card ${item.isRead ? 'read' : ''}`}
+      data-ctx="article"
+      data-id={item.id}
+      role="article"
+      data-card-index={cardIndex}
+      tabIndex={tabbable ? 0 : -1}
+      onKeyDown={(e) => {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
+        else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+      }}
+    >
       <div className="notif-card-header-row">
         <div className="notif-title">{item.title}</div>
         <div className="notif-top-actions">
@@ -949,7 +999,8 @@ const NotifCard = memo(function NotifCard({ item }: { item: ArticleEntry }) {
         </div>
         {summaryError ? (
           <div className="ai-error-row">
-            <span className="ai-error-text" title={summaryError}>生成失败：{summaryError}</span>
+            {/* TASK-100：错误前缀统一「摘要生成失败：」（此前 Reader/通知卡两种写法） */}
+            <span className="ai-error-text" title={summaryError}>摘要生成失败：{summaryError}</span>
             <button className="ai-retry-btn" onClick={() => summarizeEntry(item.id)}>重试</button>
           </div>
         ) : summaryGenerating && !item.aiSummary ? (

@@ -2282,6 +2282,13 @@ await (async () => {
     s5RaceAfter.articlesLoading === false && s5RaceAfter.activeFeedFilter === '11'
     && s5RaceAfter.entries.length === 0);
   listPlan = null;   // 退出 defer 模式：下面这一次必须真的走完（否则永远挂起）
+  /* TASK-100 P3-1：selectFeed 触发的 reload 此刻仍在途（其 list_articles 也被 defer 过），
+     新守卫「reload 在途拦截续拉」会拦住下面这一次 loadMore——先放行在途 reload 落地
+     （回满一页源B 数据，使 exhausted=false），再验证续拉恢复。 */
+  pendingList[pendingList.length - 1]?.resolve(
+    Array.from({ length: 500 }, (_, i) => mkRow({ id: 6200 + i, feed_id: 11 })),
+  );
+  await nTick(20);
   invokeCalls.length = 0;
   await store.getState().loadMoreArticles();
   checkNew('(s5/D3) 竞态丢弃后入口守卫没被锁死：下一次分页照常发出（且用新范围源B）',
@@ -3727,6 +3734,429 @@ await (async () => {
   checkNew("(fix-14) 页脚版本获取失败保持 …（不再回退硬编码假版本 '0.8.0'，与 AboutTab 决策对齐）",
     !sfFix.includes("'0.8.0'")
     && sfFix.includes("version || '…'"));
+}
+
+/* ============================================================
+   TASK-100（自检遗留收口，2026-09-29）：前端 P3×9 + UI P2×2 + UI P3×17
+   + 文档/乱码/兼容。行为断言（内存假后端）+ 源码形态断言，沿用 fix-* 风格。
+   明确不做（DEC-task100）：跨布局 J/K 键盘导航、--text-tertiary 对比度调整。
+   ============================================================ */
+{
+  const fs100 = await import('node:fs');
+  const src100 = (p) => fs100.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const nTick100 = (ms = 20) => new Promise((r) => setTimeout(r, ms));
+
+  /* ---------- (t100-cache) P3-7：viewEntriesCache LRU 上限（8 组合键，先淘汰最旧） ---------- */
+  {
+    const { viewEntriesCache } = await import('../dist-test/store/internals.js');
+    viewEntriesCache.clear();
+    for (let i = 0; i < 10; i += 1) viewEntriesCache.set(`k${i}`, [{ id: `e${i}` }]);
+    checkNew('(t100-cache) 容量上限：写入 10 个组合键后缓存收敛到 8（修前无上限累积）',
+      viewEntriesCache.size === 8);
+    checkNew('(t100-cache) 先淘汰最旧：最早写入的 k0/k1 被淘汰，最新 k8/k9 保留',
+      !viewEntriesCache.has('k0') && !viewEntriesCache.has('k1')
+      && viewEntriesCache.has('k8') && viewEntriesCache.has('k9'));
+    viewEntriesCache.get('k2'); // 命中刷新新鲜度
+    for (let i = 10; i < 12; i += 1) viewEntriesCache.set(`k${i}`, []);
+    checkNew('(t100-cache) 命中刷新 LRU 新鲜度：get 过的 k2 不被随后两次写入淘汰',
+      viewEntriesCache.has('k2') && viewEntriesCache.size === 8);
+    viewEntriesCache.clear();
+    checkNew('(t100-cache) clear() 语义保持（切排序整体清空路径不受影响）',
+      viewEntriesCache.size === 0);
+  }
+
+  /* ---------- (t100-p3-1) reload 在途期间拦截 loadMore/refill ---------- */
+  {
+    const prevInvoke = globalThis.__INVOKE__;
+    try {
+      const FOLDERS = [{ id: 1, name: '分类', layout: 'article', auto_summary: false, auto_translate: false, collapsed: false }];
+      const FEEDS = [
+        { id: 10, folder_id: 1, feed_url: 'https://a.example/rss', site_url: null, title: '源A', favicon_url: null, layout: 'inherit', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
+        { id: 11, folder_id: 1, feed_url: 'https://b.example/rss', site_url: null, title: '源B', favicon_url: null, layout: 'inherit', auto_summary: false, auto_translate: false, fetch_failed: false, fetch_error: null, last_fetched_at: null },
+      ];
+      const mkRow = (o) => ({
+        id: 0, feed_id: 10, title: 't', author: null, snippet: 's', image_url: null,
+        enclosure_url: null, enclosure_mime: null, duration_sec: null, ai_summary: null,
+        source: 'direct', published_at: '2026-09-04T10:00:00Z', is_read: false, is_starred: false, url: null,
+        content_html: null, translated_content: null, fulltext_extracted: false, ...o,
+      });
+      let feedFilter = null;
+      let delayed; // 挂起中的 list_articles resolve（模拟慢 reload）
+      const calls = [];
+      globalThis.__INVOKE__ = (cmd, args) => {
+        calls.push({ cmd, args });
+        switch (cmd) {
+          case 'list_folders': return Promise.resolve(FOLDERS);
+          case 'list_feeds': return Promise.resolve(FEEDS);
+          case 'feed_counts': return Promise.resolve([]);
+          case 'sync_status': return Promise.resolve({ connected: false });
+          case 'list_articles': {
+            const a = (args && args.args) || {};
+            let out = [];
+            for (let i = 0; i < 600; i += 1) {
+              out.push(mkRow({
+                id: 50000 + (feedFilter === 11 ? 100000 : 0) + i,
+                feed_id: feedFilter ?? 10,
+                published_at: new Date(Date.UTC(2026, 8, 4, 10, 0, 0) - i * 1000).toISOString(),
+              }));
+            }
+            if (a.feed_id != null) out = out.filter((r) => r.feed_id === a.feed_id);
+            out = out.slice(a.offset || 0, a.limit != null ? (a.offset || 0) + a.limit : undefined);
+            if (delayed) {
+              delayed = null;
+              return new Promise((resolve) => setTimeout(() => resolve(out), 60));
+            }
+            return Promise.resolve(out);
+          }
+          default: return Promise.resolve(null);
+        }
+      };
+      const { isBackendReloadInFlight } = await import('../dist-test/store/slices/bootstrap.js');
+      const viewCache = (await import('../dist-test/store/internals.js')).viewEntriesCache;
+      viewCache.clear();
+      store.setState({
+        dataMode: 'tauri', dataLoading: false, bootstrapError: null,
+        activeContentLayout: 'article', activeViewFilter: 'all', activeFeedFilter: 'all',
+        timelineFilter: 'all', timelineSort: 'newest',
+        activeArticleId: null, openedReadIds: {}, entries: [], categories: [], feedIndex: new Map(),
+        feedCounts: new Map(), articlesLimit: 0, articlesLoading: false, articlesExhausted: false,
+        articlesCursor: {}, hydratedIds: {}, hydrationErrors: {}, toasts: [],
+      });
+      await store.getState().reloadFromBackend();
+      const baseCount = store.getState().entries.length;
+      checkNew('(t100-p3-1) 前置：all 口径首批 500 条已就位（假后端单源 600 条）',
+        baseCount === 500);
+
+      // 切范围：游标镜像先写入（feed-11 从 0 起步），reload 的 list_articles 挂起 60ms
+      delayed = true;
+      feedFilter = 11;
+      calls.length = 0;
+      store.getState().selectFeed('feed-11');
+      checkNew('(t100-p3-1) 切范围后 reload 在途：isBackendReloadInFlight() 为真',
+        isBackendReloadInFlight() === true);
+      const idsBeforeReload = store.getState().entries.length;
+      await store.getState().loadMoreArticles();
+      await nTick100(5);
+      checkNew('(t100-p3-1) 在途窗口内 loadMoreArticles 被拦截：未发出第二发 list_articles（修前会把新口径一页 append 到旧列表尾）',
+        calls.filter((c) => c.cmd === 'list_articles').length === 1
+          && store.getState().entries.length === idsBeforeReload);
+      // reload 落地后拦截解除，续拉恢复
+      await nTick100(120);
+      checkNew('(t100-p3-1) reload 落地：在途标记清除、entries 为 feed-11 快照、游标对齐',
+        isBackendReloadInFlight() === false
+          && store.getState().entries.length === 500
+          && store.getState().entries.every((e) => e.feedId === '11')
+          && store.getState().articlesCursor['article|feed-11'] === 500);
+      calls.length = 0;
+      await store.getState().loadMoreArticles();
+      checkNew('(t100-p3-1) 落地后续拉放行：第 2 页请求带该范围游标 offset=500（假后端每源共 600 行，追加 100 行收敛到底）',
+        calls.filter((c) => c.cmd === 'list_articles').length === 1
+          && calls.find((c) => c.cmd === 'list_articles')?.args.args.offset === 500
+          && store.getState().entries.length === 600
+          && store.getState().articlesExhausted === true);
+      feedFilter = null;
+    } finally {
+      globalThis.__INVOKE__ = prevInvoke;
+    }
+  }
+
+  /* ---------- (t100-p3-3) triggerManualSync：仅「未连接」静默，其余失败可见 ---------- */
+  {
+    const prevInvoke = globalThis.__INVOKE__;
+    try {
+      let syncPhaseError = null;
+      globalThis.__INVOKE__ = (cmd) => {
+        switch (cmd) {
+          case 'sync_phase':
+            if (syncPhaseError) return Promise.reject(syncPhaseError);
+            return Promise.resolve({ pushed_states: 0, pushed_feeds: 0, pulled_feeds: 0, pulled_entries: 0, merged_states: 0, errors: [] });
+          case 'refresh_all_feeds': return Promise.resolve({ new_articles: 0, failed_feeds: 0 });
+          case 'list_folders': return Promise.resolve([]);
+          case 'list_feeds': return Promise.resolve([]);
+          case 'list_articles': return Promise.resolve([]);
+          case 'feed_counts': return Promise.resolve([]);
+          case 'sync_status': return Promise.resolve({ connected: false });
+          default: return Promise.resolve(null);
+        }
+      };
+      store.setState({ dataMode: 'tauri', dataLoading: false, bootstrapError: null, toasts: [], syncStatus: 'synced' });
+      // 场景 1：notConnected（既有语义）→ 静默跳过订阅层，走纯直连刷新
+      syncPhaseError = { code: 'notConnected', message: '未连接后端' };
+      store.getState().triggerManualSync();
+      await nTick100(60);
+      const toast1 = store.getState().toasts.at(-1)?.text ?? '';
+      checkNew('(t100-p3-3) notConnected 静默跳过：最终 toast 与既有口径逐字一致（无失败前缀）',
+        toast1 === '已刷新，新增 0 条');
+      // 场景 2：网络类失败 → 可见（console.warn + 汇入提示），不再吞成假成功
+      syncPhaseError = { code: 'timeout', message: '网络超时' };
+      store.getState().triggerManualSync();
+      await nTick100(60);
+      const toast2 = store.getState().toasts.at(-1)?.text ?? '';
+      checkNew('(t100-p3-3) 其余失败可见：toast 前置「订阅同步失败：网络超时」，正常信息共存',
+        toast2.includes('订阅同步失败：网络超时') && toast2.includes('已刷新，新增 0 条'));
+      checkNew('(t100-p3-3) 源码形态：catch 不再无条件吞错，notConnected 判定收口在 isNotConnectedError',
+        src100('../src/store/slices/sync.ts').includes('function isNotConnectedError')
+          && !src100('../src/store/slices/sync.ts').includes(".catch(() => null) // 未连接"));
+    } finally {
+      globalThis.__INVOKE__ = prevInvoke;
+      store.setState({ toasts: [] });
+    }
+  }
+
+  /* ---------- (t100-p3-4) toggleAllFolders：allSettled 聚合，失败合并一条 toast ---------- */
+  {
+    const prevInvoke = globalThis.__INVOKE__;
+    try {
+      const collapseCalls = [];
+      globalThis.__INVOKE__ = (cmd, args) => {
+        if (cmd === 'set_folder_collapsed') {
+          collapseCalls.push(args);
+          if (args.id === 3) return Promise.reject({ message: 'db busy' });
+        }
+        return Promise.resolve(null);
+      };
+      const mkCat = (id) => ({
+        id: `cat-${id}`, name: `分类${id}`, collapsed: false, settingsCollapsed: false,
+        layout: 'article', autoSummary: false, autoTranslate: false, feeds: [],
+      });
+      store.setState({ dataMode: 'tauri', categories: [mkCat(1), mkCat(2), mkCat(3)], toasts: [] });
+      store.getState().toggleAllFolders();
+      await nTick100(40);
+      checkNew('(t100-p3-4) 批量落库仍逐分类发出（3 次 set_folder_collapsed）',
+        collapseCalls.length === 3 && collapseCalls.every((a) => a.collapsed === true));
+      checkNew('(t100-p3-4) 失败合并一条 toast（含失败个数），不再逐个弹',
+        collapseCalls.length === 3
+          && store.getState().toasts.filter((t) => t.text.includes('折叠状态未能保存')).length === 1
+          && store.getState().toasts.at(-1)?.text === '1 个分类的折叠状态未能保存，重启后可能回退');
+    } finally {
+      globalThis.__INVOKE__ = prevInvoke;
+      store.setState({ toasts: [] });
+    }
+  }
+
+  /* ---------- (t100-p3-10) mock addFeed：无匹配分类不再假成功 ---------- */
+  {
+    const prevInvoke = globalThis.__INVOKE__;
+    try {
+      globalThis.__INVOKE__ = () => Promise.resolve(null);
+      const mkCat = (id) => ({
+        id: `cat-${id}`, name: `分类${id}`, collapsed: false, settingsCollapsed: false,
+        layout: 'article', autoSummary: false, autoTranslate: false, feeds: [],
+      });
+      store.setState({ dataMode: 'mock', categories: [mkCat(1)], toasts: [] });
+      store.getState().addFeed('cat-999', 'https://x.example/rss', '幽灵源', 'article', false, false, false);
+      checkNew('(t100-p3-10) 无匹配分类：失败 toast，且分类树未被污染（修前静默假成功「已添加订阅源」）',
+        store.getState().toasts.at(-1)?.text === '添加失败：目标分类不存在'
+          && store.getState().categories[0].feeds.length === 0);
+      store.getState().addFeed('cat-1', 'https://x.example/rss', '正常源', 'article', false, false, false);
+      checkNew('(t100-p3-10) 有匹配分类：成功 toast + feed 挂载（既有行为保持）',
+        store.getState().toasts.at(-1)?.text === '已添加订阅源：正常源'
+          && store.getState().categories[0].feeds.length === 1);
+    } finally {
+      globalThis.__INVOKE__ = prevInvoke;
+      store.setState({ categories: [], toasts: [] });
+    }
+  }
+
+  /* ---------- (t100-d30) parseTs：空格分隔旧格式按 UTC 解析（R-P3-7 前端半边） ---------- */
+  {
+    const { parseTs } = await import('../dist-test/lib/api.js');
+    const spaceForm = parseTs('2026-09-04 10:00:00');
+    const utcExpect = Date.UTC(2026, 8, 4, 10, 0, 0);
+    checkNew('(t100-d30) 「YYYY-MM-DD HH:MM:SS」按 UTC 解析（修前 Date.parse 按本地时区，时间偏移一个时区差）',
+      spaceForm === utcExpect);
+    checkNew('(t100-d30) 标准 ISO（T 分隔 + Z）仍走 Date.parse（不受改动影响）',
+      parseTs('2026-09-04T10:00:00Z') === Date.parse('2026-09-04T10:00:00Z'));
+    checkNew('(t100-d30) 带毫秒/时区的 ISO 与空格格式各自正确（空格格式兼容带小数秒的变体不误吞）',
+      parseTs('2026-09-04T10:00:00.123Z') === Date.parse('2026-09-04T10:00:00.123Z')
+        && parseTs('2026-09-04 10:00:00') === parseTs('2026-09-04 10:00:00'));
+    checkNew('(t100-d30) null / 不可解析 → 0（排序稳定的既有契约）',
+      parseTs(null) === 0 && parseTs('not-a-date') === 0);
+  }
+
+  /* ---------- (t100-src) 源码形态断言：P3 剩余项 + UI 一致性（U1-U8） ---------- */
+  {
+    const sidebar = src100('../src/components/Sidebar.tsx');
+    const timeline = src100('../src/components/Timeline.tsx');
+    const overlays = src100('../src/components/Overlays.tsx');
+    const primitives = src100('../src/components/primitives.tsx');
+    const app = src100('../src/App.tsx');
+    const player = src100('../src/components/PlayerBar.tsx');
+    const appearance = src100('../src/components/settings/AppearanceTab.tsx');
+    const shortcuts = src100('../src/components/settings/ShortcutsTab.tsx');
+    const syncTab = src100('../src/components/settings/SyncTab.tsx');
+    const apiSrc = src100('../src/lib/api.ts');
+    const bootstrap = src100('../src/store/slices/bootstrap.ts');
+    const internals = src100('../src/store/internals.ts');
+    const ctxMenu = src100('../src/components/ContextMenu.tsx');
+    const feedsTab = src100('../src/components/settings/FeedsTab.tsx');
+    const reader = src100('../src/components/Reader.tsx');
+    const icons = src100('../src/components/icons.tsx');
+    const tokens = src100('../src/styles/tokens.css');
+    const baseCss = src100('../src/styles/base.css');
+    const indexHtml = src100('../index.html');
+    const readme = src100('../README.md');
+
+    /* P3-1：reload 在途拦截（行为断言见上，这里锁守卫的存在性） */
+    checkNew('(t100-p3-1) 守卫接线：loadMoreArticles 入口检查 isBackendReloadInFlight；两个 reload 以计数器包裹',
+      bootstrap.includes('if (isBackendReloadInFlight()) return;')
+      && bootstrap.includes('backendReloadInFlight++')
+      && bootstrap.includes('backendReloadInFlight--')
+      && (bootstrap.match(/backendReloadInFlight--/g) || []).length === 2);
+    checkNew('(t100-p3-1) 计数器与 reloadGeneration 同为模块级状态（不得被 setState 泄漏进 store）',
+      !bootstrap.includes('reloadInFlight: ') && bootstrap.includes('let backendReloadInFlight = 0;'));
+
+    /* P3-2：fetchFailed 假 affordance */
+    checkNew('(t100-p3-2) fetchFailed 警示点改为非点击承诺「最近一次抓取失败」（重试走旁边独立刷新钮）',
+      sidebar.includes('title="最近一次抓取失败"')
+        && !sidebar.includes('点击重试'));
+
+    /* P3-6 + U1：快捷键表补 Space + 紧凑加号形态 */
+    checkNew('(t100-p3-6) 快捷键表补 Space 行（播放器激活时播放/暂停）',
+      shortcuts.includes("'Space'")
+        && shortcuts.includes('播放器激活时'));
+    checkNew('(t100-u1) 快捷键提示全仓统一紧凑加号形态：Ctrl+K / Ctrl+, / Esc',
+      shortcuts.includes("'Ctrl+K'") && shortcuts.includes("'Ctrl+,'")
+        && sidebar.includes('>Ctrl+K<') && sidebar.includes('>Ctrl+,<')
+        && overlays.includes('>Esc</span>'));
+    checkNew('(t100-u1) 禁止形态清零：Ctrl K / Ctrl , / Ctrl + K / ESC 关闭 / 小写 esc',
+      !sidebar.includes('Ctrl K') && !sidebar.includes('Ctrl ,')
+        && !shortcuts.includes('Ctrl + K') && !shortcuts.includes('Ctrl + ,')
+        && !overlays.includes('ESC 关闭') && !overlays.includes('<kbd>esc</kbd>'));
+
+    /* P3-7：LRU 上限实现 */
+    checkNew('(t100-p3-7) viewEntriesCache 收口为 LRUMap（容量 8，命中刷新新鲜度）',
+      internals.includes('class LRUMap<V> extends Map<string, V>')
+        && internals.includes('VIEW_ENTRIES_CACHE_MAX = 8'));
+
+    /* P3-8 / P3-9：断开语义分离 + removed_feeds 消费 */
+    checkNew('(t100-p3-8) doDisconnect 分开处理：断开成功后 reload 失败不再误报「断开失败」',
+      syncTab.includes('已断开连接，但本地刷新失败'));
+    checkNew('(t100-p3-9) SyncReport 补 removed_feeds 声明，SyncTab 同步报告消费（对账删除计数，纯信息展示）',
+      apiSrc.includes('removed_feeds?: number;')
+        && syncTab.includes('removedFeeds += feedsReport.removed_feeds')
+        && syncTab.includes('removedFeeds += statesReport.removed_feeds')
+        && syncTab.includes('本次对账移除'));
+
+    /* P3-10：mock addFeed 失败可见（行为断言见上） */
+    checkNew('(t100-p3-10) mock 分支 addFeed 前置目标分类存在性检查',
+      src100('../src/store/slices/feeds.ts').includes('添加失败：目标分类不存在'));
+
+    /* D29：api.ts 注释更正 + README 同步范围更正 */
+    checkNew('(t100-d29) api.ts 搜索注释更正为 LIKE 子串（FTS5 仅历史遗留提法），不再宣称 FTS5 全文搜索',
+      !apiSrc.includes('FTS5 全文搜索')
+        && apiSrc.includes('LIKE 子串匹配'));
+    checkNew('(t100-d29) README 同步范围更正：AI 配置/模型名不在白名单',
+      readme.includes('AI 配置（含模型名）不在白名单')
+        && !readme.includes('模型等非敏感配置'));
+
+    /* D28：base.css 历史注释乱码重建（73 行 / 114 处 U+FFFD → 0） */
+    const fffd = String.fromCharCode(0xfffd);
+    checkNew('(t100-d28) base.css 重建后 U+FFFD=0（73 行历史注释按 git 1503dbd 干净版原样恢复，CSS 规则零变化）',
+      !baseCss.includes(fffd));
+    checkNew('(t100-d28) 重建样本抽检：注释原文与 git 干净版逐字一致',
+      baseCss.includes('FluxReader 全局基础样式（迁移自 prototype.html §1-§7）')
+        && baseCss.includes('/* Feed Group Manager —— 设置页订阅管理')
+        && baseCss.includes('层级最高：盖过设置弹窗（150）与下拉菜单（2000） */'));
+
+    /* UI P2-2：J/K 范围文案 + Social/Notif 卡 roving */
+    checkNew('(t100-uip2-2) ShortcutsTab J/K 范围文案改准「文章布局」（跨布局 J/K 为决策不做）',
+      shortcuts.includes("'文章布局'") && !shortcuts.includes("'时间流'"));
+    checkNew('(t100-uip2-2) SocialCard/NotifCard 补 role="article" + tabIndex + 方向键 roving，融入既有 tabindex 体系',
+      timeline.includes("role=\"article\"")
+        && (timeline.match(/role="article"/g) || []).length === 2
+        && timeline.includes('tabIndex={tabbable ? 0 : -1}')
+        && timeline.includes('<SocialCard item={item} cardIndex={vi.index}')
+        && timeline.includes('<NotifCard item={item} cardIndex={vi.index}'));
+
+    /* UI P2-7：浮层焦点移入/归还 */
+    checkNew('(t100-uip2-7) ModalOverlay 打开移焦入容器（tabIndex=-1，子组件 autoFocus 优先）、关闭归还触发元素',
+      primitives.includes('cardRef.current?.focus({ preventScroll: true })')
+        && primitives.includes('restoreRef.current.focus({ preventScroll: true })')
+        && primitives.includes('tabIndex={-1}'));
+    checkNew('(t100-uip2-7) Lightbox 记录打开时 document.activeElement 并在关闭时归还',
+      overlays.includes('overlayRef.current?.focus({ preventScroll: true })')
+        && overlays.includes('restoreRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;'));
+
+    /* U7：Esc 链补 closeAskVisible */
+    checkNew('(t100-u7) App.tsx Esc 链首支补 closeAskVisible（确认框 3000 自带 Esc > 弹窗 150 > 播放器 140）',
+      app.indexOf('if (s.closeAskVisible)') < app.indexOf('else if (s.searchOpen) s.closeSearch()')
+        && app.includes("s.answerCloseAsk('tray', false)"));
+
+    /* U2：叫法统一「添加订阅源」 */
+    checkNew('(t100-u2) 右键菜单与设置页 FeedsTab 统一「添加订阅源」，两套旧叫法清零',
+      ctxMenu.includes("label: '添加订阅源'") && !ctxMenu.includes('新建订阅源')
+        && feedsTab.includes('<span>添加订阅源</span>') && !feedsTab.includes('添加源</span>'));
+
+    /* 生成中文案统一 + 署名中文化 */
+    checkNew('(t100-c14) 生成中文案统一「正在生成摘要…」、错误前缀统一「摘要生成失败：」',
+      reader.includes('正在生成摘要…') && !reader.includes('正在根据提示词生成摘要')
+        && timeline.includes('摘要生成失败：') && !timeline.includes('>生成失败：'));
+    checkNew('(t100-c15) Reader 署名中文化：作者：{author}（「By {author}」清零）',
+      reader.includes('作者：{art.author}') && !reader.includes('By {art.author}'));
+
+    /* U3：星标视觉统一 */
+    checkNew('(t100-u3) 三处星标统一 Icons.star/starFilled：SocialCard 收藏态 starFilled、GalleryCard ★/☆ 字符移除、ArticleCard「★ 已收藏」移除',
+      timeline.includes('{item.isStarred ? <Icons.starFilled /> : <Icons.star />}')
+        && !timeline.includes('★')
+        && timeline.includes('card-starred-flag')
+        && !timeline.includes('☆'));
+    checkNew('(t100-u3) ArticleCard 页脚收藏标记落位 card-starred-flag（base.css 提供 --star-color 视觉）',
+      baseCss.includes('.card-starred-flag') && baseCss.includes('color: var(--star-color);'));
+
+    /* U4：播放器/主题图标 SVG 化 */
+    checkNew('(t100-u4) PlayerBar 六控件全部 Icons SVG：暂停/播放/关闭/快退/快进/全屏的字符图标清零',
+      player.includes('Icons.pause') && player.includes('Icons.play')
+        && player.includes('Icons.x') && player.includes('Icons.maximize')
+        && player.includes('Icons.rotateCcw') && player.includes('Icons.rotateCw')
+        && !/[⏸▶✕↺↻⛶]/.test(player));
+    checkNew('(t100-u4) AppearanceTab 主题三按钮 emoji（日/月/电脑符号）移除，Icons.sun/moon/monitor 上位',
+      !appearance.includes('☀') && !appearance.includes('🌙') && !appearance.includes('💻')
+        && appearance.includes('icon: Icons.sun')
+        && appearance.includes('icon: Icons.moon')
+        && appearance.includes('icon: Icons.monitor'));
+    checkNew('(t100-u4) Icons 集合补齐八个形状（pause/x/rotateCcw/rotateCw/maximize/sun/moon/monitor）',
+      ['pause:', 'x:', 'rotateCcw:', 'rotateCw:', 'maximize:', 'sun:', 'moon:', 'monitor:']
+        .every((k) => icons.includes(k)));
+
+    /* U5：line-clamp 截断文本补 title */
+    checkNew('(t100-u5) 截断文本补 title（=未截断全文）：card-title/card-snippet/gallery-title/podcast-title',
+      timeline.includes('<h4 className="card-title" title={art.title}>')
+        && timeline.includes('<p className="card-snippet" title={art.snippet}>')
+        && timeline.includes('<div className="gallery-title" title={item.title}>')
+        && timeline.includes('<div className="podcast-title" title={item.title}>'));
+
+    /* U6：favicon 失败回退 dot 占位 */
+    checkNew('(t100-u6) favicon onError 回退 dot 占位（FeedFavicon 组件），行首不再留空槽',
+      sidebar.includes('function FeedFavicon')
+        && sidebar.includes('onError={() => setFailed(true)}')
+        && !sidebar.includes("style.display = 'none'"));
+
+    /* U7 配套断言见上；U8：theme-color */
+    checkNew('(t100-u8) index.html theme-color = #14161a（与深色 --bg-base 一致，启动不闪色）',
+      indexHtml.includes('content="#14161a"') && !indexHtml.includes('#0a1936'));
+
+    /* P3 散点：LAYOUT_NO_AI 收敛 / 占位类化 / busy 统一 / stale 注释 / token 化 / 头注释 */
+    checkNew('(t100-c23) LAYOUT_NO_AI 双定义收敛：Overlays 改 import settings/shared，本地定义删除',
+      overlays.includes("import { LAYOUT_NO_AI } from './settings/shared';")
+        && !overlays.includes("new Set(['image', 'podcast'])"));
+    checkNew('(t100-c26) SocialCard 占位 opacity 0.45 内联移除，并入 .hydrate-placeholder 类',
+      !timeline.includes('opacity: 0.45')
+        && baseCss.includes('.hydrate-placeholder {')
+        && baseCss.includes('opacity: 0.45;'));
+    checkNew('(t100-c25) 双刷新入口 busy 统一「禁用+转圈」：小图标钮补 disabled，CSS 提供禁用态',
+      sidebar.includes('disabled={isBusy}')
+        && baseCss.includes('.sync-refresh-btn:disabled'));
+    checkNew('(t100-c27) primitives.tsx stale 注释更正：确认框 z-index 3000（修前注释写 300）',
+      primitives.includes('z-index 为 3000') && !primitives.includes('z-index 300，'));
+    checkNew('(t100-c17) #e67e22 token 化：tokens.css 新增 --feed-error，base.css 引用，硬编码清零',
+      tokens.includes('--feed-error: #e67e22;')
+        && baseCss.includes('color: var(--feed-error);')
+        && !baseCss.includes('#e67e22'));
+    checkNew('(t100-c20) tokens.css 头注释更正：深浅两模式均已实现全部 5 个调色盘',
+      tokens.includes('均已实现全部 5 个调色盘')
+        && !tokens.includes('浅色模式当前仅实现 blue'));
+  }
 }
 
 // ---- 汇总 ----

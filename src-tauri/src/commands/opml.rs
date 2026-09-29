@@ -12,7 +12,7 @@ OPML 导入导出
 
 /// 导入 OPML：按目录建 folder → 插入 feed（已存在的 URL 跳过）→ 入同步队列。
 /// 返回 (新增源数, 跳过数)。
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct OpmlImportReport {
     pub imported: usize,
     pub skipped: usize,
@@ -45,6 +45,13 @@ fn import_feeds(
     // 目录名 → folder_id 缓存（一次导入内同名目录只建一次）
     let mut folder_ids: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
+    // P3-1（自检 2026-09-29）：整个导入单事务——建目录 → 插 feed → 清墓碑 →
+    // 入队，任一条失败整体回滚（Err 路径 Transaction drop 自动回滚；unchecked_
+    // transaction 用法对齐同库 mark_all_read_with_enqueue / persist_new_feed）。
+    // 此前逐条自动提交：第 N 条失败会留下「部分源已导入」的半套状态，且报告
+    // 以 Err 丢弃、已导入计数无处可查，用户重试会得到叠加结果。
+    let tx = conn.unchecked_transaction()?;
+
     for f in feeds {
         // 已存在（URL 碰撞）→ 跳过。
         // P3[9]（REQ-104）：去重改用**规范化 URL**（feed_id_by_url_normalized，与
@@ -52,8 +59,8 @@ fn import_feeds(
         // 而 feeds.feed_url 的 UNIQUE 也按原串，于是同一订阅只要饰词不同
         // （https/http、www.、尾斜杠、utm_* 等跟踪参数）就能被再次导入成第二个 feed
         // → 文章翻倍、已读/收藏状态分裂、未读数与远端对不齐。
-        if db::feed_exists_by_url(conn, &f.feed_url)?
-            || db::feed_id_by_url_normalized(conn, &f.feed_url)?.is_some()
+        if db::feed_exists_by_url(&tx, &f.feed_url)?
+            || db::feed_id_by_url_normalized(&tx, &f.feed_url)?.is_some()
         {
             report.skipped += 1;
             continue;
@@ -62,13 +69,13 @@ fn import_feeds(
         let folder_id = match folder_ids.get(name) {
             Some(id) => *id,
             None => {
-                let id = db::create_folder(conn, name, "article")?;
+                let id = db::create_folder(&tx, name, "article")?;
                 folder_ids.insert(name.to_string(), id);
                 id
             }
         };
         db::insert_feed(
-            conn,
+            &tx,
             &f.feed_url,
             None,
             &f.title,
@@ -81,14 +88,15 @@ fn import_feeds(
         // TASK-064 N4：同 add_feed——重新导入 = 用户改变主意的最强证据，清掉
         // 同 URL 的删除墓碑，否则 pull 永久跳过该源（不绑 remote_id）、其未推送
         // 状态 30 天后被 prune_stale_unbound 物理删除。
-        db::remove_feed_tombstone(conn, &f.feed_url)?;
+        db::remove_feed_tombstone(&tx, &f.feed_url)?;
         // 新增订阅入同步队列（连接 Miniflux 后补推）。payload 必须是含 folder_id
         // 的 JSON——push_feeds 据此把订阅挂到远端对应分类；此前误传标题字符串，
         // serde_json 解析失败导致 payload 丢弃、源被推到远端默认分类（目录丢失）。
         let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
-        db::enqueue_sync(conn, None, Some(&f.feed_url), "add_feed", Some(&payload))?;
+        db::enqueue_sync(&tx, None, Some(&f.feed_url), "add_feed", Some(&payload))?;
         report.imported += 1;
     }
+    tx.commit()?;
     Ok(report)
 }
 
@@ -197,6 +205,58 @@ mod tests {
                 .unwrap()
                 .contains(&"http://a.example/rss".to_string()),
             "重新导入后墓碑必须清除（N4：否则 pull 永久跳过该源）"
+        );
+    }
+
+    /// P3-1（自检 2026-09-29）：导入中途失败必须**整体回滚**——第 1 条已导入的
+    /// 源/目录/队列/事务内墓碑清除全部撤销（修前逐条自动提交会残留半套）。
+    /// 生产代码无注入点，用测试侧 RAISE(ABORT) 触发器在第 2 条的入队处注入
+    /// 真实失败（SQLITE_CONSTRAINT 走的就是生产 Err 路径）。
+    #[test]
+    fn import_feeds_midway_failure_rolls_back_everything() {
+        let conn = conn();
+        conn.execute_batch(
+            "CREATE TRIGGER test_fail_second_enqueue BEFORE INSERT ON sync_queue
+             WHEN NEW.action = 'add_feed' AND NEW.feed_url = 'https://boom.example/rss' BEGIN
+                 SELECT RAISE(ABORT, 'simulated midway failure');
+             END;",
+        )
+        .unwrap();
+        db::add_feed_tombstone(&conn, "https://a.example/rss").unwrap();
+
+        let err = import_feeds(
+            &conn,
+            &[
+                feed("https://a.example/rss", "A", None),
+                feed("https://boom.example/rss", "B", None),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            err.message.contains("simulated midway failure"),
+            "必须是注入的约束失败现场: {err}"
+        );
+
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM feeds"),
+            0,
+            "中途失败必须整体回滚：第 1 条已导入的源也不得残留（修前残留）"
+        );
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM folders WHERE name = '导入'"),
+            0,
+            "导入目录必须随事务回滚"
+        );
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM sync_queue"),
+            0,
+            "add_feed 队项必须随事务回滚"
+        );
+        assert!(
+            db::feed_tombstones(&conn)
+                .unwrap()
+                .contains(&"http://a.example/rss".to_string()),
+            "事务内的墓碑清除必须被回滚（否则半套状态破坏删除语义）"
         );
     }
 }

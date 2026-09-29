@@ -36,6 +36,19 @@ const ARTICLES_PAGE_SIZE = 500;
 /** reloadFromBackend 代际计数：并发 reload 只接受最新一次结果 */
 let reloadGeneration = 0;
 
+/** TASK-100 P3-1：后端 reload（全量/筛选）在途计数。
+ *  selectLayout/selectFeed/selectView 都是「先写游标镜像、再异步 reload」：
+ *  该窗口内 entries 仍是旧口径快照，若放行 loadMoreArticles（含自动续拉），
+ *  新口径的一页会被 append 到旧口径列表尾（瞬态错排，随后才被 reload 整体替换）。
+ *  在途期间一律拦截续拉——reload 落地时 entries 与游标原子对齐，之后哨兵/
+ *  refill effect 随 items 变化重新触发，不会丢加载。 */
+let backendReloadInFlight = 0;
+
+/** 是否有后端 reload 在途（loadMoreArticles 的入口守卫之一） */
+export function isBackendReloadInFlight(): boolean {
+  return backendReloadInFlight > 0;
+}
+
 /** 判断列表查询是否附带正文。虚拟滚动下仅视口约 30 条需要正文，由
     useLazyHydrate 按需批量水合（1 次 IPC）即可；列表查询保持轻量（不含
     正文 HTML），避免每页 500 条背 2-3MB 正文（「列表背正文」是滚动卡顿主因）。 */
@@ -85,64 +98,69 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       reloadGeneration 代际守卫整体丢弃（与既有的「旧代际 reload 被丢弃」同口径）。 */
   reloadFromBackend: async () => {
     const gen = ++reloadGeneration;
-    const layout = get().activeContentLayout;
-    const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort, layout);
-    let folders, feeds, articles, counts;
+    backendReloadInFlight++;
     try {
-      [folders, feeds, articles, counts] = await Promise.all([
-        api.listFolders(),
-        api.listFeeds(),
-        api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset: 0, with_content: layoutNeedsBody(layout) }),
-        api.feedCounts(),
-      ]);
-    } catch (e) {
-      /* TASK-067 N10：后台刷新事件/范围切换路径的失败此前完全不可见（bootstrap
-         路径另有 bootstrapError，但 void 调用点无人接住）。toast 后 rethrow——
-         bootstrapFromBackend 的错误态语义保持。 */
-      get().showToast(`刷新失败：${extractError(e)}`);
-      throw e;
-    }
-    if (gen !== reloadGeneration) return; // 已有更新的 reload 在途/完成
-    if (!folders || !feeds || articles === null) return;
-
-    const categories = folderRowsToCategories(folders, feeds);
-    const feedCounts = new Map<string, { total: number; unread: number; starred: number; today: number }>();
-    if (counts) {
-      for (const c of counts) {
-        feedCounts.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
+      const layout = get().activeContentLayout;
+      const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort, layout);
+      let folders, feeds, articles, counts;
+      try {
+        [folders, feeds, articles, counts] = await Promise.all([
+          api.listFolders(),
+          api.listFeeds(),
+          api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset: 0, with_content: layoutNeedsBody(layout) }),
+          api.feedCounts(),
+        ]);
+      } catch (e) {
+        /* TASK-067 N10：后台刷新事件/范围切换路径的失败此前完全不可见（bootstrap
+           路径另有 bootstrapError，但 void 调用点无人接住）。toast 后 rethrow——
+           bootstrapFromBackend 的错误态语义保持。 */
+        get().showToast(`刷新失败：${extractError(e)}`);
+        throw e;
       }
+      if (gen !== reloadGeneration) return; // 已有更新的 reload 在途/完成
+      if (!folders || !feeds || articles === null) return;
+
+      const categories = folderRowsToCategories(folders, feeds);
+      const feedCounts = new Map<string, { total: number; unread: number; starred: number; today: number }>();
+      if (counts) {
+        for (const c of counts) {
+          feedCounts.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
+        }
+      }
+      const nextEntries = articles.map(articleRowToEntry);
+      /* 分页游标写回**发起 reload 时**的范围键（不是完成时的 activeFeedFilter：
+         两者可能已被用户改过，而游标属于发起时的查询口径）。
+         TASK-094：entries 是该布局的快照，游标键带布局（R7：切布局不串游标）。 */
+      const scopeKey = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
+      // 缓存「全部」视图快照：切回时零延迟恢复（视图切换卡顿的根治）。
+      // TASK-052：快照就是**该范围**的首批，故缓存键必须带范围，否则源A 的首批
+      // 会被当成「全部」的首批恢复（数据错配）。TASK-094：键首段本就是布局。
+      viewEntriesCache.set(viewCacheKey(get().activeContentLayout, 'all', get().activeFeedFilter), nextEntries);
+      set((s) => ({
+        ...reconcileCategories(s, categories),
+        entries: nextEntries,
+        feedCounts,
+        articlesLimit: articles.length,
+        articlesCursor: { ...s.articlesCursor, [scopeKey]: articles.length },
+        articlesLoading: false,
+        articlesExhausted: articles.length < ARTICLES_PAGE_SIZE,
+        dataMode: 'tauri',
+        dataLoading: false,
+        /* 新快照不带正文：清空水合终态，让社交/通知卡片重新水合 */
+        hydratedIds: {},
+        hydrationErrors: {},
+      }));
+      /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
+      void api.syncStatus().then((st) => {
+        if (st && gen === reloadGeneration) set({ syncConnected: st.connected });
+      }).catch(() => { /* TASK-067 N10：纯提示性刷新，失败不打扰 */ });
+      // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
+      // （状态/内容可能变化，entries 需同步刷新为筛选结果）
+      const view = get().activeViewFilter;
+      if (view !== 'all') void get().reloadFilteredEntries(view);
+    } finally {
+      backendReloadInFlight--;
     }
-    const nextEntries = articles.map(articleRowToEntry);
-    /* 分页游标写回**发起 reload 时**的范围键（不是完成时的 activeFeedFilter：
-       两者可能已被用户改过，而游标属于发起时的查询口径）。
-       TASK-094：entries 是该布局的快照，游标键带布局（R7：切布局不串游标）。 */
-    const scopeKey = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
-    // 缓存「全部」视图快照：切回时零延迟恢复（视图切换卡顿的根治）。
-    // TASK-052：快照就是**该范围**的首批，故缓存键必须带范围，否则源A 的首批
-    // 会被当成「全部」的首批恢复（数据错配）。TASK-094：键首段本就是布局。
-    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, 'all', get().activeFeedFilter), nextEntries);
-    set((s) => ({
-      ...reconcileCategories(s, categories),
-      entries: nextEntries,
-      feedCounts,
-      articlesLimit: articles.length,
-      articlesCursor: { ...s.articlesCursor, [scopeKey]: articles.length },
-      articlesLoading: false,
-      articlesExhausted: articles.length < ARTICLES_PAGE_SIZE,
-      dataMode: 'tauri',
-      dataLoading: false,
-      /* 新快照不带正文：清空水合终态，让社交/通知卡片重新水合 */
-      hydratedIds: {},
-      hydrationErrors: {},
-    }));
-    /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
-    void api.syncStatus().then((st) => {
-      if (st && gen === reloadGeneration) set({ syncConnected: st.connected });
-    }).catch(() => { /* TASK-067 N10：纯提示性刷新，失败不打扰 */ });
-    // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
-    // （状态/内容可能变化，entries 需同步刷新为筛选结果）
-    const view = get().activeViewFilter;
-    if (view !== 'all') void get().reloadFilteredEntries(view);
   },
 
   /** 滚动到底部按需拉取下一批文章（追加到 entries，不覆盖已加载的）。
@@ -154,6 +172,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const st = get();
     if (st.dataMode !== 'tauri') return;
     if (st.articlesLoading || st.articlesExhausted) return; // 已在加载 / 已到底
+    /* TASK-100 P3-1：reload（全量/筛选）在途期间拦截续拉——此刻 entries 仍是
+       旧口径快照（切布局/切范围先写游标镜像、reload 未返回），放行会把新口径
+       一页 append 到旧列表尾。reload 落地后 refill/哨兵 effect 会重新触发。 */
+    if (isBackendReloadInFlight()) return;
     /* 发起时快照「范围 + 布局 + 排序 + 游标」：四者必须来自同一时刻，否则请求参数与
        竞态比较的基准会互相错位（例如请求用旧范围、比较用新范围）。 */
     const scope = st.activeFeedFilter;
@@ -224,6 +246,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       是同一范围、更窄的口径（视图筛选是范围的子集），两条路径共用范围游标。 */
   reloadFilteredEntries: async (view) => {
     if (get().dataMode !== 'tauri') return;
+    backendReloadInFlight++;
     /* fix-4（自检 P2-2）：发起时快照「范围×布局」口径——与 loadMoreArticles 的
        守卫判据对齐。此前只比较 view：切范围/切布局后的旧响应仍会放行，把
        「源A × 旧布局」的收藏列表覆盖进新口径（新请求先返回时旧响应晚到，
@@ -245,6 +268,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       /* TASK-067 N10：筛选视图拉取失败对用户可见（此前静默，列表停留旧快照） */
       get().showToast(`筛选列表加载失败：${extractError(e)}`);
       return;
+    } finally {
+      backendReloadInFlight--;
     }
     if (!rows) return;
     // 竞态保护：拉取期间用户又切了视图，丢弃过期结果

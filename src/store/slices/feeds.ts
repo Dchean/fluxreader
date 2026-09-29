@@ -137,6 +137,13 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
         });
       return;
     }
+    /* TASK-100 P3-10：无匹配目标分类时不再静默假成功——此前 categories.map
+       找不到 catId 时 feed 无处挂载，却仍弹「已添加订阅源」（仅浏览器演示
+       模式可达）。 */
+    if (!get().categories.some((c) => c.id === catId)) {
+      get().showToast('添加失败：目标分类不存在');
+      return;
+    }
     set((s) => {
       const nextCategories = s.categories.map((c) =>
         c.id === catId
@@ -328,11 +335,15 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
     const anyOpen = get().categories.some((c) => !c.collapsed);
     set((s) => ({ categories: s.categories.map((c) => ({ ...c, collapsed: anyOpen })) }));
     get().showToast(anyOpen ? '已收起全部分类' : '已展开全部分类');
-    /* 批量落库折叠状态 */
+    /* 批量落库折叠状态：TASK-100 P3-4——此前逐分类发 N 次 IPC、失败逐个 toast
+       （几十个分类一次点击几十次往返 + 连环弹窗）。改为并发聚合，失败合并成
+       一条 toast（含失败个数）。 */
     if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-      for (const c of get().categories) {
-        void api.setFolderCollapsed(numericId(c.id), anyOpen).catch(() => get().showToast('折叠状态未能保存，重启后可能回退'));
-      }
+      const cats = get().categories;
+      void Promise.allSettled(cats.map((c) => api.setFolderCollapsed(numericId(c.id), anyOpen))).then((settled) => {
+        const failed = settled.filter((r) => r.status === 'rejected').length;
+        if (failed > 0) get().showToast(`${failed} 个分类的折叠状态未能保存，重启后可能回退`);
+      });
     }
   },
 

@@ -3,13 +3,13 @@ import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
 import { api, articleRowToEntry } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
 import { ModalOverlay, FluxDropdown, SwitchInline } from './primitives';
+import { LAYOUT_NO_AI } from './settings/shared';
 import type { ArticleEntry, ContentLayoutType, FeedItem } from '../types';
 import { anchorScopeNav } from './anchorScopeNav';
 import { CoverImage } from './CoverImage';
 
-/** 不使用 AI 的布局（与 SettingsModal 的判定一致）：卡片不渲染摘要/翻译，
- *  对话框里选了这类布局时隐藏 AI 开关（勾选值一并归零，避免保存无效配置）。 */
-const LAYOUT_NO_AI: ReadonlySet<string> = new Set(['image', 'podcast']);
+/* TASK-100：LAYOUT_NO_AI 双定义收敛——唯一定义在 settings/shared.ts，
+   此处（与设置页）共用同一份，避免改一处漏一处。 */
 
 /** 稳定空数组：搜索结果空查询分支引用（避免 useMemo 依赖每次渲染都变化） */
 const EMPTY_RESULTS: ArticleEntry[] = [];
@@ -285,7 +285,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
           onKeyDown={onInputKeyDown}
           className="search-modal-input"
         />
-        <span className="kbd-tag" style={{ marginLeft: 0 }}>ESC 关闭</span>
+        <span className="kbd-tag" style={{ marginLeft: 0 }}>Esc</span>
       </div>
       <div className="cp-list" ref={listRef} role="listbox">
         {items.length === 0 ? (
@@ -303,7 +303,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
       <div className="cp-footer">
         <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
         <span><kbd>⏎</kbd> 打开</span>
-        <span><kbd>esc</kbd> 关闭</span>
+        <span><kbd>Esc</kbd> 关闭</span>
         <div style={{ flex: 1 }} />
         <span>支持文章 · 订阅源 · 命令</span>
       </div>
@@ -324,8 +324,24 @@ export function Lightbox() {
   const lightboxUrl = useAppStore((s) => s.lightboxUrl);
   const lightboxEntryId = useAppStore((s) => s.lightboxEntryId);
   const closeLightbox = useAppStore((s) => s.closeLightbox);
+  /* TASK-100 B（UI P2-7 最小实现）：打开时焦点移入灯箱容器（tabIndex=-1），
+     关闭时归还触发元素焦点。此前打开态焦点仍留在触发按钮上，Tab 会游走到
+     背后内容，且关闭后焦点落回 body 而非触发元素。 */
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const restoreRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (lightboxUrl) {
+      restoreRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      overlayRef.current?.focus({ preventScroll: true });
+    } else if (restoreRef.current) {
+      restoreRef.current.focus({ preventScroll: true });
+      restoreRef.current = null;
+    }
+  }, [lightboxUrl]);
   return (
     <div
+      ref={overlayRef}
+      tabIndex={-1}
       className={`modal-overlay lightbox-overlay ${lightboxUrl ? 'open' : ''}`}
       /* 同 ModalOverlay：外层常驻 DOM，关闭时只切类名，
          故必须靠 inert 让关闭态不可聚焦（见 REQ-047）。 */

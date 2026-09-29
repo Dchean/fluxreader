@@ -237,7 +237,8 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
       // 空白区域 / 未标记元素 → 全局菜单
       return [
         {
-          label: '新建订阅源',
+          /* TASK-100 U2：叫法统一「添加订阅源」——与侧栏/命令面板/弹窗标题同一套说法 */
+          label: '添加订阅源',
           icon: <Icons.plus />,
           onSelect: () => st.openAddFeedModal(''),
         },
