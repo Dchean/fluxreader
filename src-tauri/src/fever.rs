@@ -1,12 +1,18 @@
 //! Fever API 客户端（v3，Miniflux 兼容）。
 //!
-//! 认证：`api_key = md5(username:password)`（十六进制小写），随 query 传。
+//! 认证：`api_key = md5(username:password)`（十六进制小写），随 **POST form body**
+//! 传（application/x-www-form-urlencoded；TASK-101——FreshRSS 的 fever.php 只读
+//! `$_POST['api_key']`，api_key 拼 query 会被 FreshRSS 当作空）。公式不变。
 //! Fever 的 username/password 与 Google Reader 集成凭据 **相同**（Miniflux 里
-//! Fever 与 Google Reader 共用「集成」页配置）。
+//! Fever 与 Google Reader 共用「集成」页配置；FreshRSS 用个人设置里的「API 密码」）。
 //!
 //! 已用 curl 连真实 Miniflux（`https://sync.example.invalid/`）实证的要点：
-//! - action 必须放在 URL query（`/fever/?api&feeds`），**不能**放 form body；
-//!   `api_key` 与参数（`since_id`/`with_ids`/`id`/`as`/`mark`）放 query 或 form 均可。
+//! - action 必须放在 URL query（`/fever/?api`），**不能**放 form body；
+//!   其余参数（`since_id`/`with_ids`/`id`/`as`/`mark`）放 query 或 form 均可。
+//! - `api_key`：Miniflux（`r.FormValue`）query 与 form body 都收，**FreshRSS 只收
+//!   form body**（`p/api/fever.php:172` 只读 `$_POST['api_key']`）——故统一走
+//!   form body（TASK-101），其余参数留在 query（两类后端的 `$_REQUEST`/FormValue
+//!   都收）。顺带消除 api_key 进服务器访问日志的泄露面。
 //! - `items` 端点最多返回 **50 条**（升序），增量用 `since_id` 分页拉全。
 //! - `unread_item_ids`/`saved_item_ids` 是权威**全量** id 集合（不受 50 条限制）。
 //! - `mark=item` 只接受**单个** id（逗号分隔无效），推送需逐个条目调用。
@@ -100,6 +106,12 @@ struct FeverItem {
 客户端
 ============================================================ */
 
+/// TASK-101：认证失败统一口径（`call_probe` 与 `mark_items` 两处共用）。
+/// FreshRSS 的 Fever 与 GReader 都使用个人设置里的「API 密码」——提示用户
+/// 别拿登录密码试 Fever。
+const AUTH_FAILED_MSG: &str =
+    "Fever 认证失败（api_key 不正确；FreshRSS 请使用个人设置里的「API 密码」）";
+
 #[derive(Clone)]
 pub struct FeverClient {
     base: String,
@@ -119,11 +131,12 @@ impl FeverClient {
         }
     }
 
-    /// API 入口（不含 query）。两种后端形态不同：
+    /// API 入口（不含 query）。各后端形态不同：
     /// - Miniflux：`{域名}/fever/?api`（协议规定的 `/fever/` 路径）；
-    /// - FreshRSS：`{域名}/api/fever.php?api`（脚本路径，**不是** `/fever/` 形态）。
+    /// - FreshRSS：`{域名}/api/fever.php?api`（脚本路径，**不是** `/fever/` 形态；
+    ///   新版布局移到 `{域名}/p/api/fever.php`，TASK-101）。
     ///
-    /// 端点解析（TASK-059）会把 `base` 定成其中一种，这里据其形态拼出正确的入口。
+    /// 端点解析（TASK-059/101）会把 `base` 定成其中一种，这里据其形态拼出正确的入口。
     fn api_entry(&self) -> String {
         if self.base.ends_with(".php") {
             format!("{}?api", self.base)
@@ -132,7 +145,8 @@ impl FeverClient {
         }
     }
 
-    /// POST 请求：action 拼 query + api_key 拼 query，返回信封并校验 `auth == 1`。
+    /// POST 请求：action 与其余参数拼 query、api_key 走 POST form body，
+    /// 返回信封并校验 `auth == 1`。
     /// `action` 形如 `feeds` / `groups` / `items` / `unread_item_ids`（无值参数）。
     /// `extra` 是 `since_id=5900` / `with_ids=1,2` 这类带值参数。
     async fn call(&self, action: &str, extra: &[(&str, String)]) -> AppResult<FeverEnvelope> {
@@ -154,14 +168,24 @@ impl FeverClient {
         extra: &[(&str, String)],
     ) -> AppResult<(Option<FeverEnvelope>, u16)> {
         let mut url = self.api_entry();
-        url.push_str(&format!("&api_key={}", self.api_key));
         if !action.is_empty() {
             url.push_str(&format!("&{action}"));
         }
         for (k, v) in extra {
             url.push_str(&format!("&{k}={v}"));
         }
-        let resp = self.http.post(&url).send().await?;
+        // TASK-101：api_key 必须走 POST form body（application/x-www-form-urlencoded）。
+        // FreshRSS 的 p/api/fever.php:172 只读 `$_POST['api_key']`、完全不读 query——
+        // api_key 拼 query 时 FreshRSS 收到的恒为空 → auth 恒 0（「api_key 不正确」）。
+        // Miniflux 用 r.FormValue 取值，query 与 form body 都收，形状兼容不回退。
+        // action/mark/as/id/with_ids/since_id 等留在 query（两类后端均走 $_REQUEST/
+        // FormValue）；api_key 不再出现在 URL，顺带消除进服务器访问日志的泄露面。
+        let resp = self
+            .http
+            .post(&url)
+            .form(&[("api_key", self.api_key.as_str())])
+            .send()
+            .await?;
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             return Ok((None, status));
@@ -178,7 +202,7 @@ impl FeverClient {
             ));
         }
         if env.auth != 1 {
-            return Err(AppError::new("auth", "Fever 认证失败（api_key 不正确）"));
+            return Err(AppError::new("auth", AUTH_FAILED_MSG));
         }
         Ok((Some(env), status))
     }
@@ -186,8 +210,9 @@ impl FeverClient {
     /// 连通测试：认证明文。
     ///
     /// **端点自动适配（TASK-059）**：`new` 收到的 endpoint 可能是**纯域名**——
-    /// 依次尝试 `{域名}`（Miniflux 的 `/fever/` 形态）与 `{域名}/api/fever.php`
-    /// （FreshRSS 形态），以 **404 = 路径不存在**、**其它状态码 = 路径存在** 判定。
+    /// 依次尝试 `{域名}`（Miniflux 的 `/fever/` 形态）、`{域名}/api/fever.php`
+    /// （FreshRSS 形态）与 `{域名}/p/api/fever.php`（FreshRSS 新版布局，TASK-101），
+    /// 以 **404 = 路径不存在**、**其它状态码 = 路径存在** 判定。
     ///
     /// **凭据错误必须立即停下**：非 404 的失败（含 `auth != 1`）都说明**路径已找对**，
     /// 继续试下一个候选只会掩盖真实原因（把密码错报成「找不到 API」）。
@@ -392,8 +417,16 @@ impl FeverClient {
             // 于是「Fever + FreshRSS」拉得到、推不出去（TASK-059 审查发现）。
             let mut url = self.api_entry();
             url.push_str(&format!("&mark=item&as={mark}&id={id}"));
-            url.push_str(&format!("&api_key={}", self.api_key));
-            let resp = self.http.post(&url).send().await?;
+            // TASK-101：api_key 与 call_probe 一致走 POST form body（FreshRSS 的
+            // fever.php 只读 `$_POST['api_key']`——此前 api_key 拼 query、POST 空
+            // body，FreshRSS 上「拉得到、推不出去」的认证侧根因）；mark/as/id 留
+            // query（FreshRSS 走 $_REQUEST，Miniflux 实证 query 可用，不动）。
+            let resp = self
+                .http
+                .post(&url)
+                .form(&[("api_key", self.api_key.as_str())])
+                .send()
+                .await?;
             if !resp.status().is_success() {
                 return Err(AppError::network(format!(
                     "Fever mark {mark} {id} → {}",
@@ -402,7 +435,7 @@ impl FeverClient {
             }
             let env: FeverEnvelope = resp.json().await?;
             if env.auth != 1 {
-                return Err(AppError::new("auth", "Fever 认证失败"));
+                return Err(AppError::new("auth", AUTH_FAILED_MSG));
             }
         }
         Ok(())

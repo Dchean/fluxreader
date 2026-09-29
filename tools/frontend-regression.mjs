@@ -4159,6 +4159,99 @@ await (async () => {
   }
 }
 
+/* ============================================================
+   TASK-101（2026-09-29）：SyncTab 提示精简 + Fever「API 密码」提示
+   + 设置页冗长文案审计（GeneralTab/ReadingTab/AppearanceTab/AboutTab/
+   FeedsTab/AiTab/ConfigSyncSection/CacheCleanupSection/SyncTab 逐个过）。
+   UI 契约 V1/V2：.workflow-kit/docs/UI-CONTRACT-TASK-101-SYNC-COPY.md。
+   V1 = 被点名长句清零；新短句（单句 ≤40 字）保留三语义（a 测试连接仅验证
+        登录不拉数据 / b 保存并同步才开始拉取 / c 断开会移除同步拉取内容），
+        已读/收藏回传语义取保留；
+   V2 = Fever 协议选择处单行提示含「API 密码」（FreshRSS 的 Fever/GReader
+        均用个人设置里的 API 密码），≤50 字、无分号长链。
+   ============================================================ */
+{
+  const fs101 = await import('node:fs');
+  const src101 = (p) => fs101.readFileSync(new URL(p, import.meta.url), 'utf8');
+
+  const syncTab101 = src101('../src/components/settings/SyncTab.tsx');
+  const configSync101 = src101('../src/components/settings/ConfigSyncSection.tsx');
+  const cacheCleanup101 = src101('../src/components/settings/CacheCleanupSection.tsx');
+  const general101 = src101('../src/components/settings/GeneralTab.tsx');
+
+  /* ---------- V1：SyncTab 主提示（唯一带 marginTop:8 的 mini-dialog-hint） ---------- */
+  const mainHint101 =
+    syncTab101.match(/<div className="mini-dialog-hint" style=\{\{ marginTop: 8 \}\}>\s*([\s\S]*?)<\/div>/)?.[1]
+      ?.replace(/\s+/g, '') ?? '';
+
+  checkNew('(t101-v1a) 语义a：「测试连接」仅验证登录不拉数据（修前为被点名长句开头）',
+    mainHint101.includes('「测试连接」仅验证登录不拉数据'));
+  checkNew('(t101-v1b) 语义b：「保存并同步」才开始拉取订阅与文章（拉取只由保存触发）',
+    mainHint101.includes('「保存并同步」才开始拉取订阅与文章'));
+  checkNew('(t101-v1c) 语义c：断开连接会移除同步拉取的内容',
+    mainHint101.includes('断开连接会移除同步拉取的内容'));
+  checkNew('(t101-v1-d) 已读/收藏回传语义保留（约1秒内回传服务端；契约允许精简掉，取保留）',
+    mainHint101.includes('已读/收藏等变更约1秒内回传服务端'));
+  checkNew('(t101-v1-len) 新主提示单句 ≤40 字（V1 短句口径；修前单段 74 字）',
+    mainHint101.length > 0
+    && mainHint101.split('。').filter(Boolean).every((s) => s.length <= 40));
+  checkNew('(t101-v1-old) 被点名旧长句四种片段整段清零',
+    !syncTab101.includes('只验证连通性（秒级）')
+    && !syncTab101.includes('会立即在后台拉取订阅与文章状态')
+    && !syncTab101.includes('已读/收藏等变更约 1 秒内推送到服务端')
+    && !syncTab101.includes('断开连接会移除服务端拉取的订阅与文章'));
+  checkNew('(t101-v1-e) SyncTab 恰两块 mini-dialog-hint（主提示 + Fever 提示，不新增解释段落）',
+    (syncTab101.match(/mini-dialog-hint/g) || []).length === 2);
+
+  /* ---------- V2：Fever「API 密码」提示（同步协议卡片内、无 style 的 mini-dialog-hint） ---------- */
+  const feverHint101 =
+    syncTab101.match(/<div className="mini-dialog-hint">\s*([\s\S]*?)<\/div>/)?.[1]
+      ?.replace(/\s+/g, ' ').trim() ?? '';
+  const protoCard101 =
+    syncTab101.slice(syncTab101.indexOf('title="同步协议"'), syncTab101.indexOf('title="后端 Endpoint"'));
+
+  checkNew('(t101-v2a) Fever 提示含「API 密码」+ 个人设置 + FreshRSS，Fever/GReader 通用且点明非登录密码',
+    feverHint101.includes('API 密码') && feverHint101.includes('个人设置')
+    && feverHint101.includes('FreshRSS') && feverHint101.includes('Fever')
+    && feverHint101.includes('GReader') && feverHint101.includes('非登录密码'));
+  checkNew('(t101-v2b) Fever 提示单行 ≤50 字且无分号长链（V2 口径）',
+    feverHint101.length > 0 && feverHint101.length <= 50
+    && !feverHint101.includes('；') && !feverHint101.includes(';'));
+  checkNew('(t101-v2c) 提示位于「同步协议」卡片（Fever 协议选择区域）内',
+    protoCard101.length > 0 && protoCard101.includes('API 密码'));
+
+  /* ---------- 审计项源级断言：三处 >60 字 desc 的压缩前后锁定 ---------- */
+  checkNew('(t101-audit-1) SyncTab 用户名 desc 63→45 字：集成页配置/GReader·Fever 共用/非账号密码 三语义全保留',
+    syncTab101.includes('Miniflux「集成」页配置的用户名，GReader / Fever 共用（非账号密码）')
+    && !syncTab101.includes('页单独配置的用户名')
+    && !syncTab101.includes('非 Miniflux 账号密码'));
+  checkNew('(t101-audit-2) ConfigSyncSection Token desc 69→56 字：classic PAT/gist scope/fine-grained 不支持 全保留',
+    configSync101.includes('手动填入替代网页登录，需 classic PAT（勾选 gist scope，fine-grained 不支持）')
+    && !configSync101.includes('fine-grained PAT 不支持 Gist API'));
+  checkNew('(t101-audit-3) ConfigSyncSection WebDAV desc 66→56 字：配置文件名 fluxreader-config.json 保留（子路径示例由输入框 placeholder 表达）',
+    configSync101.includes('例如 https://dav.example.com（配置存为 fluxreader-config.json）')
+    && !configSync101.includes('dav.example.com/fluxreader（配置存为'));
+
+  /* ---------- 审计兜底：九个设置组件静态 desc 全量扫描，>60 字清零（修前 63/66/69 三处） ---------- */
+  const auditedDescs101 = [
+    'GeneralTab', 'ReadingTab', 'AppearanceTab', 'AboutTab', 'FeedsTab',
+    'AiTab', 'ConfigSyncSection', 'CacheCleanupSection', 'SyncTab',
+  ].flatMap((f) => [...src101(`../src/components/settings/${f}.tsx`).matchAll(/desc="([^"]+)"/g)])
+    .map((m) => m[1]);
+  checkNew('(t101-audit-4) 九组件静态 desc 扫描（' + auditedDescs101.length + ' 条）：>60 字长 desc 清零',
+    auditedDescs101.length > 20 && !auditedDescs101.some((t) => t.length > 60));
+
+  /* ---------- 审计不回退：确认类/阈值/约束语义一条不丢 ---------- */
+  checkNew('(t101-audit-5) 确认与约束语义零丢失：断开确认、清理不可撤销、收藏与待同步保留、AI 缓存正文保留、下载覆盖确认、托盘真退出',
+    syncTab101.includes('断开后将移除从服务端拉取的订阅与文章（含已读/收藏绑定），本地直连添加的订阅不受影响。确定断开吗？')
+    && cacheCleanup101.includes('此操作不可撤销')
+    && cacheCleanup101.includes('收藏文章与待同步状态始终保留')
+    && cacheCleanup101.includes('（收藏除外）')
+    && cacheCleanup101.includes('正文保留')
+    && configSync101.includes('已存在的源会跳过；本地设置与 AI 配置将被远端覆盖')
+    && general101.includes('托盘菜单「退出」才是真正退出'));
+}
+
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);
 const newFailed = newResults.filter((r) => !r.pass);

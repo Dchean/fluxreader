@@ -196,17 +196,24 @@ export function SyncTab() {
         title="同步协议"
         desc="两种协议共用 Miniflux「集成」凭据，切换不丢数据。"
       >
-        {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
-            深浅主题外观与展开行为都与 FluxDropdown 不一致 */}
-        <FluxDropdown
-          width={220}
-          value={protocol}
-          onChange={(v) => setProtocol(v === 'fever' ? 'fever' : 'greader')}
-          options={[
-            { value: 'greader', label: 'Google Reader（推荐）' },
-            { value: 'fever', label: 'Fever' },
-          ]}
-        />
+        <div>
+          {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
+              深浅主题外观与展开行为都与 FluxDropdown 不一致 */}
+          <FluxDropdown
+            width={220}
+            value={protocol}
+            onChange={(v) => setProtocol(v === 'fever' ? 'fever' : 'greader')}
+            options={[
+              { value: 'greader', label: 'Google Reader（推荐）' },
+              { value: 'fever', label: 'Fever' },
+            ]}
+          />
+          {/* TASK-101 V2：FreshRSS 的 Fever/GReader 均用「API 密码」（个人设置里
+              设置/重置）——认证报障的高频误区，单行短提示放在协议选择处 */}
+          <div className="mini-dialog-hint">
+            Fever / GReader 均用 FreshRSS 个人设置的「API 密码」，非登录密码。
+          </div>
+        </div>
       </SettingCard>
       <SettingCard title="后端 Endpoint" desc={ENDPOINT_DESC}>
         <input
@@ -219,7 +226,7 @@ export function SyncTab() {
       </SettingCard>
       <SettingCard
         title="用户名"
-        desc="Miniflux「集成」页单独配置的用户名（Google Reader / Fever 共用，非 Miniflux 账号密码）"
+        desc="Miniflux「集成」页配置的用户名，GReader / Fever 共用（非账号密码）"
       >
         <input
           type="text"
@@ -265,8 +272,8 @@ export function SyncTab() {
         )}
       </div>
       <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        「测试连接」只验证连通性（秒级）；「保存并同步」会立即在后台拉取订阅与文章状态。
-        已读/收藏等变更约 1 秒内推送到服务端；断开连接会移除服务端拉取的订阅与文章。
+        「测试连接」仅验证登录不拉数据，「保存并同步」才开始拉取订阅与文章。
+        已读/收藏等变更约 1 秒内回传服务端，断开连接会移除同步拉取的内容。
       </div>
 
       <div className="settings-group-title" style={{ marginTop: 20 }}>自动同步</div>

@@ -169,7 +169,7 @@ export function ConfigSyncSection() {
         />
       </SettingCard>
       {backend === 'gist' ? (
-        <SettingCard title="GitHub Token（classic PAT）" desc="手动填入替代网页登录；需 classic PAT（勾选 gist scope），fine-grained PAT 不支持 Gist API">
+        <SettingCard title="GitHub Token（classic PAT）" desc="手动填入替代网页登录，需 classic PAT（勾选 gist scope，fine-grained 不支持）">
           <input
             type="password"
             className="setting-input"
@@ -180,7 +180,7 @@ export function ConfigSyncSection() {
         </SettingCard>
       ) : (
         <>
-          <SettingCard title="WebDAV 服务器" desc="例如 https://dav.example.com/fluxreader（配置存为 fluxreader-config.json）">
+          <SettingCard title="WebDAV 服务器" desc="例如 https://dav.example.com（配置存为 fluxreader-config.json）">
             <input
               type="text"
               className="setting-input"
