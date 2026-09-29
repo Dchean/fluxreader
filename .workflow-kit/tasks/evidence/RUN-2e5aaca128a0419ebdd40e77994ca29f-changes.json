@@ -1,9 +1,0 @@
-{
-  "changed_files": [
-    "src-tauri/src/commands/articles.rs",
-    "src-tauri/src/db.rs",
-    "src-tauri/src/db/articles.rs",
-    "src-tauri/src/lib.rs",
-    "src-tauri/tests/cover_backfill_e2e.rs"
-  ]
-}

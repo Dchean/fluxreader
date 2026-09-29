@@ -1,7 +1,0 @@
-{
-  "changed_files": [
-    "src/App.tsx",
-    "src/components/shortcutYield.ts",
-    "tools/frontend-regression.mjs"
-  ]
-}

@@ -1,6 +1,0 @@
-{
-  "changed_files": [
-    "src/store/slices/nav.ts",
-    "tools/frontend-regression.mjs"
-  ]
-}

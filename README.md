@@ -2,13 +2,12 @@
 
 本地优先的 Windows 桌面 RSS 客户端，使用 Tauri 2、Rust、React、TypeScript、Zustand 与 SQLite。现有核心能力包括五种内容布局、Google Reader / Fever 协议同步，以及 AI 摘要和翻译。
 
-当前工作流为 workflow-kit（2026-09-15 接入）：新会话从 [WORKFLOW-KIT.md](WORKFLOW-KIT.md) 开始；当前主会话是总控，目标、权限、预算与用户决定以 `.workflow-kit/` 下的状态文件为准。
+分支流向：`main`（本分支）为纯项目代码主分支，不含工作流内容；开发在 `dev` 分支进行，工作流记录与状态在 `dev` 的 `.workflow-kit/` 下。调整先在 `dev` 提交并验证，通过后再合并进 `main`（合并不得带入工作流内容，步骤见 [AGENTS.md](AGENTS.md)）。
 
 ## 从这里开始
 
-- [工作流入口](WORKFLOW-KIT.md)：新会话从这里开始，运行 `python .workflow-kit/scripts/project_workflow.py start --root .` 查看阶段与任务状态。
-- [执行规则](AGENTS.md)：各 agent 公共约定入口。
-- [项目状态](.workflow-kit/tasks/PROJECT.json)、[用户决定](.workflow-kit/tasks/DECISIONS.json)、[权限与分工](.workflow-kit/tasks/POLICY.json)、[需求确认](.workflow-kit/tasks/BRIEF.json)。
+- [执行规则](AGENTS.md)：分支流向约定与各 agent 公共约定入口。
+- [工作流状态](https://github.com/Dchean/fluxreader/tree/dev/.workflow-kit)：任务队列、用户决定与需求确认在 `dev` 分支。
 - 旧版工作流系统（旧 docs/、tasks/、.agents/ 笔记体系、旧 workflow-kit 安装）已于 2026-09-15 按用户决定清理，原文可在 git 历史查阅。
 
 ## 功能范围
@@ -27,8 +26,6 @@
 | src-tauri/src/ | Tauri 入口、Rust 业务、协议客户端与 SQLite 数据访问 |
 | src-tauri/tests/ | Rust 集成、迁移、回归及服务测试 |
 | tools/ | 现有前端逻辑回归和 mock 工具 |
-| .workflow-kit/ | 当前工作流状态、任务队列与流程文档 |
-| workflow-kit/ | workflow-kit 启动包（接入工具来源，维护时处理） |
 | .github/workflows/ | 当前 CI 和发布配置 |
 
 旧架构、数据模型与用户流程文档（docs/ARCHITECTURE.md、DATA-MODEL.md、USER-FLOWS.md）在 git 历史中，对应已记录的源码基准，不冒充目标设计或运行验证。

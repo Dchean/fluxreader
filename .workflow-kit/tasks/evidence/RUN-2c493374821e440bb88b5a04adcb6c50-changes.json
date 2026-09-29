@@ -1,8 +1,0 @@
-{
-  "changed_files": [
-    "src/components/settings/SyncTab.tsx",
-    "src/components/settings/endpointHint.ts",
-    "tools/frontend-regression.mjs",
-    "tsconfig.test.json"
-  ]
-}
