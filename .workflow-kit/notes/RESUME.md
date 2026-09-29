@@ -83,8 +83,6 @@
 
 ## 最近事件
 
-- 2026-09-28T22:41:47.576602Z · checkpoint · TASK-100 · 2026-09-28T22:4xZ 实现派发完成：前端代理（agent_28a8f0e5 复用）负责 28+2 项（自检 P3×9、UI P2×2、UI P3×17、base.css 乱码重建、api.ts/README 文档项、parseTs 兼容），Rust 代理（agent_7a7d3675 复用）负责 7+1 项（事务/上抛/口径/收敛/吞错/v15 迁移/流式消毒评估）。文件域互斥分工（src/** vs src-tauri/**）。产出归 tmp/task-100/{frontend,rust}-progress.md 与 tmp/task-100-ui/；worker-result 由主控合并后写 RUN-d5c798cf 的 evidence 路径。；下一步：等两代理交付 → 主控跑全量门禁 → diff --run → finish → verify → 全新独立审查子代理（含 U1-U8 真机取证核对）→ accept → 提交推送 → bump 0.16.0 单独推 → 等 CI 绿 → annotated tag v0.16.0 → Release 监控
-- 2026-09-28T23:22:06.282312Z · checkpoint · TASK-100 · 2026-09-28T23:1xZ 实现重派发：上轮两代理 SendMessage 唤醒失败（实例随会话终止，No active local_agent task），改为全新实例后台并行——前端 agent_bfc8797d（30 项，任务书 tmp/task-100/brief-frontend.md）、Rust agent_00523aee（7+1 项，任务书 tmp/task-100/brief-rust.md）。任务书含 9 键 worker-result 契约与文件域互斥（src/** vs src-tauri/**）；现场已核对无半成品；下一步：等两代理交付 → 主控合并 worker-result → diff --run → finish → verify → 全新独立审查子代理（含 U1-U8 真机取证）→ accept → 提交推送 → bump 0.16.0 单独推 → 等 CI 绿 → annotated tag → Release 监控
 - 2026-09-29T00:12:28.654579Z · checkpoint · TASK-100 · Worker requests manager action; inspect the result；下一步：处理执行者提出的请求，再 unblock 后 begin；不要新建任务或重置预算
 - 2026-09-29T00:14:49.064773Z · checkpoint · TASK-100 · 阻塞已处置（action_required）：finish 首次因 unresolved_items 非空记 action_required 阻塞，属契约误用非现场问题，修正后重跑；下一步：begin 重新实现
 - 2026-09-29T00:14:49.128836Z · unblock · TASK-100 · action_required → ready；依据：主控核对：8 条 unresolved_items 均为 DEC-task100 既定记录项而非请求行动，已并入 summary、unresolved_items 置空；changed_files 31 个与 diff 一致
@@ -95,6 +93,8 @@
 - 2026-09-29T00:51:25.079820Z · checkpoint · TASK-100 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-29T00:52:21.124895Z · accept · 验收 TASK-100；依据：owner 2026-09-29 会话指示：「修复发现的问题并打tag发布，现在可以使用子代理了，记得按工作流派发子代理审计」+ 2026-09-24 授权「我授权你自行验收和commit」；TASK-100 实现双 worker 交付（前端 30 项/Rust 7+1 项）、verify RUN-c9ad8ebf 全绿、全新独立审查 PASS findings=0（U1-U8 真机取证 8/8，agent_ff2cf8d0）
 - 2026-09-29T00:53:05.261629Z · note/progress · TASK-100 收口（2026-09-29 08:5x 本地）：实现双 worker 交付（前端 30 项、回归 419→501；Rust 7+1 项、cargo 239/0/9、v15 迁移 legacy 时间归一），RUN-8a60ab6d finish、verify RUN-c9ad8ebf 全绿，全新独立审查（agent_ff2cf8d0）PASS findings=0，U1-U8 真机取证 8/8（证据 tasks/evidence/TASK-100-ui-*），验收 DEC-0697069a92cf487e9c425bb36dfa6cf4。流程插曲两笔：worker-result 的 unresolved_items 必须为空数组（记录项进 summary），非空会记 action_required 阻塞；unblock 后新 run 承接（基线继承，changed_files 任务累计口径）。下一步：业务+workflow 两笔提交推送 → v0.16.0 发布序列
+- 2026-09-29T01:04:36.685557Z · note/progress · v0.16.0 发布序列执行中（2026-09-29 09:0x 本地）：bump 提交 afa7edf 单独推送、CI 于 09:03 completed:success（head_sha 精确匹配，无 v0.15.0 的 tag 门控错位），annotated tag v0.16.0 已打在 afa7edf（附注=完整发布说明，git tag -n99 可读）并推送。Release workflow 后台轮询中（背景任务 exec_26ae624d）。发布说明定稿于 tmp/release-notes-v0.16.0.md（4 提交、mock addFeed 措辞已修正、门禁数字 239/501）
+- 2026-09-29T01:10:39.609105Z · note/progress · v0.16.0 发布成功（2026-09-29 01:07:58Z，Release run #29 completed:success，CI run 在 afa7edf 上绿）：GitHub Latest「FluxReader v0.16.0」，产物 FluxReader_0.16.0_x64-setup.exe（5,885,745 B）与 FluxReader_0.16.0_x64_en-US.msi（8,491,008 B），target=afa7edf（tag 门控 head_sha 精确匹配）。release body 沿既有约定为短文+指向 tag 附注（本机无 gh/token），完整变更说明在 v0.16.0 tag 附注与 tmp/release-notes-v0.16.0.md。本次 /goal 全链路闭环：自检遗留项收口（TASK-100，双 worker 实现+全新独立审查 PASS）→ 提交 8e688a1/042fd1c → bump afa7edf 单独推 → CI 绿 → annotated tag → Release。owner 决策队列遗留：跨布局 J/K、--text-tertiary 对比度（DEC-task100 记录）
 
 ## 如何继续
 
