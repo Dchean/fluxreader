@@ -126,6 +126,15 @@ pub struct MockGReader {
     pub fever_api_version: Mutex<i64>,
     /// TASK-059：置位后 Fever 返回 auth=0（验证 auth 校验未因放宽版本而放松）。
     pub fever_reject_auth: std::sync::atomic::AtomicBool,
+    /// TASK-101：FreshRSS 形态的 api_key 校验（非空时启用）。模拟 FreshRSS
+    /// `p/api/fever.php:172` 只读 `$_POST['api_key']`（POST form body）、**完全不读
+    /// query** 的行为：body 里的 api_key 等于该值才回 auth=1，否则 auth=0
+    /// （query 里带了也当无效——mock 若读 query，旧实现就能通过，红证据失效）。
+    /// 空串 = 不启用（保持旧行为，auth 由 `fever_reject_auth` 决定）。
+    pub fever_expected_api_key: Mutex<String>,
+    /// TASK-101：收到的 Fever 请求原始 query（'?' 后的部分；无 query 为空串）。
+    /// 用于断言「请求 query 中不含 api_key」（防回退，兼消除其进访问日志的泄露面）。
+    pub fever_query_strings: Mutex<Vec<String>>,
     /// TASK-059：收到的全部请求（`"{METHOD} {path}"`，含被前缀规则拒绝的）。
     /// 用于证明「探测有界」与「解析结果已缓存、后续同步不再探测」——
     /// 只看状态码无法区分「试了 1 次」与「试了 2 次」。
@@ -185,6 +194,8 @@ impl MockGReader {
             fever_endpoint: Mutex::new(String::new()),
             fever_api_version: Mutex::new(3),
             fever_reject_auth: std::sync::atomic::AtomicBool::new(false),
+            fever_expected_api_key: Mutex::new(String::new()),
+            fever_query_strings: Mutex::new(Vec::new()),
             requests: Mutex::new(Vec::new()),
             pending_injection: Mutex::new(None),
         });
@@ -302,6 +313,21 @@ impl MockGReader {
     pub fn set_fever_reject_auth(&self, reject: bool) {
         self.fever_reject_auth
             .store(reject, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// TASK-101：启用 FreshRSS 形态的 api_key 校验。传入期望的 api_key
+    /// （md5(username:password) 十六进制小写）后，Fever 路由只认 POST form body
+    /// 里的 api_key（query 里带了也当无效，模拟 `$_POST['api_key']`），
+    /// 一致才回 auth=1，否则 auth=0。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_fever_expected_api_key(&self, key: &str) {
+        *self.fever_expected_api_key.lock().unwrap() = key.to_string();
+    }
+
+    /// TASK-101：收到的 Fever 请求原始 query 列表（防回退断言用）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn fever_query_log(&self) -> Vec<String> {
+        self.fever_query_strings.lock().unwrap().clone()
     }
 
     /// 收到的请求记录（`"{METHOD} {path}"`）。
@@ -526,6 +552,17 @@ async fn handle_conn(
         .unwrap()
         .push(format!("{method} {path}"));
 
+    // TASK-101：记录 Fever 请求的原始 query（'?' 后的部分；无 query 为空串），
+    // 供断言「请求 query 中不得出现 api_key」（防回退）取证。
+    // 与 requests 日志同样在路由/404 拦截**之前**记录：被拒的探测也纳入断言范围。
+    if path.contains("fever") {
+        let query = path_query
+            .split_once('?')
+            .map(|(_, q)| q.to_string())
+            .unwrap_or_default();
+        srv.fever_query_strings.lock().unwrap().push(query);
+    }
+
     // TASK-059：模拟「两种后端把 API 放在不同路径」。
     // 配置了前缀时，非该前缀下的 GReader/Fever 端点一律 404——
     // 这正是真实 FreshRSS 与 Miniflux 的差异，也是自动适配要解决的问题。
@@ -688,7 +725,23 @@ fn route(
         // 只回信封的话，客户端只能证明连接成功，证明不了后续调用打对了地址。
         ("POST", p) if p.contains("fever") => {
             let v = *srv.fever_api_version.lock().unwrap();
-            let auth = if srv
+            let expected_key = srv.fever_expected_api_key.lock().unwrap().clone();
+            let auth = if !expected_key.is_empty() {
+                // TASK-101：模拟 FreshRSS `p/api/fever.php:172` 的行为——
+                // `$feverKey = … $_POST['api_key'] …` **只读 POST form body**，
+                // 完全不读 query（query 里带了也当无效）。body 里的 api_key 与
+                // 期望值一致才回 auth=1；mock 若读 query，旧实现（api_key 拼
+                // query、POST 空 body）也能通过，修前红证据就失效了。
+                let body_key = parse_form(body)
+                    .get("api_key")
+                    .and_then(|vals| vals.first().cloned())
+                    .unwrap_or_default();
+                if body_key == expected_key {
+                    1
+                } else {
+                    0
+                }
+            } else if srv
                 .fever_reject_auth
                 .load(std::sync::atomic::Ordering::SeqCst)
             {

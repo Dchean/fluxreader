@@ -121,15 +121,18 @@ fn candidates_are_bounded_and_shaped_correctly() {
     );
     // 已带后缀时不追加重复候选
     assert_eq!(greader_candidates("https://x/api/greader.php").len(), 1);
-    // Fever 同构
+    // Fever 同构（TASK-101：新增第三候选 p/api/fever.php——FreshRSS 新版布局）
     assert_eq!(
         fever_candidates("https://demo.freshrss.org"),
         vec![
             "https://demo.freshrss.org".to_string(),
-            "https://demo.freshrss.org/api/fever.php".to_string()
+            "https://demo.freshrss.org/api/fever.php".to_string(),
+            "https://demo.freshrss.org/p/api/fever.php".to_string()
         ]
     );
+    // 已带任一布局的完整脚本路径时不追加重复候选
     assert_eq!(fever_candidates("https://x/api/fever.php").len(), 1);
+    assert_eq!(fever_candidates("https://x/p/api/fever.php").len(), 1);
 
     // 只有 404 代表「路径不存在」；凭据类状态码绝不能算作路径缺失
     assert!(!path_exists(404));

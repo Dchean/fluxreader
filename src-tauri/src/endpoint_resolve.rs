@@ -8,7 +8,7 @@
 //! | 后端 | GReader API 所在 | Fever API 所在 |
 //! | --- | --- | --- |
 //! | **Miniflux** | 站点**根**（`{域名}/accounts/ClientLogin`） | `{域名}/fever/` |
-//! | **FreshRSS** | **子路径** `{域名}/api/greader.php` | `{域名}/api/fever.php` |
+//! | **FreshRSS** | **子路径** `{域名}/api/greader.php` | `{域名}/api/fever.php`（新版布局 `p/api/fever.php`，TASK-101） |
 //!
 //! 此前代码把用户输入**原样**当作 API 根，于是填域名时：
 //! `POST {域名}/accounts/ClientLogin` → **404**（实测），FreshRSS 用户必然连不上。
@@ -62,14 +62,24 @@ pub fn greader_candidates(endpoint: &str) -> Vec<String> {
 /// Fever 客户端的请求路径是 `{base}/fever/?api`（协议规定 `action` 拼 query），
 /// 故这里的「根」指的是 **`/fever/` 之前**那一段：
 /// - Miniflux：`{域名}/fever/?api` → 根 = `{域名}`；
-/// - FreshRSS：`{域名}/api/fever.php?api` → 它不是 `{base}/fever/` 形态，
-///   需单独作为**完整端点**处理（见 `fever_endpoint_candidates`）。
+/// - FreshRSS（经典布局）：`{域名}/api/fever.php?api` → 完整端点作候选；
+/// - FreshRSS（新版布局，TASK-101）：官方把脚本移到 `p/api/fever.php`
+///   （官方文档的 `/api/fever.php` 是服务器别名，但自建部署不一定配）。
+///
+/// **顺延纪律不变**：第三候选仅在前面候选 **404** 后才被尝试（标准 Miniflux /
+/// 经典 FreshRSS 安装在第一、二候选即命中，零影响）；
+/// 非 404 = 路径存在，立即停（凭据错误不得被误判成「路径不对」）。
 pub fn fever_candidates(endpoint: &str) -> Vec<String> {
     let base = endpoint.trim().trim_end_matches('/').to_string();
     let mut out = vec![base.clone()];
-    if !base.ends_with("/api/fever.php") {
-        out.push(format!("{base}/api/fever.php"));
+    // 用户已自己填了完整脚本路径（任一布局）时不追加——追加会得到无意义的叠加候选
+    // （如 `.../api/fever.php/api/fever.php`）。
+    if base.ends_with("/api/fever.php") || base.ends_with("/p/api/fever.php") {
+        return out;
     }
+    out.push(format!("{base}/api/fever.php"));
+    // FreshRSS 新版布局（TASK-101）：仅当前面候选 404 后顺延尝试
+    out.push(format!("{base}/p/api/fever.php"));
     out
 }
 
@@ -168,21 +178,29 @@ mod tests {
     }
 
     #[test]
-    fn fever_bare_domain_yields_root_then_freshrss_endpoint() {
+    fn fever_bare_domain_yields_root_then_freshrss_endpoints() {
+        // TASK-101：新增第三候选（FreshRSS 新版布局 p/api/fever.php）。
+        // 顺延顺序：根 → /api/fever.php → /p/api/fever.php
         assert_eq!(
             fever_candidates("https://demo.freshrss.org"),
             vec![
                 "https://demo.freshrss.org".to_string(),
                 "https://demo.freshrss.org/api/fever.php".to_string(),
+                "https://demo.freshrss.org/p/api/fever.php".to_string(),
             ]
         );
     }
 
     #[test]
     fn fever_full_path_keeps_single_candidate() {
+        // 向后兼容：已填完整路径（任一布局）时不追加无意义候选
         assert_eq!(
             fever_candidates("https://demo.freshrss.org/api/fever.php"),
             vec!["https://demo.freshrss.org/api/fever.php".to_string()]
+        );
+        assert_eq!(
+            fever_candidates("https://demo.freshrss.org/p/api/fever.php"),
+            vec!["https://demo.freshrss.org/p/api/fever.php".to_string()]
         );
     }
 
