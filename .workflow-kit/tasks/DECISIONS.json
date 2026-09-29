@@ -2708,6 +2708,32 @@
       "candidates": {
         "TASK-099": "cc5367d491a39610cf86c3c11298ae28a7dc02de9f2b4a22d027d0581c6ff52e"
       }
+    },
+    {
+      "id": "DEC-task100-selfcheck-remaining-20260929",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-29 会话指示：「修复发现的问题并打tag发布，现在可以使用子代理了，记得按工作流派发子代理审计」——发布前自检三报告（.workflow-kit/docs/selfcheck-20260928/）的未修复遗留项纳入本轮修复并随 v0.16.0 发布",
+      "statement": "自检遗留的前端 P2×2/P3×9+UI P2×2/P3×17 与 Rust P3×7 按 TASK-100 收口；base.css 历史注释乱码一并重建；跨布局 J/K、--text-tertiary 对比度、get_setting 边界、命令壳测试覆盖按报告结论记录不修；流式翻译 delta 消毒先评估可安全实现再动；修复完成后 bump 0.16.0、单独推送等 CI 绿、annotated tag 发布 release",
+      "scope": [
+        "TASK-100",
+        "v0.16.0"
+      ],
+      "recorded_at_utc": "2026-09-28T22:34:26.614979+00:00"
+    },
+    {
+      "id": "DEC-0697069a92cf487e9c425bb36dfa6cf4",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-29 会话指示：「修复发现的问题并打tag发布，现在可以使用子代理了，记得按工作流派发子代理审计」+ 2026-09-24 授权「我授权你自行验收和commit」；TASK-100 实现双 worker 交付（前端 30 项/Rust 7+1 项）、verify RUN-c9ad8ebf 全绿、全新独立审查 PASS findings=0（U1-U8 真机取证 8/8，agent_ff2cf8d0）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-100"
+      ],
+      "recorded_at_utc": "2026-09-29T00:52:16.588169Z",
+      "candidates": {
+        "TASK-100": "15bd751d47f6feeb8be616521f77f30ac5082b7941dcb74c3fcb15df8a658034"
+      }
     }
   ]
 }

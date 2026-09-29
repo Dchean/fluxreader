@@ -28,7 +28,7 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 71 项：已验收 58，待验收 0，阻塞 0。
+已建任务 72 项：已验收 59，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
@@ -45,7 +45,7 @@
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 59 项记录可在任务总览查看。
+另有 60 项记录可在任务总览查看。
 
 **本轮暂缓**：SQL 性能与索引加固（审计 route-M，主控已用 EXPLAIN QUERY PLAN 独立复核）：M-5 列表查询因 COALESCE 表达式排序使 idx_articles_published 对 8 个变体全失效（SCAN + USE TEMP B-TREE FOR ORDER BY）；M-7 sync_queue 零索引致每次标读全表扫；M-9 一次全部已读 = 1 SELECT + 1 UPDATE + 2N 往返且全程持锁；M-14 v6→v7 后置回填在事务外且以 user_version 当完成标记（半途中断永不重试）。
 
@@ -83,18 +83,18 @@
 
 ## 最近事件
 
-- 2026-09-28T17:15:40.578747Z · checkpoint · TASK-099 · 依据新决定追加预算；原始时钟与失败记录保留；下一步：先核对已有成果，再按原任务范围继续
-- 2026-09-28T17:15:40.685876Z · extend · TASK-099 · 追加 240 分钟、0 轮修复；依据：owner 2026-09-28 会话 /goal 指令：「将项目推进优化重构完……推送并打tag，发布release」——完成 TASK-099 是该指令的前置；追加时长沿用 owner 在 TASK-092 同类阻塞时「追加 4 小时」的会话内选择（DEC-b672049f）
-- 2026-09-28T17:15:52.315605Z · checkpoint · TASK-099 · 阻塞已处置（protocol）：protocol 阻塞（Invalid worker status/summary）：worker-result 首版两处不合契约——status 用了 ok（应为 ready_for_verification）、validation_requests 用了对象数组（应为字符串数组）。已按 validate_worker_result 契约重写文件（9 键不变，内容为真实门禁数字）；diff 已核对 outside/protected 为空。预算已 extend 240min（DEC-d62afaed512c416cac7617f43d51adb4）。；下一步：begin 重新实现
-- 2026-09-28T17:15:52.372296Z · unblock · TASK-099 · protocol → ready；依据：主控
-- 2026-09-28T17:16:24.157569Z · checkpoint · TASK-099 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-09-28T17:16:55.892798Z · checkpoint · TASK-099 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/db.rs, src-tauri/src/db/articles.rs, src-tauri/src/db/auth_probe.rs, src-tauri/src/db/migrations.rs, src-tauri/src/db/sync_map.rs, src-tauri/tests/migration_test.rs；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-09-28T17:18:54.136771Z · checkpoint · TASK-099 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
-- 2026-09-28T17:34:58.997050Z · checkpoint · TASK-099 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
-- 2026-09-28T17:35:55.315235Z · accept · 验收 TASK-099；依据：owner 授权链：2026-09-24「我授权你自行验收和commit」+ 2026-09-28 会话 /goal「将项目推进优化重构完……推送并打tag，发布release」；独立审查 PASS findings=0（subagent:review-req108，全新实例）
-- 2026-09-28T17:40:22.723671Z · note/progress · TASK-099 · TASK-099 收口（2026-09-28 17:5xZ）：实现由主控完成（子代理 API 渠道当日多次中断，checkpoint 有记录；审查子代理为全新实例 agent_d988cc2a）。业务提交 aa1a97f（7 文件，cargo 228/0/9、前端 419/419、fmt/clippy/lint/build 全绿）；独立审查 PASS findings=0（5 个不阻塞观察项入其 summary）；验收 DEC-ca4d269f；已推送 4729e8d..7c71ec2，CI run #103 进行中。流程插曲三笔：①首版 worker-result 两处不合契约（status 枚举、validation_requests 须字符串数组）致 protocol 阻塞，按 validate_worker_result 修正后 extend 240min（DEC-d62afaed）→ unblock → 新 run RUN-51527a3d 承接同一现场完成 finish/verify（ lesson：worker-result 的 status 只能是 ready_for_verification/action_requested/blocked，validation_requests/requested_actions 是字符串数组）；②.zcodeignore 为 ZCode 宿主自动生成的机器本地排除文件（内容自 .gitignore 同步），被 run 的全目录 inventory 判为越界——已删除并加入 .git/info/exclude（本地防复活），后续 run 若宿主再生成需同样处置；③审计 round-3 的 O 路结论（COALESCE 排序致 SCAN+TEMP B-TREE）经本次 EXPLAIN 与 Rust 断言双重复核成立并修复。下一步：owner /goal 要求的全项目多子代理自检（Rust/前端/UI 三路，读码非门禁）→ 分诊修复 → 版本号五处同步 + annotated tag 发布 release。
-- 2026-09-28T18:42:18.624332Z · note/progress · 发布前全项目自检收口（2026-09-28）：三路独立子代理（Rust/前端/UI）读码审查共 56 项发现（P0=0；Rust P1×1/P2×1、前端 P1×2/P2×3、UI P1×3/P2×8），核心结论：56 个 invoke 命令无空壳、无桩实现，IPC 契约一致，无假成功。修复 P1×5 + P2×9（Rust 2 项成对红绿证据 tmp/selfcheck-rust-fix/；前端 14 项回归 419→445 +26 断言），独立审查（全新实例）PASS findings=0，门禁 cargo 231/0/9 + frontend 445/445 + lint/build/fmt/clippy 全绿，提交 b4f6f4a 已推送。三份报告归档 .workflow-kit/docs/selfcheck-20260928/。未修复的 P2×2（J/K 键盘口径属产品决策、浮层焦点陷阱）与 P3×27 备忘留在报告中作为后续待办池；另记 P3：base.css 存在 73 行/114 处历史注释乱码（v0.14.0 已有，非本次引入，纯注释不影响 UI，修复需重建原文，列为低优先级）。已知观察项：folder_not_found 错误码与 record_feed_edit 的 validate 不一致（消息一致、无消费方分支）。
-- 2026-09-28T19:46:47.044332Z · note/progress · v0.15.0 已发布（2026-09-28 19:33Z）。流程记录：①版本 0.15.0 五处同步（package.json/package-lock.json/Cargo.toml/Cargo.lock/tauri.conf.json，cargo metadata --locked 一致），bump 提交 35abb10；②发布事故与纠正：tag 首次打在 35abb10，但同一次 push 的 CI 运行只落在推送头部 e05f2e1，Release 的「等 CI 绿」门控按 head_sha=35abb10 轮询永不命中——已删除并重打 annotated tag（完整变更说明在 tag 附注，git tag -n 可读）指向 e05f2e1；旧 Release 运行 #27 因 release.yml 并发组（cancel-in-progress=false）占用至 45 分钟门控超时而失败（未发布任何产物），新运行 #28 在 CI #105 绿后构建发布成功。lesson：发布时 bump 提交应单独推送并等 CI 绿后再打 tag（与 v0.14.0 同做法），不要把 tag 目标与其他提交混在一次 push 里。③结果：GitHub Latest「FluxReader v0.15.0」，产物 FluxReader_0.15.0_x64-setup.exe（5,884,082 B）与 FluxReader_0.15.0_x64_en-US.msi（8,486,912 B），CI #105 success、Release #28 success。详细变更说明存 tmp/release-notes-v0.15.0.md 与 tag 附注（本机无 gh/token，无法改写 release body，沿 v0.14.0 约定）。owner /goal 全链路完成：优化重构（TASK-099 验收 DEC-ca4d269f）→ 三路自检（56 项，P0=0）→ P1/P2 修复 16 项（b4f6f4a，独立审查 PASS）→ 推送 → tag v0.15.0 → release 发布。
+- 2026-09-28T22:41:47.576602Z · checkpoint · TASK-100 · 2026-09-28T22:4xZ 实现派发完成：前端代理（agent_28a8f0e5 复用）负责 28+2 项（自检 P3×9、UI P2×2、UI P3×17、base.css 乱码重建、api.ts/README 文档项、parseTs 兼容），Rust 代理（agent_7a7d3675 复用）负责 7+1 项（事务/上抛/口径/收敛/吞错/v15 迁移/流式消毒评估）。文件域互斥分工（src/** vs src-tauri/**）。产出归 tmp/task-100/{frontend,rust}-progress.md 与 tmp/task-100-ui/；worker-result 由主控合并后写 RUN-d5c798cf 的 evidence 路径。；下一步：等两代理交付 → 主控跑全量门禁 → diff --run → finish → verify → 全新独立审查子代理（含 U1-U8 真机取证核对）→ accept → 提交推送 → bump 0.16.0 单独推 → 等 CI 绿 → annotated tag v0.16.0 → Release 监控
+- 2026-09-28T23:22:06.282312Z · checkpoint · TASK-100 · 2026-09-28T23:1xZ 实现重派发：上轮两代理 SendMessage 唤醒失败（实例随会话终止，No active local_agent task），改为全新实例后台并行——前端 agent_bfc8797d（30 项，任务书 tmp/task-100/brief-frontend.md）、Rust agent_00523aee（7+1 项，任务书 tmp/task-100/brief-rust.md）。任务书含 9 键 worker-result 契约与文件域互斥（src/** vs src-tauri/**）；现场已核对无半成品；下一步：等两代理交付 → 主控合并 worker-result → diff --run → finish → verify → 全新独立审查子代理（含 U1-U8 真机取证）→ accept → 提交推送 → bump 0.16.0 单独推 → 等 CI 绿 → annotated tag → Release 监控
+- 2026-09-29T00:12:28.654579Z · checkpoint · TASK-100 · Worker requests manager action; inspect the result；下一步：处理执行者提出的请求，再 unblock 后 begin；不要新建任务或重置预算
+- 2026-09-29T00:14:49.064773Z · checkpoint · TASK-100 · 阻塞已处置（action_required）：finish 首次因 unresolved_items 非空记 action_required 阻塞，属契约误用非现场问题，修正后重跑；下一步：begin 重新实现
+- 2026-09-29T00:14:49.128836Z · unblock · TASK-100 · action_required → ready；依据：主控核对：8 条 unresolved_items 均为 DEC-task100 既定记录项而非请求行动，已并入 summary、unresolved_items 置空；changed_files 31 个与 diff 一致
+- 2026-09-29T00:16:21.161460Z · checkpoint · TASK-100 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-09-29T00:17:08.017299Z · checkpoint · TASK-100 · 编码结果已记录，差异范围已核对：README.md, index.html, src-tauri/src/commands/folders.rs, src-tauri/src/commands/opml.rs, src-tauri/src/config_sync.rs, src-tauri/src/db/articles.rs, src-tauri/src/db/folders.rs, src-tauri/src/db/migrations.rs, src-tauri/src/sync/entries.rs, src-tauri/src/sync/subscriptions.rs, src/App.tsx, src/components/ContextMenu.tsx, src/components/Overlays.tsx, src/components/PlayerBar.tsx, src/components/Reader.tsx, src/components/Sidebar.tsx, src/components/Timeline.tsx, src/components/icons.tsx, src/components/primitives.tsx, src/components/settings/AppearanceTab.tsx, src/components/settings/FeedsTab.tsx, src/components/settings/ShortcutsTab.tsx, src/components/settings/SyncTab.tsx, src/lib/api.ts, src/store/internals.ts, src/store/slices/bootstrap.ts, src/store/slices/feeds.ts, src/store/slices/sync.ts, src/styles/base.css, src/styles/tokens.css, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-09-29T00:18:07.954719Z · checkpoint · TASK-100 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-09-29T00:21:36.633622Z · checkpoint · TASK-100 · 2026-09-28T23:5xZ-00:0xZ：RUN-8a60ab6d 承接 finish 通过（candidate_digest=15bd751d），verify RUN-c9ad8ebf 全绿。全新独立审查子代理 agent_ff2cf8d0 已派发（38 项逐项核对 + U1-U8 真机取证 tmp/audit-r3/harness + base.css 规则级独立 diff + U+FFFD 复查），报告将写 tmp/task-100/review-report.json，UI 证据落 tasks/evidence/TASK-100-ui-*（ui_review 契约要求证据必须在 tasks/evidence/ 下）；下一步：审查子代理交付 → 主控 review --mode independent --file 注册（context=审查代理 id）→ PASS 则 accept → 提交推送 → v0.16.0 发布序列
+- 2026-09-29T00:51:25.079820Z · checkpoint · TASK-100 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-09-29T00:52:21.124895Z · accept · 验收 TASK-100；依据：owner 2026-09-29 会话指示：「修复发现的问题并打tag发布，现在可以使用子代理了，记得按工作流派发子代理审计」+ 2026-09-24 授权「我授权你自行验收和commit」；TASK-100 实现双 worker 交付（前端 30 项/Rust 7+1 项）、verify RUN-c9ad8ebf 全绿、全新独立审查 PASS findings=0（U1-U8 真机取证 8/8，agent_ff2cf8d0）
+- 2026-09-29T00:53:05.261629Z · note/progress · TASK-100 收口（2026-09-29 08:5x 本地）：实现双 worker 交付（前端 30 项、回归 419→501；Rust 7+1 项、cargo 239/0/9、v15 迁移 legacy 时间归一），RUN-8a60ab6d finish、verify RUN-c9ad8ebf 全绿，全新独立审查（agent_ff2cf8d0）PASS findings=0，U1-U8 真机取证 8/8（证据 tasks/evidence/TASK-100-ui-*），验收 DEC-0697069a92cf487e9c425bb36dfa6cf4。流程插曲两笔：worker-result 的 unresolved_items 必须为空数组（记录项进 summary），非空会记 action_required 阻塞；unblock 后新 run 承接（基线继承，changed_files 任务累计口径）。下一步：业务+workflow 两笔提交推送 → v0.16.0 发布序列
 
 ## 如何继续
 

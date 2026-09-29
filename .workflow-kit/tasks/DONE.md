@@ -74,5 +74,6 @@
 | [TASK-097](items/TASK-097.json) | 同步增量窗口收口：greader 游标改取拉取起点 + mock_greader changed_at 语义全面核对（REQ-002） | done |
 | [TASK-098](items/TASK-098.json) | 前端 reload 异常处理收口：selectView/selectFeed 补 .catch（REQ-102） | done |
 | [TASK-099](items/TASK-099.json) | REQ-108 SQL 性能与迁移加固：M-5 列表索引失效、M-7 sync_queue 索引、M-9 全部已读往返、M-14 迁移回填事务性 | done |
+| [TASK-100](items/TASK-100.json) | 发布前自检遗留项收口：前端 P2×2+P3×26、Rust P3×7（自检三报告 20260928 的未修复项） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

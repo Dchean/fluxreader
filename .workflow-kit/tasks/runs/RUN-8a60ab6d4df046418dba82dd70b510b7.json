@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-8a60ab6d4df046418dba82dd70b510b7",
+  "task_id": "TASK-100",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "承接 RUN-d5c798cf：两个全新实现子代理（前端 30 项/Rust 7+1 项）已完工并交付 worker-result，门禁自跑全绿（cargo 239/0/9、frontend 501/501、lint/build/fmt/clippy）；原 run 因 unresolved_items 契约误用记 action_required 阻塞，主控修正后 unblock，新 run 承接同一现场走 finish/verify"
+  },
+  "started_at_utc": "2026-09-29T00:16:21.013966Z",
+  "finished_at_utc": "2026-09-29T00:17:07.951370Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "1770cce2487d4b4b620d1ef24773289345814344bc268d3d6205ad21b02f47d6",
+  "candidate_digest": "15bd751d47f6feeb8be616521f77f30ac5082b7941dcb74c3fcb15df8a658034",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-8a60ab6d4df046418dba82dd70b510b7-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-8a60ab6d4df046418dba82dd70b510b7-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-d5c798cf62a14a9d95f699ae1a1cd6d1-scope.json"
+}

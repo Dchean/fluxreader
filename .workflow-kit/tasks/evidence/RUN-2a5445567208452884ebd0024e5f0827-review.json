@@ -1,0 +1,116 @@
+{
+  "task_id": "TASK-100",
+  "candidate_digest": "15bd751d47f6feeb8be616521f77f30ac5082b7941dcb74c3fcb15df8a658034",
+  "verification_run": "RUN-c9ad8ebf914647dcac48fa9823a4b93e",
+  "verdict": "PASS",
+  "findings": [],
+  "summary": "独立复核 38 项（前端 30 + Rust 7+1）全部在改动文件中找到真实实现，未发现表面改动或凑绿。深查五项均通过：(1) v15 迁移归一格式 replace(' ','T')||'+00:00' 与 ingestion/parse.rs、sync/entries.rs 现行 to_rfc3339() UTC 形态逐字一致，SQLite GLOB 整串匹配只命中 19 字符空格形态故天然幂等，up/幂等/排序等价三条测试均为真实断言（含修前乱序锚），v1..v14 本体未动（两处测试适配只随版本推进断言基准，v14 现场以 to_version(14) 原样锁定）；(2) base.css 乱码重建独立验证：候选 vs HEAD(b4f6f4a) 剥注释后规则级 diff 仅 25 行且全部对应 TASK-100 有意新增/修改（skip-btn、--feed-error、sync-refresh-btn:disabled、card-starred-flag、hydrate-placeholder），73 条映射逐一核对 72 条与 1503dbd 干净版逐字一致、1 条为恢复后追加 token 说明（该行规则同步 token 化），U+FFFD 0；(3) Esc 链 closeAskVisible 插链首（150）> 播放器（140），确认框 3000 捕获级 stopPropagation，真机实测 Esc 关序 150→140、3000 只关自身，ModalOverlay/Lightbox 焦点归还实现真实（记录 activeElement、关闭归还、子组件 autoFocus 优先）；(4) frontend-regression 新增 56 条 t100-* 断言含内存假后端行为断言（reload 在途拦截、LRU、notConnected、allSettled 聚合、mock addFeed、parseTs UTC），(s5/D3) 既有用例仅加 4 行放行在途 reload 的测试准备代码、断言语句零改动；(5) Rust 事务化/上抛/同口径/收敛/吞错全部落实，RAISE(ABORT) 触发器注入走真实 SQLITE_CONSTRAINT 生产 Err 路径且断言 feed/文章/墓碑/队项四类残留全零。抽查门禁：npm run test:frontend 501/501、cargo 指定 8 个新用例全过（verify 全量 239/0/9、fmt/clippy/lint/build 0 由 RUN-c9ad8ebf 证据交叉核对）。U1-U8 真机取证（harness Chrome CDP + 忠实假后端，浅/深两套截图 + DOM 断言）8/8 PASS。R-P3-9 按 DEC 评估后跳过（流式 delta 不进 HTML 渲染路径、逐 delta 过 ammonia 会切断跨 delta 标签、CSP 兜底在案），依据已落纸；跨布局 J/K、--text-tertiary、R-P3-10/11 按 DEC 记录不做。",
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "38 项逐项核对：前端 A 组 9 项（P3-1 reload 在途守卫、P3-2 tooltip 非点击承诺、P3-3 isNotConnectedError 判定收口、P3-4 allSettled 聚合、P3-6 Space 行、P3-7 LRUMap 容量 8、P3-8 断开/刷新分离、P3-9 removed_feeds 声明并消费、P3-10 mock addFeed 失败可见）、B 组 2 项（J/K 文案改准+Social/Notif 卡 role/tabIndex roving、ModalOverlay/Lightbox 焦点移入归还）、C 组 16 项（U7 Esc 链、U2 叫法、生成中文案、署名中文化、U1 紧凑加号、--feed-error token、U3 星标 SVG、U5 title 属性、tokens 头注释、U8 theme-color、U6 favicon 回退、LAYOUT_NO_AI 单源、U4 SVG 图标、双刷新 busy 统一、占位类化、stale 注释）、D 组 3 项（base.css 重建、FTS5/README 措辞、parseTs UTC）均在源码落实；Rust 7 项（事务化×2、folder_name 上抛、cleanup_cache datetime()、limit.max(0)、entries 三处 warn、config_sync 三处 ?、v15 迁移）+ R-P3-9 评估跳过（依据落纸 rust-progress.md 与 worker-result）全部符合报告条目与 DEC 不做清单。验收①断言总数 501≥445、②八项针对性测试真实、③U+FFFD 全仓 0、④U1-U8 取证 8/8 PASS、⑤门禁 239/0/9 与 501/501 全绿不回退。",
+      "evidence_files": [
+        "src-tauri/src/db/migrations.rs",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/src/db/folders.rs",
+        "src-tauri/src/config_sync.rs",
+        "src-tauri/src/sync/entries.rs",
+        "src-tauri/src/sync/subscriptions.rs",
+        "src/App.tsx",
+        "src/components/primitives.tsx",
+        "src/components/Overlays.tsx",
+        "src/components/Timeline.tsx",
+        "src/components/Sidebar.tsx",
+        "src/components/PlayerBar.tsx",
+        "src/components/icons.tsx",
+        "src/components/settings/ShortcutsTab.tsx",
+        "src/components/settings/AppearanceTab.tsx",
+        "src/components/settings/FeedsTab.tsx",
+        "src/components/settings/SyncTab.tsx",
+        "src/lib/api.ts",
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/feeds.ts",
+        "src/store/slices/sync.ts",
+        "src/styles/base.css",
+        "src/styles/tokens.css",
+        "index.html",
+        "README.md",
+        ".workflow-kit/tasks/evidence/TASK-100-ui-report.md",
+        ".workflow-kit/tasks/evidence/TASK-100-ui-dark.png",
+        ".workflow-kit/tasks/evidence/TASK-100-ui-light.png"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "tools/frontend-regression.mjs 新增 56 条 (t100-*) 断言审阅为真断言：行为断言用内存假后端构造真实场景（deferred list_articles 验证 reload 在途拦截并核对 IPC 调用计数与 offset=500 游标、LRU 容量/淘汰/保鲜/clear、notConnected 与 timeout 两路 toast 逐字断言、allSettled 3 调用 1 失败合并 toast、mock addFeed 失败/成功双路、parseTs 四组时区无关断言），视觉/文案项沿用既有源级形态断言风格且禁止形态清零判据可长期成立。既有 (s5/D3) 竞态用例仅加 4 行测试准备代码（放行被新守卫拦截的在途 reload 后再续拉），既有断言语句一行未改。现场重跑 npm run test:frontend 501/501 通过；cargo 指定新用例 8/8 通过（midway×2、v15×3、clamps、cleanup_cache_ai_scope、folder_name_distinguishes）；RUN-c9ad8ebf 证据交叉核对 cargo 239 passed/0 failed/9 ignored（ignored 不增）、frontend 501/501、lint 0 warnings 0 errors、fmt/clippy 通过。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-c9ad8ebf914647dcac48fa9823a4b93e-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-c9ad8ebf914647dcac48fa9823a4b93e-cargo_test.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-c9ad8ebf914647dcac48fa9823a4b93e-lint.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "失败路径逐一核实：persist_new_feed/import_feeds 用测试侧 RAISE(ABORT) 触发器在第 2 篇文章/第 2 条入队处注入真实 SQLITE_CONSTRAINT（生产 Err 路径），断言 feed、先于失败点的文章、事务内墓碑清除、add_feed 队项四类残留全零（修前会残留半套且重试被判重拦住）；folder_name 用 ALTER TABLE 改名注入真实 DB 错误断言 Err 上抛（code=db，修前被 .ok() 压成 Ok(None)），push_feeds 对 Err 采取 warn+report.errors+跳过该队项（不进 done、不被 prune 剪除、下轮自愈），选择依据已写明；cleanup_cache ai 分支测试含判别力锚（修前裸比较确实漏掉 offset 边界行）+ 修后 offset/legacy 双清 + 新于 cutoff 控制行不清；list_articles limit 负数/i64::MIN 收敛 0 行、100000 合法大值放行；triggerManualSync 仅结构化 notConnected 静默、timeout 类失败 toast 可见不假成功；doDisconnect 断开成功后 reload 失败给「已断开连接，但本地刷新失败：…」不再误报。",
+      "evidence_files": [
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/opml.rs",
+        "src-tauri/src/db/folders.rs",
+        "src-tauri/src/sync/subscriptions.rs",
+        "src/store/slices/sync.ts",
+        "src/components/settings/SyncTab.tsx",
+        ".workflow-kit/tasks/evidence/RUN-c9ad8ebf914647dcac48fa9823a4b93e-cargo_test.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "base.css 历史乱码重建独立验证通过：候选与 HEAD(b4f6f4a) 剥注释后规则级 diff 仅 25 行且全部对应本任务有意改动（.win-btn.skip-btn、--feed-error token 引用、.sync-refresh-btn:disabled 及 :hover、.card-starred-flag、.hydrate-placeholder），重建本身零规则变化；73 条 fffd 映射逐一核对全部与 HEAD 行号对齐，72 条恢复文本与 1503dbd 干净版逐字一致、1 条（feed-error-dot 注释）为恢复原文后追加 token 说明（与该行规则 token 化同步，合理）；v15 迁移语句抽成常量供测试共用同一生产字节防漂移，注释注明 GLOB 幂等论证与 v14 触发器边界；LAYOUT_NO_AI 收敛单源、stale 注释更正、tokens.css 头注释更新、api.ts/README 文档漂移修正——注释/文档与实现重新对齐。",
+      "evidence_files": [
+        "src/styles/base.css",
+        "src/styles/tokens.css",
+        "src/components/Overlays.tsx",
+        "src-tauri/src/db/migrations.rs",
+        "tools/frontend-regression.mjs",
+        "README.md"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "viewEntriesCache 由无上限 Map 改为 LRUMap（容量 8 个布局×视图×范围组合键，命中刷新新鲜度、超限淘汰最旧），消除筛选视图缓存 limit=100000 全集快照的无界内存增长，get/set/clear 调用点零改动（切排序整体清空语义保持，行为断言 4 条锁定）；P3-1 reload 在途拦截在 reloadFromBackend/reloadFilteredEntries 全程 try/finally 计数、loadMoreArticles 入口守卫，reload 落地后哨兵/refill effect 随 items 变化重触发不丢加载（行为断言验证拦截窗口与落地后续拉放行、游标对齐）；toggleAllFolders 由逐分类 N 次串行 IPC 改 Promise.allSettled 并发聚合，失败合并一条 toast；Rust 侧 persist_new_feed/import_feeds 事务化为单次提交，无新增锁跨 await（unchecked_transaction 局部于同步段）；无新增依赖。",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/feeds.ts",
+        "src-tauri/src/commands/folders.rs",
+        "src-tauri/src/commands/opml.rs"
+      ]
+    }
+  ],
+  "ui_review": {
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-100-CONSISTENCY.md",
+    "checked_states": [
+      "U1.shortcut-hint-format",
+      "U2.add-feed-wording",
+      "U3.star-visual",
+      "U4.player-icons",
+      "U5.truncate-title",
+      "U6.favicon-fallback",
+      "U7.close-ask-esc",
+      "U8.theme-color"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-100-ui-light.png",
+      ".workflow-kit/tasks/evidence/TASK-100-ui-dark.png",
+      ".workflow-kit/tasks/evidence/TASK-100-ui-report.md"
+    ]
+  }
+}
