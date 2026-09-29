@@ -83,7 +83,6 @@
 
 ## 最近事件
 
-- 2026-09-29T14:31:03.413166Z · checkpoint · TASK-101 · 编码结果已记录，差异范围已核对：src-tauri/src/endpoint_resolve.rs, src-tauri/src/fever.rs, src-tauri/tests/endpoint_autodetect_e2e.rs, src-tauri/tests/fever_freshrss_e2e.rs, src-tauri/tests/mock_greader.rs, src/components/settings/ConfigSyncSection.tsx, src/components/settings/SyncTab.tsx, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-09-29T14:31:51.039682Z · checkpoint · TASK-101 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-29T14:32:26.925065Z · checkpoint · TASK-101 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-09-29T14:50:03.454576Z · checkpoint · TASK-101 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
@@ -95,6 +94,7 @@
 - 2026-09-29T15:06:47.311026Z · checkpoint · TASK-101 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-29T15:07:04.875561Z · accept · 验收 TASK-101；依据：owner 2026-09-29 会话指示：「检查是哪里出了问题…调整为简略清晰的文案…」+「合并后打tag发版」；TASK-101 双 worker 交付、修复轮 F1 注释闭环、verify RUN-227e8674 全绿、全新独立审查两轮（首轮 PASS findings 2 low → 修复 → 终审 PASS findings=0，agent_70f6fc03/agent_58c8bb19），UI 取证 V1/V2 13/13
 - 2026-09-29T15:07:25.425691Z · note/progress · TASK-101 收口（2026-09-29 22:5x 本地）：Fever+FRESHess 认证修复（api_key→POST form body，根因取证归档）+ 设置页文案精简。双 worker 交付 → finish/verify 绿 → 首轮独立审查 PASS findings 2 low（F1 注释漏列候选/F2 红证据归档位置）→ F2 主控归档 + F1 修复 run RUN-08cfeb97（纯注释）→ verify RUN-227e8674 绿 → 全新复审 PASS findings=0 → 验收 DEC-2649113d03dd46b9a13b86aad65ff0e9。cargo 244/0/9（+5 e2e：mock FreshRSS 只认 POST body，修前红 0/5 留档）、frontend 516/516（+15 t101）。下一步：业务+workflow 提交推 dev → CI 绿 → 协议合并 main → bump 0.16.1 发版（owner 指示「合并后打tag发版」）
+- 2026-09-29T22:37:43.240653Z · note/progress · v0.16.1 发布成功（2026-09-30 06:37Z，Release run #33 completed:success）：GitHub Latest「FluxReader v0.16.1」，target=0aafc038（main，含 TASK-101 修复+release.yml 三项修正），资产 FluxReader_0.16.1_x64-setup.exe（5,894,799 B）+ msi（8,495,104 B），正文=850 字符完整发布说明（tag 附注即 Release 正文机制实战成功）。发布链路三笔修正（全走 dev→main）：①浅检出把 annotated tag 读成提交信息→API 读 tag 对象；②tauri-action 不覆盖同名资产→构建前清空既有资产（#31 失败根因）；③判据字段错（/git/tags 无顶层 type，#32 失败根因）→ref.object.type。操作事故两笔复盘：①合并协议命令链断（git rm 对无工作流改动的合并报 fatal）致 merge 未提交、后续 tag 步骤照跑——lesson：协议命令需容错（|| true）且长链失败后必须先核对现场再继续；②dev 上 git merge main 发生快进，dev tip 被推到 main 状态、.workflow-kit 全删——已 reset e1c516a + cherry-pick 修正 + force-with-lease 恢复（8fc1c34）——lesson：跨分支操作前必查 git branch --show-current，判据 merge base；main→dev 的同步禁用 merge（dev 是 main 祖先时会快进吞掉工作流内容）。dev 版本号仍为 0.16.0（bump 属 main 发布线，随下次合并同步）。CI #121/#122（main）、#123+（dev）全绿
 
 ## 如何继续
 
