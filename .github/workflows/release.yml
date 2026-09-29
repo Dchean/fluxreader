@@ -74,12 +74,17 @@ jobs:
           if ($env:GITHUB_REF -like 'refs/tags/*') {
             $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
             $ref = Invoke-RestMethod -Uri "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/git/ref/tags/$($env:GITHUB_REF_NAME)" -Headers $headers
-            $tagObj = Invoke-RestMethod -Uri "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/git/tags/$($ref.object.sha)" -Headers $headers
-            if ($tagObj.type -eq 'tag' -and $tagObj.message -and $tagObj.message.Trim()) {
-              $body = $tagObj.message
-            } else {
-              throw "Tag $($env:GITHUB_REF_NAME) is lightweight or has no annotation — push an annotated tag (git tag -a)."
+            # 判据在 ref 的 object.type（tag=annotated / commit=lightweight）；
+            # /git/tags/{sha} 的响应没有顶层 type 字段（v0.16.1 #32 判错字段的教训），
+            # 且轻量 tag 用 commit sha 查 /git/tags 会 404——先判 ref 再取对象。
+            if ($ref.object.type -ne 'tag') {
+              throw "Tag $($env:GITHUB_REF_NAME) is lightweight — push an annotated tag (git tag -a)."
             }
+            $tagObj = Invoke-RestMethod -Uri "https://api.github.com/repos/$($env:GITHUB_REPOSITORY)/git/tags/$($ref.object.sha)" -Headers $headers
+            if (-not $tagObj.message -or -not $tagObj.message.Trim()) {
+              throw "Tag $($env:GITHUB_REF_NAME) has an empty annotation."
+            }
+            $body = $tagObj.message
           }
           "RELEASE_BODY<<RELEASE_BODY_GITHUB_ENV_EOF" | Add-Content -Path $env:GITHUB_ENV
           $body | Add-Content -Path $env:GITHUB_ENV
