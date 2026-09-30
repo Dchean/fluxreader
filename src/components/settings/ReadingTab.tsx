@@ -11,7 +11,9 @@ export function ReadingTab() {
   return (
     <>
       <div className="settings-group-title">字体</div>
-      <SettingCard title="正文字体" desc="选择阅读器正文渲染字体家族">
+      {/* TASK-102：字体/字号/行高/最大宽度/阅读时间的标题已自解释，
+          desc 均复述标题 → 删除（仅保留有触发语义的两条） */}
+      <SettingCard title="正文字体">
         <FluxDropdown
           width={200}
           value={settings.fontFamily}
@@ -19,7 +21,7 @@ export function ReadingTab() {
           options={FONT_OPTIONS}
         />
       </SettingCard>
-      <SettingCard title="字号" desc="调整正文基础显示大小">
+      <SettingCard title="字号">
         <div className="range-slider-wrap">
           <input
             type="range"
@@ -32,7 +34,7 @@ export function ReadingTab() {
           <span className="range-value-tag">{settings.fontSize}px</span>
         </div>
       </SettingCard>
-      <SettingCard title="行高" desc="调整正文段落行间距比例">
+      <SettingCard title="行高">
         <div className="range-slider-wrap">
           <input
             type="range"
@@ -47,7 +49,7 @@ export function ReadingTab() {
       </SettingCard>
 
       <div className="settings-group-title">版面</div>
-      <SettingCard title="正文最大宽度" desc="限制单行文本长度以优化可读性">
+      <SettingCard title="正文最大宽度">
         <div className="range-slider-wrap">
           <input
             type="range"
@@ -61,7 +63,7 @@ export function ReadingTab() {
           <span className="range-value-tag">{settings.maxWidth}px</span>
         </div>
       </SettingCard>
-      <SettingCard title="显示预计阅读时间" desc="在文章信息栏显示估算阅读时长">
+      <SettingCard title="显示预计阅读时间">
         <Switch checked={settings.showReadTime} onChange={(v) => updateSettings({ showReadTime: v })} />
       </SettingCard>
 

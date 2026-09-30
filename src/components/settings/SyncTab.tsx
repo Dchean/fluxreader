@@ -181,41 +181,45 @@ export function SyncTab() {
     );
   }
 
+  /* TASK-102 X3：账户前缀提为常量——空串字面量与「从未」引号留在同一行时，
+     文案扫描会把两个引号间的模板内容误配成假长文案（'…' 对跨模板配对）；
+     分行后字面量配对只在单行内成立，扫描恢复零误报。渲染输出不变。 */
+  const accountTag = account ? `账户 ${account} · ` : '';
+
   return (
     <>
       <div className="settings-group-title">后端配置</div>
       <SettingCard
         title="连接状态"
         desc={connected
-          ? `${account ? `账户 ${account} · ` : ''}上次同步 ${lastSync > 0 ? new Date(lastSync * 1000).toLocaleString() : '从未'}`
+          ? `${accountTag}上次同步 ${lastSync > 0 ? new Date(lastSync * 1000).toLocaleString() : '从未'}`
           : '未连接（客户端可独立使用：直连抓取、阅读、收藏均正常）'}
       >
         <span className="about-arch-tag">{connected ? (account ?? '已连接') : '未连接'}</span>
       </SettingCard>
+      {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
+          深浅主题外观与展开行为都与 FluxDropdown 不一致。
+          TASK-102：FluxDropdown 必须是 SettingCard 的直接子元素（.setting-card
+          双列布局的控件列贴右缘）——包进裸 div 会被提示文本撑宽、把下拉挤离
+          右缘（X1 错位根因）；API 密码提示改放 desc 位（≤32 字），不设常驻 hint。 */}
       <SettingCard
         title="同步协议"
-        desc="两种协议共用 Miniflux「集成」凭据，切换不丢数据。"
+        desc="Fever / GReader 均用「API 密码」，非登录密码"
       >
-        <div>
-          {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
-              深浅主题外观与展开行为都与 FluxDropdown 不一致 */}
-          <FluxDropdown
-            width={220}
-            value={protocol}
-            onChange={(v) => setProtocol(v === 'fever' ? 'fever' : 'greader')}
-            options={[
-              { value: 'greader', label: 'Google Reader（推荐）' },
-              { value: 'fever', label: 'Fever' },
-            ]}
-          />
-          {/* TASK-101 V2：FreshRSS 的 Fever/GReader 均用「API 密码」（个人设置里
-              设置/重置）——认证报障的高频误区，单行短提示放在协议选择处 */}
-          <div className="mini-dialog-hint">
-            Fever / GReader 均用 FreshRSS 个人设置的「API 密码」，非登录密码。
-          </div>
-        </div>
+        <FluxDropdown
+          width={220}
+          value={protocol}
+          onChange={(v) => setProtocol(v === 'fever' ? 'fever' : 'greader')}
+          options={[
+            { value: 'greader', label: 'Google Reader（推荐）' },
+            { value: 'fever', label: 'Fever' },
+          ]}
+        />
       </SettingCard>
-      <SettingCard title="后端 Endpoint" desc={ENDPOINT_DESC}>
+      <SettingCard
+        title="后端 Endpoint"
+        desc={ENDPOINT_DESC}
+      >
         <input
           type="text"
           className="setting-input"
@@ -236,9 +240,11 @@ export function SyncTab() {
           onChange={(e) => setUsername(e.target.value)}
         />
       </SettingCard>
+      {/* TASK-102：断开态不设 desc——「集成密码」字面解释复述标题，共用语义已由
+          协议卡 desc 与用户名卡承载（X3：无复述标题的 desc） */}
       <SettingCard
         title="密码"
-        desc={connected ? '已保存（出于安全不回显）。留空提交 = 保持当前密码；填写新值 = 更换账号' : '集成密码（Google Reader / Fever 共用）'}
+        desc={connected ? '已保存（出于安全不回显）。留空提交 = 保持当前密码；填写新值 = 更换账号' : undefined}
       >
         <input
           type="password"
@@ -271,9 +277,10 @@ export function SyncTab() {
           </button>
         )}
       </div>
+      {/* TASK-102：单行 ≤40 字，只保留两按钮语义对齐——「断开会移除拉取内容」由
+          断开确认框承载、「已读/收藏约 1 秒回传」为解释性冗余，均不再常驻 */}
       <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        「测试连接」仅验证登录不拉数据，「保存并同步」才开始拉取订阅与文章。
-        已读/收藏等变更约 1 秒内回传服务端，断开连接会移除同步拉取的内容。
+        「测试连接」仅验证登录；「保存并同步」确认后拉取订阅与文章。
       </div>
 
       <div className="settings-group-title" style={{ marginTop: 20 }}>自动同步</div>
