@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "id": "RUN-b475337863904cf18a550539f7a04127",
+  "task_id": "TASK-102",
+  "kind": "verification",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-513b7da293114a02beb052ad4630571e"
+  },
+  "started_at_utc": "2026-09-30T03:36:54.631786Z",
+  "finished_at_utc": "2026-09-30T03:41:58.088395Z",
+  "exit_code": 1,
+  "timed_out": true,
+  "input_digest": "45ecee75d371fb489280332d8216b8637546feca488b1470344760bae1adb6d1",
+  "candidate_digest": "e1208e0c5bced0a1b557878c345299010805ccb56598c722f2ae72ce9d80dcc8",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-b475337863904cf18a550539f7a04127-cargo_test.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-b475337863904cf18a550539f7a04127-cargo_test.stderr.txt"
+  ],
+  "checks": [
+    {
+      "gate_id": "cargo_test",
+      "status": "FAIL",
+      "exit_code": 1,
+      "log": ".workflow-kit/tasks/evidence/RUN-b475337863904cf18a550539f7a04127-cargo_test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-b475337863904cf18a550539f7a04127-cargo_test.stderr.txt",
+      "candidate_digest": "e1208e0c5bced0a1b557878c345299010805ccb56598c722f2ae72ce9d80dcc8",
+      "command": {
+        "argv": [
+          "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+          "test"
+        ],
+        "cwd": "src-tauri",
+        "started_at_utc": "2026-09-30T03:36:54.783334Z",
+        "finished_at_utc": "2026-09-30T03:41:57.989681Z",
+        "exit_code": 1,
+        "timed_out": true,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-b475337863904cf18a550539f7a04127-cargo_test.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-b475337863904cf18a550539f7a04127-cargo_test.stderr.txt"
+      }
+    }
+  ],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 10932,
+  "controller_pid": 45728,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Program Files\\Rust stable MSVC 1.98\\bin\\cargo.exe",
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "started_at_utc": "2026-09-30T03:36:54.783334Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-b475337863904cf18a550539f7a04127-cargo_test.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-b475337863904cf18a550539f7a04127-cargo_test.stderr.txt",
+      "finished_at_utc": "2026-09-30T03:41:57.989681Z",
+      "exit_code": 1,
+      "timed_out": true,
+      "cancelled": false
+    }
+  ],
+  "failure_kind": "interrupted",
+  "failure_reason": "Verification timed out/cancelled; original logs and deadline retained"
+}

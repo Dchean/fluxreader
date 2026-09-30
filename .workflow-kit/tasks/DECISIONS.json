@@ -2761,6 +2761,33 @@
       "candidates": {
         "TASK-101": "b378aaff9f541fed7723274dfbeb82b7c69ff6452f93dfd76ba9cccf62d1ac41"
       }
+    },
+    {
+      "id": "DEC-task102-copy-trim-20260930",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-30 会话指示原话：「现在调整之后选择协议的控件左移错位了，并且现在同步页的文案还是太长，需要精简并对齐小控件……要精简并对齐测试连接和保存并同步，其他的也是，检查其他的地方是否有多余文案或者文案太长需要精简的，有的地方是可以不需要文案解释」",
+      "statement": "修复 TASK-101 引入的协议控件对齐回归（提示移入 desc 位），动作区提示精简为单行并与两按钮对齐，断开删除语义回归确认框承载，设置页全量冗余文案删除性精简（复述/花絮直接删，保留 ≤48 字）。",
+      "scope": [
+        "TASK-102",
+        "REQ-006",
+        "REQ-008"
+      ],
+      "recorded_at_utc": "2026-09-30T02:30:05.737499Z"
+    },
+    {
+      "id": "DEC-473b2d2a1f0c4428a2dfdd38e3b4691f",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-09-30 会话指示：「现在调整之后选择协议的控件左移错位了，并且现在同步页的文案还是太长……」；TASK-102 双 worker 交付（首例跨配额中断续作）、verify RUN-e39d2c3c 全绿、全新独立审查 PASS findings=0（X1 对齐 0px 实测、X3 独立复扫 212 条，agent_8d15915e）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-102"
+      ],
+      "recorded_at_utc": "2026-09-30T04:03:05.671835Z",
+      "candidates": {
+        "TASK-102": "e1208e0c5bced0a1b557878c345299010805ccb56598c722f2ae72ce9d80dcc8"
+      }
     }
   ]
 }
