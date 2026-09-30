@@ -114,7 +114,7 @@ export function ConfigSyncSection() {
       {ghAccount ? (
         <SettingCard
           title="已登录 GitHub"
-          desc={`账户 ${ghAccount.login} · 配置经私有 Gist 同步（与 PAT 等效，仅本机存储 token）`}
+          desc={`账户 ${ghAccount.login} · 配置经私有 Gist 同步（token 仅存本机）`}
         >
           <button className="toggle-action-btn btn-danger-text" disabled={ghLoggingIn} onClick={() => void doGhDisconnect()}>
             断开
@@ -123,7 +123,7 @@ export function ConfigSyncSection() {
       ) : ghFlow ? (
         <SettingCard
           title="等待授权"
-          desc="在浏览器打开授权页，输入下方代码完成授权。此卡片常驻，登录成功后自动消失"
+          desc="在浏览器授权页输入下方代码完成授权，成功后此卡自动消失"
         >
           <div className="device-code-block">
             <span className="device-code-value">{ghFlow.user_code}</span>
@@ -157,7 +157,9 @@ export function ConfigSyncSection() {
       >
         <span className="about-arch-tag">{status?.configured ? '已配置' : '未配置'}</span>
       </SettingCard>
-      <SettingCard title="同步后端" desc="Gist 可用上方网页登录自动配置，或手动填 classic PAT；WebDAV 填服务器地址与账号">
+      {/* TASK-102：三处 desc 压缩至 ≤48 字，约束语义（classic PAT / gist scope /
+          fine-grained 不支持 / 配置文件名）逐条保留 */}
+      <SettingCard title="同步后端" desc="Gist 可网页登录自动配置，或手填 classic PAT；WebDAV 填服务器与账号">
         <FluxDropdown
           width={140}
           value={backend}
@@ -169,7 +171,7 @@ export function ConfigSyncSection() {
         />
       </SettingCard>
       {backend === 'gist' ? (
-        <SettingCard title="GitHub Token（classic PAT）" desc="手动填入替代网页登录，需 classic PAT（勾选 gist scope，fine-grained 不支持）">
+        <SettingCard title="GitHub Token（classic PAT）" desc="手动填入；classic PAT 需勾 gist scope，fine-grained 不支持">
           <input
             type="password"
             className="setting-input"
@@ -180,7 +182,8 @@ export function ConfigSyncSection() {
         </SettingCard>
       ) : (
         <>
-          <SettingCard title="WebDAV 服务器" desc="例如 https://dav.example.com（配置存为 fluxreader-config.json）">
+          {/* TASK-102：示例 URL 由输入框 placeholder 表达，desc 只保留配置文件名（约束语义） */}
+          <SettingCard title="WebDAV 服务器" desc="配置在服务器存为 fluxreader-config.json">
             <input
               type="text"
               className="setting-input"
@@ -189,7 +192,7 @@ export function ConfigSyncSection() {
               onChange={(e) => setServer(e.target.value)}
             />
           </SettingCard>
-          <SettingCard title="WebDAV 用户名" desc="服务器登录账号">
+          <SettingCard title="WebDAV 用户名">
             <input
               type="text"
               className="setting-input"
@@ -218,9 +221,10 @@ export function ConfigSyncSection() {
           下载并应用
         </button>
       </div>
+      {/* TASK-102：压缩至 ≤48 字单句——覆盖语义（约束）保留，
+          「多设备换机先上传新机下载」为操作指引花絮 → 删除 */}
       <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        手动上传/下载模式：下载会覆盖本地设置与 AI 配置，订阅源按 URL 合并（已存在跳过）。
-        多设备使用时，换机先「上传」，新机「下载并应用」。
+        下载会覆盖本地设置与 AI 配置；订阅源按 URL 合并（已存在跳过）。
       </div>
     </>
   );

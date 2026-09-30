@@ -63,7 +63,8 @@ export function AboutTab() {
       <SettingCard title="客户端版本" desc={`FluxReader v${version || '…'} (Build 2026.08)`}>
         <span className="about-arch-tag">Tauri 2 + Rust + SQLite</span>
       </SettingCard>
-      <SettingCard title="检查更新" desc="检测 GitHub Releases 上的最新版本">
+      {/* TASK-102：desc 复述「检查更新」标题 → 删除（按钮文案已自解释） */}
+      <SettingCard title="检查更新">
         {updateState === 'checking' ? (
           <span className="about-update-hint">正在检查…</span>
         ) : updateState === 'available' && latestInfo ? (

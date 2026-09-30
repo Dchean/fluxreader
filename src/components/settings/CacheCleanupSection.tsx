@@ -49,9 +49,10 @@ export function CacheCleanupSection() {
           清理 AI 缓存
         </button>
       </div>
+      {/* TASK-102：压缩至 ≤48 字——（收藏除外）/正文保留两条约束保留，
+          「重新打开文章可再次生成」为推导性解释 → 删除 */}
       <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        「清理旧文章」删除指定时间前的文章正文与条目（收藏除外）；「清理 AI 缓存」仅清除 AI 摘要与翻译
-        缓存（正文保留，重新打开文章可再次生成）。
+        「清理旧文章」删指定时间前文章（收藏除外）；「清理 AI 缓存」仅清摘要与翻译缓存，正文保留。
       </div>
       <ConfirmDialog
         open={confirm !== null}

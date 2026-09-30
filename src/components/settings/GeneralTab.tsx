@@ -28,7 +28,7 @@ export function GeneralTab() {
           <span className="range-value-tag">{settings.refreshInterval} 分钟</span>
         </div>
       </SettingCard>
-      <SettingCard title="并发抓取数" desc="同时抓取的源数量。源多可调高，被限流时调低。">
+      <SettingCard title="并发抓取数" desc="源多可调高，被限流时调低。">
         <div className="range-slider-wrap">
           <input
             type="range"
@@ -44,13 +44,15 @@ export function GeneralTab() {
       </SettingCard>
 
       <div className="settings-group-title">已读行为</div>
-      <SettingCard title="打开文章时标为已读" desc="点击选中文章后立即更新本地已读状态">
+      {/* TASK-102：三个已读开关的标题已完整表达触发时机，desc 复述标题 → 删除；
+          「滚动到底部」保留触发边界说明（正文滚至末尾才算读过，非视口底） */}
+      <SettingCard title="打开文章时标为已读">
         <Switch checked={settings.markReadOnOpen} onChange={(v) => updateSettings({ markReadOnOpen: v })} />
       </SettingCard>
-      <SettingCard title="滚动到底部时标为已读" desc="正文滚至末尾才算读过，适合深度阅读">
+      <SettingCard title="滚动到底部时标为已读" desc="正文滚至末尾才算读过">
         <Switch checked={settings.markReadOnScrollBottom} onChange={(v) => updateSettings({ markReadOnScrollBottom: v })} />
       </SettingCard>
-      <SettingCard title="滚动出列表区域时标为已读" desc="卡片滚出时间流上沿即视为已浏览">
+      <SettingCard title="滚动出列表区域时标为已读">
         <Switch checked={settings.markReadOnScrollOut} onChange={(v) => updateSettings({ markReadOnScrollOut: v })} />
       </SettingCard>
 
@@ -62,7 +64,8 @@ export function GeneralTab() {
       <SettingCard title="新文章系统通知" desc="窗口在后台/托盘时，后台刷新抓到新文章发 Windows 通知">
         <Switch checked={settings.notifyOnNewArticles} onChange={(v) => updateSettings({ notifyOnNewArticles: v })} />
       </SettingCard>
-      <SettingCard title="启动时打开" desc="下次打开应用时默认进入的视图">
+      {/* TASK-102：标题 + 下拉/开关已自解释，desc 复述标题 → 删除 */}
+      <SettingCard title="启动时打开">
         {/* D4：选项与 store 的启动白名单（STARTUP_VIEWS）同源——此前的
             「文章」('article') 不在白名单内，选中后静默失效，已移除；
             白名单里的「收藏」补上了 UI 入口。 */}
@@ -73,7 +76,7 @@ export function GeneralTab() {
           options={STARTUP_VIEW_OPTIONS}
         />
       </SettingCard>
-      <SettingCard title="启动时隐藏已读" desc="仅展示未读流内容">
+      <SettingCard title="启动时隐藏已读">
         <Switch checked={settings.hideReadOnStartup} onChange={(v) => updateSettings({ hideReadOnStartup: v })} />
       </SettingCard>
     </>

@@ -4169,6 +4169,9 @@ await (async () => {
         已读/收藏回传语义取保留；
    V2 = Fever 协议选择处单行提示含「API 密码」（FreshRSS 的 Fever/GReader
         均用个人设置里的 API 密码），≤50 字、无分号长链。
+   TASK-102（2026-09-30）owner 返工改判（本块断言已同步改锚）：
+   v1c 断开语义移出常驻提示（确认框承载）、v1-d 回传句改删、
+   V2 提示并入协议卡 desc 位 ≤32 字、协议卡控件恢复直接子元素。
    ============================================================ */
 {
   const fs101 = await import('node:fs');
@@ -4184,14 +4187,15 @@ await (async () => {
     syncTab101.match(/<div className="mini-dialog-hint" style=\{\{ marginTop: 8 \}\}>\s*([\s\S]*?)<\/div>/)?.[1]
       ?.replace(/\s+/g, '') ?? '';
 
-  checkNew('(t101-v1a) 语义a：「测试连接」仅验证登录不拉数据（修前为被点名长句开头）',
-    mainHint101.includes('「测试连接」仅验证登录不拉数据'));
-  checkNew('(t101-v1b) 语义b：「保存并同步」才开始拉取订阅与文章（拉取只由保存触发）',
-    mainHint101.includes('「保存并同步」才开始拉取订阅与文章'));
-  checkNew('(t101-v1c) 语义c：断开连接会移除同步拉取的内容',
-    mainHint101.includes('断开连接会移除同步拉取的内容'));
-  checkNew('(t101-v1-d) 已读/收藏回传语义保留（约1秒内回传服务端；契约允许精简掉，取保留）',
-    mainHint101.includes('已读/收藏等变更约1秒内回传服务端'));
+  checkNew('(t101-v1a) 语义a：「测试连接」仅验证登录（TASK-102 精简口径，验证语义保留）',
+    mainHint101.includes('「测试连接」仅验证登录'));
+  checkNew('(t101-v1b) 语义b：「保存并同步」确认后拉取订阅与文章（拉取只由保存触发，TASK-102 口径）',
+    mainHint101.includes('「保存并同步」确认后拉取订阅与文章'));
+  checkNew('(t101-v1c) 语义c：断开删除语义移出常驻提示（TASK-102），仅由断开确认框承载',
+    !mainHint101.includes('断开')
+    && syncTab101.includes('断开后将移除从服务端拉取的订阅与文章'));
+  checkNew('(t101-v1-d) 已读/收藏回传句删除（TASK-102：解释性冗余；TASK-101 曾取保留，owner 返工改删）',
+    !mainHint101.includes('回传') && !syncTab101.includes('约1秒内回传'));
   checkNew('(t101-v1-len) 新主提示单句 ≤40 字（V1 短句口径；修前单段 74 字）',
     mainHint101.length > 0
     && mainHint101.split('。').filter(Boolean).every((s) => s.length <= 40));
@@ -4200,36 +4204,38 @@ await (async () => {
     && !syncTab101.includes('会立即在后台拉取订阅与文章状态')
     && !syncTab101.includes('已读/收藏等变更约 1 秒内推送到服务端')
     && !syncTab101.includes('断开连接会移除服务端拉取的订阅与文章'));
-  checkNew('(t101-v1-e) SyncTab 恰两块 mini-dialog-hint（主提示 + Fever 提示，不新增解释段落）',
-    (syncTab101.match(/mini-dialog-hint/g) || []).length === 2);
+  checkNew('(t101-v1-e) SyncTab 恰一块 mini-dialog-hint（动作区主提示；Fever 提示已并入协议卡 desc，TASK-102）',
+    (syncTab101.match(/mini-dialog-hint/g) || []).length === 1);
 
-  /* ---------- V2：Fever「API 密码」提示（同步协议卡片内、无 style 的 mini-dialog-hint） ---------- */
-  const feverHint101 =
-    syncTab101.match(/<div className="mini-dialog-hint">\s*([\s\S]*?)<\/div>/)?.[1]
-      ?.replace(/\s+/g, ' ').trim() ?? '';
+  /* ---------- V2：Fever「API 密码」提示（TASK-102 起并入「同步协议」卡 desc 位，
+      独立 mini-dialog-hint 与包裹 div 均删除；≤32 字预算内 FreshRSS/个人设置
+      细节让位，「Fever/GReader 均用」+「非登录密码」核心误区纠正保留） ---------- */
   const protoCard101 =
     syncTab101.slice(syncTab101.indexOf('title="同步协议"'), syncTab101.indexOf('title="后端 Endpoint"'));
+  const protoDesc101 = protoCard101.match(/desc="([^"]+)"/)?.[1] ?? '';
 
-  checkNew('(t101-v2a) Fever 提示含「API 密码」+ 个人设置 + FreshRSS，Fever/GReader 通用且点明非登录密码',
-    feverHint101.includes('API 密码') && feverHint101.includes('个人设置')
-    && feverHint101.includes('FreshRSS') && feverHint101.includes('Fever')
-    && feverHint101.includes('GReader') && feverHint101.includes('非登录密码'));
-  checkNew('(t101-v2b) Fever 提示单行 ≤50 字且无分号长链（V2 口径）',
-    feverHint101.length > 0 && feverHint101.length <= 50
-    && !feverHint101.includes('；') && !feverHint101.includes(';'));
-  checkNew('(t101-v2c) 提示位于「同步协议」卡片（Fever 协议选择区域）内',
-    protoCard101.length > 0 && protoCard101.includes('API 密码'));
+  checkNew('(t101-v2a) API 密码提示在协议卡 desc 位：Fever/GReader 通用且点明非登录密码（TASK-102 口径）',
+    protoDesc101.includes('API 密码') && protoDesc101.includes('Fever')
+    && protoDesc101.includes('GReader') && protoDesc101.includes('非登录密码'));
+  checkNew('(t101-v2b) 协议卡 desc ≤32 字（TASK-102 预算；TASK-101 的 hint ≤50 口径废止）',
+    protoDesc101.length > 0 && protoDesc101.length <= 32);
+  checkNew('(t101-v2c) 协议卡内无第二行常驻 hint、无包裹 div（提示全在 desc 位）',
+    protoCard101.length > 0
+    && !protoCard101.includes('mini-dialog-hint')
+    && !protoCard101.includes('<div'));
 
   /* ---------- 审计项源级断言：三处 >60 字 desc 的压缩前后锁定 ---------- */
   checkNew('(t101-audit-1) SyncTab 用户名 desc 63→45 字：集成页配置/GReader·Fever 共用/非账号密码 三语义全保留',
     syncTab101.includes('Miniflux「集成」页配置的用户名，GReader / Fever 共用（非账号密码）')
     && !syncTab101.includes('页单独配置的用户名')
     && !syncTab101.includes('非 Miniflux 账号密码'));
-  checkNew('(t101-audit-2) ConfigSyncSection Token desc 69→56 字：classic PAT/gist scope/fine-grained 不支持 全保留',
-    configSync101.includes('手动填入替代网页登录，需 classic PAT（勾选 gist scope，fine-grained 不支持）')
+  checkNew('(t101-audit-2) ConfigSyncSection Token desc 56→47 字：classic PAT/gist scope/fine-grained 不支持 全保留（TASK-102 ≤48 口径）',
+    configSync101.includes('手动填入；classic PAT 需勾 gist scope，fine-grained 不支持')
+    && !configSync101.includes('手动填入替代网页登录')
     && !configSync101.includes('fine-grained PAT 不支持 Gist API'));
-  checkNew('(t101-audit-3) ConfigSyncSection WebDAV desc 66→56 字：配置文件名 fluxreader-config.json 保留（子路径示例由输入框 placeholder 表达）',
-    configSync101.includes('例如 https://dav.example.com（配置存为 fluxreader-config.json）')
+  checkNew('(t101-audit-3) ConfigSyncSection WebDAV desc 55→31 字：配置文件名 fluxreader-config.json 保留（示例 URL 由输入框 placeholder 表达，TASK-102 ≤48 口径）',
+    configSync101.includes('配置在服务器存为 fluxreader-config.json')
+    && !configSync101.includes('例如 https://dav.example.com')
     && !configSync101.includes('dav.example.com/fluxreader（配置存为'));
 
   /* ---------- 审计兜底：九个设置组件静态 desc 全量扫描，>60 字清零（修前 63/66/69 三处） ---------- */
@@ -4250,6 +4256,109 @@ await (async () => {
     && cacheCleanup101.includes('正文保留')
     && configSync101.includes('已存在的源会跳过；本地设置与 AI 配置将被远端覆盖')
     && general101.includes('托盘菜单「退出」才是真正退出'));
+}
+
+/* ============================================================
+   TASK-102（2026-09-30）：同步协议卡控件对齐修复 + 设置页文案删除性精简
+   UI 契约 X1/X2/X3：.workflow-kit/docs/UI-CONTRACT-TASK-102-SETTING-COPY.md。
+   X1 = 协议卡 FluxDropdown 恢复为 SettingCard 直接子元素（卡内无包裹 div /
+        常驻 hint——提示文本撑宽包裹层是下拉左移错位根因）；
+   X2 = 动作区提示单行 ≤40 字、两按钮语义一一对齐；「断开会移除拉取内容」
+        与「已读/收藏约 1 秒回传」移出常驻文案；API 密码提示在协议卡 desc 位
+        且 ≤32 字；
+   X3 = 全设置组件文案扫描守卫：中文文案字面量 ≤48 字（新增长文案直接红）
+        + 复述性/花絮 desc 删除清零 + 约束语义（留空提交、托盘真退出、
+        下载覆盖、不可撤销）零丢失。
+   ============================================================ */
+{
+  const fs102 = await import('node:fs');
+  const src102 = (p) => fs102.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const syncTab102 = src102('../src/components/settings/SyncTab.tsx');
+  const general102 = src102('../src/components/settings/GeneralTab.tsx');
+  const reading102 = src102('../src/components/settings/ReadingTab.tsx');
+  const about102 = src102('../src/components/settings/AboutTab.tsx');
+  const configSync102 = src102('../src/components/settings/ConfigSyncSection.tsx');
+  const cacheCleanup102 = src102('../src/components/settings/CacheCleanupSection.tsx');
+  const shared102 = src102('../src/components/settings/shared.ts');
+
+  /* ---------- X1：协议卡结构断言（对齐根因修复） ---------- */
+  const protoCard102 = syncTab102.slice(
+    syncTab102.indexOf('title="同步协议"'),
+    syncTab102.indexOf('title="后端 Endpoint"'),
+  );
+  checkNew('(t102-x1a) 同步协议卡：SettingCard 开标签后直接是 FluxDropdown（直接子元素，无包裹层）',
+    /title="同步协议"\s*desc="[^"]+"\s*>\s*<FluxDropdown/.test(syncTab102));
+  checkNew('(t102-x1b) 同步协议卡：FluxDropdown 闭合后直接 </SettingCard>，卡内无包裹 div、无 hint',
+    /<FluxDropdown[\s\S]*?\/>\s*\n\s*<\/SettingCard>\s*\n\s*<SettingCard\s*\n\s*title="后端 Endpoint"/.test(syncTab102)
+    && !protoCard102.includes('<div')
+    && !protoCard102.includes('mini-dialog-hint'));
+
+  /* ---------- X2：文案断言（单行提示 + 删除语义归位 + API 密码提示） ---------- */
+  const mainHint102 =
+    syncTab102.match(/<div className="mini-dialog-hint" style=\{\{ marginTop: 8 \}\}>\s*([\s\S]*?)<\/div>/)?.[1]
+      ?.replace(/\s+/g, '') ?? '';
+  checkNew('(t102-x2a) 动作区提示单行 ≤40 字：两按钮语义一一对齐（测试连接=仅验证登录；保存并同步=确认后拉取订阅与文章）',
+    mainHint102.length > 0 && mainHint102.length <= 40
+    && mainHint102.includes('「测试连接」仅验证登录')
+    && mainHint102.includes('「保存并同步」确认后拉取订阅与文章'));
+  checkNew('(t102-x2b) 「断开会移除拉取内容」不再常驻：主提示无「断开」，破坏性语义仅由断开确认框承载',
+    !mainHint102.includes('断开')
+    && syncTab102.includes('断开后将移除从服务端拉取的订阅与文章'));
+  checkNew('(t102-x2c) 「已读/收藏约 1 秒回传」删除：常驻提示与整卡均不再出现',
+    !mainHint102.includes('回传')
+    && !syncTab102.includes('约 1 秒内回传')
+    && !syncTab102.includes('约1秒内回传'));
+  const protoDesc102 = protoCard102.match(/desc="([^"]+)"/)?.[1] ?? '';
+  checkNew('(t102-x2d) API 密码提示在协议卡 desc 位且 ≤32 字，卡内无第二行常驻 hint',
+    protoDesc102.includes('API 密码') && protoDesc102.length > 0 && protoDesc102.length <= 32
+    && !protoCard102.includes('mini-dialog-hint'));
+  checkNew('(t102-x2e) 低价值花絮句「两种协议共用 Miniflux…切换不丢数据」已删除（desc 位让给 API 密码提示）',
+    !syncTab102.includes('两种协议共用') && !syncTab102.includes('切换不丢数据'));
+
+  /* ---------- X3：全设置组件文案扫描守卫（新增长文案直接红） ---------- */
+  const scanFiles102 = [
+    'GeneralTab', 'ReadingTab', 'AppearanceTab', 'AboutTab', 'FeedsTab',
+    'AiTab', 'ConfigSyncSection', 'CacheCleanupSection', 'SyncTab',
+    'AutoStartSwitch', 'ShortcutsTab', 'SettingsSidebarFooter',
+  ];
+  /* 去掉注释再取字面量：注释里的引号示例不计入文案；模板串（动态拼接的
+     toast/确认框 message）不在 desc/hint 静态范围，由契约确认框口径另行断言 */
+  const stripComments102 = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const literals102 = scanFiles102.flatMap((f) =>
+    [...stripComments102(src102(`../src/components/settings/${f}.tsx`))
+      .matchAll(/'([^'\n]+)'|"([^"\n]+)"/g)]
+      .map((m) => m[1] ?? m[2]));
+  /* 确认框 message 属对话框文案，不在 X3 desc/hint 范围（49 字，约束语义另锁） */
+  const dialogAllowlist102 = new Set([
+    '断开后将移除从服务端拉取的订阅与文章（含已读/收藏绑定），本地直连添加的订阅不受影响。确定断开吗？',
+  ]);
+  const cjkCopy102 = [...new Set(literals102)]
+    .filter((t) => /[\u4e00-\u9fff]/.test(t) && !dialogAllowlist102.has(t));
+  checkNew('(t102-x3a) 全设置组件中文文案字面量扫描（' + cjkCopy102.length + ' 条去重）：无 >48 字',
+    cjkCopy102.length > 60
+    && !cjkCopy102.some((t) => t.length > 48));
+  checkNew('(t102-x3b) 复述性/花絮 desc 删除清零：General×4、Reading×5、About×1、ConfigSync×1、SyncTab×1 原文不再出现',
+    !general102.includes('点击选中文章后立即更新本地已读状态')
+    && !general102.includes('卡片滚出时间流上沿即视为已浏览')
+    && !general102.includes('下次打开应用时默认进入的视图')
+    && !general102.includes('仅展示未读流内容')
+    && !reading102.includes('选择阅读器正文渲染字体家族')
+    && !reading102.includes('调整正文基础显示大小')
+    && !reading102.includes('调整正文段落行间距比例')
+    && !reading102.includes('限制单行文本长度以优化可读性')
+    && !reading102.includes('在文章信息栏显示估算阅读时长')
+    && !about102.includes('检测 GitHub Releases 上的最新版本')
+    && !configSync102.includes('服务器登录账号')
+    && !syncTab102.includes('集成密码（Google Reader / Fever 共用）'));
+  checkNew('(t102-x3c) 约束语义零丢失：留空提交=保持密码、托盘真退出、下载覆盖本地、清理不可撤销、收藏与待同步保留',
+    syncTab102.includes('留空提交 = 保持当前密码')
+    && general102.includes('托盘菜单「退出」才是真正退出')
+    && configSync102.includes('下载会覆盖本地设置与 AI 配置')
+    && cacheCleanup102.includes('此操作不可撤销')
+    && cacheCleanup102.includes('收藏文章与待同步状态始终保留'));
+  const subtitles102 = [...shared102.matchAll(/subtitle: '([^']+)'/g)].map((m) => m[1]);
+  checkNew('(t102-x3d) 侧栏 8 个 tab subtitle（组标题级说明同口径）全部 ≤48 字',
+    subtitles102.length === 8 && subtitles102.every((t) => t.length <= 48));
 }
 
 // ---- 汇总 ----
