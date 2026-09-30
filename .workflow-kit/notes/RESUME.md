@@ -83,7 +83,6 @@
 
 ## 最近事件
 
-- 2026-09-29T22:37:43.240653Z · note/progress · v0.16.1 发布成功（2026-09-30 06:37Z，Release run #33 completed:success）：GitHub Latest「FluxReader v0.16.1」，target=0aafc038（main，含 TASK-101 修复+release.yml 三项修正），资产 FluxReader_0.16.1_x64-setup.exe（5,894,799 B）+ msi（8,495,104 B），正文=850 字符完整发布说明（tag 附注即 Release 正文机制实战成功）。发布链路三笔修正（全走 dev→main）：①浅检出把 annotated tag 读成提交信息→API 读 tag 对象；②tauri-action 不覆盖同名资产→构建前清空既有资产（#31 失败根因）；③判据字段错（/git/tags 无顶层 type，#32 失败根因）→ref.object.type。操作事故两笔复盘：①合并协议命令链断（git rm 对无工作流改动的合并报 fatal）致 merge 未提交、后续 tag 步骤照跑——lesson：协议命令需容错（|| true）且长链失败后必须先核对现场再继续；②dev 上 git merge main 发生快进，dev tip 被推到 main 状态、.workflow-kit 全删——已 reset e1c516a + cherry-pick 修正 + force-with-lease 恢复（8fc1c34）——lesson：跨分支操作前必查 git branch --show-current，判据 merge base；main→dev 的同步禁用 merge（dev 是 main 祖先时会快进吞掉工作流内容）。dev 版本号仍为 0.16.0（bump 属 main 发布线，随下次合并同步）。CI #121/#122（main）、#123+（dev）全绿
 - 2026-09-30T02:30:52.844087Z · prepare · TASK-102 · 任务已冻结：设置页协议控件对齐修复与冗余文案清理（含删除性精简）；范围 src/**, tools/frontend-regression.mjs
 - 2026-09-30T02:31:03.198298Z · checkpoint · TASK-102 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
 - 2026-09-30T03:19:52.169184Z · checkpoint · TASK-102 · 编码结果已记录，差异范围已核对：src/components/settings/AboutTab.tsx, src/components/settings/CacheCleanupSection.tsx, src/components/settings/ConfigSyncSection.tsx, src/components/settings/GeneralTab.tsx, src/components/settings/ReadingTab.tsx, src/components/settings/SyncTab.tsx, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
@@ -95,6 +94,7 @@
 - 2026-09-30T04:02:59.941731Z · checkpoint · TASK-102 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-09-30T04:03:10.298805Z · accept · 验收 TASK-102；依据：owner 2026-09-30 会话指示：「现在调整之后选择协议的控件左移错位了，并且现在同步页的文案还是太长……」；TASK-102 双 worker 交付（首例跨配额中断续作）、verify RUN-e39d2c3c 全绿、全新独立审查 PASS findings=0（X1 对齐 0px 实测、X3 独立复扫 212 条，agent_8d15915e）
 - 2026-09-30T04:03:27.967369Z · note/progress · TASK-102 收口（2026-09-30 07:0x 本地）：设置页协议控件对齐修复（根因=.setting-card 双列布局被裸 div 撑宽，提示移 desc 位、下拉恢复直接子元素，真机实测与 8 参照控件右缘偏差 0px）+ 动作区提示单行化（30 字，断开删除语义回归确认框承载）+ 全设置页删除性审计（9 组件，X3 独立复扫 212 条字面量无超限）。跨 worker 承接（首例配额中断续作），回归 527/527（t102-* 新增 11 条、t101 换锚 10 条）。流程插曲：verify 三次 interrupted 根因=reset --hard 重置 mtime 触发 cargo 全量重编译超出门禁默认 300s——后台 cargo test --no-run 预热后一次通过（lesson：大范围 mtime 变更后先预热编译再 verify）。验收 DEC-473b2d2a1f0c4428a2dfdd38e3b4691f。下一步：提交推 dev → CI 绿 → 协议合并 main（owner 未要求发版，不打 tag）
+- 2026-09-30T05:26:32.064442Z · note/progress · v0.16.2 发布成功（2026-09-30 13:26Z，Release run #35）：GitHub Latest「FluxReader v0.16.2」，target=bump 提交，资产 setup.exe（5,895,398 B）+ msi（8,495,104 B），正文=完整发布说明（距 v0.16.1 共 6 个提交——rev-list 实测）。内容=TASK-102 设置页控件对齐修复与冗余文案删除性精简。发布插曲一笔：提交数回填先按过时口算写了 3，rev-list 实测 6——tag 已推后才发现，立即删tag重打修正（lesson：回填数字必须以当刻 rev-list 输出为准，不得用记忆值；rev-list 命令要与 sed 同一命令块执行）。工作流三修正（API 读附注/清资产/判据）在 #34/#35 连续两次运行中均稳定工作
 
 ## 如何继续
 
