@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "id": "RUN-1b42a07bda04456fa2f416a18e769d21",
+  "task_id": "TASK-107",
+  "kind": "verification",
+  "outcome": "completed",
+  "executor": {
+    "harness": "local_process",
+    "model": null,
+    "context_id": "tool-0421ee7051b046898d45a943019956c1"
+  },
+  "started_at_utc": "2026-10-05T10:27:47.726198Z",
+  "finished_at_utc": "2026-10-05T10:28:10.917069Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "2a5f21c9b64ccf6c246b20ed4dfdc8cec1e037b617b9962ecf28fd63f862912e",
+  "candidate_digest": "3571a869b44b36aae4dfe3dccbaef201d4dca709171ec48a15d4a2ea417786d3",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-cargo_fmt.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-cargo_fmt.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-lint.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-lint.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-build.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-build.stderr.txt",
+    ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-frontend.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-frontend.stderr.txt"
+  ],
+  "checks": [
+    {
+      "gate_id": "cargo_test",
+      "status": "NOT_APPLICABLE",
+      "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job（windows-latest）在 dev 推送时承担，CI 绿后合并；本地探针证据 tmp/refactor-20261005/msvc_probe.py"
+    },
+    {
+      "gate_id": "cargo_fmt",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-cargo_fmt.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-cargo_fmt.stderr.txt",
+      "candidate_digest": "3571a869b44b36aae4dfe3dccbaef201d4dca709171ec48a15d4a2ea417786d3",
+      "command": {
+        "argv": [
+          "C:\\Users\\Wade\\.cargo\\bin\\cargo.exe",
+          "fmt",
+          "--check"
+        ],
+        "cwd": "src-tauri",
+        "started_at_utc": "2026-10-05T10:27:48.305701Z",
+        "finished_at_utc": "2026-10-05T10:27:49.164222Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-cargo_fmt.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-cargo_fmt.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "cargo_clippy",
+      "status": "NOT_APPLICABLE",
+      "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job（windows-latest）在 dev 推送时承担，CI 绿后合并；本地探针证据 tmp/refactor-20261005/msvc_probe.py"
+    },
+    {
+      "gate_id": "lint",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-lint.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-lint.stderr.txt",
+      "candidate_digest": "3571a869b44b36aae4dfe3dccbaef201d4dca709171ec48a15d4a2ea417786d3",
+      "command": {
+        "argv": [
+          "D:\\Program Files\\nodejs\\node.EXE",
+          "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "lint"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-10-05T10:27:49.218002Z",
+        "finished_at_utc": "2026-10-05T10:27:49.684822Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-lint.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-lint.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "build",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-build.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-build.stderr.txt",
+      "candidate_digest": "3571a869b44b36aae4dfe3dccbaef201d4dca709171ec48a15d4a2ea417786d3",
+      "command": {
+        "argv": [
+          "D:\\Program Files\\nodejs\\node.EXE",
+          "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "build"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-10-05T10:27:49.734620Z",
+        "finished_at_utc": "2026-10-05T10:27:53.286196Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-build.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-build.stderr.txt"
+      }
+    },
+    {
+      "gate_id": "frontend",
+      "status": "PASS",
+      "exit_code": 0,
+      "log": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-frontend.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-frontend.stderr.txt",
+      "candidate_digest": "3571a869b44b36aae4dfe3dccbaef201d4dca709171ec48a15d4a2ea417786d3",
+      "command": {
+        "argv": [
+          "D:\\Program Files\\nodejs\\node.EXE",
+          "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+          "run",
+          "test:frontend"
+        ],
+        "cwd": ".",
+        "started_at_utc": "2026-10-05T10:27:53.336767Z",
+        "finished_at_utc": "2026-10-05T10:28:10.770031Z",
+        "exit_code": 0,
+        "timed_out": false,
+        "cancelled": false,
+        "stdout": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-frontend.stdout.txt",
+        "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-frontend.stderr.txt"
+      }
+    }
+  ],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "pid": 36904,
+  "controller_pid": 27868,
+  "commands": [
+    {
+      "argv": [
+        "C:\\Users\\Wade\\.cargo\\bin\\cargo.exe",
+        "fmt",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "started_at_utc": "2026-10-05T10:27:48.305701Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-cargo_fmt.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-cargo_fmt.stderr.txt",
+      "finished_at_utc": "2026-10-05T10:27:49.164222Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "D:\\Program Files\\nodejs\\node.EXE",
+        "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-10-05T10:27:49.218002Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-lint.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-lint.stderr.txt",
+      "finished_at_utc": "2026-10-05T10:27:49.684822Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "D:\\Program Files\\nodejs\\node.EXE",
+        "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-10-05T10:27:49.734620Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-build.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-build.stderr.txt",
+      "finished_at_utc": "2026-10-05T10:27:53.286196Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    },
+    {
+      "argv": [
+        "D:\\Program Files\\nodejs\\node.EXE",
+        "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "started_at_utc": "2026-10-05T10:27:53.336767Z",
+      "stdout": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-frontend.stdout.txt",
+      "stderr": ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-frontend.stderr.txt",
+      "finished_at_utc": "2026-10-05T10:28:10.770031Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "cancelled": false
+    }
+  ]
+}

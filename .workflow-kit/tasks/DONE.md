@@ -77,5 +77,8 @@
 | [TASK-100](items/TASK-100.json) | 发布前自检遗留项收口：前端 P2×2+P3×26、Rust P3×7（自检三报告 20260928 的未修复项） | done |
 | [TASK-101](items/TASK-101.json) | Fever 协议对 FreshRSS 认证修复（api_key 必须走 POST form body）与设置页冗长文案精简 | done |
 | [TASK-102](items/TASK-102.json) | 设置页协议控件对齐修复与冗余文案清理（含删除性精简） | done |
+| [TASK-103](items/TASK-103.json) | 文章快照与正文水合生命周期统一——刷新不丢正文、水合终态完备（REQ-001） | cancelled |
+| [TASK-104](items/TASK-104.json) | 全部已读与标读计数一致性——按后端实际影响数对账、失败不假成功（REQ-003） | cancelled |
+| [TASK-105](items/TASK-105.json) | Rust 状态写入事务化——文章状态与待同步队列同生共死（REQ-002） | cancelled |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

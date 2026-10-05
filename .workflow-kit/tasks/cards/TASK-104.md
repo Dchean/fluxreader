@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-104 · 全部已读与标读计数一致性——按后端实际影响数对账、失败不假成功（REQ-003）
 
-**状态**：ready
+**状态**：cancelled
 
 **目标**：修复外部审计探针复现的计数缺口（AUDIT-20261005-core-consistency.md）：①src/store/slices/nav.ts markCurrentViewAllRead 乐观调用 markEntriesRead(ids) 只对已加载条目扣计数，而后端 apply_mark_all_read 处理整个范围（探针：范围 600 条未读、前端加载 1 条，后端成功后界面仍显示 599 条未读）。api.markAllRead 已返回实际标读条数（usize）但前端忽略返回值。修法要求：成功路径以返回条数校验并以 api.feedCounts() 重取全量计数（与 reloadFromBackend 同一计数来源），替代「只按已加载条目推算」；本地已加载条目的已读态允许乐观先行但失败必须回滚（保存原 read 态，catch 恢复并 toast），不允许「计数已扣、状态已改」的假成功；范围语义（feed/folder/starredOnly/sinceMs/layout）不动。②单条标读与计数一致性核查（审计「标读后数字、显示不一致」缺口）：核查 setRead/markEntriesRead 路径对 feedCounts.unread 的扣减与后端口径是否一致——含同文副本去重场景（本地主条目标读、副本计数归属）与跨布局不可见条目；发现不一致即修复并以断言锁定，确认一致的路径在 progress 写明核查结论，不得静默跳过。③t104-* 断言 ≥4 条：全部已读成功后计数=后端口径（600/1 探针场景转断言）、失败回滚不假成功、单条标读计数一致、范围外布局计数不受影响。coder 开工前先用探针/测试实证单条路径现状，据实决定修复面。
 
@@ -37,10 +37,11 @@
 - 时钟：未开始
 - 已用修复轮：0
 - 阻塞：无
-- 下一步：执行 start/next 获取可继续的动作
+- 下一步：如需同一目标，准备新的任务并引用本任务作为历史
 
 ## 最近检查点
 
+- 2026-10-05T08:08:48.768041Z：任务已取消：输入快照随 TASK-103 编码漂移（src/**），且门禁配置需按 DEC-local-cargo-gate-20261005 修正；取消后在前置任务落地时以修正规格即时重建，任务目标与验收不变。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
 
 ## 原始证据
 

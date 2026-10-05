@@ -1,0 +1,21 @@
+{
+  "task_id": "TASK-107",
+  "run_id": "RUN-b56aea5e4bdb46638cddb0c1189562f1",
+  "status": "ready_for_verification",
+  "summary": "修复轮 R2（审查 finding#2 断言缺口）：tools/frontend-regression.mjs 新增 t104-snapshot-voids-rollback-claim ×3 与 t104-snapshot-fresh-claim-rollback ×2——判别性覆盖 mergeSnapshotEntries 的 bump 副作用（外部 DB 写入+快照替换+迟到回滚不踩后端真值；快照后新声明回滚仍正常）；修正 harness mock 行级 mutation 的数字/布尔不忠实（wire 口径与 Rust Serialize 一致），二次变异验证恰好 1 条判别断言转红。上抛语义观察（缓存恢复路径 bump 不精确）留主控裁定，未动 src。自检：test:frontend 561/561、lint 0、build exit 0。",
+  "changed_files": [
+    "src/store/internals.ts",
+    "src/store/slices/nav.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "frontend",
+    "lint",
+    "build",
+    "cargo_fmt"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

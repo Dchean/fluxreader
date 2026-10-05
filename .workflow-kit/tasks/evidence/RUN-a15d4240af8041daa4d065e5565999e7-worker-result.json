@@ -1,0 +1,27 @@
+{
+  "task_id": "TASK-106",
+  "run_id": "RUN-a15d4240af8041daa4d065e5565999e7",
+  "status": "ready_for_verification",
+  "summary": "REQ-001 根因修复：①新增 internals.mergeSnapshotEntries 按 id 继承正文字段（content/rawContent/translatedContent/aiSummary/fulltextExtracted/hydrated/url），reloadFromBackend/reloadFilteredEntries/anchorToArticle/selectLayout/selectView/selectFeed 六个快照替换点统一走合并，hydratedIds/hydrationErrors 按 id 裁剪不再无条件清空；②新增 selectors.entryNeedsHydration 纯函数，useLazyHydrate 按需水合布尔订阅、effect 依赖 [id, needsHydration]，消除「显示加载中但无请求」死区；③hydrateArticleContent 重写：模块级在途 Set 去重、空 rows/缺行落「文章不存在或已被删除」终态、失败保留 hydrationErrors 内联重试、落地时按现态逐 id 复核防乱序覆盖；④frontend-regression 新增 14 条 t103-* 断言（含冲突断言改写 1 处并附理由），harness 假后端 get_articles 增加可控行为。编码原在 TASK-103 轮完成（RUN-cebca80c/2e4b96f5，因门禁环境误配取消重建，代码未变）；自检：test:frontend 543/543、lint 0 警告、build exit 0。备注（非阻塞）：空正文终态后远端后来才有正文的会话内语义保持现状（实体模型重构属二阶段）；NotifCard 无 hydrationErrors 渲染分支，失败时显示 snippet（无占位无死区），视觉不变。",
+  "changed_files": [
+    "src/components/Timeline.tsx",
+    "src/store/internals.ts",
+    "src/store/selectors.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "frontend",
+    "lint",
+    "build",
+    "cargo_test",
+    "cargo_fmt",
+    "cargo_clippy"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

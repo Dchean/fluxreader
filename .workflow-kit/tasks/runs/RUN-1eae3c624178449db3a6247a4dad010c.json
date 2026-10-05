@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-1eae3c624178449db3a6247a4dad010c",
+  "task_id": "TASK-108",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "主控派发：编程子代理实施 REQ-002/003 Rust 状态写入事务化；dev@e1d3793 基线"
+  },
+  "started_at_utc": "2026-10-05T11:44:14.618389Z",
+  "finished_at_utc": "2026-10-05T11:55:21.646626Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "a48986a09046f18797aa33490412912a3489d3b30cab1fb74e33f0114aba16c0",
+  "candidate_digest": "9bb3189a3115e8d4e7f520b5fdbd4f22cf58b312d083861e214a4b05a140b6c2",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-1eae3c624178449db3a6247a4dad010c-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-1eae3c624178449db3a6247a4dad010c-scope.json"
+}

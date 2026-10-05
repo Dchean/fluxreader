@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-a15d4240af8041daa4d065e5565999e7",
+  "task_id": "TASK-106",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "承接 TASK-103 编码结果（stash 待恢复）：REQ-001 正文水合生命周期修复；主控持有 worker-result"
+  },
+  "started_at_utc": "2026-10-05T08:14:21.342678Z",
+  "finished_at_utc": "2026-10-05T08:15:19.711421Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "ab0e668e528e0031cc76e0b90f738d88ebf6850cdf0fedae635e3636045ac2d0",
+  "candidate_digest": "2a5f21c9b64ccf6c246b20ed4dfdc8cec1e037b617b9962ecf28fd63f862912e",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-a15d4240af8041daa4d065e5565999e7-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-a15d4240af8041daa4d065e5565999e7-scope.json"
+}

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-b56aea5e4bdb46638cddb0c1189562f1",
+  "task_id": "TASK-107",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "修复轮 R2：补 mergeSnapshotEntries bump 的缺失断言（R1 审查 finding#2）；复用编程子代理 agent_7d216075"
+  },
+  "started_at_utc": "2026-10-05T10:46:35.017960Z",
+  "finished_at_utc": "2026-10-05T11:15:10.747198Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "2a5f21c9b64ccf6c246b20ed4dfdc8cec1e037b617b9962ecf28fd63f862912e",
+  "candidate_digest": "2143649479399f31bc681309b8c369dcc15ae515237582860c97184f5092c413",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-b56aea5e4bdb46638cddb0c1189562f1-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-b56aea5e4bdb46638cddb0c1189562f1-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-fe014c746ccb4c9e92aa1e9044bb7ff0-scope.json"
+}

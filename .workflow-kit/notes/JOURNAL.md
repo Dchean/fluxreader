@@ -571,3 +571,52 @@
 - 2026-10-05T07:03:50.873863Z · prepare · TASK-103 · 任务已冻结：文章快照与正文水合生命周期统一——刷新不丢正文、水合终态完备（REQ-001）；范围 src, tools/frontend-regression.mjs
 - 2026-10-05T07:05:33.495357Z · prepare · TASK-104 · 任务已冻结：全部已读与标读计数一致性——按后端实际影响数对账、失败不假成功（REQ-003）；范围 src, tools/frontend-regression.mjs
 - 2026-10-05T07:07:07.311683Z · prepare · TASK-105 · 任务已冻结：Rust 状态写入事务化——文章状态与待同步队列同生共死（REQ-002）；范围 src-tauri/src
+- 2026-10-05T07:08:18.228918Z · checkpoint · TASK-103 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-05T07:50:25.107941Z · checkpoint · TASK-103 · Worker requests manager action; inspect the result；下一步：处理执行者提出的请求，再 unblock 后 begin；不要新建任务或重置预算
+- 2026-10-05T07:51:19.853671Z · checkpoint · TASK-103 · 阻塞已处置（action_required）：首次 finish 因 worker-result unresolved_items 非空被判 action_required；主控已核对：unresolved 两项均为非阻塞备注（会话内空正文终态语义、NotifCard 视觉不变），已并入 summary 清空列表重交。代码改动范围经 diff 核对全部在 allowed_paths 内。；下一步：begin 重新实现
+- 2026-10-05T07:51:20.178120Z · unblock · TASK-103 · action_required → ready；依据：DEC-refactor-roadmap-20261005
+- 2026-10-05T07:52:17.967590Z · checkpoint · TASK-103 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-05T07:53:01.821608Z · checkpoint · TASK-103 · 编码结果已记录，差异范围已核对：src/components/Timeline.tsx, src/store/internals.ts, src/store/selectors.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-05T07:53:17.049914Z · checkpoint · TASK-103 · Required gate failed: cargo_test；下一步：先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算
+- 2026-10-05T08:08:11.357206Z · checkpoint · TASK-103 · 阻塞已处置（test_failure）：前次 verify 失败根因是环境性的：本机无 MSVC 链接器导致 cargo_test 必败（GNU link.exe 遮蔽+无 VS Build Tools，探针证据在案）。主控已将 cargo_test/cargo_clippy 改为可选门禁并记录决定；cargo 权威证据由 CI rust job 承担。非代码问题，恢复验证。；下一步：verify 当前候选
+- 2026-10-05T08:08:11.737757Z · unblock · TASK-103 · test_failure → verifying；依据：DEC-local-cargo-gate-20261005
+- 2026-10-05T08:08:48.772225Z · checkpoint · TASK-104 · 任务已取消：输入快照随 TASK-103 编码漂移（src/**），且门禁配置需按 DEC-local-cargo-gate-20261005 修正；取消后在前置任务落地时以修正规格即时重建，任务目标与验收不变。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
+- 2026-10-05T08:08:49.109227Z · cancel · TASK-104 · 输入快照随 TASK-103 编码漂移（src/**），且门禁配置需按 DEC-local-cargo-gate-20261005 修正；取消后在前置任务落地时以修正规格即时重建，任务目标与验收不变。；依据：DEC-local-cargo-gate-20261005
+- 2026-10-05T08:08:55.068732Z · checkpoint · TASK-105 · 任务已取消：冻结摘要因门禁修正过期（DEC-local-cargo-gate-20261005）；取消后派发前以修正规格即时重建，任务目标与验收不变。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
+- 2026-10-05T08:08:55.487770Z · cancel · TASK-105 · 冻结摘要因门禁修正过期（DEC-local-cargo-gate-20261005）；取消后派发前以修正规格即时重建，任务目标与验收不变。；依据：DEC-local-cargo-gate-20261005
+- 2026-10-05T08:10:38.648622Z · checkpoint · TASK-103 · 任务已取消：主控立项时误将 cargo_test/cargo_clippy 设为必需门禁，与本机无 MSVC 链接器的环境事实冲突（DEC-local-cargo-gate-20261005）；prepare 后改门禁被 verify 的防 rehash 设计正确拒绝。按工具设计取消原卡，以修正门禁（cargo_test/clippy 可选+理由，cargo 权威证据=CI rust job）重建同规格任务；代码改动已 stash，将在新卡 begin 前恢复以保证输入快照→候选差异完整。编码结果经 frontend 543/543、lint、build 自检通过。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
+- 2026-10-05T08:10:39.006783Z · cancel · TASK-103 · 主控立项时误将 cargo_test/cargo_clippy 设为必需门禁，与本机无 MSVC 链接器的环境事实冲突（DEC-local-cargo-gate-20261005）；prepare 后改门禁被 verify 的防 rehash 设计正确拒绝。按工具设计取消原卡，以修正门禁（cargo_test/clippy 可选+理由，cargo 权威证据=CI rust job）重建同规格任务；代码改动已 stash，将在新卡 begin 前恢复以保证输入快照→候选差异完整。编码结果经 frontend 543/543、lint、build 自检通过。；依据：DEC-local-cargo-gate-20261005
+- 2026-10-05T08:12:33.777616Z · prepare · TASK-106 · 任务已冻结：文章快照与正文水合生命周期统一——刷新不丢正文、水合终态完备（承接 TASK-103，REQ-001）；范围 src, tools/frontend-regression.mjs
+- 2026-10-05T08:14:22.005496Z · checkpoint · TASK-106 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-05T08:15:20.015597Z · checkpoint · TASK-106 · 编码结果已记录，差异范围已核对：src/components/Timeline.tsx, src/store/internals.ts, src/store/selectors.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-05T08:15:42.670379Z · checkpoint · TASK-106 · Required gate failed: cargo_fmt；下一步：先核对已有文件及原始日志，再处理 test_failure；不要新建任务或重置预算
+- 2026-10-05T08:20:22.925338Z · note/context · 环境修复（DEC-local-cargo-gate-20261005 补充）：本机 .cargo/bin 全部 shim 为 rustup.exe 符号链接，workflow runtime resolve_program 的 Path.resolve() 追链后以 rustup.exe 身份执行导致 cargo test/fmt 报「invalid value ... for [+toolchain]」。已把 cargo.exe 符号链接替换为等价实体副本（rustup shim 按 argv[0] 文件名分发，副本语义不变，rustup 默认 Windows 形态即实体副本）。cargo --version/rustfmt --version 复验通过。TASK-106 的 cargo_fmt 本地门禁恢复可执行。
+- 2026-10-05T08:20:27.318240Z · checkpoint · TASK-106 · 阻塞已处置（test_failure）：前次 cargo_fmt 失败根因是 .cargo/bin 符号链接被 runtime resolve 成 rustup.exe（已以实体副本修复并复验 cargo fmt --version 正常），非代码格式问题；cargo fmt --check 手动复跑 exit 0。恢复验证。；下一步：verify 当前候选
+- 2026-10-05T08:20:27.561387Z · unblock · TASK-106 · test_failure → verifying；依据：DEC-local-cargo-gate-20261005
+- 2026-10-05T08:20:56.084294Z · checkpoint · TASK-106 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-05T08:35:24.992077Z · checkpoint · TASK-106 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-05T08:38:34.820818Z · prepare · TASK-107 · 任务已冻结：全部已读与标读计数一致性——按后端实际影响数对账、失败不假成功（REQ-003）；范围 src, tools/frontend-regression.mjs
+- 2026-10-05T08:39:09.528974Z · checkpoint · TASK-107 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-05T08:51:40.666508Z · note/context · TASK-106 · CI 权威证据：dev@76f3256（TASK-106 候选）GitHub Actions CI 全绿（frontend job + rust job，windows-latest cargo test + clippy -D warnings），2026-10-05 完成于约 08:52Z。cargo_test/cargo_clippy 本地可选门禁由本次 CI 运行覆盖（DEC-local-cargo-gate-20261005 补偿控制生效）。
+- 2026-10-05T09:21:15.260238Z · checkpoint · TASK-107 · 编码结果已记录，差异范围已核对：src/store/internals.ts, src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-05T09:21:49.160227Z · checkpoint · TASK-107 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-05T10:05:47.431149Z · checkpoint · TASK-107 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-05T10:06:45.399052Z · checkpoint · TASK-107 · 阻塞已处置（review_failure）：独立审查 PASS 但附 2 条低危 findings，按工具规则进修复轮：①全部已读失败回滚的等值守卫在同值覆盖窗口会误踩用户 toggle 接管（升级为版本化守卫）；②feedCounts 重取失败静默残留（收紧可见性/自愈路径）。均为小改；修复后重新 verify+独立审查。；下一步：begin 重新实现
+- 2026-10-05T10:06:45.651051Z · unblock · TASK-107 · review_failure → ready；依据：DEC-refactor-roadmap-20261005
+- 2026-10-05T10:07:35.204343Z · checkpoint · TASK-107 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-05T10:27:42.274931Z · checkpoint · TASK-107 · 编码结果已记录，差异范围已核对：src/store/internals.ts, src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-05T10:28:11.224418Z · checkpoint · TASK-107 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-05T10:45:48.248135Z · checkpoint · TASK-107 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-05T10:46:00.482019Z · checkpoint · TASK-107 · 阻塞已处置（review_failure）：R1 审查 PASS 附 3 条低危：#2 mergeSnapshotEntries bump 无断言覆盖是真实缺口（R2 补断言）；#1/#3 为自愈型角例（双失败窗口、affected=0 短路），修之恐引入更差行为，按 findings=可执行缺陷口径交下轮审查裁定，分析保留在报告 summary 供 owner 查阅。修复轮 2/4。；下一步：begin 重新实现
+- 2026-10-05T10:46:00.751938Z · unblock · TASK-107 · review_failure → ready；依据：DEC-refactor-roadmap-20261005
+- 2026-10-05T10:46:35.599039Z · checkpoint · TASK-107 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-05T11:15:11.041843Z · checkpoint · TASK-107 · 编码结果已记录，差异范围已核对：src/store/internals.ts, src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-05T11:15:52.373056Z · checkpoint · TASK-107 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-05T11:40:03.113740Z · checkpoint · TASK-107 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-05T11:40:27.990777Z · note/todo · 二阶段微任务候选（R2 审查裁定记录）：mergeSnapshotEntries 增加 fromBackend 参数把 bump 收窄到后端真值路径（bootstrap.ts 三处传 true，nav.ts 三处缓存恢复不 bump）——审查确认修法技术成立（nav 不 bump 不会重开快照踩踏缺口），当前角例双窄窗口+自愈故不阻塞；宜与二阶段「查询缓存/操作版本模型」一并实施。来源：TASK-107 R2 审查（agent_e92dd332）。
+- 2026-10-05T11:43:28.385117Z · prepare · TASK-108 · 任务已冻结：Rust 状态写入事务化——文章状态与待同步队列同生共死（REQ-002）；范围 src-tauri/src
+- 2026-10-05T11:44:15.349537Z · checkpoint · TASK-108 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-05T11:55:21.953657Z · checkpoint · TASK-108 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/db.rs, src-tauri/src/db/articles.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-05T11:55:58.440008Z · checkpoint · TASK-108 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-05T12:19:28.855805Z · checkpoint · TASK-108 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-05T12:37:10.453887Z · note/context · TASK-108 · CI 权威证据：dev@8c1501f（TASK-108 候选）GitHub Actions CI 全绿（rust job windows-latest：cargo test 含新增 4 条故障注入测试 + clippy -D warnings；frontend job 亦绿），编译验证缺口由此闭合。独立审查（agent_1ab56972，PASS findings=0）已落账。

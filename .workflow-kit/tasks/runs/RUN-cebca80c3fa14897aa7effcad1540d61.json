@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-cebca80c3fa14897aa7effcad1540d61",
+  "task_id": "TASK-103",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "主控派发：编程子代理按卡片实施 REQ-001 正文水合生命周期修复；dev@f3e3822 基线"
+  },
+  "started_at_utc": "2026-10-05T07:08:17.426023Z",
+  "finished_at_utc": "2026-10-05T07:50:24.730627Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "ab0e668e528e0031cc76e0b90f738d88ebf6850cdf0fedae635e3636045ac2d0",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-cebca80c3fa14897aa7effcad1540d61-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-cebca80c3fa14897aa7effcad1540d61-scope.json",
+  "failure_kind": "action_required",
+  "failure_reason": "Worker requests manager action; inspect the result"
+}

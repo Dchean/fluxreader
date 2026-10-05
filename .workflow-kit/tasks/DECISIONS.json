@@ -2805,6 +2805,23 @@
     "REQ-007"
    ],
    "recorded_at_utc": "2026-10-05T07:02:15.467669Z"
+  },
+  {
+   "id": "DEC-local-cargo-gate-20261005",
+   "issuer": "owner",
+   "status": "accepted",
+   "source": "owner 2026-10-05 会话指示按流程推进重构；环境事实：本机（Windows）无 MSVC 链接器——vswhere 缺失、VS2022 目录空壳、无 Windows SDK，净化 PATH 后 rustc 报「linker link.exe not found」，cargo test/check 的 build script 链接全部失败（探针证据 tmp/refactor-20261005/msvc_probe.py；外部审计同报 link.exe 阻断）",
+   "statement": "本机 cargo_test/cargo_clippy 门禁降为可选（required=false + 环境理由），cargo_fmt 本地照常（不需要链接器）；cargo 测试与 clippy 的权威证据由 CI rust job（windows-latest，dev 推送即跑，.github/workflows/ci.yml）承担——分支协议本就要求 CI 绿后才合并 main，合并前 CI 即为 cargo 门禁。TASK-105（Rust 事务化）的 verify 本地跑 frontend/lint/build/fmt 四门禁，cargo 证据以 dev 推送后的 CI 运行为准。本机如需恢复本地 cargo 全门禁，后续可安装 VS Build Tools（需 owner 授权）。",
+   "scope": [
+    "TASK-103",
+    "TASK-104",
+    "TASK-105",
+    "REQ-001",
+    "REQ-002",
+    "REQ-003",
+    "REQ-007"
+   ],
+   "recorded_at_utc": "2026-10-05T08:04:07.106490Z"
   }
  ]
 }

@@ -1,0 +1,68 @@
+{
+  "task_id": "TASK-107",
+  "candidate_digest": "3571a869b44b36aae4dfe3dccbaef201d4dca709171ec48a15d4a2ea417786d3",
+  "verification_run": "RUN-1b42a07bda04456fa2f416a18e769d21",
+  "verdict": "PASS",
+  "summary": "复核 TASK-107 修复轮 R1（候选摘要 3571a869…，工作树三个变更文件逐一 sha256 与 R1 候选 manifest 比对一致；R0 候选 99e7adf6 与 R1 候选已区分确认）。F1：entryMutationVersion 版本计数器接入 flipEntryFlag/markEntriesRead/mergeSnapshotEntries 三个真实写入点，核查确认全仓 isRead 写入均汇入前两个函数（selectArticle markReadOnOpen、markEntriesReadBulk、anchorToArticle、optimisticEntryFlagToggle 皆经由之；sync slice 不写本地条目），单条 toggle 每次真实翻转（含失败 flip-back）必 bump，markCurrentViewAllRead 失败回滚以「版本未变」为恢复前提、值守卫保留作快速短路；单条 toggle 与全部已读回滚并发的守卫行为经变异与代码推演正确。快照替换逐 id bump 语义正确（后端行级真值使在途乐观声明失效），与 TASK-106 水合合并、hydrateArticleContent 无冲突无循环（版本 Map 不触碰正文/水合字段， hydrate 不写 isRead）。F2：对账收口 reconcileCounts，首次失败诊断 toast（16 字，与「全部已读保存失败」文案明确区分）+ 3s 一次静默重试后放弃，reloadFromBackend 确认重取同一 feed_counts 来源（自愈链路成立）。变异复现：删版本守卫、删 flipEntryFlag bump 各精准转红 2 条 rollback-guard-versioned；F2 退化静默转红 2 条 reconcile-retry（第 3 条「停留乐观值 599」为状态记录型断言，修前修后同过）——共 4 条新断言具判别力，与作者声称「恰好 4 条」一致；删 mergeSnapshotEntries bump 无断言转红（防御性改动无覆盖）。基线复跑 test:frontend 556/556（R0 为 551/551，纯增量 5 条）；R0 全部断言（含 7 条 t104、(f)/(p1) 强化版）逐条在场且通过，零弱化；变更仅三文件均在 allowed_paths 内，无夹带。遗留低危：双失败角例（全部已读失败 × 期间单条 toggle 的 set_read 也失败）下版本守卫跳过回滚，单条 UI/DB 读态错配与计数偏差 1，下次 reload 自愈——严格窄于 R0 已修复的 C3 缺陷，不阻塞。",
+  "findings": [
+    "【低·不阻塞】双失败角例的归属盲区：markCurrentViewAllRead 在途失败期间，用户单条 toggle 的 set_read 也失败时，optimisticEntryFlagToggle 的 flip-back（src/store/internals.ts）会 bump 版本，使 markCurrentViewAllRead 失败分支的版本守卫（src/store/slices/nav.ts）跳过该条目回滚——UI 停留已读而 DB 为未读、该源未读计数偏差 -1，下次 reloadFromBackend 重取条目与 feed_counts 后自愈。触发需两次独立 IPC 写失败且按特定交错落地，影响面 1 条条目、暂态；严格窄于 R0 已修复的 C3 同值接管缺陷（C3 场景经 t104-rollback-guard-versioned ×2 断言锁定）。建议：未来引入同步四态展示时，把 flip-back 与用户接管在版本记账上区分（如「回滚 bump 不改归属」）。",
+    "【低·不阻塞】mergeSnapshotEntries 的逐 id bump（src/store/internals.ts）无断言覆盖：独立变异 A3（删除该 bump）下 556/556 仍全绿。该改动语义正确且必要（快照替换携带后端行级真值，使在途回滚声明失效、防止陈旧读态踩新快照），但回归套件未锁定。建议：后续补一条「全部已读失败期间发生快照替换 → 迟到回滚不覆盖新快照」断言。",
+    "【低·不阻塞】affected===0 短路在「本地在册条目与后端读态偏斜」时跳过对账：此时乐观翻转仍发生，前端计数与本地条目自洽但与后端真值暂偏（src/store/slices/nav.ts 成功分支注释的理由在该偏斜场景下略有过度声明），至下次 reload 自愈。该行为 R0 已存在、R1 未改动，非本轮引入，记录备查。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "四条验收场景逐一落地：① 成功后以 feed_counts 重取整体替换对账（600/1 探针转断言 t104-markall-count-authoritative，含 feed_counts 恰调 1 次的来源校验）；② 失败回滚读态/计数/已读保留快照 + 失败 toast 带重试、无假成功（t104-markall-failure-rollback ×2 与 (p1) ×2）；③ 单条标读与后端按行聚合口径一致、同文副本不重复扣减（t104-single-read-count ×2，核查结论写入 internals.ts 两处 docstring）；④ 范围隔离（t104-scope-isolation ×2）。R1 增量恰好对应 R0 两条低危 findings：版本化回滚守卫（F1）与对账重取可见化+重试（F2），非目标（后端语义、四态展示、副本推送、分页结构）未触碰。git diff 仅 src/store/internals.ts（+45）、src/store/slices/nav.ts（+123）、tools/frontend-regression.mjs（+251），均在 allowed_paths 内，无范围外文件改动。",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/store/slices/nav.ts",
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "R0 验证 551/551（26 既有 + 525 store）→ R1 556/556（26 + 530），差值恰为 5 条新增断言（rollback-guard-versioned ×2、reconcile-retry ×3），R0 的 7 条 t104 断言与 (f)/(p1) 强化版逐条在场、语义未松（成功计数校验、回滚完整性、假成功排除均保留）。独立复现变异测试（仅改 gitignore 的 dist-test 构建产物，验证后重编译恢复并复跑 556/556）：A1 删 nav 版本守卫 → 恰 2 条 rollback-guard-versioned 红、其余 554 全绿；A2 删 flipEntryFlag 的 bump（模拟单条路径不 bump）→ 同 2 条红；B F2 退化为静默降级 → 2 条 reconcile-retry 红（第 3 条「停留乐观值 599」在修前修后行为相同，属状态记录型断言，非判别器）——共 4 条新断言具判别力，与作者声称一致；A3 删 mergeSnapshotEntries 的 bump → 0 红（见 finding 2）。3s 真实计时器测试以 nTick(3500) 等待、余量 500ms，本会话 8 次复跑全部稳定通过，无时序脆弱迹象。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "已核对：① 失败回滚完整性——读态逐条恢复（仅 prev=false 且当前为乐观值且版本未变的条目）、逐 feed 聚合回补计数、openedReadIds 还原、视图缓存仅在发生恢复时同步；② 全仓 isRead 写入点覆盖——selectArticle markReadOnOpen（reader.ts）、markEntriesReadBulk（reader.ts，滚动/播放标读）、anchorToArticle（bootstrap.ts）、optimisticEntryFlagToggle（经 flipEntryFlag）全部经 markEntriesRead/flipEntryFlag 落入版本记账，sync.ts 不写本地 entries，无未记账写入路径；③ mergeSnapshotEntries bump 与 TASK-106 水合合并/hydrateArticleContent 无冲突（版本 Map 独立于正文/水合字段，hydrate 不写 isRead，无递归无循环；快照替换使在途回滚声明失效正是期望语义，失败场景下快照本就携带后端未读真值）；④ 重试窗口内用户再触发全部已读：新操作自带对账，旧的一次性重试仅多一次幂等 feedCounts 重取，互不破坏；⑤ toast 文案「全部已读已保存，未读计数刷新失败」与回滚路径「全部已读保存失败：…」明确区分（t104-reconcile-retry 第 1 条双向断言锁定）；⑥ 诊断 toast 无 action 生命期 2.2s 早于 3s 重试完成，重试仍失败无二次提示（依赖 reload 自愈）——已声明的设计取舍；⑦ 双失败角例与 affected===0 偏斜分别见 finding 1/3。",
+      "evidence_files": [
+        "src/store/slices/nav.ts",
+        "src/store/internals.ts",
+        "src/store/slices/reader.ts",
+        "src/store/slices/bootstrap.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "版本计数器为模块私有 Map + 单一读取口 getEntryVersion，三个写入点均有文档化注释（含 C3 探针依据与 Map 增长上界说明「与 entries 同量级、无需清理」），与 optimisticEntryFlagToggle 既有回滚契约共用一套机制而非另起炉灶；reconcileCounts 收口为局部函数供首次与重试共用，消除 R0 的重复调用点；依赖方向不变（nav/internals 单向、无新循环导入）；无以行数为理由的拆分或预建抽象。",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/store/slices/nav.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "PASS",
+      "analysis": "静态范围声明（未做实测基准、不声称实测提升，亦不触及既定性能目标「启动/布局切换/正文加载」）：版本 Map 写入为每次真实翻转 O(1)，快照替换逐 id bump O(n) 与既有全量替换同阶；markEntriesRead 的单遍聚合热路径未动；额外运行时成本仅对账失败路径上一次 3s 延迟的 feedCounts 重取（罕见路径、单次）；回归套件因 3s 真实计时器增加约 3.5s 墙钟（套件总时长约 17s，RUN 证据 10:27:53→10:28:10 与本地复跑一致）。",
+      "evidence_files": [
+        "src/store/internals.ts",
+        ".workflow-kit/tasks/runs/RUN-1b42a07bda04456fa2f416a18e769d21.json"
+      ]
+    }
+  ],
+  "ui_review": {
+    "required": false,
+    "evidence_files": [],
+    "notes": "ui_change=false（任务卡界面约定「不涉及界面」；toast 文案走既有 showToast 通道，无界面结构/交互变化，无需视觉证据）"
+  }
+}
