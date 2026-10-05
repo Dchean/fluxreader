@@ -1,7 +1,7 @@
 import type { StateCreator } from 'zustand';
 import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
-import { appStore, buildFeedIndex, markEntriesRead, reconcileCategories, scopePageKey, scopeQueryArgs, viewCacheKey, viewEntriesCache } from '../internals';
+import { appStore, buildFeedIndex, markEntriesRead, mergeSnapshotEntries, reconcileCategories, scopePageKey, scopeQueryArgs, viewCacheKey, viewEntriesCache } from '../internals';
 import type { AppState } from '../types';
 import type { ContentLayoutType } from '../../types';
 
@@ -51,7 +51,11 @@ export function isBackendReloadInFlight(): boolean {
 
 /** 判断列表查询是否附带正文。虚拟滚动下仅视口约 30 条需要正文，由
     useLazyHydrate 按需批量水合（1 次 IPC）即可；列表查询保持轻量（不含
-    正文 HTML），避免每页 500 条背 2-3MB 正文（「列表背正文」是滚动卡顿主因）。 */
+    正文 HTML），避免每页 500 条背 2-3MB 正文（「列表背正文」是滚动卡顿主因）。
+    TASK-103 实证：五布局一律走懒水合（本函数恒 false），with_content 在
+    reloadFromBackend / loadMoreArticles / reloadFilteredEntries / anchorToArticle
+    四处均传 false —— 快照行因此从不携带正文；快照替换时的正文保留由
+    mergeSnapshotEntries 按 id 继承负责（internals，REQ-001 根因修复）。 */
 function layoutNeedsBody(_layout: ContentLayoutType): boolean {
   return false;
 }
@@ -127,7 +131,12 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
           feedCounts.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
         }
       }
-      const nextEntries = articles.map(articleRowToEntry);
+      /* TASK-103（REQ-001）：快照替换按 id 继承正文与水合终态（收口在
+         mergeSnapshotEntries）。新行从不带正文（with_content 恒 false），直接
+         覆盖会把已水合卡片的正文抹掉；而虚拟列表按文章 id 保持卡片身份、
+         useLazyHydrate 同 id 不重触发 → 卡片永挂「加载正文…」且无请求在途。 */
+      const merged = mergeSnapshotEntries(get().entries, articles.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors);
+      const nextEntries = merged.entries;
       /* 分页游标写回**发起 reload 时**的范围键（不是完成时的 activeFeedFilter：
          两者可能已被用户改过，而游标属于发起时的查询口径）。
          TASK-094：entries 是该布局的快照，游标键带布局（R7：切布局不串游标）。 */
@@ -135,6 +144,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       // 缓存「全部」视图快照：切回时零延迟恢复（视图切换卡顿的根治）。
       // TASK-052：快照就是**该范围**的首批，故缓存键必须带范围，否则源A 的首批
       // 会被当成「全部」的首批恢复（数据错配）。TASK-094：键首段本就是布局。
+      // TASK-103：缓存写入的是继承过正文的合并结果，缓存恢复（selectFeed 等）
+      // 才能零延迟还原正文。
       viewEntriesCache.set(viewCacheKey(get().activeContentLayout, 'all', get().activeFeedFilter), nextEntries);
       set((s) => ({
         ...reconcileCategories(s, categories),
@@ -146,9 +157,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         articlesExhausted: articles.length < ARTICLES_PAGE_SIZE,
         dataMode: 'tauri',
         dataLoading: false,
-        /* 新快照不带正文：清空水合终态，让社交/通知卡片重新水合 */
-        hydratedIds: {},
-        hydrationErrors: {},
+        /* TASK-103：水合终态不再无条件清空——mergeSnapshotEntries 已按 id 裁剪，
+           只保留仍在新快照中的终态/错误标记（旧写法把终态连同正文一起抹掉，
+           正是 REQ-001「刷新后社交卡片一直加载正文」的根因） */
+        hydratedIds: merged.hydratedIds,
+        hydrationErrors: merged.hydrationErrors,
       }));
       /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
       void api.syncStatus().then((st) => {
@@ -278,17 +291,18 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     //（排序不参与：筛选视图拉的是全集，切排序只是本地重排，entries 仍然有效）
     if (scopePageKey(get().activeFeedFilter, get().activeContentLayout) !== scopeKeyAtStart) return;
     // 替换 entries（筛选视图的完整列表），重置分页游标（筛选视图不分页）
-    const next = rows.map(articleRowToEntry);
-    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view, get().activeFeedFilter), next);
+    // TASK-103：同 reloadFromBackend——快照替换按 id 继承正文与水合终态（合并
+    // 逻辑收口在 mergeSnapshotEntries，不得在此另写一份），终态按 id 裁剪。
+    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors);
+    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view, get().activeFeedFilter), merged.entries);
     set((s) => ({
-      entries: next,
+      entries: merged.entries,
       articlesLimit: rows.length,
       articlesCursor: { ...s.articlesCursor, [scopeKeyAtStart]: rows.length },
       articlesExhausted: true,
       articlesLoading: false,
-      /* 新快照不带正文：清空水合终态，让卡片重新水合 */
-      hydratedIds: {},
-      hydrationErrors: {},
+      hydratedIds: merged.hydratedIds,
+      hydrationErrors: merged.hydrationErrors,
     }));
   },
 
@@ -335,7 +349,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     }
     if (gen !== reloadGeneration) return;
     if (!rows) return;
-    const next = rows.map(articleRowToEntry);
+    /* TASK-103：锚定分页同样是快照替换——按 id 继承正文与水合终态（收口在
+       mergeSnapshotEntries），终态按 id 裁剪，不再整体清空。 */
+    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors);
+    const next = merged.entries;
     set((s) => ({
       entries: next,
       articlesLimit: offset + next.length,
@@ -350,9 +367,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       isShowingTranslatedProse: false,
       isRawRenderMode: false,
       showFulltext: false,
-      /* 新快照不带正文：清空水合终态，让卡片重新水合 */
-      hydratedIds: {},
-      hydrationErrors: {},
+      hydratedIds: merged.hydratedIds,
+      hydrationErrors: merged.hydrationErrors,
     }));
     // F7：与 selectArticle 同口径——打开时按设置标已读（此前搜索/命令面板
     // 打开的文章不标读，与列表点开行为分叉）

@@ -165,6 +165,61 @@ export function reconcileCategories(
   return { categories: nextCategories, feedIndex: index, entries };
 }
 
+/** TASK-103（REQ-001）：快照替换时的正文/水合终态合并 —— 所有「entries 整体
+    替换」的调用点（reloadFromBackend / reloadFilteredEntries / anchorToArticle /
+    selectLayout·selectView·selectFeed 的缓存恢复）共用这**一份**实现，不得各自为政。
+
+    缺陷：快照行从不携带正文（with_content 恒 false，见 bootstrap.layoutNeedsBody
+    的实证），此前替换直接丢弃旧条目的正文并无条件清空 hydratedIds /
+    hydrationErrors；而虚拟列表按文章 id 保持卡片身份、useLazyHydrate 同 id 不再
+    重触发——卡片停留在「加载正文…」且无任何请求在途（审计探针复现的死区）。
+
+    语义：
+    - 按 id 继承旧条目的正文痕迹（content/rawContent/translatedContent/aiSummary/
+      fulltextExtracted/hydrated，另含 url——它是详情行字段、列表行不带，不继承
+      会让刷新后的「查看原文/全文提取」失效）；
+    - 新行自带正文（with_content 场景）时以新行为准，旧值仅作缺省兜底；
+    - hydratedIds / hydrationErrors 不再整体清空：按 id 裁剪，只保留仍存在于新
+      快照中的标记（终态与正文一起继承，防止「空正文终态被清 → 卡片回退加载
+      占位」；已消失条目的滞留标记移除，与 TASK-063 清滞留的契约同口径）。 */
+export function mergeSnapshotEntries(
+  prevEntries: ArticleEntry[],
+  nextEntries: ArticleEntry[],
+  prevHydratedIds: Record<string, true>,
+  prevHydrationErrors: Record<string, string>,
+): { entries: ArticleEntry[]; hydratedIds: Record<string, true>; hydrationErrors: Record<string, string> } {
+  const prevById = new Map(prevEntries.map((a) => [a.id, a] as const));
+  const entries = nextEntries.map((a) => {
+    const prev = prevById.get(a.id);
+    /* 无旧条目 / 新行自带正文（with_content）→ 以新行为准 */
+    if (!prev || a.content) return a;
+    /* 旧条目没有任何可继承的正文痕迹 → 原样返回（保持引用稳定，避免无谓重渲染） */
+    if (!prev.content && !prev.hydrated && !prev.url && !prev.translatedContent && !prev.aiSummary && !prev.fulltextExtracted) {
+      return a;
+    }
+    return {
+      ...a,
+      content: prev.content,
+      rawContent: prev.rawContent,
+      translatedContent: a.translatedContent || prev.translatedContent,
+      aiSummary: a.aiSummary || prev.aiSummary,
+      fulltextExtracted: a.fulltextExtracted || prev.fulltextExtracted,
+      hydrated: prev.hydrated,
+      url: a.url ?? prev.url,
+    };
+  });
+  const surviving = new Set(nextEntries.map((a) => a.id));
+  const hydratedIds: Record<string, true> = {};
+  for (const id of Object.keys(prevHydratedIds)) {
+    if (surviving.has(id)) hydratedIds[id] = true;
+  }
+  const hydrationErrors: Record<string, string> = {};
+  for (const id of Object.keys(prevHydrationErrors)) {
+    if (surviving.has(id)) hydrationErrors[id] = prevHydrationErrors[id];
+  }
+  return { entries, hydratedIds, hydrationErrors };
+}
+
 /** 把当前 entries 同步进「当前布局 × 当前视图」的缓存。
     乐观更新（标读/收藏/水合）只改 store.entries，缓存若不联动，切走视图再
     切回会用旧快照覆盖新状态（正文丢失、标读回退）。 */

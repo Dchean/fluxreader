@@ -53,6 +53,13 @@ function enqueueHydration(id: string) {
   });
 }
 
+/* TASK-103：在途水合 id 集——同 id 在途不重复 IPC。useLazyHydrate 的条件重
+   触发（快照替换让水合前提重新成立）与虚拟列表的重挂载都会在请求未落地时
+   再次入队；无去重时同 id 会并发两个 get_articles（重复 IPC，两个响应先后
+   落地还可能互踩）。既有 enqueueHydration 的同帧 Set 去重语义不变，这一层
+   覆盖的是「跨帧仍在途」的窗口。 */
+const hydrationInFlight = new Set<string>();
+
 /** 「智能全文」判定：正文是否已是全文（无需 Readability 提取）。
     启发式：只认明确的"正文被截断"信号——摘要型源（少数派等）的结尾标记
     "查看全文/阅读全文/继续阅读/阅读原文" 等。返回 true = 需要提取全文（是摘要）；
@@ -204,23 +211,41 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     enqueueHydration(id);
   },
 
-  /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰）。 */
+  /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰）。
+      TASK-103 终态机（正文状态：未请求 → 加载中 → 成功/空正文/不存在/失败）：
+      - 命中行 → 填充正文 + hydrated 终态（content_html 为 NULL 的空正文也算
+        已水合，卡片显示「暂无正文」而非加载占位）；
+      - 响应中缺行的 id → 「文章不存在」终态（hydrationErrors 明确错误，卡片
+        显示内联重试，不得静默留加载占位）；空 rows 即整批不存在，同口径；
+      - 请求失败 → 错误落 hydrationErrors（retryHydration 内联重试入口保留）；
+      - 应用与错误标记都按**当前 store 状态**逐 id 复核：请求在途期间条目可能
+        已被快照替换移除、或已经他路水合（selectArticle 详情拉取）——迟到的
+        旧响应不得覆盖新状态。这是与 reloadGeneration 同目标的乱序防护，用
+        「按 id 现态复核」而非整批代际号：滚动时并发多批是常态，整批代际会把
+        旧批的有效行一并丢弃、卡片反而回到无请求死区；在途去重
+        （hydrationInFlight）已保证同 id 同时至多一个请求在途。 */
   hydrateArticleContent: (ids) => {
     if (get().dataMode !== 'tauri') return;
-    /* 过滤出「仍存在且未水合」的 id（幂等 + 去重） */
+    /* 过滤出「仍存在且未水合」的 id（幂等 + 去重）；在途 id 一并去重——
+       同 id 在途不重复 IPC（TASK-103） */
     const pending = ids.filter((id) => {
+      if (hydrationInFlight.has(id)) return false;
       const a = get().entries.find((e) => e.id === id);
       return a && !a.content && !get().hydratedIds[id];
     });
     if (pending.length === 0) return;
+    for (const id of pending) hydrationInFlight.add(id);
+    const pendingSet = new Set(pending);
     void api.getArticles(pending.map(Number)).then((rows) => {
-      if (!rows || rows.length === 0) return;
+      /* 先释放在途标记再应用：应用是同步块，期间新入队的同 id 请求要么被
+         正文/终态短路、要么被在途去重拦下，不会与本次响应交错 */
+      for (const id of pending) hydrationInFlight.delete(id);
       /* 构建 id → 详情 映射，一次性合并进 entries（单次 map，单次 set） */
-      const byId = new Map(rows.map((r) => [String(r.id), r]));
+      const byId = new Map((rows ?? []).map((r) => [String(r.id), r] as const));
       set((s) => {
         let changed = false;
         const entries = s.entries.map((a) => {
-          if (a.content) return a;
+          if (a.content || !pendingSet.has(a.id)) return a;
           const row = byId.get(a.id);
           if (!row) return a;
           changed = true;
@@ -238,23 +263,37 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
           };
         });
         if (changed) syncCurrentViewCache(entries);
-        return changed ? { entries } : s;
-      });
-      /* 水合成功的条目记入 hydratedIds 终态（空正文也算已水合），并清其错误态 */
-      const hydrated = rows.map((r) => String(r.id));
-      set((s) => {
-        const nextErrors = { ...s.hydrationErrors };
-        for (const id of hydrated) delete nextErrors[id];
+        /* 水合成功的条目记入 hydratedIds 终态（空正文也算已水合），并清其错误态；
+           缺行且仍未水合的 id 记「文章不存在」终态。逐 id 现态复核：
+           条目已被移除的不写滞留终态（旧响应不覆盖新状态）。 */
         const nextHydrated = { ...s.hydratedIds };
-        for (const id of hydrated) nextHydrated[id] = true;
-        return { hydrationErrors: nextErrors, hydratedIds: nextHydrated };
+        const nextErrors = { ...s.hydrationErrors };
+        for (const id of pending) {
+          const cur = s.entries.find((a) => a.id === id);
+          if (!cur) continue;
+          if (byId.has(id)) {
+            nextHydrated[id] = true;
+            delete nextErrors[id];
+          } else if (!cur.content && !s.hydratedIds[id]) {
+            nextErrors[id] = '文章不存在或已被删除';
+          }
+        }
+        return changed
+          ? { entries, hydratedIds: nextHydrated, hydrationErrors: nextErrors }
+          : { hydratedIds: nextHydrated, hydrationErrors: nextErrors };
       });
     }).catch((e: unknown) => {
-      /* 批量水合失败：错误落到对应卡片（社交卡内联重试），不再静默假加载 */
+      for (const id of pending) hydrationInFlight.delete(id);
+      /* 批量水合失败：错误落到对应卡片（社交卡内联重试），不再静默假加载。
+         TASK-103：只对「仍存在且仍未水合」的 id 落错误——过期失败不得污染
+         已被快照替换/他路水合的新状态 */
       const msg = extractError(e);
       set((s) => {
         const next = { ...s.hydrationErrors };
-        for (const id of pending) next[id] = msg;
+        for (const id of pending) {
+          const a = s.entries.find((x) => x.id === id);
+          if (a && !a.content && !s.hydratedIds[id]) next[id] = msg;
+        }
         return { hydrationErrors: next };
       });
     });

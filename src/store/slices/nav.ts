@@ -1,6 +1,6 @@
 import type { StateCreator } from 'zustand';
 import { api } from '../../lib/api';
-import { markEntriesRead, scopePageKey, scopeQueryArgs, viewCacheKey, viewEntriesCache } from '../internals';
+import { markEntriesRead, mergeSnapshotEntries, scopePageKey, scopeQueryArgs, viewCacheKey, viewEntriesCache } from '../internals';
 import { selectVisibleEntries } from '../selectors';
 import type { AppState } from '../types';
 
@@ -67,7 +67,12 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     const view = get().activeViewFilter;
     const cached = viewEntriesCache.get(viewCacheKey(layout, view, get().activeFeedFilter));
     if (cached) {
-      set({ entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
+      /* TASK-103：缓存恢复同属快照替换——正文与水合终态按 id 继承（收口在
+         mergeSnapshotEntries；缓存快照本身携带 reload 时继承的正文），仅裁剪
+         已不在恢复快照中的滞留标记。TASK-063 的「滞留标记阻断重水合」缺陷
+         由该收口统一处置，不再在此整体清空。 */
+      const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors);
+      set({ entries: merged.entries, articlesExhausted: view !== 'all', hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
     }
     /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
@@ -99,13 +104,18 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        「清空 → 拉取 → 一次性渲染数百张卡片」的卡顿。
        TASK-052：缓存键带上订阅范围（源A 的首批≠全部的首批）；缓存里只有内容，
        游标仍需经 applyArticlesCursor 收口写入（不裸写 articlesLimit）。
-       TASK-063：恢复时必须清水合状态——缓存快照不带正文，水合守卫
-       （ensureArticleContent 的 hydratedIds 短路）会把上次会话的滞留标记误判为
-       「已水合」，社交/通知卡片在后台刷新落地前空白且不会重水合。 */
+       TASK-063：恢复时必须处置滞留水合状态——否则水合守卫（ensureArticleContent
+       的 hydratedIds 短路）会把不属于本快照的滞留标记误判为「已水合」，社交/通知
+       卡片在后台刷新落地前空白且不会重水合。TASK-103：处置方式从「整体清空」
+       收口为 mergeSnapshotEntries 的按 id 继承+裁剪（正文与终态一起继承，
+       已消失条目的滞留标记移除），缓存恢复不再丢已水合正文。 */
     const scopeKey = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
     const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, get().activeFeedFilter));
     if (cached) {
-      set({ activeViewFilter: view, openedReadIds: {}, entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
+      /* TASK-103：同 selectLayout——快照恢复按 id 继承正文与水合终态（合并收口
+         在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。 */
+      const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors);
+      set({ activeViewFilter: view, openedReadIds: {}, entries: merged.entries, articlesExhausted: view !== 'all', hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
@@ -130,9 +140,9 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
      快照且不可滚动时其第一页永远拉不到。
      与 selectView 同构：tauri 模式下缓存命中同步恢复该范围快照（零延迟）并
      后台刷新；未命中直接后台重拉——两个 reload 都在发起时读取刚写入的
-     activeFeedFilter，自带代际/竞态守卫丢弃过期结果。恢复时清水合状态
-     （理由同 selectView：缓存快照不带正文，滞留的已水合标记会造成
-     「永不重水合」的正文空白）。mock 模式保持纯游标镜像（不触发 IPC、
+     activeFeedFilter，自带代际/竞态守卫丢弃过期结果。恢复时按 id 继承+裁剪
+     水合状态（TASK-103 收口到 mergeSnapshotEntries：缓存快照携带继承的正文，
+     滞留标记只裁剪不属于本快照的部分——理由同 selectView）。mock 模式保持纯游标镜像（不触发 IPC、
      不把 mock 会话翻成 tauri）。 */
   selectFeed: (feedId) => {
     const scopeKey = scopePageKey(feedId, get().activeContentLayout);
@@ -147,7 +157,10 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     const view = get().activeViewFilter;
     const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, feedId));
     if (cached) {
-      set({ entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
+      /* TASK-103：同 selectLayout——快照恢复按 id 继承正文与水合终态（合并收口
+         在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。 */
+      const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors);
+      set({ entries: merged.entries, articlesExhausted: view !== 'all', hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
     }
     /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */

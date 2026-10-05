@@ -345,6 +345,8 @@ await (async () => {
   let aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
   let rejectCmds = new Set();   // (p) TASK-067 N10：按命令名注入 IPC 失败
   let rejectWhen = null;        // (p3-f2) TASK-093：按 (cmd, args) 谓词注入失败——连点场景只拒第一次的置位写
+  let getArticlesPlan = null;   // TASK-103：批量水合行为——{ rows } | { mode:'defer' } | { mode:'reject', error }
+  let pendingGetArticles = [];  // defer 模式挂起项 { ids, resolve }
   let heldAi = [];            // hold 模式挂起项 { cmd, id, ch }
   let settingsRaw = null;     // get_setting('app_settings') 的返回值
   let ghLoginStatus = null;   // github_login_status 的返回值：null | {login} | 'reject'
@@ -402,7 +404,14 @@ await (async () => {
         return Promise.resolve(value);
       }
       case 'get_article': return Promise.resolve(detailImpl(Number(args.id)));
-      case 'get_articles': return Promise.resolve([]);
+      case 'get_articles': {
+        /* TASK-103 可控行为：成功返回 rows / defer 挂起（驱动在途窗口）/ 失败 reject */
+        if (getArticlesPlan && getArticlesPlan.mode === 'reject') return Promise.reject(getArticlesPlan.error ?? { message: 'get_articles 注入失败' });
+        if (getArticlesPlan && getArticlesPlan.mode === 'defer') {
+          return new Promise((resolve) => { pendingGetArticles.push({ ids: args.ids, resolve }); });
+        }
+        return Promise.resolve(getArticlesPlan ? getArticlesPlan.rows : []);
+      }
       case 'get_setting': return Promise.resolve(settingsRaw);
       case 'set_setting': return Promise.resolve(null);
       /* E1：GitHub 登录态恢复（bootstrapGithubAuth 定向断言用；null / {login} / 'reject'） */
@@ -465,6 +474,8 @@ await (async () => {
     aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
     rejectCmds = new Set();
     rejectWhen = null;
+    getArticlesPlan = null;
+    pendingGetArticles = [];
     detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
     /* TASK-063：视图缓存是模块级 Map，跨用例残留会让下一个用例的 selectFeed
        命中上一个夹具的快照（跨夹具污染）。每个用例独立起步（(s6) 此前已就地
@@ -520,11 +531,20 @@ await (async () => {
     aOk.entries.length === 8 && aOk.articlesLimit === 8 && aOk.articlesCursor['article|all'] === 8
     && aOk.articlesExhausted === true && aOk.articlesLoading === false);
 
-  store.setState({ hydratedIds: { '101': true }, hydrationErrors: { '102': '旧错误' } });
+  /* 【TASK-103 改动理由】旧断言「新快照清空 hydratedIds/hydrationErrors」锁的
+     正是 REQ-001 的根因手法：无条件清空让已水合卡片在后台刷新后失去正文与
+     终态，而虚拟列表按 id 保持卡片身份、useLazyHydrate 同 id 不重触发——卡片
+     永挂「加载正文…」且无请求在途（审计探针复现）。新契约：快照替换按 id
+     继承正文与终态（mergeSnapshotEntries），只裁剪已不在新快照中的滞留标记
+     ——本断言改写为锁定继承+裁剪，非为过门禁而弱化（覆盖面反而更宽：
+     同时验证「仍在快照的保留」与「已消失的移除」两侧）。 */
+  store.setState({ hydratedIds: { '101': true, '999': true }, hydrationErrors: { '102': '旧错误', '998': 'x' } });
   await store.getState().reloadFromBackend();
-  checkNew('(a) 新快照清空 hydratedIds/hydrationErrors（正文按需重新水合，不复用旧终态）',
-    Object.keys(store.getState().hydratedIds).length === 0
-    && Object.keys(store.getState().hydrationErrors).length === 0);
+  checkNew('(a) 新快照按 id 继承并裁剪水合终态（TASK-103：仍在快照的 101/102 保留，已消失的 999/998 移除）',
+    store.getState().hydratedIds['101'] === true
+    && store.getState().hydrationErrors['102'] === '旧错误'
+    && store.getState().hydratedIds['999'] === undefined
+    && store.getState().hydrationErrors['998'] === undefined);
 
   await resetStore();
   failReload = { code: 'db_corrupt', message: '数据库损坏' };
@@ -2737,6 +2757,207 @@ await (async () => {
       store.getState().entries.some((e) => e.id === '9002')
       && store.getState().articlesCursor['article|11'] === 1);
     listPlan = null;
+  }
+
+  /* ============================================================
+     TASK-103（REQ-001）：文章快照与正文水合生命周期统一
+     —— 刷新不丢正文、同 id 刷新后重新水合、终态机完备、乱序防护与在途去重。
+     审计探针场景（AUDIT-20261005-core-consistency.md「社交正文问题链路」）：
+     reloadFromBackend 替换快照并清空 hydratedIds × 虚拟列表按 id 保持卡片身份
+     × useLazyHydrate 依赖仅 [id] ⇒ 卡片停留「加载正文…」且新增正文请求数=0。
+     实证口径：with_content 恒 false（bootstrap.layoutNeedsBody 五布局全 false），
+     快照行从不携带正文，正文由懒水合按需拉取；mergeSnapshotEntries 负责
+     快照替换时的正文/终态继承（收口单点，六个调用点共用）。
+     ============================================================ */
+  {
+    const { entryNeedsHydration: NEED } = await import('../src/store/selectors.ts');
+    const socialRow = (o) => mkRow({ feed_id: 11, ...o });
+    /* store.entries 侧的条目形状（id 为字符串、content/content_html 分离）——
+       与首段 S-2 的 socialEntry 同构；getArticlesPlan 返回的才是后端行形状 */
+    const t103Entry = (id, extra = {}) => ({
+      id: String(id), feedId: '11', title: 't103 帖', publishedAt: Date.now(), isRead: false,
+      isStarred: false, tags: [], source: 'direct', snippet: '摘要', author: 'a',
+      content: '', rawContent: '', translatedContent: '', aiSummary: '',
+      ...extra,
+    });
+    const t103State = () => store.getState();
+    const t103GetArticlesCount = () => invokeCalls.filter((c) => c.cmd === 'get_articles').length;
+
+    /* ---------- t103-snapshot-preserves-hydration：快照替换保留水合 ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    // 预置已水合痕迹：101 有正文+url；102 空正文终态；103 全量（译文/摘要/全文/原文分离）
+    store.setState((s) => ({
+      entries: s.entries.map((a) => {
+        if (a.id === '101') return { ...a, content: '<p>101 正文</p>', rawContent: '<p>101 正文</p>', hydrated: true, url: 'https://example.com/101' };
+        if (a.id === '102') return { ...a, hydrated: true };
+        if (a.id === '103') return { ...a, content: '<p>103 全文</p>', rawContent: '<p>103 原文</p>', translatedContent: '<p>103 译文</p>', aiSummary: '103 摘要', fulltextExtracted: true, hydrated: true, url: 'https://example.com/103' };
+        return a;
+      }),
+      hydratedIds: { '101': true, '102': true },
+      hydrationErrors: {},
+    }));
+    const t103BaseCalls = t103GetArticlesCount();
+    await store.getState().reloadFromBackend();
+    const t103AfterReload = t103State();
+    checkNew('(t103-snapshot-preserves-hydration) 快照替换按 id 继承正文/原文/译文/摘要/全文标记/url，hydratedIds 不再清空',
+      t103AfterReload.entries.find((a) => a.id === '101')?.content === '<p>101 正文</p>'
+      && t103AfterReload.entries.find((a) => a.id === '101')?.url === 'https://example.com/101'
+      && t103AfterReload.entries.find((a) => a.id === '103')?.content === '<p>103 全文</p>'
+      && t103AfterReload.entries.find((a) => a.id === '103')?.rawContent === '<p>103 原文</p>'
+      && t103AfterReload.entries.find((a) => a.id === '103')?.translatedContent === '<p>103 译文</p>'
+      && t103AfterReload.entries.find((a) => a.id === '103')?.aiSummary === '103 摘要'
+      && t103AfterReload.entries.find((a) => a.id === '103')?.fulltextExtracted === true
+      && t103AfterReload.hydratedIds['101'] === true && t103AfterReload.hydratedIds['102'] === true);
+    checkNew('(t103-snapshot-preserves-hydration) 已水合条目刷新后不触发任何补拉（直接恢复正文，无「无请求死区」）',
+      t103GetArticlesCount() === t103BaseCalls
+      && NEED(t103AfterReload, '101') === false && NEED(t103AfterReload, '102') === false);
+    // with_content 场景：新行自带正文/url 时以新行为准（104 新行带正文）
+    store.setState((s) => ({
+      entries: s.entries.map((a) => (a.id === '104' ? { ...a, content: '旧104', rawContent: '旧104', url: 'https://example.com/old-104' } : a)),
+    }));
+    backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, content_html: '<p>新104</p>', url: 'https://example.com/104' } : r));
+    await store.getState().reloadFromBackend();
+    checkNew('(t103-snapshot-preserves-hydration) 新行自带正文（with_content）以新行为准：104 取新行正文与新 url',
+      t103State().entries.find((a) => a.id === '104')?.content === '<p>新104</p>'
+      && t103State().entries.find((a) => a.id === '104')?.url === 'https://example.com/104');
+    backendRows = BASE_ROWS;
+    // 收口契约的另一侧：范围切换（缓存恢复 + 后台刷新）同函数继承，正文不丢
+    getArticlesPlan = { rows: [mkRow({ id: 201, feed_id: 11, content_html: '<p>201 正文</p>' })] };
+    store.setState({ hydratedIds: {}, hydrationErrors: {} });
+    store.getState().hydrateArticleContent(['201']);
+    await nTick(20);
+    getArticlesPlan = null;
+    store.getState().selectFeed('11');
+    await nTick(30);
+    store.getState().selectFeed('all');
+    checkNew('(t103-snapshot-preserves-hydration) selectFeed 往返（缓存恢复+后台刷新，同走 mergeSnapshotEntries）：201 正文保留',
+      t103State().entries.find((a) => a.id === '201')?.content === '<p>201 正文</p>');
+
+    /* ---------- t103-stale-card-rehydrates：审计探针场景（同 ID 刷新）---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    store.setState((s) => ({
+      entries: s.entries.map((a) => (a.id === '101' ? { ...a, content: '<p>101 正文</p>', rawContent: '<p>101 正文</p>', hydrated: true } : a)),
+      hydratedIds: { '101': true },
+    }));
+    await store.getState().reloadFromBackend();
+    const t103Probe = t103State();
+    checkNew('(t103-stale-card-rehydrates) 审计探针场景：同 ID 刷新后 content 不再被清空（直接恢复正文，请求数=0 也不再是死区）',
+      t103Probe.entries.find((a) => a.id === '101')?.content === '<p>101 正文</p>'
+      && t103Probe.hydratedIds['101'] === true);
+    // 未水合卡片：刷新后水合前提重新成立 —— entryNeedsHydration 的真值表（useLazyHydrate 重入队的依据）
+    checkNew('(t103-stale-card-rehydrates) 未水合卡片刷新后水合前提重新成立：entryNeedsHydration 仅在「条目在 ∧ 无正文 ∧ 无终态 ∧ 无失败态」为真',
+      NEED(t103Probe, '201') === true
+      && NEED({ ...t103Probe, hydrationErrors: { '201': 'x' } }, '201') === false
+      && NEED({ ...t103Probe, hydratedIds: { '201': true } }, '201') === false
+      && NEED({ ...t103Probe, entries: t103Probe.entries.map((a) => (a.id === '201' ? { ...a, content: 'x' } : a)) }, '201') === false
+      && NEED({ ...t103Probe, entries: t103Probe.entries.filter((a) => a.id !== '201') }, '201') === false);
+    // 源码形态断言（手法沿用本文件既有 readFileSync 写法）：锁定方案 A ——
+    // effect 消费 entryNeedsHydration 布尔值并以 [id, needsHydration] 为依赖
+    const fs103 = await import('node:fs');
+    const tl103Src = fs103.readFileSync(new URL('../src/components/Timeline.tsx', import.meta.url), 'utf8');
+    const hook103 = tl103Src.slice(tl103Src.indexOf('function useLazyHydrate'), tl103Src.indexOf('/* ---------- 文章卡片'));
+    checkNew('(t103-stale-card-rehydrates) useLazyHydrate 不再只依赖 [id]：按 id 订阅 entryNeedsHydration，条件重新成立即重新入队',
+      hook103.includes('useAppStore((s) => entryNeedsHydration(s, id))')
+      && hook103.includes('if (!needsHydration) return;')
+      && hook103.includes('[id, needsHydration]')
+      && !hook103.includes('}, [id]);'));
+
+    /* ---------- t103-hydration-terminals：终态机（成功/空正文/缺行/失败）---------- */
+    // （1）空正文：content_html 为 NULL → hydrated 终态 + entry.hydrated，不无限重试
+    await resetStore();
+    store.setState({ entries: [t103Entry(311)], hydratedIds: {}, hydrationErrors: {} });
+    getArticlesPlan = { rows: [socialRow({ id: 311 })] };
+    store.getState().hydrateArticleContent(['311']);
+    await nTick(20);
+    const t103E311 = t103State().entries.find((a) => a.id === '311');
+    checkNew('(t103-hydration-terminals) 空正文（content_html NULL）→ hydratedIds 终态 + entry.hydrated，卡片不再显示加载占位',
+      t103E311?.content === '' && t103E311?.hydrated === true
+      && t103State().hydratedIds['311'] === true && NEED(t103State(), '311') === false);
+    // （2）部分缺行：322 无对应返回行 → 「文章不存在」终态
+    store.setState({ entries: [t103Entry(321), t103Entry(322)], hydratedIds: {}, hydrationErrors: {} });
+    getArticlesPlan = { rows: [socialRow({ id: 321, content_html: '<p>321</p>' })] };
+    store.getState().hydrateArticleContent(['321', '322']);
+    await nTick(20);
+    checkNew('(t103-hydration-terminals) 响应缺行 → 该 id 进「文章不存在」终态（不静默留加载占位），命中行照常填充',
+      t103State().entries.find((a) => a.id === '321')?.content === '<p>321</p>'
+      && (t103State().hydrationErrors['322'] ?? '').includes('文章不存在')
+      && NEED(t103State(), '322') === false);
+    // （3）空 rows：整批「文章不存在」（空 ids/空 rows 不留占位）
+    store.setState({ entries: [t103Entry(331)], hydratedIds: {}, hydrationErrors: {} });
+    getArticlesPlan = { rows: [] };
+    store.getState().hydrateArticleContent(['331']);
+    await nTick(20);
+    checkNew('(t103-hydration-terminals) 空 rows → 整批进「文章不存在」终态（空 ids/空 rows 不留占位）',
+      (t103State().hydrationErrors['331'] ?? '').includes('文章不存在') && NEED(t103State(), '331') === false);
+    // （4）失败：错误可见 + retryHydration 内联重试收敛为成功
+    store.setState({ entries: [t103Entry(341)], hydratedIds: {}, hydrationErrors: {} });
+    getArticlesPlan = { mode: 'reject', error: { message: 'IPC 超时' } };
+    store.getState().hydrateArticleContent(['341']);
+    await nTick(20);
+    checkNew('(t103-hydration-terminals) 请求失败 → hydrationErrors 保留原错误信息（内联重试入口可用）',
+      t103State().hydrationErrors['341'] === 'IPC 超时');
+    getArticlesPlan = { rows: [socialRow({ id: 341, content_html: '<p>341 重试成功</p>' })] };
+    store.getState().retryHydration('341');
+    await nTick(20);
+    checkNew('(t103-hydration-terminals) retryHydration 后正文填充、错误清除、终态落位',
+      t103State().entries.find((a) => a.id === '341')?.content === '<p>341 重试成功</p>'
+      && t103State().hydrationErrors['341'] === undefined && t103State().hydratedIds['341'] === true);
+    getArticlesPlan = null;
+
+    /* ---------- t103-race-and-dedup：在途去重 + 乱序/过期防护 ---------- */
+    // 在途去重：请求未落地时重复入队（重触发/重挂载/直接调用）→ 不产生第二次 IPC
+    await resetStore();
+    store.setState({ entries: [t103Entry(351), t103Entry(352)], hydratedIds: {}, hydrationErrors: {} });
+    getArticlesPlan = { mode: 'defer' };
+    invokeCalls.length = 0;
+    store.getState().hydrateArticleContent(['351', '352']);
+    await nTick(0);
+    store.getState().hydrateArticleContent(['351', '352']); // 在途重复入队
+    store.getState().ensureArticleContent('351');           // 挂载路径重复入队
+    await nTick(0);
+    const t103DedupCalls = invokeCalls.filter((c) => c.cmd === 'get_articles');
+    checkNew('(t103-race-and-dedup) 同 id 在途重复入队不重复 IPC（仅首批一次、含两个 id）',
+      pendingGetArticles.length === 1 && t103DedupCalls.length === 1
+      && t103DedupCalls[0]?.args.ids.join(',') === '351,352');
+    pendingGetArticles[0].resolve([socialRow({ id: 351, content_html: '<p>351 正文</p>' }), socialRow({ id: 352 })]);
+    await nTick(10);
+    checkNew('(t103-race-and-dedup) 在途去重不丢结果：351 填充正文、352 空正文终态',
+      t103State().entries.find((a) => a.id === '351')?.content === '<p>351 正文</p>'
+      && t103State().hydratedIds['352'] === true);
+    // 乱序防护：批量在途期间条目已经他路水合（selectArticle 详情）→ 迟到响应不覆盖新正文
+    await resetStore();
+    store.setState({ entries: [t103Entry(361)], hydratedIds: {}, hydrationErrors: {} });
+    getArticlesPlan = { mode: 'defer' };
+    invokeCalls.length = 0;
+    store.getState().hydrateArticleContent(['361']);
+    await nTick(0);
+    detailImpl = (id) => socialRow({ id, content_html: '<p>详情路径正文</p>', url: 'https://example.com/361' });
+    store.getState().selectArticle('361'); // 详情路径先落地
+    await nTick(10);
+    const t103DetailContent = t103State().entries.find((a) => a.id === '361')?.content;
+    pendingGetArticles[0].resolve([socialRow({ id: 361, content_html: '<p>旧批次正文</p>' })]);
+    await nTick(10);
+    checkNew('(t103-race-and-dedup) 旧响应不覆盖新状态：他路已水合的正文不被迟到批次改写，终态照常落位',
+      t103DetailContent === '<p>详情路径正文</p>'
+      && t103State().entries.find((a) => a.id === '361')?.content === '<p>详情路径正文</p>'
+      && t103State().hydratedIds['361'] === true);
+    getArticlesPlan = null;
+    detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
+    // 过期防护另一侧：在途期间条目被快照替换移除 → 迟到响应不写滞留终态/正文
+    await resetStore();
+    store.setState({ entries: [t103Entry(371)], hydratedIds: {}, hydrationErrors: {} });
+    getArticlesPlan = { mode: 'defer' };
+    invokeCalls.length = 0;
+    store.getState().hydrateArticleContent(['371']);
+    await nTick(0);
+    store.setState({ entries: [t103Entry(372)] }); // 快照替换：371 不在新快照
+    pendingGetArticles[0].resolve([socialRow({ id: 371, content_html: '<p>迟到正文</p>' })]);
+    await nTick(10);
+    checkNew('(t103-race-and-dedup) 在途期间条目被快照替换移除：迟到响应不写正文、不写滞留 hydratedIds',
+      !t103State().entries.some((a) => a.id === '371')
+      && t103State().hydratedIds['371'] === undefined
+      && t103State().hydrationErrors['371'] === undefined);
+    getArticlesPlan = null;
   }
 })();
 
