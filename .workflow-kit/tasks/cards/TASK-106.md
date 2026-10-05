@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-106 · 文章快照与正文水合生命周期统一——刷新不丢正文、水合终态完备（承接 TASK-103，REQ-001）
 
-**状态**：verified
+**状态**：done
 
 **目标**：修复 REQ-001（社交布局正文一直加载）的根因并补齐水合终态机，依据外部审计探针复现的链路（AUDIT-20261005-core-consistency.md）：①src/store/slices/bootstrap.ts reloadFromBackend 快照替换 entries 时新行不含正文且清空 hydratedIds，而虚拟列表按文章 id 保持组件身份、useLazyHydrate（src/components/Timeline.tsx 一带）effect 依赖仅 [id]，同 id 不再触发水合请求，卡片停留「加载正文…」且实际无请求在途。修法要求：快照替换时按 id 保留既有条目的正文字段（content/rawContent/translatedContent/aiSummary/fulltextExtracted/hydrated），新行自带正文（with_content 场景）时以新行为准；hydratedIds 不再无条件清空；hydrated 保留与新行合并逻辑收口到单一函数（避免 bootstrap/bootstrapFromBackend/其他快照路径各自为政）。②水合触发修正：useLazyHydrate 不再只依赖 [id]——卡片挂载期间观察 store 的「无正文 && 未水合 && 无终态 && 无在途」状态，条件重新成立时重新入队（或 reloadFromBackend 完成后对未水合条目统一重新入队，coder 二选一并断言锁定）。③终态机完备（reader.ts hydrateArticleContent / enqueueHydration / retryHydration）：成功含空正文 → hydrated=true 终态「无正文」（不再显示加载占位、不无限重试）；请求 rows 中缺失的 id → 「文章不存在」终态（hydrationErrors 明确错误或从 entries 清理，不得留加载占位）；请求失败 → hydrationErrors 保留内联重试；空 ids/空 rows 不再静默 return 留占位；乱序/过期响应防护（reload 已有 reloadGeneration 手法，水合补同类保护），旧响应不得覆盖新状态。④既有 enqueueHydration 在途去重语义保留。回归断言：tools/frontend-regression.mjs 新增 t103-* ≥5 条（快照替换保留正文、同 id 刷新后重新水合、空正文/缺行/失败终态、乱序防护、在途去重），与既有断言冲突项同步更新。coder 开工前先实证 with_content 在各布局的实际取值（layoutNeedsBody），据实修正注释与逻辑，不以猜测为准。
 

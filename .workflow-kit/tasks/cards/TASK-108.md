@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-108 · Rust 状态写入事务化——文章状态与待同步队列同生共死（REQ-002）
 
-**状态**：verified
+**状态**：done
 
 **目标**：统一单条状态写入的事务与同步语义（外部审计 AUDIT-20261005-core-consistency.md 点名的一致性缺口）：src-tauri/src/commands/articles.rs record_read_state / record_star_state 先 db::set_read/set_starred 再 db::enqueue_sync，无外层事务——第二步失败时「本地状态已改但没有待同步记录」，离线期间该变更将永不补推且可能被远端对账覆盖；set_read_bulk 批量路径逐条执行同样可能部分成功。修法要求：①record_read_state / record_star_state 的「状态写入+入队」复合操作包进单一 rusqlite 事务，与 db::mark_all_read_with_enqueue 既有事务口径一致（建议下沉为 db 层函数复用，commands 层只调度）；②set_read_bulk 改为整体单事务（任一 id 失败全部回滚，消除部分成功），语义与单条路径一致并在契约注释载明；③故障注入测试：入队步失败（返回 Err 的测试注入手法）→ 状态不落库，断言「状态变更与队列项同生共死」≥2 条（单条读/藏各一）；④不改命令签名、IPC 形状、push/对账行为；既有 cargo 测试不回退。coder 开工前先盘点 db::set_read/set_starred/enqueue_sync 的全部调用点，确认事务下沉不破坏其他调用方（如对账/导入路径）。
 
