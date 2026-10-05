@@ -217,6 +217,10 @@ export function mergeSnapshotEntries(
   for (const id of Object.keys(prevHydrationErrors)) {
     if (surviving.has(id)) hydrationErrors[id] = prevHydrationErrors[id];
   }
+  /* TASK-107 R1：快照替换带来后端行级真值（含 is_read）——任何在途乐观写入
+     对这些 id 的回滚声明随之失效，逐 id bump 版本让迟到回滚全部跳过
+     （否则回滚会把陈旧读态踩到新快照上）。 */
+  for (const a of entries) bumpEntryVersion(a.id);
   return { entries, hydratedIds, hydrationErrors };
 }
 
@@ -228,15 +232,44 @@ export function syncCurrentViewCache(entries: ArticleEntry[]) {
   viewEntriesCache.set(viewCacheKey(s.activeContentLayout, s.activeViewFilter, s.activeFeedFilter), entries);
 }
 
+/* TASK-107 R1（F1）：条目变更版本号——乐观回滚的归属判定。
+   既有「仅当当前值仍等于乐观写入值」的值守卫无法区分「用户已接管（同值覆盖
+   写入）」与「未被触碰」：全部已读在途失败期间，用户对同一在册条目连点两次
+   toggle 停在与乐观写入相同的值（其自身 set_read 已落库），迟到的回滚会把
+   UI 踩回旧值而 DB 是新值（审查探针 C3 实测）。规则：任何真实的条目标志写入
+   （flipEntryFlag / markEntriesRead / 快照替换 mergeSnapshotEntries）都必须
+   bump 该条目版本，回滚方以「版本未变」为恢复前提。Map 随会话内被写过的
+   条目增长（与 entries 同量级），无需清理。 */
+const entryMutationVersion = new Map<string, number>();
+
+/** 读条目当前变更版本（未被写过的条目为 0）。回滚方在乐观写入后快照各 id 的
+    版本，失败回滚时仅恢复「版本仍相等」的条目。 */
+export function getEntryVersion(id: string): number {
+  return entryMutationVersion.get(id) ?? 0;
+}
+
+function bumpEntryVersion(id: string): void {
+  entryMutationVersion.set(id, getEntryVersion(id) + 1);
+}
+
 /** 乐观更新某篇条目的 isRead/isStarred，并同步 feedCounts 的未读/收藏计数。
     侧边栏数字基于 feedCounts（后端精确计数），若不联动，标读/收藏后角标
-    不立即变化（与乐观更新的列表脱节）。total/today 不受影响。 */
+    不立即变化（与乐观更新的列表脱节）。total/today 不受影响。
+    TASK-107 核查结论（REQ-003 单条口径）：后端 set_read/record_read_state 只
+    翻转该行自身（UPDATE articles ... WHERE id = ?），feed_counts 按「每行
+    is_read=0」聚合——本函数按该行所属 feed 恰好 ±1 与后端口径一致；同文副本
+    （跨源同 guid 的行）在后端各自独立成行、互不联动（本地传播不存在，仅同步
+    推送广播到远端，属 TASK-107 non_goals），前端也只动主条目所属源（t104
+    断言锁定：标读后前端计数 == 后端按行聚合）。
+    TASK-107 R1：每次真实翻转都 bump 条目版本（entryMutationVersion），供
+    多条目乐观操作（全部已读）的失败回滚做归属判定。 */
 export function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
   const s = appStore().getState();
   const entry = s.entries.find((e) => e.id === id);
   if (!entry) return;
   const nextVal = !entry[field];
   const entries = s.entries.map((e) => (e.id === id ? { ...e, [field]: nextVal } : e));
+  bumpEntryVersion(id);
   const c = s.feedCounts.get(entry.feedId);
   let feedCounts = s.feedCounts;
   if (c) {
@@ -252,7 +285,14 @@ export function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
 
 /** 批量标已读：同步 feedCounts 的未读计数（每篇 -1）。
     高效实现：一次遍历 entries 构建新数组，一次聚合 feedId 的未读减少数，
-    避免循环内多次 Map 复制 / entries.map（「全部已读」几百篇时 O(n²) 卡顿）。 */
+    避免循环内多次 Map 复制 / entries.map（「全部已读」几百篇时 O(n²) 卡顿）。
+    TASK-107 核查结论：单条/批量标读路径（set_read / set_read_bulk）后端都是
+    逐 id 翻转自身行（apply_read_bulk = 循环 record_read_state），本函数按被
+    翻转行逐 feed 聚合 -1 与后端口径一致；「整个范围一起标读」的 mark_all_read
+    不走本函数做计数（范围总量前端不可知），由 markCurrentViewAllRead 成功后
+    重取 feed_counts 对账（t104 断言锁定）。
+    TASK-107 R1：每次真实翻转都 bump 条目版本（entryMutationVersion）——
+    全部已读的乐观写入本身也走这里，其失败回滚以「版本未变」为恢复前提。 */
 export function markEntriesRead(ids: Set<string>) {
   const s = appStore().getState();
   let entries = s.entries;
@@ -262,6 +302,7 @@ export function markEntriesRead(ids: Set<string>) {
   entries = entries.map((e) => {
     if (ids.has(e.id) && !e.isRead) {
       changed = true;
+      bumpEntryVersion(e.id); // TASK-107 R1：真实翻转必 bump 版本（回滚归属判定）
       unreadDeltas.set(e.feedId, (unreadDeltas.get(e.feedId) ?? 0) + 1);
       return { ...e, isRead: true };
     }

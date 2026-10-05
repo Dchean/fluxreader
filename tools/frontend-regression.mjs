@@ -347,6 +347,10 @@ await (async () => {
   let rejectWhen = null;        // (p3-f2) TASK-093：按 (cmd, args) 谓词注入失败——连点场景只拒第一次的置位写
   let getArticlesPlan = null;   // TASK-103：批量水合行为——{ rows } | { mode:'defer' } | { mode:'reject', error }
   let pendingGetArticles = [];  // defer 模式挂起项 { ids, resolve }
+  /* TASK-107：feed_counts 行为。null = 静态 COUNTS（既有断言基线——夹具的计数
+     与行级数据刻意不一致，大量断言依赖）；函数 = 按 backendRows 忠实聚合
+     （计数对账用例：markCurrentViewAllRead 成功后重取的计数必须等于后端口径）。 */
+  let feedCountsImpl = null;
   let heldAi = [];            // hold 模式挂起项 { cmd, id, ch }
   let settingsRaw = null;     // get_setting('app_settings') 的返回值
   let ghLoginStatus = null;   // github_login_status 的返回值：null | {login} | 'reject'
@@ -370,6 +374,28 @@ await (async () => {
     const off = a.offset || 0;
     return out.slice(off, a.limit == null ? out.length : off + a.limit);
   }
+  /* TASK-107：feed 生效布局（feed 级覆盖 → 分类兜底），mark_all_read 的
+     layout 过滤与 list_articles 的 where 构建同口径 */
+  function effectiveFeedLayout(feedIdNum) {
+    const f = FEEDS.find((x) => x.id === feedIdNum);
+    if (!f) return null;
+    return f.layout !== 'inherit' ? f.layout : (FOLDERS.find((c) => c.id === f.folder_id) || {}).layout || null;
+  }
+  /* TASK-107：按 backendRows 忠实聚合 feed_counts（与 Rust feed_counts 同口径：
+     COUNT(*) / SUM(is_read=0) / SUM(is_starred=1) / today 按 localtime 判日）。
+     仅在计数对账用例挂到 feedCountsImpl 上（缺省静态 COUNTS 保既有基线）。 */
+  function countsFromRows() {
+    const byFeed = new Map();
+    for (const r of backendRows) {
+      const c = byFeed.get(r.feed_id) ?? { feed_id: r.feed_id, total: 0, unread: 0, starred: 0, today: 0 };
+      c.total += 1;
+      if (!r.is_read) c.unread += 1;
+      if (r.is_starred) c.starred += 1;
+      if (localDayKey(Date.parse(r.published_at)) === localDayKey(NOW)) c.today += 1;
+      byFeed.set(r.feed_id, c);
+    }
+    return [...byFeed.values()];
+  }
   function emitAi(plan, ch) {
     for (const d of plan.deltas) ch.onmessage?.({ type: 'delta', data: d });
     if (plan.error) { ch.onmessage?.({ type: 'error', data: plan.error }); return; }
@@ -383,7 +409,9 @@ await (async () => {
     switch (cmd) {
       case 'list_folders': return failReload ? Promise.reject(failReload) : Promise.resolve(FOLDERS);
       case 'list_feeds': return failReload ? Promise.reject(failReload) : Promise.resolve(FEEDS);
-      case 'feed_counts': return failReload ? Promise.reject(failReload) : Promise.resolve(COUNTS);
+      /* TASK-107：feedCountsImpl 非空时按 backendRows 忠实聚合（计数对账用例）；
+         缺省仍返回静态 COUNTS——既有断言基线依赖它（与行级夹具刻意不一致） */
+      case 'feed_counts': return failReload ? Promise.reject(failReload) : Promise.resolve(feedCountsImpl ? feedCountsImpl() : COUNTS);
       case 'sync_status': return Promise.resolve({ connected: false });
       case 'list_articles': {
         if (listPlan && listPlan.mode === 'reject') return Promise.reject(listPlan.error);
@@ -414,6 +442,33 @@ await (async () => {
       }
       case 'get_setting': return Promise.resolve(settingsRaw);
       case 'set_setting': return Promise.resolve(null);
+      /* TASK-107：单条标读忠实落库（record_read_state 语义：仅该行自身，
+         无本地同文副本传播）——单条计数一致性核查的根基 */
+      case 'set_read': {
+        const row = backendRows.find((r) => r.id === Number(args.id));
+        /* TASK-107 R2/F3：mutation 用布尔——Rust Serialize 的 wire 格式是 bool，
+           数字 1/0 会让 reload 后的 entry.isRead 变成 number，破坏 `=== true` 形态
+           的守卫/断言（快照替换场景因此失真） */
+        if (row) row.is_read = args.read === true;
+        return Promise.resolve(null);
+      }
+      /* TASK-107：mark_all_read 忠实落库（apply_mark_all_read 语义：整个
+         范围×布局×视图口径的未读行置已读，返回受影响行数）——600/1 探针
+         与「成功后计数以后端为准」对账的根基 */
+      case 'mark_all_read': {
+        let affected = 0;
+        for (const r of backendRows) {
+          if (r.is_read) continue;
+          if (args.feedId != null && r.feed_id !== args.feedId) continue;
+          if (args.folderId != null && (FEEDS.find((f) => f.id === r.feed_id) || {}).folder_id !== args.folderId) continue;
+          if (args.starredOnly && !r.is_starred) continue;
+          if (args.sinceMs != null && localDayKey(Date.parse(r.published_at)) !== localDayKey(args.sinceMs)) continue;
+          if (args.layout && effectiveFeedLayout(r.feed_id) !== args.layout) continue;
+          r.is_read = true; // TASK-107 R2/F3：wire 格式为布尔（见 set_read 处注释）
+          affected += 1;
+        }
+        return Promise.resolve(affected);
+      }
       /* E1：GitHub 登录态恢复（bootstrapGithubAuth 定向断言用；null / {login} / 'reject'） */
       case 'github_login_status':
         return ghLoginStatus === 'reject'
@@ -460,7 +515,9 @@ await (async () => {
 
   /* ---------- 状态复位 / 规范化装载 ---------- */
   async function resetStore(extra) {
-    backendRows = BASE_ROWS;
+    /* TASK-107：行对象深拷贝——假后端的 set_read / mark_all_read 会就地翻转
+       is_read（忠实模拟落库），浅引用会让突变跨用例残留（污染 BASE_ROWS） */
+    backendRows = BASE_ROWS.map((r) => ({ ...r }));
     failReload = null;
     listPlan = null;
     pendingList = [];
@@ -476,6 +533,7 @@ await (async () => {
     rejectWhen = null;
     getArticlesPlan = null;
     pendingGetArticles = [];
+    feedCountsImpl = null;
     detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
     /* TASK-063：视图缓存是模块级 Map，跨用例残留会让下一个用例的 selectFeed
        命中上一个夹具的快照（跨夹具污染）。每个用例独立起步（(s6) 此前已就地
@@ -794,7 +852,13 @@ await (async () => {
   /* ============================================================
      (f) markAllRead / markCurrentViewAllRead 的范围语义
      ============================================================ */
+  /* 【TASK-107 改动理由】计数断言改为「与后端对账」口径：假后端升级为忠实
+     聚合（feedCountsImpl），markCurrentViewAllRead 成功后重取 feed_counts
+     整体替换——期望值从「乐观按已加载推算」改为后端真值（本块行级数据：
+     feed10 未读 101/103、feed11 未读 201、feed12 未读 104/105；starredOnly
+     只标 103/201）。保护意图不变且更强：数字必须等于后端口径而非本地推算。 */
   await bootFixture();
+  feedCountsImpl = countsFromRows;
   store.setState({ activeViewFilter: 'starred', timelineFilter: 'all', activeFeedFilter: 'all', openedReadIds: { '103': true } });
   invokeCalls.length = 0;
   store.getState().markCurrentViewAllRead();
@@ -806,13 +870,17 @@ await (async () => {
     && f1.entries.find((a) => a.id === '103')?.isRead === true
     && f1.entries.find((a) => a.id === '101')?.isRead === false
     && f1.entries.find((a) => a.id === '102')?.isRead === true);
-  checkNew('(f) 全部已读只减被标条目所属源的未读数（源A 3→2，源D 不动）',
-    f1.feedCounts.get('10')?.unread === 2 && f1.feedCounts.get('12')?.unread === 2);
+  /* 本块 scope = all × article 布局 × starred 视图：被标读的只有 103（feed10）；
+     feed11 是 social 布局源，201 两侧（前端可见集/后端范围）都不在范围内 → 计数 1 保持 */
+  checkNew('(f) 全部已读后计数=后端口径（源A 2→1：仅标读的 103 扣减；源D 2、跨布局源B 1 不动）',
+    f1.feedCounts.get('10')?.unread === 1 && f1.feedCounts.get('12')?.unread === 2
+    && f1.feedCounts.get('11')?.unread === 1);
   checkNew('(f) 全部已读后清空「已读保留」快照（列表不再保留灰色卡片）',
     Object.keys(f1.openedReadIds).length === 0);
   checkNew('(f) 全部已读给出 toast 反馈', f1.toasts.some((t) => t.text === '已全部标为已读'));
 
   await bootFixture();
+  feedCountsImpl = countsFromRows;
   store.setState({ activeViewFilter: 'all', timelineFilter: 'unread', activeFeedFilter: 'cat-1' });
   invokeCalls.length = 0;
   store.getState().markCurrentViewAllRead();
@@ -821,11 +889,14 @@ await (async () => {
   const fCat = store.getState();
   checkNew('(f) 分类范围 → folderId=数字、feedId=null（cat- 前缀不被当作源 id）',
     fCatCall?.args.folderId === 1 && fCatCall?.args.feedId === null);
+  /* TASK-107：计数期望值改为后端对账口径（整个分类范围的未读 101/103/104/105
+     都被标读：feed10 2→0、feed12 2→0）；分类外的 feed11（201）计数与读态均不受影响 */
   checkNew('(f) 分类范围只标该分类可见条目，分类外条目不受影响',
     fCat.entries.find((a) => a.id === '101')?.isRead === true
     && fCat.entries.find((a) => a.id === '103')?.isRead === true
     && fCat.entries.find((a) => a.id === '201')?.isRead === false
-    && fCat.feedCounts.get('10')?.unread === 1 && fCat.feedCounts.get('12')?.unread === 0);
+    && fCat.feedCounts.get('10')?.unread === 0 && fCat.feedCounts.get('12')?.unread === 0
+    && fCat.feedCounts.get('11')?.unread === 1);
 
   await bootFixture();
   store.setState({ activeViewFilter: 'all', timelineFilter: 'unread', activeFeedFilter: '12' });
@@ -1636,13 +1707,25 @@ await (async () => {
     && store.getState().activeArticleId === '101');
 
   /* ---------- (p) TASK-067 N9/N10：交互落库与错误可见性 ---------- */
+  /* 【TASK-107 改动理由】旧断言文案『全部已读未能保存，重启后可能回退』对应旧
+     失败语义（本地保持已读假成功、重启回退）。新契约：失败即回滚（乐观读态/
+     计数/已读保留快照全部还原），成功 toast 不再提前弹；断言升级为「回滚到位
+     + 失败 toast 带重试 + 无假成功提示」，保护更强非弱化。 */
   await bootFixture();
   rejectCmds.add('mark_all_read');
   store.setState({ activeViewFilter: 'all', activeFeedFilter: '10', toasts: [] });
+  const p1BeforeCounts = store.getState().feedCounts.get('10')?.unread;
+  const p1BeforeOpened = Object.keys(store.getState().openedReadIds).length;
   store.getState().markCurrentViewAllRead();
   await nTick(10);
-  checkNew('(p1) 全部已读失败必须可见（修前静默：本地已标读、计数已扣、无提示）',
-    store.getState().toasts.some((t) => t.text === '全部已读未能保存，重启后可能回退'));
+  const p1After = store.getState();
+  checkNew('(p1) 全部已读失败必须可见且带重试入口（TASK-107：无「已全部标为已读」假成功提示）',
+    p1After.toasts.some((t) => t.text.startsWith('全部已读保存失败') && t.action?.label === '重试')
+    && !p1After.toasts.some((t) => t.text === '已全部标为已读'));
+  checkNew('(p1) 失败回滚到位：已读态还原、未读计数还原、「已读保留」快照还原（TASK-107）',
+    p1After.entries.filter((a) => a.feedId === '10' && a.isRead).length === 1 // 仅 102 本就已读
+    && p1After.feedCounts.get('10')?.unread === p1BeforeCounts
+    && Object.keys(p1After.openedReadIds).length === p1BeforeOpened);
 
   await bootFixture();
   rejectCmds.add('set_read');
@@ -2757,6 +2840,240 @@ await (async () => {
       store.getState().entries.some((e) => e.id === '9002')
       && store.getState().articlesCursor['article|11'] === 1);
     listPlan = null;
+  }
+
+  /* ============================================================
+     TASK-107（REQ-003）：全部已读与标读计数一致性
+     —— 成功以后端实际影响数对账（feed_counts 重取整体替换）、失败回滚不假
+     成功、单条标读计数与后端口径一致（含同文副本不重复扣减）、范围外布局/
+     范围计数不受影响。
+     审计探针（AUDIT-20261005-core-consistency.md）：范围 600 条未读、前端
+     加载 1 条，后端成功 600 条后界面仍显示 599 条未读（乐观推算缺口）。
+     计数对账用例统一挂 feedCountsImpl = countsFromRows（忠实聚合）；mock 的
+     set_read / mark_all_read 已升级为忠实落库（就地翻转 is_read 并返回受影响
+     行数），resetStore 对行对象深拷贝防跨用例突变残留。
+     ============================================================ */
+  {
+    /* ---------- t104-markall-count-authoritative：600/1 探针转断言 ---------- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    const rows107 = [];
+    for (let i = 0; i < 600; i += 1) rows107.push(mkRow({ id: 40000 + i, feed_id: 10, published_at: iso(NOW - i * 1000) }));
+    backendRows = rows107;
+    /* 注意：不能走 bootFixture()——resetStore 会复位 feedCountsImpl/backendRows，
+       自定义夹具必须在 resetStore 之后、bootstrapFromBackend 之前就位 */
+    await store.getState().bootstrapFromBackend();
+    /* 极端分页形态：范围 600 条未读、前端仅加载 1 条（其余 599 条不在册） */
+    store.setState((s) => ({ entries: s.entries.slice(0, 1) }));
+    invokeCalls.length = 0;
+    store.getState().markCurrentViewAllRead();
+    await nTick(10);
+    checkNew('(t104-markall-count-authoritative) 600/1 探针：全部已读成功后未读计数=后端口径 0（修前按已加载推算残留 599）',
+      store.getState().feedCounts.get('10')?.unread === 0
+      && store.getState().entries.find((a) => a.id === '40000')?.isRead === true
+      && invokeCalls.filter((c) => c.cmd === 'feed_counts').length === 1);
+
+    /* ---------- t104-markall-failure-rollback：失败不假成功 ---------- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 41001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 41002, feed_id: 10, published_at: iso(NOW - 60000) }),
+      mkRow({ id: 41003, feed_id: 12, published_at: iso(NOW - 120000) }),
+      mkRow({ id: 41004, feed_id: 12, published_at: iso(NOW - 180000) }),
+      mkRow({ id: 41005, feed_id: 12, published_at: iso(NOW - 240000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    rejectCmds.add('mark_all_read');
+    store.getState().markCurrentViewAllRead();
+    await nTick(10);
+    const rb107 = store.getState();
+    checkNew('(t104-markall-failure-rollback) markAllRead 失败：无「已全部标为已读」假成功提示，失败 toast 可见且带重试',
+      !rb107.toasts.some((t) => t.text === '已全部标为已读')
+      && rb107.toasts.some((t) => t.text.startsWith('全部已读保存失败') && t.action?.label === '重试'));
+    checkNew('(t104-markall-failure-rollback) 失败回滚到位：已读态全部还原、未读计数还原（feed10=2 / feed12=3）',
+      rb107.entries.every((a) => !a.isRead)
+      && rb107.feedCounts.get('10')?.unread === 2 && rb107.feedCounts.get('12')?.unread === 3);
+
+    /* ---------- t104-single-read-count：单条标读计数与后端口径一致 ---------- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 42001, feed_id: 10, guid: 'dup-1', published_at: iso(NOW) }),
+      mkRow({ id: 42002, feed_id: 12, published_at: iso(NOW - 60000) }),
+      mkRow({ id: 42003, feed_id: 11, guid: 'dup-1', published_at: iso(NOW - 120000) }),
+      mkRow({ id: 42004, feed_id: 11, published_at: iso(NOW - 180000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    store.getState().toggleEntryFlag('42001', 'isRead');
+    await nTick(10);
+    const single107 = store.getState();
+    /* 后端口径：set_read 只翻转 42001 自身（同文副本行 42003 不动），按行重算聚合 */
+    const agg107 = new Map(countsFromRows().map((c) => [String(c.feed_id), c]));
+    checkNew('(t104-single-read-count) 单条标读：前端 feedCounts 与后端按行聚合逐源一致（feed10 恰好 -1，其余不动）',
+      single107.feedCounts.get('10')?.unread === agg107.get('10')?.unread && single107.feedCounts.get('10')?.unread === 0
+      && single107.feedCounts.get('11')?.unread === agg107.get('11')?.unread && single107.feedCounts.get('11')?.unread === 2
+      && single107.feedCounts.get('12')?.unread === agg107.get('12')?.unread && single107.feedCounts.get('12')?.unread === 1);
+    checkNew('(t104-single-read-count) 同文副本不重复扣减：主条目标读后，副本行（42003）读态与所属源计数均不变',
+      agg107.get('11')?.unread === 2
+      && single107.entries.find((a) => a.id === '42003')?.isRead === false);
+
+    /* ---------- t104-scope-isolation：范围外布局/范围计数不受影响 ---------- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 43001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 43002, feed_id: 10, published_at: iso(NOW - 60000) }),
+      mkRow({ id: 43003, feed_id: 11, published_at: iso(NOW - 120000) }),
+      mkRow({ id: 43011, feed_id: 12, published_at: iso(NOW - 180000) }),
+      mkRow({ id: 43012, feed_id: 12, published_at: iso(NOW - 240000) }),
+      mkRow({ id: 43013, feed_id: 12, published_at: iso(NOW - 300000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    /* 范围内仅部分条目已加载（分页快照形态）：feed12 共 3 条未读，在册 2 条 */
+    store.setState((s) => ({ entries: s.entries.filter((a) => a.id === '43011' || a.id === '43012') }));
+    store.setState({ activeFeedFilter: '12' });
+    const isoBefore107 = store.getState();
+    store.getState().markCurrentViewAllRead();
+    await nTick(10);
+    const isoAfter107 = store.getState();
+    checkNew('(t104-scope-isolation) 单源范围全部已读（3 条未读仅 2 条在册）：该源计数=后端口径 0（修前残留 1）',
+      isoAfter107.feedCounts.get('12')?.unread === 0
+      && isoAfter107.entries.every((a) => a.feedId === '12' && a.isRead));
+    checkNew('(t104-scope-isolation) 范围外不受影响：其他源（feed10=2）与跨布局源（feed11 social=1）计数保持原值',
+      isoAfter107.feedCounts.get('10')?.unread === isoBefore107.feedCounts.get('10')?.unread
+      && isoAfter107.feedCounts.get('11')?.unread === isoBefore107.feedCounts.get('11')?.unread
+      && isoAfter107.feedCounts.get('10')?.unread === 2 && isoAfter107.feedCounts.get('11')?.unread === 1);
+
+    /* ---------- t104-rollback-guard-versioned（TASK-107 R1/F1）：版本化回滚守卫 ----------
+       审查探针 C3 场景：全部已读在途失败期间，用户对同一在册条目连点两次 toggle
+       停在「已读」（其自身 set_read(true) 已落库）。修前值守卫（当前值==乐观写入值）
+       无法区分「用户已接管」与「未被触碰」，迟到回滚把 UI 踩回未读而 DB 是已读，
+       计数同步偏差 +1；修后以「条目变更版本未变」为恢复前提，用户接管（每次真实
+       翻转都 bump 版本）的条目一律跳过。 */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 47001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 47002, feed_id: 10, published_at: iso(NOW - 60000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    rejectCmds.add('mark_all_read');
+    store.getState().markCurrentViewAllRead();            // 乐观翻转 47001/47002 → read
+    store.getState().toggleEntryFlag('47001', 'isRead');  // 用户 read→unread（set_read(false) 落库）
+    store.getState().toggleEntryFlag('47001', 'isRead');  // 用户 unread→read（最终意图=已读，set_read(true) 落库）
+    await nTick(60);                                       // 全部已读失败回滚落地
+    const guard107 = store.getState();
+    checkNew('(t104-rollback-guard-versioned) 双 toggle 停在已读 + 全部已读失败：用户最终意图不被回踩（修前值守卫误踩回未读）',
+      guard107.entries.find((a) => a.id === '47001')?.isRead === true
+      && backendRows.find((r) => r.id === 47001)?.is_read === true // R2/F3：wire 格式布尔化（原数字 1）
+      && guard107.entries.find((a) => a.id === '47002')?.isRead === false);
+    checkNew('(t104-rollback-guard-versioned) 版本化守卫下计数与 DB 真值一致（修前同值误踩会偏差 +1）',
+      guard107.feedCounts.get('10')?.unread === 1
+      && countsFromRows().find((c) => c.feed_id === 10)?.unread === 1);
+
+    /* ---------- t104-reconcile-retry（TASK-107 R1/F2）：对账重取失败可见化 + 短延迟重试 ----------
+       审查探针 F 场景：mark_all_read 落库成功但紧随的 feed_counts 重取失败——
+       修前完全静默（计数残留乐观值 599、DB 真值 0，无任何提示）；修后先给一条
+       诊断 toast（与「保存失败」文案明确区分），并安排一次 3s 延迟重试。 */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    const rows107F2 = [];
+    for (let i = 0; i < 600; i += 1) rows107F2.push(mkRow({ id: 46000 + i, feed_id: 10, published_at: iso(NOW - i * 1000) }));
+    backendRows = rows107F2;
+    await store.getState().bootstrapFromBackend();
+    store.setState((s) => ({ entries: s.entries.slice(0, 1) }));
+    rejectCmds.add('feed_counts'); // 仅注入对账重取失败（mark_all_read 本身成功落库）
+    store.getState().markCurrentViewAllRead();
+    await nTick(10);
+    const rF2 = store.getState();
+    checkNew('(t104-reconcile-retry) 对账重取失败不再静默：诊断 toast 可见且不与「保存失败」混淆（标读本身已成功）',
+      rF2.toasts.some((t) => t.text === '全部已读已保存，未读计数刷新失败')
+      && !rF2.toasts.some((t) => t.text.startsWith('全部已读保存失败')));
+    checkNew('(t104-reconcile-retry) 重取失败时计数停留乐观值（599），等待延迟重试',
+      rF2.feedCounts.get('10')?.unread === 599
+      && countsFromRows().find((c) => c.feed_id === 10)?.unread === 0);
+    rejectCmds.delete('feed_counts');
+    await nTick(3500); // 等 3s 延迟重试落地
+    checkNew('(t104-reconcile-retry) 3s 延迟重试成功：计数自愈为后端真值 0',
+      store.getState().feedCounts.get('10')?.unread === 0);
+
+    /* ---------- t104-snapshot-voids-rollback-claim（TASK-107 R2/F3）：快照替换使在途乐观声明失效 ----------
+       R1 审查变异发现：mergeSnapshotEntries 对存活 id 的 bumpEntryVersion 无断言覆盖（删掉全绿）。
+       本场景给 bump 一个**判别性**用例：全部已读在途失败窗口内，外部 DB 写入（同步拉取把远端
+       已读态直接落库——不经前端写入路径、不 bump 前端版本）把行置为已读，随后快照替换带来
+       行级真值（行 read=true、计数重取 0）。mark_all_read 此刻才失败：条目当前值==乐观写入值
+       （值守卫放行），唯一的守卫是 merge bump（版本已前进）——迟到回滚必须跳过，否则会把
+       陈旧未读踩回 UI 并把刚重取的真值计数虚增回去。 */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 48001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 48002, feed_id: 10, published_at: iso(NOW - 60000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    const realInvoke107v = globalThis.__INVOKE__;
+    let rejectMarkAll107v = null;
+    globalThis.__INVOKE__ = (cmd, args) => {
+      if (cmd === 'mark_all_read') return new Promise((_resolve, rej) => { rejectMarkAll107v = rej; });
+      return realInvoke107v(cmd, args);
+    };
+    store.getState().markCurrentViewAllRead(); // 乐观翻转 48001/48002 → read（计数 2→0，版本快照 v1）
+    await nTick(0);
+    /* 外部写入者（同步拉取语义）：绕过前端直接落库，行 is_read=1——不触发 flipEntryFlag/markEntriesRead */
+    backendRows.forEach((r) => { r.is_read = true; }); // 外部落库为 wire 布尔
+    await store.getState().reloadFromBackend(); // 快照替换：行 read=true、计数重取 0、merge bump → v2
+    const voided107 = store.getState();
+    checkNew('(t104-snapshot-voids-rollback-claim) 场景成立：快照替换带来后端真值（行 read=true、计数重取 0）',
+      voided107.entries.every((a) => a.isRead) && voided107.feedCounts.get('10')?.unread === 0);
+    rejectMarkAll107v({ message: '注入失败:mark_all_read' });
+    await nTick(10);
+    globalThis.__INVOKE__ = realInvoke107v;
+    const afterVoid107 = store.getState();
+    checkNew('(t104-snapshot-voids-rollback-claim) 迟到回滚不踩快照真值：行保持 read、计数保持 0（无 bump 时会被恢复为未读并虚增回 2）',
+      afterVoid107.entries.every((a) => a.isRead)
+      && afterVoid107.feedCounts.get('10')?.unread === 0);
+    checkNew('(t104-snapshot-voids-rollback-claim) 回滚跳过不等于吞错：失败 toast 仍可见且带重试',
+      afterVoid107.toasts.some((t) => t.text.startsWith('全部已读保存失败') && t.action?.label === '重试'));
+
+    /* ---------- t104-snapshot-fresh-claim-rollback（TASK-107 R2/F3）：快照后新声明的回滚仍正常 ----------
+       边界：bump 只使「快照替换**之前**建立的乐观声明」失效，不得永久瘫痪回滚机制。
+       两段验证——①快照替换（行仍未读：mark_all_read 未落库）+ 失败：被快照覆盖的条目不被
+       陈旧回滚踩到（读态/计数保持快照后的后端真值；此形态值守卫与版本守卫双保险，锁定契约）；
+       ②快照替换**之后**新发起的全部已读（版本快照取自 bump 后的现值）失败时，回滚照常
+       恢复读态并回补计数——机制本身仍然存活。 */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 49001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 49002, feed_id: 10, published_at: iso(NOW - 60000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    const realInvoke107f = globalThis.__INVOKE__;
+    let rejectMarkAll107f = null;
+    globalThis.__INVOKE__ = (cmd, args) => {
+      if (cmd === 'mark_all_read') return new Promise((_resolve, rej) => { rejectMarkAll107f = rej; });
+      return realInvoke107f(cmd, args);
+    };
+    store.getState().markCurrentViewAllRead(); // 声明 #1：乐观翻转 → read（计数 2→0）
+    await nTick(0);
+    await store.getState().reloadFromBackend(); // 快照替换（行仍未读：mark_all_read 未落库）→ 计数重取 2、bump
+    rejectMarkAll107f({ message: '注入失败:mark_all_read' });
+    await nTick(10);
+    const staleClaim107 = store.getState();
+    checkNew('(t104-snapshot-fresh-claim-rollback) 陈旧声明失效：快照后行保持未读、计数保持重取值 2（不被陈旧回滚踩动）',
+      staleClaim107.entries.every((a) => !a.isRead)
+      && staleClaim107.feedCounts.get('10')?.unread === 2);
+    store.getState().markCurrentViewAllRead(); // 声明 #2（快照后新建）：乐观翻转 → read（计数 2→0）
+    await nTick(0);
+    rejectMarkAll107f({ message: '注入失败:mark_all_read' });
+    await nTick(10);
+    globalThis.__INVOKE__ = realInvoke107f;
+    const freshClaim107 = store.getState();
+    checkNew('(t104-snapshot-fresh-claim-rollback) 快照后新声明的回滚仍正常：两行恢复未读、计数回补到 2（机制未被 bump 瘫痪）',
+      freshClaim107.entries.every((a) => !a.isRead)
+      && freshClaim107.feedCounts.get('10')?.unread === 2
+      && freshClaim107.toasts.some((t) => t.text.startsWith('全部已读保存失败')));
   }
 
   /* ============================================================
