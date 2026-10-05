@@ -3077,6 +3077,152 @@ await (async () => {
   }
 
   /* ============================================================
+     TASK-109：查询口径统一收口（QueryScope）+ merge bump 按真值来源收窄
+     - 口径单点：三把键与查询参数只经 QueryScope 派生（源级断言）；
+       scopePageKey/viewCacheKey 字符串形态锁定不变（缓存/游标键兼容）；
+     - reloadFromBackend 的游标键/「全部」视图缓存键改为发起时快照（原在 await
+       后读完成时状态，靠 reloadGeneration 间接兜底；行为等价、口径显式化）；
+     - bump 收窄：后端快照路径（fromBackend=true）void 在途声明；缓存恢复路径
+       （fromBackend=false）不 void——R2 裁定角例的修后行为有判别断言。
+     ============================================================ */
+  {
+    const fs109 = await import('node:fs');
+    const src109 = (p) => fs109.readFileSync(new URL(p, import.meta.url), 'utf8');
+    const internals109 = src109('../src/store/internals.ts');
+    const bootstrap109 = src109('../src/store/slices/bootstrap.ts');
+    const nav109 = src109('../src/store/slices/nav.ts');
+
+    /* -- t109-queryscope-single-source：口径派生单点性（源级）-- */
+    checkNew('(t109-queryscope-single-source) QueryScope 统一入口定义于 internals：三把键 + 标写范围 + 两个具名守卫齐备',
+      internals109.includes('export const QueryScope = {')
+      && internals109.includes('args: scopeQueryArgs')
+      && internals109.includes('markScope: scopeFilterArgs')
+      && internals109.includes('pageKey: scopePageKey')
+      && internals109.includes('viewKey: viewCacheKey')
+      && internals109.includes('export function paginationStale(')
+      && internals109.includes('export function filteredSnapshotStale('));
+    {
+      const importLine = (src) => {
+        const m = src.match(/import \{([^}]*)\} from '\.\.\/internals';/);
+        return m ? m[1] : '';
+      };
+      checkNew('(t109-queryscope-single-source) bootstrap/nav 不再裸引三把键：仅经 QueryScope.* 消费（键派生无第二入口）',
+        !importLine(bootstrap109).includes('scopeQueryArgs') && !importLine(bootstrap109).includes('scopePageKey')
+        && !importLine(bootstrap109).includes('viewCacheKey')
+        && !importLine(nav109).includes('scopeQueryArgs') && !importLine(nav109).includes('scopePageKey')
+        && !importLine(nav109).includes('viewCacheKey')
+        && bootstrap109.includes('QueryScope.args(') && bootstrap109.includes('QueryScope.pageKey(')
+        && bootstrap109.includes('QueryScope.viewKey(')
+        && bootstrap109.includes('QueryScope.paginationStale(') && bootstrap109.includes('QueryScope.filteredSnapshotStale(')
+        && nav109.includes('QueryScope.pageKey(') && nav109.includes('QueryScope.viewKey('));
+    }
+
+    /* -- t109-key-format-compat：键形态兼容（行为级）-- */
+    {
+      const it109 = await import('../dist-test/store/internals.js');
+      checkNew('(t109-key-format-compat) scopePageKey/viewCacheKey 字符串形态逐字不变，QueryScope 同源绑定、args/markScope 派生正确',
+        it109.scopePageKey('all') === 'all' && it109.scopePageKey('10') === '10' && it109.scopePageKey('cat-1') === 'cat-1'
+        && it109.scopePageKey('10', 'article') === 'article|10' && it109.scopePageKey('all', 'social') === 'social|all'
+        && it109.viewCacheKey('article', 'all') === 'article|all|all'
+        && it109.viewCacheKey('social', 'starred', '11') === 'social|starred|11'
+        && it109.QueryScope.pageKey === it109.scopePageKey && it109.QueryScope.viewKey === it109.viewCacheKey
+        && JSON.stringify(it109.QueryScope.args('12', 'oldest', 'social')) === JSON.stringify({ feed_id: 12, folder_id: null, newest_first: false, layout: 'social' })
+        && JSON.stringify(it109.QueryScope.markScope('cat-1')) === JSON.stringify({ feed_id: null, folder_id: 1 })
+        && JSON.stringify(it109.QueryScope.markScope('all')) === JSON.stringify({ feed_id: null, folder_id: null }));
+    }
+
+    /* -- t109-reload-scope-snapshot-at-start：发起时快照修正（源级）-- */
+    {
+      const start109 = bootstrap109.indexOf('reloadFromBackend: async');
+      const end109 = bootstrap109.indexOf('loadMoreArticles:');
+      const reloadSrc = bootstrap109.slice(start109, end109);
+      const awaitPos = reloadSrc.indexOf('await Promise.all');
+      const capturePos = reloadSrc.indexOf('const scopeAtStart = get().activeFeedFilter;');
+      checkNew('(t109-reload-scope-snapshot-at-start) reloadFromBackend 发起时快照范围口径：scopeKey/缓存键从 scopeAtStart 派生，await 后无完成时回读',
+        capturePos >= 0 && awaitPos >= 0 && capturePos < awaitPos
+        && reloadSrc.includes('const scopeKey = QueryScope.pageKey(scopeAtStart, layoutAtStart);')
+        && reloadSrc.includes("QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart)")
+        && !reloadSrc.slice(awaitPos).includes('get().activeFeedFilter')
+        && !reloadSrc.slice(awaitPos).includes('get().activeContentLayout'));
+    }
+
+    /* -- t109-markscope-derivation：标写范围派生收口（源级）-- */
+    {
+      const markSrc = nav109.slice(nav109.indexOf('markCurrentViewAllRead: () => {'));
+      checkNew('(t109-markscope-derivation) markCurrentViewAllRead 标写范围经 QueryScope.markScope（仅订阅维度），layout 由 markAllRead 独立参数承载',
+        markSrc.includes('QueryScope.markScope(scope)')
+        && !markSrc.includes('scopeQueryArgs(')
+        && markSrc.includes('api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout })'));
+    }
+
+    /* -- t109-cache-restore-preserves-claim：R2 裁定角例修后行为（判别，行为级）--
+       全部已读乐观写入在途（缓存已被乐观写同步为 read 态）→ 缓存恢复（selectFeed
+       命中，回放乐观 read 态；fromBackend=false 不 bump 版本）→ mark_all_read 失败
+       → 回滚必须仍能恢复（修前 bump-on-all-merge 会 void 声明、卡在乐观 read 态）。 */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 50001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 50002, feed_id: 10, published_at: iso(NOW - 60000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    const realInvoke109 = globalThis.__INVOKE__;
+    let rejectMarkAll109 = null;
+    globalThis.__INVOKE__ = (cmd, args) => {
+      if (cmd === 'mark_all_read') return new Promise((_res, rej) => { rejectMarkAll109 = rej; });
+      return realInvoke109(cmd, args);
+    };
+    store.getState().markCurrentViewAllRead(); // 乐观翻转 → read；缓存同步为 read 态；版本快照 v1
+    await nTick(0);
+    listPlan = { mode: 'defer' };              // 拦住 selectFeed 的后台 reload（其 fromBackend bump 不得抢跑）
+    store.getState().selectFeed('all');        // 缓存命中：回放乐观 read 态（TASK-109②：不 bump）
+    await nTick(0);
+    const replayed109 = store.getState();
+    checkNew('(t109-cache-restore-preserves-claim) 场景成立：缓存回放携带乐观 read 态且计数停留乐观值（回放未 bump 版本）',
+      replayed109.entries.every((a) => a.isRead) && replayed109.feedCounts.get('10')?.unread === 0);
+    rejectMarkAll109({ message: '注入失败:mark_all_read' });
+    await nTick(10);
+    const healed109 = store.getState();
+    checkNew('(t109-cache-restore-preserves-claim) R2 角例修后行为：缓存回放不 void 在途声明，失败回滚正确恢复未读态与计数 2',
+      healed109.entries.every((a) => !a.isRead) && healed109.feedCounts.get('10')?.unread === 2);
+
+    /* -- t109-cache-replay-new-claim：缓存回放不误 void 新声明（行为级）-- */
+    store.getState().markCurrentViewAllRead(); // 回放后的新声明：乐观翻转 → read（版本 bump 后快照）
+    await nTick(0);
+    rejectMarkAll109({ message: '注入失败:mark_all_read' });
+    await nTick(10);
+    const newClaim109 = store.getState();
+    checkNew('(t109-cache-replay-new-claim) 缓存回放后新建声明的回滚仍正常：恢复未读态与计数 2（不误 void）',
+      newClaim109.entries.every((a) => !a.isRead) && newClaim109.feedCounts.get('10')?.unread === 2);
+    // 清理：放行被 defer 的后台 reload（fromBackend merge 接真值对齐），还原 invoke
+    listPlan = null;
+    for (const p of pendingList) p.resolve(queryRows(p.args));
+    pendingList.length = 0;
+    await nTick(20);
+    globalThis.__INVOKE__ = realInvoke109;
+
+    /* -- t109-filtered-guard-named：筛选视图不锁排序（具名守卫，行为级）-- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    await store.getState().bootstrapFromBackend();
+    listPlan = { mode: 'defer' };
+    store.setState({ activeViewFilter: 'starred', timelineSort: 'newest' });
+    const pFiltered109 = store.getState().reloadFilteredEntries('starred');
+    await nTick(0);
+    store.getState().toggleTimelineSort(); // 拉取期间切排序：筛选视图有意不锁排序（本地重排，不触发重拉）
+    const sortFlipped109 = store.getState().timelineSort === 'oldest';
+    for (const p of pendingList) p.resolve(queryRows(p.args));
+    pendingList.length = 0;
+    await pFiltered109;
+    listPlan = null;
+    checkNew('(t109-filtered-guard-named) 筛选视图拉取不锁排序（具名守卫 filteredSnapshotStale）：拉取期间切排序响应仍落地',
+      sortFlipped109
+      && store.getState().entries.length > 0
+      && store.getState().entries.every((a) => a.isStarred)
+      && store.getState().articlesExhausted === true);
+  }
+
+  /* ============================================================
      TASK-103（REQ-001）：文章快照与正文水合生命周期统一
      —— 刷新不丢正文、同 id 刷新后重新水合、终态机完备、乱序防护与在途去重。
      审计探针场景（AUDIT-20261005-core-consistency.md「社交正文问题链路」）：

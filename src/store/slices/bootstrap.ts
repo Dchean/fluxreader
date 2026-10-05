@@ -1,7 +1,7 @@
 import type { StateCreator } from 'zustand';
 import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
-import { appStore, buildFeedIndex, markEntriesRead, mergeSnapshotEntries, reconcileCategories, scopePageKey, scopeQueryArgs, viewCacheKey, viewEntriesCache } from '../internals';
+import { appStore, buildFeedIndex, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, viewEntriesCache } from '../internals';
 import type { AppState } from '../types';
 import type { ContentLayoutType } from '../../types';
 
@@ -104,14 +104,24 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const gen = ++reloadGeneration;
     backendReloadInFlight++;
     try {
-      const layout = get().activeContentLayout;
-      const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort, layout);
+      /* TASK-109①：发起时一次性快照「范围×布局×排序」——查询参数、分页游标键
+         与「全部」视图缓存键全部从该快照派生。原实现在 await 之后读「完成时」
+         的 activeFeedFilter/activeContentLayout 充当游标键与缓存键口径（注释
+         声称发起时），靠 reloadGeneration 间接兜底：任何范围/布局变更都经由
+         selectFeed/selectLayout 触发新 reload 使旧代际整体丢弃，故行为等价；
+         现改为显式成立（与 loadMoreArticles/anchorToArticle 的发起时快照同一
+         形态），不再依赖默会。reloadGeneration 守卫保留。 */
+      const scopeAtStart = get().activeFeedFilter;
+      const layoutAtStart = get().activeContentLayout;
+      const sortAtStart = get().timelineSort;
+      const scopeKey = QueryScope.pageKey(scopeAtStart, layoutAtStart);
+      const scopeArgs = QueryScope.args(scopeAtStart, sortAtStart, layoutAtStart);
       let folders, feeds, articles, counts;
       try {
         [folders, feeds, articles, counts] = await Promise.all([
           api.listFolders(),
           api.listFeeds(),
-          api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset: 0, with_content: layoutNeedsBody(layout) }),
+          api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset: 0, with_content: layoutNeedsBody(layoutAtStart) }),
           api.feedCounts(),
         ]);
       } catch (e) {
@@ -135,18 +145,17 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
          mergeSnapshotEntries）。新行从不带正文（with_content 恒 false），直接
          覆盖会把已水合卡片的正文抹掉；而虚拟列表按文章 id 保持卡片身份、
          useLazyHydrate 同 id 不重触发 → 卡片永挂「加载正文…」且无请求在途。 */
-      const merged = mergeSnapshotEntries(get().entries, articles.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors);
+      const merged = mergeSnapshotEntries(get().entries, articles.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
       const nextEntries = merged.entries;
-      /* 分页游标写回**发起 reload 时**的范围键（不是完成时的 activeFeedFilter：
-         两者可能已被用户改过，而游标属于发起时的查询口径）。
+      /* 分页游标键取自**发起时快照**（TASK-109①）：游标属于发起时的查询口径，
+         与完成时的 activeFeedFilter 无关（gen 匹配时两者恒等，此处为显式口径）。
          TASK-094：entries 是该布局的快照，游标键带布局（R7：切布局不串游标）。 */
-      const scopeKey = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
       // 缓存「全部」视图快照：切回时零延迟恢复（视图切换卡顿的根治）。
       // TASK-052：快照就是**该范围**的首批，故缓存键必须带范围，否则源A 的首批
       // 会被当成「全部」的首批恢复（数据错配）。TASK-094：键首段本就是布局。
       // TASK-103：缓存写入的是继承过正文的合并结果，缓存恢复（selectFeed 等）
       // 才能零延迟还原正文。
-      viewEntriesCache.set(viewCacheKey(get().activeContentLayout, 'all', get().activeFeedFilter), nextEntries);
+      viewEntriesCache.set(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart), nextEntries);
       set((s) => ({
         ...reconcileCategories(s, categories),
         entries: nextEntries,
@@ -193,8 +202,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        竞态比较的基准会互相错位（例如请求用旧范围、比较用新范围）。 */
     const scope = st.activeFeedFilter;
     const layoutAtStart = st.activeContentLayout;
-    const scopeKey = scopePageKey(scope, layoutAtStart);
-    const scopeArgs = scopeQueryArgs(scope, st.timelineSort, layoutAtStart);
+    const scopeKey = QueryScope.pageKey(scope, layoutAtStart);
+    const scopeArgs = QueryScope.args(scope, st.timelineSort, layoutAtStart);
     const offset = st.articlesLimit;
     /* F1（Batch 1/2 独立审查 P3）：排序也必须参与竞态比较——offset 的含义随排序
        翻转（同 offset=500 在 newest/oldest 下指向不同的 500 条）。守卫原本只比
@@ -215,10 +224,16 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       // 把属于 A 的迟到数据错接到 B 的列表上；带上 scopeKey 后这种串台也会被丢弃。
       // F1：排序翻转同样使该响应过期（见发起时的 sortAtStart 注释）。
       // TASK-094（R7）：布局切换改变整个 entries 序列与游标键，布局在途响应一并过期。
+      // TASK-109①：判据收口为具名守卫 paginationStale（四元组全锁，语义见 internals）。
       if (
-        scopePageKey(get().activeFeedFilter, get().activeContentLayout) !== scopeKey
-        || get().articlesLimit !== offset
-        || get().timelineSort !== sortAtStart
+        QueryScope.paginationStale(
+          { scopeKey, sort: sortAtStart, offset },
+          {
+            scopeKey: QueryScope.pageKey(get().activeFeedFilter, get().activeContentLayout),
+            sort: get().timelineSort,
+            offset: get().articlesLimit,
+          },
+        )
       ) {
         set({ articlesLoading: false });
         return;
@@ -264,8 +279,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        守卫判据对齐。此前只比较 view：切范围/切布局后的旧响应仍会放行，把
        「源A × 旧布局」的收藏列表覆盖进新口径（新请求先返回时旧响应晚到，
        错列表一直留存），并把游标写过期键。 */
-    const scopeKeyAtStart = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
-    const scopeArgs = scopeQueryArgs(get().activeFeedFilter, get().timelineSort, get().activeContentLayout);
+    const scopeKeyAtStart = QueryScope.pageKey(get().activeFeedFilter, get().activeContentLayout);
+    const scopeArgs = QueryScope.args(get().activeFeedFilter, get().timelineSort, get().activeContentLayout);
     let rows;
     try {
       rows = await api.listArticles({
@@ -289,12 +304,14 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (get().activeViewFilter !== view) return;
     // fix-4：拉取期间订阅范围或布局也变了 ⇒ 该响应属于另一个查询口径，整体丢弃
     //（排序不参与：筛选视图拉的是全集，切排序只是本地重排，entries 仍然有效）
-    if (scopePageKey(get().activeFeedFilter, get().activeContentLayout) !== scopeKeyAtStart) return;
+    // TASK-109①：该「有意不锁排序」的判据收口为具名守卫 filteredSnapshotStale
+    //（与 paginationStale 的差异显式化，语义见 internals）。
+    if (QueryScope.filteredSnapshotStale(scopeKeyAtStart, QueryScope.pageKey(get().activeFeedFilter, get().activeContentLayout))) return;
     // 替换 entries（筛选视图的完整列表），重置分页游标（筛选视图不分页）
     // TASK-103：同 reloadFromBackend——快照替换按 id 继承正文与水合终态（合并
     // 逻辑收口在 mergeSnapshotEntries，不得在此另写一份），终态按 id 裁剪。
-    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors);
-    viewEntriesCache.set(viewCacheKey(get().activeContentLayout, view, get().activeFeedFilter), merged.entries);
+    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
+    viewEntriesCache.set(QueryScope.viewKey(get().activeContentLayout, view, get().activeFeedFilter), merged.entries);
     set((s) => ({
       entries: merged.entries,
       articlesLimit: rows.length,
@@ -322,9 +339,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        注意顺序契约：本 action 按**调用时**的范围/排序构造查询，调用方（命令面板）
        必须先完成 selectFeed/selectView 的前置导航。 */
     const scope = st.activeFeedFilter;
-    const scopeKey = scopePageKey(scope, st.activeContentLayout);
+    const scopeKey = QueryScope.pageKey(scope, st.activeContentLayout);
     const args = {
-      ...scopeQueryArgs(scope, st.timelineSort, st.activeContentLayout),
+      ...QueryScope.args(scope, st.timelineSort, st.activeContentLayout),
       limit: ARTICLES_PAGE_SIZE,
       offset: 0,
       with_content: layoutNeedsBody(st.activeContentLayout),
@@ -351,7 +368,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (!rows) return;
     /* TASK-103：锚定分页同样是快照替换——按 id 继承正文与水合终态（收口在
        mergeSnapshotEntries），终态按 id 裁剪，不再整体清空。 */
-    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors);
+    /* TASK-109②：后端快照路径（fromBackend=true）——行级 is_read 是后端真值，
+       在途乐观声明失效（bump）。 */
+    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
     const next = merged.entries;
     set((s) => ({
       entries: next,

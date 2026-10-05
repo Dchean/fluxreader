@@ -115,6 +115,18 @@ function scopeNumericId(raw: string): number {
   return m ? Number(m[1]) : NaN;
 }
 
+/** 订阅范围 → 后端范围维度（feed_id / folder_id）。
+    TASK-109：从 scopeQueryArgs 拆出的最底层派生——「与排序、布局无关」的标写
+    范围（mark_all_read，经 QueryScope.markScope）与列表查询共用同一份映射，
+    'cat-N' → folder_id、'all' → 双 null、其余 → feed_id=数字。 */
+function scopeFilterArgs(scope: string): { feed_id: number | null; folder_id: number | null } {
+  const isCat = scope.startsWith('cat-');
+  return {
+    feed_id: scope === 'all' || isCat ? null : scopeNumericId(scope),
+    folder_id: isCat ? scopeNumericId(scope) : null,
+  };
+}
+
 /** 订阅范围 + 排序 → list_articles / article_index 的查询参数。
     'cat-N' → folder_id=N；'all' → 两者皆 null；其余 → feed_id=数字。
     两种 id 形态（纯数字 '12' / 前缀 'feed-12'）统一走数字提取。
@@ -122,16 +134,15 @@ function scopeNumericId(raw: string): number {
     article_index 的布局过滤（feed 级覆盖 → 分类兜底，与 resolveFeedLayout 同口径）。
     此前布局只在前端本地过滤：后端全局分页、稀疏布局首批撑不满容器且 onScroll
     不触发，列表永远停在首批。不传 layout 的调用（旧断言/无布局语义的调用点）
-    返回值与修前逐字一致（不含 layout 键）。 */
+    返回值与修前逐字一致（不含 layout 键）。
+    TASK-109：范围维度拆入 scopeFilterArgs；请一律经 QueryScope.args 消费。 */
 export function scopeQueryArgs(
   scope: string,
   sort: 'newest' | 'oldest',
   layout?: ContentLayoutType,
 ): { feed_id: number | null; folder_id: number | null; newest_first: boolean; layout?: ContentLayoutType } {
-  const isCat = scope.startsWith('cat-');
   return {
-    feed_id: scope === 'all' || isCat ? null : scopeNumericId(scope),
-    folder_id: isCat ? scopeNumericId(scope) : null,
+    ...scopeFilterArgs(scope),
     newest_first: sort === 'newest',
     ...(layout ? { layout } : {}),
   };
@@ -141,10 +152,51 @@ export function scopeQueryArgs(
     否则不带 scope 的场景会被误并进 'all' 的游标。
     TASK-094（R7）：键必须含布局——布局切换后 entries 换成另一布局的快照，游标若
     只按范围记账，「画廊第 2 页」会接着「文章第 1 页」的全局 offset 翻，整段错位。
-    不传 layout 的调用返回值与修前逐字一致（仅旧测试/兼容路径）。 */
+    不传 layout 的调用返回值与修前逐字一致（仅旧测试/兼容路径）。
+    TASK-109：字符串形态锁定不变（缓存/游标键兼容，t109 断言锁定）；请一律经
+    QueryScope.pageKey 消费。 */
 export function scopePageKey(scope: string, layout?: ContentLayoutType): string {
   return layout ? `${layout}|${scope || 'all'}` : scope || 'all';
 }
+
+/** TASK-109：分页续拉（loadMoreArticles）的竞态守卫——具名化收口。
+    响应落地时，发起时快照的「范围×布局（scopeKey）× 排序 × 游标」任一漂移即整页丢弃：
+    - scopeKey 漂移：查询口径已换（切范围/切布局）；
+    - 游标漂移：reload / 缓存恢复已重置该范围的分页进度（D3 / TASK-052）；
+    - 排序漂移：offset 的含义随排序翻转（F1），旧排序的响应属于另一查询口径。 */
+export function paginationStale(
+  atStart: { scopeKey: string; sort: 'newest' | 'oldest'; offset: number },
+  now: { scopeKey: string; sort: 'newest' | 'oldest'; offset: number },
+): boolean {
+  return now.scopeKey !== atStart.scopeKey || now.offset !== atStart.offset || now.sort !== atStart.sort;
+}
+
+/** TASK-109：筛选视图全集拉取（reloadFilteredEntries）的竞态守卫——具名化收口。
+    **有意不锁排序**（与 paginationStale 的差异在此，此前只靠注释默会）：筛选视图
+    拉的是该范围×布局的全集（limit 100000 不分页），切排序只是 selectVisibleEntries
+    的本地重排、entries 仍然有效——锁排序反而会丢弃整个有效响应。范围×布局
+    （scopeKey）漂移才使响应过期（那是另一个查询口径的列表）。 */
+export function filteredSnapshotStale(scopeKeyAtStart: string, scopeKeyNow: string): boolean {
+  return scopeKeyNow !== scopeKeyAtStart;
+}
+
+/* TASK-109：查询口径统一派生入口（QueryScope）——三把键与查询参数只从这里派生：
+   - args：后端查询参数（范围×排序×可选布局）→ list_articles / article_index；
+   - markScope：标写范围维度（仅 feed_id/folder_id，排序/布局不进标写口径——
+     布局由 api.markAllRead 的独立 layout 参数承载）；
+   - pageKey：分页游标键（布局×范围）；
+   - viewKey：视图快照缓存键（布局×视图×范围）；
+   - paginationStale / filteredSnapshotStale：两类快照响应的具名竞态守卫
+     （分页全锁四元组；筛选视图有意不锁排序——差异见各自注释）。
+   pageKey / viewKey 的字符串形态锁定不变（缓存/游标键兼容，t109 断言锁定）。 */
+export const QueryScope = {
+  args: scopeQueryArgs,
+  markScope: scopeFilterArgs,
+  pageKey: scopePageKey,
+  viewKey: viewCacheKey,
+  paginationStale,
+  filteredSnapshotStale,
+} as const;
 
 /** 由 categories 构建 feedId → { feed, cat } 解析表（每次 categories 变更后重建） */
 export function buildFeedIndex(categories: CategoryGroup[]) {
@@ -187,6 +239,7 @@ export function mergeSnapshotEntries(
   nextEntries: ArticleEntry[],
   prevHydratedIds: Record<string, true>,
   prevHydrationErrors: Record<string, string>,
+  fromBackend: boolean,
 ): { entries: ArticleEntry[]; hydratedIds: Record<string, true>; hydrationErrors: Record<string, string> } {
   const prevById = new Map(prevEntries.map((a) => [a.id, a] as const));
   const entries = nextEntries.map((a) => {
@@ -217,10 +270,18 @@ export function mergeSnapshotEntries(
   for (const id of Object.keys(prevHydrationErrors)) {
     if (surviving.has(id)) hydrationErrors[id] = prevHydrationErrors[id];
   }
-  /* TASK-107 R1：快照替换带来后端行级真值（含 is_read）——任何在途乐观写入
-     对这些 id 的回滚声明随之失效，逐 id bump 版本让迟到回滚全部跳过
-     （否则回滚会把陈旧读态踩到新快照上）。 */
-  for (const a of entries) bumpEntryVersion(a.id);
+  /* TASK-109②：版本 bump 按真值来源收窄（TASK-107 R2 审查裁定）——
+     - fromBackend=true（bootstrap 三处后端快照路径 reloadFromBackend /
+       reloadFilteredEntries / anchorToArticle）：行级 is_read 是后端真值，任何
+       在途乐观写入对这些 id 的回滚声明随之失效，bump 让迟到回滚全部跳过
+       （否则回滚会把陈旧读态踩到新快照上、把刚重取的真值计数虚增回去）；
+     - fromBackend=false（nav 三处缓存恢复路径 selectLayout / selectView /
+       selectFeed）：缓存回放是近期 UI 状态而非后端真值——唯一不带后端真值的
+       缓存行恰是乐观态本身（经 syncCurrentViewCache 落进缓存），不 bump 以
+       保留本应正确的在途回滚；经 reload 落进缓存的行在 bootstrap merge 时已
+       bump 过，此处不 bump 不会重开踩踏缺口（缓存恢复点随后必触发后台
+       reload，其 fromBackend=true 的 merge 接手真值对齐）。 */
+  if (fromBackend) for (const a of entries) bumpEntryVersion(a.id);
   return { entries, hydratedIds, hydrationErrors };
 }
 
