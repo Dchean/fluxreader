@@ -107,27 +107,16 @@ pub async fn search_articles(
 /// A-5：无论是否已配置同步都入队——离线期间的变更保留持久化待推记录，
 /// 连接后由 states_phase 推送段/即时推送补推。此前仅在 sync_configured 时
 /// 入队，离线变更永不补推且可能被远端对账覆盖。
+/// TASK-108：复合操作下沉为 [`db::set_read_with_enqueue`] **单事务**——状态写入
+/// 与入队同生共死：入队步失败时状态写入一并回滚。修前无外层事务，入队失败会
+/// 留下「本地已改但无待推记录」的孤儿变更（离线永不补推，且可能被远端对账覆盖）。
 pub fn record_read_state(conn: &rusqlite::Connection, id: i64, read: bool) -> AppResult<()> {
-    db::set_read(conn, id, read)?;
-    db::enqueue_sync(
-        conn,
-        Some(id),
-        None,
-        if read { "read" } else { "unread" },
-        None,
-    )
+    db::set_read_with_enqueue(conn, id, read)
 }
 
-/// 同 [`record_read_state`]：收藏状态。
+/// 同 [`record_read_state`]：收藏状态（TASK-108 单事务化，同上）。
 pub fn record_star_state(conn: &rusqlite::Connection, id: i64, starred: bool) -> AppResult<()> {
-    db::set_starred(conn, id, starred)?;
-    db::enqueue_sync(
-        conn,
-        Some(id),
-        None,
-        if starred { "star" } else { "unstar" },
-        None,
-    )
+    db::set_starred_with_enqueue(conn, id, starred)
 }
 
 #[tauri::command]
@@ -148,11 +137,13 @@ pub async fn set_read(state: State<'_, AppState>, id: i64, read: bool) -> AppRes
 /// `set_read_bulk`——对真实命令体做变异（跳过入队/绕过 record_read_state）测试仍全绿，
 /// 即那份「等价性证据」是装饰性的。现在把循环抽成本函数，命令与测试都调它，
 /// 变异真实命令路径即可让测试失败（并已被实测验证）。
+///
+/// TASK-108：整批下沉为 [`db::set_read_bulk_with_enqueue`]——**单事务全有全无**，
+/// 逐 id 走与 [`record_read_state`] 完全相同的内核语句（状态写入 + 入队），语义
+/// 与单条路径严格一致；中途任一 id 失败整批回滚，不再有部分成功（修前逐条
+/// 自动提交，中途失败会留下半批已落库+已入队）。
 pub fn apply_read_bulk(conn: &rusqlite::Connection, ids: &[i64], read: bool) -> AppResult<()> {
-    for id in ids {
-        record_read_state(conn, *id, read)?;
-    }
-    Ok(())
+    db::set_read_bulk_with_enqueue(conn, ids, read)
 }
 
 /// 批量标读：一次 IPC 处理整批 id（AUDIT P3[F4]）。
@@ -161,14 +152,14 @@ pub fn apply_read_bulk(conn: &rusqlite::Connection, ids: &[i64], read: bool) -> 
 /// 「全部已读」/滚动标读传入几百个 id 时就是几百次 IPC 往返。本命令把它收敛为一次：
 /// 整批在**同一次持锁**内写完，锁外只调度一次推送。
 ///
-/// 语义与逐条路径严格一致（这是本命令的唯一契约，由 [`apply_read_bulk`] 承载并单测锁定）：
-///   · 每个 id 都经 [`record_read_state`] —— 本地 `is_read` 写入 + `sync_queue`
-///     入队（action 名 `read`/`unread`）与逐条完全相同；
+/// 语义契约（由 [`apply_read_bulk`] 承载并单测锁定，与逐条路径严格一致）：
+///   · 每个 id 都走与 [`record_read_state`] 相同的内核语句——本地 `is_read` 写入 +
+///     `sync_queue` 入队（action 名 `read`/`unread`）；
 ///   · 未配置同步后端时同样入队、由推送段静默跳过（A-5 语义）；
-///   · 空 ids 安全返回。
-/// 粒度差异：整批共用一次锁与一次 push 调度。注意 `record_read_state` 内部**逐条提交**
-/// （无外层事务），故「不写半批」只对内存态成立——中途失败时先前 id 已落库并已入队。
-/// 这是有意保留的：给整批包事务会改变 `record_read_state` 的既有语义（见本卡 non_goals）。
+///   · 空 ids 安全返回；
+///   · TASK-108：整批**单事务、全有全无**——任一 id 的写入或入队失败整批回滚，
+///     不存在部分成功（修前逐条提交，「不写半批」只对内存态成立）。
+/// 粒度差异：整批共用一次锁、一次事务与一次 push 调度。
 #[tauri::command]
 pub async fn set_read_bulk(state: State<'_, AppState>, ids: Vec<i64>, read: bool) -> AppResult<()> {
     if ids.is_empty() {
@@ -340,6 +331,15 @@ mod bulk_read_tests {
         .unwrap()
     }
 
+    fn count_starred(c: &Connection) -> i64 {
+        c.query_row(
+            "SELECT COUNT(*) FROM articles WHERE is_starred = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
     fn queued(c: &Connection) -> Vec<(String, Option<i64>)> {
         let mut stmt = c
             .prepare("SELECT action, article_id FROM sync_queue ORDER BY action, article_id")
@@ -445,6 +445,114 @@ mod bulk_read_tests {
             actions,
             vec!["unread"],
             "同文章反向入队应互斥合并，只留最新的 unread（不得留下 read+unread 两条）"
+        );
+    }
+
+    /* ---------- TASK-108：状态写入 + 入队 同生共死（故障注入） ---------- */
+
+    /// 故障注入手法（TASK-108）：在 sync_queue 上挂 `BEFORE INSERT` 触发器
+    /// `RAISE(ABORT)`——纯 SQL 层注入，不打桩、不引依赖、不改生产语义；失败
+    /// 发生在真实 `enqueue_sync` 的 INSERT 语句上，此时同一事务内的状态写入
+    /// UPDATE 已经执行，断言整体回滚。
+    fn inject_enqueue_failure_all(c: &Connection) {
+        c.execute_batch(
+            "CREATE TRIGGER inject_enqueue_fail BEFORE INSERT ON sync_queue
+             BEGIN SELECT RAISE(ABORT, 'injected: enqueue step failed'); END",
+        )
+        .unwrap();
+    }
+
+    /// TASK-108 验收③（单条·读）：入队步失败 → 已读状态不落库。
+    /// 修前 record_read_state 无外层事务：set_read 已自动提交，入队失败留下
+    /// 「已读但无待推记录」的孤儿变更（离线永不补推）。修后必须整体回滚。
+    #[test]
+    fn record_read_state_enqueue_failure_rolls_back_read_write() {
+        let (conn, ids) = seeded(1);
+        let id = ids[0];
+        inject_enqueue_failure_all(&conn);
+
+        let err = record_read_state(&conn, id, true).unwrap_err();
+        assert!(
+            err.to_string().contains("injected: enqueue step failed"),
+            "失败必须来自注入的入队步（而非状态写入步）：{err}"
+        );
+        assert_eq!(
+            count_read(&conn),
+            0,
+            "入队失败时 is_read 不得落库（事务回滚，同生共死）"
+        );
+        assert!(queued(&conn).is_empty(), "失败的队项也不得残留");
+    }
+
+    /// TASK-108 验收③（单条·藏）：同上，收藏状态。
+    #[test]
+    fn record_star_state_enqueue_failure_rolls_back_star_write() {
+        let (conn, ids) = seeded(1);
+        let id = ids[0];
+        inject_enqueue_failure_all(&conn);
+
+        let err = record_star_state(&conn, id, true).unwrap_err();
+        assert!(
+            err.to_string().contains("injected: enqueue step failed"),
+            "失败必须来自注入的入队步（而非状态写入步）：{err}"
+        );
+        assert_eq!(
+            count_starred(&conn),
+            0,
+            "入队失败时 is_starred 不得落库（事务回滚，同生共死）"
+        );
+        assert!(queued(&conn).is_empty(), "失败的队项也不得残留");
+    }
+
+    /// TASK-108 验收②：bulk **全有全无**——中途 id 失败时，先前 id 已在事务内
+    /// 完成的写入与入队一并回滚。WHEN 子句只在最后一篇的入队上触发失败：若实现
+    /// 退回逐条自动提交（修前形态），前两篇会部分成功落库，本用例必红。
+    #[test]
+    fn apply_read_bulk_is_all_or_nothing_on_mid_batch_enqueue_failure() {
+        let (conn, ids) = seeded(3);
+        let bad = ids[2]; // 最后一篇注入失败：前两篇已写入，若非单事务即部分成功
+                          // 触发器 WHEN 里的 id 是夹具自产的 i64，直接内插进 DDL（SQLite 触发器
+                          // 程序内不允许绑定参数）
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER inject_enqueue_fail_mid BEFORE INSERT ON sync_queue
+             WHEN NEW.article_id = {bad}
+             BEGIN SELECT RAISE(ABORT, 'injected: mid-batch enqueue failure'); END"
+        ))
+        .unwrap();
+
+        let err = apply_read_bulk(&conn, &ids, true).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("injected: mid-batch enqueue failure"),
+            "失败必须来自注入点（bad = {bad}）：{err}"
+        );
+        assert_eq!(
+            count_read(&conn),
+            0,
+            "任一 id 失败必须整批回滚：先前 id 不得落库（无部分成功）"
+        );
+        assert_eq!(queued(&conn).len(), 0, "先前 id 的队项也必须一并回滚");
+    }
+
+    /// TASK-108 补充锚：record_star_state 成功路径（此前无直接单测），锁定
+    /// 「写状态 + 入队」复合语义未被事务化改写，反向合并语义与逐条入队一致。
+    #[test]
+    fn record_star_state_success_writes_state_and_enqueues() {
+        let (conn, ids) = seeded(2);
+        record_star_state(&conn, ids[0], true).unwrap();
+        assert_eq!(count_starred(&conn), 1, "收藏应落库");
+        assert_eq!(
+            queued(&conn),
+            vec![("star".to_string(), Some(ids[0]))],
+            "应入队一条 star"
+        );
+
+        record_star_state(&conn, ids[0], false).unwrap();
+        assert_eq!(count_starred(&conn), 0, "取消收藏应落库");
+        assert_eq!(
+            queued(&conn),
+            vec![("unstar".to_string(), Some(ids[0]))],
+            "同文章 star→unstar 互斥合并，只留最新的 unstar"
         );
     }
 

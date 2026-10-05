@@ -29,7 +29,8 @@ pub use articles::{
     article_index, articles_without_cover, cleanup_cache, clear_article_cover_if_matches,
     clear_dedup_tombstones, feed_counts, get_article, get_articles, list_articles, mark_all_read,
     mark_all_read_with_enqueue, purge_remote_data, search_articles, set_article_ai_fields,
-    set_read, set_starred, upsert_article_with_feed, ArticleListItem, ArticleQuery, ArticleRow,
+    set_read, set_read_bulk_with_enqueue, set_read_with_enqueue, set_starred,
+    set_starred_with_enqueue, upsert_article_with_feed, ArticleListItem, ArticleQuery, ArticleRow,
     FeedCounts, NewArticle,
 };
 pub use feeds::{

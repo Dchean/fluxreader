@@ -716,6 +716,77 @@ pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
     Ok(())
 }
 
+/* ============================================================
+TASK-108：状态写入 + 同步入队 的复合事务（同生共死，REQ-002）
+============================================================ */
+
+/// 已读状态「写入 + 入队」的事务内核（TASK-108）：调用方负责事务边界——
+/// 单条入口 [`set_read_with_enqueue`] 与批量入口 [`set_read_bulk_with_enqueue`]
+/// 各自开事务后调用本函数。语句顺序与参数同 commands 层既有逐条提交形态
+/// 完全一致（先写状态后入队，action 名 `read`/`unread`），事务化只改变失败时
+/// 的原子性（任一步失败整体回滚），成功路径逐列语义不变。
+fn set_read_enqueue_in_tx(conn: &Connection, id: i64, read: bool) -> AppResult<()> {
+    set_read(conn, id, read)?;
+    enqueue_sync(
+        conn,
+        Some(id),
+        None,
+        if read { "read" } else { "unread" },
+        None,
+    )
+}
+
+/// 收藏版事务内核，同 [`set_read_enqueue_in_tx`]（action 名 `star`/`unstar`）。
+fn set_starred_enqueue_in_tx(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
+    set_starred(conn, id, starred)?;
+    enqueue_sync(
+        conn,
+        Some(id),
+        None,
+        if starred { "star" } else { "unstar" },
+        None,
+    )
+}
+
+/// 单条已读状态 + 同步入队（TASK-108，REQ-002）：复合操作包进**单一事务**——
+/// 此前 commands 层先 `set_read` 再 `enqueue_sync` 无外层事务，入队一步失败会
+/// 留下「本地状态已改但没有待同步记录」的孤儿变更：离线期间该变更永不补推，
+/// 且可能被远端对账覆盖（AUDIT-20261005-core-consistency 点名缺口）。
+/// 事务口径与 [`mark_all_read_with_enqueue`] 一致：`unchecked_transaction`
+/// （&Connection 可用，单连接 + 互斥锁的既有约束）+ 显式 commit；出错时
+/// 事务对象 drop 自动回滚，「状态写入与队列项同生共死」由故障注入测试锁定。
+pub fn set_read_with_enqueue(conn: &Connection, id: i64, read: bool) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    set_read_enqueue_in_tx(&tx, id, read)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 单条收藏状态 + 同步入队，同 [`set_read_with_enqueue`]（TASK-108）。
+pub fn set_starred_with_enqueue(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    set_starred_enqueue_in_tx(&tx, id, starred)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// 批量已读 + 逐条入队（TASK-108）：整批**单事务、全有全无**——任一 id 的
+/// 状态写入或入队失败，先前 id 已在事务内完成的写入与队项一并回滚，不存在
+/// 部分成功（修前逐条自动提交，中途失败会留下半批已落库）。ids 逐条走
+/// [`set_read_enqueue_in_tx`]（与 [`set_read_with_enqueue`] 同一内核语句），
+/// 同文章正反方向的互斥合并语义与逐条入队一致；空 ids 不开事务直接返回。
+pub fn set_read_bulk_with_enqueue(conn: &Connection, ids: &[i64], read: bool) -> AppResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    for id in ids {
+        set_read_enqueue_in_tx(&tx, *id, read)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// 查询「无封面 + 有原文 URL + 直连来源」的文章 id（封面后台补全用）。
 /// 摘要型 RSS（少数派等）不带 media 字段，封面只能从文章页 og:image 拿；
 /// 这里只取直连源（source='direct'）的条目——Miniflux 源在入库时已用
