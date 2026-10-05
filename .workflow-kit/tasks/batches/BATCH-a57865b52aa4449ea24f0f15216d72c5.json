@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "id": "BATCH-a57865b52aa4449ea24f0f15216d72c5",
+  "status": "active",
+  "task_ids": [
+    "TASK-110"
+  ],
+  "approval_decision_ids": [
+    "DEC-85857e4038814bd1a7b18de0ed36db04",
+    "DEC-budget-unlock-20260915",
+    "DEC-992f64fd15714ca2a614fe66d5a144ec"
+  ],
+  "created_at_utc": "2026-10-05T14:30:21.966963Z"
+}

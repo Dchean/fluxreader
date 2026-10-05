@@ -1,0 +1,63 @@
+{
+  "task_id": "TASK-109",
+  "candidate_digest": "018a4d38356b154f10ef406bfee6be5dc67d3c8bf23bf7d023ba09db0ef5806b",
+  "verification_run": "RUN-0268d4be749142a5a10eb5a7331d564a",
+  "verdict": "PASS",
+  "summary": "独立逐行核对通过。重点①重做面：git checkout 误回退后的重做完整无遗漏、无语义漂移——bootstrap.ts 五处声称改动全部在场且与 nav.ts/internals.ts 配套一致：(a) 全部键/参数消费已收口到 QueryScope.pageKey/args/viewKey（bootstrap 12 处、nav 6 处，import 行不再裸引三把键，全仓 grep 证实无第二消费点，仅注释提及旧名）；(b) reloadFromBackend 发起时快照 scopeAtStart/layoutAtStart/sortAtStart（bootstrap.ts:114-118），with_content 改用 layoutAtStart，reloadGeneration 守卫原样保留（:134）；(c) paginationStale/filteredSnapshotStale 与被替换的内联比较逐语义等价（前者 scopeKey+offset+sort 三维全锁、后者仅 scopeKey，与 HEAD 行为逐字段对齐）；(d) mergeSnapshotEntries 三处后端路径 fromBackend=true（:148/:313/:373），nav 三处缓存恢复=false；(e) markCurrentViewAllRead 经 QueryScope.markScope（nav.ts:223），scopeFilterArgs 从 scopeQueryArgs 逐字拆出共用。四个改动文件 sha256 与候选 manifest 逐一吻合。变异判别力三组均自行复现成功：A（恢复无条件 bump）→ t109-cache-restore-preserves-claim 及 t109-cache-replay-new-claim 转红、t104-snapshot-* 保持绿；B（回读完成时状态）→ 仅 t109-reload-scope-snapshot-at-start 转红；C（改键分隔符）→ t109-key-format-compat 及多处游标键行为断言转红。复核后 570/570、lint 0、build exit 0，探针改动已全部还原并经 sha256 验证。非阻塞观察两条：其一，「行为等价」声明在极窄交错角例下略有夸大——view≠'all' 时 selectFeed/selectLayout 只触发 reloadFilteredEntries（不 bump reloadGeneration），此窗口内旧代码会把按发起口径取回的快照写进完成时口径的游标/缓存键（键-数据错配的潜在污染），新代码写入自洽键，属严格修正而非回归，且全套行为断言（含变异 B 仅源级断言转红）实证常见路径行为不变；其二，scopeQueryArgs/scopePageKey/viewCacheKey 仍保留具名导出，口径单点性目前由 t109 源级断言（bootstrap/nav import 行）约束而非编译期强制，现无其他代码文件引用（仅注释），风险可控。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "对照任务卡三项需求逐项核实。①口径单点：QueryScope 定义于 internals.ts（args/markScope/pageKey/viewKey/paginationStale/filteredSnapshotStale 六成员齐备），三把键与查询参数只经它派生；scopeFilterArgs 从 scopeQueryArgs 逐字拆出被 args 与 markScope 共用（消除范围映射第二份）；三处历史不一致全部以具名形式收口——bootstrap.ts:143 完成时回读改为发起时快照、loadMoreArticles 守卫具名为 paginationStale（含排序）、reloadFilteredEntries 具名为 filteredSnapshotStale（明示不锁排序）、markCurrentViewAllRead 改经 markScope 只取订阅维度。②merge bump 收窄：mergeSnapshotEntries 增加 fromBackend 参数，bootstrap 三处后端路径传 true、nav 三处缓存恢复传 false，与任务卡指定调用点一一对应，无遗漏调用点（全仓 grep 仅此 6 处）。③t109-* 断言 9 条（≥5 达标）覆盖口径单点（源级 2 条）、发起时快照（源级）、键形态兼容（行为级）、bump 三方向（R2 角例恢复、后端快照 void 保持、缓存回放不误 void）、markScope 派生、filteredSnapshotStale 行为。non_goals 全部遵守：键字符串形态未动（逐字核对 scopePageKey/viewCacheKey 函数体与 HEAD 一致）、limit:100000 未动、Rust 未动（cargo_fmt PASS 佐证 src-tauri 无改动）、bump 点集合未扩大（仅门控既有 bump）。允许路径内改动，四个 changed_files 与 diff 完全一致。",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/nav.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "验证 RUN-0268d4be749142a5a10eb5a7331d564a 四门禁全过（cargo_fmt/lint/build/frontend exit 0，cargo test/clippy 按 DEC-local-cargo-gate-20261005 由 CI 承担）。审查者复跑 test:frontend 得 570/570（既有回归 26 + 新增 544），与门禁证据一致；t103-×16、t104-×17、t109-×9 计数与自检声称吻合。既有断言零弱化核实：frontend-regression.mjs 的 diff 为纯新增（+146/−0），无任何既有 checkNew/check 删除或改写；t104-snapshot-voids-rollback-claim 三条子断言在候选与变异 A 下均保持通过（后端快照 void 语义未受收窄影响）。判别力自行复现三组：A=恢复无条件 bump 时 t109-cache-restore-preserves-claim（R2 角例）与 t109-cache-replay-new-claim 转红而 t104-snapshot-* 保持绿，证明收窄方向判别成立；B=reloadFromBackend 回读完成时状态时仅 t109-reload-scope-snapshot-at-start 转红（源级锁定有效）；C=scopePageKey 分隔符 |→# 时 t109-key-format-compat 及多处游标键行为断言转红（键形态锁定有效）。探针改动已还原并经 sha256 验证与候选一致。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-0268d4be749142a5a10eb5a7331d564a-frontend.stdout.txt",
+        ".workflow-kit/tasks/runs/RUN-0268d4be749142a5a10eb5a7331d564a.json",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "逐路径核对。并发/交错窗口：reloadFromBackend 的 reloadGeneration 守卫与 anchorToArticle 的代际递增原样保留；loadMoreArticles 的 isBackendReloadInFlight 入口拦截未动；paginationStale 逐字段等价于被替换的内联三元比较（scopeKey/offset/sort），filteredSnapshotStale 等价于原单维比较，未引入新窗口也未收窄既有防护；loadMore 先于 reload 发起、响应晚于 reload 落地的窗口要求 scopeKey+sort+offset 全等才放行，与 HEAD 语义相同（追加的正是同一查询口径的下一页），非本卡引入。fromBackend=false 安全性对三条缓存恢复路径成立：全仓仅三个 viewEntriesCache 写入点——reloadFromBackend（merge fromBackend=true 已 bump）、reloadFilteredEntries（同前）、syncCurrentViewCache（仅由 flipEntryFlag/markEntriesRead/reader.ts 回滚路径调用，每次真实翻转本身 bump）；乐观版本快照发生在乐观 bump 之后，故缓存恢复（不 bump）不会使任何在途回滚的版本前提失效，而经 reload 落入缓存的行在 merge 时已 bump——R2 论证对所有三条路径成立，且有 t109-cache-restore-preserves-claim / t109-cache-replay-new-claim / t104-* 行为级实证。错误路径零改动：三处后端拉取的 catch/toast/rethrow、markCurrentViewAllRead 的版本化回滚与对账重试均逐字保留。边界输入：scopeFilterArgs 对空串/无数字 id 的行为与拆出前逐字一致（NaN 路径不变）。签名变更由 tsc -b（build 门禁）编译期强制覆盖全部 6 个调用点。",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/nav.ts",
+        ".workflow-kit/tasks/evidence/RUN-0268d4be749142a5a10eb5a7331d564a-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "结构变化有任务卡明确授权且有代码证据：三把键分散定义 + 多处裸拼（变更原因：口径漂移已实证三处不一致、且键形态需防回退）收口为单点 QueryScope；scopeFilterArgs 抽取消除了范围→feed/folder 映射在查询与标写两条路径的隐性重复；两个具名守卫把「分页全锁四元组 vs 筛选视图有意不锁排序」从注释默会升级为有名字、有 doc 注释、有行为断言的 API 差异。依赖方向未变（slices → internals 单向），无新增抽象层，mergeSnapshotEntries 仅增一个布尔参数。命名清晰（QueryScope.args/markScope/pageKey/viewKey 与领域词汇对应）。非阻塞观察：scopeQueryArgs/scopePageKey/viewCacheKey 仍具名导出（兼容旧测试），单点性目前靠 t109 源级断言（bootstrap/nav import 行）约束而非编译期强制；现全仓无其他代码引用（仅注释提及），后续如新增调用点该断言覆盖不到，可在后续卡考虑收窄导出或加 lint 规则。注释与代码同步更新（旧注释「完成时回读」的描述已被显式口径注释取代），无遗留误导性注释（grep 残留的 scopeQueryArgs 字样均为历史说明性注释，指向的函数仍存在且语义未变）。",
+      "evidence_files": [
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/nav.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本卡不触及运行时性能路径：查询参数、limit/offset、缓存键与命中行为、LRU 容量、渲染路径全部保持不变；新增开销仅为 mergeSnapshotEntries 的一个布尔参数、QueryScope 常量对象（既有函数的同源引用绑定，无包装层）与守卫的具名函数调用（内联比较的等价改写）。键形态逐字不变断言（t109-key-format-compat）同时保证了不会因收口引入缓存失效率变化。无新的代表性负载诉求，不造基准。",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": {
+    "required": false,
+    "evidence_files": [],
+    "notes": "ui_change=false"
+  }
+}

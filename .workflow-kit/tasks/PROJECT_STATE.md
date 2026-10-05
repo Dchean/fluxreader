@@ -24,10 +24,12 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 80 项：已验收 64，待验收 0，阻塞 0。
+已建任务 82 项：已验收 64，待验收 1，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-110 · 筛选视图真分页——废除 limit:100000 近似全集（二阶段②，审计块②/完成标准「旧文章可达」）](<cards/TASK-110.md>) | 待执行 | 废除筛选视图（收藏/未读/今天）的唯一近似全集路径 reloadFilteredEntries（bootstrap.ts:266-306）的 limit:100000，改为真分页，使旧文章在筛选视图可达（审计二阶段完成标准）。现况事实（探查在案）：reloadFilteredEntries 是全库唯一超大 limit 调用点（bootstrap.ts:271-279），articlesExhausted 恒 true（:302），切排序只本地重排全集（nav.ts:200-201）；Rust 端 list_articles 本就支持 limit/offset（commands/articles.rs:54-67 limit unwrap_or(500) 无上限；db/articles.rs:182-188 ORDER/LIMIT/OFFSET）；ARTICLES_PAGE_SIZE=500（bootstrap.ts:34）；假后端 queryRows 已支持分页与筛选（tools/frontend-regression.mjs:365-376）。修法要求：①筛选视图分页拉取：首批 PAGE_SIZE，articlesCursor/scopePageKey 口径复用（游标键已含 layout，TASK-094 R7），加载更多在筛选视图可用（复用或扩展 loadMoreArticles，含其三重竞态守卫的等价物；sentinel 三态 timelineSentinel 与自动续拉 timelineRefill 在筛选视图生效）；articlesExhausted 改为真实判定（next.length < PAGE_SIZE）。②稳定序与偏移：追加按 id 去重（同步插入使 offset 漂移时不得重复入列）；新条目插入已加载页中间的处理策略二选一并写明（追加去重保序 vs 触发重拉），选定的策略要有判别断言。③切排序对齐 all：筛选视图切排序改为重拉当前范围（放弃「全集在内存本地重排」的旧语义；已加载条目的水合正文由 merge 保留——TASK-106 机制），toggleTimelineSort（nav.ts:184-203）相应收口。④计数口径不动（feedCounts 权威对账为 TASK-107 已建立语义）；大库下不再一次拉全集，内存占用随页数线性可控。⑤回归断言 t110-* ≥6 条：分页首屏、加载更多、追加去重（偏移漂移场景）、exhausted 判定、切排序重拉（水合保留）、筛选过滤参数（only_unread/only_starred/only_today）逐一如旧。既有断言零弱化——注意既有断言若依赖「筛选视图拉全集」行为（如 articlesExhausted 恒 true、切排序不重拉），需按行为变化更新并附理由。 |
+| [TASK-109 · 查询口径统一收口 + merge bump 按真值来源收窄（二阶段①，承接审计块②）](<cards/TASK-109.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -38,10 +40,8 @@
 | [TASK-036 · 订阅改名/移动目录接线：edit_subscription 推送远端（A-2）](<cards/TASK-036.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 68 项记录可在任务总览查看。
+另有 70 项记录可在任务总览查看。
 
 **本轮暂缓**：SQL 性能与索引加固（审计 route-M，主控已用 EXPLAIN QUERY PLAN 独立复核）：M-5 列表查询因 COALESCE 表达式排序使 idx_articles_published 对 8 个变体全失效（SCAN + USE TEMP B-TREE FOR ORDER BY）；M-7 sync_queue 零索引致每次标读全表扫；M-9 一次全部已读 = 1 SELECT + 1 UPDATE + 2N 往返且全程持锁；M-14 v6→v7 后置回填在事务外且以 user_version 当完成标记（半途中断永不重试）。
 

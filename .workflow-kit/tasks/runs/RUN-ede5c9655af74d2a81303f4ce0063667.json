@@ -24,7 +24,19 @@
     "verdict": "PASS",
     "report": ".workflow-kit/tasks/evidence/RUN-ede5c9655af74d2a81303f4ce0063667-review.json",
     "candidate_digest": "cc5367d491a39610cf86c3c11298ae28a7dc02de9f2b4a22d027d0581c6ff52e",
-    "quality_digest": "3a2b09222cb52de6f28f9aa015d3784385568f6bb1aae006d9f98e72724e11f8"
+    "quality_digest": "23a9f72a175e163f43a1b07206d334c99bf8ee5eaa5b3868b3711908a7c7b8b3"
   },
-  "estimated_cost_usd": null
+  "estimated_cost_usd": null,
+  "recomputed": [
+    {
+      "at_utc": "2026-10-05T14:28:30.920069Z",
+      "source": "DEC-evidence-loss-repair-20261005（悬空证据引用移除后的摘要重算，非工具变更）",
+      "changed": {
+        "quality_digest": [
+          "3a2b09222cb52de6f28f9aa015d3784385568f6bb1aae006d9f98e72724e11f8",
+          "23a9f72a175e163f43a1b07206d334c99bf8ee5eaa5b3868b3711908a7c7b8b3"
+        ]
+      }
+    }
+  ]
 }

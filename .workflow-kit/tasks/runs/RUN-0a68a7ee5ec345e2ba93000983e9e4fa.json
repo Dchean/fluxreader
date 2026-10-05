@@ -25,7 +25,19 @@
     "report": ".workflow-kit/tasks/evidence/RUN-0a68a7ee5ec345e2ba93000983e9e4fa-review.json",
     "candidate_digest": "b378aaff9f541fed7723274dfbeb82b7c69ff6452f93dfd76ba9cccf62d1ac41",
     "ui_evidence_digest": "3e236d8a944148dcae1367a4499878a8bcc15ade0e3658c837337f6e7083ae04",
-    "quality_digest": "dc122446f5e59543e979aeabfa8cbefc55c116d1bfc7790c18622bef9d1766df"
+    "quality_digest": "b7360d2c15e62af123016a152d576ac8b4c8179562c13f5864d438dfb9e30aa7"
   },
-  "estimated_cost_usd": null
+  "estimated_cost_usd": null,
+  "recomputed": [
+    {
+      "at_utc": "2026-10-05T14:28:35.303373Z",
+      "source": "DEC-evidence-loss-repair-20261005（悬空证据引用移除后的摘要重算，非工具变更）",
+      "changed": {
+        "quality_digest": [
+          "dc122446f5e59543e979aeabfa8cbefc55c116d1bfc7790c18622bef9d1766df",
+          "b7360d2c15e62af123016a152d576ac8b4c8179562c13f5864d438dfb9e30aa7"
+        ]
+      }
+    }
+  ]
 }

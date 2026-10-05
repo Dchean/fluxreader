@@ -624,3 +624,14 @@
 - 2026-10-05T13:22:00.884538Z · accept · 验收 TASK-106；依据：owner 2026-10-05 会话指示：「继续二阶段」——第一阶段交付报告展示后 owner 指示进入下一阶段，视为验收确认（TASK-106 部分）；验证/独立审查/CI 证据在案，候选=dev@76f3256
 - 2026-10-05T13:23:12.641754Z · accept · 验收 TASK-107, TASK-108；依据：owner 2026-10-05 会话指示：「继续二阶段」——第一阶段交付报告展示后 owner 指示进入下一阶段，视为验收确认（TASK-107/108 部分）；验证/独立审查/CI 证据在案（107 候选=dev@e1d3793，108 候选=dev@8c1501f）
 - 2026-10-05T13:24:42.946105Z · note/decision · 二阶段任务拆分（DEC-phase2-split-20261005，承接 DEC-refactor-roadmap-20261005 第 3 条）：基于只读探查（口径三把键 scopeQueryArgs/scopePageKey/viewCacheKey 维度不对称；limit:100000 唯一路径=reloadFilteredEntries；mergeSnapshotEntries 六调用点=nav 三处缓存回放+bootstrap 三处后端真值；viewEntriesCache LRU 8 键但单键无上界；GR 对账 read 单向/starred 双向 vs Fever read 双向；sync_queue 无状态列）拆四卡：TASK-109 查询口径统一收口+merge bump 收窄（fromBackend）；TASK-110 筛选视图真分页替代 limit:100000（稳定序+同步偏移去重+切排序重拉对齐 all）；TASK-111 缓存实体预算+后台刷新保位（顶条锚定）；TASK-112 协议对账冲突政策显式化+兼容矩阵文档（Rust+docs，含过时注释修正与副本传播政策文档化）。四态同步展示归三阶段交互一致性。执行沿用一阶段流程：逐任务 prepare→编码子代理→门禁→全新审查子代理→CI→合并。
+- 2026-10-05T13:29:45.354549Z · prepare · TASK-109 · 任务已冻结：查询口径统一收口 + merge bump 按真值来源收窄（二阶段①，承接审计块②）；范围 src, tools/frontend-regression.mjs
+- 2026-10-05T13:30:27.860424Z · checkpoint · TASK-109 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-05T13:59:37.861979Z · checkpoint · TASK-109 · 编码结果已记录，差异范围已核对：src/store/internals.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-05T14:00:10.767598Z · checkpoint · TASK-109 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-05T14:11:39.221015Z · checkpoint · TASK-109 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-05T14:28:26.639138Z · recompute · TASK-098 · 重算派生摘要 quality_digest；依据：DEC-evidence-loss-repair-20261005（悬空证据引用移除后的摘要重算，非工具变更）
+- 2026-10-05T14:28:30.930235Z · recompute · TASK-099 · 重算派生摘要 quality_digest；依据：DEC-evidence-loss-repair-20261005（悬空证据引用移除后的摘要重算，非工具变更）
+- 2026-10-05T14:28:35.314405Z · recompute · TASK-101 · 重算派生摘要 quality_digest；依据：DEC-evidence-loss-repair-20261005（悬空证据引用移除后的摘要重算，非工具变更）
+- 2026-10-05T14:30:21.992063Z · batch · 关闭 BATCH-d11d22edcd1c4faf8453695d32926081，开启 BATCH-a57865b52aa4449ea24f0f15216d72c5；策略允许自动续批
+- 2026-10-05T14:31:23.276760Z · prepare · TASK-110 · 任务已冻结：筛选视图真分页——废除 limit:100000 近似全集（二阶段②，审计块②/完成标准「旧文章可达」）；范围 src, tools/frontend-regression.mjs
+- 2026-10-05T14:31:46.341244Z · note/lesson · 历史会话证据丢失教训（DEC-evidence-loss-repair-20261005）：审查代理产出的变异测试/门禁日志若只写 tasks/evidence/ 而不随提交入库，摘要校验将永久悬空。本轮起审查报告引用的证据文件必须随任务记录一并提交。存量同型缺陷：TASK-092/093/094/096/097（旧批次，不阻塞操作）的悬空引用仍在，待后续统一处置。

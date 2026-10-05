@@ -28,10 +28,12 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 80 项：已验收 64，待验收 0，阻塞 0。
+已建任务 82 项：已验收 64，待验收 1，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
+| [TASK-110 · 筛选视图真分页——废除 limit:100000 近似全集（二阶段②，审计块②/完成标准「旧文章可达」）](<../tasks/cards/TASK-110.md>) | 待执行 | 废除筛选视图（收藏/未读/今天）的唯一近似全集路径 reloadFilteredEntries（bootstrap.ts:266-306）的 limit:100000，改为真分页，使旧文章在筛选视图可达（审计二阶段完成标准）。现况事实（探查在案）：reloadFilteredEntries 是全库唯一超大 limit 调用点（bootstrap.ts:271-279），articlesExhausted 恒 true（:302），切排序只本地重排全集（nav.ts:200-201）；Rust 端 list_articles 本就支持 limit/offset（commands/articles.rs:54-67 limit unwrap_or(500) 无上限；db/articles.rs:182-188 ORDER/LIMIT/OFFSET）；ARTICLES_PAGE_SIZE=500（bootstrap.ts:34）；假后端 queryRows 已支持分页与筛选（tools/frontend-regression.mjs:365-376）。修法要求：①筛选视图分页拉取：首批 PAGE_SIZE，articlesCursor/scopePageKey 口径复用（游标键已含 layout，TASK-094 R7），加载更多在筛选视图可用（复用或扩展 loadMoreArticles，含其三重竞态守卫的等价物；sentinel 三态 timelineSentinel 与自动续拉 timelineRefill 在筛选视图生效）；articlesExhausted 改为真实判定（next.length < PAGE_SIZE）。②稳定序与偏移：追加按 id 去重（同步插入使 offset 漂移时不得重复入列）；新条目插入已加载页中间的处理策略二选一并写明（追加去重保序 vs 触发重拉），选定的策略要有判别断言。③切排序对齐 all：筛选视图切排序改为重拉当前范围（放弃「全集在内存本地重排」的旧语义；已加载条目的水合正文由 merge 保留——TASK-106 机制），toggleTimelineSort（nav.ts:184-203）相应收口。④计数口径不动（feedCounts 权威对账为 TASK-107 已建立语义）；大库下不再一次拉全集，内存占用随页数线性可控。⑤回归断言 t110-* ≥6 条：分页首屏、加载更多、追加去重（偏移漂移场景）、exhausted 判定、切排序重拉（水合保留）、筛选过滤参数（only_unread/only_starred/only_today）逐一如旧。既有断言零弱化——注意既有断言若依赖「筛选视图拉全集」行为（如 articlesExhausted 恒 true、切排序不重拉），需按行为变化更新并附理由。 |
+| [TASK-109 · 查询口径统一收口 + merge bump 按真值来源收窄（二阶段①，承接审计块②）](<../tasks/cards/TASK-109.md>) | 已验证，待验收 | 当前候选的测试与审查通过（independent）；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-029 · 全局排查空壳功能与隐藏 Bug，产出可确认清单（REQ-007）](<../tasks/cards/TASK-029.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-030 · 修复社交布局正文无限加载（REQ-001）](<../tasks/cards/TASK-030.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-031 · 定位双向同步缺口：订阅与文章状态回传（REQ-002/003）](<../tasks/cards/TASK-031.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
@@ -42,10 +44,8 @@
 | [TASK-036 · 订阅改名/移动目录接线：edit_subscription 推送远端（A-2）](<../tasks/cards/TASK-036.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-037 · 同步接线收尾：push 挂分类（A-3）+ 分类改名/删除防复活（A-4）](<../tasks/cards/TASK-037.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-038 · 同步队列卫生：老化清理（A-8）+ 吞错日志（C-2）](<../tasks/cards/TASK-038.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
-| [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 68 项记录可在任务总览查看。
+另有 70 项记录可在任务总览查看。
 
 **本轮暂缓**：SQL 性能与索引加固（审计 route-M，主控已用 EXPLAIN QUERY PLAN 独立复核）：M-5 列表查询因 COALESCE 表达式排序使 idx_articles_published 对 8 个变体全失效（SCAN + USE TEMP B-TREE FOR ORDER BY）；M-7 sync_queue 零索引致每次标读全表扫；M-9 一次全部已读 = 1 SELECT + 1 UPDATE + 2N 往返且全程持锁；M-14 v6→v7 后置回填在事务外且以 user_version 当完成标记（半途中断永不重试）。
 
@@ -72,7 +72,6 @@
 
 ## 教训
 
-- 2026-09-23T10:02:31.741705Z · note/lesson · lesson（2026-09-23）：**成功时静默的门禁不能作为审查证据被引用**。TASK-090 的独立复审结论为 PASS，但 `review` 命令两次拒绝落盘，唯一原因是 review_checks 的 evidence_files 引用了 `cargo fmt --check` 的 stdout 日志——该文件 0 字节（rustfmt 干净时**不输出任何内容**），而工具要求被引用的证据文件存在且非空（防伪造证据）。正确修法不是往日志里补内容（那是伪造证据），而是改引非空证据：验证运行记录 `.workflow-kit/tasks/runs/<RUN>.json`（内含该门禁 status=PASS 与 exit_code=0），或同批非空的门禁日志（如 cargo_test 的 stdout）。推广：① 准备任务卡时，把「成功时静默」的命令（cargo fmt --check、grep -q、test -f 之类）设为**必需门禁**前，要先确定证据面；项目既有的「四门禁」（cargo test / lint / build / frontend）恰好都会打印可引用的摘要行——这大概不是巧合；② 本卡把 cargo_fmt 与 cargo_clippy 加进门禁是对的（覆盖面更全，clippy 也确实抓到一处 manual-ok lint），但下次要么在审查指引里显式要求「引用运行记录而非空日志」，要么让门禁命令天然产出摘要行；③ 工具侧建议（需单独立项，不在任务卡里夹带）：verify 写日志时给每个门禁附一行「命令 + 退出码」页眉，使所有门禁（含静默成功者）都有非空证据，避免审查者与总控在此反复往返。
 - 2026-09-24T05:06:30.595590Z · note/lesson · 订正 2026-09-23T07:13:57Z 那条 Batch 2 记录：其「新增断言 +7，每条都做过修前/修后成对验证」不准确——独立审查实测新增 9 个 checkNew（frontend-regression.mjs 817/1586/1626/1629/1640/2212/2220/2224/2227 行），其中 1626、2212、2227 三条在修前代码下也通过（不具判别力）；合计 348/348 的总数无误。纪律：声称「成对验证」必须附每条断言对应的变异与变红输出，否则只写「新增 N 条」。
 - 2026-09-28T05:03:29.843064Z · note/lesson · TASK-092 · scope 失败已出现 16 次：Interrupted run recovered: 2026-09-28 核对：tasklist+CIM 确认无 fluxreader 相关 python/cargo/chrome 进程（现有 node 进程属 Adobe 与 D:\NextCreator 其他项目，不属于本任务）；写交互报告的子代理 12:56 追。下次准备/实现前先核对这一点。
 - 2026-09-28T05:18:30.528502Z · note/lesson · TASK-092 · scope 失败已出现 17 次：Out-of-scope changes: .workflow-kit/binding.json, .workflow-kit/docs/workflow/REFACTOR.md, .workflow-kit/docs/workflow/design-note.md, .workflow-kit/docs/workfl。下次准备/实现前先核对这一点。
@@ -80,21 +79,22 @@
 - 2026-09-28T05:53:41.267765Z · note/lesson · TASK-092 · protocol 失败已出现 8 次：Worker result must match the complete worker-result contract。下次准备/实现前先核对这一点。
 - 2026-09-28T06:23:16.626668Z · note/lesson · workflow-kit 新引擎（2026-09-28 升级）三处契约坑，下次直接按此准备：①worker-result JSON 键集必须与契约精确相等——finish 成功时工具会自动给文件加 changed_files_source 键并改写 changed_files，从已 finish 的文件复制会带入多余键触发 protocol 阻塞；应始终从 worker 原始 9 键文件重建。②review 报告 ui_review.checked_states 每条必须恰为 ui_check id 字符串（整串相等，不能带结论后缀），evidence_files 只收 tasks/evidence/ 与 tasks/runs/ 下非空文件（截图+报告至少各一）。③PASS 且 findings 为空的报告要求 review_checks 恰好覆盖 5 个规范 area（requirements/regression/failure_paths/maintainability/performance，各一条、无自定义名、无多余条目），每条必带 evidence_files（候选文件或 evidence/runs 附件，tmp/ 无效）；观察性备忘写 summary 与 analysis，不进 findings。M22 变异证据已随 TASK-092 归档可作范例。
 - 2026-09-28T17:13:58.507375Z · note/lesson · TASK-099 · protocol 失败已出现 9 次：Invalid worker status/summary。下次准备/实现前先核对这一点。
+- 2026-10-05T14:31:46.341244Z · note/lesson · 历史会话证据丢失教训（DEC-evidence-loss-repair-20261005）：审查代理产出的变异测试/门禁日志若只写 tasks/evidence/ 而不随提交入库，摘要校验将永久悬空。本轮起审查报告引用的证据文件必须随任务记录一并提交。存量同型缺陷：TASK-092/093/094/096/097（旧批次，不阻塞操作）的悬空引用仍在，待后续统一处置。
 
 ## 最近事件
 
-- 2026-10-05T11:40:03.113740Z · checkpoint · TASK-107 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
-- 2026-10-05T11:40:27.990777Z · note/todo · 二阶段微任务候选（R2 审查裁定记录）：mergeSnapshotEntries 增加 fromBackend 参数把 bump 收窄到后端真值路径（bootstrap.ts 三处传 true，nav.ts 三处缓存恢复不 bump）——审查确认修法技术成立（nav 不 bump 不会重开快照踩踏缺口），当前角例双窄窗口+自愈故不阻塞；宜与二阶段「查询缓存/操作版本模型」一并实施。来源：TASK-107 R2 审查（agent_e92dd332）。
-- 2026-10-05T11:43:28.385117Z · prepare · TASK-108 · 任务已冻结：Rust 状态写入事务化——文章状态与待同步队列同生共死（REQ-002）；范围 src-tauri/src
-- 2026-10-05T11:44:15.349537Z · checkpoint · TASK-108 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-10-05T11:55:21.953657Z · checkpoint · TASK-108 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/db.rs, src-tauri/src/db/articles.rs；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-10-05T11:55:58.440008Z · checkpoint · TASK-108 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
-- 2026-10-05T12:19:28.855805Z · checkpoint · TASK-108 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
-- 2026-10-05T12:37:10.453887Z · note/context · TASK-108 · CI 权威证据：dev@8c1501f（TASK-108 候选）GitHub Actions CI 全绿（rust job windows-latest：cargo test 含新增 4 条故障注入测试 + clippy -D warnings；frontend job 亦绿），编译验证缺口由此闭合。独立审查（agent_1ab56972，PASS findings=0）已落账。
-- 2026-10-05T13:18:28.803192Z · note/context · TASK-106 · 主控补记：TASK-107 在 TASK-106 验证后承接其源码继续交付（同链 108 独立路径），begin 时未声明 continuation_of 故 continued_by 未自动落账；现按 begin 对 continuation_of 的既有行为补写 evidence.continued_by=TASK-107，使 106 可与 107/108 整链验收（accept 的 successor 机制）。
-- 2026-10-05T13:22:00.884538Z · accept · 验收 TASK-106；依据：owner 2026-10-05 会话指示：「继续二阶段」——第一阶段交付报告展示后 owner 指示进入下一阶段，视为验收确认（TASK-106 部分）；验证/独立审查/CI 证据在案，候选=dev@76f3256
-- 2026-10-05T13:23:12.641754Z · accept · 验收 TASK-107, TASK-108；依据：owner 2026-10-05 会话指示：「继续二阶段」——第一阶段交付报告展示后 owner 指示进入下一阶段，视为验收确认（TASK-107/108 部分）；验证/独立审查/CI 证据在案（107 候选=dev@e1d3793，108 候选=dev@8c1501f）
 - 2026-10-05T13:24:42.946105Z · note/decision · 二阶段任务拆分（DEC-phase2-split-20261005，承接 DEC-refactor-roadmap-20261005 第 3 条）：基于只读探查（口径三把键 scopeQueryArgs/scopePageKey/viewCacheKey 维度不对称；limit:100000 唯一路径=reloadFilteredEntries；mergeSnapshotEntries 六调用点=nav 三处缓存回放+bootstrap 三处后端真值；viewEntriesCache LRU 8 键但单键无上界；GR 对账 read 单向/starred 双向 vs Fever read 双向；sync_queue 无状态列）拆四卡：TASK-109 查询口径统一收口+merge bump 收窄（fromBackend）；TASK-110 筛选视图真分页替代 limit:100000（稳定序+同步偏移去重+切排序重拉对齐 all）；TASK-111 缓存实体预算+后台刷新保位（顶条锚定）；TASK-112 协议对账冲突政策显式化+兼容矩阵文档（Rust+docs，含过时注释修正与副本传播政策文档化）。四态同步展示归三阶段交互一致性。执行沿用一阶段流程：逐任务 prepare→编码子代理→门禁→全新审查子代理→CI→合并。
+- 2026-10-05T13:29:45.354549Z · prepare · TASK-109 · 任务已冻结：查询口径统一收口 + merge bump 按真值来源收窄（二阶段①，承接审计块②）；范围 src, tools/frontend-regression.mjs
+- 2026-10-05T13:30:27.860424Z · checkpoint · TASK-109 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-05T13:59:37.861979Z · checkpoint · TASK-109 · 编码结果已记录，差异范围已核对：src/store/internals.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-05T14:00:10.767598Z · checkpoint · TASK-109 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-05T14:11:39.221015Z · checkpoint · TASK-109 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-05T14:28:26.639138Z · recompute · TASK-098 · 重算派生摘要 quality_digest；依据：DEC-evidence-loss-repair-20261005（悬空证据引用移除后的摘要重算，非工具变更）
+- 2026-10-05T14:28:30.930235Z · recompute · TASK-099 · 重算派生摘要 quality_digest；依据：DEC-evidence-loss-repair-20261005（悬空证据引用移除后的摘要重算，非工具变更）
+- 2026-10-05T14:28:35.314405Z · recompute · TASK-101 · 重算派生摘要 quality_digest；依据：DEC-evidence-loss-repair-20261005（悬空证据引用移除后的摘要重算，非工具变更）
+- 2026-10-05T14:30:21.992063Z · batch · 关闭 BATCH-d11d22edcd1c4faf8453695d32926081，开启 BATCH-a57865b52aa4449ea24f0f15216d72c5；策略允许自动续批
+- 2026-10-05T14:31:23.276760Z · prepare · TASK-110 · 任务已冻结：筛选视图真分页——废除 limit:100000 近似全集（二阶段②，审计块②/完成标准「旧文章可达」）；范围 src, tools/frontend-regression.mjs
+- 2026-10-05T14:31:46.341244Z · note/lesson · 历史会话证据丢失教训（DEC-evidence-loss-repair-20261005）：审查代理产出的变异测试/门禁日志若只写 tasks/evidence/ 而不随提交入库，摘要校验将永久悬空。本轮起审查报告引用的证据文件必须随任务记录一并提交。存量同型缺陷：TASK-092/093/094/096/097（旧批次，不阻塞操作）的悬空引用仍在，待后续统一处置。
 
 ## 如何继续
 
