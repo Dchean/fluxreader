@@ -1,6 +1,6 @@
 import type { StateCreator } from 'zustand';
-import { api } from '../../lib/api';
-import { markEntriesRead, scopePageKey, scopeQueryArgs, viewCacheKey, viewEntriesCache } from '../internals';
+import { api, extractError } from '../../lib/api';
+import { getEntryVersion, markEntriesRead, mergeSnapshotEntries, scopePageKey, scopeQueryArgs, syncCurrentViewCache, viewCacheKey, viewEntriesCache } from '../internals';
 import { selectVisibleEntries } from '../selectors';
 import type { AppState } from '../types';
 
@@ -67,7 +67,12 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     const view = get().activeViewFilter;
     const cached = viewEntriesCache.get(viewCacheKey(layout, view, get().activeFeedFilter));
     if (cached) {
-      set({ entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
+      /* TASK-103：缓存恢复同属快照替换——正文与水合终态按 id 继承（收口在
+         mergeSnapshotEntries；缓存快照本身携带 reload 时继承的正文），仅裁剪
+         已不在恢复快照中的滞留标记。TASK-063 的「滞留标记阻断重水合」缺陷
+         由该收口统一处置，不再在此整体清空。 */
+      const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors);
+      set({ entries: merged.entries, articlesExhausted: view !== 'all', hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
     }
     /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
@@ -99,13 +104,18 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        「清空 → 拉取 → 一次性渲染数百张卡片」的卡顿。
        TASK-052：缓存键带上订阅范围（源A 的首批≠全部的首批）；缓存里只有内容，
        游标仍需经 applyArticlesCursor 收口写入（不裸写 articlesLimit）。
-       TASK-063：恢复时必须清水合状态——缓存快照不带正文，水合守卫
-       （ensureArticleContent 的 hydratedIds 短路）会把上次会话的滞留标记误判为
-       「已水合」，社交/通知卡片在后台刷新落地前空白且不会重水合。 */
+       TASK-063：恢复时必须处置滞留水合状态——否则水合守卫（ensureArticleContent
+       的 hydratedIds 短路）会把不属于本快照的滞留标记误判为「已水合」，社交/通知
+       卡片在后台刷新落地前空白且不会重水合。TASK-103：处置方式从「整体清空」
+       收口为 mergeSnapshotEntries 的按 id 继承+裁剪（正文与终态一起继承，
+       已消失条目的滞留标记移除），缓存恢复不再丢已水合正文。 */
     const scopeKey = scopePageKey(get().activeFeedFilter, get().activeContentLayout);
     const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, get().activeFeedFilter));
     if (cached) {
-      set({ activeViewFilter: view, openedReadIds: {}, entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
+      /* TASK-103：同 selectLayout——快照恢复按 id 继承正文与水合终态（合并收口
+         在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。 */
+      const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors);
+      set({ activeViewFilter: view, openedReadIds: {}, entries: merged.entries, articlesExhausted: view !== 'all', hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
@@ -130,9 +140,9 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
      快照且不可滚动时其第一页永远拉不到。
      与 selectView 同构：tauri 模式下缓存命中同步恢复该范围快照（零延迟）并
      后台刷新；未命中直接后台重拉——两个 reload 都在发起时读取刚写入的
-     activeFeedFilter，自带代际/竞态守卫丢弃过期结果。恢复时清水合状态
-     （理由同 selectView：缓存快照不带正文，滞留的已水合标记会造成
-     「永不重水合」的正文空白）。mock 模式保持纯游标镜像（不触发 IPC、
+     activeFeedFilter，自带代际/竞态守卫丢弃过期结果。恢复时按 id 继承+裁剪
+     水合状态（TASK-103 收口到 mergeSnapshotEntries：缓存快照携带继承的正文，
+     滞留标记只裁剪不属于本快照的部分——理由同 selectView）。mock 模式保持纯游标镜像（不触发 IPC、
      不把 mock 会话翻成 tauri）。 */
   selectFeed: (feedId) => {
     const scopeKey = scopePageKey(feedId, get().activeContentLayout);
@@ -147,7 +157,10 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     const view = get().activeViewFilter;
     const cached = viewEntriesCache.get(viewCacheKey(get().activeContentLayout, view, feedId));
     if (cached) {
-      set({ entries: cached, articlesExhausted: view !== 'all', hydratedIds: {}, hydrationErrors: {} });
+      /* TASK-103：同 selectLayout——快照恢复按 id 继承正文与水合终态（合并收口
+         在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。 */
+      const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors);
+      set({ entries: merged.entries, articlesExhausted: view !== 'all', hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
       get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
     }
     /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
@@ -191,28 +204,107 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
 
   markCurrentViewAllRead: () => {
     const ids = new Set(selectVisibleEntries(get()).map((i) => i.id));
-    if (get().dataMode === 'tauri') {
-      /* 范围语义与后端一致：当前 feed/分类范围（all 时两者皆 null）。
-         与分页/锚定共用 scopeQueryArgs（TASK-052 口径收口），feed id 形态
-         （'feed-123' / 纯数字 '123'）的数字提取只此一份。 */
-      const scope = get().activeFeedFilter;
-      /* 布局口径由下方 api.markAllRead 的 layout 参数承载（写入口径不变）；
-         scopeQueryArgs 在此只取 feed_id / folder_id。 */
-      const { feed_id: feedId, folder_id: folderId } = scopeQueryArgs(scope, get().timelineSort, get().activeContentLayout);
-      /* F8：视图口径必须与界面一致——收藏/今天视图只标该视图可见的文章，
-         否则会把范围内未显示的文章一并标读（并推给远端），与文案不符 */
-      const view = get().activeViewFilter;
-      const starredOnly = view === 'starred';
-      const sinceMs = view === 'today' ? startOfLocalDayMs() : undefined;
-      const layout = get().activeContentLayout;
-      /* TASK-067 N10：全部已读失败必须可见——此前静默失败会让本地已全标读、
-         计数已扣，重启后全部回退未读 */
-      void api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout }).catch(() => {
-        get().showToast('全部已读未能保存，重启后可能回退');
-      });
+    if (get().dataMode !== 'tauri') {
+      /* mock 模式：无库可写，仅本地标读 + 提示，绝不伪造落库（(f) 契约不变） */
+      markEntriesRead(ids);
+      set({ openedReadIds: {} });
+      get().showToast('已全部标为已读');
+      return;
     }
+    /* 范围语义与后端一致：当前 feed/分类范围（all 时两者皆 null）。
+       与分页/锚定共用 scopeQueryArgs（TASK-052 口径收口），feed id 形态
+       （'feed-123' / 纯数字 '123'）的数字提取只此一份。 */
+    const scope = get().activeFeedFilter;
+    /* 布局口径由下方 api.markAllRead 的 layout 参数承载（写入口径不变）；
+       scopeQueryArgs 在此只取 feed_id / folder_id。 */
+    const { feed_id: feedId, folder_id: folderId } = scopeQueryArgs(scope, get().timelineSort, get().activeContentLayout);
+    /* F8：视图口径必须与界面一致——收藏/今天视图只标该视图可见的文章，
+       否则会把范围内未显示的文章一并标读（并推给远端），与文案不符 */
+    const view = get().activeViewFilter;
+    const starredOnly = view === 'starred';
+    const sinceMs = view === 'today' ? startOfLocalDayMs() : undefined;
+    const layout = get().activeContentLayout;
+    /* TASK-107（REQ-003）：本地已加载条目乐观先行（读态即时变化不等落库），
+       但必须保存被翻转条目的原读态——失败时逐条恢复，不允许「计数已扣、
+       状态已改」的假成功。 */
+    const prevReadById = new Map<string, boolean>();
+    for (const e of get().entries) {
+      if (ids.has(e.id)) prevReadById.set(e.id, e.isRead);
+    }
+    const prevOpenedReadIds = get().openedReadIds;
     markEntriesRead(ids);
+    /* TASK-107 R1（F1）：乐观写入后快照各 id 的变更版本——失败回滚只恢复
+       「版本仍等于快照值」的条目。仅凭「当前值仍等于乐观写入值」的值守卫
+       无法区分「用户已接管（同值覆盖写入）」与「未被触碰」：在途失败期间
+       用户连点两次 toggle 停在与乐观写入相同的值时，迟到回滚会误踩用户最终
+       意图而 DB 已是新值（审查探针 C3 实测）。版本由 internals 的三个真实
+       写入点维护：flipEntryFlag（单条 toggle）/ markEntriesRead（本操作的
+       乐观写入与批量标读）/ mergeSnapshotEntries（快照替换带后端真值）。 */
+    const optimisticVersionById = new Map<string, number>();
+    for (const [id, prev] of prevReadById) {
+      if (!prev) optimisticVersionById.set(id, getEntryVersion(id));
+    }
     set({ openedReadIds: {} });
-    get().showToast('已全部标为已读');
+    void api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout }).then((affected) => {
+      /* TASK-107：成功以后端为准对账。mark_all_read 影响整个范围（含未加载
+         条目），此前忽略返回值、只按已加载条目推算计数——审计探针：范围 600
+         条未读、前端加载 1 条，后端成功 600 条后界面仍显示 599。范围总量前端
+         不可知（分页只加载首批），affected 无法直接换算计数，对账收口为
+         「重取 feed_counts 整体替换」（与 reloadFromBackend 同一计数来源）；
+         affected 是后端对本次操作的实际影响报告（0 = 范围内本就没有未读，
+         此时乐观写入也未翻转任何条目，无需重取）。 */
+      get().showToast('已全部标为已读');
+      if (affected === 0) return;
+      const reconcileCounts = () =>
+        api.feedCounts().then((rows) => {
+          if (!rows) return false;
+          const next = new Map<string, { total: number; unread: number; starred: number; today: number }>();
+          for (const c of rows) {
+            next.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
+          }
+          set({ feedCounts: next });
+          return true;
+        });
+      /* TASK-107 R1（F2）：对账重取失败不再完全静默——落库已成功但计数残留
+         乐观值（600/1 形态下显示 599、DB 真值 0），先给一条诊断提示（≤40 字，
+         与「保存失败」文案明确区分：标读本身没有失败），并安排一次 3s 延迟
+         重试；重试仍失败则放弃，依赖既有 reload 自愈（下次任意
+         reloadFromBackend 重取同一计数来源，审查探针 F2 证实自愈有效）。 */
+      reconcileCounts().catch(() => {
+        get().showToast('全部已读已保存，未读计数刷新失败');
+        setTimeout(() => {
+          void reconcileCounts().catch(() => { /* 重试仍失败：放弃，计数由下次 reload 自愈 */ });
+        }, 3000);
+      });
+    }).catch((e: unknown) => {
+      /* TASK-107：失败回滚——乐观翻转到原读态、逐 feed 回补未读计数、还原
+         「已读保留」快照并同步视图缓存。恢复前提从「当前值仍等于乐观写入值」
+         升级为 R1 的版本守卫（值守卫保留作快速短路：值已不同必然已被接管）。
+         成功 toast 已移入 .then（落库确认后才弹），此处只给失败 toast + 重试。 */
+      const s = get();
+      let changed = false;
+      const unreadRestore = new Map<string, number>();
+      const entries = s.entries.map((a) => {
+        if (!ids.has(a.id)) return a;
+        const prev = prevReadById.get(a.id);
+        if (prev !== false || a.isRead !== true) return a;
+        if (getEntryVersion(a.id) !== optimisticVersionById.get(a.id)) return a; // R1：期间已被其他写入接管
+        changed = true;
+        unreadRestore.set(a.feedId, (unreadRestore.get(a.feedId) ?? 0) + 1);
+        return { ...a, isRead: prev };
+      });
+      let feedCounts = s.feedCounts;
+      if (changed) {
+        feedCounts = new Map(s.feedCounts);
+        for (const [fid, delta] of unreadRestore) {
+          const c = feedCounts.get(fid);
+          if (c) feedCounts.set(fid, { ...c, unread: Math.max(0, c.unread + delta) });
+        }
+      }
+      set(changed ? { entries, feedCounts, openedReadIds: prevOpenedReadIds } : { openedReadIds: prevOpenedReadIds });
+      if (changed) syncCurrentViewCache(entries);
+      /* TASK-067 N10：失败必须可见；本地已回滚，文案不再断言「重启后可能回退」 */
+      get().showToast(`全部已读保存失败：${extractError(e)}`, { label: '重试', run: () => get().markCurrentViewAllRead() });
+    });
   },
 });

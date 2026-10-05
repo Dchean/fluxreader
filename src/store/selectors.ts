@@ -35,6 +35,22 @@ export function matchesViewFilter(entry: ArticleEntry, view: ViewFilterType, now
   }
 }
 
+/** TASK-103：单张卡片「需要水合正文」的判定 —— 条目仍在 && 无正文 && 无终态
+    （hydratedIds，含空正文终态）&& 无失败态（hydrationErrors，失败走内联重试、
+    不自动重试）。与 reader.ensureArticleContent 的短路守卫同口径（那边不查
+    hydrationErrors：挂载路径允许对失败条目重新发起请求）。
+    useLazyHydrate 按 id 订阅本判定的布尔值：快照替换（reload / 缓存恢复）让
+    条件重新成立时布尔翻转 → effect 重新入队，消除「显示加载中但无请求在途」
+    的死区（REQ-001）。重复入队由 hydrateArticleContent 的在途去重兜底，
+    这里不观察「在途」——它是模块级状态，不在 store 快照里。 */
+export function entryNeedsHydration(
+  s: Pick<AppState, 'entries' | 'hydratedIds' | 'hydrationErrors'>,
+  id: string,
+): boolean {
+  const art = s.entries.find((a) => a.id === id);
+  return !!art && !art.content && !s.hydratedIds[id] && !s.hydrationErrors[id];
+}
+
 /** 当前布局下的全部条目（含已读）。
     布局不是条目属性，而是「feed 布局绑定 → 分类布局」的动态解析结果，
     修改绑定后条目即时迁移到新布局视图，无需数据搬迁。 */

@@ -8,6 +8,7 @@ import {
   VIEW_NAMES,
   podcastClickAction,
   autoAiBlockOpen,
+  entryNeedsHydration,
   selectVisibleEntries,
   selectFeedConfig,
 } from '../store';
@@ -420,13 +421,24 @@ export function Timeline() {
 /** 虚拟滚动下，卡片只在进入视口（+overscan 缓冲）时才挂载，挂载即水合正文。
     不再需要 IntersectionObserver 判断「是否进入视口」——虚拟化本身已保证
     挂载的卡片就在视口附近。批量队列（store 的 enqueueHydration）会把同一帧
-    内挂载的几十张卡片合并成一次 IPC，避免逐篇洪峰。 */
+    内挂载的几十张卡片合并成一次 IPC，避免逐篇洪峰。
+    TASK-103（REQ-001）：effect 不能只依赖 [id]——虚拟列表按文章 id 保持卡片
+    身份，同 id 不重挂载；若挂载期间水合前提被快照替换重置（reload / 缓存恢复
+    后该卡片仍无正文且无终态），旧实现不再触发任何请求，卡片永挂「加载正文…」
+    而实际无请求在途（审计探针复现的死区）。修法：按 id 订阅
+    entryNeedsHydration 的布尔值（无正文 && 未水合 && 无终态 && 无失败态），
+    条件重新成立时翻转触发重新入队；在途重复入队由 hydrateArticleContent 的
+    在途去重兜底（不会产生第二次 IPC）。选定该方案而非「reload 完成后统一重
+    入队」：后者每次后台刷新都把整页（约 500 条）拉正文，正是懒水合设计刻意
+    避免的「列表背正文」洪峰；按卡片观察只覆盖真正挂载着的约 30 张。 */
 function useLazyHydrate(id: string): React.RefObject<HTMLDivElement | null> {
   const ref = useRef<HTMLDivElement | null>(null);
+  const needsHydration = useAppStore((s) => entryNeedsHydration(s, id));
   useEffect(() => {
-    /* 挂载即水合（幂等：已有正文则短路） */
+    if (!needsHydration) return;
+    /* 挂载/条件重新成立即水合（幂等：已有正文或终态则短路） */
     useAppStore.getState().ensureArticleContent(id);
-  }, [id]);
+  }, [id, needsHydration]);
   return ref;
 }
 
