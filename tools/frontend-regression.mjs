@@ -3712,6 +3712,211 @@ await (async () => {
   }
 
   /* ============================================================
+     TASK-115（2026-10-06，REQ-005 三阶段②）：返回位置统一规则。
+     X1 切换返回滚动恢复（per-filterKey 锚存档 + nav 缓存命中恢复信号）/
+     X2 阅读器关闭焦点归还原卡（关闭信号 + ref 记账）/ X3 规则文档化
+     （timelineAnchor.ts 头注 = 全场景规则表的代码单点注释）。
+
+     与 TASK-111 的证据边界同口径（如实说明）：滚动/聚焦本体是 DOM 行为，
+     node 回归网无法驱动真实虚拟列表——行为断言落在两层：
+     - store 层：信号 bump 语义（导航缓存命中 → switchRestoreNonce；阅读器
+       关闭 → readerCloseNonce）与「不叠加」双向隔离（两信号互不串扰）；
+     - 纯函数层：archive 锚的回位决策（anchorRestoreIndex 复用）与焦点归还
+       决策（readerFocusReturnIndex）直接断言；模块级存档 API（stash/peek/
+       rearm）与 Timeline 同入口驱动；接线由源码形态断言钉住（t111-6 先例）。
+
+     判别设计（吸收 t111 审查教训——断言必须有变异判别力）：
+     - 存档-恢复断言锚定「回到原上下文后 peekReturnAnchor 命中且决策返回
+       原索引」，naive 实现（stash 不存档 / 恢复用活锚）必转红；
+     - 同上下文重复导航断言 contextChanged 守卫（无守卫 → 恢复信号误 bump）；
+     - 切排序断言「信号不 bump + 新键查档为空」（新语境裁定的双重形态）；
+     - 关闭信号断言「连续两次关闭必 +1」（nonce 选型判别：id 字段同值不触发）。
+     ============================================================ */
+  {
+    const fs115 = await import('node:fs');
+    const src115 = (p) => fs115.readFileSync(new URL(p, import.meta.url), 'utf8');
+    const ta115 = await import('../src/components/timelineAnchor.ts');
+    const { RETURN_ANCHOR_ARCHIVE_MAX, anchorRestoreIndex: ari115, readerFocusReturnIndex: rfri115 } = ta115;
+    const filterKeyOf115 = (s) => `${s.activeContentLayout}|${s.activeViewFilter}|${s.activeFeedFilter}|${s.timelineFilter}|${s.timelineSort}`;
+    const itemsOf115 = () => selectVisibleEntries(store.getState());
+    const cnt115 = (s, t) => (s.match(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+    const ordered115 = (s, parts) => {
+      let i = 0;
+      for (const p of parts) { i = s.indexOf(p, i); if (i < 0) return false; i += p.length; }
+      return true;
+    };
+    /* 模块级测试时钟：t111 块已把节流基准推到 NOW+30M，这里从更大刻度起，
+       保证 recordTopAnchor 不被上一块残留的节流窗口吞掉 */
+    let T115 = NOW + 40000000;
+
+    /* -- (t115-0) X1/X2 接线 + X3 规则文档化（源级防回退，t111-6 同口径） -- */
+    const timelineSrc115 = src115('../src/components/Timeline.tsx');
+    const navSrc115 = src115('../src/store/slices/nav.ts');
+    const readerSrc115 = src115('../src/store/slices/reader.ts');
+    const anchorSrc115 = src115('../src/components/timelineAnchor.ts');
+    checkNew('(t115-0) X1 接线（源级）：nav 三处缓存命中恢复按 contextChanged 条件 bump switchRestoreNonce（entries 与信号同一次原子写入；同上下文重复导航不恢复）；Timeline 存档时序 = 先 stash 后 clear（弃锚语义不变，只多归档）',
+      cnt115(navSrc115, '...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {})') === 3
+      && cnt115(navSrc115, 'const contextChanged =') === 3
+      && timelineSrc115.indexOf('stashTopAnchorForReturn();') >= 0
+      && timelineSrc115.indexOf('stashTopAnchorForReturn();') < timelineSrc115.indexOf('clearTopAnchor();'));
+    checkNew('(t115-0) X1 消费侧（源级·有序）：switchRestoreNonce effect = 查档(peekReturnAnchor) → 决策(anchorRestoreIndex) → 程序性滚动抑制 → scrollToIndex(align:start) → 重锚(rearmTopAnchor)；image 提前回落',
+      ordered115(timelineSrc115, [
+        'const switchRestoreNonce = useAppStore((s) => s.switchRestoreNonce);',
+        'anchorRestoreIndex(peekReturnAnchor(filterKey), filterKey, items)',
+        'suppressNextScrollEvents();',
+        "rowVirtualizer.scrollToIndex(idx, { align: 'start' });",
+        'rearmTopAnchor(items[idx].id, filterKey, performance.now());',
+      ]));
+    checkNew('(t115-0) X2 接线（源级）：reader.ts 唯一关闭路径 bump readerCloseNonce；Timeline 在 activeArticleId 跟随 effect 记账原选中卡（ref），关闭信号 effect 消费决策（readerFocusReturnIndex → focusCardAt）',
+      readerSrc115.includes('readerCloseNonce: s.readerCloseNonce + 1')
+      && ordered115(timelineSrc115, [
+        'const readerCloseNonce = useAppStore((s) => s.readerCloseNonce);',
+        'readerFocusReturnIndex(lastActiveArticleIdRef.current, items)',
+        'focusCardAt(idx);',
+      ])
+      && timelineSrc115.includes('lastActiveArticleIdRef.current = activeArticleId;'));
+    checkNew('(t115-0) 画廊回落口径（源级）：三个回位/归还 effect（TASK-111 刷新保位 / TASK-115 切换返回 / 阅读器关闭焦点归还）各有 image 布局提前回落（非虚拟化无定位基建，与 TASK-111 同一口径）',
+      cnt115(timelineSrc115, "if (activeContentLayout === 'image') return;") === 3);
+    checkNew('(t115-0) X3 规则文档化（代码单点注释）：timelineAnchor.ts 头注 = 全场景规则表（切排序=新语境裁定、锚丢失归零回落、画廊回落、不叠加保证）',
+      anchorSrc115.includes('全场景规则表')
+      && anchorSrc115.includes('切排序（重拉）')
+      && anchorSrc115.includes('新语境')
+      && anchorSrc115.includes('存档随 filterKey 键自然失效')
+      && anchorSrc115.includes('不叠加保证'));
+
+    /* ---------- (t115-x1a) 存档-恢复：切走再切回，恢复信号 + 存档锚命中原索引 ---------- */
+    await resetStore();
+    ta115.clearTopAnchor();
+    await store.getState().bootstrapFromBackend(); // 8 行；bootstrap 写 'article|all|all' 视图缓存
+    const t115K1 = filterKeyOf115(store.getState());
+    const t115srn0 = store.getState().switchRestoreNonce;
+    T115 += 1000;
+    checkNew('(t115-x1a) 前置：顶条锚已记录（101@K1，活锚与 Timeline handleScroll 同一入口）',
+      ta115.recordTopAnchor('101', t115K1, T115) === true && ta115.peekTopAnchor()?.id === '101');
+    /* 离开上下文（与 Timeline filterKey layout effect 同一入口：先存档后清活锚） */
+    ta115.stashTopAnchorForReturn();
+    ta115.clearTopAnchor();
+    listPlan = { mode: 'reject', error: { message: 't115 注入' } };
+    store.getState().selectFeed('11'); // 切到 feed-11（缓存 miss，后台 reload 注入失败冻结状态）
+    await nTick(10);
+    store.getState().selectFeed('all'); // 切回：缓存命中 → entries 同步恢复 + 恢复信号
+    const t115stA = store.getState();
+    checkNew('(t115-x1a) 存档-恢复（store 层）：缓存命中切回 → switchRestoreNonce +1（entries 与信号同一次原子写入，恢复列表已就位）',
+      t115stA.switchRestoreNonce === t115srn0 + 1 && t115stA.entries.length === 8 && t115stA.activeFeedFilter === 'all');
+    const t115Kback = filterKeyOf115(t115stA);
+    const t115arch = ta115.peekReturnAnchor(t115Kback);
+    checkNew('(t115-x1a) 存档-恢复（决策侧）：按原上下文键查档命中（离开时顶条 101），锚 id 在恢复列表中 → 决策返回其索引（Timeline 据此 scrollToIndex align:start 一次性定位）',
+      t115Kback === t115K1 && t115arch?.id === '101' && t115arch?.filterKey === t115K1
+      && ari115(t115arch, t115Kback, itemsOf115()) === 0);
+    await nTick(10); // 让注入失败的 reload 落定
+    listPlan = null;
+
+    /* ---------- (t115-x1b) 锚丢失 → 归零回落（不猜） ---------- */
+    T115 += 1000;
+    ta115.recordTopAnchor('888', t115Kback, T115); // 锚指向已不存在/被筛出的条目
+    ta115.stashTopAnchorForReturn();
+    ta115.clearTopAnchor();
+    listPlan = { mode: 'reject', error: { message: 't115 注入' } };
+    store.getState().selectFeed('11');
+    await nTick(10);
+    store.getState().selectFeed('all');
+    await nTick(10);
+    listPlan = null;
+    checkNew('(t115-x1b) 锚丢失归零回落（判别）：存档锚 id 不在恢复列表 → anchorRestoreIndex 返回 null（消费侧不动作 = 保持归零 effect 置顶后的顶部；首次进入/无存档同口径回落，绝不猜位置）',
+      ta115.peekReturnAnchor(filterKeyOf115(store.getState()))?.id === '888'
+      && ari115(ta115.peekReturnAnchor(filterKeyOf115(store.getState())), filterKeyOf115(store.getState()), itemsOf115()) === null);
+
+    /* ---------- (t115-x3c) 同上下文重复导航不恢复（contextChanged 守卫，判别） ---------- */
+    const t115srnGuard = store.getState().switchRestoreNonce;
+    store.getState().selectFeed('all'); // 已在 all：缓存命中但 contextChanged=false
+    checkNew('(t115-x3c) 同上下文重复导航不恢复（判别）：缓存命中但范围段未变 → 恢复信号不 bump（无守卫的 naive 实现会把列表拽回上次离开位置）',
+      store.getState().switchRestoreNonce === t115srnGuard && store.getState().activeFeedFilter === 'all');
+    await nTick(10);
+
+    /* ---------- (t115-x1c) 切排序（重拉）不恢复——新语境裁定 ---------- */
+    const t115srnSort = store.getState().switchRestoreNonce;
+    store.getState().toggleTimelineSort(); // filterKey 变（sort 段）+ 清视图缓存 + 重拉
+    await nTick(20);
+    const t115stSort = store.getState();
+    checkNew('(t115-x1c) 切排序不恢复（新语境裁定）：filterKey 已变 = 新语境 → 恢复信号不 bump（重拉不是缓存恢复路径），新键查档为空（进入即归零，裁定无需特判——存档随 filterKey 键自然失效），旧存档仍在旧键下（回原上下文仍可恢复）',
+      t115stSort.switchRestoreNonce === t115srnSort && t115stSort.timelineSort === 'oldest'
+      && ta115.peekReturnAnchor(filterKeyOf115(t115stSort)) === null
+      && ta115.peekReturnAnchor(t115K1)?.id === '888');
+
+    /* ---------- (t115-x2a/b) 阅读器关闭焦点归还 ---------- */
+    await resetStore();
+    ta115.clearTopAnchor();
+    await store.getState().bootstrapFromBackend();
+    store.getState().selectArticle('102'); // 打开阅读器（102 在列表 index 1）
+    checkNew('(t115-x2a) 前置：阅读器打开且选中 102', store.getState().activeArticleId === '102');
+    const t115rcn0 = store.getState().readerCloseNonce;
+    store.getState().clearReaderSelection(); // Esc 关闭（App.tsx 唯一关闭路径）
+    checkNew('(t115-x2a) 阅读器关闭信号：clearReaderSelection bump readerCloseNonce 且选中清空（滚动不动 = filterKey 未变不触发归零，既有语义）',
+      store.getState().readerCloseNonce === t115rcn0 + 1 && store.getState().activeArticleId === null);
+    checkNew('(t115-x2a) 焦点归还原卡（决策）：原卡 102 仍在当前列表 → 决策返回其 index（Timeline 据此 focusCardAt：原卡可见不滚、不可见 scrollToIndex 定位后聚焦）',
+      rfri115('102', itemsOf115()) === 1);
+    store.getState().selectArticle('103'); // 换一篇打开
+    const t115rcn1 = store.getState().readerCloseNonce;
+    store.getState().clearReaderSelection(); // 再关（同一篇形态的连续开关）
+    checkNew('(t115-x2a) 关闭信号必重触发（选型判别）：连续两次关闭 nonce 连续 +1——若用 activeArticleId 字段本身当信号，同值（开→关→再开同一篇→关）无法重触发 effect，这是选计数器不选 id 字段的理由',
+      store.getState().readerCloseNonce === t115rcn1 + 1);
+    store.getState().selectFeed('12'); // 阅读器开着时列表已切范围（selectFeed 不清选中；feed-12 与当前 article 布局同布局，列表非空）
+    await nTick(20);
+    checkNew('(t115-x2b) 焦点归还回落（判别）：原卡不在当前列表（列表已切换，新范围=[104,105]）→ 决策 null = 不聚焦不滚动（焦点归还无对象，绝不猜）；无归还目标（null id）同口径',
+      rfri115('103', itemsOf115()) === null && itemsOf115().map((e) => e.id).join(',') === '104,105'
+      && rfri115(null, itemsOf115()) === null);
+
+    /* ---------- (t115-x3a) 与 TASK-111 刷新保位不叠加（双向隔离） ---------- */
+    await resetStore();
+    ta115.clearTopAnchor();
+    await store.getState().bootstrapFromBackend();
+    const t115srnIso = store.getState().switchRestoreNonce;
+    const t115prnIso = store.getState().positionRestoreNonce;
+    ta115.rearmTopAnchor('101', filterKeyOf115(store.getState()), (T115 += 1000));
+    ta115.stashTopAnchorForReturn();
+    ta115.clearTopAnchor();
+    listPlan = { mode: 'reject', error: { message: 't115 注入' } };
+    store.getState().selectFeed('11');
+    await nTick(10);
+    store.getState().selectFeed('all'); // 切换返回：只动 switchRestoreNonce
+    checkNew('(t115-x3a) 不叠加（出向）：切换返回恢复 bump switchRestoreNonce 但 positionRestoreNonce 纹丝不动（导航路径的 reload 不带 keepReadingPosition，「一次性定位」绝不借用「持续跟踪」通道）',
+      store.getState().switchRestoreNonce === t115srnIso + 1
+      && store.getState().positionRestoreNonce === t115prnIso);
+    await nTick(10);
+    listPlan = null;
+    await store.getState().reloadFromBackend({ keepReadingPosition: true }); // 后台刷新：只动 positionRestoreNonce
+    checkNew('(t115-x3a) 不叠加（入向）：keepReadingPosition 刷新落地 bump positionRestoreNonce 但 switchRestoreNonce 纹丝不动（两个 effect 各消费各的信号、各用各的锚——存档 vs 活锚，互不发出互不消费对方信号）',
+      store.getState().positionRestoreNonce === t115prnIso + 1
+      && store.getState().switchRestoreNonce === t115srnIso + 1);
+
+    /* ---------- (t115-x3b) 存档容量 LRU + rearm 语义（模块级） ---------- */
+    T115 += 5000;
+    ta115.rearmTopAnchor('r1', 'fk-r', T115);
+    checkNew('(t115-x3b) rearm 重锚语义（恢复的支撑）：绕过节流直设活锚并推进节流基准（窗口内到达的 scroll 事件记录被吸收——活锚保持在恢复落点，用户随即再离开时存档的是恢复后位置而非恢复前位置）',
+      ta115.peekTopAnchor()?.id === 'r1'
+      && ta115.recordTopAnchor('r2', 'fk-r', T115 + 100) === false
+      && ta115.peekTopAnchor()?.id === 'r1');
+    ta115.clearTopAnchor();
+    for (let i = 0; i <= RETURN_ANCHOR_ARCHIVE_MAX; i++) {
+      ta115.rearmTopAnchor(`a${i}`, `fk-${i}`, T115 + 100 + i);
+      ta115.stashTopAnchorForReturn();
+      ta115.clearTopAnchor();
+    }
+    checkNew(`(t115-x3b) 存档容量 LRU（TASK-111 预算纪律）：上限 ${RETURN_ANCHOR_ARCHIVE_MAX}（与视图缓存键数同值），溢出淘汰最旧上下文（fk-0 已淘汰、fk-MAX 保留）——淘汰只影响该上下文退回「归零回落」，无正确性影响`,
+      ta115.peekReturnAnchor('fk-0') === null
+      && ta115.peekReturnAnchor(`fk-${RETURN_ANCHOR_ARCHIVE_MAX}`)?.id === `a${RETURN_ANCHOR_ARCHIVE_MAX}`);
+    ta115.peekReturnAnchor('fk-1'); // 命中刷新 LRU 新鲜度
+    ta115.rearmTopAnchor('aNEW', 'fk-NEW', T115 + 500);
+    ta115.stashTopAnchorForReturn();
+    ta115.clearTopAnchor();
+    checkNew('(t115-x3b) LRU 新鲜度：peek 命中把该上下文刷新为最新使用，随后溢出淘汰的是真正最旧的 fk-2（fk-1 因刚被使用而幸存）',
+      ta115.peekReturnAnchor('fk-1')?.id === 'a1' && ta115.peekReturnAnchor('fk-2') === null
+      && ta115.peekReturnAnchor('fk-NEW')?.id === 'aNEW');
+
+    await resetStore(); // 夹具复位
+  }
+
+  /* ============================================================
      TASK-103（REQ-001）：文章快照与正文水合生命周期统一
      —— 刷新不丢正文、同 id 刷新后重新水合、终态机完备、乱序防护与在途去重。
      审计探针场景（AUDIT-20261005-core-consistency.md「社交正文问题链路」）：
@@ -5233,8 +5438,13 @@ await (async () => {
         && baseCss.includes('层级最高：盖过设置弹窗（150）与下拉菜单（2000） */'));
 
     /* UI P2-2：J/K 范围文案 + Social/Notif 卡 roving */
-    checkNew('(t100-uip2-2) ShortcutsTab J/K 范围文案改准「文章布局」（跨布局 J/K 为决策不做）',
-      shortcuts.includes("'文章布局'") && !shortcuts.includes("'时间流'"));
+    /* 【TASK-114 更新理由】X3 把 J/K 从「仅文章」扩展到全部虚拟化布局（画廊除外），
+       旧文案「文章布局」正是本卡收口的不一致点——随之改准并钉住新范围（明示画廊
+       不支持）；「不得宣传成整个时间流」的防误伤边界（!includes 时间流）保留。 */
+    checkNew('(t100-uip2-2) ShortcutsTab J/K 范围文案随 TASK-114 改准：虚拟化四布局生效、明示画廊不支持（旧「文章布局」清零）',
+      shortcuts.includes("'文章/社交/播客/通知（画廊不支持）'")
+      && !shortcuts.includes("'文章布局'")
+      && !shortcuts.includes("'时间流'"));
     checkNew('(t100-uip2-2) SocialCard/NotifCard 补 role="article" + tabIndex + 方向键 roving，融入既有 tabindex 体系',
       timeline.includes("role=\"article\"")
         && (timeline.match(/role="article"/g) || []).length === 2
@@ -5532,6 +5742,288 @@ await (async () => {
   const subtitles102 = [...shared102.matchAll(/subtitle: '([^']+)'/g)].map((m) => m[1]);
   checkNew('(t102-x3d) 侧栏 8 个 tab subtitle（组标题级说明同口径）全部 ≤48 字',
     subtitles102.length === 8 && subtitles102.every((t) => t.length <= 48));
+}
+
+/* ============================================================
+   TASK-114（2026-10-06，REQ-005/008）：五布局状态与快捷键统一
+   X1 NotifCard 水合三态（对齐 SocialCard，失败不再静默）/
+   X2 Enter 五卡统一（Social/Notif 补选中）/ X3 J/K 全虚拟化布局（画廊除外）。
+
+   证据边界（如实说明）：renderToStaticMarkup 走 zustand 服务端快照——
+   useSyncExternalStore 的 getServerSnapshot 读 getInitialState（createStore
+   时捕获，setState 不可达；实测探针确认 SSR 不随 setState 变化），SSR 只能
+   呈现与初值一致的形态（d5 空态先例即此）。三态/键绑定是运行时状态驱动的
+   分支，无法经 Timeline SSR 逐态取证，故本组走两条既有证据通道：
+   - 源级结构断言（t102-x1 先例）：按组件声明边界切片，钉住条件链与接线；
+   - 纯函数/store 层行为断言：X3 门控与推进抽为 src/lib/jkNavigation.ts
+     （App.tsx 消费同一份），真值表 + 五布局 store 模拟；X1 的状态判定复用
+     t103 已断言的 entryNeedsHydration 真值表与 retryHydration 行为
+     （Social/Notif 走同一条批量水合队列，无第二套判定）。
+   ============================================================ */
+{
+  const fs114 = await import('node:fs');
+  const src114 = (p) => fs114.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const timeline114 = src114('../src/components/Timeline.tsx');
+  const app114 = src114('../src/App.tsx');
+  const shortcuts114 = src114('../src/components/settings/ShortcutsTab.tsx');
+  const compSlice114 = (a, b) => {
+    const i = timeline114.indexOf(a);
+    const j = b ? timeline114.indexOf(b, i) : timeline114.length;
+    return i >= 0 && j > i ? timeline114.slice(i, j) : '';
+  };
+  const article114 = compSlice114('const ArticleCard = memo(function ArticleCard(', 'const SocialCard = memo(function SocialCard(');
+  const social114 = compSlice114('const SocialCard = memo(function SocialCard(', 'const GalleryCard = memo(function GalleryCard(');
+  const gallery114 = compSlice114('const GalleryCard = memo(function GalleryCard(', 'const PodcastCard = memo(function PodcastCard(');
+  const podcast114 = compSlice114('const PodcastCard = memo(function PodcastCard(', 'const NotifCard = memo(function NotifCard(');
+  const notif114 = compSlice114('const NotifCard = memo(function NotifCard(', null);
+  const cnt114 = (s, t) => (s.match(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+  const ENTER_GUARD = "e.key === 'Enter' || e.key === ' '";
+
+  /* ---------- X1：NotifCard 水合三态 ---------- */
+  checkNew('(t114-x1a) NotifCard 订阅水合错误态与终态（对齐 SocialCard 的订阅面：hydrationErrors/hydratedIds）',
+    notif114.includes('s.hydrationErrors[item.id]') && notif114.includes('s.hydratedIds[item.id]'));
+
+  /* TASK-114 R1-F1：失败分支切片（自 ') : hydrationError ? (' 至 snippet 正文分支）
+     ——只覆盖「无正文可显示」的失败，无 snippet 回退、无正文 div；正文（fullText）
+     分支在失败分支**之前**，与基准 SocialCard 的 content 优先逐分支对齐（可达组合态
+     「错误态+正文已到达」——详情拉取成功只写 content 不清错误——必须显示正文）。 */
+  const notifErrBranch114 = notif114.slice(
+    notif114.indexOf(') : hydrationError ? ('),
+    notif114.indexOf(') : item.snippet ? ('),
+  );
+  const notifBodyBranch114 = notif114.slice(
+    notif114.indexOf('{fullText ? ('),
+    notif114.indexOf(') : hydrationError ? ('),
+  );
+  checkNew('(t114-x1b) NotifCard 失败态=内联重试（hydrate-retry + retryHydration(id)，文案域「正文加载失败：」，与 SocialCard 同形），失败分支不再回退 snippet',
+    notifErrBranch114.length > 0
+    && notifErrBranch114.includes('className="hydrate-retry"')
+    && notifErrBranch114.includes('retryHydration(item.id)')
+    && notifErrBranch114.includes('正文加载失败：')
+    && !notifErrBranch114.includes('item.snippet')
+    && !notifErrBranch114.includes('notif-body-text'));
+
+  checkNew('(t114-x1c) NotifCard 空正文/加载中占位与 SocialCard 同形（className="hydrate-placeholder" 恰两态）',
+    cnt114(notif114, 'className="hydrate-placeholder"') === 2
+    && notif114.includes('暂无正文') && notif114.includes('加载正文…'));
+
+  checkNew('(t114-x1f) 正文分支先于失败分支（R1-F1）：「错误态+正文已到达」组合态显示正文而非假失败行（与 SocialCard content 优先逐分支对齐）',
+    notifBodyBranch114.length > 0
+    && notifBodyBranch114.includes('notif-body-text')
+    && notif114.indexOf('notif-body-text') < notif114.indexOf('className="hydrate-retry"'));
+
+  checkNew('(t114-x1g) 纯失败态（无正文）不渲染「展开更多」（正文已被重试行替换，防死控件）；错误滞留+正文已达的组合态豁免（!!fullText，可展开水合全文，与修前/同态 SocialCard 一致）',
+    notif114.includes('{isLong && (!hydrationError || !!fullText) && (')
+    && notif114.indexOf('{isLong && (!hydrationError || !!fullText) && (') < notif114.indexOf('className="notif-expand-btn"'));
+
+  checkNew('(t114-x1e) NotifCard 与 SocialCard 三态同构：两卡同为「错误重试 → 空正文 → 加载占位」条件链（占位类与文案逐一同形）',
+    social114.includes('className="hydrate-retry"') && notif114.includes('className="hydrate-retry"')
+    && social114.includes('className="hydrate-placeholder"') && notif114.includes('className="hydrate-placeholder"')
+    && social114.includes('暂无正文') && notif114.includes('暂无正文')
+    && social114.includes('加载正文…') && notif114.includes('加载正文…'));
+
+  /* ---------- X2：Enter/Space 五卡统一 ---------- */
+  checkNew('(t114-x2a) Enter/Space 键位五卡齐备（Article=选中 / Podcast=play / Gallery 两分支=灯箱 / Social、Notif=选中·新增）',
+    cnt114(article114, ENTER_GUARD) === 1 && cnt114(podcast114, ENTER_GUARD) === 1
+    && cnt114(gallery114, ENTER_GUARD) === 2 && cnt114(social114, ENTER_GUARD) === 1
+    && cnt114(notif114, ENTER_GUARD) === 1);
+  checkNew('(t114-x2b) Social/Notif Enter 语义=选中（onSelect(item.id)，与 ArticleCard 同动作），且仅卡片本体响应（e.target 守卫：嵌套按钮/链接的键盘激活不被卡片级选中劫持）',
+    social114.includes('if (e.target === e.currentTarget)') && notif114.includes('if (e.target === e.currentTarget)')
+    && social114.indexOf('e.target === e.currentTarget') < social114.indexOf('onSelect(item.id);')
+    && notif114.indexOf('e.target === e.currentTarget') < notif114.indexOf('onSelect(item.id);'));
+  checkNew('(t114-x2c) Timeline 接线：Social/Notif 卡 onSelect={selectArticle}（选中即打开）',
+    timeline114.includes('<SocialCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle}')
+    && timeline114.includes('<NotifCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle}'));
+
+  /* ---------- X3：J/K 全虚拟化布局（画廊除外） ---------- */
+  const { jkLayoutAllowed, jkNextIndex } = await import('../src/lib/jkNavigation.ts');
+
+  /* 修前门控可复现：旧实现 activeContentLayout !== 'article' 即 return，
+     social/podcast/notification 按 J/K 无响应（本卡收口的不一致点本身） */
+  const legacyJkGate114 = (l) => l === 'article';
+  checkNew('(t114-x3a) 修前门控可复现：旧判定仅 article 放行，social/podcast/notification 一律拦下',
+    legacyJkGate114('article') && !legacyJkGate114('social')
+    && !legacyJkGate114('podcast') && !legacyJkGate114('notification'));
+  checkNew('(t114-x3b) J/K 门控：虚拟化四布局放行、画廊 image 拦下（与 Timeline 虚拟化开关同一口径）',
+    jkLayoutAllowed('article') && jkLayoutAllowed('social') && jkLayoutAllowed('podcast')
+    && jkLayoutAllowed('notification') && !jkLayoutAllowed('image'));
+  checkNew('(t114-x3c) J/K 推进真值表（与修前内联实现逐条等价）：j 末项回绕→0、k 首项回绕→末项、无选中 j→0/k→末项、空列表→-1',
+    jkNextIndex(5, 4, true) === 0 && jkNextIndex(5, 0, false) === 4
+    && jkNextIndex(5, -1, true) === 0 && jkNextIndex(5, -1, false) === 4
+    && jkNextIndex(3, 1, true) === 2 && jkNextIndex(3, 1, false) === 0
+    && jkNextIndex(0, -1, true) === -1 && jkNextIndex(0, -1, false) === -1);
+
+  /* store 层模拟：App.tsx J/K 分支语义可达性——五布局各绑一个源，虚拟化四布局
+     下 selectVisibleEntries 产出序列且「门控放行 ∧ 推进必得可选中目标」；image
+     布局条目虽在、门控拦下（不支持）。跑在本文件末尾，随后恢复 store。 */
+  {
+    const { selectVisibleEntries: sve114 } = await import('../dist-test/store.js');
+    const mkEntry114 = (id, feedId, ts) => ({
+      id, feedId, title: `t-${id}`, author: 'a', snippet: 's', content: '',
+      translatedContent: '', aiSummary: '', url: '', cover: null, imageUrl: null,
+      tags: [], isRead: false, isStarred: false, publishedAt: ts,
+      enclosureUrl: null, enclosureMime: null, durationSec: null,
+      fulltextExtracted: false, rawContent: null,
+    });
+    const LAYOUT_FEEDS114 = [
+      ['7100', 'article'], ['7200', 'social'], ['7300', 'podcast'], ['7400', 'notification'], ['7500', 'image'],
+    ];
+    const entries114 = LAYOUT_FEEDS114.flatMap(([feedId], i) => [
+      mkEntry114(`${feedId}1`, feedId, 1000 + i),
+      mkEntry114(`${feedId}2`, feedId, 2000 + i),
+      mkEntry114(`${feedId}3`, feedId, 3000 + i),
+    ]);
+    const feedIndex114 = new Map(LAYOUT_FEEDS114.map(([feedId, layout]) => [feedId, {
+      feed: { id: feedId, name: `源-${layout}`, layout },
+      cat: { id: 'cat-114', name: '分类-114', layout: 'article' },
+    }]));
+    const prevLayout114 = store.getState().activeContentLayout;
+    store.setState({
+      entries: entries114, feedIndex: feedIndex114, openedReadIds: {},
+      activeFeedFilter: 'all', activeViewFilter: 'all', timelineFilter: 'all', timelineSort: 'newest',
+      activeArticleId: null,
+    });
+    let simOk114 = true;
+    for (const [feedId, layout] of LAYOUT_FEEDS114) {
+      store.setState({ activeContentLayout: layout });
+      const items = sve114(store.getState());
+      if (layout === 'image') {
+        /* 画廊：条目在（3 条），但门控拦下——J/K 不可达（不支持） */
+        simOk114 = simOk114 && items.length === 3 && !jkLayoutAllowed(layout);
+        continue;
+      }
+      /* 无选中按 j：门控放行 ∧ 推进落最新一条；再从首项 j 推进到位次第二 */
+      const first = items[jkNextIndex(items.length, -1, true)];
+      const second = items[jkNextIndex(items.length, 0, true)];
+      simOk114 = simOk114 && jkLayoutAllowed(layout) && items.length === 3
+        && !!first && first.id === `${feedId}3` && !!second && second.id === `${feedId}2`;
+    }
+    checkNew('(t114-x3d) store 层五布局模拟：article/social/podcast/notification 逐布局门控放行且 selectVisibleEntries×jkNextIndex 必得可选中目标（j 依次落最新/次新）；image 条目在但门控拦下',
+      simOk114);
+    store.setState({ activeContentLayout: prevLayout114, entries: [], feedIndex: new Map() });
+  }
+
+  checkNew('(t114-x3e) App.tsx J/K 分支消费纯函数（门控 + 推进），旧「仅 article」内联门控与内隔回绕判定清零',
+    app114.includes('jkLayoutAllowed(s.activeContentLayout)')
+    && app114.includes("jkNextIndex(items.length, curIdx, e.key === 'j')")
+    && !app114.includes("s.activeContentLayout !== 'article'")
+    && !app114.includes('nextIdx = e.key'));
+  checkNew('(t114-x3f) ShortcutsTab J/K 行同步：范围=文章/社交/播客/通知、明示画廊不支持（旧「文章布局」清零）',
+    shortcuts114.includes("'文章/社交/播客/通知（画廊不支持）'")
+    && shortcuts114.includes("'上下切换选中条目'")
+    && !shortcuts114.includes("'文章布局'"));
+
+  /* SSR 烟测（证据边界见块首注释）：NotifCard 三态改动后 Timeline 组件树仍可
+     执行（与 d5 同口径的初值空态形态，不承载逐态取证） */
+  const { renderToStaticMarkup: rsm114 } = await import('react-dom/server');
+  const { createElement: ce114 } = await import('react');
+  const { Timeline: Timeline114 } = await import('../src/components/Timeline.tsx');
+  const html114 = rsm114(ce114(Timeline114));
+  checkNew('(t114-x1d) SSR 烟测：三态/键绑定改动后 Timeline 组件树仍可执行（空态/哨兵形态不变）',
+    html114.includes('timeline-empty-state') && html114.includes('timeline-load-more'));
+}
+
+/* ============================================================
+   TASK-116（2026-10-06，同步四态展示）：队列状态列 + 统计命令 + pill/摘要卡。
+   X1 侧栏 pill 优先级修正（error > syncing > waiting > connected，修复「手动
+   同步进行中失败态被 syncing 覆盖」）+ 等待计数 + 「· 部分失败」段；
+   X2 设置页四态摘要卡（stats + 上次同步，如实口径）；X3 无队列不劣化。
+
+   证据边界（如实说明，t115 同口径）：pill 与摘要 desc 文案真值表分别落在纯函数
+   syncPillLabel / syncStateSummary（src/lib/syncPill.ts，组件收口单点）；
+   SSR 烟测受 zustand v5 server snapshot 恒读 getInitialState() 所限，只取证
+   「组件树可执行 + 初始态基线渲染」（x1f/x2d 注）；接线由源码形态断言钉住
+   （t111-6/t115-0 先例）；Rust 侧 attempts/last_error/sync_queue_stats 由
+   CI cargo test 承担（t116-r0..r3）。
+   判别设计：
+   - 优先级逐格锁死：error 在 syncing/backgroundSyncing 中仍显示（修前必红的格子）；
+   - X3 零队列时既有文案逐字保留（噪音/假状态清零）；
+   - 后缀断言「无失败绝不追加」（「· 部分失败」凭空出现的实现必红）；
+   - 接线断言：旧内联四分支清零——优先级回退必须重写文案单点才会复绿。
+   ============================================================ */
+{
+  const fs116 = await import('node:fs');
+  const src116 = (p) => fs116.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const { syncPillLabel } = await import('../src/lib/syncPill.ts');
+  const mk116 = (o) => ({ syncStatus: 'synced', backgroundSyncing: false, syncConnected: true, waiting: 0, failed: 0, ...o });
+
+  /* ---------- X1：pill 优先级真值表（纯函数单点） ---------- */
+  checkNew('(t116-x1a) 优先级1：error 恒「同步失败」——手动同步进行中（syncing）/后台同步中也不例外（修复失败被 syncing 覆盖的既有缺陷）',
+    syncPillLabel(mk116({ syncStatus: 'error' })) === '同步失败'
+    && syncPillLabel(mk116({ syncStatus: 'error', backgroundSyncing: true })) === '同步失败');
+  checkNew('(t116-x1b) 优先级2：手动/后台同步中显示「同步中…」（error 缺席时）',
+    syncPillLabel(mk116({ syncStatus: 'syncing' })) === '同步中…'
+    && syncPillLabel(mk116({ backgroundSyncing: true })) === '同步中…');
+  checkNew('(t116-x1c) 优先级3：waiting>0 显示「等待同步 N 条」（未连接也如实——队列是本地事实，连接后自动补推）',
+    syncPillLabel(mk116({ waiting: 3 })) === '等待同步 3 条'
+    && syncPillLabel(mk116({ waiting: 1, syncConnected: false })) === '等待同步 1 条');
+  checkNew('(t116-x1d) failed>0 追加「· 部分失败」段（同一 pill 内，≤48 字）；无失败绝不追加（凭空出现的实现必红）',
+    syncPillLabel(mk116({ waiting: 2, failed: 1 })) === '等待同步 2 条 · 部分失败'
+    && syncPillLabel(mk116({ syncStatus: 'error', failed: 2 })) === '同步失败 · 部分失败'
+    && syncPillLabel(mk116({ syncStatus: 'syncing', failed: 1 })) === '同步中… · 部分失败'
+    && syncPillLabel(mk116({})) === '后端已同步');
+
+  /* ---------- X3：无队列无失败不劣化（既有语义逐字保留，不新增噪音） ---------- */
+  checkNew('(t116-x3a) X3 不劣化：无队列无失败时与既有语义逐字一致（后端已同步 / 本地模式 · 直连抓取），不出现等待/失败段',
+    syncPillLabel(mk116({})) === '后端已同步'
+    && syncPillLabel(mk116({ syncConnected: false })) === '本地模式 · 直连抓取'
+    && !syncPillLabel(mk116({})).includes('等待')
+    && !syncPillLabel(mk116({})).includes('部分失败'));
+
+  /* ---------- 接线：store→pill（SSR 取证）+ 源级防回退 ---------- */
+  const sidebarSrc116 = src116('../src/components/Sidebar.tsx');
+  const apiSrc116 = src116('../src/lib/api.ts');
+  const bootstrapSrc116 = src116('../src/store/slices/bootstrap.ts');
+  const syncTabSrc116 = src116('../src/components/settings/SyncTab.tsx');
+  checkNew('(t116-x1e) Sidebar 接线（源级）：文案收口到 syncPillLabel 单点（store 字段逐参入函），旧内联四分支文案清零（优先级回退必须重写文案单点才能复绿）',
+    sidebarSrc116.includes('syncPillLabel({')
+    && sidebarSrc116.includes('waiting: syncWaiting,') && sidebarSrc116.includes('failed: syncFailed,')
+    && !sidebarSrc116.includes("'同步失败'") && !sidebarSrc116.includes("'同步中…'")
+    && !sidebarSrc116.includes("'等待同步") && !sidebarSrc116.includes("'后端已同步'"));
+  checkNew('(t116-api) api 形态：syncQueueStats() 调 sync_queue_stats 命令，返回 SyncQueueStats（waiting/failed/last_error）',
+    apiSrc116.includes("await inv('sync_queue_stats')")
+    && apiSrc116.includes('interface SyncQueueStats')
+    && apiSrc116.includes('waiting: number') && apiSrc116.includes('failed: number')
+    && apiSrc116.includes('last_error: string | null'));
+  checkNew('(t116-refresh) 刷新时机（源级）：启动装载 reload 顺带拉 syncQueueStats 写入 store（挂载与手动同步完成后的末次 reload 共用此点）',
+    bootstrapSrc116.includes('api.syncQueueStats()')
+    && bootstrapSrc116.includes('syncWaiting: q.waiting') && bootstrapSrc116.includes('syncFailed: q.failed'));
+
+  /* store→pill 接线（SSR 烟测）。证据边界（如实说明）：zustand v5 的
+     useSyncExternalStore server snapshot 恒读 getInitialState()（模块创建时的
+     初始态，闭包持有、测试无法重定向），renderToStaticMarkup 只能看到初始态——
+     故 SSR 只取证「组件树可执行 + 初始态 pill 渲染」；字段驱动的真值表由
+     纯函数断言（x1a-x1d）与参数级接线断言（x1e）共同锁定。 */
+  const { renderToStaticMarkup: rsm116 } = await import('react-dom/server');
+  const { createElement: ce116 } = await import('react');
+  const { Sidebar: Sidebar116 } = await import('../src/components/Sidebar.tsx');
+  const pillBase116 = rsm116(ce116(Sidebar116));
+  checkNew('(t116-x1f) SSR 烟测：Sidebar 组件树可执行，初始态（未连接 · 空队列）pill 渲染出 X3 基线文案「本地模式 · 直连抓取」',
+    pillBase116.includes('本地模式 · 直连抓取')
+    && pillBase116.includes('sync-status-pill'));
+
+  /* ---------- X2：SyncTab 四态摘要卡（纯函数真值表 + 源级接线 + SSR 烟测） ---------- */
+  const { syncStateSummary } = await import('../src/lib/syncPill.ts');
+  const stat116 = (o) => ({ waiting: 0, failed: 0, last_error: null, ...o });
+  checkNew('(t116-x2a) 摘要口径（纯函数）：等待 N / 部分失败 N（最新错误 ≤1 行摘要）/ 上次同步时间，三段齐备',
+    syncStateSummary(stat116({ waiting: 3 }), 0) === '等待同步 3 条；上次同步 从未；状态变更已保存，连接后自动补推'
+    && syncStateSummary(stat116({ waiting: 3 }), 1760000000).includes('上次同步 ')
+    && syncStateSummary(stat116({ waiting: 2, failed: 1, last_error: '状态推送失败: HTTP 500' }), 0)
+      === '等待同步 2 条；部分失败 1（状态推送失败: HTTP 500）；上次同步 从未；状态变更已保存，连接后自动补推');
+  checkNew('(t116-x2b) 摘要口径（纯函数）：最新错误按码点截断 60 字符+…（不劈代理对）；无队列无失败仅时间行+说明句（X3 无噪音）；不虚构「已确认累计」',
+    syncStateSummary(stat116({ failed: 1, last_error: '错'.repeat(80) }), 0).includes(`部分失败 1（${'错'.repeat(60)}…）`)
+    && syncStateSummary(stat116({}), 0) === '上次同步 从未；状态变更已保存，连接后自动补推'
+    && !syncStateSummary(stat116({}), 0).includes('已确认'));
+  checkNew('(t116-x2c) SyncTab 摘要卡接线（源级）：「同步状态」卡 desc 走 syncStateSummary 单点，挂载与保存并同步链尾都刷新统计；说明句在卡 desc 收尾（不新增常驻 hint，TASK-101/102 既有断言锁定）',
+    syncTabSrc116.includes('title="同步状态"')
+    && syncTabSrc116.includes('syncStateSummary(')
+    && syncTabSrc116.includes('api.syncQueueStats()')
+    && syncTabSrc116.includes('refreshQueueStats(setQueueStats)')
+    && (syncTabSrc116.match(/mini-dialog-hint/g) || []).length === 1);
+  const { SyncTab: SyncTab116 } = await import('../src/components/settings/SyncTab.tsx');
+  const syncTabHtml116 = rsm116(ce116(SyncTab116));
+  checkNew('(t116-x2d) SSR 烟测：摘要卡改动后 SyncTab 组件树仍可执行（初始 mock 态渲染「演示模式」卡，证据边界同 x1f 注）',
+    syncTabHtml116.includes('演示模式') && syncTabHtml116.includes('同步'));
 }
 
 // ---- 汇总 ----

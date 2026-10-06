@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../../store';
-import { api, extractError } from '../../lib/api';
+import { api, extractError, type SyncQueueStats } from '../../lib/api';
+import { syncStateSummary } from '../../lib/syncPill';
 import { FluxDropdown, Switch, SettingCard, ConfirmDialog } from '../primitives';
 import { CacheCleanupSection } from './CacheCleanupSection';
 import { ConfigSyncSection } from './ConfigSyncSection';
@@ -8,6 +9,14 @@ import { ENDPOINT_DESC, ENDPOINT_PLACEHOLDER, endpointHint } from './endpointHin
 import { syncFailureMessage } from '../../store/syncErrors';
 
 /* ---------- TAB 6: 同步 ---------- */
+
+/** TASK-116：拉取同步队列统计进摘要卡。失败静默——纯提示性数据（TASK-067 N10
+ *  口径）。模块级函数（只依赖注入的 setter），供挂载 effect 与同步链尾复用。 */
+function refreshQueueStats(setter: (q: SyncQueueStats | null) => void) {
+  void api.syncQueueStats()
+    .then((q) => { if (q) setter(q); })
+    .catch(() => { /* 统计拉取失败静默兜底（默认零值可用） */ });
+}
 
 export function SyncTab() {
   const showToast = useAppStore((s) => s.showToast);
@@ -22,6 +31,8 @@ export function SyncTab() {
   const [connected, setConnected] = useState(false);
   const [account, setAccount] = useState<string | null>(null);
   const [lastSync, setLastSync] = useState(0);
+  /** TASK-116 X2：同步队列统计（等待/部分失败 + 最新错误摘要） */
+  const [queueStats, setQueueStats] = useState<SyncQueueStats | null>(null);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
@@ -40,6 +51,7 @@ export function SyncTab() {
       if (st.connected && st.endpoint) setEndpoint(st.endpoint);
       setProtocol(st.protocol === 'fever' ? 'fever' : 'greader');
     }).catch(() => { /* TASK-067 N10：挂载期状态拉取失败静默兜底（默认态可用） */ });
+    refreshQueueStats(setQueueStats);
   }, [dataMode]);
 
   /* 轻量连通测试：不落库不做同步（填表时快速验证） */
@@ -115,6 +127,8 @@ export function SyncTab() {
           showToast(failures.length > 0 ? failures.join('；') : '后端同步完成');
           /* TASK-100 P3-9：对账移除了远端已删除的订阅源——纯信息展示，单列一条 */
           if (removedFeeds > 0) showToast(`本次对账移除 ${removedFeeds} 个已在服务端删除的订阅源`);
+          /* TASK-116：本次同步链可能已清空队列或标记失败项，摘要卡跟着刷新 */
+          refreshQueueStats(setQueueStats);
         })
         .catch((e: unknown) => {
           const m = extractError(e);
@@ -186,6 +200,15 @@ export function SyncTab() {
      分行后字面量配对只在单行内成立，扫描恢复零误报。渲染输出不变。 */
   const accountTag = account ? `账户 ${account} · ` : '';
 
+  /* TASK-116 X2：四态摘要口径收口到纯函数 syncStateSummary（src/lib/syncPill.ts，
+     契约 X2/X3 如实原则；真值表由回归网 t116 断言驱动）。 */
+  const waiting = queueStats?.waiting ?? 0;
+  const failedCount = queueStats?.failed ?? 0;
+  const syncStateDesc = syncStateSummary(
+    queueStats ?? { waiting: 0, failed: 0, last_error: null },
+    lastSync,
+  );
+
   return (
     <>
       <div className="settings-group-title">后端配置</div>
@@ -196,6 +219,14 @@ export function SyncTab() {
           : '未连接（客户端可独立使用：直连抓取、阅读、收藏均正常）'}
       >
         <span className="about-arch-tag">{connected ? (account ?? '已连接') : '未连接'}</span>
+      </SettingCard>
+      {/* TASK-116 X2：四态摘要卡。状态标签 = 四态中的当下态（部分失败 > 等待同步 >
+         本地已保存）——「远端已确认」随成功 prune 即时出队、不可作常驻态展示（X3）；
+         desc 收尾即「本地已保存」说明句（状态变更已事务化落库，TASK-108） */}
+      <SettingCard title="同步状态" desc={syncStateDesc}>
+        <span className="about-arch-tag">
+          {failedCount > 0 ? '部分失败' : waiting > 0 ? '等待同步' : '本地已保存'}
+        </span>
       </SettingCard>
       {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
           深浅主题外观与展开行为都与 FluxDropdown 不一致。

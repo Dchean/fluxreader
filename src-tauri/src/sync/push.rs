@@ -78,13 +78,18 @@ pub(super) fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
     Ok(plan)
 }
 
-/// 锁外：执行推送计划。返回成功清除的队列 id（失败项保留 → 天然重试）。
+/// 锁外：执行推送计划。返回 (成功清除的队列 id, 失败项 (队列 id, 错误摘要))。
+/// 失败项保留在队列（天然重试），由调用方落库标记 attempts/last_error
+/// （TASK-116 四态展示；db::mark_push_failed）——本函数保持无 DB 访问，
+/// 与「HTTP 全在锁外、DB 读写锁内短临界区」的锁纪律一致。
+/// read 广播聚合为单请求：任一 entry 失败则该组全部 queue id 同记一条摘要。
 pub(super) async fn exec_push(
     client: &Backend,
     plan: &PushPlan,
     report: &mut SyncReport,
-) -> Vec<i64> {
+) -> (Vec<i64>, Vec<(i64, String)>) {
     let mut done: Vec<i64> = Vec::new();
+    let mut failed: Vec<(i64, String)> = Vec::new();
     // read/unread 聚合批量（Google Reader edit-tag 单请求可携带全部 id + tag）
     for action in ["read", "unread"] {
         let ids: Vec<i64> = plan
@@ -111,7 +116,17 @@ pub(super) async fn exec_push(
                         .map(|s| s.queue_id),
                 );
             }
-            Err(e) => report.errors.push(format!("状态推送失败: {e}")),
+            Err(e) => {
+                // 聚合报告与 per-item 摘要同文：errors 口径逐字保持修前形态
+                let summary = format!("状态推送失败: {e}");
+                report.errors.push(summary.clone());
+                failed.extend(
+                    plan.status
+                        .iter()
+                        .filter(|s| s.action == action)
+                        .map(|s| (s.queue_id, summary.clone())),
+                );
+            }
         }
     }
     // 收藏：star/unstar（Google Reader 有明确的 add/remove 语义，非 toggle）
@@ -126,12 +141,14 @@ pub(super) async fn exec_push(
                 report.pushed_states += 1;
                 done.push(*qid);
             }
-            Err(e) => report
-                .errors
-                .push(format!("收藏同步失败: entry {remote_id}: {e}")),
+            Err(e) => {
+                let summary = format!("收藏同步失败: entry {remote_id}: {e}");
+                report.errors.push(summary.clone());
+                failed.push((*qid, summary));
+            }
         }
     }
-    done
+    (done, failed)
 }
 
 /// 即时状态推送：只推 sync_queue（read/unread/star/unstar + 副本广播），
@@ -177,11 +194,20 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
     if plan.status.is_empty() && plan.stars.is_empty() {
         return;
     }
-    let done = exec_push(&client, &plan, &mut report).await;
-    if !done.is_empty() {
+    let (done, failed) = exec_push(&client, &plan, &mut report).await;
+    {
         let conn = db.lock().await;
-        if let Err(e) = db::prune_sync(&conn, &done) {
-            log::warn!("sync: 清队列失败: {e}");
+        // TASK-116：失败项落库标记（attempts+1 / last_error）——即时推送失败此前
+        // 只进日志，用户在 UI 上永远看不到「部分失败」。标记失败不影响队列保留。
+        if !failed.is_empty() {
+            if let Err(e) = db::mark_push_failed(&conn, &failed) {
+                log::warn!("sync: 推送失败标记落库失败: {e}");
+            }
+        }
+        if !done.is_empty() {
+            if let Err(e) = db::prune_sync(&conn, &done) {
+                log::warn!("sync: 清队列失败: {e}");
+            }
         }
     }
     if !report.errors.is_empty() {

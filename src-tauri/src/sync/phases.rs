@@ -49,12 +49,20 @@ pub async fn states_phase(
             age_stale_queue(&conn, &mut report);
             plan_push(&conn)?
         };
-        let done = exec_push(&client, &plan, &mut report).await;
-        if !done.is_empty() {
+        let (done, failed) = exec_push(&client, &plan, &mut report).await;
+        {
             let conn = db.lock().await;
+            // TASK-116：失败项落库标记（attempts+1 / last_error，四态展示口径）
+            if !failed.is_empty() {
+                if let Err(err) = db::mark_push_failed(&conn, &failed) {
+                    log::warn!("sync: 推送失败标记落库失败（states 首次 push）: {err}");
+                }
+            }
             // P3[1]：剪除失败此前静默 → 队项残留会被重复推送。改为 warn。
-            if let Err(err) = db::prune_sync(&conn, &done) {
-                log::warn!("sync: 剪除已推送队项失败（states 首次 push）: {err}");
+            if !done.is_empty() {
+                if let Err(err) = db::prune_sync(&conn, &done) {
+                    log::warn!("sync: 剪除已推送队项失败（states 首次 push）: {err}");
+                }
             }
         }
     }
@@ -71,12 +79,20 @@ pub async fn states_phase(
             plan_push(&conn)?
         };
         if !plan.status.is_empty() || !plan.stars.is_empty() {
-            let done = exec_push(&client, &plan, &mut report).await;
-            if !done.is_empty() {
+            let (done, failed) = exec_push(&client, &plan, &mut report).await;
+            {
                 let conn = db.lock().await;
+                // TASK-116：失败项落库标记（pull 后补推段，同首次 push 段口径）
+                if !failed.is_empty() {
+                    if let Err(err) = db::mark_push_failed(&conn, &failed) {
+                        log::warn!("sync: 推送失败标记落库失败（states 补推）: {err}");
+                    }
+                }
                 // P3[1]：同上（pull 后补推段）。
-                if let Err(err) = db::prune_sync(&conn, &done) {
-                    log::warn!("sync: 剪除已推送队项失败（states 补推）: {err}");
+                if !done.is_empty() {
+                    if let Err(err) = db::prune_sync(&conn, &done) {
+                        log::warn!("sync: 剪除已推送队项失败（states 补推）: {err}");
+                    }
                 }
             }
         }

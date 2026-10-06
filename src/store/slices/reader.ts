@@ -21,6 +21,7 @@ export type ReaderSlice = Pick<
   | 'retryHydration'
   | 'hydrateArticleContent'
   | 'clearReaderSelection'
+  | 'readerCloseNonce'
   | 'extractCurrentArticle'
   | 'toggleReaderFulltext'
   | 'toggleCurrentReadStatus'
@@ -82,6 +83,12 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
   hydrationErrors: {},
   hydratedIds: {},
   openedReadIds: {},
+  /* TASK-115②：阅读器关闭信号（nonce，不透明计数器；字段说明见 types.ts）。
+     仅在 clearReaderSelection bump——本 action 只发信号，不携带载荷：原选中卡
+     id 由 Timeline 在 activeArticleId 跟随 effect 用 ref 记账（关闭 commit 时
+     该 ref 保留关闭前值），Timeline 的 readerClose effect 消费本信号归还焦点。
+     选型理由见下方 clearReaderSelection 长注释与 timelineAnchor.ts 头注 X2 节。 */
+  readerCloseNonce: 0,
 
   /* ================= 阅读器 ================= */
 
@@ -299,8 +306,24 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     });
   },
 
+  /* TASK-115②：关闭阅读器（Esc / App 全局快捷键的唯一关闭路径）。修前只清
+     四个字段、无焦点归还——关闭后焦点落空、J/K 从列表顶部重新起步（阅读
+     上下文丢失）。修法：bump readerCloseNonce 发出关闭信号，Timeline 消费
+     信号把焦点归还原选中卡（原卡不在当前列表 → 归零回落不聚焦）。
+     选型（Timeline 消费关闭信号 vs 本 action 记录原 id）：选前者——本 action
+     只 bump 不透明计数器，原选中卡由 Timeline 在 activeArticleId 跟随 effect
+     里记录（关闭时刻它必然持有最后选中的文章 id）。理由：store 不反向依赖
+     components 层（timelineAnchor 在 components/ 下，store→components 是
+     倒挂方向，会开循环依赖的口子）；且「只有原 id 字段无法区分连续两次开关
+     同一篇」（值不变不触发 effect），nonce 计数器才是可靠的重触发信号。 */
   clearReaderSelection: () =>
-    set({ activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false, showFulltext: false }),
+    set((s) => ({
+      readerCloseNonce: s.readerCloseNonce + 1,
+      activeArticleId: null,
+      isShowingTranslatedProse: false,
+      isRawRenderMode: false,
+      showFulltext: false,
+    })),
 
   /** 手动全文提取：Readability 拉原文网页存 content；rawContent 始终保留 RSS 原文
       （供「全文 ↔ RSS 正文」切换回跳）。提取成功后进入全文视图。 */

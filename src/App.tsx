@@ -8,6 +8,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal, CloseAskDialog } from './components/Overlays';
 import { ContextMenuHost } from './components/ContextMenu';
 import { anyOverlayOpen, shouldYieldToOverlay } from './components/shortcutYield';
+import { jkLayoutAllowed, jkNextIndex } from './lib/jkNavigation';
 /* ============================================================
    Application Shell
 
@@ -268,20 +269,19 @@ export default function App() {
         s.toggleCurrentReadStatus();
         return;
       }
-      /* J/K 键盘流：选中即打开（已确认的产品决策） */
+      /* J/K 键盘流：选中即打开（已确认的产品决策）。
+         TASK-114 X3：布局门控从「仅 article」扩展为「image 之外全部放行」——
+         全部虚拟化布局复用 Timeline 的 moveCardFocus/focusIndex 基建（选中切换
+         后 focusIndex 经既有 effect 跟随，卡片 roving tabindex 同步）；画廊
+         （image）非虚拟化、无该基建，不支持 J/K。门控与推进判定收口在纯函数
+         jkLayoutAllowed/jkNextIndex（src/lib/jkNavigation.ts，与 Timeline
+         虚拟化开关同一口径），回归网直接断言真值表与 store 层五布局模拟。 */
       if (e.key === 'j' || e.key === 'k') {
-        if (s.activeContentLayout !== 'article') return;
+        if (!jkLayoutAllowed(s.activeContentLayout)) return;
         const items = selectVisibleEntries(s);
         const curIdx = items.findIndex((a) => a.id === s.activeArticleId);
-        let nextIdx: number;
-        if (curIdx === -1) {
-          nextIdx = e.key === 'j' ? 0 : items.length - 1;
-        } else {
-          nextIdx = e.key === 'j'
-            ? (curIdx < items.length - 1 ? curIdx + 1 : 0)
-            : (curIdx > 0 ? curIdx - 1 : items.length - 1);
-        }
-        if (items[nextIdx]) s.selectArticle(items[nextIdx].id);
+        const nextIdx = jkNextIndex(items.length, curIdx, e.key === 'j');
+        if (nextIdx >= 0 && items[nextIdx]) s.selectArticle(items[nextIdx].id);
       }
     };
     window.addEventListener('keydown', onKey);
