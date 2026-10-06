@@ -1,0 +1,61 @@
+{
+  "task_id": "TASK-113",
+  "candidate_digest": "8df7f65e578d29e18b8b6b2aab15fb4056bb0df9f6d506ce1a6b7647a856d0af",
+  "verification_run": "RUN-294c3cdc945240eeacd6ec65bbcd4cad",
+  "verdict": "PASS",
+  "summary": "独立复核确认：d167135→5860dad 差异仅为声称的 3 处——sync/mod.rs 删除零消费的 use conflict_policy::*（grep 证实全部消费点走 conflict_policy:: 限定路径、无任何裸名代码消费者），greader_pull.rs/fever_pull.rs 测试模块 /// 文档块改 // 普通注释（剥去注释符后逐行比对，原文 6/6、12/12 行逐字保留，仅前置 3 行 TASK-113 说明）；测试函数体与断言、conflict_policy.rs、reconcile 生产代码零改动。修复正确性：mod.rs:59 的 mod conflict_policy 对子模块可见，fever_pull.rs:3 / greader_pull.rs:3 经 use super::* 取得模块名，conflict_policy 项均 pub(super)，限定路径解析成立；删除未消费 glob 纯编译期、无运行时效应。排除疑点抽查成立：单臂穷尽 match（conflict_policy.rs:155，单变体枚举无 wildcard，不触发默认 lint）、bool_assert_comparison（新测试均为 assert!(谓词调用)/assert_eq!(值,期望) 形态）、pub(super) 项消费（4 常量+2 函数全部被限定路径消费，枚举变体全部被构造，无 dead_code 面）。CI 证据绑定：经 GitHub API 独立核实 run 37415533640（dev@5860dad，全 sha 5860dad53fab0f03b65d04bbc86bf7a21f0546df 与本地提交一致）completed/success（2026-10-06T04:49:36Z），rust job『Check & test Rust (src-tauri)』各步 fmt --check / clippy -D warnings / cargo test / mock 集成套件（--include-ignored）全 success，clippy 命令与任务卡门禁逐字一致（ci.yml:65），cargo test 实际执行 TASK-112 新增 9 条测试（GR 4+Fever 4+政策格 1，均存在于提交树且未改动）；基线 run 37411238924@d167135 为 failure，与本卡起因吻合。候选绑定：RUN-294c3cdc candidate manifest 的 digest=8df7f65e…与审查包一致，其 52 个文件 sha256 与工作树逐一相符，工作树对全部候选路径相对 5860dad 干净（差异仅为 .workflow-kit 记账文件，不在候选内）。遗留笔误裁定：greader_pull.rs:310 seed_bound 文档写『返回 (article id, remote entry id)』而函数仅返回 aid（i64，:346）——属纯注释笔误、无行为影响、TASK-112 已验收态、非 clippy 触发点且不在本卡改动范围，裁定为非阻塞观察、不列为 finding，建议登记待办随下次触碰该文件时修正。综合裁定 PASS，findings=0。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务目标为修复 TASK-112 新增代码的 clippy 触发点且行为零变化、经 CI 复验。差异仅 3 文件且全部在允许路径 src-tauri/src 内：mod.rs 删零消费 glob 导入（grep 证实无裸名消费者），两个 pull 文件仅测试模块文档注释等价改写（文字逐字保留，程序化比对通过）。无断言改动、无范围扩大、无顺带行为变化。验收①③由 diff 等价性证实，②由 CI rust job 全绿覆盖（独立经 GitHub API 核实 run 37415533640@5860dad completed/success），⑤由 RUN-294c3cdc 本地四门禁 exit 0 覆盖，④即本审查。",
+      "evidence_files": [
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/sync/greader_pull.rs",
+        "src-tauri/src/sync/fever_pull.rs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "9 条 TASK-112 测试（greader_pull 4、fever_pull 4、conflict_policy 政策格锁定 1）在本候选中逐字未动（两文件差异 hunks 仅覆盖注释块），CI『Run tests』步 success 即其实际编译执行通过；断言形态为 assert!(谓词调用) 与 assert_eq!(值, 期望)，零弱化。本地门禁 RUN-294c3cdc：cargo_fmt/lint/build/frontend 全部 exit 0（记录于 RUN json；cargo fmt --check 通过时无输出属正常，故未引用其空 stdout 文件）。CI clippy --all-targets -D warnings 对整 crate（含测试目标）执行成功，等价重写未削弱任何既有保护。",
+      "evidence_files": [
+        "src-tauri/src/sync/conflict_policy.rs",
+        "src-tauri/src/sync/greader_pull.rs",
+        ".workflow-kit/tasks/evidence/RUN-294c3cdc945240eeacd6ec65bbcd4cad-candidate.json",
+        ".workflow-kit/tasks/runs/RUN-294c3cdc945240eeacd6ec65bbcd4cad.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "低风险注释级变更：生产代码仅删一条私有 glob 导入，纯编译期、无运行时路径变化。相关失败面（编译失败/lint 失败/测试失败）由 CI rust job 全部步骤 success 覆盖，含 --include-ignored 的 6 个 mock 集成套件。注释中记载的失败守卫语义（pending 保护、reconcile_ok、失败≠空集合）对应的锁定测试（gr/fever_reconcile_pending_guard_blocks_snapshot_rollback 等）逐字未动且 CI 执行通过；异常、空输入、恢复、数据边界行为零变化。",
+      "evidence_files": [
+        "src-tauri/src/sync/fever_pull.rs",
+        "src-tauri/src/sync/greader_pull.rs",
+        ".workflow-kit/tasks/runs/RUN-294c3cdc945240eeacd6ec65bbcd4cad.json"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "删除零消费 glob 消除了 rustc 1.98+ 对完全未消费 glob import 的 unused_imports 触发面，并在原处留注释明示 conflict_policy 不参与裸名重导出的例外及原因（消费点一律限定路径、兄弟模块经 use super::* 取得模块名），与代码事实一致；/// 改 // 处内联注明触发 lint（empty_line_after_doc_comments、doc_lazy_continuation）与理由，防回退。无新抽象、无重复规则、无模块边界变化，净维护负担为负。seed_bound 文档笔误为 TASK-112 既有状态，裁定见 summary。",
+      "evidence_files": [
+        "src-tauri/src/sync/mod.rs",
+        "src-tauri/src/sync/conflict_policy.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "改动仅为注释改写与未消费导入删除，不产生任何运行时代码路径、数据或资源变化，无可测量的性能影响面，基准与测量不适用。",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": {
+    "required": false,
+    "evidence_files": [],
+    "notes": "ui_change=false；本候选不涉及前端文件与界面。"
+  }
+}

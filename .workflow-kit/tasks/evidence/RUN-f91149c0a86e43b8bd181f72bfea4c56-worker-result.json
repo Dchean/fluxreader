@@ -1,0 +1,28 @@
+{
+  "task_id": "TASK-111",
+  "run_id": "RUN-f91149c0a86e43b8bd181f72bfea4c56",
+  "status": "ready_for_verification",
+  "summary": "修复轮 R1（审查 2 条 Medium findings，均回归网判别力缺陷、产品代码零改动）：F1 (t111-4) selectView 不 bump 断言改真前后比较（nonce 基线前置读取），M3 变异（无条件 bump）精准转红；F2 (t111-5b) 切范围回落断言重构为「同源换范围、可见集合不变」场景（显式锁定 items.length===2 && findIndex(锚)===0 前置，排除 findIndex 落空假阳性），M2 变异（删 filterKey 拦截）精准转红；顺手全量排查 t111 其余断言无同型空洞。两次变异均还原并 sha256 复核。自检：test:frontend 605/605、lint 0、build exit 0。",
+  "changed_files": [
+    "src/App.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/timelineAnchor.ts",
+    "src/store/internals.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/feeds.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/sync.ts",
+    "src/store/types.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "frontend",
+    "lint",
+    "build",
+    "cargo_fmt"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

@@ -83,5 +83,7 @@
 | [TASK-106](items/TASK-106.json) | 文章快照与正文水合生命周期统一——刷新不丢正文、水合终态完备（承接 TASK-103，REQ-001） | done |
 | [TASK-107](items/TASK-107.json) | 全部已读与标读计数一致性——按后端实际影响数对账、失败不假成功（REQ-003） | done |
 | [TASK-108](items/TASK-108.json) | Rust 状态写入事务化——文章状态与待同步队列同生共死（REQ-002） | done |
+| [TASK-112](items/TASK-112.json) | 协议对账冲突政策显式化 + 服务端×协议兼容矩阵文档（二阶段④，完成标准「不同协议行为有明确说明」） | done |
+| [TASK-113](items/TASK-113.json) | TASK-112 延续：修复新增代码的 clippy 警告并经 CI 复验（行为零变化保持） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

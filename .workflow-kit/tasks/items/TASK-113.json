@@ -1,0 +1,237 @@
+{
+  "schema_version": 1,
+  "id": "TASK-113",
+  "title": "TASK-112 延续：修复新增代码的 clippy 警告并经 CI 复验（行为零变化保持）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "ui_contract_ref": null,
+  "ui_checks": [],
+  "status": "done",
+  "objective": "延续任务（continuation_of=TASK-112 候选 7205fab91198e15b42120da9d5df19361783e3bb40a133ccdd3f41081d6d4a18）：dev@d167135 的 CI rust job clippy（--all-targets -- -D warnings）失败（fmt --check 过、cargo test 被跳过、frontend job 绿）。本地无 MSVC 链接器无法运行 clippy（DEC-local-cargo-gate-20261005 工具盲区）。修法要求：①静态排查 TASK-112 新增/修改的 Rust 代码（src-tauri/src/sync/conflict_policy.rs 新建、greader_pull.rs/fever_pull.rs 修改与新增测试、push.rs 注释、db/articles.rs 注释）中触发 clippy 默认 lint 的模式（重点：dead_code 未用测试助手/未用导入、needless return/borrow、冗余 match/if、格式化参数、单臂枚举相关建议、assert_eq 字面量、unused_mut 等），逐一修复；②修复仅限使 clippy 干净与等价重写，不得改变行为（本卡与 TASK-112 同为行为零变化约束）、不得删除有效测试断言；③修复后经推送 CI 复验（cargo test + clippy 全绿，含 TASK-112 新增 9 条测试真正执行通过）——CI 是本卡 cargo 门禁的执行器；④无法本地验证 clippy 属已知限制，coder 尽最大静态核对并在汇报列明全部改动点供审查。",
+  "non_goals": [
+    "不改对账行为/政策语义/游标推进（行为零变化延续 TASK-112）",
+    "不改前端与工作流脚本",
+    "不安装本机 MSVC 工具链（属 owner 决定）"
+  ],
+  "requirement_refs": [
+    "REQ-002",
+    "REQ-003"
+  ],
+  "reference_ids": [],
+  "decision_refs": [
+    ".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"
+  ],
+  "dependencies": [
+    "TASK-112"
+  ],
+  "blocks": [],
+  "risk": {
+    "level": "low",
+    "decision_ids": [
+      "DEC-refactor-roadmap-20261005"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src-tauri/src",
+      "docs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① clippy 触发点修复：静态排查列明的全部改动点可解释；行为零变化保持（diff 等价重写）",
+    "② CI rust job 全绿：cargo fmt/clippy/test（含 TASK-112 新增 9 条测试）通过——推送后以 CI 结论为准",
+    "③ TASK-112 既有测试与其余断言零改动零弱化",
+    "④ 独立审查（全新子代理，未参与编码）PASS findings=0（聚焦 clippy 修复的等价性与测试完整性）",
+    "⑤ 本地门禁：cargo fmt、lint、build、frontend 不回退"
+  ],
+  "gates": [
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": false,
+      "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担，CI 绿后合并；本卡 CI 失败即门禁失败"
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "required": false,
+      "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）；本卡的 clippy 证据由 CI 复验承担"
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@d167135（TASK-112 候选）：本地四门禁绿、独立审查 PASS，但 CI rust job clippy -D warnings 失败（本卡存在的直接原因）。本卡修复 clippy 触发点并经 CI 复验全绿。",
+      "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    },
+    "decision_ids": [
+      "DEC-refactor-roadmap-20261005"
+    ],
+    "actions": [
+      {
+        "action": "adapt",
+        "target": "TASK-112 新增测试/代码中触发 clippy 的等价重写",
+        "reason": "等价重写不弱化保护；CI 全绿为验收",
+        "gate_ids": [
+          "cargo_fmt",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "TASK-112 既有断言与本地四门禁",
+        "reason": "不回退证据；cargo 证据由 CI 复验承担（DEC-local-cargo-gate-20261005）",
+        "gate_ids": [
+          "cargo_fmt",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-113-input-5c0630e9f3f9448a96ee246d9353ae45.json",
+    "digest": "7205fab91198e15b42120da9d5df19361783e3bb40a133ccdd3f41081d6d4a18",
+    "source_revision": null,
+    "definition_digest": "6f1a7225a03c76a05b73dd94942baf37e3a8b338ecca79a99c1ffdbf2aaecc4f"
+  },
+  "budget": {
+    "started_at_utc": "2026-10-06T04:18:39.157194Z",
+    "deadline_at_utc": "2026-10-06T08:18:39.157194Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-a57865b52aa4449ea24f0f15216d72c5",
+  "run_ids": [
+    "RUN-db542dab68694d4084e075d631e9152e",
+    "RUN-294c3cdc945240eeacd6ec65bbcd4cad",
+    "RUN-53910b7822454abd9bd893437aa3f7bc"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-294c3cdc945240eeacd6ec65bbcd4cad-candidate.json",
+    "candidate_digest": "8df7f65e578d29e18b8b6b2aab15fb4056bb0df9f6d506ce1a6b7647a856d0af",
+    "verification_run": "RUN-294c3cdc945240eeacd6ec65bbcd4cad",
+    "review_run": "RUN-53910b7822454abd9bd893437aa3f7bc",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-6fe3a6a863aa4420af4b42450e365990-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-6fe3a6a863aa4420af4b42450e365990"
+    ],
+    "merge_ref": "main 合并后回填：dev→main 不含工作流内容"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/AUDIT-20261005-core-consistency.md",
+    "docs",
+    "src-tauri/src"
+  ],
+  "continuation_of": {
+    "TASK-112": "7205fab91198e15b42120da9d5df19361783e3bb40a133ccdd3f41081d6d4a18"
+  },
+  "checkpoints": [
+    {
+      "at_utc": "2026-10-06T04:18:40.084219Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-10-06T04:48:42.034156Z",
+      "note": "编码结果已记录，差异范围已核对：src-tauri/src/sync/fever_pull.rs, src-tauri/src/sync/greader_pull.rs, src-tauri/src/sync/mod.rs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-10-06T04:49:12.717868Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-10-06T05:09:48.104093Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-f91149c0a86e43b8bd181f72bfea4c56",
+  "task_id": "TASK-111",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "修复轮 R1：修 t111 两处空洞断言（审查 findings），复用编码代理 agent_fc1b4819"
+  },
+  "started_at_utc": "2026-10-06T02:37:03.508222Z",
+  "finished_at_utc": "2026-10-06T02:46:19.144158Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "c508ee944736b8a7c2db9657543171f537cfcea0631391251db54be43b328a73",
+  "candidate_digest": "b554936c63a89a3bdeed78d7148957096696852333564b0fff329491287132a8",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-f91149c0a86e43b8bd181f72bfea4c56-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-f91149c0a86e43b8bd181f72bfea4c56-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-9bffe3094ee847199572940d82d4d7ec-scope.json"
+}

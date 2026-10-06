@@ -1,0 +1,21 @@
+{
+  "task_id": "TASK-113",
+  "run_id": "RUN-db542dab68694d4084e075d631e9152e",
+  "status": "ready_for_verification",
+  "summary": "TASK-112 延续：clippy 触发点静态排查修复（3 处，clippy-driver 抛置片段实证复现，CI 日志无 admin 权限不可拉）：①sync/mod.rs 删除未被消费的 use conflict_policy::* glob import（rustc 1.98 起对完全未消费 glob 告警，CI #137 绿/#138 红同日对比+Q1/Q1c 探针实证；消费点全部走限定路径，删除后解析经 use super::* 链可达）；②greader_pull.rs 与 fever_pull.rs 测试模块的 /// 文档块改普通注释（empty_line_after_doc_comments + doc_lazy_continuation 两条 lint，文字逐字保留）；排除疑点清单 14 项逐一实证（bool_assert_comparison/single_match/unwrap_or_default 等）。行为零变化：9 条测试函数体与断言、conflict_policy.rs、reconcile 生产代码零改动（diff 仅 3 文件注释级+删一行死导入）。cargo fmt --check exit 0。CI 复验为最终裁决（含 9 条新测试真正执行）。",
+  "changed_files": [
+    "src-tauri/src/sync/fever_pull.rs",
+    "src-tauri/src/sync/greader_pull.rs",
+    "src-tauri/src/sync/mod.rs"
+  ],
+  "validation_requests": [
+    "cargo_fmt",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

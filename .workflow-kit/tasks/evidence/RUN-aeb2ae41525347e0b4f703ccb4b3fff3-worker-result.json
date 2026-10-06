@@ -1,0 +1,25 @@
+{
+  "task_id": "TASK-112",
+  "run_id": "RUN-aeb2ae41525347e0b4f703ccb4b3fff3",
+  "status": "ready_for_verification",
+  "summary": "二阶段④协议对账政策显式化（行为零变化）：①新建 sync/conflict_policy.rs 政策单点——ReadDirection/StarDirection 枚举 + 每操作×协议政策格常量（GR_READ=RemoteReadWins、FEVER_READ=UnreadSetBidirectional、两侧 STAR=AuthoritativeBidirectional）+ 行级落地函数 apply_read/star_by_policy，reconcile_reader_state/reconcile_fever_state 改为消费政策常量（语句逐列对照零变化，pending 守卫/失败守卫/游标段原样保留+政策注释）；同文副本读状态广播保持现状政策（DEC-refactor-roadmap 第 6 条）写入政策头注+push.rs 消费点注释。②docs/sync-compat-matrix.md：协议×操作差异矩阵、冲突政策表、副本传播政策、游标语义、服务端已知差异（带 2026-10 时点声明）、已知限制 L1-L5（含审计「游标变更时间假设」结论）。③db/articles.rs:186 过时注释修正（100000→TASK-110 废除说明、前端实际 500）。④新增 9 条测试（政策格锚 + GR 单向/Fever 双向/星标双向/pending 保护锁定，缺双向锁定补齐）+ 测试盘点结论；cargo test/clippy 由 CI rust job 承担（DEC-local-cargo-gate-20261005）。自检：cargo fmt --check exit 0；静态自审对齐仓内既有形态（MIGRATIONS cfg(test) 导出、SyncMatchMaps pub 字段构造等）。",
+  "changed_files": [
+    "docs/sync-compat-matrix.md",
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/sync/conflict_policy.rs",
+    "src-tauri/src/sync/fever_pull.rs",
+    "src-tauri/src/sync/greader_pull.rs",
+    "src-tauri/src/sync/mod.rs",
+    "src-tauri/src/sync/push.rs"
+  ],
+  "validation_requests": [
+    "cargo_fmt",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

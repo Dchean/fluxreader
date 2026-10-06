@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-1c96a69950ae41dab8a7fd8eb28d9407",
+  "task_id": "TASK-110",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "预算恢复后续作收轮：代码已完成（585/585），主控持有 worker-result，直接 diff→finish→verify→审查"
+  },
+  "started_at_utc": "2026-10-06T01:09:01.194191Z",
+  "finished_at_utc": "2026-10-06T01:09:53.492536Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "018a4d38356b154f10ef406bfee6be5dc67d3c8bf23bf7d023ba09db0ef5806b",
+  "candidate_digest": "c508ee944736b8a7c2db9657543171f537cfcea0631391251db54be43b328a73",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-1c96a69950ae41dab8a7fd8eb28d9407-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-1c96a69950ae41dab8a7fd8eb28d9407-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-4c593b7e9512493094df4cabf361c272-scope.json"
+}

@@ -635,3 +635,37 @@
 - 2026-10-05T14:30:21.992063Z · batch · 关闭 BATCH-d11d22edcd1c4faf8453695d32926081，开启 BATCH-a57865b52aa4449ea24f0f15216d72c5；策略允许自动续批
 - 2026-10-05T14:31:23.276760Z · prepare · TASK-110 · 任务已冻结：筛选视图真分页——废除 limit:100000 近似全集（二阶段②，审计块②/完成标准「旧文章可达」）；范围 src, tools/frontend-regression.mjs
 - 2026-10-05T14:31:46.341244Z · note/lesson · 历史会话证据丢失教训（DEC-evidence-loss-repair-20261005）：审查代理产出的变异测试/门禁日志若只写 tasks/evidence/ 而不随提交入库，摘要校验将永久悬空。本轮起审查报告引用的证据文件必须随任务记录一并提交。存量同型缺陷：TASK-092/093/094/096/097（旧批次，不阻塞操作）的悬空引用仍在，待后续统一处置。
+- 2026-10-05T14:32:52.061227Z · checkpoint · TASK-110 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T01:06:33.628514Z · checkpoint · TASK-110 · Original task deadline exhausted; preserve the task and request a scoped budget decision；下一步：先核对已有文件及原始日志，再处理 budget；不要新建任务或重置预算
+- 2026-10-06T01:07:57.389472Z · checkpoint · TASK-110 · 依据新决定追加预算；原始时钟与失败记录保留；下一步：先核对已有成果，再按原任务范围继续
+- 2026-10-06T01:07:57.769422Z · extend · TASK-110 · 追加 120 分钟、1 轮修复；依据：owner 2026-10-05 会话指示「继续推进」：TASK-110 历经三次执行代理中断（配额/会话超限），原 240 分钟墙钟被中断等待耗尽；代码已完成且自检 585/585 全绿，加 120 分钟用于收轮、验证与独立审查
+- 2026-10-06T01:08:13.466784Z · checkpoint · TASK-110 · 阻塞已处置（budget）：预算耗尽中断（三次代理中断所致，非执行失败）；已 extend 120 分钟，代码完成自检全绿，恢复收轮→verify→审查流程；下一步：begin 重新实现
+- 2026-10-06T01:08:13.739146Z · unblock · TASK-110 · budget → ready；依据：DEC-ad3b063a38164204824ac97f5bd9b699
+- 2026-10-06T01:09:01.963436Z · checkpoint · TASK-110 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T01:09:53.859253Z · checkpoint · TASK-110 · 编码结果已记录，差异范围已核对：src/store/internals.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T01:10:25.246355Z · checkpoint · TASK-110 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T01:37:54.665746Z · checkpoint · TASK-110 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-06T01:40:53.294750Z · prepare · TASK-111 · 任务已冻结：查询缓存实体预算 + 后台刷新保位（二阶段③，完成标准「快速切换不串数据」的容量与位置面）；范围 src, tools/frontend-regression.mjs
+- 2026-10-06T01:41:31.679278Z · checkpoint · TASK-111 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T02:13:39.168487Z · checkpoint · TASK-111 · 编码结果已记录，差异范围已核对：src/App.tsx, src/components/Timeline.tsx, src/components/timelineAnchor.ts, src/store/internals.ts, src/store/slices/bootstrap.ts, src/store/slices/feeds.ts, src/store/slices/nav.ts, src/store/slices/sync.ts, src/store/types.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T02:14:09.535967Z · checkpoint · TASK-111 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T02:36:16.328807Z · checkpoint · TASK-111 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-06T02:36:22.488844Z · checkpoint · TASK-111 · 阻塞已处置（review_failure）：审查 FAIL：产品代码本体核实正确，2 条 Medium findings 均为回归网判别力缺陷（t111-4 selectView 不 bump 断言空洞=自比较恒真；主动切范围回落断言因列表为空而以错误原因通过，filterKey 失配分支无判别力）。进修复轮 R1：按审查建议修两处断言并变异自证，产品代码不动。；下一步：begin 重新实现
+- 2026-10-06T02:36:22.761734Z · unblock · TASK-111 · review_failure → ready；依据：DEC-refactor-roadmap-20261005
+- 2026-10-06T02:37:04.200423Z · checkpoint · TASK-111 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T02:46:19.466586Z · checkpoint · TASK-111 · 编码结果已记录，差异范围已核对：src/App.tsx, src/components/Timeline.tsx, src/components/timelineAnchor.ts, src/store/internals.ts, src/store/slices/bootstrap.ts, src/store/slices/feeds.ts, src/store/slices/nav.ts, src/store/slices/sync.ts, src/store/types.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T02:46:50.113390Z · checkpoint · TASK-111 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T03:01:12.120023Z · checkpoint · TASK-111 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-06T03:04:03.943313Z · prepare · TASK-112 · 任务已冻结：协议对账冲突政策显式化 + 服务端×协议兼容矩阵文档（二阶段④，完成标准「不同协议行为有明确说明」）；范围 src-tauri/src, docs
+- 2026-10-06T03:04:45.237052Z · checkpoint · TASK-112 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T03:31:27.006560Z · checkpoint · TASK-112 · 编码结果已记录，差异范围已核对：docs/sync-compat-matrix.md, src-tauri/src/db/articles.rs, src-tauri/src/sync/conflict_policy.rs, src-tauri/src/sync/fever_pull.rs, src-tauri/src/sync/greader_pull.rs, src-tauri/src/sync/mod.rs, src-tauri/src/sync/push.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T03:31:58.002010Z · checkpoint · TASK-112 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T03:53:44.197408Z · checkpoint · TASK-112 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-06T04:15:15.898732Z · note/decision · TASK-112 CI 失败处置（dev@d167135，rust job clippy -D warnings 失败：fmt 过、测试被跳过、frontend job 绿）：本地无 MSVC 链接器无法运行 clippy（DEC-local-cargo-gate-20261005），属工具盲区内的质量事故；候选验证与独立审查记录保留有效（静态核查未覆盖 clippy lint 面）。处置：按延续任务机制建 TASK-113（continuation_of=TASK-112 候选 7205fab9），静态排查修复 clippy 警告后重走 verify→独立审查→CI 复验（CI 绿为合并前置），验收以 112+113 整链进行。
+- 2026-10-06T04:17:38.511954Z · prepare · TASK-113 · 任务已冻结：TASK-112 延续：修复新增代码的 clippy 警告并经 CI 复验（行为零变化保持）；范围 src-tauri/src, docs
+- 2026-10-06T04:18:40.088740Z · checkpoint · TASK-113 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T04:48:42.039180Z · checkpoint · TASK-113 · 编码结果已记录，差异范围已核对：src-tauri/src/sync/fever_pull.rs, src-tauri/src/sync/greader_pull.rs, src-tauri/src/sync/mod.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T04:49:12.722377Z · checkpoint · TASK-113 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T05:09:48.109012Z · checkpoint · TASK-113 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-06T08:32:37.189654Z · note/context · 陈旧控制器锁清理：中断会话的控制器（lock token lock-8a1b22789bc6461，started 2026-10-06T05:11Z）退出后其 pid 33276 被 Windows 复用给 Bitwarden.exe（tasklist 实证），工具 pid_alive 保守检查拒绝 recover。主控以进程身份证据（复用非同进程）判定锁为陈旧，备份锁文件至 tmp/refactor-20261005/stale-controller-lock-backup.json 后删除。锁为瞬态控制文件非受管记录。
+- 2026-10-06T08:33:49.720058Z · accept · 验收 TASK-112, TASK-113；依据：owner 2026-10-05 会话指示「继续二阶段/继续推进」——二阶段交付报告流程下 owner 指示持续推进，视为对二阶段成果的验收确认（TASK-112 及其延续 TASK-113 整链）；验证/独立审查/CI 证据在案（TASK-113 候选=dev@5860dad CI 全绿，含 9 条新 Rust 测试执行）
