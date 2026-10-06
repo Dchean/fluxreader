@@ -3362,6 +3362,30 @@ body.has-player-expanded .toast-layer {
   text-decoration: underline;
 }
 
+/* TASK-114 X1：NotifCard 水合三态同形接入（占位/重试与社交卡同一套 JSX 形态），
+   样式镜像上两条 .social-text 规则；新增独立规则而非扩选器，保持既有选择器
+   字节不动（t100-c26 锁定 .hydrate-placeholder {） */
+.notif-card .hydrate-placeholder {
+  display: block;
+  min-height: 60px;
+  line-height: 1.55;
+}
+
+.notif-card .hydrate-retry {
+  display: block;
+  min-height: 60px;
+  line-height: 1.55;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+}
+
 
 /* ============================================================
    全局右键菜单（替换 WebView2 默认菜单）

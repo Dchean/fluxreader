@@ -415,9 +415,10 @@ export function Timeline() {
                   style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
                 >
                   {activeContentLayout === 'article' && <ArticleCard art={item} onSelect={selectArticle} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
-                  {activeContentLayout === 'social' && <SocialCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
+                  {/* TASK-114 X2：Social/Notif 卡补 onSelect（Enter/Space=选中，与 ArticleCard 同语义） */}
+                  {activeContentLayout === 'social' && <SocialCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle} onMoveFocus={moveCardFocus} />}
                   {activeContentLayout === 'podcast' && <PodcastCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
-                  {activeContentLayout === 'notification' && <NotifCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
+                  {activeContentLayout === 'notification' && <NotifCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle} onMoveFocus={moveCardFocus} />}
                 </div>
               );
             })}
@@ -545,8 +546,9 @@ const ArticleCard = memo(function ArticleCard({ art, onSelect, cardIndex, tabbab
 
 /* ---------- 社交卡片 ---------- */
 
-const SocialCard = memo(function SocialCard({ item, cardIndex, tabbable, onMoveFocus }: {
+const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbable, onMoveFocus }: {
   item: ArticleEntry;
+  onSelect: (id: string) => void;
   cardIndex: number;
   tabbable: boolean;
   onMoveFocus: (from: number, delta: number) => void;
@@ -612,9 +614,13 @@ const SocialCard = memo(function SocialCard({ item, cardIndex, tabbable, onMoveF
 
   return (
     /* TASK-100（UI P2-2 轻修）：社交/通知卡补 article 语义角色 + tabIndex，融入卡片级
-       roving tabindex 体系（对照 ArticleCard/PodcastCard）。卡片本体无主行为
-       （正文内链接/图片各自处理，操作按钮在动作条），故只接方向键移动焦点，
-       Enter/Space 不绑定动作。跨布局 J/K 仍为产品决策不做（DEC-task100）。 */
+       roving tabindex 体系（对照 ArticleCard/PodcastCard）。TASK-114 X2：补
+       Enter/Space=选中（与 ArticleCard 同语义 onSelect）。role 维持 article 而非
+       改 button：卡内嵌套着动作按钮/链接/重试控件，role=button 会按 ARIA 规则把
+       交互后代从可达性树掩蔽掉，且「订阅流中的文章」语义本就是 article——对齐
+       ArticleCard 的是**可交互行为**（Enter/Space/tabIndex/roving），不是容器角色。
+       Enter/Space 只在焦点落卡片本体（e.target===e.currentTarget）时生效：嵌套
+       按钮/链接的键盘激活语义（原生 click 合成）不得被卡片级选中劫持。 */
     <div
       ref={hydrateRef}
       className={`social-card ${item.isRead ? 'read' : ''}`}
@@ -624,6 +630,13 @@ const SocialCard = memo(function SocialCard({ item, cardIndex, tabbable, onMoveF
       data-card-index={cardIndex}
       tabIndex={tabbable ? 0 : -1}
       onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          if (e.target === e.currentTarget) {
+            e.preventDefault();
+            onSelect(item.id);
+          }
+          return;
+        }
         if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
         else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
       }}
@@ -935,8 +948,9 @@ const PodcastCard = memo(function PodcastCard({ item, cardIndex, tabbable, onMov
 
 /* ---------- 通知卡片 ---------- */
 
-const NotifCard = memo(function NotifCard({ item, cardIndex, tabbable, onMoveFocus }: {
+const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable, onMoveFocus }: {
   item: ArticleEntry;
+  onSelect: (id: string) => void;
   cardIndex: number;
   tabbable: boolean;
   onMoveFocus: (from: number, delta: number) => void;
@@ -958,6 +972,12 @@ const NotifCard = memo(function NotifCard({ item, cardIndex, tabbable, onMoveFoc
   /* 进入视口附近才水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
      「展开更多」必须展示全文而非同一段截断文本 */
   const hydrateRef = useLazyHydrate(item.id);
+  /* TASK-114 X1：水合三态订阅（对齐 SocialCard 同名订阅）——useLazyHydrate 内部
+     已按 entryNeedsHydration 触发请求，这里订阅错误态/终态把请求结果呈现出来：
+     失败=内联重试（不再静默回退 snippet）、终态=暂无正文、其余=加载占位。
+     请求与 SocialCard 走同一条批量水合队列（enqueueHydration），无需改数据层。 */
+  const hydrationError = useAppStore((s) => s.hydrationErrors[item.id]);
+  const hydrated = useAppStore((s) => s.hydratedIds[item.id]);
   /* 展示文本：展开态优先水合全文（剥 HTML 标签），未水合/收起态用 snippet */
   const fullText = item.content
     ? item.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
@@ -986,7 +1006,8 @@ const NotifCard = memo(function NotifCard({ item, cardIndex, tabbable, onMoveFoc
   const isLong = (fullText || item.snippet || '').length > 120;
 
   return (
-    /* TASK-100（UI P2-2 轻修）：同 SocialCard——补 role/tabIndex 融入 roving 体系 */
+    /* TASK-100（UI P2-2 轻修）：同 SocialCard——补 role/tabIndex 融入 roving 体系。
+       TASK-114 X2：Enter/Space=选中，e.target 守卫与 role 裁定同 SocialCard 注释。 */
     <div
       ref={hydrateRef}
       className={`notif-card ${item.isRead ? 'read' : ''}`}
@@ -996,6 +1017,13 @@ const NotifCard = memo(function NotifCard({ item, cardIndex, tabbable, onMoveFoc
       data-card-index={cardIndex}
       tabIndex={tabbable ? 0 : -1}
       onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          if (e.target === e.currentTarget) {
+            e.preventDefault();
+            onSelect(item.id);
+          }
+          return;
+        }
         if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
         else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
       }}
@@ -1061,7 +1089,33 @@ const NotifCard = memo(function NotifCard({ item, cardIndex, tabbable, onMoveFoc
         )}
       </div>
 
-      <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
+      {/* TASK-114 X1：水合三态对齐 SocialCard（同构：正文→正文 / 错误→内联重试 /
+          终态空→暂无正文 / 其余→加载占位，复用 .hydrate-retry / .hydrate-placeholder
+          同一套样式）。
+          TASK-114 R1-F1：正文分支（fullText）置于失败分支**之前**，与基准 SocialCard
+          的 content 优先逐分支对齐——ensureArticleContent 详情拉取成功只写 content、
+          从不清 hydrationErrors[id]（reader.ts 详情 .then 分支），「错误态 + 正文已
+          到达」是可达组合态（列表批量水合失败 → Enter/J-K 打开 → 详情成功），该
+          状态下必须显示已到达的正文，而非把正文替换成假的失败重试行。
+          失败分支只覆盖「无正文可显示」的失败：snippet 回退保持在错误**之后**
+          （契约「失败不再静默回退 snippet」）；非失败态保留 snippet 展示（通知卡的
+          主正文本就是 snippet，加载窗口内把可读内容换成占位是信息损失）。 */}
+      {fullText ? (
+        <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
+      ) : hydrationError ? (
+        <button
+          className="hydrate-retry"
+          onClick={() => useAppStore.getState().retryHydration(item.id)}
+        >
+          正文加载失败：{hydrationError}（点击重试）
+        </button>
+      ) : item.snippet ? (
+        <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
+      ) : hydrated ? (
+        <div className="notif-body-text"><span className="hydrate-placeholder">暂无正文</span></div>
+      ) : (
+        <div className="notif-body-text"><span className="hydrate-placeholder">加载正文…</span></div>
+      )}
 
       <div className={`notif-translated-block ${transShow ? 'show' : ''}`}>
         {/* TASK-065 N8/N11：同 SocialCard——未消毒按纯文本，消毒后按 HTML */}
@@ -1080,7 +1134,12 @@ const NotifCard = memo(function NotifCard({ item, cardIndex, tabbable, onMoveFoc
         ) : null}
       </div>
 
-      {isLong && (
+      {/* TASK-114 X1：纯失败态（无正文可显示）正文已被重试行替换，展开按钮不渲染
+          （切换无对象，避免死控件）。TASK-114 R2：错误态滞留 + 正文经详情路到达
+          （reader.ts 详情 .then 只写 content 不清错误）的组合态下，正文分支显示的是
+          收起态 2 行钳制的 snippet——与修前及同态 SocialCard 一致保留「展开更多」
+          （此时展开有对象：displayText 切到水合全文），故门控对 !!fullText 豁免。 */}
+      {isLong && (!hydrationError || !!fullText) && (
         <button className="notif-expand-btn" onClick={() => setExpanded(!expanded)}>
           {expanded ? '收起内容 ▲' : '展开更多 ▼'}
         </button>

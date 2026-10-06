@@ -5233,8 +5233,13 @@ await (async () => {
         && baseCss.includes('层级最高：盖过设置弹窗（150）与下拉菜单（2000） */'));
 
     /* UI P2-2：J/K 范围文案 + Social/Notif 卡 roving */
-    checkNew('(t100-uip2-2) ShortcutsTab J/K 范围文案改准「文章布局」（跨布局 J/K 为决策不做）',
-      shortcuts.includes("'文章布局'") && !shortcuts.includes("'时间流'"));
+    /* 【TASK-114 更新理由】X3 把 J/K 从「仅文章」扩展到全部虚拟化布局（画廊除外），
+       旧文案「文章布局」正是本卡收口的不一致点——随之改准并钉住新范围（明示画廊
+       不支持）；「不得宣传成整个时间流」的防误伤边界（!includes 时间流）保留。 */
+    checkNew('(t100-uip2-2) ShortcutsTab J/K 范围文案随 TASK-114 改准：虚拟化四布局生效、明示画廊不支持（旧「文章布局」清零）',
+      shortcuts.includes("'文章/社交/播客/通知（画廊不支持）'")
+      && !shortcuts.includes("'文章布局'")
+      && !shortcuts.includes("'时间流'"));
     checkNew('(t100-uip2-2) SocialCard/NotifCard 补 role="article" + tabIndex + 方向键 roving，融入既有 tabindex 体系',
       timeline.includes("role=\"article\"")
         && (timeline.match(/role="article"/g) || []).length === 2
@@ -5532,6 +5537,185 @@ await (async () => {
   const subtitles102 = [...shared102.matchAll(/subtitle: '([^']+)'/g)].map((m) => m[1]);
   checkNew('(t102-x3d) 侧栏 8 个 tab subtitle（组标题级说明同口径）全部 ≤48 字',
     subtitles102.length === 8 && subtitles102.every((t) => t.length <= 48));
+}
+
+/* ============================================================
+   TASK-114（2026-10-06，REQ-005/008）：五布局状态与快捷键统一
+   X1 NotifCard 水合三态（对齐 SocialCard，失败不再静默）/
+   X2 Enter 五卡统一（Social/Notif 补选中）/ X3 J/K 全虚拟化布局（画廊除外）。
+
+   证据边界（如实说明）：renderToStaticMarkup 走 zustand 服务端快照——
+   useSyncExternalStore 的 getServerSnapshot 读 getInitialState（createStore
+   时捕获，setState 不可达；实测探针确认 SSR 不随 setState 变化），SSR 只能
+   呈现与初值一致的形态（d5 空态先例即此）。三态/键绑定是运行时状态驱动的
+   分支，无法经 Timeline SSR 逐态取证，故本组走两条既有证据通道：
+   - 源级结构断言（t102-x1 先例）：按组件声明边界切片，钉住条件链与接线；
+   - 纯函数/store 层行为断言：X3 门控与推进抽为 src/lib/jkNavigation.ts
+     （App.tsx 消费同一份），真值表 + 五布局 store 模拟；X1 的状态判定复用
+     t103 已断言的 entryNeedsHydration 真值表与 retryHydration 行为
+     （Social/Notif 走同一条批量水合队列，无第二套判定）。
+   ============================================================ */
+{
+  const fs114 = await import('node:fs');
+  const src114 = (p) => fs114.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const timeline114 = src114('../src/components/Timeline.tsx');
+  const app114 = src114('../src/App.tsx');
+  const shortcuts114 = src114('../src/components/settings/ShortcutsTab.tsx');
+  const compSlice114 = (a, b) => {
+    const i = timeline114.indexOf(a);
+    const j = b ? timeline114.indexOf(b, i) : timeline114.length;
+    return i >= 0 && j > i ? timeline114.slice(i, j) : '';
+  };
+  const article114 = compSlice114('const ArticleCard = memo(function ArticleCard(', 'const SocialCard = memo(function SocialCard(');
+  const social114 = compSlice114('const SocialCard = memo(function SocialCard(', 'const GalleryCard = memo(function GalleryCard(');
+  const gallery114 = compSlice114('const GalleryCard = memo(function GalleryCard(', 'const PodcastCard = memo(function PodcastCard(');
+  const podcast114 = compSlice114('const PodcastCard = memo(function PodcastCard(', 'const NotifCard = memo(function NotifCard(');
+  const notif114 = compSlice114('const NotifCard = memo(function NotifCard(', null);
+  const cnt114 = (s, t) => (s.match(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+  const ENTER_GUARD = "e.key === 'Enter' || e.key === ' '";
+
+  /* ---------- X1：NotifCard 水合三态 ---------- */
+  checkNew('(t114-x1a) NotifCard 订阅水合错误态与终态（对齐 SocialCard 的订阅面：hydrationErrors/hydratedIds）',
+    notif114.includes('s.hydrationErrors[item.id]') && notif114.includes('s.hydratedIds[item.id]'));
+
+  /* TASK-114 R1-F1：失败分支切片（自 ') : hydrationError ? (' 至 snippet 正文分支）
+     ——只覆盖「无正文可显示」的失败，无 snippet 回退、无正文 div；正文（fullText）
+     分支在失败分支**之前**，与基准 SocialCard 的 content 优先逐分支对齐（可达组合态
+     「错误态+正文已到达」——详情拉取成功只写 content 不清错误——必须显示正文）。 */
+  const notifErrBranch114 = notif114.slice(
+    notif114.indexOf(') : hydrationError ? ('),
+    notif114.indexOf(') : item.snippet ? ('),
+  );
+  const notifBodyBranch114 = notif114.slice(
+    notif114.indexOf('{fullText ? ('),
+    notif114.indexOf(') : hydrationError ? ('),
+  );
+  checkNew('(t114-x1b) NotifCard 失败态=内联重试（hydrate-retry + retryHydration(id)，文案域「正文加载失败：」，与 SocialCard 同形），失败分支不再回退 snippet',
+    notifErrBranch114.length > 0
+    && notifErrBranch114.includes('className="hydrate-retry"')
+    && notifErrBranch114.includes('retryHydration(item.id)')
+    && notifErrBranch114.includes('正文加载失败：')
+    && !notifErrBranch114.includes('item.snippet')
+    && !notifErrBranch114.includes('notif-body-text'));
+
+  checkNew('(t114-x1c) NotifCard 空正文/加载中占位与 SocialCard 同形（className="hydrate-placeholder" 恰两态）',
+    cnt114(notif114, 'className="hydrate-placeholder"') === 2
+    && notif114.includes('暂无正文') && notif114.includes('加载正文…'));
+
+  checkNew('(t114-x1f) 正文分支先于失败分支（R1-F1）：「错误态+正文已到达」组合态显示正文而非假失败行（与 SocialCard content 优先逐分支对齐）',
+    notifBodyBranch114.length > 0
+    && notifBodyBranch114.includes('notif-body-text')
+    && notif114.indexOf('notif-body-text') < notif114.indexOf('className="hydrate-retry"'));
+
+  checkNew('(t114-x1g) 纯失败态（无正文）不渲染「展开更多」（正文已被重试行替换，防死控件）；错误滞留+正文已达的组合态豁免（!!fullText，可展开水合全文，与修前/同态 SocialCard 一致）',
+    notif114.includes('{isLong && (!hydrationError || !!fullText) && (')
+    && notif114.indexOf('{isLong && (!hydrationError || !!fullText) && (') < notif114.indexOf('className="notif-expand-btn"'));
+
+  checkNew('(t114-x1e) NotifCard 与 SocialCard 三态同构：两卡同为「错误重试 → 空正文 → 加载占位」条件链（占位类与文案逐一同形）',
+    social114.includes('className="hydrate-retry"') && notif114.includes('className="hydrate-retry"')
+    && social114.includes('className="hydrate-placeholder"') && notif114.includes('className="hydrate-placeholder"')
+    && social114.includes('暂无正文') && notif114.includes('暂无正文')
+    && social114.includes('加载正文…') && notif114.includes('加载正文…'));
+
+  /* ---------- X2：Enter/Space 五卡统一 ---------- */
+  checkNew('(t114-x2a) Enter/Space 键位五卡齐备（Article=选中 / Podcast=play / Gallery 两分支=灯箱 / Social、Notif=选中·新增）',
+    cnt114(article114, ENTER_GUARD) === 1 && cnt114(podcast114, ENTER_GUARD) === 1
+    && cnt114(gallery114, ENTER_GUARD) === 2 && cnt114(social114, ENTER_GUARD) === 1
+    && cnt114(notif114, ENTER_GUARD) === 1);
+  checkNew('(t114-x2b) Social/Notif Enter 语义=选中（onSelect(item.id)，与 ArticleCard 同动作），且仅卡片本体响应（e.target 守卫：嵌套按钮/链接的键盘激活不被卡片级选中劫持）',
+    social114.includes('if (e.target === e.currentTarget)') && notif114.includes('if (e.target === e.currentTarget)')
+    && social114.indexOf('e.target === e.currentTarget') < social114.indexOf('onSelect(item.id);')
+    && notif114.indexOf('e.target === e.currentTarget') < notif114.indexOf('onSelect(item.id);'));
+  checkNew('(t114-x2c) Timeline 接线：Social/Notif 卡 onSelect={selectArticle}（选中即打开）',
+    timeline114.includes('<SocialCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle}')
+    && timeline114.includes('<NotifCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle}'));
+
+  /* ---------- X3：J/K 全虚拟化布局（画廊除外） ---------- */
+  const { jkLayoutAllowed, jkNextIndex } = await import('../src/lib/jkNavigation.ts');
+
+  /* 修前门控可复现：旧实现 activeContentLayout !== 'article' 即 return，
+     social/podcast/notification 按 J/K 无响应（本卡收口的不一致点本身） */
+  const legacyJkGate114 = (l) => l === 'article';
+  checkNew('(t114-x3a) 修前门控可复现：旧判定仅 article 放行，social/podcast/notification 一律拦下',
+    legacyJkGate114('article') && !legacyJkGate114('social')
+    && !legacyJkGate114('podcast') && !legacyJkGate114('notification'));
+  checkNew('(t114-x3b) J/K 门控：虚拟化四布局放行、画廊 image 拦下（与 Timeline 虚拟化开关同一口径）',
+    jkLayoutAllowed('article') && jkLayoutAllowed('social') && jkLayoutAllowed('podcast')
+    && jkLayoutAllowed('notification') && !jkLayoutAllowed('image'));
+  checkNew('(t114-x3c) J/K 推进真值表（与修前内联实现逐条等价）：j 末项回绕→0、k 首项回绕→末项、无选中 j→0/k→末项、空列表→-1',
+    jkNextIndex(5, 4, true) === 0 && jkNextIndex(5, 0, false) === 4
+    && jkNextIndex(5, -1, true) === 0 && jkNextIndex(5, -1, false) === 4
+    && jkNextIndex(3, 1, true) === 2 && jkNextIndex(3, 1, false) === 0
+    && jkNextIndex(0, -1, true) === -1 && jkNextIndex(0, -1, false) === -1);
+
+  /* store 层模拟：App.tsx J/K 分支语义可达性——五布局各绑一个源，虚拟化四布局
+     下 selectVisibleEntries 产出序列且「门控放行 ∧ 推进必得可选中目标」；image
+     布局条目虽在、门控拦下（不支持）。跑在本文件末尾，随后恢复 store。 */
+  {
+    const { selectVisibleEntries: sve114 } = await import('../dist-test/store.js');
+    const mkEntry114 = (id, feedId, ts) => ({
+      id, feedId, title: `t-${id}`, author: 'a', snippet: 's', content: '',
+      translatedContent: '', aiSummary: '', url: '', cover: null, imageUrl: null,
+      tags: [], isRead: false, isStarred: false, publishedAt: ts,
+      enclosureUrl: null, enclosureMime: null, durationSec: null,
+      fulltextExtracted: false, rawContent: null,
+    });
+    const LAYOUT_FEEDS114 = [
+      ['7100', 'article'], ['7200', 'social'], ['7300', 'podcast'], ['7400', 'notification'], ['7500', 'image'],
+    ];
+    const entries114 = LAYOUT_FEEDS114.flatMap(([feedId], i) => [
+      mkEntry114(`${feedId}1`, feedId, 1000 + i),
+      mkEntry114(`${feedId}2`, feedId, 2000 + i),
+      mkEntry114(`${feedId}3`, feedId, 3000 + i),
+    ]);
+    const feedIndex114 = new Map(LAYOUT_FEEDS114.map(([feedId, layout]) => [feedId, {
+      feed: { id: feedId, name: `源-${layout}`, layout },
+      cat: { id: 'cat-114', name: '分类-114', layout: 'article' },
+    }]));
+    const prevLayout114 = store.getState().activeContentLayout;
+    store.setState({
+      entries: entries114, feedIndex: feedIndex114, openedReadIds: {},
+      activeFeedFilter: 'all', activeViewFilter: 'all', timelineFilter: 'all', timelineSort: 'newest',
+      activeArticleId: null,
+    });
+    let simOk114 = true;
+    for (const [feedId, layout] of LAYOUT_FEEDS114) {
+      store.setState({ activeContentLayout: layout });
+      const items = sve114(store.getState());
+      if (layout === 'image') {
+        /* 画廊：条目在（3 条），但门控拦下——J/K 不可达（不支持） */
+        simOk114 = simOk114 && items.length === 3 && !jkLayoutAllowed(layout);
+        continue;
+      }
+      /* 无选中按 j：门控放行 ∧ 推进落最新一条；再从首项 j 推进到位次第二 */
+      const first = items[jkNextIndex(items.length, -1, true)];
+      const second = items[jkNextIndex(items.length, 0, true)];
+      simOk114 = simOk114 && jkLayoutAllowed(layout) && items.length === 3
+        && !!first && first.id === `${feedId}3` && !!second && second.id === `${feedId}2`;
+    }
+    checkNew('(t114-x3d) store 层五布局模拟：article/social/podcast/notification 逐布局门控放行且 selectVisibleEntries×jkNextIndex 必得可选中目标（j 依次落最新/次新）；image 条目在但门控拦下',
+      simOk114);
+    store.setState({ activeContentLayout: prevLayout114, entries: [], feedIndex: new Map() });
+  }
+
+  checkNew('(t114-x3e) App.tsx J/K 分支消费纯函数（门控 + 推进），旧「仅 article」内联门控与内隔回绕判定清零',
+    app114.includes('jkLayoutAllowed(s.activeContentLayout)')
+    && app114.includes("jkNextIndex(items.length, curIdx, e.key === 'j')")
+    && !app114.includes("s.activeContentLayout !== 'article'")
+    && !app114.includes('nextIdx = e.key'));
+  checkNew('(t114-x3f) ShortcutsTab J/K 行同步：范围=文章/社交/播客/通知、明示画廊不支持（旧「文章布局」清零）',
+    shortcuts114.includes("'文章/社交/播客/通知（画廊不支持）'")
+    && shortcuts114.includes("'上下切换选中条目'")
+    && !shortcuts114.includes("'文章布局'"));
+
+  /* SSR 烟测（证据边界见块首注释）：NotifCard 三态改动后 Timeline 组件树仍可
+     执行（与 d5 同口径的初值空态形态，不承载逐态取证） */
+  const { renderToStaticMarkup: rsm114 } = await import('react-dom/server');
+  const { createElement: ce114 } = await import('react');
+  const { Timeline: Timeline114 } = await import('../src/components/Timeline.tsx');
+  const html114 = rsm114(ce114(Timeline114));
+  checkNew('(t114-x1d) SSR 烟测：三态/键绑定改动后 Timeline 组件树仍可执行（空态/哨兵形态不变）',
+    html114.includes('timeline-empty-state') && html114.includes('timeline-load-more'));
 }
 
 // ---- 汇总 ----
