@@ -22,6 +22,7 @@ import type { ArticleEntry } from '../types';
 import { useEnteringClass } from './useEnteringClass';
 import { sentinelMode } from './timelineSentinel';
 import { refillDecision } from './timelineRefill';
+import { anchorRestoreIndex, clearTopAnchor, peekTopAnchor, recordTopAnchor } from './timelineAnchor';
 
 /* ============================================================
    Timeline —— 顶栏（标题/筛选/排序/全部已读）+ 五布局渲染器
@@ -155,10 +156,14 @@ export function Timeline() {
   };
   /* 筛选上下文变化 → 重置基准并关闭本帧的滚出判定。
      与下面的归零 effect 同依赖，按声明顺序先执行 ⇒ 基准与本帧判定都已就绪，
-     不依赖「归零 effect 先跑完」这一时序假设。 */
+     不依赖「归零 effect 先跑完」这一时序假设。
+     TASK-111②：同时丢弃顶条锚——锚属于「上一个阅读上下文」（filterKey 逐字
+     一致才允许回位），用户主动切布局/视图/范围/筛选/排序后旧锚绝不参与新
+     上下文的后台刷新回位（双重保险：消费侧还有 filterKey 比对）。 */
   useLayoutEffect(() => {
     lastStartIndexRef.current = 0;
     scrollDrivenRef.current = false;
+    clearTopAnchor();
   }, [filterKey]);
   /* 真实输入监听（挂载一次）：四类输入都能启动「用户滚动」的事实——
      wheel（滚轮/触控板）、touchmove（触屏拖动）、pointerdown（滚动条拖动、
@@ -226,6 +231,32 @@ export function Timeline() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeArticleId]);
 
+  /* TASK-111②：后台刷新保位——消费顶条锚。reloadFromBackend 以
+     keepReadingPosition 落地（feeds-updated / 手动同步 / 单源刷新路径）时
+     store bump positionRestoreNonce，本 effect 消费锚：锚 id 仍在新快照中 →
+     程序性滚动回其新索引（新文章插入头部场景，抵消整体替换 + 头部插入造成的
+     视觉跳动）；无锚 / filterKey 已变 / 锚 id 不在快照 → 回落现状（不强制顶部）。
+     分流语义：
+     - 锚与 filterKey 一起记账（timelineAnchor），消费时逐字比对——用户主动
+       切范围/布局/视图/排序后锚已被 clearTopAnchor 丢弃且比对也不通过，
+       导航路径的 reload 亦不 bump nonce（三重隔离）；
+     - 复用 activeArticleId 定位 effect 的既有程序性滚动抑制机制
+       （suppressNextScrollEvents → scrollToIndex，防回位被误判成用户滚动
+       而整段标读）；align:'start'——锚即「可见首条」，对齐回视口顶 = 原位还原；
+     - activeArticleId 的定位 effect 保持既有不变语义（选中文章仍由它负责），
+       本 effect 只管滚动位置，两者互补不冲突；
+     - 画廊布局不虚拟化（scrollToIndex 无效），回位回落现状。 */
+  const positionRestoreNonce = useAppStore((s) => s.positionRestoreNonce);
+  useEffect(() => {
+    if (positionRestoreNonce === 0) return; // 初值非信号
+    if (activeContentLayout === 'image') return; // 画廊非虚拟化，回位回落现状
+    const idx = anchorRestoreIndex(peekTopAnchor(), filterKey, items);
+    if (idx == null) return; // 无锚 / 上下文已切换 / 锚丢失 → 回落
+    suppressNextScrollEvents();
+    rowVirtualizer.scrollToIndex(idx, { align: 'start' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positionRestoreNonce]);
+
   /* 滚动到底部附近 → 按需加载下一批文章（分页，避免一次性全量拉取）。 */
   const handleScroll = () => {
     /* P3[F5]/fix-2：判定收口在 scrollAwayRead.isUserScrollEvent——只有「近期有
@@ -237,6 +268,14 @@ export function Timeline() {
       programmaticUntil: programmaticScrollUntilRef.current,
       now: performance.now(),
     });
+    /* TASK-111②：顶条锚记录（节流收口在 timelineAnchor.recordTopAnchor）——
+       以当前可见首条目 id + filterKey 记账，供后台刷新落地后回位。程序性滚动
+       （J/K / 回位）也照记：那是用户此刻的阅读位置。画廊布局不记录
+       （虚拟化禁用时 range 不代表真实视口，回位消费侧同样回落）。 */
+    if (activeContentLayout !== 'image') {
+      const topItem = items[rowVirtualizer.range?.startIndex ?? 0];
+      if (topItem) recordTopAnchor(topItem.id, filterKey, performance.now());
+    }
     const el = scrollRef.current;
     if (!el) return;
     // 距底部 600px 内视为"到底"，提前预加载，滚动体验更顺滑

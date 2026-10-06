@@ -88,7 +88,9 @@ export default function App() {
           (e) => {
             const { new_articles, failed_feeds } = e.payload;
             /* TASK-098（与 F5 同口径）：失败提示由 reloadFromBackend 的 toast 给出，这里吞掉 toast 后的重抛 */
-            void useAppStore.getState().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
+            /* TASK-111②：后台刷新路径携带保位请求——落地时发出保位信号，
+               Timeline 消费顶条锚回位（审计「后台刷新保留当前阅读位置」）。 */
+            void useAppStore.getState().reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
             if (new_articles > 0) {
               useAppStore.getState().showToast(`后台刷新：新文章 ${new_articles} 篇`);
             } else if (failed_feeds > 0) {

@@ -701,7 +701,11 @@ await (async () => {
     store.getState().activeViewFilter === 'unread' && Object.keys(store.getState().openedReadIds).length === 0);
   await nTick(20);
   const cUnread = store.getState();
-  checkNew('(c) 未读视图走 only_unread 拉全量：只剩 6 条未读、游标=行数、不再分页',
+  /* 【TASK-110 改动理由】原断言名「拉全量/不再分页」编码的正是本卡废除的近似全集
+     手法（limit:100000 一次拉完）。分页化后这里是**首屏**：6 行 < 页大小(500) ⇒
+     exhausted 真实判定为 true。判定条件本身（6 条/游标=行数/已到底）与修前一致，
+     只改措辞对齐新语义，不弱化保护。 */
+  checkNew('(c) 未读视图走 only_unread 拉取首屏：只剩 6 条未读、游标=行数、不足一页即真实判定已到底',
     cUnread.entries.map((e) => e.id).join(',') === '101,201,103,104,105,301'
     && cUnread.articlesLimit === 6 && cUnread.articlesExhausted === true && cUnread.articlesLoading === false);
   store.getState().selectView('today');
@@ -2442,14 +2446,16 @@ await (async () => {
   listPlan = { mode: 'defer' };   // 冻结后台刷新，只观察缓存恢复本身
   store.getState().selectView('all');
   const s6BackSync = store.getState();
-  /* exhausted 这里为 false 是正确的：游标 40 来自「收藏视图只有 3 条」那次拉取，
-     但切回「全部」时 entries 换成了 40 条的首批，我们并不知道「全部」是否已经到底，
-     未到底（保守地允许下一次 loadMore）才是安全语义——若错标已到底，源A 更老的
-     文章就再也取不回来了。 */
-  checkNew('(s6) 切回「全部」缓存命中：同步恢复的是源A 的 40 条（不拿收藏视图的 3 条冒充），游标随之对齐且不误标已到底',
+  /* 【TASK-110 改动理由】原断言把「缓存恢复时不知道是否到底 ⇒ 保守标 false」写成
+     期望——那是筛选视图全集拉取时代（无法从快照得知尽端）的防错手法。分页化后
+     缓存快照本身记录了「最近一次拉取是否满一页」：40 行 < 页大小 ⇒ 该范围确实
+     只有 40 条，exhausted=true 是真实判定而非误标（selectView 与 selectLayout/
+     selectFeed 同口径收口）。原保护意图（老文章不因误标已到底而不可达）由更强的
+     机制接棒：恢复后必触发后台 reload 重取真值；本场景 40 条即全量，true 准确。 */
+  checkNew('(s6) 切回「全部」缓存命中：同步恢复的是源A 的 40 条（不拿收藏视图的 3 条冒充），游标随之对齐、exhausted 按快照长度真实判定（40<500=已到底）',
     s6BackSync.entries.length === 40 && s6BackSync.entries.every((e) => e.feedId === '10')
     && s6BackSync.articlesLimit === 40 && s6BackSync.articlesCursor['article|10'] === 40
-    && s6BackSync.articlesExhausted === false && s6BackSync.articlesLoading === false);
+    && s6BackSync.articlesExhausted === true && s6BackSync.articlesLoading === false);
   listPlan = null;
   await nTick(20);
   checkNew('(s6) 后台静默刷新完成后结论不变（仍是源A 的 40 条）',
@@ -2551,20 +2557,29 @@ await (async () => {
     && invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0
     && store.getState().dataMode === 'mock');
 
-  /* ③ 筛选视图（收藏/未读/今天 = 本地排序的全集）只做本地重排，不重拉（IPC 计数） */
+  /* ③ 筛选视图（收藏/未读/今天）切排序。
+     【TASK-110 改动理由】原断言「全集本地重排、不重拉后端（0 次 list_articles）」
+     锁的正是本卡废除的手法：筛选视图原本拉全集（limit:100000）存内存，切排序
+     只需本地重排。分页化后全集不再在内存里，排序改由服务端承载——切排序必须
+     按新排序重拉当前范围（与「全部」视图同构）。本断言按行为变化改写，保留其
+     保护意图中仍然成立的部分（可见顺序翻转、集合不变），并加锁新契约（重拉的
+     wire 参数：only_starred + newest_first=false + offset=0，恰好 1 次）。 */
   await bootFixture();
   store.getState().selectView('starred');
   await nTick(30);
   invokeCalls.length = 0;
-  const p3f5StarIds = store.getState().entries.map((e) => e.id).join(',');
+  const p3f5StarSet = [...store.getState().entries].map((e) => e.id).sort().join(',');
   const p3f5VisNewest = selectVisibleEntries(store.getState())[0]?.id;
   store.getState().toggleTimelineSort();
   await nTick(30);
   const p3f5VisOldest = selectVisibleEntries(store.getState())[0]?.id;
-  checkNew('(p3-f5) 筛选视图切排序：全集本地重排（可见顺序翻转、集合不变），不重拉后端（0 次 list_articles）',
-    invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0
+  const p3f5SortCall = invokeCalls.find((c) => c.cmd === 'list_articles');
+  checkNew('(p3-f5) 筛选视图切排序：按新排序重拉当前范围（1 次 list_articles，only_starred + newest_first=false + offset=0），可见顺序翻转、集合不变（TASK-110③ 行为变化）',
+    invokeCalls.filter((c) => c.cmd === 'list_articles').length === 1
+    && p3f5SortCall?.args.args.only_starred === true && p3f5SortCall?.args.args.newest_first === false
+    && p3f5SortCall?.args.args.offset === 0
     && p3f5VisNewest === '102' && p3f5VisOldest === '103'
-    && store.getState().entries.map((e) => e.id).join(',') === p3f5StarIds);
+    && [...store.getState().entries].map((e) => e.id).sort().join(',') === p3f5StarSet);
 
   /* ---------- (p3b) TASK-098：selectLayout/selectView/selectFeed 的 void reload 全量收口（F5 同款铺开） ----------
      TASK-093 的 F5 只收口了 toggleTimelineSort；TASK-098 独立审查把同款暴露铺开收口：
@@ -2578,10 +2593,16 @@ await (async () => {
     const navSrcP3b = fsP3b.readFileSync(new URL('../src/store/slices/nav.ts', import.meta.url), 'utf8');
     const appSrcP3b = fsP3b.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
     const p3bNavReloadLines = navSrcP3b.split('\n').filter((l) => /void get\(\)\.reload(FromBackend|FilteredEntries)\(/.test(l));
-    checkNew('(p3b) nav.ts 全部 void reload 调用点（9 处：selectLayout / selectView 两条路 / selectFeed / toggleTimelineSort）逐行带 .catch（漏一处即失败）',
-      p3bNavReloadLines.length === 9 && p3bNavReloadLines.every((l) => l.includes('.catch(')));
-    checkNew('(p3b) App.tsx 后台刷新事件（feeds-updated）的 void reloadFromBackend 同样带 .catch（删掉即失败）',
-      /void useAppStore\.getState\(\)\.reloadFromBackend\(\)\.catch\(/.test(appSrcP3b));
+    checkNew('(p3b) nav.ts 全部 void reload 调用点（10 处：selectLayout / selectView 两条路 / selectFeed / toggleTimelineSort 两条路——TASK-110③ 新增筛选分流）逐行带 .catch（漏一处即失败）',
+      /* TASK-110③：toggleTimelineSort 筛选视图新增 reloadFilteredEntries 分流（原 9 处 → 10 处） */
+    p3bNavReloadLines.length === 10 && p3bNavReloadLines.every((l) => l.includes('.catch(')));
+    /* 【TASK-111② 改动理由】原断言锁定的字面量是 `reloadFromBackend().catch(`——
+       本卡给该调用补了保位请求实参（后台刷新路径携带 keepReadingPosition，落地
+       时发出保位信号供 Timeline 消费顶条锚回位）。断言同步改写为锁定新 wire 形态
+       （带实参 + .catch 仍在），非为过门禁而弱化：.catch 防线（删掉即失败）与
+       「后台刷新走保位路径」两点同时锁定。 */
+    checkNew('(p3b) App.tsx 后台刷新事件（feeds-updated）的 void reloadFromBackend（TASK-111② 起带 keepReadingPosition 保位实参）同样带 .catch（删掉即失败）',
+      /void useAppStore\.getState\(\)\.reloadFromBackend\(\{ keepReadingPosition: true \}\)\.catch\(/.test(appSrcP3b));
 
     /* ① selectView 缓存命中路径：bootFixture 已把「all」快照写进 viewEntriesCache，
          selectView('all') 命中缓存 → 后台静默刷新失败（toast 后重抛，本入口须接住） */
@@ -3074,6 +3095,620 @@ await (async () => {
       freshClaim107.entries.every((a) => !a.isRead)
       && freshClaim107.feedCounts.get('10')?.unread === 2
       && freshClaim107.toasts.some((t) => t.text.startsWith('全部已读保存失败')));
+  }
+
+  /* ============================================================
+     TASK-109：查询口径统一收口（QueryScope）+ merge bump 按真值来源收窄
+     - 口径单点：三把键与查询参数只经 QueryScope 派生（源级断言）；
+       scopePageKey/viewCacheKey 字符串形态锁定不变（缓存/游标键兼容）；
+     - reloadFromBackend 的游标键/「全部」视图缓存键改为发起时快照（原在 await
+       后读完成时状态，靠 reloadGeneration 间接兜底；行为等价、口径显式化）；
+     - bump 收窄：后端快照路径（fromBackend=true）void 在途声明；缓存恢复路径
+       （fromBackend=false）不 void——R2 裁定角例的修后行为有判别断言。
+     ============================================================ */
+  {
+    const fs109 = await import('node:fs');
+    const src109 = (p) => fs109.readFileSync(new URL(p, import.meta.url), 'utf8');
+    const internals109 = src109('../src/store/internals.ts');
+    const bootstrap109 = src109('../src/store/slices/bootstrap.ts');
+    const nav109 = src109('../src/store/slices/nav.ts');
+
+    /* -- t109-queryscope-single-source：口径派生单点性（源级）-- */
+    checkNew('(t109-queryscope-single-source) QueryScope 统一入口定义于 internals：三把键 + 标写范围 + 两个具名守卫齐备',
+      internals109.includes('export const QueryScope = {')
+      && internals109.includes('args: scopeQueryArgs')
+      && internals109.includes('markScope: scopeFilterArgs')
+      && internals109.includes('pageKey: scopePageKey')
+      && internals109.includes('viewKey: viewCacheKey')
+      && internals109.includes('export function paginationStale(')
+      && internals109.includes('export function filteredSnapshotStale('));
+    {
+      const importLine = (src) => {
+        const m = src.match(/import \{([^}]*)\} from '\.\.\/internals';/);
+        return m ? m[1] : '';
+      };
+      checkNew('(t109-queryscope-single-source) bootstrap/nav 不再裸引三把键：仅经 QueryScope.* 消费（键派生无第二入口）',
+        !importLine(bootstrap109).includes('scopeQueryArgs') && !importLine(bootstrap109).includes('scopePageKey')
+        && !importLine(bootstrap109).includes('viewCacheKey')
+        && !importLine(nav109).includes('scopeQueryArgs') && !importLine(nav109).includes('scopePageKey')
+        && !importLine(nav109).includes('viewCacheKey')
+        && bootstrap109.includes('QueryScope.args(') && bootstrap109.includes('QueryScope.pageKey(')
+        && bootstrap109.includes('QueryScope.viewKey(')
+        && bootstrap109.includes('QueryScope.paginationStale(') && bootstrap109.includes('QueryScope.filteredSnapshotStale(')
+        && nav109.includes('QueryScope.pageKey(') && nav109.includes('QueryScope.viewKey('));
+    }
+
+    /* -- t109-key-format-compat：键形态兼容（行为级）-- */
+    {
+      const it109 = await import('../dist-test/store/internals.js');
+      checkNew('(t109-key-format-compat) scopePageKey/viewCacheKey 字符串形态逐字不变，QueryScope 同源绑定、args/markScope 派生正确',
+        it109.scopePageKey('all') === 'all' && it109.scopePageKey('10') === '10' && it109.scopePageKey('cat-1') === 'cat-1'
+        && it109.scopePageKey('10', 'article') === 'article|10' && it109.scopePageKey('all', 'social') === 'social|all'
+        && it109.viewCacheKey('article', 'all') === 'article|all|all'
+        && it109.viewCacheKey('social', 'starred', '11') === 'social|starred|11'
+        && it109.QueryScope.pageKey === it109.scopePageKey && it109.QueryScope.viewKey === it109.viewCacheKey
+        && JSON.stringify(it109.QueryScope.args('12', 'oldest', 'social')) === JSON.stringify({ feed_id: 12, folder_id: null, newest_first: false, layout: 'social' })
+        && JSON.stringify(it109.QueryScope.markScope('cat-1')) === JSON.stringify({ feed_id: null, folder_id: 1 })
+        && JSON.stringify(it109.QueryScope.markScope('all')) === JSON.stringify({ feed_id: null, folder_id: null }));
+    }
+
+    /* -- t109-reload-scope-snapshot-at-start：发起时快照修正（源级）-- */
+    {
+      const start109 = bootstrap109.indexOf('reloadFromBackend: async');
+      const end109 = bootstrap109.indexOf('loadMoreArticles:');
+      const reloadSrc = bootstrap109.slice(start109, end109);
+      const awaitPos = reloadSrc.indexOf('await Promise.all');
+      const capturePos = reloadSrc.indexOf('const scopeAtStart = get().activeFeedFilter;');
+      checkNew('(t109-reload-scope-snapshot-at-start) reloadFromBackend 发起时快照范围口径：scopeKey/缓存键从 scopeAtStart 派生，await 后无完成时回读',
+        capturePos >= 0 && awaitPos >= 0 && capturePos < awaitPos
+        && reloadSrc.includes('const scopeKey = QueryScope.pageKey(scopeAtStart, layoutAtStart);')
+        && reloadSrc.includes("QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart)")
+        && !reloadSrc.slice(awaitPos).includes('get().activeFeedFilter')
+        && !reloadSrc.slice(awaitPos).includes('get().activeContentLayout'));
+    }
+
+    /* -- t109-markscope-derivation：标写范围派生收口（源级）-- */
+    {
+      const markSrc = nav109.slice(nav109.indexOf('markCurrentViewAllRead: () => {'));
+      checkNew('(t109-markscope-derivation) markCurrentViewAllRead 标写范围经 QueryScope.markScope（仅订阅维度），layout 由 markAllRead 独立参数承载',
+        markSrc.includes('QueryScope.markScope(scope)')
+        && !markSrc.includes('scopeQueryArgs(')
+        && markSrc.includes('api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout })'));
+    }
+
+    /* -- t109-cache-restore-preserves-claim：R2 裁定角例修后行为（判别，行为级）--
+       全部已读乐观写入在途（缓存已被乐观写同步为 read 态）→ 缓存恢复（selectFeed
+       命中，回放乐观 read 态；fromBackend=false 不 bump 版本）→ mark_all_read 失败
+       → 回滚必须仍能恢复（修前 bump-on-all-merge 会 void 声明、卡在乐观 read 态）。 */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 50001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 50002, feed_id: 10, published_at: iso(NOW - 60000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    const realInvoke109 = globalThis.__INVOKE__;
+    let rejectMarkAll109 = null;
+    globalThis.__INVOKE__ = (cmd, args) => {
+      if (cmd === 'mark_all_read') return new Promise((_res, rej) => { rejectMarkAll109 = rej; });
+      return realInvoke109(cmd, args);
+    };
+    store.getState().markCurrentViewAllRead(); // 乐观翻转 → read；缓存同步为 read 态；版本快照 v1
+    await nTick(0);
+    listPlan = { mode: 'defer' };              // 拦住 selectFeed 的后台 reload（其 fromBackend bump 不得抢跑）
+    store.getState().selectFeed('all');        // 缓存命中：回放乐观 read 态（TASK-109②：不 bump）
+    await nTick(0);
+    const replayed109 = store.getState();
+    checkNew('(t109-cache-restore-preserves-claim) 场景成立：缓存回放携带乐观 read 态且计数停留乐观值（回放未 bump 版本）',
+      replayed109.entries.every((a) => a.isRead) && replayed109.feedCounts.get('10')?.unread === 0);
+    rejectMarkAll109({ message: '注入失败:mark_all_read' });
+    await nTick(10);
+    const healed109 = store.getState();
+    checkNew('(t109-cache-restore-preserves-claim) R2 角例修后行为：缓存回放不 void 在途声明，失败回滚正确恢复未读态与计数 2',
+      healed109.entries.every((a) => !a.isRead) && healed109.feedCounts.get('10')?.unread === 2);
+
+    /* -- t109-cache-replay-new-claim：缓存回放不误 void 新声明（行为级）-- */
+    store.getState().markCurrentViewAllRead(); // 回放后的新声明：乐观翻转 → read（版本 bump 后快照）
+    await nTick(0);
+    rejectMarkAll109({ message: '注入失败:mark_all_read' });
+    await nTick(10);
+    const newClaim109 = store.getState();
+    checkNew('(t109-cache-replay-new-claim) 缓存回放后新建声明的回滚仍正常：恢复未读态与计数 2（不误 void）',
+      newClaim109.entries.every((a) => !a.isRead) && newClaim109.feedCounts.get('10')?.unread === 2);
+    // 清理：放行被 defer 的后台 reload（fromBackend merge 接真值对齐），还原 invoke
+    listPlan = null;
+    for (const p of pendingList) p.resolve(queryRows(p.args));
+    pendingList.length = 0;
+    await nTick(20);
+    globalThis.__INVOKE__ = realInvoke109;
+
+    /* -- t109-filtered-guard-named→t110：筛选视图拉取锁排序（具名守卫，行为级）。
+       【TASK-110 改动理由】原断言「筛选视图拉取不锁排序：拉取期间切排序响应仍落地」
+       锁的正是本卡废除的旧行为——筛选视图拉全集（limit:100000）存内存，切排序只是
+       selectVisibleEntries 本地重排，排序与取数无关，守卫有意不锁排序。TASK-110①③
+       分页化 + 切排序改为服务端重拉后，该前提废除：迟到的旧排序响应属于另一个查询
+       口径（放行会把旧排序页当作新排序列表写入），filteredSnapshotStale 同步锁排序。
+       新契约两段验证：①拉取期间切排序 ⇒ 第一发（旧排序）响应被整体丢弃，entries
+       未被覆盖；②切排序自身触发的按新排序重拉落地（entries 为新排序序、集合不变、
+       exhausted 真实判定、游标随落地快照对齐）。 */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    await store.getState().bootstrapFromBackend();
+    listPlan = { mode: 'defer' };
+    store.setState({ activeViewFilter: 'starred', timelineSort: 'newest' });
+    const pFiltered109 = store.getState().reloadFilteredEntries('starred');
+    await nTick(0);
+    store.getState().toggleTimelineSort(); // TASK-110③：筛选视图切排序现在触发按新排序的重拉（第二发，同走 defer 队列）
+    const sortFlipped109 = store.getState().timelineSort === 'oldest';
+    for (const p of pendingList) p.resolve(queryRows(p.args)); // 第一发（旧排序 newest）响应放行 → 守卫丢弃
+    pendingList.length = 0;
+    await pFiltered109;
+    checkNew('(t109-filtered-guard-named→t110) 筛选视图拉取锁排序（TASK-110③ 行为变化）：拉取期间切排序，迟到旧排序响应被 filteredSnapshotStale 整体丢弃（entries 未被覆盖，仍为 all 首批快照）',
+      sortFlipped109
+      && store.getState().entries.length === 8
+      && store.getState().entries.some((e) => !e.isStarred));
+    /* TASK-110③ 驱动补充（探针实测的连锁根因，必须在此排空）：切排序触发的第二发
+       reloadFilteredEntries，其 list_articles 经 api.listArticles 内部 await getInvoke()
+       延了一个微任务才进 defer 队列——第一发在上方 nTick(0) 宏任务间隙已入队、排空
+       循环够得到它；第二发入队晚于排空循环，promise 被孤儿化后永不落定，
+       reloadFilteredEntries 的 finally 减不掉 backendReloadInFlight，在途标记泄漏会
+       拦住后续所有测试块的 loadMoreArticles（r7-switch / t100-p3-1 连锁误红）。
+       生产侧无此问题（Tauri invoke 恒 settle），纯测试驱动口径。 */
+    await nTick(0);
+    for (const p of pendingList.splice(0)) p.resolve(queryRows(p.args)); // 第二发（新排序 oldest 重拉）放行
+    listPlan = null;
+    await nTick(10);
+    checkNew('(t109-filtered-guard-named→t110) 切排序触发的重拉落地：entries 为新排序（oldest）收藏集合、exhausted 真实判定（3<500）、游标随落地快照对齐',
+      store.getState().entries.map((e) => e.id).join(',') === '103,102,201'
+      && store.getState().entries.every((a) => a.isStarred)
+      && store.getState().articlesExhausted === true
+      && store.getState().articlesCursor['article|all'] === 3);
+  }
+
+  /* ============================================================
+     TASK-110（二阶段②）：筛选视图真分页——废除 limit:100000 近似全集。
+     旧手法：reloadFilteredEntries 一次拉全集（articlesExhausted 恒 true、切排序
+     仅本地重排），旧文章在筛选视图不可达（审计二阶段完成标准）。新契约：
+     ①筛选视图首屏 PAGE_SIZE、续拉走 loadMoreArticles（viewFilter 单点派生，
+       与「全部」视图共用游标键 scopePageKey 与分页守卫）；
+     ②追加按 id 去重 + 稳定序策略「追加去重保序」（同步插入使 offset 漂移时
+       不得重复入列；新条目不回填已加载窗口，随下次 reload 进入——判别断言）；
+     ③切排序与 all 同构重拉（水合正文由 mergeSnapshotEntries 按 id 继承）；
+     ④exhausted 真实判定（rows.length < PAGE_SIZE）双向锁定；
+     ⑤过滤参数（only_unread/only_starred/only_today）逐项 × 范围 × 布局。
+     夹具：600 行 feed-10（i=0 最新），其中前 520 行收藏；时间戳取 NOW-3d 起，
+     与「今天」判定解耦（today 用独立 NOW 行）。全部走内存假后端（模块级
+     harness），布局不做后端过滤（与 (r7-switch) 同口径，断言走 wire 参数）。
+     ============================================================ */
+  {
+    const PAGE = 500; // 与 internals.ARTICLES_PAGE_SIZE 同值（import 断言见 (t110-0)）
+    const mkT110Row = (o) => mkRow({ feed_id: 10, ...o });
+    const T110_OLD = iso(NOW - 3 * 86400000);
+    /* 600 行基础夹具：id=1100+i，i 越小越新；i<520 收藏 */
+    const t110Rows = () => {
+      const rows = [];
+      for (let i = 0; i < 600; i += 1) {
+        rows.push(mkT110Row({ id: 1100 + i, published_at: iso(NOW - 3 * 86400000 - i * 60000), is_starred: i < 520 }));
+      }
+      return rows;
+    };
+
+    /* -- (t110-0) 页大小单点来源：筛选视图分页与「全部」共用同一常量 -- */
+    const { ARTICLES_PAGE_SIZE: t110Page } = await import('../dist-test/store/internals.js');
+    checkNew('(t110-0) ARTICLES_PAGE_SIZE 收口到 internals（=500）：筛选视图首屏/续拉与「全部」视图同一页大小单点来源',
+      t110Page === 500 && PAGE === t110Page);
+
+    /* ---------- (t110-1/2) 收藏视图：首屏分页 → 满页续拉 → 真到底 ---------- */
+    await resetStore();
+    backendRows = t110Rows();
+    await store.getState().bootstrapFromBackend(); // all 视图首批 500（exhausted=false）
+    invokeCalls.length = 0;
+    store.getState().selectView('starred'); // 缓存已清 → 走 reloadFilteredEntries 首屏
+    await nTick(20);
+    const t110Star1st = invokeCalls.filter((c) => c.cmd === 'list_articles');
+    const t110Star1stArgs = t110Star1st[0]?.args.args;
+    checkNew('(t110-1) 收藏视图首屏真分页 wire：恰 1 次 list_articles，only_starred=true + limit=500（废除 limit:100000）+ offset=0 + 范围/布局维度齐全（article|all）',
+      t110Star1st.length === 1
+      && t110Star1stArgs?.only_starred === true && t110Star1stArgs?.limit === 500 && t110Star1stArgs?.offset === 0
+      && t110Star1stArgs?.feed_id === null && t110Star1stArgs?.folder_id === null && t110Star1stArgs?.layout === 'article');
+    const t110Star1stState = store.getState();
+    checkNew('(t110-1) 收藏视图首屏落地：520 条收藏取前 500（最新端 i=0..499 ⇒ id 1100..1599）、exhausted 真实判定为 false（满页 ⇒ 可续拉，refill/哨兵前提）、游标=500',
+      t110Star1stState.entries.length === 500
+      && t110Star1stState.entries.every((e) => e.isStarred)
+      && t110Star1stState.entries[0]?.id === '1100' && t110Star1stState.entries[499]?.id === '1599'
+      && t110Star1stState.articlesExhausted === false && t110Star1stState.articlesLimit === 500
+      && t110Star1stState.articlesCursor['article|all'] === 500);
+
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles(); // 筛选视图续拉：与首屏同口径（viewFilter 单点派生）
+    const t110Star2nd = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    const t110Star2ndState = store.getState();
+    checkNew('(t110-2) 收藏视图加载更多同口径 wire：only_starred=true + offset=500（沿用首屏写入的同键游标）+ limit=500',
+      t110Star2nd?.only_starred === true && t110Star2nd?.offset === 500 && t110Star2nd?.limit === 500);
+    checkNew('(t110-2) 收藏视图续拉落地：追加剩余 20 条收敛到底（520 条无重复）、exhausted 真实判定为 true（20<500）、游标=520',
+      t110Star2ndState.entries.length === 520 && new Set(t110Star2ndState.entries.map((e) => e.id)).size === 520
+      && t110Star2ndState.entries[500]?.id === '1600' && t110Star2ndState.entries.at(-1)?.id === '1619'
+      && t110Star2ndState.articlesExhausted === true && t110Star2ndState.articlesLimit === 520
+      && t110Star2ndState.articlesCursor['article|all'] === 520);
+
+    /* ---------- (t110-3) 偏移漂移按 id 去重（同步插入场景，判别断言） ----------
+       场景：第 2 页（offset=500）在途期间后端同步入库 10 条更新的文章（插入
+       已加载窗口前端 ⇒ offset 漂移 10），迟到响应由 600 行扩为 610 行序列的
+       offset 500..999 共 110 行，与已加载集合重叠 10 条。
+       判别：修前无去重 ⇒ entries 610 长度含 10 个重复 id（React key 冲突）；
+       修后追加去重保序 ⇒ 600 条唯一、游标按拉取行数推进（500+110=610）、
+       新条目不回填已加载窗口（随下次 reload 进入——策略固化）。 */
+    await resetStore();
+    backendRows = t110Rows();
+    await store.getState().bootstrapFromBackend(); // all 视图首批 500：ids 1100..1599
+    listPlan = { mode: 'defer' };
+    store.getState().loadMoreArticles(); // 第 2 页（offset=500）在途
+    await nTick(0); // 微任务排空：第 2 页请求进入 defer 队列
+    const t110DriftPage2 = pendingList.at(-1);
+    /* 同步插入 10 条（后端同步入库语义；store 无感知、不发 reload、游标不动） */
+    for (let i = 0; i < 10; i += 1) {
+      backendRows.unshift(mkT110Row({ id: 1700 + i, published_at: iso(NOW), title: `t110 同步插入 ${i}` }));
+    }
+    t110DriftPage2?.resolve(queryRows(t110DriftPage2.args)); // 迟到响应 = 新序列 offset 500..999（与已加载重叠 10 条）
+    listPlan = null;
+    await nTick(20);
+    const t110Drift = store.getState();
+    const t110DriftIds = t110Drift.entries.map((e) => e.id);
+    checkNew('(t110-3) 偏移漂移按 id 去重（判别断言）：迟到第 2 页扩为 110 行（漂移后窗口后移），与已加载窗口重叠 10 条（id 1590..1599）不重复入列（entries 600 条唯一，修前为 610 含 10 重复）、已加载窗口保序不变、新增段按序追加（id 1600..1699）',
+      t110DriftIds.length === 600 && new Set(t110DriftIds).size === 600
+      && t110DriftIds.slice(0, 500).join(',') === Array.from({ length: 500 }, (_, k) => String(1100 + k)).join(',')
+      && t110DriftIds.slice(500).join(',') === Array.from({ length: 100 }, (_, k) => String(1600 + k)).join(','));
+    checkNew('(t110-3) 偏移漂移游标与新条目策略：游标按拉取行数推进（500+110=610，offset 语义=已看过的后端位置）、exhausted 按拉取行数真实判定（110<500）、同步插入的新条目不回填已加载窗口（追加去重保序，随下次 reload 进入）',
+      t110Drift.articlesLimit === 610 && t110Drift.articlesCursor['article|all'] === 610
+      && t110Drift.articlesExhausted === true
+      && t110DriftIds.every((id) => Number(id) < 1700));
+
+    /* ---------- (t110-4) 切排序重拉与 all 同构：wire 参数 + 水合正文保留 ---------- */
+    await resetStore();
+    backendRows = t110Rows();
+    await store.getState().bootstrapFromBackend();
+    store.getState().selectView('starred');
+    await nTick(20);
+    /* 模拟已加载条目的懒水合终态（id 1300 = i 200，切排序前后都在首屏内） */
+    store.setState((s) => ({
+      entries: s.entries.map((e) => (e.id === '1300' ? { ...e, content: '<p>t110 水合正文</p>', hydrated: true } : e)),
+      hydratedIds: { ...s.hydratedIds, '1300': true },
+    }));
+    invokeCalls.length = 0;
+    store.getState().toggleTimelineSort(); // TASK-110③：筛选视图切排序 → 服务端重拉（不再本地重排全集）
+    await nTick(20);
+    const t110SortCalls = invokeCalls.filter((c) => c.cmd === 'list_articles');
+    const t110SortArgs = t110SortCalls[0]?.args.args;
+    checkNew('(t110-4) 收藏视图切排序重拉 wire：恰 1 次 list_articles，only_starred=true + newest_first=false + offset=0（与「全部」视图同构，服务端承载排序）',
+      t110SortCalls.length === 1
+      && t110SortArgs?.only_starred === true && t110SortArgs?.newest_first === false && t110SortArgs?.offset === 0);
+    const t110Sorted = store.getState();
+    const t110SortedHydrated = t110Sorted.entries.find((e) => e.id === '1300');
+    checkNew('(t110-4) 切排序重拉落地：entries 换为新排序（oldest）首屏（首条=最老收藏 1619）、已加载条目的水合正文按 id 继承不因重拉丢失（TASK-106 机制）、游标随落地快照对齐',
+      t110Sorted.entries.length === 500 && t110Sorted.entries[0]?.id === '1619'
+      && t110Sorted.entries.every((e) => e.isStarred)
+      && t110SortedHydrated?.content === '<p>t110 水合正文</p>' && t110SortedHydrated?.hydrated === true
+      && t110Sorted.hydratedIds['1300'] === true
+      && t110Sorted.articlesCursor['article|all'] === 500 && t110Sorted.articlesExhausted === false);
+
+    /* ---------- (t110-5) 过滤参数逐项：only_unread / only_starred / only_today（article|all） ---------- */
+    await resetStore();
+    backendRows = [
+      mkT110Row({ id: 2100, published_at: T110_OLD }), // 未读·旧
+      mkT110Row({ id: 2101, published_at: T110_OLD }), // 未读·旧
+      mkT110Row({ id: 2102, published_at: T110_OLD }), // 未读·旧
+      mkT110Row({ id: 2103, published_at: T110_OLD, is_read: true }), // 已读·旧
+      mkT110Row({ id: 2104, published_at: T110_OLD, is_read: true }), // 已读·旧
+      mkT110Row({ id: 2105, published_at: iso(NOW) }), // 未读·今天
+      mkT110Row({ id: 2106, published_at: iso(NOW) }), // 未读·今天
+      mkT110Row({ id: 2107, published_at: T110_OLD, is_starred: true }), // 未读·收藏·旧
+    ];
+    await store.getState().bootstrapFromBackend();
+    invokeCalls.length = 0;
+    store.getState().selectView('unread');
+    await nTick(20);
+    const t110UnreadArgs = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    checkNew('(t110-5) 未读视图首屏 wire：only_unread=true + offset=0 + limit=500，落地只含未读行且 exhausted 真实判定（6<500）',
+      t110UnreadArgs?.only_unread === true && t110UnreadArgs?.only_starred === undefined && t110UnreadArgs?.only_today === undefined
+      && t110UnreadArgs?.offset === 0 && t110UnreadArgs?.limit === 500
+      && store.getState().entries.length === 6 && store.getState().entries.every((e) => !e.isRead)
+      && store.getState().articlesExhausted === true);
+    invokeCalls.length = 0;
+    store.getState().selectView('today');
+    await nTick(20);
+    const t110TodayArgs = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    checkNew('(t110-5) 今天视图首屏 wire：only_today=true（不带其余筛选键），落地只含今天行（2 条）',
+      t110TodayArgs?.only_today === true && t110TodayArgs?.only_unread === undefined && t110TodayArgs?.only_starred === undefined
+      && store.getState().entries.map((e) => e.id).join(',') === '2105,2106');
+    invokeCalls.length = 0;
+    store.getState().selectView('starred');
+    await nTick(20);
+    const t110StarredArgs = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    checkNew('(t110-5) 收藏视图首屏 wire：only_starred=true（不带其余筛选键），落地只含收藏行（1 条）',
+      t110StarredArgs?.only_starred === true && t110StarredArgs?.only_unread === undefined && t110StarredArgs?.only_today === undefined
+      && store.getState().entries.map((e) => e.id).join(',') === '2107');
+
+    /* ---------- (t110-6) 过滤参数 × 范围：feed-10 × 收藏 ---------- */
+    await resetStore();
+    backendRows = [
+      mkT110Row({ id: 2200, published_at: T110_OLD, is_starred: true }),
+      mkT110Row({ id: 2201, published_at: T110_OLD }),
+      mkT110Row({ id: 2202, feed_id: 11, published_at: T110_OLD, is_starred: true }), // 源B 的收藏（范围外）
+    ];
+    await store.getState().bootstrapFromBackend();
+    store.getState().selectFeed('feed-10');
+    await nTick(20);
+    invokeCalls.length = 0;
+    store.getState().selectView('starred');
+    await nTick(20);
+    const t110ScopeArgs = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    checkNew('(t110-6) 收藏视图 × 订阅范围 wire：feed_id=10 + only_starred=true（视图筛选是范围的子集，两参数同发），落地不含范围外收藏',
+      t110ScopeArgs?.feed_id === 10 && t110ScopeArgs?.folder_id === null && t110ScopeArgs?.only_starred === true
+      && store.getState().entries.map((e) => e.id).join(',') === '2200');
+
+    /* ---------- (t110-7) 过滤参数 × 布局：social × 收藏 ---------- */
+    await resetStore();
+    backendRows = [
+      mkT110Row({ id: 2300, published_at: T110_OLD, is_starred: true }),
+      mkT110Row({ id: 2301, published_at: T110_OLD }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    store.getState().selectLayout('social');
+    await nTick(20);
+    invokeCalls.length = 0;
+    store.getState().selectView('starred');
+    await nTick(20);
+    const t110LayoutArgs = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    checkNew('(t110-7) 收藏视图 × 布局 wire：layout=social + only_starred=true（布局维度进查询参数，TASK-094 R7 口径在筛选视图保持）',
+      t110LayoutArgs?.layout === 'social' && t110LayoutArgs?.only_starred === true && t110LayoutArgs?.offset === 0);
+
+    await resetStore(); // 夹具复位：不把 610 行大夹具与 defer 残留带给后续块
+  }
+
+  /* ============================================================
+     TASK-111（二阶段③）：①查询缓存实体预算 ②后台刷新保位。
+     ①审计：「单纯限制为 8 个视图并不能限制每个视图的大小」——TASK-100 P3-7
+       只封键数（LRU 8），TASK-110 分页化后单键 entries 仍随滚动加载无界增长
+       （syncCurrentViewCache 会把当前 1500 条窗口整体落键）。新契约：
+       单键实体预算 VIEW_ENTRIES_CACHE_ENTRY_BUDGET=1000（≥ 页大小 500，截断
+       只发生在加载超 2 页的大库场景），超限尾部截断（缓存语义=首屏快照，
+       丢最老端由恢复后的后台 reload 补齐）；缓存值升级为 {entries, loadedCount,
+       exhausted} 元数据——恢复路径（nav 三处）用**记录值**判定 exhausted 与
+       续拉游标，不重算截断后长度（判别：截断长度 1000 落在页边界上方，
+       「已到底」的快照会被误判成「还有数据」，且续拉 offset 回退重拉已去重
+       丢弃的区间）。
+     ②审计：「后台刷新保留当前阅读位置」——feeds-updated/手动同步/单源刷新
+       → reloadFromBackend 整体替换 entries，newest_first 下新文章插头部使
+       索引后移、虚拟列表视觉跳动。新契约：Timeline 滚动时节流记录顶条锚
+       （可见首条目 id + filterKey，模块级 timelineAnchor），内容刷新落地时
+       bump positionRestoreNonce，Timeline 消费锚：锚 id 仍在同上下文
+       （filterKey 逐字一致）新快照中 → 程序性滚动回其新索引（复用既有
+       suppressNextScrollEvents 抑制）；无锚/上下文已切/锚丢失 → 回落现状。
+       导航路径（selectFeed/selectView/selectLayout/toggleTimelineSort）不
+       bump 信号且切上下文即弃锚——分流显式。
+     夹具：1501/1100 行 feed-10 大夹具驱动预算；缓存写入经 flipEntryFlag
+     （→syncCurrentViewCache，loadMore 不落缓存——缓存语义=首屏/同步快照，
+     既有口径）。保位用纯函数 anchorRestoreIndex + nonce 断言（滚动本体是
+     DOM 行为，由源码形态断言防回退，与 t100/p3 组先例同口径）。
+     ============================================================ */
+  {
+    const fs111 = await import('node:fs');
+    const src111 = (p) => fs111.readFileSync(new URL(p, import.meta.url), 'utf8');
+    const { VIEW_ENTRIES_CACHE_ENTRY_BUDGET, ARTICLES_PAGE_SIZE: t111Page, flipEntryFlag } = await import('../dist-test/store/internals.js');
+    const ta111 = await import('../src/components/timelineAnchor.ts');
+    const filterKeyOf = (s) => `${s.activeContentLayout}|${s.activeViewFilter}|${s.activeFeedFilter}|${s.timelineFilter}|${s.timelineSort}`;
+    const mkT111Row = (o) => mkRow({ feed_id: 10, ...o });
+    const t111Rows = (count, startId) => {
+      const rows = [];
+      for (let i = 0; i < count; i += 1) rows.push(mkT111Row({ id: startId + i, published_at: iso(NOW - i * 60000) }));
+      return rows;
+    };
+    /* 缓存写入驱动器：直接翻旗（同步、无 IPC）→ flipEntryFlag 内部
+       syncCurrentViewCache 把当前窗口（含全部已加载页）落键 */
+    const t111SyncCache = (id) => flipEntryFlag(id, 'isStarred');
+
+    /* -- (t111-0) 预算单点 + 审计注释 + 恢复用记录值（源级防回退） -- */
+    const internalsSrc111 = src111('../src/store/internals.ts');
+    const navSrc111 = src111('../src/store/slices/nav.ts');
+    checkNew('(t111-0) 单键实体预算收口 internals：=1000 且 ≥ 页大小（截断只发生在加载超 2 页场景，首批/次页永不截断）',
+      VIEW_ENTRIES_CACHE_ENTRY_BUDGET === 1000 && VIEW_ENTRIES_CACHE_ENTRY_BUDGET >= t111Page);
+    checkNew('(t111-0) 预算注释载明审计依据（键数上限≠单键大小），恢复路径用缓存记录的 loadedCount/exhausted 而非重算截断长度',
+      internalsSrc111.includes('审计：「单纯限制为 8 个视图并不能限制每个视图的大小」')
+      && internalsSrc111.includes('export function setViewEntriesSnapshot(')
+      && navSrc111.includes('applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted)')
+      && navSrc111.includes('articlesExhausted: cached.exhausted'));
+
+    /* ---------- (t111-1) 预算截断：边界（恰=预算不截断）+ 触发（尾部截断、元数据真值） ---------- */
+    await resetStore();
+    backendRows = t111Rows(1501, 3000); // 1501 行：3 页后余 1 行
+    await store.getState().bootstrapFromBackend(); // 首批 500（3000..3499）
+    await store.getState().loadMoreArticles(); // 1000（..3999）
+    t111SyncCache('3000'); // 缓存落键：当前窗口恰 1000 = 预算
+    const t111c1000 = viewEntriesCache.get('article|all|all');
+    checkNew('(t111-1) 边界：加载恰 1000（=预算）不截断，缓存值=完整快照 + 元数据（loadedCount=1000、exhausted=false）',
+      t111c1000.entries.length === 1000 && t111c1000.loadedCount === 1000 && t111c1000.exhausted === false
+      && t111c1000.entries[0].id === '3000' && t111c1000.entries.at(-1).id === '3999');
+    await store.getState().loadMoreArticles(); // 1500（..4499）→ 超预算
+    t111SyncCache('3002');
+    const t111c1500 = viewEntriesCache.get('article|all|all');
+    checkNew('(t111-1) 截断触发（1500>1000）：尾部截断为 1000 条（首条保留、最老端 500 条丢弃——首屏快照语义，恢复后由后台刷新补齐），loadedCount/exhausted 记录写入时真值（1500/false）不随截断失真',
+      t111c1500.entries.length === 1000 && t111c1500.entries[0].id === '3000' && t111c1500.entries.at(-1).id === '3999'
+      && t111c1500.loadedCount === 1500 && t111c1500.exhausted === false);
+
+    /* ---------- (t111-2) 截断恢复（exhausted=false 态）+ 截断后续拉衔接（判别） ----------
+       离开/回到该范围触发缓存恢复；注入 reload 失败让恢复态存续（否则后台
+       刷新立即整体替换）。判别点：恢复游标 = 记录的 loadedCount=1500（朴素
+       实现重算截断长度会写 1000），续拉 offset=1500 不回退重拉。 */
+    listPlan = { mode: 'reject', error: { message: 't111 注入' } };
+    store.getState().selectFeed('feed-11'); // 离开（其后台 reload 失败被吞）
+    await nTick(10);
+    store.getState().selectFeed('all'); // 回来：缓存命中同步恢复
+    const t111rA = store.getState();
+    checkNew('(t111-2) 截断快照恢复（exhausted=false 态）：entries=截断后的 1000 条、游标按记录 loadedCount=1500 恢复（判别：重算截断长度会写 1000）、exhausted=false 与写入时一致（末次拉取满页）',
+      t111rA.entries.length === 1000 && t111rA.entries[0].id === '3000'
+      && t111rA.articlesCursor['article|all'] === 1500 && t111rA.articlesLimit === 1500
+      && t111rA.articlesExhausted === false);
+    await nTick(10); // 让恢复路径的注入失败 reload 落定（backendReloadInFlight 归零，续拉不再被在途守卫拦截）
+    listPlan = null; // 解除 reject 注入：续拉本身要走通（只用于冻结恢复路径的 reload）
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles(); // 续拉：offset 必须接在真实已加载数之后
+    const t111contArgs = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    const t111rA2 = store.getState();
+    checkNew('(t111-2) 截断后续拉衔接（判别）：offset 用记录的 loadedCount=1500（朴素实现会从截断长度 1000 重拉已去重丢弃的区间）、余下 1 行（4500）追加无重复、游标=1501、exhausted=true（1<500）',
+      t111contArgs?.offset === 1500 && t111contArgs?.limit === 500
+      && t111rA2.entries.length === 1001 && t111rA2.entries.at(-1)?.id === '4500'
+      && new Set(t111rA2.entries.map((e) => e.id)).size === 1001
+      && t111rA2.articlesCursor['article|all'] === 1501 && t111rA2.articlesExhausted === true);
+
+    /* ---------- (t111-3) 截断恢复（exhausted=true 态，判别）+ exhausted 不误判 ----------
+       1100 行 = 500+500+100：末页不满 ⇒ 真实已到底。截断后缓存长度 1000 落在
+       页边界上方——重算长度会把「已到底」误判成「还有数据」并触发伪续拉。 */
+    await resetStore();
+    backendRows = t111Rows(1100, 5000); // 1100 行（5000..6099）
+    await store.getState().bootstrapFromBackend(); // 500
+    await store.getState().loadMoreArticles(); // 1000
+    await store.getState().loadMoreArticles(); // 余 100 行（100<500）→ 真实到底
+    t111SyncCache('5001'); // 缓存落键：1100 条 → 截断 1000，exhausted=true
+    const t111cB = viewEntriesCache.get('article|all|all');
+    checkNew('(t111-3) 前置：加载 1100（末页不满）→ 缓存截断 1000 条但元数据记录 loadedCount=1100 / exhausted=true（尾部截断不丢 exhausted 判据）',
+      t111cB.entries.length === 1000 && t111cB.loadedCount === 1100 && t111cB.exhausted === true);
+    listPlan = { mode: 'reject', error: { message: 't111 注入' } };
+    store.getState().selectFeed('feed-11');
+    await nTick(10);
+    store.getState().selectFeed('all');
+    const t111rB = store.getState();
+    checkNew('(t111-3) 截断恢复（exhausted=true 态，判别）：恢复 exhausted=true（判别：重算截断长度 1000≥500 会误判成 false）、游标=记录 loadedCount=1100',
+      t111rB.entries.length === 1000 && t111rB.articlesExhausted === true
+      && t111rB.articlesCursor['article|all'] === 1100);
+    await nTick(10); // 让恢复路径的注入失败 reload 落定（同 t111-2）
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles();
+    checkNew('(t111-3) exhausted 不误判：恢复后的「已到底」状态拦截伪续拉（不发 list_articles，列表不重复入列）',
+      invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0
+      && store.getState().entries.length === 1000);
+    listPlan = null;
+
+    /* ---------- (t111-4) 后台刷新保位：节流锚记录 + 落地信号 + 锚回位决策 ----------
+       新文章插头部场景：锚 id 7001 从 index 0 后移到 3，决策返回新索引 →
+       Timeline 程序性滚动回位（视觉跳动抵消）；导航路径不 bump 信号。 */
+    await resetStore();
+    ta111.clearTopAnchor();
+    backendRows = [
+      mkT111Row({ id: 7001, published_at: iso(NOW) }),
+      mkT111Row({ id: 7002, published_at: iso(NOW - 1000) }),
+      mkT111Row({ id: 7003, published_at: iso(NOW - 2000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    const t111nonce0 = store.getState().positionRestoreNonce;
+    const t111fkey = filterKeyOf(store.getState());
+    const t111idsBefore = selectVisibleEntries(store.getState()).map((e) => e.id);
+    const t111T0 = NOW + 10000000;
+    checkNew('(t111-4) 顶条锚节流记录：首次记录生效、窗口内重复记录被忽略（约 4 次/秒收敛，锚零订阅不触发渲染）',
+      t111idsBefore.join(',') === '7001,7002,7003'
+      && ta111.recordTopAnchor(t111idsBefore[0], t111fkey, t111T0) === true
+      && ta111.recordTopAnchor('7003', t111fkey, t111T0 + 100) === false
+      && ta111.peekTopAnchor()?.id === '7001');
+    /* 后台刷新：3 篇新文章插入头部（时间戳更新） */
+    backendRows = [
+      mkT111Row({ id: 7102, published_at: iso(NOW + 2000) }),
+      mkT111Row({ id: 7101, published_at: iso(NOW + 1000) }),
+      mkT111Row({ id: 7100, published_at: iso(NOW) }),
+      ...backendRows,
+    ];
+    await store.getState().reloadFromBackend({ keepReadingPosition: true });
+    const t111st4 = store.getState();
+    checkNew('(t111-4) 后台刷新（keepReadingPosition）落地：保位信号 nonce +1（当前视图 all，落地即发出）',
+      t111st4.positionRestoreNonce === t111nonce0 + 1 && t111st4.entries.length === 6);
+    const t111items4 = selectVisibleEntries(t111st4);
+    checkNew('(t111-4) 顶条锚回位决策（新文章插头部场景）：锚 id 7001 由 index 0 后移到 3，决策返回新索引（Timeline 据此 scrollToIndex 原位还原）',
+      t111items4.map((e) => e.id).join(',') === '7102,7101,7100,7001,7002,7003'
+      && ta111.anchorRestoreIndex(ta111.peekTopAnchor(), filterKeyOf(t111st4), t111items4) === 3);
+    const t111nonce4b = store.getState().positionRestoreNonce;
+    await store.getState().reloadFromBackend(); // 导航路径形态：不带 opts
+    checkNew('(t111-4) 分流（导航路径）：不带 keepReadingPosition 的 reload 不 bump 保位信号——用户主动导航时锚机制保持沉默',
+      store.getState().positionRestoreNonce === t111nonce4b);
+    /* 筛选视图：selectView 导航不 bump；后台刷新经 reloadFilteredEntries 透传落地 bump。
+       【TASK-111 R1/F1 改动理由】原断言把 nonce 基线放在 selectView 落定**之后**读取
+       再与自身比较（永不失败，审查变异 M3：selectView 无条件 bump 全量仍绿——空洞）。
+       改为真前后比较：基线在调用前读取，selectView 落定后必须仍等于基线。 */
+    const t111nonce4c0 = store.getState().positionRestoreNonce; // 基线：selectView 调用前
+    store.getState().selectView('starred'); // 无收藏行 → 空列表（导航路径）
+    await nTick(20);
+    checkNew('(t111-4) 分流（筛选视图导航）：selectView 不 bump 保位信号（真前后比较：调用前基线 vs 落定后——selectView 任何形式的 bump 都会转红）',
+      store.getState().positionRestoreNonce === t111nonce4c0);
+    const t111nonce4c = store.getState().positionRestoreNonce; // 透传 bump 用例的基线（selectView 落定后）
+    backendRows.unshift(mkT111Row({ id: 7200, is_starred: true, published_at: iso(NOW + 3000) }));
+    await store.getState().reloadFilteredEntries('starred', { keepReadingPosition: true });
+    checkNew('(t111-4) 分流（筛选视图后台刷新）：reloadFilteredEntries 透传 keepReadingPosition 落地 bump 信号（feeds-updated → 筛选视图透传路径；落地快照即当前视图）',
+      store.getState().positionRestoreNonce === t111nonce4c + 1
+      && store.getState().entries.map((e) => e.id).join(',') === '7200');
+
+    /* ---------- (t111-5) 锚丢失回落 / 主动切范围回落 / 锚不干扰主动滚动 ---------- */
+    /* a) 锚丢失：锚 id 不在新快照（文章被删/被筛出）→ 决策 null，回落现状 */
+    ta111.clearTopAnchor();
+    const t111fkeyS = filterKeyOf(store.getState()); // starred 上下文
+    ta111.recordTopAnchor('7200', t111fkeyS, NOW + 20000000);
+    backendRows = backendRows.filter((r) => r.id !== 7200); // 后端：该收藏文消失
+    const t111nonce5a = store.getState().positionRestoreNonce;
+    await store.getState().reloadFilteredEntries('starred', { keepReadingPosition: true });
+    checkNew('(t111-5) 锚丢失回落（判别）：锚 id 不在新快照 → 决策返回 null（回落现状、不强制顶部——消费侧无可滚动目标），信号照常送达（nonce +1，消费侧对 null 不动作）',
+      ta111.anchorRestoreIndex(ta111.peekTopAnchor(), filterKeyOf(store.getState()), selectVisibleEntries(store.getState())) === null
+      && store.getState().positionRestoreNonce === t111nonce5a + 1);
+    /* b) 主动切范围：锚属于旧上下文（filterKey 失配）→ 不回位。
+       【TASK-111 R1/F2 改动理由】原场景切范围后可见列表为空（唯一收藏行已删），
+       anchorRestoreIndex 返回 null 只因 findIndex 落空、与 filterKey 拦截无关
+       （审查变异 M2：删除 timelineAnchor 的 filterKey 拦截全量仍绿——判别力不成立）。
+       改为「同源换范围」构造：切换后可见集合与切换前**完全一致**（全部行都属于
+       feed-10，锚 id 仍是可见首条），唯一变化是 filterKey 的范围段——决策返回
+       null 只能来自 filterKey 拦截本身（M2 变异下该断言必转红）。 */
+    await resetStore(); // 独立夹具：all 范围两行（均属 feed-10）
+    ta111.clearTopAnchor();
+    backendRows = [
+      mkT111Row({ id: 7300, published_at: iso(NOW) }),
+      mkT111Row({ id: 7301, published_at: iso(NOW - 1000) }),
+    ];
+    await store.getState().bootstrapFromBackend(); // 范围 all：可见 [7300, 7301]
+    const t111fkey5b = filterKeyOf(store.getState()); // 旧上下文（范围 all）
+    ta111.recordTopAnchor('7300', t111fkey5b, NOW + 21000000);
+    const t111nonce5b = store.getState().positionRestoreNonce;
+    store.getState().selectFeed('10'); // 用户主动切范围（真实 scope 形态 '10'：feedId 无前缀；导航，不 bump 信号）
+    await nTick(20);
+    const t111st5b = store.getState();
+    const t111items5b = selectVisibleEntries(t111st5b);
+    const t111idx5b = t111items5b.findIndex((e) => e.id === '7300');
+    checkNew('(t111-5) 主动切范围回落（判别）：filterKey 已失配且锚 id 仍可见（可见列表非空、findIndex 命中——排除「findIndex 落空」假阳性）→ 决策 null 纯因 filterKey 拦截（绝不把上一个范围的阅读位置回放进新范围），导航 reload 不 bump 信号',
+      filterKeyOf(t111st5b) !== t111fkey5b
+      && t111items5b.length === 2 && t111idx5b === 0
+      && ta111.anchorRestoreIndex(ta111.peekTopAnchor(), filterKeyOf(t111st5b), t111items5b) === null
+      && t111st5b.positionRestoreNonce === t111nonce5b);
+    /* c) 主动滚动：锚跟随用户——节流窗口过期后可重新记录（边界 249/250） */
+    const t111T5 = NOW + 30000000;
+    checkNew('(t111-5) 锚不干扰主动滚动：节流窗口过期后重新记录生效（锚跟随用户最终停留位置）、窗口内仍被忽略',
+      ta111.recordTopAnchor('7101', filterKeyOf(store.getState()), t111T5) === true
+      && ta111.recordTopAnchor('7102', filterKeyOf(store.getState()), t111T5 + 249) === false
+      && ta111.recordTopAnchor('7102', filterKeyOf(store.getState()), t111T5 + 250) === true
+      && ta111.peekTopAnchor()?.id === '7102');
+
+    /* -- (t111-6) Timeline / 内容刷新入口接线（源级防回退，与 t109 同口径） -- */
+    const timelineSrc111 = src111('../src/components/Timeline.tsx');
+    const appSrc111 = src111('../src/App.tsx');
+    const syncSrc111 = src111('../src/store/slices/sync.ts');
+    const feedsSrc111 = src111('../src/store/slices/feeds.ts');
+    const t111iRestore = timelineSrc111.indexOf('anchorRestoreIndex(peekTopAnchor(), filterKey, items)');
+    const t111iSuppress = timelineSrc111.indexOf('suppressNextScrollEvents();', t111iRestore);
+    const t111iScroll = timelineSrc111.indexOf("rowVirtualizer.scrollToIndex(idx, { align: 'start' });", t111iSuppress);
+    checkNew('(t111-6) Timeline 接线：滚动记录顶条锚（recordTopAnchor）、上下文切换弃锚（clearTopAnchor）、保位信号消费——先程序性滚动抑制再 scrollToIndex 回位（复用既有机制，防回位被误判为用户滚动）',
+      timelineSrc111.includes('const positionRestoreNonce = useAppStore((s) => s.positionRestoreNonce);')
+      && timelineSrc111.includes('recordTopAnchor(topItem.id, filterKey, performance.now())')
+      && timelineSrc111.includes('clearTopAnchor();')
+      && t111iRestore >= 0 && t111iSuppress > t111iRestore && t111iScroll > t111iSuppress
+      && t111iScroll - t111iSuppress < 120);
+    checkNew('(t111-6) 内容刷新入口携带保位请求（feeds-updated / 手动同步 / 单源刷新），导航入口（nav 三处 + 启动装载）保持无参调用',
+      appSrc111.includes('reloadFromBackend({ keepReadingPosition: true })')
+      && syncSrc111.includes('reloadFromBackend({ keepReadingPosition: true })')
+      && feedsSrc111.includes('reloadFromBackend({ keepReadingPosition: true })'));
+
+    await resetStore(); // 夹具复位：不把大夹具与 reject 注入带给后续块
   }
 
   /* ============================================================

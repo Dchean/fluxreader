@@ -115,7 +115,10 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
              等下方内容抓取完成后一次性 reload，避免「状态同步→闪动→内容→再闪动」 */
           return api.refreshAllFeeds();
         })
-        .then((summary: RefreshSummary | null) => get().reloadFromBackend().then(() => summary))
+        /* TASK-111②：手动同步与后台刷新（feeds-updated）同属内容刷新——reload
+           携带保位请求，落地后 Timeline 消费顶条锚回位（审计「后台刷新保留
+           当前阅读位置」）。 */
+        .then((summary: RefreshSummary | null) => get().reloadFromBackend({ keepReadingPosition: true }).then(() => summary))
         .then((summary: RefreshSummary | null) => {
           set({ syncStatus: 'synced' });
           /* TASK-058：同步失败信息与「N 个源直连失败」是两类不同失败，须**共存**

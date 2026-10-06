@@ -244,6 +244,11 @@ async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec
 /// - read 集合含 remote_id → 远端已读 → 本地已读（read-wins，不反向复活未读）
 /// - starred 集合含 remote_id → 本地收藏；不含 → 取消收藏
 /// - pending 保护：本地有未推送变更的条目跳过，防「刚标读/刚收藏」被远端快照回滚
+///
+/// TASK-112：方向语义收口到 `conflict_policy.rs` 政策单点——本函数按
+/// `GR_READ_DIRECTION` / `GR_STAR_DIRECTION` 消费行级落地函数，不再自持
+/// 方向分支；行为与显式化前逐列一致（收口不是改行为），政策理由与历史
+/// 依据见政策点及 `docs/sync-compat-matrix.md`。
 fn reconcile_reader_state(
     conn: &Connection,
     read_ids: &[i64],
@@ -257,20 +262,213 @@ fn reconcile_reader_state(
 
     for (remote_id, aid) in &maps.mf_id_to_article {
         let aid = *aid;
+        // TASK-112 政策（conflict_policy 头注「共享守卫」）：pending 保护——
+        // 本地有未推送变更的条目跳过远端快照，交给 push 段队列，不被回滚。
         if maps.pending_ids.contains(&aid) {
-            continue; // 交给 push 段队列，不被远端快照回滚
+            continue;
         }
-        if read_set.contains(remote_id) {
-            if let Ok(n) = db::sync_mark_read_if_unread(conn, aid) {
-                report.merged_states += n;
-            }
+        // TASK-112 政策（GR_READ_DIRECTION = RemoteReadWins 单向 read-wins）：
+        // 远端已读 → 本地已读；远端未读不回写（不复活未读）。
+        report.merged_states += conflict_policy::apply_read_by_policy(
+            conn,
+            conflict_policy::GR_READ_DIRECTION,
+            read_set.contains(remote_id),
+            aid,
+        );
+        // TASK-112 政策（GR_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
+        // 命中 → 收藏；未命中 → 取消收藏。
+        report.merged_states += conflict_policy::apply_star_by_policy(
+            conn,
+            conflict_policy::GR_STAR_DIRECTION,
+            starred_set.contains(remote_id),
+            aid,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{NewArticle, MIGRATIONS};
+
+    // TASK-113：本段是测试模块级说明而非某条目的文档——原 `///` 块后接空行
+    // 触发 clippy empty_line_after_doc_comments，且列表后的未缩进续行触发
+    // doc_lazy_continuation（-D warnings 下致命），故改普通注释（文字不变）。
+    // TASK-112 政策锁定测试：GR 轻量对账的「操作 × 协议」格逐格锁死。
+    // 判别力声明（「修前红」语义：对应政策被翻转/守卫被移除时必红）——
+    // - 单向格：GR_READ_DIRECTION 被改成双向 → remote_unread 用例红；
+    // - 双向格：GR_STAR_DIRECTION 被改成单向 → 两个 star 用例红；
+    // - pending 保护：守卫被移除 → pending 用例红。
+    // 本卡行为零变化，故全部用例在显式化前后都绿；CI（cargo test）承担执行。
+
+    fn conn() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    /// 造一篇已绑定远端 entry 的本地文章，返回 (article id, remote entry id)。
+    /// feeds.feed_url 有 UNIQUE 约束，故 feed/folder/guid 均按 remote_id 派生，
+    /// 同一连接内可造多篇。
+    fn seed_bound(conn: &rusqlite::Connection, remote_id: i64) -> i64 {
+        let folder = db::create_folder(conn, &format!("测试分类{remote_id}"), "article").unwrap();
+        let feed = db::insert_feed(
+            conn,
+            &format!("https://f.example/{remote_id}.rss"),
+            None,
+            "F",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let a = NewArticle {
+            guid: format!("g{remote_id}"),
+            url: Some(format!("https://e.example/p/{remote_id}")),
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "b".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-01-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let aid = db::upsert_article_with_feed(conn, feed, &a, false)
+            .unwrap()
+            .0;
+        db::set_article_remote_id(conn, aid, remote_id).unwrap();
+        aid
+    }
+
+    /// 单条映射的 SyncMatchMaps（reconcile 只消费 mf_id_to_article 与 pending_ids）。
+    fn maps_for(remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
+        db::SyncMatchMaps {
+            url_to_id: Default::default(),
+            id_to_mf_id: Default::default(),
+            id_to_mf_pair: Default::default(),
+            pending_ids: if pending {
+                std::iter::once(aid).collect()
+            } else {
+                Default::default()
+            },
+            feed_mf_to_id: Default::default(),
+            mf_id_to_article: std::iter::once((remote_id, aid)).collect(),
         }
-        if starred_set.contains(remote_id) {
-            if let Ok(n) = db::sync_mark_starred_if_unstarred(conn, aid) {
-                report.merged_states += n;
-            }
-        } else if let Ok(n) = db::sync_mark_unstarred_if_starred(conn, aid) {
-            report.merged_states += n;
-        }
+    }
+
+    fn is_read(conn: &rusqlite::Connection, aid: i64) -> bool {
+        conn.query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+            != 0
+    }
+
+    fn is_starred(conn: &rusqlite::Connection, aid: i64) -> bool {
+        conn.query_row(
+            "SELECT is_starred FROM articles WHERE id = ?1",
+            [aid],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            != 0
+    }
+
+    /// GR 单向格锁定：远端「未读」（read 集合未命中）不得复活本地已读。
+    /// 政策被翻成双向时本用例红（sync_mark_unread_if_read 会把 is_read 打回 0）。
+    #[test]
+    fn gr_reconcile_remote_unread_does_not_revive_local_read() {
+        let conn = conn();
+        let aid = seed_bound(&conn, 101);
+        conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [aid])
+            .unwrap();
+
+        let mut report = SyncReport::default();
+        reconcile_reader_state(&conn, &[], &[], &maps_for(101, aid, false), &mut report);
+
+        assert!(
+            is_read(&conn, aid),
+            "GR 政策（单向 read-wins）：远端未读不得复活本地已读"
+        );
+        assert_eq!(
+            report.merged_states, 0,
+            "单向格：远端未读不应产生任何状态写入"
+        );
+    }
+
+    /// GR 单向格命中侧：远端已读 → 本地已读（read-wins 收敛路径）。
+    #[test]
+    fn gr_reconcile_remote_read_marks_local_read() {
+        let conn = conn();
+        let aid = seed_bound(&conn, 102);
+
+        let mut report = SyncReport::default();
+        reconcile_reader_state(&conn, &[102], &[], &maps_for(102, aid, false), &mut report);
+
+        assert!(is_read(&conn, aid), "远端已读必须落地本地已读");
+        assert_eq!(report.merged_states, 1, "命中侧恰好一次状态写入");
+    }
+
+    /// GR 星标格双向锁定：同一轮里两个条目分别验证「未命中 → 取消收藏」
+    /// 与「命中 → 收藏」。政策被改成单向时两个断言其一必红。
+    #[test]
+    fn gr_reconcile_starred_is_bidirectional() {
+        let conn = conn();
+        let starred = seed_bound(&conn, 103);
+        let unstarred = seed_bound(&conn, 104);
+        conn.execute(
+            "UPDATE articles SET is_starred = 1 WHERE id = ?1",
+            [starred],
+        )
+        .unwrap();
+
+        let mut report = SyncReport::default();
+        // starred_ids 只含 104：103 未命中（远端已取消收藏），104 命中。
+        let maps = db::SyncMatchMaps {
+            mf_id_to_article: [(103, starred), (104, unstarred)].into_iter().collect(),
+            ..maps_for(103, starred, false)
+        };
+        reconcile_reader_state(&conn, &[], &[104], &maps, &mut report);
+
+        assert!(
+            !is_starred(&conn, starred),
+            "GR 星标双向：远端未命中必须取消本地收藏"
+        );
+        assert!(
+            is_starred(&conn, unstarred),
+            "GR 星标双向：远端命中必须收藏本地"
+        );
+        assert_eq!(report.merged_states, 2, "双向各一次写入");
+    }
+
+    /// 共享守卫锁定：pending（已入队未推送）条目整行跳过——远端快照既不能
+    /// 标读它、也不能取消它的收藏。守卫被移除时本用例红（命中侧会写 is_read、
+    /// 未命中侧会清 is_starred）。
+    #[test]
+    fn gr_reconcile_pending_guard_blocks_snapshot_rollback() {
+        let conn = conn();
+        let aid = seed_bound(&conn, 105);
+        conn.execute("UPDATE articles SET is_starred = 1 WHERE id = ?1", [aid])
+            .unwrap();
+
+        let mut report = SyncReport::default();
+        // 远端快照：已读命中 + 收藏未命中——若无 pending 保护会同时翻转两列。
+        reconcile_reader_state(&conn, &[105], &[], &maps_for(105, aid, true), &mut report);
+
+        assert!(
+            !is_read(&conn, aid),
+            "pending 保护：本地未读不得被远端已读快照覆盖"
+        );
+        assert!(
+            is_starred(&conn, aid),
+            "pending 保护：本地收藏不得被远端未收藏快照清除"
+        );
+        assert_eq!(report.merged_states, 0, "pending 命中行不产生任何写入");
     }
 }

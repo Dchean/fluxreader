@@ -49,6 +49,9 @@ pub(super) fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
             // 已读广播：绑定的 entry + 记账的全部同文副本 entry 一并标读
             // （双端场景：Read You 不去重，手机上另一源的副本也要已读，
             // 否则手机读完这篇、那个源里又冒出来一篇未读的"同一篇"）
+            // TASK-112 政策：本分支是「同文副本读状态传播 = read 广播保持现状」
+            // 的消费点（政策定义与 DEC-refactor-roadmap-20261005 第 6 条原文见
+            // conflict_policy.rs 头注；unread/star/unstar 不广播）。
             "read" => {
                 let mut ids = vec![remote_id];
                 for dup in db::article_dup_entries(conn, article_id).unwrap_or_default() {

@@ -252,7 +252,10 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
       .then((n) => {
         if (n === null) return;
         get().showToast(n > 0 ? `已刷新，新增 ${n} 条` : '已刷新，无新文章');
-        return get().reloadFromBackend();
+        /* TASK-111②：单源刷新与后台刷新（feeds-updated）同属内容刷新——
+           reload 携带保位请求，落地后 Timeline 消费顶条锚回位（审计「后台
+           刷新保留当前阅读位置」）。 */
+        return get().reloadFromBackend({ keepReadingPosition: true });
       })
       .catch((e: unknown) => {
         const msg = extractError(e);
