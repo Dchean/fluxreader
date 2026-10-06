@@ -56,6 +56,7 @@ entries / greader_pull / fever_pull 三个子模块**不含任何 pub 项**—�
 `#[doc(hidden)] pub` 的可测性小口子（集成测试注入游标墙钟，构造确定性
 时间线），需经下方显式 `pub use` 暴露给 tests/；不影响任何对外行为。
 ============================================================ */
+mod conflict_policy;
 mod credentials;
 mod entries;
 mod fever_pull;
@@ -73,6 +74,7 @@ pub use subscriptions::*;
 pub use greader_pull::set_greader_pull_clock_override;
 
 /* 无 pub 项的内部实现模块：私有重导出，仅供 sync 内部（含兄弟子模块）使用 */
+use conflict_policy::*;
 use entries::*;
 use fever_pull::*;
 use greader_pull::*;

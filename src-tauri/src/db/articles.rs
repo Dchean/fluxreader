@@ -182,8 +182,10 @@ fn list_articles_sql(q: &ArticleQuery) -> (String, Vec<rusqlite::types::Value>) 
     sql.push_str(&format!(" ORDER BY {order} LIMIT ? OFFSET ?"));
     // P3-4（自检 2026-09-29）：limit 夹取——负数在 SQLite 的 LIMIT 语义是
     // 「不限制」，调用方一处笔误就会把整个库倒出来（search_articles 的 P3[8]
-    // 同款修法，见本文件 :367 附近）。负 → 0 行；合法大值（前端
-    // ARTICLES_PAGE_SIZE=100000）原样放行，不设上限。
+    // 同款修法，见本文件 :367 附近）。负 → 0 行；合法大值原样放行，不设上限
+    // （TASK-112 注释修正：前端 ARTICLES_PAGE_SIZE=500，见 src/store/internals.ts
+    // ——TASK-110 起真分页；100000 是废除前 reloadFilteredEntries 的「近似全集」
+    // 旧字面量，本处旧注释引用有误）。
     params.push(q.limit.max(0).into());
     params.push(q.offset.into());
     (sql, params)

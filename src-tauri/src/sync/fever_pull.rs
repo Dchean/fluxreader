@@ -183,6 +183,13 @@ pub(super) async fn pull_entries_fever(
 /// - `saved_item_ids` 含 remote_id → 本地收藏；不含 → 取消收藏
 ///
 /// pending 保护：本地有未推送变更的条目跳过，防把「刚标读/刚收藏」瞬间回滚。
+///
+/// TASK-112：方向语义收口到 `conflict_policy.rs` 政策单点——本函数按
+/// `FEVER_READ_DIRECTION`（UnreadSetBidirectional 双向权威）/
+/// `FEVER_STAR_DIRECTION` 消费行级落地函数，不再自持方向分支；行为与
+/// 显式化前逐列一致（收口不是改行为），双向选择的前提（Fever 只有
+/// unread/saved 集合、Miniflux 按 URL 去重）与守卫说明见政策点及
+/// `docs/sync-compat-matrix.md`。
 fn reconcile_fever_state(
     conn: &Connection,
     unread: &[i64],
@@ -196,23 +203,220 @@ fn reconcile_fever_state(
 
     for (remote_id, aid) in &maps.mf_id_to_article {
         let aid = *aid;
+        // TASK-112 政策（conflict_policy 头注「共享守卫」）：pending 保护——
+        // 本地有未推送变更的条目跳过远端快照，交给 push 段队列，不被回滚。
         if maps.pending_ids.contains(&aid) {
-            continue; // 交给 push 段队列，不被远端快照回滚
+            continue;
         }
-        let want_read = !unread_set.contains(remote_id);
-        if want_read {
-            if let Ok(n) = db::sync_mark_read_if_unread(conn, aid) {
-                report.merged_states += n;
-            }
-        } else if let Ok(n) = db::sync_mark_unread_if_read(conn, aid) {
-            report.merged_states += n;
+        // TASK-112 政策（FEVER_READ_DIRECTION = UnreadSetBidirectional 双向权威）：
+        // unread 集合权威——命中 → 本地未读（可复活未读）；未命中 → 本地已读。
+        report.merged_states += conflict_policy::apply_read_by_policy(
+            conn,
+            conflict_policy::FEVER_READ_DIRECTION,
+            !unread_set.contains(remote_id),
+            aid,
+        );
+        // TASK-112 政策（FEVER_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
+        // 命中 → 收藏；未命中 → 取消收藏。
+        report.merged_states += conflict_policy::apply_star_by_policy(
+            conn,
+            conflict_policy::FEVER_STAR_DIRECTION,
+            starred_set.contains(remote_id),
+            aid,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{NewArticle, MIGRATIONS};
+
+    /// TASK-112 政策锁定测试：Fever 对账的「操作 × 协议」格逐格锁死。
+    /// 判别力声明（对应政策被翻转/守卫被移除时必红）——
+    /// - 双向格：FEVER_READ_DIRECTION 被改成单向（RemoteReadWins）→
+    ///   remote_unread 复活用例红（本地已读不再被翻回未读）；
+    /// - 单向命中侧被移除 → read 落地用例红；
+    /// - pending 保护：守卫被移除 → pending 用例红。
+    /// 本卡行为零变化，故全部用例在显式化前后都绿；CI（cargo test）承担执行。
+    ///
+    /// 失败守卫（reconcile_ok：集合拉取失败跳过对账）的端到端锁定依赖 HTTP 层，
+    /// 由 live 测试（tests/fever_sync_live_e2e.rs，#[ignore]）与 CI 承担——
+    /// mock_greader 的 Fever 路由未实现 unread/saved/items 端点，无法在
+    /// src/ 范围内注入（tests/ 不在本卡允许修改范围）。
+
+    fn conn() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    /// 造一篇已绑定远端 Fever item 的本地文章（feeds.feed_url UNIQUE →
+    /// feed/folder/guid 按 remote_id 派生，同一连接可造多篇）。
+    fn seed_bound(conn: &rusqlite::Connection, remote_id: i64) -> i64 {
+        let folder = db::create_folder(conn, &format!("测试分类{remote_id}"), "article").unwrap();
+        let feed = db::insert_feed(
+            conn,
+            &format!("https://f.example/{remote_id}.rss"),
+            None,
+            "F",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let a = NewArticle {
+            guid: format!("g{remote_id}"),
+            url: Some(format!("https://e.example/p/{remote_id}")),
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "b".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-01-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let aid = db::upsert_article_with_feed(conn, feed, &a, false)
+            .unwrap()
+            .0;
+        db::set_article_remote_id(conn, aid, remote_id).unwrap();
+        aid
+    }
+
+    /// 单条映射的 SyncMatchMaps（reconcile 只消费 mf_id_to_article 与 pending_ids）。
+    fn maps_for(remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
+        db::SyncMatchMaps {
+            url_to_id: Default::default(),
+            id_to_mf_id: Default::default(),
+            id_to_mf_pair: Default::default(),
+            pending_ids: if pending {
+                std::iter::once(aid).collect()
+            } else {
+                Default::default()
+            },
+            feed_mf_to_id: Default::default(),
+            mf_id_to_article: std::iter::once((remote_id, aid)).collect(),
         }
-        if starred_set.contains(remote_id) {
-            if let Ok(n) = db::sync_mark_starred_if_unstarred(conn, aid) {
-                report.merged_states += n;
-            }
-        } else if let Ok(n) = db::sync_mark_unstarred_if_starred(conn, aid) {
-            report.merged_states += n;
-        }
+    }
+
+    fn is_read(conn: &rusqlite::Connection, aid: i64) -> bool {
+        conn.query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+            != 0
+    }
+
+    fn is_starred(conn: &rusqlite::Connection, aid: i64) -> bool {
+        conn.query_row(
+            "SELECT is_starred FROM articles WHERE id = ?1",
+            [aid],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            != 0
+    }
+
+    /// Fever 双向格核心锁定：远端 unread 集合命中 → 本地已读被翻回未读。
+    /// 政策被改成单向（RemoteReadWins）时本用例红——这正是 Fever 与 GR 的
+    /// 分叉点，必须显式锁死。
+    #[test]
+    fn fever_reconcile_remote_unread_revives_local_unread() {
+        let conn = conn();
+        let aid = seed_bound(&conn, 201);
+        conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [aid])
+            .unwrap();
+
+        let mut report = SyncReport::default();
+        reconcile_fever_state(&conn, &[201], &[], &maps_for(201, aid, false), &mut report);
+
+        assert!(
+            !is_read(&conn, aid),
+            "Fever 政策（unread 集合双向权威）：远端未读必须复活本地未读"
+        );
+        assert_eq!(report.merged_states, 1, "命中侧恰好一次状态写入");
+    }
+
+    /// Fever 双向格未命中侧：unread 集合不含 → 本地未读被翻成已读
+    /// （Fever 无法列举已读条目，「未命中 = 已读」是唯一可用信号）。
+    #[test]
+    fn fever_reconcile_unread_miss_marks_local_read() {
+        let conn = conn();
+        let aid = seed_bound(&conn, 202);
+
+        let mut report = SyncReport::default();
+        reconcile_fever_state(&conn, &[], &[], &maps_for(202, aid, false), &mut report);
+
+        assert!(is_read(&conn, aid), "unread 未命中必须落地本地已读");
+        assert_eq!(report.merged_states, 1, "未命中侧恰好一次状态写入");
+    }
+
+    /// Fever 星标格双向锁定：未命中 → 取消收藏；命中 → 收藏。
+    #[test]
+    fn fever_reconcile_starred_is_bidirectional() {
+        let conn = conn();
+        let starred = seed_bound(&conn, 203);
+        let unstarred = seed_bound(&conn, 204);
+        conn.execute(
+            "UPDATE articles SET is_starred = 1 WHERE id = ?1",
+            [starred],
+        )
+        .unwrap();
+
+        let mut report = SyncReport::default();
+        // saved 集合只含 204：203 未命中（远端已取消收藏），204 命中。
+        let maps = db::SyncMatchMaps {
+            mf_id_to_article: [(203, starred), (204, unstarred)].into_iter().collect(),
+            ..maps_for(203, starred, false)
+        };
+        reconcile_fever_state(&conn, &[203, 204], &[204], &maps, &mut report);
+
+        assert!(
+            !is_starred(&conn, starred),
+            "Fever 星标双向：saved 未命中必须取消本地收藏"
+        );
+        assert!(
+            is_starred(&conn, unstarred),
+            "Fever 星标双向：saved 命中必须收藏本地"
+        );
+        // 读状态侧：两者都在 unread 集合 → 双向落点为「未读」，但两篇本就是
+        // 未读（条件写不命中 0 行），不计入 merged_states。
+        assert!(
+            !is_read(&conn, starred) && !is_read(&conn, unstarred),
+            "unread 命中的条目应保持未读"
+        );
+        assert_eq!(report.merged_states, 2, "星标双向各一次写入");
+    }
+
+    /// 共享守卫锁定：pending（已入队未推送）条目整行跳过——unread 命中
+    /// 不能翻回未读、saved 未命中不能清收藏。守卫被移除时本用例红。
+    #[test]
+    fn fever_reconcile_pending_guard_blocks_snapshot_rollback() {
+        let conn = conn();
+        let aid = seed_bound(&conn, 205);
+        conn.execute("UPDATE articles SET is_read = 1 WHERE id = ?1", [aid])
+            .unwrap();
+        conn.execute("UPDATE articles SET is_starred = 1 WHERE id = ?1", [aid])
+            .unwrap();
+
+        let mut report = SyncReport::default();
+        // 远端快照：unread 命中 + saved 未命中——若无 pending 保护会同时翻转两列。
+        reconcile_fever_state(&conn, &[205], &[], &maps_for(205, aid, true), &mut report);
+
+        assert!(
+            is_read(&conn, aid),
+            "pending 保护：本地已读不得被远端未读快照覆盖"
+        );
+        assert!(
+            is_starred(&conn, aid),
+            "pending 保护：本地收藏不得被远端未收藏快照清除"
+        );
+        assert_eq!(report.merged_states, 0, "pending 命中行不产生任何写入");
     }
 }
