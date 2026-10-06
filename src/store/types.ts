@@ -164,7 +164,10 @@ export interface AppState {
   /** 启动装载失败信息（tauri 模式后端异常时展示错误态+重试，绝不回退 mock 演示数据——P0-2） */
   bootstrapError: string | null;
   retryBootstrap: () => Promise<void>;
-  reloadFromBackend: () => Promise<void>;
+  /** 从后端拉全量快照替换本地状态。TASK-111②：opts.keepReadingPosition 仅由
+      内容刷新路径（feeds-updated / 手动同步 / 单源刷新）传入，落地时发出保位
+      信号；导航路径（selectFeed/selectView/selectLayout 等）不传，不触发回位。 */
+  reloadFromBackend: (opts?: { keepReadingPosition?: boolean }) => Promise<void>;
   /** 当前视图的分页游标（= 当前范围已从后端加载的文章数）。每次 reload /
       视图切换 / 范围切换时，按该范围自己的 per-scope 游标恢复（TASK-052）。 */
   articlesLimit: number;
@@ -175,11 +178,16 @@ export interface AppState {
   articlesLoading: boolean;
   /** 已加载完所有文章（列表底部显示「到底了」） */
   articlesExhausted: boolean;
+  /** TASK-111②：后台刷新保位信号（nonce）。内容刷新路径（feeds-updated /
+      手动同步 / 单源刷新）的 reload 落地时 bump；导航路径不 bump。Timeline
+      订阅它，变化时消费顶条锚（timelineAnchor）做程序性回位。 */
+  positionRestoreNonce: number;
   /** 滚动到底部时按需拉取下一批文章（追加到 entries）。 */
   loadMoreArticles: () => Promise<void>;
   /** 切换视图到收藏/未读/今天时，按后端筛选拉取完整列表并替换 entries。
-      这些视图需要完整数据，而「全部」视图的 entries 是分页快照。 */
-  reloadFilteredEntries: (view: ViewFilterType) => Promise<void>;
+      这些视图需要完整数据，而「全部」视图的 entries 是分页快照。
+      TASK-111②：opts.keepReadingPosition 仅由后台刷新透传（保位信号）。 */
+  reloadFilteredEntries: (view: ViewFilterType, opts?: { keepReadingPosition?: boolean }) => Promise<void>;
   /** 搜索/深层打开文章：计算目标文章在当前筛选下的绝对位置，从该页加载列表
       （而非从头拉 500 篇），并选中该文章。解决「搜索结果是很老的文章时，
       列表还停在第 1 页、定位不到」的问题。 */

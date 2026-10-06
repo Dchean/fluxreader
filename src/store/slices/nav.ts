@@ -1,6 +1,6 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
-import { ARTICLES_PAGE_SIZE, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, syncCurrentViewCache, viewEntriesCache } from '../internals';
+import { getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, syncCurrentViewCache, viewEntriesCache } from '../internals';
 import { selectVisibleEntries } from '../selectors';
 import type { AppState } from '../types';
 
@@ -73,12 +73,17 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          由该收口统一处置，不再在此整体清空。
          TASK-109②：fromBackend=false——缓存回放是近期 UI 状态而非后端真值，
          不 bump 条目版本（在途乐观声明的回滚仍有效）。 */
-      const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors, false);
+      const merged = mergeSnapshotEntries(get().entries, cached.entries, get().hydratedIds, get().hydrationErrors, false);
       /* TASK-110①：exhausted 真实判定随快照长度（原筛选视图恒 true、all 视图恒
          false——两者都随分页化失效）；缓存快照即最近一次拉取的首屏/续拉结果，
-         「长度 < 页大小 ⇒ 已到底」与拉取时的判定同口径。 */
-      set({ entries: merged.entries, articlesExhausted: cached.length < ARTICLES_PAGE_SIZE, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
-      get().applyArticlesCursor(scopeKey, cached.length, cached.length < ARTICLES_PAGE_SIZE);
+         「长度 < 页大小 ⇒ 已到底」与拉取时的判定同口径。
+         TASK-111①：判定与游标恢复改用缓存**记录的元数据**（exhausted /
+         loadedCount）而非截断后的 entries.length——单键实体预算超限尾部截断后，
+         截断长度若落在页大小边界附近会把「已到底」误判成「还有数据」（或反），
+         且续拉 offset 会回退重拉已去重丢弃的区间；记录值是写入时的真实口径
+         （含偏移漂移下 entries 短于游标的形态），恢复行为与写入时逐字一致。 */
+      set({ entries: merged.entries, articlesExhausted: cached.exhausted, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
+      get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
        reload 自身的 toast 给出，这里只吞掉残余重抛，避免 unhandled rejection。 */
@@ -120,14 +125,16 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       /* TASK-103：同 selectLayout——快照恢复按 id 继承正文与水合终态（合并收口
          在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。
          TASK-109②：fromBackend=false（缓存回放非后端真值，不 bump 版本）。 */
-      const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors, false);
+      const merged = mergeSnapshotEntries(get().entries, cached.entries, get().hydratedIds, get().hydrationErrors, false);
       /* TASK-110①：exhausted 真实判定随快照长度（与 selectLayout 同口径收口——
          原写法 `view !== 'all'` 是「筛选视图拉全集 ⇒ 恒已到底」的旧语义：分页化后
          筛选视图的缓存快照可能是未满页的部分页，误标已到底会挡住续拉，旧文章
          在「缓存命中 + 后台刷新失败」的窗口内不可达）。缓存快照即最近一次拉取的
-         首屏/续拉结果，「长度 < 页大小 ⇒ 已到底」与拉取时的判定同口径。 */
-      set({ activeViewFilter: view, openedReadIds: {}, entries: merged.entries, articlesExhausted: cached.length < ARTICLES_PAGE_SIZE, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
-      get().applyArticlesCursor(scopeKey, cached.length, cached.length < ARTICLES_PAGE_SIZE);
+         首屏/续拉结果，「长度 < 页大小 ⇒ 已到底」与拉取时的判定同口径。
+         TASK-111①：与 selectLayout 同口径——判定/游标恢复用缓存记录的元数据
+         （exhausted / loadedCount），不重算截断后的快照长度（理由见 selectLayout）。 */
+      set({ activeViewFilter: view, openedReadIds: {}, entries: merged.entries, articlesExhausted: cached.exhausted, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
+      get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
       if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
@@ -171,11 +178,13 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       /* TASK-103：同 selectLayout——快照恢复按 id 继承正文与水合终态（合并收口
          在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。
          TASK-109②：fromBackend=false（缓存回放非后端真值，不 bump 版本）。 */
-      const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors, false);
+      const merged = mergeSnapshotEntries(get().entries, cached.entries, get().hydratedIds, get().hydrationErrors, false);
       /* TASK-110①：exhausted 真实判定随快照长度（与 selectLayout/selectView 同口径
-         收口——`view !== 'all'` 的恒真/恒 false 旧语义随分页化失效，理由见 selectLayout）。 */
-      set({ entries: merged.entries, articlesExhausted: cached.length < ARTICLES_PAGE_SIZE, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
-      get().applyArticlesCursor(scopeKey, cached.length, cached.length < ARTICLES_PAGE_SIZE);
+         收口——`view !== 'all'` 的恒真/恒 false 旧语义随分页化失效，理由见 selectLayout）。
+         TASK-111①：与 selectLayout 同口径——判定/游标恢复用缓存记录的元数据
+         （exhausted / loadedCount），不重算截断后的快照长度（理由见 selectLayout）。 */
+      set({ entries: merged.entries, articlesExhausted: cached.exhausted, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
+      get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
     if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });

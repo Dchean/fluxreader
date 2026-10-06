@@ -1,7 +1,7 @@
 import type { StateCreator } from 'zustand';
 import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
-import { ARTICLES_PAGE_SIZE, appStore, buildFeedIndex, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, viewEntriesCache } from '../internals';
+import { ARTICLES_PAGE_SIZE, appStore, buildFeedIndex, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, setViewEntriesSnapshot } from '../internals';
 import type { AppState } from '../types';
 import type { ContentLayoutType } from '../../types';
 
@@ -22,6 +22,7 @@ export type BootstrapSlice = Pick<
   | 'articlesLoading'
   | 'articlesExhausted'
   | 'articlesCursor'
+  | 'positionRestoreNonce'
   | 'reloadFromBackend'
   | 'loadMoreArticles'
   | 'reloadFilteredEntries'
@@ -88,6 +89,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   articlesCursor: {},
   articlesLoading: false,
   articlesExhausted: false,
+  /* TASK-111②：后台刷新保位信号（nonce）。仅 reloadFromBackend /
+     reloadFilteredEntries 以 keepReadingPosition 落地时 bump（feeds-updated /
+     手动同步 / 单源刷新路径）；导航路径（selectFeed/selectView/selectLayout/
+     toggleTimelineSort）与启动装载不 bump——Timeline 订阅该 nonce，变化时消费
+     顶条锚（timelineAnchor）做程序性回位。nonce 而非布尔：连续多次后台刷新
+     每次都要触发一次消费，即使 entries 引用恰未变化。 */
+  positionRestoreNonce: 0,
 
   /* ================= 数据源：后端 SQLite ⇄ mock ================= */
 
@@ -100,9 +108,15 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       「当前范围已加载了多少条」与列表实际能显示多少条脱节：单源视图下首批
       500 条里可能一条属于该源，且游标直接跳到 500（该源的老文章永远够不到）。
       范围由 get() 在**发起时**读取：异步等待期间用户切范围，结果交由下面
-      reloadGeneration 代际守卫整体丢弃（与既有的「旧代际 reload 被丢弃」同口径）。 */
-  reloadFromBackend: async () => {
+      reloadGeneration 代际守卫整体丢弃（与既有的「旧代际 reload 被丢弃」同口径）。
+
+      TASK-111②：opts.keepReadingPosition —— 仅内容刷新路径（feeds-updated /
+      手动同步 / 单源刷新）传入。落地时 bump positionRestoreNonce 让 Timeline
+      消费顶条锚回位（审计「后台刷新保留当前阅读位置」）；导航路径不传，
+      锚机制对用户主动切换保持沉默（分流显式化）。 */
+  reloadFromBackend: async (opts) => {
     const gen = ++reloadGeneration;
+    const keepReadingPosition = opts?.keepReadingPosition === true;
     backendReloadInFlight++;
     try {
       /* TASK-109①：发起时一次性快照「范围×布局×排序」——查询参数、分页游标键
@@ -156,7 +170,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       // 会被当成「全部」的首批恢复（数据错配）。TASK-094：键首段本就是布局。
       // TASK-103：缓存写入的是继承过正文的合并结果，缓存恢复（selectFeed 等）
       // 才能零延迟还原正文。
-      viewEntriesCache.set(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart), nextEntries);
+      // TASK-111①：经 setViewEntriesSnapshot 收口——单键实体预算（超限尾部截断）
+      // + 分页元数据（loadedCount/exhausted 取写入时真值），恢复路径用记录值判定。
+      setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart), nextEntries, articles.length, articles.length < ARTICLES_PAGE_SIZE);
       set((s) => ({
         ...reconcileCategories(s, categories),
         entries: nextEntries,
@@ -172,6 +188,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
            正是 REQ-001「刷新后社交卡片一直加载正文」的根因） */
         hydratedIds: merged.hydratedIds,
         hydrationErrors: merged.hydrationErrors,
+        /* TASK-111②：保位信号仅在「落地快照就是当前视图」时发出（'all'）。
+           筛选视图下本落地的 'all' 快照会被紧随的 reloadFilteredEntries 整体
+           替换，信号由后者发出——Timeline 消费时 items 已是最终快照，不会对
+           过渡快照做错误回位。 */
+        ...(keepReadingPosition && s.activeViewFilter === 'all'
+          ? { positionRestoreNonce: s.positionRestoreNonce + 1 }
+          : {}),
       }));
       /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
       void api.syncStatus().then((st) => {
@@ -179,8 +202,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       }).catch(() => { /* TASK-067 N10：纯提示性刷新，失败不打扰 */ });
       // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
       // （状态/内容可能变化，entries 需同步刷新为筛选结果）
+      // TASK-111②：保位请求随路径透传——'all' 快照只是过渡态，信号由筛选
+      // 快照落地时发出。
       const view = get().activeViewFilter;
-      if (view !== 'all') void get().reloadFilteredEntries(view);
+      if (view !== 'all') void get().reloadFilteredEntries(view, keepReadingPosition ? { keepReadingPosition: true } : undefined);
     } finally {
       backendReloadInFlight--;
     }
@@ -296,8 +321,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       （QueryScope.viewFilter 单点派生，游标键复用 scopePageKey）。
 
       TASK-052：查询同样带**当前订阅范围**（feed_id / folder_id）。同源下切视图
-      是同一范围、更窄的口径（视图筛选是范围的子集），两条路径共用范围游标。 */
-  reloadFilteredEntries: async (view) => {
+      是同一范围、更窄的口径（视图筛选是范围的子集），两条路径共用范围游标。
+
+      TASK-111②：opts.keepReadingPosition —— 仅 reloadFromBackend 的后台刷新
+      透传（feeds-updated / 手动同步 / 单源刷新）；selectView / toggleTimelineSort
+      等导航路径不传。落地时 bump positionRestoreNonce（本快照即当前视图，
+      守卫已确保 activeViewFilter === view）。 */
+  reloadFilteredEntries: async (view, opts) => {
     if (get().dataMode !== 'tauri') return;
     backendReloadInFlight++;
     /* fix-4（自检 P2-2）：发起时快照「范围×布局×排序」口径——与 loadMoreArticles 的
@@ -341,8 +371,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     // 替换 entries（筛选视图首屏），重置分页游标（续拉与「全部」视图同机制）
     // TASK-103：同 reloadFromBackend——快照替换按 id 继承正文与水合终态（合并
     // 逻辑收口在 mergeSnapshotEntries，不得在此另写一份），终态按 id 裁剪。
+    // TASK-111①：经 setViewEntriesSnapshot 收口——单键实体预算 + 分页元数据。
     const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
-    viewEntriesCache.set(QueryScope.viewKey(layoutAtStart, view, scopeAtStart), merged.entries);
+    setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, view, scopeAtStart), merged.entries, rows.length, rows.length < ARTICLES_PAGE_SIZE);
     set((s) => ({
       entries: merged.entries,
       articlesLimit: rows.length,
@@ -352,6 +383,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       articlesLoading: false,
       hydratedIds: merged.hydratedIds,
       hydrationErrors: merged.hydrationErrors,
+      /* TASK-111②：本快照即当前视图（守卫已确保 activeViewFilter === view），
+         保位信号在此发出——Timeline 消费时 items 已是最终快照。 */
+      ...(opts?.keepReadingPosition === true ? { positionRestoreNonce: s.positionRestoreNonce + 1 } : {}),
     }));
   },
 

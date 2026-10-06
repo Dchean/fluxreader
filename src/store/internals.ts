@@ -49,6 +49,33 @@ export function appStore(): StoreApi<AppState> {
     只影响再次进入该组合时的一次重拉（数据由后台刷新补齐），无正确性影响。 */
 const VIEW_ENTRIES_CACHE_MAX = 8;
 
+/** TASK-111①：单键实体预算（审计：「单纯限制为 8 个视图并不能限制每个视图的大小」——
+    TASK-100 P3-7 只封了键数上界，TASK-110 分页化后单键 entries 仍随「滚动加载」
+    无界增长：1200 条的库滚三页，该键就背 1200 个条目对象，8 键 × 无上界 = 内存
+    回到无界形态）。缓存语义 = 首屏快照（命中即零延迟显示、随后必触发后台 reload
+    重取真值），故超限从**尾部截断**安全：丢的是最老端条目，恢复后的后台刷新会
+    立即补齐完整口径。
+    取值 1000 ≥ ARTICLES_PAGE_SIZE(500)：截断只发生在「单键加载超过 2 页」的
+    大库场景，首批/次页快照永不截断；预算与页大小的关系在 t111-* 断言中锁定。
+    截断的正确性边界（exhausted/续拉衔接）见 setViewEntriesSnapshot 与缓存值
+    元数据（ViewEntriesSnapshot）——恢复时用**记录值**而非截断长度判定，避免
+    截断长度落在 PAGE_SIZE 边界附近造成 exhausted 误判。 */
+export const VIEW_ENTRIES_CACHE_ENTRY_BUDGET = 1000;
+
+/** TASK-111①：视图缓存值 = 条目快照 + 分页元数据。
+    loadedCount = 写入时该视图真实已从后端加载的总数（per-scope 游标值，≥
+    entries.length：按 id 去重的偏移漂移会让 entries 短于游标，见 TASK-110②）；
+    exhausted = 写入时的真实到底判定（fetched < PAGE_SIZE）。
+    恢复路径（nav 三处缓存命中）必须用这两个**记录值**恢复游标与 exhausted，
+    不得用截断后的 entries.length 重算——截断后长度若 < 页大小（预算更小的
+    未来取值）或边界相邻，都会把「还有数据」误判成「已到底」（或反），且
+    续拉 offset 会回退重拉已去重丢弃的区间。 */
+export interface ViewEntriesSnapshot {
+  entries: ArticleEntry[];
+  loadedCount: number;
+  exhausted: boolean;
+}
+
 class LRUMap<V> extends Map<string, V> {
   private readonly max: number;
 
@@ -79,7 +106,18 @@ class LRUMap<V> extends Map<string, V> {
   }
 }
 
-export const viewEntriesCache: Map<string, ArticleEntry[]> = new LRUMap<ArticleEntry[]>(VIEW_ENTRIES_CACHE_MAX);
+export const viewEntriesCache: Map<string, ViewEntriesSnapshot> = new LRUMap<ViewEntriesSnapshot>(VIEW_ENTRIES_CACHE_MAX);
+
+/** TASK-111①：视图缓存写入唯一收口（三个写入点共用：reloadFromBackend /
+    reloadFilteredEntries / syncCurrentViewCache）——单键实体预算在此一处执行，
+    超限尾部截断后连同分页元数据（loadedCount / exhausted，取写入时真值）落键。
+    loadedCount 以 max(记录值, 截断长度) 兜底：正常路径记录值 ≥ 截断长度
+    （entries ⊆ 已加载窗口）；mock 模式无游标（articlesLimit=0），兜底让恢复
+    游标退回「快照长度」——与预算引入前的恢复行为逐字一致。 */
+export function setViewEntriesSnapshot(key: string, entries: ArticleEntry[], loadedCount: number, exhausted: boolean): void {
+  const trimmed = entries.length > VIEW_ENTRIES_CACHE_ENTRY_BUDGET ? entries.slice(0, VIEW_ENTRIES_CACHE_ENTRY_BUDGET) : entries;
+  viewEntriesCache.set(key, { entries: trimmed, loadedCount: Math.max(loadedCount, trimmed.length), exhausted });
+}
 
 /** 视图缓存 key：布局 × 视图 × 订阅范围（scope）。
     TASK-052 起**必须带 scope**：条目列表现在是「该范围的首批 N 条」，缓存若不
@@ -315,10 +353,19 @@ export function mergeSnapshotEntries(
 
 /** 把当前 entries 同步进「当前布局 × 当前视图」的缓存。
     乐观更新（标读/收藏/水合）只改 store.entries，缓存若不联动，切走视图再
-    切回会用旧快照覆盖新状态（正文丢失、标读回退）。 */
+    切回会用旧快照覆盖新状态（正文丢失、标读回退）。
+    TASK-111①：经 setViewEntriesSnapshot 收口——同一单键实体预算 + 元数据。
+    元数据取 store 现值：游标镜像 articlesLimit 即当前视图真实已加载数（TASK-110
+    起筛选视图与「全部」共享同键游标，该值对两者同义），exhausted 同理；
+    mock 模式无游标（0），由收口内的 max 兜底回快照长度（恢复行为不变）。 */
 export function syncCurrentViewCache(entries: ArticleEntry[]) {
   const s = appStore().getState();
-  viewEntriesCache.set(viewCacheKey(s.activeContentLayout, s.activeViewFilter, s.activeFeedFilter), entries);
+  setViewEntriesSnapshot(
+    viewCacheKey(s.activeContentLayout, s.activeViewFilter, s.activeFeedFilter),
+    entries,
+    s.articlesLimit,
+    s.articlesExhausted,
+  );
 }
 
 /* TASK-107 R1（F1）：条目变更版本号——乐观回滚的归属判定。
