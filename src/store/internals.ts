@@ -159,39 +159,67 @@ export function scopePageKey(scope: string, layout?: ContentLayoutType): string 
   return layout ? `${layout}|${scope || 'all'}` : scope || 'all';
 }
 
-/** TASK-109：分页续拉（loadMoreArticles）的竞态守卫——具名化收口。
-    响应落地时，发起时快照的「范围×布局（scopeKey）× 排序 × 游标」任一漂移即整页丢弃：
-    - scopeKey 漂移：查询口径已换（切范围/切布局）；
-    - 游标漂移：reload / 缓存恢复已重置该范围的分页进度（D3 / TASK-052）；
-    - 排序漂移：offset 的含义随排序翻转（F1），旧排序的响应属于另一查询口径。 */
-export function paginationStale(
-  atStart: { scopeKey: string; sort: 'newest' | 'oldest'; offset: number },
-  now: { scopeKey: string; sort: 'newest' | 'oldest'; offset: number },
-): boolean {
-  return now.scopeKey !== atStart.scopeKey || now.offset !== atStart.offset || now.sort !== atStart.sort;
-}
-
-/** TASK-109：筛选视图全集拉取（reloadFilteredEntries）的竞态守卫——具名化收口。
-    **有意不锁排序**（与 paginationStale 的差异在此，此前只靠注释默会）：筛选视图
-    拉的是该范围×布局的全集（limit 100000 不分页），切排序只是 selectVisibleEntries
-    的本地重排、entries 仍然有效——锁排序反而会丢弃整个有效响应。范围×布局
-    （scopeKey）漂移才使响应过期（那是另一个查询口径的列表）。 */
-export function filteredSnapshotStale(scopeKeyAtStart: string, scopeKeyNow: string): boolean {
-  return scopeKeyNow !== scopeKeyAtStart;
-}
-
 /* TASK-109：查询口径统一派生入口（QueryScope）——三把键与查询参数只从这里派生：
    - args：后端查询参数（范围×排序×可选布局）→ list_articles / article_index；
    - markScope：标写范围维度（仅 feed_id/folder_id，排序/布局不进标写口径——
      布局由 api.markAllRead 的独立 layout 参数承载）；
+   - viewFilter：视图筛选参数（only_unread/only_starred/only_today）——筛选视图
+     首屏与续拉共用（TASK-110）；
    - pageKey：分页游标键（布局×范围）；
    - viewKey：视图快照缓存键（布局×视图×范围）；
-   - paginationStale / filteredSnapshotStale：两类快照响应的具名竞态守卫
-     （分页全锁四元组；筛选视图有意不锁排序——差异见各自注释）。
+   - paginationStale / filteredSnapshotStale：两类快照响应的具名竞态守卫。
    pageKey / viewKey 的字符串形态锁定不变（缓存/游标键兼容，t109 断言锁定）。 */
+
+/** 列表分页大小：首批/每次滚动加载拉取的文章数（「全部」视图与筛选视图共用，
+    TASK-110 自 bootstrap.ts 收口到此处——筛选视图分页化后两条路径共享同一页大小
+    与游标口径，常量必须有单一来源）。 */
+export const ARTICLES_PAGE_SIZE = 500;
+
+/** TASK-110：视图筛选参数（only_unread / only_starred / only_today）——筛选视图
+    首屏（reloadFilteredEntries）与续拉（loadMoreArticles）共用同一派生，保证
+    「加载更多」取到的集合与首屏同口径；'all' → 空对象（wire 形态与不传键逐字
+    一致）。 */
+export function viewFilterArgs(view: ViewFilterType): { only_unread?: boolean; only_starred?: boolean; only_today?: boolean } {
+  return {
+    ...(view === 'unread' ? { only_unread: true } : {}),
+    ...(view === 'starred' ? { only_starred: true } : {}),
+    ...(view === 'today' ? { only_today: true } : {}),
+  };
+}
+
+/** TASK-109：分页续拉（loadMoreArticles）的竞态守卫——具名化收口。
+    响应落地时，发起时快照的「范围×布局（scopeKey）× 排序 × 游标 × 视图」任一
+    漂移即整页丢弃：
+    - scopeKey 漂移：查询口径已换（切范围/切布局）；
+    - 游标漂移：reload / 缓存恢复已重置该范围的分页进度（D3 / TASK-052）；
+    - 排序漂移：offset 的含义随排序翻转（F1），旧排序的响应属于另一查询口径；
+    - 视图漂移（TASK-110）：筛选视图分页化后切视图会整体替换 entries 并重置
+      同键游标，旧视图的在途分页响应不得追加进新视图列表（游标数值可能恰好
+      相等，须显式比较视图维度）。 */
+export function paginationStale(
+  atStart: { scopeKey: string; sort: 'newest' | 'oldest'; offset: number; view: ViewFilterType },
+  now: { scopeKey: string; sort: 'newest' | 'oldest'; offset: number; view: ViewFilterType },
+): boolean {
+  return now.scopeKey !== atStart.scopeKey || now.offset !== atStart.offset
+    || now.sort !== atStart.sort || now.view !== atStart.view;
+}
+
+/** TASK-109：筛选视图拉取（reloadFilteredEntries）的竞态守卫——具名化收口。
+    范围×布局漂移使响应过期（另一个查询口径的列表）。
+    TASK-110：排序维度入守卫——筛选视图分页化 + 切排序改为重拉后，排序由服务端
+    承载，迟到旧排序响应不得覆盖新排序列表（旧「全集本地重排」语义下排序无关，
+    该前提已随 TASK-110 废除）。 */
+export function filteredSnapshotStale(
+  atStart: { scopeKey: string; sort: 'newest' | 'oldest' },
+  now: { scopeKey: string; sort: 'newest' | 'oldest' },
+): boolean {
+  return now.scopeKey !== atStart.scopeKey || now.sort !== atStart.sort;
+}
+
 export const QueryScope = {
   args: scopeQueryArgs,
   markScope: scopeFilterArgs,
+  viewFilter: viewFilterArgs,
   pageKey: scopePageKey,
   viewKey: viewCacheKey,
   paginationStale,

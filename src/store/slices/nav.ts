@@ -1,6 +1,6 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
-import { getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, syncCurrentViewCache, viewEntriesCache } from '../internals';
+import { ARTICLES_PAGE_SIZE, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, syncCurrentViewCache, viewEntriesCache } from '../internals';
 import { selectVisibleEntries } from '../selectors';
 import type { AppState } from '../types';
 
@@ -74,8 +74,11 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          TASK-109②：fromBackend=false——缓存回放是近期 UI 状态而非后端真值，
          不 bump 条目版本（在途乐观声明的回滚仍有效）。 */
       const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors, false);
-      set({ entries: merged.entries, articlesExhausted: view !== 'all', hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
-      get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
+      /* TASK-110①：exhausted 真实判定随快照长度（原筛选视图恒 true、all 视图恒
+         false——两者都随分页化失效）；缓存快照即最近一次拉取的首屏/续拉结果，
+         「长度 < 页大小 ⇒ 已到底」与拉取时的判定同口径。 */
+      set({ entries: merged.entries, articlesExhausted: cached.length < ARTICLES_PAGE_SIZE, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
+      get().applyArticlesCursor(scopeKey, cached.length, cached.length < ARTICLES_PAGE_SIZE);
     }
     /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
        reload 自身的 toast 给出，这里只吞掉残余重抛，避免 unhandled rejection。 */
@@ -118,8 +121,13 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。
          TASK-109②：fromBackend=false（缓存回放非后端真值，不 bump 版本）。 */
       const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors, false);
-      set({ activeViewFilter: view, openedReadIds: {}, entries: merged.entries, articlesExhausted: view !== 'all', hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
-      get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
+      /* TASK-110①：exhausted 真实判定随快照长度（与 selectLayout 同口径收口——
+         原写法 `view !== 'all'` 是「筛选视图拉全集 ⇒ 恒已到底」的旧语义：分页化后
+         筛选视图的缓存快照可能是未满页的部分页，误标已到底会挡住续拉，旧文章
+         在「缓存命中 + 后台刷新失败」的窗口内不可达）。缓存快照即最近一次拉取的
+         首屏/续拉结果，「长度 < 页大小 ⇒ 已到底」与拉取时的判定同口径。 */
+      set({ activeViewFilter: view, openedReadIds: {}, entries: merged.entries, articlesExhausted: cached.length < ARTICLES_PAGE_SIZE, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
+      get().applyArticlesCursor(scopeKey, cached.length, cached.length < ARTICLES_PAGE_SIZE);
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
       if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
@@ -164,8 +172,10 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。
          TASK-109②：fromBackend=false（缓存回放非后端真值，不 bump 版本）。 */
       const merged = mergeSnapshotEntries(get().entries, cached, get().hydratedIds, get().hydrationErrors, false);
-      set({ entries: merged.entries, articlesExhausted: view !== 'all', hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
-      get().applyArticlesCursor(scopeKey, cached.length, view !== 'all');
+      /* TASK-110①：exhausted 真实判定随快照长度（与 selectLayout/selectView 同口径
+         收口——`view !== 'all'` 的恒真/恒 false 旧语义随分页化失效，理由见 selectLayout）。 */
+      set({ entries: merged.entries, articlesExhausted: cached.length < ARTICLES_PAGE_SIZE, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
+      get().applyArticlesCursor(scopeKey, cached.length, cached.length < ARTICLES_PAGE_SIZE);
     }
     /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
     if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
@@ -184,7 +194,11 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
      故丢弃各视图快照缓存，并按新排序重拉：reload 落地时原子改写 entries 与
      per-scope 游标（游标含义已随排序翻转，必须与 entries 同一次写入）。
      不清空 entries：本地选择器先按新排序就位（零延迟、无空白闪烁），重拉完成后
-     整体替换——与 selectView 缓存命中路径同构。 */
+     整体替换——与 selectView 缓存命中路径同构。
+     TASK-110③：筛选视图（收藏/未读/今天）从「全集本地重排、切排序不调后端」
+     改为与「全部」视图同构——分页化后全集不再在内存里，本地重排只够重排已加载
+     页且续拉口径会随排序错位，排序改由服务端承载（重拉当前范围）；已加载条目的
+     水合正文由 mergeSnapshotEntries(fromBackend=true) 按 id 继承，不因重拉丢失。 */
   toggleTimelineSort: () => {
     viewEntriesCache.clear();
     set((s) => ({
@@ -194,16 +208,16 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     /* F5（Batch 1/2 独立审查 P3）：
        - dataMode 守卫：mock 模式没有后端，重拉不仅多余，还会在落地时把 mock
          会话翻成 tauri（reloadFromBackend 成功路径写 dataMode:'tauri'）；
-       - 筛选视图（收藏/未读/今天）拉的本就是全集（limit 100000，不分页），显示
-         顺序由 selectVisibleEntries 按 timelineSort 本地排序——切排序只需本地
-         重排，重拉是纯浪费，不调后端；
-       - reloadFromBackend 失败时 toast 后会重抛，void 调用点必须接住，否则
-         unhandled rejection。失败提示仍由 reloadFromBackend 自己给出，这里只吞掉
-         重抛（与 (p3) 断言「reload 失败必须可见」不冲突）。 */
+       - TASK-110③ 前：筛选视图拉的本就是全集（limit 100000，不分页），切排序只
+         需本地重排、不调后端——该前提已随筛选视图分页化废除，两类视图统一按
+         新排序重拉（重拉入口随视图分流：reloadFilteredEntries / reloadFromBackend）；
+       - reload 失败时提示由 reload 自身给出（reloadFromBackend toast 后重抛、
+         reloadFilteredEntries toast 后吞掉），void 调用点必须接住 .catch，
+         否则 unhandled rejection。 */
     if (get().dataMode !== 'tauri') return;
     const view = get().activeViewFilter;
-    if (view !== 'all') return;
-    void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
+    if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+    else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
   },
 
   markCurrentViewAllRead: () => {
