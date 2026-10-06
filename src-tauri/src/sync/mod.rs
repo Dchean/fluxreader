@@ -73,8 +73,11 @@ pub use subscriptions::*;
 /// TASK-097：唯一从「无 pub 项」子模块显式重导出的项（见上方例外说明）。
 pub use greader_pull::set_greader_pull_clock_override;
 
-/* 无 pub 项的内部实现模块：私有重导出，仅供 sync 内部（含兄弟子模块）使用 */
-use conflict_policy::*;
+/* 无 pub 项的内部实现模块：私有重导出，仅供 sync 内部（含兄弟子模块）使用。
+TASK-113：conflict_policy 例外——不参与裸名 glob 重导出。其消费点
+（greader_pull/fever_pull）一律走 `conflict_policy::` 限定路径，glob 引入的
+裸名无任何消费者，rustc 1.98 起按 unused_imports 告警（clippy -D warnings
+下致命）；兄弟子模块经 `use super::*` 仍能取得模块名本身，限定路径可解析。 */
 use entries::*;
 use fever_pull::*;
 use greader_pull::*;

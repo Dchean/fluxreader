@@ -232,18 +232,21 @@ mod tests {
     use super::*;
     use crate::db::{NewArticle, MIGRATIONS};
 
-    /// TASK-112 政策锁定测试：Fever 对账的「操作 × 协议」格逐格锁死。
-    /// 判别力声明（对应政策被翻转/守卫被移除时必红）——
-    /// - 双向格：FEVER_READ_DIRECTION 被改成单向（RemoteReadWins）→
-    ///   remote_unread 复活用例红（本地已读不再被翻回未读）；
-    /// - 单向命中侧被移除 → read 落地用例红；
-    /// - pending 保护：守卫被移除 → pending 用例红。
-    /// 本卡行为零变化，故全部用例在显式化前后都绿；CI（cargo test）承担执行。
-    ///
-    /// 失败守卫（reconcile_ok：集合拉取失败跳过对账）的端到端锁定依赖 HTTP 层，
-    /// 由 live 测试（tests/fever_sync_live_e2e.rs，#[ignore]）与 CI 承担——
-    /// mock_greader 的 Fever 路由未实现 unread/saved/items 端点，无法在
-    /// src/ 范围内注入（tests/ 不在本卡允许修改范围）。
+    // TASK-113：本段是测试模块级说明而非某条目的文档——原 `///` 块后接空行
+    // 触发 clippy empty_line_after_doc_comments，且列表后的未缩进续行触发
+    // doc_lazy_continuation（-D warnings 下致命），故改普通注释（文字不变）。
+    // TASK-112 政策锁定测试：Fever 对账的「操作 × 协议」格逐格锁死。
+    // 判别力声明（对应政策被翻转/守卫被移除时必红）——
+    // - 双向格：FEVER_READ_DIRECTION 被改成单向（RemoteReadWins）→
+    //   remote_unread 复活用例红（本地已读不再被翻回未读）；
+    // - 单向命中侧被移除 → read 落地用例红；
+    // - pending 保护：守卫被移除 → pending 用例红。
+    // 本卡行为零变化，故全部用例在显式化前后都绿；CI（cargo test）承担执行。
+    //
+    // 失败守卫（reconcile_ok：集合拉取失败跳过对账）的端到端锁定依赖 HTTP 层，
+    // 由 live 测试（tests/fever_sync_live_e2e.rs，#[ignore]）与 CI 承担——
+    // mock_greader 的 Fever 路由未实现 unread/saved/items 端点，无法在
+    // src/ 范围内注入（tests/ 不在本卡允许修改范围）。
 
     fn conn() -> rusqlite::Connection {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
