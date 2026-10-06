@@ -182,6 +182,24 @@ export interface AppState {
       手动同步 / 单源刷新）的 reload 落地时 bump；导航路径不 bump。Timeline
       订阅它，变化时消费顶条锚（timelineAnchor）做程序性回位。 */
   positionRestoreNonce: number;
+  /** TASK-115①：切换返回恢复信号（nonce）。nav 三路径（selectLayout /
+      selectView / selectFeed）**缓存命中**同步恢复 entries 时 bump；cache-miss
+      （重拉新语境）与切排序不 bump。Timeline 订阅它，变化时消费 per-filterKey
+      锚存档（timelineAnchor.peekReturnAnchor）做一次性定位。
+      与 positionRestoreNonce（TASK-111 刷新保位）是两个独立信号：切换返回是
+      「一次性定位」，刷新保位是「持续跟踪」——触发源/消费路径/锚来源（存档 vs
+      活锚）完全分离，互不发出、互不消费对方信号（不叠加保证，见
+      timelineAnchor.ts 头注规则表）。 */
+  switchRestoreNonce: number;
+  /** TASK-115②：阅读器关闭信号（nonce，不透明计数器）。clearReaderSelection
+      关闭阅读器（App.tsx 唯一关闭路径）时 bump。原选中卡 id 不经 store 传递：
+      由 Timeline 在 activeArticleId 跟随 effect 里用 ref 记账（关闭 commit 时
+      该 ref 保留关闭前值），Timeline 的 readerClose effect 消费本信号把焦点
+      归还原选中卡（原卡不在当前列表 → 归零回落）。选型与消费细节见
+      Timeline.tsx readerClose effect 注释与 timelineAnchor.ts 头注 X2 节；
+      nonce 而非布尔/id 字段：连续两次开关同一篇文章也要每次触发归还
+      （id 字段值不变无法重触发 effect）。 */
+  readerCloseNonce: number;
   /** 滚动到底部时按需拉取下一批文章（追加到 entries）。 */
   loadMoreArticles: () => Promise<void>;
   /** 切换视图到收藏/未读/今天时，按后端筛选拉取完整列表并替换 entries。

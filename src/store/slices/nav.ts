@@ -22,6 +22,7 @@ export type NavSlice = Pick<
   | 'toggleTimelineFilter'
   | 'toggleTimelineSort'
   | 'markCurrentViewAllRead'
+  | 'switchRestoreNonce'
 >;
 
 /** 本地零点毫秒（F8：今天视图的标读边界，与列表「今天」筛选同口径） */
@@ -37,10 +38,18 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
   activeFeedFilter: 'all',
   timelineFilter: 'unread',
   timelineSort: 'newest',
+  /* TASK-115①：切换返回恢复信号（字段说明见 types.ts）。仅在下方三个导航
+     action 的**缓存命中**分支 bump（entries 同步恢复时）；cache-miss 重拉、
+     切排序（重拉新语境）与启动装载一律不 bump。 */
+  switchRestoreNonce: 0,
 
   /* ================= 导航 ================= */
 
   selectLayout: (layout) => {
+    /* TASK-115①：本次导航是否真的改变筛选上下文——布局段变化，或范围段被
+       下方的 'all' 重置改变。同上下文重复导航（点击当前布局）不是「切换返回」，
+       不 bump 恢复信号（否则列表会被拽回上次离开的位置）。 */
+    const contextChanged = layout !== get().activeContentLayout || get().activeFeedFilter !== 'all';
     set({
       activeContentLayout: layout,
       activeFeedFilter: 'all',
@@ -81,8 +90,22 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          loadedCount）而非截断后的 entries.length——单键实体预算超限尾部截断后，
          截断长度若落在页大小边界附近会把「已到底」误判成「还有数据」（或反），
          且续拉 offset 会回退重拉已去重丢弃的区间；记录值是写入时的真实口径
-         （含偏移漂移下 entries 短于游标的形态），恢复行为与写入时逐字一致。 */
-      set({ entries: merged.entries, articlesExhausted: cached.exhausted, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
+         （含偏移漂移下 entries 短于游标的形态），恢复行为与写入时逐字一致。
+         TASK-115①：entries 恢复与切换返回信号**同一次原子写入**（switchRestoreNonce
+         bump，仅 contextChanged——同上下文重复导航不恢复）——Timeline 收到信号后
+         按 per-filterKey 锚存档一次性定位（存档锚在恢复列表 → scrollToIndex
+         align:start；无存档/锚丢失 → 归零回落）。
+         不叠加保证：本信号独立于 TASK-111 的 positionRestoreNonce（刷新保位），
+         恢复动作不 bump/消费刷新保位信号；随后的后台 reload 是导航路径调用
+         （不带 keepReadingPosition），刷新保位机制对本次切换保持沉默——
+         「一次性定位」与「持续跟踪」分流，见 timelineAnchor.ts 头注规则表。 */
+      set((s) => ({
+        entries: merged.entries,
+        articlesExhausted: cached.exhausted,
+        hydratedIds: merged.hydratedIds,
+        hydrationErrors: merged.hydrationErrors,
+        ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
+      }));
       get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
@@ -119,6 +142,9 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        卡片在后台刷新落地前空白且不会重水合。TASK-103：处置方式从「整体清空」
        收口为 mergeSnapshotEntries 的按 id 继承+裁剪（正文与终态一起继承，
        已消失条目的滞留标记移除），缓存恢复不再丢已水合正文。 */
+    /* TASK-115①：同 selectLayout——视图段真的变化才是「切换返回」；同上下文
+       重复导航（点击当前视图）不 bump 恢复信号。 */
+    const contextChanged = view !== get().activeViewFilter;
     const scopeKey = QueryScope.pageKey(get().activeFeedFilter, get().activeContentLayout);
     const cached = viewEntriesCache.get(QueryScope.viewKey(get().activeContentLayout, view, get().activeFeedFilter));
     if (cached) {
@@ -132,8 +158,18 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          在「缓存命中 + 后台刷新失败」的窗口内不可达）。缓存快照即最近一次拉取的
          首屏/续拉结果，「长度 < 页大小 ⇒ 已到底」与拉取时的判定同口径。
          TASK-111①：与 selectLayout 同口径——判定/游标恢复用缓存记录的元数据
-         （exhausted / loadedCount），不重算截断后的快照长度（理由见 selectLayout）。 */
-      set({ activeViewFilter: view, openedReadIds: {}, entries: merged.entries, articlesExhausted: cached.exhausted, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
+         （exhausted / loadedCount），不重算截断后的快照长度（理由见 selectLayout）。
+         TASK-115①：同 selectLayout——entries 恢复与切换返回信号同一次原子写入
+         （不叠加保证见 selectLayout 注释；仅 contextChanged）。 */
+      set((s) => ({
+        activeViewFilter: view,
+        openedReadIds: {},
+        entries: merged.entries,
+        articlesExhausted: cached.exhausted,
+        hydratedIds: merged.hydratedIds,
+        hydrationErrors: merged.hydrationErrors,
+        ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
+      }));
       get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
@@ -163,6 +199,9 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
      滞留标记只裁剪不属于本快照的部分——理由同 selectView）。mock 模式保持纯游标镜像（不触发 IPC、
      不把 mock 会话翻成 tauri）。 */
   selectFeed: (feedId) => {
+    /* TASK-115①：同 selectLayout——范围段真的变化才是「切换返回」；同上下文
+       重复导航（点击当前源/分类）不 bump 恢复信号。 */
+    const contextChanged = feedId !== get().activeFeedFilter;
     const scopeKey = QueryScope.pageKey(feedId, get().activeContentLayout);
     set((s) => ({
       activeFeedFilter: feedId,
@@ -182,8 +221,16 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       /* TASK-110①：exhausted 真实判定随快照长度（与 selectLayout/selectView 同口径
          收口——`view !== 'all'` 的恒真/恒 false 旧语义随分页化失效，理由见 selectLayout）。
          TASK-111①：与 selectLayout 同口径——判定/游标恢复用缓存记录的元数据
-         （exhausted / loadedCount），不重算截断后的快照长度（理由见 selectLayout）。 */
-      set({ entries: merged.entries, articlesExhausted: cached.exhausted, hydratedIds: merged.hydratedIds, hydrationErrors: merged.hydrationErrors });
+         （exhausted / loadedCount），不重算截断后的快照长度（理由见 selectLayout）。
+         TASK-115①：同 selectLayout——entries 恢复与切换返回信号同一次原子写入
+         （不叠加保证见 selectLayout 注释；仅 contextChanged）。 */
+      set((s) => ({
+        entries: merged.entries,
+        articlesExhausted: cached.exhausted,
+        hydratedIds: merged.hydratedIds,
+        hydrationErrors: merged.hydrationErrors,
+        ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
+      }));
       get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */

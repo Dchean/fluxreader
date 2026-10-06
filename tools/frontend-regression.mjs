@@ -3712,6 +3712,211 @@ await (async () => {
   }
 
   /* ============================================================
+     TASK-115（2026-10-06，REQ-005 三阶段②）：返回位置统一规则。
+     X1 切换返回滚动恢复（per-filterKey 锚存档 + nav 缓存命中恢复信号）/
+     X2 阅读器关闭焦点归还原卡（关闭信号 + ref 记账）/ X3 规则文档化
+     （timelineAnchor.ts 头注 = 全场景规则表的代码单点注释）。
+
+     与 TASK-111 的证据边界同口径（如实说明）：滚动/聚焦本体是 DOM 行为，
+     node 回归网无法驱动真实虚拟列表——行为断言落在两层：
+     - store 层：信号 bump 语义（导航缓存命中 → switchRestoreNonce；阅读器
+       关闭 → readerCloseNonce）与「不叠加」双向隔离（两信号互不串扰）；
+     - 纯函数层：archive 锚的回位决策（anchorRestoreIndex 复用）与焦点归还
+       决策（readerFocusReturnIndex）直接断言；模块级存档 API（stash/peek/
+       rearm）与 Timeline 同入口驱动；接线由源码形态断言钉住（t111-6 先例）。
+
+     判别设计（吸收 t111 审查教训——断言必须有变异判别力）：
+     - 存档-恢复断言锚定「回到原上下文后 peekReturnAnchor 命中且决策返回
+       原索引」，naive 实现（stash 不存档 / 恢复用活锚）必转红；
+     - 同上下文重复导航断言 contextChanged 守卫（无守卫 → 恢复信号误 bump）；
+     - 切排序断言「信号不 bump + 新键查档为空」（新语境裁定的双重形态）；
+     - 关闭信号断言「连续两次关闭必 +1」（nonce 选型判别：id 字段同值不触发）。
+     ============================================================ */
+  {
+    const fs115 = await import('node:fs');
+    const src115 = (p) => fs115.readFileSync(new URL(p, import.meta.url), 'utf8');
+    const ta115 = await import('../src/components/timelineAnchor.ts');
+    const { RETURN_ANCHOR_ARCHIVE_MAX, anchorRestoreIndex: ari115, readerFocusReturnIndex: rfri115 } = ta115;
+    const filterKeyOf115 = (s) => `${s.activeContentLayout}|${s.activeViewFilter}|${s.activeFeedFilter}|${s.timelineFilter}|${s.timelineSort}`;
+    const itemsOf115 = () => selectVisibleEntries(store.getState());
+    const cnt115 = (s, t) => (s.match(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+    const ordered115 = (s, parts) => {
+      let i = 0;
+      for (const p of parts) { i = s.indexOf(p, i); if (i < 0) return false; i += p.length; }
+      return true;
+    };
+    /* 模块级测试时钟：t111 块已把节流基准推到 NOW+30M，这里从更大刻度起，
+       保证 recordTopAnchor 不被上一块残留的节流窗口吞掉 */
+    let T115 = NOW + 40000000;
+
+    /* -- (t115-0) X1/X2 接线 + X3 规则文档化（源级防回退，t111-6 同口径） -- */
+    const timelineSrc115 = src115('../src/components/Timeline.tsx');
+    const navSrc115 = src115('../src/store/slices/nav.ts');
+    const readerSrc115 = src115('../src/store/slices/reader.ts');
+    const anchorSrc115 = src115('../src/components/timelineAnchor.ts');
+    checkNew('(t115-0) X1 接线（源级）：nav 三处缓存命中恢复按 contextChanged 条件 bump switchRestoreNonce（entries 与信号同一次原子写入；同上下文重复导航不恢复）；Timeline 存档时序 = 先 stash 后 clear（弃锚语义不变，只多归档）',
+      cnt115(navSrc115, '...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {})') === 3
+      && cnt115(navSrc115, 'const contextChanged =') === 3
+      && timelineSrc115.indexOf('stashTopAnchorForReturn();') >= 0
+      && timelineSrc115.indexOf('stashTopAnchorForReturn();') < timelineSrc115.indexOf('clearTopAnchor();'));
+    checkNew('(t115-0) X1 消费侧（源级·有序）：switchRestoreNonce effect = 查档(peekReturnAnchor) → 决策(anchorRestoreIndex) → 程序性滚动抑制 → scrollToIndex(align:start) → 重锚(rearmTopAnchor)；image 提前回落',
+      ordered115(timelineSrc115, [
+        'const switchRestoreNonce = useAppStore((s) => s.switchRestoreNonce);',
+        'anchorRestoreIndex(peekReturnAnchor(filterKey), filterKey, items)',
+        'suppressNextScrollEvents();',
+        "rowVirtualizer.scrollToIndex(idx, { align: 'start' });",
+        'rearmTopAnchor(items[idx].id, filterKey, performance.now());',
+      ]));
+    checkNew('(t115-0) X2 接线（源级）：reader.ts 唯一关闭路径 bump readerCloseNonce；Timeline 在 activeArticleId 跟随 effect 记账原选中卡（ref），关闭信号 effect 消费决策（readerFocusReturnIndex → focusCardAt）',
+      readerSrc115.includes('readerCloseNonce: s.readerCloseNonce + 1')
+      && ordered115(timelineSrc115, [
+        'const readerCloseNonce = useAppStore((s) => s.readerCloseNonce);',
+        'readerFocusReturnIndex(lastActiveArticleIdRef.current, items)',
+        'focusCardAt(idx);',
+      ])
+      && timelineSrc115.includes('lastActiveArticleIdRef.current = activeArticleId;'));
+    checkNew('(t115-0) 画廊回落口径（源级）：三个回位/归还 effect（TASK-111 刷新保位 / TASK-115 切换返回 / 阅读器关闭焦点归还）各有 image 布局提前回落（非虚拟化无定位基建，与 TASK-111 同一口径）',
+      cnt115(timelineSrc115, "if (activeContentLayout === 'image') return;") === 3);
+    checkNew('(t115-0) X3 规则文档化（代码单点注释）：timelineAnchor.ts 头注 = 全场景规则表（切排序=新语境裁定、锚丢失归零回落、画廊回落、不叠加保证）',
+      anchorSrc115.includes('全场景规则表')
+      && anchorSrc115.includes('切排序（重拉）')
+      && anchorSrc115.includes('新语境')
+      && anchorSrc115.includes('存档随 filterKey 键自然失效')
+      && anchorSrc115.includes('不叠加保证'));
+
+    /* ---------- (t115-x1a) 存档-恢复：切走再切回，恢复信号 + 存档锚命中原索引 ---------- */
+    await resetStore();
+    ta115.clearTopAnchor();
+    await store.getState().bootstrapFromBackend(); // 8 行；bootstrap 写 'article|all|all' 视图缓存
+    const t115K1 = filterKeyOf115(store.getState());
+    const t115srn0 = store.getState().switchRestoreNonce;
+    T115 += 1000;
+    checkNew('(t115-x1a) 前置：顶条锚已记录（101@K1，活锚与 Timeline handleScroll 同一入口）',
+      ta115.recordTopAnchor('101', t115K1, T115) === true && ta115.peekTopAnchor()?.id === '101');
+    /* 离开上下文（与 Timeline filterKey layout effect 同一入口：先存档后清活锚） */
+    ta115.stashTopAnchorForReturn();
+    ta115.clearTopAnchor();
+    listPlan = { mode: 'reject', error: { message: 't115 注入' } };
+    store.getState().selectFeed('11'); // 切到 feed-11（缓存 miss，后台 reload 注入失败冻结状态）
+    await nTick(10);
+    store.getState().selectFeed('all'); // 切回：缓存命中 → entries 同步恢复 + 恢复信号
+    const t115stA = store.getState();
+    checkNew('(t115-x1a) 存档-恢复（store 层）：缓存命中切回 → switchRestoreNonce +1（entries 与信号同一次原子写入，恢复列表已就位）',
+      t115stA.switchRestoreNonce === t115srn0 + 1 && t115stA.entries.length === 8 && t115stA.activeFeedFilter === 'all');
+    const t115Kback = filterKeyOf115(t115stA);
+    const t115arch = ta115.peekReturnAnchor(t115Kback);
+    checkNew('(t115-x1a) 存档-恢复（决策侧）：按原上下文键查档命中（离开时顶条 101），锚 id 在恢复列表中 → 决策返回其索引（Timeline 据此 scrollToIndex align:start 一次性定位）',
+      t115Kback === t115K1 && t115arch?.id === '101' && t115arch?.filterKey === t115K1
+      && ari115(t115arch, t115Kback, itemsOf115()) === 0);
+    await nTick(10); // 让注入失败的 reload 落定
+    listPlan = null;
+
+    /* ---------- (t115-x1b) 锚丢失 → 归零回落（不猜） ---------- */
+    T115 += 1000;
+    ta115.recordTopAnchor('888', t115Kback, T115); // 锚指向已不存在/被筛出的条目
+    ta115.stashTopAnchorForReturn();
+    ta115.clearTopAnchor();
+    listPlan = { mode: 'reject', error: { message: 't115 注入' } };
+    store.getState().selectFeed('11');
+    await nTick(10);
+    store.getState().selectFeed('all');
+    await nTick(10);
+    listPlan = null;
+    checkNew('(t115-x1b) 锚丢失归零回落（判别）：存档锚 id 不在恢复列表 → anchorRestoreIndex 返回 null（消费侧不动作 = 保持归零 effect 置顶后的顶部；首次进入/无存档同口径回落，绝不猜位置）',
+      ta115.peekReturnAnchor(filterKeyOf115(store.getState()))?.id === '888'
+      && ari115(ta115.peekReturnAnchor(filterKeyOf115(store.getState())), filterKeyOf115(store.getState()), itemsOf115()) === null);
+
+    /* ---------- (t115-x3c) 同上下文重复导航不恢复（contextChanged 守卫，判别） ---------- */
+    const t115srnGuard = store.getState().switchRestoreNonce;
+    store.getState().selectFeed('all'); // 已在 all：缓存命中但 contextChanged=false
+    checkNew('(t115-x3c) 同上下文重复导航不恢复（判别）：缓存命中但范围段未变 → 恢复信号不 bump（无守卫的 naive 实现会把列表拽回上次离开位置）',
+      store.getState().switchRestoreNonce === t115srnGuard && store.getState().activeFeedFilter === 'all');
+    await nTick(10);
+
+    /* ---------- (t115-x1c) 切排序（重拉）不恢复——新语境裁定 ---------- */
+    const t115srnSort = store.getState().switchRestoreNonce;
+    store.getState().toggleTimelineSort(); // filterKey 变（sort 段）+ 清视图缓存 + 重拉
+    await nTick(20);
+    const t115stSort = store.getState();
+    checkNew('(t115-x1c) 切排序不恢复（新语境裁定）：filterKey 已变 = 新语境 → 恢复信号不 bump（重拉不是缓存恢复路径），新键查档为空（进入即归零，裁定无需特判——存档随 filterKey 键自然失效），旧存档仍在旧键下（回原上下文仍可恢复）',
+      t115stSort.switchRestoreNonce === t115srnSort && t115stSort.timelineSort === 'oldest'
+      && ta115.peekReturnAnchor(filterKeyOf115(t115stSort)) === null
+      && ta115.peekReturnAnchor(t115K1)?.id === '888');
+
+    /* ---------- (t115-x2a/b) 阅读器关闭焦点归还 ---------- */
+    await resetStore();
+    ta115.clearTopAnchor();
+    await store.getState().bootstrapFromBackend();
+    store.getState().selectArticle('102'); // 打开阅读器（102 在列表 index 1）
+    checkNew('(t115-x2a) 前置：阅读器打开且选中 102', store.getState().activeArticleId === '102');
+    const t115rcn0 = store.getState().readerCloseNonce;
+    store.getState().clearReaderSelection(); // Esc 关闭（App.tsx 唯一关闭路径）
+    checkNew('(t115-x2a) 阅读器关闭信号：clearReaderSelection bump readerCloseNonce 且选中清空（滚动不动 = filterKey 未变不触发归零，既有语义）',
+      store.getState().readerCloseNonce === t115rcn0 + 1 && store.getState().activeArticleId === null);
+    checkNew('(t115-x2a) 焦点归还原卡（决策）：原卡 102 仍在当前列表 → 决策返回其 index（Timeline 据此 focusCardAt：原卡可见不滚、不可见 scrollToIndex 定位后聚焦）',
+      rfri115('102', itemsOf115()) === 1);
+    store.getState().selectArticle('103'); // 换一篇打开
+    const t115rcn1 = store.getState().readerCloseNonce;
+    store.getState().clearReaderSelection(); // 再关（同一篇形态的连续开关）
+    checkNew('(t115-x2a) 关闭信号必重触发（选型判别）：连续两次关闭 nonce 连续 +1——若用 activeArticleId 字段本身当信号，同值（开→关→再开同一篇→关）无法重触发 effect，这是选计数器不选 id 字段的理由',
+      store.getState().readerCloseNonce === t115rcn1 + 1);
+    store.getState().selectFeed('12'); // 阅读器开着时列表已切范围（selectFeed 不清选中；feed-12 与当前 article 布局同布局，列表非空）
+    await nTick(20);
+    checkNew('(t115-x2b) 焦点归还回落（判别）：原卡不在当前列表（列表已切换，新范围=[104,105]）→ 决策 null = 不聚焦不滚动（焦点归还无对象，绝不猜）；无归还目标（null id）同口径',
+      rfri115('103', itemsOf115()) === null && itemsOf115().map((e) => e.id).join(',') === '104,105'
+      && rfri115(null, itemsOf115()) === null);
+
+    /* ---------- (t115-x3a) 与 TASK-111 刷新保位不叠加（双向隔离） ---------- */
+    await resetStore();
+    ta115.clearTopAnchor();
+    await store.getState().bootstrapFromBackend();
+    const t115srnIso = store.getState().switchRestoreNonce;
+    const t115prnIso = store.getState().positionRestoreNonce;
+    ta115.rearmTopAnchor('101', filterKeyOf115(store.getState()), (T115 += 1000));
+    ta115.stashTopAnchorForReturn();
+    ta115.clearTopAnchor();
+    listPlan = { mode: 'reject', error: { message: 't115 注入' } };
+    store.getState().selectFeed('11');
+    await nTick(10);
+    store.getState().selectFeed('all'); // 切换返回：只动 switchRestoreNonce
+    checkNew('(t115-x3a) 不叠加（出向）：切换返回恢复 bump switchRestoreNonce 但 positionRestoreNonce 纹丝不动（导航路径的 reload 不带 keepReadingPosition，「一次性定位」绝不借用「持续跟踪」通道）',
+      store.getState().switchRestoreNonce === t115srnIso + 1
+      && store.getState().positionRestoreNonce === t115prnIso);
+    await nTick(10);
+    listPlan = null;
+    await store.getState().reloadFromBackend({ keepReadingPosition: true }); // 后台刷新：只动 positionRestoreNonce
+    checkNew('(t115-x3a) 不叠加（入向）：keepReadingPosition 刷新落地 bump positionRestoreNonce 但 switchRestoreNonce 纹丝不动（两个 effect 各消费各的信号、各用各的锚——存档 vs 活锚，互不发出互不消费对方信号）',
+      store.getState().positionRestoreNonce === t115prnIso + 1
+      && store.getState().switchRestoreNonce === t115srnIso + 1);
+
+    /* ---------- (t115-x3b) 存档容量 LRU + rearm 语义（模块级） ---------- */
+    T115 += 5000;
+    ta115.rearmTopAnchor('r1', 'fk-r', T115);
+    checkNew('(t115-x3b) rearm 重锚语义（恢复的支撑）：绕过节流直设活锚并推进节流基准（窗口内到达的 scroll 事件记录被吸收——活锚保持在恢复落点，用户随即再离开时存档的是恢复后位置而非恢复前位置）',
+      ta115.peekTopAnchor()?.id === 'r1'
+      && ta115.recordTopAnchor('r2', 'fk-r', T115 + 100) === false
+      && ta115.peekTopAnchor()?.id === 'r1');
+    ta115.clearTopAnchor();
+    for (let i = 0; i <= RETURN_ANCHOR_ARCHIVE_MAX; i++) {
+      ta115.rearmTopAnchor(`a${i}`, `fk-${i}`, T115 + 100 + i);
+      ta115.stashTopAnchorForReturn();
+      ta115.clearTopAnchor();
+    }
+    checkNew(`(t115-x3b) 存档容量 LRU（TASK-111 预算纪律）：上限 ${RETURN_ANCHOR_ARCHIVE_MAX}（与视图缓存键数同值），溢出淘汰最旧上下文（fk-0 已淘汰、fk-MAX 保留）——淘汰只影响该上下文退回「归零回落」，无正确性影响`,
+      ta115.peekReturnAnchor('fk-0') === null
+      && ta115.peekReturnAnchor(`fk-${RETURN_ANCHOR_ARCHIVE_MAX}`)?.id === `a${RETURN_ANCHOR_ARCHIVE_MAX}`);
+    ta115.peekReturnAnchor('fk-1'); // 命中刷新 LRU 新鲜度
+    ta115.rearmTopAnchor('aNEW', 'fk-NEW', T115 + 500);
+    ta115.stashTopAnchorForReturn();
+    ta115.clearTopAnchor();
+    checkNew('(t115-x3b) LRU 新鲜度：peek 命中把该上下文刷新为最新使用，随后溢出淘汰的是真正最旧的 fk-2（fk-1 因刚被使用而幸存）',
+      ta115.peekReturnAnchor('fk-1')?.id === 'a1' && ta115.peekReturnAnchor('fk-2') === null
+      && ta115.peekReturnAnchor('fk-NEW')?.id === 'aNEW');
+
+    await resetStore(); // 夹具复位
+  }
+
+  /* ============================================================
      TASK-103（REQ-001）：文章快照与正文水合生命周期统一
      —— 刷新不丢正文、同 id 刷新后重新水合、终态机完备、乱序防护与在途去重。
      审计探针场景（AUDIT-20261005-core-consistency.md「社交正文问题链路」）：
