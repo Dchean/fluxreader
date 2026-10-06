@@ -14,6 +14,8 @@ export type SyncSlice = Pick<
   | 'syncStatus'
   | 'backgroundSyncing'
   | 'syncConnected'
+  | 'syncWaiting'
+  | 'syncFailed'
   | 'githubFlow'
   | 'githubAccount'
   | 'githubLoggingIn'
@@ -74,6 +76,9 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
   syncStatus: 'synced',
   backgroundSyncing: false,
   syncConnected: false,
+  /* TASK-116 四态展示：队列统计初值 0（未拉到统计前与「无队列」同形——X3 不制造噪音） */
+  syncWaiting: 0,
+  syncFailed: 0,
   githubFlow: null,
   githubAccount: null,
   githubLoggingIn: false,

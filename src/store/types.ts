@@ -147,6 +147,11 @@ export interface AppState {
   backgroundSyncing: boolean;
   /** 后端真实的 Miniflux 连接态（bootstrap/sync 后刷新），未连接时侧栏不显示"已同步" */
   syncConnected: boolean;
+  /** TASK-116 四态展示：同步队列现存行数（「等待同步 N 条」）。
+   *  启动装载（bootstrap/reload）与手动同步完成后的 reload 刷新。 */
+  syncWaiting: number;
+  /** TASK-116：队列中推送失败过的行数（attempts>0，「部分失败」） */
+  syncFailed: number;
 
   /** GitHub 设备流登录：等待授权态（user_code 常驻显示；组件 unmount 不影响后端轮询） */
   githubFlow: { user_code: string; verification_uri: string; interval: number } | null;

@@ -276,6 +276,7 @@ pub fn run() {
             commands::sync_disconnect,
             commands::sync_local_feeds,
             commands::sync_status,
+            commands::sync_queue_stats,
             // 缓存清理
             commands::cache_cleanup,
             // 首次关闭询问

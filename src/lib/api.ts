@@ -130,6 +130,16 @@ export interface SyncStatusInfo {
   protocol?: string | null;
 }
 
+/** sync_queue_stats 返回（TASK-116 四态展示）。
+ * waiting = sync_queue 现存行数（「等待同步 N 条」的 N）；
+ * failed = attempts>0 的行数（「部分失败」的 N，是 waiting 的子集）；
+ * last_error = 最近一次推送失败的错误摘要（Rust 侧已截断到 200 字符）。 */
+export interface SyncQueueStats {
+  waiting: number;
+  failed: number;
+  last_error: string | null;
+}
+
 /** sync_save 返回：首连且本地有未绑定源时 firstConnect=true
  *（前端据此弹「同步本地订阅到后端」确认框） */
 export interface SyncSaveResult {
@@ -549,6 +559,12 @@ export const api = {
   async syncStatus(): Promise<SyncStatusInfo | null> {
     const inv = await getInvoke();
     return inv ? (await inv('sync_status') as SyncStatusInfo) : null;
+  },
+  /** 同步队列统计（TASK-116 四态展示：等待/部分失败 + 最近错误摘要）。
+   * 浏览器环境返回 null */
+  async syncQueueStats(): Promise<SyncQueueStats | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('sync_queue_stats') as SyncQueueStats) : null;
   },
 };
 

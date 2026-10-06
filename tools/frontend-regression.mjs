@@ -5923,6 +5923,109 @@ await (async () => {
     html114.includes('timeline-empty-state') && html114.includes('timeline-load-more'));
 }
 
+/* ============================================================
+   TASK-116（2026-10-06，同步四态展示）：队列状态列 + 统计命令 + pill/摘要卡。
+   X1 侧栏 pill 优先级修正（error > syncing > waiting > connected，修复「手动
+   同步进行中失败态被 syncing 覆盖」）+ 等待计数 + 「· 部分失败」段；
+   X2 设置页四态摘要卡（stats + 上次同步，如实口径）；X3 无队列不劣化。
+
+   证据边界（如实说明，t115 同口径）：pill 与摘要 desc 文案真值表分别落在纯函数
+   syncPillLabel / syncStateSummary（src/lib/syncPill.ts，组件收口单点）；
+   SSR 烟测受 zustand v5 server snapshot 恒读 getInitialState() 所限，只取证
+   「组件树可执行 + 初始态基线渲染」（x1f/x2d 注）；接线由源码形态断言钉住
+   （t111-6/t115-0 先例）；Rust 侧 attempts/last_error/sync_queue_stats 由
+   CI cargo test 承担（t116-r0..r3）。
+   判别设计：
+   - 优先级逐格锁死：error 在 syncing/backgroundSyncing 中仍显示（修前必红的格子）；
+   - X3 零队列时既有文案逐字保留（噪音/假状态清零）；
+   - 后缀断言「无失败绝不追加」（「· 部分失败」凭空出现的实现必红）；
+   - 接线断言：旧内联四分支清零——优先级回退必须重写文案单点才会复绿。
+   ============================================================ */
+{
+  const fs116 = await import('node:fs');
+  const src116 = (p) => fs116.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const { syncPillLabel } = await import('../src/lib/syncPill.ts');
+  const mk116 = (o) => ({ syncStatus: 'synced', backgroundSyncing: false, syncConnected: true, waiting: 0, failed: 0, ...o });
+
+  /* ---------- X1：pill 优先级真值表（纯函数单点） ---------- */
+  checkNew('(t116-x1a) 优先级1：error 恒「同步失败」——手动同步进行中（syncing）/后台同步中也不例外（修复失败被 syncing 覆盖的既有缺陷）',
+    syncPillLabel(mk116({ syncStatus: 'error' })) === '同步失败'
+    && syncPillLabel(mk116({ syncStatus: 'error', backgroundSyncing: true })) === '同步失败');
+  checkNew('(t116-x1b) 优先级2：手动/后台同步中显示「同步中…」（error 缺席时）',
+    syncPillLabel(mk116({ syncStatus: 'syncing' })) === '同步中…'
+    && syncPillLabel(mk116({ backgroundSyncing: true })) === '同步中…');
+  checkNew('(t116-x1c) 优先级3：waiting>0 显示「等待同步 N 条」（未连接也如实——队列是本地事实，连接后自动补推）',
+    syncPillLabel(mk116({ waiting: 3 })) === '等待同步 3 条'
+    && syncPillLabel(mk116({ waiting: 1, syncConnected: false })) === '等待同步 1 条');
+  checkNew('(t116-x1d) failed>0 追加「· 部分失败」段（同一 pill 内，≤48 字）；无失败绝不追加（凭空出现的实现必红）',
+    syncPillLabel(mk116({ waiting: 2, failed: 1 })) === '等待同步 2 条 · 部分失败'
+    && syncPillLabel(mk116({ syncStatus: 'error', failed: 2 })) === '同步失败 · 部分失败'
+    && syncPillLabel(mk116({ syncStatus: 'syncing', failed: 1 })) === '同步中… · 部分失败'
+    && syncPillLabel(mk116({})) === '后端已同步');
+
+  /* ---------- X3：无队列无失败不劣化（既有语义逐字保留，不新增噪音） ---------- */
+  checkNew('(t116-x3a) X3 不劣化：无队列无失败时与既有语义逐字一致（后端已同步 / 本地模式 · 直连抓取），不出现等待/失败段',
+    syncPillLabel(mk116({})) === '后端已同步'
+    && syncPillLabel(mk116({ syncConnected: false })) === '本地模式 · 直连抓取'
+    && !syncPillLabel(mk116({})).includes('等待')
+    && !syncPillLabel(mk116({})).includes('部分失败'));
+
+  /* ---------- 接线：store→pill（SSR 取证）+ 源级防回退 ---------- */
+  const sidebarSrc116 = src116('../src/components/Sidebar.tsx');
+  const apiSrc116 = src116('../src/lib/api.ts');
+  const bootstrapSrc116 = src116('../src/store/slices/bootstrap.ts');
+  const syncTabSrc116 = src116('../src/components/settings/SyncTab.tsx');
+  checkNew('(t116-x1e) Sidebar 接线（源级）：文案收口到 syncPillLabel 单点（store 字段逐参入函），旧内联四分支文案清零（优先级回退必须重写文案单点才能复绿）',
+    sidebarSrc116.includes('syncPillLabel({')
+    && sidebarSrc116.includes('waiting: syncWaiting,') && sidebarSrc116.includes('failed: syncFailed,')
+    && !sidebarSrc116.includes("'同步失败'") && !sidebarSrc116.includes("'同步中…'")
+    && !sidebarSrc116.includes("'等待同步") && !sidebarSrc116.includes("'后端已同步'"));
+  checkNew('(t116-api) api 形态：syncQueueStats() 调 sync_queue_stats 命令，返回 SyncQueueStats（waiting/failed/last_error）',
+    apiSrc116.includes("await inv('sync_queue_stats')")
+    && apiSrc116.includes('interface SyncQueueStats')
+    && apiSrc116.includes('waiting: number') && apiSrc116.includes('failed: number')
+    && apiSrc116.includes('last_error: string | null'));
+  checkNew('(t116-refresh) 刷新时机（源级）：启动装载 reload 顺带拉 syncQueueStats 写入 store（挂载与手动同步完成后的末次 reload 共用此点）',
+    bootstrapSrc116.includes('api.syncQueueStats()')
+    && bootstrapSrc116.includes('syncWaiting: q.waiting') && bootstrapSrc116.includes('syncFailed: q.failed'));
+
+  /* store→pill 接线（SSR 烟测）。证据边界（如实说明）：zustand v5 的
+     useSyncExternalStore server snapshot 恒读 getInitialState()（模块创建时的
+     初始态，闭包持有、测试无法重定向），renderToStaticMarkup 只能看到初始态——
+     故 SSR 只取证「组件树可执行 + 初始态 pill 渲染」；字段驱动的真值表由
+     纯函数断言（x1a-x1d）与参数级接线断言（x1e）共同锁定。 */
+  const { renderToStaticMarkup: rsm116 } = await import('react-dom/server');
+  const { createElement: ce116 } = await import('react');
+  const { Sidebar: Sidebar116 } = await import('../src/components/Sidebar.tsx');
+  const pillBase116 = rsm116(ce116(Sidebar116));
+  checkNew('(t116-x1f) SSR 烟测：Sidebar 组件树可执行，初始态（未连接 · 空队列）pill 渲染出 X3 基线文案「本地模式 · 直连抓取」',
+    pillBase116.includes('本地模式 · 直连抓取')
+    && pillBase116.includes('sync-status-pill'));
+
+  /* ---------- X2：SyncTab 四态摘要卡（纯函数真值表 + 源级接线 + SSR 烟测） ---------- */
+  const { syncStateSummary } = await import('../src/lib/syncPill.ts');
+  const stat116 = (o) => ({ waiting: 0, failed: 0, last_error: null, ...o });
+  checkNew('(t116-x2a) 摘要口径（纯函数）：等待 N / 部分失败 N（最新错误 ≤1 行摘要）/ 上次同步时间，三段齐备',
+    syncStateSummary(stat116({ waiting: 3 }), 0) === '等待同步 3 条；上次同步 从未；状态变更已保存，连接后自动补推'
+    && syncStateSummary(stat116({ waiting: 3 }), 1760000000).includes('上次同步 ')
+    && syncStateSummary(stat116({ waiting: 2, failed: 1, last_error: '状态推送失败: HTTP 500' }), 0)
+      === '等待同步 2 条；部分失败 1（状态推送失败: HTTP 500）；上次同步 从未；状态变更已保存，连接后自动补推');
+  checkNew('(t116-x2b) 摘要口径（纯函数）：最新错误按码点截断 60 字符+…（不劈代理对）；无队列无失败仅时间行+说明句（X3 无噪音）；不虚构「已确认累计」',
+    syncStateSummary(stat116({ failed: 1, last_error: '错'.repeat(80) }), 0).includes(`部分失败 1（${'错'.repeat(60)}…）`)
+    && syncStateSummary(stat116({}), 0) === '上次同步 从未；状态变更已保存，连接后自动补推'
+    && !syncStateSummary(stat116({}), 0).includes('已确认'));
+  checkNew('(t116-x2c) SyncTab 摘要卡接线（源级）：「同步状态」卡 desc 走 syncStateSummary 单点，挂载与保存并同步链尾都刷新统计；说明句在卡 desc 收尾（不新增常驻 hint，TASK-101/102 既有断言锁定）',
+    syncTabSrc116.includes('title="同步状态"')
+    && syncTabSrc116.includes('syncStateSummary(')
+    && syncTabSrc116.includes('api.syncQueueStats()')
+    && syncTabSrc116.includes('refreshQueueStats(setQueueStats)')
+    && (syncTabSrc116.match(/mini-dialog-hint/g) || []).length === 1);
+  const { SyncTab: SyncTab116 } = await import('../src/components/settings/SyncTab.tsx');
+  const syncTabHtml116 = rsm116(ce116(SyncTab116));
+  checkNew('(t116-x2d) SSR 烟测：摘要卡改动后 SyncTab 组件树仍可执行（初始 mock 态渲染「演示模式」卡，证据边界同 x1f 注）',
+    syncTabHtml116.includes('演示模式') && syncTabHtml116.includes('同步'));
+}
+
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);
 const newFailed = newResults.filter((r) => !r.pass);

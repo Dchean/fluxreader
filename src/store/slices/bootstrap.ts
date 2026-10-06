@@ -200,6 +200,12 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       void api.syncStatus().then((st) => {
         if (st && gen === reloadGeneration) set({ syncConnected: st.connected });
       }).catch(() => { /* TASK-067 N10：纯提示性刷新，失败不打扰 */ });
+      /* TASK-116 四态展示：顺带刷新同步队列统计（侧栏 pill 的「等待同步 N 条 /
+         部分失败」口径）。挂载（bootstrap 首次 reload）与手动同步完成（末次
+         reload）都经过这里——契约约定的两个刷新点，无需另设事件。 */
+      void api.syncQueueStats().then((q) => {
+        if (q && gen === reloadGeneration) set({ syncWaiting: q.waiting, syncFailed: q.failed });
+      }).catch(() => { /* 纯提示性刷新，失败不打扰 */ });
       // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
       // （状态/内容可能变化，entries 需同步刷新为筛选结果）
       // TASK-111②：保位请求随路径透传——'all' 快照只是过渡态，信号由筛选

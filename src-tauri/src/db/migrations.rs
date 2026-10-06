@@ -317,6 +317,19 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         // 重引入场景由幂等测试覆盖）。前端 parseTs 对空格格式的解析兼容由
         // 前端轨道负责，本迁移只做后端归一。user_version=15。
         M::up(V15_NORMALIZE_PUBLISHED_AT_SQL),
+        // TASK-116（同步四态展示）：sync_queue 增推送失败标记——attempts（失败
+        // 次数，每次推送失败 +1）与 last_error（截断后的最近错误摘要）。此前失败
+        // 只进聚合 SyncReport.errors 与日志，无 per-item 痕迹，UI 无法区分
+        // 「等待同步」与「部分失败」。成功即 prune 出队（远端确认口径，不可累计
+        // 溯源，stats 只报现存行）；状态变更重新入队会删旧行插新行，失败计数
+        // 随之归零（新变更 = 新尝试）。旧库升级：既有行 attempts=0 /
+        // last_error=NULL，即「等待同步」，与修前语义一致。user_version=16。
+        M::up(
+            r#"
+        ALTER TABLE sync_queue ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE sync_queue ADD COLUMN last_error TEXT;
+    "#,
+        ),
     ])
 });
 
@@ -835,6 +848,131 @@ mod req108_migration_tests {
             null_like, 0,
             "测试夹具必须覆盖 NULL/'' 写入路径（触发器已补齐）"
         );
+    }
+}
+
+/* ============================================================
+TASK-116 v16 单元测试：sync_queue 增 attempts/last_error + 旧库升级
+（cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
+============================================================ */
+#[cfg(test)]
+mod t116_migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 进程内唯一临时库路径（同 req108 模块的 unique_test_db 惯例，std 实现）。
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        std::env::temp_dir().join(format!(
+            "fluxreader_migr_{base}_{pid}_{nanos}_{seq}.db",
+            pid = std::process::id()
+        ))
+    }
+
+    fn queue_column_names(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('sync_queue') ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// (t116-r0) v16 迁移：① 全新库 to_latest 后新列存在；② 停在 v15 的旧库
+    /// （旧形态 sync_queue + 既有队列行）经生产 open() 打开即迁移——既有行拿到
+    /// 缺省值（attempts=0 / last_error=NULL =「等待同步」，与修前语义一致），
+    /// 数据零丢失，且新列立即可写。判别力：迁移漏建列时 SELECT attempts 直接
+    /// 报错红；把缺省建错（如 attempts NULL 或非 0）时断言红。
+    #[test]
+    fn v16_sync_queue_columns_and_legacy_upgrade() {
+        // ① 全新库：最新 schema 含两列
+        {
+            let mut fresh = Connection::open_in_memory().unwrap();
+            MIGRATIONS.to_latest(&mut fresh).unwrap();
+            let cols = queue_column_names(&fresh);
+            assert!(cols.contains(&"attempts".to_string()), "新库含 attempts 列");
+            assert!(
+                cols.contains(&"last_error".to_string()),
+                "新库含 last_error 列"
+            );
+        }
+
+        // ② 旧库升级：停在 v15（迁移追加前最后一版），已有队列行
+        let path = unique_test_db("t116_v15");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_version(&mut conn, 15).unwrap();
+            conn.execute_batch(
+                "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+                 INSERT INTO articles (feed_id, guid, title) VALUES (1, 'g1', 't');",
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO sync_queue (article_id, action) VALUES (1, 'read');
+                 INSERT INTO sync_queue (article_id, action, feed_url) VALUES (1, 'add_feed', 'https://x.example/rss');",
+            )
+            .unwrap();
+        }
+        // 生产打开路径：迁移 + 回填 + 凭据迁移一路跑完（既有库打开即迁移）
+        let conn = open(&path).expect("v15 旧库打开必须成功完成 v16 迁移");
+        let cols = queue_column_names(&conn);
+        assert!(cols.contains(&"attempts".to_string()));
+        assert!(cols.contains(&"last_error".to_string()));
+
+        // 既有行零丢失 + 缺省值 =「等待同步」（修前语义）
+        let (n, attempts_sum): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(attempts), -1) FROM sync_queue",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "既有队列行零丢失");
+        assert_eq!(attempts_sum, 0, "升级后既有行 attempts 全为缺省 0");
+        let null_errors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE last_error IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(null_errors, 0, "升级后既有行 last_error 全为 NULL");
+
+        // 新列立即可写（失败标记路径在升级库上可用）
+        conn.execute(
+            "UPDATE sync_queue SET attempts = attempts + 1, last_error = '升级后可写' WHERE action = 'read'",
+            [],
+        )
+        .unwrap();
+        let (a, e): (i64, String) = conn
+            .query_row(
+                "SELECT attempts, last_error FROM sync_queue WHERE action = 'read'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((a, e.as_str()), (1, "升级后可写"));
+
+        // user_version 与全新库一致（追加式迁移推进到最新，不硬编码版本号）
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let latest: i64 = {
+            let mut fresh = Connection::open_in_memory().unwrap();
+            MIGRATIONS.to_latest(&mut fresh).unwrap();
+            fresh
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(v, latest, "旧库必须升到与全新库相同的最新版本");
+        let _ = std::fs::remove_file(&path);
     }
 }
 

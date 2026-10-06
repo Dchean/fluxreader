@@ -303,3 +303,13 @@ pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo
             .filter(|p| p == "fever" || p == "greader"),
     })
 }
+
+/// 同步队列统计（TASK-116 四态展示）：侧栏 pill 与设置页「同步状态」摘要卡的
+/// 等待/部分失败口径。waiting = 队列现存行数；failed = attempts>0 行数；
+/// last_error = 最近一次推送失败的错误摘要。纯读命令，未连接也可调（队列是
+/// 本地事实——「本地已保存，连接后自动补推」的展示依据）。
+#[tauri::command]
+pub async fn sync_queue_stats(state: State<'_, AppState>) -> AppResult<db::SyncQueueStats> {
+    let conn = state.db.lock().await;
+    db::sync_queue_stats(&conn)
+}

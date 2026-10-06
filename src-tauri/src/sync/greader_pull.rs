@@ -307,7 +307,8 @@ mod tests {
         conn
     }
 
-    /// 造一篇已绑定远端 entry 的本地文章，返回 (article id, remote entry id)。
+    /// 造一篇已绑定远端 entry 的本地文章，返回新建文章的 id
+    /// （远端 entry id 即调用方传入的 remote_id，不重复返回）。
     /// feeds.feed_url 有 UNIQUE 约束，故 feed/folder/guid 均按 remote_id 派生，
     /// 同一连接内可造多篇。
     fn seed_bound(conn: &rusqlite::Connection, remote_id: i64) -> i64 {
