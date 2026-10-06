@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-109 · 查询口径统一收口 + merge bump 按真值来源收窄（二阶段①，承接审计块②）
 
-**状态**：verified
+**状态**：done
 
 **目标**：二阶段第一卡：查询口径统一与水合版本守卫的来源精确化。①口径收口：现况三把键维度不对称——scopeQueryArgs（范围×排序×可选 layout，internals.ts:126-138）、scopePageKey（范围×layout，:145-147）、viewCacheKey（layout×view×scope，:90-92）分散定义、多处裸拼；探查实证三处不一致：bootstrap.ts:143 的 scopeKey 在 await 之后读「完成时」状态（注释声称发起时口径，靠 reloadGeneration 间接兜底）、loadMoreArticles 守卫含 sortAtStart 而 reloadFilteredEntries 明示不含排序（bootstrap.ts:291，筛选视图拉全集的历史语义）、markCurrentViewAllRead（nav.ts:218-220）传 layout 却只取 feed/folder。修法要求：新建统一派生入口（如 internals 内 QueryScope 助手或独立模块），三把键与查询参数只从它派生；scopePageKey/viewCacheKey 的字符串形态不得改变（缓存键兼容，避免无谓失效）；上述三处不一致收口为显式命名谓词/参数（如「筛选视图不锁排序」的具名守卫构造器），行为保持但不再靠注释默会；bootstrap.ts:143 改为发起时快照（与 bootstrap.ts:196/267/325 一致），reloadGeneration 守卫保留。②merge bump 收窄（TASK-107 R2 审查裁定的后续微任务，todo 备忘在案）：mergeSnapshotEntries（internals.ts:185-225）增加真值来源参数（如 fromBackend），bootstrap 三处后端快照路径（reloadFromBackend:138/reloadFilteredEntries:296/anchorToArticle:354）传真——bump 生效使在途乐观声明失效；nav 三处缓存恢复（selectLayout:74/selectView:117/selectFeed:162）传假——缓存回放是近期 UI 状态而非后端真值，不 bump 以保留本应正确的在途回滚。R2 审查已确认该修法技术成立（经 reload 落进缓存的行在 bootstrap merge 时已 bump，nav 不 bump 不会重开踩踏缺口；唯一无 bump 的缓存行恰是乐观态本身）。③回归断言 t109-* ≥5 条：口径派生单点性（源级）、发起时快照修正、bump 收窄的三个方向（缓存恢复后在途回滚仍正确恢复——即 R2 裁定角例修后行为、后端快照仍 void 陈旧声明（t104-snapshot-voids-rollback-claim 必须保持通过）、缓存回放不误 void 新声明）、键形态兼容。既有断言零弱化。
 

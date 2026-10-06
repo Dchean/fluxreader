@@ -1,7 +1,7 @@
 <!-- project-workflow: generated view; edit task JSON instead -->
 # TASK-111 · 查询缓存实体预算 + 后台刷新保位（二阶段③，完成标准「快速切换不串数据」的容量与位置面）
 
-**状态**：verified
+**状态**：done
 
 **目标**：①缓存实体预算（审计：「单纯限制为 8 个视图并不能限制每个视图的大小」）：viewEntriesCache 现为 LRUMap 上限 8 键（internals.ts:50-80，TASK-100 P3-7 引入），单键内 entries 数组无上界——TASK-110 分页化后单键仍随加载增长。修法：增加单键实体预算（如 VIEW_ENTRIES_CACHE_ENTRY_BUDGET=1000 常量，注释载明审计依据），超限从尾部截断（缓存语义=首屏快照，尾部截断安全；命中恢复后 articlesExhausted/续拉衔接必须正确——截断处数 ≤ 已加载总数，恢复后续拉从游标继续，不得因截断丢 exhausted 判据）；syncCurrentViewCache（internals.ts:226-229）写入时执行同一预算。entryMutationVersion Map 会话内增长维持现状（注释已说明，不纳入本卡）。②后台刷新保位（审计：「后台刷新保留当前阅读位置，避免靠整体替换列表刷新所有内容」）：现况探查——feeds-updated 事件（scheduler.rs:176-179/244-248 → App.tsx:86-98）触发 reloadFromBackend 整体替换 entries；filterKey（Timeline.tsx:93-100）不含 entries 故滚动不归零，但 newest_first 下新文章插入头部会使索引后移，虚拟列表视觉跳动；activeArticleId 定位 effect 仅在变化时触发（Timeline.tsx:218-227），目标不在新快照时跳过（:221），无锚定恢复。修法：Timeline 在滚动时以节流方式记录「顶条锚」（可见首条目 id，存 store 或模块级状态），reloadFromBackend 完成后若锚 id 仍在（或其 feed 内同文/同 id 存活）新快照中，滚动到其新索引（程序性滚动抑制复用 Timeline.tsx:222-227 既有机制），锚 id 不在时维持现状回落（不强制顶部）；阅读中文章（activeArticleId）保持既有不变语义。③回归断言 t111-* ≥5 条：预算截断触发与恢复正确性、截断后续拉衔接（exhausted 不误判）、后台刷新后顶条锚定（新文章插入场景）、锚丢失回落、锚不影响用户主动滚动。既有断言零弱化。
 

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-2730518f88984fb0bf240f2f006e824e",
+  "task_id": "TASK-114",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "修复轮 R2：展开按钮门控组合态修复；复用编码代理 agent_b6cf831e"
+  },
+  "started_at_utc": "2026-10-06T11:21:38.834989Z",
+  "finished_at_utc": "2026-10-06T11:25:58.246639Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "80275be2506a47764c3e112a398f6bda4211a790c00575470402e5c9942db335",
+  "candidate_digest": "cd458ed0aa6e59843cfa1529da08714ea022750d4ec687bbf91da36604d503ce",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-2730518f88984fb0bf240f2f006e824e-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-2730518f88984fb0bf240f2f006e824e-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-ce4c23844b214c1ab6f726ff11ce85b3-scope.json"
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-1a3b64049652406a84d9c07fb925f872",
+  "task_id": "TASK-116",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "主控派发：编码子代理实施同步四态展示（跨栈 Rust+前端，ui_change=true，契约 UI-CONTRACT-TASK-116）；dev@7fa502b 基线"
+  },
+  "started_at_utc": "2026-10-06T13:39:32.178860Z",
+  "finished_at_utc": "2026-10-06T14:15:22.652424Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "cef21131929cc379e754a15814d171533c18c278d56acb569ad7bacb0e030123",
+  "candidate_digest": "88db6f38806efa8cfdd6ccf953277a92338de34b846d4b2923d4180202ff0998",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-1a3b64049652406a84d9c07fb925f872-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-1a3b64049652406a84d9c07fb925f872-scope.json"
+}

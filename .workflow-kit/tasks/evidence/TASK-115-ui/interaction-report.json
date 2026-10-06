@@ -1,0 +1,31 @@
+{
+  "task_id": "TASK-115",
+  "evidence_type": "ui-interaction-report",
+  "captured_at": "2026-10-06",
+  "environment": "vite dev server (http://localhost:5199/) + 真实浏览器（ZCode IAB，Chromium 内核），mock 数据模式；页内 JS 驱动交互（不经系统级键鼠）",
+  "evidence_boundary": "浏览器取证覆盖切换返回滚动恢复与阅读器关闭焦点归还的真实 UI 行为；锚存档容量/LRU/竞态等纯逻辑面由 t115-* 21 条断言（含三处变异自证）锁定。mock 数据仅 2 篇文章，滚动幅度与恢复精度受数据量限制。",
+  "interactions": [
+    {
+      "check": "X1.switch-return-scroll",
+      "artifact": "x1-switch-return-scroll-restored.png",
+      "action": "文章布局滚动列表（scrollTop=317.69）→ 切社交布局 → 切回文章布局",
+      "observed": "切回后 scrollTop=318（原值恢复，未归零）——切换返回滚动恢复在真实 UI 生效；DOM 实测 before={scrollTop:317.69} after={scrollTop:318}"
+    },
+    {
+      "check": "X2.reader-close-focus",
+      "artifact": "x2-reader-close-focus-returned.png",
+      "action": "聚焦并 Enter 选中第二张卡（Windows 11 Mica）→ Esc 关闭阅读器",
+      "observed": "阅读器关闭（『未选择文章』回归），document.activeElement=第二张卡（data-card-index=1，h4『Windows 11 Mica 材质与…』）——焦点归还原选中卡；截图为关闭后状态"
+    },
+    {
+      "check": "X3.rule-documented",
+      "artifact": null,
+      "action": "规则载体核对",
+      "observed": "统一规则表以 timelineAnchor.ts 头注单点承载（全场景规则+不叠加保证），R1 复审已核实注释与实现三处同口径；截图见另两条交互"
+    }
+  ],
+  "screenshots": [
+    "x1-switch-return-scroll-restored.png",
+    "x2-reader-close-focus-returned.png"
+  ]
+}

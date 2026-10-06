@@ -1,0 +1,6 @@
+
+> fluxreader@0.16.0 lint
+> oxlint
+
+Found 0 warnings and 0 errors.
+Finished in 55ms on 79 files with 116 rules using 16 threads.

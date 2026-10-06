@@ -669,3 +669,68 @@
 - 2026-10-06T05:09:48.109012Z · checkpoint · TASK-113 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-10-06T08:32:37.189654Z · note/context · 陈旧控制器锁清理：中断会话的控制器（lock token lock-8a1b22789bc6461，started 2026-10-06T05:11Z）退出后其 pid 33276 被 Windows 复用给 Bitwarden.exe（tasklist 实证），工具 pid_alive 保守检查拒绝 recover。主控以进程身份证据（复用非同进程）判定锁为陈旧，备份锁文件至 tmp/refactor-20261005/stale-controller-lock-backup.json 后删除。锁为瞬态控制文件非受管记录。
 - 2026-10-06T08:33:49.720058Z · accept · 验收 TASK-112, TASK-113；依据：owner 2026-10-05 会话指示「继续二阶段/继续推进」——二阶段交付报告流程下 owner 指示持续推进，视为对二阶段成果的验收确认（TASK-112 及其延续 TASK-113 整链）；验证/独立审查/CI 证据在案（TASK-113 候选=dev@5860dad CI 全绿，含 9 条新 Rust 测试执行）
+- 2026-10-06T08:59:54.431216Z · accept · 验收 TASK-109；依据：owner 会话指示持续推进，视为验收确认（TASK-109 部分）；验证/独立审查/CI 证据在案（候选=dev@54fbc74，CI 绿）
+- 2026-10-06T09:01:09.870920Z · accept · 验收 TASK-110；依据：owner 会话指示持续推进，视为验收确认（TASK-110 部分）；三次中断续作完成，验证/独立审查/CI 证据在案（候选=dev@0cd2df0）
+- 2026-10-06T09:02:24.699925Z · accept · 验收 TASK-111；依据：owner 会话指示持续推进，视为验收确认（TASK-111 部分）；R1 修复轮后复审 PASS，验证/独立审查/CI 证据在案（候选=dev@6914e28）
+- 2026-10-06T09:14:27.149769Z · note/decision · 三阶段任务拆分（DEC-phase3-split-20261006，承接 DEC-refactor-roadmap-20261005 第 3 条「五布局交互一致性」+ 审计优化点「同步四态展示」）：基于只读探查拆三卡——TASK-114 五布局状态与快捷键统一（NotifCard 补水合失败/空正文/加载 UI 对齐 SocialCard；Social/Notif 卡补 Enter/Space=选中；J/K 从仅文章布局扩展到全部虚拟化布局，ShortcutsTab 同步）；TASK-115 返回位置统一规则（per filterKey 顶条锚记忆+切回恢复，复用 timelineAnchor 机制；阅读器关闭焦点归还；统一规则文档化）；TASK-116 同步四态展示（Rust：sync_queue 增 attempts/last_error 列迁移+push 失败标记+sync_queue_stats 命令；前端：侧栏 pill 扩展+SyncTab 四态摘要，文案纪律 ≤48 字；顺手修 seed_bound doc 笔误）。加载/空/哨兵已探查证实五布局统一，不在卡内重做。执行沿用既定流程。
+- 2026-10-06T09:20:40.270346Z · prepare · TASK-114 · 任务已冻结：五布局状态与快捷键统一——NotifCard 补水合态、Enter 绑定与 J/K 全布局化（三阶段①，REQ-005/008）；范围 src, tools/frontend-regression.mjs
+- 2026-10-06T09:21:21.646494Z · checkpoint · TASK-114 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T09:56:04.869241Z · checkpoint · TASK-114 · Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)；下一步：核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算
+- 2026-10-06T09:56:06.046879Z · note/lesson · TASK-114 · scope 失败已出现 18 次：Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
+- 2026-10-06T09:56:57.268337Z · checkpoint · TASK-114 · 阻塞已处置（scope）：scope 阻塞处置：worker 按主控派发指令在 UI 契约文档（.workflow-kit/docs/UI-CONTRACT-TASK-114）追加实施记录与取证边界两节——该文档为主控持有的设计记录（spec allowed_paths 本含它，但 runtime 实现轮 allowed_paths 过滤了 .workflow-kit 路径）。文档改动合法且属主控授权范围；代码改动全部在 allowed_paths 内。重开轮以当前树为基线收轮，文档改动随主控记录提交入库。；下一步：begin 重新实现
+- 2026-10-06T09:56:57.540373Z · unblock · TASK-114 · scope → ready；依据：DEC-phase3-split-20261006（journal 决定记录）
+- 2026-10-06T09:57:39.796104Z · checkpoint · TASK-114 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T09:58:16.939772Z · checkpoint · TASK-114 · Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)；下一步：核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算
+- 2026-10-06T09:58:18.205342Z · note/lesson · TASK-114 · scope 失败已出现 19 次：Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
+- 2026-10-06T10:00:45.223073Z · checkpoint · TASK-114 · 阻塞已处置（scope）：scope 最终处置：worker 按派发指令在契约文档追加的实施记录/取证边界两节已由主控暂存（tmp/refactor-20261005/UI-CONTRACT-114-with-impl-notes.md）并将文档回退至任务输入基线内容；文档增补改由主控在任务完成后作为记录维护落账。代码改动全部在 allowed_paths 内。；下一步：begin 重新实现
+- 2026-10-06T10:00:45.528809Z · unblock · TASK-114 · scope → ready；依据：DEC-phase3-split-20261006
+- 2026-10-06T10:01:28.914395Z · checkpoint · TASK-114 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T10:02:02.976942Z · checkpoint · TASK-114 · Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)；下一步：核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算
+- 2026-10-06T10:02:04.089801Z · note/lesson · TASK-114 · scope 失败已出现 20 次：Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
+- 2026-10-06T10:05:51.516359Z · checkpoint · TASK-114 · 阻塞已处置（scope）：scope 根因处置：契约文档属任务 protected_paths（.workflow-kit/**），worker 的两节增补使工作树偏离任务首 run 基线哈希。已按首 run 基线（RUN-b6ade06c scope manifest cbb440f2）逐字节还原文档；增补内容暂存 tmp/refactor-20261005/UI-CONTRACT-114-with-impl-notes.md，任务完成后由主控作为记录维护落账。代码改动全部在 allowed_paths 内。；下一步：begin 重新实现
+- 2026-10-06T10:05:51.822114Z · unblock · TASK-114 · scope → ready；依据：DEC-phase3-split-20261006
+- 2026-10-06T10:06:33.630093Z · checkpoint · TASK-114 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T10:07:27.780948Z · checkpoint · TASK-114 · Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)；下一步：核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算
+- 2026-10-06T10:07:28.915593Z · note/lesson · TASK-114 · scope 失败已出现 21 次：Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
+- 2026-10-06T10:08:38.764095Z · checkpoint · TASK-114 · 阻塞已处置（scope）：契约文档已还原至继承基线（RUN-0477 scope manifest）哈希；worker 增补节由主控暂存并在任务完成后落账；下一步：begin 重新实现
+- 2026-10-06T10:08:39.087872Z · unblock · TASK-114 · scope → ready；依据：DEC-phase3-split-20261006
+- 2026-10-06T10:09:21.834327Z · checkpoint · TASK-114 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T10:10:41.503908Z · checkpoint · TASK-114 · Worker result belongs to a different task/run；下一步：按报错列出的漏报/多报文件修正 worker-result，再 unblock 后 begin；不要新建任务或重置预算
+- 2026-10-06T10:10:42.656676Z · note/lesson · TASK-114 · protocol 失败已出现 10 次：Worker result belongs to a different task/run。下次准备/实现前先核对这一点。
+- 2026-10-06T10:11:36.385194Z · checkpoint · TASK-114 · 阻塞已处置（protocol）：protocol 阻塞处置：上一次 finish 误传旧 run_id 被拒，run 被标记收束；代码与树状态未变（差异验算 NONE）。重开实现轮正确收轮。；下一步：begin 重新实现
+- 2026-10-06T10:11:36.740538Z · unblock · TASK-114 · protocol → ready；依据：DEC-phase3-split-20261006
+- 2026-10-06T10:12:19.366550Z · checkpoint · TASK-114 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T10:13:15.302034Z · checkpoint · TASK-114 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T10:13:47.055098Z · checkpoint · TASK-114 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T10:42:49.847798Z · checkpoint · TASK-114 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-06T10:42:55.933707Z · checkpoint · TASK-114 · 阻塞已处置（review_failure）：R0 审查 FAIL（2 findings）：①NotifCard 条件链 hydrationError 置于 fullText 前，与 SocialCard 基准（content 优先）相反——「失败后正文经详情路到达」组合态假报错（真实显示回归）；②notif-expand-btn 门控无断言保护（变异零判别）。修复轮 R1：分支顺序对齐基准+补断言，兼评估 SocialCard 同源滞留问题。；下一步：begin 重新实现
+- 2026-10-06T10:42:56.249569Z · unblock · TASK-114 · review_failure → ready；依据：DEC-refactor-roadmap-20261005
+- 2026-10-06T10:43:35.147890Z · checkpoint · TASK-114 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T10:55:42.350877Z · checkpoint · TASK-114 · 编码结果已记录，差异范围已核对：src/components/Timeline.tsx, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T10:56:13.453496Z · checkpoint · TASK-114 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T11:20:33.595720Z · checkpoint · TASK-114 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-06T11:20:42.218392Z · checkpoint · TASK-114 · 阻塞已处置（review_failure）：R1 复审 FAIL（1 低危残留）：展开按钮门控 {isLong && !hydrationError} 在组合态（错误滞留+fullText 到达）下 clamp snippet 却无展开入口（修前与同态 SocialCard 均可展开）。R2 一行修：门控改 {isLong && (!hydrationError || !!fullText)} + 注释修正 + x1g 同步。修复轮 2/4。；下一步：begin 重新实现
+- 2026-10-06T11:20:42.593808Z · unblock · TASK-114 · review_failure → ready；依据：DEC-refactor-roadmap-20261005
+- 2026-10-06T11:21:39.825141Z · checkpoint · TASK-114 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T11:25:58.738398Z · checkpoint · TASK-114 · 编码结果已记录，差异范围已核对：src/components/Timeline.tsx, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T11:26:33.060650Z · checkpoint · TASK-114 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T11:57:02.013768Z · checkpoint · TASK-114 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-06T12:01:20.674051Z · prepare · TASK-115 · 任务已冻结：返回位置统一规则——切换返回滚动恢复与阅读器焦点归还（三阶段②，REQ-005）；范围 src, tools/frontend-regression.mjs
+- 2026-10-06T12:02:28.181340Z · checkpoint · TASK-115 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T12:33:35.427706Z · checkpoint · TASK-115 · 编码结果已记录，差异范围已核对：src/components/Timeline.tsx, src/components/timelineAnchor.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, src/store/types.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T12:34:13.023223Z · checkpoint · TASK-115 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T13:04:19.699063Z · checkpoint · TASK-115 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-06T13:04:28.454681Z · checkpoint · TASK-115 · 阻塞已处置（review_failure）：R0 审查 FAIL（1 低危）：types.ts/reader.ts 两处注释引用不存在的 noteReaderFocusReturn 机制（失实注释，X3 载体即注释，判 FAIL 合理）。R1：注释改为与实现同口径（Timeline ref 记账 + readerCloseNonce 信号），重新 verify+复审。时序/不叠加/变异判别全部核实成立。；下一步：begin 重新实现
+- 2026-10-06T13:04:28.833534Z · unblock · TASK-115 · review_failure → ready；依据：DEC-refactor-roadmap-20261005
+- 2026-10-06T13:05:28.087600Z · checkpoint · TASK-115 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T13:08:20.404661Z · checkpoint · TASK-115 · 编码结果已记录，差异范围已核对：src/components/Timeline.tsx, src/components/timelineAnchor.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, src/store/types.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T13:09:02.477316Z · checkpoint · TASK-115 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T13:34:29.983475Z · checkpoint · TASK-115 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-06T13:38:33.256218Z · prepare · TASK-116 · 任务已冻结：同步四态展示——队列状态列、统计命令与主窗口/设置页呈现（三阶段③，REQ-002/003）；范围 src-tauri/src, src, tools/frontend-regression.mjs
+- 2026-10-06T13:39:33.080715Z · checkpoint · TASK-116 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-06T14:15:23.058700Z · checkpoint · TASK-116 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/sync.rs, src-tauri/src/db.rs, src-tauri/src/db/migrations.rs, src-tauri/src/db/sync_queue.rs, src-tauri/src/lib.rs, src-tauri/src/sync/greader_pull.rs, src-tauri/src/sync/phases.rs, src-tauri/src/sync/push.rs, src/components/Sidebar.tsx, src/components/settings/SyncTab.tsx, src/lib/api.ts, src/lib/syncPill.ts, src/store/slices/bootstrap.ts, src/store/slices/sync.ts, src/store/types.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-06T14:15:59.885775Z · checkpoint · TASK-116 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-06T14:38:37.486605Z · checkpoint · TASK-116 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-06T14:56:38.353752Z · accept · 验收 TASK-114；依据：owner 2026-10-05/06 会话指示持续推进——三阶段交付流程下视为验收确认（TASK-114 部分）；三轮独立审查 PASS + 真浏览器 UI 取证 + CI 绿（候选=dev@e53589a）
+- 2026-10-06T14:58:20.263556Z · accept · 验收 TASK-115；依据：owner 会话指示持续推进——视为验收确认（TASK-115 部分）；R1 复审 PASS + 真浏览器交互取证 + CI 绿（候选=dev@7fa502b）
+- 2026-10-06T15:00:08.832266Z · accept · 验收 TASK-116；依据：owner 会话指示持续推进——视为验收确认（TASK-116 部分）；独立审查 PASS + UI 取证 + CI 绿含 4 条新 Rust 测试执行（候选=dev@064bd73）

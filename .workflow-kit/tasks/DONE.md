@@ -83,7 +83,13 @@
 | [TASK-106](items/TASK-106.json) | 文章快照与正文水合生命周期统一——刷新不丢正文、水合终态完备（承接 TASK-103，REQ-001） | done |
 | [TASK-107](items/TASK-107.json) | 全部已读与标读计数一致性——按后端实际影响数对账、失败不假成功（REQ-003） | done |
 | [TASK-108](items/TASK-108.json) | Rust 状态写入事务化——文章状态与待同步队列同生共死（REQ-002） | done |
+| [TASK-109](items/TASK-109.json) | 查询口径统一收口 + merge bump 按真值来源收窄（二阶段①，承接审计块②） | done |
+| [TASK-110](items/TASK-110.json) | 筛选视图真分页——废除 limit:100000 近似全集（二阶段②，审计块②/完成标准「旧文章可达」） | done |
+| [TASK-111](items/TASK-111.json) | 查询缓存实体预算 + 后台刷新保位（二阶段③，完成标准「快速切换不串数据」的容量与位置面） | done |
 | [TASK-112](items/TASK-112.json) | 协议对账冲突政策显式化 + 服务端×协议兼容矩阵文档（二阶段④，完成标准「不同协议行为有明确说明」） | done |
 | [TASK-113](items/TASK-113.json) | TASK-112 延续：修复新增代码的 clippy 警告并经 CI 复验（行为零变化保持） | done |
+| [TASK-114](items/TASK-114.json) | 五布局状态与快捷键统一——NotifCard 补水合态、Enter 绑定与 J/K 全布局化（三阶段①，REQ-005/008） | done |
+| [TASK-115](items/TASK-115.json) | 返回位置统一规则——切换返回滚动恢复与阅读器焦点归还（三阶段②，REQ-005） | done |
+| [TASK-116](items/TASK-116.json) | 同步四态展示——队列状态列、统计命令与主窗口/设置页呈现（三阶段③，REQ-002/003） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

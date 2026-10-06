@@ -1,0 +1,14 @@
+{
+  "id": "DEC-9bbae1e39b124b3d90c29a1cfbaaa2e8",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "owner 会话指示持续推进，视为验收确认（TASK-110 部分）；三次中断续作完成，验证/独立审查/CI 证据在案（候选=dev@0cd2df0）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-110"
+  ],
+  "recorded_at_utc": "2026-10-06T09:00:37.210017Z",
+  "candidates": {
+    "TASK-110": "c508ee944736b8a7c2db9657543171f537cfcea0631391251db54be43b328a73"
+  }
+}

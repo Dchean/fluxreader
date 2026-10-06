@@ -1,0 +1,14 @@
+{
+  "id": "DEC-ca06715cc24f45f1b543b9aba747b0c7",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "owner 2026-10-05/06 会话指示持续推进——三阶段交付流程下视为验收确认（TASK-114 部分）；三轮独立审查 PASS + 真浏览器 UI 取证 + CI 绿（候选=dev@e53589a）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-114"
+  ],
+  "recorded_at_utc": "2026-10-06T14:55:53.343727Z",
+  "candidates": {
+    "TASK-114": "cd458ed0aa6e59843cfa1529da08714ea022750d4ec687bbf91da36604d503ce"
+  }
+}

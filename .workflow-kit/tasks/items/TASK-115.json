@@ -1,0 +1,286 @@
+{
+  "schema_version": 1,
+  "id": "TASK-115",
+  "title": "返回位置统一规则——切换返回滚动恢复与阅读器焦点归还（三阶段②，REQ-005）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-115-RETURN-POSITION.md",
+  "ui_checks": [
+    {
+      "id": "X1.switch-return-scroll",
+      "description": "切布局/视图/范围后返回（再切回）时滚动位置恢复到离开时顶条条目（per filterKey 锚记忆，缓存命中路径立即恢复、后台 reload 落地后校准）；无记录或锚丢失时归零回落"
+    },
+    {
+      "id": "X2.reader-close-focus",
+      "description": "阅读器关闭（Esc/clearReaderSelection）焦点归还到原选中卡片（scrollToIndex 原位+聚焦），不再只清字段丢焦点"
+    },
+    {
+      "id": "X3.rule-documented",
+      "description": "统一规则在代码单点注释+UI 契约文档明示：哪些场景保位（切换返回/后台刷新）、哪些归零（无锚/首次进入/画廊）、锚与 TASK-111 后台刷新保位的关系"
+    }
+  ],
+  "status": "done",
+  "objective": "返回位置统一规则（审计三阶段完成标准之一；探查事实：切布局/视图/范围/排序均 filterKey 归零丢位置 Timeline.tsx:94-101，缓存恢复只恢复 entries 不恢复滚动；阅读器关闭 clearReaderSelection 只清字段无焦点归还 reader.ts:302-303+Timeline.tsx:223-232 提前返回；TASK-111 后台刷新保位是唯一回位场景）。修法要求：①切换返回恢复——Timeline 已节流记录顶条锚（recordTopAnchor :275-277 一带，含 filterKey）；把「离开时的锚 id」按 filterKey 存档（模块级 Map 或 store 自选，注意容量上限与清理时机——复用 TASK-111 预算纪律），在 selectLayout/selectView/selectFeed 的缓存恢复路径（entries 恢复后）按存档锚恢复滚动（锚 id 在恢复列表中→scrollToIndex align:start；不在→归零回落）；后台 reload 落地后由既有 activeArticleId/锚机制校准，不双重滚动（与 TASK-111 positionRestoreNonce 的协同要显式：切换返回的恢复先于/独立于刷新保位，两者不叠加）。②阅读器焦点归还——clearReaderSelection 前记录原 activeArticleId 的卡片 index（或由 Timeline 消费一个关闭信号），关闭后 moveCardFocus 到原卡片（原卡片不在可见范围→scrollToIndex 定位；列表已切换→归零回落）。③统一规则文档化：UI 契约文档三检查点 + 代码单点注释（timelineAnchor 或新模块头注）列明全场景规则。画廊布局非虚拟化：切换返回恢复与阅读器焦点归还均回落现状（与 TASK-111 同口径注明）。回归断言 t115-* ≥6 条：存档-恢复（切走再切回滚到原锚）、锚丢失归零回落、切排序重拉后不恢复（filterKey 已变，重拉是新语境——写明该裁定）、阅读器关闭焦点归还原卡、关闭后列表已切回落、与 TASK-111 刷新保位不叠加。既有断言零弱化（t111-* 20 条必须原样通过）。",
+  "non_goals": [
+    "不改后台刷新保位机制本身（TASK-111 交付，仅协同不叠加）",
+    "不改画廊布局（非虚拟化，回落现状）",
+    "不做布局切换动画/视觉润色",
+    "不改 Rust 与数据层分页语义"
+  ],
+  "requirement_refs": [
+    "REQ-005"
+  ],
+  "reference_ids": [],
+  "decision_refs": [
+    ".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"
+  ],
+  "dependencies": [],
+  "blocks": [],
+  "risk": {
+    "level": "medium",
+    "decision_ids": [
+      "DEC-refactor-roadmap-20261005"
+    ]
+  },
+  "scope": {
+    "allowed_paths": [
+      "src",
+      "tools/frontend-regression.mjs"
+    ],
+    "protected_paths": [
+      "AGENTS.md",
+      "CLAUDE.md",
+      "WORKFLOW.md",
+      "tasks/**",
+      "docs/PRODUCT.md",
+      "docs/FEATURES.md",
+      "docs/workflow/**",
+      "scripts/project_workflow.py",
+      "scripts/workflow_runtime.py",
+      "scripts/workflow_bootstrap.py",
+      "scripts/workflow_intake.py",
+      "scripts/workflow_progress.py",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/binding.json",
+      ".workflow-kit/tasks/**",
+      ".workflow-kit/notes/**",
+      ".workflow-kit/scripts/**",
+      ".workflow-kit/docs/workflow/**",
+      ".workflow-kit/legacy/**",
+      ".workflow-kit/AGENTS.md",
+      ".workflow-kit/CLAUDE.md",
+      ".workflow-kit/WORKFLOW.md",
+      ".workflow-kit/docs/PRODUCT.md",
+      ".workflow-kit/docs/FEATURES.md",
+      ".workflow-kit/docs/UI-CONTRACT-TASK-115-RETURN-POSITION.md",
+      ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    ],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 切换返回滚动恢复生效（X1：缓存命中路径立即恢复；锚丢失归零回落）",
+    "② 阅读器关闭焦点归还原卡（X2）",
+    "③ 统一规则文档化（X3：契约文档+代码单点注释；切排序=新语境不恢复的裁定写明）",
+    "④ 与 TASK-111 刷新保位机制不叠加（行为断言）",
+    "⑤ 门禁全绿：frontend（t115-* 新增、t111-* 原样）、lint/build/cargo_fmt 不回退；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+    "⑥ 独立审查（全新子代理）PASS findings=0；ui_change=true 需 UI 取证说明"
+  ],
+  "gates": [
+    {
+      "id": "cargo_fmt",
+      "program": "cargo",
+      "args": [
+        "fmt",
+        "--check"
+      ],
+      "cwd": "src-tauri",
+      "required": true
+    },
+    {
+      "id": "cargo_test",
+      "program": "cargo",
+      "args": [
+        "test"
+      ],
+      "cwd": "src-tauri",
+      "required": false,
+      "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担"
+    },
+    {
+      "id": "cargo_clippy",
+      "program": "cargo",
+      "args": [
+        "clippy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "src-tauri",
+      "required": false,
+      "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）"
+    },
+    {
+      "id": "lint",
+      "program": "npm",
+      "args": [
+        "run",
+        "lint"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "build",
+      "program": "npm",
+      "args": [
+        "run",
+        "build"
+      ],
+      "cwd": ".",
+      "required": true
+    },
+    {
+      "id": "frontend",
+      "program": "npm",
+      "args": [
+        "run",
+        "test:frontend"
+      ],
+      "cwd": ".",
+      "required": true
+    }
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@TASK-114 后基线：frontend ≥611 全绿、CI 全绿。本卡新增返回位置恢复（行为增强），属行为变化（owner 指示按审计三阶段推进）。",
+      "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    },
+    "decision_ids": [
+      "DEC-refactor-roadmap-20261005"
+    ],
+    "actions": [
+      {
+        "action": "add",
+        "target": "t115-* 断言（存档恢复/回落/焦点归还/不叠加）",
+        "reason": "新机制需防回退",
+        "gate_ids": [
+          "frontend"
+        ]
+      },
+      {
+        "action": "keep",
+        "target": "既有 frontend（t103-t114 全部）/cargo fmt/lint/build 断言",
+        "reason": "不回退证据；cargo 由 CI 承担（DEC-local-cargo-gate-20261005）",
+        "gate_ids": [
+          "cargo_fmt",
+          "lint",
+          "build",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "input": {
+    "manifest": ".workflow-kit/tasks/evidence/TASK-115-input-ff3993065d58417195ef52854d2afc27.json",
+    "digest": "1cc8065927e19b4cd877505a595f49e02a5c8776b75cb0e661b379214e7cf69f",
+    "source_revision": null,
+    "definition_digest": "b3c85e23c4f5c7d501fa5fbf0a6d127e998f3988bce807d7468adb1dc6c9a678"
+  },
+  "budget": {
+    "started_at_utc": "2026-10-06T12:02:27.245265Z",
+    "deadline_at_utc": "2026-10-06T16:02:27.245265Z",
+    "repair_rounds_used": 0
+  },
+  "batch_id": "BATCH-a57865b52aa4449ea24f0f15216d72c5",
+  "run_ids": [
+    "RUN-b9405b007154440d97e517faa3936153",
+    "RUN-afa3352925cc4920b8bc881a19267c12",
+    "RUN-747beb5a61a14ebdbca56858dcd286a9",
+    "RUN-4923ef0af3394d1d9b430d7a4cd3f79c",
+    "RUN-d9858a974d1c40ef92cd213b6b95dbfd",
+    "RUN-ae9b2be69a2d417f94169ffb9c9d2b1a"
+  ],
+  "blockers": [],
+  "evidence": {
+    "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-d9858a974d1c40ef92cd213b6b95dbfd-candidate.json",
+    "candidate_digest": "e10c0b18713eac61d52bee7a10c28a01dcd8b13a21b1240d49608547cb0eedcc",
+    "verification_run": "RUN-d9858a974d1c40ef92cd213b6b95dbfd",
+    "review_run": "RUN-ae9b2be69a2d417f94169ffb9c9d2b1a",
+    "acceptance_ref": ".workflow-kit/tasks/evidence/DEC-a0d3ebb0b23c47cfbb2782d54f6f9cee-acceptance.json",
+    "owner_decision_ids": [
+      "DEC-a0d3ebb0b23c47cfbb2782d54f6f9cee"
+    ],
+    "merge_ref": "main 合并后回填：dev→main 不含工作流内容"
+  },
+  "snapshot_paths": [
+    ".workflow-kit/docs/AUDIT-20261005-core-consistency.md",
+    ".workflow-kit/docs/UI-CONTRACT-TASK-115-RETURN-POSITION.md",
+    "src",
+    "tools/frontend-regression.mjs"
+  ],
+  "checkpoints": [
+    {
+      "at_utc": "2026-10-06T12:02:28.173072Z",
+      "note": "开始执行，保留原任务身份和截止时间",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-10-06T12:33:35.418391Z",
+      "note": "编码结果已记录，差异范围已核对：src/components/Timeline.tsx, src/components/timelineAnchor.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, src/store/types.ts, tools/frontend-regression.mjs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-10-06T12:34:13.016486Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-10-06T13:04:19.691224Z",
+      "note": "Review requires changes; inspect the findings",
+      "next_action": "先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算"
+    },
+    {
+      "at_utc": "2026-10-06T13:04:28.448322Z",
+      "note": "阻塞已处置（review_failure）：R0 审查 FAIL（1 低危）：types.ts/reader.ts 两处注释引用不存在的 noteReaderFocusReturn 机制（失实注释，X3 载体即注释，判 FAIL 合理）。R1：注释改为与实现同口径（Timeline ref 记账 + readerCloseNonce 信号），重新 verify+复审。时序/不叠加/变异判别全部核实成立。",
+      "next_action": "begin 重新实现"
+    },
+    {
+      "at_utc": "2026-10-06T13:05:28.080876Z",
+      "note": "开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动",
+      "next_action": "完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify"
+    },
+    {
+      "at_utc": "2026-10-06T13:08:20.397867Z",
+      "note": "编码结果已记录，差异范围已核对：src/components/Timeline.tsx, src/components/timelineAnchor.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, src/store/types.ts, tools/frontend-regression.mjs",
+      "next_action": "运行 verify；代码完成尚未等于验收通过"
+    },
+    {
+      "at_utc": "2026-10-06T13:09:02.468426Z",
+      "note": "预先定义的必需测试全部通过，日志已保存",
+      "next_action": "审查当前候选；独立审查使用没有参与编码的新上下文"
+    },
+    {
+      "at_utc": "2026-10-06T13:34:29.978477Z",
+      "note": "当前候选的测试与审查通过（independent）",
+      "next_action": "继续已授权任务；所属功能完成后请用户验收"
+    }
+  ],
+  "resume_phase": "review",
+  "dispositions": [
+    {
+      "at_utc": "2026-10-06T13:04:28.051823Z",
+      "failure_kind": "review_failure",
+      "blockers": [
+        "Review requires changes; inspect the findings"
+      ],
+      "source": "DEC-refactor-roadmap-20261005",
+      "note": "R0 审查 FAIL（1 低危）：types.ts/reader.ts 两处注释引用不存在的 noteReaderFocusReturn 机制（失实注释，X3 载体即注释，判 FAIL 合理）。R1：注释改为与实现同口径（Timeline ref 记账 + readerCloseNonce 信号），重新 verify+复审。时序/不叠加/变异判别全部核实成立。",
+      "resumed_to": "ready"
+    }
+  ]
+}

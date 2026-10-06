@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "id": "RUN-b6ade06caf2448969617ab6dccf1f3d3",
+  "task_id": "TASK-114",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "主控派发：编码子代理实施五布局状态与快捷键统一（ui_change=true，契约见 UI-CONTRACT-TASK-114）；dev@9f57a78 基线"
+  },
+  "started_at_utc": "2026-10-06T09:21:21.092576Z",
+  "finished_at_utc": "2026-10-06T09:56:04.586133Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "80275be2506a47764c3e112a398f6bda4211a790c00575470402e5c9942db335",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-b6ade06caf2448969617ab6dccf1f3d3-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-b6ade06caf2448969617ab6dccf1f3d3-scope.json",
+  "failure_kind": "scope",
+  "failure_reason": "Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)"
+}

@@ -1,0 +1,46 @@
+{
+  "task_id": "TASK-114",
+  "evidence_type": "ui-interaction-report",
+  "captured_at": "2026-10-06",
+  "environment": "vite dev server (http://localhost:5199/) + 真实浏览器（ZCode IAB，Chromium 内核），应用以 mock 数据模式运行（本机无 MSVC 链接器无法构建桌面壳；UI 层与桌面壳同源）",
+  "evidence_boundary": "浏览器取证覆盖 UI 渲染与键绑定交互；桌面壳专有行为（托盘/窗口）不在取证范围。水合三态的错误/空正文分支由 mock 数据模式无法自然触发，其形态由源级断言（t114-x1b/x1c/x1f/x1g）与 SSR 烟测锁定，与 TASK-114 审查取证边界结论一致。",
+  "interactions": [
+    {
+      "check": "X1.notif-hydration-states",
+      "artifact": "x1-notification-layout.png",
+      "action": "切换到通知布局",
+      "observed": "NotifCard 正常渲染：摘要/翻译/标为已读按钮、AI 摘要框、正文文本可见；mock 模式下水合不触发，加载占位分支由源级断言锁定（t114-x1a..x1g）"
+    },
+    {
+      "check": "X2.enter-binding-uniform",
+      "artifact": "x2-notif-enter-opens-reader.png",
+      "action": "点击通知卡标题聚焦容器 → 按 Enter",
+      "observed": "选中生效：卡片出现 active-selected 高亮边框（快照中『未选择文章』消失），与 ArticleCard 同语义；嵌套按钮激活未被劫持（e.target===currentTarget 守卫）"
+    },
+    {
+      "check": "X3.jk-all-virtualized",
+      "artifact": "x3-article-jk-select.png",
+      "action": "文章布局按 j 两次",
+      "observed": "选中切换至第二条并同步阅读器（基线行为保持）"
+    },
+    {
+      "check": "X3.jk-all-virtualized",
+      "artifact": "x3-social-jk-select.png",
+      "action": "社交布局按 j 两次（本卡新增能力）",
+      "observed": "社交卡出现选中高亮边框、阅读器列打开（J/K 在社交布局生效）"
+    },
+    {
+      "check": "X3.jk-all-virtualized",
+      "artifact": "x3-shortcuts-tab.png",
+      "action": "打开设置 → 快捷键 tab",
+      "observed": "J/K 行范围文案为「文章/社交/播客/通知（画廊不支持）」，与 ShortcutsTab 实现同步"
+    }
+  ],
+  "screenshots": [
+    "x1-notification-layout.png",
+    "x2-notif-enter-opens-reader.png",
+    "x3-article-jk-select.png",
+    "x3-social-jk-select.png",
+    "x3-shortcuts-tab.png"
+  ]
+}

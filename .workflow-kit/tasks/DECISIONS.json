@@ -2793,7 +2793,7 @@
       "id": "DEC-refactor-roadmap-20261005",
       "issuer": "owner",
       "status": "accepted",
-      "source": "owner 2026-10-05 会话指示原话：「这是我让其他ai对本项目进行的审计，现在依据这个对项目进行重构优化，你作为项目主控，只负责路线确定和推进，派发任务给子代理，代码编写和审计都给子代理……根据这个建任务卡，并依次进行重构优化」；路线判定依据外部审计 AUDIT-20261005-core-consistency.md",
+      "source": "owner 2026-10-05 会话指示原话：「这是我让其他ai对本项目进行的审计，现在依据这个对项目进行重构优化，你作为项目主控，只负责路线确定和推进，派发任务给子代理，代码编写和审计都给子代理……根据这个建任务卡，并依次进行重构优化」；路线判定依据外部审计 AUDIT-20261005-core-consistency.md；scope 扩充记录（2026-10-06）：二/三阶段任务（109-116）与 REQ-005/008 属同一 owner 指示「根据这个建任务卡，并依次进行重构优化」的路线范围，分阶段立项",
       "statement": "核心一致性重构路线：保留 Tauri/Rust/React/SQLite 底座不重写；按审计四块（实体与视图分离/统一查询范围/事务化写入/同文建模）分四阶段推进，第一阶段=TASK-103 正文水合生命周期 + TASK-104 全部已读计数一致性 + TASK-105 Rust 状态写入事务化；编码派子代理、独立审查每轮新开未参与编码的子代理；GReader 优先推荐、Fever 为受限兼容选项；同文副本读状态传播保持现状并显式记录为政策，是否改为布局隔离优先留 owner 后续决定；二阶段及以后卡片在第一阶段验证通过后立项。详见 .workflow-kit/docs/DEC-refactor-roadmap-20261005.md",
       "scope": [
         "TASK-103",
@@ -2802,7 +2802,17 @@
         "REQ-001",
         "REQ-002",
         "REQ-003",
-        "REQ-007"
+        "REQ-007",
+        "TASK-109",
+        "TASK-110",
+        "TASK-111",
+        "TASK-112",
+        "TASK-113",
+        "TASK-114",
+        "TASK-115",
+        "TASK-116",
+        "REQ-005",
+        "REQ-008"
       ],
       "recorded_at_utc": "2026-10-05T07:02:15.467669Z"
     },
@@ -2899,6 +2909,90 @@
       "candidates": {
         "TASK-112": "7205fab91198e15b42120da9d5df19361783e3bb40a133ccdd3f41081d6d4a18",
         "TASK-113": "8df7f65e578d29e18b8b6b2aab15fb4056bb0df9f6d506ce1a6b7647a856d0af"
+      }
+    },
+    {
+      "id": "DEC-15ce21d4d96c49ec88f24d38caeb53b3",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示持续推进，视为验收确认（TASK-109 部分）；验证/独立审查/CI 证据在案（候选=dev@54fbc74，CI 绿）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-109"
+      ],
+      "recorded_at_utc": "2026-10-06T08:59:20.747508Z",
+      "candidates": {
+        "TASK-109": "018a4d38356b154f10ef406bfee6be5dc67d3c8bf23bf7d023ba09db0ef5806b"
+      }
+    },
+    {
+      "id": "DEC-9bbae1e39b124b3d90c29a1cfbaaa2e8",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示持续推进，视为验收确认（TASK-110 部分）；三次中断续作完成，验证/独立审查/CI 证据在案（候选=dev@0cd2df0）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-110"
+      ],
+      "recorded_at_utc": "2026-10-06T09:00:37.210017Z",
+      "candidates": {
+        "TASK-110": "c508ee944736b8a7c2db9657543171f537cfcea0631391251db54be43b328a73"
+      }
+    },
+    {
+      "id": "DEC-44092887f1f0428fa4d8267acbaa84a5",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示持续推进，视为验收确认（TASK-111 部分）；R1 修复轮后复审 PASS，验证/独立审查/CI 证据在案（候选=dev@6914e28）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-111"
+      ],
+      "recorded_at_utc": "2026-10-06T09:01:52.236310Z",
+      "candidates": {
+        "TASK-111": "b554936c63a89a3bdeed78d7148957096696852333564b0fff329491287132a8"
+      }
+    },
+    {
+      "id": "DEC-ca06715cc24f45f1b543b9aba747b0c7",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 2026-10-05/06 会话指示持续推进——三阶段交付流程下视为验收确认（TASK-114 部分）；三轮独立审查 PASS + 真浏览器 UI 取证 + CI 绿（候选=dev@e53589a）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-114"
+      ],
+      "recorded_at_utc": "2026-10-06T14:55:53.343727Z",
+      "candidates": {
+        "TASK-114": "cd458ed0aa6e59843cfa1529da08714ea022750d4ec687bbf91da36604d503ce"
+      }
+    },
+    {
+      "id": "DEC-a0d3ebb0b23c47cfbb2782d54f6f9cee",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示持续推进——视为验收确认（TASK-115 部分）；R1 复审 PASS + 真浏览器交互取证 + CI 绿（候选=dev@7fa502b）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-115"
+      ],
+      "recorded_at_utc": "2026-10-06T14:57:42.066294Z",
+      "candidates": {
+        "TASK-115": "e10c0b18713eac61d52bee7a10c28a01dcd8b13a21b1240d49608547cb0eedcc"
+      }
+    },
+    {
+      "id": "DEC-6ebf27b660034d69adf0a8e74a1ac713",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示持续推进——视为验收确认（TASK-116 部分）；独立审查 PASS + UI 取证 + CI 绿含 4 条新 Rust 测试执行（候选=dev@064bd73）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-116"
+      ],
+      "recorded_at_utc": "2026-10-06T14:59:17.182872Z",
+      "candidates": {
+        "TASK-116": "88db6f38806efa8cfdd6ccf953277a92338de34b846d4b2923d4180202ff0998"
       }
     }
   ]

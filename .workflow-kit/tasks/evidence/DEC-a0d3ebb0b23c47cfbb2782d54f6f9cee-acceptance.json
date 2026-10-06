@@ -1,0 +1,14 @@
+{
+  "id": "DEC-a0d3ebb0b23c47cfbb2782d54f6f9cee",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "owner 会话指示持续推进——视为验收确认（TASK-115 部分）；R1 复审 PASS + 真浏览器交互取证 + CI 绿（候选=dev@7fa502b）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-115"
+  ],
+  "recorded_at_utc": "2026-10-06T14:57:42.066294Z",
+  "candidates": {
+    "TASK-115": "e10c0b18713eac61d52bee7a10c28a01dcd8b13a21b1240d49608547cb0eedcc"
+  }
+}

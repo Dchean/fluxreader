@@ -1,0 +1,71 @@
+{
+  "task_id": "TASK-115",
+  "candidate_digest": "e10c0b18713eac61d52bee7a10c28a01dcd8b13a21b1240d49608547cb0eedcc",
+  "verification_run": "RUN-d9858a974d1c40ef92cd213b6b95dbfd",
+  "verdict": "PASS",
+  "summary": "R1 修复轮独立复审（全新上下文，未参与实现与 R0 审查）。工作区经 65 个候选文件逐一 sha256 比对并复算候选摘要，逐字节绑定 RUN-d9858a974d1c40ef92cd213b6b95dbfd 候选 e10c0b18…。R0 唯一 finding（types.ts/reader.ts 失实注释引用不存在的 timelineAnchor.noteReaderFocusReturn）已修复：grep 全仓 src/ 与 tools/ 清零（仅存历史记录类文件），两处注释改为与实现同口径——readerCloseNonce=不透明计数器信号不携带载荷、原选中卡由 Timeline lastActiveArticleIdRef 在 activeArticleId 跟随 effect 记账（关闭 commit 保留关闭前值）、关闭 commit 中 ref 语义与 nonce 重触发理由，与 Timeline.tsx:67-78/310-327 消费注释、reader.ts:309-326 长注释及实现、timelineAnchor.ts 头注 X2 节三处互相印证，且与 t115-0 源级断言钉住的接线一致。R0↔R1 差异有界：候选清单 65 文件中 63 个哈希逐字相同，差异仅 src/store/types.ts 与 src/store/slices/reader.ts；两文件相对 HEAD 的全部 hunks 与 R0 已审内容对账（types 18+、reader 25+/1-）。按 R0 报告行号引用的精确性校准（App.tsx:223、Timeline.tsx:71-78 在未变更文件上逐字命中）推算，R1 实际改动了三处注释区域：types.ts readerCloseNonce 文档重写、reader.ts 字段旁注重写（3→5 行），另有 types.ts switchRestoreNonce 文档追加 4 行「与 positionRestoreNonce 两个独立信号/不叠加保证」段落——worker 声明「两处注释」未计第三处，但三处全部为注释、内容经核对准确（与 nav.ts 条件 bump 及 timelineAnchor 头注规则一致），零可执行代码变更成立。R0 其余结论全部保持：契约文档、回归脚本、Timeline.tsx、timelineAnchor.ts、nav.ts 哈希 R0↔R1 相同（X1/X2/X3 接线与规则表载体未动）；审查者本机复跑四门禁全绿——test:frontend 642/642（26 既有+616 store，t115-*21/t111-*20/t114-*16 在场、0 失败）、lint 0/0、build exit 0、cargo fmt --check exit 0，与 RUN-d9858a 记录一致。验收⑥（PASS findings=0）现满足，ui 取证沿用 R0 边界，无新 UI 面。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "聚焦复审：R0 已逐项核实验收①-⑤（切换返回恢复/焦点归还/规则文档化/不叠加/门禁），R0↔R1 候选清单 65 文件中 63 个哈希逐字相同，差异仅 types.ts 与 reader.ts；对两文件相对 HEAD 的全部 hunks 与 R0 已审内容对账无新增可执行面，故 R0 各项结论原样保持。R0 唯一 finding 已修：noteReaderFocusReturn 在 src/ 与 tools/ 清零（残留仅为 workflow 历史记录），两处注释与实现同口径。验收⑥（独立审查 PASS findings=0）本轮满足。范围无越界：改动文件集与 R0 相同（6 文件，均在 allowed_paths 内），non-goals（TASK-111 机制、画廊、Rust）未触碰。",
+      "evidence_files": [
+        "src/store/types.ts",
+        "src/store/slices/reader.ts",
+        ".workflow-kit/tasks/runs/RUN-d9858a974d1c40ef92cd213b6b95dbfd.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "tools/frontend-regression.mjs 哈希 R0↔R1 逐字相同（既有断言零弱化的最强形态：文件未动）。审查者本机独立复跑 npm run test:frontend：642/642（26 既有 + 616 store 行为）、0 失败，t115-* 21 条、t111-* 20 条、t114-* 16 条全部在场，与 RUN-d9858a 证据文件及 R0/R1 声称一致；lint 0/0、build exit 0、cargo fmt --check exit 0 同样复跑通过。R0 的变异判别结论（M1 存档置空 5 红、M2 守卫去除 2 红）不受注释修改影响——判别载体（timelineAnchor.ts/nav.ts/Timeline.tsx/回归脚本）R0↔R1 哈希相同。",
+      "evidence_files": [
+        "tools/frontend-regression.mjs",
+        ".workflow-kit/tasks/evidence/RUN-d9858a974d1c40ef92cd213b6b95dbfd-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-d9858a974d1c40ef92cd213b6b95dbfd-candidate.json"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "R0 的失败面清单（缓存命中但注入 reload 失败、存档锚不在恢复列表归零、同上下文导航守卫、切排序新语境、关闭时列表已切换 null 不聚焦、连续开关 nonce 重触发、画廊三 effect 回落、LRU 淘汰退回归零、mock 模式不恢复、重复 Esc 门控）全部由 R0↔R1 哈希相同的行为载体承载，结论原样保持。R0→R1 差异为注释级已按三重证据界定：候选清单哈希差仅 2 文件；两文件相对 HEAD 全量 hunks 对账（清零 set((s)=>)+nonce bump 为唯一可执行差异，属 R0 已审内容）；R0 报告行号引用经未变更文件校准后与现行文件差值（reader.ts +2、types.ts +4）恰好等于注释行数变化，无未解释位移。本机复跑 642/642 进一步确认失败面断言全数有效。",
+      "evidence_files": [
+        "src/store/slices/reader.ts",
+        "src/components/Timeline.tsx"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "R0 唯一 FAIL 项（注释与实现矛盾）已修复并复核：types.ts readerCloseNonce 文档与 reader.ts 字段旁注现陈述「不透明计数器信号、不携带载荷、原选中卡由 Timeline ref 记账（关闭 commit 保留关闭前值）、nonce 重触发理由」，与 Timeline.tsx:67-78/310-327、reader.ts:309-326 长注释、timelineAnchor.ts 头注 X2 节及 t115-0 钉住的接线三处以上同口径，字段文档不再指向不存在的 API。R0 的正向结构判断（回位记账收口 timelineAnchor 单模块、store 零反向依赖、focusCardAt 去重）不变。一处声明精度备注（非缺陷）：按 R0 行号引用精确性校准推算，R1 除声明的两处注释外还将 types.ts switchRestoreNonce 文档追加了 4 行「与 positionRestoreNonce 独立/不叠加保证」段落（三处均纯注释、内容核对准确，worker 汇总未列），不影响任何可执行面，如实记录备查。",
+      "evidence_files": [
+        "src/store/types.ts",
+        "src/store/slices/reader.ts",
+        "src/components/timelineAnchor.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "R0↔R1 差异为纯注释文本（store 两文件），不触及任何运行路径：无新增订阅、无渲染通道变化、无滚动/定位路径改动；R0 已核实的热点面（250ms 节流锚记录、O(1) LRU 存档、nonce 触发的一次性 effect）载体文件哈希未变。无新增测量义务，不伪造实测。",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": {
+    "required": true,
+    "checked_states": [
+      "X1.switch-return-scroll",
+      "X2.reader-close-focus",
+      "X3.rule-documented"
+    ],
+    "evidence_files": [
+      ".workflow-kit/tasks/evidence/TASK-115-ui/x1-switch-return-scroll-restored.png",
+      ".workflow-kit/tasks/evidence/TASK-115-ui/x2-reader-close-focus-returned.png",
+      ".workflow-kit/tasks/evidence/TASK-115-ui/interaction-report.json",
+      ".workflow-kit/tasks/evidence/RUN-d9858a974d1c40ef92cd213b6b95dbfd-frontend.stdout.txt"
+    ],
+    "notes": "沿用 R0 取证边界（SSR 形态烟测 + 源级接线断言 + store 层/纯函数行为断言；真机截图由主控落账前补充至 ui_evidence_directory）。R1 未引入任何新 UI 面：R0↔R1 哈希比对证实 Timeline.tsx、nav.ts、timelineAnchor.ts、UI 契约文档、回归脚本逐字相同，差异仅 store 两文件的注释文本；X1/X2/X3 的全部 UI 行为载体与 R0 PASS 时逐字节一致。复跑中 t114-x1d SSR 烟测继续通过，t115-0 三条源级接线（X1 查档→决策→抑制→scrollToIndex→rearm 有序、X2 ref 记账+readerFocusReturnIndex→focusCardAt、三 effect image 回落计数=3）与 X3 头注关键词断言全绿；store 层 x1a/x1b/x1c/x2a/x2b/x3a/x3b/x3c 行为断言 616/616 通过。X1（切换返回恢复/锚丢失归零）、X2（关闭焦点归还原卡/列表已切回落）、X3（timelineAnchor 头注规则表+契约文档，切排序=新语境裁定在案）结论与 R0 一致保持。；落账补充（主控）：按工具 UI 取证要求补充真实浏览器截图 2 张与交互报告（tasks/evidence/TASK-115-ui/，vite dev+mock 模式，页内 JS 驱动）：切换返回 scrollTop 317.69→318 恢复实测、Esc 关闭后 activeElement=原选中卡（data-card-index=1）实测，证据边界见 interaction-report.json。",
+    "contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-115-RETURN-POSITION.md"
+  }
+}

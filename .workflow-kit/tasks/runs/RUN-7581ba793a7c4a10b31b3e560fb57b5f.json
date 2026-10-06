@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "RUN-7581ba793a7c4a10b31b3e560fb57b5f",
+  "task_id": "TASK-114",
+  "kind": "review",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "agent_c13c6a06-661a-48c5-a5ad-6f94ac9380ee"
+  },
+  "started_at_utc": "2026-10-06T11:20:32.598233Z",
+  "finished_at_utc": "2026-10-06T11:20:33.093124Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "80275be2506a47764c3e112a398f6bda4211a790c00575470402e5c9942db335",
+  "candidate_digest": "51fdf66d0eeaa086f89bc195ca24e4c72f8bb55b54bdedabb06e34ab14facda1",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-7581ba793a7c4a10b31b3e560fb57b5f-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "FAIL",
+    "report": ".workflow-kit/tasks/evidence/RUN-7581ba793a7c4a10b31b3e560fb57b5f-review.json",
+    "candidate_digest": "51fdf66d0eeaa086f89bc195ca24e4c72f8bb55b54bdedabb06e34ab14facda1"
+  },
+  "estimated_cost_usd": null,
+  "failure_kind": "review_failure",
+  "failure_reason": "Review requires changes; inspect the findings"
+}
