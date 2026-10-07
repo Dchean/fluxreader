@@ -351,6 +351,10 @@ await (async () => {
      与行级数据刻意不一致，大量断言依赖）；函数 = 按 backendRows 忠实聚合
      （计数对账用例：markCurrentViewAllRead 成功后重取的计数必须等于后端口径）。 */
   let feedCountsImpl = null;
+  /* TASK-119：feed_counts 挂起计划（{ mode: 'defer' }，一次性）+ 挂起项——
+     计数竞态场景（对账请求在途窗口）需要手动放行响应 */
+  let feedCountsPlan = null;
+  let pendingCounts = [];
   let heldAi = [];            // hold 模式挂起项 { cmd, id, ch }
   let settingsRaw = null;     // get_setting('app_settings') 的返回值
   let ghLoginStatus = null;   // github_login_status 的返回值：null | {login} | 'reject'
@@ -423,7 +427,15 @@ await (async () => {
       case 'list_feeds': return failReload ? Promise.reject(failReload) : Promise.resolve(FEEDS);
       /* TASK-107：feedCountsImpl 非空时按 backendRows 忠实聚合（计数对账用例）；
          缺省仍返回静态 COUNTS——既有断言基线依赖它（与行级夹具刻意不一致） */
-      case 'feed_counts': return failReload ? Promise.reject(failReload) : Promise.resolve(feedCountsImpl ? feedCountsImpl() : COUNTS);
+      case 'feed_counts': {
+        if (failReload) return Promise.reject(failReload);
+        /* TASK-119：一次性 defer——仅挂起当次请求，重取/后续调用照常返回 */
+        if (feedCountsPlan && feedCountsPlan.mode === 'defer') {
+          feedCountsPlan = null;
+          return new Promise((resolve) => { pendingCounts.push({ resolve }); });
+        }
+        return Promise.resolve(feedCountsImpl ? feedCountsImpl() : COUNTS);
+      }
       case 'sync_status': return Promise.resolve({ connected: false });
       case 'list_articles': {
         if (listPlan && listPlan.mode === 'reject') return Promise.reject(listPlan.error);
@@ -562,6 +574,8 @@ await (async () => {
     getArticlesPlan = null;
     pendingGetArticles = [];
     feedCountsImpl = null;
+    feedCountsPlan = null;
+    pendingCounts = [];
     detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
     /* TASK-063：视图缓存是模块级 Map，跨用例残留会让下一个用例的 selectFeed
        命中上一个夹具的快照（跨夹具污染）。每个用例独立起步（(s6) 此前已就地
@@ -3912,6 +3926,192 @@ await (async () => {
   }
 
   /* ============================================================
+     TASK-119（2026-10-07，审计 P2-4）：请求与计数过期覆盖——迟到响应不得
+     覆盖新状态（探针 P5/P6 场景转真实行为回归）。
+
+     ①查询旧版本窗口（P5）：过期判断此前只比较查询参数——QueryScope 收口了
+       谓词但没消除「同一查询的旧版本」窗口：同 scope/view/sort 两次发起、
+       新响应先落、旧响应后至，旧响应因「参数全同」被放行覆盖新结果；
+       A→B→A 同理不设防。修法：查询实例代际（bootstrap 双层级——全局
+       queryGeneration + firstPageSerialByKey Map，键复用 TASK-117 viewKey
+       键族；reloadFromBackend / reloadFilteredEntries / loadMoreArticles /
+       anchorToArticle 四处发起点统一接入）。
+     ②计数对账窗口（P6）：markCurrentViewAllRead 成功后的 feed_counts 对账
+       在途期间用户改回未读，迟到计数整体替换把乐观计数踩回旧值（文章未读
+       但未读数 0）。修法：对账发起时快照本地读/藏写入序号
+       （currentLocalFlagWriteSerial，bump 点矩阵见 internals），落地仅当
+       期间无本地写入才应用，否则丢弃并立即重取恰一次。
+
+     判别设计（变异自证）：查询场景全部构造「参数比较不可判别」形态——同键
+     旧实例迟到落地时 view/scopeKey/sort/游标守卫全放行，唯一判据是代际；
+     删掉任一落地判据的代际比较，对应断言必红。计数竞态用本卡新增的
+     feedCountsPlan/pendingCounts 手动放行（一次性 defer，重取需再挂一次）。
+     ============================================================ */
+  {
+    /* ---------- (t119-1) A→B→A 旧响应丢弃（探针 P5 本体） ----------
+       starred(A1) 请求在途 → 切 unread(B) → 切回 starred(A2)。同键旧实例（A1）
+       迟到落地时：activeViewFilter 恰为 starred、scopeKey/排序全同——既有守卫
+       全部放行，唯一判据是 per-key 首屏代际（A2 发起已 bump 同键序号）。 */
+    await resetStore();
+    listPlan = { mode: 'defer' };
+    store.getState().selectView('starred'); // A1：旧实例发起
+    await nTick(0);
+    store.getState().selectView('unread'); // B：中间视图（邻键，各自代际）
+    await nTick(0);
+    store.getState().selectView('starred'); // A2：同键新实例（代际 bump）
+    await nTick(0);
+    checkNew('(t119-1) 场景成立：A1/B/A2 三个筛选请求全部在途（同键两实例 + 邻键一次）',
+      pendingList.length === 3);
+    pendingList[2].resolve([mkRow({ id: 8102, feed_id: 10, is_starred: true, published_at: OLD })]); // A2 新响应先落
+    pendingList[1].resolve([mkRow({ id: 8201, feed_id: 10, published_at: OLD })]); // B（已切回 starred，视图守卫弃）
+    await nTick(10);
+    checkNew('(t119-1) 新实例先落地：entries 为 A2 快照（8102）',
+      store.getState().entries.map((e) => e.id).join(',') === '8102');
+    pendingList[0].resolve([mkRow({ id: 8101, feed_id: 10, is_starred: true, published_at: OLD })]); // A1 旧响应后至
+    listPlan = null;
+    await nTick(10);
+    checkNew('(t119-1) A→B→A 旧响应丢弃（判别）：迟到的首个 starred 响应不覆盖新实例结果（修前「参数全同」放行 → entries 回退 8101）',
+      store.getState().entries.map((e) => e.id).join(',') === '8102');
+
+    /* ---------- (t119-2) 同查询旧版本先发后至不覆盖（探针 P5 纯形态） ----------
+       同键两次发起（同 scope/view/sort，如刷新重发）：新实例先落、旧实例后至。
+       参数逐字全同，唯一判据是代际。 */
+    await resetStore();
+    listPlan = { mode: 'defer' };
+    store.getState().selectView('starred'); // 旧实例发起
+    await nTick(0);
+    const t119SameOld = pendingList.at(-1);
+    void store.getState().reloadFilteredEntries('starred'); // 同键新实例（同查询重发）
+    await nTick(0);
+    const t119SameNew = pendingList.at(-1);
+    t119SameNew.resolve([mkRow({ id: 8302, feed_id: 10, is_starred: true, published_at: OLD })]); // 新先落
+    await nTick(10);
+    t119SameOld.resolve([mkRow({ id: 8301, feed_id: 10, is_starred: true, published_at: OLD })]); // 旧后至（载荷不同）
+    listPlan = null;
+    await nTick(10);
+    checkNew('(t119-2) 同查询旧版本先发后至不覆盖（判别）：两次同参数 starred 请求，旧实例迟到响应被代际丢弃、entries 保持新实例结果（修前回退 8301）',
+      store.getState().entries.map((e) => e.id).join(',') === '8302');
+
+    /* ---------- (t119-3) 计数竞态：改回未读后旧计数不应用且重取一次（探针 P6 本体） ----------
+       全部已读成功 → feed_counts 对账在途（defer 挂起，载荷=发起时后端全读态
+       unread 0）→ 用户把文章改回未读（本地读态写入：序号 bump + set_read 落库）
+       → 迟到计数落地：必须判过期丢弃、立即重取恰一次；重取（期间无新写入）
+       落地后端口径真值。 */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = Array.from({ length: 600 }, (_, i) =>
+      mkRow({ id: 66000 + i, feed_id: 10, published_at: iso(NOW - i * 1000) }));
+    await store.getState().bootstrapFromBackend();
+    store.setState((s) => ({ entries: s.entries.slice(0, 1) })); // 600/1 形态（t104 同款）
+    feedCountsPlan = { mode: 'defer' }; // 挂起对账请求（一次性 defer）
+    store.getState().markCurrentViewAllRead();
+    await nTick(10); // mark_all_read 落库（600 行翻已读）→ 对账请求进入 defer
+    const t119StaleCounts = countsFromRows(); // 对账响应载荷 = 发起时后端真值（全读态：unread 0）
+    checkNew('(t119-3) 场景成立（600/1）：对账在途挂起、计数停留乐观值 599、迟到载荷为全读态 0',
+      pendingCounts.length === 1
+      && store.getState().feedCounts.get('10')?.unread === 599
+      && t119StaleCounts.find((c) => c.feed_id === 10)?.unread === 0);
+    store.getState().toggleEntryFlag(store.getState().entries[0].id, 'isRead'); // 改回未读：本地读态写入（序号 bump）+ set_read 落库
+    await nTick(10); // set_read 落库（DB 真值 = 1 篇未读）
+    checkNew('(t119-3) 用户改回未读：条目未读、计数乐观回补 600',
+      store.getState().entries[0].isRead === false
+      && store.getState().feedCounts.get('10')?.unread === 600);
+    feedCountsPlan = { mode: 'defer' }; // 重取也挂起：可断言「恰重取一次」且不级联
+    pendingCounts[0].resolve(t119StaleCounts); // 迟到计数落地
+    await nTick(10);
+    checkNew('(t119-3) 迟到计数不应用（判别）：期间有本地读写入 → 全读态旧计数（unread 0）被丢弃，计数保持乐观值 600、条目仍未读（修前整体替换 → 文章未读但未读数 0）',
+      store.getState().feedCounts.get('10')?.unread === 600
+      && store.getState().entries[0].isRead === false);
+    checkNew('(t119-3) 过期即重取恰一次：对账立即重取且不级联（重取恰一次在途）',
+      pendingCounts.length === 2);
+    pendingCounts[1].resolve(countsFromRows()); // 重取落地（载荷 = 含改回未读的后端真值）
+    await nTick(10);
+    checkNew('(t119-3) 重取落地自愈：计数收敛到含改回未读的后端口径 unread 1',
+      store.getState().feedCounts.get('10')?.unread === 1
+      && countsFromRows().find((c) => c.feed_id === 10)?.unread === 1);
+
+    /* ---------- (t119-4) 续页旧代际丢弃（探针 P4 形态） ----------
+       续拉在途期间同数据重拉落地：游标三元组（last_published/last_id/loaded）
+       与续页发起时全等 → paginationStale 参数比较不可判别（审计原话：不能只
+       比较查询参数），唯一判据是续页携带的首屏代际（重拉发起已 bump 同键序号）。 */
+    await resetStore();
+    backendRows = Array.from({ length: 600 }, (_, i) =>
+      mkRow({ id: 67000 + i, feed_id: 10, published_at: iso(NOW - i * 60000) }));
+    await store.getState().bootstrapFromBackend(); // 首屏 500（67000..67499）
+    listPlan = { mode: 'defer' };
+    const t119LmP = store.getState().loadMoreArticles(); // 续页在途（携带首屏代际）
+    await nTick(0);
+    const t119LmPending = pendingList[0];
+    void store.getState().reloadFromBackend(); // 同数据重拉（其 list 请求同样 defer）
+    await nTick(0);
+    const t119ReloadPending = pendingList[1];
+    checkNew('(t119-4) 场景成立：续页与重拉两请求在途（续页先发）',
+      pendingList.length === 2 && !!t119LmPending && !!t119ReloadPending);
+    t119ReloadPending.resolve(queryRows(t119ReloadPending.args)); // 重拉先落（同数据 → 游标三元组与续页发起时全等）
+    await nTick(10);
+    checkNew('(t119-4) 同数据重拉落地：首屏游标三元组与续页发起时全等（参数比较不可判别形态成立）',
+      store.getState().entries.length === 500
+      && store.getState().articlesCursor['article|all']?.loaded === 500
+      && store.getState().articlesCursor['article|all']?.lastId === 67499);
+    t119LmPending.resolve(queryRows(t119LmPending.args)); // 续页旧代际响应后至（= 锚后 100 行 67500..67599）
+    await t119LmP;
+    listPlan = null;
+    await nTick(10);
+    checkNew('(t119-4) 续页旧代际丢弃（判别）：期间发生了更新的首屏发起 → 迟到续页整页丢弃、entries 保持首屏 500 条、加载态复位（修前参数全同放行 → 追加至 600）',
+      store.getState().entries.length === 500
+      && store.getState().entries.every((e) => Number(e.id) <= 67499)
+      && store.getState().articlesLoading === false);
+
+    /* ---------- (t119-5) 统一后既有 reloadGeneration 保护场景仍绿 ----------
+       (a) 跨范围 reload：两个 reload 是不同 queryKey（per-key 判据不设防），
+       全局代际承担原 reloadGeneration 的范围切换保护；(b) 锚定使在途 reload
+       过期（anchorToArticle 注释声明的既有竞态语义）。统一收口后两类保护
+       原样保留，不得回退。 */
+    await resetStore();
+    listPlan = { mode: 'defer' };
+    const t119ScopeOldP = store.getState().reloadFromBackend(); // 范围 all（旧实例）
+    await nTick(0);
+    const t119ScopeOldPending = pendingList[0];
+    store.getState().selectFeed('feed-10'); // 范围切换 → 自带新 reload（新实例）
+    await nTick(0);
+    const t119ScopeNewPending = pendingList[1];
+    t119ScopeNewPending.resolve(queryRows(t119ScopeNewPending.args)); // 新范围先落（feed-10 三条）
+    await nTick(10);
+    checkNew('(t119-5) 场景成立：切范围后新范围首屏落地（feed-10 三条）',
+      store.getState().entries.length === 3
+      && store.getState().entries.every((e) => e.feedId === '10'));
+    t119ScopeOldPending.resolve(queryRows(t119ScopeOldPending.args)); // 旧范围（8 行全量）后至
+    await t119ScopeOldP;
+    listPlan = null;
+    await nTick(10);
+    checkNew('(t119-5) 跨范围旧 reload 丢弃（统一守卫，原 reloadGeneration 范围切换保护不回退）：entries 保持新范围快照',
+      store.getState().entries.length === 3
+      && store.getState().entries.every((e) => e.feedId === '10'));
+
+    await resetStore();
+    listPlan = { mode: 'defer' };
+    void store.getState().reloadFromBackend(); // reload 在途（旧实例）
+    await nTick(0);
+    const t119AnchorReloadPending = pendingList[0];
+    const t119AnchorP = store.getState().anchorToArticle('301'); // 锚定：全局代际 bump + 同键首屏序号 bump
+    await nTick(0);
+    const t119AnchorPending = pendingList[1];
+    t119AnchorPending.resolve(queryRows(t119AnchorPending.args)); // 锚定窗口先落（pos 3 起 5 行）
+    await t119AnchorP;
+    await nTick(10);
+    checkNew('(t119-5) 锚定落地：entries 为锚定窗口（301,202,105,104,103）、activeArticleId=301',
+      store.getState().activeArticleId === '301'
+      && store.getState().entries.map((e) => e.id).join(',') === '301,202,105,104,103');
+    t119AnchorReloadPending.resolve(queryRows(t119AnchorReloadPending.args)); // reload 旧响应后至（8 行全量）
+    listPlan = null;
+    await nTick(10);
+    checkNew('(t119-5) 在途 reload 被锚定过期（判别，原 anchorToArticle 竞态语义）：迟到的 reload 快照不覆盖锚定窗口',
+      store.getState().entries.map((e) => e.id).join(',') === '301,202,105,104,103'
+      && store.getState().activeArticleId === '301');
+    await resetStore(); // 夹具复位：不把 defer 残留带给后续块
+  }
+
+  /* ============================================================
      TASK-111（二阶段③）：①查询缓存实体预算 ②后台刷新保位。
      ①审计：「单纯限制为 8 个视图并不能限制每个视图的大小」——TASK-100 P3-7
        只封键数（LRU 8），TASK-110 分页化后单键 entries 仍随滚动加载无界增长
@@ -5863,8 +6063,12 @@ await (async () => {
       && bootstrap.includes('backendReloadInFlight++')
       && bootstrap.includes('backendReloadInFlight--')
       && (bootstrap.match(/backendReloadInFlight--/g) || []).length === 2);
-    checkNew('(t100-p3-1) 计数器与 reloadGeneration 同为模块级状态（不得被 setState 泄漏进 store）',
-      !bootstrap.includes('reloadInFlight: ') && bootstrap.includes('let backendReloadInFlight = 0;'));
+    /* 【TASK-119 更新理由】原 reloadGeneration 已统一为查询实例代际
+       queryGeneration（模块级改名，保护语义等价保留）——断言随统一语义更新
+       措辞，并**强化**：新代际状态同样锁定为模块级（不得泄漏进 store）。 */
+    checkNew('(t100-p3-1) 计数器与查询代际（TASK-119 统一后的 queryGeneration）同为模块级状态（不得被 setState 泄漏进 store）',
+      !bootstrap.includes('reloadInFlight: ') && !bootstrap.includes('queryGeneration: ')
+      && bootstrap.includes('let backendReloadInFlight = 0;') && bootstrap.includes('let queryGeneration = 0;'));
 
     /* P3-2：fetchFailed 假 affordance */
     checkNew('(t100-p3-2) fetchFailed 警示点改为非点击承诺「最近一次抓取失败」（重试走旁边独立刷新钮）',

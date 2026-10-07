@@ -442,6 +442,41 @@ function bumpEntryVersion(id: string, field: 'isRead' | 'isStarred'): void {
   entryMutationVersion.set(key, (entryMutationVersion.get(key) ?? 0) + 1);
 }
 
+/* ============================================================
+   TASK-119（审计 P2-4②）：本地读/藏写入序号——计数对账的过期判据。
+
+   feed_counts 对账（nav.markCurrentViewAllRead 成功路径）的响应在途期间，任何
+   本地读/藏写入都会使「发起时的计数快照」对当前状态过期：对账整体替换会把乐观
+   计数踩回旧值（审计探针 P6：全部已读成功 → 对账在途 → 用户改回未读 → 迟到计数
+   落地 → 文章未读但未读数 0）。
+
+   写入点矩阵（bumpLocalFlagWrite 的全部调用点）：
+   - flipEntryFlag：单条 toggle（卡片/阅读器；乐观回滚的重翻同径）——每次真实
+     翻转（isRead 与 isStarred 都算：收藏数同样由对账整体替换承载）；
+   - markEntriesRead：批量乐观标读（markEntriesReadBulk / markCurrentViewAllRead
+     的乐观段 / 播放器播完标读）——仅实际翻转时（changed 早退之后）；
+   - rollbackEntryClaims：失败回滚（TASK-118 统一助手，乐观 toggle /
+     markEntriesReadBulk / selectArticle·anchorToArticle 打开即标读的回滚路径）
+     ——实际恢复时。
+   markCurrentViewAllRead 经 markEntriesRead（乐观段）覆盖，不单独 bump；其失败
+   回滚是 nav 内联恢复（不经 rollbackEntryClaims），但只恢复**自身乐观段已翻转**
+   的条目（changed 早退两侧对称）——回滚发生 ⇒ 同一操作的乐观段必已 bump，在途
+   对账已因该 bump 过期，无需为回滚单独 bump。mergeSnapshotEntries 是后端真值
+   落地、非本地未确认写，不 bump（其伴随的 reload 自带同源计数，不存在对账窗口）。
+   序号只单调不清理：与会话内旗标写入同量级，消费方只做相等比较，无溢出顾虑。
+   ============================================================ */
+let localFlagWriteSerial = 0;
+
+/** TASK-119：本地读/藏真实写入（翻转或恢复）时推进序号。 */
+function bumpLocalFlagWrite(): void {
+  localFlagWriteSerial += 1;
+}
+
+/** TASK-119：读当前本地读/藏写入序号（对账发起时快照、落地时比对）。 */
+export function currentLocalFlagWriteSerial(): number {
+  return localFlagWriteSerial;
+}
+
 /** 乐观更新某篇条目的 isRead/isStarred，并同步 feedCounts 的未读/收藏计数。
     侧边栏数字基于 feedCounts（后端精确计数），若不联动，标读/收藏后角标
     不立即变化（与乐观更新的列表脱节）。total/today 不受影响。
@@ -462,6 +497,7 @@ export function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
   const nextVal = !entry[field];
   const entries = s.entries.map((e) => (e.id === id ? { ...e, [field]: nextVal } : e));
   bumpEntryVersion(id, field); // TASK-118：按旗标类型 bump 对应字段版本
+  bumpLocalFlagWrite(); // TASK-119：本地读/藏写入（计数对账过期判据，矩阵见上）
   const c = s.feedCounts.get(entry.feedId);
   let feedCounts = s.feedCounts;
   if (c) {
@@ -502,6 +538,7 @@ export function markEntriesRead(ids: Set<string>) {
     return e;
   });
   if (!changed) return;
+  bumpLocalFlagWrite(); // TASK-119：本地批量读态写入（markEntriesReadBulk / 全部已读乐观段共用此径）
   // 一次更新 feedCounts
   let feedCounts = s.feedCounts;
   for (const [feedId, delta] of unreadDeltas) {
@@ -566,6 +603,7 @@ export function rollbackEntryClaims(claims: readonly EntryRollbackClaim[]): bool
     return next;
   });
   if (!changed) return false;
+  bumpLocalFlagWrite(); // TASK-119：回滚恢复也是本地读/藏写入（失败回滚后使在途计数对账过期）
   let feedCounts = s.feedCounts;
   const applyDelta = (feedId: string, key: 'unread' | 'starred', delta: number) => {
     const c = feedCounts.get(feedId);

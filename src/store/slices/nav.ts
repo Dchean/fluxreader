@@ -1,6 +1,6 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
-import { getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, syncCurrentViewCache, viewEntriesCache } from '../internals';
+import { currentLocalFlagWriteSerial, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, syncCurrentViewCache, viewEntriesCache } from '../internals';
 import { selectVisibleEntries } from '../selectors';
 import type { AppState } from '../types';
 
@@ -335,27 +335,45 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          此时乐观写入也未翻转任何条目，无需重取）。 */
       get().showToast('已全部标为已读');
       if (affected === 0) return;
-      const reconcileCounts = () =>
-        api.feedCounts().then((rows) => {
-          if (!rows) return false;
+      /* TASK-119（审计 P2-4②探针 P6）：对账发起时记录本地读/藏写入序号
+         （currentLocalFlagWriteSerial，bump 点矩阵见 internals）——落地仅当
+         「期间无本地读/藏写入」才整体替换：替换会把乐观计数踩回旧值（改回未读
+         后迟到计数落地 → 文章未读但未读数 0）。过期则丢弃并**立即重取一次**；
+         重取仍过期/失败则放弃，计数由下次 reload 自愈（与 R1 F2 失败自愈同口径，
+         不循环重试——重取自身不再触发重取）。 */
+      const reconcileCounts = (): Promise<'applied' | 'stale' | 'empty'> => {
+        const serialAtStart = currentLocalFlagWriteSerial();
+        return api.feedCounts().then((rows) => {
+          if (!rows) return 'empty';
+          if (currentLocalFlagWriteSerial() !== serialAtStart) return 'stale';
           const next = new Map<string, { total: number; unread: number; starred: number; today: number }>();
           for (const c of rows) {
             next.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
           }
           set({ feedCounts: next });
-          return true;
+          return 'applied';
         });
-      /* TASK-107 R1（F2）：对账重取失败不再完全静默——落库已成功但计数残留
-         乐观值（600/1 形态下显示 599、DB 真值 0），先给一条诊断提示（≤40 字，
-         与「保存失败」文案明确区分：标读本身没有失败），并安排一次 3s 延迟
-         重试；重试仍失败则放弃，依赖既有 reload 自愈（下次任意
-         reloadFromBackend 重取同一计数来源，审查探针 F2 证实自愈有效）。 */
-      reconcileCounts().catch(() => {
-        get().showToast('全部已读已保存，未读计数刷新失败');
-        setTimeout(() => {
-          void reconcileCounts().catch(() => { /* 重试仍失败：放弃，计数由下次 reload 自愈 */ });
-        }, 3000);
-      });
+      };
+      const runCountReconcile = (allowRetry: boolean) => {
+        reconcileCounts().then((outcome) => {
+          if (outcome === 'stale' && allowRetry) {
+            /* 过期丢弃 → 立即重取一次（不再级联：重取的过期/失败都放弃） */
+            void reconcileCounts().catch(() => { /* 重取失败：放弃，计数由下次 reload 自愈 */ });
+          }
+        }).catch(() => {
+          /* TASK-107 R1（F2）：对账重取失败不再完全静默——落库已成功但计数残留
+             乐观值（600/1 形态下显示 599、DB 真值 0），先给一条诊断提示（≤40 字，
+             与「保存失败」文案明确区分：标读本身没有失败），并安排一次 3s 延迟
+             重试；重试仍失败则放弃，依赖既有 reload 自愈（下次任意
+             reloadFromBackend 重取同一计数来源，审查探针 F2 证实自愈有效）。 */
+          if (!allowRetry) return;
+          get().showToast('全部已读已保存，未读计数刷新失败');
+          setTimeout(() => {
+            void reconcileCounts().catch(() => { /* 重试仍失败：放弃，计数由下次 reload 自愈 */ });
+          }, 3000);
+        });
+      };
+      runCountReconcile(true);
     }).catch((e: unknown) => {
       /* TASK-107：失败回滚——乐观翻转到原读态、逐 feed 回补未读计数、还原
          「已读保留」快照并同步视图缓存。恢复前提从「当前值仍等于乐观写入值」

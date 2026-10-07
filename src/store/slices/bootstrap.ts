@@ -37,8 +37,64 @@ export type BootstrapSlice = Pick<
    TASK-110：常量收口到 internals（筛选视图分页化后与「全部」视图共用同一页大小
    与游标口径，nav.ts 的缓存恢复 exhausted 判定也需要它），此处 import 使用。 */
 
-/** reloadFromBackend 代际计数：并发 reload 只接受最新一次结果 */
-let reloadGeneration = 0;
+/* ============================================================
+   TASK-119（审计 P2-4①）：查询实例代际——统一收口（演化自原 reloadGeneration）
+
+   缺陷：过期判断只比较查询参数（QueryScope 谓词收口了口径但没消除「同一查询
+   的旧版本」窗口）——同 scope/view/sort 两次发起、新响应先落、旧响应后至，旧
+   响应因「参数全同」被放行覆盖新结果（探针 P5）；A→B→A 同理不设防。审计要求
+   每个查询实例维护 generation，首屏/续页/刷新/导航共享同一套过期判断。
+
+   机制（双层级，单一体系内的两个粒度）：
+   - queryGeneration：全局单调序号——**全局状态/窗口写入者**（reloadFromBackend
+     写 categories/feedCounts/entries 全局态；anchorToArticle 整体替换当前窗口）
+     的落地判据是「此后没有任何更新的查询发起」。纯 per-key 判据在这里不够：
+     跨范围两次 reload 是不同 queryKey，旧范围响应会在新范围落地后 pass 并把
+     全局态踩回旧值且无自愈（B 已落地不会再有查询覆盖）——这正是原
+     reloadGeneration 的既有保护（范围切换场景），统一后原样保留。
+   - firstPageSerialByKey：Map<queryKey, 序号>——queryKey 复用 TASK-117 键族
+     （viewKey = pageKey×视图口径，布局×范围×视图；排序不入键：同键换序的旧
+     响应由排序守卫与全局代际兜底）。记录该键最近一次「首屏类发起」的序号，
+     消费方有二：
+     ① reloadFilteredEntries 的落地判据——同键两次发起、先发后至的旧版本被
+        识别丢弃（P5/A→B→A 修复；视图快照只写本键，不需要全局粒度，且发起
+        不推全局代际——保留「后台刷新的 all 过渡落地 + 自链筛选重拉」价值，
+        用户切视图不使在途后台刷新整体作废）；
+     ② loadMoreArticles 续页携带的「首页代际」——续页不是新查询实例（不 bump，
+        无锚回落 offset 的退化形态同样是续期），携带发起时该键现值（= 建立当前
+        窗口的首屏代际；期间无更新首屏时二者恒等），落地要求键现值未变 +
+        paginationStale 三元组守卫保留——新首屏落地后游标三元组恰好全等（同数据
+        重拉）时参数比较不可判别，代际补上这一层（探针 P4 形态）。
+   ============================================================ */
+let queryGeneration = 0;
+const firstPageSerialByKey = new Map<string, number>();
+
+/** per-key 首屏代际记录：每次首屏类发起推进该键序号（键内单调）。 */
+function recordFirstPageStart(queryKey: string): number {
+  const serial = (firstPageSerialByKey.get(queryKey) ?? 0) + 1;
+  firstPageSerialByKey.set(queryKey, serial);
+  return serial;
+}
+
+/** 全局状态/窗口写入者发起（reloadFromBackend / anchorToArticle）：推进全局
+    代际 + 记录该键首屏代际（使该键在途的筛选/续页响应过期）。返回全局代际。 */
+function beginGlobalQuery(queryKey: string): number {
+  queryGeneration += 1;
+  recordFirstPageStart(queryKey);
+  return queryGeneration;
+}
+
+/** 视图快照写入者发起（reloadFilteredEntries）：仅推进该键首屏代际，不推全局
+    ——理由见上方机制说明（切视图不得使在途后台刷新的全局态更新作废；同键
+    旧版本由 per-key 判据识别）。返回该键代际。 */
+function beginViewQuery(queryKey: string): number {
+  return recordFirstPageStart(queryKey);
+}
+
+/** 该键当前首屏代际（续页发起时读取 = 首页代际；落地时读取 = 现值）。 */
+function currentFirstPageSerial(queryKey: string): number {
+  return firstPageSerialByKey.get(queryKey) ?? 0;
+}
 
 /** TASK-117：首屏（offset=0）写入的 per-scope keyset 游标——锚取本页最后一行
     （advanceArticlesCursor），loaded 累加到 base。续拉锚从此推进，见
@@ -117,27 +173,32 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       「当前范围已加载了多少条」与列表实际能显示多少条脱节：单源视图下首批
       500 条里可能一条属于该源，且游标直接跳到 500（该源的老文章永远够不到）。
       范围由 get() 在**发起时**读取：异步等待期间用户切范围，结果交由下面
-      reloadGeneration 代际守卫整体丢弃（与既有的「旧代际 reload 被丢弃」同口径）。
+      查询代际守卫整体丢弃（TASK-119 统一后的查询实例代际，语义同原 reloadGeneration）。
 
       TASK-111②：opts.keepReadingPosition —— 仅内容刷新路径（feeds-updated /
       手动同步 / 单源刷新）传入。落地时 bump positionRestoreNonce 让 Timeline
       消费顶条锚回位（审计「后台刷新保留当前阅读位置」）；导航路径不传，
       锚机制对用户主动切换保持沉默（分流显式化）。 */
   reloadFromBackend: async (opts) => {
-    const gen = ++reloadGeneration;
+    /* TASK-109①：发起时一次性快照「范围×布局×排序」——查询参数、分页游标键
+       与「全部」视图缓存键全部从该快照派生。原实现在 await 之后读「完成时」
+       的 activeFeedFilter/activeContentLayout 充当游标键与缓存键口径（注释
+       声称发起时），靠 reloadGeneration 间接兜底：任何范围/布局变更都经由
+       selectFeed/selectLayout 触发新 reload 使旧代际整体丢弃，故行为等价；
+       现改为显式成立（与 loadMoreArticles/anchorToArticle 的发起时快照同一
+       形态），不再依赖默会。TASK-119 起代际守卫统一为查询实例代际
+       （gen !== queryGeneration 即全局已有更新发起，见文件头机制说明）。 */
+    const scopeAtStart = get().activeFeedFilter;
+    const layoutAtStart = get().activeContentLayout;
+    const sortAtStart = get().timelineSort;
+    /* TASK-119：发起即取全局查询代际（原 reloadGeneration 的统一形态）——
+       本入口是全局状态写入者（categories/feedCounts/entries），落地要求
+       「此后没有任何更新的查询发起」（范围切换保护语义原样保留）；同时记录
+       该键首屏代际（使在途续页/筛选响应过期）。 */
+    const gen = beginGlobalQuery(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart));
     const keepReadingPosition = opts?.keepReadingPosition === true;
     backendReloadInFlight++;
     try {
-      /* TASK-109①：发起时一次性快照「范围×布局×排序」——查询参数、分页游标键
-         与「全部」视图缓存键全部从该快照派生。原实现在 await 之后读「完成时」
-         的 activeFeedFilter/activeContentLayout 充当游标键与缓存键口径（注释
-         声称发起时），靠 reloadGeneration 间接兜底：任何范围/布局变更都经由
-         selectFeed/selectLayout 触发新 reload 使旧代际整体丢弃，故行为等价；
-         现改为显式成立（与 loadMoreArticles/anchorToArticle 的发起时快照同一
-         形态），不再依赖默会。reloadGeneration 守卫保留。 */
-      const scopeAtStart = get().activeFeedFilter;
-      const layoutAtStart = get().activeContentLayout;
-      const sortAtStart = get().timelineSort;
       const scopeKey = QueryScope.pageKey(scopeAtStart, layoutAtStart);
       const scopeArgs = QueryScope.args(scopeAtStart, sortAtStart, layoutAtStart);
       let folders, feeds, articles, counts;
@@ -155,7 +216,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         get().showToast(`刷新失败：${extractError(e)}`);
         throw e;
       }
-      if (gen !== reloadGeneration) return; // 已有更新的 reload 在途/完成
+      if (gen !== queryGeneration) return; // TASK-119：全局已有更新的查询发起（统一查询代际，语义同原 reloadGeneration）
       if (!folders || !feeds || articles === null) return;
 
       const categories = folderRowsToCategories(folders, feeds);
@@ -210,13 +271,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       }));
       /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
       void api.syncStatus().then((st) => {
-        if (st && gen === reloadGeneration) set({ syncConnected: st.connected });
+        if (st && gen === queryGeneration) set({ syncConnected: st.connected });
       }).catch(() => { /* TASK-067 N10：纯提示性刷新，失败不打扰 */ });
       /* TASK-116 四态展示：顺带刷新同步队列统计（侧栏 pill 的「等待同步 N 条 /
          部分失败」口径）。挂载（bootstrap 首次 reload）与手动同步完成（末次
          reload）都经过这里——契约约定的两个刷新点，无需另设事件。 */
       void api.syncQueueStats().then((q) => {
-        if (q && gen === reloadGeneration) set({ syncWaiting: q.waiting, syncFailed: q.failed });
+        if (q && gen === queryGeneration) set({ syncWaiting: q.waiting, syncFailed: q.failed });
       }).catch(() => { /* 纯提示性刷新，失败不打扰 */ });
       // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
       // （状态/内容可能变化，entries 需同步刷新为筛选结果）
@@ -259,6 +320,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const viewAtStart = st.activeViewFilter;
     const scopeKey = QueryScope.pageKey(scope, layoutAtStart);
     const scopeArgs = { ...QueryScope.args(scope, st.timelineSort, layoutAtStart), ...QueryScope.viewFilter(viewAtStart) };
+    /* TASK-119：续页携带「首页代际」= 该键最近一次首屏类发起的序号（续页不是新
+       查询实例：不 bump——无锚回落 offset 的退化形态同样是窗口续期）。期间若无
+       更新首屏（reload/锚定/同键筛选），落地时键现值与携带值恒等。 */
+    const queryKey = QueryScope.viewKey(layoutAtStart, viewAtStart, scope);
+    const firstPageGen = currentFirstPageSerial(queryKey);
     /* TASK-117：keyset 锚 = 该 scope 游标现值（最后一行锚点 + loaded 计数）。
        游标表缺键（理论上仅 mock 残留/异常窗口）时以 articlesLimit 兜底——
        lastPublished 为 null → 请求不带 keyset 键，后端回落 OFFSET 语义。 */
@@ -308,6 +374,14 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
           },
         )
       ) {
+        set({ articlesLoading: false });
+        return;
+      }
+      /* TASK-119（审计 P2-4①）：续页代际守卫——落地仅当该键此后没有更新的首屏类
+         发起（reload/锚定/同键筛选）。三元组守卫在「新首屏（同数据重拉）落地后
+         游标与发起时全等」时放行——参数比较识别不了同一查询的旧版本（审计原话：
+         不能只比较查询参数是否相同），代际判据补上这一层。 */
+      if (currentFirstPageSerial(queryKey) !== firstPageGen) {
         set({ articlesLoading: false });
         return;
       }
@@ -375,6 +449,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const sortAtStart = get().timelineSort;
     const scopeKeyAtStart = QueryScope.pageKey(scopeAtStart, layoutAtStart);
     const scopeArgs = QueryScope.args(scopeAtStart, sortAtStart, layoutAtStart);
+    /* TASK-119（审计 P2-4①探针 P5）：筛选视图发起 = 视图快照写入者，取 per-key
+       查询代际（不推全局代际——切视图不得使在途后台刷新的全局态更新作废，
+       理由见文件头机制说明）。queryKey = viewKey = pageKey×视图口径（TASK-117
+       键族）：同键两次发起、先发后至的旧版本由落地判据识别丢弃；A→B→A 的再次
+       发起 bump 同键代际，使最初那次发起过期。 */
+    const queryKey = QueryScope.viewKey(layoutAtStart, view, scopeAtStart);
+    const gen = beginViewQuery(queryKey);
     let rows;
     try {
       rows = await api.listArticles({
@@ -404,6 +485,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     )) {
       return;
     }
+    /* TASK-119：同查询旧版本丢弃——同键此后已有更新的首屏发起（P5 的两次同查询、
+       A→B→A 的回跳、或该键上更新的锚定/重拉），本次响应属于过期查询实例，整体
+       丢弃。既有 view/scopeKey/sort 守卫在「参数全同」时不可判别，由代际补齐。 */
+    if (currentFirstPageSerial(queryKey) !== gen) return;
     // 替换 entries（筛选视图首屏），重置分页游标（续拉与「全部」视图同机制）
     // TASK-103：同 reloadFromBackend——快照替换按 id 继承正文与水合终态（合并
     // 逻辑收口在 mergeSnapshotEntries，不得在此另写一份），终态按 id 裁剪。
@@ -436,8 +521,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (get().dataMode !== 'tauri') return;
     // 递增代际：使先前触发的 reloadFromBackend（如 selectView('all') 触发的）
     // 结果失效，避免其覆盖本锚定结果（竞态）。
-    const gen = ++reloadGeneration;
+    // TASK-119：统一为 beginGlobalQuery——锚定是窗口替换写入者（entries/游标
+    // 整体替换），取全局代际（此后任何更新的查询发起都使本锚定过期，两阶段
+    // 各查一次），同时记录该键首屏代际（使该键在途续页/筛选响应过期）。
     const st = get();
+    const gen = beginGlobalQuery(QueryScope.viewKey(st.activeContentLayout, st.activeViewFilter, st.activeFeedFilter));
     /* 映射当前订阅范围 → feed_id / folder_id（与 markCurrentViewAllRead 同口径）。
        TASK-052：与 loadMoreArticles 共用 scopeQueryArgs，两个入口的口径不再各写一份。
        注意顺序契约：本 action 按**调用时**的范围/排序构造查询，调用方（命令面板）
@@ -457,7 +545,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       get().showToast(`打开文章失败：${extractError(e)}`);
       return;
     }
-    if (gen !== reloadGeneration) return; // 期间又有更新的导航操作
+    if (gen !== queryGeneration) return; // 期间又有更新的导航操作
     if (pos == null) return;
     // 从目标位置加载一页（若位置靠前，offset 为负会被 SQLite 截断为 0，安全）
     const offset = Math.max(0, pos);
@@ -468,7 +556,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       get().showToast(`打开文章失败：${extractError(e)}`);
       return;
     }
-    if (gen !== reloadGeneration) return;
+    if (gen !== queryGeneration) return;
     if (!rows) return;
     /* TASK-103：锚定分页同样是快照替换——按 id 继承正文与水合终态（收口在
        mergeSnapshotEntries），终态按 id 裁剪，不再整体清空。 */
