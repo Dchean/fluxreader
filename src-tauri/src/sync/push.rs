@@ -201,6 +201,7 @@ pub fn init_queue_event_target(app: tauri::AppHandle) {
 /// - GReader 凭据错误都经 ClientLogin 报出（greader.rs login_at：401/403/400 →
 ///   "ClientLogin → {status}"；BadAuthentication → "ClientLogin 失败：{code}"）；
 /// - 其余（端点 404 / DNS / 超时等）透传实际错误，不冒充认证失败。
+///
 /// 摘要进队列 last_error → pill「· 部分失败」与摘要卡错误行；截断由
 /// mark_push_blocked 统一承担（200 字符）。
 pub fn push_block_summary(err: &crate::error::AppError) -> String {
@@ -333,6 +334,7 @@ mod t124_tests {
     ///   ClientLogin 失败：BadAuthentication）→「认证失败」；
     /// - 网络/端点失败（reqwest DNS/超时、端点 404 文案）→ 透传实际错误且
     ///   **不冒充认证失败**。
+    ///
     /// 判别力：分类丢失（全部归为网络错误）时认证格子必红；无中生有
     /// （网络错误被标成认证）时网络格子必红。
     #[test]
