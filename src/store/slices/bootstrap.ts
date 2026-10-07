@@ -103,6 +103,90 @@ function cursorAfterFirstPage(rows: ArticleListItemRow[]): ArticlesCursorState {
   return advanceArticlesCursor(emptyArticlesCursor(), rows);
 }
 
+/* ============================================================
+   TASK-123（审计 P2-5①②）：保位窗口重取——keepReadingPosition 路径的
+   刷新不再只拉首屏。
+
+   审计探针 P7：加载 1000 篇读到第 750 篇，后台刷新固定 offset=0/limit=500
+   → 列表缩回前 500，顶条锚（id 在第 750 篇）丢失——anchorRestoreIndex 返回
+   null。注意这不是文章删除，而是**刷新策略主动丢弃已加载窗口**（TASK-117
+   keyset 化后 loadMoreArticles 续拉已正确，但 reload 首屏路径仍缩窗）。
+
+   修法（在 TASK-111② keepReadingPosition 信号 + TASK-117 keyset 游标 +
+   TASK-119 查询代际之上扩展，不推翻）：keepReadingPosition 的 reload 以
+   「发起时的游标 loaded」为窗口目标、「游标窗口底锚 lastId」为底边界，
+   keyset 分页循环重取 [首屏..窗口末]，一次性原子落地（插头部使窗口按实际
+   插入量自然生长——只拉满旧长度会把窗口尾部挤出重取范围，深页锚照样丢失，
+   见 fetchWindowRows 头注「窗口底边界」）。锚 id 在窗口内 ⇒ 刷新后必在
+   （除非真被删除/被筛出——那是真丢失，回落现状的既有语义不变）。
+
+   与查询代际的协同（TASK-119）：窗口重取是**同一查询实例的多次分页取数**
+   ——发起时 beginGlobalQuery/beginViewQuery 已 bump 并记录首屏代际，续页
+   与 loadMoreArticles 同理**不再 bump**（续页不是新查询实例）；每页 await
+   后由调用方经 isStale 复核代际/口径，任何更新的查询发起（用户导航、
+   同键筛选）都使整个实例（含已取页）作废——守卫粒度与单页形态逐字一致。
+
+   与 TASK-117 的协同：续页请求 = loadMoreArticles 同一 keyset 形态
+   （last_published/last_id 成对，严格排在锚之后），游标终值 = 累计行末行锚
+   （advanceArticlesCursor 口径），续拉无缝衔接；终页不足一页 = exhausted。
+
+   窗口底边界（bottomId）——为什么「长度达标」不够（TASK-123 断言 t123-1 的
+   判别核心）：刷新常伴随新文章插头部，窗口整体后移；若只拉满「发起时 loaded」
+   条，新插入的 N 行会把旧窗口**尾部 N 行挤出重取范围**——锚恰在其间的深页
+   读者照样丢锚（探针 P7 换个形态复发）。因此续页循环的继续条件是「长度未达
+   目标 **或** 发起时窗口底锚（游标 lastId）尚未重取到」——插头部使窗口按插入
+   量自然生长，锚 id 必在（除非真被删除/被筛出）。keyset 语义保证终止与
+   exhausted 判定仍然精确：短页 = 集合真末尾（bottomId 提前命中只会发生在
+   满页后，此时 lastPageCount = PAGE_SIZE → exhausted=false，集合若真尽于
+   该页则页短 → true，与单页形态同口径）。
+
+   与 TASK-122 的协同：rowsFetchedAt 取**发起时刻**（首屏抓取前）——窗口内
+   任何一行的「行真值时刻」都不早于它，bodyById 对齐的新鲜度判据按最保守
+   口径成立（记录晚于发起时刻的写入不回退）。
+
+   内存预算：窗口目标 = 刷新前真实 loaded（≤ 用户实际加载的页数），不做
+   无界重取；插头部只使窗口按**实际插入量**生长（底锚命中即收敛）；防御性
+   页数上限仅防后端病态（全页恒返/底锚被删时的无限追取），触限时按已取行
+   落地（极端形态下锚丢失回落现状 = 与「真被删除」同口径）。单页失败（含
+   IPC 异常）向上抛给调用方既有 catch（toast + 旧 entries 原样保留——
+   **失败的刷新同样不缩窗**，保位语义对失败路径天然成立）。 */
+async function fetchWindowRows(
+  baseArgs: Record<string, unknown>,
+  firstRows: ArticleListItemRow[],
+  windowTarget: number,
+  bottomId: number | null,
+  isStale: () => boolean,
+): Promise<{ rows: ArticleListItemRow[]; exhausted: boolean }> {
+  const rows = firstRows.slice();
+  let lastPageCount = firstRows.length;
+  let pages = 1;
+  /* 防御性页数上限：目标页数 + 1（keyset 严格递进 + 终页不足一页保证终止，
+     上限仅防后端病态全页返回 / 底锚被删后的无界追取）。 */
+  const maxPages = Math.ceil(windowTarget / ARTICLES_PAGE_SIZE) + 1;
+  /* 继续条件（命中其一即停）：代际过期 / 末页不满（集合尽）/ 页数触限 /
+     长度达标且底锚已覆盖（窗口完整重取）。 */
+  while (
+    !isStale()
+    && lastPageCount >= ARTICLES_PAGE_SIZE
+    && pages <= maxPages
+    && (rows.length < windowTarget || (bottomId != null && !rows.some((r) => r.id === bottomId)))
+  ) {
+    const last = rows[rows.length - 1];
+    const next = await api.listArticles({
+      ...baseArgs,
+      limit: ARTICLES_PAGE_SIZE,
+      /* TASK-117：keyset 续页锚（与 loadMoreArticles 同形态；OFFSET 停用） */
+      last_published: last.published_at,
+      last_id: last.id,
+    });
+    if (!next || next.length === 0) { lastPageCount = 0; break; } // 空页（含浏览器 mock null）→ 集合尽，停止重取
+    rows.push(...next);
+    lastPageCount = next.length;
+    pages += 1;
+  }
+  return { rows, exhausted: lastPageCount < ARTICLES_PAGE_SIZE };
+}
+
 /** TASK-100 P3-1：后端 reload（全量/筛选）在途计数。
  *  selectLayout/selectFeed/selectView 都是「先写游标镜像、再异步 reload」：
  *  该窗口内 entries 仍是旧口径快照，若放行 loadMoreArticles（含自动续拉），
@@ -191,12 +275,23 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const scopeAtStart = get().activeFeedFilter;
     const layoutAtStart = get().activeContentLayout;
     const sortAtStart = get().timelineSort;
+    /* TASK-123：视图口径也在发起时快照——窗口重取资格按它判定（'all' 快照
+       落地后可能被紧随的筛选重拉替换，筛选视图的窗口由该路径重取）。 */
+    const viewAtStart = get().activeViewFilter;
     /* TASK-119：发起即取全局查询代际（原 reloadGeneration 的统一形态）——
        本入口是全局状态写入者（categories/feedCounts/entries），落地要求
        「此后没有任何更新的查询发起」（范围切换保护语义原样保留）；同时记录
        该键首屏代际（使在途续页/筛选响应过期）。 */
     const gen = beginGlobalQuery(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart));
     const keepReadingPosition = opts?.keepReadingPosition === true;
+    /* TASK-123：保位窗口重取参数（发起时真值）——目标 = 该口径游标 loaded
+       （缺键回落镜像 articlesLimit），底边界 = 游标窗口底锚 lastId。仅
+       keepReadingPosition 且当前为 'all' 视图时启用；导航路径 windowTarget=0
+       → 完全跳过窗口重取（行为与 TASK-123 前逐字一致）。 */
+    const windowEligible = keepReadingPosition && viewAtStart === 'all';
+    const cursorAtStart = get().articlesCursor[QueryScope.pageKey(scopeAtStart, layoutAtStart)];
+    const windowTarget = windowEligible ? (cursorAtStart?.loaded ?? get().articlesLimit) : 0;
+    const windowBottomId = windowEligible ? (cursorAtStart?.lastId ?? null) : null;
     /* TASK-122：行抓取时刻（await 前取）——bodyById AI 产物对齐的新鲜度判据
        （晚于该时刻的写入不回退，见 bodyCache.reconcileBodyEntities） */
     const rowsFetchedAt = Date.now();
@@ -222,6 +317,35 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       if (gen !== queryGeneration) return; // TASK-119：全局已有更新的查询发起（统一查询代际，语义同原 reloadGeneration）
       if (!folders || !feeds || articles === null) return;
 
+      /* TASK-123：保位窗口重取——keepReadingPosition 不再只拉首屏：keyset 续页
+         重取 [首屏..窗口末]（底边界 = 发起时游标窗口底锚，插头部使窗口按实际
+         插入量自然生长，锚 id 必在——除非真被删除/被筛出；机制见 fetchWindowRows
+         头注）。续页与 loadMoreArticles 同为「同一查询实例的分页取数」：不 bump
+         代际，每页由循环内 isStale 复核；重取期间任何更新的查询发起（用户导航、
+         同键筛选）都使整个实例作废（下方 gen 复核含已取页）。backendReloadInFlight
+         仍持有（finally 在函数尾）——「reload 在途拦截续拉」不变式覆盖多页形态。 */
+      let windowExhausted = articles.length < ARTICLES_PAGE_SIZE;
+      if (windowTarget > 0) {
+        let win;
+        try {
+          win = await fetchWindowRows(scopeArgs, articles, windowTarget, windowBottomId, () => gen !== queryGeneration);
+        } catch (e) {
+          /* TASK-123 R1（R0 审查）：续页 IPC 失败与首屏失败同一可见性——上方
+             TASK-067 N10 的 toast+rethrow 只包住首屏 Promise.all，窗口重取若在
+             其外，失败会被调用方的 .catch(() => {}) 静默吞掉（N10 缺陷类经新
+             代码路径重开）。同文案（前缀 ≤40 字）toast 后 rethrow：调用方语义
+             与首屏失败逐字一致；失败不落地——旧 entries/游标原样保留（失败的
+             刷新同样不缩窗，保位语义对失败路径天然成立）。与 reloadFilteredEntries
+             的失败可见性形态对称（差异仅在其 catch 不重抛，见其 N10 注）。
+             回归：t123-6（续页 reject → toast + 重抛 + 不缩窗不假 exhausted）。 */
+          get().showToast(`刷新失败：${extractError(e)}`);
+          throw e;
+        }
+        if (gen !== queryGeneration) return; // 窗口重取期间有更新查询发起 → 整体作废（含已取续页）
+        articles = win.rows;
+        windowExhausted = win.exhausted;
+      }
+
       const categories = folderRowsToCategories(folders, feeds);
       const feedCounts = new Map<string, { total: number; unread: number; starred: number; today: number }>();
       if (counts) {
@@ -235,8 +359,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       const merged = mergeSnapshotEntries(get().entries, articles.map(articleRowToEntry), true, rowsFetchedAt);
       const nextEntries = merged.entries;
       /* TASK-117：首屏游标 = keyset 锚（本页最后一行的 (published_at 原文, id)），
-         loaded 承接原「已加载条数」镜像语义（articlesLimit）。 */
-      const firstPageCursor = cursorAfterFirstPage(articles);
+         loaded 承接原「已加载条数」镜像语义（articlesLimit）。
+         TASK-123：窗口重取后同一推进口径作用于**整个窗口**——锚 = 窗口末行，
+         loaded = 窗口行数（续拉自窗口末无缝衔接；底部生长的行随窗口一并入列，
+         游标与 entries 原子一致）。 */
+      const windowCursor = cursorAfterFirstPage(articles);
       /* 分页游标键取自**发起时快照**（TASK-109①）：游标属于发起时的查询口径，
          与完成时的 activeFeedFilter 无关（gen 匹配时两者恒等，此处为显式口径）。
          TASK-094：entries 是该布局的快照，游标键带布局（R7：切布局不串游标）。 */
@@ -247,15 +374,18 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       // 视图行；已加载正文由 bodyById 直接命中，无需随快照复制。
       // TASK-111①：经 setViewEntriesSnapshot 收口——单键实体预算（超限尾部截断）
       // + 分页元数据（cursor/exhausted 取写入时真值），恢复路径用记录值判定。
-      setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart), nextEntries, firstPageCursor, articles.length < ARTICLES_PAGE_SIZE);
+      setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart), nextEntries, windowCursor, windowExhausted);
       set((s) => ({
         ...reconcileCategories(s, categories),
         entries: nextEntries,
         feedCounts,
-        articlesLimit: firstPageCursor.loaded,
-        articlesCursor: { ...s.articlesCursor, [scopeKey]: firstPageCursor },
+        articlesLimit: windowCursor.loaded,
+        articlesCursor: { ...s.articlesCursor, [scopeKey]: windowCursor },
         articlesLoading: false,
-        articlesExhausted: articles.length < ARTICLES_PAGE_SIZE,
+        /* TASK-123：exhausted 随窗口重取的 keyset 真实判定（末页不满 = 集合尽），
+           不再按首屏行数近似；windowTarget=0（导航/启动路径）时与旧形态逐字一致
+           （= 首屏行数判定）。 */
+        articlesExhausted: windowExhausted,
         dataMode: 'tauri',
         dataLoading: false,
         /* TASK-122：水合终态/失败态随 bodyById（state 判别态）存活，与快照
@@ -449,6 +579,14 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const sortAtStart = get().timelineSort;
     const scopeKeyAtStart = QueryScope.pageKey(scopeAtStart, layoutAtStart);
     const scopeArgs = QueryScope.args(scopeAtStart, sortAtStart, layoutAtStart);
+    /* TASK-123：保位窗口重取参数（发起时真值）——筛选视图与「全部」共用 scope
+       游标（TASK-110①），目标 = 该游标 loaded、底边界 = 窗口底锚 lastId；仅
+       keepReadingPosition 透传时启用（导航路径 undefined → 完全跳过，行为与
+       TASK-123 前逐字一致）。 */
+    const keepWindow = opts?.keepReadingPosition === true;
+    const cursorAtStart = get().articlesCursor[scopeKeyAtStart];
+    const windowTarget = keepWindow ? (cursorAtStart?.loaded ?? get().articlesLimit) : 0;
+    const windowBottomId = keepWindow ? (cursorAtStart?.lastId ?? null) : null;
     /* TASK-119（审计 P2-4①探针 P5）：筛选视图发起 = 视图快照写入者，取 per-key
        查询代际（不推全局代际——切视图不得使在途后台刷新的全局态更新作废，
        理由见文件头机制说明）。queryKey = viewKey = pageKey×视图口径（TASK-117
@@ -459,6 +597,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     /* TASK-122：行抓取时刻（await 前取）——bodyById 对齐的新鲜度判据 */
     const rowsFetchedAt = Date.now();
     let rows;
+    let windowExhausted = true;
     try {
       rows = await api.listArticles({
         ...scopeArgs,
@@ -467,6 +606,29 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         ...QueryScope.viewFilter(view),
         with_content: layoutNeedsBody(layoutAtStart),
       });
+      /* TASK-123：保位窗口重取（与 reloadFromBackend 同机制，见 fetchWindowRows
+         头注）——keepReadingPosition 的筛选刷新不再只拉首屏，锚 id 在窗口内 ⇒
+         落地后必在。在途计数跨整个窗口重取持有（「reload 在途拦截续拉」不变式
+         覆盖多页形态）；首屏为空（空列表）不做续取。视图/口径/代际守卫在重取后
+         由下方既有守卫组统一复核（任何一条不满足即整体丢弃，与单页形态同粒度）。 */
+      if (rows && rows.length > 0 && windowTarget > 0) {
+        const win = await fetchWindowRows(
+          { ...scopeArgs, ...QueryScope.viewFilter(view) },
+          rows,
+          windowTarget,
+          windowBottomId,
+          () => get().activeViewFilter !== view
+            || QueryScope.filteredSnapshotStale(
+              { scopeKey: scopeKeyAtStart, sort: sortAtStart },
+              { scopeKey: QueryScope.pageKey(get().activeFeedFilter, get().activeContentLayout), sort: get().timelineSort },
+            )
+            || currentFirstPageSerial(queryKey) !== gen,
+        );
+        rows = win.rows;
+        windowExhausted = win.exhausted;
+      } else if (rows) {
+        windowExhausted = rows.length < ARTICLES_PAGE_SIZE;
+      }
     } catch (e) {
       /* TASK-067 N10：筛选视图拉取失败对用户可见（此前静默，列表停留旧快照） */
       get().showToast(`筛选列表加载失败：${extractError(e)}`);
@@ -496,15 +658,17 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     // bodyById，不随行继承；fromBackend=true 同时执行 AI 产物显式失效/对齐）。
     // TASK-111①：经 setViewEntriesSnapshot 收口——单键实体预算 + 分页元数据。
     // TASK-117：首屏游标 = keyset 锚（本页最后一行），与「全部」视图同一推进语义。
+    // TASK-123：窗口重取后同口径作用于整个窗口（锚 = 窗口末行，loaded = 窗口
+    // 行数，exhausted = keyset 真实判定；windowTarget=0 时与旧形态逐字一致）。
     const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), true, rowsFetchedAt);
-    const firstPageCursor = cursorAfterFirstPage(rows);
-    setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, view, scopeAtStart), merged.entries, firstPageCursor, rows.length < ARTICLES_PAGE_SIZE);
+    const windowCursor = cursorAfterFirstPage(rows);
+    setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, view, scopeAtStart), merged.entries, windowCursor, windowExhausted);
     set((s) => ({
       entries: merged.entries,
-      articlesLimit: firstPageCursor.loaded,
-      articlesCursor: { ...s.articlesCursor, [scopeKeyAtStart]: firstPageCursor },
+      articlesLimit: windowCursor.loaded,
+      articlesCursor: { ...s.articlesCursor, [scopeKeyAtStart]: windowCursor },
       /* TASK-110①：exhausted 真实判定（原恒 true——近似全集的副产品） */
-      articlesExhausted: rows.length < ARTICLES_PAGE_SIZE,
+      articlesExhausted: windowExhausted,
       articlesLoading: false,
       /* TASK-111②：本快照即当前视图（守卫已确保 activeViewFilter === view），
          保位信号在此发出——Timeline 消费时 items 已是最终快照。 */

@@ -108,8 +108,13 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     }
     /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
        reload 自身的 toast 给出，这里只吞掉残余重抛，避免 unhandled rejection。 */
-    if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
-    else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
+    /* TASK-123（审计 P2-5②）：缓存命中恢复后的后台刷新 = 内容刷新——携带
+       keepReadingPosition 走保位窗口重取（恢复定位过的锚不因重拉丢失，落地时
+       positionRestoreNonce 照常 bump，Timeline 按活锚校正索引漂移）；缓存未命中
+       = 新语境（规则表裁定：窗口深度属于旧语境，首屏起步不保窗口）。切换动作
+       本身依旧不 bump positionRestoreNonce——信号只由刷新落地发出，分流不变。 */
+    if (view !== 'all') void get().reloadFilteredEntries(view, cached ? { keepReadingPosition: true } : undefined).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+    else void get().reloadFromBackend(cached ? { keepReadingPosition: true } : undefined).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
   },
 
   /* TASK-052 契约（per-scope 游标）：游标与列表口径绑定，切换口径时必须让两者
@@ -170,8 +175,10 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
-      if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
-      else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
+      /* TASK-123（审计 P2-5②）：同 selectLayout——缓存命中恢复后的后台刷新携带
+         keepReadingPosition 走保位窗口重取（切回定位过的锚不因重拉丢失）。 */
+      if (view !== 'all') void get().reloadFilteredEntries(view, { keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+      else void get().reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
       return;
     }
     set({ activeViewFilter: view, openedReadIds: {} });
@@ -230,8 +237,11 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
-    if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
-    else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
+    /* TASK-123（审计 P2-5②）：同 selectLayout——缓存命中恢复后的后台刷新携带
+       keepReadingPosition 走保位窗口重取（切回定位过的锚不因重拉丢失）；未命中
+       = 新语境首屏起步（不保窗口）。 */
+    if (view !== 'all') void get().reloadFilteredEntries(view, cached ? { keepReadingPosition: true } : undefined).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+    else void get().reloadFromBackend(cached ? { keepReadingPosition: true } : undefined).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
   },
 
   toggleTimelineFilter: () =>

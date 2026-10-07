@@ -4420,9 +4420,12 @@ await (async () => {
     const t111iRestore = timelineSrc111.indexOf('anchorRestoreIndex(peekTopAnchor(), filterKey, items)');
     const t111iSuppress = timelineSrc111.indexOf('suppressNextScrollEvents();', t111iRestore);
     const t111iScroll = timelineSrc111.indexOf("rowVirtualizer.scrollToIndex(idx, { align: 'start' });", t111iSuppress);
+    /* 【TASK-123 改动理由】recordTopAnchor 调用补第 4 参（卡片内像素偏移，审计
+       P2-5③ 锚载荷扩展）：保护意图不变（handleScroll 顶条锚记录接线），字面量
+       随调用形态同步更新——偏移测量收口在 measureAnchorOffsetPx 单点。 */
     checkNew('(t111-6) Timeline 接线：滚动记录顶条锚（recordTopAnchor）、上下文切换弃锚（clearTopAnchor）、保位信号消费——先程序性滚动抑制再 scrollToIndex 回位（复用既有机制，防回位被误判为用户滚动）',
       timelineSrc111.includes('const positionRestoreNonce = useAppStore((s) => s.positionRestoreNonce);')
-      && timelineSrc111.includes('recordTopAnchor(topItem.id, filterKey, performance.now())')
+      && timelineSrc111.includes('recordTopAnchor(topItem.id, filterKey, performance.now(), measureAnchorOffsetPx(topIndex))')
       && timelineSrc111.includes('clearTopAnchor();')
       && t111iRestore >= 0 && t111iSuppress > t111iRestore && t111iScroll > t111iSuppress
       && t111iScroll - t111iSuppress < 120);
@@ -4482,13 +4485,17 @@ await (async () => {
       && cnt115(navSrc115, 'const contextChanged =') === 3
       && timelineSrc115.indexOf('stashTopAnchorForReturn();') >= 0
       && timelineSrc115.indexOf('stashTopAnchorForReturn();') < timelineSrc115.indexOf('clearTopAnchor();'));
+    /* 【TASK-123 改动理由】rearm 调用补第 4 参（卡片内像素偏移随重锚落档——
+       恢复落点含 intra-item 偏移，审计 P2-5③）：有序链保护意图不变
+       （查档 → 决策 → 程序性滚动抑制 → scrollToIndex → 重锚），字面量随
+       调用形态同步更新。 */
     checkNew('(t115-0) X1 消费侧（源级·有序）：switchRestoreNonce effect = 查档(peekReturnAnchor) → 决策(anchorRestoreIndex) → 程序性滚动抑制 → scrollToIndex(align:start) → 重锚(rearmTopAnchor)；image 提前回落',
       ordered115(timelineSrc115, [
         'const switchRestoreNonce = useAppStore((s) => s.switchRestoreNonce);',
         'anchorRestoreIndex(peekReturnAnchor(filterKey), filterKey, items)',
         'suppressNextScrollEvents();',
         "rowVirtualizer.scrollToIndex(idx, { align: 'start' });",
-        'rearmTopAnchor(items[idx].id, filterKey, performance.now());',
+        'rearmTopAnchor(items[idx].id, filterKey, performance.now(), peekReturnAnchor(filterKey)?.offsetPx ?? 0);',
       ]));
     checkNew('(t115-0) X2 接线（源级）：reader.ts 唯一关闭路径 bump readerCloseNonce；Timeline 在 activeArticleId 跟随 effect 记账原选中卡（ref），关闭信号 effect 消费决策（readerFocusReturnIndex → focusCardAt）',
       readerSrc115.includes('readerCloseNonce: s.readerCloseNonce + 1')
@@ -4642,6 +4649,294 @@ await (async () => {
     checkNew('(t115-x3b) LRU 新鲜度：peek 命中把该上下文刷新为最新使用，随后溢出淘汰的是真正最旧的 fk-2（fk-1 因刚被使用而幸存）',
       ta115.peekReturnAnchor('fk-1')?.id === 'a1' && ta115.peekReturnAnchor('fk-2') === null
       && ta115.peekReturnAnchor('fk-NEW')?.id === 'aNEW');
+
+    await resetStore(); // 夹具复位
+  }
+
+  /* ============================================================
+     TASK-123（2026-10-07，审计 P2-5）：保位窗口扩展——深页阅读的后台刷新
+     不再丢锚。三处机制（均扩展 TASK-111/115，不推翻）：
+     ① 保位窗口重取（bootstrap.ts fetchWindowRows）：keepReadingPosition 的
+       刷新不再只拉首屏——以发起时游标 loaded 为窗口目标、游标窗口底锚
+       lastId 为底边界，keyset 续页重取 [首屏..窗口末]。底边界是判别核心：
+       只拉满旧长度会被插头部的新文章把窗口尾部挤出重取范围（锚恰在其间
+       照样丢——探针 P7 换形态复发）；底锚命中使窗口按实际插入量自然生长，
+       锚 id 必在（除非真被删除）。
+     ② 组合修复（nav.ts）：缓存命中恢复后的后台刷新携带 keepReadingPosition
+       （重拉走保位窗口路径 → 恢复定位过的锚不因重拉二次丢失）；cache-miss
+       与切排序 = 新语境保持无参。切换动作本身依旧不 bump positionRestoreNonce
+       ——「同步段隔离 + 刷新落地段按刷新通道回位」两段语义。
+     ③ 锚载荷扩展（timelineAnchor.ts + Timeline.tsx）：卡片内像素偏移
+       （offsetPx）记录/提交/重锚/存档全链路携带、两个恢复消费点补加；
+       250ms 节流加尾沿补记（commitTopAnchor：停滚定稿，抹平节流相位差）。
+
+     证据边界（与 t111/t115 同口径，如实说明）：滚动/虚拟列表本体是 DOM 行为，
+     node 回归网不驱动 Timeline 渲染——行为断言两层：store 层走真实动作序列
+     （翻页 → 深页窗口 → 刷新/导航重拉，假后端 keyset 语义忠实建模）断言
+     窗口存活/锚决策/信号分流；锚模块（record/commit/rearm/stash）与 Timeline
+     同入口直接驱动；接线由源码形态断言钉住（t111-6/t115-0 先例）。
+     判别设计：t123-1 的「窗口重取」断言在移除 fetchWindowRows 调用（只拉
+     首屏）时整体转红（entries 1253→500、锚索引 752→null）；t123-4 的尾沿
+     断言在 commit 被节流吸收 / 不推进基准两种变异下分别转红。
+     ============================================================ */
+  {
+    const fs123 = await import('node:fs');
+    const src123 = (p) => fs123.readFileSync(new URL(p, import.meta.url), 'utf8');
+    const cnt123 = (s, t) => (s.match(new RegExp(t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+    const ta123 = await import('../src/components/timelineAnchor.ts');
+    const { flipEntryFlag: t123Flip } = await import('../dist-test/store/internals.js');
+    const { viewEntriesCache: t123Cache } = await import('../dist-test/store/internals.js');
+    const filterKeyOf123 = (s) => `${s.activeContentLayout}|${s.activeViewFilter}|${s.activeFeedFilter}|${s.timelineFilter}|${s.timelineSort}`;
+    const mkT123Row = (o) => mkRow({ feed_id: 10, ...o });
+    /* 夹具：id startId+i，i 越小越新（published_at 逐行递减 60s，无并列） */
+    const t123Rows = (count, startId) => Array.from({ length: count }, (_, i) =>
+      mkT123Row({ id: startId + i, published_at: iso(NOW - i * 60000), title: `t123-${i}` }));
+    /* 模块级测试时钟：t111/t115 块已把节流基准推到 NOW+40M 量级，这里换更大
+       刻度起步，保证首个 recordTopAnchor 不被残留节流窗口吞掉 */
+    let T123 = NOW + 50000000;
+
+    /* -- (t123-0) 接线（源级防回退，t111-6/t115-0 同口径） -- */
+    const timelineSrc123 = src123('../src/components/Timeline.tsx');
+    const navSrc123 = src123('../src/store/slices/nav.ts');
+    const bootstrapSrc123 = src123('../src/store/slices/bootstrap.ts');
+    checkNew('(t123-0) 窗口重取接线（源级）：reloadFromBackend 与 reloadFilteredEntries 的 keepReadingPosition 路径均接入 fetchWindowRows（await 调用 ×2），续页 = keyset 形态（last_published/last_id 成对），底边界条件在循环谓词中（长度未达标 **或** 底锚未覆盖即继续），落地 exhausted 随窗口重取判定（×2）',
+      cnt123(bootstrapSrc123, 'await fetchWindowRows(') === 2
+      && bootstrapSrc123.includes('rows.some((r) => r.id === bottomId)')
+      && bootstrapSrc123.includes('last_published: last.published_at,')
+      && bootstrapSrc123.includes('last_id: last.id,')
+      && cnt123(bootstrapSrc123, 'articlesExhausted: windowExhausted') === 2);
+    checkNew('(t123-0) 导航接线（源级，P2-5②）：nav 三路径「缓存命中恢复后的后台刷新」携带 keepReadingPosition（selectLayout/selectFeed 条件形态 ×2 + selectView 命中分支 ×1，筛选视图透传同构 ×3），cache-miss 与切排序保持无参（新语境首屏起步，规则表裁定）',
+      cnt123(navSrc123, 'reloadFromBackend(cached ? { keepReadingPosition: true } : undefined)') === 2
+      && cnt123(navSrc123, 'reloadFilteredEntries(view, cached ? { keepReadingPosition: true } : undefined)') === 2
+      && cnt123(navSrc123, 'reloadFromBackend({ keepReadingPosition: true })') === 1
+      && cnt123(navSrc123, 'reloadFilteredEntries(view, { keepReadingPosition: true })') === 1
+      && cnt123(navSrc123, 'get().reloadFromBackend().catch(') === 2
+      && cnt123(navSrc123, 'get().reloadFilteredEntries(view).catch(') === 2);
+    checkNew('(t123-0) Timeline 尾沿补记接线（源级）：滚动静默 ANCHOR_RECORD_THROTTLE_MS 后 commitTopAnchor 定稿（定时器重置 = 尾沿语义、回调重读实时 store getState、上下文切换不复活锚、handleScroll 调度）',
+      timelineSrc123.includes('commitTopAnchor(top.id, liveFilterKey, performance.now(), measureAnchorOffsetPx(topIndex));')
+      && timelineSrc123.includes('}, ANCHOR_RECORD_THROTTLE_MS);')
+      && timelineSrc123.includes('scheduleAnchorCommit(filterKey);')
+      && timelineSrc123.includes('if (liveFilterKey !== scheduledFilterKey) return;'));
+
+    /* ---------- (t123-1) 探针 P7 本体：深页读位刷新保位（判别） ---------- */
+    await resetStore();
+    ta123.clearTopAnchor();
+    backendRows = t123Rows(1250, 1000);
+    await store.getState().bootstrapFromBackend(); // 首批 500（1000..1499）
+    await store.getState().loadMoreArticles();     // 续拉 → 1000..1999（深页：窗口跨页）
+    T123 += 1000;
+    const t123fk1 = filterKeyOf123(store.getState());
+    checkNew('(t123-1) 前置（探针场景建模）：翻页加载 1000 篇（exhausted=false，集合还有余量）、读位在第 750 篇（index 749 = id 1749，卡片内偏移 137px）',
+      store.getState().entries.length === 1000 && store.getState().entries[749].id === '1749'
+      && store.getState().articlesCursor['article|all']?.loaded === 1000
+      && store.getState().articlesExhausted === false
+      && ta123.recordTopAnchor('1749', t123fk1, T123, 137) === true
+      && ta123.peekTopAnchor()?.offsetPx === 137);
+    /* 后台刷新：3 篇新文章插头部（feeds-updated 同形态） */
+    backendRows = [
+      mkT123Row({ id: 9000, published_at: iso(NOW + 600000) }),
+      mkT123Row({ id: 9001, published_at: iso(NOW + 599000) }),
+      mkT123Row({ id: 9002, published_at: iso(NOW + 598000) }),
+      ...backendRows,
+    ];
+    const t123segStart = invokeCalls.filter((c) => c.cmd === 'list_articles').length;
+    const t123nonce1 = store.getState().positionRestoreNonce;
+    await store.getState().reloadFromBackend({ keepReadingPosition: true });
+    const t123seg = invokeCalls.filter((c) => c.cmd === 'list_articles').slice(t123segStart);
+    checkNew('(t123-1) 刷新 wire（判别）：keepReadingPosition 重取发出「首屏 + 2 个 keyset 续页」共 3 次 list_articles——首屏 offset=0/limit=500；续页 last_published/last_id 成对（1496/1996）、无 OFFSET（与 loadMoreArticles 同形态）——移除窗口重取（只拉首屏）时此断言与下方窗口断言同红',
+      t123seg.length === 3
+      && t123seg[0].args.args.offset === 0 && t123seg[0].args.args.limit === 500 && t123seg[0].args.args.last_id === undefined
+      && t123seg[1].args.args.last_id === 1496 && t123seg[1].args.args.last_published === iso(NOW - 496 * 60000)
+      && t123seg[1].args.args.offset === undefined && t123seg[1].args.args.limit === 500
+      && t123seg[2].args.args.last_id === 1996);
+    const t123st1 = store.getState();
+    checkNew('(t123-1) P7 本体（判别）：窗口重取后 entries=1253（**不缩回 500**——探针的「刷新主动丢阅读窗口」被消除；插头部使窗口按实际插入量生长）、新文章居头部、深页锚 id 1749 仍在列表',
+      t123st1.entries.length === 1253
+      && t123st1.entries[0].id === '9000' && t123st1.entries[1].id === '9001' && t123st1.entries[2].id === '9002'
+      && t123st1.entries.some((e) => e.id === '1749'));
+    checkNew('(t123-1) 保位恢复（判别）：positionRestoreNonce +1、锚载荷（id 1749 / offsetPx 137）原样幸存、决策函数返回新索引 752（头部插入 3 行的漂移被校正——Timeline 据此 scrollToIndex + offsetPx 补偏原位还原）；naive「只拉满旧长度」会把窗口尾部 3 行挤出（1749 恰在其后不变——但底锚 1999 之后的行随 keyset 短页一并收敛，锚索引仍可判别：缩回 500 形态下本断言全红）',
+      t123st1.positionRestoreNonce === t123nonce1 + 1
+      && ta123.peekTopAnchor()?.id === '1749' && ta123.peekTopAnchor()?.offsetPx === 137
+      && ta123.anchorRestoreIndex(ta123.peekTopAnchor(), filterKeyOf123(t123st1), selectVisibleEntries(t123st1)) === 752);
+    checkNew('(t123-1) 游标一致（判别）：cursor.loaded=1253 / 底锚推进到窗口末行 2249 / exhausted=true（keyset 短页真实判定：末页 253<500 = 集合尽）——重取后游标与 entries 原子一致，续拉自窗口末无缝衔接',
+      t123st1.articlesCursor['article|all']?.loaded === 1253
+      && t123st1.articlesCursor['article|all']?.lastId === 2249
+      && t123st1.articlesExhausted === true);
+
+    /* ---------- (t123-2) 切换返回 + 导航后台重拉组合：锚不丢（审计 P2-5②） ---------- */
+    await resetStore();
+    ta123.clearTopAnchor();
+    backendRows = t123Rows(1250, 1000);
+    await store.getState().bootstrapFromBackend();
+    await store.getState().loadMoreArticles(); // 深页窗口 1000（= 预算边界，缓存不截断）
+    t123Flip('1000', 'isStarred');             // 真实翻旗 → syncCurrentViewCache 把整个深页窗口落键（t111 同口径驱动）
+    T123 += 1000;
+    const t123fk2 = filterKeyOf123(store.getState());
+    checkNew('(t123-2) 前置：深页窗口 1000 篇已随翻旗同步进视图缓存（1000=预算边界不截断）、顶条锚记录 index 749（id 1749，卡片内偏移 60px）',
+      store.getState().entries.length === 1000
+      && t123Cache.get('article|all|all')?.entries.length === 1000
+      && t123Cache.get('article|all|all')?.cursor.loaded === 1000
+      && ta123.recordTopAnchor('1749', t123fk2, T123, 60) === true);
+    ta123.stashTopAnchorForReturn(); // 离开上下文（与 Timeline layout effect 同序：先存档后清）
+    ta123.clearTopAnchor();
+    listPlan = { mode: 'defer' };
+    store.getState().selectFeed('11'); // 切走：feed-11 缓存 miss → 后台 reload 挂起（defer）
+    await nTick(0);
+    const t123srn2 = store.getState().switchRestoreNonce;
+    const t123prn2pre = store.getState().positionRestoreNonce;
+    store.getState().selectFeed('all'); // 切回：缓存命中 → 深页窗口同步恢复 + 恢复信号；后台刷新携带保位（挂起）
+    await nTick(0);
+    const t123st2a = store.getState();
+    checkNew('(t123-2) 切回恢复：switchRestoreNonce +1（恢复信号）、深页窗口同步恢复（entries=1000 不缩回）、存档锚命中原索引 749 且 intra-item 偏移 60 经存档往返保留；两次切换动作对 positionRestoreNonce 零触碰（同步段隔离——信号只由刷新落地发出）',
+      t123st2a.switchRestoreNonce === t123srn2 + 1
+      && t123st2a.positionRestoreNonce === t123prn2pre
+      && t123st2a.entries.length === 1000 && t123st2a.entries[749].id === '1749'
+      && ta123.peekReturnAnchor(t123fk2)?.id === '1749' && ta123.peekReturnAnchor(t123fk2)?.offsetPx === 60
+      && ta123.anchorRestoreIndex(ta123.peekReturnAnchor(t123fk2), t123fk2, selectVisibleEntries(t123st2a)) === 749);
+    /* Timeline 切换返回消费存档后的重锚（与 switchRestore effect 同形态：含偏移） */
+    ta123.rearmTopAnchor('1749', t123fk2, (T123 += 1000), 60);
+    /* 导航后台重拉落地：期间同步插入 1 篇新文章（切回窗口内 feeds-updated 的真实形态） */
+    backendRows = [mkT123Row({ id: 9000, published_at: iso(NOW + 600000) }), ...backendRows];
+    const t123prn2 = store.getState().positionRestoreNonce;
+    checkNew('(t123-2) 组合场景成立：切走的 feed-11 reload 与切回的保位刷新都在途（defer 挂起 ×2）——P2-5② 缺陷窗口：恢复定位已做、重拉即将落地',
+      pendingList.length === 2 && pendingList[1].args.offset === 0 && pendingList[1].args.limit === 500);
+    const t123stale11 = pendingList[0];    // feed-11 reload（代际已过期）
+    const t123navFirst = pendingList[1];   // 'all' 保位窗口刷新（导航后台刷新）
+    t123stale11.resolve(queryRows(t123stale11.args)); // 落地时被查询代际整体丢弃
+    await nTick(10);
+    t123navFirst.resolve(queryRows(t123navFirst.args)); // 首屏放行 → keyset 续页挂起 → 逐页放行至窗口收敛
+    await nTick(10);
+    while (pendingList.length) {
+      const p = pendingList.shift();
+      p.resolve(queryRows(p.args));
+      await nTick(10);
+    }
+    await nTick(10);
+    const t123st2b = store.getState();
+    checkNew('(t123-2) 重拉落地（P2-5② 本体判别）：导航后台刷新按保位窗口重取——entries=1251（**不缩回 500**：修前「重拉再次删除锚」的第二现场）、新文章插头部、锚 id 1749 幸存',
+      t123st2b.entries.length === 1251
+      && t123st2b.entries[0].id === '9000'
+      && t123st2b.entries.some((e) => e.id === '1749'));
+    checkNew('(t123-2) 组合回位（两段语义）：刷新落地 bump positionRestoreNonce（内容刷新通道——切换动作本身依旧沉默，同步段隔离语义不变）、活锚（重锚含偏移 60）在新窗口索引 750（Timeline 据此二次回位校正漂移——只订阅 switchRestoreNonce 的 effect 无需重拉后重试）',
+      t123st2b.positionRestoreNonce === t123prn2 + 1
+      && ta123.peekTopAnchor()?.id === '1749' && ta123.peekTopAnchor()?.offsetPx === 60
+      && ta123.anchorRestoreIndex(ta123.peekTopAnchor(), filterKeyOf123(t123st2b), selectVisibleEntries(t123st2b)) === 750);
+    listPlan = null;
+    await resetStore(); // defer 残留不复带给后续块
+
+    /* ---------- (t123-3) intra-item 像素偏移：记录/存档/重锚全链路（模块级） ---------- */
+    ta123.clearTopAnchor();
+    T123 += 1000;
+    checkNew('(t123-3) 偏移入锚（模块级）：recordTopAnchor 四参载荷——锚携带卡片内像素偏移（审计③：锚只存 id，长社交正文只能恢复卡片顶）',
+      ta123.recordTopAnchor('mx', 'fk-mx', T123, 42) === true
+      && ta123.peekTopAnchor()?.offsetPx === 42
+      && ta123.peekTopAnchor()?.id === 'mx');
+    ta123.stashTopAnchorForReturn();
+    ta123.clearTopAnchor();
+    checkNew('(t123-3) 偏移经存档往返：stash → peekReturnAnchor 保留 offsetPx（切换返回恢复的偏移数据源）',
+      ta123.peekReturnAnchor('fk-mx')?.offsetPx === 42 && ta123.peekReturnAnchor('fk-mx')?.id === 'mx');
+    T123 += 1000;
+    ta123.rearmTopAnchor('my', 'fk-my', T123, 77);
+    checkNew('(t123-3) 偏移随重锚：rearmTopAnchor 四参——恢复消费点以恢复落点偏移重锚（活锚 = 停滚真实位置）；重锚推进节流基准的既有语义不变（窗口内 record 被吸收，偏移不被冲掉）',
+      ta123.peekTopAnchor()?.id === 'my' && ta123.peekTopAnchor()?.offsetPx === 77
+      && ta123.recordTopAnchor('mz', 'fk-my', T123 + 100, 5) === false
+      && ta123.peekTopAnchor()?.offsetPx === 77);
+    checkNew('(t123-3) Timeline 恢复消费点接线（源级）：滚动记录带卡片内偏移（measureAnchorOffsetPx 单点口径）、刷新回位补偏（applyAnchorOffsetPx(peekTopAnchor)）、切换返回重锚带偏移 + 补偏（peekReturnAnchor）',
+      timelineSrc123.includes('recordTopAnchor(topItem.id, filterKey, performance.now(), measureAnchorOffsetPx(topIndex))')
+      && timelineSrc123.includes('applyAnchorOffsetPx(peekTopAnchor()?.offsetPx ?? 0);')
+      && timelineSrc123.includes('rearmTopAnchor(items[idx].id, filterKey, performance.now(), peekReturnAnchor(filterKey)?.offsetPx ?? 0);')
+      && timelineSrc123.includes('applyAnchorOffsetPx(peekReturnAnchor(filterKey)?.offsetPx ?? 0);'));
+
+    /* ---------- (t123-4) 节流尾沿补记 commitTopAnchor（判别） ---------- */
+    ta123.clearTopAnchor();
+    T123 += 1000;
+    const t123fk4 = 'fk-t123-4';
+    checkNew('(t123-4) 缺陷成因建模：节流 lead 锚滞留——窗口内最后一次 record 被吸收，活锚停在较早位置（审计：停滚后立即切换还可能记到较早的位置）',
+      ta123.recordTopAnchor('c1', t123fk4, T123) === true
+      && ta123.recordTopAnchor('c2', t123fk4, T123 + 100, 30) === false
+      && ta123.peekTopAnchor()?.id === 'c1');
+    ta123.commitTopAnchor('c2', t123fk4, T123 + 240, 30);
+    checkNew('(t123-4) 尾沿补记（判别本体）：commitTopAnchor 无条件写入（绕过节流）——最终停留位置（含偏移 30）落锚，与节流相位无关；变异「commit 被节流吸收」即红',
+      ta123.peekTopAnchor()?.id === 'c2' && ta123.peekTopAnchor()?.offsetPx === 30);
+    checkNew('(t123-4) commit 推进节流基准：commit 后窗口内 record 照常被吸收（与 rearm 同语义——停滚定稿不被随后同位置采样覆盖回较早值）、窗口过期恢复记录；变异「commit 不推进基准」即红',
+      ta123.recordTopAnchor('c3', t123fk4, T123 + 340) === false
+      && ta123.recordTopAnchor('c3', t123fk4, T123 + 490) === true
+      && ta123.peekTopAnchor()?.id === 'c3');
+
+    /* ---------- (t123-5) 缓存截断窗口边界：budget 截断 → 恢复 → 续拉衔接 → 保位刷新 ---------- */
+    await resetStore();
+    ta123.clearTopAnchor();
+    backendRows = t123Rows(1501, 3000); // 1501 行：3 页后余 1 行
+    await store.getState().bootstrapFromBackend();
+    await store.getState().loadMoreArticles();
+    await store.getState().loadMoreArticles(); // loaded=1500（3000..4499），exhausted=false
+    t123Flip('3000', 'isStarred');             // 落缓存：1500 > 预算 1000 → 尾部截断，元数据记录真实游标（t111-1 语义）
+    listPlan = { mode: 'reject', error: { message: 't123 注入' } };
+    store.getState().selectFeed('11');         // 切走（reload 注入失败冻结状态）
+    await nTick(10);
+    store.getState().selectFeed('all');        // 切回：缓存命中 → 截断快照恢复（1000 条）+ 游标按记录值 1500
+    await nTick(10);
+    listPlan = null;
+    const t123st5a = store.getState();
+    checkNew('(t123-5) 前置（截断恢复形态）：恢复 entries=1000（budget 截断）但游标=记录值 loaded=1500/底锚 4499（不能只保留截断长度）',
+      t123st5a.entries.length === 1000 && t123st5a.entries[0].id === '3000'
+      && t123st5a.articlesCursor['article|all']?.loaded === 1500
+      && t123st5a.articlesCursor['article|all']?.lastId === 4499
+      && t123st5a.articlesExhausted === false);
+    await store.getState().loadMoreArticles(); // 恢复后续拉衔接：keyset 锚 4499 → 追加 4500（t111-2 同衔接，本卡窗口下复核）
+    const t123st5b = store.getState();
+    checkNew('(t123-5) 恢复续拉衔接：keyset 自记录底锚 4499 续 1 行（4500）、loaded=1501、exhausted=true——恢复后的窗口边界仍以记录游标为准',
+      t123st5b.entries.length === 1001 && t123st5b.entries.at(-1).id === '4500'
+      && t123st5b.articlesCursor['article|all']?.loaded === 1501
+      && t123st5b.articlesCursor['article|all']?.lastId === 4500
+      && t123st5b.articlesExhausted === true);
+    T123 += 1000;
+    checkNew('(t123-5) 前置：锚记录在 index 999（id 3999，偏移 25）——恢复+续拉后的真实读位',
+      ta123.recordTopAnchor('3999', filterKeyOf123(t123st5b), T123, 25) === true);
+    backendRows = [mkT123Row({ id: 9000, published_at: iso(NOW + 600000) }), ...backendRows];
+    const t123nonce5 = store.getState().positionRestoreNonce;
+    await store.getState().reloadFromBackend({ keepReadingPosition: true }); // 窗口目标=记录游标 1501、底边界=4500
+    const t123st5c = store.getState();
+    checkNew('(t123-5) 保位刷新按记录窗口重取（判别）：窗口目标取**记录游标 loaded（1501）**而非恢复快照长度（1001）+ 底边界收敛——entries=1502（被截断的中段 4000..4499 随窗口重取回归，4100 在列）、游标 loaded=1502/底锚 4500、exhausted=true（keyset 短页 2<500 真实判定——按「行数<页大小」近似会把 1502 行误判成未到底）',
+      t123st5c.entries.length === 1502
+      && t123st5c.entries.some((e) => e.id === '4100') && t123st5c.entries.at(-1).id === '4500'
+      && t123st5c.articlesCursor['article|all']?.loaded === 1502
+      && t123st5c.articlesCursor['article|all']?.lastId === 4500
+      && t123st5c.articlesExhausted === true);
+    checkNew('(t123-5) 截断边界下保位：nonce +1、锚（3999/偏移 25）在新窗口索引 1000（插头部 1 行的漂移被校正）——budget 截断、恢复、续拉、刷新四段衔接后阅读位置不丢',
+      t123st5c.positionRestoreNonce === t123nonce5 + 1
+      && ta123.peekTopAnchor()?.offsetPx === 25
+      && ta123.anchorRestoreIndex(ta123.peekTopAnchor(), filterKeyOf123(t123st5c), selectVisibleEntries(t123st5c)) === 1000);
+    ta123.clearTopAnchor();
+
+    /* ---------- (t123-6) 窗口重取失败可见性（R1 修复轮：TASK-067 N10 缺陷类不重开） ----------
+       R0 审查 finding：fetchWindowRows 的 await 在首屏 toast catch 之外——续页
+       IPC 失败被调用方 .catch(()=>{}) 静默吞掉。注入手法：rejectWhen 按 (cmd,
+       args) 谓词放行首屏（offset=0）、只拒续页（带 last_id）——与 p3-f2 同一
+       注入形态；判别 = toast 可见性（rethrow 本身修前也发生，toast 是修复本体）。 */
+    await resetStore();
+    ta123.clearTopAnchor();
+    backendRows = t123Rows(1250, 1000);
+    await store.getState().bootstrapFromBackend();
+    await store.getState().loadMoreArticles(); // 深页窗口 1000（1000..1999）
+    backendRows = [mkT123Row({ id: 9000, published_at: iso(NOW + 600000) }), ...backendRows];
+    rejectWhen = (cmd, a) => cmd === 'list_articles' && a?.args?.last_id != null; // 首屏放行、续页 reject
+    const t123nonce6 = store.getState().positionRestoreNonce;
+    const t123toast6 = store.getState().toasts.length;
+    let t123r6rethrown = false;
+    await store.getState().reloadFromBackend({ keepReadingPosition: true }).catch(() => { t123r6rethrown = true; });
+    const t123st6 = store.getState();
+    checkNew('(t123-6) 续页失败可见（判别本体）：首屏成功、续页 IPC reject → toast 可见（与首屏失败同一「刷新失败：」文案前缀）+ promise 重抛（调用方 .catch 命中）——修前 toast 缺失即红',
+      t123r6rethrown === true
+      && t123st6.toasts.length === t123toast6 + 1
+      && t123st6.toasts.at(-1)?.text.startsWith('刷新失败：'));
+    checkNew('(t123-6) 失败不缩窗不假到底：entries 保持 1000（旧快照原样、锚 id 1749 仍在）、游标 loaded=1000 不动、exhausted 不被写成 true、保位信号不 bump（未落地不回位）——失败刷新与成功刷新同一保位语义',
+      t123st6.entries.length === 1000 && t123st6.entries[0].id === '1000'
+      && t123st6.entries.some((e) => e.id === '1749')
+      && t123st6.articlesCursor['article|all']?.loaded === 1000
+      && t123st6.articlesExhausted === false
+      && t123st6.positionRestoreNonce === t123nonce6);
+    rejectWhen = null;
 
     await resetStore(); // 夹具复位
   }

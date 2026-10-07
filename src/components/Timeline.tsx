@@ -23,7 +23,7 @@ import type { ArticleEntry } from '../types';
 import { useEnteringClass } from './useEnteringClass';
 import { sentinelMode } from './timelineSentinel';
 import { refillDecision } from './timelineRefill';
-import { anchorRestoreIndex, clearTopAnchor, peekReturnAnchor, peekTopAnchor, recordTopAnchor, readerFocusReturnIndex, rearmTopAnchor, stashTopAnchorForReturn } from './timelineAnchor';
+import { anchorRestoreIndex, clearTopAnchor, ANCHOR_RECORD_THROTTLE_MS, commitTopAnchor, peekReturnAnchor, peekTopAnchor, recordTopAnchor, readerFocusReturnIndex, rearmTopAnchor, stashTopAnchorForReturn } from './timelineAnchor';
 
 /* ============================================================
    Timeline —— 顶栏（标题/筛选/排序/全部已读）+ 五布局渲染器
@@ -171,6 +171,53 @@ export function Timeline() {
     programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_SUPPRESS_MS;
     userGestureRef.current = false;
   };
+  /* TASK-123①（审计 P2-5③）：恢复消费点的卡片内像素偏移补加——
+     scrollToIndex(align:'start') 把锚卡片顶对齐视口顶，再按锚记录的 offsetPx
+     微调 scrollTop = 精确还原视口（长卡片中部的停留位置不再只能恢复卡片顶；
+     动态测量下卡片起点可能微移，属既有估算行高误差量级，如实接受——见
+     timelineAnchor.ts 头注①）。px≤0 不产生额外滚动；补偏发生在程序性滚动
+     抑制窗口内，不会被误判为用户滚动。 */
+  const applyAnchorOffsetPx = (px: number) => {
+    if (px <= 0) return;
+    const el = scrollRef.current;
+    if (el) el.scrollTop += px;
+  };
+  /* TASK-123①：顶条卡片内像素偏移的统一测量（scrollTop − 顶条卡片虚拟起点）。
+     记录（recordTopAnchor）与尾沿补记（commitTopAnchor）共用同一口径，保证
+     锚载荷在两条写入路径下语义一致。画廊布局（虚拟化禁用）不调用。 */
+  const measureAnchorOffsetPx = (topIndex: number): number => {
+    const el = scrollRef.current;
+    const vi = rowVirtualizer.getVirtualItems().find((v) => v.index === topIndex);
+    if (!el || !vi) return 0;
+    return Math.max(0, Math.round(el.scrollTop - vi.start));
+  };
+  /* TASK-123②（审计 P2-5③）：节流尾沿补记——滚动静默 ANCHOR_RECORD_THROTTLE_MS
+     后把「最终停留位置」（含卡片内偏移）经 commitTopAnchor 无条件落锚。审计原话：
+     「250ms 节流没有尾沿补记，停滚后立即切换还可能记到较早的位置」——节流记录
+     （recordTopAnchor）收敛高频事件不变，尾沿补记把最后一次节流采样与真实停滚
+     落点之间的相位差抹平：连续滚动的每个事件都重置定时器，滚动停歇后定时器
+     独触发一次，落锚必然是停滚时刻的重测值。回调重读实时状态（store getState +
+     虚拟化稳定实例）：节流窗口内列表可能已被刷新替换，落锚必须反映停滚时刻的
+     真实视口；filterKey 已变化的场景（上下文切换路径已 stash+clear）不得复活
+     被丢弃的锚。 */
+  const anchorCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (anchorCommitTimerRef.current != null) clearTimeout(anchorCommitTimerRef.current);
+  }, []);
+  const scheduleAnchorCommit = (scheduledFilterKey: string) => {
+    if (anchorCommitTimerRef.current != null) clearTimeout(anchorCommitTimerRef.current);
+    anchorCommitTimerRef.current = setTimeout(() => {
+      anchorCommitTimerRef.current = null;
+      const live = useAppStore.getState();
+      const liveFilterKey = `${live.activeContentLayout}|${live.activeViewFilter}|${live.activeFeedFilter}|${live.timelineFilter}|${live.timelineSort}`;
+      if (liveFilterKey !== scheduledFilterKey) return; // 上下文已切换：锚已存档/清空，尾沿不复活
+      if (live.activeContentLayout === 'image') return; // 画廊非虚拟化，与记录路径同口径回落
+      const topIndex = rowVirtualizer.range?.startIndex ?? 0;
+      const top = selectVisibleEntries(live)[topIndex];
+      if (!top) return;
+      commitTopAnchor(top.id, liveFilterKey, performance.now(), measureAnchorOffsetPx(topIndex));
+    }, ANCHOR_RECORD_THROTTLE_MS);
+  };
   /* 筛选上下文变化 → 重置基准并关闭本帧的滚出判定。
      与下面的归零 effect 同依赖，按声明顺序先执行 ⇒ 基准与本帧判定都已就绪，
      不依赖「归零 effect 先跑完」这一时序假设。
@@ -279,6 +326,9 @@ export function Timeline() {
     if (idx == null) return; // 无锚 / 上下文已切换 / 锚丢失 → 回落
     suppressNextScrollEvents();
     rowVirtualizer.scrollToIndex(idx, { align: 'start' });
+    /* TASK-123①：卡片内像素偏移补加（对齐卡片顶后按锚 offsetPx 微调，
+       精确还原刷新前的视口——含长卡片中部停留位置）。 */
+    applyAnchorOffsetPx(peekTopAnchor()?.offsetPx ?? 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [positionRestoreNonce]);
 
@@ -304,7 +354,12 @@ export function Timeline() {
     if (idx == null) return; // 无存档 / 锚丢失 → 归零回落（不猜）
     suppressNextScrollEvents();
     rowVirtualizer.scrollToIndex(idx, { align: 'start' });
-    rearmTopAnchor(items[idx].id, filterKey, performance.now());
+    /* 【TASK-123 改动理由】rearm 补第 4 参（卡片内偏移随重锚落档——恢复落点含
+       intra-item 偏移，活锚即停滚时的真实位置；t115-0 锁定的有序链保护意图
+       不变：查档 → 决策 → 程序性滚动抑制 → scrollToIndex → 重锚）。 */
+    rearmTopAnchor(items[idx].id, filterKey, performance.now(), peekReturnAnchor(filterKey)?.offsetPx ?? 0);
+    /* TASK-123①：卡片内像素偏移补加（对齐卡片顶后按存档锚 offsetPx 微调）。 */
+    applyAnchorOffsetPx(peekReturnAnchor(filterKey)?.offsetPx ?? 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [switchRestoreNonce]);
 
@@ -341,10 +396,14 @@ export function Timeline() {
     /* TASK-111②：顶条锚记录（节流收口在 timelineAnchor.recordTopAnchor）——
        以当前可见首条目 id + filterKey 记账，供后台刷新落地后回位。程序性滚动
        （J/K / 回位）也照记：那是用户此刻的阅读位置。画廊布局不记录
-       （虚拟化禁用时 range 不代表真实视口，回位消费侧同样回落）。 */
+       （虚拟化禁用时 range 不代表真实视口，回位消费侧同样回落）。
+       TASK-123①：锚载荷带卡片内像素偏移（measureAnchorOffsetPx 单点口径）；
+       并调度尾沿补记（scheduleAnchorCommit——停滚定稿最终位置，抹平节流相位差）。 */
     if (activeContentLayout !== 'image') {
-      const topItem = items[rowVirtualizer.range?.startIndex ?? 0];
-      if (topItem) recordTopAnchor(topItem.id, filterKey, performance.now());
+      const topIndex = rowVirtualizer.range?.startIndex ?? 0;
+      const topItem = items[topIndex];
+      if (topItem) recordTopAnchor(topItem.id, filterKey, performance.now(), measureAnchorOffsetPx(topIndex));
+      scheduleAnchorCommit(filterKey);
     }
     const el = scrollRef.current;
     if (!el) return;
