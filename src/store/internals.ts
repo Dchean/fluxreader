@@ -8,6 +8,8 @@ import type {
   FeedItem,
   ViewFilterType,
 } from '../types';
+import { reconcileBodyEntities } from './bodyCache';
+import type { BodyRowFact } from './bodyCache';
 import type { AppState, ArticlesCursorState } from './types';
 
 /* ============================================================
@@ -316,81 +318,90 @@ export function reconcileCategories(
   return { categories: nextCategories, feedIndex: index, entries };
 }
 
-/** TASK-103（REQ-001）：快照替换时的正文/水合终态合并 —— 所有「entries 整体
-    替换」的调用点（reloadFromBackend / reloadFilteredEntries / anchorToArticle /
-    selectLayout·selectView·selectFeed 的缓存恢复）共用这**一份**实现，不得各自为政。
+/** TASK-103（REQ-001）→ TASK-122（审计 P2-3）架构重构：快照替换共用实现——
+    所有「entries 整体替换」的调用点（reloadFromBackend / reloadFilteredEntries /
+    anchorToArticle / selectLayout·selectView·selectFeed 的缓存恢复）共用这**一份**
+    实现，不得各自为政。
 
-    缺陷：快照行从不携带正文（with_content 恒 false，见 bootstrap.layoutNeedsBody
-    的实证），此前替换直接丢弃旧条目的正文并无条件清空 hydratedIds /
-    hydrationErrors；而虚拟列表按文章 id 保持卡片身份、useLazyHydrate 同 id 不再
-    重触发——卡片停留在「加载正文…」且无任何请求在途（审计探针复现的死区）。
+    TASK-103 时期（现已被 TASK-122 取代）：快照行从不携带正文，替换按 id 从旧
+    条目继承正文/AI/译文并裁剪水合终态——正文真值长在视图行上、随多份快照传播
+    （审计「文章实体与视图分离尚未完成；mergeSnapshotEntries 仍是复制/继承视图
+    行」），且 `a.aiSummary || prev.aiSummary` 把清理后 DB 已删除的旧产物复活
+    （探针 P3：后端已返回空产物，UI 仍为 old summary）。
 
-    语义：
-    - 按 id 继承旧条目的正文痕迹（content/rawContent/translatedContent/aiSummary/
-      fulltextExtracted/hydrated，另含 url——它是详情行字段、列表行不带，不继承
-      会让刷新后的「查看原文/全文提取」失效）；
-    - 新行自带正文（with_content 场景）时以新行为准，旧值仅作缺省兜底；
-    - hydratedIds / hydrationErrors 不再整体清空：按 id 裁剪，只保留仍存在于新
-      快照中的标记（终态与正文一起继承，防止「空正文终态被清 → 卡片回退加载
-      占位」；已消失条目的滞留标记移除，与 TASK-063 清滞留的契约同口径）。 */
+    TASK-122 起的语义（正文真值源 = bodyById，见 store/bodyCache.ts 模块头注）：
+    - 正文/AI/译文/hydrated **不再从 prev 继承**：entries 是视图行，AI 列取本次
+      后端行的真值（NULL → ''，尊重删除语义）；正文由 bodyById 承载，快照替换
+      不触碰它——「刷新不丢已加载正文」由实体缓存保证，而非行间复制；
+    - 唯一保留的继承：url（详情行字段，列表行可能缺——不继承会让刷新后的
+      「查看原文/全文提取」失效；轻字段照旧快照合并，任务卡约定）；
+    - 生成中的流式 AI 产物（summarizingIds / translatingIds）不从行覆盖：
+      行是抓取前的旧值，流式产物是更新的事实——等价旧继承对在途生成的保护，
+      但只对**正在生成**的 id 生效（不再给陈旧产物普遍豁免）；
+    - fromBackend=true（三处后端拉取路径）：除保留 TASK-109/118 的 isRead/
+      isStarred 版本 bump 外，还执行 bodyCache.reconcileBodyEntities——后端行
+      AI 列对 bodyById 的显式失效/对齐（清理 AI 缓存 → cleared 的单点，规则见
+      bodyCache 模块头注）。rowsFetchedAt = 本批行的发起抓取时刻（新鲜度判据）。
+    - fromBackend=false（三处缓存恢复路径）：缓存回放是近期 UI 状态而非后端
+      真值，不 bump 版本、不做 body 对齐（对齐只消费后端行）。
+
+    返回值不再携带 hydratedIds/hydrationErrors（store 字段已随 bodyById 移除）——
+    水合终态与失败态是 bodyById 记录的 state，与快照替换解耦，无需按 id 裁剪。 */
 export function mergeSnapshotEntries(
   prevEntries: ArticleEntry[],
   nextEntries: ArticleEntry[],
-  prevHydratedIds: Record<string, true>,
-  prevHydrationErrors: Record<string, string>,
   fromBackend: boolean,
-): { entries: ArticleEntry[]; hydratedIds: Record<string, true>; hydrationErrors: Record<string, string> } {
+  rowsFetchedAt: number,
+): { entries: ArticleEntry[] } {
   const prevById = new Map(prevEntries.map((a) => [a.id, a] as const));
+  const generatingIds = appStore().getState().summarizingIds;
+  const translatingIds = appStore().getState().translatingIds;
   const entries = nextEntries.map((a) => {
     const prev = prevById.get(a.id);
-    /* 无旧条目 / 新行自带正文（with_content）→ 以新行为准 */
-    if (!prev || a.content) return a;
-    /* 旧条目没有任何可继承的正文痕迹 → 原样返回（保持引用稳定，避免无谓重渲染） */
-    if (!prev.content && !prev.hydrated && !prev.url && !prev.translatedContent && !prev.aiSummary && !prev.fulltextExtracted) {
-      return a;
+    /* 无旧条目 → 原样返回 */
+    if (!prev) return a;
+    const generating = !!(generatingIds[a.id] || translatingIds[a.id]);
+    /* 生成中：AI 流式产物不被抓取期更早的行覆盖（列空时保流式值） */
+    if (generating && (prev.aiSummary || prev.translatedContent)) {
+      return {
+        ...a,
+        aiSummary: a.aiSummary || prev.aiSummary,
+        translatedContent: a.translatedContent || prev.translatedContent,
+      };
     }
-    return {
-      ...a,
-      content: prev.content,
-      rawContent: prev.rawContent,
-      translatedContent: a.translatedContent || prev.translatedContent,
-      aiSummary: a.aiSummary || prev.aiSummary,
-      fulltextExtracted: a.fulltextExtracted || prev.fulltextExtracted,
-      hydrated: prev.hydrated,
-      url: a.url ?? prev.url,
-    };
+    /* 轻字段继承：仅 url（详情行字段）——其余列一律本次行真值 */
+    if (!prev.url || a.url) return a;
+    return { ...a, url: prev.url };
   });
-  const surviving = new Set(nextEntries.map((a) => a.id));
-  const hydratedIds: Record<string, true> = {};
-  for (const id of Object.keys(prevHydratedIds)) {
-    if (surviving.has(id)) hydratedIds[id] = true;
-  }
-  const hydrationErrors: Record<string, string> = {};
-  for (const id of Object.keys(prevHydrationErrors)) {
-    if (surviving.has(id)) hydrationErrors[id] = prevHydrationErrors[id];
-  }
-  /* TASK-109②：版本 bump 按真值来源收窄（TASK-107 R2 审查裁定）——
-     - fromBackend=true（bootstrap 三处后端快照路径 reloadFromBackend /
-       reloadFilteredEntries / anchorToArticle）：行级 is_read 是后端真值，任何
-       在途乐观写入对这些 id 的回滚声明随之失效，bump 让迟到回滚全部跳过
-       （否则回滚会把陈旧读态踩到新快照上、把刚重取的真值计数虚增回去）；
-     - fromBackend=false（nav 三处缓存恢复路径 selectLayout / selectView /
-       selectFeed）：缓存回放是近期 UI 状态而非后端真值——唯一不带后端真值的
-       缓存行恰是乐观态本身（经 syncCurrentViewCache 落进缓存），不 bump 以
-       保留本应正确的在途回滚；经 reload 落进缓存的行在 bootstrap merge 时已
-       bump 过，此处不 bump 不会重开踩踏缺口（缓存恢复点随后必触发后台
-       reload，其 fromBackend=true 的 merge 接手真值对齐）。
-     TASK-118：后端快照路径对 isRead 与 isStarred **两字段都** bump——快照
-     整体替换携带的是后端行级真值，is_read 与 is_starred 同时被覆盖，两字段
-     的在途乐观声明一并失效；且 bump 收敛到字段键后不再有跨字段误伤（此前
-     文章级版本下，任一字段的快照替换都会 void 掉另一字段的在途声明）。 */
   if (fromBackend) {
+    /* TASK-109②：版本 bump 按真值来源收窄（TASK-107 R2 审查裁定）——
+       - fromBackend=true（bootstrap 三处后端快照路径 reloadFromBackend /
+         reloadFilteredEntries / anchorToArticle）：行级 is_read 是后端真值，任何
+         在途乐观写入对这些 id 的回滚声明随之失效，bump 让迟到回滚全部跳过
+         （否则回滚会把陈旧读态踩到新快照上、把刚重取的真值计数虚增回去）；
+       - fromBackend=false（nav 三处缓存恢复路径 selectLayout / selectView /
+         selectFeed）：缓存回放是近期 UI 状态而非后端真值——唯一不带后端真值的
+         缓存行恰是乐观态本身（经 syncCurrentViewCache 落进缓存），不 bump 以
+         保留本应正确的在途回滚；经 reload 落进缓存的行在 bootstrap merge 时已
+         bump 过，此处不 bump 不会重开踩踏缺口（缓存恢复点随后必触发后台
+         reload，其 fromBackend=true 的 merge 接手真值对齐）。
+       TASK-118：后端快照路径对 isRead 与 isStarred **两字段都** bump——快照
+       整体替换携带的是后端行级真值，is_read 与 is_starred 同时被覆盖，两字段
+       的在途乐观声明一并失效；且 bump 收敛到字段键后不再有跨字段误伤（此前
+       文章级版本下，任一字段的快照替换都会 void 掉另一字段的在途声明）。
+       TASK-122：同路径顺带执行 bodyById 的 AI 产物显式失效/对齐（清理 AI
+       缓存 → cleared 的单点，规则与探针场景见 bodyCache 模块头注）。 */
+    const facts = new Map<string, BodyRowFact>();
+    const prevSnippets = new Map<string, string>();
     for (const a of entries) {
       bumpEntryVersion(a.id, 'isRead');
       bumpEntryVersion(a.id, 'isStarred');
+      facts.set(a.id, { aiSummary: a.aiSummary, translatedContent: a.translatedContent, snippet: a.snippet });
     }
+    for (const p of prevEntries) prevSnippets.set(p.id, p.snippet);
+    reconcileBodyEntities(facts, rowsFetchedAt, (id) => !!(generatingIds[id] || translatingIds[id]), prevSnippets);
   }
-  return { entries, hydratedIds, hydrationErrors };
+  return { entries };
 }
 
 /** 把当前 entries 同步进「当前布局 × 当前视图」的缓存。

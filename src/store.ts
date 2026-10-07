@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { AppState } from './store/types';
 import { bindAppStore } from './store/internals';
+import { bindBodyCacheNotify } from './store/bodyCache';
 import { createNavSlice } from './store/slices/nav';
 import { createReaderSlice } from './store/slices/reader';
 import { createAiSlice } from './store/slices/ai';
@@ -51,6 +52,12 @@ export const useAppStore = create<AppState>((...a) => ({
 /* 注入 store 句柄：供跨 slice 的模块级 helper（视图缓存、标读/收藏收口、
    GitHub 轮询）读写。与原实现时序一致——模块求值期不会调用它们。 */
 bindAppStore(useAppStore);
+
+/* TASK-122：注入 bodyById 写入通知——模块级正文/AI 缓存的每次真实写入 bump
+   AppState.bodyCacheNonce，使经 useAppStore 订阅 entryNeedsHydration /
+   selectArticleBody 的组件在记录变化时重算 selector（机制见 bodyCache.ts
+   「写入通知」节）。 */
+bindBodyCacheNotify(() => useAppStore.setState((s) => ({ bodyCacheNonce: s.bodyCacheNonce + 1 })));
 
 export * from './store/selectors';
 

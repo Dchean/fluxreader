@@ -74,14 +74,17 @@ export interface ArticleEntry {
   snippet: string;            // 列表摘要（同步时截取）
   author: string;
   cover?: string;             // 文章封面 / 播客封面
-  content: string;            // 渲染态正文 HTML
-  rawContent: string;         // RSS 原始正文
-  translatedContent: string;  // 译文
-  aiSummary: string;
+  /** TASK-122：正文/水合真值源已迁往 bodyById（store/bodyCache.ts）——视图行
+      不再携带/继承正文，快照合并也不再继承（正文随实体存活，刷新不丢）。
+      content/rawContent 仅为 mock 演示数据保留的过渡兼容位（mock 无后端 IPC，
+      bodyById 永不落记录，选择器回退读这里）；tauri 链路（水合/提取/快照合并）
+      一律不得读写。 */
+  content?: string;           // 渲染态正文 HTML（仅 mock；真值源 bodyById）
+  rawContent?: string;        // RSS 原始正文（仅 mock；真值源 bodyById）
+  translatedContent: string;  // 译文（过渡兼容位：行携带的 DB 真值 + 无记录时的 AI 流式回退；真值源 bodyById）
+  aiSummary: string;          // 摘要（过渡兼容位：同上）
   /** 正文已被 Readability 全文覆盖（手动按钮/设置自动模式共用状态源，DB 持久化；mock 数据可缺省） */
   fulltextExtracted?: boolean;
-  /** 批量水合已终态（含空正文）：防空正文条目被反复判「未水合」造成重复拉取与永挂占位 */
-  hydrated?: boolean;
 
   /* ---- 布局专属扩展（可空，按布局使用） ---- */
   durationSec?: number;   // 播客：时长秒数

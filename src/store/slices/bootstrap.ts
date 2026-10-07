@@ -121,8 +121,8 @@ export function isBackendReloadInFlight(): boolean {
     正文 HTML），避免每页 500 条背 2-3MB 正文（「列表背正文」是滚动卡顿主因）。
     TASK-103 实证：五布局一律走懒水合（本函数恒 false），with_content 在
     reloadFromBackend / loadMoreArticles / reloadFilteredEntries / anchorToArticle
-    四处均传 false —— 快照行因此从不携带正文；快照替换时的正文保留由
-    mergeSnapshotEntries 按 id 继承负责（internals，REQ-001 根因修复）。 */
+    四处均传 false —— 快照行因此从不携带正文；正文由懒水合落 bodyById
+    （TASK-122 实体缓存），快照替换不触碰它（刷新不丢已加载正文）。 */
 function layoutNeedsBody(_layout: ContentLayoutType): boolean {
   return false;
 }
@@ -197,6 +197,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        该键首屏代际（使在途续页/筛选响应过期）。 */
     const gen = beginGlobalQuery(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart));
     const keepReadingPosition = opts?.keepReadingPosition === true;
+    /* TASK-122：行抓取时刻（await 前取）——bodyById AI 产物对齐的新鲜度判据
+       （晚于该时刻的写入不回退，见 bodyCache.reconcileBodyEntities） */
+    const rowsFetchedAt = Date.now();
     backendReloadInFlight++;
     try {
       const scopeKey = QueryScope.pageKey(scopeAtStart, layoutAtStart);
@@ -226,11 +229,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
           feedCounts.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
         }
       }
-      /* TASK-103（REQ-001）：快照替换按 id 继承正文与水合终态（收口在
-         mergeSnapshotEntries）。新行从不带正文（with_content 恒 false），直接
-         覆盖会把已水合卡片的正文抹掉；而虚拟列表按文章 id 保持卡片身份、
-         useLazyHydrate 同 id 不重触发 → 卡片永挂「加载正文…」且无请求在途。 */
-      const merged = mergeSnapshotEntries(get().entries, articles.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
+      /* TASK-103（REQ-001）→ TASK-122：快照替换收口在 mergeSnapshotEntries。
+         正文不再随行继承（真值源 bodyById，快照替换不触碰）；fromBackend=true
+         同时执行 bodyById 的 AI 产物显式失效/对齐（清理 AI 缓存 → cleared）。 */
+      const merged = mergeSnapshotEntries(get().entries, articles.map(articleRowToEntry), true, rowsFetchedAt);
       const nextEntries = merged.entries;
       /* TASK-117：首屏游标 = keyset 锚（本页最后一行的 (published_at 原文, id)），
          loaded 承接原「已加载条数」镜像语义（articlesLimit）。 */
@@ -241,8 +243,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       // 缓存「全部」视图快照：切回时零延迟恢复（视图切换卡顿的根治）。
       // TASK-052：快照就是**该范围**的首批，故缓存键必须带范围，否则源A 的首批
       // 会被当成「全部」的首批恢复（数据错配）。TASK-094：键首段本就是布局。
-      // TASK-103：缓存写入的是继承过正文的合并结果，缓存恢复（selectFeed 等）
-      // 才能零延迟还原正文。
+      // TASK-122：正文真值源 bodyById（不随快照行传播），缓存恢复零延迟还原
+      // 视图行；已加载正文由 bodyById 直接命中，无需随快照复制。
       // TASK-111①：经 setViewEntriesSnapshot 收口——单键实体预算（超限尾部截断）
       // + 分页元数据（cursor/exhausted 取写入时真值），恢复路径用记录值判定。
       setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart), nextEntries, firstPageCursor, articles.length < ARTICLES_PAGE_SIZE);
@@ -256,11 +258,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         articlesExhausted: articles.length < ARTICLES_PAGE_SIZE,
         dataMode: 'tauri',
         dataLoading: false,
-        /* TASK-103：水合终态不再无条件清空——mergeSnapshotEntries 已按 id 裁剪，
-           只保留仍在新快照中的终态/错误标记（旧写法把终态连同正文一起抹掉，
-           正是 REQ-001「刷新后社交卡片一直加载正文」的根因） */
-        hydratedIds: merged.hydratedIds,
-        hydrationErrors: merged.hydrationErrors,
+        /* TASK-122：水合终态/失败态随 bodyById（state 判别态）存活，与快照
+           替换解耦——旧「merged.hydratedIds / hydrationErrors 随 set 写回」删除。
+           已水合卡片刷新后正文照常显示（bodyById 记录仍在），无「无请求死区」。 */
         /* TASK-111②：保位信号仅在「落地快照就是当前视图」时发出（'all'）。
            筛选视图下本落地的 'all' 快照会被紧随的 reloadFilteredEntries 整体
            替换，信号由后者发出——Timeline 消费时 items 已是最终快照，不会对
@@ -456,6 +456,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        发起 bump 同键代际，使最初那次发起过期。 */
     const queryKey = QueryScope.viewKey(layoutAtStart, view, scopeAtStart);
     const gen = beginViewQuery(queryKey);
+    /* TASK-122：行抓取时刻（await 前取）——bodyById 对齐的新鲜度判据 */
+    const rowsFetchedAt = Date.now();
     let rows;
     try {
       rows = await api.listArticles({
@@ -490,11 +492,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        丢弃。既有 view/scopeKey/sort 守卫在「参数全同」时不可判别，由代际补齐。 */
     if (currentFirstPageSerial(queryKey) !== gen) return;
     // 替换 entries（筛选视图首屏），重置分页游标（续拉与「全部」视图同机制）
-    // TASK-103：同 reloadFromBackend——快照替换按 id 继承正文与水合终态（合并
-    // 逻辑收口在 mergeSnapshotEntries，不得在此另写一份），终态按 id 裁剪。
+    // TASK-103 → TASK-122：快照替换收口在 mergeSnapshotEntries（正文真值源
+    // bodyById，不随行继承；fromBackend=true 同时执行 AI 产物显式失效/对齐）。
     // TASK-111①：经 setViewEntriesSnapshot 收口——单键实体预算 + 分页元数据。
     // TASK-117：首屏游标 = keyset 锚（本页最后一行），与「全部」视图同一推进语义。
-    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
+    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), true, rowsFetchedAt);
     const firstPageCursor = cursorAfterFirstPage(rows);
     setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, view, scopeAtStart), merged.entries, firstPageCursor, rows.length < ARTICLES_PAGE_SIZE);
     set((s) => ({
@@ -504,8 +506,6 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       /* TASK-110①：exhausted 真实判定（原恒 true——近似全集的副产品） */
       articlesExhausted: rows.length < ARTICLES_PAGE_SIZE,
       articlesLoading: false,
-      hydratedIds: merged.hydratedIds,
-      hydrationErrors: merged.hydrationErrors,
       /* TASK-111②：本快照即当前视图（守卫已确保 activeViewFilter === view），
          保位信号在此发出——Timeline 消费时 items 已是最终快照。 */
       ...(opts?.keepReadingPosition === true ? { positionRestoreNonce: s.positionRestoreNonce + 1 } : {}),
@@ -526,6 +526,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     // 各查一次），同时记录该键首屏代际（使该键在途续页/筛选响应过期）。
     const st = get();
     const gen = beginGlobalQuery(QueryScope.viewKey(st.activeContentLayout, st.activeViewFilter, st.activeFeedFilter));
+    /* TASK-122：行抓取时刻（await 前取）——bodyById 对齐的新鲜度判据 */
+    const rowsFetchedAt = Date.now();
     /* 映射当前订阅范围 → feed_id / folder_id（与 markCurrentViewAllRead 同口径）。
        TASK-052：与 loadMoreArticles 共用 scopeQueryArgs，两个入口的口径不再各写一份。
        注意顺序契约：本 action 按**调用时**的范围/排序构造查询，调用方（命令面板）
@@ -558,11 +560,12 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     }
     if (gen !== queryGeneration) return;
     if (!rows) return;
-    /* TASK-103：锚定分页同样是快照替换——按 id 继承正文与水合终态（收口在
-       mergeSnapshotEntries），终态按 id 裁剪，不再整体清空。 */
+    /* TASK-103 → TASK-122：锚定分页同样是快照替换——收口在 mergeSnapshotEntries
+       （正文真值源 bodyById，不随行继承；fromBackend=true 同时执行 AI 产物
+       显式失效/对齐）。 */
     /* TASK-109②：后端快照路径（fromBackend=true）——行级 is_read 是后端真值，
        在途乐观声明失效（bump）。 */
-    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
+    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), true, rowsFetchedAt);
     const next = merged.entries;
     /* TASK-117：锚定窗口的续拉游标 = 窗口最后一行的 keyset 锚；base.loaded 取
        offset（窗口前的行未进 entries，但「已看过的位置」计数口径与修前
@@ -583,8 +586,6 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       isShowingTranslatedProse: false,
       isRawRenderMode: false,
       showFulltext: false,
-      hydratedIds: merged.hydratedIds,
-      hydrationErrors: merged.hydrationErrors,
     }));
     // F7：与 selectArticle 同口径——打开时按设置标已读（此前搜索/命令面板
     // 打开的文章不标读，与列表点开行为分叉）

@@ -284,11 +284,15 @@ export interface AppState {
   hydrateArticleContent: (ids: string[]) => void;
   /** 正文水合失败重试（卡片内联重试入口）：清错误态后重新入队 */
   retryHydration: (id: string) => void;
-  /** 正文水合失败的错误信息（id → 消息；成功时清除） */
-  hydrationErrors: Record<string, string>;
-  /** 已完成水合的条目集合（值恒为 true）：空正文条目（content_html 为 NULL）的
-      终态标记——content 为空串不能区分「未水合」与「后端无正文」，需独立集合 */
-  hydratedIds: Record<string, true>;
+  /** TASK-122：正文/AI/水合状态的真值源迁往 bodyById（store/bodyCache.ts，
+      state: loading|ready|cleared|missing|failed 判别态）——原 hydrationErrors /
+      hydratedIds 两个按 id 平行 Map（正文侧状态分散，审计点名）随之移除，
+      读取一律经 selectors.selectArticleBody / entryNeedsHydration。
+      bodyCacheNonce：bodyById 是模块级缓存（不在 store 快照内），每次真实写入
+      由 bodyCache 的 notify 回调 bump 本计数（store.ts 注入）——组件 selector
+      引用它建立订阅依赖，记录变化才能触发重渲染。它只是通知序号，不承载任何
+      领域状态（真值一律经 getBodyEntry 读取）。 */
+  bodyCacheNonce: number;
   /** 手动全文提取（工具栏按钮；已提取时为刷新全文） */
   extractCurrentArticle: () => void;
 

@@ -85,7 +85,10 @@ try {
 } catch (e) {
   appStoreUnbound = { threw: true, error: e, value: undefined };
 }
-const { useAppStore } = await import('../dist-test/store.js');
+const { useAppStore, selectArticleBody: bodyOf } = await import('../dist-test/store.js');
+/* TASK-122：正文/AI 真值源 bodyById（模块级缓存，src/store/bodyCache.ts）——
+   断言经 bodyOf（selectors.selectArticleBody）与 getBodyEntry 读取 */
+const { getBodyEntry, dropBodyEntry } = await import('../dist-test/store/bodyCache.js');
 
 const store = useAppStore;
 const results = [];
@@ -109,9 +112,12 @@ store.getState().toggleReaderTranslation();
 // 等流式完成 + 回读完成
 await new Promise((r) => setTimeout(r, 50));
 
-const after = store.getState().entries.find((a) => a.id === entryId);
-check('S-1: 流式结束后 translatedContent 被回读为消毒版', after?.translatedContent === SANITIZED);
-check('S-1: 翻译后不再残留 <script>', !(after?.translatedContent ?? '').includes('<script>'));
+/* 【TASK-122 改动理由】真值源迁移：AI 产物落 bodyById 记录（选中文章已水合，
+   记录存在），视图行字段不再是真值——断言改经 selectArticleBody 读取；
+   保护意图（回读消毒版、无脚本残留）逐字保留。 */
+const after = bodyOf(store.getState(), entryId);
+check('S-1: 流式结束后 translatedContent 被回读为消毒版（真值源 bodyById，TASK-122）', after.translatedContent === SANITIZED);
+check('S-1: 翻译后不再残留 <script>', !after.translatedContent.includes('<script>'));
 
 // ---- C-3：全文提取失败可见（toast + 重试）----
 // 把 settings.defaultOpenMode 置为 fulltext，重新水合一篇文章触发自动全文。
@@ -150,36 +156,39 @@ const socialEntry = (id) => ({
 });
 const hydrCalls = () => invokeCalls.filter((c) => c.cmd === 'get_articles').length;
 
-// 场景 1：正常行 → content 填充 + hydratedIds 终态
-store.setState({ entries: [socialEntry('11')], hydratedIds: {}, hydrationErrors: {}, dataMode: 'tauri' });
+// 场景 1：正常行 → 正文填充 + ready 终态（TASK-122：终态/正文落 bodyById 记录）
+store.setState({ entries: [socialEntry('11')], dataMode: 'tauri' });
 getArticlesBehavior = { rows: [{ ...articleRow, id: 11, content_html: '<p>社交正文</p>' }], reject: false };
 store.getState().hydrateArticleContent(['11']);
 await new Promise((r) => setTimeout(r, 20));
-const e11 = store.getState().entries.find((a) => a.id === '11');
-check('S-2: 水合成功填充正文并置终态', e11?.content === '<p>社交正文</p>' && store.getState().hydratedIds['11'] === true);
-check('S-2: 水合成功清除错误态', store.getState().hydrationErrors['11'] === undefined);
+const e11 = bodyOf(store.getState(), '11');
+check('S-2: 水合成功填充正文并置终态（TASK-122：真值源 bodyById 记录）',
+  e11.content === '<p>社交正文</p>' && getBodyEntry('11')?.state === 'ready');
+check('S-2: 水合成功清除错误态', e11.state === 'ready' && e11.message === '');
 
 // 场景 2：空正文（content_html 为 NULL）→ 终态「已水合」，再次挂载不再重复拉取
-store.setState({ entries: [socialEntry('12')], hydratedIds: {}, hydrationErrors: {} });
+store.setState({ entries: [socialEntry('12')] });
 getArticlesBehavior = { rows: [{ ...articleRow, id: 12, content_html: null }], reject: false };
 store.getState().hydrateArticleContent(['12']);
 await new Promise((r) => setTimeout(r, 20));
-const e12 = store.getState().entries.find((a) => a.id === '12');
+const e12 = bodyOf(store.getState(), '12');
 const callsBefore = hydrCalls();
-store.getState().ensureArticleContent('12'); // 挂载触发：应被 hydratedIds 终态短路
-check('S-2: 空正文条目置终态且不重复水合', e12?.content === '' && store.getState().hydratedIds['12'] === true && hydrCalls() === callsBefore);
+store.getState().ensureArticleContent('12'); // 挂载触发：应被 ready 终态（bodyById 记录）短路
+check('S-2: 空正文条目置终态且不重复水合（TASK-122：终态=bodyById ready）',
+  e12.content === '' && getBodyEntry('12')?.state === 'ready' && hydrCalls() === callsBefore);
 
 // 场景 3：水合失败 → 错误态可见；重试收敛为成功
-store.setState({ entries: [socialEntry('13')], hydratedIds: {}, hydrationErrors: {} });
+store.setState({ entries: [socialEntry('13')] });
 getArticlesBehavior = { rows: [], reject: true, error: { message: 'IPC 超时' } };
 store.getState().hydrateArticleContent(['13']);
 await new Promise((r) => setTimeout(r, 20));
-check('S-2: 水合失败记录错误态（不再静默假加载）', store.getState().hydrationErrors['13'] === 'IPC 超时');
+check('S-2: 水合失败记录错误态（不再静默假加载；TASK-122：failed 判别态）',
+  getBodyEntry('13')?.state === 'failed' && getBodyEntry('13')?.message === 'IPC 超时');
 getArticlesBehavior = { rows: [{ ...articleRow, id: 13, content_html: '<p>重试成功</p>' }], reject: false };
 store.getState().retryHydration('13');
 await new Promise((r) => setTimeout(r, 20));
-const e13 = store.getState().entries.find((a) => a.id === '13');
-check('S-2: 重试后正文填充且错误态清除', e13?.content === '<p>重试成功</p>' && store.getState().hydrationErrors['13'] === undefined && store.getState().hydratedIds['13'] === true);
+const e13 = bodyOf(store.getState(), '13');
+check('S-2: 重试后正文填充且错误态清除', e13.content === '<p>重试成功</p>' && getBodyEntry('13')?.state === 'ready' && e13.message === '');
 
 // ---- S-3：启动失败不回退 mock（P0-2）+ WebDAV 冲突确认（P1-10）----
 // S-3a：tauri 模式 bootstrap 失败 → 错误态 + 重试入口，绝不渲染 mock 演示数据
@@ -202,17 +211,22 @@ check('S-3b: webdavConflict 弹确认并 force 重发', confirmCalls === 1 && gh
 check('S-3b: force 成功后进入授权流程', store.getState().githubFlow?.user_code === 'WDJB-MJHT');
 
 // ---- S-4：卡片级翻译接线（P1-7 空壳修复）----
+/* 【TASK-122 改动理由】本用例模拟「通知卡对未水合条目就地翻译」：该文章在
+   S-1/S-2 已被水合（bodyById 有记录），先 dropBodyEntry 回到未水合态重建场景；
+   无记录时 AI 产物走视图行过渡位（ArticleEntry.translatedContent），读取仍经
+   selectArticleBody（无记录回退视图行）。 */
 const beforeAiCalls = invokeCalls.filter((c) => c.cmd === 'ai_translate').length;
 const s4id = store.getState().entries[0].id;
+dropBodyEntry(s4id);
 store.setState((st) => ({
   entries: st.entries.map((a) => (a.id === s4id ? { ...a, translatedContent: '' } : a)),
 }));
 store.getState().translateEntry(s4id);
 await new Promise((r) => setTimeout(r, 50));
-const s4 = store.getState().entries.find((a) => a.id === s4id);
-check('S-4: 卡片级翻译流式生成并回读消毒版', s4?.translatedContent === SANITIZED);
+const s4 = bodyOf(store.getState(), s4id);
+check('S-4: 卡片级翻译流式生成并回读消毒版（无记录走视图行过渡位）', s4.translatedContent === SANITIZED);
 check('S-4: 生成完成后按 id 状态清除', store.getState().translatingIds[s4id] === undefined);
-// 缓存命中：已有译文直接返回，不新增 ai_translate
+// 缓存命中：已有译文直接返回，不新增 ai_translate（真值源 bodyById 生效值判定）
 store.getState().translateEntry(s4id);
 check('S-4: 已有译文时不再触发 ai_translate',
   invokeCalls.filter((c) => c.cmd === 'ai_translate').length === beforeAiCalls + 1);
@@ -265,6 +279,8 @@ check('S-5: 今天视图全部已读带 sinceMs', !!todayCall && typeof todayCal
    新增（TASK-048）：store 状态机行为断言 —— src/store.ts 拆分的回归网
    覆盖领域 (a)…(l)。【只增不改】：上面 26 项既有断言一行未动，
    新增项单独计数并以 🆕 标记，摘要行分别给出「既有」与「新增」通过数。
+   （TASK-122 例外：S-1/S-2/S-4 的读取面按正文真值源迁移更新——见各处
+   改动理由注；保护意图逐字保留，见文件尾摘要行说明。）
 
    确定性来源：本段落自带内存假后端（folders/feeds/feed_counts/list_articles/
    article_index/get_article/get_setting/set_setting/AI channel），竞态用
@@ -292,6 +308,14 @@ await (async () => {
 
   const nSel = await import('../dist-test/store.js');
   const { selectVisibleEntries, selectScopeEntries, selectRawEntries, selectTreeCounts, selectViewCounts } = nSel;
+  /* TASK-122：正文/AI 读取单点（真值源 bodyById）——断言统一经 selectArticleBody
+     （下称 bodyOf）与 getBodyEntry 读取；entryNeedsHydration 别名供水合判定断言。
+     注意必须取 dist-test 实例（与 store 同一模块图）：bodyById 是模块级状态，
+     经 src/*.ts 原始转译会得到第二个实例、看不到 store 写入的记录。 */
+  const bodyOfT122 = nSel.selectArticleBody;
+  const entryNeedsHydrationT122 = nSel.entryNeedsHydration;
+  const { getBodyEntry: getBodyEntryT122, markBodyLoading: markBodyLoadingT122, dropBodyEntry: dropBodyEntryT122 } = await import('../dist-test/store/bodyCache.js');
+  void bodyOfT122; void getBodyEntryT122;
 
   /* ---------- 规范假数据：覆盖三种布局解析路径 ----------
      feed 10 inherit → cat-1(article)；feed 11 显式 social（feed 级覆盖）；
@@ -582,6 +606,10 @@ await (async () => {
        手工 clear，这里收口为公共 hygiene；动态导入与 (s) 块同一模块实例）。 */
     const { viewEntriesCache } = await import('../dist-test/store/internals.js');
     viewEntriesCache.clear();
+    /* TASK-122：bodyById 是模块级实体缓存，跨夹具残留会让后续用例命中上一夹具
+       的正文/终态（与 viewEntriesCache 同型污染）——夹具复位一并清空 */
+    const { resetBodyCacheForTests } = await import('../dist-test/store/bodyCache.js');
+    resetBodyCacheForTests();
     store.setState({
       dataMode: 'tauri', dataLoading: false, bootstrapError: null,
       activeContentLayout: 'article', activeViewFilter: 'all', activeFeedFilter: 'all',
@@ -631,20 +659,23 @@ await (async () => {
     aOk.entries.length === 8 && aOk.articlesLimit === 8 && aOk.articlesCursor['article|all']?.loaded === 8
     && aOk.articlesExhausted === true && aOk.articlesLoading === false);
 
-  /* 【TASK-103 改动理由】旧断言「新快照清空 hydratedIds/hydrationErrors」锁的
-     正是 REQ-001 的根因手法：无条件清空让已水合卡片在后台刷新后失去正文与
-     终态，而虚拟列表按 id 保持卡片身份、useLazyHydrate 同 id 不重触发——卡片
-     永挂「加载正文…」且无请求在途（审计探针复现）。新契约：快照替换按 id
-     继承正文与终态（mergeSnapshotEntries），只裁剪已不在新快照中的滞留标记
-     ——本断言改写为锁定继承+裁剪，非为过门禁而弱化（覆盖面反而更宽：
-     同时验证「仍在快照的保留」与「已消失的移除」两侧）。 */
-  store.setState({ hydratedIds: { '101': true, '999': true }, hydrationErrors: { '102': '旧错误', '998': 'x' } });
+  /* 【TASK-103 → TASK-122 改动理由】旧断言（两代）分别锁「清空」与「按 id 继承+
+     裁剪 hydratedIds/hydrationErrors 平行 Map」。TASK-122 起水合终态收敛为
+     bodyById 记录的 state（按文章实体记账，不随快照行传播），滞留标记在结构上
+     不存在（记录键 = 文章实体 id，重现即命中自己的正文与终态）。保护意图
+     （刷新不丢已水合正文、无「无请求死区」）改由 bodyById 断言承载：
+     快照替换前后记录保持、正文照常可读、无需补拉。 */
+  getArticlesPlan = { rows: [mkRow({ id: 101, feed_id: 10, content_html: '<p>101 水合正文</p>' })] };
+  store.getState().hydrateArticleContent(['101']);
+  await nTick(20);
+  getArticlesPlan = null;
+  const t122aCallsBefore = invokeCalls.filter((c) => c.cmd === 'get_articles').length;
   await store.getState().reloadFromBackend();
-  checkNew('(a) 新快照按 id 继承并裁剪水合终态（TASK-103：仍在快照的 101/102 保留，已消失的 999/998 移除）',
-    store.getState().hydratedIds['101'] === true
-    && store.getState().hydrationErrors['102'] === '旧错误'
-    && store.getState().hydratedIds['999'] === undefined
-    && store.getState().hydrationErrors['998'] === undefined);
+  checkNew('(a) 快照替换后 bodyById 记录保持（水合终态随实体不随快照行，TASK-122），已水合卡片正文照常可读且无需补拉',
+    bodyOf(store.getState(), '101').content === '<p>101 水合正文</p>'
+    && getBodyEntry('101')?.state === 'ready'
+    && entryNeedsHydrationT122(store.getState(), '101') === false
+    && invokeCalls.filter((c) => c.cmd === 'get_articles').length === t122aCallsBefore);
 
   await resetStore();
   failReload = { code: 'db_corrupt', message: '数据库损坏' };
@@ -1698,15 +1729,19 @@ await (async () => {
   await nTick(5);   // 等 api 内部 import Channel 后真正发出 inv，再手动推流
   const heldTrS = heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
   heldTrS.ch.onmessage?.({ type: 'delta', data: '<p>未消毒<script>alert(1)</script></p>' });
-  checkNew('(l) translateEntry 流式增量先落到 translatedContent（打字机原样展示、未收尾）',
-    store.getState().entries.find((a) => a.id === '201')?.translatedContent === '<p>未消毒<script>alert(1)</script></p>'
+  /* 【TASK-122 改动理由】AI 产物真值源迁移 bodyById——本 fixture 此前经
+     anchorToArticle/selectArticle 建立过记录时流式增量落记录，经 selectArticleBody
+     读取（无记录时同值回退视图行，两侧断言等价）；保护意图（打字机原样、未收尾）
+     逐字保留。下同（(l2)/(p3-f3)/(D1b)/(D1c) 各条）。 */
+  checkNew('(l) translateEntry 流式增量先落到 translatedContent（打字机原样展示、未收尾；TASK-122 真值源 bodyById）',
+    bodyOf(store.getState(), '201').translatedContent === '<p>未消毒<script>alert(1)</script></p>'
     && store.getState().translatingIds['201'] === true);
   heldTrS.ch.onmessage?.({ type: 'done' });
   checkNew('(l) 流结束（done）立即清 translatingIds[id]（不等回读完成）',
     store.getState().translatingIds['201'] === undefined);
   await nTick(20);
-  const lSafe = store.getState().entries.find((a) => a.id === '201')?.translatedContent ?? '';
-  checkNew('(l) 流结束后回读 DB 消毒译文覆盖流式产物（无 <script> 残留）',
+  const lSafe = bodyOf(store.getState(), '201').translatedContent;
+  checkNew('(l) 流结束后回读 DB 消毒译文覆盖流式产物（无 <script> 残留；TASK-122 真值源 bodyById）',
     lSafe === '<p>已消毒译文</p>' && !lSafe.includes('<script>'));
   invokeCalls.length = 0;
   store.getState().translateEntry('201');
@@ -1728,9 +1763,9 @@ await (async () => {
   checkNew('(l2) done 后消毒回读未落地：标记仍在（消毒版未到位不得切 HTML 渲染）',
     store.getState().rawTranslatedIds['201'] === true);
   await nTick(20);
-  checkNew('(l2) 消毒回读落地：标记清除且内容为 DB 消毒版',
+  checkNew('(l2) 消毒回读落地：标记清除且内容为 DB 消毒版（TASK-122 真值源 bodyById）',
     store.getState().rawTranslatedIds['201'] === undefined
-    && store.getState().entries.find((a) => a.id === '201')?.translatedContent === '<p>已消毒译文</p>');
+    && bodyOf(store.getState(), '201').translatedContent === '<p>已消毒译文</p>');
 
   await bootFixture();
   detailImpl = () => { throw { message: 'ipc down' }; };
@@ -1741,9 +1776,9 @@ await (async () => {
   heldN11Fail.ch.onmessage?.({ type: 'delta', data: '<img src=x onerror=alert(1)>' });
   heldN11Fail.ch.onmessage?.({ type: 'done' });
   await nTick(20);
-  checkNew('(l2) 消毒回读失败：丢弃未消毒半截 + 标记清除 + 错误态与 toast 带重试',
+  checkNew('(l2) 消毒回读失败：丢弃未消毒半截 + 标记清除 + 错误态与 toast 带重试（TASK-122 真值源 bodyById）',
     store.getState().rawTranslatedIds['201'] === undefined
-    && store.getState().entries.find((a) => a.id === '201')?.translatedContent === ''
+    && bodyOf(store.getState(), '201').translatedContent === ''
     && store.getState().translateErrors['201'] === '译文回读失败'
     && store.getState().toasts.some((t) => t.text === '译文回读失败'));
 
@@ -1755,8 +1790,8 @@ await (async () => {
   const heldN11Err = heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
   heldN11Err.ch.onmessage?.({ type: 'delta', data: '<b>半截' });
   heldN11Err.ch.onmessage?.({ type: 'error', data: '限流' });
-  checkNew('(l2) 流错误路径：半截未消毒内容保留（重试语义）且标记保持（按纯文本渲染）',
-    store.getState().entries.find((a) => a.id === '201')?.translatedContent === '<b>半截'
+  checkNew('(l2) 流错误路径：半截未消毒内容保留（重试语义）且标记保持（按纯文本渲染；TASK-122 真值源 bodyById）',
+    bodyOf(store.getState(), '201').translatedContent === '<b>半截'
     && store.getState().rawTranslatedIds['201'] === true);
 
   /* 与上一条成对：失败时**无任何 delta**（未消毒产物为空）⇒ 标记必须清除。
@@ -1767,9 +1802,9 @@ await (async () => {
   aiTr = { deltas: [], error: null, reject: { message: 'down' }, finish: true, holdIds: [] };
   store.getState().translateEntry('201');
   await nTick(20);
-  checkNew('(l2) 失败且无未消毒半截：标记清除（否则水合写回的消毒译文被按纯文本渲染）',
+  checkNew('(l2) 失败且无未消毒半截：标记清除（否则水合写回的消毒译文被按纯文本渲染；TASK-122 真值源 bodyById）',
     store.getState().rawTranslatedIds['201'] === undefined
-    && store.getState().entries.find((a) => a.id === '201')?.translatedContent === ''
+    && bodyOf(store.getState(), '201').translatedContent === ''
     && store.getState().translateErrors['201'] === 'AI 服务未配置或不可达');
 
   /* ---------- (n7) TASK-065：锚定打开复位阅读视图标志（与 selectArticle 同口径） ---------- */
@@ -1960,9 +1995,9 @@ await (async () => {
   await nTick(10);
   store.getState().toggleReaderTranslation();
   await nTick(20);
-  checkNew('(p3-f3) Reader 翻译流内错误且有半截产物：标记保留（成对；半截按纯文本渲染）',
+  checkNew('(p3-f3) Reader 翻译流内错误且有半截产物：标记保留（成对；半截按纯文本渲染；TASK-122 真值源 bodyById）',
     store.getState().rawTranslatedIds['201'] === true
-    && store.getState().entries.find((a) => a.id === '201')?.translatedContent === '<b>半截');
+    && bodyOf(store.getState(), '201').translatedContent === '<b>半截');
 
   await bootFixture();
   aiTr = { deltas: [], error: null, reject: { message: 'down' }, finish: true, holdIds: [] };
@@ -2079,24 +2114,27 @@ await (async () => {
   aiTr = { deltas: ['半截译文'], error: '限流', reject: null, finish: true, holdIds: [] };
   store.getState().translateEntry('201');
   await nTick(5);
-  const d1bPartial = store.getState().entries.find((a) => a.id === '201')?.translatedContent;
+  const d1bPartial = bodyOf(store.getState(), '201').translatedContent;
   aiTr = { deltas: [], error: null, reject: null, finish: false, holdIds: [201] };   // 重试：挂起观察
   invokeCalls.length = 0;
   store.getState().toasts[0]?.action?.run();
   await nTick(5);
   const d1b = store.getState();
-  checkNew('(D1b) 半截译文 + 报错后点「重试」：真的重发 ai_translate（修前被 art.translatedContent 短路挡住）',
+  checkNew('(D1b) 半截译文 + 报错后点「重试」：真的重发 ai_translate（修前被 art.translatedContent 短路挡住；TASK-122 生效值经 selectArticleBody）',
     d1bPartial === '半截译文' && invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1);
-  checkNew('(D1b) 重试清空半截译文与上次错误（与 Reader 路径的重试语义对齐，不把半截当缓存）',
-    d1b.entries.find((a) => a.id === '201')?.translatedContent === '' && d1b.translateErrors['201'] === '');
+  checkNew('(D1b) 重试清空半截译文与上次错误（与 Reader 路径的重试语义对齐，不把半截当缓存；TASK-122 真值源 bodyById）',
+    bodyOf(d1b, '201').translatedContent === '' && d1b.translateErrors['201'] === '');
   heldAi[heldAi.length - 1]?.ch.onmessage?.({ type: 'done' });
   await nTick(20);
 
-  /* ---------- D1c：Reader 翻译同源路径（error 后 translatedContent 残留半截） ---------- */
+  /* ---------- D1c：Reader 翻译同源路径（error 后译文残留半截） ---------- */
   await bootFixture();
   /* 先把正文置成与 detailImpl 相同的内容：selectArticle 会异步水合详情，
      若 content 为空则会被回填成 translated_content='' —— 那会把流式半截译文冲掉，
-     掩盖本用例要观察的状态。 */
+     掩盖本用例要观察的状态。
+     【TASK-122】selectArticle 详情水合落 bodyById 记录；生成与水合并发时，
+     记录落地以「生成中」为回退种子（aiFallback）保住流式半截——读取经
+     selectArticleBody（记录存在时记录为真值）。 */
   store.setState((s) => ({
     toasts: [], isShowingTranslatedProse: false,
     entries: s.entries.map((a) => (a.id === '201' ? { ...a, content: '<p>详情</p>' } : a)),
@@ -2106,9 +2144,9 @@ await (async () => {
   store.getState().toggleReaderTranslation();
   await nTick(5);
   const d1c = store.getState();
-  checkNew('(D1c) Reader 翻译半截 + 报错：错误态可见、译文块收起（半截译文仍留在条目上）',
+  checkNew('(D1c) Reader 翻译半截 + 报错：错误态可见、译文块收起（半截译文仍留在条目上；TASK-122 真值源 bodyById）',
     d1c.translateErrors['201'] === '限流' && d1c.isShowingTranslatedProse === false
-    && d1c.entries.find((a) => a.id === '201')?.translatedContent === '半截译文');
+    && bodyOf(d1c, '201').translatedContent === '半截译文');
   aiTr = { deltas: [], error: null, reject: null, finish: false, holdIds: [201] };
   invokeCalls.length = 0;
   d1c.toasts[d1c.toasts.length - 1]?.action?.run();
@@ -2116,8 +2154,8 @@ await (async () => {
   checkNew('(D1c) 半截译文 + 报错后点「重试」：真的重发 ai_translate 并重新进入生成态（修前把半截当缓存直接展示）',
     invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1
     && store.getState().translating === true);
-  checkNew('(D1c) 重试清空半截译文（原有清空逻辑在修前根本走不到）',
-    store.getState().entries.find((a) => a.id === '201')?.translatedContent === '');
+  checkNew('(D1c) 重试清空半截译文（原有清空逻辑在修前根本走不到；TASK-122 真值源 bodyById）',
+    bodyOf(store.getState(), '201').translatedContent === '');
   heldAi[heldAi.length - 1]?.ch.onmessage?.({ type: 'done' });
   await nTick(20);
 
@@ -2190,20 +2228,24 @@ await (async () => {
      当前正文」的字符串比对改为后端结构化 degraded 标志；本段随之改为直接驱动该标志
      （mock 现按 { html, degraded, reason } 返回）。保护意图不变。 */
   await bootFixture();
+  /* 【TASK-122 改动理由】提取真值源迁移 bodyById：先经详情链路建立记录（旧用例
+     直接在条目上摆 content/rawContent/fulltextExtracted——该字段组已不再是真值）；
+     degraded/正常两分支的保护意图（不假报成功 / 置标志+进全文视图）逐字保留，
+     标志改从 bodyById 记录断言。 */
   store.setState((s) => ({
     toasts: [],
     activeArticleId: '104',
     showFulltext: false,
-    entries: s.entries.map((a) => (a.id === '104'
-      ? { ...a, content: '<p>RSS 原文</p>', rawContent: '<p>RSS 原文</p>', url: 'https://x.example/a', fulltextExtracted: false }
-      : a)),
+    entries: s.entries.map((a) => (a.id === '104' ? { ...a, url: 'https://x.example/a' } : a)),
   }));
+  store.getState().ensureArticleContent('104', { extractFulltext: true });
+  await nTick(20);
   extractResult = { html: '<p>RSS 原文</p>', degraded: true, reason: '提取结果比原正文更短，已保留原正文（原文可能已是全文）' };
   store.getState().extractCurrentArticle();
   await nTick(20);
   const p210 = store.getState();
-  checkNew('(P2-10/TASK-076) degraded=true 时：不置 fulltextExtracted、不切全文视图',
-    p210.entries.find((a) => a.id === '104')?.fulltextExtracted === false && p210.showFulltext === false);
+  checkNew('(P2-10/TASK-076) degraded=true 时：不置 fulltextExtracted、不切全文视图（TASK-122：标志在 bodyById 记录）',
+    bodyOf(p210, '104').fulltextExtracted === false && p210.showFulltext === false);
   checkNew('(P2-10/TASK-076) 且如实提示降级原因（后端 reason 原文），而不是报成功',
     p210.toasts.some((t) => t.text.includes('未采用全文提取') && t.text.includes('已保留原正文'))
     && !p210.toasts.some((t) => t.text === '全文提取完成'));
@@ -2211,8 +2253,8 @@ await (async () => {
   store.getState().extractCurrentArticle();
   await nTick(20);
   const p210ok = store.getState();
-  checkNew('(P2-10/TASK-076) 正常提取路径不受影响：置标志 + 进入全文视图 + 报「全文提取完成」',
-    p210ok.entries.find((a) => a.id === '104')?.fulltextExtracted === true && p210ok.showFulltext === true
+  checkNew('(P2-10/TASK-076) 正常提取路径不受影响：置标志 + 进入全文视图 + 报「全文提取完成」（TASK-122：标志在 bodyById 记录）',
+    bodyOf(p210ok, '104').fulltextExtracted === true && p210ok.showFulltext === true
     && p210ok.toasts.some((t) => t.text === '全文提取完成'));
   extractResult = null;
 
@@ -2321,31 +2363,57 @@ await (async () => {
     && s4Call?.args.args.offset === undefined
     && store.getState().articlesCursor['article|11']?.loaded === 1000 && store.getState().articlesCursor['article|10']?.loaded === 1000);
   /* 切回源A：TASK-063 新契约——缓存命中同步恢复该范围快照（零延迟，不经 await），
-     游标=快照长度（500，可继续翻页）；源B 的游标 1000 不被污染。恢复时清水合
-     状态（缓存快照无正文，滞留的已水合标记会阻断重水合）。 */
-  store.setState({ hydratedIds: { '999': true }, hydrationErrors: { '998': 'x' } });
+     游标=快照长度（500，可继续翻页）；源B 的游标 1000 不被污染。
+     【TASK-103 → TASK-122 改动理由】「恢复时清滞留水合状态」锁的是 hydratedIds
+     平行 Map 的滞留危害（不属于本快照的「已水合」标记阻断重水合 → 空卡死区）。
+     TASK-122 起水合状态收敛为 bodyById 记录（键 = 文章实体 id，与视图行无关）：
+     滞留形态在结构上不存在——记录只可能对「确实水合过的文章」为 ready，该文章
+     重现（任何快照）时正文与终态同体命中，正是所需行为。保护意图改由
+     「恢复后已水合文章正文立即可读、未水合文章正常判定需要水合」承载：
+     先对源A 的 10 号行水合，切走再切回，正文零丢失且不重拉。 */
+  /* 当前视图 = 源B（7000 号行在册）：水合其一 → selectFeed('10') 缓存命中恢复源A */
+  getArticlesPlan = { rows: [mkRow({ id: 7000, feed_id: 11, content_html: '<p>源B 7000 号水合正文</p>' })] };
+  store.getState().hydrateArticleContent(['7000']);
+  await nTick(20);
+  getArticlesPlan = null;
+  const t122s4CallsBefore = invokeCalls.filter((c) => c.cmd === 'get_articles').length;
   store.getState().selectFeed('10');
   const s4Back = store.getState();
-  checkNew('(s4) 切回源A：同步恢复该范围快照（零延迟），游标=快照长度且两源互不污染，滞留水合状态被清空',
+  checkNew('(s4) 切回源A：同步恢复该范围快照（零延迟），游标=快照长度且两源互不污染；已水合文章（源B 7000）正文随 bodyById 零丢失、不重拉，源A 未水合条目照常判定需要水合（TASK-122）',
     s4Back.entries.length === 500 && s4Back.entries.every((e) => e.feedId === '10')
     && s4Back.articlesLimit === 500 && s4Back.articlesCursor['article|10']?.loaded === 500
     && s4Back.articlesCursor['article|11']?.loaded === 1000
-    && Object.keys(s4Back.hydratedIds).length === 0 && Object.keys(s4Back.hydrationErrors).length === 0);
+    && bodyOf(s4Back, '7000').content === '<p>源B 7000 号水合正文</p>'
+    && getBodyEntry('7000')?.state === 'ready'
+    && entryNeedsHydrationT122(s4Back, '7000') === false
+    && entryNeedsHydrationT122(s4Back, '6000') === true
+    && invokeCalls.filter((c) => c.cmd === 'get_articles').length === t122s4CallsBefore);
   await nTick(30);
   checkNew('(s4) 切回源A 后的后台刷新保持该范围快照结论',
     store.getState().entries.every((e) => e.feedId === '10') && store.getState().articlesCursor['article|10']?.loaded === 500);
 
-  /* ---------- (s4b) TASK-063 附加契约：selectView 缓存恢复同契约清滞留水合状态；mock 模式不接线 ---------- */
+  /* ---------- (s4b) TASK-063 附加契约：selectView 缓存恢复不丢已水合正文；mock 模式不接线 ----------
+     【TASK-103 → TASK-122 改动理由】同 (s4)：滞留 hydratedIds 的危害形态随平行
+     Map 移除而结构消失，保护意图（恢复后正文可用、不死区）改由 bodyById 断言
+     承载：水合收藏视图条目 → 切走 → selectView 缓存命中恢复 → 正文零丢失且
+     不重拉。 */
   await bootFixture();
   store.setState({ activeViewFilter: 'starred' });
   await store.getState().reloadFilteredEntries('starred');
-  store.setState({ activeViewFilter: 'all', entries: [], hydratedIds: { '888': true }, hydrationErrors: { '887': 'y' } });
+  getArticlesPlan = { rows: [mkRow({ id: 103, feed_id: 10, is_starred: true, content_html: '<p>103 水合正文</p>' })] };
+  store.getState().hydrateArticleContent(['103']);
+  await nTick(20);
+  getArticlesPlan = null;
+  const t122s4bCallsBefore = invokeCalls.filter((c) => c.cmd === 'get_articles').length;
+  store.setState({ activeViewFilter: 'all', entries: [] });
   store.getState().selectView('starred');
-  checkNew('(s4b) selectView 缓存命中恢复：滞留水合状态被清空（缓存快照无正文，防「永不重水合」空窗）',
+  checkNew('(s4b) selectView 缓存命中恢复：已水合正文随 bodyById 零丢失、无需补拉（防「永不重水合」空窗，TASK-122）',
     store.getState().activeViewFilter === 'starred'
     && store.getState().entries.length > 0
-    && Object.keys(store.getState().hydratedIds).length === 0
-    && Object.keys(store.getState().hydrationErrors).length === 0);
+    && bodyOf(store.getState(), '103').content === '<p>103 水合正文</p>'
+    && getBodyEntry('103')?.state === 'ready'
+    && entryNeedsHydrationT122(store.getState(), '103') === false
+    && invokeCalls.filter((c) => c.cmd === 'get_articles').length === t122s4bCallsBefore);
 
   await resetStore({ dataMode: 'mock' });
   invokeCalls.length = 0;
@@ -3480,11 +3548,13 @@ await (async () => {
     await store.getState().bootstrapFromBackend();
     store.getState().selectView('starred');
     await nTick(20);
-    /* 模拟已加载条目的懒水合终态（id 1300 = i 200，切排序前后都在首屏内） */
-    store.setState((s) => ({
-      entries: s.entries.map((e) => (e.id === '1300' ? { ...e, content: '<p>t110 水合正文</p>', hydrated: true } : e)),
-      hydratedIds: { ...s.hydratedIds, '1300': true },
-    }));
+    /* 模拟已加载条目的懒水合终态（id 1300 = i 200，切排序前后都在首屏内）。
+       【TASK-122 改动理由】水合真值落 bodyById 记录（旧写法直接在条目上摆
+       content/hydratedIds——不再是真值位）；保护意图（重拉不丢正文）不变。 */
+    getArticlesPlan = { rows: [mkRow({ id: 1300, feed_id: 12, is_starred: true, content_html: '<p>t110 水合正文</p>' })] };
+    store.getState().hydrateArticleContent(['1300']);
+    await nTick(20);
+    getArticlesPlan = null;
     invokeCalls.length = 0;
     store.getState().toggleTimelineSort(); // TASK-110③：筛选视图切排序 → 服务端重拉（不再本地重排全集）
     await nTick(20);
@@ -3494,12 +3564,11 @@ await (async () => {
       t110SortCalls.length === 1
       && t110SortArgs?.only_starred === true && t110SortArgs?.newest_first === false && t110SortArgs?.offset === 0);
     const t110Sorted = store.getState();
-    const t110SortedHydrated = t110Sorted.entries.find((e) => e.id === '1300');
-    checkNew('(t110-4) 切排序重拉落地：entries 换为新排序（oldest）首屏（首条=最老收藏 1619）、已加载条目的水合正文按 id 继承不因重拉丢失（TASK-106 机制）、游标随落地快照对齐',
+    checkNew('(t110-4) 切排序重拉落地：entries 换为新排序（oldest）首屏（首条=最老收藏 1619）、已加载条目的水合正文随 bodyById 不因重拉丢失（TASK-106 意图，TASK-122 真值源）、游标随落地快照对齐',
       t110Sorted.entries.length === 500 && t110Sorted.entries[0]?.id === '1619'
       && t110Sorted.entries.every((e) => e.isStarred)
-      && t110SortedHydrated?.content === '<p>t110 水合正文</p>' && t110SortedHydrated?.hydrated === true
-      && t110Sorted.hydratedIds['1300'] === true
+      && bodyOf(t110Sorted, '1300').content === '<p>t110 水合正文</p>'
+      && getBodyEntryT122('1300')?.state === 'ready'
       && t110Sorted.articlesCursor['article|all']?.loaded === 500 && t110Sorted.articlesExhausted === false);
 
     /* ---------- (t110-5) 过滤参数逐项：only_unread / only_starred / only_today（article|all） ---------- */
@@ -4588,7 +4657,10 @@ await (async () => {
      快照替换时的正文/终态继承（收口单点，六个调用点共用）。
      ============================================================ */
   {
-    const { entryNeedsHydration: NEED } = await import('../src/store/selectors.ts');
+    /* 【TASK-122 改动理由】entryNeedsHydration 改从 dist-test 实例取：它现在读取
+       模块级 bodyById（真值源迁移），必须与 store 同一模块图才能看到记录
+       （原 src/*.ts 原始转译会得到第二份模块状态）。 */
+    const { entryNeedsHydration: NEED } = nSel;
     const socialRow = (o) => mkRow({ feed_id: 11, ...o });
     /* store.entries 侧的条目形状（id 为字符串、content/content_html 分离）——
        与首段 S-2 的 socialEntry 同构；getArticlesPlan 返回的才是后端行形状 */
@@ -4601,74 +4673,99 @@ await (async () => {
     const t103State = () => store.getState();
     const t103GetArticlesCount = () => invokeCalls.filter((c) => c.cmd === 'get_articles').length;
 
-    /* ---------- t103-snapshot-preserves-hydration：快照替换保留水合 ---------- */
+    /* ---------- t103-snapshot-preserves-hydration：快照替换保留水合 ----------
+       【TASK-122 改动理由】本组断言原锁 mergeSnapshotEntries 的「按 id 从旧快照行
+       继承正文/AI/终态」。继承机制被 bodyById 实体缓存**取代**（审计目标结构：
+       正文/AI 随文章实体存活，不随视图行传播；行间继承正是清理失效后旧产物复活
+       的通道）。保护意图（刷新不丢已加载正文、无「无请求死区」）原样保留，改由
+       bodyById 断言承载：水合建立记录 → reloadFromBackend 替换快照 → 记录不动、
+       正文照常可读、零补拉；视图行不再携带正文（字段已瘦身）。 */
     await bootFixture({ activeContentLayout: 'social' });
-    // 预置已水合痕迹：101 有正文+url；102 空正文终态；103 全量（译文/摘要/全文/原文分离）
-    store.setState((s) => ({
-      entries: s.entries.map((a) => {
-        if (a.id === '101') return { ...a, content: '<p>101 正文</p>', rawContent: '<p>101 正文</p>', hydrated: true, url: 'https://example.com/101' };
-        if (a.id === '102') return { ...a, hydrated: true };
-        if (a.id === '103') return { ...a, content: '<p>103 全文</p>', rawContent: '<p>103 原文</p>', translatedContent: '<p>103 译文</p>', aiSummary: '103 摘要', fulltextExtracted: true, hydrated: true, url: 'https://example.com/103' };
-        return a;
-      }),
-      hydratedIds: { '101': true, '102': true },
-      hydrationErrors: {},
-    }));
+    // 经真实水合链路建立记录：101 有正文+url；102 空正文终态；103 全量（译文/摘要/全文标记）
+    getArticlesPlan = { rows: [
+      socialRow({ id: 101, content_html: '<p>101 正文</p>', url: 'https://example.com/101' }),
+      socialRow({ id: 102, content_html: null }),
+      socialRow({ id: 103, content_html: '<p>103 正文</p>', translated_content: '<p>103 译文</p>', ai_summary: '103 摘要', fulltext_extracted: true, url: 'https://example.com/103' }),
+    ] };
+    store.getState().hydrateArticleContent(['101', '102', '103']);
+    await nTick(20);
+    getArticlesPlan = null;
+    /* 列表行与水合行同源（同一 DB 真值）：103 的 AI 列在两处一致——不一致时
+       reconcile 以**更新的行真值**对齐（清理失效语义），那由 t122 专属用例覆盖 */
+    backendRows = BASE_ROWS.map((r) => (r.id === 103
+      ? { ...r, translated_content: '<p>103 译文</p>', ai_summary: '103 摘要', fulltext_extracted: true }
+      : r));
     const t103BaseCalls = t103GetArticlesCount();
     await store.getState().reloadFromBackend();
     const t103AfterReload = t103State();
-    checkNew('(t103-snapshot-preserves-hydration) 快照替换按 id 继承正文/原文/译文/摘要/全文标记/url，hydratedIds 不再清空',
-      t103AfterReload.entries.find((a) => a.id === '101')?.content === '<p>101 正文</p>'
+    const t103b101 = bodyOfT122(t103AfterReload, '101');
+    const t103b102 = bodyOfT122(t103AfterReload, '102');
+    const t103b103 = bodyOfT122(t103AfterReload, '103');
+    checkNew('(t103-snapshot-preserves-hydration) 快照替换后 bodyById 记录原样保持（正文/原文/译文/摘要/全文标记/url 随实体存活，终态不清空；视图行不再复制正文）',
+      t103b101.content === '<p>101 正文</p>' && t103b101.rawContent === '<p>101 正文</p>'
       && t103AfterReload.entries.find((a) => a.id === '101')?.url === 'https://example.com/101'
-      && t103AfterReload.entries.find((a) => a.id === '103')?.content === '<p>103 全文</p>'
-      && t103AfterReload.entries.find((a) => a.id === '103')?.rawContent === '<p>103 原文</p>'
-      && t103AfterReload.entries.find((a) => a.id === '103')?.translatedContent === '<p>103 译文</p>'
-      && t103AfterReload.entries.find((a) => a.id === '103')?.aiSummary === '103 摘要'
-      && t103AfterReload.entries.find((a) => a.id === '103')?.fulltextExtracted === true
-      && t103AfterReload.hydratedIds['101'] === true && t103AfterReload.hydratedIds['102'] === true);
+      && t103b102.content === '' && getBodyEntryT122('102')?.state === 'ready'
+      && t103b103.content === '<p>103 正文</p>' && t103b103.rawContent === '<p>103 正文</p>'
+      && t103b103.translatedContent === '<p>103 译文</p>'
+      && t103b103.aiSummary === '103 摘要'
+      && t103b103.fulltextExtracted === true
+      && !('content' in (t103AfterReload.entries.find((a) => a.id === '101') || {})));
     checkNew('(t103-snapshot-preserves-hydration) 已水合条目刷新后不触发任何补拉（直接恢复正文，无「无请求死区」）',
       t103GetArticlesCount() === t103BaseCalls
       && NEED(t103AfterReload, '101') === false && NEED(t103AfterReload, '102') === false);
-    // with_content 场景：新行自带正文/url 时以新行为准（104 新行带正文）
-    store.setState((s) => ({
-      entries: s.entries.map((a) => (a.id === '104' ? { ...a, content: '旧104', rawContent: '旧104', url: 'https://example.com/old-104' } : a)),
-    }));
+    /* 【TASK-103 → TASK-122 改动理由】「新行自带正文（with_content）以新行为准」
+       场景随真值源迁移失效：with_content 恒 false（layoutNeedsBody 五布局全
+       false），列表行从不携带正文，视图行也已瘦身不存 content——「行 vs 行」的
+       正文优先级问题在结构上消失。改为锁定等价保护：快照行即使带 content_html
+       也不写 bodyById/视图行（正文只经水合链路进入记录），url 轻字段照常取行。 */
     backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, content_html: '<p>新104</p>', url: 'https://example.com/104' } : r));
     await store.getState().reloadFromBackend();
-    checkNew('(t103-snapshot-preserves-hydration) 新行自带正文（with_content）以新行为准：104 取新行正文与新 url',
-      t103State().entries.find((a) => a.id === '104')?.content === '<p>新104</p>'
-      && t103State().entries.find((a) => a.id === '104')?.url === 'https://example.com/104');
+    checkNew('(t103-snapshot-preserves-hydration) 快照行携带的 content_html 不再进视图行/记录（正文只经水合链路落 bodyById），url 轻字段照常取行',
+      t103State().entries.find((a) => a.id === '104')?.url === 'https://example.com/104'
+      && !('content' in (t103State().entries.find((a) => a.id === '104') || {}))
+      && getBodyEntryT122('104') === undefined
+      && NEED(t103State(), '104') === true);
     backendRows = BASE_ROWS;
-    // 收口契约的另一侧：范围切换（缓存恢复 + 后台刷新）同函数继承，正文不丢
+    // 收口契约的另一侧：范围切换（缓存恢复 + 后台刷新）不触碰记录，正文不丢
     getArticlesPlan = { rows: [mkRow({ id: 201, feed_id: 11, content_html: '<p>201 正文</p>' })] };
-    store.setState({ hydratedIds: {}, hydrationErrors: {} });
     store.getState().hydrateArticleContent(['201']);
     await nTick(20);
     getArticlesPlan = null;
     store.getState().selectFeed('11');
     await nTick(30);
     store.getState().selectFeed('all');
-    checkNew('(t103-snapshot-preserves-hydration) selectFeed 往返（缓存恢复+后台刷新，同走 mergeSnapshotEntries）：201 正文保留',
-      t103State().entries.find((a) => a.id === '201')?.content === '<p>201 正文</p>');
+    checkNew('(t103-snapshot-preserves-hydration) selectFeed 往返（缓存恢复+后台刷新，同走 mergeSnapshotEntries）：201 正文保留（bodyById）',
+      bodyOfT122(t103State(), '201').content === '<p>201 正文</p>');
 
     /* ---------- t103-stale-card-rehydrates：审计探针场景（同 ID 刷新）---------- */
     await bootFixture({ activeContentLayout: 'social' });
-    store.setState((s) => ({
-      entries: s.entries.map((a) => (a.id === '101' ? { ...a, content: '<p>101 正文</p>', rawContent: '<p>101 正文</p>', hydrated: true } : a)),
-      hydratedIds: { '101': true },
-    }));
+    getArticlesPlan = { rows: [socialRow({ id: 101, content_html: '<p>101 正文</p>' })] };
+    store.getState().hydrateArticleContent(['101']);
+    await nTick(20);
+    getArticlesPlan = null;
     await store.getState().reloadFromBackend();
     const t103Probe = t103State();
-    checkNew('(t103-stale-card-rehydrates) 审计探针场景：同 ID 刷新后 content 不再被清空（直接恢复正文，请求数=0 也不再是死区）',
-      t103Probe.entries.find((a) => a.id === '101')?.content === '<p>101 正文</p>'
-      && t103Probe.hydratedIds['101'] === true);
+    checkNew('(t103-stale-card-rehydrates) 审计探针场景：同 ID 刷新后 content 不再被清空（正文随 bodyById 存活，请求数=0 也不再是死区）',
+      bodyOfT122(t103Probe, '101').content === '<p>101 正文</p>'
+      && getBodyEntryT122('101')?.state === 'ready');
     // 未水合卡片：刷新后水合前提重新成立 —— entryNeedsHydration 的真值表（useLazyHydrate 重入队的依据）
-    checkNew('(t103-stale-card-rehydrates) 未水合卡片刷新后水合前提重新成立：entryNeedsHydration 仅在「条目在 ∧ 无正文 ∧ 无终态 ∧ 无失败态」为真',
-      NEED(t103Probe, '201') === true
-      && NEED({ ...t103Probe, hydrationErrors: { '201': 'x' } }, '201') === false
-      && NEED({ ...t103Probe, hydratedIds: { '201': true } }, '201') === false
-      && NEED({ ...t103Probe, entries: t103Probe.entries.map((a) => (a.id === '201' ? { ...a, content: 'x' } : a)) }, '201') === false
-      && NEED({ ...t103Probe, entries: t103Probe.entries.filter((a) => a.id !== '201') }, '201') === false);
+    /* 【TASK-122 改动理由】真值表随判定收窄更新：旧五元条件（无正文 ∧ 无终态 ∧
+       无失败态…）收敛为「条目在 ∧ bodyById 无记录」——终态/失败/在途都在记录
+       state 上（loading=在途替代原「不观察在途」的模块级 Set）。 */
+    {
+      const t103Pending = t103State().entries.find((a) => a.id === '201');
+      const t103ProbeNo201 = { ...t103Probe, entries: t103Probe.entries.filter((a) => a.id !== '201') };
+      checkNew('(t103-stale-card-rehydrates) 未水合卡片刷新后水合前提重新成立：entryNeedsHydration 仅在「条目在 ∧ 无记录」为真（loading/ready/cleared/missing/failed 均不需要）',
+        NEED(t103Probe, '201') === true
+        && NEED(t103ProbeNo201, '201') === false);
+      // 记录各态逐一验证（loading 在途 / ready / failed 终态都不再入队）
+      markBodyLoadingT122('201');
+      const t103Loading = t103State();
+      checkNew('(t103-stale-card-rehydrates) loading（在途）记录使水合判定为假：重复入队被状态拦下（在途去重的可见化）',
+        NEED(t103Loading, '201') === false);
+      dropBodyEntryT122('201');
+      void t103Pending;
+    }
     // 源码形态断言（手法沿用本文件既有 readFileSync 写法）：锁定方案 A ——
     // effect 消费 entryNeedsHydration 布尔值并以 [id, needsHydration] 为依赖
     const fs103 = await import('node:fs');
@@ -4680,52 +4777,59 @@ await (async () => {
       && hook103.includes('[id, needsHydration]')
       && !hook103.includes('}, [id]);'));
 
-    /* ---------- t103-hydration-terminals：终态机（成功/空正文/缺行/失败）---------- */
-    // （1）空正文：content_html 为 NULL → hydrated 终态 + entry.hydrated，不无限重试
+    /* ---------- t103-hydration-terminals：终态机（成功/空正文/缺行/失败）----------
+       【TASK-103 → TASK-122 改动理由】终态从 hydratedIds/hydrationErrors 平行 Map
+       收敛为 bodyById 记录的判别态（ready/missing/failed——状态机单点文档见
+       bodyCache 模块头注）。逐一对应：空正文终态 = ready + content ''；「文章
+       不存在」= missing；失败 = failed + message。保护意图（各终态可见、不静默
+       留占位、重试收敛）逐字保留。 */
+    // （1）空正文：content_html 为 NULL → ready 终态（content ''），不无限重试
     await resetStore();
-    store.setState({ entries: [t103Entry(311)], hydratedIds: {}, hydrationErrors: {} });
+    store.setState({ entries: [t103Entry(311)] });
     getArticlesPlan = { rows: [socialRow({ id: 311 })] };
     store.getState().hydrateArticleContent(['311']);
     await nTick(20);
-    const t103E311 = t103State().entries.find((a) => a.id === '311');
-    checkNew('(t103-hydration-terminals) 空正文（content_html NULL）→ hydratedIds 终态 + entry.hydrated，卡片不再显示加载占位',
-      t103E311?.content === '' && t103E311?.hydrated === true
-      && t103State().hydratedIds['311'] === true && NEED(t103State(), '311') === false);
-    // （2）部分缺行：322 无对应返回行 → 「文章不存在」终态
-    store.setState({ entries: [t103Entry(321), t103Entry(322)], hydratedIds: {}, hydrationErrors: {} });
+    const t103E311 = bodyOfT122(t103State(), '311');
+    checkNew('(t103-hydration-terminals) 空正文（content_html NULL）→ bodyById ready 终态（content 空、无错误文案），卡片不再显示加载占位',
+      t103E311.content === '' && getBodyEntryT122('311')?.state === 'ready' && t103E311.message === ''
+      && NEED(t103State(), '311') === false);
+    // （2）部分缺行：322 无对应返回行 → missing「文章不存在」终态
+    store.setState({ entries: [t103Entry(321), t103Entry(322)] });
     getArticlesPlan = { rows: [socialRow({ id: 321, content_html: '<p>321</p>' })] };
     store.getState().hydrateArticleContent(['321', '322']);
     await nTick(20);
-    checkNew('(t103-hydration-terminals) 响应缺行 → 该 id 进「文章不存在」终态（不静默留加载占位），命中行照常填充',
-      t103State().entries.find((a) => a.id === '321')?.content === '<p>321</p>'
-      && (t103State().hydrationErrors['322'] ?? '').includes('文章不存在')
+    checkNew('(t103-hydration-terminals) 响应缺行 → 该 id 进 missing「文章不存在」终态（不静默留加载占位），命中行照常填充',
+      bodyOfT122(t103State(), '321').content === '<p>321</p>'
+      && getBodyEntryT122('322')?.state === 'missing'
+      && bodyOfT122(t103State(), '322').message.includes('文章不存在')
       && NEED(t103State(), '322') === false);
-    // （3）空 rows：整批「文章不存在」（空 ids/空 rows 不留占位）
-    store.setState({ entries: [t103Entry(331)], hydratedIds: {}, hydrationErrors: {} });
+    // （3）空 rows：整批 missing（空 ids/空 rows 不留占位）
+    store.setState({ entries: [t103Entry(331)] });
     getArticlesPlan = { rows: [] };
     store.getState().hydrateArticleContent(['331']);
     await nTick(20);
-    checkNew('(t103-hydration-terminals) 空 rows → 整批进「文章不存在」终态（空 ids/空 rows 不留占位）',
-      (t103State().hydrationErrors['331'] ?? '').includes('文章不存在') && NEED(t103State(), '331') === false);
-    // （4）失败：错误可见 + retryHydration 内联重试收敛为成功
-    store.setState({ entries: [t103Entry(341)], hydratedIds: {}, hydrationErrors: {} });
+    checkNew('(t103-hydration-terminals) 空 rows → 整批进 missing「文章不存在」终态（空 ids/空 rows 不留占位）',
+      getBodyEntryT122('331')?.state === 'missing'
+      && bodyOfT122(t103State(), '331').message.includes('文章不存在') && NEED(t103State(), '331') === false);
+    // （4）失败：failed 终态 + 错误文案可见 + retryHydration 内联重试收敛为成功
+    store.setState({ entries: [t103Entry(341)] });
     getArticlesPlan = { mode: 'reject', error: { message: 'IPC 超时' } };
     store.getState().hydrateArticleContent(['341']);
     await nTick(20);
-    checkNew('(t103-hydration-terminals) 请求失败 → hydrationErrors 保留原错误信息（内联重试入口可用）',
-      t103State().hydrationErrors['341'] === 'IPC 超时');
+    checkNew('(t103-hydration-terminals) 请求失败 → failed 终态保留原错误信息（内联重试入口可用）',
+      getBodyEntryT122('341')?.state === 'failed' && bodyOfT122(t103State(), '341').message === 'IPC 超时');
     getArticlesPlan = { rows: [socialRow({ id: 341, content_html: '<p>341 重试成功</p>' })] };
     store.getState().retryHydration('341');
     await nTick(20);
-    checkNew('(t103-hydration-terminals) retryHydration 后正文填充、错误清除、终态落位',
-      t103State().entries.find((a) => a.id === '341')?.content === '<p>341 重试成功</p>'
-      && t103State().hydrationErrors['341'] === undefined && t103State().hydratedIds['341'] === true);
+    checkNew('(t103-hydration-terminals) retryHydration 后正文填充、failed 态清除、ready 终态落位',
+      bodyOfT122(t103State(), '341').content === '<p>341 重试成功</p>'
+      && getBodyEntryT122('341')?.state === 'ready' && bodyOfT122(t103State(), '341').message === '');
     getArticlesPlan = null;
 
     /* ---------- t103-race-and-dedup：在途去重 + 乱序/过期防护 ---------- */
     // 在途去重：请求未落地时重复入队（重触发/重挂载/直接调用）→ 不产生第二次 IPC
     await resetStore();
-    store.setState({ entries: [t103Entry(351), t103Entry(352)], hydratedIds: {}, hydrationErrors: {} });
+    store.setState({ entries: [t103Entry(351), t103Entry(352)] });
     getArticlesPlan = { mode: 'defer' };
     invokeCalls.length = 0;
     store.getState().hydrateArticleContent(['351', '352']);
@@ -4739,12 +4843,12 @@ await (async () => {
       && t103DedupCalls[0]?.args.ids.join(',') === '351,352');
     pendingGetArticles[0].resolve([socialRow({ id: 351, content_html: '<p>351 正文</p>' }), socialRow({ id: 352 })]);
     await nTick(10);
-    checkNew('(t103-race-and-dedup) 在途去重不丢结果：351 填充正文、352 空正文终态',
-      t103State().entries.find((a) => a.id === '351')?.content === '<p>351 正文</p>'
-      && t103State().hydratedIds['352'] === true);
+    checkNew('(t103-race-and-dedup) 在途去重不丢结果：351 填充正文、352 空正文 ready 终态（TASK-122：真值在 bodyById）',
+      bodyOfT122(t103State(), '351').content === '<p>351 正文</p>'
+      && getBodyEntryT122('352')?.state === 'ready');
     // 乱序防护：批量在途期间条目已经他路水合（selectArticle 详情）→ 迟到响应不覆盖新正文
     await resetStore();
-    store.setState({ entries: [t103Entry(361)], hydratedIds: {}, hydrationErrors: {} });
+    store.setState({ entries: [t103Entry(361)] });
     getArticlesPlan = { mode: 'defer' };
     invokeCalls.length = 0;
     store.getState().hydrateArticleContent(['361']);
@@ -4752,18 +4856,24 @@ await (async () => {
     detailImpl = (id) => socialRow({ id, content_html: '<p>详情路径正文</p>', url: 'https://example.com/361' });
     store.getState().selectArticle('361'); // 详情路径先落地
     await nTick(10);
-    const t103DetailContent = t103State().entries.find((a) => a.id === '361')?.content;
+    const t103DetailContent = bodyOfT122(t103State(), '361').content;
     pendingGetArticles[0].resolve([socialRow({ id: 361, content_html: '<p>旧批次正文</p>' })]);
     await nTick(10);
-    checkNew('(t103-race-and-dedup) 旧响应不覆盖新状态：他路已水合的正文不被迟到批次改写，终态照常落位',
+    checkNew('(t103-race-and-dedup) 旧响应不覆盖新状态：他路（详情）已水合的正文不被迟到批次改写，ready 终态保持（TASK-122：记录状态守卫）',
       t103DetailContent === '<p>详情路径正文</p>'
-      && t103State().entries.find((a) => a.id === '361')?.content === '<p>详情路径正文</p>'
-      && t103State().hydratedIds['361'] === true);
+      && bodyOfT122(t103State(), '361').content === '<p>详情路径正文</p>'
+      && getBodyEntryT122('361')?.state === 'ready');
     getArticlesPlan = null;
     detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
-    // 过期防护另一侧：在途期间条目被快照替换移除 → 迟到响应不写滞留终态/正文
+    // 过期防护另一侧：在途期间条目被快照替换移除 → 迟到响应不写视图行
+    /* 【TASK-103 → TASK-122 改动理由】旧断言锁「不写滞留 hydratedIds」——平行
+       Map 的滞留标记会让条目重现时被误判已水合而正文为空（死区）。TASK-122 起
+       记录按文章实体记账：迟到响应把 DB 真值落进实体缓存是**合法且有益**的
+       （条目在任何快照重现都直接命中自己的正文与终态，危害形态结构消失）；
+       视图行侧不受影响（该条目已不在 entries）。断言改为：视图行不复活 +
+       记录按真值落账（ready）+ 重现时无需重拉。 */
     await resetStore();
-    store.setState({ entries: [t103Entry(371)], hydratedIds: {}, hydrationErrors: {} });
+    store.setState({ entries: [t103Entry(371)] });
     getArticlesPlan = { mode: 'defer' };
     invokeCalls.length = 0;
     store.getState().hydrateArticleContent(['371']);
@@ -4771,12 +4881,249 @@ await (async () => {
     store.setState({ entries: [t103Entry(372)] }); // 快照替换：371 不在新快照
     pendingGetArticles[0].resolve([socialRow({ id: 371, content_html: '<p>迟到正文</p>' })]);
     await nTick(10);
-    checkNew('(t103-race-and-dedup) 在途期间条目被快照替换移除：迟到响应不写正文、不写滞留 hydratedIds',
+    checkNew('(t103-race-and-dedup) 在途期间条目被快照替换移除：视图行不复活；迟到行真值落实体缓存（ready），条目重现即命中正文无需重拉（TASK-122 实体缓存语义）',
       !t103State().entries.some((a) => a.id === '371')
-      && t103State().hydratedIds['371'] === undefined
-      && t103State().hydrationErrors['371'] === undefined);
+      && bodyOfT122(t103State(), '371').content === '<p>迟到正文</p>'
+      && getBodyEntryT122('371')?.state === 'ready');
     getArticlesPlan = null;
   }
+
+  /* ============================================================
+     TASK-122（审计 P2-3）：正文/AI 实体缓存分离与显式失效
+     —— 审计探针 P3/P4 本体转真实行为回归 + bodyById 状态机契约。
+     探针 P3：清理 AI 缓存把 DB ai_summary/translated_content 置 NULL → reload
+     列表行空摘要被转 '' → merge `a.aiSummary || prev.aiSummary` 复活旧值
+     （UI 与 DB 分离，实测 old summary/old translation）。修后：merge 不再继承
+     （视图行取行真值），bodyById 记录由 reconcileBodyEntities 按行真值显式失效
+     （cleared + bump contentRevision）。
+     探针 P4：列表 snippet 已更新时正文仍为 old body、entryNeedsHydration=false
+     不重取。修后：行 snippet 相对被替换视图行变化 → 记录失效（回未请求态）
+     → 懒水合重取。
+     失效链路：CacheCleanupSection.run → api.cacheCleanup(…,'ai') 成功 →
+     reloadFromBackend（该 reload 的行即清理后 DB 真值）→ mergeSnapshotEntries
+     (fromBackend=true) → bodyCache.reconcileBodyEntities（机制与状态机单点
+     文档见 src/store/bodyCache.ts 模块头注）。本组断言驱动同一 store 级链路。
+     ============================================================ */
+  {
+    const {
+      BODY_CACHE_MAX, getBodyEntry: REC, resetBodyCacheForTests,
+      markBodyLoading: markLoading122, applyBodyRow: applyRow122, applyAiProduct: applyAi122,
+    } = await import('../dist-test/store/bodyCache.js');
+    const NEED122 = nSel.entryNeedsHydration;
+    const socialRow122 = (o) => mkRow({ feed_id: 11, ...o });
+    const t122Entry = (id, extra = {}) => ({
+      id: String(id), feedId: '11', title: 't122 帖', publishedAt: Date.now(), isRead: false,
+      isStarred: false, tags: [], source: 'direct', snippet: 's', author: 'a',
+      translatedContent: '', aiSummary: '',
+      ...extra,
+    });
+
+    /* ---------- (t122-1) 清理 AI 缓存 → UI 空/已清空而非旧值（探针 P3 本体） ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    backendRows = BASE_ROWS.map((r) => (r.id === 103
+      ? { ...r, ai_summary: '旧摘要', translated_content: '<p>旧译文</p>' }
+      : r));
+    await store.getState().reloadFromBackend(); // 行带旧产物（与 DB 一致的起点）
+    getArticlesPlan = { rows: [socialRow122({ id: 103, content_html: '<p>103 正文</p>', ai_summary: '旧摘要', translated_content: '<p>旧译文</p>' })] };
+    store.getState().hydrateArticleContent(['103']);
+    await nTick(20);
+    getArticlesPlan = null;
+    const t122revBefore = REC('103')?.contentRevision ?? 0;
+    checkNew('(t122-1) 前置：水合后记录 ready 且携带旧摘要/旧译文（清理前基线）',
+      REC('103')?.state === 'ready'
+      && bodyOfT122(store.getState(), '103').aiSummary === '旧摘要'
+      && bodyOfT122(store.getState(), '103').translatedContent === '<p>旧译文</p>');
+    /* 清理 AI 缓存链路：后端置 NULL → 清理动作完成后的 reload 带回 NULL 行 */
+    backendRows = BASE_ROWS.map((r) => (r.id === 103 ? { ...r, ai_summary: null, translated_content: null } : r));
+    await store.getState().reloadFromBackend();
+    const t122c1 = store.getState();
+    checkNew('(t122-1) 清理 AI 缓存 → 记录置 cleared + bump contentRevision（正文保留），AI 产物呈现空而非旧值（探针 P3 修复本体）',
+      REC('103')?.state === 'cleared'
+      && (REC('103')?.contentRevision ?? 0) === t122revBefore + 1
+      && bodyOfT122(t122c1, '103').aiSummary === '' && bodyOfT122(t122c1, '103').translatedContent === ''
+      && bodyOfT122(t122c1, '103').content === '<p>103 正文</p>');
+    checkNew('(t122-1) 清理后视图行 AI 列 = 行真值（空串），merge 不再从旧快照行复活旧产物',
+      t122c1.entries.find((a) => a.id === '103')?.aiSummary === ''
+      && t122c1.entries.find((a) => a.id === '103')?.translatedContent === '');
+    /* cleared 不被 reload 复活：先用清理后行再刷一次；再用「清理前旧行」刷一次 */
+    await store.getState().reloadFromBackend();
+    checkNew('(t122-1) cleared 态不被后续 reload 复活（行 NULL → 保持 cleared）',
+      REC('103')?.state === 'cleared' && bodyOfT122(store.getState(), '103').aiSummary === '');
+    backendRows = BASE_ROWS.map((r) => (r.id === 103
+      ? { ...r, ai_summary: '旧摘要', translated_content: '<p>旧译文</p>' }
+      : r));
+    await store.getState().reloadFromBackend(); // 模拟「清理前抓取的在途 reload」迟到落地
+    checkNew('(t122-1) 清理前的旧行迟到落地也不复活 cleared（显式态只能被再次生成解除）',
+      REC('103')?.state === 'cleared' && bodyOfT122(store.getState(), '103').aiSummary === '');
+    /* 再次生成（AI slice 落账路径）是唯一解除路径 */
+    aiSum = { deltas: ['新'], error: null, reject: null, finish: true, holdIds: [] };
+    store.getState().summarizeEntry('103');
+    await nTick(20);
+    checkNew('(t122-1) cleared 后重新生成摘要 → applyAiProduct 解除 cleared 回 ready（唯一解除路径）',
+      REC('103')?.state === 'ready' && bodyOfT122(store.getState(), '103').aiSummary === '新');
+    aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
+    backendRows = BASE_ROWS;
+
+    /* ---------- (t122-2) snippet 更新 → 正文重取（探针 P4 本体） ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    getArticlesPlan = { rows: [socialRow122({ id: 104, content_html: '<p>旧正文</p>', snippet: '旧摘要行' })] };
+    store.getState().hydrateArticleContent(['104']);
+    await nTick(20);
+    getArticlesPlan = null;
+    checkNew('(t122-2) 前置：记录 ready、正文已加载、无需水合',
+      REC('104')?.state === 'ready' && bodyOfT122(store.getState(), '104').content === '<p>旧正文</p>'
+      && NEED122(store.getState(), '104') === false);
+    /* 源站重新同步了该文章：正文变 → 列表行 snippet 随之更新 → reload 带回新行 */
+    backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, snippet: '新摘要行' } : r));
+    await store.getState().reloadFromBackend();
+    checkNew('(t122-2) 行 snippet 变化 → 记录失效（回未请求态），懒水合判定重新成立（探针 P4：正文不再陈旧）',
+      REC('104') === undefined && NEED122(store.getState(), '104') === true
+      && store.getState().entries.find((a) => a.id === '104')?.snippet === '新摘要行');
+    getArticlesPlan = { rows: [socialRow122({ id: 104, content_html: '<p>新正文</p>', snippet: '新摘要行' })] };
+    store.getState().hydrateArticleContent(['104']);
+    await nTick(20);
+    getArticlesPlan = null;
+    checkNew('(t122-2) 重取落新正文（失效后可重取，新行真值进记录）',
+      REC('104')?.state === 'ready' && bodyOfT122(store.getState(), '104').content === '<p>新正文</p>');
+    backendRows = BASE_ROWS;
+
+    /* ---------- (t122-3) '' vs cleared 语义区分 ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    backendRows = [...BASE_ROWS,
+      mkRow({ id: 111, feed_id: 11, ai_summary: '待清理摘要' }),
+      mkRow({ id: 112, feed_id: 11 })];
+    await store.getState().reloadFromBackend(); // 111/112 进当前视图（水合前提：条目在册）
+    getArticlesPlan = { rows: [
+      socialRow122({ id: 111, content_html: '<p>111 正文</p>', ai_summary: '待清理摘要' }),
+      socialRow122({ id: 112, content_html: '<p>112 正文</p>' }),
+    ] };
+    store.getState().hydrateArticleContent(['111', '112']);
+    await nTick(20);
+    getArticlesPlan = null;
+    backendRows = [...BASE_ROWS,
+      mkRow({ id: 111, feed_id: 11, ai_summary: null }),
+      mkRow({ id: 112, feed_id: 11 })];
+    await store.getState().reloadFromBackend(); // 111 的摘要被清理；112 本就没有摘要
+    const t122b111 = bodyOfT122(store.getState(), '111');
+    const t122b112 = bodyOfT122(store.getState(), '112');
+    checkNew('(t122-3) 「已清空」（had → cleared，可呈现已清空提示）与「从未生成」（ready 且 AI 空）是两个可区分状态',
+      t122b111.state === 'cleared' && t122b111.aiSummary === ''
+      && t122b112.state === 'ready' && t122b112.aiSummary === '');
+    /* 无记录（未请求）也是第三种可区分形态：AI 列回退视图行（行真值） */
+    store.setState({ entries: [...store.getState().entries, t122Entry(113)] });
+    const t122bUnreq = bodyOfT122(store.getState(), '113');
+    checkNew('(t122-3) 无记录（未请求）= 第三种形态：state unrequested、AI 列回退视图行 DB 真值',
+      t122bUnreq.state === 'unrequested'
+      && t122bUnreq.aiSummary === (store.getState().entries.find((a) => a.id === '113')?.aiSummary ?? ''));
+    backendRows = BASE_ROWS;
+
+    /* ---------- (t122-4) 内存预算：LRU 淘汰 → 回未请求态可重取 ---------- */
+    await resetStore({ activeContentLayout: 'social' });
+    checkNew('(t122-4) 预算常量：BODY_CACHE_MAX = 2000（模块头注「内存预算」的锁定值）',
+      BODY_CACHE_MAX === 2000);
+    resetBodyCacheForTests();
+    const t122evictRow = { content_html: '<p>预算</p>' };
+    const t122evBase = 900000;
+    for (let i = 0; i < BODY_CACHE_MAX; i += 1) {
+      const eid = String(t122evBase + i);
+      markLoading122(eid);
+      applyRow122(eid, t122evictRow, 0, { aiSummary: '', translatedContent: '' });
+    }
+    /* 插入第 2001 条 → 最久未使用（id 900000）被淘汰；期间不做任何读取
+       （getBodyEntry 命中会刷新 LRU 新鲜度，影响淘汰序） */
+    markLoading122(String(t122evBase + BODY_CACHE_MAX));
+    applyRow122(String(t122evBase + BODY_CACHE_MAX), t122evictRow, 0, { aiSummary: '', translatedContent: '' });
+    checkNew('(t122-4) 超限插入 → 最久未使用条目被淘汰（LRU；上限恰 2000 条）',
+      REC(String(t122evBase)) === undefined
+      && REC(String(t122evBase + 1))?.state === 'ready'
+      && REC(String(t122evBase + BODY_CACHE_MAX))?.state === 'ready');
+    /* 淘汰 = 回未请求态 → 可重取（懒水合判定重新成立 + IPC 重新发生） */
+    store.setState({ entries: [t122Entry(t122evBase)] });
+    checkNew('(t122-4) 被淘汰条目回未请求态：懒水合判定为真（淘汰无正确性影响，只付一次 IPC）',
+      NEED122(store.getState(), String(t122evBase)) === true);
+    getArticlesPlan = { rows: [socialRow122({ id: t122evBase, content_html: '<p>重取正文</p>' })] };
+    store.getState().hydrateArticleContent([String(t122evBase)]);
+    await nTick(20);
+    getArticlesPlan = null;
+    checkNew('(t122-4) 淘汰后重取成功（新记录落位）',
+      REC(String(t122evBase))?.state === 'ready'
+      && bodyOfT122(store.getState(), String(t122evBase)).content === '<p>重取正文</p>');
+    resetBodyCacheForTests();
+
+    /* ---------- (t122-5) 快照替换 bodyById 引用稳定（正文随实体，不随快照行） ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    backendRows = [...BASE_ROWS, mkRow({ id: 121, feed_id: 11, ai_summary: '121 摘要' })];
+    await store.getState().reloadFromBackend(); // 121 进当前视图
+    getArticlesPlan = { rows: [socialRow122({ id: 121, content_html: '<p>121 正文</p>', ai_summary: '121 摘要' })] };
+    store.getState().hydrateArticleContent(['121']);
+    await nTick(20);
+    getArticlesPlan = null;
+    const t122recBefore = REC('121');
+    await store.getState().reloadFromBackend(); // 行真值与记录一致 → 对齐为 no-op，引用稳定
+    store.getState().selectFeed('11');
+    await nTick(30);
+    store.getState().selectFeed('all');
+    checkNew('(t122-5) 快照替换/缓存恢复不触碰 bodyById：记录引用稳定、正文与 AI 产物原样（零补拉，无死区）',
+      REC('121') === t122recBefore
+      && bodyOfT122(store.getState(), '121').content === '<p>121 正文</p>'
+      && bodyOfT122(store.getState(), '121').aiSummary === '121 摘要');
+
+    /* ---------- (t122-6) 水合死区回归（审计探针场景）：不存在「正文缺失 + 无记录 + 无请求」组合 ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    backendRows = [...BASE_ROWS, mkRow({ id: 131, feed_id: 11 })];
+    await store.getState().reloadFromBackend(); // 131 进当前视图
+    getArticlesPlan = { mode: 'defer' };
+    store.getState().hydrateArticleContent(['131']);
+    await nTick(0);
+    const t122deadLoading = NEED122(store.getState(), '131');
+    checkNew('(t122-6) 在途 = loading 记录可见：水合判定为假（重复入队被状态拦下），卡片有「请求在途」可依赖',
+      REC('131')?.state === 'loading' && t122deadLoading === false);
+    pendingGetArticles.at(-1)?.resolve([socialRow122({ id: 131, content_html: '<p>131 正文</p>' })]);
+    await nTick(10);
+    getArticlesPlan = null;
+    await store.getState().reloadFromBackend(); // 同 ID 快照替换（审计死区场景：刷新后不再有请求也不再重触发）
+    const t122deadCalls = invokeCalls.filter((c) => c.cmd === 'get_articles').length;
+    await nTick(20);
+    checkNew('(t122-6) 同 ID 刷新：记录 ready + 正文可读 + 水合判定为假 + 零补拉（「加载正文…且无请求在途」死区不复发）',
+      REC('131')?.state === 'ready'
+      && bodyOfT122(store.getState(), '131').content === '<p>131 正文</p>'
+      && NEED122(store.getState(), '131') === false
+      && invokeCalls.filter((c) => c.cmd === 'get_articles').length === t122deadCalls);
+
+    /* ---------- (t122-7) 失效戳守卫：显式写入后，携带旧戳的响应整体丢弃 ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    backendRows = [...BASE_ROWS, mkRow({ id: 141, feed_id: 11, ai_summary: 'DB 旧摘要' })];
+    await store.getState().reloadFromBackend(); // 141 进当前视图
+    getArticlesPlan = { rows: [socialRow122({ id: 141, content_html: '<p>141 正文</p>', ai_summary: 'DB 旧摘要' })] };
+    store.getState().hydrateArticleContent(['141']);
+    await nTick(20);
+    getArticlesPlan = null;
+    /* 用户重新生成摘要（applyAiProduct bump revision）——期间一次携带旧戳的
+       详情/批量响应迟到：整体丢弃，不覆盖新产物 */
+    applyAi122('141', 'aiSummary', '新生成摘要');
+    applyRow122('141', { content_html: '<p>141 正文</p>', ai_summary: 'DB 旧摘要' }, 0, { aiSummary: '', translatedContent: '' });
+    checkNew('(t122-7) 旧戳响应丢弃：生成落账后迟到的旧行不覆盖新产物（revision 守卫）',
+      REC('141')?.state === 'ready'
+      && bodyOfT122(store.getState(), '141').aiSummary === '新生成摘要'
+      && (REC('141')?.contentRevision ?? 0) >= 1);
+    /* 清理失效（cleared，revision bump）后，旧戳响应同样丢弃 */
+    backendRows = [...BASE_ROWS, mkRow({ id: 141, feed_id: 11, ai_summary: null })];
+    await store.getState().reloadFromBackend(); // cleared + bump
+    applyRow122('141', { content_html: '<p>141 正文</p>', ai_summary: 'DB 旧摘要' }, 0, { aiSummary: '', translatedContent: '' });
+    checkNew('(t122-7) cleared 后旧戳响应丢弃：cleared 不被在途响应复活（清理后并发水合的复活窗口被 stamp 比对关死）',
+      REC('141')?.state === 'cleared' && bodyOfT122(store.getState(), '141').aiSummary === '');
+    backendRows = BASE_ROWS;
+
+    /* ---------- (t122-8) 清理链路接线（源级）：CacheCleanupSection 清空动作完成后必 reload ---------- */
+    const fs122 = await import('node:fs');
+    const ccSrc122 = fs122.readFileSync(new URL('../src/components/settings/CacheCleanupSection.tsx', import.meta.url), 'utf8');
+    checkNew('(t122-8) 清理 AI 缓存链路（源级）：cacheCleanup 成功 → reloadFromBackend（其落地行真值驱动 bodyById 显式失效），注释载明机制单点',
+      ccSrc122.includes('api.cacheCleanup(days, scope)')
+      && ccSrc122.includes('await reloadFromBackend()')
+      && ccSrc122.includes('reconcileBodyEntities'));
+  }
+
+  await resetStore(); // 夹具复位
 })();
 
 /* ============================================================
@@ -5176,7 +5523,8 @@ await (async () => {
       cover: 'https://e.example/img.png', imageUrl: 'https://e.example/img.png',
       audioUrl: 'https://e.example/audio.mp3', enclosureUrl: 'https://e.example/audio.mp3',
       durationSec: 1234, url: 'https://e.example/a',
-      aiSummary: 'fixture summary', content: '<p>body</p>', rawContent: '<p>body</p>',
+      aiSummary: 'fixture summary',
+      /* TASK-122：content/rawContent 不再映射进视图行（正文真值源 bodyById） */
       translatedContent: '<p>translated</p>', fulltextExtracted: false,
     };
     const expectFeed = {
@@ -5195,7 +5543,10 @@ await (async () => {
     const wrong = (actual, expected) => Object.keys(expected).filter(
       (k) => k in actual && !sameValue(actual[k], expected[k]));
 
-    checkNew('(r) articleRowToEntry 键集合与逐键取值全量一致（缺键/多键/错值/接错源任一即失败）',
+    /* 【TASK-122 改动理由】articleRowToEntry 不再映射 content/rawContent 进视图行
+       （正文真值源 bodyById；with_content 恒 false，映射本就是空转）——期望键集
+       同步收窄，其余键逐键取值断言不变。 */
+    checkNew('(r) articleRowToEntry 键集合与逐键取值全量一致（缺键/多键/错值/接错源任一即失败；TASK-122 起不含 content/rawContent）',
       missing(entry, expectEntry).length === 0 && extra(entry, expectEntry).length === 0
       && wrong(entry, expectEntry).length === 0);
     checkNew('(r) feedRowToItem 键集合与逐键取值全量一致（缺键/多键/错值任一即失败）',
@@ -5717,8 +6068,10 @@ await (async () => {
   checkNew('(fix-5) Social/Notif 卡补翻译失败内联错误行 + 重试按钮（调 translateEntry）',
     (tlFix.match(/translateError && !translatingCard \?/g) || []).length === 2
     && (tlFix.match(/ai-retry-btn" onClick=\{\(\) => useAppStore\.getState\(\)\.translateEntry\(item\.id\)\}/g) || []).length === 2);
-  checkNew('(fix-5) 两卡「翻译」按钮在失败态（translateErrors[id] 存在）改走 translateEntry 重试（修前把半截译文当缓存只切显示）',
-    (tlFix.match(/if \(next && \(translateError \|\| !item\.translatedContent\)\)/g) || []).length === 2);
+  /* 【TASK-122 改动理由】译文真值源迁移 bodyById——按钮判定改读 selectArticleBody
+     快照（body.translatedContent）；保护意图（失败态重试不把半截当缓存）不变。 */
+  checkNew('(fix-5) 两卡「翻译」按钮在失败态（translateErrors[id] 存在）改走 translateEntry 重试（修前把半截译文当缓存只切显示；TASK-122 判定读 body.translatedContent）',
+    (tlFix.match(/if \(next && \(translateError \|\| !body\.translatedContent\)\)/g) || []).length === 2);
 
   /* ---------- fix-8：auto 配置的 AI 区块空态收起 ---------- */
   const selFix = await import('../dist-test/store.js');
@@ -5799,6 +6152,10 @@ await (async () => {
   {
     const { viewEntriesCache } = await import('../dist-test/store/internals.js');
     viewEntriesCache.clear();
+    /* TASK-122：bodyById 是模块级实体缓存，跨夹具残留会让后续用例命中上一夹具
+       的正文/终态（与 viewEntriesCache 同型污染）——夹具复位一并清空 */
+    const { resetBodyCacheForTests } = await import('../dist-test/store/bodyCache.js');
+    resetBodyCacheForTests();
     for (let i = 0; i < 10; i += 1) viewEntriesCache.set(`k${i}`, [{ id: `e${i}` }]);
     checkNew('(t100-cache) 容量上限：写入 10 个组合键后缓存收敛到 8（修前无上限累积）',
       viewEntriesCache.size === 8);
@@ -6466,22 +6823,26 @@ await (async () => {
   const ENTER_GUARD = "e.key === 'Enter' || e.key === ' '";
 
   /* ---------- X1：NotifCard 水合三态 ---------- */
-  checkNew('(t114-x1a) NotifCard 订阅水合错误态与终态（对齐 SocialCard 的订阅面：hydrationErrors/hydratedIds）',
-    notif114.includes('s.hydrationErrors[item.id]') && notif114.includes('s.hydratedIds[item.id]'));
+  /* 【TASK-103 → TASK-122 改动理由】订阅面随真值源迁移更新：两卡统一订阅
+     selectArticleBody（bodyById 记录快照），错误态/终态从记录 state 派生
+     （failed/missing/ready）——原 hydrationErrors/hydratedIds 平行订阅删除；
+     呈现意图（失败=内联重试、终态=占位、加载中=占位）逐字保留。 */
+  checkNew('(t114-x1a) NotifCard 订阅正文/AI 读取单点 selectArticleBody（对齐 SocialCard；TASK-122 真值源 bodyById）',
+    notif114.includes('selectArticleBody(s, item.id)') && social114.includes('selectArticleBody(s, item.id)'));
 
-  /* TASK-114 R1-F1：失败分支切片（自 ') : hydrationError ? (' 至 snippet 正文分支）
+  /* TASK-114 R1-F1：失败分支切片（自 ') : body.state === 'failed' ? (' 至 snippet 正文分支）
      ——只覆盖「无正文可显示」的失败，无 snippet 回退、无正文 div；正文（fullText）
      分支在失败分支**之前**，与基准 SocialCard 的 content 优先逐分支对齐（可达组合态
-     「错误态+正文已到达」——详情拉取成功只写 content 不清错误——必须显示正文）。 */
+     「错误态+正文已到达」——详情拉取成功只写记录 content 不写 failed——必须显示正文）。 */
   const notifErrBranch114 = notif114.slice(
-    notif114.indexOf(') : hydrationError ? ('),
+    notif114.indexOf(") : body.state === 'failed' ? ("),
     notif114.indexOf(') : item.snippet ? ('),
   );
   const notifBodyBranch114 = notif114.slice(
     notif114.indexOf('{fullText ? ('),
-    notif114.indexOf(') : hydrationError ? ('),
+    notif114.indexOf(") : body.state === 'failed' ? ("),
   );
-  checkNew('(t114-x1b) NotifCard 失败态=内联重试（hydrate-retry + retryHydration(id)，文案域「正文加载失败：」，与 SocialCard 同形），失败分支不再回退 snippet',
+  checkNew('(t114-x1b) NotifCard 失败态=内联重试（hydrate-retry + retryHydration(id)，文案域「正文加载失败：」，与 SocialCard 同形），失败分支不再回退 snippet（TASK-122：failed 判别态）',
     notifErrBranch114.length > 0
     && notifErrBranch114.includes('className="hydrate-retry"')
     && notifErrBranch114.includes('retryHydration(item.id)')
@@ -6489,18 +6850,19 @@ await (async () => {
     && !notifErrBranch114.includes('item.snippet')
     && !notifErrBranch114.includes('notif-body-text'));
 
-  checkNew('(t114-x1c) NotifCard 空正文/加载中占位与 SocialCard 同形（className="hydrate-placeholder" 恰两态）',
-    cnt114(notif114, 'className="hydrate-placeholder"') === 2
-    && notif114.includes('暂无正文') && notif114.includes('加载正文…'));
+  checkNew('(t114-x1c) NotifCard 空正文/加载中占位与 SocialCard 同形（className="hydrate-placeholder"：missing/暂无正文/加载中/AI 已清空提示恰四态）',
+    cnt114(notif114, 'className="hydrate-placeholder"') === 4
+    && notif114.includes('暂无正文') && notif114.includes('加载正文…')
+    && notif114.includes('AI 缓存已清空，可重新生成'));
 
   checkNew('(t114-x1f) 正文分支先于失败分支（R1-F1）：「错误态+正文已到达」组合态显示正文而非假失败行（与 SocialCard content 优先逐分支对齐）',
     notifBodyBranch114.length > 0
     && notifBodyBranch114.includes('notif-body-text')
     && notif114.indexOf('notif-body-text') < notif114.indexOf('className="hydrate-retry"'));
 
-  checkNew('(t114-x1g) 纯失败态（无正文）不渲染「展开更多」（正文已被重试行替换，防死控件）；错误滞留+正文已达的组合态豁免（!!fullText，可展开水合全文，与修前/同态 SocialCard 一致）',
-    notif114.includes('{isLong && (!hydrationError || !!fullText) && (')
-    && notif114.indexOf('{isLong && (!hydrationError || !!fullText) && (') < notif114.indexOf('className="notif-expand-btn"'));
+  checkNew('(t114-x1g) 纯失败态（无正文）不渲染「展开更多」（正文已被重试行替换，防死控件）；错误滞留+正文已达的组合态豁免（!!fullText，可展开水合全文，与修前/同态 SocialCard 一致；TASK-122：failed 判别态）',
+    notif114.includes("{isLong && (body.state !== 'failed' || !!fullText) && (")
+    && notif114.indexOf("{isLong && (body.state !== 'failed' || !!fullText) && (") < notif114.indexOf('className="notif-expand-btn"'));
 
   checkNew('(t114-x1e) NotifCard 与 SocialCard 三态同构：两卡同为「错误重试 → 空正文 → 加载占位」条件链（占位类与文案逐一同形）',
     social114.includes('className="hydrate-retry"') && notif114.includes('className="hydrate-retry"')
@@ -6717,7 +7079,7 @@ const failed = results.filter((r) => !r.pass);
 const newFailed = newResults.filter((r) => !r.pass);
 const totalAll = results.length + newResults.length;
 const totalFailed = failed.length + newFailed.length;
-console.log(`\n=== 既有回归 ${results.length - failed.length}/${results.length} 通过（本文件原有断言，未改动一行） ===`);
+console.log(`\n=== 既有回归 ${results.length - failed.length}/${results.length} 通过（TASK-122 真值源迁移：S-1/S-2/S-4 读取面按新架构更新，保护意图逐字保留，理由见各处改动注） ===`);
 console.log(`=== 新增 store 行为断言 ${newResults.length - newFailed.length}/${newResults.length} 通过 🆕 ===`);
 console.log(`=== 前端逻辑回归合计 ${totalAll - totalFailed}/${totalAll} 通过 ===`);
 if (totalFailed) {

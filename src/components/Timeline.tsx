@@ -9,6 +9,7 @@ import {
   podcastClickAction,
   autoAiBlockOpen,
   entryNeedsHydration,
+  selectArticleBody,
   selectVisibleEntries,
   selectFeedConfig,
 } from '../store';
@@ -627,17 +628,18 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
   const openLightbox = useAppStore((s) => s.openLightbox);
   const binding = useAppStore((s) => s.feedIndex.get(item.feedId));
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
-  /* 正文水合状态：错误态显示内联重试；空正文终态显示「暂无正文」而非永挂「加载正文…」 */
-  const hydrationError = useAppStore((s) => s.hydrationErrors[item.id]);
-  const hydrated = useAppStore((s) => s.hydratedIds[item.id]);
+  /* TASK-122：正文/AI 读取单点——selectArticleBody（真值源 bodyById）。
+     错误态/空正文终态/加载中都从记录 state 派生（原 hydrationErrors/hydratedIds
+     两个按 id 平行订阅随之删除）。 */
+  const body = useAppStore((s) => selectArticleBody(s, item.id));
   /* 卡片级翻译状态（按 id 订阅，生成中指示） */
   const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
   /* fix-5：卡片级翻译失败信息（内联错误行 + 重试依据，此前只有 toast 一闪而过） */
   const translateError = useAppStore((s) => s.translateErrors[item.id] || '');
   /* TASK-065 N11：译文当前是否为未消毒流式产物（决定纯文本/HTML 渲染路径） */
   const rawTranslated = useAppStore((s) => s.rawTranslatedIds[item.id]);
-  /* 社交卡片正文直接渲染 item.content：进入视口附近才懒加载水合（避免几百张
-     卡片同时 getArticle 卡顿） */
+  /* 社交卡片正文直接渲染 body.content（真值源 bodyById）：进入视口附近才懒加载
+     水合（避免几百张卡片同时 getArticle 卡顿） */
   const hydrateRef = useLazyHydrate(item.id);
   /* 派生值提取为局部变量：JSX 表达式内不放可选链（oxc 解析限制，且更易读） */
   const feedName = binding ? binding.feed.name : '';
@@ -648,7 +650,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
      卡片挂载刻意不发起，防滚动 IPC 风暴）；手动点「翻译」仍会就地触发生成。 */
   const showTranslate = transOverride ?? autoAiBlockOpen(
     feedConfig.autoTranslate,
-    !!item.translatedContent,
+    !!body.translatedContent,
     !!translatingCard,
     !!translateError,
   );
@@ -679,7 +681,7 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, [item.content]);
+  }, [body.content]);
 
   return (
     /* TASK-100（UI P2-2 轻修）：社交/通知卡补 article 语义角色 + tabIndex，融入卡片级
@@ -720,7 +722,10 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
           <span className="social-date">{formatRelativeTime(item.publishedAt)}</span>
         </div>
         {/* 正文是消毒后的 HTML（同 Reader）；水合完成前显示轻量占位（毫秒级）。
-            <img> 点击走灯箱放大（与 Reader 一致），<a> 走外链 */}
+            <img> 点击走灯箱放大（与 Reader 一致），<a> 走外链。
+            TASK-122：正文与三态从 body 派生——content 优先；failed=内联重试；
+            missing=文章不存在；ready/cleared（空正文终态，正文保留不受 AI 清理
+            影响）=「暂无正文」；其余（loading/未请求）=加载占位。 */}
         <div
           ref={textRef}
           className={`social-text ${isLong && !expanded ? 'collapsed' : ''}`}
@@ -737,16 +742,18 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
             handleArticleLinkClick(e);
           }}
         >
-          {item.content ? (
-            <div dangerouslySetInnerHTML={{ __html: item.content }} />
-          ) : hydrationError ? (
+          {body.content ? (
+            <div dangerouslySetInnerHTML={{ __html: body.content }} />
+          ) : body.state === 'failed' ? (
             <button
               className="hydrate-retry"
               onClick={() => useAppStore.getState().retryHydration(item.id)}
             >
-              正文加载失败：{hydrationError}（点击重试）
+              正文加载失败：{body.message}（点击重试）
             </button>
-          ) : hydrated ? (
+          ) : body.state === 'missing' ? (
+            <span className="hydrate-placeholder">{body.message}</span>
+          ) : body.state === 'ready' || body.state === 'cleared' ? (
             /* TASK-100：占位透明度并入 .hydrate-placeholder 类（此前内联 opacity 两处） */
             <span className="hydrate-placeholder">暂无正文</span>
           ) : (
@@ -759,11 +766,14 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
           </button>
         )}
         <div className={"social-translated-block" + (showTranslate ? " show" : "")}>
-          {/* TASK-065 N8/N11：未消毒流式产物按纯文本渲染；消毒后与 Reader 同口径按 HTML 渲染 */}
+          {/* TASK-065 N8/N11：未消毒流式产物按纯文本渲染；消毒后与 Reader 同口径按 HTML 渲染。
+              TASK-122：cleared 判别态呈现「已清空」（与「从未生成过」的空白区分） */}
           {rawTranslated ? (
-            <span>{item.translatedContent}</span>
+            <span>{body.translatedContent}</span>
+          ) : body.state === 'cleared' && !body.translatedContent ? (
+            <span className="hydrate-placeholder">AI 缓存已清空，可重新生成</span>
           ) : (
-            <span dangerouslySetInnerHTML={{ __html: item.translatedContent }} />
+            <span dangerouslySetInnerHTML={{ __html: body.translatedContent }} />
           )}
           {translatingCard ? <span>翻译中…</span> : null}
           {/* fix-5：翻译失败内联错误行 + 重试（此前失败只有 toast 一闪，半截译文无恢复入口） */}
@@ -801,10 +811,10 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
               /* fix-5：失败态（translateErrors[id] 存在）时点「翻译」必须重走
                  translateEntry 重试——旧逻辑在有半截译文时会把它当缓存只切显示，
                  重试按钮变成死路径（P2-3）。 */
-              if (next && (translateError || !item.translatedContent)) {
+              if (next && (translateError || !body.translatedContent)) {
                 /* 无译文或上次失败：实际触发生成/重试（P1-7 空壳修复 + fix-5） */
                 useAppStore.getState().translateEntry(item.id);
-              } else if (item.translatedContent) {
+              } else if (body.translatedContent) {
                 showToast(next ? '已显示正文翻译' : '已隐藏正文翻译');
               }
               setTransOverride(next);
@@ -1041,15 +1051,15 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   /* 进入视口附近才水合全文（与社交卡一致）：列表快照的 snippet 是 280 字截断，
      「展开更多」必须展示全文而非同一段截断文本 */
   const hydrateRef = useLazyHydrate(item.id);
-  /* TASK-114 X1：水合三态订阅（对齐 SocialCard 同名订阅）——useLazyHydrate 内部
-     已按 entryNeedsHydration 触发请求，这里订阅错误态/终态把请求结果呈现出来：
-     失败=内联重试（不再静默回退 snippet）、终态=暂无正文、其余=加载占位。
-     请求与 SocialCard 走同一条批量水合队列（enqueueHydration），无需改数据层。 */
-  const hydrationError = useAppStore((s) => s.hydrationErrors[item.id]);
-  const hydrated = useAppStore((s) => s.hydratedIds[item.id]);
+  /* TASK-114 X1 → TASK-122：水合三态从 selectArticleBody 派生（对齐 SocialCard）
+     ——useLazyHydrate 内部已按 entryNeedsHydration 触发请求，这里消费记录状态
+     把结果呈现出来：失败=内联重试（不再静默回退 snippet）、missing=文章不存在、
+     终态空正文=暂无正文、其余=加载占位。请求与 SocialCard 走同一条批量水合
+     队列（enqueueHydration）。 */
+  const body = useAppStore((s) => selectArticleBody(s, item.id));
   /* 展示文本：展开态优先水合全文（剥 HTML 标签），未水合/收起态用 snippet */
-  const fullText = item.content
-    ? item.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  const fullText = body.content
+    ? body.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
     : '';
   const displayText = expanded && fullText ? fullText : item.snippet;
   /* 失败后卡片保持展开（展示错误 + 重试按钮） */
@@ -1059,14 +1069,14 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
      触发生成并展开。 */
   const summaryOpen = summaryOverride ?? autoAiBlockOpen(
     feedConfig.autoSummary,
-    !!item.aiSummary,
+    !!body.aiSummary,
     summaryGenerating,
     !!summaryError,
   );
   /* fix-8：译文块同口径（见上） */
   const transShow = transOverride ?? autoAiBlockOpen(
     feedConfig.autoTranslate,
-    !!item.translatedContent,
+    !!body.translatedContent,
     !!translatingCard,
     !!translateError,
   );
@@ -1117,7 +1127,7 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
               const next = !transShow;
               /* fix-5：失败态时点「翻译」必须重走 translateEntry 重试（与
                  SocialCard 同口径，半截译文不再被当成缓存只切显示） */
-              if (next && (translateError || !item.translatedContent)) {
+              if (next && (translateError || !body.translatedContent)) {
                 useAppStore.getState().translateEntry(item.id);
               }
               setTransOverride(next);
@@ -1151,10 +1161,13 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
             <span className="ai-error-text" title={summaryError}>摘要生成失败：{summaryError}</span>
             <button className="ai-retry-btn" onClick={() => summarizeEntry(item.id)}>重试</button>
           </div>
-        ) : summaryGenerating && !item.aiSummary ? (
+        ) : summaryGenerating && !body.aiSummary ? (
           <div className="notif-ai-text ai-generating-hint">正在生成摘要…</div>
+        ) : body.state === 'cleared' && !body.aiSummary ? (
+          /* TASK-122：cleared 判别态呈现「已清空」（与「从未生成过」的空白区分） */
+          <div className="notif-ai-text ai-generating-hint">AI 缓存已清空，可重新生成</div>
         ) : (
-          <div className="notif-ai-text">{item.aiSummary}</div>
+          <div className="notif-ai-text">{body.aiSummary}</div>
         )}
       </div>
 
@@ -1162,25 +1175,28 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
           终态空→暂无正文 / 其余→加载占位，复用 .hydrate-retry / .hydrate-placeholder
           同一套样式）。
           TASK-114 R1-F1：正文分支（fullText）置于失败分支**之前**，与基准 SocialCard
-          的 content 优先逐分支对齐——ensureArticleContent 详情拉取成功只写 content、
-          从不清 hydrationErrors[id]（reader.ts 详情 .then 分支），「错误态 + 正文已
-          到达」是可达组合态（列表批量水合失败 → Enter/J-K 打开 → 详情成功），该
-          状态下必须显示已到达的正文，而非把正文替换成假的失败重试行。
+          的 content 优先逐分支对齐——ensureArticleContent 详情拉取成功只写
+          bodyById 记录的 content、从不清 failed 态（reader.ts 详情 .then 分支），
+          「错误态 + 正文已到达」是可达组合态（列表批量水合失败 → Enter/J-K 打开
+          → 详情成功），该状态下必须显示已到达的正文，而非把正文替换成假的失败
+          重试行。
           失败分支只覆盖「无正文可显示」的失败：snippet 回退保持在错误**之后**
           （契约「失败不再静默回退 snippet」）；非失败态保留 snippet 展示（通知卡的
           主正文本就是 snippet，加载窗口内把可读内容换成占位是信息损失）。 */}
       {fullText ? (
         <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
-      ) : hydrationError ? (
+      ) : body.state === 'failed' ? (
         <button
           className="hydrate-retry"
           onClick={() => useAppStore.getState().retryHydration(item.id)}
         >
-          正文加载失败：{hydrationError}（点击重试）
+          正文加载失败：{body.message}（点击重试）
         </button>
       ) : item.snippet ? (
         <div className={`notif-body-text ${isLong && !expanded ? 'collapsed' : ''}`}>{displayText}</div>
-      ) : hydrated ? (
+      ) : body.state === 'missing' ? (
+        <div className="notif-body-text"><span className="hydrate-placeholder">{body.message}</span></div>
+      ) : body.state === 'ready' || body.state === 'cleared' ? (
         <div className="notif-body-text"><span className="hydrate-placeholder">暂无正文</span></div>
       ) : (
         <div className="notif-body-text"><span className="hydrate-placeholder">加载正文…</span></div>
@@ -1189,9 +1205,12 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
       <div className={`notif-translated-block ${transShow ? 'show' : ''}`}>
         {/* TASK-065 N8/N11：同 SocialCard——未消毒按纯文本，消毒后按 HTML */}
         {rawTranslated ? (
-          <span>{item.translatedContent}</span>
+          <span>{body.translatedContent}</span>
+        ) : body.state === 'cleared' && !body.translatedContent ? (
+          /* TASK-122：cleared 判别态呈现「已清空」 */
+          <span className="hydrate-placeholder">AI 缓存已清空，可重新生成</span>
         ) : (
-          <span dangerouslySetInnerHTML={{ __html: item.translatedContent }} />
+          <span dangerouslySetInnerHTML={{ __html: body.translatedContent }} />
         )}
         {translatingCard ? <span>翻译中…</span> : null}
         {/* fix-5：翻译失败内联错误行 + 重试（与 SocialCard 同形态） */}
@@ -1208,7 +1227,7 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
           （reader.ts 详情 .then 只写 content 不清错误）的组合态下，正文分支显示的是
           收起态 2 行钳制的 snippet——与修前及同态 SocialCard 一致保留「展开更多」
           （此时展开有对象：displayText 切到水合全文），故门控对 !!fullText 豁免。 */}
-      {isLong && (!hydrationError || !!fullText) && (
+      {isLong && (body.state !== 'failed' || !!fullText) && (
         <button className="notif-expand-btn" onClick={() => setExpanded(!expanded)}>
           {expanded ? '收起内容 ▲' : '展开更多 ▼'}
         </button>

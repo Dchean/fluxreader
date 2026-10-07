@@ -1,5 +1,6 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
+import { applyBodyRow, applyExtractedFulltext, dropBodyEntry, getBodyEntry, markBodyFailed, markBodyLoading, markBodyMissing } from '../bodyCache';
 import type { EntryRollbackClaim } from '../internals';
 import { appStore, getEntryVersion, markEntriesRead, optimisticEntryFlagToggle, rollbackEntryClaims, syncCurrentViewCache } from '../internals';
 import type { AppState } from '../types';
@@ -14,8 +15,7 @@ export type ReaderSlice = Pick<
   | 'isShowingTranslatedProse'
   | 'isRawRenderMode'
   | 'showFulltext'
-  | 'hydrationErrors'
-  | 'hydratedIds'
+  | 'bodyCacheNonce'
   | 'openedReadIds'
   | 'selectArticle'
   | 'ensureArticleContent'
@@ -55,12 +55,12 @@ function enqueueHydration(id: string) {
   });
 }
 
-/* TASK-103：在途水合 id 集——同 id 在途不重复 IPC。useLazyHydrate 的条件重
-   触发（快照替换让水合前提重新成立）与虚拟列表的重挂载都会在请求未落地时
-   再次入队；无去重时同 id 会并发两个 get_articles（重复 IPC，两个响应先后
-   落地还可能互踩）。既有 enqueueHydration 的同帧 Set 去重语义不变，这一层
-   覆盖的是「跨帧仍在途」的窗口。 */
-const hydrationInFlight = new Set<string>();
+/* TASK-103：在途水合去重 → TASK-122：由 bodyById 的 loading 记录承载——
+   同 id 在途不重复 IPC 的判定从模块级 Set 收敛为记录状态（无记录才入队；
+   loading 记录存在即在途）。useLazyHydrate 的条件重触发（快照替换让水合前提
+   重新成立）与虚拟列表的重挂载都会在请求未落地时再次入队；loading 态让
+   entryNeedsHydration 为假，重复入队被守卫拦下（原 hydrationInFlight 的
+   跨帧窗口与 enqueueHydration 的同帧 Set 去重语义都由此承接）。 */
 
 /** 「智能全文」判定：正文是否已是全文（无需 Readability 提取）。
     启发式：只认明确的"正文被截断"信号——摘要型源（少数派等）的结尾标记
@@ -81,8 +81,9 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
   isShowingTranslatedProse: false,
   isRawRenderMode: false,
   showFulltext: false,
-  hydrationErrors: {},
-  hydratedIds: {},
+  /* TASK-122：bodyById 写入通知序号（真实写入由 store.ts 注入的 notify 回调
+     bump；本 slice 只持初值。语义见 types.ts bodyCacheNonce 注释） */
+  bodyCacheNonce: 0,
   openedReadIds: {},
   /* TASK-115②：阅读器关闭信号（nonce，不透明计数器；字段说明见 types.ts）。
      仅在 clearReaderSelection bump——本 action 只发信号，不携带载荷：原选中卡
@@ -131,9 +132,13 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       守卫用「条目仍在」（不依赖 activeArticleId：社交卡片挂载时也走这里）。
       实现：并入批量水合队列（微任务合批）——首屏几十张可见卡片同帧触发时，
       合并成一次 get_articles IPC + 一次 set，避免逐篇 IPC 洪峰与逐篇 O(n) 重渲染。
-      注意：extractFulltext（打开文章的智能全文）即使 content 已水合也须执行——
-      列表卡片批量水合只填 content，不触发智能全文判定；打开文章时若 content
-      已在（列表水合过），仍要走 extractFulltext 分支。 */
+      注意：extractFulltext（打开文章的智能全文）即使正文已水合也须执行——
+      列表卡片批量水合只填 content，不触发智能全文判定；打开文章时若 bodyById
+      已 ready（列表水合过），仍要走 extractFulltext 分支。
+      TASK-122：水合真值落 bodyById（记录 state：loading→ready/missing/failed），
+      视图行只同步 snippet/url 轻字段；幂等守卫从「art.content || hydratedIds」
+      改为「bodyById 已有记录」（loading=在途、ready/cleared/missing/failed=终态，
+      失败只能经 retryHydration 删记录后重入队）。 */
   ensureArticleContent: (id, opts) => {
     const { dataMode, entries } = get();
     if (dataMode !== 'tauri') return;
@@ -142,42 +147,44 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     if (opts?.extractFulltext) {
       /* 打开文章：需要完整详情（含 url/fulltext_extracted）+ 智能全文判定。
          若已水合（列表卡片批量水合过），content 已有，但仍需取详情以判断
-         是否要提取全文——故不因 art.content 短路。 */
+         是否要提取全文——故不因记录存在而短路。
+         TASK-122：发起前签失效戳（记录现 revision）；期间发生显式失效
+         （清理 AI 缓存 / 再次生成）则迟到的详情响应整体丢弃。 */
+      const stamp = markBodyLoading(id);
       void api.getArticle(Number(id)).then((row) => {
-        if (!row) return;
+        if (!row) {
+          /* 详情缺行 = 文章不存在（旧实现静默 return，记录卡 loading；TASK-122
+             终态化：missing 呈现「文章不存在」，可经 retryHydration 幂等重试） */
+          markBodyMissing(id, stamp);
+          return;
+        }
         const cur = get().entries.find((a) => a.id === id);
+        /* TASK-122：详情落 bodyById（正文/AI/译文真值）；AI 列 NULL 时保留现值
+           （流式半截/未落库产物——与旧 `row.x ?? a.x` 回退逐字同语义）。
+           生成中传视图行值做回退（记录在途时其 AI 为空，不能当回退源）。
+           条目已被快照替换移除也照常落记录（实体缓存语义，见批量路径同款裁定）；
+           仅视图行轻字段同步跳过。 */
+        const generating = !!(get().summarizingIds[id] || get().translatingIds[id]);
+        const rec = getBodyEntry(id);
+        applyBodyRow(id, row, stamp, {
+          aiSummary: generating ? (cur?.aiSummary || '') : (rec?.aiSummary ?? cur?.aiSummary ?? ''),
+          translatedContent: generating ? (cur?.translatedContent || '') : (rec?.translatedContent ?? cur?.translatedContent ?? ''),
+        });
         if (!cur) return;
-        const html = row.content_html ?? '';
-        /* 若已有正文（列表水合过）且详情正文相同，跳过重复 set，仅补全可能
-           缺失的 url/fulltext_extracted 等字段；否则正常水合 */
-        if (!cur.content || cur.content !== html) {
+        /* 视图行轻字段照旧同步：snippet/url（列表行可能缺 url）；无变化不 set
+           （保持 entries 引用稳定，避免无谓重渲染） */
+        const nextUrl = cur.url ?? row.url ?? undefined;
+        const nextSnippet = row.snippet || cur.snippet;
+        if (nextUrl !== cur.url || nextSnippet !== cur.snippet) {
           set((s) => ({
             entries: s.entries.map((a) =>
-              a.id === id
-                ? {
-                    ...a,
-                    content: html,
-                    rawContent: html,
-                    translatedContent: row.translated_content ?? '',
-                    snippet: row.snippet || a.snippet,
-                    aiSummary: row.ai_summary ?? a.aiSummary,
-                    url: row.url ?? a.url,
-                    fulltextExtracted: row.fulltext_extracted ?? false,
-                  }
-                : a,
-            ),
-          }));
-        } else {
-          /* content 相同：仍补全 url（列表水合可能缺 url） */
-          set((s) => ({
-            entries: s.entries.map((a) =>
-              a.id === id && !a.url && row.url ? { ...a, url: row.url, fulltextExtracted: row.fulltext_extracted ?? false } : a,
+              a.id === id ? { ...a, url: nextUrl, snippet: nextSnippet } : a,
             ),
           }));
         }
         const mode = get().settings.defaultOpenMode;
         const alreadyExtracted = row.fulltext_extracted ?? false;
-        if (mode === 'fulltext' && row.url && !alreadyExtracted && shouldExtractFulltext(html)) {
+        if (mode === 'fulltext' && row.url && !alreadyExtracted && shouldExtractFulltext(row.content_html ?? '')) {
           void api
             .extractFulltext(Number(id))
             .then((res) => {
@@ -193,10 +200,8 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
                 );
                 return;
               }
-              set((s) => ({
-                entries: s.entries.map((a) => (a.id === id ? { ...a, content: res.html, fulltextExtracted: true } : a)),
-                showFulltext: true,
-              }));
+              applyExtractedFulltext(id, res.html);
+              set({ showFulltext: true });
             })
             .catch((e: unknown) => {
               const msg = extractError(e);
@@ -204,115 +209,110 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
             });
         }
       }).catch((e: unknown) => {
-        /* 打开文章的详情拉取失败：Reader 不能静默空白（REQ-001 排查 P1-8） */
+        /* 打开文章的详情拉取失败：Reader 不能静默空白（REQ-001 排查 P1-8）。
+           TASK-122：失败落 bodyById failed 态（卡片内联重试入口可用） */
         const msg = extractError(e);
-        set((s) => ({ hydrationErrors: { ...s.hydrationErrors, [id]: msg } }));
+        markBodyFailed(id, stamp, msg);
         get().showToast(`正文加载失败：${msg}`, { label: '重试', run: () => get().ensureArticleContent(id, { extractFulltext: true }) });
       });
       return;
     }
-    /* 列表卡片（社交/通知）水合：已水合（含空正文终态）则短路，否则并入批量队列。
-       不能只判 art.content——content_html 为 NULL 的条目水合后 content 仍为空串，
-       仅按 content 判定会让它每次挂载都重新入队（重复 IPC 洪峰 + 永挂「加载正文…」）。 */
-    if (art.content || get().hydratedIds[id]) return;
+    /* 列表卡片（社交/通知）水合：bodyById 已有记录（含空正文终态 loading/ready/
+       cleared/missing/failed）则短路，否则并入批量队列。不能只判正文有无——
+       content_html 为 NULL 的条目水合后 content 仍为空串，仅按内容判定会让它
+       每次挂载都重新入队（重复 IPC 洪峰 + 永挂「加载正文…」）。 */
+    if (getBodyEntry(id)) return;
     enqueueHydration(id);
   },
 
-  /** 水合失败重试：清错误态后重新入队（卡片内联重试入口）。 */
+  /** 水合失败重试：删记录回「未请求」态后重新入队（卡片内联重试入口）。
+      TASK-122：missing/failed 都是可重试终态（重试幂等：missing 重试后仍是
+      missing），与旧「清 hydrationErrors 后入队」同语义。 */
   retryHydration: (id) => {
-    set((s) => {
-      const next = { ...s.hydrationErrors };
-      delete next[id];
-      return { hydrationErrors: next };
-    });
+    dropBodyEntry(id);
     enqueueHydration(id);
   },
 
   /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰）。
-      TASK-103 终态机（正文状态：未请求 → 加载中 → 成功/空正文/不存在/失败）：
-      - 命中行 → 填充正文 + hydrated 终态（content_html 为 NULL 的空正文也算
-        已水合，卡片显示「暂无正文」而非加载占位）；
-      - 响应中缺行的 id → 「文章不存在」终态（hydrationErrors 明确错误，卡片
-        显示内联重试，不得静默留加载占位）；空 rows 即整批不存在，同口径；
-      - 请求失败 → 错误落 hydrationErrors（retryHydration 内联重试入口保留）；
-      - 应用与错误标记都按**当前 store 状态**逐 id 复核：请求在途期间条目可能
+      TASK-103 终态机 → TASK-122：状态收敛为 bodyById 记录的判别态
+      （loading → ready / missing / failed，见 bodyCache 模块头注状态机）：
+      - 命中行 → applyBodyRow 写 ready（正文/AI/译文落记录；视图行同步
+        snippet/url 轻字段；AI 列 NULL 时保留现值——流式产物不丢）；
+      - 响应中缺行的 id → markBodyMissing「文章不存在」终态（卡片呈现明确
+        文案，不得静默留加载占位）；空 rows 即整批不存在，同口径；
+      - 请求失败 → markBodyFailed（retryHydration 内联重试入口保留）；
+      - 应用与终态标记都按**当前 store 状态**逐 id 复核：请求在途期间条目可能
         已被快照替换移除、或已经他路水合（selectArticle 详情拉取）——迟到的
         旧响应不得覆盖新状态。这是与 reloadGeneration 同目标的乱序防护，用
         「按 id 现态复核」而非整批代际号：滚动时并发多批是常态，整批代际会把
-        旧批的有效行一并丢弃、卡片反而回到无请求死区；在途去重
-        （hydrationInFlight）已保证同 id 同时至多一个请求在途。 */
+        旧批的有效行一并丢弃、卡片反而回到无请求死区；在途去重（loading
+        记录）已保证同 id 同时至多一个请求在途。 */
   hydrateArticleContent: (ids) => {
     if (get().dataMode !== 'tauri') return;
-    /* 过滤出「仍存在且未水合」的 id（幂等 + 去重）；在途 id 一并去重——
-       同 id 在途不重复 IPC（TASK-103） */
+    /* 过滤出「仍存在且无记录」的 id（幂等 + 去重）：loading=在途、
+       ready/cleared/missing/failed=终态，都不入队（TASK-122 判定改从 bodyById） */
     const pending = ids.filter((id) => {
-      if (hydrationInFlight.has(id)) return false;
-      const a = get().entries.find((e) => e.id === id);
-      return a && !a.content && !get().hydratedIds[id];
+      if (getBodyEntry(id)) return false;
+      return get().entries.some((e) => e.id === id);
     });
     if (pending.length === 0) return;
-    for (const id of pending) hydrationInFlight.add(id);
+    /* 发起即置 loading（签发失效戳）：同帧重复入队与跨帧重复 IPC 都被
+       「记录存在」拦下；响应落地按 stamp 比对丢弃失效后的迟到响应 */
+    const stamps = new Map<string, number>(pending.map((id) => [id, markBodyLoading(id)] as const));
     const pendingSet = new Set(pending);
     void api.getArticles(pending.map(Number)).then((rows) => {
-      /* 先释放在途标记再应用：应用是同步块，期间新入队的同 id 请求要么被
-         正文/终态短路、要么被在途去重拦下，不会与本次响应交错 */
-      for (const id of pending) hydrationInFlight.delete(id);
-      /* 构建 id → 详情 映射，一次性合并进 entries（单次 map，单次 set） */
+      /* 构建 id → 详情 映射，一次性合并（单次 map，单次 set） */
       const byId = new Map((rows ?? []).map((r) => [String(r.id), r] as const));
+      /* TASK-122：视图行侧只同步轻字段（snippet/url）；正文/AI 落 bodyById */
       set((s) => {
         let changed = false;
         const entries = s.entries.map((a) => {
-          if (a.content || !pendingSet.has(a.id)) return a;
+          if (!pendingSet.has(a.id)) return a;
           const row = byId.get(a.id);
           if (!row) return a;
+          const nextUrl = a.url ?? row.url ?? undefined;
+          const nextSnippet = row.snippet || a.snippet;
+          if (nextUrl === a.url && nextSnippet === a.snippet) return a;
           changed = true;
-          const html = row.content_html ?? '';
-          return {
-            ...a,
-            content: html,
-            rawContent: html,
-            translatedContent: row.translated_content ?? '',
-            snippet: row.snippet || a.snippet,
-            aiSummary: row.ai_summary ?? a.aiSummary,
-            url: row.url ?? a.url,
-            fulltextExtracted: row.fulltext_extracted ?? false,
-            hydrated: true,
-          };
+          return { ...a, url: nextUrl, snippet: nextSnippet };
         });
         if (changed) syncCurrentViewCache(entries);
-        /* 水合成功的条目记入 hydratedIds 终态（空正文也算已水合），并清其错误态；
-           缺行且仍未水合的 id 记「文章不存在」终态。逐 id 现态复核：
-           条目已被移除的不写滞留终态（旧响应不覆盖新状态）。 */
-        const nextHydrated = { ...s.hydratedIds };
-        const nextErrors = { ...s.hydrationErrors };
-        for (const id of pending) {
-          const cur = s.entries.find((a) => a.id === id);
-          if (!cur) continue;
-          if (byId.has(id)) {
-            nextHydrated[id] = true;
-            delete nextErrors[id];
-          } else if (!cur.content && !s.hydratedIds[id]) {
-            nextErrors[id] = '文章不存在或已被删除';
-          }
-        }
-        return changed
-          ? { entries, hydratedIds: nextHydrated, hydrationErrors: nextErrors }
-          : { hydratedIds: nextHydrated, hydrationErrors: nextErrors };
+        return changed ? { entries } : {};
       });
+      /* 正文/AI 落记录：逐 id 现态复核——只写仍是 **loading** 的记录（本批的
+         在途标记）：他路已水合（selectArticle 详情先落地 → ready）、显式失效
+         （cleared）的 id 一律跳过——迟到的旧批次不得覆盖新状态（TASK-103 语义，
+         TASK-122 以记录状态表达）。
+         条目已被快照替换移除的 id **照常落记录**（TASK-122 裁定）：记录是文章
+         实体缓存，不随视图行存活——行真值是该实体的合法缓存，条目若在后续快照
+         重现可直接命中（不产生任何视图污染；旧「滞留 hydratedIds 阻断重水合」
+         的危害形态在结构上不存在：内容与终态同体存活，重现即有正文）。
+         缺行（missing）/失败（failed）同理按实体落账——响应缺行即 DB 已删，
+         与视图是否还在无关；失败落账避免 loading 记录无人收尾的死区。 */
+      for (const id of pending) {
+        const rec = getBodyEntry(id);
+        if (!rec || rec.state !== 'loading') continue;
+        const row = byId.get(id);
+        if (!row) {
+          markBodyMissing(id, stamps.get(id) ?? 0);
+          continue;
+        }
+        const generating = !!(get().summarizingIds[id] || get().translatingIds[id]);
+        const entry = get().entries.find((a) => a.id === id);
+        applyBodyRow(id, row, stamps.get(id) ?? 0, {
+          aiSummary: generating ? (entry?.aiSummary || '') : (rec.aiSummary || entry?.aiSummary || ''),
+          translatedContent: generating ? (entry?.translatedContent || '') : (rec.translatedContent || entry?.translatedContent || ''),
+        });
+      }
     }).catch((e: unknown) => {
-      for (const id of pending) hydrationInFlight.delete(id);
-      /* 批量水合失败：错误落到对应卡片（社交卡内联重试），不再静默假加载。
-         TASK-103：只对「仍存在且仍未水合」的 id 落错误——过期失败不得污染
-         已被快照替换/他路水合的新状态 */
+      /* 批量水合失败：错误落到对应记录（卡片内联重试），不再静默假加载。
+         TASK-103：只对「仍在途（loading）」的 id 落 failed——过期失败不得污染
+         已被快照替换/他路水合/显式失效的新状态 */
       const msg = extractError(e);
-      set((s) => {
-        const next = { ...s.hydrationErrors };
-        for (const id of pending) {
-          const a = s.entries.find((x) => x.id === id);
-          if (a && !a.content && !s.hydratedIds[id]) next[id] = msg;
-        }
-        return { hydrationErrors: next };
-      });
+      for (const id of pending) {
+        const rec = getBodyEntry(id);
+        if (rec?.state === 'loading') markBodyFailed(id, stamps.get(id) ?? 0, msg);
+      }
     });
   },
 
@@ -335,18 +335,25 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       showFulltext: false,
     })),
 
-  /** 手动全文提取：Readability 拉原文网页存 content；rawContent 始终保留 RSS 原文
-      （供「全文 ↔ RSS 正文」切换回跳）。提取成功后进入全文视图。 */
+  /** 手动全文提取：Readability 拉原文网页存 content（TASK-122：落 bodyById）；
+      rawContent 始终保留 RSS 原文（供「全文 ↔ RSS 正文」切换回跳）。
+      提取成功后进入全文视图。 */
   extractCurrentArticle: () => {
     const { activeArticleId, entries, dataMode, showToast } = get();
     if (!activeArticleId || dataMode !== 'tauri') return;
     const art = entries.find((a) => a.id === activeArticleId);
     if (!art) return;
+    const rec = getBodyEntry(activeArticleId);
+    if (!rec) {
+      /* 正文尚未水合（无记录）：先取详情再提取（与打开文章同一详情链路） */
+      get().ensureArticleContent(activeArticleId, { extractFulltext: true });
+      return;
+    }
     if (!art.url) {
       showToast('该条目没有原文链接');
       return;
     }
-    showToast(art.fulltextExtracted ? '正在刷新全文…' : '正在提取全文…');
+    showToast(rec.fulltextExtracted ? '正在刷新全文…' : '正在提取全文…');
     void api
       .extractFulltext(Number(activeArticleId))
       .then((res) => {
@@ -360,12 +367,8 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
           showToast(`未采用全文提取：${res.reason ?? '提取结果不可用'}`);
           return;
         }
-        set((s) => ({
-          entries: s.entries.map((a) =>
-            a.id === id ? { ...a, content: res.html, fulltextExtracted: true } : a,
-          ),
-          showFulltext: true,
-        }));
+        applyExtractedFulltext(id, res.html);
+        set({ showFulltext: true });
         showToast('全文提取完成');
       })
       .catch((e: unknown) => {
@@ -375,13 +378,14 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
   },
 
   /** 全文视图切换：已提取全文 → 在 RSS 原文与全文间切换（不重复请求）；
-      未提取 → 触发提取（同 extractCurrentArticle）。 */
+      未提取 → 触发提取（同 extractCurrentArticle）。
+      TASK-122：fulltextExtracted 从 bodyById 记录取（真值源迁移）。 */
   toggleReaderFulltext: () => {
-    const { activeArticleId, entries, showFulltext } = get();
+    const { activeArticleId, showFulltext } = get();
     if (!activeArticleId) return;
-    const art = entries.find((a) => a.id === activeArticleId);
-    if (!art) return;
-    if (art.fulltextExtracted) {
+    const rec = getBodyEntry(activeArticleId);
+    if (!rec) return;
+    if (rec.fulltextExtracted) {
       // 已提取：直接切换视图
       set({ showFulltext: !showFulltext });
     } else {

@@ -6,6 +6,8 @@ import type {
   ViewFilterType,
 } from '../types';
 import { isSameLocalDay } from '../lib/format';
+import { getBodyEntry } from './bodyCache';
+import type { BodyEntry, BodyState } from './bodyCache';
 import type { AppState } from './types';
 
 /* ============================================================
@@ -35,20 +37,112 @@ export function matchesViewFilter(entry: ArticleEntry, view: ViewFilterType, now
   }
 }
 
-/** TASK-103：单张卡片「需要水合正文」的判定 —— 条目仍在 && 无正文 && 无终态
-    （hydratedIds，含空正文终态）&& 无失败态（hydrationErrors，失败走内联重试、
-    不自动重试）。与 reader.ensureArticleContent 的短路守卫同口径（那边不查
-    hydrationErrors：挂载路径允许对失败条目重新发起请求）。
-    useLazyHydrate 按 id 订阅本判定的布尔值：快照替换（reload / 缓存恢复）让
-    条件重新成立时布尔翻转 → effect 重新入队，消除「显示加载中但无请求在途」
-    的死区（REQ-001）。重复入队由 hydrateArticleContent 的在途去重兜底，
-    这里不观察「在途」——它是模块级状态，不在 store 快照里。 */
+/* ============================================================
+   TASK-122：正文/AI 读取单点（真值源 bodyById，store/bodyCache.ts）
+
+   selectArticleBody 是卡片与阅读器取正文/AI 产物的**唯一**入口：
+   - 记录存在（loading/ready/cleared/missing/failed）→ 一切以记录为准；
+   - 无记录（未请求 / LRU 淘汰）→ content/rawContent 为空；AI 字段回退视图行
+     （列表行携带的 ai_summary/translated_content 是同一 DB 的查询真值，未水合
+     卡片靠它即时显示摘要/译文；水合后记录接管）。该回退是过渡兼容位：列表行
+     停止携带 AI 列（Rust DTO 分离，另卡）后即可删除；
+   - mock 演示模式无后端 IPC、bodyById 永不落记录 → 回退视图行的
+     content/rawContent（mock 数据的内联正文，ArticleEntry 上仅存的两处正文
+     兼容位）。tauri 链路不得依赖该回退。
+   ============================================================ */
+
+/** 正文/AI 读取快照（组件订阅形态；记录引用稳定，写入即换引用） */
+export interface ArticleBodyView {
+  /** 判别态：unrequested = 无记录（未请求/已淘汰）；其余透传 BodyState */
+  state: BodyState | 'unrequested';
+  content: string;
+  rawContent: string;
+  translatedContent: string;
+  aiSummary: string;
+  fulltextExtracted: boolean;
+  /** missing/failed 的呈现文案（其余态为空） */
+  message: string;
+  /** 显式失效计数（t122 断言/调试观察用） */
+  contentRevision: number;
+}
+
+const UNREQUESTED_BODY: ArticleBodyView = {
+  state: 'unrequested',
+  content: '',
+  rawContent: '',
+  translatedContent: '',
+  aiSummary: '',
+  fulltextExtracted: false,
+  message: '',
+  contentRevision: 0,
+};
+
+function bodyViewFrom(rec: BodyEntry): ArticleBodyView {
+  return {
+    state: rec.state,
+    content: rec.content,
+    rawContent: rec.rawContent,
+    translatedContent: rec.translatedContent,
+    aiSummary: rec.aiSummary,
+    fulltextExtracted: rec.fulltextExtracted,
+    message: rec.message,
+    contentRevision: rec.contentRevision,
+  };
+}
+
+/** 单篇文章的正文/AI 视图（读取单点；语义见本文件 TASK-122 头注）。
+    订阅依赖：本函数读取的 bodyById 是模块级状态，组件经 useAppStore 传整个
+    state 进来——此处显式消费 s.bodyCacheNonce（bodyCache 每次真实写入 bump，
+    store.ts 注入 notify）建立订阅依赖，记录变化才能触发 selector 重算。 */
+export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bodyCacheNonce'>, id: string | null | undefined): ArticleBodyView {
+  void s.bodyCacheNonce; // 订阅依赖（见上）：值本身无意义，真值经 getBodyEntry 读取
+  if (!id) return UNREQUESTED_BODY;
+  const rec = getBodyEntry(id);
+  if (rec) return bodyViewFrom(rec);
+  const entry = s.entries.find((a) => a.id === id);
+  if (!entry) return UNREQUESTED_BODY;
+  /* 无记录回退：mock = 演示正文全量；tauri = 仅 AI 列与全文标记（行携带真值），
+     正文恒空（未请求态——懒水合会按 entryNeedsHydration 入队） */
+  if (s.dataMode === 'mock') {
+    return {
+      state: 'ready',
+      content: entry.content ?? '',
+      rawContent: entry.rawContent ?? '',
+      translatedContent: entry.translatedContent,
+      aiSummary: entry.aiSummary,
+      fulltextExtracted: entry.fulltextExtracted ?? false,
+      message: '',
+      contentRevision: 0,
+    };
+  }
+  return {
+    state: 'unrequested',
+    content: '',
+    rawContent: '',
+    translatedContent: entry.translatedContent,
+    aiSummary: entry.aiSummary,
+    fulltextExtracted: entry.fulltextExtracted ?? false,
+    message: '',
+    contentRevision: 0,
+  };
+}
+
+/** TASK-122：单张卡片「需要水合正文」的判定 —— 条目仍在 && bodyById 无记录。
+    记录存在即不需要水合：loading=在途（重复入队由记录状态拦下，替代原模块级
+    hydrationInFlight）、ready=已水合（含空正文终态）、cleared=AI 失效但正文
+    保留、missing/failed=终态（失败走内联重试 retryHydration 删记录重入队，
+    不自动重试）。useLazyHydrate 按 id 订阅本判定的布尔值：快照替换（reload /
+    缓存恢复）或 LRU 淘汰让条件重新成立时布尔翻转 → effect 重新入队，消除
+    「显示加载中但无请求在途」的死区（REQ-001）；预算淘汰（记录被删）→ 回
+    未请求态 → 自动重取（TASK-111 内存预算纪律的淘汰语义）。
+    重复入队由 hydrateArticleContent 的记录守卫兜底，这里不观察请求本身。 */
 export function entryNeedsHydration(
-  s: Pick<AppState, 'entries' | 'hydratedIds' | 'hydrationErrors'>,
+  s: Pick<AppState, 'entries' | 'bodyCacheNonce'>,
   id: string,
 ): boolean {
-  const art = s.entries.find((a) => a.id === id);
-  return !!art && !art.content && !s.hydratedIds[id] && !s.hydrationErrors[id];
+  void s.bodyCacheNonce; // 订阅依赖：记录写入 bump nonce，useLazyHydrate 的订阅才能重算
+  if (getBodyEntry(id)) return false;
+  return s.entries.some((a) => a.id === id);
 }
 
 /** 当前布局下的全部条目（含已读）。
