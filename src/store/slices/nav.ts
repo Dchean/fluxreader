@@ -1,6 +1,6 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
-import { getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, syncCurrentViewCache, viewEntriesCache } from '../internals';
+import { currentLocalFlagWriteSerial, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, syncCurrentViewCache, viewEntriesCache } from '../internals';
 import { selectVisibleEntries } from '../selectors';
 import type { AppState } from '../types';
 
@@ -69,7 +69,8 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     if (get().dataMode !== 'tauri') return;
     const scopeKey = QueryScope.pageKey(get().activeFeedFilter, layout);
     set((s) => ({
-      articlesLimit: s.articlesCursor[scopeKey] ?? 0,
+      /* TASK-117：镜像取 keyset 游标的 loaded 计数（原游标值即计数） */
+      articlesLimit: s.articlesCursor[scopeKey]?.loaded ?? 0,
       articlesExhausted: false,
       articlesLoading: false,
     }));
@@ -106,7 +107,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         hydrationErrors: merged.hydrationErrors,
         ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
       }));
-      get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
+      get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
        reload 自身的 toast 给出，这里只吞掉残余重抛，避免 unhandled rejection。 */
@@ -122,11 +123,13 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        匹配、但无需重新拉取」的同步恢复（目前只有 selectView 缓存命中走这条）。
      之所以不暴露成通用 setter：单纯写 articlesLimit 而不动 entries（D3 缺陷当时
      可达的形态）会把「游标指向的位置」与「列表里的内容」拆开，下一次 loadMore 的
-     offset 就会越过列表内容、整段文章静默丢失。 */
-  applyArticlesCursor: (scopeKey, limit, exhausted) =>
+     起点就会越过列表内容、整段文章静默丢失。
+     TASK-117：第二参从计数改为完整 keyset 游标（ArticlesCursorState）——
+     articlesLimit 镜像写 cursor.loaded（计数口径不变），articlesCursor 存完整锚。 */
+  applyArticlesCursor: (scopeKey, cursor, exhausted) =>
     set((s) => ({
-      articlesLimit: limit,
-      articlesCursor: { ...s.articlesCursor, [scopeKey]: limit },
+      articlesLimit: cursor.loaded,
+      articlesCursor: { ...s.articlesCursor, [scopeKey]: cursor },
       articlesExhausted: exhausted,
       articlesLoading: false,
     })),
@@ -170,7 +173,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         hydrationErrors: merged.hydrationErrors,
         ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
       }));
-      get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
+      get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
       if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
@@ -206,7 +209,8 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     set((s) => ({
       activeFeedFilter: feedId,
       openedReadIds: {},
-      articlesLimit: s.articlesCursor[scopeKey] ?? 0,
+      /* TASK-117：镜像取 keyset 游标的 loaded 计数（原游标值即计数） */
+      articlesLimit: s.articlesCursor[scopeKey]?.loaded ?? 0,
       articlesExhausted: false,
       articlesLoading: false,
     }));
@@ -231,7 +235,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         hydrationErrors: merged.hydrationErrors,
         ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
       }));
-      get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
+      get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
     if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
@@ -312,10 +316,13 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        用户连点两次 toggle 停在与乐观写入相同的值时，迟到回滚会误踩用户最终
        意图而 DB 已是新值（审查探针 C3 实测）。版本由 internals 的三个真实
        写入点维护：flipEntryFlag（单条 toggle）/ markEntriesRead（本操作的
-       乐观写入与批量标读）/ mergeSnapshotEntries（快照替换带后端真值）。 */
+       乐观写入与批量标读）/ mergeSnapshotEntries（快照替换带后端真值）。
+       TASK-118（审计 P1-2）：快照与守卫都取 **isRead 字段**版本——修前文章级
+       共享版本下，窗口内用户收藏（bump isStarred）会把读回滚误判成已接管而
+       跳过（应恢复未读却停在乐观已读）。 */
     const optimisticVersionById = new Map<string, number>();
     for (const [id, prev] of prevReadById) {
-      if (!prev) optimisticVersionById.set(id, getEntryVersion(id));
+      if (!prev) optimisticVersionById.set(id, getEntryVersion(id, 'isRead'));
     }
     set({ openedReadIds: {} });
     void api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout }).then((affected) => {
@@ -328,27 +335,45 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          此时乐观写入也未翻转任何条目，无需重取）。 */
       get().showToast('已全部标为已读');
       if (affected === 0) return;
-      const reconcileCounts = () =>
-        api.feedCounts().then((rows) => {
-          if (!rows) return false;
+      /* TASK-119（审计 P2-4②探针 P6）：对账发起时记录本地读/藏写入序号
+         （currentLocalFlagWriteSerial，bump 点矩阵见 internals）——落地仅当
+         「期间无本地读/藏写入」才整体替换：替换会把乐观计数踩回旧值（改回未读
+         后迟到计数落地 → 文章未读但未读数 0）。过期则丢弃并**立即重取一次**；
+         重取仍过期/失败则放弃，计数由下次 reload 自愈（与 R1 F2 失败自愈同口径，
+         不循环重试——重取自身不再触发重取）。 */
+      const reconcileCounts = (): Promise<'applied' | 'stale' | 'empty'> => {
+        const serialAtStart = currentLocalFlagWriteSerial();
+        return api.feedCounts().then((rows) => {
+          if (!rows) return 'empty';
+          if (currentLocalFlagWriteSerial() !== serialAtStart) return 'stale';
           const next = new Map<string, { total: number; unread: number; starred: number; today: number }>();
           for (const c of rows) {
             next.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
           }
           set({ feedCounts: next });
-          return true;
+          return 'applied';
         });
-      /* TASK-107 R1（F2）：对账重取失败不再完全静默——落库已成功但计数残留
-         乐观值（600/1 形态下显示 599、DB 真值 0），先给一条诊断提示（≤40 字，
-         与「保存失败」文案明确区分：标读本身没有失败），并安排一次 3s 延迟
-         重试；重试仍失败则放弃，依赖既有 reload 自愈（下次任意
-         reloadFromBackend 重取同一计数来源，审查探针 F2 证实自愈有效）。 */
-      reconcileCounts().catch(() => {
-        get().showToast('全部已读已保存，未读计数刷新失败');
-        setTimeout(() => {
-          void reconcileCounts().catch(() => { /* 重试仍失败：放弃，计数由下次 reload 自愈 */ });
-        }, 3000);
-      });
+      };
+      const runCountReconcile = (allowRetry: boolean) => {
+        reconcileCounts().then((outcome) => {
+          if (outcome === 'stale' && allowRetry) {
+            /* 过期丢弃 → 立即重取一次（不再级联：重取的过期/失败都放弃） */
+            void reconcileCounts().catch(() => { /* 重取失败：放弃，计数由下次 reload 自愈 */ });
+          }
+        }).catch(() => {
+          /* TASK-107 R1（F2）：对账重取失败不再完全静默——落库已成功但计数残留
+             乐观值（600/1 形态下显示 599、DB 真值 0），先给一条诊断提示（≤40 字，
+             与「保存失败」文案明确区分：标读本身没有失败），并安排一次 3s 延迟
+             重试；重试仍失败则放弃，依赖既有 reload 自愈（下次任意
+             reloadFromBackend 重取同一计数来源，审查探针 F2 证实自愈有效）。 */
+          if (!allowRetry) return;
+          get().showToast('全部已读已保存，未读计数刷新失败');
+          setTimeout(() => {
+            void reconcileCounts().catch(() => { /* 重试仍失败：放弃，计数由下次 reload 自愈 */ });
+          }, 3000);
+        });
+      };
+      runCountReconcile(true);
     }).catch((e: unknown) => {
       /* TASK-107：失败回滚——乐观翻转到原读态、逐 feed 回补未读计数、还原
          「已读保留」快照并同步视图缓存。恢复前提从「当前值仍等于乐观写入值」
@@ -361,7 +386,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         if (!ids.has(a.id)) return a;
         const prev = prevReadById.get(a.id);
         if (prev !== false || a.isRead !== true) return a;
-        if (getEntryVersion(a.id) !== optimisticVersionById.get(a.id)) return a; // R1：期间已被其他写入接管
+        if (getEntryVersion(a.id, 'isRead') !== optimisticVersionById.get(a.id)) return a; // R1 + TASK-118：期间已被其他**读态**写入接管（收藏 bump 的是 isStarred 字段，不再使读回滚失效）
         changed = true;
         unreadRestore.set(a.feedId, (unreadRestore.get(a.feedId) ?? 0) + 1);
         return { ...a, isRead: prev };

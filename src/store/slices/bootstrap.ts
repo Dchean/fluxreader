@@ -1,8 +1,10 @@
 import type { StateCreator } from 'zustand';
 import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
-import { ARTICLES_PAGE_SIZE, appStore, buildFeedIndex, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, setViewEntriesSnapshot } from '../internals';
-import type { AppState } from '../types';
+import type { ArticleListItemRow } from '../../lib/api';
+import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, appStore, buildFeedIndex, emptyArticlesCursor, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, rollbackEntryClaims, setViewEntriesSnapshot } from '../internals';
+import type { EntryRollbackClaim } from '../internals';
+import type { AppState, ArticlesCursorState } from '../types';
 import type { ContentLayoutType } from '../../types';
 
 /** 启动与数据快照 slice：SQLite ⇄ mock 数据源、全量/分页/筛选拉取与锚定打开。
@@ -35,8 +37,71 @@ export type BootstrapSlice = Pick<
    TASK-110：常量收口到 internals（筛选视图分页化后与「全部」视图共用同一页大小
    与游标口径，nav.ts 的缓存恢复 exhausted 判定也需要它），此处 import 使用。 */
 
-/** reloadFromBackend 代际计数：并发 reload 只接受最新一次结果 */
-let reloadGeneration = 0;
+/* ============================================================
+   TASK-119（审计 P2-4①）：查询实例代际——统一收口（演化自原 reloadGeneration）
+
+   缺陷：过期判断只比较查询参数（QueryScope 谓词收口了口径但没消除「同一查询
+   的旧版本」窗口）——同 scope/view/sort 两次发起、新响应先落、旧响应后至，旧
+   响应因「参数全同」被放行覆盖新结果（探针 P5）；A→B→A 同理不设防。审计要求
+   每个查询实例维护 generation，首屏/续页/刷新/导航共享同一套过期判断。
+
+   机制（双层级，单一体系内的两个粒度）：
+   - queryGeneration：全局单调序号——**全局状态/窗口写入者**（reloadFromBackend
+     写 categories/feedCounts/entries 全局态；anchorToArticle 整体替换当前窗口）
+     的落地判据是「此后没有任何更新的查询发起」。纯 per-key 判据在这里不够：
+     跨范围两次 reload 是不同 queryKey，旧范围响应会在新范围落地后 pass 并把
+     全局态踩回旧值且无自愈（B 已落地不会再有查询覆盖）——这正是原
+     reloadGeneration 的既有保护（范围切换场景），统一后原样保留。
+   - firstPageSerialByKey：Map<queryKey, 序号>——queryKey 复用 TASK-117 键族
+     （viewKey = pageKey×视图口径，布局×范围×视图；排序不入键：同键换序的旧
+     响应由排序守卫与全局代际兜底）。记录该键最近一次「首屏类发起」的序号，
+     消费方有二：
+     ① reloadFilteredEntries 的落地判据——同键两次发起、先发后至的旧版本被
+        识别丢弃（P5/A→B→A 修复；视图快照只写本键，不需要全局粒度，且发起
+        不推全局代际——保留「后台刷新的 all 过渡落地 + 自链筛选重拉」价值，
+        用户切视图不使在途后台刷新整体作废）；
+     ② loadMoreArticles 续页携带的「首页代际」——续页不是新查询实例（不 bump，
+        无锚回落 offset 的退化形态同样是续期），携带发起时该键现值（= 建立当前
+        窗口的首屏代际；期间无更新首屏时二者恒等），落地要求键现值未变 +
+        paginationStale 三元组守卫保留——新首屏落地后游标三元组恰好全等（同数据
+        重拉）时参数比较不可判别，代际补上这一层（探针 P4 形态）。
+   ============================================================ */
+let queryGeneration = 0;
+const firstPageSerialByKey = new Map<string, number>();
+
+/** per-key 首屏代际记录：每次首屏类发起推进该键序号（键内单调）。 */
+function recordFirstPageStart(queryKey: string): number {
+  const serial = (firstPageSerialByKey.get(queryKey) ?? 0) + 1;
+  firstPageSerialByKey.set(queryKey, serial);
+  return serial;
+}
+
+/** 全局状态/窗口写入者发起（reloadFromBackend / anchorToArticle）：推进全局
+    代际 + 记录该键首屏代际（使该键在途的筛选/续页响应过期）。返回全局代际。 */
+function beginGlobalQuery(queryKey: string): number {
+  queryGeneration += 1;
+  recordFirstPageStart(queryKey);
+  return queryGeneration;
+}
+
+/** 视图快照写入者发起（reloadFilteredEntries）：仅推进该键首屏代际，不推全局
+    ——理由见上方机制说明（切视图不得使在途后台刷新的全局态更新作废；同键
+    旧版本由 per-key 判据识别）。返回该键代际。 */
+function beginViewQuery(queryKey: string): number {
+  return recordFirstPageStart(queryKey);
+}
+
+/** 该键当前首屏代际（续页发起时读取 = 首页代际；落地时读取 = 现值）。 */
+function currentFirstPageSerial(queryKey: string): number {
+  return firstPageSerialByKey.get(queryKey) ?? 0;
+}
+
+/** TASK-117：首屏（offset=0）写入的 per-scope keyset 游标——锚取本页最后一行
+    （advanceArticlesCursor），loaded 累加到 base。续拉锚从此推进，见
+    loadMoreArticles。 */
+function cursorAfterFirstPage(rows: ArticleListItemRow[]): ArticlesCursorState {
+  return advanceArticlesCursor(emptyArticlesCursor(), rows);
+}
 
 /** TASK-100 P3-1：后端 reload（全量/筛选）在途计数。
  *  selectLayout/selectFeed/selectView 都是「先写游标镜像、再异步 reload」：
@@ -108,27 +173,32 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       「当前范围已加载了多少条」与列表实际能显示多少条脱节：单源视图下首批
       500 条里可能一条属于该源，且游标直接跳到 500（该源的老文章永远够不到）。
       范围由 get() 在**发起时**读取：异步等待期间用户切范围，结果交由下面
-      reloadGeneration 代际守卫整体丢弃（与既有的「旧代际 reload 被丢弃」同口径）。
+      查询代际守卫整体丢弃（TASK-119 统一后的查询实例代际，语义同原 reloadGeneration）。
 
       TASK-111②：opts.keepReadingPosition —— 仅内容刷新路径（feeds-updated /
       手动同步 / 单源刷新）传入。落地时 bump positionRestoreNonce 让 Timeline
       消费顶条锚回位（审计「后台刷新保留当前阅读位置」）；导航路径不传，
       锚机制对用户主动切换保持沉默（分流显式化）。 */
   reloadFromBackend: async (opts) => {
-    const gen = ++reloadGeneration;
+    /* TASK-109①：发起时一次性快照「范围×布局×排序」——查询参数、分页游标键
+       与「全部」视图缓存键全部从该快照派生。原实现在 await 之后读「完成时」
+       的 activeFeedFilter/activeContentLayout 充当游标键与缓存键口径（注释
+       声称发起时），靠 reloadGeneration 间接兜底：任何范围/布局变更都经由
+       selectFeed/selectLayout 触发新 reload 使旧代际整体丢弃，故行为等价；
+       现改为显式成立（与 loadMoreArticles/anchorToArticle 的发起时快照同一
+       形态），不再依赖默会。TASK-119 起代际守卫统一为查询实例代际
+       （gen !== queryGeneration 即全局已有更新发起，见文件头机制说明）。 */
+    const scopeAtStart = get().activeFeedFilter;
+    const layoutAtStart = get().activeContentLayout;
+    const sortAtStart = get().timelineSort;
+    /* TASK-119：发起即取全局查询代际（原 reloadGeneration 的统一形态）——
+       本入口是全局状态写入者（categories/feedCounts/entries），落地要求
+       「此后没有任何更新的查询发起」（范围切换保护语义原样保留）；同时记录
+       该键首屏代际（使在途续页/筛选响应过期）。 */
+    const gen = beginGlobalQuery(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart));
     const keepReadingPosition = opts?.keepReadingPosition === true;
     backendReloadInFlight++;
     try {
-      /* TASK-109①：发起时一次性快照「范围×布局×排序」——查询参数、分页游标键
-         与「全部」视图缓存键全部从该快照派生。原实现在 await 之后读「完成时」
-         的 activeFeedFilter/activeContentLayout 充当游标键与缓存键口径（注释
-         声称发起时），靠 reloadGeneration 间接兜底：任何范围/布局变更都经由
-         selectFeed/selectLayout 触发新 reload 使旧代际整体丢弃，故行为等价；
-         现改为显式成立（与 loadMoreArticles/anchorToArticle 的发起时快照同一
-         形态），不再依赖默会。reloadGeneration 守卫保留。 */
-      const scopeAtStart = get().activeFeedFilter;
-      const layoutAtStart = get().activeContentLayout;
-      const sortAtStart = get().timelineSort;
       const scopeKey = QueryScope.pageKey(scopeAtStart, layoutAtStart);
       const scopeArgs = QueryScope.args(scopeAtStart, sortAtStart, layoutAtStart);
       let folders, feeds, articles, counts;
@@ -146,7 +216,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         get().showToast(`刷新失败：${extractError(e)}`);
         throw e;
       }
-      if (gen !== reloadGeneration) return; // 已有更新的 reload 在途/完成
+      if (gen !== queryGeneration) return; // TASK-119：全局已有更新的查询发起（统一查询代际，语义同原 reloadGeneration）
       if (!folders || !feeds || articles === null) return;
 
       const categories = folderRowsToCategories(folders, feeds);
@@ -162,6 +232,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
          useLazyHydrate 同 id 不重触发 → 卡片永挂「加载正文…」且无请求在途。 */
       const merged = mergeSnapshotEntries(get().entries, articles.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
       const nextEntries = merged.entries;
+      /* TASK-117：首屏游标 = keyset 锚（本页最后一行的 (published_at 原文, id)），
+         loaded 承接原「已加载条数」镜像语义（articlesLimit）。 */
+      const firstPageCursor = cursorAfterFirstPage(articles);
       /* 分页游标键取自**发起时快照**（TASK-109①）：游标属于发起时的查询口径，
          与完成时的 activeFeedFilter 无关（gen 匹配时两者恒等，此处为显式口径）。
          TASK-094：entries 是该布局的快照，游标键带布局（R7：切布局不串游标）。 */
@@ -171,14 +244,14 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       // TASK-103：缓存写入的是继承过正文的合并结果，缓存恢复（selectFeed 等）
       // 才能零延迟还原正文。
       // TASK-111①：经 setViewEntriesSnapshot 收口——单键实体预算（超限尾部截断）
-      // + 分页元数据（loadedCount/exhausted 取写入时真值），恢复路径用记录值判定。
-      setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart), nextEntries, articles.length, articles.length < ARTICLES_PAGE_SIZE);
+      // + 分页元数据（cursor/exhausted 取写入时真值），恢复路径用记录值判定。
+      setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, 'all', scopeAtStart), nextEntries, firstPageCursor, articles.length < ARTICLES_PAGE_SIZE);
       set((s) => ({
         ...reconcileCategories(s, categories),
         entries: nextEntries,
         feedCounts,
-        articlesLimit: articles.length,
-        articlesCursor: { ...s.articlesCursor, [scopeKey]: articles.length },
+        articlesLimit: firstPageCursor.loaded,
+        articlesCursor: { ...s.articlesCursor, [scopeKey]: firstPageCursor },
         articlesLoading: false,
         articlesExhausted: articles.length < ARTICLES_PAGE_SIZE,
         dataMode: 'tauri',
@@ -198,13 +271,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       }));
       /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
       void api.syncStatus().then((st) => {
-        if (st && gen === reloadGeneration) set({ syncConnected: st.connected });
+        if (st && gen === queryGeneration) set({ syncConnected: st.connected });
       }).catch(() => { /* TASK-067 N10：纯提示性刷新，失败不打扰 */ });
       /* TASK-116 四态展示：顺带刷新同步队列统计（侧栏 pill 的「等待同步 N 条 /
          部分失败」口径）。挂载（bootstrap 首次 reload）与手动同步完成（末次
          reload）都经过这里——契约约定的两个刷新点，无需另设事件。 */
       void api.syncQueueStats().then((q) => {
-        if (q && gen === reloadGeneration) set({ syncWaiting: q.waiting, syncFailed: q.failed });
+        if (q && gen === queryGeneration) set({ syncWaiting: q.waiting, syncFailed: q.failed });
       }).catch(() => { /* 纯提示性刷新，失败不打扰 */ });
       // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
       // （状态/内容可能变化，entries 需同步刷新为筛选结果）
@@ -219,8 +292,14 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
 
   /** 滚动到底部按需拉取下一批文章（追加到 entries，不覆盖已加载的）。
       TASK-052：请求带**当前订阅范围**（feed_id / folder_id）与排序，游标取自该
-      范围自己的 per-scope 游标（articlesCursor[scopeKey]，经 articlesLimit 镜像），
-      因此「第 2 页」= 该范围的第 501..1000 条，而不是全局序列的第 501..1000 条。
+      范围自己的 per-scope 游标（articlesCursor[scopeKey]，经 articlesLimit 镜像）。
+      TASK-117（审计 P1-1）：续拉从 OFFSET 语义改 **keyset**——可变筛选集合
+      （未读视图的 WHERE is_read=0、收藏视图的 is_starred=1）上 OFFSET 不等价于
+      已看条数：1200 未读读 500 标读后集合剩 700，下一页仍 OFFSET 500 → 跳过
+      剩余集合前 500 篇并假 exhausted。keyset 以已加载窗口最后一行的
+      (published_at 原文, id) 为锚（last_published/last_id 成对发送），请求
+      「严格排在锚之后」的行，与集合增删无关。OFFSET 键停用（后端保留兼容）；
+      游标缺锚（lastPublished null，正常 tauri 流程不可达）才回落 offset。
       若已有更多在途则跳过（防抖）。
       TASK-110①：筛选视图（收藏/未读/今天）共用本路径续拉——请求携带与首屏同源
       的视图筛选参数（QueryScope.viewFilter 单点派生），「全部」视图空参数与旧
@@ -241,37 +320,56 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const viewAtStart = st.activeViewFilter;
     const scopeKey = QueryScope.pageKey(scope, layoutAtStart);
     const scopeArgs = { ...QueryScope.args(scope, st.timelineSort, layoutAtStart), ...QueryScope.viewFilter(viewAtStart) };
-    const offset = st.articlesLimit;
-    /* F1（Batch 1/2 独立审查 P3）：排序也必须参与竞态比较——offset 的含义随排序
-       翻转（同 offset=500 在 newest/oldest 下指向不同的 500 条）。守卫原本只比
+    /* TASK-119：续页携带「首页代际」= 该键最近一次首屏类发起的序号（续页不是新
+       查询实例：不 bump——无锚回落 offset 的退化形态同样是窗口续期）。期间若无
+       更新首屏（reload/锚定/同键筛选），落地时键现值与携带值恒等。 */
+    const queryKey = QueryScope.viewKey(layoutAtStart, viewAtStart, scope);
+    const firstPageGen = currentFirstPageSerial(queryKey);
+    /* TASK-117：keyset 锚 = 该 scope 游标现值（最后一行锚点 + loaded 计数）。
+       游标表缺键（理论上仅 mock 残留/异常窗口）时以 articlesLimit 兜底——
+       lastPublished 为 null → 请求不带 keyset 键，后端回落 OFFSET 语义。 */
+    const cursorAtStart = st.articlesCursor[scopeKey] ?? emptyArticlesCursor(st.articlesLimit);
+    /* F1（Batch 1/2 独立审查 P3）：排序也必须参与竞态比较——keyset 锚的含义随排序
+       翻转（同锚点在 newest/oldest 下指向不同的后续集合）。守卫原本只比
        scopeKey 与游标：旧排序在途的分页响应若晚于「切排序后的重拉」到达，且重拉
-       后游标恰好仍等于该 offset，就会被放行，把旧排序第 2 页接到新排序列表后
+       后游标恰好仍等于该锚点，就会被放行，把旧排序第 2 页接到新排序列表后
        （审查探针实测 duplicates 100 / missing 100）。发起时快照排序，返回时排序
        已翻转 ⇒ 该响应属于另一个查询口径，整体丢弃（与 scopeKey 同一判据粒度）。 */
     const sortAtStart = st.timelineSort;
     set({ articlesLoading: true });
     try {
-      const rows = await api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset, with_content: layoutNeedsBody(layoutAtStart) });
+      const rows = await api.listArticles({
+        ...scopeArgs,
+        limit: ARTICLES_PAGE_SIZE,
+        /* TASK-117：OFFSET 停用（缺陷手法本身），由 keyset 锚承接续拉位置；
+           无锚回落（见 cursorAtStart 注释）才带 offset。 */
+        ...(cursorAtStart.lastPublished != null && cursorAtStart.lastId != null
+          ? { last_published: cursorAtStart.lastPublished, last_id: cursorAtStart.lastId }
+          : { offset: cursorAtStart.loaded }),
+        with_content: layoutNeedsBody(layoutAtStart),
+      });
       // 竞态保护：加载期间游标被重置（reload / selectView 命中缓存恢复快照 / 切换
       // 范围或布局加载了该口径自己的游标），丢弃本次追加。必须顺手复位 articlesLoading
       // （D3）：否则该标志永久为 true，被入口守卫（articlesLoading || articlesExhausted）
       // 永久挡住后续所有 loadMoreArticles —— 列表停在半截且加载动画常驻。
       // TASK-052 把比较基准从「全局 articlesLimit」收紧为「该范围的游标」：A 源在途时
-      // 切到 B 源，B 源自己的游标可能与 offset 数值相同（例如都是 500），若只比数值会
+      // 切到 B 源，B 源自己的游标可能与锚点数值相同（例如都是 500），若只比数值会
       // 把属于 A 的迟到数据错接到 B 的列表上；带上 scopeKey 后这种串台也会被丢弃。
       // F1：排序翻转同样使该响应过期（见发起时的 sortAtStart 注释）。
       // TASK-094（R7）：布局切换改变整个 entries 序列与游标键，布局在途响应一并过期。
       // TASK-109①：判据收口为具名守卫 paginationStale（语义见 internals）。
       // TASK-110①：view 入守卫——筛选视图分页化后切视图会整体替换 entries 并重置
-      // 同键游标，旧视图的在途分页响应不得追加进新视图列表（游标数值可能恰好
+      // 同键游标，旧视图的在途分页响应不得追加进新视图列表（锚点数值可能恰好
       // 相等，须显式比较视图维度）。
+      // TASK-117：游标比较改为 keyset 三元组（lastPublished/lastId/loaded 任一
+      // 漂移即过期——锚点推进与 reload 重置两种竞态都覆盖）。
       if (
         QueryScope.paginationStale(
-          { scopeKey, sort: sortAtStart, offset, view: viewAtStart },
+          { scopeKey, sort: sortAtStart, cursor: cursorAtStart, view: viewAtStart },
           {
             scopeKey: QueryScope.pageKey(get().activeFeedFilter, get().activeContentLayout),
             sort: get().timelineSort,
-            offset: get().articlesLimit,
+            cursor: get().articlesCursor[scopeKey] ?? emptyArticlesCursor(get().articlesLimit),
             view: get().activeViewFilter,
           },
         )
@@ -279,14 +377,19 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         set({ articlesLoading: false });
         return;
       }
-      /* TASK-110②：追加按 id 去重——稳定序策略选定「**追加去重保序**」：
-         同步在已加载窗口前端插入新条目会使 offset 漂移，下一页与已加载集合
-         重叠，去重保证 entries 按 id 唯一（duplicate key 防线）。策略取舍
-         （审计「后台刷新保留当前阅读位置」）：插入项**不回填**已加载窗口
-         （触发重拉会整体替换列表、丢失滚动位置），随下次 reloadFromBackend
-         （后台刷新/切范围/切筛选）进入列表；游标按**拉取行数**推进（offset
-         语义 = 已看过的后端位置），头部插入的漂移量恰等于去重量，不跳行不重复
-         （删除型漂移可能跳过个位数行，由 reload 对齐——offset 分页的固有限制）。 */
+      /* TASK-119（审计 P2-4①）：续页代际守卫——落地仅当该键此后没有更新的首屏类
+         发起（reload/锚定/同键筛选）。三元组守卫在「新首屏（同数据重拉）落地后
+         游标与发起时全等」时放行——参数比较识别不了同一查询的旧版本（审计原话：
+         不能只比较查询参数是否相同），代际判据补上这一层。 */
+      if (currentFirstPageSerial(queryKey) !== firstPageGen) {
+        set({ articlesLoading: false });
+        return;
+      }
+      /* TASK-110②：追加按 id 去重——稳定序策略「**追加去重保序**」。TASK-117 后
+         续拉锚是最后一行锚点而非偏移量，插入漂移不再使续拉区间与已加载集合重叠
+         （keyset 天然免疫，t117-3 断言锁定）；去重保留作 duplicate key 的兜底防线
+         （集合收缩场景锚点前移等极端窗口）。游标推进 = 锚更新为**本页最后一行**，
+         loaded 累加拉取行数。 */
       const seen = new Set(get().entries.map((e) => e.id));
       const next = (rows ? rows.map(articleRowToEntry) : []).filter((a) => {
         if (seen.has(a.id)) return false;
@@ -294,20 +397,21 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         return true;
       });
       const fetched = rows ? rows.length : 0;
+      const nextCursor = advanceArticlesCursor(cursorAtStart, rows ?? []);
       if (fetched < ARTICLES_PAGE_SIZE) {
-        // 不足一页 → 已到底（按**拉取行数**判定：偏移漂移去重后追加数变短不代表到底）
+        // 不足一页 → 已到底（按**拉取行数**判定：与追加去重无关，见 t110 既有语义）
         set((s) => ({
           entries: next.length ? [...s.entries, ...next] : s.entries,
-          articlesLimit: offset + fetched,
-          articlesCursor: { ...s.articlesCursor, [scopeKey]: offset + fetched },
+          articlesLimit: nextCursor.loaded,
+          articlesCursor: { ...s.articlesCursor, [scopeKey]: nextCursor },
           articlesLoading: false,
           articlesExhausted: true,
         }));
       } else {
         set((s) => ({
           entries: next.length ? [...s.entries, ...next] : s.entries,
-          articlesLimit: offset + fetched,
-          articlesCursor: { ...s.articlesCursor, [scopeKey]: offset + fetched },
+          articlesLimit: nextCursor.loaded,
+          articlesCursor: { ...s.articlesCursor, [scopeKey]: nextCursor },
           articlesLoading: false,
         }));
       }
@@ -345,6 +449,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const sortAtStart = get().timelineSort;
     const scopeKeyAtStart = QueryScope.pageKey(scopeAtStart, layoutAtStart);
     const scopeArgs = QueryScope.args(scopeAtStart, sortAtStart, layoutAtStart);
+    /* TASK-119（审计 P2-4①探针 P5）：筛选视图发起 = 视图快照写入者，取 per-key
+       查询代际（不推全局代际——切视图不得使在途后台刷新的全局态更新作废，
+       理由见文件头机制说明）。queryKey = viewKey = pageKey×视图口径（TASK-117
+       键族）：同键两次发起、先发后至的旧版本由落地判据识别丢弃；A→B→A 的再次
+       发起 bump 同键代际，使最初那次发起过期。 */
+    const queryKey = QueryScope.viewKey(layoutAtStart, view, scopeAtStart);
+    const gen = beginViewQuery(queryKey);
     let rows;
     try {
       rows = await api.listArticles({
@@ -374,16 +485,22 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     )) {
       return;
     }
+    /* TASK-119：同查询旧版本丢弃——同键此后已有更新的首屏发起（P5 的两次同查询、
+       A→B→A 的回跳、或该键上更新的锚定/重拉），本次响应属于过期查询实例，整体
+       丢弃。既有 view/scopeKey/sort 守卫在「参数全同」时不可判别，由代际补齐。 */
+    if (currentFirstPageSerial(queryKey) !== gen) return;
     // 替换 entries（筛选视图首屏），重置分页游标（续拉与「全部」视图同机制）
     // TASK-103：同 reloadFromBackend——快照替换按 id 继承正文与水合终态（合并
     // 逻辑收口在 mergeSnapshotEntries，不得在此另写一份），终态按 id 裁剪。
     // TASK-111①：经 setViewEntriesSnapshot 收口——单键实体预算 + 分页元数据。
+    // TASK-117：首屏游标 = keyset 锚（本页最后一行），与「全部」视图同一推进语义。
     const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
-    setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, view, scopeAtStart), merged.entries, rows.length, rows.length < ARTICLES_PAGE_SIZE);
+    const firstPageCursor = cursorAfterFirstPage(rows);
+    setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, view, scopeAtStart), merged.entries, firstPageCursor, rows.length < ARTICLES_PAGE_SIZE);
     set((s) => ({
       entries: merged.entries,
-      articlesLimit: rows.length,
-      articlesCursor: { ...s.articlesCursor, [scopeKeyAtStart]: rows.length },
+      articlesLimit: firstPageCursor.loaded,
+      articlesCursor: { ...s.articlesCursor, [scopeKeyAtStart]: firstPageCursor },
       /* TASK-110①：exhausted 真实判定（原恒 true——近似全集的副产品） */
       articlesExhausted: rows.length < ARTICLES_PAGE_SIZE,
       articlesLoading: false,
@@ -404,8 +521,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (get().dataMode !== 'tauri') return;
     // 递增代际：使先前触发的 reloadFromBackend（如 selectView('all') 触发的）
     // 结果失效，避免其覆盖本锚定结果（竞态）。
-    const gen = ++reloadGeneration;
+    // TASK-119：统一为 beginGlobalQuery——锚定是窗口替换写入者（entries/游标
+    // 整体替换），取全局代际（此后任何更新的查询发起都使本锚定过期，两阶段
+    // 各查一次），同时记录该键首屏代际（使该键在途续页/筛选响应过期）。
     const st = get();
+    const gen = beginGlobalQuery(QueryScope.viewKey(st.activeContentLayout, st.activeViewFilter, st.activeFeedFilter));
     /* 映射当前订阅范围 → feed_id / folder_id（与 markCurrentViewAllRead 同口径）。
        TASK-052：与 loadMoreArticles 共用 scopeQueryArgs，两个入口的口径不再各写一份。
        注意顺序契约：本 action 按**调用时**的范围/排序构造查询，调用方（命令面板）
@@ -425,7 +545,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       get().showToast(`打开文章失败：${extractError(e)}`);
       return;
     }
-    if (gen !== reloadGeneration) return; // 期间又有更新的导航操作
+    if (gen !== queryGeneration) return; // 期间又有更新的导航操作
     if (pos == null) return;
     // 从目标位置加载一页（若位置靠前，offset 为负会被 SQLite 截断为 0，安全）
     const offset = Math.max(0, pos);
@@ -436,7 +556,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       get().showToast(`打开文章失败：${extractError(e)}`);
       return;
     }
-    if (gen !== reloadGeneration) return;
+    if (gen !== queryGeneration) return;
     if (!rows) return;
     /* TASK-103：锚定分页同样是快照替换——按 id 继承正文与水合终态（收口在
        mergeSnapshotEntries），终态按 id 裁剪，不再整体清空。 */
@@ -444,10 +564,15 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        在途乐观声明失效（bump）。 */
     const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), get().hydratedIds, get().hydrationErrors, true);
     const next = merged.entries;
+    /* TASK-117：锚定窗口的续拉游标 = 窗口最后一行的 keyset 锚；base.loaded 取
+       offset（窗口前的行未进 entries，但「已看过的位置」计数口径与修前
+       articlesLimit=offset+行数 逐字一致）。窗口为空（pos 越界）保留空锚，
+       续拉回落 offset 语义（anchorToArticle 的请求本就带 offset）。 */
+    const anchorCursor = advanceArticlesCursor(emptyArticlesCursor(offset), rows ?? []);
     set((s) => ({
       entries: next,
-      articlesLimit: offset + next.length,
-      articlesCursor: { ...s.articlesCursor, [scopeKey]: offset + next.length },
+      articlesLimit: anchorCursor.loaded,
+      articlesCursor: { ...s.articlesCursor, [scopeKey]: anchorCursor },
       articlesExhausted: next.length < ARTICLES_PAGE_SIZE,
       articlesLoading: false,
       activeArticleId: articleId,
@@ -466,10 +591,17 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const { settings: stSettings, dataMode: stMode } = get();
     const target = get().entries.find((a) => a.id === articleId);
     if (stMode === 'tauri' && stSettings.markReadOnOpen && target && !target.isRead) {
+      /* TASK-118（审计相邻缺口）：与 selectArticle 同口径——打开即标读失败走
+         统一回滚助手 rollbackEntryClaims（乐观置位后快照 isRead 字段版本；
+         恢复读态 + 逐 feed 回补 unread，版本守卫：期间已被接管则跳过），
+         不再只提示。边界裁定同 selectArticle：失败只回滚读态与计数，不清
+         activeArticleId（文章刚被锚定打开，用户还在读）。 */
+      markEntriesRead(new Set([articleId]));
+      const claim: EntryRollbackClaim = { id: articleId, field: 'isRead', prev: false, version: getEntryVersion(articleId, 'isRead') };
       void api.setRead(Number(articleId), true).catch((e) => {
+        rollbackEntryClaims([claim]);
         get().showToast(`标读失败：${extractError(e)}`);
       });
-      markEntriesRead(new Set([articleId]));
     }
     // 打开文章：触发智能全文（与 selectArticle 一致）
     get().ensureArticleContent(articleId, { extractFulltext: true });

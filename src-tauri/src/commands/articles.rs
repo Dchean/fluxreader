@@ -27,6 +27,12 @@ pub struct ArticleListArgs {
     /// （article/social/image/podcast/notification）。省略 = 不过滤（既有调用
     /// 逐字不变）；过滤口径与 mark_all_read 同源（feed 级覆盖 → 分类兜底）。
     pub layout: Option<String>,
+    /// TASK-117：keyset 续拉游标锚——上一页最后一行的 (published_at 原文, id)。
+    /// wire 键为 snake_case（与 feed_id 等既有键同一命名口径）。两者**成对**给出
+    /// 才启用 keyset 谓词；省略 = 既有 OFFSET 语义（首屏/锚定路径不带）。
+    /// last_published 是外部字符串，后端只经绑定参数进入 SQL（注入面为零）。
+    pub last_published: Option<String>,
+    pub last_id: Option<i64>,
 }
 
 #[tauri::command]
@@ -63,6 +69,8 @@ fn article_query(args: &ArticleListArgs) -> db::ArticleQuery {
         offset: args.offset.unwrap_or(0),
         with_content: args.with_content.unwrap_or(false),
         layout: args.layout.clone(),
+        last_published: args.last_published.clone(),
+        last_id: args.last_id,
     }
 }
 
@@ -570,6 +578,8 @@ mod bulk_read_tests {
             "offset": 100,
             "with_content": true,
             "layout": "image",
+            "last_published": "2026-01-01T00:00:00+08:00",
+            "last_id": 42,
         });
 
         let args: ArticleListArgs = serde_json::from_value(json_payload).unwrap();
@@ -584,8 +594,19 @@ mod bulk_read_tests {
         assert_eq!(args.with_content, Some(true));
         // TASK-094：可选 layout（snake_case 键名与前端一致）；缺省 = None
         assert_eq!(args.layout.as_deref(), Some("image"));
+        // TASK-117：keyset 游标锚（snake_case wire 键，原文透传不重格式化）
+        assert_eq!(
+            args.last_published.as_deref(),
+            Some("2026-01-01T00:00:00+08:00")
+        );
+        assert_eq!(args.last_id, Some(42));
         let without: ArticleListArgs =
             serde_json::from_value(serde_json::json!({ "limit": 1 })).unwrap();
         assert_eq!(without.layout, None, "layout 缺省必须是 None（不过滤）");
+        assert_eq!(
+            without.last_published, None,
+            "last_published 缺省必须是 None（走既有 OFFSET 语义）"
+        );
+        assert_eq!(without.last_id, None, "last_id 缺省必须是 None");
     }
 }
