@@ -94,15 +94,16 @@ def seed(total):
             feed = random.choice(feed_rows)["id"]
             title = f"{random.choice(titles)} #{i:06d}"
             body = "".join(f"<p>样本段落 {i}-{k}：用于大库滚动与查询测量的合成内容，长度足够产生真实渲染成本。</p>" for k in range(3))
+            rfc = time.strftime('%Y-%m-%dT%H:%M:%S+08:00', time.gmtime(now - i * 60 + 8 * 3600))
             vals = {"feed_id": feed, "title": title, "content_html": body, "snippet": title,
                     "author": "phase4-seed", "url": f"https://seed.local/article/{i}",
-                    "published_at": now - i * 60, "is_read": random.random() < 0.7,
+                    "published_at": rfc, "is_read": random.random() < 0.7,
                     "is_starred": random.random() < 0.05}
             use = [c for c in a_cols if c in vals]
             if "guid" in a_cols and "guid" not in use:
                 use.append("guid"); vals["guid"] = f"seed-{i}"
             if "created_at" in a_cols and "created_at" not in use:
-                use.append("created_at"); vals["created_at"] = now - i * 60
+                use.append("created_at"); vals["created_at"] = rfc
             ph = ",".join("?" * len(use))
             conn.execute(f"INSERT INTO articles ({','.join(use)}) VALUES ({ph})", [vals[c] for c in use])
             if i % 2000 == 0:

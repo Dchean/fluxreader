@@ -6,7 +6,7 @@
 // 纪律：本脚本只读测量（滚动/点击/读堆内存），不写应用数据；DB 注入由 phase4_seed.py 负责。
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { connect, findPageTarget, waitFor, CDP_PORT } from './t059_cdp.mjs';
+import { connect, findPageTarget, CDP_PORT } from './t059_cdp.mjs';
 
 const outArg = process.argv.indexOf('--out');
 const OUT = outArg > -1 ? resolve(process.argv[outArg + 1]) : 'tmp/phase4/measure-report.json';
@@ -14,14 +14,11 @@ const OUT = outArg > -1 ? resolve(process.argv[outArg + 1]) : 'tmp/phase4/measur
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
-  const wsUrl = await findPageTarget(CDP_PORT, (t) =>
-    (t.title || '').includes('FluxReader') || (t.url || '').startsWith('http'));
-  if (!wsUrl) throw new Error('未找到应用页面：确认应用已带 --remote-debugging-port=9222 启动');
-  const cdp = await connect(wsUrl);
+  const target = await findPageTarget(CDP_PORT);
+  if (!target) throw new Error('未找到应用页面：确认应用已带 --remote-debugging-port=9222 启动');
+  const cdp = await connect(target.webSocketDebuggerUrl);
   const send = (method, params = {}) => cdp.send(method, params);
-  const evalJs = async (expr) => (await send('Runtime.evaluate', {
-    expression: expr, returnByValue: true, awaitPromise: true,
-  })).result?.result?.value;
+  const evalJs = async (expr) => await cdp.evaluate(expr);
 
   const report = { capturedAt: new Date().toISOString(), port: CDP_PORT, measures: {} };
 
@@ -40,6 +37,8 @@ async function main() {
   await evalJs(`(() => { const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()==='文章'); if(b) b.click(); })()`);
   await sleep(1000);
   const frameStats = await evalJs(`(async () => {
+    let cards = document.querySelectorAll('[data-card-index]').length;
+    if (!cards) { for (const n of ['社交','通知','播客','画廊']) { const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===n); if(b) b.click(); await new Promise(r=>setTimeout(r,800)); cards = document.querySelectorAll('[data-card-index]').length; if (cards) break; } }
     const scrollers = [...document.querySelectorAll('div')].filter(d => d.scrollHeight > d.clientHeight + 200 && d.clientHeight > 300);
     const list = scrollers.sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
     if (!list) return { error: 'no-scrollable-list' };
@@ -58,26 +57,34 @@ async function main() {
   // ---- M3 切换延迟（点击订阅源/视图 → 列表重渲染完成）----
   report.measures.switchLatency = [];
   const feedButtons = await evalJs(`[...document.querySelectorAll('button')].filter(b => /\\d$/.test(b.textContent.trim()) && b.closest('[class*=feed], li, [class*=sidebar]')).slice(0, 3).map(b => b.textContent.trim())`);
-  for (const label of (feedButtons || []).slice(0, 3)) {
+  const hasCards = await evalJs(`document.querySelectorAll('[data-card-index]').length > 0`);
+  for (const label of (hasCards ? (feedButtons || []).slice(0, 3) : [])) {
     const t0 = Date.now();
     await evalJs(`(() => { const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${JSON.stringify(label)}); if(b) b.click(); })()`);
     await evalJs(`new Promise((res) => { const t0=Date.now(); const iv=setInterval(()=>{ const done=document.querySelectorAll('[data-card-index]').length>0 || Date.now()-t0>8000; if(done){clearInterval(iv);res();} },50); })`);
     report.measures.switchLatency.push({ target: label, ms: Date.now() - t0 });
     await sleep(400);
   }
+  if (!hasCards) report.measures.switchLatency.push({ skipped: '当前布局无数据卡片（feed 绑定其他布局），延迟测量在绑定布局轮执行' });
 
   // ---- M4 搜索延迟（Ctrl+K → 输入 → 结果出现）----
-  await send('Input.dispatchKeyEvent', { type: 'keyDown', modifiers: ['ctrl'], key: 'k', code: 'KeyK', windowsVirtualKeyCode: 75 });
-  await send('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: ['ctrl'], key: 'k', code: 'KeyK', windowsVirtualKeyCode: 75 });
+  await evalJs(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', code: 'KeyK', ctrlKey: true, bubbles: true }))`);
   await sleep(500);
   const search = await evalJs(`(async () => {
     const input = document.querySelector('input[type=text], input:not([type])');
     if (!input) return { error: 'no-search-input' };
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
     const t0 = performance.now();
-    setter.call(input, 'rust'); input.dispatchEvent(new Event('input', { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 1200));
-    return { ms: Math.round(performance.now() - t0), resultText: (document.body.textContent.match(/结果|条/g) || []).length };
+    setter.call(input, '#000001'); input.dispatchEvent(new Event('input', { bubbles: true }));
+    const t0b = performance.now();
+    await new Promise((res) => {
+      const iv = setInterval(() => {
+        const overlay = document.body.textContent;
+        const done = /000001/.test(overlay) && (performance.now() - t0b > 150);
+        if (done || performance.now() - t0 > 5000) { clearInterval(iv); res(); }
+      }, 50);
+    });
+    return { typedMs: Math.round(t0b - t0), resultMs: Math.round(performance.now() - t0) };
   })()`);
   report.measures.search = search;
   await evalJs(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
