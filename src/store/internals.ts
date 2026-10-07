@@ -1,5 +1,6 @@
 import type { StoreApi } from 'zustand';
 import { extractError } from '../lib/api';
+import type { ArticleListItemRow } from '../lib/api';
 import type {
   ArticleEntry,
   CategoryGroup,
@@ -7,7 +8,7 @@ import type {
   FeedItem,
   ViewFilterType,
 } from '../types';
-import type { AppState } from './types';
+import type { AppState, ArticlesCursorState } from './types';
 
 /* ============================================================
    跨 slice 共享的模块级基础设施。
@@ -63,16 +64,15 @@ const VIEW_ENTRIES_CACHE_MAX = 8;
 export const VIEW_ENTRIES_CACHE_ENTRY_BUDGET = 1000;
 
 /** TASK-111①：视图缓存值 = 条目快照 + 分页元数据。
-    loadedCount = 写入时该视图真实已从后端加载的总数（per-scope 游标值，≥
-    entries.length：按 id 去重的偏移漂移会让 entries 短于游标，见 TASK-110②）；
-    exhausted = 写入时的真实到底判定（fetched < PAGE_SIZE）。
-    恢复路径（nav 三处缓存命中）必须用这两个**记录值**恢复游标与 exhausted，
-    不得用截断后的 entries.length 重算——截断后长度若 < 页大小（预算更小的
-    未来取值）或边界相邻，都会把「还有数据」误判成「已到底」（或反），且
-    续拉 offset 会回退重拉已去重丢弃的区间。 */
+    TASK-117：cursor = 写入时该 scope 的 keyset 游标（ArticlesCursorState，原
+    loadedCount 的超集：loaded 字段承接原「已加载总数」语义，lastPublished/lastId
+    是续拉锚）。恢复路径（nav 三处缓存命中）必须用这两个**记录值**恢复游标与
+    exhausted，不得用截断后的 entries.length 重算——截断后长度若 < 页大小
+    （预算更小的未来取值）或边界相邻，都会把「还有数据」误判成「已到底」（或反），
+    且续拉锚会回退重拉已去重丢弃的区间。 */
 export interface ViewEntriesSnapshot {
   entries: ArticleEntry[];
-  loadedCount: number;
+  cursor: ArticlesCursorState;
   exhausted: boolean;
 }
 
@@ -110,13 +110,15 @@ export const viewEntriesCache: Map<string, ViewEntriesSnapshot> = new LRUMap<Vie
 
 /** TASK-111①：视图缓存写入唯一收口（三个写入点共用：reloadFromBackend /
     reloadFilteredEntries / syncCurrentViewCache）——单键实体预算在此一处执行，
-    超限尾部截断后连同分页元数据（loadedCount / exhausted，取写入时真值）落键。
-    loadedCount 以 max(记录值, 截断长度) 兜底：正常路径记录值 ≥ 截断长度
-    （entries ⊆ 已加载窗口）；mock 模式无游标（articlesLimit=0），兜底让恢复
-    游标退回「快照长度」——与预算引入前的恢复行为逐字一致。 */
-export function setViewEntriesSnapshot(key: string, entries: ArticleEntry[], loadedCount: number, exhausted: boolean): void {
+    超限尾部截断后连同分页元数据（cursor / exhausted，取写入时真值）落键。
+    TASK-117：第二参从 loadedCount 改为完整 keyset 游标；loaded 以
+    max(记录值, 截断长度) 兜底：正常路径记录值 ≥ 截断长度（entries ⊆ 已加载
+    窗口）；mock 模式无游标（articlesCursor 空表），调用方以
+    emptyArticlesCursor(articlesLimit) 兜底，让恢复游标退回「快照长度」——与
+    预算引入前的恢复行为逐字一致。 */
+export function setViewEntriesSnapshot(key: string, entries: ArticleEntry[], cursor: ArticlesCursorState, exhausted: boolean): void {
   const trimmed = entries.length > VIEW_ENTRIES_CACHE_ENTRY_BUDGET ? entries.slice(0, VIEW_ENTRIES_CACHE_ENTRY_BUDGET) : entries;
-  viewEntriesCache.set(key, { entries: trimmed, loadedCount: Math.max(loadedCount, trimmed.length), exhausted });
+  viewEntriesCache.set(key, { entries: trimmed, cursor: { ...cursor, loaded: Math.max(cursor.loaded, trimmed.length) }, exhausted });
 }
 
 /** 视图缓存 key：布局 × 视图 × 订阅范围（scope）。
@@ -139,12 +141,37 @@ export function viewCacheKey(layout: ContentLayoutType, view: ViewFilterType, sc
    后果：单源/单分类视图下滚，取回的不是该源的后续文章；且列表为空时哨兵
    不渲染（items.length > 0 才渲染），该源的老文章永远够不到。
 
+   TASK-117（审计 P1-1）：游标值从「已加载条数（OFFSET）」改为 keyset 锚
+   （ArticlesCursorState：lastPublished/lastId/loaded）——可变筛选集合上 OFFSET
+   不等价于已看条数（读 500 标读后集合剩 700，下一页仍 OFFSET 500 → 跳过 500 篇
+   并假 exhausted）。锚 = 已加载窗口最后一行的 (published_at 原文, id)，续拉请求
+   「严格排在锚之后」，与集合增删无关。
+
    本模块把「查询口径」收口成一处：
    - scopeQueryArgs(scope, sort)：订阅范围 + 排序 → 后端参数（feed_id/folder_id
      /newest_first），与 anchorToArticle / markCurrentViewAllRead 同口径；
    - scopePageKey(scope, view)：分页游标键 —— 筛选口径可独立翻页，但共享
      entries，故游标键**只取订阅范围**（feed/分类），不含视图与排序。
    ============================================================ */
+
+/** TASK-117：空游标（无 keyset 锚：lastPublished/lastId 为 null，仅计 loaded）。
+    首屏 / mock 模式 / 游标缺省回落用。 */
+export function emptyArticlesCursor(loaded = 0): ArticlesCursorState {
+  return { lastPublished: null, lastId: null, loaded };
+}
+
+/** TASK-117：由后端行推进 keyset 游标——锚 = 最后一行的 (published_at 原文, id)。
+    base：续拉传游标现值（loaded 累加），首屏传 emptyArticlesCursor()。
+    空页保留原锚（loaded 不变）：空页即到底（fetched < PAGE_SIZE → exhausted），
+    该锚不会再被消费；保留原值使游标仍是「已看过的最后一篇」。 */
+export function advanceArticlesCursor(base: ArticlesCursorState, rows: ArticleListItemRow[]): ArticlesCursorState {
+  const last = rows.length ? rows[rows.length - 1] : null;
+  return {
+    lastPublished: last ? (last.published_at ?? null) : base.lastPublished,
+    lastId: last ? last.id : base.lastId,
+    loaded: base.loaded + rows.length,
+  };
+}
 
 /** 从字符串 id（纯数字 / 'cat-' / 'feed-' 前缀）提取后端数字 id。
     （与 selectors.numericId 同形；此处模块内私有，避免 internals ↔ selectors 循环依赖） */
@@ -230,15 +257,21 @@ export function viewFilterArgs(view: ViewFilterType): { only_unread?: boolean; o
     漂移即整页丢弃：
     - scopeKey 漂移：查询口径已换（切范围/切布局）；
     - 游标漂移：reload / 缓存恢复已重置该范围的分页进度（D3 / TASK-052）；
-    - 排序漂移：offset 的含义随排序翻转（F1），旧排序的响应属于另一查询口径；
+    - 排序漂移：keyset 锚的含义随排序翻转（F1——同锚点在 newest/oldest 下指向
+      不同的后续集合），旧排序的响应属于另一查询口径；
     - 视图漂移（TASK-110）：筛选视图分页化后切视图会整体替换 entries 并重置
-      同键游标，旧视图的在途分页响应不得追加进新视图列表（游标数值可能恰好
-      相等，须显式比较视图维度）。 */
+      同键游标，旧视图的在途分页响应不得追加进新视图列表（锚点数值可能恰好
+      相等，须显式比较视图维度）。
+    TASK-117：游标从单值 offset 改为 keyset 三元组，任一字段漂移都判过期
+    （锚点被推进 / reload 重置，两种竞态都覆盖）。 */
 export function paginationStale(
-  atStart: { scopeKey: string; sort: 'newest' | 'oldest'; offset: number; view: ViewFilterType },
-  now: { scopeKey: string; sort: 'newest' | 'oldest'; offset: number; view: ViewFilterType },
+  atStart: { scopeKey: string; sort: 'newest' | 'oldest'; cursor: ArticlesCursorState; view: ViewFilterType },
+  now: { scopeKey: string; sort: 'newest' | 'oldest'; cursor: ArticlesCursorState; view: ViewFilterType },
 ): boolean {
-  return now.scopeKey !== atStart.scopeKey || now.offset !== atStart.offset
+  return now.scopeKey !== atStart.scopeKey
+    || now.cursor.lastPublished !== atStart.cursor.lastPublished
+    || now.cursor.lastId !== atStart.cursor.lastId
+    || now.cursor.loaded !== atStart.cursor.loaded
     || now.sort !== atStart.sort || now.view !== atStart.view;
 }
 
@@ -355,15 +388,17 @@ export function mergeSnapshotEntries(
     乐观更新（标读/收藏/水合）只改 store.entries，缓存若不联动，切走视图再
     切回会用旧快照覆盖新状态（正文丢失、标读回退）。
     TASK-111①：经 setViewEntriesSnapshot 收口——同一单键实体预算 + 元数据。
-    元数据取 store 现值：游标镜像 articlesLimit 即当前视图真实已加载数（TASK-110
-    起筛选视图与「全部」共享同键游标，该值对两者同义），exhausted 同理；
-    mock 模式无游标（0），由收口内的 max 兜底回快照长度（恢复行为不变）。 */
+    TASK-117：元数据取当前 scope 的 keyset 游标现值（原 articlesLimit 镜像的
+    超集）；mock 模式无游标（articlesCursor 空表），以 emptyArticlesCursor
+    (articlesLimit) 兜底，loaded 由收口内的 max 兜底回快照长度（恢复行为不变）。 */
 export function syncCurrentViewCache(entries: ArticleEntry[]) {
   const s = appStore().getState();
+  const cursor = s.articlesCursor[QueryScope.pageKey(s.activeFeedFilter, s.activeContentLayout)]
+    ?? emptyArticlesCursor(s.articlesLimit);
   setViewEntriesSnapshot(
     viewCacheKey(s.activeContentLayout, s.activeViewFilter, s.activeFeedFilter),
     entries,
-    s.articlesLimit,
+    cursor,
     s.articlesExhausted,
   );
 }

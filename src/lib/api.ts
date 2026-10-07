@@ -162,6 +162,13 @@ export interface ArticleListArgs {
   /** 布局过滤（TASK-094 / REQ-107，可选）：后端按 feed 级覆盖 → 分类兜底过滤，
       列表分页因此带布局维度。省略 = 不过滤。 */
   layout?: string;
+  /** TASK-117：keyset 续拉游标锚——上一页最后一行的 (published_at 原文, id)。
+      两者成对给出才生效（后端缺一回落 OFFSET 既有语义）；last_published 必须
+      原样透传后端返回的 published_at 字符串（RFC3339），不得本地重格式化——
+      后端谓词与排序共用同一字符串比较口径，重格式化会让游标错位。
+      省略 = 走既有 OFFSET 语义（首屏/锚定路径不带本键）。 */
+  last_published?: string | null;
+  last_id?: number | null;
 }
 
 /** 后端聚合的精确条目计数（按 feed 分组）——侧边栏数字用，不受列表分页 limit 影响 */

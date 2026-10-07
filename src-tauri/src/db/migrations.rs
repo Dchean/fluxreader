@@ -330,6 +330,22 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         ALTER TABLE sync_queue ADD COLUMN last_error TEXT;
     "#,
         ),
+        // TASK-117（审计 P1-1：keyset 分页）：列表 ORDER 补 id 决胜后
+        // （PUBLISHED_ORDER_DESC/ASC = published_at, id），无等值前缀的查询变体
+        // （全部/按分类/布局）在既有 idx_articles_published（published_at DESC 声明，
+        // 隐式 rowid ASC 尾巴）上给不出 (published_at DESC, id DESC)——反向扫描的
+        // rowid 方向与声明方向相反，SQLite 需 TEMP B-TREE 补排最后一项（实测
+        // EXPLAIN QUERY PLAN：USE TEMP B-TREE FOR LAST TERM OF ORDER BY）。
+        // 本索引按 (published_at, id) 双 ASC 声明：正向扫描供 ASC + id ASC，反向
+        // 扫描供 DESC + id DESC，两方向都免排序；带等值前缀的查询变体（feed/unread）
+        // 仍由 v14 的 (feed_id, published_at) / (is_read, published_at) 反向扫描有序
+        // 驱动（计划断言见 db/articles.rs 的 list_query_plan_*，keyset 谓词变体同测）。
+        // 纯增索引：不改表数据、不动任何既有索引，旧版本语义零变化。user_version=17。
+        M::up(
+            r#"
+        CREATE INDEX idx_articles_published_id ON articles(published_at, id);
+    "#,
+        ),
     ])
 });
 

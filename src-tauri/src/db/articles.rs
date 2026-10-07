@@ -138,17 +138,47 @@ pub struct ArticleQuery {
     /// （feed 级覆盖 → 分类兜底，见 [`LAYOUT_FILTER_SQL`]）。
     /// None = 不按布局过滤（既有行为逐字不变）。
     pub layout: Option<String>,
+    /// TASK-117：keyset 续拉游标锚——上一页最后一行的 (published_at 原文, id)。
+    /// **两者同时给出**才启用 keyset 谓词（缺一回落 OFFSET 既有语义：成对约束
+    /// 避免半截游标的歧义；前端续拉恒成对发送）。article_index 不消费本字段
+    /// （锚定求的是全筛选集里的绝对位置，与续拉起点无关），谓词只在
+    /// [`list_articles_sql`] 追加、不进 [`article_where`]。
+    pub last_published: Option<String>,
+    pub last_id: Option<i64>,
 }
 
-/// 列表排序表达式（M-5 / REQ-108）：纯 `published_at`——`list_articles` 与
-/// `article_index` 的窗口排序共用同一常量，保证「绝对位置」与「列表顺序」
-/// 同口径。published_at 非空不变量由 v14 迁移的触发器 + 写入兜底固化
-/// （见 db/migrations.rs），使本表达式与旧 `COALESCE(published_at, fetched_at)`
-/// 逐行等价（由 migrations 的排序等价测试锁定），并可直接由
-/// idx_articles_published / idx_articles_feed_published / idx_articles_read_published
-/// 有序驱动，免 TEMP B-TREE 排序（计划断言见本文件测试）。
-pub(crate) const PUBLISHED_ORDER_DESC: &str = "a.published_at DESC";
-pub(crate) const PUBLISHED_ORDER_ASC: &str = "a.published_at ASC";
+/// 列表排序表达式（M-5 / REQ-108；TASK-117 起补 `a.id` 决胜）——
+/// `list_articles` 与 `article_index` 的窗口排序共用同一常量，保证「绝对位置」
+/// 与「列表顺序」同口径。published_at 非空不变量由 v14 迁移的触发器 + 写入兜底
+/// 固化（见 db/migrations.rs），使本表达式与旧 `COALESCE(published_at, fetched_at)`
+/// 逐行等价（由 migrations 的排序等价测试锁定）。
+///
+/// TASK-117（审计 P1-1）：keyset 分页要求排序键是**全序**——published_at 是
+/// 秒级粒度的 TEXT，同秒文章此前顺序不定（SQLite 对相等键保持扫描序，非确定），
+/// keyset 游标会因此重复/漏行。补 `a.id`（INTEGER PRIMARY KEY = rowid）决胜后
+/// 全序成立。索引有序驱动（免 TEMP B-TREE）由 v17 迁移的
+/// idx_articles_published_id (published_at, id) 承接（ASC 声明可正向供 ASC+id ASC、
+/// 反向供 DESC+id DESC；原 idx_articles_published 的 DESC 声明带隐式 rowid ASC 尾巴，
+/// 反向扫描给不出 id DESC，实测 EXPLAIN 见 tmp/audit-20261007 后的本卡探查）；
+/// feed/unread 等带等值前缀的查询仍由 idx_articles_feed_published /
+/// idx_articles_read_published 反向扫描有序驱动（计划断言见本文件测试）。
+pub(crate) const PUBLISHED_ORDER_DESC: &str = "a.published_at DESC, a.id DESC";
+pub(crate) const PUBLISHED_ORDER_ASC: &str = "a.published_at ASC, a.id ASC";
+
+/// TASK-117：keyset 续拉谓词（DESC：严格排在游标**之前**）。占位符按出现次序
+/// 绑定（last_published 两次 + last_id 一次），外部字符串 last_published 只经
+/// 绑定参数进入 SQL，无任何拼接（注入面为零，由 `list_articles_sql` 的组装
+/// 方式保证——条件文本只来自本文件常量）。
+/// 比较必须是**裸字符串**比较（与 [`PUBLISHED_ORDER_DESC`] 同一表达式口径）：
+/// keyset 正确性的根基是「谓词的『游标之后』≡ 排序的『下一行』」——若谓词用
+/// datetime() 规范化而排序仍按原文（或反过来），混合时区/格式形态下行会在两套
+/// 序之间错位（跳行/重复）。datetime() 包列还会让索引无法有序驱动（TEMP B-TREE，
+/// 破坏 M-5 计划断言）。混合 offset 形态的时间语义由 v15 归一 + 生产写入恒
+/// RFC3339 保证；即便存在历史混排，字符串序也是**确定的全序**，游标在同一序里
+/// 续拉就不重不漏（分页正确性与时间语义正交）。
+const KEYSET_PREDICATE_DESC: &str = "(a.published_at < ? OR (a.published_at = ? AND a.id < ?))";
+/// 同 [`KEYSET_PREDICATE_DESC`]，ASC 方向（严格排在游标**之后**）。
+const KEYSET_PREDICATE_ASC: &str = "(a.published_at > ? OR (a.published_at = ? AND a.id > ?))";
 
 /// 组装列表查询 SQL + 绑定（`list_articles` 的生产字节；测试对同一产物跑
 /// EXPLAIN QUERY PLAN，见 `list_query_plan_*`）。
@@ -170,6 +200,33 @@ fn list_articles_sql(q: &ArticleQuery) -> (String, Vec<rusqlite::types::Value>) 
     );
     // 值全部走绑定参数（占位符序号即绑定顺序），条件文本只拼固定字符串
     let (where_clauses, mut params) = article_where(q);
+    // TASK-117：keyset 续拉——游标锚成对给出时追加「严格排在游标之后」的谓词
+    // （方向随排序翻转），并停用 OFFSET 语义（offset 参数保留绑定、调用方传 0）。
+    // last_published 是外部字符串，只经绑定参数进入 SQL（见 KEYSET_PREDICATE_* 注释）。
+    if let (Some(last_published), Some(last_id)) = (&q.last_published, q.last_id) {
+        let (predicate, dir_params): (&'static str, Vec<rusqlite::types::Value>) = if q.newest_first
+        {
+            (
+                KEYSET_PREDICATE_DESC,
+                vec![
+                    last_published.clone().into(),
+                    last_published.clone().into(),
+                    last_id.into(),
+                ],
+            )
+        } else {
+            (
+                KEYSET_PREDICATE_ASC,
+                vec![
+                    last_published.clone().into(),
+                    last_published.clone().into(),
+                    last_id.into(),
+                ],
+            )
+        };
+        where_clauses.push(predicate);
+        params.extend(dir_params);
+    }
     if !where_clauses.is_empty() {
         sql.push_str(" WHERE ");
         sql.push_str(&where_clauses.join(" AND "));
@@ -187,6 +244,9 @@ fn list_articles_sql(q: &ArticleQuery) -> (String, Vec<rusqlite::types::Value>) 
     // ——TASK-110 起真分页；100000 是废除前 reloadFilteredEntries 的「近似全集」
     // 旧字面量，本处旧注释引用有误）。
     params.push(q.limit.max(0).into());
+    // TASK-117：OFFSET 保留（兼容既有调用方），但前端列表续拉已改走 keyset
+    // 谓词（last_published/last_id 成对给出时 OFFSET 恒为 0——两种游标不同时
+    // 生效，见上方 keyset 组装处）。
     params.push(q.offset.into());
     (sql, params)
 }
@@ -243,7 +303,11 @@ fn article_where(q: &ArticleQuery) -> (Vec<&'static str>, Vec<rusqlite::types::V
 /// 用窗口函数 ROW_NUMBER() OVER (ORDER BY ...) - 1 求位置，供前端「搜索/深层
 /// 打开文章后只加载目标那一页」的双向分页锚定——无需从头拉全量。
 /// 排序与 list_articles 完全同口径（[`PUBLISHED_ORDER_DESC`] / [`PUBLISHED_ORDER_ASC`]，
-/// M-5：纯 published_at，与旧 COALESCE 口径逐行等价）。
+/// M-5：纯 published_at + TASK-117 起共用的 a.id 决胜，与旧 COALESCE 口径逐行等价；
+/// ROW_NUMBER 的窗口 ORDER 与列表 ORDER 共用同一常量，锚定位置与列表顺序天然同序，
+/// 并列 published_at 由 id 决胜后窗口序确定）。
+/// 注意：本函数不消费 [`ArticleQuery::last_published`] / [`ArticleQuery::last_id`]
+/// （keyset 游标只作用于 [`list_articles`]）——锚定求的是**全筛选集**里的绝对位置。
 pub fn article_index(
     conn: &Connection,
     q: &ArticleQuery,
@@ -1097,6 +1161,8 @@ mod tests {
             offset: 0,
             with_content: false,
             layout: None,
+            last_published: None,
+            last_id: None,
         };
         let ids: Vec<i64> = list_articles(&conn, &q)
             .unwrap()
@@ -1194,6 +1260,8 @@ mod tests {
             offset: 0,
             with_content: false,
             layout: layout.map(str::to_string),
+            last_published: None,
+            last_id: None,
         }
     }
 
@@ -1313,7 +1381,6 @@ mod tests {
         .unwrap();
         assert_eq!(page[0].id, target);
     }
-
     /* ---------- P3[4]：purge_remote_data 必须保住用户自建的空目录 ---------- */
 
     /// 用户自建空目录（无订阅、无远端绑定）在断开连接后必须保留。
@@ -1658,6 +1725,8 @@ mod tests {
             offset: 0,
             with_content: false,
             layout: layout.map(|s| s.to_string()),
+            last_published: None,
+            last_id: None,
         }
     }
 
@@ -2036,6 +2105,8 @@ mod tests {
             offset: 0,
             with_content: false,
             layout: None,
+            last_published: None,
+            last_id: None,
         };
         assert!(
             list_articles(&conn, &q(-1)).unwrap().is_empty(),
@@ -2060,5 +2131,246 @@ mod tests {
             3,
             "前端合法大值（ARTICLES_PAGE_SIZE=100000）必须原样放行"
         );
+    }
+
+    /* ============================================================
+    TASK-117（审计 P1-1）：keyset 分页谓词——可变集合上连续翻页不丢不重
+    ============================================================ */
+
+    /// 夹具：12 篇文章，published_at 按 i/3 分 4 组（组内**同秒并列**），
+    /// id 随插入递增。预期全序：DESC = (published_at DESC, id DESC)——
+    /// 同秒组内按 id 降序；ASC 反向。
+    fn seed_keyset_fixture() -> (Connection, i64, Vec<i64>) {
+        let conn = conn();
+        let fid = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://k.example/feed",
+            None,
+            "k",
+            None,
+            fid,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        let mut ids = Vec::new();
+        for i in 0..12 {
+            let group = i / 3;
+            let (aid, _) = upsert_article_with_feed(
+                &conn,
+                feed,
+                &na(
+                    &format!("k{i}"),
+                    Some(format!("2026-01-01T00:{:02}:00+00:00", group * 10)),
+                ),
+                false,
+            )
+            .unwrap();
+            ids.push(aid);
+        }
+        (conn, feed, ids)
+    }
+
+    fn keyset_q(feed: i64, newest_first: bool, only_unread: bool) -> ArticleQuery {
+        ArticleQuery {
+            feed_id: Some(feed),
+            folder_id: None,
+            only_unread,
+            only_starred: false,
+            only_today: false,
+            newest_first,
+            limit: 0,
+            offset: 0,
+            with_content: false,
+            layout: None,
+            last_published: None,
+            last_id: None,
+        }
+    }
+
+    /// 全序期望（DESC）：published_at 降序，同秒组内 id 降序。
+    fn expected_desc_order(ids: &[i64]) -> Vec<i64> {
+        let mut keyed: Vec<(String, i64)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (format!("2026-01-01T00:{:02}:00+00:00", (i / 3) * 10), *id))
+            .collect();
+        keyed.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        keyed.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// 全序期望（ASC）：published_at 升序，同秒组内 id 升序。
+    fn expected_asc_order(ids: &[i64]) -> Vec<i64> {
+        let mut keyed: Vec<(String, i64)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (format!("2026-01-01T00:{:02}:00+00:00", (i / 3) * 10), *id))
+            .collect();
+        keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        keyed.into_iter().map(|(_, id)| id).collect()
+    }
+
+    /// keyset 连续翻页走完全集：每页 limit=page，锚 = 上一页最后一行，
+    /// OFFSET 恒 0（前端续拉形态）。
+    fn walk_by_keyset(conn: &Connection, q: &ArticleQuery, page: i64) -> Vec<i64> {
+        let mut cursor = q.clone();
+        cursor.limit = page;
+        cursor.offset = 0;
+        let mut out = Vec::new();
+        loop {
+            let rows = list_articles(conn, &cursor).unwrap();
+            let n = rows.len() as i64;
+            out.extend(rows.iter().map(|r| r.id));
+            if n < page {
+                break;
+            }
+            let last = rows.last().unwrap();
+            cursor.last_published = last.published_at.clone();
+            cursor.last_id = Some(last.id);
+        }
+        out
+    }
+
+    /// OFFSET 连续翻页走完全集（不可变集合上的参照实现）。
+    fn walk_by_offset(conn: &Connection, q: &ArticleQuery, page: i64) -> Vec<i64> {
+        let mut cursor = q.clone();
+        cursor.limit = page;
+        let mut out = Vec::new();
+        loop {
+            let rows = list_articles(conn, &cursor).unwrap();
+            let n = rows.len() as i64;
+            out.extend(rows.iter().map(|r| r.id));
+            if n < page {
+                break;
+            }
+            cursor.offset += page;
+        }
+        out
+    }
+
+    /// keyset 谓词正确性①：DESC/ASC 两方向、同秒并列由 id 决胜、
+    /// 与 OFFSET 路径在不可变集合上逐页等价（keyset 全集 == offset 全集）。
+    /// 这同时锁定「首页一致」：两路径的第一页来自同一序（offset 0 / 无谓词）。
+    #[test]
+    fn keyset_pagination_matches_offset_and_resolves_ties() {
+        let (conn, feed, ids) = seed_keyset_fixture();
+
+        let desc = keyset_q(feed, true, false);
+        let keyset_desc = walk_by_keyset(&conn, &desc, 5);
+        let offset_desc = walk_by_offset(&conn, &desc, 5);
+        assert_eq!(
+            keyset_desc,
+            expected_desc_order(&ids),
+            "DESC keyset 全序：published_at 降序 + 同秒组 id 降序（不重不漏走完全集）"
+        );
+        assert_eq!(
+            keyset_desc, offset_desc,
+            "同集合同排序下 keyset 翻页必须与 OFFSET 翻页逐页等价（DESC）"
+        );
+
+        let asc = keyset_q(feed, false, false);
+        let keyset_asc = walk_by_keyset(&conn, &asc, 5);
+        let offset_asc = walk_by_offset(&conn, &asc, 5);
+        assert_eq!(
+            keyset_asc,
+            expected_asc_order(&ids),
+            "ASC keyset 全序：published_at 升序 + 同秒组 id 升序"
+        );
+        assert_eq!(
+            keyset_asc, offset_asc,
+            "同集合同排序下 keyset 翻页必须与 OFFSET 翻页逐页等价（ASC）"
+        );
+    }
+
+    /// keyset 谓词正确性②（审计 P1 探针场景的本体）：可变筛选集合
+    /// （WHERE is_read=0）上读掉一页后续拉——keyset 必须返回**剩余集合**的
+    /// 下一页（OFFSET 语义在此会跳过 (页大小) 行并假 exhausted）。
+    #[test]
+    fn keyset_continuation_tracks_mutable_unread_collection() {
+        let (conn, feed, _) = seed_keyset_fixture();
+        let page = 5i64;
+        let unread = keyset_q(feed, true, true);
+        // 预期全序（未读视图与全集合同序：全部行未读）
+        let expected = expected_desc_order(&seed_ids(&conn));
+        let mut seen: Vec<i64> = Vec::new();
+
+        let mut cursor = unread.clone();
+        cursor.limit = page;
+        loop {
+            let rows = list_articles(&conn, &cursor).unwrap();
+            let fetched = rows.len();
+            let page_ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+            // 操作序列：读掉当前页（真实「打开即标读」的批量形态）
+            for id in &page_ids {
+                set_read(&conn, *id, true).unwrap();
+            }
+            seen.extend(&page_ids);
+            if fetched < page as usize {
+                break;
+            }
+            let last = rows.last().unwrap();
+            cursor.last_published = last.published_at.clone();
+            cursor.last_id = Some(last.id);
+        }
+
+        assert_eq!(
+            seen, expected,
+            "可变集合上连续「读一页→续拉」必须不重不漏走完全集"
+        );
+    }
+
+    /// keyset 谓词正确性③：同秒并列组跨页边界——锚行的同秒兄弟（published_at
+    /// 相等、id 更小）必须由 `published_at = ? AND a.id < ?` 分支在本页续上，
+    /// 不得因 `published_at < ?` 单臂漏行（页大小刻意与组大小互质：5 vs 3）。
+    #[test]
+    fn keyset_tie_group_spans_page_boundary_without_gap() {
+        let (conn, feed, ids) = seed_keyset_fixture();
+        let q = keyset_q(feed, true, false);
+        let page = 5i64;
+
+        let mut cursor = q.clone();
+        cursor.limit = page;
+        cursor.offset = 0;
+        let first = list_articles(&conn, &cursor).unwrap();
+        assert_eq!(first.len(), 5, "夹具自检：满页");
+        let anchor = first.last().unwrap();
+        // 锚行所属同秒组的兄弟（id 更小）必然一部分已被本页包含、一部分没有：
+        // 断言锚的 published_at 与首屏某行相同（同秒组跨页的前提成立）
+        assert!(
+            first
+                .iter()
+                .any(|r| r.published_at == anchor.published_at && r.id != anchor.id),
+            "夹具自检：锚行的同秒兄弟必须部分落在首屏（组跨页边界）"
+        );
+
+        cursor.last_published = anchor.published_at.clone();
+        cursor.last_id = Some(anchor.id);
+        let second = list_articles(&conn, &cursor).unwrap();
+        let second_ids: Vec<i64> = second.iter().map(|r| r.id).collect();
+        // 第二页 = 全序中严格排在锚之后的 5 行；其中必须含锚的同秒兄弟（id < 锚 id 且同秒）
+        let want = expected_desc_order(&ids);
+        let anchor_pos = want.iter().position(|id| *id == anchor.id).unwrap();
+        assert_eq!(
+            second_ids,
+            want[anchor_pos + 1..anchor_pos + 6],
+            "keyset 第二页必须恰好是全序中锚之后的 5 行（同秒兄弟由 id 决胜臂续上）"
+        );
+        assert!(
+            second
+                .iter()
+                .any(|r| r.published_at == anchor.published_at && r.id < anchor.id),
+            "第二页必须含锚行的同秒兄弟（= 分支生效），否则谓词退化为纯 < 比较"
+        );
+    }
+
+    /// 夹具辅助：从库中按插入序取回 ids（expected_* 依赖插入序与分组的关系）。
+    fn seed_ids(conn: &Connection) -> Vec<i64> {
+        let mut stmt = conn.prepare("SELECT id FROM articles ORDER BY id").unwrap();
+        stmt.query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
     }
 }

@@ -361,7 +361,11 @@ await (async () => {
     const d = new Date(ms);
     return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
   };
-  /* 内存版 list_articles：支持 范围/未读/收藏/今天/排序/分页，行为与后端契约一致 */
+  /* 内存版 list_articles：支持 范围/未读/收藏/今天/排序/keyset 分页，
+     行为与后端契约一致。TASK-117：排序补 id 决胜（与后端 ORDER BY
+     a.published_at, a.id 同口径）；last_published/last_id 成对给出时按 keyset
+     谓词取「严格排在锚之后」的行（OFFSET 停用）——锚点与集合增删无关，
+     这是 t117 操作序列回归（阅读中翻页/取消收藏）假后端语义的根基。 */
   function queryRows(a = {}) {
     let out = backendRows.slice();
     if (a.feed_id != null) out = out.filter((r) => r.feed_id === a.feed_id);
@@ -370,7 +374,15 @@ await (async () => {
     if (a.only_starred) out = out.filter((r) => r.is_starred);
     if (a.only_today) out = out.filter((r) => localDayKey(Date.parse(r.published_at)) === localDayKey(NOW));
     const dir = a.newest_first === false ? 1 : -1;
-    out.sort((x, y) => dir * (Date.parse(x.published_at) - Date.parse(y.published_at)));
+    out.sort((x, y) => (dir * (Date.parse(x.published_at) - Date.parse(y.published_at))) || (dir * (x.id - y.id)));
+    if (a.last_published != null && a.last_id != null) {
+      /* keyset 谓词（与后端同语义；比较用 published_at 原文——假后端的
+         published_at 恒为 toISOString 的统一形态，字符串序与时间序一致） */
+      out = out.filter((r) => dir < 0
+        ? (r.published_at < a.last_published || (r.published_at === a.last_published && r.id < a.last_id))
+        : (r.published_at > a.last_published || (r.published_at === a.last_published && r.id > a.last_id)));
+      return out.slice(0, a.limit == null ? out.length : a.limit);
+    }
     const off = a.offset || 0;
     return out.slice(off, a.limit == null ? out.length : off + a.limit);
   }
@@ -450,6 +462,22 @@ await (async () => {
            数字 1/0 会让 reload 后的 entry.isRead 变成 number，破坏 `=== true` 形态
            的守卫/断言（快照替换场景因此失真） */
         if (row) row.is_read = args.read === true;
+        return Promise.resolve(null);
+      }
+      /* TASK-117：单条收藏忠实落库（record_star_state 语义：仅该行自身）——
+         取消收藏场景的续拉回归（t117-2）需要后端集合真实收缩。 */
+      case 'set_starred': {
+        const row = backendRows.find((r) => r.id === Number(args.id));
+        if (row) row.is_starred = args.starred === true;
+        return Promise.resolve(null);
+      }
+      /* TASK-117：批量标读忠实落库（apply_read_bulk 语义：逐 id 翻转自身行）——
+         阅读中连续翻页回归（t117-1）需要 is_read=0 的筛选集合真实收缩。 */
+      case 'set_read_bulk': {
+        for (const id of args.ids ?? []) {
+          const row = backendRows.find((r) => r.id === Number(id));
+          if (row) row.is_read = args.read === true;
+        }
         return Promise.resolve(null);
       }
       /* TASK-107：mark_all_read 忠实落库（apply_mark_all_read 语义：整个
@@ -586,7 +614,7 @@ await (async () => {
      继续），与「当前范围已加载 8 条」脱节。per-scope 游标下首批游标 = 实际行数，
      并且按范围键（此处 'article|all'，TASK-094 起含布局）记进 articlesCursor。 */
   checkNew('(a) 首批分页游标 = 实际行数（per-scope：不再硬编码 PAGE_SIZE）、8 行 < 500 视为已到底、加载态收起',
-    aOk.entries.length === 8 && aOk.articlesLimit === 8 && aOk.articlesCursor['article|all'] === 8
+    aOk.entries.length === 8 && aOk.articlesLimit === 8 && aOk.articlesCursor['article|all']?.loaded === 8
     && aOk.articlesExhausted === true && aOk.articlesLoading === false);
 
   /* 【TASK-103 改动理由】旧断言「新快照清空 hydratedIds/hydrationErrors」锁的
@@ -648,8 +676,12 @@ await (async () => {
     selectScopeEntries(store.getState()).map((e) => e.id).join(',') === '201,202');
   store.setState({ activeContentLayout: 'article' });
   store.getState().selectFeed('cat-1');
+
+  /* 【TASK-117 改动理由】期望顺序随并列决胜更新：BASE_ROWS 此前按插入序稳定排序，
+     id 决胜后同秒组内 id 降序——TODAY 组 {201,102,101}、OLD 组 {301,202,105,104,103}；
+     断言意图（集合成员与派生口径）不变，仅并列序变化。 */
   checkNew('(b) 同一分类在 article 布局下覆盖源A+源D（5 条）',
-    selectScopeEntries(store.getState()).map((e) => e.id).join(',') === '101,102,103,104,105');
+    selectScopeEntries(store.getState()).map((e) => e.id).join(',') === '102,101,105,104,103');
 
   store.setState({ activeViewFilter: 'all', timelineFilter: 'unread', activeFeedFilter: 'all' });
   const treeUnread = selectTreeCounts(store.getState());
@@ -683,17 +715,21 @@ await (async () => {
   await bootFixture();
   store.setState({ activeViewFilter: 'starred' });
   await store.getState().reloadFilteredEntries('starred');
+
+  /* 【TASK-117 改动理由】期望顺序随并列决胜更新：BASE_ROWS 此前按插入序稳定排序，
+     id 决胜后同秒组内 id 降序——TODAY 组 {201,102,101}、OLD 组 {301,202,105,104,103}；
+     断言意图（集合成员与派生口径）不变，仅并列序变化。 */
   checkNew('(c) 收藏视图拉取走 only_starred：entries 只剩 3 条收藏（跨布局，布局在派生层过滤）',
-    store.getState().entries.map((e) => e.id).join(',') === '102,201,103');
+    store.getState().entries.map((e) => e.id).join(',') === '201,102,103');
   store.setState({ activeViewFilter: 'all', entries: [], articlesLimit: 0, articlesExhausted: false });
   store.getState().selectView('starred');
   const cCache = store.getState();
   checkNew('(c) selectView 命中视图缓存：同步恢复快照（零延迟、游标=快照长度、标记已到底）',
-    cCache.activeViewFilter === 'starred' && cCache.entries.map((e) => e.id).join(',') === '102,201,103'
+    cCache.activeViewFilter === 'starred' && cCache.entries.map((e) => e.id).join(',') === '201,102,103'
     && cCache.articlesLimit === 3 && cCache.articlesExhausted === true);
   await nTick(20);
   checkNew('(c) 缓存命中后的后台静默刷新不改变收藏视图结论',
-    store.getState().entries.map((e) => e.id).join(',') === '102,201,103');
+    store.getState().entries.map((e) => e.id).join(',') === '201,102,103');
 
   store.setState({ activeViewFilter: 'all', entries: [], articlesLimit: 0, openedReadIds: { '102': true } });
   store.getState().selectView('unread');
@@ -706,7 +742,7 @@ await (async () => {
      exhausted 真实判定为 true。判定条件本身（6 条/游标=行数/已到底）与修前一致，
      只改措辞对齐新语义，不弱化保护。 */
   checkNew('(c) 未读视图走 only_unread 拉取首屏：只剩 6 条未读、游标=行数、不足一页即真实判定已到底',
-    cUnread.entries.map((e) => e.id).join(',') === '101,201,103,104,105,301'
+    cUnread.entries.map((e) => e.id).join(',') === '201,101,301,105,104,103'
     && cUnread.articlesLimit === 6 && cUnread.articlesExhausted === true && cUnread.articlesLoading === false);
   store.getState().selectView('today');
   await nTick(20);
@@ -715,12 +751,16 @@ await (async () => {
     cToday.length > 0 && cToday.every((e) => localDayKey(e.publishedAt) === localDayKey(Date.now())));
 
   await bootFixture();
-  checkNew('(c) 全部视图 + 显示全部：article 布局可见 5 条，按发布时间降序',
-    selectVisibleEntries(store.getState()).map((e) => e.id).join(',') === '101,102,103,104,105');
+
+  /* 【TASK-117 改动理由】期望顺序随并列决胜更新：BASE_ROWS 此前按插入序稳定排序，
+     id 决胜后同秒组内 id 降序——TODAY 组 {201,102,101}、OLD 组 {301,202,105,104,103}；
+     断言意图（集合成员与派生口径）不变，仅并列序变化。 */
+  checkNew('(c) 全部视图 + 显示全部：article 布局可见 5 条，按发布时间降序（同秒由 id 决胜）',
+    selectVisibleEntries(store.getState()).map((e) => e.id).join(',') === '102,101,105,104,103');
   store.getState().toggleTimelineFilter();
   checkNew('(c) toggleTimelineFilter → 未读：已读条目从可见集合移除，未读保留',
     store.getState().timelineFilter === 'unread'
-    && selectVisibleEntries(store.getState()).map((e) => e.id).join(',') === '101,103,104,105');
+    && selectVisibleEntries(store.getState()).map((e) => e.id).join(',') === '101,105,104,103');
   store.getState().toggleTimelineFilter();
   checkNew('(c) 再次 toggle 回「全部」：已读条目重新可见（可逆）',
     store.getState().timelineFilter === 'all' && selectVisibleEntries(store.getState()).length === 5);
@@ -766,9 +806,13 @@ await (async () => {
     && Object.keys(dAfter.openedReadIds).length === 0 && dAfter.activeViewFilter === 'all');
   checkNew('(d) 布局切换是纯本地过滤：entries 引用不变（不触发 reload、不闪空）',
     store.getState().entries === dEntriesRef && store.getState().articlesLoading === false);
+
+  /* 【TASK-117 改动理由】期望顺序随并列决胜更新：BASE_ROWS 此前按插入序稳定排序，
+     id 决胜后同秒组内 id 降序——TODAY 组 {201,102,101}、OLD 组 {301,202,105,104,103}；
+     断言意图（集合成员与派生口径）不变，仅并列序变化。 */
   checkNew('(d) 派生集合按布局解析：article = 源A+源D，social = 源B+源C',
-    selectRawEntries({ ...store.getState(), activeContentLayout: 'article' }).map((e) => e.id).join(',') === '101,102,103,104,105'
-    && selectRawEntries(store.getState()).map((e) => e.id).join(',') === '201,202,301');
+    selectRawEntries({ ...store.getState(), activeContentLayout: 'article' }).map((e) => e.id).join(',') === '102,101,105,104,103'
+    && selectRawEntries(store.getState()).map((e) => e.id).join(',') === '201,301,202');
   store.setState({ activeContentLayout: 'image' });
   checkNew('(d) image 布局无绑定源 → 派生集合为空（不串其他布局条目）',
     selectRawEntries(store.getState()).length === 0 && selectVisibleEntries(store.getState()).length === 0);
@@ -792,7 +836,7 @@ await (async () => {
   await nTick(0);
   checkNew('(d) updateCatLayout 后 inherit 源的条目跟随分类布局迁移（源C 进 podcast）',
     store.getState().feedIndex.get('20')?.cat.layout === 'podcast'
-    && selectRawEntries({ ...store.getState(), activeContentLayout: 'podcast' }).map((e) => e.id).join(',') === '201,202,301'
+    && selectRawEntries({ ...store.getState(), activeContentLayout: 'podcast' }).map((e) => e.id).join(',') === '201,301,202'
     && selectRawEntries(store.getState()).length === 0
     && invokeCalls.some((c) => c.cmd === 'update_folder_layout' && c.args.id === 2 && c.args.layout === 'podcast'));
 
@@ -980,8 +1024,13 @@ await (async () => {
   await store.getState().loadMoreArticles();
   const gMore = store.getState();
   const gListCall = invokeCalls.find((c) => c.cmd === 'list_articles');
-  checkNew('(g) 追加加载以游标为 offset：500→503，条目顺序连续不重复',
-    gListCall?.args.args.offset === 500 && gMore.articlesLimit === 503 && gMore.entries.length === 503
+  /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚（last_published/
+     last_id = 首屏最后一行 5499 的原文锚）——offset 正是本卡废除的缺陷手法，
+     wire 断言随行为变化更新。 */
+  checkNew('(g) 追加加载以 keyset 锚续拉（last_published/last_id=首屏末行 5499，无 offset）：500→503，条目顺序连续不重复',
+    gListCall?.args.args.last_published === iso(NOW - 499 * 60000) && gListCall?.args.args.last_id === 5499
+    && gListCall?.args.args.offset === undefined
+    && gMore.articlesLimit === 503 && gMore.entries.length === 503
     && gMore.entries[500].id === '5500' && gMore.entries[502].id === '5502');
   checkNew('(g) 不足一页 → 置 articlesExhausted 且游标按实际行数推进',
     gMore.articlesExhausted === true && gMore.articlesLoading === false);
@@ -1017,7 +1066,9 @@ await (async () => {
   listPlan = { mode: 'defer' };
   const pMore = store.getState().loadMoreArticles();
   await nTick(0);
-  store.setState({ articlesLimit: 0, articlesLoading: false });   // 模拟期间发生 reload 重置游标
+  /* 模拟期间发生 reload 重置游标：TASK-117 起守卫比对 per-scope keyset 游标，
+     重置必须写游标本身（真实 reload 正是镜像+游标原子同写） */
+  store.setState({ articlesLimit: 0, articlesLoading: false, articlesCursor: { 'article|all': { lastPublished: null, lastId: null, loaded: 0 } } });
   pendingList[0].resolve([mkRow({ id: 7001, feed_id: 10 })]);
   await pMore;
   listPlan = null;
@@ -1029,11 +1080,14 @@ await (async () => {
      articlesLoading=false，把这个缺陷掩盖了 —— 这里保留在途加载态（模拟真实
      竞态：加载期间 selectView 命中视图缓存恢复快照，只写游标不碰 loading），
      修前 articlesLoading 会永久停在 true，入口守卫随即永久挡住后续所有分页。 */
-  store.setState({ articlesLoading: false, articlesExhausted: false, articlesLimit: 100, entries: [] });
+  /* TASK-117：先给游标一个锚（上一场景的空游标已被重置），随后在途期间重置为
+     空游标——守卫比对 per-scope keyset 游标，锚漂移即过期（重置须写游标本身，
+     真实 reload 正是镜像+游标原子同写） */
+  store.setState({ articlesLoading: false, articlesExhausted: false, articlesLimit: 100, entries: [], articlesCursor: { 'article|all': { lastPublished: iso(NOW - 100000), lastId: 5499, loaded: 100 } } });
   listPlan = { mode: 'defer' };
   const pRace = store.getState().loadMoreArticles();
   await nTick(0);
-  store.setState({ articlesLimit: 0 });          // 期间游标被重置，加载态仍为 true
+  store.setState({ articlesLimit: 0, articlesCursor: { 'article|all': { lastPublished: null, lastId: null, loaded: 0 } } });
   pendingList[pendingList.length - 1].resolve([mkRow({ id: 7100, feed_id: 10 })]);
   await pRace;
   listPlan = null;
@@ -1060,9 +1114,14 @@ await (async () => {
   invokeCalls.length = 0;
   await store.getState().anchorToArticle('301');
   const hAnchor = store.getState();
+  /* 【TASK-117 改动理由】期望页内容随 id 决胜序更新：BASE_ROWS 的 TODAY/OLD 并列组
+     此前按插入序稳定排序（101,102 / 103..301），id 决胜后并列组内 id 降序
+     （102,101 / 301,202,201,105,104,103）——301 的绝对位置从 7 变 2，锚定页
+     从 [301] 变为其所在窗口的 6 行；断言意图（锚定到目标所在页）不变。 */
   checkNew('(h) 搜索结果锚定：按绝对位置拉取该页并选中（不再从头拉 500 篇）',
     invokeCalls.some((c) => c.cmd === 'article_index')
-    && hAnchor.activeArticleId === '301' && hAnchor.entries.map((e) => e.id).join(',') === '301'
+    && hAnchor.activeArticleId === '301'
+    && hAnchor.entries.map((e) => e.id).join(',') === '301,202,105,104,103'
     && hAnchor.articlesLimit === 8 && hAnchor.articlesExhausted === true
     && hAnchor.openedReadIds['301'] === true);
 
@@ -1084,7 +1143,7 @@ await (async () => {
   indexPlan = null;
   checkNew('(h) 只有最新一次导航生效（activeArticleId=301、列表为其所在页）',
     store.getState().activeArticleId === '301'
-    && store.getState().entries.map((e) => e.id).join(',') === '301');
+    && store.getState().entries.map((e) => e.id).join(',') === '301,202,105,104,103');
 
   await bootFixture();
   store.setState({ activeFeedFilter: '12' });
@@ -2193,7 +2252,7 @@ await (async () => {
   const s1First = store.getState();
   checkNew('(s1) 单源视图首批：查询带 feed_id，条目全部属于该源，游标 = 该范围已加载数（500）',
     s1First.entries.length === 500 && s1First.entries.every((e) => e.feedId === '10')
-    && s1First.articlesLimit === 500 && s1First.articlesCursor['article|10'] === 500
+    && s1First.articlesLimit === 500 && s1First.articlesCursor['article|10']?.loaded === 500
     && s1First.articlesExhausted === false);
   invokeCalls.length = 0;
   await store.getState().loadMoreArticles();
@@ -2207,14 +2266,17 @@ await (async () => {
       .map((r) => String(r.id)),
   );
   const s1Page2 = s1Second.entries.slice(500).map((e) => e.id);
-  checkNew('(s1) 第 2 页请求沿用同一范围与游标（feed_id=10 / offset=500 / newest_first）',
+  /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚——源A 首页末行
+     id 6499（i=499），锚点原文透传。offset 正是本卡废除的缺陷手法。 */
+  checkNew('(s1) 第 2 页请求沿用同一范围与 keyset 锚（feed_id=10 / last_id=6499 / newest_first）',
     s1Page2Call?.args.args.feed_id === 10 && s1Page2Call?.args.args.folder_id === null
-    && s1Page2Call?.args.args.offset === 500 && s1Page2Call?.args.args.newest_first === true);
+    && s1Page2Call?.args.args.last_id === 6499 && s1Page2Call?.args.args.last_published === iso(NOW - 499 * 1000)
+    && s1Page2Call?.args.args.offset === undefined && s1Page2Call?.args.args.newest_first === true);
   checkNew('(s1) 第 2 页取回该源的后续文章：全部属于 feed 10，且与第 1 页 id 集合不重叠',
     s1Second.entries.length === 1000 && s1Second.entries.every((e) => e.feedId === '10')
     && s1Page2.length === 500 && s1Page2.every((id) => !s1Ids1.has(id))
     && s1Page2[0] === '6500' && s1Page2[499] === '6999'
-    && s1Second.articlesLimit === 1000 && s1Second.articlesCursor['article|10'] === 1000);
+    && s1Second.articlesLimit === 1000 && s1Second.articlesCursor['article|10']?.loaded === 1000);
 
   /* ---------- (s4) per-scope 游标互不污染：A 源翻到第 2 页后切 B 源，B 从第 1 页开始 ---------- */
   /* TASK-063：selectFeed 自带接线（缓存命中恢复 / 未命中自动重拉）——此处不再
@@ -2225,21 +2287,25 @@ await (async () => {
   const s4Switch = store.getState();
   checkNew('(s4) 切到未曾加载的源B：游标从 0 起步（不继承源A 的 1000）',
     s4Switch.activeFeedFilter === '11' && s4Switch.articlesLimit === 0
-    && s4Switch.articlesCursor['article|10'] === 1000 && s4Switch.articlesCursor['article|11'] === undefined);
+    && s4Switch.articlesCursor['article|10']?.loaded === 1000 && s4Switch.articlesCursor['article|11'] === undefined);
   await nTick(30);
   const s4FirstCall = invokeCalls.find((c) => c.cmd === 'list_articles');
   const s4First = store.getState();
   checkNew('(s4) selectFeed 自动重拉：源B 首批查询按源B 的第 1 页取（feed_id=11 / offset=0），条目全属源B',
     s4FirstCall?.args.args.feed_id === 11 && s4FirstCall?.args.args.offset === 0
     && s4First.entries.length === 500 && s4First.entries.every((e) => e.feedId === '11')
-    && s4First.articlesCursor['article|11'] === 500 && s4First.articlesCursor['article|10'] === 1000
+    && s4First.articlesCursor['article|11']?.loaded === 500 && s4First.articlesCursor['article|10']?.loaded === 1000
     && s4First.entries.slice(0, 500).every((e) => !s1Ids1.has(e.id)));
   invokeCalls.length = 0;
   await store.getState().loadMoreArticles();
   const s4Call = invokeCalls.find((c) => c.cmd === 'list_articles');
-  checkNew('(s4) 源B 翻页用**源B 自己的游标**（offset=500 而非源A 的 1000）',
-    s4Call?.args.args.feed_id === 11 && s4Call?.args.args.offset === 500
-    && store.getState().articlesCursor['article|11'] === 1000 && store.getState().articlesCursor['article|10'] === 1000);
+  /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚——源B 首页末行
+     id 7499；判别意图不变：锚取自**源B 自己的游标**（而非源A 的 1000）。 */
+  checkNew('(s4) 源B 翻页用**源B 自己的游标**（keyset 锚 last_id=7499 而非源A 的锚）',
+    s4Call?.args.args.feed_id === 11 && s4Call?.args.args.last_id === 7499
+    && s4Call?.args.args.last_published === iso(NOW - 499 * 1000 - 500)
+    && s4Call?.args.args.offset === undefined
+    && store.getState().articlesCursor['article|11']?.loaded === 1000 && store.getState().articlesCursor['article|10']?.loaded === 1000);
   /* 切回源A：TASK-063 新契约——缓存命中同步恢复该范围快照（零延迟，不经 await），
      游标=快照长度（500，可继续翻页）；源B 的游标 1000 不被污染。恢复时清水合
      状态（缓存快照无正文，滞留的已水合标记会阻断重水合）。 */
@@ -2248,12 +2314,12 @@ await (async () => {
   const s4Back = store.getState();
   checkNew('(s4) 切回源A：同步恢复该范围快照（零延迟），游标=快照长度且两源互不污染，滞留水合状态被清空',
     s4Back.entries.length === 500 && s4Back.entries.every((e) => e.feedId === '10')
-    && s4Back.articlesLimit === 500 && s4Back.articlesCursor['article|10'] === 500
-    && s4Back.articlesCursor['article|11'] === 1000
+    && s4Back.articlesLimit === 500 && s4Back.articlesCursor['article|10']?.loaded === 500
+    && s4Back.articlesCursor['article|11']?.loaded === 1000
     && Object.keys(s4Back.hydratedIds).length === 0 && Object.keys(s4Back.hydrationErrors).length === 0);
   await nTick(30);
   checkNew('(s4) 切回源A 后的后台刷新保持该范围快照结论',
-    store.getState().entries.every((e) => e.feedId === '10') && store.getState().articlesCursor['article|10'] === 500);
+    store.getState().entries.every((e) => e.feedId === '10') && store.getState().articlesCursor['article|10']?.loaded === 500);
 
   /* ---------- (s4b) TASK-063 附加契约：selectView 缓存恢复同契约清滞留水合状态；mock 模式不接线 ---------- */
   await bootFixture();
@@ -2291,18 +2357,21 @@ await (async () => {
   const s2First50 = s2First.entries.map((e) => e.id);
   checkNew('(s2) 单分类视图首批：查询带 folder_id，条目只含该分类的源，游标 500',
     s2First.entries.length === 500 && s2First.entries.every((e) => e.feedId === '10' || e.feedId === '12')
-    && s2First.articlesLimit === 500 && s2First.articlesCursor['article|cat-1'] === 500);
+    && s2First.articlesLimit === 500 && s2First.articlesCursor['article|cat-1']?.loaded === 500);
   invokeCalls.length = 0;
   await store.getState().loadMoreArticles();
   const s2Call = invokeCalls.find((c) => c.cmd === 'list_articles');
   const s2Second = store.getState();
-  checkNew('(s2) 第 2 页请求沿用分类口径（folder_id=1 / feed_id=null / offset=500）',
+  /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚——分类首页末行
+     id 9249（feed12 i=249，交错序的最后一行），锚点原文透传。 */
+  checkNew('(s2) 第 2 页请求沿用分类口径与 keyset 锚（folder_id=1 / feed_id=null / last_id=9249）',
     s2Call?.args.args.folder_id === 1 && s2Call?.args.args.feed_id === null
-    && s2Call?.args.args.offset === 500);
+    && s2Call?.args.args.last_id === 9249 && s2Call?.args.args.last_published === iso(NOW - 249300)
+    && s2Call?.args.args.offset === undefined);
   checkNew('(s2) 第 2 页取回该分类的后续文章（不含分类外源C），且与第 1 页不重叠',
     s2Second.entries.length === 1000 && s2Second.entries.every((e) => e.feedId === '10' || e.feedId === '12')
     && s2Second.entries.slice(500).every((e) => !s2First50.includes(e.id))
-    && s2Second.articlesCursor['article|cat-1'] === 1000);
+    && s2Second.articlesCursor['article|cat-1']?.loaded === 1000);
 
   /* ---------- (s3) 列表为空也能推进：单源视图下该源没有文章时，游标不再被首批截断 ----------
      改造前：首批游标恒为 PAGE_SIZE(500)，即使 `entries` 里一条该源的文章都没有，
@@ -2315,7 +2384,7 @@ await (async () => {
   await store.getState().reloadFromBackend();
   const s3Empty = store.getState();
   checkNew('(s3) 空范围首批：查询带 feed_id、游标 = 实际 0 行、立即收敛为已到底（不再假称还有 500 条）',
-    s3Empty.entries.length === 0 && s3Empty.articlesLimit === 0 && s3Empty.articlesCursor['article|10'] === 0
+    s3Empty.entries.length === 0 && s3Empty.articlesLimit === 0 && s3Empty.articlesCursor['article|10']?.loaded === 0
     && s3Empty.articlesExhausted === true && s3Empty.articlesLoading === false);
   invokeCalls.length = 0;
   await store.getState().loadMoreArticles();
@@ -2332,16 +2401,21 @@ await (async () => {
     backendRows.push(mkRow({ id: 4000 + i, feed_id: 20, title: `C${i}`, published_at: iso(NOW - i * 1000) }));
   }
   store.setState({ dataMode: 'tauri', activeFeedFilter: '10' });
-  /* 模拟改造前的口径：首批按全局拉满 500 行，范围里一条都没有 */
-  store.setState({ entries: [], articlesLimit: 500, articlesCursor: { 'article|10': 500 }, articlesExhausted: false });
+  /* 模拟改造前的口径：首批按全局拉满 500 行，范围里一条都没有。
+     TASK-117：游标模拟值同步升为 keyset 形态（锚值任意——本范围查询结果为空，
+     锚不参与判定；断言只看 wire 带了锚与范围）。 */
+  store.setState({ entries: [], articlesLimit: 500, articlesCursor: { 'article|10': { lastPublished: iso(NOW - 500000), lastId: 3999, loaded: 500 } }, articlesExhausted: false });
   invokeCalls.length = 0;
   await store.getState().loadMoreArticles();
   const s3Advance = invokeCalls.find((c) => c.cmd === 'list_articles');
-  checkNew('(s3) 列表为空且未到底时仍可发起下一页：请求带当前范围（feed_id=10 / offset=500）', 
-    s3Advance?.args.args.feed_id === 10 && s3Advance?.args.args.offset === 500);
+  /* 【TASK-117 改动理由】续拉游标从 offset=500 改为 keyset 锚（last_published/last_id
+     成对）——offset 正是本卡废除的缺陷手法，wire 断言随行为变化更新。 */
+  checkNew('(s3) 列表为空且未到底时仍可发起下一页：请求带当前范围与 keyset 锚（feed_id=10 / last_id=3999 / last_published=锚原文，无 offset）',
+    s3Advance?.args.args.feed_id === 10 && s3Advance?.args.args.last_id === 3999
+    && s3Advance?.args.args.last_published === iso(NOW - 500000) && s3Advance?.args.args.offset === undefined);
   checkNew('(s3) 该源确无更多数据时空页把状态收敛为「已到底 + 空列表」（补拉不会无限循环）',
     store.getState().entries.length === 0 && store.getState().articlesExhausted === true
-    && store.getState().articlesLoading === false && store.getState().articlesCursor['article|10'] === 500);
+    && store.getState().articlesLoading === false && store.getState().articlesCursor['article|10']?.loaded === 500);
   /* 再触发：守卫挡住（已到底） */
   invokeCalls.length = 0;
   await store.getState().loadMoreArticles();
@@ -2350,7 +2424,8 @@ await (async () => {
 
   /* ---------- (s5) D2/D3 守住（051 修复不回退） ---------- */
   await resetStore();
-  store.setState({ dataMode: 'tauri', activeFeedFilter: '10', entries: [], articlesLimit: 100, articlesCursor: { 'article|10': 100 }, articlesExhausted: false, toasts: [] });
+  /* TASK-117：游标模拟值升为 keyset 形态（锚值确定性给出，wire 断言核对原文透传） */
+  store.setState({ dataMode: 'tauri', activeFeedFilter: '10', entries: [], articlesLimit: 100, articlesCursor: { 'article|10': { lastPublished: iso(NOW - 100000), lastId: 4999, loaded: 100 } }, articlesExhausted: false, toasts: [] });
   listPlan = { mode: 'reject', error: { message: 'db busy' } };
   invokeCalls.length = 0;
   await store.getState().loadMoreArticles();
@@ -2361,22 +2436,26 @@ await (async () => {
     && typeof s5Fail.toasts[0].action?.run === 'function');
   checkNew('(s5/D2) 失败路径同样复位加载态且不破坏游标/条目',
     s5Fail.articlesLoading === false && s5Fail.articlesLimit === 100
-    && s5Fail.articlesCursor['article|10'] === 100 && s5Fail.entries.length === 0);
+    && s5Fail.articlesCursor['article|10']?.loaded === 100 && s5Fail.entries.length === 0);
   /* D2 的重试按钮真的能重发（把后端恢复后点重试） */
   listPlan = null;
   invokeCalls.length = 0;
   s5Fail.toasts[0].action.run();
   await nTick(20);
-  checkNew('(s5/D2) 失败 toast 的「重试」确实重发分页请求（按当前范围，不是死按钮）',
+  /* 【TASK-117 改动理由】续拉 wire 从 offset=100 改为 keyset 锚——offset 正是
+     本卡废除的缺陷手法，wire 断言随行为变化更新（锚值 = 上方模拟游标的原文）。 */
+  checkNew('(s5/D2) 失败 toast 的「重试」确实重发分页请求（按当前范围 + keyset 锚，不是死按钮）',
     invokeCalls.filter((c) => c.cmd === 'list_articles').length >= 1
-    && invokeCalls.some((c) => c.cmd === 'list_articles' && c.args.args.feed_id === 10 && c.args.args.offset === 100));
+    && invokeCalls.some((c) => c.cmd === 'list_articles' && c.args.args.feed_id === 10
+      && c.args.args.last_id === 4999 && c.args.args.last_published === iso(NOW - 100000)));
   listPlan = null;
 
   /* D3：竞态丢弃分支必须复位 articlesLoading（且新增的 scopeKey 收紧后依然如此）。
      场景：在途加载期间用户切到另一个范围（selectFeed 会把游标换成新范围的值，
-     可能恰好等于 in-flight 的 offset——旧的「只比数值」判据会漏判）。 */
+     可能恰好等于 in-flight 的锚点数值——旧的「只比数值」判据会漏判）。
+     TASK-117：游标模拟值升为 keyset 形态（两范围锚点数值刻意相同——串台判别前提）。 */
   await resetStore();
-  store.setState({ dataMode: 'tauri', activeFeedFilter: '10', entries: [], articlesLimit: 100, articlesCursor: { 'article|10': 100, 'article|11': 100 }, articlesExhausted: false, articlesLoading: false });
+  store.setState({ dataMode: 'tauri', activeFeedFilter: '10', entries: [], articlesLimit: 100, articlesCursor: { 'article|10': { lastPublished: iso(NOW - 100000), lastId: 4999, loaded: 100 }, 'article|11': { lastPublished: iso(NOW - 100000), lastId: 4999, loaded: 100 } }, articlesExhausted: false, articlesLoading: false });
   listPlan = { mode: 'defer' };
   const s5Race = store.getState().loadMoreArticles();
   await nTick(0);
@@ -2404,11 +2483,12 @@ await (async () => {
 
   /* 同范围内的「游标被 reload 重置」这条既有 D3 场景，在新判据下也必须仍然丢弃 */
   await resetStore();
-  store.setState({ dataMode: 'tauri', activeFeedFilter: '10', entries: [], articlesLimit: 100, articlesCursor: { 'article|10': 100 }, articlesExhausted: false });
+  store.setState({ dataMode: 'tauri', activeFeedFilter: '10', entries: [], articlesLimit: 100, articlesCursor: { 'article|10': { lastPublished: iso(NOW - 100000), lastId: 4999, loaded: 100 } }, articlesExhausted: false });
   listPlan = { mode: 'defer' };
   const s5Race2 = store.getState().loadMoreArticles();
   await nTick(0);
-  store.setState({ articlesLimit: 0, articlesCursor: { 'article|10': 0 } });   // 同范围内游标被重置
+  /* TASK-117：重置后的空游标形态（无锚） */
+  store.setState({ articlesLimit: 0, articlesCursor: { 'article|10': { lastPublished: null, lastId: null, loaded: 0 } } });   // 同范围内游标被重置
   pendingList[pendingList.length - 1].resolve([mkRow({ id: 6100, feed_id: 10 })]);
   await s5Race2;
   listPlan = null;
@@ -2438,7 +2518,7 @@ await (async () => {
   const s6Starred = store.getState();
   checkNew('(s6) 同源切「收藏」：查询仍带 feed_id，游标 = 该筛选实际行数（不是 40）',
     s6Starred.entries.length === 3 && s6Starred.entries.every((e) => e.feedId === '10')
-    && s6Starred.articlesLimit === 3 && s6Starred.articlesCursor['article|10'] === 3
+    && s6Starred.articlesLimit === 3 && s6Starred.articlesCursor['article|10']?.loaded === 3
     && s6Starred.articlesExhausted === true);
   /* 视图缓存必须按范围分桶：切回 all 时不能把「源A 收藏」当成「源A 全部」恢复。
      关键证据是**同步恢复**那一步（缓存命中在 reload 之前同步生效，后台刷新随后才到）：
@@ -2454,7 +2534,7 @@ await (async () => {
      机制接棒：恢复后必触发后台 reload 重取真值；本场景 40 条即全量，true 准确。 */
   checkNew('(s6) 切回「全部」缓存命中：同步恢复的是源A 的 40 条（不拿收藏视图的 3 条冒充），游标随之对齐、exhausted 按快照长度真实判定（40<500=已到底）',
     s6BackSync.entries.length === 40 && s6BackSync.entries.every((e) => e.feedId === '10')
-    && s6BackSync.articlesLimit === 40 && s6BackSync.articlesCursor['article|10'] === 40
+    && s6BackSync.articlesLimit === 40 && s6BackSync.articlesCursor['article|10']?.loaded === 40
     && s6BackSync.articlesExhausted === true && s6BackSync.articlesLoading === false);
   listPlan = null;
   await nTick(20);
@@ -2469,7 +2549,7 @@ await (async () => {
     s6D.entries.length === 40 && s6D.entries.every((e) => e.feedId === '12')
     && s6D.articlesLimit === 40 && s6D.articlesExhausted === true);
   checkNew('(s6) per-scope 游标并存：源A 的 40 与源D 的 40 各自记账，互不覆盖',
-    s6D.articlesCursor['article|12'] === 40 && s6D.articlesCursor['article|10'] === 40);
+    s6D.articlesCursor['article|12']?.loaded === 40 && s6D.articlesCursor['article|10']?.loaded === 40);
 
   /* ---------- (s7) 排序切换：游标含义随 newest_first 翻转 ⇒ 必须按新排序重拉 ----------
      只翻转排序键而不重拉时，已加载的快照（旧排序的首批）会与新排序的下一页错位——继续翻页
@@ -2491,17 +2571,18 @@ await (async () => {
   await store.getState().reloadFromBackend();
   const s7Pre = store.getState();
   const s7PreOk = s7Pre.entries.length === 500 && s7Pre.entries[0]?.id === '5000'
-    && s7Pre.articlesCursor['article|10'] === 500 && s7Pre.articlesExhausted === false;
+    && s7Pre.articlesCursor['article|10']?.loaded === 500 && s7Pre.articlesExhausted === false;
   const s7CacheHadSnapshot = viewEntriesCache.size > 0;  // 重拉已把「全部」视图快照写入缓存
-  /* 舞台：list_articles 全部挂起。loadMore 先发（旧排序第 2 页 offset=500），
-     toggle 的重拉后发（新排序首页 offset=0）——按参数匹配挂起项，不按下标。 */
+  /* 舞台：list_articles 全部挂起。loadMore 先发（旧排序第 2 页，keyset 锚
+     last_id=5499），toggle 的重拉后发（新排序首页 offset=0）——按参数匹配挂起项，
+     不按下标。TASK-117：续拉挂起项按 keyset 锚匹配（原 offset=500）。 */
   listPlan = { mode: 'defer' };
   invokeCalls.length = 0;
   store.getState().loadMoreArticles();
   store.getState().toggleTimelineSort();
   const s7CacheCleared = viewEntriesCache.size === 0;    // toggle 同步丢弃各视图快照缓存
   await nTick(30);                                       // reload 的 folders/feeds/counts 落地，两个 list_articles 挂起
-  const s7StaleCall = pendingList.find((p) => p.args.offset === 500);
+  const s7StaleCall = pendingList.find((p) => p.args.last_id === 5499 && p.args.newest_first === true);
   const s7ReloadCall = pendingList.find((p) => p.args.offset === 0 && p.args.newest_first === false);
   s7ReloadCall?.resolve(queryRows(s7ReloadCall.args));   // 重拉先落地：游标仍为 500（F1 场景成立的前提）
   await nTick(30);
@@ -2517,14 +2598,14 @@ await (async () => {
   checkNew('(s7) 切换「最早」：按新排序重拉该范围首页（feed_id=10 / offset=0 / newest_first=false），游标与 entries 同一次写入',
     s7ReloadCall?.args.feed_id === 10 && s7ReloadCall?.args.folder_id === null
     && s7ReloadCall?.args.offset === 0 && s7ReloadCall?.args.newest_first === false
-    && s7.entries.length === 500 && s7.articlesLimit === 500 && s7.articlesCursor['article|10'] === 500);
+    && s7.entries.length === 500 && s7.articlesLimit === 500 && s7.articlesCursor['article|10']?.loaded === 500);
   checkNew('(s7) 重拉后的首批换到另一端（首条 = 全库最老 id 5599），不再是最新端快照',
     s7.entries[0]?.id === '5599' && s7.entries[499]?.id === '5100'
     && s7.entries.every((e) => e.id !== '5000'));
   checkNew('(p3-f1) 旧排序在途页迟到达时被丢弃：无重复、无缺失段（修前 duplicates=100/missing=100，审查探针场景）',
     s7.entries.length === 500 && new Set(s7Ids).size === s7Ids.length
     && s7Ids.every((id) => { const n = Number(id); return n >= 5100 && n <= 5599; })
-    && s7.articlesLimit === 500 && s7.articlesCursor['article|10'] === 500);
+    && s7.articlesLimit === 500 && s7.articlesCursor['article|10']?.loaded === 500);
   checkNew('(s7) 排序键翻转且已读保留快照清空、各视图快照缓存同步丢弃（与视图/范围切换同口径；TASK-093 加强，M4/M4b 变红）',
     s7.timelineSort === 'oldest' && Object.keys(s7.openedReadIds).length === 0
     && s7CacheHadSnapshot && s7CacheCleared);
@@ -2859,7 +2940,7 @@ await (async () => {
     await nTick(20);
     checkNew('(fix-4) 新口径响应照常落地：源B 的收藏行进列表、游标写在新范围键上',
       store.getState().entries.some((e) => e.id === '9002')
-      && store.getState().articlesCursor['article|11'] === 1);
+      && store.getState().articlesCursor['article|11']?.loaded === 1);
     listPlan = null;
   }
 
@@ -3262,7 +3343,7 @@ await (async () => {
       store.getState().entries.map((e) => e.id).join(',') === '103,102,201'
       && store.getState().entries.every((a) => a.isStarred)
       && store.getState().articlesExhausted === true
-      && store.getState().articlesCursor['article|all'] === 3);
+      && store.getState().articlesCursor['article|all']?.loaded === 3);
   }
 
   /* ============================================================
@@ -3317,49 +3398,56 @@ await (async () => {
       && t110Star1stState.entries.every((e) => e.isStarred)
       && t110Star1stState.entries[0]?.id === '1100' && t110Star1stState.entries[499]?.id === '1599'
       && t110Star1stState.articlesExhausted === false && t110Star1stState.articlesLimit === 500
-      && t110Star1stState.articlesCursor['article|all'] === 500);
+      && t110Star1stState.articlesCursor['article|all']?.loaded === 500);
 
     invokeCalls.length = 0;
     await store.getState().loadMoreArticles(); // 筛选视图续拉：与首屏同口径（viewFilter 单点派生）
     const t110Star2nd = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
     const t110Star2ndState = store.getState();
-    checkNew('(t110-2) 收藏视图加载更多同口径 wire：only_starred=true + offset=500（沿用首屏写入的同键游标）+ limit=500',
-      t110Star2nd?.only_starred === true && t110Star2nd?.offset === 500 && t110Star2nd?.limit === 500);
+    /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚（last_published/
+       last_id = 首屏末行 1599 的原文锚）——offset 正是本卡废除的缺陷手法。 */
+    checkNew('(t110-2) 收藏视图加载更多同口径 wire：only_starred=true + keyset 锚（last_id=1599，沿用首屏写入的同键游标）+ limit=500',
+      t110Star2nd?.only_starred === true && t110Star2nd?.last_id === 1599
+      && t110Star2nd?.last_published === iso(NOW - 3 * 86400000 - 499 * 60000)
+      && t110Star2nd?.offset === undefined && t110Star2nd?.limit === 500);
     checkNew('(t110-2) 收藏视图续拉落地：追加剩余 20 条收敛到底（520 条无重复）、exhausted 真实判定为 true（20<500）、游标=520',
       t110Star2ndState.entries.length === 520 && new Set(t110Star2ndState.entries.map((e) => e.id)).size === 520
       && t110Star2ndState.entries[500]?.id === '1600' && t110Star2ndState.entries.at(-1)?.id === '1619'
       && t110Star2ndState.articlesExhausted === true && t110Star2ndState.articlesLimit === 520
-      && t110Star2ndState.articlesCursor['article|all'] === 520);
+      && t110Star2ndState.articlesCursor['article|all']?.loaded === 520);
 
-    /* ---------- (t110-3) 偏移漂移按 id 去重（同步插入场景，判别断言） ----------
-       场景：第 2 页（offset=500）在途期间后端同步入库 10 条更新的文章（插入
-       已加载窗口前端 ⇒ offset 漂移 10），迟到响应由 600 行扩为 610 行序列的
-       offset 500..999 共 110 行，与已加载集合重叠 10 条。
-       判别：修前无去重 ⇒ entries 610 长度含 10 个重复 id（React key 冲突）；
-       修后追加去重保序 ⇒ 600 条唯一、游标按拉取行数推进（500+110=610）、
-       新条目不回填已加载窗口（随下次 reload 进入——策略固化）。 */
+    /* ---------- (t110-3) 插入漂移 keyset 免疫（同步插入场景，判别断言） ----------
+       【TASK-117 改动理由】原断言锁定 offset 分页的「漂移 + 按id去重」补偿手法：
+       第 2 页（offset=500）在途期间后端插入 10 条更新文章 ⇒ 迟到响应 = 新序列
+       offset 500..999 共 110 行，与已加载窗口重叠 10 条，靠追加去重兜住。keyset
+       续拉从根上消除该漂移：锚 = 首屏末行 1599（published_at 原文 + id），迟到
+       响应 = 严格排在锚之后的 100 行（1600..1699），与集合增删无关——不再重叠、
+       无需去重补偿（去重保留作 duplicate key 兜底防线，不回填策略不变）。
+       判别：游标推进 = 500+100=600（offset 语义下为 610），entries 600 条唯一、
+       已加载窗口保序、新增段按序追加；同步插入的 10 条不回填已加载窗口。 */
     await resetStore();
     backendRows = t110Rows();
     await store.getState().bootstrapFromBackend(); // all 视图首批 500：ids 1100..1599
     listPlan = { mode: 'defer' };
-    store.getState().loadMoreArticles(); // 第 2 页（offset=500）在途
+    store.getState().loadMoreArticles(); // 第 2 页（keyset 锚 1599）在途
     await nTick(0); // 微任务排空：第 2 页请求进入 defer 队列
     const t110DriftPage2 = pendingList.at(-1);
     /* 同步插入 10 条（后端同步入库语义；store 无感知、不发 reload、游标不动） */
     for (let i = 0; i < 10; i += 1) {
       backendRows.unshift(mkT110Row({ id: 1700 + i, published_at: iso(NOW), title: `t110 同步插入 ${i}` }));
     }
-    t110DriftPage2?.resolve(queryRows(t110DriftPage2.args)); // 迟到响应 = 新序列 offset 500..999（与已加载重叠 10 条）
+    t110DriftPage2?.resolve(queryRows(t110DriftPage2.args)); // 迟到响应 = 锚之后的 100 行（keyset 免疫插入漂移）
     listPlan = null;
     await nTick(20);
     const t110Drift = store.getState();
     const t110DriftIds = t110Drift.entries.map((e) => e.id);
-    checkNew('(t110-3) 偏移漂移按 id 去重（判别断言）：迟到第 2 页扩为 110 行（漂移后窗口后移），与已加载窗口重叠 10 条（id 1590..1599）不重复入列（entries 600 条唯一，修前为 610 含 10 重复）、已加载窗口保序不变、新增段按序追加（id 1600..1699）',
+    checkNew('(t110-3) 插入漂移 keyset 免疫（判别断言）：迟到第 2 页恰为锚后 100 行（id 1600..1699，无重叠无补拉）、entries 600 条唯一、已加载窗口保序不变、新增段按序追加',
       t110DriftIds.length === 600 && new Set(t110DriftIds).size === 600
       && t110DriftIds.slice(0, 500).join(',') === Array.from({ length: 500 }, (_, k) => String(1100 + k)).join(',')
       && t110DriftIds.slice(500).join(',') === Array.from({ length: 100 }, (_, k) => String(1600 + k)).join(','));
-    checkNew('(t110-3) 偏移漂移游标与新条目策略：游标按拉取行数推进（500+110=610，offset 语义=已看过的后端位置）、exhausted 按拉取行数真实判定（110<500）、同步插入的新条目不回填已加载窗口（追加去重保序，随下次 reload 进入）',
-      t110Drift.articlesLimit === 610 && t110Drift.articlesCursor['article|all'] === 610
+    checkNew('(t110-3) 插入漂移游标与新条目策略：游标 loaded 按拉取行数累加（500+100=600）、锚推进到本页末行 1699、exhausted 按拉取行数真实判定（100<500）、同步插入的新条目不回填已加载窗口（追加去重保序，随下次 reload 进入）',
+      t110Drift.articlesLimit === 600 && t110Drift.articlesCursor['article|all']?.loaded === 600
+      && t110Drift.articlesCursor['article|all']?.lastId === 1699
       && t110Drift.articlesExhausted === true
       && t110DriftIds.every((id) => Number(id) < 1700));
 
@@ -3389,7 +3477,7 @@ await (async () => {
       && t110Sorted.entries.every((e) => e.isStarred)
       && t110SortedHydrated?.content === '<p>t110 水合正文</p>' && t110SortedHydrated?.hydrated === true
       && t110Sorted.hydratedIds['1300'] === true
-      && t110Sorted.articlesCursor['article|all'] === 500 && t110Sorted.articlesExhausted === false);
+      && t110Sorted.articlesCursor['article|all']?.loaded === 500 && t110Sorted.articlesExhausted === false);
 
     /* ---------- (t110-5) 过滤参数逐项：only_unread / only_starred / only_today（article|all） ---------- */
     await resetStore();
@@ -3417,9 +3505,11 @@ await (async () => {
     store.getState().selectView('today');
     await nTick(20);
     const t110TodayArgs = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
-    checkNew('(t110-5) 今天视图首屏 wire：only_today=true（不带其余筛选键），落地只含今天行（2 条）',
+    /* 【TASK-117 改动理由】期望顺序随 id 决胜更新：2105/2106 同秒并列，后端
+       ORDER BY published_at DESC, id DESC（及同口径的本地排序）下 2106 在前。 */
+    checkNew('(t110-5) 今天视图首屏 wire：only_today=true（不带其余筛选键），落地只含今天行（2 条，同秒并列由 id 决胜 2106 在前）',
       t110TodayArgs?.only_today === true && t110TodayArgs?.only_unread === undefined && t110TodayArgs?.only_starred === undefined
-      && store.getState().entries.map((e) => e.id).join(',') === '2105,2106');
+      && store.getState().entries.map((e) => e.id).join(',') === '2106,2105');
     invokeCalls.length = 0;
     store.getState().selectView('starred');
     await nTick(20);
@@ -3466,16 +3556,194 @@ await (async () => {
   }
 
   /* ============================================================
+     TASK-117（审计 P1-1）：可变集合分页改 keyset 游标——阅读中连续翻页不丢文章
+
+     审计 P1 探针场景（tmp/audit-20261007/probes.mjs P1）：未读筛选 WHERE
+     is_read=0 是**可变集合**，OFFSET 不等价于已看条数——1200 未读读 500 标读
+     后集合剩 700，下一页仍 OFFSET 500 → 跳过剩余集合前 500 篇并假 exhausted
+     （探针实测：loaded=700、missingUnread=500、exhausted=true）。修法：续拉以
+     已加载窗口最后一行 (published_at 原文, id) 为 keyset 锚，请求「严格排在锚
+     之后」的行，与集合增删无关。
+
+     门禁纪律（DEC-gate-adjust-20261007）：操作序列场景必须转真实行为回归——
+     本组全部走真实 store 动作序列（翻页 → 标读/取消收藏 → 续拉），不做静态
+     分页断言。假后端 queryRows 已按 keyset 语义升级（排序补 id 决胜 + 谓词），
+     并忠实落库 set_read_bulk / set_starred（后端集合真实收缩是缺陷成因，必须
+     建模，否则操作序列无判别力）。
+     ============================================================ */
+  {
+    const mkT117Row = (o) => mkRow({ feed_id: 10, ...o });
+    /* 1200 行未读夹具：id 3000+i，i 越小越新（published_at 逐行递减，无并列） */
+    const t117Rows = () => Array.from({ length: 1200 }, (_, i) =>
+      mkT117Row({ id: 3000 + i, published_at: iso(NOW - 3 * 86400000 - i * 1000), title: `t117-${i}` }));
+
+    /* ---------- (t117-1) 阅读中连续翻页（审计 P1 探针场景本体） ----------
+       操作序列：未读视图首屏 500 → 批量标读这 500（真实 IPC 落库，集合收缩为
+       700）→ 续拉必须返回**剩余集合的前 500 篇**（id 3500..3999）。OFFSET 语义
+       在此会返回 4000..4199（跳过 500 篇）并假 exhausted。 */
+    await resetStore();
+    backendRows = t117Rows();
+    store.getState().selectView('unread'); // 缓存已清 → 走 reloadFilteredEntries 首屏
+    await nTick(20);
+    const t117p1 = store.getState();
+    checkNew('(t117-1) 前置：未读首屏 500 条（id 3000..3499）、exhausted=false（1200 未读满页，可续拉）',
+      t117p1.entries.length === 500 && t117p1.entries[0].id === '3000' && t117p1.entries[499].id === '3499'
+      && t117p1.articlesExhausted === false);
+    store.getState().markEntriesReadBulk(t117p1.entries.map((e) => e.id)); // 读掉首屏（set_read_bulk 忠实落库）
+    await nTick(0);
+    checkNew('(t117-1) 标读落库后未读集合收缩为 700（假后端忠实翻转 is_read：缺陷成因被建模）',
+      queryRows({ only_unread: true, limit: null }).length === 700);
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles();
+    const t117p1wire = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    const t117p1after = store.getState();
+    checkNew('(t117-1) 续拉 wire：only_unread + keyset 锚（last_published=末行 3499 原文 / last_id=3499，无 offset）',
+      t117p1wire?.only_unread === true && t117p1wire?.last_id === 3499
+      && t117p1wire?.last_published === iso(NOW - 3 * 86400000 - 499 * 1000)
+      && t117p1wire?.offset === undefined && t117p1wire?.limit === 500);
+    checkNew('(t117-1) 续拉落地（判别）：返回剩余集合的前 500 篇（id 3500..3999 按序追加，无重复无跳过）、exhausted=false',
+      t117p1after.entries.length === 1000 && t117p1after.entries[500].id === '3500'
+      && t117p1after.entries.at(-1).id === '3999'
+      && new Set(t117p1after.entries.map((e) => e.id)).size === 1000
+      && t117p1after.articlesExhausted === false);
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles(); // 第三页：剩余 200 条
+    const t117p1end = store.getState();
+    checkNew('(t117-1) 第三页收敛：追加 4000..4199 共 200 条走完集合、exhausted=true（不足一页真实判定）、游标 loaded=1200、锚推进到末行 4199',
+      t117p1end.entries.length === 1200 && t117p1end.entries[1000].id === '4000'
+      && new Set(t117p1end.entries.map((e) => e.id)).size === 1200
+      && t117p1end.articlesExhausted === true && t117p1end.articlesCursor['article|all']?.loaded === 1200
+      && t117p1end.articlesCursor['article|all']?.lastId === 4199);
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles();
+    checkNew('(t117-1) exhausted 判定（判别）：到底后再触发不发 IPC（审计「假 exhausted」的反向锚——真到底才允许挡住续拉）',
+      invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0);
+    checkNew('(t117-1) 全程无遗漏（判别）：审计探针口径 missingUnread=0——剩余未读行（700 条）全部已入列',
+      queryRows({ only_unread: true, limit: null }).every((r) => t117p1end.entries.some((e) => e.id === String(r.id))));
+
+    /* ---------- (t117-2) 取消收藏场景（收藏视图续拉，同性质判别） ----------
+       操作序列：收藏首屏 500 → 逐条取消收藏这 500（set_starred 忠实落库，收藏
+       集合收缩为 20）→ 续拉必须返回剩余 20 条收藏（id 6500..6519）。OFFSET 语义
+       在此返回 0 行并假 exhausted——20 条收藏从此不可达。 */
+    await resetStore();
+    backendRows = Array.from({ length: 600 }, (_, i) =>
+      mkT117Row({ id: 6000 + i, published_at: iso(NOW - 3 * 86400000 - i * 60000), is_starred: i < 520 }));
+    store.getState().selectView('starred');
+    await nTick(20);
+    const t117p2 = store.getState();
+    checkNew('(t117-2) 前置：收藏首屏 500 条（id 6000..6499）、exhausted=false（520 收藏满页，可续拉）',
+      t117p2.entries.length === 500 && t117p2.entries[0].id === '6000' && t117p2.entries[499].id === '6499'
+      && t117p2.articlesExhausted === false);
+    for (const e of t117p2.entries) store.getState().toggleEntryFlag(e.id, 'isStarred'); // 逐条取消收藏（真实卡片操作）
+    await nTick(0);
+    checkNew('(t117-2) 取消收藏落库后收藏集合收缩为 20（set_starred 忠实翻转 is_starred）',
+      queryRows({ only_starred: true, limit: null }).length === 20);
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles();
+    const t117p2wire = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    const t117p2after = store.getState();
+    checkNew('(t117-2) 续拉 wire：only_starred + keyset 锚（last_id=6499，无 offset）',
+      t117p2wire?.only_starred === true && t117p2wire?.last_id === 6499 && t117p2wire?.offset === undefined);
+    checkNew('(t117-2) 续拉落地（判别）：剩余 20 条收藏全部入列（id 6500..6519，修前 OFFSET 返回 0 行且假 exhausted——这 20 条不可达）',
+      t117p2after.entries.length === 520 && t117p2after.entries[500].id === '6500'
+      && t117p2after.entries.at(-1).id === '6519'
+      && new Set(t117p2after.entries.map((e) => e.id)).size === 520
+      && t117p2after.articlesExhausted === true
+      && t117p2after.articlesCursor['article|all']?.loaded === 520);
+
+    /* ---------- (t117-3) 插入漂移（首屏与续拉之间插入新文章） ----------
+       keyset 天然免疫：锚 = 首屏末行 3499，插入的新行比锚更新（排在锚**之前**），
+       不改变「锚之后」的集合——续拉仍返回 3500..3999，与新插入行零重叠零遗漏。
+       （旧 OFFSET 语义下插入使偏移漂移，续拉区间与已加载窗口重叠。） */
+    await resetStore();
+    backendRows = t117Rows();
+    store.getState().selectView('unread');
+    await nTick(20);
+    listPlan = { mode: 'defer' };
+    store.getState().loadMoreArticles(); // 续拉在途（锚 3499）
+    await nTick(0);
+    const t117p3deferred = pendingList.at(-1);
+    for (let i = 0; i < 10; i += 1) { // 后端同步入库 10 条更新文章（未读，比全部已有行新）
+      backendRows.unshift(mkT117Row({ id: 5000 + i, published_at: iso(NOW), title: `t117 插入 ${i}` }));
+    }
+    t117p3deferred?.resolve(queryRows(t117p3deferred.args)); // 迟到响应 = 锚后的 500 行
+    listPlan = null;
+    await nTick(20);
+    const t117p3 = store.getState();
+    const t117p3ids = t117p3.entries.map((e) => e.id);
+    checkNew('(t117-3) 插入漂移免疫（判别）：续拉恰为锚后 500 行（id 3500..3999），与新插入 10 行零重叠、已加载窗口保序、entries 1000 条唯一',
+      t117p3ids.length === 1000 && new Set(t117p3ids).size === 1000
+      && t117p3ids.slice(0, 500).join(',') === Array.from({ length: 500 }, (_, k) => String(3000 + k)).join(',')
+      && t117p3ids.slice(500).join(',') === Array.from({ length: 500 }, (_, k) => String(3500 + k)).join(',')
+      && t117p3ids.every((id) => Number(id) < 5000)
+      && t117p3.articlesCursor['article|all']?.loaded === 1000
+      && t117p3.articlesCursor['article|all']?.lastId === 3999);
+
+    /* ---------- (t117-4) 并列 published_at 由 id 决胜（同秒文章不重不漏） ----------
+       600 行**同一秒**发布：全序完全由 id 决胜（DESC = id 降序），页边界落在并列
+       组中间——续拉必须由谓词的 `published_at = ? AND id < ?` 分支续上同秒兄弟
+       （id 3299..3200），不得因 `published_at < ?` 单臂漏行或重复。 */
+    await resetStore();
+    backendRows = Array.from({ length: 600 }, (_, i) =>
+      mkT117Row({ id: 3200 + i, published_at: iso(NOW - 3 * 86400000), title: `t117 同秒 ${i}` }));
+    await store.getState().bootstrapFromBackend(); // all 视图首屏 500 = id 降序前 500（3799..3300）
+    const t117p4 = store.getState();
+    checkNew('(t117-4) 前置：同秒 600 行首屏 500 条按 id 降序（3799..3300）、锚=末行 3300',
+      t117p4.entries.length === 500 && t117p4.entries[0].id === '3799' && t117p4.entries[499].id === '3300'
+      && t117p4.articlesCursor['article|all']?.lastId === 3300
+      && t117p4.articlesCursor['article|all']?.lastPublished === iso(NOW - 3 * 86400000)
+      && t117p4.articlesExhausted === false);
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles();
+    const t117p4after = store.getState();
+    const t117p4ids = t117p4after.entries.map((e) => e.id);
+    checkNew('(t117-4) 同秒跨页续拉不重不漏（判别）：第二页 = 同秒组内 id 更小的 100 行（3299..3200）、全集 600 条唯一且与全序一致',
+      t117p4after.entries[500].id === '3299' && t117p4after.entries.at(-1).id === '3200'
+      && t117p4ids.length === 600 && new Set(t117p4ids).size === 600
+      && t117p4ids.join(',') === Array.from({ length: 600 }, (_, k) => String(3799 - k)).join(',')
+      && t117p4after.articlesExhausted === true);
+
+    /* ---------- (t117-5) 排序切换后游标重置方向正确 ----------
+       newest 翻页后切 oldest：重拉落地游标重置为新方向首屏（锚 = **新方向**首屏
+       末行）——续拉必须沿 oldest 方向从该锚继续（id 3699..），而不是沿用旧方向
+       的锚 3499。 */
+    await resetStore();
+    backendRows = t117Rows();
+    await store.getState().bootstrapFromBackend(); // newest 首屏 500（id 3000..3499）
+    invokeCalls.length = 0;
+    store.getState().toggleTimelineSort(); // 切 oldest：整体重拉（viewEntriesCache 已清）
+    await nTick(20);
+    const t117p5sorted = store.getState();
+    checkNew('(t117-5) 切 oldest 重拉落地：首屏换到最老端（首条 id 4199）、游标重置为新方向首屏（loaded=500）、锚=新方向末行 3700',
+      t117p5sorted.entries[0].id === '4199' && t117p5sorted.entries.length === 500
+      && t117p5sorted.articlesCursor['article|all']?.loaded === 500
+      && t117p5sorted.articlesCursor['article|all']?.lastId === 3700
+      && t117p5sorted.articlesExhausted === false);
+    invokeCalls.length = 0;
+    await store.getState().loadMoreArticles();
+    const t117p5wire = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
+    const t117p5after = store.getState();
+    checkNew('(t117-5) 切排序后续拉方向正确（判别）：wire 带 newest_first=false + 新方向锚（last_id=3700），续拉沿 oldest 继续（id 3699..3200），不沿用旧方向锚 3499',
+      t117p5wire?.newest_first === false && t117p5wire?.last_id === 3700
+      && t117p5wire?.last_published === iso(NOW - 3 * 86400000 - 700 * 1000)
+      && t117p5after.entries.length === 1000 && t117p5after.entries[500].id === '3699'
+      && new Set(t117p5after.entries.map((e) => e.id)).size === 1000);
+
+    await resetStore(); // 夹具复位：不把 1200 行大夹具与 defer 残留带给后续块
+  }
+
+  /* ============================================================
      TASK-111（二阶段③）：①查询缓存实体预算 ②后台刷新保位。
      ①审计：「单纯限制为 8 个视图并不能限制每个视图的大小」——TASK-100 P3-7
        只封键数（LRU 8），TASK-110 分页化后单键 entries 仍随滚动加载无界增长
        （syncCurrentViewCache 会把当前 1500 条窗口整体落键）。新契约：
        单键实体预算 VIEW_ENTRIES_CACHE_ENTRY_BUDGET=1000（≥ 页大小 500，截断
        只发生在加载超 2 页的大库场景），超限尾部截断（缓存语义=首屏快照，
-       丢最老端由恢复后的后台 reload 补齐）；缓存值升级为 {entries, loadedCount,
-       exhausted} 元数据——恢复路径（nav 三处）用**记录值**判定 exhausted 与
+       丢最老端由恢复后的后台 reload 补齐）；缓存值升级为 {entries, cursor,
+       exhausted} 元数据（TASK-117：cursor 为 keyset 游标，loaded 字段承接原
+       loadedCount 语义）——恢复路径（nav 三处）用**记录值**判定 exhausted 与
        续拉游标，不重算截断后长度（判别：截断长度 1000 落在页边界上方，
-       「已到底」的快照会被误判成「还有数据」，且续拉 offset 回退重拉已去重
+       「已到底」的快照会被误判成「还有数据」，且续拉锚回退重拉已去重
        丢弃的区间）。
      ②审计：「后台刷新保留当前阅读位置」——feeds-updated/手动同步/单源刷新
        → reloadFromBackend 整体替换 entries，newest_first 下新文章插头部使
@@ -3512,10 +3780,13 @@ await (async () => {
     const navSrc111 = src111('../src/store/slices/nav.ts');
     checkNew('(t111-0) 单键实体预算收口 internals：=1000 且 ≥ 页大小（截断只发生在加载超 2 页场景，首批/次页永不截断）',
       VIEW_ENTRIES_CACHE_ENTRY_BUDGET === 1000 && VIEW_ENTRIES_CACHE_ENTRY_BUDGET >= t111Page);
-    checkNew('(t111-0) 预算注释载明审计依据（键数上限≠单键大小），恢复路径用缓存记录的 loadedCount/exhausted 而非重算截断长度',
+    /* 【TASK-117 改动理由】源级断言随游标契约更新：缓存元数据 loadedCount 升为
+       完整 keyset 游标（cursor），nav 恢复点透传 cached.cursor——记录值恢复的
+       保护意图不变（不用截断长度重算游标）。 */
+    checkNew('(t111-0) 预算注释载明审计依据（键数上限≠单键大小），恢复路径用缓存记录的 cursor/exhausted 而非重算截断长度',
       internalsSrc111.includes('审计：「单纯限制为 8 个视图并不能限制每个视图的大小」')
       && internalsSrc111.includes('export function setViewEntriesSnapshot(')
-      && navSrc111.includes('applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted)')
+      && navSrc111.includes('applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted)')
       && navSrc111.includes('articlesExhausted: cached.exhausted'));
 
     /* ---------- (t111-1) 预算截断：边界（恰=预算不截断）+ 触发（尾部截断、元数据真值） ---------- */
@@ -3525,40 +3796,44 @@ await (async () => {
     await store.getState().loadMoreArticles(); // 1000（..3999）
     t111SyncCache('3000'); // 缓存落键：当前窗口恰 1000 = 预算
     const t111c1000 = viewEntriesCache.get('article|all|all');
-    checkNew('(t111-1) 边界：加载恰 1000（=预算）不截断，缓存值=完整快照 + 元数据（loadedCount=1000、exhausted=false）',
-      t111c1000.entries.length === 1000 && t111c1000.loadedCount === 1000 && t111c1000.exhausted === false
+    /* 【TASK-117 改动理由】缓存元数据断言随游标契约更新：loadedCount → cursor.loaded */
+    checkNew('(t111-1) 边界：加载恰 1000（=预算）不截断，缓存值=完整快照 + 元数据（cursor.loaded=1000、exhausted=false）',
+      t111c1000.entries.length === 1000 && t111c1000.cursor.loaded === 1000 && t111c1000.exhausted === false
       && t111c1000.entries[0].id === '3000' && t111c1000.entries.at(-1).id === '3999');
     await store.getState().loadMoreArticles(); // 1500（..4499）→ 超预算
     t111SyncCache('3002');
     const t111c1500 = viewEntriesCache.get('article|all|all');
-    checkNew('(t111-1) 截断触发（1500>1000）：尾部截断为 1000 条（首条保留、最老端 500 条丢弃——首屏快照语义，恢复后由后台刷新补齐），loadedCount/exhausted 记录写入时真值（1500/false）不随截断失真',
+    checkNew('(t111-1) 截断触发（1500>1000）：尾部截断为 1000 条（首条保留、最老端 500 条丢弃——首屏快照语义，恢复后由后台刷新补齐），cursor/exhausted 记录写入时真值（loaded=1500、锚=4499/false）不随截断失真',
       t111c1500.entries.length === 1000 && t111c1500.entries[0].id === '3000' && t111c1500.entries.at(-1).id === '3999'
-      && t111c1500.loadedCount === 1500 && t111c1500.exhausted === false);
+      && t111c1500.cursor.loaded === 1500 && t111c1500.cursor.lastId === 4499 && t111c1500.exhausted === false);
 
     /* ---------- (t111-2) 截断恢复（exhausted=false 态）+ 截断后续拉衔接（判别） ----------
        离开/回到该范围触发缓存恢复；注入 reload 失败让恢复态存续（否则后台
-       刷新立即整体替换）。判别点：恢复游标 = 记录的 loadedCount=1500（朴素
+       刷新立即整体替换）。判别点：恢复游标 = 记录的 cursor.loaded=1500（朴素
        实现重算截断长度会写 1000），续拉 offset=1500 不回退重拉。 */
     listPlan = { mode: 'reject', error: { message: 't111 注入' } };
     store.getState().selectFeed('feed-11'); // 离开（其后台 reload 失败被吞）
     await nTick(10);
     store.getState().selectFeed('all'); // 回来：缓存命中同步恢复
     const t111rA = store.getState();
-    checkNew('(t111-2) 截断快照恢复（exhausted=false 态）：entries=截断后的 1000 条、游标按记录 loadedCount=1500 恢复（判别：重算截断长度会写 1000）、exhausted=false 与写入时一致（末次拉取满页）',
+    checkNew('(t111-2) 截断快照恢复（exhausted=false 态）：entries=截断后的 1000 条、游标按记录 cursor.loaded=1500 恢复（判别：重算截断长度会写 1000）、exhausted=false 与写入时一致（末次拉取满页）',
       t111rA.entries.length === 1000 && t111rA.entries[0].id === '3000'
-      && t111rA.articlesCursor['article|all'] === 1500 && t111rA.articlesLimit === 1500
+      && t111rA.articlesCursor['article|all']?.loaded === 1500 && t111rA.articlesLimit === 1500
       && t111rA.articlesExhausted === false);
     await nTick(10); // 让恢复路径的注入失败 reload 落定（backendReloadInFlight 归零，续拉不再被在途守卫拦截）
     listPlan = null; // 解除 reject 注入：续拉本身要走通（只用于冻结恢复路径的 reload）
     invokeCalls.length = 0;
-    await store.getState().loadMoreArticles(); // 续拉：offset 必须接在真实已加载数之后
+    await store.getState().loadMoreArticles(); // 续拉：keyset 锚必须接在真实已加载窗口末行之后
     const t111contArgs = invokeCalls.find((c) => c.cmd === 'list_articles')?.args.args;
     const t111rA2 = store.getState();
-    checkNew('(t111-2) 截断后续拉衔接（判别）：offset 用记录的 loadedCount=1500（朴素实现会从截断长度 1000 重拉已去重丢弃的区间）、余下 1 行（4500）追加无重复、游标=1501、exhausted=true（1<500）',
-      t111contArgs?.offset === 1500 && t111contArgs?.limit === 500
+    /* 【TASK-117 改动理由】续拉 wire 从 offset=1500 改为 keyset 锚（恢复游标记录的
+       锚=第三页末行 4499）——判别意图不变：从记录的真值续拉，不回退重拉已丢弃区间。 */
+    checkNew('(t111-2) 截断后续拉衔接（判别）：keyset 锚用恢复游标记录的末行 4499/loaded=1500（朴素实现会从截断长度 1000 重拉已去重丢弃的区间）、余下 1 行（4500）追加无重复、游标=1501、exhausted=true（1<500）',
+      t111contArgs?.last_id === 4499 && t111contArgs?.last_published === iso(NOW - 1499 * 60000)
+      && t111contArgs?.offset === undefined && t111contArgs?.limit === 500
       && t111rA2.entries.length === 1001 && t111rA2.entries.at(-1)?.id === '4500'
       && new Set(t111rA2.entries.map((e) => e.id)).size === 1001
-      && t111rA2.articlesCursor['article|all'] === 1501 && t111rA2.articlesExhausted === true);
+      && t111rA2.articlesCursor['article|all']?.loaded === 1501 && t111rA2.articlesExhausted === true);
 
     /* ---------- (t111-3) 截断恢复（exhausted=true 态，判别）+ exhausted 不误判 ----------
        1100 行 = 500+500+100：末页不满 ⇒ 真实已到底。截断后缓存长度 1000 落在
@@ -3570,16 +3845,16 @@ await (async () => {
     await store.getState().loadMoreArticles(); // 余 100 行（100<500）→ 真实到底
     t111SyncCache('5001'); // 缓存落键：1100 条 → 截断 1000，exhausted=true
     const t111cB = viewEntriesCache.get('article|all|all');
-    checkNew('(t111-3) 前置：加载 1100（末页不满）→ 缓存截断 1000 条但元数据记录 loadedCount=1100 / exhausted=true（尾部截断不丢 exhausted 判据）',
-      t111cB.entries.length === 1000 && t111cB.loadedCount === 1100 && t111cB.exhausted === true);
+    checkNew('(t111-3) 前置：加载 1100（末页不满）→ 缓存截断 1000 条但元数据记录 cursor.loaded=1100 / exhausted=true（尾部截断不丢 exhausted 判据）',
+      t111cB.entries.length === 1000 && t111cB.cursor.loaded === 1100 && t111cB.exhausted === true);
     listPlan = { mode: 'reject', error: { message: 't111 注入' } };
     store.getState().selectFeed('feed-11');
     await nTick(10);
     store.getState().selectFeed('all');
     const t111rB = store.getState();
-    checkNew('(t111-3) 截断恢复（exhausted=true 态，判别）：恢复 exhausted=true（判别：重算截断长度 1000≥500 会误判成 false）、游标=记录 loadedCount=1100',
+    checkNew('(t111-3) 截断恢复（exhausted=true 态，判别）：恢复 exhausted=true（判别：重算截断长度 1000≥500 会误判成 false）、游标=记录 cursor.loaded=1100',
       t111rB.entries.length === 1000 && t111rB.articlesExhausted === true
-      && t111rB.articlesCursor['article|all'] === 1100);
+      && t111rB.articlesCursor['article|all']?.loaded === 1100);
     await nTick(10); // 让恢复路径的注入失败 reload 落定（同 t111-2）
     invokeCalls.length = 0;
     await store.getState().loadMoreArticles();
@@ -3805,9 +4080,12 @@ await (async () => {
       t115stA.switchRestoreNonce === t115srn0 + 1 && t115stA.entries.length === 8 && t115stA.activeFeedFilter === 'all');
     const t115Kback = filterKeyOf115(t115stA);
     const t115arch = ta115.peekReturnAnchor(t115Kback);
+    /* 【TASK-117 改动理由】期望索引随 id 决胜序更新：BASE_ROWS 的 TODAY 并列组
+       （101/102 同秒）排序从插入序变为 id 降序（102,101），101 的索引 0 → 1；
+       断言意图（存档锚命中恢复列表中的原条目）不变。 */
     checkNew('(t115-x1a) 存档-恢复（决策侧）：按原上下文键查档命中（离开时顶条 101），锚 id 在恢复列表中 → 决策返回其索引（Timeline 据此 scrollToIndex align:start 一次性定位）',
       t115Kback === t115K1 && t115arch?.id === '101' && t115arch?.filterKey === t115K1
-      && ari115(t115arch, t115Kback, itemsOf115()) === 0);
+      && ari115(t115arch, t115Kback, itemsOf115()) === 1);
     await nTick(10); // 让注入失败的 reload 落定
     listPlan = null;
 
@@ -3853,8 +4131,10 @@ await (async () => {
     store.getState().clearReaderSelection(); // Esc 关闭（App.tsx 唯一关闭路径）
     checkNew('(t115-x2a) 阅读器关闭信号：clearReaderSelection bump readerCloseNonce 且选中清空（滚动不动 = filterKey 未变不触发归零，既有语义）',
       store.getState().readerCloseNonce === t115rcn0 + 1 && store.getState().activeArticleId === null);
+    /* 【TASK-117 改动理由】期望索引随 id 决胜序更新：TODAY 并列组 id 降序后 102
+       为列表首条（原 index 1 → 0）；断言意图（原卡仍在列表 → 返回其索引）不变。 */
     checkNew('(t115-x2a) 焦点归还原卡（决策）：原卡 102 仍在当前列表 → 决策返回其 index（Timeline 据此 focusCardAt：原卡可见不滚、不可见 scrollToIndex 定位后聚焦）',
-      rfri115('102', itemsOf115()) === 1);
+      rfri115('102', itemsOf115()) === 0);
     store.getState().selectArticle('103'); // 换一篇打开
     const t115rcn1 = store.getState().readerCloseNonce;
     store.getState().clearReaderSelection(); // 再关（同一篇形态的连续开关）
@@ -3862,8 +4142,10 @@ await (async () => {
       store.getState().readerCloseNonce === t115rcn1 + 1);
     store.getState().selectFeed('12'); // 阅读器开着时列表已切范围（selectFeed 不清选中；feed-12 与当前 article 布局同布局，列表非空）
     await nTick(20);
-    checkNew('(t115-x2b) 焦点归还回落（判别）：原卡不在当前列表（列表已切换，新范围=[104,105]）→ 决策 null = 不聚焦不滚动（焦点归还无对象，绝不猜）；无归还目标（null id）同口径',
-      rfri115('103', itemsOf115()) === null && itemsOf115().map((e) => e.id).join(',') === '104,105'
+    /* 【TASK-117 改动理由】期望列表随 id 决胜序更新：feed-12 的 104/105 同秒并列，
+       id 降序后为 [105,104]（原插入序 [104,105]）；断言意图（原卡不在列表 → null）不变。 */
+    checkNew('(t115-x2b) 焦点归还回落（判别）：原卡不在当前列表（列表已切换，新范围=[105,104]）→ 决策 null = 不聚焦不滚动（焦点归还无对象，绝不猜）；无归还目标（null id）同口径',
+      rfri115('103', itemsOf115()) === null && itemsOf115().map((e) => e.id).join(',') === '105,104'
       && rfri115(null, itemsOf115()) === null);
 
     /* ---------- (t115-x3a) 与 TASK-111 刷新保位不叠加（双向隔离） ---------- */
@@ -4872,12 +5154,19 @@ await (async () => {
     ];
     let rows94 = [];
     const calls94 = [];
+    /* TASK-117：与主假后端同口径——排序补 id 决胜，keyset 锚成对给出时按谓词续拉 */
     const queryRows94 = (a = {}) => {
       let out = rows94.slice();
       if (a.feed_id != null) out = out.filter((r) => r.feed_id === a.feed_id);
       if (a.folder_id != null) out = out.filter((r) => (FEEDS94.find((f) => f.id === r.feed_id) || {}).folder_id === a.folder_id);
       const dir = a.newest_first === false ? 1 : -1;
-      out.sort((x, y) => dir * (Date.parse(x.published_at) - Date.parse(y.published_at)));
+      out.sort((x, y) => (dir * (Date.parse(x.published_at) - Date.parse(y.published_at))) || (dir * (x.id - y.id)));
+      if (a.last_published != null && a.last_id != null) {
+        out = out.filter((r) => dir < 0
+          ? (r.published_at < a.last_published || (r.published_at === a.last_published && r.id < a.last_id))
+          : (r.published_at > a.last_published || (r.published_at === a.last_published && r.id > a.last_id)));
+        return out.slice(0, a.limit == null ? out.length : a.limit);
+      }
       const off = a.offset || 0;
       return out.slice(off, a.limit == null ? out.length : off + a.limit);
     };
@@ -4923,18 +5212,21 @@ await (async () => {
     calls94.length = 0;
     await store94.getState().loadMoreArticles();
     const idsBeforeLeave = selectVisibleEntries(store94.getState()).map((e) => e.id);
-    checkNew('(r7-switch) article 第 2 页：请求沿用该布局自己的游标（offset=500），可见集合增长到 500 且无重复',
-      calls94.find((c) => c.cmd === 'list_articles')?.args.args.offset === 500
+    /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚（article 布局首页
+       末行 id 9249，交错序最后一行）——判别意图不变：锚取自该布局自己的游标桶。 */
+    checkNew('(r7-switch) article 第 2 页：请求沿用该布局自己的游标（keyset 锚 last_id=9249），可见集合增长到 500 且无重复',
+      calls94.find((c) => c.cmd === 'list_articles')?.args.args.last_id === 9249
+      && calls94.find((c) => c.cmd === 'list_articles')?.args.args.offset === undefined
       && idsBeforeLeave.length === 500 && new Set(idsBeforeLeave).size === 500
       && idsBeforeLeave.every((id) => Number(id) >= 8000 && Number(id) < 9000)
-      && store94.getState().articlesCursor['article|all'] === 1000);
+      && store94.getState().articlesCursor['article|all']?.loaded === 1000);
 
     /* 切到 social：该口径首批从 offset=0 开始（请求带 layout=social），游标分桶互不污染 */
     calls94.length = 0;
     store94.getState().selectLayout('social');
     const r7SocialSync = store94.getState();
     checkNew('(r7-switch) 切 social 同步阶段：游标从 0 起步（不继承 article 的 1000），article 桶原样保留',
-      r7SocialSync.articlesLimit === 0 && r7SocialSync.articlesCursor['article|all'] === 1000);
+      r7SocialSync.articlesLimit === 0 && r7SocialSync.articlesCursor['article|all']?.loaded === 1000);
     await nTick94(30);
     const r7SocialCall = calls94.find((c) => c.cmd === 'list_articles');
     const r7SocialIds = selectVisibleEntries(store94.getState()).map((e) => e.id);
@@ -4942,8 +5234,8 @@ await (async () => {
       r7SocialCall?.args.args.layout === 'social' && r7SocialCall?.args.args.offset === 0
       && r7SocialIds.length > 0 && r7SocialIds.every((id) => Number(id) >= 9000));
     checkNew('(r7-switch) social 游标记在 social 桶（与 article 桶并存）：两布局各自记账',
-      store94.getState().articlesCursor['social|all'] === 500
-      && store94.getState().articlesCursor['article|all'] === 1000);
+      store94.getState().articlesCursor['social|all']?.loaded === 500
+      && store94.getState().articlesCursor['article|all']?.loaded === 1000);
 
     /* 切回 article：缓存命中同步恢复快照，游标与恢复的快照长度对齐（既有 selectFeed
        同一契约——不从 0 起步、不继承 social 桶）；后台刷新 + 续一页后，
@@ -4953,15 +5245,15 @@ await (async () => {
     const r7BackSync = store94.getState();
     checkNew('(r7-switch) 切回 article 同步恢复：游标与恢复的快照长度对齐（不从 0 起步），social 桶不污染 article 桶',
       r7BackSync.articlesLimit === r7BackSync.entries.length && r7BackSync.articlesLimit > 0
-      && r7BackSync.articlesCursor['article|all'] === r7BackSync.articlesLimit
-      && r7BackSync.articlesCursor['social|all'] === 500);
+      && r7BackSync.articlesCursor['article|all']?.loaded === r7BackSync.articlesLimit
+      && r7BackSync.articlesCursor['social|all']?.loaded === 500);
     await nTick94(30);
     await store94.getState().loadMoreArticles();
     const r7BackIds = selectVisibleEntries(store94.getState()).map((e) => e.id);
     checkNew('(r7-switch) 切回 article 续一页后：可见集合与离开前逐位一致（无重复、无缺失段），游标连续',
       r7BackIds.length === idsBeforeLeave.length && r7BackIds.join(',') === idsBeforeLeave.join(',')
       && new Set(r7BackIds).size === r7BackIds.length
-      && store94.getState().articlesCursor['article|all'] === 1000);
+      && store94.getState().articlesCursor['article|all']?.loaded === 1000);
 
     /* 视图缓存按「布局 × 视图 × 范围」分桶：两布局各有快照（R7 缓存半边） */
     checkNew('(r7-cache) 视图缓存键含布局：article 与 social 各有独立快照，互不冒充',
@@ -5179,7 +5471,14 @@ await (async () => {
               }));
             }
             if (a.feed_id != null) out = out.filter((r) => r.feed_id === a.feed_id);
-            out = out.slice(a.offset || 0, a.limit != null ? (a.offset || 0) + a.limit : undefined);
+            /* TASK-117：keyset 锚成对给出时按谓词续拉（published_at 两两互异，字符串比较即可） */
+            if (a.last_published != null && a.last_id != null) {
+              out = out.filter((r) => r.published_at < a.last_published
+                || (r.published_at === a.last_published && r.id < a.last_id));
+              out = out.slice(0, a.limit != null ? a.limit : undefined);
+            } else {
+              out = out.slice(a.offset || 0, a.limit != null ? (a.offset || 0) + a.limit : undefined);
+            }
             if (delayed) {
               delayed = null;
               return new Promise((resolve) => setTimeout(() => resolve(out), 60));
@@ -5224,12 +5523,16 @@ await (async () => {
         isBackendReloadInFlight() === false
           && store.getState().entries.length === 500
           && store.getState().entries.every((e) => e.feedId === '11')
-          && store.getState().articlesCursor['article|feed-11'] === 500);
+          && store.getState().articlesCursor['article|feed-11']?.loaded === 500);
       calls.length = 0;
       await store.getState().loadMoreArticles();
-      checkNew('(t100-p3-1) 落地后续拉放行：第 2 页请求带该范围游标 offset=500（假后端每源共 600 行，追加 100 行收敛到底）',
+      /* 【TASK-117 改动理由】续拉 wire 从 offset=500 改为 keyset 锚（feed-11 首页
+         末行 id 150499 的原文锚）——判别意图不变：续拉带该范围的游标。 */
+      checkNew('(t100-p3-1) 落地后续拉放行：第 2 页请求带该范围 keyset 锚 last_id=150499（假后端每源共 600 行，追加 100 行收敛到底）',
         calls.filter((c) => c.cmd === 'list_articles').length === 1
-          && calls.find((c) => c.cmd === 'list_articles')?.args.args.offset === 500
+          && calls.find((c) => c.cmd === 'list_articles')?.args.args.last_id === 150499
+          && calls.find((c) => c.cmd === 'list_articles')?.args.args.last_published
+            === new Date(Date.UTC(2026, 8, 4, 10, 0, 0) - 499 * 1000).toISOString()
           && store.getState().entries.length === 600
           && store.getState().articlesExhausted === true);
       feedFilter = null;

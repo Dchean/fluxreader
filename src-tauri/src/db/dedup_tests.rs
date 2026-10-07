@@ -304,6 +304,8 @@ fn article_index_positions_align_with_list() {
         offset: 0,
         with_content: false,
         layout: None,
+        last_published: None,
+        last_id: None,
     };
 
     // 全量列表顺序：最新（i=4）在最前

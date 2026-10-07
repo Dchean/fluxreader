@@ -117,8 +117,21 @@ export function selectVisibleEntries(s: AppState): ArticleEntry[] {
     list = list.filter((i) => !i.isRead || s.openedReadIds[i.id]);
   }
 
-  /* 时间流排序：真实客户端按时间戳降序/升序，不依赖数据插入顺序 */
-  list = [...list].sort((a, b) => (s.timelineSort === 'newest' ? b.publishedAt - a.publishedAt : a.publishedAt - b.publishedAt));
+  /* 时间流排序：真实客户端按时间戳降序/升序，不依赖数据插入顺序。
+     TASK-117：并列 publishedAt 由 id 决胜——与后端 ORDER BY a.published_at, a.id
+     同向同口径（keyset 续拉锚依赖**全序**：同秒文章的服务器顺序由 id 定，
+     本地排序若不补同一决胜，续拉追加会与已加载窗口交错乱序）。
+     id 是后端行 id 的十进制字符串，数值比较与 SQLite 的 id 序一致；
+     mock 的非数字 id 落回 0（保持既有相对顺序，不受影响）。 */
+  const dir = s.timelineSort === 'newest' ? -1 : 1;
+  list = [...list].sort((a, b) => {
+    const byTime = dir * (a.publishedAt - b.publishedAt);
+    if (byTime !== 0) return byTime;
+    const na = Number(a.id);
+    const nb = Number(b.id);
+    if (!Number.isFinite(na) || !Number.isFinite(nb)) return 0;
+    return dir * (na - nb);
+  });
   visibleEntriesCache = { entries: s.entries, feedIndex: s.feedIndex, openedReadIds: s.openedReadIds, key, result: list };
   return list;
 }

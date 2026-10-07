@@ -77,6 +77,20 @@ export type ToastMessage = {
   action?: { label: string; run: () => void };
 };
 
+/** TASK-117：per-scope keyset 分页游标（articlesCursor 的值类型）。
+ *  - lastPublished：已加载窗口最后一行的 published_at **原文**（RFC3339 字符串，
+ *    后端返回什么就存什么——后端谓词与排序共用同一字符串比较口径，任何本地
+ *    重格式化都会让游标错位）；空窗口为 null（无锚，续拉回落首页语义）。
+ *  - lastId：最后一行的后端行 id（INTEGER PRIMARY KEY），并列 published_at 的
+ *    决胜键；空窗口为 null。
+ *  - loaded：已加载总行数。不再承担分页语义（OFFSET 已废除），仅供 exhausted
+ *    镜像（articlesLimit）与视图缓存元数据（ViewEntriesSnapshot）使用。 */
+export interface ArticlesCursorState {
+  lastPublished: string | null;
+  lastId: number | null;
+  loaded: number;
+}
+
 export interface AppState {
   /* ---------- 导航与筛选 ---------- */
   activeContentLayout: ContentLayoutType;
@@ -173,12 +187,19 @@ export interface AppState {
       内容刷新路径（feeds-updated / 手动同步 / 单源刷新）传入，落地时发出保位
       信号；导航路径（selectFeed/selectView/selectLayout 等）不传，不触发回位。 */
   reloadFromBackend: (opts?: { keepReadingPosition?: boolean }) => Promise<void>;
-  /** 当前视图的分页游标（= 当前范围已从后端加载的文章数）。每次 reload /
-      视图切换 / 范围切换时，按该范围自己的 per-scope 游标恢复（TASK-052）。 */
+  /** 当前视图的分页游标镜像（= 当前范围已从后端加载的文章总数）。每次 reload /
+      视图切换 / 范围切换时，按该范围自己的 per-scope 游标恢复（TASK-052）。
+      TASK-117：仅作 loaded 计数镜像（供 mock 兜底与调试观察），分页续拉不再
+      消费它——续拉游标见 articlesCursor。 */
   articlesLimit: number;
-  /** per-scope 分页游标表：scopeKey（'all' | feedId | 'cat-N'）→ 已加载条数。
-      详见 internals.scopePageKey 的取舍说明。 */
-  articlesCursor: Record<string, number>;
+  /** per-scope 分页游标表：scopeKey（'all' | feedId | 'cat-N'）→ keyset 游标。
+      TASK-117（审计 P1-1）：从「已加载条数（OFFSET）」改为 keyset 锚
+      （ArticlesCursorState）——可变筛选集合（WHERE is_read=0 / is_starred=1）上
+      OFFSET 不等价于已看条数（读 500 标读后集合收缩，下一页仍 OFFSET 500 会跳过
+      500 篇并假 exhausted）；keyset 以已加载窗口最后一行的 (published_at 原文, id)
+      为锚，与集合增删无关地指向「已看过的最后一篇」。
+      详见 internals.scopePageKey 的取舍说明与 ArticlesCursorState 契约注释。 */
+  articlesCursor: Record<string, ArticlesCursorState>;
   /** 正在加载下一批文章（列表底部加载动画） */
   articlesLoading: boolean;
   /** 已加载完所有文章（列表底部显示「到底了」） */
@@ -228,8 +249,9 @@ export interface AppState {
   selectFeed: (feedId: string) => void;
   /** 同步恢复分页游标（per-scope 游标表的唯一镜像写入点）：写 articlesLimit /
       articlesCursor / articlesExhausted / articlesLoading 四处，entries 由调用方
-      保证与该游标匹配（缓存恢复路径）。 */
-  applyArticlesCursor: (scopeKey: string, limit: number, exhausted: boolean) => void;
+      保证与该游标匹配（缓存恢复路径）。
+      TASK-117：第二参从计数改为完整 keyset 游标（ArticlesCursorState）。 */
+  applyArticlesCursor: (scopeKey: string, cursor: ArticlesCursorState, exhausted: boolean) => void;
   toggleTimelineFilter: () => void;
   toggleTimelineSort: () => void;
   markCurrentViewAllRead: () => void;

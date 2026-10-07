@@ -69,7 +69,8 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     if (get().dataMode !== 'tauri') return;
     const scopeKey = QueryScope.pageKey(get().activeFeedFilter, layout);
     set((s) => ({
-      articlesLimit: s.articlesCursor[scopeKey] ?? 0,
+      /* TASK-117：镜像取 keyset 游标的 loaded 计数（原游标值即计数） */
+      articlesLimit: s.articlesCursor[scopeKey]?.loaded ?? 0,
       articlesExhausted: false,
       articlesLoading: false,
     }));
@@ -106,7 +107,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         hydrationErrors: merged.hydrationErrors,
         ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
       }));
-      get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
+      get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
        reload 自身的 toast 给出，这里只吞掉残余重抛，避免 unhandled rejection。 */
@@ -122,11 +123,13 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        匹配、但无需重新拉取」的同步恢复（目前只有 selectView 缓存命中走这条）。
      之所以不暴露成通用 setter：单纯写 articlesLimit 而不动 entries（D3 缺陷当时
      可达的形态）会把「游标指向的位置」与「列表里的内容」拆开，下一次 loadMore 的
-     offset 就会越过列表内容、整段文章静默丢失。 */
-  applyArticlesCursor: (scopeKey, limit, exhausted) =>
+     起点就会越过列表内容、整段文章静默丢失。
+     TASK-117：第二参从计数改为完整 keyset 游标（ArticlesCursorState）——
+     articlesLimit 镜像写 cursor.loaded（计数口径不变），articlesCursor 存完整锚。 */
+  applyArticlesCursor: (scopeKey, cursor, exhausted) =>
     set((s) => ({
-      articlesLimit: limit,
-      articlesCursor: { ...s.articlesCursor, [scopeKey]: limit },
+      articlesLimit: cursor.loaded,
+      articlesCursor: { ...s.articlesCursor, [scopeKey]: cursor },
       articlesExhausted: exhausted,
       articlesLoading: false,
     })),
@@ -170,7 +173,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         hydrationErrors: merged.hydrationErrors,
         ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
       }));
-      get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
+      get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
       if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
@@ -206,7 +209,8 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     set((s) => ({
       activeFeedFilter: feedId,
       openedReadIds: {},
-      articlesLimit: s.articlesCursor[scopeKey] ?? 0,
+      /* TASK-117：镜像取 keyset 游标的 loaded 计数（原游标值即计数） */
+      articlesLimit: s.articlesCursor[scopeKey]?.loaded ?? 0,
       articlesExhausted: false,
       articlesLoading: false,
     }));
@@ -231,7 +235,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         hydrationErrors: merged.hydrationErrors,
         ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
       }));
-      get().applyArticlesCursor(scopeKey, cached.loadedCount, cached.exhausted);
+      get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
     if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
