@@ -199,7 +199,10 @@ fn list_articles_sql(q: &ArticleQuery) -> (String, Vec<rusqlite::types::Value>) 
          FROM articles a",
     );
     // 值全部走绑定参数（占位符序号即绑定顺序），条件文本只拼固定字符串
-    let (where_clauses, mut params) = article_where(q);
+    let (mut where_clauses, mut params) = article_where(q);
+    // TASK-121：R1 修复——keyset 谓词追加处 `where_clauses.push`（本函数内，紧随
+    // 其后）需可变绑定，漏 mut 即 CI rust job 的 error[E0596]
+    // （lib 编译失败即止，tests/ 目标从未编译）。
     // TASK-117：keyset 续拉——游标锚成对给出时追加「严格排在游标之后」的谓词
     // （方向随排序翻转），并停用 OFFSET 语义（offset 参数保留绑定、调用方传 0）。
     // last_published 是外部字符串，只经绑定参数进入 SQL（见 KEYSET_PREDICATE_* 注释）。

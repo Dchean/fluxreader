@@ -103,6 +103,11 @@ async fn direct_fetch_pipeline_end_to_end() {
             offset: 0,
             with_content: true,
             layout: None,
+            /* TASK-121：TASK-117 给 ArticleQuery 增补 keyset 游标字段后，
+             * 结构体字面量必须穷尽全字段；None/None = 既有 OFFSET 语义，
+             * 本测试查询路径行为零变化。 */
+            last_published: None,
+            last_id: None,
         },
     )
     .unwrap();
