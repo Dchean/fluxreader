@@ -136,6 +136,10 @@ pub async fn set_read(state: State<'_, AppState>, id: i64, read: bool) -> AppRes
     // 锁外调度即时推送（防抖合批，~1s 内到达服务端）；未配置时 push_states_now
     // 静默返回，队列项留待连接后的同步补推
     schedule_state_push(&state);
+    // TASK-124（审计 P2-6①，探针 P8 本体）：本地事务已提交 → 立即发
+    // sync-queue-changed，pill 即时「等待同步 N 条」（不等 800ms 推送往返）。
+    // 锁外发（notify_queue_changed 内部自持短锁读统计）；未配置时内部静默。
+    crate::sync::notify_queue_changed(&state.db).await;
     Ok(())
 }
 
@@ -178,6 +182,8 @@ pub async fn set_read_bulk(state: State<'_, AppState>, ids: Vec<i64>, read: bool
         apply_read_bulk(&conn, &ids, read)?;
     }
     schedule_state_push(&state);
+    // TASK-124：整批单事务提交后发 sync-queue-changed（锁外，同 set_read 口径）
+    crate::sync::notify_queue_changed(&state.db).await;
     Ok(())
 }
 
@@ -188,6 +194,8 @@ pub async fn set_starred(state: State<'_, AppState>, id: i64, starred: bool) -> 
         record_star_state(&conn, id, starred)?;
     }
     schedule_state_push(&state);
+    // TASK-124：收藏入队事务提交后发 sync-queue-changed（锁外，同 set_read 口径）
+    crate::sync::notify_queue_changed(&state.db).await;
     Ok(())
 }
 
@@ -215,6 +223,9 @@ pub async fn mark_all_read(
     // 锁外调度即时推送；未配置时 push_states_now 内 build_client 返回 None 而
     // 静默返回，队列项留待连接后的同步补推（与 set_read/set_starred 一致）
     schedule_state_push(&state);
+    // TASK-124：「全部已读」集合入队单事务提交后发 sync-queue-changed（锁外）——
+    // 一次 mark_all_read 入队 N 条，事件只发一次（统计已聚合）。
+    crate::sync::notify_queue_changed(&state.db).await;
     Ok(n)
 }
 

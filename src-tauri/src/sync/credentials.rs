@@ -27,6 +27,18 @@ pub fn read_credentials(conn: &Connection) -> Option<(String, String, String, St
     Some((protocol, endpoint, username, password))
 }
 
+/// build_client 失败的两种形态（TASK-124，审计 P2-6②）。
+/// 此前 build_client 返回 Option<Backend>，把「未配置」与「配置了但认证/端点/
+/// 网络失败」都压成 None——调用方无从区分，后者（attempts/last_error）永不记录。
+pub(super) enum ClientBuildFailure {
+    /// 无凭据或凭据为空：未配置同步。调用方静默跳过（A-5 既有语义：
+    /// 队列保留，连接后补推；不发事件不报警）。
+    NotConfigured,
+    /// 有凭据但构建失败（认证被拒 / 端点解析不到 / 网络不可达）。
+    /// 带实际错误——调用方据此记录阻塞标记并发 sync-queue-changed。
+    Failed(AppError),
+}
+
 /// 协议无关后端客户端（Google Reader / Fever）。
 /// sync 引擎只依赖这个枚举的统一方法，协议差异封装在内部。
 pub enum Backend {
@@ -111,10 +123,14 @@ impl Backend {
 pub(super) async fn build_client(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
-) -> Option<Backend> {
+) -> Result<Backend, ClientBuildFailure> {
     let (protocol, endpoint, username, password) = {
         let conn = db.lock().await;
-        read_credentials(&conn)?
+        match read_credentials(&conn) {
+            Some(c) => c,
+            // 未配置：静默（区别于「有凭据但失败」，TASK-124）
+            None => return Err(ClientBuildFailure::NotConfigured),
+        }
     };
     let cached = {
         let conn = db.lock().await;
@@ -134,7 +150,7 @@ pub(super) async fn build_client(
                         Ok(()) => client,
                         Err(e) => {
                             log::warn!("sync: Fever 认证失败: {e}");
-                            return None;
+                            return Err(ClientBuildFailure::Failed(e));
                         }
                     }
                 }
@@ -142,7 +158,7 @@ pub(super) async fn build_client(
                     Ok(client) => client,
                     Err(e) => {
                         log::warn!("sync: Fever 端点解析/认证失败: {e}");
-                        return None;
+                        return Err(ClientBuildFailure::Failed(e));
                     }
                 },
             };
@@ -163,7 +179,7 @@ pub(super) async fn build_client(
                 }
                 Err(e) => {
                     log::warn!("sync: ClientLogin 失败: {e}");
-                    return None;
+                    return Err(ClientBuildFailure::Failed(e));
                 }
             }
         }
@@ -178,5 +194,5 @@ pub(super) async fn build_client(
             log::warn!("sync: 端点解析结果落库失败（不影响本次同步）: {e}");
         }
     }
-    Some(backend)
+    Ok(backend)
 }

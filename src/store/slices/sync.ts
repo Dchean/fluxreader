@@ -16,10 +16,12 @@ export type SyncSlice = Pick<
   | 'syncConnected'
   | 'syncWaiting'
   | 'syncFailed'
+  | 'syncQueueLastError'
   | 'githubFlow'
   | 'githubAccount'
   | 'githubLoggingIn'
   | 'triggerManualSync'
+  | 'applySyncQueueChanged'
   | 'githubLoginStart'
   | 'githubLoginDisconnect'
 >;
@@ -79,6 +81,8 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
   /* TASK-116 四态展示：队列统计初值 0（未拉到统计前与「无队列」同形——X3 不制造噪音） */
   syncWaiting: 0,
   syncFailed: 0,
+  /* TASK-124：最近一次推送失败摘要初值 null（无失败不制造噪音） */
+  syncQueueLastError: null,
   githubFlow: null,
   githubAccount: null,
   githubLoggingIn: false,
@@ -157,6 +161,21 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
       set({ syncStatus: 'synced' });
       get().showToast('已刷新');
     }, 1100);
+  },
+
+  /* ================= TASK-124：sync-queue-changed 事件落地 ================= *
+     Rust 在本地入队事务提交 / 即时推送与 states 推送段确认·失败 / 认证·网络
+     阻塞后发 sync-queue-changed（payload = sync_queue_stats 三元组）。本动作是
+     App.tsx 监听器的唯一落点——与 reloadFromBackend 的顺带刷新并存同一状态源
+     （syncWaiting/syncFailed/syncQueueLastError），pill 与 SyncTab 摘要卡自动跟随。
+     只写队列三字段：syncConnected 不在此触碰——未配置静默语义在 Rust 发射点
+     （无凭据不发事件），本地模式 pill 分支（「本地模式 · 直连抓取」）不误报。 */
+  applySyncQueueChanged: (stats) => {
+    set({
+      syncWaiting: stats.waiting,
+      syncFailed: stats.failed,
+      syncQueueLastError: stats.last_error ?? null,
+    });
   },
 
   /* ================= GitHub 设备流登录（store 级常驻轮询） ================= *

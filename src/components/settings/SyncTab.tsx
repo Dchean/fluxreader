@@ -54,6 +54,19 @@ export function SyncTab() {
     refreshQueueStats(setQueueStats);
   }, [dataMode]);
 
+  /* TASK-124：摘要卡实时跟随 sync-queue-changed——store 三字段由 App.tsx 监听器
+     （事件）与 reloadFromBackend（顺带刷新）写入（单一状态源）。这里订阅 store，
+     变化镜像进本地 queueStats（挂载/保存链尾的 refreshQueueStats 主动拉取保留：
+     打开设置页即取一次最新真值；事件缺失时摘要卡维持 t116 既有行为）。
+     setState 位于订阅回调（事件驱动的外部系统同步），非 effect 体同步 setState。 */
+  useEffect(
+    () =>
+      useAppStore.subscribe((s) => {
+        setQueueStats({ waiting: s.syncWaiting, failed: s.syncFailed, last_error: s.syncQueueLastError });
+      }),
+    [],
+  );
+
   /* 轻量连通测试：不落库不做同步（填表时快速验证） */
   const doTest = async () => {
     if (!endpoint.trim() || !username.trim() || !password.trim()) {

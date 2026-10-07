@@ -131,6 +131,11 @@ pub fn run() {
 
             app.manage(state::AppState::new(conn, http, media));
 
+            // TASK-124：sync-queue-changed 事件目标注册（本地入队提交 / 推送确认·
+            // 失败 / 认证·网络阻塞后发，前端 pill/摘要卡实时跟随）。集成测试不注册
+            // → 发射点 no-op，既有 sync 引擎测试零影响。
+            sync::init_queue_event_target(app.handle().clone());
+
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
             // 封面后台补全（摘要型源 og:image 兜底，低优先级）

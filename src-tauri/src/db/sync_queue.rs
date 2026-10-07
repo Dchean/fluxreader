@@ -137,6 +137,22 @@ pub fn mark_push_failed(conn: &Connection, failed: &[(i64, String)]) -> AppResul
     Ok(())
 }
 
+/// 推送阻塞标记（TASK-124，审计 P2-6②）：后端客户端构建失败（认证/端点解析/
+/// 网络不可达）时，本轮推送**未进 exec_push**——此前 attempts/last_error 对这类
+/// 失败永不记录，用户在 UI 上永远看不到「为什么一直不同步」。现在把**全部现存
+/// 队项**计一次失败尝试（attempts+1）并记录摘要——与 mark_push_failed 同口径
+/// （attempts 累加、摘要按码点截断 200 字符）；摘要带「认证失败」/实际错误文案，
+/// 由 sync::push_block_summary 分类。空队列为 no-op，返回标记行数（调用方据
+/// n>0 决定是否发 sync-queue-changed——统计真变了才发，X3 不制造噪音）。
+pub fn mark_push_blocked(conn: &Connection, summary: &str) -> AppResult<usize> {
+    let summary = truncate_last_error(summary);
+    let n = conn.execute(
+        "UPDATE sync_queue SET attempts = attempts + 1, last_error = ?1",
+        params![summary],
+    )?;
+    Ok(n)
+}
+
 /// 队列统计（四态展示口径，TASK-116）：
 /// - waiting = 队列现存行数（含 add_feed；「等待同步 N 条」的 N）；
 /// - failed  = attempts > 0 的行数（「部分失败」的 N；是 waiting 的子集）；
@@ -168,6 +184,45 @@ pub fn sync_queue_stats(conn: &Connection) -> AppResult<SyncQueueStats> {
 }
 
 /* ============================================================
+TASK-124（同步状态变化事件）：sync-queue-changed 事件 payload 单点
+============================================================ */
+
+/// `sync-queue-changed` 事件 payload（纯函数，wire 形态单点 + 可测）：
+/// `{waiting, failed, last_error}` 与 [`SyncQueueStats`] / 前端 `SyncQueueStats`
+/// （src/lib/api.ts）三方同形。configured=false → None：未配置同步静默不发事件
+/// （审计「区分未配置/认证失败/网络失败」的「未配置」半边——前端 pill 靠既有
+/// 「本地模式 · 直连抓取」分支，不误报不刷状态）。
+pub fn queue_changed_payload(
+    stats: &SyncQueueStats,
+    configured: bool,
+) -> Option<serde_json::Value> {
+    if !configured {
+        return None;
+    }
+    Some(serde_json::json!({
+        "waiting": stats.waiting,
+        "failed": stats.failed,
+        "last_error": stats.last_error,
+    }))
+}
+
+/* ============================================================
+文件级测试助手（#[cfg(test)]）：t116/t124 两个测试模块共用。
+TASK-124 修复轮 R1：`attempts_of` 原私有定义在 `mod t116_tests` 内，
+兄弟模块 `mod t124_tests` 引用它报 E0425（Rust 模块私有性：兄弟模块的
+私有项互不可见）。上移到文件级后两模块经 `use super::*` 解析同一份。
+============================================================ */
+#[cfg(test)]
+fn attempts_of(c: &Connection, id: i64) -> i64 {
+    c.query_row(
+        "SELECT attempts FROM sync_queue WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/* ============================================================
 TASK-116 单元测试：失败标记落库 / 成功 prune 归零 / stats 口径
 （cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
 ============================================================ */
@@ -179,15 +234,6 @@ mod t116_tests {
         let mut c = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_latest(&mut c).unwrap();
         c
-    }
-
-    fn attempts_of(c: &Connection, id: i64) -> i64 {
-        c.query_row(
-            "SELECT attempts FROM sync_queue WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .unwrap()
     }
 
     fn last_error_of(c: &Connection, id: i64) -> Option<String> {
@@ -308,5 +354,116 @@ mod t116_tests {
             "last_error 取 id 最大（最晚入队）的失败行"
         );
         assert_eq!(attempts_of(&c, id_b), 0, "中间行未受影响");
+    }
+}
+
+/* ============================================================
+TASK-124 单元测试：事件 payload 正确性 / 推送阻塞标记
+（cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
+============================================================ */
+#[cfg(test)]
+mod t124_tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        let mut c = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut c).unwrap();
+        c
+    }
+
+    /// (t124-r1) 事件 payload 正确性（探针 P8 链路的 Rust 半边）：队列变更后
+    /// stats 查询即得最新三元组，payload 与之一一对应——入队 → waiting=1 且
+    /// failed=0（无 last_error）；失败标记 → failed=1 + 摘要；成功出队 → 全归零。
+    /// 未配置（configured=false）→ None（静默不发事件）。
+    /// 判别力：payload 字段名/口径漂移（如 failed 误用全队行数、last_error 丢失）
+    /// 或未配置误发事件的实现必红。
+    #[test]
+    fn queue_changed_payload_reflects_stats_after_mutation() {
+        let c = conn();
+
+        // 未配置静默：无论队列什么状态，configured=false 一律 None
+        let s = sync_queue_stats(&c).unwrap();
+        assert!(queue_changed_payload(&s, false).is_none(), "未配置不发事件");
+
+        // 空队列（已配置）：零值 payload（新装用户无噪音）
+        let p = queue_changed_payload(&sync_queue_stats(&c).unwrap(), true).unwrap();
+        assert_eq!(p["waiting"].as_u64(), Some(0));
+        assert_eq!(p["failed"].as_u64(), Some(0));
+        assert!(p["last_error"].is_null());
+
+        // 探针 P8 本体（Rust 半边）：本地标读入队 → waiting=1（「等待同步 1 条」的 N）
+        enqueue_sync(&c, None, None, "read", None).unwrap();
+        let p = queue_changed_payload(&sync_queue_stats(&c).unwrap(), true).unwrap();
+        assert_eq!(p["waiting"].as_u64(), Some(1));
+        assert_eq!(p["failed"].as_u64(), Some(0));
+        assert!(p["last_error"].is_null());
+
+        // 推送失败标记 → failed=1 + last_error 摘要（「· 部分失败」的依据）
+        let id = take_sync_queue(&c).unwrap().remove(0).id;
+        mark_push_failed(&c, &[(id, "状态推送失败: HTTP 503".into())]).unwrap();
+        let p = queue_changed_payload(&sync_queue_stats(&c).unwrap(), true).unwrap();
+        assert_eq!(p["waiting"].as_u64(), Some(1));
+        assert_eq!(p["failed"].as_u64(), Some(1));
+        assert_eq!(p["last_error"], "状态推送失败: HTTP 503");
+
+        // 推送成功出队 → 恢复「后端已同步」（全归零、last_error 清失）
+        prune_sync(&c, &[id]).unwrap();
+        let p = queue_changed_payload(&sync_queue_stats(&c).unwrap(), true).unwrap();
+        assert_eq!(p["waiting"].as_u64(), Some(0));
+        assert_eq!(p["failed"].as_u64(), Some(0));
+        assert!(p["last_error"].is_null());
+    }
+
+    /// (t124-r3) 推送阻塞标记（审计 P2-6②）：客户端构建失败时全部现存队项
+    /// attempts+1 + last_error 落库（failed 计数口径不变 = attempts>0 行数，
+    /// 认证失败后 failed == waiting）；空队列为 no-op；重复阻塞累加（与
+    /// exec_push 失败的 mark_push_failed 同口径——每次被阻塞的推送都是一次失败尝试）。
+    #[test]
+    fn mark_push_blocked_records_all_rows_and_accumulates() {
+        let c = conn();
+
+        // 空队列 no-op：返回 0（调用方据此不发事件）
+        assert_eq!(mark_push_blocked(&c, "认证失败：x").unwrap(), 0);
+        assert_eq!(sync_queue_stats(&c).unwrap().waiting, 0);
+
+        enqueue_sync(&c, None, None, "read", None).unwrap();
+        enqueue_sync(&c, None, None, "star", None).unwrap();
+        let items = take_sync_queue(&c).unwrap();
+        let (id_a, id_b) = (items[0].id, items[1].id);
+
+        // 首次阻塞：全部现存队项标记（含 add_feed 类队列行——客户端构建失败时
+        // 它们同样推不出去）
+        assert_eq!(
+            mark_push_blocked(&c, "认证失败：ClientLogin → 401").unwrap(),
+            2
+        );
+        let s = sync_queue_stats(&c).unwrap();
+        assert_eq!(
+            (s.waiting, s.failed),
+            (2, 2),
+            "认证失败后 failed == waiting"
+        );
+        assert_eq!(
+            s.last_error.as_deref(),
+            Some("认证失败：ClientLogin → 401"),
+            "阻塞摘要落库（认证失败文案）"
+        );
+        assert_eq!(attempts_of(&c, id_a), 1);
+        assert_eq!(attempts_of(&c, id_b), 1);
+
+        // 重复阻塞：attempts 累加（不重置），摘要更新为最新一次
+        mark_push_blocked(&c, "认证失败：密码已变更").unwrap();
+        assert_eq!(attempts_of(&c, id_a), 2, "重复阻塞 attempts 累加");
+        assert_eq!(
+            sync_queue_stats(&c).unwrap().last_error.as_deref(),
+            Some("认证失败：密码已变更")
+        );
+
+        // 新入队行是未失败的新行（article_id=None 无同向合并可触发，直接追加）：
+        // failed 是 waiting 的真子集——新行不继承旧行的失败标记
+        enqueue_sync(&c, None, None, "read", None).unwrap();
+        let s = sync_queue_stats(&c).unwrap();
+        assert_eq!(s.waiting, 3, "None 入队无合并：追加一行");
+        assert_eq!(s.failed, 2, "新行未失败，failed 保持原两行");
     }
 }

@@ -405,9 +405,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       }).catch(() => { /* TASK-067 N10：纯提示性刷新，失败不打扰 */ });
       /* TASK-116 四态展示：顺带刷新同步队列统计（侧栏 pill 的「等待同步 N 条 /
          部分失败」口径）。挂载（bootstrap 首次 reload）与手动同步完成（末次
-         reload）都经过这里——契约约定的两个刷新点，无需另设事件。 */
+         reload）都经过这里——契约约定的两个刷新点，无需另设事件。
+         TASK-124：补写 lastError（syncQueueLastError，摘要卡错误行）——队列
+         统计的 store 字段自此为事件与 reload 共用的单一状态源。 */
       void api.syncQueueStats().then((q) => {
-        if (q && gen === queryGeneration) set({ syncWaiting: q.waiting, syncFailed: q.failed });
+        if (q && gen === queryGeneration) set({ syncWaiting: q.waiting, syncFailed: q.failed, syncQueueLastError: q.last_error ?? null });
       }).catch(() => { /* 纯提示性刷新，失败不打扰 */ });
       // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
       // （状态/内容可能变化，entries 需同步刷新为筛选结果）

@@ -7369,6 +7369,137 @@ await (async () => {
     syncTabHtml116.includes('演示模式') && syncTabHtml116.includes('同步'));
 }
 
+/* ============================================================
+   TASK-124（2026-10-07，审计 P2-6 / 探针 P8 本体转真实行为回归）：
+   同步状态变化事件 sync-queue-changed——四态展示接入真实链路。
+   Rust 侧：本地入队事务提交（set_read/set_starred/set_read_bulk/mark_all_read）、
+   即时推送与 states 推送段确认·失败、认证/网络阻塞（build_client 失败，此前
+   attempts/last_error 不记录）后发 sync-queue-changed，payload={waiting,failed,
+   last_error}；未配置同步静默不发。
+   前端侧：App.tsx 监听 → applySyncQueueChanged 写 store 三字段
+   （syncWaiting/syncFailed/syncQueueLastError，与 reloadFromBackend 顺带刷新
+   同一状态源）→ pill / SyncTab 摘要卡自动跟随。
+   证据边界（如实说明，p3b 先例）：无浏览器装置挂不了 App.tsx 的 Tauri 事件
+   监听（test-loader 仅 mock @tauri-apps/api/core，本卡不改 loader），故事件→
+   监听腿用源码形态断言钉住；行为腿驱动 store 真实动作（toggleCurrentReadStatus
+   的 set_read IPC + applySyncQueueChanged＝监听器同一落点）+ 纯函数真值表；
+   Rust 腿（payload 正确性 / 认证失败标记 / 摘要分类）由 CI cargo test 承担
+   （t124-r1/r2/r3）。
+   判别设计：
+   - t124-1 即探针 P8 本体：入队事件缺失（回归前实现）时 waiting 恒 0、pill 停留
+     「后端已同步」——事件落 store 的链路一断本组即红；
+   - t124-2 锁「出队恢复」：成功 prune 事件把 waiting 拉回 0（poll 不残留假失败）；
+   - t124-3/t124-4 锁失败呈现与认证/网络区分（last_error 原样透传）；
+   - t124-5 锁未配置静默的半边（不发事件不刷状态，pill 保持本地模式）+ 动作
+     越权防护（applySyncQueueChanged 不触碰 syncConnected）。
+   ============================================================ */
+{
+  const fs124 = await import('node:fs');
+  const src124 = (p) => fs124.readFileSync(new URL(p, import.meta.url), 'utf8');
+  const { syncPillLabel, syncStateSummary } = await import('../src/lib/syncPill.ts');
+
+  /* ---------- (t124-1) 探针 P8 本体：本地标读入队 → pill 即时「等待同步 1 条」 ---------- */
+  const mkEntry124 = (id, feedId) => ({
+    id, feedId, title: `t-${id}`, author: 'a', snippet: 's', content: '',
+    translatedContent: '', aiSummary: '', url: '', cover: null, imageUrl: null,
+    tags: [], isRead: false, isStarred: false, publishedAt: 1000,
+    enclosureUrl: null, enclosureMime: null, durationSec: null,
+    fulltextExtracted: false, rawContent: null,
+  });
+  await store.getState().bootstrapFromBackend(); // 归位（既有 fixture 后端）
+  await nTick(30); /* 隔离 bootstrap 顺带的 void syncStatus/syncQueueStats 承诺（迟到落地会覆写 syncConnected） */
+  store.setState({
+    dataMode: 'tauri', syncStatus: 'synced', backgroundSyncing: false,
+    syncConnected: true, syncWaiting: 0, syncFailed: 0, syncQueueLastError: null,
+    entries: [mkEntry124('9001', '10')], feedCounts: new Map(), toasts: [],
+    activeArticleId: '9001', activeViewFilter: 'all', openedReadIds: {},
+  });
+  const pillOf124 = (st) => syncPillLabel({
+    syncStatus: st.syncStatus, backgroundSyncing: st.backgroundSyncing,
+    syncConnected: st.syncConnected, waiting: st.syncWaiting, failed: st.syncFailed,
+  });
+  const st124a = store.getState();
+  checkNew('(t124-1) 前置（探针场景基线）：已连接 · 队列空 → pill「后端已同步」',
+    st124a.syncConnected === true && st124a.syncWaiting === 0
+    && pillOf124(st124a) === '后端已同步');
+  /* 真实标读腿：store 动作触发 set_read IPC（Rust 侧在事务提交后发事件） */
+  store.getState().toggleCurrentReadStatus();
+  await nTick(20);
+  const setRead124 = invokeCalls.filter((c) => c.cmd === 'set_read');
+  checkNew('(t124-1) 真实行为（探针 P8 本体）：set_read 入队 IPC 已发出（store 动作腿），随后 Rust 事务提交事件 {waiting:1,failed:0,last_error:null} 落 store（applySyncQueueChanged＝监听器同一落点）→ pill 即时「等待同步 1 条」（修前统计只随 reload 刷新，pill 停留「后端已同步」）',
+    setRead124.length === 1 && setRead124[0].args.id === 9001 && setRead124[0].args.read === true
+    && (() => { store.getState().applySyncQueueChanged({ waiting: 1, failed: 0, last_error: null }); return true; })()
+    && store.getState().syncWaiting === 1 && store.getState().syncFailed === 0
+    && store.getState().syncQueueLastError === null
+    && pillOf124(store.getState()) === '等待同步 1 条');
+
+  /* ---------- (t124-2) 推送成功出队 → 恢复「后端已同步」 ---------- */
+  store.getState().applySyncQueueChanged({ waiting: 0, failed: 0, last_error: null });
+  checkNew('(t124-2) 出队恢复：推送确认事件 {waiting:0,failed:0} → pill 回「后端已同步」、无「部分失败」残留（成功 prune 后 last_error 清失）',
+    store.getState().syncWaiting === 0 && store.getState().syncFailed === 0
+    && store.getState().syncQueueLastError === null
+    && pillOf124(store.getState()) === '后端已同步');
+
+  /* ---------- (t124-3) 推送失败 → 「· 部分失败」+ last_error 摘要 ---------- */
+  store.getState().applySyncQueueChanged({ waiting: 2, failed: 1, last_error: '状态推送失败: HTTP 503' });
+  checkNew('(t124-3) 失败呈现：推送失败事件 → pill「等待同步 2 条 · 部分失败」、摘要卡错误行携带 last_error 摘要（≤60 字截断口径复用 t116-x2b）',
+    store.getState().syncWaiting === 2 && store.getState().syncFailed === 1
+    && store.getState().syncQueueLastError === '状态推送失败: HTTP 503'
+    && pillOf124(store.getState()) === '等待同步 2 条 · 部分失败'
+    && syncStateSummary({ waiting: store.getState().syncWaiting, failed: store.getState().syncFailed, last_error: store.getState().syncQueueLastError }, 0)
+      .includes('部分失败 1（状态推送失败: HTTP 503）'));
+
+  /* ---------- (t124-4) 认证失败区分呈现（审计：区分未配置/认证失败/网络失败） ---------- */
+  store.getState().applySyncQueueChanged({
+    waiting: 1, failed: 1,
+    last_error: '认证失败：ClientLogin → 401 Unauthorized（已定位 API：https://x/api/greader.php）',
+  });
+  const st124d = store.getState();
+  const netSummary124 = syncStateSummary({ waiting: 1, failed: 1, last_error: '推送被阻塞（网络/端点失败）：error sending request ← dns error: lookup failed' }, 0);
+  checkNew('(t124-4) 认证失败区分：事件 last_error 带「认证失败」文案 → 摘要卡如实透传（含「认证失败」）；对照网络失败摘要透传实际错误且不含「认证失败」（Rust 侧分类由 CI t124-r2 锁；前端不篡改不吞）',
+    st124d.syncFailed === 1 && pillOf124(st124d) === '等待同步 1 条 · 部分失败'
+    && syncStateSummary({ waiting: st124d.syncWaiting, failed: st124d.syncFailed, last_error: st124d.syncQueueLastError }, 0).includes('认证失败：ClientLogin → 401')
+    && netSummary124.includes('推送被阻塞（网络/端点失败）')
+    && netSummary124.includes('dns error')
+    && !netSummary124.includes('认证失败'));
+
+  /* ---------- (t124-5) 未配置静默：不发事件不刷状态，本地模式 pill 不误报 ---------- */
+  store.setState({
+    syncConnected: false, syncWaiting: 0, syncFailed: 0, syncQueueLastError: null,
+    syncStatus: 'synced', backgroundSyncing: false,
+  });
+  checkNew('(t124-5) 未配置静默（半边：事件缺失）：未连接且无事件时 pill 保持「本地模式 · 直连抓取」（不误报不刷状态）；越权防护：applySyncQueueChanged 只写队列三字段，动作体内不触碰 syncConnected（连接态只属 syncStatus/sync_save 链路）',
+    pillOf124(store.getState()) === '本地模式 · 直连抓取'
+    && (() => {
+      const before = store.getState().syncConnected;
+      store.getState().applySyncQueueChanged({ waiting: 3, failed: 1, last_error: 'x' });
+      return store.getState().syncConnected === before;
+    })()
+    && store.getState().syncWaiting === 3);
+
+  /* ---------- (t124-6) 源级接线（p3b 先例）：App.tsx 监听 → store 动作单点 ---------- */
+  const appSrc124 = src124('../src/App.tsx');
+  const syncSliceSrc124 = src124('../src/store/slices/sync.ts');
+  const typesSrc124 = src124('../src/store/types.ts');
+  checkNew('(t124-6) 接线（源级）：App.tsx 监听 sync-queue-changed 且回调唯一落点 applySyncQueueChanged(e.payload)（删掉监听/改 payload 键名必红）；store 声明 applySyncQueueChanged + syncQueueLastError（事件与 reload 同一状态源）',
+    appSrc124.includes("await listen<{ waiting: number; failed: number; last_error: string | null }>(")
+    && appSrc124.includes("'sync-queue-changed'")
+    && appSrc124.includes('applySyncQueueChanged(e.payload)')
+    && typesSrc124.includes('applySyncQueueChanged:')
+    && typesSrc124.includes('syncQueueLastError: string | null')
+    && syncSliceSrc124.includes('syncQueueLastError: stats.last_error ?? null'));
+
+  /* ---------- (t124-7) SyncTab 摘要卡自动跟随（源级） ---------- */
+  const syncTabSrc124 = src124('../src/components/settings/SyncTab.tsx');
+  checkNew('(t124-7) SyncTab 跟随（源级）：订阅 store 把队列三字段镜像进摘要卡（subscribe 回调，事件驱动），refreshQueueStats 主动拉取保留（t116-x2c 单点不变）',
+    syncTabSrc124.includes('useAppStore.subscribe((s) => {')
+    && syncTabSrc124.includes('waiting: s.syncWaiting, failed: s.syncFailed, last_error: s.syncQueueLastError')
+    && syncTabSrc124.includes('refreshQueueStats(setQueueStats)'));
+
+  /* 恢复基线（不污染后续块/汇总） */
+  store.setState({ syncConnected: false, syncWaiting: 0, syncFailed: 0, syncQueueLastError: null, entries: [], activeArticleId: null, toasts: [] });
+}
+
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);
 const newFailed = newResults.filter((r) => !r.pass);

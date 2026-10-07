@@ -130,6 +130,32 @@ export default function App() {
     return () => unlistens.forEach((u) => u());
   }, []);
 
+  /* ---------- TASK-124（审计 P2-6①）：同步队列变化事件——四态展示接入真实链路 ----------
+     Rust 在本地入队事务提交（set_read/set_starred/set_read_bulk/mark_all_read）、
+     即时推送与 states 推送段确认·失败、认证/网络阻塞后发 sync-queue-changed
+     （payload = {waiting, failed, last_error}）。此前队列统计只随 reloadFromBackend
+     刷新——本地标读入队后 pill 仍显示「后端已同步」（探针 P8 本体）。
+     监听器只调 applySyncQueueChanged（store 动作，只写队列三字段，不触碰
+     syncConnected）：未配置同步时 Rust 不发事件，pill 保持「本地模式」分支不误报。 */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<{ waiting: number; failed: number; last_error: string | null }>(
+          'sync-queue-changed',
+          (e) => {
+            useAppStore.getState().applySyncQueueChanged(e.payload);
+          },
+        );
+      } catch {
+        /* 事件监听失败不影响主流程 */
+      }
+    })();
+    return () => unlisten?.();
+  }, []);
+
   /* ---------- SMTC 系统媒体键回调：媒体键/音量浮层控制播放 ---------- */
   useEffect(() => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
