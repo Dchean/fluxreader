@@ -3052,7 +3052,13 @@ await (async () => {
        停在「已读」（其自身 set_read(true) 已落库）。修前值守卫（当前值==乐观写入值）
        无法区分「用户已接管」与「未被触碰」，迟到回滚把 UI 踩回未读而 DB 是已读，
        计数同步偏差 +1；修后以「条目变更版本未变」为恢复前提，用户接管（每次真实
-       翻转都 bump 版本）的条目一律跳过。 */
+       翻转都 bump 版本）的条目一律跳过。
+       【TASK-118 更新理由】版本键升级为 articleId × field（per-field）后守卫语义
+       保持——本场景的接管判定原本只涉及 isRead 写入，为使断言对「per-field 升级」
+       有判别力（而非仅锁行为不变），在窗口内对 47002 追加一次**收藏**写入：
+       修前（文章级共享版本）收藏 bump 会 void 掉 47002 的读声明、回滚被跳过
+       （行卡在乐观已读、计数偏差），修后 isStarred 的 bump 不进 isRead 版本，
+       47002 的读回滚照常恢复且收藏保留。原有两断言的条件全部保留（只增不减）。 */
     await resetStore();
     feedCountsImpl = countsFromRows;
     backendRows = [
@@ -3064,15 +3070,18 @@ await (async () => {
     store.getState().markCurrentViewAllRead();            // 乐观翻转 47001/47002 → read
     store.getState().toggleEntryFlag('47001', 'isRead');  // 用户 read→unread（set_read(false) 落库）
     store.getState().toggleEntryFlag('47001', 'isRead');  // 用户 unread→read（最终意图=已读，set_read(true) 落库）
+    store.getState().toggleEntryFlag('47002', 'isStarred'); // TASK-118：窗口内收藏写（set_starred(true) 落库；只 bump isStarred 版本）
     await nTick(60);                                       // 全部已读失败回滚落地
     const guard107 = store.getState();
     checkNew('(t104-rollback-guard-versioned) 双 toggle 停在已读 + 全部已读失败：用户最终意图不被回踩（修前值守卫误踩回未读）',
       guard107.entries.find((a) => a.id === '47001')?.isRead === true
       && backendRows.find((r) => r.id === 47001)?.is_read === true // R2/F3：wire 格式布尔化（原数字 1）
       && guard107.entries.find((a) => a.id === '47002')?.isRead === false);
-    checkNew('(t104-rollback-guard-versioned) 版本化守卫下计数与 DB 真值一致（修前同值误踩会偏差 +1）',
+    checkNew('(t104-rollback-guard-versioned) 版本化守卫下计数与 DB 真值一致（修前同值误踩会偏差 +1）；窗口内收藏不使 47002 的读回滚失效（per-field：star 只 bump isStarred 版本）且收藏保留（TASK-118 更新）',
       guard107.feedCounts.get('10')?.unread === 1
-      && countsFromRows().find((c) => c.feed_id === 10)?.unread === 1);
+      && countsFromRows().find((c) => c.feed_id === 10)?.unread === 1
+      && guard107.entries.find((a) => a.id === '47002')?.isStarred === true
+      && guard107.feedCounts.get('10')?.starred === 1);
 
     /* ---------- t104-reconcile-retry（TASK-107 R1/F2）：对账重取失败可见化 + 短延迟重试 ----------
        审查探针 F 场景：mark_all_read 落库成功但紧随的 feed_counts 重取失败——
@@ -3730,6 +3739,176 @@ await (async () => {
       && new Set(t117p5after.entries.map((e) => e.id)).size === 1000);
 
     await resetStore(); // 夹具复位：不把 1200 行大夹具与 defer 残留带给后续块
+  }
+
+  /* ============================================================
+     TASK-118（2026-10-07，审计 P1-2）：跨字段操作版本与回滚统一——
+     收藏不再使读状态回滚失效。
+
+     审计探针本体（tmp/audit-20261007/probes.mjs P2）：entryMutationVersion
+     修前是文章级共享版本——全部已读在途时用户收藏该文，收藏 bump 同一版本，
+     读状态回滚被当成「已被接管」而跳过（审计实测：应 isRead=false/unread=1，
+     实际 isRead=true/isStarred=true/unread=0）。修法：版本键改 articleId ×
+     field（isRead/isStarred 各自单调）；markCurrentViewAllRead 回滚只查
+     isRead 字段版本；回滚统一——单条 toggle / 批量标读 / 打开即标读三条
+     路径失败都走同一回滚助手 rollbackEntryClaims（审计相邻缺口：「所有
+     乐观写入都有统一版本回滚」此前不成立——bulk 与打开即标读失败只提示）。
+
+     门禁纪律（DEC-gate-adjust-20261007）：审计探针场景转真实行为回归。
+     本组全部走真实 store 动作序列；假后端复用既有 rejectCmds（按命令名
+     注入失败）与 held-promise（手动 reject 驱动在途窗口）机制，无需扩展
+     注入设施（set_read_bulk / set_read 的拒绝注入由 rejectCmds 直接覆盖）。
+     ============================================================ */
+  {
+    const it118 = await import('../dist-test/store/internals.js');
+
+    /* ---------- t118-probe-cross-field：审计探针本体（全部已读在途+收藏+失败） ---------- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [mkRow({ id: 52001, feed_id: 10, published_at: iso(NOW) })];
+    await store.getState().bootstrapFromBackend();
+    const realInvoke118 = globalThis.__INVOKE__;
+    let rejectMarkAll118 = null;
+    globalThis.__INVOKE__ = (cmd, args) => {
+      if (cmd === 'mark_all_read') return new Promise((_res, rej) => { rejectMarkAll118 = rej; });
+      return realInvoke118(cmd, args);
+    };
+    store.getState().markCurrentViewAllRead();              // 全部已读在途（乐观：read、unread 0，isRead 版本快照 v1）
+    await nTick(0);
+    store.getState().toggleEntryFlag('52001', 'isStarred'); // 用户收藏（set_starred(true) 落库；只 bump isStarred 版本）
+    await nTick(0);
+    rejectMarkAll118({ message: '注入失败:mark_all_read' }); // 全部已读此刻才失败
+    await nTick(10);
+    globalThis.__INVOKE__ = realInvoke118;
+    const probe118 = store.getState();
+    checkNew('(t118-probe-cross-field) 探针本体：全部已读在途+收藏+失败 → 读状态恢复未读（修前收藏 bump 共享版本使读回滚被跳过：isRead 停留 true）',
+      probe118.entries.find((a) => a.id === '52001')?.isRead === false
+      && probe118.feedCounts.get('10')?.unread === 1);
+    checkNew('(t118-probe-cross-field) 探针本体：收藏保留（isStarred=true、starred=1，与后端按行聚合一致——读失败不牵连收藏）',
+      probe118.entries.find((a) => a.id === '52001')?.isStarred === true
+      && probe118.feedCounts.get('10')?.starred === 1
+      && countsFromRows().find((c) => c.feed_id === 10)?.starred === 1);
+
+    /* ---------- t118-field-version：跨字段版本隔离真值表（三个 bump 点） ---------- */
+    await resetStore();
+    backendRows = [
+      mkRow({ id: 56001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 56002, feed_id: 10, published_at: iso(NOW - 60000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    const v118 = (id, field) => it118.getEntryVersion(id, field);
+    /* 基线说明：bootstrapFromBackend 落地的后端快照本身就是一次真实写入
+       （mergeSnapshotEntries fromBackend=true 两字段 bump）——启动后每行两字段
+       版本 = 1；版本 0 只属于从未被任何写入触达的 (id, field)。 */
+    checkNew('(t118-field-version) 真值表·基线：启动快照计入版本（每行两字段=1），未触达的 (id, field) 为 0',
+      v118('56001', 'isRead') === 1 && v118('56001', 'isStarred') === 1
+      && v118('56002', 'isRead') === 1 && v118('56002', 'isStarred') === 1
+      && v118('99999', 'isRead') === 0 && v118('99999', 'isStarred') === 0);
+    store.getState().toggleEntryFlag('56001', 'isStarred'); // 收藏：flipEntryFlag 按旗标 bump isStarred
+    checkNew('(t118-field-version) 真值表·收藏：isStarred 2、isRead 保持 1（跨字段隔离核心——修前共享版本两者同 bump）',
+      v118('56001', 'isStarred') === 2 && v118('56001', 'isRead') === 1);
+    store.getState().toggleEntryFlag('56002', 'isRead');    // 单条标读：flipEntryFlag bump isRead
+    it118.markEntriesRead(new Set(['56001']));              // 批量标读（本地乐观）：只 bump isRead
+    checkNew('(t118-field-version) 真值表·标读：isRead bump、同条目 isStarred 与另一条目 isStarred 均不受牵连',
+      v118('56001', 'isRead') === 2 && v118('56001', 'isStarred') === 2
+      && v118('56002', 'isRead') === 2 && v118('56002', 'isStarred') === 1);
+    await store.getState().reloadFromBackend();             // 后端快照替换（fromBackend=true）
+    checkNew('(t118-field-version) 真值表·后端快照：两字段都 bump（快照整体替换携带行级真值，两字段在途声明一并失效）',
+      v118('56001', 'isRead') === 3 && v118('56001', 'isStarred') === 3
+      && v118('56002', 'isRead') === 3 && v118('56002', 'isStarred') === 2);
+
+    /* ---------- t118-symmetric-cross-field：对称方向（收藏在途+标读接管+收藏失败） ---------- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [mkRow({ id: 57001, feed_id: 10, published_at: iso(NOW) })];
+    await store.getState().bootstrapFromBackend();
+    const realInvoke118s = globalThis.__INVOKE__;
+    let rejectSetStarred118s = null;
+    globalThis.__INVOKE__ = (cmd, args) => {
+      if (cmd === 'set_starred') return new Promise((_res, rej) => { rejectSetStarred118s = rej; });
+      return realInvoke118s(cmd, args);
+    };
+    store.getState().toggleEntryFlag('57001', 'isStarred'); // 收藏在途（乐观 starred、计数 +1）
+    await nTick(0);
+    store.getState().toggleEntryFlag('57001', 'isRead');    // 用户标读（set_read(true) 落库成功；bump isRead 版本）
+    await nTick(0);
+    rejectSetStarred118s({ message: '注入失败:set_starred' }); // 收藏此刻才失败
+    await nTick(10);
+    globalThis.__INVOKE__ = realInvoke118s;
+    const sym118 = store.getState();
+    checkNew('(t118-symmetric-cross-field) 对称方向：收藏失败回滚仍恢复（isStarred=false、starred=0）——标读 bump 的是 isRead 版本，不 void 收藏声明（修前共享版本下收藏停留乐观 true）',
+      sym118.entries.find((a) => a.id === '57001')?.isStarred === false
+      && sym118.feedCounts.get('10')?.starred === 0);
+    checkNew('(t118-symmetric-cross-field) 对称方向：窗口内的标读保留（isRead=true、unread=0，与 DB 一致）',
+      sym118.entries.find((a) => a.id === '57001')?.isRead === true
+      && sym118.feedCounts.get('10')?.unread === 0
+      && countsFromRows().find((c) => c.feed_id === 10)?.unread === 0);
+
+    /* ---------- t118-bulk-rollback：set_read_bulk 失败回滚（统一助手，批量路径） ---------- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 53001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 53002, feed_id: 10, published_at: iso(NOW - 60000) }),
+      mkRow({ id: 53003, feed_id: 10, published_at: iso(NOW - 120000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    rejectCmds.add('set_read_bulk');
+    store.getState().markEntriesReadBulk(['53001', '53002', '53003']); // 乐观翻转 3 行 → read、unread 0
+    store.getState().toggleEntryFlag('53001', 'isRead');  // 窗口内用户双击接管 53001：read→unread（set_read(false) 落库）
+    store.getState().toggleEntryFlag('53001', 'isRead');  // unread→read（最终意图=已读，set_read(true) 落库）
+    await nTick(10);                                       // bulk 失败回滚落地
+    const bulk118 = store.getState();
+    checkNew('(t118-bulk-rollback) set_read_bulk 失败：未被接管的行（53002/53003）恢复未读、unread 逐 feed 回补、失败 toast 可见（修前只提示不回滚）',
+      bulk118.entries.find((a) => a.id === '53002')?.isRead === false
+      && bulk118.entries.find((a) => a.id === '53003')?.isRead === false
+      && bulk118.feedCounts.get('10')?.unread === 2
+      && bulk118.toasts.some((t) => t.text === '批量标读失败'));
+    checkNew('(t118-bulk-rollback) 版本守卫：窗口内双击停在读的 53001 不被回踩（isRead 版本已前进），UI 与 DB 真值一致（修前无回滚/值守卫均无法同时满足）',
+      bulk118.entries.find((a) => a.id === '53001')?.isRead === true
+      && backendRows.find((r) => r.id === 53001)?.is_read === true
+      && bulk118.feedCounts.get('10')?.unread === countsFromRows().find((c) => c.feed_id === 10)?.unread);
+
+    /* ---------- t118-open-read-rollback：打开即标读失败回滚（统一助手，selectArticle 路径） ---------- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [mkRow({ id: 54001, feed_id: 10, published_at: iso(NOW) })];
+    await store.getState().bootstrapFromBackend();
+    rejectCmds.add('set_read');
+    store.getState().selectArticle('54001'); // markReadOnOpen 默认 true → 乐观置 read + set_read 失败
+    await nTick(10);
+    const open118 = store.getState();
+    checkNew('(t118-open-read-rollback) 打开即标读失败：读态恢复未读、unread 回补（修前乐观停留已读只提示）+ 失败 toast 可见',
+      open118.entries.find((a) => a.id === '54001')?.isRead === false
+      && open118.feedCounts.get('10')?.unread === 1
+      && open118.toasts.some((t) => t.text.startsWith('标读失败：')));
+    checkNew('(t118-open-read-rollback) 边界裁定：回滚读态但不清阅读上下文——activeArticleId 保留（用户还在读）、「打开过」保留标记在（未读筛选下原地变灰而非消失）',
+      open118.activeArticleId === '54001'
+      && open118.openedReadIds['54001'] === true);
+
+    /* ---------- t118-markall-twice：连续两次全部已读失败（版本快照可复用性） ---------- */
+    await resetStore();
+    feedCountsImpl = countsFromRows;
+    backendRows = [
+      mkRow({ id: 58001, feed_id: 10, published_at: iso(NOW) }),
+      mkRow({ id: 58002, feed_id: 10, published_at: iso(NOW - 60000) }),
+    ];
+    await store.getState().bootstrapFromBackend();
+    rejectCmds.add('mark_all_read');
+    store.getState().markCurrentViewAllRead();
+    await nTick(10); // 第一轮失败回滚（两行恢复未读、版本停在 v1）
+    checkNew('(t118-markall-twice) 第一轮全部已读失败：回滚到位（两行未读、unread=2）',
+      store.getState().entries.every((a) => !a.isRead)
+      && store.getState().feedCounts.get('10')?.unread === 2);
+    store.getState().markCurrentViewAllRead();
+    await nTick(10); // 第二轮失败回滚：乐观写入重新翻转（bump → v2），快照取自首轮回滚后的现值
+    checkNew('(t118-markall-twice) 第二轮全部已读失败：新快照（v2）下回滚照常恢复——机制不被首轮 bump/回滚瘫痪、计数不重复回补（两行未读、unread=2、无假成功提示）',
+      store.getState().entries.every((a) => !a.isRead)
+      && store.getState().feedCounts.get('10')?.unread === 2
+      && backendRows.every((r) => !r.is_read)
+      && !store.getState().toasts.some((t) => t.text === '已全部标为已读'));
+
+    await resetStore(); // 夹具复位：不把 rejectCmds / 大夹具残留带给后续块
   }
 
   /* ============================================================

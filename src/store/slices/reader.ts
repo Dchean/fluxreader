@@ -1,6 +1,7 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
-import { appStore, markEntriesRead, optimisticEntryFlagToggle, syncCurrentViewCache } from '../internals';
+import type { EntryRollbackClaim } from '../internals';
+import { appStore, getEntryVersion, markEntriesRead, optimisticEntryFlagToggle, rollbackEntryClaims, syncCurrentViewCache } from '../internals';
 import type { AppState } from '../types';
 
 /** 阅读器 slice：选中文章、正文水合（懒加载 + 批量合批）与卡片就地标读/收藏。
@@ -99,11 +100,20 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     const shouldMarkRead = dataMode === 'tauri' && settings.markReadOnOpen && !art.isRead;
     if (shouldMarkRead) {
       /* 后端模式：已读落库（不重载快照，本地同步置位即可） */
-      /* TASK-067 N10：标读失败对用户可见（此前静默，重启后回退未读） */
+      /* TASK-067 N10：标读失败对用户可见（此前静默，重启后回退未读）。
+         TASK-118（审计相邻缺口）：乐观置位（markEntriesRead）后快照 isRead
+         字段版本，失败走统一回滚助手 rollbackEntryClaims——与单条 toggle /
+         批量标读同一份实现（恢复读态 + 逐 feed 回补 unread，版本守卫：期间
+         已被接管则跳过）。
+         边界裁定：失败时文章刚被选中阅读——只回滚读态与计数，不清
+         activeArticleId / openedReadIds（用户还在读；「打开过」的保留标记
+         使卡片在未读筛选下原地变灰而非消失）。 */
+      markEntriesRead(new Set([id]));
+      const claim: EntryRollbackClaim = { id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') };
       void api.setRead(Number(id), true).catch((e) => {
+        rollbackEntryClaims([claim]);
         get().showToast(`标读失败：${extractError(e)}`);
       });
-      markEntriesRead(new Set([id]));
     }
     set((s) => ({
       /* 记录"本次会话中被打开过"：即使标已读，在未读筛选下也保留显示（原地变灰） */
@@ -425,17 +435,6 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       return e ? !e.isRead : false;
     });
     if (unread.length === 0) return;
-    if (dataMode === 'tauri') {
-      /* AUDIT P3[F4]（TASK-084）：改为**一次**批量 IPC。
-         修前是 `Promise.allSettled(unread.map((id) => api.setRead(...)))` —— 每个 id 一次
-         invoke，几百个 id 就是几百次往返。Rust 侧 set_read_bulk 在同一把锁内逐 id 走
-         record_read_state（本地写入 + 入队口径与逐条路径完全一致），故语义等价。
-         失败提示：整批一次（比修前的“部分失败”粒度更粗，但不再有 toast 洪峰，
-         且 catch 保证不会产生 unhandled rejection）。 */
-      void api.setReadBulk(unread.map((id) => Number(id)), true).catch(() => {
-        get().showToast('批量标读失败');
-      });
-    }
     const marked = new Set(unread);
     markEntriesRead(marked);
     set((s) => ({
@@ -448,6 +447,24 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         ...Object.fromEntries(unread.map((id) => [id, true])),
       },
     }));
+    if (dataMode === 'tauri') {
+      /* AUDIT P3[F4]（TASK-084）：改为**一次**批量 IPC。
+         修前是 `Promise.allSettled(unread.map((id) => api.setRead(...)))` —— 每个 id 一次
+         invoke，几百个 id 就是几百次往返。Rust 侧 set_read_bulk 在同一把锁内逐 id 走
+         record_read_state（本地写入 + 入队口径与逐条路径完全一致），故语义等价。
+         失败提示：整批一次（比修前的“部分失败”粒度更粗，但不再有 toast 洪峰，
+         且 catch 保证不会产生 unhandled rejection）。
+         TASK-118（审计相邻缺口）：乐观置位后快照各 id 的 isRead 字段版本，
+         失败走统一回滚助手 rollbackEntryClaims——与单条 toggle / 打开即标读
+         同一份实现：按版本守卫恢复被翻转行、逐 feed 回补 unread（Math.max(0,)），
+         不再只提示不回滚。openedReadIds 不回撤：「打开过」的原地变灰保留语义
+         不随落库失败撤销（与打开即标读回滚的边界裁定同口径）。 */
+      const claims: EntryRollbackClaim[] = unread.map((id) => ({ id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') }));
+      void api.setReadBulk(unread.map((id) => Number(id)), true).catch(() => {
+        rollbackEntryClaims(claims);
+        get().showToast('批量标读失败');
+      });
+    }
   },
 
   /* ================= 卡片就地操作 ================= */

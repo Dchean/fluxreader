@@ -379,8 +379,17 @@ export function mergeSnapshotEntries(
        缓存行恰是乐观态本身（经 syncCurrentViewCache 落进缓存），不 bump 以
        保留本应正确的在途回滚；经 reload 落进缓存的行在 bootstrap merge 时已
        bump 过，此处不 bump 不会重开踩踏缺口（缓存恢复点随后必触发后台
-       reload，其 fromBackend=true 的 merge 接手真值对齐）。 */
-  if (fromBackend) for (const a of entries) bumpEntryVersion(a.id);
+       reload，其 fromBackend=true 的 merge 接手真值对齐）。
+     TASK-118：后端快照路径对 isRead 与 isStarred **两字段都** bump——快照
+     整体替换携带的是后端行级真值，is_read 与 is_starred 同时被覆盖，两字段
+     的在途乐观声明一并失效；且 bump 收敛到字段键后不再有跨字段误伤（此前
+     文章级版本下，任一字段的快照替换都会 void 掉另一字段的在途声明）。 */
+  if (fromBackend) {
+    for (const a of entries) {
+      bumpEntryVersion(a.id, 'isRead');
+      bumpEntryVersion(a.id, 'isStarred');
+    }
+  }
   return { entries, hydratedIds, hydrationErrors };
 }
 
@@ -409,18 +418,28 @@ export function syncCurrentViewCache(entries: ArticleEntry[]) {
    toggle 停在与乐观写入相同的值（其自身 set_read 已落库），迟到的回滚会把
    UI 踩回旧值而 DB 是新值（审查探针 C3 实测）。规则：任何真实的条目标志写入
    （flipEntryFlag / markEntriesRead / 快照替换 mergeSnapshotEntries）都必须
-   bump 该条目版本，回滚方以「版本未变」为恢复前提。Map 随会话内被写过的
-   条目增长（与 entries 同量级），无需清理。 */
+   bump 对应字段版本，回滚方以「版本未变」为恢复前提。Map 随会话内被写过的
+   条目增长（与 entries 同量级，键为 条目×字段 至多两倍），无需清理。
+   TASK-118（审计 P1-2）：版本键从「文章级共享」升级为 articleId × field——
+   isRead / isStarred 各自独立单调。修前两字段共用同一文章版本：全部已读在途
+   时用户收藏该文，收藏（flipEntryFlag isStarred）bump 使读状态的迟到回滚被
+   误判成「已被接管」而跳过（审计探针实测：应 isRead=false/unread=1，实际
+   isRead=true/isStarred=true/unread=0）——收藏并没有接管 isRead，字段间不得
+   互相失效。键形态 `${id}|${field}`：id 是数字字符串、field 名不含 `|`，无歧义。 */
 const entryMutationVersion = new Map<string, number>();
 
-/** 读条目当前变更版本（未被写过的条目为 0）。回滚方在乐观写入后快照各 id 的
-    版本，失败回滚时仅恢复「版本仍相等」的条目。 */
-export function getEntryVersion(id: string): number {
-  return entryMutationVersion.get(id) ?? 0;
+/** TASK-118：版本键 = articleId × field。 */
+const entryVersionKey = (id: string, field: 'isRead' | 'isStarred'): string => `${id}|${field}`;
+
+/** 读条目当前字段变更版本（未被写过的条目/字段为 0）。回滚方在乐观写入后
+    快照各 (id, field) 的版本，失败回滚时仅恢复「版本仍相等」的字段声明。 */
+export function getEntryVersion(id: string, field: 'isRead' | 'isStarred'): number {
+  return entryMutationVersion.get(entryVersionKey(id, field)) ?? 0;
 }
 
-function bumpEntryVersion(id: string): void {
-  entryMutationVersion.set(id, getEntryVersion(id) + 1);
+function bumpEntryVersion(id: string, field: 'isRead' | 'isStarred'): void {
+  const key = entryVersionKey(id, field);
+  entryMutationVersion.set(key, (entryMutationVersion.get(key) ?? 0) + 1);
 }
 
 /** 乐观更新某篇条目的 isRead/isStarred，并同步 feedCounts 的未读/收藏计数。
@@ -433,14 +452,16 @@ function bumpEntryVersion(id: string): void {
     推送广播到远端，属 TASK-107 non_goals），前端也只动主条目所属源（t104
     断言锁定：标读后前端计数 == 后端按行聚合）。
     TASK-107 R1：每次真实翻转都 bump 条目版本（entryMutationVersion），供
-    多条目乐观操作（全部已读）的失败回滚做归属判定。 */
+    多条目乐观操作（全部已读）的失败回滚做归属判定。
+    TASK-118：按旗标类型 bump 对应字段版本（isRead / isStarred 各自单调）——
+    收藏只进 isStarred，不再使同文章在途的读状态回滚失效（审计 P1-2）。 */
 export function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
   const s = appStore().getState();
   const entry = s.entries.find((e) => e.id === id);
   if (!entry) return;
   const nextVal = !entry[field];
   const entries = s.entries.map((e) => (e.id === id ? { ...e, [field]: nextVal } : e));
-  bumpEntryVersion(id);
+  bumpEntryVersion(id, field); // TASK-118：按旗标类型 bump 对应字段版本
   const c = s.feedCounts.get(entry.feedId);
   let feedCounts = s.feedCounts;
   if (c) {
@@ -463,7 +484,8 @@ export function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
     不走本函数做计数（范围总量前端不可知），由 markCurrentViewAllRead 成功后
     重取 feed_counts 对账（t104 断言锁定）。
     TASK-107 R1：每次真实翻转都 bump 条目版本（entryMutationVersion）——
-    全部已读的乐观写入本身也走这里，其失败回滚以「版本未变」为恢复前提。 */
+    全部已读的乐观写入本身也走这里，其失败回滚以「版本未变」为恢复前提。
+    TASK-118：标读只 bump isRead 字段版本（收藏写入不再牵连本字段的回滚判定）。 */
 export function markEntriesRead(ids: Set<string>) {
   const s = appStore().getState();
   let entries = s.entries;
@@ -473,7 +495,7 @@ export function markEntriesRead(ids: Set<string>) {
   entries = entries.map((e) => {
     if (ids.has(e.id) && !e.isRead) {
       changed = true;
-      bumpEntryVersion(e.id); // TASK-107 R1：真实翻转必 bump 版本（回滚归属判定）
+      bumpEntryVersion(e.id, 'isRead'); // TASK-107 R1 + TASK-118：真实翻转必 bump isRead 字段版本（回滚归属判定）
       unreadDeltas.set(e.feedId, (unreadDeltas.get(e.feedId) ?? 0) + 1);
       return { ...e, isRead: true };
     }
@@ -493,12 +515,79 @@ export function markEntriesRead(ids: Set<string>) {
   syncCurrentViewCache(entries);
 }
 
+/** TASK-118：乐观写失败的统一回滚助手——三条乐观路径共用这**一份**实现，
+    不得各写一份（审计相邻缺口：修前单条 toggle 走值比较、批量标读与打开即
+    标读失败只提示不回滚，「所有乐观写入都有统一版本回滚」不成立）：
+    - 单条 toggle：optimisticEntryFlagToggle（卡片 / 阅读器 / 标读与收藏）；
+    - 批量标读：markEntriesReadBulk（滚动标读 / 全部已读的本地路径 / 播放器）；
+    - 打开即标读：selectArticle 与 anchorToArticle 的 markReadOnOpen。
+
+    声明形态（调用方在乐观写入**落地后**快照）：id + 字段 + 写入前值 + 该字段
+    版本。恢复守卫两道、顺序固定：
+    - 值等快速短路：当前值已等于回滚目标（prev）→ 无需动、也不动计数；
+    - 版本守卫（TASK-107 R1 语义，TASK-118 起按字段比较）：该字段版本 ≠ 快照值
+      → 期间已被其他真实写入接管，跳过——迟到回滚不得踩掉用户已落库的最终意图
+      （审查探针 C3），也不得被**另一字段**的写入 void（审计 P1-2）。
+    计数回补：按行恢复方向逐 feed 聚合，与 flipEntryFlag 的乐观方向互逆
+    （isRead 恢复未读 → unread +1、恢复已读 → unread -1；isStarred 对称），
+    Math.max(0,) 钳制与 markCurrentViewAllRead 的回滚形态一致。
+    返回是否有行被恢复：无恢复不写 store、不刷视图缓存（与「回滚跳过 ≠ 吞错」
+    分离——失败提示始终由调用方给出）。 */
+export interface EntryRollbackClaim {
+  id: string;
+  field: 'isRead' | 'isStarred';
+  /** 乐观写入前的值（回滚目标） */
+  prev: boolean;
+  /** 乐观写入 bump 完成后快照的字段版本 */
+  version: number;
+}
+
+export function rollbackEntryClaims(claims: readonly EntryRollbackClaim[]): boolean {
+  if (claims.length === 0) return false;
+  const s = appStore().getState();
+  const claimByKey = new Map(claims.map((c) => [entryVersionKey(c.id, c.field), c] as const));
+  let changed = false;
+  const unreadRestore = new Map<string, number>();
+  const starredRestore = new Map<string, number>();
+  const entries = s.entries.map((a) => {
+    let next = a;
+    const readClaim = claimByKey.get(entryVersionKey(a.id, 'isRead'));
+    if (readClaim && a.isRead !== readClaim.prev && getEntryVersion(a.id, 'isRead') === readClaim.version) {
+      changed = true;
+      next = { ...next, isRead: readClaim.prev };
+      unreadRestore.set(a.feedId, (unreadRestore.get(a.feedId) ?? 0) + (readClaim.prev ? -1 : 1));
+    }
+    const starClaim = claimByKey.get(entryVersionKey(a.id, 'isStarred'));
+    if (starClaim && a.isStarred !== starClaim.prev && getEntryVersion(a.id, 'isStarred') === starClaim.version) {
+      changed = true;
+      next = { ...next, isStarred: starClaim.prev };
+      starredRestore.set(a.feedId, (starredRestore.get(a.feedId) ?? 0) + (starClaim.prev ? 1 : -1));
+    }
+    return next;
+  });
+  if (!changed) return false;
+  let feedCounts = s.feedCounts;
+  const applyDelta = (feedId: string, key: 'unread' | 'starred', delta: number) => {
+    const c = feedCounts.get(feedId);
+    if (!c) return;
+    if (feedCounts === s.feedCounts) feedCounts = new Map(s.feedCounts); // 惰性复制
+    feedCounts.set(feedId, { ...c, [key]: Math.max(0, c[key] + delta) });
+  };
+  for (const [fid, delta] of unreadRestore) applyDelta(fid, 'unread', delta);
+  for (const [fid, delta] of starredRestore) applyDelta(fid, 'starred', delta);
+  appStore().setState({ entries, feedCounts });
+  syncCurrentViewCache(entries);
+  return true;
+}
+
 /** F2/F3（Batch 1/2 独立审查 P3）收口：乐观标志写的唯一实现——卡片
     （toggleEntryFlag）与阅读器（toggleCurrentReadStatus / toggleCurrentStar）共用。
     - 乐观翻转立即生效（点下去不等落库，flipEntryFlag 连动 feedCounts 与视图缓存）；
-    - 失败时**仅当当前值仍等于乐观写入值**才恢复点击前值：回滚若是「再翻一次当前值」，
-      连点两次且第一次失败、第二次成功时，第一次的迟到 catch 会把第二次已落库的
-      新值再踩回旧值——UI 与 DB 脱节（审查探针实测 UI isRead=true / DB is_read=false）；
+    - 失败回滚的归属判定：修前是「仅当当前值仍等于乐观写入值」（回滚若是
+      「再翻一次当前值」，连点两次且第一次失败、第二次成功时，第一次的迟到
+      catch 会把第二次已落库的新值再踩回旧值——UI 与 DB 脱节，审查探针实测）；
+      TASK-107 R1 起为版本守卫，TASK-118 起收口到统一助手 rollbackEntryClaims
+      （字段级版本守卫 + 值等快速短路）——与批量标读、打开即标读同一份实现；
     - 失败 toast 由调用方给文案模板（保持各入口既有文案）；成功提示（若有）通过
       onSuccess 在**落库成功后**出现——与 P1-5「去假成功」同口径，不得提前乐观弹。 */
 export function optimisticEntryFlagToggle(
@@ -514,12 +603,13 @@ export function optimisticEntryFlagToggle(
   const prev = entry[field];
   const optimistic = !prev;
   flipEntryFlag(id, field);
+  /* TASK-118：乐观翻转（flipEntryFlag 已 bump 对应字段）后快照该字段版本，
+     失败交给统一回滚助手——跨字段写入（如收藏）不再使本字段的回滚失效。 */
+  const claim: EntryRollbackClaim = { id, field, prev, version: getEntryVersion(id, field) };
   void request(optimistic).then(() => {
     onSuccess?.(optimistic);
   }).catch((e: unknown) => {
-    const cur = appStore().getState().entries.find((x) => x.id === id);
-    /* 仅当当前值仍等于乐观写入值时才恢复原值；否则后续点击已接管状态，只提示 */
-    if (cur && cur[field] === optimistic) flipEntryFlag(id, field);
+    rollbackEntryClaims([claim]);
     appStore().getState().showToast(failureText(extractError(e)));
   });
 }

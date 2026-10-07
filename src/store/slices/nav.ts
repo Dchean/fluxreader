@@ -316,10 +316,13 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        用户连点两次 toggle 停在与乐观写入相同的值时，迟到回滚会误踩用户最终
        意图而 DB 已是新值（审查探针 C3 实测）。版本由 internals 的三个真实
        写入点维护：flipEntryFlag（单条 toggle）/ markEntriesRead（本操作的
-       乐观写入与批量标读）/ mergeSnapshotEntries（快照替换带后端真值）。 */
+       乐观写入与批量标读）/ mergeSnapshotEntries（快照替换带后端真值）。
+       TASK-118（审计 P1-2）：快照与守卫都取 **isRead 字段**版本——修前文章级
+       共享版本下，窗口内用户收藏（bump isStarred）会把读回滚误判成已接管而
+       跳过（应恢复未读却停在乐观已读）。 */
     const optimisticVersionById = new Map<string, number>();
     for (const [id, prev] of prevReadById) {
-      if (!prev) optimisticVersionById.set(id, getEntryVersion(id));
+      if (!prev) optimisticVersionById.set(id, getEntryVersion(id, 'isRead'));
     }
     set({ openedReadIds: {} });
     void api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout }).then((affected) => {
@@ -365,7 +368,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         if (!ids.has(a.id)) return a;
         const prev = prevReadById.get(a.id);
         if (prev !== false || a.isRead !== true) return a;
-        if (getEntryVersion(a.id) !== optimisticVersionById.get(a.id)) return a; // R1：期间已被其他写入接管
+        if (getEntryVersion(a.id, 'isRead') !== optimisticVersionById.get(a.id)) return a; // R1 + TASK-118：期间已被其他**读态**写入接管（收藏 bump 的是 isStarred 字段，不再使读回滚失效）
         changed = true;
         unreadRestore.set(a.feedId, (unreadRestore.get(a.feedId) ?? 0) + 1);
         return { ...a, isRead: prev };

@@ -2,7 +2,8 @@ import type { StateCreator } from 'zustand';
 import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
 import type { ArticleListItemRow } from '../../lib/api';
-import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, appStore, buildFeedIndex, emptyArticlesCursor, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, setViewEntriesSnapshot } from '../internals';
+import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, appStore, buildFeedIndex, emptyArticlesCursor, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, rollbackEntryClaims, setViewEntriesSnapshot } from '../internals';
+import type { EntryRollbackClaim } from '../internals';
 import type { AppState, ArticlesCursorState } from '../types';
 import type { ContentLayoutType } from '../../types';
 
@@ -502,10 +503,17 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     const { settings: stSettings, dataMode: stMode } = get();
     const target = get().entries.find((a) => a.id === articleId);
     if (stMode === 'tauri' && stSettings.markReadOnOpen && target && !target.isRead) {
+      /* TASK-118（审计相邻缺口）：与 selectArticle 同口径——打开即标读失败走
+         统一回滚助手 rollbackEntryClaims（乐观置位后快照 isRead 字段版本；
+         恢复读态 + 逐 feed 回补 unread，版本守卫：期间已被接管则跳过），
+         不再只提示。边界裁定同 selectArticle：失败只回滚读态与计数，不清
+         activeArticleId（文章刚被锚定打开，用户还在读）。 */
+      markEntriesRead(new Set([articleId]));
+      const claim: EntryRollbackClaim = { id: articleId, field: 'isRead', prev: false, version: getEntryVersion(articleId, 'isRead') };
       void api.setRead(Number(articleId), true).catch((e) => {
+        rollbackEntryClaims([claim]);
         get().showToast(`标读失败：${extractError(e)}`);
       });
-      markEntriesRead(new Set([articleId]));
     }
     // 打开文章：触发智能全文（与 selectArticle 一致）
     get().ensureArticleContent(articleId, { extractFulltext: true });
