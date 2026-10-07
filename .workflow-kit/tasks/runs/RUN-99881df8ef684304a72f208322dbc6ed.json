@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-99881df8ef684304a72f208322dbc6ed",
+  "task_id": "TASK-119",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "主控派发：编码子代理实施审计 P2-4 请求/计数过期覆盖（纯前端）；dev@feae9cd 基线；审计材料 tmp/audit-20261007/ REVIEW.md 第 4 节 + probes.mjs P5/P6 场景"
+  },
+  "started_at_utc": "2026-10-07T05:30:55.688490Z",
+  "finished_at_utc": "2026-10-07T06:31:08.381593Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "d43066fbf3a2ff803583f86966540c0c5df62a0d1f4c9e0ce500cbaff111bfaf",
+  "candidate_digest": "c794f5b2ec1881cd04c76cc228f6311780d7f57a653ec2e537a06e74cfd82bbc",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-99881df8ef684304a72f208322dbc6ed-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-99881df8ef684304a72f208322dbc6ed-scope.json"
+}

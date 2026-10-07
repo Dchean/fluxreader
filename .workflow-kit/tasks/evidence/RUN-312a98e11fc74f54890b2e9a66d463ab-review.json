@@ -1,0 +1,59 @@
+{
+  "task_id": "TASK-121",
+  "candidate_digest": "5f58c8241220e84f38e8bd3a40af83735ebc7643c2ac9351757b0a5802b2e07b",
+  "verification_run": "RUN-97860d5bd86d4f19a95f860be2d27c70",
+  "verdict": "PASS",
+  "summary": "聚焦复审 R1（R0 唯一 finding=E0596 漏 mut）。diff 核对：候选相对基线 7a3d0f4 恰 2 文件 9 insertions/1 deletion，与声称一致——db/articles.rs 仅 :202 一行补 mut + 3 行注释，tests/ingestion_e2e.rs 仅 5 行（3 行 TASK-121 归因注释 + last_published/last_id=None 两字段，字段补齐保持 R0 原样），无夹带（147 个候选文件 sha256 与工作区全量一致）。独立复核：①:202 修复正确且必要——函数体内 where_clauses 仅 :230 push（需 mut）与 :233/:235 is_empty/join（只读）；:330 article_index_sql 同名绑定仅 :336/:339 is_empty/join，确为只读，不加 mut 正确（加了反被 -D warnings 的 unused_mut 拦截）。②tests/ 字段在位。③两文件 grep TASK-120 零残留。CI 证据链复现：三个存档日志（b7947e9/feae9cd/7a3d0f4）均唯一错误 E0596@articles.rs:227:9，rustc help「consider changing this to be mutable」即 R1 修法原文，「could not compile app (lib)/(lib test) due to 1 previous error」证实 lib 先败 tests/ 未编译。独立探针（rustc/clippy-driver 1.98.1 与 CI 同 release，存档 tmp/refactor-20261005/TASK-121-r1-probe-*.rs）：变异体去 mut 唯一错误 E0596 且 help/修法建议与 CI 逐字同态；修复形态（含 article_index_sql 只读形态）rustc 与 clippy-driver -D warnings 均零错零警，与 R0 存档探针交叉一致。CI 可绿置信度：高——E0596 属 borrowck 阶段错误，CI「1 previous error」意味着 lib 与 lib-test 全量类型检查+borrowck 仅此一错；tests/ 集成 crate 在 CI 从未编译，已排查 tests/ 仅 ingestion_e2e.rs 构造 ArticleQuery 且其 E0063 已修，全仓 10 处 ArticleQuery 构造点（commands 层/dedup_tests×2/articles.rs 测试模块×6/ingestion_e2e）全部字段完备或 ..q.clone() 基座完整，ArticleQuery 无 Default derive 穷尽字面量为唯一构造方式；ArticleListArgs 含 keyset 字段全量透传；article_index 同序由与 list 共用 PUBLISHED_ORDER_* 常量构造保证。fmt/lint/build/frontend 四门禁在本候选 digest 上 PASS（lint 0 errors 仅 phase4_measure.mjs 既有 1 warning，frontend 701/701）。残余风险：clippy lint 面在 CI 从未跑过（一直卡在编译），TASK-117 新代码的完整 crate clippy 评估只能由 CI 给出，但 R0 三疑点组探针与本轮真实形态探针均零警告，判为低风险，CI rust job 为最终裁决。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "R0 唯一 finding（E0596：articles.rs:202 where_clauses 漏 mut，须与 tests/ 补齐同批落地）已按修法落地：:202 改 let (mut where_clauses, mut params)（rustc help 原文修法），tests/ 字段补齐保持 R0 原样且归因注释由 TASK-120 更正为 TASK-121。diff 恰 2 文件 9+/1-，无范围扩大、无夹带（候选清单 147 文件哈希全匹配）。R0 对 E0063 修复正确性的核对结论（10 处构造点、无 Default derive、None/None 回落 OFFSET 语义）本轮独立抽查全部复现成立。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/tests/ingestion_e2e.rs",
+        ".workflow-kit/tasks/evidence/TASK-121-review-ci-run155-7a3d0f4-rust-job.log"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "mut 增补为纯编译期改动（借用检查放行，无任何运行时语义/SQL 文本/绑定顺序变化）；tests/ 仅注释与两个 None 字段，断言零触碰（diff vs HEAD 无断言行）。keyset 成对守卫（last_published/last_id 同 Some 才启用谓词）与 article_index 不消费游标字段的语义均未改动。本地四门禁在本候选 digest 上 PASS：fmt exit 0、lint 1 既有 warning/0 error、build exit 0、frontend 701/701（26 既有+675 新增，不低于基线）。cargo test/clippy 本机 NOT_APPLICABLE（DEC-local-cargo-gate），CI rust job 为最终裁决。",
+      "evidence_files": [
+        ".workflow-kit/tasks/runs/RUN-97860d5bd86d4f19a95f860be2d27c70.json",
+        ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-frontend.stdout.txt"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "变异自证独立复现：以当前真实代码形态构造探针，去 mut 后 rustc 唯一错误 E0596（cannot borrow where_clauses as mutable）且 help 与修法建议和三个 CI 存档日志逐字同态；修复形态 rustc -D warnings 与 clippy-driver -D warnings（1.98.1，CI 同 release）均零错零警。article_index_sql 同名绑定只读形态一并入探针：不加 mut 无 unused_mut。半截游标/None-None 回落路径语义未变。lib 修好后新暴露编译面已排查：tests/ 目录仅 ingestion_e2e.rs 引用 ArticleQuery/last_published，无第二处 E0063 潜伏点。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/TASK-121-review-probe-keyset-nomut.rs",
+        ".workflow-kit/tasks/evidence/TASK-121-review-ci-run-b7947e9-rust-job.log"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "3 行注释准确记录 E0596 定罪、rustc help 原文与「lib 编译失败即止、tests/ 从未编译」的因果，tests/ 注释记录穷尽性要求与 None/None=既有 OFFSET 语义；R0 指出的 TASK-120 失效归因已全部更正（两文件 grep TASK-120 零残留）。fmt 门禁在含全部新注释的候选上 PASS。无重复规则、无新增抽象层、职责与依赖方向不变。",
+      "evidence_files": [
+        "src-tauri/src/db/articles.rs",
+        "src-tauri/tests/ingestion_e2e.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "改动为编译期 mut 声明、注释与测试路径 None 字段补齐，无生产运行时行为面；SQL 文本、谓词组装、绑定与查询路径逐字未变，无测量对象。",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": {
+    "required": false,
+    "checked_states": [],
+    "evidence_files": [],
+    "notes": "ui_change=false"
+  }
+}

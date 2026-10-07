@@ -91,5 +91,10 @@
 | [TASK-114](items/TASK-114.json) | 五布局状态与快捷键统一——NotifCard 补水合态、Enter 绑定与 J/K 全布局化（三阶段①，REQ-005/008） | done |
 | [TASK-115](items/TASK-115.json) | 返回位置统一规则——切换返回滚动恢复与阅读器焦点归还（三阶段②，REQ-005） | done |
 | [TASK-116](items/TASK-116.json) | 同步四态展示——队列状态列、统计命令与主窗口/设置页呈现（三阶段③，REQ-002/003） | done |
+| [TASK-117](items/TASK-117.json) | 可变集合分页改 keyset 游标——阅读中连续翻页不丢文章（审计 P1-1） | done |
+| [TASK-118](items/TASK-118.json) | 跨字段操作版本与回滚统一——收藏不再使读状态回滚失效（审计 P1-2） | done |
+| [TASK-119](items/TASK-119.json) | 请求与计数过期覆盖——迟到响应不得覆盖新状态（审计 P2-4） | done |
+| [TASK-120](items/TASK-120.json) | TASK-117 延续：修复新增代码的 clippy 警告（CI 失败处置，行为零变化保持） | cancelled |
+| [TASK-121](items/TASK-121.json) | TASK-117 延续：tests/ 构造点补齐 E0063 修复（CI 失败处置，行为零变化） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

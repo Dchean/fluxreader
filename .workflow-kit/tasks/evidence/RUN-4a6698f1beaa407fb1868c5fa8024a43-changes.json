@@ -1,0 +1,6 @@
+{
+  "changed_files": [
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/tests/ingestion_e2e.rs"
+  ]
+}

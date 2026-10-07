@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-119",
+  "run_id": "RUN-99881df8ef684304a72f208322dbc6ed",
+  "status": "ready_for_verification",
+  "summary": "审计 P2-4 修复（请求与计数过期覆盖，纯前端；历经配额中断+续作）：①查询实例代际统一——bootstrap.ts 双层级：queryGeneration 全局单调（全局状态写入者 reloadFromBackend/anchorToArticle 落地判据，原 reloadGeneration 语义统一保留）+ firstPageSerialByKey per-key 首屏代际（reloadFilteredEntries 落地判据解决探针 P5/A→B→A；loadMore 续页携带首页代际解决 P4 形态「同数据重拉三元组全等不可判别」）；四处发起点接入经续作代理逐项核对无漏接。②计数过期：reconcileCounts 返回 applied|stale|empty，判据 currentLocalFlagWriteSerial（internals bump 矩阵：flipEntryFlag/markEntriesRead/rollbackEntryClaims），stale→丢弃+立即重取一次（不级联），失败诊断 toast+3s 重试保留。③t119-* 16 条断言（探针 P5/P6/P4 本体+统一后既有保护），三处变异自证（代际比较去除 3 红/stale 判据去除 2 红，恰对应）。过程事故如实披露：续作代理变异验证时 git checkout 误回退前任未提交的 bootstrap.ts，已从其会话快照逐字重建（701/701 含源级形态断言背书，无字节级哈希证明）——审查须重点核对 bootstrap.ts。自检：test:frontend 701/701、lint 0、build exit 0。",
+  "changed_files": [
+    "src/store/internals.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "frontend",
+    "lint",
+    "build",
+    "cargo_fmt"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

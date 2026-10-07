@@ -1,0 +1,17 @@
+
+> fluxreader@0.17.0 lint
+> oxlint
+
+
+  ! eslint(no-unused-vars): Variable 'send' is declared but never used. Unused variables should start with a '_'.
+    ,-[tools/phase4_measure.mjs:20:9]
+ 19 |   const cdp = await connect(target.webSocketDebuggerUrl);
+ 20 |   const send = (method, params = {}) => cdp.send(method, params);
+    :         ^^|^
+    :           `-- 'send' is declared here
+ 21 |   const evalJs = async (expr) => await cdp.evaluate(expr);
+    `----
+  help: Consider removing this declaration.
+
+Found 1 warning and 0 errors.
+Finished in 103ms on 81 files with 116 rules using 16 threads.

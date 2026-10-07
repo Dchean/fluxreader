@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-121",
+  "run_id": "RUN-4a6698f1beaa407fb1868c5fa8024a43",
+  "status": "ready_for_verification",
+  "summary": "修复轮 R1（R0 审查以一手 CI 日志推翻 E0063 定罪）：真根因=E0596 cannot borrow where_clauses as mutable（db/articles.rs:202 漏 mut，lib 编译失败、tests/ 从未被编译到 CI）。R1：:202 补 mut（rustc help 原文）+ tests/ingestion_e2e.rs 补齐同批落地（两者缺一 clippy 步骤仍败）+ 注释归因 TASK-120→121；article_index_sql 同名绑定未加 mut（只读，加 mut 触发 unused_mut 新失败，与 CI 日志「仅 1 错误@227」互证）。方法论勘误：R0 探针以 mut 形态传参恰好掩盖绑定缺 mut——E0063 本体真实但被 lib 侧 E0596 遮蔽，属次级潜伏缺陷已随批修复。变异自证：去 mut 恰 E0596 一错（与 CI 日志逐字同态）、修复体零错零警，与审查者存档探针交叉一致。自检：cargo fmt --check 0；CI 终判（fmt→clippy 含 tests/ 编译→test）为最终裁决。",
+  "changed_files": [
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/tests/ingestion_e2e.rs"
+  ],
+  "validation_requests": [
+    "cargo_fmt",
+    "frontend",
+    "lint",
+    "build"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

@@ -1,0 +1,61 @@
+{
+  "task_id": "TASK-119",
+  "candidate_digest": "c794f5b2ec1881cd04c76cc228f6311780d7f57a653ec2e537a06e74cfd82bbc",
+  "verification_run": "RUN-5880f0b894da46d48586c230cf7709bc",
+  "verdict": "PASS",
+  "summary": "五项核对全部通过，findings=0。候选 65 文件 sha256 与工作树逐一全等；差异恰为 4 文件（internals/bootstrap/nav/frontend-regression）且全部落在 scope.allowed_paths 内，src-tauri 零改动（cargo_fmt/NOT_APPLICABLE 合规 DEC-local-cargo-gate-20261005）。重建面重点核对（bootstrap.ts 因续作代理 git checkout 事故后声称逐字重建、无事故前哈希可比）：全文件通读逐项核实——①TASK-119 双层级机制注释与代码自洽：queryGeneration 全局单调 + firstPageSerialByKey per-key，四处发起点齐备（reloadFromBackend/anchorToArticle=beginGlobalQuery，reloadFilteredEntries=beginViewQuery，loadMoreArticles 携带 firstPageGen 且不 bump）；②符号定义-消费对封闭：新代际符号仅存在于 bootstrap.ts 模块内，currentLocalFlagWriteSerial 由 internals 导出、仅 nav.ts 消费，bumpLocalFlagWrite 三调用点（flipEntryFlag 无条件/markEntriesRead 与 rollbackEntryClaims 均在 changed 早退之后）与注释矩阵逐一相符，全部本地读写入路径（player 播完标读、reader 打开即标读与批量、nav 全部已读乐观段、flipEntryFlag 单条）均汇入被插桩函数；③无重建遗漏：diff vs HEAD 仅含 TASK-119 机制变更，keyset 游标写入点（cursorAfterFirstPage/advanceArticlesCursor/setViewEntriesSnapshot）、mergeSnapshotEntries 正文与水合继承、TASK-109① 发起时快照（t109 源级断言通过）、loadMore D3/F1 既有守卫均原样保留，t100-p3-1 按统一语义更新为更强断言（附理由，属强化非弱化）；④判据自行变异复现四例全数判别：删 reloadFilteredEntries per-key 判据→t119-1/t119-2 红（699/701），删 loadMore 代际判据→t119-4 红（700/701），删 reloadFromBackend 全局代际判据→既有(a)旧代际保护断言与 t119-5 双红（698/701），删 reconcileCounts 序号判据→t119-3 判别断言红；恢复后 701/701 且 4 文件哈希与候选清单再次全等。审计探针 P5/P6 对候选构建复跑均转预期通过（审计时 P5 finalIds=[1]≠[2]、P6 unread=0≠1，修后均等于期望值）；t119-4 的续页形态对应审计第 4 节『首屏/续页/刷新/导航共享同一套过期判断』要求（probes.mjs P4 是审计第 5 节保位项，属本卡 non_goals，未混入）。边界论证核实：跨范围两次 reload 为不同 queryKey，纯 per-key 判据下旧范围响应确会在新范围落地后放行踩回全局态且无自愈，全局判据必要且原 reloadGeneration 保护经 t119-5 锁定；续页『三元组守卫（跨键漂移）+键代际（同键同参）』互补窗口推演成立——t119-4 构造的正是同数据重拉后游标三元组全等、参数比较不可判别的形态；anchorToArticle 两阶段各查一次全局代际，beginViewQuery 不推全局保住『all 过渡落地+自链筛选重拉』语义与统一前等价。reconcileCounts stale→丢弃+立即重取恰一次不级联、empty 不重试、首次失败仍走 R1 F2 toast+3s 一次重试，与卡片要求逐字相符。复跑验证：frontend 701/701、build exit 0、lint 0 错误（唯一 warning 位于候选外 tools/phase4_measure.mjs，审计前即存在的未提交改动，非本卡引入）。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "逐项对照任务卡验收：①A→B→A 旧响应丢弃=t119-1；②同查询旧版本先发后至不覆盖=t119-2；③计数竞态改回未读后旧计数不应用且重取一次=t119-3（含恰一次不级联断言）；④续页旧代际丢弃=t119-4、统一后既有 reloadGeneration 保护场景=t119-5（跨范围+锚定两场景）；⑤门禁全绿复跑属实；⑥本审查即独立全新上下文。t119-* 共 16 条（3+1+5+3+4）≥5 条达标且为操作序列真实行为回归。修法形态与卡片一致：统一收口未留双代际并存（reloadGeneration 改名为 queryGeneration 同语义并入），per-key Map 复用 TASK-117 viewKey 键族，loadMore 续页携带首页代际且 paginationStale 三元组守卫保留。范围核对：4 改动文件均在 allowed_paths，无 protected_paths 触碰，Rust 零改动，无顺带行为变化（diff 仅 TASK-119 机制+测试夹具 feedCountsPlan/pendingCounts 一次性 defer）。",
+      "evidence_files": [
+        "src/store/slices/bootstrap.ts",
+        "src/store/slices/nav.ts",
+        "src/store/internals.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "RUN-5880f0b894da46d48586c230cf7709bc 四门禁 PASS（frontend 701/701，含 t119 全部 16 条与 t109 源级形态断言）；审查者独立复跑 test:frontend 701/701、build exit 0。判别力用变异自证（审查者自行执行四处变异并恢复）：删 per-key 判据→t119-1/2 红、删 loadMore 代际→t119-4 红、删全局代际→既有(a)+t119-5 红、删计数序号判据→t119-3 红——每个判据都有唯一对应的红测，无搭便车断言。审计探针 P5/P6 对候选构建复跑转为预期通过（审计基线上两者均失败），探针场景真实转回归。既有断言零弱化核实：frontend-regression.mjs 的 diff 仅有三处——新增 t119 块、测试夹具新增 defer 通道、t100-p3-1 更新为强化声明（新增 !queryGeneration: 与 let queryGeneration = 0; 两项要求并附统一语义理由），t117-*/t118-*/t104-voids/t109 等原样未动。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-5880f0b894da46d48586c230cf7709bc-frontend.stdout.txt",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "核对异常与边界场景：reconcileCounts 返回 'empty'（!rows）不应用也不重试（与修前语义一致）；stale→立即重取恰一次且重取自身的过期/失败均放弃（不级联、无循环），首次失败保留 R1 F2 诊断 toast+3s 一次重试，重试仍失败靠下次 reload 自愈——注释明示放弃路径。bump 矩阵覆盖核实：markEntriesRead 仅实际翻转时 bump（changed 早退对称）、nav 内联失败回滚不单独 bump 的论证成立（其自身乐观段必已 bump 使在途对账过期，且回滚只恢复自身翻转条目）；mergeSnapshotEntries 不 bump 的论证成立（后端真值落地伴随同源计数，无对账窗口）。查询失败路径保留：reloadFromBackend toast+rethrow、reloadFilteredEntries/loadMoreArticles toast+加载态复位、anchorToArticle toast。代际边界：续页期间跨范围/跨视图/切排序漂移由 paginationStale 判丢弃、同键同参由代际判丢弃，两判据互补无缺口；同步提示性刷新（syncStatus/syncQueueStats）沿用 gen 相等才写。序号/代际单调增长无溢出与清理顾虑（消费方仅做相等比较，Map 以键组合数为界）。",
+      "evidence_files": [
+        "src/store/slices/nav.ts",
+        "src/store/internals.ts",
+        "src/store/slices/bootstrap.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "结构评估：新代际机制以模块级私有 helpers（recordFirstPageStart/beginGlobalQuery/beginViewQuery/currentFirstPageSerial）收口在 bootstrap.ts——四个查询发起点全部在该 slice，无跨 slice 泄漏；计数序号收口在 internals 与 entryMutationVersion 同区并置，注释给出完整 bump 点矩阵与『为何 nav 内联回滚/mergeSnapshotEntries 不 bump』的推理链，定义-消费对可静态追踪。无重复规则：per-key 判据复用 QueryScope.viewKey 单点派生，未另造键函数；未拆分、未合并既有模块，无为将来预建的抽象。源级注释（文件头 40-68 行双层级说明）与实现逐点对应，含『排序不入键由排序守卫与全局代际兜底』的边界说明。t109 的 QueryScope 单点性源级断言与 t100-p3-1 模块级状态断言在重建后的文件上均通过，长期维护约束未松动。",
+      "evidence_files": [
+        "src/store/slices/bootstrap.ts",
+        "src/store/internals.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "本卡改动为查询发起/落地路径上的 O(1) 整数序号比较与 Map 读写（量级以会话内键组合数为界）、计数对账的布尔判据，不改变任何请求的次数、页大小或网络形态；未做性能宣称，无代表性负载测量需求，不适用。",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": {
+    "required": false,
+    "checked_states": [],
+    "evidence_files": [],
+    "notes": "ui_change=false"
+  }
+}
