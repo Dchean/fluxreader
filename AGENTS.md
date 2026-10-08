@@ -42,9 +42,9 @@ Note 的路径即分类：`{lifecycle}/{class}/yyyy-mm-dd-topic.md`，lifecycle 
 | --- | --- |
 | `npm run lint`（oxlint）、`npm run build`（tsc + vite）、`npm run test:frontend`（前端状态回归） | 本地与 CI |
 | `cargo fmt --all -- --check` | 本地与 CI |
-| `cargo clippy --all-targets -- -D warnings`、`cargo test` | CI（windows-latest） |
+| `cargo clippy --all-targets -- -D warnings`、`cargo test` | 本地（当前已可链接）与 CI（windows-latest） |
 
-本机没有 MSVC 链接器，`cargo test` 与 clippy 无法链接，因此由 CI 的 rust job 承担——**每一项都必须有承担者**，不能出现「本地不跑、CI 也不跑」的检查。CI 只跑 6 个受约束的 mock 集成套件与默认测试集；`#[ignore]` 的 live 测试（真实服务端）需在具体任务里单独约定读写边界后执行，不作为统一门禁。
+2026-10-08 已通过实际命令确认本机可链接并运行完整 `cargo test` 和 `cargo clippy --all-targets`；本地与 CI 的 rust job 共同承担，不能继续沿用旧的“本机缺 MSVC 链接器”结论——**每一项都必须有承担者**，不能出现「本地不跑、CI 也不跑」的检查。CI 只跑 6 个受约束的 mock 集成套件与默认测试集；`#[ignore]` 的 live 测试（真实服务端）需在具体任务里单独约定读写边界后执行，不作为统一门禁。
 
 CI 固定在 Windows 上跑 Rust：这是纯 Windows 客户端，DPAPI 凭据加密与 SMTC 媒体控制等 Windows 专有功能只在 Windows 编译；在 Linux 上检查的是 `#[cfg(not(windows))]` 降级分支，真正的生产代码路径反而被跳过。
 

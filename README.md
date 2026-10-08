@@ -40,7 +40,7 @@ npm run test:frontend    # Node 中的前端状态回归，不是桌面 UI E2E
 npm run tauri build
 ```
 
-Rust 侧：`cargo fmt --all -- --check` 可在本地跑；`cargo clippy --all-targets -- -D warnings` 与 `cargo test` 需要 MSVC 链接器，由 CI 的 windows-latest rust job 承担。`#[ignore]` 的 live 测试需要真实同步后端，不作为统一门禁。
+Rust 侧：当前本机（2026-10-08 实测）已可运行 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings` 与 `cargo test`；CI 的 windows-latest rust job 继续承担完整门禁。`#[ignore]` 的 live 测试需要真实同步后端，不作为统一门禁。
 
 当前 CI 使用 Node 22。发布需要单独确认，流程见 [docs/release.md](docs/release.md)。
 

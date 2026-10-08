@@ -18,18 +18,18 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 
 | 卡片 | 交付边界 | 审计覆盖 | 前置卡 | 状态 |
 | --- | --- | --- | --- | --- |
-| [OPT-001](OPT-001.md) | 可靠 outbox 操作身份 | F01 | 无 | verified-local |
-| [OPT-002](OPT-002.md) | 正文安全边界与解析健壮性 | F07,F20 | 无 | review |
-| [OPT-003](OPT-003.md) | 原子抓取与缓存确认 | F08 | OPT-001 | queued |
-| [OPT-004](OPT-004.md) | Google Reader 目标服务端契约 | F02,F04 | 无 | review |
-| [OPT-005](OPT-005.md) | Fever 身份与完整历史回溯 | F03,F19 | OPT-004 | queued |
+| [OPT-001](OPT-001.md) | 可靠 outbox 操作身份 | F01 | 无 | verified-ci |
+| [OPT-002](OPT-002.md) | 正文安全边界与解析健壮性 | F07,F20 | 无 | verified-ci |
+| [OPT-003](OPT-003.md) | 原子抓取与缓存确认 | F08 | OPT-001 | coding |
+| [OPT-004](OPT-004.md) | Google Reader 目标服务端契约 | F02,F04 | 无 | verified-ci |
+| [OPT-005](OPT-005.md) | Fever 身份与完整历史回溯 | F03,F19 | OPT-004 | coding |
 | [OPT-006](OPT-006.md) | 账号生命周期与配置导入隔离 | F05,F06 | OPT-001, OPT-004 | queued |
 | [OPT-007](OPT-007.md) | 可恢复 pull 与提交时冲突保护 | F09,F10,F11 | OPT-005, OPT-006 | queued |
 | [OPT-008](OPT-008.md) | 内容身份与保守去重 | F12 | OPT-007 | queued |
 | [OPT-009](OPT-009.md) | 可靠订阅写回和能力声明 | F17 | OPT-006, OPT-008 | queued |
 | [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | queued |
 | [OPT-011](OPT-011.md) | AI 设置单点与输入范围一致 | F13,refreshInterval | OPT-006 | queued |
-| [OPT-012](OPT-012.md) | 阅读器源码与浮层交互 | F14,closeAsk | 无 | coding |
+| [OPT-012](OPT-012.md) | 阅读器源码与浮层交互 | F14,closeAsk | 无 | verified-ci |
 | [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-011 | queued |
 | [OPT-014](OPT-014.md) | 更新检查与凭据失败关闭 | F16,F22 | 无 | coding |
 | [OPT-015](OPT-015.md) | 窗口启动恢复与幂等媒体键 | F21,F23 | 无 | queued |
