@@ -689,9 +689,12 @@ async fn feed_rename_and_move_push_edit_subscription() {
         "移动目录推送应成功"
     );
     let form2 = mock_greader::last_subscription_edit_form(&server);
+    // R1（OPT-004 P2-2）：`a` 是完整 label stream id（真实 wire 规范），不是裸目录名。
     assert!(
-        form2.iter().any(|(k, v)| k == "a" && v == "目标分类"),
-        "远端应收到 a=目标分类，实际 {form2:?}"
+        form2
+            .iter()
+            .any(|(k, v)| k == "a" && v == "user/-/label/目标分类"),
+        "远端应收到 a=user/-/label/目标分类，实际 {form2:?}"
     );
 }
 
@@ -1156,10 +1159,11 @@ async fn add_feed_pushes_folder_membership() {
         Some("edit"),
         "应补发 ac=edit，实际 {form:?}"
     );
+    // R1（OPT-004 P2-2）：完整 label stream id（真实 wire 规范）。
     assert_eq!(
         get("a").as_deref(),
-        Some("目标分类"),
-        "应携带 a=目标分类（A-3），实际 {form:?}"
+        Some("user/-/label/目标分类"),
+        "应携带 a=user/-/label/目标分类（A-3），实际 {form:?}"
     );
     assert_eq!(
         get("s").as_deref(),

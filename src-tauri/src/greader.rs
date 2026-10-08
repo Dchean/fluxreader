@@ -4,8 +4,11 @@
 //! 本模块当前**只实现 Google Reader 协议**（后端可换的基线）；Fever API 预留
 //! 未实现——它是可选备胎，仅在 Google Reader 兼容层不可用时才需要补充
 //! （`POST /fever/?api` + `api_key=md5(username:password)`）。
-//! 认证：两步 ClientLogin 换取 auth token，后续请求用 `Authorization: GoogleLogin auth=<token>`（GET）
-//! 或表单参数 `T=<token>`（POST）。
+//! 认证（OPT-004 起，契约见 `.agents/notes/implemented/architecture/2026-10-08-Reader适配的鉴权与分类契约.md`）：
+//! 两步 ClientLogin 换取 auth token；**所有** API 请求一致携带
+//! `Authorization: GoogleLogin auth=<auth>`（GET 与 POST 都带——FreshRSS 靠它设用户上下文），
+//! 表单参数 `T` 则用写操作专用 action token（`GET /reader/api/0/token` 换取并缓存；
+//! Miniflux 返回 auth 本身、FreshRSS 返回另一字符串，两种都接受）。
 //!
 //! 权威规范来源：Miniflux 源码 `internal/googlereader/`（README.md + middleware.go），
 //! 并经 curl 连真实 Miniflux（`https://sync.example.invalid/`）实证。要点：
@@ -239,18 +242,23 @@ pub mod tags {
 pub struct GReaderClient {
     /// 后端根 URL（去尾部斜杠），如 `https://sync.example.invalid`
     base: String,
-    /// ClientLogin 换取的 auth token（`username/hmac`）
+    /// ClientLogin 换取的 auth token（`username/hmac`），用于 Authorization 头
     token: String,
+    /// 写操作专用 action token（`GET /token` 换取，惰性 + 单次缓存）。
+    /// 失败不缓存：错误返回后下次调用会重试（OnceCell 的 get_or_try_init 语义）。
+    action_token: tokio::sync::OnceCell<String>,
     http: Client,
 }
 
 impl GReaderClient {
     /// 用已知的 auth token 构建（不重新 ClientLogin）。
+    /// 写请求所需的 action token 在首次 POST 时惰性获取并缓存。
     pub fn new(endpoint: &str, token: &str, http: Client) -> Self {
         let base = endpoint.trim_end_matches('/').to_string();
         Self {
             base,
             token: token.to_string(),
+            action_token: tokio::sync::OnceCell::new(),
             http,
         }
     }
@@ -344,6 +352,7 @@ impl GReaderClient {
         Ok(Some(Self {
             base: base.to_string(),
             token,
+            action_token: tokio::sync::OnceCell::new(),
             http: http.clone(),
         }))
     }
@@ -374,33 +383,113 @@ impl GReaderClient {
         Ok(resp.json().await?)
     }
 
-    /// POST 请求（表单 `T=<token>` 认证）。
-    async fn post_form<T: for<'de> Deserialize<'de>>(
+    /// 写操作专用 action token（`GET /reader/api/0/token`），同一客户端只取一次。
+    ///
+    /// 职责分离（OPT-004）：Authorization 头始终是登录 auth（服务端据此设用户上下文），
+    /// POST 表单的 `T` 是 action token——Miniflux 的 /token 返回 auth 本身，
+    /// FreshRSS 返回另一字符串（`str_pad(sha1(...), 57, 'Z')`），两种都接受。
+    ///
+    /// 回退边界：**只有 /token 明确 404**（该实现没有此端点）才退回用登录 auth 当 T；
+    /// 401/403/5xx、空响应体、网络失败一律如实报错——不回退、不改猜 URL、不吞认证错误。
+    /// 依据：已固定的两服务端上游源码都有 /token；404 之外的失败说明认证/服务异常，
+    /// 回退会把真实故障伪装成另一种请求形态，掩盖问题。
+    // Note: T 与 auth 的职责分离、404-only 回退 — 见 .agents/notes/implemented/architecture/2026-10-08-Reader适配的鉴权与分类契约.md
+    async fn action_token(&self) -> AppResult<&str> {
+        self.action_token
+            .get_or_try_init(|| async { self.fetch_action_token().await })
+            .await
+            .map(String::as_str)
+    }
+
+    async fn fetch_action_token(&self) -> AppResult<String> {
+        let resp = self
+            .http
+            .get(self.url("/reader/api/0/token"))
+            .header("Authorization", format!("GoogleLogin auth={}", self.token))
+            .send()
+            .await
+            .map_err(|e| AppError::network(format!("获取 action token 失败：网络错误（{e}）")))?;
+        let status = resp.status().as_u16();
+        if status == 404 {
+            // 兼容无 /token 的实现：明确 404 才回退到登录 auth（见方法注释的边界说明）。
+            if self.token.is_empty() {
+                return Err(AppError::network(
+                    "获取 action token 失败：/token 不存在且登录 auth 为空",
+                ));
+            }
+            return Ok(self.token.clone());
+        }
+        if !resp.status().is_success() {
+            return Err(AppError::network(format!(
+                "获取 action token 失败：GET /reader/api/0/token → {status}"
+            )));
+        }
+        // 不把响应体裁剪进错误/日志：token 与凭据同属敏感值。
+        let body = resp.text().await.map_err(|e| {
+            AppError::network(format!("获取 action token 失败：读取响应失败（{e}）"))
+        })?;
+        let token = body.trim();
+        if token.is_empty() {
+            return Err(AppError::network(
+                "获取 action token 失败：服务端返回空 token",
+            ));
+        }
+        Ok(token.to_string())
+    }
+
+    /// 发 POST：Authorization 头带登录 auth，表单 `T` 用 action token（缓存，多次 POST 只取一次）。
+    /// 表单编码交给 reqwest `.form()`（URL 转义由它负责，不手拼）。
+    async fn post_with_action_token(
         &self,
         path: &str,
         form: &[(&str, String)],
-    ) -> AppResult<T> {
-        let mut params: Vec<(&str, String)> = vec![("T", self.token.clone())];
+    ) -> AppResult<reqwest::Response> {
+        let token = self.action_token().await?.to_string();
+        let mut params: Vec<(&str, String)> = vec![("T", token)];
         params.extend_from_slice(form);
-        let resp = self.http.post(self.url(path)).form(&params).send().await?;
+        let resp = self
+            .http
+            .post(self.url(path))
+            .header("Authorization", format!("GoogleLogin auth={}", self.token))
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| AppError::network(format!("POST {path} 网络失败（{e}）")))?;
         if !resp.status().is_success() {
             return Err(AppError::network(format!(
                 "POST {path} → {}",
                 resp.status()
             )));
         }
+        Ok(resp)
+    }
+
+    /// POST 请求（JSON 响应）。
+    async fn post_form<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+    ) -> AppResult<T> {
+        let resp = self.post_with_action_token(path, form).await?;
         Ok(resp.json().await?)
     }
 
-    /// POST 请求返回纯文本（edit-tag 等返回 `OK`）。
+    /// POST 请求返回纯文本（edit-tag / subscription/edit 成功时返回 `OK`）。
+    ///
+    /// **严格校验成功正文**（OPT-004 R1 P2-1）：只验 HTTP 状态不够——真实生态里
+    /// 「2xx + 错误体」（如 `FAIL`）表示写操作未生效，若当成功处理，调用方会按
+    /// 成功 prune 队列，用户意图静默丢失且永不重试。要求 trim 后等于 `OK`
+    /// （允许周围空白）；200+FAIL、200+空体、其他正文一律报协议错误。
+    /// 错误信息**不回显响应体**（实现细节/敏感片段不进错误与日志）。
     async fn post_form_text(&self, path: &str, form: &[(&str, String)]) -> AppResult<()> {
-        let mut params: Vec<(&str, String)> = vec![("T", self.token.clone())];
-        params.extend_from_slice(form);
-        let resp = self.http.post(self.url(path)).form(&params).send().await?;
-        if !resp.status().is_success() {
+        let resp = self.post_with_action_token(path, form).await?;
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| AppError::network(format!("POST {path} 成功但读取响应体失败（{e}）")))?;
+        if body.trim() != "OK" {
             return Err(AppError::network(format!(
-                "POST {path} → {}",
-                resp.status()
+                "POST {path} → 200 但响应体不是 OK（协议错误，写操作未生效）"
             )));
         }
         Ok(())
@@ -517,6 +606,13 @@ impl GReaderClient {
     }
 
     /// 编辑订阅（`ac=edit`，`s=feed/<数字id>`，可改标题 `t` 或移分类 `a`）。
+    ///
+    /// `dest_label` 是**用户目录名**（裸名，如 `技术/阅读`）；wire 上的 `a` 必须是
+    /// 完整 label stream id `user/-/label/<名>`（FreshRSS `subscriptionEdit` 按
+    /// `user/-/label/` 或 `user/<user>/label/` 前缀解析；Miniflux 同形态）。
+    /// 这里**无条件前置一次**——目录名本身以 `user/-/label/` 开头时也不能按字面
+    /// 判定「已格式化」而少前置（用户的目录名是数据，不是标记）。
+    // Note: `a` 的完整 stream id 形态 — 见 .agents/notes/implemented/architecture/2026-10-08-Reader适配的鉴权与分类契约.md
     pub async fn edit_subscription(
         &self,
         feed_numeric_id: i64,
@@ -530,8 +626,8 @@ impl GReaderClient {
         if let Some(t) = title {
             form.push(("t", t.to_string()));
         }
-        if let Some(a) = dest_label {
-            form.push(("a", a.to_string()));
+        if let Some(name) = dest_label {
+            form.push(("a", label_stream_id(name)));
         }
         self.post_form_text("/reader/api/0/subscription/edit", &form)
             .await
@@ -568,6 +664,55 @@ pub fn parse_item_id(id: &str) -> Option<i64> {
 /// 判断 item 的 categories 是否含某 tag（read/starred 状态判断）。
 pub fn has_tag(categories: &[String], tag_suffix: &str) -> bool {
     categories.iter().any(|c| c.ends_with(tag_suffix))
+}
+
+/// 从分类 id 解析 label 后缀：`user/<user>/label/<name>` → `<name>`。
+///
+/// 只去掉 `user/` 与第一个 `/label/` 前缀；后缀原样保留——分类名是用户可见标签
+/// 本身，中文与斜杠（如 `技术/阅读`）必须完整带回，不能按 `/` 再切分。
+/// 非 label 前缀（state tag 等）返回 None。
+pub fn category_label_from_id(id: &str) -> Option<&str> {
+    let rest = id.strip_prefix("user/")?;
+    let (_, name) = rest.split_once("/label/")?;
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// 用户目录名 → 完整 label stream id（`user/-/label/<名>`）。
+///
+/// 用于 subscription/edit 的 `a` 参数（见 `edit_subscription`）。**无条件前置**：
+/// 目录名是用户数据，即使字面上以 `user/-/label/` 开头也只是名字的一部分，
+/// 不得按字面判定「已格式化」。
+fn label_stream_id(name: &str) -> String {
+    format!("user/-/label/{name}")
+}
+
+/// 分类元素规范化：把 `subscription/list` 的 categories[] 与 `tag/list` 的 tag
+/// 统一归一成「分类名」，供 sync 建目录/归属使用。
+///
+/// 两种服务端形态都覆盖（固定上游源码，见 OPT-004 的 Note）：
+/// - Miniflux：`{id, label, type:"folder"}` —— type 标 folder，label 直接用；
+/// - FreshRSS：tag 只有 `{id:"user/-/label/名", type:"folder"}`（无 label），
+///   subscription 的 category 只有 `{id:"user/-/label/名", label:"名"}`（无 type）。
+///
+/// 规则：type == "folder"，或 **type 缺失但 id 是 label 前缀** → 分类（label 优先，
+/// 缺 label 从 id 后缀解析）；其余（state tag、用户 tag）→ None。
+/// **普通 state tag 绝不能建目录**——`user/-/state/com.google/...` 与
+/// `user/-/state/org.freshrss/main` 都会在这里被挡掉。
+// Note: 分类识别规则与 FreshRSS/Miniflux 固定上游源码逐条对应 — 见 .agents/notes/implemented/architecture/2026-10-08-Reader适配的鉴权与分类契约.md
+pub fn category_name(id: &str, label: Option<&str>, type_: Option<&str>) -> Option<String> {
+    let from_id = category_label_from_id(id);
+    let is_category = type_ == Some("folder") || (type_.is_none() && from_id.is_some());
+    if !is_category {
+        return None;
+    }
+    label
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .or_else(|| from_id.map(str::to_string))
 }
 
 /* ============================================================
@@ -633,6 +778,92 @@ mod tests {
         assert_eq!(parse_item_id("5749"), Some(5749));
         // 16 位十六进制（无前缀）
         assert_eq!(parse_item_id("0000000000001675"), Some(5749));
+    }
+
+    /// Miniflux 形态：type=folder + label 直接用。
+    #[test]
+    fn category_name_miniflux_folder_uses_label() {
+        assert_eq!(
+            category_name("user/-/label/科技", Some("科技"), Some("folder")),
+            Some("科技".to_string())
+        );
+        // label 为空串视为缺失，回退 id 后缀
+        assert_eq!(
+            category_name("user/-/label/科技", Some(""), Some("folder")),
+            Some("科技".to_string())
+        );
+    }
+
+    /// FreshRSS 形态一：folder tag 只有 id+type（无 label），从 id 后缀取，
+    /// 中文与斜杠原样保留。
+    #[test]
+    fn category_name_freshrss_folder_tag_parses_id_suffix() {
+        assert_eq!(
+            category_name("user/-/label/技术/阅读", None, Some("folder")),
+            Some("技术/阅读".to_string())
+        );
+        // 带用户名的前缀同样适用
+        assert_eq!(
+            category_name("user/alice/label/News", None, Some("folder")),
+            Some("News".to_string())
+        );
+    }
+
+    /// FreshRSS 形态二：subscription category 无 type，id 为 label 前缀 → 分类；
+    /// label 优先于 id 后缀。
+    #[test]
+    fn category_name_freshrss_subscription_category_without_type() {
+        assert_eq!(
+            category_name("user/-/label/科技", Some("科技"), None),
+            Some("科技".to_string())
+        );
+        assert_eq!(
+            category_name("user/alice/label/名 称", Some("名 称"), None),
+            Some("名 称".to_string())
+        );
+    }
+
+    /// state tag 与普通 tag 绝不归一成目录；label 前缀但 type=tag 也不建目录
+    /// （Inoreader 用户 tag 是标签不是分类）。
+    #[test]
+    fn category_name_rejects_state_and_user_tags() {
+        for id in [
+            "user/-/state/com.google/read",
+            "user/-/state/com.google/starred",
+            "user/-/state/com.google/reading-list",
+            "user/-/state/org.freshrss/main",
+        ] {
+            assert_eq!(
+                category_name(id, None, None),
+                None,
+                "state tag 不得建目录: {id}"
+            );
+        }
+        assert_eq!(
+            category_name("user/-/label/tag-only", Some("tag-only"), Some("tag")),
+            None,
+            "type=tag 的用户标签不是分类"
+        );
+        // label 前缀但后缀为空 → 不成名，拒绝
+        assert_eq!(category_name("user/-/label/", Some(""), None), None);
+    }
+
+    /// 目录名 → wire stream id：无条件前置一次；字面量名字不得被误判为已格式化。
+    #[test]
+    fn label_stream_id_always_prefixes_once() {
+        assert_eq!(label_stream_id("技术/阅读"), "user/-/label/技术/阅读");
+        assert_eq!(
+            label_stream_id("user/-/label/伪装"),
+            "user/-/label/user/-/label/伪装"
+        );
+    }
+
+    #[test]
+    fn category_label_from_id_edge_cases() {
+        assert_eq!(category_label_from_id("user/-/label/a/b/c"), Some("a/b/c"));
+        assert_eq!(category_label_from_id("feed/42"), None);
+        assert_eq!(category_label_from_id("user/1/state/com.google/read"), None);
+        assert_eq!(category_label_from_id("user/-/label/"), None);
     }
 
     #[test]

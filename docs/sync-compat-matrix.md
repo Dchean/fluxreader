@@ -12,7 +12,9 @@
 **不代表部署服务的版本**；升级或更换服务端后须复核。
 
 **版本验证声明（必读）**：本矩阵的「指定服务端版本已验证」列**只覆盖测试替身**
-`src-tauri/tests/mock_greader.rs`——它是唯一被自动化测试锁定（GR 路由）的服务端形态。
+（`src-tauri/tests/mock_greader.rs` 的宽松形态，以及
+`src-tauri/tests/greader_compat_e2e.rs` 的 Miniflux/FreshRSS 严格夹具）——它们是
+被自动化测试锁定的服务端形态。
 **Miniflux / FreshRSS 的具体部署版本未逐一实机验收**；文中「协议/服务端支持」列
 涉及外部服务端的事实来自源码查阅时点（2026-10），**不代表所有部署版本都已验收**。
 升级或更换服务端后三者都须复核。三列必须分开——协议/服务端事实、本客户端实现现状、
@@ -165,3 +167,24 @@ FreshRSS 的具体部署版本未逐一实机验收**——本列不能当作「
   不推进）、`dedup_sync_e2e.rs`（同源判定矩阵/墓碑）。
 - 端到端（live，`#[ignore]`，CI 外人工执行）：`fever_sync_live_e2e.rs`、
   `fever_live_e2e.rs`（Fever 真实后端的集合/对账往返）。
+
+## 7. GReader 鉴权与分类契约（OPT-004 补记）
+
+本节超出主线「状态同步对账」范围（订阅层与认证层），为回溯便利列入本文件。
+三列口径同 §1：协议/服务端支持来自**固定上游源码**（FreshRSS `219eaf58` 的
+`p/api/greader.php`、Miniflux `internal/googlereader/middleware.go`；时点 2026-10-08，
+见 `tmp/optimization-20261008/upstream/`）；实现列是 FluxReader 代码真实行为；
+验证列只覆盖**测试替身**，不代表真实服务端实测。
+
+| 维度 | 协议/服务端支持 | 本客户端已实现 | 验证（夹具，非真实服务端） |
+|---|---|---|---|
+| 请求认证 | Miniflux：GET 读 `Authorization: GoogleLogin auth=<auth>`，POST **只读**表单 `T`；FreshRSS：所有请求读 `Authorization`（设用户上下文），自身忽略 `T` 的宽容分支除外 | 所有请求（GET/POST）统一携带 Authorization；POST 表单 `T` 用 action token | 两个严格夹具：Miniflux 形态 POST 只认 `T=auth`；FreshRSS 形态缺 Authorization 一律 401 |
+| action token | 两端都有 `/reader/api/0/token`：Miniflux 返回登录 auth 本身；FreshRSS 返回 `str_pad(sha1(salt+user+apiPasswordHash), 57, 'Z')`（与 auth 不同） | 首写前 `GET /token`，`OnceCell` 单次缓存；Miniflux/FreshRSS 两种返回值都接受 | `greader_compat_e2e.rs`：token 仅取一次；FreshRSS 写请求 `T` 必须等于 `/token` 返回的另一字符串 |
+| token 失败边界 | 协议未规定 | **仅 404 回退**用登录 auth 当 `T`；401/403/5xx/空体/网络失败如实报错，不回退不猜 URL | 夹具注入 401/500/空体/404/拒连，逐项锁定「报错 vs 回退」方向 |
+| 分类识别 | Miniflux tag `{id,label,type:"folder"}`；FreshRSS tag 只有 `{id,type:"folder"}`（无 label）、subscription category 只有 `{id,label}`（无 type） | `greader::category_name` 单点：type folder 或「type 缺失 + label 前缀 id」；label 优先，缺则取 `user/.../label/` 后缀（中文/斜杠原样保留）；state tag 与 `type:"tag"` 一律不成目录 | 严格夹具经 `sync::feeds_phase` 验证：FreshRSS 形态目录/归属正确、state tag 不污染；Miniflux 形态回归不变 |
+| 写操作响应体 | 成功约定是文本 `OK`（FreshRSS `edit-tag`/`subscription/edit` 均 `exit('OK')`；Miniflux 同形态）；协议未规定错误体，实现可能回 `FAIL` | `post_form_text` 要求 200 **且** trim 后 == `OK`；FAIL/空体/其它正文 → 脱敏协议错误（不回显响应体），调用方不得按成功 prune 队列 | 严格夹具注入 `200+FAIL` / `200+空体`：直接客户端报错不假成功；`sync::push_states_now` 队列保留；` OK \n` 容忍、清除注入后成功路径仍 prune |
+| 写分类 stream id | `subscription/edit` 的 `a` 是 label stream id（`user/-/label/<名>` / `user/<user>/label/<名>`）；FreshRSS 按前缀解析，裸名解析为空 → 落默认分类 | `edit_subscription` 的 `dest_label`（用户裸目录名）无条件前置一次为 `user/-/label/<名>` 再交 `reqwest.form` 编码；名字本身含前缀字面量不误判 | FreshRSS/Miniflux 严格夹具**实际移动分类**并可断言（中文/斜杠名、字面量前缀名）；既有 `sync_gap_repro_e2e` 断言更新为真实 wire 形态（未减断言） |
+
+已知限制：真实 Miniflux/FreshRSS 部署版本未实机验收；夹具只锁定客户端契约与
+固定源码的实现形态（`mock_greader.rs` 补 `/token` 路由并按真实 wire 解析 `a`，
+不校验认证；认证严格校验在 `greader_compat_e2e.rs` 的独立夹具）。

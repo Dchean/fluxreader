@@ -579,8 +579,9 @@ async fn handle_conn(
 /// 只拦截「受布局影响」的端点（ClientLogin / reader API / Fever），
 /// 避免影响 mock 自身的其它路由。
 fn path_outside_configured_prefix(srv: &MockGReader, path: &str) -> Option<String> {
-    const GREADER_SUFFIXES: [&str; 9] = [
+    const GREADER_SUFFIXES: [&str; 10] = [
         "/accounts/ClientLogin",
+        "/reader/api/0/token",
         "/reader/api/0/subscription/list",
         "/reader/api/0/tag/list",
         "/reader/api/0/stream/items/ids",
@@ -720,6 +721,11 @@ fn route(
                 )
             }
         }
+        // OPT-004：action token（GET）。Miniflux 形态返回登录 auth 本身
+        // （mock 的固定 auth = "mock/abc"）；FreshRSS 返回另一字符串的严格形态
+        // 在 tests/greader_compat_e2e.rs 的独立夹具里验证。现有套件只依赖
+        // 「POST 的 T 从这里取」这一行为，不依赖具体值。
+        ("GET", p) if p.ends_with("/reader/api/0/token") => (200, "mock/abc".into()),
         // TASK-059：Fever 信封（Miniflux 的 /fever/?api 与 FreshRSS 的 /api/fever.php 共用）。
         // 带一份最小分组/订阅数据，使「解析出的端点能被真正使用」可验证——
         // 只回信封的话，客户端只能证明连接成功，证明不了后续调用打对了地址。
@@ -1051,7 +1057,7 @@ fn route(
             srv.subscription_edits
                 .lock()
                 .unwrap()
-                .push((ac.clone(), s_val));
+                .push((ac.clone(), s_val.clone()));
             {
                 let mut form_out = srv.last_subscription_edit_form.lock().unwrap();
                 form_out.clear();
@@ -1081,6 +1087,26 @@ fn route(
                 // TASK-070：原 `"subscribe" => …` 分支随 GReaderClient::subscribe 的
                 // 删除而不可达（生产侧只发 ac=unsubscribe / ac=edit，订阅走 quickadd），
                 // 故移除；订阅路径的记录由 quickadd 分支负责。
+                "edit" => {
+                    // OPT-004 R1（P2-2）：`a` 是完整 label stream id
+                    // （`user/-/label/<名>` / `user/<user>/label/<名>`），不是裸目录名。
+                    // 按真实 wire 规范解析并实际移动分类（此前只回 OK，写分类零覆盖）。
+                    // 裸名不是有效 stream id → 不移动（FreshRSS 会落默认分类）。
+                    if let Some(a) = form.get("a").and_then(|v| v.first().cloned()) {
+                        let label = a
+                            .strip_prefix("user/")
+                            .and_then(|rest| rest.split_once("/label/"))
+                            .map(|(_, name)| name.to_string())
+                            .filter(|name| !name.is_empty());
+                        if let Some(label) = label {
+                            let mut subs = srv.subscriptions.lock().unwrap();
+                            if let Some(sub) = subs.iter_mut().find(|s| s.id == s_val) {
+                                sub.categories = vec![(label, "folder".into())];
+                            }
+                        }
+                    }
+                    (200, "OK".into())
+                }
                 _ => (200, "OK".into()),
             }
         }

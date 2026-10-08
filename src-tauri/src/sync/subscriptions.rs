@@ -207,11 +207,13 @@ pub(super) async fn pull_feeds(
     // 简单起见：按 label 名 upsert 本地 folder，不维护 remote_id（分类碰撞用名字）。
     {
         let conn = db.lock().await;
+        // 分类规范化收口在 greader::category_name（OPT-004）：
+        // Miniflux folder tag 带 label；FreshRSS folder tag 只有 {id,type:folder}
+        // （从 user/.../label/ 后缀取名）；state tag（含 org.freshrss/main）一律不成目录。
+        // Note: 分类识别规则必须与固定上游源码一致 — 见 .agents/notes/implemented/architecture/2026-10-08-Reader适配的鉴权与分类契约.md
         let remote_labels: Vec<String> = remote_tags
             .iter()
-            .filter(|t| t.r#type.as_deref() == Some("folder"))
-            .filter_map(|t| t.label.clone())
-            .filter(|l| !l.is_empty())
+            .filter_map(|t| greader::category_name(&t.id, t.label.as_deref(), t.r#type.as_deref()))
             .collect();
         // A-4：分类墓碑——改名/删除过的 label 不复活；远端已不再列出即清墓碑
         let tombstones = db::folder_tombstones(&conn).unwrap_or_default();
@@ -263,12 +265,13 @@ pub(super) async fn pull_feeds(
             let local_feed = db::feed_id_by_url_normalized(&conn, &rf.url).ok().flatten();
             // 远端 feed 数字 id（读响应用 feed/数字）
             let remote_feed_id = greader::parse_feed_numeric_id(&rf.id);
-            // 分类归属：subscription 的第一个 folder category
-            let remote_folder_label = rf
-                .categories
-                .iter()
-                .find(|c| c.r#type.as_deref() == Some("folder"))
-                .and_then(|c| c.label.clone());
+            // 分类归属：subscription 的第一个分类 category。
+            // FreshRSS 的 category 形如 {id:"user/-/label/名", label:"名"}——**没有 type**，
+            // 靠 id 的 label 前缀识别；Miniflux 仍是 type:folder。规则同 tag/list 收口在
+            // greader::category_name。
+            let remote_folder_label = rf.categories.iter().find_map(|c| {
+                greader::category_name(&c.id, c.label.as_deref(), c.r#type.as_deref())
+            });
             match local_feed {
                 Some(lid) => {
                     // 已存在（本地直连添加过）→ 绑定 remote_id，本地分类/布局保留。
