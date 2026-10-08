@@ -83,7 +83,6 @@
 
 ## 最近事件
 
-- 2026-10-08T02:45:13.176413Z · checkpoint · TASK-128 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
 - 2026-10-08T02:45:42.457653Z · checkpoint · TASK-128 · 阻塞已处置（review_failure）：R1 修复范围：F1 搜索正例限定文章分组+overlayText 打开后读取+键入前 token 硬断言；F2 每段自带 conditions 快照并据此生成结论行；F3 清单与 seed 脚本加『还原前退出应用』保护；F4 修正『只读』声明并单列真实同步警告；F5 统一清单文件名与长会话判定线；F6 崩溃布局堆值标失效。；下一步：begin 重新实现
 - 2026-10-08T02:45:42.863432Z · unblock · TASK-128 · review_failure → ready；依据：独立复审 FAIL（6 findings，其中 F1 搜索正例可被订阅源条目抢先、F2 结论行条件与实际同步状态矛盾为高/中危测量可信度问题）
 - 2026-10-08T02:46:35.037914Z · checkpoint · TASK-128 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
@@ -95,6 +94,7 @@
 - 2026-10-08T03:36:42.956552Z · note/context · TASK-128 · 待观察项（不可稳定复现）：TASK-128 首轮烟雾（tmp/phase4/measure-smoke.json，10:10，worker 自起 Chrome/CDP 9224）捕获到一次 getSnapshot should be cached → React #185 崩溃（appHealth.crashes x2：longSession 与 memoryByLayout:通知 各一次），该 JSON 内不含组件归属；worker 报告称报错组件为 <NotifCard>（现场观察，无存档栈）。TASK-122 R1 的 useShallow 修复（eba4df5，08:10）在该烟雾之前已落地。总控随后复现尝试全部阴性：完整电池 x2（11:28/11:29，everCrashed=false）、快速五布局切换 x6 轮、GC+布局循环、Reader 打开/AI 按钮/Escape、命令面板输入——均 0 错误；全 src 的 17 处非平凡订阅已逐一核查（均为标量或稳定引用），t122-9 源级锁覆盖三处 selectArticleBody 订阅。处置：记为待观察项，不阻断交付；若 owner 实机复现，按 tools/phase4_checklist.md §6 取证。候选补强（backlog）：测量电池的错误钩子捕获 React componentStack（console.error 的次参数）并落盘，使复发可归因。
 - 2026-10-08T03:36:56.878840Z · note/todo · backlog（非本轮范围，待 owner 决定）：①测量电池错误钩子补 React componentStack 捕获（NotifCard #185 复发可归因）；②挂载组件测试通道评估（P2-7.5，audit 建议真实组件测试覆盖 effect 生命周期）；③回归套件按领域拆分（约 6000 行集中测试含源码字符串检查）；④Fever max_id 历史回溯实现（TASK-127 仅如实记录能力未实现）；⑤scheduler.rs 封面回填 DB 写失败 unwrap_or(0) 同类问题（TASK-127 审查观察项，在 allowed_paths 外）；⑥同文内容/各源条目独立建模（四阶段④，未实现）。
 - 2026-10-08T04:10:31.018814Z · note/progress · 已产出第五阶段技术评估文档 .workflow-kit/docs/REFACTOR-TECH-REPORT-20261008.md（dev@b018792，411 行）：逐审计项技术思路/备选取舍/代码锚点（符号+行号）/测试锚点/证据 RUN-DEC 索引 + 范围缺陷与两起 CI 事故过程 + 11 项处置速查表 + 审计者反例构造表 + 诚实清单 7 条 + 逐提交 numstat 附录。供第三方审计评估本轮工作。
+- 2026-10-08T04:22:47.556206Z · note/progress · 发布收口：main 推送版本 bump 提交 50771b0（0.17.0→0.17.1），CI run 37726363519 在该提交全绿；annotated tag v0.17.1 已推送（附注=发布正文，20 非合并提交，源文件 tmp/release-notes-v0.17.1.md），Release 工作流 run 37727115106 已启动（先复核该提交 CI，再 windows-latest 构建安装包并回写 Release 正文）。dev/main 业务代码一致（git diff 为空）。
 
 ## 如何继续
 
