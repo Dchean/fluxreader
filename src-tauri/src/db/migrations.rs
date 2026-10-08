@@ -346,6 +346,54 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         CREATE INDEX idx_articles_published_id ON articles(published_at, id);
     "#,
         ),
+        // OPT-001（F01：可靠 outbox 操作身份）：sync_queue 重建为
+        // id INTEGER PRIMARY KEY AUTOINCREMENT。旧表 id 是普通 ROWID 别名：
+        // enqueue_sync 先删同 article 的同类/相反项再插入，被删行空出的最大
+        // ROWID 会被新行复用。推送计划在 DB 锁内取快照后即释放锁，网络往返
+        // 只由 PUSH_LOCK 串行保护——本地入队不经过 PUSH_LOCK（DB 锁也不跨
+        // HTTP）；窗口内复用 id 会让旧计划返回后按 id 确认（prune_sync）
+        // 误删新的用户意图。AUTOINCREMENT 借 sqlite_sequence 保证「已提交的
+        // 操作 id 在删除后不复用」——这是旧计划按 id 精确确认仍成立的唯一
+        // 前提。本地入队与在飞推送的并发本身不在本卡范围（账号隔离是
+        // OPT-006；不锁整个 DB）。
+        //
+        // 重建保留全部列（id/article_id/feed_url/action/payload/created_at/
+        // attempts/last_error）、外键、id 与全部内容：按显式 id 列拷贝，原 id
+        // 逐字保留；两个 v14 索引随旧表 DROP 后按原生义重建。sqlite_sequence
+        // 不手工重置——SQLite 自动维护：向 AUTOINCREMENT 表显式拷入 id 会把
+        // 序列推进到现存最大 id，随后的 RENAME 同步序列条目名；重开库后新项
+        // id 恒高于已提交最大 id（test 只验证「不复用」行为，不绑定该实现）。
+        // 拷贝在 open 既有的 foreign_keys=ON 下执行：FK 悬空的遗留行会使本
+        // 迁移整步失败回滚（fail-stop，不静默丢弃坏行）。整个重建在迁移框架
+        // 的单事务内：任一步失败整体回滚，不留半张表（v17 原表与
+        // user_version 原样保留）。
+        // Note: 操作 id 不复用是旧推送计划按 id 精确确认的前提 —
+        // 见 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md
+        M::up(
+            r#"
+        CREATE TABLE sync_queue_new (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_id  INTEGER REFERENCES articles(id) ON DELETE CASCADE,
+            feed_url    TEXT,
+            action      TEXT NOT NULL,
+            payload     TEXT,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            attempts    INTEGER NOT NULL DEFAULT 0,
+            last_error  TEXT
+        );
+
+        INSERT INTO sync_queue_new
+            (id, article_id, feed_url, action, payload, created_at, attempts, last_error)
+        SELECT id, article_id, feed_url, action, payload, created_at, attempts, last_error
+          FROM sync_queue;
+
+        DROP TABLE sync_queue;
+        ALTER TABLE sync_queue_new RENAME TO sync_queue;
+
+        CREATE INDEX idx_sync_queue_article ON sync_queue(article_id, action);
+        CREATE INDEX idx_sync_queue_created ON sync_queue(created_at);
+    "#,
+        ),
     ])
 });
 
@@ -1153,5 +1201,347 @@ mod v15_migration_tests {
             by_true,
             "ORDER BY published_at 必须与真实时刻口径（datetime 归一）逐行等价"
         );
+    }
+}
+
+/* ============================================================
+OPT-001 v18 单元测试：sync_queue 重建为 AUTOINCREMENT（F01）
+（cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
+============================================================ */
+#[cfg(test)]
+mod opt001_migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 进程内唯一临时库路径（同 req108 模块的 unique_test_db 惯例，std 实现）。
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        std::env::temp_dir().join(format!(
+            "fluxreader_migr_{base}_{pid}_{nanos}_{seq}.db",
+            pid = std::process::id()
+        ))
+    }
+
+    /// sync_queue 全列快照（按 id 升序）：id, article_id, feed_url, action,
+    /// payload, created_at, attempts, last_error。
+    type QueueRow = (
+        i64,
+        Option<i64>,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        i64,
+        Option<String>,
+    );
+
+    /// Row → QueueRow（列序与 queue_rows 的 SELECT 一致）。
+    fn row_to_queue_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<QueueRow> {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+            r.get(6)?,
+            r.get(7)?,
+        ))
+    }
+
+    fn queue_rows(conn: &Connection) -> Vec<QueueRow> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, article_id, feed_url, action, payload, created_at, attempts, last_error
+                   FROM sync_queue ORDER BY id",
+            )
+            .unwrap();
+        let it = stmt.query_map([], row_to_queue_row).unwrap();
+        it.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    fn queue_table_sql(conn: &Connection) -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sync_queue'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// v17 夹具：旧形状 sync_queue（普通 id）上的失败待推项——article 级
+    /// 非连续 id 2/5 + add_feed 行 id 9，显式 created_at 便于逐字比对，
+    /// 部分带失败标记（attempts/last_error）。
+    fn seed_v17(path: &std::path::Path) {
+        let mut conn = Connection::open(path).unwrap();
+        MIGRATIONS.to_version(&mut conn, 17).unwrap();
+        conn.execute_batch(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+             INSERT INTO articles (feed_id, guid, title) VALUES
+               (1, 'g1', 't1'), (1, 'g2', 't2');
+             INSERT INTO sync_queue (id, article_id, action, created_at, attempts, last_error)
+               VALUES (2, 1, 'read', '2026-09-01 10:00:00', 3, '状态推送失败: HTTP 500');
+             INSERT INTO sync_queue (id, article_id, action, created_at, attempts, last_error)
+               VALUES (5, 2, 'unstar', '2026-09-02 11:00:00', 0, NULL);
+             INSERT INTO sync_queue
+               (id, article_id, feed_url, action, payload, created_at, attempts, last_error)
+               VALUES (9, NULL, 'https://x.example/rss', 'add_feed', '{\"title\":\"X\"}',
+                       '2026-09-03 12:00:00', 1, '认证失败：ClientLogin → 401');",
+        )
+        .unwrap();
+    }
+
+    /// (opt001-m1) v17 → v18 生产 open 升级：id/全部内容/失败信息逐字保留，
+    /// 表为 AUTOINCREMENT、两个索引与 FK 均在，新项 id 高于已提交最大 id，
+    /// 清空后再入队不复用被删行；article 删除对队列行的级联仍生效。
+    /// 判别力：漏拷贝任一列、退回普通 rowid（可复用）、漏索引、漏 FK、
+    /// sequence 未随拷贝/RENAME 自动推进时对应断言必红。
+    /// （不对 sqlite_sequence 表本身断言——只验证「不复用」的实际行为。）
+    #[test]
+    fn v18_rebuild_preserves_rows_index_fk_and_identity() {
+        let path = unique_test_db("opt001_v18");
+        let _ = std::fs::remove_file(&path);
+        seed_v17(&path);
+
+        // 生产打开路径：迁移 + 回填 + 凭据迁移一路跑完
+        let conn = open(&path).expect("v17 库必须完成 v18 迁移");
+
+        // user_version 与全新库一致（追加式迁移推进到最新，不硬编码版本号）
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        let latest: i64 = {
+            let mut fresh = Connection::open_in_memory().unwrap();
+            MIGRATIONS.to_latest(&mut fresh).unwrap();
+            fresh
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(v, latest, "旧库必须升到与全新库相同的最新版本");
+
+        // id / 全部内容 / 失败信息逐字保留（含非连续 id 与 add_feed 行）
+        let rows = queue_rows(&conn);
+        assert_eq!(rows.len(), 3, "既有队列行零丢失");
+        let ids: Vec<i64> = rows.iter().map(|r| r.0).collect();
+        assert_eq!(ids, vec![2, 5, 9], "非连续 id 逐字保留");
+
+        // article 级失败项 id=2：全列逐字（含失败标记）
+        assert_eq!(rows[0].1, Some(1));
+        assert_eq!(rows[0].2, None);
+        assert_eq!(rows[0].3, "read");
+        assert_eq!(rows[0].4, None);
+        assert_eq!(rows[0].5, "2026-09-01 10:00:00");
+        assert_eq!(rows[0].6, 3);
+        assert_eq!(rows[0].7.as_deref(), Some("状态推送失败: HTTP 500"));
+
+        // article 级健康项 id=5
+        assert_eq!(rows[1].1, Some(2));
+        assert_eq!(rows[1].3, "unstar");
+        assert_eq!(rows[1].5, "2026-09-02 11:00:00");
+        assert_eq!(rows[1].6, 0);
+        assert_eq!(rows[1].7, None);
+
+        // add_feed 行 id=9：feed_url/payload 与失败标记
+        assert_eq!(rows[2].1, None);
+        assert_eq!(rows[2].2.as_deref(), Some("https://x.example/rss"));
+        assert_eq!(rows[2].3, "add_feed");
+        assert_eq!(rows[2].4.as_deref(), Some("{\"title\":\"X\"}"));
+        assert_eq!(rows[2].5, "2026-09-03 12:00:00");
+        assert_eq!(rows[2].6, 1);
+        assert_eq!(rows[2].7.as_deref(), Some("认证失败：ClientLogin → 401"));
+
+        // 表形状：AUTOINCREMENT 在 sqlite_master 原样可见（重建的语义核心）
+        let sql = queue_table_sql(&conn);
+        assert!(
+            sql.contains("AUTOINCREMENT"),
+            "v18 必须把 sync_queue 重建为 AUTOINCREMENT：{sql}"
+        );
+
+        // 列序不变量：v17 全列按原顺序保留（应用写入依赖列位置无关，但迁移
+        // 拷贝按列名，顺序漂移会暴露拷贝语句与旧表不同构）
+        let cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('sync_queue') ORDER BY cid")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            cols,
+            vec![
+                "id",
+                "article_id",
+                "feed_url",
+                "action",
+                "payload",
+                "created_at",
+                "attempts",
+                "last_error",
+            ],
+            "v18 必须保留全部列且顺序不变"
+        );
+
+        // FK 保留：article 级队项仍随文章删除级联
+        let (fk_table, fk_col, fk_on_delete): (String, String, String) = conn
+            .query_row(
+                "SELECT \"table\", \"from\", on_delete FROM pragma_foreign_key_list('sync_queue')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (fk_table.as_str(), fk_col.as_str(), fk_on_delete.as_str()),
+            ("articles", "article_id", "CASCADE"),
+            "v18 必须保留 article_id → articles(id) ON DELETE CASCADE"
+        );
+
+        // 两个索引按原生义重建
+        for idx in ["idx_sync_queue_article", "idx_sync_queue_created"] {
+            let (n, tbl): (i64, String) = conn
+                .query_row(
+                    "SELECT COUNT(*), COALESCE(MAX(tbl_name), '') FROM sqlite_master
+                      WHERE type = 'index' AND name = ?1",
+                    params![idx],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                (n, tbl.as_str()),
+                (1, "sync_queue"),
+                "v18 必须重建索引 {idx}"
+            );
+        }
+
+        // 新项 id 高于已提交最大 id（v17 遗留 max=9；sequence 由 SQLite 自动维护）
+        enqueue_sync(&conn, Some(1), None, "star", None).unwrap();
+        let new_id: i64 = conn
+            .query_row("SELECT MAX(id) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            new_id > 9,
+            "升级后新项 id 必须高于已提交最大 id（got {new_id}）"
+        );
+
+        // article 删除的级联仍生效：id=5 的 unstar 随 article 2 删除；
+        // add_feed 行（article_id NULL）与 article 1 的行不受影响
+        let sql = "DELETE FROM articles WHERE id = 2";
+        conn.execute(sql, []).unwrap();
+        let ids: Vec<i64> = queue_rows(&conn).iter().map(|r| r.0).collect();
+        assert_eq!(
+            ids,
+            vec![2, 9, new_id],
+            "FK cascade 必须保留：article 级行随文章删除，add_feed 行不受影响"
+        );
+
+        // 清空后再入队：不复用被删行（sequence 随拷贝/RENAME 自动推进，
+        // 不依赖迁移里的手工重置；若未推进，这里会回落到 1 级别的旧 id）
+        prune_sync(&conn, &[2, 9, new_id]).unwrap();
+        assert!(take_sync_queue(&conn).unwrap().is_empty(), "队列已清空");
+        enqueue_sync(&conn, Some(1), None, "unread", None).unwrap();
+        let after_drain: i64 = conn
+            .query_row("SELECT MAX(id) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            after_drain > new_id,
+            "清空后新项 id 不得复用被删行（got {after_drain}）"
+        );
+
+        drop(conn);
+        std::fs::remove_file(&path).expect("清理临时库失败");
+    }
+
+    /// (opt001-m2) 失败迁移不留半张表：v17 库中混入 FK 悬空的遗留队项
+    /// （历史 FK 关闭窗口写入的孤儿行），生产 open 在 v18 拷贝步即失败——
+    /// 单事务整体回滚：原表形状/全部行/两个索引/user_version=17 原样，
+    /// 且不留 sync_queue_new 半成品；修复数据（删除孤儿行）后重开即完成迁移。
+    /// 判别力：迁移语句若被拆出事务（或半途提交），后续断言必红。
+    #[test]
+    fn v18_migration_failure_leaves_no_partial_table_and_recovers() {
+        let path = unique_test_db("opt001_fail");
+        let _ = std::fs::remove_file(&path);
+
+        // v17 夹具 + 悬空 article_id=999 的孤儿队项：仅夹具连接显式 FK OFF 种
+        // 数据（bundled SQLite 默认 FK ON，裸连接不关就插不进去）；生产 open
+        // 仍全程 FK ON，由拷贝步触发真实回滚
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+            MIGRATIONS.to_version(&mut conn, 17).unwrap();
+            conn.execute_batch(
+                "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+                 INSERT INTO articles (feed_id, guid, title) VALUES (1, 'g1', 't1');
+                 INSERT INTO sync_queue (id, article_id, action, created_at)
+                   VALUES (1, 1, 'read', '2026-09-01 10:00:00');
+                 INSERT INTO sync_queue (id, article_id, action, created_at)
+                   VALUES (7, 999, 'read', '2026-09-02 10:00:00');",
+            )
+            .unwrap();
+        }
+
+        // 生产打开路径：拷贝孤儿行触发 FK 违例 → 迁移失败（open 报错）
+        let err = open(&path).expect_err("FK 悬空行必须让 v18 迁移失败");
+        assert_eq!(err.code, "migration", "必须归类为迁移错误：{err}");
+        assert!(
+            err.message.contains("FOREIGN KEY"),
+            "失败原因必须暴露 FK 违例：{err}"
+        );
+
+        // 回滚现场：原表（非 AUTOINCREMENT）/全部行/两个索引/版本号原样，无半张新表
+        {
+            let conn = Connection::open(&path).unwrap();
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 17, "失败迁移不得推进 user_version");
+
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type = 'table' AND name = 'sync_queue_new'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "失败迁移不得留下半张 sync_queue_new");
+
+            let sql = queue_table_sql(&conn);
+            assert!(
+                !sql.contains("AUTOINCREMENT"),
+                "回滚后必须还是 v17 原表：{sql}"
+            );
+
+            let ids: Vec<i64> = queue_rows(&conn).iter().map(|r| r.0).collect();
+            assert_eq!(ids, vec![1, 7], "回滚不得丢行（含孤儿行原样保留）");
+
+            let idx_n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'
+                      AND name IN ('idx_sync_queue_article', 'idx_sync_queue_created')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(idx_n, 2, "回滚后 v14 索引原样保留");
+        }
+
+        // 修复孤儿行后再打开：迁移成功，健康行保留
+        {
+            let conn = Connection::open(&path).unwrap();
+            let sql = "DELETE FROM sync_queue WHERE id = 7";
+            conn.execute(sql, []).unwrap();
+        }
+        let conn = open(&path).expect("修复后重开必须完成 v18");
+        assert!(queue_table_sql(&conn).contains("AUTOINCREMENT"));
+        let ids: Vec<i64> = queue_rows(&conn).iter().map(|r| r.0).collect();
+        assert_eq!(ids, vec![1], "修复后迁移保留健康行");
+        drop(conn);
+        std::fs::remove_file(&path).expect("清理临时库失败");
     }
 }

@@ -70,7 +70,12 @@ pub fn take_sync_queue(conn: &Connection) -> AppResult<Vec<SyncQueueItem>> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 清除已成功推送的队列条目
+/// 清除已成功推送的队列条目（远端确认 = 按 id 精确出队）。
+/// 精确确认的前提是**操作 id 在删除后不复用**：推送计划取快照后即释放 DB
+/// 锁，网络往返只由 PUSH_LOCK 串行保护，而本地入队不经过 PUSH_LOCK——窗口内
+/// 复用 id 会让旧计划返回后按 id prune 误删新的用户意图（审计 F01；v18 起
+/// sync_queue 为 AUTOINCREMENT，见 db/migrations.rs 的 v18 迁移）。
+// Note: 操作 id 不复用是旧推送计划按 id 精确确认的前提 — 见 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md
 pub fn prune_sync(conn: &Connection, ids: &[i64]) -> AppResult<()> {
     if ids.is_empty() {
         return Ok(());
@@ -466,5 +471,92 @@ mod t124_tests {
         let s = sync_queue_stats(&c).unwrap();
         assert_eq!(s.waiting, 3, "None 入队无合并：追加一行");
         assert_eq!(s.failed, 2, "新行未失败，failed 保持原两行");
+    }
+}
+
+/* ============================================================
+OPT-001（F01）单元测试：操作身份不复用（v17 复现锚 + v18 AUTOINCREMENT）
+（cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
+============================================================ */
+#[cfg(test)]
+mod opt001_tests {
+    use super::*;
+
+    /// (opt001-u1) 替换入队不复用操作 id（验收伪码的单元版）：
+    /// ① v17 修前锚——替换入队复用被删行的最大 ROWID，旧计划按 id 确认会
+    ///    误删新的用户意图；② v18（AUTOINCREMENT）同一序列——新 id 必不同、
+    ///    旧 id 的确认不伤新项，清空后序列继续走高不回落。断言只验证
+    ///    「不复用」的实际行为，不绑定 sqlite_sequence 表的实现细节。
+    /// 判别力：v18 退回普通 INTEGER PRIMARY KEY 时，star/unstar 段必红
+    /// （复用使 assert_ne 失败、prune 旧 id 直接删掉新行）。
+    #[test]
+    fn queue_identity_not_reused_across_replacement() {
+        let mut c = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut c, 17).unwrap();
+        c.execute_batch(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+             INSERT INTO articles (feed_id, guid, title) VALUES (1, 'g1', 't');",
+        )
+        .unwrap();
+
+        // ---- ① 修前锚（v17 普通 rowid）：id 复用 → 旧确认误删新意图 ----
+        enqueue_sync(&c, Some(1), None, "read", None).unwrap();
+        let v17_old = take_sync_queue(&c).unwrap().remove(0).id;
+        enqueue_sync(&c, Some(1), None, "unread", None).unwrap();
+        let v17_new = take_sync_queue(&c).unwrap().remove(0).id;
+        assert_eq!(
+            v17_new, v17_old,
+            "修前锚：v17 替换入队复用被删行的最大 ROWID（F01 复现的前提）"
+        );
+        prune_sync(&c, &[v17_old]).unwrap();
+        assert!(
+            take_sync_queue(&c).unwrap().is_empty(),
+            "修前锚：旧计划按 id 确认会误删新的 unread 意图（F01 现场）"
+        );
+
+        // 升级前留下一条现存行（重申 read 再复用 id=1），升级后先确认清空它
+        enqueue_sync(&c, Some(1), None, "read", None).unwrap();
+        MIGRATIONS.to_latest(&mut c).unwrap();
+        let basis = take_sync_queue(&c).unwrap().remove(0).id;
+        assert_eq!(basis, 1, "前置：升级时现存最大 id = 1（v17 复用结果）");
+        prune_sync(&c, &[basis]).unwrap();
+
+        // ---- ② v18：同一序列不得复用；空队列后序列继续走高 ----
+        // （sequence 由 SQLite 随拷贝/RENAME 自动维护，不手工重置）
+        enqueue_sync(&c, Some(1), None, "star", None).unwrap();
+        let star = take_sync_queue(&c).unwrap().remove(0).id;
+        assert!(
+            star > basis,
+            "升级后新项 id 必须高于已提交最大 id（不复用被删行）"
+        );
+
+        enqueue_sync(&c, Some(1), None, "unstar", None).unwrap();
+        let unstar = take_sync_queue(&c).unwrap().remove(0).id;
+        assert_ne!(unstar, star, "v18：替换入队必须换新 id（不复用被删行）");
+        prune_sync(&c, &[star]).unwrap();
+        let q = take_sync_queue(&c).unwrap();
+        assert_eq!(q.len(), 1, "旧 id 的确认不得删掉新用户意图");
+        assert_eq!(q[0].id, unstar);
+        assert_eq!(q[0].action, "unstar");
+
+        // unstar 残留先清场：read/unread 入队不会清除 unstar，保留会让下一段
+        // remove(0) 拿到旧行（清场后重新断言队列空，再进入 read 场景）
+        prune_sync(&c, &[unstar]).unwrap();
+        assert!(take_sync_queue(&c).unwrap().is_empty(), "unstar 场景清场");
+
+        // read→unread 同断言（队列已空也不回落复用）
+        enqueue_sync(&c, Some(1), None, "read", None).unwrap();
+        let read = take_sync_queue(&c).unwrap().remove(0).id;
+        assert!(read > unstar, "清空后新项 id 继续走高，不回落复用");
+        enqueue_sync(&c, Some(1), None, "unread", None).unwrap();
+        let unread = take_sync_queue(&c).unwrap().remove(0).id;
+        assert!(unread > read, "替换入队 id 严格递增");
+        prune_sync(&c, &[read]).unwrap();
+        let q = take_sync_queue(&c).unwrap();
+        assert_eq!(
+            (q.len(), q[0].id, q[0].action.as_str()),
+            (1, unread, "unread"),
+            "旧 read 计划的确认不得伤及新的 unread 意图"
+        );
     }
 }

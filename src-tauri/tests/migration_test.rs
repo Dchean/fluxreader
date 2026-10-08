@@ -148,6 +148,36 @@ fn migration_v6_to_v7_backfills_precise_url_norm() {
                 published_at TEXT, fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
                 is_read INTEGER NOT NULL DEFAULT 0, is_starred INTEGER NOT NULL DEFAULT 0,
                 miniflux_id INTEGER, fulltext_extracted INTEGER NOT NULL DEFAULT 0, UNIQUE(feed_id, guid));
+            -- 真实 v3 就有的 FTS 表与 3 个触发器（R2：v6 夹具此前漏建；v14 的
+            -- articles_au 引用 articles_fts，v18 的 RENAME 重解析 schema 时
+            -- 缺表会让整个迁移失败。语句与现行 migrations.rs 已发布的 v3 SQL
+            -- 对齐，放在插入数据之前）
+            CREATE VIRTUAL TABLE articles_fts USING fts5(
+                title, body_text, author, ai_summary, translated_content,
+                content='articles', content_rowid='id',
+                tokenize='unicode61'
+            );
+            INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
+                SELECT id, title, body_text, COALESCE(author, ''), COALESCE(ai_summary, ''), COALESCE(translated_content, '')
+                FROM articles;
+            CREATE TRIGGER articles_ai AFTER INSERT ON articles BEGIN
+                INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
+                VALUES (new.id, new.title, new.body_text, COALESCE(new.author, ''),
+                        COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
+            END;
+            CREATE TRIGGER articles_ad AFTER DELETE ON articles BEGIN
+                INSERT INTO articles_fts(articles_fts, rowid, title, body_text, author, ai_summary, translated_content)
+                VALUES ('delete', old.id, old.title, old.body_text, COALESCE(old.author, ''),
+                        COALESCE(old.ai_summary, ''), COALESCE(old.translated_content, ''));
+            END;
+            CREATE TRIGGER articles_au AFTER UPDATE ON articles BEGIN
+                INSERT INTO articles_fts(articles_fts, rowid, title, body_text, author, ai_summary, translated_content)
+                VALUES ('delete', old.id, old.title, old.body_text, COALESCE(old.author, ''),
+                        COALESCE(old.ai_summary, ''), COALESCE(old.translated_content, ''));
+                INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
+                VALUES (new.id, new.title, new.body_text, COALESCE(new.author, ''),
+                        COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
+            END;
             CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE deduped_urls (url TEXT PRIMARY KEY, kept_aid INTEGER NOT NULL, kept_at TEXT NOT NULL DEFAULT (datetime('now')));
             -- 真实 v6 库在 v2 就有 sync_queue（TASK-099 v14 起对其建索引，
