@@ -249,43 +249,121 @@ Articles
 订阅删除墓碑（A-1）：本地删除后 pull 不得按远端列表复活。
 存 app_settings 的 JSON 数组（规范化 URL），避免为一次删除语义新增迁移；
 退订成功（远端确认）后清除。
+
+R1（OPT-008A）：URL 规范化算法收敛（通用参数不再全局剥除）后，旧算法时代的
+墓碑键与新算法键不再相等——只保字节会在 pull 的 stale 判据下失配被误清，
+已删订阅复活。v19 把旧键迁入独立 legacy 命名空间；匹配/回收跨两个命名空间，
+旧规则用 legacy_v1_normalize 隔离快照复刻，**绝不用回身份匹配**。
 ============================================================ */
 const FEED_TOMBSTONE_KEY: &str = "feed_tombstones";
+/// 旧算法（v1）时代的退订墓碑（v19 从 FEED_TOMBSTONE_KEY 迁入；键为旧算法
+/// 规范化产物，原始 URL 已丢）。仅用于防复活的兼容匹配/回收。
+const FEED_TOMBSTONE_LEGACY_V1_KEY: &str = "feed_tombstones_legacy_v1";
 
-/// 删除订阅的墓碑 URL 列表（规范化）。
-pub fn feed_tombstones(conn: &Connection) -> AppResult<Vec<String>> {
-    let raw = super::get_setting(conn, FEED_TOMBSTONE_KEY)?;
-    Ok(raw
-        .as_deref()
-        .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
-        .unwrap_or_default())
+/// 读墓碑列表：**缺 key = 合法空表**（从未删过订阅）；存在但读/解析失败 =
+/// **未知**——必须 Err（R2：退化空表会把用户删除意图当不存在而放行复活）。
+/// 调用方不得吞错继续导入；损坏的 setting 原值保持不动，修复后自然重试。
+fn read_tombstones(conn: &Connection, key: &str) -> AppResult<Vec<String>> {
+    let Some(raw) = super::get_setting(conn, key)? else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str::<Vec<String>>(&raw).map_err(|e| {
+        crate::error::AppError::new(
+            "db",
+            format!("订阅墓碑 {key} 内容损坏（保留原值，等待修复）: {e}"),
+        )
+    })
 }
 
-fn save_feed_tombstones(conn: &Connection, list: &[String]) -> AppResult<()> {
+fn save_tombstones(conn: &Connection, key: &str, list: &[String]) -> AppResult<()> {
     let raw = serde_json::to_string(list).unwrap_or_else(|_| "[]".into());
-    super::set_setting(conn, FEED_TOMBSTONE_KEY, &raw)
+    super::set_setting(conn, key, &raw)
+}
+
+/// 删除订阅的墓碑 URL 列表（当前算法命名空间，规范化）。
+pub fn feed_tombstones(conn: &Connection) -> AppResult<Vec<String>> {
+    read_tombstones(conn, FEED_TOMBSTONE_KEY)
+}
+
+/// 旧算法命名空间的退订墓碑（见常量注释）。
+pub fn legacy_feed_tombstones(conn: &Connection) -> AppResult<Vec<String>> {
+    read_tombstones(conn, FEED_TOMBSTONE_LEGACY_V1_KEY)
 }
 
 // Note: 墓碑是 pull 防复活的唯一防线；清除判据是「远端列表已不含该 URL」而非 2xx — 见 .agents/notes/implemented/bug-fix/2026-09-18-双向同步的写入接线与墓碑.md
-/// 写入删除墓碑（幂等，按规范化 URL 去重）。
+/// 写入删除墓碑（幂等，按当前算法规范化 URL 去重）。
 pub fn add_feed_tombstone(conn: &Connection, feed_url: &str) -> AppResult<()> {
     let norm = super::normalize_url(feed_url);
     let mut list = feed_tombstones(conn)?;
     if !list.iter().any(|u| u == &norm) {
         list.push(norm);
-        save_feed_tombstones(conn, &list)?;
+        save_tombstones(conn, FEED_TOMBSTONE_KEY, &list)?;
     }
     Ok(())
 }
 
-/// 清除删除墓碑（远端已确认不再订阅后调用）。
+/// 清除删除墓碑（用户显式重新添加同 URL 时调用——commands::persist_new_feed
+/// 的真实解除点）：当前与 legacy 两个命名空间一并解除（旧墓碑键只存字节，
+/// 不按旧规则重算就无法被显式重加解除）。
+/// 退订 2xx / 远端列表滞后等路径不得调用（见 subscriptions::unsubscribe_remote）。
 pub fn remove_feed_tombstone(conn: &Connection, feed_url: &str) -> AppResult<()> {
     let norm = super::normalize_url(feed_url);
     let mut list = feed_tombstones(conn)?;
     let before = list.len();
     list.retain(|u| u != &norm);
     if list.len() != before {
-        save_feed_tombstones(conn, &list)?;
+        save_tombstones(conn, FEED_TOMBSTONE_KEY, &list)?;
+    }
+    let legacy_norm = super::legacy_v1_normalize(feed_url);
+    let mut legacy = legacy_feed_tombstones(conn)?;
+    let before = legacy.len();
+    legacy.retain(|u| u != &legacy_norm);
+    if legacy.len() != before {
+        save_tombstones(conn, FEED_TOMBSTONE_LEGACY_V1_KEY, &legacy)?;
+    }
+    Ok(())
+}
+
+/// 该远端 URL 是否被删除墓碑压制（跨算法版本）：当前命名空间按新算法键比对；
+/// legacy 命名空间按隔离的旧算法快照比对。保守权衡——旧键丢失了参数原值，
+/// 所有旧键候选（如 ?t=123 与 ?t=456）会一同被抑制，不能猜 raw 恢复。
+pub fn feed_url_tombstoned(conn: &Connection, feed_url: &str) -> AppResult<bool> {
+    let norm = super::normalize_url(feed_url);
+    if feed_tombstones(conn)?.iter().any(|t| t == &norm) {
+        return Ok(true);
+    }
+    let legacy_norm = super::legacy_v1_normalize(feed_url);
+    Ok(legacy_feed_tombstones(conn)?
+        .iter()
+        .any(|t| t == &legacy_norm))
+}
+
+/// 墓碑收敛（pull 的「远端列表已不含」判据，跨算法版本）：各命名空间只按
+/// 自己的算法全集判 stale——legacy 墓碑只有「远端旧规范全集确实不含该键」时
+/// 才清。保留中的墓碑一律不动；除远端事实（与用户显式重加）外不主动丢弃
+/// 用户删除意图。
+/// R2：先读完两侧再写——任一读取/解析失败在任何 setting 被改动之前返回，
+/// 损坏值原样保留（未知状态不产生任何副作用）。
+pub fn prune_feed_tombstones(conn: &Connection, remote_urls: &[String]) -> AppResult<()> {
+    let mut current = feed_tombstones(conn)?;
+    let mut legacy = legacy_feed_tombstones(conn)?;
+    let remote_current: HashSet<String> = remote_urls
+        .iter()
+        .map(|u| super::normalize_url(u))
+        .collect();
+    let before = current.len();
+    current.retain(|k| remote_current.contains(k));
+    if current.len() != before {
+        save_tombstones(conn, FEED_TOMBSTONE_KEY, &current)?;
+    }
+    let remote_legacy: HashSet<String> = remote_urls
+        .iter()
+        .map(|u| super::legacy_v1_normalize(u))
+        .collect();
+    let before = legacy.len();
+    legacy.retain(|k| remote_legacy.contains(k));
+    if legacy.len() != before {
+        save_tombstones(conn, FEED_TOMBSTONE_LEGACY_V1_KEY, &legacy)?;
     }
     Ok(())
 }

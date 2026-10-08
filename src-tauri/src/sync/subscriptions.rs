@@ -246,18 +246,35 @@ pub(super) async fn pull_feeds(
     // 锁内：订阅按 URL 碰撞合并
     {
         let conn = db.lock().await;
-        // A-1：本地已删除（墓碑）的订阅不复活；远端列表已不含的墓碑可清除
-        let tombstones = db::feed_tombstones(&conn).unwrap_or_default();
-        let remote_norm: Vec<String> = remote_subs
-            .iter()
-            .map(|rf| db::normalize_url(&rf.url))
-            .collect();
-        for stale in tombstones.iter().filter(|t| !remote_norm.contains(t)) {
-            let _ = db::remove_feed_tombstone(&conn, stale);
-        }
+        // A-1 + OPT-008A R1/R2：本地已删除（墓碑）的订阅不复活；远端列表已不含的
+        // 墓碑可清除。匹配/收敛必须跨算法版本兼容（旧算法键在 legacy 命名空间，
+        // 见 db::feeds 墓碑段），不能在 subscriptions 里重算或混用算法。
+        // R2：墓碑读取/清理任何错误 = 状态未知——本轮停止订阅导入并记入 report，
+        // setting 原值保留（修复后下一轮自然重试）；绝不能把「未知」当「空表」
+        // 放行导入（会复活用户已删除的订阅）。
+        let remote_urls: Vec<String> = remote_subs.iter().map(|rf| rf.url.clone()).collect();
+        let tombstones_known = match db::prune_feed_tombstones(&conn, &remote_urls) {
+            Ok(()) => true,
+            Err(e) => {
+                report.errors.push(format!(
+                    "订阅墓碑读取/清理失败，本轮停止订阅导入（保留原值待重试）: {e}"
+                ));
+                false
+            }
+        };
         for rf in &remote_subs {
-            if tombstones.contains(&db::normalize_url(&rf.url)) {
-                continue; // 本地已删除且远端仍列出：保留墓碑，跳过复活
+            if !tombstones_known {
+                break; // 状态未知：导入整段停止，无任何写路径被触发
+            }
+            match db::feed_url_tombstoned(&conn, &rf.url) {
+                Ok(true) => continue, // 本地已删除且远端仍列出：保留墓碑，跳过复活
+                Ok(false) => {}
+                Err(e) => {
+                    report.errors.push(format!(
+                        "订阅墓碑读取失败，本轮停止订阅导入（保留原值待重试）: {e}"
+                    ));
+                    break;
+                }
             }
             // 用规范化 URL 匹配本地 feed（后端返回的 URL 与本地直连添加时
             // 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成新订阅 → 同一

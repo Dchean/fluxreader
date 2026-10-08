@@ -34,10 +34,11 @@ pub use articles::{
     FeedCounts, NewArticle,
 };
 pub use feeds::{
-    add_feed_tombstone, delete_feed, feed_remote_info, feed_tombstones, feeds_all_ids,
-    feeds_due_for_refresh, find_feed_by_url, insert_feed, insert_feed_origin, list_feeds,
-    remove_feed_tombstone, set_feed_ai_flags, set_feed_fetch_state, set_feed_title_and_icon,
-    update_feed, update_feed_layout, FeedRow,
+    add_feed_tombstone, delete_feed, feed_remote_info, feed_tombstones, feed_url_tombstoned,
+    feeds_all_ids, feeds_due_for_refresh, find_feed_by_url, insert_feed, insert_feed_origin,
+    legacy_feed_tombstones, list_feeds, prune_feed_tombstones, remove_feed_tombstone,
+    set_feed_ai_flags, set_feed_fetch_state, set_feed_title_and_icon, update_feed,
+    update_feed_layout, FeedRow,
 };
 pub use folders::{
     add_folder_tombstone, create_folder, delete_folder, feed_urls_in_folder, folder_name,
@@ -70,6 +71,9 @@ pub use sync_queue::{
     SyncQueueItem, SyncQueueStats,
 };
 pub use url_norm::normalize_url;
+/* OPT-008A R1：旧算法规范化快照——只供 db/feeds.rs 的 legacy 退订墓碑匹配/回收，
+不是身份匹配 API，不对外暴露。 */
+pub(crate) use url_norm::legacy_v1_normalize;
 
 #[cfg(test)]
 mod auth_probe;

@@ -101,6 +101,70 @@ fn smart_dedup_blocks_cross_feed_same_url() {
     assert!(!new5);
     let _ = id1;
 }
+/// OPT-008A（F12）保守规则经真实入库路径：明确归属的营销参数变体仍被去重
+/// 拦截（真去重不退化）；论坛主题 t、通用 s、章节/分组 ID 等业务参数不再互相
+/// 吞并；X 状态页例外只对确切域名生效。
+#[test]
+fn conservative_url_rules_keep_true_dedup_and_separate_business_params() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    MIGRATIONS.to_latest(&mut conn).unwrap();
+    let f = create_folder(&conn, "F", "article").unwrap();
+    let feed = insert_feed(
+        &conn,
+        "https://x.example/f",
+        None,
+        "f",
+        None,
+        f,
+        "inherit",
+        true,
+        false,
+    )
+    .unwrap();
+    let up = |url: &str, guid: &str| {
+        upsert_article_with_feed(&conn, feed, &new_article(url, guid), true).unwrap()
+    };
+
+    // 明确归属的营销参数变体 → 同一篇，后续被拦
+    let (_, n1) = up("https://n.example/post", "g1");
+    assert!(n1);
+    let (_, n2) = up("https://n.example/post?utm_source=rss&fbclid=abc", "g2");
+    assert!(!n2, "utm/fbclid 变体必须仍被去重");
+    let (_, n3) = up("https://n.example/post?mc_cid=1", "g3");
+    assert!(!n3, "mc_cid 变体必须仍被去重");
+
+    // 论坛主题号（F12 核心反例）：t=123 与 t=456 必须分别入库
+    let (_, n4) = up("https://forum.example/viewtopic.php?t=123", "g4");
+    assert!(n4);
+    let (_, n5) = up("https://forum.example/viewtopic.php?t=456", "g5");
+    assert!(n5, "不同主题号不得被去重吞并");
+    let (_, n6) = up("https://forum.example/viewtopic.php?s=foo", "g6");
+    assert!(n6);
+    let (_, n7) = up("https://forum.example/viewtopic.php?s=bar", "g7");
+    assert!(n7, "普通站点上通用 s 参数是业务参数，不得吞并");
+    // 章节/分组业务 ID
+    let (_, n8) = up("https://novel.example/read?web_chapter_id=1", "g8");
+    assert!(n8);
+    let (_, n9) = up("https://novel.example/read?web_chapter_id=2", "g9");
+    assert!(n9, "不同章节 ID 不得被去重吞并");
+    let (_, n10) = up("https://novel.example/read?group_id=1", "g10");
+    assert!(n10);
+    let (_, n11) = up("https://novel.example/read?group_id=2", "g11");
+    assert!(n11, "不同 group_id 不得被去重吞并");
+
+    // X 状态页：允许的跟踪变体仍是同一篇
+    let (_, n12) = up("https://x.com/u/status/123", "g12");
+    assert!(n12);
+    let (_, n13) = up("https://x.com/u/status/123?s=20&t=abc", "g13");
+    assert!(!n13, "X 状态页的 t/s 变体必须仍被去重");
+
+    // 伪域名不具备 X 状态页例外
+    let (_, n14) = up("https://x.com.evil/u/status/123", "g14");
+    assert!(n14);
+    let (_, n15) = up("https://x.com.evil/u/status/123?s=20", "g15");
+    assert!(n15, "伪域名不得套 X 状态页例外");
+}
+
 /// 搜索（LIKE 子串）：中文子串、多词 AND、通配符转义。
 /// 修复背景：unicode61 FTS 把整段中文当一个 token，搜「科技」匹配不到
 /// 「科技公司新闻」——改为子串匹配后语义对任意语言正确。

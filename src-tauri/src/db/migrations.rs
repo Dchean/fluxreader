@@ -1,6 +1,8 @@
 use super::*;
 use rusqlite::params;
 
+use super::url_norm::NORM_VERSION;
+
 /// P3-7（自检 2026-09-29）v15 迁移语句：把 legacy SQLite 格式的 published_at
 /// 归一为现行写入格式。抽成常量供幂等测试复用**同一生产字节**，防测试与迁移漂移。
 /// 命中与改写细节见下方 v15 M::up 注释。
@@ -394,6 +396,33 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         CREATE INDEX idx_sync_queue_created ON sync_queue(created_at);
     "#,
         ),
+        // OPT-008A（F12：保守 URL 匹配与版本化重建）：清除旧算法完成标记 +
+        // 清空内容去重墓碑 + 旧退订墓碑迁入 legacy 命名空间；url_norm 本体由
+        // open() 的 ensure_url_norm_backfill 用新算法从原始 url 重算（与该函数
+        // 的新版本标记同事务，失败可重试）。
+        // 旧 'url_norm_backfill_done' 只说明旧算法回填过，不能使新算法升级永远
+        // 跳过——删掉它让升级后的首次 open 必然进入版本化重算。
+        // deduped_urls 的键是旧算法规范化产物且已丢原始 URL，无法反向重算；
+        // 残留会按错误键继续压制文章，清空允许重拉被错误压制的条目。只清这类
+        // 内容去重墓碑；目录删除墓碑是 settings 里的独立键（folder_tombstones），
+        // 绝不删除。已被误合并/未存入的历史正文无法由迁移凭空恢复，只能后续
+        // 重拉（本卡不做）。
+        // 退订墓碑（R1）：旧算法键与新算法键不再相等，只保字节会在 pull 的
+        // stale 判据下被误清、已删订阅复活。将旧键字节迁入独立 legacy 命名空间
+        // （不反推原始 URL），匹配/回收跨命名空间的判据在 db::feeds 墓碑函数；
+        // 原键清空后新删除按新算法键写入，旧算法规则不以任何形式回到身份匹配。
+        // Note: 通用参数收敛（t/s/ref 等只在 X 状态页剥）、存量键重建与旧墓碑
+        // 兼容匹配 — 见 .agents/notes/implemented/bug-fix/2026-10-08-保守URL匹配与重建标记.md
+        M::up(
+            r#"
+        DELETE FROM settings WHERE key = 'url_norm_backfill_done';
+        DELETE FROM deduped_urls;
+
+        INSERT OR REPLACE INTO settings (key, value)
+            SELECT 'feed_tombstones_legacy_v1', value FROM settings WHERE key = 'feed_tombstones';
+        DELETE FROM settings WHERE key = 'feed_tombstones';
+    "#,
+        ),
     ])
 });
 
@@ -410,7 +439,9 @@ pub fn open(path: &Path) -> AppResult<Connection> {
     // 而非 user_version——旧实现以 prev_version < 7 为闸门，回填在迁移事务外
     // 逐行提交，半途中断后 user_version 已 ≥7，回填永不重试。现在标记与回填
     // 同事务落标，「已升级但标记缺失」的库（含已停在 v7+ 的存量库）启动即
-    // 幂等补跑；已标记库直接跳过（零重复工作）。
+    // 幂等补跑；已完成当前算法版本的库直接跳过（零重复工作）。OPT-008A 起
+    // 标记携带算法版本（NORM_VERSION）：v19 清除旧布尔标记后，升级库必然
+    // 进入一次新算法重算；算法再变化时递增版本即可再次触发。
     ensure_url_norm_backfill(&conn)?;
     // 启动迁移：历史明文敏感凭据升级为 DPAPI 密文（SEC-2）。幂等。
     let _ = crate::credentials::migrate_legacy_plaintext(&conn)?;
@@ -436,24 +467,30 @@ fn backfill_should_fail(_rows_updated: usize) -> bool {
     false
 }
 
-/// url_norm 完整规范化回填（M-14，幂等可重入）：对 url 非空的行重算
-/// normalize_url，**只 UPDATE 结果确有变化的行**（已规范化库零写放大），
-/// 并在同一事务内落 settings 完成标记。返回是否实际执行了回填。
+/// url_norm 完整规范化回填（M-14 幂等可重入；OPT-008A 起按算法版本重建）：
+/// 对 url 非空的行重算 normalize_url，**只 UPDATE 结果确有变化的行**（已规范化
+/// 库零写放大），并在同一事务内把 settings.url_norm_backfill_version 写为当前
+/// [`NORM_VERSION`]。返回是否实际执行了回填。
 ///
 /// 与旧版 [`backfill_url_norm`] 的差别：① 回填 + 落标同事务——任何语句失败
-/// 整体回滚，下次启动按「标记缺失」重试，不再出现「迁移已提交、回填半途
-/// 而废、永不重试」的窗口；② 逐行错误不再被 `let _ =` 吞掉（吞错正是旧版
-/// 「静默半完成」的来源）；③ 已标记库直接跳过，重启零重复工作。
+/// 整体回滚，下次启动按「标记缺失/旧版本」重试，不再出现「迁移已提交、回填
+/// 半途而废、永不重试」的窗口；② 逐行错误不再被 `let _ =` 吞掉（吞错正是旧版
+/// 「静默半完成」的来源）；③ 已完成当前版本的库直接跳过，重启零重复工作。
+///
+/// 版本标记而非布尔完成标记（OPT-008A）：算法语义变化（通用参数收敛）后
+/// 旧标记不再代表「当前算法已回填」，布尔标记会让升级永远跳过重算、被错误
+/// 合并的键永久残留。v19 迁移清除了旧 'url_norm_backfill_done' 键，此后只看
+/// 版本值：缺失或不等即重算。
 fn ensure_url_norm_backfill(conn: &Connection) -> AppResult<bool> {
-    const MARKER_KEY: &str = "url_norm_backfill_done";
-    let done: bool = conn
+    const MARKER_KEY: &str = "url_norm_backfill_version";
+    let current: Option<String> = conn
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ?1)",
+            "SELECT value FROM settings WHERE key = ?1",
             params![MARKER_KEY],
-            |r| r.get::<_, i64>(0),
+            |r| r.get(0),
         )
-        .map(|v| v != 0)?;
-    if done {
+        .optional()?;
+    if current.as_deref() == Some(NORM_VERSION) {
         return Ok(false);
     }
     let tx = conn.unchecked_transaction()?;
@@ -482,9 +519,9 @@ fn ensure_url_norm_backfill(conn: &Connection) -> AppResult<bool> {
         }
     }
     tx.execute(
-        "INSERT INTO settings (key, value) VALUES (?1, '1')
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![MARKER_KEY],
+        params![MARKER_KEY, NORM_VERSION],
     )?;
     tx.commit()?;
     Ok(true)
@@ -516,11 +553,14 @@ mod req108_migration_tests {
         ))
     }
 
-    const MARKER_SQL: &str =
-        "SELECT EXISTS(SELECT 1 FROM settings WHERE key = 'url_norm_backfill_done')";
+    /// 当前算法版本标记值（缺失为空串）：M-14 的布尔完成标记在 OPT-008A 后由
+    /// 版本标记取代（'url_norm_backfill_version'，值为 NORM_VERSION）。
+    const MARKER_VERSION_SQL: &str =
+        "SELECT COALESCE((SELECT value FROM settings WHERE key = 'url_norm_backfill_version'), '')";
 
-    fn marker_value(conn: &Connection) -> i64 {
-        conn.query_row(MARKER_SQL, [], |r| r.get(0)).unwrap()
+    fn marker_version(conn: &Connection) -> String {
+        conn.query_row(MARKER_VERSION_SQL, [], |r| r.get(0))
+            .unwrap()
     }
 
     /// ① M-14 中断复现：回填中途模拟失败 → 迁移已提交、回滚零残留 →
@@ -540,7 +580,9 @@ mod req108_migration_tests {
                    (1, 'g1', 't1', 'https://WWW.Example.com/a?utm_source=x#frag'),
                    (1, 'g2', 't2', 'https://m.example.com/b/'),
                    (1, 'g3', 't3', 'http://example.com/AMP/c.amp.html'),
-                   (1, 'g4', 't4', 'http://example.com/plain');",
+                   (1, 'g4', 't4', 'http://example.com/plain');
+                 -- 旧算法布尔完成标记：OPT-008A 起不能使新算法升级跳过
+                 INSERT INTO settings (key, value) VALUES ('url_norm_backfill_done', '1');",
             )
             .unwrap();
         }
@@ -575,10 +617,18 @@ mod req108_migration_tests {
                 "迁移事务独立提交：user_version 已到最新（旧实现据此永不重试）"
             );
             assert_eq!(
-                marker_value(&conn),
-                0,
-                "回填回滚：完成标记必须缺失（下次启动据此重试）"
+                marker_version(&conn),
+                "",
+                "回填回滚：版本标记必须缺失（下次启动据此重试）"
             );
+            let old_marker: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM settings WHERE key = 'url_norm_backfill_done'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(old_marker, 0, "v19 必须清除旧算法布尔完成标记");
             let placeholders: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM articles
@@ -617,7 +667,11 @@ mod req108_migration_tests {
                     "重启补跑必须把 url_norm 规范化到完整口径（中断前已更新的行也要重算）"
                 );
             }
-            assert_eq!(marker_value(&conn), 1, "补跑成功后同事务落标");
+            assert_eq!(
+                marker_version(&conn),
+                NORM_VERSION,
+                "补跑成功后同事务落新版本标记"
+            );
             // 幂等：已标记库再调一次 = 零工作（零重复回填）
             assert!(
                 !ensure_url_norm_backfill(&conn).unwrap(),
@@ -661,7 +715,7 @@ mod req108_migration_tests {
             normalize_url("https://www.example.com/post?utm_medium=rss"),
             "存量库（已停在 v7+）首启必须幂等补跑规范化"
         );
-        assert_eq!(marker_value(&conn), 1);
+        assert_eq!(marker_version(&conn), NORM_VERSION);
         assert!(
             !ensure_url_norm_backfill(&conn).unwrap(),
             "补跑落标后重复启动零重复工作"
@@ -1541,6 +1595,142 @@ mod opt001_migration_tests {
         assert!(queue_table_sql(&conn).contains("AUTOINCREMENT"));
         let ids: Vec<i64> = queue_rows(&conn).iter().map(|r| r.0).collect();
         assert_eq!(ids, vec![1], "修复后迁移保留健康行");
+        drop(conn);
+        std::fs::remove_file(&path).expect("清理临时库失败");
+    }
+}
+
+/* ============================================================
+OPT-008A v19 单元测试：保守 URL 匹配 + 版本化存量重建（F12）
+（cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
+============================================================ */
+#[cfg(test)]
+mod opt008a_migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 进程内唯一临时库路径（同 req108 模块的 unique_test_db 惯例，std 实现）。
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        std::env::temp_dir().join(format!(
+            "fluxreader_migr_{base}_{pid}_{nanos}_{seq}.db",
+            pid = std::process::id()
+        ))
+    }
+
+    fn setting(conn: &Connection, key: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// (opt008a-m1) v18 旧库（旧算法把两个不同主题归到同一 url_norm、旧布尔
+    /// 完成标记在、内容去重墓碑在、用户删除墓碑在）经生产 open 升级：旧标记与
+    /// 内容去重墓碑被清；url_norm 由原始 url 按新算法重算、两个主题分开；
+    /// 原始 url 与读/藏状态原样；用户退订/目录墓碑绝不删除；版本标记只在重算
+    /// 成功后写入，重复启动零重复工作。
+    /// 判别力：缺 v19 或 ensure 未版本化时，旧标记令重算被跳过——两条主题仍是
+    /// 同一键、旧标记残留，断言必红。
+    #[test]
+    fn v19_rebuilds_url_norm_and_clears_content_tombstones_only() {
+        let path = unique_test_db("opt008a_v19");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_version(&mut conn, 18).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO feeds (feed_url, title) VALUES ('https://forum.example/rss', 'F');
+                INSERT INTO articles (feed_id, guid, title, url, url_norm, is_read, is_starred) VALUES
+                  (1, 'g1', 'topic-123', 'https://forum.example/viewtopic.php?t=123',
+                   'http://forum.example/viewtopic.php', 1, 1),
+                  (1, 'g2', 'topic-456', 'https://forum.example/viewtopic.php?t=456',
+                   'http://forum.example/viewtopic.php', 0, 1);
+                INSERT INTO deduped_urls (url, kept_aid)
+                  VALUES ('http://forum.example/viewtopic.php', 1);
+                INSERT INTO settings (key, value) VALUES
+                  ('url_norm_backfill_done', '1'),
+                  ('feed_tombstones', '["https://gone.example/rss"]'),
+                  ('folder_tombstones', '["旧目录"]');
+            "#,
+            )
+            .unwrap();
+        }
+
+        let conn = open(&path).expect("v18 旧库必须完成 v19 升级与版本化重算");
+
+        // v19：旧布尔标记与内容去重墓碑清除；用户删除墓碑保留
+        assert_eq!(
+            setting(&conn, "url_norm_backfill_done"),
+            None,
+            "旧算法完成标记必须被清除（不能使新算法升级永远跳过）"
+        );
+        let dedup_left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM deduped_urls", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(dedup_left, 0, "内容去重墓碑清空以允许重拉");
+        assert_eq!(
+            setting(&conn, "feed_tombstones_legacy_v1").as_deref(),
+            Some("[\"https://gone.example/rss\"]"),
+            "旧算法退订墓碑必须迁入 legacy 命名空间（字节保留，不反推原始 URL）"
+        );
+        assert_eq!(
+            setting(&conn, "feed_tombstones"),
+            None,
+            "原墓碑键清空：新删除按新算法键写入，两个命名空间不得混用"
+        );
+        assert_eq!(
+            setting(&conn, "folder_tombstones").as_deref(),
+            Some("[\"旧目录\"]"),
+            "目录删除墓碑绝不删除"
+        );
+
+        // 新算法重建：原始 url 原串保持、url_norm 与 normalize_url 一致且两主题分开
+        let rows: Vec<(String, String, String, i64, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT guid, url, url_norm, is_read, is_starred FROM articles ORDER BY guid",
+                )
+                .unwrap();
+            stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert_eq!(rows.len(), 2, "存量行零丢失");
+        assert_eq!(rows[0].1, "https://forum.example/viewtopic.php?t=123");
+        assert_eq!(
+            rows[0].2,
+            normalize_url("https://forum.example/viewtopic.php?t=123"),
+            "url_norm 必须按新算法从原始 url 重算"
+        );
+        assert_ne!(
+            rows[0].2, rows[1].2,
+            "不同主题号升级后必须是不同匹配键（F12）"
+        );
+        assert_eq!((rows[0].3, rows[0].4), (1, 1), "读/藏状态保持");
+        assert_eq!((rows[1].3, rows[1].4), (0, 1), "读/藏状态保持");
+
+        // 版本标记只在成功后写入；重复启动零重复工作
+        assert_eq!(
+            setting(&conn, "url_norm_backfill_version").as_deref(),
+            Some(NORM_VERSION)
+        );
+        assert!(
+            !ensure_url_norm_backfill(&conn).unwrap(),
+            "已标记库不得重复回填"
+        );
         drop(conn);
         std::fs::remove_file(&path).expect("清理临时库失败");
     }
