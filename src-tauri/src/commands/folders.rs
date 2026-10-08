@@ -225,8 +225,9 @@ fn persist_new_feed(
     for a in &parsed.articles {
         db::upsert_article_with_feed(&tx, feed_id, a, dedup)?;
     }
-    // 勾选「同步到后端」且已连接 → 入队推送新订阅（feeds 阶段推远端）
-    if sync_to_backend && sync_configured(&tx) {
+    // 勾选「同步到后端」且已连接 → 入队推送新订阅（feeds 阶段推远端）。
+    // OPT-014 R1：凭据读取失败 → Err（不得静默当未连接跳过入队）。
+    if sync_to_backend && sync_configured(&tx)? {
         let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
         db::enqueue_sync(&tx, None, Some(feed_url), "add_feed", Some(&payload))?;
     }
@@ -526,20 +527,146 @@ mod tests {
             .unwrap();
         assert_eq!(queued, 0, "add_feed 队项不得残留");
     }
+
+    /* ---------- OPT-014 R2：record_* 的可失败检查必须先于本地副作用 ---------- */
+
+    /// 凭据读取器置为不可用：坏密文（读时 Err，不是「未配置」）。
+    fn corrupt_sync_credentials(conn: &rusqlite::Connection) {
+        db::set_setting(conn, "greader_endpoint", "https://example.com").unwrap();
+        db::set_setting(conn, "greader_username", "u").unwrap();
+        db::set_setting(conn, "greader_password", "pw").unwrap();
+        conn.execute(
+            "UPDATE settings SET value = 'dpapi:@@corrupt@@' WHERE key = 'greader_password'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            crate::sync::read_credentials(conn).is_err(),
+            "前置：坏密文必须让凭据读取失败（不是 Ok(None)）"
+        );
+    }
+
+    /// 一个已绑定远端的本地订阅 + 一篇文章。
+    fn seed_feed_with_article(conn: &rusqlite::Connection) -> (i64, i64) {
+        let folder = db::create_folder(conn, "分类", "article").unwrap();
+        let feed = db::insert_feed(
+            conn,
+            "https://r2.example/feed.xml",
+            None,
+            "旧标题",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let a = db::NewArticle {
+            guid: "r2-a1".into(),
+            url: Some("https://r2.example/a1".into()),
+            title: "A".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>a</p>".into()),
+            body_text: "a".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some(chrono::Utc::now().to_rfc3339()),
+            source: "direct".into(),
+        };
+        let (aid, _) = db::upsert_article_with_feed(conn, feed, &a, false).unwrap();
+        db::set_feed_remote_id(conn, feed, 10).unwrap();
+        (feed, aid)
+    }
+
+    /// R2 P2：坏密文时删除必须整单失败且**先于任何本地副作用**——订阅/文章/
+    /// 墓碑原样（修前：墓碑已落、订阅已删，才发现凭据读取失败）。
+    #[test]
+    fn record_feed_deletion_fails_before_local_side_effects_on_corrupt_credentials() {
+        let conn = test_conn();
+        let (feed, aid) = seed_feed_with_article(&conn);
+        corrupt_sync_credentials(&conn);
+
+        let err = record_feed_deletion(&conn, feed).expect_err("坏密文必须让删除整体失败");
+        assert!(
+            err.code == "credentialCorrupt" || err.code == "credentialDecrypt",
+            "应为凭据解密错误：{err}"
+        );
+
+        let feed_left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM feeds WHERE id = ?1", [feed], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(feed_left, 1, "删除失败后订阅必须原样");
+        let art_left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM articles WHERE id = ?1", [aid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(art_left, 1, "删除失败后文章必须原样");
+        assert_eq!(
+            db::feed_tombstones(&conn).unwrap(),
+            Vec::<String>::new(),
+            "删除失败后不得留下墓碑"
+        );
+    }
+
+    /// R2 P2：坏密文时编辑必须整单失败且字段原样（修前：update_feed 已生效）。
+    #[test]
+    fn record_feed_edit_fails_before_local_side_effects_on_corrupt_credentials() {
+        let conn = test_conn();
+        let (feed, _aid) = seed_feed_with_article(&conn);
+        let other = db::create_folder(&conn, "另一个分类", "social").unwrap();
+        corrupt_sync_credentials(&conn);
+
+        let err = record_feed_edit(
+            &conn,
+            feed,
+            Some("新标题"),
+            Some(other),
+            Some("social"),
+            Some(true),
+            Some(true),
+        )
+        .expect_err("坏密文必须让编辑整体失败");
+        assert!(
+            err.code == "credentialCorrupt" || err.code == "credentialDecrypt",
+            "应为凭据解密错误：{err}"
+        );
+
+        let row = db::list_feeds(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == feed)
+            .expect("订阅应仍在");
+        assert_eq!(row.title, "旧标题", "编辑失败后标题必须原样");
+        assert_eq!(row.layout, "inherit", "编辑失败后布局必须原样");
+        assert!(!row.auto_summary, "编辑失败后 auto_summary 必须原样");
+        assert!(!row.auto_translate, "编辑失败后 auto_translate 必须原样");
+        assert_ne!(row.folder_id, other, "编辑失败后分类不得被移动");
+    }
 }
 
 /// 删除订阅的本地记录 + 删除墓碑（命令与测试共用的真实逻辑）。
 /// 返回 Some((remote_id, feed_url))：该订阅已绑定远端且同步已配置，
 /// 调用方应 best-effort 退订远端（GReader）；Fever 或未连接时仅靠墓碑防复活。
+///
+/// OPT-014 R2：可失败的凭据读取前移到**任何本地副作用之前**并复用结果——
+/// 坏密文时整单失败，不留下「订阅已删 + 墓碑已落」却报错的半套状态。
+/// Note: .agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md
 pub fn record_feed_deletion(
     conn: &rusqlite::Connection,
     id: i64,
 ) -> AppResult<Option<(i64, String)>> {
+    let sync_ok = sync_configured(conn)?;
     let (feed_url, remote_id) = db::feed_remote_info(conn, id)?;
     // A-1：墓碑先落，退订失败也不得让 pull 把已删订阅拉回来
     db::add_feed_tombstone(conn, &feed_url)?;
     db::delete_feed(conn, id)?;
-    Ok(if sync_configured(conn) {
+    Ok(if sync_ok {
         remote_id.map(|rid| (rid, feed_url))
     } else {
         None
@@ -621,6 +748,10 @@ pub type FeedEditPush = (i64, Option<String>, Option<String>);
 
 /// 更新订阅并返回需推送远端的编辑目标（命令与测试共用的真实逻辑，A-2）。
 /// 返回 Some((remote_id, 新标题, 目标分类名))：该订阅已绑定远端且同步已配置。
+///
+/// OPT-014 R2：可失败的凭据读取前移到 `db::update_feed` 之前并复用结果——
+/// 坏密文时整单失败，不留下「字段已改」却报错的半套状态。
+/// Note: .agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md
 pub fn record_feed_edit(
     conn: &rusqlite::Connection,
     id: i64,
@@ -630,6 +761,7 @@ pub fn record_feed_edit(
     auto_summary: Option<bool>,
     auto_translate: Option<bool>,
 ) -> AppResult<Option<FeedEditPush>> {
+    let sync_ok = sync_configured(conn)?;
     // 目标分类必须存在（防 UI 传错 id 把源挂飞）
     if let Some(fid) = folder_id {
         if !db::folder_exists(conn, fid)? {
@@ -645,7 +777,7 @@ pub fn record_feed_edit(
         auto_summary,
         auto_translate,
     )?;
-    if !sync_configured(conn) {
+    if !sync_ok {
         return Ok(None);
     }
     let (_feed_url, remote_id) = db::feed_remote_info(conn, id)?;

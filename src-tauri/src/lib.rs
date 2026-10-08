@@ -297,6 +297,8 @@ pub fn run() {
             // 图片代理（防盗链兼容）
             commands::fetch_image,
             // OPML 导入导出
+            // 更新检查（OPT-014：固定目的地，无 URL 入参）
+            commands::check_for_updates,
             commands::opml_import,
             commands::opml_export,
             // SMTC 系统媒体控制

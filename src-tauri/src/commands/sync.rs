@@ -31,6 +31,12 @@ pub async fn sync_test(
 /// 密码留空且已连接 → 复用已存密码（仅改 Endpoint 的场景）。
 /// 换账号检测：已连接其他账号（协议/endpoint/username 不同）时先清理旧账号
 /// 数据（订阅/绑定/队列），避免两份订阅列表混杂。
+///
+/// OPT-014 R1 失败关闭：
+/// - 旧凭据**读取/解密失败**（如密文损坏）→ 整体 Err，不写任何新账号数据
+///   （修前 `read_credentials` 吞错成 None，被当「首次连接」跳过换号清理）；
+/// - 清理与配置写入在同一事务提交（见 [`commit_account_settings`]），
+///   任何一步失败（含密码 DPAPI 加密）整体回滚——旧配置/订阅/队列原样。
 #[tauri::command]
 pub async fn sync_save(
     state: State<'_, AppState>,
@@ -47,94 +53,163 @@ pub async fn sync_save(
     }
     .to_string();
 
-    // 留空密码且已连接 → 复用旧密码（改地址不动密钥）
-    //
-    // P3[3]（REQ-104）：此前这一分支连**用户名**也一并复用（old_user.clone()），
-    // 于是用户只改用户名、密码留空时，界面上的新用户名被静默丢弃——用户以为换了
-    // 账号，实际仍连旧账号，且没有任何提示。现在只复用 password；
-    // 用户名以本次输入为准（留空则同样回落到旧值，保持「只改地址」的既有便利）。
-    let (endpoint, username, password) = {
+    // 旧凭据读取（仅一次，保留 Result）：Err 原样上抛——不得当未配置/首次连接（R1 P2）。
+    let old = {
         let conn = state.db.lock().await;
-        let old = crate::sync::read_credentials(&conn);
-        match (&old, password.trim().is_empty()) {
-            (Some((_old_p, _old_ep, old_user, old_pw)), true) => {
-                let typed_user = username.trim();
-                (
-                    endpoint.trim().to_string(),
-                    if typed_user.is_empty() {
-                        old_user.clone()
-                    } else {
-                        typed_user.to_string()
-                    },
-                    old_pw.clone(),
-                )
-            }
-            (None, true) => {
-                return Err(AppError::new("validate", "请填写密码"));
-            }
-            _ => (
-                endpoint.trim().to_string(),
-                username.trim().to_string(),
-                password.trim().to_string(),
-            ),
-        }
+        crate::sync::read_credentials(&conn)
     };
-    // 换账号检测（锁内读旧凭据）；保存前凭据为空 = 首连
-    let (account_changed, old_was_empty) = {
-        let conn = state.db.lock().await;
-        let old = crate::sync::read_credentials(&conn);
-        match old {
-            Some((old_p, old_ep, old_user, old_pw)) => {
-                let changed = old_p != protocol
-                    || old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/')
-                    || old_user != username
-                    || old_pw != password;
-                (changed, false)
-            }
-            None => (false, true),
-        }
-    };
+    // 密码复用 / 换号判定 / 首连判定（纯逻辑，模块单测覆盖）
+    let plan = resolve_save_plan(old, &protocol, &endpoint, &username, &password)?;
+
     // 测试新凭据（失败不保存不动现状）；用户名随凭据落库（设置页动态显示）
-    let (msg, _account, resolved_base) =
-        crate::sync::test_connection(&protocol, &endpoint, &username, &password, &state.http)
-            .await?;
-    {
-        let mut conn = state.db.lock().await;
-        if account_changed {
-            let (feeds, _) = db::purge_remote_data(&mut conn)?;
-            log::info!("sync: 账号切换，清理旧账号数据：{feeds} 个订阅");
-        }
-        // 首连判定（保存前凭据为空 = 第一次连接）：供前端决定是否弹
-        // 「同步本地订阅到后端」（本地有未绑源时）
-        let unbound_local = db::count_unbound_local_feeds(&conn)?;
-        let first_connect = old_was_empty && unbound_local > 0;
-        db::set_setting(&conn, "sync_protocol", &protocol)?;
-        db::set_setting(&conn, "greader_endpoint", &endpoint)?;
-        db::set_setting(&conn, "greader_username", &username)?;
-        db::set_setting(&conn, "greader_password", &password)?;
-        // 端点解析结果落库（TASK-059）：设置页刚刚已验证过，同步侧直接复用，
-        // 不必每轮再探测一遍。`greader_endpoint` 存的仍是用户原始输入。
-        if let Err(e) =
-            crate::endpoint_resolve::remember_base(&conn, &protocol, &endpoint, &resolved_base)
-        {
-            log::warn!("sync: 端点解析结果落库失败（不影响本次连接）: {e}");
-        }
-        // 新连接：清增量游标（GReader 时间戳 / Fever 条目 id），让首同步从全量开始
-        db::set_setting(&conn, "sync_last_sync", "0")?;
-        db::set_setting(&conn, "sync_last_entry_id", "0")?;
-        if first_connect {
-            return Ok(serde_json::json!({
-                "message": msg,
-                "firstConnect": true,
-                "unboundLocalFeeds": unbound_local,
-            })
-            .to_string());
-        }
-    }
-    Ok(
-        serde_json::json!({ "message": msg, "firstConnect": false, "unboundLocalFeeds": 0 })
-            .to_string(),
+    let (msg, _account, resolved_base) = crate::sync::test_connection(
+        &plan.protocol,
+        &plan.endpoint,
+        &plan.username,
+        &plan.password,
+        &state.http,
     )
+    .await?;
+
+    let mut conn = state.db.lock().await;
+    let unbound_local = commit_account_settings(
+        &mut conn,
+        &plan,
+        &resolved_base,
+        crate::credentials::encrypt_secret,
+    )?;
+    // 首连判定：保存前无凭据，且清理后仍有未绑定的本地直连源
+    let first_connect = plan.old_was_empty && unbound_local > 0;
+    Ok(serde_json::json!({
+        "message": msg,
+        "firstConnect": first_connect,
+        "unboundLocalFeeds": if first_connect { unbound_local } else { 0 },
+    })
+    .to_string())
+}
+
+/// sync_save 的凭据规划结果（纯数据，无副作用；协议已归一）。
+#[derive(Debug)]
+struct SavePlan {
+    protocol: String,
+    endpoint: String,
+    username: String,
+    password: String,
+    /// 协议/地址/用户名/密码任一变化 = 换账号（需要先清理旧账号数据）
+    account_changed: bool,
+    /// 保存前没有任何可用凭据 = 首次连接
+    old_was_empty: bool,
+}
+
+/// 旧凭据 → 本次提交计划（OPT-014 R1 纯函数收口）。
+///
+/// `old` 是 [`crate::sync::read_credentials`] 的原样结果：
+/// - `Err` 必须原样上抛——**绝不**当「首次连接」继续写新账号（修前后的
+///   吞错路径正是这样跳过换号清理的）；
+/// - `Ok(None)` + 空密码 → validate Err（无从复用密码）；
+/// - `Ok(Some)` + 空密码 → 复用旧密码；用户名留空回落旧值，显式输入以本次
+///   为准（P3[3] 语义保持）。
+fn resolve_save_plan(
+    old: AppResult<Option<(String, String, String, String)>>,
+    protocol: &str,
+    endpoint: &str,
+    username: &str,
+    password: &str,
+) -> AppResult<SavePlan> {
+    let old = old?;
+    let typed_pw = password.trim();
+    let (endpoint, username, password) = match (&old, typed_pw.is_empty()) {
+        (Some((_old_p, _old_ep, old_user, old_pw)), true) => {
+            let typed_user = username.trim();
+            (
+                endpoint.trim().to_string(),
+                if typed_user.is_empty() {
+                    old_user.clone()
+                } else {
+                    typed_user.to_string()
+                },
+                old_pw.clone(),
+            )
+        }
+        (None, true) => {
+            return Err(AppError::new("validate", "请填写密码"));
+        }
+        _ => (
+            endpoint.trim().to_string(),
+            username.trim().to_string(),
+            typed_pw.to_string(),
+        ),
+    };
+    let (account_changed, old_was_empty) = match &old {
+        Some((old_p, old_ep, old_user, old_pw)) => (
+            old_p != protocol
+                || old_ep.trim_end_matches('/') != endpoint.trim_end_matches('/')
+                || old_user != &username
+                || old_pw != &password,
+            false,
+        ),
+        None => (false, true),
+    };
+    Ok(SavePlan {
+        protocol: protocol.to_string(),
+        endpoint,
+        username,
+        password,
+        account_changed,
+        old_was_empty,
+    })
+}
+
+/// 账号提交事务内核（OPT-014 R1）：换号清理 + 凭据/游标落库在**同一短事务**
+/// 内全有全无——任一步失败（含密码 DPAPI 加密）整体回滚，旧账号配置/订阅/
+/// 队列原样。返回清理后仍未绑定的本地直连源数（首连弹窗判定输入）。
+///
+/// `encrypt` 注入仅本模块单测使用（生产恒为 `credentials::encrypt_secret`）；
+/// 不是 IPC 命令参数，webview 无法触达。
+fn commit_account_settings(
+    conn: &mut rusqlite::Connection,
+    plan: &SavePlan,
+    resolved_base: &str,
+    encrypt: fn(&str) -> AppResult<String>,
+) -> AppResult<i64> {
+    let tx = conn.transaction()?;
+    if plan.account_changed {
+        let (feeds, _) = db::purge_remote_data_in(&tx)?;
+        log::info!("sync: 账号切换，清理旧账号数据：{feeds} 个订阅");
+    }
+    let unbound_local = db::count_unbound_local_feeds(&tx)?;
+    db::set_setting_with(&tx, "sync_protocol", &plan.protocol, encrypt)?;
+    db::set_setting_with(&tx, "greader_endpoint", &plan.endpoint, encrypt)?;
+    db::set_setting_with(&tx, "greader_username", &plan.username, encrypt)?;
+    db::set_setting_with(&tx, "greader_password", &plan.password, encrypt)?;
+    // 端点解析结果落库（TASK-059）：设置页刚刚已验证过，同步侧直接复用，
+    // 不必每轮再探测一遍。`greader_endpoint` 存的仍是用户原始输入。
+    if let Err(e) =
+        crate::endpoint_resolve::remember_base(&tx, &plan.protocol, &plan.endpoint, resolved_base)
+    {
+        log::warn!("sync: 端点解析结果落库失败（不影响本次连接）: {e}");
+    }
+    // 新连接：清增量游标（GReader 时间戳 / Fever 条目 id），让首同步从全量开始
+    db::set_setting_with(&tx, "sync_last_sync", "0", encrypt)?;
+    db::set_setting_with(&tx, "sync_last_entry_id", "0", encrypt)?;
+    tx.commit()?;
+    Ok(unbound_local)
+}
+
+/// 断开提交事务内核（OPT-014 R1）：服务端数据清理 + 凭据/游标清空在同一短
+/// 事务内全有全无。`encrypt` 注入仅本模块单测使用。
+fn commit_disconnect(
+    conn: &mut rusqlite::Connection,
+    encrypt: fn(&str) -> AppResult<String>,
+) -> AppResult<(usize, usize)> {
+    let tx = conn.transaction()?;
+    let r = db::purge_remote_data_in(&tx)?;
+    db::set_setting_with(&tx, "greader_endpoint", "", encrypt)?;
+    db::set_setting_with(&tx, "greader_password", "", encrypt)?;
+    db::set_setting_with(&tx, "greader_username", "", encrypt)?;
+    db::set_setting_with(&tx, "sync_last_sync", "0", encrypt)?;
+    tx.commit()?;
+    Ok(r)
 }
 
 /// 分步同步：which="feeds"（订阅层，秒级）| "states"（状态+条目层，慢）。
@@ -163,7 +238,8 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
     // 不会堆积重复队列——失败项保留是重试语义，重复入队才是堆积）
     let queued = {
         let conn = state.db.lock().await;
-        if !sync_configured(&conn) {
+        // OPT-014 R1：凭据读取失败 → Err（不得当未连接静默返回）
+        if !sync_configured(&conn)? {
             return Err(AppError::new("notConnected", "未连接后端"));
         }
         let rows = db::list_unbound_local_feeds(&conn)?;
@@ -229,16 +305,13 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
 
 /// 断开连接：清凭据 + 清理服务端来源数据（订阅/条目/绑定/队列）。
 /// 用户直连订阅（origin='local'）保留——断开只清服务端数据的产品语义。
+/// OPT-014 R1：清理与清空在同一事务（见 [`commit_disconnect`]），失败整体回滚；
+/// 本命令不读取旧密码，故损坏密文导致的 sync_save 失败可用「断开 → 重连」恢复。
 #[tauri::command]
 pub async fn sync_disconnect(state: State<'_, AppState>) -> AppResult<String> {
     let (feeds, articles) = {
         let mut conn = state.db.lock().await;
-        let r = db::purge_remote_data(&mut conn)?;
-        db::set_setting(&conn, "greader_endpoint", "")?;
-        db::set_setting(&conn, "greader_password", "")?;
-        db::set_setting(&conn, "greader_username", "")?;
-        db::set_setting(&conn, "sync_last_sync", "0")?;
-        r
+        commit_disconnect(&mut conn, crate::credentials::encrypt_secret)?
     };
     Ok(format!(
         "已断开并清理：移除 {feeds} 个服务端订阅（{articles} 处绑定），本地直连订阅保留"
@@ -312,4 +385,315 @@ pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo
 pub async fn sync_queue_stats(state: State<'_, AppState>) -> AppResult<db::SyncQueueStats> {
     let conn = state.db.lock().await;
     db::sync_queue_stats(&conn)
+}
+
+/* ============================================================
+R1 返工：账号提交事务与读取错误区分（OPT-014 F22 收口）
+============================================================ */
+
+#[cfg(test)]
+mod account_commit_tests {
+    use super::*;
+    use crate::db;
+
+    fn conn() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    fn count(conn: &rusqlite::Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// 测试用提交计划（字段与纯函数产物同构）。
+    fn plan(purge: bool, protocol: &str, endpoint: &str, user: &str, pw: &str) -> SavePlan {
+        SavePlan {
+            protocol: protocol.to_string(),
+            endpoint: endpoint.to_string(),
+            username: user.to_string(),
+            password: pw.to_string(),
+            account_changed: purge,
+            old_was_empty: false,
+        }
+    }
+
+    /// 旧账号配置（完整四键）
+    fn seed_old_account(conn: &rusqlite::Connection) {
+        db::set_setting(conn, "sync_protocol", "greader").unwrap();
+        db::set_setting(conn, "greader_endpoint", "http://old.example").unwrap();
+        db::set_setting(conn, "greader_username", "old-user").unwrap();
+        db::set_setting(conn, "greader_password", "old-pw").unwrap();
+    }
+
+    /// 旧账号的远端数据：订阅 + 文章 + 绑定 + 队列 + 墓碑
+    fn seed_remote(conn: &rusqlite::Connection) {
+        let folder = db::create_folder(conn, "远端分类", "article").unwrap();
+        let feed = db::insert_feed_origin(
+            conn,
+            "http://old.example/feed.xml",
+            None,
+            "Remote",
+            None,
+            folder,
+            "inherit",
+            true,
+            false,
+            "remote",
+        )
+        .unwrap();
+        let a = db::NewArticle {
+            guid: "r1".into(),
+            url: Some("http://old.example/a1".into()),
+            title: "A".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "a".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some(chrono::Utc::now().to_rfc3339()),
+            source: "miniflux".into(),
+        };
+        let (aid, _) = db::upsert_article_with_feed(conn, feed, &a, false).unwrap();
+        db::set_article_remote_id(conn, aid, 100).unwrap();
+        db::set_feed_remote_id(conn, feed, 10).unwrap();
+        db::enqueue_sync(conn, Some(aid), None, "read", None).unwrap();
+        conn.execute(
+            "INSERT INTO deduped_urls (url, kept_aid) VALUES ('http://old.example/dup', ?1)",
+            [aid],
+        )
+        .unwrap();
+    }
+
+    /// R1 P1 反例：换号提交中密码加密失败 → 整个账号提交回滚。
+    /// 旧配置/远端订阅/绑定/队列/墓碑必须全部原样（修前：purge 与新 protocol/
+    /// endpoint/username 已落库，遇 encrypt Err 留下「新地址 + 旧密码 + 空数据」）。
+    #[test]
+    fn commit_failure_rolls_back_purge_and_all_settings() {
+        let mut conn = conn();
+        seed_old_account(&conn);
+        seed_remote(&conn);
+
+        let err = commit_account_settings(
+            &mut conn,
+            &plan(true, "fever", "http://new.example", "new-user", "new-pw"),
+            "http://new.example/api",
+            |_| Err(AppError::new("credentialEncrypt", "注入的 DPAPI 失败")),
+        )
+        .expect_err("加密失败必须让整个账号提交失败");
+        assert_eq!(err.code, "credentialEncrypt");
+
+        // 旧配置四键原样（密码仍可正常读回旧值）
+        assert_eq!(
+            db::get_setting(&conn, "sync_protocol").unwrap().unwrap(),
+            "greader"
+        );
+        assert_eq!(
+            db::get_setting(&conn, "greader_endpoint").unwrap().unwrap(),
+            "http://old.example"
+        );
+        assert_eq!(
+            db::get_setting(&conn, "greader_username").unwrap().unwrap(),
+            "old-user"
+        );
+        assert_eq!(
+            db::get_setting(&conn, "greader_password").unwrap().unwrap(),
+            "old-pw"
+        );
+        // 远端订阅/绑定/队列/墓碑原样
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM feeds WHERE origin = 'remote'"),
+            1,
+            "换号清理必须整体回滚"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM articles WHERE remote_id IS NOT NULL"
+            ),
+            1,
+            "绑定必须原样"
+        );
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM sync_queue"),
+            1,
+            "待推队列必须原样"
+        );
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM deduped_urls"),
+            1,
+            "墓碑必须原样"
+        );
+    }
+
+    /// 对照：同一路径成功加密器 → 事务提交，换号清理与新配置同时生效。
+    #[test]
+    fn commit_success_purges_old_account_and_writes_new() {
+        let mut conn = conn();
+        seed_old_account(&conn);
+        seed_remote(&conn);
+
+        let unbound = commit_account_settings(
+            &mut conn,
+            &plan(true, "fever", "http://new.example", "new-user", "new-pw"),
+            "http://new.example",
+            crate::credentials::encrypt_secret,
+        )
+        .unwrap();
+        assert_eq!(unbound, 0, "无本地未绑定源");
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM feeds WHERE origin = 'remote'"),
+            0
+        );
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM sync_queue"), 0);
+        assert_eq!(
+            db::get_setting(&conn, "greader_endpoint").unwrap().unwrap(),
+            "http://new.example"
+        );
+        assert_eq!(
+            db::get_setting(&conn, "greader_password").unwrap().unwrap(),
+            "new-pw"
+        );
+    }
+
+    /// R1：断开的清理与凭据清空在**同一短事务**——任一步失败整体回滚（远端数据/
+    /// 旧配置不被半清）。
+    #[test]
+    fn disconnect_failure_rolls_back_cleanup_and_settings() {
+        let mut conn = conn();
+        seed_old_account(&conn);
+        seed_remote(&conn);
+
+        let err = commit_disconnect(&mut conn, |_| {
+            Err(AppError::new("credentialEncrypt", "注入的 DPAPI 失败"))
+        })
+        .expect_err("清空密码加密失败必须整体失败");
+        assert_eq!(err.code, "credentialEncrypt");
+
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM feeds WHERE origin = 'remote'"),
+            1,
+            "清理必须随事务回滚"
+        );
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM sync_queue"), 1);
+        assert_eq!(
+            db::get_setting(&conn, "greader_endpoint").unwrap().unwrap(),
+            "http://old.example"
+        );
+        assert_eq!(
+            db::get_setting(&conn, "greader_password").unwrap().unwrap(),
+            "old-pw"
+        );
+    }
+
+    /// 断开成功：远端数据清理 + 凭据清空提交（本地直连保留由既有 e2e 锁）。
+    #[test]
+    fn disconnect_success_clears_and_purges() {
+        let mut conn = conn();
+        seed_old_account(&conn);
+        seed_remote(&conn);
+
+        let (feeds, _) = commit_disconnect(&mut conn, crate::credentials::encrypt_secret).unwrap();
+        assert_eq!(feeds, 1);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM feeds WHERE origin = 'remote'"),
+            0
+        );
+        assert!(matches!(crate::sync::read_credentials(&conn), Ok(None)));
+    }
+
+    /// R1 P2 恢复负例：损坏密文 → 读取 Err（不得当未配置）；
+    /// 断开（不读旧密码）→ 清空 → 完整凭据重新提交 → 恢复可读。
+    #[test]
+    fn corrupt_cipher_recovers_via_disconnect_then_reconnect() {
+        let mut conn = conn();
+        seed_old_account(&conn);
+        conn.execute(
+            "UPDATE settings SET value = 'dpapi:@@corrupt@@' WHERE key = 'greader_password'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            crate::sync::read_credentials(&conn).is_err(),
+            "损坏密文必须 Err，不得吞成未配置"
+        );
+
+        commit_disconnect(&mut conn, crate::credentials::encrypt_secret).unwrap();
+        assert!(matches!(crate::sync::read_credentials(&conn), Ok(None)));
+
+        commit_account_settings(
+            &mut conn,
+            &plan(false, "greader", "http://new.example", "new-user", "new-pw"),
+            "http://new.example",
+            crate::credentials::encrypt_secret,
+        )
+        .unwrap();
+        let c = crate::sync::read_credentials(&conn).unwrap().unwrap();
+        assert_eq!(c.3, "new-pw", "重配后凭据恢复可读");
+    }
+
+    /// R1 P2：保存计划的读取错误必须原样上抛——不得当「首次连接」继续写新账号。
+    #[test]
+    fn save_plan_rejects_read_error_instead_of_first_connect() {
+        let err = resolve_save_plan(
+            Err(AppError::new("credentialDecrypt", "凭据损坏")),
+            "greader",
+            "http://new.example",
+            "new-user",
+            "new-pw",
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "credentialDecrypt");
+    }
+
+    #[test]
+    fn save_plan_blank_password_needs_existing_credentials() {
+        let err = resolve_save_plan(Ok(None), "greader", "http://x", "u", "").unwrap_err();
+        assert_eq!(err.code, "validate");
+        assert_eq!(err.message, "请填写密码");
+    }
+
+    #[test]
+    fn save_plan_first_connect_flags_and_trim() {
+        let p = resolve_save_plan(Ok(None), "greader", " http://x ", " u ", " pw ").unwrap();
+        assert_eq!(p.endpoint, "http://x");
+        assert_eq!(p.username, "u");
+        assert_eq!(p.password, "pw");
+        assert!(p.old_was_empty && !p.account_changed);
+    }
+
+    /// 密码留空复用旧密码；用户名留空回落旧值、显式输入以本次为准（P3[3] 语义保持）。
+    #[test]
+    fn save_plan_reuses_password_and_username_when_blank() {
+        let old = Some((
+            "greader".to_string(),
+            "http://old/".to_string(),
+            "old-user".to_string(),
+            "old-pw".to_string(),
+        ));
+        let p = resolve_save_plan(Ok(old.clone()), "greader", "http://old", "", "").unwrap();
+        assert_eq!(p.endpoint, "http://old");
+        assert_eq!(p.username, "old-user");
+        assert_eq!(p.password, "old-pw");
+        assert!(!p.account_changed, "仅尾斜杠差异不算换号");
+
+        let p2 = resolve_save_plan(Ok(old), "greader", "http://old", "new-user", "").unwrap();
+        assert_eq!(p2.username, "new-user", "显式用户名不被旧值覆盖");
+        assert!(p2.account_changed, "用户名变化 = 换号");
+    }
+
+    #[test]
+    fn save_plan_full_new_account_marks_changed() {
+        let old = Some((
+            "greader".to_string(),
+            "http://old".to_string(),
+            "old-user".to_string(),
+            "old-pw".to_string(),
+        ));
+        let p = resolve_save_plan(Ok(old), "fever", "http://new", "new-user", "new-pw").unwrap();
+        assert!(p.account_changed && !p.old_was_empty);
+    }
 }

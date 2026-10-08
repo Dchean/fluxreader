@@ -48,6 +48,10 @@ pub use migrations::open;
 #[cfg(test)]
 pub(crate) use migrations::MIGRATIONS;
 pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
+/* OPT-014 R1：账号提交事务内核/可注入写入——crate 内部（命令层）使用，
+不是 IPC 面，也不对集成测试开放（测试在同模块单测内做）。 */
+pub(crate) use articles::purge_remote_data_in;
+pub(crate) use settings::set_setting_with;
 pub use sync_map::{
     add_article_dup_entry, article_by_remote_id, article_dup_entries, backfill_article_content,
     count_unbound_local_feeds, ensure_uncategorized_folder, export_feeds_with_folders,

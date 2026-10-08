@@ -33,6 +33,139 @@ pub async fn set_setting(state: State<'_, AppState>, key: String, value: String)
     }
     db::set_setting(&conn, &key, &value)
 }
+
+/* ============================================================
+更新检查（OPT-014 / F16）
+============================================================ */
+
+/// GitHub API 根（生产固定）。webview 只经命令拿结果，不持有出网能力——
+/// 生产 CSP 的 connect-src 保持不放宽，也不提供「前端传任意 URL」的代理。
+/// Note: 固定目的地与链接受信化见
+/// .agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md
+const GITHUB_API_BASE: &str = "https://api.github.com";
+
+/// 官方仓库最新发布的固定路径。测试只在模块单测内换 base 主机，路径恒为它。
+const RELEASES_LATEST_PATH: &str = "/repos/Dchean/fluxreader/releases/latest";
+
+/// 受信发布页根：html_url 缺失时回落到它；非受信值一律拒绝（见下）。
+const TRUSTED_RELEASES_URL: &str = "https://github.com/Dchean/fluxreader/releases";
+
+/// 更新检查结果（IPC 返回）：version 已去可选 v/V 前缀，url 已受信化。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UpdateCheckOutcome {
+    pub version: String,
+    pub url: String,
+}
+
+/// 校验一个**已提供**的 html_url 是否属于受信本仓库 releases 域：
+/// 仅接受 https + github.com 主机 + 本仓库 releases 路径；其余（畸形/非 https/
+/// 其他域/其他仓库/伪装前缀/协议注入）返回 None。
+/// GitHub owner/repo 大小写不敏感，路径按小写比较；段边界必须整段或接 `/`，
+/// 防 `fluxreader-evil` 之类的前缀伪装。
+fn trusted_release_url(raw: &str) -> Option<String> {
+    let u = url::Url::parse(raw).ok()?;
+    if u.scheme() != "https" {
+        return None;
+    }
+    if u.host_str().map(|h| h.eq_ignore_ascii_case("github.com")) != Some(true) {
+        return None;
+    }
+    let path = u.path().to_ascii_lowercase();
+    if path != "/dchean/fluxreader/releases" && !path.starts_with("/dchean/fluxreader/releases/") {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
+/// 更新检查专用 HTTP client（OPT-014 R1）：
+/// - **禁止跟随重定向**——目的地必须固定在 GitHub 首跳，绝不能把固定 URL 的
+///   请求被 30x 带去任意主机/降级 http（3xx 一律按失败处理）；
+/// - 显式超时（含连接超时），慢响应有界失败；
+/// - 应用身份 UA。**不复用抓取 client**（后者按设计允许跨域跳转）。
+fn update_check_client(timeout: std::time::Duration) -> AppResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .user_agent(format!("FluxReader/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| AppError::internal(format!("更新检查 HTTP client 构建失败：{e}")))
+}
+
+/// 更新检查内部实现（与命令分离；只在模块单测里换 base 主机与超时，
+/// 无任何 pub 测试入口）。
+///
+/// 响应契约（R1 P4）：
+/// - `html_url` **缺失** → 回落官方 releases 页（可容忍）；
+/// - `html_url` **已提供但非 string / 非法 / 非受信** → Err（不得悄悄换成官方页
+///   还返回 Ok——同版本时前端会误报「已是最新」）。
+async fn check_for_updates_at_base(
+    api_base: &str,
+    timeout: std::time::Duration,
+) -> AppResult<UpdateCheckOutcome> {
+    let client = update_check_client(timeout)?;
+    let url = format!("{api_base}{RELEASES_LATEST_PATH}");
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let hint = match status.as_u16() {
+            300..=399 => "重定向被拒绝（更新检查目的地必须固定）",
+            404 => "未找到发布，可能尚未发布正式版本",
+            429 => "请求被限流，请稍后重试",
+            s if s >= 500 => "GitHub 服务暂时不可用",
+            _ => "请求被拒绝",
+        };
+        return Err(AppError::network(format!(
+            "GitHub 返回 HTTP {}：{hint}",
+            status.as_u16()
+        )));
+    }
+    let v: serde_json::Value = resp.json().await?;
+    let tag = v
+        .get("tag_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim();
+    // 发布标签常见 `v0.18.0` / `V0.18.0` 形态：去掉可选单个 v/V 前缀后交给
+    // 前端 compareVersions 比较；空标签（含裸 "v"）视为不可用响应。
+    let version = tag
+        .strip_prefix('v')
+        .or_else(|| tag.strip_prefix('V'))
+        .unwrap_or(tag);
+    if version.is_empty() {
+        return Err(AppError::network(
+            "更新响应缺少可用版本号（tag_name 缺失或为空）",
+        ));
+    }
+    let url = match v.get("html_url") {
+        None => TRUSTED_RELEASES_URL.to_string(),
+        Some(serde_json::Value::String(raw)) => trusted_release_url(raw).ok_or_else(|| {
+            // 不回显外部提供的地址原文（避免把任意串带进 UI 错误文案）
+            AppError::network("更新响应的 html_url 不属于受信本仓库 releases 域")
+        })?,
+        Some(_) => {
+            return Err(AppError::network(
+                "更新响应的 html_url 类型非法（应为字符串）",
+            ));
+        }
+    };
+    Ok(UpdateCheckOutcome {
+        version: version.to_string(),
+        url,
+    })
+}
+
+/// IPC 命令：检查更新。无 URL 入参——目的地恒为官方仓库 releases/latest；
+/// 不存在任何可注入 client/URL 的测试后门（注入面只在模块单测内）。
+#[tauri::command]
+pub async fn check_for_updates() -> AppResult<UpdateCheckOutcome> {
+    check_for_updates_at_base(GITHUB_API_BASE, std::time::Duration::from_secs(10)).await
+}
+
 /* ============================================================
 全文提取（Readability）
 ============================================================ */
@@ -248,5 +381,285 @@ mod image_proxy_tests {
     fn referer_candidates_dedupes_page_equal_to_origin() {
         let got = referer_candidates("https://ex.com/a.png", Some("https://ex.com/"));
         assert_eq!(got, vec![None, Some("https://ex.com/".to_string())]);
+    }
+}
+
+/* OPT-014 / F16：更新检查链接受信化与受控 HTTP。
+R1 收窄：本地 HTTP mock 测试收进模块单测（原 tests/update_check_e2e.rs 删除）——
+`check_for_updates_at_base` 不再有任何 pub 测试入口，webview/外部 Rust 均不可达；
+测试仍全部真实执行（本地回环 HTTP）。 */
+#[cfg(test)]
+mod update_check_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// 受信地址原样返回：本仓库 releases/tag 页与 releases 根页；owner/repo 大小写不敏感。
+    #[test]
+    fn accepts_only_trusted_repo_release_urls() {
+        for ok in [
+            "https://github.com/Dchean/fluxreader/releases/tag/v0.18.0",
+            "https://github.com/Dchean/fluxreader/releases",
+            "https://github.com/dchean/fluxreader/releases/tag/v0.18.0",
+        ] {
+            assert_eq!(
+                trusted_release_url(ok).as_deref(),
+                Some(ok),
+                "受信地址应原样返回"
+            );
+        }
+    }
+
+    /// 非受信地址一律判非法：畸形/非 https/其他域/其他仓库/前缀伪装/协议注入。
+    #[test]
+    fn rejects_untrusted_release_urls() {
+        for bad in [
+            "",
+            "not a url",
+            "http://github.com/Dchean/fluxreader/releases/tag/v1",
+            "https://evil.example.com/updates",
+            "https://github.com.evil.example/Dchean/fluxreader/releases",
+            "https://github.com/Other/repo/releases/tag/v1",
+            "https://github.com/Dchean/fluxreader-evil/releases/tag/v1",
+            "https://github.com/Dchean/fluxreader/releases-evil",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                trusted_release_url(bad).is_none(),
+                "非受信地址必须拒绝：{bad}"
+            );
+        }
+    }
+
+    struct Mock {
+        base: String,
+        last_request: Arc<Mutex<String>>,
+    }
+
+    /// 本地 mock：对任意请求固定返回 (status, body)，并记录最后一个请求原文。
+    fn spawn_mock(status: u16, body: &str) -> Mock {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let last_request: Arc<Mutex<String>> = Default::default();
+        let sink = last_request.clone();
+        let body = body.to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let sink = sink.clone();
+                let body = body.clone();
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 8192];
+                    let Ok(n) = stream.read(&mut buf) else { return };
+                    *sink.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let reason = match status {
+                        200 => "OK",
+                        404 => "Not Found",
+                        429 => "Too Many Requests",
+                        _ => "Internal Server Error",
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    let _ = stream.flush();
+                });
+            }
+        });
+        Mock {
+            base: format!("http://127.0.0.1:{port}"),
+            last_request,
+        }
+    }
+
+    /// 计数 listener：对任何请求 +1（若被误访问，测试可明确诊断），并回 200。
+    fn spawn_counting_mock() -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut stream = stream;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// 302 入口 listener：把 Location 指向 `target`（若被跟随，target 会计数）。
+    fn spawn_redirect_to(target_port: u16) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{target_port}/evil\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn port_of(base: &str) -> u16 {
+        base.rsplit(':').next().unwrap().parse().unwrap()
+    }
+
+    /// 正例：协议路径/请求头/解析全链路。客户端不带默认 UA——UA 必须来自专用 client。
+    #[tokio::test]
+    async fn release_response_parsed_with_app_identity_headers_on_fixed_path() {
+        let mock = spawn_mock(
+            200,
+            r#"{"tag_name":"v0.18.0","html_url":"https://github.com/Dchean/fluxreader/releases/tag/v0.18.0"}"#,
+        );
+        let out = check_for_updates_at_base(&mock.base, Duration::from_secs(5))
+            .await
+            .expect("有效响应应解析成功");
+        assert_eq!(out.version, "0.18.0", "tag_name 应去掉 v 前缀");
+        assert_eq!(
+            out.url, "https://github.com/Dchean/fluxreader/releases/tag/v0.18.0",
+            "受信 html_url 应原样返回"
+        );
+
+        let req = mock.last_request.lock().unwrap().clone();
+        assert!(
+            req.starts_with("GET /repos/Dchean/fluxreader/releases/latest "),
+            "目的地路径必须固定：{req}"
+        );
+        let lower = req.to_ascii_lowercase();
+        assert!(
+            lower.contains("user-agent: fluxreader/"),
+            "必须带应用身份 UA：{req}"
+        );
+        assert!(
+            lower.contains("accept: application/vnd.github"),
+            "需要 GitHub JSON Accept 头：{req}"
+        );
+    }
+
+    /// 缺失 html_url 可容忍：回落官方 releases 页；无 v 前缀 tag 原样保留。
+    #[tokio::test]
+    async fn missing_html_url_falls_back_to_official_page() {
+        let mock = spawn_mock(200, r#"{"tag_name":"0.19.0"}"#);
+        let out = check_for_updates_at_base(&mock.base, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(out.version, "0.19.0");
+        assert_eq!(out.url, TRUSTED_RELEASES_URL);
+    }
+
+    /// R1 P4：**已提供**但非受信/非法/非 string 的 html_url 必须 Err——
+    /// 修前回落官方页并返回 Ok，同版本时前端会误报「已是最新」。
+    #[tokio::test]
+    async fn provided_untrusted_html_url_is_error_not_silent_fallback() {
+        for body in [
+            r#"{"tag_name":"v9.9.9","html_url":"https://evil.example.com/updates"}"#,
+            r#"{"tag_name":"v9.9.9","html_url":"http://github.com/Dchean/fluxreader/releases/tag/v9"}"#,
+            r#"{"tag_name":"v9.9.9","html_url":"https://github.com/Other/repo/releases/tag/v9"}"#,
+            r#"{"tag_name":"v9.9.9","html_url":"https://github.com/Dchean/fluxreader-evil/releases"}"#,
+            r#"{"tag_name":"v9.9.9","html_url":""}"#,
+            r#"{"tag_name":"v9.9.9","html_url":"javascript:alert(1)"}"#,
+            r#"{"tag_name":"v9.9.9","html_url":42}"#,
+            r#"{"tag_name":"v9.9.9","html_url":{"nested":true}}"#,
+        ] {
+            let mock = spawn_mock(200, body);
+            let err = check_for_updates_at_base(&mock.base, Duration::from_secs(5))
+                .await
+                .expect_err("已提供但非法的 html_url 必须 Err");
+            assert!(
+                err.message.contains("html_url"),
+                "错误应指向 html_url：{err}"
+            );
+        }
+    }
+
+    /// 404/429/5xx：必须 Err（错误码可见），不得静默当作「已是最新」。
+    #[tokio::test]
+    async fn http_error_statuses_fail_instead_of_reporting_latest() {
+        for status in [404u16, 429, 500, 503] {
+            let mock = spawn_mock(status, "{}");
+            let err = check_for_updates_at_base(&mock.base, Duration::from_secs(5))
+                .await
+                .expect_err("HTTP 错误不得作为检查结果");
+            assert!(
+                err.message.contains(&status.to_string()),
+                "错误信息应含状态码 {status}：{err}"
+            );
+        }
+    }
+
+    /// 无 tag / 空 tag / 裸 v / 非对象 body：必须 Err（不能拿空版本去比较）。
+    #[tokio::test]
+    async fn missing_or_empty_tag_is_error() {
+        for body in [
+            "{}",
+            r#"{"tag_name":""}"#,
+            r#"{"tag_name":"  "}"#,
+            r#"{"tag_name":"v"}"#,
+            "[]",
+            "\"just-a-string\"",
+        ] {
+            let mock = spawn_mock(200, body);
+            let err = check_for_updates_at_base(&mock.base, Duration::from_secs(5))
+                .await
+                .expect_err("缺少可用版本号必须 Err");
+            assert!(
+                err.message.contains("tag_name"),
+                "错误应说明缺少 tag_name：{err}"
+            );
+        }
+    }
+
+    /// R1 P3：302 必须失败，且重定向目标**零请求**——更新检查专用 client 禁止跟随
+    /// 重定向（修前共享抓取 client 会跟到任意主机）。
+    #[tokio::test]
+    async fn redirect_is_rejected_and_target_receives_zero_requests() {
+        let (target_base, hits) = spawn_counting_mock();
+        let entry = spawn_redirect_to(port_of(&target_base));
+        let err = check_for_updates_at_base(&entry, Duration::from_secs(5))
+            .await
+            .expect_err("302 必须判失败");
+        assert!(err.message.contains("302"), "错误应含状态码 302：{err}");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "禁止跟随重定向：目标主机不得收到任何请求"
+        );
+    }
+
+    /// R1 P3：慢响应必须被 timeout 有界掐断（专用 client 显式超时）。
+    #[tokio::test]
+    async fn slow_response_times_out_bounded() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        // 接受连接但永不响应：请求应挂在超时而非无限等待
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let start = Instant::now();
+        let err = check_for_updates_at_base(&base, Duration::from_millis(250))
+            .await
+            .expect_err("慢响应必须超时失败");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "超时必须是有界的（实际 {:?}）",
+            start.elapsed()
+        );
+        assert_eq!(err.code, "network", "超时应是网络类错误：{err}");
     }
 }

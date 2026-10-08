@@ -2,27 +2,46 @@ use super::*;
 use rusqlite::params;
 
 pub fn get_setting(conn: &Connection, key: &str) -> AppResult<Option<String>> {
-    let v = conn
+    let v: Option<String> = conn
         .query_row(
             "SELECT value FROM settings WHERE key = ?1",
             params![key],
             |r| r.get(0),
         )
         .optional()?;
-    // 敏感键读时解密（SEC-2）；历史明文无前缀则原样返回（兼容）
-    Ok(v.map(|raw: String| {
-        if crate::credentials::is_sensitive_key(key) {
-            crate::credentials::decrypt_secret(&raw)
-        } else {
-            raw
+    match v {
+        // 敏感键读时解密（SEC-2）；历史明文无前缀则原样返回（兼容）。
+        // OPT-014 / F22：密文损坏/DPAPI 失败返回可见错误——绝不把 `dpapi:`
+        // 原串当已解密值交给调用方（那会把密文当密码发给服务端）。
+        Some(raw) if crate::credentials::is_sensitive_key(key) => {
+            Ok(Some(crate::credentials::decrypt_secret(&raw)?))
         }
-    }))
+        Some(raw) => Ok(Some(raw)),
+        None => Ok(None),
+    }
 }
 
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> AppResult<()> {
+    set_setting_with(conn, key, value, crate::credentials::encrypt_secret)
+}
+
+/// 写入核心（可注入加密器；同模块单测用它模拟加密失败；账号提交事务内核
+/// 经 `db::set_setting_with` 复用它把敏感写入并入同一事务）。
+///
+/// OPT-014 / F22 失败关闭：敏感键加密失败必须整体 Err——SQL 尚未执行，
+/// 旧值原样保留，任何路径都不落明文。注入助手不是 IPC 命令：生产命令面
+/// 无加密后端参数，webview 没有可操控的后门。
+///
+/// Note: 失败关闭边界见 .agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md
+pub(crate) fn set_setting_with(
+    conn: &Connection,
+    key: &str,
+    value: &str,
+    encrypt: fn(&str) -> AppResult<String>,
+) -> AppResult<()> {
     // 敏感键写时加密（SEC-2）：DPAPI 加密后落库，读 DB 不见明文
     let stored = if crate::credentials::is_sensitive_key(key) {
-        crate::credentials::encrypt_secret(value)
+        encrypt(value)?
     } else {
         value.to_string()
     };
@@ -98,5 +117,78 @@ mod tests {
         // 类型不符（数字当布尔）→ 默认
         assert!(app_settings_bool(&conn, "n", true));
         assert!(!app_settings_bool(&conn, "missing", false));
+    }
+
+    /// OPT-014 / F22：加密失败必须失败关闭——保存返回 Err、旧值原样、缺行不插入
+    /// （任何路径都不落明文）。
+    #[test]
+    fn set_setting_propagates_encrypt_failure_and_leaves_db_untouched() {
+        let conn = conn();
+        set_setting(&conn, "greader_password", "old-valid-secret").unwrap();
+        let before: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='greader_password'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let err = set_setting_with(
+            &conn,
+            "greader_password",
+            "new-secret-must-not-land",
+            |_| {
+                Err(crate::error::AppError::new(
+                    "credentialEncrypt",
+                    "注入的加密失败",
+                ))
+            },
+        )
+        .expect_err("加密失败必须返回 Err，而不是静默写入");
+        assert_eq!(err.code, "credentialEncrypt");
+        let after: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='greader_password'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, after, "失败后旧值必须原样保留");
+        assert!(
+            !after.contains("new-secret-must-not-land"),
+            "DB 不得出现待保存明文"
+        );
+
+        // 缺行场景：失败不得插入任何行（尤其明文）
+        let err2 = set_setting_with(&conn, "miniflux_token", "also-must-not-land", |_| {
+            Err(crate::error::AppError::new(
+                "credentialEncrypt",
+                "注入的加密失败",
+            ))
+        });
+        assert!(err2.is_err());
+        let exists: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='miniflux_token'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(exists.is_none(), "失败不得写入新行");
+
+        // 对照：同轴注入成功加密器时正常写入（不误伤保存路径）
+        set_setting_with(&conn, "miniflux_token", "next-token", |v| {
+            Ok(format!("dpapi:test[{v}]"))
+        })
+        .unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='miniflux_token'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "dpapi:test[next-token]");
     }
 }

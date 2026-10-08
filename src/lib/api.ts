@@ -148,6 +148,15 @@ export interface SyncSaveResult {
   unboundLocalFeeds: number;
 }
 
+/** check_for_updates 返回（OPT-014 / F16）：Rust 侧固定请求官方仓库
+ * releases/latest（禁止跟随重定向）；url 只可能是本仓库 releases 域——
+ * html_url 缺失时回落后端官方发布页，已提供但非受信/非法时整体报错
+ * （不会拿官方页顶替）。版本比较仍在前端 compareVersions。 */
+export interface UpdateCheckResult {
+  version: string;
+  url: string;
+}
+
 export interface ArticleListArgs {
   feed_id?: number | null;
   folder_id?: number | null;
@@ -327,6 +336,14 @@ export const api = {
   async setSetting(key: string, value: string): Promise<null> {
     const inv = await getInvoke();
     return inv ? (await inv('set_setting', { key, value }) as null) : null;
+  },
+
+  /* ---- 更新检查（OPT-014：出网收口在 Rust，固定目的地，无 URL 入参） ---- */
+  /** 检查官方仓库最新发布。失败（含 404/429/5xx/无 tag）抛 AppError 拒绝；
+   * 浏览器环境无 IPC → 返回 null（调用方按失败处理）。 */
+  async checkForUpdates(): Promise<UpdateCheckResult | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('check_for_updates') as UpdateCheckResult) : null;
   },
 
   /* ---- 分类/订阅源级设置落库（接线后端已有命令） ---- */

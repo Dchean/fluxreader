@@ -231,7 +231,17 @@ pub async fn notify_queue_changed(db: &Arc<Mutex<Connection>>) {
     };
     let payload = {
         let conn = db.lock().await;
-        let configured = crate::sync::read_credentials(&conn).is_some();
+        // OPT-014 R1：读取/解密失败按「已配置」的显示口径处理（Err ≠ 未配置）——
+        // 让等待/失败统计照常发给前端（错误原因由推送路径的 last_error 呈现）；
+        // 只有确证未配置才静默（不误报、不刷状态）。
+        let configured = match crate::sync::read_credentials(&conn) {
+            Ok(None) => false,
+            Ok(Some(_)) => true,
+            Err(e) => {
+                log::warn!("sync: 凭据读取失败，队列状态按已配置口径上报: {e}");
+                true
+            }
+        };
         db::sync_queue_stats(&conn)
             .ok()
             .and_then(|s| db::queue_changed_payload(&s, configured))

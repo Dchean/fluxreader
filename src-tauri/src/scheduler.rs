@@ -219,7 +219,17 @@ async fn auto_sync_backend(
             .and_then(|v| v.get("refreshInterval").and_then(|i| i.as_i64()))
             .filter(|i| (5..=720).contains(i))
             .unwrap_or(30);
-        let connected = crate::sync::read_credentials(&conn).is_some();
+        // OPT-014 R1：凭据读取/解密失败（密文损坏）不等于「未配置」——
+        // 记警告并跳过本轮自动同步（不发任何请求；可见失败由推送路径的
+        // last_error 呈现），不得静默当作离线。
+        let connected = match crate::sync::read_credentials(&conn) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                log::warn!("scheduler: 凭据读取失败，跳过本轮后端自动同步: {e}");
+                false
+            }
+        };
         let last = crate::db::last_sync_ts(&conn).unwrap_or(0);
         (on, interval, connected, last)
     };

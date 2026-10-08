@@ -12,19 +12,29 @@ use tokio::sync::Mutex;
 /// username/password 是 Miniflux「集成」页单独配置的凭据（Google Reader 与
 /// Fever 共用同一套集成凭据，非 Miniflux 账号密码）。
 /// 协议从 settings 键 `sync_protocol` 读取（"greader" | "fever"，默认 "greader"）。
-pub fn read_credentials(conn: &Connection) -> Option<(String, String, String, String)> {
-    let protocol = db::get_setting(conn, "sync_protocol")
-        .ok()
-        .flatten()
+///
+/// **三态语义（OPT-014 R1）**：
+/// - `Ok(Some(..))` 已配置；
+/// - `Ok(None)` 未配置（键缺失或凭据字段为空）；
+/// - `Err(e)` **读取/解密失败**（如密码密文损坏）——调用方不得把它当「未配置/
+///   首次连接」继续写新账号或发请求；必须按可见失败处理（失败关闭）。
+pub fn read_credentials(conn: &Connection) -> AppResult<Option<(String, String, String, String)>> {
+    let protocol = db::get_setting(conn, "sync_protocol")?
         .filter(|p| p == "fever" || p == "greader")
         .unwrap_or_else(|| "greader".to_string());
-    let endpoint = db::get_setting(conn, "greader_endpoint").ok().flatten()?;
-    let username = db::get_setting(conn, "greader_username").ok().flatten()?;
-    let password = db::get_setting(conn, "greader_password").ok().flatten()?;
+    let Some(endpoint) = db::get_setting(conn, "greader_endpoint")? else {
+        return Ok(None);
+    };
+    let Some(username) = db::get_setting(conn, "greader_username")? else {
+        return Ok(None);
+    };
+    let Some(password) = db::get_setting(conn, "greader_password")? else {
+        return Ok(None);
+    };
     if endpoint.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some((protocol, endpoint, username, password))
+    Ok(Some((protocol, endpoint, username, password)))
 }
 
 /// build_client 失败的两种形态（TASK-124，审计 P2-6②）。
@@ -127,9 +137,12 @@ pub(super) async fn build_client(
     let (protocol, endpoint, username, password) = {
         let conn = db.lock().await;
         match read_credentials(&conn) {
-            Some(c) => c,
+            Ok(Some(c)) => c,
             // 未配置：静默（区别于「有凭据但失败」，TASK-124）
-            None => return Err(ClientBuildFailure::NotConfigured),
+            Ok(None) => return Err(ClientBuildFailure::NotConfigured),
+            // OPT-014 R1：读取/解密失败不是「未配置」——按可重试失败上报
+            //（记录 attempts/last_error），不得静默当首次连接跳过。
+            Err(e) => return Err(ClientBuildFailure::Failed(e)),
         }
     };
     let cached = {
@@ -195,4 +208,49 @@ pub(super) async fn build_client(
         }
     }
     Ok(backend)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    /// R1 P2 三态语义：未配置 → Ok(None)；完整 → Ok(Some)；**损坏密文 → Err**
+    /// （不得吞成 None 让调用方当「首次连接」继续写新账号）。
+    #[test]
+    fn read_credentials_distinguishes_not_configured_from_read_error() {
+        let conn = conn();
+        assert!(matches!(read_credentials(&conn), Ok(None)), "空库 = 未配置");
+
+        db::set_setting(&conn, "greader_endpoint", "http://example.com").unwrap();
+        db::set_setting(&conn, "greader_username", "u").unwrap();
+        assert!(
+            matches!(read_credentials(&conn), Ok(None)),
+            "缺密码 = 未配置"
+        );
+
+        db::set_setting(&conn, "greader_password", "pw").unwrap();
+        let c = read_credentials(&conn).unwrap().unwrap();
+        assert_eq!(
+            (c.1.as_str(), c.2.as_str(), c.3.as_str()),
+            ("http://example.com", "u", "pw")
+        );
+
+        // 损坏密文（裸 SQL 写入，绕过写入加密）：Err 而非 Ok(None)
+        conn.execute(
+            "UPDATE settings SET value = 'dpapi:@@corrupt@@' WHERE key = 'greader_password'",
+            [],
+        )
+        .unwrap();
+        let err = read_credentials(&conn).expect_err("损坏密文必须返回可见错误");
+        assert!(
+            err.code == "credentialCorrupt" || err.code == "credentialDecrypt",
+            "错误码应指向解密失败：{err}"
+        );
+    }
 }

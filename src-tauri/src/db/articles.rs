@@ -543,8 +543,20 @@ pub fn clear_dedup_tombstones(conn: &Connection) -> AppResult<usize> {
 /// 其文章/绑定/队列/墓碑），清空本地条目上的 Miniflux 绑定与副本记账、
 /// folders/feeds 的 remote_id 残留。用户直连订阅（origin='local'）保留。
 /// 空目录（pull 建的、没了成员）一并删除。
+///
+/// 独立调用入口：自开事务。需要与调用方其它写入同一短事务（账号切换/断开
+/// 的「全有全无」）时改用 [`purge_remote_data_in`]，避免嵌套 BEGIN。
 pub fn purge_remote_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
     let tx = conn.transaction()?;
+    let r = purge_remote_data_in(&tx)?;
+    tx.commit()?;
+    Ok(r)
+}
+
+/// [`purge_remote_data`] 的事务内核（OPT-014 R1）：在**调用方已有事务**内执行
+/// 全部清理步骤，不自行 BEGIN/COMMIT——与调用方的其它写入同生共死。
+/// SQL 语义与独立入口完全一致（同一份代码）。
+pub(crate) fn purge_remote_data_in(tx: &rusqlite::Transaction<'_>) -> AppResult<(usize, usize)> {
     // P3[4]（REQ-104）：先记下「属于服务端的分类」，供第 5 步只删这些空目录。
     // 此前第 5 步的 SQL 是「删所有无成员的目录」，注释却写「Pull 建的」——
     // 于是**用户自建的空目录会被一起删掉**（用户手动建了目录、还没往里放订阅，
@@ -589,7 +601,6 @@ pub fn purge_remote_data(conn: &mut Connection) -> AppResult<(usize, usize)> {
             [id],
         )?;
     }
-    tx.commit()?;
     Ok((feeds, articles))
 }
 
@@ -1527,6 +1538,43 @@ mod tests {
     /// · 修前 cutoff = `datetime('now','-N days','localtime')`，形如 `2026-09-14 16:45:20`
     ///   （含空格、本地墙上时间）；
     /// · 两者做**裸文本比较**：第 11 个字符处 `'T'(0x54) > ' '(0x20)`，故当**日期部分相同**时
+    /// OPT-014 R1：事务内核 `purge_remote_data_in` 不自行提交——在调用方事务里
+    /// 执行后回滚，一切原样（证明可与账号提交同事务，且无嵌套 BEGIN）。
+    #[test]
+    fn purge_kernel_rolls_back_with_caller_transaction() {
+        let mut conn = conn();
+        let folder = create_folder(&conn, "远端分类", "article").unwrap();
+        insert_feed_origin(
+            &conn,
+            "https://r.example/feed",
+            None,
+            "R",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+            "remote",
+        )
+        .unwrap();
+
+        {
+            let tx = conn.transaction().unwrap();
+            let (feeds, _) = purge_remote_data_in(&tx).unwrap();
+            assert_eq!(feeds, 1, "内核在事务内可见清理结果");
+            // 不 commit：模拟调用方后续步骤失败（如凭据加密 Err）
+        }
+
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE origin = 'remote'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 1, "调用方回滚后服务端订阅必须原样");
+    }
+
     ///   文章恒被判定为「不够旧」；加上 localtime 把阈值整体挪动，实际判定退化为按**日期**
     ///   粗比、且随本机时区漂移。
     ///

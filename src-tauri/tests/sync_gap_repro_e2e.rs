@@ -793,7 +793,7 @@ async fn offline_mark_all_read_queued_and_pushed_after_connect() {
     let (n, scoped) = {
         let conn = db.lock().await;
         assert!(
-            sync::read_credentials(&conn).is_none(),
+            matches!(sync::read_credentials(&conn), Ok(None)),
             "前置条件：离线阶段必须未配置同步凭据"
         );
         let ids = db::list_unread_ids_scoped(&conn, None, None, false, None, None).unwrap();
@@ -894,7 +894,7 @@ async fn offline_star_change_pushed_after_connect() {
     {
         let conn = db.lock().await;
         assert!(
-            sync::read_credentials(&conn).is_none(),
+            matches!(sync::read_credentials(&conn), Ok(None)),
             "前置条件：离线阶段必须未配置同步凭据"
         );
         app_lib::commands::record_star_state(&conn, aid, true).expect("record star");
