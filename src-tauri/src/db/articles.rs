@@ -260,7 +260,19 @@ pub fn list_articles(conn: &Connection, q: &ArticleQuery) -> AppResult<Vec<Artic
     let (sql, params) = list_articles_sql(q);
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(params), article_list_item)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let mut items = rows.collect::<Result<Vec<_>, _>>()?;
+    // F07 读边界：社交/通知布局直接渲染这些字段；存量行可能从未经净化写入。
+    // with_content=false 时正文列为 NULL（元数据列表），不产生清洗成本。
+    if q.with_content {
+        for item in &mut items {
+            sanitize_renderable_fields(
+                item.url.as_deref(),
+                &mut item.content_html,
+                &mut item.translated_content,
+            );
+        }
+    }
+    Ok(items)
 }
 
 /// 构建列表查询的 WHERE 条件 + 绑定参数（`list_articles` 与 `article_index`
@@ -353,14 +365,43 @@ fn article_index_sql(q: &ArticleQuery, article_id: i64) -> (String, Vec<rusqlite
     (sql, params)
 }
 
+// Note: 可渲染正文/译文的净化在读取边界与写入路径同源（同一 sanitize()） — 见 .agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md
+/// 读边界的可渲染字段净化（F07）：存量行可能含未清洗 HTML（历史回填绕过、
+/// 历史 AI 产物、旧库迁移），详情与携带正文的列表行返回前统一过生产
+/// [`crate::sanitize::sanitize`]；基址取该行 url（相对链接与写入口径一致地重写
+/// 为绝对）。None/空串原样保留；只读元数据的列表不携带正文列，不经过本函数。
+fn sanitize_renderable_fields(
+    url: Option<&str>,
+    content_html: &mut Option<String>,
+    translated_content: &mut Option<String>,
+) {
+    if let Some(html) = content_html.as_deref() {
+        if !html.is_empty() {
+            *content_html = Some(crate::sanitize::sanitize(html, url));
+        }
+    }
+    if let Some(tr) = translated_content.as_deref() {
+        if !tr.is_empty() {
+            *translated_content = Some(crate::sanitize::sanitize(tr, url));
+        }
+    }
+}
+
 pub fn get_article(conn: &Connection, id: i64) -> AppResult<Option<ArticleRow>> {
-    let row = conn
+    let mut row = conn
         .query_row(
             &format!("SELECT {ARTICLE_COLS} FROM articles WHERE id = ?1"),
             params![id],
             article_row,
         )
         .optional()?;
+    if let Some(r) = row.as_mut() {
+        sanitize_renderable_fields(
+            r.url.as_deref(),
+            &mut r.content_html,
+            &mut r.translated_content,
+        );
+    }
     Ok(row)
 }
 
@@ -375,7 +416,15 @@ pub fn get_articles(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ArticleRow>
     let sql = format!("SELECT {ARTICLE_COLS} FROM articles WHERE id IN ({placeholders})");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), article_row)?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let mut articles = rows.collect::<Result<Vec<_>, _>>()?;
+    for a in &mut articles {
+        sanitize_renderable_fields(
+            a.url.as_deref(),
+            &mut a.content_html,
+            &mut a.translated_content,
+        );
+    }
+    Ok(articles)
 }
 
 /// 全文搜索：LIKE 子串匹配，命中按发布时间倒序，返回与列表页同构的轻量行。

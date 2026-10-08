@@ -159,7 +159,7 @@ pub(super) fn merge_pulled_entry(
             }
             merge_remote_status(conn, aid, e, maps, report);
             // 正文/封面/enclosure 兜底回填：本地为空才补，已有内容不覆盖。
-            backfill_entry_content(conn, aid, e);
+            backfill_entry_content(conn, aid, e, report);
         }
         None => {
             // 本地没有 → 若其远端 feed 已绑定，则 upsert 补齐
@@ -269,7 +269,11 @@ fn strip_html_text(html: &str) -> String {
 
 /// 已有条目正文/封面/enclosure 兜底回填：本地为空才补（COALESCE），已有内容绝不覆盖。
 /// （封面 / enclosure 单列 COALESCE：既不抢本地封面，也能补上 Miniflux 后来抓到的图。）
-fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) {
+/// OPT-002（F07）：回填失败此前被 `let _` 静默吞掉——正文缺失而同步报成功、现场
+/// 无线索。改为 warn + 记入 report.errors（恢复语义的完整处理见 OPT-007，本轮不
+/// 扩展游标协议：失败仍不中断整轮，下轮会再试）。
+// Note: 回填写入的净化在 db::backfill_article_content 内完成（同 sanitize 口径） — 见 .agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md
+fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent, report: &mut SyncReport) {
     let content_html = item_content_html(e);
     let enclosure = e.enclosure.first();
     let (enc_url, enc_mime) = match enclosure {
@@ -277,7 +281,7 @@ fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) {
         None => (None, None),
     };
     let content_image = crate::sanitize::first_image(&content_html);
-    let _ = db::backfill_article_content(
+    if let Err(err) = db::backfill_article_content(
         conn,
         aid,
         &content_html,
@@ -285,5 +289,10 @@ fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) {
         content_image.as_deref(),
         enc_url.as_deref(),
         enc_mime.as_deref(),
-    );
+    ) {
+        log::warn!("sync: 正文回填失败（aid={aid}）: {err}");
+        report
+            .errors
+            .push(format!("拉取条目回填正文失败（aid={aid}）: {err}"));
+    }
 }

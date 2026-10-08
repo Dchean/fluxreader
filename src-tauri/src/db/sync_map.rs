@@ -550,7 +550,12 @@ pub fn sync_mark_unstarred_if_starred(conn: &Connection, article_id: i64) -> App
     Ok(n)
 }
 
-/// 同步专用：回填文章内容字段（本地为空才补，Pull 段正文兜底用）
+/// 同步专用：回填文章内容字段（本地为空才补，Pull 段正文兜底用）。
+///
+/// F07：补全的 HTML 必须与首次入库走同一净化边界——此前原始 HTML 直接补入空
+/// content_html，绕过了 sanitizer 并一路抵达 dangerouslySetInnerHTML。
+/// 基址取该文章的 url（与抓取入库的相对链接重写口径一致）；DB 错误正常上抛。
+// Note: 可渲染 HTML 的净化口径只有 sanitize()（写入口与读边界共用） — 见 .agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md
 pub fn backfill_article_content(
     conn: &Connection,
     article_id: i64,
@@ -560,6 +565,15 @@ pub fn backfill_article_content(
     enclosure_url: Option<&str>,
     enclosure_mime: Option<&str>,
 ) -> AppResult<()> {
+    let base: Option<String> = conn
+        .query_row(
+            "SELECT url FROM articles WHERE id = ?1",
+            params![article_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let safe_html = crate::sanitize::sanitize(content_html, base.as_deref());
     conn.execute(
         "UPDATE articles SET
             content_html = CASE WHEN COALESCE(content_html, '') = '' THEN ?1 ELSE content_html END,
@@ -569,7 +583,7 @@ pub fn backfill_article_content(
             enclosure_mime = COALESCE(enclosure_mime, ?5)
          WHERE id = ?6",
         params![
-            content_html,
+            safe_html,
             body_text,
             image_url,
             enclosure_url,
