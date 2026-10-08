@@ -689,8 +689,12 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
   const feedConfig = useAppStore(useShallow((s) => selectFeedConfig(s, item.feedId)));
   /* TASK-122：正文/AI 读取单点——selectArticleBody（真值源 bodyById）。
      错误态/空正文终态/加载中都从记录 state 派生（原 hydrationErrors/hydratedIds
-     两个按 id 平行订阅随之删除）。 */
-  const body = useAppStore((s) => selectArticleBody(s, item.id));
+     两个按 id 平行订阅随之删除）。
+     【为何必须包 useShallow】selectArticleBody 每次调用返回**新对象**（体见
+     selectors.ts 的 bodyViewFrom），zustand v5 不做 selector 快照缓存 →
+     useSyncExternalStore 每轮拿到新引用，React 报「getSnapshot should be cached」
+     并无限重渲染（React #185）。浅比较命中后引用稳定，仅记录真变才重渲染。 */
+  const body = useAppStore(useShallow((s) => selectArticleBody(s, item.id)));
   /* 卡片级翻译状态（按 id 订阅，生成中指示） */
   const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
   /* fix-5：卡片级翻译失败信息（内联错误行 + 重试依据，此前只有 toast 一闪而过） */
@@ -1114,8 +1118,10 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
      ——useLazyHydrate 内部已按 entryNeedsHydration 触发请求，这里消费记录状态
      把结果呈现出来：失败=内联重试（不再静默回退 snippet）、missing=文章不存在、
      终态空正文=暂无正文、其余=加载占位。请求与 SocialCard 走同一条批量水合
-     队列（enqueueHydration）。 */
-  const body = useAppStore((s) => selectArticleBody(s, item.id));
+     队列（enqueueHydration）。
+     【为何必须包 useShallow】同 SocialCard：selectArticleBody 返回新对象，
+     zustand v5 + useSyncExternalStore 无快照缓存会无限重渲染（React #185）。 */
+  const body = useAppStore(useShallow((s) => selectArticleBody(s, item.id)));
   /* 展示文本：展开态优先水合全文（剥 HTML 标签），未水合/收起态用 snippet */
   const fullText = body.content
     ? body.content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()

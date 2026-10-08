@@ -5416,6 +5416,98 @@ await (async () => {
       ccSrc122.includes('api.cacheCleanup(days, scope)')
       && ccSrc122.includes('await reloadFromBackend()')
       && ccSrc122.includes('reconcileBodyEntities'));
+
+    /* ---------- (t122-9) 源级锁：订阅 selectArticleBody 必须包 useShallow ---------- */
+    /* 依据（P0 运行期缺陷，真实 headless Chrome 复现）：selectArticleBody 在有记录时
+       每次调用都经 bodyViewFrom(rec) 返回**新对象**；zustand v5 的 useStore
+       （node_modules/zustand/react.js）把 selector 直接交给
+       React.useSyncExternalStore 且不做快照缓存 → React 每轮 getSnapshot 都拿到新
+       引用 → console.error「The result of getSnapshot should be cached to avoid an
+       infinite loop」→「Uncaught Error: Maximum update depth exceeded」（React
+       #185）。Reader 挂载（打开任意文章）与社交/通知卡渲染都会崩。
+       约定与 Sidebar.tsx 既有注记一致：返回新引用的派生 selector 必须包 useShallow。
+       本断言为**补充性静态锁**（权威证明是管理器跑的真实浏览器检查）：对 src/ 全
+       树做去注释/去字符串后的**括号配平**扫描，取出每个 useAppStore(...) 的完整
+       实参，凡实参中出现 selectArticleBody 者必须形如 useShallow(...)。空白容忍
+       （缩进/换行/括号内空白任意），不锁死措辞；删掉 useShallow 或新写一处裸订阅
+       必红。 */
+    const maskCode122 = (src) => {
+      let out = '';
+      let i = 0;
+      while (i < src.length) {
+        const c = src[i];
+        const n = src[i + 1];
+        if (c === '/' && n === '/') { // 行注释整体置空（避免注释里的 useAppStore( 误命中）
+          const e = src.indexOf('\n', i);
+          const end = e === -1 ? src.length : e;
+          out += ' '.repeat(end - i);
+          i = end;
+          continue;
+        }
+        if (c === '/' && n === '*') { // 块注释整体置空
+          const e = src.indexOf('*/', i + 2);
+          const end = e === -1 ? src.length : e + 2;
+          out += ' '.repeat(end - i);
+          i = end;
+          continue;
+        }
+        if (c === '"' || c === "'" || c === '`') { // 字符串内部置空，保留引号
+          let j = i + 1;
+          let closed = false;
+          while (j < src.length) {
+            if (src[j] === '\\') { j += 2; continue; }
+            if (src[j] === c) { j += 1; closed = true; break; }
+            j += 1;
+          }
+          out += c + ' '.repeat(Math.max(0, j - i - (closed ? 2 : 1))) + (closed ? c : '');
+          i = j;
+          continue;
+        }
+        out += c;
+        i += 1;
+      }
+      return out;
+    };
+    const scanBodySubs122 = (src) => {
+      const code = maskCode122(src);
+      const NEEDLE = 'useAppStore(';
+      const found = [];
+      let i = 0;
+      while ((i = code.indexOf(NEEDLE, i)) !== -1) {
+        const open = i + NEEDLE.length - 1; // '(' 的下标
+        let depth = 0;
+        let j = open;
+        for (; j < code.length; j += 1) {
+          if (code[j] === '(') depth += 1;
+          else if (code[j] === ')') { depth -= 1; if (depth === 0) break; }
+        }
+        const arg = code.slice(open + 1, j);
+        i = j + 1;
+        if (/\bselectArticleBody\b/.test(arg)) {
+          found.push({ arg: arg.replace(/\s+/g, ' ').trim(), wrapped: /^useShallow\s*\(/.test(arg.trim()) });
+        }
+      }
+      return found;
+    };
+    const walk122 = (dir) => {
+      const files = [];
+      for (const e of fs122.readdirSync(dir, { withFileTypes: true })) {
+        const child = new URL(e.isDirectory() ? `${e.name}/` : e.name, dir);
+        if (e.isDirectory()) files.push(...walk122(child));
+        else if (/\.tsx?$/.test(e.name)) files.push(child);
+      }
+      return files;
+    };
+    const subs122 = [];
+    for (const f of walk122(new URL('../src/', import.meta.url))) {
+      for (const s of scanBodySubs122(fs122.readFileSync(f, 'utf8'))) {
+        subs122.push({ where: `${f.pathname.split('/src/').pop()} → ${s.arg}`, wrapped: s.wrapped });
+      }
+    }
+    const bare122 = subs122.filter((s) => !s.wrapped);
+    if (bare122.length) console.error('裸订阅（缺 useShallow）:', bare122.map((b) => b.where).join(' | '));
+    checkNew('(t122-9) selectArticleBody 订阅必须包 useShallow（源级锁）：src/ 全树每个引用 selectArticleBody 的 useAppStore(...) 实参均以 useShallow(...) 包裹（裸订阅 = zustand v5 快照不缓存 → React #185 无限重渲染；至少覆盖 Reader/SocialCard/NotifCard 三处）',
+      subs122.length >= 3 && bare122.length === 0);
   }
 
   await resetStore(); // 夹具复位

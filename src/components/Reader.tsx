@@ -42,8 +42,15 @@ export function Reader() {
     s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) ?? null : null,
   );
   /* TASK-122：正文/AI 产物读取单点——selectArticleBody（真值源 bodyById）。
-     body 是快照对象（记录写入即换引用），nonce 依赖在 selector 内部建立。 */
-  const body = useAppStore((s) => selectArticleBody(s, s.activeArticleId));
+     body 是快照对象（记录写入即换引用），nonce 依赖在 selector 内部建立。
+     【为何必须包 useShallow】selectArticleBody 每次调用都经 bodyViewFrom(rec)
+     返回**新对象**，zustand v5 把 selector 直接交给 useSyncExternalStore 且不做
+     快照缓存 → React 每次 getSnapshot 都拿到新引用，判定为「未缓存」并反复重渲染
+    （console.error "The result of getSnapshot should be cached..." → React #185
+     Maximum update depth exceeded，打开文章即崩）。useShallow 逐字段浅比较，
+     字段值不变即命中缓存引用，只有记录真变才触发渲染。同 Sidebar.tsx 的既有约定：
+     返回新引用的派生 selector 必须包 useShallow。 */
+  const body = useAppStore(useShallow((s) => selectArticleBody(s, s.activeArticleId)));
   /* 文章之间切换、以及原文↔译文视图切换时，正文淡入一次（REQ-005） */
   const readerViewRef = useRef<HTMLDivElement>(null);
   useEnteringClass(readerViewRef, `${art?.id ?? ''}|${isShowingTranslatedProse}`, 'reader-entering');
