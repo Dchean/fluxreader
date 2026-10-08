@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-128",
+  "run_id": "RUN-aebd4d720c7a41069b8abb20a372d1cf",
+  "status": "ready_for_verification",
+  "summary": "R1 修复轮，逐条处置独立复审 6 findings。(F1 high) 搜索正例归属限定文章分组：新增 articleGroupScope/articleGroupItems（[role=group][aria-label=文章]，回退语义显式标注 articleGroupUsable:false）；paletteBaseline 改为打开浮层后读取（Node 侧在打开后调用），chooseSearchToken 参数更名 paletteText 并记录 excludedByPalette；键入前 token 已存在则整段判 invalid 不输出 resultMs。双路验证：mock 烟雾正例 resultMs=468.2/hitInsideArticleGroup=true/tokenAbsentBeforeTyping=true；对抗性探针用 token 'APOD'（订阅源 'NASA APOD' 子串）——旧判据 203.1ms 命中 feed 行，新判据无命中且 runSearch 返回 invalid（正是 F1 路径）。(F2 medium) 新增 conditionsBySection（每测量段起始快照，直方入 measureOrder[*].syncInFlightAtStart），condLineOf(section) 按本段快照生成结论行；longSession 与 memoryByLayout 每条目各带自带 conditions；验证：注入 __t128SyncInFlight 后内存/longSession 行印『同步在飞=true』而 switch/search/scroll 保持 false，不再自相矛盾。(F3 medium) phase4_seed.py 新增 running_app_processes()（tasklist CSV 查询 FluxReader.exe，检测失败不静默当作未运行）与 restore(force=False) 拒绝逻辑 + --force（文档标注危险）；清单步骤⑤首句改为『先完全退出 FluxReader（确认进程结束）』并给 tasklist 确认命令与拒绝说明。沙箱验证四态（在跑→拒绝且文件未动、在跑+--force→还原、不在跑→还原、检测不可用→告警后还原）。(F4 medium) 修正 measure 头部纪律：本脚本自身不写数据，但锁等待段会触发一次真实手动同步（联网抓取全部订阅源+写库+可能推送后端），新增 --no-sync-probe 跳过开关（保留空闲+IPC 对照采样），报告 caveats 回显该副作用；清单新增专门警告块（调用链、两种规避方式、跳过开关）。(F5 low) 清单命令与查看命令统一为固定 --out tmp/phase4/measure-run.json；longSession 增加逐轮 jsHeapMB/domNodes 采样（perRoundHeap + 单调步数统计），判定线改写为可用输出判读的『首末增量为显著正值且 DOM 节点同向增长』（含无 GC caveat）。(F6 low) 崩溃布局堆值置 null + heapInvalidReason（heapUsedMBBeforeCrash 留档备查），结论行印『失效（渲染树被卸载，appCrashedHere）』，verdicts 同步。附带修复：页面库注入模板里的 '\n' 被外层模板字符串吞掉导致 SyntaxError，改用 String.fromCharCode(10) 并加 new Function(PAGE_LIB) 预检。验证：node --check/py_compile 通过、烟雾电池（Vite 5198 + 无头 Chrome 9224，mock）exit 0 且逐段证据见 tmp/phase4/measure-smoke-r1.json、lint 0 警告 0 错误、build 通过、frontend 759/759、t059_cdp.mjs 零改动、自起进程已清理。",
+  "changed_files": [
+    "tools/phase4_measure.mjs",
+    "tools/phase4_seed.py",
+    "tools/phase4_checklist.md"
+  ],
+  "validation_requests": [
+    "cargo_fmt",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

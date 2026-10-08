@@ -1,0 +1,6 @@
+{
+  "changed_files": [
+    "src-tauri/src/db/sync_queue.rs",
+    "src-tauri/src/sync/push.rs"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-123",
+  "run_id": "RUN-c82f1e9b7c634b51a1acc63e070e7a3f",
+  "status": "ready_for_verification",
+  "summary": "修复轮 R1（R0 审查唯一低危 finding）：reloadFromBackend 的 fetchWindowRows 续页失败可见性——try/catch 包裹，同文案 toast「刷新失败：…」+rethrow（与首屏失败逐字一致、与 reloadFilteredEntries 对称，差异仅其 catch 不重抛已注释）；失败不落地（旧 entries/游标原样、inflight 复位、不假 exhausted、nonce 不 bump）。t123-6 新增 2 条断言（toast 可见性判别本体：rejectWhen 放行首屏只拒续页→toast 恰+1；不缩窗不假到底），变异自证（去包装恰可见性 1 红）。自检：test:frontend 750/750（t123-0..6 共 27 条）、lint 0、build 0。",
+  "changed_files": [
+    "src/store/slices/bootstrap.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "frontend",
+    "lint",
+    "build",
+    "cargo_fmt"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

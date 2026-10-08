@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-128",
+  "run_id": "RUN-0353573413df42efa91ac2d7c4235031",
+  "status": "ready_for_verification",
+  "summary": "修复审计 P2-7 六点并补媒体/并发负载测量能力。(1) 切换延迟：改为「卡片身份基线变化（rAF 逐帧轮询 16ms）+ 连续 3 帧渲染稳定」双判据，输出 firstResultMs/stableMs/cardsBefore/cardsAfter，超时 timedOut 不带毫秒。(2) 搜索：分段 openMs/resultMs；结果归属断言（浮层内 .cp-item、含唯一 token、结果数与基线不同）+ 负向探针（不存在 token 必不命中）；超时 timedOut+reason 不输出普通耗时；另断言 Escape 关闭。(3) phase4_seed.py 增 --media（image_url/author/duration_sec/enclosure_url，picssum 稳定图与公开音频样例）与 --layouts（按 feeds.layout 轮转铺满五布局，源不足自动补种子源），--info 输出按布局卡数与媒体覆盖率；备份/还原逐字节+SHA256 纪律保持，并新增「已有干净基线时拒绝覆盖」保护。(4) 内存：JS 堆与进程 RSS 分列（RSS 按 WebView2 进程组命令行含 com.fluxreader.app 过滤，避免把无关 msedgewebview2 计入），长会话 8 轮报首末增量，巡检中断则 growthMB=null+invalidReason。(5) 深页滚动：top/mid/bottom 三档、每档先等虚拟列表静默再采 3s rAF 帧间隔。(6) 锁等待代理：sync_queue_stats IPC 往返 20 次 p50/p95/p99，空闲与同步在飞两态，标注为代理指标（IPC+单连接锁等待），非 Tauri 时如实 skipped。(7) 报告带 conditions 条件块，结论前置同条件串并声明单档规模不能判定超线性。(8) 新增 tools/phase4_checklist.md（owner 实机清单：前置/六步流程/字段含义/判定线/代理指标说明/失败处置）。(9) 烟雾验证：Vite dev + 无头 Chrome CDP 跑通电池（tmp/phase4/measure-smoke2.json、measure-smoke3.json），结构化字段齐全、非 Tauri 段如实标记、无假数字。门禁：node --check/py_compile 通过、lint 0 警告 0 错误（原 1 条未使用变量警告随重写消失）、build 通过、frontend 759/759、rustfmt 检查 81 文件 exit 0（未跑 cargo，遵本机限制）。tools/t059_cdp.mjs 与 HEAD 逐字节一致。 【待观察项（非本卡交付内容）】烟雾首轮出现一次不可稳定复现的前端崩溃证据（tmp/phase4/measure-smoke.json appHealth 捕获 getSnapshot→#185，报 NotifCard）；总控随后 2 轮电池 + 快速五布局切换压力测试均未复现（measure-smoke2/3 everCrashed=false），已记入清单与项目日志作为独立复现任务输入。",
+  "changed_files": [
+    "tools/phase4_measure.mjs",
+    "tools/phase4_seed.py",
+    "tools/phase4_checklist.md"
+  ],
+  "validation_requests": [
+    "cargo_fmt",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "blocked_reason": null,
+  "unresolved_items": []
+}

@@ -1,0 +1,19 @@
+{
+  "task_id": "TASK-122",
+  "run_id": "RUN-5834c5a91f0a4bdbbd6af4801f864c98",
+  "status": "ready_for_verification",
+  "summary": "R1 修复轮（P0）：selectArticleBody 有记录时经 bodyViewFrom 每次返回新对象，Reader/SocialCard/NotificationCard 三处 useAppStore 订阅未包 useShallow → zustand v5 无快照缓存 → React #185 无限重渲染，打开文章即崩。修复：三处订阅全部包 useShallow（Reader.tsx:53、Timeline.tsx:697/1124），并补源级锁定断言 t122-9（扫描全 src，任何引用 selectArticleBody 的 useAppStore 调用未包 useShallow 即红）。真实 Chrome（headless CDP，mock 模式）复核：打开文章后 #185/getSnapshot 错误清零、reader-col 正常渲染标题/作者/摘要/操作栏；修前同场景必崩。前端回归 759/759（新增 t122-9）、lint/build 通过；本卡 Rust 零改动。",
+  "changed_files": [
+    "src/components/Reader.tsx",
+    "src/components/Timeline.tsx",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

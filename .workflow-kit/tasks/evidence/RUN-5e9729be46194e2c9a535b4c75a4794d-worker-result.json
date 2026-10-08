@@ -1,0 +1,33 @@
+{
+  "task_id": "TASK-122",
+  "run_id": "RUN-5e9729be46194e2c9a535b4c75a4794d",
+  "status": "ready_for_verification",
+  "summary": "审计 P2-3 修复（bodyById 实体缓存分离与显式失效，高风险架构，15 文件 +1317/-794）：①新模块 bodyCache.ts——bodyById 判别联合状态机（无记录=未请求→loading→ready|missing|failed；ready→cleared 由 reconcile 观察 DB 删除 AI 产物触发；重新生成唯一解除），contentRevision/aiWrittenAt 失效戳，LRU 2000 预算淘汰回未请求态，模块头注=状态机与失效规则单点文档；②显式失效入口 reconcileBodyEntities（fromBackend=true 三路径触发）：行 AI 空+记录非空→cleared+bump（受影响 id 由行真值推导）、行 AI 非空且不同→对齐、cleared 不被 reload/迟到响应复活（cleared-skip+失效戳双关）、生成中豁免行对齐、行 snippet 变化→记录失效回未请求（探针 P4 本体）、在途水合 stamp 比对；③mergeSnapshotEntries 剥离正文/AI/译文继承（isRead/isStarred bump 语义与 fromBackend 门控逐字保留；snippet/url 轻字段照旧）；④读取单点 selectArticleBody（Reader/SocialCard/NotifCard/AI slice/entryNeedsHydration 全部改经它；bodyCacheNonce 注入桥接模块级缓存响应性）；⑤ hydratedIds/hydrationErrors 删除（分散态收敛为判别联合）；entry.content/rawContent 降 mock 专属可选位；⑥失效戳守卫（生成后旧戳响应丢弃/cleared 后旧戳丢弃）。t122-* 20 条 8 组（探针 P3/P4 本体+预算+死区回归+失效戳+源级接线），变异自证（禁用 cleared 路径 6 红）；既有断言按架构迁移更新（保护意图保留逐条附理由，t103 源级 useLazyHydrate 零改动过）。自检：test:frontend 723/723、lint 0、build 0。已知边界：AI 列仍随列表行传播（彻底分离需 Rust DTO 另卡）、snippet 失效信号为启发式（无 DB 内容版本列）。",
+  "changed_files": [
+    "src/components/Reader.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/settings/CacheCleanupSection.tsx",
+    "src/lib/api.ts",
+    "src/store.ts",
+    "src/store/bodyCache.ts",
+    "src/store/internals.ts",
+    "src/store/selectors.ts",
+    "src/store/slices/ai.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/reader.ts",
+    "src/store/types.ts",
+    "src/types.ts",
+    "tools/frontend-regression.mjs"
+  ],
+  "validation_requests": [
+    "frontend",
+    "lint",
+    "build",
+    "cargo_fmt"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

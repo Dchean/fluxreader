@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-10-08T01:12:55.428844Z",
+  "roots": [
+    ".workflow-kit/docs/DEC-gate-adjust-20261007.md",
+    "docs/sync-compat-matrix.md",
+    "src-tauri/src/sync"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/docs/DEC-gate-adjust-20261007.md",
+      "sha256": "6921a0bde4c5b29a620af19bc1815a7a2240a4dbca44cca9496403af41c9d6f9"
+    },
+    {
+      "path": "docs/sync-compat-matrix.md",
+      "sha256": "5c29815c44d2e9ee95b02de0d5daa0feb577ec0531cd92cd0e39b45568faefd7"
+    },
+    {
+      "path": "src-tauri/src/sync/conflict_policy.rs",
+      "sha256": "8e0319ae9adc74b36c4433cd4782dfe4721abc8b2d7995b421695eacd7516797"
+    },
+    {
+      "path": "src-tauri/src/sync/credentials.rs",
+      "sha256": "ede96c846214b205f7a02b9406ce6cead9773a1fdc918a3d08f9f830f6622395"
+    },
+    {
+      "path": "src-tauri/src/sync/entries.rs",
+      "sha256": "fe7ffa6ae2768fb98991a84967f2c172d40b803edcc6cc14bbb89f3d8aafbe84"
+    },
+    {
+      "path": "src-tauri/src/sync/fever_pull.rs",
+      "sha256": "453735bd481913be726c7accd6c8ca7ee7e584d0678e40f29d8bf4ad78309e61"
+    },
+    {
+      "path": "src-tauri/src/sync/greader_pull.rs",
+      "sha256": "f8fb2f92d8431a2f03e18f300026b51b4a6ef0ecdb46d6ea091f77c09938dd72"
+    },
+    {
+      "path": "src-tauri/src/sync/mod.rs",
+      "sha256": "4acbc2be6c613250961288bf3d937267989ccbc8efa1a43c0250a6c7d7e86fdc"
+    },
+    {
+      "path": "src-tauri/src/sync/phases.rs",
+      "sha256": "ae731e8de340999bd523a0839cb0b6b2daa5e00dd03001bb567062aeff5c81dd"
+    },
+    {
+      "path": "src-tauri/src/sync/push.rs",
+      "sha256": "fd8d199a4228d8f82bdf1ef8b725bdfbe3512c02397cbc037d207eb0523e9e72"
+    },
+    {
+      "path": "src-tauri/src/sync/subscriptions.rs",
+      "sha256": "cdb846f59eab4e9c89df6de6b2d21a887eccf033b605014f1fdb49f2edb9bb2a"
+    }
+  ],
+  "digest": "2ddf3750189760e86d6279bd749fa940c25ecb4ff713f54b66f18a209b53fc56"
+}

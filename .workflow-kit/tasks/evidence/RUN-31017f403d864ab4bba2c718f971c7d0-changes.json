@@ -1,0 +1,9 @@
+{
+  "changed_files": [
+    "src/components/Timeline.tsx",
+    "src/components/timelineAnchor.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

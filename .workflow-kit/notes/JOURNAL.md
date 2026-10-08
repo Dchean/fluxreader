@@ -775,3 +775,99 @@
 - 2026-10-07T08:51:21.339472Z · accept · 验收 TASK-119, TASK-121；依据：owner 会话指示持续推进——视为验收确认（TASK-119/121 部分）；119 审查 PASS（重建面核对）+121 审查 R1 PASS（E0596 一手日志定罪）+CI f195aec 全绿（rust job 首次走通含 keyset 测试）
 - 2026-10-07T08:53:27.774714Z · accept · 验收 TASK-117；依据：owner 2026-10-07 会话指示持续推进——视为验收确认（TASK-117 部分）；审查 PASS+变异判别+CI 全绿（候选=dev@b7947e9；其 CI clippy 失败经 TASK-121 修复后 f195aec 全绿含 keyset 测试）
 - 2026-10-07T08:54:41.776629Z · accept · 验收 TASK-118；依据：owner 会话指示持续推进——视为验收确认（TASK-118 部分）；审查 PASS（bump 点穷举）+CI 全绿（候选=dev@feae9cd，CI 失败经 121 修复后 f195aec 全绿）
+- 2026-10-07T09:10:44.424816Z · batch · 关闭 BATCH-a57865b52aa4449ea24f0f15216d72c5，开启 BATCH-c3476b91d7ef4487a9f8747496f884bc；策略允许自动续批
+- 2026-10-07T09:11:41.723714Z · prepare · TASK-122 · 任务已冻结：正文/AI 实体缓存分离与显式失效——清理缓存不再复活旧产物（审计 P2-3）；范围 src, tools/frontend-regression.mjs
+- 2026-10-07T09:12:23.846447Z · checkpoint · TASK-122 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-07T10:55:19.478912Z · checkpoint · TASK-122 · 编码结果已记录，差异范围已核对：src/components/Reader.tsx, src/components/Timeline.tsx, src/components/settings/CacheCleanupSection.tsx, src/lib/api.ts, src/store.ts, src/store/bodyCache.ts, src/store/internals.ts, src/store/selectors.ts, src/store/slices/ai.ts, src/store/slices/bootstrap.ts, src/store/slices/nav.ts, src/store/slices/reader.ts, src/store/types.ts, src/types.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-07T10:55:53.019193Z · checkpoint · TASK-122 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-07T11:29:44.976185Z · checkpoint · TASK-122 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-07T11:43:18.404900Z · prepare · TASK-123 · 任务已冻结：保位窗口扩展——深页阅读的后台刷新不再丢锚（审计 P2-5）；范围 src, tools/frontend-regression.mjs
+- 2026-10-07T11:44:00.821822Z · checkpoint · TASK-123 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-07T14:02:56.868270Z · checkpoint · TASK-123 · Out-of-scope changes: .zcodeignore (allowed: src, tools/frontend-regression.mjs)；下一步：核对 diff --run 列出的越界文件，撤销或用 unblock --note 说明归属后再 begin；不要新建任务或重置预算
+- 2026-10-07T14:02:58.243853Z · note/lesson · TASK-123 · scope 失败已出现 24 次：Out-of-scope changes: .zcodeignore (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
+- 2026-10-07T14:03:47.914477Z · checkpoint · TASK-123 · 阻塞已处置（scope）：scope 处置：被拦的 .zcodeignore 为编码代理工作期间生成的工具配置文件（构建产物/运行时数据忽略清单，非本卡业务改动、未被任何任务引入）。将其移出仓库追踪面（未跟踪文件不属候选差异），工作树其余改动全部在 allowed_paths 内。；下一步：begin 重新实现
+- 2026-10-07T14:03:48.209123Z · unblock · TASK-123 · scope → ready；依据：DEC-gate-adjust-20261007
+- 2026-10-07T14:04:36.542465Z · checkpoint · TASK-123 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-07T14:05:01.405630Z · checkpoint · TASK-123 · Worker result belongs to a different task/run；下一步：按报错列出的漏报/多报文件修正 worker-result，再 unblock 后 begin；不要新建任务或重置预算
+- 2026-10-07T14:05:02.574988Z · note/lesson · TASK-123 · protocol 失败已出现 11 次：Worker result belongs to a different task/run。下次准备/实现前先核对这一点。
+- 2026-10-07T14:05:36.435636Z · checkpoint · TASK-123 · 阻塞已处置（protocol）：protocol 处置：首次 finish 误传旧 run_id 被拒、run 被收束（工作树未变，diff 已核对）。重开轮正确收轮。；下一步：begin 重新实现
+- 2026-10-07T14:05:36.732976Z · unblock · TASK-123 · protocol → ready；依据：DEC-gate-adjust-20261007
+- 2026-10-07T14:06:24.303149Z · checkpoint · TASK-123 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-07T14:07:00.318618Z · checkpoint · TASK-123 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-07T14:07:36.314036Z · checkpoint · TASK-123 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-07T14:33:54.172921Z · checkpoint · TASK-123 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-07T14:34:01.472156Z · checkpoint · TASK-123 · 阻塞已处置（review_failure）：R0 审查 FAIL（1 低危）：reloadFromBackend 的 fetchWindowRows 续页失败被外层静默 catch 丢弃（重开 TASK-067 N10 已关闭的『后台刷新失败不可见』缺陷类，与 reloadFilteredEntries 不对称）。核心窗口机制经审查确认正确（终止性/锚必在/代际协同/游标一致全过，4 处变异独立复现）。R1：续页失败同样 toast+rethrow+1 条失败可见性回归。；下一步：begin 重新实现
+- 2026-10-07T14:34:01.778351Z · unblock · TASK-123 · review_failure → ready；依据：DEC-gate-adjust-20261007
+- 2026-10-07T14:34:50.607076Z · checkpoint · TASK-123 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-07T14:40:17.160663Z · checkpoint · TASK-123 · 编码结果已记录，差异范围已核对：src/store/slices/bootstrap.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-07T14:40:51.387122Z · checkpoint · TASK-123 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-07T14:50:54.109053Z · checkpoint · TASK-123 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-07T14:54:07.284233Z · prepare · TASK-124 · 任务已冻结：同步状态变化事件——四态展示在真实操作链路上生效（审计 P2-6）；范围 src, tools/frontend-regression.mjs, src-tauri/src
+- 2026-10-07T14:54:52.878722Z · checkpoint · TASK-124 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-07T15:29:53.781431Z · checkpoint · TASK-124 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/db.rs, src-tauri/src/db/sync_queue.rs, src-tauri/src/lib.rs, src-tauri/src/sync/credentials.rs, src-tauri/src/sync/phases.rs, src-tauri/src/sync/push.rs, src-tauri/src/sync/subscriptions.rs, src/App.tsx, src/components/settings/SyncTab.tsx, src/store/slices/bootstrap.ts, src/store/slices/sync.ts, src/store/types.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-07T15:30:28.883396Z · checkpoint · TASK-124 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-07T15:50:22.592051Z · checkpoint · TASK-124 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-07T15:50:29.944154Z · checkpoint · TASK-124 · 阻塞已处置（review_failure）：R0 审查 FAIL（1 finding）：t124_tests 跨模块调用 t116_tests 私有 helper attempts_of（E0425 必炸 CI cargo test/clippy --all-targets；本地门禁不跑 cargo 故未拦，113/121/122 先例补偿核查抓到）。其余核查全部属实（锁纪律/字段对齐/判别力）。R1：helper 上移文件级 cfg(test) 或 t124_tests 内定义（单行级），修后 CI 复验。；下一步：begin 重新实现
+- 2026-10-07T15:50:30.240635Z · unblock · TASK-124 · review_failure → ready；依据：DEC-gate-adjust-20261007
+- 2026-10-07T15:51:20.125028Z · checkpoint · TASK-124 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-07T15:54:47.457988Z · checkpoint · TASK-124 · 编码结果已记录，差异范围已核对：src-tauri/src/commands/articles.rs, src-tauri/src/db.rs, src-tauri/src/db/sync_queue.rs, src-tauri/src/lib.rs, src-tauri/src/sync/credentials.rs, src-tauri/src/sync/phases.rs, src-tauri/src/sync/push.rs, src-tauri/src/sync/subscriptions.rs, src/App.tsx, src/components/settings/SyncTab.tsx, src/store/slices/bootstrap.ts, src/store/slices/sync.ts, src/store/types.ts, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-07T15:55:21.093462Z · checkpoint · TASK-124 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-07T16:55:51.125302Z · checkpoint · TASK-124 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-07T22:39:09.140213Z · checkpoint · TASK-124 · 依据新决定追加预算；原始时钟与失败记录保留；下一步：先核对已有成果，再按原任务范围继续
+- 2026-10-07T22:39:09.601554Z · extend · TASK-124 · 追加 60 分钟、1 轮修复；依据：TASK-124 CI 门禁修复轮（clippy doc_lazy_continuation，一手日志定罪），用户持续指示『继续推进优化』
+- 2026-10-07T22:39:24.427505Z · checkpoint · TASK-124 · 阻塞已处置（review_failure）：CI rust job clippy -D warnings 失败：4 处 doc_lazy_continuation（push.rs:204/205/336/337，文档注释列表续行未缩进）。修复 = 注释缩进对齐，无行为变化。R0 复审已 PASS，本处置仅针对 CI 门禁复验。；下一步：begin 重新实现
+- 2026-10-07T22:39:24.753543Z · unblock · TASK-124 · review_failure → ready；依据：CI 一手日志（run 37696238068 job 113048549611，git credential token 抓取）
+- 2026-10-07T22:40:25.711842Z · checkpoint · TASK-124 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-07T22:43:44.202076Z · checkpoint · TASK-124 · Worker requests manager action; inspect the result；下一步：处理执行者提出的请求，再 unblock 后 begin；不要新建任务或重置预算
+- 2026-10-07T22:44:19.465601Z · checkpoint · TASK-124 · 阻塞已处置（action_required）：R2 修复已落地（push.rs 两处空行），local cargo fmt 通过。首次 finish 因我误把 CI 环境说明放入 unresolved_items 而 block(action_required)。重新 begin 以正确记录候选。；下一步：begin 重新实现
+- 2026-10-07T22:44:19.813627Z · unblock · TASK-124 · action_required → ready；依据：主控自查：worker-result 的 unresolved_items 字段误放 CI 环境说明；业务修复已就绪。按契约置空后重新 begin 承载同一候选。
+- 2026-10-07T22:45:23.694795Z · checkpoint · TASK-124 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-07T22:46:23.644381Z · checkpoint · TASK-124 · 编码结果已记录，差异范围已核对：src-tauri/src/sync/push.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-07T22:47:05.193059Z · checkpoint · TASK-124 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-07T22:56:58.522784Z · checkpoint · TASK-124 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-07T22:59:12.680419Z · accept · 验收 TASK-124；依据：owner 会话指示『继续推进优化，按照之前派发子代理的方式进行』——视为验收确认；CI 全绿（8a4ca5e，rust job clippy/test success）+ 独立复审 R2 PASS（全新子代理，一手 CI 日志定罪 doc_lazy_continuation）
+- 2026-10-07T23:02:56.400487Z · checkpoint · TASK-122 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-07T23:03:44.794066Z · checkpoint · TASK-123 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-07T23:59:02.334408Z · checkpoint · TASK-122 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-08T00:01:04.466711Z · checkpoint · TASK-122 · 依据新决定追加预算；原始时钟与失败记录保留；下一步：先核对已有成果，再按原任务范围继续
+- 2026-10-08T00:01:04.907259Z · extend · TASK-122 · 追加 60 分钟、1 轮修复；依据：TASK-122 P0 修复轮（selectArticleBody useShallow，真实 Chrome 实证 #185），用户持续指示『继续推进优化』
+- 2026-10-08T00:01:13.516961Z · checkpoint · TASK-122 · 阻塞已处置（review_failure）：P0：selectArticleBody 每调用经 bodyViewFrom 返回新对象，Reader/SocialCard/NotificationCard 三处未包 useShallow → useSyncExternalStore 无限重渲染 #185。修复 = 三处订阅包 useShallow（一行级）。；下一步：begin 重新实现
+- 2026-10-08T00:01:13.885458Z · unblock · TASK-122 · review_failure → ready；依据：独立复审 FAIL（P0）+ 总控本人 headless Chrome 实证复现
+- 2026-10-08T00:02:33.297912Z · checkpoint · TASK-122 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-08T00:09:25.873189Z · checkpoint · TASK-122 · 编码结果已记录，差异范围已核对：src/components/Reader.tsx, src/components/Timeline.tsx, tools/frontend-regression.mjs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-08T00:10:11.207420Z · checkpoint · TASK-122 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-08T00:20:25.476652Z · checkpoint · TASK-122 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-08T00:22:05.447520Z · accept · 验收 TASK-122；依据：owner 会话指示『继续推进优化』——视为验收确认；TASK-122 独立复审 R1 PASS（P0 selectArticleBody useShallow 修复）+ 总控 headless Chrome 实证打开文章不再崩 + CI 全绿（eba4df5）
+- 2026-10-08T00:23:01.217020Z · checkpoint · TASK-123 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-08T00:36:54.226167Z · checkpoint · TASK-123 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-08T00:38:31.860467Z · accept · 验收 TASK-123；依据：owner 会话指示『继续推进优化』——视为验收确认；TASK-123 聚焦独立复审 PASS（TASK-122 修复后新候选上 t123-* 27 断言保持、锚/窗口逻辑完好）+ CI 全绿（eba4df5）
+- 2026-10-08T00:46:27.510503Z · prepare · TASK-125 · 任务已冻结：协议能力矩阵三列化与冲突应用层错误可见——能力/实现/验证分层（审计 P2-8）；范围 docs/sync-compat-matrix.md, src-tauri/src/sync
+- 2026-10-08T00:47:31.666947Z · checkpoint · TASK-125 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-08T01:08:57.523123Z · checkpoint · TASK-125 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-08T01:10:20.267811Z · checkpoint · TASK-125 · 任务已取消：范围定义疏漏：allowed_paths 漏 src-tauri/src/fever.rs（objective 的 D 项明确点名该文件记录 Fever max_id 能力），diff 判越界；且 finish 在文件被还原后记录了空候选（记录事故）。编码成果已存 tmp/task125.patch，重建任务后应用。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
+- 2026-10-08T01:10:20.598129Z · cancel · TASK-125 · 范围定义疏漏：allowed_paths 漏 src-tauri/src/fever.rs（objective 的 D 项明确点名该文件记录 Fever max_id 能力），diff 判越界；且 finish 在文件被还原后记录了空候选（记录事故）。编码成果已存 tmp/task125.patch，重建任务后应用。；依据：主控自查（TASK-120 先例：范围错误→cancel+重建）
+- 2026-10-08T01:14:06.838880Z · prepare · TASK-126 · 任务已冻结：协议能力矩阵三列化与冲突应用层错误可见——能力/实现/验证分层（审计 P2-8，TASK-126 范围修正重建）；范围 docs/sync-compat-matrix.md, src-tauri/src/sync
+- 2026-10-08T01:24:58.168659Z · checkpoint · TASK-126 · 任务已取消：allowed_paths 仍漏 src-tauri/src/fever.rs：prepare 的 allowed_paths 取自 snapshot_paths（spec 的 scope 对象不被读取），重建时未把该文件纳入 snapshot_paths。改为把 src-tauri/src/fever.rs 加进 snapshot_paths 后重建。；下一步：如需同一目标，准备新的任务并引用本任务作为历史
+- 2026-10-08T01:24:58.560068Z · cancel · TASK-126 · allowed_paths 仍漏 src-tauri/src/fever.rs：prepare 的 allowed_paths 取自 snapshot_paths（spec 的 scope 对象不被读取），重建时未把该文件纳入 snapshot_paths。改为把 src-tauri/src/fever.rs 加进 snapshot_paths 后重建。；依据：主控自查（同一范围缺陷第二次：TASK-125→126）
+- 2026-10-08T01:26:58.904181Z · prepare · TASK-127 · 任务已冻结：协议能力矩阵三列化与冲突应用层错误可见——能力/实现/验证分层（审计 P2-8，TASK-125/126 范围修正重建）；范围 docs/sync-compat-matrix.md, src-tauri/src/sync, src-tauri/src/fever.rs
+- 2026-10-08T01:27:58.307698Z · checkpoint · TASK-127 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-08T01:28:54.468410Z · checkpoint · TASK-127 · 编码结果已记录，差异范围已核对：docs/sync-compat-matrix.md, src-tauri/src/fever.rs, src-tauri/src/sync/conflict_policy.rs, src-tauri/src/sync/fever_pull.rs, src-tauri/src/sync/greader_pull.rs；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-08T01:29:34.831415Z · checkpoint · TASK-127 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-08T01:41:31.895910Z · checkpoint · TASK-127 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-08T01:42:49.358516Z · accept · 验收 TASK-127；依据：owner 会话指示『继续推进优化』——视为验收确认；TASK-127 独立复审 PASS（矩阵三列事实经上游源码复核、无 unwrap_or(0) 残留、失败传播测试具判别力）+ CI 全绿（0cc84e6，rust job clippy --all-targets/test 通过）
+- 2026-10-08T01:45:56.759368Z · prepare · TASK-128 · 任务已冻结：性能测量纠正与媒体/并发负载补测工具——先保证测量正确（审计 P2-7）；范围 tools/t059_cdp.mjs, tools/phase4_measure.mjs, tools/phase4_seed.py, tools/phase4_checklist.md
+- 2026-10-08T01:46:49.945336Z · checkpoint · TASK-128 · 开始执行，保留原任务身份和截止时间；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-08T02:31:29.814840Z · checkpoint · TASK-128 · Worker requests manager action; inspect the result；下一步：处理执行者提出的请求，再 unblock 后 begin；不要新建任务或重置预算
+- 2026-10-08T02:31:55.711549Z · checkpoint · TASK-128 · 阻塞已处置（action_required）：首次 finish 因 unresolved_items 非空而 block(action_required)。该待观察项（不可稳定复现的 NotifCard #185 证据）已改记入 summary 与项目日志，不阻塞本卡。；下一步：begin 重新实现
+- 2026-10-08T02:31:56.079069Z · unblock · TASK-128 · action_required → ready；依据：主控自查：worker-result 的 unresolved_items 误填了「待观察项」（本卡交付不依赖它），按契约置空；修复已就绪，重开轮承载同一候选。
+- 2026-10-08T02:33:02.035695Z · checkpoint · TASK-128 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-08T02:33:52.485251Z · checkpoint · TASK-128 · 编码结果已记录，差异范围已核对：tools/phase4_checklist.md, tools/phase4_measure.mjs, tools/phase4_seed.py；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-08T02:34:33.188703Z · checkpoint · TASK-128 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-08T02:45:13.176413Z · checkpoint · TASK-128 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-08T02:45:42.457653Z · checkpoint · TASK-128 · 阻塞已处置（review_failure）：R1 修复范围：F1 搜索正例限定文章分组+overlayText 打开后读取+键入前 token 硬断言；F2 每段自带 conditions 快照并据此生成结论行；F3 清单与 seed 脚本加『还原前退出应用』保护；F4 修正『只读』声明并单列真实同步警告；F5 统一清单文件名与长会话判定线；F6 崩溃布局堆值标失效。；下一步：begin 重新实现
+- 2026-10-08T02:45:42.863432Z · unblock · TASK-128 · review_failure → ready；依据：独立复审 FAIL（6 findings，其中 F1 搜索正例可被订阅源条目抢先、F2 结论行条件与实际同步状态矛盾为高/中危测量可信度问题）
+- 2026-10-08T02:46:35.037914Z · checkpoint · TASK-128 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-08T03:07:54.102660Z · checkpoint · TASK-128 · 编码结果已记录，差异范围已核对：tools/phase4_checklist.md, tools/phase4_measure.mjs, tools/phase4_seed.py；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-08T03:08:36.584948Z · checkpoint · TASK-128 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-08T03:19:13.656197Z · checkpoint · TASK-128 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-08T03:22:28.503699Z · accept · 验收 TASK-128；依据：owner 会话指示『继续推进优化』——视为验收确认；TASK-128 独立复审 R1 PASS findings=0（6 findings 逐条对抗式复核：搜索归属对抗探针、restore 三分支实跑、条件快照贯穿结论行）+ CI 全绿（b7c3ed8）

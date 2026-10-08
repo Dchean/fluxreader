@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-36b10dd1e41a47ba9ac397d0fcce946d",
+  "task_id": "TASK-123",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "TASK-123 聚焦复审（全新子代理，绑定 TASK-122 后新候选）：PASS findings=0；t123-* 27 断言保持、TASK-122 useShallow 改动不扰动锚/窗口逻辑"
+  },
+  "started_at_utc": "2026-10-08T00:36:17.018596Z",
+  "finished_at_utc": "2026-10-08T00:36:17.564068Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "348015fe2a7c8785a67233f0180574c0496c01250a5f6228abcef0b4761c5a0e",
+  "candidate_digest": "04191dce70b6da53c5e4b69163d4545712c66dfc1adb7c45324c8cf0b508889f",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-36b10dd1e41a47ba9ac397d0fcce946d-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-36b10dd1e41a47ba9ac397d0fcce946d-review.json",
+    "candidate_digest": "04191dce70b6da53c5e4b69163d4545712c66dfc1adb7c45324c8cf0b508889f",
+    "quality_digest": "b8378f1def794b66889f4e6ba4000333270e6b106d2fee42fb46df845b786f19"
+  },
+  "estimated_cost_usd": null
+}

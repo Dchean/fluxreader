@@ -96,5 +96,12 @@
 | [TASK-119](items/TASK-119.json) | 请求与计数过期覆盖——迟到响应不得覆盖新状态（审计 P2-4） | done |
 | [TASK-120](items/TASK-120.json) | TASK-117 延续：修复新增代码的 clippy 警告（CI 失败处置，行为零变化保持） | cancelled |
 | [TASK-121](items/TASK-121.json) | TASK-117 延续：tests/ 构造点补齐 E0063 修复（CI 失败处置，行为零变化） | done |
+| [TASK-122](items/TASK-122.json) | 正文/AI 实体缓存分离与显式失效——清理缓存不再复活旧产物（审计 P2-3） | done |
+| [TASK-123](items/TASK-123.json) | 保位窗口扩展——深页阅读的后台刷新不再丢锚（审计 P2-5） | done |
+| [TASK-124](items/TASK-124.json) | 同步状态变化事件——四态展示在真实操作链路上生效（审计 P2-6） | done |
+| [TASK-125](items/TASK-125.json) | 协议能力矩阵三列化与冲突应用层错误可见——能力/实现/验证分层（审计 P2-8） | cancelled |
+| [TASK-126](items/TASK-126.json) | 协议能力矩阵三列化与冲突应用层错误可见——能力/实现/验证分层（审计 P2-8，TASK-126 范围修正重建） | cancelled |
+| [TASK-127](items/TASK-127.json) | 协议能力矩阵三列化与冲突应用层错误可见——能力/实现/验证分层（审计 P2-8，TASK-125/126 范围修正重建） | done |
+| [TASK-128](items/TASK-128.json) | 性能测量纠正与媒体/并发负载补测工具——先保证测量正确（审计 P2-7） | done |
 
 verified 表示验证/审查完成、等待所属交付验收；不等于已经合并。

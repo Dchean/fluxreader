@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-999aa4d5487b45738d2de39266416a33",
+  "task_id": "TASK-128",
+  "kind": "review",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "TASK-128 R1 独立复审（全新子代理）：6 findings 逐条对抗式复核全部真修复，PASS findings=0；审查者自跑搜索对抗探针与 restore 三分支"
+  },
+  "started_at_utc": "2026-10-08T03:18:36.174498Z",
+  "finished_at_utc": "2026-10-08T03:18:36.676925Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "063a878423ad20fccfa1ecf61c707302ecbdafc19e01e23d7314d30e294bfde1",
+  "candidate_digest": "2208b361f76b5871175b852a0da02c67dcf02b16a192b887cb170869d3b22418",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-999aa4d5487b45738d2de39266416a33-review.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": "independent",
+    "verdict": "PASS",
+    "report": ".workflow-kit/tasks/evidence/RUN-999aa4d5487b45738d2de39266416a33-review.json",
+    "candidate_digest": "2208b361f76b5871175b852a0da02c67dcf02b16a192b887cb170869d3b22418",
+    "quality_digest": "31ebbf6da42b5aa57d80a651c8d52d7d66dfe263c603dae1db5e32c4db09faaa"
+  },
+  "estimated_cost_usd": null
+}

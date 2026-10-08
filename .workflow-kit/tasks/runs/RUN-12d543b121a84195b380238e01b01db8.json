@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-12d543b121a84195b380238e01b01db8",
+  "task_id": "TASK-127",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "TASK-127 编码（P2-8 重建）：应用已完成的补丁 tmp/task125.patch"
+  },
+  "started_at_utc": "2026-10-08T01:27:57.442173Z",
+  "finished_at_utc": "2026-10-08T01:28:53.970224Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "268e3fd2c11f5427d95296130600666c36543c8c931676a6bde6d50bfdee0595",
+  "candidate_digest": "0d5048ceccacd83bf0774940c475f55e1fa4828c8adc9591b228d4e8a2595fde",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-12d543b121a84195b380238e01b01db8-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-12d543b121a84195b380238e01b01db8-scope.json"
+}

@@ -1,0 +1,109 @@
+{
+  "task_id": "TASK-128",
+  "candidate_digest": "426b81f4ee645ad03144284e2e417a74a1cc2efe9b386c8a3d7a5d1cf7f29309",
+  "verification_run": "RUN-798c246ba58940a087bb6248e6e7365d",
+  "verdict": "FAIL",
+  "summary": "工具确有实质改进（切换双判据/搜索分段+负向探针/媒体与五布局种子/RSS 与 JS 堆分列/深页三档/锁等待代理/条件块；t059_cdp 零改动、候选哈希一致、语法与门禁全过），但仍有 6 处问题，其中两处仍会产出或标注误导性数字，不能判 PASS。",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "high",
+      "location": "tools/phase4_measure.mjs:584-608/346-400/778",
+      "trigger": "搜索浮层 .cp-item 同时含操作/订阅源/文章三组，searchItems 取全部；overlayText 在浮层未打开时读取必为空，chooseSearchToken 的排除守卫永不生效。当 token 恰为订阅源名子串（如 'Verge' ⊂ 'The Verge'）时，180ms 防抖后 feed 条目即满足「含 token 且结果数变化」，正例立即判成功。",
+      "impact": "记录的 resultMs 可能只是 feed 过滤耗时（~180-200ms），把真机 FTS 耗时整段抹掉——正是本卡要消灭的『看起来达标其实没测到』；负向探针（随机 token）覆盖不到此路径。",
+      "suggestion": "正例判定限定到文章分组（[aria-label=文章] 下的 .cp-item）；overlayText 改为打开浮层后读取，并硬性断言键入前条目文本不含 token。"
+    },
+    {
+      "id": "F2",
+      "severity": "medium",
+      "location": "tools/phase4_measure.mjs:738/949-957/827-843/846-886/1053-1059",
+      "trigger": "lockWaitProxy 段点『刷新全部订阅源』触发真实同步后，随后的 longSession 与 memoryByLayout 就在同步在飞状态下测量。",
+      "impact": "内存/长会话结论行用电池开头的 condLine，恒印『同步在飞=false』，与同一 JSON 里 conditionsBefore.syncInFlight=true 自相矛盾；同步入库的新文章还会让堆/DOM 增量被误读为缓存增长（审计 P2-7.4 类问题的残留）。",
+      "suggestion": "每段自带 conditions() 快照并据此生成该段结论行；内存结论行显式打印同步在飞状态。"
+    },
+    {
+      "id": "F3",
+      "severity": "medium",
+      "location": "tools/phase4_checklist.md:55-64；tools/phase4_seed.py:176-189",
+      "trigger": "按清单顺序执行：② 启动应用 → ③ 跑电池 → ⑤ --restore。应用仍在运行时 SQLite 连接仍持有句柄。",
+      "impact": "活动连接下逐字节覆盖 .db/-wal/-shm 可能静默失效甚至损坏真实库，而 restore 的 SHA256 只校验目标文件必然通过——本卡『备份/还原纪律不变』最不能失效的一环。",
+      "suggestion": "步骤⑤前要求完全退出应用（确认进程结束）；phase4_seed.restore() 检测 FluxReader.exe 在跑时拒绝或要求 --force。"
+    },
+    {
+      "id": "F4",
+      "severity": "medium",
+      "location": "tools/phase4_measure.mjs:8（纪律声明）与 403-421/827-843；tools/phase4_checklist.md 全流程",
+      "trigger": "真机跑锁等待代理段会点『刷新全部订阅源』→ triggerManualSync → syncPhase('feeds'/'states') + refreshAllFeeds + reloadFromBackend。",
+      "impact": "owner 依据『只读测量，不写应用数据』的承诺决定是否在真实库/真实账号上运行；实际会联网抓取全部源、写库、可能向已连接后端推送状态。文档不实 + owner 知情缺口。",
+      "suggestion": "修正头部纪律描述，清单单列警告（会触发一次真实同步；不希望联网时先断开后端或跳过该段）。"
+    },
+    {
+      "id": "F5",
+      "severity": "low",
+      "location": "tools/phase4_checklist.md:47/53/90",
+      "trigger": "按③的 --out 命名模式执行后照抄④的查看命令；或按第 90 行判定线判断长会话。",
+      "impact": "④路径与实际文件名不一致会报错；『多轮后仍单调增长』的判定线在本工具输出（只采首末两点）上不成立。",
+      "suggestion": "统一文件名或改用固定 --out；判定线改写为可判读形式（显著正增量且 DOM 节点同向增长），或在 longSession 内补每轮堆采样。"
+    },
+    {
+      "id": "F6",
+      "severity": "low",
+      "location": "tools/phase4_measure.mjs:1054",
+      "trigger": "遍历五布局时某布局把渲染树打崩（mock 下『通知』布局实测）。",
+      "impact": "结论行出现『通知:12.68MB×0卡』，读起来像可用数字，实为根卸载后的页面堆；verdicts 里虽带 appCrashedHere 但控制台结论行是 owner 第一眼读到的。",
+      "suggestion": "结论行对 appCrashedHere 的布局输出 heapUsedMB=null/『失效（渲染树被卸载）』，与长会话增量处理一致。"
+    }
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "11 条验收逐项核对：①满足（id 集合变化判据 + rAF 轮询 + 3 帧稳定 + 超时不印毫秒）；②分段与浮层归属已实现但正例范围含命令/订阅源条目且守卫失效 → F1；③--media/--layouts 与 migrations.rs 实际 schema 一致、--info 只读、备份还原函数未改但清单缺『还原前退出应用』→ F3；④分列与口径说明齐备、崩溃中断即作废增量，但结论行条件被污染 → F2；⑤⑥满足；⑦条件块存在但对 lockWaitProxy 之后的段不成立 → F2；⑧清单可执行性有两处缺口 → F3/F4/F5；⑨烟雾证据与候选内容一致、skipped/timedOut 分支如实；⑩门禁 PASS。",
+      "evidence_files": [
+        "tools/phase4_measure.mjs",
+        "tools/phase4_seed.py",
+        "tools/phase4_checklist.md",
+        ".workflow-kit/tasks/evidence/RUN-798c246ba58940a087bb6248e6e7365d-candidate.json"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "git diff 0cc84e6 2275f02 仅三份工具文件，零业务代码；受保护的 tools/t059_cdp.mjs 两个区间 diff 均为空且哈希与候选 manifest 一致。验证运行 lint（0 warnings）、build、frontend（759/759，含 t122/t124/t116 既有断言逐条打印）、cargo_fmt 全 PASS；cargo_test/clippy 按 DEC-local-cargo-gate-20261005 标 NOT_APPLICABLE（本卡零 Rust 改动）。phase4_seed 旧路径（无 --layouts）仍可用，未见弱化既有保护。",
+      "evidence_files": [
+        ".workflow-kit/tasks/runs/RUN-798c246ba58940a087bb6248e6e7365d.json",
+        ".workflow-kit/tasks/evidence/RUN-798c246ba58940a087bb6248e6e7365d-frontend.stdout.txt",
+        "tools/t059_cdp.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "FAIL",
+      "analysis": "工具失败路径处理是本卡亮点（错误挂钩先装、appHealth 区分渲染树卸载、crashGuard 记录并恢复且标注 postRecoveryReload、崩溃后剩余段跳过并写入 caveats、空数据/不可滚动/无 token/非 Tauri 一律 skipped 不给数字、长会话中断 growthMB=null+原因）。但恢复/数据边界有一处未处置：清单 --restore 步骤无『先退出应用』约束、seed 脚本不检测进程，活动连接下覆盖真实库可能静默失效或损坏而哈希校验必然通过（F3）；另有 F6 崩溃布局堆值未标失效。",
+      "evidence_files": [
+        "tools/phase4_measure.mjs",
+        "tools/phase4_seed.py",
+        "tools/phase4_checklist.md"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "职责划分清楚（页面内测量库只产数据、Node 侧负责注入/进程 RSS/分段 try-catch/汇总）；CDP 契约只消费受保护的 t059_cdp.mjs 且修掉了审计 7.6 的两处契约不符；命名与注释把口径写在字段旁；跳过/超时分支与正常分支字段形状一致；seed 侧 cols() 探测列、--info 与 --layouts 共用单一口径。文档准确性问题（F4/F5）已列 findings，不改变结构评价。",
+      "evidence_files": [
+        "tools/phase4_measure.mjs",
+        "tools/phase4_seed.py"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "FAIL",
+      "analysis": "本项评『这套工具能否产出可信测量』：相比 0cc84e6 是质变，但 F1（搜索 resultMs 可能只是订阅源过滤，真机把 FTS 耗时整段抹掉，负向探针抓不到）与 F2（电池自己触发同步后就地测长会话/各布局内存，报告仍印同步在飞=false）仍会污染性能结论。可接受的残留已在 note/caveats 说明：firstResultMs 受 rAF 粒度限制、stableMs 含 3 帧静默下限需按定义读、程序化滚动不等于真实输入延迟、无头模式下 RSS 如实为 null。",
+      "evidence_files": [
+        "tools/phase4_measure.mjs",
+        "tools/phase4_checklist.md"
+      ]
+    }
+  ],
+  "ui_review": null
+}

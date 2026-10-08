@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "RUN-b581fc12078a45989e3ee29b0952bbdb",
+  "task_id": "TASK-124",
+  "kind": "implementation",
+  "outcome": "blocked",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "TASK-124 R2 修复轮：CI clippy doc_lazy_continuation 4 处"
+  },
+  "started_at_utc": "2026-10-07T22:40:24.769454Z",
+  "finished_at_utc": "2026-10-07T22:43:43.771553Z",
+  "exit_code": null,
+  "timed_out": false,
+  "input_digest": "e7670d8c52f1cd8a5747da4cf0635adb4454fefc6d633f823d5aa4518d7671c0",
+  "candidate_digest": null,
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-b581fc12078a45989e3ee29b0952bbdb-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-b581fc12078a45989e3ee29b0952bbdb-scope.json",
+  "baseline_manifest": ".workflow-kit/tasks/evidence/RUN-f7f1ee7aca654a88aec3f937118bb33c-scope.json",
+  "failure_kind": "action_required",
+  "failure_reason": "Worker requests manager action; inspect the result"
+}

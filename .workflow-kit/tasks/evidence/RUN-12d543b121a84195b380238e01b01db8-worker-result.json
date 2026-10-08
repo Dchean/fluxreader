@@ -1,0 +1,22 @@
+{
+  "task_id": "TASK-127",
+  "run_id": "RUN-12d543b121a84195b380238e01b01db8",
+  "status": "ready_for_verification",
+  "summary": "实现审计 P2-8（TASK-125 范围修正后的重建，编码成果经 tmp/task125.patch 复用）：(A) docs/sync-compat-matrix.md 三列化——§1 大表改为「维度 | 协议/服务端支持 | 本客户端已实现 | 指定服务端版本已验证」四列，Fever 条目获取行如实写明协议/当前 Miniflux 支持 items&max_id 向更旧翻页（handler.go 约 227-267，2026-10 查阅时点）、本客户端未实现历史回溯（仅 since_id 增量 + items_recent 种子 + with_ids 补齐），新增「历史回溯（向更旧翻页）」专行；文首与 §5 增加版本验证声明（仅 mock_greader 测试替身自动锁定，Miniflux/FreshRSS 具体部署版本未逐一验收）；§2 明确四格政策均为客户端选择的冲突策略而非协议必然要求（GR read-wins 显式标注）；§6-L2 重写。(B) conflict_policy.rs：apply_read_by_policy/apply_star_by_policy 返回 AppResult<usize>，移除全部 unwrap_or(0)，DB 写失败不再被当成 0 行变化；新增两个测试（成功路径计数、无表 DB 触发写入失败 → Err 传播）。(C) greader_pull.rs/fever_pull.rs：reconcile_reader_state/reconcile_fever_state 返回 AppResult<()> 并用 ? 传播，调用点把 Err 记入 report.errors（不再静默），既有 #[cfg(test)] 调用点同步 .unwrap()，断言语义不变。(D) fever.rs：模块头与 items_since/items_recent 文档补历史回溯能力说明（协议支持 vs 本客户端未实现，纯注释）。门禁：cargo fmt --check 通过；lint 通过（1 条既有警告在 tools/phase4_measure.mjs，未触碰）；build/frontend 由 verify 复跑。Rust 编译/test/clippy 由 CI rust job 承担（本机无 MSVC 链接器，DEC-local-cargo-gate-20261005）。",
+  "changed_files": [
+    "docs/sync-compat-matrix.md",
+    "src-tauri/src/fever.rs",
+    "src-tauri/src/sync/conflict_policy.rs",
+    "src-tauri/src/sync/fever_pull.rs",
+    "src-tauri/src/sync/greader_pull.rs"
+  ],
+  "validation_requests": [
+    "cargo_fmt",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

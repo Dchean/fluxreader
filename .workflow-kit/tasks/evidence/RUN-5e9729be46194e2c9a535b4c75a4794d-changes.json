@@ -1,0 +1,19 @@
+{
+  "changed_files": [
+    "src/components/Reader.tsx",
+    "src/components/Timeline.tsx",
+    "src/components/settings/CacheCleanupSection.tsx",
+    "src/lib/api.ts",
+    "src/store.ts",
+    "src/store/bodyCache.ts",
+    "src/store/internals.ts",
+    "src/store/selectors.ts",
+    "src/store/slices/ai.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/reader.ts",
+    "src/store/types.ts",
+    "src/types.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

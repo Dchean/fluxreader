@@ -1,0 +1,20 @@
+{
+  "task_id": "TASK-124",
+  "run_id": "RUN-b581fc12078a45989e3ee29b0952bbdb",
+  "status": "ready_for_verification",
+  "summary": "R2 修复轮：修复 CI rust job（clippy --all-targets -D warnings）报出的 4 处 clippy::doc_lazy_continuation（src-tauri/src/sync/push.rs）。根因是非空行 + 空行分段缺失导致的文档注释列表项续行缩进告警（rustc 1.99/CI clippy）。修法：在 push_block_summary 文档列表末尾与 t124_tests 判别力说明前各插入一个空行（/// 独占行），使续行成为独立段落——语义正确且 clippy 接受；纯文档注释，零行为变化。 环境说明：本地无 MSVC 链接器，cargo test/clippy 由 CI rust job 承担（DEC-local-cargo-gate-20261005）；本地 cargo fmt --check 已通过，doc_lazy_continuation 消除待 CI 复验。",
+  "changed_files": [
+    "src-tauri/src/db/sync_queue.rs",
+    "src-tauri/src/sync/push.rs"
+  ],
+  "validation_requests": [
+    "cargo_fmt",
+    "lint",
+    "build",
+    "frontend"
+  ],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null,
+  "changed_files_source": "auto: filled from diff by the tool"
+}

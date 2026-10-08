@@ -1,0 +1,57 @@
+{
+  "task_id": "TASK-122",
+  "candidate_digest": "04191dce70b6da53c5e4b69163d4545712c66dfc1adb7c45324c8cf0b508889f",
+  "verification_run": "RUN-e4a1095b1ef244739fe319c2128dbcf4",
+  "verdict": "PASS",
+  "summary": "R1 repair reviewed independently against commit eba4df5 (HEAD). Delta is exactly three files: Reader.tsx, Timeline.tsx, tools/frontend-regression.mjs. All three selectArticleBody subscriptions now read useAppStore(useShallow((s) => selectArticleBody(...))); selectors.ts and bodyCache.ts are byte-identical to HEAD~1 (empty diff), so selector semantics (new object per record, module singleton UNREQUESTED_BODY for no-id/no-record/no-entry) are unchanged — fix is call-site only, as required. A full-tree scan of src/ finds exactly 3 selectArticleBody subscriptions, all wrapped; no useStore/alias/generic-form bypasses exist. The new t122-9 guard masks comments and strings before scanning and extracts bracket-balanced useAppStore arguments; it flags all three pre-fix bare subscriptions, and a re-added bare subscription (single- or multi-line, nested) fails. Verification RUN-e4a1095b1ef244739fe319c2128dbcf4: cargo_fmt/lint/build/frontend all PASS (759/759, 0 failures); t122-9 present and green in the frontend log. Residual static-scan limitations (explicit generic call form useAppStore<T>(...) and alias/indirect indirection are not detected) are acknowledged in the guard's own comment as supplementary to the authoritative browser check; neither form exists in the tree and both would be static-lint-invisible but not runtime-safe, so this is a documented scope limit, not a defect.",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "Requirement: three sites (Reader/activeArticleId, SocialCard/item.id, NotificationCard/item.id) must wrap the subscription in useShallow with behavior otherwise identical. Confirmed at Reader.tsx:53 and Timeline.tsx:697 / 1124, all useAppStore(useShallow((s) => selectArticleBody(...))), with the zustand/react/shallow import present in both files (Reader.tsx:2, Timeline.tsx:4). Behavior unchanged: git diff HEAD~1 -- src/store/selectors.ts src/store/bodyCache.ts is empty; selectors.ts:97-101 still returns bodyViewFrom(rec) (fresh object) for records and UNREQUESTED_BODY (module singleton, selectors.ts:69) for no id/record/entry. Comment at selectors.ts:54-67, 97-98 unchanged. No scope expansion: delta touches only the three expected files.",
+      "evidence_files": [
+        "src/components/Reader.tsx",
+        "src/components/Timeline.tsx",
+        "src/store/selectors.ts"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "Verification run RUN-e4a1095b1ef244739fe319c2128dbcf4 checks read directly from the run record and raw logs: cargo_fmt PASS, lint PASS (1 pre-existing warning in tools/phase4_measure.mjs, 0 errors), build PASS (exit 0), frontend PASS (759/759, 0 failures). t122-9 is present in RUN-e4a1095b1ef244739fe319c2128dbcf4-frontend.stdout.txt as green. The governing maskCode122/scanBodySubs122 logic from tools/frontend-regression.mjs re-ran: on HEAD it yields 3 subscriptions, 0 bare; against the pre-fix Reader.tsx/Timeline.tsx from HEAD~1 it yields the three bare subscriptions flagged wrapped=false, i.e. the assertion would have failed before the fix and will fail again if any single bare subscription reappears. The guard does not weaken any pre-existing assertion; t122-1..t122-8 remain unchanged and green.",
+      "evidence_files": [
+        ".workflow-kit/tasks/runs/RUN-e4a1095b1ef244739fe319c2128dbcf4.json",
+        ".workflow-kit/tasks/evidence/RUN-e4a1095b1ef244739fe319c2128dbcf4-frontend.stdout.txt",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "The failure being fixed is an unconditional infinite render (React #185: getSnapshot not cached -> Maximum update depth exceeded on Reader mount). Root cause verified structurally: zustand v5 useStore passes the selector straight to React.useSyncExternalStore with no snapshot cache, and bodyViewFrom (selectors.ts:80-91) returns a fresh object each call, so bare subscription guarantees an unstable getSnapshot; useShallow's ref-based shallow compare stabilizes the reference. All 8 ArticleBodyView fields are primitives, so shallow comparison is complete (no nested-object false-positive that would leave the loop live). Edge cases: no-id (Reader with activeArticleId null), no-record, and mock-mode branch all return either the singleton or a fresh literal — useShallow covers both. Three pre-fix sites all covered; the scan also exercises multi-line and nested-wrapper variants and flags them. No empty/repeat/recovery path in this delta changes behavior.",
+      "evidence_files": [
+        "src/components/Reader.tsx",
+        "src/components/Timeline.tsx",
+        "src/store/selectors.ts"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "Dependency direction unchanged (components -> store selectors); no new module, no new abstraction. The comments at Reader.tsx and Timeline.tsx explain WHY useShallow is mandatory (zustand v5 hands the selector to useSyncExternalStore with no snapshot cache; bodyViewFrom returns a new object -> getSnapshot reference always changes -> React #185 loop) and tie it to the pre-existing Sidebar.tsx invariant, rather than narrating authoring. The t122-9 guard is well-scoped and honest: it masks // and /* */ comments and string/backtick literals before scanning, tolerates arbitrary whitespace/newlines, and walks the whole src/ tree, so the canonical bare form cannot survive. Residual limits, explicitly declared in the guard's own comment as supplementary to the authoritative browser check: the explicit generic form 'useAppStore<T>(...)' is not matched by the 'useAppStore(' needle, and alias/indirect indirection is invisible. Neither form exists anywhere in src/, so the guard is not presently bypassed; noted as a known static-analysis boundary, not a defect.",
+      "evidence_files": [
+        "src/components/Reader.tsx",
+        "src/components/Timeline.tsx",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "No representative-load measurement or performance target is involved in this delta. It is a correctness fix at three subscription sites (eliminating an infinite re-render loop is a behavioral correctness gain, not a benchmarked optimization). Cost delta is one shallow compare of an 8-primitive-field object per relevant store update, negligible.",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": null
+}

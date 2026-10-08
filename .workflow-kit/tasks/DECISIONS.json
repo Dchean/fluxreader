@@ -3064,6 +3064,114 @@
       "candidates": {
         "TASK-118": "d43066fbf3a2ff803583f86966540c0c5df62a0d1f4c9e0ce500cbaff111bfaf"
       }
+    },
+    {
+      "id": "DEC-237b7d141c0f472aac4a262b4f8deca0",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "TASK-124 CI 门禁修复轮（clippy doc_lazy_continuation，一手日志定罪），用户持续指示『继续推进优化』",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-124"
+      ],
+      "recorded_at_utc": "2026-10-07T22:37:54.413157Z",
+      "budget_extension": {
+        "decision_id": "DEC-237b7d141c0f472aac4a262b4f8deca0",
+        "recorded_at_utc": "2026-10-07T22:37:54.413157Z",
+        "minutes": 60,
+        "repair_rounds": 1,
+        "previous_deadline_at_utc": "2026-10-07T18:54:52.199033Z",
+        "deadline_at_utc": "2026-10-07T23:37:54.413157Z"
+      }
+    },
+    {
+      "id": "DEC-cfb13b2ec3a44f1cb07cc877b1a2b6d3",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示『继续推进优化，按照之前派发子代理的方式进行』——视为验收确认；CI 全绿（8a4ca5e，rust job clippy/test success）+ 独立复审 R2 PASS（全新子代理，一手 CI 日志定罪 doc_lazy_continuation）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-124"
+      ],
+      "recorded_at_utc": "2026-10-07T22:58:34.062931Z",
+      "candidates": {
+        "TASK-124": "34ca7a1ce6615697f0265fda4a867971db080380321e5c0db3141b1f8115b574"
+      }
+    },
+    {
+      "id": "DEC-a66a199abaf44ffe932b5d0419b207db",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "TASK-122 P0 修复轮（selectArticleBody useShallow，真实 Chrome 实证 #185），用户持续指示『继续推进优化』",
+      "statement": "Owner extended this task's time/repair allowance; financial limits remain in force",
+      "scope": [
+        "TASK-122"
+      ],
+      "recorded_at_utc": "2026-10-07T23:59:47.739600Z",
+      "budget_extension": {
+        "decision_id": "DEC-a66a199abaf44ffe932b5d0419b207db",
+        "recorded_at_utc": "2026-10-07T23:59:47.739600Z",
+        "minutes": 60,
+        "repair_rounds": 1,
+        "previous_deadline_at_utc": "2026-10-07T13:12:23.217220Z",
+        "deadline_at_utc": "2026-10-08T00:59:47.739600Z"
+      }
+    },
+    {
+      "id": "DEC-00de125f547c4591b1d8be0e3be19f6d",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示『继续推进优化』——视为验收确认；TASK-122 独立复审 R1 PASS（P0 selectArticleBody useShallow 修复）+ 总控 headless Chrome 实证打开文章不再崩 + CI 全绿（eba4df5）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-122"
+      ],
+      "recorded_at_utc": "2026-10-08T00:21:29.188224Z",
+      "candidates": {
+        "TASK-122": "04191dce70b6da53c5e4b69163d4545712c66dfc1adb7c45324c8cf0b508889f"
+      }
+    },
+    {
+      "id": "DEC-7bcb581dc5b64482bfadecebd685377e",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示『继续推进优化』——视为验收确认；TASK-123 聚焦独立复审 PASS（TASK-122 修复后新候选上 t123-* 27 断言保持、锚/窗口逻辑完好）+ CI 全绿（eba4df5）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-123"
+      ],
+      "recorded_at_utc": "2026-10-08T00:37:55.158004Z",
+      "candidates": {
+        "TASK-123": "04191dce70b6da53c5e4b69163d4545712c66dfc1adb7c45324c8cf0b508889f"
+      }
+    },
+    {
+      "id": "DEC-0b906820888c47c28194164e3d135715",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示『继续推进优化』——视为验收确认；TASK-127 独立复审 PASS（矩阵三列事实经上游源码复核、无 unwrap_or(0) 残留、失败传播测试具判别力）+ CI 全绿（0cc84e6，rust job clippy --all-targets/test 通过）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-127"
+      ],
+      "recorded_at_utc": "2026-10-08T01:42:16.211989Z",
+      "candidates": {
+        "TASK-127": "0d5048ceccacd83bf0774940c475f55e1fa4828c8adc9591b228d4e8a2595fde"
+      }
+    },
+    {
+      "id": "DEC-013d34d427db48b1a727615fb8244d3e",
+      "issuer": "owner",
+      "status": "accepted",
+      "source": "owner 会话指示『继续推进优化』——视为验收确认；TASK-128 独立复审 R1 PASS findings=0（6 findings 逐条对抗式复核：搜索归属对抗探针、restore 三分支实跑、条件快照贯穿结论行）+ CI 全绿（b7c3ed8）",
+      "statement": "Owner accepted the listed candidate versions and their continuations",
+      "scope": [
+        "TASK-128"
+      ],
+      "recorded_at_utc": "2026-10-08T03:21:41.928561Z",
+      "candidates": {
+        "TASK-128": "2208b361f76b5871175b852a0da02c67dcf02b16a192b887cb170869d3b22418"
+      }
     }
   ]
 }

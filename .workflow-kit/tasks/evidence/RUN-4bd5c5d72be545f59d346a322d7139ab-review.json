@@ -1,0 +1,72 @@
+{
+  "task_id": "TASK-124",
+  "candidate_digest": "5d2c9ba8d0e021cec51fa036d0049609b8783eb42b06436a9322adf49f2361cf",
+  "verification_run": "RUN-f46c49bf50b242bf89905fb2fbe58f37",
+  "verdict": "FAIL",
+  "summary": "独立复核：候选 116 文件 sha256 与工作区逐一吻合，候选摘要按 workflow-kit capture/digest 算法重算一致；改动恰 14 文件全在 allowed_paths，保护路径未触碰。审计 P2-6 两个半边的设计与落地均属实：Rust 侧 sync-queue-changed 在四命令事务提交后锁外、push_states_now/states_phase 推送确认·失败后（含老化清理与补推段）、build_client 失败 record_push_block（全队项 attempts+1+摘要，审计②此前不记录）发射；前端 applySyncQueueChanged 只写 waiting/failed/lastError 三字段不越权 syncConnected，App.tsx 监听与 SyncTab subscribe 镜像、reload 顺带刷新同一状态源；payload 单点 queue_changed_payload 三方同形（snake_case，与 api.ts SyncQueueStats 无 rename_all 情况下逐字对齐）；未配置静默双保险（OnceLock 未注册 no-op + read_credentials None→None）。未编译补偿核查：build_client Result 化 5 个调用点（push.rs/phases.rs×2/subscriptions.rs×2）全部适配，无 Option 残留；ClientBuildFailure 走既有 pub(super)+glob 重导出模式；notify_queue_changed 锁纪律逐一核对（四命令 conn 锁作用域外、两 phase 内均在 conn lock drop 后，PUSH_LOCK→db 单向无环无重入死锁）；OnceLock set-once 幂等且先于 scheduler 注册；clippy 默认面逐项过（pub 多参/match 单臂/unused 无命中）。回归判别力：自行变异（last_error 写入改恒 null）恰 3 红（t124-3/t124-4/t124-6），复跑 cargo fmt --check exit 0。但发现一处 CI 必红的编译缺陷：sync_queue.rs 的 mod t124_tests 跨模块引用仅定义在 mod t116_tests 内的私有 helper attempts_of，cargo test 与 clippy --all-targets 在 CI 必报 E0425——Rust 半边回归保护当前不可执行，验收④/⑤的 CI 腿不成立，故 FAIL；本地门禁（fmt/lint/build/frontend 758/758）真实通过，修复为单行级（helper 上移或 t124_tests 内定义），修后复验可收口。",
+  "findings": [
+    "位置：src-tauri/src/db/sync_queue.rs mod t124_tests（mark_push_blocked_records_all_rows_and_accumulates，t124-r3）。触发条件：CI 执行 cargo test 或 cargo clippy --all-targets（本地门禁不跑 cargo，DEC-local-cargo-gate-20261005，故未拦）。影响：E0425 cannot find function `attempts_of` in this scope——该 helper（sync_queue.rs:223）仅定义于兄弟模块 mod t116_tests 内，Rust 模块私有性下 t124_tests 的 `use super::*` 不可见，测试 crate 编译失败，t124-r1/r3 与全仓 Rust 测试在 CI 全红，验收④（Rust 事件 payload/失败标记测试 CI 执行）与⑤（cargo test/clippy CI 承担）不成立。建议：把 attempts_of 上移到 sync_queue.rs 顶层 #[cfg(test)] 作用域供两个测试模块共用，或在 mod t124_tests 内定义同名 helper（照抄 t116_tests:223 的 query_row 实现即可）；修后本地补跑 cargo fmt --check 并交 CI 复验。"
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "任务卡①②两半逐项对上：a) 发射点=四命令（set_read:142/set_read_bulk:186/set_starred:198/mark_all_read:228，均在事务提交后 conn 锁外、各发一次统计已聚合）+ push_states_now（出队/失败后 314，无可推项仅老化时 291）+ states_phase（首次推段 89、补推段 123、补推无推仅老化 127）+ record_push_block（build_client Failed→全队项 mark_push_blocked，审计②「attempts/last_error 永不记录」的缺口补上）；b) 前端 App.tsx 监听 sync-queue-changed→applySyncQueueChanged（只写三字段，syncConnected 不触碰），SyncTab subscribe 镜像+refreshQueueStats 保留，bootstrap reload 补写 syncQueueLastError——同一状态源并存不互相覆盖（事件与 reload 写同一三字段，后到为准且均为真值）。分类：push_block_summary 按 code==\"auth\"（fever.rs:205/438 实证）或含 ClientLogin（greader.rs:69/337 实证文案）归认证失败，其余透传不冒充；未配置静默双保险。t124-* 8 条（1 前置+1 本体+2/3/4/5/6/7）覆盖验收①②③场景，t116-* 13 条逐字保留（基线 750→758=+8）。范围 14 文件全在 allowed_paths，非目标零越界（无短轮询、无重试/老化语义改动、无徽标、keyset 未动）。④Rust 测试 3 条已写但 CI 编译受阻——该缺口记入 regression。",
+      "evidence_files": [
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/commands/articles.rs",
+        "src/store/slices/sync.ts",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "FAIL",
+      "analysis": "本地证据复核：RUN-f46c49bf frontend 758/758（26 既有+732 新增）与证据日志一致，lint 唯一 warning 为未改动的 tools/phase4_measure.mjs 既有项，build exit 0；cargo fmt --check 独立复跑 exit=0。判别力自行复现：把 applySyncQueueChanged 的 syncQueueLastError 写入变异为恒 null，恰 t124-3/t124-4/t124-6 三红、其余 755 绿（复原后文件 sha256 与候选清单逐字吻合），事件落 store 链路断裂必红成立；t124-6 源级断言钉住 App.tsx 监听与 payload 键名。但 Rust 侧回归保护当前不可执行：mod t124_tests 引用仅存在于 mod t116_tests 的私有 fn attempts_of，cargo test 与 clippy --all-targets 编译必红（E0425）——t124-r1/r3（payload 正确性/阻塞标记）两条 CI 测试跑不起来，验收④/⑤的 CI 腿不成立，本组判 FAIL。其余既有断言零弱化：t116 13 条语义原样（刷新点新增而非替换，bootstrap 仅补写 lastError），26 条既有迁移断言全绿。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-f46c49bf50b242bf89905fb2fbe58f37-frontend.stdout.txt",
+        "src-tauri/src/db/sync_queue.rs",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "异常与边界逐一核对：①未配置静默双保险——notify_queue_changed 先查 OnceLock（未注册 no-op，集成测试零影响）再查 read_credentials（endpoint/username/password 空串均 None），queue_changed_payload(configured=false) 恒 None，前端 pill 保持本地模式分支（t124-5+124-r1 锁定）；②认证/端点/网络失败——record_push_block 仅在 mark_push_blocked 返回 n>0 时发事件（空队 no-op 不制造噪音），全队项 attempts+1 与 failed=attempts>0 行数口径自洽（认证失败后 failed==waiting，t124-r3 断言），摘要经 truncate_last_error 200 码点截断，与 mark_push_failed 同口径；③落库失败仅 warn 不发事件；emit 失败 `let _ =` 忽略（降级为 reload 刷新点，仍收敛）；④锁纪律：四命令在 conn 锁作用域外 await notify；push_states_now/states_phase 的 notify 均在 conn lock drop 后调用，notify 内部自持短锁（stats 单查询），PUSH_LOCK→db 单向加锁无环、无重入死锁；⑤OnceLock set-once 幂等（重复注册取首次），lib.rs setup 中先注册再 spawn_scheduler，命令并发无 setup 前窗口；⑥push_states_now 读队列失败仍走锁外提前 return（不误发事件）。",
+      "evidence_files": [
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/db/sync_queue.rs",
+        "src-tauri/src/sync/credentials.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "结构与单点成立：wire 形态收口 queue_changed_payload 纯函数单点（Rust struct/事件 payload/前端 api.ts SyncQueueStats 三方同形，无 rename_all 也无键名漂移）；前端落点单点 applySyncQueueChanged（App.tsx 监听唯一调用），pill 文案沿用 syncPillLabel 单点未动。build_client Option→Result 的两形态区分使「未配置静默」与「失败可见」在类型上可分，5 个调用点（push.rs:263、phases.rs:21/40、subscriptions.rs:21/54）全部适配且 subscriptions 的 best-effort 语义保持（Err(_)→false，不发事件不发标记，有注释说明口径）；record_push_block 消除了 push_states_now/states_phase 的重复阻塞处置。OnceLock 注册表替代加参的理由（push_states_now/states_phase 二参签名被 tests/ 多文件锁定）已注释属实（实证 tests/ sync_gap_repro_e2e.rs:737 等二参调用未变）。feeds_phase 失败映射回 notConnected 与手动同步 isNotConnectedError 前端语义的差异有注释理由。新 pub 项（init_queue_event_target/push_block_summary/notify_queue_changed/mark_push_blocked/queue_changed_payload）均经既有 glob 重导出模式暴露，无新抽象层、无重复规则。未发现需要拆而未拆的实证。",
+      "evidence_files": [
+        "src-tauri/src/sync/credentials.rs",
+        "src-tauri/src/sync/subscriptions.rs",
+        "src-tauri/src/db/sync_queue.rs",
+        "src/store/slices/sync.ts",
+        "src-tauri/src/lib.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "无性能目标或测量承诺变更。新增运行时面仅为：每个 sync-queue-changed 事件一次 sync_queue_stats 查询（三个 COUNT 级子查询，注释口径 <1ms 量级）与一次 tauri emit；阻塞路径一次全表 UPDATE（attempts+1）。事件频率由用户操作（四命令）与推送完成/阻塞次数界定，无轮询引入（非目标明示），防抖合批 schedule_state_push 语义未动。以上为静态范围说明，不做实测提升声称。",
+      "evidence_files": [
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/db/sync_queue.rs"
+      ]
+    }
+  ],
+  "ui_review": {
+    "required": false,
+    "checked_states": [],
+    "evidence_files": [],
+    "notes": "ui_change=false（四态数据源接通，无视觉样式变更）"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "changed_files": [
+    "src/store/slices/bootstrap.ts",
+    "tools/frontend-regression.mjs"
+  ]
+}

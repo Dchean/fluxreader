@@ -1,0 +1,41 @@
+{
+  "task_id": "TASK-123",
+  "candidate_digest": "04191dce70b6da53c5e4b69163d4545712c66dfc1adb7c45324c8cf0b508889f",
+  "verification_run": "RUN-435771d3935a4dc3839bc8d6949baca3",
+  "verdict": "PASS",
+  "summary": "Focused re-review on the current tree (HEAD eba4df5). TASK-123 logic is intact and the later TASK-122 P0 delta does not break it. (1) fetchWindowRows keyset loop termination and the bottom-anchor predicate are unchanged; keepReadingPosition windowTarget/windowBottomId derivation in reloadFromBackend and reloadFilteredEntries intact. (2) timelineAnchor record/commit/rearm/stash and the offsetPx path are unchanged. (3) TASK-122 commit eba4df5 touched only Reader.tsx, Timeline.tsx and tools/frontend-regression.mjs; git diff 8a4ca5e..eba4df5 for src/store/slices/bootstrap.ts, src/components/timelineAnchor.ts and src/store/slices/nav.ts is EMPTY. The Timeline.tsx hunk changes only the SocialCard/NotifCard body subscription to useShallow(...) plus comments — zero anchor/offsetPx/filterKey/scrollToIndex tokens. (4) t123-* assertions t123-0..t123-6 still present and green (27 log lines, no weakening). (5) Candidate digest matches the current tree exactly: all candidate.json file hashes verified equal, 0 mismatches. Independent re-run of npm run test:frontend on the current tree: exit 0, 759/759 passed.",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "Acceptance ①②③④ all covered: window refetch (fetchWindowRows with keyset continuing pages up to maxPages=ceil(target/PAGE)+1, bottom-anchor convergence), navigation-refetch combination (nav three paths pass keepReadingPosition on cache hit), intra-item offsetPx (record/commit/rearm/stash all carry it; restore consumers add it via applyAnchorOffsetPx after scrollToIndex align:'start'), and cache-truncation window boundary (cursor.loaded/lastId drive windowTarget/windowBottomId, not truncated snapshot length). Acceptance ⑤ gates green: cargo_fmt PASS, lint PASS, build PASS, frontend PASS 759/759 incl. t123-*; cargo_test/clippy NOT_APPLICABLE per DEC-local-cargo-gate-20261005 (no MSVC linker, zero Rust change this card).",
+      "evidence_files": ["src/store/slices/bootstrap.ts", "src/components/timelineAnchor.ts", "src/store/slices/nav.ts", ".workflow-kit/tasks/evidence/RUN-435771d3935a4dc3839bc8d6949baca3-frontend.stdout.txt"]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "t123-0..t123-6 present in tools/frontend-regression.mjs and in the RUN-435771 frontend log (27 lines). Discriminating assertions intact: t123-1 asserts 3 list_articles calls (first page + 2 keyset pages), entries=1253 not collapsing to 500, anchor id 1749 surviving with offsetPx 137 and restore index 752; t123-2 asserts the navigation-refetch combo (entries=1251 not 500, positionRestoreNonce bump, index 750); t123-3 offset round-trip; t123-4 tail-commit; t123-5 truncation boundary; t123-6 sub-page failure visibility. TASK-122 appended a new t122-9 source-level lock and did not modify any t123 assertion. Independent re-run: exit 0, '前端逻辑回归合计 759/759 通过'.",
+      "evidence_files": ["tools/frontend-regression.mjs", ".workflow-kit/tasks/runs/RUN-435771d3935a4dc3839bc8d6949baca3.json", ".workflow-kit/tasks/evidence/RUN-435771d3935a4dc3839bc8d6949baca3-frontend.stdout.txt"]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "fetchWindowRows sub-page failure path is wrapped with toast + rethrow, matching the first-page catch; empty page breaks with exhausted true; the isStale closure re-checks gen !== queryGeneration each page and again after the loop so a superseded instance is discarded in full; on failure the old entries/cursor/exhausted are left untouched and positionRestoreNonce is not bumped (asserted by t123-6). No mutation of the anchor on failure.",
+      "evidence_files": ["src/store/slices/bootstrap.ts", ".workflow-kit/tasks/evidence/RUN-435771d3935a4dc3839bc8d6949baca3-frontend.stdout.txt"]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "fetchWindowRows helper is a single reused primitive for both content-refresh entry points, keeping cursor advance, exhausted判定 and keyset form in one place; rationale in block comments at module/header level. timelineAnchor.ts keeps the single accounting point for record/commit/rearm/stash. The TASK-122 useShallow wrap is a localized subscription fix guarded by t122-9, so the boundary between body subscription and anchor logic stays explicit. No duplicated rule introduced.",
+      "evidence_files": ["src/components/timelineAnchor.ts", "src/store/slices/bootstrap.ts", "src/components/Timeline.tsx"]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "No performance claim in this card; objective is positional correctness on background refresh. windowTarget is bounded by the previously loaded count and maxPages caps pathological refetch, so work stays proportional to the already-loaded window. TASK-122's useShallow wrap reduces re-renders rather than adding load.",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": null
+}

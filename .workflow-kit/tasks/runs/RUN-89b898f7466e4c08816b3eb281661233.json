@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "id": "RUN-89b898f7466e4c08816b3eb281661233",
+  "task_id": "TASK-124",
+  "kind": "implementation",
+  "outcome": "completed",
+  "executor": {
+    "harness": "current_agent",
+    "model": null,
+    "context_id": "主控派发：编码子代理实施同步状态变化事件（跨栈，审计 P2-6）；dev@4f040fc 基线；审计材料 tmp/audit-20261007/ REVIEW.md 第 6 节 + probes.mjs P8 场景"
+  },
+  "started_at_utc": "2026-10-07T14:54:52.213010Z",
+  "finished_at_utc": "2026-10-07T15:29:53.431486Z",
+  "exit_code": 0,
+  "timed_out": false,
+  "input_digest": "e7670d8c52f1cd8a5747da4cf0635adb4454fefc6d633f823d5aa4518d7671c0",
+  "candidate_digest": "5d2c9ba8d0e021cec51fa036d0049609b8783eb42b06436a9322adf49f2361cf",
+  "raw_output_refs": [
+    ".workflow-kit/tasks/evidence/RUN-89b898f7466e4c08816b3eb281661233-worker-result.json"
+  ],
+  "checks": [],
+  "review": {
+    "mode": null,
+    "verdict": null,
+    "report": null,
+    "candidate_digest": null
+  },
+  "estimated_cost_usd": null,
+  "scope_manifest": ".workflow-kit/tasks/evidence/RUN-89b898f7466e4c08816b3eb281661233-scope.json"
+}

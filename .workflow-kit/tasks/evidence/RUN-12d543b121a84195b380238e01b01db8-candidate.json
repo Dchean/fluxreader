@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-10-08T01:28:53.946264Z",
+  "roots": [
+    ".workflow-kit/docs/DEC-gate-adjust-20261007.md",
+    "docs/sync-compat-matrix.md",
+    "src-tauri/src/fever.rs",
+    "src-tauri/src/sync"
+  ],
+  "files": [
+    {
+      "path": ".workflow-kit/docs/DEC-gate-adjust-20261007.md",
+      "sha256": "6921a0bde4c5b29a620af19bc1815a7a2240a4dbca44cca9496403af41c9d6f9"
+    },
+    {
+      "path": "docs/sync-compat-matrix.md",
+      "sha256": "97d8dcb29a925603bfe9e2e89fdcf58e123da0cc575450fd27b03f6bc70d411f"
+    },
+    {
+      "path": "src-tauri/src/fever.rs",
+      "sha256": "b5cb47f6ef29146da202032f626d5ecaa52e4c0e6d65bc1c2577bd3d541a033a"
+    },
+    {
+      "path": "src-tauri/src/sync/conflict_policy.rs",
+      "sha256": "ffc2a869de8c8e8ee0df8869c8683d4621acaebcb23e299da1c7a58b8f5fdf89"
+    },
+    {
+      "path": "src-tauri/src/sync/credentials.rs",
+      "sha256": "ede96c846214b205f7a02b9406ce6cead9773a1fdc918a3d08f9f830f6622395"
+    },
+    {
+      "path": "src-tauri/src/sync/entries.rs",
+      "sha256": "fe7ffa6ae2768fb98991a84967f2c172d40b803edcc6cc14bbb89f3d8aafbe84"
+    },
+    {
+      "path": "src-tauri/src/sync/fever_pull.rs",
+      "sha256": "f0911acec9dc4acee33ce4effbdd600c7827b12cd601d32e9de4b95ff2500e21"
+    },
+    {
+      "path": "src-tauri/src/sync/greader_pull.rs",
+      "sha256": "79e39f78690d7e8de9f7f644efb5dfffe183a85813c14ad8ee464f8d0738498d"
+    },
+    {
+      "path": "src-tauri/src/sync/mod.rs",
+      "sha256": "4acbc2be6c613250961288bf3d937267989ccbc8efa1a43c0250a6c7d7e86fdc"
+    },
+    {
+      "path": "src-tauri/src/sync/phases.rs",
+      "sha256": "ae731e8de340999bd523a0839cb0b6b2daa5e00dd03001bb567062aeff5c81dd"
+    },
+    {
+      "path": "src-tauri/src/sync/push.rs",
+      "sha256": "fd8d199a4228d8f82bdf1ef8b725bdfbe3512c02397cbc037d207eb0523e9e72"
+    },
+    {
+      "path": "src-tauri/src/sync/subscriptions.rs",
+      "sha256": "cdb846f59eab4e9c89df6de6b2d21a887eccf033b605014f1fdb49f2edb9bb2a"
+    }
+  ],
+  "digest": "0d5048ceccacd83bf0774940c475f55e1fa4828c8adc9591b228d4e8a2595fde"
+}

@@ -1,0 +1,67 @@
+{
+  "task_id": "TASK-124",
+  "candidate_digest": "cf42393e1c23d67b04cea8f54d9a1e879f4f3b99b2fd552a8f1358e038e22f7a",
+  "verification_run": "RUN-ffbb4cf89dc2460e9cfec6bba18ee28d",
+  "verdict": "PASS",
+  "summary": "R1 聚焦复审（未参与前轮）：候选绑定无误——R1 候选清单 116 文件 sha256 与工作区逐一吻合（0 缺失 0 不符），manifest.digest 与 RUN json.candidate_digest 均等于给定摘要。R0→R1 变更面经独立重建证实恰为一处：R0 版 sync_queue.rs（用逆操作重建，逆后 sha256 逐字命中 R0 候选 9fae1e4d…）与 R1 仅差 attempts_of 的搬运——文件级 #[cfg(test)] fn（:215-216，位于 :209 新头注之后、:229 mod t116_tests 之前）新增，mod t116_tests 内原定义（R0 :184-192）删除，函数体逐字相同；全文件 attempts_of 仅 1 处定义、10 处调用，无重复定义、无夹带。R0 唯一 finding 的根因与修复独立复现：以 rustc --emit=metadata（免链接）编译 R0 结构片段得 E0425「cannot find function `attempts_of` in this scope / note: function crate::t116_tests::attempts_of exists but is inaccessible」，R1 结构片段零错误通过——兄弟模块私有项互不可见的机制明确，上移后两模块经各自 use super::* 解析同一份文件级项。静态编译面（本机 cargo check 被缺 MSVC link.exe 的既有环境阻断，DEC-local-cargo-gate-20261005 前提复现，故无法整 crate typecheck，改为逐符号人工核查）：build_client Result<Backend,ClientBuildFailure> 化后 5 个调用点（push.rs:263 / phases.rs:21 / phases.rs:40 / subscriptions.rs:21 / subscriptions.rs:54）全部适配，全仓无 let-else/Option 残留，无第六处漏改；ClientBuildFailure 的 pub(super) 可见性经同步模块的既有 pub use credentials::* glob + 兄弟 use super::* 解析（用 rustc 元数据探针复现该模式：零错误，与既有 pub(super) build_client 同机制）；record_push_block/notify_queue_changed 为 pub(super)+pub 经 push 的 glob 重导出；age_stale_queue 新 usize 返回被 3 个调用点全部消费；mark_push_blocked/queue_changed_payload 经 db.rs glob 重导出；articles.rs 4 命令用 crate::sync::notify_queue_changed 具名路径；lib.rs sync::init_queue_event_target 经 pub mod sync + glob；类型面无裸名/缺失 use：push_block_summary 读 AppError.code/.message（真实 pub 字段）、notify 传 &Arc<Mutex<Connection>> 与 AppState.db 同型、queue_changed_payload 读 SyncQueueStats 三 pub 字段、tauri::Emitter 在函数内导入。R0 的 E0425 同型缺陷在新增面上未再复现。门禁独立复跑：cargo fmt --check exit 0；frontend 758/758（26 既有 + 732 新增，t116-* 13 条语义保持、t124-* 9 条含 2 条源级接线断言）。R1 已闭合 R0 唯一 finding，无新 finding；CI 残余风险仅剩常规编译面（本机不可跑的 cargo test/clippy 全量，属 DEC 明示由 CI 承担）。判定 PASS。",
+  "findings": [],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "PASS",
+      "analysis": "验收④（Rust 事件 payload/失败标记测试 ≥2 条，CI 执行）的编译阻碍已消除：send 侧新增 3 条 cargo 测试（sync_queue.rs t124-r1 payload 正确性、t124-r3 mark_push_blocked 全队项累加、push.rs t124-r2 认证/网络分类），R1 后 t124_tests 的 attempts_of 经文件级解析可编译，此前 E0425 阻断不再。任务卡①②两半与前轮结论一致且本轮抽验属实：①本地入队事务提交后（articles.rs set_read:142/set_read_bulk:186/set_starred:198/mark_all_read:228，均在 conn 锁外）与推送确认·失败后（push.rs:314、phases.rs:89/123/127）发 sync-queue-changed，payload 经 queue_changed_payload 单点 {waiting,failed,last_error}；②build_client 失败经 record_push_block 记 attempts/last_error（审计②缺口）。前端 App.tsx 监听→applySyncQueueChanged 只写三字段不触 syncConnected，SyncTab subscribe 镜像、bootstrap reload 补写 lastError，同一状态源并存。范围 14 文件全在 allowed_paths，非目标零越界。",
+      "evidence_files": [
+        "src-tauri/src/db/sync_queue.rs",
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/commands/articles.rs",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "R0 regression FAIL 的唯一依据（mod t124_tests 引用兄弟模块私有 attempts_of → cargo test/clippy --all-targets E0425）本轮独立复核为已修复：R1 将 helper 上移文件级 #[cfg(test)]，以 rustc 元数据探针双向复现（R0 结构 E0425、R1 结构 exit 0），并确认无重复定义（全文件 1 处）；判别力保持——t124-r1/r3 仍引用该 helper 做落库真值断言，t116_tests 内 6 处 attempts_of 调用（:262/268/273/293/356 等）经 use super::* 解析同一文件级项，语义未变。门禁独立复跑：frontend 758/758（26 既有 + 732 新增）与本机 cargo fmt --check exit 0 均复现；t116-* 13 条语义逐字保留（基线 750→758=+8），刷新点为新增而非替换。t124-r2（push.rs，不依赖跨模块私有项）本就无该阻碍。",
+      "evidence_files": [
+        ".workflow-kit/tasks/evidence/RUN-ffbb4cf89dc2460e9cfec6bba18ee28d-frontend.stdout.txt",
+        "src-tauri/src/db/sync_queue.rs",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "PASS",
+      "analysis": "抽验前轮结论并复核 R1 触达面：①未配置静默——notify_queue_changed 先查 QUEUE_EVENT_TARGET 未注册即 return（集成测试不注册，发射点 no-op），再经 read_credentials 为空返回 None，queue_changed_payload(configured=false) 恒 None；②认证/网络区分——push_block_summary 以 err.code==\"auth\" 或 message 含 ClientLogin 归认证（fever.rs/greader.rs 实证文案），其余透传「推送被阻塞（网络/端点失败）」，t124-r2 钉住分类；③阻塞标记——record_push_block 仅在 mark_push_blocked 返回 n>0 时发事件（空队 no-op），摘要经 truncate_last_error 200 码点截断；④锁纪律——四命令 notify 在 conn 锁外、两 phase 的 notify 在 conn lock drop 后，notify 内部自持短锁读 stats，PUSH_LOCK→db 单向无环；⑤OnceLock set-once 幂等、lib.rs setup 先注册后 spawn_scheduler；⑥push_states_now 读队列失败走锁外提前 return 不误发。R1 仅动测试 helper，不触任何运行时路径，无新异常面。",
+      "evidence_files": [
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/sync/phases.rs",
+        "src-tauri/src/db/sync_queue.rs",
+        "src-tauri/src/sync/credentials.rs"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "R1 结构改进成立且最小：helper 上移到文件级 #[cfg(test)]（:215-216）后成为两个测试模块的单一共享点，消除「兄弟模块私有项不可见」的隐式约束，头注（:209-214）记录了 E0425 根因与修复理由，符合「重复规则/必须共享的边界」证据——t124_tests 与 t116_tests 需要同一落库真值读取口径，就地复制 helper 反而制造第二份重复，上移更优。函数体逐字未动（query_row 读 attempts），last_error_of 仍单点留在 t116_tests（仅 t116 使用，无需上移）。无新增抽象层、无重复定义、无夹带（10 处调用点与 R0 逐字相同）。新 pub 项（notify_queue_changed/push_block_summary/init_queue_event_target/record_push_block/mark_push_blocked/queue_changed_payload）沿用既有 glob 重导出模式暴露，无模块边界异常。",
+      "evidence_files": [
+        "src-tauri/src/db/sync_queue.rs",
+        "src-tauri/src/commands/articles.rs",
+        "src-tauri/src/db.rs"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "无性能目标或测量承诺变更，R1 仅移动 #[cfg(test)] 测试 helper，不进任何产物二进制、不改运行时面。既有运行面（每事件一次 sync_queue_stats 三 COUNT 查询 + 一次 tauri emit；阻塞路径一次全表 UPDATE）与 R0 逐字相同，无轮询引入，防抖合批 schedule_state_push 语义未动。以上为静态范围说明，不作实测提升声称。",
+      "evidence_files": [
+        "src-tauri/src/sync/push.rs",
+        "src-tauri/src/db/sync_queue.rs"
+      ]
+    }
+  ],
+  "ui_review": {
+    "required": false,
+    "checked_states": [],
+    "evidence_files": [],
+    "notes": "ui_change=false（四态数据源接通，无视觉样式变更）"
+  }
+}

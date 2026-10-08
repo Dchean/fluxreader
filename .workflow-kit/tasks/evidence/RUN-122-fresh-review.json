@@ -1,0 +1,60 @@
+{
+  "task_id": "TASK-122",
+  "candidate_digest": "264a047329c99f99e60e730b6f67f563bd54d2e56968c2acb09723ad256fb0f5",
+  "verification_run": "RUN-4e9d315ed3dc4cbe86024e9d6fc6e2b4",
+  "verdict": "FAIL",
+  "summary": "候选与工作区逐文件 sha256 吻合；t122-* 行为断言与四门禁通过，但发现 P0 运行缺陷：selectArticleBody 每次调用返回新对象，三处订阅（Reader.tsx:46、Timeline.tsx:693 SocialCard、Timeline.tsx:1118 NotificationCard）未包 useShallow，触发 React error #185（getSnapshot should be cached → Maximum update depth exceeded）。已在真实 headless Chrome 复现：打开文章 Reader 挂载即崩，Reader 不渲染；useShallow 包裹后 A/B 干净。主交互路径不可用，FAIL。",
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "P0",
+      "location": "src/components/Reader.tsx:46；src/components/Timeline.tsx:693/1118",
+      "trigger": "Reader 挂载（打开文章）或 Social/Notification 卡渲染即触发。selectArticleBody 有记录时经 bodyViewFrom 每次返回新对象；无 useShallow 的 useSyncExternalStore getSnapshot 引用恒变 → React 无限重渲染 #185。",
+      "impact": "打开任意文章 Reader 崩溃、社交/通知卡崩溃，应用主路径不可用。",
+      "suggestion": "三处改 useShallow 包裹：useAppStore(useShallow((s)=>selectArticleBody(s, id)))；补 DOM 渲染回归/源级锁定，不能用纯 store 回归代替。"
+    }
+  ],
+  "review_checks": [
+    {
+      "area": "requirements",
+      "status": "FAIL",
+      "analysis": "正文读取单点实现导致真实渲染崩溃",
+      "evidence_files": [
+        "src/store/selectors.ts",
+        "src/components/Reader.tsx"
+      ]
+    },
+    {
+      "area": "regression",
+      "status": "PASS",
+      "analysis": "t122-* 行为断言存在且四门禁通过，但 node-only harness 无法覆盖 DOM 渲染崩溃",
+      "evidence_files": [
+        ".workflow-kit/tasks/runs/RUN-4e9d315ed3dc4cbe86024e9d6fc6e2b4.json",
+        "tools/frontend-regression.mjs"
+      ]
+    },
+    {
+      "area": "failure_paths",
+      "status": "FAIL",
+      "analysis": "真实 React 渲染路径未覆盖且实测崩溃",
+      "evidence_files": [
+        "src/components/Reader.tsx"
+      ]
+    },
+    {
+      "area": "maintainability",
+      "status": "PASS",
+      "analysis": "bodyCache 模块结构良好，缺陷在订阅接线层",
+      "evidence_files": [
+        "src/store/bodyCache.ts"
+      ]
+    },
+    {
+      "area": "performance",
+      "status": "NOT_APPLICABLE",
+      "analysis": "正确性崩溃非性能基准问题",
+      "evidence_files": []
+    }
+  ],
+  "ui_review": null
+}

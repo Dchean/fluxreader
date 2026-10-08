@@ -28,7 +28,7 @@
 
 **性能安排**：社交布局正文加载不再无限等待，与切换布局后的秒开对齐
 
-已建任务 93 项：已验收 76，待验收 0，阻塞 0。
+已建任务 100 项：已验收 81，待验收 0，阻塞 0。
 
 | 任务 | 状态 | 目标 / 下一步 |
 | --- | --- | --- |
@@ -45,7 +45,7 @@
 | [TASK-039 · REQ-004 播客页 toast 位置 + REQ-008 设置页控件一致性](<../tasks/cards/TASK-039.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 | [TASK-040 · 前端缺陷批一：按 id 摘要态（F4）+ 搜索打开标读（F7）+ 全部已读视图口径（F8）+ 搜索竞态（F20）](<../tasks/cards/TASK-040.md>) | 已验收 | 当前候选的测试与审查通过；继续已授权任务；所属功能完成后请用户验收 |
 
-另有 81 项记录可在任务总览查看。
+另有 88 项记录可在任务总览查看。
 
 **本轮暂缓**：SQL 性能与索引加固（审计 route-M，主控已用 EXPLAIN QUERY PLAN 独立复核）：M-5 列表查询因 COALESCE 表达式排序使 idx_articles_published 对 8 个变体全失效（SCAN + USE TEMP B-TREE FOR ORDER BY）；M-7 sync_queue 零索引致每次标读全表扫；M-9 一次全部已读 = 1 SELECT + 1 UPDATE + 2N 往返且全程持锁；M-14 v6→v7 后置回填在事务外且以 user_version 当完成标记（半途中断永不重试）。
 
@@ -72,29 +72,29 @@
 
 ## 教训
 
-- 2026-10-05T14:31:46.341244Z · note/lesson · 历史会话证据丢失教训（DEC-evidence-loss-repair-20261005）：审查代理产出的变异测试/门禁日志若只写 tasks/evidence/ 而不随提交入库，摘要校验将永久悬空。本轮起审查报告引用的证据文件必须随任务记录一并提交。存量同型缺陷：TASK-092/093/094/096/097（旧批次，不阻塞操作）的悬空引用仍在，待后续统一处置。
-- 2026-10-06T09:56:06.046879Z · note/lesson · TASK-114 · scope 失败已出现 18 次：Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
 - 2026-10-06T09:58:18.205342Z · note/lesson · TASK-114 · scope 失败已出现 19 次：Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
 - 2026-10-06T10:02:04.089801Z · note/lesson · TASK-114 · scope 失败已出现 20 次：Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
 - 2026-10-06T10:07:28.915593Z · note/lesson · TASK-114 · scope 失败已出现 21 次：Out-of-scope changes: .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
 - 2026-10-06T10:10:42.656676Z · note/lesson · TASK-114 · protocol 失败已出现 10 次：Worker result belongs to a different task/run。下次准备/实现前先核对这一点。
 - 2026-10-07T07:41:17.258677Z · note/lesson · TASK-120 · scope 失败已出现 22 次：Out-of-scope changes: src-tauri/tests/ingestion_e2e.rs (allowed: src-tauri/src)。下次准备/实现前先核对这一点。
 - 2026-10-07T07:43:13.134405Z · note/lesson · TASK-120 · scope 失败已出现 23 次：Out-of-scope changes: src-tauri/tests/ingestion_e2e.rs (allowed: src-tauri/src)。下次准备/实现前先核对这一点。
+- 2026-10-07T14:02:58.243853Z · note/lesson · TASK-123 · scope 失败已出现 24 次：Out-of-scope changes: .zcodeignore (allowed: src, tools/frontend-regression.mjs)。下次准备/实现前先核对这一点。
+- 2026-10-07T14:05:02.574988Z · note/lesson · TASK-123 · protocol 失败已出现 11 次：Worker result belongs to a different task/run。下次准备/实现前先核对这一点。
 
 ## 最近事件
 
-- 2026-10-07T07:48:18.940197Z · checkpoint · TASK-121 · 编码结果已记录，差异范围已核对：无文件变化；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-10-07T07:48:57.566489Z · checkpoint · TASK-121 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
-- 2026-10-07T08:07:34.825072Z · checkpoint · TASK-121 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
-- 2026-10-07T08:07:43.864955Z · checkpoint · TASK-121 · 阻塞已处置（review_failure）：R0 审查 FAIL（1 finding，一手证据翻案）：审查者调取三份失败 CI 原始日志——真实根因=E0596 cannot borrow where_clauses as mutable（db/articles.rs:202 漏 mut，lib 编译失败，tests/ 从未被编译；E0063 从未在 CI 出现，TASK-120 的 E0063 定罪错误）。R1：:202 加 mut（一行，allowed_paths 内）+ 注释归因修正 + tests/ 补齐同批落地；同时披露 TASK-117 worker 的『cargo check=0』为不实记录（E0596 在 lib，任何 check 必撞）。修复轮 1/4。；下一步：begin 重新实现
-- 2026-10-07T08:07:44.226958Z · unblock · TASK-121 · review_failure → ready；依据：DEC-gate-adjust-20261007
-- 2026-10-07T08:08:37.408427Z · checkpoint · TASK-121 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-10-07T08:17:27.982847Z · checkpoint · TASK-121 · 编码结果已记录，差异范围已核对：src-tauri/src/db/articles.rs, src-tauri/tests/ingestion_e2e.rs；下一步：运行 verify；代码完成尚未等于验收通过
-- 2026-10-07T08:18:05.912208Z · checkpoint · TASK-121 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
-- 2026-10-07T08:33:58.201701Z · checkpoint · TASK-121 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
-- 2026-10-07T08:51:21.339472Z · accept · 验收 TASK-119, TASK-121；依据：owner 会话指示持续推进——视为验收确认（TASK-119/121 部分）；119 审查 PASS（重建面核对）+121 审查 R1 PASS（E0596 一手日志定罪）+CI f195aec 全绿（rust job 首次走通含 keyset 测试）
-- 2026-10-07T08:53:27.774714Z · accept · 验收 TASK-117；依据：owner 2026-10-07 会话指示持续推进——视为验收确认（TASK-117 部分）；审查 PASS+变异判别+CI 全绿（候选=dev@b7947e9；其 CI clippy 失败经 TASK-121 修复后 f195aec 全绿含 keyset 测试）
-- 2026-10-07T08:54:41.776629Z · accept · 验收 TASK-118；依据：owner 会话指示持续推进——视为验收确认（TASK-118 部分）；审查 PASS（bump 点穷举）+CI 全绿（候选=dev@feae9cd，CI 失败经 121 修复后 f195aec 全绿）
+- 2026-10-08T02:31:56.079069Z · unblock · TASK-128 · action_required → ready；依据：主控自查：worker-result 的 unresolved_items 误填了「待观察项」（本卡交付不依赖它），按契约置空；修复已就绪，重开轮承载同一候选。
+- 2026-10-08T02:33:02.035695Z · checkpoint · TASK-128 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-08T02:33:52.485251Z · checkpoint · TASK-128 · 编码结果已记录，差异范围已核对：tools/phase4_checklist.md, tools/phase4_measure.mjs, tools/phase4_seed.py；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-08T02:34:33.188703Z · checkpoint · TASK-128 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-08T02:45:13.176413Z · checkpoint · TASK-128 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
+- 2026-10-08T02:45:42.457653Z · checkpoint · TASK-128 · 阻塞已处置（review_failure）：R1 修复范围：F1 搜索正例限定文章分组+overlayText 打开后读取+键入前 token 硬断言；F2 每段自带 conditions 快照并据此生成结论行；F3 清单与 seed 脚本加『还原前退出应用』保护；F4 修正『只读』声明并单列真实同步警告；F5 统一清单文件名与长会话判定线；F6 崩溃布局堆值标失效。；下一步：begin 重新实现
+- 2026-10-08T02:45:42.863432Z · unblock · TASK-128 · review_failure → ready；依据：独立复审 FAIL（6 findings，其中 F1 搜索正例可被订阅源条目抢先、F2 结论行条件与实际同步状态矛盾为高/中危测量可信度问题）
+- 2026-10-08T02:46:35.037914Z · checkpoint · TASK-128 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
+- 2026-10-08T03:07:54.102660Z · checkpoint · TASK-128 · 编码结果已记录，差异范围已核对：tools/phase4_checklist.md, tools/phase4_measure.mjs, tools/phase4_seed.py；下一步：运行 verify；代码完成尚未等于验收通过
+- 2026-10-08T03:08:36.584948Z · checkpoint · TASK-128 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
+- 2026-10-08T03:19:13.656197Z · checkpoint · TASK-128 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
+- 2026-10-08T03:22:28.503699Z · accept · 验收 TASK-128；依据：owner 会话指示『继续推进优化』——视为验收确认；TASK-128 独立复审 R1 PASS findings=0（6 findings 逐条对抗式复核：搜索归属对抗探针、restore 三分支实跑、条件快照贯穿结论行）+ CI 全绿（b7c3ed8）
 
 ## 如何继续
 

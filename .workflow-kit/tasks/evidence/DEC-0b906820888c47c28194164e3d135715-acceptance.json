@@ -1,0 +1,14 @@
+{
+  "id": "DEC-0b906820888c47c28194164e3d135715",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "owner 会话指示『继续推进优化』——视为验收确认；TASK-127 独立复审 PASS（矩阵三列事实经上游源码复核、无 unwrap_or(0) 残留、失败传播测试具判别力）+ CI 全绿（0cc84e6，rust job clippy --all-targets/test 通过）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-127"
+  ],
+  "recorded_at_utc": "2026-10-08T01:42:16.211989Z",
+  "candidates": {
+    "TASK-127": "0d5048ceccacd83bf0774940c475f55e1fa4828c8adc9591b228d4e8a2595fde"
+  }
+}

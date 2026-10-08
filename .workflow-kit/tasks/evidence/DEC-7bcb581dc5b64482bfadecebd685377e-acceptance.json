@@ -1,0 +1,14 @@
+{
+  "id": "DEC-7bcb581dc5b64482bfadecebd685377e",
+  "issuer": "owner",
+  "status": "accepted",
+  "source": "owner 会话指示『继续推进优化』——视为验收确认；TASK-123 聚焦独立复审 PASS（TASK-122 修复后新候选上 t123-* 27 断言保持、锚/窗口逻辑完好）+ CI 全绿（eba4df5）",
+  "statement": "Owner accepted the listed candidate versions and their continuations",
+  "scope": [
+    "TASK-123"
+  ],
+  "recorded_at_utc": "2026-10-08T00:37:55.158004Z",
+  "candidates": {
+    "TASK-123": "04191dce70b6da53c5e4b69163d4545712c66dfc1adb7c45324c8cf0b508889f"
+  }
+}

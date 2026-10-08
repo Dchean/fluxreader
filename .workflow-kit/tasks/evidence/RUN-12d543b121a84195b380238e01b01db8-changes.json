@@ -1,0 +1,9 @@
+{
+  "changed_files": [
+    "docs/sync-compat-matrix.md",
+    "src-tauri/src/fever.rs",
+    "src-tauri/src/sync/conflict_policy.rs",
+    "src-tauri/src/sync/fever_pull.rs",
+    "src-tauri/src/sync/greader_pull.rs"
+  ]
+}
