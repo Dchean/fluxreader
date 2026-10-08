@@ -34,5 +34,5 @@ __pycache__/
 .workbuddy/
 .mimosa/
 
-# ---- 主分支不含工作流内容（防误提交；合并流程见 AGENTS.md）----
-.workflow-kit/
+# ---- agent 工具的本机配置（由工具自行生成/同步，内容随机器而异）----
+.zcodeignore
