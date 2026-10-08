@@ -77,13 +77,11 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     const view = get().activeViewFilter;
     const cached = viewEntriesCache.get(QueryScope.viewKey(layout, view, get().activeFeedFilter));
     if (cached) {
-      /* TASK-103：缓存恢复同属快照替换——正文与水合终态按 id 继承（收口在
-         mergeSnapshotEntries；缓存快照本身携带 reload 时继承的正文），仅裁剪
-         已不在恢复快照中的滞留标记。TASK-063 的「滞留标记阻断重水合」缺陷
-         由该收口统一处置，不再在此整体清空。
-         TASK-109②：fromBackend=false——缓存回放是近期 UI 状态而非后端真值，
-         不 bump 条目版本（在途乐观声明的回滚仍有效）。 */
-      const merged = mergeSnapshotEntries(get().entries, cached.entries, get().hydratedIds, get().hydrationErrors, false);
+      /* TASK-103 → TASK-122：缓存恢复同属快照替换，收口在 mergeSnapshotEntries。
+         正文真值源 bodyById（快照恢复不触碰，已加载正文零丢失）；AI 列取缓存行
+         真值（缓存行本身就是最近一次后端行）；fromBackend=false 不 bump 版本、
+         不做 body 对齐（对齐只消费后端行，随后必触发的 reload 接手）。 */
+      const merged = mergeSnapshotEntries(get().entries, cached.entries, false, 0);
       /* TASK-110①：exhausted 真实判定随快照长度（原筛选视图恒 true、all 视图恒
          false——两者都随分页化失效）；缓存快照即最近一次拉取的首屏/续拉结果，
          「长度 < 页大小 ⇒ 已到底」与拉取时的判定同口径。
@@ -103,16 +101,20 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       set((s) => ({
         entries: merged.entries,
         articlesExhausted: cached.exhausted,
-        hydratedIds: merged.hydratedIds,
-        hydrationErrors: merged.hydrationErrors,
+        /* TASK-122：水合终态/失败态随 bodyById 存活，与快照恢复解耦 */
         ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
       }));
       get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：void reload 调用点必须接住 promise——失败提示由
        reload 自身的 toast 给出，这里只吞掉残余重抛，避免 unhandled rejection。 */
-    if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
-    else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
+    /* TASK-123（审计 P2-5②）：缓存命中恢复后的后台刷新 = 内容刷新——携带
+       keepReadingPosition 走保位窗口重取（恢复定位过的锚不因重拉丢失，落地时
+       positionRestoreNonce 照常 bump，Timeline 按活锚校正索引漂移）；缓存未命中
+       = 新语境（规则表裁定：窗口深度属于旧语境，首屏起步不保窗口）。切换动作
+       本身依旧不 bump positionRestoreNonce——信号只由刷新落地发出，分流不变。 */
+    if (view !== 'all') void get().reloadFilteredEntries(view, cached ? { keepReadingPosition: true } : undefined).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+    else void get().reloadFromBackend(cached ? { keepReadingPosition: true } : undefined).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
   },
 
   /* TASK-052 契约（per-scope 游标）：游标与列表口径绑定，切换口径时必须让两者
@@ -140,21 +142,19 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
        「清空 → 拉取 → 一次性渲染数百张卡片」的卡顿。
        TASK-052：缓存键带上订阅范围（源A 的首批≠全部的首批）；缓存里只有内容，
        游标仍需经 applyArticlesCursor 收口写入（不裸写 articlesLimit）。
-       TASK-063：恢复时必须处置滞留水合状态——否则水合守卫（ensureArticleContent
-       的 hydratedIds 短路）会把不属于本快照的滞留标记误判为「已水合」，社交/通知
-       卡片在后台刷新落地前空白且不会重水合。TASK-103：处置方式从「整体清空」
-       收口为 mergeSnapshotEntries 的按 id 继承+裁剪（正文与终态一起继承，
-       已消失条目的滞留标记移除），缓存恢复不再丢已水合正文。 */
+       TASK-063（历史）：恢复时曾需处置滞留水合标记（按 id 平行 Map 会把不属于
+       本快照的「已水合」误判带回来）。TASK-122 起水合状态收敛为 bodyById 记录的
+       state（按文章实体记账，不随快照行传播），滞留形态在结构上不再存在；
+       快照恢复只还原视图行，正文/终态由 bodyById 直接命中。 */
     /* TASK-115①：同 selectLayout——视图段真的变化才是「切换返回」；同上下文
        重复导航（点击当前视图）不 bump 恢复信号。 */
     const contextChanged = view !== get().activeViewFilter;
     const scopeKey = QueryScope.pageKey(get().activeFeedFilter, get().activeContentLayout);
     const cached = viewEntriesCache.get(QueryScope.viewKey(get().activeContentLayout, view, get().activeFeedFilter));
     if (cached) {
-      /* TASK-103：同 selectLayout——快照恢复按 id 继承正文与水合终态（合并收口
-         在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。
-         TASK-109②：fromBackend=false（缓存回放非后端真值，不 bump 版本）。 */
-      const merged = mergeSnapshotEntries(get().entries, cached.entries, get().hydratedIds, get().hydrationErrors, false);
+      /* TASK-103 → TASK-122：同 selectLayout——快照恢复收口在 mergeSnapshotEntries
+         （正文真值源 bodyById，恢复不触碰；fromBackend=false 不 bump 不对齐）。 */
+      const merged = mergeSnapshotEntries(get().entries, cached.entries, false, 0);
       /* TASK-110①：exhausted 真实判定随快照长度（与 selectLayout 同口径收口——
          原写法 `view !== 'all'` 是「筛选视图拉全集 ⇒ 恒已到底」的旧语义：分页化后
          筛选视图的缓存快照可能是未满页的部分页，误标已到底会挡住续拉，旧文章
@@ -169,15 +169,16 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         openedReadIds: {},
         entries: merged.entries,
         articlesExhausted: cached.exhausted,
-        hydratedIds: merged.hydratedIds,
-        hydrationErrors: merged.hydrationErrors,
+        /* TASK-122：水合终态/失败态随 bodyById 存活，与快照恢复解耦 */
         ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
       }));
       get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
       /* 后台静默刷新（不阻塞切换）：状态/内容可能已变 */
       /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
-      if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
-      else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
+      /* TASK-123（审计 P2-5②）：同 selectLayout——缓存命中恢复后的后台刷新携带
+         keepReadingPosition 走保位窗口重取（切回定位过的锚不因重拉丢失）。 */
+      if (view !== 'all') void get().reloadFilteredEntries(view, { keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+      else void get().reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
       return;
     }
     set({ activeViewFilter: view, openedReadIds: {} });
@@ -197,9 +198,9 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
      快照且不可滚动时其第一页永远拉不到。
      与 selectView 同构：tauri 模式下缓存命中同步恢复该范围快照（零延迟）并
      后台刷新；未命中直接后台重拉——两个 reload 都在发起时读取刚写入的
-     activeFeedFilter，自带代际/竞态守卫丢弃过期结果。恢复时按 id 继承+裁剪
-     水合状态（TASK-103 收口到 mergeSnapshotEntries：缓存快照携带继承的正文，
-     滞留标记只裁剪不属于本快照的部分——理由同 selectView）。mock 模式保持纯游标镜像（不触发 IPC、
+     activeFeedFilter，自带代际/竞态守卫丢弃过期结果。恢复时快照合并收口在
+     mergeSnapshotEntries（TASK-122：正文真值源 bodyById，恢复只还原视图行，
+     理由同 selectView）。mock 模式保持纯游标镜像（不触发 IPC、
      不把 mock 会话翻成 tauri）。 */
   selectFeed: (feedId) => {
     /* TASK-115①：同 selectLayout——范围段真的变化才是「切换返回」；同上下文
@@ -218,10 +219,9 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     const view = get().activeViewFilter;
     const cached = viewEntriesCache.get(QueryScope.viewKey(get().activeContentLayout, view, feedId));
     if (cached) {
-      /* TASK-103：同 selectLayout——快照恢复按 id 继承正文与水合终态（合并收口
-         在 mergeSnapshotEntries），仅裁剪已不在恢复快照中的滞留标记。
-         TASK-109②：fromBackend=false（缓存回放非后端真值，不 bump 版本）。 */
-      const merged = mergeSnapshotEntries(get().entries, cached.entries, get().hydratedIds, get().hydrationErrors, false);
+      /* TASK-103 → TASK-122：同 selectLayout——快照恢复收口在 mergeSnapshotEntries
+         （正文真值源 bodyById，恢复不触碰；fromBackend=false 不 bump 不对齐）。 */
+      const merged = mergeSnapshotEntries(get().entries, cached.entries, false, 0);
       /* TASK-110①：exhausted 真实判定随快照长度（与 selectLayout/selectView 同口径
          收口——`view !== 'all'` 的恒真/恒 false 旧语义随分页化失效，理由见 selectLayout）。
          TASK-111①：与 selectLayout 同口径——判定/游标恢复用缓存记录的元数据
@@ -231,15 +231,17 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       set((s) => ({
         entries: merged.entries,
         articlesExhausted: cached.exhausted,
-        hydratedIds: merged.hydratedIds,
-        hydrationErrors: merged.hydrationErrors,
+        /* TASK-122：水合终态/失败态随 bodyById 存活，与快照恢复解耦 */
         ...(contextChanged ? { switchRestoreNonce: s.switchRestoreNonce + 1 } : {}),
       }));
       get().applyArticlesCursor(scopeKey, cached.cursor, cached.exhausted);
     }
     /* TASK-098（与 F5 同口径）：同 selectLayout——接住 reload 重抛，失败提示由 reload 自身给出 */
-    if (view !== 'all') void get().reloadFilteredEntries(view).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
-    else void get().reloadFromBackend().catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
+    /* TASK-123（审计 P2-5②）：同 selectLayout——缓存命中恢复后的后台刷新携带
+       keepReadingPosition 走保位窗口重取（切回定位过的锚不因重拉丢失）；未命中
+       = 新语境首屏起步（不保窗口）。 */
+    if (view !== 'all') void get().reloadFilteredEntries(view, cached ? { keepReadingPosition: true } : undefined).catch(() => { /* 失败已可见（reloadFilteredEntries 内 toast） */ });
+    else void get().reloadFromBackend(cached ? { keepReadingPosition: true } : undefined).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
   },
 
   toggleTimelineFilter: () =>
@@ -258,7 +260,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
      TASK-110③：筛选视图（收藏/未读/今天）从「全集本地重排、切排序不调后端」
      改为与「全部」视图同构——分页化后全集不再在内存里，本地重排只够重排已加载
      页且续拉口径会随排序错位，排序改由服务端承载（重拉当前范围）；已加载条目的
-     水合正文由 mergeSnapshotEntries(fromBackend=true) 按 id 继承，不因重拉丢失。 */
+     正文随 bodyById 实体存活（TASK-122），重拉替换快照行不影响正文显示。 */
   toggleTimelineSort: () => {
     viewEntriesCache.clear();
     set((s) => ({

@@ -162,10 +162,14 @@ export interface AppState {
   /** 后端真实的 Miniflux 连接态（bootstrap/sync 后刷新），未连接时侧栏不显示"已同步" */
   syncConnected: boolean;
   /** TASK-116 四态展示：同步队列现存行数（「等待同步 N 条」）。
-   *  启动装载（bootstrap/reload）与手动同步完成后的 reload 刷新。 */
+   *  启动装载（bootstrap/reload）与手动同步完成后的 reload 刷新；
+   *  TASK-124 起 sync-queue-changed 事件即时刷新（同一状态源）。 */
   syncWaiting: number;
   /** TASK-116：队列中推送失败过的行数（attempts>0，「部分失败」） */
   syncFailed: number;
+  /** TASK-124：队列最近一次推送失败的错误摘要（「部分失败」的错误行）。
+   *  sync-queue-changed 事件 / reload 顺带刷新写入；未失败为 null。 */
+  syncQueueLastError: string | null;
 
   /** GitHub 设备流登录：等待授权态（user_code 常驻显示；组件 unmount 不影响后端轮询） */
   githubFlow: { user_code: string; verification_uri: string; interval: number } | null;
@@ -284,11 +288,15 @@ export interface AppState {
   hydrateArticleContent: (ids: string[]) => void;
   /** 正文水合失败重试（卡片内联重试入口）：清错误态后重新入队 */
   retryHydration: (id: string) => void;
-  /** 正文水合失败的错误信息（id → 消息；成功时清除） */
-  hydrationErrors: Record<string, string>;
-  /** 已完成水合的条目集合（值恒为 true）：空正文条目（content_html 为 NULL）的
-      终态标记——content 为空串不能区分「未水合」与「后端无正文」，需独立集合 */
-  hydratedIds: Record<string, true>;
+  /** TASK-122：正文/AI/水合状态的真值源迁往 bodyById（store/bodyCache.ts，
+      state: loading|ready|cleared|missing|failed 判别态）——原 hydrationErrors /
+      hydratedIds 两个按 id 平行 Map（正文侧状态分散，审计点名）随之移除，
+      读取一律经 selectors.selectArticleBody / entryNeedsHydration。
+      bodyCacheNonce：bodyById 是模块级缓存（不在 store 快照内），每次真实写入
+      由 bodyCache 的 notify 回调 bump 本计数（store.ts 注入）——组件 selector
+      引用它建立订阅依赖，记录变化才能触发重渲染。它只是通知序号，不承载任何
+      领域状态（真值一律经 getBodyEntry 读取）。 */
+  bodyCacheNonce: number;
   /** 手动全文提取（工具栏按钮；已提取时为刷新全文） */
   extractCurrentArticle: () => void;
 
@@ -331,6 +339,11 @@ export interface AppState {
   /** text + 可选操作按钮（label/run：失败场景的一键重试） */
   showToast: (text: string, action?: { label: string; run: () => void }) => void;
   triggerManualSync: () => void;
+  /** TASK-124：sync-queue-changed 事件落地（App.tsx 监听器调用）。
+   *  payload = Rust sync_queue_stats 三元组 {waiting, failed, last_error}。
+   *  只写队列三字段，绝不触碰 syncConnected——未配置静默语义在 Rust 发射点
+   *  （无凭据不发事件），pill 的本地模式分支不因本动作破坏。 */
+  applySyncQueueChanged: (stats: { waiting: number; failed: number; last_error: string | null }) => void;
 
   /* ---------- Actions: 订阅管理 ---------- */
   createCategory: (name: string, layout: ContentLayoutType) => void;

@@ -16,8 +16,11 @@ pub async fn edit_remote_subscription(
     title: Option<&str>,
     dest_label: Option<&str>,
 ) -> bool {
-    let Some(client) = build_client(db, http).await else {
-        return false;
+    // TASK-124：build_client Result 化——两类失败（未配置/认证·网络失败）对
+    // 订阅编辑推送的既有行为一致（best-effort，失败仅记 false），此处不记录不发事件。
+    let client = match build_client(db, http).await {
+        Ok(c) => c,
+        Err(_) => return false,
     };
     match client.edit_subscription(remote_id, title, dest_label).await {
         Ok(()) => true,
@@ -44,9 +47,13 @@ pub async fn unsubscribe_remote(
     remote_id: i64,
     feed_url: &str,
 ) -> bool {
-    let _ = feed_url; // 保留签名：调用方语义不变；墓碑不再由此处清除
-    let Some(client) = build_client(db, http).await else {
-        return false;
+    // 保留签名：调用方语义不变；墓碑不再由此处清除
+    let _ = feed_url;
+    // TASK-124：build_client Result 化——两类失败（未配置/认证·网络失败）对
+    // 退订推送的既有行为一致（best-effort，失败仅记 false），此处不记录不发事件。
+    let client = match build_client(db, http).await {
+        Ok(c) => c,
+        Err(_) => return false,
     };
     match client {
         Backend::GReader(c) => c.unsubscribe(remote_id).await.is_ok(),

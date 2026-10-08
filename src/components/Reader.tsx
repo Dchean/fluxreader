@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { useAppStore, selectFeedConfig } from '../store';
+import { useAppStore, selectArticleBody, selectFeedConfig } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
@@ -41,13 +41,23 @@ export function Reader() {
   const art = useAppStore((s) =>
     s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) ?? null : null,
   );
+  /* TASK-122：正文/AI 产物读取单点——selectArticleBody（真值源 bodyById）。
+     body 是快照对象（记录写入即换引用），nonce 依赖在 selector 内部建立。
+     【为何必须包 useShallow】selectArticleBody 每次调用都经 bodyViewFrom(rec)
+     返回**新对象**，zustand v5 把 selector 直接交给 useSyncExternalStore 且不做
+     快照缓存 → React 每次 getSnapshot 都拿到新引用，判定为「未缓存」并反复重渲染
+    （console.error "The result of getSnapshot should be cached..." → React #185
+     Maximum update depth exceeded，打开文章即崩）。useShallow 逐字段浅比较，
+     字段值不变即命中缓存引用，只有记录真变才触发渲染。同 Sidebar.tsx 的既有约定：
+     返回新引用的派生 selector 必须包 useShallow。 */
+  const body = useAppStore(useShallow((s) => selectArticleBody(s, s.activeArticleId)));
   /* 文章之间切换、以及原文↔译文视图切换时，正文淡入一次（REQ-005） */
   const readerViewRef = useRef<HTMLDivElement>(null);
   useEnteringClass(readerViewRef, `${art?.id ?? ''}|${isShowingTranslatedProse}`, 'reader-entering');
   /* 正文图片代理（防盗链）：对少数派等白名单式防盗链域名，走后端 fetch_image
      拿 bytes 转 data: URL 替换。代理目标 = 当前要显示的基础 HTML（全文或 RSS 原文），
      按 baseHtml 缓存，避免每次渲染重复抓图。 */
-  const baseHtml = showFulltext ? art?.content ?? '' : art?.rawContent ?? '';
+  const baseHtml = showFulltext ? body.content : body.rawContent;
   const [proxiedContent, setProxiedContent] = useState<{ key: string; html: string } | null>(null);
   useEffect(() => {
     if (!baseHtml) { setProxiedContent(null); return; }
@@ -75,11 +85,11 @@ export function Reader() {
   const summaryOpen = summaryOverride ?? (config.autoSummary || summaryGenerating || !!summaryError);
 
   /* 阅读时间估算（中文 ~400字/分钟，英文 ~220词/分钟）。
-     P2-5：正文未水合时 content 是空串，按它算出来恒为「1 分钟阅读」，
-     水合后又会跳到真实值（假数字 + 跳变）。未水合就不显示——
-     宁可暂时没有这一项，也不显示一个确定错的数字。 */
-  const readTime = art && art.content
-    ? `${Math.max(1, Math.round(art.content.replace(/<[^>]+>/g, '').length / 400))} 分钟阅读`
+     P2-5：正文未水合时按它算出来恒为「1 分钟阅读」，水合后又会跳到真实值
+     （假数字 + 跳变）。未水合就不显示——宁可暂时没有这一项，也不显示一个
+     确定错的数字。TASK-122：正文从 bodyById 读。 */
+  const readTime = body.content
+    ? `${Math.max(1, Math.round(body.content.replace(/<[^>]+>/g, '').length / 400))} 分钟阅读`
     : '';
 
   /* ---------- 滚动行为 ---------- */
@@ -93,15 +103,17 @@ export function Reader() {
 
   /* 源级 autoSummary/autoTranslate：打开文章即自动触发。
      等内容水合完成后再触发（翻译需要正文）；已有缓存时后端会短路；
-     静默失败：未配置 AI 不弹 toast（手动按钮仍会提示）。 */
-  const hydrated = !!art?.content;
+     静默失败：未配置 AI 不弹 toast（手动按钮仍会提示）。
+     TASK-122：水合完成判定从 bodyById 状态取（ready；cleared = AI 被清理但
+     正文保留——打开即按 auto 配置重新生成，即「清理后重开可再次生成」）。 */
+  const hydrated = (body.state === 'ready' || body.state === 'cleared') && body.content !== '';
   useEffect(() => {
     if (!art || !hydrated) return;
     const st = useAppStore.getState();
     if (st.dataMode !== 'tauri') return;
     const cfg = selectFeedConfig(st, art.feedId);
-    if (cfg.autoSummary && !art.aiSummary) st.triggerReaderSummary({ silent: true });
-    if (cfg.autoTranslate && !art.translatedContent && !st.isShowingTranslatedProse) {
+    if (cfg.autoSummary && !body.aiSummary) st.triggerReaderSummary({ silent: true });
+    if (cfg.autoTranslate && !body.translatedContent && !st.isShowingTranslatedProse) {
       st.toggleReaderTranslation({ silent: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -236,7 +248,7 @@ export function Reader() {
                     className={`toggle-action-btn ${showFulltext ? 'active-accent' : ''}`}
                     onClick={toggleReaderFulltext}
                     title={
-                      !art.fulltextExtracted
+                      !body.fulltextExtracted
                         ? '从原文网页提取全文（Readability）'
                         : showFulltext
                           ? '切换到 RSS 原文'
@@ -245,7 +257,7 @@ export function Reader() {
                   >
                     <Icons.doc />
                     <span>
-                      {!art.fulltextExtracted ? '提取全文' : showFulltext ? 'RSS 原文' : '显示全文'}
+                      {!body.fulltextExtracted ? '提取全文' : showFulltext ? 'RSS 原文' : '显示全文'}
                     </span>
                   </button>
                 )}
@@ -273,8 +285,12 @@ export function Reader() {
                     <span className="ai-error-text" title={summaryError}>摘要生成失败：{summaryError}</span>
                     <button className="ai-retry-btn" onClick={() => triggerReaderSummary()}>重试</button>
                   </div>
+                ) : body.state === 'cleared' && !body.aiSummary ? (
+                  /* TASK-122：AI 缓存已被清理（cleared 判别态）——呈现「已清空」而非
+                     与「从未生成过」混同的空白（'' vs cleared 语义区分） */
+                  <span className="ai-generating-hint">AI 缓存已清空，可重新生成</span>
                 ) : (
-                  <p>{art.aiSummary}</p>
+                  <p>{body.aiSummary}</p>
                 )}
               </div>
             </div>
@@ -300,7 +316,7 @@ export function Reader() {
                 }}
                 onClick={handleProseClick}
               >
-                {art.translatedContent}
+                {body.translatedContent}
               </div>
             ) : (
               <div
@@ -313,7 +329,7 @@ export function Reader() {
                 onClick={handleProseClick}
                 dangerouslySetInnerHTML={{
                   __html: isShowingTranslatedProse
-                    ? art.translatedContent
+                    ? body.translatedContent
                     : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml),
                 }}
               />

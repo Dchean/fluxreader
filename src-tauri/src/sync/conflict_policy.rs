@@ -53,6 +53,7 @@
 use rusqlite::Connection;
 
 use crate::db;
+use crate::error::AppResult;
 
 /// 读状态对账方向（「协议 × 读状态」格的政策取值）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,27 +116,30 @@ pub(super) const FEVER_STAR_DIRECTION: StarDirection = StarDirection::Authoritat
 /// - `UnreadSetBidirectional`：`remote_read` 为真 `sync_mark_read_if_unread`，
 ///   为假 `sync_mark_unread_if_read`。
 ///
-/// 返回实际写入行数（写失败按 0 计——与原 `if let Ok(n)` 一致，静默跳过，
-/// 失败现场可自愈：下一轮对账重放同一集合）。
+/// 返回 `AppResult<usize>`（实际写入行数）。审计 P2-8③：此处原为
+/// `unwrap_or(0)`——DB 写失败被吞成「没有变化 0 行」，调用方与用户都无从
+/// 区分「远端本来就是这个状态」与「本地写失败了」。现在失败经 `?` 向上传播，
+/// 由 reconcile 循环的调用方记入 `SyncReport.errors` 并保留游标/重放语义
+/// （失败现场仍可自愈：下一轮对账重放同一集合，但不再静默）。
 pub(super) fn apply_read_by_policy(
     conn: &Connection,
     direction: ReadDirection,
     remote_read: bool,
     article_id: i64,
-) -> usize {
+) -> AppResult<usize> {
     match direction {
         ReadDirection::RemoteReadWins => {
             if remote_read {
-                db::sync_mark_read_if_unread(conn, article_id).unwrap_or(0)
+                db::sync_mark_read_if_unread(conn, article_id)
             } else {
-                0
+                Ok(0)
             }
         }
         ReadDirection::UnreadSetBidirectional => {
             if remote_read {
-                db::sync_mark_read_if_unread(conn, article_id).unwrap_or(0)
+                db::sync_mark_read_if_unread(conn, article_id)
             } else {
-                db::sync_mark_unread_if_read(conn, article_id).unwrap_or(0)
+                db::sync_mark_unread_if_read(conn, article_id)
             }
         }
     }
@@ -145,19 +149,20 @@ pub(super) fn apply_read_by_policy(
 ///
 /// 行级语义与显式化前一致：命中 `sync_mark_starred_if_unstarred`，未命中
 /// `sync_mark_unstarred_if_starred`（两协议同构，方向由参数声明）。
-/// 返回实际写入行数（失败按 0 计，同上）。
+/// 返回 `AppResult<usize>`（实际写入行数）——失败不再按 0 计，向上传播
+/// （审计 P2-8③，同 [`apply_read_by_policy`]）。
 pub(super) fn apply_star_by_policy(
     conn: &Connection,
     direction: StarDirection,
     remote_starred: bool,
     article_id: i64,
-) -> usize {
+) -> AppResult<usize> {
     match direction {
         StarDirection::AuthoritativeBidirectional => {
             if remote_starred {
-                db::sync_mark_starred_if_unstarred(conn, article_id).unwrap_or(0)
+                db::sync_mark_starred_if_unstarred(conn, article_id)
             } else {
-                db::sync_mark_unstarred_if_starred(conn, article_id).unwrap_or(0)
+                db::sync_mark_unstarred_if_starred(conn, article_id)
             }
         }
     }
@@ -177,6 +182,83 @@ mod tests {
         assert_eq!(
             FEVER_STAR_DIRECTION,
             StarDirection::AuthoritativeBidirectional
+        );
+    }
+
+    /// 建一个带最新 schema 的内存库并造一篇已绑定远端 id 的文章。
+    fn conn_with_article() -> (Connection, i64) {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let folder = db::create_folder(&conn, "测试分类", "article").unwrap();
+        let feed = db::insert_feed(
+            &conn,
+            "https://f.example/cp.rss",
+            None,
+            "F",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let a = crate::db::NewArticle {
+            guid: "g-cp".into(),
+            url: Some("https://e.example/p/cp".into()),
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: "b".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-01-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let aid = db::upsert_article_with_feed(&conn, feed, &a, false)
+            .unwrap()
+            .0;
+        (conn, aid)
+    }
+
+    /// 审计 P2-8③ 正向：写成功返回实际写入行数（此处条件写命中 1 行）。
+    /// 同时锁定签名已变为 `AppResult<usize>`（`?` / `unwrap` 才能取出计数）。
+    #[test]
+    fn apply_read_by_policy_returns_written_rows_on_success() {
+        let (conn, aid) = conn_with_article();
+        let n = apply_read_by_policy(&conn, GR_READ_DIRECTION, true, aid).unwrap();
+        assert_eq!(n, 1, "未读 → 已读 命中一行");
+        // 幂等：再次应用同一远端状态写 0 行（不是失败）。
+        let n = apply_read_by_policy(&conn, GR_READ_DIRECTION, true, aid).unwrap();
+        assert_eq!(n, 0, "条件写未命中即 0 行变化，而非错误");
+        // 单向格未命中侧不产生写。
+        let n = apply_read_by_policy(&conn, GR_READ_DIRECTION, false, aid).unwrap();
+        assert_eq!(n, 0, "GR 单向：远端未读不产生写");
+    }
+
+    /// 审计 P2-8③ 反向：DB 写失败必须返回 Err，不再 `unwrap_or(0)` 吞成
+    /// 「0 行变化」。注入方式：用一个**未建 schema** 的空内存库（无 articles
+    /// 表），UPDATE 必然以 `no such table: articles` 失败——确定性、无 mock、
+    /// 不依赖触发器/FK 行为。
+    /// 判别力声明：若恢复 `unwrap_or(0)` 语义，本用例两处断言都红。
+    #[test]
+    fn apply_read_by_policy_propagates_db_write_failure() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // 读格：双向权威的「命中 → 标读」分支（DB 写失败）。
+        let read_err = apply_read_by_policy(&conn, FEVER_READ_DIRECTION, true, 1);
+        assert!(
+            read_err.is_err(),
+            "DB 写失败必须向上传播为 Err，不得被吞成 Ok(0)：{read_err:?}"
+        );
+
+        // 星标格：命中 → 收藏分支（DB 写失败）。
+        let star_err = apply_star_by_policy(&conn, FEVER_STAR_DIRECTION, true, 1);
+        assert!(
+            star_err.is_err(),
+            "星标格写失败同样必须传播为 Err：{star_err:?}"
         );
     }
 }

@@ -21,6 +21,14 @@ export function CacheCleanupSection() {
     try {
       const msg = await api.cacheCleanup(days, scope);
       showToast(msg ?? '清理完成');
+      /* TASK-122：清理动作完成后必须 reload——AI 缓存清理（scope='ai'）在后端把
+         ai_summary/translated_content 置 NULL，前端对受影响 id 的显式失效
+         （bodyById 记录置 cleared + bump contentRevision）由这次 reload 落地时的
+         mergeSnapshotEntries(fromBackend=true) → bodyCache.reconcileBodyEntities
+         按**行真值**逐 id 执行（前端无法预知清理范围，行 NULL 即删除语义；
+         机制与状态机见 store/bodyCache.ts 模块头注「显式失效规则」单点文档）。
+         清理后如有在途水合/reload，cleared 态不会被复活（行对齐跳过 cleared +
+         失效戳比对丢弃迟到响应）。 */
       await reloadFromBackend();
     } catch (e) {
       showToast(`清理失败：${extractError(e)}`);

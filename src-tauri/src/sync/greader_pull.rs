@@ -170,7 +170,16 @@ pub(super) async fn pull_entries_greader(
         ) {
             (Ok(read_ids), Ok(starred_ids)) => {
                 let conn = db.lock().await;
-                reconcile_reader_state(&conn, &read_ids, &starred_ids, &maps, report);
+                // 审计 P2-8③：对账内的 DB 写失败必须可见——记入 report.errors
+                // （不再被 unwrap_or(0) 伪装成 0 行变化）。已写入行不回滚，
+                // 剩余行下一轮同集合对账幂等重放。
+                if let Err(e) =
+                    reconcile_reader_state(&conn, &read_ids, &starred_ids, &maps, report)
+                {
+                    report.errors.push(format!(
+                        "状态对账中断：本地状态写入失败（{e}），本轮剩余条目未对账"
+                    ));
+                }
                 drop(conn);
             }
             (Err(e), _) | (_, Err(e)) => {
@@ -249,13 +258,18 @@ async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec
 /// `GR_READ_DIRECTION` / `GR_STAR_DIRECTION` 消费行级落地函数，不再自持
 /// 方向分支；行为与显式化前逐列一致（收口不是改行为），政策理由与历史
 /// 依据见政策点及 `docs/sync-compat-matrix.md`。
+///
+/// 审计 P2-8③：返回 `AppResult<()>`——行级写失败经 `?` 中断本轮对账并向上
+/// 传播（调用方记入 `report.errors`），不再像旧的 `unwrap_or(0)` 那样把 DB
+/// 写失败伪装成「0 行变化」。已写入的行不会回滚；剩余未对账的行由下一轮
+/// 同集合对账重放（幂等自愈），但失败本身对用户可见。
 fn reconcile_reader_state(
     conn: &Connection,
     read_ids: &[i64],
     starred_ids: &[i64],
     maps: &db::SyncMatchMaps,
     report: &mut SyncReport,
-) {
+) -> AppResult<()> {
     use std::collections::HashSet;
     let read_set: HashSet<i64> = read_ids.iter().copied().collect();
     let starred_set: HashSet<i64> = starred_ids.iter().copied().collect();
@@ -274,7 +288,7 @@ fn reconcile_reader_state(
             conflict_policy::GR_READ_DIRECTION,
             read_set.contains(remote_id),
             aid,
-        );
+        )?;
         // TASK-112 政策（GR_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
         // 命中 → 收藏；未命中 → 取消收藏。
         report.merged_states += conflict_policy::apply_star_by_policy(
@@ -282,8 +296,9 @@ fn reconcile_reader_state(
             conflict_policy::GR_STAR_DIRECTION,
             starred_set.contains(remote_id),
             aid,
-        );
+        )?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -391,7 +406,9 @@ mod tests {
             .unwrap();
 
         let mut report = SyncReport::default();
-        reconcile_reader_state(&conn, &[], &[], &maps_for(101, aid, false), &mut report);
+        // 审计 P2-8③：reconcile 返回 AppResult<()>——本用例锁政策方向，
+        // 内存库上写必然成功，故 unwrap 即断言「无 DB 写失败」。
+        reconcile_reader_state(&conn, &[], &[], &maps_for(101, aid, false), &mut report).unwrap();
 
         assert!(
             is_read(&conn, aid),
@@ -410,7 +427,8 @@ mod tests {
         let aid = seed_bound(&conn, 102);
 
         let mut report = SyncReport::default();
-        reconcile_reader_state(&conn, &[102], &[], &maps_for(102, aid, false), &mut report);
+        reconcile_reader_state(&conn, &[102], &[], &maps_for(102, aid, false), &mut report)
+            .unwrap();
 
         assert!(is_read(&conn, aid), "远端已读必须落地本地已读");
         assert_eq!(report.merged_states, 1, "命中侧恰好一次状态写入");
@@ -435,7 +453,7 @@ mod tests {
             mf_id_to_article: [(103, starred), (104, unstarred)].into_iter().collect(),
             ..maps_for(103, starred, false)
         };
-        reconcile_reader_state(&conn, &[], &[104], &maps, &mut report);
+        reconcile_reader_state(&conn, &[], &[104], &maps, &mut report).unwrap();
 
         assert!(
             !is_starred(&conn, starred),
@@ -460,7 +478,7 @@ mod tests {
 
         let mut report = SyncReport::default();
         // 远端快照：已读命中 + 收藏未命中——若无 pending 保护会同时翻转两列。
-        reconcile_reader_state(&conn, &[105], &[], &maps_for(105, aid, true), &mut report);
+        reconcile_reader_state(&conn, &[105], &[], &maps_for(105, aid, true), &mut report).unwrap();
 
         assert!(
             !is_read(&conn, aid),

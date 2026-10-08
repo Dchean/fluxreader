@@ -626,7 +626,6 @@ export function folderRowsToCategories(folders: FolderRow[], feeds: FeedRow[]): 
 }
 
 export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
-  const html = row.content_html ?? '';
   return {
     id: String(row.id),
     feedId: String(row.feed_id),
@@ -645,8 +644,10 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
     durationSec: row.duration_sec ?? undefined,
     url: row.url ?? undefined,
     aiSummary: row.ai_summary ?? '',
-    content: html,
-    rawContent: html,
+    /* TASK-122：content/rawContent 不再映射进视图行（正文真值源 bodyById；
+       with_content 恒 false，列表行的 content_html 恒 NULL，映射本就是空转）。
+       translatedContent/aiSummary/fulltextExtracted 保留：列表行携带的 DB 列
+       真值，未水合卡片的即时显示源（过渡兼容位，见 ArticleEntry 注释）。 */
     translatedContent: row.translated_content ?? '',
     fulltextExtracted: row.fulltext_extracted ?? false,
   };

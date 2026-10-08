@@ -11,16 +11,19 @@ use tokio::sync::Mutex;
 
 /// feeds 阶段（订阅层）：push_feeds + pull_feeds。秒级，首连先跑这段。
 /// 锁纪律：HTTP 全在锁外；DB 读写在锁内短临界区完成。
+/// TASK-124：feeds 阶段的构建失败不记录不发事件（记录/呈现职责在 states 段与
+/// 即时推送，见 push.rs record_push_block）——「未配置」与「失败」对订阅层同步
+/// 的既有行为一致（都是中止），两类失败映射回同一 notConnected 错误。
 pub async fn feeds_phase(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
 ) -> AppResult<SyncReport> {
-    let Some(client) = build_client(db, http).await else {
-        return Err(AppError::new(
+    let client = build_client(db, http).await.map_err(|_| {
+        AppError::new(
             "notConnected",
             "未配置同步后端（Google Reader / Fever 凭据）",
-        ));
-    };
+        )
+    })?;
     let mut report = SyncReport::default();
     push_feeds(db, &client, &mut report).await;
     pull_feeds(db, &client, &mut report).await;
@@ -34,20 +37,34 @@ pub async fn states_phase(
     http: &reqwest::Client,
     full: bool,
 ) -> AppResult<SyncReport> {
-    let Some(client) = build_client(db, http).await else {
-        return Err(AppError::new(
-            "notConnected",
-            "未配置同步后端（Google Reader / Fever 凭据）",
-        ));
+    let client = match build_client(db, http).await {
+        Ok(c) => c,
+        Err(ClientBuildFailure::NotConfigured) => {
+            return Err(AppError::new(
+                "notConnected",
+                "未配置同步后端（Google Reader / Fever 凭据）",
+            ));
+        }
+        // TASK-124（审计 P2-6②）：有凭据但认证/端点/网络失败——记录阻塞标记
+        // （attempts/last_error 此前对这类失败永不记录）+ 发 sync-queue-changed。
+        // 返回错误保持既有 notConnected 形态：手动同步的「未连接静默跳过」前端
+        // 语义（isNotConnectedError）不因本卡改变；可见性由 pill/摘要卡承担。
+        Err(ClientBuildFailure::Failed(e)) => {
+            record_push_block(db, &e).await;
+            return Err(AppError::new(
+                "notConnected",
+                "未配置同步后端（Google Reader / Fever 凭据）",
+            ));
+        }
     };
     let mut report = SyncReport::default();
     // 推送段进 PUSH_LOCK（与 push_states_now/feeds_phase 的推送互斥，防 prune 竞态）
     {
         let _guard = PUSH_LOCK.lock().await;
-        let plan = {
+        let (plan, stale) = {
             let conn = db.lock().await;
-            age_stale_queue(&conn, &mut report);
-            plan_push(&conn)?
+            let stale = age_stale_queue(&conn, &mut report);
+            (plan_push(&conn)?, stale)
         };
         let (done, failed) = exec_push(&client, &plan, &mut report).await;
         {
@@ -65,6 +82,12 @@ pub async fn states_phase(
                 }
             }
         }
+        // TASK-124：推送确认/失败后发事件（同 push_states_now 口径：成功出队
+        // waiting 降、失败标记 failed/last_error 升；仅老化清理也发——waiting 已降）。
+        // 统计读在锁外短临界区（notify_queue_changed 内部自持短锁）。
+        if !done.is_empty() || !failed.is_empty() || stale > 0 {
+            notify_queue_changed(db).await;
+        }
     }
     pull_entries(db, &client, &mut report, full).await;
     // pull 后补推：pull 会为「本地已读但后端刚抓取成功的文章」绑定
@@ -73,10 +96,10 @@ pub async fn states_phase(
     // 其他客户端会看到「本地已读、后端仍未读」。二次 push 幂等（队列已空则无操作）。
     {
         let _guard = PUSH_LOCK.lock().await;
-        let plan = {
+        let (plan, stale) = {
             let conn = db.lock().await;
-            age_stale_queue(&conn, &mut report);
-            plan_push(&conn)?
+            let stale = age_stale_queue(&conn, &mut report);
+            (plan_push(&conn)?, stale)
         };
         if !plan.status.is_empty() || !plan.stars.is_empty() {
             let (done, failed) = exec_push(&client, &plan, &mut report).await;
@@ -95,6 +118,13 @@ pub async fn states_phase(
                     }
                 }
             }
+            // TASK-124：补推段同口径发事件。
+            if !done.is_empty() || !failed.is_empty() || stale > 0 {
+                notify_queue_changed(db).await;
+            }
+        } else if stale > 0 {
+            // TASK-124：补推段无可推项，但老化清理改变了统计 → 仍发事件。
+            notify_queue_changed(db).await;
         }
     }
     Ok(report)
