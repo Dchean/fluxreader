@@ -1,3 +1,4 @@
+// Note: 404 才继续试下一个候选，其他状态码立即按真实错误码报 — 见 .agents/notes/implemented/feature/2026-10-07-Endpoint-适配契约.md
 //! Endpoint 解析：把「用户填的域名」自动适配到实际的 API 根地址（TASK-059）。
 //!
 //! ## 为什么需要

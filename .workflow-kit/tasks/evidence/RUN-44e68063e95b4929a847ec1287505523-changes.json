@@ -1,6 +1,0 @@
-{
-  "changed_files": [
-    ".workflow-kit/tasks/BRIEF.json",
-    "src-tauri/tests/refresh_dedup_e2e.rs"
-  ]
-}

@@ -1,7 +1,0 @@
-error: unexpected argument '--check' found
-
-  tip: to pass '--check' as a value, use '-- --check'
-
-Usage: rustup[EXE] <+toolchain>
-
-For more information, try '--help'.

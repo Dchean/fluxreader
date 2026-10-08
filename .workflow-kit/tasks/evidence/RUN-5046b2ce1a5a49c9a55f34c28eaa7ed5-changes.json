@@ -1,6 +1,0 @@
-{
-  "changed_files": [
-    ".workflow-kit/docs/AUDIT-20260919-v2.md",
-    "src-tauri/src/db/articles.rs"
-  ]
-}

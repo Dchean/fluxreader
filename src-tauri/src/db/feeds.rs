@@ -266,6 +266,7 @@ fn save_feed_tombstones(conn: &Connection, list: &[String]) -> AppResult<()> {
     super::set_setting(conn, FEED_TOMBSTONE_KEY, &raw)
 }
 
+// Note: 墓碑是 pull 防复活的唯一防线；清除判据是「远端列表已不含该 URL」而非 2xx — 见 .agents/notes/implemented/bug-fix/2026-09-18-双向同步的写入接线与墓碑.md
 /// 写入删除墓碑（幂等，按规范化 URL 去重）。
 pub fn add_feed_tombstone(conn: &Connection, feed_url: &str) -> AppResult<()> {
     let norm = super::normalize_url(feed_url);

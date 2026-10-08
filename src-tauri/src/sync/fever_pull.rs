@@ -1,4 +1,5 @@
 //! sync 的 fever_pull 子模块（TASK-045 从 sync.rs 按既有章节拆分）。
+// Note: 任一集合拉取失败即整轮跳过对账（失败 ≠ 空集合） — 见 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md
 
 use super::*;
 use crate::db;

@@ -1,3 +1,4 @@
+// Note: selectArticleBody 的订阅必须包 useShallow（zustand v5 快照不缓存 → React #185） — 见 .agents/notes/implemented/architecture/2026-10-06-正文与-AI-产物的实体缓存.md
 import type {
   ArticleEntry,
   CategoryGroup,

@@ -1,3 +1,4 @@
+// Note: 只填域名、后端候选探测；凭据错不得报成地址错 — 见 .agents/notes/implemented/feature/2026-10-07-Endpoint-适配契约.md
 /** Endpoint 填法指引与失败提示（TASK-057 起，TASK-059 纠正方向）。
  *
  * 抽成纯模块以便在无 DOM 的 Node 回归框架中直接断言（沿用 compareVersions / aiConfig 的既有做法）。

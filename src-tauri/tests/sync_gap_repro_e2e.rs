@@ -2,7 +2,8 @@
 //!
 //! 约定：修复完成的场景去掉 #[ignore] 并断言期望行为（默认 `cargo test` 即覆盖）；
 //! 尚未修复的场景保留 #[ignore] 与原因标注（复现旧缺陷，修复后转正）。
-//! 缺口定位与修复设计见 .workflow-kit/docs/FINDINGS-SYNC-GAP.md。
+//! 缺口定位与修复设计见 .agents/notes/implemented/bug-fix/2026-09-18-双向同步的写入接线与墓碑.md
+//! 与 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md。
 //!
 //! 运行：cargo test --test sync_gap_repro_e2e（默认集含全部已转正场景）
 

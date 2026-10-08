@@ -1,6 +1,0 @@
-{
-  "changed_files": [
-    "src/components/CoverImage.tsx",
-    "tools/frontend-regression.mjs"
-  ]
-}

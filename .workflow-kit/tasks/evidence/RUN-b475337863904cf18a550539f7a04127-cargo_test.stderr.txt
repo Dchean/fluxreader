@@ -1,5 +1,0 @@
-   Compiling app v0.16.0 (D:\fluxreader\src-tauri)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 48s
-     Running unittests src\lib.rs (target\debug\deps\app_lib-a60bc5d19612cf5e.exe)
-     Running unittests src\main.rs (target\debug\deps\app-e16146b25497f768.exe)
-     Running tests\account_lifecycle_e2e.rs (target\debug\deps\account_lifecycle_e2e-818c5b808f343f0d.exe)

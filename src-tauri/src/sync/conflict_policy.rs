@@ -1,3 +1,4 @@
+// Note: 政策格取值是客户端选择；改政策 = 改这里 + 改 docs/sync-compat-matrix.md + 改锁定测试 — 见 .agents/notes/implemented/architecture/2026-10-07-同步冲突政策单点.md
 //! TASK-112 协议对账冲突政策单点（single source of policy）。
 //!
 //! 双协议（Google Reader / Fever）在「状态对账」上的方向差异此前散落在

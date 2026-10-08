@@ -1,7 +1,0 @@
-{
-  "changed_files": [
-    "src/components/Reader.tsx",
-    "src/components/Timeline.tsx",
-    "tools/frontend-regression.mjs"
-  ]
-}

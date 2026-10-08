@@ -1,1 +1,0 @@
-   Compiling app v0.16.0 (D:\fluxreader\src-tauri)

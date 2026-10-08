@@ -1,3 +1,4 @@
+// Note: 回归网只锁行为，源码文本断言仅留「单点性必要」 — 见 .agents/notes/implemented/testing/2026-09-16-测试门禁与断言纪律.md
 // 前端逻辑回归（无浏览器）：用 node 驱动 Zustand 状态机验证 S-1 / C-3。
 // 运行：先 npx tsc -p tsconfig.test.json，再
 //   node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs
@@ -6976,7 +6977,7 @@ await (async () => {
    TASK-101（2026-09-29）：SyncTab 提示精简 + Fever「API 密码」提示
    + 设置页冗长文案审计（GeneralTab/ReadingTab/AppearanceTab/AboutTab/
    FeedsTab/AiTab/ConfigSyncSection/CacheCleanupSection/SyncTab 逐个过）。
-   UI 契约 V1/V2：.workflow-kit/docs/UI-CONTRACT-TASK-101-SYNC-COPY.md。
+   UI 契约 V1/V2：Note: 界面文案与控件口径 — 见 .agents/notes/implemented/feature/2026-10-07-界面文案与控件口径.md。
    V1 = 被点名长句清零；新短句（单句 ≤40 字）保留三语义（a 测试连接仅验证
         登录不拉数据 / b 保存并同步才开始拉取 / c 断开会移除同步拉取内容），
         已读/收藏回传语义取保留；
@@ -7073,7 +7074,7 @@ await (async () => {
 
 /* ============================================================
    TASK-102（2026-09-30）：同步协议卡控件对齐修复 + 设置页文案删除性精简
-   UI 契约 X1/X2/X3：.workflow-kit/docs/UI-CONTRACT-TASK-102-SETTING-COPY.md。
+   UI 契约 X1/X2/X3：Note: 界面文案与控件口径 — 见 .agents/notes/implemented/feature/2026-10-07-界面文案与控件口径.md。
    X1 = 协议卡 FluxDropdown 恢复为 SettingCard 直接子元素（卡内无包裹 div /
         常驻 hint——提示文本撑宽包裹层是下拉左移错位根因）；
    X2 = 动作区提示单行 ≤40 字、两按钮语义一一对齐；「断开会移除拉取内容」
