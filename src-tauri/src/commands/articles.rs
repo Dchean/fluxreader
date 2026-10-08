@@ -12,6 +12,7 @@ use tauri::State;
 Articles
 ============================================================ */
 
+// Note: rename_all 只作用于命令形参名，不作用于形参内部对象；字段名与前端 payload 须逐字一致 — 见 .agents/notes/implemented/bug-fix/2026-09-22-命令入参序列化契约.md
 #[derive(Deserialize)]
 pub struct ArticleListArgs {
     pub feed_id: Option<i64>,

@@ -1,3 +1,4 @@
+// Note: 封面代理、失败占位与幂等上报；代理判定只在 lib/imageProxy.ts — 见 .agents/notes/implemented/feature/2026-10-07-封面代理与失败占位.md
 import { useEffect, useSyncExternalStore, type ReactNode } from 'react';
 import { Icons } from './icons';
 import { coverView, driveCover, getCoverState, onCoverError, subscribeCover } from '../lib/coverImage';

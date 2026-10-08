@@ -1,3 +1,4 @@
+// Note: 「远端已确认」不可累计溯源，不得虚构总数 — 见 .agents/notes/implemented/feature/2026-10-06-同步四态与失败可见性.md
 use super::*;
 use rusqlite::params;
 use serde::Serialize;

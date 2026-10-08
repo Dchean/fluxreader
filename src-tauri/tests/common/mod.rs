@@ -1,7 +1,6 @@
 //! 集成测试共享 helper（TASK-096 测试基建收口）。
 //!
-//! 背景（TASK-095 基线证据，逐字固化于
-//! .workflow-kit/tasks/evidence/TASK-095-baseline-flaky.md）：CI cargo test
+//! 背景（基线证据原文在存档分支 archive/tooling-and-reports）：CI cargo test
 //! 偶发失败（CI #101、2026-09-28 本地 verify 均复现）——cargo test 把同一
 //! 测试二进制的多个 #[test] 作为线程并发跑在同一进程内，此前各测试文件
 //! 自拼的临时库名唯一性只靠时钟纳秒，而 Windows 时钟在密集调用下精度不足

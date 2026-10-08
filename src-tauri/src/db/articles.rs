@@ -153,6 +153,7 @@ pub struct ArticleQuery {
 /// 固化（见 db/migrations.rs），使本表达式与旧 `COALESCE(published_at, fetched_at)`
 /// 逐行等价（由 migrations 的排序等价测试锁定）。
 ///
+// Note: 分页谓词必须与 ORDER BY 逐字同构（裸字符串比较，成对给出游标） — 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
 /// TASK-117（审计 P1-1）：keyset 分页要求排序键是**全序**——published_at 是
 /// 秒级粒度的 TEXT，同秒文章此前顺序不定（SQLite 对相等键保持扫描序，非确定），
 /// keyset 游标会因此重复/漏行。补 `a.id`（INTEGER PRIMARY KEY = rowid）决胜后
@@ -789,6 +790,7 @@ pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
 TASK-108：状态写入 + 同步入队 的复合事务（同生共死，REQ-002）
 ============================================================ */
 
+// Note: 状态写入与同步入队必须同事务；批量路径全有全无 — 见 .agents/notes/implemented/bug-fix/2026-09-18-状态写入事务化与对账守卫.md
 /// 已读状态「写入 + 入队」的事务内核（TASK-108）：调用方负责事务边界——
 /// 单条入口 [`set_read_with_enqueue`] 与批量入口 [`set_read_bulk_with_enqueue`]
 /// 各自开事务后调用本函数。语句顺序与参数同 commands 层既有逐条提交形态

@@ -1,3 +1,4 @@
+// Note: 本数据只在浏览器 mock 模式生效；后端异常时绝不回退到它 — 见 .agents/notes/implemented/simplification/2026-09-29-死代码与空壳集群清理.md
 import type { ArticleEntry, CategoryGroup } from './types';
 
 /* 演示数据 —— 浏览器环境（无 Tauri IPC）的回退数据源，以真实客户端的

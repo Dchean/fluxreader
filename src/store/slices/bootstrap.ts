@@ -1,3 +1,4 @@
+// Note: 水合触发判定读实体缓存状态而非「快照是否被替换过」；刷新不丢正文 — 见 .agents/notes/implemented/bug-fix/2026-10-05-正文水合生命周期统一.md
 import type { StateCreator } from 'zustand';
 import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';

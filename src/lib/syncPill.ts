@@ -1,5 +1,5 @@
 /* TASK-116 X1：侧栏同步 pill 文案的单一事实源（纯函数，回归网直接驱动真值表）。
-   优先级契约（.workflow-kit/docs/UI-CONTRACT-TASK-116-SYNC-FOUR-STATES.md X1）：
+   优先级契约（Note: 同步四态与失败可见性 — 见 .agents/notes/implemented/feature/2026-10-06-同步四态与失败可见性.md）：
    1. syncStatus === 'error' → 同步失败（不再被「同步中」覆盖——修复既有缺陷：
       旧实现 isBusy 时 syncing 优先级高于 error，手动同步失败态被吞）；
    2. 同步中（手动 syncStatus==='syncing' 或后台 backgroundSyncing）→ 同步中…；

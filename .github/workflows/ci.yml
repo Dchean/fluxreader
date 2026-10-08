@@ -58,6 +58,9 @@ jobs:
 
       # Note: 格式门禁的设立理由——此前的提交里混用过不同缩进/换行风格，
       # 产生大量纯排版 diff 干扰代码审查；统一为 rustfmt 默认风格后由 CI 守住。
+      # Note: 门禁必须各自独立可跑、失败信息指向自身原因——中间门禁挡住后置门禁
+      # 等于没有门禁（曾因 fmt 排在 clippy/test 之前掩盖两个真实缺陷）。理由与
+      # 断言纪律见 .agents/notes/implemented/testing/2026-09-16-测试门禁与断言纪律.md
       - name: Format (cargo fmt --check)
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 

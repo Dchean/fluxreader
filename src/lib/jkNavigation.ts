@@ -1,3 +1,4 @@
+// Note: J/K 门控用「排除 image」而非白名单，新增虚拟化布局自动获得 — 见 .agents/notes/implemented/feature/2026-10-06-键盘导航、焦点与卡片角色.md
 import type { ContentLayoutType } from '../types';
 
 /* ============================================================

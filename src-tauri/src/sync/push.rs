@@ -1,3 +1,4 @@
+// Note: 队列状态变化要主动发事件；认证失败与网络失败必须分类上报 — 见 .agents/notes/implemented/feature/2026-10-06-同步四态与失败可见性.md
 //! sync 的 push 子模块（TASK-045 从 sync.rs 按既有章节拆分）。
 
 use super::*;

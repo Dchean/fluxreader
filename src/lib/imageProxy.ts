@@ -1,3 +1,4 @@
+// Note: 白名单式防盗链必须走后端代理；域名白名单只在本文件维护 — 见 .agents/notes/implemented/feature/2026-10-07-封面代理与失败占位.md
 // 正文图片代理（防盗链兼容）——参考 Papr 方案。
 // webview 的 Referer 无法按域名变化：黑名单式防盗链（sinaimg.cn 拒外来 Referer）
 // 与白名单式（少数派 cdnfile.sspai.com 要求 sspai.com Referer）无法用单一

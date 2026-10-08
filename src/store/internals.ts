@@ -1,3 +1,4 @@
+// Note: 查询范围单点派生、keyset 游标与代际守卫 — 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
 import type { StoreApi } from 'zustand';
 import { extractError } from '../lib/api';
 import type { ArticleListItemRow } from '../lib/api';
