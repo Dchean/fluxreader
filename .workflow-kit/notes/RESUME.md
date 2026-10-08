@@ -57,8 +57,6 @@
 
 ## 未完成的上下文、决策与待办（Agent 笔记）
 
-- 2026-09-29T13:32:50.022310Z · note/decision · 2026-09-29 owner 指示：「按照项目最新情况更新readme（如果不影响工作流的话），并且规范历史提交的commit文案和release文案」。执行：①README 两分支统一为同一份分支无关版本（分支与发布约定、提交与发布文案约定、能力概述刷新、结构表校准——删不存在的 workflow-kit/ 启动包行、.workflow-kit/ 标注仅 dev），未来 dev→main 合并在 README 上零冲突；②release.yml 的 releaseBody 改为自动取 annotated tag 附注（手动触发回退静态文案），今后发布说明只维护 tag 附注一处，模板见 .workflow-kit/docs/RELEASE-NOTES-TEMPLATE.md；③提交信息约定（type(scope): 中文主题；chore(workflow) 仅 dev）写入 README 并即日生效，本日提交即按此执行；④历史提交文案重写经评估不执行：改写祖先提交须重打全部 9 个已发布 tag（v0.8.0..v0.16.0）并强推，重推 v* tag 会逐个重触发 Release 工作流（旧提交无 CI 运行记录，45 分钟门控必超时失败），且 .workflow-kit 证据与日志引用的提交哈希全部失效——收益远低于破坏面；规范自即日起生效，历史以 tag 附注呈现；若 owner 仍要求改写历史需明确批准并接受「临时停用 Release 触发 + filter-repo + 全 tag 重建 + 双分支强推」流程；⑤已发布 Release 的 web 正文（旧静态文案）本机无 gh/token 不能改，owner 可自行 gh release edit --notes-file 修正（命令见模板文档）。
-- 2026-10-05T06:55:38.348960Z · note/decision · 核心一致性重构路线（DEC-refactor-roadmap-20261005）：保留 Tauri/Rust/React/SQLite 底座不重写；按审计四块（实体与视图分离/统一查询范围/事务化写入/同文建模）分四阶段推进，第一阶段=TASK-103 正文水合生命周期 + TASK-104 全部已读计数一致性 + TASK-105 Rust 状态写入事务化；编码派子代理、独立审查每轮新开子代理；GReader 优先推荐、Fever 为受限兼容；同文副本读状态传播保持现状并显式记录为政策，布局隔离优先与否留 owner 决定；二阶段及以后卡片在第一阶段验证通过后立项。详见 .workflow-kit/docs/DEC-refactor-roadmap-20261005.md 与 AUDIT-20261005-core-consistency.md
 - 2026-10-05T08:20:22.925338Z · note/context · 环境修复（DEC-local-cargo-gate-20261005 补充）：本机 .cargo/bin 全部 shim 为 rustup.exe 符号链接，workflow runtime resolve_program 的 Path.resolve() 追链后以 rustup.exe 身份执行导致 cargo test/fmt 报「invalid value ... for [+toolchain]」。已把 cargo.exe 符号链接替换为等价实体副本（rustup shim 按 argv[0] 文件名分发，副本语义不变，rustup 默认 Windows 形态即实体副本）。cargo --version/rustfmt --version 复验通过。TASK-106 的 cargo_fmt 本地门禁恢复可执行。
 - 2026-10-05T08:51:40.666508Z · note/context · TASK-106 · CI 权威证据：dev@76f3256（TASK-106 候选）GitHub Actions CI 全绿（frontend job + rust job，windows-latest cargo test + clippy -D warnings），2026-10-05 完成于约 08:52Z。cargo_test/cargo_clippy 本地可选门禁由本次 CI 运行覆盖（DEC-local-cargo-gate-20261005 补偿控制生效）。
 - 2026-10-05T11:40:27.990777Z · note/todo · 二阶段微任务候选（R2 审查裁定记录）：mergeSnapshotEntries 增加 fromBackend 参数把 bump 收窄到后端真值路径（bootstrap.ts 三处传 true，nav.ts 三处缓存恢复不 bump）——审查确认修法技术成立（nav 不 bump 不会重开快照踩踏缺口），当前角例双窄窗口+自愈故不阻塞；宜与二阶段「查询缓存/操作版本模型」一并实施。来源：TASK-107 R2 审查（agent_e92dd332）。
@@ -69,6 +67,8 @@
 - 2026-10-06T08:32:37.189654Z · note/context · 陈旧控制器锁清理：中断会话的控制器（lock token lock-8a1b22789bc6461，started 2026-10-06T05:11Z）退出后其 pid 33276 被 Windows 复用给 Bitwarden.exe（tasklist 实证），工具 pid_alive 保守检查拒绝 recover。主控以进程身份证据（复用非同进程）判定锁为陈旧，备份锁文件至 tmp/refactor-20261005/stale-controller-lock-backup.json 后删除。锁为瞬态控制文件非受管记录。
 - 2026-10-06T09:14:27.149769Z · note/decision · 三阶段任务拆分（DEC-phase3-split-20261006，承接 DEC-refactor-roadmap-20261005 第 3 条「五布局交互一致性」+ 审计优化点「同步四态展示」）：基于只读探查拆三卡——TASK-114 五布局状态与快捷键统一（NotifCard 补水合失败/空正文/加载 UI 对齐 SocialCard；Social/Notif 卡补 Enter/Space=选中；J/K 从仅文章布局扩展到全部虚拟化布局，ShortcutsTab 同步）；TASK-115 返回位置统一规则（per filterKey 顶条锚记忆+切回恢复，复用 timelineAnchor 机制；阅读器关闭焦点归还；统一规则文档化）；TASK-116 同步四态展示（Rust：sync_queue 增 attempts/last_error 列迁移+push 失败标记+sync_queue_stats 命令；前端：侧栏 pill 扩展+SyncTab 四态摘要，文案纪律 ≤48 字；顺手修 seed_bound doc 笔误）。加载/空/哨兵已探查证实五布局统一，不在卡内重做。执行沿用既定流程。
 - 2026-10-07T07:08:48.610322Z · note/context · TASK-117 · CI 失败记录：dev@b7947e9 起 rust job clippy -D warnings 失败（fmt 过/test 跳过；117/118/119 三个提交连续失败，同一 Rust 代码态）。日志需登录无法匿名读取（annotations 仅 exit code 1）。处置：延续卡静态排查（113 先例）+ 请 owner 从日志页贴错误文本双轨。117 本地验证与独立审查有效，CI 绿前不验收不合并。
+- 2026-10-08T03:36:42.956552Z · note/context · TASK-128 · 待观察项（不可稳定复现）：TASK-128 首轮烟雾（tmp/phase4/measure-smoke.json，10:10，worker 自起 Chrome/CDP 9224）捕获到一次 getSnapshot should be cached → React #185 崩溃（appHealth.crashes x2：longSession 与 memoryByLayout:通知 各一次），该 JSON 内不含组件归属；worker 报告称报错组件为 <NotifCard>（现场观察，无存档栈）。TASK-122 R1 的 useShallow 修复（eba4df5，08:10）在该烟雾之前已落地。总控随后复现尝试全部阴性：完整电池 x2（11:28/11:29，everCrashed=false）、快速五布局切换 x6 轮、GC+布局循环、Reader 打开/AI 按钮/Escape、命令面板输入——均 0 错误；全 src 的 17 处非平凡订阅已逐一核查（均为标量或稳定引用），t122-9 源级锁覆盖三处 selectArticleBody 订阅。处置：记为待观察项，不阻断交付；若 owner 实机复现，按 tools/phase4_checklist.md §6 取证。候选补强（backlog）：测量电池的错误钩子捕获 React componentStack（console.error 的次参数）并落盘，使复发可归因。
+- 2026-10-08T03:36:56.878840Z · note/todo · backlog（非本轮范围，待 owner 决定）：①测量电池错误钩子补 React componentStack 捕获（NotifCard #185 复发可归因）；②挂载组件测试通道评估（P2-7.5，audit 建议真实组件测试覆盖 effect 生命周期）；③回归套件按领域拆分（约 6000 行集中测试含源码字符串检查）；④Fever max_id 历史回溯实现（TASK-127 仅如实记录能力未实现）；⑤scheduler.rs 封面回填 DB 写失败 unwrap_or(0) 同类问题（TASK-127 审查观察项，在 allowed_paths 外）；⑥同文内容/各源条目独立建模（四阶段④，未实现）。
 
 ## 教训
 
@@ -83,9 +83,6 @@
 
 ## 最近事件
 
-- 2026-10-08T02:31:56.079069Z · unblock · TASK-128 · action_required → ready；依据：主控自查：worker-result 的 unresolved_items 误填了「待观察项」（本卡交付不依赖它），按契约置空；修复已就绪，重开轮承载同一候选。
-- 2026-10-08T02:33:02.035695Z · checkpoint · TASK-128 · 开始执行，保留原任务身份和截止时间；沿用本任务先前的范围基线，changed_files 为本任务累计改动；下一步：完成当前修改后运行 diff --run 核对改动，再调用 finish，然后 verify
-- 2026-10-08T02:33:52.485251Z · checkpoint · TASK-128 · 编码结果已记录，差异范围已核对：tools/phase4_checklist.md, tools/phase4_measure.mjs, tools/phase4_seed.py；下一步：运行 verify；代码完成尚未等于验收通过
 - 2026-10-08T02:34:33.188703Z · checkpoint · TASK-128 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-10-08T02:45:13.176413Z · checkpoint · TASK-128 · Review requires changes; inspect the findings；下一步：先核对已有文件及原始日志，再处理 review_failure；不要新建任务或重置预算
 - 2026-10-08T02:45:42.457653Z · checkpoint · TASK-128 · 阻塞已处置（review_failure）：R1 修复范围：F1 搜索正例限定文章分组+overlayText 打开后读取+键入前 token 硬断言；F2 每段自带 conditions 快照并据此生成结论行；F3 清单与 seed 脚本加『还原前退出应用』保护；F4 修正『只读』声明并单列真实同步警告；F5 统一清单文件名与长会话判定线；F6 崩溃布局堆值标失效。；下一步：begin 重新实现
@@ -95,6 +92,9 @@
 - 2026-10-08T03:08:36.584948Z · checkpoint · TASK-128 · 预先定义的必需测试全部通过，日志已保存；下一步：审查当前候选；独立审查使用没有参与编码的新上下文
 - 2026-10-08T03:19:13.656197Z · checkpoint · TASK-128 · 当前候选的测试与审查通过（independent）；下一步：继续已授权任务；所属功能完成后请用户验收
 - 2026-10-08T03:22:28.503699Z · accept · 验收 TASK-128；依据：owner 会话指示『继续推进优化』——视为验收确认；TASK-128 独立复审 R1 PASS findings=0（6 findings 逐条对抗式复核：搜索归属对抗探针、restore 三分支实跑、条件快照贯穿结论行）+ CI 全绿（b7c3ed8）
+- 2026-10-08T03:35:49.723027Z · note/progress · TASK-128 · 第五阶段收口：TASK-122/123/124/127/128 全部验收（DEC-00de125f/7bcb581d/cfb13b2e/0b906820/013d34d4），dev→main 合并完成（cdb9bb3，剔除 .workflow-kit 与 TASK 契约文档），main CI 运行中（frontend job 全绿；rust job clippy/test 步骤已过、mock 集成测试中）。TASK-125/126 因 allowed_paths 未含 src-tauri/src/fever.rs 两次重建后以 TASK-127 交付（cancel 记录在案）。
+- 2026-10-08T03:36:42.956552Z · note/context · TASK-128 · 待观察项（不可稳定复现）：TASK-128 首轮烟雾（tmp/phase4/measure-smoke.json，10:10，worker 自起 Chrome/CDP 9224）捕获到一次 getSnapshot should be cached → React #185 崩溃（appHealth.crashes x2：longSession 与 memoryByLayout:通知 各一次），该 JSON 内不含组件归属；worker 报告称报错组件为 <NotifCard>（现场观察，无存档栈）。TASK-122 R1 的 useShallow 修复（eba4df5，08:10）在该烟雾之前已落地。总控随后复现尝试全部阴性：完整电池 x2（11:28/11:29，everCrashed=false）、快速五布局切换 x6 轮、GC+布局循环、Reader 打开/AI 按钮/Escape、命令面板输入——均 0 错误；全 src 的 17 处非平凡订阅已逐一核查（均为标量或稳定引用），t122-9 源级锁覆盖三处 selectArticleBody 订阅。处置：记为待观察项，不阻断交付；若 owner 实机复现，按 tools/phase4_checklist.md §6 取证。候选补强（backlog）：测量电池的错误钩子捕获 React componentStack（console.error 的次参数）并落盘，使复发可归因。
+- 2026-10-08T03:36:56.878840Z · note/todo · backlog（非本轮范围，待 owner 决定）：①测量电池错误钩子补 React componentStack 捕获（NotifCard #185 复发可归因）；②挂载组件测试通道评估（P2-7.5，audit 建议真实组件测试覆盖 effect 生命周期）；③回归套件按领域拆分（约 6000 行集中测试含源码字符串检查）；④Fever max_id 历史回溯实现（TASK-127 仅如实记录能力未实现）；⑤scheduler.rs 封面回填 DB 写失败 unwrap_or(0) 同类问题（TASK-127 审查观察项，在 allowed_paths 外）；⑥同文内容/各源条目独立建模（四阶段④，未实现）。
 
 ## 如何继续
 
