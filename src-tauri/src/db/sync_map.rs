@@ -335,16 +335,19 @@ pub fn get_article_content_html(conn: &Connection, article_id: i64) -> AppResult
     Ok(html)
 }
 
-/// 更新文章全文提取结果：覆盖 content_html 并置提取标志
+/// 更新文章全文提取结果：覆盖 content_html、置提取标志，并按同一来源重写
+/// body_text（R1：纯文本列/搜索/摘要必须与提取正文同源，不得残留旧 RSS 文本——
+/// 旧实现只写 HTML+flag，后续刷新保护会冻结「HTML=全文、body_text=旧 RSS」的错配）。
 pub fn update_article_fulltext(
     conn: &Connection,
     article_id: i64,
     content_html: &str,
     extracted: bool,
 ) -> AppResult<()> {
+    let body_text = crate::sanitize::html_to_text(content_html);
     conn.execute(
-        "UPDATE articles SET content_html = ?1, fulltext_extracted = ?2 WHERE id = ?3",
-        params![content_html, extracted as i64, article_id],
+        "UPDATE articles SET content_html = ?1, body_text = ?2, fulltext_extracted = ?3 WHERE id = ?4",
+        params![content_html, body_text, extracted as i64, article_id],
     )?;
     Ok(())
 }

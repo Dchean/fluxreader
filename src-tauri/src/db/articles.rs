@@ -691,14 +691,18 @@ pub fn upsert_article_with_feed(
             }
         }
     }
-    let existing: Option<i64> = conn
+    let existing: Option<(i64, bool)> = conn
         .query_row(
-            "SELECT id FROM articles WHERE feed_id = ?1 AND guid = ?2",
+            "SELECT id, fulltext_extracted FROM articles WHERE feed_id = ?1 AND guid = ?2",
             params![feed_id, a.guid],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
         )
         .optional()?;
-    if let Some(id) = existing {
+    if let Some((id, ft_extracted)) = existing {
+        // Note: 已提取全文（fulltext_extracted=1）的条目不得被 RSS 内容覆盖正文（优先保持提取全文，避免「标志=已提取、正文=摘要」的不一致） — 见 .agents/notes/implemented/architecture/2026-09-19-后端模块拆分与并发纪律.md
+        // 正文冻结、纯文本按保留的 HTML 重算（R1：修复旧版「只写 HTML+flag」留下的
+        // body_text 旧 RSS 错配）；guid 与规范化 URL 两条命中路径同口径（下方 by_url 分支）。
+        let ft_body = fulltext_body_for_refresh(conn, id, ft_extracted)?;
         conn.execute(
             "UPDATE articles SET
                 url = COALESCE(?2, url),
@@ -706,8 +710,8 @@ pub fn upsert_article_with_feed(
                 title = ?3,
                 author = COALESCE(?4, author),
                 summary = COALESCE(?5, summary),
-                content_html = COALESCE(?6, content_html),
-                body_text = CASE WHEN ?7 != '' THEN ?7 ELSE body_text END,
+                content_html = CASE WHEN fulltext_extracted = 1 THEN content_html ELSE COALESCE(?6, content_html) END,
+                body_text = CASE WHEN fulltext_extracted = 1 THEN COALESCE(?14, body_text) WHEN ?7 != '' THEN ?7 ELSE body_text END,
                 image_url = COALESCE(?8, image_url),
                 enclosure_url = COALESCE(?9, enclosure_url),
                 enclosure_mime = COALESCE(?10, enclosure_mime),
@@ -727,7 +731,8 @@ pub fn upsert_article_with_feed(
                 a.enclosure_mime,
                 a.duration_sec,
                 a.published_at,
-                a.url.as_deref().map(normalize_url)
+                a.url.as_deref().map(normalize_url),
+                ft_body
             ],
         )?;
         Ok((id, false))
@@ -737,21 +742,25 @@ pub fn upsert_article_with_feed(
         // 命中已有文章时只更新内容（正文/标题/封面/附件），**保留 source 与状态**
         // （is_read/is_starred/remote_id）——抓取只负责内容、同步只负责状态，
         // 避免「切换本地抓取后数量翻倍」与「状态被抓取覆盖回未读」。
-        let by_url: Option<i64> = conn
+        let by_url: Option<(i64, bool)> = conn
             .query_row(
-                "SELECT id FROM articles WHERE feed_id = ?1 AND url_norm = ?2 ORDER BY id LIMIT 1",
+                "SELECT id, fulltext_extracted FROM articles WHERE feed_id = ?1 AND url_norm = ?2 ORDER BY id LIMIT 1",
                 params![feed_id, normalize_url(url)],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
             )
             .optional()?;
-        if let Some(id) = by_url {
+        if let Some((id, ft_extracted)) = by_url {
+            // OPT-003 全文保护：同 [`upsert_article_with_feed`] 的 guid 命中分支
+            // （guid 变化但规范化 URL 相同的重放），已提取全文的条目同样冻结正文、
+            // 并按保留的 HTML 重算纯文本（R1 历史错配修复），只用 RSS 更新元数据。
+            let ft_body = fulltext_body_for_refresh(conn, id, ft_extracted)?;
             conn.execute(
                 "UPDATE articles SET
                     title = ?1,
                     author = COALESCE(?2, author),
                     summary = COALESCE(?3, summary),
-                    content_html = COALESCE(?4, content_html),
-                    body_text = CASE WHEN ?5 != '' THEN ?5 ELSE body_text END,
+                    content_html = CASE WHEN fulltext_extracted = 1 THEN content_html ELSE COALESCE(?4, content_html) END,
+                    body_text = CASE WHEN fulltext_extracted = 1 THEN COALESCE(?12, body_text) WHEN ?5 != '' THEN ?5 ELSE body_text END,
                     image_url = COALESCE(?6, image_url),
                     enclosure_url = COALESCE(?7, enclosure_url),
                     enclosure_mime = COALESCE(?8, enclosure_mime),
@@ -770,6 +779,7 @@ pub fn upsert_article_with_feed(
                     a.duration_sec,
                     a.published_at,
                     id,
+                    ft_body,
                 ],
             )?;
             Ok((id, false))
@@ -779,6 +789,29 @@ pub fn upsert_article_with_feed(
     } else {
         insert_new_article(conn, feed_id, a)
     }
+}
+
+/// 刷新保护下已提取全文行的纯文本来源：按当前保留的 content_html 重算
+/// （OPT-003 R1：历史库存在「HTML=提取全文、body_text=旧 RSS」的错配行，
+/// 该错配源于旧版 update_article_fulltext 只写 HTML+flag；刷新时在此恢复同源）。
+/// 未提取或 HTML 为空时返回 None（保持原 body_text 不动，避免把好文本清空）。
+fn fulltext_body_for_refresh(
+    conn: &Connection,
+    id: i64,
+    extracted: bool,
+) -> AppResult<Option<String>> {
+    if !extracted {
+        return Ok(None);
+    }
+    let html: String = conn.query_row(
+        "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
+        params![id],
+        |r| r.get(0),
+    )?;
+    if html.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(crate::sanitize::html_to_text(&html)))
 }
 
 /// 插入新文章（upsert_article_with_feed 的兜底路径）。
@@ -1530,14 +1563,6 @@ mod tests {
         assert_eq!(left, 1, "本地订阅所属目录必须保留");
     }
 
-    /* ---------- P3[5]：cleanup_cache 的 cutoff 不得因时区混用而多删 ---------- */
-
-    /// cutoff 必须与 published_at 处于同一时基（P3[5]）。**实测语义**（非推测）：
-    ///
-    /// · published_at 由 `to_rfc3339()` 产生，形如 `2026-09-14T18:45:20+12:00`（含 `T` 与偏移）；
-    /// · 修前 cutoff = `datetime('now','-N days','localtime')`，形如 `2026-09-14 16:45:20`
-    ///   （含空格、本地墙上时间）；
-    /// · 两者做**裸文本比较**：第 11 个字符处 `'T'(0x54) > ' '(0x20)`，故当**日期部分相同**时
     /// OPT-014 R1：事务内核 `purge_remote_data_in` 不自行提交——在调用方事务里
     /// 执行后回滚，一切原样（证明可与账号提交同事务，且无嵌套 BEGIN）。
     #[test]
@@ -1575,6 +1600,14 @@ mod tests {
         assert_eq!(left, 1, "调用方回滚后服务端订阅必须原样");
     }
 
+    /* ---------- P3[5]：cleanup_cache 的 cutoff 不得因时区混用而多删 ---------- */
+
+    /// cutoff 必须与 published_at 处于同一时基（P3[5]）。**实测语义**（非推测）：
+    ///
+    /// · published_at 由 `to_rfc3339()` 产生，形如 `2026-09-14T18:45:20+12:00`（含 `T` 与偏移）；
+    /// · 修前 cutoff = `datetime('now','-N days','localtime')`，形如 `2026-09-14 16:45:20`
+    ///   （含空格、本地墙上时间）；
+    /// · 两者做**裸文本比较**：第 11 个字符处 `'T'(0x54) > ' '(0x20)`，故当**日期部分相同**时
     ///   文章恒被判定为「不够旧」；加上 localtime 把阈值整体挪动，实际判定退化为按**日期**
     ///   粗比、且随本机时区漂移。
     ///

@@ -56,6 +56,7 @@ pub async fn fetch_and_parse(
 
 /// 第三阶段：锁内写回。成功清失败标记 + 更新元数据 + upsert 条目；
 /// 失败标记 fetch_failed（指数退避由 db 层维护）。
+/// Body 分支的源元数据/条目/条件头/失败状态在**单一短事务**内提交，失败全量回滚。
 /// 返回本次新增条目数。old_etag/old_last_modified：DB 里读到的旧条件头，
 /// 304 分支写回时复用（304 响应不带新头，写 None 会断掉条件 GET 链）。
 pub fn apply_refresh_result(
@@ -77,15 +78,21 @@ pub fn apply_refresh_result(
             last_modified,
             ..
         } => {
+            // Note: Body 写回的源元数据/条目/条件头/失败状态必须同一短事务提交（HTTP 已锁外完成） — 见 .agents/notes/implemented/architecture/2026-09-19-后端模块拆分与并发纪律.md
+            // OPT-003：三段式只保证 HTTP 在锁外；写回内部此前逐语句自动提交，
+            // 中途任一失败（条目插入/触发器/磁盘错误）会留下「标题与条件头已换新、
+            // 条目只进一半」的半提交状态。包进单一事务后，数据与状态同生共死；
+            // 失败注入回归见 tests/staged_refresh_e2e.rs（BEFORE INSERT 触发器反例）。
+            let tx = conn.unchecked_transaction()?;
             db::set_feed_title_and_icon(
-                conn,
+                &tx,
                 feed_id,
                 parsed.title.as_deref(),
                 parsed.icon.as_deref(),
                 parsed.site_url.as_deref(),
             )?;
             db::set_feed_fetch_state(
-                conn,
+                &tx,
                 feed_id,
                 false,
                 None,
@@ -94,11 +101,12 @@ pub fn apply_refresh_result(
             )?;
             let mut new_count = 0;
             for a in &parsed.articles {
-                let (_, was_new) = db::upsert_article_with_feed(conn, feed_id, a, dedup)?;
+                let (_, was_new) = db::upsert_article_with_feed(&tx, feed_id, a, dedup)?;
                 if was_new {
                     new_count += 1;
                 }
             }
+            tx.commit()?;
             Ok(new_count)
         }
     }
