@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::db;
+use crate::error::AppResult;
 use crate::fever;
 use crate::greader::ItemContent;
 use chrono::Utc;
@@ -23,9 +24,13 @@ fn collect_fever_items(
     }
 }
 
-/// Fever 拉取：Fever 无「全部条目 id」端点（items 仅给最近 50 条），拆两段：
+/// Fever 拉取：items 端点单页仅给最近 50 条，拆两段：
 /// ① `since_id` 分页增量拉新条目（含已读+未读 → 同源判定 + upsert）
 /// ② `unread_item_ids`/`saved_item_ids` 权威集合全量对账（已读/收藏反推）。
+///
+/// TASK-125（审计 P2-8）：协议/当前 Miniflux 服务端支持 `items&max_id` 向
+/// **更旧**条目翻页（历史回溯），但本客户端**未实现**该方向（见 `fever.rs`
+/// 模块头「历史回溯能力」段）；此处两段是能力现状，不是协议上限。
 pub(super) async fn pull_entries_fever(
     db: &Arc<Mutex<Connection>>,
     client: &fever::FeverClient,
@@ -66,6 +71,8 @@ pub(super) async fn pull_entries_fever(
     let mut seen: HashSet<i64> = HashSet::new();
     // TASK-068：抓取失败计数——时间戳游标仅在无失败时推进（对称 greader 守卫；
     // last_sync_entry_id 只计已合并条目，本就安全）。
+    // TASK-125：since_id=0 走首种子（最近 50 条）是因本客户端未实现 max_id
+    // 历史回溯，不是协议没有历史端点（见 `fever.rs` 模块头）。
     let mut fetch_failures = 0usize;
 
     if since_id > 0 {
@@ -96,7 +103,8 @@ pub(super) async fn pull_entries_fever(
             }
         }
     } else {
-        // 首次：Fever 无全量历史端点；最近 50 条作已读种子，未读/收藏由下方补齐
+        // 首次：本客户端未实现 max_id 历史回溯（协议/当前 Miniflux 支持，见
+        // `fever.rs` 模块头）；最近 50 条作已读种子，未读/收藏由下方 with_ids 补齐
         match client.items_recent().await {
             Ok(seed) => collect_fever_items(&mut all_items, &mut seen, seed),
             Err(e) => {
@@ -158,7 +166,14 @@ pub(super) async fn pull_entries_fever(
     // 集合拉取失败时整段跳过（C-1），绝不做"空集合 = 远端全变"的对账。
     if reconcile_ok {
         let conn = db.lock().await;
-        reconcile_fever_state(&conn, &unread, &starred, &maps, report);
+        // 审计 P2-8③：对账内的 DB 写失败必须可见——记入 report.errors
+        // （不再被 unwrap_or(0) 伪装成 0 行变化）。已写入行不回滚，
+        // 剩余行下一轮同集合对账幂等重放。
+        if let Err(e) = reconcile_fever_state(&conn, &unread, &starred, &maps, report) {
+            report.errors.push(format!(
+                "状态对账中断：本地状态写入失败（{e}），本轮剩余条目未对账"
+            ));
+        }
     }
 
     // ⑥ 更新游标（Fever 用条目 id；时间戳游标也记录，供切换回 greader 后的首拉）
@@ -190,13 +205,17 @@ pub(super) async fn pull_entries_fever(
 /// 显式化前逐列一致（收口不是改行为），双向选择的前提（Fever 只有
 /// unread/saved 集合、Miniflux 按 URL 去重）与守卫说明见政策点及
 /// `docs/sync-compat-matrix.md`。
+///
+/// 审计 P2-8③：返回 `AppResult<()>`——行级写失败经 `?` 中断本轮对账并向上
+/// 传播（调用方记入 `report.errors`），不再像旧的 `unwrap_or(0)` 那样把 DB
+/// 写失败伪装成「0 行变化」。已写入行不回滚；剩余行由下一轮同集合对账重放。
 fn reconcile_fever_state(
     conn: &Connection,
     unread: &[i64],
     starred: &[i64],
     maps: &db::SyncMatchMaps,
     report: &mut SyncReport,
-) {
+) -> AppResult<()> {
     use std::collections::HashSet;
     let unread_set: HashSet<i64> = unread.iter().copied().collect();
     let starred_set: HashSet<i64> = starred.iter().copied().collect();
@@ -215,7 +234,7 @@ fn reconcile_fever_state(
             conflict_policy::FEVER_READ_DIRECTION,
             !unread_set.contains(remote_id),
             aid,
-        );
+        )?;
         // TASK-112 政策（FEVER_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
         // 命中 → 收藏；未命中 → 取消收藏。
         report.merged_states += conflict_policy::apply_star_by_policy(
@@ -223,8 +242,9 @@ fn reconcile_fever_state(
             conflict_policy::FEVER_STAR_DIRECTION,
             starred_set.contains(remote_id),
             aid,
-        );
+        )?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -337,7 +357,7 @@ mod tests {
             .unwrap();
 
         let mut report = SyncReport::default();
-        reconcile_fever_state(&conn, &[201], &[], &maps_for(201, aid, false), &mut report);
+        reconcile_fever_state(&conn, &[201], &[], &maps_for(201, aid, false), &mut report).unwrap();
 
         assert!(
             !is_read(&conn, aid),
@@ -354,7 +374,7 @@ mod tests {
         let aid = seed_bound(&conn, 202);
 
         let mut report = SyncReport::default();
-        reconcile_fever_state(&conn, &[], &[], &maps_for(202, aid, false), &mut report);
+        reconcile_fever_state(&conn, &[], &[], &maps_for(202, aid, false), &mut report).unwrap();
 
         assert!(is_read(&conn, aid), "unread 未命中必须落地本地已读");
         assert_eq!(report.merged_states, 1, "未命中侧恰好一次状态写入");
@@ -378,7 +398,7 @@ mod tests {
             mf_id_to_article: [(203, starred), (204, unstarred)].into_iter().collect(),
             ..maps_for(203, starred, false)
         };
-        reconcile_fever_state(&conn, &[203, 204], &[204], &maps, &mut report);
+        reconcile_fever_state(&conn, &[203, 204], &[204], &maps, &mut report).unwrap();
 
         assert!(
             !is_starred(&conn, starred),
@@ -410,7 +430,7 @@ mod tests {
 
         let mut report = SyncReport::default();
         // 远端快照：unread 命中 + saved 未命中——若无 pending 保护会同时翻转两列。
-        reconcile_fever_state(&conn, &[205], &[], &maps_for(205, aid, true), &mut report);
+        reconcile_fever_state(&conn, &[205], &[], &maps_for(205, aid, true), &mut report).unwrap();
 
         assert!(
             is_read(&conn, aid),

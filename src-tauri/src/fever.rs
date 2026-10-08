@@ -14,6 +14,15 @@
 //!   form body（TASK-101），其余参数留在 query（两类后端的 `$_REQUEST`/FormValue
 //!   都收）。顺带消除 api_key 进服务器访问日志的泄露面。
 //! - `items` 端点最多返回 **50 条**（升序），增量用 `since_id` 分页拉全。
+//! - **历史回溯能力（协议/服务端支持 vs 本客户端未实现，TASK-125 审计 P2-8）**：
+//!   Fever 协议 / 当前 Miniflux 服务端的 `items` 端点支持 `max_id`——按
+//!   `id < max_id` 向**更旧**条目翻页，重复请求直到返回空数组即完成历史回溯
+//!   （来源：github.com/miniflux/v2 的 `internal/fever/handler.go` 约 227-267 行，
+//!   2026-10 查阅 dev/main 分支源码时点）。**本客户端当前只实现** `since_id`
+//!   增量（向更新方向）与 `items_recent` 首种子（最近 50 条），`items_with_ids`
+//!   仅用于补齐权威集合中缺正文的条目——**未实现 max_id 历史回溯**。该能力此处
+//!   仅作记录（适配器能力报告的记录点），实现属后续任务；「历史是否仍被服务端
+//!   保留另当别论」。
 //! - `unread_item_ids`/`saved_item_ids` 是权威**全量** id 集合（不受 50 条限制）。
 //! - `mark=item` 只接受**单个** id（逗号分隔无效），推送需逐个条目调用。
 //! - 不支持添加订阅（Fever 协议无写订阅端点）——`quick_add` 由上层降级处理。
@@ -354,6 +363,11 @@ impl FeverClient {
 
     /// 增量拉条目：`id > since_id`（Miniflux 限制 50 条升序，调用方需分页到拿完）。
     /// 注意 `since_id=0` 是无效值（返回默认最近 50 条），首次同步请用 [`Self::items_recent`]。
+    ///
+    /// 方向说明（TASK-125）：本方法只向**更新**方向翻页（`since_id` 递增）。Fever
+    /// 协议/当前 Miniflux 服务端另支持 `items&max_id` 向**更旧**条目翻页（重复直到
+    /// 返回空数组，即历史回溯）——本客户端**未实现**（见模块头「历史回溯能力」段）；
+    /// 该能力为适配器能力报告的记录点，实现属后续任务。
     pub async fn items_since(&self, since_id: i64) -> AppResult<Vec<ItemContent>> {
         let env = self
             .call("items", &[("since_id", since_id.to_string())])
@@ -368,6 +382,10 @@ impl FeverClient {
     /// 拉最近条目（items 无参数，Miniflux 返回最近 50 条，未读优先）。
     /// 仅用于 Fever 首次同步的已读种子；未读/收藏由 `unread_item_ids`/
     /// `saved_item_ids` + `items_with_ids` 补齐。
+    ///
+    /// TASK-125：首同步深度因此只有最近 50 条——**不是**协议没有历史端点，
+    /// 而是本客户端未实现 `max_id` 历史回溯（见模块头「历史回溯能力」段与
+    /// `docs/sync-compat-matrix.md` §1/§6-L2）。
     pub async fn items_recent(&self) -> AppResult<Vec<ItemContent>> {
         let env = self.call("items", &[]).await?;
         Ok(env
