@@ -3,33 +3,52 @@
 // 前置：应用以远程调试端口启动（WebView2）：
 //   set WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222
 //   FluxReader.exe
-// 运行：node tools/phase4_measure.mjs --out tmp/phase4/measure-report.json
+// 运行：node tools/phase4_measure.mjs --out tmp/phase4/measure-report.json [--reload] [--no-sync-probe]
 // 依赖：tools/t059_cdp.mjs 的连接基建（findPageTarget/connect；该文件受保护，本工具只消费不改）。
-// 纪律：本脚本只读测量（点击/滚动/读堆内存/IPC 查询），不写应用数据；DB 注入由 phase4_seed.py 负责。
 //
-// ---- TASK-128 修正要点（对应审计 P2-7 的六点质疑）----
+// ---- 数据写入纪律（TASK-128 R1 修正：原文「只读测量，不写应用数据」不准确，见审计 R1-F4）----
+// 本脚本自身不做写操作（点击/滚动/读堆/IPC 查询都是读），**但「锁等待代理」段会通过命令面板点一次
+// 「刷新全部订阅源」**，那是一次真实的手动同步：store.triggerManualSync → syncPhase('feeds'/'states')
+// + refreshAllFeeds + reloadFromBackend，即**联网抓取全部订阅源、写入本机 DB，并可能把状态推给
+// 已连接的后端**。要完全避免这次同步，二选一：
+//   a) 加 --no-sync-probe：跳过该次触发（锁等待段只保留空闲态 + 纯 IPC 对照采样，同步在飞态记 skipped）；
+//   b) 先在应用里断开后端（只去掉「向后端推送/从后端拉取」，同步仍会写本机 DB）或断网。
+// DB 注入与还原由 phase4_seed.py 负责，本脚本不碰 DB 文件。
+//
+// ---- TASK-128 修正要点（对应审计 P2-7 的六点质疑 + R1 的六条 findings）----
 // 1) 切换延迟：不再用「存在任意卡片」作完成判据。点击前记录卡片 id 基线，点击后以
 //    **卡片 id 集合变化**（rAF 16ms 轮询，非 50ms setInterval）为 firstResultMs，
 //    再等 **连续 3 帧 rAF 无 DOM 变更**为 stableMs；超时只报 timedOut，不给毫秒数。
 // 2) 搜索：分段计时 openMs（Ctrl+K → 浮层打开）与 resultMs（键入 → 结果节点出现）；
-//    结果归属断言=「节点必须来自搜索浮层内的 .cp-item」「文本含本次 token」「结果数与基线不同」；
-//    超时只报 timedOut，不给 resultMs。另跑一次「确定不在数据里的 token」负向探针，
-//    证明命中判定确实只看浮层而不是 document.body。
+//    结果归属断言=「节点必须来自搜索浮层的**文章分组**（[role=group][aria-label=文章]；标签查不到
+//    时回退到最后一个 role=group，但该组不得是「操作/订阅源」）」「文本含本次 token」
+//    「文章分组结果数与基线不同」；**键入前读一次浮层条目并硬断言 token 不在其中**（不成立即作废，
+//    不给 resultMs）。R1-F1：命令/订阅源分组同样渲染 .cp-item，不限定分组时订阅源过滤（180ms 防抖
+//    量级）会被当成 FTS 命中；用于选 token 的浮层文本也必须**在浮层打开之后**读（旧版恒为空串）。
+//    另跑一次「确定不在数据里的 token」负向探针，证明命中判定确实只看浮层而不是 document.body。
 // 3) 深页滚动：顶部之外再测列表中部 50% 与尾部 90%（先滚到位并等静默 300ms，再采样 3 秒）。
 // 4) 内存口径分列：JS 堆（performance.memory）与进程 RSS（app 进程 + WebView2 进程组，
-//    Node 侧 PowerShell 读取）；外加长会话 8 轮巡检的堆/RSS 增量。
+//    Node 侧 PowerShell 读取）；外加长会话 8 轮巡检的堆/RSS 增量与**逐轮堆序列**（R1-F5）。
 // 5) 锁等待代理：sync_queue_stats IPC 往返采样，空闲态与同步在飞态各一组（明确标注为代理）。
 // 6) 报告自带测量条件（conditions），并在结论行内限定条件；任一测量段缺前置条件时
 //    输出 {skipped}/{error}/{timedOut}，绝不给假数字。
+// 7) 每段结论行用它**自己**的条件快照（report.conditionsBySection[<段名>]，另见每条 memoryByLayout
+//    条目自带的 conditions）：锁等待段会触发一次真实同步，借用电池开头那份会印出自相矛盾的
+//    「同步在飞=false」（R1-F2）。长会话/各布局行都显式打印自己的同步在飞状态。
+// 8) 各布局内存结论：该布局测量时渲染树已被卸载（appCrashedHere）的，印 heapUsedMB=null/
+//    「失效（渲染树被卸载）」，不把卸载后的页面堆当成该布局的内存（R1-F6）。
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { connect, findPageTarget, CDP_PORT } from './t059_cdp.mjs';
 
-  const outArg = process.argv.indexOf('--out');
+const outArg = process.argv.indexOf('--out');
 const OUT = outArg > -1 ? resolve(process.argv[outArg + 1]) : resolve('tmp/phase4/measure-report.json');
 /** --reload：先刷新页面再测量（重复测量时拿到干净的起点；不写应用数据）。 */
 const RELOAD_FIRST = process.argv.includes('--reload');
+/** --no-sync-probe：锁等待段**不点**「刷新全部订阅源」——该点击是一次真实手动同步（联网抓取全部
+    订阅源 + 写本机 DB，可能向后端推送状态）。加此开关后该段只剩只读采样，同步在飞态记 skipped。 */
+const NO_SYNC_PROBE = process.argv.includes('--no-sync-probe');
 
 /** 应用进程名（Tauri productName）与 WebView2 进程组名，可用环境变量覆盖。 */
 const APP_PROCESS = process.env.T128_APP_PROCESS || 'FluxReader';
@@ -308,7 +327,43 @@ const PAGE_LIB = `
     };
   };
 
-  /* ---- (b) 搜索：分段计时 + 结果归属断言 ---- */
+  /* ---- (b) 搜索：分段计时 + 结果归属断言 ----
+     浮层结构（src/components/Overlays.tsx）：操作 / 订阅源 / 文章 三组，每组都是
+     <div role="group" aria-label={title}>，组内条目一律 .cp-item。所以「命中」必须落在**文章组**
+     里：命令与订阅源条目同样带 .cp-item，订阅源组还会按查询词过滤——token 只要是某个订阅源名的
+     子串（如 'Verge' ⊂ 'The Verge'），不限定分组就会把「订阅源过滤完成」（180ms 防抖量级）
+     当成「FTS 搜到文章」的 resultMs（审计 R1-F1）。 */
+  const ARTICLE_GROUP_LABEL = '文章';
+  const NON_ARTICLE_GROUP_LABELS = ['操作', '订阅源'];
+  const paletteGroups = () => {
+    const o = searchOverlay();
+    const out = [];
+    if (!o) return out;
+    for (const g of o.querySelectorAll('[role="group"]')) out.push({ el: g, label: g.getAttribute('aria-label') });
+    return out;
+  };
+  /* 文章分组解析：优先 [aria-label=文章]；标签查不到时回退到最后一个 role=group，
+     但该回退组若本身是「操作/订阅源」，就判为不可用（宁可超时也不接受订阅源组的命中）。 */
+  const articleGroupScope = () => {
+    const groups = paletteGroups();
+    if (!groups.length) return null;
+    let g = null;
+    let resolvedBy = null;
+    for (const x of groups) {
+      if (x.label === ARTICLE_GROUP_LABEL) { g = x; resolvedBy = 'aria-label'; break; }
+    }
+    if (!g) { g = groups[groups.length - 1]; resolvedBy = 'last-group-fallback'; }
+    const usable = resolvedBy === 'aria-label' ||
+      (resolvedBy === 'last-group-fallback' && NON_ARTICLE_GROUP_LABELS.indexOf(String(g.label)) < 0);
+    return { el: g.el, label: g.label, resolvedBy: resolvedBy, usable: usable };
+  };
+  const articleGroupItems = () => {
+    const g = articleGroupScope();
+    if (!g || !g.usable) return [];
+    const out = [];
+    for (const el of g.el.querySelectorAll('.cp-item')) out.push((el.textContent || '').trim());
+    return out;
+  };
   const setInputValue = (el, value) => {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
     setter.call(el, value);
@@ -343,6 +398,30 @@ const PAGE_LIB = `
     return await waitUntil(() => !searchState().open, timeoutMs || 1500);
   };
 
+  /* 键入前基线采样：打开浮层 → 读整层条目文本 + 分组标签 + 文章组条目 → 关掉。
+     用途是给 Node 侧选 token 提供「浮层已打开时可见的文本」（旧版在浮层从未打开时读 overlayText，
+     恒为空串，排除守卫永不生效——审计 R1-F1）。 */
+  const paletteBaseline = async () => {
+    await closeSearch(1200);
+    pressKey('k', { ctrlKey: true, code: 'KeyK' });
+    const opened = await waitUntil(() => searchState().open, 2500);
+    if (!opened) return { opened: false, items: [], groups: [], text: '', itemCount: 0, articleGroupCount: null };
+    const items = searchItems();
+    const groups = paletteGroups().map((g) => g.label);
+    const scope = articleGroupScope();
+    const articleItems = articleGroupItems();
+    const out = {
+      /* 注意：本文件是外层模板串，页面内代码里**不能写 \n 这类转义**（会被外层先解成真换行，
+         把内层字符串截断成语法错误）。要用换行符请用 String.fromCharCode(10)。 */
+      opened: true, items: items, groups: groups, text: items.join(String.fromCharCode(10)), itemCount: items.length,
+      articleGroupCount: articleItems.length,
+      articleGroupLabel: scope ? scope.label : null,
+      articleGroupResolvedBy: scope ? scope.resolvedBy : null,
+    };
+    await closeSearch(1200);
+    return out;
+  };
+
   const runSearch = async (params) => {
     const p = params || {};
     const timeoutMs = p.timeoutMs || 6000;
@@ -355,43 +434,91 @@ const PAGE_LIB = `
     if (!opened) return { timedOut: true, openMs: r1(openMs), reason: 'search-overlay-not-open', token: p.token };
     const input = searchInput();
     if (!input) return { timedOut: true, openMs: r1(openMs), reason: 'no-search-input', token: p.token };
+    /* 键入前基线：全部在浮层**打开之后**读。
+       - 整层条目文本 → 硬断言本次 token 不在其中（否则「命中」可能只是既有条目，不是新查询结果）
+       - 文章组条目数 → 「结果数变化」只对文章组计 */
     const baselineItems = searchItems();
     const baselineCount = baselineItems.length;
-    const t1 = performance.now();
-    setInputValue(input, p.token);
-    let resultMs = null;
-    let hit = null;
-    let polls = 0;
-    while (performance.now() - t1 < timeoutMs) {
-      await sleep(16);
-      polls += 1;
-      const items = searchItems();
-      const found = items.filter((t) => t.indexOf(p.token) >= 0);
-      if (found.length > 0 && items.length !== baselineCount) { resultMs = performance.now() - t1; hit = found.slice(0, 3); break; }
-    }
-    const postItems = searchItems();
+    const baselineGroups = paletteGroups().map((g) => g.label);
+    const baselineScope = articleGroupScope();
+    const baselineArticleItems = articleGroupItems();
+    const baselineArticleCount = baselineArticleItems.length;
+    const tokenAlreadyPresent = baselineItems.some((t) => t.indexOf(p.token) >= 0);
+    const scopeInfo = {
+      scope: '搜索浮层内 [role="group"][aria-label="文章"] 下的 .cp-item（标签查不到时回退到最后一个 [role="group"]，该组不得是「操作/订阅源」）',
+      overlayResolved: !!searchOverlay(),
+      overlayContainsInput: !!(searchOverlay() && searchOverlay().contains(searchInput())),
+      paletteGroupsAtBaseline: baselineGroups,
+      articleGroupResolved: !!baselineScope,
+      articleGroupResolvedBy: baselineScope ? baselineScope.resolvedBy : null,
+      articleGroupLabel: baselineScope ? baselineScope.label : null,
+      articleGroupUsable: !!(baselineScope && baselineScope.usable),
+      baselinePaletteItemCount: baselineCount,
+      baselineArticleGroupCount: baselineArticleCount,
+      tokenAbsentBeforeTyping: !tokenAlreadyPresent,
+    };
     const out = {
       token: p.token,
       tokenSource: p.tokenSource || null,
       openMs: r1(openMs),
       baselineResultCount: baselineCount,
-      baselineHasToken: baselineItems.some((t) => t.indexOf(p.token) >= 0),
-      resultCount: postItems.length,
-      resultCountChanged: postItems.length !== baselineCount,
-      polls: polls,
-      matchedNodes: hit,
-      ownership: {
-        scope: 'searchOverlay.querySelectorAll(".cp-item")',
-        overlayResolved: !!searchOverlay(),
-        overlayContainsInput: !!(searchOverlay() && searchOverlay().contains(searchInput())),
-        containsToken: !!hit,
-        countDiffersFromBaseline: postItems.length !== baselineCount,
-      },
+      baselineArticleGroupCount: baselineArticleCount,
+      baselineHasToken: tokenAlreadyPresent,
+      polls: 0,
+      matchedNodes: null,
+      ownership: scopeInfo,
+    };
+    if (tokenAlreadyPresent) {
+      /* 硬断言失败：token 在键入前就已出现在浮层条目里（命令/订阅源分组也有 .cp-item），
+         此时任何「命中」都无法证明来自本次新查询 —— 作废本段，不输出 resultMs。 */
+      out.invalid = true;
+      out.reason = 'token-present-in-palette-before-typing';
+      out.note = '键入前浮层条目里已含该 token：命中不能证明是本次查询结果，本段不给 resultMs（请换 token）';
+      out.closedAfterEscape = await closeSearch(1500);
+      return out;
+    }
+    const t1 = performance.now();
+    setInputValue(input, p.token);
+    let resultMs = null;
+    let hit = null;
+    let polls = 0;
+    let hitScope = null;
+    while (performance.now() - t1 < timeoutMs) {
+      await sleep(16);
+      polls += 1;
+      const items = articleGroupItems(); /* 只有「文章分组」的条目算数 */
+      const found = items.filter((t) => t.indexOf(p.token) >= 0);
+      if (found.length > 0 && items.length !== baselineArticleCount) {
+        resultMs = performance.now() - t1;
+        hit = found.slice(0, 3);
+        hitScope = articleGroupScope();
+        break;
+      }
+    }
+    const finalScope = hitScope || articleGroupScope();
+    const postArticleItems = articleGroupItems();
+    const postItems = searchItems();
+    out.polls = polls;
+    out.matchedNodes = hit;
+    out.resultCount = postItems.length;
+    out.resultCountChanged = postItems.length !== baselineCount;
+    out.articleGroupResultCount = postArticleItems.length;
+    out.articleGroupCountChanged = postArticleItems.length !== baselineArticleCount;
+    out.ownership = {
+      ...scopeInfo,
+      articleGroupResolvedAtEnd: !!finalScope,
+      articleGroupResultCount: postArticleItems.length,
+      articleGroupCountChanged: postArticleItems.length !== baselineArticleCount,
+      containsToken: !!hit,
+      hitGroupLabel: hit && finalScope ? finalScope.label : null,
+      hitGroupResolvedBy: hit && finalScope ? finalScope.resolvedBy : null,
+      hitInsideArticleGroup: !!(hit && finalScope && finalScope.usable),
     };
     if (resultMs === null) {
       out.timedOut = true;
-      out.reason = 'no-result-node-with-token-within-timeout';
-      out.note = '超时内未在浮层内找到「含 token 且结果数变化」的结果节点：不输出 resultMs';
+      out.reason = 'no-article-group-item-with-token-within-timeout';
+      out.note = '超时内文章分组（[aria-label=文章]）未出现「含 token 且结果数变化」的条目：不输出 resultMs' +
+        (baselineScope && !baselineScope.usable ? '（浮层里没有可用的文章分组，回退组是「' + String(baselineScope.label) + '」）' : '');
     } else {
       out.resultMs = r1(resultMs);
     }
@@ -399,7 +526,9 @@ const PAGE_LIB = `
     return out;
   };
 
-  /* 触发手动同步：走命令面板的「刷新全部订阅源」（store.triggerManualSync） */
+  /* 触发手动同步：走命令面板的「刷新全部订阅源」（store.triggerManualSync）。
+     ！！本工具唯一的真实写操作！！会联网抓取全部订阅源、写本机 DB、可能向后端推送状态
+     （审计 R1-F4）。--no-sync-probe 时 Node 侧不会调用本函数。 */
   const triggerManualSyncViaPalette = async () => {
     await closeSearch(1200);
     pressKey('k', { ctrlKey: true, code: 'KeyK' });
@@ -495,6 +624,11 @@ const PAGE_LIB = `
         rec.scroll = { skipped: 'not-scrollable' };
       }
       await sleep(120);
+      /* 逐轮堆采样（R1-F5）：只采首末两点撑不起「多轮后仍单调增长」的判定线，这里补上每轮读数。
+         口径：逐轮读数**不**强制 GC，只用于看趋势；首末增量另见 longSession.growthMB（首末各强制 GC）。 */
+      const h = heap();
+      rec.jsHeapMB = h ? h.usedJSHeapMB : null;
+      rec.domNodes = domNodes();
       log.push(rec);
     }
     return { rounds: rounds, roundsCompleted: log.length, crashedAtRound: crashedAtRound, roundsWithChange: log.filter((x) => x.switched).length, log: log };
@@ -513,7 +647,9 @@ const PAGE_LIB = `
     switchLatency: switchLatency, scrollToRatio: scrollToRatio, frameSample: frameSample,
     runSearch: runSearch, searchState: searchState, triggerManualSyncViaPalette: triggerManualSyncViaPalette,
     lockSample: lockSample, ipcBaseline: ipcBaseline, longSession: longSession,
-    overlayText: () => { const o = searchOverlay(); return o ? (o.textContent || '') : ''; },
+    /* R1-F1：token 选择用的浮层文本必须在**浮层打开后**读（paletteBaseline 负责开→读→关）；
+       旧导出 overlayText() 在浮层未打开时恒返回空串，排除守卫永不生效，故移除。 */
+    paletteBaseline: paletteBaseline, paletteGroups: paletteGroups, articleGroupItems: articleGroupItems,
     cardTitles: () => {
       const out = [];
       for (const el of document.querySelectorAll('[data-ctx="article"][data-id]')) {
@@ -580,12 +716,19 @@ function readProcessRss() {
 /* ============================================================
    搜索 token 选择：优先取「只在一张卡片标题里出现」的片段，
    这样命中即证明结果属于本次查询（既不是背景列表文本，也不是公共词）。
+   paletteText 必须是**浮层打开之后**读到的条目文本（paletteBaseline().text）；
+   旧版在浮层从未打开时读，恒为空串，下面的排除守卫永不生效（审计 R1-F1）。
    ============================================================ */
-function chooseSearchToken(titles, overlayText) {
+function chooseSearchToken(titles, paletteText) {
+  const seenText = String(paletteText || '');
   const scores = new Map();
+  const excludedByPalette = [];
   const add = (cand) => {
     if (!cand || cand.length < 3) return;
-    if (overlayText.includes(cand)) return; // 打开浮层时已可见 → 无法作为「新查询」证据
+    if (seenText.includes(cand)) { // 键入前浮层里已可见 → 无法作为「新查询」证据
+      if (excludedByPalette.length < 8) excludedByPalette.push(cand);
+      return;
+    }
     scores.set(cand, (scores.get(cand) || 0) + 1);
   };
   for (const raw of titles) {
@@ -603,8 +746,11 @@ function chooseSearchToken(titles, overlayText) {
     const key = [seen === 1 ? 0 : 1, -cand.length];
     if (!best || key[0] < best.key[0] || (key[0] === best.key[0] && key[1] < best.key[1])) best = { cand: cand, key: key, seen: seen };
   }
-  if (!best) return { token: null, reason: 'no-candidate-token-from-visible-card-titles' };
-  return { token: best.cand, seenInTitles: best.seen, source: 'visible-card-title(仅 ' + best.seen + ' 张卡命中)' };
+  if (!best) return { token: null, reason: 'no-candidate-token-from-visible-card-titles', candidates: { paletteTextLength: seenText.length, excludedByPalette: excludedByPalette } };
+  return {
+    token: best.cand, seenInTitles: best.seen, source: 'visible-card-title(仅 ' + best.seen + ' 张卡命中)',
+    candidates: { paletteTextLength: seenText.length, excludedByPalette: excludedByPalette },
+  };
 }
 
 /* ============================================================
@@ -621,6 +767,8 @@ async function main() {
     webviewProcess: WEBVIEW_PROCESS,
     measures: {},
     conditions: null,
+    /* 每段自己的条件快照（段名 → conditions）：结论行只引用本段那一份（R1-F2）。 */
+    conditionsBySection: {},
     verdicts: {},
     conclusions: [],
     caveats: [],
@@ -641,9 +789,22 @@ async function main() {
 
   /** 每个测量段独立 try/catch：任何一段失败都不拖垮整份报告。 */
   const measureOrder = [];
+  /** 段级条件快照（R1-F2）：结论行只允许引用**本段开始那一刻**的条件。
+      锁等待代理段自己会触发一次真实同步，若后续段借用电池开头那份条件，结论行就会印出
+      「同步在飞=false」，与同一份 JSON 里 conditionsBefore.syncInFlight=true 自相矛盾。 */
+  const snapshotConditions = async (name) => {
+    let c = null;
+    try { c = await page('window.__t128.conditions()'); } catch (e) { c = { error: e && e.message ? e.message : String(e) }; }
+    report.conditionsBySection[name] = c;
+    return c;
+  };
   const section = async (name, fn) => {
     const entry = { name: name, postRecoveryReload: report.appHealth && report.appHealth.recoveries.length > 0 };
     measureOrder.push(entry);
+    if (!crashed()) {
+      const c0 = await snapshotConditions(name);
+      entry.syncInFlightAtStart = c0 && typeof c0.syncInFlight === 'boolean' ? c0.syncInFlight : null;
+    }
     try {
       const v = await fn();
       report.measures[name] = v;
@@ -700,9 +861,16 @@ async function main() {
     return info;
   };
   /** 未恢复的崩溃之后，剩余交互段一律跳过（并说明原因），不再制造误导性的空测点。 */
-  const crashed = () => report.appHealth.alive === false;
+  const crashed = () => !!report.appHealth && report.appHealth.alive === false;
 
   try {
+    /* 注入前先在 Node 侧编译一次页面内测量库：PAGE_LIB 是外层模板串，内层代码里
+       误写反斜杠转义（如反斜杠+n 会被外层先解成真换行）会把内层字符串截断——页面里只会抛
+       「Invalid or unexpected token」，指不出位置。这里先给出明确报错，避免白跑一轮电池。 */
+    try { new Function(PAGE_LIB); } catch (e) {
+      throw new Error('页面内测量库（PAGE_LIB）语法错误：' + (e && e.message ? e.message : String(e)) +
+        '——检查外层模板串里是否有被提前解掉的转义（反斜杠 n/r/t 等），需要换行请用 String.fromCharCode(10)。');
+    }
     if (RELOAD_FIRST) {
       /* 可选：先刷新页面再测量（只重载前端，不写应用数据）。重复测量时保证同一基线；
          刷新后前端会从本机 DB 重新装载状态。 */
@@ -775,13 +943,16 @@ async function main() {
 
     /* ---- (b) 搜索：负向探针（确定不存在的 token）+ 正向计时（取自当前可见卡片标题）---- */
     if (!crashed()) await section('search', async () => {
-      const overlayText = (await page('window.__t128.overlayText()')) || '';
+      /* R1-F1：浮层文本必须在**浮层打开之后**读。paletteBaseline() 开→读→关，返回整层条目文本、
+         分组标签与文章分组条目；旧版在浮层从未打开时读 overlayText，恒为空串，排除守卫形同虚设。 */
+      const baseline = await page('window.__t128.paletteBaseline()');
+      const paletteText = baseline && baseline.text ? baseline.text : '';
       const negative = await page('window.__t128.runSearch({ token: ' + JSON.stringify('t128absent' + Math.random().toString(36).slice(2, 10)) + ', tokenSource: "随机合成（确定不在数据中）", timeoutMs: 2500 })');
       const titles = (await page('window.__t128.cardTitles()')) || [];
-      const picked = chooseSearchToken(titles, overlayText);
+      const picked = chooseSearchToken(titles, paletteText);
       let positive = null;
       if (!picked.token) {
-        positive = { skipped: picked.reason, note: '当前布局没有可见卡片标题可用于取 token；正向计时未执行（不编造）' };
+        positive = { skipped: picked.reason, note: '当前布局没有可见卡片标题可用于取 token（或候选 token 键入前已出现在浮层文本里）；正向计时未执行（不编造）' };
       } else {
         positive = await page('window.__t128.runSearch(' + JSON.stringify({ token: picked.token, tokenSource: picked.source, timeoutMs: 6000 }) + ')');
       }
@@ -790,7 +961,16 @@ async function main() {
         negativeProbe: negative,
         positive: positive,
         tokenCandidatesFromTitles: titles.length,
-        note: 'openMs=Ctrl+K→浮层打开；resultMs=键入→浮层内出现含 token 且结果数变化的结果节点；两者都只在成立时输出数字',
+        tokenCandidatePool: picked.candidates || null,
+        paletteBaseline: {
+          opened: !!(baseline && baseline.opened),
+          groupLabels: baseline ? baseline.groups : null,
+          itemCount: baseline ? baseline.itemCount : null,
+          articleGroupCount: baseline ? baseline.articleGroupCount : null,
+          textLength: paletteText.length,
+        },
+        note: 'openMs=Ctrl+K→浮层打开；resultMs=键入→**文章分组**（[aria-label=文章]）内出现含 token 且结果数变化的结果节点；' +
+          '键入前先读一次浮层条目并硬断言 token 不在其中（否则 invalid，不给 resultMs）；两者都只在成立时输出数字',
       };
     });
 
@@ -823,22 +1003,40 @@ async function main() {
       };
     });
 
-    /* ---- (f) 锁等待代理：空闲态 + 同步在飞态 ---- */
+    /* ---- (f) 锁等待代理：空闲态 + 同步在飞态 ----
+       ！！本段是本工具唯一的真实写操作入口！！点「刷新全部订阅源」= 一次真实手动同步
+       （联网抓取全部订阅源 + 写本机 DB + 可能向后端推送状态）；--no-sync-probe 时不点。 */
     if (!crashed()) await section('lockWaitProxy', async () => {
       const idle = await page('window.__t128.lockSample(20, {})');
       const ipc = await page('window.__t128.ipcBaseline(10)');
+      const idleConditions = await page('window.__t128.conditions()');
       if (idle && idle.skipped) {
-        return { idle: idle, ipcBaseline: ipc, syncInFlight: { skipped: idle.skipped }, note: '无 Tauri IPC：锁等待代理不适用（如实跳过）' };
+        return { idle: idle, ipcBaseline: ipc, syncInFlight: { skipped: idle.skipped }, conditionsIdle: idleConditions, syncProbeTriggered: false, note: '无 Tauri IPC：锁等待代理不适用（如实跳过）' };
+      }
+      if (NO_SYNC_PROBE) {
+        return {
+          idle: idle,
+          ipcBaseline: ipc,
+          syncInFlight: { skipped: 'no-sync-probe（--no-sync-probe：不触发真实同步）' },
+          conditionsIdle: idleConditions,
+          syncProbeTriggered: false,
+          note: '--no-sync-probe：本段只做只读采样（空闲态 20 次 sync_queue_stats + 纯 IPC 对照）；未点「刷新全部订阅源」，故不写库、不联网、不向后端推送',
+        };
       }
       const trigger = await page('window.__t128.triggerManualSyncViaPalette()');
       const inFlight = await page('window.__t128.lockSample(20, {})');
+      const inFlightConditions = await page('window.__t128.conditions()');
       await crashGuard('lockWaitProxy');
       return {
         idle: idle,
         ipcBaseline: ipc,
         syncInFlight: inFlight,
         trigger: trigger,
-        note: '空闲态与同步在飞态各采样 20 次 sync_queue_stats IPC 往返；同步由命令面板「刷新全部订阅源」触发',
+        conditionsIdle: idleConditions,
+        conditionsInFlight: inFlightConditions,
+        syncProbeTriggered: !!(trigger && trigger.triggered),
+        note: '空闲态与同步在飞态各采样 20 次 sync_queue_stats IPC 往返；同步由命令面板「刷新全部订阅源」触发——' +
+          '注意这是一次**真实同步**：联网抓取全部订阅源、写本机 DB，并可能向已连接的后端推送状态（R1-F4）',
       };
     });
 
@@ -857,6 +1055,15 @@ async function main() {
       /* 巡检被打断（崩了 / 找不到按钮）时，首末堆值不在同一会话上：增量无意义，必须作废。 */
       const incomplete = !!afterHealth || (session && (session.crashedAtRound || session.roundsCompleted < session.rounds));
       const growth = heapStart !== null && heapEnd !== null ? +(heapEnd - heapStart).toFixed(2) : null;
+      /* 逐轮堆序列（R1-F5）：只采首末两点撑不起「多轮后仍单调增长」的判定线，这里把每轮读数
+         一起交给报告（口径：逐轮读数不强制 GC，只用于看趋势；首末增量另计并强制 GC）。 */
+      const perRoundHeap = session && Array.isArray(session.log)
+        ? session.log.map((r) => ({ round: r.round, layout: r.target, jsHeapMB: r.jsHeapMB === undefined ? null : r.jsHeapMB, domNodes: r.domNodes === undefined ? null : r.domNodes }))
+        : null;
+      const heapSeq = perRoundHeap ? perRoundHeap.map((r) => r.jsHeapMB).filter((v) => typeof v === 'number') : [];
+      const monotonicRounds = heapSeq.length > 1
+        ? heapSeq.reduce((acc, v, i) => (i > 0 && v > heapSeq[i - 1] ? acc + 1 : acc), 0)
+        : null;
       return {
         rounds: 8,
         roundsCompleted: session ? session.roundsCompleted : 0,
@@ -869,6 +1076,10 @@ async function main() {
         growthInvalidReason: incomplete
           ? ('巡检在第 ' + ((session && session.crashedAtRound) || '?') + ' 轮中断（应用渲染树被卸载或布局按钮缺失）：首末堆值不在同一会话上，增量作废')
           : null,
+        perRoundHeap: perRoundHeap,
+        perRoundHeapNote: '逐轮 usedJSHeapSize 读数（**不强制 GC**，含未回收垃圾，只看趋势）；长会话增量只认首末两点且首末都先 HeapProfiler.collectGarbage',
+        perRoundHeapMonotonicSteps: monotonicRounds,
+        perRoundHeapSteps: heapSeq.length > 1 ? heapSeq.length - 1 : null,
         domNodesStart: before.domNodes,
         domNodes: after.domNodes,
         domNodesDelta: after.domNodes - before.domNodes,
@@ -880,6 +1091,7 @@ async function main() {
         roundsWithChange: session ? session.roundsWithChange : null,
         conditionsBefore: before,
         conditionsAfter: after,
+        conditionsSection: report.conditionsBySection.longSession || null,
         appCrashedDuringSession: !!afterHealth,
         note: '读堆前先 HeapProfiler.collectGarbage；JS 堆与进程 RSS 口径不同，两列不可互相换算；深页滚动由每轮 scrollTop 推进 0.8 屏实现',
       };
@@ -903,12 +1115,21 @@ async function main() {
           mediaNodes: media ? media.count : null,
           mediaEnabled: cond.mediaEnabled,
           articlesLoaded: cond.articlesLoaded,
+          /* 每条自带该布局测量时的条件快照（R1-F2）：结论行按条目引用，不借用电池开头那份。 */
+          conditions: cond,
+          syncInFlight: cond.syncInFlight,
           rss: readProcessRss(),
         });
         const h = await crashGuard('memoryByLayout:' + name);
         if (h) {
-          out[out.length - 1].appCrashedHere = true;
-          out[out.length - 1].healthAfter = h.health;
+          /* 崩溃布局的堆读数无效（R1-F6）：渲染树已卸载，读到的是「卸载后的页面堆」，
+             当成该布局的内存会误导读者。留原始值备查，主字段置 null 并与长会话作废口径一致。 */
+          const last = out[out.length - 1];
+          last.appCrashedHere = true;
+          last.healthAfter = h.health;
+          last.heapUsedMBBeforeCrash = last.heapUsedMB;
+          last.heapUsedMB = null;
+          last.heapInvalidReason = '失效（渲染树被卸载，appCrashedHere）：崩溃后读到的页面堆不代表该布局的内存';
           break;
         }
       }
@@ -947,14 +1168,18 @@ function writeReport(report) {
 /** 结论只允许在受测条件下陈述；每项都带判定线与本测点是否越线。 */
 function buildVerdicts(report) {
   const c = report.conditions || {};
-  const condLine =
-    '受测条件：布局=' + String(c.layoutUnderTest) +
-    '、已加载实体≈' + String(c.articlesLoaded) + (c.loadedItemsEstimate != null ? '（虚拟列表估算 ' + c.loadedItemsEstimate + ' 条）' : '') +
-    '、可见卡片=' + String(c.cardsVisible) +
-    '、媒体=' + String(c.mediaEnabled) +
-    '、网络=' + String(c.network) +
-    '、同步在飞=' + String(c.syncInFlight) +
-    (c.appVersion ? '、版本=' + c.appVersion : '');
+  const condLineFrom = (cc, tag) =>
+    '受测条件' + (tag ? '[' + tag + ']' : '') + '：布局=' + String(cc.layoutUnderTest) +
+    '、已加载实体≈' + String(cc.articlesLoaded) + (cc.loadedItemsEstimate != null ? '（虚拟列表估算 ' + cc.loadedItemsEstimate + ' 条）' : '') +
+    '、可见卡片=' + String(cc.cardsVisible) +
+    '、媒体=' + String(cc.mediaEnabled) +
+    '、网络=' + String(cc.network) +
+    '、同步在飞=' + String(cc.syncInFlight) +
+    (cc.appVersion ? '、版本=' + cc.appVersion : '');
+  /* 段级条件（R1-F2）：锁等待段会触发一次真实同步，其后各段必须引用**自己**那份条件快照，
+     否则会出现「结论印 同步在飞=false，而同一份 JSON 的 conditionsBefore.syncInFlight=true」。 */
+  const bySection = report.conditionsBySection || {};
+  const condLineOf = (sectionName) => condLineFrom(bySection[sectionName] || c, sectionName);
   const conclusions = [];
 
   // 切换
@@ -970,16 +1195,17 @@ function buildVerdicts(report) {
       skipped: sw.filter((x) => x.skipped).map((x) => x.skipped),
       field: 'firstResultMs（新结果落地）与 stableMs（连续 3 帧无 DOM 变更）分列',
     };
+    const swCond = condLineOf('switchLatency');
     conclusions.push(
       ok.length
-        ? condLine + '：切换 ' + ok.length + ' 个目标的最慢 firstResultMs=' + Math.max(...ok.map((x) => x.firstResultMs)) +
+        ? swCond + '：切换 ' + ok.length + ' 个目标的最慢 firstResultMs=' + Math.max(...ok.map((x) => x.firstResultMs)) +
           'ms、stableMs 最大=' + Math.max(...ok.map((x) => x.stableMs || 0)) + 'ms（判定线 >1000ms）→ ' +
           (crossed.length ? '有目标越线：' + crossed.map((x) => x.target).join('/') : '未观察到越线')
-        : condLine + '：切换延迟无有效测点（全部超时/跳过）→ 不支持任何切换性能结论',
+        : swCond + '：切换延迟无有效测点（全部超时/跳过）→ 不支持任何切换性能结论',
     );
   } else {
     report.verdicts.switchLatency = { decisionLineMs: 1000, measured: 0, error: sw && sw.error ? sw.error : 'no-data' };
-    conclusions.push(condLine + '：切换延迟无测点 → 无结论');
+    conclusions.push(condLineOf('switchLatency') + '：切换延迟无测点 → 无结论');
   }
 
   // 搜索
@@ -993,19 +1219,20 @@ function buildVerdicts(report) {
       openPlusResultMs: +total.toFixed(1),
       crossed: total > 1000 || s.positive.resultMs > 1000,
       ownership: s.positive.ownership,
+      dataWrite: false,
     };
     conclusions.push(
-      condLine + '：搜索 openMs=' + s.positive.openMs + '、resultMs=' + s.positive.resultMs +
+      condLineOf('search') + '：搜索 openMs=' + s.positive.openMs + '、resultMs=' + s.positive.resultMs +
       '（合计 ' + total.toFixed(1) + 'ms，判定线 >1000ms）→ ' +
       (total > 1000 ? '越线' : '未观察到越线') +
       '；结果归属：' + JSON.stringify(s.positive.ownership),
     );
   } else if (s && s.positive && s.positive.timedOut) {
     report.verdicts.search = { decisionLineMs: 1000, timedOut: true, reason: s.positive.reason, openMs: s.positive.openMs };
-    conclusions.push(condLine + '：搜索 resultMs 无有效测点（timedOut=' + s.positive.reason + '，openMs=' + s.positive.openMs + '）→ 不支持搜索性能结论');
+    conclusions.push(condLineOf('search') + '：搜索 resultMs 无有效测点（timedOut=' + s.positive.reason + '，openMs=' + s.positive.openMs + '）→ 不支持搜索性能结论');
   } else {
     report.verdicts.search = { decisionLineMs: 1000, error: (s && (s.error || (s.positive && s.positive.skipped))) || 'no-data' };
-    conclusions.push(condLine + '：搜索无测点 → 无结论');
+    conclusions.push(condLineOf('search') + '：搜索无测点 → 无结论');
   }
   if (s && s.negativeProbe) {
     const neg = s.negativeProbe;
@@ -1029,54 +1256,95 @@ function buildVerdicts(report) {
     };
     conclusions.push(
       pos.length
-        ? condLine + '：滚动帧间隔 p95（判定线 >50ms）→ ' + pos.map((p) => p.position + '=' + p.p95 + 'ms').join('、') + '：' +
+        ? condLineOf('scroll') + '：滚动帧间隔 p95（判定线 >50ms）→ ' + pos.map((p) => p.position + '=' + p.p95 + 'ms').join('、') + '：' +
           (pos.some((p) => p.p95 > 50) ? '有位置越线' : '未观察到越线') +
-          '（三档规模/一档规模的差别见 --info 与 conditions；单次运行不代表其他数据规模）'
-        : condLine + '：滚动无有效测点（列表不可滚动）→ 无结论',
+          '（三档位置/一档规模的差别见 --info 与 conditions；单次运行不代表其他数据规模）'
+        : condLineOf('scroll') + '：滚动无有效测点（列表不可滚动）→ 无结论',
     );
   } else {
     report.verdicts.scroll = { decisionLineMs: 50, error: (sc && sc.error) || 'no-data' };
-    conclusions.push(condLine + '：滚动无测点 → 无结论');
+    conclusions.push(condLineOf('scroll') + '：滚动无测点 → 无结论');
   }
 
-  // 内存
+  // 内存（各布局条目 + 长会话各自的条件，见 R1-F2；崩溃布局的堆值失效，见 R1-F6）
   const mem = report.measures.memoryByLayout;
   const sess = report.measures.longSession;
   if (Array.isArray(mem) || (sess && !sess.error)) {
+    /* 条目形状：布局名 + 该布局测量时刻的同步在飞状态；渲染树被卸载的布局不给数字。 */
+    const memEntry = (m) => {
+      if (m.skipped) return m.layout + ':' + (m.skipped === 'layout-button-not-found' ? '失效（找不到布局按钮）' : m.skipped);
+      const sync = m.syncInFlight === undefined || m.syncInFlight === null ? '同步在飞=未知' : '同步在飞=' + m.syncInFlight;
+      /* 崩溃布局一律不给数字（R1-F6）：即使某个版本的报告里 heapUsedMB 还是数值，只要带
+         appCrashedHere 就按失效处理，并把原始读数标出来，避免「看起来能用」的假数字。 */
+      const invalid = !!(m.appCrashedHere || m.heapUsedMB === null || m.heapUsedMB === undefined);
+      if (invalid) {
+        const why = m.heapInvalidReason || (m.appCrashedHere ? '失效（渲染树被卸载，appCrashedHere）' : '失效（无堆读数）');
+        const raw = m.heapUsedMBBeforeCrash !== undefined && m.heapUsedMBBeforeCrash !== null
+          ? '，崩溃前读数 ' + m.heapUsedMBBeforeCrash + 'MB 仅备查'
+          : (m.heapUsedMB !== null && m.heapUsedMB !== undefined ? '，原始读数 ' + m.heapUsedMB + 'MB 仅备查' : '');
+        return m.layout + ':heapUsedMB=null（' + why + '）×' + m.cards + '卡（' + sync + raw + '）';
+      }
+      return m.layout + ':' + m.heapUsedMB + 'MB×' + m.cards + '卡（' + sync + '）';
+    };
+    const sessCondObj = sess && sess.conditionsBefore ? sess.conditionsBefore : (bySection.longSession || c);
+    const sessCond = condLineFrom(sessCondObj, 'longSession');
+    /* 逐轮堆序列（R1-F5）：给出去掉噪声后仍能判读的形状——相邻递增步数 / 总步数。 */
+    const steps = sess && typeof sess.perRoundHeapSteps === 'number' ? sess.perRoundHeapSteps : null;
+    const mono = sess && typeof sess.perRoundHeapMonotonicSteps === 'number' ? sess.perRoundHeapMonotonicSteps : null;
     report.verdicts.memory = {
-      decisionLine: '内存随文章数超线性增长；长会话缓存应有界',
-      jsHeapByLayoutMB: Array.isArray(mem) ? mem.map((m) => ({ layout: m.layout, heapUsedMB: m.heapUsedMB, cards: m.cards, appCrashedHere: !!m.appCrashedHere })) : null,
-      longSession: sess && !sess.error ? { rounds: sess.rounds, roundsCompleted: sess.roundsCompleted, crashedAtRound: sess.crashedAtRound, jsHeapStartMB: sess.jsHeapStartMB, jsHeapEndMB: sess.jsHeapEndMB, growthMB: sess.growthMB, growthValid: sess.growthValid, growthInvalidReason: sess.growthInvalidReason, appRssDeltaMB: sess.appRssDeltaMB, webviewRssDeltaMB: sess.webviewRssDeltaMB, domNodesDelta: sess.domNodesDelta, appCrashedDuringSession: !!sess.appCrashedDuringSession } : { error: (sess && sess.error) || 'no-data' },
+      decisionLine: '内存随文章数超线性增长；长会话缓存应有界（判据：首末堆增量为显著正值且 DOM 节点同向增长；逐轮序列见 perRoundHeap）',
+      jsHeapByLayoutMB: Array.isArray(mem) ? mem.map((m) => ({ layout: m.layout, heapUsedMB: m.heapUsedMB, cards: m.cards, syncInFlight: m.syncInFlight, appCrashedHere: !!m.appCrashedHere, heapInvalidReason: m.heapInvalidReason || null, skipped: m.skipped || null })) : null,
+      longSession: sess && !sess.error ? {
+        rounds: sess.rounds, roundsCompleted: sess.roundsCompleted, crashedAtRound: sess.crashedAtRound,
+        jsHeapStartMB: sess.jsHeapStartMB, jsHeapEndMB: sess.jsHeapEndMB, growthMB: sess.growthMB, growthValid: sess.growthValid,
+        growthInvalidReason: sess.growthInvalidReason, appRssDeltaMB: sess.appRssDeltaMB, webviewRssDeltaMB: sess.webviewRssDeltaMB,
+        domNodesDelta: sess.domNodesDelta, appCrashedDuringSession: !!sess.appCrashedDuringSession,
+        syncInFlightAtStart: sessCondObj.syncInFlight, perRoundHeap: sess.perRoundHeap || null,
+        perRoundHeapMonotonicSteps: mono, perRoundHeapSteps: steps,
+      } : { error: (sess && sess.error) || 'no-data' },
       singleScalePoint: true,
     };
     const growth = sess && !sess.error && sess.growthValid ? sess.growthMB : null;
+    const domDelta = sess && !sess.error ? sess.domNodesDelta : null;
     conclusions.push(
-      condLine + '：内存 JS 堆=' + (Array.isArray(mem) ? mem.map((m) => m.layout + ':' + m.heapUsedMB + 'MB×' + m.cards + '卡').join('、') : 'n/a') +
+      condLineOf('memoryByLayout') + '：内存 JS 堆（逐布局，括号内为该布局测量时刻的同步在飞状态）=' +
+        (Array.isArray(mem) ? mem.map(memEntry).join('、') : 'n/a') +
+        '；长会话（' + sessCond + '）：8 轮 JS 堆增量=' +
         (growth !== null && growth !== undefined
-          ? '；长会话 8 轮 JS 堆增量=' + growth + 'MB（进程 RSS 增量见 longSession，口径不同不可换算）'
-          : '；长会话增量作废（' + ((sess && (sess.growthInvalidReason || sess.error)) || 'no-data') + '）——不输出可能被误读的增量数字') +
-        '；单档数据规模无法判定「超线性」——需两档规模（如 20k/50k）同条件各跑一次再比较',
+          ? growth + 'MB、DOM 节点增量=' + String(domDelta) +
+            '、逐轮递增步数=' + String(mono) + '/' + String(steps) + '（进程 RSS 增量见 longSession，口径不同不可换算；' +
+            (growth > 0 && domDelta !== null && domDelta > 0 ? '首末增量为正且 DOM 同向增长' : '未见「首末显著正增量 + DOM 同向增长」的组合') + '）'
+          : '作废（' + ((sess && (sess.growthInvalidReason || sess.error)) || 'no-data') + '）——不输出可能被误读的增量数字') +
+        '（判定线见 verdicts.memory.decisionLine；单档数据规模无法判定「超线性」——需两档规模（如 20k/50k）同条件各跑一次再比较）',
     );
   }
 
-  // 锁等待代理
+  // 锁等待代理（本段自带同步触发：结论引用本段条件，并标明是否真的触发过同步）
   const lk = report.measures.lockWaitProxy;
   if (lk) {
     if (lk.idle && lk.idle.skipped) {
-      report.verdicts.lockWaitProxy = { skipped: lk.idle.skipped, note: lk.note };
-      conclusions.push(condLine + '：锁等待代理跳过（' + lk.idle.skipped + '）→ 无锁等待结论');
+      report.verdicts.lockWaitProxy = { skipped: lk.idle.skipped, note: lk.note, syncProbeTriggered: false };
+      conclusions.push(condLineOf('lockWaitProxy') + '：锁等待代理跳过（' + lk.idle.skipped + '）→ 无锁等待结论');
     } else {
       report.verdicts.lockWaitProxy = {
         proxy: true,
         decisionLineMs: 50,
         idle: lk.idle, syncInFlight: lk.syncInFlight, ipcBaseline: lk.ipcBaseline,
+        syncProbeTriggered: !!lk.syncProbeTriggered,
+        syncInFlightAtProbe: lk.conditionsInFlight ? lk.conditionsInFlight.syncInFlight : null,
         crossed: [lk.idle, lk.syncInFlight].filter((x) => x && typeof x.p95 === 'number' && x.p95 > 50).length > 0,
       };
       conclusions.push(
-        condLine + '：锁等待代理（IPC 往返 + 单连接查询/锁等待，非直接锁计时）空闲 p50/p95/p99=' +
+        condLineOf('lockWaitProxy') + '：锁等待代理（IPC 往返 + 单连接查询/锁等待，非直接锁计时）空闲 p50/p95/p99=' +
         [lk.idle && lk.idle.p50, lk.idle && lk.idle.p95, lk.idle && lk.idle.p99].join('/') +
-        'ms、同步在飞=' + [lk.syncInFlight && lk.syncInFlight.p50, lk.syncInFlight && lk.syncInFlight.p95, lk.syncInFlight && lk.syncInFlight.p99].join('/') +
-        'ms（代理判定线 p95>50ms）→ ' + (report.verdicts.lockWaitProxy.crossed ? '有越线，建议用 Rust 侧计时复核' : '未观察到越线'),
+        'ms、同步在飞态=' + (lk.syncInFlight && lk.syncInFlight.skipped
+          ? lk.syncInFlight.skipped
+          : [lk.syncInFlight && lk.syncInFlight.p50, lk.syncInFlight && lk.syncInFlight.p95, lk.syncInFlight && lk.syncInFlight.p99].join('/') +
+            'ms（触发时同步在飞=' + String(lk.conditionsInFlight ? lk.conditionsInFlight.syncInFlight : '未知') + '）') +
+        '（代理判定线 p95>50ms）→ ' + (report.verdicts.lockWaitProxy.crossed ? '有越线，建议用 Rust 侧计时复核' : '未观察到越线') +
+        (lk.syncProbeTriggered
+          ? '。⚠ 本段为取得「同步在飞态」样本，通过命令面板触发过一次**真实手动同步**（联网抓取全部订阅源 + 写本机 DB，可能向后端推送状态）；此后各段的条件快照见 report.conditionsBySection'
+          : '。本段未触发同步（--no-sync-probe 或环境不支持），未写库、未联网'),
       );
     }
   }
@@ -1088,7 +1356,25 @@ function buildVerdicts(report) {
     '锁等待是 IPC 往返代理，不是数据库锁计时；要区分二者需要 Rust 侧埋点。',
     '单次运行只覆盖一个数据规模与一种网络状态，结论不得外推到其他规模/网络/布局组合。',
     '搜索/切换的 resultMs/firstResultMs 为页面内 performance.now() 口径，不含 Node/CDP 往返开销。',
+    '搜索 resultMs 只认**文章分组**（[role=group][aria-label=文章]）里的条目：命令/订阅源分组同样渲染 .cp-item，' +
+      '不限定分组会把订阅源过滤（180ms 防抖量级）误当成 FTS 命中；另键入前硬断言 token 不在浮层条目里，不成立则本段作废。',
+    '各条结论引用的是**本段开始时刻**的条件快照（report.conditionsBySection[<段名>]；内存段另见每条 memoryByLayout[].conditions），' +
+      '不是电池开头的统一快照——锁等待段自身会触发一次真实同步，借用旧快照会印出与同一 JSON 自相矛盾的「同步在飞」。',
+    '长会话增量只认首末两点（两次都先强制 GC）；perRoundHeap 的逐轮读数**不强制 GC**，只用于看趋势，两者不可混读。',
   ];
+  if (report.measures.lockWaitProxy && report.measures.lockWaitProxy.syncProbeTriggered) {
+    report.caveats.push(
+      '本次运行在锁等待段触发过一次**真实手动同步**（刷新全部订阅源）：联网抓取全部订阅源、写本机 DB，并可能向已连接的后端推送状态。' +
+      '本脚本其余部分不做写操作，但这次同步是脚本发起的；不希望联网/写库时请加 --no-sync-probe 或先断开后端。',
+    );
+  }
+  if (report.measures.memoryByLayout && Array.isArray(report.measures.memoryByLayout)
+    && report.measures.memoryByLayout.some((m) => m && m.appCrashedHere)) {
+    report.caveats.push(
+      'memoryByLayout 中有布局在测量时渲染树已被卸载（appCrashedHere）：该布局的 heapUsedMB 已置 null（原始读数见 heapUsedMBBeforeCrash），' +
+      '崩溃后读到的页面堆不代表该布局的内存。',
+    );
+  }
   if (report.appHealth && report.appHealth.alive === false) {
     report.caveats.push(
       '本次运行中应用渲染树被卸载且未能自动恢复（首次出现在 ' + report.appHealth.firstDetectedAfter +
@@ -1105,8 +1391,8 @@ function buildVerdicts(report) {
 }
 
 function printSummary(report) {
-  console.log(JSON.stringify({ conditions: report.conditions, appHealth: report.appHealth, verdicts: report.verdicts }, null, 1));
-  console.log('---- 结论（限定在受测条件下）----');
+  console.log(JSON.stringify({ conditions: report.conditions, conditionsBySection: report.conditionsBySection, appHealth: report.appHealth, verdicts: report.verdicts }, null, 1));
+  console.log('---- 结论（每行限定在该段自己的受测条件下）----');
   for (const line of report.conclusions) console.log('- ' + line);
   if (report.fatal) console.log('FATAL: ' + report.fatal);
 }

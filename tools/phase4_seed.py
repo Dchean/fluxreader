@@ -10,6 +10,8 @@
 #   python tools/phase4_seed.py --seed 50000 --media --layouts
 #                                                            # 追加真实媒体 URL + 五布局铺满（本卡新增）
 #   python tools/phase4_seed.py --restore                    # 测量完成后还原真实库
+#                                                           #（还原前必须完全退出应用；见 restore() 文档）
+#   python tools/phase4_seed.py --restore --force            # 危险：应用仍在运行时强行还原（不建议）
 #
 # 写入的 DB 列（仅这些；其余列不碰）：
 #   articles: feed_id, guid, title, author, url, url_norm?, summary, content_html,
@@ -19,7 +21,7 @@
 #   feeds:    layout（仅 --layouts：把布局轮转分配给现有订阅源）
 #   folders:  layout（仅 --layouts 且需要新建分类时才写）
 #   不写 settings / sync_queue / deduped_urls / 任何 AI 产物列。
-import argparse, hashlib, json, os, random, shutil, sqlite3, sys, time
+import argparse, hashlib, json, os, random, shutil, sqlite3, subprocess, sys, time
 
 APP_DIR = os.path.join(os.environ.get("APPDATA", ""), "com.fluxreader.app")
 DB_FILES = ["fluxreader.db", "fluxreader.db-wal", "fluxreader.db-shm"]
@@ -173,7 +175,66 @@ def backup(force=False):
     print("已备份 →", BACKUP_DIR, json.dumps(manifest, indent=1))
 
 
-def restore():
+def running_app_processes(app_name=None):
+    """检测应用进程是否在运行：Windows 用 `tasklist`（无第三方依赖）。
+
+    返回 (pids, detect_error)：
+      - pids：匹配到的进程 PID 列表（空表示没在跑）；
+      - detect_error：非 None 表示**无法判定**（非 Windows / tasklist 不可用），调用方应给警告，
+        而不是把「查不到」当成「没在跑」。
+    进程名可用环境变量 T128_APP_PROCESS 覆盖（与 tools/phase4_measure.mjs 同一口径，
+    开发版 exe 名字不同时两边一起改）。
+    """
+    name = app_name or os.environ.get("T128_APP_PROCESS") or "FluxReader"
+    image = name if name.lower().endswith(".exe") else name + ".exe"
+    if os.name != "nt":
+        return [], f"当前平台是 {os.name}，不做 Windows 进程检测"
+    try:
+        proc = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {image}", "/NH", "/FO", "CSV"],
+            capture_output=True, text=True, errors="replace", timeout=30,
+        )
+    except Exception as e:  # noqa: BLE001 - 检测失败要如实上报，不能静默通过
+        return [], f"tasklist 执行失败：{e}"
+    if proc.returncode != 0:
+        return [], f"tasklist 返回码 {proc.returncode}：{(proc.stderr or '').strip()[:200]}"
+    pids = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith('"'):
+            continue  # 「信息: 没有运行的任务匹配指定标准。」等本地化提示行
+        fields = [f.strip().strip('"') for f in line.split('","')]
+        if fields and fields[0].lower() == image.lower() and len(fields) > 1 and fields[1].isdigit():
+            pids.append(int(fields[1]))
+    return pids, None
+
+
+def restore(force=False):
+    """把备份的三件套（.db / -wal / -shm）逐字节拷回真实库。
+
+    ⚠ 还原前必须**完全退出应用**（FluxReader.exe 进程结束）。
+    为什么：应用运行时它的 SQLite 连接仍持有 .db/-wal/-shm 的句柄，逐字节覆盖可能被文件锁
+    静默拒绝（旧文件原样保留）或在 WAL 恢复时把库改坏——而本函数末尾的 SHA256 只校验「拷过去的
+    目标文件」，这种破坏下它必然通过，等于没有保护。
+
+    因此：检测到应用进程仍在运行时**拒绝还原**（除非显式 force=True / --force）。
+    检测不到（非 Windows、tasklist 不可用）时只打印警告，由操作者自行确认。
+    """
+    pids, detect_error = running_app_processes()
+    if detect_error:
+        print(f"⚠ 无法自动确认应用是否已退出（{detect_error}）。")
+        print("  还原前请自行确认 FluxReader 已完全退出（否则运行中的 SQLite 连接可能让覆盖静默失效或损坏库）。")
+    elif pids:
+        if not force:
+            sys.exit(
+                "检测到 FluxReader 仍在运行（PID: " + ", ".join(str(p) for p in pids) + "）：拒绝还原。\n"
+                "  原因：应用的活动 SQLite 连接持有 .db/-wal/-shm 句柄，运行中逐字节覆盖可能静默失效\n"
+                "        甚至损坏真实库；而还原结束时的 SHA256 只校验目标文件，这种破坏下必然通过。\n"
+                "  处置：完全退出 FluxReader（关掉窗口后确认进程结束）再重跑 --restore。\n"
+                "  确认进程是否真的没了：tasklist /FI \"IMAGENAME eq FluxReader.exe\"\n"
+                "  确实要在应用运行时还原（危险，不建议）：加 --force。"
+            )
+        print("⚠ --force：应用仍在运行（PID: " + ", ".join(str(p) for p in pids) + "）仍继续还原——可能静默失效或损坏库，风险自负。")
     with open(os.path.join(BACKUP_DIR, "manifest.json")) as f:
         manifest = json.load(f)
     for name, want in manifest.items():
@@ -405,12 +466,20 @@ def main():
     ap.add_argument("--rng-seed", type=int, default=20261007, help="随机种子，保证多次注入同构（默认 20261007）")
     ap.add_argument("--rebackup", action="store_true",
                     help="允许覆盖已有的「注入前」备份（默认拒绝，防止把已注入的库当基线）")
+    ap.add_argument("--force", action="store_true",
+                    help="危险：--restore 时即使检测到应用仍在运行也继续（应用活动连接下覆盖 .db 可能静默失效或损坏库）")
     a = ap.parse_args()
     if a.info:
         info()
     elif a.restore:
-        restore()
+        restore(force=a.force)
     elif a.seed:
+        pids, detect_error = running_app_processes()
+        if pids:
+            print("⚠ 检测到 FluxReader 正在运行（PID: " + ", ".join(str(p) for p in pids) + "）：注入会在应用的活动连接旁写库，"
+                  "应用可能读不到新行或与注入互相阻塞。建议先完全退出应用再注入（本脚本不阻止，因为读库方是它自己）。")
+        elif detect_error:
+            print(f"⚠ 无法自动确认应用是否已退出（{detect_error}）——注入前请自行确认。")
         print("备份真实库…"); backup(force=a.rebackup)
         seed(a.seed, media=a.media, layouts=a.layouts, media_ratio=a.media_ratio,
              rng_seed=a.rng_seed, image_url_tpl=a.image_url, audio_url=a.audio_url)
