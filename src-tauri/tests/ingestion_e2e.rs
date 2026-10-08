@@ -1,28 +1,33 @@
 //! 集成测试：直连抓取全链路（fetch → parse → upsert → 查询）。
-//! 用本地 HTTP feed 服务（127.0.0.1:8765）做确定性验证，不依赖外网
-//! （国内网络对境外源站的 DNS/直连不稳定，那是环境问题不是管线问题）。
-//! 运行：先 python -m http.server 8765 --bind 127.0.0.1（serve 含 local_feed.xml 的目录）
-//! 然后 cargo test --test ingestion_e2e -- --ignored --nocapture
+//! 自托管本地 HTTP feed 服务（OPT-016A）：测试自己绑定 127.0.0.1:0
+//! （common::LocalFeedServer），固定 feed 内容与条件响应（ETag/Last-Modified、
+//! 304）由本测试生成，结束时显式 stop 关闭 accept 循环；不依赖外网、不占用
+//! 固定端口 8765、不借用任何用户现有服务。CI 默认运行（无 #[ignore]）。
+//! 运行：cargo test --test ingestion_e2e -- --nocapture
 
 use app_lib::db;
 use app_lib::ingestion;
 
 mod common;
 
-const FEED_URL: &str = "http://127.0.0.1:8765/local_feed.xml";
-
 #[tokio::test]
-#[ignore = "requires local feed server on 127.0.0.1:8765"]
 async fn direct_fetch_pipeline_end_to_end() {
+    // 自托管服务：先绑定 127.0.0.1:0 拿到内核分配的端口，再把端口注入固定 feed 内容
+    let server = common::LocalFeedServer::start_with_feed(common::local_feed_xml)
+        .await
+        .expect("start local feed server");
+    let feed_url = server.url("/local_feed.xml");
+
+    // 临时库守卫先于 Connection 声明：正常返回与 panic 展开都删除库文件（含 WAL 旁路）
     let tmp = common::unique_db_path("e2e_test");
-    let _ = std::fs::remove_file(&tmp);
+    let _cleanup = common::TempDbGuard::new(tmp.clone());
     let conn = db::open(&tmp).expect("open db");
 
     // 1. 建分类 + 直连抓取验证（add_feed 命令的核心路径）
     let folder_id = db::create_folder(&conn, "技术开发", "article").unwrap();
 
     let client = ingestion::build_client(30);
-    let fetched = ingestion::conditional_get(&client, FEED_URL, None, None)
+    let fetched = ingestion::conditional_get(&client, &feed_url, None, None)
         .await
         .expect("direct fetch");
     let (bytes, etag, last_modified) = match fetched {
@@ -35,15 +40,24 @@ async fn direct_fetch_pipeline_end_to_end() {
         } => (bytes, etag, last_modified),
     };
     assert!(!bytes.is_empty(), "feed body should not be empty");
+    assert!(etag.is_some(), "self-hosted server must send ETag");
+    assert!(
+        last_modified.is_some(),
+        "self-hosted server must send Last-Modified"
+    );
 
-    let parsed = ingestion::parse_feed(&bytes, FEED_URL).expect("parse feed");
+    let parsed = ingestion::parse_feed(&bytes, &feed_url).expect("parse feed");
     assert_eq!(parsed.title.as_deref(), Some("Local Test Feed"));
     assert_eq!(parsed.articles.len(), 2, "both entries parsed");
+    assert!(
+        parsed.icon.is_some(),
+        "channel <image> parsed as icon（刷新管线因此不 spawn favicon 后台探测）"
+    );
     println!("feed title: {:?}", parsed.title.as_deref());
 
     let feed_id = db::insert_feed(
         &conn,
-        FEED_URL,
+        &feed_url,
         parsed.site_url.as_deref(),
         parsed.title.as_deref().unwrap_or(""),
         parsed.icon.as_deref(),
@@ -76,7 +90,7 @@ async fn direct_fetch_pipeline_end_to_end() {
         .unwrap();
     assert_eq!(count, 2, "all articles persisted");
 
-    // 相对链接解析：entry link href="/post/1" 应变成绝对 URL
+    // 相对链接解析：entry link href="/post/1" 应变成绝对 URL（基址 = 自托管实际端口）
     let abs: String = conn
         .query_row(
             "SELECT url FROM articles WHERE feed_id = ?1 AND title LIKE 'Direct%'",
@@ -84,10 +98,7 @@ async fn direct_fetch_pipeline_end_to_end() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(
-        abs, "http://127.0.0.1:8765/post/1",
-        "relative link resolved"
-    );
+    assert_eq!(abs, server.url("/post/1"), "relative link resolved");
 
     // 3. 列表查询路径（与前端 listArticles 同构）
     let items = db::list_articles(
@@ -144,7 +155,7 @@ async fn direct_fetch_pipeline_end_to_end() {
         re.content_html
             .as_deref()
             .unwrap_or("")
-            .contains("127.0.0.1:8765/img/a.png"),
+            .contains(&server.url("/img/a.png")),
         "relative img resolved in sanitized html"
     );
     println!("sanitized html ok");
@@ -152,21 +163,27 @@ async fn direct_fetch_pipeline_end_to_end() {
     // 7. 消毒函数单点验证：事件处理器/js scheme 剥离，img src 重写
     let dirty =
         r#"<img src="/x.png" onerror="alert(1)"><a href="javascript:evil()">c</a><p>ok</p>"#;
-    let clean = app_lib::sanitize::sanitize(dirty, Some("http://127.0.0.1:8765/"));
+    let base = server.url("/");
+    let clean = app_lib::sanitize::sanitize(dirty, Some(&base));
     assert!(!clean.contains("onerror"), "event handler stripped");
     assert!(!clean.contains("javascript:"), "js scheme stripped");
-    assert!(
-        clean.contains("http://127.0.0.1:8765/x.png"),
-        "img src rewritten"
-    );
+    assert!(clean.contains(&server.url("/x.png")), "img src rewritten");
     println!("sanitize ok");
 
-    // 8. 条件 GET 复请求路径不炸（本地 http.server 不回 ETag，仅验证请求路径）
-    let r2 =
-        ingestion::conditional_get(&client, FEED_URL, etag.as_deref(), last_modified.as_deref())
-            .await;
+    // 8. 条件 GET 复请求：带自托管服务发出的验证器，应命中 304 未变更
+    let r2 = ingestion::conditional_get(
+        &client,
+        &feed_url,
+        etag.as_deref(),
+        last_modified.as_deref(),
+    )
+    .await;
     assert!(r2.is_ok(), "conditional re-fetch path ok");
+    assert!(
+        matches!(r2, Ok(ingestion::Fetched::NotModified)),
+        "matching validators must yield 304"
+    );
 
-    let _ = std::fs::remove_file(&tmp);
+    server.stop().await;
     println!("=== E2E PASS ===");
 }

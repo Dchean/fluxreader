@@ -3,8 +3,12 @@ name: CI
 on:
   # dev 为开发分支（携带工作流记录），推送即跑 CI，供合并进 main 前的验证；
   # main 为纯项目代码主分支，发布 tag 的 CI 门控依赖本工作流在 main 上的运行。
+  # v* tag push 同样触发本工作流（只做门禁，不自动发布）：release.yml 要求
+  # tagged commit 上 ci.yml 全绿，而 tag 可能指向没有 main/dev push run 的提交
+  # ——此前会让门禁空等 45 分钟超时，tag 触发补齐该 run。
   push:
     branches: [main, dev]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -45,8 +49,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        id: checkout
 
       - name: Setup Rust
+        id: toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -58,16 +64,22 @@ jobs:
 
       # Note: 格式门禁的设立理由——此前的提交里混用过不同缩进/换行风格，
       # 产生大量纯排版 diff 干扰代码审查；统一为 rustfmt 默认风格后由 CI 守住。
-      # Note: 门禁必须各自独立可跑、失败信息指向自身原因——中间门禁挡住后置门禁
-      # 等于没有门禁（曾因 fmt 排在 clippy/test 之前掩盖两个真实缺陷）。理由与
-      # 断言纪律见 .agents/notes/implemented/testing/2026-09-16-测试门禁与断言纪律.md
+      # Note: 各 Rust 门禁必须各自独立可跑、失败信息指向自身原因——中间门禁挡住后置
+      # 门禁等于没有门禁（曾因 fmt 排在 clippy/test 之前掩盖两个真实缺陷）。下面前四步
+      # 均带明确执行条件：前置门禁无论成功或失败都继续（success() || failure()），
+      # 但只在 checkout 与 toolchain 正常时运行——否则错误会指向缺失的工程而非真实
+      # 原因；任一失败步骤都会让 job 变红，不用 continue-on-error 掩盖。理由与断言
+      # 纪律见 .agents/notes/implemented/testing/2026-09-16-测试门禁与断言纪律.md
       - name: Format (cargo fmt --check)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
       - name: Lint (clippy, deny warnings)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Run tests
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       # 注意：这里必须用 --include-ignored（跑「非 ignored + ignored 全部」），
@@ -75,5 +87,8 @@ jobs:
       # 一个 #[ignore] 都没有 —— 若写成 --ignored，本步骤会匹配 0 个用例却依然绿灯，
       # 等于整条 mock 集成测试通道从未在 CI 里真正跑过。各文件头部文档写的也是
       # --include-ignored（如 account_lifecycle_e2e.rs 的运行示例）。
+      # 注意：ingestion_e2e / scheduler_e2e 各自自托管 127.0.0.1 临时 feed 服务
+      # （OPT-016A，无 #[ignore]），由上面的默认 `cargo test` 步骤真实执行。
       - name: Run self-hosted mock integration tests (core sync/AI protocols)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo test --manifest-path src-tauri/Cargo.toml --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --include-ignored
