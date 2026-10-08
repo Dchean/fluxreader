@@ -6,6 +6,7 @@ import { formatRelativeTime } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
 import { proxyImagesInHtml } from '../lib/imageProxy';
 import { useEnteringClass } from './useEnteringClass';
+import { ReaderProse } from './ReaderProse';
 
 /* ============================================================
    Reader —— 右侧沉浸阅读器
@@ -71,6 +72,15 @@ export function Reader() {
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseHtml, art?.url]);
+  /* 正文两路呈现（审计 F14 / OPT-012）：源码态展示的是**原始文本**（当前用户选择的
+     RSS 原文/提取全文/已消毒译文，未经图片代理——显示代理 base64 会冒充源码），
+     渲染态保持现行为（代理命中时用代理产物）。流式未消毒译文两路都是纯文本。
+     Note: 为何源码不能继续走 dangerouslySetInnerHTML、分离契约与取舍 —— 见
+     .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md */
+  const renderHtml = isShowingTranslatedProse
+    ? body.translatedContent
+    : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml);
+  const sourceText = isShowingTranslatedProse ? body.translatedContent : baseHtml;
   const feedName = useAppStore((s) => (s.activeArticleId ? s.feedIndex.get(s.entries.find((a) => a.id === s.activeArticleId)?.feedId ?? '')?.feed.name ?? '' : ''));
   const config = useAppStore(
     useShallow((s) => selectFeedConfig(s, art?.feedId ?? '')),
@@ -303,37 +313,21 @@ export function Reader() {
               </div>
             )}
 
-            {/* 正文 */}
-            {isShowingTranslatedProse && rawStream ? (
-              /* TASK-065 N11：流式/未消毒译文按纯文本渲染——模型原始输出
-                 （未消毒）不进 HTML 渲染路径；消毒回读落地后切回 HTML。 */
-              <div
-                className={`article-prose ${isRawRenderMode ? 'raw-render-mode' : ''}`}
-                style={{
-                  fontFamily: settings.fontFamily,
-                  fontSize: settings.fontSize,
-                  lineHeight: settings.lineHeight / 100,
-                }}
-                onClick={handleProseClick}
-              >
-                {body.translatedContent}
-              </div>
-            ) : (
-              <div
-                className={`article-prose ${isRawRenderMode ? 'raw-render-mode' : ''}`}
-                style={{
-                  fontFamily: settings.fontFamily,
-                  fontSize: settings.fontSize,
-                  lineHeight: settings.lineHeight / 100,
-                }}
-                onClick={handleProseClick}
-                dangerouslySetInnerHTML={{
-                  __html: isShowingTranslatedProse
-                    ? body.translatedContent
-                    : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml),
-                }}
-              />
-            )}
+            {/* 正文：源码/渲染/流式三条路径收口在 ReaderProse（F14/OPT-012）。
+                传参含义：renderHtml 走渲染态（含代理产物），sourceText 走源码态
+                （原始文本，不经代理），isStreamingTranslation 走纯文本。 */}
+            <ReaderProse
+              renderHtml={renderHtml}
+              sourceText={sourceText}
+              isSourceMode={isRawRenderMode}
+              isStreamingTranslation={isShowingTranslatedProse && !!rawStream}
+              style={{
+                fontFamily: settings.fontFamily,
+                fontSize: settings.fontSize,
+                lineHeight: settings.lineHeight / 100,
+              }}
+              onClick={handleProseClick}
+            />
           </div>
         </div>
       )}

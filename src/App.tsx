@@ -255,6 +255,8 @@ export default function App() {
          此前只有 Space 判断了 defaultPrevented，S/M/J/K 不看浮层状态——设置页、
          搜索框、各类弹窗打开时，焦点若不在输入框上，按 S/M 会作用到**浮层背后的
          当前文章**（改了它的收藏/已读却看不见），J/K 还会在背后切换文章。
+         OPT-012：补上「关闭确认框」（closeAskVisible）——它此前漏出浮层清单，
+         确认框打开时单键同样会作用到背后文章；Esc 仍走上方专门分支（不改语义）。
          Ctrl+K / Ctrl+, / Escape 属浮层自身操作，在此判断之前已处理，不受影响。
          判据已抽成纯函数 shouldYieldToOverlay（src/components/shortcutYield.ts），
          浮层集合由同模块的 anyOverlayOpen 按 OVERLAY_SOURCES 清单求值，
@@ -270,6 +272,7 @@ export default function App() {
         lightboxUrl: s.lightboxUrl,
         playerExpanded: s.playerExpanded,
         playerActive: s.player.isActive,
+        closeAskVisible: s.closeAskVisible,
       });
       if (shouldYieldToOverlay(overlayOpen, e.key, e.ctrlKey || e.metaKey || e.altKey) === 'yield') {
         return;

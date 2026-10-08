@@ -2017,6 +2017,19 @@ body {
   font-family: "Cascadia Mono", Consolas, monospace;
 }
 
+/* 源码显示（OPT-012 / 审计 F14）：源码态改为 <pre class="reader-source-view">
+   内的**转义文本**（组件 ReaderProse；修前只是同一 HTML 容器多挂 raw-render-mode
+   类，审计实测点击前后 innerHTML 完全一致）。长行折行、超长不可断 token 强制
+   断行，双保险不撑破阅读栏；仅作用于源码容器，渲染态排版不受影响。
+   决定与取舍见 .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md */
+.article-prose .reader-source-view {
+  margin: 0;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 /* -------------------------------------------------------------
    Modals & Settings Modal Styling
    ------------------------------------------------------------- */

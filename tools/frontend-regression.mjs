@@ -1428,16 +1428,19 @@ await (async () => {
     /* 浮层集合逐项钉死：这是 TASK-086 审查者指出「文本断言可被绕过」的正面修复。
        此前 overlayOpen 是内联的 `a || b || c`，回归网只能查 token 在场——
        实测把「全屏播放器」从并集里删掉，322 条断言**全绿**（真实回归零告警）。
-       改为清单求值后，每个浮层必须单独登记，任何一项被删/被改都会被下面两条拦下。 */
+       改为清单求值后，每个浮层必须单独登记，任何一项被删/被改都会被下面两条拦下。
+       OPT-012：清单由 8 项扩为 9 项（补「关闭确认框」closeAsk）——旧 8 项逐项探针
+       一条不少地保留，新增 closeAsk 探针与真实 store 字段驱动断言。 */
     const baseOverlay = {
       searchOpen: false, settingsOpen: false, newCategoryModalOpen: false,
       addFeedModalOpen: false, editFeedModalOpen: false, renameCatModalOpen: false,
       lightboxUrl: null, playerExpanded: false, playerActive: false,
+      closeAskVisible: false,
     };
-    checkNew('(P3[F2]) 浮层清单恰为 8 项且名称稳定（新增/删除浮层必须同步本表）',
-      OVERLAY_SOURCES.length === 8
+    checkNew('(P3[F2]) 浮层清单恰为 9 项且名称稳定（新增/删除浮层必须同步本表；OPT-012 起含 closeAsk）',
+      OVERLAY_SOURCES.length === 9
       && OVERLAY_SOURCES.map((o) => o.name).join(',')
-        === 'search,settings,newCategory,addFeed,editFeed,renameCat,lightbox,playerExpanded');
+        === 'search,settings,newCategory,addFeed,editFeed,renameCat,lightbox,playerExpanded,closeAsk');
     /* 逐项：只打开这一项 ⇒ anyOverlayOpen 必须为 true（漏判/少算任一项即失败） */
     const overlayProbes = [
       ['search', { searchOpen: true }],
@@ -1448,11 +1451,13 @@ await (async () => {
       ['renameCat', { renameCatModalOpen: true }],
       ['lightbox', { lightboxUrl: 'https://example.com/a.png' }],
       ['playerExpanded', { playerExpanded: true, playerActive: true }],
+      /* OPT-012 新增：关闭确认框（审计 2026-10-08「关闭确认框与快捷键」） */
+      ['closeAsk', { closeAskVisible: true }],
     ];
     const missed = overlayProbes
       .filter(([, patch]) => anyOverlayOpen({ ...baseOverlay, ...patch }) !== true)
       .map(([name]) => name);
-    checkNew('(P3[F2]) 每个浮层单独打开都必须被判为「浮层打开」（漏判任一项即失败，输出缺项名）',
+    checkNew('(P3[F2]) 每个浮层单独打开都必须被判为「浮层打开」（漏判任一项即失败，输出缺项名；含 OPT-012 的 closeAsk）',
       missed.length === 0);
     checkNew('(P3[F2]) 无浮层时 anyOverlayOpen 为 false（不误判为打开，否则快捷键全被吞）',
       anyOverlayOpen(baseOverlay) === false);
@@ -1463,6 +1468,33 @@ await (async () => {
     /* 空字符串 lightboxUrl 等同于「无 lightbox」（防 falsy 误判） */
     checkNew('(P3[F2]) lightboxUrl 为空串不算浮层（falsy 边界）',
       anyOverlayOpen({ ...baseOverlay, lightboxUrl: '' }) === false);
+
+    /* OPT-012：关闭确认框的真实 store 字段驱动（非仅清单 token）——
+       closeAskVisible=true 时必须判为浮层打开，且 s/m/j/k 全部让路。
+       修前（探针 probe-before.mjs 实测）：anyOverlayOpen=false → 四个单键全部 proceed，
+       S/M 会改到确认框背后的文章、J/K 会在背后换文章。 */
+    store.setState({ closeAskVisible: true });
+    const sCloseAsk = store.getState();
+    const overlayOpenWithCloseAsk = anyOverlayOpen({
+      searchOpen: sCloseAsk.searchOpen,
+      settingsOpen: sCloseAsk.settingsOpen,
+      newCategoryModalOpen: sCloseAsk.newCategoryModalOpen,
+      addFeedModalOpen: sCloseAsk.addFeedModalOpen,
+      editFeedModalOpen: sCloseAsk.editFeedModalOpen,
+      renameCatModalOpen: sCloseAsk.renameCatModalOpen,
+      lightboxUrl: sCloseAsk.lightboxUrl,
+      playerExpanded: sCloseAsk.playerExpanded,
+      playerActive: sCloseAsk.player.isActive,
+      closeAskVisible: sCloseAsk.closeAskVisible,
+    });
+    checkNew('(P3[F2]/OPT-012) 真实 store：关闭确认框打开（closeAskVisible=true）⇒ anyOverlayOpen=true 且 s/m/j/k 全部让路（修前 proceed：单键作用到确认框背后的文章）',
+      overlayOpenWithCloseAsk === true
+      && ['s', 'S', 'm', 'M', 'j', 'k'].every((k) => shouldYieldToOverlay(overlayOpenWithCloseAsk, k, false) === 'yield'));
+    checkNew('(P3[F2]/OPT-012) 关闭确认框不吞组合键/非目标键（Ctrl+S 等照旧 proceed；Escape 不在让路集合，保持 App.tsx 专门分支语义）',
+      shouldYieldToOverlay(overlayOpenWithCloseAsk, 's', true) === 'proceed'
+      && shouldYieldToOverlay(overlayOpenWithCloseAsk, 'Escape', false) === 'proceed'
+      && shouldYieldToOverlay(overlayOpenWithCloseAsk, 'a', false) === 'proceed');
+    store.setState({ closeAskVisible: false });
 
     /* 修前对照：旧行为完全不看浮层 → 浮层打开时同集键也照旧执行（不让路）。 */
     const legacyYield = () => 'proceed';
@@ -1485,6 +1517,10 @@ await (async () => {
        内联写法下「少判一个浮层」无法被断言——见上面清单断言的说明。 */
     checkNew('(P3[F2]) App.tsx 的 overlayOpen 必须由 anyOverlayOpen 求值（退回内联并集即失败）',
       /const\s+overlayOpen\s*=\s*anyOverlayOpen\(/.test(appSrc));
+    /* OPT-012 接线：查询实参必须带 closeAskVisible（清单登记但调用点不传 = 漏判依旧）。
+       Esc 链对 closeAskVisible 的专门处理由 t100-u7 锁定，此处不动其语义。 */
+    checkNew('(P3[F2]/OPT-012) App.tsx 的浮层查询实参传入 closeAskVisible（清单已登记但调用点漏传即失败）',
+      /closeAskVisible:\s*s\.closeAskVisible/.test(appSrc));
   }
   store.setState({ player: { ...store.getState().player, speed: 2.0 } });
   store.getState().cyclePlaybackSpeed();
@@ -5866,9 +5902,25 @@ await (async () => {
     socialBlock.includes('rawTranslated ? (') && socialBlock.includes('dangerouslySetInnerHTML'));
   checkNew('(n8) NotifCard 译文块同样分支（修前纯文本插值显示字面标签）',
     notifBlock.includes('rawTranslated ? (') && notifBlock.includes('dangerouslySetInnerHTML'));
-  checkNew('(n11) Reader 译文渲染含未消毒纯文本分支（流式产物不进 HTML 渲染路径）',
-    readerSrc.includes('rawStream')
-    && readerSrc.includes('dangerouslySetInnerHTML'));
+  /* (n11) 原为「Reader.tsx 同时含 rawStream 与 dangerouslySetInnerHTML」的源码形态断言；
+     OPT-012 把三条呈现路径收口进生产组件 ReaderProse（源码态转义文本 / 流式纯文本 /
+     渲染态 HTML），Reader.tsx 不再直接持有 dangerouslySetInnerHTML——旧断言锁的是
+     内部结构而非行为，按「允许附理由改写、不得删覆盖」改到新结构：
+     行为面（流式纯文本转义、不创建标签）由本文件 OPT-012 块的**真实 SSR 输出**承担，
+     这里只保留接线单点：Reader 必须把 rawStream 状态传给 ReaderProse，且 ReaderProse
+     的流式分支区间内不得回到 dangerouslySetInnerHTML。
+     切片边界从「流式分支起点」到其后**首个**危险 token（文件头注释里也有该词，
+     故必须 indexOf(token, 起点) 向后找，不能用首个全局命中——首版就栽在这里）。 */
+  const readerProseSrc = fs.readFileSync(new URL('../src/components/ReaderProse.tsx', import.meta.url), 'utf8');
+  const proseStreamAt = readerProseSrc.indexOf('if (isStreamingTranslation)');
+  const proseDangerAt = readerProseSrc.indexOf('dangerouslySetInnerHTML', proseStreamAt < 0 ? 0 : proseStreamAt);
+  const proseStreamBranch = proseStreamAt < 0 ? ''
+    : readerProseSrc.slice(proseStreamAt, proseDangerAt < 0 ? readerProseSrc.length : proseDangerAt);
+  checkNew('(n11) Reader 译文渲染含未消毒纯文本分支（流式产物不进 HTML 渲染路径；OPT-012 收口 ReaderProse：接线传 rawStream + 流式分支先于且不进入 HTML 创建路径）',
+    readerSrc.includes('isStreamingTranslation={isShowingTranslatedProse && !!rawStream}')
+    && proseStreamBranch.length > 0
+    && proseDangerAt > proseStreamAt
+    && !proseStreamBranch.includes('dangerouslySetInnerHTML'));
 
   /* (p3-f4) M7（审查：Timeline 删除假成功 toast 在修后回归网下全绿）：SocialCard
      收藏/标读按钮不得在组件层弹本地假成功 toast——成功态由卡片自身状态呈现，
@@ -7591,6 +7643,103 @@ await (async () => {
 
   /* 恢复基线（不污染后续块/汇总） */
   store.setState({ syncConnected: false, syncWaiting: 0, syncFailed: 0, syncQueueLastError: null, entries: [], activeArticleId: null, toasts: [] });
+}
+
+/* ============================================================
+   OPT-012（审计 F14 + 「关闭确认框与快捷键」）：阅读器源码/渲染分离回归。
+   浮层侧断言已就地更新于 P3[F2] 块（清单 8→9 + 真实 store 字段驱动 closeAsk）。
+
+   证据分层（如实说明）：
+   - 呈现分支（源码态转义文本 / 渲染态 DOM / 流式纯文本）由生产组件 ReaderProse
+     承担，本块用 react-dom/server 的**真实 SSR 输出**取证——不用「源码含
+     isRawRenderMode」之类 token 断言代替输出；修前对照见
+     tmp/optimization-20261008/OPT-012/probe-before.mjs（复刻旧分支 = 三类标签真实出现）。
+   - 值传递（显示 RSS 原文/提取全文/译文、代理 base64 只进渲染态）无 DOM harness，
+     且 zustand v5 server snapshot 恒读 getInitialState（t116 注），故由 Reader.tsx
+     参数级接线断言钉住（cov-wire/t111-6 先例），行为面由上面 SSR 输出互补。
+   ============================================================ */
+{
+  const fsOpt12 = await import('node:fs');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { createElement } = await import('react');
+  const { ReaderProse } = await import('../src/components/ReaderProse.tsx');
+
+  /* 固定 HTML：含 <p><b> 与带 onerror 的 <img>（审计 F14 建议的正文形态） */
+  const FIXED_HTML = '<p>第一段<b>加粗</b></p><img src="https://example.com/pic.png" onerror="alert(1)">';
+  /* 图片代理产物形态：data: base64——只允许出现在渲染态，不得冒充源码 */
+  const PROXIED_HTML = '<p>第一段</p><img src="data:image/png;base64,QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=">';
+  const STYLE = { fontFamily: 'Georgia, serif', fontSize: 16, lineHeight: 1.6 };
+  const renderProse = (props) => renderToStaticMarkup(createElement(ReaderProse, {
+    style: STYLE, onClick: () => { /* noop */ }, ...props,
+  }));
+
+  /* ---- A：源码态 = 转义文本，不创建 p/b/img ---- */
+  const sourceHtml = renderProse({
+    renderHtml: PROXIED_HTML, sourceText: FIXED_HTML,
+    isSourceMode: true, isStreamingTranslation: false,
+  });
+  checkNew('(opt012-a1) 真实 SSR 源码态：输出转义文本（&lt;p&gt;/&lt;b&gt;/&lt;img 与 onerror 均为字面），不创建 p/b/img 元素（修前同走 dangerouslySetInnerHTML → 三类标签真实出现）',
+    sourceHtml.includes('reader-source-view')
+    && sourceHtml.includes('&lt;p&gt;') && sourceHtml.includes('&lt;b&gt;') && sourceHtml.includes('&lt;img')
+    && !sourceHtml.includes('<p>') && !sourceHtml.includes('<b>') && !sourceHtml.includes('<img'));
+  checkNew('(opt012-a2) 真实 SSR 源码态：显示原始 src、不显示图片代理 data: base64（sourceText 取未经代理的原文；renderHtml 的代理产物只属于渲染态）',
+    sourceHtml.includes('https://example.com/pic.png')
+    && !sourceHtml.includes('data:image') && !sourceHtml.includes('base64'));
+
+  /* ---- B：渲染态 = 现有 DOM 结构照旧 ---- */
+  const renderOut = renderProse({
+    renderHtml: FIXED_HTML, sourceText: FIXED_HTML,
+    isSourceMode: false, isStreamingTranslation: false,
+  });
+  checkNew('(opt012-b1) 真实 SSR 渲染态：p/b/img DOM 结构照旧创建（源码/渲染分离不降级渲染路径），容器不再挂 raw-render-mode',
+    renderOut.includes('<p>第一段<b>加粗</b></p>')
+    && /<img[^>]*src="https:\/\/example\.com\/pic\.png"/.test(renderOut)
+    && !renderOut.includes('raw-render-mode'));
+  const proxiedOut = renderProse({
+    renderHtml: PROXIED_HTML, sourceText: FIXED_HTML,
+    isSourceMode: false, isStreamingTranslation: false,
+  });
+  checkNew('(opt012-b2) 真实 SSR 渲染态：图片代理产物（data: base64）仍被使用（修前行为不回退；与 a2 源码态对照）',
+    proxiedOut.includes('data:image/png;base64,'));
+
+  /* ---- C：流式未消毒译文 = 纯文本（rawStream 期间 source 也是纯文本） ---- */
+  const STREAM_TEXT = '<script>alert(1)</script>半截译文';
+  const streamRenderOut = renderProse({
+    renderHtml: STREAM_TEXT, sourceText: STREAM_TEXT,
+    isSourceMode: false, isStreamingTranslation: true,
+  });
+  const streamSourceOut = renderProse({
+    renderHtml: STREAM_TEXT, sourceText: STREAM_TEXT,
+    isSourceMode: true, isStreamingTranslation: true,
+  });
+  checkNew('(opt012-c1) 真实 SSR 流式译文（渲染态）：未消毒产物按纯文本插值——无 <script> 元素、字面 &lt;script&gt; 可见（TASK-065 N11 契约保留）',
+    streamRenderOut.includes('&lt;script&gt;')
+    && !streamRenderOut.includes('<script>')
+    && streamRenderOut.includes('class="article-prose"'));
+  checkNew('(opt012-c2) 真实 SSR 流式译文（源码态）：同样纯文本转义、不创建标签（流式期间切源码不打开 HTML 路径）',
+    streamSourceOut.includes('reader-source-view')
+    && streamSourceOut.includes('&lt;script&gt;') && !streamSourceOut.includes('<script>')
+    && !streamSourceOut.includes('<p>') && !streamSourceOut.includes('<img'));
+
+  /* ---- D：值传递接线（源级；SSR 读不到 store 真值——t116 注边界） ---- */
+  const readerSrcOpt12 = fsOpt12.readFileSync(new URL('../src/components/Reader.tsx', import.meta.url), 'utf8');
+  checkNew('(opt012-d1) Reader 接线：渲染态 HTML = 消毒译文 / 代理命中产物 ?? baseHtml；源码文本 = 译文 / 未经代理的 baseHtml；Reader.tsx 不再有第二处 HTML 创建路径',
+    readerSrcOpt12.includes('const renderHtml = isShowingTranslatedProse')
+    && readerSrcOpt12.includes('proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml')
+    && readerSrcOpt12.includes('const sourceText = isShowingTranslatedProse ? body.translatedContent : baseHtml')
+    && !/dangerouslySetInnerHTML\s*=\s*\{\{/.test(readerSrcOpt12));
+  checkNew('(opt012-d2) Reader 接线：三个模式开关与内容按名传入 ReaderProse（isSourceMode=isRawRenderMode；isStreamingTranslation=译文+rawStream；renderHtml/sourceText/onClick）',
+    readerSrcOpt12.includes('isSourceMode={isRawRenderMode}')
+    && readerSrcOpt12.includes('isStreamingTranslation={isShowingTranslatedProse && !!rawStream}')
+    && readerSrcOpt12.includes('renderHtml={renderHtml}')
+    && readerSrcOpt12.includes('sourceText={sourceText}')
+    && readerSrcOpt12.includes('onClick={handleProseClick}'));
+
+  /* ---- E：源码容器样式（局部；长行折行不撑破布局） ---- */
+  const cssOpt12 = fsOpt12.readFileSync(new URL('../src/styles/base.css', import.meta.url), 'utf8');
+  checkNew('(opt012-e1) 源码显示局部样式：.reader-source-view 折行（white-space:pre-wrap）+ 超长 token 断行（overflow-wrap:anywhere），选择器只作用于源码容器',
+    /\.article-prose\s+\.reader-source-view\s*\{[^}]*white-space:\s*pre-wrap/s.test(cssOpt12)
+    && /\.article-prose\s+\.reader-source-view\s*\{[^}]*overflow-wrap:\s*anywhere/s.test(cssOpt12));
 }
 
 // ---- 汇总 ----

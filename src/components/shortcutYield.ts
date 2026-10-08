@@ -8,12 +8,13 @@
    放到本文件（与 timelineSentinel.ts / store/selectors.ts 同一做法），两侧共用同一份
    判定，避免「断言一套、渲染一套」。
 
-   契约（P3[F2] / REQ-104 / TASK-086）：
+   契约（P3[F2] / REQ-104 / TASK-086，OPT-012 补 closeAsk）：
    - 任一浮层打开（搜索/设置/新建分类/添加订阅/编辑订阅/重命名分类/图片 lightbox/
-     全屏播放器）时，**单键**快捷键 S/M/J/K 让路 → 'yield'；
+     全屏播放器/关闭确认框）时，**单键**快捷键 S/M/J/K 让路 → 'yield'；
    - 带 Ctrl / Meta / Alt 的组合键**不让路**（Ctrl+K、Ctrl+, 属浮层自身操作，
      在 App.tsx 中位于本判定之前处理）；
-   - 非 S/M/J/K 键不让路；
+   - 非 S/M/J/K 键不让路（Escape 亦不让路——确认框的 Esc 由 App.tsx 专门分支
+     与弹窗自身捕获处理，保持既有语义）；
    - 浮层未打开时不让路。
    浮层集合本身由 OVERLAY_SOURCES 清单定义、anyOverlayOpen 求值，
    使「新增/漏判浮层」成为可断言项（见下方该清单的说明）。
@@ -45,6 +46,9 @@ export interface OverlayState {
   lightboxUrl: string | null;
   playerExpanded: boolean;
   playerActive: boolean;
+  /* OPT-012：关闭确认框曾漏出本清单——确认框打开时 S/M/J/K 仍会作用到背后文章
+     （S/M 改收藏/已读、J/K 切文章，用户看不见）。审计 2026-10-08「关闭确认框与快捷键」条目。 */
+  closeAskVisible: boolean;
 }
 
 /** 浮层清单：每项给出「名称 + 该浮层当前是否打开」。新增浮层必须在此登记。 */
@@ -61,6 +65,8 @@ export const OVERLAY_SOURCES: readonly {
   { name: 'lightbox', isOpen: (s) => !!s.lightboxUrl },
   /* Full Player 大浮层：仅在播放器激活时才算浮层 */
   { name: 'playerExpanded', isOpen: (s) => s.playerExpanded && s.playerActive },
+  /* 关闭确认框（closeAsk）：视觉层级最高（3000），单键必须让路 */
+  { name: 'closeAsk', isOpen: (s) => s.closeAskVisible },
 ];
 
 /** 任一浮层打开 ⇒ true。App.tsx 直接调用本函数，回归网对同一份清单逐项断言。 */
