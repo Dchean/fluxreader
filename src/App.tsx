@@ -164,12 +164,14 @@ export default function App() {
       try {
         const { listen } = await import('@tauri-apps/api/event');
         unlisten = await listen<string>('player-media', (e) => {
+          /* OPT-015：媒体键语义（play/pause 目标态幂等、toggle 才切换、未激活
+             不启动、stop 关闭）单点在 store.applyMediaAction；这里只收窄
+             payload，不再内联播放判定——此前 play/pause/toggle 全部
+             togglePlayerPlay，播放中按「播放」会反被暂停。 */
           const st = useAppStore.getState();
-          if (!st.player.isActive) return;
-          if (e.payload === 'toggle' || e.payload === 'play' || e.payload === 'pause') {
-            st.togglePlayerPlay();
-          } else if (e.payload === 'stop') {
-            st.closePodcastBar();
+          const action = e.payload;
+          if (action === 'play' || action === 'pause' || action === 'toggle' || action === 'stop') {
+            st.applyMediaAction(action);
           }
         });
       } catch {

@@ -28,6 +28,10 @@ export interface PodcastPlayerState {
   seekToSec: number | null;
 }
 
+/** OPT-015：SMTC 媒体键动作（Rust `player-media` 事件的 payload 域）。
+ *  play/pause 是「目标态」语义（重复按不翻转），toggle 才是切换。 */
+export type MediaAction = 'play' | 'pause' | 'toggle' | 'stop';
+
 export interface SettingsState {
   /* 通用 */
   autoRefresh: boolean;
@@ -306,6 +310,11 @@ export interface AppState {
   /* ---------- Actions: 播客 ---------- */
   playPodcastEpisode: (title: string, showName: string, cover: string, audioUrl: string, entryId?: string) => void;
   togglePlayerPlay: () => void;
+  /** OPT-015：媒体键动作幂等消费（App.tsx `player-media` 事件唯一落点）。
+   *  play/pause = 目标态（已在目标态则 no-op，不翻转）；toggle = 切换；
+   *  stop = 关闭播放条。未激活（无剧集）时 play/pause/toggle 无任何副作用
+   *  ——媒体键不得凭空启动无源播放器。 */
+  applyMediaAction: (action: MediaAction) => void;
   cyclePlaybackSpeed: () => void;
   closePodcastBar: () => void;
   /** Full Player 展开态（大播放器覆盖层；Esc/再次点击收起） */

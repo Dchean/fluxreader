@@ -18,6 +18,9 @@ pub mod scheduler;
 pub mod state;
 pub mod sync;
 
+// 冷启动窗口恢复（OPT-015）：仅本 crate 使用，不进集成测试公共面
+mod window_startup;
+
 use std::path::PathBuf;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -94,8 +97,16 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
-        // 窗口状态记忆：尺寸/位置/最大化跨启动保留
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // 窗口状态记忆：尺寸/位置/最大化跨启动保留。
+        // OPT-015：main 跳过插件的初始自动恢复——冷启动恢复统一由 setup 里
+        // window_startup 模块一次性执行（窗口已创建未展示时恢复几何再显式
+        // 显示），防止「插件先恢复/显示 → Rust 再恢复」的二次跳动；
+        // 插件生命周期核对与时序依据见 window_startup.rs 头注与 Note。
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .skip_initial_state("main")
+                .build(),
+        )
         // 开机自启：Windows 注册表 Run 键（设置页开关控制）
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -110,6 +121,18 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+
+            // OPT-015：主窗口已创建、尚未展示（tauri.conf.json visible:false）。
+            // 在窗口不可见时完成几何恢复（排除 VISIBLE），再显式显示——不 sleep、
+            // 不等待前端网络/正文装载。恢复失败内部回退居中；显示失败记日志
+            // （应用仍可经托盘唤起，不把启动拖垮为 panic）。
+            if let Some(win) = app.get_webview_window("main") {
+                if let Err(e) = window_startup::restore_and_show(&win) {
+                    log::error!("window-startup: {e}");
+                }
+            } else {
+                log::error!("window-startup: 未找到主窗口，跳过启动恢复");
             }
 
             // 数据库放应用数据目录（LocalAppData/FluxReader/fluxreader.db）
@@ -274,6 +297,8 @@ pub fn run() {
             // 设置
             commands::get_setting,
             commands::set_setting,
+            // 更新检查（OPT-014：固定目的地，无 URL 入参）
+            commands::check_for_updates,
             // Miniflux 同步
             commands::sync_test,
             commands::sync_save,
@@ -297,8 +322,6 @@ pub fn run() {
             // 图片代理（防盗链兼容）
             commands::fetch_image,
             // OPML 导入导出
-            // 更新检查（OPT-014：固定目的地，无 URL 入参）
-            commands::check_for_updates,
             commands::opml_import,
             commands::opml_export,
             // SMTC 系统媒体控制

@@ -7742,6 +7742,105 @@ await (async () => {
     && /\.article-prose\s+\.reader-source-view\s*\{[^}]*overflow-wrap:\s*anywhere/s.test(cssOpt12));
 }
 
+/* ============================================================
+   OPT-015（F23 媒体键）：SMTC 媒体动作幂等回归。
+   证据分层（如实说明）：
+   - 行为层：直接驱动**真实 store**（dist-test 同一模块图实例）的
+     applyMediaAction——卡片要求「实际 store 测试，不只测试复制 helper」。
+     R1 修订（review P2）：Play/Pause 的幂等必须**每次调用后立即断言**且覆盖
+     playing/paused 两种初态——只看终态的旧断言对「Play 分支变质为 toggle」
+     漏检（true→false→true 两次调用后终态仍是 true，审查实测 780/780 全绿）。
+     强化后的断言已用内存变异探针实测对旧 toggle 语义必红（m2a/m3c 直接命中，
+     m4a..m6c 为状态级联失败），探针与用法见
+     tmp/optimization-20261008/OPT-015/mutation-probe-loader.mjs（不改产品文件）。
+   - 接线层：App.tsx player-media 监听只收窄 payload 后调 applyMediaAction
+     （源码形态断言，沿用本文件 readFileSync 先例）——删掉监听或退回内联
+     播放判定即失败。真实媒体键→SMTC→Rust→前端整链的实机验证由主控隔离验收。
+   ============================================================ */
+{
+  const stM = () => store.getState();
+
+  /* 基线：关闭播放条、清空 toast */
+  store.setState({ toasts: [] });
+  stM().closePodcastBar();
+
+  /* ---- inactive：媒体键不得启动播放器、不得改任何字段 ---- */
+  const inactiveBefore = JSON.stringify(stM().player);
+  stM().applyMediaAction('play');
+  stM().applyMediaAction('pause');
+  stM().applyMediaAction('toggle');
+  checkNew('(opt015-m1) inactive：Play/Pause/Toggle 全无副作用（不启动无剧集播放器，player 字段逐字节不变）',
+    JSON.stringify(stM().player) === inactiveBefore && stM().player.isActive === false);
+
+  /* ---- playing 初态：Play 每次调用后都必须恒播放（逐步断言） ---- */
+  stM().playPodcastEpisode('M 集', '节目', '', 'https://a.example/m.mp3');
+  stM().applyMediaAction('play');
+  checkNew('(opt015-m2a) playing 初态·第 1 次 Play 后仍播放（Play 变质为 toggle 时 true→false 在此即红）',
+    stM().player.isPlaying === true && stM().player.isActive === true);
+  stM().applyMediaAction('play');
+  checkNew('(opt015-m2b) playing 初态·第 2 次 Play 后仍播放（逐步断言；只看终态对 true→false→true 漏检）',
+    stM().player.isPlaying === true && stM().player.isActive === true);
+
+  /* ---- paused 初态：Play 每次调用后都必须恒播放，且进度保留 ---- */
+  stM().syncPlayerProgress(63, 300);
+  stM().applyMediaAction('pause');
+  checkNew('(opt015-m3a) paused 初态就位（首次 Pause 从播放翻到暂停，进度保留）',
+    stM().player.isPlaying === false && stM().player.positionSec === 63);
+  stM().applyMediaAction('play');
+  checkNew('(opt015-m3b) paused 初态·第 1 次 Play 后 → 播放（目标态语义：63s 处续播，不归零重启）',
+    stM().player.isPlaying === true && stM().player.positionSec === 63);
+  stM().applyMediaAction('play');
+  checkNew('(opt015-m3c) paused 初态·第 2 次 Play 后仍播放（Play 变质为 toggle 时 true→false 在此即红）',
+    stM().player.isPlaying === true && stM().player.positionSec === 63);
+
+  /* ---- Pause 同样逐步：每次调用后都断 false（playing/paused 两种初态） ---- */
+  stM().applyMediaAction('pause');
+  checkNew('(opt015-m4a) playing 初态·第 1 次 Pause 后 → 暂停', stM().player.isPlaying === false);
+  stM().applyMediaAction('pause');
+  checkNew('(opt015-m4b) paused 初态·第 2 次 Pause 后仍暂停（Pause 变质为 toggle 时 false→true 在此即红）',
+    stM().player.isPlaying === false);
+  stM().applyMediaAction('pause');
+  checkNew('(opt015-m5) paused 初态·第 3 次 Pause 后仍暂停（每次 Pause 后断言 false，不只看双切回）',
+    stM().player.isPlaying === false && stM().player.positionSec === 63);
+
+  /* ---- Toggle 才切换：×2 回原态 ---- */
+  stM().applyMediaAction('toggle');
+  checkNew('(opt015-m6a) Toggle 单次翻转恢复播放（切换语义只归 toggle）', stM().player.isPlaying === true);
+  stM().applyMediaAction('toggle');
+  checkNew('(opt015-m6b) Toggle 第 2 次翻转回原态（暂停）', stM().player.isPlaying === false);
+  stM().applyMediaAction('toggle');
+  checkNew('(opt015-m6c) Toggle 再次翻转（供 Stop 关闭用例以播放态起）', stM().player.isPlaying === true);
+
+  /* ---- Stop 关闭（激活态） ---- */
+  stM().applyMediaAction('stop');
+  checkNew('(opt015-m7) Stop 关闭播放条（isActive/isPlaying 双落 + seek 清空）',
+    stM().player.isActive === false && stM().player.isPlaying === false && stM().player.seekToSec === null);
+
+  /* ---- 幂等 ≠ 失效：暂停后 Play 从暂停点恢复（不重头） ---- */
+  stM().playPodcastEpisode('M 集', '节目', '', 'https://a.example/m.mp3');
+  stM().syncPlayerProgress(63, 300);
+  stM().applyMediaAction('pause');
+  stM().applyMediaAction('play');
+  checkNew('(opt015-m8) Pause→Play 恢复播放且进度保留（目标态语义：63s 处续播，不归零重启）',
+    stM().player.isPlaying === true && stM().player.positionSec === 63);
+
+  /* ---- inactive 下 Stop 仍是关闭路径（幂等无害） ---- */
+  stM().closePodcastBar();
+  stM().applyMediaAction('stop');
+  checkNew('(opt015-m9) inactive 下 Stop 仍是关闭路径（无异常、状态保持关闭）',
+    stM().player.isActive === false && stM().player.isPlaying === false);
+
+  /* ---- 接线层：App.tsx player-media 监听 ---- */
+  const fsOpt15 = await import('node:fs');
+  const appSrcOpt15 = fsOpt15.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const pmStart = appSrcOpt15.indexOf("listen<string>('player-media'");
+  const pmBlock = pmStart < 0 ? '' : appSrcOpt15.slice(pmStart, appSrcOpt15.indexOf('});', pmStart));
+  checkNew('(opt015-m10) App.tsx 接线：player-media 收窄四个动作后唯一落点 applyMediaAction(action)；播放判定不再内联（无 togglePlayerPlay() 调用 / 无 isActive 早退）',
+    pmBlock.includes("'play'") && pmBlock.includes("'pause'") && pmBlock.includes("'toggle'") && pmBlock.includes("'stop'")
+    && pmBlock.includes('applyMediaAction(action)')
+    && !pmBlock.includes('togglePlayerPlay()') && !pmBlock.includes('isActive'));
+}
+
 // ---- 汇总 ----
 const failed = results.filter((r) => !r.pass);
 const newFailed = newResults.filter((r) => !r.pass);
