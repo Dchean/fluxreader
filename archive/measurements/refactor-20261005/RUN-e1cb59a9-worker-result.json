@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-117",
+  "run_id": "RUN-e1cb59a9c6174f8baf1ee25fb446acfc",
+  "status": "ready_for_verification",
+  "summary": "审计 P1-1 修复（keyset 分页）：Rust——ArticleQuery 增 last_published/last_id（参数化绑定，无注入面），PUBLISHED_ORDER 补 id 决胜（列表与 article_index 窗口共用常量自动同口径），keyset 谓词常量（DESC/ASC），v17 迁移 idx_articles_published_id(published_at,id)（真库 EXPLAIN 实测 8 个查询计划变体无 TEMP B-TREE——无等值前缀变体在旧索引必出 TEMP B-TREE，索引必要）；OFFSET 保留绑定但前端列表停用。前端——articlesCursor 契约 count→{lastPublished,lastId,loaded}（advanceArticlesCursor 单点收口，迁移点全清单：写×4/镜像×3/视图缓存元数据/paginationStale 三元组/wire 层），loadMoreArticles 成对传 keyset（无锚回落 offset），selectVisibleEntries 本地排序补 id 决胜。选型：裸字符串比较（谓词与排序共用同一表达式，datetime() 包列破坏索引有序驱动且与 M-5 计划断言冲突；分页正确性与时间语义正交）。操作序列回归 t117-* 16 条：阅读中连续翻页（1200 未读读 500 续拉收剩余前 500——OFFSET 会跳 500 并假 exhausted）、取消收藏、插入漂移免疫、同秒并列决胜、排序切换游标重置。假后端 queryRows 升级 keyset 语义+忠实 set_read_bulk/set_starred 落库。自检：cargo fmt --check 0、cargo check --all-targets 0（本地）、test:frontend 671/671、lint 0（phase4_measure.mjs 既有 warning 非本卡）、build 0；额外真 SQLite 3.49.1 镜像生产 SQL 逐字节验证 keyset/offset/期望全序三方等价。cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）。",
+  "changed_files": "auto",
+  "validation_requests": ["cargo_fmt", "frontend", "lint", "build"],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

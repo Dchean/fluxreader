@@ -1,0 +1,16 @@
+{
+ "task_id": "TASK-123",
+ "run_id": "RUN-31017f403d864ab4bba2c718f971c7d0",
+ "status": "ready_for_verification",
+ "summary": "审计 P2-5 修复（保位窗口扩展，纯前端；配额中断+续作完成）：①保位窗口刷新——bootstrap.ts fetchWindowRows：keepReadingPosition 路径（reloadFromBackend 'all' 视图 + reloadFilteredEntries 共用 scope 游标）按窗口目标页数循环 keyset 续拉（续取条件=长度未达标或发起时底锚 lastId 未覆盖——插头部使窗口按插入量自然生长；防呆页数上限防底锚被删无界追取），窗口重建后锚必在（真删除除外）；游标/exhausted 落地随窗口真值，windowTarget=0 时行为与改前逐字一致；backendReloadInFlight/gen 复核跨多页持有。②Timeline 接线：commitTopAnchor 尾沿定时器（静默后补记，上下文切换不复活锚，卸载清理）、measureAnchorOffsetPx（卡片内像素偏移记录与提交同口径）、positionRestore/switchRestore 补偏消费；nav 三路径缓存命中后台刷新携带 keepReadingPosition（cache-miss/切排序=新语境无参保持）。③intra-item 像素偏移全链路（记录/恢复/rearm 带偏移+补偏）。④t123-* 25 条 5 组（探针 P7 本体：wire 3 次/窗口 1253 不缩回/锚索引 752/游标一致；组合两段语义；intra-item 全链；尾沿；截断边界四段衔接）。四变异自证：去窗口循环 8 红/去 nav 接线 3 红/commit 被节流吸收 2 红/commit 不推进基准 1 红。过程披露：前任代理实现仅一半（fetchWindowRows 死代码+零接线，且续取条件有挤出尾部缺陷），续作代理补实现+接线+断言。自检：test:frontend 748/748、lint 0、build 0。",
+ "changed_files": "auto",
+ "validation_requests": [
+  "frontend",
+  "lint",
+  "build",
+  "cargo_fmt"
+ ],
+ "requested_actions": [],
+ "unresolved_items": [],
+ "blocked_reason": null
+}

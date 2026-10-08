@@ -1,0 +1,63 @@
+{
+ "task_id": "TASK-123",
+ "candidate_digest": "e2911fef212bf6fb9d699fa016890405a83c7812dc0715d1a91db61399c1183d",
+ "verification_run": "RUN-a3ffb99e3ce54971b39c7729e60f5ccb",
+ "verdict": "PASS",
+ "summary": "R1 聚焦复审完成：候选即工作树（六文件 sha256 与 RUN-a3ffb99e 候选清单逐一吻合）。R0 唯一低危 finding（reloadFromBackend 续页失败被调用方 .catch(()=>{}) 静默吞掉，重开 TASK-067 N10 缺陷类）已按建议修复：fetchWindowRows 调用以 try/catch 包裹，同文案 toast「刷新失败：…」+rethrow（与首屏 310-316 行 catch 逐字一致；与 reloadFilteredEntries 对称，差异仅其 catch 不重抛且已注释）。失败语义成立：rethrow 发生在任何落地之前（articles/windowExhausted 未采纳、setViewEntriesSnapshot/set 未达、nonce 不 bump、backendReloadInFlight 于 finally 复位），t123-6 第二条断言行为级锁定。R1 增量核实无夹带：changed_files 仅 bootstrap.ts+frontend-regression.mjs，Timeline/timelineAnchor/nav/App 四文件与 R0 哈希逐字节相同；harness 相对基线仅 2 行删除（R0 已接受的 t111-6/t115-0 四参字面量同步），t123-6 块为纯新增 2 条断言；R0→R1 两次验证输出的测试名多重集差恰为 {t123-6:+2}，零丢失零缩减。变异独立复现：去 toast+rethrow 包装 → 749/750，恰 (t123-6) 续页失败可见判别本体 1 红（第二条不缩窗断言保持绿，证明 R0 缺陷纯为可见性）→ 还原后哈希复验一致。门禁复跑全绿：frontend 750/750（t123-0..6 共 27 条）、lint/build/cargo_fmt exit 0。R0 其余 PASS 结论延续成立，判 PASS findings=0。",
+ "findings": [],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "R0 finding 修复逐点对照：①位置——reloadFromBackend 内 fetchWindowRows 调用（329-343 行）现以 try/catch 包裹，catch 内 showToast(`刷新失败：${extractError(e)}`) 后 rethrow，正是 R0 建议的「与首屏同样以 toast+rethrow 包裹」方案；②范围——修复轮 changes 仅 bootstrap.ts+frontend-regression.mjs（RUN-c82f1e9b changes.json），另四个业务文件哈希与 R0 候选完全相同，无顺带行为变更、无范围扩大；③windowTarget=0 路径（导航/启动）不受影响——try/catch 仅在 windowTarget>0 分支内，导航形态与改前逐字一致；④修复超出 R0 最低要求（补 1 条回归）的部分为 t123-6 第二条「失败不缩窗不假到底」断言，属同一 finding 的语义收口，不算扩大范围。",
+   "evidence_files": [
+    "src/store/slices/bootstrap.ts",
+    ".workflow-kit/tasks/evidence/RUN-c82f1e9b7c634b51a1acc63e070e7a3f-worker-result.json",
+    ".workflow-kit/tasks/evidence/RUN-af185e424597457fa6aee58a8f4fea75-candidate.json"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "t123-6 两条断言核对：①判别本体——rejectWhen 谓词放行首屏（无 last_id）、只拒续页（last_id!=null），断言 promise 重抛命中调用方 .catch + toast 恰 +1 + 文案以「刷新失败：」开头（与首屏失败同一前缀，修复本体正是 toast 可见性，rethrow 修前也发生故不构成判别）；②不缩窗不假到底——entries 保持 1000（锚 id 1749 在列）、游标 loaded=1000 不动、exhausted 不被写 true、positionRestoreNonce 不 bump。变异自证（审查者独立复现，非采信作者）：将 try/catch 还原为 R0 形态 const win = await fetchWindowRows(...) 后 749/750，唯一红 = 判别本体，第二条保持绿——判别力与「恰可见性 1 红」声称一致；还原后 sha256 复验 ed8b2f8b 与候选一致。零弱化：R0（RUN-af185e42，748/748）与 R1（RUN-a3ffb99e，750/750）两次验证输出的测试名多重集差恰为 {t123-6:+2}，t123-0..5 计数 3/5/5/4/3/5 不变，既有回归 26/26 两组均全绿；harness 相对基线全 diff 仅 2 行删除（R0 已审的 t111-6/t115-0 四参同步）。门禁复跑：frontend 750/750、lint/build/cargo_fmt 全部 exit 0。",
+   "evidence_files": [
+    ".workflow-kit/tasks/evidence/RUN-a3ffb99e3ce54971b39c7729e60f5ccb-frontend.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-af185e424597457fa6aee58a8f4fea75-frontend.stdout.txt",
+    "tools/frontend-regression.mjs",
+    "src/store/slices/bootstrap.ts"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "R0 finding 对应的失败路径已闭合，其余失败路径结论延续 R0：①失败不落地——catch 的 rethrow 发生在 articles=win.rows / windowExhausted=win.exhausted 采纳之前、setViewEntriesSnapshot 与 set() 之前，entries/游标/exhausted/nonce 全部原样（t123-6 第二条行为级锁定；变异运行中该断言在无包装形态下仍绿，证明失败路径本就不落地）；②backendReloadInFlight 于 finally 复位，失败不会永久拦截续拉；③可见性对称——reloadFilteredEntries 的窗口重取同在其 toasting try 内（catch toast「筛选列表加载失败」后 return 不重抛，为该视图快照写入者的既有语义且 R1 注释明示差异），两路径续页失败现均用户可见，TASK-067 N10 缺陷类不再经新代码路径重开；rethrow 保留 bootstrapFromBackend 错误态语义与首屏 catch 一致，keepReadingPosition 调用方（App.tsx feeds-updated / nav.ts 缓存命中 'all'）的 .catch(()=>{}) 吞掉的只是已可见的错误；④文案——与首屏失败 toast 逐字同源，前缀「刷新失败：」5 字，符合本库单行 ≤40 字口径（TASK-101/102）；⑤gen 过期/短页 exhausted/页数触限回落等 R0 已核路径代码未动。",
+   "evidence_files": [
+    "src/store/slices/bootstrap.ts",
+    "src/App.tsx",
+    "src/store/slices/nav.ts"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "修复为最小单点改动：try/catch 形态与紧邻的首屏 catch 同构（同文案同 rethrow），无新抽象、无重复规则；R1 注释（333-340 行）单点成文修复理由、与 reloadFilteredEntries 的对称/差异、回归指针（t123-6），延续本库「注释即规则文档」纪律；fetchWindowRows 仍为两条 reload 路径共用单点，依赖方向无变化；无以行数为理由的拆分、无预建抽象。",
+   "evidence_files": [
+    "src/store/slices/bootstrap.ts"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "NOT_APPLICABLE",
+   "analysis": "R1 增量仅为失败路径上的 try/catch 包裹 + 一条 toast：成功路径零新增 IPC/分配/状态写入（try 本身无运行时成本），窗口重取的有界成本分析（ceil(loaded/500)+1 次顺序 IPC、防呆页数上限封顶）与 R0 审定结论相同未变，无新的代表性负载维度需要测量，故不适用。",
+   "evidence_files": [
+    "src/store/slices/bootstrap.ts"
+   ]
+  }
+ ],
+ "ui_review": {
+  "required": false,
+  "checked_states": [],
+  "evidence_files": [],
+  "notes": "ui_change=false；R1 增量为数据层失败可见性（toast 复用既有 showToast 通道，无界面结构改动），按任务包免除 UI 审查。"
+ }
+}

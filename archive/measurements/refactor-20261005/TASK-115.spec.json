@@ -1,0 +1,62 @@
+{
+  "id": "TASK-115",
+  "title": "返回位置统一规则——切换返回滚动恢复与阅读器焦点归还（三阶段②，REQ-005）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-115-RETURN-POSITION.md",
+  "ui_checks": [
+    {"id": "X1.switch-return-scroll", "description": "切布局/视图/范围后返回（再切回）时滚动位置恢复到离开时顶条条目（per filterKey 锚记忆，缓存命中路径立即恢复、后台 reload 落地后校准）；无记录或锚丢失时归零回落"},
+    {"id": "X2.reader-close-focus", "description": "阅读器关闭（Esc/clearReaderSelection）焦点归还到原选中卡片（scrollToIndex 原位+聚焦），不再只清字段丢焦点"},
+    {"id": "X3.rule-documented", "description": "统一规则在代码单点注释+UI 契约文档明示：哪些场景保位（切换返回/后台刷新）、哪些归零（无锚/首次进入/画廊）、锚与 TASK-111 后台刷新保位的关系"}
+  ],
+  "objective": "返回位置统一规则（审计三阶段完成标准之一；探查事实：切布局/视图/范围/排序均 filterKey 归零丢位置 Timeline.tsx:94-101，缓存恢复只恢复 entries 不恢复滚动；阅读器关闭 clearReaderSelection 只清字段无焦点归还 reader.ts:302-303+Timeline.tsx:223-232 提前返回；TASK-111 后台刷新保位是唯一回位场景）。修法要求：①切换返回恢复——Timeline 已节流记录顶条锚（recordTopAnchor :275-277 一带，含 filterKey）；把「离开时的锚 id」按 filterKey 存档（模块级 Map 或 store 自选，注意容量上限与清理时机——复用 TASK-111 预算纪律），在 selectLayout/selectView/selectFeed 的缓存恢复路径（entries 恢复后）按存档锚恢复滚动（锚 id 在恢复列表中→scrollToIndex align:start；不在→归零回落）；后台 reload 落地后由既有 activeArticleId/锚机制校准，不双重滚动（与 TASK-111 positionRestoreNonce 的协同要显式：切换返回的恢复先于/独立于刷新保位，两者不叠加）。②阅读器焦点归还——clearReaderSelection 前记录原 activeArticleId 的卡片 index（或由 Timeline 消费一个关闭信号），关闭后 moveCardFocus 到原卡片（原卡片不在可见范围→scrollToIndex 定位；列表已切换→归零回落）。③统一规则文档化：UI 契约文档三检查点 + 代码单点注释（timelineAnchor 或新模块头注）列明全场景规则。画廊布局非虚拟化：切换返回恢复与阅读器焦点归还均回落现状（与 TASK-111 同口径注明）。回归断言 t115-* ≥6 条：存档-恢复（切走再切回滚到原锚）、锚丢失归零回落、切排序重拉后不恢复（filterKey 已变，重拉是新语境——写明该裁定）、阅读器关闭焦点归还原卡、关闭后列表已切回落、与 TASK-111 刷新保位不叠加。既有断言零弱化（t111-* 20 条必须原样通过）。",
+  "non_goals": [
+    "不改后台刷新保位机制本身（TASK-111 交付，仅协同不叠加）",
+    "不改画廊布局（非虚拟化，回落现状）",
+    "不做布局切换动画/视觉润色",
+    "不改 Rust 与数据层分页语义"
+  ],
+  "requirement_refs": ["REQ-005"],
+  "reference_ids": [],
+  "decision_refs": [".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"],
+  "dependencies": [],
+  "blocks": [],
+  "snapshot_paths": ["src", "tools/frontend-regression.mjs"],
+  "risk": {"level": "medium", "decision_ids": ["DEC-refactor-roadmap-20261005"]},
+  "scope": {
+    "allowed_paths": ["src/**", "tools/frontend-regression.mjs", ".workflow-kit/docs/UI-CONTRACT-TASK-115-RETURN-POSITION.md"],
+    "protected_paths": ["AGENTS.md", "CLAUDE.md", "WORKFLOW.md", "WORKFLOW-KIT.md", "README.md", "package.json", "package-lock.json", "src-tauri/**", "docs/**", ".workflow-kit/**"],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 切换返回滚动恢复生效（X1：缓存命中路径立即恢复；锚丢失归零回落）",
+    "② 阅读器关闭焦点归还原卡（X2）",
+    "③ 统一规则文档化（X3：契约文档+代码单点注释；切排序=新语境不恢复的裁定写明）",
+    "④ 与 TASK-111 刷新保位机制不叠加（行为断言）",
+    "⑤ 门禁全绿：frontend（t115-* 新增、t111-* 原样）、lint/build/cargo_fmt 不回退；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+    "⑥ 独立审查（全新子代理）PASS findings=0；ui_change=true 需 UI 取证说明"
+  ],
+  "gates": [
+    {"id": "cargo_fmt", "program": "cargo", "args": ["fmt", "--check"], "cwd": "src-tauri", "required": true},
+    {"id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": false, "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担"},
+    {"id": "cargo_clippy", "program": "cargo", "args": ["clippy", "--all-targets", "--", "-D", "warnings"], "cwd": "src-tauri", "required": false, "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）"},
+    {"id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true},
+    {"id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true},
+    {"id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true}
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@TASK-114 后基线：frontend ≥611 全绿、CI 全绿。本卡新增返回位置恢复（行为增强），属行为变化（owner 指示按审计三阶段推进）。",
+      "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    },
+    "decision_ids": ["DEC-refactor-roadmap-20261005"],
+    "actions": [
+      {"action": "add", "target": "t115-* 断言（存档恢复/回落/焦点归还/不叠加）", "reason": "新机制需防回退", "gate_ids": ["frontend"]},
+      {"action": "keep", "target": "既有 frontend（t103-t114 全部）/cargo fmt/lint/build 断言", "reason": "不回退证据；cargo 由 CI 承担（DEC-local-cargo-gate-20261005）", "gate_ids": ["cargo_fmt", "lint", "build", "frontend"]}
+    ]
+  }
+}

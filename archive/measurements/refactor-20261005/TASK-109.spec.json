@@ -1,0 +1,60 @@
+{
+  "id": "TASK-109",
+  "title": "查询口径统一收口 + merge bump 按真值来源收窄（二阶段①，承接审计块②）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "objective": "二阶段第一卡：查询口径统一与水合版本守卫的来源精确化。①口径收口：现况三把键维度不对称——scopeQueryArgs（范围×排序×可选 layout，internals.ts:126-138）、scopePageKey（范围×layout，:145-147）、viewCacheKey（layout×view×scope，:90-92）分散定义、多处裸拼；探查实证三处不一致：bootstrap.ts:143 的 scopeKey 在 await 之后读「完成时」状态（注释声称发起时口径，靠 reloadGeneration 间接兜底）、loadMoreArticles 守卫含 sortAtStart 而 reloadFilteredEntries 明示不含排序（bootstrap.ts:291，筛选视图拉全集的历史语义）、markCurrentViewAllRead（nav.ts:218-220）传 layout 却只取 feed/folder。修法要求：新建统一派生入口（如 internals 内 QueryScope 助手或独立模块），三把键与查询参数只从它派生；scopePageKey/viewCacheKey 的字符串形态不得改变（缓存键兼容，避免无谓失效）；上述三处不一致收口为显式命名谓词/参数（如「筛选视图不锁排序」的具名守卫构造器），行为保持但不再靠注释默会；bootstrap.ts:143 改为发起时快照（与 bootstrap.ts:196/267/325 一致），reloadGeneration 守卫保留。②merge bump 收窄（TASK-107 R2 审查裁定的后续微任务，todo 备忘在案）：mergeSnapshotEntries（internals.ts:185-225）增加真值来源参数（如 fromBackend），bootstrap 三处后端快照路径（reloadFromBackend:138/reloadFilteredEntries:296/anchorToArticle:354）传真——bump 生效使在途乐观声明失效；nav 三处缓存恢复（selectLayout:74/selectView:117/selectFeed:162）传假——缓存回放是近期 UI 状态而非后端真值，不 bump 以保留本应正确的在途回滚。R2 审查已确认该修法技术成立（经 reload 落进缓存的行在 bootstrap merge 时已 bump，nav 不 bump 不会重开踩踏缺口；唯一无 bump 的缓存行恰是乐观态本身）。③回归断言 t109-* ≥5 条：口径派生单点性（源级）、发起时快照修正、bump 收窄的三个方向（缓存恢复后在途回滚仍正确恢复——即 R2 裁定角例修后行为、后端快照仍 void 陈旧声明（t104-snapshot-voids-rollback-claim 必须保持通过）、缓存回放不误 void 新声明）、键形态兼容。既有断言零弱化。",
+  "non_goals": [
+    "不改 scopePageKey/viewCacheKey 字符串形态与任何缓存命中行为（纯收口不改键）",
+    "不改 limit:100000 与分页机制（TASK-110）",
+    "不改 viewEntriesCache 容量结构（TASK-111）",
+    "不改 Rust 侧任何代码",
+    "不改 entryMutationVersion 的 bump 点集合（仅按真值来源门控既有三处调用点的 bump）"
+  ],
+  "requirement_refs": ["REQ-007"],
+  "reference_ids": [],
+  "decision_refs": [".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"],
+  "dependencies": [],
+  "blocks": [],
+  "snapshot_paths": ["src", "tools/frontend-regression.mjs"],
+  "risk": {
+    "level": "medium",
+    "decision_ids": ["DEC-refactor-roadmap-20261005"]
+  },
+  "scope": {
+    "allowed_paths": ["src/**", "tools/frontend-regression.mjs"],
+    "protected_paths": ["AGENTS.md", "CLAUDE.md", "WORKFLOW.md", "WORKFLOW-KIT.md", "README.md", "package.json", "package-lock.json", "src-tauri/**", ".workflow-kit/**"],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 口径单点：三把键与查询参数从统一派生入口产生，三处不一致以显式命名收口（t109-* 源级断言锁定）",
+    "② bootstrap.ts:143 改为发起时范围快照，reloadGeneration 守卫保留，行为兼容（断言锁定）",
+    "③ merge bump 收窄：后端三路径 bump、缓存三路径不 bump；t104-snapshot-voids-rollback-claim 等既有断言全过；R2 角例（缓存恢复后在途回滚）修后行为有判别断言",
+    "④ scopePageKey/viewCacheKey 字符串形态不变（断言锁定键形态）",
+    "⑤ 门禁全绿：frontend 全过（t109-* 新增）、lint/build exit 0、cargo fmt 不回退；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+    "⑥ 独立审查（全新子代理，未参与编码）PASS findings=0"
+  ],
+  "gates": [
+    {"id": "cargo_fmt", "program": "cargo", "args": ["fmt", "--check"], "cwd": "src-tauri", "required": true},
+    {"id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": false, "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job（windows-latest）在 dev 推送时承担，CI 绿后合并；本地探针证据 tmp/refactor-20261005/msvc_probe.py"},
+    {"id": "cargo_clippy", "program": "cargo", "args": ["clippy", "--all-targets", "--", "-D", "warnings"], "cwd": "src-tauri", "required": false, "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）"},
+    {"id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true},
+    {"id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true},
+    {"id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true}
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@b93c29f（一阶段验收后）：frontend 561/561、CI rust job cargo test+clippy 全绿（dev@8c1501f 运行）、lint/build/cargo_fmt 本地门禁绿。本卡为口径收口+守卫来源精确化，用户可见行为保持。",
+      "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    },
+    "decision_ids": ["DEC-refactor-roadmap-20261005"],
+    "actions": [
+      {"action": "add", "target": "t109-* 断言（口径单点、发起时快照、bump 三方向、键形态兼容）", "reason": "收口与守卫语义需防回退", "gate_ids": ["frontend"]},
+      {"action": "keep", "target": "既有 frontend/cargo fmt/lint/build 断言（含 t103-*/t104-* 全部）", "reason": "本地不回退证据；cargo test/clippy 由 CI rust job 承担（DEC-local-cargo-gate-20261005）", "gate_ids": ["cargo_fmt", "lint", "build", "frontend"]}
+    ]
+  }
+}

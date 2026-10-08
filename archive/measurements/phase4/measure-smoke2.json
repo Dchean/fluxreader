@@ -1,0 +1,811 @@
+{
+ "tool": "tools/phase4_measure.mjs",
+ "task": "TASK-128（审计 P2-7 测量纠正）",
+ "capturedAt": "2026-10-08T02:27:31.046Z",
+ "cdpPort": 9223,
+ "node": "v24.19.0",
+ "appProcess": "FluxReader",
+ "webviewProcess": "msedgewebview2",
+ "measures": {
+  "appVersionProbe": {
+   "appVersion": null,
+   "source": "plugin:app|version"
+  },
+  "switchLatency": [
+   {
+    "target": "GitHub Releases0",
+    "kind": "feed",
+    "timedOut": true,
+    "timeoutMs": 8000,
+    "polls": 482,
+    "cardsBefore": 1,
+    "cardsAfter": 1,
+    "changed": false,
+    "note": "超时内卡片 id 集合未变化：不输出毫秒数（目标可能只是重载同集结果、列表为空或点击未生效）"
+   },
+   {
+    "target": "布局:社交",
+    "kind": "layout",
+    "firstResultMs": 14.9,
+    "stableMs": 49.4,
+    "stableFrames": 3,
+    "stableTimedOut": false,
+    "polls": 1,
+    "cardsBefore": 1,
+    "cardsAfter": 1,
+    "changed": true,
+    "idSampleAfter": [
+     "soc-1"
+    ]
+   },
+   {
+    "target": "布局:文章",
+    "kind": "layout",
+    "firstResultMs": 18,
+    "stableMs": 46.5,
+    "stableFrames": 3,
+    "stableTimedOut": false,
+    "polls": 1,
+    "cardsBefore": 1,
+    "cardsAfter": 2,
+    "changed": true,
+    "idSampleAfter": [
+     "art-1",
+     "art-3"
+    ]
+   }
+  ],
+  "search": {
+   "negativeProbe": {
+    "token": "t128absent7r8yx2rc",
+    "tokenSource": "随机合成（确定不在数据中）",
+    "openMs": 16.8,
+    "baselineResultCount": 16,
+    "baselineHasToken": false,
+    "resultCount": 0,
+    "resultCountChanged": true,
+    "polls": 150,
+    "matchedNodes": null,
+    "ownership": {
+     "scope": "searchOverlay.querySelectorAll(\".cp-item\")",
+     "overlayResolved": true,
+     "overlayContainsInput": true,
+     "containsToken": false,
+     "countDiffersFromBaseline": true
+    },
+    "timedOut": true,
+    "reason": "no-result-node-with-token-within-timeout",
+    "note": "超时内未在浮层内找到「含 token 且结果数变化」的结果节点：不输出 resultMs",
+    "closedAfterEscape": true
+   },
+   "positive": {
+    "token": "DeepSeek",
+    "tokenSource": "visible-card-title(仅 1 张卡命中)",
+    "openMs": 18.4,
+    "baselineResultCount": 16,
+    "baselineHasToken": false,
+    "resultCount": 1,
+    "resultCountChanged": true,
+    "polls": 28,
+    "matchedNodes": [
+     "DeepSeek-V3 架构解析与多头潜在注意力机制探讨OpenAI Blog"
+    ],
+    "ownership": {
+     "scope": "searchOverlay.querySelectorAll(\".cp-item\")",
+     "overlayResolved": true,
+     "overlayContainsInput": true,
+     "containsToken": true,
+     "countDiffersFromBaseline": true
+    },
+    "resultMs": 463.7,
+    "closedAfterEscape": true
+   },
+   "tokenCandidatesFromTitles": 2,
+   "note": "openMs=Ctrl+K→浮层打开；resultMs=键入→浮层内出现含 token 且结果数变化的结果节点；两者都只在成立时输出数字"
+  },
+  "scroll": {
+   "layout": "文章",
+   "note": "每个位置先滚到位并等虚拟列表静默 300ms，再采集 3 秒 rAF 帧间隔（期间每 100ms 程序化推进 240px，与旧版同一手法但位置不同）",
+   "positions": [
+    {
+     "position": "top",
+     "skipped": "list-not-scrollable",
+     "scrollHeight": 409,
+     "clientHeight": 409,
+     "conditions": {
+      "layoutUnderTest": "文章",
+      "articlesLoaded": 0,
+      "articlesLoadedSource": "sidebar .feed-all-row 角标（当前布局口径；非全库总量；mock 无 IPC 时恒为 0）",
+      "loadedItemsEstimate": 2,
+      "loadedItemsEstimateNote": "虚拟列表总高 ÷ 估算行高 160px（仅虚拟化布局；动画/未测量行会让它偏大偏小，只作量级参考）",
+      "cardsVisible": 2,
+      "mediaNodesInList": 2,
+      "mediaEnabled": true,
+      "network": "local-mock",
+      "tauri": false,
+      "syncInFlight": false,
+      "syncPill": "本地模式 · 直连抓取",
+      "domNodes": 680,
+      "heap": {
+       "usedJSHeapMB": 15.87,
+       "totalJSHeapMB": 19.84,
+       "jsHeapLimitMB": 4192
+      },
+      "scroller": {
+       "scrollHeight": 409,
+       "clientHeight": 409,
+       "scrollTop": 0
+      },
+      "appVersion": null
+     }
+    },
+    {
+     "position": "mid",
+     "skipped": "list-not-scrollable",
+     "scrollHeight": 409,
+     "clientHeight": 409,
+     "conditions": {
+      "layoutUnderTest": "文章",
+      "articlesLoaded": 0,
+      "articlesLoadedSource": "sidebar .feed-all-row 角标（当前布局口径；非全库总量；mock 无 IPC 时恒为 0）",
+      "loadedItemsEstimate": 2,
+      "loadedItemsEstimateNote": "虚拟列表总高 ÷ 估算行高 160px（仅虚拟化布局；动画/未测量行会让它偏大偏小，只作量级参考）",
+      "cardsVisible": 2,
+      "mediaNodesInList": 2,
+      "mediaEnabled": true,
+      "network": "local-mock",
+      "tauri": false,
+      "syncInFlight": false,
+      "syncPill": "本地模式 · 直连抓取",
+      "domNodes": 680,
+      "heap": {
+       "usedJSHeapMB": 15.87,
+       "totalJSHeapMB": 19.84,
+       "jsHeapLimitMB": 4192
+      },
+      "scroller": {
+       "scrollHeight": 409,
+       "clientHeight": 409,
+       "scrollTop": 0
+      },
+      "appVersion": null
+     }
+    },
+    {
+     "position": "bottom",
+     "skipped": "list-not-scrollable",
+     "scrollHeight": 409,
+     "clientHeight": 409,
+     "conditions": {
+      "layoutUnderTest": "文章",
+      "articlesLoaded": 0,
+      "articlesLoadedSource": "sidebar .feed-all-row 角标（当前布局口径；非全库总量；mock 无 IPC 时恒为 0）",
+      "loadedItemsEstimate": 2,
+      "loadedItemsEstimateNote": "虚拟列表总高 ÷ 估算行高 160px（仅虚拟化布局；动画/未测量行会让它偏大偏小，只作量级参考）",
+      "cardsVisible": 2,
+      "mediaNodesInList": 2,
+      "mediaEnabled": true,
+      "network": "local-mock",
+      "tauri": false,
+      "syncInFlight": false,
+      "syncPill": "本地模式 · 直连抓取",
+      "domNodes": 680,
+      "heap": {
+       "usedJSHeapMB": 15.87,
+       "totalJSHeapMB": 19.84,
+       "jsHeapLimitMB": 4192
+      },
+      "scroller": {
+       "scrollHeight": 409,
+       "clientHeight": 409,
+       "scrollTop": 0
+      },
+      "appVersion": null
+     }
+    }
+   ]
+  },
+  "lockWaitProxy": {
+   "idle": {
+    "skipped": "not-tauri",
+    "note": "浏览器 mock 环境无 IPC，锁等待代理不适用"
+   },
+   "ipcBaseline": {
+    "skipped": "not-tauri"
+   },
+   "syncInFlight": {
+    "skipped": "not-tauri"
+   },
+   "note": "无 Tauri IPC：锁等待代理不适用（如实跳过）"
+  },
+  "longSession": {
+   "rounds": 8,
+   "roundsCompleted": 8,
+   "crashedAtRound": null,
+   "jsHeapStartMB": 15.87,
+   "jsHeapEndMB": 14.23,
+   "growthMB": -1.64,
+   "growthRawMB": -1.64,
+   "growthValid": true,
+   "growthInvalidReason": null,
+   "domNodesStart": 680,
+   "domNodes": 661,
+   "domNodesDelta": -19,
+   "rssStart": {
+    "appProcess": "FluxReader",
+    "appProcessCount": 0,
+    "appRssMB": null,
+    "webviewProcess": "msedgewebview2",
+    "webviewOwnerFilter": "com.fluxreader.app",
+    "webviewOwnerFilterMatched": false,
+    "webviewProcessCount": 0,
+    "webviewRssMB": null,
+    "webviewOnMachineTotal": 47,
+    "note": "RSS 含 Rust + WebView2 + 图片/音频解码内存；与 JS 堆口径不同（JS 堆只覆盖渲染进程的 JS 对象）；未匹配到本应用的 WebView2 进程（无头浏览器/开发模式下为预期），故 webviewRssMB 为 null；机器上同名的 WebView2 进程共有 47 个（2649.1MB），不计入",
+    "appRssNote": "未找到应用进程（开发/无头浏览器模式下的预期结果）"
+   },
+   "rssEnd": {
+    "appProcess": "FluxReader",
+    "appProcessCount": 0,
+    "appRssMB": null,
+    "webviewProcess": "msedgewebview2",
+    "webviewOwnerFilter": "com.fluxreader.app",
+    "webviewOwnerFilterMatched": false,
+    "webviewProcessCount": 0,
+    "webviewRssMB": null,
+    "webviewOnMachineTotal": 47,
+    "note": "RSS 含 Rust + WebView2 + 图片/音频解码内存；与 JS 堆口径不同（JS 堆只覆盖渲染进程的 JS 对象）；未匹配到本应用的 WebView2 进程（无头浏览器/开发模式下为预期），故 webviewRssMB 为 null；机器上同名的 WebView2 进程共有 47 个（2648.1MB），不计入",
+    "appRssNote": "未找到应用进程（开发/无头浏览器模式下的预期结果）"
+   },
+   "appRssDeltaMB": null,
+   "webviewRssDeltaMB": null,
+   "log": [
+    {
+     "round": 1,
+     "target": "文章",
+     "switched": false,
+     "firstResultMs": null,
+     "stableMs": 49.8,
+     "timedOut": true,
+     "stableTimedOut": false,
+     "scroll": {
+      "skipped": "not-scrollable"
+     }
+    },
+    {
+     "round": 2,
+     "target": "社交",
+     "switched": true,
+     "firstResultMs": 14.4,
+     "stableMs": 29.1,
+     "timedOut": false,
+     "stableTimedOut": false,
+     "scroll": {
+      "skipped": "not-scrollable"
+     }
+    },
+    {
+     "round": 3,
+     "target": "画廊",
+     "switched": true,
+     "firstResultMs": 14.5,
+     "stableMs": 41.2,
+     "timedOut": false,
+     "stableTimedOut": false,
+     "scroll": {
+      "scrollTop": 47,
+      "scrollHeight": 456
+     }
+    },
+    {
+     "round": 4,
+     "target": "播客",
+     "switched": true,
+     "firstResultMs": 14,
+     "stableMs": 57.1,
+     "timedOut": false,
+     "stableTimedOut": false,
+     "scroll": {
+      "skipped": "not-scrollable"
+     }
+    },
+    {
+     "round": 5,
+     "target": "通知",
+     "switched": true,
+     "firstResultMs": 13.3,
+     "stableMs": 38.5,
+     "timedOut": false,
+     "stableTimedOut": false,
+     "scroll": {
+      "skipped": "not-scrollable"
+     }
+    },
+    {
+     "round": 6,
+     "target": "文章",
+     "switched": true,
+     "firstResultMs": 13.9,
+     "stableMs": 37.9,
+     "timedOut": false,
+     "stableTimedOut": false,
+     "scroll": {
+      "skipped": "not-scrollable"
+     }
+    },
+    {
+     "round": 7,
+     "target": "社交",
+     "switched": true,
+     "firstResultMs": 15.3,
+     "stableMs": 36.8,
+     "timedOut": false,
+     "stableTimedOut": false,
+     "scroll": {
+      "skipped": "not-scrollable"
+     }
+    },
+    {
+     "round": 8,
+     "target": "画廊",
+     "switched": true,
+     "firstResultMs": 17.3,
+     "stableMs": 50.6,
+     "timedOut": false,
+     "stableTimedOut": false,
+     "scroll": {
+      "scrollTop": 47,
+      "scrollHeight": 456
+     }
+    }
+   ],
+   "roundsWithChange": 7,
+   "conditionsBefore": {
+    "layoutUnderTest": "文章",
+    "articlesLoaded": 0,
+    "articlesLoadedSource": "sidebar .feed-all-row 角标（当前布局口径；非全库总量；mock 无 IPC 时恒为 0）",
+    "loadedItemsEstimate": 2,
+    "loadedItemsEstimateNote": "虚拟列表总高 ÷ 估算行高 160px（仅虚拟化布局；动画/未测量行会让它偏大偏小，只作量级参考）",
+    "cardsVisible": 2,
+    "mediaNodesInList": 2,
+    "mediaEnabled": true,
+    "network": "local-mock",
+    "tauri": false,
+    "syncInFlight": false,
+    "syncPill": "本地模式 · 直连抓取",
+    "domNodes": 680,
+    "heap": {
+     "usedJSHeapMB": 15.87,
+     "totalJSHeapMB": 19.84,
+     "jsHeapLimitMB": 4192
+    },
+    "scroller": {
+     "scrollHeight": 409,
+     "clientHeight": 409,
+     "scrollTop": 0
+    },
+    "appVersion": null
+   },
+   "conditionsAfter": {
+    "layoutUnderTest": "画廊",
+    "articlesLoaded": 0,
+    "articlesLoadedSource": "sidebar .feed-all-row 角标（当前布局口径；非全库总量；mock 无 IPC 时恒为 0）",
+    "loadedItemsEstimate": null,
+    "loadedItemsEstimateNote": "虚拟列表总高 ÷ 估算行高 160px（仅虚拟化布局；动画/未测量行会让它偏大偏小，只作量级参考）",
+    "cardsVisible": 2,
+    "mediaNodesInList": 2,
+    "mediaEnabled": true,
+    "network": "local-mock",
+    "tauri": false,
+    "syncInFlight": false,
+    "syncPill": "本地模式 · 直连抓取",
+    "domNodes": 661,
+    "heap": {
+     "usedJSHeapMB": 14.23,
+     "totalJSHeapMB": 15.34,
+     "jsHeapLimitMB": 4192
+    },
+    "scroller": {
+     "scrollHeight": 456,
+     "clientHeight": 409,
+     "scrollTop": 47
+    },
+    "appVersion": null
+   },
+   "appCrashedDuringSession": false,
+   "note": "读堆前先 HeapProfiler.collectGarbage；JS 堆与进程 RSS 口径不同，两列不可互相换算；深页滚动由每轮 scrollTop 推进 0.8 屏实现"
+  },
+  "memoryByLayout": [
+   {
+    "layout": "文章",
+    "heapUsedMB": 14.26,
+    "heap": {
+     "usedJSHeapMB": 14.26,
+     "totalJSHeapMB": 15.34,
+     "jsHeapLimitMB": 4192
+    },
+    "cards": 2,
+    "mediaNodes": 2,
+    "mediaEnabled": true,
+    "articlesLoaded": 0,
+    "rss": {
+     "appProcess": "FluxReader",
+     "appProcessCount": 0,
+     "appRssMB": null,
+     "webviewProcess": "msedgewebview2",
+     "webviewOwnerFilter": "com.fluxreader.app",
+     "webviewOwnerFilterMatched": false,
+     "webviewProcessCount": 0,
+     "webviewRssMB": null,
+     "webviewOnMachineTotal": 47,
+     "note": "RSS 含 Rust + WebView2 + 图片/音频解码内存；与 JS 堆口径不同（JS 堆只覆盖渲染进程的 JS 对象）；未匹配到本应用的 WebView2 进程（无头浏览器/开发模式下为预期），故 webviewRssMB 为 null；机器上同名的 WebView2 进程共有 47 个（2648.1MB），不计入",
+     "appRssNote": "未找到应用进程（开发/无头浏览器模式下的预期结果）"
+    }
+   },
+   {
+    "layout": "社交",
+    "heapUsedMB": 14.26,
+    "heap": {
+     "usedJSHeapMB": 14.26,
+     "totalJSHeapMB": 15.34,
+     "jsHeapLimitMB": 4192
+    },
+    "cards": 1,
+    "mediaNodes": 0,
+    "mediaEnabled": false,
+    "articlesLoaded": 0,
+    "rss": {
+     "appProcess": "FluxReader",
+     "appProcessCount": 0,
+     "appRssMB": null,
+     "webviewProcess": "msedgewebview2",
+     "webviewOwnerFilter": "com.fluxreader.app",
+     "webviewOwnerFilterMatched": false,
+     "webviewProcessCount": 0,
+     "webviewRssMB": null,
+     "webviewOnMachineTotal": 47,
+     "note": "RSS 含 Rust + WebView2 + 图片/音频解码内存；与 JS 堆口径不同（JS 堆只覆盖渲染进程的 JS 对象）；未匹配到本应用的 WebView2 进程（无头浏览器/开发模式下为预期），故 webviewRssMB 为 null；机器上同名的 WebView2 进程共有 47 个（2648.1MB），不计入",
+     "appRssNote": "未找到应用进程（开发/无头浏览器模式下的预期结果）"
+    }
+   },
+   {
+    "layout": "画廊",
+    "heapUsedMB": 14.26,
+    "heap": {
+     "usedJSHeapMB": 14.26,
+     "totalJSHeapMB": 15.34,
+     "jsHeapLimitMB": 4192
+    },
+    "cards": 2,
+    "mediaNodes": 2,
+    "mediaEnabled": true,
+    "articlesLoaded": 0,
+    "rss": {
+     "appProcess": "FluxReader",
+     "appProcessCount": 0,
+     "appRssMB": null,
+     "webviewProcess": "msedgewebview2",
+     "webviewOwnerFilter": "com.fluxreader.app",
+     "webviewOwnerFilterMatched": false,
+     "webviewProcessCount": 0,
+     "webviewRssMB": null,
+     "webviewOnMachineTotal": 47,
+     "note": "RSS 含 Rust + WebView2 + 图片/音频解码内存；与 JS 堆口径不同（JS 堆只覆盖渲染进程的 JS 对象）；未匹配到本应用的 WebView2 进程（无头浏览器/开发模式下为预期），故 webviewRssMB 为 null；机器上同名的 WebView2 进程共有 47 个（2648.7MB），不计入",
+     "appRssNote": "未找到应用进程（开发/无头浏览器模式下的预期结果）"
+    }
+   },
+   {
+    "layout": "播客",
+    "heapUsedMB": 14.23,
+    "heap": {
+     "usedJSHeapMB": 14.23,
+     "totalJSHeapMB": 15.34,
+     "jsHeapLimitMB": 4192
+    },
+    "cards": 1,
+    "mediaNodes": 1,
+    "mediaEnabled": true,
+    "articlesLoaded": 0,
+    "rss": {
+     "appProcess": "FluxReader",
+     "appProcessCount": 0,
+     "appRssMB": null,
+     "webviewProcess": "msedgewebview2",
+     "webviewOwnerFilter": "com.fluxreader.app",
+     "webviewOwnerFilterMatched": false,
+     "webviewProcessCount": 0,
+     "webviewRssMB": null,
+     "webviewOnMachineTotal": 47,
+     "note": "RSS 含 Rust + WebView2 + 图片/音频解码内存；与 JS 堆口径不同（JS 堆只覆盖渲染进程的 JS 对象）；未匹配到本应用的 WebView2 进程（无头浏览器/开发模式下为预期），故 webviewRssMB 为 null；机器上同名的 WebView2 进程共有 47 个（2648.7MB），不计入",
+     "appRssNote": "未找到应用进程（开发/无头浏览器模式下的预期结果）"
+    }
+   },
+   {
+    "layout": "通知",
+    "heapUsedMB": 14.25,
+    "heap": {
+     "usedJSHeapMB": 14.25,
+     "totalJSHeapMB": 15.34,
+     "jsHeapLimitMB": 4192
+    },
+    "cards": 1,
+    "mediaNodes": 0,
+    "mediaEnabled": false,
+    "articlesLoaded": 0,
+    "rss": {
+     "appProcess": "FluxReader",
+     "appProcessCount": 0,
+     "appRssMB": null,
+     "webviewProcess": "msedgewebview2",
+     "webviewOwnerFilter": "com.fluxreader.app",
+     "webviewOwnerFilterMatched": false,
+     "webviewProcessCount": 0,
+     "webviewRssMB": null,
+     "webviewOnMachineTotal": 47,
+     "note": "RSS 含 Rust + WebView2 + 图片/音频解码内存；与 JS 堆口径不同（JS 堆只覆盖渲染进程的 JS 对象）；未匹配到本应用的 WebView2 进程（无头浏览器/开发模式下为预期），故 webviewRssMB 为 null；机器上同名的 WebView2 进程共有 47 个（2649MB），不计入",
+     "appRssNote": "未找到应用进程（开发/无头浏览器模式下的预期结果）"
+    }
+   }
+  ]
+ },
+ "conditions": {
+  "layoutUnderTest": "通知",
+  "articlesLoaded": 0,
+  "articlesLoadedSource": "sidebar .feed-all-row 角标（当前布局口径；非全库总量；mock 无 IPC 时恒为 0）",
+  "loadedItemsEstimate": 1,
+  "loadedItemsEstimateNote": "虚拟列表总高 ÷ 估算行高 160px（仅虚拟化布局；动画/未测量行会让它偏大偏小，只作量级参考）",
+  "cardsVisible": 1,
+  "mediaNodesInList": 0,
+  "mediaEnabled": false,
+  "network": "local-mock",
+  "tauri": false,
+  "syncInFlight": false,
+  "syncPill": "本地模式 · 直连抓取",
+  "domNodes": 646,
+  "heap": {
+   "usedJSHeapMB": 15.61,
+   "totalJSHeapMB": 20.59,
+   "jsHeapLimitMB": 4192
+  },
+  "scroller": {
+   "scrollHeight": 409,
+   "clientHeight": 409,
+   "scrollTop": 0
+  },
+  "appVersion": null
+ },
+ "verdicts": {
+  "switchLatency": {
+   "decisionLineMs": 1000,
+   "measured": 2,
+   "crossed": [],
+   "timedOut": [
+    "GitHub Releases0"
+   ],
+   "skipped": [],
+   "field": "firstResultMs（新结果落地）与 stableMs（连续 3 帧无 DOM 变更）分列"
+  },
+  "search": {
+   "decisionLineMs": 1000,
+   "openMs": 18.4,
+   "resultMs": 463.7,
+   "openPlusResultMs": 482.1,
+   "crossed": false,
+   "ownership": {
+    "scope": "searchOverlay.querySelectorAll(\".cp-item\")",
+    "overlayResolved": true,
+    "overlayContainsInput": true,
+    "containsToken": true,
+    "countDiffersFromBaseline": true
+   }
+  },
+  "searchNegativeProbe": {
+   "token": "t128absent7r8yx2rc",
+   "matched": false,
+   "timedOut": true,
+   "verdict": "PASS：不存在于数据的 token 未产生「命中」"
+  },
+  "scroll": {
+   "decisionLineMs": 50,
+   "perPosition": [],
+   "crossed": [],
+   "skipped": [
+    {
+     "position": "top",
+     "why": "list-not-scrollable"
+    },
+    {
+     "position": "mid",
+     "why": "list-not-scrollable"
+    },
+    {
+     "position": "bottom",
+     "why": "list-not-scrollable"
+    }
+   ]
+  },
+  "memory": {
+   "decisionLine": "内存随文章数超线性增长；长会话缓存应有界",
+   "jsHeapByLayoutMB": [
+    {
+     "layout": "文章",
+     "heapUsedMB": 14.26,
+     "cards": 2,
+     "appCrashedHere": false
+    },
+    {
+     "layout": "社交",
+     "heapUsedMB": 14.26,
+     "cards": 1,
+     "appCrashedHere": false
+    },
+    {
+     "layout": "画廊",
+     "heapUsedMB": 14.26,
+     "cards": 2,
+     "appCrashedHere": false
+    },
+    {
+     "layout": "播客",
+     "heapUsedMB": 14.23,
+     "cards": 1,
+     "appCrashedHere": false
+    },
+    {
+     "layout": "通知",
+     "heapUsedMB": 14.25,
+     "cards": 1,
+     "appCrashedHere": false
+    }
+   ],
+   "longSession": {
+    "rounds": 8,
+    "roundsCompleted": 8,
+    "crashedAtRound": null,
+    "jsHeapStartMB": 15.87,
+    "jsHeapEndMB": 14.23,
+    "growthMB": -1.64,
+    "growthValid": true,
+    "growthInvalidReason": null,
+    "appRssDeltaMB": null,
+    "webviewRssDeltaMB": null,
+    "domNodesDelta": -19,
+    "appCrashedDuringSession": false
+   },
+   "singleScalePoint": true
+  },
+  "lockWaitProxy": {
+   "skipped": "not-tauri",
+   "note": "无 Tauri IPC：锁等待代理不适用（如实跳过）"
+  }
+ },
+ "conclusions": [
+  "受测条件：布局=通知、已加载实体≈0（虚拟列表估算 1 条）、可见卡片=1、媒体=false、网络=local-mock、同步在飞=false：切换 2 个目标的最慢 firstResultMs=18ms、stableMs 最大=49.4ms（判定线 >1000ms）→ 未观察到越线",
+  "受测条件：布局=通知、已加载实体≈0（虚拟列表估算 1 条）、可见卡片=1、媒体=false、网络=local-mock、同步在飞=false：搜索 openMs=18.4、resultMs=463.7（合计 482.1ms，判定线 >1000ms）→ 未观察到越线；结果归属：{\"scope\":\"searchOverlay.querySelectorAll(\\\".cp-item\\\")\",\"overlayResolved\":true,\"overlayContainsInput\":true,\"containsToken\":true,\"countDiffersFromBaseline\":true}",
+  "受测条件：布局=通知、已加载实体≈0（虚拟列表估算 1 条）、可见卡片=1、媒体=false、网络=local-mock、同步在飞=false：滚动无有效测点（列表不可滚动）→ 无结论",
+  "受测条件：布局=通知、已加载实体≈0（虚拟列表估算 1 条）、可见卡片=1、媒体=false、网络=local-mock、同步在飞=false：内存 JS 堆=文章:14.26MB×2卡、社交:14.26MB×1卡、画廊:14.26MB×2卡、播客:14.23MB×1卡、通知:14.25MB×1卡；长会话 8 轮 JS 堆增量=-1.64MB（进程 RSS 增量见 longSession，口径不同不可换算）；单档数据规模无法判定「超线性」——需两档规模（如 20k/50k）同条件各跑一次再比较",
+  "受测条件：布局=通知、已加载实体≈0（虚拟列表估算 1 条）、可见卡片=1、媒体=false、网络=local-mock、同步在飞=false：锁等待代理跳过（not-tauri）→ 无锁等待结论"
+ ],
+ "caveats": [
+  "JS 堆（performance.memory）不含 Rust 侧、WebView2 与图片/音频解码内存；进程 RSS 含全部但不可与 JS 堆换算。",
+  "滚动测量是程序化滚动 + rAF 帧间隔，不代表真实输入延迟；每位置仅 3 秒采样。",
+  "锁等待是 IPC 往返代理，不是数据库锁计时；要区分二者需要 Rust 侧埋点。",
+  "单次运行只覆盖一个数据规模与一种网络状态，结论不得外推到其他规模/网络/布局组合。",
+  "搜索/切换的 resultMs/firstResultMs 为页面内 performance.now() 口径，不含 Node/CDP 往返开销。"
+ ],
+ "appHealth": {
+  "alive": true,
+  "everCrashed": false,
+  "crashes": [],
+  "recoveries": [],
+  "initialCheck": {
+   "alive": true,
+   "rootChildren": 13,
+   "hasSidebar": true,
+   "hasTimeline": true,
+   "domNodes": 646,
+   "cards": 1,
+   "errors": [],
+   "errorCount": 0
+  }
+ },
+ "processRssStart": {
+  "appProcess": "FluxReader",
+  "appProcessCount": 0,
+  "appRssMB": null,
+  "webviewProcess": "msedgewebview2",
+  "webviewOwnerFilter": "com.fluxreader.app",
+  "webviewOwnerFilterMatched": false,
+  "webviewProcessCount": 0,
+  "webviewRssMB": null,
+  "webviewOnMachineTotal": 47,
+  "note": "RSS 含 Rust + WebView2 + 图片/音频解码内存；与 JS 堆口径不同（JS 堆只覆盖渲染进程的 JS 对象）；未匹配到本应用的 WebView2 进程（无头浏览器/开发模式下为预期），故 webviewRssMB 为 null；机器上同名的 WebView2 进程共有 47 个（2648.9MB），不计入",
+  "appRssNote": "未找到应用进程（开发/无头浏览器模式下的预期结果）"
+ },
+ "processRssEnd": {
+  "appProcess": "FluxReader",
+  "appProcessCount": 0,
+  "appRssMB": null,
+  "webviewProcess": "msedgewebview2",
+  "webviewOwnerFilter": "com.fluxreader.app",
+  "webviewOwnerFilterMatched": false,
+  "webviewProcessCount": 0,
+  "webviewRssMB": null,
+  "webviewOnMachineTotal": 47,
+  "note": "RSS 含 Rust + WebView2 + 图片/音频解码内存；与 JS 堆口径不同（JS 堆只覆盖渲染进程的 JS 对象）；未匹配到本应用的 WebView2 进程（无头浏览器/开发模式下为预期），故 webviewRssMB 为 null；机器上同名的 WebView2 进程共有 47 个（2648.9MB），不计入",
+  "appRssNote": "未找到应用进程（开发/无头浏览器模式下的预期结果）"
+ },
+ "conditionsEnd": {
+  "layoutUnderTest": "通知",
+  "articlesLoaded": 0,
+  "articlesLoadedSource": "sidebar .feed-all-row 角标（当前布局口径；非全库总量；mock 无 IPC 时恒为 0）",
+  "loadedItemsEstimate": 1,
+  "loadedItemsEstimateNote": "虚拟列表总高 ÷ 估算行高 160px（仅虚拟化布局；动画/未测量行会让它偏大偏小，只作量级参考）",
+  "cardsVisible": 1,
+  "mediaNodesInList": 0,
+  "mediaEnabled": false,
+  "network": "local-mock",
+  "tauri": false,
+  "syncInFlight": false,
+  "syncPill": "本地模式 · 直连抓取",
+  "domNodes": 646,
+  "heap": {
+   "usedJSHeapMB": 14.26,
+   "totalJSHeapMB": 15.34,
+   "jsHeapLimitMB": 4192
+  },
+  "scroller": {
+   "scrollHeight": 409,
+   "clientHeight": 409,
+   "scrollTop": 0
+  },
+  "appVersion": null
+ },
+ "pageErrors": [],
+ "appHealthFinal": {
+  "alive": true,
+  "rootChildren": 13,
+  "hasSidebar": true,
+  "hasTimeline": true,
+  "domNodes": 646,
+  "cards": 1,
+  "errors": [],
+  "errorCount": 0
+ },
+ "measureOrder": [
+  {
+   "name": "appVersionProbe",
+   "ok": true
+  },
+  {
+   "name": "switchLatency",
+   "postRecoveryReload": false,
+   "ok": true
+  },
+  {
+   "name": "search",
+   "postRecoveryReload": false,
+   "ok": true
+  },
+  {
+   "name": "scroll",
+   "postRecoveryReload": false,
+   "ok": true
+  },
+  {
+   "name": "lockWaitProxy",
+   "postRecoveryReload": false,
+   "ok": true
+  },
+  {
+   "name": "longSession",
+   "postRecoveryReload": false,
+   "ok": true
+  },
+  {
+   "name": "memoryByLayout",
+   "postRecoveryReload": false,
+   "ok": true
+  }
+ ]
+}

@@ -1,0 +1,16 @@
+{
+ "task_id": "TASK-114",
+ "run_id": "RUN-b287f3fc3c2e46ada62ec2ff196ef958",
+ "status": "ready_for_verification",
+ "summary": "三阶段①五布局状态与快捷键统一（对照 UI-CONTRACT-TASK-114 X1/X2/X3）：X1 NotifCard 补水合三态（订阅 hydrationErrors/hydratedIds，失败→内联 retryHydration 重试、空正文→「暂无正文」、加载中→占位；失败态整体替换正文不再静默回退 snippet，失败态不渲染「展开更多」死控件；数据层零改动复用批量队列）+ base.css 两条镜像规则；X2 Social/Notif onKeyDown 补 Enter/Space=选中（e.target===currentTarget 守卫防劫持嵌套控件激活；role 维持 article 的裁定已入契约实施记录——role=button 会掩蔽交互后代可达性）；X3 J/K 门控抽纯函数 jkNavigation.ts（jkLayoutAllowed 排除 image 与虚拟化开关同口径、jkNextIndex 与修前回绕逐条等价），App.tsx 消费，ShortcutsTab 同步（画廊不支持明示）。t114-* 14 条断言（SSR 烟测+源级切片+store 层五布局模拟+真值表）；更新 t100-uip2-2 一条（J/K 范围文案，附理由）。SSR 逐态取证不可行实证（zustand v5 getInitialState）已入契约取证边界节。过程备注：原执行轮 RUN-b6ade06c 的收轮被 scope 拦截（契约文档改动经 unblock 处置入基线，见 journal）；本延续轮承接同一代码。自检：test:frontend 619/619、lint 0、build exit 0。",
+ "changed_files": "auto",
+ "validation_requests": [
+  "frontend",
+  "lint",
+  "build",
+  "cargo_fmt"
+ ],
+ "requested_actions": [],
+ "unresolved_items": [],
+ "blocked_reason": null
+}

@@ -1,0 +1,167 @@
+{
+ "id": "TASK-121",
+ "title": "TASK-117 延续：tests/ 构造点补齐 E0063 修复（CI 失败处置，行为零变化）",
+ "kind": "implementation",
+ "retry_safe": true,
+ "ui_change": false,
+ "objective": "延续任务（continuation_of=TASK-117 候选 577efdd5...详见 items/TASK-117.json evidence）：dev@b7947e9 起 CI rust job clippy（--all-targets -- -D warnings）失败（fmt 过/test 跳过；117/118/119 三提交同态连续失败）。修复面=TASK-117 引入的 Rust 代码（db/articles.rs 的 ArticleQuery 新字段/KEYSET_PREDICATE 常量/keyset 谓词组装/ORDER 常量、migrations.rs v17、commands/articles.rs ArticleListArgs、dedup_tests.rs、db/articles.rs 内新测试模块）。方法：TASK-113 先例——clippy-driver 抛置片段实证（本机 clippy 1.98.1 与 CI 同 release）+ 与仓内既有同形态代码比对；逐一修复（等价重写，不改行为/不删有效断言/不动 keyset 语义）。若片段实证无法定位，输出「已排除清单」并停止（等待主控取得 CI 日志）。禁止 cargo test/clippy/build/check（本机必败且浪费）。",
+ "non_goals": [
+  "不改 keyset 分页语义/谓词文本",
+  "不改前端",
+  "不动 docs/**"
+ ],
+ "requirement_refs": [
+  "REQ-003",
+  "REQ-007"
+ ],
+ "reference_ids": [],
+ "decision_refs": [
+  ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+ ],
+ "dependencies": [
+  "TASK-117"
+ ],
+ "blocks": [],
+ "snapshot_paths": [
+  "src-tauri/src",
+  "src-tauri/tests"
+ ],
+ "continuation_of": {
+  "TASK-117": "e577efdd54d96199e49379745acebcda6610502bd4f875ce5097ef5a50c4fa54"
+ },
+ "risk": {
+  "level": "low",
+  "decision_ids": [
+   "DEC-gate-adjust-20261007"
+  ]
+ },
+ "scope": {
+  "allowed_paths": [
+   "src-tauri/src/**",
+   "src-tauri/tests/**"
+  ],
+  "protected_paths": [
+   "AGENTS.md",
+   "CLAUDE.md",
+   "WORKFLOW.md",
+   "WORKFLOW-KIT.md",
+   "README.md",
+   "package.json",
+   "package-lock.json",
+   "src/**",
+   "tools/**",
+   "docs/**",
+   ".workflow-kit/**"
+  ],
+  "network": "none",
+  "data": "synthetic_only"
+ },
+ "acceptance": [
+  "① E0063 修复（tests/ingestion_e2e.rs 字面量补齐）：触发点清单（file:line+lint 名+修法+依据）与已排除清单",
+  "② CI rust job 全绿（cargo fmt/clippy/test 含 keyset 3 条测试）——推送后以 CI 结论为准",
+  "③ TASK-117 既有测试与断言零弱化；行为零变化保持",
+  "④ 独立审查（全新子代理）PASS findings=0",
+  "⑤ 本地门禁：cargo fmt、lint、build、frontend 不回退"
+ ],
+ "gates": [
+  {
+   "id": "cargo_fmt",
+   "program": "cargo",
+   "args": [
+    "fmt",
+    "--check"
+   ],
+   "cwd": "src-tauri",
+   "required": true
+  },
+  {
+   "id": "cargo_test",
+   "program": "cargo",
+   "args": [
+    "test"
+   ],
+   "cwd": "src-tauri",
+   "required": false,
+   "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：由 CI rust job 承担；本卡 CI 失败即门禁失败"
+  },
+  {
+   "id": "cargo_clippy",
+   "program": "cargo",
+   "args": [
+    "clippy",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+   ],
+   "cwd": "src-tauri",
+   "required": false,
+   "reason": "同 cargo_test"
+  },
+  {
+   "id": "lint",
+   "program": "npm",
+   "args": [
+    "run",
+    "lint"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "build",
+   "program": "npm",
+   "args": [
+    "run",
+    "build"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "frontend",
+   "program": "npm",
+   "args": [
+    "run",
+    "test:frontend"
+   ],
+   "cwd": ".",
+   "required": true
+  }
+ ],
+ "test_review": {
+  "behavior": "change",
+  "baseline": {
+   "status": "PASS",
+   "summary": "dev@7a3d0f4（117/118/119 前端全部通过；rust job clippy 失败）。本卡修复 clippy 触发点并经 CI 复验。",
+   "evidence_ref": ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+  },
+  "decision_ids": [
+   "DEC-gate-adjust-20261007"
+  ],
+  "actions": [
+   {
+    "action": "adapt",
+    "target": "触发 clippy 的等价重写",
+    "reason": "等价重写不弱化保护；CI 全绿为验收",
+    "gate_ids": [
+     "cargo_fmt",
+     "lint",
+     "build",
+     "frontend"
+    ]
+   },
+   {
+    "action": "keep",
+    "target": "TASK-117 既有断言与本地四门禁",
+    "reason": "行为零变化证明",
+    "gate_ids": [
+     "cargo_fmt",
+     "lint",
+     "build",
+     "frontend"
+    ]
+   }
+  ]
+ }
+}

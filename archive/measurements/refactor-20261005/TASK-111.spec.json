@@ -1,0 +1,58 @@
+{
+  "id": "TASK-111",
+  "title": "查询缓存实体预算 + 后台刷新保位（二阶段③，完成标准「快速切换不串数据」的容量与位置面）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "objective": "①缓存实体预算（审计：「单纯限制为 8 个视图并不能限制每个视图的大小」）：viewEntriesCache 现为 LRUMap 上限 8 键（internals.ts:50-80，TASK-100 P3-7 引入），单键内 entries 数组无上界——TASK-110 分页化后单键仍随加载增长。修法：增加单键实体预算（如 VIEW_ENTRIES_CACHE_ENTRY_BUDGET=1000 常量，注释载明审计依据），超限从尾部截断（缓存语义=首屏快照，尾部截断安全；命中恢复后 articlesExhausted/续拉衔接必须正确——截断处数 ≤ 已加载总数，恢复后续拉从游标继续，不得因截断丢 exhausted 判据）；syncCurrentViewCache（internals.ts:226-229）写入时执行同一预算。entryMutationVersion Map 会话内增长维持现状（注释已说明，不纳入本卡）。②后台刷新保位（审计：「后台刷新保留当前阅读位置，避免靠整体替换列表刷新所有内容」）：现况探查——feeds-updated 事件（scheduler.rs:176-179/244-248 → App.tsx:86-98）触发 reloadFromBackend 整体替换 entries；filterKey（Timeline.tsx:93-100）不含 entries 故滚动不归零，但 newest_first 下新文章插入头部会使索引后移，虚拟列表视觉跳动；activeArticleId 定位 effect 仅在变化时触发（Timeline.tsx:218-227），目标不在新快照时跳过（:221），无锚定恢复。修法：Timeline 在滚动时以节流方式记录「顶条锚」（可见首条目 id，存 store 或模块级状态），reloadFromBackend 完成后若锚 id 仍在（或其 feed 内同文/同 id 存活）新快照中，滚动到其新索引（程序性滚动抑制复用 Timeline.tsx:222-227 既有机制），锚 id 不在时维持现状回落（不强制顶部）；阅读中文章（activeArticleId）保持既有不变语义。③回归断言 t111-* ≥5 条：预算截断触发与恢复正确性、截断后续拉衔接（exhausted 不误判）、后台刷新后顶条锚定（新文章插入场景）、锚丢失回落、锚不影响用户主动滚动。既有断言零弱化。",
+  "non_goals": [
+    "不改 keyset 游标（属后续性能阶段）",
+    "不改五布局视觉样式与交互规则（三阶段）",
+    "不引入 TanStack Query 等第二套缓存",
+    "不改 feeds-updated 事件与 Rust 调度"
+  ],
+  "requirement_refs": ["REQ-003", "REQ-007"],
+  "reference_ids": [],
+  "decision_refs": [".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"],
+  "dependencies": [],
+  "blocks": [],
+  "snapshot_paths": ["src", "tools/frontend-regression.mjs"],
+  "risk": {
+    "level": "medium",
+    "decision_ids": ["DEC-refactor-roadmap-20261005"]
+  },
+  "scope": {
+    "allowed_paths": ["src/**", "tools/frontend-regression.mjs"],
+    "protected_paths": ["AGENTS.md", "CLAUDE.md", "WORKFLOW.md", "WORKFLOW-KIT.md", "README.md", "package.json", "package-lock.json", "src-tauri/**", ".workflow-kit/**"],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 单键实体预算生效：超限尾部截断，恢复后续拉衔接正确、exhausted 不误判（t111-*）",
+    "② 后台刷新保位：新文章插入头部时顶条锚定回滚视觉跳动，锚丢失回落现状（t111-* 判别断言）",
+    "③ 主动滚动/键盘导航行为不受锚机制干扰（t111-*）",
+    "④ 门禁全绿：frontend 全过、lint/build exit 0、cargo fmt 不回退；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+    "⑤ 独立审查（全新子代理，未参与编码）PASS findings=0"
+  ],
+  "gates": [
+    {"id": "cargo_fmt", "program": "cargo", "args": ["fmt", "--check"], "cwd": "src-tauri", "required": true},
+    {"id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": false, "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担"},
+    {"id": "cargo_clippy", "program": "cargo", "args": ["clippy", "--all-targets", "--", "-D", "warnings"], "cwd": "src-tauri", "required": false, "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）"},
+    {"id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true},
+    {"id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true},
+    {"id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true}
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@二阶段②后基线：frontend 全绿、CI 全绿。本卡为缓存容量治理与刷新位置保持，用户可见行为改善（减少跳动）。",
+      "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    },
+    "decision_ids": ["DEC-refactor-roadmap-20261005"],
+    "actions": [
+      {"action": "add", "target": "t111-* 断言（预算/截断/保位/回落）", "reason": "新机制需防回退", "gate_ids": ["frontend"]},
+      {"action": "keep", "target": "既有 frontend/cargo fmt/lint/build 断言", "reason": "不回退证据；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）", "gate_ids": ["cargo_fmt", "lint", "build", "frontend"]}
+    ]
+  }
+}

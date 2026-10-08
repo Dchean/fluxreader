@@ -1,0 +1,159 @@
+{
+ "id": "TASK-104",
+ "title": "全部已读与标读计数一致性——按后端实际影响数对账、失败不假成功（REQ-003）",
+ "kind": "implementation",
+ "retry_safe": true,
+ "ui_change": false,
+ "objective": "修复外部审计探针复现的计数缺口（AUDIT-20261005-core-consistency.md）：①src/store/slices/nav.ts markCurrentViewAllRead 乐观调用 markEntriesRead(ids) 只对已加载条目扣计数，而后端 apply_mark_all_read 处理整个范围（探针：范围 600 条未读、前端加载 1 条，后端成功后界面仍显示 599 条未读）。api.markAllRead 已返回实际标读条数（usize）但前端忽略返回值。修法要求：成功路径以返回条数校验并以 api.feedCounts() 重取全量计数（与 reloadFromBackend 同一计数来源），替代「只按已加载条目推算」；本地已加载条目的已读态允许乐观先行但失败必须回滚（保存原 read 态，catch 恢复并 toast），不允许「计数已扣、状态已改」的假成功；范围语义（feed/folder/starredOnly/sinceMs/layout）不动。②单条标读与计数一致性核查（审计「标读后数字、显示不一致」缺口）：核查 setRead/markEntriesRead 路径对 feedCounts.unread 的扣减与后端口径是否一致——含同文副本去重场景（本地主条目标读、副本计数归属）与跨布局不可见条目；发现不一致即修复并以断言锁定，确认一致的路径在 progress 写明核查结论，不得静默跳过。③t104-* 断言 ≥4 条：全部已读成功后计数=后端口径（600/1 探针场景转断言）、失败回滚不假成功、单条标读计数一致、范围外布局计数不受影响。coder 开工前先用探针/测试实证单条路径现状，据实决定修复面。",
+ "non_goals": [
+  "不改后端 mark_all_read 范围语义与事务实现（REQ-108 已集合化，本卡仅前端计数对账）",
+  "不实现同步状态四态展示（本地已保存/等待同步/远端已确认/部分失败，属第二阶段）",
+  "不改同文副本推送策略（DEC-refactor-roadmap-20261005 第 6 条保持现状）",
+  "不改分页/游标与 viewEntriesCache 结构"
+ ],
+ "requirement_refs": [
+  "REQ-003",
+  "REQ-007"
+ ],
+ "reference_ids": [],
+ "decision_refs": [
+  ".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"
+ ],
+ "dependencies": [],
+ "blocks": [],
+ "snapshot_paths": [
+  "src",
+  "tools/frontend-regression.mjs"
+ ],
+ "risk": {
+  "level": "medium",
+  "decision_ids": [
+   "DEC-refactor-roadmap-20261005"
+  ]
+ },
+ "scope": {
+  "allowed_paths": [
+   "src/**",
+   "tools/frontend-regression.mjs"
+  ],
+  "protected_paths": [
+   "AGENTS.md",
+   "CLAUDE.md",
+   "WORKFLOW.md",
+   "WORKFLOW-KIT.md",
+   "README.md",
+   "package.json",
+   "package-lock.json",
+   "src-tauri/**",
+   ".workflow-kit/**"
+  ],
+  "network": "none",
+  "data": "synthetic_only"
+ },
+ "acceptance": [
+  "① 全部已读成功后计数以后端为准：600 未读/加载 1 条场景，后端成功 600 后界面未读=0（不再残留 599）（t104-markall-count-authoritative）",
+  "② 失败不假成功：markAllRead 拒绝/异常时本地已读态与计数回滚，toast 可见（t104-markall-failure-rollback）",
+  "③ 单条标读计数一致：标读后 feedCounts 与实际状态一致（含同文副本不重复扣减），核查结论逐路径入 progress（t104-single-read-count）",
+  "④ 范围可解释：当前范围全部已读不影响其他范围/布局的计数（t104-scope-isolation）",
+  "⑤ 门禁全绿不回退：frontend 全过（t104-* 新增）、lint/build exit 0、cargo test/fmt/clippy 不回退",
+  "⑥ 独立审查（全新子代理，未参与编码）PASS findings=0"
+ ],
+ "gates": [
+  {
+   "id": "cargo_test",
+   "program": "cargo",
+   "args": [
+    "test"
+   ],
+   "cwd": "src-tauri",
+   "required": true
+  },
+  {
+   "id": "cargo_fmt",
+   "program": "cargo",
+   "args": [
+    "fmt",
+    "--check"
+   ],
+   "cwd": "src-tauri",
+   "required": true
+  },
+  {
+   "id": "cargo_clippy",
+   "program": "cargo",
+   "args": [
+    "clippy",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+   ],
+   "cwd": "src-tauri",
+   "required": true
+  },
+  {
+   "id": "lint",
+   "program": "npm",
+   "args": [
+    "run",
+    "lint"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "build",
+   "program": "npm",
+   "args": [
+    "run",
+    "build"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "frontend",
+   "program": "npm",
+   "args": [
+    "run",
+    "test:frontend"
+   ],
+   "cwd": ".",
+   "required": true
+  }
+ ],
+ "test_review": {
+  "behavior": "change",
+  "baseline": {
+   "status": "PASS",
+   "summary": "dev@30cd2bc（v0.16.2 后）：外部审计实测 frontend 527/527；cargo 本机预检通过。本卡修复计数对账与失败回滚，属行为修复。",
+   "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+  },
+  "decision_ids": [
+   "DEC-refactor-roadmap-20261005"
+  ],
+  "actions": [
+   {
+    "action": "add",
+    "target": "t104-* 断言（计数以远端为准、失败回滚、单条一致、范围隔离）",
+    "reason": "审计探针场景转断言，防回退",
+    "gate_ids": [
+     "frontend"
+    ]
+   },
+   {
+    "action": "keep",
+    "target": "既有 frontend/cargo/fmt/clippy/lint/build 断言",
+    "reason": "不回退证据",
+    "gate_ids": [
+     "cargo_test",
+     "cargo_fmt",
+     "cargo_clippy",
+     "lint",
+     "build",
+     "frontend"
+    ]
+   }
+  ]
+ }
+}

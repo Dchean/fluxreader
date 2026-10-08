@@ -1,0 +1,82 @@
+{
+ "task_id": "TASK-116",
+ "candidate_digest": "88db6f38806efa8cfdd6ccf953277a92338de34b846d4b2923d4180202ff0998",
+ "verification_run": "RUN-53b1b55fb36e4e6986f2b0934e1efd24",
+ "verdict": "PASS",
+ "summary": "独立复核了 16 个改动文件（全部落在允许路径 src-tauri/src、src、tools/frontend-regression.mjs 内，无夹带），并把工作区 116 个候选文件逐一 sha256 对照 candidate manifest，全部一致——审查对象即候选本体（digest 88db6f38…）。未编译补偿核查（Rust，本机无 MSVC 链接器，DEC-local-cargo-gate-20261005）：v16 迁移为追加式 M::up，两条 ALTER TABLE ADD COLUMN 与仓内首个迁移的多语句批执行模式一致，SQLite 下 NOT NULL DEFAULT 0 非空缺省合法、既有行得 0/NULL 即「等待同步」与修前语义等价；mark_push_failed/exec_push 签名改为 (done,failed) 后三处调用点（phases.rs 首推段与补推段、push_states_now）适配正确，失败标记与 prune_sync 同一 conn 临界区内完成且 PUSH_LOCK 串行化，take_sync_queue 不删行（UPDATE 落在存活行上）；SyncQueueStats 无 rename_all，字段 waiting/failed/last_error 与前端接口逐字一致，i64→usize 转换安全；新命令 sync_queue_stats 已注册进 lib.rs invoke_handler，db.rs 再导出齐全；两个测试模块的 use super::*/MIGRATIONS/open/Connection 作用域依赖逐一静态核过可编译；clippy 默认 lint 面逐项过一遍未见命中。行为语义：prune 语义零变化（成功出队、失败保留天然重试，t116-r2 双向锁死）、重新入队删旧插新重置失败态与文档口径一致、waiting 含 add_feed 与四态文档一致。前端：syncPillLabel/syncStateSummary 单点纯函数，X1 优先级 error>syncing>waiting>connected 修掉了真实存在的旧缺陷（修前 Sidebar.tsx 同步中/后台中分支先于 error 判定，错误态在后台同步时被覆盖）；X2/X3 如实口径（无「已确认累计」），回归网对 frontend-regression.mjs 纯增量 +103/-0 行，既有断言零弱化（t101-v1-e「恰一块 mini-dialog-hint」原样保留且 t116-x2c 复述锁死）。独立复跑：cargo fmt --check 绿、test:frontend 655/655 绿；变异验证两处均被杀（改优先级→x1a/x1d 红；无条件下追加分失败段→x1a/x1b/x1c/x1d/x3a 红），探针已清理、候选文件字节复原。CI 残余风险：cargo test/clippy 未在本机执行，t116-r0..r3 与 clippy 只能由 CI rust job（dev 推送）裁决——静态补偿把编译/ lint 风险压到很低但非零，合入前必须以 CI 绿为放行条件。UI 真机截图按分工由主控落账前补充，本次按通道（源级接线+纯函数真值表+SSR 烟测）评估。无 findings。",
+ "findings": [],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "验收①：v16 追加式迁移给 sync_queue 加 attempts INTEGER NOT NULL DEFAULT 0 与 last_error TEXT，t116-r0 同时覆盖全新库与停在 v15 的旧库经生产 open() 升级（既有行 2 条零丢失、缺省值=等待同步、user_version 追平全新库）。验收②：push 失败项 attempts+1/last_error 落库（200 码点截断），成功 prune 照旧，stats 命令 waiting/failed/last_error 口径由 t116-r1..r3 锁死并注册进 invoke_handler。验收③④：侧栏 pill 优先级修正+等待计数（X1）、SyncTab 四态摘要卡（X2/X3，desc 收尾并入「本地已保存」说明句、未虚构已确认总数）。顺手项：greader_pull.rs seed_bound doc 笔误已按登记修正。非目标未越界：无 per-article 徽标、无重试按钮、推送/对账语义零变化。范围核对：改动文件全部在 allowed_paths 内，.workflow-kit 与其他目录零夹带。",
+   "evidence_files": [
+    "src-tauri/src/db/migrations.rs",
+    "src-tauri/src/db/sync_queue.rs",
+    "src-tauri/src/commands/sync.rs",
+    "src-tauri/src/lib.rs",
+    "src/components/settings/SyncTab.tsx",
+    "src-tauri/src/sync/greader_pull.rs"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "RUN-53b1b55 五门禁：cargo_fmt/lint/build/frontend 全 PASS（fmt stdout 为空、lint 0 警告、build 含 tsc -b、frontend 655/655=既有 26+新增 629）。审查者独立复跑 cargo fmt --check 与 test:frontend 均复现绿。frontend-regression.mjs 差异纯增量（+103/-0），t116-* 共 13 条（真值表 x1a-x1d/x3a、接线 x1e/t116-api/t116-refresh/x2c、SSR 烟测 x1f/x2d、口径 x2a/x2b），SSR 证据边界（zustand v5 server snapshot 只能见初始态）在注释中如实声明且与 t115 先例同口径。判别力变异抽查：变异1（优先级回退为 syncing 先于 error）被 t116-x1a/x1d 杀死；变异2（无失败也追加分失败段）被 t116-x1a/x1b/x1c/x1d/x3a 五条杀死——新增断言具备真实判别力。Rust 侧 t116-r0..r3 静态审阅断言形态与判别力充分（迁移漏列/缺省错/标记错行/prune 语义改坏均会红），执行由 CI 承担。",
+   "evidence_files": [
+    ".workflow-kit/tasks/runs/RUN-53b1b55fb36e4e6986f2b0934e1efd24.json",
+    ".workflow-kit/tasks/evidence/RUN-53b1b55fb36e4e6986f2b0934e1efd24-frontend.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-53b1b55fb36e4e6986f2b0934e1efd24-lint.stdout.txt",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "①旧库升级：v15 旧库带既有队列行走生产 open()（WAL+迁移+回填+凭据迁移全链）被 t116-r0 覆盖，ALTER TABLE ADD COLUMN 对既有行填非空缺省，行为与修前等价。②推送失败：exec_push 返回 (done,failed)，三处调用点均在同一 DB 临界区内先 mark_push_failed 再 prune_sync，标记失败降级为 warn 不影响队列保留（天然重试）；重复失败 attempts 累加、摘要更新为最近一次（t116-r1）。③重新入队重置：enqueue_sync 同向互斥删旧插新，失败计数随旧行消失（新变更=新尝试），与迁移注释口径一致。④聚合失败：read 广播单请求失败时该组全部 queue id 同记一条摘要，errors 聚合文本逐字保持修前形态。⑤空队列/浏览器环境：stats 空队列返回零值（t116-r3 前置格），前端 api.syncQueueStats 无 invoke 返回 null，bootstrap/SyncTab 两处均以 if(q) 守卫，统计拉取失败静默兜底不阻塞主流程。⑥last_error 取 id 最大失败行（入队互斥删旧插新保证 id 单调，代码注释如实标注为近似最近）。⑦mark_push_failed 对空列表 no-op 有测试锁死。",
+   "evidence_files": [
+    "src-tauri/src/sync/push.rs",
+    "src-tauri/src/sync/phases.rs",
+    "src-tauri/src/db/sync_queue.rs",
+    "src/store/slices/bootstrap.ts",
+    "src/components/settings/SyncTab.tsx"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "文案真值收口到 src/lib/syncPill.ts 两个纯函数（syncPillLabel/syncStateSummary），Sidebar/SyncTab 只做接线，回归网直接驱动纯函数而非组件内部——单点修文案、真值表可测。Rust 侧延续既有领域拆分：mark_push_failed/sync_queue_stats 放 db/sync_queue.rs（与 enqueue/prune 同域），命令层薄封装，db.rs 只加再导出；exec_push 保持无 DB 访问（HTTP 锁外、标记与 prune 锁内短临界区）延续既有锁纪律并写入文档注释。迁移注释完整记录四态口径与升级语义。无为复用预建的抽象、无行数驱动的拆分；未发现拆而未拆的重复规则。轻微说明（非缺陷）：states_phase 首推段把 DB 锁获取从「done 非空才锁」改为无条件短临界区，属标记逻辑引入的合理代价，单次同步一次额外锁获取可忽略。",
+   "evidence_files": [
+    "src/lib/syncPill.ts",
+    "src-tauri/src/db/sync_queue.rs",
+    "src-tauri/src/db.rs",
+    "src-tauri/src/sync/push.rs"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "NOT_APPLICABLE",
+   "analysis": "无性能宣称且改动不触及代表性负载热路径：ALTER TABLE ADD COLUMN 在 SQLite 为元数据操作不做整表重写；sync_queue_stats 为三标量子查询的单行读，队列表受 30 天老化清理约束体量恒小，且命令仅在启动装载/手动同步链尾/摘要卡挂载时调用；exec_push 网络行为与请求数零变化。无实测基准可做亦无回归嫌疑，不伪造测量结论。",
+   "evidence_files": [
+    "src-tauri/src/db/migrations.rs",
+    "src-tauri/src/db/sync_queue.rs"
+   ]
+  }
+ ],
+ "ui_review": {
+  "required": true,
+  "checked_states": [
+   "X1.sidebar-waiting-count",
+   "X2.settings-four-states",
+   "X3.no-fake-states"
+  ],
+  "contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-116-SYNC-FOUR-STATES.md",
+  "evidence_files": [
+   ".workflow-kit/tasks/evidence/TASK-116-ui/x1-sidebar-pill-local-mode.png",
+   ".workflow-kit/tasks/evidence/TASK-116-ui/x2-synctab-summary-card.png",
+   ".workflow-kit/tasks/evidence/TASK-116-ui/interaction-report.json",
+   ".workflow-kit/tasks/evidence/RUN-53b1b55fb36e4e6986f2b0934e1efd24-frontend.stdout.txt"
+  ],
+  "notes": "按通道评估：X1——pill 文案收口 syncPillLabel 单点，真值表逐格核对契约优先级表（error 恒显/同步中次之/waiting>0 显示 N 条/其余既有文案逐字），failed>0 全分支追加「· 部分失败」且无失败绝不追加；修前缺陷存在性已核实（旧 Sidebar.tsx 将 syncing/backgroundSyncing 分支置于 error 之前，错误态在后台同步期间被覆盖）；点击仍 openSettingsTab('sync') 未动；SSR 烟测渲染出基线文案与 sync-status-pill 节点。X2——摘要卡数据源 queueStats+lastSync（秒），desc=等待/部分失败（≤60 码点错误摘要）+上次同步+说明句，状态标签 部分失败>等待同步>本地已保存，「远端已确认」不作常驻态；说明句并入 desc 尾，mini-dialog-hint 恰一块断言（t101-v1-e）原样通过且 t116-x2c 复述锁定。X3——无队列无失败时 pill 逐字维持「后端已同步/本地模式 · 直连抓取」，摘要仅时间行+说明句，无「已确认累计」虚构。局限与后续：本审查为源级+纯函数真值表+SSR 初始态烟测通道（zustand v5 server snapshot 边界已在测试注释如实声明），真机截图通道的证据目录 .workflow-kit/tasks/evidence/TASK-116-ui/RUN-53b1b55fb36e4e6986f2b0934e1efd24/ 尚未生成，按分工由主控落账前补充；侧栏 pill 的队列计数仅在 bootstrap 首装 reload 与手动同步完成末次 reload 刷新（契约约定两刷新点，逐字变更入队不即时刷新为已知边界，非契约违背）。；落账补充（主控）：按工具 UI 取证要求补充真浏览器截图 2 张与交互报告（tasks/evidence/TASK-116-ui/）。诚实边界：浏览器演示模式 SyncTab 短路，摘要卡与等待/失败分支不可浏览器呈现，由纯函数真值表+源级断言+CI Rust 测试锁定；浏览器通道实证 pill 本体与 X3 无队列分支。"
+ }
+}

@@ -1,0 +1,163 @@
+{
+ "id": "TASK-127",
+ "title": "协议能力矩阵三列化与冲突应用层错误可见——能力/实现/验证分层（审计 P2-8，TASK-125/126 范围修正重建）",
+ "kind": "implementation",
+ "retry_safe": true,
+ "ui_change": false,
+ "objective": "修复第三方审计 P2-8（tmp/audit-20261007/REVIEW.md 第 8 节）：①docs/sync-compat-matrix.md 把 Fever 写成「无全量历史端点」，否定当前 Miniflux/Fever 服务端的 max_id 向更旧翻页能力（handler.go:227-267，2026-10-07 读取），属把「本客户端未实现」说成「协议做不到」；②矩阵把「协议/服务端支持」「本客户端已实现」「指定服务端版本已验证」三类事实混在一处，无法作为验收矩阵；③conflict_policy.rs 的 apply_read_by_policy/apply_star_by_policy 用 unwrap_or(0) 把 DB 写失败吞成「没有变化」，调用方无法区分。修法要求：(A) docs/sync-compat-matrix.md 增加三列表头，逐行把每格事实归入「协议/服务端支持」「本客户端已实现」「指定服务端版本已验证」三列——Fever 行必须如实写明：协议支持 items&max_id（< max_id 向更旧翻页，重复直到空数组），而本客户端当前未实现历史回溯（仅最近 50 条种子 + unread/saved 权威集合 with_ids 补齐），「指定服务端版本已验证」列标注当前仅覆盖 mock 替身与（若确有）已实测版本，Miniflux/FreshRSS 具体版本未逐一验收；GR 行的 conflicts 政策（read-wins）同理标注为「本客户端选择的冲突策略」而非「协议必然要求」。(B) src-tauri/src/sync/conflict_policy.rs：apply_read_by_policy/apply_star_by_policy 由返回 usize 改为返回 AppResult<usize>（DB 写失败向上传播，不再 unwrap_or(0) 吞错）。(C) 两个调用方 src-tauri/src/sync/greader_pull.rs / fever_pull.rs 的 reconcile_reader_state/reconcile_fever_state 相应改为返回 AppResult<()>，循环内用 ? 传播或聚合成 report.errors，reconcile 调用点据此记录错误（失败不再被当成「0 行变化」静默跳过）。(D) src-tauri/src/sync/fever.rs 模块头/方法注释如实记录 max_id 历史回溯能力（协议支持 vs 客户端未实现），供适配器能力报告消费（本卡只需注释与文档，不要求实现历史回溯）。(E) 政策格锁定测试与方向测试保持；新增/更新 Rust 测试覆盖 apply 返回 Err 的传播路径；矩阵与代码常量一致性由现有测试 + 文档对照保证。",
+ "non_goals": [
+  "不实现 Fever 历史回溯（max_id 翻页）本身——本卡只如实记录能力，实现属后续独立任务",
+  "不改冲突政策取值（GR 单向、Fever 双向保持现状）",
+  "不改前端、不改 tools/frontend-regression.mjs",
+  "不改订阅层（feeds 阶段）与矩阵范围外内容",
+  "不引入服务端版本探测/握手实现"
+ ],
+ "requirement_refs": [
+  "REQ-002",
+  "REQ-003"
+ ],
+ "reference_ids": [],
+ "decision_refs": [
+  ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+ ],
+ "dependencies": [],
+ "blocks": [],
+ "snapshot_paths": [
+  "docs/sync-compat-matrix.md",
+  "src-tauri/src/sync",
+  "src-tauri/src/fever.rs"
+ ],
+ "risk": {
+  "level": "medium",
+  "decision_ids": [
+   "DEC-gate-adjust-20261007"
+  ]
+ },
+ "scope": {
+  "allowed_paths": [
+   "docs/sync-compat-matrix.md",
+   "src-tauri/src/sync",
+   "src-tauri/src/fever.rs"
+  ],
+  "protected_paths": [
+   ".workflow-kit/**",
+   "src/**",
+   "tools/**",
+   "src-tauri/src/db/**",
+   "src-tauri/src/commands/**"
+  ],
+  "network": "none",
+  "data": "synthetic_only"
+ },
+ "acceptance": [
+  "① 矩阵三列化：docs/sync-compat-matrix.md 的协议×操作差异矩阵含「协议/服务端支持」「本客户端已实现」「指定服务端版本已验证」三列，逐格标注；Fever 行明确「协议支持 items&max_id 向更旧翻页；本客户端未实现历史回溯」",
+  "② 冲突政策标注为客户端选择：GR read-wins 等格在「协议/服务端支持」列不写成协议必然要求，而标注为本客户端冲突策略",
+  "③ 版本已验证列如实：说明当前仅 mock 替身（及确有实测者）覆盖，Miniflux/FreshRSS 具体版本未逐一验收",
+  "④ conflict_policy apply_read_by_policy/apply_star_by_policy 返回 AppResult<usize>，DB 写失败不再被 unwrap_or(0) 吞成 0",
+  "⑤ 调用方 reconcile_reader_state/reconcile_fever_state 返回 AppResult<()> 并在调用点记录失败（report.errors 或传播），不再静默",
+  "⑥ fever.rs 注释如实记录 max_id 能力（协议支持 vs 客户端未实现）",
+  "⑦ Rust 测试覆盖 apply 失败传播路径（CI 执行）；现有政策格锁定测试保持绿",
+  "⑧ 门禁全绿：cargo_fmt + lint/build/frontend 不回退（前端零改动）；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+  "⑨ 独立审查（全新子代理）PASS findings=0"
+ ],
+ "gates": [
+  {
+   "id": "cargo_fmt",
+   "program": "cargo",
+   "args": [
+    "fmt",
+    "--check"
+   ],
+   "cwd": "src-tauri",
+   "required": true
+  },
+  {
+   "id": "cargo_test",
+   "program": "cargo",
+   "args": [
+    "test"
+   ],
+   "cwd": "src-tauri",
+   "required": false,
+   "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 承担"
+  },
+  {
+   "id": "cargo_clippy",
+   "program": "cargo",
+   "args": [
+    "clippy",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+   ],
+   "cwd": "src-tauri",
+   "required": false,
+   "reason": "同 cargo_test"
+  },
+  {
+   "id": "lint",
+   "program": "npm",
+   "args": [
+    "run",
+    "lint"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "build",
+   "program": "npm",
+   "args": [
+    "run",
+    "build"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "frontend",
+   "program": "npm",
+   "args": [
+    "run",
+    "test:frontend"
+   ],
+   "cwd": ".",
+   "required": true
+  }
+ ],
+ "test_review": {
+  "behavior": "change",
+  "baseline": {
+   "status": "PASS",
+   "summary": "dev@eba4df5（第五阶段 P1/P2 任务 117/118/119/121/122/123/124 全部验收后）：frontend 759/759、CI 全绿。本卡为文档矩阵分层 + 冲突应用层错误可见（审计 P2-8），Rust 改动限定 conflict_policy 的错误传播。",
+   "evidence_ref": ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+  },
+  "decision_ids": [
+   "DEC-gate-adjust-20261007"
+  ],
+  "actions": [
+   {
+    "action": "add",
+    "target": "apply_read_by_policy/apply_star_by_policy 返回 Err 的传播路径 Rust 测试（CI 执行）+ 政策格锁定保持",
+    "reason": "把静默 unwrap_or(0) 改为向上传播，需断言失败不再被当成 0 行变化（审计 P2-8 ③）；Rust 测试由 CI rust job 执行（DEC-local-cargo-gate-20261005）",
+    "gate_ids": [
+     "cargo_fmt",
+     "lint",
+     "build"
+    ]
+   },
+   {
+    "action": "keep",
+    "target": "既有政策格锁定测试（conflict_policy.rs / greader_pull.rs / fever_pull.rs 的 #[cfg(test)]）与既有 frontend/cargo fmt/lint/build 门禁",
+    "reason": "政策方向未变（方向锁定与判别力保持）；本卡前端零改动，矩阵文档无自动化门禁（由独立审查人工核对）",
+    "gate_ids": [
+     "cargo_fmt",
+     "lint",
+     "build",
+     "frontend"
+    ]
+   }
+  ]
+ }
+}

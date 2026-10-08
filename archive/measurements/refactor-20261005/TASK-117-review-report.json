@@ -1,0 +1,71 @@
+{
+ "task_id": "TASK-117",
+ "candidate_digest": "e577efdd54d96199e49379745acebcda6610502bd4f875ce5097ef5a50c4fa54",
+ "verification_run": "RUN-ac201789cc76419e87ee62468a7fedf8",
+ "verdict": "PASS",
+ "summary": "独立复核（未参与编码的新上下文，分支 dev 工作区即候选）：11 个改动文件与候选清单逐一 sha256 匹配，candidate_digest 按工具算法重算一致，diff 未超出声明范围。核心结论——keyset SQL 正确：DESC 谓词 (a.published_at < ? OR (a.published_at = ? AND a.id < ?)) 与 ORDER 常量 a.published_at DESC, a.id DESC 严格同向同表达式（list_articles 与 article_index 窗口共用同一常量，锚定口径不破），ASC 对称；占位符 3 处与绑定序（last_published×2 + last_id）逐一对应，last_published 为外部字符串但只经 rusqlite 绑定参数进入 SQL，谓词文本是本文件 &'static 常量，注入面为零；v15 归一后 published_at 恒 RFC3339 +00:00 统一形态，裸字符串比较=时间序且构成确定全序，选型成立（datetime() 包列破坏索引有序驱动、与 REQ-108 M-5 计划断言冲突的反驳理由经实 SQLite 验证属实）。独立 EXPLAIN 复测（SQLite 3.49.1 内存镜像）：无 v17 时新两键 ORDER 触发 USE TEMP B-TREE FOR LAST TERM OF ORDER BY（迁移注释声称属实），有 v17 后全部/按源/未读/按分类变体在 DESC/ASC/keyset 下全部索引有序驱动免排序；可变集合走查探针：OFFSET 语义只见 2500/5000 行（审计缺陷复现），keyset 5000/5000 零重复零遗漏。Rust 侧 3 条 keyset 谓词测试逻辑静态复核无误（DESC/ASC 全序等价、可变未读集合续拉、同秒组跨页边界），由 CI 执行。前端契约迁移完整：articlesCursor 全消费点（types 契约、applyArticlesCursor、paginationStale 三字段比较、ViewEntriesSnapshot.cursor、api wire）收口无残留，loadMoreArticles 中 keyset 与 offset 互斥展开，残留 offset 调用点仅剩首屏 offset=0、锚定窗口定位与文档化的无锚回落三条合法路径；selectVisibleEntries id 决胜与后端 DESC/ASC 同向。回归判别力经三组变异验证：A（loadMoreArticles 回退 offset）19 断言变红（含 t117-1 审计探针本体的续拉落地/收敛/无遗漏判别、t117-2/3/5）；B（假后端 keyset 语义移除）13 断言变红（含 t117-1 收敛与全程无遗漏、t117-3）；C（假后端 id 决胜移除）t117-4 前置判别变红——审计 P1 场景在修前手法下必红。门禁本地复跑：cargo fmt 0、lint 0（唯一 warning 为候选外既有 tools/phase4_measure.mjs:20）、frontend 671/671（新增 t117 16 条）。唯一非缺陷备注：migrations.rs v17 注释『keyset 谓词变体同测（计划断言）』略夸大仓库内覆盖——list_query_plan_* 未含 keyset 变体（其计划正确性由本次独立 EXPLAIN 探针证实，行为层有 3 条测试），不构成可执行缺陷。",
+ "findings": [],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "逐项对照任务卡修法要求①-⑤与验收①-⑥：①ArticleListArgs/ArticleQuery 增 last_published/last_id（成对给出才启用，缺一回落 OFFSET），KEYSET_PREDICATE_DESC/ASC 与验收文本逐字一致，OFFSET 参数保留绑定；②PUBLISHED_ORDER_DESC/ASC 补 a.id 决胜且 list_articles 与 article_index 窗口共用同一常量（grep 全库仅这两处消费），article_index 结构性不消费 keyset（谓词只在 list_articles_sql 追加、不进 article_where），既有锚定断言 article_index_positions_align_with_list 原样保留仅补字段初始化；③loadMoreArticles 是全部视图（今天/未读/收藏/全部）共用续拉单点，keyset 锚无条件携带，残留 offset 调用点仅首屏 offset=0、anchorToArticle 窗口定位、文档化无锚回落；④前端 ArticlesCursorState{lastPublished,lastId,loaded} per-scope，advanceArticlesCursor 单点推进，exhausted 判定保持 fetched<PAGE_SIZE；⑤selectVisibleEntries 补 id 决胜且方向与后端同向（newest: id DESC / oldest: id ASC），mock 非数字 id 回落 0 不破坏既有顺序；⑥t117-* 共 16 条断言（≥6）含全部要求的操作序列场景（阅读中翻页=审计探针本体/取消收藏/插入漂移/同秒并列/排序切换），Rust keyset 测试 3 条（≥2）；SQL 注入面确认参数化。非目标四项（刷新窗口/实体缓存/mark_all_read/TanStack）diff 无触及，无范围外改动（11 文件与声明逐一哈希匹配）。",
+   "evidence_files": [
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/commands/articles.rs",
+    "src/store/slices/bootstrap.ts",
+    "src/store/types.ts",
+    "src/store/selectors.ts",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "frontend 门禁原始输出含『前端逻辑回归合计 671/671 通过』且 t117 断言 16 条在案；本地复跑同绿。判别力变异验证（本审查执行，非作者声称）：变异 A（loadMoreArticles 续拉回退 offset=loaded）→ 652/671，19 红，含 t117-1『续拉落地（判别）：返回剩余集合的前 500 篇』『第三页收敛』『全程无遗漏』与 t117-2/3/5 判别——审计探针场景本体在修前手法下必红；变异 B（假后端 queryRows keyset 谓词分支禁用）→ 658/671，13 红，含 t117-1 收敛/无遗漏/exhausted 判别与 t117-3 插入漂移免疫；变异 C（假后端排序 id 决胜移除）→ t117-4『前置：同秒 600 行首屏按 id 降序』判别变红。假后端 queryRows 已真实升级（筛选+排序 id 决胜+keyset 谓词+set_read_bulk/set_starred 忠实落库使集合真实收缩），操作序列场景具备建模缺陷成因的判别力。既有断言适配全部带【TASK-117 改动理由】标记（20 处），M-5 计划断言（list_query_plan_is_index_ordered_without_temp_btree）以新 ORDER 生产字节原样保留。cargo test 3 条 keyset 谓词测试静态复核逻辑无误，按 DEC-local-cargo-gate-20261005 由 CI 执行。",
+   "evidence_files": [
+    ".workflow-kit/tasks/evidence/RUN-ac201789cc76419e87ee62468a7fedf8-frontend.stdout.txt",
+    "tools/frontend-regression.mjs",
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/db/dedup_tests.rs"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "核对的反例与边界：①半截游标——后端仅成对（Some,Some）才追加谓词，单侧给出回落 OFFSET 语义，行为确定不崩；②空页——advanceArticlesCursor 空页保留原锚且 loaded 不变，fetched<PAGE_SIZE 置 exhausted，锚不再被消费；③游标表缺键（mock 残留/异常窗口）——loadMoreArticles 以 emptyArticlesCursor(articlesLimit) 兜底，lastPublished null → 不带 keyset 键回落 offset，与修前行为衔接；④published_at 为 null 的锚在 tauri 流程不可达（v12/v14 回填+触发器非空不变量，v15 归一），TS 侧 Option 语义与后端 Option<String> 一致并作防御性 ?? null；⑤keyset 与 offset 互斥——前端三元展开两分支互斥，全库 listArticles 调用点核查无同时携带路径，后端两游标叠加误用需调用方同时传（当前无此调用方）；⑥在途竞态——paginationStale 升为 lastPublished/lastId/loaded 三字段比较，锚点推进与 reload 重置两种竞态均覆盖，articlesLoading 单飞防抖保留；⑦exhausted 后再触发不发 IPC（t117-1 判别断言）；⑧v17 迁移纯增索引不动表数据与既有索引，user_version 递增，旧库升级兼容（v16 旧库升级测试先例同型）。",
+   "evidence_files": [
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/db/migrations.rs",
+    "src/store/internals.ts",
+    "src/store/slices/bootstrap.ts"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "结构收口而非扩散：keyset 谓词/排序/方向全部收口为 db/articles.rs 常量（谓词与 ORDER 同文件相邻、注释互指），list_articles 与 article_index 共用 PUBLISHED_ORDER 保证『绝对位置=列表顺序』口径由类型系统外的单一常量承接；前端游标推进单点 advanceArticlesCursor（四处写入点共用），emptyArticlesCursor 兜底语义集中；articlesLimit 降级为 loaded 镜像后全库消费点核查（nav 三处镜像读、syncCurrentViewCache 兜底、测试断言）无误用；paginationStale 三字段比较保持具名守卫单点。20 处既有断言适配均带【TASK-117 改动理由】内联理由，无静默弱化。备注（非缺陷）：migrations.rs v17 注释括号『计划断言见 db/articles.rs 的 list_query_plan_*，keyset 谓词变体同测』中『keyset 谓词变体同测』与仓库事实不符——list_query_plan_* 的 5 个变体均 last_published: None，keyset 变体仅被 3 条行为测试覆盖、无 EXPLAIN 断言；该声称的计划性质（等值前缀 keyset 变体索引有序驱动）经本审查独立 EXPLAIN 探针证实为真，但后续改动 keyset 谓词形状时 CI 计划断言不会拦截，属测试覆盖提示而非代码缺陷。",
+   "evidence_files": [
+    "src-tauri/src/db/articles.rs",
+    "src-tauri/src/db/migrations.rs",
+    "src/store/internals.ts",
+    "src/store/selectors.ts"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "PASS",
+   "analysis": "v17 索引必要性以真 SQLite（3.49.1，内存镜像 5000 行含并列）独立复测：无 v17 时 ORDER BY published_at DESC, id DESC 实测触发 USE TEMP B-TREE FOR LAST TERM OF ORDER BY（迁移注释声称属实）；建 v17 后全部/按源/未读/按分类变体在 DESC、ASC、keyset 三形态下全部索引有序驱动（SCAN/SEARCH USING COVERING INDEX，零 TEMP B-TREE），双 ASC 声明正反扫描双向免排序的选型理由验证成立；等值前缀变体（feed_id=/is_read=0+keyset）仍由 v14 索引 SEARCH 驱动，M-5 计划断言不回退且被 CI 锁定。可变集合走查探针（5000 行、页 500、逐页标读）：OFFSET 语义仅见 2500/5000 行（审计 P1-1 缺陷定量复现），keyset 见 5000/5000 且零重复——keyset 修法同时消除该缺陷与对应的无谓重复拉取。SELECT 列与绑定数量未增（keyset 谓词仅增 3 个绑定值），前端 paginationStale 由 1 字段比较升为 3 字段比较，可忽略。未运行实机基准，以上为计划层与算法层证据，不声称端到端耗时改善。",
+   "evidence_files": [
+    "src-tauri/src/db/migrations.rs",
+    "src-tauri/src/db/articles.rs"
+   ]
+  }
+ ],
+ "ui_review": {
+  "required": false,
+  "checked_states": [],
+  "evidence_files": [],
+  "notes": "ui_change=false；本卡为分页游标正确性修复，不触及界面布局/交互/视觉，Timeline 哨兵续拉入口行为契约（articlesLoading/exhausted 守卫）由 store 层回归覆盖。"
+ }
+}

@@ -1,0 +1,66 @@
+{
+ "task_id": "TASK-107",
+ "candidate_digest": "2143649479399f31bc681309b8c369dcc15ae515237582860c97184f5092c413",
+ "verification_run": "RUN-01d0dfb259214dfa81cb0526bad200ad",
+ "verdict": "PASS",
+ "summary": "R2 候选独立复核通过。①候选同一性：RUN-01d0dfb259214dfa81cb0526bad200ad-candidate.json（digest 2143649…）全部 62 个文件逐一 sha256 与工作树比对零偏差；与 R1 候选（3571a869…）manifest 逐文件 diff 恰好仅 tools/frontend-regression.mjs 一个文件变化——R2 确实未动 src，internals.ts/nav.ts 与 R1 审查通过态逐字节一致。②判别断言：新增 5 条（t104-snapshot-voids-rollback-claim ×3、t104-snapshot-fresh-claim-rollback ×2）真实在场且通过；独立变异验证（仅改 gitignore 的 dist-test 构建产物，验证后恢复复跑 561/561）：MUT-A 置空 mergeSnapshotEntries 的逐 id bump → 恰 1 条转红（「迟到回滚不踩快照真值」），其余 4 条为契约锁定（场景成立校验、跳过不吞错、快照后新声明回滚存活），与 coder 声称「恰好 1 条判别断言转红」一致；MUT-B 把 nav 回滚的版本快照改为永不匹配（模拟回滚机制被瘫痪）→ fresh-claim ② 等 6 条转红，证明该块同时防「bump 过度收紧」方向的回归。③mock 布尔化：4 处行级 mutation（set_read 的 args.read===true、mark_all_read 的 is_read=true、47001 DB 行断言、48001/48002 外部写入者）全部改为 wire 布尔，与 src-tauri Serialize 口径核实一致（ArticleRow.is_read: bool、set_read(read: bool)、mark_all_read→usize，snake_case 直传，articleRowToEntry 原样映射）；全文件 grep 无残留数字 1/0 口径的行级读写，is_starred 亦全为布尔，未发现口径问题，且 (f)/(p1) 既有断言随 faithful mock 升级为更强口径非弱化。④基线复跑：npm run test:frontend 561/561（26 既有 + 535 store，较 R1 的 556 纯增 5 条），本会话两次基线复跑稳定；RUN-01d0dfb 门禁 lint 0 warning/0 error、build exit 0、cargo_fmt 空（通过）、frontend 561/561 一致。⑤R1 F1/F2 未被破坏：manifest diff 证明实现零改动，t104-rollback-guard-versioned ×2 与 t104-reconcile-retry ×3 全部在场且通过，MUT-B 亦证明 F1 断言族判别力仍在。⑥语义问题裁定：非阻塞观察，不作为 finding。角例为「markAllRead 在途失败 × 期间用户切走又切回同范围命中视图缓存」——markEntriesRead 在乐观写入时即把当前范围缓存同步为乐观读态（internals.ts syncCurrentViewCache），缓存恢复 mergeSnapshotEntries 携带的行不是后端真值而是乐观 UI 回放，当前的全量 bump 使一次本应正确的在途回滚被跳过，UI/计数短暂停留乐观态。裁定理由：(a) 不违反本阶段目标「失败不假成功、操作范围可解释」——失败 toast+重试在该交错下仍然可见（新断言第 3 条「回滚跳过不等于吞错」锁定），按重试即自修复；(b) 触发 doubly-narrow：需 IPC 写失败叠加秒级在途窗口内同范围往返导航；(c) 自愈路径确定：导航本身即 kicked reloadFromBackend（'all' 视图同时替换 entries 与 feedCounts 完全自愈；筛选视图 entries 由 reloadFilteredEntries 收敛、计数至下次全量 reload，与 R1 已接受的自愈角例同族）；(d) coder 的 fromBackend 修法经推演技术成立——经 reload 落地进入缓存的行在 bootstrap 路径 merge 时已 bump，缓存恢复不 bump 不会重开「快照真值被陈旧回滚踩踏」的缺口，唯一无 bump 的缓存行恰是乐观态本身，回滚恢复它正是正确行为；但在 R2（声明范围=补断言+mock 保真）内实施会扩范围、触碰 R1 刚验证过的 F1 版本记账语义且需自备判别断言，宜列为后续微任务由 owner 决定。R0/R1 已裁决不修的自愈角例（双失败窗口、affected===0 短路）维持原判不重复列入。",
+ "findings": [],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "R2 范围与声称一致：R1→R2 候选 manifest 逐文件 diff 恰好仅 tools/frontend-regression.mjs（+5 条断言 + 4 处 mock 布尔保真修正），未触碰 src 与任何范围外文件；候选 manifest 62 文件与工作树 sha256 零偏差，digest 2143649… 即当前工作树。R2 增量精准对应 R1 审查 finding#2（mergeSnapshotEntries bump 无断言覆盖）：t104-snapshot-voids-rollback-claim ×3 给出判别性用例（外部 DB 写入+快照替换+迟到回滚不踩后端真值），t104-snapshot-fresh-claim-rollback ×2 锁定「bump 只使快照前声明失效、不得瘫痪回滚机制」的双向边界，超出 R1 要求的「补一条」且方向正确。",
+   "evidence_files": [
+    ".workflow-kit/tasks/evidence/RUN-01d0dfb259214dfa81cb0526bad200ad-candidate.json",
+    ".workflow-kit/tasks/evidence/RUN-1b42a07bda04456fa2f416a18e769d21-candidate.json",
+    "tools/frontend-regression.mjs",
+    "src/store/internals.ts"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "独立复跑 npm run test:frontend 561/561（26 既有 + 535 store），较 R1 的 556/556 纯增恰 5 条新断言，R0 全部 7 条 t104 与 R1 的 rollback-guard-versioned ×2、reconcile-retry ×3 逐条在场且通过（含 3.5s 真实计时器用例两次基线复跑稳定），零弱化；RUN-01d0dfb 门禁日志 lint 0/0、build exit 0、frontend 561/561 与本地一致。变异验证（仅改 gitignore 的 dist-test 产物，恢复后复跑全绿）：MUT-A 置空 merge bump → 恰 1 条（snapshot-voids「迟到回滚不踩快照真值」）转红，判别力属实；MUT-B nav 版本快照永不匹配 → fresh-claim ② 等 6 条转红，证明该断言族对「回滚被过度禁用」方向同样具判别力。",
+   "evidence_files": [
+    ".workflow-kit/tasks/evidence/RUN-01d0dfb259214dfa81cb0526bad200ad-frontend.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-01d0dfb259214dfa81cb0526bad200ad-lint.stdout.txt",
+    ".workflow-kit/tasks/evidence/RUN-01d0dfb259214dfa81cb0526bad200ad-build.stdout.txt",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "mock 布尔化口径核对：set_read mock 落库 args.read===true、mark_all_read 落库 is_read=true、t104-rollback-guard-versioned 的 DB 行断言 ===true、snapshot-voids 的外部写入者 forEach 置 true——与 src-tauri 只读核实一致（db/articles.rs ArticleRow 派生 Serialize、is_read: bool；commands/articles.rs set_read(read: bool)、mark_all_read→usize），articleRowToEntry 将 row.is_read 原样映射 entry.isRead，wire 布尔口径全程一致；全文件扫描无残留数字口径行级 mutation（is_starred 同为布尔）。修复前数字 1/0 会使 reload 后 isRead===1，破坏 ===true 形态的值守卫/断言（快照替换场景失真），此修正是使 R2 判别断言成立的前提而非引入新口径。失败可见性在新角例下仍被锁定：回滚被 bump 跳过时失败 toast+重试仍可见（snapshot-voids 第 3 条）。",
+   "evidence_files": [
+    "tools/frontend-regression.mjs",
+    "src/lib/api.ts"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "R1 的 F1/F2 实现未被 R2 破坏：R1→R2 manifest diff 证明 internals.ts（entryMutationVersion 三写入点）与 nav.ts（版本守卫回滚 + reconcileCounts 重试收口）与 R1 审查通过态逐字节一致，R2 零改动；两组断言在场且通过。新增测试块注释完整交代场景构造理由（外部写入者绕过前端写入路径、两段式边界验证意图），fixture 隔离（resetStore 深拷贝行对象 + feedCountsImpl 用例内挂载/复位）未引入跨用例污染；上抛的 fromBackend 语义问题未擅自实施，交审查裁定，符合流程。",
+   "evidence_files": [
+    "src/store/internals.ts",
+    "src/store/slices/nav.ts",
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/tasks/evidence/RUN-b56aea5e4bdb46638cddb0c1189562f1-worker-result.json"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "PASS",
+   "analysis": "R2 纯测试文件改动，无运行时路径变化；套件墙钟较 R1 仅增两条快用例与一组 mock 行翻转，无新计时器（3.5s 重试用例 R1 已有），本会话两次基线复跑与 RUN-01d0dfb 证据时长一致，无时序脆弱迹象。dist-test 变异探针验证后已恢复（重编译复核 561/561），仓库无探针残留。",
+   "evidence_files": [
+    ".workflow-kit/tasks/evidence/RUN-01d0dfb259214dfa81cb0526bad200ad-frontend.stdout.txt",
+    "tools/frontend-regression.mjs"
+   ]
+  }
+ ],
+ "ui_review": {
+  "required": false,
+  "evidence_files": [],
+  "notes": "ui_change=false（R2 仅改测试 harness，无任何界面结构/交互/文案变化）"
+ }
+}

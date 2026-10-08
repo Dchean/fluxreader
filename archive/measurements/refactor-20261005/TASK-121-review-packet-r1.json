@@ -1,0 +1,1112 @@
+{
+  "ok": true,
+  "instructions": "# 审查执行器\n\n读取明确指定的审查包。任务的角色是 reviewer，输入包括 task_id、candidate_digest、原始需求/验收、质量目标、当前源码、完整差异、验证 RUN 与必要参考。先依据这些事实形成结论，不采用作者的“应该通过”。\n\nindependent 必须来自没有参与实现的新上下文。同一模型可以；同一上下文改名字不可以。Agent 包办不要求 CLI，宿主提供独立上下文即可。自审只能在策略允许且任务不是高风险时使用，并如实标记。\n\n## 五项核对\n\n- requirements：逐项对照用户的当前需求，包括 Bug、新增功能和兼容限制；检查是否漏做、顺带改变行为或扩大范围。\n- regression：阅读实际验证命令、原始输出及测试断言，检查它们是否能发现目标缺陷，是否弱化了仍有效的保护。\n- failure_paths：核对实际相关的异常、空输入、重复执行、恢复、数据/权限边界；需要时验证具体反例。不要只走成功路径。\n- maintainability：检查职责、依赖方向、重复规则、命名、模块边界及新增维护负担。工作量大不是拒绝必要改进的理由，抽象层数也不等于质量。结构调整（拆分、合并、抽取公共层）必须有 REFACTOR 列出的代码证据：变更原因不同、无法单独验证、重复规则、依赖方向、必须隔离的边界或真实并行冲突；只以行数或“太大”为理由的拆分、为将来复用预建的抽象，记为 finding。有证据需要拆而未拆的地方可以指出，不强制。\n- performance：检查代表性负载下的测量和回归；静态分析须明确其范围，不能伪称实测提升。不受影响时解释不适用，不强造基准。\n\ndocumentation/baseline 任务只需 requirements 和 regression 两项，其余三项可省略；其他任务五项齐全。每项保存 status、简短的结论依据 analysis 和 evidence_files。evidence_files 只能引用候选快照内的文件，或 .workflow-kit/tasks/runs/、.workflow-kit/tasks/evidence/ 下的附件；不要引用任务条目、任务卡、DECISIONS、PROJECT 或笔记，这些文件由工具改写，引用它们会让审查在保存后立即失效。需要引用其他源文件时，应由总控把它加进任务的 snapshot_paths 再验证。报告记录可核对事实，不要求披露内部推理过程。requirements/regression 不能标不适用；高风险的 failure_paths 也不能。未完成检查时用顶层 BLOCKED，有待修问题用 FAIL；不能留下 NOT_RUN/FAIL 项却给总体 PASS。\n\n自审前暂停编码，从原需求和完整差异重新检查，包括新增、删除、重命名、未跟踪文件。发现问题后回到原任务修复，重新验证再审，不在审查阶段改验收、预算或代码放行。\n\n## 适用性与 UI\n\n重构核对 test_review：原测试、CI、mock/fixture 和快照是否仍适用，适配是否保留行为，替换/退役是否有对应需求决定，新需求是否有覆盖。原始基线和已知失败应保留；命令没变不代表断言没弱化。\n\nui_change=true 时检查 UI 约定、当前截图、交互报告与 ui_checks，实际操作适用控件的展开、焦点、错误、窄屏和键盘状态；checked_states 填 ui_checks 的 id。没有真实视觉依据不能把构建成功写成界面通过。\n\n## 输出\n\n使用 contracts/review-result.schema.json 的完整结构。以下只是字段形状，标识、依据和路径必须替换为实际值：\n\n~~~json\n{\n  \"task_id\": \"TASK-actual\",\n  \"candidate_digest\": \"当前候选摘要\",\n  \"verification_run\": \"RUN-actual-verification\",\n  \"verdict\": \"PASS\",\n  \"summary\": \"审查范围及实际结论\",\n  \"findings\": [],\n  \"review_checks\": [\n    {\"area\": \"requirements\", \"status\": \"PASS\", \"analysis\": \"具体需求与差异如何对应\", \"evidence_files\": [\"实际源码或证据路径\"]},\n    {\"area\": \"regression\", \"status\": \"PASS\", \"analysis\": \"实际测试如何保护目标行为\", \"evidence_files\": [\"实际验证记录路径\"]},\n    {\"area\": \"failure_paths\", \"status\": \"PASS\", \"analysis\": \"已核对的异常和恢复场景\", \"evidence_files\": [\"实际证据路径\"]},\n    {\"area\": \"maintainability\", \"status\": \"PASS\", \"analysis\": \"具体结构变化和维护影响\", \"evidence_files\": [\"实际源码路径\"]},\n    {\"area\": \"performance\", \"status\": \"NOT_APPLICABLE\", \"analysis\": \"仅在确实不涉及运行性能时填写具体理由\", \"evidence_files\": []}\n  ],\n  \"ui_review\": null\n}\n~~~\n\n每个 finding 说明位置、触发条件、影响和建议。UI PASS 用包含 contract_ref、checked_states、evidence_files 的对象替代 ui_review=null；文件含实际截图和交互报告。不得复制示例中的不适用理由给任意项目。\n\n报告与当前 verification_run、候选和证据绑定；改动后旧结论不能继续放行。程序核对完整性、关联与变更，不能自动判断分析有无遗漏或证明上下文独立。\n",
+  "task_packet": {
+    "task_id": "TASK-121",
+    "run_id": null,
+    "task": {
+      "schema_version": 1,
+      "id": "TASK-121",
+      "title": "TASK-117 延续：tests/ 构造点补齐 E0063 修复（CI 失败处置，行为零变化）",
+      "kind": "implementation",
+      "retry_safe": true,
+      "ui_change": false,
+      "ui_contract_ref": null,
+      "ui_checks": [],
+      "status": "review",
+      "objective": "延续任务（continuation_of=TASK-117 候选 577efdd5...详见 items/TASK-117.json evidence）：dev@b7947e9 起 CI rust job clippy（--all-targets -- -D warnings）失败（fmt 过/test 跳过；117/118/119 三提交同态连续失败）。修复面=TASK-117 引入的 Rust 代码（db/articles.rs 的 ArticleQuery 新字段/KEYSET_PREDICATE 常量/keyset 谓词组装/ORDER 常量、migrations.rs v17、commands/articles.rs ArticleListArgs、dedup_tests.rs、db/articles.rs 内新测试模块）。方法：TASK-113 先例——clippy-driver 抛置片段实证（本机 clippy 1.98.1 与 CI 同 release）+ 与仓内既有同形态代码比对；逐一修复（等价重写，不改行为/不删有效断言/不动 keyset 语义）。若片段实证无法定位，输出「已排除清单」并停止（等待主控取得 CI 日志）。禁止 cargo test/clippy/build/check（本机必败且浪费）。",
+      "non_goals": [
+        "不改 keyset 分页语义/谓词文本",
+        "不改前端",
+        "不动 docs/**"
+      ],
+      "requirement_refs": [
+        "REQ-003",
+        "REQ-007"
+      ],
+      "reference_ids": [],
+      "decision_refs": [
+        ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+      ],
+      "dependencies": [
+        "TASK-117"
+      ],
+      "blocks": [],
+      "risk": {
+        "level": "low",
+        "decision_ids": [
+          "DEC-gate-adjust-20261007"
+        ]
+      },
+      "scope": {
+        "allowed_paths": [
+          "src-tauri/src",
+          "src-tauri/tests"
+        ],
+        "protected_paths": [
+          "AGENTS.md",
+          "CLAUDE.md",
+          "WORKFLOW.md",
+          "tasks/**",
+          "docs/PRODUCT.md",
+          "docs/FEATURES.md",
+          "docs/workflow/**",
+          "scripts/project_workflow.py",
+          "scripts/workflow_runtime.py",
+          "scripts/workflow_bootstrap.py",
+          "scripts/workflow_intake.py",
+          "scripts/workflow_progress.py",
+          "WORKFLOW-KIT.md",
+          ".workflow-kit/binding.json",
+          ".workflow-kit/tasks/**",
+          ".workflow-kit/notes/**",
+          ".workflow-kit/scripts/**",
+          ".workflow-kit/docs/workflow/**",
+          ".workflow-kit/legacy/**",
+          ".workflow-kit/AGENTS.md",
+          ".workflow-kit/CLAUDE.md",
+          ".workflow-kit/WORKFLOW.md",
+          ".workflow-kit/docs/PRODUCT.md",
+          ".workflow-kit/docs/FEATURES.md",
+          ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+        ],
+        "network": "none",
+        "data": "synthetic_only"
+      },
+      "acceptance": [
+        "① E0063 修复（tests/ingestion_e2e.rs 字面量补齐）：触发点清单（file:line+lint 名+修法+依据）与已排除清单",
+        "② CI rust job 全绿（cargo fmt/clippy/test 含 keyset 3 条测试）——推送后以 CI 结论为准",
+        "③ TASK-117 既有测试与断言零弱化；行为零变化保持",
+        "④ 独立审查（全新子代理）PASS findings=0",
+        "⑤ 本地门禁：cargo fmt、lint、build、frontend 不回退"
+      ],
+      "gates": [
+        {
+          "id": "cargo_fmt",
+          "program": "cargo",
+          "args": [
+            "fmt",
+            "--check"
+          ],
+          "cwd": "src-tauri",
+          "required": true
+        },
+        {
+          "id": "cargo_test",
+          "program": "cargo",
+          "args": [
+            "test"
+          ],
+          "cwd": "src-tauri",
+          "required": false,
+          "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：由 CI rust job 承担；本卡 CI 失败即门禁失败"
+        },
+        {
+          "id": "cargo_clippy",
+          "program": "cargo",
+          "args": [
+            "clippy",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "cwd": "src-tauri",
+          "required": false,
+          "reason": "同 cargo_test"
+        },
+        {
+          "id": "lint",
+          "program": "npm",
+          "args": [
+            "run",
+            "lint"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "build",
+          "program": "npm",
+          "args": [
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "frontend",
+          "program": "npm",
+          "args": [
+            "run",
+            "test:frontend"
+          ],
+          "cwd": ".",
+          "required": true
+        }
+      ],
+      "test_review": {
+        "behavior": "change",
+        "baseline": {
+          "status": "PASS",
+          "summary": "dev@7a3d0f4（117/118/119 前端全部通过；rust job clippy 失败）。本卡修复 clippy 触发点并经 CI 复验。",
+          "evidence_ref": ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+        },
+        "decision_ids": [
+          "DEC-gate-adjust-20261007"
+        ],
+        "actions": [
+          {
+            "action": "adapt",
+            "target": "触发 clippy 的等价重写",
+            "reason": "等价重写不弱化保护；CI 全绿为验收",
+            "gate_ids": [
+              "cargo_fmt",
+              "lint",
+              "build",
+              "frontend"
+            ]
+          },
+          {
+            "action": "keep",
+            "target": "TASK-117 既有断言与本地四门禁",
+            "reason": "行为零变化证明",
+            "gate_ids": [
+              "cargo_fmt",
+              "lint",
+              "build",
+              "frontend"
+            ]
+          }
+        ]
+      },
+      "input": {
+        "manifest": ".workflow-kit/tasks/evidence/TASK-121-input-41f424de12e146b3a6572bfd91c782bb.json",
+        "digest": "f9659a933589667ba49d5e950771e39c80e11fc091127531dad0c7fcc3fd09e5",
+        "source_revision": null,
+        "definition_digest": "01ea3f8d5df54ca73d0ebd5806dd243edf5c354bcf7303477a2155a87a5508f3"
+      },
+      "budget": {
+        "started_at_utc": "2026-10-07T07:47:19.046664Z",
+        "deadline_at_utc": "2026-10-07T11:47:19.046664Z",
+        "repair_rounds_used": 0
+      },
+      "batch_id": "BATCH-a57865b52aa4449ea24f0f15216d72c5",
+      "run_ids": [
+        "RUN-631080f22efd46d7b9fd78750b891fd9",
+        "RUN-291bab4f95dd4ad9b2180793e2c29590",
+        "RUN-4fe4be4283fa4a25952aae92bb23490c",
+        "RUN-4a6698f1beaa407fb1868c5fa8024a43",
+        "RUN-97860d5bd86d4f19a95f860be2d27c70"
+      ],
+      "blockers": [],
+      "evidence": {
+        "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-candidate.json",
+        "candidate_digest": "5f58c8241220e84f38e8bd3a40af83735ebc7643c2ac9351757b0a5802b2e07b",
+        "verification_run": "RUN-97860d5bd86d4f19a95f860be2d27c70",
+        "review_run": null,
+        "acceptance_ref": null,
+        "owner_decision_ids": [],
+        "merge_ref": null
+      },
+      "snapshot_paths": [
+        ".workflow-kit/docs/DEC-gate-adjust-20261007.md",
+        "src",
+        "src-tauri/src",
+        "src-tauri/tests",
+        "tools/frontend-regression.mjs"
+      ],
+      "continuation_of": {
+        "TASK-117": "e577efdd54d96199e49379745acebcda6610502bd4f875ce5097ef5a50c4fa54"
+      },
+      "resume_phase": "review"
+    },
+    "brief": {
+      "goal": "以 workflow-kit 2026-09-18.3 新周期对 fluxreader 持续改进：修复全项目体检发现的缺陷（P1/P2），处置功能空壳与死代码确保无未落实的宣称能力，完成 ingestion.rs 拆分与结构性硬化（pull 游标守卫、app_settings 收口），使项目稳定规范、代码与技术路线优雅高效",
+      "audience": "项目作者本人日常使用的桌面端 RSS/播客阅读器",
+      "acceptance": [
+        "体检报告 AUDIT-20260919-v2.md 的 P1/P2 缺陷经确认后全部修复并有修前复现/修后验证的成对证据",
+        "结构性硬化落地：pull 分块失败不推进增量游标；app_settings 读取收口为类型化助手",
+        "ingestion.rs 拆分为领域模块，行为零变化，四门禁不回归",
+        "死代码/空壳集群处置完毕（删除或裁决保留），无未落实的宣称能力",
+        "设计边界项（P2-12/P3-11 等）经 owner 逐项裁决：实施或注释明示保留",
+        "既有质量底线延续：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283 不回退（通过数可增不可减）"
+      ],
+      "non_goals": [
+        "更换技术栈或迁移框架",
+        "重新设计全新 UI（沿用现有布局与交互习惯）",
+        "不引入新的外部服务或费用",
+        "不拆分 Overlays/Timeline/db/sync_map.rs/base.css 与协议客户端（评估结论：内聚良好，拆了只加跳转成本）",
+        "不动 merge_remote_status 一带同步合并语义（pending 保护/read-anywhere-wins/跨源副本记账，有书面不变式 TASK-060 §4）"
+      ],
+      "compatibility": [
+        "保留现有 SQLite 数据库与迁移",
+        "保留 Fever/GReader/本地抓取等同步协议行为",
+        "保留现有 UI 布局与交互习惯（重构不改版）",
+        "未提交的工作区修改与旧任务记录不动"
+      ],
+      "quality": {
+        "priority": "quality_first",
+        "maintainability": "单体模块拆分为领域模块（延续 db.rs 试点模式），前端补行为测试，lint/typecheck/test 作为门禁",
+        "stability": "现有 Rust e2e 与前端回归不回归；同步、抓取、播放主流程稳定",
+        "performance": {
+          "mode": "measure",
+          "workload": "大量订阅与文章（万级）下的启动、布局切换、正文加载",
+          "targets": [
+            "社交布局正文加载不再无限等待，与切换布局后的秒开对齐"
+          ],
+          "rationale": "REQ-001/003 涉及加载性能，需以实际测量判断"
+        }
+      },
+      "requirements": [
+        {
+          "id": "REQ-003",
+          "kind": "bug",
+          "description": "本地抓取模式下，本地文章数量与状态和同步后端不一致",
+          "in_scope": true,
+          "acceptance": [
+            "本地抓取模式文章数量与状态与后端对齐"
+          ]
+        },
+        {
+          "id": "REQ-007",
+          "kind": "improvement",
+          "description": "疑似存在空壳/未完成功能与隐藏 Bug，先由 Agent 排查列出清单",
+          "in_scope": true,
+          "acceptance": [
+            "排查清单列出发现与建议，逐项经用户确认后才纳入实施"
+          ]
+        }
+      ],
+      "ui": {
+        "mode": "existing",
+        "style_intent": "保持现有布局与交互习惯，重构不改版；统一控件风格（下拉选择框等不一致组件对齐一致），打磨动画流畅度与文案",
+        "target_devices": [
+          "Windows 桌面端"
+        ]
+      }
+    },
+    "reference_candidates": [],
+    "read_first": [
+      "AGENTS.md",
+      "WORKFLOW-KIT.md"
+    ],
+    "candidate_digest": "5f58c8241220e84f38e8bd3a40af83735ebc7643c2ac9351757b0a5802b2e07b",
+    "deadline_at_utc": "2026-10-07T11:47:19.046664Z",
+    "role": "reviewer",
+    "verification": {
+      "schema_version": 1,
+      "id": "RUN-97860d5bd86d4f19a95f860be2d27c70",
+      "task_id": "TASK-121",
+      "kind": "verification",
+      "outcome": "completed",
+      "executor": {
+        "harness": "local_process",
+        "model": null,
+        "context_id": "tool-fa5969059262410b8ce1aca6619c307a"
+      },
+      "started_at_utc": "2026-10-07T08:17:37.553703Z",
+      "finished_at_utc": "2026-10-07T08:18:05.506443Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "input_digest": "f9659a933589667ba49d5e950771e39c80e11fc091127531dad0c7fcc3fd09e5",
+      "candidate_digest": "5f58c8241220e84f38e8bd3a40af83735ebc7643c2ac9351757b0a5802b2e07b",
+      "raw_output_refs": [
+        ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-cargo_fmt.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-cargo_fmt.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-lint.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-build.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-frontend.stderr.txt"
+      ],
+      "checks": [
+        {
+          "gate_id": "cargo_fmt",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-cargo_fmt.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-cargo_fmt.stderr.txt",
+          "candidate_digest": "5f58c8241220e84f38e8bd3a40af83735ebc7643c2ac9351757b0a5802b2e07b",
+          "command": {
+            "argv": [
+              "C:\\Users\\Wade\\.cargo\\bin\\cargo.exe",
+              "fmt",
+              "--check"
+            ],
+            "cwd": "src-tauri",
+            "started_at_utc": "2026-10-07T08:17:38.659315Z",
+            "finished_at_utc": "2026-10-07T08:17:39.688571Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-cargo_fmt.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-cargo_fmt.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "cargo_test",
+          "status": "NOT_APPLICABLE",
+          "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：由 CI rust job 承担；本卡 CI 失败即门禁失败"
+        },
+        {
+          "gate_id": "cargo_clippy",
+          "status": "NOT_APPLICABLE",
+          "reason": "同 cargo_test"
+        },
+        {
+          "gate_id": "lint",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-lint.stderr.txt",
+          "candidate_digest": "5f58c8241220e84f38e8bd3a40af83735ebc7643c2ac9351757b0a5802b2e07b",
+          "command": {
+            "argv": [
+              "D:\\Program Files\\nodejs\\node.EXE",
+              "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "lint"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-10-07T08:17:39.771835Z",
+            "finished_at_utc": "2026-10-07T08:17:40.453407Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-lint.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-lint.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "build",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-build.stderr.txt",
+          "candidate_digest": "5f58c8241220e84f38e8bd3a40af83735ebc7643c2ac9351757b0a5802b2e07b",
+          "command": {
+            "argv": [
+              "D:\\Program Files\\nodejs\\node.EXE",
+              "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "build"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-10-07T08:17:40.527559Z",
+            "finished_at_utc": "2026-10-07T08:17:45.470283Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-build.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-build.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "frontend",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-frontend.stderr.txt",
+          "candidate_digest": "5f58c8241220e84f38e8bd3a40af83735ebc7643c2ac9351757b0a5802b2e07b",
+          "command": {
+            "argv": [
+              "D:\\Program Files\\nodejs\\node.EXE",
+              "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "test:frontend"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-10-07T08:17:45.540224Z",
+            "finished_at_utc": "2026-10-07T08:18:05.124332Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-frontend.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-frontend.stderr.txt"
+          }
+        }
+      ],
+      "review": {
+        "mode": null,
+        "verdict": null,
+        "report": null,
+        "candidate_digest": null
+      },
+      "estimated_cost_usd": null,
+      "pid": 10956,
+      "controller_pid": 32352,
+      "commands": [
+        {
+          "argv": [
+            "C:\\Users\\Wade\\.cargo\\bin\\cargo.exe",
+            "fmt",
+            "--check"
+          ],
+          "cwd": "src-tauri",
+          "started_at_utc": "2026-10-07T08:17:38.659315Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-cargo_fmt.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-cargo_fmt.stderr.txt",
+          "finished_at_utc": "2026-10-07T08:17:39.688571Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "D:\\Program Files\\nodejs\\node.EXE",
+            "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "lint"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-10-07T08:17:39.771835Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-lint.stderr.txt",
+          "finished_at_utc": "2026-10-07T08:17:40.453407Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "D:\\Program Files\\nodejs\\node.EXE",
+            "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-10-07T08:17:40.527559Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-build.stderr.txt",
+          "finished_at_utc": "2026-10-07T08:17:45.470283Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "D:\\Program Files\\nodejs\\node.EXE",
+            "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "test:frontend"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-10-07T08:17:45.540224Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-97860d5bd86d4f19a95f860be2d27c70-frontend.stderr.txt",
+          "finished_at_utc": "2026-10-07T08:18:05.124332Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        }
+      ]
+    },
+    "verification_ref": ".workflow-kit/tasks/runs/RUN-97860d5bd86d4f19a95f860be2d27c70.json",
+    "required_review_areas": [
+      "requirements",
+      "regression",
+      "failure_paths",
+      "maintainability",
+      "performance"
+    ],
+    "required_review_mode": "independent_required",
+    "candidate_files": [
+      {
+        "path": ".workflow-kit/docs/DEC-gate-adjust-20261007.md",
+        "sha256": "6921a0bde4c5b29a620af19bc1815a7a2240a4dbca44cca9496403af41c9d6f9"
+      },
+      {
+        "path": "src-tauri/src/ai.rs",
+        "sha256": "10636ac2054e8fbc98f54ecb939e796c20ae0e583ccb4b8c5259756e4b786774"
+      },
+      {
+        "path": "src-tauri/src/commands/ai.rs",
+        "sha256": "4807b12e3104e070b46650861722f690b3a60203502b084fe2d4cf500ca65b3d"
+      },
+      {
+        "path": "src-tauri/src/commands/articles.rs",
+        "sha256": "4f16e2aa7102db4b28ca44b7af411a7eed0d0d8d743fbecca40674bcae8e8ae5"
+      },
+      {
+        "path": "src-tauri/src/commands/folders.rs",
+        "sha256": "ddbfdef5ad50b699ad62005616e027505ef61e59b05037135bcb5d744f5eff2e"
+      },
+      {
+        "path": "src-tauri/src/commands/mod.rs",
+        "sha256": "a4f3deda54bfed7923012bee12c47db75d00c524649fd550d4793591368c63e6"
+      },
+      {
+        "path": "src-tauri/src/commands/opml.rs",
+        "sha256": "470ed7e50e5518dfebf8f28cd3155eeee63b1f60e8743eaeecf974e8363e22d1"
+      },
+      {
+        "path": "src-tauri/src/commands/settings.rs",
+        "sha256": "374571f262ca0c23f2217b457f8973eef4e8a9542c42ae732004ef447fc5c68c"
+      },
+      {
+        "path": "src-tauri/src/commands/sync.rs",
+        "sha256": "49721f6816c7e669458821ce14f84571296ee010f9509df7a414abd798660b88"
+      },
+      {
+        "path": "src-tauri/src/config_sync.rs",
+        "sha256": "a6b712a76ee6fc143d98a8abb3a33ad9b423f36ee8fc71e11dda0b0c392c5495"
+      },
+      {
+        "path": "src-tauri/src/credentials.rs",
+        "sha256": "23c2c920c8ff0297ee73f3d94023990fe0f92c1125376c246b57fbc2f477bc9f"
+      },
+      {
+        "path": "src-tauri/src/db.rs",
+        "sha256": "142315ede969c99b46dea991c2bd6784457241d346f7ee9f7cf767fb8e8966fa"
+      },
+      {
+        "path": "src-tauri/src/db/articles.rs",
+        "sha256": "c7d8b613b7a75151649aecb8e7c18efdac4136371d577abef6d79dd9838e7b71"
+      },
+      {
+        "path": "src-tauri/src/db/auth_probe.rs",
+        "sha256": "e26a2adabef716281df32327ee7578f0ec130fc79c3c44c213361e913306f170"
+      },
+      {
+        "path": "src-tauri/src/db/commands_extraction_tests.rs",
+        "sha256": "33140f8382a6a72c3abb5fbe031b93de9ac23fc8013fc875cd257f29ba0a0f9f"
+      },
+      {
+        "path": "src-tauri/src/db/dedup_tests.rs",
+        "sha256": "c9385edb5332e3faec70a26c73bce137d8e6e56c6aaf7f77259813162e2f4b2a"
+      },
+      {
+        "path": "src-tauri/src/db/feeds.rs",
+        "sha256": "e5b84609d14e4d77d93c78f4ce3d208c6df3d2ca5b57db2bdf9bb5c439ec302e"
+      },
+      {
+        "path": "src-tauri/src/db/folders.rs",
+        "sha256": "a4d702f8a8676b3caecbdcca47aac64bbb14f3ca41908476280fec1cafa76329"
+      },
+      {
+        "path": "src-tauri/src/db/migrations.rs",
+        "sha256": "b0780ca3e3afed7017d69de3f334bec807e0368948d81310b72a19f6265b3945"
+      },
+      {
+        "path": "src-tauri/src/db/settings.rs",
+        "sha256": "28b3417014357b1ec27b8a7d23203f3fa5cf77a7527141b6a339abfcf33cdd42"
+      },
+      {
+        "path": "src-tauri/src/db/sync_extraction_tests.rs",
+        "sha256": "565f8c95cc8105c3ea6968cd313f235c5efd5cfe37f6351bd42d11a3d4469cb6"
+      },
+      {
+        "path": "src-tauri/src/db/sync_map.rs",
+        "sha256": "23ebd3e1fa80baa9f93bb91f048f7a7a64ca9af0eafae5dc5f622d89406a41fd"
+      },
+      {
+        "path": "src-tauri/src/db/sync_queue.rs",
+        "sha256": "47a000c708ff0e2bf098f269bad5248111b7cb51c26a141896a63d4c2fdbf7f5"
+      },
+      {
+        "path": "src-tauri/src/db/url_norm.rs",
+        "sha256": "930e332a4883b65e42ea06f71c4b3f9488227375112b0169df8868ce623ad308"
+      },
+      {
+        "path": "src-tauri/src/endpoint_resolve.rs",
+        "sha256": "6eee2a7b1cf53f774ced5818ba92238ffae3d1fd9d30f607e909484de8f1d60e"
+      },
+      {
+        "path": "src-tauri/src/error.rs",
+        "sha256": "eae55f5577c34770e082cd873bdbe691da31c71d6b1cdf31d3137ad1bff0132e"
+      },
+      {
+        "path": "src-tauri/src/extraction.rs",
+        "sha256": "8442ee4fb8b2b0b099aff444ebb0809f24e55ef06a0228653b26f2d36b32b0ba"
+      },
+      {
+        "path": "src-tauri/src/fever.rs",
+        "sha256": "6517ecb172ea084fe33435adda1ec5902f852f0ce72b6bf72b54b2da6ba2a6f2"
+      },
+      {
+        "path": "src-tauri/src/github_auth.rs",
+        "sha256": "e2317105e3d5f21d2b01c9af0693780651566597304e40bacca0fcade043e45e"
+      },
+      {
+        "path": "src-tauri/src/greader.rs",
+        "sha256": "2511c682fff877d19231749ded98347b914736df9cb53735e47634728ad60fc8"
+      },
+      {
+        "path": "src-tauri/src/ingestion/favicon.rs",
+        "sha256": "1ecff53f9b96ce761ff9458f865db81ec431ec822ca6a3b556f301cffb8c8bad"
+      },
+      {
+        "path": "src-tauri/src/ingestion/http.rs",
+        "sha256": "4a8428e4f676eb4e11f39c75d18d3c1834b6538b09d407fc9e6af39996071eea"
+      },
+      {
+        "path": "src-tauri/src/ingestion/mod.rs",
+        "sha256": "bcc8763bab76fae6a3467999364af3698408dca666cfdac8eba998643b6e6d31"
+      },
+      {
+        "path": "src-tauri/src/ingestion/parse.rs",
+        "sha256": "7d3fdde050d8fa2f508715f5d53bdec2f0d584e10bb54e260f58cc334e536dce"
+      },
+      {
+        "path": "src-tauri/src/ingestion/staged.rs",
+        "sha256": "0b9c4f37036ae1ac8b06df0161ed3b463ea0216e41f2b63904c382f216c78b56"
+      },
+      {
+        "path": "src-tauri/src/lib.rs",
+        "sha256": "f287c6b7921daea2c72b20fc364e5fc851002154b9cc8e67eead514225cdf241"
+      },
+      {
+        "path": "src-tauri/src/main.rs",
+        "sha256": "e5dfab54c7a9843285d54ff5a783c00813cd3f28d1bb2f6982aa348697cbb1c4"
+      },
+      {
+        "path": "src-tauri/src/media.rs",
+        "sha256": "dab7146de3a9433b83f70f29a2ddda31347b0b3f3ff2c5e20b9a1762220f84ae"
+      },
+      {
+        "path": "src-tauri/src/opml.rs",
+        "sha256": "e65ae3ae7a3846b90042550c4072f1431e7a4b585215c64752c53f4acef2a9c0"
+      },
+      {
+        "path": "src-tauri/src/sanitize.rs",
+        "sha256": "319778ace4e57b93f0f494b8d0ec08afd0561dd04a635963c596be91af45d373"
+      },
+      {
+        "path": "src-tauri/src/scheduler.rs",
+        "sha256": "9200c93dbe89fe0a528535c8bfe3b14e9b5a7e43225609c4e6d9d412009b1eed"
+      },
+      {
+        "path": "src-tauri/src/state.rs",
+        "sha256": "31519b71581e8d0ca8ea43874c7c18c119f2811921bcf7db9e5534be62e3f06b"
+      },
+      {
+        "path": "src-tauri/src/sync/conflict_policy.rs",
+        "sha256": "8e0319ae9adc74b36c4433cd4782dfe4721abc8b2d7995b421695eacd7516797"
+      },
+      {
+        "path": "src-tauri/src/sync/credentials.rs",
+        "sha256": "05968ceedd344573311ae1d67ed565200bba62f9095631055855994de7d6fbb1"
+      },
+      {
+        "path": "src-tauri/src/sync/entries.rs",
+        "sha256": "fe7ffa6ae2768fb98991a84967f2c172d40b803edcc6cc14bbb89f3d8aafbe84"
+      },
+      {
+        "path": "src-tauri/src/sync/fever_pull.rs",
+        "sha256": "453735bd481913be726c7accd6c8ca7ee7e584d0678e40f29d8bf4ad78309e61"
+      },
+      {
+        "path": "src-tauri/src/sync/greader_pull.rs",
+        "sha256": "f8fb2f92d8431a2f03e18f300026b51b4a6ef0ecdb46d6ea091f77c09938dd72"
+      },
+      {
+        "path": "src-tauri/src/sync/mod.rs",
+        "sha256": "4acbc2be6c613250961288bf3d937267989ccbc8efa1a43c0250a6c7d7e86fdc"
+      },
+      {
+        "path": "src-tauri/src/sync/phases.rs",
+        "sha256": "99b215085a19395b51c4b99e82ea02c6e3f6abd68d86fc405e28a067ca992056"
+      },
+      {
+        "path": "src-tauri/src/sync/push.rs",
+        "sha256": "087af3c93167f4b4c646bd2fa1a8bcd7aa9f433af0226cc8788b9737523e0cfe"
+      },
+      {
+        "path": "src-tauri/src/sync/subscriptions.rs",
+        "sha256": "4c2d0338c23697e863fd2d4e30b35fe496feef68856046f7dbb84e5c0905332b"
+      },
+      {
+        "path": "src-tauri/tests/account_lifecycle_e2e.rs",
+        "sha256": "3afe5cf361ff73edc7bd725c61cdedf78fd6e9cf759f39d5795bfc5273093bab"
+      },
+      {
+        "path": "src-tauri/tests/ai_e2e.rs",
+        "sha256": "40c76ec2048a0d6b1cbb3795ca5b768c345b08d863dd625001cc766ffc4b774a"
+      },
+      {
+        "path": "src-tauri/tests/common/mod.rs",
+        "sha256": "58d42cc3b667998fbf72d8c5c65fde073a34e5d19d824876ea008433209e78a5"
+      },
+      {
+        "path": "src-tauri/tests/config_sync_e2e.rs",
+        "sha256": "1fd5228346e3342373582690b7c2a58db29ab1c031b1888c871786c386c5dcd6"
+      },
+      {
+        "path": "src-tauri/tests/cover_backfill_e2e.rs",
+        "sha256": "0e942e1a962c605699f52d58f52a69537efa2a2ca073c0827a5b2b94195ba4c0"
+      },
+      {
+        "path": "src-tauri/tests/dedup_sync_e2e.rs",
+        "sha256": "9c5e309f4a2873d8556de22e91763eaabbfb938cca128780b0fb9f185d341755"
+      },
+      {
+        "path": "src-tauri/tests/dual_client_e2e.rs",
+        "sha256": "079f581af7a0d6b095d12620f688ff00d6ff50b2ba8dac0be1992c7ad8f4e110"
+      },
+      {
+        "path": "src-tauri/tests/endpoint_autodetect_e2e.rs",
+        "sha256": "d934d032e88b2005a86e4c1c339efacc730c926c8d7d81bdddfa69a3bbc0987b"
+      },
+      {
+        "path": "src-tauri/tests/feed_edit_e2e.rs",
+        "sha256": "7aefa0dfe53c45decbcc7c10968ae90061350b72f9ed37ffddb14eb18e0db66c"
+      },
+      {
+        "path": "src-tauri/tests/fever_freshrss_e2e.rs",
+        "sha256": "50f4596f97ae705ed597b3d4368988c9185ac10876dd29332dc88acb6595b587"
+      },
+      {
+        "path": "src-tauri/tests/fever_live_e2e.rs",
+        "sha256": "fa9aaa9414ee5e2ae7a16c8fabcd4bd41399edd96f3b06938225a93ea2dd0a3b"
+      },
+      {
+        "path": "src-tauri/tests/fever_sync_live_e2e.rs",
+        "sha256": "6908e30cdf1dd570fd2b61823184cc57ab8aa161b1a66a9ebe27b6175c283baf"
+      },
+      {
+        "path": "src-tauri/tests/fixtures/local_feed.xml",
+        "sha256": "5a813b1eb4b55276f85fa54eb7fef5289b8917bba5e34cdd21bc2140f3426fdc"
+      },
+      {
+        "path": "src-tauri/tests/fixtures/row_fixture.json",
+        "sha256": "eedbb5f5a54a8b92e954eb8d8312f6a79de9309ee6d0ea1510f6782c12ec9164"
+      },
+      {
+        "path": "src-tauri/tests/github_auth_e2e.rs",
+        "sha256": "7b7dc15a0cb6d7f5c4bf386b032e15b34d25655a8f9de45d13cdc95363e84cdc"
+      },
+      {
+        "path": "src-tauri/tests/greader_live_e2e.rs",
+        "sha256": "ab512153565af72f9befc12987c74647df81d02d02189d9fb1f844267d958531"
+      },
+      {
+        "path": "src-tauri/tests/ingestion_e2e.rs",
+        "sha256": "773e8da9b6140ee7197205885c0cf334c243d27411ad97329fae60b428965586"
+      },
+      {
+        "path": "src-tauri/tests/migration_test.rs",
+        "sha256": "bd68f64de60398e96e5b8db72dc43aa3109692fb4b2a7e52a752a107b5495e35"
+      },
+      {
+        "path": "src-tauri/tests/mock_greader.rs",
+        "sha256": "cd9e70d473ca1b104975899e61f6e758732e9e32356cf7e576d2285619ac86a8"
+      },
+      {
+        "path": "src-tauri/tests/pull_cursor_e2e.rs",
+        "sha256": "7e37d712d05d94799cb9f084d13287ac101e99bd8926e96cdb92ec452e9500b6"
+      },
+      {
+        "path": "src-tauri/tests/pull_window_e2e.rs",
+        "sha256": "b6fb4cb6579b11635c32c9812fa2576640dbb66eaceb9907664018d105c3277c"
+      },
+      {
+        "path": "src-tauri/tests/refresh_dedup_e2e.rs",
+        "sha256": "7fbfcc12fd0b334b205631971ab86af3fa4e219e383c251382b1c97ab3db9004"
+      },
+      {
+        "path": "src-tauri/tests/regression_e2e.rs",
+        "sha256": "bc2501d08d02b7de597687663d5fcbf30c2add46d6dfe68b2c42a2332ed8ee6e"
+      },
+      {
+        "path": "src-tauri/tests/row_fixture_e2e.rs",
+        "sha256": "02b380038ed488f840575891bf62eaaf3d46d9ef2d21ca8c2423bcb3f502dbe1"
+      },
+      {
+        "path": "src-tauri/tests/scheduler_e2e.rs",
+        "sha256": "713e0fb7f43d332d19dc4f5c7ca0f6e585eb4a7744c5e69d81d7cb1bcbd75bc3"
+      },
+      {
+        "path": "src-tauri/tests/staged_refresh_e2e.rs",
+        "sha256": "43ffa5864aae8602356b1a91cbcc8f6c4fa0f2a4df8f04492a7243bb58600b7e"
+      },
+      {
+        "path": "src-tauri/tests/star_reconcile_truncation_e2e.rs",
+        "sha256": "fdccff5b4a0a04291dddc55419715dd3ed10eb9c8f4ddbd317f18c57379f1e33"
+      },
+      {
+        "path": "src-tauri/tests/sync_content_e2e.rs",
+        "sha256": "6d07c2bb6bb823c2f8e0e3aa1487509ab16675325313cc3157c65a3b7d075363"
+      },
+      {
+        "path": "src-tauri/tests/sync_e2e.rs",
+        "sha256": "c8f891e7ce9cb861bc67e222d83181513b4919dbf1ad37925119f725082891b8"
+      },
+      {
+        "path": "src-tauri/tests/sync_gap_repro_e2e.rs",
+        "sha256": "0797eb444b491b1598376d18f652ed8e7325d0a4b7745d0c8afc7dd54929aa96"
+      },
+      {
+        "path": "src-tauri/tests/sync_phases_e2e.rs",
+        "sha256": "0fd0d96d28915f1d522c01348b64181952ba8192ff7578903055c7c07e434e35"
+      },
+      {
+        "path": "src-tauri/tests/unique_db_path_test.rs",
+        "sha256": "df09764839c7c3e11e473b001d91a68e6e14af14590d5111350b52f9075b692b"
+      },
+      {
+        "path": "src/App.tsx",
+        "sha256": "7fa22fc2e73f07385aa44b7ac9ffb9c0748f969720825f2db91d2729f0346c99"
+      },
+      {
+        "path": "src/components/ContextMenu.tsx",
+        "sha256": "476c192de0f3d14eccf399c4449e9cd3f963e0cf918cd78813ffe41adebfdcbb"
+      },
+      {
+        "path": "src/components/CoverImage.tsx",
+        "sha256": "acde60105681e16398ef7cd2e9daade5ab527c9297751be3b92599fbf0a4fb31"
+      },
+      {
+        "path": "src/components/Overlays.tsx",
+        "sha256": "437ca347f28fe42077a15565ff3749870c6e38b954ee557eb2384fb1f01e43b9"
+      },
+      {
+        "path": "src/components/PlayerBar.tsx",
+        "sha256": "1d177b4b4aaa17ae824930615eef1e1f7d97b483642e0b2ba3259335fd1d8619"
+      },
+      {
+        "path": "src/components/Reader.tsx",
+        "sha256": "edd1e7800c0d9d3aa0d87a69fa236233c62e7ca5320dd6fcde446a576ae058a9"
+      },
+      {
+        "path": "src/components/SettingsModal.tsx",
+        "sha256": "08ec2b6251cd4426a2cd2eca8d87a0b3dda27e46d5e6d7ad533190b2d8afce43"
+      },
+      {
+        "path": "src/components/Sidebar.tsx",
+        "sha256": "8ff311c87982af744dbea362e96930c94e1f87a3fde56c174bbc48bf36af6e4c"
+      },
+      {
+        "path": "src/components/Timeline.tsx",
+        "sha256": "963a208a4a73cb1faa9c220bc92363d7e7b1df2e96b4521b95158be278dad008"
+      },
+      {
+        "path": "src/components/anchorScopeNav.ts",
+        "sha256": "f008ac5e8bc8802033fac247db06c7211ce6a06f2d5790ef0628021f5e4ec5cb"
+      },
+      {
+        "path": "src/components/icons.tsx",
+        "sha256": "b9aff7b2c075ce9dd24223cc8abf8d2f82fcc22fe240cd989cab91860eec57be"
+      },
+      {
+        "path": "src/components/primitives.tsx",
+        "sha256": "fd79c9f7d6dca710f838a4da83f6c9d0c04256fbb4f989c6e7395c1f03089aa5"
+      },
+      {
+        "path": "src/components/scrollAwayRead.ts",
+        "sha256": "acd6b0ce741cb85b05df53894c8bfb2db33b8a72db75907e5a67c0d16555d976"
+      },
+      {
+        "path": "src/components/settings/AboutTab.tsx",
+        "sha256": "81e61ac583c3517ba1c803a144ad8b87cb07ef7f09c7e37001fdbf41aa11c772"
+      },
+      {
+        "path": "src/components/settings/AiTab.tsx",
+        "sha256": "61c54528ce65b54448caebb5c7bb33167ef238d40f4073bc0128804868b4d00e"
+      },
+      {
+        "path": "src/components/settings/AppearanceTab.tsx",
+        "sha256": "b401bde08c8967cce5aefffb68badf4d112c872013f24ede07dc82748986656f"
+      },
+      {
+        "path": "src/components/settings/AutoStartSwitch.tsx",
+        "sha256": "0973a70933b82b38097d18495e6b8253d836d62dacf825f6ab4c92c670432be8"
+      },
+      {
+        "path": "src/components/settings/CacheCleanupSection.tsx",
+        "sha256": "9966203f4c1a74aec8cf947b3592a8b67f5b23ed6acaad5fed95bd345a6fe991"
+      },
+      {
+        "path": "src/components/settings/ConfigSyncSection.tsx",
+        "sha256": "b6dcd9ab104b3775e312b24f7606e5c37d46f27f27af2bebfa3d4d13a83c3c9b"
+      },
+      {
+        "path": "src/components/settings/FeedsTab.tsx",
+        "sha256": "ede70afdae8438aafe90bf04ece23dab6c9fed4a944a75a514100f2f41cf2ed5"
+      },
+      {
+        "path": "src/components/settings/GeneralTab.tsx",
+        "sha256": "6af737ebac85b9037e3baaec448317133aa50bb4524f17aca99350455b524dcc"
+      },
+      {
+        "path": "src/components/settings/ReadingTab.tsx",
+        "sha256": "1c1bf2ec3158028a62064e99688c8a3a57fe90a36486d63c00015ae87a454f80"
+      },
+      {
+        "path": "src/components/settings/SettingsSidebarFooter.tsx",
+        "sha256": "ecbc9619017df8065f8846b12785c1172e50d78de4a22d933ad6cb2f3b098494"
+      },
+      {
+        "path": "src/components/settings/ShortcutsTab.tsx",
+        "sha256": "f6bf0c0d2c41d227e9756de2910467e4d28e21964317e75da87d51aec74deb32"
+      },
+      {
+        "path": "src/components/settings/SyncTab.tsx",
+        "sha256": "69350e53bd79f9edcad7d469f0d44eb2ae1b10c98c2d4ece2e2e2c97fc5e7f35"
+      },
+      {
+        "path": "src/components/settings/aiConfig.ts",
+        "sha256": "3fa952c1fcdfb53cbb0f91f7ed1b7229759943d8d8bfeb1ebd04cd877133e747"
+      },
+      {
+        "path": "src/components/settings/compareVersions.ts",
+        "sha256": "2ea002c70004f42931e6e3a496d2c2e1a81cbc25c3b6c116ff8f8e25a47de4d6"
+      },
+      {
+        "path": "src/components/settings/endpointHint.ts",
+        "sha256": "01bddaee3639dec14477f204a9480388de9b8d00ebfe4c05cd2031675c9e7096"
+      },
+      {
+        "path": "src/components/settings/layoutOptions.tsx",
+        "sha256": "d97053c551499e62c41f2cf198f483890b3d50157f754634838a957985d67594"
+      },
+      {
+        "path": "src/components/settings/shared.ts",
+        "sha256": "7444ddc08e6510731985427198d672d3ecba1d0a59e9309003de697f52fbc20b"
+      },
+      {
+        "path": "src/components/shortcutYield.ts",
+        "sha256": "66f2c5029e8d363830babf1f99b740143e6bca8a2fe0d9160586cff0c6cc1724"
+      },
+      {
+        "path": "src/components/timelineAnchor.ts",
+        "sha256": "fc1260c68be9862757a95dfc8d6f61682b7fcd914ae240ae57eb4357d22111a6"
+      },
+      {
+        "path": "src/components/timelineRefill.ts",
+        "sha256": "e7a6e1374cc071f59b95e822de75d5ad609acc28127512b646c7f9759e7c4dc1"
+      },
+      {
+        "path": "src/components/timelineSentinel.ts",
+        "sha256": "6da2fbc6999eb463eb2b0f293815857c978841c406cde937f37fbfb3722a5601"
+      },
+      {
+        "path": "src/components/useEnteringClass.ts",
+        "sha256": "dec0d43a3a14cb5808e3a50f862bf245ace7dec1245c5905f584610ebd3e0b89"
+      },
+      {
+        "path": "src/index.css",
+        "sha256": "5b7f28dce8a0d58880caec4fea84aa7d66ae1df87e0d1536404c171414726c71"
+      },
+      {
+        "path": "src/lib/api.ts",
+        "sha256": "7e530ae1296489713a3b74a83688b0fab6c6d9a57f8af35ab0f251a9645122f7"
+      },
+      {
+        "path": "src/lib/coverImage.ts",
+        "sha256": "175ecf9c692aa51e3123d0d604e930936ddc6607cf005233aca55bbf2a2604e1"
+      },
+      {
+        "path": "src/lib/external.ts",
+        "sha256": "44fde0dd0eef6b67094b62d9a0ee74183cea0ec91bc68258531add620cd9e9e1"
+      },
+      {
+        "path": "src/lib/format.ts",
+        "sha256": "35c7e1185478bfc5f14f7e13da95d6ec32948ef36672a9129b24c99514440ca6"
+      },
+      {
+        "path": "src/lib/imageProxy.ts",
+        "sha256": "6d2a830596eb510695a240e1262f1736c449e809f4d6ca7e326e445657f07d5c"
+      },
+      {
+        "path": "src/lib/jkNavigation.ts",
+        "sha256": "4978fde52308b7745f3d11e07d4a7479e5a926d455b6cc253f4bce706c25e333"
+      },
+      {
+        "path": "src/lib/syncPill.ts",
+        "sha256": "8bd90898f60fe875d071a12be6d6105d260be674ba852dfff396d542740959db"
+      },
+      {
+        "path": "src/main.tsx",
+        "sha256": "6e9e5807fcbd48b75a96db5cbef36c996262196be42e6d4760dc86babbe61ad2"
+      },
+      {
+        "path": "src/mockData.ts",
+        "sha256": "cbe88ab8cba6d9eb25bd95ba642b24941c69162909450bf1fe30072476cebef1"
+      },
+      {
+        "path": "src/store.ts",
+        "sha256": "24b8cd3e59fbf9479283d5bf3afdd10258c0df95ac028210e6300e7bc0859dce"
+      },
+      {
+        "path": "src/store/internals.ts",
+        "sha256": "fe0be2a23076c07d983112a67061ee34fe8f46e3274655d97575aab00032b829"
+      },
+      {
+        "path": "src/store/selectors.ts",
+        "sha256": "81c4b616ea79de8d15ca7b4ee08495a5bcfa53d350795f2a40f4c39500f0d8f7"
+      },
+      {
+        "path": "src/store/settingsValidation.ts",
+        "sha256": "6eeb761a6c5bee910f28be59fae759c9a17b898ce92c6944ecafebd519e2896a"
+      },
+      {
+        "path": "src/store/slices/ai.ts",
+        "sha256": "75b1cc2dcd9bb44614bf988c8f5ac0ca716258bd03cf9e631d06afa6c2e14ff4"
+      },
+      {
+        "path": "src/store/slices/bootstrap.ts",
+        "sha256": "ad941dd19294b84eed18dade6d997c50eeddaa14ef6e3a9bc65a7f812e24ce9d"
+      },
+      {
+        "path": "src/store/slices/feeds.ts",
+        "sha256": "e50116d2d6e40d91c55200ea5c5c94f129429f8568e14557dceb304be272af15"
+      },
+      {
+        "path": "src/store/slices/nav.ts",
+        "sha256": "0da15dd3481606505eb509db782cadae6958b29950c230f1c2a20dbb2c620d69"
+      },
+      {
+        "path": "src/store/slices/player.ts",
+        "sha256": "9ebe51f11338508157fe4191740bf2a5123e70a3726d2ab7b98e6bd6b0b6b342"
+      },
+      {
+        "path": "src/store/slices/reader.ts",
+        "sha256": "1171567b6490e46a78516de744f3e2c4b8118b6704332ff1d911fef4da4ced80"
+      },
+      {
+        "path": "src/store/slices/settings.ts",
+        "sha256": "3c9093c81d7937089c6f05ce4284a0b2f7678fe193f4368dc471cb684d34d9b6"
+      },
+      {
+        "path": "src/store/slices/sync.ts",
+        "sha256": "fd3b318d6c5ee9bbc598a29c5959d17d42a01af860e12be5d649a1707772c592"
+      },
+      {
+        "path": "src/store/slices/ui.ts",
+        "sha256": "c30c4e43b9bdafe6f51a4fb65622e39883b8f948c3f79ce9c83f9ee2b08b1709"
+      },
+      {
+        "path": "src/store/syncErrors.ts",
+        "sha256": "8d504273c846d4b78c0cc038563ce110aba9a1974feb69c8484ccb3ae44e7000"
+      },
+      {
+        "path": "src/store/types.ts",
+        "sha256": "cc21e1b55c64297c4b6a3262ce0fb635ae159a87a92a30aea66db6b061ee2f96"
+      },
+      {
+        "path": "src/styles/base.css",
+        "sha256": "716fb8dba7e3e1624849208bc56bd7b36f19af0877bd72648798f3cccded2641"
+      },
+      {
+        "path": "src/styles/tokens.css",
+        "sha256": "1c350244206e1bb25ab4593d799eb51e3852b743762d3151986db92e8d88e28d"
+      },
+      {
+        "path": "src/types.ts",
+        "sha256": "7dfb6936ed0dfb9c2a627d2d5abcd8fe543c2534a59955167cea816a83146397"
+      },
+      {
+        "path": "tools/frontend-regression.mjs",
+        "sha256": "cde3f0b5879a6e209d115b88e235cc3749284c2ce05fdbd27fb738b460b996e8"
+      }
+    ],
+    "changed_files": [
+      "src-tauri/src/db/articles.rs",
+      "src-tauri/tests/ingestion_e2e.rs"
+    ]
+  },
+  "instruction": "把此输入交给未参与实现的新上下文；同模型即可，不要求 CLI。不要复制作者会话或通过预期。不能创建独立上下文时如实报告，按已确认审查策略处理。 审查证据只能引用候选文件或 tasks/runs、tasks/evidence 下的附件，不要引用任务记录、卡片或决定文件。"
+}

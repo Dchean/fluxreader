@@ -1,0 +1,161 @@
+{
+ "id": "TASK-123",
+ "title": "保位窗口扩展——深页阅读的后台刷新不再丢锚（审计 P2-5）",
+ "kind": "implementation",
+ "retry_safe": true,
+ "ui_change": false,
+ "objective": "修复第三方审计 P2-5（tmp/audit-20261007/REVIEW.md 第 5 节，探针 P7 场景）：①刷新固定 offset=0/limit=500——加载 1000 篇读到第 750 篇后后台刷新，列表缩回前 500，anchorRestoreIndex 返回 null（非文章删除，是刷新策略主动丢阅读窗口）；②组合问题：缓存返回先定位、导航仍无条件后台重拉第一页，返回锚在第二页时重拉再次删除锚（只订阅 switchRestoreNonce 的 effect 不能在重拉后解决）；③锚只存 id 不存卡片内像素偏移；250ms 节流无尾沿补记。修法要求（在 TASK-111/115 机制上扩展，不推翻）：①**刷新围绕当前已加载窗口**：reloadFromBackend 的 keepReadingPosition 路径（内容刷新三入口）改为「保留窗口刷新」——携带当前窗口边界（cursor.loaded 或 keyset 锚），刷新拉取覆盖 [首屏+已加载页]（分页语义下按已加载页数拉取），或更优：窗口内文章按 keyset 重取全窗口；窗口重建后锚 id 必在（除非真被删除）；②**缓存返回+重拉的组合**：切换返回的恢复 effect 与导航重拉的协调——重拉若导致锚丢失，恢复 effect 需在重拉落地后再次尝试（或重拉本身走保位窗口路径使锚不丢）；③锚存档增加 intra-item 像素偏移（卡片内 scrollOffset，恢复时 scrollToIndex+像素偏移）；250ms 节流加尾沿补记（停滚后补记一次最终位置）；④缓存截断记录窗口边界（审计：不能只保留 loadedCount 假定已移除条目可达——TASK-111 的 budget 截断若发生，恢复后续拉衔接已有 cursor；核实并锁定）。⑤回归 t123-* ≥5 条（探针 P7 场景转真实行为回归）：深页（1000+）读到 750 后台刷新保位；切换返回+重拉组合锚不丢；intra-item 偏移恢复；节流尾沿；缓存截断窗口边界。既有断言零弱化（t111-*/t115-* 语义保持）。",
+ "non_goals": [
+  "不改 keyset 分页语义（117）",
+  "不做 bodyById 变更（122）",
+  "不做真实挂载组件测试通道（独立评估）",
+  "画廊布局仍回落现状"
+ ],
+ "requirement_refs": [
+  "REQ-003",
+  "REQ-007"
+ ],
+ "reference_ids": [],
+ "decision_refs": [
+  ".workflow-kit/docs/DEC-refactor-roadmap-20261005.md",
+  ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+ ],
+ "dependencies": [],
+ "blocks": [],
+ "snapshot_paths": [
+  "src",
+  "tools/frontend-regression.mjs"
+ ],
+ "risk": {
+  "level": "medium",
+  "decision_ids": [
+   "DEC-gate-adjust-20261007"
+  ]
+ },
+ "scope": {
+  "allowed_paths": [
+   "src/**",
+   "tools/frontend-regression.mjs"
+  ],
+  "protected_paths": [
+   "AGENTS.md",
+   "CLAUDE.md",
+   "WORKFLOW.md",
+   "WORKFLOW-KIT.md",
+   "README.md",
+   "package.json",
+   "package-lock.json",
+   "src-tauri/**",
+   "docs/**",
+   ".workflow-kit/**"
+  ],
+  "network": "none",
+  "data": "synthetic_only"
+ },
+ "acceptance": [
+  "① 深页（窗口跨页）读到 750 篇后后台刷新：阅读位置保持（t123-*，探针 P7 本体转回归）",
+  "② 切换返回+导航重拉组合：锚不因重拉丢失",
+  "③ intra-item 像素偏移恢复；节流尾沿补记",
+  "④ 缓存截断窗口边界处理正确（恢复后续拉衔接不跳行）",
+  "⑤ 门禁全绿：frontend（t123-* 新增）、lint/build/cargo_fmt 不回退；cargo 由 CI 承担（DEC-local-cargo-gate-20261005）",
+  "⑥ 独立审查（全新子代理）PASS findings=0"
+ ],
+ "gates": [
+  {
+   "id": "cargo_fmt",
+   "program": "cargo",
+   "args": [
+    "fmt",
+    "--check"
+   ],
+   "cwd": "src-tauri",
+   "required": true
+  },
+  {
+   "id": "cargo_test",
+   "program": "cargo",
+   "args": [
+    "test"
+   ],
+   "cwd": "src-tauri",
+   "required": false,
+   "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 承担；本卡 Rust 零改动"
+  },
+  {
+   "id": "cargo_clippy",
+   "program": "cargo",
+   "args": [
+    "clippy",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+   ],
+   "cwd": "src-tauri",
+   "required": false,
+   "reason": "同 cargo_test"
+  },
+  {
+   "id": "lint",
+   "program": "npm",
+   "args": [
+    "run",
+    "lint"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "build",
+   "program": "npm",
+   "args": [
+    "run",
+    "build"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "frontend",
+   "program": "npm",
+   "args": [
+    "run",
+    "test:frontend"
+   ],
+   "cwd": ".",
+   "required": true
+  }
+ ],
+ "test_review": {
+  "behavior": "change",
+  "baseline": {
+   "status": "PASS",
+   "summary": "dev@TASK-122 后（91059a3）：frontend 723/723、CI 全绿。本卡扩展保位窗口，属行为增强。",
+   "evidence_ref": ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+  },
+  "decision_ids": [
+   "DEC-gate-adjust-20261007"
+  ],
+  "actions": [
+   {
+    "action": "add",
+    "target": "t123-* 回归（深页刷新保位/组合锚/intra-item/尾沿/截断边界）",
+    "reason": "审计 P2-5 修复需操作序列场景锁定（DEC-gate-adjust ①）",
+    "gate_ids": [
+     "frontend"
+    ]
+   },
+   {
+    "action": "keep",
+    "target": "既有 frontend/cargo fmt/lint/build 断言（t111-*/t115-*/t122-* 语义保持）",
+    "reason": "不回退证据",
+    "gate_ids": [
+     "cargo_fmt",
+     "lint",
+     "build",
+     "frontend"
+    ]
+   }
+  ]
+ }
+}

@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-111",
+  "run_id": "RUN-9bffe3094ee847199572940d82d4d7ec",
+  "status": "ready_for_verification",
+  "summary": "二阶段③：①缓存实体预算——viewEntriesCache 值升级为 {entries,loadedCount,exhausted} 快照（VIEW_ENTRIES_CACHE_ENTRY_BUDGET=1000 尾部截断，写入唯一收口 setViewEntriesSnapshot），nav 三处恢复用记录的 loadedCount/exhausted 而非截断长度（exhausted 两态与续拉衔接自洽，附带修复 TASK-110 偏移漂移场景的恢复误判）；②后台刷新保位——timelineAnchor 模块（250ms 节流记录顶条锚、filterKey 变化弃锚、anchorRestoreIndex 纯函数决策），三处内容刷新入口（feeds-updated/手动同步/单源刷新）经 opts.keepReadingPosition 透传，落地且快照即当前视图时 bump positionRestoreNonce，Timeline 订阅回位（suppressNextScrollEvents+scrollToIndex align:start），导航/启动/设置路径不透传不回位，锚丢失/上下文切换回落现状；③t111-* 断言 20 条（预算边界/截断恢复/续拉衔接判别/锚回位决策/回落/不干扰主动滚动/源级接线），(p3b) 一条按新 wire 形态更新附理由。自检：test:frontend 605/605（t103/t104/t109/t110 共 48 条原样过）、lint 0、build exit 0、cargo fmt exit 0。",
+  "changed_files": "auto",
+  "validation_requests": ["frontend", "lint", "build", "cargo_fmt"],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

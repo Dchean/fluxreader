@@ -1,0 +1,802 @@
+{
+  "ok": true,
+  "instructions": "# 审查执行器\n\n读取明确指定的审查包。任务的角色是 reviewer，输入包括 task_id、candidate_digest、原始需求/验收、质量目标、当前源码、完整差异、验证 RUN 与必要参考。先依据这些事实形成结论，不采用作者的“应该通过”。\n\nindependent 必须来自没有参与实现的新上下文。同一模型可以；同一上下文改名字不可以。Agent 包办不要求 CLI，宿主提供独立上下文即可。自审只能在策略允许且任务不是高风险时使用，并如实标记。\n\n## 五项核对\n\n- requirements：逐项对照用户的当前需求，包括 Bug、新增功能和兼容限制；检查是否漏做、顺带改变行为或扩大范围。\n- regression：阅读实际验证命令、原始输出及测试断言，检查它们是否能发现目标缺陷，是否弱化了仍有效的保护。\n- failure_paths：核对实际相关的异常、空输入、重复执行、恢复、数据/权限边界；需要时验证具体反例。不要只走成功路径。\n- maintainability：检查职责、依赖方向、重复规则、命名、模块边界及新增维护负担。工作量大不是拒绝必要改进的理由，抽象层数也不等于质量。结构调整（拆分、合并、抽取公共层）必须有 REFACTOR 列出的代码证据：变更原因不同、无法单独验证、重复规则、依赖方向、必须隔离的边界或真实并行冲突；只以行数或“太大”为理由的拆分、为将来复用预建的抽象，记为 finding。有证据需要拆而未拆的地方可以指出，不强制。\n- performance：检查代表性负载下的测量和回归；静态分析须明确其范围，不能伪称实测提升。不受影响时解释不适用，不强造基准。\n\ndocumentation/baseline 任务只需 requirements 和 regression 两项，其余三项可省略；其他任务五项齐全。每项保存 status、简短的结论依据 analysis 和 evidence_files。evidence_files 只能引用候选快照内的文件，或 .workflow-kit/tasks/runs/、.workflow-kit/tasks/evidence/ 下的附件；不要引用任务条目、任务卡、DECISIONS、PROJECT 或笔记，这些文件由工具改写，引用它们会让审查在保存后立即失效。需要引用其他源文件时，应由总控把它加进任务的 snapshot_paths 再验证。报告记录可核对事实，不要求披露内部推理过程。requirements/regression 不能标不适用；高风险的 failure_paths 也不能。未完成检查时用顶层 BLOCKED，有待修问题用 FAIL；不能留下 NOT_RUN/FAIL 项却给总体 PASS。\n\n自审前暂停编码，从原需求和完整差异重新检查，包括新增、删除、重命名、未跟踪文件。发现问题后回到原任务修复，重新验证再审，不在审查阶段改验收、预算或代码放行。\n\n## 适用性与 UI\n\n重构核对 test_review：原测试、CI、mock/fixture 和快照是否仍适用，适配是否保留行为，替换/退役是否有对应需求决定，新需求是否有覆盖。原始基线和已知失败应保留；命令没变不代表断言没弱化。\n\nui_change=true 时检查 UI 约定、当前截图、交互报告与 ui_checks，实际操作适用控件的展开、焦点、错误、窄屏和键盘状态；checked_states 填 ui_checks 的 id。没有真实视觉依据不能把构建成功写成界面通过。\n\n## 输出\n\n使用 contracts/review-result.schema.json 的完整结构。以下只是字段形状，标识、依据和路径必须替换为实际值：\n\n~~~json\n{\n  \"task_id\": \"TASK-actual\",\n  \"candidate_digest\": \"当前候选摘要\",\n  \"verification_run\": \"RUN-actual-verification\",\n  \"verdict\": \"PASS\",\n  \"summary\": \"审查范围及实际结论\",\n  \"findings\": [],\n  \"review_checks\": [\n    {\"area\": \"requirements\", \"status\": \"PASS\", \"analysis\": \"具体需求与差异如何对应\", \"evidence_files\": [\"实际源码或证据路径\"]},\n    {\"area\": \"regression\", \"status\": \"PASS\", \"analysis\": \"实际测试如何保护目标行为\", \"evidence_files\": [\"实际验证记录路径\"]},\n    {\"area\": \"failure_paths\", \"status\": \"PASS\", \"analysis\": \"已核对的异常和恢复场景\", \"evidence_files\": [\"实际证据路径\"]},\n    {\"area\": \"maintainability\", \"status\": \"PASS\", \"analysis\": \"具体结构变化和维护影响\", \"evidence_files\": [\"实际源码路径\"]},\n    {\"area\": \"performance\", \"status\": \"NOT_APPLICABLE\", \"analysis\": \"仅在确实不涉及运行性能时填写具体理由\", \"evidence_files\": []}\n  ],\n  \"ui_review\": null\n}\n~~~\n\n每个 finding 说明位置、触发条件、影响和建议。UI PASS 用包含 contract_ref、checked_states、evidence_files 的对象替代 ui_review=null；文件含实际截图和交互报告。不得复制示例中的不适用理由给任意项目。\n\n报告与当前 verification_run、候选和证据绑定；改动后旧结论不能继续放行。程序核对完整性、关联与变更，不能自动判断分析有无遗漏或证明上下文独立。\n",
+  "task_packet": {
+    "task_id": "TASK-114",
+    "run_id": null,
+    "task": {
+      "schema_version": 1,
+      "id": "TASK-114",
+      "title": "五布局状态与快捷键统一——NotifCard 补水合态、Enter 绑定与 J/K 全布局化（三阶段①，REQ-005/008）",
+      "kind": "implementation",
+      "retry_safe": true,
+      "ui_change": true,
+      "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md",
+      "ui_checks": [
+        {
+          "id": "X1.notif-hydration-states",
+          "description": "NotifCard 与 SocialCard 同构：水合失败→内联重试按钮（retryHydration）、已水合无正文→「暂无正文」、水合中→加载指示；失败时不再以 snippet 静默回退"
+        },
+        {
+          "id": "X2.enter-binding-uniform",
+          "description": "Social/Notif 卡 Enter/Space=选中打开阅读器，与 ArticleCard 一致（Podcast=play、Gallery=灯箱保持其领域语义）；role/tabIndex 形态对齐"
+        },
+        {
+          "id": "X3.jk-all-virtualized",
+          "description": "J/K 选中切换从「仅文章布局」扩展到全部虚拟化布局（article/social/podcast/notification），循环回绕与 moveCardFocus 一致；画廊（非虚拟化）维持现状并在快捷键表注明；ShortcutsTab 文案同步更新"
+        }
+      ],
+      "status": "review",
+      "objective": "五布局交互一致性第一卡（探查证实加载/空/哨兵/refill 已五布局统一，本卡只收口三处真实不一致）：①NotifCard 水合态缺失——NotifCard 走 useLazyHydrate 水合（Timeline.tsx:960 一带）但不订阅 hydrationErrors/hydratedIds，失败时静默回退 snippet（:962-965），而 SocialCard 有完整失败→内联重试（retryHydration）/空正文→「暂无正文」/加载中三态（:660-671）。修法：NotifCard 对齐 SocialCard 三态（复用其 JSX/样式形态，通知卡文案域内适配），失败不再静默。②Enter 绑定不一致——Article/Podcast/Gallery 有 Enter/Space（选中/play/灯箱，:503-513/:901-907/:816-837），Social/Notif 只有方向键（:623-629/:996-1001）。修法：Social/Notif 补 Enter/Space=选中（与 ArticleCard 同语义：onSelect(id)），tabIndex/role 形态对齐。③J/K 范围——App.tsx:272-285 的 J/K 显式 `if (s.activeContentLayout !== 'article') return;` 仅文章布局生效。修法：扩展到全部虚拟化布局（article/social/podcast/notification；image 布局非虚拟化无 moveCardFocus 基建，维持现状并在 ShortcutsTab 注明「画廊布局不支持 J/K」），选中切换/循环回绕/moveCardFocus 行为不变；shouldYieldToOverlay 让路规则复用不扩键。ShortcutsTab（:8-16）文案同步。UI 契约文档（三检查点）随卡建立。回归断言 t114-* ≥6 条：NotifCard 三态 SSR/源级断言（复用 renderToStaticMarkup 先例 :3948-3959 与源级扫描先例）、Enter 绑定源级断言（五卡对照）、J/K 布局门控行为断言（store 层模拟五布局 keydown 语义）、ShortcutsTab 一致性扫描。既有断言零弱化（若 Social/Notif「仅方向键」有既有断言锁定，更新附理由）。",
+      "non_goals": [
+        "不改画廊布局键盘行为（非虚拟化，维持现状仅文档注明）",
+        "不改加载/空态/哨兵/refill（已五布局统一，探查证实）",
+        "不改返回位置机制（TASK-115）",
+        "不做视觉润色/动画（本卡仅状态与键绑定一致性）",
+        "不改 Rust"
+      ],
+      "requirement_refs": [
+        "REQ-005",
+        "REQ-008"
+      ],
+      "reference_ids": [],
+      "decision_refs": [
+        ".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"
+      ],
+      "dependencies": [],
+      "blocks": [],
+      "risk": {
+        "level": "medium",
+        "decision_ids": [
+          "DEC-refactor-roadmap-20261005"
+        ]
+      },
+      "scope": {
+        "allowed_paths": [
+          "src",
+          "tools/frontend-regression.mjs"
+        ],
+        "protected_paths": [
+          "AGENTS.md",
+          "CLAUDE.md",
+          "WORKFLOW.md",
+          "tasks/**",
+          "docs/PRODUCT.md",
+          "docs/FEATURES.md",
+          "docs/workflow/**",
+          "scripts/project_workflow.py",
+          "scripts/workflow_runtime.py",
+          "scripts/workflow_bootstrap.py",
+          "scripts/workflow_intake.py",
+          "scripts/workflow_progress.py",
+          "WORKFLOW-KIT.md",
+          ".workflow-kit/binding.json",
+          ".workflow-kit/tasks/**",
+          ".workflow-kit/notes/**",
+          ".workflow-kit/scripts/**",
+          ".workflow-kit/docs/workflow/**",
+          ".workflow-kit/legacy/**",
+          ".workflow-kit/AGENTS.md",
+          ".workflow-kit/CLAUDE.md",
+          ".workflow-kit/WORKFLOW.md",
+          ".workflow-kit/docs/PRODUCT.md",
+          ".workflow-kit/docs/FEATURES.md",
+          ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md",
+          ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+        ],
+        "network": "none",
+        "data": "synthetic_only"
+      },
+      "acceptance": [
+        "① NotifCard 三态与 SocialCard 同构（X1：失败重试/暂无正文/加载中；SSR 或源级断言锁定）",
+        "② Enter 绑定五卡统一（X2：Social/Notif=选中，Podcast=play，Gallery=灯箱，Article=选中）",
+        "③ J/K 全虚拟化布局生效、画廊注明不支持（X3：行为断言+ShortcutsTab 同步）",
+        "④ UI 契约文档三检查点落账（.workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md）",
+        "⑤ 门禁全绿：frontend（t114-* 新增）、lint/build/cargo_fmt 不回退；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+        "⑥ 独立审查（全新子代理）PASS findings=0；ui_change=true 需 UI 取证（SSR 形态断言可作证据通道，真机截图非必需但需注明）"
+      ],
+      "gates": [
+        {
+          "id": "cargo_fmt",
+          "program": "cargo",
+          "args": [
+            "fmt",
+            "--check"
+          ],
+          "cwd": "src-tauri",
+          "required": true
+        },
+        {
+          "id": "cargo_test",
+          "program": "cargo",
+          "args": [
+            "test"
+          ],
+          "cwd": "src-tauri",
+          "required": false,
+          "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担"
+        },
+        {
+          "id": "cargo_clippy",
+          "program": "cargo",
+          "args": [
+            "clippy",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "cwd": "src-tauri",
+          "required": false,
+          "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）"
+        },
+        {
+          "id": "lint",
+          "program": "npm",
+          "args": [
+            "run",
+            "lint"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "build",
+          "program": "npm",
+          "args": [
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "required": true
+        },
+        {
+          "id": "frontend",
+          "program": "npm",
+          "args": [
+            "run",
+            "test:frontend"
+          ],
+          "cwd": ".",
+          "required": true
+        }
+      ],
+      "test_review": {
+        "behavior": "change",
+        "baseline": {
+          "status": "PASS",
+          "summary": "dev@二阶段后（main@82b2488 同源）：frontend 605/605、CI rust job 全绿（dev@5860dad）。本卡为交互一致性补齐（新键绑定/新状态 UI），属行为变化（owner 指示按审计三阶段推进）。",
+          "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+        },
+        "decision_ids": [
+          "DEC-refactor-roadmap-20261005"
+        ],
+        "actions": [
+          {
+            "action": "add",
+            "target": "t114-* 断言（NotifCard 三态/Enter 五卡对照/J-K 门控/ShortcutsTab 同步）",
+            "reason": "行为变化需成对断言",
+            "gate_ids": [
+              "frontend"
+            ]
+          },
+          {
+            "action": "adapt",
+            "target": "锁定 Social/Notif「仅方向键」等旧行为的既有断言（如有）",
+            "reason": "旧行为正是本卡收口的不一致点，更新附理由",
+            "gate_ids": [
+              "frontend"
+            ]
+          },
+          {
+            "action": "keep",
+            "target": "既有 frontend/cargo fmt/lint/build 断言",
+            "reason": "不回退证据；cargo 由 CI 承担（DEC-local-cargo-gate-20261005）",
+            "gate_ids": [
+              "cargo_fmt",
+              "lint",
+              "build",
+              "frontend"
+            ]
+          }
+        ]
+      },
+      "input": {
+        "manifest": ".workflow-kit/tasks/evidence/TASK-114-input-65f9b01b4681455580e7f9568a1e11c9.json",
+        "digest": "80275be2506a47764c3e112a398f6bda4211a790c00575470402e5c9942db335",
+        "source_revision": null,
+        "definition_digest": "caa10520ce816b255b394e5b9b03cbf2fe4d26bb281a3b290cbc146524e68256"
+      },
+      "budget": {
+        "started_at_utc": "2026-10-06T09:21:21.079559Z",
+        "deadline_at_utc": "2026-10-06T13:21:21.079559Z",
+        "repair_rounds_used": 0
+      },
+      "batch_id": "BATCH-a57865b52aa4449ea24f0f15216d72c5",
+      "run_ids": [
+        "RUN-b6ade06caf2448969617ab6dccf1f3d3",
+        "RUN-730237dfc22742c99b1bcc1ce6e53770",
+        "RUN-047746af8dc54cdb9a50fa06ea9a338d",
+        "RUN-b287f3fc3c2e46ada62ec2ff196ef958",
+        "RUN-ac62aa3f118d440194c71a2ebde87107",
+        "RUN-43c232645aa346338e6a63221cac32c2",
+        "RUN-160011a0c9d941a2815b4ca89458f040"
+      ],
+      "blockers": [],
+      "evidence": {
+        "candidate_manifest": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-candidate.json",
+        "candidate_digest": "f98fd0d282767ce4d6473cfd53b78eb23bae8aaeafab142121394a9c5377b412",
+        "verification_run": "RUN-160011a0c9d941a2815b4ca89458f040",
+        "review_run": null,
+        "acceptance_ref": null,
+        "owner_decision_ids": [],
+        "merge_ref": null
+      },
+      "snapshot_paths": [
+        ".workflow-kit/docs/AUDIT-20261005-core-consistency.md",
+        ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md",
+        "src",
+        "tools/frontend-regression.mjs"
+      ],
+      "resume_phase": "implementation"
+    },
+    "brief": {
+      "goal": "以 workflow-kit 2026-09-18.3 新周期对 fluxreader 持续改进：修复全项目体检发现的缺陷（P1/P2），处置功能空壳与死代码确保无未落实的宣称能力，完成 ingestion.rs 拆分与结构性硬化（pull 游标守卫、app_settings 收口），使项目稳定规范、代码与技术路线优雅高效",
+      "audience": "项目作者本人日常使用的桌面端 RSS/播客阅读器",
+      "acceptance": [
+        "体检报告 AUDIT-20260919-v2.md 的 P1/P2 缺陷经确认后全部修复并有修前复现/修后验证的成对证据",
+        "结构性硬化落地：pull 分块失败不推进增量游标；app_settings 读取收口为类型化助手",
+        "ingestion.rs 拆分为领域模块，行为零变化，四门禁不回归",
+        "死代码/空壳集群处置完毕（删除或裁决保留），无未落实的宣称能力",
+        "设计边界项（P2-12/P3-11 等）经 owner 逐项裁决：实施或注释明示保留",
+        "既有质量底线延续：cargo 161/0/9、lint 0/0、build exit 0、frontend 283/283 不回退（通过数可增不可减）"
+      ],
+      "non_goals": [
+        "更换技术栈或迁移框架",
+        "重新设计全新 UI（沿用现有布局与交互习惯）",
+        "不引入新的外部服务或费用",
+        "不拆分 Overlays/Timeline/db/sync_map.rs/base.css 与协议客户端（评估结论：内聚良好，拆了只加跳转成本）",
+        "不动 merge_remote_status 一带同步合并语义（pending 保护/read-anywhere-wins/跨源副本记账，有书面不变式 TASK-060 §4）"
+      ],
+      "compatibility": [
+        "保留现有 SQLite 数据库与迁移",
+        "保留 Fever/GReader/本地抓取等同步协议行为",
+        "保留现有 UI 布局与交互习惯（重构不改版）",
+        "未提交的工作区修改与旧任务记录不动"
+      ],
+      "quality": {
+        "priority": "quality_first",
+        "maintainability": "单体模块拆分为领域模块（延续 db.rs 试点模式），前端补行为测试，lint/typecheck/test 作为门禁",
+        "stability": "现有 Rust e2e 与前端回归不回归；同步、抓取、播放主流程稳定",
+        "performance": {
+          "mode": "measure",
+          "workload": "大量订阅与文章（万级）下的启动、布局切换、正文加载",
+          "targets": [
+            "社交布局正文加载不再无限等待，与切换布局后的秒开对齐"
+          ],
+          "rationale": "REQ-001/003 涉及加载性能，需以实际测量判断"
+        }
+      },
+      "requirements": [
+        {
+          "id": "REQ-005",
+          "kind": "improvement",
+          "description": "客户端使用生硬，动画不够丝滑优雅",
+          "in_scope": true,
+          "acceptance": [
+            "关键交互动画流畅自然，可观察验证"
+          ]
+        },
+        {
+          "id": "REQ-008",
+          "kind": "improvement",
+          "description": "UI 控件风格不统一（如下拉选择框），需调整一致",
+          "in_scope": true,
+          "acceptance": [
+            "控件风格统一，下拉框等不一致组件对齐一致"
+          ]
+        }
+      ],
+      "ui": {
+        "mode": "existing",
+        "style_intent": "保持现有布局与交互习惯，重构不改版；统一控件风格（下拉选择框等不一致组件对齐一致），打磨动画流畅度与文案",
+        "target_devices": [
+          "Windows 桌面端"
+        ]
+      }
+    },
+    "reference_candidates": [],
+    "read_first": [
+      "AGENTS.md",
+      "WORKFLOW-KIT.md",
+      ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md",
+      ".workflow-kit/docs/workflow/FRONTEND.md"
+    ],
+    "candidate_digest": "f98fd0d282767ce4d6473cfd53b78eb23bae8aaeafab142121394a9c5377b412",
+    "deadline_at_utc": "2026-10-06T13:21:21.079559Z",
+    "role": "reviewer",
+    "verification": {
+      "schema_version": 1,
+      "id": "RUN-160011a0c9d941a2815b4ca89458f040",
+      "task_id": "TASK-114",
+      "kind": "verification",
+      "outcome": "completed",
+      "executor": {
+        "harness": "local_process",
+        "model": null,
+        "context_id": "tool-4ad9245e3d0f4a7c84091f1bdfb99aab"
+      },
+      "started_at_utc": "2026-10-06T10:13:21.911519Z",
+      "finished_at_utc": "2026-10-06T10:13:46.702675Z",
+      "exit_code": 0,
+      "timed_out": false,
+      "input_digest": "80275be2506a47764c3e112a398f6bda4211a790c00575470402e5c9942db335",
+      "candidate_digest": "f98fd0d282767ce4d6473cfd53b78eb23bae8aaeafab142121394a9c5377b412",
+      "raw_output_refs": [
+        ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-cargo_fmt.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-cargo_fmt.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-lint.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-lint.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-build.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-build.stderr.txt",
+        ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-frontend.stdout.txt",
+        ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-frontend.stderr.txt"
+      ],
+      "checks": [
+        {
+          "gate_id": "cargo_fmt",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-cargo_fmt.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-cargo_fmt.stderr.txt",
+          "candidate_digest": "f98fd0d282767ce4d6473cfd53b78eb23bae8aaeafab142121394a9c5377b412",
+          "command": {
+            "argv": [
+              "C:\\Users\\Wade\\.cargo\\bin\\cargo.exe",
+              "fmt",
+              "--check"
+            ],
+            "cwd": "src-tauri",
+            "started_at_utc": "2026-10-06T10:13:22.600883Z",
+            "finished_at_utc": "2026-10-06T10:13:23.561325Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-cargo_fmt.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-cargo_fmt.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "cargo_test",
+          "status": "NOT_APPLICABLE",
+          "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担"
+        },
+        {
+          "gate_id": "cargo_clippy",
+          "status": "NOT_APPLICABLE",
+          "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）"
+        },
+        {
+          "gate_id": "lint",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-lint.stderr.txt",
+          "candidate_digest": "f98fd0d282767ce4d6473cfd53b78eb23bae8aaeafab142121394a9c5377b412",
+          "command": {
+            "argv": [
+              "D:\\Program Files\\nodejs\\node.EXE",
+              "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "lint"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-10-06T10:13:23.613442Z",
+            "finished_at_utc": "2026-10-06T10:13:24.111693Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-lint.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-lint.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "build",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-build.stderr.txt",
+          "candidate_digest": "f98fd0d282767ce4d6473cfd53b78eb23bae8aaeafab142121394a9c5377b412",
+          "command": {
+            "argv": [
+              "D:\\Program Files\\nodejs\\node.EXE",
+              "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "build"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-10-06T10:13:24.169377Z",
+            "finished_at_utc": "2026-10-06T10:13:28.094338Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-build.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-build.stderr.txt"
+          }
+        },
+        {
+          "gate_id": "frontend",
+          "status": "PASS",
+          "exit_code": 0,
+          "log": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-frontend.stderr.txt",
+          "candidate_digest": "f98fd0d282767ce4d6473cfd53b78eb23bae8aaeafab142121394a9c5377b412",
+          "command": {
+            "argv": [
+              "D:\\Program Files\\nodejs\\node.EXE",
+              "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+              "run",
+              "test:frontend"
+            ],
+            "cwd": ".",
+            "started_at_utc": "2026-10-06T10:13:28.147827Z",
+            "finished_at_utc": "2026-10-06T10:13:46.546342Z",
+            "exit_code": 0,
+            "timed_out": false,
+            "cancelled": false,
+            "stdout": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-frontend.stdout.txt",
+            "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-frontend.stderr.txt"
+          }
+        }
+      ],
+      "review": {
+        "mode": null,
+        "verdict": null,
+        "report": null,
+        "candidate_digest": null
+      },
+      "estimated_cost_usd": null,
+      "pid": 15752,
+      "controller_pid": 20408,
+      "commands": [
+        {
+          "argv": [
+            "C:\\Users\\Wade\\.cargo\\bin\\cargo.exe",
+            "fmt",
+            "--check"
+          ],
+          "cwd": "src-tauri",
+          "started_at_utc": "2026-10-06T10:13:22.600883Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-cargo_fmt.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-cargo_fmt.stderr.txt",
+          "finished_at_utc": "2026-10-06T10:13:23.561325Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "D:\\Program Files\\nodejs\\node.EXE",
+            "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "lint"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-10-06T10:13:23.613442Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-lint.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-lint.stderr.txt",
+          "finished_at_utc": "2026-10-06T10:13:24.111693Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "D:\\Program Files\\nodejs\\node.EXE",
+            "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "build"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-10-06T10:13:24.169377Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-build.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-build.stderr.txt",
+          "finished_at_utc": "2026-10-06T10:13:28.094338Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        },
+        {
+          "argv": [
+            "D:\\Program Files\\nodejs\\node.EXE",
+            "D:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+            "run",
+            "test:frontend"
+          ],
+          "cwd": ".",
+          "started_at_utc": "2026-10-06T10:13:28.147827Z",
+          "stdout": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-frontend.stdout.txt",
+          "stderr": ".workflow-kit/tasks/evidence/RUN-160011a0c9d941a2815b4ca89458f040-frontend.stderr.txt",
+          "finished_at_utc": "2026-10-06T10:13:46.546342Z",
+          "exit_code": 0,
+          "timed_out": false,
+          "cancelled": false
+        }
+      ]
+    },
+    "verification_ref": ".workflow-kit/tasks/runs/RUN-160011a0c9d941a2815b4ca89458f040.json",
+    "required_review_areas": [
+      "requirements",
+      "regression",
+      "failure_paths",
+      "maintainability",
+      "performance"
+    ],
+    "required_review_mode": "independent_required",
+    "candidate_files": [
+      {
+        "path": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md",
+        "sha256": "a6c9c91229cdce5c04e5dd3220fd4ff8c119f0861ac716146e4c51a43f285261"
+      },
+      {
+        "path": ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md",
+        "sha256": "cbb440f2f6f872c63d5fefaddc948d1f02f0cca5440ded019e98a7a085eff4aa"
+      },
+      {
+        "path": "src/App.tsx",
+        "sha256": "7fa22fc2e73f07385aa44b7ac9ffb9c0748f969720825f2db91d2729f0346c99"
+      },
+      {
+        "path": "src/components/ContextMenu.tsx",
+        "sha256": "476c192de0f3d14eccf399c4449e9cd3f963e0cf918cd78813ffe41adebfdcbb"
+      },
+      {
+        "path": "src/components/CoverImage.tsx",
+        "sha256": "acde60105681e16398ef7cd2e9daade5ab527c9297751be3b92599fbf0a4fb31"
+      },
+      {
+        "path": "src/components/Overlays.tsx",
+        "sha256": "437ca347f28fe42077a15565ff3749870c6e38b954ee557eb2384fb1f01e43b9"
+      },
+      {
+        "path": "src/components/PlayerBar.tsx",
+        "sha256": "1d177b4b4aaa17ae824930615eef1e1f7d97b483642e0b2ba3259335fd1d8619"
+      },
+      {
+        "path": "src/components/Reader.tsx",
+        "sha256": "edd1e7800c0d9d3aa0d87a69fa236233c62e7ca5320dd6fcde446a576ae058a9"
+      },
+      {
+        "path": "src/components/SettingsModal.tsx",
+        "sha256": "08ec2b6251cd4426a2cd2eca8d87a0b3dda27e46d5e6d7ad533190b2d8afce43"
+      },
+      {
+        "path": "src/components/Sidebar.tsx",
+        "sha256": "c359e8d1ec590730d783137b5d202dbd61345a53727e7a074a9606b01295a08c"
+      },
+      {
+        "path": "src/components/Timeline.tsx",
+        "sha256": "cd88e4f809a7673e8121e072a871b2c55d13e97fce78fee096929cba2be24ab5"
+      },
+      {
+        "path": "src/components/anchorScopeNav.ts",
+        "sha256": "f008ac5e8bc8802033fac247db06c7211ce6a06f2d5790ef0628021f5e4ec5cb"
+      },
+      {
+        "path": "src/components/icons.tsx",
+        "sha256": "b9aff7b2c075ce9dd24223cc8abf8d2f82fcc22fe240cd989cab91860eec57be"
+      },
+      {
+        "path": "src/components/primitives.tsx",
+        "sha256": "fd79c9f7d6dca710f838a4da83f6c9d0c04256fbb4f989c6e7395c1f03089aa5"
+      },
+      {
+        "path": "src/components/scrollAwayRead.ts",
+        "sha256": "acd6b0ce741cb85b05df53894c8bfb2db33b8a72db75907e5a67c0d16555d976"
+      },
+      {
+        "path": "src/components/settings/AboutTab.tsx",
+        "sha256": "81e61ac583c3517ba1c803a144ad8b87cb07ef7f09c7e37001fdbf41aa11c772"
+      },
+      {
+        "path": "src/components/settings/AiTab.tsx",
+        "sha256": "61c54528ce65b54448caebb5c7bb33167ef238d40f4073bc0128804868b4d00e"
+      },
+      {
+        "path": "src/components/settings/AppearanceTab.tsx",
+        "sha256": "b401bde08c8967cce5aefffb68badf4d112c872013f24ede07dc82748986656f"
+      },
+      {
+        "path": "src/components/settings/AutoStartSwitch.tsx",
+        "sha256": "0973a70933b82b38097d18495e6b8253d836d62dacf825f6ab4c92c670432be8"
+      },
+      {
+        "path": "src/components/settings/CacheCleanupSection.tsx",
+        "sha256": "9966203f4c1a74aec8cf947b3592a8b67f5b23ed6acaad5fed95bd345a6fe991"
+      },
+      {
+        "path": "src/components/settings/ConfigSyncSection.tsx",
+        "sha256": "b6dcd9ab104b3775e312b24f7606e5c37d46f27f27af2bebfa3d4d13a83c3c9b"
+      },
+      {
+        "path": "src/components/settings/FeedsTab.tsx",
+        "sha256": "ede70afdae8438aafe90bf04ece23dab6c9fed4a944a75a514100f2f41cf2ed5"
+      },
+      {
+        "path": "src/components/settings/GeneralTab.tsx",
+        "sha256": "6af737ebac85b9037e3baaec448317133aa50bb4524f17aca99350455b524dcc"
+      },
+      {
+        "path": "src/components/settings/ReadingTab.tsx",
+        "sha256": "1c1bf2ec3158028a62064e99688c8a3a57fe90a36486d63c00015ae87a454f80"
+      },
+      {
+        "path": "src/components/settings/SettingsSidebarFooter.tsx",
+        "sha256": "ecbc9619017df8065f8846b12785c1172e50d78de4a22d933ad6cb2f3b098494"
+      },
+      {
+        "path": "src/components/settings/ShortcutsTab.tsx",
+        "sha256": "f6bf0c0d2c41d227e9756de2910467e4d28e21964317e75da87d51aec74deb32"
+      },
+      {
+        "path": "src/components/settings/SyncTab.tsx",
+        "sha256": "36f672869156e4007c3e62d85a3113231dcfd77cc97dc349248428e5db5f5435"
+      },
+      {
+        "path": "src/components/settings/aiConfig.ts",
+        "sha256": "3fa952c1fcdfb53cbb0f91f7ed1b7229759943d8d8bfeb1ebd04cd877133e747"
+      },
+      {
+        "path": "src/components/settings/compareVersions.ts",
+        "sha256": "2ea002c70004f42931e6e3a496d2c2e1a81cbc25c3b6c116ff8f8e25a47de4d6"
+      },
+      {
+        "path": "src/components/settings/endpointHint.ts",
+        "sha256": "01bddaee3639dec14477f204a9480388de9b8d00ebfe4c05cd2031675c9e7096"
+      },
+      {
+        "path": "src/components/settings/layoutOptions.tsx",
+        "sha256": "d97053c551499e62c41f2cf198f483890b3d50157f754634838a957985d67594"
+      },
+      {
+        "path": "src/components/settings/shared.ts",
+        "sha256": "7444ddc08e6510731985427198d672d3ecba1d0a59e9309003de697f52fbc20b"
+      },
+      {
+        "path": "src/components/shortcutYield.ts",
+        "sha256": "66f2c5029e8d363830babf1f99b740143e6bca8a2fe0d9160586cff0c6cc1724"
+      },
+      {
+        "path": "src/components/timelineAnchor.ts",
+        "sha256": "ae89f53ebc08ac2c66035dd064dfe2196a7b8d07e832ecb4b199c339ba5b907e"
+      },
+      {
+        "path": "src/components/timelineRefill.ts",
+        "sha256": "e7a6e1374cc071f59b95e822de75d5ad609acc28127512b646c7f9759e7c4dc1"
+      },
+      {
+        "path": "src/components/timelineSentinel.ts",
+        "sha256": "6da2fbc6999eb463eb2b0f293815857c978841c406cde937f37fbfb3722a5601"
+      },
+      {
+        "path": "src/components/useEnteringClass.ts",
+        "sha256": "dec0d43a3a14cb5808e3a50f862bf245ace7dec1245c5905f584610ebd3e0b89"
+      },
+      {
+        "path": "src/index.css",
+        "sha256": "5b7f28dce8a0d58880caec4fea84aa7d66ae1df87e0d1536404c171414726c71"
+      },
+      {
+        "path": "src/lib/api.ts",
+        "sha256": "86b0222e1fedc78e5e8a555a527bb1979b7d422b208f58dbf5cdd8b02323f484"
+      },
+      {
+        "path": "src/lib/coverImage.ts",
+        "sha256": "175ecf9c692aa51e3123d0d604e930936ddc6607cf005233aca55bbf2a2604e1"
+      },
+      {
+        "path": "src/lib/external.ts",
+        "sha256": "44fde0dd0eef6b67094b62d9a0ee74183cea0ec91bc68258531add620cd9e9e1"
+      },
+      {
+        "path": "src/lib/format.ts",
+        "sha256": "35c7e1185478bfc5f14f7e13da95d6ec32948ef36672a9129b24c99514440ca6"
+      },
+      {
+        "path": "src/lib/imageProxy.ts",
+        "sha256": "6d2a830596eb510695a240e1262f1736c449e809f4d6ca7e326e445657f07d5c"
+      },
+      {
+        "path": "src/lib/jkNavigation.ts",
+        "sha256": "4978fde52308b7745f3d11e07d4a7479e5a926d455b6cc253f4bce706c25e333"
+      },
+      {
+        "path": "src/main.tsx",
+        "sha256": "6e9e5807fcbd48b75a96db5cbef36c996262196be42e6d4760dc86babbe61ad2"
+      },
+      {
+        "path": "src/mockData.ts",
+        "sha256": "cbe88ab8cba6d9eb25bd95ba642b24941c69162909450bf1fe30072476cebef1"
+      },
+      {
+        "path": "src/store.ts",
+        "sha256": "24b8cd3e59fbf9479283d5bf3afdd10258c0df95ac028210e6300e7bc0859dce"
+      },
+      {
+        "path": "src/store/internals.ts",
+        "sha256": "97511ed3e063f73377eebdbc8b8a3969bccf5fd252739a606ac2b57e0a800cfb"
+      },
+      {
+        "path": "src/store/selectors.ts",
+        "sha256": "8382df019bfcf0e6de9a70c4a0b6aef94bda0b64e682c04e2ed9673bde2e0ad3"
+      },
+      {
+        "path": "src/store/settingsValidation.ts",
+        "sha256": "6eeb761a6c5bee910f28be59fae759c9a17b898ce92c6944ecafebd519e2896a"
+      },
+      {
+        "path": "src/store/slices/ai.ts",
+        "sha256": "75b1cc2dcd9bb44614bf988c8f5ac0ca716258bd03cf9e631d06afa6c2e14ff4"
+      },
+      {
+        "path": "src/store/slices/bootstrap.ts",
+        "sha256": "e710d8f5336f28c626739e25ff0bb3620dd43f3a099be2c6c56193d92d3e8c3a"
+      },
+      {
+        "path": "src/store/slices/feeds.ts",
+        "sha256": "e50116d2d6e40d91c55200ea5c5c94f129429f8568e14557dceb304be272af15"
+      },
+      {
+        "path": "src/store/slices/nav.ts",
+        "sha256": "5c2adf25c65fcdd2e0cc36ea6a774ea2e305235b60a755872a889961652e308b"
+      },
+      {
+        "path": "src/store/slices/player.ts",
+        "sha256": "9ebe51f11338508157fe4191740bf2a5123e70a3726d2ab7b98e6bd6b0b6b342"
+      },
+      {
+        "path": "src/store/slices/reader.ts",
+        "sha256": "38dfa27bcaf8ff93962b93194bd9e3d463a08c776ee8ad472734523b9ccfe003"
+      },
+      {
+        "path": "src/store/slices/settings.ts",
+        "sha256": "3c9093c81d7937089c6f05ce4284a0b2f7678fe193f4368dc471cb684d34d9b6"
+      },
+      {
+        "path": "src/store/slices/sync.ts",
+        "sha256": "30a30b2c5f496bac011e3675ff82324e69ba8b86978dac7a1280a5f03bea0dd8"
+      },
+      {
+        "path": "src/store/slices/ui.ts",
+        "sha256": "c30c4e43b9bdafe6f51a4fb65622e39883b8f948c3f79ce9c83f9ee2b08b1709"
+      },
+      {
+        "path": "src/store/syncErrors.ts",
+        "sha256": "8d504273c846d4b78c0cc038563ce110aba9a1974feb69c8484ccb3ae44e7000"
+      },
+      {
+        "path": "src/store/types.ts",
+        "sha256": "e008dcbf84955728b7ed47ffc52105b43da7fc225868897e24dbdbbef396b47e"
+      },
+      {
+        "path": "src/styles/base.css",
+        "sha256": "716fb8dba7e3e1624849208bc56bd7b36f19af0877bd72648798f3cccded2641"
+      },
+      {
+        "path": "src/styles/tokens.css",
+        "sha256": "1c350244206e1bb25ab4593d799eb51e3852b743762d3151986db92e8d88e28d"
+      },
+      {
+        "path": "src/types.ts",
+        "sha256": "7dfb6936ed0dfb9c2a627d2d5abcd8fe543c2534a59955167cea816a83146397"
+      },
+      {
+        "path": "tools/frontend-regression.mjs",
+        "sha256": "4fde499d0c24b941fc4358031c8e3696c84cad769db14740f75afe27e2a97a50"
+      }
+    ],
+    "changed_files": [],
+    "ui_evidence_directory": ".workflow-kit/tasks/evidence/TASK-114-ui/RUN-160011a0c9d941a2815b4ca89458f040/"
+  },
+  "instruction": "把此输入交给未参与实现的新上下文；同模型即可，不要求 CLI。不要复制作者会话或通过预期。不能创建独立上下文时如实报告，按已确认审查策略处理。 审查证据只能引用候选文件或 tasks/runs、tasks/evidence 下的附件，不要引用任务记录、卡片或决定文件。"
+}

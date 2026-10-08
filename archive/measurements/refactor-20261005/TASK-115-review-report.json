@@ -1,0 +1,75 @@
+{
+ "task_id": "TASK-115",
+ "candidate_digest": "fa24a1411fa2835991d0341c6114a20d21d1fed57b2fb70ebe8bc9a0b2f29207",
+ "verification_run": "RUN-afa3352925cc4920b8bc881a19267c12",
+ "verdict": "FAIL",
+ "summary": "独立审查（全新上下文，未参与实现）。候选 6 个改动文件的 sha256 与 RUN-afa3352925cc4920b8bc881a19267c12-candidate.json 逐字一致，改动范围仅 src + tools/frontend-regression.mjs，回归脚本差异纯新增（205+/0-），t111-* 20 条、t114-* 16 条逐字未动，既有断言零弱化。X1/X2/X3 行为逐条对照任务卡与契约成立：①切换返回恢复=per-filterKey 锚存档（LRU 8 与 VIEW_ENTRIES_CACHE_MAX 同值）+ nav 三路径 contextChanged 条件 bump（与 entries 同一次原子写入）+ Timeline 消费（查档→决策→抑制→scrollToIndex align:start→rearm 重锚）；②焦点归还=clearReaderSelection bump readerCloseNonce（App.tsx:223 唯一关闭路径核实）+ Timeline ref 记账 + readerFocusReturnIndex/focusCardAt 收口；③规则表入 timelineAnchor.ts 头注与契约文档，切排序=新语境裁定成立（信号不 bump + 新键查档空，t115-x1c）。时序核查：「先归零后恢复」可靠——两 effect 同在 Timeline 组件、同批 passive effect 按声明序执行（React 保证），归零 effect 无条件先跑、恢复 effect 后跑且闭包捕获同一次渲染的新 items/filterKey（nav 两次 set 同步批量，React 18 单次渲染）；存档 useLayoutEffect 先于全部 passive effect，stash→clear 顺序由源级断言钉住；rearm 语义正确（重锚落点并推进节流基准，防 250ms 窗口内 scroll 事件把活锚滞留在恢复前位置）。不叠加核查：switchRestoreNonce 与 positionRestoreNonce 触发源/消费 effect/锚来源三重分离，nav.ts 全部 reload 调用无 keepReadingPosition（grep 全库仅 App.tsx:94/sync.ts:121/bootstrap.ts 携带），bootstrap 仅 keepReadingPosition&&view==='all' 落地时 bump；t115-x3a 双向断言通过（出向在 selectFeed 同步返回后立即核对，可捕获同步串扰；异步 reload 串扰变体由源级+源读覆盖）。X2「关闭时刻必然持有」论证成立：跟随 effect 对 null 早退、关闭 commit 中 ref 保留关闭前值，与声明序无关也正确；连续开关同一篇由 nonce 重触发（x2a）。独立复跑 test:frontend 642/642（t115 21 绿、0 红）。变异自证两处独立复现：M1 存档置空→恰好 5 红（x1a 决策侧/x1b/x1c/x3b 容量/x3b 新鲜度，与作者声称一致）；M2 三处守卫去除→恰好 2 红（t115-0 源级+x3c，与作者声称一致）；变异后已逐字节还原（哈希复核一致）。唯一可执行缺陷：types.ts 与 reader.ts 的两段新注释引用不存在的 timelineAnchor.noteReaderFocusReturn 并描述已放弃的「关闭时刻记入模块档案」机制，与实现（Timeline ref 记账）及同文件长注释/timelineAnchor 头注自相矛盾——注释属可执行修正，按验收⑥ PASS findings=0 的口径判 FAIL，一行修即可。契约补记：worker 的 4 条补记原文只在主控汇报中、未落任何可审文件，按实现核对推导出 4 条应落账的补记（同上下文导航不恢复/cache-miss 切回不恢复仅缓存命中消费/切排序旧键存档保留语义/焦点归还为 Timeline ref 记账而非关闭时刻档案），其中「存档随之失效」需精确化为仅对新语境失效；两条补记须与修正后的注释同口径。ui_review 按 TASK-114 取证边界以 SSR 烟测+源级+store 层通道评估通过，真机截图由主控落账前补充。",
+ "findings": [
+  "【低危·注释失实，一处修改两处落点】src/store/types.ts:190-197（readerCloseNonce 字段文档）与 src/store/slices/reader.ts:86-89（字段旁注）声称「clearReaderSelection 在关闭时刻把原 activeArticleId 记入焦点档案（timelineAnchor.noteReaderFocusReturn）」「信号载荷走模块档案」。事实：timelineAnchor.ts 不存在 noteReaderFocusReturn（全库仅这两处注释引用该符号）；clearReaderSelection 只 bump nonce 不记录任何载荷（src/store/slices/reader.ts:317-324）；归还目标由 Timeline 的 lastActiveArticleIdRef 在 activeArticleId 跟随 effect 捕获（src/components/Timeline.tsx:71-78），与 timelineAnchor.ts 头注 X2、reader.ts 内 clearReaderSelection 上方长注释（:307-316）及 t115-0 源级断言一致。触发条件：任何维护者查阅字段语义或按注释寻找该函数。影响：同文件自相矛盾、指向不存在的 API，误导后续修改（X2 的选型论证恰是本卡声称的交付内容之一，字段文档是首要查阅点）。建议：将两段注释改为与实现同口径——「信号载荷（原选中卡 id）由 Timeline 组件内 ref 记账（lastActiveArticleIdRef，activeArticleId 跟随 effect 捕获，关闭 commit 中保留关闭前值），store 只携带不透明 nonce」；纯注释修改后需按流程重新 verify 换取新候选摘要。"
+ ],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "①X1：存档/查档/重锚/决策收口在 src/components/timelineAnchor.ts（Map<filterKey,TopAnchor> 覆盖+LRU 上限 RETURN_ANCHOR_ARCHIVE_MAX=8 与 VIEW_ENTRIES_CACHE_MAX=8 同值，src/store/internals.ts:50）；nav 三路径（selectLayout/selectView/selectFeed）在缓存命中分支以条件展开 ...(contextChanged ? {switchRestoreNonce+1} : {}) 与 entries/hydratedIds 同一次 set 原子写入，cache-miss、切排序（重拉+清缓存）、启动装载不 bump；Timeline 消费 effect 查档→anchorRestoreIndex→抑制→scrollToIndex(align:start)→rearm，无存档/锚 id 不在恢复列表→null→不动作=归零 effect 已置顶（归零回落）；同上下文重复导航 contextChanged=false 不恢复（x3c）。②X2：clearReaderSelection bump readerCloseNonce（reader.ts:317-324），全库唯一调用点 App.tsx:223（Esc 链尾）；Timeline lastActiveArticleIdRef 记账 + 关闭 effect 消费 readerFocusReturnIndex→focusCardAt（align:auto=可见不滚/不可见定位后聚焦，与方向键共用一套）；原卡不在 items→null→不聚焦。③X3：timelineAnchor.ts 头注全场景规则表（8 行与契约文档规则表逐条对应）+ 契约文档本身存在且被快照纳管；切排序裁定双形态写明。④不叠加见 regression/failure_paths 证据。⑤门禁：RUN-afa3352925cc4920b8bc881a19267c12 cargo_fmt/lint/build PASS、frontend PASS（642/642，t115-* 21 条全绿）；cargo test/clippy NOT_APPLICABLE（DEC-local-cargo-gate-20261005，CI 承担）。范围无越界（仅 allowed_paths 内 6 文件）；non-goals 成立：bootstrap.ts/sync.ts（TASK-111 机制载体）不在改动清单，画廊布局未改，Rust 未动。唯一残缺=两段失实注释（见 findings），不影响行为与验收①-⑤的成立，但按验收⑥（PASS findings=0）计为待修。",
+   "evidence_files": [
+    "src/components/timelineAnchor.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/reader.ts",
+    "src/components/Timeline.tsx",
+    "src/App.tsx"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "test_review 动作如实执行：add=t115-* 21 条（≥6 达标），keep=既有断言零改动——git diff 对 tools/frontend-regression.mjs 为 205 行纯新增、0 删除，t111-* 20 条/t114-* 16 条逐字原样（计数与作者声称一致）。独立复跑 npm run test:frontend 642/642（26 既有 + 616 store 行为），RUN 同配置 0 ❌。断言分层有判别力：store 层信号语义（x1a nonce+1 与 entries 同批、x2a 关闭信号、x3a 双向隔离）+ 纯函数决策（anchorRestoreIndex/readerFocusReturnIndex 直接断言）+ 模块级 API（stash/peek/rearm/LRU）+ 源级接线（t115-0 六条，含 stash 先于 clear 的有序断言与三处 image 回落计数=3）。变异自证（审查者独立执行，均在探针目录备份后逐字节还原、哈希复核一致）：M1（stashTopAnchorForReturn 置空）→恰好 5 红=x1a 决策侧/x1b/x1c/x3b 容量/x3b 新鲜度，与作者声称逐条吻合；M2（三处 contextChanged 守卫全部去除）→恰好 2 红=t115-0 X1 接线（源级计数失效）+x3c（同上下文导航误 bump），与作者声称吻合。x3a 出向断言在 selectFeed 同步返回后立即核对（捕获同步串扰），「nav 异步 reload 落地串扰」变体由静态事实覆盖：grep 全库 keepReadingPosition 仅 App.tsx:94（手动同步）/sync.ts:121（feeds-updated）/bootstrap.ts:208（筛选视图透传），nav.ts 六处 reload 调用全部无参。轻微备注（非弱化、先于本卡存在）：t111-6 第二条断言的标签称「导航入口保持无参调用」但断言体只验证三个内容刷新入口携带该选项，导航入口的无参调用由源读证实而非断言钉住。",
+   "evidence_files": [
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/tasks/evidence/RUN-afa3352925cc4920b8bc881a19267c12-frontend.stdout.txt",
+    ".workflow-kit/tasks/runs/RUN-afa3352925cc4920b8bc881a19267c12.json"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "已核对的异常/边界（均有断言或源级证据）：缓存命中切回但注入 reload 失败（listPlan reject）→信号仍与 entries 同批 bump、恢复列表为缓存快照（x1a）；存档锚 id 不在恢复列表（888 不存在）→anchorRestoreIndex null→归零回落不猜（x1b）；无存档/首次进入→查档 null→归零（现状口径）；同上下文重复导航（selectFeed('all') 已在 all）→contextChanged 守卫拦下不 bump（x3c）；切排序→filterKey 变即新语境：信号不 bump、新键查档空、归零（x1c）；阅读器关闭时列表已切换（selectFeed('12') 后原卡 103 不在 [104,105]）→readerFocusReturnIndex null→不聚焦不滚动，null 归还目标同口径（x2b）；连续开关同一篇→nonce 连续 +1 保证 effect 重触发（x2a，选型判别）；画廊 image→三个回位/归还 effect 各自提前回落（t115-0 计数=3）；存档 LRU 溢出→淘汰最旧上下文、被淘汰者退回归零回落无正确性影响、peek 命中刷新新鲜度（x3b 两条）；mock 模式→selectLayout 在缓存逻辑前 return、viewEntriesCache 在 mock 下不写入→不恢复（归零现状）；重复 Esc→App.tsx:223 以 activeArticleId 为门，clearReaderSelection 不会在关闭后误触发。时序类失败面：「先归零后恢复」不依赖跨组件时序（两 effect 同组件、声明序执行、均无前置条件跳过归零）；恢复 effect 闭包捕获同批渲染的新 items/filterKey（原子写入保证）；rearm 防 250ms 节流窗口把活锚滞留在恢复前位置（x3b rearm 语义断言）。已知的良性角落（实现与断言明确选择、需契约补记精确化）：切排序旧键存档保留（x1c 显式断言「旧存档仍在旧键下」），若用户切回原排序后未再滚动即离开，随后缓存命中切回该上下文会恢复到排序切换前的锚（真实历史阅读位）而非严格「离开时顶条」；cache-miss 切回不消费存档（恢复仅缓存命中路径，与任务目标「不双重滚动」的口径一致）。",
+   "evidence_files": [
+    "src/components/timelineAnchor.ts",
+    "src/store/slices/bootstrap.ts",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "FAIL",
+   "analysis": "结构判断为正向：全部「回位/归还」记账收口在 timelineAnchor.ts 单模块（头注=规则表单点），store 只携带两个不透明 nonce（载荷留模块/组件，信号入 store），依赖方向干净——nav.ts/reader.ts 的 import 仅 api/internals/selectors/types，无 store→components 反向依赖（worker 的选型理由经核实成立：store 记原 id 需反向依赖 components 层，且 id 字段同值不触发 effect，nonce 才能区分连续开关同一篇）；焦点定位-聚焦收口 focusCardAt 后 moveCardFocus 与关闭归还真去重（原 moveCardFocus 内联三步并入共用函数，并补齐了此前缺失的程序性滚动抑制，与「每次 scrollToIndex 前必须 suppress」的既有约定一致）。唯一定级缺陷：types.ts:190-197 与 reader.ts:86-89 两段新注释引用不存在的 timelineAnchor.noteReaderFocusReturn、描述未实现的「关闭时刻记入模块档案」机制，与实现（Timeline ref 记账）、timelineAnchor.ts 头注 X2、reader.ts 自身长注释三处矛盾——本卡 X3 的载体恰是注释，字段文档失实属可执行修正项（详见 findings），故本项 FAIL，其余维护性面成立。",
+   "evidence_files": [
+    "src/store/types.ts",
+    "src/store/slices/reader.ts",
+    "src/components/timelineAnchor.ts",
+    "src/components/Timeline.tsx"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "NOT_APPLICABLE",
+   "analysis": "无新增测量义务且无热点路径变化：滚动锚记录为 TASK-111 既有节流路径（250ms 窗口，本卡未改）；存档为 O(1) Map 操作、容量硬上限 8（LRU 淘汰）；三个新消费 effect 仅在对应 nonce 变化时各执行一次（每次导航/关闭至多一次 scrollToIndex），订阅面仅增三个标量 selector，不触发额外重渲染；存档/锚留在模块级刻意避免进入 store 渲染通道（与 TASK-111 同一分工）。虚拟化与分页语义未动（non-goals），不伪造实测提升。",
+   "evidence_files": []
+  }
+ ],
+ "ui_review": {
+  "required": true,
+  "checked_states": [
+   "X1.switch-return-scroll",
+   "X2.reader-close-focus",
+   "X3.rule-documented"
+  ],
+  "evidence_files": [
+   "src/components/timelineAnchor.ts",
+   "src/components/Timeline.tsx",
+   "tools/frontend-regression.mjs"
+  ],
+  "notes": "按 TASK-114 建立的取证边界评估（SSR 形态烟测 + 源级接线断言 + store 层/纯函数行为断言；真机截图由主控落账前补充）。X1：store 层存档-恢复链路（x1a 缓存命中切回 nonce+1 且恢复列表就位、决策返回原索引 0）+ 源级有序断言（查档→决策→抑制→scrollToIndex align:start→rearm）覆盖「立即恢复」；「锚丢失/无存档归零回落」由 x1b + 归零 effect 既有语义覆盖；「后台 reload 落地后校准」的口径=rearm 把活锚重锚到恢复落点，其后内容刷新（feeds-updated 等带 keepReadingPosition 路径）由 TASK-111 机制从该落点校准，导航自带 reload 不滚动（x3a 双向隔离钉住）。X2：滚动不动（filterKey 未变不触发归零，既有语义）+ 焦点归还原卡（x2a 决策 index=1 + 源级 focusCardAt 接线）+ 列表已切回落（x2b）+ 连续开关重触发。X3：代码单点注释（timelineAnchor.ts 头注 8 行规则表，含切排序裁定与不叠加保证）与契约文档规则表逐行对应；t115-0 X3 源级断言钉住头注关键词。本卡未新增任何 CSS/样式类（改动仅行为与注释，无 css 文件变更），故无截图依赖的新视觉面；SSR 烟测（t114-x1d）在复跑中继续通过，证明 Timeline 组件树改动后仍可静态渲染。截图（切换返回前后、阅读器关闭焦点归还、画廊回落）待主控落账前补充至 ui_evidence_directory。"
+ }
+}

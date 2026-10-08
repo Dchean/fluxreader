@@ -1,0 +1,59 @@
+{
+  "id": "TASK-122",
+  "title": "正文/AI 实体缓存分离与显式失效——清理缓存不再复活旧产物（审计 P2-3）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "objective": "落地审计目标结构的 bodyById 块（tmp/audit-20261007/REVIEW.md 第 3 节 [P2] + 架构目标节，探针 P3/P4 场景）。根因：①清理 AI 缓存真实路径把 DB ai_summary/translated_content 置 NULL 再 reload，列表行空摘要被转 ''，mergeSnapshotEntries 的 `a.aiSummary || prev.aiSummary` 把旧值复活（UI 与 DB 分离；探针实测 old summary/old translation）；②snippet 更新后正文仍陈旧（entryNeedsHydration=false 不重取）；③'' 同时承担「无」与「已清空」两种语义。设计要求（Zustand 内实现，禁第二套框架）：①新增独立正文实体缓存（模块级 bodyById：Map<id, BodyEntry>，BodyEntry={content,rawContent,translatedContent,aiSummary,fulltextExtracted,contentRevision,state}，state 为显式判别态：loading|ready|cleared|missing|failed——收敛 TASK-103 的分散态）；②显式失效：设置页清理 AI 缓存（CacheCleanupSection 调用链）后对受影响 id bump contentRevision 并置 cleared 态（不再依赖 merge 继承）；③**merge 不再继承正文/AI/译文重字段**（快照合并退化为视图行字段；isRead/isStarred 继承与版本守卫语义不变——TASK-107/118 机制保持）；④卡片/阅读器从 bodyById 读正文（选择器单点），懒水合判定改从 bodyById 状态判定（无记录→未请求；loading 在途；cleared→「已清空」呈现；missing→「文章不存在」；failed→重试）；⑤正文内存预算（LRU 或条数上限，TASK-111 纪律）与淘汰策略（淘汰后回未请求态可重取）；⑥视图行保留的 snippet/url 等轻字段照旧（快照合并保留这些）。⑦兼容硬约束：t103/t104/t108/t109/t110/t111/t117/t118 既有断言语义不回退（快照继承相关断言按新架构更新，逐条附理由——本卡是审计点名「文章实体与视图分离尚未完成」的核心落地，允许大改但保护意图必须保留：刷新不丢已加载正文（从 bodyById 来）、水合死区不复现、清理失效语义正确）；Rust 零改动。⑧回归 t122-* ≥6 条：清理 AI 缓存→UI 空非旧值（探针 P3 本体）；snippet 更新→正文重取（探针 P4）；'' vs cleared 语义区分；正文预算淘汰→可重取；快照替换后 bodyById 稳定（正文不丢）；水合死区回归（审计探针场景）仍被锁。代码注释：bodyById 的状态机与失效规则单点文档化。",
+  "non_goals": [
+    "不做 queries[QueryKey] 完整查询值对象重构（keyset+代际已覆盖其正确性面）",
+    "不做 articlesById 全量实体化（isRead/isStarred 保持行级真值+版本守卫模型）",
+    "不做 mutations 操作 ID 撤销完整模型（per-field 版本已覆盖 P1-2）",
+    "不改 Rust/后端接口",
+    "不引入 TanStack Query（审计：非必要条件）"
+  ],
+  "requirement_refs": ["REQ-007"],
+  "reference_ids": [],
+  "decision_refs": [".workflow-kit/docs/DEC-refactor-roadmap-20261005.md", ".workflow-kit/docs/DEC-gate-adjust-20261007.md"],
+  "dependencies": [],
+  "blocks": [],
+  "snapshot_paths": ["src", "tools/frontend-regression.mjs"],
+  "risk": {"level": "high", "decision_ids": ["DEC-gate-adjust-20261007", "DEC-refactor-roadmap-20261005"]},
+  "scope": {
+    "allowed_paths": ["src/**", "tools/frontend-regression.mjs"],
+    "protected_paths": ["AGENTS.md", "CLAUDE.md", "WORKFLOW.md", "WORKFLOW-KIT.md", "README.md", "package.json", "package-lock.json", "src-tauri/**", "docs/**", ".workflow-kit/**"],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 清理 AI 缓存→UI 显示空/已清空而非旧值（审计探针 P3 本体转回归，t122-*）",
+    "② snippet 更新→正文重取（探针 P4 本体）；正文/AI/译文 ''与 cleared 语义区分",
+    "③ bodyById 状态机显式化（loading/ready/cleared/missing/failed 判别联合，无字符串态共用）",
+    "④ 正文内存预算与淘汰→可重取；快照替换不丢已加载正文（从 bodyById）",
+    "⑤ 水合死区回归仍锁定；t103-t118 既有断言零弱化（架构更新逐条附理由）",
+    "⑥ 门禁全绿：frontend（t122-* 新增）、lint/build/cargo_fmt 不回退；cargo 由 CI 承担（DEC-local-cargo-gate-20261005）",
+    "⑦ 独立审查（全新子代理）PASS findings=0"
+  ],
+  "gates": [
+    {"id": "cargo_fmt", "program": "cargo", "args": ["fmt", "--check"], "cwd": "src-tauri", "required": true},
+    {"id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": false, "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 承担；本卡 Rust 零改动"},
+    {"id": "cargo_clippy", "program": "cargo", "args": ["clippy", "--all-targets", "--", "-D", "warnings"], "cwd": "src-tauri", "required": false, "reason": "同 cargo_test"},
+    {"id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true},
+    {"id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true},
+    {"id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true}
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@main 合并后（P1 批次 117-121 全部验收）：frontend 701/701、main@b497288 CI 全绿。本卡落地审计架构目标 bodyById 块，属高风险架构变更（owner 指示按审计收口顺序推进）。",
+      "evidence_ref": ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+    },
+    "decision_ids": ["DEC-gate-adjust-20261007", "DEC-refactor-roadmap-20261005"],
+    "actions": [
+      {"action": "add", "target": "t122-* 回归（清理失效/重取/语义区分/预算淘汰/死区回归）", "reason": "架构变更需成对断言（DEC-gate-adjust ①）", "gate_ids": ["frontend"]},
+      {"action": "adapt", "target": "快照正文继承相关的 t103 既有断言族", "reason": "继承机制被 bodyById 取代，保护意图（刷新不丢正文/死区不复发）必须保留并转由新机制断言承载，逐条附理由", "gate_ids": ["frontend"]},
+      {"action": "keep", "target": "其余既有 frontend/cargo fmt/lint/build 断言", "reason": "不回退证据", "gate_ids": ["cargo_fmt", "lint", "build", "frontend"]}
+    ]
+  }
+}

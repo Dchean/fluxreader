@@ -1,0 +1,59 @@
+{
+  "id": "TASK-112",
+  "title": "协议对账冲突政策显式化 + 服务端×协议兼容矩阵文档（二阶段④，完成标准「不同协议行为有明确说明」）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "objective": "把协议间对账差异从「实现分支里的隐性事实」提升为显式冲突政策并文档化（审计二阶段完成标准；行为零变化）。现况事实（探查在案）：GR 轻量对账 reconcile_reader_state（src-tauri/src/sync/greader_pull.rs:247-276）读状态单向 read-wins（不反向复活未读）、starred 双向；Fever reconcile_fever_state（fever_pull.rs:186-218）读状态双向（unread 集合命中即恢复未读，前提注释 fever_pull.rs:180-182「Miniflux 按 URL 去重、Fever 视角无跨源副本」）；两侧共享 pending 保护（pending_ids 命中即跳过）与「失败≠空集合」守卫（GR :164-182、Fever reconcile_ok :53-62/159-162）；增量游标：GR 起点候选游标+幂等合并（greader_pull.rs:60-67、189-198，REQ-103 失败守卫），时间过滤列随服务端实现而异（mock_greader 为 changed_at>=ot，真实 Miniflux main 映射 published_at 严格大于——greader_pull.rs:60-64 注释在案）；Fever last_id 按已合并条目 max 推进（fever_pull.rs:145-151）。修法要求：①政策显式化：新增单一政策定义点（建议 src-tauri/src/sync/conflict_policy.rs：每个「操作×协议」一条政策常量/函数+文档注释，说明选择理由与历史依据），reconcile_reader_state/reconcile_fever_state 引用政策定义（行为逐列不变——这是收口不是改行为；diff 必须可证明行为零变化）；同文副本读状态传播政策（DEC-refactor-roadmap 第 6 条：保持广播现状）一并写入政策点注释。②新增 docs/sync-compat-matrix.md（仓库根新建 docs/ 目录）：面向维护者/用户的兼容矩阵——协议（GR/Fever）×操作（标读/取消标读/收藏/取消收藏/对账方向/增量游标语义/时间过滤列）差异表；服务端（FreshRSS/Miniflux）已知实现差异（引用 greader_pull.rs:60-64 既有注释事实，注明「外部源码来自 dev 分支查阅时点，不代表部署服务版本」）；冲突政策表（哪个协议哪个方向单向/双向+理由）；同文副本传播政策；已知限制（游标变更时间假设不能单独保证晚到旧文章——审计结论）；不写教程性冗余。③修正过时注释：db/articles.rs:186「前端 ARTICLES_PAGE_SIZE=100000」与前端实际 500 不符（100000 是 TASK-110 废除前的 reloadFilteredEntries 字面量），按当前事实改写。④测试：核查 GR 单向/Fever 双向、pending 保护、失败守卫的既有测试覆盖（探查显示 sync_phases_e2e/pull_cursor_e2e/star_reconcile_truncation_e2e 等；缺哪条补哪条 ≥1 条）；cargo test 由 CI 执行。",
+  "non_goals": [
+    "不改任何对账行为/游标推进/push 行为（政策显式化=收口+文档，diff 必须证明行为零变化）",
+    "不新增用户可见设置项（政策是代码级显式+文档，UI 配置留后续按 owner 决定）",
+    "不实现同步四态 UI 展示（三阶段交互一致性）",
+    "不改前端代码"
+  ],
+  "requirement_refs": ["REQ-002", "REQ-003"],
+  "reference_ids": [],
+  "decision_refs": [".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"],
+  "dependencies": [],
+  "blocks": [],
+  "snapshot_paths": ["src-tauri/src", "docs"],
+  "risk": {
+    "level": "medium",
+    "decision_ids": ["DEC-refactor-roadmap-20261005"]
+  },
+  "scope": {
+    "allowed_paths": ["src-tauri/src/**", "docs/**"],
+    "protected_paths": ["AGENTS.md", "CLAUDE.md", "WORKFLOW.md", "WORKFLOW-KIT.md", "README.md", "package.json", "package-lock.json", "src/**", "tools/**", ".workflow-kit/**"],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 政策单点：GR/Fever 对账差异在单一政策定义点显式化，reconcile 函数引用之，行为零变化（diff 逐列可证 + 既有 e2e 全过）",
+    "② docs/sync-compat-matrix.md 上线：矩阵含协议×操作差异、服务端实现差异（带时点声明）、冲突政策表、副本传播政策、已知限制",
+    "③ db/articles.rs:186 过时注释修正",
+    "④ 对账方向的测试锁定齐备（缺补 ≥1 条）；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+    "⑤ 门禁全绿：cargo fmt、lint、build、frontend 不回退",
+    "⑥ 独立审查（全新子代理，未参与编码）PASS findings=0"
+  ],
+  "gates": [
+    {"id": "cargo_fmt", "program": "cargo", "args": ["fmt", "--check"], "cwd": "src-tauri", "required": true},
+    {"id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": false, "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担"},
+    {"id": "cargo_clippy", "program": "cargo", "args": ["clippy", "--all-targets", "--", "-D", "warnings"], "cwd": "src-tauri", "required": false, "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）"},
+    {"id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true},
+    {"id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true},
+    {"id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true}
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@二阶段③后基线：frontend 全绿、CI rust job 全绿。本卡行为零变化（政策显式化+文档+注释修正），新测试仅在 CI 执行。",
+      "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    },
+    "decision_ids": ["DEC-refactor-roadmap-20261005"],
+    "actions": [
+      {"action": "add", "target": "对账方向政策锁定测试（如缺）", "reason": "政策显式化需有测试锚；执行器为 CI rust job 的 cargo test（DEC-local-cargo-gate-20261005）", "gate_ids": ["cargo_fmt", "lint", "build", "frontend"]},
+      {"action": "keep", "target": "既有 e2e/单元测试与本地四门禁", "reason": "行为零变化的证明；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）", "gate_ids": ["cargo_fmt", "lint", "build", "frontend"]}
+    ]
+  }
+}

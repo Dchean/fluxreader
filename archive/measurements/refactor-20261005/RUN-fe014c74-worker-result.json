@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-107",
+  "run_id": "RUN-fe014c746ccb4c9e92aa1e9044bb7ff0",
+  "status": "ready_for_verification",
+  "summary": "修复轮 R1（审查 2 条低危 findings）：F1 版本化回滚守卫——internals.ts 新增 entryMutationVersion 计数器（flipEntryFlag/markEntriesRead/mergeSnapshotEntries 三写入点接线，快照替换也 bump 使在途乐观声明失效），nav.ts markCurrentViewAllRead 失败回滚前提升级为版本守卫（值守卫作快速短路），用户已接管条目不再误踩；F2 计数对账重取收口 reconcileCounts——首次失败立即单条诊断 toast（16 字）+ 3s 一次静默重试，仍失败放弃依赖 reload 自愈。新增 t104 断言 5 条（rollback-guard-versioned ×2、reconcile-retry ×3），变异测试证明断言判别力。t103-*/t104-* 既有断言零改动。自检：test:frontend 556/556、lint 0、build exit 0。",
+  "changed_files": "auto",
+  "validation_requests": ["frontend", "lint", "build", "cargo_fmt"],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

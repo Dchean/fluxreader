@@ -1,0 +1,73 @@
+{
+ "task_id": "TASK-114",
+ "candidate_digest": "cd458ed0aa6e59843cfa1529da08714ea022750d4ec687bbf91da36604d503ce",
+ "verification_run": "RUN-21ee986be8bd458bb7dce8519b7dca81",
+ "verdict": "PASS",
+ "summary": "独立复审在未参与实现的全新上下文完成：工作树 65/65 文件 sha256 与 R2 候选 manifest 逐一匹配（digest cd458ed0…），R1→R2 候选全量哈希差分恰为 src/components/Timeline.tsx 与 tools/frontend-regression.mjs 两文件，与 changed_files 声明一致、无夹带；Timeline.tsx 经 R1 干净备份（probes/Timeline.tsx.r1-clean.bak）逐字 diff 证实仅 :1137-1142 一处 hunk（门控+分态注释）。R1 唯一 finding 按建议修复到位：门控改为 {isLong && (!hydrationError || !!fullText)}，三态语义经条件链推演逐态核实——纯失败态（无正文可显示）门控恒假、重试行替换正文且无死控件（『渲染重试行』的充要条件 !fullText&&err 与『错误在场时门控为真』构造性互斥）；组合态（错误滞留+fullText 经详情路到达；reader.ts :129-160 详情 .then 只写 content 不清错、:229-235 批量水合过滤已有 content 的 id，证实可达且会话内滞留）正文分支显示 2 行钳制 snippet、门控豁免渲染展开按钮且展开有实义（displayText 由 snippet 切水合全文）；常态门控退化为 isLong，与基准 SocialCard :687 同形。变异独立复现：移除 || !!fullText 豁免（恰一行）后全量复跑恰 t114-x1g 一项转红（620/621、日志单一 ❌、npm exit 1），还原后 sha256 与候选一致（1b1193c2…）；x1g 判别力双向成立（新门控串 includes+先于按钮序断言，旧门控串零残留引用）。R1 其余 PASS 结论未被破坏：R1/R2 两轮验证 stdout 全量 t114 标签差分恰 x1g 一条、其余 15 条 t114 与既有 26 组逐字一致、计数 26+595 两轮相同（x1f 链序、x1b/x1c 闭合、范围结论延续）；门禁在审查者上下文复跑 frontend 621/621、lint exit 0、build exit 0、cargo_fmt exit 0 全绿。探针与变异日志存 tmp/refactor-20261005/probes/（r2-mut-run.log、r2-rev-frontend/lint/build/cargo-fmt.log、Timeline.tsx.r2-clean.bak、r2-fulllabels-r1run/r2run.txt）。verdict PASS，findings=0。",
+ "findings": [],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "聚焦复审 R1 唯一残留 finding 的修复：门控 {isLong && (!hydrationError || !!fullText) && (} 与 R1 建议逐字一致（Timeline.tsx:1142）；:1137-1141 注释按三态分写（纯失败不渲染防死控件 / 组合态豁免理由引 reader.ts 详情 .then 不清错的事实 / 常态不变）与实现逐句相符；t114-x1g 标签与断言体同步钉新门控。R1→R2 变更面经 65 文件哈希差分证实恰两文件，与 changed_files 一致，无越界无夹带；non_goals 未触碰（base.css/ShortcutsTab/App.tsx/jkNavigation 哈希均不变），X1 订阅面/X2/X3 主体实现 R2 未动。其余需求项沿用 R1 PASS 结论（本卡聚焦残留项，五项核对从简）。",
+   "evidence_files": [
+    "src/components/Timeline.tsx",
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "变异独立复现：文件级备份后移除 || !!fullText 豁免（恰一行 diff），全量复跑 620/621、唯一失败项恰 t114-x1g（日志单一 ❌、npm exit 1），还原后 sha256 与候选一致。x1g 断言非空洞且判别面恰此一条：新门控串在 Timeline.tsx 恰 1 处、回归文件恰 2 处引用（includes+indexOf 序断言），旧门控串 isLong && !hydrationError 零残留引用。零弱化核实：R1（RUN-83a6895a）/R2（RUN-21ee986b）两轮验证 stdout 全量标签差分恰 x1g 一条、16 条 t114 与既有 26 组断言标签逐字一致、计数 26+595 两轮相同。门禁审查者上下文复跑：frontend 621/621、lint exit 0、build exit 0、cargo_fmt exit 0，与 RUN-21ee986b 证据一致。",
+   "evidence_files": [
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/tasks/evidence/RUN-21ee986be8bd458bb7dce8519b7dca81-frontend.stdout.txt"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "三态语义经门控与正文条件链（fullText→err→snippet→hydrated→加载中）组合推演逐态核实：①纯失败态（fullText 空+err）正文=hydrate-retry 行、门控=isLong&&!err 恒假——无死控件，且『渲染重试行』（!fullText&&err）与『错误在场时门控为真』（需 fullText）构造性互斥，不存在按钮作用无对象的组合；②组合态（错误滞留+正文经详情路到达）正文走 fullText 分支呈 2 行钳制 snippet，门控豁免渲染展开按钮，点击 displayText 由 snippet 切水合全文——R1 残留缺陷消除、展开有实义；③常态门控退化为 isLong 与基准 SocialCard :687 同形（含加载窗口 snippet 长文展开=去钳制，与修前行为一致）。组合态可达与滞留事实复核成立：reader.ts 详情 .then 只写 content 不清 hydrationErrors（:129-160）、批量水合过滤已有 content 的 id（:229-235），错误清除仍仅 retryHydration 一口——底层卫生项维持独立上报裁定不变，UI 侧门控修正已按 R1 建议兜底；快照刷新继承双态路径不因 R2 改动而变，且该态现在有可见正文与展开入口。",
+   "evidence_files": [
+    "src/components/Timeline.tsx",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "R2 增量为 Timeline.tsx 单 hunk（门控一行+分态注释五行）与回归文件一条断言改写：无新抽象、无依赖方向变化、无重复规则新增。注释把三态语义落到可验证事实（reader.ts 详情 .then 不清错、displayText 切换机制、与修前/同态 SocialCard 对照），R1 指出的『注释在组合态失准』已纠正且与实现逐句相符；x1g 标签文字完整记载三态语义，后续维护者可从断言直达门控意图。R0/R1 结构结论（jkNavigation 抽取、双卡 JSX 镜像、base.css 复用）不受影响（相关文件哈希 R1→R2 不变）。",
+   "evidence_files": [
+    "src/components/Timeline.tsx",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "NOT_APPLICABLE",
+   "analysis": "R2 改动为渲染门控布尔式增加一个析取项（每次渲染 O(1)）与源级断言：订阅面（hydrationErrors/hydratedIds 按 id 细粒度选择器）、请求数、数据量、热路径均无变化，分支求值代价与原式等价（同一组条件的子集关系），不涉及代表性负载测量，无实测提升宣称，不适用。",
+   "evidence_files": []
+  }
+ ],
+ "ui_review": {
+  "required": true,
+  "evidence_files": [
+   ".workflow-kit/tasks/evidence/TASK-114-ui/x1-notification-layout.png",
+   ".workflow-kit/tasks/evidence/TASK-114-ui/x2-notif-enter-opens-reader.png",
+   ".workflow-kit/tasks/evidence/TASK-114-ui/x3-article-jk-select.png",
+   ".workflow-kit/tasks/evidence/TASK-114-ui/x3-social-jk-select.png",
+   ".workflow-kit/tasks/evidence/TASK-114-ui/x3-shortcuts-tab.png",
+   ".workflow-kit/tasks/evidence/TASK-114-ui/interaction-report.json",
+   ".workflow-kit/tasks/evidence/RUN-21ee986be8bd458bb7dce8519b7dca81-frontend.stdout.txt"
+  ],
+  "notes": "ui_change=true。任务声明三个 ui_check 逐项覆盖结论如下。X1.notif-hydration-states=通过：x1a..x1g 七条断言（订阅面/失败内联重试形态/占位恰两态/SSR 烟测/三态同构/正文分支先于失败分支/展开按钮门控）在审查者独立复跑 621/621 中全部通过；R2 门控修复（{isLong && (!hydrationError || !!fullText)}）属 X1 的组合态收尾——组合态「展开更多」恢复可见且展开有实义（displayText 切水合全文），纯失败态维持不渲染无死控件，三态主体同构（与 SocialCard 逐分支对照）不受影响。X2.enter-binding-uniform=通过：x2a..c 三条断言（Enter/Space 五卡键位齐备、Social/Notif=选中且 e.target 守卫、Timeline 接线 onSelect=selectArticle）独立复跑全绿；R2 未触及该面（App.tsx/jkNavigation.ts/Timeline X2 区块哈希 R1→R2 不变，两轮标签差分恰仅 x1g 一条）。X3.jk-all-virtualized=通过：x3a..f 六条断言（修前门控可复现/虚拟化四布局放行+画廊拦下/推进真值表/store 层五布局模拟/App.tsx 消费纯函数/ShortcutsTab 同步）独立复跑全绿；R2 未触及该面（ShortcutsTab.tsx/base.css 哈希不变）。取证边界延续 R0/R1 结论：契约「验证取证」条款明示『SSR 形态断言（renderToStaticMarkup 先例）+ 源级结构断言可作 UI 证据通道；真机截图非必需』，本轮沿用该通道并特此注明；R2 未新增样式类（base.css 不在 R1→R2 哈希差分中），唯一 UI 可见变化即上述 X1 组合态展开按钮。ui_evidence_directory（TASK-114-ui/RUN-21ee986b/）未建立实体截图目录，与 R0/R1 相同，属契约允许的通道选择而非缺陷。R1 ui_review 指出的残留 UI 缺陷（组合态无展开入口）已随 R2 消除。；落账补充（主控）：按工具 UI 取证要求补充真实浏览器截图 5 张与交互报告（tasks/evidence/TASK-114-ui/，vite dev + mock 模式，证据边界已在 interaction-report.json 声明：错误/空正文分支形态由源级断言锁定）。",
+  "contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md",
+  "checked_states": [
+   "X1.notif-hydration-states",
+   "X2.enter-binding-uniform",
+   "X3.jk-all-virtualized"
+  ]
+ }
+}

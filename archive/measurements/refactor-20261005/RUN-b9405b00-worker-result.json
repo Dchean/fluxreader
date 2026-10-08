@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-115",
+  "run_id": "RUN-b9405b007154440d97e517faa3936153",
+  "status": "ready_for_verification",
+  "summary": "三阶段②返回位置统一（对照 UI-CONTRACT-TASK-115 X1/X2/X3）：X1 锚存档（Map<filterKey,TopAnchor> 按 filterKey 覆盖+LRU 8，timelineAnchor.ts）+ nav 三缓存命中路径 switchRestoreNonce 与 entries 原子写入（contextChanged 守卫：同上下文导航不恢复；cache-miss/切排序=新语境不恢复）+ Timeline switchRestore effect（查档→决策→抑制→scrollToIndex→rearmTopAnchor 重锚落点防节流滞留）；X2 readerCloseNonce 关闭信号（store 不反向依赖 components 层的选型）+ Timeline ref 记账原选中卡 + focusCardAt 归还（原卡可见不滚/不可见定位/列表已切回落）；X3 统一规则表入 timelineAnchor 头注（全场景+不叠加保证）；画廊三 effect 回落现状。不叠加：switchRestoreNonce 与 TASK-111 positionRestoreNonce 触发源/消费 effect/锚来源三重分离，t115-x3a 双向断言。t115-* 断言 21 条（三处变异自证：M1 存档置空 5 红/M2 守卫去除 2 红/M3 关闭信号删除 3 红）。自检：test:frontend 642/642（t111-*20/t114-*16 原样）、lint 0、build exit 0。契约补记建议 4 条在汇报，待主控落账。",
+  "changed_files": "auto",
+  "validation_requests": ["frontend", "lint", "build", "cargo_fmt"],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

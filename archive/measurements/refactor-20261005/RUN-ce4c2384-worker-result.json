@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-114",
+  "run_id": "RUN-ce4c23844b214c1ab6f726ff11ce85b3",
+  "status": "ready_for_verification",
+  "summary": "修复轮 R1（审查 2 findings）：F1 采纳分支重排（a）——NotifCard 正文条件链改为 fullText 优先（与 SocialCard content 优先逐分支对齐），错误分支只覆盖无正文可显示的失败（切片内无 notif-body-text/snippet），「错误态+正文经详情路到达」组合态不再假报错；不采纳 b（reader.ts 清错误态，触碰 TASK-103 终态机语义面且落地后滞留错误不可见，报主控裁定作独立卫生项）。F2 补 t114-x1f（正文分支先于失败分支）与 t114-x1g（展开按钮 !hydrationError 门控，变异自证精准转红）两条断言，x1b/x1c 同步（零弱化）。自检：test:frontend 621/621、lint 0、build exit 0。",
+  "changed_files": "auto",
+  "validation_requests": ["frontend", "lint", "build", "cargo_fmt"],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

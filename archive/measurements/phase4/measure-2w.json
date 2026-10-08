@@ -1,0 +1,60 @@
+{
+ "capturedAt": "2026-10-07T01:15:18.515Z",
+ "port": 9222,
+ "measures": {
+  "memory": [
+   {
+    "layout": "文章",
+    "heapUsedMB": 9.1,
+    "cards": 23
+   },
+   {
+    "layout": "社交",
+    "heapUsedMB": 9.5,
+    "cards": 0
+   },
+   {
+    "layout": "画廊",
+    "heapUsedMB": 9.8,
+    "cards": 0
+   },
+   {
+    "layout": "播客",
+    "heapUsedMB": 10,
+    "cards": 0
+   },
+   {
+    "layout": "通知",
+    "heapUsedMB": 7.9,
+    "cards": 0
+   }
+  ],
+  "scrollArticle": {
+   "frames": 302,
+   "p50": 10,
+   "p95": 10.1,
+   "max": 10.3,
+   "jankOver50ms": 0,
+   "listHeight": 30188
+  },
+  "switchLatency": [
+   {
+    "target": "全部6009",
+    "ms": 68
+   },
+   {
+    "target": "今天0",
+    "ms": 64
+   },
+   {
+    "target": "未读6009",
+    "ms": 66
+   }
+  ],
+  "search": {
+   "ms": 1206,
+   "resultText": 1
+  },
+  "scaleNote": "精确文章数以 phase4_seed.py --info 或 sqlite COUNT 为准；本脚本记录 UI 可见卡片数与内存/帧率供对照。"
+ }
+}

@@ -1,0 +1,64 @@
+{
+  "id": "TASK-114",
+  "title": "五布局状态与快捷键统一——NotifCard 补水合态、Enter 绑定与 J/K 全布局化（三阶段①，REQ-005/008）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md",
+  "ui_checks": [
+    {"id": "X1.notif-hydration-states", "description": "NotifCard 与 SocialCard 同构：水合失败→内联重试按钮（retryHydration）、已水合无正文→「暂无正文」、水合中→加载指示；失败时不再以 snippet 静默回退"},
+    {"id": "X2.enter-binding-uniform", "description": "Social/Notif 卡 Enter/Space=选中打开阅读器，与 ArticleCard 一致（Podcast=play、Gallery=灯箱保持其领域语义）；role/tabIndex 形态对齐"},
+    {"id": "X3.jk-all-virtualized", "description": "J/K 选中切换从「仅文章布局」扩展到全部虚拟化布局（article/social/podcast/notification），循环回绕与 moveCardFocus 一致；画廊（非虚拟化）维持现状并在快捷键表注明；ShortcutsTab 文案同步更新"}
+  ],
+  "objective": "五布局交互一致性第一卡（探查证实加载/空/哨兵/refill 已五布局统一，本卡只收口三处真实不一致）：①NotifCard 水合态缺失——NotifCard 走 useLazyHydrate 水合（Timeline.tsx:960 一带）但不订阅 hydrationErrors/hydratedIds，失败时静默回退 snippet（:962-965），而 SocialCard 有完整失败→内联重试（retryHydration）/空正文→「暂无正文」/加载中三态（:660-671）。修法：NotifCard 对齐 SocialCard 三态（复用其 JSX/样式形态，通知卡文案域内适配），失败不再静默。②Enter 绑定不一致——Article/Podcast/Gallery 有 Enter/Space（选中/play/灯箱，:503-513/:901-907/:816-837），Social/Notif 只有方向键（:623-629/:996-1001）。修法：Social/Notif 补 Enter/Space=选中（与 ArticleCard 同语义：onSelect(id)），tabIndex/role 形态对齐。③J/K 范围——App.tsx:272-285 的 J/K 显式 `if (s.activeContentLayout !== 'article') return;` 仅文章布局生效。修法：扩展到全部虚拟化布局（article/social/podcast/notification；image 布局非虚拟化无 moveCardFocus 基建，维持现状并在 ShortcutsTab 注明「画廊布局不支持 J/K」），选中切换/循环回绕/moveCardFocus 行为不变；shouldYieldToOverlay 让路规则复用不扩键。ShortcutsTab（:8-16）文案同步。UI 契约文档（三检查点）随卡建立。回归断言 t114-* ≥6 条：NotifCard 三态 SSR/源级断言（复用 renderToStaticMarkup 先例 :3948-3959 与源级扫描先例）、Enter 绑定源级断言（五卡对照）、J/K 布局门控行为断言（store 层模拟五布局 keydown 语义）、ShortcutsTab 一致性扫描。既有断言零弱化（若 Social/Notif「仅方向键」有既有断言锁定，更新附理由）。",
+  "non_goals": [
+    "不改画廊布局键盘行为（非虚拟化，维持现状仅文档注明）",
+    "不改加载/空态/哨兵/refill（已五布局统一，探查证实）",
+    "不改返回位置机制（TASK-115）",
+    "不做视觉润色/动画（本卡仅状态与键绑定一致性）",
+    "不改 Rust"
+  ],
+  "requirement_refs": ["REQ-005", "REQ-008"],
+  "reference_ids": [],
+  "decision_refs": [".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"],
+  "dependencies": [],
+  "blocks": [],
+  "snapshot_paths": ["src", "tools/frontend-regression.mjs"],
+  "risk": {"level": "medium", "decision_ids": ["DEC-refactor-roadmap-20261005"]},
+  "scope": {
+    "allowed_paths": ["src/**", "tools/frontend-regression.mjs", ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md"],
+    "protected_paths": ["AGENTS.md", "CLAUDE.md", "WORKFLOW.md", "WORKFLOW-KIT.md", "README.md", "package.json", "package-lock.json", "src-tauri/**", "docs/**", ".workflow-kit/**"],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① NotifCard 三态与 SocialCard 同构（X1：失败重试/暂无正文/加载中；SSR 或源级断言锁定）",
+    "② Enter 绑定五卡统一（X2：Social/Notif=选中，Podcast=play，Gallery=灯箱，Article=选中）",
+    "③ J/K 全虚拟化布局生效、画廊注明不支持（X3：行为断言+ShortcutsTab 同步）",
+    "④ UI 契约文档三检查点落账（.workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md）",
+    "⑤ 门禁全绿：frontend（t114-* 新增）、lint/build/cargo_fmt 不回退；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+    "⑥ 独立审查（全新子代理）PASS findings=0；ui_change=true 需 UI 取证（SSR 形态断言可作证据通道，真机截图非必需但需注明）"
+  ],
+  "gates": [
+    {"id": "cargo_fmt", "program": "cargo", "args": ["fmt", "--check"], "cwd": "src-tauri", "required": true},
+    {"id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": false, "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担"},
+    {"id": "cargo_clippy", "program": "cargo", "args": ["clippy", "--all-targets", "--", "-D", "warnings"], "cwd": "src-tauri", "required": false, "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）"},
+    {"id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true},
+    {"id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true},
+    {"id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true}
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@二阶段后（main@82b2488 同源）：frontend 605/605、CI rust job 全绿（dev@5860dad）。本卡为交互一致性补齐（新键绑定/新状态 UI），属行为变化（owner 指示按审计三阶段推进）。",
+      "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    },
+    "decision_ids": ["DEC-refactor-roadmap-20261005"],
+    "actions": [
+      {"action": "add", "target": "t114-* 断言（NotifCard 三态/Enter 五卡对照/J-K 门控/ShortcutsTab 同步）", "reason": "行为变化需成对断言", "gate_ids": ["frontend"]},
+      {"action": "adapt", "target": "锁定 Social/Notif「仅方向键」等旧行为的既有断言（如有）", "reason": "旧行为正是本卡收口的不一致点，更新附理由", "gate_ids": ["frontend"]},
+      {"action": "keep", "target": "既有 frontend/cargo fmt/lint/build 断言", "reason": "不回退证据；cargo 由 CI 承担（DEC-local-cargo-gate-20261005）", "gate_ids": ["cargo_fmt", "lint", "build", "frontend"]}
+    ]
+  }
+}

@@ -1,0 +1,169 @@
+{
+ "id": "TASK-118",
+ "title": "跨字段操作版本与回滚统一——收藏不再使读状态回滚失效（审计 P1-2）",
+ "kind": "implementation",
+ "retry_safe": true,
+ "ui_change": false,
+ "objective": "修复第三方审计 P1-2（tmp/audit-20261007/REVIEW.md 第 2 节，探针 probes.mjs P2）：entryMutationVersion 是文章级共享版本，收藏（flipEntryFlag isStarred）与标读共用同一版本——全部已读在途时用户收藏该文，收藏 bump 版本使读状态回滚被跳过（审计实测：应 isRead=false/unread=1，实际 isRead=true/isStarred=true/unread=0）。修法要求：①版本键改 articleId×field（isRead/isStarred 各自单调，flipEntryFlag 按旗标类型 bump 对应字段；markEntriesRead bump isRead；mergeSnapshotEntries 后端行级真值两字段都 bump——快照整体替换使两字段在途声明都失效，语义注释说明）；nav.ts markCurrentViewAllRead 失败回滚只查 isRead 字段版本。②回滚统一（审计相邻缺口：『所有乐观写入都有统一版本回滚』尚未成立）：a) optimisticEntryFlagToggle 值比较改版本守卫（同一协调器）；b) markEntriesReadBulk（滚动批量标读）失败增加回滚——失败时按版本守卫恢复被翻转行并回补计数（对照 markCurrentViewAllRead 的回滚形态）；c) 打开即标读（selectArticle 的 markReadOnOpen→set_read）失败增加回滚（现仅 toast）。三路径共用同一回滚助手（恢复读态+按行回补 unread），单条与批量不得各写一份。③失败注入回归 t118-* ≥5 条（审计探针场景转真实行为回归，DEC-gate-adjust 纪律）：全部已读在途+收藏+失败 → 读状态恢复且收藏保留（探针本体）；跨字段版本隔离真值表；bulk 中途失败回滚；打开即标读失败回滚；连续两次全部已读的版本快照正确性。④Rust 零改动（纯前端）；不改 keyset 分页（TASK-117 刚落地）。既有断言零弱化（t104-rollback-guard-versioned 两断言锁的守卫升级为 per-field 后语义仍须成立——更新附理由）。",
+ "non_goals": [
+  "不改 Rust/IPC 形状",
+  "不做 confirmed value+pending intents 完整模型（审计建议的更完整方案，视本轮后情况另立）",
+  "不改 mergeSnapshotEntries 的 fromBackend 门控语义",
+  "不做 keyset 分页变更（TASK-117）"
+ ],
+ "requirement_refs": [
+  "REQ-003",
+  "REQ-007"
+ ],
+ "reference_ids": [],
+ "decision_refs": [
+  ".workflow-kit/docs/DEC-refactor-roadmap-20261005.md",
+  ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+ ],
+ "dependencies": [],
+ "blocks": [],
+ "snapshot_paths": [
+  "src",
+  "tools/frontend-regression.mjs"
+ ],
+ "risk": {
+  "level": "medium",
+  "decision_ids": [
+   "DEC-gate-adjust-20261007"
+  ]
+ },
+ "scope": {
+  "allowed_paths": [
+   "src/**",
+   "tools/frontend-regression.mjs"
+  ],
+  "protected_paths": [
+   "AGENTS.md",
+   "CLAUDE.md",
+   "WORKFLOW.md",
+   "WORKFLOW-KIT.md",
+   "README.md",
+   "package.json",
+   "package-lock.json",
+   "src-tauri/**",
+   "docs/**",
+   ".workflow-kit/**"
+  ],
+  "network": "none",
+  "data": "synthetic_only"
+ },
+ "acceptance": [
+  "① 全部已读在途+收藏+失败：读状态恢复未读、收藏保留（审计探针本体转回归，t118-*）",
+  "② 跨字段版本隔离：isRead/isStarred 版本互不干扰（真值表断言）",
+  "③ 回滚统一：单条 toggle/批量标读/打开即标读三路径失败都走同一回滚助手（行为断言）",
+  "④ mergeSnapshotEntries 两字段 bump 语义保持（t104-snapshot-voids-rollback-claim 原样过）",
+  "⑤ 门禁全绿：frontend（t118-* 新增）、lint/build/cargo_fmt 不回退；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+  "⑥ 独立审查（全新子代理）PASS findings=0"
+ ],
+ "gates": [
+  {
+   "id": "cargo_fmt",
+   "program": "cargo",
+   "args": [
+    "fmt",
+    "--check"
+   ],
+   "cwd": "src-tauri",
+   "required": true
+  },
+  {
+   "id": "cargo_test",
+   "program": "cargo",
+   "args": [
+    "test"
+   ],
+   "cwd": "src-tauri",
+   "required": false,
+   "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担；本卡 Rust 零改动"
+  },
+  {
+   "id": "cargo_clippy",
+   "program": "cargo",
+   "args": [
+    "clippy",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings"
+   ],
+   "cwd": "src-tauri",
+   "required": false,
+   "reason": "同 cargo_test"
+  },
+  {
+   "id": "lint",
+   "program": "npm",
+   "args": [
+    "run",
+    "lint"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "build",
+   "program": "npm",
+   "args": [
+    "run",
+    "build"
+   ],
+   "cwd": ".",
+   "required": true
+  },
+  {
+   "id": "frontend",
+   "program": "npm",
+   "args": [
+    "run",
+    "test:frontend"
+   ],
+   "cwd": ".",
+   "required": true
+  }
+ ],
+ "test_review": {
+  "behavior": "change",
+  "baseline": {
+   "status": "PASS",
+   "summary": "dev@b7947e9（TASK-117 后）：frontend 671/671、CI 全绿。本卡修复审计 P1-2 正确性缺陷（跨字段版本共享使回滚失效），属行为修复。",
+   "evidence_ref": ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+  },
+  "decision_ids": [
+   "DEC-gate-adjust-20261007"
+  ],
+  "actions": [
+   {
+    "action": "add",
+    "target": "t118-* 操作序列回归（探针本体/跨字段真值表/bulk 回滚/打开即标读回滚）",
+    "reason": "审计 P1-2 正确性修复需操作序列场景锁定（DEC-gate-adjust ①）",
+    "gate_ids": [
+     "frontend"
+    ]
+   },
+   {
+    "action": "adapt",
+    "target": "t104-rollback-guard-versioned 等锁文章级版本语义的断言",
+    "reason": "版本键升级为 per-field，守卫语义保持、实现形态变化，更新附理由",
+    "gate_ids": [
+     "frontend"
+    ]
+   },
+   {
+    "action": "keep",
+    "target": "其余既有 frontend/cargo fmt/lint/build 断言",
+    "reason": "不回退证据",
+    "gate_ids": [
+     "cargo_fmt",
+     "lint",
+     "build",
+     "frontend"
+    ]
+   }
+  ]
+ }
+}

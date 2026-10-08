@@ -1,0 +1,72 @@
+{
+ "task_id": "TASK-111",
+ "candidate_digest": "e6a02214aa41bde75cb58a94429377f3483bc38b9413009e2c4dba7665aab7a7",
+ "verification_run": "RUN-6d3ff49f2ad846a88b60694528e916c4",
+ "verdict": "FAIL",
+ "summary": "独立复审 TASK-111（①单键实体预算 ②后台刷新保位）。候选完整性：63 个候选文件 sha256 与 RUN-6d3ff49f candidate.json 逐一吻合，digest 一致，审查变异探针已全部还原（复跑 605/605，哈希复核 NONE mismatch）。产品实现本体核实为正确：缓存写入唯一收口成立（全仓 viewEntriesCache.set 仅 setViewEntriesSnapshot 一处，其余为 get/clear）；loadedCount=Math.max(记录值,截断长度) 在 tauri 态取记录游标真值、mock 态（articlesLimit=0）兜底回快照长度与预算前恢复行为一致；nav 三处恢复与 applyArticlesCursor 衔接正确；截断恰发生在 >1000（trimmed 恒为整 1000 或不截断），exhausted 两态（false 续拉 offset=1500 不回退重拉、true 拦截伪续拉）由 t111-2/3 判别锁定；保位三重隔离逐入口核实——keepReadingPosition 仅 App.tsx feeds-updated / sync.ts 手动同步 / feeds.ts 单源刷新三处传入，启动 bootstrap、设置类（CacheCleanup/ConfigSync/SyncTab/FeedsTab）与 nav 全部无参，nonce bump 带「落地快照即当前视图」守卫（completion 时 activeViewFilter==='all' + reloadGeneration 代际 + filteredSnapshotStale），消费侧 clearTopAnchor（filterKey 变化）+ anchorRestoreIndex 逐字比对 + 画廊早退；回位滚动经既有抑制窗口不误判用户滚动，handleScroll 重记锚不构成循环（记录不触发滚动、nonce 仅 reload 落地 bump）；性能：锚记录 250ms 节流 O(1) 模块级零订阅，截断常态路径零拷贝。门禁复核：RUN-6d3ff49f 四必需门禁 PASS（frontend 605/605、lint/build/cargo_fmt exit 0），cargo test/clippy 按 DEC-local-cargo-gate-20261005 由 CI 承担。判 FAIL 的原因在回归网而非产品代码：20 条 t111 断言中 2 条判别力不成立（变异证实，见 findings）——selectView 不 bump 的保证实际无人锁定、anchorRestoreIndex 的 filterKey 失配回落分支可被删除而不红，任务卡验收②③要求的判别断言在这两点上名不副实；修复成本低（两处断言改写），修后需重新 verify 并复审。非阻塞观察：作者自检口径「t103/t104/t109/t110 共 48 条」与实际不符（16/17/10/14=57 条，全部原样通过，不影响零弱化结论）；mock 模式恢复 exhausted 语义由「长度<500」改为记录值（false），仅影响演示模式哨兵文案（loadMore 在 mock 恒 no-op），惯性无害；exhausted=true 截断恢复后 loadedCount 与可见条目间的尾部区间在下次 reload 前不可达——首屏快照语义的既记载取舍；ui_change=false（行为改善非 UI 样式变化），ui_review=null。",
+ "findings": [
+  "[Medium][regression] tools/frontend-regression.mjs:3633-3635 —— (t111-4)「分流（筛选视图导航）：selectView 不 bump 保位信号」是空洞断言：positionRestoreNonce 在 selectView('starred')+nTick 完成之后才读取（3633 行），再与自身比较（3635 行），永不失败。变异验证：让 selectView 缓存命中与未命中两个分支均无条件 bump positionRestoreNonce 后，全量 605/605 仍全部通过（其它断言无一捕获）。即「selectView 导航不 bump」这一保证当前没有被任何断言锁定（同组内 selectFeed 与无 opts reloadFromBackend 的对应断言均为真前后比较，唯独 selectView 缺位）。触发条件：未来任何给 selectView/reloadFilteredEntries 导航路径误加保位透传的回归都不会被门禁发现。建议：把 nonce 读取移到 selectView 调用之前做前后比较（与 3638 行 nonce4c+1 的写法对齐）。",
+  "[Medium][regression] tools/frontend-regression.mjs:3659-3663 —— (t111-5)「主动切范围回落（判别）」的 anchorRestoreIndex(...)===null 子句因错误原因通过：selectFeed('feed-10') 后 activeViewFilter 仍为 'starred' 且唯一收藏行 7200 已从后端删除，selectVisibleEntries 恒为空列表，findIndex 落空返回 null——与 src/components/timelineAnchor.ts:71 的 filterKey 逐字比对无关。变异验证：整行删除 timelineAnchor.ts:71 的「filterKey 不一致拦截」后，全量 605/605 仍全部通过——纯函数的 filterKey 失配回落分支（上下文切换隔离的核心判据、任务卡「分流显式」设计的关键一环）未被任何断言判别。产品代码当前正确（Timeline 的 clearTopAnchor 于 filterKey 变化 + 导航路径不 bump nonce 两道外围保险在位），缺陷在回归网声称的判别力不成立。建议：新增直接断言——记录锚于上下文 A，在上下文 B（items 非空且包含锚 id）调用 anchorRestoreIndex，锁定返回 null；或改造 t111-5b 使消费时 items 非空。"
+ ],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "①预算：VIEW_ENTRIES_CACHE_ENTRY_BUDGET=1000（≥页大小 500，注释载明审计原文），超限尾部截断，syncCurrentViewCache 与两处 reload 写入统一经 setViewEntriesSnapshot 收口，恢复路径（selectLayout/selectView/selectFeed 三处）改用记录元数据 loadedCount/exhausted 经 applyArticlesCursor 恢复——附带覆盖 TASK-110 偏移漂移（entries 短于游标）场景的恢复误判；截断边界两态自洽（截断仅发生于 >1000，trimmed 恒整 1000 或不截断；exhausted=false 恢复游标 1500 续拉 offset 接 1500 不重拉，exhausted=true 恢复 true 拦截伪续拉）。②保位：timelineAnchor 模块（250ms 节流 + filterKey 记账 + anchorRestoreIndex 纯函数）、三个内容刷新入口传 opts.keepReadingPosition、落地「快照即当前视图」才 bump nonce、Timeline 订阅 nonce 回位（suppressNextScrollEvents + scrollToIndex align:start）、导航/启动/设置路径不透传、锚丢失回落、画廊不回位——与任务卡逐项对应。③t111-* 共 20 条（≥5）。non_goals 遵守：keyset 游标未动、无第二套缓存、src-tauri 未改（changed_files 全部在 allowed_paths src 与 tools/frontend-regression.mjs 内）、feeds-updated 事件与 Rust 调度未动。",
+   "evidence_files": [
+    "src/store/internals.ts",
+    "src/components/timelineAnchor.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/App.tsx",
+    "src/store/slices/sync.ts",
+    "src/store/slices/feeds.ts",
+    "src/store/types.ts"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "FAIL",
+   "analysis": "既有断言零弱化成立：t103/t104/t109/t110 共 57 条（16/17/10/14）在源码与 RUN-6d3ff49f frontend 门禁输出中一一对应全部通过，全文件差异仅两个 hunk——(p3b) 一条既有断言更新（字面量随 wire 形态改为锁定 keepReadingPosition 实参 + .catch 仍在，比原断言更严，附改动理由注释）与新增 t111 块。新增 20 条 t111 断言中 18 条经变异证实有判别力：把恢复路径退回「重算截断长度」的朴素实现（M1）后被 5 条断言捕获（t111-0/2×2/3×2，600/605→实红）。但两条判别力不成立（见 findings，变异 M2/M3 均全绿）：selectView 不 bump 为空洞自比较、anchorRestoreIndex 的 filterKey 失配分支可删而不红——任务卡验收②③要求的判别断言在这两点上不成立，故 regression 判 FAIL。复跑确认：605/605 与 RUN 记录一致，探针还原后候选逐字完好。",
+   "evidence_files": [
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/tasks/runs/RUN-6d3ff49f2ad846a88b60694528e916c4.json",
+    ".workflow-kit/tasks/evidence/RUN-6d3ff49f2ad846a88b60694528e916c4-frontend.stdout.txt"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "已核对的失败/边界场景：预算边界（恰=1000 不截断且元数据完整，t111-1）；1500 与 1100 两种超限形态的截断与两态 exhausted 恢复（t111-2/3，含 exhausted=true 拦截伪续拉不发 list_articles）；恢复路径注入 reload 失败使恢复态存续（t111-2/3 的 reject 注入）；锚丢失（id 不在新快照）回落且信号照常送达（t111-5a）；无锚/上下文切换/画廊布局三路回落（Timeline 消费 effect 的早退分支与 clearTopAnchor）；并发 reload 代际守卫 + completion 时 activeViewFilter 检查 + filteredSnapshotStale 对「在途刷新期间用户切范围/切视图」的竞态覆盖（陈旧 reload 不会对过渡快照误 bump）；筛选视图透传路径（reloadFromBackend 落 'all' 过渡快照不 bump、信号由 reloadFilteredEntries 落地发出）；回位程序性滚动经抑制窗口不会被误判为用户滚动（markReadOnScrollOut 不误触发），回位滚动重记锚无循环（记录不触发滚动、nonce 仅 reload 落地 bump）；空快照（entries=0）写入/恢复一致；LRU 淘汰与既有 8 键语义不受影响。未发现产品代码层的失败路径缺陷。",
+   "evidence_files": [
+    "src/store/internals.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/components/timelineAnchor.ts",
+    "src/components/Timeline.tsx"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "结构变化克制且降低维护负担：单键预算与元数据收口进 setViewEntriesSnapshot 单一写入点（grep 全仓证实 viewEntriesCache.set 仅 internals.ts 一处，三个写入点共用，无绕过）；anchorRestoreIndex/recordTopAnchor/peekTopAnchor 为纯函数或模块级状态，与回归网消费同一份实现（判别断言可直接锁定）；timelineAnchor.ts 模块形态与既有 timelineSentinel/timelineRefill 同构，零新依赖；nav 三处恢复统一改 applyArticlesCursor(记录元数据) 消除了三份重复的「长度重算」规则；依赖方向单向（Timeline→timelineAnchor、slices→internals），无循环；注释载明审计依据、取值理由与 mock/tauri 两态语义，后人可追溯。无以行数为理由的拆分、无预建抽象。",
+   "evidence_files": [
+    "src/store/internals.ts",
+    "src/components/timelineAnchor.ts",
+    "src/components/Timeline.tsx",
+    "src/store/slices/nav.ts"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "PASS",
+   "analysis": "静态核对（范围明确声明，非实测、不宣称测量提升）：①内存形态——单键实体上限 1000 × 8 键封住 TASK-110 分页化后「单键随滚动加载无界增长」的回归面，截断仅在 entries.length>1000 时执行一次 slice；常态路径 trimmed===entries 原引用，写入零拷贝（LRU set 的 delete+set 为 O(1)）。②锚记录——模块级 O(1) 写入，250ms 节流（高频 scroll 收敛到约 4 次/秒），零 store 订阅（Timeline 仅新增订阅 positionRestoreNonce 标量，仅在 reload 落地时变化，滚动不触发任何组件重渲染）——「锚零订阅」声称与代码一致。③恢复路径用记录值替代重算，无新增遍历。万级负载的实测属后续性能阶段（任务卡 non_goals：不改 keyset 游标），本卡未做也未声称实测。",
+   "evidence_files": [
+    "src/components/timelineAnchor.ts",
+    "src/components/Timeline.tsx",
+    "src/store/internals.ts"
+   ]
+  }
+ ],
+ "ui_review": null
+}

@@ -1,0 +1,61 @@
+{
+ "task_id": "TASK-118",
+ "candidate_digest": "d43066fbf3a2ff803583f86966540c0c5df62a0d1f4c9e0ce500cbaff111bfaf",
+ "verification_run": "RUN-7509ff497f1349129793937b1470f602",
+ "verdict": "PASS",
+ "summary": "独立复核 TASK-118（审计 P1-2 修复）。①版本键确已升级为 articleId×field（entryVersionKey `${id}|${field}`），三个真实写入点（flipEntryFlag 按旗标、markEntriesRead 按 isRead、mergeSnapshotEntries fromBackend=true 双字段）全部收口且带语义注释；nav.ts markCurrentViewAllRead 守卫只查 isRead 字段版本。②回滚统一成立：单条 toggle / markEntriesReadBulk / 打开即标读（selectArticle + anchorToArticle）三条乐观路径失败均走同一助手 rollbackEntryClaims，两道守卫顺序（值等短路→字段版本守卫）语义经推演正确，计数回补与 flipEntryFlag 乐观方向互逆并 Math.max(0,) 钳制，changed 才写 store 且失败 toast 不吞错。③审计探针本体（probes.mjs P2）被 t118-probe-cross-field 逐动作复刻为行为回归；审查者独立完成四组变异：键退化忽略 field 恰 8 红且探针断言必红、助手空转 9 红覆盖三条路径、快照 bump 全去 5 红、单字段 bump 缺失 4 红——三族判别力全部成立。④bump 覆盖穷举：全仓 isRead/isStarred 写入仅 internals 三点 + 两处回滚恢复 + api.ts 行映射/mock 夹具，四个 IPC 写命令（set_read/set_starred/set_read_bulk/mark_all_read）无一绕过乐观 bump 与版本守卫回滚。⑤t104-rollback-guard-versioned 升级经字节级比对确为只增不减（原两断言条件逐字保留 + 窗口内追加收藏写 + 2 个新条件 + 更新理由注释），t104-snapshot-voids-rollback-claim 原样通过，其余 683 条断言零改动（diff 仅 3 个 hunk）。⑥基线复跑 685/685 与 RUN-7509 证据一致，lint 0 错误（phase4_measure.mjs 既有 1 warning 非本卡文件）、build exit 0、cargo_fmt PASS，Rust 零改动属实，改动范围 5 文件全在 allowed_paths 内。两处残余边界（连读双失败的陈旧声明跳过、快照移除行被续拉重挂后迟到回滚 clobber）均为 TASK-107 既有形态、本卡未加重、且完整修复属任务卡明示 non-goal（confirmed value+pending intents 模型），记入分析不构成缺陷。findings=0。",
+ "findings": [],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "对照任务卡逐项核实：①版本键 = `${id}|${field}`（internals.ts entryVersionKey），flipEntryFlag 按旗标 bump 对应字段、markEntriesRead 只 bump isRead、mergeSnapshotEntries fromBackend=true 对 isRead/isStarred 双 bump 且语义注释到位，nav.ts markCurrentViewAllRead 快照与守卫均只取 isRead 字段版本；②回滚统一：optimisticEntryFlagToggle 值比较改走统一助手，markEntriesReadBulk 与打开即标读（selectArticle 及 anchorToArticle 两处）失败新增回滚，三路径共用 rollbackEntryClaims 单一实现，单条与批量未各写一份；③t118-* 共 6 场景 14 断言，覆盖任务卡点名的全部 5 个场景（探针本体/跨字段真值表/bulk 失败回滚/打开即标读失败回滚/连续两次全部已读）另加对称方向 1 场景；④Rust 零改动属实（git status 无 src-tauri 变更）、keyset 分页（TASK-117）未触碰、t104-snapshot-voids-rollback-claim 原样通过；改动 5 文件（src/store/internals.ts、bootstrap.ts、nav.ts、reader.ts、tools/frontend-regression.mjs）全部在 allowed_paths 内，non_goals（不改 Rust/IPC 形状、不做 pending intents 完整模型、不改 fromBackend 门控语义、不动 keyset 分页）逐条未越界。",
+   "evidence_files": [
+    "src/store/internals.ts",
+    "src/store/slices/nav.ts",
+    "src/store/slices/reader.ts",
+    "src/store/slices/bootstrap.ts",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "审查者本地复跑 npm run test:frontend = 685/685（26 既有 + 659 新增），与 RUN-7509ff497f1349129793937b1470f602 frontend 证据一致。t118 断言走真实 store 动作序列 + 假后端注入（rejectCmds 按命令名拒绝、held-promise 手动驱动在途窗口），断言同时核对 entries、feedCounts 与 backendRows 后端真值三方一致。审计探针本体等价性：t118-probe-cross-field 逐动作复刻 probes.mjs P2（mark_all_read 挂起→收藏→此刻才拒绝），断言 isRead=false/unread=1/收藏保留且与后端按行聚合一致。审查者独立变异验证（记录：tmp/refactor-20261005/TASK-118-review-mutation-log.md）：MUT-A 版本键退化忽略 field → 恰 8 红，含探针本体断言（必红成立）；MUT-B rollbackEntryClaims 空转 → 9 红，单条/批量/打开即标读三路径各有判别断言；MUT-C 快照 fromBackend bump 全去 → 5 红（含 t104-snapshot-voids-rollback-claim）；MUT-C2 单字段 bump 缺失 → 4 红（双 bump 完整性被真值表锁定）。既有断言零弱化：frontend-regression.mjs 差异仅 3 个 hunk，t104-rollback-guard-versioned 升级经与 HEAD 字节级比对确为只增不减（原两断言条件逐字保留，新增窗口内收藏写 1 行 + 第二断言追加 2 个条件 + TASK-118 更新理由注释），t104-snapshot-voids-rollback-claim 三断言原样未动且通过。",
+   "evidence_files": [
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/tasks/evidence/RUN-7509ff497f1349129793937b1470f602-frontend.stdout.txt",
+    "src/store/internals.ts"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "乐观写入穷举：单条 toggle（ContextMenu/Timeline 卡片、阅读器 toggleCurrentReadStatus/toggleCurrentStar）→ optimisticEntryFlagToggle → 统一助手；批量标读（Reader 自动、Timeline scrollAwayRead、player.ts 播完标读）→ markEntriesReadBulk → 统一助手；打开即标读（selectArticle、anchorToArticle）→ 统一助手；markCurrentViewAllRead 按任务卡要求保留自身回滚形态且只查 isRead 字段版本。四个 IPC 写命令（set_read/set_starred/set_read_bulk/mark_all_read）前均有 bump 的乐观写入、后均有版本守卫回滚，无绕过入口。守卫语义推演：值等短路在前——当前值已等于回滚目标时用户的接管写入已落库、计数已由用户自身操作回平，跳过不动作语义正确；值不同但版本已前进则跳过（接管）；值不同且版本未变才恢复。计数回补方向与 flipEntryFlag 严格互逆（isRead 恢复未读 +1/恢复已读 -1；isStarred 对称），多 feed 聚合与 Math.max(0,) 钳制正确；changed=false 不写 store 不刷缓存，失败 toast 始终由调用方给出（回滚跳过不吞错）。边界裁定核对：回滚不动 activeArticleId/openedReadIds（阅读器正文展示不受影响，rollbackEntryClaims 只写 entries/feedCounts），selectors.ts:110 证实 openedReadIds 保留使未读筛选下卡片原地保留而非消失，与卡片描述一致。残余边界两处均为 TASK-107 既有形态且本卡未加重（双失败窗口的陈旧声明跳过；mergeSnapshotEntries 只 bump 存活行、被移除行经 loadMoreArticles 重挂后理论上可携活声明）——完整修复属任务卡明示 non-goal，不构成本候选缺陷。",
+   "evidence_files": [
+    "src/store/internals.ts",
+    "src/store/slices/reader.ts",
+    "src/store/slices/bootstrap.ts",
+    "src/store/slices/nav.ts"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "结构改善实质：修前回滚逻辑三处分裂（单条 toggle 值比较、批量标读与打开即标读只提示不回滚、全部已读自带一套），现收口为单一类型化契约 EntryRollbackClaim + rollbackEntryClaims——声明形态（id/field/prev/version）与两道守卫顺序在助手处单点定义，调用方声明各仅 1-2 行，重复规则消除且依赖方向不变（slices → internals 单向）。版本键派生收口在 entryVersionKey 单点，bump 写入点保持恰三个并有注释索引（nav.ts 注释列举）；markCurrentViewAllRead 未被强行并入助手属正确取舍：其语义（整范围 mark_all_read、openedReadIds 还原、成功后计数对账）与逐行声明回滚确实不同，注释已说明对照关系。EntryRollbackClaim.prev 硬编码 false 的三处调用点均有 !isRead 前置守卫保证（selectArticle/anchorToArticle 的 shouldMarkRead、bulk 的 unread 过滤），无隐含假设泄漏。无为将来复用预建的抽象，Map 键增长（条目×字段至多两倍）已在注释中说明无需清理。",
+   "evidence_files": [
+    "src/store/internals.ts",
+    "src/store/slices/reader.ts"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "NOT_APPLICABLE",
+   "analysis": "本卡为正确性修复，未主张任何性能提升，无代表性负载测量要求。静态范围核查：版本 Map 键上界从 条目数 变为 条目×字段（至多两倍），仍 O(1) 读写、随会话有界，无淘汰需求变化；rollbackEntryClaims 为单次 O(entries) 遍历 + 单次 setState，仅在失败路径执行（批量路径修前失败无回滚，新增开销仅在失败时刻）；mergeSnapshotEntries 每次 fromBackend 快照多一次 Map bump（每条目一次），相对快照构建本身可忽略。均非热路径常态开销，不构成回归风险。",
+   "evidence_files": [
+    "src/store/internals.ts"
+   ]
+  }
+ ],
+ "ui_review": null
+}

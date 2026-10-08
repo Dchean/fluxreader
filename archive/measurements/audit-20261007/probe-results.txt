@@ -1,0 +1,8 @@
+P1 unread paging {"loaded":700,"missingUnread":500,"exhausted":true,"lastListArgs":{"args":{"feed_id":null,"folder_id":null,"newest_first":true,"layout":"article","only_unread":true,"limit":500,"offset":500,"with_content":false}}}
+P2 cross-field rollback {"uiRead":true,"uiStar":true,"uiUnread":0,"expectedRead":false,"expectedUnread":1}
+P3 content freshness {"content":"<p>old body</p>","snippet":"new body from backend","needsHydration":false,"bodyCalls":0}
+P4 deep reading refresh {"loaded":500,"anchorIndex":null}
+P5 same-query response race {"finalIds":["1"],"expectedIds":["2"]}
+P6 count response race {"uiRead":false,"uiUnread":0,"expectedUnread":1}
+P7 after AI-cache clearing reload {"uiSummary":"old summary","uiTranslation":"old translation","expectedSummary":""}
+P8 queue UI freshness {"actualQueue":1,"statsRequests":0,"storeWaiting":0,"label":"后端已同步"}

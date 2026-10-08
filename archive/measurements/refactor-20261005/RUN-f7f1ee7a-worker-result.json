@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-124",
+  "run_id": "RUN-f7f1ee7aca654a88aec3f937118bb33c",
+  "status": "ready_for_verification",
+  "summary": "修复轮 R1（R0 审查唯一 finding）：attempts_of 从 mod t116_tests 私有 fn 上移到 sync_queue.rs 文件级 #[cfg(test)]（两测试模块 use super::* 解析同一份定义，函数体逐字未动）；跨模块私有引用系统性清查（t116_tests/t124_tests(sync_queue)/t124_tests(push) 未解析裸名均 0，conn 各自定义非同型、last_error_of 单点留原位）。cargo fmt --check 0。CI 复验为权威证据。",
+  "changed_files": "auto",
+  "validation_requests": ["cargo_fmt", "frontend", "lint", "build"],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

@@ -1,0 +1,57 @@
+{
+  "id": "TASK-117",
+  "title": "可变集合分页改 keyset 游标——阅读中连续翻页不丢文章（审计 P1-1）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": false,
+  "objective": "修复第三方审计 P1-1（tmp/audit-20261007/REVIEW.md 第 1 节，探针 probes.mjs P1）：可变筛选集合（WHERE is_read=0）上 OFFSET 分页不等价于已看条数——1200 未读读 500 标读后集合剩 700，下一页仍 OFFSET 500 → 跳过 500 篇并假 exhausted。审计要求：以稳定排序键做 keyset 分页（规范化发布时间+唯一 ID），列表、定位与续拉共用排序规则；验收必须包含阅读/取消收藏过程中连续翻页，不能只有静态分页与插入去重。修法要求：①Rust：list_articles 增可选 keyset 参数（last_published TEXT + last_id i64），DESC 谓词 `(a.published_at < ?last_published OR (a.published_at = ?last_published AND a.id < ?last_id))`（ASC 反向）；ORDER 常量补 id 决胜（`a.published_at DESC, a.id DESC`/ASC 同理）——**article_index 的 ROW_NUMBER 窗口必须同步补 id 决胜**（锚定位置与列表顺序同口径，锚定不受本卡破坏）；OFFSET 参数保留（其他调用方兼容）但前端列表路径停用。②前端：articlesCursor 从「已加载条数」改为「每 scopeKey 的 {lastPublished, lastId, loaded}」，loadMoreArticles 传 keyset 参数；exhausted 判定不变（返回 < PAGE_SIZE）；selectVisibleEntries 本地排序必须补 id 决胜（与服务器顺序一致，续拉追加才不乱序）。③「今天/未读/收藏」三种筛选与「全部」全部走 keyset。④回归断言 t117-* ≥6 条，**必须包含操作序列场景**（DEC-gate-adjust 纪律）：阅读中连续翻页（审计探针场景：1200 未读、读 500、续拉不得跳过）、取消收藏场景、插入漂移（keyset 天然免疫，断言锁定）、排序决胜并列 published_at（同秒文章不重不漏）。既有断言依赖 offset 语义的按行为变化更新附理由。审计探针可参考 tmp/audit-20261007/probes.mjs 的 P1 场景构造。⑤Rust 测试 ≥2 条（keyset 谓词正确性：DESC/ASC 边界、并列 published_at 决胜；CI 执行）。",
+  "non_goals": [
+    "不改刷新窗口策略（审计 P2-5 独立卡）",
+    "不做实体/正文缓存分离（P2-3 独立卡）",
+    "不改 mark_all_read/事务化语义",
+    "不引入 TanStack Query"
+  ],
+  "requirement_refs": ["REQ-003", "REQ-007"],
+  "reference_ids": [],
+  "decision_refs": [".workflow-kit/docs/DEC-refactor-roadmap-20261005.md", ".workflow-kit/docs/DEC-gate-adjust-20261007.md"],
+  "dependencies": [],
+  "blocks": [],
+  "snapshot_paths": ["src", "tools/frontend-regression.mjs", "src-tauri/src"],
+  "risk": {"level": "medium", "decision_ids": ["DEC-gate-adjust-20261007"]},
+  "scope": {
+    "allowed_paths": ["src/**", "tools/frontend-regression.mjs", "src-tauri/src/**"],
+    "protected_paths": ["AGENTS.md", "CLAUDE.md", "WORKFLOW.md", "WORKFLOW-KIT.md", "README.md", "package.json", "package-lock.json", "docs/**", ".workflow-kit/**"],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 阅读中连续翻页不丢：1200 未读场景，读 500 后续拉返回剩余集合前 500 篇（审计探针场景转回归，t117-*）",
+    "② 取消收藏场景同性质通过；并列 published_at 由 id 决胜不重不漏",
+    "③ article_index 锚定与列表顺序保持同口径（既有锚定断言不回退）",
+    "④ Rust keyset 谓词测试 ≥2 条（DESC/ASC/并列决胜）；cargo test/clippy 由 CI 承担（DEC-local-cargo-gate-20261005）",
+    "⑤ 门禁全绿：frontend（t117-* 新增）、lint/build/cargo_fmt 不回退",
+    "⑥ 独立审查（全新子代理）PASS findings=0；keyset 谓词的 SQL 注入面（last_published 为外部字符串）需审查确认参数化"
+  ],
+  "gates": [
+    {"id": "cargo_fmt", "program": "cargo", "args": ["fmt", "--check"], "cwd": "src-tauri", "required": true},
+    {"id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": false, "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担"},
+    {"id": "cargo_clippy", "program": "cargo", "args": ["clippy", "--all-targets", "--", "-D", "warnings"], "cwd": "src-tauri", "required": false, "reason": "同 cargo_test；clippy 盲区按 TASK-113 先例静态自查+片段实证"},
+    {"id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true},
+    {"id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true},
+    {"id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true}
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@02a82f1（门禁调整后）：frontend 655/655、CI rust job 全绿（v0.17.0 tag）。本卡修复审计 P1-1 正确性缺陷（offset 分页在可变集合跳过条目），属行为修复；审计探针场景必须转回归（DEC-gate-adjust 纪律）。",
+      "evidence_ref": ".workflow-kit/docs/DEC-gate-adjust-20261007.md"
+    },
+    "decision_ids": ["DEC-gate-adjust-20261007"],
+    "actions": [
+      {"action": "add", "target": "t117-* 操作序列回归（阅读中翻页/取消收藏/插入漂移/并列决胜）+ Rust keyset 谓词测试", "reason": "审计 P1-1 正确性修复需按操作序列场景锁定（DEC-gate-adjust ①）", "gate_ids": ["cargo_fmt", "frontend"]},
+      {"action": "adapt", "target": "依赖 offset 游标语义的既有断言（游标镜像/applyArticlesCursor 契约）", "reason": "offset 语义正是本卡废除的缺陷手法，更新附理由", "gate_ids": ["frontend"]},
+      {"action": "keep", "target": "其余既有 frontend/cargo fmt/lint/build 断言", "reason": "不回退证据；cargo 由 CI 承担（DEC-local-cargo-gate-20261005）", "gate_ids": ["cargo_fmt", "lint", "build", "frontend"]}
+    ]
+  }
+}

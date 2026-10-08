@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-107",
+  "run_id": "RUN-adcdaa59ef97462a88a84feaa8aa77d3",
+  "status": "ready_for_verification",
+  "summary": "REQ-003 计数一致性：①nav.ts markCurrentViewAllRead 重写——tauri 路径乐观先行（保存原读态快照），成功后消费 markAllRead 返回的实际条数并 api.feedCounts() 重取全量计数整体替换（与 reloadFromBackend 同源），失败按「仅当当前值仍等于乐观写入值」逐条回滚读态+逐 feed 回补 unread+还原 openedReadIds，toast『全部已读保存失败：{原因}』带重试，成功 toast 移到落库确认后；范围语义未动。②单条标读计数核查：先读后端实证（set_read 仅翻该行、feed_counts 按行聚合、apply_read_bulk 逐行），探针验证单条/批量路径前端与后端口径一致（无需修复），结论落 flipEntryFlag/markEntriesRead docstring。③frontend-regression：假后端升级为忠实实现（set_read 就地翻转、mark_all_read 按 scope×layout 翻转未读并返回受影响行数、feed_counts 可插拔），新增 t104-* 7 条，更新 (f)/(p1) 既有断言并附理由；t103-* 16 条原样通过。自检：test:frontend 551/551、lint 0、build exit 0。备注（非阻塞）：对账重取的毫秒级竞态由下次 reload 自愈；同文副本远端传播计数变化属同步域（本卡 non_goals）。",
+  "changed_files": "auto",
+  "validation_requests": ["frontend", "lint", "build", "cargo_fmt"],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

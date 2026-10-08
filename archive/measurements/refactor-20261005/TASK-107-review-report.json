@@ -1,0 +1,62 @@
+{
+ "task_id": "TASK-107",
+ "candidate_digest": "99e7adf69eeb52e4849857829846a1c9ee921c206e2803a6738612bf28c70600",
+ "verification_run": "RUN-8e7605b3dc36498cb7f5a734ddbf6f7d",
+ "verdict": "PASS",
+ "summary": "独立审查（未参与编码的新上下文）完成五项核对。候选完整性：按 candidate manifest 重算摘要 99e7adf6…70600 与记录一致，62 个快照文件逐一 sha256 比对工作树无差异；变更仅 src/store/internals.ts、src/store/slices/nav.ts、tools/frontend-regression.mjs，均在 allowed_paths 内。requirements：四个验收场景逐一落地（成功后以 markAllRead 返回条数判定并重取 feedCounts 整体替换、失败回滚带快照守卫、单条路径核查结论入 docstring、范围语义未动）。regression：复跑 frontend 551/551（26 既有未动、t103 16 条原样通过、t104 7 条新增且有判别力——修前实现下 t104-markall-count-authoritative 必失败），(f)/(p1) 更新为强化非弱化，假后端忠实化不构成空转的「mock 测 mock」。failure_paths：用独立实现的忠实假后端驱动 dist-test store 做 21 项探针（600/1、失败回滚完整性、守卫竞态、affected===0 分支、同 feed 连续两次全部已读、对账重取失败降级），全部符合设计预期；Rust 后端口径（set_read 单行 UPDATE、apply_read_bulk 循环 record_read_state、mark_all_read_with_enqueue 返回受影响行数、feed_counts 按行 SUM(is_read=0)、同文副本无本地传播）与 internals.ts 两处 docstring 的核查结论逐条一致。maintainability/performance 无发现问题。两条低危观察（对账重取失败静默降级、回滚守卫同值覆盖窗口）均为既有设计先例/既有契约的同族限制、有自愈路径，不构成待修问题，不阻塞放行。",
+ "findings": [
+  "【低·不阻塞】成功路径的计数对账重取失败时静默降级：mark_all_read 落库成功但紧随其后的 api.feedCounts() 调用失败时，计数停留在乐观值（600/1 形态下显示 599，DB 真值 0）且无任何用户可见提示。位置：src/store/slices/nav.ts markCurrentViewAllRead 成功分支内层 .catch(() => { /* TASK-067 N10 同口径 */ })。触发条件苛刻（同一 IPC 通道上前一命令事务成功、下一条轻量聚合查询立即失败）；独立探针 F1 实测复现残留缺口、F2 证实下次 reloadFromBackend 重取后自愈。影响：短暂（至下次刷新）的计数偏低显示，无数据损坏。建议：后续任务可择机把该降级改为静默重试一次或触发一次后台 reload；沿用 TASK-067 N10「纯对账刷新，失败不打扰」先例属有意取舍，不在本卡阻塞。",
+  "【低·不阻塞】失败回滚守卫无法区分「同值覆盖写入」的归属：全部已读在途失败期间，用户对同一在册条目连点两次 toggle 停在「已读」（其自身 set_read(true) 落库成功），迟到的回滚会把 UI 踩回「未读」而 DB 为已读，计数同步偏差 +1（下次 reload 自愈）；独立探针 C3 实测复现。该窗口与 src/store/internals.ts optimisticEntryFlagToggle 既有回滚契约（偶数次连点同值无法归属）完全同族，nav.ts 注释明示「与 optimisticEntryFlagToggle 的回滚契约同口径」，非本卡新引入的回归。同窗口内用户打开条目写入的 openedReadIds 会被整体还原丢弃（该条目从未读列表短暂消失，会话内显示问题，reload 自愈）。建议：保持与单条契约同族的现状即可；若未来做同步状态四态展示（第二阶段），可一并引入按条目写入版本号消除该类归属歧义。"
+ ],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "逐条对照任务目标与验收：① 成功路径消费 api.markAllRead 返回的受影响条数，affected>0 时以 api.feedCounts() 重取并整体替换 feedCounts（与 reloadFromBackend 同一计数来源），600 未读/加载 1 条探针场景转成 t104-markall-count-authoritative 断言，独立探针 A 组复现「成功后未读=0、feed_counts 恰好重取 1 次、toast 在落库确认后出现」；② 乐观翻转前保存 prevReadById（原读态快照）与 prevOpenedReadIds，catch 中按「仅当当前值仍等于乐观写入值」逐条恢复、逐 feed 回补未读、还原已读保留快照并同步视图缓存，失败 toast 带重试，无「已全部标为已读」假成功；③ 单条路径核查未发现不一致，结论写入 internals.ts 的 flipEntryFlag（单条）与 markEntriesRead（批量）docstring，与 Rust 源码逐条核实一致（src-tauri/src/db/articles.rs 的 set_read 为单行 UPDATE ... WHERE id = ?、feed_counts 按行 SUM(is_read=0) 聚合、commands/articles.rs 的 apply_read_bulk 为循环 record_read_state、无同文副本本地传播，广播仅在同步推送侧且属 non_goals），t104-single-read-count 双断言锁定（前端计数==后端按行聚合、副本行读态与所属源计数不动）；④ 范围语义未动：scopeQueryArgs 同参调用、starredOnly/sinceMs/layout 原样传递、F8 视图口径注释保留。变更三个文件均在 allowed_paths（src、tools/frontend-regression.mjs）；回归脚本 resetStore 的行对象深拷贝是假后端忠实落库（就地翻转 is_read）的必要测试基建配套且有注释说明，不属扩大范围。验收③要求的「核查结论入 progress」以 docstring 为承载（比 checkpoints 更持久），探针/断言均未发现单条路径不一致，不存在静默跳过。",
+   "evidence_files": [
+    "src/store/slices/nav.ts",
+    "src/store/internals.ts",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "复跑 npm run test:frontend 得 551/551（与 RUN-8e7605b3dc36498cb7f5a734ddbf6f7d 的 frontend 门禁输出一致）：26 条既有断言未动一行，t103 16 条（上一任务基线）原样通过，t104 新增 7 条覆盖四个验收命名场景。判别力核实：修前实现（git diff 中被删除的旧码）忽略返回值、从不重取计数，t104-markall-count-authoritative 在其下必失败（feedCounts 停留乐观值 599），该断言还锁定 feed_counts 恰好重取 1 次。(f) 两块断言更新为强化：期望值从「静态 COUNTS 的乐观推算口径」（源A 3→2）改为行级真值（源A 2→1、源D 2、跨布局源B 1），并保留范围隔离检查；(p1) 从旧失败语义（本地保持假成功+「重启后可能回退」文案）升级为「回滚到位+失败 toast 带重试+无假成功提示」三面检查，改动理由均在断言处注释。假后端升级的价值评估：set_read/mark_all_read 忠实落库并返回受影响行数、feed_countsImpl 可插拔按行聚合——计数对账断言的期望值来自行级聚合而非夹具静态表，前端必须消费重取结果才能通过，不构成空转的「mock 测 mock」；缺省路径仍返回静态 COUNTS 保住既有断言基线，probe 场景的布局过滤（effectiveFeedLayout）与 Rust scope_clause 的布局谓词同构。cargo test/clippy 由 CI rust job 承担（DEC-local-cargo-gate-20261005），本地必需门禁 cargo_fmt/lint/build/frontend 在 RUN 中全 PASS。",
+   "evidence_files": [
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/tasks/runs/RUN-8e7605b3dc36498cb7f5a734ddbf6f7d.json",
+    ".workflow-kit/tasks/evidence/RUN-8e7605b3dc36498cb7f5a734ddbf6f7d-frontend.stdout.txt"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "PASS",
+   "analysis": "以独立实现的忠实假后端驱动 dist-test store 完成 21 项探针（tmp/refactor-20261005/task-107-review-probe.mjs，审查工件、不在候选内），21/21 通过：① 失败回滚完整性——mark_all_read 拒绝后读态全部还原（仅本已读条目保持）、未读计数回到前值、openedReadIds 还原、DB 无污染、失败 toast 带重试且无假成功提示（B 组，与 t104-markall-failure-rollback 断言一致）；② 守卫防误回滚——用户 toggle（→未读）已接管的条目被守卫跳过，UI 计数与 DB 真值一致（C1/C2）；③ 回滚守卫的同值覆盖窗口实测存在但与既有单条契约同族（C3，见 finding 2）；④ affected===0 分支正确——请求带 layout 过滤、跳过重取、陈旧偏高计数被 Math.max(0,…) 钳向真值而非虚高、范围外源计数不动（D 组）；⑤ 同一 feed 连续两次全部已读：第一次失败回滚后重试成功（计数=0、DB 一致）、第一次成功后第二次 affected=0 幂等无副作用（E 组）；⑥ 对账重取失败降级——计数停留乐观值 599、静默、下次 reload 自愈（F 组，见 finding 1）。探针还覆盖了并发乐观 toggle 与回滚的交错时序。t104-markall-failure-rollback 与 (p1) 断言已把回滚与可见性固化进回归。",
+   "evidence_files": [
+    "src/store/slices/nav.ts",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "变更局部且收敛：一个 store action（markCurrentViewAllRead 约 80 行含注释）、两处 docstring、回归脚本；依赖方向不变（nav → api/internals/selectors）。回滚逻辑与单条契约（internals.optimisticEntryFlagToggle）形态不同（多条目 × 计数回补 × openedReadIds 快照 × 视图缓存同步），内联在 nav.ts 合理，未发现为复用预建的抽象或只为行数的拆分；守卫条件与回滚契约在注释中明示与既有实现对口径。口径核查结论放在离实现最近的 docstring 处并引用 t104 断言作锚点，后续修改者可在实现处直接看到后端依据。假后端的 set_read/mark_all_read 忠实化与 feedCountsImpl 可插拔设计，为后续计数类断言提供了统一口径而未破坏既有静态 COUNTS 基线；resetStore 深拷贝注释解释了为何必须。命名与注释风格延续既有约定（每处改动带 TASK-107 标注与理由）。无新增维护负担或职责混淆。",
+   "evidence_files": [
+    "src/store/slices/nav.ts",
+    "src/store/internals.ts"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "NOT_APPLICABLE",
+   "analysis": "本卡为计数正确性与失败可见性修复，不触及 brief 设定的代表性负载目标（万级订阅/文章下的启动、布局切换、正文加载），验收与门禁亦未设性能指标。新增成本静态分析（范围明确、不伪称实测）：成功路径每次「全部已读」多一次 feed_counts IPC（后端为单条 GROUP BY 聚合查询）+ 一次 O(rows) 的 Map 重建；回滚为在册条目单遍 O(n)；prevReadById 快照 O(n) 一次。均为用户手动触发的一次性操作，不构成热路径；markEntriesRead 既有的一次遍历/惰性复制设计（防「全部已读」几百篇时 O(n²) 卡顿）未被改动。故不构造基准。",
+   "evidence_files": []
+  }
+ ],
+ "ui_review": {
+  "required": false,
+  "evidence_files": [],
+  "notes": "本卡 ui_change=false，无界面改动；仅 toast 文案与时机变化（成功 toast 移至落库确认后、失败 toast 带重试），其可见性已由 (p1)/t104 断言在状态机层验证。"
+ }
+}

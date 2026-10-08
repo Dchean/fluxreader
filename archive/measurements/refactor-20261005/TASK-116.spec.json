@@ -1,0 +1,62 @@
+{
+  "id": "TASK-116",
+  "title": "同步四态展示——队列状态列、统计命令与主窗口/设置页呈现（三阶段③，REQ-002/003）",
+  "kind": "implementation",
+  "retry_safe": true,
+  "ui_change": true,
+  "ui_contract_ref": ".workflow-kit/docs/UI-CONTRACT-TASK-116-SYNC-FOUR-STATES.md",
+  "ui_checks": [
+    {"id": "X1.sidebar-waiting-count", "description": "侧栏同步 pill 在有等待同步项时可见区分（如「等待同步 N 条」优先级恰当、失败态不被 syncing 覆盖的优先级修正），点击仍进设置同步页"},
+    {"id": "X2.settings-four-states", "description": "SyncTab 增加四态摘要卡：等待同步 N、最近推送失败 N（含最新错误摘要）、上次推送确认数；文案 ≤48 字、复述性文案不写"},
+    {"id": "X3.no-fake-states", "description": "无队列且无失败时显示既有「后端已同步」语义不劣化；不虚构「已确认总数」（prune 后不可溯源，如实以「上次推送」口径呈现）"}
+  ],
+  "objective": "同步四态展示（审计优化点「同步界面区分本地已保存/等待同步/远端已确认/部分失败」；探查事实：sync_queue 无状态列 migrations.rs:94-101、失败项无 per-item 标记仅聚合 errors、无生产命令暴露队列、主窗口指示为侧栏 pill 四分支且失败态会被 syncing 覆盖 Sidebar.tsx:88-100）。修法要求：①Rust——新迁移加列：sync_queue 增 attempts INTEGER NOT NULL DEFAULT 0 与 last_error TEXT（沿用既有迁移模式，user_version 递增；旧库兼容）；push.rs 推送失败项 UPDATE attempts=attempts+1, last_error=…，成功 prune 照旧（远端确认=出队）；新增命令 sync_queue_stats() -> { waiting: usize, failed: usize }（waiting=队列行数按 action 分组可选，failed=attempts>0 的行数与最新 last_error 摘要），commands/sync.rs 注册+lib.rs invoke_handler；顺手修正 greader_pull.rs:310 一带 seed_bound 的 doc 笔误（写「返回二元组」实际返回 aid——延续任务审查裁定的登记项，同文件领域顺手修）。②前端——api.syncQueueStats()；侧栏 pill 扩展：waiting>0 时文案带「等待同步 N 条」（优先级修正：error > syncing > waiting > connected，避免既有「失败被 syncing 覆盖」），失败>0 时 tooltip/文案带「部分失败」；SyncTab 四态摘要卡（X2，数据来自 stats + 既有 syncStatus.last_sync/SyncReport 口径）；「本地已保存」语义= articles 状态已事务化落库（TASK-108 交付），在摘要卡说明文案体现（不新增每卡状态徽标）。③测试——Rust：迁移测试（新列存在+旧库升级）、push 失败标记/成功 prune 后 failed 归零、stats 命令返回（cargo test 由 CI 执行）；前端 t116-* ≥5 条（api 形态、pill 优先级纯函数、SyncTab 摘要渲染源级/SSR、无队列不劣化 X3）。既有断言零弱化（侧栏 pill 四分支既有断言如有冲突，更新附理由）。",
+  "non_goals": [
+    "不做每篇文章的同步状态徽标（卡片级 UI，超出审计要求 granularity）",
+    "不做重试按钮/手动清队（队列自动重试机制保持）",
+    "不改推送逻辑与对账语义（仅加失败标记与统计）",
+    "不做「已确认总数」累计（prune 不可溯源，X3 如实口径）"
+  ],
+  "requirement_refs": ["REQ-002", "REQ-003"],
+  "reference_ids": [],
+  "decision_refs": [".workflow-kit/docs/DEC-refactor-roadmap-20261005.md"],
+  "dependencies": [],
+  "blocks": [],
+  "snapshot_paths": ["src-tauri/src", "src", "tools/frontend-regression.mjs"],
+  "risk": {"level": "medium", "decision_ids": ["DEC-refactor-roadmap-20261005"]},
+  "scope": {
+    "allowed_paths": ["src-tauri/src/**", "src/**", "tools/frontend-regression.mjs", ".workflow-kit/docs/UI-CONTRACT-TASK-116-SYNC-FOUR-STATES.md"],
+    "protected_paths": ["AGENTS.md", "CLAUDE.md", "WORKFLOW.md", "WORKFLOW-KIT.md", "README.md", "package.json", "package-lock.json", "docs/**", ".workflow-kit/**"],
+    "network": "none",
+    "data": "synthetic_only"
+  },
+  "acceptance": [
+    "① 迁移落地：sync_queue 增 attempts/last_error，旧库升级兼容（cargo 测试，CI 执行）",
+    "② push 失败标记/成功 prune 语义正确，stats 命令返回准确（cargo 测试，CI 执行）",
+    "③ 侧栏 pill 优先级修正与等待计数（X1）",
+    "④ SyncTab 四态摘要卡（X2/X3，如实口径）",
+    "⑤ 门禁全绿：frontend（t116-* 新增）、lint/build/cargo_fmt 不回退；cargo test/clippy 由 CI 承担且必须绿（DEC-local-cargo-gate-20261005）",
+    "⑥ 独立审查（全新子代理）PASS findings=0；ui_change=true 需 UI 取证说明"
+  ],
+  "gates": [
+    {"id": "cargo_fmt", "program": "cargo", "args": ["fmt", "--check"], "cwd": "src-tauri", "required": true},
+    {"id": "cargo_test", "program": "cargo", "args": ["test"], "cwd": "src-tauri", "required": false, "reason": "本机无 MSVC 链接器（DEC-local-cargo-gate-20261005）：cargo test/clippy 由 CI rust job 在 dev 推送时承担；本卡新增迁移与测试均以 CI 绿为验收（TASK-113 先例：clippy 盲区经静态排查+片段实证控制）"},
+    {"id": "cargo_clippy", "program": "cargo", "args": ["clippy", "--all-targets", "--", "-D", "warnings"], "cwd": "src-tauri", "required": false, "reason": "同 cargo_test（DEC-local-cargo-gate-20261005）"},
+    {"id": "lint", "program": "npm", "args": ["run", "lint"], "cwd": ".", "required": true},
+    {"id": "build", "program": "npm", "args": ["run", "build"], "cwd": ".", "required": true},
+    {"id": "frontend", "program": "npm", "args": ["run", "test:frontend"], "cwd": ".", "required": true}
+  ],
+  "test_review": {
+    "behavior": "change",
+    "baseline": {
+      "status": "PASS",
+      "summary": "dev@TASK-115 后基线：frontend 全绿、CI rust job 全绿。本卡为新增能力（队列状态暴露+UI 呈现），属行为变化（owner 指示按审计三阶段推进）。",
+      "evidence_ref": ".workflow-kit/docs/AUDIT-20261005-core-consistency.md"
+    },
+    "decision_ids": ["DEC-refactor-roadmap-20261005"],
+    "actions": [
+      {"action": "add", "target": "Rust 迁移/push 标记/stats 测试（CI 执行）+ 前端 t116-* 断言", "reason": "新能力需成对断言", "gate_ids": ["cargo_fmt", "frontend"]},
+      {"action": "keep", "target": "既有 frontend/cargo fmt/lint/build 断言", "reason": "不回退证据；cargo 由 CI 承担（DEC-local-cargo-gate-20261005）", "gate_ids": ["cargo_fmt", "lint", "build", "frontend"]}
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-120",
+  "run_id": "RUN-f89fef2b4f6e402b88ef33e7b4b1583e",
+  "status": "ready_for_verification",
+  "summary": "TASK-117 延续：CI 失败根因定罪为 **E0063 硬编译错误而非 clippy lint**——clippy --all-targets 编译 tests/ 集成测试目标，tests/ingestion_e2e.rs:95 的 ArticleQuery 字面量缺 TASK-117 新增的 last_published/last_id（TASK-117 补齐了 src 内全部字面量唯独漏此 tests/ 构造点；本机无链接器从未暴露）。修复：该字面量补 2 行 None/None+注释（1 文件 5 insertions）。**边界偏离（主控裁定接受）**：修复点在 src-tauri/tests/ 超出卡面 src/**——结构体字面量穷尽性校验下 src 内无修法，属 TASK-117 自身遗漏的补齐，与 117 对 dedup_tests.rs 补法同款，测试语义零变化（None/None=既有 OFFSET 路径，2 条断言不涉排序并列）。方法：clippy-driver 同版本（1.98.1）片段探针+同形态基线绿比对排除 12 组疑点（元组 if-let/assigning_clones/type_complexity/walk 循环/wire 断言形态等逐条实证零警告）；行为零变化=生产代码零改动。自检：cargo fmt --check 0。CI 复验为最终裁决。",
+  "changed_files": "auto",
+  "validation_requests": ["cargo_fmt", "frontend", "lint", "build"],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

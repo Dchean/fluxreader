@@ -1,0 +1,11 @@
+{
+  "task_id": "TASK-110",
+  "run_id": "RUN-4c593b7e9512493094df4cabf361c272",
+  "status": "ready_for_verification",
+  "summary": "二阶段②筛选视图真分页：①废除 limit:100000 近似全集（reloadFilteredEntries 首屏 PAGE_SIZE=500、articlesExhausted 真实判定 rows.length<PAGE_SIZE，三处缓存恢复同口径收口）；②loadMoreArticles 筛选视图续拉（QueryScope.viewFilter 单点派生 only_unread/only_starred/only_today，首屏与续拉同口径 wire；游标键复用 scopePageKey、视图维度由 paginationStale 兜底）；③切排序重拉（toggleTimelineSort 两类视图同构分流 reloadFilteredEntries/reloadFromBackend，水合正文由 merge fromBackend=true 按 id 继承）；④追加去重保序策略（同步插入 offset 漂移不重复入列，游标按拉取行数推进；中间插入不回填已加载窗口随下次 reload 进入——保位优先于即时可见）；⑤t110-* 断言 16 条（wire/落地/去重判别/切排序/过滤参数逐项/范围/布局）+ 既有断言按行为变化更新（(c)/(s6)/(p3-f5)③/t109-filtered-guard-named，理由注释在案）+ 修复测试驱动层 backendReloadInFlight 微任务泄漏根因（产品代码零缺陷，6 个连锁误红原断言零改动转绿）。过程备注：本任务历经三次代理中断（配额/会话），主控分三次派发续作衔接。自检：test:frontend 585/585、lint 0、build exit 0。",
+  "changed_files": "auto",
+  "validation_requests": ["frontend", "lint", "build", "cargo_fmt"],
+  "requested_actions": [],
+  "unresolved_items": [],
+  "blocked_reason": null
+}

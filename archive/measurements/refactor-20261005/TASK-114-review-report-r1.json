@@ -1,0 +1,69 @@
+{
+ "task_id": "TASK-114",
+ "candidate_digest": "51fdf66d0eeaa086f89bc195ca24e4c72f8bb55b54bdedabb06e34ab14facda1",
+ "verification_run": "RUN-83a6895a363e4b44a812835be7d0c59e",
+ "verdict": "FAIL",
+ "summary": "独立复审在未参与实现的全新上下文完成：工作树与 R1 候选逐字节一致（65/65 文件 sha256 匹配 manifest，digest 51fdf66d…），R0→R1 变更面经两轮 manifest 哈希对比证实恰为 src/components/Timeline.tsx 与 tools/frontend-regression.mjs 两文件（其余 63 文件含契约文档与 R0 候选逐字节相同），无夹带。F1 修复主害达成：NotifCard 条件链重排为 fullText→hydrationError→snippet→hydrated→加载中（以 R0 候选逐字节备份做真实 diff，Timeline.tsx 全部差异仅此一 hunk），与基准 SocialCard 的 content→error→hydrated→加载中逐分支对照成立（snippet 分支为契约实施记录记载的域内适配，仅非失败态可达），R0 复现的组合态假报错已消除。F2 修复经独立变异复现证实：移除 notif-expand-btn 的 !hydrationError 门控后全量复跑恰 t114-x1g 一项转红（620/621，唯一失败项，npm exit 1），还原后 sha256 与候选一致；门禁在审查者上下文独立复跑 frontend 621/621、lint 0、build exit 0。x1b/x1c 零弱化核实：R0→R1 测试名集合恰 +x1f+x1g，其余 12 条 t114 断言标签逐字节一致，既有 26 组未动；x1c 删除的「重试行先于正文分支」旧序条款正是 R0 判定应纠正的错误顺序，新序由切片型 x1f 以更强形式钉住，x1b 切片边界收紧并新增负条件。不采纳 b（详情成功清错误）的裁定部分成立：reader.ts 详情 .then 确只写 content 不清 hydrationErrors（:129-160），该改动确属 TASK-103 终态机语义面，上报独立卫生项程序正当；但组合态因此滞留且会话内不可清除（批量水合只处理无 content 的 id，retryHydration 是唯一手动清除口而组合态无重试行入口），其唯一用户可见效应恰是下述残留缺陷。仍判 FAIL：R0-F1 的展开按钮一半未修复——组合态（错误滞留+正文已到达）下通知卡正文被 2 行 line-clamp 钳制却无「展开更多」（修前与同态 SocialCard 均可展开），:1137 注释理由在该态失准，t114-x1g 将其连同失准理由钉为正确行为。探针与变异日志存 tmp/refactor-20261005/probes/（r1-mut-run.log、Timeline.tsx.r1-clean.bak）。",
+ "findings": [
+  "【低】位置：src/components/Timeline.tsx:1138 展开按钮门控 {isLong && !hydrationError && (（对照基准 SocialCard :687 仅 isLong 无错误门控，修前 HEAD 同无）。触发条件：可达且会话内滞留的组合态 hydrationErrors[id] 与条目正文并存——路径①列表批量水合失败落错（src/store/slices/reader.ts:285-298）→ 不点内联重试而经 Enter/J-K 打开 → 详情 .then 写 content 不清错误（reader.ts:129-160）；路径②详情失败落错+toast（reader.ts:189-193）→ 按 toast 提示点重试成功，同路只写 content 仍不清错误；批量水合成功只清本次处理的无 content id（reader.ts:231-235、271-280），retryHydration（reader.ts:205-212）为唯一手动清除口而组合态卡片不渲染重试行，快照刷新对存续 id 同时继承 content 与 error → 组合态滞留且无可见异常提示。影响：isLong（>120 字）通知卡正文呈 .notif-body-text.collapsed 两行钳制（styles/base.css:1515-1520）却无「展开更多」按钮，内联无法展开至全文（修前可展开、同态 SocialCard 可展开），且该状态无卡片级恢复入口；:1137 注释「失败态正文已被重试行替换，切换无对象」在该态与事实不符（正文分支已胜出）；t114-x1g 连同该失准理由把门控钉为正确行为，回归网反向保护缺陷。建议：门控改为「正文区当前有可展开文本」语义——isLong && (!hydrationError || !!fullText)（一行，同文件内），同步修正注释与 t114-x1g 断言；R0 备选 b（详情成功路径清错误）可一并消除组合态但属 TASK-103 状态机语义面（worker 已报独立卫生项，裁定合理），本轮取 UI 侧一行修即可。"
+ ],
+ "review_checks": [
+  {
+   "area": "requirements",
+   "status": "PASS",
+   "analysis": "三检查点与 R0 两项 finding 的声称修复逐项对照落实：X1 NotifCard 三态（订阅 hydrationErrors/hydratedIds :979-980、失败内联重试/空正文「暂无正文」/加载占位、失败分支无 snippet 回退无 notif-body-text）；X2 Enter 五卡绑定与 e.target 守卫（R1 未触及，哈希与 R0 一致）；X3 J/K 门控与 ShortcutsTab（R1 未触及，哈希与 R0 一致）。F1 分支重排（fullText 先于失败分支，snippet 留在错误之后）与 F2 新断言（t114-x1f/x1g）均在场，前者经 R0 备份真实 diff 核对、后者经变异复现证实判别力。R0→R1 变更面恰两文件（manifest 哈希对比，其余 63 文件与 R0 候选一致），无越界无夹带；non_goals 全部遵守；b 不采纳为上报主控的书面裁定而非静默缩范围。组合态展开按钮残留记入 failure_paths，不重复计为漏需求。",
+   "evidence_files": [
+    "src/components/Timeline.tsx",
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md"
+   ]
+  },
+  {
+   "area": "regression",
+   "status": "PASS",
+   "analysis": "审查者独立上下文复跑：frontend 621/621、lint exit 0、build exit 0（复跑日志存 tmp/refactor-20261005/probes/r1-lint.log、r1-build.log，与 RUN-83a6895a 证据一致）。F2 变异独立复现：文件级备份后移除 !hydrationError 门控，全量复跑恰 t114-x1g 转红（620/621 唯一失败项，npm exit 1），还原后 sha256 与候选一致——R0 的变异零判别缺口已闭合。零弱化核实：R0→R1 测试名集合恰 +x1f+x1g、其余 12 条 t114 断言标签逐字节一致、既有 26 组未动（两轮 RUN stdout 全量标签差分仅上述三处）；x1c 删除的旧序条款由切片型 x1f 替代（更强：body 分支切片 + notif-body-text 先于 hydrate-retry 的序断言），x1b 切片边界收紧（至 ') : item.snippet ? ('）并新增 !notif-body-text 负条件。局限说明：frontend-regression.mjs 的 R0 字节副本无存档（工作树即 R1 候选、全库无备份），零弱化结论基于测试名/标签/计数差分与现断言实质审读（每条均含多条件非空洞判定），为该条件下可达的最高置信。",
+   "evidence_files": [
+    "tools/frontend-regression.mjs",
+    ".workflow-kit/tasks/evidence/RUN-83a6895a363e4b44a812835be7d0c59e-frontend.stdout.txt"
+   ]
+  },
+  {
+   "area": "failure_paths",
+   "status": "FAIL",
+   "analysis": "已核对成立：纯失败态（无正文可显示）→ 重试行整体替换正文、无 snippet 无正文 div；空正文终态 → 「暂无正文」；加载中 → 占位；组合态正文显示（R0-F1 主害）已修复——fullText 分支先于错误分支，与 SocialCard content 优先逐分支一致。残留缺陷（记 FAIL）：组合态下展开按钮仍被 !hydrationError 隐藏（见 findings 第 1 条），该组合态经 reader.ts 两条路径核实可达且会话内滞留（详情 .then 只写 content 不清错、批量水合过滤掉有 content 的 id、retryHydration 在组合态无 UI 入口、快照刷新继承双态），:1137 注释理由在该态失准。b 不采纳理由核实：详情 .then 确不清 hydrationErrors 属实（reader.ts:129-160 无 delete），改动确触 TASK-103 终态机语义面（失败/文章不存在为终态、乱序防护注释 :214-226 记载），上报独立卫生项正当；但该裁定使组合态持续存在，需 UI 侧门控修正兜底。SSR 取证边界沿用 R0 实测结论（setState 后 renderToStaticMarkup 输出逐字节不变），本缺陷走源级通道取证与修复。",
+   "evidence_files": [
+    "src/components/Timeline.tsx",
+    "src/store/slices/reader.ts",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "maintainability",
+   "status": "PASS",
+   "analysis": "R1 增量为 Timeline.tsx 单 hunk（分支重排+注释更新）与回归文件两条断言，无新抽象、无依赖方向变化、无重复规则新增；新注释把分支序依据落到 reader.ts 具体事实（详情 .then 不清错误），可追溯可验证。jkNavigation/X2/X3 面 R1 未触及（哈希与 R0 候选一致），R0 maintainability 结论（jkNavigation 抽取、base.css 镜像规则、双卡 JSX 镜像）沿用。唯一维护性问题：:1137 注释与门控条件在组合态失准并遭 t114-x1g 钉住，已并入 findings，随修复一并纠正，不单列。",
+   "evidence_files": [
+    "src/components/Timeline.tsx",
+    "tools/frontend-regression.mjs"
+   ]
+  },
+  {
+   "area": "performance",
+   "status": "NOT_APPLICABLE",
+   "analysis": "R1 改动为渲染分支顺序重排与源级断言新增：分支求值代价等价（同一组条件换序），无请求次数、数据量、订阅面或热路径变化（订阅面 R0 已核与 SocialCard 同模式、按 id 细粒度选择器），无实测提升宣称，不涉及代表性负载测量，不适用。",
+   "evidence_files": []
+  }
+ ],
+ "ui_review": {
+  "required": true,
+  "evidence_files": [
+   "src/components/Timeline.tsx",
+   "src/components/settings/ShortcutsTab.tsx",
+   "src/App.tsx",
+   "src/lib/jkNavigation.ts",
+   "src/styles/base.css",
+   "tools/frontend-regression.mjs",
+   ".workflow-kit/tasks/evidence/RUN-83a6895a363e4b44a812835be7d0c59e-frontend.stdout.txt"
+  ],
+  "notes": "ui_change=true。契约基准 .workflow-kit/docs/UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md（R1 未改动，哈希与 R0 候选一致），检查点 X1.notif-hydration-states/X2.enter-binding-uniform/X3.jk-all-virtualized。沿用 R0 已建立的取证边界结论（SSR 冻结于 zustand store 初态、setState 不可达，实施与 R0 审查双侧探针实测），本轮抽查关键形态断言在场且全绿：t114-x1a..g（订阅面/失败重试形态/占位恰两态/SSR 烟测/三态同构/正文分支先于失败分支/展开按钮门控）、x2a..c、x3a..f 共 16 条在独立复跑 621/621 中全部通过，SSR 形态断言 x1d 通过。R1 未引入新样式类（base.css 与 R0 候选哈希一致，仅复用既有 .hydrate-retry/.hydrate-placeholder/.notif-body-text.collapsed），真机截图非必需（契约「验证取证」条允许 SSR 形态断言+源级结构断言通道，特此注明）。残留 UI 缺陷仅组合态展开按钮一项（findings 第 1 条），不影响三态主体同构结论。"
+ }
+}
