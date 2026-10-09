@@ -36,7 +36,9 @@ fn start_mock_openai() -> u16 {
                 // 模型列表（连通性测试路径）
                 "{\"data\":[{\"id\":\"gpt-4o\"},{\"id\":\"deepseek-chat\"},{\"id\":\"glm-4-flash\"}]}".to_string()
             } else if is_chat {
-                // SSE 流：3 个增量 + [DONE]（请求体里带"翻译"字样则回译文名）
+                // SSE 流：3 个增量 + finish_reason=stop + [DONE]（真实完整帧；
+                // 请求体里带"翻译"字样则回译文名）。OPT-013A：完成语义严格化后，
+                // mock 必须给出 finish 帧，stream_chat 才可能返回 completed=true。
                 let translate_mode = req.contains("专业译者");
                 let (a, b, c) = if translate_mode {
                     ("<p>", "你好世界", "</p>")
@@ -48,6 +50,7 @@ fn start_mock_openai() -> u16 {
                      data: {{\"choices\":[{{\"delta\":{{\"content\":\"{a}\"}}}}]}}\n\n\
                      data: {{\"choices\":[{{\"delta\":{{\"content\":\"{b}\"}}}}]}}\n\n\
                      data: {{\"choices\":[{{\"delta\":{{\"content\":\"{c}\"}}}}],\"error\":null}}\n\n\
+                     data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\n\
                      data: [DONE]\n\n"
                 )
             } else {
