@@ -772,16 +772,34 @@ fn route(
                     serde_json::json!({ "id": (i as i64) + 1, "title": s.title, "url": s.url })
                 })
                 .collect();
-            (
-                200,
-                serde_json::json!({
-                    "api_version": v,
-                    "auth": auth,
-                    "groups": groups,
-                    "feeds": feeds,
-                })
-                .to_string(),
-            )
+            // OPT-005：生产 FeverClient 对「数据方法响应缺对应字段」是协议错误
+            // （缺字段 ≠ 空集合）。本 mock 此前对所有 action 只回 groups/feeds，
+            // 现按请求里的 action 补上对应字段（内容保持宽松空集，现有断言不变）。
+            // 注：action 是无值参数（`?api&items`），故按原始 query 子串判定。
+            let mut envelope = serde_json::json!({
+                "api_version": v,
+                "auth": auth,
+                "groups": groups,
+                "feeds": feeds,
+            });
+            if let Some(obj) = envelope.as_object_mut() {
+                if path_query.contains("unread_item_ids") {
+                    obj.insert(
+                        "unread_item_ids".into(),
+                        serde_json::Value::String(String::new()),
+                    );
+                }
+                if path_query.contains("saved_item_ids") {
+                    obj.insert(
+                        "saved_item_ids".into(),
+                        serde_json::Value::String(String::new()),
+                    );
+                }
+                if path_query.contains("items") {
+                    obj.insert("items".into(), serde_json::Value::Array(Vec::new()));
+                }
+            }
+            (200, envelope.to_string())
         }
         // 订阅列表
         ("GET", p) if p.ends_with("/reader/api/0/subscription/list") => {

@@ -213,6 +213,74 @@ pub fn set_last_sync_entry_id(conn: &Connection, id: i64) -> AppResult<()> {
     set_setting(conn, "sync_last_entry_id", &id.to_string())
 }
 
+/* ============================================================
+Fever 历史状态（OPT-005 R2；内部 settings，无 schema 迁移）
+
+显式三态（`fever_history_state` 键，单键原子承载状态+游标）：
+- 缺失/空串                       = Unknown：**绝不当完成**（旧库只有 since、
+  或从未初始化）；同步据此启动回溯（从顶部）。
+- `pending:<max_id>`（1..=i64::MAX）= Pending：历史未完成，下一次 `items&max_id`
+  从该游标继续；页事务把页数据与它同 commit。
+- `complete`                       = Complete：历史已取尽。
+其余取值 = **损坏 → Err**（显式报错，不擅自当完成、不覆盖现场）。
+
+与 `sync_last_entry_id`（只由连续成功范围推进）互不越权：续取旧历史不推动
+增量游标；初始化 Pending 成功先于任何更大的 since 落库。
+============================================================ */
+
+const FEVER_HISTORY_STATE_KEY: &str = "fever_history_state";
+const FEVER_HISTORY_STATE_COMPLETE: &str = "complete";
+
+/// Fever 历史状态（见上方三态语义）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeverHistoryState {
+    /// 键缺失/空：状态未知，**绝不当完成**。
+    Unknown,
+    /// 未完成：下一次 max_id 从该游标继续。
+    Pending(i64),
+    /// 已取尽。
+    Complete,
+}
+
+/// 读 Fever 历史状态；损坏值返回显式错误（调用方不得继续、不得覆盖）。
+// Note: Unknown/Pending/Complete 与 checkpoint 同 commit 的语义 — 见 .agents/notes/implemented/architecture/2026-10-08-Fever身份与历史回溯.md
+pub fn fever_history_state(conn: &Connection) -> AppResult<FeverHistoryState> {
+    let raw = get_setting(conn, FEVER_HISTORY_STATE_KEY)?;
+    let Some(raw) = raw else {
+        return Ok(FeverHistoryState::Unknown);
+    };
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(FeverHistoryState::Unknown);
+    }
+    if t == FEVER_HISTORY_STATE_COMPLETE {
+        return Ok(FeverHistoryState::Complete);
+    }
+    if let Some(rest) = t.strip_prefix("pending:") {
+        if let Ok(v) = rest.trim().parse::<i64>() {
+            if v >= 1 {
+                return Ok(FeverHistoryState::Pending(v));
+            }
+        }
+    }
+    Err(crate::error::AppError::new(
+        "protocol",
+        format!(
+            "Fever 历史状态损坏（{FEVER_HISTORY_STATE_KEY}={raw:?}）：不擅自当完成，请排查/修复"
+        ),
+    ))
+}
+
+/// 写入 Pending（未完成）状态与续取游标。
+pub fn set_fever_history_pending(conn: &Connection, max_id: i64) -> AppResult<()> {
+    set_setting(conn, FEVER_HISTORY_STATE_KEY, &format!("pending:{max_id}"))
+}
+
+/// 历史已取尽：写 Complete（只有在真正走完空页后允许）。
+pub fn set_fever_history_complete(conn: &Connection) -> AppResult<()> {
+    set_setting(conn, FEVER_HISTORY_STATE_KEY, FEVER_HISTORY_STATE_COMPLETE)
+}
+
 /// feeds 的 remote_id 绑定
 pub fn set_feed_remote_id(conn: &Connection, feed_id: i64, remote_id: i64) -> AppResult<()> {
     conn.execute(
@@ -600,3 +668,69 @@ pub fn backfill_article_content(
 /* ============================================================
 测试模块（TASK-017 追加）
 ============================================================ */
+
+#[cfg(test)]
+mod fever_checkpoint_tests {
+    use super::*;
+    use crate::db::MIGRATIONS;
+
+    fn conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    /// 三态往返与边界（i64::MAX 合法的 Pending）。
+    #[test]
+    fn fever_history_state_roundtrip() {
+        let conn = conn();
+        assert_eq!(
+            fever_history_state(&conn).unwrap(),
+            FeverHistoryState::Unknown,
+            "缺省 = Unknown（绝不当完成）"
+        );
+        set_fever_history_pending(&conn, 76).unwrap();
+        assert_eq!(
+            fever_history_state(&conn).unwrap(),
+            FeverHistoryState::Pending(76)
+        );
+        set_fever_history_pending(&conn, i64::MAX).unwrap();
+        assert_eq!(
+            fever_history_state(&conn).unwrap(),
+            FeverHistoryState::Pending(i64::MAX)
+        );
+        set_fever_history_complete(&conn).unwrap();
+        assert_eq!(
+            fever_history_state(&conn).unwrap(),
+            FeverHistoryState::Complete
+        );
+        set_setting(&conn, "fever_history_state", "   ").unwrap();
+        assert_eq!(
+            fever_history_state(&conn).unwrap(),
+            FeverHistoryState::Unknown,
+            "空白视为缺失 = Unknown"
+        );
+    }
+
+    /// 损坏值必须显式报错（不得当完成、不得静默 reset）。
+    #[test]
+    fn fever_history_state_corrupt_is_error() {
+        let conn = conn();
+        for bad in [
+            "not-a-state",
+            "pending:",
+            "pending:0",
+            "pending:-9",
+            "pending:abc",
+            "completed",
+            "PENDING:5",
+        ] {
+            set_setting(&conn, "fever_history_state", bad).unwrap();
+            let err = fever_history_state(&conn).expect_err("损坏状态必须报错");
+            assert!(
+                err.to_string().contains("fever_history_state"),
+                "{bad:?} 的错误应带键名：{err}"
+            );
+        }
+    }
+}

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::db::{self, NewArticle};
+use crate::error::AppResult;
 use crate::greader::{self, ItemContent};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -15,7 +16,9 @@ fn item_feed_id(e: &ItemContent) -> Option<i64> {
         .and_then(|o| greader::parse_feed_numeric_id(&o.stream_id))
 }
 
-/// 从 ItemContent 提取条目十进制 id（长格式 id 尾部十六进制）。
+/// 从 ItemContent 提取条目十进制 id。解析规则在 `greader::parse_item_id`
+/// 单点（协议形状：长格式 tag 尾部十六进制；无前缀纯数字按十进制——
+/// Fever 长 id 与 greader 十进制 id 都不得按十六进制猜，OPT-005/F03）。
 pub(super) fn item_numeric_id(e: &ItemContent) -> Option<i64> {
     greader::parse_item_id(&e.id)
 }
@@ -49,26 +52,24 @@ fn item_published_at(e: &ItemContent) -> String {
 /// - 待推保护：本地有未推送变更 → 跳过（本地优先，防乒乓）
 /// - read-anywhere-wins：「读」是强意图，任何副本的已读都接受
 /// - unread 只认绑定同源 entry：跨源副本的未读不能复活桌面已读
+///
+/// R2：所有 DB 写失败**透传 Err**（不再 warn 后继续）——Fever 侧据此整页回滚
+/// 并保留输入页游标；GR 侧由调用方记错误且不推进游标（不吞失败）。
 fn merge_remote_status(
     conn: &Connection,
     aid: i64,
     e: &ItemContent,
     maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
-) {
+) -> AppResult<()> {
     let Some(eid) = item_numeric_id(e) else {
-        return;
+        return Ok(());
     };
     let feed_id = item_feed_id(e);
-    // P3[1]（REQ-104）：绑定写失败此前被 `let _ =` 静默吞掉。绑定失败会让该条目在
-    // 后续对账中被当作「未绑定」，状态同步与去重判断随之走偏，且现场无任何日志。
-    // 改为 warn 记录（失败仍不中断本轮同步——绑定可在下一轮补上，属可自愈类）。
-    if let Err(err) = db::set_article_remote_id(conn, aid, eid) {
-        log::warn!("sync: 绑定条目远端 id 失败（aid={aid} eid={eid}）: {err}");
-    }
+    db::set_article_remote_id(conn, aid, eid)?;
     // 同步 maps 的绑定状态：后续 entry 若 URL 兜底匹配到同一 aid，能读到
-    // 「已绑定 eid」而非批量快照里的「未绑定」，避免跨源同 URL 副本被误判
-    // 为自己的条目（时序偏差）。
+    // 「已绑定 eid」而非批量快照里的「未绑定」，避免跨源同 URL 副本被误判为
+    // 自己的条目（时序偏差）。
     maps.id_to_mf_id.insert(aid, Some(eid));
     maps.id_to_mf_pair.insert(
         aid,
@@ -79,11 +80,11 @@ fn merge_remote_status(
     );
     maps.mf_id_to_article.insert(eid, aid);
     if maps.pending_ids.contains(&aid) {
-        return;
+        return Ok(());
     }
     let remote_read = greader::has_tag(&e.categories, "/com.google/read");
     let remote_starred = greader::has_tag(&e.categories, "/com.google/starred");
-    let local_bound = db::article_by_remote_id(conn, eid).ok().flatten().is_some();
+    let local_bound = db::article_by_remote_id(conn, eid)?.is_some();
     let same_feed_trusted = maps
         .id_to_mf_pair
         .get(&aid)
@@ -94,23 +95,23 @@ fn merge_remote_status(
         .unwrap_or(false);
     let accept_unread = local_bound && same_feed_trusted;
     if remote_read || accept_unread {
-        // P3[1]：状态写失败此前被静默吞掉——已读/收藏未落库会让「未读数对不齐」
-        // 失去可诊断线索。改为 warn（不中断：下轮对账会再试）。
-        if let Err(err) = db::sync_set_article_status(conn, aid, remote_read, remote_starred) {
-            log::warn!("sync: 写入远端状态失败（aid={aid}）: {err}");
-        }
+        db::sync_set_article_status(conn, aid, remote_read, remote_starred)?;
         report.pulled_entries += 1;
     }
+    Ok(())
 }
 
 /// 共享：合并一条已拉取的远端条目（URL 兜底匹配 / remote_id 直配 / 同源判定 /
 /// 跨源副本记账 / 新条目 upsert）。Google Reader 与 Fever 两条 pull 路径共用。
+///
+/// R2：返回 `AppResult<()>`——任何 DB 写失败透传（Fever 页事务据此整页回滚；
+/// GR 调用方记错误并保留游标）。**禁止**在此吞成 warn/`let _`。
 pub(super) fn merge_pulled_entry(
     conn: &Connection,
     e: &ItemContent,
     maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
-) {
+) -> AppResult<()> {
     // URL 兜底匹配（规范化）
     let aid = item_url(e)
         .as_deref()
@@ -138,36 +139,28 @@ pub(super) fn merge_pulled_entry(
             if !is_own {
                 // 跨源副本：记账（已读广播对象）。read-anywhere-wins
                 if let Some(eid) = eid {
-                    // P3[1]：跨源副本记账失败此前静默——记账缺失会导致同文副本后续被
-                    // 重复计入/漏广播已读。改为 warn。
-                    if let Err(err) = db::add_article_dup_entry(conn, aid, eid) {
-                        log::warn!("sync: 跨源副本记账失败（aid={aid} eid={eid}）: {err}");
-                    }
+                    db::add_article_dup_entry(conn, aid, eid)?;
                 }
                 if greader::has_tag(&e.categories, "/com.google/read")
                     && !maps.pending_ids.contains(&aid)
                 {
-                    // P3-5（自检 2026-09-29）：跨源副本标读失败此前被 `let _ =` 静默
-                    // 吞掉——read-anywhere-wins 的广播丢失且失败现场无线索。对齐
-                    // 同文件 merge_remote_status 的 warn 纪律（失败不中断：可经
-                    // 下轮对账自愈）。
-                    if let Err(err) = db::sync_mark_read_if_unread(conn, aid) {
-                        log::warn!("sync: 跨源副本标读失败（aid={aid}）: {err}");
-                    }
+                    db::sync_mark_read_if_unread(conn, aid)?;
                 }
-                return;
+                return Ok(());
             }
-            merge_remote_status(conn, aid, e, maps, report);
+            merge_remote_status(conn, aid, e, maps, report)?;
             // 正文/封面/enclosure 兜底回填：本地为空才补，已有内容不覆盖。
-            backfill_entry_content(conn, aid, e, report);
+            backfill_entry_content(conn, aid, e)?;
+            Ok(())
         }
         None => {
             // 本地没有 → 若其远端 feed 已绑定，则 upsert 补齐
             let feed_id = item_feed_id(e);
             let local_feed = feed_id.and_then(|fid| maps.feed_mf_to_id.get(&fid).copied());
             if let Some(local_feed) = local_feed {
-                upsert_remote_entry(conn, local_feed, e, maps, report);
+                upsert_remote_entry(conn, local_feed, e, maps, report)?;
             }
+            Ok(())
         }
     }
 }
@@ -198,7 +191,7 @@ fn upsert_remote_entry(
     e: &ItemContent,
     maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
-) {
+) -> AppResult<()> {
     let published = item_published_at(e);
     let content_html = item_content_html(e);
 
@@ -232,35 +225,18 @@ fn upsert_remote_entry(
         published_at: Some(published),
         source: "miniflux".into(),
     };
-    // TASK-056：失败必须可见。此前是无 else 的 `if let Ok((aid, _))`——
-    // 条目插入失败既不记 report.errors 也不上抛，同步对外表现为成功，
-    // 用户看到「同步完成」但文章数不变（与订阅路径同一类静默吞错）。
-    match db::upsert_article_with_feed(conn, feed_id, &a, false) {
-        Ok((aid, _)) => {
-            if let Some(eid) = item_numeric_id(e) {
-                // P3-5：绑定写失败此前静默——绑定缺失会让该条目在后续对账中被
-                // 当作「未绑定」重复处理且无线索。对齐 merge_remote_status 的
-                // warn 纪律（可自愈，不中断本轮）。
-                if let Err(err) = db::set_article_remote_id(conn, aid, eid) {
-                    log::warn!("sync: 绑定新条目远端 id 失败（aid={aid} eid={eid}）: {err}");
-                }
-                maps.id_to_mf_id.insert(aid, Some(eid));
-                maps.mf_id_to_article.insert(eid, aid);
-            }
-            // P3-5：状态写失败此前静默——已读/收藏未落库会让「未读数对不齐」
-            // 失去可诊断线索。对齐 merge_remote_status 的 warn 纪律。
-            if let Err(err) = db::sync_set_article_status(conn, aid, remote_read, remote_starred) {
-                log::warn!("sync: 写入新条目远端状态失败（aid={aid}）: {err}");
-            }
-            report.pulled_entries += 1;
-        }
-        Err(err) => {
-            report.errors.push(format!(
-                "拉取条目 {} 建本地失败: {err}",
-                item_url(e).unwrap_or_default()
-            ));
-        }
+    // TASK-056 语义保留（失败必须可见），R2 升级形态：整条链路 Result 化——
+    // 插入/绑定/状态任何一步失败都透传 Err（不再「记 report 后继续」，那样调用方
+    // 无法整页回滚、也无法保住重拉游标）。
+    let (aid, _) = db::upsert_article_with_feed(conn, feed_id, &a, false)?;
+    if let Some(eid) = item_numeric_id(e) {
+        db::set_article_remote_id(conn, aid, eid)?;
+        maps.id_to_mf_id.insert(aid, Some(eid));
+        maps.mf_id_to_article.insert(eid, aid);
     }
+    db::sync_set_article_status(conn, aid, remote_read, remote_starred)?;
+    report.pulled_entries += 1;
+    Ok(())
 }
 
 fn strip_html_text(html: &str) -> String {
@@ -269,11 +245,10 @@ fn strip_html_text(html: &str) -> String {
 
 /// 已有条目正文/封面/enclosure 兜底回填：本地为空才补（COALESCE），已有内容绝不覆盖。
 /// （封面 / enclosure 单列 COALESCE：既不抢本地封面，也能补上 Miniflux 后来抓到的图。）
-/// OPT-002（F07）：回填失败此前被 `let _` 静默吞掉——正文缺失而同步报成功、现场
-/// 无线索。改为 warn + 记入 report.errors（恢复语义的完整处理见 OPT-007，本轮不
-/// 扩展游标协议：失败仍不中断整轮，下轮会再试）。
+/// OPT-002（F07）语义保留（失败必须可见）；R2 升级形态：回填失败透传 Err——
+/// 由调用方决定粒度（Fever 整页回滚 + 保留游标；GR 记错误且不推游标）。
 // Note: 回填写入的净化在 db::backfill_article_content 内完成（同 sanitize 口径） — 见 .agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md
-fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent, report: &mut SyncReport) {
+fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) -> AppResult<()> {
     let content_html = item_content_html(e);
     let enclosure = e.enclosure.first();
     let (enc_url, enc_mime) = match enclosure {
@@ -281,7 +256,7 @@ fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent, report: 
         None => (None, None),
     };
     let content_image = crate::sanitize::first_image(&content_html);
-    if let Err(err) = db::backfill_article_content(
+    db::backfill_article_content(
         conn,
         aid,
         &content_html,
@@ -289,10 +264,5 @@ fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent, report: 
         content_image.as_deref(),
         enc_url.as_deref(),
         enc_mime.as_deref(),
-    ) {
-        log::warn!("sync: 正文回填失败（aid={aid}）: {err}");
-        report
-            .errors
-            .push(format!("拉取条目回填正文失败（aid={aid}）: {err}"));
-    }
+    )
 }

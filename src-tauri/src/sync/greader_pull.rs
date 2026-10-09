@@ -151,11 +151,30 @@ pub(super) async fn pull_entries_greader(
                 continue;
             }
         };
-        let conn = db.lock().await;
-        for e in &entries {
-            merge_pulled_entry(&conn, e, &mut maps, report);
+        // R2：entries 的合并链路 Result 化——DB 写失败不得吞。本块中途失败即计数
+        // （时间戳游标不推进，下一轮重拉同一窗口），已处理条目留库（GR 无页事务，
+        // 细粒度恢复仍归 OPT-007）。错误信息带条目 URL（TASK-056 可定位性契约）。
+        let mut merge_error: Option<(String, AppError)> = None;
+        {
+            let conn = db.lock().await;
+            for e in &entries {
+                if let Err(err) = merge_pulled_entry(&conn, e, &mut maps, report) {
+                    let url = e
+                        .alternate
+                        .first()
+                        .map(|a| a.href.clone())
+                        .unwrap_or_default();
+                    merge_error = Some((url, err));
+                    break;
+                }
+            }
         }
-        drop(conn);
+        if let Some((url, err)) = merge_error {
+            chunk_failures += 1;
+            report
+                .errors
+                .push(format!("合并条目 {url} 失败（本块中止，游标保留）: {err}"));
+        }
     }
 
     // 轻量同步（full=false）状态对账：增量 item_contents 只覆盖「变更过的」条目，

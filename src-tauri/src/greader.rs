@@ -643,22 +643,28 @@ pub fn parse_feed_numeric_id(stream_id: &str) -> Option<i64> {
     stream_id.strip_prefix("feed/")?.parse().ok()
 }
 
-/// 从长格式 item id（`tag:google.com,2005:reader/item/0000000000001675`）提取十进制 id。
-/// 长格式 id 的尾部是 16 位十六进制；也可直接是十进制（`12345`）。
+/// 从 item id 提取十进制 id——按**协议形状**解析，不按长度猜进制（审计 F03）：
+///
+/// - 规范长格式 `tag:google.com,2005:reader/item/<hex>`：尾部按**十六进制**解析
+///   （Google Reader item tag 规范；纯数字与含 a-f 都合法）。
+/// - 无前缀的**纯十进制数字串**（FreshRSS greader 的 `stream/items/ids` 返回
+///   64 位十进制、Fever 条目 id 是十进制字面值）：按**十进制**解析。
+///   **绝不按十六进制猜**——16 位纯数字（如 `"1791440000000000"`）若按十六进制
+///   解释会静默落成另一个数字，remote_id 与状态全线错位。
+/// - 其余形态（无前缀且含非数字字符）返回 None：不猜、不靠 `len == 16` 试探。
+// Note: item id 按协议形状（前缀 hex / 无前缀十进制）解析，不按长度猜 — 见 .agents/notes/implemented/architecture/2026-10-08-Fever身份与历史回溯.md
 pub fn parse_item_id(id: &str) -> Option<i64> {
-    if let Some(hex) = id.rsplit('/').next() {
-        // 16 位十六进制 → 十进制
-        if hex.len() == 16 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            if let Ok(v) = i64::from_str_radix(hex, 16) {
-                return Some(v);
-            }
+    const ITEM_TAG_PREFIX: &str = "tag:google.com,2005:reader/item/";
+    if let Some(hex) = id.strip_prefix(ITEM_TAG_PREFIX) {
+        if !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return i64::from_str_radix(hex, 16).ok();
         }
-        // 纯十进制
-        if let Ok(v) = hex.parse::<i64>() {
-            return Some(v);
-        }
+        return None;
     }
-    id.parse::<i64>().ok()
+    if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+        return id.parse::<i64>().ok();
+    }
+    None
 }
 
 /// 判断 item 的 categories 是否含某 tag（read/starred 状态判断）。
@@ -768,16 +774,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_item_id_handles_both_formats() {
-        // 长格式：tag:google.com,2005:reader/item/0000000000001675 → 十进制 5749
+    fn parse_item_id_handles_protocol_shapes() {
+        // 规范长格式（前缀形状）→ 尾部按十六进制：纯数字与含 a-f 都合法。
         assert_eq!(
             parse_item_id("tag:google.com,2005:reader/item/0000000000001675"),
             Some(5749)
         );
-        // 十进制
+        assert_eq!(
+            parse_item_id("tag:google.com,2005:reader/item/00000000000016ab"),
+            Some(5803)
+        );
+        // 无前缀纯十进制（含 FreshRSS greader 的 64 位十进制长 id）：按十进制，
+        // **不得**按 len==16 猜十六进制（否则 0x0000000000001675=5749 会顶替 1675）。
         assert_eq!(parse_item_id("5749"), Some(5749));
-        // 16 位十六进制（无前缀）
-        assert_eq!(parse_item_id("0000000000001675"), Some(5749));
+        assert_eq!(parse_item_id("0000000000001675"), Some(1675));
+        assert_eq!(parse_item_id("1791440000000000"), Some(1791440000000000));
+        // 其余形态不猜（无协议形状可依）。
+        assert_eq!(parse_item_id("00000000000016ab"), None);
+        assert_eq!(parse_item_id("feed/42"), None);
+        assert_eq!(parse_item_id(""), None);
     }
 
     /// Miniflux 形态：type=folder + label 直接用。

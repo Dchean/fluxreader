@@ -3,51 +3,203 @@
 
 use super::*;
 use crate::db;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::fever;
 use crate::greader::ItemContent;
 use chrono::Utc;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// 收集一批 Fever 条目：记录已见 id（供 with_ids 补齐去重）+ 追加到总列表。
-fn collect_fever_items(
-    all_items: &mut Vec<ItemContent>,
-    seen: &mut std::collections::HashSet<i64>,
-    incoming: Vec<ItemContent>,
-) {
-    for it in incoming {
-        if let Some(eid) = item_numeric_id(&it) {
-            seen.insert(eid);
+/// 每个同步轮次的历史回溯页预算（50 条/页 → 单轮至多 1 万条）。
+/// 到达预算**不是完成**：保存 checkpoint 并记「未完成」，下一次同步
+/// （含自动 light）从 checkpoint 续取——不会永久只拉前一万条。
+const HISTORY_MAX_PAGES_PER_SYNC: usize = 200;
+
+/// 页内 id 范围（min, max）；非空页但无可解析 id → None（游标守卫据此报错）。
+fn page_id_bounds(page: &[ItemContent]) -> Option<(i64, i64)> {
+    let mut ids = page.iter().filter_map(item_numeric_id);
+    let first = ids.next()?;
+    let (mut min, mut max) = (first, first);
+    for id in ids {
+        min = min.min(id);
+        max = max.max(id);
+    }
+    Some((min, max))
+}
+
+/// 页事务随页数据一起 commit 的游标写入（R2：页数据、checkpoint、since 同事务）。
+enum PageCursorWrite {
+    /// 增量页：连续 since 推进到该值。
+    Since(i64),
+    /// 历史续取页：checkpoint（Pending）推进到该值。
+    Pending(i64),
+    /// 顶部连续页：since 与 checkpoint 同一事务写入。
+    Top { since: i64, pending: i64 },
+}
+
+/// 逐页落库（**页事务**）：页内所有 DB 写 + 该页的游标（since/checkpoint）在
+/// 同一短事务里全有全无；离开函数后该页 `ItemContent`（含 HTML）即释放——
+/// 不累计全历史（内存只留 `seen` 的 id 集合与当前页）。
+///
+/// 任何行/绑定/状态/回填/游标写失败 → 回滚事务，并回滚内存统计与 `seen`
+/// （maps 由调用方按回滚后的 DB 重建——未提交绑定不得当事实）。
+fn merge_page_tx(
+    conn: &mut Connection,
+    page: Vec<ItemContent>,
+    seen: &mut HashSet<i64>,
+    maps: &mut db::SyncMatchMaps,
+    report: &mut SyncReport,
+    cursor_write: Option<PageCursorWrite>,
+) -> AppResult<()> {
+    let stats = (report.pulled_entries, report.merged_states);
+    let mut added: Vec<i64> = Vec::new();
+    let tx = conn.transaction()?;
+    let mut failure: Option<AppError> = None;
+    for it in page {
+        let eid = item_numeric_id(&it);
+        if let Some(id) = eid {
+            if seen.contains(&id) {
+                continue; // 重复条目（页重叠）：本事务不重复处理
+            }
         }
-        all_items.push(it);
+        match merge_pulled_entry(&tx, &it, maps, report) {
+            Ok(()) => {
+                if let Some(id) = eid {
+                    seen.insert(id);
+                    added.push(id);
+                }
+            }
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+    }
+    if failure.is_none() {
+        if let Some(w) = cursor_write {
+            let r = match w {
+                PageCursorWrite::Since(v) => db::set_last_sync_entry_id(&tx, v),
+                PageCursorWrite::Pending(v) => db::set_fever_history_pending(&tx, v),
+                PageCursorWrite::Top { since, pending } => db::set_last_sync_entry_id(&tx, since)
+                    .and_then(|_| db::set_fever_history_pending(&tx, pending)),
+            };
+            if let Err(e) = r {
+                failure = Some(e);
+            }
+        }
+    }
+    if let Some(e) = failure {
+        drop(tx); // 回滚：页数据与游标都不落地
+        for id in added {
+            seen.remove(&id);
+        }
+        report.pulled_entries = stats.0;
+        report.merged_states = stats.1;
+        return Err(e);
+    }
+    match tx.commit() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // COMMIT 失败同样按页失败处理：内存侧回滚（DB 侧由 rusqlite 回滚）。
+            for id in added {
+                seen.remove(&id);
+            }
+            report.pulled_entries = stats.0;
+            report.merged_states = stats.1;
+            Err(AppError::from(e))
+        }
     }
 }
 
-/// Fever 拉取：items 端点单页仅给最近 50 条，拆两段：
-/// ① `since_id` 分页增量拉新条目（含已读+未读 → 同源判定 + upsert）
-/// ② `unread_item_ids`/`saved_item_ids` 权威集合全量对账（已读/收藏反推）。
+/// 页事务失败后按 DB 重建匹配映射（未提交绑定不得当事实）。
+/// **重建失败必须错误传播**：调用方立即终止本轮（不执行后续 history/with_ids/
+/// 完成时间），Pending 与已确认 since 保留——绝不把 DB 错误退化成空映射继续
+/// （空 feed 映射会让 merge 全部「合法跳过」，却照常确认 since/checkpoint）。
+fn rebuild_maps_after_failure(
+    conn: &Connection,
+    maps: &mut db::SyncMatchMaps,
+    report: &mut SyncReport,
+) -> AppResult<()> {
+    match db::sync_match_maps(conn) {
+        Ok(m) => {
+            *maps = m;
+            Ok(())
+        }
+        Err(e) => {
+            report.errors.push(format!(
+                "页回滚后重建匹配映射失败（本轮终止，保留 Pending 与已确认游标）: {e}"
+            ));
+            Err(e)
+        }
+    }
+}
+
+/// Fever 拉取，三段式（R2：页事务 + 显式状态）：
+/// ① 增量：`items&since_id` 向新分页。**非空页一律继续直到空页**——服务端
+///    （FreshRSS `fever.php`）先 `LIMIT 50` 再由扩展 hook 过滤（hook 含
+///    with_ids 全分支），49 条非空短页不代表没有后页。
+/// ② 历史回溯：状态显式三态（Unknown/Pending/Complete）。缺失/损坏/读取失败
+///    **绝不当完成**：Unknown（含旧库只有 since）自动从顶部补旧历史；损坏显式
+///    报错且不动任何游标。每页「页数据 + checkpoint」同事务；预算/失败保留
+///    Pending 续取点；只有真正走到空页才写 Complete。
+/// ③ `unread_item_ids`/`saved_item_ids` 权威集合对账（失败 ≠ 空集合）。
 ///
-/// TASK-125（审计 P2-8）：协议/当前 Miniflux 服务端支持 `items&max_id` 向
-/// **更旧**条目翻页（历史回溯），但本客户端**未实现**该方向（见 `fever.rs`
-/// 模块头「历史回溯能力」段）；此处两段是能力现状，不是协议上限。
+/// 游标纪律：`last_sync_entry_id` 只由**连续成功**的增量页（或从顶部连续走下的
+/// 历史页）在同页事务里推进；with_ids 补齐、Pending 续取页、失败页都不推动。
+/// Note: 页事务/显式状态/失败回滚语义 — 见 .agents/notes/implemented/architecture/2026-10-08-Fever身份与历史回溯.md
 pub(super) async fn pull_entries_fever(
     db: &Arc<Mutex<Connection>>,
     client: &fever::FeverClient,
     report: &mut SyncReport,
     full: bool,
 ) {
-    use std::collections::HashSet;
-
-    let since_id = {
+    // 读取 since 与历史三态。状态损坏/读失败：显式报错并整轮不拉取、不动游标
+    // （绝不能把损坏/未知当完成继续推进）。
+    let (since_id, history_state) = {
         let conn = db.lock().await;
-        if full {
+        let since = if full {
             0
         } else {
             db::last_sync_entry_id(&conn).unwrap_or(0)
+        };
+        match db::fever_history_state(&conn) {
+            Ok(s) => (since, s),
+            Err(e) => {
+                report.errors.push(format!(
+                    "Fever 历史状态不可读，本轮不拉取条目（游标保留）: {e}"
+                ));
+                return;
+            }
         }
     };
+
+    // 历史计划：
+    // - full / 首连（since==0）：从顶部全量重放（幂等；覆盖旧 Pending/Complete）。
+    // - Unknown（旧库只有 since、无状态键）：必须启动回溯（从顶部补旧历史）。
+    // - Pending(c)：从 c 续取（含 c==i64::MAX 的顶走重试）。
+    // - Complete：无需回溯。
+    let history_plan: Option<(i64, bool)> = if full || since_id == 0 {
+        Some((i64::MAX, true))
+    } else {
+        match history_state {
+            db::FeverHistoryState::Unknown => Some((i64::MAX, true)),
+            db::FeverHistoryState::Pending(c) => Some((c, c == i64::MAX)),
+            db::FeverHistoryState::Complete => None,
+        }
+    };
+
+    // R2-P1：先初始化 Pending 成功，之后才允许任何更大的 since 落库。
+    if let Some((start, _)) = history_plan {
+        let conn = db.lock().await;
+        if let Err(e) = db::set_fever_history_pending(&conn, start) {
+            report.errors.push(format!(
+                "初始化 Fever 历史状态失败（未开始拉取，旧游标保留）: {e}"
+            ));
+            return;
+        }
+    }
 
     // ① 权威状态集合（全量 id）：未读 + 收藏。
     // 拉取失败 ≠ 空集合（C-1）：失败即跳过本轮对账（下方 ⑤ 用 reconcile_ok 守卫），
@@ -67,55 +219,220 @@ pub(super) async fn pull_entries_fever(
         }
     };
 
-    // ② 拉条目正文：增量（since_id>0）或首次种子（since_id=0 → 最近 50 条）
-    let mut all_items: Vec<ItemContent> = Vec::new();
-    let mut seen: HashSet<i64> = HashSet::new();
-    // TASK-068：抓取失败计数——时间戳游标仅在无失败时推进（对称 greader 守卫；
-    // last_sync_entry_id 只计已合并条目，本就安全）。
-    // TASK-125：since_id=0 走首种子（最近 50 条）是因本客户端未实现 max_id
-    // 历史回溯，不是协议没有历史端点（见 `fever.rs` 模块头）。
-    let mut fetch_failures = 0usize;
+    // 匹配映射一次构建；逐页合并时增量更新（新绑定/新条目立即可被后续页匹配）。
+    // R3-P1：读取失败**立即终止本轮**——绝不退化成空映射继续（空 feed 映射会让
+    // merge「合法跳过」却照常确认 since/checkpoint）。Pending 与旧游标保留，
+    // 不执行后续 history/with_ids/完成时间，等待下一次同步重试。
+    let mut maps = {
+        let conn = db.lock().await;
+        match db::sync_match_maps(&conn) {
+            Ok(m) => m,
+            Err(e) => {
+                report.errors.push(format!(
+                    "同步匹配映射构建失败，本轮不拉取/不合并（Pending 与游标保留）: {e}"
+                ));
+                return;
+            }
+        }
+    };
 
+    let mut seen: HashSet<i64> = HashSet::new();
+    // TASK-068：抓取失败计数——时间戳游标仅在无失败时推进（对称 greader 守卫）。
+    let mut fetch_failures = 0usize;
+    // R2：页事务（DB 级）失败单独计数——同样不推进完成时间、保留重拉游标。
+    let mut merge_failures = 0usize;
+    // 只由成功提交的页事务推进（见函数头游标纪律）；with_ids/Pending 页不推动。
+    let mut since_cursor = since_id;
+
+    // ② 增量（since_id>0）：非空页一律继续直到空页（短页 ≠ 结束）。
+    // 游标必须严格前进：服务端若忽略 since_id / 返回重复页，页内 max 不会
+    // 大于旧游标——显式报错并保留已拉进度，绝不无限循环。
+    // 页事务：页数据 + since 同 commit；失败整页回滚并保留 since=cursor 重拉。
     if since_id > 0 {
-        // 增量：items&since_id 升序分页，单页 50，不足 50 即拿完
         let mut cursor = since_id;
         loop {
-            let batch = match client.items_since(cursor).await {
-                Ok(b) => b,
+            let page = match client.items_since(cursor).await {
+                Ok(p) => p,
                 Err(e) => {
                     fetch_failures += 1;
                     report.errors.push(format!("拉取增量条目失败: {e}"));
                     break;
                 }
             };
-            let n = batch.len();
-            if n == 0 {
-                break;
+            if page.is_empty() {
+                break; // 空页才是结束
             }
-            cursor = batch
-                .iter()
-                .filter_map(item_numeric_id)
-                .max()
-                .unwrap_or(cursor);
-            let got_all = n < 50;
-            collect_fever_items(&mut all_items, &mut seen, batch);
-            if got_all {
-                break;
-            }
-        }
-    } else {
-        // 首次：本客户端未实现 max_id 历史回溯（协议/当前 Miniflux 支持，见
-        // `fever.rs` 模块头）；最近 50 条作已读种子，未读/收藏由下方 with_ids 补齐
-        match client.items_recent().await {
-            Ok(seed) => collect_fever_items(&mut all_items, &mut seen, seed),
-            Err(e) => {
-                fetch_failures += 1;
-                report.errors.push(format!("拉取最近条目失败: {e}"));
+            let next = match page_id_bounds(&page) {
+                Some((_, max)) if max > cursor => max,
+                _ => {
+                    fetch_failures += 1;
+                    report.errors.push(format!(
+                        "Fever 增量分页游标未前进（since_id={cursor}）：已中止本轮，下轮重试"
+                    ));
+                    break;
+                }
+            };
+            let mut guard = db.lock().await;
+            match merge_page_tx(
+                &mut guard,
+                page,
+                &mut seen,
+                &mut maps,
+                report,
+                Some(PageCursorWrite::Since(next)),
+            ) {
+                Ok(()) => {
+                    cursor = next;
+                    since_cursor = since_cursor.max(next);
+                }
+                Err(e) => {
+                    merge_failures += 1;
+                    report.errors.push(format!(
+                        "增量页合并失败（已回滚，保留 since={cursor} 下轮重拉）: {e}"
+                    ));
+                    if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
+                        return; // R3-P1：重建失败 = 不再有可信映射，立即终止本轮
+                    }
+                    break;
+                }
             }
         }
     }
 
-    // ③ 权威集合中本地还没有正文的条目（未读/收藏），用 with_ids 分块补齐
+    // ③ 历史回溯：顶部重放（full/首连/Unknown）或 Pending 续取。
+    // 页事务：页数据 + checkpoint（顶部页连带 since）同 commit；
+    // 预算到达/分页失败/游标不前进都保留 Pending=当前页输入游标（可重拉），
+    // 只有真正走到空页才写 Complete。
+    // 游标取页内**最小** id（固定实现页内顺序均为 DESC；游标与顺序无关）；
+    // 游标必须严格减小，否则（服务端不支持 max_id 等）显式失败并保留续取点。
+    let mut history_completed = false;
+    if let Some((start, top_walk)) = history_plan {
+        let mut boundary_ok = true;
+        if top_walk {
+            // `max_id` 严格 `<` 不会返回恰好 i64::MAX 的条目；已读非收藏的它
+            // 不在权威集合里、with_ids 补齐也摸不到。显式 with_ids 顶覆盖一次
+            // （hook 对 with_ids 同样生效——被过滤时视为服务端没有该条目）。
+            match client.items_with_ids(&[i64::MAX]).await {
+                Ok(page) => {
+                    let bounds = page_id_bounds(&page);
+                    let write = bounds.map(|(_, max)| PageCursorWrite::Top {
+                        since: since_cursor.max(max),
+                        pending: start,
+                    });
+                    let mut guard = db.lock().await;
+                    match merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, write) {
+                        Ok(()) => {
+                            if let Some((_, max)) = bounds {
+                                since_cursor = since_cursor.max(max);
+                            }
+                        }
+                        Err(e) => {
+                            // 顶覆盖页失败：Pending=start（初始化已落库）保留，
+                            // 下次同步（含 light）重新顶走——不提前完成。
+                            merge_failures += 1;
+                            report.errors.push(format!(
+                                "历史顶部覆盖页失败（已回滚，Pending=MAX 保留）: {e}"
+                            ));
+                            if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
+                                return; // R3-P1：重建失败立即终止本轮
+                            }
+                            boundary_ok = false;
+                        }
+                    }
+                }
+                Err(e) => {
+                    // 顶覆盖网络失败 = 历史阶段没有开始：Pending=MAX 保留。
+                    fetch_failures += 1;
+                    report.errors.push(format!("拉取历史条目前失败: {e}"));
+                    boundary_ok = false;
+                }
+            }
+        }
+        if boundary_ok {
+            let mut cursor = start;
+            let mut pages = 0usize;
+            loop {
+                if pages >= HISTORY_MAX_PAGES_PER_SYNC {
+                    // 预算到达不是完成：Pending=cursor 已在库（初始化或上一页
+                    // 事务），报告/完成时间同样如实反映未完成。
+                    fetch_failures += 1;
+                    report.errors.push(format!(
+                        "Fever 历史回溯未完成：本轮已达 {HISTORY_MAX_PAGES_PER_SYNC} 页预算（Pending={cursor} 已保留，下次同步自动继续）"
+                    ));
+                    break;
+                }
+                let page = match client.items_before(cursor).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        fetch_failures += 1;
+                        report
+                            .errors
+                            .push(format!("拉取历史条目失败（Pending={cursor} 保留）: {e}"));
+                        break;
+                    }
+                };
+                if page.is_empty() {
+                    history_completed = true; // 空数组 = 服务端保留的历史已取尽
+                    break;
+                }
+                let Some((min, max)) = page_id_bounds(&page) else {
+                    fetch_failures += 1;
+                    report.errors.push(format!(
+                        "Fever 历史页无可解析 id（max_id={cursor}）：已中止，下轮重试"
+                    ));
+                    break;
+                };
+                if min >= cursor {
+                    fetch_failures += 1;
+                    report.errors.push(format!(
+                        "Fever 历史分页游标未前进（max_id={cursor}）：已中止，下轮重试"
+                    ));
+                    break;
+                }
+                let write = if top_walk {
+                    PageCursorWrite::Top {
+                        since: since_cursor.max(max),
+                        pending: min,
+                    }
+                } else {
+                    PageCursorWrite::Pending(min)
+                };
+                let mut guard = db.lock().await;
+                match merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, Some(write)) {
+                    Ok(()) => {
+                        if top_walk {
+                            since_cursor = since_cursor.max(max);
+                        }
+                        cursor = min;
+                        pages += 1;
+                    }
+                    Err(e) => {
+                        merge_failures += 1;
+                        report.errors.push(format!(
+                            "历史页合并失败（已回滚，Pending={cursor} 保留）: {e}"
+                        ));
+                        if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
+                            return; // R3-P1：重建失败立即终止本轮
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        if history_completed {
+            // 只有真正取尽才允许 Complete；写失败保持 Pending（下轮会再走到这里）。
+            let conn = db.lock().await;
+            if let Err(e) = db::set_fever_history_complete(&conn) {
+                merge_failures += 1;
+                report.errors.push(format!(
+                    "写 Complete 状态失败（保持 Pending，下轮重试）: {e}"
+                ));
+            }
+        }
+    }
+
+    // ④ 权威集合中本地还没有正文的条目（未读/收藏），用 with_ids 分块补齐。
+    // 这是 id 精确通道，结果**不**推动 `last_sync_entry_id`（游标纪律）。
     let mut need: Vec<i64> = unread
         .iter()
         .chain(starred.iter())
@@ -126,41 +443,27 @@ pub(super) async fn pull_entries_fever(
     need.dedup();
     for chunk in need.chunks(50) {
         match client.items_with_ids(chunk).await {
-            Ok(batch) => collect_fever_items(&mut all_items, &mut seen, batch),
+            Ok(page) => {
+                // 页事务（无游标写入）：失败整页回滚，**不**推动任何游标。
+                let mut guard = db.lock().await;
+                if let Err(e) = merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, None)
+                {
+                    merge_failures += 1;
+                    report
+                        .errors
+                        .push(format!("with_ids 补齐页合并失败（已回滚，游标不动）: {e}"));
+                    if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
+                        return; // R3-P1：重建失败立即终止本轮
+                    }
+                    break;
+                }
+            }
             Err(e) => {
                 fetch_failures += 1;
                 report.errors.push(format!("拉取未读/收藏条目失败: {e}"));
                 break;
             }
         }
-    }
-
-    // ④ 构建匹配映射 + 锁内合并（复用同一条目合并逻辑）
-    let mut maps = {
-        let conn = db.lock().await;
-        db::sync_match_maps(&conn).unwrap_or_else(|e| {
-            report.errors.push(format!("同步匹配映射构建失败: {e}"));
-            db::SyncMatchMaps {
-                url_to_id: Default::default(),
-                id_to_mf_id: Default::default(),
-                id_to_mf_pair: Default::default(),
-                pending_ids: Default::default(),
-                feed_mf_to_id: Default::default(),
-                mf_id_to_article: Default::default(),
-            }
-        })
-    };
-
-    let mut last_id = since_id;
-    for chunk in all_items.chunks(100) {
-        let conn = db.lock().await;
-        for e in chunk {
-            if let Some(eid) = item_numeric_id(e) {
-                last_id = last_id.max(eid);
-            }
-            merge_pulled_entry(&conn, e, &mut maps, report);
-        }
-        drop(conn);
     }
 
     // ⑤ 权威状态对账：Fever 无法直接拉已读条目，靠「未读/收藏集合」反推。
@@ -177,17 +480,17 @@ pub(super) async fn pull_entries_fever(
         }
     }
 
-    // ⑥ 更新游标（Fever 用条目 id；时间戳游标也记录，供切换回 greader 后的首拉）
+    // ⑥ 完成时间。`last_sync_entry_id` 与历史 checkpoint 已在各页事务内提交
+    // （页数据与游标同 commit），这里不再有「事务外的游标补写」。
+    // 时间戳游标仅在「本轮窗口拿全」时推进——抓取失败、页事务失败、预算未完成
+    // 与权威集合失败都算没拿全，否则切回 greader 时会跳过该窗口。
     let conn = db.lock().await;
-    let _ = db::set_last_sync_entry_id(&conn, last_id);
-    // TASK-068/069：时间戳游标仅在「本轮窗口拿全」时推进——抓取失败与权威集合
-    // 失败都算没拿全，否则切回 greader 时会跳过该窗口。
-    let failures = fetch_failures + collection_failures;
+    let failures = fetch_failures + collection_failures + merge_failures;
     if failures == 0 {
         let _ = db::set_last_sync_ts(&conn, Utc::now().timestamp());
     } else {
         log::warn!(
-            "fever pull: {fetch_failures} fetch(es) + {collection_failures} collection failure(s); keeping last_sync_ts"
+            "fever pull: {fetch_failures} fetch(es) + {collection_failures} collection + {merge_failures} merge failure(s); keeping last_sync_ts"
         );
     }
     drop(conn);
@@ -264,10 +567,9 @@ mod tests {
     // - pending 保护：守卫被移除 → pending 用例红。
     // 本卡行为零变化，故全部用例在显式化前后都绿；CI（cargo test）承担执行。
     //
-    // 失败守卫（reconcile_ok：集合拉取失败跳过对账）的端到端锁定依赖 HTTP 层，
-    // 由 live 测试（tests/fever_sync_live_e2e.rs，#[ignore]）与 CI 承担——
-    // mock_greader 的 Fever 路由未实现 unread/saved/items 端点，无法在
-    // src/ 范围内注入（tests/ 不在本卡允许修改范围）。
+    // 失败守卫（reconcile_ok：集合拉取失败跳过对账）与 max_id 历史回溯的
+    // 端到端锁定在 tests/fever_compat_e2e.rs（OPT-005 严格 HTTP 夹具：缺字段/
+    // 分页失败/游标不前进/长 id 字符串都真实过 HTTP 层），单元测试只锁纯逻辑。
 
     fn conn() -> rusqlite::Connection {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();

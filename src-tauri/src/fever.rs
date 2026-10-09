@@ -13,17 +13,25 @@
 //!   form body**（`p/api/fever.php:172` 只读 `$_POST['api_key']`）——故统一走
 //!   form body（TASK-101），其余参数留在 query（两类后端的 `$_REQUEST`/FormValue
 //!   都收）。顺带消除 api_key 进服务器访问日志的泄露面。
-//! - `items` 端点最多返回 **50 条**（升序），增量用 `since_id` 分页拉全。
-//! - **历史回溯能力（协议/服务端支持 vs 本客户端未实现，TASK-125 审计 P2-8）**：
-//!   Fever 协议 / 当前 Miniflux 服务端的 `items` 端点支持 `max_id`——按
-//!   `id < max_id` 向**更旧**条目翻页，重复请求直到返回空数组即完成历史回溯
-//!   （来源：github.com/miniflux/v2 的 `internal/fever/handler.go` 约 227-267 行，
-//!   2026-10 查阅 dev/main 分支源码时点）。**本客户端当前只实现** `since_id`
-//!   增量（向更新方向）与 `items_recent` 首种子（最近 50 条），`items_with_ids`
-//!   仅用于补齐权威集合中缺正文的条目——**未实现 max_id 历史回溯**。该能力此处
-//!   仅作记录（适配器能力报告的记录点），实现属后续任务；「历史是否仍被服务端
-//!   保留另当别论」。
-//! - `unread_item_ids`/`saved_item_ids` 是权威**全量** id 集合（不受 50 条限制）。
+//! - `items` 端点最多返回 **50 条**/页；`since_id` 向更新方向分页增量，
+//!   `max_id` 向**更旧**方向分页（`id < max_id`）。两家**固定实现**的 max_id
+//!   页均为 `ORDER BY id DESC`（FreshRSS `p/api/fever.php` 的 `findEntries`；
+//!   Miniflux `internal/fever/handler.go` 约 227-267 行），即返回紧邻 max_id
+//!   的最近 50 条；客户端游标取**页内最小 id**，与页内顺序无关（升序页只在
+//!   测试夹具中作泛化鲁棒性对照，**不是**任何固定实现的事实）。首/全量同步
+//!   循环 `items_before` 直到返回空数组，即取尽服务端保留历史（TASK-125 审计
+//!   P2-8；「历史是否仍被服务端保留另当别论」）；分页失败 / 页预算到达 /
+//!   游标不前进都保留 checkpoint，下一次同步（含自动 light）自动续取。
+//! - **资源界限**：响应体读取有 16 MiB 上限（`MAX_RESPONSE_BYTES`），超限
+//!   显式协议错误；历史回溯在 `sync/fever_pull.rs` 逐页落库并释放正文，
+//!   不累计全历史。
+//! - **id 类型（审计 F03）**：FreshRSS 的 Fever 端把 64 位 id 作为 PHP
+//!   numeric-string 序列化（`json_encode` 输出 JSON **字符串**，如
+//!   `"1791440000000000"`），Miniflux 输出 JSON **数字**；`id`/`feed_id`/
+//!   `group_id` 两种形态都接受，一律按**十进制**解析——绝不按十六进制猜，
+//!   也不经 f64 中转。非法/溢出/负值显式报错（`FeverId`）。
+//! - `unread_item_ids`/`saved_item_ids` 是权威**全量** id 集合（不受 50 条限制）；
+//!   响应缺该字段是协议错误，**不得当空集合**（空集合会触发双向对账清状态）。
 //! - `mark=item` 只接受**单个** id（逗号分隔无效），推送需逐个条目调用。
 //! - 不支持添加订阅（Fever 协议无写订阅端点）——`quick_add` 由上层降级处理。
 //!
@@ -37,8 +45,83 @@ use crate::greader::{
 };
 use md5::{Digest, Md5};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
+use std::fmt;
+
+/* ============================================================
+Fever 数值 id（审计 F03）
+
+FreshRSS 的 Fever 端把 64 位 id 作为 PHP numeric-string 序列化
+（`json_encode` 输出 JSON 字符串，如 `"1791440000000000"`）；Miniflux 输出
+JSON 数字；greader 侧的 `stream/items/ids` 同样返回十进制字符串。
+两种形态都按**十进制**解析——**绝不按十六进制猜**（16 位纯数字若按十六进制
+解释会静默得到另一个 id，remote_id 与状态全部对不上），也不经 f64 中转
+（大整数会失真）。非法（含 `0x` 前缀/空串/非数字）、负数、超出 i64 一律
+显式报错，不静默过滤。
+============================================================ */
+
+// Note: 两种 JSON 形态（数字/十进制字符串）都按十进制、绝不猜十六进制 — 见 .agents/notes/implemented/architecture/2026-10-08-Fever身份与历史回溯.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct FeverId(i64);
+
+impl FeverId {
+    fn get(self) -> i64 {
+        self.0
+    }
+}
+
+/// 十进制字符串 → id：必须全部是 ASCII 数字（拒绝 `0x`、`-`、空串、空白内嵌）。
+fn parse_decimal_id(raw: &str) -> Result<i64, String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Err("Fever ID 字符串为空".to_string());
+    }
+    if !t.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "Fever ID 不是十进制数字字符串：{raw:?}（不得按十六进制解释）"
+        ));
+    }
+    t.parse::<i64>()
+        .map_err(|_| format!("Fever ID 超出 i64 范围：{raw:?}"))
+}
+
+impl<'de> Deserialize<'de> for FeverId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IdVisitor;
+
+        impl<'de> Visitor<'de> for IdVisitor {
+            type Value = FeverId;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("Fever ID（非负十进制整数或十进制数字字符串）")
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<FeverId, E> {
+                if v < 0 {
+                    return Err(E::custom(format!("Fever ID 不得为负值：{v}")));
+                }
+                Ok(FeverId(v))
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<FeverId, E> {
+                i64::try_from(v)
+                    .map(FeverId)
+                    .map_err(|_| E::custom(format!("Fever ID 超出 i64 范围：{v}")))
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<FeverId, E> {
+                parse_decimal_id(v).map(FeverId).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(IdVisitor)
+    }
+}
 
 /* ============================================================
 Fever 原始响应（JSON）
@@ -56,8 +139,13 @@ struct FeverEnvelope {
     feeds_groups: Vec<FeverFeedsGroup>,
     #[serde(default)]
     feeds: Vec<FeverFeed>,
+    /// `items` 方法必须带 `items` 字段——**缺失 ≠ 空数组**（缺失是协议错误，
+    /// 不得静默当作「没有条目」耗尽历史）。非 items 方法（认证探针等）响应
+    /// 不含该字段，故为 Option。
     #[serde(default)]
-    items: Vec<FeverItem>,
+    items: Option<Vec<FeverItem>>,
+    /// 同 `items`：权威集合方法响应缺该字段是协议错误，不得当空集合
+    /// （空集合会触发双向对账把本地状态清掉）。
     #[serde(default)]
     unread_item_ids: Option<String>,
     #[serde(default)]
@@ -66,22 +154,21 @@ struct FeverEnvelope {
 
 #[derive(Debug, Deserialize)]
 struct FeverGroup {
-    id: i64,
+    id: FeverId,
     #[serde(default)]
     title: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct FeverFeedsGroup {
-    #[serde(default)]
-    group_id: i64,
+    group_id: FeverId,
     #[serde(default)]
     feed_ids: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct FeverFeed {
-    id: i64,
+    id: FeverId,
     #[serde(default)]
     title: String,
     #[serde(default)]
@@ -92,9 +179,9 @@ struct FeverFeed {
 
 #[derive(Debug, Deserialize)]
 struct FeverItem {
-    id: i64,
+    id: FeverId,
     #[serde(default)]
-    feed_id: i64,
+    feed_id: FeverId,
     #[serde(default)]
     title: String,
     #[serde(default)]
@@ -114,6 +201,47 @@ struct FeverItem {
 /* ============================================================
 客户端
 ============================================================ */
+
+/// Fever 响应体读取上限：16 MiB。单页 50 条的正常响应远小于此；超过即视为
+/// 协议/实现异常，显式失败而不是把整段读入内存再解析。
+///
+/// 实现说明（R2）：`Content-Length` 预检（快路径）+ `Response::chunk()` 逐块
+/// 累计的**读取中硬界**；chunk 上自动解压透明生效，覆盖 chunked（无长度）与
+/// 压缩膨胀两种形态。不新增 reqwest feature/依赖。
+const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// 读取并解析 Fever 信封（带 16 MiB 上限）。
+///
+/// R2：按 `Response::chunk()` **逐块累计**（reqwest 的 chunk 无需 `stream`
+/// feature；解压也在其上透明生效）——不是「先 `bytes()` 读全再量长度」。
+/// Content-Length 只是提前拒绝的快路径；无长度（chunked）/压缩（解压后膨胀）
+/// 的响应同样在读取过程中被硬界拦住。
+async fn read_envelope(mut resp: reqwest::Response, action: &str) -> AppResult<FeverEnvelope> {
+    let label = if action.is_empty() { "探针" } else { action };
+    if let Some(len) = resp.content_length() {
+        if len > MAX_RESPONSE_BYTES {
+            return Err(AppError::new(
+                "protocol",
+                format!("Fever {label} 响应超过 16 MiB 上限（Content-Length={len}）"),
+            ));
+        }
+    }
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if body.len() as u64 + chunk.len() as u64 > MAX_RESPONSE_BYTES {
+            return Err(AppError::new(
+                "protocol",
+                format!(
+                    "Fever {label} 响应超过 16 MiB 上限（读取中累计超过 {} 字节）",
+                    MAX_RESPONSE_BYTES
+                ),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body)
+        .map_err(|e| AppError::new("protocol", format!("Fever {label} 响应解析失败：{e}")))
+}
 
 /// TASK-101：认证失败统一口径（`call_probe` 与 `mark_items` 两处共用）。
 /// FreshRSS 的 Fever 与 GReader 都使用个人设置里的「API 密码」——提示用户
@@ -199,7 +327,7 @@ impl FeverClient {
         if !resp.status().is_success() {
             return Ok((None, status));
         }
-        let env: FeverEnvelope = resp.json().await?;
+        let env: FeverEnvelope = read_envelope(resp, action).await?;
         // TASK-059（owner 授权放宽）：原为 `!= 3` 即拒绝，但 FreshRSS 的 Fever 实测返回
         // `{"api_version":4,"auth":0}`——它用 4 表示自身实现版本，而**信封结构与 v3 一致**
         // （`api_version` + `auth` 两字段语义不变）。故改为**兼容 3 及以上**。
@@ -304,17 +432,14 @@ impl FeverClient {
 
         let mut group_title: HashMap<i64, String> = HashMap::new();
         for g in &groups_env.groups {
-            group_title.insert(g.id, g.title.clone());
+            group_title.insert(g.id.get(), g.title.clone());
         }
-        // feed_id → 第一个归属 group_id
+        // feed_id → 第一个归属 group_id（feed_ids 是 CSV；非法项显式报错，
+        // 不得 filter_map 静默跳过——那会把归属错误当成「无分类」悄悄落地）。
         let mut feed_group: HashMap<i64, i64> = HashMap::new();
         for fg in &groups_env.feeds_groups {
-            for fid in fg
-                .feed_ids
-                .split(',')
-                .filter_map(|s| s.trim().parse::<i64>().ok())
-            {
-                feed_group.entry(fid).or_insert(fg.group_id);
+            for fid in parse_csv_ids(&fg.feed_ids, "feeds_groups.feed_ids")? {
+                feed_group.entry(fid).or_insert(fg.group_id.get());
             }
         }
 
@@ -323,7 +448,7 @@ impl FeverClient {
             .into_iter()
             .map(|f| {
                 let categories = feed_group
-                    .get(&f.id)
+                    .get(&f.id.get())
                     .and_then(|gid| group_title.get(gid))
                     .map(|t| CategoryRef {
                         id: format!("user/-/label/{t}"),
@@ -338,7 +463,7 @@ impl FeverClient {
                     Some(f.site_url.clone())
                 };
                 Subscription {
-                    id: format!("feed/{}", f.id),
+                    id: format!("feed/{}", f.id.get()),
                     title: f.title,
                     categories,
                     url: f.url,
@@ -350,49 +475,62 @@ impl FeverClient {
     }
 
     /// 权威未读条目 id 全量集合。
+    ///
+    /// 响应**缺 `unread_item_ids` 字段是协议错误**（auth-only 响应只对认证
+    /// 方法合法）：绝不能当空集合——空集合会在双向对账里被解释成「远端全部
+    /// 未读消失 = 全变已读」，静默清掉本地状态。
     pub async fn unread_item_ids(&self) -> AppResult<Vec<i64>> {
         let env = self.call("unread_item_ids", &[]).await?;
-        Ok(parse_csv_ids(env.unread_item_ids.as_deref()))
+        let raw = env.unread_item_ids.ok_or_else(|| {
+            AppError::new(
+                "protocol",
+                "Fever unread_item_ids 响应缺少 unread_item_ids 字段（缺失不得当空集合）",
+            )
+        })?;
+        parse_csv_ids(&raw, "unread_item_ids")
     }
 
-    /// 权威收藏条目 id 全量集合。
+    /// 权威收藏条目 id 全量集合（缺字段同样是协议错误，见 `unread_item_ids`）。
     pub async fn saved_item_ids(&self) -> AppResult<Vec<i64>> {
         let env = self.call("saved_item_ids", &[]).await?;
-        Ok(parse_csv_ids(env.saved_item_ids.as_deref()))
+        let raw = env.saved_item_ids.ok_or_else(|| {
+            AppError::new(
+                "protocol",
+                "Fever saved_item_ids 响应缺少 saved_item_ids 字段（缺失不得当空集合）",
+            )
+        })?;
+        parse_csv_ids(&raw, "saved_item_ids")
     }
 
-    /// 增量拉条目：`id > since_id`（Miniflux 限制 50 条升序，调用方需分页到拿完）。
-    /// 注意 `since_id=0` 是无效值（返回默认最近 50 条），首次同步请用 [`Self::items_recent`]。
-    ///
-    /// 方向说明（TASK-125）：本方法只向**更新**方向翻页（`since_id` 递增）。Fever
-    /// 协议/当前 Miniflux 服务端另支持 `items&max_id` 向**更旧**条目翻页（重复直到
-    /// 返回空数组，即历史回溯）——本客户端**未实现**（见模块头「历史回溯能力」段）；
-    /// 该能力为适配器能力报告的记录点，实现属后续任务。
+    /// 增量拉条目：`id > since_id`（服务端限制 50 条/页，调用方按页内最大 id
+    /// 递增游标分页到拿完）。注意 `since_id=0` 是无效值（服务端返回默认最近
+    /// 50 条），首次同步走 [`Self::items_before`] 的完整历史回溯。
     pub async fn items_since(&self, since_id: i64) -> AppResult<Vec<ItemContent>> {
         let env = self
             .call("items", &[("since_id", since_id.to_string())])
             .await?;
-        Ok(env
-            .items
-            .into_iter()
-            .map(fever_item_to_item_content)
-            .collect())
+        parse_items(env.items)
     }
 
-    /// 拉最近条目（items 无参数，Miniflux 返回最近 50 条，未读优先）。
-    /// 仅用于 Fever 首次同步的已读种子；未读/收藏由 `unread_item_ids`/
-    /// `saved_item_ids` + `items_with_ids` 补齐。
+    /// 历史回溯：`id < max_id` 的最近一页（`max_id` 不超过 50 条/页）。
     ///
-    /// TASK-125：首同步深度因此只有最近 50 条——**不是**协议没有历史端点，
-    /// 而是本客户端未实现 `max_id` 历史回溯（见模块头「历史回溯能力」段与
-    /// `docs/sync-compat-matrix.md` §1/§6-L2）。
+    /// 语义（协议/两家固定实现一致，见模块头）：「向更旧翻页」——调用方以
+    /// **页内最小 id** 作为下一页游标（与页内顺序无关：FreshRSS DESC、
+    /// Miniflux 升序），重复请求直到返回空数组即取尽服务端保留历史。
+    pub async fn items_before(&self, max_id: i64) -> AppResult<Vec<ItemContent>> {
+        let env = self
+            .call("items", &[("max_id", max_id.to_string())])
+            .await?;
+        parse_items(env.items)
+    }
+
+    /// 拉最近条目（items 无参数，服务端返回最近 50 条）。
+    ///
+    /// 首/全量同步现走 [`Self::items_before`] 循环取尽历史（TASK-125 / OPT-005），
+    /// 本方法保留为显式「只看最近窗口」接口。
     pub async fn items_recent(&self) -> AppResult<Vec<ItemContent>> {
         let env = self.call("items", &[]).await?;
-        Ok(env
-            .items
-            .into_iter()
-            .map(fever_item_to_item_content)
-            .collect())
+        parse_items(env.items)
     }
 
     /// 按 id 精确拉条目正文。
@@ -406,11 +544,7 @@ impl FeverClient {
             .collect::<Vec<_>>()
             .join(",");
         let env = self.call("items", &[("with_ids", csv)]).await?;
-        Ok(env
-            .items
-            .into_iter()
-            .map(fever_item_to_item_content)
-            .collect())
+        parse_items(env.items)
     }
 
     /* ---------- 状态写入（mark=item，单个 id 逐个调用） ---------- */
@@ -451,7 +585,7 @@ impl FeverClient {
                     resp.status()
                 )));
             }
-            let env: FeverEnvelope = resp.json().await?;
+            let env: FeverEnvelope = read_envelope(resp, "mark").await?;
             if env.auth != 1 {
                 return Err(AppError::new("auth", AUTH_FAILED_MSG));
             }
@@ -464,11 +598,42 @@ impl FeverClient {
 映射辅助
 ============================================================ */
 
-fn parse_csv_ids(s: Option<&str>) -> Vec<i64> {
-    s.unwrap_or("")
-        .split(',')
-        .filter_map(|x| x.trim().parse().ok())
-        .collect()
+/// `items` 方法响应 → 条目列表：缺 `items` 字段是协议错误（缺失 ≠ 空数组）。
+fn parse_items(items: Option<Vec<FeverItem>>) -> AppResult<Vec<ItemContent>> {
+    let items = items.ok_or_else(|| {
+        AppError::new(
+            "protocol",
+            "Fever items 响应缺少 items 字段（缺失不得当空数组）",
+        )
+    })?;
+    Ok(items.into_iter().map(fever_item_to_item_content).collect())
+}
+
+/// 逗号分隔的十进制 id 集合（`unread_item_ids` / `saved_item_ids` /
+/// `feeds_groups.feed_ids`）。
+///
+/// 空串 = 空集合（合法）；其余任何非法项（非十进制、负数、溢出、空项）都
+/// **显式报错**——绝不 `filter_map(..ok())` 静默过滤：那会把协议错误伪造成
+/// 「更小的集合」，权威对账据此回写会把本地状态清错。
+fn parse_csv_ids(raw: &str, field: &str) -> AppResult<Vec<i64>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for token in trimmed.split(',') {
+        let t = token.trim();
+        if t.is_empty() {
+            return Err(AppError::new(
+                "protocol",
+                format!("Fever {field} 含空项：{raw:?}"),
+            ));
+        }
+        let id = parse_decimal_id(t)
+            .map_err(|e| AppError::new("protocol", format!("Fever {field} 非法：{e}")))?;
+        out.push(id);
+    }
+    Ok(out)
 }
 
 /// Fever item → 统一 `ItemContent`（复用 greader 的状态 tag 语义）。
@@ -483,7 +648,9 @@ fn fever_item_to_item_content(item: FeverItem) -> ItemContent {
         categories.push(tags::STARRED.to_string());
     }
     ItemContent {
-        id: item.id.to_string(),
+        // 十进制字面值：与 FeverId 的整数定义一致（mark/with_ids/对账共用同一
+        // 定义；下游 greader::parse_item_id 对无前缀纯数字同样按十进制解析）。
+        id: item.id.get().to_string(),
         categories,
         title: item.title,
         author: item.author,
@@ -498,7 +665,7 @@ fn fever_item_to_item_content(item: FeverItem) -> ItemContent {
             content: item.html.unwrap_or_default(),
         }),
         origin: Some(OriginRef {
-            stream_id: format!("feed/{}", item.feed_id),
+            stream_id: format!("feed/{}", item.feed_id.get()),
             title: String::new(),
             html_url: String::new(),
         }),
@@ -527,20 +694,82 @@ mod tests {
     }
 
     #[test]
-    fn parse_csv_handles_empty_and_trailing() {
-        assert!(parse_csv_ids(None).is_empty());
-        assert_eq!(parse_csv_ids(Some("")), Vec::<i64>::new());
+    fn parse_csv_ids_accepts_empty_and_decimal_tokens() {
+        assert_eq!(parse_csv_ids("", "x").unwrap(), Vec::<i64>::new());
         assert_eq!(
-            parse_csv_ids(Some("5699,5700,5711")),
+            parse_csv_ids("5699,5700,5711", "x").unwrap(),
             vec![5699, 5700, 5711]
         );
+        // 周围空白容忍（服务端一般不产生，但容忍不影响语义）
+        assert_eq!(parse_csv_ids(" 1 , 2 ", "x").unwrap(), vec![1, 2]);
+    }
+
+    /// 非法项必须显式报错，绝不静默过滤成「更小的集合」。
+    #[test]
+    fn parse_csv_ids_rejects_invalid_instead_of_filtering() {
+        for bad in [
+            "1,abc",
+            "0x1F",
+            "1,,2",
+            "1,-2",
+            "99999999999999999999",
+            ",1",
+            "1,",
+        ] {
+            assert!(
+                parse_csv_ids(bad, "unread_item_ids").is_err(),
+                "{bad:?} 应报错而不是被过滤"
+            );
+        }
+    }
+
+    /// F03：JSON 数字与十进制数字字符串都接受；不经 f64 中转失真。
+    #[test]
+    fn fever_id_accepts_number_and_decimal_string() {
+        #[derive(Deserialize)]
+        struct Probe {
+            id: FeverId,
+        }
+        // 契约给出的长 id（FreshRSS numeric-string 形态）。
+        let s: Probe = serde_json::from_str(r#"{"id":"1791440000000000"}"#).unwrap();
+        let n: Probe = serde_json::from_str(r#"{"id":1791440000000000}"#).unwrap();
+        assert_eq!(s.id.get(), 1791440000000000);
+        assert_eq!(n.id.get(), 1791440000000000);
+        // 2^53 + 1：f64 无法精确表示，必须走整数解析（证明不经 f64 中转）。
+        let big: Probe = serde_json::from_str(r#"{"id":9007199254740993}"#).unwrap();
+        assert_eq!(big.id.get(), 9007199254740993);
+    }
+
+    /// 非法/负值/溢出/浮点一律显式报错，不静默。
+    #[test]
+    fn fever_id_rejects_invalid_negative_overflow_and_float() {
+        // 本测试只断言反序列化失败，字段不会被读取。
+        #[derive(Deserialize)]
+        struct Probe {
+            #[allow(dead_code)]
+            id: FeverId,
+        }
+        for bad in [
+            r#"{"id":"0x1F"}"#,
+            r#"{"id":"-5"}"#,
+            r#"{"id":-5}"#,
+            r#"{"id":""}"#,
+            r#"{"id":"99999999999999999999"}"#,
+            r#"{"id":99999999999999999999}"#,
+            r#"{"id":1.5}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Probe>(bad).is_err(),
+                "{bad} 应显式报错"
+            );
+        }
     }
 
     #[test]
     fn item_maps_read_and_saved_to_tags() {
         let item = FeverItem {
-            id: 5705,
-            feed_id: 21,
+            id: FeverId(5705),
+            feed_id: FeverId(21),
             title: "t".into(),
             author: Some("a".into()),
             html: Some("<p>x</p>".into()),
