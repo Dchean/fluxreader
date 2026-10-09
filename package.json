@@ -9,7 +9,8 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:frontend": "tsc -p tsconfig.test.json && node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs"
+    "test:frontend": "tsc -p tsconfig.test.json && node --loader ./tools/test-loader.mjs ./tools/frontend-regression.mjs",
+    "test:components": "tsc -p tsconfig.test.json && node ./tools/component-regression.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.10",
@@ -28,6 +29,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.0",
+    "jsdom": "^28.1.0",
     "oxlint": "^1.79.0",
     "typescript": "~6.0.2",
     "vite": "^8.2.2"

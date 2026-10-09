@@ -40,6 +40,13 @@ jobs:
       - name: Frontend regression (node state-machine checks)
         run: npm run test:frontend
 
+      # Note: 真实挂载回归（OPT-016B）——jsdom + React createRoot/act 挂载生产组件，
+      # 覆盖 effect/事件/异步链与真实 DOM 契约（ReaderProse 源码态、Timeline 五布局、
+      # CloseAskDialog 键盘、正文水合），与上面的纯逻辑通道共用同一份 loader 与
+      # store/bodyCache 实例。不跑 effect 的 SSR/静态断言不能替代它，故单列一步。
+      - name: Component mount regression (jsdom + React act)
+        run: npm run test:components
+
   rust:
     name: Check & test Rust (src-tauri)
     # 纯 Windows 客户端：DPAPI 凭据加密、SMTC 媒体控制等 Windows 专有功能
