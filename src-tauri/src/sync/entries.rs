@@ -166,15 +166,17 @@ pub(super) fn merge_pulled_entry(
 }
 
 /// 协议分派：Google Reader 用 `ot` 时间游标，Fever 用 `since_id` 条目游标。
+/// OPT-006：返回值 `AppResult<()>`——会话代际失配（账号在拉取期间变更）以
+/// `staleSession` 终止本轮，调用方据此返回可见错误而不是假成功。
 pub(super) async fn pull_entries(
     db: &Arc<Mutex<Connection>>,
-    client: &Backend,
+    session: &SyncSession,
     report: &mut SyncReport,
     full: bool,
-) {
-    match client {
-        Backend::GReader(g) => pull_entries_greader(db, g, report, full).await,
-        Backend::Fever(f) => pull_entries_fever(db, f, report, full).await,
+) -> AppResult<()> {
+    match &session.client {
+        Backend::GReader(g) => pull_entries_greader(db, session, g, report, full).await,
+        Backend::Fever(f) => pull_entries_fever(db, session, f, report, full).await,
     }
 }
 

@@ -88,7 +88,7 @@ export function ConfigSyncSection() {
       const payload = await api.configSyncDownload();
       const parsed = JSON.parse(payload) as { uploaded_at?: string; feeds?: unknown[] };
       const n = Array.isArray(parsed.feeds) ? parsed.feeds.length : 0;
-      if (!window.confirm(`下载远端配置（${n} 个订阅源，上传于 ${parsed.uploaded_at ?? '未知时间'}）并应用？\n\n已存在的源会跳过；本地设置与 AI 配置将被远端覆盖。`)) {
+      if (!window.confirm(`下载远端配置（${n} 个订阅源，上传于 ${parsed.uploaded_at ?? '未知时间'}）并应用？\n\n已存在的源会跳过；本地设置与 AI 配置将被远端覆盖。\n（连接信息只作为待确认建议，不会改动当前连接。）`)) {
         setBusy(false);
         return;
       }
@@ -101,6 +101,10 @@ export function ConfigSyncSection() {
       if (r.updated > 0) parts.push(`更新 ${r.updated} 个`);
       if (r.skipped > 0) parts.push(`跳过 ${r.skipped} 个（内容一致）`);
       showToast(`配置已应用：${parts.join('，')}`);
+      // OPT-006：导入不会改动活动连接；若含连接信息则提示到「后端配置」激活
+      if (r.pendingConnection) {
+        showToast('检测到连接信息：请到「后端配置」重新输入密码后保存以激活（当前连接不受影响）');
+      }
     } catch (e) {
       showToast(`下载失败：${extractError(e)}`);
     } finally {

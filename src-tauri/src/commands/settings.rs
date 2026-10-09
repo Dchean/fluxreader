@@ -16,22 +16,57 @@ pub async fn get_setting(state: State<'_, AppState>, key: String) -> AppResult<O
     db::get_setting(&conn, &key)
 }
 
-#[tauri::command]
-pub async fn set_setting(state: State<'_, AppState>, key: String, value: String) -> AppResult<()> {
-    let conn = state.db.lock().await;
+/// OPT-006：活动账号与同步进度键——通用 `set_setting` 不得改写。
+/// 这些都只能经专用命令修改（sync_save / sync_disconnect 在**同一事务**里
+/// 推进代际并做并发校验；config_sync 导入只写待确认建议）：
+/// - 活动凭据四键：协议 / 地址 / 用户名 / 密码；
+/// - 代际与两类游标、Fever 历史状态、端点解析缓存：绕过写入会让在途会话的
+///   代际复核失真或让新账号继承旧进度；
+/// - 待确认连接建议：由导入与专用保存/放弃命令管理。
+// Note: 通用 IPC 不得绕过账号生命周期（写入侧收口） — 见 .agents/notes/implemented/architecture/2026-10-08-账号会话与配置应用边界.md
+const PROTECTED_SETTING_KEYS: &[&str] = &[
+    "sync_protocol",
+    "greader_endpoint",
+    "greader_username",
+    "greader_password",
+    "sync_generation",
+    "sync_last_sync",
+    "sync_last_entry_id",
+    "fever_history_state",
+    "endpoint_resolved",
+    "pending_connection_config",
+    "pending_connection_serial",
+];
+
+/// 通用设置写入的真实实现（命令与单测共用；单测无法构造 State）。
+pub(crate) fn apply_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> AppResult<()> {
+    // OPT-006：活动连接/代际/进度键必须走专用保存流程（含代际推进与并发校验），
+    // 通用写入是一条会绕过账号生命周期守卫的旁路——在此拒绝。
+    if PROTECTED_SETTING_KEYS.contains(&key) {
+        return Err(AppError::new(
+            "protectedSetting",
+            format!("设置键「{key}」受账号生命周期保护，请使用「同步」设置页的保存/断开流程"),
+        ));
+    }
     // smartDedup 关闭瞬间清去重墓碑：用户显式想让重复文章回来，
     // 之后的抓取按无去重语义正常入库（不清的话墓碑会继续拦截）
     if key == "app_settings" {
-        let was_on = read_dedup_flag(&conn);
-        let now_on = serde_json::from_str::<serde_json::Value>(&value)
+        let was_on = read_dedup_flag(conn);
+        let now_on = serde_json::from_str::<serde_json::Value>(value)
             .ok()
             .and_then(|v| v.get("smartDedup").and_then(|b| b.as_bool()))
             .unwrap_or(false);
         if was_on && !now_on {
-            let _ = db::clear_dedup_tombstones(&conn);
+            let _ = db::clear_dedup_tombstones(conn);
         }
     }
-    db::set_setting(&conn, &key, &value)
+    db::set_setting(conn, key, value)
+}
+
+#[tauri::command]
+pub async fn set_setting(state: State<'_, AppState>, key: String, value: String) -> AppResult<()> {
+    let conn = state.db.lock().await;
+    apply_setting(&conn, &key, &value)
 }
 
 /* ============================================================
@@ -167,7 +202,62 @@ pub async fn check_for_updates() -> AppResult<UpdateCheckOutcome> {
 }
 
 /* ============================================================
-全文提取（Readability）
+设置写入保护（OPT-006 / F05）
+
+通用 set_setting 是一条绕过账号生命周期的旁路：任何前端/其它模块都能直接
+改写活动凭据、代际与游标。账号身份变化必须走 sync_save / sync_disconnect
+的专用事务（含清理、代际推进与并发复核），配置导入只写待确认建议。
+本段单测锁定「受保护键一律拒绝、普通键照常写入」。
+============================================================ */
+#[cfg(test)]
+mod protected_setting_tests {
+    use super::*;
+
+    fn conn() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    /// 判别力：保护清单被移除任一项时对应用例必红（写入成功 = 旁路存在）。
+    #[test]
+    fn protected_keys_are_rejected_with_dedicated_flow_hint() {
+        let conn = conn();
+        for key in [
+            "sync_protocol",
+            "greader_endpoint",
+            "greader_username",
+            "greader_password",
+            "sync_generation",
+            "sync_last_sync",
+            "sync_last_entry_id",
+            "fever_history_state",
+            "endpoint_resolved",
+            "pending_connection_config",
+        ] {
+            let err = apply_setting(&conn, key, "tampered").expect_err("受保护键必须拒绝");
+            assert_eq!(err.code, "protectedSetting", "{key} 应返回明确错误码");
+            assert!(
+                err.message.contains("保存") || err.message.contains("断开"),
+                "{key} 错误应指向专用流程：{err}"
+            );
+            let stored = db::get_setting(&conn, key).unwrap();
+            assert!(stored.is_none(), "{key} 被拒绝后不得留下任何写入");
+        }
+    }
+
+    /// 对照：普通键（app_settings / 播放进度等）不受影响。
+    #[test]
+    fn ordinary_keys_still_write() {
+        let conn = conn();
+        apply_setting(&conn, "app_settings", r#"{"themeMode":"dark"}"#).unwrap();
+        let saved = db::get_setting(&conn, "app_settings").unwrap().unwrap();
+        assert!(saved.contains("dark"));
+    }
+}
+
+/* ============================================================
+完整 SQL 全文提取（Readability）
 ============================================================ */
 
 /// 全文提取的结果（TASK-076 / P2-10 后半，DEC-req104-p2-10b-fulltext-degraded-20260920）。

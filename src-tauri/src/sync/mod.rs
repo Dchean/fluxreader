@@ -63,6 +63,7 @@ mod fever_pull;
 mod greader_pull;
 mod phases;
 mod push;
+mod session;
 mod subscriptions;
 
 pub use credentials::*;
@@ -81,3 +82,4 @@ TASK-113：conflict_policy 例外——不参与裸名 glob 重导出。其消�
 use entries::*;
 use fever_pull::*;
 use greader_pull::*;
+use session::*;

@@ -368,6 +368,18 @@ pub fn prune_feed_tombstones(conn: &Connection, remote_urls: &[String]) -> AppRe
     Ok(())
 }
 
+/// 清空两个命名空间的退订墓碑（OPT-006：**账号身份变更**的提交事务内调用）。
+///
+/// 语义边界：墓碑记录的是「用户在本机删过这个订阅」；换到**另一个账号**后，
+/// 旧账号的删除意图不再适用——新账号的订阅列表里若有同 URL，应当正常导入，
+/// 否则旧墓碑会永久压制新账号的订阅（F05「旧映射不污染新账号」）。
+/// **断开连接不调用**（未换账号）：重连同一账号时墓碑仍须防复活（TASK-055）。
+pub fn clear_feed_tombstones(conn: &Connection) -> AppResult<()> {
+    save_tombstones(conn, FEED_TOMBSTONE_KEY, &[])?;
+    save_tombstones(conn, FEED_TOMBSTONE_LEGACY_V1_KEY, &[])?;
+    Ok(())
+}
+
 /// 订阅的同步信息：URL 与远端绑定 id（删除订阅时用于退订与墓碑）。
 pub fn feed_remote_info(conn: &Connection, id: i64) -> AppResult<(String, Option<i64>)> {
     conn.query_row(

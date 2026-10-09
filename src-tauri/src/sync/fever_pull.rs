@@ -148,17 +148,24 @@ fn rebuild_maps_after_failure(
 ///
 /// 游标纪律：`last_sync_entry_id` 只由**连续成功**的增量页（或从顶部连续走下的
 /// 历史页）在同页事务里推进；with_ids 补齐、Pending 续取页、失败页都不推动。
+///
+/// OPT-006：`session` 的代际在每个 HTTP→DB 边界复核（游标/历史状态读、Pending
+/// 初始化、每页请求与页事务、Complete、对账、完成时间）。代际失配立即以
+/// `staleSession` 终止本轮——Pending 页游标只对原会话有效，旧响应不落库。
 /// Note: 页事务/显式状态/失败回滚语义 — 见 .agents/notes/implemented/architecture/2026-10-08-Fever身份与历史回溯.md
 pub(super) async fn pull_entries_fever(
     db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
     client: &fever::FeverClient,
     report: &mut SyncReport,
     full: bool,
-) {
+) -> AppResult<()> {
     // 读取 since 与历史三态。状态损坏/读失败：显式报错并整轮不拉取、不动游标
     // （绝不能把损坏/未知当完成继续推进）。
     let (since_id, history_state) = {
         let conn = db.lock().await;
+        // OPT-006：读游标/历史状态即边界——旧会话不得基于已切换账号的进度拉取。
+        session.ensure_current(&conn)?;
         let since = if full {
             0
         } else {
@@ -170,7 +177,7 @@ pub(super) async fn pull_entries_fever(
                 report.errors.push(format!(
                     "Fever 历史状态不可读，本轮不拉取条目（游标保留）: {e}"
                 ));
-                return;
+                return Ok(());
             }
         }
     };
@@ -193,12 +200,19 @@ pub(super) async fn pull_entries_fever(
     // R2-P1：先初始化 Pending 成功，之后才允许任何更大的 since 落库。
     if let Some((start, _)) = history_plan {
         let conn = db.lock().await;
+        // OPT-006：Pending 初始化是游标写边界——代际失配不得写。
+        session.ensure_current(&conn)?;
         if let Err(e) = db::set_fever_history_pending(&conn, start) {
             report.errors.push(format!(
                 "初始化 Fever 历史状态失败（未开始拉取，旧游标保留）: {e}"
             ));
-            return;
+            return Ok(());
         }
+    }
+
+    // OPT-006：权威集合请求前复核代际。
+    if !session_is_current(db, session).await {
+        return Err(SyncSession::stale_error());
     }
 
     // ① 权威状态集合（全量 id）：未读 + 收藏。
@@ -225,13 +239,14 @@ pub(super) async fn pull_entries_fever(
     // 不执行后续 history/with_ids/完成时间，等待下一次同步重试。
     let mut maps = {
         let conn = db.lock().await;
+        session.ensure_current(&conn)?;
         match db::sync_match_maps(&conn) {
             Ok(m) => m,
             Err(e) => {
                 report.errors.push(format!(
                     "同步匹配映射构建失败，本轮不拉取/不合并（Pending 与游标保留）: {e}"
                 ));
-                return;
+                return Ok(());
             }
         }
     };
@@ -251,6 +266,10 @@ pub(super) async fn pull_entries_fever(
     if since_id > 0 {
         let mut cursor = since_id;
         loop {
+            // OPT-006：每页请求前复核代际——账号已切换即停止后续请求。
+            if !session_is_current(db, session).await {
+                return Err(SyncSession::stale_error());
+            }
             let page = match client.items_since(cursor).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -273,6 +292,9 @@ pub(super) async fn pull_entries_fever(
                 }
             };
             let mut guard = db.lock().await;
+            // OPT-006：页事务（页数据 + since 同 commit）是游标写边界——代际
+            // 失配整页丢弃：不合并、不推进 since，Pending 由账号提交事务重置。
+            session.ensure_current(&guard)?;
             match merge_page_tx(
                 &mut guard,
                 page,
@@ -291,7 +313,7 @@ pub(super) async fn pull_entries_fever(
                         "增量页合并失败（已回滚，保留 since={cursor} 下轮重拉）: {e}"
                     ));
                     if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
-                        return; // R3-P1：重建失败 = 不再有可信映射，立即终止本轮
+                        return Ok(()); // R3-P1：重建失败 = 不再有可信映射，立即终止本轮
                     }
                     break;
                 }
@@ -312,6 +334,10 @@ pub(super) async fn pull_entries_fever(
             // `max_id` 严格 `<` 不会返回恰好 i64::MAX 的条目；已读非收藏的它
             // 不在权威集合里、with_ids 补齐也摸不到。显式 with_ids 顶覆盖一次
             // （hook 对 with_ids 同样生效——被过滤时视为服务端没有该条目）。
+            // OPT-006：请求前复核代际。
+            if !session_is_current(db, session).await {
+                return Err(SyncSession::stale_error());
+            }
             match client.items_with_ids(&[i64::MAX]).await {
                 Ok(page) => {
                     let bounds = page_id_bounds(&page);
@@ -320,6 +346,8 @@ pub(super) async fn pull_entries_fever(
                         pending: start,
                     });
                     let mut guard = db.lock().await;
+                    // OPT-006：页事务是游标写边界——代际失配整页丢弃。
+                    session.ensure_current(&guard)?;
                     match merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, write) {
                         Ok(()) => {
                             if let Some((_, max)) = bounds {
@@ -334,7 +362,7 @@ pub(super) async fn pull_entries_fever(
                                 "历史顶部覆盖页失败（已回滚，Pending=MAX 保留）: {e}"
                             ));
                             if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
-                                return; // R3-P1：重建失败立即终止本轮
+                                return Ok(()); // R3-P1：重建失败立即终止本轮
                             }
                             boundary_ok = false;
                         }
@@ -360,6 +388,10 @@ pub(super) async fn pull_entries_fever(
                         "Fever 历史回溯未完成：本轮已达 {HISTORY_MAX_PAGES_PER_SYNC} 页预算（Pending={cursor} 已保留，下次同步自动继续）"
                     ));
                     break;
+                }
+                // OPT-006：每页请求前复核代际。
+                if !session_is_current(db, session).await {
+                    return Err(SyncSession::stale_error());
                 }
                 let page = match client.items_before(cursor).await {
                     Ok(p) => p,
@@ -398,6 +430,8 @@ pub(super) async fn pull_entries_fever(
                     PageCursorWrite::Pending(min)
                 };
                 let mut guard = db.lock().await;
+                // OPT-006：页事务是游标写边界——代际失配整页丢弃。
+                session.ensure_current(&guard)?;
                 match merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, Some(write)) {
                     Ok(()) => {
                         if top_walk {
@@ -412,7 +446,7 @@ pub(super) async fn pull_entries_fever(
                             "历史页合并失败（已回滚，Pending={cursor} 保留）: {e}"
                         ));
                         if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
-                            return; // R3-P1：重建失败立即终止本轮
+                            return Ok(()); // R3-P1：重建失败立即终止本轮
                         }
                         break;
                     }
@@ -422,6 +456,8 @@ pub(super) async fn pull_entries_fever(
         if history_completed {
             // 只有真正取尽才允许 Complete；写失败保持 Pending（下轮会再走到这里）。
             let conn = db.lock().await;
+            // OPT-006：Complete 是历史状态写边界——代际失配不得落库。
+            session.ensure_current(&conn)?;
             if let Err(e) = db::set_fever_history_complete(&conn) {
                 merge_failures += 1;
                 report.errors.push(format!(
@@ -442,10 +478,16 @@ pub(super) async fn pull_entries_fever(
     need.sort_unstable();
     need.dedup();
     for chunk in need.chunks(50) {
+        // OPT-006：补齐请求前复核代际。
+        if !session_is_current(db, session).await {
+            return Err(SyncSession::stale_error());
+        }
         match client.items_with_ids(chunk).await {
             Ok(page) => {
                 // 页事务（无游标写入）：失败整页回滚，**不**推动任何游标。
                 let mut guard = db.lock().await;
+                // OPT-006：合并是回写边界——代际失配整页丢弃。
+                session.ensure_current(&guard)?;
                 if let Err(e) = merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, None)
                 {
                     merge_failures += 1;
@@ -453,7 +495,7 @@ pub(super) async fn pull_entries_fever(
                         .errors
                         .push(format!("with_ids 补齐页合并失败（已回滚，游标不动）: {e}"));
                     if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
-                        return; // R3-P1：重建失败立即终止本轮
+                        return Ok(()); // R3-P1：重建失败立即终止本轮
                     }
                     break;
                 }
@@ -470,6 +512,8 @@ pub(super) async fn pull_entries_fever(
     // 集合拉取失败时整段跳过（C-1），绝不做"空集合 = 远端全变"的对账。
     if reconcile_ok {
         let conn = db.lock().await;
+        // OPT-006：对账是回写边界——代际失配丢弃整份权威集合。
+        session.ensure_current(&conn)?;
         // 审计 P2-8③：对账内的 DB 写失败必须可见——记入 report.errors
         // （不再被 unwrap_or(0) 伪装成 0 行变化）。已写入行不回滚，
         // 剩余行下一轮同集合对账幂等重放。
@@ -485,6 +529,8 @@ pub(super) async fn pull_entries_fever(
     // 时间戳游标仅在「本轮窗口拿全」时推进——抓取失败、页事务失败、预算未完成
     // 与权威集合失败都算没拿全，否则切回 greader 时会跳过该窗口。
     let conn = db.lock().await;
+    // OPT-006：完成时间推进前复核代际——旧会话不得写新账号的时间戳游标。
+    session.ensure_current(&conn)?;
     let failures = fetch_failures + collection_failures + merge_failures;
     if failures == 0 {
         let _ = db::set_last_sync_ts(&conn, Utc::now().timestamp());
@@ -494,6 +540,7 @@ pub(super) async fn pull_entries_fever(
         );
     }
     drop(conn);
+    Ok(())
 }
 
 /// Fever 全量状态对账。Miniflux 按 URL 去重 entry，故 Fever 视角无跨源副本，

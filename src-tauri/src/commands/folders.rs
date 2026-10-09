@@ -651,8 +651,10 @@ mod tests {
 }
 
 /// 删除订阅的本地记录 + 删除墓碑（命令与测试共用的真实逻辑）。
-/// 返回 Some((remote_id, feed_url))：该订阅已绑定远端且同步已配置，
+/// 返回 Some((remote_id, feed_url, generation))：该订阅已绑定远端且同步已配置，
 /// 调用方应 best-effort 退订远端（GReader）；Fever 或未连接时仅靠墓碑防复活。
+/// generation 是读取 remote_id 同一持锁内捕获的账号代际（OPT-006）——退订发送前
+/// 复核，换号后不得把旧账号的 remote_id 发给新账号。
 ///
 /// OPT-014 R2：可失败的凭据读取前移到**任何本地副作用之前**并复用结果——
 /// 坏密文时整单失败，不留下「订阅已删 + 墓碑已落」却报错的半套状态。
@@ -660,14 +662,15 @@ mod tests {
 pub fn record_feed_deletion(
     conn: &rusqlite::Connection,
     id: i64,
-) -> AppResult<Option<(i64, String)>> {
+) -> AppResult<Option<(i64, String, i64)>> {
     let sync_ok = sync_configured(conn)?;
+    let generation = db::sync_generation(conn)?;
     let (feed_url, remote_id) = db::feed_remote_info(conn, id)?;
     // A-1：墓碑先落，退订失败也不得让 pull 把已删订阅拉回来
     db::add_feed_tombstone(conn, &feed_url)?;
     db::delete_feed(conn, id)?;
     Ok(if sync_ok {
-        remote_id.map(|rid| (rid, feed_url))
+        remote_id.map(|rid| (rid, feed_url, generation))
     } else {
         None
     })
@@ -684,8 +687,16 @@ pub async fn delete_feed(state: State<'_, AppState>, id: i64) -> AppResult<()> {
     // 锁外 best-effort 退订远端。注意：**成功仅意味着请求被后端接受（2xx），不代表远端已删除**，
     // 故此处不清墓碑——墓碑由后续 pull 在「远端列表确认已不含该 URL」时收敛清除。
     // 若按请求成功就清墓碑，2xx 但未生效时会让已删订阅在下次 pull 复活（TASK-055 修复）。
-    if let Some((remote_id, feed_url)) = unsubscribe {
-        let _ = crate::sync::unsubscribe_remote(&state.db, &state.http, remote_id, &feed_url).await;
+    // OPT-006：generation 与 remote_id 同一次持锁内捕获——退订发送前复核代际。
+    if let Some((remote_id, feed_url, generation)) = unsubscribe {
+        let _ = crate::sync::unsubscribe_remote(
+            &state.db,
+            &state.http,
+            remote_id,
+            &feed_url,
+            generation,
+        )
+        .await;
     }
     Ok(())
 }
@@ -730,24 +741,29 @@ pub async fn update_feed(
     };
     // 锁外 best-effort 推送远端（GReader ac=edit；Fever no-op）：
     // 失败仅记日志，本地更新已生效，靠下次 pull 对账/用户重试收敛（A-2）
-    if let Some((remote_id, new_title, dest_label)) = push {
+    // OPT-006：generation 与 remote_id 同一次持锁内捕获——发送前复核代际，
+    // 换号后不得把旧账号的 remote_id 发给新账号。
+    if let Some((remote_id, new_title, dest_label, generation)) = push {
         let _ = crate::sync::edit_remote_subscription(
             &state.db,
             &state.http,
             remote_id,
             new_title.as_deref(),
             dest_label.as_deref(),
+            generation,
         )
         .await;
     }
     Ok(())
 }
 
-/// 远端订阅编辑的推送目标：远端 id、新标题（None 表示不改标题）、目标分类名（None 表示未移动分类）。
-pub type FeedEditPush = (i64, Option<String>, Option<String>);
+/// 远端订阅编辑的推送目标：远端 id、新标题（None 表示不改标题）、目标分类名（None 表示未移动分类）、
+/// 捕获代际（OPT-006：发送前复核，换号后不向新账号发送旧 remote_id）。
+pub type FeedEditPush = (i64, Option<String>, Option<String>, i64);
 
 /// 更新订阅并返回需推送远端的编辑目标（命令与测试共用的真实逻辑，A-2）。
-/// 返回 Some((remote_id, 新标题, 目标分类名))：该订阅已绑定远端且同步已配置。
+/// 返回 Some((remote_id, 新标题, 目标分类名, generation))：该订阅已绑定远端且同步已配置。
+/// generation 与 remote_id 同一次持锁内捕获（OPT-006）。
 ///
 /// OPT-014 R2：可失败的凭据读取前移到 `db::update_feed` 之前并复用结果——
 /// 坏密文时整单失败，不留下「字段已改」却报错的半套状态。
@@ -762,6 +778,7 @@ pub fn record_feed_edit(
     auto_translate: Option<bool>,
 ) -> AppResult<Option<FeedEditPush>> {
     let sync_ok = sync_configured(conn)?;
+    let generation = db::sync_generation(conn)?;
     // 目标分类必须存在（防 UI 传错 id 把源挂飞）
     if let Some(fid) = folder_id {
         if !db::folder_exists(conn, fid)? {
@@ -788,7 +805,12 @@ pub fn record_feed_edit(
         Some(fid) => db::folder_name(conn, fid)?,
         None => None,
     };
-    Ok(Some((rid, title.map(|t| t.to_string()), dest_label)))
+    Ok(Some((
+        rid,
+        title.map(|t| t.to_string()),
+        dest_label,
+        generation,
+    )))
 }
 
 #[tauri::command]

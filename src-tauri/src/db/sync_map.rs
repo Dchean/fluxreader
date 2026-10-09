@@ -181,6 +181,49 @@ pub fn article_dup_entries(conn: &Connection, id: i64) -> AppResult<Vec<i64>> {
         .collect())
 }
 
+/* ============================================================
+同步代际（OPT-006 / F05、F06；内部 settings，无 schema 迁移）
+
+每个数据库独立的 `sync_generation`：账号配置提交（sync_save）与断开
+（sync_disconnect）在同一事务里 +1；同步会话在同一个短 DB 临界区里
+捕获「凭据 + 代际」，此后每个 HTTP→DB 回写边界在**同一次持锁内**复核
+代际——不等 = 账号已变更，旧响应一律不落库（不复活旧绑定/游标/队列）。
+代际缺失/非法按 0 处理（旧库首次升级即 0，第一次账号提交推进到 1）。
+============================================================ */
+
+const SYNC_GENERATION_KEY: &str = "sync_generation";
+
+/// 读当前同步代际（每库独立）。
+///
+/// R2 三态收紧：**只有「键缺失」= 0**（旧库未初始化，第一次账号提交推进到 1）；
+/// 键存在但为空串/空白/非法/负数/溢出一律 `Err`——「有键但不可解析」是状态损坏，
+/// 按 0 会与旧代际 0 的会话假匹配，也绝不能在 `bump` 里被顺手覆写掩盖。
+pub fn sync_generation(conn: &Connection) -> AppResult<i64> {
+    let Some(raw) = get_setting(conn, SYNC_GENERATION_KEY)? else {
+        return Ok(0);
+    };
+    match raw.trim().parse::<i64>() {
+        Ok(v) if v >= 0 => Ok(v),
+        _ => Err(crate::error::AppError::new(
+            "protocol",
+            format!("同步代际损坏（{SYNC_GENERATION_KEY}={raw:?}）：拒绝继续，请排查/修复后重试"),
+        )),
+    }
+}
+
+/// 推进代际并返回新值（调用方须已处于账号提交事务内）。
+/// R2：`checked_add`——到 i64::MAX 时 Err（不饱和复用同一代际），且不改写现场。
+pub fn bump_sync_generation(conn: &Connection) -> AppResult<i64> {
+    let next = sync_generation(conn)?.checked_add(1).ok_or_else(|| {
+        crate::error::AppError::new(
+            "protocol",
+            format!("同步代际溢出（{SYNC_GENERATION_KEY} 已达 i64::MAX）：拒绝继续"),
+        )
+    })?;
+    set_setting(conn, SYNC_GENERATION_KEY, &next.to_string())?;
+    Ok(next)
+}
+
 /// 记录上次同步时间戳（Pull 增量游标，unix 秒）
 pub fn last_sync_ts(conn: &Connection) -> AppResult<i64> {
     let v: Option<String> = conn
@@ -279,6 +322,14 @@ pub fn set_fever_history_pending(conn: &Connection, max_id: i64) -> AppResult<()
 /// 历史已取尽：写 Complete（只有在真正走完空页后允许）。
 pub fn set_fever_history_complete(conn: &Connection) -> AppResult<()> {
     set_setting(conn, FEVER_HISTORY_STATE_KEY, FEVER_HISTORY_STATE_COMPLETE)
+}
+
+/// 重置历史状态为 Unknown（OPT-006：断开/换号同一事务内调用）。
+/// 写空串而非删除行：`fever_history_state` 读侧把空串当 Unknown（见三态语义），
+/// 显式写空让「刚被账号事件重置」与「从未初始化」在同步行为上一致（都启动回溯），
+/// 同时保留一行可审计记录。
+pub fn reset_fever_history_state(conn: &Connection) -> AppResult<()> {
+    set_setting(conn, FEVER_HISTORY_STATE_KEY, "")
 }
 
 /// feeds 的 remote_id 绑定

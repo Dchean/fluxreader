@@ -143,6 +143,18 @@ pub fn remember_base(
     crate::db::set_setting(conn, CACHE_KEY, &serde_json::to_string(&entry)?)
 }
 
+/// 清空解析缓存（OPT-006：账号身份变更/断开时与凭据清理同事务调用）。
+/// 缓存键的命中条件是（协议 + 输入）一致，换号时输入通常已不同而自然失效；
+/// 显式清除覆盖「换回同一地址的另一个账号」与「断开后重连」两类残留，
+/// 让新账号的解析结果必须重新写入（写回前 build_session 会复核代际）。
+pub fn clear_cached_base(conn: &Connection) -> crate::error::AppResult<()> {
+    conn.execute(
+        "DELETE FROM settings WHERE key = ?1",
+        rusqlite::params![CACHE_KEY],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

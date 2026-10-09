@@ -36,11 +36,121 @@ pub struct SyncPayload {
     pub connection_config: Option<ConnectionConfig>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct ConnectionConfig {
     pub sync_protocol: Option<String>,
     pub greader_endpoint: Option<String>,
     pub greader_username: Option<String>,
+}
+
+impl ConnectionConfig {
+    /// 是否含任一非空字段（空建议不落库）。
+    pub fn has_any_value(&self) -> bool {
+        [
+            &self.sync_protocol,
+            &self.greader_endpoint,
+            &self.greader_username,
+        ]
+        .into_iter()
+        .any(|v| v.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+    }
+}
+
+/// 配置导入的待确认连接建议（settings，非敏感：协议/地址/用户名，**无密码**）。
+/// 导入只写这条建议，不改活动凭据/绑定；激活必须经 sync_save 专用保存流程
+/// （重新输入凭据 + 携带本建议的 version 做 CAS），提交成功后同一事务消费本键。
+/// 每次写入（即便同值重复导入）都递增 `version`——旧激活 token 不得误消费新建议。
+// Note: 导入不直接应用连接配置、激活 CAS 与版本语义 — 见 .agents/notes/implemented/architecture/2026-10-08-账号会话与配置应用边界.md
+pub(crate) const PENDING_CONNECTION_KEY: &str = "pending_connection_config";
+
+/// 待确认建议的独立发行序号（settings，非敏感）。
+/// R2 ③：token 由**持久单调 serial** 发行，清空建议（放弃/已消费）**只清内容、
+/// 不重置发行器**——否则「清空后重导」会从 1 重新发行，与历史在途 token 撞车
+/// （ABA：旧 token 命中新建议）。serial 只增不减（i64→u64 checked_add，溢出 Err）。
+pub(crate) const PENDING_SERIAL_KEY: &str = "pending_connection_serial";
+
+/// 待确认连接建议的落库形态：版本号 + 非敏感连接字段。
+/// 旧版本（无 `version` 字段的平铺 JSON）反序列化为 version 0（兼容，不代表"从未导入"）。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PendingSuggestion {
+    /// 每次导入写入递增；激活提交用它与当前值做 CAS。
+    #[serde(default)]
+    pub version: u64,
+    #[serde(flatten)]
+    pub connection: ConnectionConfig,
+}
+
+/// 读待确认连接建议（空串 = 无建议；损坏 JSON → 显式错误，不静默当无）。
+pub fn read_pending_suggestion(
+    conn: &rusqlite::Connection,
+) -> AppResult<Option<PendingSuggestion>> {
+    let Some(raw) = db::get_setting(conn, PENDING_CONNECTION_KEY)? else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str::<PendingSuggestion>(trimmed)
+        .map(Some)
+        .map_err(|e| {
+            AppError::internal(format!(
+                "待确认连接建议损坏（{PENDING_CONNECTION_KEY}）: {e}"
+            ))
+        })
+}
+
+/// 读待确认建议的发行序号（缺失 = 0 从未发行；现存但非法/负/溢出 = Err，
+/// 不按 0 处理——那会让 serial 回退、重新发行历史 token）。
+fn read_pending_serial(conn: &rusqlite::Connection) -> AppResult<u64> {
+    let Some(raw) = db::get_setting(conn, PENDING_SERIAL_KEY)? else {
+        return Ok(0);
+    };
+    raw.trim().parse::<u64>().map_err(|_| {
+        AppError::internal(format!(
+            "待确认建议发行序号损坏（{PENDING_SERIAL_KEY}={raw:?}）：拒绝继续，请排查/修复"
+        ))
+    })
+}
+
+/// 写待确认连接建议（导入事务内调用），返回本次 token（版本号）：
+/// - **同值重复导入 = ignore**：不换 token（内容一致，旧 token 消费的是同一建议）；
+/// - 换值 / 清空后重导 = 由独立单调 serial 发行**新 token**（绝不回退复用，
+///   即使 `pending_connection_config` 被清空过——防 ABA）；
+/// - serial 与内容写由调用方的导入事务捆在一起（`&tx`）：一起提交/一起回滚；
+///   `checked_add` 溢出 Err（不饱和复用），serial 先写、内容后写——中途失败只留
+///   「已用号段」的空洞，不会出现同号两建议。
+pub fn store_pending_connection(
+    conn: &rusqlite::Connection,
+    cc: &ConnectionConfig,
+) -> AppResult<u64> {
+    if let Some(existing) = read_pending_suggestion(conn)? {
+        if existing.connection == *cc {
+            return Ok(existing.version); // 同值 ignore：不刷新 token
+        }
+    }
+    let version = read_pending_serial(conn)?.checked_add(1).ok_or_else(|| {
+        AppError::internal(format!(
+            "待确认建议发行序号溢出（{PENDING_SERIAL_KEY} 已达 u64::MAX）：拒绝继续"
+        ))
+    })?;
+    db::set_setting(conn, PENDING_SERIAL_KEY, &version.to_string())?;
+    let suggestion = PendingSuggestion {
+        version,
+        connection: cc.clone(),
+    };
+    db::set_setting(
+        conn,
+        PENDING_CONNECTION_KEY,
+        &serde_json::to_string(&suggestion)?,
+    )?;
+    Ok(version)
+}
+
+/// 清除待确认连接建议（仅专用激活提交 CAS 命中 / 用户放弃时调用）。
+/// R2 ③：**只清内容，不触碰发行 serial**——历史 token 永不复用（防 ABA）。
+pub fn clear_pending_connection(conn: &rusqlite::Connection) -> AppResult<()> {
+    db::set_setting(conn, PENDING_CONNECTION_KEY, "")
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -286,16 +396,17 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
         merge_app_settings(&tx, remote_settings)?;
     }
 
-    // 非敏感连接配置应用（保留凭据字段不变）
+    // 非敏感连接配置：**不写活动凭据**（OPT-006 / F05——导入新地址不能与旧密码
+    // 拼接）。只落一条带版本号的「待确认连接建议」，由用户在「后端配置」重新输入
+    // 凭据后经 sync_save 专用保存流程激活（携带本版本做 CAS，命中才消费）。
+    let mut pending_connection = None;
     if let Some(cc) = &p.connection_config {
-        if let Some(v) = &cc.sync_protocol {
-            db::set_setting(&tx, "sync_protocol", v)?;
-        }
-        if let Some(v) = &cc.greader_endpoint {
-            db::set_setting(&tx, "greader_endpoint", v)?;
-        }
-        if let Some(v) = &cc.greader_username {
-            db::set_setting(&tx, "greader_username", v)?;
+        if cc.has_any_value() {
+            let version = store_pending_connection(&tx, cc)?;
+            pending_connection = Some(PendingSuggestion {
+                version,
+                connection: cc.clone(),
+            });
         }
     }
 
@@ -304,12 +415,15 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
         imported,
         updated,
         skipped,
+        pending_connection,
     })
 }
 
 /// 应用下载配置的结果计数（TASK-074）：把「已更新」与「已跳过」分开，
 /// 供界面如实展示（此前 skipped 实为已更新数，文案却是「跳过」）。
-#[derive(Debug, Default, Clone, Copy, Serialize)]
+/// OPT-006：`pending_connection` = 本次导入落下的待确认连接建议（含版本号，
+/// 非敏感；需用户重新输入凭据后经专用激活提交才会生效；导入本身不改活动凭据）。
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct ApplyOutcome {
     /// 新建的源数
     pub imported: usize,
@@ -317,6 +431,8 @@ pub struct ApplyOutcome {
     pub updated: usize,
     /// 已存在但内容与远端一致、无需改动的源数
     pub skipped: usize,
+    /// 本次导入的待确认连接建议（若有；带激活 CAS 用的版本号）
+    pub pending_connection: Option<PendingSuggestion>,
 }
 
 /// 合并 app_settings：远端白名单字段覆盖本地，本地特定字段保留。
@@ -627,10 +743,13 @@ pub async fn config_sync_apply(
     let conn = state.db.lock().await;
     let outcome = apply_payload(&conn, &p)?;
     // TASK-074：如实分开 imported / updated / skipped（此前 skipped 是已更新数）
+    // OPT-006：pendingConnection = 待确认连接建议——前端必须展示「需重新输入凭据
+    // 后保存才会激活」，激活走 sync_save 专用流程（导入不改活动凭据）。
     Ok(serde_json::json!({
         "imported": outcome.imported,
         "updated": outcome.updated,
         "skipped": outcome.skipped,
+        "pendingConnection": outcome.pending_connection,
     }))
 }
 

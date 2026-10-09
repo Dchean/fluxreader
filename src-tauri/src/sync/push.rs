@@ -81,11 +81,16 @@ pub(super) fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
 
 /// 锁外：执行推送计划。返回 (成功清除的队列 id, 失败项 (队列 id, 错误摘要))。
 /// 失败项保留在队列（天然重试），由调用方落库标记 attempts/last_error
-/// （TASK-116 四态展示；db::mark_push_failed）——本函数保持无 DB 访问，
+/// （TASK-116 四态展示；db::mark_push_failed）——本函数保持无业务 DB 访问，
 /// 与「HTTP 全在锁外、DB 读写锁内短临界区」的锁纪律一致。
 /// read 广播聚合为单请求：任一 entry 失败则该组全部 queue id 同记一条摘要。
+///
+/// OPT-006：每个新批次（read / unread / 每个 star）发送前在同一次持锁内复核
+/// 会话代际；结果返回后再复核一次才计入 done/failed——账号在批次在途时被切换
+/// 的话，旧批次的确认不得落回本地，后续批次也不再发出（已发出的请求无法撤回）。
 pub(super) async fn exec_push(
-    client: &Backend,
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
     plan: &PushPlan,
     report: &mut SyncReport,
 ) -> (Vec<i64>, Vec<(i64, String)>) {
@@ -102,11 +107,20 @@ pub(super) async fn exec_push(
         if ids.is_empty() {
             continue;
         }
+        if !session_is_current(db, session).await {
+            log::warn!("sync: 推送批次发送前检测到账号代际变更，停止后续推送（{action}）");
+            return (done, failed);
+        }
         let result = if action == "read" {
-            client.mark_read(&ids).await
+            session.client.mark_read(&ids).await
         } else {
-            client.mark_unread(&ids).await
+            session.client.mark_unread(&ids).await
         };
+        // 响应返回后复核：旧账号的确认/失败不得计入本地记账。
+        if !session_is_current(db, session).await {
+            log::warn!("sync: 推送响应返回时账号代际已变更，丢弃该批次确认（{action}）");
+            return (done, failed);
+        }
         match result {
             Ok(()) => {
                 report.pushed_states += ids.len();
@@ -132,11 +146,19 @@ pub(super) async fn exec_push(
     }
     // 收藏：star/unstar（Google Reader 有明确的 add/remove 语义，非 toggle）
     for (qid, remote_id, want_star) in &plan.stars {
+        if !session_is_current(db, session).await {
+            log::warn!("sync: 推送批次发送前检测到账号代际变更，停止后续推送（star）");
+            return (done, failed);
+        }
         let result = if *want_star {
-            client.mark_starred(&[*remote_id]).await
+            session.client.mark_starred(&[*remote_id]).await
         } else {
-            client.mark_unstarred(&[*remote_id]).await
+            session.client.mark_unstarred(&[*remote_id]).await
         };
+        if !session_is_current(db, session).await {
+            log::warn!("sync: 推送响应返回时账号代际已变更，丢弃该批次确认（star）");
+            return (done, failed);
+        }
         match result {
             Ok(()) => {
                 report.pushed_states += 1;
@@ -272,10 +294,20 @@ pub(super) async fn record_push_block(db: &Arc<Mutex<Connection>>, err: &crate::
 }
 
 pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) {
-    let client = match build_client(db, http).await {
+    let session = match build_session(db, http).await {
         Ok(c) => c,
         // 未配置：静默返回（队列保留，连接后补推）——不发事件不报警（A-5 语义不变）
         Err(ClientBuildFailure::NotConfigured) => return,
+        // OPT-006：构建期间账号被切换——丢弃本轮（不记录阻塞标记）
+        Err(ClientBuildFailure::Stale) => {
+            log::info!("sync: 即时推送会话已失效（账号配置变更），丢弃本轮");
+            return;
+        }
+        // R1：坏代际 = 可见协议错误，不记录推送阻塞（与队列无关）
+        Err(ClientBuildFailure::CorruptGeneration(e)) => {
+            log::warn!("sync: 即时推送因同步代际损坏中止: {e}");
+            return;
+        }
         // TASK-124：认证/端点/网络失败——记录阻塞标记 + 发事件（此前在此提前返回，
         // 用户在 UI 上永远看不到「为什么一直不同步」，审计 P2-6②）
         Err(ClientBuildFailure::Failed(e)) => {
@@ -287,6 +319,11 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
     let _guard = PUSH_LOCK.lock().await;
     let (plan, mut report, stale) = {
         let conn = db.lock().await;
+        // OPT-006：计划构建是回写前边界（age_stale_queue 会写库）——代际失配即弃。
+        if session.ensure_current(&conn).is_err() {
+            log::info!("sync: 即时推送计划构建时账号代际已变更，丢弃本轮");
+            return;
+        }
         let mut report = SyncReport::default();
         let stale = age_stale_queue(&conn, &mut report);
         match plan_push(&conn) {
@@ -304,9 +341,15 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
         }
         return;
     }
-    let (done, failed) = exec_push(&client, &plan, &mut report).await;
+    let (done, failed) = exec_push(db, &session, &plan, &mut report).await;
     {
         let conn = db.lock().await;
+        // OPT-006：确认/失败标记/剪除都是回写边界——账号已变更时旧队项已清空，
+        // 不得把旧批次的记账落回（更不得动新账号的队项）。
+        if session.ensure_current(&conn).is_err() {
+            log::info!("sync: 即时推送回写时账号代际已变更，丢弃确认与标记");
+            return;
+        }
         // TASK-116：失败项落库标记（attempts+1 / last_error）——即时推送失败此前
         // 只进日志，用户在 UI 上永远看不到「部分失败」。标记失败不影响队列保留。
         if !failed.is_empty() {

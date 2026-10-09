@@ -93,11 +93,24 @@ export interface RefreshSummary {
   failed_feeds: number;
 }
 
-/** config_sync_apply 的结果计数（TASK-074：updated 与 skipped 语义分离）。 */
+/** config_sync_apply 的结果计数（TASK-074：updated 与 skipped 语义分离）。
+ * OPT-006：pendingConnection = 配置导入留下的待确认连接建议（协议/地址/用户名，
+ * 无密码）——导入不改活动凭据；激活必须在「后端配置」重新输入密码后经
+ * sync_save 保存。 */
 export interface ConfigSyncApplyResult {
   imported: number;
   updated: number;
   skipped: number;
+  pendingConnection?: PendingConnection | null;
+}
+
+/** 待确认连接建议（OPT-006 R1）：仅非敏感字段 + 激活 CAS 版本号；
+ * 激活需重新输入密码，并把 `version` 原样回传给 syncSave（后端独立校验，不信任 UI）。 */
+export interface PendingConnection {
+  version: number;
+  sync_protocol?: string | null;
+  greader_endpoint?: string | null;
+  greader_username?: string | null;
 }
 
 /** extract_fulltext 的结果（TASK-076 / P2-10 后半）：降级不再静默。
@@ -543,11 +556,18 @@ export const api = {
   },
   /** 保存凭据（先测试，失败不保存）。重活（拉订阅/同步状态）由前端随后台阶段执行。
    * 返回 JSON：{ message, firstConnect, unboundLocalFeeds }——首连且本地有
-   * 未绑定源时前端弹「同步本地订阅」确认框 */
-  async syncSave(protocol: string, endpoint: string, username: string, password: string): Promise<SyncSaveResult | null> {
+   * 未绑定源时前端弹「同步本地订阅」确认框。
+   * OPT-006 R1：`activatePendingVersion` 仅在**专用激活**配置导入建议时传入
+   * （值取自 syncPendingConnection().version）；普通保存不传 = 不消费任何建议。
+   * 后端在 HTTP 前与提交事务内两次做版本/身份校验（CAS），不匹配整体拒绝。 */
+  async syncSave(protocol: string, endpoint: string, username: string, password: string, activatePendingVersion?: number): Promise<SyncSaveResult | null> {
     const inv = await getInvoke();
     if (!inv) return null;
-    const raw = (await inv('sync_save', { protocol, endpoint, username, password })) as string;
+    const args: Record<string, unknown> = { protocol, endpoint, username, password };
+    if (activatePendingVersion !== undefined) {
+      args.activatePendingVersion = activatePendingVersion;
+    }
+    const raw = (await inv('sync_save', args)) as string;
     try {
       return JSON.parse(raw) as SyncSaveResult;
     } catch {
@@ -583,6 +603,17 @@ export const api = {
   async syncStatus(): Promise<SyncStatusInfo | null> {
     const inv = await getInvoke();
     return inv ? (await inv('sync_status') as SyncStatusInfo) : null;
+  },
+  /** 配置导入的待确认连接建议（OPT-006）：只读展示；激活走 syncSave
+   * （需重新输入密码），放弃走 syncDismissPendingConnection。浏览器环境返回 null。 */
+  async syncPendingConnection(): Promise<PendingConnection | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('sync_pending_connection') as PendingConnection | null) : null;
+  },
+  /** 放弃待确认连接建议（不触碰活动凭据/绑定）。 */
+  async syncDismissPendingConnection(): Promise<void> {
+    const inv = await getInvoke();
+    if (inv) await inv('sync_dismiss_pending_connection');
   },
   /** 同步队列统计（TASK-116 四态展示：等待/部分失败 + 最近错误摘要）。
    * 浏览器环境返回 null */

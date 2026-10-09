@@ -307,6 +307,9 @@ pub fn run() {
             commands::sync_local_feeds,
             commands::sync_status,
             commands::sync_queue_stats,
+            // 配置导入的待确认连接建议（OPT-006：只读/放弃；激活走 sync_save）
+            commands::sync_pending_connection,
+            commands::sync_dismiss_pending_connection,
             // 缓存清理
             commands::cache_cleanup,
             // 首次关闭询问

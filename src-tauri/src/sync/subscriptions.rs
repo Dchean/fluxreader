@@ -9,20 +9,33 @@ use tokio::sync::Mutex;
 
 /// 推送订阅编辑（改名 / 移动目录）到远端（best-effort，A-2）。
 /// 失败仅记日志：本地已生效，靠下次 pull 对账或用户重试收敛，不阻塞 UI。
+///
+/// OPT-006：`expected_generation` 是命令在**同一持锁内**读远端 id 时捕获的代际
+/// （record_feed_edit 返回）。构建会话期间账号被切换（代际不等）→ 不向新账号
+/// 发送旧账号的 remote_id，直接返回 false。
 pub async fn edit_remote_subscription(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
     remote_id: i64,
     title: Option<&str>,
     dest_label: Option<&str>,
+    expected_generation: i64,
 ) -> bool {
     // TASK-124：build_client Result 化——两类失败（未配置/认证·网络失败）对
     // 订阅编辑推送的既有行为一致（best-effort，失败仅记 false），此处不记录不发事件。
-    let client = match build_client(db, http).await {
+    let session = match build_session(db, http).await {
         Ok(c) => c,
         Err(_) => return false,
     };
-    match client.edit_subscription(remote_id, title, dest_label).await {
+    if session.generation != expected_generation {
+        log::warn!("sync: 订阅编辑的账号代际已变更，取消向新账号发送旧 remote_id");
+        return false;
+    }
+    match session
+        .client
+        .edit_subscription(remote_id, title, dest_label)
+        .await
+    {
         Ok(()) => true,
         Err(e) => {
             log::warn!("sync: 订阅编辑推送失败（本地已生效，待下轮收敛）: {e}");
@@ -41,22 +54,30 @@ pub async fn edit_remote_subscription(
 /// 时清除（见本文件下方 tombstone 收敛段）——那是唯一有证据支撑的清除条件。
 /// 曾经在此处按 `ok` 清墓碑，会导致 2xx 但远端未生效时清掉唯一防线，
 /// 下次 pull 见远端仍列出该订阅便把它**复活**（用户现象：「删掉的订阅自己回来了」）。
+///
+/// OPT-006：同 `edit_remote_subscription`——`expected_generation` 不匹配时不向
+/// 新账号发送旧账号的 remote_id。
 pub async fn unsubscribe_remote(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
     remote_id: i64,
     feed_url: &str,
+    expected_generation: i64,
 ) -> bool {
-    // 保留签名：调用方语义不变；墓碑不再由此处清除
+    // 保留签名语义：调用方语义不变；墓碑不再由此处清除
     let _ = feed_url;
     // TASK-124：build_client Result 化——两类失败（未配置/认证·网络失败）对
     // 退订推送的既有行为一致（best-effort，失败仅记 false），此处不记录不发事件。
-    let client = match build_client(db, http).await {
+    let session = match build_session(db, http).await {
         Ok(c) => c,
         Err(_) => return false,
     };
-    match client {
-        Backend::GReader(c) => c.unsubscribe(remote_id).await.is_ok(),
+    if session.generation != expected_generation {
+        log::warn!("sync: 退订的账号代际已变更，取消向新账号发送旧 remote_id");
+        return false;
+    }
+    match session.client {
+        Backend::GReader(ref c) => c.unsubscribe(remote_id).await.is_ok(),
         Backend::Fever(_) => false,
     }
 }
@@ -64,7 +85,7 @@ pub async fn unsubscribe_remote(
 /// 未连接期间本地新增的订阅推到远端（三段式：锁内读队列 → 锁外 HTTP → 锁内落库）
 pub(super) async fn push_feeds(
     db: &Arc<Mutex<Connection>>,
-    client: &Backend,
+    session: &SyncSession,
     report: &mut SyncReport,
 ) {
     // add_feed 队列动作：锁内读出全部待处理项（feed_url + 目标分类）
@@ -78,6 +99,12 @@ pub(super) async fn push_feeds(
     }
     let items: Vec<PendingFeed> = {
         let conn = db.lock().await;
+        // OPT-006：读队列入 HTTP 前先复核代际——账号已切换时旧队列已随 purge
+        // 清空，本段不应再向新账号发起任何 add_feed。
+        if let Err(e) = session.ensure_current(&conn) {
+            log::warn!("sync: 订阅推送前账号代际已变更，跳过本轮推送: {e}");
+            return;
+        }
         let queued = match db::take_sync_queue(&conn) {
             Ok(v) => v,
             Err(e) => {
@@ -134,13 +161,23 @@ pub(super) async fn push_feeds(
     // 锁外：逐个订阅（quick_add 自动发现 feed，幂等——已存在返回既有 stream_id）
     let mut done: Vec<i64> = Vec::new();
     for it in &items {
-        match client.quick_add(&it.url).await {
+        // OPT-006：每个订阅推送（新批次）前复核代际——账号已切换即停止后续请求。
+        if !session_is_current(db, session).await {
+            log::warn!("sync: 订阅推送期间账号代际已变更，停止后续推送");
+            break;
+        }
+        match session.client.quick_add(&it.url).await {
             Ok(r) => {
                 report.pushed_feeds += 1;
                 done.push(it.queue_id);
                 // 锁内：绑定本地 feed（URL 匹配），若 quick_add 返回了数字 id
                 let bound_remote_id = {
                     let conn = db.lock().await;
+                    // OPT-006：绑定是回写边界——响应在途期间换号时不得写绑定。
+                    if session.ensure_current(&conn).is_err() {
+                        log::warn!("sync: quick_add 响应返回时账号代际已变更，丢弃绑定");
+                        break;
+                    }
                     let mut nid = None;
                     if let Some(local_id) = db::feed_id_by_url(&conn, &it.url).ok().flatten() {
                         if let Some(stream_id) = r.stream_id.as_deref() {
@@ -160,7 +197,11 @@ pub(super) async fn push_feeds(
                 };
                 // A-3：锁外补挂目标分类（best-effort，失败仅记日志——订阅已推送）
                 if let (Some(nid), Some(label)) = (bound_remote_id, it.folder_label.as_deref()) {
-                    if let Err(e) = client.edit_subscription(nid, None, Some(label)).await {
+                    if let Err(e) = session
+                        .client
+                        .edit_subscription(nid, None, Some(label))
+                        .await
+                    {
                         report
                             .errors
                             .push(format!("订阅 {} 挂载分类「{label}」失败: {e}", it.url));
@@ -171,6 +212,12 @@ pub(super) async fn push_feeds(
         }
     }
     let conn = db.lock().await;
+    // OPT-006：剪除确认是回写边界——代际失配时 done 里的旧队项绝不能触碰
+    //（账号已切换，旧队项已随 purge 清空；新账号队项与旧编号无对应关系）。
+    if session.ensure_current(&conn).is_err() {
+        log::warn!("sync: 订阅推送确认时账号代际已变更，跳过剪除与僵尸清理");
+        return;
+    }
     // P3[1]：剪除已推送队项失败此前静默——残留队项会被下一轮重复推送（重复订阅
     // 动作），且无日志可查。改为 warn（失败不中断：下轮会再尝试剪除）。
     if let Err(err) = db::prune_sync(&conn, &done) {
@@ -188,18 +235,26 @@ pub(super) async fn push_feeds(
 /// 拉远端分类+订阅，URL 碰撞合并（三段式：锁外拉取 → 锁内合并）
 pub(super) async fn pull_feeds(
     db: &Arc<Mutex<Connection>>,
-    client: &Backend,
+    session: &SyncSession,
     report: &mut SyncReport,
 ) {
+    // OPT-006：发起拉取前先复核代际——账号已切换时不向新服务端发旧请求。
+    if !session_is_current(db, session).await {
+        report
+            .errors
+            .push("同步会话已失效（账号配置已变更），跳过订阅拉取".into());
+        return;
+    }
     // Google Reader：subscription/list 同时含订阅 + 分类（categories 里的 label/folder）。
     // tag/list 提供独立分类（含空分类）。分类映射用 tag/list 的 label。
-    let (remote_tags, remote_subs) = match tokio::join!(client.tags(), client.subscriptions()) {
-        (Ok(t), Ok(s)) => (t, s),
-        (Err(e), _) | (_, Err(e)) => {
-            report.errors.push(format!("拉取订阅失败: {e}"));
-            return;
-        }
-    };
+    let (remote_tags, remote_subs) =
+        match tokio::join!(session.client.tags(), session.client.subscriptions()) {
+            (Ok(t), Ok(s)) => (t, s),
+            (Err(e), _) | (_, Err(e)) => {
+                report.errors.push(format!("拉取订阅失败: {e}"));
+                return;
+            }
+        };
 
     // 锁内：分类按 label 匹配本地 folder，不存在则创建。
     // Google Reader 分类没有数字 id，用 label 名做键（与 Miniflux 的 category id 不同）。
@@ -207,6 +262,14 @@ pub(super) async fn pull_feeds(
     // 简单起见：按 label 名 upsert 本地 folder，不维护 remote_id（分类碰撞用名字）。
     {
         let conn = db.lock().await;
+        // OPT-006：建分类是回写边界——响应在途期间账号被切换则整段丢弃。
+        if let Err(e) = session.ensure_current(&conn) {
+            log::warn!("sync: 分类导入前账号代际已变更，丢弃本轮响应: {e}");
+            report
+                .errors
+                .push("同步会话已失效（账号配置已在其他窗口变更），本轮订阅响应已丢弃".into());
+            return;
+        }
         // 分类规范化收口在 greader::category_name（OPT-004）：
         // Miniflux folder tag 带 label；FreshRSS folder tag 只有 {id,type:folder}
         // （从 user/.../label/ 后缀取名）；state tag（含 org.freshrss/main）一律不成目录。
@@ -246,6 +309,14 @@ pub(super) async fn pull_feeds(
     // 锁内：订阅按 URL 碰撞合并
     {
         let conn = db.lock().await;
+        // OPT-006：绑定/建源也是回写边界——代际失配整段丢弃（不建源、不绑定）。
+        if let Err(e) = session.ensure_current(&conn) {
+            log::warn!("sync: 订阅导入前账号代际已变更，丢弃本轮响应: {e}");
+            report
+                .errors
+                .push("同步会话已失效（账号配置已在其他窗口变更），本轮订阅响应已丢弃".into());
+            return;
+        }
         // A-1 + OPT-008A R1/R2：本地已删除（墓碑）的订阅不复活；远端列表已不含的
         // 墓碑可清除。匹配/收敛必须跨算法版本兼容（旧算法键在 legacy 命名空间，
         // 见 db::feeds 墓碑段），不能在 subscriptions 里重算或混用算法。
@@ -380,6 +451,12 @@ pub(super) async fn pull_feeds(
     // ============================================================
     {
         let conn = db.lock().await;
+        // OPT-006：远端退订对账的本地删除是回写边界——代际失配时整段跳过
+        //（换号后新账号的订阅列表与本轮旧响应无对应关系，绝不能删）。
+        if let Err(e) = session.ensure_current(&conn) {
+            log::warn!("sync: 退订对账前账号代际已变更，跳过删除段: {e}");
+            return;
+        }
         // 本轮远端订阅的规范化 URL 集合（判据②）
         let remote_norm_set: std::collections::HashSet<String> = remote_subs
             .iter()

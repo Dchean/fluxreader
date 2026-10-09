@@ -14,19 +14,52 @@ use tokio::sync::Mutex;
 /// TASK-124：feeds 阶段的构建失败不记录不发事件（记录/呈现职责在 states 段与
 /// 即时推送，见 push.rs record_push_block）——「未配置」与「失败」对订阅层同步
 /// 的既有行为一致（都是中止），两类失败映射回同一 notConnected 错误。
+/// OPT-006：会话代际失配（账号在构建期间被切换）→ staleSession 错误，不落库。
 pub async fn feeds_phase(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
 ) -> AppResult<SyncReport> {
-    let client = build_client(db, http).await.map_err(|_| {
-        AppError::new(
+    let session = build_session(db, http).await.map_err(|e| match e {
+        ClientBuildFailure::Stale => SyncSession::stale_error(),
+        // R1：坏代际是可见协议错误（原样上报，不伪装 notConnected）
+        ClientBuildFailure::CorruptGeneration(err) => err,
+        _ => AppError::new(
             "notConnected",
             "未配置同步后端（Google Reader / Fever 凭据）",
-        )
+        ),
     })?;
+    feeds_phase_in_session(db, &session).await
+}
+
+/// feeds 阶段的会话版本（sync_local_feeds 用）：要求当前代际等于
+/// `expected_generation`——入队与推送之间账号被切换时不得把本地订阅推给新账号
+/// （首连推送必须经用户确认，见 SyncTab 的 firstConnect 流程）。
+pub async fn feeds_phase_at(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+    expected_generation: i64,
+) -> AppResult<SyncReport> {
+    let session = build_session(db, http).await.map_err(|e| match e {
+        ClientBuildFailure::Stale => SyncSession::stale_error(),
+        ClientBuildFailure::CorruptGeneration(err) => err,
+        _ => AppError::new(
+            "notConnected",
+            "未配置同步后端（Google Reader / Fever 凭据）",
+        ),
+    })?;
+    if session.generation != expected_generation {
+        return Err(SyncSession::stale_error());
+    }
+    feeds_phase_in_session(db, &session).await
+}
+
+async fn feeds_phase_in_session(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+) -> AppResult<SyncReport> {
     let mut report = SyncReport::default();
-    push_feeds(db, &client, &mut report).await;
-    pull_feeds(db, &client, &mut report).await;
+    push_feeds(db, session, &mut report).await;
+    pull_feeds(db, session, &mut report).await;
     Ok(report)
 }
 
@@ -37,7 +70,7 @@ pub async fn states_phase(
     http: &reqwest::Client,
     full: bool,
 ) -> AppResult<SyncReport> {
-    let client = match build_client(db, http).await {
+    let session = match build_session(db, http).await {
         Ok(c) => c,
         Err(ClientBuildFailure::NotConfigured) => {
             return Err(AppError::new(
@@ -45,6 +78,11 @@ pub async fn states_phase(
                 "未配置同步后端（Google Reader / Fever 凭据）",
             ));
         }
+        // OPT-006：构建期间账号被切换——旧会话作废，不记录阻塞标记（那会标记
+        // 到新账号的队列上），直接丢弃本轮。
+        Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
+        // R1：坏代际 = 可见协议错误，不记录推送阻塞（与队列无关）。
+        Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
         // TASK-124（审计 P2-6②）：有凭据但认证/端点/网络失败——记录阻塞标记
         // （attempts/last_error 此前对这类失败永不记录）+ 发 sync-queue-changed。
         // 返回错误保持既有 notConnected 形态：手动同步的「未连接静默跳过」前端
@@ -63,12 +101,18 @@ pub async fn states_phase(
         let _guard = PUSH_LOCK.lock().await;
         let (plan, stale) = {
             let conn = db.lock().await;
+            // OPT-006：计划构建即 HTTP→DB 边界（age_stale_queue 是写）——代际失配
+            // 直接丢弃本轮，不发出任何请求。
+            session.ensure_current(&conn)?;
             let stale = age_stale_queue(&conn, &mut report);
             (plan_push(&conn)?, stale)
         };
-        let (done, failed) = exec_push(&client, &plan, &mut report).await;
+        let (done, failed) = exec_push(db, &session, &plan, &mut report).await;
         {
             let conn = db.lock().await;
+            // OPT-006：推送确认/失败标记/剪除都是回写边界——账号已变更时旧队项
+            // 已随 purge 清空，且新账号可能复用编号语义，一律不得落库。
+            session.ensure_current(&conn)?;
             // TASK-116：失败项落库标记（attempts+1 / last_error，四态展示口径）
             if !failed.is_empty() {
                 if let Err(err) = db::mark_push_failed(&conn, &failed) {
@@ -89,7 +133,7 @@ pub async fn states_phase(
             notify_queue_changed(db).await;
         }
     }
-    pull_entries(db, &client, &mut report, full).await;
+    pull_entries(db, &session, &mut report, full).await?;
     // pull 后补推：pull 会为「本地已读但后端刚抓取成功的文章」绑定
     // remote_id（此前未绑定，push 段跳过）。绑定后再推一次，把它们的
     // pending read/star 推到后端——否则这些文章要等下一轮同步才同步状态，
@@ -98,14 +142,17 @@ pub async fn states_phase(
         let _guard = PUSH_LOCK.lock().await;
         let (plan, stale) = {
             let conn = db.lock().await;
+            session.ensure_current(&conn)?;
             let stale = age_stale_queue(&conn, &mut report);
             (plan_push(&conn)?, stale)
         };
         if !plan.status.is_empty() || !plan.stars.is_empty() {
-            let (done, failed) = exec_push(&client, &plan, &mut report).await;
+            let (done, failed) = exec_push(db, &session, &plan, &mut report).await;
             {
                 let conn = db.lock().await;
                 // TASK-116：失败项落库标记（pull 后补推段，同首次 push 段口径）
+                // OPT-006：同首次 push 段——回写前复核代际。
+                session.ensure_current(&conn)?;
                 if !failed.is_empty() {
                     if let Err(err) = db::mark_push_failed(&conn, &failed) {
                         log::warn!("sync: 推送失败标记落库失败（states 补推）: {err}");

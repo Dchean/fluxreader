@@ -176,8 +176,8 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
         app_lib::commands::record_feed_deletion(&conn, feed_id).expect("record deletion")
     };
     assert!(
-        matches!(unsubscribe, Some((10, _))),
-        "已绑定远端且同步已配置时应返回待退订目标"
+        matches!(unsubscribe, Some((10, _, _))),
+        "已绑定远端且同步已配置时应返回待退订目标（remote_id, url, generation）"
     );
 
     // ① 删除后立即同步：远端订阅列表仍含 feed/10（列表滞后），墓碑必须阻止复活
@@ -200,9 +200,9 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
     // **不再等价于「远端已删除」**，因此此处**不清墓碑**——墓碑改由后续 pull
     // 在「远端列表确认已不含该 URL」时收敛清除（见 ③ 之后的断言）。
     // 修复前此处按 2xx 清墓碑，导致「2xx 但远端未生效」时已删订阅复活。
-    let (remote_id, feed_url) = unsubscribe.expect("unsubscribe target");
+    let (remote_id, feed_url, generation) = unsubscribe.expect("unsubscribe target");
     assert!(
-        sync::unsubscribe_remote(&db, &http, remote_id, &feed_url).await,
+        sync::unsubscribe_remote(&db, &http, remote_id, &feed_url, generation).await,
         "退订请求应被后端接受（mock 回 200）"
     );
     assert!(
@@ -275,7 +275,7 @@ async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
         .expect("feeds phase (bind)");
 
     // 删除（命令层真实逻辑）：写墓碑 + 删除本地 + 返回待退订的远端 id
-    let (remote_id, feed_url) = {
+    let (remote_id, feed_url, generation) = {
         let conn = db.lock().await;
         app_lib::commands::record_feed_deletion(&conn, feed_id)
             .expect("record deletion")
@@ -287,7 +287,7 @@ async fn unsubscribe_2xx_without_removal_keeps_tombstone_and_no_revive() {
         .unsubscribe_returns_2xx_without_removing
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
-    let accepted = sync::unsubscribe_remote(&db, &http, remote_id, &feed_url).await;
+    let accepted = sync::unsubscribe_remote(&db, &http, remote_id, &feed_url, generation).await;
     assert!(accepted, "请求被后端接受（2xx），返回值应为 true");
 
     // ① 墓碑必须仍在：请求成功 ≠ 远端已删除，不能据此清墓碑
@@ -645,12 +645,20 @@ async fn feed_rename_and_move_push_edit_subscription() {
         .expect("record edit")
     };
     assert!(
-        matches!(&push, Some((10, Some(t), None)) if t == "Brand New Title"),
-        "已绑定远端且已配置时应返回 (10, 新标题, None)，实际 {push:?}"
+        matches!(&push, Some((10, Some(t), None, _)) if t == "Brand New Title"),
+        "已绑定远端且已配置时应返回 (10, 新标题, None, generation)，实际 {push:?}"
     );
-    let (rid, title, label) = push.unwrap();
+    let (rid, title, label, generation) = push.unwrap();
     assert!(
-        sync::edit_remote_subscription(&db, &http, rid, title.as_deref(), label.as_deref()).await,
+        sync::edit_remote_subscription(
+            &db,
+            &http,
+            rid,
+            title.as_deref(),
+            label.as_deref(),
+            generation
+        )
+        .await,
         "改名推送应成功"
     );
     let form = mock_greader::last_subscription_edit_form(&server);
@@ -679,13 +687,20 @@ async fn feed_rename_and_move_push_edit_subscription() {
         .expect("record edit (move)")
     };
     assert!(
-        matches!(&push2, Some((10, None, Some(l))) if l == "目标分类"),
-        "移动目录应返回 (10, None, 目标分类名)，实际 {push2:?}"
+        matches!(&push2, Some((10, None, Some(l), _)) if l == "目标分类"),
+        "移动目录应返回 (10, None, 目标分类名, generation)，实际 {push2:?}"
     );
-    let (rid2, title2, label2) = push2.unwrap();
+    let (rid2, title2, label2, generation2) = push2.unwrap();
     assert!(
-        sync::edit_remote_subscription(&db, &http, rid2, title2.as_deref(), label2.as_deref())
-            .await,
+        sync::edit_remote_subscription(
+            &db,
+            &http,
+            rid2,
+            title2.as_deref(),
+            label2.as_deref(),
+            generation2
+        )
+        .await,
         "移动目录推送应成功"
     );
     let form2 = mock_greader::last_subscription_edit_form(&server);

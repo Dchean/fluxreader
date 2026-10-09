@@ -180,7 +180,7 @@ fn payload_excludes_all_credential_fields() {
 }
 
 #[test]
-fn apply_preserves_local_credentials_and_updates_allowed_fields() {
+fn apply_preserves_local_credentials_and_stores_pending_connection_only() {
     let tmp = common::unique_db_path("cfgsync_test_apply_cred");
     let _ = std::fs::remove_file(&tmp);
     let conn = db::open(&tmp).unwrap();
@@ -205,6 +205,10 @@ fn apply_preserves_local_credentials_and_updates_allowed_fields() {
         r#"{"themeMode":"light","autoStart":false,"closePromptShown":true}"#,
     )
     .unwrap();
+    // 活动账号（身份 A）——导入 B 后必须原样
+    db::set_setting(&conn, "sync_protocol", "greader").unwrap();
+    db::set_setting(&conn, "greader_endpoint", "https://active-a.example").unwrap();
+    db::set_setting(&conn, "greader_username", "active-user-a").unwrap();
 
     // 远端 payload 包含不同的非敏感配置和设置，但不包含凭据（模拟白名单构建）
     let payload = SyncPayload {
@@ -215,12 +219,12 @@ fn apply_preserves_local_credentials_and_updates_allowed_fields() {
         app_settings: Some(r#"{"themeMode":"dark","fontSize":20}"#.into()),
         connection_config: Some(app_lib::config_sync::ConnectionConfig {
             sync_protocol: Some("fever".into()),
-            greader_endpoint: Some("https://remote.com".into()),
-            greader_username: Some("remoteuser".into()),
+            greader_endpoint: Some("https://remote-b.example".into()),
+            greader_username: Some("remoteuser-b".into()),
         }),
     };
 
-    apply_payload(&conn, &payload).unwrap();
+    let outcome = apply_payload(&conn, &payload).unwrap();
 
     // 验证：本地凭据保持不变
     let ai_config = db::get_setting(&conn, "ai_config").unwrap().unwrap();
@@ -241,18 +245,40 @@ fn apply_preserves_local_credentials_and_updates_allowed_fields() {
         "本地同步凭据应保持不变"
     );
 
-    // 验证：非敏感连接配置被更新
-    let protocol = db::get_setting(&conn, "sync_protocol").unwrap().unwrap();
-    assert_eq!(protocol, "fever", "sync_protocol 应被远端更新");
-
-    let endpoint = db::get_setting(&conn, "greader_endpoint").unwrap().unwrap();
+    // OPT-006 / F05：活动连接配置**不得**被导入直接覆盖——只落待确认建议。
     assert_eq!(
-        endpoint, "https://remote.com",
-        "greader_endpoint 应被远端更新"
+        db::get_setting(&conn, "sync_protocol").unwrap().unwrap(),
+        "greader",
+        "导入不得改写活动协议（修前被直接覆盖成 fever）"
     );
-
-    let username = db::get_setting(&conn, "greader_username").unwrap().unwrap();
-    assert_eq!(username, "remoteuser", "greader_username 应被远端更新");
+    assert_eq!(
+        db::get_setting(&conn, "greader_endpoint").unwrap().unwrap(),
+        "https://active-a.example",
+        "导入不得改写活动地址（防「新地址 + 旧密码」拼接）"
+    );
+    assert_eq!(
+        db::get_setting(&conn, "greader_username").unwrap().unwrap(),
+        "active-user-a",
+        "导入不得改写活动用户名"
+    );
+    let pending = outcome
+        .pending_connection
+        .expect("导入必须生成待确认连接建议（供 UI 展示并引导重新输入凭据）");
+    assert!(pending.version >= 1, "建议必须带激活 CAS 版本号");
+    assert_eq!(
+        pending.connection.greader_endpoint.as_deref(),
+        Some("https://remote-b.example")
+    );
+    assert_eq!(pending.connection.sync_protocol.as_deref(), Some("fever"));
+    assert_eq!(
+        pending.connection.greader_username.as_deref(),
+        Some("remoteuser-b")
+    );
+    // 待确认建议已实际落库（settings），不是仅返回值
+    let stored = db::get_setting(&conn, "pending_connection_config")
+        .unwrap()
+        .unwrap();
+    assert!(stored.contains("remote-b.example"), "建议应落库待消费");
 
     // 验证：app_settings 白名单字段更新，本地特定字段保留
     let settings = db::get_setting(&conn, "app_settings").unwrap().unwrap();
@@ -265,6 +291,131 @@ fn apply_preserves_local_credentials_and_updates_allowed_fields() {
         "closePromptShown 应保持本地值"
     );
 
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// OPT-006 R2 ③：待确认建议的版本由**独立单调 serial** 发行，清空只清内容、
+/// 不重置发行器（防 ABA）；同值重复导入 = ignore（不换 token），换值/清后重导
+/// = 新 token。缺版本字段的旧形状兼容为版本 0。
+#[test]
+fn pending_suggestion_serial_is_monotonic_and_aba_safe() {
+    fn payload_with(cc: app_lib::config_sync::ConnectionConfig) -> SyncPayload {
+        SyncPayload {
+            schema: 1,
+            uploaded_at: "2026-09-01T00:00:00Z".into(),
+            folders: vec![],
+            feeds: vec![],
+            app_settings: None,
+            connection_config: Some(cc),
+        }
+    }
+    fn stored_version(conn: &Connection) -> u64 {
+        let raw = db::get_setting(conn, "pending_connection_config")
+            .unwrap()
+            .expect("建议应已落库");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        v.get("version")
+            .and_then(|n| n.as_u64())
+            .unwrap_or_else(|| panic!("建议必须带版本号：{raw}"))
+    }
+    fn cc(endpoint: &str, user: &str) -> app_lib::config_sync::ConnectionConfig {
+        app_lib::config_sync::ConnectionConfig {
+            sync_protocol: Some("greader".into()),
+            greader_endpoint: Some(endpoint.into()),
+            greader_username: Some(user.into()),
+        }
+    }
+
+    let tmp = common::unique_db_path("cfgsync_pending_serial");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+
+    apply_payload(&conn, &payload_with(cc("http://b.example", "user-b"))).unwrap();
+    let v1 = stored_version(&conn);
+    assert!(v1 >= 1, "首次导入发行 token 从 1 起");
+
+    // 同值重复导入：ignore——版本不变（不得刷新 token）
+    apply_payload(&conn, &payload_with(cc("http://b.example", "user-b"))).unwrap();
+    assert_eq!(stored_version(&conn), v1, "同值重复导入必须 ignore");
+
+    // 换值：发新 token
+    apply_payload(&conn, &payload_with(cc("http://c.example", "user-c"))).unwrap();
+    let v2 = stored_version(&conn);
+    assert!(v2 > v1, "换值必须发新 token：{v1} -> {v2}");
+
+    // 清空（放弃建议）后重导同值：serial 不重置 → 新 token（ABA 修复核心）
+    app_lib::config_sync::clear_pending_connection(&conn).unwrap();
+    assert!(
+        app_lib::config_sync::read_pending_suggestion(&conn)
+            .unwrap()
+            .is_none(),
+        "清空后无建议"
+    );
+    apply_payload(&conn, &payload_with(cc("http://c.example", "user-c"))).unwrap();
+    let v3 = stored_version(&conn);
+    assert!(
+        v3 > v2,
+        "清空重导必须高于历史发行值（否则旧 token 会 ABA 命中）：{v2} -> {v3}"
+    );
+
+    // 旧平铺形状兼容为版本 0；不同值 store 继续用持久 serial（不倒退）
+    db::set_setting(
+        &conn,
+        "pending_connection_config",
+        r#"{"sync_protocol":"greader","greader_endpoint":"http://legacy.example","greader_username":"u"}"#,
+    )
+    .unwrap();
+    let legacy = app_lib::config_sync::read_pending_suggestion(&conn)
+        .unwrap()
+        .expect("旧形状应可读");
+    assert_eq!(legacy.version, 0, "旧形状 = 版本 0");
+    let next = app_lib::config_sync::store_pending_connection(
+        &conn,
+        &cc("http://next.example", "user-next"),
+    )
+    .unwrap();
+    assert!(next > v3, "持久 serial 不得因旧形状回退：{v3} -> {next}");
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// OPT-006：无连接配置的导入不触碰待确认建议；空建议不落库。
+#[test]
+fn apply_without_connection_config_leaves_pending_untouched() {
+    let tmp = common::unique_db_path("cfgsync_test_pending_none");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    db::set_setting(&conn, "pending_connection_config", "{}").unwrap();
+
+    let payload = SyncPayload {
+        schema: 1,
+        uploaded_at: "2026-09-01T00:00:00Z".into(),
+        folders: vec![],
+        feeds: vec![],
+        app_settings: None,
+        connection_config: None,
+    };
+    let outcome = apply_payload(&conn, &payload).unwrap();
+    assert!(outcome.pending_connection.is_none());
+    assert_eq!(
+        db::get_setting(&conn, "pending_connection_config")
+            .unwrap()
+            .unwrap(),
+        "{}",
+        "无连接配置的导入不得清掉既有建议"
+    );
+
+    // 空字段建议（全是 None/空白）不覆盖既有建议
+    let payload2 = SyncPayload {
+        connection_config: Some(app_lib::config_sync::ConnectionConfig {
+            sync_protocol: Some("  ".into()),
+            greader_endpoint: None,
+            greader_username: Some("".into()),
+        }),
+        ..payload
+    };
+    let outcome2 = apply_payload(&conn, &payload2).unwrap();
+    assert!(outcome2.pending_connection.is_none(), "空建议不落库");
     let _ = std::fs::remove_file(&tmp);
 }
 

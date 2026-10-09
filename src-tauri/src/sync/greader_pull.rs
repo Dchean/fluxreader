@@ -37,14 +37,20 @@ pub fn set_greader_pull_clock_override(ts: Option<i64>) {
 /// 分页三段式：每页「锁外拉取 → 锁内合并」，锁从不跨分页 HTTP await。
 /// `full=true`（手动同步/首连）：先做绑定回填 + 全量状态对账。
 /// `full=false`（后台自动同步）：只拉增量（ot 游标），便宜。
+///
+/// OPT-006：`session` 的代际在每个 HTTP→DB 边界复核（游标读、每页 id 请求、
+/// 每块正文合并、状态对账、游标推进）；代际失配立即以 `staleSession` 终止本轮，
+/// 旧响应不落库、后续请求不再发出。
 pub(super) async fn pull_entries_greader(
     db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
     client: &GReaderClient,
     report: &mut SyncReport,
     full: bool,
-) {
+) -> AppResult<()> {
     let since_s = {
         let conn = db.lock().await;
+        session.ensure_current(&conn)?;
         db::last_sync_ts(&conn).unwrap_or(0)
     };
 
@@ -74,7 +80,13 @@ pub(super) async fn pull_entries_greader(
     // all_item_ids 为空会让下方 chunks(100) 一次都不执行，chunk_failures 保持 0、
     // 游标照常推进，失败窗口被跳过（正是本守卫要关闭的漏文章形态）。故与分块失败同源计数。
     let mut id_failures = 0usize;
+    let mut stale = false;
     loop {
+        // OPT-006：每页 id 请求前复核代际——账号已切换即停止后续请求。
+        if !session_is_current(db, session).await {
+            stale = true;
+            break;
+        }
         let r = match client
             .item_ids(
                 "user/-/state/com.google/reading-list",
@@ -126,6 +138,7 @@ pub(super) async fn pull_entries_greader(
     // 分批拉正文（每次 100 条，避免单请求过大），锁内合并
     let mut maps = {
         let conn = db.lock().await;
+        session.ensure_current(&conn)?;
         db::sync_match_maps(&conn).unwrap_or_else(|e| {
             report.errors.push(format!("同步匹配映射构建失败: {e}"));
             db::SyncMatchMaps {
@@ -143,6 +156,11 @@ pub(super) async fn pull_entries_greader(
     // 增量从新游标起步，这些条目就只能等全量同步补回（「偶发漏文章」的温床）。
     let mut chunk_failures = 0usize;
     for chunk in all_item_ids.chunks(100) {
+        // OPT-006：每块正文请求前复核代际。
+        if !session_is_current(db, session).await {
+            stale = true;
+            break;
+        }
         let entries = match client.item_contents(chunk).await {
             Ok(v) => v,
             Err(e) => {
@@ -157,17 +175,25 @@ pub(super) async fn pull_entries_greader(
         let mut merge_error: Option<(String, AppError)> = None;
         {
             let conn = db.lock().await;
-            for e in &entries {
-                if let Err(err) = merge_pulled_entry(&conn, e, &mut maps, report) {
-                    let url = e
-                        .alternate
-                        .first()
-                        .map(|a| a.href.clone())
-                        .unwrap_or_default();
-                    merge_error = Some((url, err));
-                    break;
+            // OPT-006：合并是回写边界——响应在途期间换号则整块丢弃。
+            if session.ensure_current(&conn).is_err() {
+                stale = true;
+            } else {
+                for e in &entries {
+                    if let Err(err) = merge_pulled_entry(&conn, e, &mut maps, report) {
+                        let url = e
+                            .alternate
+                            .first()
+                            .map(|a| a.href.clone())
+                            .unwrap_or_default();
+                        merge_error = Some((url, err));
+                        break;
+                    }
                 }
             }
+        }
+        if stale {
+            break;
         }
         if let Some((url, err)) = merge_error {
             chunk_failures += 1;
@@ -176,11 +202,18 @@ pub(super) async fn pull_entries_greader(
                 .push(format!("合并条目 {url} 失败（本块中止，游标保留）: {err}"));
         }
     }
+    if stale {
+        return Err(SyncSession::stale_error());
+    }
 
     // 轻量同步（full=false）状态对账：增量 item_contents 只覆盖「变更过的」条目，
     // 漏掉「手机很早前标读 / 收藏、changed_at 早于游标」的旧变更。这里用 read /
     // starred 权威 id 集合补齐（与 Fever 的 unread/saved 对账对称）。
     if !full {
+        // OPT-006：对账集合请求前复核代际。
+        if !session_is_current(db, session).await {
+            return Err(SyncSession::stale_error());
+        }
         // 拉取失败 ≠ 空集合（C-1）：任一权威集合拉取失败即跳过本轮对账，
         // 避免把网络/服务端错误当成"远端什么都没有"，静默清空本地收藏
         match tokio::join!(
@@ -189,6 +222,8 @@ pub(super) async fn pull_entries_greader(
         ) {
             (Ok(read_ids), Ok(starred_ids)) => {
                 let conn = db.lock().await;
+                // OPT-006：对账是回写边界——代际失配丢弃整份权威集合。
+                session.ensure_current(&conn)?;
                 // 审计 P2-8③：对账内的 DB 写失败必须可见——记入 report.errors
                 // （不再被 unwrap_or(0) 伪装成 0 行变化）。已写入行不回滚，
                 // 剩余行下一轮同集合对账幂等重放。
@@ -214,9 +249,11 @@ pub(super) async fn pull_entries_greader(
     // 下一轮重拉同一窗口补回（合并幂等，不会产生重复条目）。
     // TASK-097：推进值写「id 列举开始前取的起点候选」（论证见函数头部），
     // 不再取结束墙钟；failures > 0 时候选被丢弃、游标保持旧值，语义不变。
+    // OPT-006：推进前在同一次持锁内复核代际——旧会话不得把游标推过账号边界。
     let failures = id_failures + chunk_failures;
     if failures == 0 {
         let conn = db.lock().await;
+        session.ensure_current(&conn)?;
         let _ = db::set_last_sync_ts(&conn, cursor_candidate);
         drop(conn);
     } else {
@@ -224,6 +261,7 @@ pub(super) async fn pull_entries_greader(
             "greader pull: {id_failures} id-listing failure(s) + {chunk_failures} chunk(s) failed; keeping last_sync_ts（下一轮重拉同一窗口）"
         );
     }
+    Ok(())
 }
 
 /// 分页拉取某 Google Reader stream 的全部条目 id（read / starred 权威集合）。
