@@ -95,3 +95,14 @@ R3已交刚成功交付的原会话（OPT-008B-phase1-R3-20261012）：逐条目
 实现者success停写，报告991/991前端、22/22组件与Rust门禁通过；同一独立reviewer正在复审（OPT-008B-phase1-R3-review-20261012）。主控新增真实store探针controller-apply-old-bootstrap-r3.mjs：bootstrap旧false读取挂起→真实runAppSettingsApplyBoundary内模拟配置持久化true并readBackAppliedAppSettings接受→旧bootstrap放行；输出afterApply=true、persistedDedup=true、afterOldBootstrap=false，退出1。应用边界未使旧读取凭据过期，仍有UI/确认态回退风险；未验收，不把执行者“可接受残余”视作主控已同意。待独立结果汇总后定向返工。
 
 R3独立结论为PASS，但主控不采纳最终验收：上述应用后旧读取反例实际失败，review漏审应用代次只观察本地updateSettings写序号。另不接受“IPC默认FIFO”替代读取前pending意图保护的明确契约。R4已交原实现会话（OPT-008B-phase1-R4-20261012），限定设置读取/应用代次与已有字段凭据的最小硬化；补独立提交/回包时序、应用期间多点击及回读失败后的全量载荷覆盖反例。后两类目前是待验证风险，不冒称已实跑。Rust若无改动复用R3相同版本门禁，前端改动须按最终版本验证；身份/Fever已核销路径不重做审计。
+
+## R4复审与R5（2026-10-12）
+
+R4终态success并停写，最终前端1016/1016、组件22/22，lint/build及Rust门禁通过；主控核对前端最终日志与失败修正记录，Note37篇格式/链接检查通过。原应用后旧bootstrap回退已关闭，设置读取前沿与文章在途字段保护已补回归；不能把这些历史失败继续列为当前未修。
+
+独立R4初审NEEDS_CHANGES（2项P2）；主控用真实store与独立持久态确认两项，并推翻另一项“不可能插入”的判断。三条探针均退出1，位于tmp/optimization-20261008/OPT-008B：
+- controller-remote-base-r4.mjs：导入行高200、旧本地180；窗口内A字号成功、B行高失败，A用B.prev把远端行高写回180，最终UI/DB都错误地180。相等不等于正确。
+- controller-postgate-unconfirmed-r4.mjs：导入去重true但回读失败；门关闭后仅改字号，非门控分支未校准就把未触及的去重覆盖false。
+- controller-postgate-click-r4.mjs：窗口内A/B排队，关门后A仍等网络响应；此时C点击去重true，A结束后B构造载荷偷带C，C随后失败但库中已true。初审只考虑单笔门释放的连续微任务，遗漏前一笔网络等待，主控不采纳其不可达结论。
+
+R5交原实现会话（OPT-008B-phase1-R5-20261012），要求在既有设置协调范围内收敛“确认基线+每笔patch+待写意图”，不继续给门内/门外路径叠补丁；同键先后意图、失败回滚、校准中新点击、全量载荷保护须一起保持。初审建议简单优先confirmed也不能直接照做，否则会把A18/B16中的A错误降回基线16。既有身份/Fever/Rust子路径不重审，无改动Rust复用同版本门禁；前端最终版本重新验收。未提交产品、未开始正文实体第二阶段，主卡仍12完成/6未完成。
