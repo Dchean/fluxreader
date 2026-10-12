@@ -107,6 +107,14 @@ R4终态success并停写，最终前端1016/1016、组件22/22，lint/build及Ru
 
 R5交原实现会话（OPT-008B-phase1-R5-20261012），要求在既有设置协调范围内收敛“确认基线+每笔patch+待写意图”，不继续给门内/门外路径叠补丁；同键先后意图、失败回滚、校准中新点击、全量载荷保护须一起保持。初审建议简单优先confirmed也不能直接照做，否则会把A18/B16中的A错误降回基线16。既有身份/Fever/Rust子路径不重审，无改动Rust复用同版本门禁；前端最终版本重新验收。未提交产品、未开始正文实体第二阶段，主卡仍12完成/6未完成。
 
+## R5复审与R6（2026-10-12）
+
+R5统一设置载荷为“确认基线+本笔patch”，待写意图投影UI，已关闭R4三条主控反例；报告1039/1039前端、22/22组件、lint/build与8探针通过，Rust无改动复用R4。Note37篇格式/链接检查通过。独立R5复审NEEDS_CHANGES（1项P2），主控实跑并确认：空基线同键18/20两笔均失败，UI最终18而不是16（controller-empty-base-r5.mjs，退出1），后一笔prev继承前一笔失败乐观值。
+
+主控另发现R5新单飞读取凭据不绑定原请求写前沿：已有确认基线false→旧bootstrap读取挂起→写true成功→第二次bootstrap加入同一旧读取→放行后DBtrue/UIfalse（controller-shared-old-read-r5.mjs，退出1）。这是实际store导出契约反例；生产当前主要是App启动调用，未冒称真实界面操作已复现双bootstrap。初审仅核查base未知时的校准join就概括单飞正确，范围不足；R6须绑定原请求写/应用代次或取消不安全共享，不能为旧测试只有一个release而更改产品语义。
+
+R6已交原会话（OPT-008B-phase1-R6-20261012），保留base+patch方向，最小修复空/partial基线失败下限和共享读取新鲜性。相关反例进入正式回归，原8探针保持，前端最终门禁；Rust若未变不重复执行。尚未提交产品或开始第二阶段。
+
 ## 第二阶段接线与验收边界（尚未派发）
 
 主控按当前源码确认的入口：migrations.rs现行版本21，FTS外部内容表和触发器依赖articles正文列；articles.rs同时负责列表摘要、LIKE/FTS搜索、入库、AI落盘和缓存清理；sync_map.rs仍有正文/全文/AI输入读取；commands/settings.rs负责异步全文提取；commands/ai.rs在网络生成后按article_id写产物。前端bodyCache以条目ID存实体，正文失效部分依赖snippet变化，不能仅加JOIN就声称修订已打通。
