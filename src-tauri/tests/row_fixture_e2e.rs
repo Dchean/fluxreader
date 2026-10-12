@@ -25,6 +25,9 @@ fn row_serialization_matches_fixture() {
         layout: "article".into(),
         auto_summary: true,
         auto_translate: false,
+        // OPT-011：两个 mode 取不同值——fixture 比对能抓住「接错数据源/漏映射」
+        summary_mode: "inherit".into(),
+        translate_mode: "off".into(),
         fetch_failed: false,
         fetch_error: None,
         last_fetched_at: None,

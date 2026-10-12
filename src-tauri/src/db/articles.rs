@@ -660,12 +660,82 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
 /// 丢弃时写 deduped_urls 墓碑：记录保留了哪篇；墓碑在（开关未关闭过）时，
 /// 同 URL 的后续重放（guid 稳定 → 每轮刷新都会再来）持续被拦，
 /// 直到用户关闭智能去重（清墓碑，重复文章按用户意图重新入库）。
+///
+/// R3：本函数是 [`upsert_article_with_feed_tracked`] 的旧形状包装（只关心
+/// id/是否新插入的调用方保持零改动）；需要「既有行是否实际改过可见字段」的
+/// 调用方（sync 合并 / F11 数据变化标记）用 tracked 版本。
 pub fn upsert_article_with_feed(
     conn: &Connection,
     feed_id: i64,
     a: &NewArticle,
     dedup: bool,
 ) -> AppResult<(i64, bool)> {
+    let o = upsert_article_with_feed_tracked(conn, feed_id, a, dedup)?;
+    Ok((o.id, o.inserted))
+}
+
+/// `upsert_article_with_feed` 的富结果（R3）：在 id/inserted 之外，报告既有行
+/// UPDATE 是否**实际**改变了可见字段值（title/url/author/summary/正文/body/
+/// 封面/enclosure/duration/published）。判定用 UPDATE 前后值比对（空串与 NULL
+/// 归一为同值）——SQLite 的 `changes()` 对同值 UPDATE 也计命中行，不能当变化。
+#[derive(Debug, PartialEq, Eq)]
+pub struct ArticleUpsert {
+    pub id: i64,
+    pub inserted: bool,
+    pub content_changed: bool,
+}
+
+/// 既有行可见字段快照（R3 前后比对用；空串与 NULL 归一——两者无可见差异）。
+#[derive(Debug, PartialEq, Eq)]
+struct VisibleFields {
+    url: Option<String>,
+    title: Option<String>,
+    author: Option<String>,
+    summary: Option<String>,
+    content_html: Option<String>,
+    body_text: Option<String>,
+    image_url: Option<String>,
+    enclosure_url: Option<String>,
+    enclosure_mime: Option<String>,
+    duration_sec: Option<i64>,
+    published_at: Option<String>,
+}
+
+/// 读既有行的可见字段快照；读取失败透传 Err（不得吞成「无变化」）。
+/// 文本字段经 `null_if_empty` 归一（空串 ≡ NULL，见 db.rs）。
+fn visible_fields(conn: &Connection, id: i64) -> AppResult<VisibleFields> {
+    let f = conn.query_row(
+        "SELECT url, title, author, summary, content_html, body_text, image_url,
+                enclosure_url, enclosure_mime, duration_sec, published_at
+         FROM articles WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok(VisibleFields {
+                url: null_if_empty(r.get(0)?),
+                title: null_if_empty(r.get(1)?),
+                author: null_if_empty(r.get(2)?),
+                summary: null_if_empty(r.get(3)?),
+                content_html: null_if_empty(r.get(4)?),
+                body_text: null_if_empty(r.get(5)?),
+                image_url: null_if_empty(r.get(6)?),
+                enclosure_url: null_if_empty(r.get(7)?),
+                enclosure_mime: null_if_empty(r.get(8)?),
+                duration_sec: r.get(9)?,
+                published_at: null_if_empty(r.get(10)?),
+            })
+        },
+    )?;
+    Ok(f)
+}
+
+/// R3 核心：返回富结果的 upsert。匹配逻辑与旧入口完全同源（本函数即原实现，
+/// 旧入口为薄包装）——禁止在别处再写第二份 URL/guid 匹配。
+pub fn upsert_article_with_feed_tracked(
+    conn: &Connection,
+    feed_id: i64,
+    a: &NewArticle,
+    dedup: bool,
+) -> AppResult<ArticleUpsert> {
     // 智能去重：规范化 URL 已存在于任一源 → 跳过（返回非新增，计数不膨胀）
     if dedup {
         if let Some(url) = a.url.as_deref().filter(|u| !u.is_empty()) {
@@ -677,7 +747,11 @@ pub fn upsert_article_with_feed(
                     "INSERT OR REPLACE INTO deduped_urls (url, kept_aid) VALUES (?1, ?2)",
                     params![norm, kept_aid],
                 );
-                return Ok((0, false));
+                return Ok(ArticleUpsert {
+                    id: 0,
+                    inserted: false,
+                    content_changed: false,
+                });
             }
             // 无现存文章但墓碑在（保留的那篇已被用户删掉）：同 URL 仍拦。
             // 否则删掉一篇 → 下轮刷新同 URL 立即回来，删除形同虚设。
@@ -687,7 +761,11 @@ pub fn upsert_article_with_feed(
                 |r| r.get(0),
             )?;
             if tombstoned {
-                return Ok((0, false));
+                return Ok(ArticleUpsert {
+                    id: 0,
+                    inserted: false,
+                    content_changed: false,
+                });
             }
         }
     }
@@ -699,6 +777,9 @@ pub fn upsert_article_with_feed(
         )
         .optional()?;
     if let Some((id, ft_extracted)) = existing {
+        // R3：既有行先抓可见字段快照，UPDATE 后复读比对（同值 replay →
+        // content_changed=false；不能拿 changes() 冒充变化）。
+        let before = visible_fields(conn, id)?;
         // Note: 已提取全文（fulltext_extracted=1）的条目不得被 RSS 内容覆盖正文（优先保持提取全文，避免「标志=已提取、正文=摘要」的不一致） — 见 .agents/notes/implemented/architecture/2026-09-19-后端模块拆分与并发纪律.md
         // 正文冻结、纯文本按保留的 HTML 重算（R1：修复旧版「只写 HTML+flag」留下的
         // body_text 旧 RSS 错配）；guid 与规范化 URL 两条命中路径同口径（下方 by_url 分支）。
@@ -735,7 +816,11 @@ pub fn upsert_article_with_feed(
                 ft_body
             ],
         )?;
-        Ok((id, false))
+        Ok(ArticleUpsert {
+            id,
+            inserted: false,
+            content_changed: before != visible_fields(conn, id)?,
+        })
     } else if let Some(url) = a.url.as_deref().filter(|u| !u.is_empty()) {
         // 同 feed 内按规范化 URL 兜底去重：direct 抓取与 Miniflux 同步的 guid 不同
         // （direct 用原始 guid，Miniflux 用 `miniflux-{id}`），但 URL 相同是同一篇。
@@ -750,6 +835,8 @@ pub fn upsert_article_with_feed(
             )
             .optional()?;
         if let Some((id, ft_extracted)) = by_url {
+            // R3：同 guid 分支——前后快照比对给出 content_changed。
+            let before = visible_fields(conn, id)?;
             // OPT-003 全文保护：同 [`upsert_article_with_feed`] 的 guid 命中分支
             // （guid 变化但规范化 URL 相同的重放），已提取全文的条目同样冻结正文、
             // 并按保留的 HTML 重算纯文本（R1 历史错配修复），只用 RSS 更新元数据。
@@ -782,12 +869,26 @@ pub fn upsert_article_with_feed(
                     ft_body,
                 ],
             )?;
-            Ok((id, false))
+            Ok(ArticleUpsert {
+                id,
+                inserted: false,
+                content_changed: before != visible_fields(conn, id)?,
+            })
         } else {
-            insert_new_article(conn, feed_id, a)
+            let (id, inserted) = insert_new_article(conn, feed_id, a)?;
+            Ok(ArticleUpsert {
+                id,
+                inserted,
+                content_changed: false,
+            })
         }
     } else {
-        insert_new_article(conn, feed_id, a)
+        let (id, inserted) = insert_new_article(conn, feed_id, a)?;
+        Ok(ArticleUpsert {
+            id,
+            inserted,
+            content_changed: false,
+        })
     }
 }
 
@@ -845,7 +946,56 @@ fn insert_new_article(conn: &Connection, feed_id: i64, a: &NewArticle) -> AppRes
     Ok((conn.last_insert_rowid(), true))
 }
 
+/* ============================================================
+OPT-007（F09/F10）：本地读/藏状态写入的**字段版本**内核
+
+pull 合并以「pull 起点版本快照 + 当前 DB 版本 + 该字段 pending」为守卫决定
+是否接受远端字段（sync/conflict_policy.rs 的 field_accepts_remote）。要让
+该守卫成立，本地每一次读/藏写入都必须在**同一 SQL 事务**里把对应版本 +1：
+
+- 单条 / 批量 / mark_all_read 三组入口都经这里递增（checked 增长：到
+  i64::MAX 时 Err，绝不饱和——饱和会让「版本相等」把本地新写入误判成
+  「拉取期间无变化」，旧网络快照即可回滚用户刚下的意图）；
+- 远端合并**不经过**本内核：写侧用 db/sync_map.rs 的带版本条件更新
+  （WHERE 版本 = 快照）二次校验，版本不符即 0 行跳过该字段；
+- read / star 两列独立递增：读的本地写入不会压住无冲突的收藏合并，反之亦然。
+============================================================ */
+
+/// 把指定版本列 +1（调用方须已处于包含状态写入的事务/语句内）。
+/// 文章不存在时保持旧语义（纯 SET 0 行、不报错）——不在这里引入新的错误面。
+fn bump_article_version(conn: &Connection, id: i64, column: &str) -> AppResult<()> {
+    debug_assert!(column == "read_version" || column == "star_version");
+    let current: Option<i64> = conn
+        .query_row(
+            &format!("SELECT {column} FROM articles WHERE id = ?1"),
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(current) = current else {
+        return Ok(());
+    };
+    let next = current.checked_add(1).ok_or_else(|| {
+        crate::error::AppError::new(
+            "protocol",
+            format!("{column} 溢出（文章 id={id} 已达 i64::MAX）：拒绝本地状态写入"),
+        )
+    })?;
+    let n = conn.execute(
+        &format!("UPDATE articles SET {column} = ?1 WHERE id = ?2 AND {column} = ?3"),
+        params![next, id, current],
+    )?;
+    if n == 0 {
+        return Err(crate::error::AppError::new(
+            "db",
+            format!("{column} 递增失败（文章 id={id} 版本在写入窗口内变化）"),
+        ));
+    }
+    Ok(())
+}
+
 pub fn set_read(conn: &Connection, id: i64, read: bool) -> AppResult<()> {
+    bump_article_version(conn, id, "read_version")?;
     conn.execute(
         "UPDATE articles SET is_read = ?1 WHERE id = ?2",
         params![read as i64, id],
@@ -872,6 +1022,7 @@ pub fn set_article_ai_fields(
 }
 
 pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {
+    bump_article_version(conn, id, "star_version")?;
     conn.execute(
         "UPDATE articles SET is_starred = ?1 WHERE id = ?2",
         params![starred as i64, id],
@@ -1063,7 +1214,9 @@ pub(crate) fn scope_clause(
     (sql, binds)
 }
 
-/// 全部已读：作用于当前筛选范围（feed/folder/all），与前端「全部已读」按钮语义一致
+/// 全部已读：作用于当前筛选范围（feed/folder/all），与前端「全部已读」按钮语义一致。
+/// OPT-007：同步递增 read_version（该路径同样是「本地标读」入口，字段版本必须
+/// 覆盖全部本地写入；checked 增长——范围内任一行已达 i64::MAX 时整条拒绝）。
 pub fn mark_all_read(
     conn: &Connection,
     feed_id: Option<i64>,
@@ -1073,24 +1226,51 @@ pub fn mark_all_read(
     layout: Option<&str>,
 ) -> AppResult<usize> {
     let (clause, binds) = scope_clause(feed_id, folder_id, starred_only, since_ms, layout);
-    let sql = format!("UPDATE articles SET is_read = 1 WHERE is_read = 0{clause}");
     let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+    ensure_read_version_can_grow(conn, &clause, refs.as_slice())?;
+    let sql = format!(
+        "UPDATE articles SET is_read = 1, read_version = read_version + 1 WHERE is_read = 0{clause}"
+    );
     let n = conn.execute(&sql, refs.as_slice())?;
     Ok(n)
+}
+
+/// OPT-007：范围内是否出现 read_version 饱和行（= i64::MAX 且将被本次标读）。
+/// 饱和即 Err——拒绝饱和复用同一版本（否则「版本相等」判定失效；见 bump 内核注释）。
+/// 检查与 UPDATE 在调用方同一事务内（mark_all_read_with_enqueue）或在单条语句
+/// 之前（mark_all_read），单连接互斥下无并发缝隙。
+fn ensure_read_version_can_grow(
+    conn: &Connection,
+    clause: &str,
+    refs: &[&dyn rusqlite::ToSql],
+) -> AppResult<()> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM articles WHERE is_read = 0{clause} AND read_version = {max}",
+        max = i64::MAX
+    );
+    let saturated: i64 = conn.query_row(&sql, refs, |r| r.get(0))?;
+    if saturated > 0 {
+        return Err(crate::error::AppError::new(
+            "protocol",
+            format!("read_version 溢出（{saturated} 行已达 i64::MAX）：拒绝标读，版本不得饱和复用"),
+        ));
+    }
+    Ok(())
 }
 
 /// 「全部已读」集合化（REQ-108 M-9）：一个事务内完成 入队 + 标读，语句数常数化。
 ///
 /// 旧实现 = 1 SELECT（list_unread_ids_scoped 收集未读 id）+ 1 UPDATE + 每条 id
 /// 一次 enqueue_sync（DELETE + INSERT）= 2N+2 条语句，且命令全程持库锁。
-/// 这里固定 3 条语句：
+/// 这里固定 4 条语句（OPT-007 起补一条 read_version 饱和预检）：
 ///   ① 批量删除范围内条目的 read/unread 旧队项（与逐条 enqueue 的「同向互斥
 ///      覆盖」语义一致：每个 id 至多保留一条最新 read 队项）；
 ///   ② `INSERT ... SELECT` 为范围内全部未读条目入 `read` 队项（feed_url/payload
 ///      为 NULL，与 `enqueue_sync(conn, Some(id), None, "read", None)` 逐列相同）；
-///   ③ 单条 UPDATE 标读，返回受影响行数。
-/// ①② 在 ③ 之前求值 `is_read = 0`，入队集合与旧实现「标读前收集」的集合逐行
-/// 相同（F8，由等价性测试锁定）；三条语句同事务——旧实现逐条提交，中途失败会
+///   ③ read_version 饱和预检（范围内有行到 i64::MAX 即整条拒绝，见 bump 内核）；
+///   ④ 单条 UPDATE 标读并同语句递增 read_version，返回受影响行数。
+/// ①② 在 ④ 之前求值 `is_read = 0`，入队集合与旧实现「标读前收集」的集合逐行
+/// 相同（F8，由等价性测试锁定）；语句全在同一事务——旧实现逐条提交，中途失败会
 /// 留下半批已标读，事务化只会更保守（不多不少）。
 /// created_at 用语句级 `datetime('now')`（旧逐条可能跨秒；老化/补推只做时间序
 /// 比较，语义不受影响）。语句数不随 N 增长的断言见 auth_probe 探针测试。
@@ -1116,7 +1296,11 @@ pub fn mark_all_read_with_enqueue(
            FROM articles WHERE is_read = 0{clause}"
     );
     tx.execute(&ins, refs.as_slice())?;
-    let upd = format!("UPDATE articles SET is_read = 1 WHERE is_read = 0{clause}");
+    // OPT-007：标读与 read_version 递增同语句同事务——「全部已读」也是本地
+    // 标读入口，字段版本必须与状态写入原子一致（checked 增长，饱和拒绝）。
+    ensure_read_version_can_grow(&tx, &clause, refs.as_slice())?;
+    let upd =
+        format!("UPDATE articles SET is_read = 1, read_version = read_version + 1 WHERE is_read = 0{clause}");
     let n = tx.execute(&upd, refs.as_slice())?;
     tx.commit()?;
     Ok(n)
@@ -2507,5 +2691,196 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
+    }
+
+    /* ============================================================
+    OPT-007（F09/F10）：字段版本递增覆盖全部本地入口 + checked 增长
+    ============================================================ */
+
+    fn versions(conn: &Connection, id: i64) -> (i64, i64) {
+        conn.query_row(
+            "SELECT read_version, star_version FROM articles WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// 判别力：set_read/set_starred（单条内核）、set_read_bulk_with_enqueue
+    /// （批量）、mark_all_read_with_enqueue / mark_all_read（全部已读）任一漏
+    /// 递增时对应断言红；read 写入误递增 star_version（或反向）时隔离断言红。
+    #[test]
+    fn opt007_local_status_paths_bump_field_versions_in_isolation() {
+        let conn = conn();
+        let fid = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://f.example/rss",
+            None,
+            "f",
+            None,
+            fid,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        let a1 = upsert_article_with_feed(&conn, feed, &na("v1", None), false)
+            .unwrap()
+            .0;
+        let a2 = upsert_article_with_feed(&conn, feed, &na("v2", None), false)
+            .unwrap()
+            .0;
+        let a3 = upsert_article_with_feed(&conn, feed, &na("v3", None), false)
+            .unwrap()
+            .0;
+        assert_eq!(versions(&conn, a1), (0, 0), "新入库版本为 0");
+
+        // 单条读：只动 read_version；单条藏：只动 star_version
+        set_read(&conn, a1, true).unwrap();
+        assert_eq!(versions(&conn, a1), (1, 0), "set_read 递增 read_version");
+        set_starred(&conn, a1, true).unwrap();
+        assert_eq!(
+            versions(&conn, a1),
+            (1, 1),
+            "set_starred 递增 star_version（独立列）"
+        );
+
+        // 复合入口（with_enqueue）逐条递增，且与入队同事务
+        set_read_with_enqueue(&conn, a1, false).unwrap();
+        assert_eq!(versions(&conn, a1).0, 2, "set_read_with_enqueue 递增");
+
+        // 批量入口逐 id 递增
+        set_read_bulk_with_enqueue(&conn, &[a2, a3], true).unwrap();
+        assert_eq!(versions(&conn, a2).0, 1, "批量标读递增 a2");
+        assert_eq!(versions(&conn, a3).0, 1, "批量标读递增 a3");
+
+        // mark_all_read_with_enqueue：范围内未读行逐行递增
+        let n = mark_all_read_with_enqueue(&conn, None, None, false, None, None).unwrap();
+        assert!(n >= 1, "范围标读至少命中一行");
+        assert_eq!(
+            versions(&conn, a1),
+            (3, 1),
+            "全部已读递增 read_version 且不触碰 star_version"
+        );
+
+        // 对照入口 mark_all_read 同口径
+        set_read(&conn, a1, false).unwrap();
+        let before = versions(&conn, a1).0;
+        mark_all_read(&conn, None, None, false, None, None).unwrap();
+        assert_eq!(
+            versions(&conn, a1).0,
+            before + 1,
+            "mark_all_read 参照入口同样递增（两入口口径一致）"
+        );
+    }
+
+    /// checked 增长：版本达 i64::MAX 时本地写入必须 Err（拒绝饱和复用同一版本
+    /// ——饱和会让远端合并的「版本相等」判定把新本地意图误判成无变化）。
+    /// 单条与批量（mark_all_read*）两条内核都锁死。
+    #[test]
+    fn opt007_version_growth_is_checked_not_saturating() {
+        let conn = conn();
+        let fid = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://f.example/rss",
+            None,
+            "f",
+            None,
+            fid,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        let a = upsert_article_with_feed(&conn, feed, &na("max", None), false)
+            .unwrap()
+            .0;
+        conn.execute(
+            "UPDATE articles SET read_version = ?1 WHERE id = ?2",
+            params![i64::MAX, a],
+        )
+        .unwrap();
+
+        // 单条：Err，且现场不被改写（版本仍是 MAX、is_read 不落地）
+        let err = set_read(&conn, a, true).expect_err("read_version 饱和必须拒绝");
+        assert_eq!(err.code, "protocol");
+        assert_eq!(versions(&conn, a).0, i64::MAX, "失败不得改写版本现场");
+        let is_read: i64 = conn
+            .query_row("SELECT is_read FROM articles WHERE id = ?1", [a], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(is_read, 0, "饱和拒绝时状态写入不得落地");
+
+        // 全部已读：整条 Err（事务内先预检），不产生半批
+        let err = mark_all_read_with_enqueue(&conn, None, None, false, None, None)
+            .expect_err("范围内饱和行必须让整条标读失败");
+        assert_eq!(err.code, "protocol");
+        let err2 = mark_all_read(&conn, None, None, false, None, None).expect_err("对照入口同口径");
+        assert_eq!(err2.code, "protocol");
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(queued, 0, "饱和失败时入队同样回滚（无半批）");
+    }
+
+    /// R3：tracked upsert 的 `content_changed` 只报**实际前后变化**——
+    /// 新插入靠 inserted 表态（content_changed=false）；同值 replay / 空串
+    /// 归一（NULL ≡ ''）不得误报；真实字段变化必须报。旧形状入口保持兼容。
+    #[test]
+    fn tracked_upsert_reports_only_real_content_changes() {
+        let conn = conn();
+        let fid = create_folder(&conn, "R3", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://r3.example/rss",
+            None,
+            "r3",
+            None,
+            fid,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        let a = na("r3-tracked", Some("2026-01-01T00:00:00+00:00".into()));
+        let o1 = upsert_article_with_feed_tracked(&conn, feed, &a, false).unwrap();
+        assert!(o1.inserted, "首次必须 report inserted");
+        assert!(!o1.content_changed, "新插入的内容变化由 inserted 承担");
+
+        // 同值 replay：不报变化
+        let o2 = upsert_article_with_feed_tracked(&conn, feed, &a, false).unwrap();
+        assert_eq!(o2.id, o1.id, "guid 命中同一行");
+        assert!(
+            !o2.inserted && !o2.content_changed,
+            "同值 replay 不得报变化"
+        );
+
+        // 真实变化：标题改写
+        let mut b = na("r3-tracked", Some("2026-01-01T00:00:00+00:00".into()));
+        b.title = "changed title".into();
+        let o3 = upsert_article_with_feed_tracked(&conn, feed, &b, false).unwrap();
+        assert!(
+            !o3.inserted && o3.content_changed,
+            "标题真实改变必须报 content_changed"
+        );
+
+        // 空串 ≡ NULL：author 由 NULL 写成 ''（COALESCE('',...) 命中）→ 归一后无可见差异
+        let mut c = na("r3-tracked", Some("2026-01-01T00:00:00+00:00".into()));
+        c.title = "changed title".into();
+        c.author = Some(String::new());
+        let o4 = upsert_article_with_feed_tracked(&conn, feed, &c, false).unwrap();
+        assert!(
+            !o4.content_changed,
+            "空串与 NULL 归一为同值，不构成可见变化"
+        );
+
+        // 旧形状包装（id/inserted）保持兼容
+        let (id, inserted) = upsert_article_with_feed(&conn, feed, &b, false).unwrap();
+        assert_eq!(id, o1.id);
+        assert!(!inserted);
     }
 }

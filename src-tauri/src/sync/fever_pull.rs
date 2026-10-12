@@ -43,8 +43,9 @@ enum PageCursorWrite {
 /// 同一短事务里全有全无；离开函数后该页 `ItemContent`（含 HTML）即释放——
 /// 不累计全历史（内存只留 `seen` 的 id 集合与当前页）。
 ///
-/// 任何行/绑定/状态/回填/游标写失败 → 回滚事务，并回滚内存统计与 `seen`
-/// （maps 由调用方按回滚后的 DB 重建——未提交绑定不得当事实）。
+/// 任何行/绑定/状态/回填/游标写失败 → 回滚事务，并回滚内存统计（含 R3 数据
+/// 变化标记）与 `seen`（maps 由调用方按回滚后的 DB 重建——未提交绑定不得
+/// 当事实）。
 fn merge_page_tx(
     conn: &mut Connection,
     page: Vec<ItemContent>,
@@ -53,7 +54,11 @@ fn merge_page_tx(
     report: &mut SyncReport,
     cursor_write: Option<PageCursorWrite>,
 ) -> AppResult<()> {
-    let stats = (report.pulled_entries, report.merged_states);
+    let stats = (
+        report.pulled_entries,
+        report.merged_states,
+        report.entries_data_changed,
+    );
     let mut added: Vec<i64> = Vec::new();
     let tx = conn.transaction()?;
     let mut failure: Option<AppError> = None;
@@ -97,6 +102,7 @@ fn merge_page_tx(
         }
         report.pulled_entries = stats.0;
         report.merged_states = stats.1;
+        report.entries_data_changed = stats.2;
         return Err(e);
     }
     match tx.commit() {
@@ -108,6 +114,7 @@ fn merge_page_tx(
             }
             report.pulled_entries = stats.0;
             report.merged_states = stats.1;
+            report.entries_data_changed = stats.2;
             Err(AppError::from(e))
         }
     }
@@ -123,7 +130,10 @@ fn rebuild_maps_after_failure(
     report: &mut SyncReport,
 ) -> AppResult<()> {
     match db::sync_match_maps(conn) {
-        Ok(m) => {
+        Ok(mut m) => {
+            // OPT-007：重建按 DB 现状，但字段版本快照保持轮内原值——与 GR 失败
+            // 重建同口径（见 db/sync_map.rs 的 keep_field_versions_from）。
+            m.keep_field_versions_from(maps);
             *maps = m;
             Ok(())
         }
@@ -215,6 +225,30 @@ pub(super) async fn pull_entries_fever(
         return Err(SyncSession::stale_error());
     }
 
+    // 匹配映射一次构建；逐页合并时增量更新（新绑定/新条目立即可被后续页匹配）。
+    // R3-P1：读取失败**立即终止本轮**——绝不退化成空映射继续（空 feed 映射会让
+    // merge「合法跳过」却照常确认 since/checkpoint）。Pending 与旧游标保留，
+    // 不执行后续 history/with_ids/完成时间，等待下一次同步重试。
+    //
+    // OPT-007 字段版本快照：必须在**第一个 HTTP 请求（下方权威集合）之前**抓取
+    // （任务卡「版号快照在HTTP前抓」）。unread/saved 集合在 ⑤ 对账时才使用；若
+    // 快照晚于集合请求（原实现位置），用户在集合在途期间标读/收藏并即时推送
+    // 成功（防抖 ~1s，队列已清）后，晚抓的快照会把新版本当成起点版本，⑤ 的
+    // 旧集合即可回滚用户意图——只看当前 pending 的实现同样失守（队列已清）。
+    let mut maps = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        match db::sync_match_maps(&conn) {
+            Ok(m) => m,
+            Err(e) => {
+                report.errors.push(format!(
+                    "同步匹配映射构建失败，本轮不拉取/不合并（Pending 与游标保留）: {e}"
+                ));
+                return Ok(());
+            }
+        }
+    };
+
     // ① 权威状态集合（全量 id）：未读 + 收藏。
     // 拉取失败 ≠ 空集合（C-1）：失败即跳过本轮对账（下方 ⑤ 用 reconcile_ok 守卫），
     // 避免静默把本地全部标为已读 / 清空收藏——Fever 对账为远端权威双向语义，误判代价更高。
@@ -233,23 +267,7 @@ pub(super) async fn pull_entries_fever(
         }
     };
 
-    // 匹配映射一次构建；逐页合并时增量更新（新绑定/新条目立即可被后续页匹配）。
-    // R3-P1：读取失败**立即终止本轮**——绝不退化成空映射继续（空 feed 映射会让
-    // merge「合法跳过」却照常确认 since/checkpoint）。Pending 与旧游标保留，
-    // 不执行后续 history/with_ids/完成时间，等待下一次同步重试。
-    let mut maps = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        match db::sync_match_maps(&conn) {
-            Ok(m) => m,
-            Err(e) => {
-                report.errors.push(format!(
-                    "同步匹配映射构建失败，本轮不拉取/不合并（Pending 与游标保留）: {e}"
-                ));
-                return Ok(());
-            }
-        }
-    };
+    // 匹配映射已在权威集合请求前构建（字段版本快照必须早于任何 HTTP，见上方）。
 
     let mut seen: HashSet<i64> = HashSet::new();
     // TASK-068：抓取失败计数——时间戳游标仅在无失败时推进（对称 greader 守卫）。
@@ -560,6 +578,9 @@ pub(super) async fn pull_entries_fever(
 /// 审计 P2-8③：返回 `AppResult<()>`——行级写失败经 `?` 中断本轮对账并向上
 /// 传播（调用方记入 `report.errors`），不再像旧的 `unwrap_or(0)` 那样把 DB
 /// 写失败伪装成「0 行变化」。已写入行不回滚；剩余行由下一轮同集合对账重放。
+///
+/// OPT-007 字段版本守卫：与 GR 对账同构——pull 起点版本快照 + 当前 DB 版本 +
+/// 该字段 pending，**按字段**独立判定（本地只改读时收藏照常收敛；反之亦然）。
 fn reconcile_fever_state(
     conn: &Connection,
     unread: &[i64],
@@ -573,27 +594,35 @@ fn reconcile_fever_state(
 
     for (remote_id, aid) in &maps.mf_id_to_article {
         let aid = *aid;
-        // TASK-112 政策（conflict_policy 头注「共享守卫」）：pending 保护——
-        // 本地有未推送变更的条目跳过远端快照，交给 push 段队列，不被回滚。
-        if maps.pending_ids.contains(&aid) {
-            continue;
-        }
+        // OPT-007：字段版本快照（pull 起点；缺失按 (0,0) 保守处理）——
+        // 任务卡负例①② 的 Fever 侧对称锁定。
+        let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
         // TASK-112 政策（FEVER_READ_DIRECTION = UnreadSetBidirectional 双向权威）：
         // unread 集合权威——命中 → 本地未读（可复活未读）；未命中 → 本地已读。
-        report.merged_states += conflict_policy::apply_read_by_policy(
+        // R3：apply_* 返回**值条件写命中行数**（值实际改变）——据此置数据变化
+        // 标记；merged_states 仍按旧口径累计（对外统计兼容）。
+        let read_rows = conflict_policy::apply_read_by_policy(
             conn,
             conflict_policy::FEVER_READ_DIRECTION,
             !unread_set.contains(remote_id),
             aid,
+            snap_read,
+            maps.pending_read_ids.contains(&aid),
         )?;
         // TASK-112 政策（FEVER_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
         // 命中 → 收藏；未命中 → 取消收藏。
-        report.merged_states += conflict_policy::apply_star_by_policy(
+        let star_rows = conflict_policy::apply_star_by_policy(
             conn,
             conflict_policy::FEVER_STAR_DIRECTION,
             starred_set.contains(remote_id),
             aid,
+            snap_star,
+            maps.pending_star_ids.contains(&aid),
         )?;
+        if read_rows > 0 || star_rows > 0 {
+            report.entries_data_changed = true;
+        }
+        report.merged_states += read_rows + star_rows;
     }
     Ok(())
 }
@@ -662,7 +691,10 @@ mod tests {
         aid
     }
 
-    /// 单条映射的 SyncMatchMaps（reconcile 只消费 mf_id_to_article 与 pending_ids）。
+    /// 单条映射的 SyncMatchMaps（reconcile 消费 mf_id_to_article / 字段 pending /
+    /// 字段版本快照）。`pending=true` 表示**读/藏两字段都有**未推送意图（逐字段
+    /// 判定的旧口径对照）；版本快照取 (0,0) = 与夹具行（raw SQL 写入、版本 0）
+    /// 相等，即「拉取期间无本地写入」的默认起点。
     fn maps_for(remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
         db::SyncMatchMaps {
             url_to_id: Default::default(),
@@ -673,6 +705,17 @@ mod tests {
             } else {
                 Default::default()
             },
+            pending_read_ids: if pending {
+                std::iter::once(aid).collect()
+            } else {
+                Default::default()
+            },
+            pending_star_ids: if pending {
+                std::iter::once(aid).collect()
+            } else {
+                Default::default()
+            },
+            id_to_versions: std::iter::once((aid, (0, 0))).collect(),
             feed_mf_to_id: Default::default(),
             mf_id_to_article: std::iter::once((remote_id, aid)).collect(),
         }
@@ -791,5 +834,36 @@ mod tests {
             "pending 保护：本地收藏不得被远端未收藏快照清除"
         );
         assert_eq!(report.merged_states, 0, "pending 命中行不产生任何写入");
+    }
+
+    /// OPT-007 字段版本守卫（Fever 对账侧，任务卡负例①②的对称锁定）：
+    /// 拉取期间本地标读（read_version 0→1、队列已清无 pending）→ 远端 unread
+    /// 集合不得把已读翻回；同文章收藏字段版本未变 → saved 命中照常收藏
+    /// （字段独立，不被读字段的守卫牵连）。判别力：aid 级 pending 集合的旧形态
+    /// 在版本/队列双空时无法保护（已读被翻回）；字段版本守卫被移除时同样红。
+    #[test]
+    fn fever_reconcile_field_version_guard_protects_local_write_and_keeps_other_field() {
+        let conn = conn();
+        let aid = seed_bound(&conn, 206);
+        db::set_read(&conn, aid, true).unwrap(); // 本地标读：read_version 0→1
+        let mut maps = maps_for(206, aid, false);
+        maps.id_to_versions.insert(aid, (0, 0)); // pull 起点快照早于该本地写入
+
+        let mut report = SyncReport::default();
+        // 远端快照：unread 命中（会翻回未读）+ saved 命中（应收藏）。
+        reconcile_fever_state(&conn, &[206], &[206], &maps, &mut report).unwrap();
+
+        assert!(
+            is_read(&conn, aid),
+            "拉取期间本地标读（版本已变）：远端 unread 集合不得翻回未读"
+        );
+        assert!(
+            is_starred(&conn, aid),
+            "收藏字段无本地写入：saved 命中照常收藏（字段独立）"
+        );
+        assert_eq!(
+            report.merged_states, 1,
+            "仅收藏一次写入——读被字段版本守卫跳过，不牵连收藏"
+        );
     }
 }

@@ -35,12 +35,43 @@ pub struct SyncMatchMaps {
     /// article id → (文章 remote_id, 所属 feed 的 remote_id)
     /// （同源判定的输入：生产据此推导 same_feed_trusted）
     pub id_to_mf_pair: HashMap<i64, (Option<i64>, Option<i64>)>,
-    /// 有「已入队未推送」读/收藏变更的 article id 集合
+    /// 有「已入队未推送」读/收藏变更的 article id 集合（并集；字段粒度见下两列）
     pub pending_ids: HashSet<i64>,
+    /// 有「已入队未推送」read/unread 变更的 article id 集合（字段粒度）
+    pub pending_read_ids: HashSet<i64>,
+    /// 有「已入队未推送」star/unstar 变更的 article id 集合（字段粒度）
+    pub pending_star_ids: HashSet<i64>,
+    /// article id → (read_version, star_version)：**pull 起点**的字段版本快照。
+    /// OPT-007 字段版本持久守卫：远端合并按「快照版本 == 当前 DB 版本 且 该字段
+    /// 无 pending」接受该字段；不符则跳过（本地在拉取期间写过的字段不得被旧
+    /// 网络快照回滚）。快照取整个 pull 共用的这一份；轮内才见到的 id（新入库，
+    /// 或快照之后外部写入的行）由合并路径按 (0,0) 保守补记**且不覆盖已有值**
+    /// （见 sync/entries.rs 的 upsert_remote_entry）。
+    pub id_to_versions: HashMap<i64, (i64, i64)>,
     /// feed remote_id → feed id
     pub feed_mf_to_id: HashMap<i64, i64>,
     /// article remote_id → article id
     pub mf_id_to_article: HashMap<i64, i64>,
+}
+
+impl SyncMatchMaps {
+    /// OPT-007：失败后按 DB 现状**重建映射**时，字段版本快照保持本轮原值
+    /// （粘滞，不回刷现场版本）。
+    ///
+    /// 为什么不能直接用重建时的当前版本：快照的语义是「pull 起点（或轮内新入库
+    /// 时刻）的版本」。合并中途失败后继续本轮的后续分块/对账时，若把快照刷新为
+    /// 重建时点版本，则「pull 起点 ~ 重建点」之间发生的本地写入（即使随后即时
+    /// 推送成功、队列已清）会被新快照当成「起点就是这样」，后续旧远端状态即可
+    /// 把用户意图回滚——与「快照必须在任何 HTTP 之前抓」是同一不变量的两个面。
+    ///
+    /// 重建才见到的 id（本轮新入库或外部写入在快照之后）：按 (0,0) 保守处理——
+    /// 与 upsert_remote_entry 的补记口径一致；该行若确有本地写入（版本 > 0）
+    /// 会被守卫拒绝，宁可跳过远端合并也不冒回滚风险。
+    pub fn keep_field_versions_from(&mut self, previous: &SyncMatchMaps) {
+        for (aid, version) in self.id_to_versions.iter_mut() {
+            *version = previous.id_to_versions.get(aid).copied().unwrap_or((0, 0));
+        }
+    }
 }
 
 /// 一次批量查询构建 Pull 合并所需的全部匹配映射。
@@ -65,9 +96,11 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     let mut id_to_mf_pair: HashMap<i64, (Option<i64>, Option<i64>)> = HashMap::new();
     // 6. mf_id → article id（仅已绑定的）
     let mut mf_id_to_article: HashMap<i64, i64> = HashMap::new();
+    // 7. id → (read_version, star_version)：pull 起点字段版本快照（OPT-007）
+    let mut id_to_versions: HashMap<i64, (i64, i64)> = HashMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT a.id, a.remote_id, f.remote_id FROM articles a
+            "SELECT a.id, a.remote_id, f.remote_id, a.read_version, a.star_version FROM articles a
              JOIN feeds f ON f.id = a.feed_id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -75,27 +108,41 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
                 r.get::<_, i64>(0)?,
                 r.get::<_, Option<i64>>(1)?,
                 r.get::<_, Option<i64>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
             ))
         })?;
         for row in rows {
-            let (id, mf_id, feed_mf_id) = row?;
+            let (id, mf_id, feed_mf_id, read_version, star_version) = row?;
             id_to_mf_id.insert(id, mf_id);
             id_to_mf_pair.insert(id, (mf_id, feed_mf_id));
+            id_to_versions.insert(id, (read_version, star_version));
             if let Some(mf) = mf_id {
                 mf_id_to_article.insert(mf, id);
             }
         }
     }
 
-    // 4. pending sync 的 article id 集合
+    // 4. pending sync 的 article id 集合（并集 + 字段粒度）
     let mut pending_ids = HashSet::new();
+    let mut pending_read_ids = HashSet::new();
+    let mut pending_star_ids = HashSet::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT article_id FROM sync_queue WHERE action IN ('read','unread','star','unstar')",
+            "SELECT DISTINCT article_id, action FROM sync_queue WHERE action IN ('read','unread','star','unstar')",
         )?;
-        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
         for row in rows {
-            pending_ids.insert(row?);
+            let (aid, action) = row?;
+            pending_ids.insert(aid);
+            match action.as_str() {
+                "read" | "unread" => {
+                    pending_read_ids.insert(aid);
+                }
+                _ => {
+                    pending_star_ids.insert(aid);
+                }
+            }
         }
     }
 
@@ -116,18 +163,27 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
         id_to_mf_id,
         id_to_mf_pair,
         pending_ids,
+        pending_read_ids,
+        pending_star_ids,
+        id_to_versions,
         feed_mf_to_id,
         mf_id_to_article,
     })
 }
 
-/// 绑定 Miniflux entry id（Pull 时首次见到该条目）
-pub fn set_article_remote_id(conn: &Connection, id: i64, remote_id: i64) -> AppResult<()> {
-    conn.execute(
-        "UPDATE articles SET remote_id = ?1 WHERE id = ?2",
+/// 绑定 Miniflux entry id（Pull 时首次见到该条目）。
+///
+/// R3：返回**绑定值是否实际变化**（既有行由 NULL/旧 id 变为新 id → true；
+/// 已等于目标值/行不存在 → false，且不再产生同值 UPDATE）。数据变化标记消费
+/// 该返回值——绑定变化是可见数据变化的一部分（旧调用方丢弃 bool 即可）。
+/// 写入本身即判定：WHERE 的 `remote_id IS NOT ?1` 只在值确实不同时命中一行
+/// （同时覆盖 NULL 与旧值两种形态），无需额外读一次现值。
+pub fn set_article_remote_id(conn: &Connection, id: i64, remote_id: i64) -> AppResult<bool> {
+    let n = conn.execute(
+        "UPDATE articles SET remote_id = ?1 WHERE id = ?2 AND (remote_id IS NOT ?1)",
         params![remote_id, id],
     )?;
-    Ok(())
+    Ok(n > 0)
 }
 
 /// 记账服务端同文副本 entry（跨源同 URL 的另一条 entry）。
@@ -622,7 +678,13 @@ pub fn update_feed_title_if_empty(
     Ok(())
 }
 
-/// 同步专用：无条件更新文章已读和收藏状态（Pull 段状态合并用）
+/// 同步专用：无条件更新文章已读和收藏状态。
+///
+/// R2 起**只允许用于同一 DB 临界区内刚插入的新行**（`upsert_remote_entry` 的
+/// inserted=true 分支：行不存在→插入→写状态之间不可能有本地写入，快照 (0,0)
+/// 与行初值恒等，整值写不覆盖任何用户意图）。既有行的 pull 状态合并必须逐字段
+/// 过版本/pending 守卫，走下方带版本条件的原语——直接对既有行调用本函数会
+/// 回滚拉取期间用户的标读/收藏。
 pub fn sync_set_article_status(
     conn: &Connection,
     article_id: i64,
@@ -672,11 +734,161 @@ pub fn sync_mark_unstarred_if_starred(conn: &Connection, article_id: i64) -> App
     Ok(n)
 }
 
+/* ============================================================
+OPT-007（F09/F10）：远端合并的字段版本守卫原语
+
+与上方无版本条件版本的分工：上方是「不带版本」的通用条件写——其中
+`sync_set_article_status` 仍有一处生产消费（R2 起仅限同一 DB 临界区内刚插入
+的新行：快照 (0,0) 与行初值恒等，见 sync/entries.rs 的 upsert_remote_entry），
+其余四个为测试与历史消费点。**既有行**的 pull 状态合并（轻量对账 +
+merge_remote_status + upsert 命中既有行）唯一生产写路径是下方带版本条件的
+原语——每条 WHERE 都额外要求该字段版本仍等于 pull 起点快照。版本不符 =
+本地在拉取期间写过该字段（本地写入在同一事务里递增版本），本次远端快照对
+该字段作废（0 行）；**远端合并不递增版本**（版本只记录本地意图，远端确认
+不产生新意图）。
+============================================================ */
+
+/// 读文章的 (read_version, star_version)；行不存在返回 None。
+pub fn article_field_versions(conn: &Connection, article_id: i64) -> AppResult<Option<(i64, i64)>> {
+    let v = conn
+        .query_row(
+            "SELECT read_version, star_version FROM articles WHERE id = ?1",
+            params![article_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(v)
+}
+
+/// 远端合并（带版本条件）：未读 → 已读；本地版本已变 → 0 行。
+pub fn sync_mark_read_if_unread_at_version(
+    conn: &Connection,
+    article_id: i64,
+    read_version: i64,
+) -> AppResult<usize> {
+    let n = conn.execute(
+        "UPDATE articles SET is_read = 1 WHERE id = ?1 AND is_read = 0 AND read_version = ?2",
+        params![article_id, read_version],
+    )?;
+    Ok(n)
+}
+
+/// 远端合并（带版本条件）：已读 → 未读；本地版本已变 → 0 行。
+pub fn sync_mark_unread_if_read_at_version(
+    conn: &Connection,
+    article_id: i64,
+    read_version: i64,
+) -> AppResult<usize> {
+    let n = conn.execute(
+        "UPDATE articles SET is_read = 0 WHERE id = ?1 AND is_read = 1 AND read_version = ?2",
+        params![article_id, read_version],
+    )?;
+    Ok(n)
+}
+
+/// 远端合并（带版本条件）：未收藏 → 收藏；本地版本已变 → 0 行。
+pub fn sync_mark_starred_if_unstarred_at_version(
+    conn: &Connection,
+    article_id: i64,
+    star_version: i64,
+) -> AppResult<usize> {
+    let n = conn.execute(
+        "UPDATE articles SET is_starred = 1 WHERE id = ?1 AND is_starred = 0 AND star_version = ?2",
+        params![article_id, star_version],
+    )?;
+    Ok(n)
+}
+
+/// 远端合并（带版本条件）：已收藏 → 取消收藏；本地版本已变 → 0 行。
+pub fn sync_mark_unstarred_if_starred_at_version(
+    conn: &Connection,
+    article_id: i64,
+    star_version: i64,
+) -> AppResult<usize> {
+    let n = conn.execute(
+        "UPDATE articles SET is_starred = 0 WHERE id = ?1 AND is_starred = 1 AND star_version = ?2",
+        params![article_id, star_version],
+    )?;
+    Ok(n)
+}
+
+/// 远端合并（带版本条件）：整值写读状态（GR 条目的 read=false 侧与
+/// accept-unread 路径）；本地版本已变 → 0 行。
+pub fn sync_set_read_at_version(
+    conn: &Connection,
+    article_id: i64,
+    read: bool,
+    read_version: i64,
+) -> AppResult<usize> {
+    let n = conn.execute(
+        "UPDATE articles SET is_read = ?1 WHERE id = ?2 AND read_version = ?3",
+        params![read as i64, article_id, read_version],
+    )?;
+    Ok(n)
+}
+
+/// 远端合并（带版本条件）：整值写收藏状态；本地版本已变 → 0 行。
+pub fn sync_set_star_at_version(
+    conn: &Connection,
+    article_id: i64,
+    starred: bool,
+    star_version: i64,
+) -> AppResult<usize> {
+    let n = conn.execute(
+        "UPDATE articles SET is_starred = ?1 WHERE id = ?2 AND star_version = ?3",
+        params![starred as i64, article_id, star_version],
+    )?;
+    Ok(n)
+}
+
+/// 回填涉及的可见字段快照（R3 前后比对；文本经 `null_if_empty` 归一）。
+#[derive(Debug, PartialEq, Eq)]
+struct FillVisible {
+    content_html: Option<String>,
+    body_text: Option<String>,
+    image_url: Option<String>,
+    enclosure_url: Option<String>,
+    enclosure_mime: Option<String>,
+}
+
+/// 读一行的 (url, 回填可见字段)；行不存在返回 None。读取失败透传 Err。
+fn fill_visible(
+    conn: &Connection,
+    article_id: i64,
+) -> AppResult<Option<(Option<String>, FillVisible)>> {
+    let row = conn
+        .query_row(
+            "SELECT url, content_html, body_text, image_url, enclosure_url, enclosure_mime
+             FROM articles WHERE id = ?1",
+            params![article_id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    FillVisible {
+                        content_html: null_if_empty(r.get(1)?),
+                        body_text: null_if_empty(r.get(2)?),
+                        image_url: null_if_empty(r.get(3)?),
+                        enclosure_url: null_if_empty(r.get(4)?),
+                        enclosure_mime: null_if_empty(r.get(5)?),
+                    },
+                ))
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
 /// 同步专用：回填文章内容字段（本地为空才补，Pull 段正文兜底用）。
 ///
 /// F07：补全的 HTML 必须与首次入库走同一净化边界——此前原始 HTML 直接补入空
 /// content_html，绕过了 sanitizer 并一路抵达 dangerouslySetInnerHTML。
 /// 基址取该文章的 url（与抓取入库的相对链接重写口径一致）；DB 错误正常上抛。
+///
+/// R3：返回**本次调用是否实际改变了数据**（UPDATE 前后可见字段比对，空串≡NULL；
+/// 同值重复回填/本地已有内容不覆盖 → false）。消费点以此驱动数据变化标记，
+/// 不允许拿 UPDATE 的 changes()（同值也计命中行）冒充变化；读取失败 `?` 上抛，
+/// 不得吞成「无变化」。行在调用时已被删除（拉取期间的删除竞态）→ Ok(false)：
+/// 没有可回填的对象，不是读取失败。
 // Note: 可渲染 HTML 的净化口径只有 sanitize()（写入口与读边界共用） — 见 .agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md
 pub fn backfill_article_content(
     conn: &Connection,
@@ -686,15 +898,10 @@ pub fn backfill_article_content(
     image_url: Option<&str>,
     enclosure_url: Option<&str>,
     enclosure_mime: Option<&str>,
-) -> AppResult<()> {
-    let base: Option<String> = conn
-        .query_row(
-            "SELECT url FROM articles WHERE id = ?1",
-            params![article_id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
+) -> AppResult<bool> {
+    let Some((base, before)) = fill_visible(conn, article_id)? else {
+        return Ok(false);
+    };
     let safe_html = crate::sanitize::sanitize(content_html, base.as_deref());
     conn.execute(
         "UPDATE articles SET
@@ -713,7 +920,16 @@ pub fn backfill_article_content(
             article_id
         ],
     )?;
-    Ok(())
+    // 复读比对（同一连接内行必然还在；读取失败按 R3 纪律上抛 Err）。
+    let after = fill_visible(conn, article_id)?
+        .map(|(_, f)| f)
+        .ok_or_else(|| {
+            crate::error::AppError::new(
+                "db",
+                format!("回填后复读失败：文章 {article_id} 不存在（并发删除？）"),
+            )
+        })?;
+    Ok(before != after)
 }
 
 /* ============================================================
@@ -783,5 +999,154 @@ mod fever_checkpoint_tests {
                 "{bad:?} 的错误应带键名：{err}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod r3_change_detection_tests {
+    use super::*;
+    use crate::db::{create_folder, insert_feed, upsert_article_with_feed, NewArticle, MIGRATIONS};
+
+    fn seed(conn: &Connection, guid: &str) -> i64 {
+        let folder = create_folder(conn, &format!("F{guid}"), "article").unwrap();
+        let feed = insert_feed(
+            conn,
+            &format!("https://f.example/{guid}.rss"),
+            None,
+            "f",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let a = NewArticle {
+            guid: guid.into(),
+            url: Some(format!("https://e.example/{guid}")),
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: String::new(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-01-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        upsert_article_with_feed(conn, feed, &a, false).unwrap().0
+    }
+
+    fn conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    /// R3：绑定返回**实际变化**——NULL→新值 true；同值 false；换绑 true；
+    /// 行不存在 false（不误报）。DB 值同步核对。
+    #[test]
+    fn remote_id_binding_reports_actual_change() {
+        let conn = conn();
+        let aid = seed(&conn, "bind");
+        assert!(
+            set_article_remote_id(&conn, aid, 77).unwrap(),
+            "NULL → 77 是真实变化"
+        );
+        assert!(
+            !set_article_remote_id(&conn, aid, 77).unwrap(),
+            "同值重复绑定不得报变化"
+        );
+        assert!(
+            set_article_remote_id(&conn, aid, 88).unwrap(),
+            "换绑是真实变化"
+        );
+        let got: Option<i64> = conn
+            .query_row("SELECT remote_id FROM articles WHERE id = ?1", [aid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(got, Some(88), "换绑后的现场值");
+        assert!(
+            !set_article_remote_id(&conn, 999_999, 1).unwrap(),
+            "行不存在：无可绑定，false"
+        );
+    }
+
+    /// R3：backfill 只在**真正补进内容**时返回 true——首次补空行 true；
+    /// 同值重复 false；本地已有内容不覆盖 false；无可回填内容 false。
+    /// 每次断言都同时核对 DB 前后值（不只查 flag）。
+    #[test]
+    fn backfill_reports_change_only_when_it_fills() {
+        let conn = conn();
+        let aid = seed(&conn, "fill");
+        let before: (Option<String>, String) = conn
+            .query_row(
+                "SELECT content_html, body_text FROM articles WHERE id = ?1",
+                [aid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(before, (None, String::new()), "前置：空正文行");
+
+        let first = backfill_article_content(
+            &conn,
+            aid,
+            "<p>远端正文</p>",
+            "远端正文",
+            Some("https://img.example/i.jpg"),
+            Some("https://audio.example/a.mp3"),
+            Some("audio/mpeg"),
+        )
+        .unwrap();
+        assert!(first, "空行首次回填必须报变化");
+        let after: (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT content_html, body_text, image_url FROM articles WHERE id = ?1",
+                [aid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            after,
+            (
+                "<p>远端正文</p>".into(),
+                "远端正文".into(),
+                Some("https://img.example/i.jpg".into())
+            ),
+            "首次回填的现场值"
+        );
+
+        let again = backfill_article_content(
+            &conn,
+            aid,
+            "<p>远端正文</p>",
+            "远端正文",
+            Some("https://img.example/i.jpg"),
+            Some("https://audio.example/a.mp3"),
+            Some("audio/mpeg"),
+        )
+        .unwrap();
+        assert!(!again, "同值重复回填不得再报变化");
+
+        let overwrite_try =
+            backfill_article_content(&conn, aid, "<p>换一篇</p>", "换一篇", None, None, None)
+                .unwrap();
+        assert!(!overwrite_try, "本地已有内容不被覆盖：不是变化");
+        let kept: String = conn
+            .query_row(
+                "SELECT content_html FROM articles WHERE id = ?1",
+                [aid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "<p>远端正文</p>", "不被覆盖的现场值");
+
+        // 远端无可回填内容（空串）→ 无变化（空串 ≡ NULL 归一）
+        let empty = seed(&conn, "fill-empty");
+        let none_filled = backfill_article_content(&conn, empty, "", "", None, None, None).unwrap();
+        assert!(!none_filled, "无可回填内容不得报变化");
     }
 }

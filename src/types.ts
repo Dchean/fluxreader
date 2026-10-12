@@ -33,14 +33,41 @@ export const DEFAULT_OPEN_MODES: ('rss' | 'fulltext')[] = ['rss', 'fulltext'];
 /** 同步模式白名单（与 SyncTab 的选项一致） */
 export const SYNC_MODES: ('direct' | 'hybrid')[] = ['direct', 'hybrid'];
 
+/* ---- OPT-011（F13）：源级 AI 开关三态 ----
+   - 'inherit'：跟随所属分类的布尔默认（分类默认 false）；
+   - 'on' / 'off'：源的显式选择；显式关闭必须能压过分类开启（不以 OR 合并）。
+   旧 bool 字段（autoSummary/autoTranslate）保留为旧格式兼容输入（缺 mode 的
+   旧 mock / schema1 配置按 bool 映射），不再是有效配置真值——运行时有效值由
+   store/selectors.ts 的 selectFeedConfig（唯一 resolver）按 mode + 分类 bool
+   解析，任何组件不得再直读源上的旧 bool。 */
+export type FeedAiMode = 'inherit' | 'on' | 'off';
+export const FEED_AI_MODES: FeedAiMode[] = ['inherit', 'on', 'off'];
+
+/** 旧输入归一（单点）：合法 mode 原样；缺失/非法时按旧 bool 映射显式 on/off
+    （旧 mock、schema1 配置、旧后端行都走这里；绝不悄悄回 'inherit'）。 */
+export function normalizeFeedAiMode(raw: unknown, legacyBool: boolean): FeedAiMode {
+  return raw === 'inherit' || raw === 'on' || raw === 'off'
+    ? raw
+    : (legacyBool ? 'on' : 'off');
+}
+
+/** 唯一 resolver 的纯函数核心：mode + 分类布尔默认 → 运行有效开关。 */
+export function resolveFeedAiMode(mode: FeedAiMode, categoryDefault: boolean): boolean {
+  return mode === 'on' || (mode === 'inherit' && categoryDefault);
+}
+
 export interface FeedItem {
   id: string;
   name: string;
   url: string;
   favicon?: string;
   layout: 'inherit' | ContentLayoutType;
+  /** 旧兼容位（不再是有效真值）：仅作为缺 mode 时的映射输入；消费者走 resolver */
   autoSummary: boolean;
   autoTranslate: boolean;
+  /** OPT-011：三态真值（'inherit' | 'on' | 'off'） */
+  summaryMode: FeedAiMode;
+  translateMode: FeedAiMode;
   /** 该源最近一次抓取是否失败（驱动前端错误标志 + 指数退避重试） */
   fetchFailed?: boolean;
 }

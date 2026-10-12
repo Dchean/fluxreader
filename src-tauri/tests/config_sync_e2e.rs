@@ -582,6 +582,9 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "inherit".into(),
                 auto_summary: true,
                 auto_translate: false,
+                // OPT-011：mode 是真值；该源本地为 off/off，快照为 on/inherit → updated
+                summary_mode: Some("on".into()),
+                translate_mode: Some("inherit".into()),
                 site_url: Some("https://a.com".into()),
                 favicon_url: None,
             },
@@ -593,10 +596,12 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "inherit".into(),
                 auto_summary: false,
                 auto_translate: false,
+                summary_mode: Some("inherit".into()),
+                translate_mode: Some("off".into()),
                 site_url: None,
                 favicon_url: None,
             },
-            // 新源 + 新分类名 → 分类创建后导入
+            // 新源 + 新分类名 → 分类创建后导入（旧 schema1：无 mode 字段）
             app_lib::config_sync::FeedSpec {
                 url: "https://pod.com/rss".into(),
                 title: "播客源".into(),
@@ -604,6 +609,8 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "inherit".into(),
                 auto_summary: false,
                 auto_translate: false,
+                summary_mode: None,
+                translate_mode: None,
                 site_url: None,
                 favicon_url: None,
             },
@@ -615,6 +622,8 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 layout: "inherit".into(),
                 auto_summary: false,
                 auto_translate: false,
+                summary_mode: None,
+                translate_mode: None,
                 site_url: None,
                 favicon_url: None,
             },
@@ -660,10 +669,206 @@ fn apply_upserts_feeds_and_overrides_settings() {
         .unwrap();
     assert_eq!(a.title, "源A");
     assert_eq!(a.site_url, Some("https://a.com".to_string()));
+    // OPT-011：mode 是真值——已存在源被快照的 mode 覆盖，bool 兼容列镜像 mode
+    assert_eq!(
+        (a.summary_mode.as_str(), a.translate_mode.as_str()),
+        ("on", "inherit"),
+        "快照带 mode 时必须按 mode 落库（不能忽略 synced 配置）"
+    );
+    assert!(a.auto_summary, "bool 兼容列为 mode==on 的镜像");
+    assert!(
+        !a.auto_translate,
+        "inherit 镜像保留 0（保守，不诱使降级客户端烧 AI）"
+    );
+    let new_feed = feeds
+        .iter()
+        .find(|f| f.feed_url == "https://new.com/rss")
+        .unwrap();
+    assert_eq!(
+        (
+            new_feed.summary_mode.as_str(),
+            new_feed.translate_mode.as_str()
+        ),
+        ("inherit", "off"),
+        "新源导入按 mode 真值落库"
+    );
+    let legacy_feed = feeds
+        .iter()
+        .find(|f| f.feed_url == "https://pod.com/rss")
+        .unwrap();
+    assert_eq!(
+        (
+            legacy_feed.summary_mode.as_str(),
+            legacy_feed.translate_mode.as_str()
+        ),
+        ("off", "off"),
+        "旧 schema1（无 mode）按 bool 映射显式 on/off——绝不引入 inherit 开启"
+    );
 
     // 设置被覆盖
     let s = db::get_setting(&conn, "app_settings").unwrap().unwrap();
     assert!(s.contains("\"fontSize\":18"));
+
+    // OPT-011：同 payload 再应用一次 → 四个源全部按「内容一致」跳过。
+    // mode 已进入变化判定：若只比 bool 镜像（inherit 与 off 同为 0），
+    // translate_mode=inherit 的那条会被误判一致——本断言可判红该缺口。
+    let outcome2 = apply_payload(&conn, &payload).unwrap();
+    assert_eq!(
+        (outcome2.imported, outcome2.updated, outcome2.skipped),
+        (0, 0, 4),
+        "重复应用必须幂等：mode 参与逐字段比较，全部跳过"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// OPT-011：快照里的非法 AI mode 必须让整包导入失败（不悄悄回默认、不留半套）。
+#[test]
+fn apply_rejects_illegal_feed_mode_and_rolls_back() {
+    let tmp = common::unique_db_path("cfgsync_test_badmode");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+
+    let payload = SyncPayload {
+        schema: 1,
+        uploaded_at: "2026-09-01T00:00:00Z".into(),
+        folders: vec![app_lib::config_sync::FolderSpec {
+            name: "非法模式目录".into(),
+            layout: "article".into(),
+            auto_summary: false,
+            auto_translate: false,
+            position: 0,
+        }],
+        feeds: vec![app_lib::config_sync::FeedSpec {
+            url: "https://bad.example/rss".into(),
+            title: "坏模式源".into(),
+            folder: "非法模式目录".into(),
+            layout: "article".into(),
+            auto_summary: false,
+            auto_translate: false,
+            summary_mode: Some("maybe".into()),
+            translate_mode: None,
+            site_url: None,
+            favicon_url: None,
+        }],
+        app_settings: None,
+        connection_config: None,
+    };
+
+    let err = apply_payload(&conn, &payload).unwrap_err();
+    assert!(
+        err.message.contains("maybe"),
+        "错误必须指出非法值（不悄悄回默认）: {err}"
+    );
+    let folder_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM folders", [], |r| r.get(0))
+        .unwrap();
+    let feed_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        (folder_count, feed_count),
+        (0, 0),
+        "非法 mode 必须整包回滚，不留半套"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// OPT-011：远端 app_settings.refreshInterval 必须与本地写路径 / Rust scheduler
+/// 同口径（5–720 整数）。非法值（30.5 / 4 / 721 / 字符串 / null）让整个 apply
+/// 失败并回滚——本地既有 settings 与库内容原样，不静默把非法值写进本地
+/// （修前 30.5 会原样落库：DB=30.5 / UI 保留旧值 / Rust 回默认，三方分叉）。
+#[test]
+fn apply_rejects_invalid_remote_refresh_interval_and_rolls_back() {
+    for bad in ["30.5", "4", "721", "\"300\"", "null"] {
+        let tmp = common::unique_db_path("cfgsync_test_badinterval");
+        let _ = std::fs::remove_file(&tmp);
+        let conn = db::open(&tmp).unwrap();
+        // 本地既有设置与目录：失败后必须逐字原样
+        db::set_setting(&conn, "app_settings", r#"{"refreshInterval":300}"#).unwrap();
+        db::create_folder(&conn, "本地分类", "article").unwrap();
+
+        let payload = SyncPayload {
+            schema: 1,
+            uploaded_at: "2026-09-01T00:00:00Z".into(),
+            folders: vec![app_lib::config_sync::FolderSpec {
+                name: "远端分类".into(),
+                layout: "article".into(),
+                auto_summary: false,
+                auto_translate: false,
+                position: 0,
+            }],
+            feeds: vec![app_lib::config_sync::FeedSpec {
+                url: "https://interval.example/rss".into(),
+                title: "远端源".into(),
+                folder: "远端分类".into(),
+                layout: "article".into(),
+                auto_summary: false,
+                auto_translate: false,
+                summary_mode: None,
+                translate_mode: None,
+                site_url: None,
+                favicon_url: None,
+            }],
+            app_settings: Some(format!(r#"{{"refreshInterval":{bad}}}"#)),
+            connection_config: None,
+        };
+
+        let err = apply_payload(&conn, &payload).unwrap_err();
+        assert!(
+            err.message.contains("refreshInterval"),
+            "非法 refreshInterval（{bad}）必须被拒绝并说明字段: {err}"
+        );
+        assert_eq!(
+            db::get_setting(&conn, "app_settings").unwrap().as_deref(),
+            Some(r#"{"refreshInterval":300}"#),
+            "非法 refreshInterval（{bad}）：本地设置必须原样（apply 事务整体回滚）"
+        );
+        let folders = db::list_folders(&conn).unwrap();
+        assert!(
+            folders.iter().all(|f| f.name != "远端分类"),
+            "非法 refreshInterval（{bad}）：已应用的远端分类必须回滚"
+        );
+        assert!(
+            db::list_feeds(&conn).unwrap().is_empty(),
+            "非法 refreshInterval（{bad}）：已插入的远端源必须回滚"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// OPT-011：合法 refreshInterval 正常应用——整数原样；整数值小数（30.0）
+/// 数值等价、归一为整数写回（与前端校验表 / Rust 读取同口径）。
+#[test]
+fn apply_accepts_integral_remote_refresh_interval_normalized() {
+    let tmp = common::unique_db_path("cfgsync_test_okinterval");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+
+    let apply_with = |raw: &str| {
+        let payload = SyncPayload {
+            schema: 1,
+            uploaded_at: "2026-09-01T00:00:00Z".into(),
+            folders: vec![],
+            feeds: vec![],
+            app_settings: Some(raw.to_string()),
+            connection_config: None,
+        };
+        apply_payload(&conn, &payload).unwrap();
+        let s = db::get_setting(&conn, "app_settings").unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        v.get("refreshInterval").and_then(|x| x.as_i64())
+    };
+
+    assert_eq!(
+        apply_with(r#"{"refreshInterval":300}"#),
+        Some(300),
+        "区间内整数原样应用"
+    );
+    assert_eq!(
+        apply_with(r#"{"refreshInterval":30.0}"#),
+        Some(30),
+        "整数值小数数值等价，归一为整数写回（不写 30.0 的浮点形态）"
+    );
     let _ = std::fs::remove_file(&tmp);
 }
 
@@ -760,6 +965,27 @@ async fn full_roundtrip_upload_download_apply() {
     assert!(folders_b
         .iter()
         .any(|f| f.name == "播客" && f.layout == "podcast"));
+    // OPT-011：AI 开关三态随快照往返一致（设备B 拿到与设备A 相同的 mode）
+    let a_b = db::list_feeds(&conn_b)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.feed_url == "https://a.com/rss")
+        .unwrap();
+    let b_b = db::list_feeds(&conn_b)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.feed_url == "https://b.com/feed")
+        .unwrap();
+    assert_eq!(
+        (a_b.summary_mode.as_str(), a_b.translate_mode.as_str()),
+        ("on", "off"),
+        "mode 必须随配置快照往返（导出携带、导入生效）"
+    );
+    assert_eq!(
+        (b_b.summary_mode.as_str(), b_b.translate_mode.as_str()),
+        ("off", "on"),
+        "mode 必须随配置快照往返（第二条源独立三态）"
+    );
     // 设备B 拿到设备A 的设置（但不包含凭据）
     let s = db::get_setting(&conn_b, "app_settings").unwrap().unwrap();
     assert!(s.contains("fontSize"));
@@ -802,6 +1028,8 @@ fn apply_failure_rolls_back_the_whole_payload() {
             layout: "article".into(),
             auto_summary: false,
             auto_translate: false,
+            summary_mode: None,
+            translate_mode: None,
             site_url: None,
             favicon_url: None,
         }],

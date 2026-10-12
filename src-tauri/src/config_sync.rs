@@ -170,8 +170,33 @@ pub struct FeedSpec {
     pub layout: String,
     pub auto_summary: bool,
     pub auto_translate: bool,
+    /// OPT-011：源级 AI 开关三态（'inherit' | 'on' | 'off'）。
+    /// 旧 schema1 快照没有本字段（None）→ 导入时由旧 bool 映射显式 on/off
+    /// （保守兼容：旧快照里关着的源绝不因导入突然开启）。非法值拒绝整包导入。
+    #[serde(default)]
+    pub summary_mode: Option<String>,
+    #[serde(default)]
+    pub translate_mode: Option<String>,
     pub site_url: Option<String>,
     pub favicon_url: Option<String>,
+}
+
+/// OPT-011：把快照的 AI 开关输入归一为三态真值——mode 优先（非法拒绝，
+/// 不悄悄回默认），缺 mode 时由旧 bool 映射显式 on/off。
+fn resolve_spec_modes(f: &FeedSpec) -> AppResult<(db::FeedAiMode, db::FeedAiMode)> {
+    let summary = match f.summary_mode.as_deref() {
+        Some(raw) => db::FeedAiMode::parse(raw).map_err(|e| {
+            AppError::internal(format!("快照中的源 {} AI 模式非法：{}", f.url, e.message))
+        })?,
+        None => db::FeedAiMode::from_legacy_bool(f.auto_summary),
+    };
+    let translate = match f.translate_mode.as_deref() {
+        Some(raw) => db::FeedAiMode::parse(raw).map_err(|e| {
+            AppError::internal(format!("快照中的源 {} AI 模式非法：{}", f.url, e.message))
+        })?,
+        None => db::FeedAiMode::from_legacy_bool(f.auto_translate),
+    };
+    Ok((summary, translate))
 }
 
 /// 从本地库构建上传 payload（白名单原则：仅同步字段清单中 sync=允许 的字段）。
@@ -201,8 +226,12 @@ pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
             title: f.title.clone(),
             folder: folder_names.get(&f.folder_id).cloned().unwrap_or_default(),
             layout: f.layout.clone(),
+            // 旧 bool 字段照旧导出（旧客户端读同一快照时的兼容输入），
+            // 新真值 mode 同时携带（新客户端以 mode 为准）。
             auto_summary: f.auto_summary,
             auto_translate: f.auto_translate,
+            summary_mode: Some(f.summary_mode.clone()),
+            translate_mode: Some(f.translate_mode.clone()),
             site_url: f.site_url.clone(),
             favicon_url: f.favicon_url.clone(),
         })
@@ -304,6 +333,8 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
     for f in &p.feeds {
         match db::find_feed_by_url(&tx, &f.url)? {
             Some(existing_id) => {
+                // OPT-011：mode 归一先于一切写入（非法值 Err → 整包回滚，不留半套）。
+                let (summary_mode, translate_mode) = resolve_spec_modes(f)?;
                 // 已存在：更新白名单字段（title, folder, layout, AI flags, site_url, favicon_url）
                 let folder_id = match folder_ids.get(&f.folder) {
                     Some(id) => *id,
@@ -319,18 +350,22 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                     }
                 };
                 // 先读现值，判断这次到底有没有变化——有变化才算 updated，
-                // 完全一致才计入 skipped（用户看到的「跳过」才是真的跳过）
+                // 完全一致才计入 skipped（用户看到的「跳过」才是真的跳过）。
+                // OPT-011：mode 是真值，入变化判定（只有 mode 变也必须算更新）。
                 let changed: bool = tx.query_row(
                     "SELECT (title IS NOT ?1) OR (folder_id IS NOT ?2) OR (layout IS NOT ?3)
                             OR (auto_summary IS NOT ?4) OR (auto_translate IS NOT ?5)
-                            OR (site_url IS NOT ?6) OR (favicon_url IS NOT ?7)
-                     FROM feeds WHERE id = ?8",
+                            OR (summary_mode IS NOT ?6) OR (translate_mode IS NOT ?7)
+                            OR (site_url IS NOT ?8) OR (favicon_url IS NOT ?9)
+                     FROM feeds WHERE id = ?10",
                     rusqlite::params![
                         f.title,
                         folder_id,
                         f.layout,
-                        f.auto_summary as i64,
-                        f.auto_translate as i64,
+                        summary_mode.mirrors_legacy_bool() as i64,
+                        translate_mode.mirrors_legacy_bool() as i64,
+                        summary_mode.as_str(),
+                        translate_mode.as_str(),
                         f.site_url,
                         f.favicon_url,
                         existing_id
@@ -338,14 +373,21 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                     |r| r.get(0),
                 )?;
                 if changed {
+                    // bool 兼容列由 mode 纯函数镜像（mode 优先于快照的旧 bool——
+                    // 旧客户端传来的 bool 与 mode 冲突时以 mode 为准，两列不分叉）
                     tx.execute(
-                        "UPDATE feeds SET title = ?1, folder_id = ?2, layout = ?3, auto_summary = ?4, auto_translate = ?5, site_url = ?6, favicon_url = ?7 WHERE id = ?8",
+                        "UPDATE feeds SET title = ?1, folder_id = ?2, layout = ?3,
+                                          auto_summary = ?4, auto_translate = ?5,
+                                          summary_mode = ?6, translate_mode = ?7,
+                                          site_url = ?8, favicon_url = ?9 WHERE id = ?10",
                         rusqlite::params![
                             f.title,
                             folder_id,
                             f.layout,
-                            f.auto_summary,
-                            f.auto_translate,
+                            summary_mode.mirrors_legacy_bool() as i64,
+                            translate_mode.mirrors_legacy_bool() as i64,
+                            summary_mode.as_str(),
+                            translate_mode.as_str(),
                             f.site_url,
                             f.favicon_url,
                             existing_id
@@ -357,7 +399,8 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                 }
             }
             None => {
-                // 新源导入
+                // 新源导入（OPT-011：mode 为真值，非法值拒绝整包）
+                let (summary_mode, translate_mode) = resolve_spec_modes(f)?;
                 let folder_id = match folder_ids.get(&f.folder) {
                     Some(id) => *id,
                     None => {
@@ -375,7 +418,7 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                 } else {
                     f.title.clone()
                 };
-                db::insert_feed(
+                db::insert_feed_origin_modes(
                     &tx,
                     &f.url,
                     f.site_url.as_deref(),
@@ -383,8 +426,9 @@ pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<
                     f.favicon_url.as_deref(),
                     folder_id,
                     &f.layout,
-                    f.auto_summary,
-                    f.auto_translate,
+                    summary_mode,
+                    translate_mode,
+                    "local",
                 )?;
                 imported += 1;
             }
@@ -435,6 +479,32 @@ pub struct ApplyOutcome {
     pub pending_connection: Option<PendingSuggestion>,
 }
 
+/// OPT-011：远端 app_settings 的 refreshInterval 校验单点（先于 merge 的任何写入）。
+///
+/// 与本地写路径（settingsValidation：区间 + Number.isInteger）和 Rust scheduler
+/// （read_refresh_interval）同口径：JSON 整数或整数值小数（30.0）接受并**归一为
+/// 整数**；缺失 = None（走既有「远端缺键 → 本地删除」语义）；存在但非法
+/// （30.5 / 4 / 721 / 字符串 / null）→ Err。
+///
+/// 为什么必须让整个 apply 失败：修前原样 merge 会把 30.5 写进本地 app_settings，
+/// 而前端校验拒绝（UI 保留旧值 300）、Rust scheduler 读不到整数回落默认 30——
+/// DB / UI / 运行值三方分叉。不静默写非法值，也不把正确性托付给 UI 忽略。
+fn validated_remote_refresh_interval(remote: &serde_json::Value) -> AppResult<Option<i64>> {
+    let Some(v) = remote.get("refreshInterval") else {
+        return Ok(None);
+    };
+    let as_int = v
+        .as_i64()
+        .or_else(|| v.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64));
+    match as_int {
+        Some(n) if (5..=720).contains(&n) => Ok(Some(n)),
+        _ => Err(AppError::new(
+            "validate",
+            format!("配置快照的 refreshInterval 非法（必须为 5–720 整数）：{v}"),
+        )),
+    }
+}
+
 /// 合并 app_settings：远端白名单字段覆盖本地，本地特定字段保留。
 ///
 /// TASK-074（P2-12，DEC-req104-p2-12-config-delete-20260920）：此前只做 upsert——
@@ -443,8 +513,13 @@ pub struct ApplyOutcome {
 /// ① 远端存在且属白名单 → 覆盖本地；
 /// ② 远端**不存在**且属白名单、但本地存在 → 本地同步删除（跟随远端事实）；
 /// ③ 本地专属字段（autoStart / closePromptShown）永不接受远端删除或覆盖。
+///
+/// OPT-011：refreshInterval 是数值型配置——远端存在时先严格校验（见上），非法
+/// 整体 Err 由调用方事务回滚（本地 settings/feeds 原样）；合法值归一为整数写回。
 fn merge_app_settings(conn: &rusqlite::Connection, remote_raw: &str) -> AppResult<()> {
     let remote: serde_json::Value = serde_json::from_str(remote_raw)?;
+    // 校验先于任何改动（含下面的删除阶段）：失败即整体失败，内存 merged 不被改动
+    let remote_interval = validated_remote_refresh_interval(&remote)?;
     let local_raw = db::get_setting(conn, "app_settings")?;
 
     let mut merged = if let Some(local_raw) = local_raw {
@@ -473,9 +548,19 @@ fn merge_app_settings(conn: &rusqlite::Connection, remote_raw: &str) -> AppResul
     // ① 远端白名单字段覆盖（③ 本地专属字段除外）
     if let (Some(remote_obj), Some(merged_obj)) = (remote_obj, merged.as_object_mut()) {
         for (key, value) in remote_obj {
-            if !is_local_only_setting(key) {
-                merged_obj.insert(key.clone(), value.clone());
+            if is_local_only_setting(key) {
+                continue;
             }
+            // refreshInterval 写回应经校验的整数形态（30.0 → 30），与前端
+            // 校验表 / Rust 读取同一口径；非法值已在函数入口 Err，不会到这。
+            let normalized = if key == "refreshInterval" {
+                remote_interval
+                    .map(serde_json::Value::from)
+                    .unwrap_or_else(|| value.clone())
+            } else {
+                value.clone()
+            };
+            merged_obj.insert(key.clone(), normalized);
         }
     }
 

@@ -16,8 +16,9 @@ import * as d5 from './frontend-tests/settings-and-feeds.mjs';
 import * as d6 from './frontend-tests/pagination-and-cache.mjs';
 import * as d7 from './frontend-tests/scroll-position-restore.mjs';
 import * as d8 from './frontend-tests/ui-contracts.mjs';
+import * as d9 from './frontend-tests/subscription-sync.mjs';
 
-const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8];
+const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9];
 
 const argv = process.argv.slice(2);
 const selected = [];

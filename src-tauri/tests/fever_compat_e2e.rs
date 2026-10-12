@@ -901,6 +901,18 @@ fn remove_article_insert_failure(conn: &rusqlite::Connection) {
         .unwrap();
 }
 
+/// 注入：指定 guid 的文章 UPDATE 失败（真 DB trigger）。R3 失败页标记测试用——
+/// 重放/回填路径对既有行走 UPDATE（INSERT 注入打不到），触发器随页事务一起
+/// 阻断并回滚。
+fn install_article_update_failure(conn: &rusqlite::Connection, guid: &str) {
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER opt007_fail_article_upd BEFORE UPDATE ON articles \
+         WHEN OLD.guid = '{guid}' \
+         BEGIN SELECT RAISE(ABORT, 'injected article update failure'); END;"
+    ))
+    .unwrap();
+}
+
 /// 极简 base64 解码（测试用；忽略 `=` 与空白）。载荷由 node zlib 预生成。
 fn base64_decode(input: &str) -> Vec<u8> {
     fn val(c: u8) -> Option<u8> {
@@ -1737,6 +1749,90 @@ async fn page_insert_failure_rolls_back_page_with_pending_resume() {
             "只有真正取尽才允许 Complete"
         );
     }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// R3：失败页回滚不得留下**假数据变化标记**。前置：全量同步完成（125 条、
+/// history complete）。重放轮开始前做两处现场改造，二者都在回溯首页（=125..76，
+/// 降序处理）且**先于**注入点 85 被合并：
+/// - 删除条目 88（已读非收藏）→ 重放以**新行 INSERT** 真实入库（置标记）；
+/// - 清空条目 90 的正文 → 重放 backfill 真实回填（置标记）。
+/// 随后同页的条目 85 注入 UPDATE 失败 → 整页回滚。断言：错误可见、88 仍不存在、
+/// 90 正文仍为空（页内真实写都被撤销）、标记与 has_data_change 为 false
+/// （标记随页回滚，不得残留）。时序依据：mock 的 max_id 页为
+/// `id < max_id ORDER BY id DESC LIMIT 50`（本文件夹具契约），88/90 先于 85 处理，
+/// 故回滚前标记必然已被置起——本用例对「页回滚回退标记」有判别力。
+/// 88/90 均不在 unread（已读）/saved 集合，回滚后 with_ids/reconcile 都不会再
+/// 触及它们，终态可确定性断言。
+#[tokio::test]
+async fn failed_page_rollback_leaves_no_data_change_marker() {
+    let srv = fixture_125().await;
+    let (db, tmp) = seed_db("fever_compat_page_marker", &srv);
+    let http_client = http();
+
+    // 前置：全量成功（新条目 = 真实变化，标记必须为 true）。
+    let first = sync::sync_now(&db, &http_client).await.expect("first sync");
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    assert!(first.entries_data_changed, "前置：首轮全量确有新条目变化");
+    {
+        let conn = db.lock().await;
+        assert_eq!(article_count(&conn), 125);
+        assert_eq!(history_state(&conn).as_deref(), Some("complete"));
+        // 现场改造 1：删除 88（重放会 INSERT 补回 → 页内真实变化）。
+        conn.execute("DELETE FROM articles WHERE remote_id = 88", [])
+            .unwrap();
+        // 现场改造 2：清空 90 的正文（重放会 backfill 补回 → 页内真实变化）。
+        conn.execute(
+            "UPDATE articles SET content_html = NULL WHERE remote_id = 90",
+            [],
+        )
+        .unwrap();
+        // 触发顶部重放：历史状态重置为 Unknown（拉取仍从顶部走）。
+        db::reset_fever_history_state(&conn).unwrap();
+        // 注入：remote-85 的既有行 UPDATE 失败（重放/回填路径 = UPDATE）。
+        install_article_update_failure(&conn, "remote-85");
+    }
+
+    let report = sync::sync_light(&db, &http_client)
+        .await
+        .expect("second sync");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("injected article update failure")),
+        "回放页必须真实失败并可见: {:?}",
+        report.errors
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            article_count(&conn),
+            124,
+            "失败页回滚后现场逐条不变（88 的重放 INSERT 也被回滚）"
+        );
+        assert!(
+            !bound_remote_id(&conn, 88),
+            "页内新行入库必须随页回滚（不得半提交）"
+        );
+        assert!(bound_remote_id(&conn, 85), "失败页条目不得半提交");
+        let content_90: Option<String> = conn
+            .query_row(
+                "SELECT content_html FROM articles WHERE remote_id = 90",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            content_90, None,
+            "页内已真实发生的回填必须随页回滚（正文回到清空态）"
+        );
+    }
+    assert!(
+        !report.entries_data_changed,
+        "失败页已回滚：不得留下假数据变化标记（页内新行/回填的标记必须一起回退）"
+    );
+    assert!(!report.has_data_change(), "本轮零实际变化：不得发数据事件");
     let _ = std::fs::remove_file(&tmp);
 }
 

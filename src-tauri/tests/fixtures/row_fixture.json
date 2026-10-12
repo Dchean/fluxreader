@@ -9,6 +9,8 @@
     "layout": "article",
     "auto_summary": true,
     "auto_translate": false,
+    "summary_mode": "inherit",
+    "translate_mode": "off",
     "fetch_failed": false,
     "fetch_error": null,
     "last_fetched_at": null

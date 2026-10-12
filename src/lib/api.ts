@@ -1,4 +1,5 @@
-import type { ArticleEntry, CategoryGroup, FeedItem } from '../types';
+import type { ArticleEntry, CategoryGroup, FeedItem, FeedAiMode } from '../types';
+import { normalizeFeedAiMode } from '../types';
 
 /* ============================================================
    Tauri invoke 封装 —— 浏览器开发环境回退 mock
@@ -52,8 +53,12 @@ export interface FeedRow {
   title: string;
   favicon_url: string | null;
   layout: string;
+  /** 旧兼容列（不再是有效真值；仅作为缺 summary_mode 时的映射输入） */
   auto_summary: boolean;
   auto_translate: boolean;
+  /** OPT-011：AI 开关三态真值（旧后端行/schema1 可缺 → 按 bool 映射） */
+  summary_mode?: string | null;
+  translate_mode?: string | null;
   fetch_failed: boolean;
   fetch_error: string | null;
   last_fetched_at: string | null;
@@ -232,14 +237,17 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('feed_counts') as FeedCountsRow[]) : null;
   },
+  /** 添加订阅源（OPT-011：新 UI 传三态 mode；旧 caller 可省略 mode 走旧 bool 显式语义） */
   async addFeed(
     feedUrl: string,
     title: string | null,
     folderId: number | null,
     layout: string,
-    autoSummary: boolean,
-    autoTranslate: boolean,
+    autoSummary: boolean | null,
+    autoTranslate: boolean | null,
     syncToBackend: boolean,
+    summaryMode?: FeedAiMode,
+    translateMode?: FeedAiMode,
   ): Promise<FeedRow | null> {
     const inv = await getInvoke();
     return inv
@@ -250,6 +258,8 @@ export const api = {
           layout,
           autoSummary,
           autoTranslate,
+          summaryMode: summaryMode ?? null,
+          translateMode: translateMode ?? null,
           syncToBackend,
         }) as FeedRow)
       : null;
@@ -258,7 +268,9 @@ export const api = {
     const mount = await getInvoke();
     return mount ? (await mount('delete_feed', { id }) as null) : null;
   },
-  /** 编辑源：标题/分类/布局/AI 开关一次性更新（undefined 字段保持不变） */
+  /** 编辑源：标题/分类/布局/AI 开关一次性更新（undefined 字段保持不变）。
+   * OPT-011：新 UI 传三态 summaryMode/translateMode；旧 caller 仍可只传 bool
+   * （后端映射显式 on/off，见 db::update_feed_full）。 */
   async updateFeed(args: {
     id: number;
     title?: string;
@@ -266,6 +278,8 @@ export const api = {
     layout?: string;
     autoSummary?: boolean;
     autoTranslate?: boolean;
+    summaryMode?: FeedAiMode;
+    translateMode?: FeedAiMode;
   }): Promise<null> {
     const inv = await getInvoke();
     return inv ? (await inv('update_feed', args) as null) : null;
@@ -364,13 +378,31 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('set_folder_collapsed', { id, collapsed }) as null) : null;
   },
-  async setFolderAiFlags(id: number, autoSummary: boolean, autoTranslate: boolean): Promise<null> {
+  /** OPT-011：分类 AI 默认单字段 patch——undefined 的字段不发送（只写被改字段）。
+   * 旧 full 调用（两字段都给）语义不变；两字段独立落库，并发乱序不互相覆盖。 */
+  async setFolderAiFlags(id: number, autoSummary?: boolean, autoTranslate?: boolean): Promise<null> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_folder_ai_flags', { id, summary: autoSummary, translate: autoTranslate }) as null) : null;
+    if (!inv) return null;
+    const args: Record<string, unknown> = { id };
+    if (autoSummary !== undefined) args.summary = autoSummary;
+    if (autoTranslate !== undefined) args.translate = autoTranslate;
+    return (await inv('set_folder_ai_flags', args) as null);
   },
   async setFeedAiFlags(id: number, autoSummary: boolean, autoTranslate: boolean): Promise<null> {
     const inv = await getInvoke();
     return inv ? (await inv('set_feed_ai_flags', { id, summary: autoSummary, translate: autoTranslate }) as null) : null;
+  },
+  /** OPT-011：源级 AI 开关三态（新真值入口；只动给出的字段，undefined 不改）。
+   * 与 setFeedAiFlags 的边界一致：只写本地，不推远端。 */
+  async setFeedAiModes(id: number, summaryMode?: FeedAiMode, translateMode?: FeedAiMode): Promise<null> {
+    const inv = await getInvoke();
+    return inv
+      ? (await inv('set_feed_ai_modes', {
+          id,
+          summaryMode: summaryMode ?? null,
+          translateMode: translateMode ?? null,
+        }) as null)
+      : null;
   },
 
   /* ---- AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi） ---- */
@@ -653,6 +685,10 @@ export function feedRowToItem(row: FeedRow): FeedItem {
     layout: row.layout as FeedItem['layout'],
     autoSummary: row.auto_summary,
     autoTranslate: row.auto_translate,
+    /* OPT-011：mode 为真值；旧行/旧 mock 缺 mode（schema1/旧后端）时按旧 bool
+       映射显式 on/off——升级不把原本关闭的源推向付费 AI。 */
+    summaryMode: normalizeFeedAiMode(row.summary_mode, row.auto_summary),
+    translateMode: normalizeFeedAiMode(row.translate_mode, row.auto_translate),
     fetchFailed: row.fetch_failed,
   };
 }

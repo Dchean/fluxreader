@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useAppStore } from '../../store';
+import { awaitAiWriteFrontier, confirmAppliedConfig, markAiConfigUnconfirmed, runConfigApplyBarrier, useAppStore } from '../../store';
 import { api, extractError } from '../../lib/api';
 import { openExternal } from '../../lib/external';
 import { FluxDropdown, SettingCard } from '../primitives';
@@ -72,6 +72,10 @@ export function ConfigSyncSection() {
   const doUpload = async () => {
     setBusy(true);
     try {
+      /* OPT-011 R5：上传是**读取已保存配置**的快照——先等发起时已存在的 AI 写
+         前沿落定（快照不漏用户已点写的 AI 值）。不设写门：上传的网络往返不
+         阻塞之后任何 AI 操作（之后的点击乐观显示、请求照常发出）。 */
+      await awaitAiWriteFrontier();
       const at = await api.configSyncUpload();
       setStatus({ configured: true, backend, lastUpload: at });
       showToast('配置已上传');
@@ -90,17 +94,38 @@ export function ConfigSyncSection() {
       const n = Array.isArray(parsed.feeds) ? parsed.feeds.length : 0;
       if (!window.confirm(`下载远端配置（${n} 个订阅源，上传于 ${parsed.uploaded_at ?? '未知时间'}）并应用？\n\n已存在的源会跳过；本地设置与 AI 配置将被远端覆盖。\n（连接信息只作为待确认建议，不会改动当前连接。）`)) {
         setBusy(false);
-        return;
+        return; // 用户取消：不进入屏障、不执行应用（无残留）
       }
-      const r = await api.configSyncApply(payload);
-      await reloadFromBackend();
+      /* OPT-011 R5：确认后进入受控写屏障——同步捕获并等待「进入时已存在的
+         AI 写前沿」，应用期间的 AI 点击乐观可见、请求排在应用之后；屏障不
+         等待后来写（无自锁），失败/取消都在 finally 释放、错误如实提示。 */
+      let readbackError: string | null = null;
+      const r = await runConfigApplyBarrier(async () => {
+        const res = await api.configSyncApply(payload);
+        try {
+          /* 真实配置回读确认/对齐——不把可能被查询代际淘汰的 reload 当已确认。 */
+          await confirmAppliedConfig();
+        } catch (e) {
+          /* 应用已整包覆写后端 AI 配置而本地没有读回实际值：受影响键标记
+             未确认（后续失败不得声称「已恢复原值」），如实告知。 */
+          readbackError = extractError(e);
+          markAiConfigUnconfirmed();
+        }
+        return res;
+      });
       await bootstrapSettings().catch(() => null);
+      /* 应用结果落地后的全量刷新（entries/计数）；它不是确认依据（确认由上面
+         的真实回读完成），失败由刷新路径自身提示。 */
+      void reloadFromBackend().catch(() => null);
       // TASK-074：如实区分「新增 / 已更新 / 已跳过」——此前把已更新数当成
       // 「跳过 M 个已存在」展示，数字含义是错的。
       const parts = [`新增 ${r.imported} 个源`];
       if (r.updated > 0) parts.push(`更新 ${r.updated} 个`);
       if (r.skipped > 0) parts.push(`跳过 ${r.skipped} 个（内容一致）`);
       showToast(`配置已应用：${parts.join('，')}`);
+      if (readbackError) {
+        showToast(`配置已应用，但配置回读失败：${readbackError}（本地界面值未确认）`);
+      }
       // OPT-006：导入不会改动活动连接；若含连接信息则提示到「后端配置」激活
       if (r.pendingConnection) {
         showToast('检测到连接信息：请到「后端配置」重新输入密码后保存以激活（当前连接不受影响）');

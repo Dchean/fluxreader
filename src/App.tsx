@@ -84,13 +84,23 @@ export default function App() {
     void (async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<{ new_articles: number; failed_feeds: number }>(
+        unlisten = await listen<{
+          new_articles: number;
+          failed_feeds: number;
+          /* OPT-007（F11）：后台同步的数据变化事件按实际变更集驱动——纯读藏
+             对账（merged_states>0、无新文章）也会到达本监听器；两字段仅为
+             可诊断性随 payload 下发，落地动作与两条既有通道一致。 */
+          pulled_entries?: number;
+          merged_states?: number;
+        }>(
           'feeds-updated',
           (e) => {
             const { new_articles, failed_feeds } = e.payload;
             /* TASK-098（与 F5 同口径）：失败提示由 reloadFromBackend 的 toast 给出，这里吞掉 toast 后的重抛 */
             /* TASK-111②：后台刷新路径携带保位请求——落地时发出保位信号，
-               Timeline 消费顶条锚回位（审计「后台刷新保留当前阅读位置」）。 */
+               Timeline 消费顶条锚回位（审计「后台刷新保留当前阅读位置」）。
+               OPT-007：纯对账变化（new_articles=0）同样走这条保位 reload——
+               列表/计数/Reader 跟随更新，锚点保留；空变化不在 Rust 侧发事件。 */
             void useAppStore.getState().reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
             if (new_articles > 0) {
               useAppStore.getState().showToast(`后台刷新：新文章 ${new_articles} 篇`);

@@ -88,15 +88,18 @@ pub async fn set_folder_collapsed(
     db::set_folder_collapsed(&conn, id, collapsed)
 }
 
+/// 分类 AI 默认开关写入。OPT-011：参数改为可选（单字段 patch）——新 caller 只传
+/// 被切换的字段（summary 或 translate），两字段独立落库，乱序到达不互相覆盖；
+/// 旧 full caller 继续传两个 bool，语义不变（整对写）。
 #[tauri::command]
 pub async fn set_folder_ai_flags(
     state: State<'_, AppState>,
     id: i64,
-    summary: bool,
-    translate: bool,
+    summary: Option<bool>,
+    translate: Option<bool>,
 ) -> AppResult<()> {
     let conn = state.db.lock().await;
-    db::set_folder_ai_flags(&conn, id, summary, translate)
+    db::set_folder_ai_flags_partial(&conn, id, summary, translate)
 }
 
 #[tauri::command]
@@ -109,6 +112,9 @@ pub async fn list_feeds(state: State<'_, AppState>) -> AppResult<Vec<db::FeedRow
 /// `folder_id = None`（UI 未选分类，如全新安装无任何分类时）→ 自动落到
 /// 「未分类」文件夹（不存在则创建）——首次使用添加源不再报错。
 /// 参数较多是 IPC 契约（前端 invoke 逐字段传），加 allow 避免 clippy 误报。
+///
+/// OPT-011：新增 `summary_mode` / `translate_mode` 三态可选参数（新 UI 默认
+/// 'inherit'）；旧 caller 仍可只传 bool——合并规则单点在 resolve_ai_modes。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn add_feed(
@@ -117,10 +123,21 @@ pub async fn add_feed(
     title: Option<String>,
     folder_id: Option<i64>,
     layout: String,
-    auto_summary: bool,
-    auto_translate: bool,
+    auto_summary: Option<bool>,
+    auto_translate: Option<bool>,
+    summary_mode: Option<String>,
+    translate_mode: Option<String>,
     sync_to_backend: bool,
 ) -> AppResult<db::FeedRow> {
+    // OPT-011：mode 校验先于任何副作用（含出网抓取）——非法值直接拒绝，
+    // 不悄悄回默认。新 caller 传 mode 优先；旧 caller 只传 bool 时映射显式
+    // on/off；两者皆缺 = 全新源默认 inherit。
+    let (summary_mode, translate_mode) = resolve_ai_modes(
+        summary_mode.as_deref(),
+        translate_mode.as_deref(),
+        auto_summary,
+        auto_translate,
+    )?;
     // 1. 抓取验证（直连，第一优先级）
     let fetched = ingestion::conditional_get(&state.http, &feed_url, None, None).await?;
     let (bytes, etag, last_modified) = match fetched {
@@ -147,15 +164,39 @@ pub async fn add_feed(
         last_modified.as_deref(),
         folder_id,
         &layout,
-        auto_summary,
-        auto_translate,
+        summary_mode,
+        translate_mode,
         sync_to_backend,
     )
+}
+
+/// OPT-011：AI 开关输入的合并规则（单点）——mode 优先，旧 bool 回退为显式
+/// on/off，两者皆缺取 inherit（「新增源默认继承」）。非法 mode 串 Err。
+fn resolve_ai_modes(
+    summary_mode: Option<&str>,
+    translate_mode: Option<&str>,
+    auto_summary: Option<bool>,
+    auto_translate: Option<bool>,
+) -> AppResult<(db::FeedAiMode, db::FeedAiMode)> {
+    let summary = match summary_mode {
+        Some(raw) => db::FeedAiMode::parse(raw)?,
+        None => auto_summary
+            .map(db::FeedAiMode::from_legacy_bool)
+            .unwrap_or(db::FeedAiMode::Inherit),
+    };
+    let translate = match translate_mode {
+        Some(raw) => db::FeedAiMode::parse(raw)?,
+        None => auto_translate
+            .map(db::FeedAiMode::from_legacy_bool)
+            .unwrap_or(db::FeedAiMode::Inherit),
+    };
+    Ok((summary, translate))
 }
 
 /// add_feed 抓取验证后的入库段（TASK-064 抽出以便脱离 Tauri State 测试）。
 /// 查重 → 标题兜底 → 「未分类」兜底 → 插入 → 清同 URL 删除墓碑（N4）→
 /// 写抓取状态 → 建文章 → 按需入队推送。
+/// OPT-011：AI 开关以三态 mode 传入（调用方经 resolve_ai_modes 归一）。
 #[allow(clippy::too_many_arguments)]
 fn persist_new_feed(
     conn: &rusqlite::Connection,
@@ -166,8 +207,8 @@ fn persist_new_feed(
     last_modified: Option<&str>,
     folder_id: Option<i64>,
     layout: &str,
-    auto_summary: bool,
-    auto_translate: bool,
+    summary_mode: db::FeedAiMode,
+    translate_mode: db::FeedAiMode,
     sync_to_backend: bool,
 ) -> AppResult<db::FeedRow> {
     // P3[9]（REQ-104）：改用**规范化 URL** 去重（与 sync 侧 pull_feeds 同一判据）。
@@ -205,7 +246,7 @@ fn persist_new_feed(
     // 「feed 已存在而文章残缺」的半套状态，且重试被「该订阅地址已存在」判重
     // 拦住，用户必须先删再加。查重/分类校验是纯读，留在事务外不影响原子性。
     let tx = conn.unchecked_transaction()?;
-    let feed_id = db::insert_feed(
+    let feed_id = db::insert_feed_origin_modes(
         &tx,
         feed_url,
         parsed.site_url.as_deref(),
@@ -213,8 +254,9 @@ fn persist_new_feed(
         parsed.icon.as_deref(),
         folder_id,
         layout,
-        auto_summary,
-        auto_translate,
+        summary_mode,
+        translate_mode,
+        "local",
     )?;
     // TASK-064 N4：重新添加 = 用户改变主意的最强证据——清掉同 URL 的删除
     // 墓碑。此前墓碑只在 pull 的「远端不再列出」分支清除，重新添加的源被永久
@@ -280,8 +322,8 @@ mod tests {
             None,
             None,
             "inherit",
-            true,
-            false,
+            db::FeedAiMode::On,
+            db::FeedAiMode::Off,
             false,
         )
         .unwrap();
@@ -312,8 +354,8 @@ mod tests {
             None,
             Some(999), // folders.id 从 1 起：0（前端无分类时传 0）与 999 均不存在
             "inherit",
-            true,
-            false,
+            db::FeedAiMode::On,
+            db::FeedAiMode::Off,
             false,
         )
         .unwrap_err();
@@ -350,8 +392,8 @@ mod tests {
             None,
             None,
             "inherit",
-            false,
-            false,
+            db::FeedAiMode::Off,
+            db::FeedAiMode::Off,
             false,
         )
         .unwrap();
@@ -372,8 +414,8 @@ mod tests {
             None,
             Some(fid),
             "inherit",
-            false,
-            false,
+            db::FeedAiMode::Off,
+            db::FeedAiMode::Off,
             false,
         )
         .unwrap();
@@ -394,8 +436,8 @@ mod tests {
             None,
             None,
             "inherit",
-            true,
-            false,
+            db::FeedAiMode::On,
+            db::FeedAiMode::Off,
             false,
         )
         .unwrap();
@@ -408,8 +450,8 @@ mod tests {
             None,
             None,
             "inherit",
-            true,
-            false,
+            db::FeedAiMode::On,
+            db::FeedAiMode::Off,
             false,
         )
         .unwrap_err();
@@ -433,8 +475,8 @@ mod tests {
             None,
             None,
             "inherit",
-            true,
-            false,
+            db::FeedAiMode::On,
+            db::FeedAiMode::Off,
             false,
         )
         .unwrap();
@@ -446,7 +488,17 @@ mod tests {
             "https://f.example/rss/",                      // 尾斜杠
         ] {
             let err = persist_new_feed(
-                &conn, variant, &parsed, None, None, None, None, "inherit", true, false, false,
+                &conn,
+                variant,
+                &parsed,
+                None,
+                None,
+                None,
+                None,
+                "inherit",
+                db::FeedAiMode::On,
+                db::FeedAiMode::Off,
+                false,
             )
             .unwrap_err();
             assert_eq!(err.code, "duplicate", "变体 {variant} 必须被判重");
@@ -495,8 +547,8 @@ mod tests {
             None,
             None,
             "inherit",
-            true,
-            false,
+            db::FeedAiMode::On,
+            db::FeedAiMode::Off,
             false,
         )
         .unwrap_err();
@@ -630,6 +682,8 @@ mod tests {
             Some("social"),
             Some(true),
             Some(true),
+            None,
+            None,
         )
         .expect_err("坏密文必须让编辑整体失败");
         assert!(
@@ -647,6 +701,103 @@ mod tests {
         assert!(!row.auto_summary, "编辑失败后 auto_summary 必须原样");
         assert!(!row.auto_translate, "编辑失败后 auto_translate 必须原样");
         assert_ne!(row.folder_id, other, "编辑失败后分类不得被移动");
+    }
+
+    /* ---------- OPT-011：AI 开关输入的合并规则与三态落库 ---------- */
+
+    /// resolve_ai_modes：new caller 的 mode 优先；旧 caller 只传 bool 时映射
+    /// 显式 on/off；两者皆缺 = 全新源默认 inherit；非法 mode 串拒绝。
+    #[test]
+    fn resolve_ai_modes_prefers_mode_then_legacy_bool_then_inherit() {
+        assert_eq!(
+            resolve_ai_modes(Some("on"), Some("inherit"), Some(false), Some(false)).unwrap(),
+            (db::FeedAiMode::On, db::FeedAiMode::Inherit),
+            "mode 是 new caller 的真值（压过同帧的旧 bool）"
+        );
+        assert_eq!(
+            resolve_ai_modes(None, None, Some(true), Some(false)).unwrap(),
+            (db::FeedAiMode::On, db::FeedAiMode::Off),
+            "旧 caller 只传 bool → 显式 on/off（不引入 inherit）"
+        );
+        assert_eq!(
+            resolve_ai_modes(None, None, None, None).unwrap(),
+            (db::FeedAiMode::Inherit, db::FeedAiMode::Inherit),
+            "两者皆缺 = 新增源默认继承（默认分类仍 false，先不烧 AI）"
+        );
+        let err = resolve_ai_modes(Some("maybe"), None, None, None).unwrap_err();
+        assert_eq!(err.code, "validate", "非法 mode 必须拒绝且不悄悄回默认");
+    }
+
+    /// 新 UI 路径：persist_new_feed 收 inherit → 三态列 inherit、旧 bool 镜像 0；
+    /// 旧 caller 路径（On/Off）语义不变。
+    #[test]
+    fn persist_new_feed_keeps_inherit_default_and_explicit_modes() {
+        let conn = test_conn();
+        let parsed = minimal_parsed();
+        let row = persist_new_feed(
+            &conn,
+            "https://f.example/rss",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            db::FeedAiMode::Inherit,
+            db::FeedAiMode::Inherit,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (row.summary_mode.as_str(), row.translate_mode.as_str()),
+            ("inherit", "inherit"),
+            "新 UI 默认 inherit 必须原样落库（真值不是 bool 回显）"
+        );
+        assert!(
+            !row.auto_summary && !row.auto_translate,
+            "bool 兼容列镜像 0"
+        );
+        let inherit_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE summary_mode = 'inherit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(inherit_count, 1, "库内真值列确实写了 inherit");
+    }
+
+    /// record_feed_edit 的新真值入口：只改一个 mode、其余字段不动；
+    /// 显式 off 能压过分类开启（写库层只存选择，解析在前端 resolver——见 Note）。
+    #[test]
+    fn record_feed_edit_writes_explicit_modes_without_touching_other_fields() {
+        let conn = test_conn();
+        let (feed, _aid) = seed_feed_with_article(&conn);
+        let push = record_feed_edit(
+            &conn,
+            feed,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(db::FeedAiMode::Off),
+            Some(db::FeedAiMode::Inherit),
+        )
+        .unwrap();
+        assert!(push.is_none(), "未配置同步时无远端推送目标");
+        let row = db::list_feeds(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.id == feed)
+            .unwrap();
+        assert_eq!(
+            (row.summary_mode.as_str(), row.translate_mode.as_str()),
+            ("off", "inherit"),
+            "显式关闭与继承态分别原样落库"
+        );
+        assert_eq!(row.title, "旧标题", "未给的字段不被连带改动");
+        // 非法 mode 不可能经此入口进入：parse 在命令层、单测这里直接给类型化枚举
     }
 }
 
@@ -713,7 +864,12 @@ pub async fn update_feed_layout(
 
 /// 编辑源：标题/所属分类/布局/AI 开关一次性更新。
 /// 连接 Miniflux 时改名与移动分类尽量同步到远端（best-effort，失败不阻塞本地落库结果）。
+///
+/// OPT-011：新增三态 `summary_mode` / `translate_mode` 可选参数（新 UI 真值）；
+/// 旧 caller 仍可只传 bool（映射显式 on/off，见 db::update_feed_full）。
+/// 非法 mode 在任何写入前拒绝。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_feed(
     state: State<'_, AppState>,
     id: i64,
@@ -722,10 +878,21 @@ pub async fn update_feed(
     layout: Option<String>,
     auto_summary: Option<bool>,
     auto_translate: Option<bool>,
+    summary_mode: Option<String>,
+    translate_mode: Option<String>,
 ) -> AppResult<()> {
     let title = title
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
+    // mode 校验先于持锁/任何写入：非法输入不产生半套状态
+    let summary_mode = summary_mode
+        .as_deref()
+        .map(db::FeedAiMode::parse)
+        .transpose()?;
+    let translate_mode = translate_mode
+        .as_deref()
+        .map(db::FeedAiMode::parse)
+        .transpose()?;
 
     let push = {
         let conn = state.db.lock().await;
@@ -737,6 +904,8 @@ pub async fn update_feed(
             layout.as_deref(),
             auto_summary,
             auto_translate,
+            summary_mode,
+            translate_mode,
         )?
     };
     // 锁外 best-effort 推送远端（GReader ac=edit；Fever no-op）：
@@ -765,9 +934,13 @@ pub type FeedEditPush = (i64, Option<String>, Option<String>, i64);
 /// 返回 Some((remote_id, 新标题, 目标分类名, generation))：该订阅已绑定远端且同步已配置。
 /// generation 与 remote_id 同一次持锁内捕获（OPT-006）。
 ///
+/// OPT-011：AI 开关支持三态 mode（新真值）；旧 bool 参数保留为兼容输入。
+/// 合并规则与写入收口在 db::update_feed_full（单条 SQL，bool 镜像不分叉）。
+///
 /// OPT-014 R2：可失败的凭据读取前移到 `db::update_feed` 之前并复用结果——
 /// 坏密文时整单失败，不留下「字段已改」却报错的半套状态。
 /// Note: .agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md
+#[allow(clippy::too_many_arguments)]
 pub fn record_feed_edit(
     conn: &rusqlite::Connection,
     id: i64,
@@ -776,6 +949,8 @@ pub fn record_feed_edit(
     layout: Option<&str>,
     auto_summary: Option<bool>,
     auto_translate: Option<bool>,
+    summary_mode: Option<db::FeedAiMode>,
+    translate_mode: Option<db::FeedAiMode>,
 ) -> AppResult<Option<FeedEditPush>> {
     let sync_ok = sync_configured(conn)?;
     let generation = db::sync_generation(conn)?;
@@ -785,7 +960,7 @@ pub fn record_feed_edit(
             return Err(AppError::new("validate", "目标分类不存在"));
         }
     }
-    db::update_feed(
+    db::update_feed_full(
         conn,
         id,
         title,
@@ -793,6 +968,8 @@ pub fn record_feed_edit(
         layout,
         auto_summary,
         auto_translate,
+        summary_mode,
+        translate_mode,
     )?;
     if !sync_ok {
         return Ok(None);
@@ -822,4 +999,32 @@ pub async fn set_feed_ai_flags(
 ) -> AppResult<()> {
     let conn = state.db.lock().await;
     db::set_feed_ai_flags(&conn, id, summary, translate)
+}
+
+/// OPT-011：设置源级 AI 开关三态（新真值入口；设置页三态控件等使用）。
+/// 只动给出的字段（None = 不改）；只写本地（AI 开关是本地配置，不推远端，
+/// 与旧 set_feed_ai_flags 的边界一致）。非法 mode 拒绝，不悄悄回默认。
+#[tauri::command]
+pub async fn set_feed_ai_modes(
+    state: State<'_, AppState>,
+    id: i64,
+    summary_mode: Option<String>,
+    translate_mode: Option<String>,
+) -> AppResult<()> {
+    let summary_mode = summary_mode
+        .as_deref()
+        .map(db::FeedAiMode::parse)
+        .transpose()?;
+    let translate_mode = translate_mode
+        .as_deref()
+        .map(db::FeedAiMode::parse)
+        .transpose()?;
+    if summary_mode.is_none() && translate_mode.is_none() {
+        return Err(AppError::new(
+            "validate",
+            "至少给出一个要更新的 AI 开关模式",
+        ));
+    }
+    let conn = state.db.lock().await;
+    db::set_feed_ai_modes(&conn, id, summary_mode, translate_mode)
 }

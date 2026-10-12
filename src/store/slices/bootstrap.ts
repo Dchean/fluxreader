@@ -4,6 +4,7 @@ import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
 import type { ArticleListItemRow } from '../../lib/api';
 import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, appStore, buildFeedIndex, emptyArticlesCursor, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, rollbackEntryClaims, setViewEntriesSnapshot } from '../internals';
+import { applyConfigRead, beginConfigRead } from '../aiConfigWrites';
 import type { EntryRollbackClaim } from '../internals';
 import type { AppState, ArticlesCursorState } from '../types';
 import type { ContentLayoutType } from '../../types';
@@ -222,6 +223,23 @@ export async function bootstrapGithubAuth() {
   }
 }
 
+/** OPT-011 R5：配置应用（config_sync_apply）成功后的**真实配置回读确认**。
+    不能把 reloadFromBackend 的 Promise 当确认：它可能被更新的查询发起经
+    queryGeneration 淘汰而提前返回（不接受任何数据）。这里在 list_folders/
+    list_feeds 发出前捕获读取凭据、落地前 applyConfigRead 对账（推进确认态、
+    保留未落定意图、解除 stale），再原子更新 categories/feedIndex。读取失败
+    上抛——调用方如实告知「已应用但回读未确认」，不假称已对齐。 */
+export async function confirmAppliedConfig(): Promise<void> {
+  const cred = beginConfigRead();
+  const [folders, feeds] = await Promise.all([api.listFolders(), api.listFeeds()]);
+  if (!folders || !feeds) {
+    throw new Error('后端不可用（配置回读失败）');
+  }
+  const categories = folderRowsToCategories(folders, feeds);
+  applyConfigRead(categories, cred);
+  appStore().setState(reconcileCategories(appStore().getState(), categories));
+}
+
 export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice> = (set, get) => ({
   /* 启动用空数据 + dataLoading 骨架（不用 mock 先行渲染——曾导致卸载重装后
      「测试订阅一闪而过」，同步后被真实空库替换；蓝图中 P1/I3 要求首帧即真实态） */
@@ -301,6 +319,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       const scopeKey = QueryScope.pageKey(scopeAtStart, layoutAtStart);
       const scopeArgs = QueryScope.args(scopeAtStart, sortAtStart, layoutAtStart);
       let folders, feeds, articles, counts;
+      /* OPT-011 R4：AI 配置读取凭据——必须在 list_folders/list_feeds **发出前**
+         捕获（读取数据的时刻 ≠ 接受响应的时刻）。凭据只用于接受点判定每个键
+         的快照值是否仍可用；读取失败或查询代际淘汰 = 不调用 applyConfigRead，
+         凭据为纯值自然作废，不留任何在途登记。 */
+      const aiReadCred = beginConfigRead();
       try {
         [folders, feeds, articles, counts] = await Promise.all([
           api.listFolders(),
@@ -348,6 +371,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       }
 
       const categories = folderRowsToCategories(folders, feeds);
+      /* OPT-011 R4：接受 AI 配置快照——凭读取凭据更新确认态（更早的读取不得
+         回退期间成功的写入、不得覆盖更晚接受的读取），并保留未落定意图的可视
+         值（尤其读取发起后的新点击）。必须在 set 之前对同一 categories 对象执行，
+         落地后 store/feedIndex 与协议态一致。 */
+      applyConfigRead(categories, aiReadCred);
       const feedCounts = new Map<string, { total: number; unread: number; starred: number; today: number }>();
       if (counts) {
         for (const c of counts) {

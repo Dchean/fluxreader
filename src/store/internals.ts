@@ -6,6 +6,7 @@ import type {
   ArticleEntry,
   CategoryGroup,
   ContentLayoutType,
+  FeedAiMode,
   FeedItem,
   ViewFilterType,
 } from '../types';
@@ -662,4 +663,54 @@ export function optimisticEntryFlagToggle(
     rollbackEntryClaims([claim]);
     appStore().getState().showToast(failureText(extractError(e)));
   });
+}
+
+/* ============================================================
+   OPT-011：AI 开关（源三态 / 分类布尔默认）的原子索引更新
+
+   缺陷背景（真实旧索引与「死分类」）：
+   - toggleFeedSummary / toggleFeedTranslate / toggleCatSummary / toggleCatTranslate
+     此前只 set({ categories })，不重建 feedIndex——selectFeedConfig（读 feedIndex）
+     的消费者当帧看到的还是旧 feed/cat 对象：源开关「看起来开了」却不生效；
+   - 分类 AI 布尔此前不参与任何有效值解析（源只读自己的 bool）——分类开关是
+     死的：打开分类后其下「继承」源并不跟随（F13 的根因）。
+
+   applyFeedAiModePatch / applyCategoryAiFlagPatch 经 reconcileCategories 在
+   **同一 setState** 里更新 categories 与 feedIndex——任何消费者当帧看到同一配置。
+   写入 × 快照对账协议（待写意图 / 确认态 / 读取凭据、同键串行与失败恢复）
+   收口在 store/aiConfigWrites.ts（OPT-011 R4，见《AI配置写入与快照对账》）。
+   ============================================================ */
+
+/** OPT-011：源三态字段的原子写入（categories + feedIndex 同一 setState）。
+    只改给出的字段；未涉及的字段与布局等保持原值。 */
+export function applyFeedAiModePatch(
+  feedId: string,
+  patch: { summaryMode?: FeedAiMode; translateMode?: FeedAiMode },
+): void {
+  const s = appStore().getState();
+  const nextCategories = s.categories.map((c) => {
+    const idx = c.feeds.findIndex((f) => f.id === feedId);
+    if (idx < 0) return c;
+    const feed = c.feeds[idx];
+    const next: FeedItem = {
+      ...feed,
+      ...(patch.summaryMode !== undefined ? { summaryMode: patch.summaryMode } : {}),
+      ...(patch.translateMode !== undefined ? { translateMode: patch.translateMode } : {}),
+    };
+    const feeds = [...c.feeds];
+    feeds[idx] = next;
+    return { ...c, feeds };
+  });
+  appStore().setState(reconcileCategories(s, nextCategories));
+}
+
+/** OPT-011：分类布尔 AI 默认的原子写入（categories + feedIndex 同一 setState）。 */
+export function applyCategoryAiFlagPatch(
+  catId: string,
+  field: 'autoSummary' | 'autoTranslate',
+  value: boolean,
+): void {
+  const s = appStore().getState();
+  const nextCategories = s.categories.map((c) => (c.id === catId ? { ...c, [field]: value } : c));
+  appStore().setState(reconcileCategories(s, nextCategories));
 }

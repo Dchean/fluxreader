@@ -423,6 +423,53 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         DELETE FROM settings WHERE key = 'feed_tombstones';
     "#,
         ),
+        // OPT-007（F09/F10：字段版本持久守卫）：articles 增 read_version /
+        // star_version ——「本地已读/收藏提交」的按字段单调版本（i64 非负）。
+        // 语义（见 sync/conflict_policy.rs 与 sync/entries.rs 的消费点）：
+        // - pull 起点把两列快照进 SyncMatchMaps.id_to_versions；
+        // - 所有本地标读/收藏入口（单条/批量/mark_all_read）在**同一 SQL
+        //   事务**里把对应列 +1（db/articles.rs 的 bump 内核，checked 增长，
+        //   到 i64::MAX 拒绝而不是饱和——饱和会让「版本相等」误判成「本地没
+        //   有新写入」，旧网络快照即可回滚新意图）；
+        // - 远端合并**不递增**：写侧用带版本条件的条件更新（WHERE 版本 = 快照）
+        //   在合并时点二次校验，版本不符即跳过该字段（0 行）。
+        // 读/藏两列独立：read 的本地写入不会压住无冲突的 star 合并，反向亦然。
+        // 纯增列：旧行取 DEFAULT 0（= 从未有本地状态写入），旧版本语义零变化。
+        // user_version=20。
+        M::up(
+            r#"
+        ALTER TABLE articles ADD COLUMN read_version INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE articles ADD COLUMN star_version INTEGER NOT NULL DEFAULT 0;
+    "#,
+        ),
+        // OPT-011（F13：AI 开关单点与输入范围一致）：feeds 增 summary_mode /
+        // translate_mode 三态列（'inherit' | 'on' | 'off'，SQL CHECK 拒非法值）。
+        // 语义（有效配置解析见 db/feeds.rs 的 FeedAiMode 与前端唯一 resolver）：
+        // - mode 是源的 AI 开关真值；'inherit' = 跟随所属分类的布尔默认，
+        //   'on'/'off' = 源的显式选择（显式关闭必须能压过分类开启）；
+        // - 旧 bool 列 auto_summary/auto_translate 保留为**旧格式兼容输入/输出**
+        //   （数据库降级或旧客户端读同一库时），不再是有效配置真值；
+        // - 旧行由原 bool 回填 on/off：升级后每行语义与升级前逐字一致
+        //   （旧 true 仍是开、旧 false 仍是关），不会因「默认 inherit + 分类
+        //   默认 false」之类差异把原本关闭的源推向付费 AI；
+        // - 新行缺省 'inherit'（add_feed 命令的新 caller 语义；旧 bool 入口
+        //   insert/update 仍按 bool 写显式 on/off，见 db/feeds.rs）。
+        // 纯增列 + 回填：不动 v20 的两列，不改 read/star 版本迁移与同步字段。
+        // user_version=21。
+        // Note: 三态真值、bool 兼容回填与有效配置解析 — 见
+        // .agents/notes/implemented/architecture/2026-10-08-AI配置继承与派生索引单点.md
+        M::up(
+            r#"
+        ALTER TABLE feeds ADD COLUMN summary_mode TEXT NOT NULL DEFAULT 'inherit'
+            CHECK (summary_mode IN ('inherit', 'on', 'off'));
+        ALTER TABLE feeds ADD COLUMN translate_mode TEXT NOT NULL DEFAULT 'inherit'
+            CHECK (translate_mode IN ('inherit', 'on', 'off'));
+
+        UPDATE feeds SET
+            summary_mode   = CASE WHEN auto_summary   != 0 THEN 'on' ELSE 'off' END,
+            translate_mode = CASE WHEN auto_translate != 0 THEN 'on' ELSE 'off' END;
+    "#,
+        ),
     ])
 });
 
@@ -1733,5 +1780,282 @@ mod opt008a_migration_tests {
         );
         drop(conn);
         std::fs::remove_file(&path).expect("清理临时库失败");
+    }
+}
+
+/* ============================================================
+OPT-007 v20 单元测试：articles 字段版本列（read_version / star_version）
+（cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
+============================================================ */
+#[cfg(test)]
+mod opt007_migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 进程内唯一临时库路径（同本文件既有模块的 unique_test_db 惯例，std 实现）。
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        std::env::temp_dir().join(format!(
+            "fluxreader_migr_{base}_{pid}_{nanos}_{seq}.db",
+            pid = std::process::id()
+        ))
+    }
+
+    fn article_columns(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('articles') ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// (opt007-m1) v20 迁移：① 全新库 to_latest 后两列存在且为 i64 缺省 0；
+    /// ② 停在 v19 的旧库（既有文章带读/藏状态）经生产 open() 升级——列补上、
+    /// 状态原样、版本一律 0（从未有本地状态写入），且列立即可写。
+    /// 判别力：漏建任一列时 `SELECT read_version` 直接报错红；缺省写成非 0 /
+    /// 升级改写文章状态时对应断言红。
+    #[test]
+    fn v20_adds_field_version_columns_and_legacy_upgrade_keeps_zero() {
+        // ① 全新库：最新 schema 含两列，缺省 0，类型 INTEGER
+        {
+            let mut fresh = Connection::open_in_memory().unwrap();
+            MIGRATIONS.to_latest(&mut fresh).unwrap();
+            let cols = article_columns(&fresh);
+            assert!(cols.contains(&"read_version".to_string()));
+            assert!(cols.contains(&"star_version".to_string()));
+            fresh
+                .execute_batch(
+                    "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+                     INSERT INTO articles (feed_id, guid, title, is_read, is_starred)
+                       VALUES (1, 'new', 't', 1, 1);",
+                )
+                .unwrap();
+            let (rv, sv, ty): (i64, i64, String) = fresh
+                .query_row(
+                    "SELECT read_version, star_version,
+                            (SELECT type FROM pragma_table_info('articles') WHERE name = 'read_version')
+                       FROM articles WHERE guid = 'new'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((rv, sv), (0, 0), "新库插入缺省版本为 0");
+            assert_eq!(ty, "INTEGER", "版本列必须是 INTEGER");
+        }
+
+        // ② 旧库升级：停在 v19，既有文章带状态；生产 open 完成 v20
+        let path = unique_test_db("opt007_v20");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_version(&mut conn, 19).unwrap();
+            conn.execute_batch(
+                "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+                 INSERT INTO articles (feed_id, guid, title, is_read, is_starred) VALUES
+                   (1, 'a', 't1', 1, 0),
+                   (1, 'b', 't2', 0, 1);",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).expect("v19 旧库必须完成 v20 迁移");
+        let cols = article_columns(&conn);
+        assert!(cols.contains(&"read_version".to_string()));
+        assert!(cols.contains(&"star_version".to_string()));
+        let rows: Vec<(String, i64, i64, i64, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT guid, is_read, is_starred, read_version, star_version
+                       FROM articles ORDER BY guid",
+                )
+                .unwrap();
+            stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert_eq!(
+            rows,
+            vec![("a".to_string(), 1, 0, 0, 0), ("b".to_string(), 0, 1, 0, 0)],
+            "升级保留状态、版本一律 0（旧库从未记录本地写入版本）"
+        );
+        // 列立即可写（后续本地写入路径依赖）
+        conn.execute(
+            "UPDATE articles SET read_version = read_version + 1 WHERE guid = 'a'",
+            [],
+        )
+        .unwrap();
+        let rv: i64 = conn
+            .query_row(
+                "SELECT read_version FROM articles WHERE guid = 'a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(rv, 1, "升级后列可立即递增");
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/* ============================================================
+OPT-011 v21 单元测试：feeds AI 开关三态列（summary_mode / translate_mode）
+（cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
+============================================================ */
+#[cfg(test)]
+mod opt011_migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 进程内唯一临时库路径（与 opt007_migration_tests 的惯例一致）。
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        std::env::temp_dir().join(format!(
+            "fluxreader_migr_{base}_{pid}_{nanos}_{seq}.db",
+            pid = std::process::id()
+        ))
+    }
+
+    fn feed_columns(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('feeds') ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// (opt011-m1) v21 迁移：① 全新库 to_latest 后两列存在，新行缺省 'inherit'
+    /// （三态默认继承），CHECK 拒绝非法 mode；② v21 的字节与 v20 之后不改动既有
+    /// 列——旧 bool 列照旧可用。
+    /// 判别力：漏建任一列时 `SELECT summary_mode` 直接报错红；缺省错写 'off'
+    /// （会让新源在分类开启时静默永远不自动生成）或 CHECK 失效时对应断言红。
+    #[test]
+    fn v21_adds_three_state_mode_columns_with_inherit_default() {
+        let mut fresh = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut fresh).unwrap();
+        let cols = feed_columns(&fresh);
+        assert!(cols.contains(&"summary_mode".to_string()));
+        assert!(cols.contains(&"translate_mode".to_string()));
+
+        fresh
+            .execute_batch(
+                "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');",
+            )
+            .unwrap();
+        let (sm, tm, ty): (String, String, String) = fresh
+            .query_row(
+                "SELECT summary_mode, translate_mode,
+                        (SELECT type FROM pragma_table_info('feeds') WHERE name = 'summary_mode')
+                   FROM feeds WHERE feed_url = 'https://f.example/rss'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (sm.as_str(), tm.as_str()),
+            ("inherit", "inherit"),
+            "新行缺省必须是 inherit（新增源默认继承分类）"
+        );
+        assert_eq!(ty, "TEXT", "mode 列必须是 TEXT");
+
+        // CHECK 拒非法值：不悄悄回默认，写入即失败
+        let err = fresh
+            .execute(
+                "UPDATE feeds SET summary_mode = 'maybe' WHERE feed_url = 'https://f.example/rss'",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, rusqlite::Error::SqliteFailure(e, _)
+                if e.code == rusqlite::ErrorCode::ConstraintViolation),
+            "非法 mode 必须被 SQL CHECK 拒绝（不静默回默认）: {err}"
+        );
+    }
+
+    /// (opt011-m2) 旧库升级：停在 v20、既有 feeds 带 bool（true/false 两态都有），
+    /// 经生产 open() 升级 v21——mode 由原 bool 显式回填 on/off（不增不减语义），
+    /// bool 列原样保留，随后新插入的行缺省 inherit。
+    /// 判别力：回填成 'inherit'（升级后旧 true 源在分类关时行为反转）或改写 bool
+    /// 时对应断言红。
+    #[test]
+    fn v21_backfills_modes_from_legacy_bools_without_surprise() {
+        let path = unique_test_db("opt011_v21");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_version(&mut conn, 20).unwrap();
+            conn.execute_batch(
+                "INSERT INTO feeds (feed_url, title, auto_summary, auto_translate) VALUES
+                   ('https://on.example/rss', '旧开', 1, 0),
+                   ('https://off.example/rss', '旧关', 0, 1);",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).expect("v20 旧库必须完成 v21 迁移");
+        let rows: Vec<(String, i64, i64, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT feed_url, auto_summary, auto_translate, summary_mode, translate_mode
+                       FROM feeds ORDER BY feed_url",
+                )
+                .unwrap();
+            stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "https://off.example/rss".to_string(),
+                    0,
+                    1,
+                    "off".to_string(),
+                    "on".to_string()
+                ),
+                (
+                    "https://on.example/rss".to_string(),
+                    1,
+                    0,
+                    "on".to_string(),
+                    "off".to_string()
+                ),
+            ],
+            "旧行按原 bool 回填 on/off（升级不改变任何一行的开关语义），bool 列原样"
+        );
+        // 升级后新插入的行缺省 inherit（不与旧行回填混淆）
+        conn.execute(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://new.example/rss', '新')",
+            [],
+        )
+        .unwrap();
+        let sm: String = conn
+            .query_row(
+                "SELECT summary_mode FROM feeds WHERE feed_url = 'https://new.example/rss'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sm, "inherit", "升级后新行仍走缺省 inherit");
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
     }
 }

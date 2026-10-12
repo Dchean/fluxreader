@@ -2,9 +2,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
 import { api, articleRowToEntry } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
-import { ModalOverlay, FluxDropdown, SwitchInline } from './primitives';
+import { ModalOverlay, FluxDropdown, SwitchInline, AiModeSelect } from './primitives';
 import { LAYOUT_NO_AI } from './settings/shared';
-import type { ArticleEntry, ContentLayoutType, FeedItem } from '../types';
+import { normalizeFeedAiMode } from '../types';
+import type { ArticleEntry, ContentLayoutType, FeedAiMode, FeedItem } from '../types';
 import { anchorScopeNav } from './anchorScopeNav';
 import { CoverImage } from './CoverImage';
 
@@ -446,20 +447,22 @@ function AddFeedModalBody({
   onSubmit,
 }: {
   initialCatId: string;
-  categories: { id: string; name: string; layout?: string }[];
+  categories: { id: string; name: string; layout?: string; autoSummary?: boolean; autoTranslate?: boolean }[];
   syncConnected: boolean;
   onCancel: () => void;
-  onSubmit: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean, syncToBackend: boolean) => void;
+  onSubmit: (catId: string, url: string, title: string, layout: string, summaryMode: FeedAiMode, translateMode: FeedAiMode, syncToBackend: boolean) => void;
 }) {
   const [url, setUrl] = useState('');
   const [title, setTitle] = useState('');
   const [catId, setCatId] = useState(initialCatId);
   const [layout, setLayout] = useState('inherit');
-  const [autoSummary, setAutoSummary] = useState(false);
-  const [autoTranslate, setAutoTranslate] = useState(false);
+  /* OPT-011：新增源默认继承分类（默认分类仍 false，先不烧 AI）；用户可显式开/关 */
+  const [summaryMode, setSummaryMode] = useState<FeedAiMode>('inherit');
+  const [translateMode, setTranslateMode] = useState<FeedAiMode>('inherit');
   const [syncToBackend, setSyncToBackend] = useState(true);
   /* 生效布局：显式选择优先，否则目标分类的布局——画廊/播客布局隐藏 AI 开关 */
-  const curCatLayout = categories.find((c) => c.id === catId)?.layout ?? 'article';
+  const curCat = categories.find((c) => c.id === catId);
+  const curCatLayout = curCat?.layout ?? 'article';
   const noAi = LAYOUT_NO_AI.has(layout === 'inherit' ? curCatLayout : layout);
 
   return (
@@ -520,11 +523,21 @@ function AddFeedModalBody({
           {!noAi && (
             <>
               <label className="mini-dialog-checkbox">
-                <SwitchInline checked={autoSummary} onChange={(v) => setAutoSummary(v)} />
+                <AiModeSelect
+                  mode={summaryMode}
+                  categoryOn={curCat?.autoSummary ?? false}
+                  onChange={setSummaryMode}
+                  title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                />
                 自动摘要
               </label>
               <label className="mini-dialog-checkbox">
-                <SwitchInline checked={autoTranslate} onChange={(v) => setAutoTranslate(v)} />
+                <AiModeSelect
+                  mode={translateMode}
+                  categoryOn={curCat?.autoTranslate ?? false}
+                  onChange={setTranslateMode}
+                  title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                />
                 自动翻译
               </label>
             </>
@@ -547,7 +560,9 @@ function AddFeedModalBody({
             disabled={!url.trim()}
             onClick={() => {
               if (!url.trim()) return;
-              onSubmit(catId, url.trim(), title.trim() || url.trim(), layout, noAi ? false : autoSummary, noAi ? false : autoTranslate, syncToBackend);
+              /* OPT-011：提交三态 mode（默认 inherit）；不再把 bool 回显写入。
+                 noAI 布局下控件隐藏但不改写选择（布局忽略 AI；默认继承仍是产品语义）。 */
+              onSubmit(catId, url.trim(), title.trim() || url.trim(), layout, summaryMode, translateMode, syncToBackend);
               onCancel();
             }}
           >
@@ -578,6 +593,8 @@ export function EditFeedModal() {
           feed={binding.feed}
           curCatId={binding.cat.id}
           curCatLayout={binding.cat.layout}
+          curCatAutoSummary={binding.cat.autoSummary}
+          curCatAutoTranslate={binding.cat.autoTranslate}
           categories={categories.map((c) => ({ id: c.id, name: c.name, layout: c.layout }))}
           onCancel={() => closeMiniModal('editFeed')}
           onSubmit={(next) => {
@@ -594,6 +611,8 @@ function EditFeedModalBody({
   feed,
   curCatId,
   curCatLayout,
+  curCatAutoSummary,
+  curCatAutoTranslate,
   categories,
   onCancel,
   onSubmit,
@@ -601,15 +620,18 @@ function EditFeedModalBody({
   feed: FeedItem;
   curCatId: string;
   curCatLayout: string;
+  curCatAutoSummary: boolean;
+  curCatAutoTranslate: boolean;
   categories: { id: string; name: string; layout: string }[];
   onCancel: () => void;
-  onSubmit: (next: { title: string; catId: string; layout: string; autoSummary: boolean; autoTranslate: boolean }) => void;
+  onSubmit: (next: { title: string; catId: string; layout: string; summaryMode: FeedAiMode; translateMode: FeedAiMode }) => void;
 }) {
   const [title, setTitle] = useState(feed.name);
   const [catId, setCatId] = useState(curCatId);
   const [layout, setLayout] = useState<string>(feed.layout);
-  const [autoSummary, setAutoSummary] = useState(feed.autoSummary);
-  const [autoTranslate, setAutoTranslate] = useState(feed.autoTranslate);
+  /* OPT-011：显示与提交都是三态真值（缺 mode 的旧行按旧 bool 映射） */
+  const [summaryMode, setSummaryMode] = useState<FeedAiMode>(normalizeFeedAiMode(feed.summaryMode, feed.autoSummary));
+  const [translateMode, setTranslateMode] = useState<FeedAiMode>(normalizeFeedAiMode(feed.translateMode, feed.autoTranslate));
 
   return (
     <div className="mini-dialog">
@@ -664,11 +686,21 @@ function EditFeedModalBody({
           return (
             <>
               <label className="mini-dialog-checkbox">
-                <SwitchInline checked={autoSummary} onChange={(v) => setAutoSummary(v)} />
+                <AiModeSelect
+                  mode={summaryMode}
+                  categoryOn={curCatAutoSummary}
+                  onChange={setSummaryMode}
+                  title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                />
                 自动摘要
               </label>
               <label className="mini-dialog-checkbox">
-                <SwitchInline checked={autoTranslate} onChange={(v) => setAutoTranslate(v)} />
+                <AiModeSelect
+                  mode={translateMode}
+                  categoryOn={curCatAutoTranslate}
+                  onChange={setTranslateMode}
+                  title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                />
                 自动翻译
               </label>
             </>
@@ -681,10 +713,10 @@ function EditFeedModalBody({
         <button
           className="toggle-action-btn btn-primary"
           onClick={() => {
-            /* 不支持 AI 的布局：勾选值归零再提交（与 UI 隐藏一致） */
-            const eff = layout === 'inherit' ? curCatLayout : layout;
-            const noAi = LAYOUT_NO_AI.has(eff);
-            onSubmit({ title, catId, layout, autoSummary: noAi ? false : autoSummary, autoTranslate: noAi ? false : autoTranslate });
+            /* OPT-011：提交三态真值。不支持 AI 的布局下控件隐藏，但**不改写**
+               用户选择（沿原值提交，不把隐藏态硬翻成 off——避免只改标题时
+               悄悄丢掉显式选择）。 */
+            onSubmit({ title, catId, layout, summaryMode, translateMode });
           }}
         >
           保存

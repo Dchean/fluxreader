@@ -30,7 +30,11 @@ import { createSettingsSlice } from './store/slices/settings';
    不参与任何取值——不会出现同名 key 被后展开的 slice 覆盖。
    ============================================================ */
 
-export { bootstrapGithubAuth } from './store/slices/bootstrap';
+export { bootstrapGithubAuth, confirmAppliedConfig } from './store/slices/bootstrap';
+/* OPT-011 R5：配置应用/上传的协调入口经 store 公开面导出——组件一律经本模块
+   （测试工具链把 src/store.ts 别名到唯一 store 实例）消费协调协议，避免深层
+   子路径在别名体系下形成第二个协议实例（写队列/屏障必须与 store 的写入口同一份）。 */
+export { awaitAiWriteFrontier, markAiConfigUnconfirmed, runConfigApplyBarrier } from './store/aiConfigWrites';
 
 /* Note: 为何按领域拆 slice（而不是像后端那样按文件搬函数），以及键集如何保证不重不漏：
    slice 类型写成 Pick<AppState, …>，9 个 Pick 的并集必须恰好等于 AppState ——

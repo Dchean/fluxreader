@@ -186,6 +186,9 @@ pub async fn sync_now(
     let states = states_phase(db, http, true).await?;
     report.pushed_states = states.pushed_states;
     report.pulled_entries = states.pulled_entries;
+    // R3：条目层实际变化标记必须跨阶段汇聚（缺了它，sync_now 路径上正文/
+    // 绑定/对账的真实变化会被漏发事件）。旧计数保持既有形状不动（兼容）。
+    report.entries_data_changed |= states.entries_data_changed;
     report.errors.extend(states.errors);
     Ok(report)
 }

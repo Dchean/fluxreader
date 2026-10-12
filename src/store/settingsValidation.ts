@@ -22,7 +22,7 @@ import type { SettingsState } from './types';
 
 /** 数值设置项的允许区间 [min, max]，与设置页 <input type="range"> 一致 */
 const NUMERIC_RANGES: Record<string, readonly [number, number]> = {
-  refreshInterval: [5, 120],   // GeneralTab: min 5 / max 120
+  refreshInterval: [5, 720],   // GeneralTab: min 5 / max 720（与 Rust scheduler 同区间）
   fetchConcurrency: [1, 16],   // GeneralTab: min 1 / max 16
   fontSize: [13, 24],          // ReadingTab: min 13 / max 24
   lineHeight: [130, 240],      // ReadingTab: min 130 / max 240
@@ -34,6 +34,12 @@ const isBool = (v: unknown): boolean => typeof v === 'boolean';
 const oneOf = (allowed: readonly unknown[]) => (v: unknown): boolean => allowed.includes(v);
 const inRange = (range: readonly [number, number]) => (v: unknown): boolean =>
   typeof v === 'number' && Number.isFinite(v) && v >= range[0] && v <= range[1];
+/** OPT-011：整数区间校验（refreshInterval 定版 5–720 **整数**）。
+    小数由前端写/读路径一并拒绝——Rust scheduler 的 read_refresh_interval
+    同口径（整数值小数等价、非整数拒绝），不会出现「客户端收下小数、
+    Rust 静默回默认」的双侧分叉。 */
+const inIntRange = (range: readonly [number, number]) => (v: unknown): boolean =>
+  typeof v === 'number' && Number.isInteger(v) && v >= range[0] && v <= range[1];
 
 /** fontFamily 只要求「非空字符串」：字体族是自由文本（FONT_OPTIONS 可被覆盖） */
 const isNonEmptyString = (v: unknown): boolean => typeof v === 'string' && v.trim().length > 0;
@@ -43,7 +49,7 @@ const isNonEmptyString = (v: unknown): boolean => typeof v === 'string' && v.tri
 export const SETTINGS_VALIDATORS: Record<keyof SettingsState, (v: unknown) => boolean> = {
   /* 通用 */
   autoRefresh: isBool,
-  refreshInterval: inRange(NUMERIC_RANGES.refreshInterval),
+  refreshInterval: inIntRange(NUMERIC_RANGES.refreshInterval),
   fetchConcurrency: inRange(NUMERIC_RANGES.fetchConcurrency),
   markReadOnOpen: isBool,
   markReadOnScrollBottom: isBool,

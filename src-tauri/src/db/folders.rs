@@ -76,6 +76,7 @@ pub fn set_folder_collapsed(conn: &Connection, id: i64, collapsed: bool) -> AppR
     Ok(())
 }
 
+/// 分类 AI 默认的整对写入（旧 full 语义，配置导入/旧 caller 使用）。
 pub fn set_folder_ai_flags(
     conn: &Connection,
     id: i64,
@@ -85,6 +86,37 @@ pub fn set_folder_ai_flags(
     conn.execute(
         "UPDATE folders SET auto_summary = ?1, auto_translate = ?2 WHERE id = ?3",
         params![summary as i64, translate as i64, id],
+    )?;
+    Ok(())
+}
+
+/// OPT-011：分类 AI 默认的单字段 patch（None = 不改该字段）。
+///
+/// 缺陷背景（成功乱序回退）：旧整对写入要求调用方快照「另一字段」的现值随行——
+/// 前端 toggleCatSummary 快照 translate、toggleCatTranslate 快照 summary；两次
+/// 切换并发在途且到达乱序时（A(true,false) 迟到于 B(true,true)），整对快照会把
+/// B 已写入的另一字段用**旧值覆盖**回退。单字段 patch 后每次写入只携带当前
+/// 变更字段：两字段独立落库，乱序到达也不互相覆盖。
+///
+/// 两字段皆缺 = 无写入目标：拒绝（validate），避免空转写与误用。
+pub fn set_folder_ai_flags_partial(
+    conn: &Connection,
+    id: i64,
+    summary: Option<bool>,
+    translate: Option<bool>,
+) -> AppResult<()> {
+    if summary.is_none() && translate.is_none() {
+        return Err(crate::error::AppError::new(
+            "validate",
+            "至少给出一个要更新的分类 AI 开关字段",
+        ));
+    }
+    conn.execute(
+        "UPDATE folders SET
+            auto_summary = COALESCE(?1, auto_summary),
+            auto_translate = COALESCE(?2, auto_translate)
+         WHERE id = ?3",
+        params![summary.map(|b| b as i64), translate.map(|b| b as i64), id],
     )?;
     Ok(())
 }
@@ -193,5 +225,44 @@ mod tests {
             Some("技术".to_string()),
             "恢复后查询正常（注入未破坏夹具）"
         );
+    }
+
+    /* ---------- OPT-011：分类 AI 单字段 patch（成功乱序不互相覆盖） ---------- */
+
+    fn flags(conn: &Connection, id: i64) -> (i64, i64) {
+        conn.query_row(
+            "SELECT auto_summary, auto_translate FROM folders WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// 单字段 patch 只动目标字段、另一字段保持原值；旧 full 写入（兼容 caller）
+    /// 语义不变；两字段皆缺拒绝。判别力：某字段写入若把另一字段带回旧值
+    /// （快照式整对写的行为），下面的中间断言即红。
+    #[test]
+    fn partial_folder_ai_flag_only_touches_target_field() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let id = create_folder(&conn, "分类", "article").unwrap();
+
+        // 旧 full caller：整对写入照旧
+        set_folder_ai_flags(&conn, id, true, false).unwrap();
+        assert_eq!(flags(&conn, id), (1, 0), "旧 full caller 语义保持");
+
+        // 单字段 translate=true → summary 保持 1（不被快照旧值覆盖）
+        set_folder_ai_flags_partial(&conn, id, None, Some(true)).unwrap();
+        assert_eq!(flags(&conn, id), (1, 1), "只改 translate，summary 保持");
+
+        // 单字段 summary=false → translate 保持 1
+        // （等价于乱序场景：各字段独立落库，谁先谁后都不带回对方的旧值）
+        set_folder_ai_flags_partial(&conn, id, Some(false), None).unwrap();
+        assert_eq!(flags(&conn, id), (0, 1), "只改 summary，translate 保持");
+
+        // 两字段皆缺：validate 拒绝（不空转写、不误当 no-op）
+        let err = set_folder_ai_flags_partial(&conn, id, None, None).unwrap_err();
+        assert_eq!(err.code, "validate");
+        assert_eq!(flags(&conn, id), (0, 1), "拒绝路径不得改动任何字段");
     }
 }

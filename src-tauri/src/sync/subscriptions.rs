@@ -373,6 +373,12 @@ pub(super) async fn pull_feeds(
                         &rf.title,
                         rf.html_url.as_deref(),
                     );
+                    // R5 注释澄清（不改行为）：本行对每个匹配上的既有远端 feed
+                    // **无条件** +1（前置的 set_feed_remote_id /
+                    // update_feed_title_if_empty 还以 `let _` 吞错）——它不是
+                    // 「真实变化计数」。后台 sync_light 只跑 states_phase、不跑
+                    // feeds 阶段，故本计数不在 has_data_change 的生产消费路径上；
+                    // 订阅层的真实增删仍由 pulled_feeds / removed_feeds 表达。
                     report.merged_states += 1;
                 }
                 None => {

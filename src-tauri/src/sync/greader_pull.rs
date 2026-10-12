@@ -54,6 +54,29 @@ pub(super) async fn pull_entries_greader(
         db::last_sync_ts(&conn).unwrap_or(0)
     };
 
+    // OPT-007 字段版本快照：必须在**任何 HTTP 请求之前**抓取（任务卡「版号快照在
+    // HTTP 前抓」）。快照是「pull 起点该字段无本地写入」的判据；若晚抓（如放在
+    // id 列举之后），用户在 id 列举在途期间标读/收藏并即时推送成功（防抖 ~1s，
+    // 队列已清）后，晚抓的快照会把**新版本**当成起点版本，后续正文/对账携带的
+    // 旧远端状态即可回滚用户意图——只看当前 pending 的实现同样失守（队列已清）。
+    //
+    // 构建失败**不得退化成空映射继续**——空 feed 映射会让 merge 全部「合法跳过」，
+    // 而 chunk_failures 保持 0、游标照常推进，整个窗口被静默跳过（与 Fever R3-P1
+    // 同口径；错误可见 + 游标保留，下一轮重拉同一窗口）。
+    let mut maps = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        match db::sync_match_maps(&conn) {
+            Ok(m) => m,
+            Err(e) => {
+                report.errors.push(format!(
+                    "同步匹配映射构建失败，本轮不合并条目（游标保留）: {e}"
+                ));
+                return Ok(());
+            }
+        }
+    };
+
     // TASK-097 游标语义修正：本轮游标候选在 id 列举**开始前**取（拉取起点墙钟），
     // 拉取成功时写候选，而非修前的「拉取结束墙钟」。论证（起点游标 + 合并幂等 ⇒ 无漏无重）：
     // - 无漏：设起点候选为 C、id 列举时刻为 L（C ≤ L）。凡列举时刻已存在且
@@ -135,23 +158,7 @@ pub(super) async fn pull_entries_greader(
         }
     }
 
-    // 分批拉正文（每次 100 条，避免单请求过大），锁内合并
-    let mut maps = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        db::sync_match_maps(&conn).unwrap_or_else(|e| {
-            report.errors.push(format!("同步匹配映射构建失败: {e}"));
-            db::SyncMatchMaps {
-                url_to_id: Default::default(),
-                id_to_mf_id: Default::default(),
-                id_to_mf_pair: Default::default(),
-                pending_ids: Default::default(),
-                feed_mf_to_id: Default::default(),
-                mf_id_to_article: Default::default(),
-            }
-        })
-    };
-
+    // 分批拉正文（每次 100 条，避免单请求过大），锁内合并。
     // TASK-068：分块失败计数——失败块的条目本轮丢失，若游标照常推进，下一轮
     // 增量从新游标起步，这些条目就只能等全量同步补回（「偶发漏文章」的温床）。
     let mut chunk_failures = 0usize;
@@ -200,6 +207,30 @@ pub(super) async fn pull_entries_greader(
             report
                 .errors
                 .push(format!("合并条目 {url} 失败（本块中止，游标保留）: {err}"));
+            // OPT-007：失败块按 DB 现状**重建匹配映射**——合并是逐语句回写
+            // 并就地改内存 maps，中途失败后不得让后续块继续用可能带半程突变
+            // 的映射（否则失败窗口重拉时按被污染绑定「合法跳过」）。重建
+            // 继续不了就终止本轮（游标已因 chunk_failures 保留，不假成功）。
+            // 字段版本快照经 keep_field_versions_from **保持轮内原值**：重建
+            // 不回刷版本，否则「pull 起点 ~ 重建点」的本地写入会被洗成「起点
+            // 无变化」，后续块的旧远端状态即可回滚用户意图。
+            let conn = db.lock().await;
+            if session.ensure_current(&conn).is_err() {
+                stale = true;
+            } else {
+                match db::sync_match_maps(&conn) {
+                    Ok(mut m) => {
+                        m.keep_field_versions_from(&maps);
+                        maps = m;
+                    }
+                    Err(e) => {
+                        report.errors.push(format!(
+                            "合并失败后重建匹配映射失败（本轮终止，游标保留）: {e}"
+                        ));
+                        break;
+                    }
+                }
+            }
         }
     }
     if stale {
@@ -309,7 +340,9 @@ async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec
 /// Google Reader 权威状态对账（轻量同步用）：
 /// - read 集合含 remote_id → 远端已读 → 本地已读（read-wins，不反向复活未读）
 /// - starred 集合含 remote_id → 本地收藏；不含 → 取消收藏
-/// - pending 保护：本地有未推送变更的条目跳过，防「刚标读/刚收藏」被远端快照回滚
+/// - 字段守卫（OPT-007 / 任务卡负例②）：pull 起点版本快照 + 当前 DB 版本 +
+///   该字段 pending——按 **字段** 独立判定（本地只改过读时，收藏照常收敛；
+///   aid 级 pending 并集会错误地把无冲突字段一起跳过）
 ///
 /// TASK-112：方向语义收口到 `conflict_policy.rs` 政策单点——本函数按
 /// `GR_READ_DIRECTION` / `GR_STAR_DIRECTION` 消费行级落地函数，不再自持
@@ -333,27 +366,35 @@ fn reconcile_reader_state(
 
     for (remote_id, aid) in &maps.mf_id_to_article {
         let aid = *aid;
-        // TASK-112 政策（conflict_policy 头注「共享守卫」）：pending 保护——
-        // 本地有未推送变更的条目跳过远端快照，交给 push 段队列，不被回滚。
-        if maps.pending_ids.contains(&aid) {
-            continue;
-        }
+        // OPT-007：字段版本快照（pull 起点）+ 字段 pending 交给政策守卫；
+        // 快照缺失（理论不可达）按 (0,0) 保守处理——与旧行版本一致。
+        let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
         // TASK-112 政策（GR_READ_DIRECTION = RemoteReadWins 单向 read-wins）：
         // 远端已读 → 本地已读；远端未读不回写（不复活未读）。
-        report.merged_states += conflict_policy::apply_read_by_policy(
+        // R3：apply_* 返回的是**值条件写命中行数**（值实际改变）——据此置数据
+        // 变化标记；merged_states 仍按旧口径累计（对外统计兼容）。
+        let read_rows = conflict_policy::apply_read_by_policy(
             conn,
             conflict_policy::GR_READ_DIRECTION,
             read_set.contains(remote_id),
             aid,
+            snap_read,
+            maps.pending_read_ids.contains(&aid),
         )?;
         // TASK-112 政策（GR_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
         // 命中 → 收藏；未命中 → 取消收藏。
-        report.merged_states += conflict_policy::apply_star_by_policy(
+        let star_rows = conflict_policy::apply_star_by_policy(
             conn,
             conflict_policy::GR_STAR_DIRECTION,
             starred_set.contains(remote_id),
             aid,
+            snap_star,
+            maps.pending_star_ids.contains(&aid),
         )?;
+        if read_rows > 0 || star_rows > 0 {
+            report.entries_data_changed = true;
+        }
+        report.merged_states += read_rows + star_rows;
     }
     Ok(())
 }
@@ -419,7 +460,10 @@ mod tests {
         aid
     }
 
-    /// 单条映射的 SyncMatchMaps（reconcile 只消费 mf_id_to_article 与 pending_ids）。
+    /// 单条映射的 SyncMatchMaps（reconcile 消费 mf_id_to_article / 字段 pending /
+    /// 字段版本快照）。`pending=true` 表示**读/藏两字段都有**未推送意图（逐字段
+    /// 判定的旧口径对照）；版本快照取 (0,0) = 与夹具行（raw SQL 写入、版本 0）
+    /// 相等，即「拉取期间无本地写入」的默认起点。
     fn maps_for(remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
         db::SyncMatchMaps {
             url_to_id: Default::default(),
@@ -430,6 +474,17 @@ mod tests {
             } else {
                 Default::default()
             },
+            pending_read_ids: if pending {
+                std::iter::once(aid).collect()
+            } else {
+                Default::default()
+            },
+            pending_star_ids: if pending {
+                std::iter::once(aid).collect()
+            } else {
+                Default::default()
+            },
+            id_to_versions: std::iter::once((aid, (0, 0))).collect(),
             feed_mf_to_id: Default::default(),
             mf_id_to_article: std::iter::once((remote_id, aid)).collect(),
         }
@@ -546,5 +601,37 @@ mod tests {
             "pending 保护：本地收藏不得被远端未收藏快照清除"
         );
         assert_eq!(report.merged_states, 0, "pending 命中行不产生任何写入");
+    }
+
+    /// OPT-007 字段版本守卫（对账入口，任务卡负例①②）：
+    /// 拉取期间本地收藏（star_version 0→1，且队列已清/无 pending——只有版本
+    /// 能保护）→ 远端「未命中」集合不得取消收藏；同一文章的读字段无本地写入
+    /// （快照 == 当前版本）→ 远端已读照常收敛——字段彼此独立，不因收藏被保护
+    /// 而放弃读的合并。判别力：只用 aid 级 pending 集合的实现（old 形态）在
+    /// 队列已清时会把收藏取消（第三断言红）；字段版本守卫被移除时同样红。
+    #[test]
+    fn gr_reconcile_field_version_guard_protects_local_write_and_keeps_other_field() {
+        let conn = conn();
+        let aid = seed_bound(&conn, 106);
+        db::set_starred(&conn, aid, true).unwrap(); // 本地收藏：star_version 0→1
+        let mut maps = maps_for(106, aid, false);
+        maps.id_to_versions.insert(aid, (0, 0)); // pull 起点快照早于该本地写入
+
+        let mut report = SyncReport::default();
+        // 远端快照：starred 未命中（会取消收藏）+ read 命中（应照常标读）。
+        reconcile_reader_state(&conn, &[106], &[], &maps, &mut report).unwrap();
+
+        assert!(
+            is_starred(&conn, aid),
+            "拉取期间本地收藏（版本已变、队列已清）：远端未命中集合不得取消"
+        );
+        assert!(
+            is_read(&conn, aid),
+            "读字段无本地写入、版本快照相等：远端已读照常收敛（字段独立）"
+        );
+        assert_eq!(
+            report.merged_states, 1,
+            "仅读字段一次写入——收藏被字段版本守卫跳过，不牵连读"
+        );
     }
 }

@@ -3,9 +3,11 @@ import type {
   ArticleEntry,
   CategoryGroup,
   ContentLayoutType,
+  FeedAiMode,
   FeedItem,
   ViewFilterType,
 } from '../types';
+import { normalizeFeedAiMode, resolveFeedAiMode } from '../types';
 import { isSameLocalDay } from '../lib/format';
 import { getBodyEntry } from './bodyCache';
 import type { BodyEntry, BodyState } from './bodyCache';
@@ -309,12 +311,33 @@ export function selectTreeCounts(
   return counts;
 }
 
-/** 订阅源 → AI 配置解析（feed 值总是存在，绑定缺失即无配置） */
+/** 订阅源 → AI 配置解析（唯一 resolver，OPT-011）：
+    - 真值 = 源的三态 mode（旧行/旧 mock 缺 mode 时按旧 bool 映射，见 types.ts）；
+    - 'inherit' → 跟随所属分类的布尔默认；'on'/'off' → 源的显式选择
+      （显式关闭压过分类开启——不以 OR 合并，保证可关闭）；
+    - 旧 bool 字段（feed.autoSummary/autoTranslate）只作为缺 mode 的映射输入，
+      不再是有效真值：任何组件都不得绕过本函数直读源上的旧 bool。
+    绑定缺失即无配置（false）。返回 mode 供设置页三态控件回显。
+    Note: 三态真值、bool 兼容输入与单一 resolver 的取舍 — 见
+    .agents/notes/implemented/architecture/2026-10-08-AI配置继承与派生索引单点.md */
 export function selectFeedConfig(s: Pick<AppState, 'feedIndex'>, feedId: string) {
   const binding = s.feedIndex.get(feedId);
+  if (!binding) {
+    return {
+      autoSummary: false,
+      autoTranslate: false,
+      summaryMode: 'off' as FeedAiMode,
+      translateMode: 'off' as FeedAiMode,
+    };
+  }
+  const { feed, cat } = binding;
+  const summaryMode = normalizeFeedAiMode(feed.summaryMode, feed.autoSummary);
+  const translateMode = normalizeFeedAiMode(feed.translateMode, feed.autoTranslate);
   return {
-    autoSummary: binding?.feed.autoSummary ?? false,
-    autoTranslate: binding?.feed.autoTranslate ?? false,
+    autoSummary: resolveFeedAiMode(summaryMode, cat.autoSummary),
+    autoTranslate: resolveFeedAiMode(translateMode, cat.autoTranslate),
+    summaryMode,
+    translateMode,
   };
 }
 

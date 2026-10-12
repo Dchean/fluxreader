@@ -2,6 +2,7 @@ import type {
   ArticleEntry,
   CategoryGroup,
   ContentLayoutType,
+  FeedAiMode,
   FeedItem,
   PaletteTheme,
   ThemeMode,
@@ -359,18 +360,20 @@ export interface AppState {
   deleteCategory: (catId: string) => void;
   /** 分类改名（连接 Miniflux 时同步远端） */
   renameCategory: (catId: string, name: string) => void;
-  addFeed: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean, syncToBackend?: boolean) => void;
+  addFeed: (catId: string, url: string, title: string, layout: string, summaryMode: FeedAiMode, translateMode: FeedAiMode, syncToBackend?: boolean) => void;
   deleteFeed: (catId: string, feedId: string) => void;
-  /** 编辑源：改名/移动分类/布局/AI 开关一次性提交 */
-  editFeed: (feedId: string, next: { title: string; catId: string; layout: string; autoSummary: boolean; autoTranslate: boolean }) => void;
+  /** 编辑源：改名/移动分类/布局/AI 开关一次性提交。
+   * OPT-011：AI 开关以三态 mode 为真值（修正此前 bool 回显覆盖用户选择）。 */
+  editFeed: (feedId: string, next: { title: string; catId: string; layout: string; summaryMode: FeedAiMode; translateMode: FeedAiMode }) => void;
   /** 单源手动刷新（直连），toast 反馈新增条数 */
   refreshOneFeed: (feedId: string) => void;
   updateCatLayout: (catId: string, layout: ContentLayoutType) => void;
   updateFeedLayout: (catId: string, feedId: string, layout: string) => void;
   toggleCatSummary: (catId: string, val: boolean) => void;
   toggleCatTranslate: (catId: string, val: boolean) => void;
-  toggleFeedSummary: (catId: string, feedId: string, val: boolean) => void;
-  toggleFeedTranslate: (catId: string, feedId: string, val: boolean) => void;
+  /** OPT-011：源级三态开关（'inherit' | 'on' | 'off'）——显式关闭压过分类开启 */
+  toggleFeedSummary: (catId: string, feedId: string, mode: FeedAiMode) => void;
+  toggleFeedTranslate: (catId: string, feedId: string, mode: FeedAiMode) => void;
   toggleFolderCollapse: (catId: string) => void;
   toggleAllFolders: () => void;
   toggleSettingsCatCollapse: (catId: string) => void;

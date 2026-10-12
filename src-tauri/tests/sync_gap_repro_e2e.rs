@@ -641,6 +641,8 @@ async fn feed_rename_and_move_push_edit_subscription() {
             None,
             None,
             None,
+            None,
+            None,
         )
         .expect("record edit")
     };
@@ -680,6 +682,8 @@ async fn feed_rename_and_move_push_edit_subscription() {
             feed_id,
             None,
             Some(target_folder),
+            None,
+            None,
             None,
             None,
             None,
@@ -1104,6 +1108,8 @@ async fn feed_edit_without_backend_stays_local() {
             &conn,
             feed_id,
             Some("Locally Renamed"),
+            None,
+            None,
             None,
             None,
             None,

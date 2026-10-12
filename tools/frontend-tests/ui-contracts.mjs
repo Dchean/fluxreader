@@ -435,6 +435,9 @@ export async function run(ctx) {
       id: '7', name: 'Fixture Feed', url: 'https://f.example/rss',
       favicon: 'https://f.example/favicon.ico', layout: 'article',
       autoSummary: true, autoTranslate: false, fetchFailed: false,
+      /* OPT-011：三态 mode 是真值（fixture 的 mode 与 bool 取值刻意不一致——
+         bool 仅兼容位；若映射回读 bool 而不是 mode，这两键断言即红） */
+      summaryMode: 'inherit', translateMode: 'off',
     };
 
     const missing = (actual, expected) => Object.keys(expected).filter((k) => !(k in actual));
@@ -1267,11 +1270,11 @@ export async function run(ctx) {
         layout: 'article', autoSummary: false, autoTranslate: false, feeds: [],
       });
       store.setState({ dataMode: 'mock', categories: [mkCat(1)], toasts: [] });
-      store.getState().addFeed('cat-999', 'https://x.example/rss', '幽灵源', 'article', false, false, false);
+      store.getState().addFeed('cat-999', 'https://x.example/rss', '幽灵源', 'article', 'inherit', 'inherit', false);
       checkNew('(t100-p3-10) 无匹配分类：失败 toast，且分类树未被污染（修前静默假成功「已添加订阅源」）',
         store.getState().toasts.at(-1)?.text === '添加失败：目标分类不存在'
           && store.getState().categories[0].feeds.length === 0);
-      store.getState().addFeed('cat-1', 'https://x.example/rss', '正常源', 'article', false, false, false);
+      store.getState().addFeed('cat-1', 'https://x.example/rss', '正常源', 'article', 'inherit', 'inherit', false);
       checkNew('(t100-p3-10) 有匹配分类：成功 toast + feed 挂载（既有行为保持）',
         store.getState().toasts.at(-1)?.text === '已添加订阅源：正常源'
           && store.getState().categories[0].feeds.length === 1);

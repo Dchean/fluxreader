@@ -279,6 +279,8 @@ pub fn run() {
             commands::update_feed,
             commands::update_feed_layout,
             commands::set_feed_ai_flags,
+            // OPT-011：源级 AI 开关三态（inherit/on/off）新入口
+            commands::set_feed_ai_modes,
             // 条目
             commands::list_articles,
             commands::article_index,

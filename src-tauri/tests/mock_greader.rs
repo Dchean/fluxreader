@@ -68,6 +68,22 @@ pub struct MockSubscription {
     pub categories: Vec<(String, String)>, // (label, type="folder")
 }
 
+/// OPT-007 屏障槽位类型（单独命名满足 clippy::type_complexity）：
+/// stream/items/ids 的（匹配子串 + 停靠信号 + 放行信号）。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，只被其中一个消费
+type StreamIdsBarrierSlot = Option<(
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+)>;
+/// OPT-007 屏障槽位类型：stream/items/contents 的（第 N 次 + 停靠信号 + 放行信号）。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，只被其中一个消费
+type ContentsBarrierSlot = Option<(
+    usize,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+)>;
+
 pub struct MockGReader {
     pub port: u16,
     pub entries: Mutex<Vec<MockEntry>>,
@@ -144,6 +160,24 @@ pub struct MockGReader {
     /// entries——模拟「拉取进行中（id 列举之后、游标推进之前）服务端出现的变更」，
     /// 该条目因此不在本轮结果里，用于锁定「下一轮增量必须拉回它」。
     pub pending_injection: Mutex<Option<MockEntry>>,
+    /// OPT-007 屏障（响应在途时序）：匹配的 `stream/items/ids` 请求在响应体
+    /// **算定之后、写回之前**挂起，直到测试显式放行。测试可在此期间对本地库
+    /// 执行真实操作（本地状态写入 / 模拟推送确认清队）——复现「请求已发出 →
+    /// 本地变更 → 旧快照返回」的可控时序（不靠 sleep 碰运气）。
+    pub stream_ids_barrier: Mutex<StreamIdsBarrierSlot>,
+    /// OPT-007 屏障：第 N 次（1 基计数）`stream/items/contents` 请求在响应体
+    /// 算定后挂起——驱动「新条目入库后、同批下一页在途时本地变更」的场景。
+    pub contents_barrier: Mutex<ContentsBarrierSlot>,
+    /// contents 请求计数（contents_barrier 的匹配依据）。
+    pub contents_calls: std::sync::atomic::AtomicUsize,
+}
+
+/// OPT-007 网络屏障的测试端句柄：`arrived` 在响应即将写回前收到信号，
+/// `release` 放行响应。测试顺序：等 arrived → 执行本地真实操作 → release。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，只被其中一个消费
+pub struct MockBarrier {
+    pub arrived: tokio::sync::oneshot::Receiver<()>,
+    pub release: tokio::sync::oneshot::Sender<()>,
 }
 
 impl MockGReader {
@@ -198,6 +232,9 @@ impl MockGReader {
             fever_query_strings: Mutex::new(Vec::new()),
             requests: Mutex::new(Vec::new()),
             pending_injection: Mutex::new(None),
+            stream_ids_barrier: Mutex::new(None),
+            contents_barrier: Mutex::new(None),
+            contents_calls: std::sync::atomic::AtomicUsize::new(0),
         });
 
         let srv = server.clone();
@@ -474,6 +511,33 @@ impl MockGReader {
         });
     }
 
+    /// OPT-007：在第 N 次（1 基）`stream/items/contents` 响应「算定后、写回前」
+    /// 挂起，返回测试端句柄（见 [`MockBarrier`]）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn arm_contents_barrier(&self, call_index: usize) -> MockBarrier {
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.contents_barrier.lock().unwrap() = Some((call_index, arrived_tx, release_rx));
+        MockBarrier {
+            arrived: arrived_rx,
+            release: release_tx,
+        }
+    }
+
+    /// OPT-007：对 s= 参数包含 `stream_contains` 的 `stream/items/ids` 请求
+    /// （响应算定后、写回前）挂起，返回测试端句柄（见 [`MockBarrier`]）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn arm_stream_ids_barrier(&self, stream_contains: &str) -> MockBarrier {
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.stream_ids_barrier.lock().unwrap() =
+            Some((stream_contains.to_string(), arrived_tx, release_rx));
+        MockBarrier {
+            arrived: arrived_rx,
+            release: release_tx,
+        }
+    }
+
     /// 同 add_entry_ret，但可指定正文 HTML 与 enclosures（播客/封面回归用）。
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
@@ -571,6 +635,52 @@ async fn handle_conn(
     }
 
     let (status, json) = route(&srv, method, path, path_query, &body, &head);
+
+    // OPT-007 网络屏障：命中的请求在响应体**算定之后、写回之前**挂起——
+    // 测试可在此期间对本地库执行真实操作（本地写入 / 模拟推送确认清队），
+    // 复现「请求已发出 → 本地变更 → 旧快照返回」的可控时序（不靠 sleep）。
+    if path.ends_with("/reader/api/0/stream/items/ids") {
+        let barrier = {
+            let mut slot = srv.stream_ids_barrier.lock().unwrap();
+            let matched = slot
+                .as_ref()
+                .map(|(stream, _, _)| {
+                    let q = parse_query(path_query);
+                    let s = q.get("s").cloned().unwrap_or_default();
+                    s.contains(stream.as_str())
+                })
+                .unwrap_or(false);
+            if matched {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, arrived, release)) = barrier {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
+    if path.ends_with("/reader/api/0/stream/items/contents") {
+        let n = srv
+            .contents_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let barrier = {
+            let mut slot = srv.contents_barrier.lock().unwrap();
+            let matched = slot.as_ref().map(|(idx, _, _)| *idx == n).unwrap_or(false);
+            if matched {
+                slot.take().map(|(_, arrived, release)| (arrived, release))
+            } else {
+                None
+            }
+        };
+        if let Some((arrived, release)) = barrier {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
+
     write_json(&mut stream, status, &json).await
 }
 
@@ -852,10 +962,17 @@ fn route(
             }
             let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
-            // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）
+            // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）。
+            // R3 夹具修正（协议依据）：Google Reader 的 `user/-/state/com.google/read`
+            // 与 `.../starred` 是**正交的 tag 流**——成员资格 = 条目携带该 tag，
+            // 与另一状态无关（真实 Miniflux GReader shim / FreshRSS 同样只按对应
+            // 状态过滤）。旧实现用 (read,starred) 双约束 (true,false)/(false,true)，
+            // 顺带要求了「未收藏才算已读 / 已读不算收藏」——非协议规则，会让
+            // read+starred 条目从两个流里同时消失，reconcile 误判「远端取消了收藏」。
+            // 故每流只约束自己的布尔位（None = 不约束另一位）。
             let state_filter = match stream.as_str() {
-                "user/-/state/com.google/read" => Some((true, false)), // 只看已读
-                "user/-/state/com.google/starred" => Some((false, true)), // 只看收藏
+                "user/-/state/com.google/read" => Some((Some(true), None)), // 只看已读
+                "user/-/state/com.google/starred" => Some((None, Some(true))), // 只看收藏
                 _ => None,
             };
             let feed_filter: Option<i64> =
@@ -867,7 +984,10 @@ fn route(
                 .iter()
                 .filter(|e| feed_filter.map_or(true, |f| e.feed_id == f))
                 .filter(|e| match state_filter {
-                    Some((is_read, is_starred)) => (e.read == is_read) && (e.starred == is_starred),
+                    Some((want_read, want_starred)) => {
+                        want_read.map_or(true, |v| e.read == v)
+                            && want_starred.map_or(true, |v| e.starred == v)
+                    }
                     None => true,
                 })
                 .filter(|e| e.changed_at >= ot)

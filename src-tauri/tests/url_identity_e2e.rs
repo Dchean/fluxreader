@@ -23,9 +23,16 @@ use rusqlite::OptionalExtension;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// 造「v18 存量现场」：用生产 open 建出最新 schema（v19 为纯数据迁移，v18 与
-/// v19 的 schema 相同），再把迁移簿记回拨到 18 并植入旧算法产物，使下一次
-/// open 走真实的「v18 → v19 + 版本化重算」升级路径。
+/// 造「v18 存量现场」：用生产 open 建出最新 schema，再把**迁移簿记与物理形状**
+/// 一并回拨到 v18——v18 之后只有 v19 纯数据迁移、v20 纯增列（read_version /
+/// star_version）与 v21 纯增列（feeds.summary_mode / translate_mode）；追加式
+/// 迁移不允许改写历史，夹具要模拟真实 v18 形状只能由最新 schema 反向裁剪这些列。
+/// 随后植入旧算法产物，使下一次 open 走真实的
+/// 「v18 → v19 → v20 → v21 + 版本化重算」升级路径。
+///
+/// OPT-007 / OPT-011 起注意：此后新增 ADD COLUMN 迁移必须在本夹具追加对应的
+/// DROP COLUMN 回拨——否则 user_version=18 与物理列不一致，迁移会以 duplicate
+/// column fail-stop（这正是迁移框架「版本号与物理形状必须一致」的应有行为）。
 fn seed_v18_legacy(path: &std::path::Path) {
     let conn = db::open(path).expect("open db");
     conn.execute_batch(
@@ -43,6 +50,12 @@ fn seed_v18_legacy(path: &std::path::Path) {
           ('feed_tombstones', '["https://gone.example/rss"]'),
           ('folder_tombstones', '["旧目录"]');
         DELETE FROM settings WHERE key = 'url_norm_backfill_version';
+        -- OPT-007：v20 增列后的物理回拨（见上方函数注释）
+        ALTER TABLE articles DROP COLUMN read_version;
+        ALTER TABLE articles DROP COLUMN star_version;
+        -- OPT-011：v21 增列（feeds 三态）后的物理回拨
+        ALTER TABLE feeds DROP COLUMN summary_mode;
+        ALTER TABLE feeds DROP COLUMN translate_mode;
         PRAGMA user_version = 18;
         "#,
     )
@@ -334,6 +347,7 @@ async fn seed_deleted_feed_legacy_era(
             "已绑定远端：删除应返回待退订目标（测试不实际退订，远端保持列出）"
         );
         // 改写为旧算法时代现场：墓碑剥参键 + 旧标记 + 版本回拨
+        // OPT-007：物理形状一并回拨到 v18（删 v20 增列，同 seed_v18_legacy 注明）
         let legacy_json = serde_json::to_string(&vec![legacy_key.clone()]).unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('feed_tombstones', ?1)",
@@ -343,6 +357,11 @@ async fn seed_deleted_feed_legacy_era(
         conn.execute_batch(
             "DELETE FROM settings WHERE key = 'feed_tombstones_legacy_v1';
              INSERT OR REPLACE INTO settings (key, value) VALUES ('url_norm_backfill_done', '1');
+             ALTER TABLE articles DROP COLUMN read_version;
+             ALTER TABLE articles DROP COLUMN star_version;
+             -- OPT-011：v21 增列（feeds 三态）后的物理回拨（同 seed_v18_legacy）
+             ALTER TABLE feeds DROP COLUMN summary_mode;
+             ALTER TABLE feeds DROP COLUMN translate_mode;
              PRAGMA user_version = 18;",
         )
         .unwrap();

@@ -2524,6 +2524,22 @@ body {
   /* 60px = 紧凑开关 32 + 间距 4 + 两个汉字（分类行与源行文字等宽，列宽恒定） */
 }
 
+/* OPT-011：源行三态 AI 开关（继承/开启/关闭）——比两态开关宽，
+   定宽列保证同列对齐；分类行保持原有 60px 开关列。 */
+.mgr-ai-mode-label {
+  font-size: 11.5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  flex: 0 0 128px; /* 96px 下拉 + 4px 间距 + 两个汉字 */
+}
+
+.ai-mode-select {
+  display: inline-flex;
+  align-items: center;
+}
+
 .group-mgr-body {
   /* 水平 padding 归零：源行自带 12px 行内边距，与 header 同基准对齐（双层缩进会让按键列错 12px） */
   padding: 10px 0;

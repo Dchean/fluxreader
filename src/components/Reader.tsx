@@ -111,23 +111,37 @@ export function Reader() {
     setSummaryOverride(null);
   }, [art?.id]);
 
-  /* 源级 autoSummary/autoTranslate：打开文章即自动触发。
-     等内容水合完成后再触发（翻译需要正文）；已有缓存时后端会短路；
+  /* 源级/分类级有效 autoSummary/autoTranslate（唯一 resolver 解析 mode+分类）：
+     打开文章即自动触发，等正文水合完成后再发起（翻译需要正文）。
      静默失败：未配置 AI 不弹 toast（手动按钮仍会提示）。
      TASK-122：水合完成判定从 bodyById 状态取（ready；cleared = AI 被清理但
-     正文保留——打开即按 auto 配置重新生成，即「清理后重开可再次生成」）。 */
+     正文保留——打开即按 auto 配置重新生成，即「清理后重开可再次生成」）。
+     OPT-011：effect 订阅**有效配置**（config 字段入依赖）——切换源的继承/显式
+     开关或分类默认后立即重评：
+     - 关闭 → 重跑时不触发（尚未发起的自动请求被立即阻止）；
+     - 开启 → 若本文尚无产物且在途为空则发起；
+     - 已经在途的请求不取消（政策：已发送的内容不可撤销，不声称可撤回）；
+       生成中标记（summarizingIds/translating）防重复发起。 */
   const hydrated = (body.state === 'ready' || body.state === 'cleared') && body.content !== '';
   useEffect(() => {
     if (!art || !hydrated) return;
     const st = useAppStore.getState();
     if (st.dataMode !== 'tauri') return;
     const cfg = selectFeedConfig(st, art.feedId);
-    if (cfg.autoSummary && !body.aiSummary) st.triggerReaderSummary({ silent: true });
-    if (cfg.autoTranslate && !body.translatedContent && !st.isShowingTranslatedProse) {
+    if (cfg.autoSummary && !body.aiSummary && !st.summarizingIds[art.id]) {
+      st.triggerReaderSummary({ silent: true });
+    }
+    if (
+      cfg.autoTranslate
+      && !body.translatedContent
+      && !st.isShowingTranslatedProse
+      && !st.translatingIds[art.id]
+      && !st.translating
+    ) {
       st.toggleReaderTranslation({ silent: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [art?.id, hydrated]);
+  }, [art?.id, hydrated, config.autoSummary, config.autoTranslate]);
 
   /* 滚动到正文底部 → 标已读（markReadOnScrollBottom，实施方案 §3 已读行为②） */
   useEffect(() => {

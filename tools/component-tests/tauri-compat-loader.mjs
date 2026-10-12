@@ -21,10 +21,28 @@ export async function openUrl(url) {
 export async function revealItemInDir() {}
 `,
   '@tauri-apps/api/event': `
-export async function listen() { return () => {}; }
-export async function once() { return () => {}; }
+const __handlers = new Map();
+export async function listen(name, cb) {
+  const list = __handlers.get(name) ?? [];
+  list.push(cb);
+  __handlers.set(name, list);
+  return () => {
+    const l = __handlers.get(name) ?? [];
+    const i = l.indexOf(cb);
+    if (i >= 0) l.splice(i, 1);
+  };
+}
+export async function once(name, cb) { return listen(name, cb); }
 export async function emit() { return; }
 export async function emitTo() { return; }
+/* OPT-007：把一次「后端 emit」按真实事件载荷形态 { event, id, payload } 派发给
+   全部在册监听者（模拟 WebView 事件回调），返回命中监听者数——「生产者发出的
+   事件真的到达前端监听器」类断言据此取证。无监听者不报错（与真实行为一致）。 */
+globalThis.__DISPATCH_TAURI_EVENT__ = (name, payload) => {
+  const list = [...(__handlers.get(name) ?? [])];
+  for (const cb of list) cb({ event: name, id: 0, payload });
+  return list.length;
+};
 export class TauriEvent {
   static get TauriEvent() { return undefined; }
 }

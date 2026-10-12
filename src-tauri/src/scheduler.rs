@@ -25,6 +25,9 @@ pub const MAX_CONCURRENCY: usize = 16;
 /// 注（TASK-069 审查 F3）：这里保留一次 raw 聚合读取，是因为 refreshInterval 与
 /// fetchConcurrency 是**数值型**（带区间夹取），N-硬2 明确将数值读取推迟到后续任务，
 /// 布尔助手不覆盖该语义。已收口的纯布尔读取仍走 app_settings_bool/app_settings_str。
+///
+/// OPT-011：refreshInterval 的解析收口到 read_refresh_interval（5–720 整数，
+/// 与前端校验/UI 滑杆同口径；整数值小数如 30.0 等价接受，30.5 拒绝）。
 async fn read_refresh_config(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
 ) -> (bool, i64, bool, usize) {
@@ -41,10 +44,8 @@ async fn read_refresh_config(
         if let Some(v) = json.get("autoRefresh").and_then(|v| v.as_bool()) {
             enabled = v;
         }
-        if let Some(v) = json.get("refreshInterval").and_then(|v| v.as_i64()) {
-            if (5..=720).contains(&v) {
-                interval = v;
-            }
+        if let Some(v) = read_refresh_interval(&json) {
+            interval = v;
         }
         if let Some(v) = json.get("smartDedup").and_then(|v| v.as_bool()) {
             dedup = v;
@@ -56,6 +57,19 @@ async fn read_refresh_config(
         }
     }
     (enabled, interval, dedup, concurrency)
+}
+
+/// refreshInterval 的数值读取单点（OPT-011）：只接受 5–720 的**整数**。
+/// serde_json 里 `30` 解析为 i64、`30.0`/`30.5` 为 f64——整数值的 f64（30.0）
+/// 等价接受；非整数小数（30.5）与越界值一律 None（调用方回落默认），
+/// 与前端 settingsValidation（区间 + Number.isInteger）逐字同口径，
+/// 不会出现「客户端收下小数、Rust 静默回默认」的双侧分叉。
+fn read_refresh_interval(v: &serde_json::Value) -> Option<i64> {
+    let raw = v.get("refreshInterval")?;
+    let as_int = raw
+        .as_i64()
+        .or_else(|| raw.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))?;
+    (5..=720).contains(&as_int).then_some(as_int)
 }
 
 /// 同步模式（app_settings.syncMode，UI 词条「本机抓取 / 跟随服务端」）：
@@ -211,13 +225,13 @@ async fn auto_sync_backend(
         }
         // refreshInterval 是数值型（带区间夹取），N-硬2 明确推迟到后续任务；
         // 仅在 autoSync 开启时才需要解析，故放在早退之后（避免无谓的二次读取）。
+        // OPT-011：解析收口到 read_refresh_interval（5–720 整数，与刷新调度同一口径）。
         let interval = crate::db::get_setting(&conn, "app_settings")
             .ok()
             .flatten()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .as_ref()
-            .and_then(|v| v.get("refreshInterval").and_then(|i| i.as_i64()))
-            .filter(|i| (5..=720).contains(i))
+            .and_then(read_refresh_interval)
             .unwrap_or(30);
         // OPT-014 R1：凭据读取/解密失败（密文损坏）不等于「未配置」——
         // 记警告并跳过本轮自动同步（不发任何请求；可见失败由推送路径的
@@ -245,16 +259,31 @@ async fn auto_sync_backend(
     match crate::sync::sync_light(db, http).await {
         Ok(r) => {
             log::info!(
-                "scheduler: 后端自动同步完成：推 {}/拉 {} 项，{} 错误",
+                "scheduler: 后端自动同步完成：推 {}/拉 {} 项、对账 {} 项，{} 错误",
                 r.pushed_states,
                 r.pulled_entries,
+                r.merged_states,
                 r.errors.len()
             );
-            // 拉平了状态（或推空但有 pending 修正）→ 通知前端重载
-            if r.pulled_entries > 0 {
+            /* OPT-007（F11 / R3 / R4 / R5）：数据变化事件按**实际变更集**驱动——
+            判定单点在 SyncReport::has_data_change：条目层真实变化
+            （entries_data_changed：新插入 / 正文·绑定真实改变 / 读藏值实际改变，
+            每个成功变更点即时合并）或 merged_states（本消费路径上为 states 阶段
+            对账值条件写命中行——真实变化；订阅阶段的无条件绑定计数不在
+            sync_light 路径上，见 mod.rs 注释）或订阅层增删（pulled_feeds /
+            removed_feeds）。pulled_entries 是「处理过/已接受」计数（守卫通过但
+            值未变也计数），不冒充变化。空变化（只有推送确认/错误）不发，避免
+            无谓 reload 抖动。payload 保持既有字段（new_articles 固定 0 为保留
+            策略），前端零改动。 */
+            if r.has_data_change() {
                 let _ = app.emit(
                     "feeds-updated",
-                    serde_json::json!({ "new_articles": 0, "failed_feeds": 0 }),
+                    serde_json::json!({
+                        "new_articles": 0,
+                        "failed_feeds": 0,
+                        "pulled_entries": r.pulled_entries,
+                        "merged_states": r.merged_states
+                    }),
                 );
             }
         }
@@ -490,4 +519,53 @@ async fn attempt_cover(
         filled += n;
     }
     filled
+}
+
+/* ============================================================
+OPT-011：refreshInterval 读取口径单元测试（5–720 整数；与前端同区间）
+============================================================ */
+#[cfg(test)]
+mod refresh_interval_tests {
+    use super::read_refresh_interval;
+    use serde_json::json;
+
+    /// (opt011-int) 区间边界与整数口径：5 / 720 接受；4 / 721 拒绝；
+    /// JSON 整数（30）与整数值小数（300.0）等价接受；非整数小数（30.5）
+    /// 拒绝（不悄悄回默认——调用方以 None 走默认，与前端 Number.isInteger
+    /// 的拒绝口径一致）；缺失/非数值拒绝。
+    #[test]
+    fn refresh_interval_accepts_only_integers_within_range() {
+        assert_eq!(
+            read_refresh_interval(&json!({"refreshInterval": 5})),
+            Some(5)
+        );
+        assert_eq!(
+            read_refresh_interval(&json!({"refreshInterval": 300})),
+            Some(300)
+        );
+        assert_eq!(
+            read_refresh_interval(&json!({"refreshInterval": 720})),
+            Some(720)
+        );
+        assert_eq!(
+            read_refresh_interval(&json!({"refreshInterval": 300.0})),
+            Some(300),
+            "整数值小数与 int 等价（JSON 里 300.0 解析为 f64）"
+        );
+        assert_eq!(
+            read_refresh_interval(&json!({"refreshInterval": 30.5})),
+            None,
+            "非整数小数必须拒绝（修前 as_i64() 静默 None → 回默认，与 UI 值分叉）"
+        );
+        assert_eq!(read_refresh_interval(&json!({"refreshInterval": 4})), None);
+        assert_eq!(
+            read_refresh_interval(&json!({"refreshInterval": 721})),
+            None
+        );
+        assert_eq!(
+            read_refresh_interval(&json!({"refreshInterval": "30"})),
+            None
+        );
+        assert_eq!(read_refresh_interval(&json!({})), None);
+    }
 }

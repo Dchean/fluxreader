@@ -49,12 +49,26 @@ fn item_published_at(e: &ItemContent) -> String {
 }
 
 /// 状态合并的守卫语义（pull_entries 与对账共用）：
-/// - 待推保护：本地有未推送变更 → 跳过（本地优先，防乒乓）
+/// - 待推保护：本地有未推送变更 → 跳过该**字段**（本地优先，防乒乓）；
+/// - OPT-007 字段版本守卫：pull 起点版本快照 != 当前 DB 版本 → 跳过该字段
+///   （拉取期间本地写过；即使推送已确认、队列已清，版本仍保留）；
 /// - read-anywhere-wins：「读」是强意图，任何副本的已读都接受
 /// - unread 只认绑定同源 entry：跨源副本的未读不能复活桌面已读
 ///
+/// 字段彼此独立：读的守卫不压收藏的合并，反之亦然（任务卡负例②）。
+///
 /// R2：所有 DB 写失败**透传 Err**（不再 warn 后继续）——Fever 侧据此整页回滚
 /// 并保留输入页游标；GR 侧由调用方记错误且不推进游标（不吞失败）。
+///
+/// R3：状态写改用**值条件**原语（`*_if_unread/_if_read/_if_unstarred/_if_starred`
+/// 的 at_version 形态）——命中行数 = 值实际改变的证据，据此置
+/// `report.entries_data_changed`；`pulled_entries` 仍按旧口径（守卫通过即计数，
+/// 含同值）累计，保持对外统计兼容，但不再充当事件判定依据。
+///
+/// R4：标记在**每个成功实际变更点立即合并**（不等函数尾）——GR 是逐语句提交
+/// （无页事务），绑定/read 写成功后同函数内的 star 写可能 Err，若攒到尾部再
+/// 置位，已提交的变化就失去事件信号。失败本身不算变化（Err 路径不置位），
+/// 只有 rows>0 / binding_changed 才置。
 fn merge_remote_status(
     conn: &Connection,
     aid: i64,
@@ -66,7 +80,15 @@ fn merge_remote_status(
         return Ok(());
     };
     let feed_id = item_feed_id(e);
-    db::set_article_remote_id(conn, aid, eid)?;
+    let binding_changed = db::set_article_remote_id(conn, aid, eid)?;
+    // R3/R4/R5：绑定本身是可见数据变化（NULL/旧 id → 该 entry 的 id）——在
+    // set_article_remote_id **成功之后立即**并入标记：其后任何可失败读取
+    // （article_by_remote_id、字段版本守卫等）或写入失败都不得让已提交的绑定
+    // 变化失去信号（GR 逐语句提交，无页事务）。纯失败不置位（binding_changed
+    // 仅在值实际变化时为 true）。
+    if binding_changed {
+        report.entries_data_changed = true;
+    }
     // 同步 maps 的绑定状态：后续 entry 若 URL 兜底匹配到同一 aid，能读到
     // 「已绑定 eid」而非批量快照里的「未绑定」，避免跨源同 URL 副本被误判为
     // 自己的条目（时序偏差）。
@@ -79,9 +101,6 @@ fn merge_remote_status(
         ),
     );
     maps.mf_id_to_article.insert(eid, aid);
-    if maps.pending_ids.contains(&aid) {
-        return Ok(());
-    }
     let remote_read = greader::has_tag(&e.categories, "/com.google/read");
     let remote_starred = greader::has_tag(&e.categories, "/com.google/starred");
     let local_bound = db::article_by_remote_id(conn, eid)?.is_some();
@@ -95,8 +114,50 @@ fn merge_remote_status(
         .unwrap_or(false);
     let accept_unread = local_bound && same_feed_trusted;
     if remote_read || accept_unread {
-        db::sync_set_article_status(conn, aid, remote_read, remote_starred)?;
-        report.pulled_entries += 1;
+        // OPT-007：逐字段过版本守卫（pull 起点快照 + 当前 DB 版本 + 该字段
+        // pending）。任一方被本地新写入/未推送意图压住时只跳过该字段，另一
+        // 字段不受牵连；两侧都过才把整条计入 pulled_entries（与旧口径「状态
+        // 已接受」对齐）。merge_remote_status 只在 merge_pulled_entry 的
+        // is_own 分支调用（同库测试锁定时序），入参 maps 与写入同处一个
+        // DB 临界区。
+        let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
+        let read_ok = conflict_policy::field_accepts_remote(
+            conn,
+            aid,
+            conflict_policy::SyncField::Read,
+            snap_read,
+            maps.pending_read_ids.contains(&aid),
+        )?;
+        let star_ok = conflict_policy::field_accepts_remote(
+            conn,
+            aid,
+            conflict_policy::SyncField::Star,
+            snap_star,
+            maps.pending_star_ids.contains(&aid),
+        )?;
+        if read_ok {
+            let rows = if remote_read {
+                db::sync_mark_read_if_unread_at_version(conn, aid, snap_read)?
+            } else {
+                db::sync_mark_unread_if_read_at_version(conn, aid, snap_read)?
+            };
+            if rows > 0 {
+                report.entries_data_changed = true;
+            }
+        }
+        if star_ok {
+            let rows = if remote_starred {
+                db::sync_mark_starred_if_unstarred_at_version(conn, aid, snap_star)?
+            } else {
+                db::sync_mark_unstarred_if_starred_at_version(conn, aid, snap_star)?
+            };
+            if rows > 0 {
+                report.entries_data_changed = true;
+            }
+        }
+        if read_ok || star_ok {
+            report.pulled_entries += 1;
+        }
     }
     Ok(())
 }
@@ -138,19 +199,37 @@ pub(super) fn merge_pulled_entry(
                         .unwrap_or(false));
             if !is_own {
                 // 跨源副本：记账（已读广播对象）。read-anywhere-wins
+                // R3：dup 列表是内部记账（供后续读广播定位副本），本身不改可见
+                // 数据、不进数据变化标记；只有下面的「已读广播」真实改了读值才进。
                 if let Some(eid) = eid {
                     db::add_article_dup_entry(conn, aid, eid)?;
                 }
-                if greader::has_tag(&e.categories, "/com.google/read")
-                    && !maps.pending_ids.contains(&aid)
-                {
-                    db::sync_mark_read_if_unread(conn, aid)?;
+                if greader::has_tag(&e.categories, "/com.google/read") {
+                    // OPT-007：跨源副本的「已读广播」同样过字段版本守卫
+                    // （读字段粒度）——本地在拉取期间写过读的条目不被旧快照碰。
+                    let snap_read = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0)).0;
+                    let pending_read = maps.pending_read_ids.contains(&aid);
+                    if conflict_policy::field_accepts_remote(
+                        conn,
+                        aid,
+                        conflict_policy::SyncField::Read,
+                        snap_read,
+                        pending_read,
+                    )? {
+                        let rows = db::sync_mark_read_if_unread_at_version(conn, aid, snap_read)?;
+                        if rows > 0 {
+                            report.entries_data_changed = true;
+                        }
+                    }
                 }
                 return Ok(());
             }
             merge_remote_status(conn, aid, e, maps, report)?;
             // 正文/封面/enclosure 兜底回填：本地为空才补，已有内容不覆盖。
-            backfill_entry_content(conn, aid, e)?;
+            // R3：只有真实补进了内容才置数据变化标记（同值重复/无可回填 = false）。
+            if backfill_entry_content(conn, aid, e)? {
+                report.entries_data_changed = true;
+            }
             Ok(())
         }
         None => {
@@ -181,11 +260,13 @@ pub(super) async fn pull_entries(
 }
 
 /// 后端条目入库（source='miniflux'，不覆盖直连正文）。
-/// 调用约定（不变式）：merge_pulled_entry 仅在 URL 与 remote_id 两个查找都未命中时
-/// 才调用本函数，本地必然没有该条目。已删除的 existing 守卫分支用的是同一对查找
-/// （URL 分支还叠加同源过滤，只会收窄候选集），两个查找都未命中时它必为 None，
-/// 分支不可达（TASK-060 §4 论证）。若改动 merge_pulled_entry 的查找逻辑或新增调用点，
-/// 须按该论证重新推导本约定。
+/// 调用约定（R2 修正，原「本地必然没有」论证只对**快照时刻**成立）：
+/// merge_pulled_entry 仅在 URL 与 remote_id 两个查找都未命中 **pull 起点快照映射**
+/// 时调用本函数；快照在任何 HTTP 之前抓取，因此「快照未命中」不等于「此刻 DB 里
+/// 没有」——HTTP 在途期间直连抓取插入的同 feed 同 URL 行不在快照里，
+/// upsert_article_with_feed 会按 (feed, url_norm) 或 guid 命中该既有行并返回
+/// inserted=false。调用方必须区分新行/既有行：既有行的状态逐字段过版本/pending
+/// 守卫，不得整值覆写（否则回滚快照之后用户的标读/收藏——主控 2026-10-10 反例）。
 /// enclosure（播客音频/视频）与图片一并落库——播放器与卡片封面依赖。
 fn upsert_remote_entry(
     conn: &Connection,
@@ -229,15 +310,84 @@ fn upsert_remote_entry(
     };
     // TASK-056 语义保留（失败必须可见），R2 升级形态：整条链路 Result 化——
     // 插入/绑定/状态任何一步失败都透传 Err（不再「记 report 后继续」，那样调用方
-    // 无法整页回滚、也无法保住重拉游标）。
-    let (aid, _) = db::upsert_article_with_feed(conn, feed_id, &a, false)?;
+    // 无法整页回滚、也无法保住重拉游标）。R3 换 tracked 形态：既有行的
+    // content_changed 由 UPDATE 前后值比对得出（同值 replay/无内容差异 = false），
+    // 是数据变化标记的一部分，不能拿 changes() 冒充。
+    let outcome = db::upsert_article_with_feed_tracked(conn, feed_id, &a, false)?;
+    let aid = outcome.id;
+    // OPT-007：版本基线只在**缺失时**补记 (0,0)——已有快照不得被覆盖为 0，
+    // 也绝不能用 HTTP 之后现读的 DB 版本重新定义快照（那会把拉取期间的本地
+    // 写入洗成「起点无变化」，旧远端状态即可回滚用户意图）。轮内才见到的 id
+    // （新入库或快照后外部写入）按 (0,0) 保守处理：该行若已有本地写入
+    // （版本 > 0）会被逐字段守卫拒绝，宁可跳过远端合并不冒回滚风险——
+    // 与 db/sync_map.rs 的 keep_field_versions_from 同口径。
+    maps.id_to_versions.entry(aid).or_insert((0, 0));
+    // R3/R4：新插入 / 既有行可见字段真实变化（tracked 结果）——**立即**并入
+    // 标记：这些变化已随本语句提交，其后绑定/状态任一步失败都不得让它们失去
+    // 事件信号（GR 逐语句提交，无页事务可依赖）。
+    if outcome.inserted || outcome.content_changed {
+        report.entries_data_changed = true;
+    }
     if let Some(eid) = item_numeric_id(e) {
-        db::set_article_remote_id(conn, aid, eid)?;
+        // R4：绑定成功即置位（后续步骤失败不回退已提交的绑定变化）。
+        if db::set_article_remote_id(conn, aid, eid)? {
+            report.entries_data_changed = true;
+        }
         maps.id_to_mf_id.insert(aid, Some(eid));
         maps.mf_id_to_article.insert(eid, aid);
     }
-    db::sync_set_article_status(conn, aid, remote_read, remote_starred)?;
-    report.pulled_entries += 1;
+    if outcome.inserted {
+        // 真正的新行：插入发生在同一 DB 临界区内，其间不可能有本地写入，快照
+        // (0,0) 与行初值恒等，整值写状态不会覆盖任何用户意图。远端确认不产生
+        // 本地版本（保持 0）。新行本身的标记已在上面置位。
+        db::sync_set_article_status(conn, aid, remote_read, remote_starred)?;
+        report.pulled_entries += 1;
+        return Ok(());
+    }
+    // 既有行（典型：pull 起点快照之后直连入库、快照映射尚未包含的同 feed 同
+    // URL 行）：状态逐字段过版本/pending 守卫，与 merge_remote_status 同一套
+    // 语义（read/star 彼此独立，无冲突字段照常收敛）——整值 sync_set_article_status
+    // 在这里会回滚快照之后用户的标读/收藏（R2 修复的 P2 反例）。
+    // R3/R4：状态写用值条件原语，命中行数当场进标记（守卫通过但值未变仍按
+    // 旧口径计入 pulled_entries，保持统计兼容；写 Err 不置位——失败不是变化）。
+    let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
+    let read_ok = conflict_policy::field_accepts_remote(
+        conn,
+        aid,
+        conflict_policy::SyncField::Read,
+        snap_read,
+        maps.pending_read_ids.contains(&aid),
+    )?;
+    let star_ok = conflict_policy::field_accepts_remote(
+        conn,
+        aid,
+        conflict_policy::SyncField::Star,
+        snap_star,
+        maps.pending_star_ids.contains(&aid),
+    )?;
+    if read_ok {
+        let rows = if remote_read {
+            db::sync_mark_read_if_unread_at_version(conn, aid, snap_read)?
+        } else {
+            db::sync_mark_unread_if_read_at_version(conn, aid, snap_read)?
+        };
+        if rows > 0 {
+            report.entries_data_changed = true;
+        }
+    }
+    if star_ok {
+        let rows = if remote_starred {
+            db::sync_mark_starred_if_unstarred_at_version(conn, aid, snap_star)?
+        } else {
+            db::sync_mark_unstarred_if_starred_at_version(conn, aid, snap_star)?
+        };
+        if rows > 0 {
+            report.entries_data_changed = true;
+        }
+    }
+    if read_ok || star_ok {
+        report.pulled_entries += 1;
+    }
     Ok(())
 }
 
@@ -249,8 +399,9 @@ fn strip_html_text(html: &str) -> String {
 /// （封面 / enclosure 单列 COALESCE：既不抢本地封面，也能补上 Miniflux 后来抓到的图。）
 /// OPT-002（F07）语义保留（失败必须可见）；R2 升级形态：回填失败透传 Err——
 /// 由调用方决定粒度（Fever 整页回滚 + 保留游标；GR 记错误且不推游标）。
+/// R3：返回是否**实际补进了内容**（同值重复/无可回填 = false），供数据变化标记。
 // Note: 回填写入的净化在 db::backfill_article_content 内完成（同 sanitize 口径） — 见 .agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md
-fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) -> AppResult<()> {
+fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) -> AppResult<bool> {
     let content_html = item_content_html(e);
     let enclosure = e.enclosure.first();
     let (enc_url, enc_mime) = match enclosure {

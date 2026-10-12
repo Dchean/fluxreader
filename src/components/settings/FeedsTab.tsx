@@ -2,7 +2,8 @@ import { useRef, useState } from 'react';
 import { useAppStore } from '../../store';
 import { api, extractError } from '../../lib/api';
 import { Icons } from '../icons';
-import { FluxDropdown, SwitchInline, ConfirmDialog } from '../primitives';
+import { FluxDropdown, SwitchInline, ConfirmDialog, AiModeSelect } from '../primitives';
+import { normalizeFeedAiMode } from '../../types';
 import type { ContentLayoutType } from '../../types';
 import { LAYOUT_OPTIONS } from './layoutOptions';
 import { LAYOUT_NO_AI, type PendingDelete } from './shared';
@@ -128,7 +129,7 @@ export function FeedsTab() {
 
                 <label
                   className="mgr-checkbox-label"
-                  title="分类内新文章自动生成 AI 摘要"
+                  title="分类默认：自动生成 AI 摘要（仅对其下「继承」的源生效；源显式关闭优先）"
                   style={LAYOUT_NO_AI.has(cat.layout) ? { display: 'none' } : undefined}
                 >
                   <SwitchInline
@@ -140,7 +141,7 @@ export function FeedsTab() {
                 </label>
                 <label
                   className="mgr-checkbox-label"
-                  title="分类内新文章自动翻译正文"
+                  title="分类默认：自动翻译正文（仅对其下「继承」的源生效；源显式关闭优先）"
                   style={LAYOUT_NO_AI.has(cat.layout) ? { display: 'none' } : undefined}
                 >
                   <SwitchInline
@@ -202,30 +203,34 @@ export function FeedsTab() {
                     </div>
                   </div>
                   <div className="group-mgr-feed-controls">
-                    <label
-                      className="mgr-checkbox-label"
-                      title="该源新文章自动生成 AI 摘要"
+                    {/* OPT-011：源级 AI 开关是三态（继承分类 / 开启 / 关闭）——
+                        显式关闭压过分类开启；显示值取 mode 真值（旧 bool 只作
+                        缺 mode 时的映射输入）。关闭的生效边界：只阻止尚未发起的
+                        自动请求，已发送的请求不会撤销（不声称可撤销已发送内容）。 */}
+                    <span
+                      className="mgr-ai-mode-label"
                       style={noAi ? { display: 'none' } : undefined}
                     >
-                      <SwitchInline
-                        compact
-                        checked={f.autoSummary}
-                        onChange={(v) => toggleFeedSummary(cat.id, f.id, v)}
+                      <AiModeSelect
+                        mode={normalizeFeedAiMode(f.summaryMode, f.autoSummary)}
+                        categoryOn={cat.autoSummary}
+                        onChange={(m) => toggleFeedSummary(cat.id, f.id, m)}
+                        title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
                       />
                       摘要
-                    </label>
-                    <label
-                      className="mgr-checkbox-label"
-                      title="该源新文章自动翻译正文"
+                    </span>
+                    <span
+                      className="mgr-ai-mode-label"
                       style={noAi ? { display: 'none' } : undefined}
                     >
-                      <SwitchInline
-                        compact
-                        checked={f.autoTranslate}
-                        onChange={(v) => toggleFeedTranslate(cat.id, f.id, v)}
+                      <AiModeSelect
+                        mode={normalizeFeedAiMode(f.translateMode, f.autoTranslate)}
+                        categoryOn={cat.autoTranslate}
+                        onChange={(m) => toggleFeedTranslate(cat.id, f.id, m)}
+                        title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
                       />
                       翻译
-                    </label>
+                    </span>
                     <FluxDropdown
                       width={96}
                       value={f.layout}
