@@ -41,3 +41,9 @@ schema与实际读写、状态策略、UI可达性都使用新所有权，不是
 第一阶段写集：db/articles、sync_map、feeds及必要db.rs导出；sync/entries、push、conflict_policy、两协议pull；必要前端查询/呈现/计数与store派生消费者（不改AI配置协调器）；对应Rust/前端行为回归、既有URL/查询/冲突政策Note。若必须新增持久身份/显示聚合字段，先报告数据契约和迁移理由，不提前堆叠第二阶段空schema。
 
 执行者同一负责人调查、实现、验证与返工。每阶段最后一次验证后停止写入，交初审和主控复审；遇到无法兼容的真实产品语义冲突时提交具体决策点，不能默默关闭smartDedup、取消read广播、禁用布局或删回归。临时交付记录在tmp/optimization-20261008/OPT-008B/RESULT.md，长期取舍见对应新模型Note。
+
+## 执行恢复（2026-10-12）
+
+首轮已产生条目身份/查询集合及相关回归改动，前端聚合计数接线尚在进行，未交付、未初审。16:17 的CLI终态为 error_during_execution，明确429 quota耗尽（不是普通观察超时）；原进程已退出，保留原会话与全部工作区改动，按授权切 custom-local:deepseek-v4.1-flash / max 继续，不把外层退出码0计作成功。原始记录位于 tmp/optimization-20261008/OPT-008B-phase1-20261012，续跑位于 OPT-008B-phase1-fallback-20261012。
+
+第一阶段实际消费者需要新增scope_counts只读计数IPC，允许commands/articles.rs、lib.rs注册及前端api/types/侧栏的必要接线；实现者须说明聚合集合口径、兼容边界和真实消费证据。此扩展不授权提前增加正文schema、修改AI配置协调器或减少原验收范围。当前产品WIP未纳入任何提交级CI；2c7dcf5的CI 38220831888成功仅覆盖之前产品基线与文档。

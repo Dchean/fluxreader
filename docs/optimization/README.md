@@ -38,7 +38,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | queued | 尚未实施；待可靠订阅写回之后推进 |
 | [OPT-011](OPT-011.md) | AI 设置单点与输入范围一致 | F13,refreshInterval | OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-012](OPT-012.md) | 阅读器源码与浮层交互 | F14,closeAsk | 无 | verified-ci | 已提交、独立审查及 CI 通过 |
-| [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-011 | queued | 013A SSE 已通过 CI；长文分段、版本缓存与恢复尚未实施 |
+| [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-008B, OPT-011 | queued | 013A SSE 已通过 CI；长文分段、版本缓存与恢复尚未实施，等待内容修订契约稳定 |
 | [OPT-014](OPT-014.md) | 更新检查与凭据失败关闭 | F16,F22 | 无 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-015](OPT-015.md) | 窗口启动恢复与幂等媒体键 | F21,F23 | 无 | verified-ci | 015P 首显最大化修复已通过 CI；015N 八场景本地原生验收通过 |
 | [OPT-016](OPT-016.md) | 行为回归分层与依赖卫生 | 测试网,依赖,CI | OPT-003, OPT-012, OPT-013, OPT-015 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
