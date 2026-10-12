@@ -97,10 +97,10 @@ export async function load(url, context, nextLoad) {
   return nextLoad(url, context);
 }
 
-/** 供回归网做「两份 loader 源码一致」的字节校验。 */
+/** 本文件路径（当前仓库内无调用方）。 */
 export const UI_LOADER_PATH = fileURLToPath(import.meta.url);
 
-/** 读回本文件源码（harness 用来比对内联副本）。 */
+/** 读回本文件源码（当前仓库内无调用方）。 */
 export async function readOwnSource() {
   return readFile(import.meta.url, 'utf8');
 }

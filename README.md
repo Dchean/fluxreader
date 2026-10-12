@@ -42,7 +42,7 @@ npm run tauri build
 
 Rust 侧：当前本机（2026-10-08 实测）已可运行 `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings` 与 `cargo test`；CI 的 windows-latest rust job 继续承担完整门禁。`#[ignore]` 的 live 测试需要真实同步后端，不作为统一门禁。
 
-当前 CI 使用 Node 22。发布需要单独确认，流程见 [docs/release.md](docs/release.md)。
+开发与验收统一使用 Node 22（主版本记录在仓库根目录 `.node-version`，CI 的 setup-node 经 `node-version-file` 读取；该文件只被工具读取，不会替换本机系统 Node）。发布需要单独确认，流程见 [docs/release.md](docs/release.md)。
 
 ## 已知限制
 

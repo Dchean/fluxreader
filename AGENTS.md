@@ -40,7 +40,7 @@ Note 的路径即分类：`{lifecycle}/{class}/yyyy-mm-dd-topic.md`，lifecycle 
 
 | 检查 | 在哪跑 |
 | --- | --- |
-| `npm run lint`（oxlint）、`npm run build`（tsc + vite）、`npm run test:frontend`（前端状态回归） | 本地与 CI |
+| `npm run lint`（oxlint）、`npm run build`（tsc + vite）、`npm run test:frontend`（前端状态回归）、`npm run test:components`（组件真实挂载回归） | 本地与 CI |
 | `cargo fmt --all -- --check` | 本地与 CI |
 | `cargo clippy --all-targets -- -D warnings`、`cargo test` | 本地（当前已可链接）与 CI（windows-latest） |
 
