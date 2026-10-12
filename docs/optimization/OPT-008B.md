@@ -75,3 +75,5 @@ R1在两次max-turns终态后原会话续跑，最终success、is_error=false并
 - controller-settings-success-r1.mjs：A切去重true、B改字号全成功，但reload计数为0（应至少1），脚本退出1。
 
 R2交回原会话（OPT-008B-phase1-R2-20261012）。同轮已被字段守卫接受的远端read信号优先不能被Fever末尾立即撤销；无本轮信号时仍保留Fever双向unread权威，历史本地已读不能永久挡掉后续取消读。新增必要的受影响条目回执/回读与计数确认可以实施，必须覆盖真实消费者与前沿保护；不许为通过旧线性计数mock而关闭后端读闭包。搜索跨布局还需实际组件打开/返回/续页验证，不能以数组存在自证。阶段二与父卡继续未完成。
+
+R2续跑恢复：首段达到max-turns后正常停止，但原会话再次续跑被provider立即以HTTP400“Invalid assistant message: content or tool_calls must be set”拒绝，无产品执行。已确认两个进程均终止，保留全部WIP和有效日志，以干净CodeBuddy会话接管（OPT-008B-phase1-R2-recover-20261012）；不修改CLI历史或全局配置、不重复派两个写入者，模型保持授权备用max。当前新增counts_snapshot/读状态回执接线仍未验收，最近前端回归有3项失败，已作为接管输入，不沿用R1全绿。
