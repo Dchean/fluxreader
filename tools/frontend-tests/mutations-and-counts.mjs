@@ -484,7 +484,8 @@ export async function run(ctx) {
     checkNew('(t104-markall-count-authoritative) 600/1 探针：全部已读成功后未读计数=后端口径 0（修前按已加载推算残留 599）',
       store.getState().feedCounts.get('10')?.unread === 0
       && store.getState().entries.find((a) => a.id === '40000')?.isRead === true
-      && S.invokeCalls.filter((c) => c.cmd === 'feed_counts').length === 1);
+      /* R2/N2：对账改走单次 counts_snapshot（源键+聚合键同一时刻） */
+      && S.invokeCalls.filter((c) => c.cmd === 'counts_snapshot').length === 1);
 
     /* ---------- t104-markall-failure-rollback：失败不假成功 ---------- */
     await resetStore();
@@ -605,7 +606,7 @@ export async function run(ctx) {
     S.backendRows = rows107F2;
     await store.getState().bootstrapFromBackend();
     store.setState((s) => ({ entries: s.entries.slice(0, 1) }));
-    S.rejectCmds.add('feed_counts'); // 仅注入对账重取失败（mark_all_read 本身成功落库）
+    S.rejectCmds.add('counts_snapshot'); // 仅注入对账重取失败（mark_all_read 本身成功落库）
     store.getState().markCurrentViewAllRead();
     await nTick(10);
     const rF2 = store.getState();
@@ -615,7 +616,7 @@ export async function run(ctx) {
     checkNew('(t104-reconcile-retry) 重取失败时计数停留乐观值（599），等待延迟重试',
       rF2.feedCounts.get('10')?.unread === 599
       && countsFromRows().find((c) => c.feed_id === 10)?.unread === 0);
-    S.rejectCmds.delete('feed_counts');
+    S.rejectCmds.delete('counts_snapshot');
     await nTick(3500); // 等 3s 延迟重试落地
     checkNew('(t104-reconcile-retry) 3s 延迟重试成功：计数自愈为后端真值 0',
       store.getState().feedCounts.get('10')?.unread === 0);
@@ -781,6 +782,12 @@ export async function run(ctx) {
     checkNew('(t118-field-version) 真值表·标读：isRead bump、同条目 isStarred 与另一条目 isStarred 均不受牵连',
       v118('56001', 'isRead') === 2 && v118('56001', 'isStarred') === 2
       && v118('56002', 'isRead') === 2 && v118('56002', 'isStarred') === 1);
+    /* R4 夹具时序：快照 bump 表针对**已落定**声明（先等两笔 toggle 请求落定——
+       读取发起时仍**在途**的字段自 R4 起走独立保护（保留本地值、快照为旧值时
+       不 bump，失败回滚仍有效；快照确认本地值时才 bump），在途交错场景由
+       dedup-display (s) 组锁定。此处保持「快照整体替换使已落定声明失效」的
+       版本语义与字段隔离断言不变。 */
+    await nTick(0); await nTick(0);
     await store.getState().reloadFromBackend();             // 后端快照替换（fromBackend=true）
     checkNew('(t118-field-version) 真值表·后端快照：两字段都 bump（快照整体替换携带行级真值，两字段在途声明一并失效）',
       v118('56001', 'isRead') === 3 && v118('56001', 'isStarred') === 3

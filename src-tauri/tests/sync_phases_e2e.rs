@@ -34,6 +34,13 @@ async fn setup(
 
 /// 本地造一篇直连文章 + 远端 mock 加同 URL entry（绑定回填的匹配目标）。
 /// 返回 (本地文章 id, 远端 entry id)。
+///
+/// OPT-008B：**feed 绑定是本人份匹配的前置**——URL 兜底现在只在同一订阅源内
+/// 选行（跨源同 URL 各自独立成条目），未绑定 feed 的远端条目不再借全局 URL
+/// 映射改写本地行。本夹具直接声明 feed 10 已绑定，聚焦 states 合并。
+/// 生产边界（勿以「恒 feeds→states」论证）：`sync_now` 串联 feeds→states；
+/// `sync_light`/后台自动同步只跑 states——纯后台路径不会先行绑定 feed，
+/// 未绑定远端 feed 的条目停留在有限兼容分支（本地无对应源行，用户不可见）。
 async fn seed_local_article(
     db: &Arc<Mutex<rusqlite::Connection>>,
     server: &MockGReader,
@@ -53,6 +60,7 @@ async fn seed_local_article(
         false,
     )
     .unwrap();
+    db::set_feed_remote_id(&conn, feed_id, 10).unwrap();
     let a = db::NewArticle {
         guid: format!("guid-{url}"),
         url: Some(url.into()),

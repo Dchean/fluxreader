@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { awaitAiWriteFrontier, confirmAppliedConfig, markAiConfigUnconfirmed, runConfigApplyBarrier, useAppStore } from '../../store';
+import { awaitAiWriteFrontier, awaitAppSettingsWriteFrontier, confirmAppliedConfig, markAiConfigUnconfirmed, markAppSettingsUnconfirmed, readBackAppliedAppSettings, runAppSettingsApplyBoundary, runConfigApplyBarrier, useAppStore } from '../../store';
 import { api, extractError } from '../../lib/api';
 import { openExternal } from '../../lib/external';
 import { FluxDropdown, SettingCard } from '../primitives';
@@ -9,7 +9,6 @@ import { FluxDropdown, SettingCard } from '../primitives';
 export function ConfigSyncSection() {
   const showToast = useAppStore((s) => s.showToast);
   const reloadFromBackend = useAppStore((s) => s.reloadFromBackend);
-  const bootstrapSettings = useAppStore((s) => s.bootstrapSettings);
   const [backend, setBackend] = useState<'gist' | 'webdav'>('gist');
   const [token, setToken] = useState('');
   const [server, setServer] = useState('');
@@ -74,8 +73,11 @@ export function ConfigSyncSection() {
     try {
       /* OPT-011 R5：上传是**读取已保存配置**的快照——先等发起时已存在的 AI 写
          前沿落定（快照不漏用户已点写的 AI 值）。不设写门：上传的网络往返不
-         阻塞之后任何 AI 操作（之后的点击乐观显示、请求照常发出）。 */
+         阻塞之后任何 AI 操作（之后的点击乐观显示、请求照常发出）。
+         R3：app_settings（界面设置）同一语义——发起时前沿等待，快照不漏已点写，
+         不设门。 */
       await awaitAiWriteFrontier();
+      await awaitAppSettingsWriteFrontier();
       const at = await api.configSyncUpload();
       setStatus({ configured: true, backend, lastUpload: at });
       showToast('配置已上传');
@@ -98,9 +100,14 @@ export function ConfigSyncSection() {
       }
       /* OPT-011 R5：确认后进入受控写屏障——同步捕获并等待「进入时已存在的
          AI 写前沿」，应用期间的 AI 点击乐观可见、请求排在应用之后；屏障不
-         等待后来写（无自锁），失败/取消都在 finally 释放、错误如实提示。 */
+         等待后来写（无自锁），失败/取消都在 finally 释放、错误如实提示。
+         R3：app_settings 同一约定（嵌套边界：AI 门 + 设置门同时生效）——
+         应用期间的新点击乐观可见、请求排在应用与回读之后；应用+回读的
+         app_settings 真实回读在同一窗口内完成，键经回读保留、请求载荷在
+         发送时重建（不清空点击、不把远端覆盖打回）。 */
       let readbackError: string | null = null;
-      const r = await runConfigApplyBarrier(async () => {
+      let settingsReadbackError: string | null = null;
+      const r = await runConfigApplyBarrier(() => runAppSettingsApplyBoundary(async () => {
         const res = await api.configSyncApply(payload);
         try {
           /* 真实配置回读确认/对齐——不把可能被查询代际淘汰的 reload 当已确认。 */
@@ -111,9 +118,18 @@ export function ConfigSyncSection() {
           readbackError = extractError(e);
           markAiConfigUnconfirmed();
         }
+        try {
+          /* R3：app_settings 真实回读（应用窗口内、门未释放）——刷新可视设置与
+             确认基线；窗口内新点击的键保留本地意图值。 */
+          await readBackAppliedAppSettings();
+        } catch (e) {
+          /* 应用已提交而界面设置没有读回：确认基线置不可信（后续失败不假称
+             已恢复），如实告知。 */
+          settingsReadbackError = extractError(e);
+          markAppSettingsUnconfirmed();
+        }
         return res;
-      });
-      await bootstrapSettings().catch(() => null);
+      }));
       /* 应用结果落地后的全量刷新（entries/计数）；它不是确认依据（确认由上面
          的真实回读完成），失败由刷新路径自身提示。 */
       void reloadFromBackend().catch(() => null);
@@ -125,6 +141,9 @@ export function ConfigSyncSection() {
       showToast(`配置已应用：${parts.join('，')}`);
       if (readbackError) {
         showToast(`配置已应用，但配置回读失败：${readbackError}（本地界面值未确认）`);
+      }
+      if (settingsReadbackError) {
+        showToast(`配置已应用，但界面设置回读失败：${settingsReadbackError}（本地界面值未确认）`);
       }
       // OPT-006：导入不会改动活动连接；若含连接信息则提示到「后端配置」激活
       if (r.pendingConnection) {

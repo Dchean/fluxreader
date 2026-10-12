@@ -96,6 +96,25 @@ export interface ArticlesCursorState {
   loaded: number;
 }
 
+/** 计数行（total/unread/starred/today 四元组）。 */
+export interface CountsRow {
+  total: number;
+  unread: number;
+  starred: number;
+  today: number;
+}
+
+/** OPT-008B R1：scope_counts 的 store 快照（带来源元数据）。
+    布局是快照的一部分：选择器只在该 layout 与当前 activeContentLayout 相等时
+    消费（旧布局快照不得按新布局显示）；`dedup` 记录产生快照时的开关值（口径
+    标签）。分类分组计数在 `folders`（键 'cat-N'）。 */
+export interface ScopeCountsSnapshot {
+  layout: ContentLayoutType;
+  dedup: boolean;
+  all: CountsRow;
+  folders: Map<string, CountsRow>;
+}
+
 export interface AppState {
   /* ---------- 导航与筛选 ---------- */
   activeContentLayout: ContentLayoutType;
@@ -134,8 +153,17 @@ export interface AppState {
 
   /** 后端聚合的精确计数（feedId → total/unread/starred/today）。
       侧边栏角标用——不受文章列表分页 limit 影响，保证数字准确。
-      （「全部/未读数字被 limit 截断」的根因修复） */
+      （「全部/未读数字被 limit 截断」的根因修复）
+      注：这是**与布局无关的按源计数**（feed_counts），选择器据此按当前布局
+      过滤求和——聚合角标回退路径的底座。 */
   feedCounts: Map<string, { total: number; unread: number; starred: number; today: number }>;
+
+  /** OPT-008B R1：smartDedup 显示集合的 **scope 精确计数快照**
+      （scope_counts：全部 / 每分类 / 每源，按 snapshot.layout 布局过滤）。
+      仅开关开启且取到数据时非空——选择器只在 `layout === activeContentLayout`
+      时消费（旧布局快照不得按新布局显示）；缺快照回退按源求和。
+      独立于 feedCounts：feedCounts 是布局无关的源计数，不得被单布局快照覆盖。 */
+  scopeCounts: ScopeCountsSnapshot | null;
 
   /* ---------- 播客播放器 ---------- */
   player: PodcastPlayerState;

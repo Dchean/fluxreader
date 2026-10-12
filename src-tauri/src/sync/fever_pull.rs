@@ -599,16 +599,24 @@ fn reconcile_fever_state(
         let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
         // TASK-112 政策（FEVER_READ_DIRECTION = UnreadSetBidirectional 双向权威）：
         // unread 集合权威——命中 → 本地未读（可复活未读）；未命中 → 本地已读。
-        // R3：apply_* 返回**值条件写命中行数**（值实际改变）——据此置数据变化
-        // 标记；merged_states 仍按旧口径累计（对外统计兼容）。
-        let read_rows = conflict_policy::apply_read_by_policy(
-            conn,
-            conflict_policy::FEVER_READ_DIRECTION,
-            !unread_set.contains(remote_id),
-            aid,
-            snap_read,
-            maps.pending_read_ids.contains(&aid),
-        )?;
+        // N4（R2 裁定）：**本轮已有已读信号（own 或跨副本广播）落定的行，轮终
+        // 权威对账不得立刻撤销同一广播**——仅在"把本地已读翻回未读"这一方向让位；
+        // 无本轮读信号时双向权威照旧（历史本地已读不永久阻挡之后的远端显式 unread；
+        // 下一轮 explicit_read_ids 已清空，unread 正常生效，pending/版本守卫优先）。
+        let same_round_read_signal = maps.explicit_read_ids.contains(&aid);
+        let remote_read = !unread_set.contains(remote_id);
+        let read_rows = if same_round_read_signal && !remote_read {
+            0
+        } else {
+            conflict_policy::apply_read_by_policy(
+                conn,
+                conflict_policy::FEVER_READ_DIRECTION,
+                remote_read,
+                aid,
+                snap_read,
+                maps.pending_read_ids.contains(&aid),
+            )?
+        };
         // TASK-112 政策（FEVER_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
         // 命中 → 收藏；未命中 → 取消收藏。
         let star_rows = conflict_policy::apply_star_by_policy(
@@ -698,8 +706,10 @@ mod tests {
     fn maps_for(remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
         db::SyncMatchMaps {
             url_to_id: Default::default(),
+            feed_url_to_id: Default::default(),
+            url_norm_to_ids: Default::default(),
             id_to_mf_id: Default::default(),
-            id_to_mf_pair: Default::default(),
+            id_to_feed_mf: Default::default(),
             pending_ids: if pending {
                 std::iter::once(aid).collect()
             } else {
@@ -715,6 +725,7 @@ mod tests {
             } else {
                 Default::default()
             },
+            explicit_read_ids: Default::default(),
             id_to_versions: std::iter::once((aid, (0, 0))).collect(),
             feed_mf_to_id: Default::default(),
             mf_id_to_article: std::iter::once((remote_id, aid)).collect(),

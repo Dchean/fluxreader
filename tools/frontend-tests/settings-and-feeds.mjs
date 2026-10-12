@@ -63,11 +63,17 @@ export async function run(ctx) {
     && store.getState().settings.maxWidth === 900);
 
   S.invokeCalls.length = 0;
+  /* R5 机制：每笔载荷 =「已确认基线 + 本笔 patch」。空库（后端无存量）首写只带
+     本笔键是既有语义的细化；此处先以完整快照建立基线，再断言「含新值且不丢
+     基线键」（旧断言锁的「全量快照」已由「基线键保留」替代，判别力不变）。 */
+  S.settingsRaw = JSON.stringify(store.getState().settings);
+  await store.getState().bootstrapSettings();
+  S.invokeCalls.length = 0;
   store.getState().updateSettings({ fontSize: 20, themeMode: 'light' });
   await nTick(0);   // api.setSetting 内部 await getInvoke()
   const kWrite = S.invokeCalls.find((c) => c.cmd === 'set_setting');
   const kPayload = kWrite ? JSON.parse(kWrite.args.value) : {};
-  checkNew('(k) updateSettings 合并进内存并以单键 JSON 全量落库（含新值且不丢其他键）',
+  checkNew('(k) updateSettings 合并进内存并落库（含新值且不丢基线键）',
     store.getState().settings.fontSize === 20 && kWrite?.args.key === 'app_settings'
     && kPayload.fontSize === 20 && kPayload.themeMode === 'light'
     && typeof kPayload.markReadOnOpen === 'boolean' && kPayload.listWidth === store.getState().settings.listWidth);

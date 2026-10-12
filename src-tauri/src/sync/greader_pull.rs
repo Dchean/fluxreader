@@ -467,8 +467,10 @@ mod tests {
     fn maps_for(remote_id: i64, aid: i64, pending: bool) -> db::SyncMatchMaps {
         db::SyncMatchMaps {
             url_to_id: Default::default(),
+            feed_url_to_id: Default::default(),
+            url_norm_to_ids: Default::default(),
             id_to_mf_id: Default::default(),
-            id_to_mf_pair: Default::default(),
+            id_to_feed_mf: Default::default(),
             pending_ids: if pending {
                 std::iter::once(aid).collect()
             } else {
@@ -484,6 +486,7 @@ mod tests {
             } else {
                 Default::default()
             },
+            explicit_read_ids: Default::default(),
             id_to_versions: std::iter::once((aid, (0, 0))).collect(),
             feed_mf_to_id: Default::default(),
             mf_id_to_article: std::iter::once((remote_id, aid)).collect(),

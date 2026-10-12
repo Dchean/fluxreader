@@ -47,15 +47,23 @@ pub(super) fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
             continue;
         };
         match item.action.as_str() {
-            // 已读广播：绑定的 entry + 记账的全部同文副本 entry 一并标读
+            // 已读广播：绑定的 entry + 全部同文副本 entry 一并标读
             // （双端场景：Read You 不去重，手机上另一源的副本也要已读，
             // 否则手机读完这篇、那个源里又冒出来一篇未读的"同一篇"）
             // TASK-112 政策：本分支是「同文副本读状态传播 = read 广播保持现状」
             // 的消费点（政策定义与 DEC-refactor-roadmap-20261005 第 6 条原文见
             // conflict_policy.rs 头注；unread/star/unstar 不广播）。
+            // OPT-008B：目标集由 db::read_broadcast_targets 单点给出（同文兄弟
+            // 条目的 remote_id + 旧 CSV 记账的有限兼容），不再只靠 remote_dup_ids
+            // ——跨源同 URL 现在是各自独立的持久条目，广播按统一选择规则展开。
+            // OPT-008B R1（初审 P3-4 / 主控 P2）：广播目标查询失败必须**透传**
+            // ——`unwrap_or_default` 会把「同文兄弟 + 旧 CSV 记账」静默当空，
+            // 读传播无声缺失且原 read 队项会被 prune（本卡明确禁止「失败当空」）。
+            // 错误经 plan_push 上抛：push_states_now/ states 推送段据此中止本轮，
+            // 队列保留、下轮重试。
             "read" => {
                 let mut ids = vec![remote_id];
-                for dup in db::article_dup_entries(conn, article_id).unwrap_or_default() {
+                for dup in db::read_broadcast_targets(conn, article_id)? {
                     if dup != remote_id {
                         ids.push(dup);
                     }

@@ -109,6 +109,10 @@ const S = {
      与行级数据刻意不一致，大量断言依赖）；函数 = 按 backendRows 忠实聚合
      （计数对账用例：markCurrentViewAllRead 成功后重取的计数必须等于后端口径）。 */
   feedCountsImpl: null,
+  /* OPT-008B：scope_counts 行为（smartDedup 显示集合的 scope 精确计数——
+     全部/每分类/每源）。null = 返回 null（关闭开关/旧后端路径）；
+     函数 = (layout) => ScopeCountsDetailRow 形态（getInvoke 透传）。 */
+  scopeCountsImpl: null,
   /* TASK-119：feed_counts 挂起计划（{ mode: 'defer' }，一次性）+ 挂起项——
      计数竞态场景（对账请求在途窗口）需要手动放行响应 */
   feedCountsPlan: null,
@@ -250,6 +254,31 @@ globalThis.__INVOKE__ = (cmd, args) => {
         return new Promise((resolve) => { S.pendingCounts.push({ resolve }); });
       }
       return Promise.resolve(S.feedCountsImpl ? S.feedCountsImpl() : COUNTS);
+    }
+    /* OPT-008B：scope_counts——smartDedup 显示集合的 scope 精确计数
+       （全部/每分类/每源；与 list/search/markAll 同一谓词族）。缺省 null =
+       未提供（开关关闭/旧后端 → 前端回退按源求和）。 */
+    case 'scope_counts': {
+      if (S.failReload) return Promise.reject(S.failReload);
+      return Promise.resolve(S.scopeCountsImpl ? S.scopeCountsImpl(args && args.layout) : null);
+    }
+    /* OPT-008B R2（N2/P3-4）：计数组合快照——前端 reload 与写后对账的唯一计数
+       IPC；同一次调用内返回源计数 + scope 计数（源键/聚合键同一时刻）。
+       TASK-119 的一次性 defer 计划同样作用于本命令（对账竞态用例）。 */
+    case 'counts_snapshot': {
+      if (S.failReload) return Promise.reject(S.failReload);
+      const layout = args && args.layout;
+      const payload = () => ({
+        feeds: S.feedCountsImpl ? S.feedCountsImpl() : COUNTS,
+        scope: S.scopeCountsImpl ? S.scopeCountsImpl(layout) : null,
+      });
+      if (S.feedCountsPlan && S.feedCountsPlan.mode === 'defer') {
+        S.feedCountsPlan = null;
+        return new Promise((resolve) => {
+          S.pendingCounts.push({ resolve: (arg) => resolve({ feeds: arg ?? payload().feeds, scope: payload().scope }) });
+        });
+      }
+      return Promise.resolve(payload());
     }
     case 'sync_status': return Promise.resolve({ connected: false });
     case 'list_articles': {
@@ -452,9 +481,9 @@ async function resetStore(extra) {
   S.getArticlesPlan = null;
   S.pendingGetArticles = [];
   S.feedCountsImpl = null;
+  S.scopeCountsImpl = null;
   S.feedCountsPlan = null;
-  S.pendingCounts = [];
-  S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
+  S.pendingCounts = [];  S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: null });
   /* TASK-063：视图缓存是模块级 Map，跨用例残留会让下一个用例的 selectFeed
      命中上一个夹具的快照（跨夹具污染）。每个用例独立起步（(s6) 此前已就地
      手工 clear，这里收口为公共 hygiene；动态导入与 (s) 块同一模块实例）。 */
@@ -464,6 +493,10 @@ async function resetStore(extra) {
      的正文/终态（与 viewEntriesCache 同型污染）——夹具复位一并清空 */
   const { resetBodyCacheForTests } = await import('../../dist-test/store/bodyCache.js');
   resetBodyCacheForTests();
+  /* OPT-008B R1：settings 持久化链/已确认基线是模块级状态——复位避免跨用例
+     串扰（失败回滚目标必须只来自本用例已确认的写入） */
+  const { resetAppSettingsWriteStateForTests } = await import('../../dist-test/store/slices/settings.js');
+  resetAppSettingsWriteStateForTests();
   store.setState({
     dataMode: 'tauri', dataLoading: false, bootstrapError: null,
     activeContentLayout: 'article', activeViewFilter: 'all', activeFeedFilter: 'all',
@@ -471,7 +504,7 @@ async function resetStore(extra) {
     activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false, showFulltext: false,
     summarizingIds: {}, translatingIds: {}, translating: false, summaryErrors: {}, translateErrors: {},
     hydrationErrors: {}, hydratedIds: {}, openedReadIds: {}, toasts: [],
-    entries: [], categories: [], feedIndex: new Map(), feedCounts: new Map(),
+    entries: [], categories: [], feedIndex: new Map(), feedCounts: new Map(), scopeCounts: null,
     articlesLimit: 0, articlesLoading: false, articlesExhausted: false,
     player: { isActive: false, isPlaying: false, speed: 1, title: '', showName: '', cover: '', audioUrl: '', positionSec: 0, durationSec: 0, seekToSec: null },
     playerExpanded: false,

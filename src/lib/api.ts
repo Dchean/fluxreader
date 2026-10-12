@@ -198,6 +198,12 @@ export interface ArticleListArgs {
   last_id?: number | null;
 }
 
+/** OPT-008B R2（N1）：读写入回执行——读闭包真实翻转的条目（含同 URL 副本）。 */
+export interface ReadWriteReceipt {
+  id: number;
+  feed_id: number;
+}
+
 /** 后端聚合的精确条目计数（按 feed 分组）——侧边栏数字用，不受列表分页 limit 影响 */
 export interface FeedCountsRow {
   feed_id: number;
@@ -205,6 +211,23 @@ export interface FeedCountsRow {
   unread: number;
   starred: number;
   today: number;
+}
+
+/** OPT-008B：显示集合（smartDedup）的 scope 精确计数行。 */
+export interface ScopeCountsRow {
+  scope_id: number;
+  total: number;
+  unread: number;
+  starred: number;
+  today: number;
+}
+
+/** OPT-008B：`scope_counts` 返回——全部 / 每分类 / 每源（当前布局过滤后），
+    与列表/搜索/markAll 同一显示集合谓词族。 */
+export interface ScopeCountsDetailRow {
+  all: { total: number; unread: number; starred: number; today: number };
+  folders: ScopeCountsRow[];
+  feeds: ScopeCountsRow[];
 }
 
 /* ============================================================
@@ -236,6 +259,21 @@ export const api = {
   async feedCounts(): Promise<FeedCountsRow[] | null> {
     const inv = await getInvoke();
     return inv ? (await inv('feed_counts') as FeedCountsRow[]) : null;
+  },
+  /** OPT-008B：显示集合的 scope 精确计数（全部/每分类/每源，当前布局过滤）。
+      仅 smartDedup 开启时需要——聚合数字与列表同一谓词族，保证“数字 == 列表”。 */
+  async scopeCounts(layout?: string): Promise<ScopeCountsDetailRow | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('scope_counts', { layout: layout ?? null }) as ScopeCountsDetailRow) : null;
+  },
+  /** OPT-008B R2（N2/P3-4）：**计数组合快照**——同一开关值、同一 DB 锁内返回
+      源计数（布局无关）+ scope 精确计数（按布局）。对账/启动装载只发这一条
+      IPC，源键与聚合键不会来自两个时刻。 */
+  async countsSnapshot(layout?: string): Promise<{ feeds: FeedCountsRow[]; scope: ScopeCountsDetailRow } | null> {
+    const inv = await getInvoke();
+    return inv
+      ? (await inv('counts_snapshot', { layout: layout ?? null }) as { feeds: FeedCountsRow[]; scope: ScopeCountsDetailRow })
+      : null;
   },
   /** 添加订阅源（OPT-011：新 UI 传三态 mode；旧 caller 可省略 mode 走旧 bool 显式语义） */
   async addFeed(
@@ -322,15 +360,19 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('get_articles', { ids }) as ArticleDetailRow[]) : null;
   },
-  async setRead(id: number, read: boolean): Promise<null> {
+  /** 单条标读/取消标读。R2（N1）：读闭包可能一并标读同 URL 未读副本——
+   * 返回**真实翻转行回执**（`[{id, feed_id}]`），供前端让受影响条目/计数本地
+   * 收敛；mock/旧后端返回 null 时按无回执处理（仅乐观行）。 */
+  async setRead(id: number, read: boolean): Promise<ReadWriteReceipt[] | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_read', { id, read }) as null) : null;
+    return inv ? (await inv('set_read', { id, read }) as ReadWriteReceipt[]) : null;
   },
   /** 批量标读：一次 IPC 处理整批 id（AUDIT P3[F4]）。语义与逐条 setRead 等价，见
-   *  Rust 侧 set_read_bulk 的契约注释（每个 id 都走 record_read_state + 入队）。 */
-  async setReadBulk(ids: number[], read: boolean): Promise<null> {
+   *  Rust 侧 set_read_bulk 的契约注释（每个 id 都走 record_read_state + 入队）。
+   *  R2（N1）：返回整批真实翻转行回执（去重升序；含闭包副本）。 */
+  async setReadBulk(ids: number[], read: boolean): Promise<ReadWriteReceipt[] | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_read_bulk', { ids, read }) as null) : null;
+    return inv ? (await inv('set_read_bulk', { ids, read }) as ReadWriteReceipt[]) : null;
   },
   async setStarred(id: number, starred: boolean): Promise<null> {
     const inv = await getInvoke();

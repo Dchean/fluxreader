@@ -238,8 +238,23 @@ export function selectVisibleEntries(s: AppState): ArticleEntry[] {
     （timelineFilter）影响：显示全部时 = 全部文章数，显示未读时 = 未读数；
     其余 view filter（今天/未读/收藏）各自独立计数。 */
 export function selectViewCounts(
-  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts'>,
+  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts' | 'scopeCounts' | 'settings'>,
 ) {
+  /* OPT-008B R1：smartDedup 开启且快照**布局与开关都匹配**时，聚合 scope 的
+     角标直接取 scope_counts 快照（该 scope 显示集合的精确计数，与列表同一
+     谓词族）。快照带 layout/dedup 来源：旧布局或旧开关口径的快照一律不消费
+     （R2/N3 偏差 B 下旧口径快照必须失效）；快照缺失（开关关闭 / mock / 旧
+     后端 / 取数失败）回退既有「按源求和」口径。
+     feedCounts 始终是与布局无关的按源计数（不得被单布局快照覆盖）。 */
+  const snap = s.scopeCounts;
+  if (snap && snap.layout === s.activeContentLayout && snap.dedup === s.settings.smartDedup) {
+    const key = s.activeFeedFilter;
+    const exact = key === 'all' ? snap.all : key.startsWith('cat-') ? snap.folders.get(key) : null;
+    if (exact) {
+      const all = s.timelineFilter === 'unread' ? exact.unread : exact.total;
+      return { all, today: exact.today, unread: exact.unread, starred: exact.starred };
+    }
+  }
   // 用后端精确计数（feedCounts）聚合，而非前端 entries——entries 受分页 limit
   // 截断，会导致「全部/未读数字不准确」。遍历 feedIndex，按「当前布局 × 订阅范围」
   // 累加各 feed 的 total/unread/starred/today。
@@ -282,7 +297,7 @@ export function numericId(id: string): number {
 }
 
 export function selectTreeCounts(
-  s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts'>,
+  s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts' | 'scopeCounts' | 'settings'>,
 ): Map<string, number> {
   // 订阅树角标：数字 = 该行在「当前布局 × 当前视图 × 显示: 全部/未读」筛选下的
   // 条目数。用后端精确计数聚合（feedCounts），不受文章列表分页 limit 影响。
@@ -290,23 +305,43 @@ export function selectTreeCounts(
   // 与「全部」键动态数字一致；否则按 activeViewFilter（全部→total、未读→unread…）。
   const counts = new Map<string, number>();
   const bump = (key: string, n: number) => counts.set(key, (counts.get(key) ?? 0) + n);
+  // 「显示: 未读」只在「全部」视图生效（与 selectVisibleEntries 同口径），
+  // 其余视图按各自筛选语义。
+  const viewOf = (c: { total: number; unread: number; starred: number; today: number }): number =>
+    s.activeViewFilter === 'all' && s.timelineFilter === 'unread'
+      ? c.unread
+      : s.activeViewFilter === 'unread' ? c.unread
+      : s.activeViewFilter === 'starred' ? c.starred
+      : s.activeViewFilter === 'today' ? c.today
+      : c.total;
+  /* OPT-008B R1：源角标始终取 feedCounts（布局无关的按源精确计数，按当前布局
+     过滤 feedIndex）；分类与「全部」角标在 **scopeCounts 快照布局匹配**时直接取
+     该 scope 的显示集合计数（层级去重的总数不可由子集数字相加重建），否则回退
+     按成员求和。旧布局快照不得按新布局显示（快照 layout 与当前不等即忽略）。 */
+  const snap = s.scopeCounts && s.scopeCounts.layout === s.activeContentLayout && s.scopeCounts.dedup === s.settings.smartDedup ? s.scopeCounts : null;
+  let fallbackAll = 0;
   for (const [feedId, binding] of s.feedIndex) {
     if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
     /* L2：feedCounts 缺该源 → 不建角标（与 selectViewCounts 同一取舍：精确计数
        缺失时保守留空，不退回受分页截断的 entries 计数）。 */
     const c = s.feedCounts.get(feedId);
     if (!c) continue;
-    // 「显示: 未读」只在「全部」视图生效（与 selectVisibleEntries 同口径），
-    // 其余视图按各自筛选语义。
-    const n = s.activeViewFilter === 'all' && s.timelineFilter === 'unread'
-      ? c.unread
-      : s.activeViewFilter === 'unread' ? c.unread
-      : s.activeViewFilter === 'starred' ? c.starred
-      : s.activeViewFilter === 'today' ? c.today
-      : c.total;
+    const n = viewOf(c);
     bump(feedId, n);
-    bump(binding.cat.id, n);
-    bump('all', n);
+    fallbackAll += n;
+  }
+  if (snap) {
+    for (const [key, c] of snap.folders) bump(key, viewOf(c));
+    bump('all', viewOf(snap.all));
+  } else {
+    // 回退：分类 = 成员求和（按 feedIndex 归属逐源累加）；全部 = 全部成员求和
+    for (const [feedId, binding] of s.feedIndex) {
+      if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
+      const c = s.feedCounts.get(feedId);
+      if (!c) continue;
+      bump(binding.cat.id, viewOf(c));
+    }
+    bump('all', fallbackAll);
   }
   return counts;
 }

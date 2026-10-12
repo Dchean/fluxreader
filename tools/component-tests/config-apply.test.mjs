@@ -489,3 +489,150 @@ componentTest('OPT-011 R6：A 失败且两屏障之间有 AI 写——写等 A�
     resetPlan();
   }
 });
+
+/* ============================================================
+   OPT-008B R3（P2-N3）：配置应用/上传的 **app_settings** 接线的真实挂载回归。
+   - 应用期间新点击：乐观可见、请求排在应用+回读之后、载荷发送时重建；
+     回读保留点击键（不丢点击）、其余键取远端；确认基线以后端为准；
+   - 上传等待发起时的设置写前沿（快照不漏已点写），且不设门——网络往返
+     不阻塞后续设置写。
+   ============================================================ */
+
+componentTest('OPT-008B R3：下载并应用接入设置边界——新点击排应用后、回读保留点击键、确认基线刷新', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+  const { resetAppSettingsWriteStateForTests } = await import('../../dist-test/store/slices/settings.js');
+  resetAppSettingsWriteStateForTests();
+
+  const applies = [];        // config_sync_apply 挂起项
+  const settingsWrites = []; // set_setting 挂起项
+  const settingsReads = [];  // get_setting 挂起项（应用回读）
+  let failNextSetting = false;
+  const REMOTE_SETTINGS = JSON.stringify({ smartDedup: true, fontSize: 22 });
+  let resolveStatus = null;
+  setPlan({
+    config_sync_status: () => new Promise((resolve) => { resolveStatus = resolve; }),
+    config_sync_download: () => Promise.resolve(JSON.stringify({ uploaded_at: 'x', feeds: [] })),
+    config_sync_apply: () => new Promise((resolve, reject) => { applies.push({ resolve, reject }); }),
+    get_setting: (args) => new Promise((resolve) => { settingsReads.push({ args, resolve }); }),
+    set_setting: (args) => {
+      if (failNextSetting) {
+        failNextSetting = false;
+        return Promise.reject({ message: '注入：设置保存失败' });
+      }
+      return new Promise((resolve, reject) => { settingsWrites.push({ args, resolve, reject }); });
+    },
+  });
+  const origConfirm = window.confirm;
+  window.confirm = () => true;
+  const { act } = await import('react');
+  try {
+    const { entry, applyBtn } = await mountSection();
+    await enableSection(act, resolveStatus, applyBtn);
+
+    /* 真实点击「下载并应用」→ 应用发出（无既有前沿） */
+    await act(async () => { applyBtn.click(); });
+    await flush(3);
+    assert.equal(invokeCount('config_sync_apply'), 1, '应用已发出');
+    assert.equal(useAppStore.getState().settings.smartDedup, false, '前置：应用前本地 dedup=false');
+
+    /* 应用在途：新点击乐观可见、请求被门控（排到应用+回读之后） */
+    await act(async () => { useAppStore.getState().updateSettings({ fontSize: 18 }); });
+    await flush(2);
+    assert.equal(useAppStore.getState().settings.fontSize, 18, '应用期间新点击乐观可见');
+    assert.equal(settingsWrites.length, 0, '点击请求被门控：应用+回读完成前不发出');
+
+    /* 应用提交 → AI 回读（list_folders/list_feeds 默认即时）→ 设置回读挂起 */
+    await act(async () => { applies[0].resolve({ imported: 0, updated: 0, skipped: 0 }); });
+    await flush(4);
+    assert.equal(settingsReads.length, 1, '应用成功后走真实 app_settings 回读（get_setting）');
+    assert.equal(settingsWrites.length, 0, '回读在途：点击请求仍被门控（排到回读之后）');
+
+    /* 放行回读（远端：dedup=true / fontSize=22）→ 点击键保留、其余取远端 */
+    await act(async () => { settingsReads[0].resolve(REMOTE_SETTINGS); });
+    await flush(4);
+    assert.equal(useAppStore.getState().settings.smartDedup, true, '回读生效：远端 dedup=true 落地');
+    assert.equal(useAppStore.getState().settings.fontSize, 18, '回读保留点击键（fontSize 未被远端 22 覆盖，点击不丢）');
+    assert.equal(settingsWrites.length, 1, '门释放后点击请求才发出（排到应用+回读之后）');
+    const sent = JSON.parse(settingsWrites[0].args.value);
+    assert.equal(sent.fontSize, 18, '点击载荷发送时重建：含点击值');
+    assert.equal(sent.smartDedup, true, '点击载荷发送时重建：含回读后的远端基线（不把远端覆盖打回）');
+
+    /* 点击落库成功 → 确认基线 = 该载荷；随后一笔失败回滚到它（而非应用前旧值） */
+    await act(async () => { settingsWrites[0].resolve(null); });
+    await flush(2);
+    failNextSetting = true;
+    await act(async () => { useAppStore.getState().updateSettings({ themeMode: 'light' }); });
+    await flush(3);
+    assert.equal(useAppStore.getState().settings.themeMode, 'dark', '失败回滚到确认基线（themeMode=dark）');
+    assert.equal(useAppStore.getState().settings.smartDedup, true, '确认基线已刷新为回读后的远端值（dedup=true 不被回滚）');
+    assert.equal(useAppStore.getState().settings.fontSize, 18, '确认基线含点击值（fontSize=18 保持）');
+    assert.ok(useAppStore.getState().toasts.some((t) => t.text.includes('设置保存失败')), '失败如实可见');
+    assert.ok(entry.container.querySelector('.settings-group-title'), '组件挂载树保持');
+  } finally {
+    window.confirm = origConfirm;
+    await drainControlled(act, [
+      { kind: 'reject', items: applies },
+      { kind: 'resolve', items: settingsReads, value: null },
+      { kind: 'reject', items: settingsWrites },
+    ]);
+    await flush(1);
+    resetPlan();
+    resetAppSettingsWriteStateForTests();
+  }
+});
+
+componentTest('OPT-008B R3：上传等待发起时的设置写前沿；往返不阻塞后续设置写', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+  const { resetAppSettingsWriteStateForTests } = await import('../../dist-test/store/slices/settings.js');
+  resetAppSettingsWriteStateForTests();
+
+  const uploads = [];
+  const settingsWrites = [];
+  let resolveStatus = null;
+  setPlan({
+    config_sync_status: () => new Promise((resolve) => { resolveStatus = resolve; }),
+    config_sync_upload: () => new Promise((resolve, reject) => { uploads.push({ resolve, reject }); }),
+    set_setting: (args) => new Promise((resolve, reject) => { settingsWrites.push({ args, resolve, reject }); }),
+  });
+  const { act } = await import('react');
+  try {
+    const { uploadBtn, applyBtn } = await mountSection();
+    await enableSection(act, resolveStatus, applyBtn);
+
+    /* 发起时已有设置写前沿：上传须等其落定（快照不漏已点写） */
+    await act(async () => { useAppStore.getState().updateSettings({ fontSize: 18 }); });
+    await flush(2);
+    assert.equal(settingsWrites.length, 1, '前置：设置写挂起');
+    await act(async () => { uploadBtn.click(); });
+    await flush(3);
+    assert.equal(uploads.length, 0, '上传等待发起时已存在的设置写前沿：尚未发出');
+
+    /* 前沿落定 → 上传发出；其网络往返不设门：后续设置写照常发出 */
+    await act(async () => { settingsWrites[0].resolve(null); });
+    await flush(3);
+    assert.equal(uploads.length, 1, '前沿落定后上传才发出');
+    await act(async () => { useAppStore.getState().updateSettings({ fontSize: 20 }); });
+    await flush(2);
+    assert.equal(settingsWrites.length, 2, '上传往返期间：新设置写照常发出（无写门）');
+
+    await act(async () => { uploads[0].resolve('2026-10-12T00:00:00Z'); });
+    await flush(3);
+    assert.ok(useAppStore.getState().toasts.some((t) => t.text === '配置已上传'), '上传成功提示如实');
+    await act(async () => { settingsWrites[1].resolve(null); });
+    await flush(2);
+  } finally {
+    await drainControlled(act, [
+      { kind: 'reject', items: uploads },
+      { kind: 'reject', items: settingsWrites },
+    ]);
+    await flush(1);
+    resetPlan();
+    resetAppSettingsWriteStateForTests();
+  }
+});

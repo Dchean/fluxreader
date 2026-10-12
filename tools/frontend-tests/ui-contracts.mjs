@@ -815,6 +815,7 @@ export async function run(ctx) {
         case 'list_folders': return Promise.resolve(FOLDERS94);
         case 'list_feeds': return Promise.resolve(FEEDS94);
         case 'feed_counts': return Promise.resolve([]);
+        case 'counts_snapshot': return Promise.resolve({ feeds: [], scope: null });
         case 'sync_status': return Promise.resolve({ connected: false });
         case 'list_articles': return Promise.resolve(queryRows94((args && args.args) || {}));
         case 'article_index': return Promise.resolve(0);
@@ -1104,6 +1105,7 @@ export async function run(ctx) {
           case 'list_folders': return Promise.resolve(FOLDERS);
           case 'list_feeds': return Promise.resolve(FEEDS);
           case 'feed_counts': return Promise.resolve([]);
+        case 'counts_snapshot': return Promise.resolve({ feeds: [], scope: null });
           case 'sync_status': return Promise.resolve({ connected: false });
           case 'list_articles': {
             const a = (args && args.args) || {};
@@ -1201,6 +1203,7 @@ export async function run(ctx) {
           case 'list_feeds': return Promise.resolve([]);
           case 'list_articles': return Promise.resolve([]);
           case 'feed_counts': return Promise.resolve([]);
+        case 'counts_snapshot': return Promise.resolve({ feeds: [], scope: null });
           case 'sync_status': return Promise.resolve({ connected: false });
           default: return Promise.resolve(null);
         }

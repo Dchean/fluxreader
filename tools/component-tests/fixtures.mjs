@@ -90,6 +90,13 @@ function defaultHandler(cmd, args) {
     case 'list_folders': return Promise.resolve(FOLDERS);
     case 'list_feeds': return Promise.resolve(FEEDS);
     case 'feed_counts': return Promise.resolve(COUNTS);
+    /* OPT-008B R2（N2/P3-4）：reload / 写后对账的唯一计数 IPC——同一次调用内
+       返回源计数（布局无关）+ scope 计数（当前布局）。组件夹具不提供 scope
+       （dedup 关闭时前端不消费；开启时 buildScopeCountsSnapshot 按契约回退），
+       源计数缺省与既有 COUNTS 同值。 */
+    case 'counts_snapshot': {
+      return Promise.resolve({ feeds: COUNTS, scope: null });
+    }
     case 'list_articles': {
       /* 后端布局过滤口径：list_articles 带 layout 维度（QueryScope.args），
          只回该布局的源的行——切布局后列表快照必须换数据（不是 css 类变化）。 */

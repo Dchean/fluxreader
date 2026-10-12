@@ -1,8 +1,9 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
-import { currentLocalFlagWriteSerial, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, syncCurrentViewCache, viewEntriesCache } from '../internals';
-import { selectVisibleEntries } from '../selectors';
+import { beginEntryFieldWrite, beginLocalFlagWrite, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCountsOrdered, scheduleCountsReconcile, syncCurrentViewCache, viewEntriesCache } from '../internals';
+import { selectScopeEntries, selectVisibleEntries } from '../selectors';
 import type { AppState } from '../types';
+import type { ViewFilterType } from '../../types';
 
 /** 导航与筛选 slice：内容布局 / 视图 / 订阅范围 / 时间流筛选状态，及其导航 action。
  *
@@ -326,34 +327,61 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     for (const [id, prev] of prevReadById) {
       if (!prev) optimisticVersionById.set(id, getEntryVersion(id, 'isRead'));
     }
+    /* R2/N1：成功后把**已加载范围内**（含当前不可见但在窗口内的同 URL 副本）
+       的条目本地收敛为已读——与后端 mark_all_read 的 范围×视图×布局 参数
+       逐项同构；`markEntriesRead` 内部只翻未读行（不会重复计数）。 */
+    const convergeLoadedScopeToRead = (viewFilter: ViewFilterType) => {
+      const st = get();
+      const inScope = selectScopeEntries(st);
+      const since = viewFilter === 'today' ? startOfLocalDayMs() : undefined;
+      const ids = new Set(
+        inScope
+          .filter((e) =>
+            viewFilter === 'starred' ? e.isStarred
+            : viewFilter === 'today' ? e.publishedAt >= (since ?? 0)
+            : true,
+          )
+          .map((e) => e.id),
+      );
+      if (ids.size > 0) markEntriesRead(ids);
+    };
     set({ openedReadIds: {} });
+    /* R2/N2：markAll 是本地写意图——在途期间计数快照不得落地覆盖其乐观值。
+       R4：被乐观翻转的行×字段同时登记为在途写（articles 快照读取发起时的
+       保护集合用；范围=本次真实翻转的 id 集合）。 */
+    beginLocalFlagWrite();
+    for (const id of optimisticVersionById.keys()) beginEntryFieldWrite(id, 'isRead');
     void api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout }).then((affected) => {
+      endLocalFlagWrite();
+      for (const id of optimisticVersionById.keys()) endEntryFieldWrite(id, 'isRead');
       /* TASK-107：成功以后端为准对账。mark_all_read 影响整个范围（含未加载
          条目），此前忽略返回值、只按已加载条目推算计数——审计探针：范围 600
          条未读、前端加载 1 条，后端成功 600 条后界面仍显示 599。范围总量前端
          不可知（分页只加载首批），affected 无法直接换算计数，对账收口为
-         「重取 feed_counts 整体替换」（与 reloadFromBackend 同一计数来源）；
+         「重取计数整体替换」（与 reloadFromBackend 同一计数来源）；
          affected 是后端对本次操作的实际影响报告（0 = 范围内本就没有未读，
          此时乐观写入也未翻转任何条目，无需重取）。 */
       get().showToast('已全部标为已读');
       if (affected === 0) return;
+      /* R2/N1：乐观段只覆盖"当前可见集合"；后端读闭包改的是整个范围（含被
+         显示聚合折叠/不在可见集合但在已加载窗口内的同 URL 副本）。成功后把这些
+         已加载条目本地收敛为已读——仅计数重取不够（entries/视图缓存里的兄弟
+         仍是未读）。范围×视图口径与后端 mark_all_read 参数逐项同构。 */
+      convergeLoadedScopeToRead(view);
       /* TASK-119（审计 P2-4②探针 P6）：对账发起时记录本地读/藏写入序号
          （currentLocalFlagWriteSerial，bump 点矩阵见 internals）——落地仅当
          「期间无本地读/藏写入」才整体替换：替换会把乐观计数踩回旧值（改回未读
-         后迟到计数落地 → 文章未读但未读数 0）。过期则丢弃并**立即重取一次**；
-         重取仍过期/失败则放弃，计数由下次 reload 自愈（与 R1 F2 失败自愈同口径，
-         不循环重试——重取自身不再触发重取）。 */
+         后迟到计数落地 → 文章未读但未读数 0）。
+         OPT-008B R1：对账统一收口到 internals.reconcileCountsOrdered——同一守卫
+         族外加「布局 / 开关代次 + 计数读取令牌 + 在途意图」（迟到响应不得跨布局
+         回填、旧 reload 不得覆盖新对账）；单次 counts_snapshot 同取源/聚合两份
+         计数（同一时刻）。过期则丢弃并**立即重取一次**；重取仍过期/失败则放弃，
+         计数由下次 reload 自愈（不循环重试）。 */
       const reconcileCounts = (): Promise<'applied' | 'stale' | 'empty'> => {
-        const serialAtStart = currentLocalFlagWriteSerial();
-        return api.feedCounts().then((rows) => {
-          if (!rows) return 'empty';
-          if (currentLocalFlagWriteSerial() !== serialAtStart) return 'stale';
-          const next = new Map<string, { total: number; unread: number; starred: number; today: number }>();
-          for (const c of rows) {
-            next.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
-          }
-          set({ feedCounts: next });
-          return 'applied';
+        return reconcileCountsOrdered().then((outcome) => {
+          if (outcome === 'failed') throw new Error('计数对账读取失败');
+          if (outcome === 'skipped') return 'empty';
+          return outcome;
         });
       };
       const runCountReconcile = (allowRetry: boolean) => {
@@ -377,12 +405,22 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       };
       runCountReconcile(true);
     }).catch((e: unknown) => {
+      endLocalFlagWrite();
+      for (const id of optimisticVersionById.keys()) endEntryFieldWrite(id, 'isRead');
       /* TASK-107：失败回滚——乐观翻转到原读态、逐 feed 回补未读计数、还原
          「已读保留」快照并同步视图缓存。恢复前提从「当前值仍等于乐观写入值」
          升级为 R1 的版本守卫（值守卫保留作快速短路：值已不同必然已被接管）。
          成功 toast 已移入 .then（落库确认后才弹），此处只给失败 toast + 重试。 */
       const s = get();
       let changed = false;
+      /* R2：接管检测——乐观声明的 isRead 版本已前进（后端快照替换/其他真实写入
+         接管了读字段）。此时回滚无法线性复原计数（快照不按行 ±1，且其在途计数
+         可能被本操作未提交意图挡下）——失败后必须强制一次权威计数对账，否则
+         计数停留在乐观值（N1 关闭 dedup 时无其他收敛路径）。 */
+      let takenOver = false;
+      for (const [id, version] of optimisticVersionById) {
+        if (getEntryVersion(id, 'isRead') !== version) { takenOver = true; break; }
+      }
       const unreadRestore = new Map<string, number>();
       const entries = s.entries.map((a) => {
         if (!ids.has(a.id)) return a;
@@ -403,6 +441,10 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       }
       set(changed ? { entries, feedCounts, openedReadIds: prevOpenedReadIds } : { openedReadIds: prevOpenedReadIds });
       if (changed) syncCurrentViewCache(entries);
+      /* OPT-008B R1/R2：失败回滚后同样对账（本地与后端一致时幂等；不一致时
+         收敛）；回滚被接管跳过（takenOver）时不受 dedup 门控强制重取——
+         乐观计数无其他复原路径（dedup 关闭时读闭包回执行不存在，因为写已失败）。 */
+      scheduleCountsReconcile(takenOver ? { force: true } : undefined);
       /* TASK-067 N10：失败必须可见；本地已回滚，文案不再断言「重启后可能回退」 */
       get().showToast(`全部已读保存失败：${extractError(e)}`, { label: '重试', run: () => get().markCurrentViewAllRead() });
     });

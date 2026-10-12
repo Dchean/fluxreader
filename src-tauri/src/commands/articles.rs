@@ -119,7 +119,11 @@ pub async fn search_articles(
 /// TASK-108：复合操作下沉为 [`db::set_read_with_enqueue`] **单事务**——状态写入
 /// 与入队同生共死：入队步失败时状态写入一并回滚。修前无外层事务，入队失败会
 /// 留下「本地已改但无待推记录」的孤儿变更（离线永不补推，且可能被远端对账覆盖）。
-pub fn record_read_state(conn: &rusqlite::Connection, id: i64, read: bool) -> AppResult<()> {
+pub fn record_read_state(
+    conn: &rusqlite::Connection,
+    id: i64,
+    read: bool,
+) -> AppResult<Vec<db::ReadWriteReceipt>> {
     db::set_read_with_enqueue(conn, id, read)
 }
 
@@ -128,12 +132,18 @@ pub fn record_star_state(conn: &rusqlite::Connection, id: i64, starred: bool) ->
     db::set_starred_with_enqueue(conn, id, starred)
 }
 
+/// 单条标读/取消标读。R2（N1）：返回**真实翻转行回执**（读闭包可能一并标读
+/// 同 URL 未读副本）——前端据此让受影响条目/计数本地收敛（不依赖全量 reload）。
 #[tauri::command]
-pub async fn set_read(state: State<'_, AppState>, id: i64, read: bool) -> AppResult<()> {
-    {
+pub async fn set_read(
+    state: State<'_, AppState>,
+    id: i64,
+    read: bool,
+) -> AppResult<Vec<db::ReadWriteReceipt>> {
+    let receipts = {
         let conn = state.db.lock().await;
-        record_read_state(&conn, id, read)?;
-    }
+        record_read_state(&conn, id, read)?
+    };
     // 锁外调度即时推送（防抖合批，~1s 内到达服务端）；未配置时 push_states_now
     // 静默返回，队列项留待连接后的同步补推
     schedule_state_push(&state);
@@ -141,7 +151,7 @@ pub async fn set_read(state: State<'_, AppState>, id: i64, read: bool) -> AppRes
     // sync-queue-changed，pill 即时「等待同步 N 条」（不等 800ms 推送往返）。
     // 锁外发（notify_queue_changed 内部自持短锁读统计）；未配置时内部静默。
     crate::sync::notify_queue_changed(&state.db).await;
-    Ok(())
+    Ok(receipts)
 }
 
 /// 批量标读的**真实逻辑**（命令与测试共用，与 [`apply_mark_all_read`] 同一手法）。
@@ -155,7 +165,11 @@ pub async fn set_read(state: State<'_, AppState>, id: i64, read: bool) -> AppRes
 /// 逐 id 走与 [`record_read_state`] 完全相同的内核语句（状态写入 + 入队），语义
 /// 与单条路径严格一致；中途任一 id 失败整批回滚，不再有部分成功（修前逐条
 /// 自动提交，中途失败会留下半批已落库+已入队）。
-pub fn apply_read_bulk(conn: &rusqlite::Connection, ids: &[i64], read: bool) -> AppResult<()> {
+pub fn apply_read_bulk(
+    conn: &rusqlite::Connection,
+    ids: &[i64],
+    read: bool,
+) -> AppResult<Vec<db::ReadWriteReceipt>> {
     db::set_read_bulk_with_enqueue(conn, ids, read)
 }
 
@@ -174,18 +188,22 @@ pub fn apply_read_bulk(conn: &rusqlite::Connection, ids: &[i64], read: bool) -> 
 ///     不存在部分成功（修前逐条提交，「不写半批」只对内存态成立）。
 /// 粒度差异：整批共用一次锁、一次事务与一次 push 调度。
 #[tauri::command]
-pub async fn set_read_bulk(state: State<'_, AppState>, ids: Vec<i64>, read: bool) -> AppResult<()> {
+pub async fn set_read_bulk(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    read: bool,
+) -> AppResult<Vec<db::ReadWriteReceipt>> {
     if ids.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    {
+    let receipts = {
         let conn = state.db.lock().await;
-        apply_read_bulk(&conn, &ids, read)?;
-    }
+        apply_read_bulk(&conn, &ids, read)?
+    };
     schedule_state_push(&state);
     // TASK-124：整批单事务提交后发 sync-queue-changed（锁外，同 set_read 口径）
     crate::sync::notify_queue_changed(&state.db).await;
-    Ok(())
+    Ok(receipts)
 }
 
 #[tauri::command]
@@ -262,6 +280,31 @@ pub fn apply_mark_all_read(
 pub async fn feed_counts(state: State<'_, AppState>) -> AppResult<Vec<db::FeedCounts>> {
     let conn = state.db.lock().await;
     db::feed_counts(&conn)
+}
+
+/// OPT-008B 第一阶段：全部 / 每分类 / 每源的**显示集合**精确计数
+/// （与 list_articles / search / markAll 同一 smartDedup 谓词族）。
+/// 前端聚合数字（侧边栏「全部/分类」）消费本命令，保证
+/// 「数字 == 点进去看到的列表条数」；源内数字仍可用 `feed_counts`。
+/// `layout` = 当前内容布局（与列表查询同口径；省略 = 不过滤）。
+#[tauri::command]
+pub async fn scope_counts(
+    state: State<'_, AppState>,
+    layout: Option<String>,
+) -> AppResult<db::ScopeCountsDetail> {
+    let conn = state.db.lock().await;
+    db::scope_counts(&conn, layout.as_deref())
+}
+
+/// 计数组合快照（R2/N2）：同一开关值、同一 DB 锁内返回源计数 + scope 计数，
+/// 前端计数对账与启动装载只发这一条 IPC（源键与聚合键不会来自两个时刻）。
+#[tauri::command]
+pub async fn counts_snapshot(
+    state: State<'_, AppState>,
+    layout: Option<String>,
+) -> AppResult<db::CountsSnapshot> {
+    let conn = state.db.lock().await;
+    db::counts_snapshot(&conn, layout.as_deref())
 }
 /* ============================================================
 刷新（直连抓取）

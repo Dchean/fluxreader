@@ -73,6 +73,9 @@ struct FEntry {
     title: String,
     read: bool,
     saved: bool,
+    /// OPT-008B：URL 覆盖（跨源同 URL 条目身份用例需要两条不同 feed 的
+    /// entry 指向同一 URL；缺省仍按 `<feed>/<id>` 生成，既有用例逐字不变）。
+    url: Option<String>,
 }
 
 /// 原样响应（HTTP 层用例：无长度分帧/压缩超限）。
@@ -216,12 +219,26 @@ impl Fixture {
     }
 
     fn add_entry(&self, id: i64, feed_id: i64, title: &str, read: bool, saved: bool) {
+        self.add_entry_with_url(id, feed_id, title, read, saved, None);
+    }
+
+    /// OPT-008B：可指定 URL 的条目入口（None = 既有 `<feed>/<id>` 形态）。
+    fn add_entry_with_url(
+        &self,
+        id: i64,
+        feed_id: i64,
+        title: &str,
+        read: bool,
+        saved: bool,
+        url: Option<&str>,
+    ) {
         self.entries.lock().unwrap().push(FEntry {
             id,
             feed_id,
             title: title.to_string(),
             read,
             saved,
+            url: url.map(str::to_string),
         });
     }
 
@@ -355,7 +372,7 @@ impl Fixture {
             "title": e.title,
             "author": "a",
             "html": html,
-            "url": format!("https://e.example/{}/{}", e.feed_id, e.id),
+            "url": e.url.clone().unwrap_or_else(|| format!("https://e.example/{}/{}", e.feed_id, e.id)),
             "is_saved": if e.saved { 1 } else { 0 },
             "is_read": if e.read { 1 } else { 0 },
             "created_on_time": 1_700_000_000 + (e.id % 1000),
@@ -2414,5 +2431,495 @@ async fn page_failure_then_rebuild_map_error_terminates_round() {
         0,
         "重建失败后不得执行 with_ids 补齐"
     );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/* ============================================================
+I. OPT-008B 第一阶段：Fever 跨源同 URL 的独立条目身份
+============================================================ */
+
+/// Fever：两个 feed 的 entry 指向同一 URL、id 不同 —— 必须各有独立条目。
+/// 身份层：两条 entry 各自绑定自己的行（不因 URL 相同被吞成 CSV/单行）。
+/// 读政策层（N4 裁定，两协议统一）：远端任一副本已读时，同 URL 兄弟按
+/// read-anywhere-wins 广播一并标读，且**本轮最终 Fever 权威对账不得立刻
+/// 撤销同一已接受的广播**；下一轮远端显式 unread（无同轮 read 信号）时
+/// 双向 unread 权威照常生效——历史广播读不永久阻挡后续远端显式 unread。
+/// 实现前：URL 兜底匹配（全局）把第二条 entry 记进 CSV/直接吞掉，断言必红。
+#[tokio::test]
+async fn fever_cross_feed_same_url_keeps_independent_entries() {
+    const SHARED: &str = "http://127.0.0.1:8765/post/fever-shared";
+    let srv = Fixture::start().await;
+    srv.set_groups(vec![(1, "G")]);
+    srv.set_feeds(vec![
+        (10, "F10", "http://example.com/f10.rss"),
+        (11, "F11", "http://example.com/f11.rss"),
+    ]);
+    srv.add_entry_with_url(7001, 10, "copy-10", false, false, Some(SHARED));
+    srv.add_entry_with_url(7002, 11, "copy-11", false, false, Some(SHARED));
+
+    let (db, tmp) = seed_db("fever_identity_cross", &srv);
+    {
+        let conn = db.lock().await;
+        // 两个本地源：sync_now 的 feeds 阶段按 URL 与远端 feed 完成绑定
+        let folder = db::create_folder(&conn, "分类", "article").unwrap();
+        let feed10 = db::insert_feed(
+            &conn,
+            "http://example.com/f10.rss",
+            None,
+            "F10",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let feed11 = db::insert_feed(
+            &conn,
+            "http://example.com/f11.rss",
+            None,
+            "F11",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        // 直连风格两行：同 URL、各自源、均未绑定——full pull 必须把每条 entry
+        // 绑到**自己源的那一行**（旧行为：URL 兜底只命中最小 id 行，第二条 entry
+        // 被记成副本、行永不绑定）。
+        let article = |guid: &str| db::NewArticle {
+            guid: guid.into(),
+            url: Some(SHARED.into()),
+            title: "direct copy".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>c</p>".into()),
+            body_text: "c".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some(chrono::Utc::now().to_rfc3339()),
+            source: "direct".into(),
+        };
+        db::upsert_article_with_feed(&conn, feed10, &article("g-f10"), false).unwrap();
+        db::upsert_article_with_feed(&conn, feed11, &article("g-f11"), false).unwrap();
+    }
+    let report = sync::sync_now(&db, &http()).await.expect("sync");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+    {
+        let conn = db.lock().await;
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM articles WHERE url_norm = ?1",
+                [db::normalize_url(SHARED)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            total, 2,
+            "Fever 跨源同 URL 必须独立成行（修前被全局 URL 匹配吞成 1 行）"
+        );
+        assert!(
+            bound_remote_id(&conn, 7001) && bound_remote_id(&conn, 7002),
+            "两条 entry 必须各自绑定到自己的 feed 行"
+        );
+    }
+
+    // 远端把 feed 10 的副本（7001）置为已读 → 7001 按自己的条目收敛已读；
+    // 同 URL 的 7002 按 read-anywhere-wins 广播一并标读，且轮终 Fever 权威
+    // 对账**不得立刻撤销**同一轮已接受的广播（N4：与 GR 同轮政策统一）。
+    {
+        let mut es = srv.entries.lock().unwrap();
+        if let Some(e) = es.iter_mut().find(|e| e.id == 7001) {
+            e.read = true;
+        }
+    }
+    sync::sync_now(&db, &http()).await.expect("sync 2");
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            article_state(&conn, 7001),
+            Some((true, false)),
+            "A 远端已读按自己的条目收敛"
+        );
+        assert_eq!(
+            article_state(&conn, 7002),
+            Some((true, false)),
+            "B 按同轮读广播一并标读（read-anywhere-wins；N4 起两协议同轮终值一致），而非 B 自己的远端 unread 立即撤销"
+        );
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM articles WHERE url_norm = ?1",
+                [db::normalize_url(SHARED)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 2, "读广播作用于已存在的兄弟行，不得合并/新增条目");
+        assert!(
+            bound_remote_id(&conn, 7001) && bound_remote_id(&conn, 7002),
+            "广播后两条 entry 仍各自绑定的自己的行（身份独立未被读广播破坏）"
+        );
+    }
+
+    // 下一轮远端把两条都显式置回未读（无同轮 read 信号）→ Fever 双向 unread
+    // 权威恢复：本地已读（含上一轮广播落下的）被显式 unread 复活，不被历史
+    // 读态永久阻挡（N4 裁定后半）。
+    {
+        let mut es = srv.entries.lock().unwrap();
+        for e in es.iter_mut() {
+            if e.id == 7001 || e.id == 7002 {
+                e.read = false;
+            }
+        }
+    }
+    sync::sync_now(&db, &http()).await.expect("sync 3");
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            article_state(&conn, 7001),
+            Some((false, false)),
+            "远端显式 unread（无同轮读信号）复活本地未读"
+        );
+        assert_eq!(
+            article_state(&conn, 7002),
+            Some((false, false)),
+            "历史广播读不得永久阻挡后续远端显式 unread"
+        );
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/* ============================================================
+N4/R2 扩展反例（主控裁决：两协议同轮政策 + 失败恢复 + 清队版本）
+
+- 排列覆盖：既有用例是「小 id 读、大 id 未读」（页序里未读行先处理、
+  读行后广播命中它）；本段补**大 id 读、小 id 未读**（读行先处理、广播先于
+  本人 own unread 落定）——两种页序都必须收敛到 read-anywhere-wins。
+- 集合失败恢复：unread 集合拉取失败必须跳过对账（不伪空成功、不推完成时间），
+  失败轮里由 items 合并产生的已读广播不回滚；下一轮集合恢复后：
+  读信号仍在的轮不得撤销广播，双方显式 unread（无读信号）的轮照常复活。
+- 清队版本：真实网络 push（Fever mark=item 端点）确认后队列清空；下一轮远端
+  显式 unread 必须能穿透字段版本守卫（本地写已把 read_version 推到 1，远端
+  合并不递增版本——版本守卫不得把「已确认的本地意图」当永久阻塞）。
+  在途旧快照与确认清队的交错方向（响应屏障）由 OPT-007
+  `pull_field_versions_e2e`（GR mock 屏障）覆盖；本段不重复屏障夹具，也不以
+  直接 `prune_sync` 模拟冒充网络 push：push 经真实 HTTP 后再断言清队。
+============================================================ */
+
+/// R2 扩展夹具：两源同 URL 各一条远端 entry（id 分别指定），本地两源各自
+/// 直连一行（未绑定）；`sync_now`（feeds→states 全量）按 URL 把每条 entry
+/// 绑到自己源的那一行。返回 (db, tmp)。
+async fn seed_cross_feed_pair(
+    tag: &str,
+    srv: &Arc<Fixture>,
+    url: &str,
+    remote_small: i64,
+    remote_large: i64,
+) -> (TestDb, std::path::PathBuf) {
+    srv.set_groups(vec![(1, "G")]);
+    srv.set_feeds(vec![
+        (10, "F10", "http://example.com/f10.rss"),
+        (11, "F11", "http://example.com/f11.rss"),
+    ]);
+    srv.add_entry_with_url(remote_small, 10, "copy-10", false, false, Some(url));
+    srv.add_entry_with_url(remote_large, 11, "copy-11", false, false, Some(url));
+
+    let (db, tmp) = seed_db(tag, srv);
+    {
+        let conn = db.lock().await;
+        let folder = db::create_folder(&conn, "分类", "article").unwrap();
+        let feed10 = db::insert_feed(
+            &conn,
+            "http://example.com/f10.rss",
+            None,
+            "F10",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let feed11 = db::insert_feed(
+            &conn,
+            "http://example.com/f11.rss",
+            None,
+            "F11",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let article = |guid: &str| db::NewArticle {
+            guid: guid.into(),
+            url: Some(url.into()),
+            title: "direct copy".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>c</p>".into()),
+            body_text: "c".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some(chrono::Utc::now().to_rfc3339()),
+            source: "direct".into(),
+        };
+        db::upsert_article_with_feed(&conn, feed10, &article("g-f10"), false).unwrap();
+        db::upsert_article_with_feed(&conn, feed11, &article("g-f11"), false).unwrap();
+    }
+    (db, tmp)
+}
+
+/// 队列里 `read` 动作的队项数。
+fn queued_read_count(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sync_queue WHERE action = 'read'",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// 某行的 read_version（版本守卫断言：本地写递增、远端合并不递增）。
+fn read_version_of(conn: &rusqlite::Connection, remote_id: i64) -> i64 {
+    conn.query_row(
+        "SELECT read_version FROM articles WHERE remote_id = ?1",
+        [remote_id],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// N4 排列二（大 id 读、小 id 未读）：页序按 id 降序 → 读行先落定并广播，
+/// 尚未被自己条目合并的未读行必须先被广播标读；随后该行 own unread 处理时，
+/// 同轮已读信号（显式集合）不得被推翻。轮终 Fever 权威对账同样不得撤销。
+#[tokio::test]
+async fn fever_same_round_large_id_read_small_id_unread_stays_read() {
+    const SHARED: &str = "http://127.0.0.1:8765/post/fever-perm-large-read";
+    let srv = Fixture::start().await;
+    let (db, tmp) = seed_cross_feed_pair("fever_perm_large_read", &srv, SHARED, 7101, 7102).await;
+    let report = sync::sync_now(&db, &http()).await.expect("sync bind");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    {
+        let conn = db.lock().await;
+        assert!(
+            bound_remote_id(&conn, 7101) && bound_remote_id(&conn, 7102),
+            "两源同 URL 各自成行并绑定"
+        );
+        assert_eq!(article_state(&conn, 7101), Some((false, false)));
+        assert_eq!(article_state(&conn, 7102), Some((false, false)));
+    }
+
+    // 远端只把**大 id**（7102）置读 → 页序 [7102, 7101]：读行先处理。
+    {
+        let mut es = srv.entries.lock().unwrap();
+        if let Some(e) = es.iter_mut().find(|e| e.id == 7102) {
+            e.read = true;
+        }
+    }
+    sync::sync_now(&db, &http()).await.expect("sync 2");
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            article_state(&conn, 7102),
+            Some((true, false)),
+            "大 id 读行按自己的条目收敛"
+        );
+        assert_eq!(
+            article_state(&conn, 7101),
+            Some((true, false)),
+            "小 id 未读行被同轮广播先标读；own unread 与轮终对账都不得推翻（顺序无关）"
+        );
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// N4 集合失败与恢复（可解释链）：失败轮跳过对账但保留 items 合并的已读广播、
+/// 不推完成时间；恢复轮里读信号仍在 → 广播不被撤销；双方显式 unread（无读
+/// 信号）轮 → 双向 unread 权威恢复。
+#[tokio::test]
+async fn fever_collection_failure_round_and_next_round_recovery_are_explainable() {
+    const SHARED: &str = "http://127.0.0.1:8765/post/fever-collection-failure";
+    let srv = Fixture::start().await;
+    let (db, tmp) =
+        seed_cross_feed_pair("fever_collection_failure", &srv, SHARED, 7201, 7202).await;
+    let r1 = sync::sync_now(&db, &http()).await.expect("sync bind");
+    assert!(r1.errors.is_empty(), "{:?}", r1.errors);
+    let ts1 = {
+        let conn = db.lock().await;
+        db::last_sync_ts(&conn).unwrap()
+    };
+
+    // 失败轮：7101 远端已读 + unread 集合拉取失败（响应缺字段）。
+    {
+        let mut es = srv.entries.lock().unwrap();
+        if let Some(e) = es.iter_mut().find(|e| e.id == 7201) {
+            e.read = true;
+        }
+    }
+    srv.set_omit_unread(true);
+    let r2 = sync::sync_now(&db, &http())
+        .await
+        .expect("sync 2 (collection failure)");
+    assert!(
+        r2.errors.iter().any(|e| e.contains("状态对账跳过")),
+        "集合拉取失败必须显式报错（不得伪空成功）：{:?}",
+        r2.errors
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            db::last_sync_ts(&conn).unwrap(),
+            ts1,
+            "集合没拿全 → 完成时间不得推进（切回 greader 不跳窗口）"
+        );
+        assert_eq!(
+            article_state(&conn, 7201),
+            Some((true, false)),
+            "失败轮 items 合并仍生效：读行自身收敛"
+        );
+        assert_eq!(
+            article_state(&conn, 7202),
+            Some((true, false)),
+            "失败轮跳过对账不等于撤销 items 合并产生的已读广播"
+        );
+    }
+
+    // 恢复轮：集合恢复（7201 仍读、7202 仍未读）。读信号仍在 → 广播不被撤销。
+    srv.set_omit_unread(false);
+    let r3 = sync::sync_now(&db, &http())
+        .await
+        .expect("sync 3 (recovered)");
+    assert!(r3.errors.is_empty(), "{:?}", r3.errors);
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            article_state(&conn, 7202),
+            Some((true, false)),
+            "恢复轮里同轮已读广播继续有效：own 远端 unread 不得撤销（N4 统一政策）"
+        );
+    }
+
+    // 显式 unread 轮：远端把两条都置回未读（无任何读信号）→ 双向权威恢复。
+    {
+        let mut es = srv.entries.lock().unwrap();
+        for e in es.iter_mut() {
+            if e.id == 7201 || e.id == 7202 {
+                e.read = false;
+            }
+        }
+    }
+    sync::sync_now(&db, &http()).await.expect("sync 4");
+    {
+        let conn = db.lock().await;
+        assert_eq!(article_state(&conn, 7201), Some((false, false)));
+        assert_eq!(
+            article_state(&conn, 7202),
+            Some((false, false)),
+            "失败轮与广播读都不得永久阻挡后续远端显式 unread"
+        );
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// N4 清队版本（真实网络 push）：本地标读经闭包把同文两行标读+入队 →
+/// `sync_now` 走 Fever `mark=item` 端点真实推送 → 服务端状态已读、队列被
+/// 确认清空（不是直接 prune 模拟）→ 下一轮远端显式 unread 穿透字段版本守卫
+/// （read_version=1 的本地意图 + 无 pending + 快照等于当前版本）恢复未读，
+/// 且远端合并不递增版本。
+#[tokio::test]
+async fn fever_push_confirmed_read_then_next_round_explicit_unread_revives() {
+    const SHARED: &str = "http://127.0.0.1:8765/post/fever-push-confirm";
+    let srv = Fixture::start().await;
+    let (db, tmp) = seed_cross_feed_pair("fever_push_confirm", &srv, SHARED, 7301, 7302).await;
+    let r1 = sync::sync_now(&db, &http()).await.expect("sync bind");
+    assert!(r1.errors.is_empty(), "{:?}", r1.errors);
+    let aid_small = {
+        let conn = db.lock().await;
+        assert!(bound_remote_id(&conn, 7301) && bound_remote_id(&conn, 7302));
+        assert_eq!(queued_read_count(&conn), 0);
+        conn.query_row("SELECT id FROM articles WHERE remote_id = 7301", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+
+    // 本地对 7301 行标读：读闭包应把同文兄弟（7302 行）一并标读并各自入队；
+    // 回执是**真实翻转行**（两条都在内）。
+    let receipts = {
+        let conn = db.lock().await;
+        db::set_read_with_enqueue(&conn, aid_small, true).unwrap()
+    };
+    assert_eq!(
+        receipts.len(),
+        2,
+        "读闭包回执应包含两条真实翻转行：{receipts:?}"
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(queued_read_count(&conn), 2, "两行各自入队 read（本地半边）");
+        assert_eq!(read_version_of(&conn, 7301), 1);
+        assert_eq!(read_version_of(&conn, 7302), 1);
+    }
+
+    // 真实网络 push：Fever mark=item 端点被命中，服务端两条变已读，队列清空。
+    let r2 = sync::sync_now(&db, &http()).await.expect("sync push");
+    assert!(r2.errors.is_empty(), "{:?}", r2.errors);
+    assert!(
+        r2.pushed_states >= 2,
+        "两条 read 意图都应经网络推送（pushed_states={}）",
+        r2.pushed_states
+    );
+    {
+        let es = srv.entries.lock().unwrap();
+        let read_of = |id: i64| es.iter().find(|e| e.id == id).map(|e| e.read);
+        assert_eq!(read_of(7301), Some(true), "真实 push 后服务端 7301 已读");
+        assert_eq!(read_of(7302), Some(true), "读广播同样经网络到达 7302");
+    }
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            queued_read_count(&conn),
+            0,
+            "push 确认成功 → 队项被真实确认清空（非模拟 prune）"
+        );
+        assert_eq!(article_state(&conn, 7301), Some((true, false)));
+        assert_eq!(article_state(&conn, 7302), Some((true, false)));
+    }
+
+    // 下一轮远端显式 unread（无同轮读信号）：版本守卫必须放行远端合并
+    // （pending 已清、快照=当前版本），本地恢复未读；远端合并不递增版本。
+    {
+        let mut es = srv.entries.lock().unwrap();
+        for e in es.iter_mut() {
+            if e.id == 7301 || e.id == 7302 {
+                e.read = false;
+            }
+        }
+    }
+    let r3 = sync::sync_now(&db, &http()).await.expect("sync 3");
+    assert!(r3.errors.is_empty(), "{:?}", r3.errors);
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            article_state(&conn, 7301),
+            Some((false, false)),
+            "清队后远端显式 unread 穿透版本守卫（未被本地已读意图永久阻塞）"
+        );
+        assert_eq!(article_state(&conn, 7302), Some((false, false)));
+        assert_eq!(
+            read_version_of(&conn, 7301),
+            1,
+            "远端合并不递增版本（版本只记录本地意图）"
+        );
+        assert_eq!(queued_read_count(&conn), 0, "远端 unread 不产生推送队项");
+    }
     let _ = std::fs::remove_file(&tmp);
 }

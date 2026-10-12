@@ -318,9 +318,13 @@ export async function run(ctx) {
   store.setState({ activeFeedFilter: '12' });
   S.invokeCalls.length = 0;
   await store.getState().anchorToArticle('301');   // 301 不在源12 的筛选范围内
-  checkNew('(h) 目标不在当前筛选内（article_index=null）：不改列表与选中态',
-    S.invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0
-    && store.getState().activeArticleId === null && store.getState().entries.length === 8);
+  /* OPT-008B R1（行为变化，迁移自「静默不打开」）：article_index=null 不再
+     什么都不做——搜索结果行必须可真实打开。回退路径按 id 取详情并注入视图行
+     （不整体替换列表窗口、不假造锚定位置）。 */
+  checkNew('(h) 目标不在当前筛选内（article_index=null）：回退按 id 直接打开（搜索结果可真实打开）',
+    store.getState().activeArticleId === '301'
+    && S.invokeCalls.some((c) => c.cmd === 'get_article')
+    && store.getState().entries.some((e) => e.id === '301'));
 
   store.setState({ dataMode: 'mock', activeArticleId: null, entries: [], articlesLimit: 0 });
   S.invokeCalls.length = 0;

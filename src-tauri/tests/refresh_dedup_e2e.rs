@@ -1,9 +1,12 @@
-//! TASK-064 N3：手动「刷新全部」必须尊重 smartDedup。
-//! 两个本地源（进程内 TcpListener HTTP server，复用 ai_e2e 模式）serve 同一份
-//! RSS（同一 article link、不同 feed_id/guid 组合不被 UNIQUE(feed_id,guid) 拦）：
-//! 开智能去重后 refresh_all 只应留 1 篇；关掉则 2 篇（开关语义双向锚定）。
-//! 修前 refresh_all 把 dedup 写死 false → 两组断言中的 on 分支失败。
-//! 不依赖外网与 Tauri（refresh_all 只吃 Arc<Mutex<Connection>> + Client）。
+//! OPT-008B 第一阶段迁移（原 TASK-064 N3）：手动「刷新全部」时 smartDedup 的
+//! 语义从「入库丢身份」改为「显示层聚合」——
+//! 两个本地源 serve 同一份 RSS（同一 article link）：**无论开关都各自入库**
+//! （条目是订阅源/远端 ID 的独立实体，`refresh_all` 报出的新增数 = 实际入库行数）；
+//! 开关只改变 `list_articles` 的显示集合（开：全部视图折叠为 1；关：逐行可见），
+//! 且单源视图两个开关下都能看到自己的那条（不隐藏当前源）。
+//! 旧断言「开=1 篇新增」是旧模型的产物（跨源副本被 dedup 丢弃），已按新语义迁移。
+//! 修前 refresh_all 把 dedup 写死 false → 现在无关（身份不再丢），保留的回归价值：
+//! 刷新必须真的走完两个源、显示集合必须随开关变化。
 
 use app_lib::db;
 use app_lib::scheduler;
@@ -101,8 +104,26 @@ async fn article_count(db: &Arc<Mutex<rusqlite::Connection>>) -> i64 {
         .unwrap()
 }
 
+fn all_scope_len(conn: &rusqlite::Connection) -> usize {
+    let q = db::ArticleQuery {
+        feed_id: None,
+        folder_id: None,
+        only_unread: false,
+        only_starred: false,
+        only_today: false,
+        newest_first: true,
+        limit: 500,
+        offset: 0,
+        with_content: false,
+        layout: None,
+        last_published: None,
+        last_id: None,
+    };
+    db::list_articles(conn, &q).unwrap().len()
+}
+
 #[tokio::test]
-async fn manual_refresh_all_respects_smart_dedup_when_on() {
+async fn manual_refresh_all_keeps_identity_and_display_dedup_collapses() {
     let port = start_feed_server();
     let (db, tmp) = setup_db(port);
     let client = app_lib::ingestion::build_client(30);
@@ -111,10 +132,25 @@ async fn manual_refresh_all_respects_smart_dedup_when_on() {
     let (new_articles, failed) = scheduler::refresh_all(&db, &client).await;
     assert_eq!(failed, 0, "两个本地源都应抓取成功");
     assert_eq!(
-        new_articles, 1,
-        "smartDedup=on：跨源同文只应有 1 篇新增（N3 修前为 2）"
+        new_articles, 2,
+        "smartDedup=on：两源各自入库（身份保留；旧断言「只留 1 篇」已迁移）"
     );
-    assert_eq!(article_count(&db).await, 1);
+    assert_eq!(article_count(&db).await, 2, "条目身份不丢");
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            all_scope_len(&conn),
+            1,
+            "显示层聚合：全部视图折叠为 1（开关的可见效果）"
+        );
+    }
+
+    // 关闭开关：全部逐行可见（同一份数据，显示集合回退）
+    set_smart_dedup(&*db.lock().await, false);
+    {
+        let conn = db.lock().await;
+        assert_eq!(all_scope_len(&conn), 2, "关闭后跨源两行都可见");
+    }
 
     let _ = std::fs::remove_file(&tmp);
 }
@@ -128,7 +164,7 @@ async fn manual_refresh_all_keeps_both_when_dedup_off() {
     set_smart_dedup(&*db.lock().await, false);
     let (new_articles, failed) = scheduler::refresh_all(&db, &client).await;
     assert_eq!(failed, 0);
-    assert_eq!(new_articles, 2, "smartDedup=off：保持既有行为，两源各 1 篇");
+    assert_eq!(new_articles, 2, "smartDedup=off：两源各 1 篇");
     assert_eq!(article_count(&db).await, 2);
 
     let _ = std::fs::remove_file(&tmp);

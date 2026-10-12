@@ -2,7 +2,7 @@ import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
 import { applyBodyRow, applyExtractedFulltext, dropBodyEntry, getBodyEntry, markBodyFailed, markBodyLoading, markBodyMissing } from '../bodyCache';
 import type { EntryRollbackClaim } from '../internals';
-import { appStore, getEntryVersion, markEntriesRead, optimisticEntryFlagToggle, rollbackEntryClaims, syncCurrentViewCache } from '../internals';
+import { appStore, applyReadReceipt, asReadReceipts, beginEntryFieldWrite, beginLocalFlagWrite, currentLocalFlagWriteSerial, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, optimisticEntryFlagToggle, rollbackEntryClaims, scheduleCountsReconcile, syncCurrentViewCache } from '../internals';
 import type { AppState } from '../types';
 
 /** 阅读器 slice：选中文章、正文水合（懒加载 + 批量合批）与卡片就地标读/收藏。
@@ -111,8 +111,23 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          使卡片在未读筛选下原地变灰而非消失）。 */
       markEntriesRead(new Set([id]));
       const claim: EntryRollbackClaim = { id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') };
-      void api.setRead(Number(id), true).catch((e) => {
-        rollbackEntryClaims([claim]);
+      beginLocalFlagWrite();
+      beginEntryFieldWrite(id, 'isRead'); // R4：articles 快照的在途写保护
+      const flagSerialAtRequest = currentLocalFlagWriteSerial();
+      void api.setRead(Number(id), true).then((receipt) => {
+        endLocalFlagWrite();
+        endEntryFieldWrite(id, 'isRead');
+        /* OPT-008B R2/N1：读闭包可能一并标读同 URL 未读副本——回执驱动条目/
+           计数本地收敛（被点行已乐观翻转，跳过重复扣减）。 */
+        applyReadReceipt(asReadReceipts(receipt), new Set([id]), flagSerialAtRequest);
+        scheduleCountsReconcile();
+      }).catch((e) => {
+        endLocalFlagWrite();
+        endEntryFieldWrite(id, 'isRead');
+        const outcome = rollbackEntryClaims([claim]);
+        /* R2：回滚被接管跳过（如快照替换）时乐观计数不可线性复原——强制一次
+           权威对账（不受 dedup 门控），失败保守留待下次 reload 自愈。 */
+        scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
         get().showToast(`标读失败：${extractError(e)}`);
       });
     }
@@ -464,8 +479,22 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          不再只提示不回滚。openedReadIds 不回撤：「打开过」的原地变灰保留语义
          不随落库失败撤销（与打开即标读回滚的边界裁定同口径）。 */
       const claims: EntryRollbackClaim[] = unread.map((id) => ({ id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') }));
-      void api.setReadBulk(unread.map((id) => Number(id)), true).catch(() => {
-        rollbackEntryClaims(claims);
+      beginLocalFlagWrite();
+      for (const id of unread) beginEntryFieldWrite(id, 'isRead'); // R4：articles 快照的在途写保护
+      const flagSerialAtRequest = currentLocalFlagWriteSerial();
+      const listed = new Set(unread);
+      void api.setReadBulk(unread.map((id) => Number(id)), true).then((receipt) => {
+        endLocalFlagWrite();
+        for (const id of unread) endEntryFieldWrite(id, 'isRead');
+        /* OPT-008B R2/N1：整批回执（含闭包副本）驱动条目/计数本地收敛。 */
+        applyReadReceipt(asReadReceipts(receipt), listed, flagSerialAtRequest);
+        scheduleCountsReconcile();
+      }).catch(() => {
+        endLocalFlagWrite();
+        for (const id of unread) endEntryFieldWrite(id, 'isRead');
+        const outcome = rollbackEntryClaims(claims);
+        /* R2：同单条路径——存在被接管跳过的声明时强制权威对账。 */
+        scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
         get().showToast('批量标读失败');
       });
     }

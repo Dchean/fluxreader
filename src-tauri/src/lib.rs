@@ -293,6 +293,10 @@ pub fn run() {
             commands::set_starred,
             commands::mark_all_read,
             commands::feed_counts,
+            // OPT-008B：显示集合（smartDedup）的 scope 精确计数
+            commands::scope_counts,
+            // OPT-008B R2：计数组合快照（同开关值、同一 DB 锁内两份计数）
+            commands::counts_snapshot,
             // 刷新（直连）
             commands::refresh_feed,
             commands::refresh_all_feeds,

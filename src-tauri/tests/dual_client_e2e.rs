@@ -117,8 +117,8 @@ fn dedup_uses_normalized_url() {
     )
     .unwrap();
 
-    // feed A：带 utm 的 URL；feed B：干净 URL + www + 尾斜杠 → 同一篇
-    let (_, n1) = db::upsert_article_with_feed(
+    // feed A：带 utm 的 URL
+    let (aid_a, n1) = db::upsert_article_with_feed(
         &conn,
         1,
         &article(
@@ -129,18 +129,41 @@ fn dedup_uses_normalized_url() {
     )
     .unwrap();
     assert!(n1, "first variant ingested");
-    let (_, n2) = db::upsert_article_with_feed(
+
+    // 同源（feed A）以不同饰词重放 → 规范化 URL 命中同一行（更新，不新增）
+    let (aid_a2, n2) = db::upsert_article_with_feed(
+        &conn,
+        1,
+        &article("http://www.example.com/story/", "ga2"),
+        true,
+    )
+    .unwrap();
+    assert_eq!(aid_a2, aid_a, "同源同 URL 不同饰词必须命中同一行");
+    assert!(!n2, "同源重放不得新增行（规范化键仍是源内匹配的键）");
+
+    // 跨源（feed B）同 URL：OPT-008B 起**必须独立入库**（旧期望「被去重拦截」
+    // 已按新语义迁移：智能去重改为查询呈现层聚合，不再在入库丢身份）
+    let (aid_b, n3) = db::upsert_article_with_feed(
         &conn,
         2,
         &article("http://www.example.com/story/", "gb"),
         true,
     )
     .unwrap();
-    assert!(!n2, "dressed-up duplicate must be caught by normalized key");
+    assert!(n3, "跨源同 URL 必须独立入库");
+    assert_ne!(aid_a, aid_b, "两源各自持久条目");
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE url_norm = ?1",
+            [db::normalize_url("https://example.com/story")],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(total, 2, "同文两源各一条");
 
     // 原始 url 保留（打开源网页用原始链接）
     let orig: String = conn
-        .query_row("SELECT url FROM articles WHERE guid = 'ga'", [], |r| {
+        .query_row("SELECT url FROM articles WHERE id = ?1", [aid_a], |r| {
             r.get(0)
         })
         .unwrap();

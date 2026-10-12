@@ -437,6 +437,9 @@ export function resetStore(extra = {}) {
     entries: [],
     feedIndex: new Map(),
     feedCounts: new Map(),
+    /* OPT-008B R2：scope 计数快照随基线清空——否则上一个用例/域的快照会按
+       layout/dedup 匹配被选择器消费（跨用例潜伏污染）。 */
+    scopeCounts: null,
     player: { ...BASELINE_PLAYER },
     playerExpanded: false,
     settingsOpen: false,

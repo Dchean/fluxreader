@@ -35,6 +35,14 @@ export { bootstrapGithubAuth, confirmAppliedConfig } from './store/slices/bootst
    （测试工具链把 src/store.ts 别名到唯一 store 实例）消费协调协议，避免深层
    子路径在别名体系下形成第二个协议实例（写队列/屏障必须与 store 的写入口同一份）。 */
 export { awaitAiWriteFrontier, markAiConfigUnconfirmed, runConfigApplyBarrier } from './store/aiConfigWrites';
+/* OPT-008B R3（P2-N3）：app_settings 的写前沿 / 应用边界 / 真实回读与未确认
+   标记——与 AI 协议同构的最小协调面（独立模块状态，不复制 AI 内核）。 */
+export {
+  awaitAppSettingsWriteFrontier,
+  markAppSettingsUnconfirmed,
+  readBackAppliedAppSettings,
+  runAppSettingsApplyBoundary,
+} from './store/slices/settings';
 
 /* Note: 为何按领域拆 slice（而不是像后端那样按文件搬函数），以及键集如何保证不重不漏：
    slice 类型写成 Pick<AppState, …>，9 个 Pick 的并集必须恰好等于 AppState ——

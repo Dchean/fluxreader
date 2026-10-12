@@ -759,10 +759,12 @@ fn staged_refresh_empty_valid_feed_is_success_not_failure() {
     tmp.finish(conn);
 }
 
-/// OPT-003 反例③：dedup 开关行为保持——开启时跨源同 URL 仍被拦并记账墓碑，
-/// 关闭时按既有语义入库；事务化不得改变去重语义。
+/// OPT-008B 第一阶段迁移（原 OPT-003 反例③）：dedup 开关不再决定入库身份——
+/// 开启时跨源同 URL **同样独立入库**（旧断言「被拦 + 记账墓碑」是入库丢身份
+/// 模型的产物，已迁移为显示层聚合，见 db::dedup_tests 的显示集合一致性）；
+/// 开关切换不改变入库结果；重复刷新幂等（同源同 URL 命中既有行）。
 #[test]
-fn staged_refresh_dedup_flag_still_blocks_cross_feed_duplicate() {
+fn staged_refresh_dedup_flag_no_longer_drops_identity() {
     let tmp = TempDb::new("dedup");
     let conn = db::open(tmp.path()).expect("open db");
     db::create_folder(&conn, "D", "article").unwrap();
@@ -798,6 +800,7 @@ fn staged_refresh_dedup_flag_still_blocks_cross_feed_duplicate() {
         false,
     )
     .unwrap();
+    let _ = kept_aid;
 
     let parsed = ingestion::ParsedFeed {
         title: Some("B".into()),
@@ -818,25 +821,25 @@ fn staged_refresh_dedup_flag_still_blocks_cross_feed_duplicate() {
         last_modified: None,
     };
 
+    // dedup 开启：条目身份保留（旧期望 0 已按新语义迁移；显示层聚合另行消费）
     let n = ingestion::apply_refresh_result(&conn, 2, &fetched, &parsed, true, None, None).unwrap();
-    assert_eq!(n, 0, "dedup 开启时同 URL 不得新增");
+    assert_eq!(n, 1, "dedup 开启时跨源同 URL 同样独立入库");
     let in_b: i64 = conn
         .query_row("SELECT COUNT(*) FROM articles WHERE feed_id = 2", [], |r| {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(in_b, 0, "被去重的条目不得落库");
-    let (url, kept): (String, i64) = conn
-        .query_row("SELECT url, kept_aid FROM deduped_urls", [], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    assert_eq!(in_b, 1, "源 B 的条目必须落库（旧模型下被丢）");
+    // 墓碑不再由入库产生（008A 迁移已清空历史墓碑；表保留为有限兼容）
+    let tombstones: i64 = conn
+        .query_row("SELECT COUNT(*) FROM deduped_urls", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(url, db::normalize_url("https://d.example/x"));
-    assert_eq!(kept, kept_aid, "墓碑必须指向保留的那篇");
+    assert_eq!(tombstones, 0, "入库不再写内容去重墓碑");
 
-    let n2 =
+    // 重复刷新（开关任意）：同源同 URL 命中既有行，不新增（幂等）
+    let again =
         ingestion::apply_refresh_result(&conn, 2, &fetched, &parsed, false, None, None).unwrap();
-    assert_eq!(n2, 1, "dedup 关闭时同 URL 按既有语义入库");
+    assert_eq!(again, 0, "重放不得新增行");
     let in_b2: i64 = conn
         .query_row("SELECT COUNT(*) FROM articles WHERE feed_id = 2", [], |r| {
             r.get(0)

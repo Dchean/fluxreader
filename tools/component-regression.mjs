@@ -38,6 +38,9 @@ await import('./component-tests/layouts.test.mjs');
 await import('./component-tests/close-ask.test.mjs');
 await import('./component-tests/hydrate.test.mjs');
 await import('./component-tests/mutation-reader-prose.test.mjs');
+/* OPT-008B R2（主控清单②）：搜索跨布局结果——真实 SearchModal 点击打开 +
+   Reader/布局实际呈现 + 返回/续页边界（数组存在不能自证渲染可见）。 */
+await import('./component-tests/search-cross-layout.test.mjs');
 /* OPT-007（F11）：feeds-updated 数据变化事件 → 前端真实监听器 → 保位 reload。 */
 await import('./component-tests/sync-data-events.test.mjs');
 /* OPT-011（F13）：AI 开关三态——Reader 自动请求订阅有效配置 + FeedsTab 三态控件。 */
