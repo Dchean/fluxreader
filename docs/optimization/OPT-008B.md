@@ -1,6 +1,6 @@
 # OPT-008B：内容实体与各订阅源条目分离
 
-Status: coding
+Status: rework
 父卡OPT008主体；前置OPT006/007/008A。保留五布局、协议ID和现有离线状态意图，不用仅修URL参数宣称完成。
 
 ## 数据所有权
@@ -47,3 +47,19 @@ schema与实际读写、状态策略、UI可达性都使用新所有权，不是
 首轮已产生条目身份/查询集合及相关回归改动，前端聚合计数接线尚在进行，未交付、未初审。16:17 的CLI终态为 error_during_execution，明确429 quota耗尽（不是普通观察超时）；原进程已退出，保留原会话与全部工作区改动，按授权切 custom-local:deepseek-v4.1-flash / max 继续，不把外层退出码0计作成功。原始记录位于 tmp/optimization-20261008/OPT-008B-phase1-20261012，续跑位于 OPT-008B-phase1-fallback-20261012。
 
 第一阶段实际消费者需要新增scope_counts只读计数IPC，允许commands/articles.rs、lib.rs注册及前端api/types/侧栏的必要接线；实现者须说明聚合集合口径、兼容边界和真实消费证据。此扩展不授权提前增加正文schema、修改AI配置协调器或减少原验收范围。当前产品WIP未纳入任何提交级CI；2c7dcf5的CI 38220831888成功仅覆盖之前产品基线与文档。
+
+## 第一阶段交付与复核（2026-10-12）
+
+备用模型续跑终态 success、is_error=false，执行者停止写入；报告前端943/943、组件18/18、Rust全测试/fmt/clippy通过。主控已核对完整Rust测试末尾与格式/lint/build原始命令结果、37篇Note结构/链接检查通过；这些不代替行为验收。独立只读初审正在检查冻结diff（OPT-008B-phase1-review-20261012），未给出结论。
+
+主控定点补测发现真实缺口：隔离生产DB API中3个同URL、不同feed的直连未读条目，smartDedup开启后调用mark_all_read_with_enqueue只改1行、只入队1行，另外2行仍未读。未发现“标读行与队列不一致”的猜测，二者当前都是1；实际问题是代表变已读后另一个副本成为未读代表，离线/纯直连无法依赖远端同步收敛，“全部已读”并未清空该范围。探针源码保存在tmp/optimization-20261008/OPT-008B/opt008b_controller_probe.rs（原临时test target已移回tmp，不进主线），最终断言read=3实际为1，cargo退出101。此问题待初审汇总后交回原实现者，不因其自报全绿或“显示集合一致”文案豁免。
+
+另一项布局切回猜测用真实store试验未复现持久错计：article 7→social 3→article回读7，切回确实重新发scope_counts；仍需检查在途响应与失败边界，不能把这一条通过扩写为所有布局竞态已覆盖。父卡与正文实体第二阶段继续未完成。
+
+## R1返工裁决
+
+独立只读CodeBuddy初审NEEDS_CHANGES（1个P1、4个P2）；主控复核接受markAll漏副本、非线性聚合计数、迟到计数跨布局污染、快照无布局来源及设置持久化/重查顺序缺口。迟到计数已用真实store确定性复现：markAll发出article计数请求→切social并落地3→放行旧article回包，当前social变2（controller-late-counts.mjs退出1）。设置IPC的真实线上乱序未实机复现，不能写成已发生；源码未等待提交及未处理失败已确认，要求受控交错回归。
+
+主控额外发现搜索去重在匹配词之前选全局代表，可能藏掉同URL组中唯一匹配的副本；另要求新协议entry不能继续被同feed URL兜底吞成CSV、read广播目标读取失败不能当空并清队、同轮read/unread顺序政策与未知feed信任边界有正式回归。这些仍在第一阶段身份/实际消费者契约内，不接受“旧路径已有”豁免。
+
+R1已交原实现会话（OPT-008B-phase1-R1-20261012），保持备用模型max；主控不同时修改产品。独立reviewer保留用于复审。范围调整允许必要计数来源类型、动作确认和设置顺序接线，但不开放AI配置协调器或第二阶段schema。当前未提交产品仍未验收，不开始下一阶段。
