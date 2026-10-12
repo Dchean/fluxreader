@@ -77,3 +77,15 @@ R1在两次max-turns终态后原会话续跑，最终success、is_error=false并
 R2交回原会话（OPT-008B-phase1-R2-20261012）。同轮已被字段守卫接受的远端read信号优先不能被Fever末尾立即撤销；无本轮信号时仍保留Fever双向unread权威，历史本地已读不能永久挡掉后续取消读。新增必要的受影响条目回执/回读与计数确认可以实施，必须覆盖真实消费者与前沿保护；不许为通过旧线性计数mock而关闭后端读闭包。搜索跨布局还需实际组件打开/返回/续页验证，不能以数组存在自证。阶段二与父卡继续未完成。
 
 R2续跑恢复：首段达到max-turns后正常停止，但原会话再次续跑被provider立即以HTTP400“Invalid assistant message: content or tool_calls must be set”拒绝，无产品执行。已确认两个进程均终止，保留全部WIP和有效日志，以干净CodeBuddy会话接管（OPT-008B-phase1-R2-recover-20261012）；不修改CLI历史或全局配置、不重复派两个写入者，模型保持授权备用max。当前新增counts_snapshot/读状态回执接线仍未验收，最近前端回归有3项失败，已作为接管输入，不沿用R1全绿。
+
+## R2交付复核与R3（2026-10-12）
+
+R2最终由OPT-008B-phase1-R2-deliver-20261012交付success并停写，968/968前端、20/20组件、Rust全门禁通过；新增Fever两排列/集合失败恢复/真实网络推送确认及direct刷新身份回归，搜索实际Reader DOM与续页可达性取证。主控已核对最终前端汇总与执行包装、Note37篇格式/链接通过。180轮有界派发用于避免90轮截断后反复触发provider坏历史，不改用户模型/强度或全局配置。
+
+独立R2复审仍NEEDS_CHANGES：读回执用全局序号一刀切跳过未冲突兄弟UI，却无条件扣源计数；reload只检查“当前无在途”而遗漏读取后已完成写入。主控接受这两项并要求计数/条目共同闭环，不能以旧路径已有而豁免视觉回退。
+
+主控另实跑settings两项反例，不能接受初审将配置入口降为P3：
+- controller-settings-config-r2.mjs：本地成功写→外部配置应用dedup=true并真实读回→下一次写失败，DB=true/UI=false（退出1）。
+- controller-settings-stale-r2.mjs：bootstrap旧false读取挂起→本地true成功→放行旧读，DB=true/UI=false（脚本退出1）。
+
+R3已交刚成功交付的原会话（OPT-008B-phase1-R3-20261012）：逐条目/字段回执确认，读快照与已提交写前沿，app_settings真实配置apply/upload与读回协调，补正式反例。额外允许必要设置协调模块及ConfigSyncSection接线，保留AI协调器内核，不提前做镜像功能。搜索续页证据改为“旧响应代际丢弃后自动重试成功”，需测试区分两次请求；reader-prose外链偶发失败未宣称修复。当前仍rework，不提交产品或开始正文实体第二阶段。
