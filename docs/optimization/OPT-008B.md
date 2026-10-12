@@ -89,3 +89,7 @@ R2最终由OPT-008B-phase1-R2-deliver-20261012交付success并停写，968/968�
 - controller-settings-stale-r2.mjs：bootstrap旧false读取挂起→本地true成功→放行旧读，DB=true/UI=false（脚本退出1）。
 
 R3已交刚成功交付的原会话（OPT-008B-phase1-R3-20261012）：逐条目/字段回执确认，读快照与已提交写前沿，app_settings真实配置apply/upload与读回协调，补正式反例。额外允许必要设置协调模块及ConfigSyncSection接线，保留AI协调器内核，不提前做镜像功能。搜索续页证据改为“旧响应代际丢弃后自动重试成功”，需测试区分两次请求；reader-prose外链偶发失败未宣称修复。当前仍rework，不提交产品或开始正文实体第二阶段。
+
+## R3交付待复审
+
+实现者success停写，报告991/991前端、22/22组件与Rust门禁通过；同一独立reviewer正在复审（OPT-008B-phase1-R3-review-20261012）。主控新增真实store探针controller-apply-old-bootstrap-r3.mjs：bootstrap旧false读取挂起→真实runAppSettingsApplyBoundary内模拟配置持久化true并readBackAppliedAppSettings接受→旧bootstrap放行；输出afterApply=true、persistedDedup=true、afterOldBootstrap=false，退出1。应用边界未使旧读取凭据过期，仍有UI/确认态回退风险；未验收，不把执行者“可接受残余”视作主控已同意。待独立结果汇总后定向返工。
