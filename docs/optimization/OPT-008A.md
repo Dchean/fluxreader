@@ -1,6 +1,6 @@
 # OPT-008A：保守 URL 匹配与版本化重建
 
-Status: verified-local
+Status: verified-ci
 父卡：OPT-008（内容/条目身份分离仍须后续完成，本子卡不能关闭父卡）。无前置，可与只读review及非同文件任务并行。
 
 ## 目标
@@ -45,3 +45,5 @@ Status: verified-local
 ## R3 与主控验收
 
 Dalton R3 PASS；原X路径/port和legacy墓碑保全、读取错误不放行已关闭。主控独立url_identity_e2e 7/7通过，未知/JSON/BLOB故障和readd事务覆盖。父卡008B仍未完成，无法凭空恢复已丢原文。
+
+提交9289d81的[CI 37861969281](https://github.com/Dchean/fluxreader/actions/runs/37861969281) completed/success。原native/父卡范围缺口仍按卡片保留。

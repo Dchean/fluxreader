@@ -1,6 +1,6 @@
 # OPT-013A：AI 流式完成信号与错误分型
 
-Status: verified-local
+Status: verified-ci
 父卡OPT-013的独立子卡；完整长文恢复/版本缓存/设置继承由父卡后续完成，不因本卡关闭父卡。前置：OPT002安全已CI。
 
 ## 目标
@@ -37,3 +37,5 @@ stream_chat仍返回AppResult<ChatOutcome>兼容调用者；只有模型明确fi
 ## R3 验收
 
 Parfit独立R3 PASS；主控ai_e2e1项与ai_stream_completion_e2e29项退出0。BOM/事件行/CRLF边界/预算/DONE及时完成/取消与缓存写失败闭环，父卡长文恢复/版本缓存未关闭。
+
+提交14318fb，CI [37870689693](https://github.com/Dchean/fluxreader/actions/runs/37870689693) completed/success；覆盖所有默认门禁。父卡剩余验收项不随子卡关闭。

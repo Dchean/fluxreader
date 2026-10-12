@@ -49,7 +49,7 @@
 | 增量游标 | GR `ot` 为服务端时间过滤参数（过滤列随实现而异）；Fever `since_id` 为条目 id 过滤 | GR `last_sync_ts`（unix 秒）**起点候选**（id 列举开始前取）+ 幂等合并 ⇒ 无漏无重；仅本轮「窗口拿全」（id 列举 + 分块零失败）才推进；Fever：`since_id` 分页**非空页持续到空页**（服务端可先 `LIMIT 50` 再经 hook 过滤产生非空短页，短页不是结束）；`last_sync_entry_id` **只由成功提交的页事务推进**（增量页或顶部连续页；与页数据同 commit，失败回滚不推进）——with_ids 补齐、Pending 续取页与失败页都不推动（防跳过未拉区间）+ `last_sync_ts`（仅零失败且历史无未完成时写，供切换回 GR 后的首拉） | `pull_cursor_e2e` + mock_greader；Fever 增量与游标隔离由 `fever_compat_e2e`（LIMIT 后过滤短页继续、增量第二页失败不被 with_ids 大 id 推动、`since_id=上次 max` 起）；真实服务端过滤列差异见 §5（源码查阅，未实机验收） |
 | 时间过滤列 | GR `ot` 语义随服务端实现；Fever 无时间过滤（条目 id 单调递增游标） | 不依赖过滤列（起点候选 + 幂等合并） | mock 为 `changed_at >= ot`（含边界，自动化锁定）；真实 Miniflux main 为 `published_at > ot`（源码查阅，未实机验收） |
 | 「失败 ≠ 空集合」守卫 | 协议本身不规定（纯客户端安全策略） | read/starred 集合任一拉取失败 → 本轮对账整体跳过（`greader_pull.rs` C-1 段）；unread/saved 任一失败 → `reconcile_ok = false`，整段对账跳过（`fever_pull.rs`） | GR：`star_reconcile_truncation_e2e`；Fever：逻辑覆盖 + live 测试 |
-| pending 保护 | 协议本身不规定（纯客户端防乒乓策略） | `pending_ids`（sync_queue 未推送 read/unread/star/unstar）命中的条目整行跳过对账——两协议共享，见 §2 | `sync_phases_e2e` / `dual_client_e2e` |
+| 字段版本守卫（pending 保护升级，OPT-007） | 协议本身不规定（纯客户端防乒乓策略） | 字段粒度：`articles.read_version` / `star_version` 随本地读/藏写入**同事务**递增（推送成功清队后版本仍保留），pull 起点快照 + 当前 DB 版本 + 该字段 pending 三输入判定——快照不等或有 pending 即跳过该字段（另一字段不受牵连）；版本快照必须在任何 HTTP 之前抓取。两协议共享，见 §2 | `pull_field_versions_e2e`（屏障网络时序）；单元：`conflict_policy.rs` / `greader_pull.rs` / `fever_pull.rs` |
 
 ## 2. 冲突政策表（对账方向）
 
@@ -67,14 +67,19 @@ DB 写失败向上传播不再吞成 0）：
 |---|---|---|---|
 | GR × 读状态 | `GR_READ_DIRECTION` | 单向 read-wins（**客户端选择**） | GR 只能拿到「已读 id 集合」，没有「明确保持未读」信号；把「不在已读集合」解释成「刚取消已读」会成批翻回历史条目。远端显式标未读由 push 段承担 |
 | GR × 星标 | `GR_STAR_DIRECTION` | 双向权威（**客户端选择**） | 收藏低频强意图、取消是显式动作；截断集合的误判由失败守卫拦截（`star_reconcile_truncation_e2e`） |
-| Fever × 读状态 | `FEVER_READ_DIRECTION` | 双向权威（unread 集合，**客户端选择**） | Fever 拿不到已读集合，「未命中 = 已读」是唯一信号，不双向则两端读状态都无法收敛。前提：Miniflux 按 URL 去重 entry，Fever 视角无跨源副本；误判代价由失败守卫 + pending 保护兜底 |
+| Fever × 读状态 | `FEVER_READ_DIRECTION` | 双向权威（unread 集合，**客户端选择**） | Fever 拿不到已读集合，「未命中 = 已读」是唯一信号，不双向则两端读状态都无法收敛。前提：Miniflux 按 URL 去重 entry，Fever 视角无跨源副本；误判代价由失败守卫 + 字段版本守卫兜底 |
 | Fever × 星标 | `FEVER_STAR_DIRECTION` | 双向权威（**客户端选择**） | 同 GR × 星标（saved 集合） |
 
 共享守卫（两协议一致，属政策的一部分）：
 
-- **pending 保护**：本地有未推送变更的条目跳过远端快照对账（防「刚标读/
-  刚收藏」被陈旧快照回滚，防乒乓）。消费点：两个 reconcile 循环开头的
-  `pending_ids.contains → continue`；共享查询 `db::sync_match_maps`。
+- **字段版本守卫 + 字段 pending（OPT-007）**：接受远端某个字段前要求
+  「pull 起点版本快照 == 当前 DB 版本 且 该字段无未推送 pending」——本地
+  写入在同事务递增对应版本，即使随后推送成功、队列已清，版本仍保留，陈旧
+  网络快照不能回滚用户刚确认的意图；read 与 star 两列彼此独立（本地只改读
+  时收藏照常收敛，反之亦然）。快照必须在**任何 HTTP 之前**抓取，失败后按
+  DB 重建映射时保持快照原值（不回刷）。消费点：两个 reconcile 循环与
+  `merge_pulled_entry` 的 `field_accepts_remote`（`conflict_policy.rs`）；
+  共享查询/快照 `db::sync_match_maps`。
 - **「失败 ≠ 空集合」**：权威集合拉取失败（网络/服务端错误、分页截断）时
   整轮对账跳过，绝不把失败当成「远端什么都没有」做双向回写。
 
@@ -180,12 +185,17 @@ FreshRSS 的具体部署版本未逐一实机验收**——本列不能当作「
 
 - 政策格锁定（单元）：`greader_pull.rs` / `fever_pull.rs` 的
   `#[cfg(test)]`——GR 单向不复活、GR/Fever 星标双向、Fever 双向复活、
-  双侧 pending 保护；`conflict_policy.rs` 政策格取值锚。
+  双侧字段 pending + 字段版本守卫（含「本地碰过并改回原值也不放行旧快照」
+  与两字段彼此独立）；`conflict_policy.rs` 政策格取值锚。
 - 端到端（既有）：`sync_phases_e2e.rs`（远端陈旧已读经轻量对账收敛；
   pending 守卫）、`dual_client_e2e.rs`（跨源副本未读不复活；副本广播；
   pending 防乒乓）、`star_reconcile_truncation_e2e.rs`（GR starred 截断
   → 对账中止，失败守卫）、`pull_cursor_e2e.rs`（分块/id 列举失败游标
   不推进）、`dedup_sync_e2e.rs`（同源判定矩阵/墓碑）。
+- 端到端（OPT-007 字段版本与拉取可靠性，屏障时序）：`pull_field_versions_e2e.rs`
+  （请求在途本地 star + 推送确认清队 → 旧远端 unstar 快照不回滚；快照早于
+  最早 HTTP；字段彼此独立；新入库后同轮后续保护；GR map 构建失败不空映射
+  假成功、批失败重建 maps 后重拉不跳过）。
 - 端到端（Fever 严格夹具，OPT-005）：`fever_compat_e2e.rs`（字符串长 id 十进制
   往返、JSON 数字形态、125 篇历史全可达/幂等、增量只走 `since_id`、分页失败可
   重试、游标不前进快速失败、重叠页去重、with_ids 补齐、缺字段/非法 id/非法 CSV

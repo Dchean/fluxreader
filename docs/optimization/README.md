@@ -53,7 +53,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 2. CodeBuddy 先写行为反例再修复，运行其能承担的检查；不能伪造未跑结果、忽略失败或用源码 contains 代替关键行为。
 3. 独立 reviewer 只读检查需求匹配、真实 diff、迁移/错误/并发边界；不能自己改代码或派嵌套 reviewer。
 4. 有 P1/P2 未关闭必须返工；主控核对关键差异、最终版本与验证证据，只针对缺口、验证后变化或集成新风险补测，不默认重跑执行者已充分完成的整套检查。维护同批 Note。
-5. npm lint/build/test:frontend 与 cargo fmt 本地 + CI；完整 cargo clippy/test 仍由 windows-latest CI 承担；本轮独立执行已证实本机也可以链接，执行负责人可以本地提前验证；主控无需在其充分证据上重复整套命令。孤立探针不能冒充全项目门禁。
+5. npm lint/build/test:frontend/test:components 与 cargo fmt/clippy/test 由执行负责人本地承担，提交级 CI 再验证精确提交（Rust 使用 windows-latest）。本机已证实可以完整链接，不能再沿用缺 MSVC 的历史豁免；主控无需在充分且版本对应的证据上重复整套命令。孤立探针不能冒充全项目门禁，真实服务端 live 测试仍单独约定边界。
 6. 模拟数据/隔离数据库可自行测试；真实账号、用户 DB、订阅删除、付费 AI 调用不纳入无边界测试。需要真实平台验收时记录缺口而不是假通过。
 
 ## 证据与任务卡

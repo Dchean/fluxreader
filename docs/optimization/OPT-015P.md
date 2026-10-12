@@ -1,6 +1,6 @@
 # OPT-015P：原生最大化首显闪烁修复
 
-Status: verified-local
+Status: verified-ci
 父卡OPT015。实际隔离trace已证最大化5ms显示→10ms隐藏→24ms显示，不能仅“排除VISIBLE”宣称隐藏恢复。
 
 ## 已知根因
@@ -31,3 +31,7 @@ Status: verified-local
 ## 代码与原生证据
 
 Confucius R2 PASS，完整plugin schema校验与最大化首显顺序闭环；主控严格driver run R-20261009-030727-46284 六场景全PASS，max首见已最大化且无hide/re-show；状态损坏9单测通过。fullscreens新增场景仍在执行，物理DPI/拔屏/SMTC边界未冒称完成。
+
+## 提交级CI
+
+提交af09d62已被 [CI 37881998284](https://github.com/Dchean/fluxreader/actions/runs/37881998284) 覆盖并success。执行者验证与独立review证据已核对，当前交付后没有未验证的相关再改动；父卡或真实物理环境边界另列。

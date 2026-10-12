@@ -1,6 +1,6 @@
 # OPT-016B：真实挂载组件回归
 
-Status: verified-local
+Status: verified-ci
 父卡OPT016的挂载测试子卡，前置OPT015（已审代码）、不依赖未来AI继承接口。可先建立实际生产组件DOM回归，后续OPT011/013补对应生命周期。
 
 ## 技术选择
@@ -27,3 +27,7 @@ npm ci/npm audit确认依赖与Node22兼容，旧testfrontend与build/lint仍过
 ## 验收证据
 
 Dirac R3 PASS。真实挂载6组与8个runner黑盒探针日志通过；R2晚异步错误用原反例独立复核exit1而非假绿。执行者最终组件6/6、lint0，已有前端回归787保护保留。主控采用对应交付证据，提交级CI验证Node22与整合；不默认重复同命令。
+
+## 提交级CI
+
+提交3e34067已被 [CI 37881998284](https://github.com/Dchean/fluxreader/actions/runs/37881998284) 覆盖并success。执行者验证与独立review证据已核对，当前交付后没有未验证的相关再改动；父卡或真实物理环境边界另列。

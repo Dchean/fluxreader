@@ -1,6 +1,6 @@
 # OPT-015N：隔离 Windows 原生窗口恢复验收
 
-Status: coding
+Status: verified-local
 父卡OPT015的实机证据补强；目的是真实窗口首次可见位置，不以mock run_sequence替代。只使用测试自己的状态文件，不启动FluxReader真实用户数据/调度/同步。
 
 ## 写集
@@ -30,3 +30,15 @@ Tauri示例复用真实生产window_startup.rs模块（path引入，避免为测
 ## 交付边界
 
 此卡只验证窗口，不代替真实SMTC音频整链、多显示器拔插或WebView复杂App交互。独立review驱动可信度后主控复跑，才能写父卡相关native证据。不得写个人memory、Git、真实app状态、安装新依赖或访问网络。
+
+## 扩展到全屏边界（主控追加）
+
+原六场景驱动已可信且max修复后三次独立/执行者run全过。追加fullscreen=true、maximized=false场景：首见矩形覆盖所属monitor边界（不是workarea最大化），真实Tauri is_fullscreen最终true，首见后无hidden/re-show/普通几何，例外输入仍有效。不能只看最后矩形。混合maximized=true+fullscreen=true按保存优先策略也需明确可独立case，不能忽略full来过测。只改driver/runner和tmp，生产代码若失败由主控另派。
+
+## 最终观测边界
+
+严格驱动已review通过，生产首显修复及完整schema解析已review通过，八个原生场景（包含fullscreen/全屏最大化组合）原始trace与输入及独立binary绑定已核；保存位置、隐藏退出、无记录、损坏、离屏、最大化均不出现首见后的hide/re-show，两个full首见为完整monitor边界。主控复跑六项，后两项沿用同驱动/对应版本实测和定点review，不重复执行充分证据。物理拔屏、DPI动态切换和完整SMTC媒体键整链不在这八场景证明内。一次性driver已保存tmp/OPT-015N/source而不进主线，复现步骤见该目录REPRODUCE.md。
+
+## 当前进度（2026-10-09 19:28）
+
+八个约定原生启动场景已完成本地实测与独立审查。前六场景证据位于 tmp/optimization-20261008/OPT-015N/runs/R-20261009-030727-46284/，fullscreen 与 fullscreen+max 位于 runs/R-20261009-034020-32412/（同一任务目录）。一次性 driver 已移至该任务 source/，不提交主线。该验收仅覆盖固定双屏 3840×2160、1.5 缩放条件，不涵盖真实物理拔屏、动态 DPI 或完整 SMTC 音频链；不把本地原生证据写成 CI 证据。

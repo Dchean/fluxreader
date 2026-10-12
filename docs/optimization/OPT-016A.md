@@ -1,6 +1,6 @@
 # OPT-016A：CI执行责任、受控HTTP测试与开发依赖补丁
 
-Status: verified-local
+Status: verified-ci
 父卡OPT016独立子卡；回归网拆分/真实挂载由父卡后续完成，不因本卡关闭父卡。前置：无。
 
 ## 写集
@@ -30,3 +30,5 @@ ingestion_e2e/scheduler_e2e中只有依赖127.0.0.1固定外部HTTP服务的igno
 ## 验收证据
 
 Heisenberg R2 PASS；主控两个HTTPsuite真实1+4通过/0ignored；cargo clippy --lib --bins --tests -- -D warnings退出0（无-A）；npm audit实时返回0 vulnerabilities。examples原生验收驱动仍WIP，完整all-targets由提交级CI覆盖（该未提交example不进入本提交）。CI工作流未实际打tag，正常devCI会验证语法与各门禁；父卡016回归分层/effect挂载仍未完成。
+
+提交4b86aef的[CI 37860660037](https://github.com/Dchean/fluxreader/actions/runs/37860660037) completed/success。原native/父卡范围缺口仍按卡片保留。

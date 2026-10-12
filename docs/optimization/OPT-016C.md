@@ -1,6 +1,6 @@
 # OPT-016C：前端状态回归按领域拆分
 
-Status: verified-local
+Status: verified-ci
 父卡OPT016。现有787条的行为保护完整保留，不凭行数/总数相同就验收。与016B的component-tests/harness不同写集。
 
 ## 写集
@@ -37,3 +37,7 @@ Euclid只读审查确认787条件/路径与九域拆分保真；唯一P2是临�
 ## R2验收
 
 Euclid独立PASS，787个实际条件/145路径保真、9域独立和3类变异证据复用；新增finally复位在3个实际异常probe复核通过，旧不存在属性删除/descriptor还原。负责人最终全回归/组件/lint/build日志已对应交付，主控按新规范不重复同命令。
+
+## 提交级CI
+
+提交235954c已被 [CI 37890352734](https://github.com/Dchean/fluxreader/actions/runs/37890352734) 覆盖并success。执行者验证与独立review证据已核对，当前交付后没有未验证的相关再改动；父卡或真实物理环境边界另列。
