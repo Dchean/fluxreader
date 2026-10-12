@@ -121,7 +121,13 @@ R6成功停写，独立只读初审PASS；主控复查失败下限传播、读�
 
 当前第一阶段验收覆盖条目身份、查询显示集合、读闭包回执、计数、搜索实际入口及相关设置协调；不是正文实体已分离。初审登记的双bootstrap读取前沿边界未冒称生产UI复现；应用后的设置回读被前置AI回读长时间阻塞时，门仍关闭且设置尚未确认，未宣称全部异常网络均已原生验收。持续读取失败会可见拒绝设置写而不覆盖未知基线。openExternal偶发未修、真实服务端live未跑继续保留。下一步精确提交并验证CI，成功后才交同负责人第二阶段。
 
-## 第二阶段接线与验收边界（尚未派发）
+## 第一阶段CI与第二阶段派发
+
+产品提交3fdec3ba5e51881f2bef41f35675cd5230b94e0a已推送dev，[CI 38259218755](https://github.com/Dchean/fluxreader/actions/runs/38259218755) completed/success。第一阶段交付完整通过，不合main、不关闭008B/008。
+
+第二阶段交同一实现负责人（OPT-008B-phase2-20261012，备用模型max），按下列边界实现内容单一所有权，先定稿原proposed身份Note再编码。独立交付记录RESULT-phase2.md留在tmp，不覆盖第一阶段最终证据。完成后继续只读初审与主控复审，未取得最终迁移/消费链证据不宣称正文分离完成。
+
+## 第二阶段接线与验收边界
 
 主控按当前源码确认的入口：migrations.rs现行版本21，FTS外部内容表和触发器依赖articles正文列；articles.rs同时负责列表摘要、LIKE/FTS搜索、入库、AI落盘和缓存清理；sync_map.rs仍有正文/全文/AI输入读取；commands/settings.rs负责异步全文提取；commands/ai.rs在网络生成后按article_id写产物。前端bodyCache以条目ID存实体，正文失效部分依赖snippet变化，不能仅加JOIN就声称修订已打通。
 

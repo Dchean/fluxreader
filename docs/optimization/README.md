@@ -18,9 +18,9 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 
 - **18 张主卡：12 张完成验收并通过提交级 CI，6 张尚未完成。** 父子卡不重复计数，不按卡片数量推算工作量百分比。
 - 已完成：OPT-001～007、011、012、014、015、016。
-- 剩余：008（条目/内容分离，第一阶段R6本地验收通过、第二阶段待做）、009（可靠订阅写回）、010（配置镜像）、013（长文与版本缓存）、017（实际性能优化）、018（最终验收与合并）。
-- 最新产品提交 **c25d367** 已推送 dev，[CI 38218122226](https://github.com/Dchean/fluxreader/actions/runs/38218122226) completed/success，前端与 Windows Rust 均通过。工具链提交 2fc0d52 的 CI 也已通过。未合并 main，未发布。
-- 007/011 经多轮确定性反例与返工最终验收；不能沿用历史 rework 段落误读当前状态。当前唯一产品写入者负责 OPT-008B 第一阶段，后续改动不在上述 CI 覆盖范围内。
+- 剩余：008（条目/内容分离，第一阶段已CI、第二阶段实施中）、009（可靠订阅写回）、010（配置镜像）、013（长文与版本缓存）、017（实际性能优化）、018（最终验收与合并）。
+- 最新产品提交 **3fdec3b** 已推送 dev，[CI 38259218755](https://github.com/Dchean/fluxreader/actions/runs/38259218755) completed/success，覆盖008B第一阶段；前端1047/1047、组件22/22及Windows Rust门禁通过。未合并 main，未发布。
+- 007/011及008B第一阶段经独立初审与主控定向复核；不能沿用历史 rework 段落误读当前状态。当前唯一产品写入者负责 OPT-008B 第二阶段，后续改动不在上述 CI 覆盖范围内。
 
 ## 路线与状态
 
@@ -33,7 +33,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-005](OPT-005.md) | Fever 身份与完整历史回溯 | F03,F19 | OPT-004 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-006](OPT-006.md) | 账号生命周期与配置导入隔离 | F05,F06 | OPT-001, OPT-004 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-007](OPT-007.md) | 可恢复 pull 与提交时冲突保护 | F09,F10,F11 | OPT-005, OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
-| [OPT-008](OPT-008.md) | 内容身份与保守去重 | F12 | OPT-007 | coding | 008A已CI；008B第一阶段本地验收通过，第二阶段待做 |
+| [OPT-008](OPT-008.md) | 内容身份与保守去重 | F12 | OPT-007 | coding | 008A及008B第一阶段已CI；第二阶段正文实体实施中 |
 | [OPT-009](OPT-009.md) | 可靠订阅写回和能力声明 | F17 | OPT-006, OPT-008 | queued | 尚未实施；等待内容/条目身份契约 |
 | [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | queued | 尚未实施；待可靠订阅写回之后推进 |
 | [OPT-011](OPT-011.md) | AI 设置单点与输入范围一致 | F13,refreshInterval | OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
@@ -67,7 +67,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | 子卡 | 范围 | 状态 | 父卡剩余工作 / 验收边界 |
 | --- | --- | --- | --- |
 | [OPT-008A](OPT-008A.md) | 保守 URL 匹配与版本化重建 | verified-ci | 008：仍缺内容/条目实体分离 |
-| [OPT-008B](OPT-008B.md) | 内容实体与各订阅源条目分离 | coding | 第一阶段R6独立初审与主控定向验收通过，待提交级CI；正文实体第二阶段未做 |
+| [OPT-008B](OPT-008B.md) | 内容实体与各订阅源条目分离 | coding | 第一阶段3fdec3b已CI；正文实体第二阶段交原负责人实施，整卡未完成 |
 | [OPT-013A](OPT-013A.md) | SSE 完成信号与错误分型 | verified-ci | 013：仍缺长文分段、缓存版本与恢复 |
 | [OPT-015N](OPT-015N.md) | 隔离 Windows 原生窗口恢复验收 | verified-local | 八场景及独立审查通过；物理拔屏、动态 DPI 与完整 SMTC 音频链未覆盖 |
 | [OPT-015P](OPT-015P.md) | 原生最大化首显闪烁修复 | verified-ci | 已提交并通过 CI |
