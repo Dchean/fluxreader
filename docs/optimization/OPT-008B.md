@@ -93,3 +93,5 @@ R3已交刚成功交付的原会话（OPT-008B-phase1-R3-20261012）：逐条目
 ## R3交付待复审
 
 实现者success停写，报告991/991前端、22/22组件与Rust门禁通过；同一独立reviewer正在复审（OPT-008B-phase1-R3-review-20261012）。主控新增真实store探针controller-apply-old-bootstrap-r3.mjs：bootstrap旧false读取挂起→真实runAppSettingsApplyBoundary内模拟配置持久化true并readBackAppliedAppSettings接受→旧bootstrap放行；输出afterApply=true、persistedDedup=true、afterOldBootstrap=false，退出1。应用边界未使旧读取凭据过期，仍有UI/确认态回退风险；未验收，不把执行者“可接受残余”视作主控已同意。待独立结果汇总后定向返工。
+
+R3独立结论为PASS，但主控不采纳最终验收：上述应用后旧读取反例实际失败，review漏审应用代次只观察本地updateSettings写序号。另不接受“IPC默认FIFO”替代读取前pending意图保护的明确契约。R4已交原实现会话（OPT-008B-phase1-R4-20261012），限定设置读取/应用代次与已有字段凭据的最小硬化；补独立提交/回包时序、应用期间多点击及回读失败后的全量载荷覆盖反例。后两类目前是待验证风险，不冒称已实跑。Rust若无改动复用R3相同版本门禁，前端改动须按最终版本验证；身份/Fever已核销路径不重做审计。
