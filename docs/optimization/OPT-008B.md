@@ -1,6 +1,6 @@
 # OPT-008B：内容实体与各订阅源条目分离
 
-Status: verified-local
+Status: verified-ci
 父卡OPT008主体；前置OPT006/007/008A。保留五布局、协议ID和现有离线状态意图，不用仅修URL参数宣称完成。
 
 ## 数据所有权
@@ -136,7 +136,7 @@ R3首轮因达到max-turns未形成交付记录；按任务拆分为R3A定向收
 - 全文提取成功回传实际`contentId/contentRevision`并更新bodyCache；Reader在活动文章正文因修订失效且Timeline卡片未挂载时主动重水合，在途旧响应仍被丢弃。
 - 历史Readability异常行保持受保护来源并修复同源纯文本；`delete_folder`与`purge_remote_data`各有共享内容引用生命周期回归；五布局真实挂载测试覆盖修订失效、重水合和Reader渲染。
 
-独立只读R3A复审结论为PASS，无P1/P2。修复rustfmt后，最终本地门禁真实退出码全部为0：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、完整`cargo test`（573 passed / 0 failed / 7 ignored）、Node22前端1059/1059、组件24/24、lint、build、Note校验与`git diff --check`。live账号测试、真实用户库/账号、提交级CI仍未执行。阶段状态为`verified-local`，主卡和Note不在本节自动关闭。
+独立只读R3A复审结论为PASS，无P1/P2。修复rustfmt后，最终本地门禁真实退出码全部为0：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、完整`cargo test`（573 passed / 0 failed / 7 ignored）、Node22前端1059/1059、组件24/24、lint、build、Note校验与`git diff --check`。提交`81567260d49e367f8964cd07ec8ddbc5c2bf112d`的Windows CI [38381181417](https://github.com/Dchean/fluxreader/actions/runs/38381181417) completed/success。live账号测试、真实用户库/账号、main合并仍未执行；阶段状态更新为`verified-ci`，总收口仍未完成。
 
 ## 第二阶段接线与验收边界
 
