@@ -36,6 +36,9 @@ use tokio::sync::Mutex;
 /// OPT-008B v22 物理回拨：把最新 schema 的「contents 迁出 + FTS 派生表」还原为
 /// v21 时代形状（旧正文列回归、FTS 外部内容表 + 触发器重建），使 user_version=18
 /// 的夹具能逐版本真实重放 v19→v22。
+/// OPT-009 v23 物理回拨：subscription_outbox（表 + 两索引）是 v21 现场不应存在的
+/// 对象，同由本函数移除——否则重放 v23 报 CREATE TABLE already exists。
+/// （约定：此后新增 ADD COLUMN / 建表迁移都必须在本夹具追加对应的物理回拨。）
 fn rollback_v22_shape(conn: &rusqlite::Connection) {
     conn.execute_batch(
         r#"
@@ -51,6 +54,9 @@ fn rollback_v22_shape(conn: &rusqlite::Connection) {
         ALTER TABLE articles ADD COLUMN body_text TEXT NOT NULL DEFAULT '';
         ALTER TABLE articles ADD COLUMN fulltext_extracted INTEGER NOT NULL DEFAULT 0;
         DROP TABLE IF EXISTS contents;
+        DROP INDEX IF EXISTS idx_subscription_outbox_url;
+        DROP INDEX IF EXISTS idx_subscription_outbox_pending;
+        DROP TABLE IF EXISTS subscription_outbox;
         CREATE VIRTUAL TABLE articles_fts USING fts5(title, body_text, author, ai_summary, translated_content,
             content='articles', content_rowid='id', tokenize='unicode61');
         CREATE TRIGGER articles_ai AFTER INSERT ON articles BEGIN

@@ -624,9 +624,10 @@ fn shared_content_update_reaches_every_referencing_entry_fts() {
 ============================================================ */
 
 /// 造「v21 存量现场」：用生产 open 建最新库，物理回拨 v22（contents 迁出 +
-/// FTS 派生表 + content_id/ai_epoch 列）并把 user_version 拨回 21；随后以
+/// FTS 派生表 + content_id/ai_epoch 列）与 v23（subscription_outbox 表 + 两索引）
+/// 并把 user_version 拨回 21；随后以
 /// **v21 时代 SQL** 直插旧行（旧正文列 + AI 产物 + 读藏/版本/远端绑定 + 队列），
-/// 使下一次 open 走真实 v22 升级路径。
+/// 使下一次 open 走真实 v22/v23 升级路径。
 fn seed_v21_legacy(path: &std::path::Path) -> (i64, i64) {
     let conn = db::open(path).expect("open latest");
     let f = db::create_folder(&conn, "F", "article").unwrap();
@@ -645,6 +646,12 @@ fn seed_v21_legacy(path: &std::path::Path) -> (i64, i64) {
         ALTER TABLE articles ADD COLUMN body_text TEXT NOT NULL DEFAULT '';
         ALTER TABLE articles ADD COLUMN fulltext_extracted INTEGER NOT NULL DEFAULT 0;
         DROP TABLE IF EXISTS contents;
+        -- OPT-009 v23 物理回拨：类型化订阅 outbox（表 + 两索引）在 v21 现场不得
+        -- 残留，否则重放 v23 时 CREATE TABLE 报 already exists（表删除即带走索引，
+        -- DROP INDEX 为显式清点）。此后新增建表迁移须在此追加对应回拨。
+        DROP INDEX IF EXISTS idx_subscription_outbox_url;
+        DROP INDEX IF EXISTS idx_subscription_outbox_pending;
+        DROP TABLE IF EXISTS subscription_outbox;
         PRAGMA user_version = 21;
         "#,
     )
