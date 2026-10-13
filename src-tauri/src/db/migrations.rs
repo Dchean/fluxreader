@@ -470,6 +470,148 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
             translate_mode = CASE WHEN auto_translate != 0 THEN 'on' ELSE 'off' END;
     "#,
         ),
+        // OPT-008B 第二阶段（contents 单一正文所有权）：正文（content_html /
+        // body_text / 提取标志）从 articles 迁出到 contents 行，条目经
+        // articles.content_id 引用；内容等价（身份哈希 + 字节复核）的条目共享
+        // 同一行（跨源同文聚合），来源进身份 → RSS 原文/Readability 提取确定分叉。
+        // 契约见 .agents/notes/proposed/architecture/2026-10-12-订阅条目与共享内容身份.md
+        // 「第二阶段契约」。要点：
+        // - SQL 段建表/加列/拆旧 FTS（旧外部内容表依赖 articles 正文列，先拆）；
+        // - Rust 钩子在**同一迁移事务内**回填：按身份归并正文、写 articles.content_id、
+        //   然后 DROP COLUMN 消除旧正文列（消除双真值），重建 FTS 派生索引并建维护触发器；
+        // - 中途失败 → 整个迁移事务回滚（版本与数据原样），重开可重试；
+        // - articles.ai_epoch：AI 产物提交守卫的清除代次（清理 AI 时 +1，迟到写被拒）。
+        // - contents.id 为 AUTOINCREMENT（R3）：普通 rowid 在删除表内最大行后会复用
+        //   该 id——前端以 (content_id, revision) 判定正文失效，复用会在「删除+重建
+        //   恰好同快照窗口」时读到同值对而继续旧正文。AUTOINCREMENT 借 sqlite_sequence
+        //   保证 id 不复用（删除最大内容后新内容取更大 id，删除重建的旧 id 永不回归）。
+        // - FTS 为**可重建派生索引**（独立表 + 触发器维护），不再与正文列同体。
+        // user_version=22。
+        M::up_with_hook(
+            r#"
+        CREATE TABLE contents (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            identity           TEXT NOT NULL UNIQUE,
+            url_norm           TEXT,
+            content_html       TEXT,
+            body_text          TEXT NOT NULL DEFAULT '',
+            extraction_source  TEXT NOT NULL DEFAULT 'rss',
+            fulltext_extracted INTEGER NOT NULL DEFAULT 0,
+            revision           INTEGER NOT NULL DEFAULT 1,
+            created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_contents_url_norm ON contents(url_norm);
+
+        ALTER TABLE articles ADD COLUMN content_id INTEGER REFERENCES contents(id);
+        ALTER TABLE articles ADD COLUMN ai_epoch INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX idx_articles_content ON articles(content_id);
+
+        DROP TRIGGER IF EXISTS articles_ai;
+        DROP TRIGGER IF EXISTS articles_ad;
+        DROP TRIGGER IF EXISTS articles_au;
+        DROP TABLE IF EXISTS articles_fts;
+
+        CREATE VIRTUAL TABLE articles_fts USING fts5(
+            title, body_text, author, ai_summary, translated_content,
+            tokenize='unicode61'
+        );
+    "#,
+            |tx: &rusqlite::Transaction<'_>| {
+                let to_sql = |e: crate::error::AppError| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(e))
+                };
+                // 1) 回填：每条旧行按（来源, html, text）身份归并进 contents。
+                let rows: Vec<(i64, Option<String>, String, i64)> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT id, content_html, body_text, fulltext_extracted FROM articles ORDER BY id",
+                    )?;
+                    let collected = stmt
+                        .query_map([], |r| {
+                            Ok((
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, Option<String>>(1)?,
+                                r.get::<_, String>(2)?,
+                                r.get::<_, i64>(3)?,
+                            ))
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    collected
+                };
+                for (id, html, body, extracted) in rows {
+                    let source = if extracted != 0 {
+                        crate::db::contents::SOURCE_READABILITY
+                    } else {
+                        crate::db::contents::SOURCE_RSS
+                    };
+                    // OPT-003 R1 历史错配修复：旧版提取只写 HTML+flag，body_text 可能
+                    // 残留 RSS 文本——升级时按保留 HTML 同源重算一次（此后由提取提交
+                    // 保证同源；RSS 刷新保护不再冻结错配）。
+                    let body = if extracted != 0 {
+                        match html.as_deref().filter(|h| !h.trim().is_empty()) {
+                            Some(h) => crate::sanitize::html_to_text(h),
+                            None => body,
+                        }
+                    } else {
+                        body
+                    };
+                    let input = crate::db::contents::ContentInput {
+                        content_html: html,
+                        body_text: body,
+                        extraction_source: source.to_string(),
+                        fulltext_extracted: extracted != 0,
+                        url_norm: None,
+                    };
+                    let (content_id, _revision, _created) =
+                        crate::db::contents::ensure_content(tx, &input, Some(id))
+                            .map_err(to_sql)?;
+                    tx.execute(
+                        "UPDATE articles SET content_id = ?1 WHERE id = ?2",
+                        rusqlite::params![content_id, id],
+                    )?;
+                }
+                // 2) 消除旧正文列（双真值来源）。此时旧 FTS 触发器/表已拆。
+                tx.execute_batch(
+                    r#"
+                    ALTER TABLE articles DROP COLUMN content_html;
+                    ALTER TABLE articles DROP COLUMN body_text;
+                    ALTER TABLE articles DROP COLUMN fulltext_extracted;
+                "#,
+                )?;
+                // 3) FTS 派生索引重建 + 维护触发器（条目/内容变化都保持每个引用条目可搜）。
+                crate::db::contents::rebuild_fts(tx).map_err(to_sql)?;
+                tx.execute_batch(
+                    r#"
+                    CREATE TRIGGER trg_articles_fts_ai AFTER INSERT ON articles BEGIN
+                        INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
+                        VALUES (new.id, new.title,
+                                COALESCE((SELECT body_text FROM contents WHERE id = new.content_id), ''),
+                                COALESCE(new.author, ''), COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
+                    END;
+                    CREATE TRIGGER trg_articles_fts_ad AFTER DELETE ON articles BEGIN
+                        DELETE FROM articles_fts WHERE rowid = old.id;
+                        DELETE FROM contents WHERE id = old.content_id
+                            AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = old.content_id);
+                    END;
+                    CREATE TRIGGER trg_articles_fts_au AFTER UPDATE OF title, author, ai_summary, translated_content, content_id ON articles BEGIN
+                        DELETE FROM articles_fts WHERE rowid = old.id;
+                        INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
+                        VALUES (new.id, new.title,
+                                COALESCE((SELECT body_text FROM contents WHERE id = new.content_id), ''),
+                                COALESCE(new.author, ''), COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
+                    END;
+                    CREATE TRIGGER trg_contents_fts_au AFTER UPDATE OF content_html, body_text ON contents BEGIN
+                        DELETE FROM articles_fts WHERE rowid IN (SELECT id FROM articles WHERE content_id = new.id);
+                        INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
+                            SELECT a.id, a.title, new.body_text, COALESCE(a.author, ''),
+                                   COALESCE(a.ai_summary, ''), COALESCE(a.translated_content, '')
+                            FROM articles a WHERE a.content_id = new.id;
+                    END;
+                "#,
+                )?;
+                Ok(())
+            },
+        ),
     ])
 });
 
@@ -882,18 +1024,28 @@ mod req108_migration_tests {
             assert_eq!(n, 1, "v14 必须创建索引 {idx}");
         }
 
-        // FTS 更新触发器收窄到内容列（兜底触发器合用同一表时的前置，见迁移注释）
+        // FTS 更新触发器（OPT-008B 第二阶段起独立派生表维护；v14 的
+        // articles_au 外部内容触发器已随正文列迁出而拆除）：条目级字段 +
+        // content_id 变化收窄——published_at 兜底 UPDATE 不触碰 FTS 行。
         let au_sql: String = conn
             .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'articles_au'",
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_articles_fts_au'",
                 [],
                 |r| r.get(0),
             )
             .unwrap();
         assert!(
-            au_sql.contains("AFTER UPDATE OF title, body_text, author, ai_summary, translated_content"),
-            "articles_au 必须收窄到内容列（否则 published_at 兜底 UPDATE 触发 FTS 的 delete 对未入索引行执行 → malformed，实测）：{au_sql}"
+            au_sql.contains("AFTER UPDATE OF title, author, ai_summary, translated_content, content_id"),
+            "trg_articles_fts_au 必须收窄到内容/身份列（否则 published_at 兜底 UPDATE 触发 FTS 的 delete 对未入索引行执行 → malformed，实测）：{au_sql}"
         );
+        let legacy_au: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'articles_au'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_au, 0, "旧 articles_au 触发器必须随正文列迁出拆除");
 
         // 兜底触发器存在性
         for trg in [

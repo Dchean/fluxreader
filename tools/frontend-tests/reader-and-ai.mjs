@@ -391,7 +391,7 @@ export async function run(ctx) {
     {
       const t103Pending = t103State().entries.find((a) => a.id === '201');
       const t103ProbeNo201 = { ...t103Probe, entries: t103Probe.entries.filter((a) => a.id !== '201') };
-      checkNew('(t103-stale-card-rehydrates) 未水合卡片刷新后水合前提重新成立：entryNeedsHydration 仅在「条目在 ∧ 无记录」为真（loading/ready/cleared/missing/failed 均不需要）',
+      checkNew('(t103-stale-card-rehydrates) 未水合卡片刷新后水合前提重新成立：entryNeedsHydration 在「条目在 ∧ 无记录」为真；有记录时 loading/ready/missing/failed 不需要（cleared 仅「正文修订失效且正文已清空」需要，由 t008b 覆盖）',
         NEED(t103Probe, '201') === true
         && NEED(t103ProbeNo201, '201') === false);
       // 记录各态逐一验证（loading 在途 / ready / failed 终态都不再入队）
@@ -849,5 +849,154 @@ export async function run(ctx) {
     if (bare122.length) console.error('裸订阅（缺 useShallow）:', bare122.map((b) => b.where).join(' | '));
     checkNew('(t122-9) selectArticleBody 订阅必须包 useShallow（源级锁）：src/ 全树每个引用 selectArticleBody 的 useAppStore(...) 实参均以 useShallow(...) 包裹（裸订阅 = zustand v5 快照不缓存 → React #185 无限重渲染；至少覆盖 Reader/SocialCard/NotifCard 三处）',
       subs122.length >= 3 && bare122.length === 0);
+  }
+
+  /* ============================================================
+     OPT-008B 第二阶段：正文修订失效（contentId/contentRevision）
+     —— 正文真值迁入 contents 后，前端失效依据从「snippet 变化」扩为
+     「条目引用的 (contentId, contentRevision) 变化」：snippet 未变但正文
+     后半段更新、共享兄弟内容变更都必须让 bodyById 记录失效并按需重取；
+     修订失效 bump 显式失效计数，使在途旧详情响应被丢弃（时序守卫不退化）。
+     链路：list_articles 行（JOIN contents 带 content_id/revision）→
+     api.articleRowToEntry(contentId/contentRevision) → mergeSnapshotEntries
+     (fromBackend) → bodyCache.invalidateContentRevision → reader.ts 对
+     cleared 记录删档重入队（ensureArticleContent/hydrateArticleContent）。
+     ============================================================ */
+  {
+    const { getBodyEntry: REC008, resetBodyCacheForTests } = await import('../../dist-test/store/bodyCache.js');
+    const NEED008 = nSel.entryNeedsHydration;
+    const body008 = (id) => bodyOfT122(store.getState(), id);
+    const row008 = (o) => mkRow({ feed_id: 11, ...o });
+
+    /* ---------- (t008b-1) 同 contentId、revision 推进（snippet 未变）→ 失效重取 ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    S.backendRows = [...BASE_ROWS, mkRow({ id: 151, feed_id: 11, content_id: 9001, content_revision: 1 })];
+    await store.getState().reloadFromBackend();
+    S.getArticlesPlan = { rows: [row008({ id: 151, content_id: 9001, content_revision: 1, content_html: '<p>151 v1</p>' })] };
+    store.getState().hydrateArticleContent(['151']);
+    await nTick(20);
+    S.getArticlesPlan = null;
+    checkNew('(t008b-1) 前置：水合记录携带 DB 内容身份与修订（content_id/content_revision 经行进条目进记录）',
+      REC008('151')?.state === 'ready' && REC008('151')?.contentId === 9001
+      && REC008('151')?.contentRev === 1 && body008('151').content === '<p>151 v1</p>');
+    /* 正文后半段更新：snippet 不变、revision 推进 → 行修订变化必须失效 */
+    S.backendRows = [...BASE_ROWS, mkRow({ id: 151, feed_id: 11, content_id: 9001, content_revision: 2 })];
+    await store.getState().reloadFromBackend();
+    checkNew('(t008b-1) snippet 未变但 revision 推进 → 记录 cleared（正文清空），懒水合判定重新成立（后半段变更不再留旧正文）',
+      REC008('151')?.state === 'cleared' && REC008('151')?.contentRev === 2
+      && body008('151').content === '' && NEED008(store.getState(), '151') === true);
+    S.getArticlesPlan = { rows: [row008({ id: 151, content_id: 9001, content_revision: 2, content_html: '<p>151 v2 后半段</p>' })] };
+    store.getState().hydrateArticleContent(['151']);
+    await nTick(20);
+    S.getArticlesPlan = null;
+    checkNew('(t008b-1) 失效后重取：新正文与新修订落记录（cleared 不是死态，按需重取闭环）',
+      REC008('151')?.state === 'ready' && body008('151').content === '<p>151 v2 后半段</p>'
+      && REC008('151')?.contentRev === 2);
+    S.backendRows = BASE_ROWS;
+
+    /* ---------- (t008b-2) 共享兄弟内容变更：同一 contentId 的修订对每个引用条目都失效 ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    S.backendRows = [...BASE_ROWS,
+      mkRow({ id: 152, feed_id: 11, content_id: 9100, content_revision: 1 }),
+      mkRow({ id: 153, feed_id: 12, content_id: 9100, content_revision: 1 })];
+    await store.getState().reloadFromBackend();
+    S.getArticlesPlan = { rows: [
+      row008({ id: 152, content_id: 9100, content_revision: 1, content_html: '<p>共享 v1</p>' }),
+      row008({ id: 153, feed_id: 12, content_id: 9100, content_revision: 1, content_html: '<p>共享 v1</p>' }),
+    ] };
+    store.getState().hydrateArticleContent(['152', '153']);
+    await nTick(20);
+    S.getArticlesPlan = null;
+    checkNew('(t008b-2) 前置：两个条目各自水合到同一 contentId（共享正文）',
+      REC008('152')?.contentId === 9100 && REC008('153')?.contentId === 9100
+      && body008('152').content === '<p>共享 v1</p>' && body008('153').content === '<p>共享 v1</p>');
+    S.backendRows = [...BASE_ROWS,
+      mkRow({ id: 152, feed_id: 11, content_id: 9100, content_revision: 2 }),
+      mkRow({ id: 153, feed_id: 12, content_id: 9100, content_revision: 2 })];
+    await store.getState().reloadFromBackend();
+    checkNew('(t008b-2) 共享兄弟内容变更（同一 contentId 新 revision）→ 每个引用条目的记录都失效，不只代表行',
+      REC008('152')?.state === 'cleared' && REC008('153')?.state === 'cleared'
+      && body008('152').content === '' && body008('153').content === '');
+    S.backendRows = BASE_ROWS;
+
+    /* ---------- (t008b-3) 修订失效后，在途旧戳水合响应被丢弃（时序守卫不退化） ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    S.backendRows = [...BASE_ROWS, mkRow({ id: 154, feed_id: 11, content_id: 9200, content_revision: 1 })];
+    await store.getState().reloadFromBackend();
+    S.getArticlesPlan = { rows: [row008({ id: 154, content_id: 9200, content_revision: 1, content_html: '<p>154 v1</p>' })] };
+    store.getState().hydrateArticleContent(['154']);
+    await nTick(20);
+    S.getArticlesPlan = { mode: 'defer' };
+    store.getState().retryHydration('154'); // 记录删档 → loading，请求挂起（在途）
+    await nTick(0);
+    S.backendRows = [...BASE_ROWS, mkRow({ id: 154, feed_id: 11, content_id: 9200, content_revision: 2 })];
+    await store.getState().reloadFromBackend(); // 在途期间修订推进 → 失效（bump 显式失效计数）
+    checkNew('(t008b-3) 在途水合期间修订推进 → 记录置 cleared 并 bump（旧响应戳已过期）',
+      REC008('154')?.state === 'cleared' && NEED008(store.getState(), '154') === true);
+    S.pendingGetArticles.at(-1)?.resolve([row008({ id: 154, content_id: 9200, content_revision: 1, content_html: '<p>154 v1 迟到</p>' })]);
+    await nTick(10);
+    S.getArticlesPlan = null;
+    checkNew('(t008b-3) 携带旧戳的在途响应被整体丢弃：cleared 不被旧正文复活（请求代次保护不退化）',
+      REC008('154')?.state === 'cleared' && body008('154').content === '');
+    /* ---------- (t008b-4) 提取成功回写提交身份：下一次 reload 不再清空重取 ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    S.backendRows = [...BASE_ROWS, mkRow({ id: 155, feed_id: 11, content_id: 9400, content_revision: 1, url: 'https://example.com/155' })];
+    await store.getState().reloadFromBackend();
+    S.getArticlesPlan = { rows: [row008({ id: 155, content_id: 9400, content_revision: 1, content_html: '<p>155 RSS 摘要</p>', url: 'https://example.com/155' })] };
+    store.getState().hydrateArticleContent(['155']);
+    await nTick(20);
+    S.getArticlesPlan = null;
+    store.setState({ activeArticleId: '155' });
+    /* 提取成功：响应携带提交后的实际身份（Rust ExtractOutcome contentId/contentRevision） */
+    S.extractResult = { html: '<p>155 提取全文</p>', degraded: false, reason: null, contentId: 9401, contentRevision: 1 };
+    store.getState().extractCurrentArticle();
+    await nTick(20);
+    checkNew('(t008b-4) 提取成功以响应携带的提交身份落记录（contentId=9401/revision=1，正文=提取全文）',
+      REC008('155')?.state === 'ready' && REC008('155')?.contentId === 9401 && REC008('155')?.contentRev === 1
+      && body008('155').content === '<p>155 提取全文</p>');
+    /* DB 行已重指 readability 行（9401,1）——下一次 reload 对值相等：不得清空/重取 */
+    const t008b4Calls = S.invokeCalls.filter((c) => c.cmd === 'get_articles' || c.cmd === 'get_article').length;
+    S.backendRows = [...BASE_ROWS, mkRow({ id: 155, feed_id: 11, content_id: 9401, content_revision: 1, url: 'https://example.com/155' })];
+    await store.getState().reloadFromBackend();
+    checkNew('(t008b-4) 提取成功后的下一次 reload 不把刚提取的正文按“修订变化”清空重取（记录仍 ready/正文保留/无新详情请求）',
+      REC008('155')?.state === 'ready' && body008('155').content === '<p>155 提取全文</p>'
+      && S.invokeCalls.filter((c) => c.cmd === 'get_articles' || c.cmd === 'get_article').length === t008b4Calls);
+    S.extractResult = null;
+
+    /* ---------- (t008b-5) 条目快照缺失后以同 id 重新出现：对值巧合必须失效（锚守卫） ---------- */
+    await bootFixture({ activeContentLayout: 'social' });
+    S.backendRows = [...BASE_ROWS, mkRow({ id: 156, feed_id: 11, title: '旧文章 156', content_id: 9500, content_revision: 1 })];
+    await store.getState().reloadFromBackend();
+    S.getArticlesPlan = { rows: [row008({ id: 156, title: '旧文章 156', content_id: 9500, content_revision: 1, content_html: '<p>156 旧正文</p>' })] };
+    store.getState().hydrateArticleContent(['156']);
+    await nTick(20);
+    S.getArticlesPlan = null;
+    checkNew('(t008b-5) 前置：156 水合就绪并携带 (9500,1) 身份',
+      REC008('156')?.state === 'ready' && REC008('156')?.contentId === 9500);
+    /* 条目从快照消失（删除）：记录仍在（实体缓存），快照不再含该 id */
+    S.backendRows = BASE_ROWS;
+    await store.getState().reloadFromBackend();
+    /* 同 id 重新出现，但已是另一条目；content_id/revision 巧合相等 */
+    S.backendRows = [...BASE_ROWS, mkRow({ id: 156, feed_id: 11, title: '重建的另一篇文章 156', content_id: 9500, content_revision: 1 })];
+    await store.getState().reloadFromBackend();
+    checkNew('(t008b-5) 快照缺失后同 id 重现（对值巧合相等但锚不符 = 另一条目）→ 记录失效清空，不继续旧正文（文章删除重建复用 id 的缓存边界）',
+      REC008('156')?.state === 'cleared' && body008('156').content === '');
+    /* 对照组：同锚重入（同 feedId+title 的正常返回窗口）不因对值相等被误失效 */
+    S.backendRows = [...BASE_ROWS,
+      mkRow({ id: 156, feed_id: 11, title: '重建的另一篇文章 156', content_id: 9500, content_revision: 1 }),
+      mkRow({ id: 157, feed_id: 11, title: '157 文章', content_id: 9600, content_revision: 1 })];
+    await store.getState().reloadFromBackend();
+    S.getArticlesPlan = { rows: [row008({ id: 157, title: '157 文章', content_id: 9600, content_revision: 1, content_html: '<p>157 正文</p>' })] };
+    store.getState().hydrateArticleContent(['157']);
+    await nTick(20);
+    S.getArticlesPlan = null;
+    S.backendRows = BASE_ROWS;
+    await store.getState().reloadFromBackend(); // 157 从快照消失
+    S.backendRows = [...BASE_ROWS, mkRow({ id: 157, feed_id: 11, title: '157 文章', content_id: 9600, content_revision: 1 })];
+    await store.getState().reloadFromBackend(); // 同锚同对重入
+    checkNew('(t008b-5) 对照：同一锚（同 feedId+title）重入窗口 + 对值相等 → 记录保持 ready、正文不丢（锚守卫不误伤正常重现）',
+      REC008('157')?.state === 'ready' && body008('157').content === '<p>157 正文</p>');
+    S.backendRows = BASE_ROWS;
+    resetBodyCacheForTests();
   }
 }

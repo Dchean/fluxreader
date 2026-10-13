@@ -1800,7 +1800,8 @@ async fn failed_page_rollback_leaves_no_data_change_marker() {
             .unwrap();
         // 现场改造 2：清空 90 的正文（重放会 backfill 补回 → 页内真实变化）。
         conn.execute(
-            "UPDATE articles SET content_html = NULL WHERE remote_id = 90",
+            "UPDATE contents SET content_html = NULL, body_text = ''
+             WHERE id IN (SELECT content_id FROM articles WHERE remote_id = 90)",
             [],
         )
         .unwrap();
@@ -1835,7 +1836,7 @@ async fn failed_page_rollback_leaves_no_data_change_marker() {
         assert!(bound_remote_id(&conn, 85), "失败页条目不得半提交");
         let content_90: Option<String> = conn
             .query_row(
-                "SELECT content_html FROM articles WHERE remote_id = 90",
+                "SELECT c.content_html FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.remote_id = 90",
                 [],
                 |r| r.get(0),
             )

@@ -10,7 +10,7 @@ import type {
   FeedItem,
   ViewFilterType,
 } from '../types';
-import { reconcileBodyEntities } from './bodyCache';
+import { getBodyEntry, invalidateContentRevision, reconcileBodyEntities } from './bodyCache';
 import type { BodyRowFact } from './bodyCache';
 import type { AppState, ArticlesCursorState, ScopeCountsSnapshot } from './types';
 
@@ -404,6 +404,38 @@ export function mergeSnapshotEntries(
     return merged;
   });
   if (fromBackend) {
+    /* OPT-008B 第二阶段：正文修订失效——条目引用的 contents 身份/修订变化
+       （含共享兄弟内容变更；snippet 未变也失效）时清空 bodyById 的正文记录回
+       cleared，由 ensureArticleContent 按需重取；在途旧详情响应因显式失效计数
+       bump 被丢弃（时序守卫不退化）。
+       R3 边界守卫：对值未变的既有条目也查记录锚（feedId|title）——同 id 条目
+       “快照缺失后重新出现/删除重建”且 (contentId, revision) 巧合相等（文章删除
+       重建复用 rowid）时锚不符必须失效，不得继续旧正文。仅对持有**真实内容
+       身份**的记录启用（rec.contentId 非 null）：身份为空的历史/夹具记录没有可
+       巧合的对值，锚比较反而会因测试/过渡数据的行身份差异误失效。门控保持
+       「快照对值变化 ∨ 锚不符」：在途旧快照（对值 = 提取前）不得把
+       applyExtractedFulltext 刚落的新身份记录失效（那是同一条目、锚相等）。 */
+    for (const a of entries) {
+      const prevRow = prevById.get(a.id);
+      const snapshotChanged =
+        !prevRow ||
+        prevRow.contentId !== a.contentId ||
+        (prevRow.contentRevision ?? 0) !== (a.contentRevision ?? 0);
+      const rec = getBodyEntry(a.id);
+      const anchorMismatch =
+        rec != null &&
+        rec.contentId !== null &&
+        rec.entryAnchor !== null &&
+        rec.entryAnchor !== `${a.feedId}|${a.title}`;
+      if (snapshotChanged || anchorMismatch) {
+        invalidateContentRevision(
+          a.id,
+          a.contentId ?? null,
+          a.contentRevision ?? 0,
+          `${a.feedId}|${a.title}`,
+        );
+      }
+    }
     /* TASK-109②：版本 bump 按真值来源收窄（TASK-107 R2 审查裁定）——
        - fromBackend=true（bootstrap 三处后端快照路径 reloadFromBackend /
          reloadFilteredEntries / anchorToArticle）：行级 is_read 是后端真值，任何

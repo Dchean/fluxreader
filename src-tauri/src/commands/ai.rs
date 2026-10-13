@@ -143,11 +143,16 @@ async fn ai_summarize_inner(
 ) -> AppResult<String> {
     let cfg = load_ai_config(state).await?;
 
-    // 取文章内容（锁内快照，锁外跑网络）
-    let (title, body, cached) = {
+    // 取文章内容（锁内快照，锁外跑网络）；OPT-008B 第二阶段：同一快照里捕获
+    // AI 提交前提（清理代次 + 内容身份/修订）——落地时校验，迟到产物不得写到
+    // 已删除/已替换内容上，也不得复活清理后的旧产物。
+    let (title, body, cached, commit_token) = {
         let conn = state.db.lock().await;
-        db::get_article_for_summary(&conn, article_id)?
-            .ok_or_else(|| AppError::not_found(format!("article {article_id}")))?
+        let (title, body, cached) = db::get_article_for_summary(&conn, article_id)?
+            .ok_or_else(|| AppError::not_found(format!("article {article_id}")))?;
+        let token = db::article_ai_commit_token(&conn, article_id)?
+            .ok_or_else(|| AppError::not_found(format!("article {article_id}")))?;
+        (title, body, cached, token)
     };
 
     // 缓存命中：直接推给前端，不重算
@@ -187,7 +192,9 @@ async fn ai_summarize_inner(
             // OPT-013A：保存失败必须 Err——不得吞错后发送 Done 假成功（此前
             // `let _ =` 即此病）。前端经 invoke rejection 显示失败并可重试；
             // 缓存未写，重试不会被缓存短路。
-            commit_summary_cache(&state.db, article_id, &outcome.text).await?;
+            // OPT-008B 第二阶段：带前提校验——期间内容被替换/条目被清理 → 拒绝
+            // 落旧产物（如实 Err，不写 Done）。
+            commit_summary_cache(&state.db, article_id, &commit_token, &outcome.text).await?;
         }
         let _ = on_channel.send(AiEvent::Done);
     }
@@ -195,21 +202,33 @@ async fn ai_summarize_inner(
     Ok(outcome.text)
 }
 
-/// 完整摘要落缓存。保存失败必须原样上抛——调用方不得吞错后发送 Done 假成功。
-/// （决定与备选见 .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md）
+/// 完整摘要落缓存（带提交前提）：任一前提不符返回 Err（前端如实显示失败并
+/// 可重试；绝不 Done 假成功——契约见
+/// .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md）。
 async fn commit_summary_cache(
     db_lock: &tokio::sync::Mutex<Connection>,
     article_id: i64,
+    expected: &db::AiCommitToken,
     text: &str,
 ) -> AppResult<()> {
     let conn = db_lock.lock().await;
-    db::set_article_ai_fields(&conn, article_id, Some(text), None)
+    let committed =
+        db::set_article_ai_fields_checked(&conn, article_id, expected, Some(text), None)?;
+    if !committed {
+        return Err(AppError::new(
+            "aiStale",
+            "内容已在生成期间更新，已丢弃过期摘要（可重试）",
+        ));
+    }
+    Ok(())
 }
 
 /// 完整译文落缓存（先过消毒器：模型输出不可信）；保存失败必须原样上抛。
+/// OPT-008B 第二阶段：带提交前提校验（同 commit_summary_cache）。
 async fn commit_translation_cache(
     db_lock: &tokio::sync::Mutex<Connection>,
     article_id: i64,
+    expected: &db::AiCommitToken,
     text: &str,
 ) -> AppResult<()> {
     // 翻译产物是 HTML 且直接 dangerouslySetInnerHTML 渲染——入库前
@@ -219,7 +238,15 @@ async fn commit_translation_cache(
     // toggleReaderTranslation 的 onDone 回读逻辑）。
     let safe = crate::sanitize::sanitize(text, None);
     let conn = db_lock.lock().await;
-    db::set_article_ai_fields(&conn, article_id, None, Some(&safe))
+    let committed =
+        db::set_article_ai_fields_checked(&conn, article_id, expected, None, Some(&safe))?;
+    if !committed {
+        return Err(AppError::new(
+            "aiStale",
+            "内容已在生成期间更新，已丢弃过期译文（可重试）",
+        ));
+    }
+    Ok(())
 }
 
 /// 流式翻译：同 ai_summarize 结构，产物写 translated_content。
@@ -240,10 +267,13 @@ async fn ai_translate_inner(
 ) -> AppResult<String> {
     let cfg = load_ai_config(state).await?;
 
-    let (title, html, cached) = {
+    let (title, html, cached, commit_token) = {
         let conn = state.db.lock().await;
-        db::get_article_for_translation(&conn, article_id)?
-            .ok_or_else(|| AppError::not_found(format!("article {article_id}")))?
+        let (title, html, cached) = db::get_article_for_translation(&conn, article_id)?
+            .ok_or_else(|| AppError::not_found(format!("article {article_id}")))?;
+        let token = db::article_ai_commit_token(&conn, article_id)?
+            .ok_or_else(|| AppError::not_found(format!("article {article_id}")))?;
+        (title, html, cached, token)
     };
 
     if let Some(translated) = cached.filter(|s| !s.trim().is_empty()) {
@@ -276,7 +306,8 @@ async fn ai_translate_inner(
     if outcome.completed {
         if !outcome.text.trim().is_empty() {
             // OPT-013A：同 ai_summarize——保存失败必须 Err，不得 Done 假成功。
-            commit_translation_cache(&state.db, article_id, &outcome.text).await?;
+            // OPT-008B 第二阶段：带前提校验（迟到译文不写已替换/已清理内容）。
+            commit_translation_cache(&state.db, article_id, &commit_token, &outcome.text).await?;
         }
         let _ = on_channel.send(AiEvent::Done);
     }
@@ -375,8 +406,48 @@ mod ai_commit_tests {
         port
     }
 
-    /// 建内存库（settings + articles 最小 schema）并构造 AppState；
-    /// `extra_sql` 用于注入触发器等故障。返回共享的事件类型表。
+    /// 阻塞版 SSE mock（OPT-008B 第二阶段）：响应头发完后经 `received` 通知测试，
+    /// 等待 `release` 才发送 body——制造可控的「模型在途窗口」（不靠 sleep 猜时序）。
+    fn start_blocking_sse(
+        body: &'static str,
+        received: tokio::sync::mpsc::UnboundedSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Some(Ok(mut stream)) = listener.incoming().next() else {
+                return;
+            };
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                req.extend_from_slice(&buf[..n]);
+                if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head =
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            if stream.write_all(head).is_err() {
+                return;
+            }
+            let _ = received.send(());
+            if release.recv().is_err() {
+                return;
+            }
+            let _ = stream.write_all(body.as_bytes());
+        });
+        port
+    }
+
+    /// 建内存库（settings + articles/contents 最小 schema——
+    /// OPT-008B 第二阶段：正文真值源 contents，条目经 content_id 引用）并构造
+    /// AppState；`extra_sql` 用于注入触发器等故障。返回共享的事件类型表。
     fn setup(port: u16, extra_sql: &str) -> (AppState, Arc<StdMutex<Vec<String>>>) {
         let conn = Connection::open_in_memory().unwrap();
         let cfg = format!(
@@ -384,10 +455,14 @@ mod ai_commit_tests {
         );
         conn.execute_batch(&format!(
             "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body_text TEXT,
-                 content_html TEXT, ai_summary TEXT, translated_content TEXT);
-             INSERT INTO articles (id, title, body_text, content_html)
-                 VALUES (1, '测试文章', '这是正文内容。', '<p>Hello World</p>');
+             CREATE TABLE contents (id INTEGER PRIMARY KEY, identity TEXT NOT NULL UNIQUE,
+                 content_html TEXT, body_text TEXT NOT NULL DEFAULT '', extraction_source TEXT NOT NULL DEFAULT 'rss',
+                 fulltext_extracted INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1);
+             CREATE TABLE articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, content_id INTEGER,
+                 ai_summary TEXT, translated_content TEXT, ai_epoch INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO contents (id, identity, content_html, body_text)
+                 VALUES (1, 'h|test', '<p>Hello World</p>', '这是正文内容。');
+             INSERT INTO articles (id, title, content_id) VALUES (1, '测试文章', 1);
              INSERT INTO settings (key, value) VALUES ('ai_config', '{cfg}');
              {extra_sql}"
         ))
@@ -550,5 +625,44 @@ mod ai_commit_tests {
         assert_eq!(types, vec!["delta"], "取消后不得发送 Done: {types:?}");
         let conn = state.db.lock().await;
         assert_eq!(query_summary(&conn), None, "取消不得写缓存");
+    }
+
+    /// OPT-008B 第二阶段：模型在途窗口内 (a) DB 锁必须空闲（不持锁跑网络），
+    /// (b) 期间内容修订被推进 → 迟到产物提交被拒（aiStale，不写缓存、不发 Done）。
+    /// 判别力：若窗口内持锁，`state.db.lock()` 超时即红；若守卫失效，提交成功 →
+    /// 无 Err 且缓存被写，断言即红。
+    #[tokio::test]
+    async fn stale_product_after_content_change_is_rejected_and_lock_free_during_network() {
+        let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let port = start_blocking_sse(COMPLETE_SSE, received_tx, release_rx);
+        let (state, events) = setup(port, "");
+        let channel = recording_channel(events.clone());
+
+        let mutate = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), received_rx.recv())
+                .await
+                .expect("mock 必须收到模型请求")
+                .expect("received 通道未关闭");
+            // 模型在途：DB 锁必须仍可获取（获取超时即证明被网络路径持有）
+            let conn = tokio::time::timeout(std::time::Duration::from_secs(2), state.db.lock())
+                .await
+                .expect("网络期间不得持有 DB 锁");
+            conn.execute(
+                "UPDATE contents SET revision = revision + 1 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+            release_tx.send(()).unwrap();
+        };
+        let (res, _) = tokio::join!(ai_summarize_inner(&state, 1, &channel), mutate);
+        let err = res.expect_err("内容修订变化后的迟到提交必须拒绝");
+        assert_eq!(err.code, "aiStale", "{err}");
+        let conn = state.db.lock().await;
+        assert_eq!(query_summary(&conn).as_deref(), None, "拒绝后不得写缓存");
+        drop(conn);
+        let types = events.lock().unwrap().clone();
+        assert_eq!(types, vec!["delta"], "拒绝后不得发送 Done: {types:?}");
     }
 }

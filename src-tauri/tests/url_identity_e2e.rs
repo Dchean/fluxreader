@@ -33,8 +33,48 @@ use tokio::sync::Mutex;
 /// OPT-007 / OPT-011 起注意：此后新增 ADD COLUMN 迁移必须在本夹具追加对应的
 /// DROP COLUMN 回拨——否则 user_version=18 与物理列不一致，迁移会以 duplicate
 /// column fail-stop（这正是迁移框架「版本号与物理形状必须一致」的应有行为）。
+/// OPT-008B v22 物理回拨：把最新 schema 的「contents 迁出 + FTS 派生表」还原为
+/// v21 时代形状（旧正文列回归、FTS 外部内容表 + 触发器重建），使 user_version=18
+/// 的夹具能逐版本真实重放 v19→v22。
+fn rollback_v22_shape(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        r#"
+        DROP TRIGGER IF EXISTS trg_articles_fts_ai;
+        DROP TRIGGER IF EXISTS trg_articles_fts_ad;
+        DROP TRIGGER IF EXISTS trg_articles_fts_au;
+        DROP TRIGGER IF EXISTS trg_contents_fts_au;
+        DROP TABLE IF EXISTS articles_fts;
+        DROP INDEX IF EXISTS idx_articles_content;
+        ALTER TABLE articles DROP COLUMN content_id;
+        ALTER TABLE articles DROP COLUMN ai_epoch;
+        ALTER TABLE articles ADD COLUMN content_html TEXT;
+        ALTER TABLE articles ADD COLUMN body_text TEXT NOT NULL DEFAULT '';
+        ALTER TABLE articles ADD COLUMN fulltext_extracted INTEGER NOT NULL DEFAULT 0;
+        DROP TABLE IF EXISTS contents;
+        CREATE VIRTUAL TABLE articles_fts USING fts5(title, body_text, author, ai_summary, translated_content,
+            content='articles', content_rowid='id', tokenize='unicode61');
+        CREATE TRIGGER articles_ai AFTER INSERT ON articles BEGIN
+            INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
+            VALUES (new.id, new.title, new.body_text, COALESCE(new.author, ''), COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
+        END;
+        CREATE TRIGGER articles_ad AFTER DELETE ON articles BEGIN
+            INSERT INTO articles_fts(articles_fts, rowid, title, body_text, author, ai_summary, translated_content)
+            VALUES ('delete', old.id, old.title, old.body_text, COALESCE(old.author, ''), COALESCE(old.ai_summary, ''), COALESCE(old.translated_content, ''));
+        END;
+        CREATE TRIGGER articles_au AFTER UPDATE ON articles BEGIN
+            INSERT INTO articles_fts(articles_fts, rowid, title, body_text, author, ai_summary, translated_content)
+            VALUES ('delete', old.id, old.title, old.body_text, COALESCE(old.author, ''), COALESCE(old.ai_summary, ''), COALESCE(old.translated_content, ''));
+            INSERT INTO articles_fts(rowid, title, body_text, author, ai_summary, translated_content)
+            VALUES (new.id, new.title, new.body_text, COALESCE(new.author, ''), COALESCE(new.ai_summary, ''), COALESCE(new.translated_content, ''));
+        END;
+    "#,
+    )
+    .unwrap();
+}
+
 fn seed_v18_legacy(path: &std::path::Path) {
     let conn = db::open(path).expect("open db");
+    rollback_v22_shape(&conn);
     conn.execute_batch(
         r#"
         INSERT INTO feeds (feed_url, title) VALUES ('https://forum.example/rss', 'F');
@@ -361,10 +401,11 @@ async fn seed_deleted_feed_legacy_era(
              ALTER TABLE articles DROP COLUMN star_version;
              -- OPT-011：v21 增列（feeds 三态）后的物理回拨（同 seed_v18_legacy）
              ALTER TABLE feeds DROP COLUMN summary_mode;
-             ALTER TABLE feeds DROP COLUMN translate_mode;
-             PRAGMA user_version = 18;",
+             ALTER TABLE feeds DROP COLUMN translate_mode;",
         )
         .unwrap();
+        rollback_v22_shape(&conn);
+        conn.execute_batch("PRAGMA user_version = 18;").unwrap();
     }
     drop(dbm);
 

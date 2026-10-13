@@ -582,11 +582,14 @@ pub fn get_article_url(conn: &Connection, article_id: i64) -> AppResult<Option<S
     Ok(url)
 }
 
-/// 获取文章正文 HTML（extract_fulltext 退化判定用）
+/// 获取文章正文 HTML（extract_fulltext 退化判定用）。
+/// OPT-008B 第二阶段：正文真值源 = contents（单一正文所有权）。
 pub fn get_article_content_html(conn: &Connection, article_id: i64) -> AppResult<String> {
     let html: String = conn
         .query_row(
-            "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
+            "SELECT COALESCE(c.content_html, '')
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.id = ?1",
             params![article_id],
             |r| r.get(0),
         )
@@ -594,20 +597,24 @@ pub fn get_article_content_html(conn: &Connection, article_id: i64) -> AppResult
     Ok(html)
 }
 
-/// 更新文章全文提取结果：覆盖 content_html、置提取标志，并按同一来源重写
-/// body_text（R1：纯文本列/搜索/摘要必须与提取正文同源，不得残留旧 RSS 文本——
-/// 旧实现只写 HTML+flag，后续刷新保护会冻结「HTML=全文、body_text=旧 RSS」的错配）。
+/// 更新文章全文提取结果（**兼容包装**）：OPT-008B 第二阶段起正文由 contents
+/// 承载，提取落库走带前提校验的 [`super::articles::replace_article_content_checked`]
+/// （迟到提交不得写已删除/已分叉/已替换内容）。本函数保留为「无前提的显式覆盖」
+/// 供非网络路径（夹具/测试）使用，语义 = 立即读取当前前提后提交一次。
 pub fn update_article_fulltext(
     conn: &Connection,
     article_id: i64,
     content_html: &str,
-    extracted: bool,
+    _extracted: bool,
 ) -> AppResult<()> {
-    let body_text = crate::sanitize::html_to_text(content_html);
-    conn.execute(
-        "UPDATE articles SET content_html = ?1, body_text = ?2, fulltext_extracted = ?3 WHERE id = ?4",
-        params![content_html, body_text, extracted as i64, article_id],
-    )?;
+    let Some((token, _html)) = super::articles::article_content_commit_token(conn, article_id)?
+    else {
+        return Ok(());
+    };
+    // R3：提交返回 Option<(content_id, revision)>；本兼容包装不消费身份（夹具/
+    // 非网络路径），投递失败（前提已变）时静默返回与旧 `let _` 语义一致。
+    let _committed =
+        super::articles::replace_article_content_checked(conn, article_id, &token, content_html)?;
     Ok(())
 }
 
@@ -663,14 +670,18 @@ pub fn list_unbound_local_feeds(conn: &Connection) -> AppResult<Vec<(i64, String
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 获取文章摘要用数据（ai_summarize 用）：(title, body_text, ai_summary)
+/// 获取文章摘要用数据（ai_summarize 用）：(title, body_text, ai_summary)。
+/// OPT-008B 第二阶段：正文纯文本来自 contents；输入键 = (title, body_text)
+/// ——标题不同的条目即便共享正文也不共用产物（产物仍存条目行）。
 pub fn get_article_for_summary(
     conn: &Connection,
     article_id: i64,
 ) -> AppResult<Option<(String, String, Option<String>)>> {
     let row = conn
         .query_row(
-            "SELECT title, COALESCE(body_text, ''), ai_summary FROM articles WHERE id = ?1",
+            "SELECT a.title, COALESCE(c.body_text, ''), a.ai_summary
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.id = ?1",
             params![article_id],
             |r| {
                 Ok((
@@ -684,14 +695,17 @@ pub fn get_article_for_summary(
     Ok(row)
 }
 
-/// 获取文章翻译用数据（ai_translate 用）：(title, content_html, translated_content)
+/// 获取文章翻译用数据（ai_translate 用）：(title, content_html, translated_content)。
+/// OPT-008B 第二阶段：正文 HTML 来自 contents；输入键 = (title, content_html, lang)。
 pub fn get_article_for_translation(
     conn: &Connection,
     article_id: i64,
 ) -> AppResult<Option<(String, String, Option<String>)>> {
     let row = conn
         .query_row(
-            "SELECT title, COALESCE(content_html, ''), translated_content FROM articles WHERE id = ?1",
+            "SELECT a.title, COALESCE(c.content_html, ''), a.translated_content
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.id = ?1",
             params![article_id],
             |r| {
                 Ok((
@@ -926,6 +940,10 @@ pub fn sync_set_star_at_version(
 }
 
 /// 回填涉及的可见字段快照（R3 前后比对；文本经 `null_if_empty` 归一）。
+/// OPT-008B 第二阶段：正文两列从 contents JOIN 读；content_id 一并参与比对
+/// （内容等价则身份不变——重指也计变化，驱动数据变化标记）。
+/// R3：来源/提取标志只读不参与比对——回填的提取保护判定（readability 行不得
+/// 被合成 RSS 覆盖）需要它们。
 #[derive(Debug, PartialEq, Eq)]
 struct FillVisible {
     content_html: Option<String>,
@@ -933,6 +951,11 @@ struct FillVisible {
     image_url: Option<String>,
     enclosure_url: Option<String>,
     enclosure_mime: Option<String>,
+    content_id: Option<i64>,
+    /// 当前指向内容的来源（'rss' | 'readability' | ''=无内容行）
+    source: String,
+    /// 当前指向内容是否已全文提取（受保护提取行判定）
+    fulltext_extracted: i64,
 }
 
 /// 读一行的 (url, 回填可见字段)；行不存在返回 None。读取失败透传 Err。
@@ -942,8 +965,10 @@ fn fill_visible(
 ) -> AppResult<Option<(Option<String>, FillVisible)>> {
     let row = conn
         .query_row(
-            "SELECT url, content_html, body_text, image_url, enclosure_url, enclosure_mime
-             FROM articles WHERE id = ?1",
+            "SELECT a.url, c.content_html, c.body_text, a.image_url, a.enclosure_url, a.enclosure_mime, a.content_id,
+                    COALESCE(c.extraction_source, ''), COALESCE(c.fulltext_extracted, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.id = ?1",
             params![article_id],
             |r| {
                 Ok((
@@ -954,6 +979,9 @@ fn fill_visible(
                         image_url: null_if_empty(r.get(3)?),
                         enclosure_url: null_if_empty(r.get(4)?),
                         enclosure_mime: null_if_empty(r.get(5)?),
+                        content_id: r.get(6)?,
+                        source: r.get(7)?,
+                        fulltext_extracted: r.get(8)?,
                     },
                 ))
             },
@@ -973,6 +1001,13 @@ fn fill_visible(
 /// 不允许拿 UPDATE 的 changes()（同值也计命中行）冒充变化；读取失败 `?` 上抛，
 /// 不得吞成「无变化」。行在调用时已被删除（拉取期间的删除竞态）→ Ok(false)：
 /// 没有可回填的对象，不是读取失败。
+///
+/// OPT-008B 第二阶段：正文回填按「逐字段空才补」合成目标内容，经 contents
+/// 身份归并（等价即复用——跨源同文共享；不把内容泄写进共享行的整值覆盖）。
+/// OPT-008B R3：当前指向**受保护提取行**（readability + 已提取）时不做 RSS
+/// 合成——就地修复异常 body（来源/标志保持 readability），防止历史「html 非空/
+/// body 缺失」行被降级成 rss 行而丢 fulltext_extracted（隔离回归见
+/// sync_extraction_tests::backfill_keeps_protected_readability_source）。
 // Note: 可渲染 HTML 的净化口径只有 sanitize()（写入口与读边界共用） — 见 .agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md
 pub fn backfill_article_content(
     conn: &Connection,
@@ -986,23 +1021,76 @@ pub fn backfill_article_content(
     let Some((base, before)) = fill_visible(conn, article_id)? else {
         return Ok(false);
     };
-    let safe_html = crate::sanitize::sanitize(content_html, base.as_deref());
+    let cur_html = before.content_html.clone().unwrap_or_default();
+    let cur_body = before.body_text.clone().unwrap_or_default();
+    /* R3（历史异常 Readability 保护）：当前指向的是受保护提取行（readability +
+    fulltext_extracted）时，回填不得合成 `(提取 HTML, RSS 纯文本)` 的 **rss 源**
+    新行——那会把提取标志丢掉、把受保护行降级成 RSS 摘要（常规提取会被防退化
+    拦截，仅「html 非空但 body 缺失/错配」的历史异常行可达）。语义与 RSS 刷新
+    保护一致：就地修复 body（html_to_text 同源重算，revision+1），来源与标志
+    保持 readability。 */
+    let protected =
+        before.source == super::contents::SOURCE_READABILITY && before.fulltext_extracted != 0;
+    if protected {
+        if let Some(cid) = before.content_id {
+            super::contents::repair_extracted_body_if_mismatch(conn, cid)?;
+        }
+    } else {
+        // 逐字段空才补（旧语义），再按合成内容归并到 contents。
+        let fill_html = cur_html.is_empty() && !content_html.trim().is_empty();
+        let fill_body = cur_body.is_empty() && !body_text.is_empty();
+        if (fill_html || fill_body)
+            && super::contents::content_non_empty(
+                Some(if fill_html { content_html } else { &cur_html }),
+                if fill_body { body_text } else { &cur_body },
+            )
+        {
+            let merged_html = if fill_html {
+                crate::sanitize::sanitize(content_html, base.as_deref())
+            } else {
+                cur_html.clone()
+            };
+            let input = super::contents::ContentInput {
+                content_html: Some(merged_html).filter(|h| !h.is_empty()),
+                body_text: if fill_body {
+                    body_text.to_string()
+                } else {
+                    cur_body.clone()
+                },
+                extraction_source: super::contents::SOURCE_RSS.to_string(),
+                fulltext_extracted: false,
+                url_norm: None,
+            };
+            /* R3（故障原子性）：ensure_content + 重指 + 旧行回收同 SAVEPOINT——
+            失败整体回滚，不留无引用新行。 */
+            super::contents::with_write_savepoint(conn, "contents_backfill_repoint", || {
+                let (content_id, _rev, _created) =
+                    super::contents::ensure_content(conn, &input, Some(article_id))?;
+                if Some(content_id) != before.content_id {
+                    conn.execute(
+                        "UPDATE articles SET content_id = ?1 WHERE id = ?2",
+                        params![content_id, article_id],
+                    )?;
+                    // 重指后旧行若无引用：回收（最后引用才回收；触发器只在条目删除时兜底）
+                    if let Some(old_id) = before.content_id {
+                        conn.execute(
+                            "DELETE FROM contents WHERE id = ?1
+                             AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1)",
+                            params![old_id],
+                        )?;
+                    }
+                }
+                Ok(())
+            })?;
+        }
+    }
     conn.execute(
         "UPDATE articles SET
-            content_html = CASE WHEN COALESCE(content_html, '') = '' THEN ?1 ELSE content_html END,
-            body_text = CASE WHEN body_text = '' THEN ?2 ELSE body_text END,
-            image_url = COALESCE(image_url, ?3),
-            enclosure_url = COALESCE(enclosure_url, ?4),
-            enclosure_mime = COALESCE(enclosure_mime, ?5)
-         WHERE id = ?6",
-        params![
-            safe_html,
-            body_text,
-            image_url,
-            enclosure_url,
-            enclosure_mime,
-            article_id
-        ],
+            image_url = COALESCE(image_url, ?1),
+            enclosure_url = COALESCE(enclosure_url, ?2),
+            enclosure_mime = COALESCE(enclosure_mime, ?3)
+         WHERE id = ?4",
+        params![image_url, enclosure_url, enclosure_mime, article_id],
     )?;
     // 复读比对（同一连接内行必然还在；读取失败按 R3 纪律上抛 Err）。
     let after = fill_visible(conn, article_id)?
@@ -1168,7 +1256,7 @@ mod r3_change_detection_tests {
         let aid = seed(&conn, "fill");
         let before: (Option<String>, String) = conn
             .query_row(
-                "SELECT content_html, body_text FROM articles WHERE id = ?1",
+                "SELECT c.content_html, COALESCE(c.body_text, '') FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
                 [aid],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -1188,7 +1276,7 @@ mod r3_change_detection_tests {
         assert!(first, "空行首次回填必须报变化");
         let after: (String, String, Option<String>) = conn
             .query_row(
-                "SELECT content_html, body_text, image_url FROM articles WHERE id = ?1",
+                "SELECT COALESCE(c.content_html, ''), COALESCE(c.body_text, ''), a.image_url FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
                 [aid],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -1221,7 +1309,7 @@ mod r3_change_detection_tests {
         assert!(!overwrite_try, "本地已有内容不被覆盖：不是变化");
         let kept: String = conn
             .query_row(
-                "SELECT content_html FROM articles WHERE id = ?1",
+                "SELECT COALESCE(c.content_html, '') FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
                 [aid],
                 |r| r.get(0),
             )

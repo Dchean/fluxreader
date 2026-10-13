@@ -51,6 +51,9 @@ fn row_serialization_matches_fixture() {
         content_html: Some("<p>body</p>".into()),
         translated_content: Some("<p>translated</p>".into()),
         fulltext_extracted: false,
+        // OPT-008B 第二阶段：正文身份/修订（前端失效依据）
+        content_id: Some(9),
+        content_revision: 3,
     };
 
     let feed_json = serde_json::to_value(&feed).expect("FeedRow 序列化");

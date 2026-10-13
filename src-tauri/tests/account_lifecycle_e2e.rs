@@ -281,7 +281,8 @@ fn cache_cleanup_ai_only_clears_ai_fields() {
 
     let (summary, translated, body): (Option<String>, Option<String>, String) = conn
         .query_row(
-            "SELECT ai_summary, translated_content, COALESCE(content_html, '') FROM articles WHERE id = ?1",
+            "SELECT a.ai_summary, a.translated_content, COALESCE(c.content_html, '')
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
             [aid],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )

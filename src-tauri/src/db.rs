@@ -24,6 +24,7 @@ fn null_if_empty(v: Option<String>) -> Option<String> {
 // 调用方无需改动）；延续「单体按领域拆分」的既有做法。
 
 mod articles;
+mod contents;
 mod feeds;
 mod folders;
 mod migrations;
@@ -33,15 +34,20 @@ mod sync_queue;
 mod url_norm;
 
 pub use articles::{
-    article_index, articles_without_cover, cleanup_cache, clear_article_cover_if_matches,
-    clear_dedup_tombstones, counts_snapshot, feed_counts, get_article, get_articles, list_articles,
-    list_read_target_ids_scoped, mark_all_read, mark_all_read_with_enqueue, purge_remote_data,
-    scope_counts, search_articles, set_article_ai_fields, set_read, set_read_bulk_with_enqueue,
-    set_read_with_enqueue, set_starred, set_starred_with_enqueue, upsert_article_with_feed,
-    upsert_article_with_feed_tracked, upsert_remote_article, ArticleListItem, ArticleQuery,
-    ArticleRow, ArticleUpsert, CountsSnapshot, FeedCounts, NewArticle, ReadWriteReceipt,
-    ScopeCounts, ScopeCountsDetail, ScopedCounts,
+    article_ai_commit_token, article_content_commit_token, article_index, articles_without_cover,
+    cleanup_cache, clear_article_cover_if_matches, clear_dedup_tombstones, counts_snapshot,
+    feed_counts, get_article, get_articles, list_articles, list_read_target_ids_scoped,
+    mark_all_read, mark_all_read_with_enqueue, purge_remote_data, replace_article_content_checked,
+    scope_counts, search_articles, set_article_ai_fields, set_article_ai_fields_checked, set_read,
+    set_read_bulk_with_enqueue, set_read_with_enqueue, set_starred, set_starred_with_enqueue,
+    upsert_article_with_feed, upsert_article_with_feed_tracked, upsert_remote_article,
+    AiCommitToken, ArticleListItem, ArticleQuery, ArticleRow, ArticleUpsert, ContentCommitToken,
+    CountsSnapshot, FeedCounts, NewArticle, ReadWriteReceipt, ScopeCounts, ScopeCountsDetail,
+    ScopedCounts,
 };
+/// OPT-008B 第二阶段：contents 单一正文所有权（常量/判空辅助供 db 各子模块与
+/// 命令层经 `crate::db::` 路径消费；写入路径经 `super::contents::` 直接调用）。
+pub use contents::{content_non_empty, SOURCE_READABILITY, SOURCE_RSS};
 pub use feeds::{
     add_feed_tombstone, clear_feed_tombstones, delete_feed, feed_remote_info, feed_tombstones,
     feed_url_tombstoned, feeds_all_ids, feeds_due_for_refresh, find_feed_by_url, insert_feed,

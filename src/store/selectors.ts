@@ -130,21 +130,27 @@ export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bo
   };
 }
 
-/** TASK-122：单张卡片「需要水合正文」的判定 —— 条目仍在 && bodyById 无记录。
+/** TASK-122：单张卡片「需要水合正文」的判定 —— 条目仍在 && （bodyById 无记录
+    或记录是**正文已失效清空的 cleared**）。
     记录存在即不需要水合：loading=在途（重复入队由记录状态拦下，替代原模块级
-    hydrationInFlight）、ready=已水合（含空正文终态）、cleared=AI 失效但正文
-    保留、missing/failed=终态（失败走内联重试 retryHydration 删记录重入队，
-    不自动重试）。useLazyHydrate 按 id 订阅本判定的布尔值：快照替换（reload /
-    缓存恢复）或 LRU 淘汰让条件重新成立时布尔翻转 → effect 重新入队，消除
-    「显示加载中但无请求在途」的死区（REQ-001）；预算淘汰（记录被删）→ 回
-    未请求态 → 自动重取（TASK-111 内存预算纪律的淘汰语义）。
+    hydrationInFlight）、ready=已水合（含空正文终态）、missing/failed=终态（失败
+    走内联重试 retryHydration 删记录重入队，不自动重试）；cleared 分两种形态：
+    AI 产物被清理（正文保留）→ 不需要重取（原语义）；**正文修订失效**
+    （OPT-008B：row 的 (contentId, revision) 变化，见 bodyCache.invalidateContentRevision
+    → content 被清空）→ 需要按新修订重取，否则懒水合卡片停在空正文、正文与
+    DB 真值脱离（本谓词与 reader.ts 的 cleared 重入队路径同一判定）。
+    useLazyHydrate 按 id 订阅本判定的布尔值：快照替换（reload / 缓存恢复）或
+    LRU 淘汰让条件重新成立时布尔翻转 → effect 重新入队，消除「显示加载中但
+    无请求在途」的死区（REQ-001）；预算淘汰（记录被删）→ 回未请求态 → 自动
+    重取（TASK-111 内存预算纪律的淘汰语义）。
     重复入队由 hydrateArticleContent 的记录守卫兜底，这里不观察请求本身。 */
 export function entryNeedsHydration(
   s: Pick<AppState, 'entries' | 'bodyCacheNonce'>,
   id: string,
 ): boolean {
   void s.bodyCacheNonce; // 订阅依赖：记录写入 bump nonce，useLazyHydrate 的订阅才能重算
-  if (getBodyEntry(id)) return false;
+  const rec = getBodyEntry(id);
+  if (rec) return rec.state === 'cleared' && rec.content === '';
   return s.entries.some((a) => a.id === id);
 }
 

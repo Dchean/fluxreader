@@ -290,8 +290,8 @@ struct ArticleSnapshot {
 
 fn article_snapshot(conn: &rusqlite::Connection, id: i64) -> ArticleSnapshot {
     conn.query_row(
-        "SELECT image_url, feed_id, url, title, source, is_read, is_starred, content_html
-         FROM articles WHERE id = ?1",
+        "SELECT a.image_url, a.feed_id, a.url, a.title, a.source, a.is_read, a.is_starred, c.content_html
+         FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
         [id],
         |row| {
             Ok(ArticleSnapshot {

@@ -84,6 +84,9 @@ export interface ArticleListItemRow {
   content_html?: string | null;
   translated_content?: string | null;
   fulltext_extracted?: boolean;
+  /** OPT-008B 第二阶段：内容身份 + 修订（前端失效依据；两种模式都返回） */
+  content_id?: number | null;
+  content_revision?: number;
 }
 
 export interface ArticleDetailRow extends ArticleListItemRow {
@@ -119,11 +122,17 @@ export interface PendingConnection {
 }
 
 /** extract_fulltext 的结果（TASK-076 / P2-10 后半）：降级不再静默。
- * degraded=true 时 html 是保留的原文，reason 说明为何没采用提取结果。 */
+ * degraded=true 时 html 是保留的原文，reason 说明为何没采用提取结果。
+ * OPT-008B R3（wire 增字段）：提交成功时携带实际内容身份/修订（Rust 侧
+ * camelCase 序列化为 contentId/contentRevision）——前端落 bodyCache 记录，
+ * 下一次 reload 不把刚成功提取的正文按「修订变化」清空重取。旧后端缺省/
+ * 降级时为 undefined（前端保持记录现值，行为与旧版一致）。 */
 export interface ExtractFulltextResult {
   html: string;
   degraded: boolean;
   reason: string | null;
+  contentId?: number | null;
+  contentRevision?: number;
 }
 
 export interface SyncReport {
@@ -776,5 +785,9 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
        真值，未水合卡片的即时显示源（过渡兼容位，见 ArticleEntry 注释）。 */
     translatedContent: row.translated_content ?? '',
     fulltextExtracted: row.fulltext_extracted ?? false,
+    /* OPT-008B 第二阶段：内容身份/修订进视图行——前端失效判定依据
+       （列表快照合并与时序水合守卫消费，见 internals/bodyCache）。 */
+    contentId: row.content_id ?? null,
+    contentRevision: row.content_revision ?? 0,
   };
 }

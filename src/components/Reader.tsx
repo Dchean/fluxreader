@@ -123,6 +123,22 @@ export function Reader() {
      - 已经在途的请求不取消（政策：已发送的内容不可撤销，不声称可撤回）；
        生成中标记（summarizingIds/translating）防重复发起。 */
   const hydrated = (body.state === 'ready' || body.state === 'cleared') && body.content !== '';
+
+  /* OPT-008B R3：正文修订失效的 Reader 自愈——条目引用的 contents 已更新时
+     bodyCache.invalidateContentRevision 把记录清空回 cleared。重水合不能依赖
+     Timeline 卡片的 useLazyHydrate（虚拟化会把卡片移出挂载窗；卡片不在树上就
+     没有任何人入队，打开中的文章会停在空正文直到用户点击/滚动）。这里对
+     activeArticleId 的「cleared 且正文空」观察调幂等 ensureArticleContent：
+     loading 态不再满足条件（不重复 IPC），在途旧详情响应由记录 stamp 丢弃，
+     新修订的响应落地后重新渲染。AI 清理型 cleared（正文保留）不受影响。 */
+  const activeArticleKey = art?.id;
+  useEffect(() => {
+    if (!activeArticleKey) return;
+    if (body.state !== 'cleared' || body.content !== '') return;
+    useAppStore.getState().ensureArticleContent(activeArticleKey);
+    // Note: exhaustive-deps — 只随「目标文章 × 失效条件」执行；body 快照其余字段
+    // 变化（AI 增量等）不该重复触发（重复入队由记录状态守卫兜底）。
+  }, [activeArticleKey, body.state, body.content]);
   useEffect(() => {
     if (!art || !hydrated) return;
     const st = useAppStore.getState();

@@ -19,14 +19,20 @@
                                 └──────▶ (删记录→未请求，可重新入队) ◀──────┘
 
      ready ──reconcile 观察到「DB 已无 AI 产物」──▶ cleared
-     cleared ──用户重新生成摘要/译文──▶ ready（唯一解除路径）
+     ready ──(contentId, revision) 变化（含共享兄弟）──▶ cleared（正文清空）
+     cleared ──重新生成摘要/译文 或 重新水合新修订──▶ ready（按形态的解除路径）
 
    语义表（呈现与水合判定消费方见 selectors.entryNeedsHydration /
    selectArticleBody / Timeline 卡片 / Reader）：
    - loading  : 请求在途（等价旧 hydrationInFlight 的可见化），不重复入队；
    - ready    : 已按 DB 真值水合（content 为空串 = 后端无正文，同样是终态）；
-   - cleared  : AI 产物（摘要/译文）被显式失效——正文保留（清理 AI 缓存不动正文），
-                不再自动重取；AI 区块呈现「已清空」，重新生成后回 ready；
+   - cleared  : 显式失效态，两种形态：①AI 产物（摘要/译文）被清理——**正文保留**
+                （清理 AI 缓存不动正文），不再自动重取，AI 区块呈现「已清空」，
+                重新生成后回 ready；②正文修订失效（invalidateContentRevision：
+                条目引用的 contents 已被替换/共享兄弟更新）——**正文清空**，
+                需按新修订重取（reader.ts 与 entryNeedsHydration 都按
+                「cleared 且 content 为空」判定重入队），在途旧响应被 bump 的
+                显式失效计数丢弃；
    - missing  : 响应缺行 = 文章不存在/已被删除，呈现「文章不存在」（重试幂等）；
    - failed   : 请求失败，呈现错误 + 内联重试（不自动重试，与旧 hydrationErrors 同）。
 
@@ -57,6 +63,10 @@
    2. contentRevision：显式写入/失效计数（清理失效、再次生成各 bump）。在途
       水合响应携带发起时的 revision 快（stamp），落地时与现值比对，不等即丢弃
       ——失效后迟到的旧响应不得覆盖新状态（含对 cleared 的复活企图）。
+      R3 边界守卫：记录同时携带条目身份锚（feedId|title，水合时写入）；
+      后端快照里同 id 条目“消失后重新出现”且 (contentId, contentRev) 巧合相等
+      时，锚不符（已是另一条目）同样失效——正文删除重建复用 id 的缓存边界
+      （invalidateContentRevision 第 2 判据）。
    3. 快照替换（六个 merge 调用点）不触碰本缓存的正文——正文随实体而非视图行
       存活，刷新/切视图不丢已加载正文（旧 mergeSnapshotEntries 继承机制对
       「刷新不丢正文 / 水合死区不复发」的保护意图由此承接）。
@@ -97,6 +107,16 @@ export interface BodyEntry {
   fulltextExtracted: boolean;
   /** 显式失效计数：清理失效 / 再次生成各 bump；在途响应以 stamp 比对丢弃 */
   contentRevision: number;
+  /** OPT-008B 第二阶段：记录对应的 DB 内容身份与修订（JOIN contents 带出）。
+      DB 修订变化 = 正文真值已更新（含共享兄弟变更）——列表快照合并 / 水合响应
+      以 (contentId, contentRev) 判定失效，snippet 未变也不留旧正文。 */
+  contentId: number | null;
+  contentRev: number;
+  /** OPT-008B R3：条目身份锚（`feedId|title`，水合响应落地时记录）。
+      快照里同 id 条目“消失后重新出现”且 (contentId, contentRev) 巧合相等时，
+      锚不符 = 后端行已是另一条目（文章删除重建复用了 rowid）→ 失效丢弃旧正文。
+      publishedAt 不进锚：列表行是原文字符串、条目是解析后的值，表示形态不一致。 */
+  entryAnchor: string | null;
   /** AI 产物最近一次真实写入时刻（ms）。对齐失效的新鲜度判据：晚于行抓取
       时刻的写入不回退（详见模块头注「显式失效规则 1」） */
   aiWrittenAt: number;
@@ -177,21 +197,29 @@ function emptyRecord(state: BodyState): BodyEntry {
     aiSummary: '',
     fulltextExtracted: false,
     contentRevision: 0,
+    contentId: null,
+    contentRev: 0,
+    entryAnchor: null,
     aiWrittenAt: 0,
     message: '',
   };
 }
 
 /** 水合入队：置 loading 态并返回失效戳（发起时的 contentRevision）。
-    仅应作用于无记录的 id（调用方守卫：已有记录 = 已水合/在途/终态，不入队；
-    重试路径先 dropBodyEntry）。loading 记录 revision 恒等于为其签发的 stamp
-    （对齐与失效都不触碰 loading），故不存在「响应被丢后卡死 loading」的死区。 */
+    仅应作用于无记录或 **cleared**（正文修订失效待重取）的 id（调用方守卫：
+    loading/ready/missing/failed = 终态或在途，不入队；失败重试走 dropBodyEntry）。
+    R3 修复：cleared → loading 时**保留显式失效计数**（不回零）——失效后的
+    重入队若把计数归零，早于失效发出的在途旧响应（stamp=0）会被重新匹配而
+    落地，正是「修订失效被旧正文复活」的窗口；保留计数使旧戳仍被丢弃。
+    loading 记录 revision 恒等于为其签发的 stamp（对齐与失效都不触碰 loading），
+    故不存在「响应被丢后卡死 loading」的死区。 */
 export function markBodyLoading(id: string): number {
   const existing = bodyById.get(id);
-  if (existing) return existing.contentRevision;
-  bodyById.set(id, { ...emptyRecord('loading') });
+  if (existing && existing.state !== 'cleared') return existing.contentRevision;
+  const revision = existing?.contentRevision ?? 0;
+  bodyById.set(id, { ...emptyRecord('loading'), contentRevision: revision });
   touch();
-  return 0;
+  return revision;
 }
 
 /** 显式 AI 写入（生成落账 / 失效 / 重试清半截）的公共段：bump revision +
@@ -199,6 +227,13 @@ export function markBodyLoading(id: string): number {
     失效 → cleared）。 */
 function withExplicitAiWrite(rec: BodyEntry, state: BodyState): BodyEntry {
   return { ...rec, state, contentRevision: rec.contentRevision + 1, aiWrittenAt: Date.now() };
+}
+
+/** OPT-008B R3：由后端行（详情/批量水合）计算条目身份锚。行缺 feed_id/title
+    （旧 mock）→ null（不参与锚比较，保持既有行为）。 */
+function anchorOfRow(row: { feed_id?: number | null; title?: string | null }): string | null {
+  if (row.feed_id == null || row.title == null) return null;
+  return `${row.feed_id}|${row.title}`;
 }
 
 /** 水合响应落地（单行命中）：写 ready 记录。
@@ -209,7 +244,7 @@ function withExplicitAiWrite(rec: BodyEntry, state: BodyState): BodyEntry {
     - 无记录（LRU 淘汰后迟到落地等）→ 以空记录为底新建，stamp=0 恒匹配。 */
 export function applyBodyRow(
   id: string,
-  row: { content_html?: string | null; translated_content?: string | null; ai_summary?: string | null; fulltext_extracted?: boolean | null },
+  row: { content_html?: string | null; translated_content?: string | null; ai_summary?: string | null; fulltext_extracted?: boolean | null; content_id?: number | null; content_revision?: number | null; feed_id?: number | null; title?: string | null },
   stamp: number,
   aiFallback: { translatedContent: string; aiSummary: string },
 ): void {
@@ -225,10 +260,52 @@ export function applyBodyRow(
     aiSummary: row.ai_summary ?? aiFallback.aiSummary,
     fulltextExtracted: row.fulltext_extracted ?? base.fulltextExtracted,
     contentRevision: stamp,
+    /* OPT-008B 第二阶段：记录 DB 内容身份/修订——行携带即刷新（本响应是新鲜
+       详情）；行缺省（旧 mock）保持现值。 */
+    contentId: row.content_id ?? base.contentId,
+    contentRev: row.content_revision ?? base.contentRev,
+    entryAnchor: anchorOfRow(row) ?? base.entryAnchor,
     aiWrittenAt: Date.now(),
     message: '',
   });
   touch();
+}
+
+/** OPT-008B 第二阶段：正文真值修订变化（列表快照合并发现条目引用的 contents
+    已更新——snippet 未变也失效；共享兄弟内容变更经同一路径传播）。
+    失效判据（任一成立即失效）：
+    1. 记录里 DB 身份/修订与给定不符；
+    2. anchor 非空且记录已有锚时锚不符——同 id 条目“消失后重新出现”已是另一
+       条目（文章删除重建复用 rowid）而 (contentId, contentRev) 巧合相等的
+       边界（R3；正常重入窗口的同一锚比较相等，不误失效）。
+    失效 = 清掉正文/提取态并回 cleared（保留 AI 字段：产物是条目级，正文重取后
+    由用户/自动流程再生成），bump 显式失效计数使在途旧详情响应丢弃。
+    无记录（未水合）→ 无需处理（下次水合即新内容）。 */
+export function invalidateContentRevision(
+  id: string,
+  contentId: number | null,
+  revision: number,
+  anchor: string | null = null,
+): boolean {
+  const current = bodyById.get(id);
+  if (!current) return false;
+  const samePair = current.contentId === contentId && current.contentRev === revision;
+  const anchorCompatible =
+    anchor === null || current.entryAnchor === null || current.entryAnchor === anchor;
+  if (samePair && anchorCompatible) return false;
+  bodyById.set(id, {
+    ...current,
+    state: 'cleared',
+    content: '',
+    rawContent: '',
+    fulltextExtracted: false,
+    contentId,
+    contentRev: revision,
+    entryAnchor: anchor ?? current.entryAnchor,
+    contentRevision: current.contentRevision + 1,
+  });
+  touch();
+  return true;
 }
 
 /** 水合响应缺行（含空 rows）：文章不存在终态。stamp 比对同 applyBodyRow。 */
@@ -255,11 +332,25 @@ export function dropBodyEntry(id: string): void {
 
 /** 全文提取成功：正文被 Readability 结果覆盖（rawContent 保留 RSS 原文）。
     AI 字段不动；不 bump revision（非显式失效，同一实体的正文内容更新）。
-    无记录 = 未水合，提取前提不成立（调用方守卫），此处防御性忽略。 */
-export function applyExtractedFulltext(id: string, html: string): void {
+    无记录 = 未水合，提取前提不成立（调用方守卫），此处防御性忽略。
+    OPT-008B R3：identity = 提取响应携带的提交后 (contentId, contentRev)
+    ——落记录使下一次 reload 的修订比较**相等**（DB 行已是该修订），刚成功
+    提取的正文不会被按“修订变化”清空重取；缺省（旧后端/降级）时保持现值。 */
+export function applyExtractedFulltext(
+  id: string,
+  html: string,
+  identity?: { contentId: number | null; contentRev: number },
+): void {
   const current = bodyById.get(id);
   if (!current) return;
-  bodyById.set(id, { ...current, content: html, fulltextExtracted: true, state: 'ready' });
+  bodyById.set(id, {
+    ...current,
+    content: html,
+    fulltextExtracted: true,
+    state: 'ready',
+    contentId: identity ? identity.contentId : current.contentId,
+    contentRev: identity ? identity.contentRev : current.contentRev,
+  });
   touch();
 }
 

@@ -112,6 +112,11 @@ export interface ArticleEntry {
   aiSummary: string;          // 摘要（过渡兼容位：同上）
   /** 正文已被 Readability 全文覆盖（手动按钮/设置自动模式共用状态源，DB 持久化；mock 数据可缺省） */
   fulltextExtracted?: boolean;
+  /** OPT-008B 第二阶段：内容身份 + 修订（单一正文所有权）——
+      列表/详情行由后端 JOIN contents 带出；修订变化 = 该条目正文已更新
+      （snippet 未变也失效，共享兄弟内容变更同理）。 */
+  contentId?: number | null;
+  contentRevision?: number;
 
   /* ---- 布局专属扩展（可空，按布局使用） ---- */
   durationSec?: number;   // 播客：时长秒数

@@ -87,12 +87,17 @@ async fn ai_summarize_translate_and_cache_pipeline() {
     let tmp = common::unique_db_path("ai_test");
     let _ = std::fs::remove_file(&tmp);
     let conn = Connection::open(&tmp).unwrap();
-    // 建最小 schema（只建这次测试需要的表）
+    // 建最小 schema（只建这次测试需要的表；OPT-008B 第二阶段：正文真值在
+    // contents，条目经 content_id 引用）
     conn.execute_batch(
-        "CREATE TABLE articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body_text TEXT,
-            content_html TEXT, ai_summary TEXT, translated_content TEXT);
-         INSERT INTO articles (id, title, body_text, content_html)
-             VALUES (1, '测试文章', '这是正文内容，用于摘要测试。', '<p>Hello World</p>');",
+        "CREATE TABLE contents (id INTEGER PRIMARY KEY, identity TEXT NOT NULL UNIQUE,
+            content_html TEXT, body_text TEXT NOT NULL DEFAULT '', extraction_source TEXT NOT NULL DEFAULT 'rss',
+            fulltext_extracted INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1);
+         CREATE TABLE articles (id INTEGER PRIMARY KEY, title TEXT NOT NULL, content_id INTEGER,
+            ai_summary TEXT, translated_content TEXT, ai_epoch INTEGER NOT NULL DEFAULT 0);
+         INSERT INTO contents (id, identity, content_html, body_text)
+             VALUES (1, 'h|ai-e2e', '<p>Hello World</p>', '这是正文内容，用于摘要测试。');
+         INSERT INTO articles (id, title, content_id) VALUES (1, '测试文章', 1);",
     )
     .unwrap();
 

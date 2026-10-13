@@ -131,10 +131,11 @@ async fn title_of(db: &Arc<Mutex<rusqlite::Connection>>, aid: i64) -> String {
 }
 
 /// 正文 HTML（R3 实际数据前后核对用；NULL 归一为 ""）。
+/// OPT-008B 第二阶段：正文真值在 contents（JOIN 读取）。
 async fn content_html_of(db: &Arc<Mutex<rusqlite::Connection>>, aid: i64) -> String {
     let conn = db.lock().await;
     conn.query_row(
-        "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
+        "SELECT COALESCE(c.content_html, '') FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
         [aid],
         |r| r.get(0),
     )

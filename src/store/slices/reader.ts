@@ -76,6 +76,14 @@ function shouldExtractFulltext(html: string): boolean {
   return truncationMarks.test(text);
 }
 
+/** OPT-008B R3：提取成功响应携带的提交后 (contentId, contentRevision)——
+    applyExtractedFulltext 落记录使下一次 reload 的修订比较相等，刚提取的正文
+    不被清空重取。旧后端/降级响应缺省时返回 undefined（保持记录现值）。 */
+function extractIdentity(res: { contentId?: number | null; contentRevision?: number }): { contentId: number | null; contentRev: number } | undefined {
+  if (typeof res.contentRevision !== 'number' || !Number.isFinite(res.contentRevision)) return undefined;
+  return { contentId: typeof res.contentId === 'number' ? res.contentId : null, contentRev: res.contentRevision };
+}
+
 export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (set, get) => ({
   activeArticleId: null,
   isShowingTranslatedProse: false,
@@ -215,7 +223,9 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
                 );
                 return;
               }
-              applyExtractedFulltext(id, res.html);
+              /* R3：以响应携带的提交后身份落记录——下一次 reload 修订比较相等，
+                 刚提取的正文不被清空重取（active Reader / 卡片 / AI 输入同源）。 */
+              applyExtractedFulltext(id, res.html, extractIdentity(res));
               set({ showFulltext: true });
             })
             .catch((e: unknown) => {
@@ -232,11 +242,16 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       });
       return;
     }
-    /* 列表卡片（社交/通知）水合：bodyById 已有记录（含空正文终态 loading/ready/
-       cleared/missing/failed）则短路，否则并入批量队列。不能只判正文有无——
-       content_html 为 NULL 的条目水合后 content 仍为空串，仅按内容判定会让它
-       每次挂载都重新入队（重复 IPC 洪峰 + 永挂「加载正文…」）。 */
-    if (getBodyEntry(id)) return;
+    /* 列表卡片（社交/通知）水合：bodyById 已有记录且**不是 cleared** 则短路
+       （loading=在途、ready/missing/failed=终态），否则并入批量队列。不能只判
+       正文有无——content_html 为 NULL 的条目水合后 content 仍为空串，仅按内容
+       判定会让它每次挂载都重新入队（重复 IPC 洪峰 + 永挂「加载正文…」）。
+       OPT-008B 第二阶段：cleared 记录 = 正文修订失效（contents 已更新）——必须
+       重取新正文，不得停在空正文。R3：不在这里删档，由 hydrateArticleContent
+       的 markBodyLoading 把 cleared→loading 并**保留失效计数**（旧戳在途响应
+       仍被丢弃，见 bodyCache.markBodyLoading）。 */
+    const existing = getBodyEntry(id);
+    if (existing && existing.state !== 'cleared') return;
     enqueueHydration(id);
   },
 
@@ -264,10 +279,13 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         记录）已保证同 id 同时至多一个请求在途。 */
   hydrateArticleContent: (ids) => {
     if (get().dataMode !== 'tauri') return;
-    /* 过滤出「仍存在且无记录」的 id（幂等 + 去重）：loading=在途、
-       ready/cleared/missing/failed=终态，都不入队（TASK-122 判定改从 bodyById） */
+    /* 过滤出「仍存在且无记录/需重取」的 id（幂等 + 去重）：loading=在途、
+       ready/missing/failed=终态不入队；OPT-008B 第二阶段：cleared（正文修订
+       失效）照常入队——按新修订重取，不停在空正文。R3：不删档重取（markBodyLoading
+       把 cleared→loading 并保留失效计数，失效前发出的旧戳响应落地时仍被丢弃）。 */
     const pending = ids.filter((id) => {
-      if (getBodyEntry(id)) return false;
+      const rec = getBodyEntry(id);
+      if (rec && rec.state !== 'cleared') return false;
       return get().entries.some((e) => e.id === id);
     });
     if (pending.length === 0) return;
@@ -382,7 +400,8 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
           showToast(`未采用全文提取：${res.reason ?? '提取结果不可用'}`);
           return;
         }
-        applyExtractedFulltext(id, res.html);
+        /* R3：手动提取同样以响应身份落记录（见 ensureArticleContent 分支注释）。 */
+        applyExtractedFulltext(id, res.html, extractIdentity(res));
         set({ showFulltext: true });
         showToast('全文提取完成');
       })

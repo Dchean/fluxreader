@@ -21,8 +21,12 @@ pub struct ArticleRow {
     pub published_at: Option<String>,
     pub is_read: bool,
     pub is_starred: bool,
-    /// 正文是否已被全文提取覆盖（手动按钮/自动模式共用状态源）
+    /// 正文是否已被全文提取覆盖（手动按钮/自动模式共用状态源；来自 contents）
     pub fulltext_extracted: bool,
+    /// OPT-008B 第二阶段：单一正文所有权——条目引用的 contents 行与其修订号。
+    /// 前端以 (content_id, content_revision) 判定正文失效（snippet 未变也失效）。
+    pub content_id: Option<i64>,
+    pub content_revision: i64,
 }
 
 /// 列表页条目（轻量：默认不含正文 HTML，snippet 截断；with_content 时附带正文，
@@ -48,6 +52,9 @@ pub struct ArticleListItem {
     pub content_html: Option<String>,
     pub translated_content: Option<String>,
     pub fulltext_extracted: bool,
+    /// OPT-008B 第二阶段：正文身份/修订（前端失效依据）
+    pub content_id: Option<i64>,
+    pub content_revision: i64,
 }
 
 /* ============================================================
@@ -72,7 +79,12 @@ pub struct NewArticle {
     pub source: String,
 }
 
-const ARTICLE_COLS: &str = "id, feed_id, url, title, author, summary, content_html, image_url, enclosure_url, enclosure_mime, duration_sec, ai_summary, translated_content, source, published_at, is_read, is_starred, fulltext_extracted";
+/// 详情/水合查询列（OPT-008B 第二阶段：正文只从 contents 取；条目级字段从 a 取）。
+/// 尾部两列为 content_id/content_revision（前端修订失效依据）。
+const ARTICLE_COLS: &str = "a.id, a.feed_id, a.url, a.title, a.author, a.summary, c.content_html, a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec, a.ai_summary, a.translated_content, a.source, a.published_at, a.is_read, a.is_starred, COALESCE(c.fulltext_extracted, 0), a.content_id, COALESCE(c.revision, 0)";
+
+/// 详情/水合查询的 FROM（单一正文所有权 JOIN）。
+const ARTICLE_FROM: &str = " FROM articles a LEFT JOIN contents c ON c.id = a.content_id";
 
 fn article_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleRow> {
     Ok(ArticleRow {
@@ -94,11 +106,14 @@ fn article_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleRow> {
         is_read: r.get::<_, i64>(15)? != 0,
         is_starred: r.get::<_, i64>(16)? != 0,
         fulltext_extracted: r.get::<_, i64>(17)? != 0,
+        content_id: r.get(18)?,
+        content_revision: r.get(19)?,
     })
 }
 
 fn article_list_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleListItem> {
-    // 列顺序依赖 list_articles 的 SELECT；当 with_content=false 时尾部四列为 NULL/0。
+    // 列顺序依赖 list_articles 的 SELECT；当 with_content=false 时中段四列为 NULL/0，
+    // 尾部两列（content_id/content_revision）两种模式都返回。
     Ok(ArticleListItem {
         id: r.get(0)?,
         feed_id: r.get(1)?,
@@ -118,6 +133,8 @@ fn article_list_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleListItem>
         content_html: r.get(15)?,
         translated_content: r.get(16)?,
         fulltext_extracted: r.get::<_, i64>(17)? != 0,
+        content_id: r.get(18)?,
+        content_revision: r.get(19)?,
     })
 }
 
@@ -281,19 +298,19 @@ fn dedup_scope_of(q: &ArticleQuery) -> DedupScope<'_> {
 /// 测试可显式控制）。
 fn list_articles_sql(q: &ArticleQuery, dedup: bool) -> (String, Vec<rusqlite::types::Value>) {
     // 正文列只在 with_content 时 SELECT（社交/通知布局需要），其余布局保持轻量查询。
-    // 尾部四列顺序与 article_list_item 的索引 14..17 严格对应。
+    // 尾部两列（content_id/content_revision）两种模式都返回——前端修订失效依据。
     let content_cols = if q.with_content {
-        "a.url, a.content_html, a.translated_content, a.fulltext_extracted"
+        "a.url, c.content_html, a.translated_content, COALESCE(c.fulltext_extracted, 0)"
     } else {
         "NULL, NULL, NULL, 0"
     };
     let mut sql = format!(
         "SELECT a.id, a.feed_id, a.title, a.author,
-                COALESCE(NULLIF(a.summary, ''), substr(a.body_text, 1, 280)) AS snippet,
+                COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
                 a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
-                {content_cols}
-         FROM articles a",
+                {content_cols}, a.content_id, COALESCE(c.revision, 0)
+         FROM articles a LEFT JOIN contents c ON c.id = a.content_id",
     );
     // 值全部走绑定参数（占位符序号即绑定顺序），条件文本只拼固定字符串
     let (mut where_clauses, mut params) = article_where(q, dedup);
@@ -501,7 +518,7 @@ fn sanitize_renderable_fields(
 pub fn get_article(conn: &Connection, id: i64) -> AppResult<Option<ArticleRow>> {
     let mut row = conn
         .query_row(
-            &format!("SELECT {ARTICLE_COLS} FROM articles WHERE id = ?1"),
+            &format!("SELECT {ARTICLE_COLS}{ARTICLE_FROM} WHERE a.id = ?1"),
             params![id],
             article_row,
         )
@@ -524,7 +541,7 @@ pub fn get_articles(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ArticleRow>
         return Ok(Vec::new());
     }
     let placeholders = vec!["?"; ids.len()].join(",");
-    let sql = format!("SELECT {ARTICLE_COLS} FROM articles WHERE id IN ({placeholders})");
+    let sql = format!("SELECT {ARTICLE_COLS}{ARTICLE_FROM} WHERE a.id IN ({placeholders})");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), article_row)?;
     let mut articles = rows.collect::<Result<Vec<_>, _>>()?;
@@ -574,16 +591,21 @@ pub fn search_articles(
 
     // 每个词一组 (title/body/summary/ai_summary/translated LIKE)，词间 AND。
     // 占位符逐个编号（?N 是编号引用，跨词组复用会错位），ESCAPE 声明 SQLite 的
-    // LIKE 通配符转义字符 '\'。同一组条件既用于外部匹配（别名 a），也用于
-    // 显示聚合的内层匹配集（别名 b）——见下方 R1 搜索去重说明。
-    let term_conditions = |alias: &str, start_idx: usize| -> (Vec<String>, usize) {
+    // LIKE 通配符转义字符 '\'。同一组条件既用于外部匹配（别名 a + 正文别名 c），
+    // 也用于显示聚合的内层匹配集（别名 b + 正文别名 bc）——见下方 R1 搜索去重说明。
+    // OPT-008B 第二阶段：正文纯文本来自 contents（单一正文所有权）。
+    let term_conditions = |alias: &str,
+                           content_alias: &str,
+                           start_idx: usize|
+     -> (Vec<String>, usize) {
         let mut parts = Vec::with_capacity(terms.len());
         let mut idx = start_idx;
         for _ in terms.iter() {
             let b = idx;
             parts.push(format!(
-                "({a}.title LIKE ?{b} ESCAPE '\\' OR {a}.body_text LIKE ?{c} ESCAPE '\\' OR COALESCE({a}.summary,'') LIKE ?{d} ESCAPE '\\' OR COALESCE({a}.ai_summary,'') LIKE ?{e} ESCAPE '\\' OR COALESCE({a}.translated_content,'') LIKE ?{f} ESCAPE '\\')",
+                "({a}.title LIKE ?{b} ESCAPE '\\' OR {ac}.body_text LIKE ?{c} ESCAPE '\\' OR COALESCE({a}.summary,'') LIKE ?{d} ESCAPE '\\' OR COALESCE({a}.ai_summary,'') LIKE ?{e} ESCAPE '\\' OR COALESCE({a}.translated_content,'') LIKE ?{f} ESCAPE '\\')",
                 a = alias,
+                ac = content_alias,
                 b = b,
                 c = b + 1,
                 d = b + 2,
@@ -594,7 +616,7 @@ pub fn search_articles(
         }
         (parts, idx)
     };
-    let (where_parts, next_idx) = term_conditions("a", 1);
+    let (where_parts, next_idx) = term_conditions("a", "c", 1);
     let mut like_args: Vec<String> = Vec::with_capacity(terms.len() * 5);
     for t in terms.iter() {
         let pat = format!("%{t}%");
@@ -613,7 +635,7 @@ pub fn search_articles(
     隐藏，搜索漏匹配。命中的代表可在列表 scope 锚定（实测由回归锁定），
     不做「关闭搜索去重」也不做「limit 后数组过滤」。 */
     let (dedup_sql, mut params): (String, Vec<rusqlite::types::Value>) = if smart_dedup_on(conn) {
-        let (inner_parts, _) = term_conditions("b", next_idx);
+        let (inner_parts, _) = term_conditions("b", "bc", next_idx);
         // 内层参数与外部同值同序，追加一遍（词 ×5）
         let mut extra: Vec<rusqlite::types::Value> = Vec::with_capacity(terms.len() * 5);
         for t in terms.iter() {
@@ -624,7 +646,7 @@ pub fn search_articles(
         }
         (
             format!(
-                " AND NOT EXISTS (SELECT 1 FROM articles b \
+                " AND NOT EXISTS (SELECT 1 FROM articles b LEFT JOIN contents bc ON bc.id = b.content_id \
                  WHERE b.url_norm = a.url_norm AND b.id < a.id AND {})",
                 inner_parts.join(" AND ")
             ),
@@ -636,11 +658,11 @@ pub fn search_articles(
     let limit_idx = like_args.len() + params.len() + 1;
     let sql = format!(
         "SELECT a.id, a.feed_id, a.title, a.author,
-                COALESCE(NULLIF(a.summary, ''), substr(a.body_text, 1, 280)) AS snippet,
+                COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
                 a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
-                NULL, NULL, NULL, 0
-         FROM articles a
+                NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0)
+         FROM articles a LEFT JOIN contents c ON c.id = a.content_id
          WHERE {}{dedup_sql}
          ORDER BY a.published_at DESC
          LIMIT ?{limit_idx}",
@@ -776,15 +798,18 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
             [],
         )?;
     } else if scope == "ai" {
+        // OPT-008B 第二阶段：清理按**条目行**生效（原年龄范围不变）——共享 contents
+        // 的兄弟条目不受影响（不误清年轻兄弟）；被清条目 ai_epoch+1，使网络在途的
+        // 迟到 AI 提交被守卫拒绝（不复活已清产物）。正文保留（重新打开可再生成）。
         ai_cleared = tx.execute(
             &format!(
-                "UPDATE articles SET ai_summary = NULL, translated_content = NULL
+                "UPDATE articles SET ai_summary = NULL, translated_content = NULL, ai_epoch = ai_epoch + 1
                  WHERE (ai_summary IS NOT NULL OR translated_content IS NOT NULL)
                    AND datetime(published_at) < {cutoff}"
             ),
             [],
         )?;
-        // FTS 触发器同步（UPDATE 触发 articles_au 已处理）
+        // FTS 由 trg_articles_fts_au（UPDATE OF ai_summary/translated_content）同步
     }
     tx.commit()?;
     Ok((deleted, ai_cleared))
@@ -844,15 +869,18 @@ struct VisibleFields {
     enclosure_mime: Option<String>,
     duration_sec: Option<i64>,
     published_at: Option<String>,
+    /// OPT-008B 第二阶段：正文身份（重指/分叉在内容变化判定内，不只看字节相等）
+    content_id: Option<i64>,
 }
 
 /// 读既有行的可见字段快照；读取失败透传 Err（不得吞成「无变化」）。
 /// 文本字段经 `null_if_empty` 归一（空串 ≡ NULL，见 db.rs）。
+/// OPT-008B 第二阶段：正文两列从 contents JOIN 读取（单一正文所有权）。
 fn visible_fields(conn: &Connection, id: i64) -> AppResult<VisibleFields> {
     let f = conn.query_row(
-        "SELECT url, title, author, summary, content_html, body_text, image_url,
-                enclosure_url, enclosure_mime, duration_sec, published_at
-         FROM articles WHERE id = ?1",
+        "SELECT a.url, a.title, a.author, a.summary, c.content_html, c.body_text, a.image_url,
+                a.enclosure_url, a.enclosure_mime, a.duration_sec, a.published_at, a.content_id
+         FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
         params![id],
         |r| {
             Ok(VisibleFields {
@@ -867,6 +895,7 @@ fn visible_fields(conn: &Connection, id: i64) -> AppResult<VisibleFields> {
                 enclosure_mime: null_if_empty(r.get(8)?),
                 duration_sec: r.get(9)?,
                 published_at: null_if_empty(r.get(10)?),
+                content_id: r.get(11)?,
             })
         },
     )?;
@@ -889,7 +918,9 @@ pub fn upsert_article_with_feed_tracked(
     let _ = dedup;
     let existing: Option<(i64, bool)> = conn
         .query_row(
-            "SELECT id, fulltext_extracted FROM articles WHERE feed_id = ?1 AND guid = ?2",
+            "SELECT a.id, COALESCE(c.fulltext_extracted, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.feed_id = ?1 AND a.guid = ?2",
             params![feed_id, a.guid],
             |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
         )
@@ -912,7 +943,9 @@ pub fn upsert_article_with_feed_tracked(
         // 避免「切换本地抓取后数量翻倍」与「状态被抓取覆盖回未读」。
         let by_url: Option<(i64, bool)> = conn
             .query_row(
-                "SELECT id, fulltext_extracted FROM articles WHERE feed_id = ?1 AND url_norm = ?2 ORDER BY id LIMIT 1",
+                "SELECT a.id, COALESCE(c.fulltext_extracted, 0)
+                 FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+                 WHERE a.feed_id = ?1 AND a.url_norm = ?2 ORDER BY a.id LIMIT 1",
                 params![feed_id, normalize_url(url)],
                 |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
             )
@@ -953,28 +986,84 @@ fn refresh_existing_article(
     conn: &Connection,
     id: i64,
     a: &NewArticle,
-    ft_extracted: bool,
+    _ft_extracted: bool,
     include_url: bool,
 ) -> AppResult<()> {
-    // Note: 已提取全文（fulltext_extracted=1）的条目不得被 RSS 内容覆盖正文（优先保持提取全文，避免「标志=已提取、正文=摘要」的不一致） — 见 .agents/notes/implemented/architecture/2026-09-19-后端模块拆分与并发纪律.md
-    // 正文冻结、纯文本按保留的 HTML 重算（R1：修复旧版「只写 HTML+flag」留下的
-    // body_text 旧 RSS 错配）；guid 与规范化 URL 两条命中路径同口径。
-    let ft_body = fulltext_body_for_refresh(conn, id, ft_extracted)?;
+    /// 条目当前指向的内容快照（正文保护判定用）：
+    /// (content_id, extraction_source, fulltext_extracted)。正文本身不进快照——
+    /// 保护时只经 contents::repair_extracted_body_if_mismatch 就地修复。
+    type CurrentContent = (Option<i64>, String, i64);
+    // OPT-008B 第二阶段：**正文保护上移到 contents**——条目当前指向 readability
+    // 提取行（source='readability' 且 fulltext_extracted=1）时，RSS 刷新不得覆盖/
+    // 重指该内容（既定保护，旧 articles.fulltext_extracted 语义等价迁移）；否则
+    // 确保 RSS 变体行（内容等价则复用同一行——跨源同文共享的目标路径）并按需把
+    // 条目重指过去（FTS 触发器随 content_id 更新：每个引用条目的索引都保持正确）。
+    let cur: Option<CurrentContent> = conn
+        .query_row(
+            "SELECT a.content_id, COALESCE(c.extraction_source, ''), COALESCE(c.fulltext_extracted, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?)),
+        )
+        .optional()?;
+    let (cur_id, cur_source, cur_extracted) = cur.unwrap_or((None, String::new(), 0));
+    let protected = cur_source == super::contents::SOURCE_READABILITY && cur_extracted != 0;
+    if protected {
+        // OPT-003 R1（历史错配修复，二期迁移到此保持同一用户保证）：flag1 行的
+        // body_text 与保留 HTML 不同源（旧版只写 HTML+flag 留下的错配）时按 HTML
+        // 重算修复；修复随 revision+1 暴露（前端修订失效）并经内容触发器更新 FTS。
+        // R3：修复单点收敛到 contents::repair_extracted_body_if_mismatch（与
+        // sync_map 回填路径共用同一语义）。
+        if let Some(cid) = cur_id {
+            super::contents::repair_extracted_body_if_mismatch(conn, cid)?;
+        }
+    }
+    if !protected && super::contents::content_non_empty(a.content_html.as_deref(), &a.body_text) {
+        let input = super::contents::ContentInput {
+            content_html: a.content_html.clone(),
+            body_text: a.body_text.clone(),
+            extraction_source: super::contents::SOURCE_RSS.to_string(),
+            fulltext_extracted: false,
+            url_norm: a.url.as_deref().map(normalize_url),
+        };
+        /* R3（内容重指故障原子性）：ensure_content 的 INSERT 与条目重指/旧行回收
+        必须同生共死——UPDATE 失败（外键/触发器等）时整体回滚，不留无引用
+        新行；SAVEPOINT 兼容调用方已有事务（sync 入库路径）。 */
+        super::contents::with_write_savepoint(conn, "contents_refresh_repoint", || {
+            let (new_id, _rev, _created) = super::contents::ensure_content(conn, &input, Some(id))?;
+            if Some(new_id) != cur_id {
+                conn.execute(
+                    "UPDATE articles SET content_id = ?1 WHERE id = ?2",
+                    params![new_id, id],
+                )?;
+                /* 重指后旧行若无引用：回收（「最后引用才回收」——否则每次内容替换都会
+                留下孤儿行；触发器只在条目删除时兜底）。 */
+                if let Some(old_id) = cur_id {
+                    conn.execute(
+                        "DELETE FROM contents WHERE id = ?1
+                         AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1)",
+                        params![old_id],
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+    }
+    // 条目级字段（正文列已不在 articles；其余同旧语义：非空才覆盖/COALESCE 保护）。
+    // guid 与规范化 URL 两条命中路径同口径。
     if include_url {
         conn.execute(
             "UPDATE articles SET
                 url = COALESCE(?2, url),
-                url_norm = CASE WHEN ?2 IS NOT NULL AND ?2 != '' THEN ?13 ELSE url_norm END,
+                url_norm = CASE WHEN ?2 IS NOT NULL AND ?2 != '' THEN ?11 ELSE url_norm END,
                 title = ?3,
                 author = COALESCE(?4, author),
                 summary = COALESCE(?5, summary),
-                content_html = CASE WHEN fulltext_extracted = 1 THEN content_html ELSE COALESCE(?6, content_html) END,
-                body_text = CASE WHEN fulltext_extracted = 1 THEN COALESCE(?14, body_text) WHEN ?7 != '' THEN ?7 ELSE body_text END,
-                image_url = COALESCE(?8, image_url),
-                enclosure_url = COALESCE(?9, enclosure_url),
-                enclosure_mime = COALESCE(?10, enclosure_mime),
-                duration_sec = COALESCE(?11, duration_sec),
-                published_at = COALESCE(?12, published_at)
+                image_url = COALESCE(?6, image_url),
+                enclosure_url = COALESCE(?7, enclosure_url),
+                enclosure_mime = COALESCE(?8, enclosure_mime),
+                duration_sec = COALESCE(?9, duration_sec),
+                published_at = COALESCE(?10, published_at)
              WHERE id = ?1",
             params![
                 id,
@@ -982,46 +1071,38 @@ fn refresh_existing_article(
                 a.title,
                 a.author,
                 a.summary,
-                a.content_html,
-                a.body_text,
                 a.image_url,
                 a.enclosure_url,
                 a.enclosure_mime,
                 a.duration_sec,
                 a.published_at,
                 a.url.as_deref().map(normalize_url),
-                ft_body
             ],
         )?;
     } else {
         // OPT-003 全文保护：guid 变化但规范化 URL 相同的重放分支，已提取全文的
-        // 条目同样冻结正文、按保留的 HTML 重算纯文本，只用 RSS 更新元数据。
+        // 条目同样保持指向提取内容，只用 RSS 更新元数据。
         conn.execute(
             "UPDATE articles SET
                 title = ?1,
                 author = COALESCE(?2, author),
                 summary = COALESCE(?3, summary),
-                content_html = CASE WHEN fulltext_extracted = 1 THEN content_html ELSE COALESCE(?4, content_html) END,
-                body_text = CASE WHEN fulltext_extracted = 1 THEN COALESCE(?12, body_text) WHEN ?5 != '' THEN ?5 ELSE body_text END,
-                image_url = COALESCE(?6, image_url),
-                enclosure_url = COALESCE(?7, enclosure_url),
-                enclosure_mime = COALESCE(?8, enclosure_mime),
-                duration_sec = COALESCE(?9, duration_sec),
-                published_at = COALESCE(?10, published_at)
-             WHERE id = ?11",
+                image_url = COALESCE(?4, image_url),
+                enclosure_url = COALESCE(?5, enclosure_url),
+                enclosure_mime = COALESCE(?6, enclosure_mime),
+                duration_sec = COALESCE(?7, duration_sec),
+                published_at = COALESCE(?8, published_at)
+             WHERE id = ?9",
             params![
                 a.title,
                 a.author,
                 a.summary,
-                a.content_html,
-                a.body_text,
                 a.image_url,
                 a.enclosure_url,
                 a.enclosure_mime,
                 a.duration_sec,
                 a.published_at,
                 id,
-                ft_body,
             ],
         )?;
     }
@@ -1048,7 +1129,9 @@ pub fn upsert_remote_article(
 ) -> AppResult<ArticleUpsert> {
     let existing: Option<(i64, bool)> = conn
         .query_row(
-            "SELECT id, fulltext_extracted FROM articles WHERE feed_id = ?1 AND guid = ?2",
+            "SELECT a.id, COALESCE(c.fulltext_extracted, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.feed_id = ?1 AND a.guid = ?2",
             params![feed_id, a.guid],
             |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
         )
@@ -1065,8 +1148,9 @@ pub fn upsert_remote_article(
     if let Some(url) = a.url.as_deref().filter(|u| !u.is_empty()) {
         let by_url: Option<(i64, bool, Option<i64>)> = conn
             .query_row(
-                "SELECT id, fulltext_extracted, remote_id FROM articles
-                 WHERE feed_id = ?1 AND url_norm = ?2 ORDER BY id LIMIT 1",
+                "SELECT a.id, COALESCE(c.fulltext_extracted, 0), a.remote_id
+                 FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+                 WHERE a.feed_id = ?1 AND a.url_norm = ?2 ORDER BY a.id LIMIT 1",
                 params![feed_id, normalize_url(url)],
                 |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?)),
             )
@@ -1092,58 +1176,53 @@ pub fn upsert_remote_article(
     })
 }
 
-/// 刷新保护下已提取全文行的纯文本来源：按当前保留的 content_html 重算
-/// （OPT-003 R1：历史库存在「HTML=提取全文、body_text=旧 RSS」的错配行，
-/// 该错配源于旧版 update_article_fulltext 只写 HTML+flag；刷新时在此恢复同源）。
-/// 未提取或 HTML 为空时返回 None（保持原 body_text 不动，避免把好文本清空）。
-fn fulltext_body_for_refresh(
-    conn: &Connection,
-    id: i64,
-    extracted: bool,
-) -> AppResult<Option<String>> {
-    if !extracted {
-        return Ok(None);
-    }
-    let html: String = conn.query_row(
-        "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
-        params![id],
-        |r| r.get(0),
-    )?;
-    if html.trim().is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(crate::sanitize::html_to_text(&html)))
-}
-
 /// 插入新文章（upsert_article_with_feed 的兜底路径）。
+/// OPT-008B 第二阶段：先插条目行（content_id 暂空）再确保内容行（空内容按新
+/// 条目 id 走私有身份——不聚合、不误并），最后回填 content_id（FTS 触发器随
+/// content_id 更新写索引）。
+/// R3（故障原子性）：三步在**同一 SAVEPOINT** 内——任一步失败整体回滚，极端
+/// 崩溃窗口不再留下「content_id NULL 且 FTS 正文为空」的半插入条目。
 fn insert_new_article(conn: &Connection, feed_id: i64, a: &NewArticle) -> AppResult<(i64, bool)> {
-    // M-5：published_at 写入兜底——程序路径不允许产生 NULL（v14 触发器再兜住
-    // 裸 SQL 路径），使「published_at 非空」不变量成立，列表排序可退化为纯
-    // ORDER BY published_at（与旧 COALESCE 口径逐行等价，见 migrations v14 注释）。
-    conn.execute(
-        "INSERT INTO articles
-            (feed_id, guid, url, url_norm, title, author, summary, content_html, body_text, image_url,
-             enclosure_url, enclosure_mime, duration_sec, published_at, source)
-         VALUES (?1, ?2, ?3, ?15, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, COALESCE(?13, datetime('now')), ?14)",
-        params![
-            feed_id,
-            a.guid,
-            a.url,
-            a.title,
-            a.author,
-            a.summary,
-            a.content_html,
-            a.body_text,
-            a.image_url,
-            a.enclosure_url,
-            a.enclosure_mime,
-            a.duration_sec,
-            a.published_at,
-            a.source,
-            a.url.as_deref().map(normalize_url)
-        ],
-    )?;
-    Ok((conn.last_insert_rowid(), true))
+    super::contents::with_write_savepoint(conn, "contents_insert_article", || {
+        // M-5：published_at 写入兜底——程序路径不允许产生 NULL（v14 触发器再兜住
+        // 裸 SQL 路径），使「published_at 非空」不变量成立，列表排序可退化为纯
+        // ORDER BY published_at（与旧 COALESCE 口径逐行等价，见 migrations v14 注释）。
+        conn.execute(
+            "INSERT INTO articles
+                (feed_id, guid, url, url_norm, title, author, summary, image_url,
+                 enclosure_url, enclosure_mime, duration_sec, published_at, source)
+             VALUES (?1, ?2, ?3, ?13, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, datetime('now')), ?12)",
+            params![
+                feed_id,
+                a.guid,
+                a.url,
+                a.title,
+                a.author,
+                a.summary,
+                a.image_url,
+                a.enclosure_url,
+                a.enclosure_mime,
+                a.duration_sec,
+                a.published_at,
+                a.source,
+                a.url.as_deref().map(normalize_url)
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        let input = super::contents::ContentInput {
+            content_html: a.content_html.clone(),
+            body_text: a.body_text.clone(),
+            extraction_source: super::contents::SOURCE_RSS.to_string(),
+            fulltext_extracted: false,
+            url_norm: a.url.as_deref().map(normalize_url),
+        };
+        let (content_id, _rev, _created) = super::contents::ensure_content(conn, &input, Some(id))?;
+        conn.execute(
+            "UPDATE articles SET content_id = ?1 WHERE id = ?2",
+            params![content_id, id],
+        )?;
+        Ok((id, true))
+    })
 }
 
 /* ============================================================
@@ -1219,6 +1298,157 @@ pub fn set_article_ai_fields(
         params![ai_summary, translated_content, id],
     )?;
     Ok(())
+}
+
+/* ============================================================
+OPT-008B 第二阶段：异步产物提交守卫（全文提取 / AI 生成）
+
+网络期间不持 DB 锁：发起前读 (content_id, revision)（AI 另加 ai_epoch 清除代次）
+作为提交前提；落地时在**单条 UPDATE 的 WHERE 内**逐项核对——迟到提交不得写到
+已删除/已分叉/已替换的条目或内容上，也不得复活清理后的旧产物。
+`(content_id, contents.revision)` 即交付给 013 复用的稳定内容版本接口。
+============================================================ */
+
+/// AI 提交前提（生成前捕获；提交时校验）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiCommitToken {
+    pub ai_epoch: i64,
+    pub content_id: Option<i64>,
+    pub content_revision: i64,
+}
+
+/// 读某条目的提交前提（不存在返回 None）。
+pub fn article_ai_commit_token(conn: &Connection, id: i64) -> AppResult<Option<AiCommitToken>> {
+    let t = conn
+        .query_row(
+            "SELECT a.ai_epoch, a.content_id, COALESCE(c.revision, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.id = ?1",
+            params![id],
+            |r| {
+                Ok(AiCommitToken {
+                    ai_epoch: r.get(0)?,
+                    content_id: r.get(1)?,
+                    content_revision: r.get(2)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(t)
+}
+
+/// 带前提校验的 AI 产物落库：任一前提不符（条目已删/已清/内容已替换/已分叉）
+/// 返回 `false`（调用方如实提示"内容已更新，已丢弃过期产物"，不写入）。
+pub fn set_article_ai_fields_checked(
+    conn: &Connection,
+    id: i64,
+    expected: &AiCommitToken,
+    ai_summary: Option<&str>,
+    translated_content: Option<&str>,
+) -> AppResult<bool> {
+    let n = conn.execute(
+        "UPDATE articles SET
+            ai_summary = COALESCE(?1, ai_summary),
+            translated_content = COALESCE(?2, translated_content)
+         WHERE id = ?3
+           AND ai_epoch = ?4
+           AND COALESCE(content_id, -1) = COALESCE(?5, -1)
+           AND COALESCE((SELECT revision FROM contents WHERE id = content_id), 0) = ?6",
+        params![
+            ai_summary,
+            translated_content,
+            id,
+            expected.ai_epoch,
+            expected.content_id,
+            expected.content_revision
+        ],
+    )?;
+    Ok(n > 0)
+}
+
+/// 全文提取的提交前提（发起前捕获：正文原文 + 内容身份/修订）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentCommitToken {
+    pub content_id: Option<i64>,
+    pub content_revision: i64,
+}
+
+pub fn article_content_commit_token(
+    conn: &Connection,
+    id: i64,
+) -> AppResult<Option<(ContentCommitToken, String)>> {
+    let row = conn
+        .query_row(
+            "SELECT a.content_id, COALESCE(c.revision, 0), COALESCE(c.content_html, '')
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.id = ?1",
+            params![id],
+            |r| {
+                Ok((
+                    ContentCommitToken {
+                        content_id: r.get(0)?,
+                        content_revision: r.get(1)?,
+                    },
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// 全文提取落库（带前提校验）：提取结果是 `readability` 来源的内容变体——
+/// 保证存在 (readability, 提取 HTML, 同源纯文本) 的 contents 行（无则建、有则
+/// 复用，多条目提取同一网页即共享），条目重指该行；旧行若无引用即回收。
+/// 前提不符（期间内容被替换/RSS 重指/条目被删）→ `None`，迟到提取不落库。
+///
+/// 成功返回**提交后的实际内容身份/修订** `(content_id, revision)`（R3：随
+/// ExtractOutcome 回传给前端落记录——下一次 reload 不再把刚提取的正文按
+/// “修订变化”清空重取；也供调用方核对提交结果与 DB 一致）。
+/// R3（故障原子性）：ensure_content 的 INSERT、条目重指、旧行回收在同一
+/// SAVEPOINT 内——重指失败整体回滚，不留无引用新行（所有回收点都是引用驱动的，
+/// 半提交孤儿不会有任何后期清理入口）。
+pub fn replace_article_content_checked(
+    conn: &Connection,
+    article_id: i64,
+    expected: &ContentCommitToken,
+    new_html: &str,
+) -> AppResult<Option<(i64, i64)>> {
+    let now = article_content_commit_token(conn, article_id)?;
+    let Some((current, _html)) = now else {
+        return Ok(None); // 条目已删除：迟到提取丢弃
+    };
+    if current != *expected {
+        return Ok(None); // 内容已被替换/重指：迟到提取丢弃（不得写分叉）
+    }
+    let body_text = crate::sanitize::html_to_text(new_html);
+    let input = super::contents::ContentInput {
+        content_html: Some(crate::sanitize::sanitize(new_html, None)),
+        body_text,
+        extraction_source: super::contents::SOURCE_READABILITY.to_string(),
+        fulltext_extracted: true,
+        url_norm: None,
+    };
+    let committed = super::contents::with_write_savepoint(conn, "contents_extract_commit", || {
+        let (new_content_id, rev, _created) =
+            super::contents::ensure_content(conn, &input, Some(article_id))?;
+        if Some(new_content_id) != current.content_id {
+            conn.execute(
+                "UPDATE articles SET content_id = ?1 WHERE id = ?2",
+                params![new_content_id, article_id],
+            )?;
+            // 旧行若已无引用：回收（条目级 delete 触发器之外的显式路径）。
+            if let Some(old_id) = current.content_id {
+                conn.execute(
+                    "DELETE FROM contents WHERE id = ?1
+                     AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = ?1)",
+                    params![old_id],
+                )?;
+            }
+        }
+        Ok((new_content_id, rev))
+    })?;
+    Ok(Some(committed))
 }
 
 pub fn set_starred(conn: &Connection, id: i64, starred: bool) -> AppResult<()> {

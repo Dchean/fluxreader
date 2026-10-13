@@ -268,20 +268,28 @@ mod protected_setting_tests {
 ///   `html`     落库/展示用的正文（成功时是提取结果，降级时是保留的原文）
 ///   `degraded` 是否降级（true = 本次没有采用提取结果）
 ///   `reason`   降级原因；成功时为 None
+/// OPT-008B R3（wire 增字段，camelCase 序列化为 `contentId`/`contentRevision`）：
+///   `content_id` / `content_revision` = **提交成功后的实际内容身份/修订**，
+///   前端 applyExtractedFulltext 依此同步 bodyCache 记录——下一次 reload 不再把
+///   刚成功提取的正文按「修订变化」清空重取。降级/未提交时为 None/0。
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractOutcome {
     pub html: String,
     pub degraded: bool,
     pub reason: Option<String>,
+    pub content_id: Option<i64>,
+    pub content_revision: i64,
 }
 
 impl ExtractOutcome {
-    fn extracted(html: String) -> Self {
+    fn extracted(html: String, content_id: i64, content_revision: i64) -> Self {
         Self {
             html,
             degraded: false,
             reason: None,
+            content_id: Some(content_id),
+            content_revision,
         }
     }
 
@@ -290,6 +298,8 @@ impl ExtractOutcome {
             html,
             degraded: true,
             reason: Some(reason.into()),
+            content_id: None,
+            content_revision: 0,
         }
     }
 }
@@ -301,12 +311,30 @@ pub async fn extract_fulltext(
     state: State<'_, AppState>,
     article_id: i64,
 ) -> AppResult<ExtractOutcome> {
+    extract_fulltext_inner(&state, article_id).await
+}
+
+/// extract_fulltext 的实现体（与 State/命令宏解耦，供模块测试直接注入——
+/// 同 ai.rs 的 `*_inner` 形态）：测试可在**网络在途窗口**内校验「不持 DB 锁」
+/// 与提交前提守卫（迟到结果不落已替换内容）。命令包装保持原签名不变。
+async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<ExtractOutcome> {
     let url: Option<String> = {
         let conn = state.db.lock().await;
         db::get_article_url(&conn, article_id)?
     };
     let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
         return Err(AppError::not_found("该条目没有原文网页地址"));
+    };
+    /* OPT-008B 第二阶段：捕获**发起时**的提交前提（内容身份/修订）与原文——
+    网络期间不持 DB 锁；落地时经带前提校验的提交，迟到提取不得写到已删除/
+    已分叉/已替换的内容上（不新增第二套版本；`(content_id, revision)` 即
+    交付给 013 复用的稳定内容版本接口）。 */
+    let (content_token, original) = {
+        let conn = state.db.lock().await;
+        match db::article_content_commit_token(&conn, article_id)? {
+            Some((token, _html)) => (token, db::get_article_content_html(&conn, article_id)?),
+            None => return Err(AppError::not_found("条目不存在或已被清理")),
+        }
     };
 
     // 拉网页（复用抓取 client；30s 超时）
@@ -348,18 +376,32 @@ pub async fn extract_fulltext(
     // 与「防退化」混在一起、无法区分）。
     {
         let conn = state.db.lock().await;
-        let original = db::get_article_content_html(&conn, article_id)?;
         // 判定抽到 extraction::degradation_reason（纯函数、可单测），此处只负责
         // 按判定结果落库或如实返回降级信息。
         if let Some(reason) = crate::extraction::degradation_reason(&original, &extracted) {
             return Ok(ExtractOutcome::degraded(original, reason));
         }
-        db::update_article_fulltext(&conn, article_id, &extracted, true)?;
+        // 带前提的提交（OPT-008B 第二阶段）：期间条目被删除/内容被替换/分叉 →
+        // 拒绝落库并如实报告（不把迟到提取写到已变化的内容上）。
+        // R3：成功返回提交后的实际内容身份/修订（前端落记录，下一次 reload 不
+        // 再把这份刚提取的正文按“修订变化”清空重取）。
+        let committed =
+            db::replace_article_content_checked(&conn, article_id, &content_token, &extracted)?;
+        let Some((content_id, content_revision)) = committed else {
+            return Ok(ExtractOutcome::degraded(
+                original,
+                "内容在提取期间已更新，已丢弃本次迟到结果",
+            ));
+        };
         if !image.is_empty() {
             db::update_article_image_if_empty(&conn, article_id, &image)?;
         }
+        Ok(ExtractOutcome::extracted(
+            extracted,
+            content_id,
+            content_revision,
+        ))
     }
-    Ok(ExtractOutcome::extracted(extracted))
 }
 /* ============================================================
 图片代理（防盗链兼容）——参考 Papr 方案
@@ -751,5 +793,191 @@ mod update_check_tests {
             start.elapsed()
         );
         assert_eq!(err.code, "network", "超时应是网络类错误：{err}");
+    }
+}
+
+/* ============================================================
+OPT-008B 第二阶段：全文提取的异步边界（真实 loopback HTTP）
+
+网络期间不持 DB 锁；发起时捕获 (content_id, revision) 提交前提，落地时在
+单条 UPDATE 的 WHERE 内逐项核对——期间内容被替换（修订推进）的迟到提取
+不得覆盖新内容。本模块用**阻塞版** loopback 服务器制造可控的在途窗口：
+窗口内先验证 DB 锁可获取（不持锁跑网络），再推进内容修订，放行后要求
+提交被拒并如实返回 degraded。
+============================================================ */
+#[cfg(test)]
+mod extract_fulltext_commit_tests {
+    use super::*;
+    use crate::state::AppState;
+    use rusqlite::Connection;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc as std_mpsc;
+    use std::time::Duration;
+
+    /// 阻塞版网页服务器：收到完整请求头后经 `received` 通知测试，等待
+    /// `release` 才回响应——窗口长度完全由测试控制（不靠 sleep 猜时序）。
+    fn start_blocking_html(
+        html: &'static str,
+        received: tokio::sync::mpsc::UnboundedSender<()>,
+        release: std_mpsc::Receiver<()>,
+    ) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Some(Ok(mut stream)) = listener.incoming().next() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let mut req = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                req.extend_from_slice(&buf[..n]);
+                if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = received.send(());
+            if release.recv().is_err() {
+                return;
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                html.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(html.as_bytes());
+            let _ = stream.flush();
+        });
+        port
+    }
+
+    /// 内存库（articles/contents 最小 schema，正文真值在 contents） + AppState。
+    fn setup(port: u16) -> AppState {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE contents (id INTEGER PRIMARY KEY, identity TEXT NOT NULL UNIQUE,
+                 url_norm TEXT,
+                 content_html TEXT, body_text TEXT NOT NULL DEFAULT '',
+                 extraction_source TEXT NOT NULL DEFAULT 'rss',
+                 fulltext_extracted INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1);
+             CREATE TABLE articles (id INTEGER PRIMARY KEY, url TEXT, content_id INTEGER,
+                 ai_summary TEXT, translated_content TEXT, ai_epoch INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO contents (id, identity, content_html, body_text)
+                 VALUES (1, 'h|extract-test', '<p>RSS 摘要</p>', 'RSS 摘要');
+             INSERT INTO articles (id, url, content_id)
+                 VALUES (1, 'http://127.0.0.1:{port}/article', 1);"
+        ))
+        .unwrap();
+        AppState::new(
+            conn,
+            crate::ingestion::build_client(30),
+            crate::media::MediaHandle::inactive(),
+        )
+    }
+
+    /// 判别力：若网络期间持有 DB 锁，窗口内的 `state.db.lock()` 会超时（测试红）；
+    /// 若提交守卫失效，迟到结果会覆盖新内容（断言 html/revision 时红）。
+    #[tokio::test]
+    async fn network_window_holds_no_db_lock_and_stale_commit_is_rejected() {
+        const PAGE: &str = "<html><head><title>t</title></head><body><article>\
+            <p>这是提取出来的完整正文，长度明显超过原 RSS 摘要，用于通过防退化判定。</p>\
+            <p>第二段继续拉长正文，确保提取结果不被判为退化。</p>\
+            </article></body></html>";
+        let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let port = start_blocking_html(PAGE, received_tx, release_rx);
+        let state = setup(port);
+
+        let mutate = async {
+            tokio::time::timeout(Duration::from_secs(5), received_rx.recv())
+                .await
+                .expect("mock 必须收到网页请求")
+                .expect("received 通道未关闭");
+            // 网络在途：DB 锁必须仍可获取（获取超时即证明被网络路径持有）
+            let conn = tokio::time::timeout(Duration::from_secs(2), state.db.lock())
+                .await
+                .expect("网络期间不得持有 DB 锁");
+            conn.execute(
+                "UPDATE contents SET revision = revision + 1 WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+            release_tx.send(()).unwrap();
+        };
+        let (outcome, _) = tokio::join!(extract_fulltext_inner(&state, 1), mutate);
+        let outcome = outcome.expect("迟到提交不是命令错误，而是 degraded 如实报告");
+        assert!(outcome.degraded, "内容修订已推进：不得采用迟到提取结果");
+        assert!(
+            outcome.reason.as_deref().unwrap_or("").contains("已更新"),
+            "降级原因应指向内容更新：{:?}",
+            outcome.reason
+        );
+        let conn = state.db.lock().await;
+        let (html, rev): (String, i64) = conn
+            .query_row(
+                "SELECT COALESCE(content_html, ''), revision FROM contents WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (html.as_str(), rev),
+            ("<p>RSS 摘要</p>", 2),
+            "拒绝后正文保持、修订保留推进值"
+        );
+    }
+
+    /// R3（wire 增字段）：成功提取的 outcome 必须携带**提交后的实际内容身份/
+    /// 修订**（与 DB 逐值一致）——前端 applyExtractedFulltext 依此同步 bodyCache
+    /// 记录，下一次 reload 不再把刚成功提取的正文按「修订变化」清空重取。
+    #[tokio::test]
+    async fn successful_extract_returns_committed_identity() {
+        const PAGE: &str = "<html><head><title>t</title></head><body><article>\
+            <p>这是提取出来的完整正文，长度明显超过原 RSS 摘要，用于通过防退化判定。</p>\
+            <p>第二段继续拉长正文，确保提取结果不被判为退化。</p>\
+            </article></body></html>";
+        let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let port = start_blocking_html(PAGE, received_tx, release_rx);
+        let state = setup(port);
+
+        let extract = extract_fulltext_inner(&state, 1);
+        let release = async {
+            tokio::time::timeout(Duration::from_secs(5), received_rx.recv())
+                .await
+                .expect("mock 必须收到网页请求")
+                .expect("received 通道未关闭");
+            release_tx.send(()).unwrap();
+        };
+        let (outcome, ()) = tokio::join!(extract, release);
+        let outcome = outcome.expect("提取应成功");
+        assert!(!outcome.degraded, "长文提取不得降级：{:?}", outcome.reason);
+        let cid = outcome.content_id.expect("成功必须携带内容身份");
+        assert!(outcome.content_revision >= 1, "修订从 1 起");
+        let conn = state.db.lock().await;
+        let (article_cid, rev, flag): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT a.content_id, c.revision, c.fulltext_extracted
+                 FROM articles a JOIN contents c ON c.id = a.content_id WHERE a.id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(article_cid, cid, "outcome 身份与 DB 提交结果一致");
+        assert_eq!(rev, outcome.content_revision, "outcome 修订与 DB 一致");
+        assert_eq!(flag, 1, "提取标志已置");
+        assert_ne!(cid, 1, "提取变体分叉到新行（来源进身份）");
+        // wire 契约（R3 增字段）：camelCase 序列化 contentId/contentRevision——
+        // 前端 ExtractFulltextResult 依此字段名消费。
+        let wire = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(wire["contentId"], serde_json::json!(cid));
+        assert_eq!(wire["contentRevision"], serde_json::json!(rev));
+        assert_eq!(wire["degraded"], serde_json::json!(false));
     }
 }

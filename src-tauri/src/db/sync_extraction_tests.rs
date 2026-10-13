@@ -387,7 +387,8 @@ fn backfill_article_content_only_when_empty() {
 
     let (html, body, img, enc_url): (String, String, Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT content_html, body_text, image_url, enclosure_url FROM articles WHERE id = ?1",
+            "SELECT COALESCE(c.content_html, ''), COALESCE(c.body_text, ''), a.image_url, a.enclosure_url
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
             params![aid],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -411,7 +412,8 @@ fn backfill_article_content_only_when_empty() {
 
     let (html2, body2, img2, enc_url2): (String, String, Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT content_html, body_text, image_url, enclosure_url FROM articles WHERE id = ?1",
+            "SELECT COALESCE(c.content_html, ''), COALESCE(c.body_text, ''), a.image_url, a.enclosure_url
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
             params![aid],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -422,4 +424,126 @@ fn backfill_article_content_only_when_empty() {
     // 封面/enclosure 不覆盖（COALESCE 保留首值）
     assert_eq!(img2, Some("http://example.com/img1.jpg".to_string()));
     assert_eq!(enc_url2, Some("http://example.com/audio.mp3".to_string()));
+}
+
+/// R3（历史异常 Readability 保护）：当前指向的行是 readability + 已提取、但
+/// body 缺失/错配的**历史异常形态**时，回填不得合成 `(提取 HTML, RSS 纯文本)`
+/// 的 rss 源新行并丢 fulltext_extracted——必须保持 readability 来源就地修复
+/// body（html_to_text 同源）。隔离回归（不依赖网络/迁移）。
+#[test]
+fn backfill_keeps_protected_readability_source() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    MIGRATIONS.to_latest(&mut conn).unwrap();
+
+    let f = create_folder(&conn, "F", "article").unwrap();
+    let feed = insert_feed(
+        &conn,
+        "http://a.example/f",
+        None,
+        "feed",
+        None,
+        f,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    let a = NewArticle {
+        guid: "g1".into(),
+        url: Some("http://a.example/p".into()),
+        title: "t".into(),
+        author: None,
+        summary: None,
+        content_html: Some("<p>RSS 摘要</p>".into()),
+        body_text: "RSS 摘要".into(),
+        image_url: None,
+        enclosure_url: None,
+        enclosure_mime: None,
+        duration_sec: None,
+        published_at: None,
+        source: "direct".into(),
+    };
+    let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+    let cid = conn
+        .query_row(
+            "SELECT content_id FROM articles WHERE id = ?1",
+            params![aid],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap();
+
+    // 历史异常现场：readability + 已提取，HTML 非空但 body 缺失（旧版只写
+    // HTML+flag 的错配形态）；revision 从 1 起。
+    conn.execute(
+        "UPDATE contents SET extraction_source = 'readability', fulltext_extracted = 1,
+             content_html = '<p>提取保留的 HTML 正文</p>', body_text = '' WHERE id = ?1",
+        params![cid],
+    )
+    .unwrap();
+    let rev_before: i64 = conn
+        .query_row(
+            "SELECT revision FROM contents WHERE id = ?1",
+            params![cid],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // 回填（RSS 纯文本 + 更“新”的 RSS HTML）：不得降级/重指/丢 flag
+    let changed = backfill_article_content(
+        &conn,
+        aid,
+        "<p>RSS 回填正文</p>",
+        "RSS 回填正文",
+        Some("http://example.com/img.jpg"),
+        None,
+        None,
+    )
+    .unwrap();
+
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM contents", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "不得合成 rss 源新行（保护行保持单一）");
+    let (cid_after, source, flag, body, rev_after): (i64, String, i64, String, i64) = conn
+        .query_row(
+            "SELECT c.id, c.extraction_source, c.fulltext_extracted, c.body_text, c.revision
+             FROM articles a JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
+            params![aid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(cid_after, cid, "条目仍指向受保护提取行（不重指）");
+    assert_eq!(
+        source, "readability",
+        "来源保持 readability（不降级为 rss）"
+    );
+    assert_eq!(flag, 1, "fulltext_extracted 不得丢失");
+    assert_eq!(
+        body,
+        crate::sanitize::html_to_text("<p>提取保留的 HTML 正文</p>"),
+        "body 就地按保留 HTML 修复（同源），而不是 RSS 纯文本"
+    );
+    assert!(
+        rev_after > rev_before,
+        "修复随 revision+1 暴露给前端修订失效"
+    );
+    assert!(changed, "修复计为数据变化（驱动数据变化标记）");
+    // 条目级 meta 回填照常
+    let img: Option<String> = conn
+        .query_row(
+            "SELECT image_url FROM articles WHERE id = ?1",
+            params![aid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(img.as_deref(), Some("http://example.com/img.jpg"));
+    // FTS 跟随修复后的正文（受保护内容仍可搜）
+    let hits: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles_fts WHERE articles_fts MATCH 'HTML' AND rowid = ?1",
+            params![aid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(hits, 1, "修复后的提取正文进入该条目的 FTS 索引");
 }

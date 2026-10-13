@@ -614,11 +614,14 @@ fn update_article_fulltext_updates_correctly() {
     assert_eq!(row.content_html, Some("<p>全文</p>".to_string()));
     assert!(row.fulltext_extracted);
     // R1：真实提取写入边界必须同时重写 body_text（与 HTML 同源），
-    // 否则刷新保护会冻结「HTML=提取全文、纯文本=旧 RSS」的错配——RED 锚
+    // 否则刷新保护会冻结「HTML=提取全文、纯文本=旧 RSS」的错配——RED 锚。
+    // OPT-008B 第二阶段：正文真值在 contents（JOIN 读取）。
     let body: String = conn
-        .query_row("SELECT body_text FROM articles WHERE id = ?1", [aid], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COALESCE(c.body_text, '') FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
+            [aid],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(body, "全文", "全文写入必须同源更新 body_text（纯文本列）");
 }

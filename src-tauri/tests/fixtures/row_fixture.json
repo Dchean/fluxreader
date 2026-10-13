@@ -33,6 +33,8 @@
     "url": "https://e.example/a",
     "content_html": "<p>body</p>",
     "translated_content": "<p>translated</p>",
-    "fulltext_extracted": false
+    "fulltext_extracted": false,
+    "content_id": 9,
+    "content_revision": 3
   }
 }

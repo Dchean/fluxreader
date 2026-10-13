@@ -1,6 +1,6 @@
 # OPT-008B：内容实体与各订阅源条目分离
 
-Status: coding
+Status: verified-local
 父卡OPT008主体；前置OPT006/007/008A。保留五布局、协议ID和现有离线状态意图，不用仅修URL参数宣称完成。
 
 ## 数据所有权
@@ -125,7 +125,18 @@ R6成功停写，独立只读初审PASS；主控复查失败下限传播、读�
 
 产品提交3fdec3ba5e51881f2bef41f35675cd5230b94e0a已推送dev，[CI 38259218755](https://github.com/Dchean/fluxreader/actions/runs/38259218755) completed/success。第一阶段交付完整通过，不合main、不关闭008B/008。
 
-第二阶段交同一实现负责人（OPT-008B-phase2-20261012，备用模型max），按下列边界实现内容单一所有权，先定稿原proposed身份Note再编码。独立交付记录RESULT-phase2.md留在tmp，不覆盖第一阶段最终证据。完成后继续只读初审与主控复审，未取得最终迁移/消费链证据不宣称正文分离完成。
+第二阶段交同一实现负责人（OPT-008B-phase2-20261012，备用模型max），按下列边界实现内容单一所有权，先定稿原proposed身份Note再编码。独立交付记录RESULT-phase2.md留在tmp，不覆盖第一阶段最终证据。实现、定向收口、独立复审与本地门禁已完成；提交级CI通过前不关闭正文分离阶段。
+
+## 第二阶段R3A本地验收（2026-10-13）
+
+R3首轮因达到max-turns未形成交付记录；按任务拆分为R3A定向收尾与最终门禁后，当前WIP完成以下收口：
+
+- `contents` 写入、条目重指、全文提取提交与回填统一使用可嵌套的SAVEPOINT；三条故障注入回归确认失败回滚后无孤儿、旧引用与FTS不变，清障后可重试。
+- `contents.id` 使用`AUTOINCREMENT`，删除最大内容后不复用ID；前端额外保存`feedId|title`条目锚，防条目删除重建且内容版本对巧合相等时复用旧正文。
+- 全文提取成功回传实际`contentId/contentRevision`并更新bodyCache；Reader在活动文章正文因修订失效且Timeline卡片未挂载时主动重水合，在途旧响应仍被丢弃。
+- 历史Readability异常行保持受保护来源并修复同源纯文本；`delete_folder`与`purge_remote_data`各有共享内容引用生命周期回归；五布局真实挂载测试覆盖修订失效、重水合和Reader渲染。
+
+独立只读R3A复审结论为PASS，无P1/P2。修复rustfmt后，最终本地门禁真实退出码全部为0：`cargo fmt --check`、`cargo clippy --all-targets -D warnings`、完整`cargo test`（573 passed / 0 failed / 7 ignored）、Node22前端1059/1059、组件24/24、lint、build、Note校验与`git diff --check`。live账号测试、真实用户库/账号、提交级CI仍未执行。阶段状态为`verified-local`，主卡和Note不在本节自动关闭。
 
 ## 第二阶段接线与验收边界
 

@@ -556,7 +556,8 @@ fn staged_refresh_fulltext_boundary_and_guid_refresh_stay_same_source() {
     db::update_article_fulltext(&conn, aid, "<p>提取的全文字一</p>", true).unwrap();
     let (html, body, flag): (Option<String>, String, i64) = conn
         .query_row(
-            "SELECT content_html, body_text, fulltext_extracted FROM articles WHERE id = ?1",
+            "SELECT c.content_html, COALESCE(c.body_text, ''), COALESCE(c.fulltext_extracted, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
             [aid],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -595,7 +596,8 @@ fn staged_refresh_fulltext_boundary_and_guid_refresh_stay_same_source() {
 
     let (html, body, flag): (Option<String>, String, i64) = conn
         .query_row(
-            "SELECT content_html, body_text, fulltext_extracted FROM articles WHERE id = ?1",
+            "SELECT c.content_html, COALESCE(c.body_text, ''), COALESCE(c.fulltext_extracted, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
             [aid],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
@@ -648,10 +650,17 @@ fn staged_refresh_recomputes_stale_body_text_on_historical_fulltext_refresh() {
         false,
     )
     .unwrap();
-    // 模拟历史错配：只写 HTML+flag（旧 update_article_fulltext 的写入形态），
-    // body_text 保持旧 RSS 文本 —— 不允许刷新后继续冻在这个错配上
+    // 模拟历史错配（OPT-008B 第二阶段形态）：提取行只写 HTML+flag，body_text
+    // 仍是旧 RSS 文本（经 contents 私有行直插，模拟旧版 update_article_fulltext
+    // 的写入形态）——刷新保护路径必须按保留 HTML 同源重算，不冻结错配。
     conn.execute(
-        "UPDATE articles SET content_html = '<p>提取的全文字二</p>', fulltext_extracted = 1 WHERE id = ?1",
+        "INSERT INTO contents (identity, content_html, body_text, extraction_source, fulltext_extracted)
+         VALUES ('e|' || ?1, '<p>提取的全文字二</p>', '旧RSS正文二', 'readability', 1)",
+        [aid],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE articles SET content_id = (SELECT id FROM contents WHERE identity = 'e|' || ?1) WHERE id = ?1",
         [aid],
     )
     .unwrap();
@@ -679,7 +688,8 @@ fn staged_refresh_recomputes_stale_body_text_on_historical_fulltext_refresh() {
 
     let (html, body, flag): (Option<String>, String, i64) = conn
         .query_row(
-            "SELECT content_html, body_text, fulltext_extracted FROM articles WHERE id = ?1",
+            "SELECT c.content_html, COALESCE(c.body_text, ''), COALESCE(c.fulltext_extracted, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
             [aid],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )

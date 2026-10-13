@@ -430,6 +430,9 @@ export async function run(ctx) {
       aiSummary: 'fixture summary',
       /* TASK-122：content/rawContent 不再映射进视图行（正文真值源 bodyById） */
       translatedContent: '<p>translated</p>', fulltextExtracted: false,
+      /* OPT-008B 第二阶段：contents 身份/修订进视图行（contentId/contentRevision
+         是前端正文失效依据，随 fixture 的 content_id/content_revision 逐键核对） */
+      contentId: 9, contentRevision: 3,
     };
     const expectFeed = {
       id: '7', name: 'Fixture Feed', url: 'https://f.example/rss',

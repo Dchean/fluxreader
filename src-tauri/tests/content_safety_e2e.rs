@@ -67,13 +67,29 @@ fn seed_article(
 }
 
 /// 直读库内原始 content_html（不经读边界净化，用于区分「写入已净化」与「读出才净化」）。
+/// OPT-008B 第二阶段：正文真值在 contents（JOIN 读取）。
 fn raw_content(conn: &rusqlite::Connection, aid: i64) -> String {
     conn.query_row(
-        "SELECT COALESCE(content_html, '') FROM articles WHERE id = ?1",
+        "SELECT COALESCE(c.content_html, '') FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
         [aid],
         |r| r.get(0),
     )
     .unwrap()
+}
+
+/// 模拟「旧库直插」的正文：正文进 contents（条目私有身份 `e|<id>`，不聚合），
+/// 条目重指该行——读边界净化必须与写入口同源（F07/R2 断言继续成立）。
+fn seed_legacy_content(conn: &rusqlite::Connection, aid: i64, html: &str) {
+    conn.execute(
+        "INSERT INTO contents (identity, content_html, body_text) VALUES ('e|' || ?1, ?2, ?3)",
+        rusqlite::params![aid, html, html],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE articles SET content_id = (SELECT id FROM contents WHERE identity = 'e|' || ?1) WHERE id = ?1",
+        rusqlite::params![aid],
+    )
+    .unwrap();
 }
 
 fn list_q(with_content: bool) -> ArticleQuery {
@@ -558,9 +574,10 @@ fn legacy_composed_lazy_payload_is_sanitized_on_read_boundary() {
         Some("https://real.example/posts/13"),
         None,
     );
+    seed_legacy_content(&conn, aid, LAZY_IFRAME_PAYLOAD);
     conn.execute(
-        "UPDATE articles SET content_html = ?1, translated_content = ?2 WHERE id = ?3",
-        rusqlite::params![LAZY_IFRAME_PAYLOAD, LAZY_IFRAME_PAYLOAD, aid],
+        "UPDATE articles SET translated_content = ?1 WHERE id = ?2",
+        rusqlite::params![LAZY_IFRAME_PAYLOAD, aid],
     )
     .unwrap();
 
@@ -600,9 +617,10 @@ fn get_article_and_get_articles_sanitize_legacy_polluted_fields() {
         Some("https://real.example/posts/9"),
         None,
     );
+    seed_legacy_content(&conn, aid, POLLUTED);
     conn.execute(
-        "UPDATE articles SET content_html = ?1, translated_content = ?2 WHERE id = ?3",
-        rusqlite::params![POLLUTED, POLLUTED_TRANSLATION, aid],
+        "UPDATE articles SET translated_content = ?1 WHERE id = ?2",
+        rusqlite::params![POLLUTED_TRANSLATION, aid],
     )
     .unwrap();
 
@@ -642,9 +660,10 @@ fn get_article_and_get_articles_sanitize_legacy_polluted_fields() {
 fn list_with_content_sanitizes_renderable_fields_meta_only_does_not() {
     let conn = open_db("opt002_list");
     let aid = seed_article(&conn, "g-list", Some("https://real.example/posts/10"), None);
+    seed_legacy_content(&conn, aid, POLLUTED);
     conn.execute(
-        "UPDATE articles SET content_html = ?1, translated_content = ?2 WHERE id = ?3",
-        rusqlite::params![POLLUTED, POLLUTED_TRANSLATION, aid],
+        "UPDATE articles SET translated_content = ?1 WHERE id = ?2",
+        rusqlite::params![POLLUTED_TRANSLATION, aid],
     )
     .unwrap();
 
