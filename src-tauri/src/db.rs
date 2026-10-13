@@ -1,8 +1,8 @@
 //! SQLite 数据层：schema + 迁移 + 类型化数据访问。
 //!
 //! 实现按领域拆分在 db/ 子模块（migrations / folders / feeds / articles /
-//! url_norm / settings / sync_queue / sync_map）；本文件只保留共享 import、
-//! 子模块声明与再导出，使 crate::db:: 的既有调用路径保持不变。
+//! contents / url_norm / settings / sync_queue / sync_map / outbox）；本文件
+//! 只保留共享 import、子模块声明与再导出，使 crate::db:: 的既有调用路径保持不变。
 //! 迁移为追加式：已发布的迁移不可修改，只能新增 M::up。
 
 use rusqlite::{Connection, OptionalExtension};
@@ -28,6 +28,7 @@ mod contents;
 mod feeds;
 mod folders;
 mod migrations;
+mod outbox;
 mod settings;
 mod sync_map;
 mod sync_queue;
@@ -64,6 +65,16 @@ pub use folders::{
 pub use migrations::open;
 #[cfg(test)]
 pub(crate) use migrations::MIGRATIONS;
+/// OPT-009 阶段 A：类型化订阅动作 outbox 数据层（与 article 状态队列
+/// sync_queue 分离）。本阶段只交付表/语义/数据层入口——推送执行、GReader
+/// wire、Fever local-only 命令层接线不在阶段 A。
+pub use outbox::{
+    advance_subscribe_stage, enqueue_edit, enqueue_subscribe, enqueue_unsubscribe,
+    mark_outbox_failed, mark_outbox_local_only, outbox_pending_for_url, pending_outbox,
+    prune_outbox, rebind_outbox_generation, subscription_outbox_stats, SubscriptionOutboxItem,
+    SubscriptionOutboxStats, ACTION_EDIT, ACTION_SUBSCRIBE, ACTION_UNSUBSCRIBE, STAGE_PENDING,
+    STAGE_REMOTE_CREATED, STATUS_LOCAL_ONLY, STATUS_PENDING,
+};
 pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
 /* OPT-014 R1：账号提交事务内核/可注入写入——crate 内部（命令层）使用，
 不是 IPC 面，也不对集成测试开放（测试在同模块单测内做）。 */

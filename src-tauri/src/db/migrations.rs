@@ -612,6 +612,41 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
                 Ok(())
             },
         ),
+        // OPT-009 阶段 A：类型化订阅动作 outbox（与 article 状态队列 sync_queue 分离）。
+        // - 订阅写回（新增/改名/移动/退订）此前是「本地改完 best-effort 推远端」，
+        //   失败只留日志；本表把意图持久化为可重试队项，重启/离线后仍可收敛。
+        // - payload 类型化：账号代际 + 账号指纹（跨账号屏障；旧账号队项暂停，回原
+        //   账号可再发）、feed 数字 remote_id / 原 URL、desired title/folder、
+        //   prev_folder（移动时 wire 需 r= 移除旧 label）、subscribe 的两段 stage
+        //   （pending=远端未建 / remote_created=远端已建、待本地绑定与分类挂载确认）。
+        // - id 为 AUTOINCREMENT：合并连续修改 = 删旧插新（不复用 id），旧 HTTP 响应
+        //   按 (id, account_generation) 精确确认，不可能误删中途改写的新目标。
+        // - 与 article sync_queue 无关：feed 删除级联、purge_remove_feed_zombies 都
+        //   不会清掉本表行（退订目标必须在本地 feed 删除后仍存活）。
+        // user_version=23。
+        M::up(
+            r#"
+        CREATE TABLE subscription_outbox (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_generation INTEGER NOT NULL,
+            account_key        TEXT NOT NULL,
+            action             TEXT NOT NULL CHECK (action IN ('subscribe','edit','unsubscribe')),
+            feed_url           TEXT NOT NULL,
+            remote_id          INTEGER,
+            desired_title      TEXT,
+            desired_folder     TEXT,
+            prev_folder        TEXT,
+            stage              TEXT NOT NULL DEFAULT 'pending' CHECK (stage IN ('pending','remote_created')),
+            status             TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','local_only')),
+            attempts           INTEGER NOT NULL DEFAULT 0,
+            last_error         TEXT,
+            created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_subscription_outbox_url ON subscription_outbox(feed_url);
+        CREATE INDEX idx_subscription_outbox_pending ON subscription_outbox(status) WHERE status = 'pending';
+    "#,
+        ),
     ])
 });
 
@@ -2207,6 +2242,143 @@ mod opt011_migration_tests {
             )
             .unwrap();
         assert_eq!(sm, "inherit", "升级后新行仍走缺省 inherit");
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/* ============================================================
+OPT-009 v23 单元测试：类型化订阅 outbox 表
+（cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
+============================================================ */
+#[cfg(test)]
+mod opt009_migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 进程内唯一临时库路径（与 opt011_migration_tests 的惯例一致）。
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        std::env::temp_dir().join(format!(
+            "fluxreader_migr_{base}_{pid}_{nanos}_{seq}.db",
+            pid = std::process::id()
+        ))
+    }
+
+    /// (opt009-m1) 全新库：subscription_outbox 存在且列形状正确；CHECK 拒绝非法
+    /// action/stage/status（不静默写脏意图）；缺省 stage/status 是 pending。
+    /// 判别力：漏建表/列时查询直接红；CHECK 缺失时非法值写入成功即红。
+    #[test]
+    fn v23_creates_typed_subscription_outbox() {
+        let mut fresh = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut fresh).unwrap();
+        let mut stmt = fresh
+            .prepare("SELECT name FROM pragma_table_info('subscription_outbox') ORDER BY name")
+            .unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for expected in [
+            "account_generation",
+            "account_key",
+            "action",
+            "feed_url",
+            "remote_id",
+            "desired_title",
+            "desired_folder",
+            "prev_folder",
+            "stage",
+            "status",
+            "attempts",
+            "last_error",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                cols.contains(&expected.to_string()),
+                "subscription_outbox 缺列 {expected}: {cols:?}"
+            );
+        }
+        fresh
+            .execute(
+                "INSERT INTO subscription_outbox (account_generation, account_key, action, feed_url)
+                 VALUES (0, 'k', 'subscribe', 'https://f.example/rss')",
+                [],
+            )
+            .unwrap();
+        let (stage, status) = fresh
+            .query_row(
+                "SELECT stage, status FROM subscription_outbox WHERE feed_url = 'https://f.example/rss'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        assert_eq!((stage.as_str(), status.as_str()), ("pending", "pending"));
+        // CHECK：非法 action / stage / status 一律拒绝
+        assert!(fresh
+            .execute(
+                "INSERT INTO subscription_outbox (account_generation, account_key, action, feed_url)
+                 VALUES (0, 'k', 'remove_feed', 'https://f.example/x')",
+                [],
+            )
+            .is_err());
+        assert!(fresh
+            .execute(
+                "INSERT INTO subscription_outbox (account_generation, account_key, action, feed_url, stage)
+                 VALUES (0, 'k', 'subscribe', 'https://f.example/y', 'done')",
+                [],
+            )
+            .is_err());
+        assert!(fresh
+            .execute(
+                "INSERT INTO subscription_outbox (account_generation, account_key, action, feed_url, status)
+                 VALUES (0, 'k', 'subscribe', 'https://f.example/z', 'confirmed')",
+                [],
+            )
+            .is_err());
+    }
+
+    /// (opt009-m2) 旧库升级（经生产 open()）：停在 v22 的库有 feeds/文章/文章级
+    /// sync_queue 行；升级后 outbox 表可用、旧数据一律原样（迁移只追加新表，
+    /// 不触碰 article 队列与既有订阅——回滚安全：v22 结构不被改写）。
+    /// 判别力：迁移若顺带清空/改写 sync_queue 或 feeds，对应断言即红。
+    #[test]
+    fn v23_upgrade_from_v22_keeps_legacy_state_intact() {
+        let path = unique_test_db("opt009_v22");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_version(&mut conn, 22).unwrap();
+            conn.execute_batch(
+                "INSERT INTO feeds (feed_url, title) VALUES ('https://old.example/rss', '旧源');
+                 INSERT INTO articles (feed_id, guid, title) VALUES (1, 'g1', '条目');
+                 INSERT INTO sync_queue (article_id, action) VALUES (1, 'read');",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).expect("v22 旧库必须完成 v23 迁移");
+        // 新表可用
+        conn.execute(
+            "INSERT INTO subscription_outbox (account_generation, account_key, action, feed_url)
+             VALUES (7, 'k', 'unsubscribe', 'https://old.example/rss')",
+            [],
+        )
+        .unwrap();
+        // 旧状态原样
+        let feeds: i64 = conn
+            .query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+            .unwrap();
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((feeds, queued), (1, 1), "迁移必须只追加新表，旧数据原样");
         drop(conn);
         let _ = std::fs::remove_file(&path);
     }

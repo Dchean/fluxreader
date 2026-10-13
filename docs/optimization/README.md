@@ -18,7 +18,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 
 - **18 张主卡：12 张完成验收并通过提交级 CI，6 张尚未完成。** 父子卡不重复计数，不按卡片数量推算工作量百分比。
 - 已完成：OPT-001～007、011、012、014、015、016。
-- 剩余：008（条目/内容分离已CI，后续仍需总收口）、009（可靠订阅写回）、010（配置镜像）、013（长文与版本缓存）、017（实际性能优化）、018（最终验收与合并）。
+- 剩余：009（可靠订阅写回实施中）、010（配置镜像）、013（长文与版本缓存）、017（实际性能优化）、018（最终验收与合并）。008已通过CI，仍由018负责总收口。
 - 最新产品提交 **3fdec3b** 已推送 dev，[CI 38259218755](https://github.com/Dchean/fluxreader/actions/runs/38259218755) completed/success，覆盖008B第一阶段；前端1047/1047、组件22/22及Windows Rust门禁通过。未合并 main，未发布。
 - 007/011及008B第一阶段经独立初审与主控定向复核；不能沿用历史 rework 段落误读当前状态。当前唯一产品写入者负责 OPT-008B 第二阶段，后续改动不在上述 CI 覆盖范围内。
 
@@ -34,7 +34,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-006](OPT-006.md) | 账号生命周期与配置导入隔离 | F05,F06 | OPT-001, OPT-004 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-007](OPT-007.md) | 可恢复 pull 与提交时冲突保护 | F09,F10,F11 | OPT-005, OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-008](OPT-008.md) | 内容身份与保守去重 | F12 | OPT-007 | verified-ci | 008A及008B第二阶段本地门禁、独立复审与Windows CI通过；待总收口 |
-| [OPT-009](OPT-009.md) | 可靠订阅写回和能力声明 | F17 | OPT-006, OPT-008 | queued | 尚未实施；等待内容/条目身份契约 |
+| [OPT-009](OPT-009.md) | 可靠订阅写回和能力声明 | F17 | OPT-006, OPT-008 | coding | 008已通过CI；订阅outbox与能力声明交CodeBuddy实施 |
 | [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | queued | 尚未实施；待可靠订阅写回之后推进 |
 | [OPT-011](OPT-011.md) | AI 设置单点与输入范围一致 | F13,refreshInterval | OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-012](OPT-012.md) | 阅读器源码与浮层交互 | F14,closeAsk | 无 | verified-ci | 已提交、独立审查及 CI 通过 |

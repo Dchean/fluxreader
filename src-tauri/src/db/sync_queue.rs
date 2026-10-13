@@ -119,7 +119,8 @@ TASK-116（同步四态展示）：失败标记 + 队列统计
 const LAST_ERROR_MAX_CHARS: usize = 200;
 
 /// 错误摘要截断：按字符（码点）截断保证多字节安全，截断后以「…」示意。
-fn truncate_last_error(err: &str) -> String {
+/// sync_queue 与订阅 outbox（db/outbox.rs）共用同一口径，故对 db 子模块可见。
+pub(super) fn truncate_last_error(err: &str) -> String {
     if err.chars().count() <= LAST_ERROR_MAX_CHARS {
         return err.to_string();
     }
