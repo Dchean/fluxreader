@@ -759,6 +759,23 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         UPDATE folders SET sync_id = lower(hex(randomblob(16))) WHERE sync_id IS NULL OR trim(sync_id) = '';
     "#,
         ),
+        // OPT-013 B1：AI 产物缓存签名列（产物与签名同一条 UPDATE 写入）。
+        // - 此前缓存命中只看 ai_summary/translated_content 非空：换模型/换提示词/
+        //   正文修订推进后旧产物仍被当成可复用缓存短路，重试被挡、也不重新计费。
+        // - 新增列存生成时输入身份的 sha256（模型/endpoint/提示词/标题/正文修订/
+        //   正文哈希/分段策略，见 ai::ai_cache_signature；api_key 不在其中），
+        //   命中判定改为「产物非空且签名等于当前输入重算值」。
+        // - 纯追加列且不回填：存量行的签名保持 NULL = 「未标记版本」——数据保留、
+        //   UI 仍可显示，但不再冒充已验证缓存，可被重新生成覆盖。
+        // 决定与备选见 .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md
+        // （OPT-013 B1 追加）。
+        // user_version=27。
+        M::up(
+            r#"
+        ALTER TABLE articles ADD COLUMN ai_summary_sig TEXT;
+        ALTER TABLE articles ADD COLUMN translated_sig TEXT;
+    "#,
+        ),
     ])
 });
 

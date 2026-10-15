@@ -62,6 +62,10 @@ export interface ArticleBodyView {
   rawContent: string;
   translatedContent: string;
   aiSummary: string;
+  /** OPT-013 B1：产物缓存签名（null = 未标记版本；产物非空而签名为空 → 组件
+      呈现「未标记版本」）。命中判定在 store/slices/ai.ts 经后端完成后短路。 */
+  aiSummarySig: string | null;
+  translatedSig: string | null;
   fulltextExtracted: boolean;
   /** missing/failed 的呈现文案（其余态为空） */
   message: string;
@@ -75,6 +79,8 @@ const UNREQUESTED_BODY: ArticleBodyView = {
   rawContent: '',
   translatedContent: '',
   aiSummary: '',
+  aiSummarySig: null,
+  translatedSig: null,
   fulltextExtracted: false,
   message: '',
   contentRevision: 0,
@@ -87,6 +93,8 @@ function bodyViewFrom(rec: BodyEntry): ArticleBodyView {
     rawContent: rec.rawContent,
     translatedContent: rec.translatedContent,
     aiSummary: rec.aiSummary,
+    aiSummarySig: rec.aiSummarySig,
+    translatedSig: rec.translatedSig,
     fulltextExtracted: rec.fulltextExtracted,
     message: rec.message,
     contentRevision: rec.contentRevision,
@@ -113,6 +121,8 @@ export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bo
       rawContent: entry.rawContent ?? '',
       translatedContent: entry.translatedContent,
       aiSummary: entry.aiSummary,
+      aiSummarySig: entry.aiSummarySig ?? null,
+      translatedSig: entry.translatedSig ?? null,
       fulltextExtracted: entry.fulltextExtracted ?? false,
       message: '',
       contentRevision: 0,
@@ -124,6 +134,8 @@ export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bo
     rawContent: '',
     translatedContent: entry.translatedContent,
     aiSummary: entry.aiSummary,
+    aiSummarySig: entry.aiSummarySig ?? null,
+    translatedSig: entry.translatedSig ?? null,
     fulltextExtracted: entry.fulltextExtracted ?? false,
     message: '',
     contentRevision: 0,

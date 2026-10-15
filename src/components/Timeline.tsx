@@ -873,11 +873,15 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
               const next = !showTranslate;
               /* fix-5：失败态（translateErrors[id] 存在）时点「翻译」必须重走
                  translateEntry 重试——旧逻辑在有半截译文时会把它当缓存只切显示，
-                 重试按钮变成死路径（P2-3）。 */
+                 重试按钮变成死路径（P2-3）。
+                 OPT-013 B1：已有译文时也必须走 translateEntry 的命中判定（后端
+                 验签名）——未验证（无签名/已过期）会重新生成，旧产物保留显示；
+                 已验证则无操作（不重复计费）。卡片的显隐切换仍由本按钮负责。 */
               if (next && (translateError || !body.translatedContent)) {
                 /* 无译文或上次失败：实际触发生成/重试（P1-7 空壳修复 + fix-5） */
                 useAppStore.getState().translateEntry(item.id);
               } else if (body.translatedContent) {
+                if (next) useAppStore.getState().translateEntry(item.id);
                 showToast(next ? '已显示正文翻译' : '已隐藏正文翻译');
               }
               setTransOverride(next);

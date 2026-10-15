@@ -118,6 +118,80 @@ impl AiConfig {
     }
 }
 
+/* ---------------- OPT-013 B1：AI 产物缓存签名 ---------------- */
+
+/// 分段策略版本：签名输入的一部分。B1 尚无分段（一次性送整篇），固定 "v1-flat"；
+/// 013-B2 引入分段后必须递增，使旧的整篇签名不再被当成同一策略的缓存。
+pub const SEGMENT_POLICY_VERSION: &str = "v1-flat";
+
+/// 缓存签名的输入清单（字段集合 = 定版 OPT-013 §1 的签名输入；**api_key 不在
+/// 其中**——签名可公开，凭据绝不进入）。
+///
+/// Note: 命中判定 / 同锁快照 / 提交与代次守卫 — 见
+/// .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md
+/// 末节「OPT-013 B1 追加（2026-10-15）」。
+#[derive(Debug, Clone, Copy)]
+pub struct AiCacheInputs<'a> {
+    /// 产物类型标识（"summary" / "translation"；改动即让全部旧签名失效）。
+    pub kind: &'a str,
+    pub model: &'a str,
+    pub base_url: &'a str,
+    /// 有效 system 提示词（与请求实际发送的 system 逐字一致）。
+    pub system: &'a str,
+    pub title: &'a str,
+    pub content_id: Option<i64>,
+    pub content_revision: i64,
+    /// 输入正文（summary = body_text；translation = content_html）。
+    pub input_body: &'a str,
+}
+
+/// AI 产物缓存签名（SHA-256，小写十六进制）。
+///
+/// 输入（定版 OPT-013 §1）：`sha256(产物类型 ‖ 模型 ‖ base_url ‖ 有效 system
+/// 提示词 ‖ 标题 ‖ 正文修订(content_id,revision) ‖ 输入正文哈希 ‖ 分段策略版本)`。
+///
+/// 编码：各字段以「标签 + 小端 u64 长度前缀 + UTF-8 字节」依次喂入哈希流，
+/// 避免朴素拼接的边界歧义（两串不同输入因分隔符吸收重合出同一签名）；正文
+/// 先单独取 sha256 再作为 `body_sha256` 字段喂入（即规范里的「输入正文哈希」）。
+///
+/// 语义：签名 = 「这份产物是在什么输入（模型/endpoint/提示词/标题/修订/正文/
+/// 分段策略）下生成的」。缓存命中要求产物非空**且**存盘签名等于当前输入重算值；
+/// 任何一项变化（换模型、换提示词、正文修订推进、标题更新）都让旧产物降级为
+/// 「未标记/过期版本」，可显示、可被重新生成覆盖，但不得短路。
+pub fn ai_cache_signature(inputs: &AiCacheInputs<'_>) -> String {
+    use sha2::{Digest, Sha256};
+
+    fn feed(h: &mut Sha256, label: &str, value: &str) {
+        h.update(label.as_bytes());
+        h.update((value.len() as u64).to_le_bytes());
+        h.update(value.as_bytes());
+    }
+
+    let mut h = Sha256::new();
+    h.update(b"fluxreader-ai-cache-sig-v1");
+    feed(&mut h, "kind", inputs.kind);
+    feed(&mut h, "model", inputs.model);
+    feed(&mut h, "base_url", inputs.base_url);
+    feed(&mut h, "system", inputs.system);
+    feed(&mut h, "title", inputs.title);
+    feed(
+        &mut h,
+        "content_id",
+        &inputs
+            .content_id
+            .map_or_else(|| "-".to_string(), |v| v.to_string()),
+    );
+    feed(&mut h, "revision", &inputs.content_revision.to_string());
+    let body_sha256 = {
+        let mut b = Sha256::new();
+        b.update(inputs.input_body.as_bytes());
+        format!("{:x}", b.finalize())
+    };
+    feed(&mut h, "body_sha256", &body_sha256);
+    feed(&mut h, "segment_policy", SEGMENT_POLICY_VERSION);
+    format!("{:x}", h.finalize())
+}
+
 /// 流式对话结果。
 pub struct ChatOutcome {
     /// 完整拼好的文本（消费方取消时含已推送的部分）。
@@ -918,5 +992,144 @@ mod tests {
     fn output_token_budgets_stay_1024_and_4096() {
         assert_eq!(SUMMARY_MAX_TOKENS, 1024);
         assert_eq!(TRANSLATE_MAX_TOKENS, 4096);
+    }
+
+    /* ---- OPT-013 B1：缓存签名 ---- */
+
+    /// 签名用例的输入清单（Default = 基准输入；变体用 ..Default::default() 只改待测字段）。
+    /// 字段取 String：测试要表达「运行时配置解析出的值」也能参与签名。
+    struct SigCase {
+        kind: String,
+        model: String,
+        base_url: String,
+        system: String,
+        title: String,
+        content_id: Option<i64>,
+        content_revision: i64,
+        input_body: String,
+    }
+
+    impl Default for SigCase {
+        fn default() -> Self {
+            Self {
+                kind: "summary".into(),
+                model: "m1".into(),
+                base_url: "https://api.example/v1".into(),
+                system: "sys".into(),
+                title: "标题".into(),
+                content_id: Some(7),
+                content_revision: 3,
+                input_body: "正文".into(),
+            }
+        }
+    }
+
+    fn sig(case: &SigCase) -> String {
+        ai_cache_signature(&AiCacheInputs {
+            kind: &case.kind,
+            model: &case.model,
+            base_url: &case.base_url,
+            system: &case.system,
+            title: &case.title,
+            content_id: case.content_id,
+            content_revision: case.content_revision,
+            input_body: &case.input_body,
+        })
+    }
+
+    /// 固定输入 → 稳定十六进制 sha256（跨进程/跨调用确定）；不同字段任一变化
+    /// 必产出不同签名——签名的判别力是「缓存不冒充」的全部依据。
+    #[test]
+    fn ai_cache_signature_is_deterministic_and_field_sensitive() {
+        let base = sig(&SigCase::default());
+        assert_eq!(base.len(), 64, "sha256 十六进制长度");
+        assert!(base
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_eq!(base, sig(&SigCase::default()), "同输入同签名");
+        // 逐字段敏感：任一输入变化都必须改变签名（否则旧产物会被当成当前缓存）
+        let variants = [
+            SigCase {
+                kind: "translation".into(),
+                ..Default::default()
+            },
+            SigCase {
+                model: "m2".into(),
+                ..Default::default()
+            },
+            SigCase {
+                base_url: "https://api.other/v1".into(),
+                ..Default::default()
+            },
+            SigCase {
+                system: "sys2".into(),
+                ..Default::default()
+            },
+            SigCase {
+                title: "标题2".into(),
+                ..Default::default()
+            },
+            SigCase {
+                content_id: Some(8),
+                ..Default::default()
+            },
+            SigCase {
+                content_revision: 4,
+                ..Default::default()
+            },
+            SigCase {
+                input_body: "正文2".into(),
+                ..Default::default()
+            },
+            SigCase {
+                content_id: None,
+                ..Default::default()
+            },
+        ];
+        for case in variants {
+            assert_ne!(sig(&case), base, "任一签名输入变化都必须改变签名");
+        }
+    }
+
+    /// 长度前缀编码：字段边界不可被内容吸收（"ab"+"c" 与 "a"+"bc" 不得同签名）。
+    #[test]
+    fn ai_cache_signature_has_no_delimiter_ambiguity() {
+        let a = sig(&SigCase {
+            title: "ab".into(),
+            input_body: "c".into(),
+            ..Default::default()
+        });
+        let b = sig(&SigCase {
+            title: "a".into(),
+            input_body: "bc".into(),
+            ..Default::default()
+        });
+        assert_ne!(a, b, "标题/正文拼接歧义不得碰撞");
+    }
+
+    /// 签名输入不含 api_key（输入清单即保证；此测试锁定未来不得偷偷加回）。
+    #[test]
+    fn ai_cache_signature_api_key_is_not_an_input() {
+        // 同一组合配置，用户仅更换 api_key——签名必须不变（换 key 不使缓存失效，
+        // 也不得把凭据卷进可公开的签名）。
+        let cfg_a = AiConfig::from_json(
+            r#"{"preset":"custom","baseUrl":"https://x/v1","apiKey":"sk-a","model":"m1"}"#,
+        )
+        .unwrap();
+        let cfg_b = AiConfig::from_json(
+            r#"{"preset":"custom","baseUrl":"https://x/v1","apiKey":"sk-b","model":"m1"}"#,
+        )
+        .unwrap();
+        let case_a = SigCase {
+            model: cfg_a.model.clone(),
+            base_url: cfg_a.base_url.clone(),
+            ..Default::default()
+        };
+        let case_b = SigCase {
+            model: cfg_b.model.clone(),
+            base_url: cfg_b.base_url.clone(),
+            ..Default::default()
+        };
+        assert_eq!(sig(&case_a), sig(&case_b), "api_key 不进签名");
     }
 }

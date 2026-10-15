@@ -1817,6 +1817,20 @@ body {
   gap: 6px;
 }
 
+/* OPT-013 B1：「未标记版本」标记——存量/过期 AI 产物可显示但不冒充已验证缓存
+   （命中判定在 store/slices/ai.ts 经后端 ai_cache_check 完成）。 */
+.ai-unverified-tag {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 30%, transparent);
+  white-space: nowrap;
+  cursor: help;
+}
+
 .ai-body-content {
   font-size: 12.5px;
   line-height: 1.6;

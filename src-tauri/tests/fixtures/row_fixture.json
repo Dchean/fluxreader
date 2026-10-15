@@ -35,6 +35,8 @@
     "translated_content": "<p>translated</p>",
     "fulltext_extracted": false,
     "content_id": 9,
-    "content_revision": 3
+    "content_revision": 3,
+    "ai_summary_sig": "sig-summary-fixture",
+    "translated_sig": "sig-translated-fixture"
   }
 }

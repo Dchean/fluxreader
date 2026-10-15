@@ -433,6 +433,9 @@ export async function run(ctx) {
       /* OPT-008B 第二阶段：contents 身份/修订进视图行（contentId/contentRevision
          是前端正文失效依据，随 fixture 的 content_id/content_revision 逐键核对） */
       contentId: 9, contentRevision: 3,
+      /* OPT-013 B1：AI 产物缓存签名进视图行（「未标记版本」判定与命中语义依赖；
+         fixture 两键取值不同，接错源即 red） */
+      aiSummarySig: 'sig-summary-fixture', translatedSig: 'sig-translated-fixture',
     };
     const expectFeed = {
       id: '7', name: 'Fixture Feed', url: 'https://f.example/rss',

@@ -480,7 +480,7 @@ fn list_unbound_local_feeds_returns_tuples() {
     assert_eq!(rows[0].2, Some(f));
 }
 
-/// get_article_for_summary：返回 (title, body_text, ai_summary)
+/// get_article_for_summary：返回 (title, body_text, ai_summary, ai_summary_sig)
 #[test]
 fn get_article_for_summary_returns_tuple() {
     let mut conn = Connection::open_in_memory().unwrap();
@@ -517,18 +517,20 @@ fn get_article_for_summary_returns_tuple() {
     };
     let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
 
-    let (title, body, summary) = get_article_for_summary(&conn, aid).unwrap().unwrap();
+    let (title, body, summary, sig) = get_article_for_summary(&conn, aid).unwrap().unwrap();
     assert_eq!(title, "测试标题");
     assert_eq!(body, "测试正文");
     assert_eq!(summary, None);
+    assert_eq!(sig, None, "未生成/未写签名：存量行签名恒为 NULL");
 
-    // 设置 AI 摘要后再查
+    // 设置 AI 摘要后再查（set_article_ai_fields 不写签名——非提交路径）
     set_article_ai_fields(&conn, aid, Some("AI 摘要"), None).unwrap();
-    let (_, _, summary2) = get_article_for_summary(&conn, aid).unwrap().unwrap();
+    let (_, _, summary2, sig2) = get_article_for_summary(&conn, aid).unwrap().unwrap();
     assert_eq!(summary2, Some("AI 摘要".to_string()));
+    assert_eq!(sig2, None);
 }
 
-/// get_article_for_translation：返回 (title, content_html, translated_content)
+/// get_article_for_translation：返回 (title, content_html, translated_content, translated_sig)
 #[test]
 fn get_article_for_translation_returns_tuple() {
     let mut conn = Connection::open_in_memory().unwrap();
@@ -565,10 +567,11 @@ fn get_article_for_translation_returns_tuple() {
     };
     let (aid, _) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
 
-    let (title, html, translated) = get_article_for_translation(&conn, aid).unwrap().unwrap();
+    let (title, html, translated, sig) = get_article_for_translation(&conn, aid).unwrap().unwrap();
     assert_eq!(title, "Test Title");
     assert_eq!(html, "<p>Test content</p>");
     assert_eq!(translated, None);
+    assert_eq!(sig, None, "未生成/未写签名：存量行签名恒为 NULL");
 }
 
 /// update_article_fulltext：更新正文、纯文本与提取标志（R1：HTML/body_text 同源）

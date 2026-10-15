@@ -27,6 +27,10 @@ pub struct ArticleRow {
     /// 前端以 (content_id, content_revision) 判定正文失效（snippet 未变也失效）。
     pub content_id: Option<i64>,
     pub content_revision: i64,
+    /// OPT-013 B1：AI 产物缓存签名（生成时输入身份的 sha256；存量/未生成行 NULL）。
+    /// 前端以「产物非空 && 签名为空」呈「未标记版本」；命中判定在命令层做。
+    pub ai_summary_sig: Option<String>,
+    pub translated_sig: Option<String>,
 }
 
 /// 列表页条目（轻量：默认不含正文 HTML，snippet 截断；with_content 时附带正文，
@@ -55,6 +59,10 @@ pub struct ArticleListItem {
     /// OPT-008B 第二阶段：正文身份/修订（前端失效依据）
     pub content_id: Option<i64>,
     pub content_revision: i64,
+    /// OPT-013 B1：AI 产物缓存签名（同 ArticleRow；轻量行也返回——卡片即时显示
+    /// 摘要的「未标记版本」判定依赖它）
+    pub ai_summary_sig: Option<String>,
+    pub translated_sig: Option<String>,
 }
 
 /* ============================================================
@@ -80,8 +88,9 @@ pub struct NewArticle {
 }
 
 /// 详情/水合查询列（OPT-008B 第二阶段：正文只从 contents 取；条目级字段从 a 取）。
-/// 尾部两列为 content_id/content_revision（前端修订失效依据）。
-const ARTICLE_COLS: &str = "a.id, a.feed_id, a.url, a.title, a.author, a.summary, c.content_html, a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec, a.ai_summary, a.translated_content, a.source, a.published_at, a.is_read, a.is_starred, COALESCE(c.fulltext_extracted, 0), a.content_id, COALESCE(c.revision, 0)";
+/// 尾部两列为 content_id/content_revision（前端修订失效依据）；
+/// OPT-013 B1：再追加两列 AI 产物缓存签名。
+const ARTICLE_COLS: &str = "a.id, a.feed_id, a.url, a.title, a.author, a.summary, c.content_html, a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec, a.ai_summary, a.translated_content, a.source, a.published_at, a.is_read, a.is_starred, COALESCE(c.fulltext_extracted, 0), a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig";
 
 /// 详情/水合查询的 FROM（单一正文所有权 JOIN）。
 const ARTICLE_FROM: &str = " FROM articles a LEFT JOIN contents c ON c.id = a.content_id";
@@ -108,12 +117,14 @@ fn article_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleRow> {
         fulltext_extracted: r.get::<_, i64>(17)? != 0,
         content_id: r.get(18)?,
         content_revision: r.get(19)?,
+        ai_summary_sig: r.get(20)?,
+        translated_sig: r.get(21)?,
     })
 }
 
 fn article_list_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleListItem> {
     // 列顺序依赖 list_articles 的 SELECT；当 with_content=false 时中段四列为 NULL/0，
-    // 尾部两列（content_id/content_revision）两种模式都返回。
+    // 尾部四列（content_id/content_revision/AI 产物签名）两种模式都返回。
     Ok(ArticleListItem {
         id: r.get(0)?,
         feed_id: r.get(1)?,
@@ -135,6 +146,8 @@ fn article_list_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleListItem>
         fulltext_extracted: r.get::<_, i64>(17)? != 0,
         content_id: r.get(18)?,
         content_revision: r.get(19)?,
+        ai_summary_sig: r.get(20)?,
+        translated_sig: r.get(21)?,
     })
 }
 
@@ -309,7 +322,7 @@ fn list_articles_sql(q: &ArticleQuery, dedup: bool) -> (String, Vec<rusqlite::ty
                 COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
                 a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
-                {content_cols}, a.content_id, COALESCE(c.revision, 0)
+                {content_cols}, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig
          FROM articles a LEFT JOIN contents c ON c.id = a.content_id",
     );
     // 值全部走绑定参数（占位符序号即绑定顺序），条件文本只拼固定字符串
@@ -661,7 +674,7 @@ pub fn search_articles(
                 COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
                 a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
-                NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0)
+                NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig
          FROM articles a LEFT JOIN contents c ON c.id = a.content_id
          WHERE {}{dedup_sql}
          ORDER BY a.published_at DESC
@@ -803,7 +816,8 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
         // 迟到 AI 提交被守卫拒绝（不复活已清产物）。正文保留（重新打开可再生成）。
         ai_cleared = tx.execute(
             &format!(
-                "UPDATE articles SET ai_summary = NULL, translated_content = NULL, ai_epoch = ai_epoch + 1
+                "UPDATE articles SET ai_summary = NULL, translated_content = NULL,
+                        ai_summary_sig = NULL, translated_sig = NULL, ai_epoch = ai_epoch + 1
                  WHERE (ai_summary IS NOT NULL OR translated_content IS NOT NULL)
                    AND datetime(published_at) < {cutoff}"
             ),
@@ -1310,18 +1324,23 @@ OPT-008B 第二阶段：异步产物提交守卫（全文提取 / AI 生成）
 ============================================================ */
 
 /// AI 提交前提（生成前捕获；提交时校验）。
+///
+/// OPT-013 B1：加入 `title` —— 签名输入含标题，提交时必须与生成时同标题，
+/// 否则会出现「新产物 + 旧签名」（标题变化后产物是旧标题下生成的）。正文输入
+/// 由 (content_id, revision) 覆盖（内容的每次更新都推进 revision）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiCommitToken {
     pub ai_epoch: i64,
     pub content_id: Option<i64>,
     pub content_revision: i64,
+    pub title: String,
 }
 
 /// 读某条目的提交前提（不存在返回 None）。
 pub fn article_ai_commit_token(conn: &Connection, id: i64) -> AppResult<Option<AiCommitToken>> {
     let t = conn
         .query_row(
-            "SELECT a.ai_epoch, a.content_id, COALESCE(c.revision, 0)
+            "SELECT a.ai_epoch, a.content_id, COALESCE(c.revision, 0), a.title
              FROM articles a LEFT JOIN contents c ON c.id = a.content_id
              WHERE a.id = ?1",
             params![id],
@@ -1330,6 +1349,7 @@ pub fn article_ai_commit_token(conn: &Connection, id: i64) -> AppResult<Option<A
                     ai_epoch: r.get(0)?,
                     content_id: r.get(1)?,
                     content_revision: r.get(2)?,
+                    title: r.get(3)?,
                 })
             },
         )
@@ -1337,32 +1357,68 @@ pub fn article_ai_commit_token(conn: &Connection, id: i64) -> AppResult<Option<A
     Ok(t)
 }
 
-/// 带前提校验的 AI 产物落库：任一前提不符（条目已删/已清/内容已替换/已分叉）
-/// 返回 `false`（调用方如实提示"内容已更新，已丢弃过期产物"，不写入）。
+/// AI 产物提交载荷：**产物与缓存签名成对**——两者必须在同一条 UPDATE 内写入，
+/// 不允许出现「新产物 + 旧签名」或「新签名 + 旧产物」（OPT-013 B1 定版 §1）。
+///
+/// Note: 提交前提与签名身份 — 见 .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md
+/// 末节「OPT-013 B1 追加（2026-10-15）」。
+#[derive(Debug, Clone, Copy)]
+pub enum AiProduct<'a> {
+    Summary { text: &'a str, signature: &'a str },
+    Translation { text: &'a str, signature: &'a str },
+}
+
+/// 带前提校验的 AI 产物落库：任一前提不符（条目已删/已清/内容已替换/已分叉/
+/// 标题已变）返回 `false`（调用方如实提示"内容已更新，已丢弃过期产物"，不写入）。
+/// `AiProduct` 的签名与产物同一条 UPDATE 落库——部分失败整体失败，无半写形态。
 pub fn set_article_ai_fields_checked(
     conn: &Connection,
     id: i64,
     expected: &AiCommitToken,
-    ai_summary: Option<&str>,
-    translated_content: Option<&str>,
+    product: AiProduct<'_>,
 ) -> AppResult<bool> {
-    let n = conn.execute(
-        "UPDATE articles SET
-            ai_summary = COALESCE(?1, ai_summary),
-            translated_content = COALESCE(?2, translated_content)
-         WHERE id = ?3
-           AND ai_epoch = ?4
-           AND COALESCE(content_id, -1) = COALESCE(?5, -1)
-           AND COALESCE((SELECT revision FROM contents WHERE id = content_id), 0) = ?6",
-        params![
-            ai_summary,
-            translated_content,
-            id,
-            expected.ai_epoch,
-            expected.content_id,
-            expected.content_revision
-        ],
-    )?;
+    // WHERE 即「签名前提」的复核：ai_epoch（清除代次）、content_id/revision
+    // （正文身份与修订——正文哈希由修订唯一决定）、title（签名输入之一）。
+    let n = match product {
+        AiProduct::Summary { text, signature } => conn.execute(
+            "UPDATE articles SET
+                ai_summary = ?1,
+                ai_summary_sig = ?2
+             WHERE id = ?3
+               AND ai_epoch = ?4
+               AND COALESCE(content_id, -1) = COALESCE(?5, -1)
+               AND COALESCE((SELECT revision FROM contents WHERE id = content_id), 0) = ?6
+               AND title = ?7",
+            params![
+                text,
+                signature,
+                id,
+                expected.ai_epoch,
+                expected.content_id,
+                expected.content_revision,
+                expected.title
+            ],
+        )?,
+        AiProduct::Translation { text, signature } => conn.execute(
+            "UPDATE articles SET
+                translated_content = ?1,
+                translated_sig = ?2
+             WHERE id = ?3
+               AND ai_epoch = ?4
+               AND COALESCE(content_id, -1) = COALESCE(?5, -1)
+               AND COALESCE((SELECT revision FROM contents WHERE id = content_id), 0) = ?6
+               AND title = ?7",
+            params![
+                text,
+                signature,
+                id,
+                expected.ai_epoch,
+                expected.content_id,
+                expected.content_revision,
+                expected.title
+            ],
+        )?,
+    };
     Ok(n > 0)
 }
 

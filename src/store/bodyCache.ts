@@ -103,6 +103,12 @@ export interface BodyEntry {
   translatedContent: string;
   /** AI 摘要（cleared 后为空串） */
   aiSummary: string;
+  /** OPT-013 B1：两类产物的缓存签名（null = 未标记版本/未生成）。
+      来源与产物同源：水合行真值（applyBodyRow）或生成回读行（applyAiProduct）。
+      产物被清空/重试清半截时一并回 null——签名不得脱离对应产物独立存活
+      （「新产物 + 旧签名」在记录层也不出现）。 */
+  aiSummarySig: string | null;
+  translatedSig: string | null;
   /** 正文已被 Readability 全文覆盖 */
   fulltextExtracted: boolean;
   /** 显式失效计数：清理失效 / 再次生成各 bump；在途响应以 stamp 比对丢弃 */
@@ -195,6 +201,8 @@ function emptyRecord(state: BodyState): BodyEntry {
     rawContent: '',
     translatedContent: '',
     aiSummary: '',
+    aiSummarySig: null,
+    translatedSig: null,
     fulltextExtracted: false,
     contentRevision: 0,
     contentId: null,
@@ -244,13 +252,18 @@ function anchorOfRow(row: { feed_id?: number | null; title?: string | null }): s
     - 无记录（LRU 淘汰后迟到落地等）→ 以空记录为底新建，stamp=0 恒匹配。 */
 export function applyBodyRow(
   id: string,
-  row: { content_html?: string | null; translated_content?: string | null; ai_summary?: string | null; fulltext_extracted?: boolean | null; content_id?: number | null; content_revision?: number | null; feed_id?: number | null; title?: string | null },
+  row: { content_html?: string | null; translated_content?: string | null; ai_summary?: string | null; fulltext_extracted?: boolean | null; content_id?: number | null; content_revision?: number | null; feed_id?: number | null; title?: string | null; ai_summary_sig?: string | null; translated_sig?: string | null },
   stamp: number,
   aiFallback: { translatedContent: string; aiSummary: string },
 ): void {
   const current = bodyById.get(id);
   if (current && current.contentRevision !== stamp) return; // 显式失效在途 → 响应过期
   const base = current ?? emptyRecord('ready');
+  /* OPT-013 B1：签名随产物来源走——行携带产物（非 NULL）时签名取行值
+     （行缺省签名字段 = 未标记版本 → null）；行产物为 NULL（回退到 aiFallback
+     的流式半截）时保留记录现值（签名不脱离产物独立改写）。 */
+  const summarySig = row.ai_summary != null ? row.ai_summary_sig ?? null : base.aiSummarySig;
+  const translatedSig = row.translated_content != null ? row.translated_sig ?? null : base.translatedSig;
   bodyById.set(id, {
     ...base,
     state: 'ready',
@@ -258,6 +271,8 @@ export function applyBodyRow(
     rawContent: row.content_html ?? '',
     translatedContent: row.translated_content ?? aiFallback.translatedContent,
     aiSummary: row.ai_summary ?? aiFallback.aiSummary,
+    aiSummarySig: summarySig,
+    translatedSig,
     fulltextExtracted: row.fulltext_extracted ?? base.fulltextExtracted,
     contentRevision: stamp,
     /* OPT-008B 第二阶段：记录 DB 内容身份/修订——行携带即刷新（本响应是新鲜
@@ -356,13 +371,24 @@ export function applyExtractedFulltext(
 
 /** AI 生成完成（摘要/译文回读 DB 消毒版后落账）：解除 cleared、bump revision。
     这是 cleared → ready 的唯一解除路径（模块头注状态机）。
+    OPT-013 B1：`signature` 与产物**成对**写入（undefined = 不改写签名——流式
+    半截场景；null = 产物清空/无签名）。回读路径应传回读行的签名（可能为
+    null：存量无签名产物重新生成后行带新签名，回读即取到）。
     仅更新**已存在**的记录；无记录返回 false（文章从未水合时调用方回退写
     视图行过渡字段——此时若凭空建记录，会让懒水合判定误判「正文已水合」，
     卡片正文永远取不到）。 */
-export function applyAiProduct(id: string, field: 'aiSummary' | 'translatedContent', value: string): boolean {
+export function applyAiProduct(
+  id: string,
+  field: 'aiSummary' | 'translatedContent',
+  value: string,
+  signature?: string | null,
+): boolean {
   const current = bodyById.get(id);
   if (!current) return false;
-  bodyById.set(id, withExplicitAiWrite({ ...current, [field]: value }, 'ready'));
+  const sigPatch: Partial<BodyEntry> = signature === undefined
+    ? {}
+    : (field === 'aiSummary' ? { aiSummarySig: signature } : { translatedSig: signature });
+  bodyById.set(id, withExplicitAiWrite({ ...current, [field]: value, ...sigPatch }, 'ready'));
   touch();
   return true;
 }
@@ -388,6 +414,9 @@ export function appendAiDelta(id: string, field: 'aiSummary' | 'translatedConten
 export interface BodyRowFact {
   aiSummary: string;
   translatedContent: string;
+  /** OPT-013 B1：行真值携带的缓存签名（null = 未标记版本）——对齐时与产物同时写 */
+  aiSummarySig: string | null;
+  translatedSig: string | null;
   /** 行 snippet（正文可能变化的伴生信号，见模块头注 P4 规则） */
   snippet: string;
 }
@@ -421,11 +450,12 @@ export function reconcileBodyEntities(
     if (rec.aiWrittenAt > rowsFetchedAt) continue; // 记录比行新（生成刚落库、行是旧查询）
     if (hadAi && !rowHasAi) {
       // DB 已删除 AI 产物（清理 AI 缓存）→ 显式失效：cleared + bump（不再被 reload 复活）
-      bodyById.set(id, withExplicitAiWrite({ ...rec, aiSummary: '', translatedContent: '' }, 'cleared'));
+      bodyById.set(id, withExplicitAiWrite({ ...rec, aiSummary: '', translatedContent: '', aiSummarySig: null, translatedSig: null }, 'cleared'));
       touch();
     } else if (rec.state === 'ready' && (rec.aiSummary !== fact.aiSummary || rec.translatedContent !== fact.translatedContent)) {
-      // 行带来不同的 DB 真值（他端再生/本端未见过）→ 对齐为行真值（不解除 cleared）
-      bodyById.set(id, { ...rec, aiSummary: fact.aiSummary, translatedContent: fact.translatedContent, aiWrittenAt: rowsFetchedAt });
+      // 行带来不同的 DB 真值（他端再生/本端未见过）→ 对齐为行真值（不解除 cleared）；
+      // OPT-013 B1：签名随行真值一起对齐（产物与签名成对，不出现新产物配旧签名）
+      bodyById.set(id, { ...rec, aiSummary: fact.aiSummary, translatedContent: fact.translatedContent, aiSummarySig: fact.aiSummarySig, translatedSig: fact.translatedSig, aiWrittenAt: rowsFetchedAt });
       touch();
     }
   }

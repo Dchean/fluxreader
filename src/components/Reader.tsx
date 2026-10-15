@@ -283,6 +283,14 @@ export function Reader() {
                   <Icons.globe />
                   <span>{isShowingTranslatedProse ? '显示原文' : '翻译'}</span>
                 </button>
+                {/* OPT-013 B1：正在展示的译文无缓存签名（存量产物/生成输入已变化）
+                    → 标记「未标记版本」。数据显示保留；点击翻译会走命中判定并
+                    重新生成覆盖（签名与产物同时更新）。 */}
+                {isShowingTranslatedProse && !!body.translatedContent && !body.translatedSig ? (
+                  <span className="ai-unverified-tag" title="该译文没有缓存签名（生成于签名功能上线前，或生成输入已变化）——仍可显示，重新生成即更新为已验证版本">
+                    未标记版本
+                  </span>
+                ) : null}
                 {dataMode === 'tauri' && (
                   <button
                     className={`toggle-action-btn ${showFulltext ? 'active-accent' : ''}`}
@@ -315,6 +323,13 @@ export function Reader() {
                   <Icons.spark />
                   <span>摘要</span>
                 </div>
+                {/* OPT-013 B1：存量无签名摘要的「未标记版本」标记——数据可见，
+                    但不冒充已验证缓存；点击摘要按钮会重新生成并写入签名。 */}
+                {!!body.aiSummary && !body.aiSummarySig ? (
+                  <span className="ai-unverified-tag" title="该摘要没有缓存签名（生成于签名功能上线前，或生成输入已变化）——仍可显示，重新生成即更新为已验证版本">
+                    未标记版本
+                  </span>
+                ) : null}
               </div>
               <div className="ai-body-content">
                 {summaryGenerating ? (

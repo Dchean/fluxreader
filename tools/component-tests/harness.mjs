@@ -225,6 +225,10 @@ export const bodyCacheMod = await import('../../dist-test/store/bodyCache.js');
 export const useAppStore = storeMod.useAppStore;
 export const getBodyEntry = bodyCacheMod.getBodyEntry;
 export const resetBodyCacheForTests = bodyCacheMod.resetBodyCacheForTests;
+/* OPT-013 B1：AI 请求代次/在途表（模块级，slice 私有 export）——夹具复位一并
+   清空，避免上一用例挂起的在途请求（受控 Promise 永不 settle）吞掉下一用例的同键触发。 */
+const aiSliceMod = await import('../../dist-test/store/slices/ai.js');
+export const resetAiRequestStateForTests = aiSliceMod.resetAiRequestStateForTests;
 
 /* ------------------------------------------------------------------
    6) 统一错误账本（R1 修复）：console.error / jsdom 未捕获 / React 三通道错误
@@ -469,6 +473,7 @@ export function resetStore(extra = {}) {
     ...extra,
   });
   resetBodyCacheForTests();
+  resetAiRequestStateForTests();
 }
 
 /** 全量清理：卸载所有挂载树（聚合错误）、复位 store、移除遗留 DOM、关闭 jsdom。

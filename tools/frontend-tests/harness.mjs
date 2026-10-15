@@ -118,6 +118,14 @@ const S = {
   feedCountsPlan: null,
   pendingCounts: [],
   heldAi: [],            // hold 模式挂起项 { cmd, id, ch }
+  /* OPT-013 B1：ai_cache_check 的返回值（前端命中判定的后端权威）。
+     缺省 true = 「当前产物与配置匹配、可复用」——夹具里产物都生成于同一份
+     mock 配置下，这是忠实缺省；测「旧签名/无签名不短路」的用例显式置 false。
+     aiCacheCheckPlan = { mode: 'defer' } 时校验挂起（一次性计划）——
+     「验签在途窗口」并发用例（R1 P2-1）需要手动放行。 */
+  aiCacheCheck: { summaryVerified: true, translationVerified: true },
+  aiCacheCheckPlan: null,
+  pendingAiChecks: [],
   settingsRaw: null,     // get_setting('app_settings') 的返回值
   ghLoginStatus: null,   // github_login_status 的返回值：null | {login} | 'reject'
   extractResult: null,   // extract_fulltext 的返回值：ExtractFulltextResult | 'reject' | null
@@ -377,8 +385,29 @@ globalThis.__INVOKE__ = (cmd, args) => {
       const ch = args.onChannel;
       if (plan.reject) return Promise.reject(plan.reject);
       if (plan.holdIds.includes(id)) { S.heldAi.push({ cmd, id, ch }); return new Promise(() => {}); }
+      /* OPT-013 B1：deferIds = 由用例手动落定的 invoke（与 holdIds 的区别：返回
+         可 resolve 的 Promise——「流已 done 但 invoke 尚未 settle」的时序窗口
+         需要它，如逆序回读场景的两笔请求先后发起）。 */
+      if ((plan.deferIds ?? []).includes(id)) {
+        return new Promise((resolve) => { S.heldAi.push({ cmd, id, ch, resolve }); });
+      }
       emitAi(plan, ch);
       return Promise.resolve('');
+    }
+    /* OPT-013 B1：缓存签名校验（前端命中判定的后端权威）。
+       夹具缺省 { summaryVerified: true, translationVerified: true }（见 S 注释）；
+       「旧签名/无签名不得短路」用例置 false 模拟后端判定「未命中」。
+       aiCacheCheckPlan = { mode: 'defer' }：挂起本次校验（一次性），由用例
+       放行——驱动「验签在途窗口」（R1 P2-1）。 */
+    case 'ai_cache_check': {
+      if (S.aiCacheCheckPlan && S.aiCacheCheckPlan.mode === 'defer') {
+        /* 粘性计划（非一次性）：在途窗口内每一次校验都挂起并计数——第二个
+           校验被发出（修前缺陷）即可从 pendingAiChecks.length 看到。 */
+        return new Promise((resolve) => {
+          S.pendingAiChecks.push({ resolve: () => resolve(S.aiCacheCheck), id: Number(args.articleId) });
+        });
+      }
+      return Promise.resolve(S.aiCacheCheck);
     }
     /* TASK-094：布局绑定写命令必须「落库」——selectLayout 触发的后台 reload 会用
        list_feeds/list_folders 重建 feedIndex，mock 若不回写，写库后立即可见的
@@ -476,6 +505,9 @@ async function resetStore(extra) {
   S.heldAi = [];
   S.aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
   S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
+  S.aiCacheCheck = { summaryVerified: true, translationVerified: true };
+  S.aiCacheCheckPlan = null;
+  S.pendingAiChecks = [];
   S.rejectCmds = new Set();
   S.rejectWhen = null;
   S.getArticlesPlan = null;
@@ -493,6 +525,10 @@ async function resetStore(extra) {
      的正文/终态（与 viewEntriesCache 同型污染）——夹具复位一并清空 */
   const { resetBodyCacheForTests } = await import('../../dist-test/store/bodyCache.js');
   resetBodyCacheForTests();
+  /* OPT-013 B1：AI 请求代次/在途表同为模块级——上一个夹具里挂起的在途请求
+     （holdIds 永不 settle）若不摘除，下一个夹具的同键触发会被「复用」吞掉。 */
+  const { resetAiRequestStateForTests } = await import('../../dist-test/store/slices/ai.js');
+  resetAiRequestStateForTests();
   /* OPT-008B R1：settings 持久化链/已确认基线是模块级状态——复位避免跨用例
      串扰（失败回滚目标必须只来自本用例已确认的写入） */
   const { resetAppSettingsWriteStateForTests } = await import('../../dist-test/store/slices/settings.js');

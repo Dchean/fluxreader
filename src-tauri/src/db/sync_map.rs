@@ -670,16 +670,21 @@ pub fn list_unbound_local_feeds(conn: &Connection) -> AppResult<Vec<(i64, String
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 获取文章摘要用数据（ai_summarize 用）：(title, body_text, ai_summary)。
+/// AI 输入读取的行形状（get_article_for_summary / get_article_for_translation
+/// 共用；OPT-013 B1 起尾部携带已存缓存签名）：(title, 输入正文, 产物, 签名)。
+pub type ArticleAiInputRow = (String, String, Option<String>, Option<String>);
+
+/// 获取文章摘要用数据（ai_summarize 用）：(title, body_text, ai_summary, ai_summary_sig)。
 /// OPT-008B 第二阶段：正文纯文本来自 contents；输入键 = (title, body_text)
 /// ——标题不同的条目即便共享正文也不共用产物（产物仍存条目行）。
+/// OPT-013 B1：附带已存缓存签名——命中判定 = 产物非空且签名等于当前输入重算值。
 pub fn get_article_for_summary(
     conn: &Connection,
     article_id: i64,
-) -> AppResult<Option<(String, String, Option<String>)>> {
+) -> AppResult<Option<ArticleAiInputRow>> {
     let row = conn
         .query_row(
-            "SELECT a.title, COALESCE(c.body_text, ''), a.ai_summary
+            "SELECT a.title, COALESCE(c.body_text, ''), a.ai_summary, a.ai_summary_sig
              FROM articles a LEFT JOIN contents c ON c.id = a.content_id
              WHERE a.id = ?1",
             params![article_id],
@@ -688,6 +693,7 @@ pub fn get_article_for_summary(
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
                 ))
             },
         )
@@ -695,15 +701,16 @@ pub fn get_article_for_summary(
     Ok(row)
 }
 
-/// 获取文章翻译用数据（ai_translate 用）：(title, content_html, translated_content)。
+/// 获取文章翻译用数据（ai_translate 用）：(title, content_html, translated_content, translated_sig)。
 /// OPT-008B 第二阶段：正文 HTML 来自 contents；输入键 = (title, content_html, lang)。
+/// OPT-013 B1：附带已存缓存签名（同 get_article_for_summary）。
 pub fn get_article_for_translation(
     conn: &Connection,
     article_id: i64,
-) -> AppResult<Option<(String, String, Option<String>)>> {
+) -> AppResult<Option<ArticleAiInputRow>> {
     let row = conn
         .query_row(
-            "SELECT a.title, COALESCE(c.content_html, ''), a.translated_content
+            "SELECT a.title, COALESCE(c.content_html, ''), a.translated_content, a.translated_sig
              FROM articles a LEFT JOIN contents c ON c.id = a.content_id
              WHERE a.id = ?1",
             params![article_id],
@@ -712,6 +719,7 @@ pub fn get_article_for_translation(
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
                 ))
             },
         )

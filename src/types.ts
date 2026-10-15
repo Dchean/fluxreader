@@ -117,6 +117,12 @@ export interface ArticleEntry {
       （snippet 未变也失效，共享兄弟内容变更同理）。 */
   contentId?: number | null;
   contentRevision?: number;
+  /** OPT-013 B1：AI 产物缓存签名（各行由后端带回；null/undefined = 未标记版本）。
+      语义：产物非空而签名为空 → 组件呈现「未标记版本」（存量无签名产物可显示、
+      可被重新生成覆盖，但不冒充已验证缓存）。命中判定在 store/slices/ai.ts
+      经后端 ai_cache_check 完成（前端无法自算签名输入）。 */
+  aiSummarySig?: string | null;
+  translatedSig?: string | null;
 
   /* ---- 布局专属扩展（可空，按布局使用） ---- */
   durationSec?: number;   // 播客：时长秒数

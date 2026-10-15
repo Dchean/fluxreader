@@ -385,12 +385,16 @@ export function mergeSnapshotEntries(
     if (!prev) return a;
     let merged = a;
     const generating = !!(generatingIds[a.id] || translatingIds[a.id]);
-    /* 生成中：AI 流式产物不被抓取期更早的行覆盖（列空时保流式值） */
+    /* 生成中：AI 流式产物不被抓取期更早的行覆盖（列空时保流式值）。
+       OPT-013 B1：签名与被保留的产物成对——行清空但保留了 prev 的产物时，
+       签名也必须取 prev 的（否则「旧产物 + 新签名为空」会误现「未标记版本」）。 */
     if (generating && (prev.aiSummary || prev.translatedContent)) {
       merged = {
         ...merged,
         aiSummary: merged.aiSummary || prev.aiSummary,
         translatedContent: merged.translatedContent || prev.translatedContent,
+        aiSummarySig: merged.aiSummary ? merged.aiSummarySig : prev.aiSummarySig,
+        translatedSig: merged.translatedContent ? merged.translatedSig : prev.translatedSig,
       };
     } else if (prev.url && !a.url) {
       /* 轻字段继承：仅 url（详情行字段）——其余列一律本次行真值 */
@@ -470,7 +474,7 @@ export function mergeSnapshotEntries(
       if (!isProtectedField(a.id, 'isStarred') || (src !== undefined && src.isStarred === a.isStarred)) {
         bumpEntryVersion(a.id, 'isStarred');
       }
-      facts.set(a.id, { aiSummary: a.aiSummary, translatedContent: a.translatedContent, snippet: a.snippet });
+      facts.set(a.id, { aiSummary: a.aiSummary, translatedContent: a.translatedContent, aiSummarySig: a.aiSummarySig ?? null, translatedSig: a.translatedSig ?? null, snippet: a.snippet });
     }
     for (const p of prevEntries) prevSnippets.set(p.id, p.snippet);
     reconcileBodyEntities(facts, rowsFetchedAt, (id) => !!(generatingIds[id] || translatingIds[id]), prevSnippets);

@@ -97,6 +97,10 @@ export interface ArticleListItemRow {
   /** OPT-008B 第二阶段：内容身份 + 修订（前端失效依据；两种模式都返回） */
   content_id?: number | null;
   content_revision?: number;
+  /** OPT-013 B1：AI 产物缓存签名（生成时输入身份的 sha256；存量/未生成行 null）。
+   *  产物非空且签名为空 = 「未标记版本」——可显示、可重新生成，但不冒充缓存。 */
+  ai_summary_sig?: string | null;
+  translated_sig?: string | null;
 }
 
 export interface ArticleDetailRow extends ArticleListItemRow {
@@ -617,6 +621,28 @@ export const api = {
     return (await inv('ai_translate', { articleId, onChannel: channel })) as string;
   },
 
+  /** OPT-013 B1：AI 缓存签名校验（后端权威结论）。
+   *
+   *  签名输入（模型/endpoint/提示词/正文哈希/修订）只有后端在同一份配置快照下
+   *  能算——前端不再自行以「产物非空」短路，命中判定在动作时刻经本命令取回：
+   *  对应项 true = 产物非空且签名匹配当前输入，可复用展示；false = 未生成、
+   *  无签名（存量）或已过期（换模型/提示词/正文修订）→ 走重新生成。
+   *  浏览器环境无 IPC → null（调用方按「无后端可校验」处理）。
+   *
+   *  Note: 命中判定/代次/在途契约 — 见
+   *  .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md（OPT-013 B1 追加）。 */
+  async aiCacheCheck(
+    articleId: number,
+  ): Promise<{ summaryVerified: boolean; translationVerified: boolean } | null> {
+    const inv = await getInvoke();
+    return inv
+      ? (await inv('ai_cache_check', { articleId }) as {
+          summaryVerified: boolean;
+          translationVerified: boolean;
+        })
+      : null;
+  },
+
   /** 全文提取（Readability）：拉原文网页抽正文并覆盖缓存。
    * TASK-076：返回结构化结果而非裸字符串——degraded=true 表示本次**没有采用**提取
    * 结果（html 是保留的原文），reason 给出原因；调用方不必再靠比对字符串去猜。 */
@@ -916,5 +942,10 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
        （列表快照合并与时序水合守卫消费，见 internals/bodyCache）。 */
     contentId: row.content_id ?? null,
     contentRevision: row.content_revision ?? 0,
+    /* OPT-013 B1：AI 产物缓存签名进视图行（null/undefined = 未标记版本——
+       组件据此呈现「未标记版本」标记；命中判定本身在 store/slices/ai.ts
+       经后端 ai_cache_check 完成）。 */
+    aiSummarySig: row.ai_summary_sig ?? null,
+    translatedSig: row.translated_sig ?? null,
   };
 }

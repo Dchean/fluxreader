@@ -332,6 +332,8 @@ pub fn run() {
             commands::ai_list_models,
             commands::ai_summarize,
             commands::ai_translate,
+            // OPT-013 B1：缓存签名校验（前端命中判定取后端权威结论）
+            commands::ai_cache_check,
             // 全文提取
             commands::extract_fulltext,
             // 图片代理（防盗链兼容）

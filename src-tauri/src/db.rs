@@ -42,9 +42,9 @@ pub use articles::{
     scope_counts, search_articles, set_article_ai_fields, set_article_ai_fields_checked, set_read,
     set_read_bulk_with_enqueue, set_read_with_enqueue, set_starred, set_starred_with_enqueue,
     upsert_article_with_feed, upsert_article_with_feed_tracked, upsert_remote_article,
-    AiCommitToken, ArticleListItem, ArticleQuery, ArticleRow, ArticleUpsert, ContentCommitToken,
-    CountsSnapshot, FeedCounts, NewArticle, ReadWriteReceipt, ScopeCounts, ScopeCountsDetail,
-    ScopedCounts,
+    AiCommitToken, AiProduct, ArticleListItem, ArticleQuery, ArticleRow, ArticleUpsert,
+    ContentCommitToken, CountsSnapshot, FeedCounts, NewArticle, ReadWriteReceipt, ScopeCounts,
+    ScopeCountsDetail, ScopedCounts,
 };
 /// OPT-008B 第二阶段：contents 单一正文所有权（常量/判空辅助供 db 各子模块与
 /// 命令层经 `crate::db::` 路径消费；写入路径经 `super::contents::` 直接调用）。

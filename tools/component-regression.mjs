@@ -51,6 +51,9 @@ await import('./component-tests/revision-shared-layouts.test.mjs');
 await import('./component-tests/sync-data-events.test.mjs');
 /* OPT-011（F13）：AI 开关三态——Reader 自动请求订阅有效配置 + FeedsTab 三态控件。 */
 await import('./component-tests/ai-settings.test.mjs');
+/* OPT-013 B1：AI 产物缓存签名——「未标记版本」标记、未命中不短路（真实点击发
+   起生成）、命中不重复计费、同键在途只发一次。 */
+await import('./component-tests/ai-cache-signature.test.mjs');
 /* OPT-011 R5：配置应用/上传经真实 UI 接入同一 AI 写协议（写屏障/前沿等待/回读确认）。 */
 await import('./component-tests/config-apply.test.mjs');
 /* OPT-009 B3：订阅写回能力声明与持久回执（FeedsTab 确认文案、Fever 仅本地、

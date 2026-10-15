@@ -402,9 +402,32 @@ fn ai_commit_guard_rejects_after_content_change_and_cleanup() {
     )
     .unwrap();
 
-    // 正常路径：前提相符 → 写入成功
+    // 正常路径：前提相符 → 写入成功（OPT-013 B1：产物与签名成对提交）
     let token = db::article_ai_commit_token(&conn, aid).unwrap().unwrap();
-    assert!(db::set_article_ai_fields_checked(&conn, aid, &token, Some("摘要 v1"), None).unwrap());
+    let ok = db::set_article_ai_fields_checked(
+        &conn,
+        aid,
+        &token,
+        db::AiProduct::Summary {
+            text: "摘要 v1",
+            signature: "sig-v1",
+        },
+    )
+    .unwrap();
+    assert!(ok, "前提相符提交成功");
+    let (prod, sig): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT ai_summary, ai_summary_sig FROM articles WHERE id = ?1",
+            [aid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(prod.as_deref(), Some("摘要 v1"));
+    assert_eq!(
+        sig.as_deref(),
+        Some("sig-v1"),
+        "签名与产物同一条 UPDATE 落库"
+    );
 
     // 内容被替换后再提交旧前提 → 拒绝（不得写已替换内容）
     let stale = token.clone();
@@ -416,17 +439,27 @@ fn ai_commit_guard_rejects_after_content_change_and_cleanup() {
     )
     .unwrap();
     assert!(
-        !db::set_article_ai_fields_checked(&conn, aid, &stale, Some("过期摘要"), None).unwrap(),
+        !db::set_article_ai_fields_checked(
+            &conn,
+            aid,
+            &stale,
+            db::AiProduct::Summary {
+                text: "过期摘要",
+                signature: "sig-stale",
+            },
+        )
+        .unwrap(),
         "内容已替换：旧前提的迟到 AI 提交必须拒绝"
     );
-    let summary: Option<String> = conn
+    let (summary, summary_sig): (Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT ai_summary FROM articles WHERE id = ?1",
+            "SELECT ai_summary, ai_summary_sig FROM articles WHERE id = ?1",
             [aid],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
     assert_eq!(summary.as_deref(), Some("摘要 v1"), "拒绝不覆盖既有产物");
+    assert_eq!(summary_sig.as_deref(), Some("sig-v1"), "拒绝不得半写签名");
 
     // 清理（ai scope）→ ai_epoch 推进：清前捕获的前提提交被拒（不复活已清产物）
     conn.execute(
@@ -439,26 +472,46 @@ fn ai_commit_guard_rejects_after_content_change_and_cleanup() {
     let (_deleted, cleared) = db::cleanup_cache(&mut conn2, 30, "ai").unwrap();
     assert_eq!(cleared, 1, "按年龄清理命中该条目 AI");
     assert!(
-        !db::set_article_ai_fields_checked(&conn2, aid, &pre_clean_token, Some("复活摘要"), None)
-            .unwrap(),
+        !db::set_article_ai_fields_checked(
+            &conn2,
+            aid,
+            &pre_clean_token,
+            db::AiProduct::Summary {
+                text: "复活摘要",
+                signature: "sig-revive",
+            },
+        )
+        .unwrap(),
         "清理后的迟到提交必须被拒（不得复活已清产物）"
     );
-    let summary2: Option<String> = conn2
+    let (summary2, summary_sig2): (Option<String>, Option<String>) = conn2
         .query_row(
-            "SELECT ai_summary FROM articles WHERE id = ?1",
+            "SELECT ai_summary, ai_summary_sig FROM articles WHERE id = ?1",
             [aid],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap();
     assert_eq!(summary2, None, "清理保持：无 AI 产物");
+    assert_eq!(
+        summary_sig2, None,
+        "清理同时使签名失效（不得只清产物留旧签名）"
+    );
 
     // 条目被删除后：迟到提交同样拒绝（不复活已删条目）
     conn2
         .execute("DELETE FROM articles WHERE id = ?1", [aid])
         .unwrap();
     assert!(
-        !db::set_article_ai_fields_checked(&conn2, aid, &pre_clean_token, Some("复活摘要2"), None)
-            .unwrap(),
+        !db::set_article_ai_fields_checked(
+            &conn2,
+            aid,
+            &pre_clean_token,
+            db::AiProduct::Summary {
+                text: "复活摘要2",
+                signature: "sig-revive2",
+            },
+        )
+        .unwrap(),
         "已删除条目的迟到 AI 提交必须拒绝"
     );
 }
@@ -655,6 +708,10 @@ fn seed_v21_legacy(path: &std::path::Path) -> (i64, i64) {
         -- OPT-010 v26 物理回拨：分类稳定身份列（folders 表无后续重建迁移，
         -- 不回拨则重放 v26 的 ALTER 报 duplicate column）。
         ALTER TABLE folders DROP COLUMN sync_id;
+        -- OPT-013 v27 物理回拨：AI 产物缓存签名列（articles 表不再重建，
+        -- 不回拨则重放 v27 的 ALTER 报 duplicate column）。
+        ALTER TABLE articles DROP COLUMN ai_summary_sig;
+        ALTER TABLE articles DROP COLUMN translated_sig;
         PRAGMA user_version = 21;
         "#,
     )
@@ -1045,7 +1102,7 @@ fn extract_commit_repoint_failure_is_atomic_and_returns_identity() {
     );
     // 后续 AI 输入以新版本为准：summary/translation 的正文读取经 contents JOIN
     // ——重指后同一入口读到提取正文（而非旧 RSS 摘要）。
-    let (title, body, _cached) = db::get_article_for_summary(&conn, aid).unwrap().unwrap();
+    let (title, body, _cached, _sig) = db::get_article_for_summary(&conn, aid).unwrap().unwrap();
     assert_eq!(title, "甲");
     assert!(
         body.contains("提取全文"),
