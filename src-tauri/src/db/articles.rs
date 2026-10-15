@@ -823,6 +823,15 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
             ),
             [],
         )?;
+        // OPT-013 B2：清 AI 缓存必须同时带走分段进度（清除使签名失效的
+        // 持久化侧落实——片段绑定签名，留着会让"已清除"的内容被恢复复用）。
+        tx.execute(
+            &format!(
+                "DELETE FROM ai_segments WHERE article_id IN (
+                     SELECT id FROM articles WHERE datetime(published_at) < {cutoff})"
+            ),
+            [],
+        )?;
         // FTS 由 trg_articles_fts_au（UPDATE OF ai_summary/translated_content）同步
     }
     tx.commit()?;

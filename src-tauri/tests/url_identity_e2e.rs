@@ -64,6 +64,9 @@ fn rollback_v22_shape(conn: &rusqlite::Connection) {
         -- 不回拨则重放 v27 的 ALTER 报 duplicate column）。
         ALTER TABLE articles DROP COLUMN ai_summary_sig;
         ALTER TABLE articles DROP COLUMN translated_sig;
+        -- OPT-013 v28 物理回拨：翻译片段表（不回拨则重放 v28 的 CREATE TABLE
+        -- 报 already exists）。
+        DROP TABLE IF EXISTS ai_segments;
         CREATE VIRTUAL TABLE articles_fts USING fts5(title, body_text, author, ai_summary, translated_content,
             content='articles', content_rowid='id', tokenize='unicode61');
         CREATE TRIGGER articles_ai AFTER INSERT ON articles BEGIN

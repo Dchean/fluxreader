@@ -123,7 +123,7 @@ const S = {
      mock 配置下，这是忠实缺省；测「旧签名/无签名不短路」的用例显式置 false。
      aiCacheCheckPlan = { mode: 'defer' } 时校验挂起（一次性计划）——
      「验签在途窗口」并发用例（R1 P2-1）需要手动放行。 */
-  aiCacheCheck: { summaryVerified: true, translationVerified: true },
+  aiCacheCheck: { summaryVerified: true, translationVerified: true, translationSegments: { total: 1, completed: 0, discarded: 0 } },
   aiCacheCheckPlan: null,
   pendingAiChecks: [],
   settingsRaw: null,     // get_setting('app_settings') 的返回值
@@ -505,7 +505,7 @@ async function resetStore(extra) {
   S.heldAi = [];
   S.aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
   S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
-  S.aiCacheCheck = { summaryVerified: true, translationVerified: true };
+  S.aiCacheCheck = { summaryVerified: true, translationVerified: true, translationSegments: { total: 1, completed: 0, discarded: 0 } };
   S.aiCacheCheckPlan = null;
   S.pendingAiChecks = [];
   S.rejectCmds = new Set();

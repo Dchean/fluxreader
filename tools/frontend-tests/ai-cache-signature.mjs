@@ -1,5 +1,6 @@
 // tools/frontend-tests/ai-cache-signature.mjs
-// 领域模块：OPT-013 B1 AI 产物缓存签名（前端命中判定 / 请求代次 / 在途复用）
+// 领域模块：OPT-013 B1/B2 AI 产物缓存签名（前端命中判定 / 请求代次 / 在途复用）
+// B2 追加：翻译分段计划的最小提示（整篇重生成必告知 / 继续提示 / 静默边界）
 // 覆盖：旧签名/无签名产物不得被前端非空短路（真实行为断言，不以源码 contains
 // 代替）；后端判定命中才短路；逆序安全回读守卫（可控 Promise 时序，不靠 sleep
 // 竞态）；过时 Done 不清除较新请求的标记；自动触发与手动入口复用同一在途请求。
@@ -165,6 +166,90 @@ export async function run(ctx) {
     S.invokeCalls.filter((c) => c.cmd === 'ai_summarize').length === 1);
   S.aiCacheCheckPlan = null;
   S.pendingAiChecks = [];
+  S.backendRows = BASE_ROWS;
+  await bootFixture();
+
+  /* ---------- (b2-1) OPT-013 B2：整篇重生成必须如实告知（最小提示） ----------
+     旧片段因输入变化作废（discarded > 0）→ 无论有无前端产物，触发翻译都必须
+     出现告知提示（定版 §3 的界面告知义务）。R1 复审 P3-4：作废与可续并存
+     （discarded > 0 且当前签名 completed > 0）时实际从第 completed+1 段继续、
+     复用已完成段——文案必须二分：纯作废才称「整篇重新翻译」，混合态称
+     「旧片段已作废 + 从第 N 段继续」。 */
+  await bootFixture();
+  const toastTexts = () => store.getState().toasts.map((t) => t.text);
+  const clearToasts = () => store.setState({ toasts: [] });
+  /* 变体 A（混合态）：前端已有（未验证）产物 + 当前签名有 1 段可续、另有 1 段作废 */
+  S.backendRows = BASE_ROWS.map((r) => (r.id === 201 ? { ...r, translated_content: '<p>旧译文</p>' } : r));
+  await store.getState().reloadFromBackend();
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 1, discarded: 1 },
+  };
+  S.aiTr = { deltas: ['新译文'], error: null, reject: null, finish: true, holdIds: [] };
+  clearToasts();
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(b2-1) 作废与可续并存：提示必须如实为「旧片段已作废 + 从第 2 段继续」（旧产物在也不豁免）',
+    toastTexts().some((t) => t.includes('旧片段已作废') && t.includes('第 2 段') && t.includes('共 3 段')));
+  checkNew('(b2-1) 混合态不得出现「整篇重新翻译」（文案与复用已完成段的实际行为必须一致）',
+    !toastTexts().some((t) => t.includes('整篇重新翻译')));
+  checkNew('(b2-1) 提示与生成并行：生成请求照常发出（提示不阻塞）',
+    S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1);
+
+  /* 变体 B：前端无产物且无可续段（completed = 0，旧片段只在后端）→ 纯作废，
+     必须提示整篇重新生成 */
+  await bootFixture();
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 0, discarded: 1 },
+  };
+  S.aiTr = { deltas: ['新译文'], error: null, reject: null, finish: true, holdIds: [] };
+  clearToasts();
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(b2-1) 纯作废（completed = 0）且前端无产物：提示整篇重生成',
+    toastTexts().some((t) => t.includes('整篇重新翻译')));
+  S.backendRows = BASE_ROWS;
+  await bootFixture();
+
+  /* ---------- (b2-2) 从已完成片段继续：非静默入口提示从哪一段继续 ---------- */
+  await bootFixture();
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 1, discarded: 0 },
+  };
+  S.aiTr = { deltas: ['继续段'], error: null, reject: null, finish: true, holdIds: [] };
+  clearToasts();
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(b2-2) 有已完成片段且未作废：提示从第 2 段继续（只重发未完成段）',
+    toastTexts().some((t) => t.includes('第 2 段') && t.includes('共 3 段')));
+
+  /* 静默（自动触发）不提示「继续」（避免按文章刷屏），但作废仍必须提示 */
+  await bootFixture();
+  store.setState({ activeArticleId: '201' });
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 1, discarded: 0 },
+  };
+  S.aiTr = { deltas: ['继续段'], error: null, reject: null, finish: true, holdIds: [] };
+  clearToasts();
+  store.getState().toggleReaderTranslation({ silent: true });
+  await nTick(20);
+  checkNew('(b2-2) 静默自动触发不提示「继续」（继续是常态信息，不做刷屏）',
+    !toastTexts().some((t) => t.includes('继续')));
+  await bootFixture();
+  store.setState({ activeArticleId: '201' });
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 0, discarded: 2 },
+  };
+  S.aiTr = { deltas: ['重生成'], error: null, reject: null, finish: true, holdIds: [] };
+  clearToasts();
+  store.getState().toggleReaderTranslation({ silent: true });
+  await nTick(20);
+  checkNew('(b2-2) 作废（整篇重生成）即使静默自动触发也必须提示（告知义务不让位）',
+    toastTexts().some((t) => t.includes('整篇重新翻译')));
   S.backendRows = BASE_ROWS;
   await bootFixture();
 }

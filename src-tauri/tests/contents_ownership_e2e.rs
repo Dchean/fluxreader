@@ -712,6 +712,9 @@ fn seed_v21_legacy(path: &std::path::Path) -> (i64, i64) {
         -- 不回拨则重放 v27 的 ALTER 报 duplicate column）。
         ALTER TABLE articles DROP COLUMN ai_summary_sig;
         ALTER TABLE articles DROP COLUMN translated_sig;
+        -- OPT-013 v28 物理回拨：翻译片段表（不回拨则重放 v28 的 CREATE TABLE
+        -- 报 already exists）。
+        DROP TABLE IF EXISTS ai_segments;
         PRAGMA user_version = 21;
         "#,
     )

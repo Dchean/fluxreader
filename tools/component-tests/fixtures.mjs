@@ -147,7 +147,7 @@ function defaultHandler(cmd, args) {
     /* OPT-013 B1：缓存签名校验（前端命中判定的后端权威）。夹具缺省「命中」——
        行里携带的产物都生成于同一份夹具配置下；测「未标记版本/旧签名不短路」
        的用例经 setPlan 覆写为未命中。 */
-    case 'ai_cache_check': return Promise.resolve({ summaryVerified: true, translationVerified: true });
+    case 'ai_cache_check': return Promise.resolve({ summaryVerified: true, translationVerified: true, translationSegments: { total: 1, completed: 0, discarded: 0 } });
     default: return Promise.resolve(null);
   }
 }

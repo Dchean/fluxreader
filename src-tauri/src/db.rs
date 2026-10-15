@@ -23,6 +23,7 @@ fn null_if_empty(v: Option<String>) -> Option<String> {
 // Note: db/ 按领域拆分子模块，对外接口保持 crate::db:: 不变（拆分是纯搬运，
 // 调用方无需改动）；延续「单体按领域拆分」的既有做法。
 
+mod ai_segments;
 mod articles;
 mod contents;
 mod feeds;
@@ -34,6 +35,10 @@ mod sync_map;
 mod sync_queue;
 mod url_norm;
 
+pub use ai_segments::{
+    ai_segment_stats, delete_stale_ai_segments, list_ai_segments, upsert_ai_segment,
+    AI_PRODUCT_TRANSLATION,
+};
 pub use articles::{
     article_ai_commit_token, article_content_commit_token, article_index, articles_without_cover,
     cleanup_cache, clear_article_cover_if_matches, clear_dedup_tombstones, counts_snapshot,

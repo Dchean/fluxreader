@@ -189,3 +189,46 @@ componentTest('OPT-013 B1：同时在途同一 (条目, 产物) 只发一次请�
     resetPlan();
   }
 });
+
+componentTest('OPT-013 B2：整篇重新生成的最小提示真实出现在组件链路（真实点击「翻译」）', { timeout: 30000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows([UNSIGNED_ROW]);
+
+  const { createElement, act } = await import('react');
+  const { Reader } = await import('../../src/components/Reader.tsx');
+  const entry = await mount(createElement(Reader));
+
+  await act(async () => { useAppStore.getState().selectArticle('101'); });
+  await waitFor(() => getBodyEntry('101')?.state === 'ready', { label: '101 水合完成' });
+  await act(async () => { useAppStore.setState({ toasts: [] }); });
+
+  /* 后端计划：旧片段因输入变化作废、当前签名无可续段（completed = 0）→ 必须
+     整篇重新生成 + 告知（纯作废形态；R1 复审 P3-4：作废与可续并存走合并文案，
+     见 frontend-tests 域用例）。生成请求挂起（只取证提示链，不让流式副作用混进
+     断言）。 */
+  setPlan({
+    ai_cache_check: () => Promise.resolve({
+      summaryVerified: true,
+      translationVerified: false,
+      translationSegments: { total: 3, completed: 0, discarded: 1 },
+    }),
+    ai_translate: () => new Promise(() => {}),
+  });
+  try {
+    const translateBtn = [...entry.container.querySelectorAll('.reader-actions-left button')]
+      .find((b) => b.textContent.includes('翻译'));
+    assert.ok(translateBtn, 'Reader 工具栏应有翻译按钮');
+    await act(async () => { translateBtn.click(); });
+    await flush(6);
+    const toasts = useAppStore.getState().toasts.map((t) => t.text);
+    assert.ok(
+      toasts.some((t) => t.includes('整篇重新翻译')),
+      `真实点击「翻译」后必须出现整篇重生成提示（实际 toasts=${JSON.stringify(toasts)}）`,
+    );
+    assert.ok(entry.container.querySelector('.reader-active-view'), 'Reader 挂载树保持');
+  } finally {
+    resetPlan();
+  }
+});

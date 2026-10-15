@@ -1,5 +1,6 @@
 import type { StateCreator } from 'zustand';
 import { api } from '../../lib/api';
+import type { TranslationSegmentPlan } from '../../lib/api';
 import { appendAiDelta, applyAiProduct, getBodyEntry } from '../bodyCache';
 import type { AppState } from '../types';
 
@@ -108,6 +109,10 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     set((st) => ({ entries: st.entries.map((a) => (a.id === id ? { ...a, [field]: value, ...sigPatch } : a)) }));
   };
 
+  /** 生成入口的统一形态：`plan` 由验签链透传（undefined = 未取到，入口自查）；
+      null = 已确认不可用（不重复取）。 */
+  type RunAiRequest = (id: string, silent: boolean, plan?: TranslationSegmentPlan | null) => void;
+
   /** OPT-013 B1：缓存命中判定（后端权威）。
    *
    *  签名输入（模型/endpoint/提示词/正文哈希/修订/分段策略）只有后端在同一份
@@ -118,13 +123,20 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
    *  校验本身失败（IPC 故障/未配置）按「不可验证」保守处理 = 不触发重新生成：
    *  校验故障不得把可用产物清空重烧（B3 再补「已过期」态与入口）。
    *  浏览器 mock 无 IPC（返回 null）→ 维持既有演示语义（按可复用展示）。 */
-  const verifyCacheHit = async (id: string, kind: AiProductKind): Promise<boolean> => {
+  const checkCache = async (
+    id: string,
+    kind: AiProductKind,
+  ): Promise<{ hit: boolean; plan: TranslationSegmentPlan | null }> => {
     try {
       const res = await api.aiCacheCheck(Number(id));
-      if (!res) return true;
-      return kind === 'summary' ? res.summaryVerified : res.translationVerified;
+      if (!res) return { hit: true, plan: null };
+      return {
+        hit: kind === 'summary' ? res.summaryVerified : res.translationVerified,
+        // 分段计划只与翻译有关；摘要入口不消费（避免无人消费字段）
+        plan: kind === 'translation' ? res.translationSegments ?? null : null,
+      };
     } catch {
-      return true;
+      return { hit: true, plan: null };
     }
   };
 
@@ -143,16 +155,59 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     id: string,
     kind: AiProductKind,
     silent: boolean,
-    run: (id: string, silent: boolean) => void,
+    run: RunAiRequest,
   ): void => {
     const key = aiKeyOf(id, kind);
     let chain: Promise<void> = Promise.resolve();
     chain = (async () => {
-      if (await verifyCacheHit(id, kind)) return; // 命中：复用展示，链结束
+      const check = await checkCache(id, kind);
+      if (check.hit) return; // 命中：复用展示，链结束
       if (aiInFlight.get(key) !== chain) return; // 防御：已被更新的在途接管
-      run(id, silent);
+      run(id, silent, kind === 'translation' ? check.plan : null);
     })();
     trackAiRequest(key, chain);
+  };
+
+  /** OPT-013 B2：翻译分段的最小提示（完整状态机归 013-B3）。
+   *
+   *  数据源 = `ai_cache_check` 的分段计划：`discarded > 0` 表示存在因输入变化
+   *  作废的旧片段，生成前**必须明确告知**（定版 §3）。R1 复审 P3-4：作废与可续
+   *  并存（`discarded > 0` 且 `0 < completed < total`）时实际仍会复用当前签名的
+   *  已完成段——从第 `completed+1` 段继续，并非整篇重生成；该情形称「旧片段
+   *  已作废；将从第 N 段继续」。R2 复审口径：else 分支实际覆盖 `completed == 0`
+   *  （真·纯作废）与 `completed == total`（全部段已在——零重发、直接提交；
+   *  精确文案的收口归 B3），共用文案不得被读作对后者的「整篇重新翻译」承诺。
+   *  非 silent 入口另有未作废的「继续」提示（discarded = 0 且 `0 < completed <
+   *  total`）；提示只在多段长文出现（短文 total=1 / 无进度时静默），不会造成
+   *  常态噪音；与入参 `plan` 配套的内部小助手**不阻塞生成**（fire-and-forget）。 */
+  const notifySegmentPlan = (
+    plan: { total: number; completed: number; discarded: number } | null | undefined,
+    silent: boolean,
+  ): void => {
+    if (!plan) return;
+    if (plan.discarded > 0) {
+      if (plan.completed > 0 && plan.completed < plan.total) {
+        get().showToast(
+          `内容或模型配置已变化：旧片段已作废；将从第 ${plan.completed + 1} 段继续（共 ${plan.total} 段，已完成的片段不重发）`,
+        );
+      } else {
+        get().showToast('内容或模型配置已变化：旧片段不可复用，正在整篇重新翻译');
+      }
+      return;
+    }
+    if (!silent && plan.total > 1 && plan.completed > 0 && plan.completed < plan.total) {
+      get().showToast(
+        `将从第 ${plan.completed + 1} 段继续（共 ${plan.total} 段，已完成的片段不重发）`,
+      );
+    }
+  };
+
+  /** 取分段计划并提示（生成入口自带的一次轻量 IPC；失败静默——提示不是生成前提）。 */
+  const hintSegmentPlan = (id: string, silent: boolean): void => {
+    void api
+      .aiCacheCheck(Number(id))
+      .then((res) => notifySegmentPlan(res?.translationSegments, silent))
+      .catch(() => { /* 计划不可用不影响生成 */ });
   };
 
   /* ---------- 生成流程（三个入口共用：请求代次 + 落地守卫） ---------- */
@@ -229,8 +284,14 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     trackAiRequest(key, p);
   };
 
-  /** 卡片级翻译生成/重试（状态按条目隔离，不复用全局 translating 单布尔）。 */
-  const runCardTranslation = (id: string, silent: boolean): void => {
+  /** 卡片级翻译生成/重试（状态按条目隔离，不复用全局 translating 单布尔）。
+      `plan` 为 undefined 时自查分段计划并提示（提示不阻塞生成；B2 最小 UI）。 */
+  const runCardTranslation = (id: string, silent: boolean, plan?: TranslationSegmentPlan | null): void => {
+    if (plan === undefined) {
+      hintSegmentPlan(id, silent);
+    } else {
+      notifySegmentPlan(plan, silent);
+    }
     const key = aiKeyOf(id, 'translation');
     const gen = beginAiRequest(key);
     const current = (): boolean => isCurrentAiRequest(key, gen);
@@ -336,8 +397,14 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     trackAiRequest(key, p);
   };
 
-  /** Reader 级翻译生成/重试（复用全局 translating 单布尔 + 展示态切换）。 */
-  const runReaderTranslation = (id: string, silent: boolean): void => {
+  /** Reader 级翻译生成/重试（复用全局 translating 单布尔 + 展示态切换）。
+      `plan` 语义同 runCardTranslation。 */
+  const runReaderTranslation = (id: string, silent: boolean, plan?: TranslationSegmentPlan | null): void => {
+    if (plan === undefined) {
+      hintSegmentPlan(id, silent);
+    } else {
+      notifySegmentPlan(plan, silent);
+    }
     const key = aiKeyOf(id, 'translation');
     const gen = beginAiRequest(key);
     const current = (): boolean => isCurrentAiRequest(key, gen);

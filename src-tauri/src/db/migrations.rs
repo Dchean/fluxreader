@@ -776,6 +776,29 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         ALTER TABLE articles ADD COLUMN translated_sig TEXT;
     "#,
         ),
+        // OPT-013 B2：翻译片段持久化（长文分段的恢复依据）。
+        // - 每个**完成**片段独立落库，绑定 B1 的缓存签名（签名输入含
+        //   SEGMENT_POLICY_VERSION 与整篇正文哈希 → 同一签名下的片段序列可复现；
+        //   模型/提示词/正文修订变化即换签名 → 旧片段不可复用）。
+        // - 主键 (article_id, product, signature, segment_index)：同段重试按
+        //   UPSERT 覆盖，不追加重复文本；PK 前缀即按条目/产物的读取与清理路径。
+        // - 只有全部片段完成才由命令层写整篇产物（本表不参与完整产物判定）。
+        // - 条目删除经 FK 级联回收（连接层 foreign_keys=ON）；清 AI 缓存
+        //   （cache_cleanup scope='ai'）显式删除——「清除必须同时使签名失效」。
+        // user_version=28。
+        M::up(
+            r#"
+        CREATE TABLE ai_segments (
+            article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+            product TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            segment_index INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (article_id, product, signature, segment_index)
+        );
+    "#,
+        ),
     ])
 });
 

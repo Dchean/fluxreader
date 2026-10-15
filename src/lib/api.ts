@@ -192,6 +192,26 @@ export interface ExtractFulltextResult {
   contentRevision?: number;
 }
 
+/** OPT-013 B2：翻译分段计划（ai_cache_check 响应的一部分）。
+ *  - total：当前输入下的总段数（短文 = 1；空正文 = 0）；
+ *  - completed：当前签名下已持久化的完成段数（重启后可恢复的依据）；
+ *  - discarded：因输入变化（模型/提示词/正文修订/分段策略）作废的旧片段数——
+ *    > 0 表示存在作废旧片段、界面必须如实告知（B2 最小提示）；但**不**一律
+ *    等于整篇重新生成：`0 < completed < total` 时复用已完成段、从第
+ *    completed+1 段继续（R2 复审口径收紧）。 */
+export interface TranslationSegmentPlan {
+  total: number;
+  completed: number;
+  discarded: number;
+}
+
+/** OPT-013 B1/B2：ai_cache_check 响应（命中判定 + 翻译分段计划）。 */
+export interface AiCacheCheckResult {
+  summaryVerified: boolean;
+  translationVerified: boolean;
+  translationSegments: TranslationSegmentPlan;
+}
+
 export interface SyncReport {
   pushed_states: number;
   pushed_feeds: number;
@@ -633,13 +653,10 @@ export const api = {
    *  .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md（OPT-013 B1 追加）。 */
   async aiCacheCheck(
     articleId: number,
-  ): Promise<{ summaryVerified: boolean; translationVerified: boolean } | null> {
+  ): Promise<AiCacheCheckResult | null> {
     const inv = await getInvoke();
     return inv
-      ? (await inv('ai_cache_check', { articleId }) as {
-          summaryVerified: boolean;
-          translationVerified: boolean;
-        })
+      ? (await inv('ai_cache_check', { articleId }) as AiCacheCheckResult)
       : null;
   },
 

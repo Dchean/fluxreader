@@ -118,11 +118,31 @@ impl AiConfig {
     }
 }
 
-/* ---------------- OPT-013 B1：AI 产物缓存签名 ---------------- */
+/* ---------------- OPT-013 B1/B2：AI 产物缓存签名与分段策略 ---------------- */
 
-/// 分段策略版本：签名输入的一部分。B1 尚无分段（一次性送整篇），固定 "v1-flat"；
-/// 013-B2 引入分段后必须递增，使旧的整篇签名不再被当成同一策略的缓存。
-pub const SEGMENT_POLICY_VERSION: &str = "v1-flat";
+/// 分段策略版本：签名输入的一部分。
+/// - `v1-flat`（B1）：整篇一次性发送，无分段。
+/// - `v2-html-blocks-8192`（B2）：按 HTML 节点边界、单段预算
+///   [`TRANSLATE_SEGMENT_MAX_BYTES`] 的确定性分段（见 `crate::ai_segments`）。
+///
+/// 策略（算法/预算/边界规则/摘要超预算语义）任何变化都必须递增本常量：
+/// 它进签名输入，旧签名与旧片段因此不再被当成同一策略的缓存/可恢复片段。
+pub const SEGMENT_POLICY_VERSION: &str = "v2-html-blocks-8192";
+
+/// 翻译分段的单段预算（UTF-8 字节）。取 8192：约 2.7k 汉字 / 8k ASCII 字符，
+/// 按最宽估算其译文输出仍小于 [`TRANSLATE_MAX_TOKENS`]（4096 token）的模型
+/// 输出上限；超长单节点按同一预算递归拆分（有界拆分下限见 ai_segments 头注）。
+pub const TRANSLATE_SEGMENT_MAX_BYTES: usize = 8192;
+
+/// 摘要输入预算（UTF-8 字节）：超过即**显式失败**（错误码 `aiTooLong`）——
+/// 不静默截掉后半篇、也不假称完整。策略取舍见 Note「OPT-013 B2 追加」：
+/// 模板摘要（多段摘要再合并）会引入二次模型调用与合并口径，成本/不确定性
+/// 高于收益，本卡选择如实失败并把重试入口留给用户。
+///
+/// 该上限是**本地防御性预算**，不是模型上下文保证：更小的模型窗口由服务端
+/// 错误如实回传（原样透传，不翻译成"内容太长"之类的猜测）；64 KiB 已远超
+/// common 8k–32k 上下文模型的单次输入容量，只拦真正病态的输入。
+pub const SUMMARY_INPUT_MAX_BYTES: usize = 64 * 1024;
 
 /// 缓存签名的输入清单（字段集合 = 定版 OPT-013 §1 的签名输入；**api_key 不在
 /// 其中**——签名可公开，凭据绝不进入）。
@@ -992,6 +1012,21 @@ mod tests {
     fn output_token_budgets_stay_1024_and_4096() {
         assert_eq!(SUMMARY_MAX_TOKENS, 1024);
         assert_eq!(TRANSLATE_MAX_TOKENS, 4096);
+    }
+
+    /// OPT-013 B2：分段/输入预算常量与策略版本是**签名输入与持久化片段的共同
+    /// 契约**——改动即让旧签名/旧片段失效，必须显式递增版本号（本测试锁定
+    /// 现值，防"改了预算忘了改版本"）。
+    #[test]
+    fn segment_policy_constants_are_versioned() {
+        assert_eq!(SEGMENT_POLICY_VERSION, "v2-html-blocks-8192");
+        assert_eq!(TRANSLATE_SEGMENT_MAX_BYTES, 8192);
+        assert_eq!(SUMMARY_INPUT_MAX_BYTES, 64 * 1024);
+        // 分段预算必须显著小于分段策略命名所描述的量级（防手误改坏版本语义）
+        assert!(
+            SEGMENT_POLICY_VERSION.contains(&TRANSLATE_SEGMENT_MAX_BYTES.to_string()),
+            "策略版本号必须携带当前分段预算（{SEGMENT_POLICY_VERSION} vs {TRANSLATE_SEGMENT_MAX_BYTES}）"
+        );
     }
 
     /* ---- OPT-013 B1：缓存签名 ---- */
