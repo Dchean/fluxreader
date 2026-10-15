@@ -1,6 +1,6 @@
 # OPT-015Q：生产自动建窗路径下的冷启位置恢复
 
-Status: verified-local
+Status: verified-ci
 父卡 OPT-015。用户 2026-10-15 复测：窗口挪动位置后，下次启动**先出现在屏幕中央、再跳到上次关闭时的位置**。OPT-015/015N/015P 的既有证据与提交（8d863ae、af09d62、OPT-015N 八场景）均未覆盖“Tauri 按 config 自动建窗”这一生产创建路径，因此不能据旧证据宣称已修。
 
 ## 已确认事实（主控源码核对）
@@ -59,6 +59,7 @@ Status: verified-local
 - 独立 Codex 只读复审：条件通过，P0/P1/P2 无遗留；P3 措辞级三项已处置（驱动注释/文案 + RED-EVIDENCE 措辞统一），P3-3 维持现有边界口径不改文件。
 - **结论：dev HEAD 的 auto 生产建窗路径未复现「先居中再跳」；红证据不成立，按任务卡「不做无依据的修复」，生产代码零改动。** 用户现象最可能来自未含修复的发版构建（v0.17.1 早于 `8d863ae`/`af09d62`），属推测（有旁证），构建归属未证实。
 - 证据：`tmp/optimization-20261008/OPT-015Q/{RED-EVIDENCE.md,RESULT.md,source/,runner/,runs/}`（tmp 不进主线）；隔离边界与取舍落盘 `.agents/notes/implemented/testing/2026-10-15-窗口启动隔离驱动的证据边界.md`。
+- 2026-10-15：收口提交 `e80957b` 推送 dev；提交级 CI [38714382972](https://github.com/Dchean/fluxreader/actions/runs/38714382972) 成功（Rust 与前端两个 job 均通过）。
 
 ### 差集驱动（2026-10-15，主控）
 
