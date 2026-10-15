@@ -36,7 +36,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-007](OPT-007.md) | 可恢复 pull 与提交时冲突保护 | F09,F10,F11 | OPT-005, OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-008](OPT-008.md) | 内容身份与保守去重 | F12 | OPT-007 | verified-ci | 008A及008B第二阶段本地门禁、独立复审与Windows CI通过；待总收口 |
 | [OPT-009](OPT-009.md) | 可靠订阅写回和能力声明 | F17 | OPT-006, OPT-008 | verified-ci | 55c379b 整卡初审 PASS、主控复核与 [CI 38677466863](https://github.com/Dchean/fluxreader/actions/runs/38677466863) 成功；待 OPT-008 总收口 |
-| [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | coding | 主控定版任务卡并派发编码会话 code-opt010-20261015；实现配置快照合并/镜像应用契约 |
+| [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | verified-ci | 7339679 初审/返工/复审与主控复核通过，[CI 38697114198](https://github.com/Dchean/fluxreader/actions/runs/38697114198) 成功；待 OPT-008 总收口 |
 | [OPT-011](OPT-011.md) | AI 设置单点与输入范围一致 | F13,refreshInterval | OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-012](OPT-012.md) | 阅读器源码与浮层交互 | F14,closeAsk | 无 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-008B, OPT-011 | queued | 013A SSE 已通过 CI；长文分段、版本缓存与恢复尚未实施，等待内容修订契约稳定 |
