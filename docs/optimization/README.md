@@ -16,9 +16,9 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 
 ## 进度快照（2026-10-15，Asia/Shanghai）
 
-- **18 张主卡：13 张完成验收并通过提交级 CI，5 张尚未完成。** 未完成项为 OPT-008 总收口、013、017、018，加 OPT-009 阶段 B2/B3 的补提交；父子卡不重复计数，不按卡片数量推算工作量百分比。
-- 已完成：OPT-001～007、009（阶段 A/B1 已 CI，B2/B3 待补）、010、011、012、014、015、015Q、016。
-- 剩余：008（主卡总收口，待 018）、013（B1/B2 已 CI，B3 未开工）、017（实际性能优化）、018（最终验收与合并）。
+- **18 张主卡：15 张完成验收并通过提交级 CI，3 张尚未完成。** 未完成项为 OPT-008 总收口、OPT-017 实际性能优化、OPT-018 最终验收与发布；父子卡不重复计数，不按卡片数量推算工作量百分比。
+- 已完成：OPT-001～007、OPT-009（B1/B2/B3 已随 55c379b 通过 CI）、010、011、012、013（013A/B1/B2/B3 全部 CI 通过）、014、015、015Q、016。
+- 剩余：008（主卡总收口，待 018）、017（已拆 017B～017F 五个子卡，逐卡派发）、018（最终验收、main 合并与发布）。
 - 状态取值：`queued`（未开工）/ `coding`（实现中）/ `review`（实现完成、门禁通过、待独立复审，尚未提交/CI）/ `verified-local`（本地/夹具已验收）/ `verified-ci`（已提交并通过提交级 CI）。
 - 最新产品提交 **2b1a395** 已推送 dev，[CI 38716779377](https://github.com/Dchean/fluxreader/actions/runs/38716779377) completed/success（前端 56s、Windows Rust 7m51s）。更早提交级 CI 依次为 7339679 / [38697114198](https://github.com/Dchean/fluxreader/actions/runs/38697114198)、55c379b / [38677466863](https://github.com/Dchean/fluxreader/actions/runs/38677466863)、e80957b / [38714382972](https://github.com/Dchean/fluxreader/actions/runs/38714382972)。未合并 main，未发布。
 
@@ -38,12 +38,12 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | verified-ci | 7339679 初审/返工/复审与主控复核通过，[CI 38697114198](https://github.com/Dchean/fluxreader/actions/runs/38697114198) 成功；待 OPT-008 总收口 |
 | [OPT-011](OPT-011.md) | AI 设置单点与输入范围一致 | F13,refreshInterval | OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-012](OPT-012.md) | 阅读器源码与浮层交互 | F14,closeAsk | 无 | verified-ci | 已提交、独立审查及 CI 通过 |
-| [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-008B, OPT-011 | coding | 013A/B1/B2 已过提交级 CI；B3 状态机与三入口完成本地门禁 + 独立复审（无 P0/P1/P2）与 tidy 收口，待提交边界 |
+| [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-008B, OPT-011 | verified-ci | 013A/B1/B2/B3 全部通过提交级 CI（B3 = af3e6a1 / CI 38768730596）；父卡收口完成 |
 | [OPT-014](OPT-014.md) | 更新检查与凭据失败关闭 | F16,F22 | 无 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-015](OPT-015.md) | 窗口启动恢复与幂等媒体键 | F21,F23 | 无 | verified-ci | 015P 首显最大化修复已通过 CI；015N 八场景本地原生验收通过 |
 | [OPT-015Q](OPT-015Q.md) | 生产自动建窗路径冷启位置恢复 | F23 | OPT-015 | verified-ci | R2 差集 12/12 绿、015N 8/8、独立复审条件通过；dev 未复现跳位，生产零改动；e80957b CI 38714382972 通过；待随 OPT-015 系列合并后请用户实机复测 |
 | [OPT-016](OPT-016.md) | 行为回归分层与依赖卫生 | 测试网,依赖,CI | OPT-003, OPT-012, OPT-013, OPT-015 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
-| [OPT-017](OPT-017.md) | 有基线的搜索和媒体性能 | FTS,画廊,缓存,观测 | OPT-007, OPT-008, OPT-016 | queued | 017A 隔离基线已本地验收；实际性能优化尚未实施 |
+| [OPT-017](OPT-017.md) | 有基线的搜索和媒体性能 | FTS,画廊,缓存,观测 | OPT-007, OPT-008, OPT-016 | coding | 017A 基线已本地验收；主控拆出 017B～017F 五个子卡，按序派发中 |
 | [OPT-018](OPT-018.md) | 全量收口和发布前验收 | 全部审计项 | OPT-001 至 OPT-017 | queued | 尚未进入最终验收；依赖前述主卡全部收口 |
 
 状态：queued / coding / review / rework / verified-local / verified-ci / integrated。未取得完整作用域证据的卡片不得记 complete。卡片中的写集可在读码后由主控明确调整，不允许执行者自行扩展。
@@ -76,6 +76,11 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-016B](OPT-016B.md) | 真实 React 挂载组件回归 | verified-ci | 已完成；后续功能改动仍须维护相关回归 |
 | [OPT-016C](OPT-016C.md) | 前端状态回归按领域拆分 | verified-ci | 已完成并通过独立审查及 CI |
 | [OPT-017A](OPT-017A.md) | 隔离数据层性能基线 | verified-local | 修订指标与原始数据已复核；仅本地基线，不是性能优化完成 |
+| [OPT-017B](OPT-017B.md) | 搜索路径与 FTS 写放大处置 | queued | 删除无消费者 FTS + 同构建前后对照；搜索超阈值按证据上候选索引 |
+| [OPT-017C](OPT-017C.md) | 画廊布局有界渲染 | queued | 全量 `items.map` 改有界窗口；保持焦点/灯箱/滚动/加载更多 |
+| [OPT-017D](OPT-017D.md) | 封面补全覆盖面与预算 | queued | 服务端无图文章缺口取证；批次/并发/超时/失败缓存与可观测 |
+| [OPT-017E](OPT-017E.md) | 重试入口持久可达与有界错误提示 | queued | 修复 `slice(-4)` 静默挤掉唯一重试入口；错误中心有界去重 |
+| [OPT-017F](OPT-017F.md) | 重复实现与零消费入口清理 | queued | 先搜消费者再删；numericId 双实现等值后收敛 |
 | [OPT-009B2](OPT-009B2.md) | 订阅 outbox 生产者、分类收敛与 tombstone 失败关闭 | verified-local | R2 复审返工实现完成：退订目标不存在（FreshRSS 400）不再永久 Retry（容忍为已满足，墓碑判据不变）、删除移除基准链起点优先 + 三类后继行重定统一（移动未发送/已发送时序都收敛）、P3-B/D/E/F 已处置登记；返工后门禁 45 suites/635 passed/0 failed，fmt/clippy 通过；独立 CodeBuddy 审计（条件通过，P3-1 已订正）+ 主控复核通过；未提交未跑 CI |
 | [OPT-009B3](OPT-009B3.md) | 订阅写回能力声明、持久回执与确认文案 | verified-local | 六项交付经全新只读会话 `audit-opt009b3-r1-20261015` 独立审计通过（无 P0/P1/P2）并由主控逐条回查源码锚点复核；5 条 P3 不阻断，P3-1 措辞已订正；写集外 7 处追加式增量已追认；未提交、未跑 CI |
 
