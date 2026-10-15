@@ -1,6 +1,6 @@
 # OPT-017B：搜索路径与 FTS 写放大处置
 
-Status: verified-local（待提交边界）
+Status: verified-ci
 父卡：OPT-017（搜索、媒体与缓存性能）。基线：OPT-017A（`docs/performance.md`
 「当前隔离 SQLite 基线」一节，2026-10-09）。
 
@@ -76,3 +76,6 @@ Status: verified-local（待提交边界）
   在 `docs/performance.md` 与 Note 如实披露；端到端抽测列为 OPT-018 发布前待办。
 - 追认三：第二篇 Note（`2026-10-05-查询与分页契约.md`）的更新随本卡批准。
 - 范围外发现另立 [OPT-017G](OPT-017G.md)（读闭包查询规划），本卡不处理。
+- 2026-10-16：提交 `cf82d21` 推送 dev；提交级 CI run 219
+  （[38823585612](https://github.com/Dchean/fluxreader/actions/runs/38823585612)）
+  completed success（14m23s）。OPT-017B 状态：verified-ci。
