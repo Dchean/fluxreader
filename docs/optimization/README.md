@@ -18,7 +18,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 
 - **18 张主卡：13 张完成验收并通过提交级 CI，5 张尚未完成。** 未完成项为 OPT-008 总收口、013、017、018，加 OPT-009 阶段 B2/B3 的补提交；父子卡不重复计数，不按卡片数量推算工作量百分比。
 - 已完成：OPT-001～007、009（阶段 A/B1 已 CI，B2/B3 待补）、010、011、012、014、015、015Q、016。
-- 剩余：008（主卡总收口，待 018）、013（B1 已 CI，B2 待提交、B3 未开工）、017（实际性能优化）、018（最终验收与合并）。
+- 剩余：008（主卡总收口，待 018）、013（B1/B2 已 CI，B3 未开工）、017（实际性能优化）、018（最终验收与合并）。
 - 状态取值：`queued`（未开工）/ `coding`（实现中）/ `review`（实现完成、门禁通过、待独立复审，尚未提交/CI）/ `verified-local`（本地/夹具已验收）/ `verified-ci`（已提交并通过提交级 CI）。
 - 最新产品提交 **2b1a395** 已推送 dev，[CI 38716779377](https://github.com/Dchean/fluxreader/actions/runs/38716779377) completed/success（前端 56s、Windows Rust 7m51s）。更早提交级 CI 依次为 7339679 / [38697114198](https://github.com/Dchean/fluxreader/actions/runs/38697114198)、55c379b / [38677466863](https://github.com/Dchean/fluxreader/actions/runs/38677466863)、e80957b / [38714382972](https://github.com/Dchean/fluxreader/actions/runs/38714382972)。未合并 main，未发布。
 
@@ -38,7 +38,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | verified-ci | 7339679 初审/返工/复审与主控复核通过，[CI 38697114198](https://github.com/Dchean/fluxreader/actions/runs/38697114198) 成功；待 OPT-008 总收口 |
 | [OPT-011](OPT-011.md) | AI 设置单点与输入范围一致 | F13,refreshInterval | OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-012](OPT-012.md) | 阅读器源码与浮层交互 | F14,closeAsk | 无 | verified-ci | 已提交、独立审查及 CI 通过 |
-| [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-008B, OPT-011 | coding | 013A SSE、B1 缓存签名/提交守卫已通过 CI；B2 分段恢复完成本地门禁与两轮独立复审（无 P0/P1/P2），待提交边界；B3 真实消费者未开工 |
+| [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-008B, OPT-011 | coding | 013A SSE、B1 缓存签名/提交守卫、B2 分段恢复均已通过提交级 CI；B3 真实消费者未开工 |
 | [OPT-014](OPT-014.md) | 更新检查与凭据失败关闭 | F16,F22 | 无 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-015](OPT-015.md) | 窗口启动恢复与幂等媒体键 | F21,F23 | 无 | verified-ci | 015P 首显最大化修复已通过 CI；015N 八场景本地原生验收通过 |
 | [OPT-015Q](OPT-015Q.md) | 生产自动建窗路径冷启位置恢复 | F23 | OPT-015 | verified-ci | R2 差集 12/12 绿、015N 8/8、独立复审条件通过；dev 未复现跳位，生产零改动；e80957b CI 38714382972 通过；待随 OPT-015 系列合并后请用户实机复测 |
