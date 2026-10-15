@@ -57,6 +57,9 @@ fn rollback_v22_shape(conn: &rusqlite::Connection) {
         DROP INDEX IF EXISTS idx_subscription_outbox_url;
         DROP INDEX IF EXISTS idx_subscription_outbox_pending;
         DROP TABLE IF EXISTS subscription_outbox;
+        -- OPT-010 v26 物理回拨：分类稳定身份列（folders 表无后续重建迁移，
+        -- 不回拨则重放 v26 的 ALTER 报 duplicate column）。
+        ALTER TABLE folders DROP COLUMN sync_id;
         CREATE VIRTUAL TABLE articles_fts USING fts5(title, body_text, author, ai_summary, translated_content,
             content='articles', content_rowid='id', tokenize='unicode61');
         CREATE TRIGGER articles_ai AFTER INSERT ON articles BEGIN

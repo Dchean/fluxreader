@@ -24,6 +24,16 @@ export function extractError(e: unknown): string {
   return String(e);
 }
 
+/** 从 IPC 错误对象提取稳定错误码（extractError 只给消息；分支处置如
+ * 「stalePreview 要求重新预览」需要码）。非对象/无码返回 null。 */
+export function extractErrorCode(e: unknown): string | null {
+  if (typeof e === 'object' && e !== null) {
+    const rec = e as Record<string, unknown>;
+    if (typeof rec.code === 'string') return rec.code;
+  }
+  return null;
+}
+
 async function getInvoke(): Promise<Invoke | null> {
   if (!isTauri()) return null;
   if (invokeFn) return invokeFn;
@@ -104,12 +114,55 @@ export interface RefreshSummary {
 /** config_sync_apply 的结果计数（TASK-074：updated 与 skipped 语义分离）。
  * OPT-006：pendingConnection = 配置导入留下的待确认连接建议（协议/地址/用户名，
  * 无密码）——导入不改活动凭据；激活必须在「后端配置」重新输入密码后经
- * sync_save 保存。 */
+ * sync_save 保存。
+ * OPT-010：removedFeeds / removedFolders / affectedArticleCount = 镜像模式
+ * 实际删除的对象数与级联文章数（合并模式恒为 0）。 */
 export interface ConfigSyncApplyResult {
+  mode?: 'merge' | 'mirror';
   imported: number;
   updated: number;
   skipped: number;
+  removedFeeds?: number;
+  removedFolders?: number;
+  affectedArticleCount?: number;
   pendingConnection?: PendingConnection | null;
+}
+
+/** OPT-010 预览条目：kind 区分源/分类（Rust 侧 serde 契约）。
+ * feed 的 affectedArticleCount 仅删除项携带；folder 删除项带 feedCount。 */
+export interface ConfigSyncPlanFeedItem {
+  kind: 'feed';
+  url: string;
+  title: string;
+  folder: string;
+  changes?: string[];
+  affectedArticleCount?: number;
+}
+export interface ConfigSyncPlanFolderItem {
+  kind: 'folder';
+  name: string;
+  previousName?: string;
+  changes?: string[];
+  feedCount?: number;
+  affectedArticleCount?: number;
+}
+export type ConfigSyncPlanItem = ConfigSyncPlanFeedItem | ConfigSyncPlanFolderItem;
+
+/** OPT-010 两段式预览结果（config_sync_plan）：
+ * additions/updates/removals 为结构化变更清单；snapshotHash 与 currentVersion
+ * 是 apply 的 CAS 凭据（任一不符后端返回 stalePreview、零写入）。 */
+export interface ConfigSyncPlanResult {
+  mode: 'merge' | 'mirror';
+  snapshotHash: string;
+  currentVersion: string;
+  affectedArticleCount: number;
+  additions: ConfigSyncPlanItem[];
+  updates: ConfigSyncPlanItem[];
+  removals: ConfigSyncPlanItem[];
+  settingsChangedKeys: string[];
+  settingsRemovedKeys: string[];
+  pendingConnection: boolean;
+  warnings: string[];
 }
 
 /** 待确认连接建议（OPT-006 R1）：仅非敏感字段 + 激活 CAS 版本号；
@@ -628,13 +681,27 @@ export const api = {
     return (await inv('config_sync_download')) as string;
   },
 
-  /** 应用下载的配置。返回 { imported, updated, skipped }。
+  /** OPT-010：预览下载的配置（只读）——返回结构化新增/更新/删除清单、受影响
+   * 文章数、快照 hash 与本地配置版本签名。取消 = 不调用 configSyncApply。 */
+  async configSyncPlan(payload: string, mode: 'merge' | 'mirror'): Promise<ConfigSyncPlanResult | null> {
+    const inv = await getInvoke();
+    if (!inv) return null;
+    return (await inv('config_sync_plan', { payload, mode })) as ConfigSyncPlanResult;
+  },
+
+  /** 应用下载的配置（OPT-010：必须携带预览返回的两个签名）。
    * TASK-074：updated=已存在且确有改动、已写库的源数；skipped=已存在但内容
-   * 与远端一致、真的无需改动的源数（此前 skipped 实为已更新数）。 */
-  async configSyncApply(payload: string): Promise<ConfigSyncApplyResult> {
+   * 与远端一致、真的无需改动的源数（此前 skipped 实为已更新数）。
+   * 签名不符后端返回 stalePreview（code）且零写入——调用方应清除预览要求重新预览。 */
+  async configSyncApply(
+    payload: string,
+    mode: 'merge' | 'mirror',
+    expectedSnapshotHash: string,
+    expectedVersion: string,
+  ): Promise<ConfigSyncApplyResult> {
     const inv = await getInvoke();
     if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('config_sync_apply', { payload })) as ConfigSyncApplyResult;
+    return (await inv('config_sync_apply', { payload, mode, expectedSnapshotHash, expectedVersion })) as ConfigSyncApplyResult;
   },
 
   /* ---- GitHub 设备流登录 ---- */

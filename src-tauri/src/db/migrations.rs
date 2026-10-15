@@ -744,6 +744,21 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         // - 纯追加列（旧行 NULL = 未解析），不动既有列与 CHECK 约束。
         // user_version=25。
         M::up("ALTER TABLE subscription_outbox ADD COLUMN resolved_remote_id INTEGER;"),
+        // OPT-010：分类稳定身份（跨设备的配置匹配键）。
+        // - 此前配置快照只能按**名称**匹配分类：跨重命名（本地改过名）时必然猜错
+        //   （镜像会把同一对象当「删旧 + 增新」；合并会出现同名重复目录）。
+        // - 每行一个随机身份（lower(hex(randomblob(16)))），在本地创建时生成、
+        //   随 schema2 快照携带；导入端按身份优先匹配、仅在自身无身份时按名称
+        //   保守采用（旧 schema1 兼容）。源的身份仍是 feed_url（URL 不随改名变化）。
+        // - 纯追加列 + 回填，旧行一律补齐；不建唯一索引（历史库/手工库不因此失败，
+        //   唯一性由「创建即生成、采用只填空」的写入纪律保证）。
+        // user_version=26。
+        M::up(
+            r#"
+        ALTER TABLE folders ADD COLUMN sync_id TEXT;
+        UPDATE folders SET sync_id = lower(hex(randomblob(16))) WHERE sync_id IS NULL OR trim(sync_id) = '';
+    "#,
+        ),
     ])
 });
 
@@ -2674,6 +2689,84 @@ mod opt009b2_migration_tests {
             )
             .unwrap();
         assert_eq!(n, 1, "新列必须可写（解析推进）");
+        drop(conn);
+        std::fs::remove_file(&path).expect("清理临时库失败");
+    }
+}
+
+/* ============================================================
+OPT-010：v26 分类稳定身份（sync_id）迁移
+============================================================ */
+#[cfg(test)]
+mod opt010_migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        std::env::temp_dir().join(format!(
+            "fluxreader_migr_{base}_{pid}_{nanos}_{seq}.db",
+            pid = std::process::id()
+        ))
+    }
+
+    /// v26：停 v25 的旧库升级后既有分类全部获得非空稳定身份；新建分类自动
+    /// 分配且与既有身份不重复（创建即生成）。
+    /// 判别力：迁移漏做时列为 NULL（断言红）；create_folder 未带 sync_id 时
+    /// 新行身份为空（第二组断言红）。
+    #[test]
+    fn v26_backfills_folder_sync_ids_and_new_folders_get_identity() {
+        let path = unique_test_db("opt010_v26");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_version(&mut conn, 25).unwrap();
+            conn.execute(
+                "INSERT INTO folders (id, name, position, layout) VALUES (1, '旧分类A', 0, 'article')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO folders (id, name, position, layout) VALUES (2, '旧分类B', 1, 'podcast')",
+                [],
+            )
+            .unwrap();
+        }
+        let conn = open(&path).expect("v25 旧库必须完成 v26 升级");
+        let rows: Vec<(i64, String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, name, COALESCE(sync_id, '') FROM folders ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(rows.len(), 2, "旧分类不因迁移丢失");
+        assert!(
+            rows.iter().all(|(_, _, uid)| !uid.trim().is_empty()),
+            "旧分类必须全部回填稳定身份: {rows:?}"
+        );
+        assert_ne!(rows[0].2, rows[1].2, "回填身份逐行独立（随机）");
+
+        // 新建分类自动分配身份，且不与既有重复
+        let new_id = crate::db::create_folder(&conn, "新分类", "article").unwrap();
+        let new_uid: String = conn
+            .query_row(
+                "SELECT COALESCE(sync_id, '') FROM folders WHERE id = ?1",
+                params![new_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !new_uid.trim().is_empty() && rows.iter().all(|(_, _, uid)| *uid != new_uid),
+            "create_folder 必须即时分配唯一身份: {new_uid}"
+        );
         drop(conn);
         std::fs::remove_file(&path).expect("清理临时库失败");
     }

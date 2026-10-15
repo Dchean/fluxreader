@@ -1,9 +1,16 @@
 //! 配置同步集成测试：本地 HTTP mock（WebDAV 语义）+ payload 构建/应用逻辑。
 //! 覆盖：payload 构建含全部配置域、上传-下载往返、应用 upsert 语义
 //! （新源导入/已存在跳过/分类合并/设置覆盖）、凭据边界（上传排除 + 导入保留）。
+//!
+//! OPT-010 增补：两段式 plan/apply（结构化预览、快照 hash + 配置版本 CAS、
+//! 单事务全有全无）、镜像模式删除语义（仅删列出对象、不产生远端退订 outbox、
+//! 不误删共享 contents、先移动后删目录）、schema2 稳定身份与 schema1 兼容。
 //! 运行：cargo test --test config_sync_e2e
 
-use app_lib::config_sync::{apply_payload, build_payload, SyncPayload};
+use app_lib::config_sync::{
+    apply_payload, apply_payload_checked, build_payload, plan_payload, ApplyMode, FeedSpec,
+    FolderSpec, SyncPayload,
+};
 use app_lib::db;
 use rusqlite::Connection;
 use std::io::{Read, Write};
@@ -505,8 +512,16 @@ fn payload_contains_all_config_domains() {
     seed_db(&conn);
 
     let p = build_payload(&conn).unwrap();
-    assert_eq!(p.schema, 1);
+    // OPT-010：schema 追加为 2（目录携带稳定 sync_id；源仍以 URL 为身份）。
+    assert_eq!(p.schema, 2);
     assert_eq!(p.folders.len(), 2);
+    assert!(
+        p.folders
+            .iter()
+            .all(|f| f.sync_id.as_deref().is_some_and(|s| !s.is_empty())),
+        "schema2 快照的每个分类必须携带稳定 sync_id: {:?}",
+        p.folders
+    );
     assert_eq!(p.feeds.len(), 2);
     // 分类 AI 标志带出
     let tech = p.folders.iter().find(|f| f.name == "技术").unwrap();
@@ -564,6 +579,7 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 auto_summary: true,
                 auto_translate: false,
                 position: 0,
+                sync_id: None,
             },
             app_lib::config_sync::FolderSpec {
                 name: "新分类".into(),
@@ -571,6 +587,7 @@ fn apply_upserts_feeds_and_overrides_settings() {
                 auto_summary: false,
                 auto_translate: true,
                 position: 1,
+                sync_id: None,
             },
         ],
         feeds: vec![
@@ -737,6 +754,7 @@ fn apply_rejects_illegal_feed_mode_and_rolls_back() {
             auto_summary: false,
             auto_translate: false,
             position: 0,
+            sync_id: None,
         }],
         feeds: vec![app_lib::config_sync::FeedSpec {
             url: "https://bad.example/rss".into(),
@@ -796,6 +814,7 @@ fn apply_rejects_invalid_remote_refresh_interval_and_rolls_back() {
                 auto_summary: false,
                 auto_translate: false,
                 position: 0,
+                sync_id: None,
             }],
             feeds: vec![app_lib::config_sync::FeedSpec {
                 url: "https://interval.example/rss".into(),
@@ -965,6 +984,29 @@ async fn full_roundtrip_upload_download_apply() {
     assert!(folders_b
         .iter()
         .any(|f| f.name == "播客" && f.layout == "podcast"));
+    // OPT-010 P0 回归：稳定身份随快照往返并在导入端采用；同一快照重放幂等。
+    let tech_a_uid = payload_a
+        .folders
+        .iter()
+        .find(|f| f.name == "技术")
+        .and_then(|f| f.sync_id.clone())
+        .expect("设备A 的快照必须携带分类稳定身份");
+    let tech_b = folders_b.iter().find(|f| f.name == "技术").unwrap();
+    assert_eq!(
+        tech_b.sync_id.as_deref(),
+        Some(tech_a_uid.as_str()),
+        "设备B 导入的分类必须采用设备A 的稳定身份（修前为随机身份占位）"
+    );
+    let replay = opt010_plan_json(&conn_b, &parsed, ApplyMode::Mirror);
+    assert_eq!(
+        (
+            replay["additions"].as_array().unwrap().len(),
+            replay["updates"].as_array().unwrap().len(),
+            replay["removals"].as_array().unwrap().len()
+        ),
+        (0, 0, 0),
+        "真实往返快照在设备B 重放必须幂等: {replay}"
+    );
     // OPT-011：AI 开关三态随快照往返一致（设备B 拿到与设备A 相同的 mode）
     let a_b = db::list_feeds(&conn_b)
         .unwrap()
@@ -1020,6 +1062,7 @@ fn apply_failure_rolls_back_the_whole_payload() {
             auto_summary: false,
             auto_translate: false,
             position: 0,
+            sync_id: None,
         }],
         feeds: vec![app_lib::config_sync::FeedSpec {
             url: "https://rollback.example/rss".into(),
@@ -1049,5 +1092,1475 @@ fn apply_failure_rolls_back_the_whole_payload() {
     assert_eq!(folder_count, 0, "中途失败必须回滚：不得残留已建目录");
     assert_eq!(feed_count, 0, "中途失败必须回滚：不得残留已插源");
 
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/* ============================================================
+OPT-010：两段式 plan/apply 与镜像应用
+
+契约（见 docs/optimization/OPT-010.md 定版）：
+- config_sync_plan(payload, mode) 返回结构化 additions/updates/removals
+  （feed/folder + affectedArticleCount）、快照 hash 与当前配置版本签名；
+  plan 只读，取消 = 不调用 apply，零写入。
+- apply 在单事务内复核快照 hash 与配置版本后执行（全有全无）；预览后本地
+  任何会改变删除后果的变更（新增/编辑源、新增文章、读藏翻转、pending 写回
+  意图变化）都必须让旧预览失效（stalePreview，零写入）。
+- 镜像删除只删 plan 列出的对象：不产生远端退订 outbox、不误删与保留对象
+  共享的 contents、先移动保留源再删目录（不误级联）。
+============================================================ */
+
+fn opt010_folder(name: &str, sync_id: Option<&str>) -> FolderSpec {
+    FolderSpec {
+        name: name.into(),
+        layout: "article".into(),
+        auto_summary: false,
+        auto_translate: false,
+        position: 0,
+        sync_id: sync_id.map(String::from),
+    }
+}
+
+fn opt010_feed(url: &str, title: &str, folder: &str) -> FeedSpec {
+    FeedSpec {
+        url: url.into(),
+        title: title.into(),
+        folder: folder.into(),
+        layout: "inherit".into(),
+        auto_summary: false,
+        auto_translate: false,
+        summary_mode: None,
+        translate_mode: None,
+        site_url: None,
+        favicon_url: None,
+    }
+}
+
+fn opt010_payload(folders: Vec<FolderSpec>, feeds: Vec<FeedSpec>) -> SyncPayload {
+    SyncPayload {
+        schema: 2,
+        uploaded_at: "2026-10-15T00:00:00Z".into(),
+        folders,
+        feeds,
+        app_settings: None,
+        connection_config: None,
+    }
+}
+
+fn opt010_plan_json(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> serde_json::Value {
+    serde_json::to_value(plan_payload(conn, p, mode).unwrap()).unwrap()
+}
+
+/// 走与前端相同的两段式：先 plan 取 hash/版本，再经 CAS 校验 apply。
+fn opt010_planned_apply(
+    conn: &Connection,
+    p: &SyncPayload,
+    mode: ApplyMode,
+) -> app_lib::error::AppResult<app_lib::config_sync::ApplyOutcome> {
+    let plan = plan_payload(conn, p, mode)?;
+    apply_payload_checked(
+        conn,
+        p,
+        mode,
+        Some(&plan.snapshot_hash),
+        Some(&plan.current_version),
+    )
+}
+
+fn opt010_insert_article(conn: &Connection, feed_id: i64, guid: &str, read: bool) -> i64 {
+    conn.execute(
+        "INSERT INTO articles (feed_id, guid, title, is_read) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![feed_id, guid, format!("文章 {guid}"), read as i64],
+    )
+    .unwrap();
+    conn.last_insert_rowid()
+}
+
+fn opt010_count(conn: &Connection, sql: &str) -> i64 {
+    conn.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+/// 本地分类的稳定身份（真实 schema2 快照形态：build_payload 产物必带 sync_id）。
+fn opt010_local_uid(conn: &Connection, name: &str) -> String {
+    db::list_folders(conn)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == name)
+        .unwrap_or_else(|| panic!("找不到本地分类 {name}"))
+        .sync_id
+        .expect("本地分类必须有稳定身份（v26 起创建即分配）")
+}
+
+fn opt010_item<'a>(
+    plan: &'a serde_json::Value,
+    list: &str,
+    kind: &str,
+    key: &str,
+) -> &'a serde_json::Value {
+    plan[list]
+        .as_array()
+        .unwrap_or_else(|| panic!("{list} 必须是数组：{plan}"))
+        .iter()
+        .find(|it| {
+            it["kind"] == kind && {
+                let field = if kind == "feed" { "url" } else { "name" };
+                it[field] == key
+            }
+        })
+        .unwrap_or_else(|| panic!("{list} 中找不到 {kind} {key}：{plan}"))
+}
+
+/// 合并保留本地独有对象；镜像列出 removal 与受影响文章数；plan 本身只读
+/// （取消 = 不调用 apply，零写入）。
+#[test]
+fn plan_is_read_only_and_mirror_lists_removals_with_article_counts() {
+    let tmp = common::unique_db_path("cfgsync_opt010_plan");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    let f1 = db::create_folder(&conn, "保留", "article").unwrap();
+    let f2 = db::create_folder(&conn, "本地独有", "article").unwrap();
+    let a = db::insert_feed(
+        &conn,
+        "https://a.example/rss",
+        None,
+        "源A",
+        None,
+        f1,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    let b = db::insert_feed(
+        &conn,
+        "https://b.example/rss",
+        None,
+        "源B",
+        None,
+        f2,
+        "article",
+        false,
+        false,
+    )
+    .unwrap();
+    opt010_insert_article(&conn, a, "a1", false);
+    opt010_insert_article(&conn, b, "b1", false);
+    opt010_insert_article(&conn, b, "b2", true);
+
+    let keep_uid = opt010_local_uid(&conn, "保留");
+    let payload = opt010_payload(
+        vec![opt010_folder("保留", Some(&keep_uid))],
+        vec![opt010_feed("https://a.example/rss", "源A", "保留")],
+    );
+
+    let before = (
+        opt010_count(&conn, "SELECT COUNT(*) FROM feeds"),
+        opt010_count(&conn, "SELECT COUNT(*) FROM folders"),
+        opt010_count(&conn, "SELECT COUNT(*) FROM articles"),
+        db::get_setting(&conn, "app_settings").unwrap(),
+        opt010_count(&conn, "SELECT COUNT(*) FROM subscription_outbox"),
+    );
+
+    // 合并：不删除任何本地独有对象
+    let merge = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
+    assert_eq!(merge["mode"], "merge");
+    assert_eq!(
+        merge["removals"].as_array().unwrap().len(),
+        0,
+        "合并模式不得列出 removal: {merge}"
+    );
+    assert_eq!(merge["affectedArticleCount"], 0, "合并模式受影响文章数为 0");
+
+    // 镜像：列出 feed B 与目录「本地独有」及其文章数
+    let mirror = opt010_plan_json(&conn, &payload, ApplyMode::Mirror);
+    assert_eq!(mirror["mode"], "mirror");
+    let b_item = opt010_item(&mirror, "removals", "feed", "https://b.example/rss");
+    assert_eq!(
+        b_item["affectedArticleCount"], 2,
+        "feed B 有 2 篇文章: {mirror}"
+    );
+    assert_eq!(b_item["title"], "源B");
+    let f2_item = opt010_item(&mirror, "removals", "folder", "本地独有");
+    assert_eq!(
+        f2_item["feedCount"], 1,
+        "目录「本地独有」含 1 个被删源: {mirror}"
+    );
+    assert_eq!(
+        f2_item["affectedArticleCount"], 2,
+        "目录级受影响文章数 = 成员被删源的文章和"
+    );
+    assert_eq!(
+        mirror["affectedArticleCount"], 2,
+        "总受影响文章数按被删源计一次（目录不重复计）"
+    );
+    // 保留对象不在删除清单里
+    assert!(
+        mirror["removals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|it| it["url"] != "https://a.example/rss" && it["name"] != "保留"),
+        "保留对象绝不出现在删除清单: {mirror}"
+    );
+
+    // 两个 plan 都不产生任何写入（取消语义的基础）
+    let after = (
+        opt010_count(&conn, "SELECT COUNT(*) FROM feeds"),
+        opt010_count(&conn, "SELECT COUNT(*) FROM folders"),
+        opt010_count(&conn, "SELECT COUNT(*) FROM articles"),
+        db::get_setting(&conn, "app_settings").unwrap(),
+        opt010_count(&conn, "SELECT COUNT(*) FROM subscription_outbox"),
+    );
+    assert_eq!(before, after, "plan 必须只读：plan 前后本地状态逐项一致");
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 镜像 apply 只删除列出对象；已连接账号下**不得**产生远端退订 outbox；
+/// 与保留文章共享的 contents 必须保留（只有最后引用消失的内容才回收）。
+#[test]
+fn mirror_apply_deletes_listed_only_without_unsubscribe_outbox_and_keeps_shared_contents() {
+    let tmp = common::unique_db_path("cfgsync_opt010_mirror");
+    let _ = std::fs::remove_file(&tmp);
+    let mut conn = db::open(&tmp).unwrap();
+    // 已连接账号：旧 delete_feed 路径在此会产生 unsubscribe outbox；镜像不得产生。
+    app_lib::commands::save_account_for_test(
+        &mut conn,
+        "greader",
+        "http://a.example",
+        "user-a",
+        "pw-a",
+        "http://a.example",
+    )
+    .unwrap();
+
+    let f1 = db::create_folder(&conn, "保留", "article").unwrap();
+    let f2 = db::create_folder(&conn, "本地独有", "article").unwrap();
+    let a = db::insert_feed(
+        &conn,
+        "https://a.example/rss",
+        None,
+        "源A",
+        None,
+        f1,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    let y = db::insert_feed(
+        &conn,
+        "https://y.example/rss",
+        None,
+        "源Y",
+        None,
+        f2,
+        "article",
+        false,
+        false,
+    )
+    .unwrap();
+    let a1 = opt010_insert_article(&conn, a, "a1", false);
+    let y1 = opt010_insert_article(&conn, y, "y1", false);
+    let _y2 = opt010_insert_article(&conn, y, "y2", true);
+
+    // 共享内容：A1 与 Y1 引用同一 contents 行；另一行只有 Y2 引用（删 Y 后应回收）。
+    conn.execute(
+        "INSERT INTO contents (identity, url_norm, content_html, body_text, extraction_source, fulltext_extracted)
+         VALUES ('h|shared|0|2', 'https://s.example', '<p>共</p>', '共', 'rss', 0)",
+        [],
+    )
+    .unwrap();
+    let shared_cid = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO contents (identity, url_norm, content_html, body_text, extraction_source, fulltext_extracted)
+         VALUES ('h|only-y|0|2', 'https://o.example', '<p>独</p>', '独', 'rss', 0)",
+        [],
+    )
+    .unwrap();
+    let only_y_cid = conn.last_insert_rowid();
+    conn.execute(
+        "UPDATE articles SET content_id = ?1 WHERE id IN (?2, ?3)",
+        rusqlite::params![shared_cid, a1, y1],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE articles SET content_id = ?1 WHERE feed_id = ?2 AND guid = 'y2'",
+        rusqlite::params![only_y_cid, y],
+    )
+    .unwrap();
+
+    let keep_uid = opt010_local_uid(&conn, "保留");
+    let payload = opt010_payload(
+        vec![opt010_folder("保留", Some(&keep_uid))],
+        vec![opt010_feed("https://a.example/rss", "源A", "保留")],
+    );
+    let outcome = opt010_planned_apply(&conn, &payload, ApplyMode::Mirror).unwrap();
+    assert_eq!(
+        (outcome.removed_feeds, outcome.removed_folders),
+        (1, 1),
+        "只删除列出的 1 源 1 目录"
+    );
+    assert_eq!(outcome.affected_article_count, 2, "受影响文章数如实回报");
+
+    // 只删列出的对象：Y 与「本地独有」消失，A 与其文章原样
+    let urls: Vec<String> = db::list_feeds(&conn)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.feed_url)
+        .collect();
+    assert_eq!(
+        urls,
+        vec!["https://a.example/rss".to_string()],
+        "保留源必须在、被删源必须无"
+    );
+    let names: Vec<String> = db::list_folders(&conn)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["保留".to_string()],
+        "被删目录必须无、保留目录必须在"
+    );
+    assert_eq!(
+        opt010_count(
+            &conn,
+            &format!("SELECT COUNT(*) FROM articles WHERE feed_id = {a}")
+        ),
+        1,
+        "保留源的文章不被误删"
+    );
+    // 共享内容保留（A1 仍引用）；仅 Y2 引用的内容随最后引用消失回收
+    assert_eq!(
+        opt010_count(
+            &conn,
+            &format!("SELECT COUNT(*) FROM contents WHERE id = {shared_cid}")
+        ),
+        1,
+        "与保留文章共享的 contents 绝不能被镜像删除（最后引用才回收）"
+    );
+    assert_eq!(
+        opt010_count(
+            &conn,
+            &format!("SELECT COUNT(*) FROM contents WHERE id = {only_y_cid}")
+        ),
+        0,
+        "只有被删源引用的内容随最后引用回收"
+    );
+    // 不产生远端退订 outbox（旧 delete_feed 路径在已连接账号下必然产生）
+    assert_eq!(
+        opt010_count(&conn, "SELECT COUNT(*) FROM subscription_outbox"),
+        0,
+        "镜像删除不得偷偷产生远端退订 outbox"
+    );
+    // 删除意图仍以墓碑落库（防 pull 把已删订阅复活），但它不是 outbox
+    assert!(
+        db::feed_url_tombstoned(&conn, "https://y.example/rss").unwrap(),
+        "镜像删除的源必须落删除墓碑（防复活；与远端退订是两件事）"
+    );
+    assert!(
+        !db::feed_url_tombstoned(&conn, "https://a.example/rss").unwrap(),
+        "保留源不得被误写墓碑"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 预览后本地配置发生会影响删除后果的变化 → stalePreview 且零写入。
+#[test]
+fn stale_preview_invalidates_with_zero_writes() {
+    fn base(tag: &str) -> (Connection, SyncPayload) {
+        let tmp = common::unique_db_path(tag);
+        let _ = std::fs::remove_file(&tmp);
+        let conn = db::open(&tmp).unwrap();
+        let f1 = db::create_folder(&conn, "保留", "article").unwrap();
+        let f2 = db::create_folder(&conn, "本地独有", "article").unwrap();
+        let a = db::insert_feed(
+            &conn,
+            "https://a.example/rss",
+            None,
+            "源A",
+            None,
+            f1,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let b = db::insert_feed(
+            &conn,
+            "https://b.example/rss",
+            None,
+            "源B",
+            None,
+            f2,
+            "article",
+            false,
+            false,
+        )
+        .unwrap();
+        opt010_insert_article(&conn, a, "a1", false);
+        opt010_insert_article(&conn, b, "b1", false);
+        let keep_uid = opt010_local_uid(&conn, "保留");
+        let payload = opt010_payload(
+            vec![opt010_folder("保留", Some(&keep_uid))],
+            vec![opt010_feed("https://a.example/rss", "源A", "保留")],
+        );
+        (conn, payload)
+    }
+    fn plan_hashes(conn: &Connection, p: &SyncPayload) -> (String, String) {
+        let plan = plan_payload(conn, p, ApplyMode::Mirror).unwrap();
+        (plan.snapshot_hash, plan.current_version)
+    }
+
+    // ① 预览后新增本地源 → 失效（新源会被新 plan 纳入删除集，旧预览数字不再代表后果）
+    {
+        let (conn, payload) = base("cfgsync_opt010_stale_newfeed");
+        let (hash, version) = plan_hashes(&conn, &payload);
+        let f1 = db::list_folders(&conn).unwrap()[0].id;
+        db::insert_feed(
+            &conn,
+            "https://new.example/rss",
+            None,
+            "新源",
+            None,
+            f1,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let err = apply_payload_checked(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&hash),
+            Some(&version),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "stalePreview", "新增源必须让旧预览失效: {err}");
+        assert_eq!(
+            opt010_count(&conn, "SELECT COUNT(*) FROM feeds"),
+            3,
+            "失效路径零写入（不得删 B）"
+        );
+    }
+
+    // ② 预览后编辑源 → 失效，更新也不得发生
+    {
+        let (conn, payload) = base("cfgsync_opt010_stale_edit");
+        let (hash, version) = plan_hashes(&conn, &payload);
+        conn.execute(
+            "UPDATE feeds SET title = '本地改名' WHERE feed_url = 'https://a.example/rss'",
+            [],
+        )
+        .unwrap();
+        let err = apply_payload_checked(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&hash),
+            Some(&version),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "stalePreview");
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM feeds WHERE feed_url = 'https://a.example/rss'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            title, "本地改名",
+            "失效路径不得用旧预览覆盖本地编辑（任何更新都回滚/不发生）"
+        );
+        assert_eq!(
+            opt010_count(&conn, "SELECT COUNT(*) FROM feeds"),
+            2,
+            "不得删除 B"
+        );
+    }
+
+    // ③ 预览后删除集对象的文章新增 → 失效（受影响文章数已变）
+    {
+        let (conn, payload) = base("cfgsync_opt010_stale_article");
+        let (hash, version) = plan_hashes(&conn, &payload);
+        let b: i64 = conn
+            .query_row(
+                "SELECT id FROM feeds WHERE feed_url = 'https://b.example/rss'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        opt010_insert_article(&conn, b, "b2", false);
+        let err = apply_payload_checked(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&hash),
+            Some(&version),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.code, "stalePreview",
+            "确认前新增文章必须让旧预览失效: {err}"
+        );
+        assert_eq!(
+            opt010_count(&conn, "SELECT COUNT(*) FROM articles"),
+            3,
+            "零写入（不得删文章）"
+        );
+    }
+
+    // ④ 预览后删除集对象的读藏变化 → 失效（状态会被级联删除）
+    {
+        let (conn, payload) = base("cfgsync_opt010_stale_read");
+        let (hash, version) = plan_hashes(&conn, &payload);
+        conn.execute("UPDATE articles SET is_read = 1 WHERE guid = 'b1'", [])
+            .unwrap();
+        let err = apply_payload_checked(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&hash),
+            Some(&version),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.code, "stalePreview",
+            "确认前读藏变化必须让旧预览失效: {err}"
+        );
+        assert_eq!(
+            opt010_count(&conn, "SELECT COUNT(*) FROM feeds"),
+            2,
+            "零写入"
+        );
+    }
+
+    // ⑤ 预览后删除集对象出现未推写回意图 → 失效（未推意图的后果已变）
+    {
+        let (conn, payload) = base("cfgsync_opt010_stale_outbox");
+        let (hash, version) = plan_hashes(&conn, &payload);
+        let gen = db::sync_generation(&conn).unwrap();
+        // 未连接：直接以空 key 落一条同 URL 的 pending 意图（模拟另一窗口刚产生的意图）
+        db::enqueue_subscribe(&conn, gen, "", "https://b.example/rss", None, None).unwrap();
+        let err = apply_payload_checked(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&hash),
+            Some(&version),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.code, "stalePreview",
+            "确认前 pending 写回意图变化必须让旧预览失效: {err}"
+        );
+        assert_eq!(
+            opt010_count(&conn, "SELECT COUNT(*) FROM subscription_outbox"),
+            1,
+            "零写入（意图保留）"
+        );
+    }
+
+    // ⑥ 快照内容与预览不一致（hash 不符）→ 失效，零写入
+    {
+        let (conn, payload) = base("cfgsync_opt010_stale_hash");
+        let (hash, version) = plan_hashes(&conn, &payload);
+        let mut other = payload;
+        other.uploaded_at = "2026-10-15T01:00:00Z".into();
+        let err = apply_payload_checked(
+            &conn,
+            &other,
+            ApplyMode::Mirror,
+            Some(&hash),
+            Some(&version),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.code, "stalePreview",
+            "换了一份快照必须让旧预览失效: {err}"
+        );
+        assert_eq!(
+            opt010_count(&conn, "SELECT COUNT(*) FROM feeds"),
+            2,
+            "零写入"
+        );
+    }
+}
+
+/// 镜像 apply 必须先有预览：缺哈希/版本一律拒绝、零写入。
+#[test]
+fn mirror_apply_requires_preview_hashes() {
+    let tmp = common::unique_db_path("cfgsync_opt010_nopreview");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    let f1 = db::create_folder(&conn, "保留", "article").unwrap();
+    db::insert_feed(
+        &conn,
+        "https://a.example/rss",
+        None,
+        "源A",
+        None,
+        f1,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    let keep_uid = opt010_local_uid(&conn, "保留");
+    let payload = opt010_payload(
+        vec![opt010_folder("保留", Some(&keep_uid))],
+        vec![opt010_feed("https://a.example/rss", "源A", "保留")],
+    );
+    let err = apply_payload_checked(&conn, &payload, ApplyMode::Mirror, None, None).unwrap_err();
+    assert_eq!(err.code, "validate", "镜像无预览必须拒绝: {err}");
+    assert_eq!(
+        opt010_count(&conn, "SELECT COUNT(*) FROM feeds"),
+        1,
+        "拒绝路径零写入"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 镜像幂等 + 保留源先移动后删目录：目录被删不级联掉已移动源的文章。
+#[test]
+fn mirror_is_idempotent_and_moves_kept_feeds_before_folder_removal() {
+    let tmp = common::unique_db_path("cfgsync_opt010_move");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    let f_old = db::create_folder(&conn, "旧分类", "article").unwrap();
+    let x = db::insert_feed(
+        &conn,
+        "https://x.example/rss",
+        None,
+        "源X",
+        None,
+        f_old,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    opt010_insert_article(&conn, x, "x1", false);
+    opt010_insert_article(&conn, x, "x2", true);
+
+    let payload = opt010_payload(
+        vec![opt010_folder("新分类", Some("uid-move-new-cat"))],
+        vec![opt010_feed("https://x.example/rss", "源X", "新分类")],
+    );
+    let outcome = opt010_planned_apply(&conn, &payload, ApplyMode::Mirror).unwrap();
+    assert_eq!(
+        (outcome.imported, outcome.updated, outcome.skipped),
+        (0, 1, 0),
+        "保留源记为移动更新"
+    );
+    assert_eq!(
+        (outcome.removed_feeds, outcome.removed_folders),
+        (0, 1),
+        "旧目录被删、无源被删"
+    );
+
+    // 源 X 仍在、文章原样、归属新目录；旧目录消失
+    let folders = db::list_folders(&conn).unwrap();
+    assert_eq!(
+        folders.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        vec!["新分类"]
+    );
+    assert_eq!(
+        folders[0].sync_id.as_deref(),
+        Some("uid-move-new-cat"),
+        "导入创建的分类必须采用远端身份（修前先随机分配、采用谓词恒 no-op）"
+    );
+    let feeds = db::list_feeds(&conn).unwrap();
+    let x_row = feeds
+        .iter()
+        .find(|f| f.feed_url == "https://x.example/rss")
+        .expect("源X必须保留");
+    assert_eq!(x_row.folder_id, folders[0].id, "源X必须已移动到新目录");
+    assert_eq!(
+        opt010_count(
+            &conn,
+            &format!("SELECT COUNT(*) FROM articles WHERE feed_id = {x}")
+        ),
+        2,
+        "目录删除不得级联删掉已移动保留源的文章"
+    );
+
+    // 再应用同一快照：幂等（无新增/更新/删除，全部跳过）
+    let plan2 = opt010_plan_json(&conn, &payload, ApplyMode::Mirror);
+    assert_eq!(
+        (
+            plan2["additions"].as_array().unwrap().len(),
+            plan2["updates"].as_array().unwrap().len(),
+            plan2["removals"].as_array().unwrap().len()
+        ),
+        (0, 0, 0),
+        "镜像后重放必须幂等: {plan2}"
+    );
+    assert_eq!(plan2["affectedArticleCount"], 0);
+    let again = opt010_planned_apply(&conn, &payload, ApplyMode::Mirror).unwrap();
+    assert_eq!(
+        (
+            again.imported,
+            again.updated,
+            again.removed_feeds,
+            again.removed_folders,
+            again.affected_article_count
+        ),
+        (0, 0, 0, 0, 0)
+    );
+    assert_eq!(again.skipped, 1, "源X内容一致 → 跳过");
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// mid-apply 注入失败（DELETE 触发器 RAISE）→ 整个镜像事务回滚（新增也不残留）。
+#[test]
+fn mid_apply_failure_rolls_back_whole_mirror() {
+    let tmp = common::unique_db_path("cfgsync_opt010_midfail");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    let f1 = db::create_folder(&conn, "保留", "article").unwrap();
+    let b = db::insert_feed(
+        &conn,
+        "https://b.example/rss",
+        None,
+        "源B",
+        None,
+        f1,
+        "article",
+        false,
+        false,
+    )
+    .unwrap();
+    opt010_insert_article(&conn, b, "b1", false);
+    opt010_insert_article(&conn, b, "b2", false);
+
+    let payload = opt010_payload(
+        vec![opt010_folder("新增", Some("uid-midfail-new"))],
+        vec![opt010_feed("https://new.example/rss", "新增源", "新增")],
+    );
+    conn.execute_batch(
+        "CREATE TRIGGER opt010_fail BEFORE DELETE ON feeds WHEN old.feed_url = 'https://b.example/rss'
+         BEGIN SELECT RAISE(ABORT, 'inject-delete-fail'); END;",
+    )
+    .unwrap();
+
+    let err = opt010_planned_apply(&conn, &payload, ApplyMode::Mirror).unwrap_err();
+    assert!(
+        err.message.contains("inject-delete-fail"),
+        "注入错误必须原样可见: {err}"
+    );
+    assert_eq!(
+        opt010_count(&conn, "SELECT COUNT(*) FROM folders WHERE name = '新增'"),
+        0,
+        "中途失败必须回滚已建目录"
+    );
+    assert_eq!(
+        opt010_count(
+            &conn,
+            "SELECT COUNT(*) FROM feeds WHERE feed_url = 'https://new.example/rss'"
+        ),
+        0,
+        "中途失败必须回滚已插源"
+    );
+    assert_eq!(
+        opt010_count(
+            &conn,
+            "SELECT COUNT(*) FROM feeds WHERE feed_url = 'https://b.example/rss'"
+        ),
+        1,
+        "被删源保留"
+    );
+    assert_eq!(
+        opt010_count(&conn, "SELECT COUNT(*) FROM articles"),
+        2,
+        "文章不被删"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 畸形快照（未知结构/枚举/URL 重复/范围）在任何写入之前整体拒绝；
+/// 镜像对未知分类引用更严格（合并保留既有的「导入」兜底语义）。
+#[test]
+fn malformed_payloads_rejected_before_any_write() {
+    let tmp = common::unique_db_path("cfgsync_opt010_bad");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+
+    // schema 高于本客户端
+    let mut future = opt010_payload(vec![], vec![]);
+    future.schema = 99;
+    let err = plan_payload(&conn, &future, ApplyMode::Merge).unwrap_err();
+    assert!(
+        err.message.contains("升级客户端"),
+        "未来 schema 必须明确拒绝: {err}"
+    );
+
+    // 重复 URL（歧义快照）
+    let dup = opt010_payload(
+        vec![],
+        vec![
+            opt010_feed("https://d.example/rss", "一", ""),
+            opt010_feed("https://d.example/rss", "二", ""),
+        ],
+    );
+    let err = plan_payload(&conn, &dup, ApplyMode::Merge).unwrap_err();
+    assert!(err.message.contains("重复"), "重复 URL 必须拒绝: {err}");
+
+    // 空 URL
+    let empty_url = opt010_payload(vec![], vec![opt010_feed("  ", "空", "")]);
+    assert!(
+        plan_payload(&conn, &empty_url, ApplyMode::Merge).is_err(),
+        "空 URL 必须拒绝"
+    );
+
+    // 非法 AI 枚举
+    let mut bad_mode = opt010_feed("https://m.example/rss", "坏", "");
+    bad_mode.summary_mode = Some("maybe".into());
+    let err = plan_payload(
+        &conn,
+        &opt010_payload(vec![], vec![bad_mode]),
+        ApplyMode::Merge,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("maybe"), "非法枚举必须指出值: {err}");
+
+    // 非法 refreshInterval 范围
+    let mut bad_range = opt010_payload(vec![], vec![]);
+    bad_range.app_settings = Some(r#"{"refreshInterval":721}"#.into());
+    assert!(
+        plan_payload(&conn, &bad_range, ApplyMode::Merge).is_err(),
+        "越界值必须拒绝"
+    );
+
+    // 镜像：源引用了不存在的分类 → 拒绝（不留半套）；合并：同快照走既有「导入」兜底
+    // 快照内重复的分类身份（歧义身份，跨设备匹配不可判定）→ 拒绝
+    let dup_uid = opt010_payload(
+        vec![
+            opt010_folder("甲", Some("dup-uid")),
+            opt010_folder("乙", Some("dup-uid")),
+        ],
+        vec![],
+    );
+    let err = plan_payload(&conn, &dup_uid, ApplyMode::Merge).unwrap_err();
+    assert!(err.message.contains("重复"), "重复分类身份必须拒绝: {err}");
+
+    let unknown_ref = opt010_payload(
+        vec![opt010_folder("真实", Some("uid-real"))],
+        vec![opt010_feed("https://u.example/rss", "无归属", "不存在")],
+    );
+    let err = plan_payload(&conn, &unknown_ref, ApplyMode::Mirror).unwrap_err();
+    assert!(
+        err.message.contains("不存在"),
+        "镜像必须拒绝未知分类引用: {err}"
+    );
+    let merge_plan = opt010_plan_json(&conn, &unknown_ref, ApplyMode::Merge);
+    let sink = opt010_item(&merge_plan, "additions", "feed", "https://u.example/rss");
+    assert_eq!(sink["folder"], "导入", "合并保留「导入」兜底归属");
+    let sink_folder = opt010_item(&merge_plan, "additions", "folder", "导入");
+    assert_eq!(sink_folder["kind"], "folder", "「导入」目录作为新增列出");
+
+    // 全部拒绝路径零写入
+    assert_eq!(
+        opt010_count(&conn, "SELECT COUNT(*) FROM folders"),
+        0,
+        "畸形快照不得写入任何目录"
+    );
+    assert_eq!(
+        opt010_count(&conn, "SELECT COUNT(*) FROM feeds"),
+        0,
+        "畸形快照不得写入任何源"
+    );
+    assert_eq!(
+        opt010_count(&conn, "SELECT COUNT(*) FROM subscription_outbox"),
+        0,
+        "畸形快照不得产生 outbox"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 预览携带结构化设置变化；敏感字段（AI 服务配置/密码）既不出网也不出现在预览里；
+/// plan 不落待确认连接建议（apply 才落）。
+#[test]
+fn plan_exposes_settings_delta_and_never_echoes_secrets() {
+    let tmp = common::unique_db_path("cfgsync_opt010_secrets");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    let f1 = db::create_folder(&conn, "技术", "article").unwrap();
+    db::insert_feed(
+        &conn,
+        "https://a.example/rss",
+        None,
+        "源A",
+        None,
+        f1,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    db::set_setting(
+        &conn,
+        "app_settings",
+        r#"{"themeMode":"light","fontSize":18,"autoStart":true}"#,
+    )
+    .unwrap();
+    db::set_setting(
+        &conn,
+        "ai_config",
+        r#"{"preset":"glm","apiKey":"top-secret-ai-key"}"#,
+    )
+    .unwrap();
+    db::set_setting(&conn, "greader_password", "top-secret-password").unwrap();
+    db::set_setting(
+        &conn,
+        "config_sync_credentials",
+        r#"{"token":"top-secret-pat"}"#,
+    )
+    .unwrap();
+
+    let upload = build_payload(&conn).unwrap();
+    let upload_json = serde_json::to_string(&upload).unwrap();
+    for secret in [
+        "top-secret-ai-key",
+        "top-secret-password",
+        "top-secret-pat",
+        "ai_config",
+        "apiKey",
+    ] {
+        assert!(
+            !upload_json.contains(secret),
+            "上传快照不得包含敏感值/字段：{secret}"
+        );
+    }
+    assert!(!upload_json.contains("autoStart"), "本地专属设置不出网");
+
+    let tech_uid = opt010_local_uid(&conn, "技术");
+    let mut payload = opt010_payload(
+        vec![opt010_folder("技术", Some(&tech_uid))],
+        vec![opt010_feed("https://a.example/rss", "源A", "技术")],
+    );
+    payload.app_settings = Some(r#"{"themeMode":"dark"}"#.into());
+    payload.connection_config = Some(app_lib::config_sync::ConnectionConfig {
+        sync_protocol: Some("fever".into()),
+        greader_endpoint: Some("http://b.example".into()),
+        greader_username: Some("user-b".into()),
+    });
+
+    let plan = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
+    assert_eq!(
+        (
+            plan["additions"].as_array().unwrap().len(),
+            plan["updates"].as_array().unwrap().len()
+        ),
+        (0, 0),
+        "带身份快照按身份命中既有分类/源：无新增无更新: {plan}"
+    );
+    assert_eq!(
+        plan["settingsChangedKeys"],
+        serde_json::json!(["themeMode"]),
+        "远端存在的白名单键变化必须如实列出: {plan}"
+    );
+    assert_eq!(
+        plan["settingsRemovedKeys"],
+        serde_json::json!(["fontSize"]),
+        "远端缺失的白名单键删除必须如实列出: {plan}"
+    );
+    assert_eq!(
+        plan["pendingConnection"], true,
+        "含连接建议的快照必须在预览里明示"
+    );
+    let plan_str = plan.to_string();
+    for secret in [
+        "top-secret-ai-key",
+        "top-secret-password",
+        "top-secret-pat",
+        "ai_config",
+        "apiKey",
+    ] {
+        assert!(!plan_str.contains(secret), "预览不得回显敏感值：{secret}");
+    }
+    assert!(
+        !plan_str.contains("autoStart"),
+        "预览的本地专属设置不参与同步"
+    );
+    // plan 不写待确认建议（apply 才落库）
+    assert!(
+        db::get_setting(&conn, "pending_connection_config")
+            .unwrap()
+            .is_none(),
+        "plan 不得落库待确认建议"
+    );
+
+    // apply 后：白名单合并照常、待确认建议落库、活动凭据不动
+    opt010_planned_apply(&conn, &payload, ApplyMode::Merge).unwrap();
+    let settings = db::get_setting(&conn, "app_settings").unwrap().unwrap();
+    let v: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert_eq!(v["themeMode"], "dark");
+    assert!(
+        v.get("fontSize").is_none(),
+        "远端已删的白名单键本地同步删除"
+    );
+    assert_eq!(v["autoStart"], true, "本地专属设置保留");
+    assert!(
+        db::get_setting(&conn, "pending_connection_config")
+            .unwrap()
+            .is_some(),
+        "apply 落待确认建议"
+    );
+    assert!(
+        db::get_setting(&conn, "greader_endpoint")
+            .unwrap()
+            .is_none(),
+        "导入不写活动连接配置"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 旧 schema1 快照（无稳定 ID / 无 mode）仍可合并；创建的对象获得本地稳定身份，
+/// 重放幂等（不因缺少远端 sync_id 反复改写）。
+#[test]
+fn schema1_payload_still_merges_and_assigns_local_identity() {
+    let tmp = common::unique_db_path("cfgsync_opt010_schema1");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+
+    let mut payload = opt010_payload(
+        vec![opt010_folder("分类", None)],
+        vec![opt010_feed("https://s1.example/rss", "老源", "分类")],
+    );
+    payload.schema = 1;
+    let outcome = apply_payload(&conn, &payload).unwrap();
+    assert_eq!(outcome.imported, 1, "schema1 快照可合并导入");
+    let folders = db::list_folders(&conn).unwrap();
+    assert_eq!(folders.len(), 1);
+    assert!(
+        folders[0].sync_id.as_deref().is_some_and(|s| !s.is_empty()),
+        "schema1 导入创建的目录也必须获得本地稳定身份（供后续快照携带）"
+    );
+    let outcome2 = apply_payload(&conn, &payload).unwrap();
+    assert_eq!(
+        (outcome2.imported, outcome2.updated, outcome2.skipped),
+        (0, 0, 1),
+        "schema1 重放幂等"
+    );
+    let plan = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
+    assert_eq!(
+        (
+            plan["additions"].as_array().unwrap().len(),
+            plan["updates"].as_array().unwrap().len()
+        ),
+        (0, 0),
+        "schema1 重放的预览也应无变化: {plan}"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 镜像的未推意图保留策略：已有 pending 写回意图一个字节不动（不替换、不清除、
+/// 不新造），预览给出明确提醒；无意图的被删源不产生新行。
+#[test]
+fn mirror_keeps_existing_pending_intents_and_creates_none() {
+    let tmp = common::unique_db_path("cfgsync_opt010_outbox_keep");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    let f1 = db::create_folder(&conn, "保留", "article").unwrap();
+    let f2 = db::create_folder(&conn, "本地独有", "article").unwrap();
+    db::insert_feed(
+        &conn,
+        "https://a.example/rss",
+        None,
+        "源A",
+        None,
+        f1,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    db::insert_feed(
+        &conn,
+        "https://y.example/rss",
+        None,
+        "源Y",
+        None,
+        f2,
+        "article",
+        false,
+        false,
+    )
+    .unwrap();
+    db::insert_feed(
+        &conn,
+        "https://z.example/rss",
+        None,
+        "源Z",
+        None,
+        f2,
+        "article",
+        false,
+        false,
+    )
+    .unwrap();
+    let gen = db::sync_generation(&conn).unwrap();
+    db::enqueue_subscribe(&conn, gen, "acct|key", "https://y.example/rss", None, None).unwrap();
+    let before: (i64, String) = conn
+        .query_row(
+            "SELECT id, status FROM subscription_outbox WHERE feed_url = 'https://y.example/rss'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+
+    let keep_uid = opt010_local_uid(&conn, "保留");
+    let payload = opt010_payload(
+        vec![opt010_folder("保留", Some(&keep_uid))],
+        vec![opt010_feed("https://a.example/rss", "源A", "保留")],
+    );
+    let plan = opt010_plan_json(&conn, &payload, ApplyMode::Mirror);
+    assert!(
+        plan["warnings"].as_array().is_some_and(|w| !w.is_empty()),
+        "被删源存在未推送写回意图时预览必须提醒（保留策略明确）: {plan}"
+    );
+    opt010_planned_apply(&conn, &payload, ApplyMode::Mirror).unwrap();
+
+    assert_eq!(
+        opt010_count(&conn, "SELECT COUNT(*) FROM subscription_outbox"),
+        1,
+        "既有意图一个不差地保留"
+    );
+    let after: (i64, String) = conn
+        .query_row(
+            "SELECT id, status FROM subscription_outbox WHERE feed_url = 'https://y.example/rss'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "既有 pending 行不得被镜像替换/清理（保留未推意图）"
+    );
+    assert_eq!(
+        opt010_count(
+            &conn,
+            "SELECT COUNT(*) FROM subscription_outbox WHERE feed_url = 'https://z.example/rss'"
+        ),
+        0,
+        "无意图的被删源不得新造 outbox 行"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 本地分类身份（可空形态；迁移前残留行/手工行为 None）。
+fn opt010_local_uid_opt(conn: &Connection, name: &str) -> Option<String> {
+    db::list_folders(conn)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == name)
+        .and_then(|f| f.sync_id)
+}
+
+/* ============================================================
+P0-1 回归：schema2 稳定身份的导入采用与重放幂等（r1 返工）
+
+缺陷（REVIEW-r1 P0-1）：`FolderPlan::New` 先 `create_folder`（随机身份）再
+`set_folder_sync_id`（只填空谓词 → 恒 no-op）——带 sync_id 的真实快照导入后，
+本地身份是我方随机值；重放时远端身份 R 与本地随机值 W 双方非空且不等，落入
+「同名不同身份」冲突：合并每次新增重复目录、镜像每次删建往复。
+============================================================ */
+
+/// 空库导入带身份 schema2 快照：目录身份必须等于远端值；同一快照重放两次
+/// plan 全零（合并与镜像）；镜像重放 apply 零删除。
+/// 判别力：修前导入目录身份 ≠ 远端值 → 本组断言必红。
+#[test]
+fn schema2_import_adopts_remote_folder_identity_and_replays_idempotently() {
+    let tmp = common::unique_db_path("cfgsync_opt010_identity");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+
+    let payload = opt010_payload(
+        vec![opt010_folder("分类", Some("uid-remote-1"))],
+        vec![opt010_feed("https://s2.example/rss", "源", "分类")],
+    );
+    let outcome = opt010_planned_apply(&conn, &payload, ApplyMode::Merge).unwrap();
+    assert_eq!(outcome.imported, 1, "空库导入源");
+    let folders = db::list_folders(&conn).unwrap();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(
+        folders[0].sync_id.as_deref(),
+        Some("uid-remote-1"),
+        "导入创建的分类必须采用远端稳定身份（修前被随机身份占位、采用谓词恒 no-op）"
+    );
+
+    // 重放：合并与镜像 plan 全零（防「同名不同身份」冲突被误触发）
+    for mode in [ApplyMode::Merge, ApplyMode::Mirror] {
+        let plan = opt010_plan_json(&conn, &payload, mode);
+        assert_eq!(
+            (
+                plan["additions"].as_array().unwrap().len(),
+                plan["updates"].as_array().unwrap().len(),
+                plan["removals"].as_array().unwrap().len()
+            ),
+            (0, 0, 0),
+            "带身份快照重放必须幂等（{mode:?}）: {plan}"
+        );
+    }
+    let again = opt010_planned_apply(&conn, &payload, ApplyMode::Mirror).unwrap();
+    assert_eq!(
+        (
+            again.imported,
+            again.updated,
+            again.skipped,
+            again.removed_feeds,
+            again.removed_folders
+        ),
+        (0, 0, 1, 0, 0),
+        "镜像重放：removed_folders=0、源内容一致跳过"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 本地身份为空（v26 之前的残留行/手工行）时，名称命中必须采用远端身份
+/// （只填空、绝不改写既有身份）；采用后按身份稳定匹配（重放全零）。
+#[test]
+fn local_folder_without_identity_adopts_remote_identity_by_name() {
+    let tmp = common::unique_db_path("cfgsync_opt010_adopt");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    conn.execute(
+        "INSERT INTO folders (name, position, layout, collapsed, sync_id)
+         VALUES ('旧分类', 0, 'article', 1, NULL)",
+        [],
+    )
+    .unwrap();
+    assert!(
+        opt010_local_uid_opt(&conn, "旧分类").is_none(),
+        "前置：本地身份为空"
+    );
+
+    let payload = opt010_payload(vec![opt010_folder("旧分类", Some("uid-adopt"))], vec![]);
+    let plan = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
+    assert_eq!(
+        plan["additions"].as_array().unwrap().len(),
+        0,
+        "名称命中的本地空身份行不得被当作新增: {plan}"
+    );
+    opt010_planned_apply(&conn, &payload, ApplyMode::Merge).unwrap();
+    assert_eq!(
+        opt010_local_uid_opt(&conn, "旧分类").as_deref(),
+        Some("uid-adopt"),
+        "空身份必须被远端身份填空采用"
+    );
+    let plan2 = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
+    assert_eq!(
+        (
+            plan2["additions"].as_array().unwrap().len(),
+            plan2["updates"].as_array().unwrap().len()
+        ),
+        (0, 0),
+        "采用后重放按身份稳定匹配: {plan2}"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 同名但双方身份不同 = 不同对象（不采用、不猜）：
+/// 合并 → 新增远端对象、本地身份原样、预览显式预警冲突；
+/// 镜像 → 新增远端对象 + 删除本地对象（收敛到快照身份）。
+#[test]
+fn same_name_different_identity_is_conflict_not_adoption() {
+    // 合并半边：不采用、不合并，两个对象并存
+    {
+        let tmp = common::unique_db_path("cfgsync_opt010_conflict_merge");
+        let _ = std::fs::remove_file(&tmp);
+        let conn = db::open(&tmp).unwrap();
+        db::create_folder(&conn, "分类", "article").unwrap();
+        let local_uid = opt010_local_uid(&conn, "分类");
+        let payload = opt010_payload(
+            vec![opt010_folder("分类", Some("uid-remote-other"))],
+            vec![],
+        );
+
+        let plan = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
+        assert_eq!(
+            plan["additions"].as_array().unwrap().len(),
+            1,
+            "同名不同身份在合并下按新增列出（不采用）: {plan}"
+        );
+        assert!(
+            plan["warnings"].as_array().is_some_and(|w| w
+                .iter()
+                .any(|x| x.as_str().is_some_and(|t| t.contains("身份不同")))),
+            "冲突必须显式预警（不猜同名即同对象）: {plan}"
+        );
+        opt010_planned_apply(&conn, &payload, ApplyMode::Merge).unwrap();
+        let folders = db::list_folders(&conn).unwrap();
+        assert_eq!(folders.len(), 2, "不同身份是两个对象（不采用、不合并）");
+        assert!(
+            folders
+                .iter()
+                .any(|f| f.sync_id.as_deref() == Some(local_uid.as_str())),
+            "本地既有身份必须原样保留"
+        );
+        assert!(
+            folders
+                .iter()
+                .any(|f| f.sync_id.as_deref() == Some("uid-remote-other")),
+            "远端身份照新增建立"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // 镜像半边：删本地旧身份、建远端身份（显式冲突后收敛到快照）
+    {
+        let tmp = common::unique_db_path("cfgsync_opt010_conflict_mirror");
+        let _ = std::fs::remove_file(&tmp);
+        let conn = db::open(&tmp).unwrap();
+        let local_id = db::create_folder(&conn, "分类", "article").unwrap();
+        let payload = opt010_payload(
+            vec![opt010_folder("分类", Some("uid-remote-other"))],
+            vec![],
+        );
+
+        let plan = opt010_plan_json(&conn, &payload, ApplyMode::Mirror);
+        assert_eq!(
+            plan["additions"].as_array().unwrap().len(),
+            1,
+            "镜像新增远端对象: {plan}"
+        );
+        assert_eq!(
+            plan["removals"].as_array().unwrap().len(),
+            1,
+            "镜像删除本地同名不同身份对象: {plan}"
+        );
+        opt010_planned_apply(&conn, &payload, ApplyMode::Mirror).unwrap();
+        let folders = db::list_folders(&conn).unwrap();
+        assert_eq!(folders.len(), 1, "镜像后收敛到快照的一份目录");
+        assert_eq!(folders[0].sync_id.as_deref(), Some("uid-remote-other"));
+        assert_ne!(folders[0].id, local_id, "是重建而不是改写既有行身份");
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// 远端身份已被本地其它对象占用（自相矛盾的混合快照：身份所属对象已被另一个
+/// 无身份槽位按名称占用）→ 新建不得复用该身份：降级随机身份 + 显式预警；
+/// 既有对象身份原样保留（身份唯一性纪律——两个对象绝不共享同一身份）。
+#[test]
+fn import_never_reuses_identity_taken_by_another_local_object() {
+    let tmp = common::unique_db_path("cfgsync_opt010_uid_taken");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    conn.execute(
+        "INSERT INTO folders (name, position, layout, collapsed, sync_id)
+         VALUES ('甲', 0, 'article', 1, 'uid-taken')",
+        [],
+    )
+    .unwrap();
+
+    let payload = opt010_payload(
+        vec![
+            // 无身份槽位先按名称命中本地「甲」（身份 uid-taken 被它占用）
+            opt010_folder("甲", None),
+            // 后续槽位又声称自己是 uid-taken（矛盾快照）→ 不得复用该身份
+            opt010_folder("乙", Some("uid-taken")),
+        ],
+        vec![],
+    );
+    let plan = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
+    assert!(
+        plan["warnings"]
+            .as_array()
+            .is_some_and(|w| w.iter().any(|x| x
+                .as_str()
+                .is_some_and(|t| t.contains("已被本地其它对象占用")))),
+        "身份占用冲突必须显式预警: {plan}"
+    );
+    opt010_planned_apply(&conn, &payload, ApplyMode::Merge).unwrap();
+    let folders = db::list_folders(&conn).unwrap();
+    assert_eq!(folders.len(), 2);
+    assert_eq!(
+        opt010_local_uid_opt(&conn, "甲").as_deref(),
+        Some("uid-taken"),
+        "既有对象的身份不得被改写/转走"
+    );
+    let yi_uid = opt010_local_uid_opt(&conn, "乙").unwrap();
+    assert!(
+        !yi_uid.trim().is_empty() && yi_uid != "uid-taken",
+        "冲突身份降级为随机新身份（不复用）: {yi_uid}"
+    );
+
+    // P3-1（r2 复审登记，钉住「有意为之」的不收敛）：矛盾快照重放时该槽位仍是
+    // 「冲突 → 降级新身份」——merge 每次确认都会新增一份空分类。唯一性优先于
+    // 收敛是刻意取舍；过程不静默：新增项与预警每次都在预览里可见、需用户确认。
+    let replay = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
+    assert_eq!(
+        replay["additions"].as_array().unwrap().len(),
+        1,
+        "矛盾快照重放按契约仍列为新增（每次确认可见、需用户确认）: {replay}"
+    );
+    assert!(
+        replay["warnings"].as_array().is_some_and(|w| !w.is_empty()),
+        "重放仍伴随预警（不静默）: {replay}"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2-1 回归：Match 采用路径的占用护栏——本地 NULL 身份行按名称命中时，若远端
+/// 身份已被本地**另一对象**占用，不得采用（否则两个对象共享同一非空 sync_id，
+/// 违反身份唯一性纪律）。
+/// 场景（自相矛盾的混合快照）：槽0 无身份按名称消耗 L1；槽1 携带 L1 的身份，
+/// 身份匹配失败（L1 已用）→ 名称命中 L2（NULL）→ 采用被拦截：L2 保持 NULL、
+/// 出现预警、全库身份无重复。
+/// 判别力：修前 adopt 无占用检查，L2 静默拿到 "uid-occupied"（两条断言必红）。
+#[test]
+fn match_adoption_never_shares_identity_with_another_local_object() {
+    let tmp = common::unique_db_path("cfgsync_opt010_match_uid_taken");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    conn.execute_batch(
+        "INSERT INTO folders (name, position, layout, collapsed, sync_id)
+             VALUES ('甲', 0, 'article', 1, 'uid-occupied');
+         INSERT INTO folders (name, position, layout, collapsed, sync_id)
+             VALUES ('乙', 0, 'article', 1, NULL);",
+    )
+    .unwrap();
+
+    let payload = opt010_payload(
+        vec![
+            // 无身份槽位先按名称命中本地「甲」→ 身份 uid-occupied 归属该行
+            opt010_folder("甲", None),
+            // 该槽声称自己是 uid-occupied：身份匹配甲失败（已被占用）→ 名称命中
+            // 本地 NULL 身份行「乙」→ Match 空身份采用路径（本用例靶点）
+            opt010_folder("乙", Some("uid-occupied")),
+        ],
+        vec![],
+    );
+    let plan = opt010_plan_json(&conn, &payload, ApplyMode::Merge);
+    assert!(
+        plan["warnings"]
+            .as_array()
+            .is_some_and(|w| w.iter().any(|x| x
+                .as_str()
+                .is_some_and(|t| t.contains("已被本地其它对象占用")))),
+        "采用被占用身份必须显式预警（修前静默共享身份）: {plan}"
+    );
+    opt010_planned_apply(&conn, &payload, ApplyMode::Merge).unwrap();
+
+    assert_eq!(
+        opt010_local_uid_opt(&conn, "甲").as_deref(),
+        Some("uid-occupied"),
+        "占用方身份原样（不得被改写/转走）"
+    );
+    assert_eq!(
+        opt010_local_uid_opt(&conn, "乙"),
+        None,
+        "被占用的身份绝不能被采用到另一对象（修前此处拿到 uid-occupied，产生共享身份）"
+    );
+    let dup = opt010_count(
+        &conn,
+        "SELECT COUNT(*) FROM (SELECT sync_id FROM folders
+         WHERE sync_id IS NOT NULL AND trim(sync_id) != ''
+         GROUP BY sync_id HAVING COUNT(*) > 1)",
+    );
+    assert_eq!(dup, 0, "全库不得存在重复的非空 sync_id");
     let _ = std::fs::remove_file(&tmp);
 }

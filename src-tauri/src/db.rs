@@ -58,10 +58,10 @@ pub use feeds::{
     update_feed_layout, FeedAiMode, FeedRow,
 };
 pub use folders::{
-    add_folder_tombstone, create_folder, delete_folder, folder_members, folder_name,
-    folder_tombstones, folder_tombstones_for, list_folders, prune_folder_tombstones, rename_folder,
-    set_folder_ai_flags, set_folder_ai_flags_partial, set_folder_collapsed, update_folder_layout,
-    FolderRow, FolderTombstone,
+    add_folder_tombstone, create_folder, create_folder_with_sync_id, delete_folder, folder_members,
+    folder_name, folder_tombstones, folder_tombstones_for, list_folders, prune_folder_tombstones,
+    rename_folder, set_folder_ai_flags, set_folder_ai_flags_partial, set_folder_collapsed,
+    set_folder_sync_id, update_folder_layout, FolderRow, FolderTombstone,
 };
 pub use migrations::open;
 #[cfg(test)]

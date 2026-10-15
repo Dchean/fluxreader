@@ -12,11 +12,13 @@ pub struct FolderRow {
     pub auto_translate: bool,
     pub collapsed: bool,
     pub position: i64,
+    /// OPT-010：配置快照的稳定身份（跨设备匹配键；v26 起每行必有）。
+    pub sync_id: Option<String>,
 }
 
 pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, layout, auto_summary, auto_translate, collapsed, position
+        "SELECT id, name, layout, auto_summary, auto_translate, collapsed, position, sync_id
          FROM folders ORDER BY position, id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -28,12 +30,27 @@ pub fn list_folders(conn: &Connection) -> AppResult<Vec<FolderRow>> {
             auto_translate: r.get::<_, i64>(4)? != 0,
             collapsed: r.get::<_, i64>(5)? != 0,
             position: r.get(6)?,
+            sync_id: r.get(7)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 pub fn create_folder(conn: &Connection, name: &str, layout: &str) -> AppResult<i64> {
+    create_folder_with_sync_id(conn, name, layout, None)
+}
+
+/// OPT-010（P0-1）：**身份采用**的创建入口——远端快照带 `sync_id` 时直接以它
+/// 落库。修前路径是 `create_folder`（先随机分配）再 `set_folder_sync_id`
+/// （「只填空」谓词对刚创建的行恒为 no-op）——远端身份永远进不了库，重放时
+/// 落入「同名不同身份」冲突。`sync_id = None`（本地手工创建 / 远端 schema1）
+/// → 生成随机身份，保持「创建即分配」语义；调用方不得用本函数改写既有行。
+pub fn create_folder_with_sync_id(
+    conn: &Connection,
+    name: &str,
+    layout: &str,
+    sync_id: Option<&str>,
+) -> AppResult<i64> {
     let next_pos: i64 = conn
         .query_row(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM folders",
@@ -41,11 +58,23 @@ pub fn create_folder(conn: &Connection, name: &str, layout: &str) -> AppResult<i
             |r| r.get(0),
         )
         .unwrap_or(0);
+    let uid = sync_id.map(str::trim).filter(|s| !s.is_empty());
     conn.execute(
-        "INSERT INTO folders (name, position, layout, collapsed) VALUES (?1, ?2, ?3, 1)",
-        params![name, next_pos, layout],
+        "INSERT INTO folders (name, position, layout, collapsed, sync_id)
+         VALUES (?1, ?2, ?3, 1, COALESCE(?4, lower(hex(randomblob(16)))))",
+        params![name, next_pos, layout, uid],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// OPT-010：导入侧「旧库无身份 + 名称命中」的保守采用——只填空，绝不改写
+/// 已有身份（同名不同身份是不同对象，由预览显式列出冲突，不在这里猜）。
+pub fn set_folder_sync_id(conn: &Connection, id: i64, sync_id: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE folders SET sync_id = ?1 WHERE id = ?2 AND (sync_id IS NULL OR trim(sync_id) = '')",
+        params![sync_id, id],
+    )?;
+    Ok(())
 }
 
 pub fn rename_folder(conn: &Connection, id: i64, name: &str) -> AppResult<()> {
@@ -342,6 +371,48 @@ mod tests {
         let err = set_folder_ai_flags_partial(&conn, id, None, None).unwrap_err();
         assert_eq!(err.code, "validate");
         assert_eq!(flags(&conn, id), (0, 1), "拒绝路径不得改动任何字段");
+    }
+
+    /* ---------- OPT-010（P0-1）：导入创建的身份采用入口 ---------- */
+
+    /// `create_folder_with_sync_id`：远端有身份 → 直落（不是先随机再「只填空」——
+    /// 那对刚创建的行恒为 no-op）；无身份/空白 → 随机生成（创建即分配语义保持）。
+    /// 判别力：修前唯一入口随机身份占位，第一条断言（== uid-adopt）必红。
+    #[test]
+    fn create_folder_with_sync_id_adopts_or_assigns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let adopted =
+            create_folder_with_sync_id(&conn, "采用身份", "article", Some("uid-adopt")).unwrap();
+        let uid: String = conn
+            .query_row(
+                "SELECT sync_id FROM folders WHERE id = ?1",
+                [adopted],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(uid, "uid-adopt", "远端身份必须直接在创建时落库");
+
+        let uids = |id: i64| -> String {
+            conn.query_row("SELECT sync_id FROM folders WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let random = create_folder_with_sync_id(&conn, "随机身份", "article", None).unwrap();
+        let random_uid = uids(random);
+        assert!(
+            !random_uid.trim().is_empty() && random_uid != "uid-adopt",
+            "无远端身份时仍创建即分配（随机且不与采用值重复）: {random_uid}"
+        );
+        let blank = create_folder_with_sync_id(&conn, "空白身份", "article", Some("   ")).unwrap();
+        let blank_uid = uids(blank);
+        assert!(
+            !blank_uid.trim().is_empty() && blank_uid != "uid-adopt",
+            "空白身份按无身份处理（随机生成，不写空白串）: {blank_uid}"
+        );
+        assert_eq!(uids(adopted), "uid-adopt", "后续创建不得改写既有行的身份");
     }
 
     /* ---------- OPT-009 B2-R2（R2-1）：墓碑回收只限归属账号 ---------- */

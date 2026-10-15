@@ -1,14 +1,21 @@
 //! 配置同步（GitHub Gist / WebDAV）：手动上传/下载客户端配置。
-//! 同步范围（白名单原则）：分类（名称/布局/AI标志/位置）+ 订阅源（URL/标题/归属/
-//! 布局/AI标志/site_url/favicon_url）+ app_settings（排除 autoStart/closePromptShown）
-//! + 非敏感连接配置（sync_protocol/greader_endpoint/greader_username）。
+//! 同步范围（白名单原则）：分类（名称/布局/AI标志/位置 + schema2 起携带
+//! 稳定 sync_id）+ 订阅源（URL/标题/归属/布局/AI标志/site_url/favicon_url）+
+//! app_settings（排除 autoStart/closePromptShown）+ 非敏感连接配置
+//! （sync_protocol/greader_endpoint/greader_username）。
 //!
 //! 凭据字段排除：greader_password, ai_config, config_sync_credentials, miniflux_token。
 //! 不含正文/媒体/AI 缓存（按设计文档边界 DEC-008/009）。
 //! 字段清单：白名单由本模块集中定义（见下方 SYNCED_SETTING_KEYS / 各域读取函数），
 //! 新增可同步字段必须同时在此登记，避免「加了字段但没进同步」的静默缺口。
 //!
-//! 不做冲突合并：下载应用仅更新白名单字段，本地凭据与本地特定设置保持不变。
+//! OPT-010：应用改为两段式——`plan_config_apply` 预览（结构化 additions/updates/
+//! removals + 快照 hash + 本地配置版本签名）→ 用户确认 → `config_sync_apply`
+//! 在单事务内复核 hash/版本后执行；合并（保留本地独有）与镜像（以远端为准删除
+//! 本地多出对象）两种模式，镜像删除不产生远端退订 outbox。实现与契约见
+//! [`plan`] 子模块。
+//!
+//! 不做双向 CRDT 同步：下载应用仅按白名单更新，本地凭据与本地特定设置保持不变。
 
 use crate::db;
 use crate::error::{AppError, AppResult};
@@ -18,7 +25,12 @@ use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
 
-const SCHEMA_VERSION: u32 = 1;
+mod plan;
+pub use plan::{
+    apply_payload_checked, plan_payload, snapshot_hash, ApplyMode, PlanItem, PlanPreview,
+};
+
+const SCHEMA_VERSION: u32 = 2;
 const CONFIG_FILE_NAME: &str = "fluxreader-config.json";
 
 /* ============================================================
@@ -160,6 +172,10 @@ pub struct FolderSpec {
     pub auto_summary: bool,
     pub auto_translate: bool,
     pub position: i64,
+    /// OPT-010（schema2）：分类的稳定身份（跨设备匹配键）。
+    /// schema1 快照没有本字段（None）→ 导入端按名称保守匹配并采用本地身份。
+    #[serde(default)]
+    pub sync_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -216,6 +232,8 @@ pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
             auto_summary: f.auto_summary,
             auto_translate: f.auto_translate,
             position: f.position,
+            // OPT-010：schema2 携带稳定身份（v26 起每行必有；None 只在损坏库出现）。
+            sync_id: f.sync_id.clone().filter(|s| !s.trim().is_empty()),
         })
         .collect();
 
@@ -270,203 +288,22 @@ fn filter_app_settings(raw: Option<String>) -> AppResult<Option<String>> {
     Ok(Some(serde_json::to_string(&settings)?))
 }
 
-/// 应用下载 payload 到本地库（白名单原则：仅应用允许字段，保留本地凭据）。
-/// 分类/源 upsert（按名称/URL 匹配），设置字段级覆盖（不整体替换，远端已删的白名单键本地同步删除）。
-/// 返回 [`ApplyOutcome`]（新增/更新/跳过/删除的源数）。
-/// 只应用白名单内的字段；未知/已下线字段一律忽略（防旧客户端覆盖新配置）。
+/// 应用下载 payload 到本地库（兼容入口 = 保守合并、无预览 CAS）。
+///
+/// OPT-010 起真正的应用内核在 [`plan`]：先结构化预览（plan_payload），用户
+/// 确认后携带快照 hash 与配置版本 CAS 复核再执行（apply_payload_checked）。
+/// 本函数保留给既有调用方/测试，等价于 merge 模式跳过 CAS 复核；镜像删除
+/// 语义不经本入口（IPC 层强制要求两者非空）。
 pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<ApplyOutcome> {
-    if p.schema > SCHEMA_VERSION {
-        return Err(AppError::internal(format!(
-            "远端配置版本 v{} 高于本客户端支持的 v{}，请升级客户端",
-            p.schema, SCHEMA_VERSION
-        )));
-    }
-
-    // TASK-064 N6：全程单事务——中途失败（如某步 SQL 约束违约）全量回滚，
-    // 不留「半套已应用配置」（此前已建的 folders / 已插的 feeds 会残留，
-    // 用户重试得到叠加结果）。Err 路径 Transaction drop 自动回滚。
-    let tx = conn.unchecked_transaction()?;
-
-    // 分类按名称 upsert（已存在则更新布局/AI 标志/位置）
-    let mut folder_ids: std::collections::HashMap<String, i64> = Default::default();
-    for f in &p.folders {
-        let existing = list_folder_id_by_name(&tx, &f.name)?;
-        let id = match existing {
-            Some(id) => {
-                // P3-6（自检 2026-09-29）：吞错改 `?` 对齐模块 N6 事务纪律——
-                // 此前布局/AI 标志写失败被 `let _ =` 吞掉、事务照常提交其余
-                // 字段，留下「半套已应用配置」。事务框架已在，失败应整包回滚。
-                db::update_folder_layout(&tx, id, &f.layout)?;
-                db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate)?;
-                // 更新位置
-                tx.execute(
-                    "UPDATE folders SET position = ?1 WHERE id = ?2",
-                    rusqlite::params![f.position, id],
-                )?;
-                id
-            }
-            None => {
-                // P3-6：同上，AI 标志写失败上抛 → 整包回滚（N6 事务纪律）
-                let id = db::create_folder(&tx, &f.name, &f.layout)?;
-                db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate)?;
-                tx.execute(
-                    "UPDATE folders SET position = ?1 WHERE id = ?2",
-                    rusqlite::params![f.position, id],
-                )?;
-                id
-            }
-        };
-        folder_ids.insert(f.name.clone(), id);
-    }
-
-    // 源按 URL upsert；没有分类的落默认分类（建一个「导入」）
-    //
-    // TASK-074（P2-12，DEC-req104-p2-12-config-delete-20260920）：计数口径修正。
-    // 此前 `skipped` 在「已存在并已更新」分支里自增，语义实为「已更新数」，
-    // 前端却把它展示成「跳过 M 个已存在」——用户看到的数字是错的。现在分开：
-    //   imported = 新建的源数
-    //   updated  = 已存在且白名单字段确有变化的源数（真的写了库）
-    //   skipped  = 已存在但内容与远端一致、无需改动的源数（真的跳过）
-    let mut imported = 0usize;
-    let mut updated = 0usize;
-    let mut skipped = 0usize;
-    for f in &p.feeds {
-        match db::find_feed_by_url(&tx, &f.url)? {
-            Some(existing_id) => {
-                // OPT-011：mode 归一先于一切写入（非法值 Err → 整包回滚，不留半套）。
-                let (summary_mode, translate_mode) = resolve_spec_modes(f)?;
-                // 已存在：更新白名单字段（title, folder, layout, AI flags, site_url, favicon_url）
-                let folder_id = match folder_ids.get(&f.folder) {
-                    Some(id) => *id,
-                    None => {
-                        // N6：兜底目录创建失败必须上抛（此前 unwrap_or(0) 产生
-                        // folder_id=0 → insert_feed 外键违约且半套配置残留）
-                        let id = match list_folder_id_by_name(&tx, "导入")? {
-                            Some(id) => id,
-                            None => db::create_folder(&tx, "导入", "article")?,
-                        };
-                        folder_ids.insert("导入".to_string(), id);
-                        id
-                    }
-                };
-                // 先读现值，判断这次到底有没有变化——有变化才算 updated，
-                // 完全一致才计入 skipped（用户看到的「跳过」才是真的跳过）。
-                // OPT-011：mode 是真值，入变化判定（只有 mode 变也必须算更新）。
-                let changed: bool = tx.query_row(
-                    "SELECT (title IS NOT ?1) OR (folder_id IS NOT ?2) OR (layout IS NOT ?3)
-                            OR (auto_summary IS NOT ?4) OR (auto_translate IS NOT ?5)
-                            OR (summary_mode IS NOT ?6) OR (translate_mode IS NOT ?7)
-                            OR (site_url IS NOT ?8) OR (favicon_url IS NOT ?9)
-                     FROM feeds WHERE id = ?10",
-                    rusqlite::params![
-                        f.title,
-                        folder_id,
-                        f.layout,
-                        summary_mode.mirrors_legacy_bool() as i64,
-                        translate_mode.mirrors_legacy_bool() as i64,
-                        summary_mode.as_str(),
-                        translate_mode.as_str(),
-                        f.site_url,
-                        f.favicon_url,
-                        existing_id
-                    ],
-                    |r| r.get(0),
-                )?;
-                if changed {
-                    // bool 兼容列由 mode 纯函数镜像（mode 优先于快照的旧 bool——
-                    // 旧客户端传来的 bool 与 mode 冲突时以 mode 为准，两列不分叉）
-                    tx.execute(
-                        "UPDATE feeds SET title = ?1, folder_id = ?2, layout = ?3,
-                                          auto_summary = ?4, auto_translate = ?5,
-                                          summary_mode = ?6, translate_mode = ?7,
-                                          site_url = ?8, favicon_url = ?9 WHERE id = ?10",
-                        rusqlite::params![
-                            f.title,
-                            folder_id,
-                            f.layout,
-                            summary_mode.mirrors_legacy_bool() as i64,
-                            translate_mode.mirrors_legacy_bool() as i64,
-                            summary_mode.as_str(),
-                            translate_mode.as_str(),
-                            f.site_url,
-                            f.favicon_url,
-                            existing_id
-                        ],
-                    )?;
-                    updated += 1;
-                } else {
-                    skipped += 1;
-                }
-            }
-            None => {
-                // 新源导入（OPT-011：mode 为真值，非法值拒绝整包）
-                let (summary_mode, translate_mode) = resolve_spec_modes(f)?;
-                let folder_id = match folder_ids.get(&f.folder) {
-                    Some(id) => *id,
-                    None => {
-                        // N6：同上，失败上抛进事务回滚
-                        let id = match list_folder_id_by_name(&tx, "导入")? {
-                            Some(id) => id,
-                            None => db::create_folder(&tx, "导入", "article")?,
-                        };
-                        folder_ids.insert("导入".to_string(), id);
-                        id
-                    }
-                };
-                let title = if f.title.trim().is_empty() {
-                    f.url.clone()
-                } else {
-                    f.title.clone()
-                };
-                db::insert_feed_origin_modes(
-                    &tx,
-                    &f.url,
-                    f.site_url.as_deref(),
-                    &title,
-                    f.favicon_url.as_deref(),
-                    folder_id,
-                    &f.layout,
-                    summary_mode,
-                    translate_mode,
-                    "local",
-                )?;
-                imported += 1;
-            }
-        }
-    }
-
-    // app_settings 字段级合并：只更新白名单字段，保留本地特定字段
-    if let Some(remote_settings) = &p.app_settings {
-        merge_app_settings(&tx, remote_settings)?;
-    }
-
-    // 非敏感连接配置：**不写活动凭据**（OPT-006 / F05——导入新地址不能与旧密码
-    // 拼接）。只落一条带版本号的「待确认连接建议」，由用户在「后端配置」重新输入
-    // 凭据后经 sync_save 专用保存流程激活（携带本版本做 CAS，命中才消费）。
-    let mut pending_connection = None;
-    if let Some(cc) = &p.connection_config {
-        if cc.has_any_value() {
-            let version = store_pending_connection(&tx, cc)?;
-            pending_connection = Some(PendingSuggestion {
-                version,
-                connection: cc.clone(),
-            });
-        }
-    }
-
-    tx.commit()?;
-    Ok(ApplyOutcome {
-        imported,
-        updated,
-        skipped,
-        pending_connection,
-    })
+    apply_payload_checked(conn, p, ApplyMode::Merge, None, None)
 }
 
 /// 应用下载配置的结果计数（TASK-074）：把「已更新」与「已跳过」分开，
 /// 供界面如实展示（此前 skipped 实为已更新数，文案却是「跳过」）。
 /// OPT-006：`pending_connection` = 本次导入落下的待确认连接建议（含版本号，
 /// 非敏感；需用户重新输入凭据后经专用激活提交才会生效；导入本身不改活动凭据）。
+/// OPT-010：`removed_feeds` / `removed_folders` / `affected_article_count` =
+/// 镜像模式实际删除的对象数与级联文章数（合并模式恒为 0）。
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct ApplyOutcome {
     /// 新建的源数
@@ -477,6 +314,12 @@ pub struct ApplyOutcome {
     pub skipped: usize,
     /// 本次导入的待确认连接建议（若有；带激活 CAS 用的版本号）
     pub pending_connection: Option<PendingSuggestion>,
+    /// 镜像删除的源数（合并模式恒为 0）
+    pub removed_feeds: usize,
+    /// 镜像删除的分类数（合并模式恒为 0）
+    pub removed_folders: usize,
+    /// 上述被删源级联删除的文章数合计
+    pub affected_article_count: i64,
 }
 
 /// OPT-011：远端 app_settings 的 refreshInterval 校验单点（先于 merge 的任何写入）。
@@ -516,54 +359,11 @@ fn validated_remote_refresh_interval(remote: &serde_json::Value) -> AppResult<Op
 ///
 /// OPT-011：refreshInterval 是数值型配置——远端存在时先严格校验（见上），非法
 /// 整体 Err 由调用方事务回滚（本地 settings/feeds 原样）；合法值归一为整数写回。
+///
+/// OPT-010：合并与增量（预览用 changed/removed 键）同源——[`plan`] 的
+/// `merged_app_settings_json` 是唯一计算口径，本函数只负责写库。
 fn merge_app_settings(conn: &rusqlite::Connection, remote_raw: &str) -> AppResult<()> {
-    let remote: serde_json::Value = serde_json::from_str(remote_raw)?;
-    // 校验先于任何改动（含下面的删除阶段）：失败即整体失败，内存 merged 不被改动
-    let remote_interval = validated_remote_refresh_interval(&remote)?;
-    let local_raw = db::get_setting(conn, "app_settings")?;
-
-    let mut merged = if let Some(local_raw) = local_raw {
-        serde_json::from_str::<serde_json::Value>(&local_raw)?
-    } else {
-        serde_json::json!({})
-    };
-
-    let remote_obj = remote.as_object();
-    // ② 远端缺失的白名单键 → 本地删除（先算再改，避免借用冲突）
-    if let Some(local_obj) = merged.as_object_mut() {
-        let missing: Vec<String> = match remote_obj {
-            Some(robj) => local_obj
-                .keys()
-                .filter(|k| !is_local_only_setting(k) && !robj.contains_key(*k))
-                .cloned()
-                .collect(),
-            // 远端 app_settings 不是对象（如空串/畸形）→ 不做删除，避免把本地设置整批清掉
-            None => Vec::new(),
-        };
-        for key in missing {
-            local_obj.remove(&key);
-        }
-    }
-
-    // ① 远端白名单字段覆盖（③ 本地专属字段除外）
-    if let (Some(remote_obj), Some(merged_obj)) = (remote_obj, merged.as_object_mut()) {
-        for (key, value) in remote_obj {
-            if is_local_only_setting(key) {
-                continue;
-            }
-            // refreshInterval 写回应经校验的整数形态（30.0 → 30），与前端
-            // 校验表 / Rust 读取同一口径；非法值已在函数入口 Err，不会到这。
-            let normalized = if key == "refreshInterval" {
-                remote_interval
-                    .map(serde_json::Value::from)
-                    .unwrap_or_else(|| value.clone())
-            } else {
-                value.clone()
-            };
-            merged_obj.insert(key.clone(), normalized);
-        }
-    }
-
+    let (merged, _, _) = plan::merged_app_settings_json(conn, remote_raw)?;
     db::set_setting(conn, "app_settings", &serde_json::to_string(&merged)?)?;
     Ok(())
 }
@@ -818,22 +618,62 @@ pub async fn config_sync_download(state: State<'_, AppState>) -> AppResult<Strin
     Ok(json)
 }
 
-/// 应用下载的 payload（前端确认后调用）。
+/// 预览下载的 payload（OPT-010 两段式第一步，只读）：
+/// 返回结构化 additions/updates/removals（含受影响文章数）、快照 hash 与本地
+/// 配置版本签名——前端展示给用户确认；取消 = 不调用 apply，零写入。
+#[tauri::command]
+pub async fn config_sync_plan(
+    state: State<'_, AppState>,
+    payload: String,
+    mode: Option<String>,
+) -> AppResult<serde_json::Value> {
+    let p: SyncPayload = serde_json::from_str(&payload)?;
+    let mode = match mode.as_deref() {
+        None => ApplyMode::Merge,
+        Some(raw) => ApplyMode::parse(raw)?,
+    };
+    let conn = state.db.lock().await;
+    let preview = plan_payload(&conn, &p, mode)?;
+    Ok(serde_json::to_value(preview)?)
+}
+
+/// 应用下载的 payload（OPT-010 两段式第二步：前端确认后调用）。
+///
+/// `expected_snapshot_hash` / `expected_version` 必须携带预览返回的两个签名；
+/// 单事务内复核「快照内容未变 + 本地配置未变」后执行，任一不符返回
+/// `stalePreview` 且零写入（旧预览必须重新确认，绝不重新计算后直接删）。
+/// 镜像模式的删除不产生远端退订 outbox，也不改活动连接凭据（连接走
+/// OPT-006 待确认建议 + 专用激活流程）。
 #[tauri::command]
 pub async fn config_sync_apply(
     state: State<'_, AppState>,
     payload: String,
+    mode: String,
+    expected_snapshot_hash: String,
+    expected_version: String,
 ) -> AppResult<serde_json::Value> {
     let p: SyncPayload = serde_json::from_str(&payload)?;
+    let mode = ApplyMode::parse(&mode)?;
     let conn = state.db.lock().await;
-    let outcome = apply_payload(&conn, &p)?;
+    let outcome = apply_payload_checked(
+        &conn,
+        &p,
+        mode,
+        Some(&expected_snapshot_hash),
+        Some(&expected_version),
+    )?;
     // TASK-074：如实分开 imported / updated / skipped（此前 skipped 是已更新数）
     // OPT-006：pendingConnection = 待确认连接建议——前端必须展示「需重新输入凭据
     // 后保存才会激活」，激活走 sync_save 专用流程（导入不改活动凭据）。
+    // OPT-010：removedFeeds/removedFolders/affectedArticleCount = 镜像实际删除数。
     Ok(serde_json::json!({
+        "mode": mode.as_str(),
         "imported": outcome.imported,
         "updated": outcome.updated,
         "skipped": outcome.skipped,
+        "removedFeeds": outcome.removed_feeds,
+        "removedFolders": outcome.removed_folders,
+        "affectedArticleCount": outcome.affected_article_count,
         "pendingConnection": outcome.pending_connection,
     }))
 }

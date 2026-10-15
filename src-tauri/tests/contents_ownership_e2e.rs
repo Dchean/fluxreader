@@ -652,6 +652,9 @@ fn seed_v21_legacy(path: &std::path::Path) -> (i64, i64) {
         DROP INDEX IF EXISTS idx_subscription_outbox_url;
         DROP INDEX IF EXISTS idx_subscription_outbox_pending;
         DROP TABLE IF EXISTS subscription_outbox;
+        -- OPT-010 v26 物理回拨：分类稳定身份列（folders 表无后续重建迁移，
+        -- 不回拨则重放 v26 的 ALTER 报 duplicate column）。
+        ALTER TABLE folders DROP COLUMN sync_id;
         PRAGMA user_version = 21;
         "#,
     )

@@ -1589,13 +1589,16 @@ export async function run(ctx) {
     auditedDescs101.length > 20 && !auditedDescs101.some((t) => t.length > 60));
 
   /* ---------- 审计不回退：确认类/阈值/约束语义一条不丢 ---------- */
-  checkNew('(t101-audit-5) 确认与约束语义零丢失：断开确认、清理不可撤销、收藏与待同步保留、AI 缓存正文保留、下载覆盖确认、托盘真退出',
+  /* OPT-010（2026-10-15）：下载确认文案由「下载会覆盖本地设置与 AI 配置」
+     改为预览/合并/镜像语义——同步的是分类与源的 AI 开关及界面设置，
+     含模型/密钥的 AI 服务配置不在同步范围（旧文案与后端白名单矛盾）。 */
+  checkNew('(t101-audit-5) 确认与约束语义零丢失：断开确认、清理不可撤销、收藏与待同步保留、AI 缓存正文保留、下载预览确认、托盘真退出',
     syncTab101.includes('断开后将移除从服务端拉取的订阅与文章（含已读/收藏绑定），本地直连添加的订阅不受影响。确定断开吗？')
     && cacheCleanup101.includes('此操作不可撤销')
     && cacheCleanup101.includes('收藏文章与待同步状态始终保留')
     && cacheCleanup101.includes('（收藏除外）')
     && cacheCleanup101.includes('正文保留')
-    && configSync101.includes('已存在的源会跳过；本地设置与 AI 配置将被远端覆盖')
+    && configSync101.includes('下载先预览：合并保留本地独有；镜像删除本地多出对象，确认后才写入')
     && general101.includes('托盘菜单「退出」才是真正退出'));
 }
 
@@ -1691,10 +1694,12 @@ export async function run(ctx) {
     && !about102.includes('检测 GitHub Releases 上的最新版本')
     && !configSync102.includes('服务器登录账号')
     && !syncTab102.includes('集成密码（Google Reader / Fever 共用）'));
-  checkNew('(t102-x3c) 约束语义零丢失：留空提交=保持密码、托盘真退出、下载覆盖本地、清理不可撤销、收藏与待同步保留',
+  checkNew('(t102-x3c) 约束语义零丢失：留空提交=保持密码、托盘真退出、下载预览确认、清理不可撤销、收藏与待同步保留',
     syncTab102.includes('留空提交 = 保持当前密码')
     && general102.includes('托盘菜单「退出」才是真正退出')
-    && configSync102.includes('下载会覆盖本地设置与 AI 配置')
+    /* OPT-010：下载覆盖旧文案改为预览/合并/镜像语义（含模型/密钥的 AI 服务
+       配置不在同步范围——旧文案与后端白名单矛盾）。 */
+    && configSync102.includes('下载先预览：合并保留本地独有；镜像删除本地多出对象，确认后才写入')
     && cacheCleanup102.includes('此操作不可撤销')
     && cacheCleanup102.includes('收藏文章与待同步状态始终保留'));
   const subtitles102 = [...shared102.matchAll(/subtitle: '([^']+)'/g)].map((m) => m[1]);

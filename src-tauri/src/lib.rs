@@ -346,6 +346,8 @@ pub fn run() {
             config_sync::config_sync_save_credentials,
             config_sync::config_sync_upload,
             config_sync::config_sync_download,
+            // OPT-010：两段式——预览（只读）→ 确认后应用（hash/版本 CAS）
+            config_sync::config_sync_plan,
             config_sync::config_sync_apply,
             config_sync::config_sync_status,
             // GitHub 设备流登录

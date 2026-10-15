@@ -119,6 +119,17 @@ function defaultHandler(cmd, args) {
     /* OPT-009 B3：订阅写回只读 IPC 的缺省（未连接/无待办——与真实后端未连接
        态同形；用例需要时经 setPlan 覆写）。 */
     case 'subscription_outbox_stats': return Promise.resolve({ pending: 0, failed: 0, local_only: 0, last_error: null });
+    /* OPT-010：配置预览（只读）缺省——无变更的合并预览；用例需要结构化清单时
+       经 setPlan 覆写。 */
+    case 'config_sync_plan': return Promise.resolve({
+      mode: args?.mode ?? 'merge',
+      snapshotHash: 'default-hash',
+      currentVersion: 'default-version',
+      affectedArticleCount: 0,
+      additions: [], updates: [], removals: [],
+      settingsChangedKeys: [], settingsRemovedKeys: [],
+      pendingConnection: false, warnings: [],
+    });
     case 'subscription_capabilities': return Promise.resolve({
       connected: false,
       protocol: null,
