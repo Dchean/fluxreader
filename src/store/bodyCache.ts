@@ -103,10 +103,10 @@ export interface BodyEntry {
   translatedContent: string;
   /** AI 摘要（cleared 后为空串） */
   aiSummary: string;
-  /** OPT-013 B1：两类产物的缓存签名（null = 未标记版本/未生成）。
-      来源与产物同源：水合行真值（applyBodyRow）或生成回读行（applyAiProduct）。
-      产物被清空/重试清半截时一并回 null——签名不得脱离对应产物独立存活
-      （「新产物 + 旧签名」在记录层也不出现）。 */
+  /** OPT-013 B1：两类产物的缓存签名（null = 旧无签名产物/未生成——B3 五态判定
+      归 stale「已过期」）。来源与产物同源：水合行真值（applyBodyRow）或生成回读行
+      （applyAiProduct）。产物被清空/重试清半截时一并回 null——签名不得脱离对应
+      产物独立存活（「新产物 + 旧签名」在记录层也不出现）。 */
   aiSummarySig: string | null;
   translatedSig: string | null;
   /** 正文已被 Readability 全文覆盖 */
@@ -260,7 +260,7 @@ export function applyBodyRow(
   if (current && current.contentRevision !== stamp) return; // 显式失效在途 → 响应过期
   const base = current ?? emptyRecord('ready');
   /* OPT-013 B1：签名随产物来源走——行携带产物（非 NULL）时签名取行值
-     （行缺省签名字段 = 未标记版本 → null）；行产物为 NULL（回退到 aiFallback
+     （行缺省签名字段 = 旧无签名产物 → null）；行产物为 NULL（回退到 aiFallback
      的流式半截）时保留记录现值（签名不脱离产物独立改写）。 */
   const summarySig = row.ai_summary != null ? row.ai_summary_sig ?? null : base.aiSummarySig;
   const translatedSig = row.translated_content != null ? row.translated_sig ?? null : base.translatedSig;
@@ -414,7 +414,8 @@ export function appendAiDelta(id: string, field: 'aiSummary' | 'translatedConten
 export interface BodyRowFact {
   aiSummary: string;
   translatedContent: string;
-  /** OPT-013 B1：行真值携带的缓存签名（null = 未标记版本）——对齐时与产物同时写 */
+  /** OPT-013 B1/B3：行真值携带的缓存签名（null = 旧无签名产物，五态判定为
+      「已过期」）——对齐时与产物同时写 */
   aiSummarySig: string | null;
   translatedSig: string | null;
   /** 行 snippet（正文可能变化的伴生信号，见模块头注 P4 规则） */

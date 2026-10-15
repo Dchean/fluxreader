@@ -16,7 +16,7 @@ function deferred() {
 }
 
 export async function run(ctx) {
-  const { S, store, checkNew, nTick, bootFixture, mkRow, BASE_ROWS, bodyOf } = ctx;
+  const { S, store, checkNew, nTick, bootFixture, mkRow, BASE_ROWS, bodyOf, selectAiProductState } = ctx;
   await ctx.useMainBackend();
 
   /* ---------- (b1-1) 无签名/旧签名产物不得被前端非空短路（后端判定未命中） ----------
@@ -250,6 +250,183 @@ export async function run(ctx) {
   await nTick(20);
   checkNew('(b2-2) 作废（整篇重生成）即使静默自动触发也必须提示（告知义务不让位）',
     toastTexts().some((t) => t.includes('整篇重新翻译')));
+  S.backendRows = BASE_ROWS;
+  await bootFixture();
+  store.setState({ activeArticleId: '201' });
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 3, discarded: 1 },
+  };
+  S.aiTr = { deltas: ['直接提交'], error: null, reject: null, finish: true, holdIds: [] };
+  clearToasts();
+  store.getState().toggleReaderTranslation();
+  await nTick(20);
+  checkNew('(b2-2) 作废但全部段已在（completed == total）：文案不得再说「整篇重新翻译」（B3 收口，零重发直接提交）',
+    toastTexts().some((t) => t.includes('全部片段就绪'))
+    && !toastTexts().some((t) => t.includes('整篇重新翻译')));
+  await bootFixture();
+
+  /* ============================================================
+     OPT-013 B3：五态单点真值、刷新一致性、三入口（真实调用断言）
+     ============================================================ */
+
+  /* ---------- (b3-1) 五态判定表（切片层；唯一且互斥，不存在「产物非空=complete」回退） ---------- */
+  await bootFixture();
+  const stateOf = (id, kind) => selectAiProductState(store.getState(), id, kind);
+  const zeroPlan = { total: 1, completed: 0, discarded: 0 };
+  /* generating：在途登记优先于一切产物/校验数据 */
+  store.setState({ summarizingIds: { 104: true } });
+  checkNew('(b3-1) generating：该产物有在途请求（不受产物与校验缓存影响）',
+    stateOf('104', 'summary') === 'generating');
+  /* complete：产物 + 签名 + 后端校验通过 */
+  S.backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, ai_summary: '已生成摘要', ai_summary_sig: 'sig-ok' } : r));
+  await store.getState().reloadFromBackend();
+  store.setState({ summarizingIds: {}, aiStatusById: { 104: { summaryVerified: true, translationVerified: false, translationSegments: zeroPlan } } });
+  checkNew('(b3-1) complete：产物非空且签名经后端校验通过（唯一 complete 路径）',
+    stateOf('104', 'summary') === 'complete');
+  checkNew('(b3-1) complete 与 stale 互斥：校验通过的产物不得同时被判已过期',
+    stateOf('104', 'summary') !== 'stale');
+  /* stale（校验不匹配：换模型/提示词/正文修订） */
+  store.setState({ aiStatusById: { 104: { summaryVerified: false, translationVerified: false, translationSegments: zeroPlan } } });
+  checkNew('(b3-1) stale：产物非空但校验不匹配',
+    stateOf('104', 'summary') === 'stale');
+  /* stale（签名缺失）——旧无签名产物；没有校验数据也必须如实标注 */
+  await bootFixture();
+  S.backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, ai_summary: '存量摘要（无签名）' } : r));
+  await store.getState().reloadFromBackend();
+  checkNew('(b3-1) stale：产物非空但签名缺失（旧无签名产物）',
+    stateOf('104', 'summary') === 'stale');
+  /* 关键负断言：产物非空 + 有签名 + 无校验数据 → 未判定，绝不回退成 complete */
+  await bootFixture();
+  S.backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, ai_summary: '未校验摘要', ai_summary_sig: 'sig-unknown' } : r));
+  await store.getState().reloadFromBackend();
+  checkNew('(b3-1) 不存在「产物非空=complete」回退：未校验时不宣称完成（结论 = 未判定）',
+    stateOf('104', 'summary') === null);
+  /* partial：无干净产物 + 当前签名 0 < completed < total */
+  await bootFixture();
+  store.setState({ aiStatusById: { 201: { summaryVerified: false, translationVerified: false, translationSegments: { total: 3, completed: 1, discarded: 0 } } } });
+  checkNew('(b3-1) partial：无完整产物但当前签名有可续片段（0<completed<total）',
+    stateOf('201', 'translation') === 'partial');
+  checkNew('(b3-1) partial 与 stale 互斥：无产物不得误标已过期', stateOf('201', 'translation') !== 'stale');
+  /* failed：无产物、无可用片段、有明确失败 */
+  await bootFixture();
+  store.setState({ translateErrors: { 201: '限流' } });
+  checkNew('(b3-1) failed：无产物、无可用已完成片段、存在明确失败',
+    stateOf('201', 'translation') === 'failed');
+  store.setState({ translateErrors: {} });
+  checkNew('(b3-1) 五态外：无产物/无在途/无进度/无错误 → 未判定（不冒充任何态）',
+    stateOf('201', 'translation') === null && stateOf('201', 'summary') === null);
+  await bootFixture();
+
+  /* ---------- (b3-2) partial 刷新重启后仍为 partial（不被当完整缓存） ---------- */
+  await bootFixture();
+  S.backendRows = BASE_ROWS.map((r) => ({ ...r })); // 无产物行（干净重启）
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 1, discarded: 0 },
+  };
+  await store.getState().reloadFromBackend();
+  checkNew('(b3-2) 前置：重启后产物为空（partial 不得被当完整缓存）',
+    (store.getState().entries.find((a) => a.id === '201')?.translatedContent ?? '') === '');
+  store.getState().refreshAiStatus('201'); // Reader 打开文章路径的状态刷新
+  await nTick(20);
+  checkNew('(b3-2) 重启后刷新状态：仍为 partial 且已完成段数不减少（1/3）',
+    stateOf('201', 'translation') === 'partial'
+    && store.getState().aiStatusById['201']?.translationSegments.completed === 1);
+  S.invokeCalls.length = 0;
+  S.aiTr = { deltas: ['续译'], error: null, reject: null, finish: true, holdIds: [] };
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(b3-2) partial 不被 complete 短路命中：继续入口真实调用后端（只重发缺失段由 B2 命令层恢复语义保证）',
+    S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1);
+  await bootFixture();
+
+  /* ---------- (b3-3) 清除入口：真实调用后端 + 状态回未生成 + 再继续零恢复 ---------- */
+  await bootFixture();
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 1, discarded: 0 },
+  };
+  store.getState().refreshAiStatus('201');
+  await nTick(20);
+  checkNew('(b3-3) 前置：partial（可清除）', stateOf('201', 'translation') === 'partial');
+  S.invokeCalls.length = 0;
+  const cleared = await store.getState().clearAiProduct('201', 'translation');
+  const clearCall = S.invokeCalls.find((c) => c.cmd === 'ai_clear_cache');
+  checkNew('(b3-3) 清除必须真实调用后端命令（articleId + product=translation，不是只清前端文字）',
+    cleared === true && !!clearCall && clearCall.args.articleId === 201 && clearCall.args.product === 'translation');
+  checkNew('(b3-3) 清除后回到「无产物/未生成」：不得再显示 partial（进度归零）',
+    stateOf('201', 'translation') === null
+    && store.getState().aiStatusById['201']?.translationSegments.completed === 0);
+  /* 后端清除后计划归零（夹具如实跟进）；再「继续」= 后端零恢复（全段重发由
+     Rust 命令层测试断言），前端侧断言真实发起且不再显示「继续」类提示。 */
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 0, discarded: 0 },
+  };
+  S.invokeCalls.length = 0;
+  store.setState({ toasts: [] });
+  S.aiTr = { deltas: ['全量'], error: null, reject: null, finish: true, holdIds: [] };
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(b3-3) 清除后再继续：真实发起生成（零恢复语义由命令层全段重发证据承担）',
+    S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1
+    && !store.getState().toasts.some((t) => t.text.includes('继续')));
+  await bootFixture();
+
+  /* ---------- (b3-4) stale：如实标注 + 重新生成真实发起（不再被旧产物短路） ---------- */
+  await bootFixture();
+  S.backendRows = BASE_ROWS.map((r) => (r.id === 201 ? { ...r, translated_content: '<p>旧译文</p>', translated_sig: 'sig-old' } : r));
+  await store.getState().reloadFromBackend();
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 1, completed: 0, discarded: 0 },
+  };
+  store.getState().refreshAiStatus('201');
+  await nTick(20);
+  checkNew('(b3-4) stale：签名不匹配的旧产物如实标注（不再冒充可复用缓存）',
+    stateOf('201', 'translation') === 'stale');
+  S.invokeCalls.length = 0;
+  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(b3-4) 重新生成前不得被当完整缓存短路：入口真实发起生成',
+    S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1);
+  checkNew('(b3-4) 生成起点清旧产物并进入 generating（未消毒半截按纯文本渲染口径）',
+    bodyOf(store.getState(), '201').translatedContent === ''
+    && store.getState().rawTranslatedIds['201'] === true
+    && stateOf('201', 'translation') === 'generating');
+  /* 失败收尾（不悬挂）：流内错误 → 残段按 partial/failed 如实呈现 */
+  const heldB34 = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
+  heldB34.ch.onmessage?.({ type: 'delta', data: '<b>半截' });
+  heldB34.ch.onmessage?.({ type: 'error', data: '限流' });
+  await nTick(20);
+  checkNew('(b3-4) 失败残段按 partial/failed 呈现（半截文本仍按纯文本渲染口径）',
+    store.getState().rawTranslatedIds['201'] === true
+    && ['partial', 'failed'].includes(stateOf('201', 'translation')));
+  S.backendRows = BASE_ROWS;
+  await bootFixture();
+
+  /* ---------- (b3-5) 卡片翻译 IPC 拒绝：失败分型落定后校验状态同口径刷新 ----------
+     R1 复审 P3-2 的判别用例：runCardTranslation 的 promise-rejection 分支曾缺
+     refreshAiStatus（summary catch / Reader catch / 三处错误回调均有）。修前该
+     路径的校验状态只来自生成入口的计划取回（hintSegmentPlan，1 次 IPC），失败
+     落定后不再刷新；修后应有第 2 次 ai_cache_check（失败分型与后端真实进度对账）。 */
+  await bootFixture();
+  S.aiCacheCheck = {
+    summaryVerified: true, translationVerified: false,
+    translationSegments: { total: 3, completed: 1, discarded: 0 },
+  };
+  S.aiTr = { deltas: [], error: null, reject: { message: 'down' }, finish: true, holdIds: [] };
+  S.invokeCalls.length = 0;
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(b3-5) 卡片翻译 IPC 拒绝：错误态落定且校验状态同步刷新（与 summary/Reader 同口径）',
+    store.getState().translateErrors['201'] === 'AI 服务未配置或不可达'
+    && S.invokeCalls.filter((c) => c.cmd === 'ai_cache_check').length === 2);
+  checkNew('(b3-5) 失败后状态如实呈现（可继续）：partial 按同一响应面的进度落账',
+    store.getState().aiStatusById['201']?.translationSegments.completed === 1
+    && stateOf('201', 'translation') === 'partial');
   S.backendRows = BASE_ROWS;
   await bootFixture();
 }

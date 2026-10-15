@@ -263,6 +263,32 @@ pub async fn ai_cache_check(
     ai_cache_check_inner(&state, article_id).await
 }
 
+/// OPT-013 B3：按「条目 × 产物」清除 AI 缓存（真实消费者「清除」入口的后端接线）。
+///
+/// 删除该条目该产物在**所有签名**下的持久化片段（后台恢复记录）与整篇产物/
+/// 签名，并推进清除代次（在途迟到提交被拒）。清除后该条目回到「无产物/未生成」
+/// ——不可能再显示 partial，也不可能被恢复复用（零恢复）。实现体拆出供模块
+/// 测试直接注入 AppState（与 ai_*_inner 同口径）。
+#[tauri::command]
+pub async fn ai_clear_cache(
+    state: State<'_, AppState>,
+    article_id: i64,
+    product: String,
+) -> AppResult<()> {
+    ai_clear_cache_inner(&state, article_id, &product).await
+}
+
+/// ai_clear_cache 的实现体（product：`"summary"` | `"translation"`，其余值显式
+/// validate 失败；条目不存在 → not_found——不清不静默成功）。
+async fn ai_clear_cache_inner(state: &AppState, article_id: i64, product: &str) -> AppResult<()> {
+    let mut conn = state.db.lock().await;
+    let cleared = db::clear_article_ai_product(&mut conn, article_id, product)?;
+    if !cleared {
+        return Err(AppError::not_found(format!("article {article_id}")));
+    }
+    Ok(())
+}
+
 async fn ai_cache_check_inner(state: &AppState, article_id: i64) -> AppResult<AiCacheCheck> {
     let conn = state.db.lock().await;
     let raw = db::get_setting(&conn, "ai_config")?;
@@ -581,14 +607,28 @@ async fn ai_translate_inner(
         }
         {
             let conn = state.db.lock().await;
-            db::upsert_ai_segment(
+            // OPT-013 B3：片段写入带清除代次前提——生成在途时用户清除（ai_epoch
+            // 前进）→ 拒绝写入并立即中止（迟到的片段不得在清除之后复活恢复记录，
+            // 否则「清除后零恢复」被破坏、UI 可能重新显示 partial）。
+            let written = db::upsert_ai_segment(
                 &conn,
                 article_id,
                 db::AI_PRODUCT_TRANSLATION,
                 &snap.signature,
                 key,
                 &safe,
+                snap.token.ai_epoch,
             )?;
+            if !written {
+                return Err(AppError::new(
+                    "aiStale",
+                    format!(
+                        "内容已在生成期间被清除，已丢弃过期译文（第 {}/{} 段后中止，可重试）",
+                        index + 1,
+                        total
+                    ),
+                ));
+            }
         }
         parts.push(safe);
     }
@@ -1090,6 +1130,58 @@ mod ai_commit_tests {
         assert_eq!(query_summary(&conn), None, "拒绝后不得写产物");
         assert_eq!(query_summary_sig(&conn), None, "拒绝后不得半写签名");
         drop(conn);
+        let types = events.lock().unwrap().clone();
+        assert_eq!(types, vec!["delta"], "拒绝后不得发送 Done: {types:?}");
+    }
+
+    /// OPT-013 B3：清除命令（ai_clear_cache）在生成在途时也必须拒绝迟到写入——
+    /// 清除推进 ai_epoch，迟到的片段写入与整篇提交都进不去（aiStale、无产物/
+    /// 签名/片段、不发 Done）。判别力：若片段写入不带代次前提，迟到的完成段会
+    /// 在清除**之后**复活（segments 非空 → 重启可恢复），「清除后零恢复」被破坏。
+    #[tokio::test]
+    async fn clear_during_generation_rejects_late_segment_and_commit() {
+        let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let port = start_blocking_sse(COMPLETE_SSE, received_tx, release_rx);
+        let (state, events) = setup(port, "");
+        let channel = recording_channel(events.clone());
+
+        let mutate = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), received_rx.recv())
+                .await
+                .expect("mock 必须收到模型请求")
+                .expect("received 通道未关闭");
+            // 模型在途：用户执行清除（真实命令路径）
+            ai_clear_cache_inner(&state, 1, "translation")
+                .await
+                .expect("清除命令必须成功");
+            release_tx.send(()).unwrap();
+        };
+        let (res, _) = tokio::join!(ai_translate_inner(&state, 1, &channel), mutate);
+        let err = res.expect_err("清除后的迟到写入必须拒绝");
+        assert_eq!(err.code, "aiStale", "{err}");
+        let conn = state.db.lock().await;
+        let translated: Option<String> = conn
+            .query_row(
+                "SELECT translated_content FROM articles WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(translated, None, "拒绝后不得写产物");
+        let sig: Option<String> = conn
+            .query_row(
+                "SELECT translated_sig FROM articles WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sig, None, "拒绝后不得半写签名");
+        let segs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ai_segments", [], |r| r.get(0))
+            .unwrap();
+        drop(conn);
+        assert_eq!(segs, 0, "迟到片段不得在清除之后复活（零恢复）");
         let types = events.lock().unwrap().clone();
         assert_eq!(types, vec!["delta"], "拒绝后不得发送 Done: {types:?}");
     }
@@ -2028,8 +2120,16 @@ mod ai_segment_tests {
         {
             let conn = state.db.lock().await;
             // 旧签名残留片段 + 让清理 DELETE 必然失败（触发器注入）。
-            db::upsert_ai_segment(&conn, 1, db::AI_PRODUCT_TRANSLATION, "old-sig", 0, "旧翻译")
-                .unwrap();
+            db::upsert_ai_segment(
+                &conn,
+                1,
+                db::AI_PRODUCT_TRANSLATION,
+                "old-sig",
+                0,
+                "旧翻译",
+                0,
+            )
+            .unwrap();
             conn.execute_batch(
                 "CREATE TRIGGER block_seg_delete BEFORE DELETE ON ai_segments
                  BEGIN SELECT RAISE(ABORT, 'injected cleanup failure'); END;",
@@ -2063,5 +2163,250 @@ mod ai_segment_tests {
             2,
             "清理失败被吞：旧签名片段残留（不影响正确性——读段只按同一签名）: {rows:?}"
         );
+    }
+
+    /* ============================================================
+    OPT-013 B3：真实消费者三入口的命令层证据
+    ============================================================ */
+
+    /// B3 反例 3（命令层，真实 wire）：同进程「继续」——第二段失败后再次触发
+    /// 生成，只重发缺失段（已完成段不重发、拼接无重复）；失败后的状态源
+    /// （`ai_cache_check` 的 completed/total）如实报告 partial 进度。
+    #[tokio::test]
+    async fn continue_after_failure_resends_only_missing_segments() {
+        let html = long_html(40);
+        let expected = expected_segments(&html);
+        assert!(expected.len() >= 3);
+        let script = vec![Reply::Text("<p>首段</p>".into()), Reply::Http500];
+        let (port, requests) = start_recording_sse(script);
+        let tmp = TempAiDb::new("b3-continue");
+        let state = setup_migrated(&tmp.path, port, &html, "正文");
+
+        let err = ai_translate_inner(
+            &state,
+            1,
+            &recording_channel(Arc::new(StdMutex::new(Vec::new()))),
+        )
+        .await
+        .expect_err("第二段失败必须如实 Err");
+        assert_eq!(err.code, "aiStream", "{err}");
+        assert_eq!(requests.lock().unwrap().len(), 2, "第一次共发出 2 段请求");
+
+        // 「继续」入口的状态源：partial = 0 < completed < total；整篇不得冒充完整
+        let plan = ai_cache_check_inner(&state, 1)
+            .await
+            .unwrap()
+            .translation_segments;
+        assert_eq!(
+            plan,
+            TranslationSegmentPlan {
+                total: expected.len(),
+                completed: 1,
+                discarded: 0
+            },
+            "失败后计划必须如实报告已完成 1 段（前端「继续」入口的数据源）"
+        );
+        assert_eq!(translated_of(&state).await, None, "部分态绝不写整篇产物");
+        assert_eq!(translated_sig_of(&state).await, None, "部分态不得写签名");
+
+        // 触发「继续」（同一命令、同一进程）：只重发缺失段
+        let text = ai_translate_inner(
+            &state,
+            1,
+            &recording_channel(Arc::new(StdMutex::new(Vec::new()))),
+        )
+        .await
+        .unwrap();
+        let reqs = requests.lock().unwrap().clone();
+        assert_eq!(
+            reqs.len(),
+            2 + (expected.len() - 1),
+            "继续只重发缺失段（已完成段不重发）"
+        );
+        let sent: Vec<String> = reqs[2..].iter().map(|r| sent_segment(r)).collect();
+        assert_eq!(sent, expected[1..].to_vec(), "从第 2 段继续，顺序一致");
+        let expect_product = format!(
+            "<p>首段</p>{}",
+            "<p>默认译文</p>".repeat(expected.len() - 1)
+        );
+        assert_eq!(text, expect_product, "拼接正确且无重复文本");
+        assert_eq!(
+            text.matches("<p>首段</p>").count(),
+            1,
+            "已完成段不得重复追加"
+        );
+        assert_eq!(
+            translated_of(&state).await.as_deref(),
+            Some(expect_product.as_str()),
+            "全部段就位后才形成整篇产物"
+        );
+    }
+
+    /// B3 反例 2（命令层，真实重启）：重启（同一文件库新连接 + 新 AppState）后
+    /// `ai_cache_check` 报告的已完成段数不减少——partial 仍为 partial，且整篇
+    /// 产物仍为空（刷新重启不得把 partial 当完整缓存）。
+    #[tokio::test]
+    async fn restart_keeps_completed_segment_count_for_partial() {
+        let html = long_html(40);
+        let expected = expected_segments(&html);
+        assert!(expected.len() >= 3);
+        let script = vec![Reply::Text("<p>首段</p>".into()), Reply::Http500];
+        let (port, _requests) = start_recording_sse(script);
+        let tmp = TempAiDb::new("b3-restart-plan");
+        let state = setup_migrated(&tmp.path, port, &html, "正文");
+        ai_translate_inner(
+            &state,
+            1,
+            &recording_channel(Arc::new(StdMutex::new(Vec::new()))),
+        )
+        .await
+        .expect_err("第二段失败");
+        let before = ai_cache_check_inner(&state, 1)
+            .await
+            .unwrap()
+            .translation_segments;
+        assert_eq!((before.total, before.completed), (expected.len(), 1));
+        drop(state); // 「进程结束」
+
+        let state2 = reopen_migrated(&tmp.path);
+        let after = ai_cache_check_inner(&state2, 1)
+            .await
+            .unwrap()
+            .translation_segments;
+        assert_eq!(
+            after, before,
+            "重启后分段进度不减少（completed 不归零、total 不变）"
+        );
+        assert_eq!(
+            translated_of(&state2).await,
+            None,
+            "重启后 partial 仍不是完整产物（不得被当完整缓存）"
+        );
+        assert_eq!(translated_sig_of(&state2).await, None);
+    }
+
+    /// B3 反例 4（命令层）：清除入口——清除后该条目该产物在**所有签名**下的
+    /// 片段为空、整篇产物与签名为空、清除代次推进；随后再生成必须零恢复
+    /// （全部分段重发，旧片段绝不混入新产物）。
+    #[tokio::test]
+    async fn clear_removes_all_segments_and_continue_recovers_nothing() {
+        let html = long_html(40);
+        let expected = expected_segments(&html);
+        assert!(expected.len() >= 3);
+        let script = vec![Reply::Text("<p>第一段</p>".into()), Reply::Http500];
+        let (port, requests) = start_recording_sse(script);
+        let tmp = TempAiDb::new("b3-clear");
+        let state = setup_migrated(&tmp.path, port, &html, "正文");
+        ai_translate_inner(
+            &state,
+            1,
+            &recording_channel(Arc::new(StdMutex::new(Vec::new()))),
+        )
+        .await
+        .expect_err("第二段失败");
+        {
+            let conn = state.db.lock().await;
+            // 另一签名下的旧片段（清除必须跨签名生效）
+            db::upsert_ai_segment(
+                &conn,
+                1,
+                db::AI_PRODUCT_TRANSLATION,
+                "old-sig",
+                0,
+                "旧签名片段",
+                0,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            segments_snapshot(&state).await.len(),
+            2,
+            "清除前：当前签名 1 段 + 旧签名 1 段"
+        );
+        let epoch_before = {
+            let conn = state.db.lock().await;
+            db::article_ai_commit_token(&conn, 1)
+                .unwrap()
+                .unwrap()
+                .ai_epoch
+        };
+
+        ai_clear_cache_inner(&state, 1, "translation")
+            .await
+            .unwrap();
+
+        assert!(
+            segments_snapshot(&state).await.is_empty(),
+            "清除必须删除全部签名下的片段（后台恢复记录）"
+        );
+        assert_eq!(translated_of(&state).await, None, "整篇产物为空");
+        assert_eq!(translated_sig_of(&state).await, None, "签名与产物同灭");
+        assert_eq!(
+            {
+                let conn = state.db.lock().await;
+                db::article_ai_commit_token(&conn, 1)
+                    .unwrap()
+                    .unwrap()
+                    .ai_epoch
+            },
+            epoch_before + 1,
+            "清除推进清除代次（在途迟到提交被拒）"
+        );
+        let plan = ai_cache_check_inner(&state, 1)
+            .await
+            .unwrap()
+            .translation_segments;
+        assert_eq!(
+            plan,
+            TranslationSegmentPlan {
+                total: expected.len(),
+                completed: 0,
+                discarded: 0
+            },
+            "清除后回到「无产物/未生成」——不得再报 partial（completed/discarded 全 0）"
+        );
+
+        // 再「继续」：零恢复——全部分段重发
+        let before = requests.lock().unwrap().len();
+        let text = ai_translate_inner(
+            &state,
+            1,
+            &recording_channel(Arc::new(StdMutex::new(Vec::new()))),
+        )
+        .await
+        .unwrap();
+        let reqs = requests.lock().unwrap().clone();
+        assert_eq!(
+            reqs.len() - before,
+            expected.len(),
+            "清除后再生成必须全部分段重发（不得复用任何旧片段）"
+        );
+        let sent: Vec<String> = reqs[before..].iter().map(|r| sent_segment(r)).collect();
+        assert_eq!(sent, expected, "全部分段（含曾完成的第 1 段）都重发");
+        assert!(
+            !text.contains("第一段") && !text.contains("旧签名片段"),
+            "旧片段不得混入新产物：{text}"
+        );
+        assert_eq!(
+            translated_of(&state).await.as_deref(),
+            Some(text.as_str()),
+            "重新生成完成后形成整篇产物"
+        );
+    }
+
+    /// B3：清除命令的参数/存在性边界——非法 product 显式 validate 失败、
+    /// 条目不存在 not_found（不得静默成功成「已清除」假象）。
+    #[tokio::test]
+    async fn clear_rejects_invalid_product_and_missing_article() {
+        let tmp = TempAiDb::new("b3-clear-validate");
+        let state = setup_migrated(&tmp.path, 0, "<p>甲</p>", "正文");
+        let err = ai_clear_cache_inner(&state, 1, "bogus")
+            .await
+            .expect_err("非法 product 必须显式失败");
+        assert_eq!(err.code, "validate", "{err}");
+        let err = ai_clear_cache_inner(&state, 999, "translation")
+            .await
+            .expect_err("条目不存在必须 not_found");
+        assert_eq!(err.code, "notFound", "{err}");
     }
 }

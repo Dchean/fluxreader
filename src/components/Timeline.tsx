@@ -9,6 +9,7 @@ import {
   podcastClickAction,
   autoAiBlockOpen,
   entryNeedsHydration,
+  selectAiProductState,
   selectArticleBody,
   selectVisibleEntries,
   selectFeedConfig,
@@ -701,6 +702,10 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
   const translateError = useAppStore((s) => s.translateErrors[item.id] || '');
   /* TASK-065 N11：译文当前是否为未消毒流式产物（决定纯文本/HTML 渲染路径） */
   const rawTranslated = useAppStore((s) => s.rawTranslatedIds[item.id]);
+  /* OPT-013 B3：译文五态（生成中/部分完成/失败/完整/已过期——切片单点判定）。
+     partial 的分段进度同源取 aiStatusById（校验状态缓存）。 */
+  const translationState = useAppStore((s) => selectAiProductState(s, item.id, 'translation'));
+  const translationSegments = useAppStore((s) => s.aiStatusById[item.id]?.translationSegments ?? null);
   /* 社交卡片正文直接渲染 body.content（真值源 bodyById）：进入视口附近才懒加载
      水合（避免几百张卡片同时 getArticle 卡顿） */
   const hydrateRef = useLazyHydrate(item.id);
@@ -745,6 +750,13 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
     ro.observe(el);
     return () => ro.disconnect();
   }, [body.content]);
+
+  /* OPT-013 B3：译文块展示且带产物时惰性补齐校验状态——stale/partial 才能在卡片
+     上如实呈现（每会话每篇至多一次 IPC；生成/操作路径仍各自走权威校验）。 */
+  useEffect(() => {
+    if (!showTranslate || rawTranslated || !body.translatedContent) return;
+    useAppStore.getState().ensureAiStatus(item.id);
+  }, [showTranslate, rawTranslated, body.translatedContent, item.id]);
 
   return (
     /* TASK-100（UI P2-2 轻修）：社交/通知卡补 article 语义角色 + tabIndex，融入卡片级
@@ -844,6 +856,31 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
             <div className="ai-error-row">
               <span className="ai-error-text" title={translateError}>翻译失败：{translateError}</span>
               <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重试</button>
+            </div>
+          ) : null}
+          {/* OPT-013 B3：五态入口——stale：「已过期」+ 重新生成；partial：
+              「部分完成（N/M 段）」+ 继续（复用已完成片段）+ 清除（删后端进度）。 */}
+          {translationState === 'stale' ? (
+            <div className="ai-state-row">
+              <span className="ai-unverified-tag" title="该译文与当前模型/提示词/正文不匹配（或没有缓存签名）——重新生成后更新为已验证版本">
+                已过期
+              </span>
+              <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重新生成</button>
+            </div>
+          ) : null}
+          {translationState === 'partial' && translationSegments ? (
+            <div className="ai-state-row">
+              <span className="ai-partial-hint">
+                部分完成（已完成 {translationSegments.completed}/{translationSegments.total} 段）
+              </span>
+              <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>继续</button>
+              <button
+                className="ai-retry-btn"
+                title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+                onClick={() => void useAppStore.getState().clearAiProduct(item.id, 'translation')}
+              >
+                清除
+              </button>
             </div>
           ) : null}
         </div>
@@ -1107,6 +1144,10 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
   const summaryGenerating = useAppStore((s) => s.summarizingIds[item.id]);
   const summaryError = useAppStore((s) => s.summaryErrors[item.id] || '');
+  /* OPT-013 B3：摘要与译文五态（卡片入口与 Reader 同一单点判定）。 */
+  const summaryState = useAppStore((s) => selectAiProductState(s, item.id, 'summary'));
+  const translationState = useAppStore((s) => selectAiProductState(s, item.id, 'translation'));
+  const translationSegments = useAppStore((s) => s.aiStatusById[item.id]?.translationSegments ?? null);
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
@@ -1152,6 +1193,14 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   /* 自动收起：按展示源文本判定（全文可得时按全文长度，否则按 snippet），
      短内容直接全文展示、不渲染展开按钮 */
   const isLong = (fullText || item.snippet || '').length > 120;
+
+  /* OPT-013 B3：摘要框/译文块展示且带产物时惰性补齐校验状态（同 SocialCard）。 */
+  useEffect(() => {
+    const showSummaryWithProduct = summaryOpen && !!body.aiSummary;
+    const showTransWithProduct = transShow && !!body.translatedContent && !rawTranslated;
+    if (!showSummaryWithProduct && !showTransWithProduct) return;
+    useAppStore.getState().ensureAiStatus(item.id);
+  }, [summaryOpen, transShow, rawTranslated, body.aiSummary, body.translatedContent, item.id]);
 
   return (
     /* TASK-100（UI P2-2 轻修）：同 SocialCard——补 role/tabIndex 融入 roving 体系。
@@ -1223,6 +1272,15 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
         <div className="notif-ai-label">
           <Icons.spark />
           <span>摘要</span>
+          {/* OPT-013 B3：摘要 stale →「已过期」+ 重新生成入口（真实调用后端）。 */}
+          {summaryState === 'stale' ? (
+            <>
+              <span className="ai-unverified-tag" title="该摘要与当前模型/提示词/正文不匹配（或没有缓存签名）——重新生成后更新为已验证版本">
+                已过期
+              </span>
+              <button className="ai-retry-btn" onClick={() => summarizeEntry(item.id)}>重新生成</button>
+            </>
+          ) : null}
         </div>
         {summaryError ? (
           <div className="ai-error-row">
@@ -1287,6 +1345,30 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
           <div className="ai-error-row">
             <span className="ai-error-text" title={translateError}>翻译失败：{translateError}</span>
             <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重试</button>
+          </div>
+        ) : null}
+        {/* OPT-013 B3：译文五态入口（与 SocialCard 同形态——stale/partial）。 */}
+        {translationState === 'stale' ? (
+          <div className="ai-state-row">
+            <span className="ai-unverified-tag" title="该译文与当前模型/提示词/正文不匹配（或没有缓存签名）——重新生成后更新为已验证版本">
+              已过期
+            </span>
+            <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重新生成</button>
+          </div>
+        ) : null}
+        {translationState === 'partial' && translationSegments ? (
+          <div className="ai-state-row">
+            <span className="ai-partial-hint">
+              部分完成（已完成 {translationSegments.completed}/{translationSegments.total} 段）
+            </span>
+            <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>继续</button>
+            <button
+              className="ai-retry-btn"
+              title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+              onClick={() => void useAppStore.getState().clearAiProduct(item.id, 'translation')}
+            >
+              清除
+            </button>
           </div>
         ) : null}
       </div>

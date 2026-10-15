@@ -387,7 +387,7 @@ export function mergeSnapshotEntries(
     const generating = !!(generatingIds[a.id] || translatingIds[a.id]);
     /* 生成中：AI 流式产物不被抓取期更早的行覆盖（列空时保流式值）。
        OPT-013 B1：签名与被保留的产物成对——行清空但保留了 prev 的产物时，
-       签名也必须取 prev 的（否则「旧产物 + 新签名为空」会误现「未标记版本」）。 */
+       签名也必须取 prev 的（否则「旧产物 + 新签名为空」会误现 stale「已过期」）。 */
     if (generating && (prev.aiSummary || prev.translatedContent)) {
       merged = {
         ...merged,

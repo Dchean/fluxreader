@@ -8,7 +8,7 @@ import type {
   ThemeMode,
   ViewFilterType,
 } from '../types';
-import type { SubscriptionCapabilities, SubscriptionOutboxStats } from '../lib/api';
+import type { SubscriptionCapabilities, SubscriptionOutboxStats, TranslationSegmentPlan } from '../lib/api';
 
 export interface PodcastPlayerState {
   isActive: boolean;
@@ -103,6 +103,21 @@ export interface CountsRow {
   unread: number;
   starred: number;
   today: number;
+}
+
+/** OPT-013 B3：AI 产物种类（摘要/翻译；与后端 AiKind 的 id 域逐字一致）。 */
+export type AiProductKind = 'summary' | 'translation';
+
+/** OPT-013 B3：单个条目的 AI 校验状态（`ai_cache_check` 成功结果的最小快照）。
+ *  只在校验成功时写入；失败保留现有值——校验故障既不得把可用产物误标为
+ *  已过期，也不触发重新生成（B1 保守语义）。五态判定（slices/ai.ts 的
+ *  selectAiProductState）以它为「签名是否与当前输入匹配」的唯一验证数据源：
+ *  没有它就不存在 complete（不存在「产物非空 = complete」的回退路径）。 */
+export interface AiCacheStatus {
+  summaryVerified: boolean;
+  translationVerified: boolean;
+  /** 当前签名下的翻译分段进度（partial 判定与「已 N/M 段」展示的数据源） */
+  translationSegments: TranslationSegmentPlan;
 }
 
 /** OPT-008B R1：scope_counts 的 store 快照（带来源元数据）。
@@ -310,8 +325,10 @@ export interface AppState {
   toggleReaderRenderMode: () => void;
   /** 全文视图切换：RSS 原文 ↔ Readability 全文（已提取则直接切换，不重复请求） */
   toggleReaderFulltext: () => void;
-  /** opts.silent：源级开关自动触发时静默失败（未配置 AI 不弹 toast） */
-  toggleReaderTranslation: (opts?: { silent?: boolean }) => void;
+  /** opts.silent：源级开关自动触发时静默失败（未配置 AI 不弹 toast）。
+   *  opts.force（OPT-013 B3）：继续/重新生成入口——跳过「已显示则关闭」的切换
+   *  语义，确保译文显示并走校验/生成（partial 继续 / stale 重新生成 / failed 重试）。 */
+  toggleReaderTranslation: (opts?: { silent?: boolean; force?: boolean }) => void;
   triggerReaderSummary: (opts?: { silent?: boolean }) => void;
   /** 列表卡片就地摘要（通知布局）：按文章 id 流式生成，不依赖阅读器选中态 */
   summarizeEntry: (id: string, opts?: { silent?: boolean }) => void;
@@ -324,6 +341,20 @@ export interface AppState {
   /** TASK-065 N11：该 id 的 translatedContent 当前是未消毒的流式产物——渲染契约：
       有标记按纯文本渲染（模型原始输出不得进 HTML 渲染路径），消毒回读成功后清除 */
   rawTranslatedIds: Record<string, true>;
+  /** OPT-013 B3：AI 校验状态缓存（`ai_cache_check` 成功结果按条目落账；五态判定的
+      验证数据源，见 AiCacheStatus 注释）。写入点收口在 slices/ai.ts：
+      checkCache / hintSegmentPlan / refreshAiStatus（生成结束后的刷新也经它）。 */
+  aiStatusById: Record<string, AiCacheStatus>;
+  /** OPT-013 B3：拉取后端权威校验状态并缓存（Reader 打开文章、生成结束等时机；
+      在途去重，失败保留现有状态）。 */
+  refreshAiStatus: (id: string) => void;
+  /** OPT-013 B3：仅当本会话尚无该条目校验状态时拉取（卡片展示路径的惰性补齐；
+      已存在状态不重复 IPC——动作时刻仍走 ai_cache_check 权威复核）。 */
+  ensureAiStatus: (id: string) => void;
+  /** OPT-013 B3「清除」入口：调用后端清除命令（删除该条目该产物在**所有签名**
+      下的持久化片段与整篇产物/签名、推进清除代次），成功后清前端状态——该条目
+      回到「无产物/未生成」，不得再显示 partial。失败如实 toast 且不改前端状态。 */
+  clearAiProduct: (id: string, kind: AiProductKind) => Promise<boolean>;
   /** 正文懒加载水合（选中文章 / 社交卡片挂载） */
   ensureArticleContent: (id: string, opts?: { extractFulltext?: boolean }) => void;
   /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰） */

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { useAppStore, selectArticleBody, selectFeedConfig } from '../store';
+import { useAppStore, selectArticleBody, selectAiProductState, selectFeedConfig } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
@@ -35,12 +35,21 @@ export function Reader() {
   const toggleReaderFulltext = useAppStore((s) => s.toggleReaderFulltext);
   const toggleReaderTranslation = useAppStore((s) => s.toggleReaderTranslation);
   const triggerReaderSummary = useAppStore((s) => s.triggerReaderSummary);
+  const clearAiProduct = useAppStore((s) => s.clearAiProduct);
   const dataMode = useAppStore((s) => s.dataMode);
   const showToast = useAppStore((s) => s.showToast);
 
   /* find() 返回既有元素引用（稳定）；config 返回新对象 → useShallow */
   const art = useAppStore((s) =>
     s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) ?? null : null,
+  );
+  /* OPT-013 B3：五态单点真值（生成中/部分完成/失败/完整/已过期）——Reader 与
+     卡片都经 selectAiProductState 消费，不在组件内复制判定逻辑。partial 的分段
+     进度取自同一份校验状态缓存（aiStatusById）。 */
+  const translationState = useAppStore((s) => (art ? selectAiProductState(s, art.id, 'translation') : null));
+  const summaryState = useAppStore((s) => (art ? selectAiProductState(s, art.id, 'summary') : null));
+  const translationSegments = useAppStore((s) =>
+    (art ? s.aiStatusById[art.id]?.translationSegments ?? null : null),
   );
   /* TASK-122：正文/AI 产物读取单点——selectArticleBody（真值源 bodyById）。
      body 是快照对象（记录写入即换引用），nonce 依赖在 selector 内部建立。
@@ -139,6 +148,16 @@ export function Reader() {
     // Note: exhaustive-deps — 只随「目标文章 × 失效条件」执行；body 快照其余字段
     // 变化（AI 增量等）不该重复触发（重复入队由记录状态守卫兜底）。
   }, [activeArticleKey, body.state, body.content]);
+  /* OPT-013 B3：打开文章即取后端权威校验状态（五态显示的数据源）——刷新/重进
+     阅读器后 stale（签名不匹配/缺失）与 partial（0 < completed < total）仍如实
+     呈现，partial 不被当完整缓存。失败静默（校验故障不改变显示，也不触发重烧）。 */
+  useEffect(() => {
+    if (!art) return;
+    useAppStore.getState().refreshAiStatus(art.id);
+    // Note: exhaustive-deps — 只在切换目标文章时刷新一次；art 其余字段变化不重取。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [art?.id]);
+
   useEffect(() => {
     if (!art || !hydrated) return;
     const st = useAppStore.getState();
@@ -283,13 +302,38 @@ export function Reader() {
                   <Icons.globe />
                   <span>{isShowingTranslatedProse ? '显示原文' : '翻译'}</span>
                 </button>
-                {/* OPT-013 B1：正在展示的译文无缓存签名（存量产物/生成输入已变化）
-                    → 标记「未标记版本」。数据显示保留；点击翻译会走命中判定并
-                    重新生成覆盖（签名与产物同时更新）。 */}
-                {isShowingTranslatedProse && !!body.translatedContent && !body.translatedSig ? (
-                  <span className="ai-unverified-tag" title="该译文没有缓存签名（生成于签名功能上线前，或生成输入已变化）——仍可显示，重新生成即更新为已验证版本">
-                    未标记版本
-                  </span>
+                {/* OPT-013 B3：译文产物五态入口——
+                    stale（签名不匹配/缺失，含 B1 的旧无签名产物）：「已过期」+
+                    重新生成（入口真实调用后端：校验未命中即重新生成）；
+                    partial（当前签名 0 < completed < total）：「部分完成（N/M 段）」+
+                    继续（复用已完成片段只发缺失段）+ 清除（删后端全签名片段与整篇产物）。
+                    生成中/失败态沿用既有流式与错误行呈现；完整态无标记。 */}
+                {translationState === 'stale' ? (
+                  <>
+                    <span className="ai-unverified-tag" title="该译文与当前模型/提示词/正文不匹配（或没有缓存签名）——仍可显示，重新生成即更新为已验证版本">
+                      已过期
+                    </span>
+                    <button className="ai-retry-btn" onClick={() => toggleReaderTranslation({ force: true })}>
+                      重新生成
+                    </button>
+                  </>
+                ) : null}
+                {translationState === 'partial' && translationSegments ? (
+                  <>
+                    <span className="ai-partial-hint">
+                      部分完成（已完成 {translationSegments.completed}/{translationSegments.total} 段）
+                    </span>
+                    <button className="ai-retry-btn" onClick={() => toggleReaderTranslation({ force: true })}>
+                      继续
+                    </button>
+                    <button
+                      className="ai-retry-btn"
+                      title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+                      onClick={() => void clearAiProduct(art.id, 'translation')}
+                    >
+                      清除
+                    </button>
+                  </>
                 ) : null}
                 {dataMode === 'tauri' && (
                   <button
@@ -323,12 +367,17 @@ export function Reader() {
                   <Icons.spark />
                   <span>摘要</span>
                 </div>
-                {/* OPT-013 B1：存量无签名摘要的「未标记版本」标记——数据可见，
-                    但不冒充已验证缓存；点击摘要按钮会重新生成并写入签名。 */}
-                {!!body.aiSummary && !body.aiSummarySig ? (
-                  <span className="ai-unverified-tag" title="该摘要没有缓存签名（生成于签名功能上线前，或生成输入已变化）——仍可显示，重新生成即更新为已验证版本">
-                    未标记版本
-                  </span>
+                {/* OPT-013 B3：摘要产物 stale（签名不匹配/缺失）→「已过期」+
+                    重新生成入口（triggerReaderSummary 走后端校验，未命中即重生成）。 */}
+                {summaryState === 'stale' ? (
+                  <>
+                    <span className="ai-unverified-tag" title="该摘要与当前模型/提示词/正文不匹配（或没有缓存签名）——仍可显示，重新生成即更新为已验证版本">
+                      已过期
+                    </span>
+                    <button className="ai-retry-btn" onClick={() => triggerReaderSummary()}>
+                      重新生成
+                    </button>
+                  </>
                 ) : null}
               </div>
               <div className="ai-body-content">
@@ -354,7 +403,7 @@ export function Reader() {
             {translateError && !isShowingTranslatedProse && !translating && (
               <div className="ai-error-row reader-translate-error">
                 <span className="ai-error-text" title={translateError}>翻译失败：{translateError}</span>
-                <button className="ai-retry-btn" onClick={() => toggleReaderTranslation()}>重试</button>
+                <button className="ai-retry-btn" onClick={() => toggleReaderTranslation({ force: true })}>重试</button>
               </div>
             )}
 

@@ -838,6 +838,56 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
     Ok((deleted, ai_cleared))
 }
 
+/// OPT-013 B3：按「条目 × 产物」清除 AI 缓存（真实消费者「清除」入口的持久化侧）。
+///
+/// 契约（B3 定版「交付 2：三入口真实接线」）：
+/// - 清产物列与签名列（同一条 UPDATE，无「新产物 + 旧签名」半写形态）；
+///   `ai_epoch + 1` 推进清除代次，使网络在途的迟到提交被
+///   [`set_article_ai_fields_checked`] 拒绝——清除后不得被旧请求复活；
+/// - 删除该条目该产物在**所有签名**下的持久化片段（后台恢复记录）：清除后
+///   「继续」不得复用任何旧片段（零恢复）；
+/// - 只动指定产物的列：清 translation 不牵连 summary（反之亦然）。
+///
+/// 返回 `false` = 条目不存在（调用方如实报 not_found，不静默成功）。
+/// Note: 清除语义与三入口 — 见 .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md
+/// 末节「OPT-013 B3 追加（2026-10-15）」。
+pub fn clear_article_ai_product(
+    conn: &mut Connection,
+    article_id: i64,
+    product: &str,
+) -> AppResult<bool> {
+    let tx = conn.transaction()?;
+    let affected = match product {
+        "summary" => tx.execute(
+            "UPDATE articles SET ai_summary = NULL, ai_summary_sig = NULL,
+                    ai_epoch = ai_epoch + 1
+             WHERE id = ?1",
+            params![article_id],
+        )?,
+        "translation" => tx.execute(
+            "UPDATE articles SET translated_content = NULL, translated_sig = NULL,
+                    ai_epoch = ai_epoch + 1
+             WHERE id = ?1",
+            params![article_id],
+        )?,
+        _ => {
+            return Err(crate::error::AppError::new(
+                "validate",
+                "product 必须是 summary 或 translation",
+            ))
+        }
+    };
+    if affected == 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "DELETE FROM ai_segments WHERE article_id = ?1 AND product = ?2",
+        params![article_id, product],
+    )?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /* ============================================================
 写入与状态：文章入库（含智能去重）、已读/收藏、AI 字段、未读数
 ============================================================ */

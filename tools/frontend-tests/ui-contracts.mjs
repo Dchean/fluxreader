@@ -433,7 +433,7 @@ export async function run(ctx) {
       /* OPT-008B 第二阶段：contents 身份/修订进视图行（contentId/contentRevision
          是前端正文失效依据，随 fixture 的 content_id/content_revision 逐键核对） */
       contentId: 9, contentRevision: 3,
-      /* OPT-013 B1：AI 产物缓存签名进视图行（「未标记版本」判定与命中语义依赖；
+      /* OPT-013 B1/B3：AI 产物缓存签名进视图行（「已过期」/命中判定语义依赖；
          fixture 两键取值不同，接错源即 red） */
       aiSummarySig: 'sig-summary-fixture', translatedSig: 'sig-translated-fixture',
     };
@@ -981,9 +981,12 @@ export async function run(ctx) {
     && tlFix.includes("el.addEventListener('wheel', latch"));
 
   /* ---------- fix-5：卡片级翻译失败的内联错误行 + 按钮重试 ---------- */
+  /* OPT-013 B3：卡片新增 stale（重新生成）/partial（继续）入口，同样走
+     translateEntry——本断言只锚「两卡都有内联错误行 + 至少各自的 translateEntry
+     重试点」，出现更多同类按钮不构成退化（计数从严等放宽为 >= 2）。 */
   checkNew('(fix-5) Social/Notif 卡补翻译失败内联错误行 + 重试按钮（调 translateEntry）',
     (tlFix.match(/translateError && !translatingCard \?/g) || []).length === 2
-    && (tlFix.match(/ai-retry-btn" onClick=\{\(\) => useAppStore\.getState\(\)\.translateEntry\(item\.id\)\}/g) || []).length === 2);
+    && (tlFix.match(/ai-retry-btn" onClick=\{\(\) => useAppStore\.getState\(\)\.translateEntry\(item\.id\)\}/g) || []).length >= 2);
   /* 【TASK-122 改动理由】译文真值源迁移 bodyById——按钮判定改读 selectArticleBody
      快照（body.translatedContent）；保护意图（失败态重试不把半截当缓存）不变。 */
   checkNew('(fix-5) 两卡「翻译」按钮在失败态（translateErrors[id] 存在）改走 translateEntry 重试（修前把半截译文当缓存只切显示；TASK-122 判定读 body.translatedContent）',

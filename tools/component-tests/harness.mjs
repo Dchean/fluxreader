@@ -436,6 +436,8 @@ export function resetStore(extra = {}) {
     translateErrors: {},
     translatingIds: {},
     rawTranslatedIds: {},
+    /* OPT-013 B3：校验状态缓存（五态显示数据源）随基线清空——防跨用例污染。 */
+    aiStatusById: {},
     openedReadIds: {},
     categories: [],
     entries: [],

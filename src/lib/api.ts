@@ -98,7 +98,9 @@ export interface ArticleListItemRow {
   content_id?: number | null;
   content_revision?: number;
   /** OPT-013 B1：AI 产物缓存签名（生成时输入身份的 sha256；存量/未生成行 null）。
-   *  产物非空且签名为空 = 「未标记版本」——可显示、可重新生成，但不冒充缓存。 */
+   *  产物非空且签名为空 = 旧无签名产物——可显示、可重新生成，但不冒充缓存
+   *  （B3 起 UI 五态判定呈现为「已过期」，见 store/slices/ai.ts 的
+   *  selectAiProductState）。 */
   ai_summary_sig?: string | null;
   translated_sig?: string | null;
 }
@@ -660,6 +662,21 @@ export const api = {
       : null;
   },
 
+  /** OPT-013 B3：按「条目 × 产物」清除 AI 缓存（真实消费者「清除」入口的后端接线）。
+   *
+   *  product = 'summary' | 'translation'（与后端 AiKind::id 的签名字符串域逐字一致）。
+   *  后端在单事务内：清产物列与签名列、`ai_epoch + 1`（在途迟到提交被拒）、删除该
+   *  条目该产物在**所有签名**下的持久化片段——清除后「继续」零恢复，且不可能再
+   *  显示 partial。条目不存在/取值非法 → AppError（前端如实 toast，不清前端状态）。
+   *  浏览器环境无 IPC → null（调用方按不可用处理）。 */
+  async aiClearCache(
+    articleId: number,
+    product: 'summary' | 'translation',
+  ): Promise<null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('ai_clear_cache', { articleId, product }) as null) : null;
+  },
+
   /** 全文提取（Readability）：拉原文网页抽正文并覆盖缓存。
    * TASK-076：返回结构化结果而非裸字符串——degraded=true 表示本次**没有采用**提取
    * 结果（html 是保留的原文），reason 给出原因；调用方不必再靠比对字符串去猜。 */
@@ -959,9 +976,9 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
        （列表快照合并与时序水合守卫消费，见 internals/bodyCache）。 */
     contentId: row.content_id ?? null,
     contentRevision: row.content_revision ?? 0,
-    /* OPT-013 B1：AI 产物缓存签名进视图行（null/undefined = 未标记版本——
-       组件据此呈现「未标记版本」标记；命中判定本身在 store/slices/ai.ts
-       经后端 ai_cache_check 完成）。 */
+    /* OPT-013 B1/B3：AI 产物缓存签名进视图行（null/undefined = 旧无签名产物——
+       五态判定（slices/ai.ts）据此呈「已过期」；命中判定同样在 store/slices/ai.ts
+       经后端 ai_cache_check 完成，前端不自算签名）。 */
     aiSummarySig: row.ai_summary_sig ?? null,
     translatedSig: row.translated_sig ?? null,
   };

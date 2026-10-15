@@ -41,15 +41,15 @@ pub use ai_segments::{
 };
 pub use articles::{
     article_ai_commit_token, article_content_commit_token, article_index, articles_without_cover,
-    cleanup_cache, clear_article_cover_if_matches, clear_dedup_tombstones, counts_snapshot,
-    feed_counts, get_article, get_articles, list_articles, list_read_target_ids_scoped,
-    mark_all_read, mark_all_read_with_enqueue, purge_remote_data, replace_article_content_checked,
-    scope_counts, search_articles, set_article_ai_fields, set_article_ai_fields_checked, set_read,
-    set_read_bulk_with_enqueue, set_read_with_enqueue, set_starred, set_starred_with_enqueue,
-    upsert_article_with_feed, upsert_article_with_feed_tracked, upsert_remote_article,
-    AiCommitToken, AiProduct, ArticleListItem, ArticleQuery, ArticleRow, ArticleUpsert,
-    ContentCommitToken, CountsSnapshot, FeedCounts, NewArticle, ReadWriteReceipt, ScopeCounts,
-    ScopeCountsDetail, ScopedCounts,
+    cleanup_cache, clear_article_ai_product, clear_article_cover_if_matches,
+    clear_dedup_tombstones, counts_snapshot, feed_counts, get_article, get_articles, list_articles,
+    list_read_target_ids_scoped, mark_all_read, mark_all_read_with_enqueue, purge_remote_data,
+    replace_article_content_checked, scope_counts, search_articles, set_article_ai_fields,
+    set_article_ai_fields_checked, set_read, set_read_bulk_with_enqueue, set_read_with_enqueue,
+    set_starred, set_starred_with_enqueue, upsert_article_with_feed,
+    upsert_article_with_feed_tracked, upsert_remote_article, AiCommitToken, AiProduct,
+    ArticleListItem, ArticleQuery, ArticleRow, ArticleUpsert, ContentCommitToken, CountsSnapshot,
+    FeedCounts, NewArticle, ReadWriteReceipt, ScopeCounts, ScopeCountsDetail, ScopedCounts,
 };
 /// OPT-008B 第二阶段：contents 单一正文所有权（常量/判空辅助供 db 各子模块与
 /// 命令层经 `crate::db::` 路径消费；写入路径经 `super::contents::` 直接调用）。

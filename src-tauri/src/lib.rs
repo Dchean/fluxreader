@@ -335,6 +335,8 @@ pub fn run() {
             commands::ai_translate,
             // OPT-013 B1：缓存签名校验（前端命中判定取后端权威结论）
             commands::ai_cache_check,
+            // OPT-013 B3：按条目×产物清除（产物+签名+全签名片段+清除代次）
+            commands::ai_clear_cache,
             // 全文提取
             commands::extract_fulltext,
             // 图片代理（防盗链兼容）

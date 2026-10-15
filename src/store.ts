@@ -73,4 +73,9 @@ bindBodyCacheNotify(() => useAppStore.setState((s) => ({ bodyCacheNonce: s.bodyC
 
 export * from './store/selectors';
 
-export type { AppState, PodcastPlayerState, SettingsState, ToastMessage } from './store/types';
+/* OPT-013 B3：AI 五态单点真值——判定与生成入口/在途表同一 slice，Reader 与卡片
+   一律经本导出消费（不在组件内复制判定逻辑）。 */
+export { selectAiProductState } from './store/slices/ai';
+export type { AiProductState } from './store/slices/ai';
+
+export type { AppState, AiCacheStatus, AiProductKind, PodcastPlayerState, SettingsState, ToastMessage } from './store/types';

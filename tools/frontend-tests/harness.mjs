@@ -539,6 +539,9 @@ async function resetStore(extra) {
     timelineFilter: 'all', timelineSort: 'newest',
     activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false, showFulltext: false,
     summarizingIds: {}, translatingIds: {}, translating: false, summaryErrors: {}, translateErrors: {},
+    /* OPT-013 B3：校验状态缓存是 store 状态（five-state 显示的数据源）——随夹具
+       复位，避免上一用例的验证结论/分段进度被下一个用例读到。 */
+    aiStatusById: {},
     hydrationErrors: {}, hydratedIds: {}, openedReadIds: {}, toasts: [],
     /* OPT-009 B3：订阅写回回执与能力矩阵（事件/挂载写入）随基线清空，
        避免跨用例残留（上一域的 local_only 计数被下一域读到）。 */
@@ -564,6 +567,8 @@ const bodyOfT122 = nSel.selectArticleBody;
 const entryNeedsHydrationT122 = nSel.entryNeedsHydration;
 const { getBodyEntry: getBodyEntryT122, markBodyLoading: markBodyLoadingT122, dropBodyEntry: dropBodyEntryT122 } = await import('../../dist-test/store/bodyCache.js');
 const { viewEntriesCache } = await import('../../dist-test/store/internals.js');
+/* OPT-013 B3：五态单点判定（与生成入口/在途表同一 slice）——域用例直接断言它的结论。 */
+const { selectAiProductState } = await import('../../dist-test/store/slices/ai.js');
 
 export function createHarness() {
   return {
@@ -612,6 +617,7 @@ export function createHarness() {
     dropBodyEntryT122,
     entryNeedsHydrationT122,
     viewEntriesCache,
+    selectAiProductState,
     appStoreUnbound,
     internalsBeforeBind,
   };

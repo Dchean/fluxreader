@@ -117,10 +117,11 @@ export interface ArticleEntry {
       （snippet 未变也失效，共享兄弟内容变更同理）。 */
   contentId?: number | null;
   contentRevision?: number;
-  /** OPT-013 B1：AI 产物缓存签名（各行由后端带回；null/undefined = 未标记版本）。
-      语义：产物非空而签名为空 → 组件呈现「未标记版本」（存量无签名产物可显示、
-      可被重新生成覆盖，但不冒充已验证缓存）。命中判定在 store/slices/ai.ts
-      经后端 ai_cache_check 完成（前端无法自算签名输入）。 */
+  /** OPT-013 B1/B3：AI 产物缓存签名（各行由后端带回；null/undefined = 旧无签名产物）。
+      语义（五态单点判定见 store/slices/ai.ts 的 selectAiProductState）：产物非空而
+      签名为空 → stale「已过期」（存量无签名产物可显示、可被重新生成覆盖，但不冒充
+      已验证缓存）；签名不匹配（换模型/提示词/正文修订）同样归 stale。命中判定在
+      store/slices/ai.ts 经后端 ai_cache_check 完成（前端无法自算签名输入）。 */
   aiSummarySig?: string | null;
   translatedSig?: string | null;
 

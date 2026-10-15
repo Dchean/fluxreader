@@ -38,7 +38,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | verified-ci | 7339679 初审/返工/复审与主控复核通过，[CI 38697114198](https://github.com/Dchean/fluxreader/actions/runs/38697114198) 成功；待 OPT-008 总收口 |
 | [OPT-011](OPT-011.md) | AI 设置单点与输入范围一致 | F13,refreshInterval | OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-012](OPT-012.md) | 阅读器源码与浮层交互 | F14,closeAsk | 无 | verified-ci | 已提交、独立审查及 CI 通过 |
-| [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-008B, OPT-011 | coding | 013A SSE、B1 缓存签名/提交守卫、B2 分段恢复均已通过提交级 CI；B3 真实消费者未开工 |
+| [OPT-013](OPT-013.md) | AI 完成状态和缓存恢复 | F15 | OPT-002, OPT-008B, OPT-011 | coding | 013A/B1/B2 已过提交级 CI；B3 状态机与三入口完成本地门禁 + 独立复审（无 P0/P1/P2）与 tidy 收口，待提交边界 |
 | [OPT-014](OPT-014.md) | 更新检查与凭据失败关闭 | F16,F22 | 无 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-015](OPT-015.md) | 窗口启动恢复与幂等媒体键 | F21,F23 | 无 | verified-ci | 015P 首显最大化修复已通过 CI；015N 八场景本地原生验收通过 |
 | [OPT-015Q](OPT-015Q.md) | 生产自动建窗路径冷启位置恢复 | F23 | OPT-015 | verified-ci | R2 差集 12/12 绿、015N 8/8、独立复审条件通过；dev 未复现跳位，生产零改动；e80957b CI 38714382972 通过；待随 OPT-015 系列合并后请用户实机复测 |
@@ -51,7 +51,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 ## 每卡固定验收
 
 1. 主控验证触发链与 Note 归属，发出明确需求、非目标、写集、负例和门禁。
-2. CodeBuddy 先写行为反例再修复，运行其能承担的检查；不能伪造未跑结果、忽略失败或用源码 contains 代替关键行为。
+2. CodeBuddy 先写行为反例再修复，运行其能承担的检查；不能伪造未跑结果、忽略失败或用源码 contains 代替关键行为。变异验证必须附「还原校验输出」日志（`diff -q` 或等效的逐字比对结果），不接受仅有自述的「已还原」。
 3. 独立 reviewer 只读检查需求匹配、真实 diff、迁移/错误/并发边界；不能自己改代码或派嵌套 reviewer。
 4. 有 P1/P2 未关闭必须返工；主控核对关键差异、最终版本与验证证据，只针对缺口、验证后变化或集成新风险补测，不默认重跑执行者已充分完成的整套检查。维护同批 Note。
 5. npm lint/build/test:frontend/test:components 与 cargo fmt/clippy/test 由执行负责人本地承担，提交级 CI 再验证精确提交（Rust 使用 windows-latest）。本机已证实可以完整链接，不能再沿用缺 MSVC 的历史豁免；主控无需在充分且版本对应的证据上重复整套命令。孤立探针不能冒充全项目门禁，真实服务端 live 测试仍单独约定边界。

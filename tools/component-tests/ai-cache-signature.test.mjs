@@ -1,12 +1,14 @@
-// OPT-013 B1：AI 产物缓存签名——「未标记版本」标记与命中判定的真实挂载回归。
+// OPT-013 B1/B2/B3：AI 产物缓存签名与五态状态机——真实挂载回归。
 //
-// 取证方式（与 OPT-016B 同纪律）：挂载**真实 Reader 组件**，数据经真实 store 与
-// 真实 IPC 假后端（fixtures.mjs）路径：
-// - 产物非空且无签名（存量行）→ 摘要卡头与译文工具栏出现「未标记版本」标记；
-//   产物带签名 → 不出现（标记不是常显装饰）；
-// - 命中判定以后端 ai_cache_check 为准：未命中（旧签名/无签名/输入变化）时
-//   真实点击「摘要」/「翻译」必须发起生成请求（不以「产物非空」短路）；
-//   命中时同一个入口不得重复计费。
+// 取证方式（与 OPT-016B 同纪律）：挂载**真实 Reader / Timeline 组件**，数据经真实
+// store 与真实 IPC 假后端（fixtures.mjs）路径：
+// - B1：产物非空且无签名（旧无签名产物）→ 摘要卡头与译文工具栏出现状态标记
+//   （B3 起统一为「已过期」）；产物带签名且后端校验通过 → 不出现（标记不是常显装饰）；
+// - B1：命中判定以后端 ai_cache_check 为准：未命中时真实点击「摘要」/「翻译」必须
+//   发起生成请求（不以「产物非空」短路）；命中时同一个入口不得重复计费；
+// - B3：stale 显示「已过期」+「重新生成」真实发起生成，完成后标记消失；
+// - B3：partial 显示「部分完成（N/M 段）」+ 继续/清除真实接线（清除调后端命令）；
+// - B3：社交卡（卡片入口）stale 显示与重新生成接线。
 // 未预期 console/jsdom/React 错误由 componentTest 统一账本终检判红。
 
 import assert from 'node:assert/strict';
@@ -14,7 +16,7 @@ import { componentTest, mount, flush, waitFor, resetStore, getBodyEntry, useAppS
 import { installBackend, seedFromRows, mkRow, clearInvokeCalls, invokeCount, setPlan, resetPlan, deferred } from './fixtures.mjs';
 
 const UNSIGNED_ROW = mkRow({
-  id: 101, title: '未标记版本文章', content_html: '<p>正文</p>',
+  id: 101, title: '旧无签名产物文章', content_html: '<p>正文</p>',
   ai_summary: '存量摘要（无签名）',
   translated_content: '<p>存量译文（无签名）</p>',
   // ai_summary_sig/translated_sig 缺省 = null（存量无签名产物）
@@ -26,39 +28,49 @@ const SIGNED_ROW = mkRow({
   translated_content: '<p>已验证译文</p>', translated_sig: 'sig-translation-1',
 });
 
-componentTest('OPT-013 B1：无签名产物呈现「未标记版本」标记，带签名产物不呈现', { timeout: 30000 }, async () => {
+componentTest('OPT-013 B1/B3：无签名产物呈现「已过期」标记，带签名且校验通过的产物不呈现', { timeout: 30000 }, async () => {
   installBackend();
   clearInvokeCalls();
   resetStore();
   seedFromRows([UNSIGNED_ROW, SIGNED_ROW]);
+  /* 忠实假后端：无签名产物校验必不通过（真实后端 signature_verified 要求
+     存盘签名等于当前输入重算值——签名为 NULL 永远不匹配）。 */
+  setPlan({ ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: false, translationSegments: { total: 1, completed: 0, discarded: 0 } }) });
 
-  const { createElement, act } = await import('react');
-  const { Reader } = await import('../../src/components/Reader.tsx');
-  const entry = await mount(createElement(Reader));
+  try {
+    const { createElement, act } = await import('react');
+    const { Reader } = await import('../../src/components/Reader.tsx');
+    const entry = await mount(createElement(Reader));
 
-  /* ---- 无签名产物：摘要卡头 + 译文工具栏都有「未标记版本」 ---- */
-  await act(async () => { useAppStore.getState().selectArticle('101'); });
-  await waitFor(() => getBodyEntry('101')?.state === 'ready', { label: '101 水合完成' });
-  await act(async () => { useAppStore.setState({ isShowingTranslatedProse: true }); });
-  await flush(2);
+    /* ---- 无签名产物（stale）：摘要卡头 + 译文工具栏都有「已过期」 ---- */
+    await act(async () => { useAppStore.getState().selectArticle('101'); });
+    await waitFor(() => getBodyEntry('101')?.state === 'ready', { label: '101 水合完成' });
+    await waitFor(() => useAppStore.getState().aiStatusById['101'] !== undefined, { label: '打开文章后校验状态刷新' });
+    await act(async () => { useAppStore.setState({ isShowingTranslatedProse: true }); });
+    await flush(2);
 
-  const headTag = entry.container.querySelector('.ai-box-head .ai-unverified-tag');
-  assert.ok(headTag, '无签名摘要应出现「未标记版本」标记（数据可显示、不冒充已验证缓存）');
-  assert.equal(headTag.textContent, '未标记版本');
-  const toolbarTag = entry.container.querySelector('.reader-actions-left .ai-unverified-tag');
-  assert.ok(toolbarTag, '无签名译文展示时应出现「未标记版本」标记');
-  assert.equal(toolbarTag.textContent, '未标记版本');
-  /* 产物本体仍可见（保留数据） */
-  assert.equal(entry.container.querySelector('.ai-body-content')?.textContent, '存量摘要（无签名）',
-    '未标记版本不隐藏数据（摘要照常显示）');
+    const headTag = entry.container.querySelector('.ai-box-head .ai-unverified-tag');
+    assert.ok(headTag, '无签名摘要应出现「已过期」标记（数据可显示、不冒充已验证缓存）');
+    assert.equal(headTag.textContent, '已过期');
+    const toolbarTag = entry.container.querySelector('.reader-actions-left .ai-unverified-tag');
+    assert.ok(toolbarTag, '无签名译文应出现「已过期」标记');
+    assert.equal(toolbarTag.textContent, '已过期');
+    /* 产物本体仍可见（保留数据） */
+    assert.equal(entry.container.querySelector('.ai-body-content')?.textContent, '存量摘要（无签名）',
+      '已过期不隐藏数据（摘要照常显示）');
 
-  /* ---- 带签名产物：同一挂载树不出现标记 ---- */
-  await act(async () => { useAppStore.getState().selectArticle('102'); });
-  await waitFor(() => getBodyEntry('102')?.state === 'ready', { label: '102 水合完成' });
-  await act(async () => { useAppStore.setState({ isShowingTranslatedProse: true }); });
-  await flush(2);
-  assert.equal(entry.container.querySelector('.ai-unverified-tag'), null,
-    '带签名产物不得出现「未标记版本」标记（标记不是常显装饰）');
+    /* ---- 带签名产物 + 后端校验通过（complete）：同一挂载树不出现标记 ---- */
+    setPlan({ ai_cache_check: () => Promise.resolve({ summaryVerified: true, translationVerified: true, translationSegments: { total: 1, completed: 0, discarded: 0 } }) });
+    await act(async () => { useAppStore.getState().selectArticle('102'); });
+    await waitFor(() => getBodyEntry('102')?.state === 'ready', { label: '102 水合完成' });
+    await waitFor(() => useAppStore.getState().aiStatusById['102'] !== undefined, { label: '102 校验状态刷新' });
+    await act(async () => { useAppStore.setState({ isShowingTranslatedProse: true }); });
+    await flush(2);
+    assert.equal(entry.container.querySelector('.ai-unverified-tag'), null,
+      '签名匹配且校验通过的产物不得出现「已过期」标记（标记不是常显装饰）');
+  } finally {
+    resetPlan();
+  }
 });
 
 componentTest('OPT-013 B1：未命中不短路（真实点击发起生成），命中不重复计费', { timeout: 40000 }, async () => {
@@ -228,6 +240,193 @@ componentTest('OPT-013 B2：整篇重新生成的最小提示真实出现在组�
       `真实点击「翻译」后必须出现整篇重生成提示（实际 toasts=${JSON.stringify(toasts)}）`,
     );
     assert.ok(entry.container.querySelector('.reader-active-view'), 'Reader 挂载树保持');
+  } finally {
+    resetPlan();
+  }
+});
+
+/* ------------------------------------------------------------------
+   OPT-013 B3：五态展示与三入口（真实挂载）
+   ------------------------------------------------------------------ */
+
+const STALE_ROW = mkRow({
+  id: 103, title: '签名不匹配旧译文', content_html: '<p>正文</p>',
+  translated_content: '<p>旧译文</p>', translated_sig: 'sig-old',
+});
+
+componentTest('OPT-013 B3：stale 译文显示「已过期」，「重新生成」真实发起生成且完成后标记消失', { timeout: 30000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows([STALE_ROW]);
+
+  let verified = false;
+  const held = [];
+  /* 提交契约忠实模拟：生成成功后 DB 行即含新产物与新签名（真实后端在 Done 前
+     已提交；回读行必须反映它）。校验判定随提交翻真（后端重算签名匹配）。 */
+  const committedRow = mkRow({
+    id: 103, title: '签名不匹配旧译文', content_html: '<p>正文</p>',
+    translated_content: '<p>新译文</p>', translated_sig: 'sig-new',
+  });
+  setPlan({
+    ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: verified, translationSegments: { total: 1, completed: 0, discarded: 0 } }),
+    get_article: () => Promise.resolve(committedRow),
+    ai_translate: (args) => new Promise((resolve) => { held.push({ cmd: 'ai_translate', args, resolve }); }),
+  });
+  try {
+    const { createElement, act } = await import('react');
+    const { Reader } = await import('../../src/components/Reader.tsx');
+    const entry = await mount(createElement(Reader));
+    await act(async () => { useAppStore.getState().selectArticle('103'); });
+    await waitFor(() => getBodyEntry('103')?.state === 'ready', { label: '103 水合完成' });
+    await waitFor(() => useAppStore.getState().aiStatusById['103'] !== undefined, { label: '打开文章后校验状态刷新' });
+    await flush(2);
+
+    const tag = entry.container.querySelector('.reader-actions-left .ai-unverified-tag');
+    assert.ok(tag, '签名不匹配的旧译文应显示「已过期」（不得冒充可复用缓存）');
+    assert.equal(tag.textContent, '已过期');
+    const regenBtn = [...entry.container.querySelectorAll('.reader-actions-left button')]
+      .find((b) => b.textContent.includes('重新生成'));
+    assert.ok(regenBtn, '「已过期」必须给出重新生成入口');
+
+    /* 重新生成 = 真实调用后端（校验未命中 → 发起生成，不被旧产物短路） */
+    await act(async () => { regenBtn.click(); });
+    await waitFor(() => held.length === 1, { label: '重新生成真实发起 ai_translate' });
+    assert.equal(held.filter((h) => h.cmd === 'ai_translate').length, 1);
+
+    /* 成功收尾：流式 + done + 读回提交行 → 校验翻真 → 标记消失 */
+    verified = true;
+    await act(async () => {
+      const h = held[0];
+      h.args.onChannel?.onmessage?.({ type: 'delta', data: '<p>新译文</p>' });
+      h.args.onChannel?.onmessage?.({ type: 'done' });
+      h.resolve('');
+      await Promise.resolve();
+    });
+    await waitFor(() => getBodyEntry('103')?.translatedSig === 'sig-new', { label: '新签名与产物成对落账' });
+    await waitFor(() => entry.container.querySelector('.reader-actions-left .ai-unverified-tag') === null, { label: '重新生成后已过期标记消失' });
+    assert.equal(entry.container.querySelector('.reader-actions-left .ai-unverified-tag'), null,
+      '重新生成后签名与产物同时更新，标记必须消失（complete）');
+  } finally {
+    resetPlan();
+  }
+});
+
+const PARTIAL_ROW = mkRow({
+  id: 203, title: '部分完成文章', content_html: '<p>正文</p>',
+  // 无整篇产物（partial 的前提：只有后端片段进度，没有可显示的完整译文）
+});
+
+componentTest('OPT-013 B3：partial 显示「部分完成」+ 继续/清除真实接线（清除调用后端命令）', { timeout: 30000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows([PARTIAL_ROW]);
+
+  const held = [];
+  setPlan({
+    ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: false, translationSegments: { total: 3, completed: 1, discarded: 0 } }),
+    ai_translate: (args) => new Promise((resolve) => { held.push({ cmd: 'ai_translate', args, resolve }); }),
+  });
+  try {
+    const { createElement, act } = await import('react');
+    const { Reader } = await import('../../src/components/Reader.tsx');
+    const entry = await mount(createElement(Reader));
+    await act(async () => { useAppStore.getState().selectArticle('203'); });
+    await waitFor(() => getBodyEntry('203')?.state === 'ready', { label: '203 水合完成' });
+    await waitFor(() => entry.container.querySelector('.ai-partial-hint') !== null, { label: 'partial 提示出现（打开文章后状态刷新）' });
+    const hint = entry.container.querySelector('.ai-partial-hint');
+    assert.ok(hint?.textContent.includes('1/3'), `部分完成提示应包含实际进度（实际 ${hint?.textContent}）`);
+
+    /* 继续：真实调用后端（复用已完成段、只发缺失段由 B2 命令层语义保证） */
+    const contBtn = [...entry.container.querySelectorAll('.reader-actions-left button')]
+      .find((b) => b.textContent === '继续');
+    assert.ok(contBtn, '「继续」入口必须存在');
+    await act(async () => { contBtn.click(); });
+    await waitFor(() => held.length === 1, { label: '继续真实发起 ai_translate' });
+    assert.equal(held.filter((h) => h.cmd === 'ai_translate').length, 1,
+      '继续入口必须真实调用后端（不是只改前端文案）');
+
+    /* 失败收尾 → 回到 partial（错误 + 可续片段并存），清除入口可点 */
+    await act(async () => {
+      const h = held[0];
+      h.args.onChannel?.onmessage?.({ type: 'delta', data: '<b>半截' });
+      h.args.onChannel?.onmessage?.({ type: 'error', data: '限流' });
+      h.resolve('');
+      await Promise.resolve();
+    });
+    await waitFor(() => entry.container.querySelector('.ai-partial-hint') !== null, { label: '失败后回到 partial（可继续）' });
+
+    /* 清除：真实调用后端清除命令（全签名片段 + 整篇产物） */
+    const clearBtn = [...entry.container.querySelectorAll('.reader-actions-left button')]
+      .find((b) => b.textContent === '清除');
+    assert.ok(clearBtn, '「清除」入口必须存在');
+    const before = invokeCount('ai_clear_cache');
+    await act(async () => { clearBtn.click(); });
+    await waitFor(() => invokeCount('ai_clear_cache') === before + 1, { label: '清除调用后端 ai_clear_cache' });
+    await waitFor(() => entry.container.querySelector('.ai-partial-hint') === null, { label: '清除后不再显示 partial' });
+    assert.equal(entry.container.querySelector('.ai-partial-hint'), null,
+      '清除后该条目回到「无产物/未生成」，不得再显示 partial');
+  } finally {
+    resetPlan();
+  }
+});
+
+const SOCIAL_STALE_ROW = mkRow({
+  id: 202, feed_id: 11, title: '社交卡旧译文', content_html: '<p>正文</p>',
+  translated_content: '<p>社交旧译文</p>', translated_sig: 'sig-social-old',
+});
+
+componentTest('OPT-013 B3：社交卡片入口区分「已过期」并提供真实重新生成接线', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows([SOCIAL_STALE_ROW], { layout: 'social' });
+  /* 自动翻译开启（卡片译文块随产物展开）——feedIndex 是唯一 resolver 的输入面。 */
+  {
+    const st = useAppStore.getState();
+    const binding = st.feedIndex.get('11');
+    assert.ok(binding, '夹具应有社交源 11 的绑定');
+    useAppStore.setState({
+      feedIndex: new Map(st.feedIndex).set('11', {
+        ...binding,
+        feed: { ...binding.feed, autoTranslate: true, translateMode: 'on' },
+      }),
+    });
+  }
+
+  const held = [];
+  setPlan({
+    ai_cache_check: () => Promise.resolve({ summaryVerified: false, translationVerified: false, translationSegments: { total: 1, completed: 0, discarded: 0 } }),
+    ai_translate: (args) => new Promise((resolve) => { held.push({ cmd: 'ai_translate', args, resolve }); }),
+  });
+  try {
+    const { createElement, act } = await import('react');
+    const { Timeline } = await import('../../src/components/Timeline.tsx');
+    const entry = await mount(createElement(Timeline));
+    await flush(4);
+    const card = entry.container.querySelector('.social-card[data-id="202"]');
+    assert.ok(card, '社交卡应真实挂载（data-id=202）');
+
+    /* 卡片入口的状态展示：stale →「已过期」+ 重新生成（状态补齐由 ensureAiStatus 惰性完成） */
+    await waitFor(() => card.querySelector('.ai-unverified-tag') !== null, { label: '社交卡「已过期」标记出现' });
+    assert.equal(card.querySelector('.ai-unverified-tag').textContent, '已过期');
+    const regenBtn = [...card.querySelectorAll('button')].find((b) => b.textContent === '重新生成');
+    assert.ok(regenBtn, '社交卡「已过期」必须给出重新生成入口');
+
+    /* 点击重新生成：真实发起生成（卡片入口与 Reader 同一单点判定、同一命令） */
+    await act(async () => { regenBtn.click(); });
+    await waitFor(() => held.length === 1, { label: '社交卡重新生成真实发起 ai_translate' });
+
+    /* 收尾：正常完成流（避免悬挂），不追加断言 */
+    await act(async () => {
+      const h = held[0];
+      h.args.onChannel?.onmessage?.({ type: 'delta', data: '<p>社交新译文</p>' });
+      h.args.onChannel?.onmessage?.({ type: 'done' });
+      h.resolve('');
+      await Promise.resolve();
+    });
+    await flush(3);
   } finally {
     resetPlan();
   }

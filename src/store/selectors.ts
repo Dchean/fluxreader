@@ -62,8 +62,9 @@ export interface ArticleBodyView {
   rawContent: string;
   translatedContent: string;
   aiSummary: string;
-  /** OPT-013 B1：产物缓存签名（null = 未标记版本；产物非空而签名为空 → 组件
-      呈现「未标记版本」）。命中判定在 store/slices/ai.ts 经后端完成后短路。 */
+  /** OPT-013 B1/B3：产物缓存签名（null = 旧无签名产物；产物非空而签名为空 →
+      stale「已过期」——五态判定在 store/slices/ai.ts 的 selectAiProductState，
+      命中判定在动作时刻经后端 ai_cache_check 完成后短路）。 */
   aiSummarySig: string | null;
   translatedSig: string | null;
   fulltextExtracted: boolean;

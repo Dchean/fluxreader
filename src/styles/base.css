@@ -1817,8 +1817,9 @@ body {
   gap: 6px;
 }
 
-/* OPT-013 B1：「未标记版本」标记——存量/过期 AI 产物可显示但不冒充已验证缓存
-   （命中判定在 store/slices/ai.ts 经后端 ai_cache_check 完成）。 */
+/* OPT-013 B1/B3：产物状态标记——旧无签名/签名不匹配的 AI 产物可显示但不冒充
+   已验证缓存（B3 起五态判定经 store/slices/ai.ts 的 selectAiProductState 单点
+   计算，该标记对应 stale =「已过期」；命中判定在动作时刻经后端 ai_cache_check）。 */
 .ai-unverified-tag {
   font-size: 11px;
   line-height: 1;
@@ -1829,6 +1830,26 @@ body {
   border: 1px solid color-mix(in srgb, var(--text-secondary) 30%, transparent);
   white-space: nowrap;
   cursor: help;
+}
+
+/* OPT-013 B3：partial（部分完成）提示与状态行——与「已过期」标记/重试按钮同一行。 */
+.ai-partial-hint {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--accent-light);
+  background: color-mix(in srgb, var(--accent-light) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-light) 30%, transparent);
+  white-space: nowrap;
+}
+
+.ai-state-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .ai-body-content {
