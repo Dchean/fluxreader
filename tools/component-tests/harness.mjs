@@ -452,6 +452,10 @@ export function resetStore(extra = {}) {
     editFeedModalOpen: false,
     renameCatModalOpen: false,
     toasts: [],
+    /* OPT-009 B3：订阅写回回执与能力矩阵是事件/挂载写入的模块状态——
+       基线清空，避免跨用例残留（上一用例的能力矩阵被下一个用例读到）。 */
+    subOutboxStats: null,
+    subscriptionCapabilities: null,
     dataMode: 'mock',
     dataLoading: false,
     bootstrapError: null,

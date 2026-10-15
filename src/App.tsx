@@ -166,6 +166,32 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
+  /* ---------- OPT-009 B3：订阅 outbox 状态变化事件——持久回执接入真实链路 ----------
+     Rust 在订阅写回入队（新增/编辑/删除/分类操作/OPML/首连推送，事务提交后）
+     与执行器确认出队/失败累计/local_only 标记后发 `subscription-outbox-changed`
+     （payload = 当前账号 `{pending, failed, local_only, last_error}`，账号限定）。
+     设置页同步摘要卡与能力卡经 store 字段即时跟随，不依赖用户手动刷新。
+     未配置同步时 Rust 不发事件（不制造噪音）；监听器只写回执字段，
+     不触碰队列统计与连接态。 */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<{ pending: number; failed: number; local_only: number; last_error: string | null }>(
+          'subscription-outbox-changed',
+          (e) => {
+            useAppStore.getState().applySubscriptionOutboxChanged(e.payload);
+          },
+        );
+      } catch {
+        /* 事件监听失败不影响主流程 */
+      }
+    })();
+    return () => unlisten?.();
+  }, []);
+
   /* ---------- SMTC 系统媒体键回调：媒体键/音量浮层控制播放 ---------- */
   useEffect(() => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;

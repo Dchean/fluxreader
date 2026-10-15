@@ -59,6 +59,10 @@ async fn feeds_phase_in_session(
 ) -> AppResult<SyncReport> {
     let mut report = SyncReport::default();
     push_feeds(db, session, &mut report).await;
+    // OPT-009 阶段 B：类型化订阅 outbox（新增/编辑/退订）的生产执行器。
+    // 在 pull 之前执行：本轮入队的订阅先推远端并完成本地绑定，随后的 pull
+    // 以远端列表做对账（两类路径都会绑定，绑定写幂等）。
+    push_subscription_outbox(db, session, &mut report).await;
     pull_feeds(db, session, &mut report).await;
     Ok(report)
 }

@@ -504,6 +504,9 @@ async function resetStore(extra) {
     activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false, showFulltext: false,
     summarizingIds: {}, translatingIds: {}, translating: false, summaryErrors: {}, translateErrors: {},
     hydrationErrors: {}, hydratedIds: {}, openedReadIds: {}, toasts: [],
+    /* OPT-009 B3：订阅写回回执与能力矩阵（事件/挂载写入）随基线清空，
+       避免跨用例残留（上一域的 local_only 计数被下一域读到）。 */
+    subOutboxStats: null, subscriptionCapabilities: null,
     entries: [], categories: [], feedIndex: new Map(), feedCounts: new Map(), scopeCounts: null,
     articlesLimit: 0, articlesLoading: false, articlesExhausted: false,
     player: { isActive: false, isPlaying: false, speed: 1, title: '', showName: '', cover: '', audioUrl: '', positionSec: 0, durationSec: 0, seekToSec: null },

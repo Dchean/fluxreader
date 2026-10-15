@@ -588,6 +588,20 @@ pub fn feed_remote_info(conn: &Connection, id: i64) -> AppResult<(String, Option
     .map_err(Into::into)
 }
 
+/// 订阅当前所属分类的 label（移动编辑时用于 wire 的 r= 旧 label；
+/// OPT-009 阶段 B：只发 a= 是追加分类，不是移动）。
+pub fn feed_folder_label(conn: &Connection, id: i64) -> AppResult<Option<String>> {
+    let folder_id: Option<i64> = conn
+        .query_row("SELECT folder_id FROM feeds WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    match folder_id {
+        Some(fid) => super::folders::folder_name(conn, fid),
+        None => Ok(None),
+    }
+}
+
 /* ============================================================
 OPT-011 单元测试：三态写入口——显式开关保留、bool 镜像不分叉、非法值拒绝
 ============================================================ */

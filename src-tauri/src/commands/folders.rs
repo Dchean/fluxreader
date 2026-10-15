@@ -27,27 +27,91 @@ pub async fn create_folder(
     db::create_folder(&conn, &name, &layout)
 }
 
-/// 分类改名（命令与测试共用的真实逻辑）：本地改名 + 旧 label 墓碑（A-4）——
-/// 否则下次 pull 按远端旧 label 重新 create_folder，留下重复空目录。
+/// 分类改名（命令与测试共用的真实逻辑）：本地改名 + 旧 label 墓碑（A-4）+ 成员
+/// 订阅的远端移动意图（OPT-009 阶段 B2），全部在同一事务内提交（全有全无）。
+///
+/// 远端表达（B2-3）：GReader 没有「分类级改名」的可移植端点——`rename-tag`/
+/// `disable-tag` 是 TheOldReader 扩展，固定上游里只有 FreshRSS 实现，本仓固定的
+/// Miniflux 侧没有可核验支持；用未验证端点会让「2xx 但未生效」冒充成功。故改名
+/// 表达为**逐成员订阅**的 `a=` 新 label + `r=` 旧 label（与移动分类同一 wire：
+/// 目标分类加入、旧 label 移除、其它标签不被触碰）。
+/// 空分类没有成员可表达：本地改名 + 旧 label 墓碑防复活，**不宣称远端已改**
+/// （没有可验证的远端表达，不伪造成功——如实列为本卡边界）。
 pub fn record_folder_rename(conn: &rusqlite::Connection, id: i64, new_name: &str) -> AppResult<()> {
-    if let Some(old) = db::folder_name(conn, id)? {
-        if old != new_name {
-            db::add_folder_tombstone(conn, &old)?;
+    let old = db::folder_name(conn, id)?;
+    let tx = conn.unchecked_transaction()?;
+    // 凭据读取失败 → Err（失败关闭）：整个改名（含墓碑与成员意图）不落库。
+    let account = crate::sync::current_account(&tx)?;
+    let account_key = account.as_ref().map(|c| c.key.clone()).unwrap_or_default();
+    if let Some(old_name) = old.as_deref().filter(|o| *o != new_name) {
+        db::add_folder_tombstone(&tx, &account_key, old_name)?;
+        if let Some(ctx) = &account {
+            for (feed_url, remote_id) in db::folder_members(&tx, id)? {
+                match remote_id {
+                    Some(rid) => {
+                        db::enqueue_edit(
+                            &tx,
+                            ctx.generation,
+                            &ctx.key,
+                            &feed_url,
+                            rid,
+                            None,
+                            Some(new_name),
+                            Some(old_name),
+                        )?;
+                    }
+                    // remote_created 窗口（本地尚无 remote_id）：并入 pending
+                    // subscribe 的目标；挂载时按 `a=` 新 label + `r=` 旧 label 发送。
+                    None => {
+                        db::update_pending_subscribe_desired(
+                            &tx,
+                            &ctx.key,
+                            &feed_url,
+                            None,
+                            Some(new_name),
+                            Some(old_name),
+                        )?;
+                    }
+                }
+            }
         }
     }
-    db::rename_folder(conn, id, new_name)
+    db::rename_folder(&tx, id, new_name)?;
+    tx.commit()?;
+    Ok(())
 }
 
-/// 删除分类（命令与测试共用的真实逻辑）：为目录 label 及其内每个订阅写墓碑，
-/// 再删目录（级联删订阅）。否则下次 pull 会把目录与订阅全部拉回（A-4）。
+/// 删除分类（命令与测试共用的真实逻辑）：旧 label 墓碑 + 每个成员订阅的 feed
+/// 墓碑与**逐源持久退订意图**（B2-2/B2-3，级联删除前取成员与远端目标快照），
+/// 再删目录（级联删订阅与本地条目）——全部同一事务，中途失败整体回滚。
+/// 远端表达同改名：没有分类级删除端点（`disable-tag` 未验证），退订逐源表达；
+/// label 在最后一个成员移除后自然消失。
 pub fn record_folder_delete(conn: &rusqlite::Connection, id: i64) -> AppResult<()> {
-    if let Some(label) = db::folder_name(conn, id)? {
-        db::add_folder_tombstone(conn, &label)?;
-        for url in db::feed_urls_in_folder(conn, id)? {
-            db::add_feed_tombstone(conn, &url)?;
+    let tx = conn.unchecked_transaction()?;
+    let account = crate::sync::current_account(&tx)?;
+    let account_key = account.as_ref().map(|c| c.key.clone()).unwrap_or_default();
+    if let Some(label) = db::folder_name(&tx, id)? {
+        db::add_folder_tombstone(&tx, &account_key, &label)?;
+        for (url, remote_id) in db::folder_members(&tx, id)? {
+            db::add_feed_tombstone(&tx, &url)?;
+            if let Some(ctx) = &account {
+                // 每个实际远端成员各自一条可恢复退订意图（remote_id 为空的成员
+                // 由 enqueue_unsubscribe 按同账号既有 pending 行结转）；
+                // 移除基准 = 被删目录名（成员远端的旧 label，R2-3 后继重加用）。
+                db::enqueue_unsubscribe(
+                    &tx,
+                    ctx.generation,
+                    &ctx.key,
+                    &url,
+                    remote_id,
+                    Some(&label),
+                )?;
+            }
         }
     }
-    db::delete_folder(conn, id)
+    db::delete_folder(&tx, id)?;
+    tx.commit()?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -58,14 +122,26 @@ pub async fn rename_folder(state: State<'_, AppState>, id: i64, name: String) ->
     }
     // 本地改名 + 旧 label 墓碑（A-4）：远端分类是 label 名，不做远端改写，
     // 但必须阻挡 pull 按旧 label 复活空目录。
-    let conn = state.db.lock().await;
-    record_folder_rename(&conn, id, &name)
+    {
+        let conn = state.db.lock().await;
+        record_folder_rename(&conn, id, &name)?;
+    }
+    // OPT-009 B3：成员改写的远端意图已在事务内入队（分类级命令不立即推送，
+    // 等待下一轮同步）——锁外广播订阅写回回执，UI 立刻看到「待办出现」。
+    crate::sync::notify_subscription_outbox_changed(&state.db).await;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn delete_folder(state: State<'_, AppState>, id: i64) -> AppResult<()> {
-    let conn = state.db.lock().await;
-    record_folder_delete(&conn, id)
+    {
+        let conn = state.db.lock().await;
+        record_folder_delete(&conn, id)?;
+    }
+    // OPT-009 B3：逐源退订意图已在事务内入队——锁外广播订阅写回回执
+    // （同样不立即推送，等待下一轮同步执行器）。
+    crate::sync::notify_subscription_outbox_changed(&state.db).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -154,20 +230,28 @@ pub async fn add_feed(
     let parsed = ingestion::parse_feed(&bytes, &feed_url)?;
 
     // 2. 入库（feed 元数据 + 全量条目，source='direct'）
-    let conn = state.db.lock().await;
-    persist_new_feed(
-        &conn,
-        &feed_url,
-        &parsed,
-        title.as_deref(),
-        etag.as_deref(),
-        last_modified.as_deref(),
-        folder_id,
-        &layout,
-        summary_mode,
-        translate_mode,
-        sync_to_backend,
-    )
+    let row = {
+        let conn = state.db.lock().await;
+        persist_new_feed(
+            &conn,
+            &feed_url,
+            &parsed,
+            title.as_deref(),
+            etag.as_deref(),
+            last_modified.as_deref(),
+            folder_id,
+            &layout,
+            summary_mode,
+            translate_mode,
+            sync_to_backend,
+        )?
+    };
+    // OPT-009 B3：勾选同步且已连接时，类型化 subscribe 意图与本地入库同事务
+    // 入队——锁外广播订阅写回回执（未入队/未配置时 notify 内部静默或同快照）。
+    if sync_to_backend {
+        crate::sync::notify_subscription_outbox_changed(&state.db).await;
+    }
+    Ok(row)
 }
 
 /// OPT-011：AI 开关输入的合并规则（单点）——mode 优先，旧 bool 回退为显式
@@ -267,11 +351,25 @@ fn persist_new_feed(
     for a in &parsed.articles {
         db::upsert_article_with_feed(&tx, feed_id, a, dedup)?;
     }
-    // 勾选「同步到后端」且已连接 → 入队推送新订阅（feeds 阶段推远端）。
+    // 勾选「同步到后端」且已连接 → 入队类型化订阅 outbox（feeds 阶段推远端）。
     // OPT-014 R1：凭据读取失败 → Err（不得静默当未连接跳过入队）。
-    if sync_to_backend && sync_configured(&tx)? {
-        let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
-        db::enqueue_sync(&tx, None, Some(feed_url), "add_feed", Some(&payload))?;
+    // OPT-009 阶段 B：与本地入库同一事务、携带账号 key/代际；远端确认按
+    // (id, generation) 精确出队（由 sync 的订阅执行器处理）。
+    if sync_to_backend {
+        if let Some(ctx) = crate::sync::current_account(&tx)? {
+            let folder_label = db::folder_name(&tx, folder_id)?;
+            // B2-5：用户/来源给的标题作为**目标**随队项落库（挂载时用真实 t=
+            // 写回）；URL 兜底标题不是用户意图（会把 URL 当标题推到远端）→ 不推。
+            let desired_title = (final_title != feed_url).then_some(final_title.as_str());
+            db::enqueue_subscribe(
+                &tx,
+                ctx.generation,
+                &ctx.key,
+                feed_url,
+                desired_title,
+                folder_label.as_deref(),
+            )?;
+        }
     }
     tx.commit()?;
     let row = db::list_feeds(conn)?
@@ -803,12 +901,19 @@ mod tests {
 
 /// 删除订阅的本地记录 + 删除墓碑（命令与测试共用的真实逻辑）。
 /// 返回 Some((remote_id, feed_url, generation))：该订阅已绑定远端且同步已配置，
-/// 调用方应 best-effort 退订远端（GReader）；Fever 或未连接时仅靠墓碑防复活。
-/// generation 是读取 remote_id 同一持锁内捕获的账号代际（OPT-006）——退订发送前
-/// 复核，换号后不得把旧账号的 remote_id 发给新账号。
+/// 调用方应即时尝试一次推送（**真正的持久意图在下面的事务里**）。
+///
+/// `generation` 是读取 remote_id 同一持锁内捕获的账号代际（OPT-006）——退货
+/// 路径复核用；typed 队项自带账号 key/代际，执行器按 (key, generation) 屏障发送。
 ///
 /// OPT-014 R2：可失败的凭据读取前移到**任何本地副作用之前**并复用结果——
 /// 坏密文时整单失败，不留下「订阅已删 + 墓碑已落」却报错的半套状态。
+///
+/// OPT-009 阶段 B2：删除墓碑、本地删除与 **typed unsubscribe 入队**同一事务
+/// （全有全无）——离线/重启后执行器按队列重试，不再依赖一次性 best-effort；
+/// 队项只认当前账号 key，换号后不会把旧账号的 remote_id 发给新账号；
+/// subscription_outbox 与 feeds 无外键，本地订阅消亡不带走退订意图。
+///
 /// Note: .agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md
 pub fn record_feed_deletion(
     conn: &rusqlite::Connection,
@@ -817,9 +922,27 @@ pub fn record_feed_deletion(
     let sync_ok = sync_configured(conn)?;
     let generation = db::sync_generation(conn)?;
     let (feed_url, remote_id) = db::feed_remote_info(conn, id)?;
+    // B2-R2/R2-3：删除时快照「远端当前 label」的移除基准（本地当前分类名）——
+    // 退订未确认前同一 URL 被快速重加时，后继 subscribe 行继承它做 r= 移除基准，
+    // 否则远端会残留这个旧 label（挂载只发 a= 是追加分类）。
+    let folder_label = db::feed_folder_label(conn, id)?;
+    let tx = conn.unchecked_transaction()?;
     // A-1：墓碑先落，退订失败也不得让 pull 把已删订阅拉回来
-    db::add_feed_tombstone(conn, &feed_url)?;
-    db::delete_feed(conn, id)?;
+    db::add_feed_tombstone(&tx, &feed_url)?;
+    // B2-2：typed 退订意图与墓碑/本地删除同生共死；凭据读取失败 → Err 整体回滚
+    // （失败关闭：不留下半套状态）。未连接 → 仅本地（无账号 key 可入队）。
+    if let Some(ctx) = crate::sync::current_account(&tx)? {
+        db::enqueue_unsubscribe(
+            &tx,
+            ctx.generation,
+            &ctx.key,
+            &feed_url,
+            remote_id,
+            folder_label.as_deref(),
+        )?;
+    }
+    db::delete_feed(&tx, id)?;
+    tx.commit()?;
     Ok(if sync_ok {
         remote_id.map(|rid| (rid, feed_url, generation))
     } else {
@@ -835,19 +958,14 @@ pub async fn delete_feed(state: State<'_, AppState>, id: i64) -> AppResult<()> {
         let conn = state.db.lock().await;
         record_feed_deletion(&conn, id)?
     };
-    // 锁外 best-effort 退订远端。注意：**成功仅意味着请求被后端接受（2xx），不代表远端已删除**，
-    // 故此处不清墓碑——墓碑由后续 pull 在「远端列表确认已不含该 URL」时收敛清除。
-    // 若按请求成功就清墓碑，2xx 但未生效时会让已删订阅在下次 pull 复活（TASK-055 修复）。
-    // OPT-006：generation 与 remote_id 同一次持锁内捕获——退订发送前复核代际。
-    if let Some((remote_id, feed_url, generation)) = unsubscribe {
-        let _ = crate::sync::unsubscribe_remote(
-            &state.db,
-            &state.http,
-            remote_id,
-            &feed_url,
-            generation,
-        )
-        .await;
+    // 锁外即时尝试一次订阅写回执行器（与 update_feed 同一 UX 形态）：退订意图
+    // 已在上面的事务里持久化，这次尝试失败只是留给下一轮同步重试。
+    // 注意：请求成功仅意味着后端接受（2xx），**不代表远端已删除**——墓碑仍只由
+    // pull 在「远端列表确认已不含该 URL」时收敛清除（TASK-055）。
+    // OPT-006：执行器的代际屏障内建（会话构建 + 每次回写前复核），换号后
+    // 不会把旧账号的 remote_id 发给新账号。
+    if unsubscribe.is_some() {
+        crate::sync::try_push_subscription_outbox(&state.db, &state.http).await;
     }
     Ok(())
 }
@@ -908,20 +1026,14 @@ pub async fn update_feed(
             translate_mode,
         )?
     };
-    // 锁外 best-effort 推送远端（GReader ac=edit；Fever no-op）：
-    // 失败仅记日志，本地更新已生效，靠下次 pull 对账/用户重试收敛（A-2）
-    // OPT-006：generation 与 remote_id 同一次持锁内捕获——发送前复核代际，
-    // 换号后不得把旧账号的 remote_id 发给新账号。
-    if let Some((remote_id, new_title, dest_label, generation)) = push {
-        let _ = crate::sync::edit_remote_subscription(
-            &state.db,
-            &state.http,
-            remote_id,
-            new_title.as_deref(),
-            dest_label.as_deref(),
-            generation,
-        )
-        .await;
+    // 锁外 best-effort 推送远端（GReader ac=edit）：OPT-009 阶段 B 起，
+    // 编辑已在 record_feed_edit 的同一事务内入队订阅 outbox，此处立即尝试一次
+    // 执行器推送（失败静默——队项保留，下一轮同步自动重试；不再出现
+    // 「本地已改、网络失败后无持久意图」的丢失窗口）。
+    // OPT-006：执行器的代际屏障内建（会话构建 + 每次回写前复核），换号后
+    // 不会把旧账号的 remote_id 发给新账号。
+    if push.is_some() {
+        crate::sync::try_push_subscription_outbox(&state.db, &state.http).await;
     }
     Ok(())
 }
@@ -939,6 +1051,16 @@ pub type FeedEditPush = (i64, Option<String>, Option<String>, i64);
 ///
 /// OPT-014 R2：可失败的凭据读取前移到 `db::update_feed` 之前并复用结果——
 /// 坏密文时整单失败，不留下「字段已改」却报错的半套状态。
+///
+/// OPT-009 阶段 B：
+/// - 本地修改与订阅 outbox 入队**同一事务**（全有全无）；入队携带账号 key/代际，
+///   由生产执行器按 (id, generation) 精确确认；
+/// - 只发目标分类 `a=` 不是移动——入队同时携带编辑前的旧 label（wire 发 `r=`）；
+/// - 本地尚无 remote_id（quick_add 已建、绑定未完成的 remote_created 窗口）时
+///   并入 pending subscribe 行的目标字段，绑定义务不因编辑丢失；
+/// - 目标信息（remote_id / 旧分类 label）在**写前**读取：读失败在本地修改之前
+///   暴露，不会出现「本地已改却报错称未改」的谎言窗口（返回结构的语义化在 B2）。
+///
 /// Note: .agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md
 #[allow(clippy::too_many_arguments)]
 pub fn record_feed_edit(
@@ -952,18 +1074,47 @@ pub fn record_feed_edit(
     summary_mode: Option<db::FeedAiMode>,
     translate_mode: Option<db::FeedAiMode>,
 ) -> AppResult<Option<FeedEditPush>> {
-    let sync_ok = sync_configured(conn)?;
-    let generation = db::sync_generation(conn)?;
+    // 账号身份 + 代际与凭据同源快照；Err（坏密文）在任何本地副作用之前上抛。
+    let account = crate::sync::current_account(conn)?;
     // 目标分类必须存在（防 UI 传错 id 把源挂飞）
     if let Some(fid) = folder_id {
         if !db::folder_exists(conn, fid)? {
             return Err(AppError::new("validate", "目标分类不存在"));
         }
     }
+    // 空标题 = 不改名（与 update_feed_full 的回退语义一致）
+    let new_title = title.map(str::trim).filter(|t| !t.is_empty());
+    // 写前预读推送目标：read 失败 → 整体 Err，且**尚未**触碰本地字段。
+    let (feed_url, remote_id) = db::feed_remote_info(conn, id)?;
+    let new_folder_label = match folder_id {
+        Some(fid) => db::folder_name(conn, fid)?,
+        None => None,
+    };
+    let prev_folder_label = if folder_id.is_some() {
+        db::feed_folder_label(conn, id)?
+    } else {
+        None
+    };
+    // 移动语义：目标 label 与当前 label 相同不算移动（不发 a=/r=）
+    let moved =
+        folder_id.is_some() && new_folder_label.is_some() && new_folder_label != prev_folder_label;
+    let desired_folder = if moved {
+        new_folder_label.as_deref()
+    } else {
+        None
+    };
+    let old_label = if moved {
+        prev_folder_label.as_deref()
+    } else {
+        None
+    };
+    let changed = new_title.is_some() || moved;
+
+    let tx = conn.unchecked_transaction()?;
     db::update_feed_full(
-        conn,
+        &tx,
         id,
-        title,
+        new_title,
         folder_id,
         layout,
         auto_summary,
@@ -971,23 +1122,53 @@ pub fn record_feed_edit(
         summary_mode,
         translate_mode,
     )?;
-    if !sync_ok {
+    if changed {
+        if let Some(ctx) = &account {
+            match remote_id {
+                Some(rid) => {
+                    db::enqueue_edit(
+                        &tx,
+                        ctx.generation,
+                        &ctx.key,
+                        &feed_url,
+                        rid,
+                        new_title,
+                        desired_folder,
+                        old_label,
+                    )?;
+                }
+                None => {
+                    // remote_created 窗口：编辑并入 pending subscribe 的目标字段
+                    // （本地已入库的目标以订阅行的 desired_* 为准，绑定后补推）。
+                    // B2-3：移动同时携带旧 label（远端挂载若已按旧 label 发过，
+                    // 需要 r= 移除；未发过时是无害 no-op）。
+                    db::update_pending_subscribe_desired(
+                        &tx,
+                        &ctx.key,
+                        &feed_url,
+                        new_title,
+                        desired_folder,
+                        old_label,
+                    )?;
+                }
+            }
+        }
+    }
+    tx.commit()?;
+
+    if !changed {
         return Ok(None);
     }
-    let (_feed_url, remote_id) = db::feed_remote_info(conn, id)?;
-    let Some(rid) = remote_id else {
-        return Ok(None);
-    };
-    let dest_label = match folder_id {
-        Some(fid) => db::folder_name(conn, fid)?,
-        None => None,
-    };
-    Ok(Some((
-        rid,
-        title.map(|t| t.to_string()),
-        dest_label,
-        generation,
-    )))
+    match (account, remote_id) {
+        (Some(ctx), Some(rid)) => Ok(Some((
+            rid,
+            new_title.map(str::to_string),
+            new_folder_label,
+            ctx.generation,
+        ))),
+        // 未配置同步 / 未绑定远端（含 remote_created 窗口）：本地已接受，无直接推送目标
+        _ => Ok(None),
+    }
 }
 
 #[tauri::command]

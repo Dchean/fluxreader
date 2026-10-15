@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../../store';
 import { api, extractError, type SyncQueueStats, type PendingConnection } from '../../lib/api';
-import { syncStateSummary } from '../../lib/syncPill';
+import { syncStateSummary, subscriptionWriteSummary, subscriptionActionLine } from '../../lib/syncPill';
 import { FluxDropdown, Switch, SettingCard, ConfirmDialog } from '../primitives';
 import { CacheCleanupSection } from './CacheCleanupSection';
 import { ConfigSyncSection } from './ConfigSyncSection';
@@ -24,6 +24,10 @@ export function SyncTab() {
   const reloadFromBackend = useAppStore((s) => s.reloadFromBackend);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  /** OPT-009 B3：订阅写回回执（当前账号限定）与能力矩阵——事件与挂载刷新
+   *  写入同一状态源，摘要卡/能力卡直接订阅（不依赖用户手动刷新）。 */
+  const subOutboxStats = useAppStore((s) => s.subOutboxStats);
+  const caps = useAppStore((s) => s.subscriptionCapabilities);
   const [endpoint, setEndpoint] = useState('');
   const [protocol, setProtocol] = useState<'greader' | 'fever'>('greader');
   const [username, setUsername] = useState('');
@@ -59,6 +63,10 @@ export function SyncTab() {
     /* OPT-006：待确认连接建议（配置导入只落建议，激活要走保存流程） */
     void api.syncPendingConnection().then((p) => setPendingConn(p)).catch(() => { /* 同上：静默兜底 */ });
     refreshQueueStats(setQueueStats);
+    /* OPT-009 B3：订阅写回回执与能力矩阵挂载即取一次真值（事件缺失时
+       摘要卡/能力卡仍与后端一致；读取失败保持原值） */
+    void useAppStore.getState().refreshSubscriptionOutboxStats();
+    void useAppStore.getState().loadSubscriptionCapabilities();
   }, [dataMode]);
 
   /* TASK-124：摘要卡实时跟随 sync-queue-changed——store 三字段由 App.tsx 监听器
@@ -153,6 +161,9 @@ export function SyncTab() {
       if (removedFeeds > 0) showToast(`本次对账移除 ${removedFeeds} 个已在服务端删除的订阅源`);
       /* TASK-116：本次同步链可能已清空队列或标记失败项，摘要卡跟着刷新 */
       refreshQueueStats(setQueueStats);
+      /* OPT-009 B3：保存可能更换协议/账号——订阅回执与能力矩阵重读 */
+      void useAppStore.getState().refreshSubscriptionOutboxStats();
+      void useAppStore.getState().loadSubscriptionCapabilities();
     } catch (e) {
       showToast(`保存失败：${endpointHint(extractError(e))}`);
       /* OPT-006 R1：保存失败（含 staleActivation：建议在验证期间被新导入替换）
@@ -216,6 +227,9 @@ export function SyncTab() {
       setConnected(false);
       setAccount(null);
       setPassword('');
+      /* OPT-009 B3：断开后协议/账号不再生效——订阅回执与能力矩阵重读 */
+      void useAppStore.getState().refreshSubscriptionOutboxStats();
+      void useAppStore.getState().loadSubscriptionCapabilities();
       /* TASK-100 P3-8：断开与「断开后的本地刷新」分开处理——此前 reload 失败
          重抛被同一个 catch 捕获，把「已断开成功」误报成「断开失败」。 */
       try {
@@ -249,13 +263,19 @@ export function SyncTab() {
   const accountTag = account ? `账户 ${account} · ` : '';
 
   /* TASK-116 X2：四态摘要口径收口到纯函数 syncStateSummary（src/lib/syncPill.ts，
-     契约 X2/X3 如实原则；真值表由回归网 t116 断言驱动）。 */
+     契约 X2/X3 如实原则；真值表由回归网 t116 断言驱动）。
+     OPT-009 B3：订阅写回回执行由 subscriptionWriteSummary 纯函数追加——无待办
+     时不新增噪音行；local_only 项如实点名「仅本地生效」（不写成成功也不隐藏）。 */
   const waiting = queueStats?.waiting ?? 0;
   const failedCount = queueStats?.failed ?? 0;
-  const syncStateDesc = syncStateSummary(
-    queueStats ?? { waiting: 0, failed: 0, last_error: null },
-    lastSync,
+  const subscriptionLine = subscriptionWriteSummary(
+    subOutboxStats ?? { pending: 0, failed: 0, local_only: 0, last_error: null },
+    caps?.protocol ?? null,
   );
+  const syncStateDesc = [
+    syncStateSummary(queueStats ?? { waiting: 0, failed: 0, last_error: null }, lastSync),
+    subscriptionLine,
+  ].filter(Boolean).join('；');
 
   return (
     <>
@@ -294,6 +314,23 @@ export function SyncTab() {
           {failedCount > 0 ? '部分失败' : waiting > 0 ? '等待同步' : '本地已保存'}
         </span>
       </SettingCard>
+      {/* OPT-009 B3：订阅写回能力卡——矩阵/概述/限制全部来自
+          subscription_capabilities 单一事实源（UI 不另写一套说法）。未连接不
+          渲染（不制造噪音）；Fever 下概述明说「仅本地生效」，local_only 计数
+          由上方摘要行如实呈现（不得写成成功也不得隐藏）。 */}
+      {caps?.connected && (
+        <>
+          <SettingCard title="订阅写回" desc={caps.overview}>
+            <span className="about-arch-tag">{caps.protocol === 'fever' ? '仅本地' : '写回远端'}</span>
+          </SettingCard>
+          <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.6, color: 'var(--text-tertiary)' }}>
+            <div>{subscriptionActionLine(caps)}</div>
+            {caps.limitations.map((l) => (
+              <div key={l.code}>· {l.detail}</div>
+            ))}
+          </div>
+        </>
+      )}
       {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
           深浅主题外观与展开行为都与 FluxDropdown 不一致。
           TASK-102：FluxDropdown 必须是 SettingCard 的直接子元素（.setting-card

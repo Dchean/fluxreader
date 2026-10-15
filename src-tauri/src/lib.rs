@@ -158,6 +158,9 @@ pub fn run() {
             // 失败 / 认证·网络阻塞后发，前端 pill/摘要卡实时跟随）。集成测试不注册
             // → 发射点 no-op，既有 sync 引擎测试零影响。
             sync::init_queue_event_target(app.handle().clone());
+            // OPT-009 B3：subscription-outbox-changed 事件目标注册（订阅写回
+            // 入队/确认/失败/local_only 标记后发，设置页持久回执即时跟随）。
+            sync::init_subscription_event_target(app.handle().clone());
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
@@ -313,6 +316,9 @@ pub fn run() {
             commands::sync_local_feeds,
             commands::sync_status,
             commands::sync_queue_stats,
+            // OPT-009 B3：订阅写回能力矩阵与持久回执（只读）
+            commands::subscription_capabilities,
+            commands::subscription_outbox_stats,
             // 配置导入的待确认连接建议（OPT-006：只读/放弃；激活走 sync_save）
             commands::sync_pending_connection,
             commands::sync_dismiss_pending_connection,

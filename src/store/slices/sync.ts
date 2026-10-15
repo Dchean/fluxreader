@@ -1,5 +1,5 @@
 import type { StateCreator } from 'zustand';
-import { api, extractError, type RefreshSummary } from '../../lib/api';
+import { api, extractError, type RefreshSummary, type SubscriptionOutboxStats } from '../../lib/api';
 import { openExternal } from '../../lib/external';
 import { appStore } from '../internals';
 import { syncFailureMessage } from '../syncErrors';
@@ -17,11 +17,16 @@ export type SyncSlice = Pick<
   | 'syncWaiting'
   | 'syncFailed'
   | 'syncQueueLastError'
+  | 'subOutboxStats'
+  | 'subscriptionCapabilities'
   | 'githubFlow'
   | 'githubAccount'
   | 'githubLoggingIn'
   | 'triggerManualSync'
   | 'applySyncQueueChanged'
+  | 'applySubscriptionOutboxChanged'
+  | 'refreshSubscriptionOutboxStats'
+  | 'loadSubscriptionCapabilities'
   | 'githubLoginStart'
   | 'githubLoginDisconnect'
 >;
@@ -83,6 +88,10 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
   syncFailed: 0,
   /* TASK-124：最近一次推送失败摘要初值 null（无失败不制造噪音） */
   syncQueueLastError: null,
+  /* OPT-009 B3：订阅写回回执/能力矩阵初值 null（未加载——不渲染、不冒充
+     「无待办」；事件与挂载刷新写入同一状态源） */
+  subOutboxStats: null,
+  subscriptionCapabilities: null,
   githubFlow: null,
   githubAccount: null,
   githubLoggingIn: false,
@@ -176,6 +185,36 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
       syncFailed: stats.failed,
       syncQueueLastError: stats.last_error ?? null,
     });
+  },
+
+  /* ================= OPT-009 B3：订阅写回回执与能力矩阵 ================= *
+     Rust 在订阅 outbox 入队（新增/编辑/删除/分类操作/OPML/首连推送）与执行器
+     确认·失败·local_only 标记后发 subscription-outbox-changed（payload =
+     当前账号 `{pending, failed, local_only, last_error}`，账号限定——异账号暂停
+     项不混入）。本动作是 App.tsx 监听器的唯一落点；设置页挂载/保存链尾另经
+     refreshSubscriptionOutboxStats 主动拉取一次真值。 */
+  applySubscriptionOutboxChanged: (stats: SubscriptionOutboxStats) => {
+    set({ subOutboxStats: stats });
+  },
+
+  refreshSubscriptionOutboxStats: async () => {
+    try {
+      const stats = await api.subscriptionOutboxStats();
+      /* 读失败保持原值（不写零冒充「无待办」）；浏览器环境返回 null 同样跳过 */
+      if (stats) set({ subOutboxStats: stats });
+    } catch {
+      /* 纯提示性读取失败：保持原值（Rust 侧读取失败为 Err，不返回零值） */
+    }
+  },
+
+  loadSubscriptionCapabilities: async () => {
+    try {
+      const caps = await api.subscriptionCapabilities();
+      /* 失败保持原值（不折成 null 也不折成未连接——不伪造能力声明） */
+      if (caps) set({ subscriptionCapabilities: caps });
+    } catch {
+      /* 同上：纯提示性读取失败静默兜底 */
+    }
   },
 
   /* ================= GitHub 设备流登录（store 级常驻轮询） ================= *

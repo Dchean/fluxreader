@@ -35,6 +35,58 @@ pub fn read_credentials(conn: &Connection) -> AppResult<Option<(String, String, 
     Ok(Some((protocol, endpoint, username, password)))
 }
 
+/// 规范化「服务器根」身份：scheme + host + **有效端口** + basepath（host 小写、
+/// 去尾斜杠）。只归并**等价形态**：省略端口与显式默认端口（http:80 / https:443）
+/// 视为同一 server；同 host 不同端口、不同 basepath 都是不同 server。
+/// 解析失败（如缺 scheme 的裸串）退回整体小写 + 去尾斜杠——保守等价。
+/// （OPT-006 身份判定与 OPT-009 账号指纹共用同一实现，不得各写一份。）
+pub fn normalized_server_root(endpoint: &str) -> String {
+    let trimmed = endpoint.trim().trim_end_matches('/');
+    match url::Url::parse(trimmed) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or("").to_ascii_lowercase();
+            // port_or_known_default：未显式端口返回协议默认端口，显式默认端口
+            // 与之相等 → 两种写法归并；非默认端口原样保留。
+            let port = u
+                .port_or_known_default()
+                .map(|p| format!(":{p}"))
+                .unwrap_or_default();
+            let path = u.path().trim_end_matches('/');
+            format!(
+                "{}://{}{}{}",
+                u.scheme().to_ascii_lowercase(),
+                host,
+                port,
+                path
+            )
+        }
+        Err(_) => trimmed.to_ascii_lowercase(),
+    }
+}
+
+/// 账号指纹（OPT-009）：协议 + 规范化服务器根 + 用户名。**持久身份，跨代际
+/// 不变**——订阅 outbox 行以此做账号屏障：key 匹配才可发，key 不匹配暂停。
+pub fn account_key(protocol: &str, endpoint: &str, username: &str) -> String {
+    format!("{protocol}|{}|{username}", normalized_server_root(endpoint))
+}
+
+/// 当前账号身份 + 库代际的同一快照（锁内读取）。未配置 → Ok(None)；
+/// 凭据读取/解密失败 → Err（失败关闭，不得当未配置）。
+pub struct AccountContext {
+    pub key: String,
+    pub generation: i64,
+}
+
+pub fn current_account(conn: &Connection) -> AppResult<Option<AccountContext>> {
+    let Some((protocol, endpoint, username, _)) = read_credentials(conn)? else {
+        return Ok(None);
+    };
+    Ok(Some(AccountContext {
+        key: account_key(&protocol, &endpoint, &username),
+        generation: db::sync_generation(conn)?,
+    }))
+}
+
 /// build_client 失败的三种形态（TASK-124，审计 P2-6②；OPT-006 增 Stale）。
 /// 此前 build_client 返回 Option<Backend>，把「未配置」与「配置了但认证/端点/
 /// 网络失败」都压成 None——调用方无从区分，后者（attempts/last_error）永不记录。
@@ -68,17 +120,33 @@ impl Backend {
         }
     }
 
-    /// 订阅编辑（改名 `t` / 移动分类 `a`）：GReader 走 ac=edit；
-    /// Fever 协议无订阅编辑端点，视为已完成（本地已生效、无从推送）。
+    /// 协议能力声明（OPT-009）：是否支持订阅写回（新增/改名/移动/退订）。
+    /// GReader 有 subscription/edit 端点；Fever 协议没有写订阅端点——调用方
+    /// **必须**据此把队项声明为 local-only，不得用 Ok 冒充远端完成。
+    pub(super) fn supports_subscription_write(&self) -> bool {
+        matches!(self, Backend::GReader(_))
+    }
+
+    /// 订阅编辑（改名 `t` / 移动分类 `a`+`r`）：GReader 走 ac=edit。
+    /// Fever 协议无订阅编辑端点——返回**明确错误**（此前返回 Ok(()) 会冒充
+    /// 「远端已完成」，用户以为改到了远端）；执行器在调用前用能力声明拦下，
+    /// 此错误只作为绕过能力门时的最后防线。
     pub(super) async fn edit_subscription(
         &self,
         remote_id: i64,
         title: Option<&str>,
         dest_label: Option<&str>,
+        remove_label: Option<&str>,
     ) -> AppResult<()> {
         match self {
-            Backend::GReader(c) => c.edit_subscription(remote_id, title, dest_label).await,
-            Backend::Fever(_) => Ok(()),
+            Backend::GReader(c) => {
+                c.edit_subscription(remote_id, title, dest_label, remove_label)
+                    .await
+            }
+            Backend::Fever(_) => Err(AppError::new(
+                "unsupported",
+                "Fever 协议不支持订阅编辑（本地已生效，远端不宣称完成）",
+            )),
         }
     }
 
@@ -124,6 +192,17 @@ impl Backend {
             Backend::Fever(_) => Err(AppError::new(
                 "unsupported",
                 "Fever 协议不支持添加订阅，请在 Miniflux Web 端添加后重新同步",
+            )),
+        }
+    }
+
+    /// 退订远端订阅：仅 GReader 有端点；Fever 明确错误（不冒充完成）。
+    pub(super) async fn unsubscribe(&self, feed_numeric_id: i64) -> AppResult<()> {
+        match self {
+            Backend::GReader(c) => c.unsubscribe(feed_numeric_id).await,
+            Backend::Fever(_) => Err(AppError::new(
+                "unsupported",
+                "Fever 协议不支持退订订阅（本地已生效，远端不宣称完成）",
             )),
         }
     }

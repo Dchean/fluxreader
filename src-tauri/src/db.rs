@@ -50,17 +50,18 @@ pub use articles::{
 /// 命令层经 `crate::db::` 路径消费；写入路径经 `super::contents::` 直接调用）。
 pub use contents::{content_non_empty, SOURCE_READABILITY, SOURCE_RSS};
 pub use feeds::{
-    add_feed_tombstone, clear_feed_tombstones, delete_feed, feed_remote_info, feed_tombstones,
-    feed_url_tombstoned, feeds_all_ids, feeds_due_for_refresh, find_feed_by_url, insert_feed,
-    insert_feed_origin, insert_feed_origin_modes, legacy_feed_tombstones, list_feeds,
+    add_feed_tombstone, clear_feed_tombstones, delete_feed, feed_folder_label, feed_remote_info,
+    feed_tombstones, feed_url_tombstoned, feeds_all_ids, feeds_due_for_refresh, find_feed_by_url,
+    insert_feed, insert_feed_origin, insert_feed_origin_modes, legacy_feed_tombstones, list_feeds,
     prune_feed_tombstones, remove_feed_tombstone, set_feed_ai_flags, set_feed_ai_modes,
     set_feed_fetch_state, set_feed_title_and_icon, update_feed, update_feed_full,
     update_feed_layout, FeedAiMode, FeedRow,
 };
 pub use folders::{
-    add_folder_tombstone, create_folder, delete_folder, feed_urls_in_folder, folder_name,
-    folder_tombstones, list_folders, remove_folder_tombstone, rename_folder, set_folder_ai_flags,
-    set_folder_ai_flags_partial, set_folder_collapsed, update_folder_layout, FolderRow,
+    add_folder_tombstone, create_folder, delete_folder, folder_members, folder_name,
+    folder_tombstones, folder_tombstones_for, list_folders, prune_folder_tombstones, rename_folder,
+    set_folder_ai_flags, set_folder_ai_flags_partial, set_folder_collapsed, update_folder_layout,
+    FolderRow, FolderTombstone,
 };
 pub use migrations::open;
 #[cfg(test)]
@@ -69,11 +70,14 @@ pub(crate) use migrations::MIGRATIONS;
 /// sync_queue 分离）。本阶段只交付表/语义/数据层入口——推送执行、GReader
 /// wire、Fever local-only 命令层接线不在阶段 A。
 pub use outbox::{
-    advance_subscribe_stage, enqueue_edit, enqueue_subscribe, enqueue_unsubscribe,
-    mark_outbox_failed, mark_outbox_local_only, outbox_pending_for_url, pending_outbox,
-    prune_outbox, rebind_outbox_generation, subscription_outbox_stats, SubscriptionOutboxItem,
-    SubscriptionOutboxStats, ACTION_EDIT, ACTION_SUBSCRIBE, ACTION_UNSUBSCRIBE, STAGE_PENDING,
-    STAGE_REMOTE_CREATED, STATUS_LOCAL_ONLY, STATUS_PENDING,
+    adopt_remote_id_for_pending, advance_subscribe_stage, advance_unsubscribe_resolution,
+    confirm_subscribe_if_desired_unchanged, enqueue_edit, enqueue_subscribe, enqueue_unsubscribe,
+    mark_outbox_failed, mark_outbox_local_only, outbox_pending_by_id, outbox_pending_for_url,
+    pending_outbox, prune_outbox, rebase_successor_edit_prev, rebind_outbox_generation,
+    subscription_outbox_changed_payload, subscription_outbox_stats,
+    update_pending_subscribe_desired, SubscriptionOutboxItem, SubscriptionOutboxStats, ACTION_EDIT,
+    ACTION_SUBSCRIBE, ACTION_UNSUBSCRIBE, STAGE_PENDING, STAGE_REMOTE_CREATED, STATUS_LOCAL_ONLY,
+    STATUS_PENDING,
 };
 pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
 /* OPT-014 R1：账号提交事务内核/可注入写入——crate 内部（命令层）使用，

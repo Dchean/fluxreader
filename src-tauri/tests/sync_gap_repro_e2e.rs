@@ -132,8 +132,9 @@ async fn seed_local_articles_in_one_feed(
     ids
 }
 
-/// A-1 修复后的期望行为（原复现测试转正）：删除已绑定远端的订阅会 best-effort
-/// 退订（GReader），并写入删除墓碑——下次 pull 不得按远端订阅列表复活已删订阅。
+/// A-1 修复后的期望行为（原复现测试转正；B2-2 起改走**持久退订队项**）：
+/// 删除已绑定远端的订阅会写删除墓碑 + 本地删除 + typed 退订意图（同一事务），
+/// 执行器按队项退订；下次 pull 不得按远端订阅列表复活已删订阅。
 #[tokio::test]
 async fn deleted_feed_stays_deleted_and_unsubscribes() {
     let (db, http, server) = setup("gap_delete").await;
@@ -170,7 +171,8 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
         assert_eq!(bound, Some(10), "前置条件：订阅已绑定远端 feed 10");
     }
 
-    // 删除（命令层真实逻辑）：写墓碑 + 删除本地 + 返回待退订的远端 id
+    // 删除（命令层真实逻辑）：墓碑 + 本地删除 + typed 退订意图同一事务；
+    // 返回值只是「可即时推送」的信号（真正的持久意图在队项里）。
     let unsubscribe = {
         let conn = db.lock().await;
         app_lib::commands::record_feed_deletion(&conn, feed_id).expect("record deletion")
@@ -179,8 +181,20 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
         matches!(unsubscribe, Some((10, _, _))),
         "已绑定远端且同步已配置时应返回待退订目标（remote_id, url, generation）"
     );
+    // 删除的持久化结果：typed 退订意图与墓碑（同一事务，离线/重启可重试）
+    {
+        let conn = db.lock().await;
+        let items = db::pending_outbox(&conn).unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "删除必须留下 typed 退订意图（B2-2：不再是一次性 best-effort）"
+        );
+        assert_eq!(items[0].action, "unsubscribe");
+        assert_eq!(items[0].remote_id, Some(10), "退订目标随删除快照");
+    }
 
-    // ① 删除后立即同步：远端订阅列表仍含 feed/10（列表滞后），墓碑必须阻止复活
+    // ① 删除后立即同步（持久队项驱动）：执行器发出退订，墓碑阻止任何形式的复活
     sync::feeds_phase(&db, &http)
         .await
         .expect("feeds phase right after delete");
@@ -194,33 +208,18 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
         .unwrap()
     };
     assert_eq!(revived, 0, "已删除订阅不得被 pull 复活（墓碑生效）");
-
-    // ② 退订远端（best-effort，GReader）。
-    // 注意（TASK-055 语义变更）：返回值 true 只表示**请求被后端接受（2xx）**，
-    // **不再等价于「远端已删除」**，因此此处**不清墓碑**——墓碑改由后续 pull
-    // 在「远端列表确认已不含该 URL」时收敛清除（见 ③ 之后的断言）。
-    // 修复前此处按 2xx 清墓碑，导致「2xx 但远端未生效」时已删订阅复活。
-    let (remote_id, feed_url, generation) = unsubscribe.expect("unsubscribe target");
-    assert!(
-        sync::unsubscribe_remote(&db, &http, remote_id, &feed_url, generation).await,
-        "退订请求应被后端接受（mock 回 200）"
-    );
     assert!(
         subscription_edit_actions(&server)
             .iter()
             .any(|(ac, s)| ac == "unsubscribe" && s.contains("feed/10")),
-        "远端应收到 ac=unsubscribe"
+        "远端应收到执行器发出的 ac=unsubscribe"
     );
-    {
-        let conn = db.lock().await;
-        assert!(
-            !db::feed_tombstones(&conn).unwrap().is_empty(),
-            "仅收到 2xx 不足以确认远端已删除，墓碑必须保留（TASK-055）"
-        );
-    }
+
+    // ② 请求成功 ≠ 远端已删除：墓碑仍只由 pull 的「远端列表确认已不含」收敛清除
+    // （「2xx 但未生效」的判据由 unsubscribe_2xx_without_removal_* 用例锁定）。
 
     // ③ 再次同步：此时 mock 已按真实行为把该订阅从远端列表移除，
-    //    pull 得以确认「远端已不含」→ 墓碑才被收敛清除，且不复活
+    //    pull 得以确认「远端已不含」→ 队项出队、墓碑收敛清除，且不复活
     sync::feeds_phase(&db, &http)
         .await
         .expect("feeds phase after unsubscribe");
@@ -239,6 +238,10 @@ async fn deleted_feed_stays_deleted_and_unsubscribes() {
         assert!(
             db::feed_tombstones(&conn).unwrap().is_empty(),
             "远端列表确认已不含该 URL 后，墓碑应由 pull 收敛清除"
+        );
+        assert!(
+            db::pending_outbox(&conn).unwrap().is_empty(),
+            "退订确认后按 (id, generation) 精确出队"
         );
     }
 }
@@ -1222,8 +1225,8 @@ async fn folder_rename_does_not_revive_old_label() {
             db::folder_tombstones(&conn)
                 .unwrap()
                 .iter()
-                .any(|l| l == "Default"),
-            "改名应写入旧 label 墓碑"
+                .any(|t| t.label == "Default" && !t.account_key.is_empty()),
+            "改名应写入旧 label 墓碑，且归属当前账号（B2-4 账号隔离）"
         );
     }
 
@@ -1280,7 +1283,7 @@ async fn folder_delete_does_not_revive_folder_or_feeds() {
         app_lib::commands::record_folder_delete(&conn, folder_id).expect("delete folder");
         let t = db::folder_tombstones(&conn).unwrap();
         let ft = db::feed_tombstones(&conn).unwrap();
-        assert!(t.iter().any(|l| l == "Default"), "删除应写入目录墓碑");
+        assert!(t.iter().any(|x| x.label == "Default"), "删除应写入目录墓碑");
         assert!(
             ft.iter().any(|u| u.contains("local_feed.xml")),
             "应为其内订阅补墓碑"
@@ -1314,13 +1317,18 @@ async fn folder_tombstone_cleared_when_remote_drops_label() {
 
     {
         let conn = db.lock().await;
-        // 手工写入一个远端 tag/list 已不含的 label 墓碑（模拟远端已删除该分类）
-        db::add_folder_tombstone(&conn, "已消失分类").unwrap();
+        // 手工写入一个远端 tag/list 已不含的 label 墓碑（模拟远端已删除该分类）。
+        // B2-4：墓碑按账号 key 归属——写当前账号的 key，pull 才把它当自家人回收。
+        let key = app_lib::sync::current_account(&conn)
+            .unwrap()
+            .expect("已配置账号")
+            .key;
+        db::add_folder_tombstone(&conn, &key, "已消失分类").unwrap();
         assert!(
             db::folder_tombstones(&conn)
                 .unwrap()
                 .iter()
-                .any(|l| l == "已消失分类"),
+                .any(|t| t.label == "已消失分类"),
             "前置：墓碑已写入"
         );
     }
@@ -1333,11 +1341,15 @@ async fn folder_tombstone_cleared_when_remote_drops_label() {
         !db::folder_tombstones(&conn)
             .unwrap()
             .iter()
-            .any(|l| l == "已消失分类"),
+            .any(|t| t.label == "已消失分类"),
         "远端已不含的 label 墓碑应被清除"
     );
     // 仍未消失的标签（远端含）其墓碑保留：补一个正例对照
-    db::add_folder_tombstone(&conn, "Default").unwrap();
+    let key = app_lib::sync::current_account(&conn)
+        .unwrap()
+        .expect("已配置账号")
+        .key;
+    db::add_folder_tombstone(&conn, &key, "Default").unwrap();
     drop(conn);
     sync::feeds_phase(&db, &http).await.expect("feeds phase 3");
     let conn = db.lock().await;
@@ -1345,7 +1357,7 @@ async fn folder_tombstone_cleared_when_remote_drops_label() {
         db::folder_tombstones(&conn)
             .unwrap()
             .iter()
-            .any(|l| l == "Default"),
+            .any(|t| t.label == "Default"),
         "远端仍列出的 label 墓碑应保留（继续阻挡复活）"
     );
     let _ = server;

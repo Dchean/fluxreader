@@ -167,6 +167,54 @@ export interface SyncQueueStats {
   last_error: string | null;
 }
 
+/* ---------- OPT-009 B3：订阅写回能力矩阵与持久回执 ---------- */
+
+/** 单动作的远端写回支持度。**逐字对应 Rust `SubscriptionWriteSupport` 的
+ *  serde 输出**（src-tauri/src/commands/sync.rs）——改任一侧必须同步改另一侧
+ *  （Rust 单测锁定 serde 名称）。 */
+export type SubscriptionWriteSupport = 'Supported' | 'LocalOnly' | 'Unsupported';
+
+/** 单动作的能力声明：结构化枚举 + 面向用户的如实说明（与 support 同源；
+ *  确认弹窗/能力卡直接采用，不在 UI 另写一套说法）。 */
+export interface SubscriptionActionCapability {
+  support: SubscriptionWriteSupport;
+  detail: string;
+}
+
+/** B2 已登记的能力边界（code 为稳定标识，detail 为用户可读说明）。 */
+export interface SubscriptionCapabilityLimit {
+  code: string;
+  detail: string;
+}
+
+/** subscription_capabilities 返回（OPT-009 B3；后端单一事实源，只读）。 */
+export interface SubscriptionCapabilities {
+  connected: boolean;
+  /** "greader" | "fever"；未连接为 null */
+  protocol: 'greader' | 'fever' | null;
+  /** 能力边界的一句话概述（设置页能力卡/提示条直接采用） */
+  overview: string;
+  subscribe: SubscriptionActionCapability;
+  edit_title: SubscriptionActionCapability;
+  move_folder: SubscriptionActionCapability;
+  unsubscribe: SubscriptionActionCapability;
+  rename_folder: SubscriptionActionCapability;
+  delete_folder: SubscriptionActionCapability;
+  empty_folder_remote: SubscriptionActionCapability;
+  limitations: SubscriptionCapabilityLimit[];
+}
+
+/** subscription_outbox_stats 返回（OPT-009 B3）：**当前账号限定**的订阅写回
+ *  回执（异账号暂停的队项不混入）。pending = 待推/待重试；failed = pending 中
+ *  attempts>0 的子集；local_only = 远端不支持、仅本地生效的终态项；
+ *  last_error = 最近失败摘要（Rust 侧已截断）。 */
+export interface SubscriptionOutboxStats {
+  pending: number;
+  failed: number;
+  local_only: number;
+  last_error: string | null;
+}
+
 /** sync_save 返回：首连且本地有未绑定源时 firstConnect=true
  *（前端据此弹「同步本地订阅到后端」确认框） */
 export interface SyncSaveResult {
@@ -703,6 +751,18 @@ export const api = {
   async syncQueueStats(): Promise<SyncQueueStats | null> {
     const inv = await getInvoke();
     return inv ? (await inv('sync_queue_stats') as SyncQueueStats) : null;
+  },
+  /** 订阅写回能力矩阵（OPT-009 B3 只读 IPC；设置页能力卡与确认弹窗远端语义
+   *  句的单一事实源）。浏览器环境返回 null */
+  async subscriptionCapabilities(): Promise<SubscriptionCapabilities | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('subscription_capabilities') as SubscriptionCapabilities) : null;
+  },
+  /** 订阅写回回执（OPT-009 B3 只读 IPC；当前账号限定的 pending/failed/
+   *  local_only/最近错误——异账号暂停项不混入）。浏览器环境返回 null */
+  async subscriptionOutboxStats(): Promise<SubscriptionOutboxStats | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('subscription_outbox_stats') as SubscriptionOutboxStats) : null;
   },
 };
 

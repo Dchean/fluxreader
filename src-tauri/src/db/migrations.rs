@@ -647,6 +647,103 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         CREATE INDEX idx_subscription_outbox_pending ON subscription_outbox(status) WHERE status = 'pending';
     "#,
         ),
+        // OPT-009 阶段 B2：分类墓碑按账号 key 隔离（跨账号同名分类不再互相压制）。
+        // - 旧形状 settings['folder_tombstones'] = ["label", ...]（无归属）：A 删除的
+        //   分类会压制 B 的同名分类，且 B 的 pull 会把 A 的墓碑当 stale 回收
+        //   （B2-4 确认的跨账号误抑制 + 静默丢失）。
+        // - 新形状 settings['folder_tombstones_v2'] =
+        //   [{"account_key": "<协议|规范化根|用户名>", "label": "..."}]。
+        // - 归属规则：旧条目归属给**迁移时配置的账号**（同库既有凭据快照），
+        //   无配置凭据 → 空 key 哨兵（无账号归属，对任何账号生效——纯本地用户的
+        //   删除意图不得因之后连接账号而失效）。旧键成功转换后删除（数据已迁移）。
+        // - 旧键内容损坏：**原样保留**（不静默丢弃），不产出 v2 条目；reader 见到
+        //   残留旧键即返回可见错误（pull 失败关闭，不得按空表复活分类）。
+        // - 纯数据迁移（无 DDL）：已发布迁移不可改，版本追加即可。
+        // user_version=24。
+        // Note: 归属规则/兼容与失败关闭 — 见 .agents/notes/implemented/architecture/2026-10-14-分类墓碑账号隔离.md
+        M::up_with_hook(
+            "-- OPT-009 阶段 B2：分类墓碑账号隔离为 settings 数据迁移，改写全部在 Rust 钩子内。",
+            |tx: &rusqlite::Transaction<'_>| {
+                let legacy: Option<String> = tx
+                    .query_row(
+                        "SELECT value FROM settings WHERE key = ?1",
+                        params![crate::db::folders::FOLDER_TOMBSTONE_KEY_LEGACY],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let Some(raw) = legacy else {
+                    return Ok(());
+                };
+                let labels: Vec<String> = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // 损坏：保留旧键字节等待人工修复，v2 不产出；reader 会以
+                        // 可见错误失败关闭（见 db::folders::folder_tombstones）。
+                        log::warn!(
+                            "migration v24: 旧分类墓碑内容损坏，保留原值不迁移（reader 将失败关闭）: {e}"
+                        );
+                        return Ok(());
+                    }
+                };
+                let owner = {
+                    let setting = |key: &str| -> rusqlite::Result<Option<String>> {
+                        tx.query_row(
+                            "SELECT value FROM settings WHERE key = ?1",
+                            params![key],
+                            |r| r.get::<_, Option<String>>(0),
+                        )
+                        .optional()
+                        .map(Option::flatten)
+                    };
+                    let protocol = setting("sync_protocol")?
+                        .filter(|p| p == "fever" || p == "greader")
+                        .unwrap_or_else(|| "greader".to_string());
+                    let endpoint = setting("greader_endpoint")?;
+                    let username = setting("greader_username")?;
+                    match (endpoint, username) {
+                        (Some(e), Some(u)) if !e.trim().is_empty() && !u.trim().is_empty() => {
+                            crate::sync::account_key(&protocol, &e, &u)
+                        }
+                        // 无配置账号（纯本地现场）：空 key 哨兵 = 对所有账号生效。
+                        _ => String::new(),
+                    }
+                };
+                let entries: Vec<crate::db::folders::FolderTombstone> = labels
+                    .into_iter()
+                    .map(|label| crate::db::folders::FolderTombstone {
+                        account_key: owner.clone(),
+                        label,
+                    })
+                    .collect();
+                let raw_v2 = serde_json::to_string(&entries).map_err(|e| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(
+                        crate::error::AppError::internal(e.to_string()),
+                    ))
+                })?;
+                if !entries.is_empty() {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                        params![crate::db::folders::FOLDER_TOMBSTONE_KEY_V2, raw_v2],
+                    )?;
+                }
+                tx.execute(
+                    "DELETE FROM settings WHERE key = ?1",
+                    params![crate::db::folders::FOLDER_TOMBSTONE_KEY_LEGACY],
+                )?;
+                Ok(())
+            },
+        ),
+        // OPT-009 阶段 B2-R2：未知远端目标的退订意图需要「解析结果」的持久字段。
+        // - 删除撞上在途 quick_add 时写入的退订行（remote_id IS NULL）由执行器用
+        //   幂等 quick_add-by-URL 解析出已验证 id；该 id 必须在列表发现/发送之前
+        //   持久化——否则订阅列表长期失败时每轮重试都会再 quick_add，非幂等服务端
+        //   上即无界造重复订阅（R2-2 复审 P2）。
+        // - `resolved_remote_id` 与 `remote_id` 分开：前者只表示「恢复路径解析出的
+        //   目标」，不能冒充「入队时已知的远端绑定」（后者走直接退订、不再做列表
+        //   发现；恢复路径必须继续用列表正面证据发现同 URL 的其它 id）。
+        // - 纯追加列（旧行 NULL = 未解析），不动既有列与 CHECK 约束。
+        // user_version=25。
+        M::up("ALTER TABLE subscription_outbox ADD COLUMN resolved_remote_id INTEGER;"),
     ])
 });
 
@@ -1922,10 +2019,17 @@ mod opt008a_migration_tests {
             None,
             "原墓碑键清空：新删除按新算法键写入，两个命名空间不得混用"
         );
+        // v19 本体不删目录删除墓碑；v24 起把它迁入带账号 key 的新形状
+        // （空 key 哨兵 = 该库无配置账号，墓碑对所有账号生效）——数据零丢失。
         assert_eq!(
-            setting(&conn, "folder_tombstones").as_deref(),
-            Some("[\"旧目录\"]"),
-            "目录删除墓碑绝不删除"
+            setting(&conn, "folder_tombstones"),
+            None,
+            "旧键由 v24 迁移消费（数据已迁入 v2，不是丢弃）"
+        );
+        assert_eq!(
+            setting(&conn, "folder_tombstones_v2").as_deref(),
+            Some(r#"[{"account_key":"","label":"旧目录"}]"#),
+            "目录删除墓碑绝不删除：迁移为账号隔离形状，无账号现场用空 key 哨兵"
         );
 
         // 新算法重建：原始 url 原串保持、url_norm 与 normalize_url 一致且两主题分开
@@ -2381,5 +2485,196 @@ mod opt009_migration_tests {
         assert_eq!((feeds, queued), (1, 1), "迁移必须只追加新表，旧数据原样");
         drop(conn);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+/* ============================================================
+OPT-009 阶段 B2 v24 单元测试：分类墓碑账号隔离迁移
+（cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
+============================================================ */
+#[cfg(test)]
+mod opt009b2_migration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        std::env::temp_dir().join(format!(
+            "fluxreader_migr_{base}_{pid}_{nanos}_{seq}.db",
+            pid = std::process::id()
+        ))
+    }
+
+    fn setting(conn: &Connection, key: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    /// 把已是最新 schema 的库回拨成「v23 + 旧形状分类墓碑」现场（v24 是纯数据
+    /// 迁移，无 DDL 回拨需要）：植入旧键、清掉 v2、user_version=23，再 open 走
+    /// 真实 v24 升级。
+    fn seed_v23_with_legacy_tombstones(path: &std::path::Path, legacy_json: &str, account: bool) {
+        let _ = std::fs::remove_file(path);
+        let mut conn = Connection::open(path).unwrap();
+        // 停在 v23 的真实 schema（不得用 latest + 伪 user_version：v25 的
+        // ALTER TABLE 在「schema 已含新列」的库上重放会 duplicate column）。
+        MIGRATIONS.to_version(&mut conn, 23).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('folder_tombstones', ?1)",
+            params![legacy_json],
+        )
+        .unwrap();
+        conn.execute(
+            "DELETE FROM settings WHERE key = 'folder_tombstones_v2'",
+            [],
+        )
+        .unwrap();
+        if account {
+            conn.execute_batch(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES
+                     ('sync_protocol', 'greader'),
+                     ('greader_endpoint', 'https://sync.example/'),
+                     ('greader_username', 'user-a');",
+            )
+            .unwrap();
+        }
+        drop(conn);
+    }
+
+    /// v24：旧形状（裸 label 数组）按**迁移时配置的账号**归属为 v2 条目，旧键
+    /// 消费后删除；多条 label 全部保留（不得静默丢弃历史墓碑）。
+    #[test]
+    fn v24_attributes_legacy_folder_tombstones_to_configured_account() {
+        let path = unique_test_db("opt009b2_v24_owner");
+        seed_v23_with_legacy_tombstones(&path, r#"["旧目录","还有一个"]"#, true);
+
+        let conn = open(&path).expect("v23 旧库必须完成 v24 升级");
+        let expected_owner = crate::sync::account_key("greader", "https://sync.example/", "user-a");
+        assert_eq!(
+            setting(&conn, "folder_tombstones").as_deref(),
+            None,
+            "旧键由 v24 消费（数据已迁入 v2）"
+        );
+        let raw = setting(&conn, "folder_tombstones_v2").unwrap();
+        let entries: Vec<crate::db::FolderTombstone> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(entries.len(), 2, "历史墓碑一条不丢: {entries:?}");
+        assert!(
+            entries.iter().all(|t| t.account_key == expected_owner),
+            "旧条目归属迁移时配置的账号: {entries:?}"
+        );
+        let labels: Vec<&str> = entries.iter().map(|t| t.label.as_str()).collect();
+        assert!(labels.contains(&"旧目录") && labels.contains(&"还有一个"));
+        // 生效集合按当前账号读取
+        let active = crate::db::folder_tombstones_for(&conn, &expected_owner).unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(
+            crate::db::folder_tombstones_for(&conn, "greader|https://other.example|b")
+                .unwrap()
+                .is_empty(),
+            "异账号不生效"
+        );
+        drop(conn);
+        std::fs::remove_file(&path).expect("清理临时库失败");
+    }
+
+    /// v24：库内无配置账号（纯本地现场）→ 空 key 哨兵条目，对所有账号生效
+    /// ——本地删除意图不得因之后连接账号而失效。
+    #[test]
+    fn v24_attributes_legacy_tombstones_to_empty_key_without_account() {
+        let path = unique_test_db("opt009b2_v24_empty");
+        seed_v23_with_legacy_tombstones(&path, r#"["本地删目录"]"#, false);
+
+        let conn = open(&path).expect("升级必须成功");
+        let raw = setting(&conn, "folder_tombstones_v2").unwrap();
+        let entries: Vec<crate::db::FolderTombstone> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].account_key, "", "无账号现场用空 key 哨兵");
+        assert_eq!(
+            crate::db::folder_tombstones_for(&conn, "greader|https://a.example|a").unwrap(),
+            vec!["本地删目录".to_string()],
+            "无归属墓碑对任何账号生效"
+        );
+        drop(conn);
+        std::fs::remove_file(&path).expect("清理临时库失败");
+    }
+
+    /// v24：旧键内容损坏 → **原样保留**（不静默丢弃）、不产出 v2 条目；
+    /// reader 见到残留旧键返回可见错误（pull 失败关闭，不得按空表复活分类）。
+    #[test]
+    fn v24_preserves_corrupt_legacy_tombstones_and_reader_fails_closed() {
+        let path = unique_test_db("opt009b2_v24_corrupt");
+        seed_v23_with_legacy_tombstones(&path, "{ not json", true);
+
+        let conn = open(&path).expect("损坏的旧键不得阻断启动（升级仍完成）");
+        assert_eq!(
+            setting(&conn, "folder_tombstones").as_deref(),
+            Some("{ not json"),
+            "损坏值原样保留等待人工修复"
+        );
+        assert_eq!(
+            setting(&conn, "folder_tombstones_v2"),
+            None,
+            "损坏内容不产出 v2 条目（无标签可归属）"
+        );
+        let err = crate::db::folder_tombstones(&conn).expect_err("残留旧键必须让读取失败关闭");
+        assert!(
+            err.message.contains("旧分类墓碑未迁移"),
+            "错误必须指向未迁移的旧键: {err}"
+        );
+        drop(conn);
+        std::fs::remove_file(&path).expect("清理临时库失败");
+    }
+
+    /// v25（B2-R2）：unknown-id 退订的解析推进需要 `resolved_remote_id` —— 纯追加列，
+    /// 停在 v24 的旧库升级后既有队项**原样**（id/动作/既有字段不变、新列为 NULL），
+    /// 新列可写（解析推进），不影响既有列语义。
+    /// 判别力：迁移漏做时列不存在（查询报错）；重建表不保 id 时下面的 id 断言红。
+    #[test]
+    fn v25_adds_resolved_remote_id_keeping_existing_rows() {
+        let path = unique_test_db("opt009b2_v25");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS.to_version(&mut conn, 24).unwrap();
+            conn.execute(
+                "INSERT INTO subscription_outbox
+                    (id, account_generation, account_key, action, feed_url, remote_id, prev_folder)
+                 VALUES (7, 3, 'k', 'unsubscribe', 'https://f.example/rss', NULL, '旧分类')",
+                [],
+            )
+            .unwrap();
+        }
+        let conn = open(&path).expect("v24 旧库必须完成 v25 升级");
+        let (id, action, resolved, prev): (i64, String, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT id, action, resolved_remote_id, prev_folder FROM subscription_outbox",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (id, action.as_str(), resolved, prev.as_deref()),
+            (7, "unsubscribe", None, Some("旧分类")),
+            "旧队项必须原样（id 不复用是旧确认精确落空的前提）"
+        );
+        let n = conn
+            .execute(
+                "UPDATE subscription_outbox SET resolved_remote_id = 101 WHERE id = 7",
+                [],
+            )
+            .unwrap();
+        assert_eq!(n, 1, "新列必须可写（解析推进）");
+        drop(conn);
+        std::fs::remove_file(&path).expect("清理临时库失败");
     }
 }

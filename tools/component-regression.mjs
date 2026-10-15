@@ -53,6 +53,9 @@ await import('./component-tests/sync-data-events.test.mjs');
 await import('./component-tests/ai-settings.test.mjs');
 /* OPT-011 R5：配置应用/上传经真实 UI 接入同一 AI 写协议（写屏障/前沿等待/回读确认）。 */
 await import('./component-tests/config-apply.test.mjs');
+/* OPT-009 B3：订阅写回能力声明与持久回执（FeedsTab 确认文案、Fever 仅本地、
+   subscription-outbox-changed 事件链驱动摘要卡）。 */
+await import('./component-tests/subscription-writeback.test.mjs');
 await import('./component-tests/runner-selfcheck.test.mjs');
 
 /* 全部用例结束后统一收尾；失败非静默、退出码非 0；无论成败都解除看门狗

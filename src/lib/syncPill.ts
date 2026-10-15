@@ -9,6 +9,12 @@
       无失败时不新增噪音）。
    failed>0（队列里存在推送失败过的行）时追加「· 部分失败」段；总长 ≤48 字。 */
 
+import type {
+  SubscriptionActionCapability,
+  SubscriptionCapabilities,
+  SubscriptionOutboxStats,
+} from './api';
+
 export interface SyncPillInput {
   syncStatus: 'synced' | 'syncing' | 'error';
   backgroundSyncing: boolean;
@@ -53,4 +59,68 @@ export function syncStateSummary(
   ].filter(Boolean).join('；');
   const lastSyncLine = `上次同步 ${lastSyncSec > 0 ? new Date(lastSyncSec * 1000).toLocaleString() : '从未'}`;
   return [queueLine, lastSyncLine, '状态变更已保存，连接后自动补推'].filter(Boolean).join('；');
+}
+
+/* ============================================================
+   OPT-009 B3：订阅写回的呈现纯函数（单一事实源；真值表由
+   tools/frontend-tests/subscription-writeback.mjs 驱动）。
+   ============================================================ */
+
+/** 订阅写回回执摘要行（追加在同步摘要卡 desc）。口径：
+ * - 无待办（pending=0 且 local_only=0）→ 空串：不新增噪音行（X3 口径）；
+ * - pending → 「等待 N 项」；failed（pending 子集）→ 追加「其中 M 项失败
+ *   （最近错误，按码点截断 60，不劈代理对）」；
+ * - local_only → 必须如实点名「仅本地生效」并携带协议事实（Fever ≠ 已同步；
+ *   不得写成成功，也不得隐藏）。 */
+export function subscriptionWriteSummary(
+  stats: SubscriptionOutboxStats,
+  protocol: 'greader' | 'fever' | null,
+): string {
+  const parts: string[] = [];
+  if (stats.pending > 0) {
+    if (stats.failed > 0) {
+      const errChars = stats.last_error ? Array.from(stats.last_error) : [];
+      const errSummary =
+        errChars.length > 60 ? `${errChars.slice(0, 60).join('')}…` : stats.last_error;
+      parts.push(
+        `等待 ${stats.pending} 项，其中 ${stats.failed} 项失败${errSummary ? `（${errSummary}）` : ''}`,
+      );
+    } else {
+      parts.push(`等待 ${stats.pending} 项`);
+    }
+  }
+  if (stats.local_only > 0) {
+    const proto = protocol === 'fever' ? 'Fever 协议不支持远端写回' : '当前协议不支持远端写回';
+    parts.push(`${stats.local_only} 项仅本地生效（${proto}）`);
+  }
+  return parts.length > 0 ? `订阅写回：${parts.join('；')}` : '';
+}
+
+/** 能力矩阵逐动作投影（能力卡一行）：支持 → 已支持 / 仅本地 / 不支持。 */
+export function subscriptionActionLine(caps: SubscriptionCapabilities): string {
+  const label = (c: SubscriptionActionCapability): string =>
+    c.support === 'Supported' ? '已支持' : c.support === 'LocalOnly' ? '仅本地' : '不支持';
+  return [
+    `新增 ${label(caps.subscribe)}`,
+    `编辑 ${label(caps.edit_title)}`,
+    `移动 ${label(caps.move_folder)}`,
+    `退订 ${label(caps.unsubscribe)}`,
+    `分类改名 ${label(caps.rename_folder)}`,
+    `分类删除 ${label(caps.delete_folder)}`,
+    `空分类 ${label(caps.empty_folder_remote)}`,
+  ].join(' · ');
+}
+
+/** 删除确认的远端语义句——唯一直取 subscription_capabilities（与能力矩阵同源，
+ *  不在 UI 另写一套说法）。分类**有成员**取 delete_folder.detail（成员逐源退订）、
+ *  **空分类**取 empty_folder_remote.detail（无可验证的远端表达）。
+ *  caps 未加载 → null：调用方省略该句（不编造远端语义）。 */
+export function deleteRemoteLine(
+  caps: SubscriptionCapabilities | null,
+  kind: 'feed' | 'folder',
+  memberCount: number,
+): string | null {
+  if (!caps) return null;
+  if (kind === 'feed') return caps.unsubscribe.detail;
+  return memberCount > 0 ? caps.delete_folder.detail : caps.empty_folder_remote.detail;
 }

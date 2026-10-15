@@ -194,10 +194,17 @@ fn open_upgrade_rebuilds_url_norm_and_separates_topic_urls() {
         None,
         "原墓碑键清空：新删除按新算法键写入，两个命名空间不得混用"
     );
+    // v24 起旧形状（裸 label 数组）迁入带账号 key 的新形状——目录删除墓碑绝不
+    // 删除（数据零丢失），该现场无配置账号 → 空 key 哨兵（对所有账号生效）。
     assert_eq!(
-        setting(&conn, "folder_tombstones").as_deref(),
-        Some("[\"旧目录\"]"),
-        "目录删除墓碑绝不删除"
+        setting(&conn, "folder_tombstones"),
+        None,
+        "旧键由 v24 迁移消费（数据已迁入 v2，不是丢弃）"
+    );
+    assert_eq!(
+        setting(&conn, "folder_tombstones_v2").as_deref(),
+        Some(r#"[{"account_key":"","label":"旧目录"}]"#),
+        "目录删除墓碑绝不删除：迁移为账号隔离形状"
     );
     let dedup_left: i64 = conn
         .query_row("SELECT COUNT(*) FROM deduped_urls", [], |r| r.get(0))

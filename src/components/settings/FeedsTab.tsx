@@ -1,6 +1,7 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../store';
 import { api, extractError } from '../../lib/api';
+import { deleteRemoteLine } from '../../lib/syncPill';
 import { Icons } from '../icons';
 import { FluxDropdown, SwitchInline, ConfirmDialog, AiModeSelect } from '../primitives';
 import { normalizeFeedAiMode } from '../../types';
@@ -33,7 +34,15 @@ export function FeedsTab() {
   const toggleSettingsCatCollapse = useAppStore((s) => s.toggleSettingsCatCollapse);
   const showToast = useAppStore((s) => s.showToast);
   const reloadFromBackend = useAppStore((s) => s.reloadFromBackend);
+  /** OPT-009 B3：订阅写回能力矩阵（确认弹窗远端语义句的单一事实源）。 */
+  const caps = useAppStore((s) => s.subscriptionCapabilities);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /* OPT-009 B3：装载时读取能力矩阵（确认弹窗与 Fever 提示都直接消费它；
+     读取失败保持原值——界面省略能力句，不编造远端语义）。 */
+  useEffect(() => {
+    void useAppStore.getState().loadSubscriptionCapabilities();
+  }, []);
 
   /* OPML 导入：<input file> 读文本 → 后端解析入库 → 重载 */
   const handleOpmlImport = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -70,16 +79,27 @@ export function FeedsTab() {
     setPending(null);
   };
 
-  /* 确认弹窗文案：让用户明确知道删的是什么、影响多大 */
+  /* 确认弹窗文案：让用户明确知道删的是什么、影响多大。
+     OPT-009 B3：远端语义句统一取自 subscription_capabilities（与能力矩阵同源，
+     不再写「同步服务端不受影响」——删除现在会产生持久退订意图）；分类删除按
+     有无成员分别取「成员逐源退订」与「空分类无可验证远端表达（仅本地）」的
+     说明；caps 未加载时省略该句（不编造远端语义）。 */
+  const memberCount = pending?.kind === 'category'
+    ? categories.find((c) => c.id === pending.catId)?.feeds.length ?? 0
+    : 0;
+  const remoteLine = pending
+    ? deleteRemoteLine(caps, pending.kind === 'category' ? 'folder' : 'feed', memberCount)
+    : null;
+  const withRemote = (base: string) => (remoteLine ? `${base}；${remoteLine}` : `${base}。`);
   const dialogText = pending
     ? pending.kind === 'category'
       ? {
           title: '删除订阅分类',
-          message: `确定删除分类「${pending.catName}」吗？其下 ${categories.find((c) => c.id === pending.catId)?.feeds.length ?? 0} 个订阅源及全部本地条目将一并移除。`,
+          message: withRemote(`确定删除分类「${pending.catName}」吗？其下 ${memberCount} 个订阅源及全部本地条目将一并移除`),
         }
       : {
           title: '删除订阅源',
-          message: `确定删除订阅源「${pending.feedName}」吗？该源的全部本地条目将一并移除，同步服务端不受影响。`,
+          message: withRemote(`确定删除订阅源「${pending.feedName}」吗？该源的全部本地条目将一并移除`),
         }
     : null;
 
@@ -98,6 +118,15 @@ export function FeedsTab() {
           + 新建分类
         </button>
       </div>
+
+      {/* OPT-009 B3：Fever 连接下常驻能力提示——新增/编辑/退订/分类变更仅本地
+          生效（概述取自 subscription_capabilities 单一事实源，不出现「已同步」
+          错觉）。GReader/未连接不渲染（不制造噪音）。 */}
+      {caps?.connected && caps.protocol === 'fever' && (
+        <div className="mini-dialog-hint" style={{ marginTop: 0, marginBottom: 8 }}>
+          {caps.overview}
+        </div>
+      )}
 
       {categories.map((cat) => {
         return (

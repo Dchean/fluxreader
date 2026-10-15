@@ -437,9 +437,12 @@ impl GReaderClient {
         Ok(token.to_string())
     }
 
-    /// 发 POST：Authorization 头带登录 auth，表单 `T` 用 action token（缓存，多次 POST 只取一次）。
+    /// 发 POST（Authorization 头带登录 auth，表单 `T` 用 action token；缓存，多次 POST 只取一次）。
     /// 表单编码交给 reqwest `.form()`（URL 转义由它负责，不手拼）。
-    async fn post_with_action_token(
+    ///
+    /// 只负责发送：**不判状态码**——调用方决定哪些非 2xx 是可容忍的终态
+    /// （见 [`Self::post_form_text_inner`] 的退订容忍位）。
+    async fn post_action_token_raw(
         &self,
         path: &str,
         form: &[(&str, String)],
@@ -447,14 +450,21 @@ impl GReaderClient {
         let token = self.action_token().await?.to_string();
         let mut params: Vec<(&str, String)> = vec![("T", token)];
         params.extend_from_slice(form);
-        let resp = self
-            .http
+        self.http
             .post(self.url(path))
             .header("Authorization", format!("GoogleLogin auth={}", self.token))
             .form(&params)
             .send()
             .await
-            .map_err(|e| AppError::network(format!("POST {path} 网络失败（{e}）")))?;
+            .map_err(|e| AppError::network(format!("POST {path} 网络失败（{e}）")))
+    }
+
+    async fn post_with_action_token(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+    ) -> AppResult<reqwest::Response> {
+        let resp = self.post_action_token_raw(path, form).await?;
         if !resp.status().is_success() {
             return Err(AppError::network(format!(
                 "POST {path} → {}",
@@ -482,7 +492,34 @@ impl GReaderClient {
     /// （允许周围空白）；200+FAIL、200+空体、其他正文一律报协议错误。
     /// 错误信息**不回显响应体**（实现细节/敏感片段不进错误与日志）。
     async fn post_form_text(&self, path: &str, form: &[(&str, String)]) -> AppResult<()> {
-        let resp = self.post_with_action_token(path, form).await?;
+        self.post_form_text_inner(path, form, false).await
+    }
+
+    /// [`Self::post_form_text`] 的可容忍变体。
+    ///
+    /// `tolerate_missing_target` = true：HTTP 400/404 视为「**目标已不存在 = 操作
+    /// 意图已满足**」返回 Ok——只给退订用（见 [`Self::unsubscribe`] 的上游依据）。
+    /// 5xx/网络错误与「2xx 非 OK」仍是错误（可重试 / 协议错误）。
+    async fn post_form_text_inner(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+        tolerate_missing_target: bool,
+    ) -> AppResult<()> {
+        let resp = self.post_action_token_raw(path, form).await?;
+        if !resp.status().is_success() {
+            if tolerate_missing_target && matches!(resp.status().as_u16(), 400 | 404) {
+                log::warn!(
+                    "sync: POST {path} → {}（目标已不存在），视为已满足",
+                    resp.status()
+                );
+                return Ok(());
+            }
+            return Err(AppError::network(format!(
+                "POST {path} → {}",
+                resp.status()
+            )));
+        }
         let body = resp
             .text()
             .await
@@ -596,28 +633,43 @@ impl GReaderClient {
     }
 
     /// 退订（`ac=unsubscribe`，`s=feed/<数字id>`）。
+    ///
+    /// **目标已不存在也是已满足（B2-R2 复审 P2-C）**：pinned FreshRSS 的
+    /// `subscriptionEdit` 对不存在/删除失败的 id 走 `badRequest()` → HTTP 400
+    /// （`freshrss-greader.php:468-471` 的 `!($feedId > 0 && deleteFeed($feedId))`
+    /// 分支 + `:122-128` 的 400 形态）。若把 400 当可重试失败，「目标已被外部
+    /// 删除」会让队项**永久 Retry**，同一意图里其它同 URL 目标也永远发不出去。
+    /// 这里 400/404 视为「目标不存在 = 退订意图已满足」返回 Ok；5xx/网络仍是
+    /// Err（可重试），2xx 仍要求正文 `OK`（写操作生效判据）。
+    /// 墓碑不因本函数 Ok 而清除——仍只由 pull 的「远端列表确认已不含」回收。
     pub async fn unsubscribe(&self, feed_numeric_id: i64) -> AppResult<()> {
         let form: Vec<(&str, String)> = vec![
             ("ac", "unsubscribe".to_string()),
             ("s", format!("feed/{feed_numeric_id}")),
         ];
-        self.post_form_text("/reader/api/0/subscription/edit", &form)
+        self.post_form_text_inner("/reader/api/0/subscription/edit", &form, true)
             .await
     }
 
-    /// 编辑订阅（`ac=edit`，`s=feed/<数字id>`，可改标题 `t` 或移分类 `a`）。
+    /// 编辑订阅（`ac=edit`，`s=feed/<数字id>`，可改标题 `t`、追加分类 `a`、
+    /// 移除分类 `r`）。
     ///
     /// `dest_label` 是**用户目录名**（裸名，如 `技术/阅读`）；wire 上的 `a` 必须是
     /// 完整 label stream id `user/-/label/<名>`（FreshRSS `subscriptionEdit` 按
     /// `user/-/label/` 或 `user/<user>/label/` 前缀解析；Miniflux 同形态）。
     /// 这里**无条件前置一次**——目录名本身以 `user/-/label/` 开头时也不能按字面
     /// 判定「已格式化」而少前置（用户的目录名是数据，不是标记）。
-    // Note: `a` 的完整 stream id 形态 — 见 .agents/notes/implemented/architecture/2026-10-08-Reader适配的鉴权与分类契约.md
+    ///
+    /// `remove_label` 是编辑前的旧分类裸名：真实「移动分类」= `a` 加目标 +
+    /// `r` 移除旧 label（只发 `a` 是**追加**分类，跨服务端会残留旧分类）；
+    /// 非目标 label 不受影响（不发送即不触碰）。
+    // Note: `a`/`r` 的完整 stream id 形态 — 见 .agents/notes/implemented/architecture/2026-10-08-Reader适配的鉴权与分类契约.md
     pub async fn edit_subscription(
         &self,
         feed_numeric_id: i64,
         title: Option<&str>,
         dest_label: Option<&str>,
+        remove_label: Option<&str>,
     ) -> AppResult<()> {
         let mut form: Vec<(&str, String)> = vec![
             ("ac", "edit".to_string()),
@@ -628,6 +680,12 @@ impl GReaderClient {
         }
         if let Some(name) = dest_label {
             form.push(("a", label_stream_id(name)));
+        }
+        if let Some(name) = remove_label {
+            // 同一 label 的 a/r 自相矛盾：目标已含旧名时不发 r（防御性）
+            if Some(name) != dest_label {
+                form.push(("r", label_stream_id(name)));
+            }
         }
         self.post_form_text("/reader/api/0/subscription/edit", &form)
             .await

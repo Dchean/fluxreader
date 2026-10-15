@@ -1,9 +1,10 @@
 //! commands 的 sync 领域子模块（TASK-044 从 commands.rs 按既有章节拆分，纯搬运）。
 
-use super::sync_configured;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
+// OPT-009 阶段 B：账号身份判定与账号指纹（订阅 outbox）必须共用同一规范化实现。
+use crate::sync::normalized_server_root;
 use tauri::State;
 
 /* ============================================================
@@ -214,35 +215,6 @@ struct SavePlan {
     /// 显式激活（activate_pending 有值）必须为 true——即使身份相同也不得复用
     /// 已保存密码，激活必须凭 fresh credential。
     password_supplied: bool,
-}
-
-/// 规范化「服务器根」身份：scheme + host + **有效端口** + basepath（host 小写、
-/// 去尾斜杠）。只归并**等价形态**：省略端口与显式默认端口（http:80 / https:443）
-/// 视为同一 server；同 host 不同端口、不同 basepath 都是不同 server（R2：端口
-/// 丢失会让 `host:8080` 与 `host:8081` 被当同身份复用旧密码）。
-/// 解析失败（如缺 scheme 的裸串）退回整体小写 + 去尾斜杠——保守等价。
-fn normalized_server_root(endpoint: &str) -> String {
-    let trimmed = endpoint.trim().trim_end_matches('/');
-    match url::Url::parse(trimmed) {
-        Ok(u) => {
-            let host = u.host_str().unwrap_or("").to_ascii_lowercase();
-            // port_or_known_default：未显式端口返回协议默认端口，显式默认端口
-            // 与之相等 → 两种写法归并；非默认端口原样保留。
-            let port = u
-                .port_or_known_default()
-                .map(|p| format!(":{p}"))
-                .unwrap_or_default();
-            let path = u.path().trim_end_matches('/');
-            format!(
-                "{}://{}{}{}",
-                u.scheme().to_ascii_lowercase(),
-                host,
-                port,
-                path
-            )
-        }
-        Err(_) => trimmed.to_ascii_lowercase(),
-    }
 }
 
 /// 待确认建议与本次保存目标是否指向同一身份（逐字段比对：建议只提供部分字段时，
@@ -535,11 +507,12 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
     // 经用户确认，不能绕过 SyncTab 的 firstConnect 流程）。
     let (queued, generation) = {
         let conn = state.db.lock().await;
-        // OPT-014 R1：凭据读取失败 → Err（不得当未连接静默返回）
-        if !sync_configured(&conn)? {
+        // OPT-014 R1：凭据读取失败 → Err（不得当未连接静默返回）。
+        // OPT-009 阶段 B：账号身份 + 代际一次快照；入队携带账号指纹，推送端按
+        // key/代际屏障执行（换号不会把本地订阅推给新账号）。
+        let Some(ctx) = crate::sync::current_account(&conn)? else {
             return Err(AppError::new("notConnected", "未连接后端"));
-        }
-        let generation = db::sync_generation(&conn)?;
+        };
         let rows = db::list_unbound_local_feeds(&conn)?;
         // P3[7]（REQ-104）：读队列失败**不能降级成空队列**再继续入队——那样
         // pending_urls 变空，下面会把每个未绑定源都重新 enqueue，产生重复 add_feed
@@ -550,22 +523,47 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
             log::warn!("sync: 读队列失败，中止本次推送以免重复入队: {e}");
             e
         })?;
-        let pending_urls: std::collections::HashSet<String> = queued_items
+        let mut pending_urls: std::collections::HashSet<String> = queued_items
             .into_iter()
             .filter(|i| i.action == "add_feed")
             .filter_map(|i| i.feed_url)
             .collect();
+        // OPT-009：订阅 outbox 中**同账号** pending 的 URL 同样算「已在队列」
+        // （连点不堆积；异账号行不算——当前账号的推送意图独立成立）。
+        for item in db::pending_outbox(&conn)? {
+            if item.account_key == ctx.key {
+                pending_urls.insert(item.feed_url);
+            }
+        }
         let mut n = 0usize;
         for (_id, url, folder) in rows {
             if pending_urls.contains(&url) {
                 continue; // 已在队列（上次失败待重试）
             }
-            let payload = serde_json::json!({ "folder_id": folder }).to_string();
-            db::enqueue_sync(&conn, None, Some(&url), "add_feed", Some(&payload))?;
+            let folder_label = match folder {
+                Some(fid) => db::folder_name(&conn, fid)?,
+                None => None,
+            };
+            db::enqueue_subscribe(
+                &conn,
+                ctx.generation,
+                &ctx.key,
+                &url,
+                // 首连推送的未绑定本地源：标题沿用本地既有值（含源抓取发现的
+                // 标题），不在此处新造目标——B2-5 的标题目标由导入/新增路径给出。
+                None,
+                folder_label.as_deref(),
+            )?;
             n += 1;
         }
-        (n, generation)
+        (n, ctx.generation)
     };
+    // OPT-009 B3：入队是订阅写回的状态变化——锁外先广播一次回执（覆盖「会话
+    // 构建失败/离线」时 UI 看不到入队结果的情形）；后续执行器路径会再广播
+    // 确认后的真值。未配置同步时 notify 内部静默。
+    if queued > 0 {
+        crate::sync::notify_subscription_outbox_changed(&state.db).await;
+    }
     if queued == 0 {
         // 没有新入队，但可能仍有待推队列项（上次失败的）——检查后再决定。
         // P3[7]：读队列失败时**不能**当作「没有待推项」直接返回「无需同步」——
@@ -573,13 +571,25 @@ pub async fn sync_local_feeds(state: State<'_, AppState>) -> AppResult<String> {
         // （继续走 feeds_phase；它是幂等的，多跑一次无害，漏跑才有害）。
         let has_pending = {
             let conn = state.db.lock().await;
-            match db::take_sync_queue(&conn) {
+            let legacy = match db::take_sync_queue(&conn) {
                 Ok(q) => q.iter().any(|i| i.action == "add_feed"),
                 Err(e) => {
                     log::warn!("sync: 读队列失败，按「可能有待推项」继续（避免误报无需同步）: {e}");
                     true
                 }
-            }
+            };
+            let outbox = match crate::sync::current_account(&conn) {
+                Ok(Some(ctx)) => match db::pending_outbox(&conn) {
+                    Ok(items) => items.iter().any(|i| i.account_key == ctx.key),
+                    Err(e) => {
+                        log::warn!("sync: 读订阅写回队列失败，按「可能有待推项」继续: {e}");
+                        true
+                    }
+                },
+                // 身份读取失败/未配置：按保守「可能有待推」，由 feeds_phase 报错
+                _ => true,
+            };
+            legacy || outbox
         };
         if !has_pending {
             return Ok("没有需要同步的本地订阅（全部已绑定或已推送）".into());
@@ -710,6 +720,193 @@ pub async fn sync_status(state: State<'_, AppState>) -> AppResult<SyncStatusInfo
 pub async fn sync_queue_stats(state: State<'_, AppState>) -> AppResult<db::SyncQueueStats> {
     let conn = state.db.lock().await;
     db::sync_queue_stats(&conn)
+}
+
+/* ============================================================
+OPT-009 B3：订阅写回能力矩阵与持久回执（只读 IPC，后端单一事实源）
+============================================================ */
+
+/// 单动作的远端写回支持度。**枚举的 serde 名称即前后端契约**
+/// （src/lib/api.ts 的 SubscriptionWriteSupport 必须与其逐字一致：
+/// "Supported" / "LocalOnly" / "Unsupported"）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum SubscriptionWriteSupport {
+    /// 远端写回被支持：变更持久入队、失败重试、按不可复用操作 id 精确确认。
+    Supported,
+    /// 远端不写回也不宣称：动作仅本地生效（终态 local_only，不重试、不冒充成功）。
+    LocalOnly,
+    /// 远端没有可验证的表达方式（也没有可回退的远端语义）。
+    Unsupported,
+}
+
+/// 单动作的能力声明：结构化枚举 + 面向用户的如实说明。detail 与 support
+/// 同一来源计算，确认弹窗/能力卡直接采用——不允许 UI 另写一套说法。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SubscriptionActionCapability {
+    pub support: SubscriptionWriteSupport,
+    pub detail: String,
+}
+
+/// B2 已登记的能力边界（结构化条目：code 为稳定标识，detail 为用户可读说明）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SubscriptionCapabilityLimit {
+    pub code: String,
+    pub detail: String,
+}
+
+/// 订阅写回能力矩阵（`subscription_capabilities` 返回）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SubscriptionCapabilities {
+    pub connected: bool,
+    /// "greader" | "fever"；未连接为 null
+    pub protocol: Option<String>,
+    /// 能力边界的一句话概述（设置页提示条/能力卡直接采用）
+    pub overview: String,
+    pub subscribe: SubscriptionActionCapability,
+    pub edit_title: SubscriptionActionCapability,
+    pub move_folder: SubscriptionActionCapability,
+    pub unsubscribe: SubscriptionActionCapability,
+    pub rename_folder: SubscriptionActionCapability,
+    pub delete_folder: SubscriptionActionCapability,
+    pub empty_folder_remote: SubscriptionActionCapability,
+    /// 已知限制（写回路径的能力边界；无写回能力时为空——概述已承载边界）
+    pub limitations: Vec<SubscriptionCapabilityLimit>,
+}
+
+fn cap(support: SubscriptionWriteSupport, detail: &str) -> SubscriptionActionCapability {
+    SubscriptionActionCapability {
+        support,
+        detail: detail.to_string(),
+    }
+}
+
+fn limit(code: &str, detail: &str) -> SubscriptionCapabilityLimit {
+    SubscriptionCapabilityLimit {
+        code: code.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+/// 纯函数：协议（None = 未连接）→ 逐动作能力矩阵。
+///
+/// 判据与执行器能力门（`sync/credentials.rs::Backend::supports_subscription_write`）
+/// 同源：GReader 有 subscription/edit 与 unsubscribe 端点；Fever 没有。
+/// 空分类的远端表达在两协议下都不存在（无成员可逐源表达、无分类级端点），
+/// 故为 Unsupported——本地照常生效、如实不宣称远端。
+/// 协议串沿用 `sync_save` 的归一纪律（未知值按 greader 兜底，实际落库只会是
+/// greader/fever 二者之一）。
+// Note: 能力矩阵的枚举契约与限制清单 — 见 .agents/notes/implemented/architecture/2026-10-15-订阅写回能力矩阵与持久回执.md
+fn subscription_capabilities_for(protocol: Option<&str>) -> SubscriptionCapabilities {
+    use SubscriptionWriteSupport as W;
+    match protocol {
+        Some("fever") => SubscriptionCapabilities {
+            connected: true,
+            protocol: Some("fever".into()),
+            overview: "Fever 协议不支持订阅写回：新增/编辑/退订及分类变更仅本地生效，不会同步到服务端（也不会重试或冒充成功）。".into(),
+            subscribe: cap(W::LocalOnly, "仅本地：Fever 协议不支持远端新增，订阅不会出现在服务端。"),
+            edit_title: cap(W::LocalOnly, "仅本地：Fever 协议不支持远端编辑，标题变化不会同步到服务端。"),
+            move_folder: cap(W::LocalOnly, "仅本地：Fever 协议不支持远端移动，分类变化不会同步到服务端。"),
+            unsubscribe: cap(W::LocalOnly, "仅本地：Fever 协议不支持远端退订，远端订阅保持不变（不回写、不重试）。"),
+            rename_folder: cap(W::LocalOnly, "仅本地：Fever 协议不支持远端写回，改名仅本地生效（墓碑防复活）。"),
+            delete_folder: cap(W::LocalOnly, "仅本地：Fever 协议不支持远端退订，远端订阅与分类保持不变。"),
+            empty_folder_remote: cap(W::Unsupported, "仅本地：Fever 没有写订阅端点，空分类也没有可表达成员——不宣称远端已改。"),
+            // 无写回路径：GReader 路径的限制条目在此不适用，边界由 overview 承载
+            limitations: Vec::new(),
+        },
+        Some(_) => SubscriptionCapabilities {
+            connected: true,
+            protocol: Some("greader".into()),
+            overview: "GReader：新增/编辑/移动/退订会持久写回远端（失败自动重试、离线与重启不丢）；分类改名/删除按成员逐源表达（无分类级端点）。".into(),
+            subscribe: cap(W::Supported, "远端写回：新增订阅会持久保存并自动重试（离线或重启不丢）。"),
+            edit_title: cap(W::Supported, "远端写回：标题变更持久保存并自动重试（离线或重启不丢）。"),
+            move_folder: cap(W::Supported, "远端写回：按移动语义表达（加入目标分类、移除原分类），失败自动重试。"),
+            unsubscribe: cap(W::Supported, "远端退订：删除会保存持久的退订意图，离线或重启后自动重试，直到服务端确认。"),
+            rename_folder: cap(W::Supported, "远端表达：逐成员「加入新分类 + 移出旧分类」（无分类级端点）；空分类无可表达成员。"),
+            delete_folder: cap(W::Supported, "远端退订：为每个已绑定的成员订阅保存持久退订意图（离线或重启后自动重试）；远端分类标签在成员全部移除后消失。"),
+            empty_folder_remote: cap(W::Unsupported, "远端无表达：空分类没有可逐源表达的成员，协议也没有分类级端点——删除/改名仅本地生效（墓碑防复活），不宣称远端已改。"),
+            limitations: vec![
+                limit("folder_member_wire", "分类级改名/删除没有可移植的分类级端点，按成员逐源用「加入/移出/退订」表达。"),
+                limit("empty_folder_local_only", "空分类没有成员可表达（也无分类级端点）：改名/删除不宣称远端已改，靠本地墓碑防复活。"),
+                limit("folder_commands_defer_push", "分类级改名/删除不立即推送，成员意图等待下一轮同步（后台自动同步或手动同步）。"),
+                limit("unsubscribe_400_tolerance", "退订目标不存在时（400/404）按「已满足」处理：若服务端实际未删除，远端可能残留孤儿，直到同步对账回收。"),
+                limit("non_idempotent_quickadd", "服务端对重复添加非幂等时，「删除后快速重加」可能产生一个额外的重复订阅（随次数线性、有界）。"),
+                limit("remove_label_noop", "移动/挂载发出的「移除旧分类」对不存在的 label 按 no-op 处理（固定上游语义）。"),
+            ],
+        },
+        None => SubscriptionCapabilities {
+            connected: false,
+            protocol: None,
+            overview: "未连接同步服务：本地操作照常保存；连接后未绑定的本地订阅可经「同步本地订阅」推送，编辑/删除不会自动补推。".into(),
+            subscribe: cap(W::LocalOnly, "未连接同步：仅本地新增；连接后可在「同步」页用「同步本地订阅」推送。"),
+            edit_title: cap(W::LocalOnly, "未连接同步：仅本地生效，不产生远端写回意图（连接后不自动补推）。"),
+            move_folder: cap(W::LocalOnly, "未连接同步：仅本地生效，不产生远端写回意图（连接后不自动补推）。"),
+            unsubscribe: cap(W::LocalOnly, "未连接同步：仅本地删除（墓碑防复活），不产生远端退订意图；连接后不自动补退。"),
+            rename_folder: cap(W::LocalOnly, "未连接同步：仅本地改名（墓碑防复活），不产生远端意图。"),
+            delete_folder: cap(W::LocalOnly, "未连接同步：仅本地删除（含墓碑），不产生远端退订意图。"),
+            empty_folder_remote: cap(W::Unsupported, "未连接同步：无远端写回；空分类也没有远端表达。"),
+            limitations: Vec::new(),
+        },
+    }
+}
+
+fn subscription_capabilities_from_conn(
+    conn: &rusqlite::Connection,
+) -> AppResult<SubscriptionCapabilities> {
+    // 凭据读取失败 → Err（不得折叠成「未连接」——那会让 UI 误报「不会写回远端」）
+    let creds = crate::sync::read_credentials(conn)?;
+    Ok(subscription_capabilities_for(
+        creds.as_ref().map(|c| c.0.as_str()),
+    ))
+}
+
+fn subscription_outbox_stats_from_conn(
+    conn: &rusqlite::Connection,
+) -> AppResult<db::SubscriptionOutboxStats> {
+    match crate::sync::current_account(conn)? {
+        Some(ctx) => db::subscription_outbox_stats(conn, &ctx.key),
+        // 未连接：没有当前账号 → 全零（当前账号限定语义下「无待办」为真；
+        // 异账号的暂停行不属于任何「当前账号」，不虚构展示）
+        None => Ok(db::SubscriptionOutboxStats::default()),
+    }
+}
+
+/// 订阅写回能力矩阵（只读）：设置页提示与确认弹窗远端语义句的单一事实源。
+/// 未连接返回未连接态；凭据损坏等读取失败 → Err（失败关闭，不误报能力）。
+#[tauri::command]
+pub async fn subscription_capabilities(
+    state: State<'_, AppState>,
+) -> AppResult<SubscriptionCapabilities> {
+    let conn = state.db.lock().await;
+    subscription_capabilities_from_conn(&conn)
+}
+
+/// 订阅写回持久回执（只读）：**当前账号限定**的 pending（含失败子集
+/// attempts>0）/local_only/最近错误摘要。异账号（换号暂停）的行不混入；
+/// 读取失败（含凭据损坏、表级故障）→ Err，不得静默返回 0 冒充「无待办」。
+/// 只承载计数与错误摘要——不回传 token/密码/密文/URL。
+#[tauri::command]
+pub async fn subscription_outbox_stats(
+    state: State<'_, AppState>,
+) -> AppResult<db::SubscriptionOutboxStats> {
+    let conn = state.db.lock().await;
+    subscription_outbox_stats_from_conn(&conn)
+}
+
+/// doc(hidden) 集成测试入口：与 `subscription_capabilities` 命令同一实现
+/// （不持 Tauri State）。不是 IPC，webview 不可达。
+#[doc(hidden)]
+pub fn subscription_capabilities_for_test(
+    conn: &rusqlite::Connection,
+) -> AppResult<SubscriptionCapabilities> {
+    subscription_capabilities_from_conn(conn)
+}
+
+/// doc(hidden) 集成测试入口：与 `subscription_outbox_stats` 命令同一实现。
+#[doc(hidden)]
+pub fn subscription_outbox_stats_for_test(
+    conn: &rusqlite::Connection,
+) -> AppResult<db::SubscriptionOutboxStats> {
+    subscription_outbox_stats_from_conn(conn)
 }
 
 /* ============================================================
@@ -1674,5 +1871,236 @@ mod account_commit_tests {
         )
         .unwrap();
         assert!(p.identity_changed && !p.old_was_empty && !p.password_changed);
+    }
+}
+
+/* ============================================================
+OPT-009 B3 单元测试：订阅写回能力矩阵与账号限定回执
+============================================================ */
+#[cfg(test)]
+mod opt009_b3_tests {
+    use super::*;
+
+    fn conn() -> rusqlite::Connection {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        db::MIGRATIONS.to_latest(&mut c).unwrap();
+        c
+    }
+
+    /// 明文凭据（与 sync/credentials.rs 单测同形态：无 dpapi: 前缀 = 明文，
+    /// 不必经 DPAPI 加密即可被 read_credentials 读回）。
+    fn seed_creds(c: &rusqlite::Connection, protocol: &str, user: &str) {
+        db::set_setting(c, "sync_protocol", protocol).unwrap();
+        db::set_setting(c, "greader_endpoint", "http://b3.example").unwrap();
+        db::set_setting(c, "greader_username", user).unwrap();
+        db::set_setting(c, "greader_password", "pw-b3").unwrap();
+    }
+
+    /// B3 契约：`SubscriptionWriteSupport` 的 serde 名称即前后端契约
+    /// （src/lib/api.ts 的同名联合类型必须与其逐字一致）。
+    #[test]
+    fn capability_enum_serde_names_are_the_contract() {
+        assert_eq!(
+            serde_json::to_value(SubscriptionWriteSupport::Supported).unwrap(),
+            serde_json::json!("Supported")
+        );
+        assert_eq!(
+            serde_json::to_value(SubscriptionWriteSupport::LocalOnly).unwrap(),
+            serde_json::json!("LocalOnly")
+        );
+        assert_eq!(
+            serde_json::to_value(SubscriptionWriteSupport::Unsupported).unwrap(),
+            serde_json::json!("Unsupported")
+        );
+    }
+
+    /// B3：能力矩阵三态（GReader / Fever / 未连接）逐动作断言，且每个动作
+    /// 带非空如实说明；已知限制清单覆盖 B2 登记的五项。
+    /// 判别力：把「无操作 Ok」式实现（全 Supported）、或漏掉 Fever 的
+    /// local-only 投影接入矩阵，本用例即红。
+    #[test]
+    fn capabilities_greader_fever_and_unconnected() {
+        use SubscriptionWriteSupport as W;
+
+        let g = subscription_capabilities_for(Some("greader"));
+        assert!(g.connected);
+        assert_eq!(g.protocol.as_deref(), Some("greader"));
+        assert_eq!(
+            (
+                g.subscribe.support,
+                g.edit_title.support,
+                g.move_folder.support,
+                g.unsubscribe.support,
+                g.rename_folder.support,
+                g.delete_folder.support,
+                g.empty_folder_remote.support,
+            ),
+            (
+                W::Supported,
+                W::Supported,
+                W::Supported,
+                W::Supported,
+                W::Supported,
+                W::Supported,
+                W::Unsupported
+            ),
+            "GReader：写端点动作全部 Supported；空分类远端表达两协议都不存在 → Unsupported"
+        );
+        assert!(!g.overview.is_empty(), "概述必须非空");
+        for c in [
+            &g.subscribe,
+            &g.edit_title,
+            &g.move_folder,
+            &g.unsubscribe,
+            &g.rename_folder,
+            &g.delete_folder,
+            &g.empty_folder_remote,
+        ] {
+            assert!(!c.detail.is_empty(), "逐动作说明必须非空");
+        }
+        let codes: Vec<&str> = g.limitations.iter().map(|l| l.code.as_str()).collect();
+        for required in [
+            "folder_member_wire",
+            "empty_folder_local_only",
+            "folder_commands_defer_push",
+            "unsubscribe_400_tolerance",
+            "non_idempotent_quickadd",
+        ] {
+            assert!(
+                codes.contains(&required),
+                "限制清单必须包含 B2 登记项 {required}：{codes:?}"
+            );
+        }
+        assert!(g.limitations.iter().all(|l| !l.detail.is_empty()));
+        // B3 文案本体（前端确认弹窗与摘要卡直接消费这些句子的关键语义；
+        // 组件测试只验证接线，文案由这里锁定）
+        assert!(
+            g.unsubscribe.detail.contains("持久") && g.unsubscribe.detail.contains("离线"),
+            "退订说明必须承载「持久退订意图 + 离线可重试」：{}",
+            g.unsubscribe.detail
+        );
+        assert!(
+            g.unsubscribe.detail.contains("重启"),
+            "退订说明必须承载「重启后可重试」：{}",
+            g.unsubscribe.detail
+        );
+        assert!(
+            g.delete_folder.detail.contains("成员"),
+            "分类删除说明必须承载「成员逐源退订」：{}",
+            g.delete_folder.detail
+        );
+        assert!(
+            g.empty_folder_remote.detail.contains("空分类"),
+            "空分类说明必须点名空分类边界：{}",
+            g.empty_folder_remote.detail
+        );
+
+        let f = subscription_capabilities_for(Some("fever"));
+        assert!(f.connected);
+        assert_eq!(f.protocol.as_deref(), Some("fever"));
+        assert_eq!(
+            (
+                f.subscribe.support,
+                f.edit_title.support,
+                f.move_folder.support,
+                f.unsubscribe.support,
+                f.rename_folder.support,
+                f.delete_folder.support,
+                f.empty_folder_remote.support,
+            ),
+            (
+                W::LocalOnly,
+                W::LocalOnly,
+                W::LocalOnly,
+                W::LocalOnly,
+                W::LocalOnly,
+                W::LocalOnly,
+                W::Unsupported
+            ),
+            "Fever：无写订阅端点 → 全部 LocalOnly（不冒充远端完成）；空分类 → Unsupported"
+        );
+        assert!(
+            f.overview.contains("仅本地"),
+            "Fever 概述必须点明「仅本地」（UI 提示条直接采用）：{}",
+            f.overview
+        );
+
+        let n = subscription_capabilities_for(None);
+        assert!(!n.connected);
+        assert!(n.protocol.is_none());
+        assert_eq!(
+            (
+                n.subscribe.support,
+                n.unsubscribe.support,
+                n.rename_folder.support,
+                n.empty_folder_remote.support,
+            ),
+            (W::LocalOnly, W::LocalOnly, W::LocalOnly, W::Unsupported),
+            "未连接：本地动作照常但不产生远端写回 → LocalOnly；空分类远端表达 Unsupported"
+        );
+    }
+
+    /// B3：凭据读取失败（坏密文）必须 Err——不得折叠成「未连接」让 UI 误报
+    /// 「不会写回远端」（OPT-014 R1 同款失败关闭纪律）。
+    #[test]
+    fn capabilities_and_stats_fail_closed_on_corrupt_credentials() {
+        let c = conn();
+        seed_creds(&c, "greader", "u");
+        c.execute(
+            "UPDATE settings SET value = 'dpapi:@@corrupt@@' WHERE key = 'greader_password'",
+            [],
+        )
+        .unwrap();
+        assert!(
+            subscription_capabilities_from_conn(&c).is_err(),
+            "能力矩阵：凭据损坏必须可见错误（不得当未连接）"
+        );
+        assert!(
+            subscription_outbox_stats_from_conn(&c).is_err(),
+            "回执统计：凭据损坏必须可见错误（不得静默返回 0）"
+        );
+    }
+
+    /// B3：回执统计三态——未连接全零（无当前账号，计数无归属）；连接后按
+    /// **当前账号**限定（换号后旧账号暂停项不可见，回原账号恢复）；表级读取
+    /// 失败必须 Err。
+    /// 判别力：全库口径实现下「换号后 pending 应为 0」的断言即红。
+    #[test]
+    fn outbox_stats_three_states_and_account_scoped() {
+        // 未连接：无当前账号 → 全零（不是「静默撒谎」，计数本就无归属）
+        let c = conn();
+        let s = subscription_outbox_stats_from_conn(&c).unwrap();
+        assert_eq!((s.pending, s.failed, s.local_only), (0, 0, 0));
+
+        // 账号 A（greader · u）：入队一条退订意图 → 统计可见
+        seed_creds(&c, "greader", "u");
+        let ctx = crate::sync::current_account(&c).unwrap().unwrap();
+        db::enqueue_subscribe(
+            &c,
+            ctx.generation,
+            &ctx.key,
+            "http://b3.example/rss",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(subscription_outbox_stats_from_conn(&c).unwrap().pending, 1);
+
+        // 换号（用户名变化 = 不同账号）：A 的行暂停，不得混入 B 的计数
+        seed_creds(&c, "greader", "u2");
+        let s_b = subscription_outbox_stats_from_conn(&c).unwrap();
+        assert_eq!(
+            (s_b.pending, s_b.failed, s_b.local_only),
+            (0, 0, 0),
+            "异账号暂停的队项不得混入当前账号（全库口径实现会红）"
+        );
+
+        // 回原账号：暂停行恢复可见（回原账号可发）
+        seed_creds(&c, "greader", "u");
+        assert_eq!(subscription_outbox_stats_from_conn(&c).unwrap().pending, 1);
+
+        // 表级读取失败：必须 Err（不得静默返回 0 冒充「无待办」）
+        c.execute("DROP TABLE subscription_outbox", []).unwrap();
+        assert!(subscription_outbox_stats_from_conn(&c).is_err());
     }
 }

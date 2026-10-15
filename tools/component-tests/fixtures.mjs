@@ -116,6 +116,22 @@ function defaultHandler(cmd, args) {
     case 'get_setting': return Promise.resolve(null);
     case 'sync_status': return Promise.resolve({ connected: false, endpoint: null, account: null, last_sync: 0 });
     case 'sync_queue_stats': return Promise.resolve({ waiting: 0, failed: 0, last_error: null });
+    /* OPT-009 B3：订阅写回只读 IPC 的缺省（未连接/无待办——与真实后端未连接
+       态同形；用例需要时经 setPlan 覆写）。 */
+    case 'subscription_outbox_stats': return Promise.resolve({ pending: 0, failed: 0, local_only: 0, last_error: null });
+    case 'subscription_capabilities': return Promise.resolve({
+      connected: false,
+      protocol: null,
+      overview: '未连接同步：本地操作照常保存；不产生远端写回。',
+      subscribe: { support: 'LocalOnly', detail: '未连接同步：仅本地新增。' },
+      edit_title: { support: 'LocalOnly', detail: '未连接同步：仅本地生效。' },
+      move_folder: { support: 'LocalOnly', detail: '未连接同步：仅本地生效。' },
+      unsubscribe: { support: 'LocalOnly', detail: '未连接同步：仅本地删除。' },
+      rename_folder: { support: 'LocalOnly', detail: '未连接同步：仅本地改名。' },
+      delete_folder: { support: 'LocalOnly', detail: '未连接同步：仅本地删除。' },
+      empty_folder_remote: { support: 'Unsupported', detail: '未连接同步：无远端写回。' },
+      limitations: [],
+    });
     case 'github_login_status': return Promise.resolve(null);
     default: return Promise.resolve(null);
   }

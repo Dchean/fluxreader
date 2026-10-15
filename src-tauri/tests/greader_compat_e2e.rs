@@ -633,8 +633,10 @@ async fn miniflux_strict_reads_and_writes_reach_server_with_single_token_fetch()
     assert!(!srv.is_starred(2), "取消收藏必须真实到达服务端");
 
     // P2-2：写分类的 `a` 是完整 stream id，夹具按真实 wire 规范实际移动分类。
+    // OPT-009 阶段 B：edit_subscription 增加旧 label 移除参数（第 4 参 None =
+    // 只追加/改名；真实移动由订阅 outbox 执行器带旧 label 发 r=）。
     client
-        .edit_subscription(10, Some("重命名"), Some("科技"))
+        .edit_subscription(10, Some("重命名"), Some("科技"), None)
         .await
         .expect("移动分类应成功");
     assert_eq!(
@@ -1137,7 +1139,7 @@ async fn freshrss_subscription_edit_moves_category_with_full_stream_id() {
         .expect("登录应成功");
 
     client
-        .edit_subscription(10, Some("新标题"), Some("技术/阅读"))
+        .edit_subscription(10, Some("新标题"), Some("技术/阅读"), None)
         .await
         .expect("移动分类应成功");
     assert_eq!(
@@ -1159,7 +1161,7 @@ async fn freshrss_subscription_edit_moves_category_with_full_stream_id() {
 
     // 目录名本身就是 `user/-/label/` 字面量：仍按裸名前置一次。
     client
-        .edit_subscription(10, None, Some("user/-/label/伪装"))
+        .edit_subscription(10, None, Some("user/-/label/伪装"), None)
         .await
         .expect("应成功");
     assert_eq!(

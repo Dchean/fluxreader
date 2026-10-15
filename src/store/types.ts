@@ -8,6 +8,7 @@ import type {
   ThemeMode,
   ViewFilterType,
 } from '../types';
+import type { SubscriptionCapabilities, SubscriptionOutboxStats } from '../lib/api';
 
 export interface PodcastPlayerState {
   isActive: boolean;
@@ -203,6 +204,14 @@ export interface AppState {
   /** TASK-124：队列最近一次推送失败的错误摘要（「部分失败」的错误行）。
    *  sync-queue-changed 事件 / reload 顺带刷新写入；未失败为 null。 */
   syncQueueLastError: string | null;
+  /** OPT-009 B3：订阅写回回执（**当前账号限定**：pending/failed/local_only/
+   *  最近错误；异账号暂停项不混入）。subscription-outbox-changed 事件与挂载
+   *  刷新写入同一状态源；null = 未加载（不渲染、不冒充「无待办」）。 */
+  subOutboxStats: SubscriptionOutboxStats | null;
+  /** OPT-009 B3：订阅写回能力矩阵（subscription_capabilities 只读 IPC；设置页
+   *  能力卡与 FeedsTab 确认弹窗远端语义句的**单一事实源**）。null = 未加载
+   *  （界面省略能力句，不伪造能力）。 */
+  subscriptionCapabilities: SubscriptionCapabilities | null;
 
   /** GitHub 设备流登录：等待授权态（user_code 常驻显示；组件 unmount 不影响后端轮询） */
   githubFlow: { user_code: string; verification_uri: string; interval: number } | null;
@@ -382,6 +391,17 @@ export interface AppState {
    *  只写队列三字段，绝不触碰 syncConnected——未配置静默语义在 Rust 发射点
    *  （无凭据不发事件），pill 的本地模式分支不因本动作破坏。 */
   applySyncQueueChanged: (stats: { waiting: number; failed: number; last_error: string | null }) => void;
+  /** OPT-009 B3：subscription-outbox-changed 事件落地（App.tsx 监听器调用）。
+   *  payload = Rust 当前账号回执 `{pending, failed, local_only, last_error}`。
+   *  只写回执字段，绝不触碰队列统计与 syncConnected（越权防护；未配置同步
+   *  静默语义在 Rust 发射点——无凭据不发事件）。 */
+  applySubscriptionOutboxChanged: (stats: SubscriptionOutboxStats) => void;
+  /** OPT-009 B3：拉取当前账号的订阅写回回执（设置页挂载/手动刷新路径）。
+   *  失败**保持原值**（读失败不得冒充「无待办」）。 */
+  refreshSubscriptionOutboxStats: () => Promise<void>;
+  /** OPT-009 B3：拉取订阅写回能力矩阵（挂载/保存/断开后刷新）。失败保持原值
+   *  （不伪造未连接、不伪造能力句）。 */
+  loadSubscriptionCapabilities: () => Promise<void>;
 
   /* ---------- Actions: 订阅管理 ---------- */
   createCategory: (name: string, layout: ContentLayoutType) => void;
