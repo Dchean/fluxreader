@@ -537,13 +537,12 @@ fn backfill_keeps_protected_readability_source() {
         )
         .unwrap();
     assert_eq!(img.as_deref(), Some("http://example.com/img.jpg"));
-    // FTS 跟随修复后的正文（受保护内容仍可搜）
-    let hits: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM articles_fts WHERE articles_fts MATCH 'HTML' AND rowid = ?1",
-            params![aid],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(hits, 1, "修复后的提取正文进入该条目的 FTS 索引");
+    // 搜索跟随修复后的正文（受保护内容仍可搜；OPT-017B 起由 trigram 候选索引
+    // + LIKE 验证承接——该词含大写，同时覆盖索引文档的 ASCII 折叠路径）
+    let hits: Vec<i64> = crate::db::search_articles(&conn, "HTML", 50)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(hits, vec![aid], "修复后的提取正文仍可被该条目搜到");
 }

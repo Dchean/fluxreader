@@ -38,7 +38,10 @@ use tokio::sync::Mutex;
 /// 的夹具能逐版本真实重放 v19→v22。
 /// OPT-009 v23 物理回拨：subscription_outbox（表 + 两索引）是 v21 现场不应存在的
 /// 对象，同由本函数移除——否则重放 v23 报 CREATE TABLE already exists。
-/// （约定：此后新增 ADD COLUMN / 建表迁移都必须在本夹具追加对应的物理回拨。）
+/// OPT-017B v29 物理回拨：trigram 候选索引 + 维护/回收触发器（最新库已无 v22
+/// FTS 面，旧 drop 为 no-op），不回拨则重放 v29 报 already exists。
+/// （约定：此后新增 ADD COLUMN / 建表 / 建触发器/虚拟表 迁移都必须在本夹具追加
+/// 对应的物理回拨。）
 fn rollback_v22_shape(conn: &rusqlite::Connection) {
     conn.execute_batch(
         r#"
@@ -47,6 +50,14 @@ fn rollback_v22_shape(conn: &rusqlite::Connection) {
         DROP TRIGGER IF EXISTS trg_articles_fts_au;
         DROP TRIGGER IF EXISTS trg_contents_fts_au;
         DROP TABLE IF EXISTS articles_fts;
+        -- OPT-017B v29 物理回拨：候选索引与维护/回收触发器（最新库已无旧 FTS
+        -- 面，上面四条 DROP 为 no-op；不回拨新对象则重放 v29 报 already exists）。
+        DROP TRIGGER IF EXISTS trg_articles_trigram_ai;
+        DROP TRIGGER IF EXISTS trg_articles_trigram_ad;
+        DROP TRIGGER IF EXISTS trg_articles_trigram_au;
+        DROP TRIGGER IF EXISTS trg_contents_trigram_au;
+        DROP TRIGGER IF EXISTS trg_articles_recycle_ad;
+        DROP TABLE IF EXISTS articles_trigram_idx;
         DROP INDEX IF EXISTS idx_articles_content;
         ALTER TABLE articles DROP COLUMN content_id;
         ALTER TABLE articles DROP COLUMN ai_epoch;

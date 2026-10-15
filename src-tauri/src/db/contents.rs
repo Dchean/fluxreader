@@ -13,15 +13,20 @@
 //! - id 稳定性（R3）：`contents.id` 为 AUTOINCREMENT——删除表内最大行后新行
 //!   不复用该 id（普通 rowid 会复用）。前端以 `(content_id, revision)` 判定正文
 //!   失效，id 复用会在「删除 + 重建恰好同快照窗口」时读到同值对。
-//! - 回收：条目删除（含源/分类/账号级联）由迁移创建的 `trg_articles_fts_ad`
-//!   触发器在**最后引用**消失时删除 contents 行；条目重指新内容时调用方在同一
-//!   语句末尾回收无引用的旧行（见 articles/sync_map 的重指路径）。
+//! - 回收：条目删除（含源/分类/账号级联）由迁移创建的
+//!   `trg_articles_recycle_ad` 触发器在**最后引用**消失时删除 contents 行；
+//!   条目重指新内容时调用方在同一语句末尾回收无引用的旧行（见
+//!   articles/sync_map 的重指路径）。该触发器在 OPT-017B 之前与
+//!   `trg_articles_fts_ad` 同体（顺带清 FTS 行）；v29 删除无消费者 FTS 后
+//!   独立命名，只做回收。
 //! - 原子性（R3）：`ensure_content` 的 INSERT 与随后的条目重指/回填是复合写，
 //!   调用方经 [`with_write_savepoint`] 包住整组语句——任一步失败整体回滚，
 //!   不会留下「已 INSERT 的 contents 行无任何引用」（孤儿）或「条目 content_id
 //!   未回填」的半提交态。SAVEPOINT 可安全嵌套于调用方既有事务内。
-//! - FTS 是**可重建派生索引**（独立 fts5 表，由迁移创建的触发器随条目/内容变化
-//!   维护），本模块提供全量重建入口 `rebuild_fts`（迁移与维护路径消费）。
+//! - 搜索派生索引：v29 起为独立 trigram 候选表 `articles_trigram_idx`
+//!   （维护触发器在 migrations.rs v29；候选只是收缩，等值验证仍由
+//!   `search_articles` 的 LIKE 条件完成）。v22 时代的 `articles_fts` 已被
+//!   v29 删除；本模块的 [`rebuild_fts`] 仅为历史 v22 迁移的实现细节保留。
 
 use md5::{Digest, Md5};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -222,6 +227,10 @@ pub fn ensure_content(
 }
 
 /// FTS 全量重建（派生索引，可从 articles×contents 无损重算）。
+///
+/// **仅被不可改的历史迁移 v22 的钩子消费**（OPT-017B 前 `articles_fts` 的
+/// 回填入口；升级链中 v22 先建、v29 再删）。生产搜索/维护路径不消费本函数；
+/// 函数体保持历史字节，避免历史迁移语义漂移。
 pub fn rebuild_fts(conn: &Connection) -> AppResult<usize> {
     conn.execute("DELETE FROM articles_fts", [])?;
     let n = conn.execute(

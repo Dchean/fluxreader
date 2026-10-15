@@ -799,6 +799,106 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         );
     "#,
         ),
+        // OPT-017B：搜索路径与 FTS 写放大处置（v3/v22 派生的 `articles_fts` 全删，
+        // 改为被搜索实际消费的 trigram 候选索引）。基线见 docs/performance.md
+        // 「OPT-017A」与「OPT-017B」两节；实现约束见本迁移内注释。
+        //
+        // 1) 删除 `articles_fts` 及四个维护触发器（`trg_articles_fts_ai/ad/au` +
+        //    `trg_contents_fts_au`）。该 FTS5 表自 REQ-104/SRH-2 起**零 MATCH
+        //    消费者**（全仓无 `articles_fts MATCH` 生产查询；`search_articles`
+        //    是 LIKE 实现），仅由触发器与 v22 迁移的全量重建维护：内容写入路径
+        //    的纯写放大与磁盘占用（50k×8KiB 合成语料实测：aux 内容更新
+        //    B/C 中位差约 0.779ms/篇、FTS 表约 16.4MB——见 OPT-017A 结果）。
+        //    历史风险：v3 的宽 UPDATE 触发器曾在兜底 UPDATE 下对未入索引行做
+        //    'delete' → `database disk image is malformed`（v14 注释），删除后
+        //    该维护面整体消失。历史迁移不可改：v22 的 `rebuild_fts` 调用保持原样
+        //    （升级链中先建后删，幂等）。
+        //
+        // 2) contents 生命周期回收（v22 起挂在 `trg_articles_fts_ad` 的第二句）
+        //    改用独立触发器 `trg_articles_recycle_ad` 承接——语义逐字保留：
+        //    条目删除且**不再有任何引用**时删 contents 行。Rust 内的指向比较
+        //    （如 contents 单测的「条目删除后 contents 回收」）不依赖触发器名。
+        //
+        // 3) 新候选索引 `articles_trigram_idx`（FTS5 trigram，本迁移回填 + 四触发器
+        //    维护）：
+        //    - **候选语义（非精确匹配）**：`search_articles` 对 ≥3 字符的词取
+        //      `AND` 连接的引用三元组（`"abc" AND "bcd"`）作为 `a.id IN (SELECT
+        //      rowid ... MATCH ...)` 候选过滤，最终**仍以既有 LIKE 条件逐行验证**
+        //      ——候选只做行数收缩，结果集与纯 LIKE 实现逐字等值（含转义字符、
+        //      AI 字段、排序/去重）。词短于 3 字符无法成三元组 → 该词不加候选
+        //      （短路时整查回落 LIKE）。
+        //    - `detail=none`：不需要位置，短语查询不可用（我们用 AND-of-trigrams
+        //      已是超集）；`content='' + contentless_delete=1`：不重复存正文副本
+        //      （正文唯一属主是 contents），DELETE 按 rowid 正常工作；两者把
+        //      50k×8KiB 合成语料的索引压缩到 MB 级（体积/耗时实测见
+        //      docs/performance.md「OPT-017B」）。
+        //    - 文档串 = 五条被搜索列（title/summary/ai_summary/translated_content
+        //      + contents.body_text）用 `lower()` 连接：SQLite 的 `lower()` 只折叠
+        //      ASCII，与 LIKE 的大小写语义逐字一致；缺任一列会造成 LIKE 命中被
+        //      候选错误排除（假阴性），覆盖列集合与 `search_articles` 的 LIKE
+        //      字段表**必须同步维护**（回归：db/articles.rs 的等值矩阵）。
+        //    - 触发器维护点与旧 FTS 一致（入库/条目列变更/content_id 变更/共享
+        //      正文变更），read/star 不触发；索引缺失/损坏时搜索回落 LIKE
+        //      （db/articles.rs 的 `search_candidates_ready` 与错误回落）。
+        // 旧库升级不损失文章/正文/搜索命中（回归：
+        // tests/opt017b_migration_tests 的 v27/v28 升级等值与幂等）。
+        // user_version=29。
+        // Note: 删除无消费者 FTS、候选索引与 LIKE 等值约束 — 见
+        // .agents/notes/implemented/architecture/2026-10-12-订阅条目与共享内容身份.md
+        // 末节「OPT-017B 追加（2026-10-16）」。
+        M::up(
+            r#"
+        DROP TRIGGER IF EXISTS trg_articles_fts_ai;
+        DROP TRIGGER IF EXISTS trg_articles_fts_ad;
+        DROP TRIGGER IF EXISTS trg_articles_fts_au;
+        DROP TRIGGER IF EXISTS trg_contents_fts_au;
+        DROP TABLE IF EXISTS articles_fts;
+
+        CREATE TRIGGER trg_articles_recycle_ad AFTER DELETE ON articles BEGIN
+            DELETE FROM contents WHERE id = old.content_id
+                AND NOT EXISTS (SELECT 1 FROM articles a WHERE a.content_id = old.content_id);
+        END;
+
+        CREATE VIRTUAL TABLE articles_trigram_idx USING fts5(
+            doc,
+            tokenize='trigram',
+            detail=none,
+            content='',
+            contentless_delete=1
+        );
+
+        INSERT INTO articles_trigram_idx(rowid, doc)
+            SELECT a.id, lower(COALESCE(a.title,'') || ' ' || COALESCE(a.summary,'') || ' ' ||
+                   COALESCE(a.ai_summary,'') || ' ' || COALESCE(a.translated_content,'') || ' ' ||
+                   COALESCE(c.body_text,''))
+              FROM articles a LEFT JOIN contents c ON c.id = a.content_id;
+
+        CREATE TRIGGER trg_articles_trigram_ai AFTER INSERT ON articles BEGIN
+            INSERT INTO articles_trigram_idx(rowid, doc)
+            VALUES (new.id, lower(COALESCE(new.title,'') || ' ' || COALESCE(new.summary,'') || ' ' ||
+                   COALESCE(new.ai_summary,'') || ' ' || COALESCE(new.translated_content,'') || ' ' ||
+                   COALESCE((SELECT body_text FROM contents WHERE id = new.content_id), '')));
+        END;
+        CREATE TRIGGER trg_articles_trigram_ad AFTER DELETE ON articles BEGIN
+            DELETE FROM articles_trigram_idx WHERE rowid = old.id;
+        END;
+        CREATE TRIGGER trg_articles_trigram_au AFTER UPDATE OF title, summary, ai_summary, translated_content, content_id ON articles BEGIN
+            DELETE FROM articles_trigram_idx WHERE rowid = old.id;
+            INSERT INTO articles_trigram_idx(rowid, doc)
+            VALUES (new.id, lower(COALESCE(new.title,'') || ' ' || COALESCE(new.summary,'') || ' ' ||
+                   COALESCE(new.ai_summary,'') || ' ' || COALESCE(new.translated_content,'') || ' ' ||
+                   COALESCE((SELECT body_text FROM contents WHERE id = new.content_id), '')));
+        END;
+        CREATE TRIGGER trg_contents_trigram_au AFTER UPDATE OF body_text ON contents BEGIN
+            DELETE FROM articles_trigram_idx WHERE rowid IN (SELECT id FROM articles WHERE content_id = new.id);
+            INSERT INTO articles_trigram_idx(rowid, doc)
+                SELECT a.id, lower(COALESCE(a.title,'') || ' ' || COALESCE(a.summary,'') || ' ' ||
+                       COALESCE(a.ai_summary,'') || ' ' || COALESCE(a.translated_content,'') || ' ' ||
+                       new.body_text)
+                  FROM articles a WHERE a.content_id = new.id;
+        END;
+    "#,
+        ),
     ])
 });
 
@@ -1130,7 +1230,7 @@ mod req108_migration_tests {
     }
 
     /// ④ v14 up 测试：索引创建 + published_at 存量兜底回填（v12 语义重申）
-    /// + FTS 更新触发器收窄 + 兜底触发器存在性。
+    /// + v14 现场的 FTS 更新触发器收窄 + 兜底触发器存在性 + v29 后旧 FTS 面清空。
     #[test]
     fn v14_adds_indexes_and_backfills_missing_published_at() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -1164,6 +1264,24 @@ mod req108_migration_tests {
                 ("g-real".to_string(), "2024-12-31T10:00:00Z".to_string()),
             ],
             "NULL/'' 存量行回填为 fetched_at，真值不动"
+        );
+
+        // M-5 触发顺序现场（v14 当时形态）：旧 articles_au 被收窄为
+        // AFTER UPDATE OF 内容列——published_at 兜底 UPDATE 不再触发 FTS 的
+        // delete+insert（对未入索引行执行会 malformed，实测）。该断言停在
+        // v14 边界（v22 拆旧触发器、v29 删除 FTS 面后此现场不再存在）。
+        let au_sql_v14: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'articles_au'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            au_sql_v14.contains(
+                "AFTER UPDATE OF title, body_text, author, ai_summary, translated_content"
+            ),
+            "v14 的 articles_au 必须收窄到内容列（否则 published_at 兜底 UPDATE 触发 FTS 的 delete 对未入索引行执行 → malformed，实测）：{au_sql_v14}"
         );
 
         // 推进到最新（v15 起含 P3-7 归一）：legacy 空格形态（回填产物）归一为
@@ -1211,28 +1329,27 @@ mod req108_migration_tests {
             assert_eq!(n, 1, "v14 必须创建索引 {idx}");
         }
 
-        // FTS 更新触发器（OPT-008B 第二阶段起独立派生表维护；v14 的
-        // articles_au 外部内容触发器已随正文列迁出而拆除）：条目级字段 +
-        // content_id 变化收窄——published_at 兜底 UPDATE 不触碰 FTS 行。
-        let au_sql: String = conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_articles_fts_au'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(
-            au_sql.contains("AFTER UPDATE OF title, author, ai_summary, translated_content, content_id"),
-            "trg_articles_fts_au 必须收窄到内容/身份列（否则 published_at 兜底 UPDATE 触发 FTS 的 delete 对未入索引行执行 → malformed，实测）：{au_sql}"
-        );
-        let legacy_au: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'articles_au'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(legacy_au, 0, "旧 articles_au 触发器必须随正文列迁出拆除");
+        // OPT-017B（v29）后：旧 FTS 面（v14 的 articles_au、v22 的
+        // trg_articles_fts_* / trg_contents_fts_au 与 articles_fts）全部删除；
+        // 完整对象集断言在 opt017b_migration_tests，这里只核旧面清空。
+        for trg in [
+            "articles_ai",
+            "articles_ad",
+            "articles_au",
+            "trg_articles_fts_ai",
+            "trg_articles_fts_ad",
+            "trg_articles_fts_au",
+            "trg_contents_fts_au",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = ?1",
+                    params![trg],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "v29 后不得残留旧 FTS 触发器 {trg}");
+        }
 
         // 兜底触发器存在性
         for trg in [
@@ -2809,5 +2926,360 @@ mod opt010_migration_tests {
         );
         drop(conn);
         std::fs::remove_file(&path).expect("清理临时库失败");
+    }
+}
+
+/* ============================================================
+OPT-017B：v29 迁移（删除无消费者 FTS + trigram 候选索引）回归。
+（先红后绿：本模块在实现 v29 前运行于 HEAD 上，FTS 仍在、trigram 对象不存在。）
+============================================================ */
+#[cfg(test)]
+mod opt017b_migration_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn object_count(conn: &Connection, where_sql: &str) -> i64 {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM sqlite_master WHERE {where_sql}"),
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// 旧 FTS 面（表/影子表/触发器/任何引用）是否仍存在于库中。
+    fn legacy_fts_objects(conn: &Connection) -> i64 {
+        object_count(
+            conn,
+            "name LIKE 'articles_fts%' OR sql LIKE '%articles_fts%'",
+        )
+    }
+
+    fn trigram_objects_present(conn: &Connection) -> bool {
+        let n = object_count(
+            conn,
+            "(type = 'table' AND name = 'articles_trigram_idx') OR (type = 'trigger' AND name IN (
+                'trg_articles_trigram_ai', 'trg_articles_trigram_ad',
+                'trg_articles_trigram_au', 'trg_contents_trigram_au'))",
+        );
+        n == 5
+    }
+
+    fn recycle_trigger_present(conn: &Connection) -> bool {
+        object_count(
+            conn,
+            "type = 'trigger' AND name = 'trg_articles_recycle_ad'",
+        ) == 1
+    }
+
+    /// v27/v28 存量库夹具（生产 API 建库到目标版本后写数据；正文共享组一行）。
+    fn seed_legacy_db(version: usize) -> Connection {
+        use crate::db::NewArticle;
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, version).unwrap();
+        let folder = crate::db::create_folder(&conn, "迁移分类", "article").unwrap();
+        let feed = crate::db::insert_feed(
+            &conn,
+            "https://m.example/rss",
+            None,
+            "迁移源",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let na = |guid: &str, title: &str, body: &str| NewArticle {
+            guid: guid.into(),
+            url: Some(format!("https://m.example/{guid}")),
+            title: title.into(),
+            author: None,
+            summary: None,
+            content_html: Some(format!("<p>{body}</p>")),
+            body_text: body.into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-01-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let (a1, _) = crate::db::upsert_article_with_feed(
+            &conn,
+            feed,
+            &na("lg1", "迁移标题一", "迁移正文甲，含深度学习和科技。"),
+            false,
+        )
+        .unwrap();
+        let _ = crate::db::upsert_article_with_feed(
+            &conn,
+            feed,
+            &na("lg2", "迁移标题二", "共享片段正文乙。"),
+            false,
+        )
+        .unwrap();
+        let _ = crate::db::upsert_article_with_feed(
+            &conn,
+            feed,
+            &na("lg3", "迁移标题三", "共享片段正文乙。"),
+            false,
+        )
+        .unwrap();
+        crate::db::set_article_ai_fields(&conn, a1, Some("迁移AI摘要"), Some("迁移译文")).unwrap();
+        conn
+    }
+
+    /// 迁移前后等值快照（数据面，不含 schema）。
+    fn data_snapshot(conn: &Connection) -> serde_json::Value {
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        let row1: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT title, ai_summary, translated_content FROM articles WHERE guid = 'lg1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        let body2: String = conn
+            .query_row(
+                "SELECT c.body_text FROM articles a JOIN contents c ON c.id = a.content_id WHERE a.guid = 'lg2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::json!({
+            "articles": count("SELECT COUNT(*) FROM articles"),
+            "contents": count("SELECT COUNT(*) FROM contents"),
+            "body_bytes": count("SELECT COALESCE(SUM(LENGTH(CAST(body_text AS BLOB))), 0) FROM contents"),
+            "row1": row1,
+            "body2": body2,
+        })
+    }
+
+    const SEARCH_TERMS: [&str; 4] = ["迁移正文", "共享片段", "迁移AI摘要", "不存在词甲乙丙丁"];
+
+    fn search_hits(conn: &Connection) -> serde_json::Value {
+        let mut out = Vec::new();
+        for t in SEARCH_TERMS {
+            let ids: Vec<i64> = crate::db::search_articles(conn, t, 50)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            out.push(serde_json::json!({ "term": t, "ids": ids }));
+        }
+        out.into()
+    }
+
+    /// 反例 2：含数据旧库（v27/v28）升级到 v29 —— 文章/正文/搜索命中不变；
+    /// 旧 FTS 及触发器全删；trigram 候选索引就位；重复升级幂等。
+    #[test]
+    fn upgrade_v27_v28_preserves_data_and_search_hits_and_drops_legacy_fts() {
+        for version in [27_usize, 28] {
+            let mut conn = seed_legacy_db(version);
+            let before = data_snapshot(&conn);
+            let hits_before = search_hits(&conn);
+            assert!(
+                legacy_fts_objects(&conn) > 0,
+                "夹具前置：v{version} 库必须仍带旧 FTS 面（历史迁移的既有形态）"
+            );
+
+            MIGRATIONS.to_latest(&mut conn).unwrap();
+            let uv: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(uv, 29, "升级后版本必须为 v29（含本卡追加迁移）");
+            assert_eq!(
+                legacy_fts_objects(&conn),
+                0,
+                "v{version}→v29：旧 articles_fts 及全部引用必须逐件删除（sqlite_master 为空）"
+            );
+            assert!(
+                trigram_objects_present(&conn),
+                "v29 必须建立 trigram 候选索引与四个维护触发器"
+            );
+            assert!(
+                recycle_trigger_present(&conn),
+                "v29 必须用不依赖 FTS 的回收触发器承接 contents 生命周期"
+            );
+
+            assert_eq!(
+                data_snapshot(&conn),
+                before,
+                "升级不得损失文章/正文/共享内容分组"
+            );
+            assert_eq!(
+                search_hits(&conn),
+                hits_before,
+                "升级前后搜索命中集必须逐字一致"
+            );
+
+            // 回填取证：索引行确实覆盖全部文章（用正文共同词 MATCH 计数）
+            let matched: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM articles_trigram_idx WHERE articles_trigram_idx MATCH '\"迁移正\" AND \"移正文\"'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(matched, 1, "共享组外仅 lg1 含该词（索引回填命中 1 行）");
+
+            // 幂等：重复升级为 no-op，数据与命中不变
+            MIGRATIONS.to_latest(&mut conn).unwrap();
+            let uv2: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(uv2, 29, "重复升级后版本不变");
+            assert_eq!(data_snapshot(&conn), before, "重复升级数据不变");
+            assert_eq!(search_hits(&conn), hits_before, "重复升级搜索命中不变");
+        }
+    }
+
+    /// 反例 3：删除后写入路径不再产生旧 FTS 面（触发器清单为准）；
+    /// contents 回收语义由独立触发器承接，行为与迁移前一致。
+    #[test]
+    fn v29_recycles_contents_and_leaves_no_legacy_fts_on_write_path() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        assert_eq!(
+            legacy_fts_objects(&conn),
+            0,
+            "最新库不得存在旧 FTS 对象或引用"
+        );
+        assert!(recycle_trigger_present(&conn));
+
+        // 触发器清单固化：articles/contents 上只应有下列触发器
+        let trigger_names = |tbl: &str| -> Vec<String> {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1 ORDER BY name",
+                )
+                .unwrap();
+            stmt.query_map(params![tbl], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            trigger_names("articles"),
+            vec![
+                "trg_articles_published_fallback_ins",
+                "trg_articles_published_fallback_upd",
+                "trg_articles_recycle_ad",
+                "trg_articles_trigram_ad",
+                "trg_articles_trigram_ai",
+                "trg_articles_trigram_au",
+            ],
+            "articles 触发器清单必须收敛为兜底/回收/候选索引维护三组"
+        );
+        assert_eq!(
+            trigger_names("contents"),
+            vec!["trg_contents_trigram_au"],
+            "contents 触发器清单只剩候选索引维护"
+        );
+
+        // 写路径（入库/改正文/写 AI）后仍无旧 FTS 面；候选索引跟随更新
+        let folder = crate::db::create_folder(&conn, "F", "article").unwrap();
+        let feed = crate::db::insert_feed(
+            &conn,
+            "https://w.example/rss",
+            None,
+            "W",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let na = |body: &str| crate::db::NewArticle {
+            guid: "wg1".into(),
+            url: Some("https://w.example/g1".into()),
+            title: "写路径标题".into(),
+            author: None,
+            summary: None,
+            content_html: Some(format!("<p>{body}</p>")),
+            body_text: body.into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-02-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let (aid, _) =
+            crate::db::upsert_article_with_feed(&conn, feed, &na("写入正文甲"), false).unwrap();
+        let _ =
+            crate::db::upsert_article_with_feed(&conn, feed, &na("写入正文乙改"), false).unwrap();
+        crate::db::set_article_ai_fields(&conn, aid, Some("写路径AI"), None).unwrap();
+        // 写入后候选索引仍可命中新词
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM articles_trigram_idx WHERE articles_trigram_idx MATCH '\"写入正\" AND \"入正文\"'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "写路径必须维护候选索引（新正文可命中）");
+        assert_eq!(legacy_fts_objects(&conn), 0, "写路径后仍无旧 FTS 面");
+        crate::db::delete_feed(&conn, feed).unwrap();
+        assert_eq!(legacy_fts_objects(&conn), 0, "删除路径后仍无旧 FTS 面");
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "删除源后文章级联清空（回收触发器同链执行）");
+        let contents_left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM contents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(contents_left, 0, "级联删除后无引用 contents 全部回收");
+    }
+
+    /// 反例 2：内容回收触发器 —— 最后引用消失才删 contents，共享行保留。
+    #[test]
+    fn v29_recycle_deletes_contents_only_after_last_reference() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let folder = crate::db::create_folder(&conn, "F", "article").unwrap();
+        let feed = crate::db::insert_feed(
+            &conn,
+            "https://r.example/rss",
+            None,
+            "R",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let na = |guid: &str| crate::db::NewArticle {
+            guid: guid.into(),
+            url: Some(format!("https://r.example/{guid}")),
+            title: format!("标题{guid}"),
+            author: None,
+            summary: None,
+            content_html: Some("<p>共享回收正文</p>".into()),
+            body_text: "共享回收正文".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-03-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let (a, _) = crate::db::upsert_article_with_feed(&conn, feed, &na("rc-a"), false).unwrap();
+        let (b, _) = crate::db::upsert_article_with_feed(&conn, feed, &na("rc-b"), false).unwrap();
+        let contents_n = |c: &Connection| -> i64 {
+            c.query_row("SELECT COUNT(*) FROM contents", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(contents_n(&conn), 1, "同文条目共享一行 contents");
+        conn.execute("DELETE FROM articles WHERE id = ?1", params![a])
+            .unwrap();
+        assert_eq!(contents_n(&conn), 1, "仍有引用：contents 不得回收");
+        conn.execute("DELETE FROM articles WHERE id = ?1", params![b])
+            .unwrap();
+        assert_eq!(contents_n(&conn), 0, "最后引用消失：contents 必须回收");
+        assert_eq!(legacy_fts_objects(&conn), 0, "全程无旧 FTS 对象参与");
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! 覆盖卡末尾必测：等价共享 / 不同内容不共享 / 空内容不聚合 / 单引用修订分叉 /
 //! 删除一个源 vs 删除最后引用 / 正文后半变更（snippet 相同但修订/内容变化）/
-//! FTS 派生索引随共享内容更新（每个引用条目可搜、旧词消失）/ 异步提交守卫
+//! 搜索索引随共享内容更新（每个引用条目可搜、旧词消失；v29 起为 trigram 候选索引 + LIKE 验证）/ 异步提交守卫
 //! （过期前提拒绝落库、清理代次拒绝复活）/ 旧库（v21 形状）迁移无损与回滚重试。
 //! 使用隔离临时库；不访问网络/用户库。
 
@@ -47,7 +47,7 @@ fn seed_feed(conn: &Connection, folder: i64, url: &str, title: &str) -> i64 {
 
 fn new_article(guid: &str, url: &str, title: &str, html: &str) -> db::NewArticle {
     // 夹具：纯文本由 HTML 粗略剥标签得出（生产由抓取层 html_to_text 保证同源；
-    // 测试只需 body_text 与 html 一致以便 FTS/snippet 断言）。
+    // 测试只需 body_text 与 html 一致以便 搜索/snippet 断言）。
     let body = html.replace("<p>", "").replace("</p>", "");
     db::NewArticle {
         guid: guid.into(),
@@ -80,14 +80,16 @@ fn contents_count(conn: &Connection) -> i64 {
         .unwrap()
 }
 
-fn fts_rowids(conn: &Connection, term: &str) -> Vec<i64> {
-    let mut stmt = conn
-        .prepare("SELECT rowid FROM articles_fts WHERE articles_fts MATCH ?1 ORDER BY rowid")
-        .unwrap();
-    stmt.query_map([term], |r| r.get(0))
+/// 生产搜索入口（OPT-017B 起 = trigram 候选索引 + LIKE 验证）在该词下的命中
+/// id，排序后返回——与排序契约解耦（排序等值在 db/articles.rs 的等值矩阵锁定）。
+fn search_ids(conn: &Connection, term: &str) -> Vec<i64> {
+    let mut ids: Vec<i64> = db::search_articles(conn, term, 50)
         .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    ids.sort_unstable();
+    ids
 }
 
 /* ============================================================
@@ -325,12 +327,12 @@ fn extraction_forks_from_shared_rss_and_protects_against_rss_refresh() {
 
     // 两个条目各自可搜到（提取正文新词只在条目 1 可搜；共享 RSS 正文只剩条目 2）
     assert_eq!(
-        fts_rowids(&conn, "提取全文"),
+        search_ids(&conn, "提取全文"),
         vec![id1],
         "提取正文仅条目 1 可搜"
     );
     assert_eq!(
-        fts_rowids(&conn, "RSS"),
+        search_ids(&conn, "RSS"),
         vec![id2],
         "分叉后共享 RSS 正文仅兄弟条目（条目 2）可搜"
     );
@@ -517,7 +519,7 @@ fn ai_commit_guard_rejects_after_content_change_and_cleanup() {
 }
 
 /* ============================================================
-三、引用生命周期：删源/删最后引用、FTS 同步
+三、引用生命周期：删源/删最后引用、搜索索引同步
 ============================================================ */
 
 #[test]
@@ -544,12 +546,12 @@ fn deleting_one_source_keeps_shared_content_until_last_reference() {
     .unwrap();
     let shared = content_id_of(&conn, id1).unwrap();
     assert_eq!(
-        fts_rowids(&conn, "共享"),
+        search_ids(&conn, "共享"),
         vec![id1, id2],
         "共享正文两个条目都可搜"
     );
 
-    // 删源 A：级联删条目 1；共享内容仍被条目 2 引用 → 保活；FTS 行 1 消失、行 2 保留
+    // 删源 A：级联删条目 1；共享内容仍被条目 2 引用 → 保活；命中 1 消失、2 保留
     db::delete_feed(&conn, a).unwrap();
     assert!(db::get_article(&conn, id1).unwrap().is_none());
     assert_eq!(
@@ -558,17 +560,17 @@ fn deleting_one_source_keeps_shared_content_until_last_reference() {
         "共享内容不被误删（仍有引用）"
     );
     assert_eq!(
-        fts_rowids(&conn, "共享"),
+        search_ids(&conn, "共享"),
         vec![id2],
         "删除源 A 后其条目不可搜、条目 2 仍可搜"
     );
 
-    // 删最后引用：内容与 FTS 行一并回收
+    // 删最后引用：内容与搜索命中一并回收
     db::delete_feed(&conn, b).unwrap();
     assert_eq!(contents_count(&conn), 0, "最后引用消失才回收 contents");
     assert!(
-        fts_rowids(&conn, "共享").is_empty(),
-        "无引用条目：FTS 行一并移除"
+        search_ids(&conn, "共享").is_empty(),
+        "无引用条目：搜索命中一并移除"
     );
 }
 
@@ -614,8 +616,8 @@ fn cache_cleanup_recycles_contents_at_last_reference() {
         "缓存清理的最后引用消失才回收 contents"
     );
     assert!(
-        fts_rowids(&conn, "共享清理").is_empty(),
-        "FTS 派生行一并移除"
+        search_ids(&conn, "共享清理").is_empty(),
+        "搜索命中一并消失（候选索引随条目删除同步清理）"
     );
 }
 
@@ -649,11 +651,11 @@ fn shared_content_update_reaches_every_referencing_entry_fts() {
     )
     .unwrap();
     assert!(
-        fts_rowids(&conn, "alpha").is_empty(),
+        search_ids(&conn, "alpha").is_empty(),
         "旧词对两个条目都消失"
     );
     assert_eq!(
-        fts_rowids(&conn, "beta"),
+        search_ids(&conn, "beta"),
         vec![id1, id2],
         "新词对每个引用条目都可搜（不只代表）"
     );
@@ -677,10 +679,10 @@ fn shared_content_update_reaches_every_referencing_entry_fts() {
 ============================================================ */
 
 /// 造「v21 存量现场」：用生产 open 建最新库，物理回拨 v22（contents 迁出 +
-/// FTS 派生表 + content_id/ai_epoch 列）与 v23（subscription_outbox 表 + 两索引）
-/// 并把 user_version 拨回 21；随后以
+/// FTS 派生表 + content_id/ai_epoch 列）、v23（subscription_outbox 表 + 两索引）
+/// 与 v29（候选索引 + 维护/回收触发器）并把 user_version 拨回 21；随后以
 /// **v21 时代 SQL** 直插旧行（旧正文列 + AI 产物 + 读藏/版本/远端绑定 + 队列），
-/// 使下一次 open 走真实 v22/v23 升级路径。
+/// 使下一次 open 走真实 v22/v23…/v29 升级路径。
 fn seed_v21_legacy(path: &std::path::Path) -> (i64, i64) {
     let conn = db::open(path).expect("open latest");
     let f = db::create_folder(&conn, "F", "article").unwrap();
@@ -692,6 +694,15 @@ fn seed_v21_legacy(path: &std::path::Path) -> (i64, i64) {
         DROP TRIGGER IF EXISTS trg_articles_fts_au;
         DROP TRIGGER IF EXISTS trg_contents_fts_au;
         DROP TABLE IF EXISTS articles_fts;
+        -- OPT-017B v29 物理回拨：候选索引与维护/回收触发器（最新库已无旧 FTS
+        -- 面，上面四条 DROP 为 no-op；不回拨新对象则重放 v29 的 CREATE 报
+        -- already exists）。
+        DROP TRIGGER IF EXISTS trg_articles_trigram_ai;
+        DROP TRIGGER IF EXISTS trg_articles_trigram_ad;
+        DROP TRIGGER IF EXISTS trg_articles_trigram_au;
+        DROP TRIGGER IF EXISTS trg_contents_trigram_au;
+        DROP TRIGGER IF EXISTS trg_articles_recycle_ad;
+        DROP TABLE IF EXISTS articles_trigram_idx;
         DROP INDEX IF EXISTS idx_articles_content;
         ALTER TABLE articles DROP COLUMN content_id;
         ALTER TABLE articles DROP COLUMN ai_epoch;
@@ -807,8 +818,8 @@ fn v21_upgrade_is_lossless_and_idempotent() {
         )
         .unwrap();
     assert_eq!(old_cols, 0, "旧正文列必须消除（不保两套真值）");
-    // FTS 派生索引已重建：旧内容可搜
-    assert_eq!(fts_rowids(&conn, "旧正文"), vec![aid]);
+    // 搜索索引已重建：旧内容可搜
+    assert_eq!(search_ids(&conn, "旧正文"), vec![aid]);
     // 幂等重开
     drop(conn);
     let conn2 = tmp.open();
@@ -1072,9 +1083,9 @@ fn extract_commit_repoint_failure_is_atomic_and_returns_identity() {
     );
     assert_eq!(content_id_of(&conn, aid), Some(cid_old), "条目仍指向旧内容");
     assert_eq!(
-        fts_rowids(&conn, "RSS"),
+        search_ids(&conn, "RSS"),
         vec![aid],
-        "旧引用 FTS 行保持（回滚无损）"
+        "旧引用搜索命中保持（回滚无损）"
     );
     conn.execute_batch("DROP TRIGGER fail_extract_repoint;")
         .unwrap();
@@ -1099,7 +1110,7 @@ fn extract_commit_repoint_failure_is_atomic_and_returns_identity() {
     assert_ne!(db_cid, cid_old, "提取变体分叉新行（来源进身份）");
     assert_eq!(contents_count(&conn), 1, "旧行无引用即回收");
     assert_eq!(
-        fts_rowids(&conn, "RSS"),
+        search_ids(&conn, "RSS"),
         Vec::<i64>::new(),
         "旧词消失（重指后每个引用条目索引更新）"
     );
@@ -1114,7 +1125,7 @@ fn extract_commit_repoint_failure_is_atomic_and_returns_identity() {
 }
 
 /// R3（故障原子性）：RSS 刷新重指失败 → 新 RSS 行整体回滚（无孤儿）、条目保持
-/// 旧指向、FTS 不出现新词；清障后重试成功并回收旧行。
+/// 旧指向、搜索索引不出现新词；清障后重试成功并回收旧行。
 #[test]
 fn refresh_repoint_failure_leaves_no_orphan_and_is_retryable() {
     let tmp = TempDb::new("contents_refresh_atomic");
@@ -1146,10 +1157,10 @@ fn refresh_repoint_failure_leaves_no_orphan_and_is_retryable() {
     assert!(format!("{err}").contains("injected"));
     assert_eq!(contents_count(&conn), 1, "新行随失败回滚（无孤儿）");
     assert_eq!(content_id_of(&conn, aid), Some(cid_old), "条目仍指旧行");
-    assert_eq!(fts_rowids(&conn, "alpha"), vec![aid], "旧词仍可搜");
+    assert_eq!(search_ids(&conn, "alpha"), vec![aid], "旧词仍可搜");
     assert!(
-        fts_rowids(&conn, "beta").is_empty(),
-        "失败的新内容不得进 FTS"
+        search_ids(&conn, "beta").is_empty(),
+        "失败的新内容不得进搜索索引"
     );
     conn.execute_batch("DROP TRIGGER fail_refresh_repoint;")
         .unwrap();
@@ -1164,12 +1175,12 @@ fn refresh_repoint_failure_leaves_no_orphan_and_is_retryable() {
     assert_eq!(id2, aid, "重试命中同一条目");
     assert_ne!(content_id_of(&conn, aid), Some(cid_old), "重试成功重指新行");
     assert_eq!(contents_count(&conn), 1, "旧行被回收（最后引用）");
-    assert_eq!(fts_rowids(&conn, "beta"), vec![aid], "新词可搜");
-    assert!(fts_rowids(&conn, "alpha").is_empty(), "旧词消失");
+    assert_eq!(search_ids(&conn, "beta"), vec![aid], "新词可搜");
+    assert!(search_ids(&conn, "alpha").is_empty(), "旧词消失");
 }
 
 /// R3（故障原子性）：新条目 INSERT 后 content_id 回填失败 → 整个插入（条目行 +
-/// 内容行 + FTS 行）随 SAVEPOINT 回滚，库中无半插入条目；清障后重试成功。
+/// 内容行 + 搜索命中）随 SAVEPOINT 回滚，库中无半插入条目；清障后重试成功。
 #[test]
 fn insert_new_article_repoint_failure_is_atomic_and_retryable() {
     let tmp = TempDb::new("contents_insert_atomic");
@@ -1199,7 +1210,10 @@ fn insert_new_article_repoint_failure_is_atomic_and_retryable() {
         "插入随失败整体回滚（不留 content_id NULL 的条目）"
     );
     assert_eq!(contents_count(&conn), 0, "私有内容行一并回滚");
-    assert!(fts_rowids(&conn, "新正文").is_empty(), "FTS 无半插入残留");
+    assert!(
+        search_ids(&conn, "新正文").is_empty(),
+        "搜索索引无半插入残留"
+    );
     conn.execute_batch("DROP TRIGGER fail_insert_repoint;")
         .unwrap();
 
@@ -1213,7 +1227,7 @@ fn insert_new_article_repoint_failure_is_atomic_and_retryable() {
     assert!(inserted, "重试成功插入");
     assert!(content_id_of(&conn, aid).is_some(), "content_id 已回填");
     assert_eq!(contents_count(&conn), 1);
-    assert_eq!(fts_rowids(&conn, "新正文"), vec![aid], "重试后 FTS 可搜");
+    assert_eq!(search_ids(&conn, "新正文"), vec![aid], "重试后搜索可命中");
 }
 
 /// R3（id 稳定性）：`contents.id` 为 AUTOINCREMENT——删除表内最大内容行后，
@@ -1345,18 +1359,18 @@ fn delete_folder_cascade_recycles_shared_contents_at_last_reference() {
         "仍被另一分类条目引用：共享内容保活"
     );
     assert_eq!(
-        fts_rowids(&conn, "分类共享"),
+        search_ids(&conn, "分类共享"),
         vec![id2],
-        "级联删除的条目 FTS 行消失、存留条目仍可搜"
+        "级联删除的条目命中消失、存留条目仍可搜"
     );
 
     db::delete_folder(&conn, f2).unwrap();
     assert_eq!(contents_count(&conn), 0, "最后引用随分类级联消失才回收");
-    assert!(fts_rowids(&conn, "分类共享").is_empty());
+    assert!(search_ids(&conn, "分类共享").is_empty());
 }
 
 /// R3：账号断开（`purge_remote_data`）删除服务端来源订阅的条目，但共享内容仍
-/// 被本地直连条目引用时保活；删最后引用才回收（含 FTS）。
+/// 被本地直连条目引用时保活；删最后引用才回收（含搜索索引）。
 #[test]
 fn purge_remote_data_keeps_shared_content_until_last_reference() {
     let tmp = TempDb::new("contents_purge_remote");
@@ -1416,12 +1430,12 @@ fn purge_remote_data_keeps_shared_content_until_last_reference() {
         "本地条目仍引用：共享内容保活（不随账号断开误删）"
     );
     assert_eq!(
-        fts_rowids(&conn, "账号共享"),
+        search_ids(&conn, "账号共享"),
         vec![id_local],
-        "存留条目 FTS 仍可搜"
+        "存留条目仍可搜"
     );
 
     db::delete_feed(&conn, local).unwrap();
     assert_eq!(contents_count(&conn), 0, "最后引用消失才回收 contents");
-    assert!(fts_rowids(&conn, "账号共享").is_empty(), "FTS 行一并移除");
+    assert!(search_ids(&conn, "账号共享").is_empty(), "命中一并移除");
 }

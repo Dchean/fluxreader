@@ -568,18 +568,33 @@ pub fn get_articles(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ArticleRow>
     Ok(articles)
 }
 
-/// 全文搜索：LIKE 子串匹配，命中按发布时间倒序，返回与列表页同构的轻量行。
+/// 全文搜索：标题/正文/摘要/AI 摘要/AI 翻译的 LIKE 子串匹配（词间 AND，按
+/// 发布时间倒序，返回与列表页同构的轻量行），并由 v29 的 trigram 候选索引
+/// 收缩扫描行数。
 ///
-/// 不用 FTS5 MATCH 的原因：unicode61 分词器把连续中文整段当作一个 token，
+/// 为什么结果是 LIKE 语义：unicode61 分词器把连续中文整段当作一个 token，
 /// 搜「科技」永远匹配不到正文里的「科技公司新闻」——对中文用户形同虚设；
-/// 且 FTS 查询语法字符（"*()" 等）需要额外转义，`node.js`、`C++` 这类词
-/// 的前缀/精确语义也很反直觉。个人库规模（≤ 数千篇）LIKE 全表扫毫秒级
-/// 完成，语义对任意语言/任意字符都正确（就是"包含这个子串"）。
+/// 且 FTS5 查询语法字符（"*()" 等）需要额外转义，`node.js`、`C++` 这类词
+/// 的前缀/精确语义也很反直觉。LIKE 的"包含这个子串"对任意语言/任意字符
+/// 都确定。AI 字段纳入命中后（SRH-2），v3 起的 `articles_fts`（unicode61）
+/// 已无 MATCH 消费者，v29（OPT-017B）将其删除并以本索引替代——它是被搜索
+/// 真实消费的**候选面**。
 ///
-/// 多关键词 AND（所有词都要命中，与主流阅读器一致）；匹配字段：标题 +
-/// 正文纯文本 + 摘要 + AI 摘要 + AI 翻译；LIKE 通配符 %/_ 按字面转义。
-/// 注：AI 字段纳入命中后（SRH-2），`articles_fts` FTS5 表（unicode61 分词对中文
-/// 不友好，见迁移注释）不再作为搜索入口，仅保留触发器同步作历史遗留。
+/// 候选索引（`articles_trigram_idx`，migrations v29）契约：
+/// - **只收缩不判定**：≥3 字符的词生成 `"abc" AND "bcd"` 形式的引用三元组
+///   MATCH 作为 `a.id IN (...)` 候选；词短于 3 字符（如 2 字中文）无法成
+///   三元组，该词不加候选（整查退回纯 LIKE）。结果集始终由下方 LIKE 条件
+///   逐行验证——与实现前行为（冻结参考实现回归）逐字等值：id 集合/顺序/
+///   去重/字段覆盖、AI 字段命中、中英文、无结果、`%`/`_`/`\` 转义。
+/// - 索引面（表 + 四触发器）缺失、或 MATCH 报错（影子表损坏等）时**回落
+///   LIKE** 并记日志；回落不依赖候选（回归覆盖"删索引/坏索引"两组）。
+/// - 陈旧边界：候选是超集，陈旧只会**多**出候选（多出的行被 LIKE 拒绝）；
+///   漏行只可能出现在"触发器被手工拆除"的库——该状态无法经应用产生
+///   （v29 一并创建索引与触发器），不承诺修复。
+///
+/// 匹配字段：标题 + 正文纯文本 + 摘要 + AI 摘要 + AI 翻译；LIKE 通配符 %/_
+/// 按字面转义。该字段集与 v29 候选索引文档串的列集**必须同步维护**
+/// （migrations v29 的 lower(...) 连接列缺一即造成 LIKE 命中的假阴性）。
 pub fn search_articles(
     conn: &Connection,
     query: &str,
@@ -589,19 +604,111 @@ pub fn search_articles(
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    let terms: Vec<String> = q
-        .split_whitespace()
-        .filter(|t| !t.is_empty())
-        .map(|t| {
-            t.replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        })
-        .collect();
-    if terms.is_empty() {
+    let raw_terms: Vec<&str> = q.split_whitespace().filter(|t| !t.is_empty()).collect();
+    if raw_terms.is_empty() {
         return Ok(Vec::new());
     }
+    let terms: Vec<String> = raw_terms.iter().map(|t| like_escape(t)).collect();
+    let candidate_matches: Vec<String> = if search_candidates_ready(conn) {
+        raw_terms
+            .iter()
+            .filter_map(|t| trigram_candidate_match(t))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if candidate_matches.is_empty() {
+        return run_search(conn, &terms, &[], limit);
+    }
+    match run_search(conn, &terms, &candidate_matches, limit) {
+        Ok(items) => Ok(items),
+        Err(err) => {
+            // 候选只是加速面，结果契约以 LIKE 为准：索引损坏/畸形时回落。
+            log::warn!("搜索候选索引不可用，回落 LIKE-only：{err}");
+            run_search(conn, &terms, &[], limit)
+        }
+    }
+}
 
+/// LIKE 通配符按字面转义（SQL 侧 `ESCAPE '\'`）。
+fn like_escape(term: &str) -> String {
+    term.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// 候选索引的 SQL 面是否齐备（表 + 四个维护触发器，migrations v29 一并创建）。
+/// 缺失即不使用候选，不在此处报错——搜索承诺在任何 schema 状态下仍以 LIKE
+/// 给出正确结果。
+fn search_candidates_ready(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE \
+         (type = 'table' AND name = 'articles_trigram_idx') OR \
+         (type = 'trigger' AND name IN ('trg_articles_trigram_ai','trg_articles_trigram_ad','trg_articles_trigram_au','trg_contents_trigram_au'))",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n == 5)
+    .unwrap_or(false)
+}
+
+/// 单词语 → 候选 MATCH 表达式：ASCII 折叠（SQLite `lower()` 只折叠 ASCII，
+/// 与 LIKE 的大小写语义逐字一致）后取全部引用三元组，各自加引号（`"` 双写
+/// 转义）并以 AND 连接。语义为"这些三元组都出现"的**超集**（不要求连续），
+/// 由 LIKE 条件收紧。词短于 3 字符返回 None（该词不加候选）。三元组只取前
+/// 64 个：截取只会放宽候选（仍是超集），杜绝超长词把 MATCH 表达式撑爆。
+fn trigram_candidate_match(term: &str) -> Option<String> {
+    let folded = term.to_ascii_lowercase();
+    let chars: Vec<char> = folded.chars().collect();
+    if chars.len() < 3 {
+        return None;
+    }
+    let parts: Vec<String> = chars
+        .windows(3)
+        .take(64)
+        .map(|w| {
+            let tri: String = w.iter().collect();
+            format!("\"{}\"", tri.replace('"', "\"\""))
+        })
+        .collect();
+    Some(parts.join(" AND "))
+}
+
+/// [`search_articles`] 的 SQL 装配与执行内核：`candidate_matches` 为空 = 纯
+/// LIKE（与实现前 SQL 同构）；非空 = 追加候选过滤。拆出为独立函数只为让测试
+/// 能对生成的 SQL 做 EXPLAIN 计划断言；生产调用入口只有 [`search_articles`]。
+fn run_search(
+    conn: &Connection,
+    terms: &[String],
+    candidate_matches: &[String],
+    limit: i64,
+) -> AppResult<Vec<ArticleListItem>> {
+    let (sql, bind_values) = build_search_sql(terms, candidate_matches, smart_dedup_on(conn));
+    // P3[8]（REQ-104）：LIMIT 此前用字符串插值 `LIMIT {limit}`。i64 本身无注入风险，
+    // 但**负数在 SQLite 里表示「不限制」**，调用方一处笔误就会把整个库倒出来；
+    // 且它不是绑定参数、不受参数检查保护。改为绑定参数并把上界收敛：
+    // 非正数 → 回落安全默认（搜索场景没有「不限制」语义），并设上限防误用。
+    let limit: i64 = if limit <= 0 { 100 } else { limit.min(1000) };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(
+            bind_values
+                .iter()
+                .map(|v| v as &dyn rusqlite::ToSql)
+                .chain(std::iter::once(&limit as &dyn rusqlite::ToSql)),
+        ),
+        article_list_item,
+    )?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 装配搜索 SQL 与绑定值（LIMIT 为末尾占位符 `?{n}`，值由 [run_search] 绑定）。
+/// `dedup_on` = smartDedup；`terms` 为已 LIKE 转义的词表。
+fn build_search_sql(
+    terms: &[String],
+    candidate_matches: &[String],
+    dedup_on: bool,
+) -> (String, Vec<rusqlite::types::Value>) {
     // 每个词一组 (title/body/summary/ai_summary/translated LIKE)，词间 AND。
     // 占位符逐个编号（?N 是编号引用，跨词组复用会错位），ESCAPE 声明 SQLite 的
     // LIKE 通配符转义字符 '\'。同一组条件既用于外部匹配（别名 a + 正文别名 c），
@@ -630,6 +737,18 @@ pub fn search_articles(
         (parts, idx)
     };
     let (where_parts, next_idx) = term_conditions("a", "c", 1);
+    // 候选过滤：编号接在外层 LIKE（?1..?5n）之后。
+    // 装配顺序 = 文本次序 = 绑定次序：外层 LIKE → 候选 MATCH → 去重内层 LIKE → LIMIT。
+    let mut candidate_sql = String::new();
+    let mut candidate_args: Vec<rusqlite::types::Value> = Vec::new();
+    for (i, m) in candidate_matches.iter().enumerate() {
+        candidate_sql.push_str(&format!(
+            " AND a.id IN (SELECT rowid FROM articles_trigram_idx WHERE articles_trigram_idx MATCH ?{})",
+            next_idx + i
+        ));
+        candidate_args.push(m.clone().into());
+    }
+    let next_idx = next_idx + candidate_matches.len();
     let mut like_args: Vec<String> = Vec::with_capacity(terms.len() * 5);
     for t in terms.iter() {
         let pat = format!("%{t}%");
@@ -637,17 +756,12 @@ pub fn search_articles(
             like_args.push(pat.clone());
         }
     }
-    // P3[8]（REQ-104）：LIMIT 此前用字符串插值 `LIMIT {limit}`。i64 本身无注入风险，
-    // 但**负数在 SQLite 里表示「不限制」**，调用方一处笔误就会把整个库倒出来；
-    // 且它不是绑定参数、不受参数检查保护。改为绑定参数并把上界收敛：
-    // 非正数 → 回落安全默认（搜索场景没有「不限制」语义），并设上限防误用。
-    let limit: i64 = if limit <= 0 { 100 } else { limit.min(1000) };
     /* OPT-008B R1（主控源码发现）：搜索的显示去重必须在**关键词匹配集合内**
     选代表——内层 EXISTS 带上与外部逐字相同的 LIKE 条件（别名 b），否则
     「同 URL 组里小 id 副本不含词、大 id 副本含词」时含词副本会被无词代表
     隐藏，搜索漏匹配。命中的代表可在列表 scope 锚定（实测由回归锁定），
     不做「关闭搜索去重」也不做「limit 后数组过滤」。 */
-    let (dedup_sql, mut params): (String, Vec<rusqlite::types::Value>) = if smart_dedup_on(conn) {
+    let (dedup_sql, params): (String, Vec<rusqlite::types::Value>) = if dedup_on {
         let (inner_parts, _) = term_conditions("b", "bc", next_idx);
         // 内层参数与外部同值同序，追加一遍（词 ×5）
         let mut extra: Vec<rusqlite::types::Value> = Vec::with_capacity(terms.len() * 5);
@@ -668,33 +782,39 @@ pub fn search_articles(
     } else {
         (String::new(), Vec::new())
     };
-    let limit_idx = like_args.len() + params.len() + 1;
+    let limit_idx = like_args.len() + candidate_args.len() + params.len() + 1;
+    // 候选存在时用 INDEXED BY 固定上表访问路径：规划器若把 IN(子查询) 反转为
+    // 「FTS 驱动的半连接 + TEMP B-TREE FOR ORDER BY」，命中稠密的长词会丢掉
+    // 排序索引的 LIMIT 提前停止（实测 20k×8KiB：3.6ms → 118.8ms；稀疏词两
+    // 计划都 <1ms）。INDEXED BY 名缺失（理论上的畸形库）会 prepare 报错 →
+    // search_articles 回落 LIKE-only（回落 SQL 不带 INDEXED BY）。
+    let from_clause = if candidate_matches.is_empty() {
+        "articles a LEFT JOIN contents c ON c.id = a.content_id"
+    } else {
+        "articles a INDEXED BY idx_articles_published_id LEFT JOIN contents c ON c.id = a.content_id"
+    };
     let sql = format!(
         "SELECT a.id, a.feed_id, a.title, a.author,
                 COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
                 a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
                 NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig
-         FROM articles a LEFT JOIN contents c ON c.id = a.content_id
-         WHERE {}{dedup_sql}
+         FROM {from_clause}
+         WHERE {where}{candidate_sql}{dedup_sql}
          ORDER BY a.published_at DESC
          LIMIT ?{limit_idx}",
-        where_parts.join(" AND "),
+        from_clause = from_clause,
+        where = where_parts.join(" AND "),
+        candidate_sql = candidate_sql,
+        dedup_sql = dedup_sql,
         limit_idx = limit_idx
     );
-    // 绑定顺序 = 文本次序：外部词参数 → （去重开启时）内层词参数 → LIMIT。
-    params.splice(0..0, like_args.into_iter().map(Into::into));
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        rusqlite::params_from_iter(
-            params
-                .iter()
-                .map(|v| v as &dyn rusqlite::ToSql)
-                .chain(std::iter::once(&limit as &dyn rusqlite::ToSql)),
-        ),
-        article_list_item,
-    )?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    // 绑定顺序 = 文本次序：外层 LIKE → 候选 MATCH → 去重内层 LIKE → LIMIT。
+    let mut bind_values: Vec<rusqlite::types::Value> =
+        like_args.into_iter().map(Into::into).collect();
+    bind_values.extend(candidate_args);
+    bind_values.extend(params);
+    (sql, bind_values)
 }
 
 /// 清空去重墓碑（smartDedup 开→关 瞬间调用：用户想让重复文章回来）。
@@ -832,7 +952,8 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
             ),
             [],
         )?;
-        // FTS 由 trg_articles_fts_au（UPDATE OF ai_summary/translated_content）同步
+        // 搜索候选索引由 trg_articles_trigram_au（UPDATE OF ai_summary/translated_content）
+        // 同步；旧 articles_fts 已在 v29 删除（本语句不再是「FTS 维护点」）
     }
     tx.commit()?;
     Ok((deleted, ai_cleared))
@@ -3871,5 +3992,502 @@ mod tests {
         let (id, inserted) = upsert_article_with_feed(&conn, feed, &b, false).unwrap();
         assert_eq!(id, o1.id);
         assert!(!inserted);
+    }
+}
+
+/* ============================================================
+OPT-017B：搜索候选索引等值与回落回归。
+（先红后绿：本模块在实现 v29/候选路径前运行于 HEAD 上，trigram 对象不存在。）
+============================================================ */
+#[cfg(test)]
+mod opt017b_search_tests {
+    use super::*;
+    use crate::db::{
+        create_folder, insert_feed, set_article_ai_fields, upsert_article_with_feed, MIGRATIONS,
+    };
+    use rusqlite::Connection;
+
+    fn conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    fn trigram_objects_present(conn: &Connection) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE (type = 'table' AND name = 'articles_trigram_idx') \
+                 OR (type = 'trigger' AND name IN ('trg_articles_trigram_ai','trg_articles_trigram_ad','trg_articles_trigram_au','trg_contents_trigram_au'))",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        n == 5
+    }
+
+    fn drop_trigram_objects(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS trg_articles_trigram_ai;
+             DROP TRIGGER IF EXISTS trg_articles_trigram_ad;
+             DROP TRIGGER IF EXISTS trg_articles_trigram_au;
+             DROP TRIGGER IF EXISTS trg_contents_trigram_au;
+             DROP TABLE IF EXISTS articles_trigram_idx;",
+        )
+        .unwrap();
+    }
+
+    /// 冻结的 LIKE-only 参考实现：逐字复制自 OPT-017B 之前的 `search_articles`
+    /// （HEAD 956cd59）。仅作测试差分基准，不参与生产路径；不得随手改动——
+    /// 它代表「实现前行为」，改动即失去等值判据。（`rustfmt::skip` = 保持
+    /// 冻结字节，格式化只允许发生在生产实现侧。）
+    #[rustfmt::skip]
+    #[allow(clippy::too_many_lines)]
+    fn reference_search_like_only(
+        conn: &Connection,
+        query: &str,
+        limit: i64,
+    ) -> AppResult<Vec<ArticleListItem>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let terms: Vec<String> = q
+            .split_whitespace()
+            .filter(|t| !t.is_empty())
+            .map(|t| {
+                t.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            })
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let term_conditions = |alias: &str,
+                               content_alias: &str,
+                               start_idx: usize|
+         -> (Vec<String>, usize) {
+            let mut parts = Vec::with_capacity(terms.len());
+            let mut idx = start_idx;
+            for _ in terms.iter() {
+                let b = idx;
+                parts.push(format!(
+                    "({a}.title LIKE ?{b} ESCAPE '\\' OR {ac}.body_text LIKE ?{c} ESCAPE '\\' OR COALESCE({a}.summary,'') LIKE ?{d} ESCAPE '\\' OR COALESCE({a}.ai_summary,'') LIKE ?{e} ESCAPE '\\' OR COALESCE({a}.translated_content,'') LIKE ?{f} ESCAPE '\\')",
+                    a = alias,
+                    ac = content_alias,
+                    b = b,
+                    c = b + 1,
+                    d = b + 2,
+                    e = b + 3,
+                    f = b + 4,
+                ));
+                idx += 5;
+            }
+            (parts, idx)
+        };
+        let (where_parts, next_idx) = term_conditions("a", "c", 1);
+        let mut like_args: Vec<String> = Vec::with_capacity(terms.len() * 5);
+        for t in terms.iter() {
+            let pat = format!("%{t}%");
+            for _ in 0..5 {
+                like_args.push(pat.clone());
+            }
+        }
+        let limit: i64 = if limit <= 0 { 100 } else { limit.min(1000) };
+        let (dedup_sql, mut params): (String, Vec<rusqlite::types::Value>) = if smart_dedup_on(conn) {
+            let (inner_parts, _) = term_conditions("b", "bc", next_idx);
+            let mut extra: Vec<rusqlite::types::Value> = Vec::with_capacity(terms.len() * 5);
+            for t in terms.iter() {
+                let pat = format!("%{t}%");
+                for _ in 0..5 {
+                    extra.push(pat.clone().into());
+                }
+            }
+            (
+                format!(
+                    " AND NOT EXISTS (SELECT 1 FROM articles b LEFT JOIN contents bc ON bc.id = b.content_id \
+                     WHERE b.url_norm = a.url_norm AND b.id < a.id AND {})",
+                    inner_parts.join(" AND ")
+                ),
+                extra,
+            )
+        } else {
+            (String::new(), Vec::new())
+        };
+        let limit_idx = like_args.len() + params.len() + 1;
+        let sql = format!(
+            "SELECT a.id, a.feed_id, a.title, a.author,
+                    COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
+                    a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
+                    a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
+                    NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE {}{dedup_sql}
+             ORDER BY a.published_at DESC
+             LIMIT ?{limit_idx}",
+            where_parts.join(" AND "),
+            limit_idx = limit_idx
+        );
+        params.splice(0..0, like_args.into_iter().map(Into::into));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(
+                params
+                    .iter()
+                    .map(|v| v as &dyn rusqlite::ToSql)
+                    .chain(std::iter::once(&limit as &dyn rusqlite::ToSql)),
+            ),
+            article_list_item,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn na_full(
+        guid: &str,
+        url: &str,
+        title: &str,
+        body: &str,
+        summary: Option<&str>,
+        published: &str,
+    ) -> NewArticle {
+        NewArticle {
+            guid: guid.into(),
+            url: Some(url.into()),
+            title: title.into(),
+            author: None,
+            summary: summary.map(str::to_string),
+            content_html: Some(format!("<p>{body}</p>")),
+            body_text: body.into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some(published.to_string()),
+            source: "direct".into(),
+        }
+    }
+
+    /// 等值夹具矩阵：中文 2 字/4 字、英文（含大小写）、中英混合、AI 字段命中
+    /// （ai_summary/translated 各自独占）、summary 独占、无结果词、`%`/`_`/`\`
+    /// 转义词（含干扰项）、并列发布时间、去重组（小 id 不含词、大 id 含词）。
+    fn build_matrix_fixture(conn: &Connection) {
+        let folder = create_folder(conn, "搜索矩阵", "article").unwrap();
+        let feed = insert_feed(
+            conn,
+            "https://s.example/rss",
+            None,
+            "搜索源",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let add = |guid: &str,
+                   url: &str,
+                   title: &str,
+                   body: &str,
+                   summary: Option<&str>,
+                   published: &str|
+         -> i64 {
+            upsert_article_with_feed(
+                conn,
+                feed,
+                &na_full(guid, url, title, body, summary, published),
+                false,
+            )
+            .unwrap()
+            .0
+        };
+        let _ = add(
+            "m1",
+            "https://s.example/m1",
+            "科技前沿速递",
+            "本文讲深度学习与神经网络。",
+            None,
+            "2026-01-01T00:01:00+00:00",
+        );
+        let _ = add(
+            "m2",
+            "https://s.example/m2",
+            "Weekly HTML Digest",
+            "The quick brown fox jumps.",
+            None,
+            "2026-01-01T00:02:00+00:00",
+        );
+        let _ = add(
+            "m3",
+            "https://s.example/m3",
+            "podcast模型周刊",
+            "中英mixed内容与AI模型训练。",
+            None,
+            "2026-01-01T00:03:00+00:00",
+        );
+        let m4 = add(
+            "m4",
+            "https://s.example/m4",
+            "普通标题四",
+            "普通正文四。",
+            None,
+            "2026-01-01T00:04:00+00:00",
+        );
+        let m5 = add(
+            "m5",
+            "https://s.example/m5",
+            "普通标题五",
+            "普通正文五。",
+            None,
+            "2026-01-01T00:05:00+00:00",
+        );
+        let _ = add(
+            "m6",
+            "https://s.example/m6",
+            "esc标题六",
+            "路径 C:\\temp 与 50_off 与 100%折扣。",
+            Some("摘要词条：独家"),
+            "2026-01-01T00:06:00+00:00",
+        );
+        // 干扰项：50Xoff 不应被 "50_off" 命中；C:Xtemp 不应被 "C:\\temp" 命中
+        let _ = add(
+            "m11",
+            "https://s.example/m11",
+            "干扰标题十一",
+            "50Xoff 与 C:Xtemp 干扰项。",
+            None,
+            "2026-01-01T00:11:00+00:00",
+        );
+        // AI 字段独占命中
+        set_article_ai_fields(conn, m4, Some("模型蒸馏技术"), None).unwrap();
+        set_article_ai_fields(conn, m5, None, Some("量子纠缠实验报告")).unwrap();
+        // 并列发布时间（同值）：两种实现的并列顺序必须逐字一致
+        let _ = add(
+            "m7",
+            "https://s.example/m7",
+            "并列标题甲",
+            "并列词验证甲。",
+            None,
+            "2026-01-01T00:20:00+00:00",
+        );
+        let _ = add(
+            "m8",
+            "https://s.example/m8",
+            "并列标题乙",
+            "并列词验证乙。",
+            None,
+            "2026-01-01T00:20:00+00:00",
+        );
+        // 去重组：同 URL；较小 id 副本不含词、较大 id 副本含词（R1：含词副本必须可被搜到）
+        let _ = add(
+            "dup-a",
+            "https://s.example/dedup",
+            "重复组第一条",
+            "无关键词的组内小 id 副本。",
+            None,
+            "2026-01-01T00:30:00+00:00",
+        );
+        let _ = add(
+            "dup-b",
+            "https://s.example/dedup",
+            "重复组第二条",
+            "该副本包含 独特去重词 供搜索。",
+            None,
+            "2026-01-01T00:31:00+00:00",
+        );
+    }
+
+    const MATRIX: &[(&str, i64)] = &[
+        // 中文 2 字（无 trigram → 必须回落 LIKE 且命中正确）
+        ("科技", 50),
+        ("独家", 50),
+        ("模型", 50),
+        // 中文 4 字（候选路径）
+        ("深度学习", 50),
+        ("神经网络", 50),
+        ("模型蒸馏", 50),
+        ("量子纠缠", 50),
+        ("摘要词条", 50),
+        // 英文（大小写不敏感）、3 字、多词 AND
+        ("html", 50),
+        ("HTML", 50),
+        ("quick", 50),
+        ("fox", 50),
+        ("quick brown", 50),
+        // 中英混合
+        ("AI", 50),
+        ("AI模型", 50),
+        ("mixed", 50),
+        ("科技 深度学习", 50),
+        // 转义字符（%/_/\\）
+        ("100%", 50),
+        ("50_off", 50),
+        ("C:\\temp", 50),
+        // 去重与并列
+        ("独特去重词", 50),
+        ("并列词", 50),
+        // 无结果 / 词际 AND 落空
+        ("罅隙龃龉甪端", 50),
+        ("quick 不存在", 50),
+        // 空/空白查询
+        ("", 50),
+        ("   ", 50),
+        // LIMIT 收敛
+        ("普通", 1),
+        ("普通", 50),
+        ("普通", -1),
+        ("普通", 100000),
+    ];
+
+    fn assert_matrix_equal(conn: &Connection, dedup: bool) {
+        for (q, limit) in MATRIX {
+            let got = serde_json::to_value(search_articles(conn, q, *limit).unwrap()).unwrap();
+            let want =
+                serde_json::to_value(reference_search_like_only(conn, q, *limit).unwrap()).unwrap();
+            assert_eq!(
+                got, want,
+                "查询 {q:?} limit={limit}（dedup={dedup}）必须与冻结 LIKE 参考实现逐字等值（含 id 序列/顺序/全字段）"
+            );
+        }
+    }
+
+    /// 反例 1：搜索等值矩阵 —— 候选索引就位后，结果集与实现前逐字一致；
+    /// 去重开/关两种设置下都必须等值（去重内层 EXISTS 复用 LIKE 条件不受影响）。
+    #[test]
+    fn search_matches_frozen_like_reference_across_matrix() {
+        let conn = conn();
+        build_matrix_fixture(&conn);
+        assert!(
+            trigram_objects_present(&conn),
+            "红：v29 未实现——候选索引对象不存在"
+        );
+        assert_matrix_equal(&conn, false);
+        // 打开显示去重后重跑全矩阵
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('app_settings', '{\"smartDedup\":true}')",
+            [],
+        )
+        .unwrap();
+        assert_matrix_equal(&conn, true);
+    }
+
+    /// 反例 4（索引缺失回落）：删除候选索引对象后，search_articles 必须回落
+    /// LIKE-only 且结果与参考实现逐字一致（不得返回空/报错）。
+    #[test]
+    fn search_falls_back_and_stays_equal_when_index_missing() {
+        let conn = conn();
+        build_matrix_fixture(&conn);
+        assert!(
+            trigram_objects_present(&conn),
+            "红：v29 未实现——候选索引对象不存在"
+        );
+        drop_trigram_objects(&conn);
+        assert!(!trigram_objects_present(&conn));
+        assert_matrix_equal(&conn, false);
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('app_settings', '{\"smartDedup\":true}')",
+            [],
+        )
+        .unwrap();
+        assert_matrix_equal(&conn, true);
+    }
+
+    /// 反例 4（索引损坏回落）：影子表被移除后 MATCH 查询会报错——必须捕获、
+    /// 记日志并回落 LIKE-only，结果仍与参考实现逐字一致。
+    #[test]
+    fn search_falls_back_and_stays_equal_when_index_shadow_corrupt() {
+        let conn = conn();
+        build_matrix_fixture(&conn);
+        assert!(
+            trigram_objects_present(&conn),
+            "红：v29 未实现——候选索引对象不存在"
+        );
+        conn.execute_batch("DROP TABLE articles_trigram_idx_data;")
+            .unwrap();
+        assert_matrix_equal(&conn, false);
+    }
+
+    fn explain_plan(conn: &Connection, sql: &str, params_n: usize) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        // EXPLAIN 也要求参数个数匹配：以 NULL 占位绑定。
+        let args = vec![rusqlite::types::Value::Null; params_n];
+        stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+            r.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
+    /// 机制取证（不依赖耗时）：候选子句形状、3 字符阈值、混合词只加长词候选、
+    /// 生成 SQL 的计划必须使用候选索引并保持 published 序索引扫描。
+    #[test]
+    fn candidate_clause_shape_plan_and_short_term_fallback() {
+        let conn = conn();
+        build_matrix_fixture(&conn);
+
+        // 词形：≥3 字符 → Some（ASCII 折叠 + 引号双写）；<3 字符 → None
+        assert_eq!(
+            trigram_candidate_match("科技"),
+            None,
+            "2 字中文无三元组 → 该词必须回落 LIKE"
+        );
+        assert_eq!(trigram_candidate_match("AI"), None);
+        assert_eq!(
+            trigram_candidate_match("深度学习"),
+            Some("\"深度学\" AND \"度学习\"".to_string())
+        );
+        assert_eq!(
+            trigram_candidate_match("HTML"),
+            Some("\"htm\" AND \"tml\"".to_string()),
+            "ASCII 折叠必须与 LIKE（lower 只折 ASCII）语义一致"
+        );
+        assert_eq!(
+            trigram_candidate_match("a\"b\"c"),
+            Some("\"a\"\"b\" AND \"\"\"b\"\"\" AND \"b\"\"c\"".to_string()),
+            "内嵌引号必须双写转义"
+        );
+
+        // 生成 SQL：长词带候选子句 + INDEXED BY；短词纯 LIKE 无候选
+        let long_cand = vec![trigram_candidate_match("深度学习").unwrap()];
+        let (sql_long, long_bind) = build_search_sql(&[like_escape("深度学习")], &long_cand, false);
+        assert!(sql_long.contains("a.id IN (SELECT rowid FROM articles_trigram_idx"));
+        assert!(sql_long.contains("INDEXED BY idx_articles_published_id"));
+        let (sql_short, short_bind) = build_search_sql(&[like_escape("科技")], &[], false);
+        assert!(!sql_short.contains("articles_trigram_idx"));
+        assert!(!sql_short.contains("INDEXED BY"));
+
+        // 混合词（2 字 + 4 字）：只对长词加一条候选子句
+        let mixed = vec![like_escape("科技"), like_escape("深度学习")];
+        let (sql_mixed, _) = build_search_sql(&mixed, &long_cand, false);
+        assert_eq!(
+            sql_mixed
+                .matches("IN (SELECT rowid FROM articles_trigram_idx")
+                .count(),
+            1,
+            "混合长度词族只能为长词加候选"
+        );
+
+        // 计划：候选查询命中 trigram 表 + published 序索引扫描（免整体排序）
+        let plan = explain_plan(&conn, &sql_long, long_bind.len() + 1);
+        assert!(
+            plan.iter().any(|s| s.contains("articles_trigram_idx")),
+            "候选查询计划必须引用候选索引：{plan:?}"
+        );
+        assert!(
+            plan.iter().any(|s| s.contains("idx_articles_published_id")),
+            "候选查询必须保持 published 序索引扫描：{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|s| s.contains("TEMP B-TREE FOR ORDER BY")),
+            "候选过滤不得引入整体排序：{plan:?}"
+        );
+        let plan_short = explain_plan(&conn, &sql_short, short_bind.len() + 1);
+        assert!(
+            !plan_short
+                .iter()
+                .any(|s| s.contains("articles_trigram_idx")),
+            "短词查询不得引用候选索引：{plan_short:?}"
+        );
     }
 }
