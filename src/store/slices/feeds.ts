@@ -144,6 +144,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
           set({ syncStatus: 'error' });
           get().showToast(`订阅已添加，刷新失败：${extractError(e)}`, {
             label: '重试',
+            key: `feed:add:${url}`,
             run: () => { void finishAdd(); },
           });
           return;
@@ -174,6 +175,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
             .join('；');
           get().showToast(`订阅已添加，${detail}`, {
             label: '重试',
+            key: `feed:add:${url}`,
             run: () => { void finishAdd(); },
           });
           return;
@@ -188,6 +190,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
           const msg = extractError(e);
           get().showToast(`添加失败：${msg}`, {
             label: '重试',
+            key: `feed:add:${url}`,
             run: () => get().addFeed(catId, url, title, layout, summaryMode, translateMode, syncToBackend),
           });
         });
@@ -373,7 +376,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
       })
       .catch((e: unknown) => {
         const msg = extractError(e);
-        get().showToast(`刷新失败：${msg}`, { label: '重试', run: () => get().refreshOneFeed(feedId) });
+        get().showToast(`刷新失败：${msg}`, { label: '重试', key: `feed:refresh:${feedId}`, run: () => get().refreshOneFeed(feedId) });
       });
   },
 

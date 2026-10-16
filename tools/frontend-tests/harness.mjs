@@ -543,6 +543,8 @@ async function resetStore(extra) {
        复位，避免上一用例的验证结论/分段进度被下一个用例读到。 */
     aiStatusById: {},
     hydrationErrors: {}, hydratedIds: {}, openedReadIds: {}, toasts: [],
+    /* OPT-017E：错误中心（带重试错误的持久可达层）随基线清空——跨用例隔离。 */
+    errors: [], errorCenterOpen: false,
     /* OPT-009 B3：订阅写回回执与能力矩阵（事件/挂载写入）随基线清空，
        避免跨用例残留（上一域的 local_only 计数被下一域读到）。 */
     subOutboxStats: null, subscriptionCapabilities: null,

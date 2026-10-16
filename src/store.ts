@@ -78,4 +78,8 @@ export * from './store/selectors';
 export { selectAiProductState } from './store/slices/ai';
 export type { AiProductState } from './store/slices/ai';
 
-export type { AppState, AiCacheStatus, AiProductKind, PodcastPlayerState, SettingsState, ToastMessage } from './store/types';
+export type { AppState, AiCacheStatus, AiProductKind, PodcastPlayerState, SettingsState, ToastMessage, AppErrorEntry } from './store/types';
+
+/* OPT-017E：错误中心上限常量（ui slice 是唯一来源；面板提示直接消费，
+   不在组件里复制数字）。 */
+export { ERROR_CENTER_MAX } from './store/slices/ui';

@@ -160,7 +160,7 @@ export const createSyncSlice: StateCreator<AppState, [], [], SyncSlice> = (set, 
         .catch((e: unknown) => {
           const msg = extractError(e);
           set({ syncStatus: 'error' });
-          get().showToast(`刷新失败：${msg}`, { label: '重试', run: () => get().triggerManualSync() });
+          get().showToast(`刷新失败：${msg}`, { label: '重试', key: 'sync:manual', run: () => get().triggerManualSync() });
         });
       return;
     }

@@ -79,6 +79,9 @@ export function Sidebar() {
   const toggleFolderCollapse = useAppStore((s) => s.toggleFolderCollapse);
   const toggleAllFolders = useAppStore((s) => s.toggleAllFolders);
   const triggerManualSync = useAppStore((s) => s.triggerManualSync);
+  /* OPT-017E：错误中心入口（重试入口持久可达——toast 上限/退场不得挤掉它） */
+  const errors = useAppStore((s) => s.errors);
+  const openErrorCenter = useAppStore((s) => s.openErrorCenter);
 
   /* 返回新引用的派生 selector 必须包 useShallow，否则 useSyncExternalStore 无限重渲染 */
   const badge = useAppStore(useShallow(selectViewCounts));
@@ -294,6 +297,19 @@ export function Sidebar() {
 
       {/* 底部固定区 */}
       <div className="sidebar-fixed-bottom">
+        {/* OPT-017E：错误中心入口——仅在有待处理错误时渲染（条目清空即消失）；
+            点击打开面板，逐条可重试/忽略。不占常驻空间、不与 toast 角标互挤。 */}
+        {errors.length > 0 && (
+          <button
+            className="sidebar-error-center"
+            onClick={openErrorCenter}
+            title="查看失败记录与重试入口"
+          >
+            <Icons.notification />
+            <span>错误中心</span>
+            <span className="error-center-badge">{errors.length}</span>
+          </button>
+        )}
         <div className="sync-status-row">
           <button className="sync-status-pill" onClick={() => openSettingsTab('sync')}>
             <div className={`sync-dot ${syncConnected ? '' : 'sync-dot-off'}`} />

@@ -446,7 +446,7 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
          乐观计数无其他复原路径（dedup 关闭时读闭包回执行不存在，因为写已失败）。 */
       scheduleCountsReconcile(takenOver ? { force: true } : undefined);
       /* TASK-067 N10：失败必须可见；本地已回滚，文案不再断言「重启后可能回退」 */
-      get().showToast(`全部已读保存失败：${extractError(e)}`, { label: '重试', run: () => get().markCurrentViewAllRead() });
+      get().showToast(`全部已读保存失败：${extractError(e)}`, { label: '重试', key: 'mark:all-read', run: () => get().markCurrentViewAllRead() });
     });
   },
 });

@@ -401,7 +401,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           });
           refreshAiStatus(id); // B3：失败分型落定后刷新（failed/partial 的数据源）
           if (!silent) {
-            get().showToast(`摘要失败：${msg}`, { label: '重试', run: () => get().summarizeEntry(id) });
+            get().showToast(`摘要失败：${msg}`, { label: '重试', key: `ai:summary:${id}`, run: () => get().summarizeEntry(id) });
           }
         },
       )
@@ -417,7 +417,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         });
         refreshAiStatus(id);
         if (!silent) {
-          get().showToast('摘要失败：请先在设置中配置 AI 服务', { label: '重试', run: () => get().summarizeEntry(id) });
+          get().showToast('摘要失败：请先在设置中配置 AI 服务', { label: '重试', key: `ai:summary:${id}`, run: () => get().summarizeEntry(id) });
         }
       });
     trackAiRequest(key, p);
@@ -491,7 +491,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               /* 失败态放行重试（D1 语义），不残留渲染风险 */
               writeAiProduct(id, 'translatedContent', '');
               refreshAiStatus(id);
-              if (!silent) get().showToast('译文回读失败', { label: '重试', run: () => get().translateEntry(id) });
+              if (!silent) get().showToast('译文回读失败', { label: '重试', key: `ai:translate:${id}`, run: () => get().translateEntry(id) });
             });
         },
         (msg) => {
@@ -514,7 +514,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           });
           refreshAiStatus(id); // B3：失败分型落定后刷新（partial/failed 的数据源）
           if (!silent) {
-            get().showToast(`翻译失败：${msg}`, { label: '重试', run: () => get().translateEntry(id) });
+            get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => get().translateEntry(id) });
           }
         },
       )
@@ -534,7 +534,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         });
         refreshAiStatus(id); // B3：失败分型落定后刷新（与 summary catch / Reader catch / 三处错误回调同口径）
         if (!silent) {
-          get().showToast('翻译失败：AI 服务未配置或不可达', { label: '重试', run: () => get().translateEntry(id) });
+          get().showToast('翻译失败：AI 服务未配置或不可达', { label: '重试', key: `ai:translate:${id}`, run: () => get().translateEntry(id) });
         }
       });
     trackAiRequest(key, p);
@@ -612,7 +612,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               writeAiProduct(id, 'translatedContent', '');
               refreshAiStatus(id);
               if (!silent) {
-                get().showToast('译文回读失败', { label: '重试', run: () => get().toggleReaderTranslation() });
+                get().showToast('译文回读失败', { label: '重试', key: `ai:translate:${id}`, run: () => get().toggleReaderTranslation() });
               }
             });
         },
@@ -638,7 +638,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           });
           refreshAiStatus(id); // B3：失败分型落定后刷新（partial/failed 的数据源）
           if (!silent) {
-            get().showToast(`翻译失败：${msg}`, { label: '重试', run: () => get().toggleReaderTranslation() });
+            get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => get().toggleReaderTranslation() });
           }
         },
       )
@@ -660,7 +660,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         });
         refreshAiStatus(id);
         if (!silent) {
-          get().showToast('翻译失败：请先在设置中配置 AI 服务', { label: '重试', run: () => get().toggleReaderTranslation() });
+          get().showToast('翻译失败：请先在设置中配置 AI 服务', { label: '重试', key: `ai:translate:${id}`, run: () => get().toggleReaderTranslation() });
         }
       });
     trackAiRequest(key, p);

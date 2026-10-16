@@ -3177,6 +3177,129 @@ body.has-player-expanded .toast-layer {
   filter: brightness(1.15);
 }
 
+/* ---------- 错误中心（OPT-017E）：重试入口持久可达 ---------- */
+/* 入口：侧栏底部固定区（仅 errors 非空时渲染，条目清空即消失——
+   不与 toast 角区/播放条互挤；toast 只是瞬时通知，持久入口在主框架上） */
+.sidebar-error-center {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border-strong));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.sidebar-error-center:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.sidebar-error-center .svg-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--danger);
+}
+
+.error-center-badge {
+  margin-left: auto;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* 面板：mini-dialog 形态（440px，复用既有对话框语言） */
+.error-center-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.error-center-close,
+.error-center-dismiss {
+  display: flex;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast);
+}
+
+.error-center-close:hover,
+.error-center-dismiss:hover {
+  color: var(--text-primary);
+}
+
+.error-center-close .svg-icon { width: 14px; height: 14px; }
+.error-center-dismiss .svg-icon { width: 12px; height: 12px; }
+
+.error-center-list {
+  margin: 10px 0;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.error-center-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+}
+
+.error-center-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.error-center-retry {
+  flex-shrink: 0;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 3px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.error-center-retry:hover {
+  filter: brightness(1.15);
+}
+
+.error-center-empty {
+  margin: 18px 0;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
 /* ---------- AI 内联错误行（摘要/翻译失败：错误信息 + 重试按钮） ---------- */
 .ai-error-row {
   display: flex;

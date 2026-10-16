@@ -143,17 +143,19 @@ export async function run(ctx) {
        实测把「全屏播放器」从并集里删掉，322 条断言**全绿**（真实回归零告警）。
        改为清单求值后，每个浮层必须单独登记，任何一项被删/被改都会被下面两条拦下。
        OPT-012：清单由 8 项扩为 9 项（补「关闭确认框」closeAsk）——旧 8 项逐项探针
-       一条不少地保留，新增 closeAsk 探针与真实 store 字段驱动断言。 */
+       一条不少地保留，新增 closeAsk 探针与真实 store 字段驱动断言。
+       OPT-017E：清单由 9 项扩为 10 项（补「错误中心」errorCenter）——旧 9 项
+       保留，新增 errorCenter 探针与 App 实参接线断言。 */
     const baseOverlay = {
       searchOpen: false, settingsOpen: false, newCategoryModalOpen: false,
       addFeedModalOpen: false, editFeedModalOpen: false, renameCatModalOpen: false,
       lightboxUrl: null, playerExpanded: false, playerActive: false,
-      closeAskVisible: false,
+      closeAskVisible: false, errorCenterOpen: false,
     };
-    checkNew('(P3[F2]) 浮层清单恰为 9 项且名称稳定（新增/删除浮层必须同步本表；OPT-012 起含 closeAsk）',
-      OVERLAY_SOURCES.length === 9
+    checkNew('(P3[F2]) 浮层清单恰为 10 项且名称稳定（新增/删除浮层必须同步本表；OPT-012 起含 closeAsk，OPT-017E 起含 errorCenter）',
+      OVERLAY_SOURCES.length === 10
       && OVERLAY_SOURCES.map((o) => o.name).join(',')
-        === 'search,settings,newCategory,addFeed,editFeed,renameCat,lightbox,playerExpanded,closeAsk');
+        === 'search,settings,newCategory,addFeed,editFeed,renameCat,lightbox,playerExpanded,closeAsk,errorCenter');
     /* 逐项：只打开这一项 ⇒ anyOverlayOpen 必须为 true（漏判/少算任一项即失败） */
     const overlayProbes = [
       ['search', { searchOpen: true }],
@@ -166,11 +168,13 @@ export async function run(ctx) {
       ['playerExpanded', { playerExpanded: true, playerActive: true }],
       /* OPT-012 新增：关闭确认框（审计 2026-10-08「关闭确认框与快捷键」） */
       ['closeAsk', { closeAskVisible: true }],
+      /* OPT-017E 新增：错误中心面板（打开时单键同样让路） */
+      ['errorCenter', { errorCenterOpen: true }],
     ];
     const missed = overlayProbes
       .filter(([, patch]) => anyOverlayOpen({ ...baseOverlay, ...patch }) !== true)
       .map(([name]) => name);
-    checkNew('(P3[F2]) 每个浮层单独打开都必须被判为「浮层打开」（漏判任一项即失败，输出缺项名；含 OPT-012 的 closeAsk）',
+    checkNew('(P3[F2]) 每个浮层单独打开都必须被判为「浮层打开」（漏判任一项即失败，输出缺项名；含 OPT-012 的 closeAsk 与 OPT-017E 的 errorCenter）',
       missed.length === 0);
     checkNew('(P3[F2]) 无浮层时 anyOverlayOpen 为 false（不误判为打开，否则快捷键全被吞）',
       anyOverlayOpen(baseOverlay) === false);
@@ -199,6 +203,7 @@ export async function run(ctx) {
       playerExpanded: sCloseAsk.playerExpanded,
       playerActive: sCloseAsk.player.isActive,
       closeAskVisible: sCloseAsk.closeAskVisible,
+      errorCenterOpen: sCloseAsk.errorCenterOpen,
     });
     checkNew('(P3[F2]/OPT-012) 真实 store：关闭确认框打开（closeAskVisible=true）⇒ anyOverlayOpen=true 且 s/m/j/k 全部让路（修前 proceed：单键作用到确认框背后的文章）',
       overlayOpenWithCloseAsk === true
@@ -234,6 +239,10 @@ export async function run(ctx) {
        Esc 链对 closeAskVisible 的专门处理由 t100-u7 锁定，此处不动其语义。 */
     checkNew('(P3[F2]/OPT-012) App.tsx 的浮层查询实参传入 closeAskVisible（清单已登记但调用点漏传即失败）',
       /closeAskVisible:\s*s\.closeAskVisible/.test(appSrc));
+    /* OPT-017E 接线：同上——errorCenter 登记进清单后，App 查询实参必须带 errorCenterOpen，
+       否则面板打开时 S/M/J/K 仍作用到背后文章（登记不等于生效）。 */
+    checkNew('(P3[F2]/OPT-017E) App.tsx 的浮层查询实参传入 errorCenterOpen（清单已登记但调用点漏传即失败）',
+      /errorCenterOpen:\s*s\.errorCenterOpen/.test(appSrc));
   }
   store.setState({ player: { ...store.getState().player, speed: 2.0 } });
   store.getState().cyclePlaybackSpeed();

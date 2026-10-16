@@ -150,7 +150,7 @@ export function SyncTab() {
         await reloadFromBackend();
       } catch (e) {
         /* 链路任一步硬失败：必须显式呈现错误（不假成功），并给出重试入口 */
-        showToast(`后台同步失败：${extractError(e)}`, { label: '重试', run: () => { void doSaveAndSync(); } });
+        showToast(`后台同步失败：${extractError(e)}`, { label: '重试', key: 'sync:save-and-sync', run: () => { void doSaveAndSync(); } });
         return;
       }
       useAppStore.setState({ syncStatus: 'synced', syncConnected: true });

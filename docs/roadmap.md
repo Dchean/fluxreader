@@ -17,7 +17,7 @@
 ## 二、代码卫生与瞬态问题
 
 - **`reader.ts` 详情成功路径不清 `hydrationErrors[id]`**：滞留的错误在分支重排后不可见，纯卫生问题。
-- **`toast` 上限会挤掉带重试项**：`src/store/slices/ui.ts` 的 `.slice(-4)` 在连续失败时会先丢掉最早（往往带重试入口）的那条。
+- **`toast` 上限会挤掉带重试项**：`src/store/slices/ui.ts` 的 `.slice(-4)` 在连续失败时仍会挤掉最旧的瞬时 toast；带重试错误已由 OPT-017E 的错误中心（有界 20 条 + 同文案合并 + 24h TTL，侧栏入口）持久承接，待该卡验收后从本清单移除。
 - **重复实现**：`numericId`（`store/selectors.ts`）与 `scopeNumericId`（`store/internals.ts`）仍是两份逐字相同的实现。
 - **只定义不用**：`greader.rs` 的 `KEPT_UNREAD`、`client_login_url` 各只剩定义行；`close-resolved` 事件只 emit 无 listen；`feeds.origin_was_local` 无生产写入方；`sync/phases.rs::sync_now` 无生产调用方（前端封装 `api.syncNow` 已删）。
 

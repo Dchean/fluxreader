@@ -6,6 +6,7 @@ import { Reader } from './components/Reader';
 import { PlayerBar } from './components/PlayerBar';
 import { SettingsModal } from './components/SettingsModal';
 import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal, CloseAskDialog } from './components/Overlays';
+import { ErrorCenterDialog } from './components/ErrorCenter';
 import { ContextMenuHost } from './components/ContextMenu';
 import { anyOverlayOpen, shouldYieldToOverlay } from './components/shortcutYield';
 import { jkLayoutAllowed, jkNextIndex } from './lib/jkNavigation';
@@ -281,6 +282,7 @@ export default function App() {
         else if (s.addFeedModalOpen) s.closeMiniModal('addFeed');
         else if (s.editFeedModalOpen) s.closeMiniModal('editFeed');
         else if (s.renameCatModalOpen) s.closeMiniModal('renameCat');
+        else if (s.errorCenterOpen) s.closeErrorCenter(); // OPT-017E：错误中心面板
         else if (s.settingsOpen) s.closeSettings();
         else if (s.lightboxUrl) s.closeLightbox();
         else if (s.playerExpanded && s.player.isActive) s.togglePlayerExpanded(); // Full Player 大浮层
@@ -311,6 +313,7 @@ export default function App() {
         playerExpanded: s.playerExpanded,
         playerActive: s.player.isActive,
         closeAskVisible: s.closeAskVisible,
+        errorCenterOpen: s.errorCenterOpen, // OPT-017E：错误中心面板
       });
       if (shouldYieldToOverlay(overlayOpen, e.key, e.ctrlKey || e.metaKey || e.altKey) === 'yield') {
         return;
@@ -432,16 +435,19 @@ export default function App() {
       <AddFeedModal />
       <EditFeedModal />
       <RenameCategoryModal />
+      {/* OPT-017E：错误中心面板（侧栏入口打开；Esc/✕/遮罩可关） */}
+      <ErrorCenterDialog />
       <CloseAskDialog />
       {/* 全局右键菜单（替换 WebView2 默认菜单） */}
       <ContextMenuHost />
 
       {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
           退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。
-          带操作按钮（action）的失败 toast 可一键重试。 */}
+          带操作按钮（action）的失败 toast 可一键重试——经 store.retryError 派发，
+          与错误中心面板同一语义（重试即消费对应条目，失败路径重报写回）。 */}
       <div className="toast-layer" aria-live="polite">
         {toasts.map((t) => (
-          <ToastPill key={t.id} text={t.text} leaving={!!t.leaving} action={t.action} />
+          <ToastPill key={t.id} id={t.id} text={t.text} leaving={!!t.leaving} action={t.action} />
         ))}
       </div>
     </>
@@ -450,15 +456,18 @@ export default function App() {
 
 /** 单条 toast：挂载后 rAF 切 visible 让 CSS transition 接管进场 */
 function ToastPill({
+  id,
   text,
   leaving,
   action,
 }: {
+  id: number;
   text: string;
   leaving: boolean;
   action?: { label: string; run: () => void };
 }) {
   const [shown, setShown] = useState(false);
+  const retryError = useAppStore((s) => s.retryError);
   useEffect(() => {
     const raf = requestAnimationFrame(() => setShown(true));
     return () => cancelAnimationFrame(raf);
@@ -467,7 +476,7 @@ function ToastPill({
   return (
     <div className={`toast-pill ${shown && !leaving ? 'visible' : ''} ${action ? 'with-action' : ''}`}>
       <span className="toast-text">{text}</span>
-      {action && <button className="toast-action-btn" onClick={action.run}>{action.label}</button>}
+      {action && <button className="toast-action-btn" onClick={() => retryError(id)}>{action.label}</button>}
     </div>
   );
 }

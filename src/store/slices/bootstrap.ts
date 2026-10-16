@@ -608,7 +608,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
          停摆、也无人知道原因。与 refreshOneFeed / extractCurrentArticle 同口径：
          复位加载态 + 可见 toast + 一键重试。 */
       set({ articlesLoading: false });
-      get().showToast(`加载更多失败：${extractError(e)}`, { label: '重试', run: () => void get().loadMoreArticles() });
+      get().showToast(`加载更多失败：${extractError(e)}`, { label: '重试', key: 'list:load-more', run: () => void get().loadMoreArticles() });
     }
   },
 

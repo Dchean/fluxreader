@@ -24,8 +24,10 @@ import * as d11 from './frontend-tests/subscription-writeback.mjs';
 import * as d12 from './frontend-tests/ai-cache-signature.mjs';
 /* OPT-017C：画廊列模型窗口域（列数/估算/放置/焦点兜底纯函数 + 灯箱/加载更多状态迁移）。 */
 import * as d13 from './frontend-tests/gallery-window.mjs';
+/* OPT-017E：错误中心域（重试入口持久可达/有界去重/重试清除语义 + 普通 toast 不回归）。 */
+import * as d14 from './frontend-tests/error-center.mjs';
 
-const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13];
+const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14];
 
 const argv = process.argv.slice(2);
 const selected = [];

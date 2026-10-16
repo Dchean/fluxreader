@@ -8,9 +8,9 @@
    放到本文件（与 timelineSentinel.ts / store/selectors.ts 同一做法），两侧共用同一份
    判定，避免「断言一套、渲染一套」。
 
-   契约（P3[F2] / REQ-104 / TASK-086，OPT-012 补 closeAsk）：
+   契约（P3[F2] / REQ-104 / TASK-086，OPT-012 补 closeAsk，OPT-017E 补 errorCenter）：
    - 任一浮层打开（搜索/设置/新建分类/添加订阅/编辑订阅/重命名分类/图片 lightbox/
-     全屏播放器/关闭确认框）时，**单键**快捷键 S/M/J/K 让路 → 'yield'；
+     全屏播放器/关闭确认框/错误中心）时，**单键**快捷键 S/M/J/K 让路 → 'yield'；
    - 带 Ctrl / Meta / Alt 的组合键**不让路**（Ctrl+K、Ctrl+, 属浮层自身操作，
      在 App.tsx 中位于本判定之前处理）；
    - 非 S/M/J/K 键不让路（Escape 亦不让路——确认框的 Esc 由 App.tsx 专门分支
@@ -49,6 +49,9 @@ export interface OverlayState {
   /* OPT-012：关闭确认框曾漏出本清单——确认框打开时 S/M/J/K 仍会作用到背后文章
      （S/M 改收藏/已读、J/K 切文章，用户看不见）。审计 2026-10-08「关闭确认框与快捷键」条目。 */
   closeAskVisible: boolean;
+  /* OPT-017E：错误中心面板（侧栏入口打开，mini-dialog 形态）——打开时单键同样让路，
+     不给「翻错误列表时按 S/M 改掉背后文章」留口子。 */
+  errorCenterOpen: boolean;
 }
 
 /** 浮层清单：每项给出「名称 + 该浮层当前是否打开」。新增浮层必须在此登记。 */
@@ -67,6 +70,8 @@ export const OVERLAY_SOURCES: readonly {
   { name: 'playerExpanded', isOpen: (s) => s.playerExpanded && s.playerActive },
   /* 关闭确认框（closeAsk）：视觉层级最高（3000），单键必须让路 */
   { name: 'closeAsk', isOpen: (s) => s.closeAskVisible },
+  /* 错误中心（errorCenter，OPT-017E）：面板打开时单键让路 */
+  { name: 'errorCenter', isOpen: (s) => s.errorCenterOpen },
 ];
 
 /** 任一浮层打开 ⇒ true。App.tsx 直接调用本函数，回归网对同一份清单逐项断言。 */

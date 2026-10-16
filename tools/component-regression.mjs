@@ -38,6 +38,8 @@ await import('./component-tests/layouts.test.mjs');
 /* OPT-017C：画廊有界渲染——5000 项挂载数上界/键盘焦点/灯箱返回/加载更多/列分配。 */
 await import('./component-tests/gallery-virtual.test.mjs');
 await import('./component-tests/close-ask.test.mjs');
+/* OPT-017E：错误中心——侧栏入口可见/面板可关闭/重试与忽略真实生效/普通 toast 不回归。 */
+await import('./component-tests/error-center.test.mjs');
 await import('./component-tests/hydrate.test.mjs');
 await import('./component-tests/mutation-reader-prose.test.mjs');
 /* OPT-008B R2（主控清单②）：搜索跨布局结果——真实 SearchModal 点击打开 +

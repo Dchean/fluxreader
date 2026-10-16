@@ -75,13 +75,30 @@ export interface SettingsState {
 }
 
 /** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM。
-    action：可选操作按钮（失败 toast 的一键重试） */
+    action：可选操作按钮（失败 toast 的一键重试；与 showToast 的动作对象同形，
+    含可选 key——错误中心按它去重，见 AppErrorEntry）。 */
 export type ToastMessage = {
   id: number;
   text: string;
   leaving?: boolean;
-  action?: { label: string; run: () => void };
+  action?: { label: string; run: () => void; key?: string };
 };
+
+/** OPT-017E：错误中心条目——带重试动作的失败提示的**持久可达副本**。
+ *  toast 层会被上限（4 条）与停留时长（4.2s）清掉唯一重试入口；错误中心以
+ *  有界列表承接：去重键取「显式操作实体 key 优先、缺省回落文案」（R1 返工：
+ *  同文案不同实体不得合并），`count` 记录合并次数、`at` 为最近一次写入时间
+ *  （TTL 惰性清理依据）。 */
+export interface AppErrorEntry {
+  id: number;
+  key: string;
+  text: string;
+  action: { label: string; run: () => void; key?: string };
+  /** 同 key 合并次数（首次为 1；重试派发清除后再次失败会从 1 重新计数） */
+  count: number;
+  /** 最近一次写入时间（ms epoch；同 key 合并时刷新，TTL 按它计算） */
+  at: number;
+}
 
 /** TASK-117：per-scope keyset 分页游标（articlesCursor 的值类型）。
  *  - lastPublished：已加载窗口最后一行的 published_at **原文**（RFC3339 字符串，
@@ -205,6 +222,11 @@ export interface AppState {
 
   /* ---------- Toast 与同步 ---------- */
   toasts: ToastMessage[];
+  /** OPT-017E：错误中心——带重试动作的失败提示的持久可达层（有界 20 条、
+   *  同 key（默认取文案）合并最新、TTL 24h 惰性清理）。普通提示仍只走 toast。 */
+  errors: AppErrorEntry[];
+  /** OPT-017E：错误中心面板开态（App Esc 链与浮层让路清单的字段源） */
+  errorCenterOpen: boolean;
   syncStatus: 'synced' | 'syncing' | 'error';
   /** 后台自动同步进行中（scheduler sync-running/sync-idle 事件驱动；与手动 syncStatus 独立） */
   backgroundSyncing: boolean;
@@ -414,8 +436,25 @@ export interface AppState {
   closeMiniModal: (which: 'newCategory' | 'addFeed' | 'editFeed' | 'renameCat') => void;
 
   /* ---------- Actions: Toast / 同步 ---------- */
-  /** text + 可选操作按钮（label/run：失败场景的一键重试） */
-  showToast: (text: string, action?: { label: string; run: () => void }) => void;
+  /** text + 可选操作按钮（label/run：失败场景的一键重试；key：操作实体标识）。
+   *  OPT-017E：带动作的提示同时写入错误中心（去重 + 上限 + TTL），使重试入口不因
+   *  toast 上限/停留时长而消失；普通提示语义不变。
+   *  R1 返工：key 为可选操作实体标识（命名 `域:操作:实体`，如 `feed:refresh:10`）
+   *  ——错误中心按「显式 key 优先、缺省回落文案」去重；带重试动作的调用点一律
+   *  传 key，避免同文案不同实体被合并成一条（迁移完整性由域回归 (e9) 守卫）。 */
+  showToast: (text: string, action?: { label: string; run: () => void; key?: string }) => void;
+  /** OPT-017E：派发错误重试并消费条目（错误中心面板与瞬时 toast 的两个表示面
+   *  同一语义）。id 先按错误中心条目匹配；找不到（条目已被同 key 合并/逐出而
+   *  toast 仍在屏上）回落到同 id 的带动作 toast。消费先于执行：动作内同步重报
+   *  的失败条目在消费之后写入 → 保留（失败不丢入口）；同步抛错则恢复消费前
+   *  快照（同样不丢入口）。 */
+  retryError: (id: number) => void;
+  /** OPT-017E：忽略（删除）单个错误条目 */
+  dismissError: (id: number) => void;
+  /** OPT-017E：清空错误中心（面板「全部清除」） */
+  clearErrors: () => void;
+  openErrorCenter: () => void;
+  closeErrorCenter: () => void;
   triggerManualSync: () => void;
   /** TASK-124：sync-queue-changed 事件落地（App.tsx 监听器调用）。
    *  payload = Rust sync_queue_stats 三元组 {waiting, failed, last_error}。

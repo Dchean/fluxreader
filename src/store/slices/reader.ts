@@ -219,7 +219,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
               if (res.degraded) {
                 get().showToast(
                   `未采用全文提取：${res.reason ?? '提取结果不可用'}`,
-                  { label: '重试', run: () => get().extractCurrentArticle() },
+                  { label: '重试', key: `reader:fulltext:${id}`, run: () => get().extractCurrentArticle() },
                 );
                 return;
               }
@@ -230,7 +230,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
             })
             .catch((e: unknown) => {
               const msg = extractError(e);
-              get().showToast(`全文提取失败：${msg}`, { label: '重试', run: () => get().extractCurrentArticle() });
+              get().showToast(`全文提取失败：${msg}`, { label: '重试', key: `reader:fulltext:${id}`, run: () => get().extractCurrentArticle() });
             });
         }
       }).catch((e: unknown) => {
@@ -238,7 +238,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
            TASK-122：失败落 bodyById failed 态（卡片内联重试入口可用） */
         const msg = extractError(e);
         markBodyFailed(id, stamp, msg);
-        get().showToast(`正文加载失败：${msg}`, { label: '重试', run: () => get().ensureArticleContent(id, { extractFulltext: true }) });
+        get().showToast(`正文加载失败：${msg}`, { label: '重试', key: `reader:content:${id}`, run: () => get().ensureArticleContent(id, { extractFulltext: true }) });
       });
       return;
     }
@@ -407,7 +407,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       })
       .catch((e: unknown) => {
         const msg = extractError(e);
-        showToast(`全文提取失败：${msg}`, { label: '重试', run: () => get().extractCurrentArticle() });
+        showToast(`全文提取失败：${msg}`, { label: '重试', key: `reader:fulltext:${activeArticleId}`, run: () => get().extractCurrentArticle() });
       });
   },
 
