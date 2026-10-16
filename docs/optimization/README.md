@@ -43,7 +43,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-015](OPT-015.md) | 窗口启动恢复与幂等媒体键 | F21,F23 | 无 | verified-ci | 015P 首显最大化修复已通过 CI；015N 八场景本地原生验收通过 |
 | [OPT-015Q](OPT-015Q.md) | 生产自动建窗路径冷启位置恢复 | F23 | OPT-015 | verified-ci | R2 差集 12/12 绿、015N 8/8、独立复审条件通过；dev 未复现跳位，生产零改动；e80957b CI 38714382972 通过；待随 OPT-015 系列合并后请用户实机复测 |
 | [OPT-016](OPT-016.md) | 行为回归分层与依赖卫生 | 测试网,依赖,CI | OPT-003, OPT-012, OPT-013, OPT-015 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
-| [OPT-017](OPT-017.md) | 有基线的搜索和媒体性能 | FTS,画廊,缓存,观测 | OPT-007, OPT-008, OPT-016 | coding | 017A 基线、017B 搜索/FTS、017C 画廊、017G 读闭包已过提交级 CI；017D～017F 已立案按序派发 |
+| [OPT-017](OPT-017.md) | 有基线的搜索和媒体性能 | FTS,画廊,缓存,观测 | OPT-007, OPT-008, OPT-016 | coding | 017A 基线、017B 搜索/FTS、017C 画廊、017D 封面、017G 读闭包已过提交级 CI；017E～017F 已立案按序派发 |
 | [OPT-018](OPT-018.md) | 全量收口和发布前验收 | 全部审计项 | OPT-001 至 OPT-017 | queued | 尚未进入最终验收；依赖前述主卡全部收口 |
 
 状态：queued / coding / review / rework / verified-local / verified-ci / integrated。未取得完整作用域证据的卡片不得记 complete。卡片中的写集可在读码后由主控明确调整，不允许执行者自行扩展。
@@ -78,7 +78,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-017A](OPT-017A.md) | 隔离数据层性能基线 | verified-local | 修订指标与原始数据已复核；仅本地基线，不是性能优化完成 |
 | [OPT-017B](OPT-017B.md) | 搜索路径与 FTS 写放大处置 | verified-ci | cf82d21 / CI 38823585612；v29 删旧 FTS、trigram 候选索引 + 等值回落 |
 | [OPT-017C](OPT-017C.md) | 画廊布局有界渲染 | verified-ci | cf46b7e / CI 38856753155；lanes + 垂直虚拟化，通用上界式与参考口径 48 |
-| [OPT-017D](OPT-017D.md) | 封面补全覆盖面与预算 | queued | 服务端无图文章缺口取证；批次/并发/超时/失败缓存与可观测 |
+| [OPT-017D](OPT-017D.md) | 封面补全覆盖面与预算 | verified-ci | 9e49e3d / CI 38872257111；候选扩到服务端无图文章 + 持久扫描游标 + 预算/可观测 |
 | [OPT-017E](OPT-017E.md) | 重试入口持久可达与有界错误提示 | queued | 修复 `slice(-4)` 静默挤掉唯一重试入口；错误中心有界去重 |
 | [OPT-017F](OPT-017F.md) | 重复实现与零消费入口清理 | queued | 先搜消费者再删；numericId 双实现等值后收敛 |
 | [OPT-017G](OPT-017G.md) | 读闭包查询规划与批量标读成本 | verified-ci | b126373 / CI 38841560090；v30 部分索引 `(url_norm) WHERE is_read=0`，50k×8KiB 1000 条标读 65772→736ms |
