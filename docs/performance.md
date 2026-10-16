@@ -72,6 +72,33 @@
 - 跨规模等值边界：真实语料（20k/50k）只背书 **id 集合与字段等值**；并列 `published_at` 下的逐行逐字排序等值仅由 db 层小夹具等值矩阵（含并列发布时间用例）机制化背书，未在大库上作全序逐字比对——引用时按「id 集合与字段等值 + 小夹具排序等值」表述，不得升格为全规模逐字排序保证。
 - 未测：端到端（IPC/渲染）、自然语料、索引损坏的逐类语义（仅按 MATCH 报错回落）、「触发器被单独拆除而表仍在」的陈旧索引（应用内不可产生）。
 
+## 读闭包查询规划与批量标读成本（OPT-017G，2026-10-16）
+
+构建：`a309219` + 本卡未提交改动（仅 `src-tauri/src/db/{articles,migrations}.rs` 与本文件等文档；工作区完整 diff 与其哈希见 tmp/optimization-20261008/OPT-017G/evidence/build-workspace-final.diff 与 RESULT.md；测量运行于 rustfmt 格式化前的同一语义版本）。语料：逐字节复制自 OPT-017B 的 20k×8KiB 与 50k×8KiB 库（未覆盖旧样本），首次打开执行 v29→v30 升级；driver、JSON 与工作副本全部在 tmp/optimization-20261008/OPT-017G/（与 017A/017B 样本分开）。
+
+**问题（同构建复现与定位）**：OPT-008B R1 读闭包（`read_targets_with_state`）逐条执行 `url_norm = ?2 AND is_read = 0 ORDER BY id`，被规划为 `SEARCH articles USING INDEX idx_articles_unread (is_read=?)`——**扫描全部未读行**并逐行回表取 `url_norm` 过滤（EXPLAIN 原文落盘 `probe_pre_*.json`）。per-item 拆分（50k×8KiB，SQL 级合计）：闭包查询 ≈24–60 ms/条（快/慢档漂移见下），url_norm 主键读 ≈0.014ms/条、回读 ≈0.008ms/条、生产 `set_read`+`enqueue_sync`（无闭包）≈0.087ms/条——闭包占 set_read_bulk 单条成本 99% 以上，复现 017B 范围外发现。
+
+**处置（v30，仅追加迁移）**：新增部分索引 `idx_articles_url_norm_unread ON articles(url_norm) WHERE is_read = 0`（`url_norm` 等值前缀 + `id`=rowid 隐式覆盖 + 免排序）。读闭包查询文本、写路径与语义**零改动**；`idx_articles_unread` 保留（mark_all_read 的 UPDATE 计划消费）。同构建 A/B/D 三臂轮内交错、顺序旋转（A=迁移后主库、B=同副本 DROP INDEX、D=未改动副本对照文件/缓存状态）：
+
+| 语料 | A 100 条 | B 100 条 | A 1000 条 | B 1000 条 | B/A（1000 条） | A per-item |
+| --- | --- | --- | --- | --- | --- | --- |
+| 20k × 8KiB | 32.96 ms | 2469.26 ms | 237.75 ms | 24981.10 ms | 105× | 0.238 ms |
+| 50k × 8KiB | 43.06 ms | 6629.78 ms | 736.20 ms | 65772.05 ms | 89× | 0.736 ms |
+
+（中位；轮次：100 条×3 轮、1000 条×2 轮；D 与 A 同量级——20k 21.94/207.91ms、50k 76.57/999.84ms——无系统性副本效应；B 臂逐条 ≈25/66ms，与 pre 同计划、同量级（约 +10~20%）。bulk 段无前置检查点、跨相位未读池起点略有差，口径见 tmp/optimization-20261008/OPT-017G/RESULT.md §4。）
+
+- 计划对照：A/D `SEARCH articles USING COVERING INDEX idx_articles_url_norm_unread (url_norm=?)`（无 TEMP B-TREE）；B 回落 `SEARCH articles USING INDEX idx_articles_unread (is_read=?)`。
+- 索引体积（dbstat）：20k 0.545MB、50k 1.53MB（对照全量 `idx_articles_url_norm` 0.99/2.50MB）；升级建索引 0.17s（20k）/1.09s（50k，open 计时含迁移）。
+- 写入成本：读/取消读翻转与插入探针在新旧索引间无法与测量噪声区分（A/B/D 交叉不一致，|差|≤0.2ms/次），远小于闭包消除的 25–66ms/条。
+- 回落与等值：删索引后计划回落、闭包结果集与回执行/逐行状态/计数逐字等值（`opt017g_read_closure_tests`）；迁移在含数据 v29 旧库上幂等（`opt017g_migration_tests`）。
+
+测量边界与未测项：
+
+- 合成语料 `url_norm` 每篇唯一（闭包命中恒 0 行）：上表只测**查询固定成本**的消除；闭包多行传播的写入放大由小夹具等值回归覆盖、未在大库测；自然语料未测。
+- 同语料同计划存在 ≈2.4× 的「快/慢档」机器状态漂移（如 50k 单条 24↔60ms；段内稳定、段间跳变，原因未定位）：跨运行引用绝对数字必须带轮次并优先用同运行 A/B 差；不得与 017B 的 25ms/条直接拼成同构建曲线。
+- 50k post 相位两次长跑被外部终止（无 stderr/崩溃/事件日志记录，进程被杀于约 4–8 分钟处，非程序错误）；定版口径为 100×3 + 1000×2 且跳过 breakdown 拆分段（per-item 拆分证据在 pre/candidates 相位），driver 已改为逐段增量落盘保全中途结果。
+- 未测：端到端（IPC/渲染）、并发锁等待、普通 B 树索引的「损坏」回落（无应用级探测；仅覆盖缺失回落）。
+
 ## 历史实测数字（v0.17.0 构建，实机）
 
 环境：本机实装 v0.17.0，WebView2 远程调试端口 9222，应用窗口置于副屏，合成为 20k / 50k 篇文章（RFC3339 时间戳）。

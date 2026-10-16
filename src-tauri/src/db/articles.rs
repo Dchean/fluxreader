@@ -1769,6 +1769,18 @@ fn set_read_enqueue_in_tx(
     })
 }
 
+// Note: 读闭包查询计划由 v30 部分索引 `idx_articles_url_norm_unread`
+// （`(url_norm) WHERE is_read = 0`）支撑（等值前缀 + 免排序覆盖扫描）；索引缺失
+// 或损坏时回落旧计划（`idx_articles_unread` 全未读扫描），结果集不变 — 见
+// docs/performance.md「OPT-017G」与 .agents/notes/implemented/architecture/
+// 2026-10-12-订阅条目与共享内容身份.md 的「OPT-017G 追加」。
+/// 读闭包目标查询：同 `url_norm` 且未读的兄弟行（排除自身），按 id 升序。
+/// 提取为常量使 EXPLAIN 计划回归测试与生产**同字节**（`opt017g_read_closure_tests`
+/// 直接复用本常量）——测试不得另抄一份 SQL。
+pub(crate) const READ_CLOSURE_SQL: &str = "SELECT id FROM articles
+             WHERE id != ?1 AND url_norm = ?2 AND is_read = 0
+             ORDER BY id";
+
 /// 读目标行随状态：`(id, feed_id, 操作前是否未读)`。读闭包 = 主行 + 同组未读副本。
 fn read_targets_with_state(conn: &Connection, id: i64) -> AppResult<Vec<(i64, i64, bool)>> {
     let norm: Option<String> = conn
@@ -1781,11 +1793,7 @@ fn read_targets_with_state(conn: &Connection, id: i64) -> AppResult<Vec<(i64, i6
         .flatten();
     let mut targets: Vec<i64> = vec![id];
     if let Some(norm) = norm {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM articles
-             WHERE id != ?1 AND url_norm = ?2 AND is_read = 0
-             ORDER BY id",
-        )?;
+        let mut stmt = conn.prepare(READ_CLOSURE_SQL)?;
         let rows = stmt.query_map(rusqlite::params![id, norm], |r| r.get::<_, i64>(0))?;
         targets.extend(rows.collect::<Result<Vec<_>, _>>()?);
     }
@@ -4489,5 +4497,424 @@ mod opt017b_search_tests {
                 .any(|s| s.contains("articles_trigram_idx")),
             "短词查询不得引用候选索引：{plan_short:?}"
         );
+    }
+}
+
+/* ============================================================
+OPT-017G：读闭包查询规划与批量标读成本回归。
+（先红后绿：本模块在实现 v30 部分索引 `idx_articles_url_norm_unread` 前运行于
+未迁移库上——「计划引用新索引」断言为红，语义等值组恒为守卫、以变异证明有效。）
+============================================================ */
+#[cfg(test)]
+mod opt017g_read_closure_tests {
+    use super::*;
+    use crate::db::{create_folder, insert_feed, scope_counts, MIGRATIONS};
+    use rusqlite::Connection;
+
+    const NEW_INDEX: &str = "idx_articles_url_norm_unread";
+
+    fn conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    fn explain_plan(conn: &Connection, sql: &str, params_n: usize) -> Vec<String> {
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let args = vec![rusqlite::types::Value::Null; params_n];
+        stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| {
+            r.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
+    fn index_present(conn: &Connection, name: &str) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                rusqlite::params![name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        n == 1
+    }
+
+    struct Fixture {
+        all: Vec<i64>,
+        /// 同文组一：A1 未读 / A2 已读+收藏 / A3 未读（跨两个源）
+        g1: [i64; 3],
+        /// 同文组二：B1/B2 未读
+        g2: [i64; 2],
+        unique: i64,
+        null_norm: i64,
+    }
+
+    /// 夹具：同 url_norm 跨源组（读传播主场）、独立组、独条、NULL url_norm。
+    /// 另补 200 条唯一 url_norm 底噪行，保证规划器有统计空间选择索引
+    /// （小表整表扫描可能压过索引，与生产形态不符）。
+    fn seed_fixture(conn: &Connection) -> Fixture {
+        let folder = create_folder(conn, "读闭包夹具", "article").unwrap();
+        let mk_feed = |suffix: &str| -> i64 {
+            insert_feed(
+                conn,
+                &format!("https://probe.invalid/{suffix}"),
+                None,
+                suffix,
+                None,
+                folder,
+                "inherit",
+                false,
+                false,
+            )
+            .unwrap()
+        };
+        let feed_a = mk_feed("a");
+        let feed_b = mk_feed("b");
+        let mk = |feed: i64, guid: &str, norm: Option<&str>, read: bool, star: bool| -> i64 {
+            conn.execute(
+                "INSERT INTO articles(feed_id,guid,url,url_norm,title,published_at,is_read,is_starred)
+                 VALUES(?1,?2,?3,?4,'t','2026-10-16T00:00:00Z',?5,?6)",
+                rusqlite::params![feed, guid, norm, norm, read as i64, star as i64],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let a1 = mk(
+            feed_a,
+            "g1-a1",
+            Some("https://probe.invalid/same-a"),
+            false,
+            false,
+        );
+        let a2 = mk(
+            feed_b,
+            "g1-a2",
+            Some("https://probe.invalid/same-a"),
+            true,
+            true,
+        );
+        let a3 = mk(
+            feed_a,
+            "g1-a3",
+            Some("https://probe.invalid/same-a"),
+            false,
+            false,
+        );
+        let b1 = mk(
+            feed_a,
+            "g2-b1",
+            Some("https://probe.invalid/same-b"),
+            false,
+            false,
+        );
+        let b2 = mk(
+            feed_b,
+            "g2-b2",
+            Some("https://probe.invalid/same-b"),
+            false,
+            false,
+        );
+        let unique = mk(
+            feed_a,
+            "uniq-1",
+            Some("https://probe.invalid/uniq-1"),
+            false,
+            false,
+        );
+        let null_norm = mk(feed_a, "null-1", None, false, false);
+        for i in 0..200 {
+            let norm = format!("https://probe.invalid/noise/{i}");
+            conn.execute(
+                "INSERT INTO articles(feed_id,guid,url,url_norm,title,published_at,is_read,is_starred)
+                 VALUES(?1,?2,?3,?3,'t','2026-10-16T00:00:00Z',?4,0)",
+                rusqlite::params![feed_a, format!("noise-{i}"), norm, (i % 3 == 0) as i64],
+            )
+            .unwrap();
+        }
+        Fixture {
+            all: vec![a1, a2, a3, b1, b2, unique, null_norm],
+            g1: [a1, a2, a3],
+            g2: [b1, b2],
+            unique,
+            null_norm,
+        }
+    }
+
+    fn closure_rowset(conn: &Connection, id: i64) -> Vec<i64> {
+        let norm: Option<String> = conn
+            .query_row(
+                "SELECT url_norm FROM articles WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .unwrap();
+        let Some(norm) = norm else {
+            return Vec::new();
+        };
+        let mut stmt = conn.prepare(READ_CLOSURE_SQL).unwrap();
+        stmt.query_map(rusqlite::params![id, norm], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    fn state_snapshot(conn: &Connection) -> serde_json::Value {
+        let rows: Vec<(i64, i64, i64, i64)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, is_read, read_version, is_starred FROM articles ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let queue: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT article_id, action FROM sync_queue ORDER BY article_id, action")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        serde_json::json!({"articles": rows, "queue": queue})
+    }
+
+    /// 反例 1（先红后绿）：读闭包查询在最新 schema 下必须由 v30 部分索引
+    /// `idx_articles_url_norm_unread` 驱动（等值前缀 + 免排序覆盖扫描），
+    /// 不得再扫全未读行，也不得引入临时排序。
+    #[test]
+    fn closure_plan_uses_partial_url_norm_unread_index() {
+        let conn = conn();
+        let _fx = seed_fixture(&conn);
+        assert!(
+            index_present(&conn, NEW_INDEX),
+            "v30 必须在最新 schema 建立 {NEW_INDEX}"
+        );
+        let plan = explain_plan(&conn, READ_CLOSURE_SQL, 2);
+        let plan_ref = explain_plan(&conn, READ_CLOSURE_SQL, 2);
+        assert_eq!(plan, plan_ref, "同库同查询计划必须稳定");
+        assert!(
+            plan.iter().any(|s| s.contains(NEW_INDEX)),
+            "闭包计划必须引用 {NEW_INDEX}：{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|s| s.contains("TEMP B-TREE")),
+            "闭包计划不得有临时排序（索引序即 ORDER BY id）：{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|s| s.contains("idx_articles_unread")),
+            "闭包计划不得再落到全未读扫描索引：{plan:?}"
+        );
+    }
+
+    /// 反例 3（缺失回落）：删掉新索引后——
+    /// 计划回落旧现场（idx_articles_unread 全未读扫描），但闭包**结果集**与
+    /// 生产状态迁移保持逐字正确（回落只变慢、不变义）。
+    #[test]
+    fn fallback_when_index_dropped_keeps_results_and_transitions() {
+        let conn = conn();
+        let fx = seed_fixture(&conn);
+        let plan_with = explain_plan(&conn, READ_CLOSURE_SQL, 2);
+        assert!(
+            plan_with.iter().any(|s| s.contains(NEW_INDEX)),
+            "前置：索引在场时计划必须引用新索引：{plan_with:?}"
+        );
+        let before: Vec<Vec<i64>> = fx.all.iter().map(|id| closure_rowset(&conn, *id)).collect();
+
+        // 索引缺失回落：与生产「库被手工降级/异常现场」同形态（普通 B 树索引无
+        // 应用级损坏探测；缺失即规划回落，损坏由 SQLite 报错——本测试覆盖缺失。）
+        conn.execute(&format!("DROP INDEX {NEW_INDEX}"), [])
+            .unwrap();
+        let plan_without = explain_plan(&conn, READ_CLOSURE_SQL, 2);
+        assert!(
+            !plan_without.iter().any(|s| s.contains(NEW_INDEX)),
+            "删索引后计划不得再引用 {NEW_INDEX}：{plan_without:?}"
+        );
+        assert!(
+            plan_without
+                .iter()
+                .any(|s| s.contains("idx_articles_unread")),
+            "删索引后必须回落旧未读扫描计划：{plan_without:?}"
+        );
+        let after: Vec<Vec<i64>> = fx.all.iter().map(|id| closure_rowset(&conn, *id)).collect();
+        assert_eq!(before, after, "索引缺失前后闭包结果集必须逐字一致");
+
+        // 生产入口在回落现场仍然语义正确：A3 标读传播到未读兄弟 A1
+        let receipts = set_read_bulk_with_enqueue(&conn, &[fx.g1[2]], true).unwrap();
+        let ids: Vec<i64> = receipts.iter().map(|r| r.id).collect();
+        let want: Vec<i64> = vec![fx.g1[0], fx.g1[2]];
+        assert_eq!(ids, want, "回落现场传播集合与回执必须与索引在场一致");
+        let read_state = |id: i64| -> i64 {
+            conn.query_row("SELECT is_read FROM articles WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(read_state(fx.g1[0]), 1);
+        assert_eq!(read_state(fx.g1[2]), 1);
+        assert_eq!(read_state(fx.g1[1]), 1, "已读兄弟不受影响");
+    }
+
+    /// 反例 2（语义等值）：同一夹具双库——库 1 带新索引、库 2 删新索引——
+    /// 完整操作序列（批量标读/单条标读/取消标读/收藏）后：
+    /// 逐项闭包结果集、回执行、逐行状态（read/read_version/star）与队列、计数快照
+    /// 全部逐字一致；收藏保持独立（不随读传播）。
+    #[test]
+    fn state_transitions_equal_with_and_without_index() {
+        let db1 = conn();
+        let db2 = conn();
+        let fx1 = seed_fixture(&db1);
+        let fx2 = seed_fixture(&db2);
+        assert_eq!(fx1.all, fx2.all, "双库夹具 id 必须一致");
+        assert!(index_present(&db1, NEW_INDEX) && index_present(&db2, NEW_INDEX));
+        db2.execute(&format!("DROP INDEX {NEW_INDEX}"), []).unwrap();
+        assert!(!index_present(&db2, NEW_INDEX));
+
+        for id in &fx1.all {
+            assert_eq!(
+                closure_rowset(&db1, *id),
+                closure_rowset(&db2, *id),
+                "库1/库2 闭包结果集必须一致（id={id}）"
+            );
+        }
+
+        let mut receipts1: Vec<ReadWriteReceipt> = Vec::new();
+        let mut receipts2: Vec<ReadWriteReceipt> = Vec::new();
+        // 1) 批量标读触发组内传播（A3→A1）
+        receipts1.extend(set_read_bulk_with_enqueue(&db1, &[fx1.g1[2]], true).unwrap());
+        receipts2.extend(set_read_bulk_with_enqueue(&db2, &[fx2.g1[2]], true).unwrap());
+        // 2) 单条标读已读行（无传播、仅主行入队）
+        receipts1.extend(set_read_with_enqueue(&db1, fx1.g1[0], true).unwrap());
+        receipts2.extend(set_read_with_enqueue(&db2, fx2.g1[0], true).unwrap());
+        // 3) 取消标读（unread 不广播；操作前已读 → 回执含本行）
+        receipts1.extend(set_read_with_enqueue(&db1, fx1.g1[1], false).unwrap());
+        receipts2.extend(set_read_with_enqueue(&db2, fx2.g1[1], false).unwrap());
+        // 4) 收藏独立（不随读传播）
+        set_starred_with_enqueue(&db1, fx1.g2[0], true).unwrap();
+        set_starred_with_enqueue(&db2, fx2.g2[0], true).unwrap();
+        // 5) 批量取消标读
+        receipts1.extend(set_read_bulk_with_enqueue(&db1, &fx1.g2, false).unwrap());
+        receipts2.extend(set_read_bulk_with_enqueue(&db2, &fx2.g2, false).unwrap());
+        // 6) NULL url_norm 条目（无闭包查询、主行直通）
+        receipts1.extend(set_read_with_enqueue(&db1, fx1.null_norm, true).unwrap());
+        receipts2.extend(set_read_with_enqueue(&db2, fx2.null_norm, true).unwrap());
+        // 7) 独条
+        receipts1.extend(set_read_with_enqueue(&db1, fx1.unique, true).unwrap());
+        receipts2.extend(set_read_with_enqueue(&db2, fx2.unique, true).unwrap());
+
+        assert_eq!(receipts1, receipts2, "回执行必须逐字一致");
+        assert_eq!(
+            state_snapshot(&db1),
+            state_snapshot(&db2),
+            "逐行状态（read/read_version/star）与队列必须逐字一致"
+        );
+        assert_eq!(
+            scope_counts(&db1, None).unwrap().all.unread,
+            scope_counts(&db2, None).unwrap().all.unread,
+            "计数快照 unread 必须一致"
+        );
+
+        // 冻结期望（手工推演，独立于实现）：回执集合、行态与队列。
+        // 任何「闭包多收/少收、传播错位」的语义变异都会在这里翻红。
+        let feed_a = conn_feed_of(&db1, fx1.g1[0]);
+        let feed_b = conn_feed_of(&db1, fx1.g1[1]);
+        let want_receipts = vec![
+            ReadWriteReceipt {
+                id: fx1.g1[0],
+                feed_id: feed_a,
+            }, // 步骤 1 传播
+            ReadWriteReceipt {
+                id: fx1.g1[2],
+                feed_id: feed_a,
+            }, // 步骤 1 主行
+            ReadWriteReceipt {
+                id: fx1.g1[1],
+                feed_id: feed_b,
+            }, // 步骤 3 取消标读（操作前已读）
+            ReadWriteReceipt {
+                id: fx1.null_norm,
+                feed_id: feed_a,
+            }, // 步骤 6
+            ReadWriteReceipt {
+                id: fx1.unique,
+                feed_id: feed_a,
+            }, // 步骤 7
+        ];
+        assert_eq!(receipts1, want_receipts, "回执集合必须等于冻结期望");
+        assert_eq!(
+            receipts2, want_receipts,
+            "（无索引库）回执集合必须等于冻结期望"
+        );
+
+        // 行态冻结：(is_read, read_version, is_starred)
+        // A1：步骤 1 传播读 + 步骤 2 主行重写 → 版本 2；
+        // A2：步骤 3 取消标读（版本 +1）；收藏保持 1；
+        // A3：步骤 1 主行 → 版本 1；B1/B2：步骤 5 取消标读（同值写入仍推进版本）；
+        // N1/U1：步骤 6/7 各 +1。任何越界标读（如把已读兄弟再次写入）都会改版本。
+        let want_states: Vec<(i64, i64, i64, i64)> = vec![
+            (fx1.g1[0], 1, 2, 0),
+            (fx1.g1[1], 0, 1, 1),
+            (fx1.g1[2], 1, 1, 0),
+            (fx1.g2[0], 0, 1, 1),
+            (fx1.g2[1], 0, 1, 0),
+            (fx1.null_norm, 1, 1, 0),
+            (fx1.unique, 1, 1, 0),
+        ];
+        let state_of = |conn: &Connection, id: i64| -> (i64, i64, i64) {
+            conn.query_row(
+                "SELECT is_read, read_version, is_starred FROM articles WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+        };
+        for (id, read, ver, star) in &want_states {
+            assert_eq!(
+                state_of(&db1, *id),
+                (*read, *ver, *star),
+                "库1 行态必须等于冻结期望（id={id}）"
+            );
+            assert_eq!(
+                state_of(&db2, *id),
+                (*read, *ver, *star),
+                "库2 行态必须等于冻结期望（id={id}）"
+            );
+        }
+
+        // 队列冻结（article_id, action 升序）：
+        // A1 read（步骤 1/2）；A2 unread（步骤 3 覆盖步骤 1 不存在的 read）；
+        // A3 read；B1 star + unread（收藏与取消标读各自保留）；B2 unread；
+        // N1 read；U1 read。已读兄弟不得有额外队项。
+        let want_queue: Vec<(i64, String)> = vec![
+            (fx1.g1[0], "read".into()),
+            (fx1.g1[1], "unread".into()),
+            (fx1.g1[2], "read".into()),
+            (fx1.g2[0], "star".into()),
+            (fx1.g2[0], "unread".into()),
+            (fx1.g2[1], "unread".into()),
+            (fx1.unique, "read".into()),
+            (fx1.null_norm, "read".into()),
+        ];
+        let queue_of = |conn: &Connection| -> Vec<(i64, String)> {
+            let mut stmt = conn
+                .prepare("SELECT article_id, action FROM sync_queue ORDER BY article_id, action")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(queue_of(&db1), want_queue, "库1 队列必须等于冻结期望");
+        assert_eq!(queue_of(&db2), want_queue, "库2 队列必须等于冻结期望");
+    }
+
+    fn conn_feed_of(conn: &Connection, id: i64) -> i64 {
+        conn.query_row("SELECT feed_id FROM articles WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 }

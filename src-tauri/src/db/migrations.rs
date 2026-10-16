@@ -899,6 +899,49 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         END;
     "#,
         ),
+        // OPT-017G：读闭包查询规划与批量标读成本（v30，纯增索引）。
+        //
+        // 现场：OPT-008B R1 的读闭包（`db/articles.rs` 的 `read_targets_with_state`）
+        // 按 `id != ?1 AND url_norm = ?2 AND is_read = 0 ORDER BY id` 逐条取同文未读
+        // 副本；可用索引里 `idx_articles_unread`（(is_read) WHERE is_read=0）虽含
+        // `is_read` 等值项，但不含 `url_norm`——规划器选中它后对每次查询**扫描全部
+        // 未读行**并在表里逐行回读 `url_norm` 过滤（EXPLAIN 实测：50k×8KiB 语料
+        // `SEARCH articles USING INDEX idx_articles_unread (is_read=?)`）。批量标读
+        // 逐条执行该查询，把「一次用户动作」放大为 O(未读行数)/条：同构建同语料实测
+        // 50k×8KiB 下闭包查询合计约 24–60ms/条（占 set_read_bulk 单条成本 99% 以上，
+        // 无闭包写+入队约 0.09ms/条）；20k×8KiB 约 9–22ms/条。017B 曾记录同一现象
+        // （范围外发现），本迁移按该卡片要求补计划取证后修复——证据落盘于
+        // tmp/optimization-20261008/OPT-017G/（probe_pre_/probe_candidates_/probe_post_*.json）。
+        //
+        // 方案：新增部分索引 `(url_norm) WHERE is_read = 0`——
+        //   - 查询的 `is_read = 0` 与部分索引 WHERE 逐字同构，`url_norm = ?` 成为
+        //     等值前缀；`id` 是 rowid 别名，索引天然覆盖 `SELECT id`，且同 url_norm
+        //     条目按 rowid 升序，**ORDER BY id 免排序**（实测计划
+        //     `SEARCH articles USING COVERING INDEX ... (url_norm=?)`，无 TEMP B-TREE）。
+        //   - 仅索引未读行（≈全表 2/3），并只在 0↔1 读翻转/插入/删除/url_norm 变更时
+        //     维护；候选对照（candidates 相位 JSON）：(url_norm, id) 部分索引与
+        //     (url_norm) 部分索引计划/耗时等价而后者更小（50k 约 1.55MB vs 1.65MB，
+        //     20k 约 0.61MB vs 0.67MB），故取最小列集；非部分 (url_norm, id)（约
+        //     2.45MB）在无 ANALYZE 统计下**不被规划器选中**（计划仍是旧全未读扫描）、
+        //     不能消除慢路径，弃用；`INDEXED BY idx_articles_url_norm` 查询改写虽同样
+        //     快，但索引缺失时直接报错（丢失回落），弃用。
+        //   - 索引缺失/损坏（普通 B 树索引无应用级探测）时规划器自动回落旧计划：
+        //     只变慢不变义（回落结果集等值回归见 db/articles.rs 的
+        //     `opt017g_read_closure_tests`）。
+        //   - 语义零变化：不改查询文本、不改写路径、不动 `idx_articles_unread`
+        //     （仍供 mark_all_read 的 UPDATE 计划，v14 注释）；同文读传播/独立收藏/
+        //     去重开关全不受影响（索引存在性等值与回执行等值回归同上）。
+        // 数据不改动，只建索引；旧库升级为单条 CREATE INDEX（50k 行实测秒级，
+        // 见 RESULT「升级耗时」）。user_version=30。
+        // Note: 读闭包查询计划与部分索引的取舍依据 — 见 docs/performance.md「OPT-017G」
+        // 与 .agents/notes/implemented/architecture/2026-10-12-订阅条目与共享内容身份.md
+        // 的「OPT-017G 追加」。
+        M::up(
+            r#"
+        CREATE INDEX IF NOT EXISTS idx_articles_url_norm_unread
+            ON articles(url_norm) WHERE is_read = 0;
+    "#,
+        ),
     ])
 });
 
@@ -3088,7 +3131,18 @@ mod opt017b_migration_tests {
             let uv: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(uv, 29, "升级后版本必须为 v29（含本卡追加迁移）");
+            // 追加式迁移不硬编码最新版本号：与全新库 to_latest 的版本一致即可
+            // （OPT-017G 追加 v30 后由 29 → 30；本断言意图是「到达最新」而非「恰为 29」）
+            let mut fresh = Connection::open_in_memory().unwrap();
+            MIGRATIONS.to_latest(&mut fresh).unwrap();
+            let latest: i64 = fresh
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                uv, latest,
+                "升级后版本必须为最新（本卡追加迁移落地）：uv={uv} latest={latest}"
+            );
+            assert!(uv >= 29, "至少到达 v29 现场：uv={uv}");
             assert_eq!(
                 legacy_fts_objects(&conn),
                 0,
@@ -3129,7 +3183,7 @@ mod opt017b_migration_tests {
             let uv2: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(uv2, 29, "重复升级后版本不变");
+            assert_eq!(uv2, uv, "重复升级后版本不变");
             assert_eq!(data_snapshot(&conn), before, "重复升级数据不变");
             assert_eq!(search_hits(&conn), hits_before, "重复升级搜索命中不变");
         }
@@ -3281,5 +3335,214 @@ mod opt017b_migration_tests {
             .unwrap();
         assert_eq!(contents_n(&conn), 0, "最后引用消失：contents 必须回收");
         assert_eq!(legacy_fts_objects(&conn), 0, "全程无旧 FTS 对象参与");
+    }
+}
+
+/* ============================================================
+OPT-017G：v30 读闭包部分索引迁移回归。
+（先红后绿：追加迁移实现前运行——索引存在性/形状断言为红；数据等值与幂等组
+为守卫。）
+============================================================ */
+#[cfg(test)]
+mod opt017g_migration_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    const NEW_INDEX: &str = "idx_articles_url_norm_unread";
+
+    fn index_present(conn: &Connection, name: &str) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                params![name],
+                |r| r.get(0),
+            )
+            .unwrap();
+        n == 1
+    }
+
+    fn index_count(conn: &Connection, name: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            params![name],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn latest_schema_version() -> i64 {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// 含数据旧库（v29）：同 url_norm 组（跨条目读传播现场）+ 独立条目 +
+    /// 混合读藏 + 一条 read 队列项 + 一条内容修好（正文共享组）。
+    fn seed_v29_data(conn: &Connection) -> serde_json::Value {
+        use crate::db::NewArticle;
+        let folder = crate::db::create_folder(conn, "迁移分类", "article").unwrap();
+        let feed = crate::db::insert_feed(
+            conn,
+            "https://g.example/rss",
+            None,
+            "G 源",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let na = |guid: &str, url: &str| NewArticle {
+            guid: guid.into(),
+            url: Some(url.into()),
+            title: format!("G 标题 {guid}"),
+            author: None,
+            summary: None,
+            content_html: Some("<p>G 正文</p>".into()),
+            body_text: "G 正文".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-10-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let (g1, _) = crate::db::upsert_article_with_feed(
+            conn,
+            feed,
+            &na("g-1", "https://g.example/same"),
+            false,
+        )
+        .unwrap();
+        let (_g2, _) = crate::db::upsert_article_with_feed(
+            conn,
+            feed,
+            &na("g-2", "https://g.example/same"),
+            false,
+        )
+        .unwrap();
+        let (g3, _) = crate::db::upsert_article_with_feed(
+            conn,
+            feed,
+            &na("g-3", "https://g.example/other"),
+            false,
+        )
+        .unwrap();
+        crate::db::set_read_with_enqueue(conn, g1, true).unwrap();
+        crate::db::set_starred_with_enqueue(conn, g3, true).unwrap();
+
+        seed_snapshot_states(conn)
+    }
+
+    /// 反例 3（升级/旧库，先红后绿）：v29 含数据旧库升级到最新——
+    /// 新部分索引就位（形状 = `ON articles(url_norm) WHERE is_read = 0`），
+    /// 数据/读藏/队列逐字不变；重复升级幂等（版本不变、单索引、数据不变）。
+    #[test]
+    fn v30_upgrade_on_populated_v29_db_is_idempotent_and_preserves_data() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 29).unwrap();
+        assert!(
+            !index_present(&conn, NEW_INDEX),
+            "前置：v29 现场不得存在 {NEW_INDEX}"
+        );
+        let before = seed_v29_data(&conn);
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let uv: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            uv,
+            latest_schema_version(),
+            "升级后必须到达最新 schema 版本（不硬编码版本号）"
+        );
+        assert!(uv >= 30, "本卡追加迁移必须推进版本：uv={uv}");
+        assert!(index_present(&conn, NEW_INDEX), "v30 必须建立 {NEW_INDEX}");
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                params![NEW_INDEX],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("ON articles(url_norm)") && sql.contains("WHERE is_read = 0"),
+            "索引必须是对 url_norm 的未读部分索引：{sql}"
+        );
+        assert_eq!(
+            seed_snapshot_states(&conn),
+            before,
+            "升级不得改动文章/读数/版本/收藏/队列"
+        );
+
+        // 幂等：重复升级 = no-op（版本不变、索引唯一、数据不变）
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let uv2: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(uv2, uv, "重复升级后版本不变");
+        assert_eq!(
+            index_count(&conn, NEW_INDEX),
+            1,
+            "重复升级后索引必须唯一（无重复对象）"
+        );
+        assert_eq!(seed_snapshot_states(&conn), before, "重复升级数据不变");
+    }
+
+    fn seed_snapshot_states(conn: &Connection) -> serde_json::Value {
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        let states: Vec<(String, i64, i64, i64)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT guid, is_read, read_version, is_starred FROM articles ORDER BY guid",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let queue: Vec<(i64, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT article_id, action FROM sync_queue ORDER BY article_id, action")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        serde_json::json!({
+            "articles": count("SELECT COUNT(*) FROM articles"),
+            "contents": count("SELECT COUNT(*) FROM contents"),
+            "read_total": count("SELECT COUNT(*) FROM articles WHERE is_read = 1"),
+            "states": states,
+            "queue": queue,
+        })
+    }
+
+    /// 全新库与升级库的索引 SQL 必须逐字一致（防两条路径漂移）。
+    #[test]
+    fn fresh_and_upgraded_index_sql_identical() {
+        let mut fresh = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut fresh).unwrap();
+        let mut upgraded = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut upgraded, 29).unwrap();
+        MIGRATIONS.to_latest(&mut upgraded).unwrap();
+        let sql_of = |conn: &Connection| -> String {
+            conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                params![NEW_INDEX],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert!(index_present(&fresh, NEW_INDEX));
+        assert_eq!(
+            sql_of(&fresh),
+            sql_of(&upgraded),
+            "全新库与 v29 升级库的索引定义必须逐字一致"
+        );
     }
 }
