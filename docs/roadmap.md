@@ -11,13 +11,12 @@
 | 「滚动出列表即标为已读」的前置条件未声明 | 只在「显示: 未读」模式下生效（`Timeline.tsx` 里的 `if (timelineFilter !== 'unread') return;`），设置页与文案都没说 | 用户以为这个开关一直有效 |
 | 配置同步的订阅/分类删除语义未实现 | `src-tauri/src/config_sync.rs` 里没有任何 `DELETE FROM` / `delete_folder` / `delete_feed`；`commands/folders.rs::delete_folder` 只调 `record_folder_delete`，不调 `unsubscribe_remote` | 「本地删除 ≠ 远端删除」两个缺口都还开着 |
 | `articles_fts` 与三个触发器零消费 | 搜索已明确不用 FTS5 `MATCH`（中文分词原因，记录在 `db/articles.rs`），但 `migrations.rs` 仍建表并维护触发器 | 无用户可见影响；占用迁移与触发器维护面 |
-| 封面覆盖缺口 | miniflux 源文章不参与封面补全（后端只取 `source='direct'`，约 16% 文章无封面）；`first_image` 无尺寸/角色启发式，会把头像、emoji、favicon 当封面 | 部分文章无封面或封面不正确 |
+| 封面覆盖缺口 | 服务端正文无图文章的候选排除已由 OPT-017D 移除（候选改为全来源「无封面 + 有 URL」）；`first_image`/og:image 仍无尺寸/角色启发式，会把头像、emoji、favicon 当封面；本地为服务端文章补上的封面不参与失效清理（保守边界） | 部分文章无封面或封面不正确 |
 | `--text-tertiary` 深色下对比度约 4:1 | 处于 WCAG AA 边缘，属于全局视觉 token | 低视力用户在深色模式下阅读辅助文字吃力 |
 
 ## 二、代码卫生与瞬态问题
 
 - **`reader.ts` 详情成功路径不清 `hydrationErrors[id]`**：滞留的错误在分支重排后不可见，纯卫生问题。
-- **`scheduler.rs` 封面回填仍 `unwrap_or(0)`**：DB 写失败被吞成「无变化」，与 `conflict_policy` 那一族已修的吞错同类。
 - **`toast` 上限会挤掉带重试项**：`src/store/slices/ui.ts` 的 `.slice(-4)` 在连续失败时会先丢掉最早（往往带重试入口）的那条。
 - **重复实现**：`numericId`（`store/selectors.ts`）与 `scopeNumericId`（`store/internals.ts`）仍是两份逐字相同的实现。
 - **只定义不用**：`greader.rs` 的 `KEPT_UNREAD`、`client_login_url` 各只剩定义行；`close-resolved` 事件只 emit 无 listen；`feeds.origin_was_local` 无生产写入方；`sync/phases.rs::sync_now` 无生产调用方（前端封装 `api.syncNow` 已删）。

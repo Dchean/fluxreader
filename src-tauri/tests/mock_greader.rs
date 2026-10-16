@@ -195,6 +195,14 @@ pub struct MockGReader {
     /// TASK-101：收到的 Fever 请求原始 query（'?' 后的部分；无 query 为空串）。
     /// 用于断言「请求 query 中不含 api_key」（防回退，兼消除其进访问日志的泄露面）。
     pub fever_query_strings: Mutex<Vec<String>>,
+    /// OPT-017D：Fever 信封是否真正服务 `entries`（默认 **false** = 保持旧行为：
+    /// unread/saved/items 一律空集）。置位后按 Fever 协议形状返回 `srv.entries`：
+    /// `unread_item_ids`/`saved_item_ids` 为 CSV 权威集合、`items` 支持
+    /// `since_id`（id >）、`max_id`（id <，最近 50 条）、`with_ids` 精确过滤；
+    /// feed_id 按下标映射为 Fever 数字 id（与 envelope 里 feeds 列表同规则）。
+    /// 默认关是为了对既有套件零影响——只有显式置位的测试（封面补全覆盖面夹具）
+    /// 才消费该数据。
+    pub fever_serve_entries: std::sync::atomic::AtomicBool,
     /// TASK-059：收到的全部请求（`"{METHOD} {path}"`，含被前缀规则拒绝的）。
     /// 用于证明「探测有界」与「解析结果已缓存、后续同步不再探测」——
     /// 只看状态码无法区分「试了 1 次」与「试了 2 次」。
@@ -281,6 +289,7 @@ impl MockGReader {
             fever_reject_auth: std::sync::atomic::AtomicBool::new(false),
             fever_expected_api_key: Mutex::new(String::new()),
             fever_query_strings: Mutex::new(Vec::new()),
+            fever_serve_entries: std::sync::atomic::AtomicBool::new(false),
             requests: Mutex::new(Vec::new()),
             pending_injection: Mutex::new(None),
             stream_ids_barrier: Mutex::new(None),
@@ -484,6 +493,14 @@ impl MockGReader {
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn fever_query_log(&self) -> Vec<String> {
         self.fever_query_strings.lock().unwrap().clone()
+    }
+
+    /// OPT-017D：是否按 Fever 协议形状真正服务 `srv.entries`（见字段说明）。
+    /// 默认 false = 旧行为（空集合）；只有显式置位的测试才消费条目数据。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_fever_serve_entries(&self, on: bool) {
+        self.fever_serve_entries
+            .store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 收到的请求记录（`"{METHOD} {path}"`）。
@@ -1065,20 +1082,109 @@ fn route(
                 "feeds": feeds,
             });
             if let Some(obj) = envelope.as_object_mut() {
+                // OPT-017D：默认（未置位）保持旧行为——各数据方法一律回空集合。
+                // 置位后按 Fever 协议形状返回 `srv.entries`（字段见 mock 头注），
+                // feed_id 按下标映射为 Fever 数字 id（与上方 feeds 列表同规则，
+                // 否则 2 号订阅的条目会被挂到别的 feed 上）。
+                let serve_entries = srv
+                    .fever_serve_entries
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let snapshot: Vec<MockEntry> = if serve_entries {
+                    srv.entries.lock().unwrap().clone()
+                } else {
+                    Vec::new()
+                };
+                let sub_ids: Vec<String> = srv
+                    .subscriptions
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect();
+                let fever_feed_id = |greader_feed_id: i64| -> i64 {
+                    let want = format!("feed/{greader_feed_id}");
+                    sub_ids
+                        .iter()
+                        .position(|id| *id == want)
+                        .map(|i| i as i64 + 1)
+                        .unwrap_or(greader_feed_id)
+                };
                 if path_query.contains("unread_item_ids") {
+                    let ids: Vec<String> = snapshot
+                        .iter()
+                        .filter(|e| !e.read)
+                        .map(|e| e.id.to_string())
+                        .collect();
                     obj.insert(
                         "unread_item_ids".into(),
-                        serde_json::Value::String(String::new()),
+                        serde_json::Value::String(ids.join(",")),
                     );
                 }
                 if path_query.contains("saved_item_ids") {
+                    let ids: Vec<String> = snapshot
+                        .iter()
+                        .filter(|e| e.starred)
+                        .map(|e| e.id.to_string())
+                        .collect();
                     obj.insert(
                         "saved_item_ids".into(),
-                        serde_json::Value::String(String::new()),
+                        serde_json::Value::String(ids.join(",")),
                     );
                 }
                 if path_query.contains("items") {
-                    obj.insert("items".into(), serde_json::Value::Array(Vec::new()));
+                    let q = parse_query(path_query);
+                    let mut ordered: Vec<&MockEntry> = snapshot.iter().collect();
+                    ordered.sort_by_key(|e| e.id);
+                    let selected: Vec<&MockEntry> = if let Some(raw) = q.get("with_ids") {
+                        let want: Vec<i64> = raw
+                            .split(',')
+                            .filter_map(|s| s.trim().parse::<i64>().ok())
+                            .collect();
+                        ordered
+                            .into_iter()
+                            .filter(|e| want.contains(&e.id))
+                            .collect()
+                    } else if let Some(max) = q.get("max_id").and_then(|v| v.parse::<i64>().ok()) {
+                        // `id < max_id` 的最近一页（≤50 条，最近的在前）
+                        let mut older: Vec<&MockEntry> =
+                            ordered.into_iter().filter(|e| e.id < max).collect();
+                        older.reverse();
+                        older.truncate(50);
+                        older
+                    } else if let Some(since) = q
+                        .get("since_id")
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .filter(|v| *v > 0)
+                    {
+                        // `id > since_id` 的增量页（≤50 条，升序）
+                        ordered
+                            .into_iter()
+                            .filter(|e| e.id > since)
+                            .take(50)
+                            .collect()
+                    } else {
+                        // 最近 50 条（最近的在前）
+                        ordered.reverse();
+                        ordered.truncate(50);
+                        ordered
+                    };
+                    let items: Vec<serde_json::Value> = selected
+                        .iter()
+                        .map(|e| {
+                            serde_json::json!({
+                                "id": e.id,
+                                "feed_id": fever_feed_id(e.feed_id),
+                                "title": e.title,
+                                "html": e.content,
+                                "url": e.url,
+                                "is_read": i64::from(e.read),
+                                "is_saved": i64::from(e.starred),
+                                "created_on_time": e.published,
+                                "changed_on_time": e.changed_at,
+                            })
+                        })
+                        .collect();
+                    obj.insert("items".into(), serde_json::Value::Array(items));
                 }
             }
             (200, envelope.to_string())

@@ -1877,15 +1877,24 @@ pub fn set_read_bulk_with_enqueue(
     Ok(receipts)
 }
 
-/// 查询「无封面 + 有原文 URL + 直连来源」的文章 id（封面后台补全用）。
-/// 摘要型 RSS（少数派等）不带 media 字段，封面只能从文章页 og:image 拿；
-/// 这里只取直连源（source='direct'）的条目——Miniflux 源在入库时已用
-/// 正文第一图兜底，无需再抓文章页。limit 限制单轮批处理量（避免启动时
-/// 一次性扫全库 + 轰炸源站）。
+/// 查询「无封面 + 有原文 URL」的文章 id（封面后台补全用），来源不限。
+/// 摘要型 RSS（少数派等）不带 media 字段、服务端文章正文也可能没有图片，封面
+/// 只能从文章页 og:image 拿；limit 限制单轮批处理量（避免启动时一次性扫全库 +
+/// 轰炸源站），offset 供调用方推进候选窗口（REQ-106①）。
 ///
-/// offset 供调用方**推进候选窗口**（REQ-106①）：补全每轮只看最新 limit 条，
-/// 若这些条目的文章页全部拿不到 og:image，更老的候选就永远轮不到。按
-/// (limit, offset) 分页扫描可让调用方跳过本进程已尝试过的条目继续往后找。
+/// OPT-017D（覆盖面）：此前只选 `source='direct'`，理由是「Miniflux 源入库时已
+/// 用正文第一图兜底」——但该兜底只覆盖**正文里有图**的服务端文章；正文无图的
+/// 服务端文章此前既没有封面、又永不进入补全队列，形成永久缺口（真实库实测见
+/// 归属 Note）。旧理由中「本地补的封面会被同步覆盖回空」也不成立：两处封面
+/// 写入都不会把本地封面清成空——[`crate::db::backfill_article_content`] 是
+/// `COALESCE(旧值, 新值)` 严格只填空；`refresh_existing_article` 是
+/// `COALESCE(新值, 旧值)`（远端给出非空新图会覆盖本地值，NULL 保留本地值，
+/// R1-P2-1 修正）。因此候选不再按 source 过滤。
+///
+/// 边界保留：失效上报通道 [`clear_article_cover_if_matches`] 仍只清
+/// `source='direct'` 的封面（保守语义，OPT-017D 明确不改）——服务端文章本地
+/// 补上的封面若失效，走前端占位而不回清。
+// Note: 覆盖面扩展与请求预算的完整理由 — 见 .agents/notes/implemented/feature/2026-10-16-封面补全覆盖面与预算边界.md
 pub fn articles_without_cover(
     conn: &Connection,
     limit: i64,
@@ -1895,7 +1904,6 @@ pub fn articles_without_cover(
         "SELECT id, url FROM articles
          WHERE (image_url IS NULL OR image_url = '')
            AND url IS NOT NULL AND url != ''
-           AND source = 'direct'
          ORDER BY published_at DESC
          LIMIT ?1 OFFSET ?2",
     )?;
@@ -1907,8 +1915,10 @@ pub fn articles_without_cover(
 
 /// 清除一个已失效的直连封面，只有上报 URL 仍与库中当前值完全一致时才生效。
 ///
-/// source='direct' 是必要边界：Miniflux 文章不进入本地封面补全队列，不能因为
-/// 图片加载失败被清成空值后永久失去封面。
+/// source='direct' 是**有意保留的保守边界**（OPT-017D 明确不改）：服务端文章的
+/// 封面字段不由客户端失效通道改写。注意它不再等价于「服务端文章没有本地补的
+/// 封面」——候选查询已扩展到全来源（见 [`articles_without_cover`]），服务端文章
+/// 本地补上的封面若失效，前端走失败占位，不会被清空重试。
 pub fn clear_article_cover_if_matches(
     conn: &Connection,
     article_id: i64,

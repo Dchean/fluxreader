@@ -92,6 +92,10 @@ async fn resolve_close(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // OPT-017D：封面补全的终止信号。RunEvent::Exit 时触发（见 `.run` 回调）——
+    // 后台循环收到信号即停发新请求并退出，不残留任务。
+    let cover_shutdown = scheduler::ShutdownToken::new();
+    let setup_shutdown = cover_shutdown.clone();
     tauri::Builder::default()
         // 单实例：二实例启动 → 聚焦既有窗口后自行退出。必须第一个注册。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
@@ -115,7 +119,7 @@ pub fn run() {
         ))
         // 系统通知：新文章到达时 Windows toast（scheduler 触发）
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| {
+        .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -165,8 +169,8 @@ pub fn run() {
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
-            // 封面后台补全（摘要型源 og:image 兜底，低优先级）
-            scheduler::spawn_cover_backfill(app.handle().clone());
+            // 封面后台补全（摘要型源 og:image 兜底，低优先级；退出可终止）
+            scheduler::spawn_cover_backfill(app.handle().clone(), setup_shutdown.clone());
 
             // 系统托盘：显示/刷新全部/退出
             let show = MenuItem::with_id(app, "show", "显示 FluxReader", true, None::<&str>)?;
@@ -361,6 +365,13 @@ pub fn run() {
             github_auth::github_login_status,
             github_auth::github_login_disconnect,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(move |_app, event| {
+            // OPT-017D：应用退出前触发封面补全终止信号（循环停发新请求、
+            // 在途请求取消、子任务随 round 返回结束）。
+            if matches!(event, tauri::RunEvent::Exit) {
+                cover_shutdown.trigger();
+            }
+        });
 }
