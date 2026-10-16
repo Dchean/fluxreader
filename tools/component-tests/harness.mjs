@@ -151,6 +151,9 @@ const offsetOverrides = new WeakMap();
 function defaultOffsetHeight(el) {
   if (el.id === 'timelineContentScroll') return 768;      // 列表滚动容器视口
   if (el.classList?.contains('timeline-virtual-item')) return 160; // 与 estimateSize 同值
+  /* OPT-017C：画廊虚拟条目（.gallery-virtual-item）统一 260px——虚拟化测量/估算
+     画廊卡片高度用；真实高度由浏览器布局决定，此处只是无布局引擎下的确定替身。 */
+  if (el.classList?.contains('gallery-virtual-item')) return 260;
   return 0;
 }
 Object.defineProperty(w.HTMLElement.prototype, 'offsetHeight', {

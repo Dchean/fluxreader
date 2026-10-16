@@ -1254,20 +1254,25 @@ body {
   font-weight: 600;
 }
 
-/* Gallery Grid */
+/* Gallery Grid：列模型 + 垂直虚拟化（OPT-017C 有界渲染）。
+   旧实现是 CSS 多列（column-count 4/3/2 + break-inside: avoid）全量渲染；
+   浏览器分列无法与「只渲染窗口内条目」共存（窗口内容会被重新分列），故改为
+   显式列模型：列数/列宽由组件按 GalleryLayout.ts 的断点与公式计算（与旧
+   column-count/column-gap 的列宽公式 (W − (n−1)×14px) / n 逐字等价），
+   窗口内卡片绝对定位在 .gallery-virtual-item 里。 */
 .gallery-masonry-grid {
-  column-count: 4;
-  column-gap: 14px;
+  position: relative;
   width: 100%;
   margin: 0;
 }
 
-@media (max-width: 1200px) { .gallery-masonry-grid { column-count: 3; } }
-@media (max-width: 800px) { .gallery-masonry-grid { column-count: 2; } }
+/* 虚拟化条目：位置（top/left/width/transform）由组件按 lane 与虚拟偏移内联设置 */
+.gallery-virtual-item {
+  position: absolute;
+  top: 0;
+}
 
 .gallery-card {
-  break-inside: avoid;
-  margin-bottom: 14px;
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);

@@ -340,7 +340,8 @@ export default function App() {
          TASK-114 X3：布局门控从「仅 article」扩展为「image 之外全部放行」——
          全部虚拟化布局复用 Timeline 的 moveCardFocus/focusIndex 基建（选中切换
          后 focusIndex 经既有 effect 跟随，卡片 roving tabindex 同步）；画廊
-         （image）非虚拟化、无该基建，不支持 J/K。门控与推进判定收口在纯函数
+         （image）：不支持 J/K——产品判断（OPT-017C 起画廊为列模型虚拟化，
+         门控维持排除 image 不变）。门控与推进判定收口在纯函数
          jkLayoutAllowed/jkNextIndex（src/lib/jkNavigation.ts，与 Timeline
          虚拟化开关同一口径），回归网直接断言真值表与 store 层五布局模拟。 */
       if (e.key === 'j' || e.key === 'k') {

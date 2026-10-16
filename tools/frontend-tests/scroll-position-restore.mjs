@@ -335,7 +335,7 @@ export async function run(ctx) {
         'focusCardAt(idx);',
       ])
       && timelineSrc115.includes('lastActiveArticleIdRef.current = activeArticleId;'));
-    checkNew('(t115-0) 画廊回落口径（源级）：三个回位/归还 effect（TASK-111 刷新保位 / TASK-115 切换返回 / 阅读器关闭焦点归还）各有 image 布局提前回落（非虚拟化无定位基建，与 TASK-111 同一口径）',
+    checkNew('(t115-0) 画廊回落口径（源级）：三个回位/归还 effect（TASK-111 刷新保位 / TASK-115 切换返回 / 阅读器关闭焦点归还）各有 image 布局提前回落（OPT-017C 行为保持口径：列模型虚拟化后仍不参与，与 TASK-111 同一回落口径）',
       cnt115(timelineSrc115, "if (activeContentLayout === 'image') return;") === 3);
     checkNew('(t115-0) X3 规则文档化（代码单点注释）：timelineAnchor.ts 头注 = 全场景规则表（切排序=新语境裁定、锚丢失归零回落、画廊回落、不叠加保证）',
       anchorSrc115.includes('全场景规则表')

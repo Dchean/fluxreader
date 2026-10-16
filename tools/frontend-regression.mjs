@@ -22,8 +22,10 @@ import * as d10 from './frontend-tests/dedup-display.mjs';
 import * as d11 from './frontend-tests/subscription-writeback.mjs';
 /* OPT-013 B1：AI 产物缓存签名域（命中判定验签名/请求代次/在途复用）。 */
 import * as d12 from './frontend-tests/ai-cache-signature.mjs';
+/* OPT-017C：画廊列模型窗口域（列数/估算/放置/焦点兜底纯函数 + 灯箱/加载更多状态迁移）。 */
+import * as d13 from './frontend-tests/gallery-window.mjs';
 
-const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12];
+const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13];
 
 const argv = process.argv.slice(2);
 const selected = [];
