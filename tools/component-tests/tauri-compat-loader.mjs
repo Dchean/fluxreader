@@ -10,14 +10,6 @@
 // 下会以未捕获异常形态失败。桩成「注册即成功、永不触发」——监听是否建立不是
 // 本测试的取证对象，而是被 mock 掉的环境边界。
 
-import { readFileSync } from 'node:fs';
-
-/* 应用版本以 package.json 为准（与 tauri.conf.json 同源维护）：不要在桩里
-   写死版本，否则版本 bump 后「检查更新」用例的前提会静默漂移。 */
-const { version: APP_VERSION } = JSON.parse(
-  readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
-);
-
 const MOCKS = {
   /* 覆盖 test-loader 的 plugin-opener 无操作桩：记录打开的 URL，供「正文 <a>
      点击真的走到 opener」类断言取证（test-loader 保持既有 mock 不动，两条
@@ -67,7 +59,7 @@ export function getCurrentWindow() {
 }
 `,
   '@tauri-apps/api/app': `
-export async function getVersion() { return '${APP_VERSION}'; }
+export async function getVersion() { return '0.0.0-test'; }
 export async function getName() { return 'fluxreader-test'; }
 export async function getTauriVersion() { return '2.0.0-test'; }
 `,
