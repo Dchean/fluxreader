@@ -474,7 +474,7 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         // body_text / 提取标志）从 articles 迁出到 contents 行，条目经
         // articles.content_id 引用；内容等价（身份哈希 + 字节复核）的条目共享
         // 同一行（跨源同文聚合），来源进身份 → RSS 原文/Readability 提取确定分叉。
-        // 契约见 .agents/notes/proposed/architecture/2026-10-12-订阅条目与共享内容身份.md
+        // 契约见 .agents/notes/implemented/architecture/2026-10-12-订阅条目与共享内容身份.md
         // 「第二阶段契约」。要点：
         // - SQL 段建表/加列/拆旧 FTS（旧外部内容表依赖 articles 正文列，先拆）；
         // - Rust 钩子在**同一迁移事务内**回填：按身份归并正文、写 articles.content_id、

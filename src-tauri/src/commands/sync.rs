@@ -653,6 +653,17 @@ pub async fn sync_dismiss_pending_connection(state: State<'_, AppState>) -> AppR
     crate::config_sync::clear_pending_connection(&conn)
 }
 
+/// 缓存清理回执文案（OPT-008C：把文案与计数口径固化为可单测的纯函数）。
+/// `scope='ai'` 必须使用 `ai_cleared`（被清 AI 的条目数），不能用 `deleted`
+/// （scope=ai 恒为 0）；两分支的对象名称/保留说明与既有 UI 文案逐字一致。
+fn cache_cleanup_receipt(days: i64, scope: &str, deleted: usize, ai_cleared: usize) -> String {
+    if scope == "articles" {
+        format!("已清理 {days} 天前的文章 {deleted} 篇（收藏文章已保留）")
+    } else {
+        format!("已清理 {days} 天前文章的 AI 摘要与翻译缓存 {ai_cleared} 篇")
+    }
+}
+
 /// 缓存清理：删除指定天数前的文章（收藏/待同步项保留）或仅清 AI 缓存。
 /// scope='articles' | 'ai'。返回 (删文章数, 清 AI 字段数)。
 #[tauri::command]
@@ -671,11 +682,7 @@ pub async fn cache_cleanup(
         let mut conn = state.db.lock().await;
         db::cleanup_cache(&mut conn, days, &scope)?
     };
-    Ok(if scope == "articles" {
-        format!("已清理 {days} 天前的文章 {deleted} 篇（收藏文章已保留）")
-    } else {
-        format!("已清理 {days} 天前文章的 AI 摘要与翻译缓存 {ai_cleared} 篇")
-    })
+    Ok(cache_cleanup_receipt(days, &scope, deleted, ai_cleared))
 }
 
 /// 同步配置状态（设置页显示用）。account = 连接时记录的服务端用户名。
@@ -2102,5 +2109,34 @@ mod opt009_b3_tests {
         // 表级读取失败：必须 Err（不得静默返回 0 冒充「无待办」）
         c.execute("DROP TABLE subscription_outbox", []).unwrap();
         assert!(subscription_outbox_stats_from_conn(&c).is_err());
+    }
+}
+
+/// OPT-008C：缓存清理回执文案/计数口径（AI 分支必须报 ai_cleared）。
+#[cfg(test)]
+mod cache_cleanup_receipt_tests {
+    use super::cache_cleanup_receipt;
+
+    #[test]
+    fn ai_scope_reports_ai_cleared_count_not_deleted() {
+        assert_eq!(
+            cache_cleanup_receipt(30, "ai", 0, 3),
+            "已清理 30 天前文章的 AI 摘要与翻译缓存 3 篇",
+            "scope=ai 必须报被清 AI 的条目数（deleted 恒为 0，不得混用）"
+        );
+        assert_eq!(
+            cache_cleanup_receipt(30, "ai", 9, 1),
+            "已清理 30 天前文章的 AI 摘要与翻译缓存 1 篇",
+            "回执文案与 ai_cleared 实际对象一致"
+        );
+    }
+
+    #[test]
+    fn articles_scope_reports_deleted_count_and_retention_wording() {
+        assert_eq!(
+            cache_cleanup_receipt(7, "articles", 2, 5),
+            "已清理 7 天前的文章 2 篇（收藏文章已保留）",
+            "scope=articles 报删除条目数并保留收藏说明"
+        );
     }
 }

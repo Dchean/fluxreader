@@ -1,6 +1,6 @@
 //! contents：单一正文所有权（OPT-008B 第二阶段）。
 //!
-//! 设计（契约见 .agents/notes/proposed/architecture/2026-10-12-订阅条目与共享内容身份.md
+//! 设计（契约见 .agents/notes/implemented/architecture/2026-10-12-订阅条目与共享内容身份.md
 //! 的「第二阶段契约」）：
 //! - 正文（content_html / body_text / 提取标志）只存 `contents` 一行；多个条目
 //!   （articles.content_id）可引用同一行——**内容真正等价**才共享。
@@ -124,34 +124,122 @@ pub(crate) fn with_write_savepoint<T>(
 /// 受保护提取行（`readability` + `fulltext_extracted`）的正文错配修复：
 /// body_text 与保留 HTML 不同源（历史只写 HTML+flag 的旧形态，或 body 缺失）
 /// 时按 HTML 重算修复并 `revision+1`（前端修订失效可感知）。
-/// **不重指、不改来源/提取标志**——RSS 刷新与远端回填不得覆盖既定提取
-/// （OPT-003 R1 语义在 contents 上的延续）。返回是否发生修复。
+/// **不更改来源、不把受保护行降级为 RSS**——RSS 刷新与远端回填不得覆盖既定
+/// 提取（OPT-003 R1 语义在 contents 上的延续）。
+///
+/// OPT-008C 裁决 a：identity 含 body，修复后必须**重算 identity**，否则行身份
+/// 与字节不一致，后续同字节 `ensure_content` 会新建行（欠共享）。重算后若
+/// 命中同 source + 同 HTML + 同 body 的已有行，按等价合并：全部引用条目重指
+/// 目标行、目标行 `revision+1`、原行删除（不留下无引用行）。哈希碰撞/等价
+/// 复核失败时按 `ensure_content` 同一加盐策略收敛，绝不误并。
+/// 目标行提取标志取两行并集（正常情况下同为 1；仅防御性地不弱化保护）。
+///
+/// **存量惰性收敛**：旧实现只改 body、不改 identity 的行（body 已同源但
+/// identity 仍是旧 body 哈希）再次进入本路径时，仅收敛规范的未加盐 `h|`
+/// 身份——无等价行则原地换 identity（**不改 body、不 bump revision**），有
+/// 等价行则按上述合并。私有 `e|` / 已加盐身份不在此路径猜测，保持原样。
+/// 该收敛只覆盖再次触达本函数的行；未触达的存量行不动（发布侧如需一次性
+/// 收敛应另做回填）。
+///
+/// 返回是否发生修复/收敛（合并也计为修复）。
+// Note: 修复重算 identity 与等价合并的裁决 — 见 .agents/notes/implemented/architecture/2026-10-12-订阅条目与共享内容身份.md「OPT-008C 收口」
 pub(crate) fn repair_extracted_body_if_mismatch(
     conn: &Connection,
     content_id: i64,
 ) -> AppResult<bool> {
-    let row: Option<(String, Option<String>)> = conn
+    let row: Option<(String, Option<String>, String, i64, String)> = conn
         .query_row(
-            "SELECT body_text, content_html FROM contents WHERE id = ?1",
+            "SELECT body_text, content_html, extraction_source, fulltext_extracted, identity
+             FROM contents WHERE id = ?1",
             params![content_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((body, html)) = row else {
+    let Some((body, html, source, extracted, identity)) = row else {
         return Ok(false);
     };
     let Some(html) = html.filter(|h| !h.trim().is_empty()) else {
         return Ok(false);
     };
     let same_source = crate::sanitize::html_to_text(&html);
-    if body == same_source {
+    let expected = compute_identity(&source, Some(&html), &same_source);
+    let body_same = body == same_source;
+    if body_same && identity == expected {
         return Ok(false);
     }
-    conn.execute(
-        "UPDATE contents SET body_text = ?1, revision = revision + 1, updated_at = datetime('now') WHERE id = ?2",
-        params![same_source, content_id],
-    )?;
-    Ok(true)
+    // 旧实现修复态：body 已同源、identity 仍是旧 body 的哈希。只收敛规范
+    // 的未加盐身份；私有/加盐身份不从字节反推（不做运行期猜测）。
+    let stale_identity_only = body_same;
+    if stale_identity_only && !is_canonical_hash_identity(&identity) {
+        return Ok(false);
+    }
+    let base = expected;
+    with_write_savepoint(conn, "contents_repair_identity", || {
+        let mut candidate = base.clone();
+        for _ in 0..16 {
+            let existing: Option<(i64, Option<String>, String, String)> = conn
+                .query_row(
+                    "SELECT id, content_html, body_text, extraction_source
+                     FROM contents WHERE identity = ?1 AND id != ?2",
+                    params![candidate, content_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            match existing {
+                None => {
+                    if stale_identity_only {
+                        // 字节没变，只是身份收敛：不改 body、不推进 revision。
+                        conn.execute(
+                            "UPDATE contents SET identity = ?1 WHERE id = ?2",
+                            params![candidate, content_id],
+                        )?;
+                    } else {
+                        conn.execute(
+                            "UPDATE contents SET identity = ?1, body_text = ?2,
+                                 revision = revision + 1, updated_at = datetime('now')
+                             WHERE id = ?3",
+                            params![candidate, same_source, content_id],
+                        )?;
+                    }
+                    return Ok(true);
+                }
+                Some((target_id, t_html, t_body, t_source)) => {
+                    // 身份哈希命中后再做字节级复核（与 ensure_content 同口径）。
+                    let equivalent = t_html.as_deref().unwrap_or("") == html
+                        && t_body == same_source
+                        && t_source == source;
+                    if equivalent {
+                        // 等价合并：先重指全部引用，再推进目标修订并删除原行。
+                        conn.execute(
+                            "UPDATE articles SET content_id = ?1 WHERE content_id = ?2",
+                            params![target_id, content_id],
+                        )?;
+                        conn.execute(
+                            "UPDATE contents SET revision = revision + 1,
+                                 fulltext_extracted = MAX(fulltext_extracted, ?1),
+                                 updated_at = datetime('now') WHERE id = ?2",
+                            params![extracted, target_id],
+                        )?;
+                        conn.execute("DELETE FROM contents WHERE id = ?1", params![content_id])?;
+                        return Ok(true);
+                    }
+                    // 哈希碰撞/同身份不同字节：加盐新身份（与 ensure_content 的
+                    // 候选收敛策略一致），绝不误并。
+                    candidate = format!("{base}|c{}", candidate.len());
+                }
+            }
+        }
+        Err(crate::error::AppError::internal(format!(
+            "内容身份冲突无法收敛（{base}）：拒绝修复以避免误并"
+        )))
+    })
+}
+
+/// 规范的未加盐内容身份（`h|...`，且不带 `|c<len>` 盐后缀）。
+/// 私有身份 `e|<article_id>` 与加盐碰撞身份都不可从当前字节反推，排除在
+/// 存量惰性收敛之外。
+fn is_canonical_hash_identity(identity: &str) -> bool {
+    identity.starts_with("h|") && !identity.contains("|c")
 }
 
 /// 找到或创建与输入等价的内容行（幂等）。

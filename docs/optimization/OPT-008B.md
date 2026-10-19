@@ -140,6 +140,11 @@ R3首轮因达到max-turns未形成交付记录；按任务拆分为R3A定向收
 
 ## 第二阶段接线与验收边界
 
+> **历史边界（2026-10-12 计划现场）**：本节写的「现行版本 21」「FTS 外部内容表」是
+> 当时源码状态，不是现状。当前迁移末版为 **v30**（v22 建 `contents`，v29 删
+> `articles_fts` 改建 `articles_trigram_idx`）；搜索权威是 **LIKE**，trigram 索引
+> 只是**可重建候选索引**。此后的现状与收口口径见文末「OPT-008C 收口（2026-10-19）」。
+
 主控按当前源码确认的入口：migrations.rs现行版本21，FTS外部内容表和触发器依赖articles正文列；articles.rs同时负责列表摘要、LIKE/FTS搜索、入库、AI落盘和缓存清理；sync_map.rs仍有正文/全文/AI输入读取；commands/settings.rs负责异步全文提取；commands/ai.rs在网络生成后按article_id写产物。前端bodyCache以条目ID存实体，正文失效部分依赖snippet变化，不能仅加JOIN就声称修订已打通。
 
 执行者第一阶段验收后继续负责第二阶段，实现前在已有proposed身份Note定稿以下契约，不为这些事实再建重复提案：
@@ -151,3 +156,26 @@ R3首轮因达到max-turns未形成交付记录；按任务拆分为R3A定向收
 5. **引用生命周期**：源删除、分类级联、账号断开、缓存清理均按引用处理，最后引用删除才回收内容与派生记录。AI按年龄清理若只命中部分引用，须明确保持原条目清理范围的分叉策略，不能意外清掉年轻兄弟或留下已承诺清理的旧产物；清理回执数量/UI文案与实际对象一致。
 
 必测：真实旧版本21库含不同正文/不同AI的同URL条目→迁移无损且外键/队列不变；注入迁移中途失败→版本与数据整体回滚、重开可重试；可等价共享/不同内容不共享/单引用修订分叉；删除一个源与删除最后引用；正文后半变更但snippet相同；FTS新词可搜旧词消失、每个源均可达；全文/AI在途修订与清除后的迟到提交拒绝；五布局正文和读藏仍独立。使用隔离库与本地HTTP夹具，不访问用户库或付费模型。改过最终版本的全套本地门禁、独立初审、主控复审与提交级CI均通过后才关闭008B/008。
+
+## OPT-008C 收口（2026-10-19）
+
+- **迁移与身份边界**：当前迁移末版 **v30**。v22 建 `contents` 并同一事务回填
+  `content_id`、删除旧正文列；v29 删除零消费的 `articles_fts`，改建
+  `articles_trigram_idx`；v30 只追加读闭包部分索引。「现行版本 21」只属于 2026-10-12
+  的计划现场，文中相关章节按历史边界保留。
+- **搜索口径（正式改写）**：搜索权威 = **LIKE**；`articles_trigram_idx` 是
+  FTS5 trigram、contentless 的**可重建候选索引**（只收缩候选，等值验证仍由
+  LIKE 完成；索引缺失/损坏回落纯 LIKE）。不得再以「存在 `articles_fts`」作为
+  验收条件；共享正文变更后每个引用条目可搜、旧词消失、候选索引可从
+  articles×contents 重建，即为满足。
+- **identity 不变量（裁决 a）**：`contents.identity` 是（source, HTML, body）的
+  内容等价身份，**修复错配 body 时必须重算**。重算命中同 source + 同 HTML +
+  同 body 的已有行时按等价合并：全部引用条目重指、目标行 `revision+1`、原行
+  删除；哈希碰撞/字节复核失败按 `ensure_content` 同一加盐策略分叉，绝不误并；
+  目标行 `fulltext_extracted` 取并集，不弱化提取保护。反例锁定在
+  `contents_ownership_e2e.rs::repair_recomputes_identity_and_merges_equivalent_references`
+  与 `ensure_content_after_repair_reuses_fixed_row`（修前分别红于「引用未重指」
+  与「同字节新建第二行」）。
+- **必测补齐**：v21 两源同 URL/不同正文/不同 AI 迁移反例（含外键检查与重开
+  幂等）、共享正文下 AI 年龄清理分叉、五布局读藏隔离与回执文案断言均已有
+  回归；见 `tmp/optimization-20261008/OPT-008C/RESULT.md` 与对应证据日志。
