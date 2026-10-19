@@ -48,7 +48,7 @@
 | 历史状态与自动续取（OPT-005 R1/R2/R3） | 协议不规定（客户端策略） | 内部 settings `fever_history_state` 显式三态（无 schema 迁移）：缺失=**Unknown（绝不当完成**，旧库只有 since 也自动从顶部补旧历史）；`pending:<max_id>`=未完成；`complete`=已取尽；损坏=**显式错误且不动游标**。每页「页数据+checkpoint/since」同事务；「先初始化 Pending 成功才允许更大的 since 落库」；每轮至多 200 页（1 万条），预算/失败/游标不前进都保留 Pending 续取点、不推进完成时间；**含自动 light** 从 Pending 续取，只有走到空页才 Complete；手动 full 从顶部重放（幂等）。**R3：map（匹配映射）读取失败——初次构建或页回滚后重建——记 report 并立即终止本轮，保留 Pending/已确认 since，不执行后续 history/with_ids/完成时间；绝不退化成空映射继续**（空 feed 映射会让 merge 合法跳过却照常确认游标/写 Complete）。`max_id` 严格 `<` 漏掉的 `i64::MAX` 边界条目由 `with_ids(MAX)` 顶覆盖 | `fever_compat_e2e`（状态写失败不推 since→light 重试、页 INSERT 失败整页回滚+Pending 保留→下轮补回、Unknown 旧库自动补旧历史、损坏状态报错不改游标、full 失败→light 自动补齐、200 页预算→下轮续取 10050 条、i64::MAX 已读非收藏可达、R3 map 列类型错误两反例：初始读取失败无假 Complete/since/time、页失败后重建失败终止整轮） |
 | 增量游标 | GR `ot` 为服务端时间过滤参数（过滤列随实现而异）；Fever `since_id` 为条目 id 过滤 | GR `last_sync_ts`（unix 秒）**起点候选**（id 列举开始前取）+ 幂等合并 ⇒ 无漏无重；仅本轮「窗口拿全」（id 列举 + 分块零失败）才推进；Fever：`since_id` 分页**非空页持续到空页**（服务端可先 `LIMIT 50` 再经 hook 过滤产生非空短页，短页不是结束）；`last_sync_entry_id` **只由成功提交的页事务推进**（增量页或顶部连续页；与页数据同 commit，失败回滚不推进）——with_ids 补齐、Pending 续取页与失败页都不推动（防跳过未拉区间）+ `last_sync_ts`（仅零失败且历史无未完成时写，供切换回 GR 后的首拉） | `pull_cursor_e2e` + mock_greader；Fever 增量与游标隔离由 `fever_compat_e2e`（LIMIT 后过滤短页继续、增量第二页失败不被 with_ids 大 id 推动、`since_id=上次 max` 起）；真实服务端过滤列差异见 §5（源码查阅，未实机验收） |
 | 时间过滤列 | GR `ot` 语义随服务端实现；Fever 无时间过滤（条目 id 单调递增游标） | 不依赖过滤列（起点候选 + 幂等合并） | mock 为 `changed_at >= ot`（含边界，自动化锁定）；真实 Miniflux main 为 `published_at > ot`（源码查阅，未实机验收） |
-| 「失败 ≠ 空集合」守卫 | 协议本身不规定（纯客户端安全策略） | read/starred 集合任一拉取失败 → 本轮对账整体跳过（`greader_pull.rs` C-1 段）；unread/saved 任一失败 → `reconcile_ok = false`，整段对账跳过（`fever_pull.rs`） | GR：`star_reconcile_truncation_e2e`；Fever：逻辑覆盖 + live 测试 |
+| 「失败 ≠ 空集合」守卫 | 协议本身不规定（纯客户端安全策略） | GR read/starred 按字段独立：成功侧照常对账，仅失败侧跳过；unread/saved 任一失败 → `reconcile_ok = false`，整段对账跳过（`fever_pull.rs`） | GR：`greader_compat_e2e` 两侧失败隔离、`star_reconcile_truncation_e2e`；Fever：逻辑覆盖 + live 测试 |
 | 字段版本守卫（pending 保护升级，OPT-007） | 协议本身不规定（纯客户端防乒乓策略） | 字段粒度：`articles.read_version` / `star_version` 随本地读/藏写入**同事务**递增（推送成功清队后版本仍保留），pull 起点快照 + 当前 DB 版本 + 该字段 pending 三输入判定——快照不等或有 pending 即跳过该字段（另一字段不受牵连）；版本快照必须在任何 HTTP 之前抓取。两协议共享，见 §2 | `pull_field_versions_e2e`（屏障网络时序）；单元：`conflict_policy.rs` / `greader_pull.rs` / `fever_pull.rs` |
 
 ## 2. 冲突政策表（对账方向）
@@ -180,10 +180,24 @@ FreshRSS 的具体部署版本未逐一实机验收**——本列不能当作「
 - **L5 Fever 截断不可检测**：unread/saved 集合是单请求全集响应，无
   continuation 可校验；GR 侧的截断检测纪律在 Fever 协议上无对应
   机制（依赖服务端响应完整性）。
-- **L6 GR 缺字段未失败关闭（2026-10-19 审计 P1）**：GR 的 `stream/items/ids`
-  与 `item_contents` 返回 200 但缺字段时，当前会被反序列化成空集合或零结果，
-  可能推进游标或清空星标；与 Fever「缺字段是协议错误」的处理不一致。修复前，
-  上文「失败 ≠ 空集合」只覆盖请求失败与分页截断，不覆盖 GR 缺字段。
+- **L6 GR 缺字段未失败关闭（已解决；2026-10-20 收敛）**：GR 的
+  `subscription/list`、`stream/items/ids`、`item_contents` 返回 200 但缺
+  `subscriptions` / `itemRefs` / `items` 时，现均映射为 `protocol`，不得当空
+  集合；非法 `itemRefs.id` 与非法 continuation 同样失败关闭并保留游标。
+  continuation 另外记录已见值、要求严格前进并限制 200 页；重复数字不会无限
+  分页。订阅绑定失败会写账号级持久 marker，独立 states 命令在首个 HTTP 前
+  即阻断条目/权威集合请求与游标推进。marker 只在订阅遍历完整、所有远端订阅
+  （含已有 `origin='local'` 匹配源）都完成 remote_id 绑定时清除；目录失败、
+  feed/分类墓碑未知、插入失败和提前 break/continue 均保持 incomplete。
+  例外仅为 known tombstone（`feed_url_tombstoned == Ok(true)`）的预期 continue：
+  该源是用户本机主动删除，不要求重新绑定。
+  新 feed 的 insert+bind 使用同一事务，绑定失败不留 remote 孤儿；历史
+  `origin='remote'` 未绑定行仅当当前远端 URL 集已不含它时清理，local 源不受影响。
+  itemRefs 为空但 continuation 合法也是 protocol 结构错误，主列表/read/starred
+  都保留游标。
+  HTTP 200 的 JSON 解码/schema 错误也统一为 `protocol`（传输/读体失败仍是
+  `network`）。read/starred 权威集合改为字段级独立对账：单侧失败只跳过该侧；
+  主列表/正文失败不再连带跳过另一成功集合。严格夹具见 `greader_compat_e2e`。
 
 测试索引（对账方向的锁定分层）：
 

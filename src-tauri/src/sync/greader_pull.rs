@@ -6,6 +6,7 @@ use crate::error::{AppError, AppResult};
 use crate::greader::{self, GReaderClient};
 use chrono::Utc;
 use rusqlite::Connection;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -15,6 +16,7 @@ use tokio::sync::Mutex;
 /// （unix 秒在用例中途翻转会把「修前必红 / 修后必绿」退化成概率性）。
 /// 仅 greader pull 消费；Fever / push / scheduler 等仍直接用 `Utc::now()`，语义不变。
 static PULL_CLOCK_OVERRIDE: AtomicI64 = AtomicI64::new(0);
+const GREADER_MAX_ID_PAGES: usize = 200;
 
 /// greader pull 的「现在」（unix 秒）：未注入时即系统墙钟。
 fn pull_now() -> i64 {
@@ -24,6 +26,12 @@ fn pull_now() -> i64 {
     } else {
         Utc::now().timestamp()
     }
+}
+
+fn item_feed_remote_id(e: &greader::ItemContent) -> Option<i64> {
+    e.origin
+        .as_ref()
+        .and_then(|o| greader::parse_feed_numeric_id(&o.stream_id))
 }
 
 /// 注入 greader pull 的游标墙钟（`None` 恢复真实时钟）。
@@ -48,6 +56,24 @@ pub(super) async fn pull_entries_greader(
     report: &mut SyncReport,
     full: bool,
 ) -> AppResult<()> {
+    let binding_incomplete = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        let account = super::current_account(&conn)?.ok_or_else(|| {
+            AppError::new(
+                "notConnected",
+                "GReader pull 缺少当前同步账号身份，本轮不请求条目",
+            )
+        })?;
+        db::binding_incomplete(&conn, &account.key)?
+    };
+    if binding_incomplete {
+        report.errors.push(
+            "持久绑定不完整标记存在：先完成 feeds 阶段绑定，本轮不请求条目/不推进游标".into(),
+        );
+        return Ok(());
+    }
+
     let since_s = {
         let conn = db.lock().await;
         session.ensure_current(&conn)?;
@@ -77,6 +103,42 @@ pub(super) async fn pull_entries_greader(
         }
     };
 
+    let unbound_remote = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        match db::unbound_remote_feeds(&conn) {
+            Ok(v) => v,
+            Err(e) => {
+                report.errors.push(format!(
+                    "读取未绑定远端源失败，本轮不拉取条目（游标保留）: {e}"
+                ));
+                return Ok(());
+            }
+        }
+    };
+    if !unbound_remote.is_empty() {
+        report.binding_incomplete = true;
+        report.errors.push(format!(
+            "存在 {} 个 origin='remote' 源仍缺 remote_id，本轮不拉取条目（游标保留）: {}",
+            unbound_remote.len(),
+            unbound_remote
+                .iter()
+                .map(|(_, url)| url.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        return Ok(());
+    }
+
+    // 没有任何远端 feed 绑定时，订阅层尚未提供条目可归属的本地源。此时拉取
+    // 条目只会全部“合法跳过”，却仍可能推进时间游标；历史/权威集合请求也
+    // 没有可对账对象。直接跳过本轮条目 pull，等 feeds 阶段建立绑定。
+    // Note: 零远端 feed 绑定不得消费 pull 窗口 — 见 .agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md
+    if maps.feed_mf_to_id.is_empty() {
+        log::debug!("greader pull: 尚无远端 feed 绑定，本轮跳过条目拉取");
+        return Ok(());
+    }
+
     // TASK-097 游标语义修正：本轮游标候选在 id 列举**开始前**取（拉取起点墙钟），
     // 拉取成功时写候选，而非修前的「拉取结束墙钟」。论证（起点游标 + 合并幂等 ⇒ 无漏无重）：
     // - 无漏：设起点候选为 C、id 列举时刻为 L（C ≤ L）。凡列举时刻已存在且
@@ -99,12 +161,23 @@ pub(super) async fn pull_entries_greader(
     let ot = if full { Some(0i64) } else { Some(since_s) };
     let mut all_item_ids: Vec<i64> = Vec::new();
     let mut continuation: Option<u64> = None;
+    let mut seen_continuations = HashSet::new();
+    let mut id_pages = 0usize;
     // TASK-069 审查 F1：id 列举失败同样是「本轮没拿到该窗口」——不计入守卫的话，
     // all_item_ids 为空会让下方 chunks(100) 一次都不执行，chunk_failures 保持 0、
     // 游标照常推进，失败窗口被跳过（正是本守卫要关闭的漏文章形态）。故与分块失败同源计数。
     let mut id_failures = 0usize;
     let mut stale = false;
     loop {
+        if id_pages >= GREADER_MAX_ID_PAGES {
+            id_failures += 1;
+            let err = AppError::new(
+                "protocol",
+                format!("GReader itemRefs 分页超过 {GREADER_MAX_ID_PAGES} 页上限"),
+            );
+            report.errors.push(format!("拉取条目 id 分页中止: {err}"));
+            break;
+        }
         // OPT-006：每页 id 请求前复核代际——账号已切换即停止后续请求。
         if !session_is_current(db, session).await {
             stale = true;
@@ -128,6 +201,7 @@ pub(super) async fn pull_entries_greader(
             }
         };
         let mut got = 0;
+        id_pages += 1;
         for it in &r.item_refs {
             if let Ok(id) = it.id.parse::<i64>() {
                 all_item_ids.push(id);
@@ -139,19 +213,38 @@ pub(super) async fn pull_entries_greader(
         match r.continuation.as_deref() {
             None | Some("") => break,
             Some(c) => match c.parse::<u64>() {
-                Ok(next) if got > 0 => continuation = Some(next),
+                Ok(next) if got > 0 => {
+                    let non_advancing = continuation.is_some_and(|previous| next <= previous);
+                    let repeated = !seen_continuations.insert(next);
+                    if non_advancing || repeated {
+                        id_failures += 1;
+                        let err = AppError::new(
+                            "protocol",
+                            format!(
+                                "GReader continuation 重复或未前进：previous={continuation:?}, next={next}"
+                            ),
+                        );
+                        report.errors.push(format!("拉取条目 id 分页中止: {err}"));
+                        break;
+                    }
+                    continuation = Some(next);
+                }
                 Ok(_) => {
                     id_failures += 1;
-                    report.errors.push(format!(
-                        "拉取条目 id 分页中断：continuation={c} 但本页无可用条目 id"
-                    ));
+                    let err = AppError::new(
+                        "protocol",
+                        format!("GReader continuation={c} 但本页无有效条目 id"),
+                    );
+                    report.errors.push(format!("拉取条目 id 分页中止: {err}"));
                     break;
                 }
                 Err(_) => {
                     id_failures += 1;
-                    report
-                        .errors
-                        .push(format!("拉取条目 id 分页中断：无法解析 continuation={c}"));
+                    let err = AppError::new(
+                        "protocol",
+                        format!("GReader continuation 不是合法非负整数：{c:?}"),
+                    );
+                    report.errors.push(format!("拉取条目 id 分页中止: {err}"));
                     break;
                 }
             },
@@ -162,6 +255,7 @@ pub(super) async fn pull_entries_greader(
     // TASK-068：分块失败计数——失败块的条目本轮丢失，若游标照常推进，下一轮
     // 增量从新游标起步，这些条目就只能等全量同步补回（「偶发漏文章」的温床）。
     let mut chunk_failures = 0usize;
+    let mut binding_failures = 0usize;
     for chunk in all_item_ids.chunks(100) {
         // OPT-006：每块正文请求前复核代际。
         if !session_is_current(db, session).await {
@@ -176,6 +270,22 @@ pub(super) async fn pull_entries_greader(
                 continue;
             }
         };
+        let mut unbound_feeds = BTreeSet::new();
+        for e in &entries {
+            if let Some(feed_id) = item_feed_remote_id(e) {
+                if !maps.feed_mf_to_id.contains_key(&feed_id) {
+                    unbound_feeds.insert(feed_id);
+                }
+            }
+        }
+        if !unbound_feeds.is_empty() {
+            binding_failures += 1;
+            report.binding_incomplete = true;
+            report.errors.push(format!(
+                "条目所属远端 feed 尚无本地绑定，本轮保留游标并继续有限兼容合并: {:?}",
+                unbound_feeds
+            ));
+        }
         // R2：entries 的合并链路 Result 化——DB 写失败不得吞。本块中途失败即计数
         // （时间戳游标不推进，下一轮重拉同一窗口），已处理条目留库（GR 无页事务，
         // 细粒度恢复仍归 OPT-007）。错误信息带条目 URL（TASK-056 可定位性契约）。
@@ -240,6 +350,7 @@ pub(super) async fn pull_entries_greader(
     // 轻量同步（full=false）状态对账：增量 item_contents 只覆盖「变更过的」条目，
     // 漏掉「手机很早前标读 / 收藏、changed_at 早于游标」的旧变更。这里用 read /
     // starred 权威 id 集合补齐（与 Fever 的 unread/saved 对账对称）。
+    let mut authority_cursor_failures = 0usize;
     if !full {
         // OPT-006：对账集合请求前复核代际。
         if !session_is_current(db, session).await {
@@ -247,31 +358,53 @@ pub(super) async fn pull_entries_greader(
         }
         // 拉取失败 ≠ 空集合（C-1）：任一权威集合拉取失败即跳过本轮对账，
         // 避免把网络/服务端错误当成"远端什么都没有"，静默清空本地收藏
-        match tokio::join!(
+        let (read_result, starred_result) = tokio::join!(
             fetch_stream_ids(client, greader::tags::READ),
             fetch_stream_ids(client, greader::tags::STARRED),
-        ) {
-            (Ok(read_ids), Ok(starred_ids)) => {
-                let conn = db.lock().await;
-                // OPT-006：对账是回写边界——代际失配丢弃整份权威集合。
-                session.ensure_current(&conn)?;
-                // 审计 P2-8③：对账内的 DB 写失败必须可见——记入 report.errors
-                // （不再被 unwrap_or(0) 伪装成 0 行变化）。已写入行不回滚，
-                // 剩余行下一轮同集合对账幂等重放。
-                if let Err(e) =
-                    reconcile_reader_state(&conn, &read_ids, &starred_ids, &maps, report)
-                {
+        );
+        let read_ids = match read_result {
+            Ok(ids) => Some(ids),
+            Err(e) => {
+                if e.code == "protocol" {
+                    authority_cursor_failures += 1;
+                }
+                report
+                    .errors
+                    .push(format!("read 权威集合拉取失败，本字段跳过对账: {e}"));
+                None
+            }
+        };
+        let starred_ids = match starred_result {
+            Ok(ids) => Some(ids),
+            Err(e) => {
+                if e.code == "protocol" {
+                    authority_cursor_failures += 1;
+                }
+                report
+                    .errors
+                    .push(format!("starred 权威集合拉取失败，本字段跳过对账: {e}"));
+                None
+            }
+        };
+        if read_ids.is_some() || starred_ids.is_some() {
+            let conn = db.lock().await;
+            // OPT-006：对账是回写边界——代际失配丢弃整份成功集合。
+            session.ensure_current(&conn)?;
+            if let Some(ids) = read_ids.as_deref() {
+                if let Err(e) = reconcile_reader_state(&conn, Some(ids), None, &maps, report) {
                     report.errors.push(format!(
-                        "状态对账中断：本地状态写入失败（{e}），本轮剩余条目未对账"
+                        "read 状态对账中断：本地写入失败（{e}），下一轮重放"
                     ));
                 }
-                drop(conn);
             }
-            (Err(e), _) | (_, Err(e)) => {
-                report.errors.push(format!(
-                    "状态对账跳过：远端状态集合拉取失败（{e}），本轮不合并远端状态"
-                ));
+            if let Some(ids) = starred_ids.as_deref() {
+                if let Err(e) = reconcile_reader_state(&conn, None, Some(ids), &maps, report) {
+                    report.errors.push(format!(
+                        "starred 状态对账中断：本地写入失败（{e}），下一轮重放"
+                    ));
+                }
             }
+            drop(conn);
         }
     }
 
@@ -281,7 +414,7 @@ pub(super) async fn pull_entries_greader(
     // TASK-097：推进值写「id 列举开始前取的起点候选」（论证见函数头部），
     // 不再取结束墙钟；failures > 0 时候选被丢弃、游标保持旧值，语义不变。
     // OPT-006：推进前在同一次持锁内复核代际——旧会话不得把游标推过账号边界。
-    let failures = id_failures + chunk_failures;
+    let failures = id_failures + chunk_failures + binding_failures + authority_cursor_failures;
     if failures == 0 {
         let conn = db.lock().await;
         session.ensure_current(&conn)?;
@@ -289,7 +422,7 @@ pub(super) async fn pull_entries_greader(
         drop(conn);
     } else {
         log::warn!(
-            "greader pull: {id_failures} id-listing failure(s) + {chunk_failures} chunk(s) failed; keeping last_sync_ts（下一轮重拉同一窗口）"
+            "greader pull: {id_failures} id-listing + {chunk_failures} chunk + {binding_failures} binding failure(s); keeping last_sync_ts（下一轮重拉同一窗口）"
         );
     }
     Ok(())
@@ -306,10 +439,19 @@ pub(super) async fn pull_entries_greader(
 async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec<i64>> {
     let mut ids: Vec<i64> = Vec::new();
     let mut continuation: Option<u64> = None;
+    let mut seen_continuations = HashSet::new();
+    let mut pages = 0usize;
     loop {
+        if pages >= GREADER_MAX_ID_PAGES {
+            return Err(AppError::new(
+                "protocol",
+                format!("拉取 {stream} 超过 {GREADER_MAX_ID_PAGES} 页上限（continuation 异常）"),
+            ));
+        }
         let r = client
             .item_ids(stream, Some(0), None, Some(1000), continuation)
             .await?;
+        pages += 1;
         let mut got = 0;
         for it in &r.item_refs {
             if let Ok(id) = it.id.parse::<i64>() {
@@ -320,16 +462,30 @@ async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec
         match r.continuation.as_deref() {
             None | Some("") => break,
             Some(c) => match c.parse::<u64>() {
-                Ok(next) if got > 0 => continuation = Some(next),
+                Ok(next) if got > 0 => {
+                    let non_advancing = continuation.is_some_and(|previous| next <= previous);
+                    let repeated = !seen_continuations.insert(next);
+                    if non_advancing || repeated {
+                        return Err(AppError::new(
+                            "protocol",
+                            format!(
+                                "拉取 {stream} continuation 重复或未前进：previous={continuation:?}, next={next}"
+                            ),
+                        ));
+                    }
+                    continuation = Some(next);
+                }
                 Ok(_) => {
-                    return Err(AppError::network(format!(
-                        "拉取 {stream} 分页中断：continuation={c} 但本页无可用条目 id"
-                    )));
+                    return Err(AppError::new(
+                        "protocol",
+                        format!("拉取 {stream} continuation={c} 但本页无有效条目 id"),
+                    ));
                 }
                 Err(_) => {
-                    return Err(AppError::network(format!(
-                        "拉取 {stream} 分页中断：无法解析 continuation={c}"
-                    )));
+                    return Err(AppError::new(
+                        "protocol",
+                        format!("拉取 {stream} continuation 不是合法非负整数：{c:?}"),
+                    ));
                 }
             },
         }
@@ -355,14 +511,14 @@ async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec
 /// 同集合对账重放（幂等自愈），但失败本身对用户可见。
 fn reconcile_reader_state(
     conn: &Connection,
-    read_ids: &[i64],
-    starred_ids: &[i64],
+    read_ids: Option<&[i64]>,
+    starred_ids: Option<&[i64]>,
     maps: &db::SyncMatchMaps,
     report: &mut SyncReport,
 ) -> AppResult<()> {
     use std::collections::HashSet;
-    let read_set: HashSet<i64> = read_ids.iter().copied().collect();
-    let starred_set: HashSet<i64> = starred_ids.iter().copied().collect();
+    let read_set: Option<HashSet<i64>> = read_ids.map(|ids| ids.iter().copied().collect());
+    let starred_set: Option<HashSet<i64>> = starred_ids.map(|ids| ids.iter().copied().collect());
 
     for (remote_id, aid) in &maps.mf_id_to_article {
         let aid = *aid;
@@ -373,24 +529,30 @@ fn reconcile_reader_state(
         // 远端已读 → 本地已读；远端未读不回写（不复活未读）。
         // R3：apply_* 返回的是**值条件写命中行数**（值实际改变）——据此置数据
         // 变化标记；merged_states 仍按旧口径累计（对外统计兼容）。
-        let read_rows = conflict_policy::apply_read_by_policy(
-            conn,
-            conflict_policy::GR_READ_DIRECTION,
-            read_set.contains(remote_id),
-            aid,
-            snap_read,
-            maps.pending_read_ids.contains(&aid),
-        )?;
+        let read_rows = match read_set.as_ref() {
+            Some(read_set) => conflict_policy::apply_read_by_policy(
+                conn,
+                conflict_policy::GR_READ_DIRECTION,
+                read_set.contains(remote_id),
+                aid,
+                snap_read,
+                maps.pending_read_ids.contains(&aid),
+            )?,
+            None => 0,
+        };
         // TASK-112 政策（GR_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
         // 命中 → 收藏；未命中 → 取消收藏。
-        let star_rows = conflict_policy::apply_star_by_policy(
-            conn,
-            conflict_policy::GR_STAR_DIRECTION,
-            starred_set.contains(remote_id),
-            aid,
-            snap_star,
-            maps.pending_star_ids.contains(&aid),
-        )?;
+        let star_rows = match starred_set.as_ref() {
+            Some(starred_set) => conflict_policy::apply_star_by_policy(
+                conn,
+                conflict_policy::GR_STAR_DIRECTION,
+                starred_set.contains(remote_id),
+                aid,
+                snap_star,
+                maps.pending_star_ids.contains(&aid),
+            )?,
+            None => 0,
+        };
         if read_rows > 0 || star_rows > 0 {
             report.entries_data_changed = true;
         }
@@ -523,7 +685,14 @@ mod tests {
         let mut report = SyncReport::default();
         // 审计 P2-8③：reconcile 返回 AppResult<()>——本用例锁政策方向，
         // 内存库上写必然成功，故 unwrap 即断言「无 DB 写失败」。
-        reconcile_reader_state(&conn, &[], &[], &maps_for(101, aid, false), &mut report).unwrap();
+        reconcile_reader_state(
+            &conn,
+            Some(&[]),
+            Some(&[]),
+            &maps_for(101, aid, false),
+            &mut report,
+        )
+        .unwrap();
 
         assert!(
             is_read(&conn, aid),
@@ -542,8 +711,14 @@ mod tests {
         let aid = seed_bound(&conn, 102);
 
         let mut report = SyncReport::default();
-        reconcile_reader_state(&conn, &[102], &[], &maps_for(102, aid, false), &mut report)
-            .unwrap();
+        reconcile_reader_state(
+            &conn,
+            Some(&[102]),
+            Some(&[]),
+            &maps_for(102, aid, false),
+            &mut report,
+        )
+        .unwrap();
 
         assert!(is_read(&conn, aid), "远端已读必须落地本地已读");
         assert_eq!(report.merged_states, 1, "命中侧恰好一次状态写入");
@@ -568,7 +743,7 @@ mod tests {
             mf_id_to_article: [(103, starred), (104, unstarred)].into_iter().collect(),
             ..maps_for(103, starred, false)
         };
-        reconcile_reader_state(&conn, &[], &[104], &maps, &mut report).unwrap();
+        reconcile_reader_state(&conn, Some(&[]), Some(&[104]), &maps, &mut report).unwrap();
 
         assert!(
             !is_starred(&conn, starred),
@@ -593,7 +768,14 @@ mod tests {
 
         let mut report = SyncReport::default();
         // 远端快照：已读命中 + 收藏未命中——若无 pending 保护会同时翻转两列。
-        reconcile_reader_state(&conn, &[105], &[], &maps_for(105, aid, true), &mut report).unwrap();
+        reconcile_reader_state(
+            &conn,
+            Some(&[105]),
+            Some(&[]),
+            &maps_for(105, aid, true),
+            &mut report,
+        )
+        .unwrap();
 
         assert!(
             !is_read(&conn, aid),
@@ -622,7 +804,7 @@ mod tests {
 
         let mut report = SyncReport::default();
         // 远端快照：starred 未命中（会取消收藏）+ read 命中（应照常标读）。
-        reconcile_reader_state(&conn, &[106], &[], &maps, &mut report).unwrap();
+        reconcile_reader_state(&conn, Some(&[106]), Some(&[]), &maps, &mut report).unwrap();
 
         assert!(
             is_starred(&conn, aid),

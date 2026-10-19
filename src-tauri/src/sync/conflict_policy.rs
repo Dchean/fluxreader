@@ -34,10 +34,9 @@
 //!   陈旧快照瞬间回滚（防乒乓）。字段粒度即本政策本体：aid 级并集会把
 //!   无冲突的另一字段一起跳过（任务卡负例②）。
 //! - **「失败 ≠ 空集合」守卫**：权威集合拉取失败（网络/服务端错误、分页截断）
-//!   时整轮对账跳过，绝不把失败当成「远端什么都没有」做双向回写——否则一次
-//!   请求失败就会静默清空本地收藏/已读态。消费点：GR 调用方
-//!   `greader_pull.rs` 的 C-1 段（`fetch_stream_ids` 报 Err → 跳过对账）；
-//!   Fever 的 `reconcile_ok` 守卫（`fever_pull.rs`）。分页截断按失败处理
+//!   时只跳过失败字段，绝不把失败当成「远端什么都没有」做双向回写。GR
+//!   read/starred 在 `greader_pull.rs` 分别 fetch/apply，单侧失败不阻断另一侧；
+//!   Fever 仍由 `reconcile_ok` 守卫整段 unread/saved。分页截断按失败处理
 //!   （`fetch_stream_ids` 的 P2-1 纪律，锁定于
 //!   `tests/star_reconcile_truncation_e2e.rs`）。
 //!

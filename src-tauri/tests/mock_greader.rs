@@ -129,6 +129,10 @@ pub struct MockGReader {
     /// 故障注入（TASK-069 审查 F1）：置位后仅 reading-list 的 stream/items/ids 返回 500
     /// （read/starred 对账仍成功）——验证「id 列举失败同样不推进游标」
     pub fail_reading_list_ids: std::sync::atomic::AtomicBool,
+    /// OPT-019：强制 item ids 单页大小（0 = 使用请求 n），用于真实 c 分页边界。
+    pub forced_item_ids_page_size: std::sync::atomic::AtomicUsize,
+    /// OPT-019：reading-list 返回空 itemRefs + 合法 continuation（非法结构）。
+    pub empty_page_with_continuation: std::sync::atomic::AtomicBool,
     /// 故障注入（P2-1，自检 2026-09-29）：置位后 starred 流的 stream/items/ids
     /// 只返回首条 id，且 continuation 为非数字垃圾——模拟「还有更多页、但续游标
     /// 损坏」的服务端异常。修前 fetch_stream_ids 静默 break 拿走截断集合，对账
@@ -244,6 +248,8 @@ impl MockGReader {
             fail_edit_tag: std::sync::atomic::AtomicBool::new(false),
             fail_item_contents: std::sync::atomic::AtomicBool::new(false),
             fail_reading_list_ids: std::sync::atomic::AtomicBool::new(false),
+            forced_item_ids_page_size: std::sync::atomic::AtomicUsize::new(0),
+            empty_page_with_continuation: std::sync::atomic::AtomicBool::new(false),
             corrupt_starred_continuation: std::sync::atomic::AtomicBool::new(false),
             fail_quick_add: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
@@ -347,6 +353,18 @@ impl MockGReader {
     pub fn set_fail_reading_list_ids(&self, fail: bool) {
         self.fail_reading_list_ids
             .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[allow(dead_code)] // 共享 mock 在独立 test target 中未必消费该故障注入
+    pub fn set_item_ids_page_size(&self, size: usize) {
+        self.forced_item_ids_page_size
+            .store(size, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[allow(dead_code)] // 共享 mock 在独立 test target 中未必消费该故障注入
+    pub fn set_empty_page_with_continuation(&self, on: bool) {
+        self.empty_page_with_continuation
+            .store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 置位后 starred 流的 stream/items/ids 返回「首条 id + 非数字 continuation」
@@ -1071,6 +1089,18 @@ fn route(
                     serde_json::json!({ "id": (i as i64) + 1, "title": s.title, "url": s.url })
                 })
                 .collect();
+            let feed_ids = (1..=feeds.len())
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let feeds_groups: Vec<serde_json::Value> = if groups.is_empty() {
+                Vec::new()
+            } else {
+                vec![serde_json::json!({
+                    "group_id": 1,
+                    "feed_ids": feed_ids,
+                })]
+            };
             // OPT-005：生产 FeverClient 对「数据方法响应缺对应字段」是协议错误
             // （缺字段 ≠ 空集合）。本 mock 此前对所有 action 只回 groups/feeds，
             // 现按请求里的 action 补上对应字段（内容保持宽松空集，现有断言不变）。
@@ -1080,6 +1110,7 @@ fn route(
                 "auth": auth,
                 "groups": groups,
                 "feeds": feeds,
+                "feeds_groups": feeds_groups,
             });
             if let Some(obj) = envelope.as_object_mut() {
                 // OPT-017D：默认（未置位）保持旧行为——各数据方法一律回空集合。
@@ -1245,7 +1276,14 @@ fn route(
                     r#"{"error_message":"injected reading-list failure"}"#.into(),
                 );
             }
-            let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
+            let mut n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
+            let forced_size = srv
+                .forced_item_ids_page_size
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if forced_size > 0 {
+                n = n.min(forced_size);
+            }
+            let offset: usize = q.get("c").and_then(|v| v.parse().ok()).unwrap_or(0);
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
             // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）。
             // R3 夹具修正（协议依据）：Google Reader 的 `user/-/state/com.google/read`
@@ -1279,6 +1317,16 @@ fn route(
                 .map(|e| e.id)
                 .collect();
             let total = ids.len();
+            if srv
+                .empty_page_with_continuation
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && stream.contains("reading-list")
+            {
+                return (
+                    200,
+                    serde_json::json!({ "itemRefs": [], "continuation": "0" }).to_string(),
+                );
+            }
             // P2-1 故障注入：starred 流首页只回 1 条 + 非数字 continuation，
             // 模拟「本应还有更多页，但续游标损坏」。客户端拿到的是**截断**的
             // starred 权威集合（首条之后的收藏不在其中）。
@@ -1305,13 +1353,14 @@ fn route(
                     srv.entries.lock().unwrap().push(injected);
                 }
             }
-            let page: Vec<i64> = ids.into_iter().take(n).collect();
+            let page: Vec<i64> = ids.into_iter().skip(offset).take(n).collect();
             let item_refs: Vec<serde_json::Value> = page
                 .iter()
                 .map(|id| serde_json::json!({"id": id.to_string()}))
                 .collect();
-            let continuation = if total > page.len() {
-                Some(page.len().to_string())
+            let end = offset.saturating_add(page.len());
+            let continuation = if end < total {
+                Some(end.to_string())
             } else {
                 None
             };

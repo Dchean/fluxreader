@@ -685,6 +685,23 @@ async fn precise_remote_id_trust_boundary_for_unknown_and_conflicting_feed() {
             false,
         )
         .unwrap();
+        // OPT-019：零远端 feed 绑定时 pull 会按数据保护守卫直接跳过。这里
+        // 预置一个与本场景无关的远端绑定，使被测的未绑定 feed 行仍进入合并链路。
+        let guard_folder = db::create_folder(&conn, "身份守卫", "article").unwrap();
+        let guard_feed = db::insert_feed_origin(
+            &conn,
+            "https://guard.invalid/feed",
+            None,
+            "身份守卫源",
+            None,
+            guard_folder,
+            "inherit",
+            false,
+            false,
+            "remote",
+        )
+        .unwrap();
+        db::set_feed_remote_id(&conn, guard_feed, 999).unwrap();
         let (aid, _) = db::upsert_article_with_feed(
             &conn,
             feed,

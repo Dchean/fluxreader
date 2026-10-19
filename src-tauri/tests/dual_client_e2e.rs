@@ -228,7 +228,16 @@ async fn read_intent_flows_both_ways_across_feeds() {
     let r1 = app_lib::sync::sync_now(&db, &http).await.expect("sync 1");
     {
         let conn = db.lock().await;
-        assert!(r1.errors.is_empty(), "no errors: {:?}", r1.errors);
+        assert!(
+            r1.errors.iter().any(|e| e.contains("所属远端 feed")),
+            "副本 feed 未绑定时必须显式记录部分绑定: {:?}",
+            r1.errors
+        );
+        assert_eq!(
+            db::last_sync_ts(&conn).unwrap(),
+            0,
+            "部分绑定轮不得推进条目游标"
+        );
         let dups = db::article_dup_entries(&conn, xid).unwrap();
         assert!(
             dups.contains(&copy_id),

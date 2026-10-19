@@ -51,8 +51,8 @@ async fn count_starred(db: &Arc<Mutex<rusqlite::Connection>>) -> i64 {
 
 /// 修前红：损坏的 continuation 使客户端只拿到 1/2 条 starred id，reconcile 把
 /// 未列出的 S2 判为「远端已取消收藏」→ 本地星标 2 → 1（断言 starred_after==2 失败）。
-/// 修后绿：fetch_stream_ids 报错中止 → C-1 守卫跳过本轮对账 → 星标保持 2，
-/// 且 report.errors 带上「状态对账跳过 + continuation」；解除注入后对账正常、
+/// 修后绿：fetch_stream_ids 报错 → 仅 starred 字段跳过对账 → 星标保持 2，
+/// 且 report.errors 带上「starred 集合失败 + continuation」；解除注入后对账正常、
 /// 星标仍为 2。
 #[tokio::test]
 async fn starred_reconcile_aborts_on_corrupt_continuation() {
@@ -88,7 +88,7 @@ async fn starred_reconcile_aborts_on_corrupt_continuation() {
         report2
             .errors
             .iter()
-            .any(|e| e.contains("状态对账跳过") && e.contains("continuation")),
+            .any(|e| e.contains("starred 权威集合") && e.contains("continuation")),
         "损坏的权威集合必须中止本轮对账并上报（C-1 守卫口径）: {:?}",
         report2.errors
     );

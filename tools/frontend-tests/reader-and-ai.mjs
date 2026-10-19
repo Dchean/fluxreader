@@ -7,7 +7,7 @@
 export const id = 'reader-and-ai';
 
 export async function run(ctx) {
-  const { S, store, checkNew, nTick, resetStore, bootFixture, mkRow, BASE_ROWS, nSel, bodyOf, bodyOfT122, getBodyEntryT122, markBodyLoadingT122, dropBodyEntryT122 } = ctx;
+  const { S, store, checkNew, nTick, resetStore, bootFixture, overrideGlobal, mkRow, BASE_ROWS, nSel, bodyOf, bodyOfT122, getBodyEntryT122, markBodyLoadingT122, dropBodyEntryT122 } = ctx;
   await ctx.useMainBackend();
 
   /* ============================================================
@@ -220,13 +220,426 @@ export async function run(ctx) {
   S.invokeCalls.length = 0;
   d1c.toasts[d1c.toasts.length - 1]?.action?.run();
   await nTick(5);
-  checkNew('(D1c) 半截译文 + 报错后点「重试」：真的重发 ai_translate 并重新进入生成态（修前把半截当缓存直接展示）',
+  checkNew('(D1c) 半截译文 + 报错后点「重试」：当前文章重发 ai_translate 并进入 Reader global translating 链',
     S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 1
     && store.getState().translating === true);
   checkNew('(D1c) 重试清空半截译文（原有清空逻辑在修前根本走不到；TASK-122 真值源 bodyById）',
     bodyOf(store.getState(), '201').translatedContent === '');
   S.heldAi[S.heldAi.length - 1]?.ch.onmessage?.({ type: 'done' });
   await nTick(20);
+
+  /* ============================================================
+     OPT-020 P1-C1：Reader 全文 / 翻译重试必须捕获失败文章 id
+     ============================================================ */
+  await bootFixture();
+  S.detailImpl = (id) => mkRow({
+    id,
+    content_html: `<p>正文 ${id}</p>`,
+    url: `https://retry.example/${id}`,
+    translated_content: null,
+  });
+  store.setState({ activeArticleId: '101', showFulltext: false });
+  store.getState().ensureArticleContent('101', { extractFulltext: true });
+  await nTick(20);
+  store.getState().ensureArticleContent('104', { extractFulltext: true });
+  await nTick(20);
+  S.extractResult = 'reject';
+  store.setState({ activeArticleId: '101', showFulltext: false, toasts: [], errors: [] });
+  S.invokeCalls.length = 0;
+  store.getState().extractCurrentArticle();
+  await nTick(20);
+  const opt020FulltextError = store.getState().errors.find(
+    (e) => e.key === 'reader:fulltext:101',
+  );
+  S.extractResult = { html: '<p>文章 101 全文</p>', degraded: false, reason: null };
+  store.setState({ activeArticleId: '104', showFulltext: false });
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020FulltextError?.id);
+  await nTick(20);
+  const opt020FulltextRetryCall = S.invokeCalls.find((c) => c.cmd === 'extract_fulltext');
+  checkNew('(OPT-020 fulltext) 文章 101 失败后切到 104，旧重试仍只请求 101',
+    opt020FulltextRetryCall?.args.articleId === 101);
+  checkNew('(OPT-020 fulltext) 旧重试不切换当前文章 104 的全文视图',
+    store.getState().activeArticleId === '104' && store.getState().showFulltext === false);
+
+  /* 文章只是不在当前视图（entries）但后端仍存在：重试必须按 id 交给后端判定。 */
+  S.extractResult = 'reject';
+  store.setState({
+    activeArticleId: '101',
+    showFulltext: false,
+    toasts: [],
+    errors: [],
+  });
+  store.getState().extractCurrentArticle();
+  await nTick(20);
+  const opt020FulltextGoneError = store.getState().errors.find(
+    (e) => e.key === 'reader:fulltext:101',
+  );
+  store.setState((s) => ({
+    activeArticleId: '104',
+    showFulltext: false,
+    entries: s.entries.filter((e) => e.id !== '101'),
+  }));
+  S.extractResult = { html: '<p>A 仍存在，后端执行</p>', degraded: false, reason: null };
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020FulltextGoneError?.id);
+  await nTick(20);
+  checkNew('(OPT-020 fulltext) A 仍在后端但不在当前 entries：旧重试仍按 id 101 请求，不错误判定删除',
+    S.backendRows.some((r) => String(r.id) === '101')
+    && S.invokeCalls.filter((c) => c.cmd === 'extract_fulltext')
+      .some((c) => c.args.articleId === 101));
+
+  /* 自动全文入口（打开文章时命中摘要判据）失败后的重试同样按文章 101 重放。 */
+  await bootFixture();
+  S.detailImpl = (id) => mkRow({
+    id,
+    content_html: '<p>这里只有摘要，查看全文</p>',
+    url: `https://auto-fulltext.example/${id}`,
+    translated_content: null,
+  });
+  S.extractResult = 'reject';
+  store.setState({
+    activeArticleId: '101',
+    showFulltext: false,
+    toasts: [],
+    errors: [],
+    settings: { ...store.getState().settings, defaultOpenMode: 'fulltext' },
+  });
+  S.invokeCalls.length = 0;
+  store.getState().ensureArticleContent('101', { extractFulltext: true });
+  await nTick(30);
+  const opt020AutoFulltextError = store.getState().errors.find(
+    (e) => e.key === 'reader:fulltext:101',
+  );
+  S.extractResult = { html: '<p>自动全文 101</p>', degraded: false, reason: null };
+  store.setState({ activeArticleId: '104', showFulltext: false });
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020AutoFulltextError?.id);
+  await nTick(20);
+  checkNew('(OPT-020 fulltext) 自动全文失败后切到 104，旧重试仍请求 101 且不改当前全文视图',
+    S.invokeCalls.filter((c) => c.cmd === 'extract_fulltext').at(-1)?.args.articleId === 101
+    && store.getState().activeArticleId === '104'
+    && store.getState().showFulltext === false);
+
+  /* reader:content 重试同样只认失败文章 id：跨视图后仍走 get_article -> bodyById。 */
+  await bootFixture();
+  store.getState().selectFeed('10');
+  await nTick(40);
+  let opt020ContentRejects = 0;
+  S.rejectWhen = (cmd) => cmd === 'get_article' && ++opt020ContentRejects <= 2;
+  S.detailImpl = (id) => mkRow({
+    id,
+    feed_id: 10,
+    content_html: `<p>正文重取 ${id}</p>`,
+    url: `https://content-retry.example/${id}`,
+    translated_content: null,
+  });
+  store.getState().ensureArticleContent('101', { extractFulltext: true });
+  await nTick(20);
+  store.getState().ensureArticleContent('103', { extractFulltext: true });
+  await nTick(20);
+  const opt020ContentError101 = store.getState().errors.find(
+    (e) => e.key === 'reader:content:101',
+  );
+  const opt020ContentError103 = store.getState().errors.find(
+    (e) => e.key === 'reader:content:103',
+  );
+  store.getState().selectFeed('12');
+  await nTick(40);
+  checkNew('(OPT-020 reader content) 前置：已切到不含 101/103 的范围',
+    store.getState().activeFeedFilter === '12'
+    && !store.getState().entries.some((e) => e.id === '101')
+    && !store.getState().entries.some((e) => e.id === '103'));
+
+  S.rejectWhen = null;
+  S.detailImpl = (id) => id === 103
+    ? null
+    : mkRow({
+        id,
+        feed_id: 10,
+        content_html: `<p>正文重取 ${id}</p>`,
+        url: `https://content-retry.example/${id}`,
+        translated_content: null,
+      });
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020ContentError101?.id);
+  await nTick(20);
+  checkNew('(OPT-020 reader content) 目标不在 entries 时重试仍按 id 调 get_article 并落 bodyById',
+    S.invokeCalls.some((c) => c.cmd === 'get_article' && c.args.id === 101)
+    && getBodyEntryT122('101')?.state === 'ready'
+    && bodyOf(store.getState(), '101').content === '<p>正文重取 101</p>'
+    && store.getState().activeFeedFilter === '12');
+
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020ContentError103?.id);
+  await nTick(20);
+  const opt020ContentMissingRetry = store.getState().errors.find(
+    (e) => e.key === 'reader:content:103',
+  );
+  checkNew('(OPT-020 reader content) 后端真实缺行时失败关闭为 missing，并保留同 key 可重试入口',
+    S.invokeCalls.some((c) => c.cmd === 'get_article' && c.args.id === 103)
+    && getBodyEntryT122('103')?.state === 'missing'
+    && !!opt020ContentMissingRetry?.action?.run
+    && store.getState().activeFeedFilter === '12');
+
+  await bootFixture();
+  S.aiTr = { deltas: [], error: 'AI 限流', reject: null, finish: true, holdIds: [] };
+  store.setState({
+    activeArticleId: '101',
+    isShowingTranslatedProse: false,
+    toasts: [],
+    errors: [],
+  });
+  S.invokeCalls.length = 0;
+  store.getState().toggleReaderTranslation();
+  await nTick(20);
+  const opt020TranslationError = store.getState().errors.find(
+    (e) => e.key === 'ai:translate:101',
+  );
+  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
+  store.setState({ activeArticleId: '104', isShowingTranslatedProse: false });
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020TranslationError?.id);
+  await nTick(20);
+  const opt020TranslationRetryCall = S.invokeCalls.find((c) => c.cmd === 'ai_translate');
+  checkNew('(OPT-020 translation) 文章 101 失败后切到 104，旧 Reader 翻译重试仍只请求 101',
+    opt020TranslationRetryCall?.args.articleId === 101);
+  checkNew('(OPT-020 translation) 旧重试不把当前文章 104 切进译文展示态',
+    store.getState().activeArticleId === '104' && store.getState().isShowingTranslatedProse === false);
+
+  S.aiTr = { deltas: [], error: 'A 当前视图外失败', reject: null, finish: true, holdIds: [] };
+  store.setState({ activeArticleId: '101', isShowingTranslatedProse: false, toasts: [], errors: [] });
+  store.getState().toggleReaderTranslation();
+  await nTick(20);
+  const opt020TranslationGoneError = store.getState().errors.find(
+    (e) => e.key === 'ai:translate:101',
+  );
+  store.setState((s) => ({
+    activeArticleId: '104',
+    isShowingTranslatedProse: false,
+    entries: s.entries.filter((e) => e.id !== '101'),
+  }));
+  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [] };
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020TranslationGoneError?.id);
+  await nTick(20);
+  checkNew('(OPT-020 translation) A 仍在后端但不在当前 entries：旧重试仍按 id 101 请求，不错误判定删除',
+    S.backendRows.some((r) => String(r.id) === '101')
+    && S.invokeCalls.filter((c) => c.cmd === 'ai_translate')
+      .some((c) => c.args.articleId === 101));
+
+  /* 连续重试必须脱离当前 entries：首次重试失败后的新入口仍可直接重发。 */
+  await bootFixture();
+  store.setState({ toasts: [], errors: [], activeArticleId: null });
+  S.aiSum = { deltas: [], error: '摘要首次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().summarizeEntry('105');
+  await nTick(20);
+  const opt020SummaryError1 = store.getState().errors.find((e) => e.key === 'ai:summary:105');
+  store.setState((s) => ({ entries: s.entries.filter((e) => e.id !== '105') }));
+  S.invokeCalls.length = 0;
+  S.aiSum = { deltas: [], error: '摘要二次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().retryError?.(opt020SummaryError1?.id);
+  await nTick(20);
+  const opt020SummaryError2 = store.getState().errors.find((e) => e.key === 'ai:summary:105');
+  S.aiSum = { deltas: [], error: '摘要三次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().retryError?.(opt020SummaryError2?.id);
+  await nTick(20);
+  checkNew('(OPT-020 summary retry) 文章不在当前 entries 时连续重试仍发两次 IPC，并保留最新入口',
+    S.invokeCalls.filter((c) => c.cmd === 'ai_summarize').length === 2
+    && !!store.getState().errors.find((e) => e.key === 'ai:summary:105')?.action?.run);
+
+  await bootFixture();
+  store.setState({ toasts: [], errors: [], activeArticleId: null });
+  S.aiTr = { deltas: [], error: '卡片翻译首次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().translateEntry('105');
+  await nTick(20);
+  const opt020CardError1 = store.getState().errors.find((e) => e.key === 'ai:translate:105');
+  store.setState((s) => ({ entries: s.entries.filter((e) => e.id !== '105') }));
+  S.invokeCalls.length = 0;
+  S.aiTr = { deltas: [], error: '卡片翻译二次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().retryError?.(opt020CardError1?.id);
+  await nTick(20);
+  const opt020CardError2 = store.getState().errors.find((e) => e.key === 'ai:translate:105');
+  S.aiTr = { deltas: [], error: '卡片翻译三次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().retryError?.(opt020CardError2?.id);
+  await nTick(20);
+  checkNew('(OPT-020 card translation retry) 文章不在当前 entries 时连续重试仍发两次 IPC，并保留最新入口',
+    S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 2
+    && !!store.getState().errors.find((e) => e.key === 'ai:translate:105')?.action?.run);
+
+  await bootFixture();
+  store.setState({
+    toasts: [],
+    errors: [],
+    activeArticleId: '105',
+    isShowingTranslatedProse: false,
+  });
+  S.aiTr = { deltas: [], error: 'Reader 翻译首次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().toggleReaderTranslation();
+  await nTick(20);
+  const opt020ReaderError1 = store.getState().errors.find((e) => e.key === 'ai:translate:105');
+  store.setState((s) => ({
+    activeArticleId: '104',
+    entries: s.entries.filter((e) => e.id !== '105'),
+  }));
+  S.invokeCalls.length = 0;
+  S.aiTr = { deltas: [], error: 'Reader 翻译二次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().retryError?.(opt020ReaderError1?.id);
+  await nTick(20);
+  const opt020ReaderError2 = store.getState().errors.find((e) => e.key === 'ai:translate:105');
+  S.aiTr = { deltas: [], error: 'Reader 翻译三次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().retryError?.(opt020ReaderError2?.id);
+  await nTick(20);
+  checkNew('(OPT-020 reader translation retry) Reader 失败后切文且 entries 无 A，二次失败入口仍连续发 IPC',
+    S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 2
+    && !!store.getState().errors.find((e) => e.key === 'ai:translate:105')?.action?.run);
+
+  /* 当前文章上的连续 retry 必须继续走 Reader 展示链，成功后保持译文展示。 */
+  await bootFixture();
+  S.detailImpl = (id) => mkRow({
+    id,
+    content_html: '<p>当前文章正文</p>',
+    translated_content: '<p>当前文章成功译文</p>',
+  });
+  store.setState({
+    toasts: [],
+    errors: [],
+    activeArticleId: '105',
+    isShowingTranslatedProse: false,
+  });
+  S.aiTr = { deltas: [], error: '当前文章首次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().toggleReaderTranslation();
+  await nTick(20);
+  const opt020ReaderCurrentError1 = store.getState().errors.find(
+    (e) => e.key === 'ai:translate:105',
+  );
+  S.invokeCalls.length = 0;
+  S.aiTr = { deltas: [], error: '当前文章二次失败', reject: null, finish: true, holdIds: [] };
+  store.getState().retryError?.(opt020ReaderCurrentError1?.id);
+  await nTick(20);
+  const opt020ReaderCurrentError2 = store.getState().errors.find(
+    (e) => e.key === 'ai:translate:105',
+  );
+  S.aiTr = { deltas: ['<p>当前文章成功译文</p>'], error: null, reject: null, finish: true, holdIds: [] };
+  store.getState().retryError?.(opt020ReaderCurrentError2?.id);
+  await nTick(30);
+  checkNew('(OPT-020 reader translation current) 当前文章连续失败仍可重试，成功走 Reader 链并保持译文展示',
+    S.invokeCalls.filter((c) => c.cmd === 'ai_translate').length === 2
+    && store.getState().isShowingTranslatedProse === true
+    && bodyOf(store.getState(), '105').translatedContent === '<p>当前文章成功译文</p>');
+
+  /* A/B 并发：A 的迟到流错误不得关闭 B 的全局 translating / 译文展示。 */
+  await bootFixture();
+  S.detailImpl = (id) => mkRow({
+    id,
+    content_html: '<p>并发正文</p>',
+    translated_content: id === 104 ? '<p>B 并发译文</p>' : '<p>A 并发译文</p>',
+  });
+  store.setState({ activeArticleId: '101', translating: false, isShowingTranslatedProse: false });
+  S.aiTr = { deltas: [], error: null, reject: null, finish: false, holdIds: [], deferIds: [101] };
+  store.getState().toggleReaderTranslation();
+  await nTick(5);
+  const opt020ReaderAStream = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 101);
+  store.setState({ activeArticleId: '104', isShowingTranslatedProse: false });
+  S.aiTr = { deltas: [], error: null, reject: null, finish: false, holdIds: [], deferIds: [104] };
+  store.getState().toggleReaderTranslation();
+  await nTick(5);
+  const opt020ReaderBStream = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 104);
+  checkNew('(OPT-020 reader translation A/B) 前置：B 生成中且译文展示态开启',
+    !!opt020ReaderAStream && !!opt020ReaderBStream
+    && store.getState().activeArticleId === '104'
+    && store.getState().translating === true
+    && store.getState().isShowingTranslatedProse === true);
+  opt020ReaderAStream.ch.onmessage?.({ type: 'error', data: 'A 迟到流失败' });
+  opt020ReaderAStream.resolve('');
+  await nTick(5);
+  checkNew('(OPT-020 reader translation A/B) A 迟到流失败不得关闭 B 的全局生成/译文展示',
+    store.getState().activeArticleId === '104'
+    && store.getState().translating === true
+    && store.getState().isShowingTranslatedProse === true
+    && store.getState().translateErrors['101'] === 'A 迟到流失败');
+  opt020ReaderBStream.ch.onmessage?.({ type: 'delta', data: '<p>B 并发译文</p>' });
+  opt020ReaderBStream.ch.onmessage?.({ type: 'done' });
+  opt020ReaderBStream.resolve('');
+  await nTick(20);
+  checkNew('(OPT-020 reader translation A/B) B 成功后译文展示保持，仅 B 清全局生成态',
+    store.getState().translating === false
+    && store.getState().isShowingTranslatedProse === true
+    && bodyOf(store.getState(), '104').translatedContent === '<p>B 并发译文</p>');
+
+  /* A 的迟到 transport reject 与流错误同口径。 */
+  await bootFixture();
+  S.detailImpl = (id) => mkRow({
+    id,
+    content_html: '<p>并发正文</p>',
+    translated_content: id === 104 ? '<p>B reject 后译文</p>' : '<p>A 译文</p>',
+  });
+  const realInvokeForReaderReject = globalThis.__INVOKE__;
+  let rejectReaderA = null;
+  const restoreReaderReject = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
+    if (cmd === 'ai_translate' && Number(args.articleId) === 101) {
+      return new Promise((_resolve, reject) => { rejectReaderA = reject; });
+    }
+    return realInvokeForReaderReject(cmd, args);
+  });
+  try {
+    store.setState({ activeArticleId: '101', translating: false, isShowingTranslatedProse: false });
+    store.getState().toggleReaderTranslation();
+    await nTick(5);
+    store.setState({ activeArticleId: '104', isShowingTranslatedProse: false });
+    S.aiTr = { deltas: [], error: null, reject: null, finish: false, holdIds: [], deferIds: [104] };
+    store.getState().toggleReaderTranslation();
+    await nTick(5);
+    const opt020ReaderBReject = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 104);
+    rejectReaderA?.({ message: 'A 迟到 reject' });
+    await nTick(10);
+    checkNew('(OPT-020 reader translation A/B) A 迟到 reject 不得关闭 B 的全局生成/译文展示',
+      !!opt020ReaderBReject
+      && store.getState().activeArticleId === '104'
+      && store.getState().translating === true
+      && store.getState().isShowingTranslatedProse === true);
+    opt020ReaderBReject.ch.onmessage?.({ type: 'done' });
+    opt020ReaderBReject.resolve('');
+    await nTick(20);
+    checkNew('(OPT-020 reader translation A/B) A reject 后 B 成功仍保持译文展示',
+      store.getState().translating === false
+      && store.getState().isShowingTranslatedProse === true
+      && bodyOf(store.getState(), '104').translatedContent === '<p>B reject 后译文</p>');
+  } finally {
+    restoreReaderReject();
+  }
+
+  /* A 的迟到 done 也不得清掉仍在生成的 B 的全局 translating。 */
+  await bootFixture();
+  S.detailImpl = (id) => mkRow({
+    id,
+    content_html: '<p>并发正文</p>',
+    translated_content: id === 104 ? '<p>B 迟到成功对照译文</p>' : '<p>A 迟到成功译文</p>',
+  });
+  store.setState({ activeArticleId: '101', translating: false, isShowingTranslatedProse: false });
+  S.aiTr = { deltas: [], error: null, reject: null, finish: false, holdIds: [], deferIds: [101] };
+  store.getState().toggleReaderTranslation();
+  await nTick(5);
+  const opt020ReaderASuccess = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 101);
+  store.setState({ activeArticleId: '104', isShowingTranslatedProse: false });
+  S.aiTr = { deltas: [], error: null, reject: null, finish: false, holdIds: [], deferIds: [104] };
+  store.getState().toggleReaderTranslation();
+  await nTick(5);
+  const opt020ReaderBSuccess = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 104);
+  opt020ReaderASuccess.ch.onmessage?.({ type: 'done' });
+  opt020ReaderASuccess.resolve('');
+  await nTick(5);
+  checkNew('(OPT-020 reader translation A/B) A 迟到 done 不得清掉仍在生成的 B 的全局 translating',
+    store.getState().activeArticleId === '104'
+    && store.getState().translating === true
+    && store.getState().isShowingTranslatedProse === true);
+  opt020ReaderBSuccess.ch.onmessage?.({ type: 'done' });
+  opt020ReaderBSuccess.resolve('');
+  await nTick(20);
+  checkNew('(OPT-020 reader translation A/B) A 迟到成功后 B 仍正常收尾并展示译文',
+    store.getState().translating === false
+    && store.getState().isShowingTranslatedProse === true
+    && bodyOf(store.getState(), '104').translatedContent === '<p>B 迟到成功对照译文</p>');
 
   /* ---------- P2-4：AI「保存提示词」只写提示词，不再顺带覆盖端点配置 ---------- */
   const { mergePromptsOnly } = await import('../../dist-test/components/settings/aiConfig.js');

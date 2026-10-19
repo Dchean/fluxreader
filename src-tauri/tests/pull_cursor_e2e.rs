@@ -37,6 +37,8 @@ async fn setup(
 #[tokio::test]
 async fn pull_chunk_failure_keeps_last_sync_ts() {
     let (db, http, server, tmp) = setup("guard").await;
+    // OPT-019：先建立至少一个远端 feed 绑定，验证分块失败守卫而非零绑定跳过。
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
     server.add_entry(10, "https://example.com/a", "A", "unread", false);
 
     // 种子旧游标 T0
@@ -81,6 +83,8 @@ async fn pull_chunk_failure_keeps_last_sync_ts() {
 #[tokio::test]
 async fn pull_success_advances_last_sync_ts() {
     let (db, http, server, tmp) = setup("advance").await;
+    // OPT-019：同失败用例，正常增量路径必须先有可归属的远端 feed。
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
     server.add_entry(10, "https://example.com/b", "B", "unread", false);
 
     let t0: i64 = 1_700_000_000;
@@ -171,5 +175,132 @@ async fn pull_id_listing_failure_keeps_last_sync_ts() {
     };
     assert_eq!(after, 1, "恢复轮必须把失败窗口的条目补回（且不重复）");
 
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn item_ids_cursor_paginates_all_pages() {
+    let (db, http, server, tmp) = setup("paged").await;
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+    server.set_item_ids_page_size(2);
+    for i in 1..=5 {
+        server.add_entry(
+            10,
+            &format!("https://example.com/page/{i}"),
+            &format!("P{i}"),
+            "unread",
+            false,
+        );
+    }
+    let t0 = 1_700_000_000;
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, t0).unwrap();
+    }
+    let report = sync::states_phase(&db, &http, false)
+        .await
+        .expect("states phase");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let conn = db.lock().await;
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 5);
+    assert!(db::last_sync_ts(&conn).unwrap() > t0);
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn empty_item_ids_page_with_continuation_is_protocol() {
+    let (db, http, server, tmp) = setup("empty-cont").await;
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+    server.set_empty_page_with_continuation(true);
+    let t0 = 1_700_000_000;
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, t0).unwrap();
+    }
+    let report = sync::states_phase(&db, &http, false)
+        .await
+        .expect("states phase");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("[protocol]") && e.contains("continuation")),
+        "{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), t0);
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn item_ids_page_limit_accepts_200_and_rejects_201() {
+    let (db, http, server, tmp) = setup("pages-200").await;
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+    server.set_item_ids_page_size(1);
+    for i in 1..=200 {
+        server.add_entry(
+            10,
+            &format!("https://example.com/limit200/{i}"),
+            &format!("L{i}"),
+            "unread",
+            false,
+        );
+    }
+    let t0 = 1_700_000_000;
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, t0).unwrap();
+    }
+    let report = sync::states_phase(&db, &http, false)
+        .await
+        .expect("200-page sync");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    {
+        let conn = db.lock().await;
+        assert!(db::last_sync_ts(&conn).unwrap() > t0);
+    }
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+
+    let (db, http, server, tmp) = setup("pages-201").await;
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+    server.set_item_ids_page_size(1);
+    for i in 1..=201 {
+        server.add_entry(
+            10,
+            &format!("https://example.com/limit201/{i}"),
+            &format!("M{i}"),
+            "unread",
+            false,
+        );
+    }
+    let t0 = 1_700_000_001;
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, t0).unwrap();
+    }
+    let report = sync::states_phase(&db, &http, false)
+        .await
+        .expect("201-page sync");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("[protocol]") && e.contains("页上限")),
+        "{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), t0);
+    drop(conn);
+    drop(db);
     let _ = std::fs::remove_file(&tmp);
 }

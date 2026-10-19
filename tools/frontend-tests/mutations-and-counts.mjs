@@ -7,7 +7,7 @@
 export const id = 'mutations-and-counts';
 
 export async function run(ctx) {
-  const { S, store, checkNew, nTick, resetStore, bootFixture, NOW, iso, mkRow, countsFromRows, selectVisibleEntries, selectTreeCounts, selectViewCounts, bodyOf, overrideGlobal } = ctx;
+  const { S, store, checkNew, nTick, resetStore, bootFixture, NOW, iso, mkRow, countsFromRows, selectVisibleEntries, selectTreeCounts, selectViewCounts, bodyOf, overrideGlobal, viewEntriesCache } = ctx;
   await ctx.useMainBackend();
 
   /* ============================================================
@@ -196,6 +196,349 @@ export async function run(ctx) {
     p1After.entries.filter((a) => a.feedId === '10' && a.isRead).length === 1 // 仅 102 本就已读
     && p1After.feedCounts.get('10')?.unread === p1BeforeCounts
     && Object.keys(p1After.openedReadIds).length === p1BeforeOpened);
+
+  /* ============================================================
+     OPT-020 P1-C1：mark-all-read 的重试是不可变范围/视图/布局快照
+     ============================================================ */
+  await bootFixture();
+  let opt020MarkAttempt = 0;
+  S.rejectWhen = (cmd) => cmd === 'mark_all_read' && ++opt020MarkAttempt <= 3;
+  store.setState({
+    activeFeedFilter: '10',
+    activeViewFilter: 'all',
+    activeContentLayout: 'article',
+    timelineFilter: 'unread',
+    openedReadIds: {},
+    toasts: [],
+    errors: [],
+  });
+  S.invokeCalls.length = 0;
+  store.getState().markCurrentViewAllRead();
+  await nTick(20);
+  const opt020MarkAError = store.getState().errors.find((e) => e.key.startsWith('mark:all-read'));
+  checkNew('(OPT-020 mark) 失败条目 key 带稳定上下文（同 key 不跨视图/范围合并）',
+    typeof opt020MarkAError?.key === 'string'
+    && opt020MarkAError.key.startsWith('mark:all-read:')
+    && opt020MarkAError.key.includes('10'));
+
+  /* 同上下文重试再失败：必须消费旧条目后重新写入同 key 的新可重试入口。 */
+  const opt020MarkAOldId = opt020MarkAError?.id;
+  store.getState().retryError?.(opt020MarkAOldId);
+  await nTick(20);
+  const opt020MarkARetryError = store.getState().errors.find(
+    (e) => e.key === opt020MarkAError?.key,
+  );
+  checkNew('(OPT-020 mark) 重试再次失败仍保留同上下文可重试入口（不是死按钮）',
+    !!opt020MarkARetryError && opt020MarkARetryError.id !== opt020MarkAOldId);
+
+  const opt020Feed12BeforeRetry = store.getState().entries
+    .filter((e) => e.feedId === '12')
+    .map((e) => `${e.id}:${e.isRead}`)
+    .join(',');
+  store.setState({
+    activeFeedFilter: '12',
+    activeViewFilter: 'all',
+    activeContentLayout: 'article',
+    timelineFilter: 'unread',
+    openedReadIds: {},
+  });
+  S.invokeCalls.length = 0;
+  store.getState().markCurrentViewAllRead();
+  await nTick(20);
+  const opt020MarkErrors = store.getState().errors.filter(
+    (e) => e.key.startsWith('mark:all-read'),
+  );
+  checkNew('(OPT-020 mark) 源 10 与源 12 的失败各自成条，不被固定 key 合并',
+    opt020MarkErrors.length === 2
+    && opt020MarkErrors[0].key !== opt020MarkErrors[1].key);
+
+  const opt020MarkAForRetry = store.getState().errors.find(
+    (e) => e.key === opt020MarkARetryError?.key,
+  );
+  S.rejectWhen = null;
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020MarkAForRetry?.id);
+  await nTick(20);
+  const opt020MarkRetryCall = S.invokeCalls.find((c) => c.cmd === 'mark_all_read');
+  const opt020Feed12AfterRetry = store.getState().entries
+    .filter((e) => e.feedId === '12')
+    .map((e) => `${e.id}:${e.isRead}`)
+    .join(',');
+  checkNew('(OPT-020 mark) 切到源 12 后重试源 10：后端只收到失败快照的 feed/layout/view 参数',
+    opt020MarkRetryCall?.args.feedId === 10
+    && opt020MarkRetryCall?.args.folderId === null
+    && opt020MarkRetryCall?.args.starredOnly === false
+    && opt020MarkRetryCall?.args.sinceMs === null
+    && opt020MarkRetryCall?.args.layout === 'article');
+  checkNew('(OPT-020 mark) 旧重试不把当前源 12 的条目标读',
+    opt020Feed12AfterRetry === opt020Feed12BeforeRetry);
+  const opt020MarkACache = viewEntriesCache.get('article|all|10');
+  checkNew('(OPT-020 mark) 切到 B 后重试 A 成功：A 的目标 viewEntriesCache 用捕获 id 收敛为全读',
+    !!opt020MarkACache
+    && opt020MarkACache.entries.length > 0
+    && opt020MarkACache.entries.filter((e) => e.feedId === '10').every((e) => e.isRead));
+
+  /* 首次写已提交但响应丢失：切 B 后重试返回 affected=0，A 缓存仍须收敛并重新对账。 */
+  await bootFixture();
+  S.feedCountsImpl = countsFromRows;
+  store.setState({
+    activeFeedFilter: '10',
+    activeViewFilter: 'all',
+    activeContentLayout: 'article',
+    timelineFilter: 'all',
+    openedReadIds: {},
+    toasts: [],
+    errors: [],
+  });
+  const realInvokeForLostResponse = globalThis.__INVOKE__;
+  let opt020LostMarkCalls = 0;
+  const restoreLostResponse = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
+    if (cmd !== 'mark_all_read') return realInvokeForLostResponse(cmd, args);
+    opt020LostMarkCalls += 1;
+    const call = opt020LostMarkCalls;
+    return realInvokeForLostResponse(cmd, args).then((affected) => (
+      call === 1 ? Promise.reject({ message: '首次已提交但响应丢失' }) : affected
+    ));
+  });
+  try {
+    store.getState().markCurrentViewAllRead();
+    await nTick(30);
+    const opt020LostError = store.getState().errors.find(
+      (e) => e.key.startsWith('mark:all-read'),
+    );
+    const opt020LostCache = viewEntriesCache.get('article|all|10');
+    checkNew('(OPT-020 mark affected=0) 前置：首次写已落库但响应丢失，A 缓存回滚为未读',
+      !!opt020LostError && !!opt020LostCache
+      && opt020LostCache.entries.filter((e) => e.feedId === '10').some((e) => !e.isRead));
+
+    store.getState().selectFeed('12');
+    await nTick(40);
+    S.invokeCalls.length = 0;
+    store.getState().retryError?.(opt020LostError?.id);
+    await nTick(40);
+    const opt020ZeroCache = viewEntriesCache.get('article|all|10');
+    checkNew('(OPT-020 mark affected=0) 重试返回 0 仍收敛 A 缓存全读并重新发起计数对账',
+      opt020LostMarkCalls === 2
+      && !!opt020ZeroCache
+      && opt020ZeroCache.entries.filter((e) => e.feedId === '10').every((e) => e.isRead)
+      && S.invokeCalls.some((c) => c.cmd === 'counts_snapshot')
+      && store.getState().feedCounts.get('10')?.unread === 0);
+  } finally {
+    restoreLostResponse();
+    S.feedCountsImpl = null;
+  }
+
+  /* A 乐观写已进入目标缓存后，用户切 B；A 迟到失败仍必须恢复 A 缓存。 */
+  await bootFixture();
+  store.setState({
+    activeFeedFilter: '10',
+    activeViewFilter: 'all',
+    activeContentLayout: 'article',
+    timelineFilter: 'unread',
+    openedReadIds: {},
+    toasts: [],
+    errors: [],
+  });
+  const realInvokeForAInFlight = globalThis.__INVOKE__;
+  let rejectAInFlight = null;
+  const restoreAInFlightInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
+    if (cmd === 'mark_all_read') {
+      return new Promise((_resolve, reject) => { rejectAInFlight = reject; });
+    }
+    return realInvokeForAInFlight(cmd, args);
+  });
+  try {
+    store.getState().markCurrentViewAllRead();
+    await nTick(10);
+    const aCacheOptimistic = viewEntriesCache.get('article|all|10');
+    checkNew('(OPT-020 mark in-flight) 前置：A 的乐观已读已写入 A 目标缓存',
+      !!aCacheOptimistic
+      && aCacheOptimistic.entries.find((e) => e.id === '101')?.isRead === true
+      && aCacheOptimistic.entries.find((e) => e.id === '103')?.isRead === true);
+
+    store.getState().selectFeed('12');
+    await nTick(40);
+    const bCacheBeforeAFailure = viewEntriesCache.get('article|all|12');
+    const bCacheStateBefore = (bCacheBeforeAFailure?.entries ?? [])
+      .map((e) => `${e.id}:${e.isRead}`)
+      .join(',');
+    checkNew('(OPT-020 mark in-flight) 前置：切到 B 后 B 目标缓存已建立',
+      !!bCacheBeforeAFailure && bCacheBeforeAFailure.entries.length > 0);
+
+    rejectAInFlight?.({ message: 'A 迟到失败' });
+    await nTick(30);
+    const aCacheRestored = viewEntriesCache.get('article|all|10');
+    const bCacheAfterAFailure = viewEntriesCache.get('article|all|12');
+    const bCacheStateAfter = (bCacheAfterAFailure?.entries ?? [])
+      .map((e) => `${e.id}:${e.isRead}`)
+      .join(',');
+    checkNew('(OPT-020 mark in-flight) A 在途切 B 后失败：A 缓存按 capturedReadById 恢复未读，B 缓存不变',
+      aCacheRestored?.entries.find((e) => e.id === '101')?.isRead === false
+      && aCacheRestored?.entries.find((e) => e.id === '102')?.isRead === true
+      && aCacheRestored?.entries.find((e) => e.id === '103')?.isRead === false
+      && bCacheStateAfter === bCacheStateBefore);
+  } finally {
+    restoreAInFlightInvoke();
+  }
+
+  /* 失败恢复必须逐 id 比较操作版本；用户接管后的读态不得被旧快照覆盖。 */
+  await bootFixture();
+  store.setState({
+    activeFeedFilter: '10',
+    activeViewFilter: 'all',
+    activeContentLayout: 'article',
+    timelineFilter: 'all',
+    openedReadIds: {},
+    toasts: [],
+    errors: [],
+  });
+  const realInvokeForTakeover = globalThis.__INVOKE__;
+  let rejectTakeoverMark = null;
+  const restoreTakeoverInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
+    if (cmd === 'mark_all_read') {
+      return new Promise((_resolve, reject) => { rejectTakeoverMark = reject; });
+    }
+    return realInvokeForTakeover(cmd, args);
+  });
+  try {
+    store.getState().markCurrentViewAllRead();
+    await nTick(10);
+    store.getState().toggleEntryFlag('102', 'isRead');
+    await nTick(20);
+    const aCacheBeforeTakeoverFailure = viewEntriesCache.get('article|all|10');
+    checkNew('(OPT-020 mark takeover) 前置：A 请求在途时用户把原本已读的 102 接管为未读',
+      store.getState().entries.find((e) => e.id === '102')?.isRead === false
+      && aCacheBeforeTakeoverFailure?.entries.find((e) => e.id === '102')?.isRead === false);
+
+    rejectTakeoverMark?.({ message: 'A 失败但用户已接管' });
+    await nTick(30);
+    const aCacheAfterTakeoverFailure = viewEntriesCache.get('article|all|10');
+    checkNew('(OPT-020 mark takeover) A 失败不得用旧快照覆盖用户接管：缓存 102 保持未读，未接管 id 仍回滚',
+      aCacheAfterTakeoverFailure?.entries.find((e) => e.id === '102')?.isRead === false
+      && aCacheAfterTakeoverFailure?.entries.find((e) => e.id === '101')?.isRead === false
+      && aCacheAfterTakeoverFailure?.entries.find((e) => e.id === '103')?.isRead === false);
+  } finally {
+    restoreTakeoverInvoke();
+  }
+
+  /* 成功回包同样必须尊重在途用户接管，不能把用户改回的未读再次收敛为已读。 */
+  await bootFixture();
+  store.setState({
+    activeFeedFilter: '10',
+    activeViewFilter: 'all',
+    activeContentLayout: 'article',
+    timelineFilter: 'all',
+    openedReadIds: {},
+    toasts: [],
+    errors: [],
+  });
+  const realInvokeForSuccessTakeover = globalThis.__INVOKE__;
+  let resolveSuccessMark = null;
+  const restoreSuccessTakeoverInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
+    if (cmd === 'mark_all_read') {
+      return new Promise((resolve) => { resolveSuccessMark = resolve; });
+    }
+    return realInvokeForSuccessTakeover(cmd, args);
+  });
+  try {
+    store.getState().markCurrentViewAllRead();
+    await nTick(10);
+    store.getState().toggleEntryFlag('102', 'isRead');
+    await nTick(20);
+    resolveSuccessMark?.(2);
+    await nTick(30);
+    const aCacheAfterSuccessTakeover = viewEntriesCache.get('article|all|10');
+    checkNew('(OPT-020 mark success takeover) 成功回包只收敛版本未变的 id：用户改回的 102 保持未读，101/103 收敛已读',
+      store.getState().entries.find((e) => e.id === '102')?.isRead === false
+      && aCacheAfterSuccessTakeover?.entries.find((e) => e.id === '102')?.isRead === false
+      && store.getState().entries.find((e) => e.id === '101')?.isRead === true
+      && store.getState().entries.find((e) => e.id === '103')?.isRead === true
+      && aCacheAfterSuccessTakeover?.entries.find((e) => e.id === '101')?.isRead === true
+      && aCacheAfterSuccessTakeover?.entries.find((e) => e.id === '103')?.isRead === true);
+  } finally {
+    restoreSuccessTakeoverInvoke();
+  }
+
+  /* retry attempt 重新建立版本：A 失败→B→重试 A 失败，A 的 entries/cache 仍恢复未读。 */
+  await bootFixture();
+  let abAAttempt = 0;
+  S.rejectWhen = (cmd) => cmd === 'mark_all_read' && ++abAAttempt <= 2;
+  store.setState({
+    activeFeedFilter: '10',
+    activeViewFilter: 'all',
+    activeContentLayout: 'article',
+    timelineFilter: 'all',
+    openedReadIds: {},
+    toasts: [],
+    errors: [],
+  });
+  store.getState().markCurrentViewAllRead();
+  await nTick(20);
+  const abAError = store.getState().errors.find((e) => e.key.startsWith('mark:all-read'));
+  store.getState().toggleEntryFlag('102', 'isRead');
+  await nTick(20);
+  store.getState().selectFeed('12');
+  await nTick(40);
+  checkNew('(OPT-020 mark A/B/A retry) 前置：真实 selectFeed 往返切到 B',
+    store.getState().activeFeedFilter === '12'
+    && store.getState().entries.length > 0
+    && store.getState().entries.every((e) => e.feedId === '12'));
+  store.getState().retryError?.(abAError?.id);
+  await nTick(30);
+  store.getState().selectFeed('10');
+  await nTick(40);
+  const abACache = viewEntriesCache.get('article|all|10');
+  checkNew('(OPT-020 mark A/B/A retry) A失败→真实 selectFeed B→重试A失败→回A：entries 与 cache 都恢复未读',
+    store.getState().activeFeedFilter === '10'
+    && store.getState().entries.every((e) => e.feedId === '10')
+    && store.getState().entries.find((e) => e.id === '101')?.isRead === false
+    && store.getState().entries.find((e) => e.id === '102')?.isRead === false
+    && store.getState().entries.find((e) => e.id === '103')?.isRead === false
+    && abACache?.entries.find((e) => e.id === '101')?.isRead === false
+    && abACache?.entries.find((e) => e.id === '102')?.isRead === false
+    && abACache?.entries.find((e) => e.id === '103')?.isRead === false);
+  S.rejectWhen = null;
+
+  /* A 在途切 B 后失败：计数按 attempt 读态/feedId 回补，不依赖 current entries。 */
+  await bootFixture();
+  store.setState({
+    activeFeedFilter: '10',
+    activeViewFilter: 'all',
+    activeContentLayout: 'article',
+    timelineFilter: 'all',
+    openedReadIds: {},
+    toasts: [],
+    errors: [],
+    settings: { ...store.getState().settings, smartDedup: false },
+  });
+  const realInvokeForCountRestore = globalThis.__INVOKE__;
+  let rejectCountRestoreMark = null;
+  const restoreCountRestoreInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
+    if (cmd === 'mark_all_read') {
+      return new Promise((_resolve, reject) => { rejectCountRestoreMark = reject; });
+    }
+    return realInvokeForCountRestore(cmd, args);
+  });
+  S.feedCountsPlan = { mode: 'defer' };
+  try {
+    const feed10UnreadBefore = store.getState().feedCounts.get('10')?.unread;
+    store.getState().markCurrentViewAllRead();
+    await nTick(10);
+    const feed10UnreadOptimistic = store.getState().feedCounts.get('10')?.unread;
+    store.setState((s) => ({
+      activeFeedFilter: '12',
+      entries: s.entries.filter((e) => e.feedId === '12'),
+    }));
+    rejectCountRestoreMark?.({ message: 'A 失败且 entries 已切 B' });
+    await nTick(30);
+    checkNew('(OPT-020 mark count restore) A 在途切 B 后失败：按 captured feedId 回补源10未读计数，不依赖 current entries',
+      typeof feed10UnreadBefore === 'number'
+      && feed10UnreadOptimistic === feed10UnreadBefore - 2
+      && store.getState().feedCounts.get('10')?.unread === feed10UnreadBefore);
+  } finally {
+    S.feedCountsPlan = null;
+    restoreCountRestoreInvoke();
+  }
 
   await bootFixture();
   S.rejectCmds.add('set_read');

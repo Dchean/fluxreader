@@ -75,8 +75,8 @@ export interface SettingsState {
 }
 
 /** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM。
-    action：可选操作按钮（失败 toast 的一键重试；与 showToast 的动作对象同形，
-    含可选 key——错误中心按它去重，见 AppErrorEntry）。 */
+    action：可选操作按钮（失败 toast 的一键重试；run 必须闭包捕获失败时上下文，
+    key 标识实体或稳定操作上下文——错误中心按它去重，见 AppErrorEntry）。 */
 export type ToastMessage = {
   id: number;
   text: string;
@@ -86,9 +86,9 @@ export type ToastMessage = {
 
 /** OPT-017E：错误中心条目——带重试动作的失败提示的**持久可达副本**。
  *  toast 层会被上限（4 条）与停留时长（4.2s）清掉唯一重试入口；错误中心以
- *  有界列表承接：去重键取「显式操作实体 key 优先、缺省回落文案」（R1 返工：
- *  同文案不同实体不得合并），`count` 记录合并次数、`at` 为最近一次写入时间
- *  （TTL 惰性清理依据）。 */
+ *  有界列表承接：去重键取「显式操作实体/上下文 key 优先、缺省回落文案」
+ *  （同文案不同实体或上下文不得合并），`count` 记录合并次数、`at` 为最近一次
+ *  写入时间（TTL 惰性清理依据）。 */
 export interface AppErrorEntry {
   id: number;
   key: string;
@@ -227,6 +227,9 @@ export interface AppState {
   errors: AppErrorEntry[];
   /** OPT-017E：错误中心面板开态（App Esc 链与浮层让路清单的字段源） */
   errorCenterOpen: boolean;
+  /** OPT-020：save-and-sync 的全局执行所有权（草稿 id；null = 空闲）。
+   *  该锁覆盖 save + post-save phase，跨组件卸载/重挂持续。 */
+  saveAndSyncBusyOwner: number | null;
   syncStatus: 'synced' | 'syncing' | 'error';
   /** 后台自动同步进行中（scheduler sync-running/sync-idle 事件驱动；与手动 syncStatus 独立） */
   backgroundSyncing: boolean;
@@ -378,7 +381,7 @@ export interface AppState {
       回到「无产物/未生成」，不得再显示 partial。失败如实 toast 且不改前端状态。 */
   clearAiProduct: (id: string, kind: AiProductKind) => Promise<boolean>;
   /** 正文懒加载水合（选中文章 / 社交卡片挂载） */
-  ensureArticleContent: (id: string, opts?: { extractFulltext?: boolean }) => void;
+  ensureArticleContent: (id: string, opts?: { extractFulltext?: boolean; allowDetached?: boolean }) => void;
   /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰） */
   hydrateArticleContent: (ids: string[]) => void;
   /** 正文水合失败重试（卡片内联重试入口）：清错误态后重新入队 */
@@ -436,12 +439,13 @@ export interface AppState {
   closeMiniModal: (which: 'newCategory' | 'addFeed' | 'editFeed' | 'renameCat') => void;
 
   /* ---------- Actions: Toast / 同步 ---------- */
-  /** text + 可选操作按钮（label/run：失败场景的一键重试；key：操作实体标识）。
+  /** text + 可选操作按钮（label/run：失败场景的一键重试；run 闭包捕获失败时
+   *  实体/范围/游标/表单快照；key：操作实体或稳定上下文标识）。
    *  OPT-017E：带动作的提示同时写入错误中心（去重 + 上限 + TTL），使重试入口不因
    *  toast 上限/停留时长而消失；普通提示语义不变。
-   *  R1 返工：key 为可选操作实体标识（命名 `域:操作:实体`，如 `feed:refresh:10`）
-   *  ——错误中心按「显式 key 优先、缺省回落文案」去重；带重试动作的调用点一律
-   *  传 key，避免同文案不同实体被合并成一条（迁移完整性由域回归 (e9) 守卫）。 */
+   *  key 为可选操作实体/上下文标识（如 `feed:refresh:10`、
+   *  `mark:all-read:<context>`）——错误中心按「显式 key 优先、缺省回落文案」
+   *  去重；带重试动作的调用点一律传 key，避免同文案不同目标被合并成一条。 */
   showToast: (text: string, action?: { label: string; run: () => void; key?: string }) => void;
   /** OPT-017E：派发错误重试并消费条目（错误中心面板与瞬时 toast 的两个表示面
    *  同一语义）。id 先按错误中心条目匹配；找不到（条目已被同 key 合并/逐出而
@@ -455,6 +459,10 @@ export interface AppState {
   clearErrors: () => void;
   openErrorCenter: () => void;
   closeErrorCenter: () => void;
+  /** OPT-020：原子获取 save+phase 全局忙锁；已有 owner 时返回 false。 */
+  beginSaveAndSync: (owner: number) => boolean;
+  /** 仅释放自己持有的全局忙锁；旧 owner 不能清掉新 owner。 */
+  endSaveAndSync: (owner: number) => void;
   triggerManualSync: () => void;
   /** TASK-124：sync-queue-changed 事件落地（App.tsx 监听器调用）。
    *  payload = Rust sync_queue_stats 三元组 {waiting, failed, last_error}。

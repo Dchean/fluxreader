@@ -131,6 +131,11 @@ struct Fixture {
     /// 响应中省略 `unread_item_ids` / `saved_item_ids` 字段（协议错误用例）。
     omit_unread: AtomicBool,
     omit_saved: AtomicBool,
+    /// 订阅层 action 各自要求的集合字段是否省略（OPT-019）。
+    omit_feeds: AtomicBool,
+    omit_groups: AtomicBool,
+    omit_feeds_side_feeds_groups: AtomicBool,
+    omit_groups_side_feeds_groups: AtomicBool,
     /// 覆盖条目的 id JSON 值（原文，如 `"\"0x1F\""`、`"1.5"`），非法 id 用例。
     raw_item_id_json: Mutex<Option<String>>,
     /// 覆盖 unread_item_ids 的原始 CSV 文本（非法集合用例）。
@@ -149,6 +154,8 @@ struct Fixture {
     oversize_html_bytes: AtomicUsize,
     /// 原样响应（超限/压缩用例）：绕过 JSON 路由直接回字节/分帧。
     raw_response: Mutex<Option<RawResponse>>,
+    /// 指定 action 返回 HTTP 200 非 JSON 正文（行为级 malformed JSON 用例）。
+    malformed_json_action: Mutex<Option<String>>,
     entries: Mutex<Vec<FEntry>>,
     /// (feed_id, title, url)
     feeds: Mutex<Vec<(i64, String, String)>>,
@@ -182,12 +189,17 @@ impl Fixture {
             omit_items: AtomicBool::new(false),
             omit_unread: AtomicBool::new(false),
             omit_saved: AtomicBool::new(false),
+            omit_feeds: AtomicBool::new(false),
+            omit_groups: AtomicBool::new(false),
+            omit_feeds_side_feeds_groups: AtomicBool::new(false),
+            omit_groups_side_feeds_groups: AtomicBool::new(false),
             raw_item_id_json: Mutex::new(None),
             raw_unread_csv: Mutex::new(None),
             hook_drop_ids: Mutex::new(HashSet::new()),
             listing_skip_ids: Mutex::new(HashSet::new()),
             oversize_html_bytes: AtomicUsize::new(0),
             raw_response: Mutex::new(None),
+            malformed_json_action: Mutex::new(None),
             entries: Mutex::new(Vec::new()),
             feeds: Mutex::new(Vec::new()),
             groups: Mutex::new(Vec::new()),
@@ -268,6 +280,23 @@ impl Fixture {
         self.omit_saved.store(v, Ordering::SeqCst);
     }
 
+    fn set_omit_feeds(&self, v: bool) {
+        self.omit_feeds.store(v, Ordering::SeqCst);
+    }
+
+    fn set_omit_groups(&self, v: bool) {
+        self.omit_groups.store(v, Ordering::SeqCst);
+    }
+
+    fn set_omit_feeds_side_feeds_groups(&self, v: bool) {
+        self.omit_feeds_side_feeds_groups.store(v, Ordering::SeqCst);
+    }
+
+    fn set_omit_groups_side_feeds_groups(&self, v: bool) {
+        self.omit_groups_side_feeds_groups
+            .store(v, Ordering::SeqCst);
+    }
+
     fn set_raw_item_id_json(&self, raw: Option<&str>) {
         *self.raw_item_id_json.lock().unwrap() = raw.map(str::to_string);
     }
@@ -288,6 +317,10 @@ impl Fixture {
 
     fn set_raw_response(&self, raw: Option<RawResponse>) {
         *self.raw_response.lock().unwrap() = raw;
+    }
+
+    fn set_malformed_json_action(&self, action: Option<&str>) {
+        *self.malformed_json_action.lock().unwrap() = action.map(str::to_string);
     }
 
     fn set_max_id_fail_at(&self, n: usize) {
@@ -520,6 +553,11 @@ fn route(srv: &Fixture, hit: &Hit) -> (u16, String) {
     }
 
     let q = query_map(&hit.query);
+    if let Some(action) = srv.malformed_json_action.lock().unwrap().clone() {
+        if q.contains_key(&action) {
+            return (200, "not-json".into());
+        }
+    }
     let mut resp = serde_json::Map::new();
     resp.insert("api_version".into(), serde_json::Value::from(4));
     resp.insert("auth".into(), serde_json::Value::from(1));
@@ -574,16 +612,24 @@ fn route(srv: &Fixture, hit: &Hit) -> (u16, String) {
                 })]
             })
             .unwrap_or_default();
-        if q.contains_key("groups") {
+        if q.contains_key("groups") && !srv.omit_groups.load(Ordering::SeqCst) {
             resp.insert("groups".into(), serde_json::Value::Array(groups));
         }
-        if q.contains_key("feeds") {
+        if q.contains_key("feeds") && !srv.omit_feeds.load(Ordering::SeqCst) {
             resp.insert("feeds".into(), serde_json::Value::Array(feeds));
         }
-        resp.insert(
-            "feeds_groups".into(),
-            serde_json::Value::Array(feeds_groups),
-        );
+        if q.contains_key("groups") && !srv.omit_groups_side_feeds_groups.load(Ordering::SeqCst) {
+            resp.insert(
+                "feeds_groups".into(),
+                serde_json::Value::Array(feeds_groups.clone()),
+            );
+        }
+        if q.contains_key("feeds") && !srv.omit_feeds_side_feeds_groups.load(Ordering::SeqCst) {
+            resp.insert(
+                "feeds_groups".into(),
+                serde_json::Value::Array(feeds_groups),
+            );
+        }
     }
 
     if q.contains_key("unread_item_ids") && !srv.omit_unread.load(Ordering::SeqCst) {
@@ -838,6 +884,11 @@ fn seed_db(tag: &str, srv: &Fixture) -> (TestDb, std::path::PathBuf) {
     db::set_setting(&conn, "greader_endpoint", &srv.url()).unwrap();
     db::set_setting(&conn, "greader_username", USER).unwrap();
     db::set_setting(&conn, "greader_password", PASS).unwrap();
+    let account = app_lib::sync::current_account(&conn)
+        .unwrap()
+        .expect("test account");
+    db::mark_zero_binding_discovery_attempt(&conn, &account.key, chrono::Utc::now().timestamp())
+        .unwrap();
     (Arc::new(tokio::sync::Mutex::new(conn)), tmp)
 }
 
@@ -973,6 +1024,100 @@ fn seed_bound_feed(conn: &rusqlite::Connection) {
     )
     .unwrap();
     db::set_feed_remote_id(conn, feed, 10).unwrap();
+}
+
+fn seed_remote_feed_and_article(conn: &rusqlite::Connection) -> (i64, i64) {
+    let folder = db::create_folder(conn, "远端分类", "article").unwrap();
+    let feed = db::insert_feed_origin(
+        conn,
+        "http://example.com/remote.rss",
+        None,
+        "远端源",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+        "remote",
+    )
+    .unwrap();
+    db::set_feed_remote_id(conn, feed, 10).unwrap();
+    let article = db::NewArticle {
+        guid: "remote-125".into(),
+        url: Some("https://e.example/125".into()),
+        title: "远端条目".into(),
+        author: None,
+        summary: None,
+        content_html: None,
+        body_text: "body".into(),
+        image_url: None,
+        enclosure_url: None,
+        enclosure_mime: None,
+        duration_sec: None,
+        published_at: Some("2026-01-01T00:00:00+00:00".into()),
+        source: "remote".into(),
+    };
+    let article_id = db::upsert_article_with_feed(conn, feed, &article, false)
+        .unwrap()
+        .0;
+    db::set_article_remote_id(conn, article_id, 125).unwrap();
+    (feed, article_id)
+}
+
+fn seed_unbound_remote_feed(conn: &rusqlite::Connection, feed_url: &str) -> i64 {
+    let folder = db::create_folder(conn, "未绑定远端分类", "article").unwrap();
+    db::insert_feed_origin(
+        conn,
+        feed_url,
+        None,
+        "未绑定远端源",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+        "remote",
+    )
+    .unwrap()
+}
+
+fn seed_local_article(conn: &rusqlite::Connection) -> i64 {
+    let folder = db::create_folder(conn, "本地分类", "article").unwrap();
+    let feed = db::insert_feed(
+        conn,
+        "https://local.example/feed.xml",
+        None,
+        "本地源",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    let article = db::NewArticle {
+        guid: "local-125".into(),
+        url: Some("https://local.example/125".into()),
+        title: "本地条目".into(),
+        author: None,
+        summary: None,
+        content_html: None,
+        body_text: "body".into(),
+        image_url: None,
+        enclosure_url: None,
+        enclosure_mime: None,
+        duration_sec: None,
+        published_at: Some("2026-01-01T00:00:00+00:00".into()),
+        source: "direct".into(),
+    };
+    db::upsert_article_with_feed(conn, feed, &article, false)
+        .unwrap()
+        .0
+}
+
+fn feed_count(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .unwrap()
 }
 
 /* ============================================================
@@ -1388,9 +1533,377 @@ async fn empty_account_sync_finishes_cleanly() {
 D. 缺字段 / 非法 ID / 缺集合：协议错误，不得当空集合
 ============================================================ */
 
+#[derive(Clone, Copy)]
+enum SubscriptionCollection {
+    Feeds,
+    Groups,
+    FeedsGroupsOnFeeds,
+    FeedsGroupsOnGroups,
+}
+
+impl SubscriptionCollection {
+    fn field_name(self) -> &'static str {
+        match self {
+            Self::Feeds => "feeds",
+            Self::Groups => "groups",
+            Self::FeedsGroupsOnFeeds | Self::FeedsGroupsOnGroups => "feeds_groups",
+        }
+    }
+
+    fn omit(self, srv: &Fixture) {
+        match self {
+            Self::Feeds => srv.set_omit_feeds(true),
+            Self::Groups => srv.set_omit_groups(true),
+            Self::FeedsGroupsOnFeeds => srv.set_omit_feeds_side_feeds_groups(true),
+            Self::FeedsGroupsOnGroups => srv.set_omit_groups_side_feeds_groups(true),
+        }
+    }
+}
+
+async fn assert_missing_subscription_collection_fails_closed(
+    tag: &str,
+    omitted: SubscriptionCollection,
+) {
+    let srv = Fixture::start().await;
+    srv.set_feeds(vec![(10, "远端源", "http://example.com/remote.rss")]);
+    srv.set_groups(vec![(20, "分类")]);
+    omitted.omit(&srv);
+
+    let (db, tmp) = seed_db(tag, &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_feed_and_article(&conn);
+    }
+    let report = sync::feeds_phase(&db, &http())
+        .await
+        .expect("protocol error is reported without aborting the phase");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains(omitted.field_name()) || e.contains("协议")),
+        "缺 {} 必须可见：{:?}",
+        omitted.field_name(),
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(feed_count(&conn), 1, "缺字段不得删除远端源");
+    assert_eq!(article_count(&conn), 1, "文章应随源保留");
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn missing_fever_feeds_collection_fails_closed() {
+    assert_missing_subscription_collection_fails_closed(
+        "fever_compat_missing_feeds",
+        SubscriptionCollection::Feeds,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn missing_fever_groups_collection_fails_closed() {
+    assert_missing_subscription_collection_fails_closed(
+        "fever_compat_missing_groups",
+        SubscriptionCollection::Groups,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn missing_fever_feeds_side_feeds_groups_collection_fails_closed() {
+    assert_missing_subscription_collection_fails_closed(
+        "fever_compat_missing_feeds_side_feeds_groups",
+        SubscriptionCollection::FeedsGroupsOnFeeds,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn missing_fever_groups_side_feeds_groups_collection_fails_closed() {
+    assert_missing_subscription_collection_fails_closed(
+        "fever_compat_missing_groups_side_feeds_groups",
+        SubscriptionCollection::FeedsGroupsOnGroups,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn explicit_empty_fever_subscription_collections_are_legal() {
+    let srv = Fixture::start().await;
+    let (db, tmp) = seed_db("fever_compat_empty_subscription_collections", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_feed_and_article(&conn);
+    }
+    let report = sync::feeds_phase(&db, &http())
+        .await
+        .expect("explicit empty feeds/groups/feeds_groups are valid");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let conn = db.lock().await;
+    assert_eq!(
+        feed_count(&conn),
+        0,
+        "显式三空数组仍是权威空集，必须执行远端源删除对账"
+    );
+    assert_eq!(
+        article_count(&conn),
+        0,
+        "权威空订阅删除源时应级联删除其文章"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 零远端 feed 绑定的 light sync 不请求条目/权威集合、不推进两类游标，
+/// 不写 history complete；预置本地文章保持。
+#[tokio::test]
+async fn fever_light_sync_without_remote_feed_binding_skips_pull_entirely() {
+    let srv = Fixture::start().await;
+    srv.add_entry(125, 10, "远端条目", false, false);
+    let (db, tmp) = seed_db("fever_compat_zero_binding", &srv);
+    {
+        let conn = db.lock().await;
+        seed_local_article(&conn);
+        db::set_last_sync_entry_id(&conn, 100).unwrap();
+        db::set_last_sync_ts(&conn, 777_777).unwrap();
+        db::set_fever_history_pending(&conn, 55).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &http())
+        .await
+        .expect("no remote feed binding is a benign skip");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(
+        srv.hits().iter().all(|h| {
+            h.query_param("items").is_none()
+                && h.query_param("since_id").is_none()
+                && h.query_param("max_id").is_none()
+                && h.query_param("unread_item_ids").is_none()
+                && h.query_param("saved_item_ids").is_none()
+        }),
+        "零绑定不得请求条目或权威状态"
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_entry_id(&conn).unwrap(), 100);
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 777_777);
+    assert_eq!(
+        history_state(&conn).as_deref(),
+        Some("pending:55"),
+        "不得初始化/推进/完成历史状态"
+    );
+    assert_eq!(article_count(&conn), 1, "预置文章不得被消费");
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2-2：一个 feed 已绑定、另一个 `origin='remote'` 源仍缺 remote_id 时，
+/// Fever 不得消费条目窗口或推进 since/history checkpoint。
+#[tokio::test]
+async fn fever_partial_remote_feed_binding_keeps_cursor_and_history() {
+    let srv = Fixture::start().await;
+    srv.add_entry(125, 11, "未绑定源条目", false, false);
+    let (db, tmp) = seed_db("fever_compat_partial_binding", &srv);
+    {
+        let conn = db.lock().await;
+        seed_bound_feed(&conn);
+        seed_unbound_remote_feed(&conn, "http://example.com/unbound.rss");
+        db::set_last_sync_entry_id(&conn, 100).unwrap();
+        db::set_last_sync_ts(&conn, 777_777).unwrap();
+        db::set_fever_history_pending(&conn, 55).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &http())
+        .await
+        .expect("partial binding is reported without aborting the phase");
+    assert!(
+        report.errors.iter().any(|e| {
+            e.contains("remote_id") || e.contains("持久绑定不完整") || e.contains("尚无本地绑定")
+        }),
+        "部分绑定或持久 marker 必须显式可见：{:?}",
+        report.errors
+    );
+    assert!(
+        srv.hits().iter().all(|h| {
+            h.query_param("items").is_none()
+                && h.query_param("since_id").is_none()
+                && h.query_param("max_id").is_none()
+                && h.query_param("unread_item_ids").is_none()
+                && h.query_param("saved_item_ids").is_none()
+        }),
+        "存在未绑定远端源时不得请求条目/权威集合"
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_entry_id(&conn).unwrap(), 100);
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 777_777);
+    assert_eq!(history_state(&conn).as_deref(), Some("pending:55"));
+    assert_eq!(article_count(&conn), 0);
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2-2 的条目级分支：增量页出现本地未绑定 feed 时必须立即中止，不能继续
+/// 走历史阶段并写 Complete。
+#[tokio::test]
+async fn fever_entry_feed_without_local_binding_keeps_cursor_and_history() {
+    let srv = Fixture::start().await;
+    srv.add_entry(125, 11, "unknown-feed", false, false);
+    let (db, tmp) = seed_db("fever_compat_unknown_entry_feed", &srv);
+    {
+        let conn = db.lock().await;
+        seed_bound_feed(&conn);
+        db::set_last_sync_entry_id(&conn, 100).unwrap();
+        db::set_last_sync_ts(&conn, 777_778).unwrap();
+        db::reset_fever_history_state(&conn).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &http())
+        .await
+        .expect("unknown entry feed is reported");
+    assert!(
+        report.errors.iter().any(|e| e.contains("尚无本地绑定")),
+        "条目级未绑定必须显式可见：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_entry_id(&conn).unwrap(), 100);
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 777_778);
+    assert_eq!(
+        db::fever_history_state(&conn).unwrap(),
+        db::FeverHistoryState::Unknown,
+        "条目级绑定失败必须恢复同步前 Unknown 状态，不得残留初始化 Pending"
+    );
+    assert_eq!(article_count(&conn), 0);
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2 返工：Fever 历史页遇到未绑定 feed 时也必须保持同步前 Unknown/history
+/// 与条目游标，不得继续写 Complete。
+#[tokio::test]
+async fn fever_history_page_with_unknown_feed_keeps_history_unknown() {
+    let srv = Fixture::start().await;
+    srv.add_entry(125, 11, "unknown-history-feed", false, false);
+    let (db, tmp) = seed_db("fever_compat_unknown_history_feed", &srv);
+    {
+        let conn = db.lock().await;
+        seed_bound_feed(&conn);
+        db::set_last_sync_entry_id(&conn, 100).unwrap();
+        db::set_last_sync_ts(&conn, 777_779).unwrap();
+        db::reset_fever_history_state(&conn).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &http(), true)
+        .await
+        .expect("history page binding failure is reported");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("历史页含尚无本地绑定")),
+        "历史页未绑定分支必须显式可见：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_entry_id(&conn).unwrap(), 100);
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 777_779);
+    assert_eq!(
+        db::fever_history_state(&conn).unwrap(),
+        db::FeverHistoryState::Unknown
+    );
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1-A（Fever）：feeds 绑定失败持久化后，独立 states 调用不得请求条目/
+/// 权威集合，也不得推进 since 或 history checkpoint。
+#[tokio::test]
+async fn fever_binding_failure_blocks_separate_states_phase() {
+    let srv = Fixture::start().await;
+    srv.set_feeds(vec![
+        (10, "旧订阅", "http://example.com/a.rss"),
+        (11, "待绑定订阅", "http://example.com/b.rss"),
+    ]);
+    srv.set_groups(vec![(1, "分类")]);
+    let (db, tmp) = seed_db("fever_compat_binding_marker", &srv);
+    {
+        let conn = db.lock().await;
+        let folder = db::create_folder(&conn, "已有分类", "article").unwrap();
+        let feed = db::insert_feed(
+            &conn,
+            "http://example.com/a.rss",
+            None,
+            "旧订阅",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        db::set_feed_remote_id(&conn, feed, 10).unwrap();
+        db::set_last_sync_entry_id(&conn, 100).unwrap();
+        db::set_last_sync_ts(&conn, 690_002).unwrap();
+        db::set_fever_history_pending(&conn, 55).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER opt019_fever_fail_remote_11
+             BEFORE UPDATE OF remote_id ON feeds
+             WHEN NEW.remote_id = 11
+             BEGIN SELECT RAISE(ABORT, 'injected Fever remote 11 failure'); END;",
+        )
+        .unwrap();
+    }
+
+    let feed_report = sync::feeds_phase(&db, &http()).await.expect("feeds phase");
+    assert!(
+        feed_report.errors.iter().any(|e| e.contains("绑定")),
+        "{:?}",
+        feed_report.errors
+    );
+    assert_eq!(feed_report.pulled_feeds, 0, "绑定失败不得计为发现成功");
+
+    let item_state_hits = |srv: &Fixture| {
+        srv.hits()
+            .iter()
+            .filter(|h| {
+                h.query_param("items").is_some()
+                    || h.query_param("since_id").is_some()
+                    || h.query_param("max_id").is_some()
+                    || h.query_param("unread_item_ids").is_some()
+                    || h.query_param("saved_item_ids").is_some()
+            })
+            .count()
+    };
+    let before = item_state_hits(&srv);
+    let states_report = sync::states_phase(&db, &http(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        states_report
+            .errors
+            .iter()
+            .any(|e| e.contains("持久绑定不完整")),
+        "{:?}",
+        states_report.errors
+    );
+    assert_eq!(item_state_hits(&srv), before);
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_entry_id(&conn).unwrap(), 100);
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 690_002);
+    assert_eq!(history_state(&conn).as_deref(), Some("pending:55"));
+    let account = app_lib::sync::current_account(&conn).unwrap().unwrap();
+    assert!(db::binding_incomplete(&conn, &account.key).unwrap());
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
 #[tokio::test]
 async fn missing_items_field_is_protocol_error() {
     let srv = Fixture::start().await;
+    srv.set_feeds(vec![(10, "源", "http://example.com/items.rss")]);
     srv.add_entry(1, 10, "条目", false, false);
     srv.set_omit_items(true);
 
@@ -1419,7 +1932,61 @@ async fn missing_items_field_is_protocol_error() {
     {
         let conn = db.lock().await;
         assert_eq!(article_count(&conn), 0, "缺 items 不得静默当空耗尽历史");
+        assert_eq!(
+            db::last_sync_entry_id(&conn).unwrap(),
+            0,
+            "缺 items 不得推进 Fever 条目游标"
+        );
+        assert_eq!(
+            db::last_sync_ts(&conn).unwrap(),
+            0,
+            "缺 items 不得写完成时间"
+        );
+        assert_ne!(
+            history_state(&conn).as_deref(),
+            Some("complete"),
+            "缺 items 不得伪装历史完成"
+        );
     }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2 补强：Fever action 返回 HTTP 200 非 JSON 时，必须在生产 pull 中映射为
+/// protocol，并保持条目游标/完成时间。
+#[tokio::test]
+async fn malformed_json_items_response_fails_closed_end_to_end() {
+    let srv = Fixture::start().await;
+    srv.add_entry(125, 10, "坏 JSON 条目", false, false);
+    srv.set_malformed_json_action(Some("items"));
+    let (db, tmp) = seed_db("fever_compat_malformed_json", &srv);
+    {
+        let conn = db.lock().await;
+        seed_bound_feed(&conn);
+        db::set_last_sync_entry_id(&conn, 100).unwrap();
+        db::set_last_sync_ts(&conn, 890_001).unwrap();
+        db::set_fever_history_complete(&conn).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &http())
+        .await
+        .expect("malformed JSON is report-visible");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("[protocol]") && e.contains("解析失败")),
+        "{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_entry_id(&conn).unwrap(), 100);
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 890_001);
+    assert_eq!(
+        db::fever_history_state(&conn).unwrap(),
+        db::FeverHistoryState::Complete
+    );
+    drop(conn);
+    drop(db);
     let _ = std::fs::remove_file(&tmp);
 }
 
@@ -2319,6 +2886,9 @@ async fn map_read_error_aborts_round_without_fake_completion() {
             [anchor],
         )
         .unwrap();
+        // map 构建发生在历史 Pending 初始化之前；预先写入哨兵状态，断言失败
+        // 不会凭空覆盖它。
+        db::set_fever_history_pending(&conn, 77).unwrap();
     }
     let report = sync::sync_now(&db, &http()).await.expect("sync");
     assert!(
@@ -2335,8 +2905,8 @@ async fn map_read_error_aborts_round_without_fake_completion() {
         );
         assert_eq!(
             history_state(&conn).as_deref(),
-            Some("pending:9223372036854775807"),
-            "状态必须保持 Pending（绝不假 Complete）"
+            Some("pending:77"),
+            "map 读取失败必须保留同步前历史状态（不初始化、不假 Complete）"
         );
         assert_eq!(db::last_sync_entry_id(&conn).unwrap(), 0, "since 不得推进");
         assert_eq!(db::last_sync_ts(&conn).unwrap(), 0, "完成时间不得推进");

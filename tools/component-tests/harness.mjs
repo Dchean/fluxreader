@@ -484,6 +484,7 @@ export function resetStore(extra = {}) {
     /* OPT-017E：错误中心（带重试错误的持久可达层）随基线清空——跨用例隔离。 */
     errors: [],
     errorCenterOpen: false,
+    saveAndSyncBusyOwner: null,
     /* OPT-009 B3：订阅写回回执与能力矩阵是事件/挂载写入的模块状态——
        基线清空，避免跨用例残留（上一用例的能力矩阵被下一个用例读到）。 */
     subOutboxStats: null,

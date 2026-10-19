@@ -55,12 +55,18 @@ pub use articles::{
 /// 命令层经 `crate::db::` 路径消费；写入路径经 `super::contents::` 直接调用）。
 pub use contents::{content_non_empty, SOURCE_READABILITY, SOURCE_RSS};
 pub use feeds::{
-    add_feed_tombstone, clear_feed_tombstones, delete_feed, feed_folder_label, feed_remote_info,
+    add_feed_tombstone, binding_incomplete, binding_incomplete_key, clear_binding_incomplete,
+    clear_binding_incomplete_attempts, clear_feed_tombstones,
+    clear_zero_binding_discovery_attempts, delete_feed, feed_folder_label, feed_remote_info,
     feed_tombstones, feed_url_tombstoned, feeds_all_ids, feeds_due_for_refresh, find_feed_by_url,
-    insert_feed, insert_feed_origin, insert_feed_origin_modes, legacy_feed_tombstones, list_feeds,
-    prune_feed_tombstones, remove_feed_tombstone, set_feed_ai_flags, set_feed_ai_modes,
-    set_feed_fetch_state, set_feed_title_and_icon, update_feed, update_feed_full,
-    update_feed_layout, FeedAiMode, FeedRow,
+    has_remote_feed_binding, insert_feed, insert_feed_origin, insert_feed_origin_modes,
+    legacy_feed_tombstones, list_feeds, mark_binding_incomplete,
+    mark_zero_binding_discovery_attempt, prune_feed_tombstones, remote_feed_binding_count,
+    remove_feed_tombstone, set_feed_ai_flags, set_feed_ai_modes, set_feed_fetch_state,
+    set_feed_title_and_icon, unbound_remote_feeds, update_feed, update_feed_full,
+    update_feed_layout, zero_binding_discovery_due, zero_binding_discovery_key, FeedAiMode,
+    FeedRow, BINDING_INCOMPLETE_KEY_PREFIX, ZERO_BINDING_DISCOVERY_INTERVAL_SECS,
+    ZERO_BINDING_DISCOVERY_KEY_PREFIX,
 };
 pub use folders::{
     add_folder_tombstone, create_folder, create_folder_with_sync_id, delete_folder, folder_members,
