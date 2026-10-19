@@ -86,6 +86,30 @@ export function pruneErrorEntries(
 
 let toastId = 0;
 
+/* ============================================================
+   OPT-018：toast 退场定时器登记（组件回归稳定性）
+
+   showToast 的两段 setTimeout（停留 2200/4200ms + 退场 200ms）此前没有句柄：
+   用例结束后它们仍会触发 store.set，下一用例挂载 ToastPill 时这条更新落在
+   act 之外，React 19 报「not wrapped in act」并把失败随机落到后续用例。
+   这里只登记句柄并提供 clearToastTimers（测试夹具复位时清空）；生产路径的
+   停留时长、退场过渡与错误中心语义均不变。
+   ============================================================ */
+type ToastTimers = {
+  leave?: ReturnType<typeof setTimeout>;
+  remove?: ReturnType<typeof setTimeout>;
+};
+const toastTimers = new Map<number, ToastTimers>();
+
+/** 清空全部 pending 的 toast 定时器（仅测试夹具使用；生产代码不调用）。 */
+export function clearToastTimers() {
+  for (const { leave, remove } of toastTimers.values()) {
+    if (leave !== undefined) clearTimeout(leave);
+    if (remove !== undefined) clearTimeout(remove);
+  }
+  toastTimers.clear();
+}
+
 export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get) => ({
   settingsOpen: false,
   settingsTab: 'general',
@@ -169,12 +193,16 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
       return { toasts, errors: upsertErrorEntry(kept, entry) };
     });
     /* 两段式生命周期：2200ms 后先标 leaving（CSS 退场过渡），200ms 过渡完成再卸载；
-       带操作按钮时延长停留（留出点重试的时间） */
+       带操作按钮时延长停留（留出点重试的时间）。句柄登记在 toastTimers，
+       以便测试夹具在用例之间清除 pending 定时器（OPT-018）。 */
     const stay = action ? 4200 : 2200;
-    setTimeout(() => {
+    const timers: ToastTimers = {};
+    toastTimers.set(id, timers);
+    timers.leave = setTimeout(() => {
       set((s) => ({ toasts: s.toasts.map((t) => (t.id === id ? { ...t, leaving: true } : t)) }));
-      setTimeout(() => {
+      timers.remove = setTimeout(() => {
         set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }));
+        toastTimers.delete(id);
       }, 200);
     }, stay);
   },

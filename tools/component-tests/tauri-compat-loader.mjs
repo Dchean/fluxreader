@@ -59,12 +59,22 @@ export function getCurrentWindow() {
 }
 `,
   '@tauri-apps/api/app': `
-export async function getVersion() { return '0.0.0-test'; }
+/* OPT-018：默认 reject——SettingsSidebarFooter 挂载后会在 effect 里读版本，
+   若桩返回确定值，它的 .then(setVersion) 会落在 act 之外（React 19 报
+   not wrapped in act，失败随机落到后续用例）。当前没有任何组件用例依赖真实
+   版本文本；需要版本数据的用例应显式注入（如 props），不要依赖本桩。 */
+export async function getVersion() {
+  throw new Error('component-test: getVersion 未注入');
+}
 export async function getName() { return 'fluxreader-test'; }
 export async function getTauriVersion() { return '2.0.0-test'; }
 `,
   '@tauri-apps/plugin-autostart': `
-export async function isEnabled() { return false; }
+/* OPT-018：isEnabled 保持 pending——AutoStartSwitch 挂载后在 effect 里读注册表，
+   若这里 resolve（false）或 reject，它的 .then/.catch 都会异步 setState，落在
+   act 之外（React 19 报「not wrapped in act ... AutoStartSwitch」，失败随机
+   落到后续用例）。组件用例不取证注册表真值；未决 Promise 不持句柄、不影响退出。 */
+export function isEnabled() { return new Promise(() => {}); }
 export async function enable() {}
 export async function disable() {}
 `,

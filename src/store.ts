@@ -83,3 +83,6 @@ export type { AppState, AiCacheStatus, AiProductKind, PodcastPlayerState, Settin
 /* OPT-017E：错误中心上限常量（ui slice 是唯一来源；面板提示直接消费，
    不在组件里复制数字）。 */
 export { ERROR_CENTER_MAX } from './store/slices/ui';
+/* OPT-018：toast 退场定时器清理入口——组件回归夹具经本模块（dist-test/store.js
+   的唯一 store 实例）调用，避免深层子路径在别名体系下形成第二个模块实例。 */
+export { clearToastTimers } from './store/slices/ui';

@@ -9,7 +9,7 @@
 // 断言连续切换不出现 getSnapshot 循环，并用法向 canary 证明捕获路径真的可用。
 
 import assert from 'node:assert/strict';
-import { componentTest, mount, unmount, flush, resetStore, useAppStore, consoleErrors, allowConsoleError, allowReactError } from './harness.mjs';
+import { componentTest, mount, unmount, flush, resetStore, useAppStore, consoleErrors, allowReactError } from './harness.mjs';
 import { installBackend, seedFromRows, defaultRows, rowsForLayout } from './fixtures.mjs';
 
 const LAYOUT_CARD = {
@@ -116,11 +116,9 @@ componentTest('OPT-016B Timeline 五布局：真实组件连续切换，卡片 D
     const root = createRoot(container, {
       onUncaughtError: (_e, info) => uncaughtStacks.push(info?.componentStack ?? ''),
     });
-    /* act 外渲染触发的「not wrapped in act」告警（React 以 Root 组件名报到
-       console.error）：两条（render 与随后的错误更新各一条），用两条 one-shot
-       精确例外消费；不用宽泛 pattern。 */
-    allowConsoleError(/not wrapped in act/);
-    allowConsoleError(/not wrapped in act/);
+    /* act 外渲染触发的「not wrapped in act」告警由 harness 的窄口径统一记账
+       （OPT-018：只进 actWarnings、不影响退出码），此处不再登记例外——否则
+       例外永不消费，反而会把用例判红。 */
     try {
       root.render(createElement(CanaryThrower));
       await new Promise((r) => setTimeout(r, 20));
