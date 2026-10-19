@@ -9,15 +9,15 @@
 | 缺口 | 现状 | 影响 |
 | --- | --- | --- |
 | 「滚动出列表即标为已读」的前置条件未声明 | 只在「显示: 未读」模式下生效（`Timeline.tsx` 里的 `if (timelineFilter !== 'unread') return;`），设置页与文案都没说 | 用户以为这个开关一直有效 |
-| 配置同步的订阅/分类删除语义未实现 | `src-tauri/src/config_sync.rs` 里没有任何 `DELETE FROM` / `delete_folder` / `delete_feed`；`commands/folders.rs::delete_folder` 只调 `record_folder_delete`，不调 `unsubscribe_remote` | 「本地删除 ≠ 远端删除」两个缺口都还开着 |
-| `articles_fts` 与三个触发器零消费 | 搜索已明确不用 FTS5 `MATCH`（中文分词原因，记录在 `db/articles.rs`），但 `migrations.rs` 仍建表并维护触发器 | 无用户可见影响；占用迁移与触发器维护面 |
+| 配置同步的镜像删除不产生远端退订意图 | mirror 模式的本地 feed/分类删除已实现（`src-tauri/src/config_sync/plan.rs`）；普通 UI 删除已走 typed outbox 持久退订；镜像删除明确不调用 `enqueue_unsubscribe` | 镜像同步后远端订阅可能残留，需用户手动退订 |
+| `articles_fts` 已删除，搜索为 LIKE 权威 + trigram 候选 | v29 已删除旧 FTS 及触发器；当前 `search_articles` 以 LIKE 逐行验证结果，`articles_trigram_idx` 仅对 ≥3 字符词作候选过滤（短词/索引缺失回落纯 LIKE） | 无用户可见影响；候选索引体积与写成本见 [performance.md](performance.md) |
 | 封面覆盖缺口 | 服务端正文无图文章的候选排除已由 OPT-017D 移除（候选改为全来源「无封面 + 有 URL」）；`first_image`/og:image 仍无尺寸/角色启发式，会把头像、emoji、favicon 当封面；本地为服务端文章补上的封面不参与失效清理（保守边界） | 部分文章无封面或封面不正确 |
 | `--text-tertiary` 深色下对比度约 4:1 | 处于 WCAG AA 边缘，属于全局视觉 token | 低视力用户在深色模式下阅读辅助文字吃力 |
 
 ## 二、代码卫生与瞬态问题
 
 - **`reader.ts` 详情成功路径不清 `hydrationErrors[id]`**：滞留的错误在分支重排后不可见，纯卫生问题。
-- **`toast` 上限会挤掉带重试项**：`src/store/slices/ui.ts` 的 `.slice(-4)` 在连续失败时仍会挤掉最旧的瞬时 toast；带重试错误已由 OPT-017E 的错误中心（有界 20 条 + 同文案合并 + 24h TTL，侧栏入口）持久承接，待该卡验收后从本清单移除。
+- **`toast` 上限仍会挤掉旧瞬时 toast**：`src/store/slices/ui.ts` 的 `.slice(-4)` 在连续失败时仍会挤掉最旧的瞬时 toast；带重试错误已由 OPT-017E 的错误中心（有界 20 条 + 同文案合并 + 24h TTL，侧栏入口）持久承接，本清单不再把「重试入口丢失」列为缺口。
 - **只定义不用**：`feeds.origin_was_local` 无置 1 写入方（`purge_remote_data_in` 里的重置为 no-op），删除列需迁移；`sync/phases.rs::sync_now` 无生产调用方（前端封装 `api.syncNow` 已删；集成测试 `dual_client_e2e` 仍消费）。
 
 ## 三、流程与基建
@@ -38,8 +38,10 @@
 
 ## 六、未实现的路线项
 
-- **「同一篇内容」与「各订阅源条目」分开建模**（核心一致性重构路线第四块）：未实现。因此「跨源同文只广播 read 不广播 star」这类问题会持续存在，同文副本的读状态传播政策也仍是未经产品确认的默认（见 [docs/sync-compat-matrix.md](sync-compat-matrix.md) §3）。
-- **服务端 × 版本兼容实测**：兼容矩阵的「已验证」列目前只覆盖测试替身 `mock_greader.rs`，Miniflux / FreshRSS 的具体部署版本未逐一实机验收。
+- **内容/条目分离已实现（v22 `contents` + `articles.content_id`）**：正文单一所有权与最后引用回收已落地。剩余是跨源同文的产品语义——read 广播、star 不广播——尚未由产品最终确认，同文副本的读状态传播政策仍是未经产品确认的默认（见 [docs/sync-compat-matrix.md](sync-compat-matrix.md) §3）。
+- **服务端 × 版本兼容实测**：兼容矩阵的「已验证」列覆盖测试替身 `mock_greader.rs` 与 `greader_compat_e2e.rs` / `fever_compat_e2e.rs` 的 Miniflux / FreshRSS 严格夹具，不代表任何具体部署版本；真实服务端未逐一实机验收。
+- **存量 identity 惰性收敛**：OPT-008C 的 identity 重算与等价合并只对触达行生效，未触达的旧行不会一次性回填；收敛随读取/写入逐步发生（见 [OPT-008C](optimization/OPT-008C.md)「遗留」）。
+- **真实 WebView 性能测量缺口**：OPT-017 的证据是隔离 SQLite / jsdom / 组件回归；真实 WebView 的滚动帧率、图片解码、真实高度分布与同构建端到端前后对照未测（见 [OPT-017](optimization/OPT-017.md) 父卡收口与 [performance.md](performance.md) 的未测边界）。
 - **反向索引**：`src/` 与 `src-tauri/src/` 的注释里保留了历史上的工作流编号（`TASK-xxx`、`REQ-0xx`）与界面契约编号。这些编号离开工作流后不可反查；相关结论已按主题整理进 `.agents/notes/`，但注释里的编号未逐处改写。
 
 ## 七、历史材料的位置

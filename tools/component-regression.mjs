@@ -63,6 +63,9 @@ await import('./component-tests/config-apply.test.mjs');
 /* OPT-009 B3：订阅写回能力声明与持久回执（FeedsTab 确认文案、Fever 仅本地、
    subscription-outbox-changed 事件链驱动摘要卡）。 */
 await import('./component-tests/subscription-writeback.test.mjs');
+/* OPT-018 A-1：更新检查实际入口——AboutTab 真实点击 → check_for_updates →
+   可用/最新/失败三种文案与错误账本边界。 */
+await import('./component-tests/about-update-check.test.mjs');
 await import('./component-tests/runner-selfcheck.test.mjs');
 
 /* 全部用例结束后统一收尾；失败非静默、退出码非 0；无论成败都解除看门狗
