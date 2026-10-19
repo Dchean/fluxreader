@@ -11,14 +11,18 @@
 ```text
 1. 起草附注到 tmp/release-notes-vX.Y.Z.md
    提交数用 git rev-list vX.Y.Z-1..HEAD --count 实测，不估
-2. bump 提交单独推送，等 CI 绿
+2. 在 main 上做 bump 提交，单独推送，等 CI 绿
 3. git tag -a vX.Y.Z <bump提交> -F <附注文件>，推送 tag
 4. Release 工作流自动构建（Release 正文取 tag 附注）
 ```
 
-**tag 必须指向 main tip 的 bump 提交。** 门禁步骤要求「tagged commit 上 `ci.yml` 全绿」，而 `ci.yml` 只触发于 `push: branches: [main, dev]` 与 PR → main，没有 `push: tags: ["v*"]` 触发。tag 指向非 main tip 的提交时，该 SHA 上永远不会有 CI 运行，门禁会空等到 45 分钟超时后报错。这条是纪律不是机制，修法见 [roadmap.md](roadmap.md)。
+**tag 必须指向 main tip 的 bump 提交。** 版本号、合并记录与发布内容在这一提交上对齐。`ci.yml` 现在同时监听 `push: tags: ["v*"]`，tag 指向的提交会在该 SHA 上触发一次 CI；`release.yml` 仍要求该 SHA 上 `ci.yml` 全部成功，失败或超时都会拒绝发布。`ci.yml` 的 tag 触发只补门禁 run，不自动发布；发布由 `release.yml` 执行。
 
-**历史提交哈希不重写。** 重打历史 tag 会逐个重触发 Release 工作流，而旧提交上没有 CI 记录，门禁必然超时失败。
+**历史提交哈希不重写。** 重打历史 tag 会逐个重新触发 Release 工作流，重建并覆盖既有发布资产；旧提交也未必能通过当前门禁。
+
+### 发布窗口内的版本号差异
+
+版本 bump 在 `main` 上完成，`dev` 仍停留在上一版本，两分支的版本文件会短暂不同。这是 [AGENTS.md](../AGENTS.md)「两个分支项目内容保持一致」的唯一临时例外。下一次在 `dev` 开发前，先把 `main` 合回 `dev`，让版本重新对齐，再继续改动。
 
 ## 发布说明只有一处来源
 
