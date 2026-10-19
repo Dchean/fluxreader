@@ -44,7 +44,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-015Q](OPT-015Q.md) | 生产自动建窗路径冷启位置恢复 | F23 | OPT-015 | verified-ci | R2 差集 12/12 绿、015N 8/8、独立复审条件通过；dev 未复现跳位，生产零改动；e80957b CI 38714382972 通过；待随 OPT-015 系列合并后请用户实机复测 |
 | [OPT-016](OPT-016.md) | 行为回归分层与依赖卫生 | 测试网,依赖,CI | OPT-003, OPT-012, OPT-013, OPT-015 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-017](OPT-017.md) | 有基线的搜索和媒体性能 | FTS,画廊,缓存,观测 | OPT-007, OPT-008, OPT-016 | verified-ci | 017A 基线 + 017B/017C/017D/017E/017F/017G 六张实现子卡全部有提交级证据；真实 WebView 性能测量作为缺口显式转入 OPT-018 |
-| [OPT-018](OPT-018.md) | 全量收口和发布前验收 | 全部审计项 | OPT-001 至 OPT-017 | verified-ci | 578c855 / CI 39199313440；跨卡审计 + 文档真相修正 + AboutTab/sync_queue 验收补强；run 235 的 Node 22 act 警告已修复 |
+| [OPT-018](OPT-018.md) | 全量收口和发布前验收 | 全部审计项 | OPT-001 至 OPT-017 | verified-ci | 最终 dev tip b3821f6 / CI 39206492546；跨卡审计 + 文档真相修正 + sync_queue 重开反例；AboutTab 组件用例因 Node 22 act 抖动撤回为证据限制 |
 
 状态：queued / coding / review / rework / verified-local / verified-ci / integrated。未取得完整作用域证据的卡片不得记 complete。卡片中的写集可在读码后由主控明确调整，不允许执行者自行扩展。
 
