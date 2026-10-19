@@ -2,7 +2,8 @@
 //! 白名单式清洗（ammonia）+ 相对 URL 重写 + 惰性图片恢复 + 富媒体放行。
 
 use ammonia::{Builder, UrlRelative};
-use scraper::{Html, Selector};
+use ego_tree::{NodeId, NodeMut, NodeRef, Tree};
+use scraper::{Html, Node, Selector};
 use std::sync::LazyLock;
 use url::Url;
 
@@ -40,11 +41,12 @@ fn iframe_host_allowed(host: &str) -> bool {
         .any(|d| h == *d || h.ends_with(&format!(".{d}")))
 }
 
+// Note: 可渲染 HTML/译文的净化口径只有这一处（写入口与读边界共用同一 sanitize） — 见 .agents/notes/implemented/architecture/2026-10-08-可渲染正文安全边界.md
 /// 消毒 feed HTML：安全渲染 + 相对 URL 以 base 重写为绝对。
 /// 放行正文内嵌 `<video>/<audio>/<source>/<track>`，以及域名白名单内的
 /// `<iframe>`（YouTube/B 站等嵌入播放器）——白名单外的 iframe 降级为外链。
 pub fn sanitize(html: &str, base: Option<&str>) -> String {
-    let html = promote_lazy_images(&filter_iframes(html));
+    let html = preprocess_html(html);
 
     let mut builder = Builder::default();
     builder
@@ -63,7 +65,7 @@ pub fn sanitize(html: &str, base: Option<&str>) -> String {
         .add_tag_attributes("audio", ["src", "controls", "preload", "loop"])
         .add_tag_attributes("source", ["src", "type", "media"])
         .add_tag_attributes("track", ["src", "kind", "srclang", "label"])
-        // iframe 的 src 已在 filter_iframes 按域名预过滤，这里只放行展示属性
+        // iframe 的 src 已在 preprocess_html 按域名预过滤，这里只放行展示属性
         .add_tag_attributes(
             "iframe",
             [
@@ -83,157 +85,170 @@ pub fn sanitize(html: &str, base: Option<&str>) -> String {
     builder.clean(&html).to_string()
 }
 
-/// iframe 预过滤：逐个扫描 `<iframe …>` 开标签——
-/// - src 域名在白名单内 → 原样保留（后续 ammonia 只放行标签与展示属性）
-/// - 白名单外 / src 解析失败 / 无 src → 替换为「▶ 在浏览器打开」外链（无 src 直接丢弃）
+/// 统一 DOM 预处理（R1/R2）：iframe 域名策略与惰性图片恢复在同一次解析里完成，
+/// 元素级替换与属性赋值全部走解析树，**绝不把来自属性的字符串 format 成标记**
+/// ——变换结束后不可能凭空出现新元素，最终 iframe 集合严格服从白名单域名；
+/// ammonia 只做兜底清洗（scheme / 属性白名单 / 文本语义）。
+/// 只有确实发生替换/提升时才重序列化，否则原样透传（字节保真、零额外成本）。
 ///
-/// 手写字符串扫描（scraper 树不可变更）；属性值里含 `>` 的极端写法会误判，
-/// 但误判方向是多降级一个 iframe，不构成安全问题（ammonia 兜底仍会清洗）。
-fn filter_iframes(html: &str) -> String {
-    if !html.to_ascii_lowercase().contains("<iframe") {
+/// - iframe 策略：解析树读取实际 src（实体解码、引号/空白、大小写归一、重复属性
+///   首个胜出，全部按 html5ever 语义）。白名单内保留；白名单外/无 src 降级为
+///   「▶ 在浏览器打开」外链（无可用 src 整体移除）。R1 教训：字符串属性扫描会被
+///   其他属性引号值里的伪 `src=` 诱骗放行；F20 的字节切片 panic 也随之消失。
+/// - 惰性图片：`src` 为空/data: 时从 data-src / data-original / data-lazy-src /
+///   srcset 首项取真实 URL，用 DOM 属性赋值写回 `src`。R2 教训：旧实现把解码后的
+///   属性值 format 进 `src="…"` 再 replacen——等于在 iframe 策略之后重新向字符串
+///   注入标记（data-src 可携带 `"><iframe …>` 制造新 iframe），且对单引号占位等
+///   序列化形态不生效。
+fn preprocess_html(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    if !lower.contains("<iframe") && !lower.contains("<img") {
         return html.to_string();
     }
-    let bytes = html.as_bytes();
-    let mut out = String::with_capacity(html.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        // 找下一个 '<'，原样拷贝到 '<' 前
-        let Some(tag_start) = html[i..].find('<') else {
-            out.push_str(&html[i..]);
-            break;
-        };
-        let tag_start = i + tag_start;
-        out.push_str(&html[i..tag_start]);
-        let rest = &html[tag_start..];
-        // 判定 iframe 开标签——纯 ASCII 前缀比较，多字节安全：
-        // is_char_boundary 保证切片点不会落在 UTF-8 字符中间
-        let is_iframe = rest.len() >= 7
-            && rest.is_char_boundary(7)
-            && rest[..7].eq_ignore_ascii_case("<iframe")
-            && !rest[7..8].starts_with(|c: char| c.is_ascii_alphanumeric());
-        if !is_iframe {
-            // 非 iframe 开标签：拷一个字符继续（避免 '<<' 死循环）
-            out.push('<');
-            i = tag_start + 1;
-            continue;
-        }
-        // iframe 开标签：截到 '>'（'>' 是 ASCII 单字节，find 返回的位置必是字符边界）
-        let Some(gt) = rest.find('>') else {
-            out.push_str(rest); // 未闭合的残缺标签，原样交给 ammonia 处理
-            break;
-        };
-        let tag = &rest[..=gt]; // 含 '<' … '>'
-                                // tag[..7] = "<iframe"（纯 ASCII）；gt 是 '>' 字节位置（边界安全）
-        let attrs = tag.get(7..gt).unwrap_or("");
-        let src = extract_attr(attrs, "src");
-        let keep = src
-            .as_deref()
-            .and_then(|s| Url::parse(s).ok())
-            .and_then(|u| u.host_str().map(|h| h.to_string()))
-            .is_some_and(|h| iframe_host_allowed(&h));
-        if keep {
-            out.push_str(tag);
-        } else if let Some(s) = src.as_deref().filter(|s| s.starts_with("http")) {
-            out.push_str(&format!(
-                "<p><a href=\"{}\">▶ 在浏览器打开嵌入内容</a></p>",
-                escape_attr(s)
-            ));
-        } // 无可用 src → 整个标签丢弃
-        i = tag_start + tag.len();
-    }
-    out
-}
+    let mut doc = Html::parse_fragment(html);
+    let mut changed = false;
 
-/// 从开标签属性段提取 `name="…"` / `name='…'` / `name=裸值` 的值。
-/// 纯字符迭代（不做字节切片算术——attrs 可能含任意 UTF-8，
-/// 字节位置推进可能落在多字节字符中间导致 panic）。
-fn extract_attr(attrs: &str, name: &str) -> Option<String> {
-    let pat = format!("{name}=");
-    let chars: Vec<char> = attrs.chars().collect();
-    let pat_chars: Vec<char> = pat.chars().collect();
-    let mut i = 0usize;
-    while i + pat_chars.len() <= chars.len() {
-        if chars[i..i + pat_chars.len()] == pat_chars[..] {
-            // 独立属性名：前一个字符不是 [A-Za-z0-9-_]
-            let prev_ok = i == 0
-                || !chars[i - 1].is_ascii_alphanumeric()
-                    && chars[i - 1] != '-'
-                    && chars[i - 1] != '_';
-            if prev_ok {
-                let mut v = chars[i + pat_chars.len()..].iter().copied();
-                return match v.next() {
-                    Some(q @ ('"' | '\'')) => {
-                        let mut value = String::new();
-                        for c in v {
-                            if c == q {
-                                break;
-                            }
-                            value.push(c);
-                        }
-                        Some(value)
-                    }
-                    Some(c) if !c.is_whitespace() => {
-                        // 裸值：到下一个空白符
-                        let mut value = String::new();
-                        value.push(c);
-                        for c in v {
-                            if c.is_whitespace() {
-                                break;
-                            }
-                            value.push(c);
-                        }
-                        Some(value)
-                    }
-                    _ => None,
-                };
+    // ① iframe 域名策略：先只读遍历收集决策（值 = Option<降级外链 href>，
+    //    None = 整体移除），再逐个原地替换/移除
+    let victims: Vec<(NodeId, Option<String>)> = doc
+        .tree
+        .nodes()
+        .filter_map(|n| {
+            let el = n.value().as_element()?;
+            if &*el.name.local != "iframe" {
+                return None;
             }
-        }
-        i += 1;
-    }
-    None
-}
-
-fn escape_attr(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('"', "&quot;")
-}
-
-/// 惰性图片恢复：`<img src="" data-src="https://…">` 的真实 URL 提升到 src，
-/// 否则 ammonia 白名单会丢弃 data-* 属性导致图片无 URL 可加载。
-fn promote_lazy_images(html: &str) -> String {
-    let img_selector: LazyLock<Selector> =
-        LazyLock::new(|| Selector::parse("img").expect("valid img selector"));
-    let doc = Html::parse_document(html);
-    if doc.select(&img_selector).next().is_none() {
-        return html.to_string();
-    }
-    let mut out = html.to_string();
-    for img in doc.select(&img_selector) {
-        let real_src = img.value().attr("src").is_some_and(|s| {
-            let s = s.trim();
-            !s.is_empty() && !s.starts_with("data:")
-        });
-        if real_src {
+            let src = el.attr("src");
+            let keep = src
+                .and_then(|s| Url::parse(s).ok())
+                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                .is_some_and(|h| iframe_host_allowed(&h));
+            if keep {
+                return None;
+            }
+            // 仅 http 起点给出可点击外链；其余（相对/javascript:/空）整体移除
+            Some((
+                n.id(),
+                src.filter(|s| s.starts_with("http")).map(str::to_string),
+            ))
+        })
+        .collect();
+    for (id, demote_src) in victims {
+        let replacement_id = demote_src
+            .as_deref()
+            .and_then(demote_link_subtree)
+            .map(|subtree| doc.tree.extend_tree(subtree).id());
+        let Some(mut node) = doc.tree.get_mut(id) else {
+            continue;
+        };
+        // 解析出的元素必有父（解析语义保证）；防御式检查避免任何 panic 路径
+        if node.parent().is_none() {
             continue;
         }
-        let recovered = ["data-src", "data-original", "data-lazy-src"]
-            .iter()
-            .find_map(|k| img.value().attr(k))
-            .or_else(|| {
-                img.value()
-                    .attr("srcset")
-                    .and_then(|ss| ss.split(',').next())
-                    .and_then(|c| c.split_whitespace().next())
+        if let Some(pid) = replacement_id {
+            node.insert_id_before(pid);
+        }
+        node.detach();
+        changed = true;
+    }
+
+    // ② 惰性图片恢复：只更新既有 src 属性值；URL 经 DOM 赋值 + 序列化转义落地，
+    //    不可能变成标记（也就不需要、不允许再做一遍 iframe 检查）
+    let recoveries: Vec<(NodeId, String)> = doc
+        .tree
+        .nodes()
+        .filter_map(|n| {
+            let el = n.value().as_element()?;
+            if &*el.name.local != "img" {
+                return None;
+            }
+            let real_src = el.attr("src").is_some_and(|s| {
+                let s = s.trim();
+                !s.is_empty() && !s.starts_with("data:")
             });
-        if let Some(u) = recovered.filter(|u| !u.is_empty()) {
-            let placeholder = img.value().attr("src").unwrap_or("");
-            let from = format!("src=\"{placeholder}\"");
-            let to = format!("src=\"{u}\"");
-            out = out.replacen(&from, &to, 1);
+            if real_src {
+                return None;
+            }
+            let recovered = ["data-src", "data-original", "data-lazy-src"]
+                .iter()
+                .find_map(|k| el.attr(k))
+                .or_else(|| {
+                    el.attr("srcset")
+                        .and_then(|ss| ss.split(',').next())
+                        .and_then(|c| c.split_whitespace().next())
+                })
+                .filter(|u| !u.is_empty())?;
+            Some((n.id(), recovered.to_string()))
+        })
+        .collect();
+    for (id, url) in recoveries {
+        let Some(mut node) = doc.tree.get_mut(id) else {
+            continue;
+        };
+        let Node::Element(el) = node.value() else {
+            continue;
+        };
+        // 只更新已存在的 src（旧实现对无 src 属性是 no-op；新写法同样不引入新属性）
+        if let Some((_, v)) = el.attrs.iter_mut().find(|(k, _)| &*k.local == "src") {
+            *v = url.into();
+            changed = true;
         }
     }
-    out
+
+    if !changed {
+        return html.to_string(); // 无改动时保持原文，不做无谓规范化
+    }
+    doc.html()
+}
+
+/// 降级外链替换模板：href 由 DOM 属性赋值写入（模板本身不含任何插值）。
+const DEMOTE_LINK_TEMPLATE: &str = r#"<p><a href="">▶ 在浏览器打开嵌入内容</a></p>"#;
+
+/// 构造降级外链子树：解析常量模板 → 按标签名取出 `<p>` 子树克隆为独立树
+/// （根即 `<p>`，不含解析器可能添加的包裹层）→ DOM 赋 href。
+/// 返回树的根 id 在 `extend_tree` 后就是可插入的 `<p>` 节点 id。
+fn demote_link_subtree(src: &str) -> Option<Tree<Node>> {
+    let mut template = Html::parse_fragment(DEMOTE_LINK_TEMPLATE);
+    let p_id = template
+        .tree
+        .nodes()
+        .find(|n| {
+            n.value()
+                .as_element()
+                .is_some_and(|e| &*e.name.local == "p")
+        })?
+        .id();
+    let a_id = template
+        .tree
+        .nodes()
+        .find(|n| {
+            n.value()
+                .as_element()
+                .is_some_and(|e| &*e.name.local == "a")
+        })?
+        .id();
+    {
+        let mut a = template.tree.get_mut(a_id)?;
+        let Node::Element(el) = a.value() else {
+            return None;
+        };
+        let (_, v) = el.attrs.iter_mut().find(|(k, _)| &*k.local == "href")?;
+        *v = src.into();
+    }
+    let p_ref = template.tree.get(p_id)?;
+    let mut out = Tree::new(p_ref.value().clone());
+    clone_children(p_ref, &mut out.root_mut());
+    Some(out)
+}
+
+/// 递归克隆子树的孩子（值克隆；不依赖解析器的文档包裹层结构）。
+fn clone_children(src: NodeRef<'_, Node>, dst: &mut NodeMut<'_, Node>) {
+    let mut child = src.first_child();
+    while let Some(c) = child {
+        let mut n = dst.append(c.value().clone());
+        clone_children(c, &mut n);
+        child = c.next_sibling();
+    }
 }
 
 /// HTML → 纯文本（snippet / 正文文本列）
@@ -345,43 +360,77 @@ mod tests {
         assert!(out.contains("<video"));
     }
 
+    /// R1：iframe 属性一律按 HTML 解析器语义读取（旧 `extract_attr` 字符串扫描
+    /// 已删除）。覆盖：引号风格、无引号值、`data-src` 不冒充 `src`、
+    /// 重复属性（解析器取首个）、其他属性值中的伪 `src=` 诱饵。
     #[test]
-    fn extract_attr_finds_value_in_all_quote_styles() {
-        assert_eq!(
-            extract_attr(r#" src="https://a/b.mp4" "#, "src").as_deref(),
-            Some("https://a/b.mp4")
+    fn iframe_attributes_follow_parser_semantics() {
+        // 无引号值
+        let bare = sanitize(
+            r#"<iframe src=https://www.youtube.com/embed/bare></iframe>"#,
+            None,
         );
-        assert_eq!(extract_attr(" src='x' ", "src").as_deref(), Some("x"));
-        assert_eq!(extract_attr(" src=bare ", "src").as_deref(), Some("bare"));
-        assert_eq!(extract_attr(" data-src=\"y\"", "src"), None);
-        assert_eq!(extract_attr(" nope", "src"), None);
+        assert_eq!(
+            bare.matches("<iframe").count(),
+            1,
+            "无引号合法 src 必须保留: {bare}"
+        );
+        // data-src 不冒充 src → 无 src 整体移除
+        let data_only = sanitize(
+            r#"<iframe data-src="https://www.youtube.com/embed/a"></iframe>"#,
+            None,
+        );
+        assert!(
+            !data_only.contains("<iframe"),
+            "data-src 不得冒充 src: {data_only}"
+        );
+        // 重复 src：解析器取首个（与浏览器一致）
+        let dup_first_ok = sanitize(
+            r#"<iframe src="https://www.youtube.com/embed/a" src="https://evil.invalid/x"></iframe>"#,
+            None,
+        );
+        assert_eq!(
+            dup_first_ok.matches("<iframe").count(),
+            1,
+            "首个 src 在白名单 → 保留: {dup_first_ok}"
+        );
+        let dup_first_evil = sanitize(
+            r#"<iframe src="https://evil.invalid/x" src="https://www.youtube.com/embed/a"></iframe>"#,
+            None,
+        );
+        assert!(
+            !dup_first_evil.contains("<iframe"),
+            "首个 src 在白名单外 → 降级/移除: {dup_first_evil}"
+        );
+        // 其他属性引号值中的伪 src= 诱饵不得影响真实判定
+        let decoy = sanitize(
+            r#"<iframe title="SRC = https://www.youtube.com/embed/a " src="https://evil.invalid/x"></iframe>"#,
+            None,
+        );
+        assert!(
+            !decoy.contains("<iframe"),
+            "诱饵不得放行真实白名单外 src: {decoy}"
+        );
     }
 
-    /// 回归：含中文的属性段曾因字节切片落在多字节字符中间而 panic
-    /// （sanitize.rs:96 end byte index not a char boundary —— add_feed
-    /// 抓取含中文标题的 feed 时命令任务 panic 永不返回）。
+    /// 回归：含中文的属性值 / 中文正文 / 残缺与多字节 iframe 不 panic
+    /// （旧 `extract_attr` 曾因字节切片落在多字节字符中间 panic；
+    /// F20 的 `rest[7..8]` 越界已随字符串扫描移除，由解析器吸收）。
     #[test]
-    fn extract_attr_with_multibyte_attrs_does_not_panic() {
-        let attrs = r#" title="媒体测试源" src="http://127.0.0.1:8799/x.mp4" alt="视频说明""#;
-        assert_eq!(
-            extract_attr(attrs, "src").as_deref(),
-            Some("http://127.0.0.1:8799/x.mp4")
-        );
-        assert_eq!(extract_attr(attrs, "title").as_deref(), Some("媒体测试源"));
-        assert_eq!(extract_attr(attrs, "alt").as_deref(), Some("视频说明"));
-        // 中文值里再找英文属性（跨多字节推进路径）
-        let attrs2 = r#" 描述="说明文字一" src='https://例子/视频.mp4'"#;
-        assert_eq!(
-            extract_attr(attrs2, "src").as_deref(),
-            Some("https://例子/视频.mp4")
-        );
-        assert_eq!(extract_attr(attrs2, "描述").as_deref(), Some("说明文字一"));
-        // 整链：含中文 feed HTML 过 filter_iframes + sanitize 不 panic
+    fn sanitize_handles_multibyte_and_truncated_iframes_without_panic() {
+        // 整链：含中文 feed HTML —— 合法嵌入保留、白名单外降级、不 panic
         let html = r#"<p>频道名：科技频道</p><iframe src="https://www.youtube.com/embed/x" title="视频：测试"></iframe><iframe src="https://恶意.例子.com/e"></iframe>"#;
         let out = sanitize(html, None);
-        assert!(out.contains("youtube.com/embed"));
-        // 白名单外 iframe 降级为外链（href 带原地址），不再以 iframe 形式存在
-        assert_eq!(out.matches("<iframe").count(), 1);
-        assert!(out.contains("在浏览器打开嵌入内容"));
+        assert!(out.contains("youtube.com/embed"), "{out}");
+        assert_eq!(out.matches("<iframe").count(), 1, "{out}");
+        assert!(
+            out.contains("在浏览器打开嵌入内容"),
+            "白名单外降级为外链: {out}"
+        );
+        // 残缺/多字节非 iframe 形态：不 panic、不放行
+        for input in ["<p>正文</p><iframe", "<iframe中>正文", "<<iframe><p>x</p>"] {
+            let out = sanitize(input, None);
+            assert!(!out.contains("<iframe"), "{input} → {out}");
+        }
     }
 }

@@ -6,6 +6,7 @@
 //! 故 lib.rs 的 invoke_handler 与 tests/ 的既有引用均无需改动。
 
 use crate::db;
+use crate::error::AppResult;
 use crate::state::AppState;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -64,8 +65,10 @@ pub(crate) fn schedule_state_push(state: &AppState) {
 }
 
 /// 后端同步凭据是否已配置（folders/articles/sync 三处共用，故留在模块根）。
-pub(crate) fn sync_configured(conn: &rusqlite::Connection) -> bool {
-    crate::sync::read_credentials(conn).is_some()
+/// OPT-014 R1：读取/解密失败 → Err——不得吞成「未配置」（那会让入队/退订等
+/// 决策把不可用凭据当离线，错误被静默）。
+pub(crate) fn sync_configured(conn: &rusqlite::Connection) -> AppResult<bool> {
+    Ok(crate::sync::read_credentials(conn)?.is_some())
 }
 
 /* ============================================================

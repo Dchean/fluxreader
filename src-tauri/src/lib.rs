@@ -1,5 +1,6 @@
 // pub 供集成测试（tests/）直接复用数据层与抓取管线
 pub mod ai;
+pub mod ai_segments;
 pub mod commands;
 pub mod config_sync;
 pub mod credentials;
@@ -17,6 +18,9 @@ pub mod sanitize;
 pub mod scheduler;
 pub mod state;
 pub mod sync;
+
+// 冷启动窗口恢复（OPT-015）：仅本 crate 使用，不进集成测试公共面
+mod window_startup;
 
 use std::path::PathBuf;
 use tauri::{
@@ -72,8 +76,10 @@ async fn resolve_close(
         v["closeToTray"] = serde_json::json!(to_tray);
         v["closePromptShown"] = serde_json::json!(true);
         let _ = crate::db::set_setting(&conn, "app_settings", &v.to_string());
-        /* 设置页的开关镜像同步（前端 bootstrapSettings 恢复，当前会话里
-        事件通知前端刷新——见 close-resolved 事件） */
+        /* 设置页的开关镜像由前端在 `answerCloseAsk` 调用点自行同步
+        （store/slices/ui.ts，本次会话即时一致；下次启动由 bootstrapSettings
+        恢复）。OPT-017F：原 `close-resolved` emit 全仓零监听，已删除——见
+        .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md。 */
     }
     if let Some(win) = app.get_webview_window("main") {
         if to_tray {
@@ -82,20 +88,31 @@ async fn resolve_close(
             app.exit(0);
         }
     }
-    let _ = app.emit("close-resolved", to_tray);
     Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // OPT-017D：封面补全的终止信号。RunEvent::Exit 时触发（见 `.run` 回调）——
+    // 后台循环收到信号即停发新请求并退出，不残留任务。
+    let cover_shutdown = scheduler::ShutdownToken::new();
+    let setup_shutdown = cover_shutdown.clone();
     tauri::Builder::default()
         // 单实例：二实例启动 → 聚焦既有窗口后自行退出。必须第一个注册。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
-        // 窗口状态记忆：尺寸/位置/最大化跨启动保留
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // 窗口状态记忆：尺寸/位置/最大化跨启动保留。
+        // OPT-015：main 跳过插件的初始自动恢复——冷启动恢复统一由 setup 里
+        // window_startup 模块一次性执行（窗口已创建未展示时恢复几何再显式
+        // 显示），防止「插件先恢复/显示 → Rust 再恢复」的二次跳动；
+        // 插件生命周期核对与时序依据见 window_startup.rs 头注与 Note。
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .skip_initial_state("main")
+                .build(),
+        )
         // 开机自启：Windows 注册表 Run 键（设置页开关控制）
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -103,13 +120,25 @@ pub fn run() {
         ))
         // 系统通知：新文章到达时 Windows toast（scheduler 触发）
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| {
+        .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+
+            // OPT-015：主窗口已创建、尚未展示（tauri.conf.json visible:false）。
+            // 在窗口不可见时完成几何恢复（排除 VISIBLE），再显式显示——不 sleep、
+            // 不等待前端网络/正文装载。恢复失败内部回退居中；显示失败记日志
+            // （应用仍可经托盘唤起，不把启动拖垮为 panic）。
+            if let Some(win) = app.get_webview_window("main") {
+                if let Err(e) = window_startup::restore_and_show(&win) {
+                    log::error!("window-startup: {e}");
+                }
+            } else {
+                log::error!("window-startup: 未找到主窗口，跳过启动恢复");
             }
 
             // 数据库放应用数据目录（LocalAppData/FluxReader/fluxreader.db）
@@ -135,11 +164,14 @@ pub fn run() {
             // 失败 / 认证·网络阻塞后发，前端 pill/摘要卡实时跟随）。集成测试不注册
             // → 发射点 no-op，既有 sync 引擎测试零影响。
             sync::init_queue_event_target(app.handle().clone());
+            // OPT-009 B3：subscription-outbox-changed 事件目标注册（订阅写回
+            // 入队/确认/失败/local_only 标记后发，设置页持久回执即时跟随）。
+            sync::init_subscription_event_target(app.handle().clone());
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
-            // 封面后台补全（摘要型源 og:image 兜底，低优先级）
-            scheduler::spawn_cover_backfill(app.handle().clone());
+            // 封面后台补全（摘要型源 og:image 兜底，低优先级；退出可终止）
+            scheduler::spawn_cover_backfill(app.handle().clone(), setup_shutdown.clone());
 
             // 系统托盘：显示/刷新全部/退出
             let show = MenuItem::with_id(app, "show", "显示 FluxReader", true, None::<&str>)?;
@@ -256,6 +288,8 @@ pub fn run() {
             commands::update_feed,
             commands::update_feed_layout,
             commands::set_feed_ai_flags,
+            // OPT-011：源级 AI 开关三态（inherit/on/off）新入口
+            commands::set_feed_ai_modes,
             // 条目
             commands::list_articles,
             commands::article_index,
@@ -268,12 +302,18 @@ pub fn run() {
             commands::set_starred,
             commands::mark_all_read,
             commands::feed_counts,
+            // OPT-008B：显示集合（smartDedup）的 scope 精确计数
+            commands::scope_counts,
+            // OPT-008B R2：计数组合快照（同开关值、同一 DB 锁内两份计数）
+            commands::counts_snapshot,
             // 刷新（直连）
             commands::refresh_feed,
             commands::refresh_all_feeds,
             // 设置
             commands::get_setting,
             commands::set_setting,
+            // 更新检查（OPT-014：固定目的地，无 URL 入参）
+            commands::check_for_updates,
             // Miniflux 同步
             commands::sync_test,
             commands::sync_save,
@@ -282,6 +322,12 @@ pub fn run() {
             commands::sync_local_feeds,
             commands::sync_status,
             commands::sync_queue_stats,
+            // OPT-009 B3：订阅写回能力矩阵与持久回执（只读）
+            commands::subscription_capabilities,
+            commands::subscription_outbox_stats,
+            // 配置导入的待确认连接建议（OPT-006：只读/放弃；激活走 sync_save）
+            commands::sync_pending_connection,
+            commands::sync_dismiss_pending_connection,
             // 缓存清理
             commands::cache_cleanup,
             // 首次关闭询问
@@ -292,6 +338,10 @@ pub fn run() {
             commands::ai_list_models,
             commands::ai_summarize,
             commands::ai_translate,
+            // OPT-013 B1：缓存签名校验（前端命中判定取后端权威结论）
+            commands::ai_cache_check,
+            // OPT-013 B3：按条目×产物清除（产物+签名+全签名片段+清除代次）
+            commands::ai_clear_cache,
             // 全文提取
             commands::extract_fulltext,
             // 图片代理（防盗链兼容）
@@ -306,6 +356,8 @@ pub fn run() {
             config_sync::config_sync_save_credentials,
             config_sync::config_sync_upload,
             config_sync::config_sync_download,
+            // OPT-010：两段式——预览（只读）→ 确认后应用（hash/版本 CAS）
+            config_sync::config_sync_plan,
             config_sync::config_sync_apply,
             config_sync::config_sync_status,
             // GitHub 设备流登录
@@ -314,6 +366,13 @@ pub fn run() {
             github_auth::github_login_status,
             github_auth::github_login_disconnect,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(move |_app, event| {
+            // OPT-017D：应用退出前触发封面补全终止信号（循环停发新请求、
+            // 在途请求取消、子任务随 round 返回结束）。
+            if matches!(event, tauri::RunEvent::Exit) {
+                cover_shutdown.trigger();
+            }
+        });
 }

@@ -25,9 +25,11 @@ export function createInitialCategories(): CategoryGroup[] {
       autoSummary: true,
       autoTranslate: false,
       feeds: [
-        { id: 'f-openai', name: 'OpenAI Blog', url: 'https://openai.com/news/rss.xml', favicon: 'https://openai.com/favicon.ico', layout: 'inherit', autoSummary: true, autoTranslate: false },
-        { id: 'f-rust', name: 'Rust Official Blog', url: 'https://blog.rust-lang.org/feed.xml', favicon: 'https://www.rust-lang.org/static/images/favicon.ico', layout: 'inherit', autoSummary: false, autoTranslate: false },
-        { id: 'f-ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', favicon: 'https://arstechnica.com/favicon.ico', layout: 'inherit', autoSummary: false, autoTranslate: false },
+        /* OPT-011：mock 夹具的 mode 与 bool 显式对齐（true→on / false→off），
+           演示语义与旧版逐字一致；运行有效值仍由 selectFeedConfig 解析。 */
+        { id: 'f-openai', name: 'OpenAI Blog', url: 'https://openai.com/news/rss.xml', favicon: 'https://openai.com/favicon.ico', layout: 'inherit', autoSummary: true, autoTranslate: false, summaryMode: 'on', translateMode: 'off' },
+        { id: 'f-rust', name: 'Rust Official Blog', url: 'https://blog.rust-lang.org/feed.xml', favicon: 'https://www.rust-lang.org/static/images/favicon.ico', layout: 'inherit', autoSummary: false, autoTranslate: false, summaryMode: 'off', translateMode: 'off' },
+        { id: 'f-ars', name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/index', favicon: 'https://arstechnica.com/favicon.ico', layout: 'inherit', autoSummary: false, autoTranslate: false, summaryMode: 'off', translateMode: 'off' },
       ],
     },
     {
@@ -39,8 +41,8 @@ export function createInitialCategories(): CategoryGroup[] {
       autoSummary: false,
       autoTranslate: true,
       feeds: [
-        { id: 'f-sama', name: 'Sam Altman (@sama)', url: 'https://rss.social/sama', favicon: '', layout: 'inherit', autoSummary: false, autoTranslate: true },
-        { id: 'f-karpathy', name: 'Andrej Karpathy', url: 'https://rss.social/karpathy', favicon: '', layout: 'inherit', autoSummary: false, autoTranslate: false },
+        { id: 'f-sama', name: 'Sam Altman (@sama)', url: 'https://rss.social/sama', favicon: '', layout: 'inherit', autoSummary: false, autoTranslate: true, summaryMode: 'off', translateMode: 'on' },
+        { id: 'f-karpathy', name: 'Andrej Karpathy', url: 'https://rss.social/karpathy', favicon: '', layout: 'inherit', autoSummary: false, autoTranslate: false, summaryMode: 'off', translateMode: 'off' },
       ],
     },
     {
@@ -52,8 +54,8 @@ export function createInitialCategories(): CategoryGroup[] {
       autoSummary: false,
       autoTranslate: false,
       feeds: [
-        { id: 'f-nasa', name: 'NASA APOD', url: 'https://apod.nasa.gov/apod.rss', favicon: 'https://www.nasa.gov/favicon.ico', layout: 'inherit', autoSummary: false, autoTranslate: false },
-        { id: 'f-unsplash', name: 'Unsplash Arch', url: 'https://unsplash.com/rss', favicon: 'https://unsplash.com/favicon.ico', layout: 'inherit', autoSummary: false, autoTranslate: false },
+        { id: 'f-nasa', name: 'NASA APOD', url: 'https://apod.nasa.gov/apod.rss', favicon: 'https://www.nasa.gov/favicon.ico', layout: 'inherit', autoSummary: false, autoTranslate: false, summaryMode: 'off', translateMode: 'off' },
+        { id: 'f-unsplash', name: 'Unsplash Arch', url: 'https://unsplash.com/rss', favicon: 'https://unsplash.com/favicon.ico', layout: 'inherit', autoSummary: false, autoTranslate: false, summaryMode: 'off', translateMode: 'off' },
       ],
     },
     {
@@ -65,7 +67,7 @@ export function createInitialCategories(): CategoryGroup[] {
       autoSummary: false,
       autoTranslate: false,
       feeds: [
-        { id: 'f-hardfork', name: 'Hard Fork Podcast', url: 'https://feeds.simplecast.com/hardfork', favicon: '', layout: 'inherit', autoSummary: false, autoTranslate: false },
+        { id: 'f-hardfork', name: 'Hard Fork Podcast', url: 'https://feeds.simplecast.com/hardfork', favicon: '', layout: 'inherit', autoSummary: false, autoTranslate: false, summaryMode: 'off', translateMode: 'off' },
       ],
     },
     {
@@ -77,7 +79,7 @@ export function createInitialCategories(): CategoryGroup[] {
       autoSummary: true,
       autoTranslate: false,
       feeds: [
-        { id: 'f-github', name: 'GitHub Releases', url: 'https://github.com/releases.atom', favicon: 'https://github.githubassets.com/favicons/favicon.png', layout: 'inherit', autoSummary: true, autoTranslate: false },
+        { id: 'f-github', name: 'GitHub Releases', url: 'https://github.com/releases.atom', favicon: 'https://github.githubassets.com/favicons/favicon.png', layout: 'inherit', autoSummary: true, autoTranslate: false, summaryMode: 'on', translateMode: 'off' },
       ],
     },
   ];

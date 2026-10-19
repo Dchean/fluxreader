@@ -3,7 +3,8 @@ import type { StateCreator } from 'zustand';
 import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
 import type { ArticleListItemRow } from '../../lib/api';
-import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, appStore, buildFeedIndex, emptyArticlesCursor, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, rollbackEntryClaims, setViewEntriesSnapshot } from '../internals';
+import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, applyReadReceipt, appStore, asReadReceipts, beginCountsFetch, beginEntryFieldWrite, beginLocalFlagWrite, buildFeedIndex, buildScopeCountsSnapshot, canLandCounts, currentLocalFlagWriteSerial, emptyArticlesCursor, endEntryFieldWrite, endLocalFlagWrite, entryInFlightFieldKeys, feedCountsFromRows, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, rollbackEntryClaims, scheduleCountsReconcile, setViewEntriesSnapshot } from '../internals';
+import { applyConfigRead, beginConfigRead } from '../aiConfigWrites';
 import type { EntryRollbackClaim } from '../internals';
 import type { AppState, ArticlesCursorState } from '../types';
 import type { ContentLayoutType } from '../../types';
@@ -18,6 +19,7 @@ export type BootstrapSlice = Pick<
   | 'entries'
   | 'feedIndex'
   | 'feedCounts'
+  | 'scopeCounts'
   | 'dataMode'
   | 'dataLoading'
   | 'bootstrapError'
@@ -222,6 +224,23 @@ export async function bootstrapGithubAuth() {
   }
 }
 
+/** OPT-011 R5：配置应用（config_sync_apply）成功后的**真实配置回读确认**。
+    不能把 reloadFromBackend 的 Promise 当确认：它可能被更新的查询发起经
+    queryGeneration 淘汰而提前返回（不接受任何数据）。这里在 list_folders/
+    list_feeds 发出前捕获读取凭据、落地前 applyConfigRead 对账（推进确认态、
+    保留未落定意图、解除 stale），再原子更新 categories/feedIndex。读取失败
+    上抛——调用方如实告知「已应用但回读未确认」，不假称已对齐。 */
+export async function confirmAppliedConfig(): Promise<void> {
+  const cred = beginConfigRead();
+  const [folders, feeds] = await Promise.all([api.listFolders(), api.listFeeds()]);
+  if (!folders || !feeds) {
+    throw new Error('后端不可用（配置回读失败）');
+  }
+  const categories = folderRowsToCategories(folders, feeds);
+  applyConfigRead(categories, cred);
+  appStore().setState(reconcileCategories(appStore().getState(), categories));
+}
+
 export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice> = (set, get) => ({
   /* 启动用空数据 + dataLoading 骨架（不用 mock 先行渲染——曾导致卸载重装后
      「测试订阅一闪而过」，同步后被真实空库替换；蓝图中 P1/I3 要求首帧即真实态） */
@@ -229,6 +248,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   entries: [],
   feedIndex: new Map(),
   feedCounts: new Map(),
+  /* OPT-008B R1：smartDedup 显示集合的 scope 计数快照（仅开关开启且取到时非空；
+     选择器按快照 layout 校验后消费，缺快照回退按源求和）。 */
+  scopeCounts: null,
 
   /* mock 数据先行渲染；Tauri 环境启动时 bootstrapFromBackend 会整体替换 */
   dataMode: 'mock',
@@ -300,13 +322,31 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     try {
       const scopeKey = QueryScope.pageKey(scopeAtStart, layoutAtStart);
       const scopeArgs = QueryScope.args(scopeAtStart, sortAtStart, layoutAtStart);
-      let folders, feeds, articles, counts;
+      let folders, feeds, articles, countsSnap;
+      /* OPT-011 R4：AI 配置读取凭据——必须在 list_folders/list_feeds **发出前**
+         捕获（读取数据的时刻 ≠ 接受响应的时刻）。凭据只用于接受点判定每个键
+         的快照值是否仍可用；读取失败或查询代际淘汰 = 不调用 applyConfigRead，
+         凭据为纯值自然作废，不留任何在途登记。 */
+      const aiReadCred = beginConfigRead();
+      /* R2/N2：计数读取令牌——reload 与写后对账共用同一提交协议；本 reload
+         的计数快照只有在「发起后没有任何更新的计数读取」且「落地时无在途
+         未提交的本地读/藏意图」时才允许落地（entries/categories 仍按各自的
+         查询代际契约独立落地，互不绑架）。
+         R3（P2-2）：同时捕获**读取发起时刻的本地写前沿**——该时刻之后发生的
+         本地写（含已提交的）使本快照的计数与行级读/藏状态相对陈旧：计数整块
+         跳过、被写过的行×字段保留本地值（mergeSnapshotEntries 的
+         writtenAfterSerial），不被旧响应翻回。 */
+      const countsToken = beginCountsFetch();
+      const flagSerialAtStart = currentLocalFlagWriteSerial();
+      /* R4：读取发起时**已在途**的写行×字段（不依赖 IPC FIFO——读取请求可能
+         先于这些写到达后端；其乐观值不得被读前快照翻回）。 */
+      const inFlightAtStart = entryInFlightFieldKeys();
       try {
-        [folders, feeds, articles, counts] = await Promise.all([
+        [folders, feeds, articles, countsSnap] = await Promise.all([
           api.listFolders(),
           api.listFeeds(),
           api.listArticles({ ...scopeArgs, limit: ARTICLES_PAGE_SIZE, offset: 0, with_content: layoutNeedsBody(layoutAtStart) }),
-          api.feedCounts(),
+          api.countsSnapshot(layoutAtStart),
         ]);
       } catch (e) {
         /* TASK-067 N10：后台刷新事件/范围切换路径的失败此前完全不可见（bootstrap
@@ -348,16 +388,28 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       }
 
       const categories = folderRowsToCategories(folders, feeds);
-      const feedCounts = new Map<string, { total: number; unread: number; starred: number; today: number }>();
-      if (counts) {
-        for (const c of counts) {
-          feedCounts.set(String(c.feed_id), { total: c.total, unread: c.unread, starred: c.starred, today: c.today });
-        }
-      }
+      /* OPT-011 R4：接受 AI 配置快照——凭读取凭据更新确认态（更早的读取不得
+         回退期间成功的写入、不得覆盖更晚接受的读取），并保留未落定意图的可视
+         值（尤其读取发起后的新点击）。必须在 set 之前对同一 categories 对象执行，
+         落地后 store/feedIndex 与协议态一致。 */
+      applyConfigRead(categories, aiReadCred);
+      /* R2/N2：计数落地资格——令牌仍最新且无在途未提交意图。entries/categories
+         按各自契约照常落地；计数不允许则整块跳过（旧值保守保留，由更新的
+         读取/对账收敛），绝不"旧 reload 盖新对账"。
+         R3（P2-2）：再加读取发起后的本地写前沿比对——旧响应不得覆已提交的
+         读/藏计数（写后对账的同一前沿语义；更晚发起的新鲜读取照常接受）。 */
+      const countsLand = canLandCounts(countsToken) && currentLocalFlagWriteSerial() === flagSerialAtStart;
+      const feedCounts = countsLand ? feedCountsFromRows(countsSnap?.feeds ?? null) : null;
+      const scopeSnapshot =
+        countsLand && get().settings.smartDedup
+          ? buildScopeCountsSnapshot(countsSnap?.scope ?? null, layoutAtStart, true)
+          : null;
       /* TASK-103（REQ-001）→ TASK-122：快照替换收口在 mergeSnapshotEntries。
          正文不再随行继承（真值源 bodyById，快照替换不触碰）；fromBackend=true
-         同时执行 bodyById 的 AI 产物显式失效/对齐（清理 AI 缓存 → cleared）。 */
-      const merged = mergeSnapshotEntries(get().entries, articles.map(articleRowToEntry), true, rowsFetchedAt);
+         同时执行 bodyById 的 AI 产物显式失效/对齐（清理 AI 缓存 → cleared）。
+         R3（P2-2）：读取发起后已被本地写过的行×字段保留本地值（旧快照不得把
+         已提交的点读/藏翻回；007 字段独立性保持）。 */
+      const merged = mergeSnapshotEntries(get().entries, articles.map(articleRowToEntry), true, rowsFetchedAt, { writtenAfterSerial: flagSerialAtStart, inFlightAtStart });
       const nextEntries = merged.entries;
       /* TASK-117：首屏游标 = keyset 锚（本页最后一行的 (published_at 原文, id)），
          loaded 承接原「已加载条数」镜像语义（articlesLimit）。
@@ -379,7 +431,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       set((s) => ({
         ...reconcileCategories(s, categories),
         entries: nextEntries,
-        feedCounts,
+        /* R2/N2：计数整块按落地资格写入——feedCounts 为 null 时保持旧值
+           （更新的读取/对账收敛；entries 不因此被绑架）。 */
+        ...(feedCounts ? { feedCounts } : {}),
+        ...(feedCounts ? { scopeCounts: scopeSnapshot } : {}),
         articlesLimit: windowCursor.loaded,
         articlesCursor: { ...s.articlesCursor, [scopeKey]: windowCursor },
         articlesLoading: false,
@@ -553,7 +608,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
          停摆、也无人知道原因。与 refreshOneFeed / extractCurrentArticle 同口径：
          复位加载态 + 可见 toast + 一键重试。 */
       set({ articlesLoading: false });
-      get().showToast(`加载更多失败：${extractError(e)}`, { label: '重试', run: () => void get().loadMoreArticles() });
+      get().showToast(`加载更多失败：${extractError(e)}`, { label: '重试', key: 'list:load-more', run: () => void get().loadMoreArticles() });
     }
   },
 
@@ -573,6 +628,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   reloadFilteredEntries: async (view, opts) => {
     if (get().dataMode !== 'tauri') return;
     backendReloadInFlight++;
+    /* R3（P2-2）：读取发起时刻的本地写前沿——旧响应不得把已提交的点读/藏
+       翻回（与 reloadFromBackend 同一守卫；本入口不落计数）。
+       R4：同时捕获在途写集合（同上，不依赖 IPC FIFO）。 */
+    const flagSerialAtStart = currentLocalFlagWriteSerial();
+    const inFlightAtStart = entryInFlightFieldKeys();
     /* fix-4（自检 P2-2）：发起时快照「范围×布局×排序」口径——与 loadMoreArticles 的
        守卫判据对齐。此前只比较 view：切范围/切布局后的旧响应仍会放行，把
        「源A × 旧布局」的收藏列表覆盖进新口径（新请求先返回时旧响应晚到，
@@ -663,7 +723,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     // TASK-117：首屏游标 = keyset 锚（本页最后一行），与「全部」视图同一推进语义。
     // TASK-123：窗口重取后同口径作用于整个窗口（锚 = 窗口末行，loaded = 窗口
     // 行数，exhausted = keyset 真实判定；windowTarget=0 时与旧形态逐字一致）。
-    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), true, rowsFetchedAt);
+    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), true, rowsFetchedAt, { writtenAfterSerial: flagSerialAtStart, inFlightAtStart });
     const windowCursor = cursorAfterFirstPage(rows);
     setViewEntriesSnapshot(QueryScope.viewKey(layoutAtStart, view, scopeAtStart), merged.entries, windowCursor, windowExhausted);
     set((s) => ({
@@ -693,6 +753,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     // 各查一次），同时记录该键首屏代际（使该键在途续页/筛选响应过期）。
     const st = get();
     const gen = beginGlobalQuery(QueryScope.viewKey(st.activeContentLayout, st.activeViewFilter, st.activeFeedFilter));
+    /* R3（P2-2）：读取发起时刻的本地写前沿——锚定快照同样不得把已提交的
+       点读/藏翻回（与 reload / filtered 同一守卫）。R4：含在途写集合。 */
+    const flagSerialAtStart = currentLocalFlagWriteSerial();
+    const inFlightAtStart = entryInFlightFieldKeys();
     /* TASK-122：行抓取时刻（await 前取）——bodyById 对齐的新鲜度判据 */
     const rowsFetchedAt = Date.now();
     /* 映射当前订阅范围 → feed_id / folder_id（与 markCurrentViewAllRead 同口径）。
@@ -707,6 +771,39 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       offset: 0,
       with_content: layoutNeedsBody(st.activeContentLayout),
     };
+    /* 打开收尾（两条路径共用）：按设置标已读（含 R1 计数对账）+ 智能全文触发。 */
+    const finishOpen = (targetId: string) => {
+      const { settings: stSettings, dataMode: stMode } = get();
+      const target = get().entries.find((a) => a.id === targetId);
+      if (stMode === 'tauri' && stSettings.markReadOnOpen && target && !target.isRead) {
+        /* TASK-118（审计相邻缺口）：与 selectArticle 同口径——打开即标读失败走
+           统一回滚助手 rollbackEntryClaims（乐观置位后快照 isRead 字段版本；
+           恢复读态 + 逐 feed 回补 unread，版本守卫：期间已被接管则跳过），
+           不再只提示。边界裁定同 selectArticle：失败只回滚读态与计数，不清
+           activeArticleId（文章刚被锚定打开，用户还在读）。 */
+        markEntriesRead(new Set([targetId]));
+        const claim: EntryRollbackClaim = { id: targetId, field: 'isRead', prev: false, version: getEntryVersion(targetId, 'isRead') };
+        beginLocalFlagWrite();
+        beginEntryFieldWrite(targetId, 'isRead'); // R4：articles 快照的在途写保护
+        const flagSerialAtRequest = currentLocalFlagWriteSerial();
+        void api.setRead(Number(targetId), true).then((receipt) => {
+          endLocalFlagWrite();
+          endEntryFieldWrite(targetId, 'isRead');
+          /* R2/N1：回执行驱动条目/计数本地收敛（被打开行已乐观翻转，跳过）。 */
+          applyReadReceipt(asReadReceipts(receipt), new Set([targetId]), flagSerialAtRequest);
+          scheduleCountsReconcile();
+        }).catch((e) => {
+          endLocalFlagWrite();
+          endEntryFieldWrite(targetId, 'isRead');
+          const outcome = rollbackEntryClaims([claim]);
+          /* R2：同 selectArticle——回滚被接管跳过时强制权威对账修复计数。 */
+          scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
+          get().showToast(`标读失败：${extractError(e)}`);
+        });
+      }
+      // 打开文章：触发智能全文（与 selectArticle 一致）
+      get().ensureArticleContent(targetId, { extractFulltext: true });
+    };
     let pos;
     try {
       pos = await api.articleIndex(args, Number(articleId));
@@ -715,7 +812,37 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       return;
     }
     if (gen !== queryGeneration) return; // 期间又有更新的导航操作
-    if (pos == null) return;
+    if (pos == null) {
+      /* OPT-008B R1（主控源码发现）：搜索命中的行可能不在当前列表 scope 的
+         显示集合里（布局过滤 / 显示聚合折叠）——不能静默不打开。回退：按 id
+         直接取详情并注入视图行（搜索结果可真实打开；列表窗口不被整体替换，
+         位置未知时不假造锚定）。 */
+      let detail = null;
+      try {
+        detail = await api.getArticle(Number(articleId));
+      } catch (e) {
+        get().showToast(`打开文章失败：${extractError(e)}`);
+        return;
+      }
+      if (gen !== queryGeneration) return;
+      if (!detail) {
+        get().showToast('打开文章失败：文章不存在');
+        return;
+      }
+      const entry = articleRowToEntry(detail);
+      set((s) => ({
+        entries: s.entries.some((a) => a.id === entry.id)
+          ? s.entries.map((a) => (a.id === entry.id ? entry : a))
+          : [...s.entries, entry],
+        activeArticleId: articleId,
+        openedReadIds: { ...s.openedReadIds, [articleId]: true },
+        isShowingTranslatedProse: false,
+        isRawRenderMode: false,
+        showFulltext: false,
+      }));
+      finishOpen(articleId);
+      return;
+    }
     // 从目标位置加载一页（若位置靠前，offset 为负会被 SQLite 截断为 0，安全）
     const offset = Math.max(0, pos);
     let rows;
@@ -731,8 +858,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        （正文真值源 bodyById，不随行继承；fromBackend=true 同时执行 AI 产物
        显式失效/对齐）。 */
     /* TASK-109②：后端快照路径（fromBackend=true）——行级 is_read 是后端真值，
-       在途乐观声明失效（bump）。 */
-    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), true, rowsFetchedAt);
+       在途乐观声明失效（bump）。R3（P2-2）：读取发起后的本地写字段保留。 */
+    const merged = mergeSnapshotEntries(get().entries, rows.map(articleRowToEntry), true, rowsFetchedAt, { writtenAfterSerial: flagSerialAtStart, inFlightAtStart });
     const next = merged.entries;
     /* TASK-117：锚定窗口的续拉游标 = 窗口最后一行的 keyset 锚；base.loaded 取
        offset（窗口前的行未进 entries，但「已看过的位置」计数口径与修前
@@ -754,25 +881,8 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       isRawRenderMode: false,
       showFulltext: false,
     }));
-    // F7：与 selectArticle 同口径——打开时按设置标已读（此前搜索/命令面板
-    // 打开的文章不标读，与列表点开行为分叉）
-    const { settings: stSettings, dataMode: stMode } = get();
-    const target = get().entries.find((a) => a.id === articleId);
-    if (stMode === 'tauri' && stSettings.markReadOnOpen && target && !target.isRead) {
-      /* TASK-118（审计相邻缺口）：与 selectArticle 同口径——打开即标读失败走
-         统一回滚助手 rollbackEntryClaims（乐观置位后快照 isRead 字段版本；
-         恢复读态 + 逐 feed 回补 unread，版本守卫：期间已被接管则跳过），
-         不再只提示。边界裁定同 selectArticle：失败只回滚读态与计数，不清
-         activeArticleId（文章刚被锚定打开，用户还在读）。 */
-      markEntriesRead(new Set([articleId]));
-      const claim: EntryRollbackClaim = { id: articleId, field: 'isRead', prev: false, version: getEntryVersion(articleId, 'isRead') };
-      void api.setRead(Number(articleId), true).catch((e) => {
-        rollbackEntryClaims([claim]);
-        get().showToast(`标读失败：${extractError(e)}`);
-      });
-    }
-    // 打开文章：触发智能全文（与 selectArticle 一致）
-    get().ensureArticleContent(articleId, { extractFulltext: true });
+    // F7：与 selectArticle 同口径——打开时按设置标已读 + 触发智能全文
+    finishOpen(articleId);
   },
 
   /** 启动装载：Tauri 环境下从 SQLite 拉数据；浏览器开发/后端异常回退 mock。

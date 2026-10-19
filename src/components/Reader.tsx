@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { useAppStore, selectArticleBody, selectFeedConfig } from '../store';
+import { useAppStore, selectArticleBody, selectAiProductState, selectFeedConfig } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
 import { openExternal, handleArticleLinkClick } from '../lib/external';
 import { proxyImagesInHtml } from '../lib/imageProxy';
 import { useEnteringClass } from './useEnteringClass';
+import { ReaderProse } from './ReaderProse';
 
 /* ============================================================
    Reader —— 右侧沉浸阅读器
@@ -34,12 +35,21 @@ export function Reader() {
   const toggleReaderFulltext = useAppStore((s) => s.toggleReaderFulltext);
   const toggleReaderTranslation = useAppStore((s) => s.toggleReaderTranslation);
   const triggerReaderSummary = useAppStore((s) => s.triggerReaderSummary);
+  const clearAiProduct = useAppStore((s) => s.clearAiProduct);
   const dataMode = useAppStore((s) => s.dataMode);
   const showToast = useAppStore((s) => s.showToast);
 
   /* find() 返回既有元素引用（稳定）；config 返回新对象 → useShallow */
   const art = useAppStore((s) =>
     s.activeArticleId ? s.entries.find((a) => a.id === s.activeArticleId) ?? null : null,
+  );
+  /* OPT-013 B3：五态单点真值（生成中/部分完成/失败/完整/已过期）——Reader 与
+     卡片都经 selectAiProductState 消费，不在组件内复制判定逻辑。partial 的分段
+     进度取自同一份校验状态缓存（aiStatusById）。 */
+  const translationState = useAppStore((s) => (art ? selectAiProductState(s, art.id, 'translation') : null));
+  const summaryState = useAppStore((s) => (art ? selectAiProductState(s, art.id, 'summary') : null));
+  const translationSegments = useAppStore((s) =>
+    (art ? s.aiStatusById[art.id]?.translationSegments ?? null : null),
   );
   /* TASK-122：正文/AI 产物读取单点——selectArticleBody（真值源 bodyById）。
      body 是快照对象（记录写入即换引用），nonce 依赖在 selector 内部建立。
@@ -71,6 +81,15 @@ export function Reader() {
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseHtml, art?.url]);
+  /* 正文两路呈现（审计 F14 / OPT-012）：源码态展示的是**原始文本**（当前用户选择的
+     RSS 原文/提取全文/已消毒译文，未经图片代理——显示代理 base64 会冒充源码），
+     渲染态保持现行为（代理命中时用代理产物）。流式未消毒译文两路都是纯文本。
+     Note: 为何源码不能继续走 dangerouslySetInnerHTML、分离契约与取舍 —— 见
+     .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md */
+  const renderHtml = isShowingTranslatedProse
+    ? body.translatedContent
+    : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml);
+  const sourceText = isShowingTranslatedProse ? body.translatedContent : baseHtml;
   const feedName = useAppStore((s) => (s.activeArticleId ? s.feedIndex.get(s.entries.find((a) => a.id === s.activeArticleId)?.feedId ?? '')?.feed.name ?? '' : ''));
   const config = useAppStore(
     useShallow((s) => selectFeedConfig(s, art?.feedId ?? '')),
@@ -101,23 +120,63 @@ export function Reader() {
     setSummaryOverride(null);
   }, [art?.id]);
 
-  /* 源级 autoSummary/autoTranslate：打开文章即自动触发。
-     等内容水合完成后再触发（翻译需要正文）；已有缓存时后端会短路；
+  /* 源级/分类级有效 autoSummary/autoTranslate（唯一 resolver 解析 mode+分类）：
+     打开文章即自动触发，等正文水合完成后再发起（翻译需要正文）。
      静默失败：未配置 AI 不弹 toast（手动按钮仍会提示）。
      TASK-122：水合完成判定从 bodyById 状态取（ready；cleared = AI 被清理但
-     正文保留——打开即按 auto 配置重新生成，即「清理后重开可再次生成」）。 */
+     正文保留——打开即按 auto 配置重新生成，即「清理后重开可再次生成」）。
+     OPT-011：effect 订阅**有效配置**（config 字段入依赖）——切换源的继承/显式
+     开关或分类默认后立即重评：
+     - 关闭 → 重跑时不触发（尚未发起的自动请求被立即阻止）；
+     - 开启 → 若本文尚无产物且在途为空则发起；
+     - 已经在途的请求不取消（政策：已发送的内容不可撤销，不声称可撤回）；
+       生成中标记（summarizingIds/translating）防重复发起。 */
   const hydrated = (body.state === 'ready' || body.state === 'cleared') && body.content !== '';
+
+  /* OPT-008B R3：正文修订失效的 Reader 自愈——条目引用的 contents 已更新时
+     bodyCache.invalidateContentRevision 把记录清空回 cleared。重水合不能依赖
+     Timeline 卡片的 useLazyHydrate（虚拟化会把卡片移出挂载窗；卡片不在树上就
+     没有任何人入队，打开中的文章会停在空正文直到用户点击/滚动）。这里对
+     activeArticleId 的「cleared 且正文空」观察调幂等 ensureArticleContent：
+     loading 态不再满足条件（不重复 IPC），在途旧详情响应由记录 stamp 丢弃，
+     新修订的响应落地后重新渲染。AI 清理型 cleared（正文保留）不受影响。 */
+  const activeArticleKey = art?.id;
+  useEffect(() => {
+    if (!activeArticleKey) return;
+    if (body.state !== 'cleared' || body.content !== '') return;
+    useAppStore.getState().ensureArticleContent(activeArticleKey);
+    // Note: exhaustive-deps — 只随「目标文章 × 失效条件」执行；body 快照其余字段
+    // 变化（AI 增量等）不该重复触发（重复入队由记录状态守卫兜底）。
+  }, [activeArticleKey, body.state, body.content]);
+  /* OPT-013 B3：打开文章即取后端权威校验状态（五态显示的数据源）——刷新/重进
+     阅读器后 stale（签名不匹配/缺失）与 partial（0 < completed < total）仍如实
+     呈现，partial 不被当完整缓存。失败静默（校验故障不改变显示，也不触发重烧）。 */
+  useEffect(() => {
+    if (!art) return;
+    useAppStore.getState().refreshAiStatus(art.id);
+    // Note: exhaustive-deps — 只在切换目标文章时刷新一次；art 其余字段变化不重取。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [art?.id]);
+
   useEffect(() => {
     if (!art || !hydrated) return;
     const st = useAppStore.getState();
     if (st.dataMode !== 'tauri') return;
     const cfg = selectFeedConfig(st, art.feedId);
-    if (cfg.autoSummary && !body.aiSummary) st.triggerReaderSummary({ silent: true });
-    if (cfg.autoTranslate && !body.translatedContent && !st.isShowingTranslatedProse) {
+    if (cfg.autoSummary && !body.aiSummary && !st.summarizingIds[art.id]) {
+      st.triggerReaderSummary({ silent: true });
+    }
+    if (
+      cfg.autoTranslate
+      && !body.translatedContent
+      && !st.isShowingTranslatedProse
+      && !st.translatingIds[art.id]
+      && !st.translating
+    ) {
       st.toggleReaderTranslation({ silent: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [art?.id, hydrated]);
+  }, [art?.id, hydrated, config.autoSummary, config.autoTranslate]);
 
   /* 滚动到正文底部 → 标已读（markReadOnScrollBottom，实施方案 §3 已读行为②） */
   useEffect(() => {
@@ -243,6 +302,39 @@ export function Reader() {
                   <Icons.globe />
                   <span>{isShowingTranslatedProse ? '显示原文' : '翻译'}</span>
                 </button>
+                {/* OPT-013 B3：译文产物五态入口——
+                    stale（签名不匹配/缺失，含 B1 的旧无签名产物）：「已过期」+
+                    重新生成（入口真实调用后端：校验未命中即重新生成）；
+                    partial（当前签名 0 < completed < total）：「部分完成（N/M 段）」+
+                    继续（复用已完成片段只发缺失段）+ 清除（删后端全签名片段与整篇产物）。
+                    生成中/失败态沿用既有流式与错误行呈现；完整态无标记。 */}
+                {translationState === 'stale' ? (
+                  <>
+                    <span className="ai-unverified-tag" title="该译文与当前模型/提示词/正文不匹配（或没有缓存签名）——仍可显示，重新生成即更新为已验证版本">
+                      已过期
+                    </span>
+                    <button className="ai-retry-btn" onClick={() => toggleReaderTranslation({ force: true })}>
+                      重新生成
+                    </button>
+                  </>
+                ) : null}
+                {translationState === 'partial' && translationSegments ? (
+                  <>
+                    <span className="ai-partial-hint">
+                      部分完成（已完成 {translationSegments.completed}/{translationSegments.total} 段）
+                    </span>
+                    <button className="ai-retry-btn" onClick={() => toggleReaderTranslation({ force: true })}>
+                      继续
+                    </button>
+                    <button
+                      className="ai-retry-btn"
+                      title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+                      onClick={() => void clearAiProduct(art.id, 'translation')}
+                    >
+                      清除
+                    </button>
+                  </>
+                ) : null}
                 {dataMode === 'tauri' && (
                   <button
                     className={`toggle-action-btn ${showFulltext ? 'active-accent' : ''}`}
@@ -275,6 +367,18 @@ export function Reader() {
                   <Icons.spark />
                   <span>摘要</span>
                 </div>
+                {/* OPT-013 B3：摘要产物 stale（签名不匹配/缺失）→「已过期」+
+                    重新生成入口（triggerReaderSummary 走后端校验，未命中即重生成）。 */}
+                {summaryState === 'stale' ? (
+                  <>
+                    <span className="ai-unverified-tag" title="该摘要与当前模型/提示词/正文不匹配（或没有缓存签名）——仍可显示，重新生成即更新为已验证版本">
+                      已过期
+                    </span>
+                    <button className="ai-retry-btn" onClick={() => triggerReaderSummary()}>
+                      重新生成
+                    </button>
+                  </>
+                ) : null}
               </div>
               <div className="ai-body-content">
                 {summaryGenerating ? (
@@ -299,41 +403,25 @@ export function Reader() {
             {translateError && !isShowingTranslatedProse && !translating && (
               <div className="ai-error-row reader-translate-error">
                 <span className="ai-error-text" title={translateError}>翻译失败：{translateError}</span>
-                <button className="ai-retry-btn" onClick={() => toggleReaderTranslation()}>重试</button>
+                <button className="ai-retry-btn" onClick={() => toggleReaderTranslation({ force: true })}>重试</button>
               </div>
             )}
 
-            {/* 正文 */}
-            {isShowingTranslatedProse && rawStream ? (
-              /* TASK-065 N11：流式/未消毒译文按纯文本渲染——模型原始输出
-                 （未消毒）不进 HTML 渲染路径；消毒回读落地后切回 HTML。 */
-              <div
-                className={`article-prose ${isRawRenderMode ? 'raw-render-mode' : ''}`}
-                style={{
-                  fontFamily: settings.fontFamily,
-                  fontSize: settings.fontSize,
-                  lineHeight: settings.lineHeight / 100,
-                }}
-                onClick={handleProseClick}
-              >
-                {body.translatedContent}
-              </div>
-            ) : (
-              <div
-                className={`article-prose ${isRawRenderMode ? 'raw-render-mode' : ''}`}
-                style={{
-                  fontFamily: settings.fontFamily,
-                  fontSize: settings.fontSize,
-                  lineHeight: settings.lineHeight / 100,
-                }}
-                onClick={handleProseClick}
-                dangerouslySetInnerHTML={{
-                  __html: isShowingTranslatedProse
-                    ? body.translatedContent
-                    : (proxiedContent?.key === baseHtml ? proxiedContent.html : baseHtml),
-                }}
-              />
-            )}
+            {/* 正文：源码/渲染/流式三条路径收口在 ReaderProse（F14/OPT-012）。
+                传参含义：renderHtml 走渲染态（含代理产物），sourceText 走源码态
+                （原始文本，不经代理），isStreamingTranslation 走纯文本。 */}
+            <ReaderProse
+              renderHtml={renderHtml}
+              sourceText={sourceText}
+              isSourceMode={isRawRenderMode}
+              isStreamingTranslation={isShowingTranslatedProse && !!rawStream}
+              style={{
+                fontFamily: settings.fontFamily,
+                fontSize: settings.fontSize,
+                lineHeight: settings.lineHeight / 100,
+              }}
+              onClick={handleProseClick}
+            />
           </div>
         </div>
       )}

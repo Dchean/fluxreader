@@ -1,5 +1,5 @@
 import type { StateCreator } from 'zustand';
-import type { AppState } from '../types';
+import type { AppState, MediaAction } from '../types';
 
 /** 播客播放器 slice：PlayerBar 状态机（播放/暂停/进度回写/倍速/展开态）。
  *
@@ -11,6 +11,7 @@ export type PlayerSlice = Pick<
   | 'playerExpanded'
   | 'playPodcastEpisode'
   | 'togglePlayerPlay'
+  | 'applyMediaAction'
   | 'syncPlayerProgress'
   | 'playerEnded'
   | 'seekPlayer'
@@ -54,6 +55,33 @@ export const createPlayerSlice: StateCreator<AppState, [], [], PlayerSlice> = (s
 
   togglePlayerPlay: () =>
     set((s) => ({ player: { ...s.player, isPlaying: !s.player.isPlaying } })),
+
+  /* OPT-015：媒体键动作幂等收口（App.tsx player-media 事件唯一落点）。
+     此前 App 对 play/pause/toggle 一律调 togglePlayerPlay——系统按「播放」
+     而当前已在播放时会反被暂停（用户实测的 Play/Pause 翻转缺陷）。这里按
+     动作语义区分：play/pause 是**目标态**（已在目标态 = no-op，不产生新
+     对象、不触发多余重渲染），toggle 才承担切换；未激活（无剧集）时
+     play/pause/toggle 全为 no-op——媒体键不得凭空启动无源播放条；
+     stop 仍走既有 closePodcastBar（关闭语义单点，幂等无害）。
+     幂等 ≠ 失效：暂停后按 Play 会置回 isPlaying=true 从暂停点恢复；
+     音频元素 play() 失败的回退（PlayerBar 翻回暂停 + toast）保留，
+     再按 Play 仍是一次真实状态变化，会重新驱动元素重试。
+     Note: 语义与证据边界见 .agents/notes/implemented/bug-fix/2026-10-08-窗口首帧恢复与媒体命令幂等.md */
+  applyMediaAction: (action: MediaAction) => {
+    if (action === 'stop') {
+      get().closePodcastBar();
+      return;
+    }
+    const p = get().player;
+    if (!p.isActive) return;
+    if (action === 'play') {
+      if (!p.isPlaying) set({ player: { ...p, isPlaying: true } });
+    } else if (action === 'pause') {
+      if (p.isPlaying) set({ player: { ...p, isPlaying: false } });
+    } else {
+      set({ player: { ...p, isPlaying: !p.isPlaying } });
+    }
+  },
 
   /** audio 元素状态回写（timeupdate/loadedmetadata/durationchange 调） */
   syncPlayerProgress: (positionSec, durationSec) =>

@@ -1,14 +1,21 @@
 //! 配置同步（GitHub Gist / WebDAV）：手动上传/下载客户端配置。
-//! 同步范围（白名单原则）：分类（名称/布局/AI标志/位置）+ 订阅源（URL/标题/归属/
-//! 布局/AI标志/site_url/favicon_url）+ app_settings（排除 autoStart/closePromptShown）
-//! + 非敏感连接配置（sync_protocol/greader_endpoint/greader_username）。
+//! 同步范围（白名单原则）：分类（名称/布局/AI标志/位置 + schema2 起携带
+//! 稳定 sync_id）+ 订阅源（URL/标题/归属/布局/AI标志/site_url/favicon_url）+
+//! app_settings（排除 autoStart/closePromptShown）+ 非敏感连接配置
+//! （sync_protocol/greader_endpoint/greader_username）。
 //!
 //! 凭据字段排除：greader_password, ai_config, config_sync_credentials, miniflux_token。
 //! 不含正文/媒体/AI 缓存（按设计文档边界 DEC-008/009）。
 //! 字段清单：白名单由本模块集中定义（见下方 SYNCED_SETTING_KEYS / 各域读取函数），
 //! 新增可同步字段必须同时在此登记，避免「加了字段但没进同步」的静默缺口。
 //!
-//! 不做冲突合并：下载应用仅更新白名单字段，本地凭据与本地特定设置保持不变。
+//! OPT-010：应用改为两段式——`plan_config_apply` 预览（结构化 additions/updates/
+//! removals + 快照 hash + 本地配置版本签名）→ 用户确认 → `config_sync_apply`
+//! 在单事务内复核 hash/版本后执行；合并（保留本地独有）与镜像（以远端为准删除
+//! 本地多出对象）两种模式，镜像删除不产生远端退订 outbox。实现与契约见
+//! [`plan`] 子模块。
+//!
+//! 不做双向 CRDT 同步：下载应用仅按白名单更新，本地凭据与本地特定设置保持不变。
 
 use crate::db;
 use crate::error::{AppError, AppResult};
@@ -18,7 +25,12 @@ use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Mutex;
 
-const SCHEMA_VERSION: u32 = 1;
+mod plan;
+pub use plan::{
+    apply_payload_checked, plan_payload, snapshot_hash, ApplyMode, PlanItem, PlanPreview,
+};
+
+const SCHEMA_VERSION: u32 = 2;
 const CONFIG_FILE_NAME: &str = "fluxreader-config.json";
 
 /* ============================================================
@@ -36,11 +48,121 @@ pub struct SyncPayload {
     pub connection_config: Option<ConnectionConfig>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 pub struct ConnectionConfig {
     pub sync_protocol: Option<String>,
     pub greader_endpoint: Option<String>,
     pub greader_username: Option<String>,
+}
+
+impl ConnectionConfig {
+    /// 是否含任一非空字段（空建议不落库）。
+    pub fn has_any_value(&self) -> bool {
+        [
+            &self.sync_protocol,
+            &self.greader_endpoint,
+            &self.greader_username,
+        ]
+        .into_iter()
+        .any(|v| v.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+    }
+}
+
+/// 配置导入的待确认连接建议（settings，非敏感：协议/地址/用户名，**无密码**）。
+/// 导入只写这条建议，不改活动凭据/绑定；激活必须经 sync_save 专用保存流程
+/// （重新输入凭据 + 携带本建议的 version 做 CAS），提交成功后同一事务消费本键。
+/// 每次写入（即便同值重复导入）都递增 `version`——旧激活 token 不得误消费新建议。
+// Note: 导入不直接应用连接配置、激活 CAS 与版本语义 — 见 .agents/notes/implemented/architecture/2026-10-08-账号会话与配置应用边界.md
+pub(crate) const PENDING_CONNECTION_KEY: &str = "pending_connection_config";
+
+/// 待确认建议的独立发行序号（settings，非敏感）。
+/// R2 ③：token 由**持久单调 serial** 发行，清空建议（放弃/已消费）**只清内容、
+/// 不重置发行器**——否则「清空后重导」会从 1 重新发行，与历史在途 token 撞车
+/// （ABA：旧 token 命中新建议）。serial 只增不减（i64→u64 checked_add，溢出 Err）。
+pub(crate) const PENDING_SERIAL_KEY: &str = "pending_connection_serial";
+
+/// 待确认连接建议的落库形态：版本号 + 非敏感连接字段。
+/// 旧版本（无 `version` 字段的平铺 JSON）反序列化为 version 0（兼容，不代表"从未导入"）。
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PendingSuggestion {
+    /// 每次导入写入递增；激活提交用它与当前值做 CAS。
+    #[serde(default)]
+    pub version: u64,
+    #[serde(flatten)]
+    pub connection: ConnectionConfig,
+}
+
+/// 读待确认连接建议（空串 = 无建议；损坏 JSON → 显式错误，不静默当无）。
+pub fn read_pending_suggestion(
+    conn: &rusqlite::Connection,
+) -> AppResult<Option<PendingSuggestion>> {
+    let Some(raw) = db::get_setting(conn, PENDING_CONNECTION_KEY)? else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str::<PendingSuggestion>(trimmed)
+        .map(Some)
+        .map_err(|e| {
+            AppError::internal(format!(
+                "待确认连接建议损坏（{PENDING_CONNECTION_KEY}）: {e}"
+            ))
+        })
+}
+
+/// 读待确认建议的发行序号（缺失 = 0 从未发行；现存但非法/负/溢出 = Err，
+/// 不按 0 处理——那会让 serial 回退、重新发行历史 token）。
+fn read_pending_serial(conn: &rusqlite::Connection) -> AppResult<u64> {
+    let Some(raw) = db::get_setting(conn, PENDING_SERIAL_KEY)? else {
+        return Ok(0);
+    };
+    raw.trim().parse::<u64>().map_err(|_| {
+        AppError::internal(format!(
+            "待确认建议发行序号损坏（{PENDING_SERIAL_KEY}={raw:?}）：拒绝继续，请排查/修复"
+        ))
+    })
+}
+
+/// 写待确认连接建议（导入事务内调用），返回本次 token（版本号）：
+/// - **同值重复导入 = ignore**：不换 token（内容一致，旧 token 消费的是同一建议）；
+/// - 换值 / 清空后重导 = 由独立单调 serial 发行**新 token**（绝不回退复用，
+///   即使 `pending_connection_config` 被清空过——防 ABA）；
+/// - serial 与内容写由调用方的导入事务捆在一起（`&tx`）：一起提交/一起回滚；
+///   `checked_add` 溢出 Err（不饱和复用），serial 先写、内容后写——中途失败只留
+///   「已用号段」的空洞，不会出现同号两建议。
+pub fn store_pending_connection(
+    conn: &rusqlite::Connection,
+    cc: &ConnectionConfig,
+) -> AppResult<u64> {
+    if let Some(existing) = read_pending_suggestion(conn)? {
+        if existing.connection == *cc {
+            return Ok(existing.version); // 同值 ignore：不刷新 token
+        }
+    }
+    let version = read_pending_serial(conn)?.checked_add(1).ok_or_else(|| {
+        AppError::internal(format!(
+            "待确认建议发行序号溢出（{PENDING_SERIAL_KEY} 已达 u64::MAX）：拒绝继续"
+        ))
+    })?;
+    db::set_setting(conn, PENDING_SERIAL_KEY, &version.to_string())?;
+    let suggestion = PendingSuggestion {
+        version,
+        connection: cc.clone(),
+    };
+    db::set_setting(
+        conn,
+        PENDING_CONNECTION_KEY,
+        &serde_json::to_string(&suggestion)?,
+    )?;
+    Ok(version)
+}
+
+/// 清除待确认连接建议（仅专用激活提交 CAS 命中 / 用户放弃时调用）。
+/// R2 ③：**只清内容，不触碰发行 serial**——历史 token 永不复用（防 ABA）。
+pub fn clear_pending_connection(conn: &rusqlite::Connection) -> AppResult<()> {
+    db::set_setting(conn, PENDING_CONNECTION_KEY, "")
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -50,6 +172,10 @@ pub struct FolderSpec {
     pub auto_summary: bool,
     pub auto_translate: bool,
     pub position: i64,
+    /// OPT-010（schema2）：分类的稳定身份（跨设备匹配键）。
+    /// schema1 快照没有本字段（None）→ 导入端按名称保守匹配并采用本地身份。
+    #[serde(default)]
+    pub sync_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -60,8 +186,33 @@ pub struct FeedSpec {
     pub layout: String,
     pub auto_summary: bool,
     pub auto_translate: bool,
+    /// OPT-011：源级 AI 开关三态（'inherit' | 'on' | 'off'）。
+    /// 旧 schema1 快照没有本字段（None）→ 导入时由旧 bool 映射显式 on/off
+    /// （保守兼容：旧快照里关着的源绝不因导入突然开启）。非法值拒绝整包导入。
+    #[serde(default)]
+    pub summary_mode: Option<String>,
+    #[serde(default)]
+    pub translate_mode: Option<String>,
     pub site_url: Option<String>,
     pub favicon_url: Option<String>,
+}
+
+/// OPT-011：把快照的 AI 开关输入归一为三态真值——mode 优先（非法拒绝，
+/// 不悄悄回默认），缺 mode 时由旧 bool 映射显式 on/off。
+fn resolve_spec_modes(f: &FeedSpec) -> AppResult<(db::FeedAiMode, db::FeedAiMode)> {
+    let summary = match f.summary_mode.as_deref() {
+        Some(raw) => db::FeedAiMode::parse(raw).map_err(|e| {
+            AppError::internal(format!("快照中的源 {} AI 模式非法：{}", f.url, e.message))
+        })?,
+        None => db::FeedAiMode::from_legacy_bool(f.auto_summary),
+    };
+    let translate = match f.translate_mode.as_deref() {
+        Some(raw) => db::FeedAiMode::parse(raw).map_err(|e| {
+            AppError::internal(format!("快照中的源 {} AI 模式非法：{}", f.url, e.message))
+        })?,
+        None => db::FeedAiMode::from_legacy_bool(f.auto_translate),
+    };
+    Ok((summary, translate))
 }
 
 /// 从本地库构建上传 payload（白名单原则：仅同步字段清单中 sync=允许 的字段）。
@@ -81,6 +232,8 @@ pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
             auto_summary: f.auto_summary,
             auto_translate: f.auto_translate,
             position: f.position,
+            // OPT-010：schema2 携带稳定身份（v26 起每行必有；None 只在损坏库出现）。
+            sync_id: f.sync_id.clone().filter(|s| !s.trim().is_empty()),
         })
         .collect();
 
@@ -91,8 +244,12 @@ pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
             title: f.title.clone(),
             folder: folder_names.get(&f.folder_id).cloned().unwrap_or_default(),
             layout: f.layout.clone(),
+            // 旧 bool 字段照旧导出（旧客户端读同一快照时的兼容输入），
+            // 新真值 mode 同时携带（新客户端以 mode 为准）。
             auto_summary: f.auto_summary,
             auto_translate: f.auto_translate,
+            summary_mode: Some(f.summary_mode.clone()),
+            translate_mode: Some(f.translate_mode.clone()),
             site_url: f.site_url.clone(),
             favicon_url: f.favicon_url.clone(),
         })
@@ -131,185 +288,23 @@ fn filter_app_settings(raw: Option<String>) -> AppResult<Option<String>> {
     Ok(Some(serde_json::to_string(&settings)?))
 }
 
-/// 应用下载 payload 到本地库（白名单原则：仅应用允许字段，保留本地凭据）。
-/// 分类/源 upsert（按名称/URL 匹配），设置字段级覆盖（不整体替换，远端已删的白名单键本地同步删除）。
-/// 返回 [`ApplyOutcome`]（新增/更新/跳过/删除的源数）。
-/// 只应用白名单内的字段；未知/已下线字段一律忽略（防旧客户端覆盖新配置）。
+/// 应用下载 payload 到本地库（兼容入口 = 保守合并、无预览 CAS）。
+///
+/// OPT-010 起真正的应用内核在 [`plan`]：先结构化预览（plan_payload），用户
+/// 确认后携带快照 hash 与配置版本 CAS 复核再执行（apply_payload_checked）。
+/// 本函数保留给既有调用方/测试，等价于 merge 模式跳过 CAS 复核；镜像删除
+/// 语义不经本入口（IPC 层强制要求两者非空）。
 pub fn apply_payload(conn: &rusqlite::Connection, p: &SyncPayload) -> AppResult<ApplyOutcome> {
-    if p.schema > SCHEMA_VERSION {
-        return Err(AppError::internal(format!(
-            "远端配置版本 v{} 高于本客户端支持的 v{}，请升级客户端",
-            p.schema, SCHEMA_VERSION
-        )));
-    }
-
-    // TASK-064 N6：全程单事务——中途失败（如某步 SQL 约束违约）全量回滚，
-    // 不留「半套已应用配置」（此前已建的 folders / 已插的 feeds 会残留，
-    // 用户重试得到叠加结果）。Err 路径 Transaction drop 自动回滚。
-    let tx = conn.unchecked_transaction()?;
-
-    // 分类按名称 upsert（已存在则更新布局/AI 标志/位置）
-    let mut folder_ids: std::collections::HashMap<String, i64> = Default::default();
-    for f in &p.folders {
-        let existing = list_folder_id_by_name(&tx, &f.name)?;
-        let id = match existing {
-            Some(id) => {
-                // P3-6（自检 2026-09-29）：吞错改 `?` 对齐模块 N6 事务纪律——
-                // 此前布局/AI 标志写失败被 `let _ =` 吞掉、事务照常提交其余
-                // 字段，留下「半套已应用配置」。事务框架已在，失败应整包回滚。
-                db::update_folder_layout(&tx, id, &f.layout)?;
-                db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate)?;
-                // 更新位置
-                tx.execute(
-                    "UPDATE folders SET position = ?1 WHERE id = ?2",
-                    rusqlite::params![f.position, id],
-                )?;
-                id
-            }
-            None => {
-                // P3-6：同上，AI 标志写失败上抛 → 整包回滚（N6 事务纪律）
-                let id = db::create_folder(&tx, &f.name, &f.layout)?;
-                db::set_folder_ai_flags(&tx, id, f.auto_summary, f.auto_translate)?;
-                tx.execute(
-                    "UPDATE folders SET position = ?1 WHERE id = ?2",
-                    rusqlite::params![f.position, id],
-                )?;
-                id
-            }
-        };
-        folder_ids.insert(f.name.clone(), id);
-    }
-
-    // 源按 URL upsert；没有分类的落默认分类（建一个「导入」）
-    //
-    // TASK-074（P2-12，DEC-req104-p2-12-config-delete-20260920）：计数口径修正。
-    // 此前 `skipped` 在「已存在并已更新」分支里自增，语义实为「已更新数」，
-    // 前端却把它展示成「跳过 M 个已存在」——用户看到的数字是错的。现在分开：
-    //   imported = 新建的源数
-    //   updated  = 已存在且白名单字段确有变化的源数（真的写了库）
-    //   skipped  = 已存在但内容与远端一致、无需改动的源数（真的跳过）
-    let mut imported = 0usize;
-    let mut updated = 0usize;
-    let mut skipped = 0usize;
-    for f in &p.feeds {
-        match db::find_feed_by_url(&tx, &f.url)? {
-            Some(existing_id) => {
-                // 已存在：更新白名单字段（title, folder, layout, AI flags, site_url, favicon_url）
-                let folder_id = match folder_ids.get(&f.folder) {
-                    Some(id) => *id,
-                    None => {
-                        // N6：兜底目录创建失败必须上抛（此前 unwrap_or(0) 产生
-                        // folder_id=0 → insert_feed 外键违约且半套配置残留）
-                        let id = match list_folder_id_by_name(&tx, "导入")? {
-                            Some(id) => id,
-                            None => db::create_folder(&tx, "导入", "article")?,
-                        };
-                        folder_ids.insert("导入".to_string(), id);
-                        id
-                    }
-                };
-                // 先读现值，判断这次到底有没有变化——有变化才算 updated，
-                // 完全一致才计入 skipped（用户看到的「跳过」才是真的跳过）
-                let changed: bool = tx.query_row(
-                    "SELECT (title IS NOT ?1) OR (folder_id IS NOT ?2) OR (layout IS NOT ?3)
-                            OR (auto_summary IS NOT ?4) OR (auto_translate IS NOT ?5)
-                            OR (site_url IS NOT ?6) OR (favicon_url IS NOT ?7)
-                     FROM feeds WHERE id = ?8",
-                    rusqlite::params![
-                        f.title,
-                        folder_id,
-                        f.layout,
-                        f.auto_summary as i64,
-                        f.auto_translate as i64,
-                        f.site_url,
-                        f.favicon_url,
-                        existing_id
-                    ],
-                    |r| r.get(0),
-                )?;
-                if changed {
-                    tx.execute(
-                        "UPDATE feeds SET title = ?1, folder_id = ?2, layout = ?3, auto_summary = ?4, auto_translate = ?5, site_url = ?6, favicon_url = ?7 WHERE id = ?8",
-                        rusqlite::params![
-                            f.title,
-                            folder_id,
-                            f.layout,
-                            f.auto_summary,
-                            f.auto_translate,
-                            f.site_url,
-                            f.favicon_url,
-                            existing_id
-                        ],
-                    )?;
-                    updated += 1;
-                } else {
-                    skipped += 1;
-                }
-            }
-            None => {
-                // 新源导入
-                let folder_id = match folder_ids.get(&f.folder) {
-                    Some(id) => *id,
-                    None => {
-                        // N6：同上，失败上抛进事务回滚
-                        let id = match list_folder_id_by_name(&tx, "导入")? {
-                            Some(id) => id,
-                            None => db::create_folder(&tx, "导入", "article")?,
-                        };
-                        folder_ids.insert("导入".to_string(), id);
-                        id
-                    }
-                };
-                let title = if f.title.trim().is_empty() {
-                    f.url.clone()
-                } else {
-                    f.title.clone()
-                };
-                db::insert_feed(
-                    &tx,
-                    &f.url,
-                    f.site_url.as_deref(),
-                    &title,
-                    f.favicon_url.as_deref(),
-                    folder_id,
-                    &f.layout,
-                    f.auto_summary,
-                    f.auto_translate,
-                )?;
-                imported += 1;
-            }
-        }
-    }
-
-    // app_settings 字段级合并：只更新白名单字段，保留本地特定字段
-    if let Some(remote_settings) = &p.app_settings {
-        merge_app_settings(&tx, remote_settings)?;
-    }
-
-    // 非敏感连接配置应用（保留凭据字段不变）
-    if let Some(cc) = &p.connection_config {
-        if let Some(v) = &cc.sync_protocol {
-            db::set_setting(&tx, "sync_protocol", v)?;
-        }
-        if let Some(v) = &cc.greader_endpoint {
-            db::set_setting(&tx, "greader_endpoint", v)?;
-        }
-        if let Some(v) = &cc.greader_username {
-            db::set_setting(&tx, "greader_username", v)?;
-        }
-    }
-
-    tx.commit()?;
-    Ok(ApplyOutcome {
-        imported,
-        updated,
-        skipped,
-    })
+    apply_payload_checked(conn, p, ApplyMode::Merge, None, None)
 }
 
 /// 应用下载配置的结果计数（TASK-074）：把「已更新」与「已跳过」分开，
 /// 供界面如实展示（此前 skipped 实为已更新数，文案却是「跳过」）。
-#[derive(Debug, Default, Clone, Copy, Serialize)]
+/// OPT-006：`pending_connection` = 本次导入落下的待确认连接建议（含版本号，
+/// 非敏感；需用户重新输入凭据后经专用激活提交才会生效；导入本身不改活动凭据）。
+/// OPT-010：`removed_feeds` / `removed_folders` / `affected_article_count` =
+/// 镜像模式实际删除的对象数与级联文章数（合并模式恒为 0）。
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct ApplyOutcome {
     /// 新建的源数
     pub imported: usize,
@@ -317,6 +312,40 @@ pub struct ApplyOutcome {
     pub updated: usize,
     /// 已存在但内容与远端一致、无需改动的源数
     pub skipped: usize,
+    /// 本次导入的待确认连接建议（若有；带激活 CAS 用的版本号）
+    pub pending_connection: Option<PendingSuggestion>,
+    /// 镜像删除的源数（合并模式恒为 0）
+    pub removed_feeds: usize,
+    /// 镜像删除的分类数（合并模式恒为 0）
+    pub removed_folders: usize,
+    /// 上述被删源级联删除的文章数合计
+    pub affected_article_count: i64,
+}
+
+/// OPT-011：远端 app_settings 的 refreshInterval 校验单点（先于 merge 的任何写入）。
+///
+/// 与本地写路径（settingsValidation：区间 + Number.isInteger）和 Rust scheduler
+/// （read_refresh_interval）同口径：JSON 整数或整数值小数（30.0）接受并**归一为
+/// 整数**；缺失 = None（走既有「远端缺键 → 本地删除」语义）；存在但非法
+/// （30.5 / 4 / 721 / 字符串 / null）→ Err。
+///
+/// 为什么必须让整个 apply 失败：修前原样 merge 会把 30.5 写进本地 app_settings，
+/// 而前端校验拒绝（UI 保留旧值 300）、Rust scheduler 读不到整数回落默认 30——
+/// DB / UI / 运行值三方分叉。不静默写非法值，也不把正确性托付给 UI 忽略。
+fn validated_remote_refresh_interval(remote: &serde_json::Value) -> AppResult<Option<i64>> {
+    let Some(v) = remote.get("refreshInterval") else {
+        return Ok(None);
+    };
+    let as_int = v
+        .as_i64()
+        .or_else(|| v.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64));
+    match as_int {
+        Some(n) if (5..=720).contains(&n) => Ok(Some(n)),
+        _ => Err(AppError::new(
+            "validate",
+            format!("配置快照的 refreshInterval 非法（必须为 5–720 整数）：{v}"),
+        )),
+    }
 }
 
 /// 合并 app_settings：远端白名单字段覆盖本地，本地特定字段保留。
@@ -327,42 +356,14 @@ pub struct ApplyOutcome {
 /// ① 远端存在且属白名单 → 覆盖本地；
 /// ② 远端**不存在**且属白名单、但本地存在 → 本地同步删除（跟随远端事实）；
 /// ③ 本地专属字段（autoStart / closePromptShown）永不接受远端删除或覆盖。
+///
+/// OPT-011：refreshInterval 是数值型配置——远端存在时先严格校验（见上），非法
+/// 整体 Err 由调用方事务回滚（本地 settings/feeds 原样）；合法值归一为整数写回。
+///
+/// OPT-010：合并与增量（预览用 changed/removed 键）同源——[`plan`] 的
+/// `merged_app_settings_json` 是唯一计算口径，本函数只负责写库。
 fn merge_app_settings(conn: &rusqlite::Connection, remote_raw: &str) -> AppResult<()> {
-    let remote: serde_json::Value = serde_json::from_str(remote_raw)?;
-    let local_raw = db::get_setting(conn, "app_settings")?;
-
-    let mut merged = if let Some(local_raw) = local_raw {
-        serde_json::from_str::<serde_json::Value>(&local_raw)?
-    } else {
-        serde_json::json!({})
-    };
-
-    let remote_obj = remote.as_object();
-    // ② 远端缺失的白名单键 → 本地删除（先算再改，避免借用冲突）
-    if let Some(local_obj) = merged.as_object_mut() {
-        let missing: Vec<String> = match remote_obj {
-            Some(robj) => local_obj
-                .keys()
-                .filter(|k| !is_local_only_setting(k) && !robj.contains_key(*k))
-                .cloned()
-                .collect(),
-            // 远端 app_settings 不是对象（如空串/畸形）→ 不做删除，避免把本地设置整批清掉
-            None => Vec::new(),
-        };
-        for key in missing {
-            local_obj.remove(&key);
-        }
-    }
-
-    // ① 远端白名单字段覆盖（③ 本地专属字段除外）
-    if let (Some(remote_obj), Some(merged_obj)) = (remote_obj, merged.as_object_mut()) {
-        for (key, value) in remote_obj {
-            if !is_local_only_setting(key) {
-                merged_obj.insert(key.clone(), value.clone());
-            }
-        }
-    }
-
+    let (merged, _, _) = plan::merged_app_settings_json(conn, remote_raw)?;
     db::set_setting(conn, "app_settings", &serde_json::to_string(&merged)?)?;
     Ok(())
 }
@@ -617,20 +618,63 @@ pub async fn config_sync_download(state: State<'_, AppState>) -> AppResult<Strin
     Ok(json)
 }
 
-/// 应用下载的 payload（前端确认后调用）。
+/// 预览下载的 payload（OPT-010 两段式第一步，只读）：
+/// 返回结构化 additions/updates/removals（含受影响文章数）、快照 hash 与本地
+/// 配置版本签名——前端展示给用户确认；取消 = 不调用 apply，零写入。
+#[tauri::command]
+pub async fn config_sync_plan(
+    state: State<'_, AppState>,
+    payload: String,
+    mode: Option<String>,
+) -> AppResult<serde_json::Value> {
+    let p: SyncPayload = serde_json::from_str(&payload)?;
+    let mode = match mode.as_deref() {
+        None => ApplyMode::Merge,
+        Some(raw) => ApplyMode::parse(raw)?,
+    };
+    let conn = state.db.lock().await;
+    let preview = plan_payload(&conn, &p, mode)?;
+    Ok(serde_json::to_value(preview)?)
+}
+
+/// 应用下载的 payload（OPT-010 两段式第二步：前端确认后调用）。
+///
+/// `expected_snapshot_hash` / `expected_version` 必须携带预览返回的两个签名；
+/// 单事务内复核「快照内容未变 + 本地配置未变」后执行，任一不符返回
+/// `stalePreview` 且零写入（旧预览必须重新确认，绝不重新计算后直接删）。
+/// 镜像模式的删除不产生远端退订 outbox，也不改活动连接凭据（连接走
+/// OPT-006 待确认建议 + 专用激活流程）。
 #[tauri::command]
 pub async fn config_sync_apply(
     state: State<'_, AppState>,
     payload: String,
+    mode: String,
+    expected_snapshot_hash: String,
+    expected_version: String,
 ) -> AppResult<serde_json::Value> {
     let p: SyncPayload = serde_json::from_str(&payload)?;
+    let mode = ApplyMode::parse(&mode)?;
     let conn = state.db.lock().await;
-    let outcome = apply_payload(&conn, &p)?;
+    let outcome = apply_payload_checked(
+        &conn,
+        &p,
+        mode,
+        Some(&expected_snapshot_hash),
+        Some(&expected_version),
+    )?;
     // TASK-074：如实分开 imported / updated / skipped（此前 skipped 是已更新数）
+    // OPT-006：pendingConnection = 待确认连接建议——前端必须展示「需重新输入凭据
+    // 后保存才会激活」，激活走 sync_save 专用流程（导入不改活动凭据）。
+    // OPT-010：removedFeeds/removedFolders/affectedArticleCount = 镜像实际删除数。
     Ok(serde_json::json!({
+        "mode": mode.as_str(),
         "imported": outcome.imported,
         "updated": outcome.updated,
         "skipped": outcome.skipped,
+        "removedFeeds": outcome.removed_feeds,
+        "removedFolders": outcome.removed_folders,
+        "affectedArticleCount": outcome.affected_article_count,
+        "pendingConnection": outcome.pending_connection,
     }))
 }
 

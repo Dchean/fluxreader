@@ -1,17 +1,21 @@
 // Note: 查询范围单点派生、keyset 游标与代际守卫 — 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
 import type { StoreApi } from 'zustand';
-import { extractError } from '../lib/api';
+import { api, extractError } from '../lib/api';
 import type { ArticleListItemRow } from '../lib/api';
 import type {
   ArticleEntry,
   CategoryGroup,
   ContentLayoutType,
+  FeedAiMode,
   FeedItem,
   ViewFilterType,
 } from '../types';
-import { reconcileBodyEntities } from './bodyCache';
+import { getBodyEntry, invalidateContentRevision, reconcileBodyEntities } from './bodyCache';
 import type { BodyRowFact } from './bodyCache';
-import type { AppState, ArticlesCursorState } from './types';
+/* OPT-017F：id 解析单点——原模块内私有同名副本（避免 internals ↔ selectors
+   循环依赖）已收敛到共享叶模块，两个层级都只依赖 ./scopeId。 */
+import { numericId } from './scopeId';
+import type { AppState, ArticlesCursorState, ScopeCountsSnapshot } from './types';
 
 /* ============================================================
    跨 slice 共享的模块级基础设施。
@@ -176,22 +180,16 @@ export function advanceArticlesCursor(base: ArticlesCursorState, rows: ArticleLi
   };
 }
 
-/** 从字符串 id（纯数字 / 'cat-' / 'feed-' 前缀）提取后端数字 id。
-    （与 selectors.numericId 同形；此处模块内私有，避免 internals ↔ selectors 循环依赖） */
-function scopeNumericId(raw: string): number {
-  const m = raw.match(/(\d+)/);
-  return m ? Number(m[1]) : NaN;
-}
-
 /** 订阅范围 → 后端范围维度（feed_id / folder_id）。
     TASK-109：从 scopeQueryArgs 拆出的最底层派生——「与排序、布局无关」的标写
     范围（mark_all_read，经 QueryScope.markScope）与列表查询共用同一份映射，
-    'cat-N' → folder_id、'all' → 双 null、其余 → feed_id=数字。 */
+    'cat-N' → folder_id、'all' → 双 null、其余 → feed_id=数字。
+    OPT-017F：数字提取走共享叶模块 numericId（原模块内私有副本已删）。 */
 function scopeFilterArgs(scope: string): { feed_id: number | null; folder_id: number | null } {
   const isCat = scope.startsWith('cat-');
   return {
-    feed_id: scope === 'all' || isCat ? null : scopeNumericId(scope),
-    folder_id: isCat ? scopeNumericId(scope) : null,
+    feed_id: scope === 'all' || isCat ? null : numericId(scope),
+    folder_id: isCat ? numericId(scope) : null,
   };
 }
 
@@ -347,13 +345,34 @@ export function reconcileCategories(
       真值，不 bump 版本、不做 body 对齐（对齐只消费后端行）。
 
     返回值不再携带 hydratedIds/hydrationErrors（store 字段已随 bodyById 移除）——
-    水合终态与失败态是 bodyById 记录的 state，与快照替换解耦，无需按 id 裁剪。 */
+    水合终态与失败态是 bodyById 记录的 state，与快照替换解耦，无需按 id 裁剪。
+
+    R3（P2-2）：可选 `opts.writtenAfterSerial` = 本次读取的**发起时刻**本地写序号
+    （reload/reloadFilteredEntries/anchorToArticle 发起时捕获）。该时刻之后被本地
+    写入的行×字段保留本地值且不 bump 版本——旧响应不得把已提交的点读/藏翻回
+    （007 的字段独立性与「实际消费者」语义），写入自身的回滚/接管判定也不被旧
+    快照失效；未写字段照常取快照真值（更晚发起的新鲜读取仍可接受外部状态，
+    本地值不是永久权威）。
+    R4：可选 `opts.inFlightAtStart` = 读取发起时**已在途**（发出未落定）的写键
+    集合（`entryInFlightFieldKeys()`）——同样保留且不 bump。读取请求可能先于
+    在途写到达后端（不依赖 IPC FIFO），在途写尚未落定的乐观值不得被读前快照
+    翻回；写失败时其回滚仍有效（版本未被本合并 bump），写成功后由后续新鲜
+    读取接受真值。 */
 export function mergeSnapshotEntries(
   prevEntries: ArticleEntry[],
   nextEntries: ArticleEntry[],
   fromBackend: boolean,
   rowsFetchedAt: number,
+  opts?: { writtenAfterSerial?: number; inFlightAtStart?: ReadonlySet<string> | null },
 ): { entries: ArticleEntry[] } {
+  const writtenAfter = fromBackend ? opts?.writtenAfterSerial : undefined;
+  const inFlightAtStart = fromBackend ? opts?.inFlightAtStart ?? null : null;
+  /** 读取发起时点已被本地写覆盖/在途的行×字段：保留本地值、不 bump 版本。 */
+  const isProtectedField = (id: string, field: 'isRead' | 'isStarred'): boolean => {
+    if (!fromBackend) return false;
+    if (writtenAfter !== undefined && entryFieldWrittenAfter(id, field, writtenAfter)) return true;
+    return inFlightAtStart !== null && inFlightAtStart.has(entryVersionKey(id, field));
+  };
   const prevById = new Map(prevEntries.map((a) => [a.id, a] as const));
   const generatingIds = appStore().getState().summarizingIds;
   const translatingIds = appStore().getState().translatingIds;
@@ -361,20 +380,63 @@ export function mergeSnapshotEntries(
     const prev = prevById.get(a.id);
     /* 无旧条目 → 原样返回 */
     if (!prev) return a;
+    let merged = a;
     const generating = !!(generatingIds[a.id] || translatingIds[a.id]);
-    /* 生成中：AI 流式产物不被抓取期更早的行覆盖（列空时保流式值） */
+    /* 生成中：AI 流式产物不被抓取期更早的行覆盖（列空时保流式值）。
+       OPT-013 B1：签名与被保留的产物成对——行清空但保留了 prev 的产物时，
+       签名也必须取 prev 的（否则「旧产物 + 新签名为空」会误现 stale「已过期」）。 */
     if (generating && (prev.aiSummary || prev.translatedContent)) {
-      return {
-        ...a,
-        aiSummary: a.aiSummary || prev.aiSummary,
-        translatedContent: a.translatedContent || prev.translatedContent,
+      merged = {
+        ...merged,
+        aiSummary: merged.aiSummary || prev.aiSummary,
+        translatedContent: merged.translatedContent || prev.translatedContent,
+        aiSummarySig: merged.aiSummary ? merged.aiSummarySig : prev.aiSummarySig,
+        translatedSig: merged.translatedContent ? merged.translatedSig : prev.translatedSig,
       };
+    } else if (prev.url && !a.url) {
+      /* 轻字段继承：仅 url（详情行字段）——其余列一律本次行真值 */
+      merged = { ...merged, url: prev.url };
     }
-    /* 轻字段继承：仅 url（详情行字段）——其余列一律本次行真值 */
-    if (!prev.url || a.url) return a;
-    return { ...a, url: prev.url };
+    /* R3/R4（P2-2）：读取发起后被本地写过/仍在途的字段保留本地值——旧快照
+       不得把已提交的点读/藏或未落定的乐观意图翻回；字段独立判定（读被写不
+       牵连藏，反之亦然）。 */
+    if (isProtectedField(a.id, 'isRead')) merged = { ...merged, isRead: prev.isRead };
+    if (isProtectedField(a.id, 'isStarred')) merged = { ...merged, isStarred: prev.isStarred };
+    return merged;
   });
   if (fromBackend) {
+    /* OPT-008B 第二阶段：正文修订失效——条目引用的 contents 身份/修订变化
+       （含共享兄弟内容变更；snippet 未变也失效）时清空 bodyById 的正文记录回
+       cleared，由 ensureArticleContent 按需重取；在途旧详情响应因显式失效计数
+       bump 被丢弃（时序守卫不退化）。
+       R3 边界守卫：对值未变的既有条目也查记录锚（feedId|title）——同 id 条目
+       “快照缺失后重新出现/删除重建”且 (contentId, revision) 巧合相等（文章删除
+       重建复用 rowid）时锚不符必须失效，不得继续旧正文。仅对持有**真实内容
+       身份**的记录启用（rec.contentId 非 null）：身份为空的历史/夹具记录没有可
+       巧合的对值，锚比较反而会因测试/过渡数据的行身份差异误失效。门控保持
+       「快照对值变化 ∨ 锚不符」：在途旧快照（对值 = 提取前）不得把
+       applyExtractedFulltext 刚落的新身份记录失效（那是同一条目、锚相等）。 */
+    for (const a of entries) {
+      const prevRow = prevById.get(a.id);
+      const snapshotChanged =
+        !prevRow ||
+        prevRow.contentId !== a.contentId ||
+        (prevRow.contentRevision ?? 0) !== (a.contentRevision ?? 0);
+      const rec = getBodyEntry(a.id);
+      const anchorMismatch =
+        rec != null &&
+        rec.contentId !== null &&
+        rec.entryAnchor !== null &&
+        rec.entryAnchor !== `${a.feedId}|${a.title}`;
+      if (snapshotChanged || anchorMismatch) {
+        invalidateContentRevision(
+          a.id,
+          a.contentId ?? null,
+          a.contentRevision ?? 0,
+          `${a.feedId}|${a.title}`,
+        );
+      }
+    }
     /* TASK-109②：版本 bump 按真值来源收窄（TASK-107 R2 审查裁定）——
        - fromBackend=true（bootstrap 三处后端快照路径 reloadFromBackend /
          reloadFilteredEntries / anchorToArticle）：行级 is_read 是后端真值，任何
@@ -390,14 +452,26 @@ export function mergeSnapshotEntries(
        整体替换携带的是后端行级真值，is_read 与 is_starred 同时被覆盖，两字段
        的在途乐观声明一并失效；且 bump 收敛到字段键后不再有跨字段误伤（此前
        文章级版本下，任一字段的快照替换都会 void 掉另一字段的在途声明）。
+       R3（P2-2）：被保留的字段既不回退值也不 bump——写入声明保持有效（在途
+       写失败仍可按版本回滚；已提交写不回退可见状态）。
        TASK-122：同路径顺带执行 bodyById 的 AI 产物显式失效/对齐（清理 AI
        缓存 → cleared 的单点，规则与探针场景见 bodyCache 模块头注）。 */
     const facts = new Map<string, BodyRowFact>();
     const prevSnippets = new Map<string, string>();
+    const nextById = new Map(nextEntries.map((a) => [a.id, a] as const));
     for (const a of entries) {
-      bumpEntryVersion(a.id, 'isRead');
-      bumpEntryVersion(a.id, 'isStarred');
-      facts.set(a.id, { aiSummary: a.aiSummary, translatedContent: a.translatedContent, snippet: a.snippet });
+      const src = nextById.get(a.id);
+      /* 保护字段的 bump 判据：快照行值 === 保留的本地值 ⇒ 后端已含该值（写已在
+         服务端生效）→ 仍 bump，迟到失败回滚不得把已生效值踩回（TASK-107 R2 的
+         迟到回滚语义保持）；快照为旧值（后端尚未含）→ 不 bump，写失败时回滚
+         仍有效（R4 在途保护的核心）。 */
+      if (!isProtectedField(a.id, 'isRead') || (src !== undefined && src.isRead === a.isRead)) {
+        bumpEntryVersion(a.id, 'isRead');
+      }
+      if (!isProtectedField(a.id, 'isStarred') || (src !== undefined && src.isStarred === a.isStarred)) {
+        bumpEntryVersion(a.id, 'isStarred');
+      }
+      facts.set(a.id, { aiSummary: a.aiSummary, translatedContent: a.translatedContent, aiSummarySig: a.aiSummarySig ?? null, translatedSig: a.translatedSig ?? null, snippet: a.snippet });
     }
     for (const p of prevEntries) prevSnippets.set(p.id, p.snippet);
     reconcileBodyEntities(facts, rowsFetchedAt, (id) => !!(generatingIds[id] || translatingIds[id]), prevSnippets);
@@ -455,6 +529,62 @@ function bumpEntryVersion(id: string, field: 'isRead' | 'isStarred'): void {
 }
 
 /* ============================================================
+R3（P2-1/P2-2）：读/藏字段的本地写入序号（按 行×字段）。
+
+`entryMutationVersion` 只支持「相等比较」的接管判定，无法回答「该字段是否在
+某个时刻之后被写过」。两个并发窗口需要这个时间序判据：
+- applyReadReceipt（P2-1）：回执行承载后端**请求时刻**已提交的翻转，不等于
+  当前状态——只跳过**本行本字段**在请求发起后被接管的行，不再用「期间有任意
+  一次全局写」把整批无关回执行一刀切；
+- mergeSnapshotEntries（P2-2）：读取发起后已被本地写入的字段保留本地值（旧
+  快照不得把已提交的点读/藏翻回），未写字段照常以后端快照覆盖——快照新鲜度
+  以**读取发起时刻**为准，本地值不是永久权威（更晚的读取照常接受）。
+
+序号复用 localFlagWriteSerial 的单调全局序（每次真实本地读/藏写入推进，
+含回执应用与失败回滚恢复）：比较「写入序号 > 读取/请求发起序号」即「写入
+晚于发起」。Map 随会话内被写过的 行×字段 增长（与 entryMutationVersion
+同量级），无需清理。
+============================================================ */
+const entryFieldWriteSerial = new Map<string, number>();
+
+/** 记录一次真实本地字段写入（调用点与 bumpEntryVersion/bumpLocalFlagWrite 同点）。 */
+function recordEntryFieldWrite(id: string, field: 'isRead' | 'isStarred'): void {
+  entryFieldWriteSerial.set(entryVersionKey(id, field), currentLocalFlagWriteSerial());
+}
+
+/** 该行该字段是否在 `baseline` 之后发生过真实本地写入（严格晚于发起时刻）。 */
+export function entryFieldWrittenAfter(id: string, field: 'isRead' | 'isStarred', baseline: number): boolean {
+  return (entryFieldWriteSerial.get(entryVersionKey(id, field)) ?? -1) > baseline;
+}
+
+/* R4：读/藏字段的**在途写**计数（行×字段）。articles 快照（reload/filtered/
+   anchor）在**读取发起时**捕获该集合，被它命中的行×字段在快照合并中保留本地
+   值——读取请求可能先于在途写到达后端（不依赖 IPC FIFO），旧快照不得把尚未
+   落定的乐观意图翻回；写落定后（成功=后端已含该值；失败=回滚恢复）由后续
+   新鲜读取接受真值。与 beginLocalFlagWrite/endLocalFlagWrite 在调用点上成对
+   镜像（同一批 settle 回调），不计入全局 unread/starred 计数语义。 */
+const entryFieldInFlight = new Map<string, number>();
+
+/** 乐观写发起时登记（提示：与 beginLocalFlagWrite 同点）。 */
+export function beginEntryFieldWrite(id: string, field: 'isRead' | 'isStarred'): void {
+  const key = entryVersionKey(id, field);
+  entryFieldInFlight.set(key, (entryFieldInFlight.get(key) ?? 0) + 1);
+}
+
+/** 写落定（成功/失败）时注销（与 endLocalFlagWrite 同点）。 */
+export function endEntryFieldWrite(id: string, field: 'isRead' | 'isStarred'): void {
+  const key = entryVersionKey(id, field);
+  const n = (entryFieldInFlight.get(key) ?? 0) - 1;
+  if (n > 0) entryFieldInFlight.set(key, n);
+  else entryFieldInFlight.delete(key);
+}
+
+/** 读取发起时捕获在途写键集合（空集返回 null——调用方省略 opts 保持轻量）。 */
+export function entryInFlightFieldKeys(): Set<string> | null {
+  return entryFieldInFlight.size > 0 ? new Set(entryFieldInFlight.keys()) : null;
+}
+
+/* ============================================================
    TASK-119（审计 P2-4②）：本地读/藏写入序号——计数对账的过期判据。
 
    feed_counts 对账（nav.markCurrentViewAllRead 成功路径）的响应在途期间，任何
@@ -489,6 +619,229 @@ export function currentLocalFlagWriteSerial(): number {
   return localFlagWriteSerial;
 }
 
+/** 计数快照行（feedCounts 的值形态）。 */
+type CountRow = { total: number; unread: number; starred: number; today: number };
+
+/* ============================================================
+OPT-008B R1：计数的**有序对账**（替代按条目线性 ±1）
+
+背景（主控裁定 P2-1）：聚合数字在折叠组上不随行数线性变化（同组 3 副本标读
+只让「全部未读」减 1 甚至不变），逐条 ±1 会系统性漂移且不自愈。方案：
+- 单条读/藏、批量、回滚之后，**在写请求落定后**发起一次真实计数对账
+  （feed_counts + 开关开启时的 scope_counts），以服务端聚合值整体替换；
+- 落地守卫（快照元数据 + 前沿）：期间有更新的对账 / 本地读藏写入 / 计数快照
+  落地 / 布局或开关变化 → 丢弃本次响应（更新的意图有自己的对账，不互相踩）；
+- 失败保守：保留最后一次同 scope 的已知值（可解释的滞后），不推进幻值。
+============================================================ */
+
+/* ============================================================
+OPT-008B 计数协议（R1 引入，R2/N2 收敛为单一确认协议）
+
+背景：
+- R1/P2-1：聚合数字在折叠组上不随行数线性变化——写请求落定后按**真实计数**
+  对账（counts_snapshot 单次读取：源键 + 聚合键同一时刻、同一开关值）。
+- R2/N1：读闭包无条件改多行（含开关关闭）——回执行（ReadWriteReceipt）驱动
+  前端条目/缓存/按源计数本地收敛，不靠全量 reload，也不要求对账覆盖条目。
+- R2/N2：reload（bootstrap）与写后对账是**两个计数写者**——共享同一提交令牌：
+  读取发起序号（后发起使先完成者过期）+ 在途本地读/藏写计数（未提交的意图
+  不得被对账覆盖）。落地时刻复核，不混用读取时刻。
+============================================================ */
+
+/** 计数读取发起序号：每次取数（reload / 对账）都推进；落地必须仍是最新一次。 */
+let countsFetchSerial = 0;
+
+/** 本地读/藏写意图在途计数：乐观写入起、请求落定（成功或回滚）止。
+    计数落地要求为 0——发起前已有但尚未提交的意图不得被服务端快照覆盖。 */
+let localFlagWritesInFlight = 0;
+
+export function beginLocalFlagWrite(): void {
+  localFlagWritesInFlight += 1;
+}
+
+export function endLocalFlagWrite(): void {
+  localFlagWritesInFlight = Math.max(0, localFlagWritesInFlight - 1);
+}
+
+/** 计数读取发起（reload 与对账共用）：返回本次读取令牌。 */
+export function beginCountsFetch(): number {
+  countsFetchSerial += 1;
+  return countsFetchSerial;
+}
+
+/** 计数落地资格（R2/N2 单一确认协议）：令牌仍是最新 + 无在途未提交意图。 */
+export function canLandCounts(token: number): boolean {
+  return token === countsFetchSerial && localFlagWritesInFlight === 0;
+}
+
+/** 测试与诊断：当前在途本地读/藏写意图数。 */
+export function localFlagWritesPending(): number {
+  return localFlagWritesInFlight;
+}
+
+/** scope_counts 详情 → store 快照（带布局/开关来源元数据；形状不合法返回 null
+    ——宁可回退按源求和，也不消费半截快照）。 */
+export function buildScopeCountsSnapshot(
+  detail: { all?: unknown; folders?: unknown } | null,
+  layout: ContentLayoutType,
+  dedup: boolean,
+): ScopeCountsSnapshot | null {
+  if (!detail || typeof detail !== 'object') return null;
+  const d = detail as {
+    all?: Partial<CountRow>;
+    folders?: Array<{ scope_id?: number } & Partial<CountRow>>;
+  };
+  if (!d.all || typeof d.all.total !== 'number') return null;
+  const folders = new Map<string, CountRow>();
+  for (const f of d.folders ?? []) {
+    if (typeof f.scope_id !== 'number') continue;
+    folders.set(`cat-${f.scope_id}`, {
+      total: Number(f.total ?? 0),
+      unread: Number(f.unread ?? 0),
+      starred: Number(f.starred ?? 0),
+      today: Number(f.today ?? 0),
+    });
+  }
+  return {
+    layout,
+    dedup,
+    all: {
+      total: Number(d.all.total ?? 0),
+      unread: Number(d.all.unread ?? 0),
+      starred: Number(d.all.starred ?? 0),
+      today: Number(d.all.today ?? 0),
+    },
+    folders,
+  };
+}
+
+/** feed_counts 行 → Map（与既有口径一致；缺失行整体丢弃该源）。 */
+export function feedCountsFromRows(
+  rows: Array<{ feed_id: number } & Partial<CountRow>> | null,
+): Map<string, CountRow> | null {
+  if (!rows) return null;
+  const next = new Map<string, CountRow>();
+  for (const c of rows) {
+    next.set(String(c.feed_id), {
+      total: Number(c.total ?? 0),
+      unread: Number(c.unread ?? 0),
+      starred: Number(c.starred ?? 0),
+      today: Number(c.today ?? 0),
+    });
+  }
+  return next;
+}
+
+export type CountsReconcileOutcome = 'applied' | 'stale' | 'failed' | 'skipped';
+
+/** 有序计数对账（fire-and-forget 语义由 [`scheduleCountsReconcile`] 承载）：
+    单次 counts_snapshot 读取 → 通过全部守卫后整体替换 feedCounts 与
+    scopeCounts（开关开启且布局未变时）；否则 'stale'（更新者优先）或
+    'failed'（读取失败，保留现值）。 */
+export async function reconcileCountsOrdered(): Promise<CountsReconcileOutcome> {
+  const s0 = appStore().getState();
+  const layout = s0.activeContentLayout;
+  const dedup = s0.settings.smartDedup;
+  const flagSerial = currentLocalFlagWriteSerial();
+  const token = beginCountsFetch();
+  let snap: Awaited<ReturnType<typeof api.countsSnapshot>>;
+  try {
+    snap = await api.countsSnapshot(layout);
+  } catch {
+    return 'failed';
+  }
+  if (!snap) return 'skipped'; // 无 IPC（mock）：不推进、不报错
+  const s1 = appStore().getState();
+  if (currentLocalFlagWriteSerial() !== flagSerial) return 'stale';
+  if (!canLandCounts(token)) return 'stale';
+  if (s1.settings.smartDedup !== dedup) return 'stale';
+  const feedCounts = feedCountsFromRows(snap.feeds);
+  if (!feedCounts) return 'skipped';
+  if (s1.activeContentLayout === layout) {
+    appStore().setState({
+      feedCounts,
+      scopeCounts: dedup ? buildScopeCountsSnapshot(snap.scope, layout, dedup) : null,
+    });
+  } else {
+    // 布局已切换：feedCounts 布局无关可落；scope 快照丢弃（选择器按布局校验）
+    appStore().setState({ feedCounts });
+  }
+  return 'applied';
+}
+
+/** 变更后对账（fire-and-forget；结果与错误都不上抛——失败保守保留现值，
+    下次 reload / 对账自愈）。
+    默认仅在 **smartDedup 开启**时发起：折叠组的非线性只存在于显示聚合开启时；
+    关闭时读闭包的真实翻转行由 [`applyReadReceipt`] 按回执行精确收敛（源键
+    逐行可数，无折叠），无需额外 IPC。
+    `force: true` = 失败路径的**权威修复**：乐观计数已按 ±1 计入而回滚被版本
+    守卫跳过（快照/接管写改了该字段）时，线性复原不可判定——必须取一次真实
+    计数（不受 dedup 门控；dedup 关闭时对账只落 feedCounts，语义同口径）。 */
+export function scheduleCountsReconcile(opts?: { force?: boolean }): void {
+  if (!opts?.force && !appStore().getState().settings.smartDedup) return;
+  void reconcileCountsOrdered().catch(() => { /* 保守：保留现值 */ });
+}
+
+/** 读写入回执的本地收敛（R2/N1 建立，R3/P2-1 逐行凭据化）：把**真实翻转行**
+    （读闭包可能含同 URL 副本）应用到本地条目/视图缓存与按源计数。
+    - `skipIds` = 调用方已乐观翻转的行（其计数已按 ±1 计入，回执不重复扣减）；
+    - **逐行凭据**：回执行承载的是后端**请求时刻**已提交的翻转，不等于当前状态
+      ——仅当该行读字段自请求发起以来没有被更新的本地写接管时才应用。判据是
+      行×字段写序号（`entryFieldWrittenAfter`），不再用「期间有任意一次全局写」
+      把整批回执行一刀切：无关 URL 组/无关行的写不再让本行回执失效；
+    - **计数随实际应用的行扣减**：已被较新 unread 接管的行、当前已是已读的行
+      都不扣（欠计/双计两侧都堵住）；窗口外的兄弟行无本地写时照常扣（源键按
+      后端提交事实逐行收敛）；
+    - 应用的翻转按字段版本 bump，使更早的失败回滚声明失效；本地状态变化后
+      bump 全局写前沿，使在途计数对账/后续回执据此判过期。
+    未提供前沿（undefined）时退化为保守形态：只按「当前未读」应用，不做逐行
+    接管判定（现有调用方均提供）。 */
+export function applyReadReceipt(
+  receipts: ReadonlyArray<{ id: number | string; feed_id: number | string }> | null | undefined,
+  skipIds?: ReadonlySet<string>,
+  flagSerialAtRequest?: number,
+): void {
+  if (!receipts || receipts.length === 0) return;
+  const s = appStore().getState();
+  const entriesById = new Map(s.entries.map((e) => [e.id, e] as const));
+  const applied: Array<{ id: string; feedId: string }> = [];
+  for (const r of receipts) {
+    const id = String(r.id);
+    if (skipIds?.has(id)) continue;
+    if (flagSerialAtRequest !== undefined && entryFieldWrittenAfter(id, 'isRead', flagSerialAtRequest)) {
+      continue; // 该行读字段已被请求发起后的更新写接管：不翻、不扣（回执不等于当前状态）
+    }
+    const entry = entriesById.get(id);
+    if (entry?.isRead) continue; // 已是已读：翻转已由该次写/更早收敛计过数，不重复扣减
+    applied.push({ id, feedId: String(r.feed_id) });
+  }
+  if (applied.length === 0) return;
+  bumpLocalFlagWrite(); // 本地状态因回执再次变化：在途对账/后续回执据此判过期
+  const extraByFeed = new Map<string, number>();
+  for (const { feedId } of applied) extraByFeed.set(feedId, (extraByFeed.get(feedId) ?? 0) + 1);
+  let feedCounts = s.feedCounts;
+  for (const [feedId, n] of extraByFeed) {
+    const c = feedCounts.get(feedId);
+    if (!c) continue;
+    if (feedCounts === s.feedCounts) feedCounts = new Map(s.feedCounts);
+    feedCounts.set(feedId, { ...c, unread: Math.max(0, c.unread - n) });
+  }
+  /* 条目翻转：仅窗口内的行（窗口外兄弟无本地条目可翻，计数照扣）。 */
+  const appliedInWindow = new Set(applied.filter((x) => entriesById.has(x.id)).map((x) => x.id));
+  let entries = s.entries;
+  let changed = false;
+  if (appliedInWindow.size > 0) {
+    entries = entries.map((e) => {
+      if (!appliedInWindow.has(e.id) || e.isRead) return e;
+      changed = true;
+      bumpEntryVersion(e.id, 'isRead'); // 已确认翻转：使更早的失败回滚声明失效
+      return { ...e, isRead: true };
+    });
+  }
+  for (const { id } of applied) recordEntryFieldWrite(id, 'isRead'); // R3：逐行写序号（后续回执/快照保留判据）
+  appStore().setState({ entries, feedCounts });
+  if (changed) syncCurrentViewCache(entries);
+}
+
 /** 乐观更新某篇条目的 isRead/isStarred，并同步 feedCounts 的未读/收藏计数。
     侧边栏数字基于 feedCounts（后端精确计数），若不联动，标读/收藏后角标
     不立即变化（与乐观更新的列表脱节）。total/today 不受影响。
@@ -510,6 +863,7 @@ export function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
   const entries = s.entries.map((e) => (e.id === id ? { ...e, [field]: nextVal } : e));
   bumpEntryVersion(id, field); // TASK-118：按旗标类型 bump 对应字段版本
   bumpLocalFlagWrite(); // TASK-119：本地读/藏写入（计数对账过期判据，矩阵见上）
+  recordEntryFieldWrite(id, field); // R3：字段写序号（回执逐行凭据 / 快照保留判据）
   const c = s.feedCounts.get(entry.feedId);
   let feedCounts = s.feedCounts;
   if (c) {
@@ -517,6 +871,8 @@ export function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
     const delta = field === 'isRead' ? (nextVal ? -1 : 1) : (nextVal ? 1 : -1);
     feedCounts = new Map(s.feedCounts);
     feedCounts.set(entry.feedId, { ...c, [key]: Math.max(0, c[key] + delta) });
+    /* OPT-008B R1：聚合角标不再按条目 ±1 推算（折叠组非线性）——写请求落定后
+       由调用方 scheduleCountsReconcile() 以真实计数整体替换。 */
   }
   appStore().setState({ entries, feedCounts });
   /* 同步当前视图缓存：避免切走再切回时，缓存恢复旧状态（标读/收藏回退闪烁） */
@@ -538,11 +894,13 @@ export function markEntriesRead(ids: Set<string>) {
   const s = appStore().getState();
   let entries = s.entries;
   const unreadDeltas = new Map<string, number>();
+  const changedIds: string[] = [];
   let changed = false;
   // 一次遍历：标记 entries + 聚合每个 feed 的未读减少数
   entries = entries.map((e) => {
     if (ids.has(e.id) && !e.isRead) {
       changed = true;
+      changedIds.push(e.id);
       bumpEntryVersion(e.id, 'isRead'); // TASK-107 R1 + TASK-118：真实翻转必 bump isRead 字段版本（回滚归属判定）
       unreadDeltas.set(e.feedId, (unreadDeltas.get(e.feedId) ?? 0) + 1);
       return { ...e, isRead: true };
@@ -551,7 +909,8 @@ export function markEntriesRead(ids: Set<string>) {
   });
   if (!changed) return;
   bumpLocalFlagWrite(); // TASK-119：本地批量读态写入（markEntriesReadBulk / 全部已读乐观段共用此径）
-  // 一次更新 feedCounts
+  for (const id of changedIds) recordEntryFieldWrite(id, 'isRead'); // R3：字段写序号（逐行）
+  // 一次更新 feedCounts（按源 -1；聚合角标由写请求落定后的有序对账替换）
   let feedCounts = s.feedCounts;
   for (const [feedId, delta] of unreadDeltas) {
     const c = feedCounts.get(feedId);
@@ -580,8 +939,9 @@ export function markEntriesRead(ids: Set<string>) {
     计数回补：按行恢复方向逐 feed 聚合，与 flipEntryFlag 的乐观方向互逆
     （isRead 恢复未读 → unread +1、恢复已读 → unread -1；isStarred 对称），
     Math.max(0,) 钳制与 markCurrentViewAllRead 的回滚形态一致。
-    返回是否有行被恢复：无恢复不写 store、不刷视图缓存（与「回滚跳过 ≠ 吞错」
-    分离——失败提示始终由调用方给出）。 */
+    返回 [`RollbackOutcome`]：无恢复不写 store、不刷视图缓存（与「回滚跳过 ≠
+    吞错」分离——失败提示始终由调用方给出）；`takenOver` 时调用方应
+    `scheduleCountsReconcile({ force: true })` 修复计数（见该字段注释）。 */
 export interface EntryRollbackClaim {
   id: string;
   field: 'isRead' | 'isStarred';
@@ -591,11 +951,29 @@ export interface EntryRollbackClaim {
   version: number;
 }
 
-export function rollbackEntryClaims(claims: readonly EntryRollbackClaim[]): boolean {
-  if (claims.length === 0) return false;
+/** R2：回滚结果——`takenOver` 是失败路径的计数修复信号。版本前进说明该字段
+    被真实写入或后端快照接管：乐观段的 ±1 与接管段是否抵消在本地不可判定
+    （快照不按行 ±1，且其在途计数可能被本次未提交意图挡下），线性复原不再
+    可信——调用方据此 force 一次权威计数对账。 */
+export interface RollbackOutcome {
+  /** 是否有行被恢复（无恢复不写 store、不刷视图缓存）。 */
+  restored: boolean;
+  /** 是否有声明的字段版本已前进（被接管）。 */
+  takenOver: boolean;
+}
+
+export function rollbackEntryClaims(claims: readonly EntryRollbackClaim[]): RollbackOutcome {
+  if (claims.length === 0) return { restored: false, takenOver: false };
   const s = appStore().getState();
   const claimByKey = new Map(claims.map((c) => [entryVersionKey(c.id, c.field), c] as const));
+  /* 接管检测先行：覆盖已从 entries 移除的声明（快照替换/筛出），恢复循环漏掉
+     的形态同样计入。 */
+  let takenOver = false;
+  for (const c of claims) {
+    if (getEntryVersion(c.id, c.field) !== c.version) takenOver = true;
+  }
   let changed = false;
+  const restoredFields: Array<{ id: string; field: 'isRead' | 'isStarred' }> = [];
   const unreadRestore = new Map<string, number>();
   const starredRestore = new Map<string, number>();
   const entries = s.entries.map((a) => {
@@ -604,18 +982,21 @@ export function rollbackEntryClaims(claims: readonly EntryRollbackClaim[]): bool
     if (readClaim && a.isRead !== readClaim.prev && getEntryVersion(a.id, 'isRead') === readClaim.version) {
       changed = true;
       next = { ...next, isRead: readClaim.prev };
+      restoredFields.push({ id: a.id, field: 'isRead' });
       unreadRestore.set(a.feedId, (unreadRestore.get(a.feedId) ?? 0) + (readClaim.prev ? -1 : 1));
     }
     const starClaim = claimByKey.get(entryVersionKey(a.id, 'isStarred'));
     if (starClaim && a.isStarred !== starClaim.prev && getEntryVersion(a.id, 'isStarred') === starClaim.version) {
       changed = true;
       next = { ...next, isStarred: starClaim.prev };
+      restoredFields.push({ id: a.id, field: 'isStarred' });
       starredRestore.set(a.feedId, (starredRestore.get(a.feedId) ?? 0) + (starClaim.prev ? 1 : -1));
     }
     return next;
   });
-  if (!changed) return false;
+  if (!changed) return { restored: false, takenOver };
   bumpLocalFlagWrite(); // TASK-119：回滚恢复也是本地读/藏写入（失败回滚后使在途计数对账过期）
+  for (const { id, field } of restoredFields) recordEntryFieldWrite(id, field); // R3：恢复也是真实本地写入（后续回执/快照保留判据）
   let feedCounts = s.feedCounts;
   const applyDelta = (feedId: string, key: 'unread' | 'starred', delta: number) => {
     const c = feedCounts.get(feedId);
@@ -625,9 +1006,11 @@ export function rollbackEntryClaims(claims: readonly EntryRollbackClaim[]): bool
   };
   for (const [fid, delta] of unreadRestore) applyDelta(fid, 'unread', delta);
   for (const [fid, delta] of starredRestore) applyDelta(fid, 'starred', delta);
+  /* OPT-008B R1：聚合角标由回滚调用方的 scheduleCountsReconcile() 以真实计数
+     整体替换（折叠组非线性，不做逐条 ±1 推算）。 */
   appStore().setState({ entries, feedCounts });
   syncCurrentViewCache(entries);
-  return true;
+  return { restored: true, takenOver };
 }
 
 /** F2/F3（Batch 1/2 独立审查 P3）收口：乐观标志写的唯一实现——卡片
@@ -656,10 +1039,90 @@ export function optimisticEntryFlagToggle(
   /* TASK-118：乐观翻转（flipEntryFlag 已 bump 对应字段）后快照该字段版本，
      失败交给统一回滚助手——跨字段写入（如收藏）不再使本字段的回滚失效。 */
   const claim: EntryRollbackClaim = { id, field, prev, version: getEntryVersion(id, field) };
-  void request(optimistic).then(() => {
+  /* R2/N2：在途意图计数（起于乐观写入、止于请求落定）——期间任何计数快照都
+     不得落地覆盖这个未提交意图；结束点用 endLocalFlagWrite 精确配对。 */
+  beginLocalFlagWrite();
+  beginEntryFieldWrite(id, field); // R4：articles 快照的在途写保护（与 endLocalFlagWrite 成对）
+  const flagSerialAtRequest = currentLocalFlagWriteSerial();
+  void request(optimistic).then((receipt) => {
+    endLocalFlagWrite();
+    endEntryFieldWrite(id, field);
+    /* R2/N1：读闭包可能一并标读同 URL 未读副本——回执行让受影响条目/计数
+       本地收敛（本次被点行已乐观翻转，跳过其重复扣减）。 */
+    if (field === 'isRead' && optimistic) {
+      applyReadReceipt(asReadReceipts(receipt), new Set([id]), flagSerialAtRequest);
+    }
     onSuccess?.(optimistic);
+    scheduleCountsReconcile();
   }).catch((e: unknown) => {
-    rollbackEntryClaims([claim]);
+    endLocalFlagWrite();
+    endEntryFieldWrite(id, field);
+    const outcome = rollbackEntryClaims([claim]);
+    /* R2：回滚被接管跳过时计数不可线性复原——权威修复（快照在途计数可能被本次
+       未提交意图挡下，关闭 dedup 时此前无人收敛）。 */
+    scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
     appStore().getState().showToast(failureText(extractError(e)));
   });
+}
+
+/** 命令返回值 → 回执行（mock/旧后端返回 null/非数组 → 无回执）。切片层
+    （打开即标读/批量）用同一解析把回执喂给 applyReadReceipt。 */
+export function asReadReceipts(
+  value: unknown,
+): Array<{ id: number | string; feed_id: number | string }> | null {
+  if (!Array.isArray(value)) return null;
+  return value.filter(
+    (r): r is { id: number | string; feed_id: number | string } =>
+      !!r && typeof r === 'object' && 'id' in r && 'feed_id' in r,
+  );
+}
+
+/* ============================================================
+   OPT-011：AI 开关（源三态 / 分类布尔默认）的原子索引更新
+
+   缺陷背景（真实旧索引与「死分类」）：
+   - toggleFeedSummary / toggleFeedTranslate / toggleCatSummary / toggleCatTranslate
+     此前只 set({ categories })，不重建 feedIndex——selectFeedConfig（读 feedIndex）
+     的消费者当帧看到的还是旧 feed/cat 对象：源开关「看起来开了」却不生效；
+   - 分类 AI 布尔此前不参与任何有效值解析（源只读自己的 bool）——分类开关是
+     死的：打开分类后其下「继承」源并不跟随（F13 的根因）。
+
+   applyFeedAiModePatch / applyCategoryAiFlagPatch 经 reconcileCategories 在
+   **同一 setState** 里更新 categories 与 feedIndex——任何消费者当帧看到同一配置。
+   写入 × 快照对账协议（待写意图 / 确认态 / 读取凭据、同键串行与失败恢复）
+   收口在 store/aiConfigWrites.ts（OPT-011 R4，见《AI配置写入与快照对账》）。
+   ============================================================ */
+
+/** OPT-011：源三态字段的原子写入（categories + feedIndex 同一 setState）。
+    只改给出的字段；未涉及的字段与布局等保持原值。 */
+export function applyFeedAiModePatch(
+  feedId: string,
+  patch: { summaryMode?: FeedAiMode; translateMode?: FeedAiMode },
+): void {
+  const s = appStore().getState();
+  const nextCategories = s.categories.map((c) => {
+    const idx = c.feeds.findIndex((f) => f.id === feedId);
+    if (idx < 0) return c;
+    const feed = c.feeds[idx];
+    const next: FeedItem = {
+      ...feed,
+      ...(patch.summaryMode !== undefined ? { summaryMode: patch.summaryMode } : {}),
+      ...(patch.translateMode !== undefined ? { translateMode: patch.translateMode } : {}),
+    };
+    const feeds = [...c.feeds];
+    feeds[idx] = next;
+    return { ...c, feeds };
+  });
+  appStore().setState(reconcileCategories(s, nextCategories));
+}
+
+/** OPT-011：分类布尔 AI 默认的原子写入（categories + feedIndex 同一 setState）。 */
+export function applyCategoryAiFlagPatch(
+  catId: string,
+  field: 'autoSummary' | 'autoTranslate',
+  value: boolean,
+): void {
+  const s = appStore().getState();
+  const nextCategories = s.categories.map((c) => (c.id === catId ? { ...c, [field]: value } : c));
+  appStore().setState(reconcileCategories(s, nextCategories));
 }

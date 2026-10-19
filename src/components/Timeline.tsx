@@ -9,6 +9,7 @@ import {
   podcastClickAction,
   autoAiBlockOpen,
   entryNeedsHydration,
+  selectAiProductState,
   selectArticleBody,
   selectVisibleEntries,
   selectFeedConfig,
@@ -24,6 +25,7 @@ import { useEnteringClass } from './useEnteringClass';
 import { sentinelMode } from './timelineSentinel';
 import { refillDecision } from './timelineRefill';
 import { anchorRestoreIndex, clearTopAnchor, ANCHOR_RECORD_THROTTLE_MS, commitTopAnchor, peekReturnAnchor, peekTopAnchor, recordTopAnchor, readerFocusReturnIndex, rearmTopAnchor, stashTopAnchorForReturn } from './timelineAnchor';
+import { GALLERY_COLUMN_GAP, GALLERY_OVERSCAN, estimateGalleryCardHeight, galleryItemPlacement, galleryTabbableIndex, resolveGalleryLaneCount } from './GalleryLayout';
 
 /* ============================================================
    Timeline —— 顶栏（标题/筛选/排序/全部已读）+ 五布局渲染器
@@ -86,7 +88,10 @@ export function Timeline() {
   const focusCardAt = (index: number) => {
     setFocusIndex(index);
     suppressNextScrollEvents();
-    rowVirtualizer.scrollToIndex(index, { align: 'auto' });
+    /* 画廊走 lanes 虚拟化实例（与行虚拟化同容器同 align:auto 语义：原卡可见
+       不滚、不可见才 scrollToIndex 定位），其余布局走行虚拟化实例。 */
+    const focusVirtualizer = activeContentLayout === 'image' ? galleryVirtualizer : rowVirtualizer;
+    focusVirtualizer.scrollToIndex(index, { align: 'auto' });
     requestAnimationFrame(() => {
       const root = scrollRef.current;
       const el = root?.querySelector<HTMLElement>(`[data-card-index="${index}"]`);
@@ -119,6 +124,38 @@ export function Timeline() {
 
   /* ---------- 滚动出列表视口 → 标已读（markReadOnScrollOut） ---------- */
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  /* ---------- 画廊列模型参数（OPT-017C 有界渲染） ----------
+     列数：与旧 CSS 多列断点逐字一致（≤800 → 2，≤1200 → 3，否则 4；单点在
+     GalleryLayout.resolveGalleryLaneCount）。窗口跨断点时重建列模型
+     （lanes 变化 = 列归属与宽度整体重排，虚拟化内部按 lanes 变更清零重算）。 */
+  const [galleryLanes, setGalleryLanes] = useState(() => resolveGalleryLaneCount());
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const narrow = window.matchMedia('(max-width: 800px)');
+    const mid = window.matchMedia('(max-width: 1200px)');
+    const update = () => setGalleryLanes(resolveGalleryLaneCount());
+    narrow.addEventListener?.('change', update);
+    mid.addEventListener?.('change', update);
+    return () => {
+      narrow.removeEventListener?.('change', update);
+      mid.removeEventListener?.('change', update);
+    };
+  }, []);
+  /* 容器宽度 → 未挂载卡片的估算高度（只影响窗口定位与滚动总高；挂载后的真实
+     高度由 measureElement 修正）。ResizeObserver 观察滚动容器：首帧与宽度
+     变化时重估；无 RO（旧环境）时只取首帧宽度。 */
+  const [galleryWidth, setGalleryWidth] = useState(0);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const update = () => setGalleryWidth(el.offsetWidth);
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   /* 布局/视图/筛选/排序切换时列表淡入一次（REQ-005）。此前 .list-entering 在
      CSS 里声明了却从未被应用，是死代码。 */
   useEnteringClass(
@@ -128,15 +165,37 @@ export function Timeline() {
   );
 
   /* 虚拟滚动：只渲染视口 + overscan 缓冲内的条目（约 30 条），滚动时复用 DOM，
-     彻底消除「一次性渲染 500 张含正文卡片」的卡顿（成熟 RSS 客户端的共识做法）。 */
+     彻底消除「一次性渲染 500 张含正文卡片」的卡顿（成熟 RSS 客户端的共识做法）。
+     画廊（image）走第二个实例（lanes 列模型，见下）；两实例共用同一滚动容器，
+     同一时刻只有当前布局的那个处于 enabled。 */
   const rowVirtualizer = useVirtualizer({
     count: items.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 160,
     overscan: 8,
     getItemKey: (index) => items[index]?.id ?? index,
-    /* 画廊（瀑布流多列）不虚拟化；其余单列布局虚拟化。 */
     enabled: activeContentLayout !== 'image',
+  });
+  /* 画廊有界渲染：lanes 列模型 + 垂直虚拟化。可见范围 = 每列视口覆盖条数 +
+     两端 overscan，挂载数与条目总数无关（窗口上界推导、列宽公式与「为什么
+     不用 CSS 多列」见 GalleryLayout.ts 头注与 docs/performance.md 画廊节）。
+     gap=14 与旧 column-gap / 卡片 margin-bottom 同值：列宽与纵向间距观感不变。 */
+  const galleryVirtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => estimateGalleryCardHeight(galleryWidth, galleryLanes),
+    overscan: GALLERY_OVERSCAN,
+    gap: GALLERY_COLUMN_GAP,
+    lanes: galleryLanes,
+    getItemKey: (index) => items[index]?.id ?? index,
+    enabled: activeContentLayout === 'image',
+    /* 画廊卡片高度在挂载/图片解码后才被测量校正，测量回调持续触发；react-virtual
+       默认在这些回调里以 flushSync 强制同步提交——那是在提交阶段调用 flushSync
+       （dev 模式报「flushSync was called from inside a lifecycle method」），
+       且滚动中强制同步渲染正是 React 不建议的模式。改为普通调度（React 18+
+       在同一微任务内提交，滚动帧不受影响）；滚动锚定（测量后 scrollTop 补偿）
+       不受本开关影响，仍即时生效。 */
+    useFlushSync: false,
   });
 
   /* markReadOnScrollOut：滚动时，可视区起始 index 递增 → 之间的条目「滚出上方」，
@@ -184,7 +243,8 @@ export function Timeline() {
   };
   /* TASK-123①：顶条卡片内像素偏移的统一测量（scrollTop − 顶条卡片虚拟起点）。
      记录（recordTopAnchor）与尾沿补记（commitTopAnchor）共用同一口径，保证
-     锚载荷在两条写入路径下语义一致。画廊布局（虚拟化禁用）不调用。 */
+     锚载荷在两条写入路径下语义一致。按行虚拟化实例取值——画廊不参与顶条锚
+     （回落口径，见下方三处 image 提前回落），不调用本函数。 */
   const measureAnchorOffsetPx = (topIndex: number): number => {
     const el = scrollRef.current;
     const vi = rowVirtualizer.getVirtualItems().find((v) => v.index === topIndex);
@@ -211,7 +271,7 @@ export function Timeline() {
       const live = useAppStore.getState();
       const liveFilterKey = `${live.activeContentLayout}|${live.activeViewFilter}|${live.activeFeedFilter}|${live.timelineFilter}|${live.timelineSort}`;
       if (liveFilterKey !== scheduledFilterKey) return; // 上下文已切换：锚已存档/清空，尾沿不复活
-      if (live.activeContentLayout === 'image') return; // 画廊非虚拟化，与记录路径同口径回落
+      if (live.activeContentLayout === 'image') return; // 画廊不参与顶条锚（回落口径，与记录路径一致）
       const topIndex = rowVirtualizer.range?.startIndex ?? 0;
       const top = selectVisibleEntries(live)[topIndex];
       if (!top) return;
@@ -317,11 +377,13 @@ export function Timeline() {
        而整段标读）；align:'start'——锚即「可见首条」，对齐回视口顶 = 原位还原；
      - activeArticleId 的定位 effect 保持既有不变语义（选中文章仍由它负责），
        本 effect 只管滚动位置，两者互补不冲突；
-     - 画廊布局不虚拟化（scrollToIndex 无效），回位回落现状。 */
+     - 画廊不参与本机制（回落口径，本卡行为保持）：顶条锚的记账/消费两侧都
+       跳过 image 布局——列模型虚拟化不改变画廊的锚参与语义，留待后续任务
+       单独评估。 */
   const positionRestoreNonce = useAppStore((s) => s.positionRestoreNonce);
   useEffect(() => {
     if (positionRestoreNonce === 0) return; // 初值非信号
-    if (activeContentLayout === 'image') return; // 画廊非虚拟化，回位回落现状
+    if (activeContentLayout === 'image') return; // 画廊不参与顶条锚回位（回落口径）
     const idx = anchorRestoreIndex(peekTopAnchor(), filterKey, items);
     if (idx == null) return; // 无锚 / 上下文已切换 / 锚丢失 → 回落
     suppressNextScrollEvents();
@@ -349,7 +411,7 @@ export function Timeline() {
   const switchRestoreNonce = useAppStore((s) => s.switchRestoreNonce);
   useEffect(() => {
     if (switchRestoreNonce === 0) return; // 初值非信号
-    if (activeContentLayout === 'image') return; // 画廊非虚拟化，恢复回落现状
+    if (activeContentLayout === 'image') return; // 画廊不参与存档锚恢复（回落口径）
     const idx = anchorRestoreIndex(peekReturnAnchor(filterKey), filterKey, items);
     if (idx == null) return; // 无存档 / 锚丢失 → 归零回落（不猜）
     suppressNextScrollEvents();
@@ -370,12 +432,13 @@ export function Timeline() {
        关闭时刻持有阅读器正在显示的文章 id）；
      - 原卡不在当前 items（阅读器开着时列表已切换）→ 归零回落不聚焦——
        焦点归还无对象，绝不猜（readerFocusReturnIndex 返回 null）；
-     - 画廊布局（image）非虚拟化、无 roving 焦点基建 → 回落现状
-       （与 TASK-111 回位、切换返回恢复同一回落口径）。 */
+     - 画廊不归还（回落口径，本卡行为保持）：列模型虚拟化后就地即可实现，
+       但焦点归还语义扩展到画廊超出本卡边界，留待后续任务评估；
+       与 TASK-111 回位、切换返回恢复同一回落口径。 */
   const readerCloseNonce = useAppStore((s) => s.readerCloseNonce);
   useEffect(() => {
     if (readerCloseNonce === 0) return; // 初值非信号
-    if (activeContentLayout === 'image') return; // 画廊回落现状
+    if (activeContentLayout === 'image') return; // 画廊不参与焦点归还（回落口径）
     const idx = readerFocusReturnIndex(lastActiveArticleIdRef.current, items);
     if (idx == null) return; // 列表已切换 / 无档案 → 归零回落
     focusCardAt(idx);
@@ -395,8 +458,8 @@ export function Timeline() {
     });
     /* TASK-111②：顶条锚记录（节流收口在 timelineAnchor.recordTopAnchor）——
        以当前可见首条目 id + filterKey 记账，供后台刷新落地后回位。程序性滚动
-       （J/K / 回位）也照记：那是用户此刻的阅读位置。画廊布局不记录
-       （虚拟化禁用时 range 不代表真实视口，回位消费侧同样回落）。
+       （J/K / 回位）也照记：那是用户此刻的阅读位置。画廊不记录（列模型虚拟化
+       与顶条锚的语义扩展不在本卡范围；回位消费侧同样回落，两侧口径一致）。
        TASK-123①：锚载荷带卡片内像素偏移（measureAnchorOffsetPx 单点口径）；
        并调度尾沿补记（scheduleAnchorCommit——停滚定稿最终位置，抹平节流相位差）。 */
     if (activeContentLayout !== 'image') {
@@ -466,6 +529,15 @@ export function Timeline() {
   /* 哨兵形态：判定收口在 timelineSentinel.sentinelMode（纯函数，回归网直接断言） */
   const sentinel = sentinelMode(items.length, articlesExhausted, articlesLoading);
 
+  /* 画廊窗口（lanes 虚拟化实例的可见条目）与 roving tabindex 兜底：
+     挂载集 = 可见范围 + overscan；焦点卡在窗口内 → 原样保留，不在（用户用
+     鼠标滚到别处后按 Tab）→ 兜底窗口首卡，保证任何滚动位置下都恰有一张卡
+     可 Tab 进入列表（判定单点在 GalleryLayout.galleryTabbableIndex）。 */
+  const galleryVirtualItems = galleryVirtualizer.getVirtualItems();
+  const galleryTabbable = activeContentLayout === 'image'
+    ? galleryTabbableIndex(galleryVirtualItems.map((vi) => vi.index), tabbableIndex)
+    : tabbableIndex;
+
   /* 标题：布局名 [· 视图筛选] [(分类/源名称)] */
   let base = LAYOUT_NAMES[activeContentLayout] ?? '内容';
   if (activeViewFilter !== 'all') base += ` · ${VIEW_NAMES[activeViewFilter]}`;
@@ -515,14 +587,33 @@ export function Timeline() {
           </div>
         )}
 
-        {/* 画廊（瀑布流多列）：不虚拟化，保持全量渲染（图片数量通常较少） */}
+        {/* 画廊（瀑布流多列）：lanes 列模型 + 垂直虚拟化——只渲染窗口内卡片
+            （每列可见条数 × 列数 + overscan，上界与推导见 GalleryLayout.ts /
+            docs/performance.md 画廊节），滚动复用同一容器。列宽/列距/图片自然
+            比例与旧 CSS 多列一致；列分配由贪心最短列（lanes）决定。 */}
         {activeContentLayout === 'image' && (
-          <div className="gallery-masonry-grid">
-            {items.map((img, idx) => (
-              <div key={img.id} data-card-id={img.id}>
-                <GalleryCard item={img} cardIndex={idx} tabbable={idx === tabbableIndex} onMoveFocus={moveCardFocus} />
-              </div>
-            ))}
+          <div
+            className="gallery-masonry-grid"
+            style={{ height: galleryVirtualizer.getTotalSize(), position: 'relative', width: '100%' }}
+          >
+            {galleryVirtualItems.map((vi) => {
+              const img = items[vi.index];
+              if (!img) return null;
+              const placement = galleryItemPlacement(vi.lane, galleryLanes);
+              return (
+                <div
+                  key={vi.key}
+                  data-index={vi.index}
+                  data-card-id={img.id}
+                  data-gallery-lane={vi.lane}
+                  ref={galleryVirtualizer.measureElement}
+                  className="gallery-virtual-item"
+                  style={{ position: 'absolute', top: 0, left: placement.left, width: placement.width, transform: `translateY(${vi.start}px)` }}
+                >
+                  <GalleryCard item={img} cardIndex={vi.index} tabbable={vi.index === galleryTabbable} onMoveFocus={moveCardFocus} />
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -701,6 +792,10 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
   const translateError = useAppStore((s) => s.translateErrors[item.id] || '');
   /* TASK-065 N11：译文当前是否为未消毒流式产物（决定纯文本/HTML 渲染路径） */
   const rawTranslated = useAppStore((s) => s.rawTranslatedIds[item.id]);
+  /* OPT-013 B3：译文五态（生成中/部分完成/失败/完整/已过期——切片单点判定）。
+     partial 的分段进度同源取 aiStatusById（校验状态缓存）。 */
+  const translationState = useAppStore((s) => selectAiProductState(s, item.id, 'translation'));
+  const translationSegments = useAppStore((s) => s.aiStatusById[item.id]?.translationSegments ?? null);
   /* 社交卡片正文直接渲染 body.content（真值源 bodyById）：进入视口附近才懒加载
      水合（避免几百张卡片同时 getArticle 卡顿） */
   const hydrateRef = useLazyHydrate(item.id);
@@ -745,6 +840,13 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
     ro.observe(el);
     return () => ro.disconnect();
   }, [body.content]);
+
+  /* OPT-013 B3：译文块展示且带产物时惰性补齐校验状态——stale/partial 才能在卡片
+     上如实呈现（每会话每篇至多一次 IPC；生成/操作路径仍各自走权威校验）。 */
+  useEffect(() => {
+    if (!showTranslate || rawTranslated || !body.translatedContent) return;
+    useAppStore.getState().ensureAiStatus(item.id);
+  }, [showTranslate, rawTranslated, body.translatedContent, item.id]);
 
   return (
     /* TASK-100（UI P2-2 轻修）：社交/通知卡补 article 语义角色 + tabIndex，融入卡片级
@@ -846,6 +948,31 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
               <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重试</button>
             </div>
           ) : null}
+          {/* OPT-013 B3：五态入口——stale：「已过期」+ 重新生成；partial：
+              「部分完成（N/M 段）」+ 继续（复用已完成片段）+ 清除（删后端进度）。 */}
+          {translationState === 'stale' ? (
+            <div className="ai-state-row">
+              <span className="ai-unverified-tag" title="该译文与当前模型/提示词/正文不匹配（或没有缓存签名）——重新生成后更新为已验证版本">
+                已过期
+              </span>
+              <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重新生成</button>
+            </div>
+          ) : null}
+          {translationState === 'partial' && translationSegments ? (
+            <div className="ai-state-row">
+              <span className="ai-partial-hint">
+                部分完成（已完成 {translationSegments.completed}/{translationSegments.total} 段）
+              </span>
+              <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>继续</button>
+              <button
+                className="ai-retry-btn"
+                title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+                onClick={() => void useAppStore.getState().clearAiProduct(item.id, 'translation')}
+              >
+                清除
+              </button>
+            </div>
+          ) : null}
         </div>
         <div className="social-actions-bar">
           <button
@@ -873,11 +1000,15 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
               const next = !showTranslate;
               /* fix-5：失败态（translateErrors[id] 存在）时点「翻译」必须重走
                  translateEntry 重试——旧逻辑在有半截译文时会把它当缓存只切显示，
-                 重试按钮变成死路径（P2-3）。 */
+                 重试按钮变成死路径（P2-3）。
+                 OPT-013 B1：已有译文时也必须走 translateEntry 的命中判定（后端
+                 验签名）——未验证（无签名/已过期）会重新生成，旧产物保留显示；
+                 已验证则无操作（不重复计费）。卡片的显隐切换仍由本按钮负责。 */
               if (next && (translateError || !body.translatedContent)) {
                 /* 无译文或上次失败：实际触发生成/重试（P1-7 空壳修复 + fix-5） */
                 useAppStore.getState().translateEntry(item.id);
               } else if (body.translatedContent) {
+                if (next) useAppStore.getState().translateEntry(item.id);
                 showToast(next ? '已显示正文翻译' : '已隐藏正文翻译');
               }
               setTransOverride(next);
@@ -1103,6 +1234,10 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   const feedName = useAppStore((s) => s.feedIndex.get(item.feedId)?.feed.name ?? '');
   const summaryGenerating = useAppStore((s) => s.summarizingIds[item.id]);
   const summaryError = useAppStore((s) => s.summaryErrors[item.id] || '');
+  /* OPT-013 B3：摘要与译文五态（卡片入口与 Reader 同一单点判定）。 */
+  const summaryState = useAppStore((s) => selectAiProductState(s, item.id, 'summary'));
+  const translationState = useAppStore((s) => selectAiProductState(s, item.id, 'translation'));
+  const translationSegments = useAppStore((s) => s.aiStatusById[item.id]?.translationSegments ?? null);
   const [summaryOverride, setSummaryOverride] = useState<boolean | null>(null);
   const [transOverride, setTransOverride] = useState<boolean | null>(null);
   const translatingCard = useAppStore((s) => s.translatingIds[item.id]);
@@ -1148,6 +1283,14 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
   /* 自动收起：按展示源文本判定（全文可得时按全文长度，否则按 snippet），
      短内容直接全文展示、不渲染展开按钮 */
   const isLong = (fullText || item.snippet || '').length > 120;
+
+  /* OPT-013 B3：摘要框/译文块展示且带产物时惰性补齐校验状态（同 SocialCard）。 */
+  useEffect(() => {
+    const showSummaryWithProduct = summaryOpen && !!body.aiSummary;
+    const showTransWithProduct = transShow && !!body.translatedContent && !rawTranslated;
+    if (!showSummaryWithProduct && !showTransWithProduct) return;
+    useAppStore.getState().ensureAiStatus(item.id);
+  }, [summaryOpen, transShow, rawTranslated, body.aiSummary, body.translatedContent, item.id]);
 
   return (
     /* TASK-100（UI P2-2 轻修）：同 SocialCard——补 role/tabIndex 融入 roving 体系。
@@ -1219,6 +1362,15 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
         <div className="notif-ai-label">
           <Icons.spark />
           <span>摘要</span>
+          {/* OPT-013 B3：摘要 stale →「已过期」+ 重新生成入口（真实调用后端）。 */}
+          {summaryState === 'stale' ? (
+            <>
+              <span className="ai-unverified-tag" title="该摘要与当前模型/提示词/正文不匹配（或没有缓存签名）——重新生成后更新为已验证版本">
+                已过期
+              </span>
+              <button className="ai-retry-btn" onClick={() => summarizeEntry(item.id)}>重新生成</button>
+            </>
+          ) : null}
         </div>
         {summaryError ? (
           <div className="ai-error-row">
@@ -1283,6 +1435,30 @@ const NotifCard = memo(function NotifCard({ item, onSelect, cardIndex, tabbable,
           <div className="ai-error-row">
             <span className="ai-error-text" title={translateError}>翻译失败：{translateError}</span>
             <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重试</button>
+          </div>
+        ) : null}
+        {/* OPT-013 B3：译文五态入口（与 SocialCard 同形态——stale/partial）。 */}
+        {translationState === 'stale' ? (
+          <div className="ai-state-row">
+            <span className="ai-unverified-tag" title="该译文与当前模型/提示词/正文不匹配（或没有缓存签名）——重新生成后更新为已验证版本">
+              已过期
+            </span>
+            <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>重新生成</button>
+          </div>
+        ) : null}
+        {translationState === 'partial' && translationSegments ? (
+          <div className="ai-state-row">
+            <span className="ai-partial-hint">
+              部分完成（已完成 {translationSegments.completed}/{translationSegments.total} 段）
+            </span>
+            <button className="ai-retry-btn" onClick={() => useAppStore.getState().translateEntry(item.id)}>继续</button>
+            <button
+              className="ai-retry-btn"
+              title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+              onClick={() => void useAppStore.getState().clearAiProduct(item.id, 'translation')}
+            >
+              清除
+            </button>
           </div>
         ) : null}
       </div>

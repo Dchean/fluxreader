@@ -18,6 +18,8 @@
 | [performance.md](performance.md) | 大库性能基线与测量方法。判定线、受测条件下的实测数字、测量纪律与数据安全纪律 |
 | [release.md](release.md) | 发布流程、tag 附注结构、存量版本说明 |
 | [roadmap.md](roadmap.md) | 未做事项与已知限制 |
+| [audit-2026-10-08.md](audit-2026-10-08.md) | 用户要求保留的审计基线快照；不等于当前修复验收 |
+| [optimization/README.md](optimization/README.md) | 本轮优化路线、逐卡范围与验收证据 |
 
 ## `.agents/notes/` 怎么读
 

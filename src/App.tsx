@@ -6,6 +6,7 @@ import { Reader } from './components/Reader';
 import { PlayerBar } from './components/PlayerBar';
 import { SettingsModal } from './components/SettingsModal';
 import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal, CloseAskDialog } from './components/Overlays';
+import { ErrorCenterDialog } from './components/ErrorCenter';
 import { ContextMenuHost } from './components/ContextMenu';
 import { anyOverlayOpen, shouldYieldToOverlay } from './components/shortcutYield';
 import { jkLayoutAllowed, jkNextIndex } from './lib/jkNavigation';
@@ -84,13 +85,23 @@ export default function App() {
     void (async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<{ new_articles: number; failed_feeds: number }>(
+        unlisten = await listen<{
+          new_articles: number;
+          failed_feeds: number;
+          /* OPT-007（F11）：后台同步的数据变化事件按实际变更集驱动——纯读藏
+             对账（merged_states>0、无新文章）也会到达本监听器；两字段仅为
+             可诊断性随 payload 下发，落地动作与两条既有通道一致。 */
+          pulled_entries?: number;
+          merged_states?: number;
+        }>(
           'feeds-updated',
           (e) => {
             const { new_articles, failed_feeds } = e.payload;
             /* TASK-098（与 F5 同口径）：失败提示由 reloadFromBackend 的 toast 给出，这里吞掉 toast 后的重抛 */
             /* TASK-111②：后台刷新路径携带保位请求——落地时发出保位信号，
-               Timeline 消费顶条锚回位（审计「后台刷新保留当前阅读位置」）。 */
+               Timeline 消费顶条锚回位（审计「后台刷新保留当前阅读位置」）。
+               OPT-007：纯对账变化（new_articles=0）同样走这条保位 reload——
+               列表/计数/Reader 跟随更新，锚点保留；空变化不在 Rust 侧发事件。 */
             void useAppStore.getState().reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
             if (new_articles > 0) {
               useAppStore.getState().showToast(`后台刷新：新文章 ${new_articles} 篇`);
@@ -156,6 +167,32 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
+  /* ---------- OPT-009 B3：订阅 outbox 状态变化事件——持久回执接入真实链路 ----------
+     Rust 在订阅写回入队（新增/编辑/删除/分类操作/OPML/首连推送，事务提交后）
+     与执行器确认出队/失败累计/local_only 标记后发 `subscription-outbox-changed`
+     （payload = 当前账号 `{pending, failed, local_only, last_error}`，账号限定）。
+     设置页同步摘要卡与能力卡经 store 字段即时跟随，不依赖用户手动刷新。
+     未配置同步时 Rust 不发事件（不制造噪音）；监听器只写回执字段，
+     不触碰队列统计与连接态。 */
+  useEffect(() => {
+    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<{ pending: number; failed: number; local_only: number; last_error: string | null }>(
+          'subscription-outbox-changed',
+          (e) => {
+            useAppStore.getState().applySubscriptionOutboxChanged(e.payload);
+          },
+        );
+      } catch {
+        /* 事件监听失败不影响主流程 */
+      }
+    })();
+    return () => unlisten?.();
+  }, []);
+
   /* ---------- SMTC 系统媒体键回调：媒体键/音量浮层控制播放 ---------- */
   useEffect(() => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
@@ -164,12 +201,14 @@ export default function App() {
       try {
         const { listen } = await import('@tauri-apps/api/event');
         unlisten = await listen<string>('player-media', (e) => {
+          /* OPT-015：媒体键语义（play/pause 目标态幂等、toggle 才切换、未激活
+             不启动、stop 关闭）单点在 store.applyMediaAction；这里只收窄
+             payload，不再内联播放判定——此前 play/pause/toggle 全部
+             togglePlayerPlay，播放中按「播放」会反被暂停。 */
           const st = useAppStore.getState();
-          if (!st.player.isActive) return;
-          if (e.payload === 'toggle' || e.payload === 'play' || e.payload === 'pause') {
-            st.togglePlayerPlay();
-          } else if (e.payload === 'stop') {
-            st.closePodcastBar();
+          const action = e.payload;
+          if (action === 'play' || action === 'pause' || action === 'toggle' || action === 'stop') {
+            st.applyMediaAction(action);
           }
         });
       } catch {
@@ -243,6 +282,7 @@ export default function App() {
         else if (s.addFeedModalOpen) s.closeMiniModal('addFeed');
         else if (s.editFeedModalOpen) s.closeMiniModal('editFeed');
         else if (s.renameCatModalOpen) s.closeMiniModal('renameCat');
+        else if (s.errorCenterOpen) s.closeErrorCenter(); // OPT-017E：错误中心面板
         else if (s.settingsOpen) s.closeSettings();
         else if (s.lightboxUrl) s.closeLightbox();
         else if (s.playerExpanded && s.player.isActive) s.togglePlayerExpanded(); // Full Player 大浮层
@@ -255,6 +295,8 @@ export default function App() {
          此前只有 Space 判断了 defaultPrevented，S/M/J/K 不看浮层状态——设置页、
          搜索框、各类弹窗打开时，焦点若不在输入框上，按 S/M 会作用到**浮层背后的
          当前文章**（改了它的收藏/已读却看不见），J/K 还会在背后切换文章。
+         OPT-012：补上「关闭确认框」（closeAskVisible）——它此前漏出浮层清单，
+         确认框打开时单键同样会作用到背后文章；Esc 仍走上方专门分支（不改语义）。
          Ctrl+K / Ctrl+, / Escape 属浮层自身操作，在此判断之前已处理，不受影响。
          判据已抽成纯函数 shouldYieldToOverlay（src/components/shortcutYield.ts），
          浮层集合由同模块的 anyOverlayOpen 按 OVERLAY_SOURCES 清单求值，
@@ -270,6 +312,8 @@ export default function App() {
         lightboxUrl: s.lightboxUrl,
         playerExpanded: s.playerExpanded,
         playerActive: s.player.isActive,
+        closeAskVisible: s.closeAskVisible,
+        errorCenterOpen: s.errorCenterOpen, // OPT-017E：错误中心面板
       });
       if (shouldYieldToOverlay(overlayOpen, e.key, e.ctrlKey || e.metaKey || e.altKey) === 'yield') {
         return;
@@ -299,7 +343,8 @@ export default function App() {
          TASK-114 X3：布局门控从「仅 article」扩展为「image 之外全部放行」——
          全部虚拟化布局复用 Timeline 的 moveCardFocus/focusIndex 基建（选中切换
          后 focusIndex 经既有 effect 跟随，卡片 roving tabindex 同步）；画廊
-         （image）非虚拟化、无该基建，不支持 J/K。门控与推进判定收口在纯函数
+         （image）：不支持 J/K——产品判断（OPT-017C 起画廊为列模型虚拟化，
+         门控维持排除 image 不变）。门控与推进判定收口在纯函数
          jkLayoutAllowed/jkNextIndex（src/lib/jkNavigation.ts，与 Timeline
          虚拟化开关同一口径），回归网直接断言真值表与 store 层五布局模拟。 */
       if (e.key === 'j' || e.key === 'k') {
@@ -390,16 +435,19 @@ export default function App() {
       <AddFeedModal />
       <EditFeedModal />
       <RenameCategoryModal />
+      {/* OPT-017E：错误中心面板（侧栏入口打开；Esc/✕/遮罩可关） */}
+      <ErrorCenterDialog />
       <CloseAskDialog />
       {/* 全局右键菜单（替换 WebView2 默认菜单） */}
       <ContextMenuHost />
 
       {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
           退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。
-          带操作按钮（action）的失败 toast 可一键重试。 */}
+          带操作按钮（action）的失败 toast 可一键重试——经 store.retryError 派发，
+          与错误中心面板同一语义（重试即消费对应条目，失败路径重报写回）。 */}
       <div className="toast-layer" aria-live="polite">
         {toasts.map((t) => (
-          <ToastPill key={t.id} text={t.text} leaving={!!t.leaving} action={t.action} />
+          <ToastPill key={t.id} id={t.id} text={t.text} leaving={!!t.leaving} action={t.action} />
         ))}
       </div>
     </>
@@ -408,15 +456,18 @@ export default function App() {
 
 /** 单条 toast：挂载后 rAF 切 visible 让 CSS transition 接管进场 */
 function ToastPill({
+  id,
   text,
   leaving,
   action,
 }: {
+  id: number;
   text: string;
   leaving: boolean;
   action?: { label: string; run: () => void };
 }) {
   const [shown, setShown] = useState(false);
+  const retryError = useAppStore((s) => s.retryError);
   useEffect(() => {
     const raf = requestAnimationFrame(() => setShown(true));
     return () => cancelAnimationFrame(raf);
@@ -425,7 +476,7 @@ function ToastPill({
   return (
     <div className={`toast-pill ${shown && !leaving ? 'visible' : ''} ${action ? 'with-action' : ''}`}>
       <span className="toast-text">{text}</span>
-      {action && <button className="toast-action-btn" onClick={action.run}>{action.label}</button>}
+      {action && <button className="toast-action-btn" onClick={() => retryError(id)}>{action.label}</button>}
     </div>
   );
 }

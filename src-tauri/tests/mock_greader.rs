@@ -68,6 +68,40 @@ pub struct MockSubscription {
     pub categories: Vec<(String, String)>, // (label, type="folder")
 }
 
+/// OPT-007 屏障槽位类型（单独命名满足 clippy::type_complexity）：
+/// stream/items/ids 的（匹配子串 + 停靠信号 + 放行信号）。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，只被其中一个消费
+type StreamIdsBarrierSlot = Option<(
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+)>;
+/// OPT-007 屏障槽位类型：stream/items/contents 的（第 N 次 + 停靠信号 + 放行信号）。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，只被其中一个消费
+type ContentsBarrierSlot = Option<(
+    usize,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+)>;
+/// OPT-009 阶段 B 屏障槽位类型：subscription/edit 的（s= 匹配子串 + 停靠信号 + 放行信号）。
+/// 服务端状态在路由内已经变更、HTTP 响应体已算定，但写回被挂起——用于复现
+/// 「旧请求响应在途期间本地产生新意图」的可控时序。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，只被其中一个消费
+type SubscriptionEditBarrierSlot = Option<(
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+)>;
+/// OPT-009 阶段 B1-R2 屏障槽位类型：subscription/quickadd 的（quickadd URL 匹配
+/// 子串 + 停靠信号 + 放行信号）。服务端已创建订阅、响应体已算定但未写回——
+/// 用于复现「quick_add 返回在途期间 record_feed_edit 原地更新 desired 目标」。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，只被其中一个消费
+type QuickaddBarrierSlot = Option<(
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+)>;
+
 pub struct MockGReader {
     pub port: u16,
     pub entries: Mutex<Vec<MockEntry>>,
@@ -106,8 +140,34 @@ pub struct MockGReader {
     /// 故障注入（TASK-055）：置位后退订仍返回 200，但**服务端保留该订阅**——
     /// 模拟真实 GReader 后端在 token 失效/权限不足/目标不存在时「2xx + 未生效」的响应。
     pub unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool,
+    /// 故障注入（OPT-009 阶段 B）：置位后 subscription/edit 一律返回 500——
+    /// 用于构造「远端已建、本地绑定已完成、分类挂载失败」的重试场景。
+    pub fail_subscription_edit: std::sync::atomic::AtomicBool,
+    /// 故障注入（OPT-009 阶段 B2）：只对 `s=` 含该子串的 subscription/edit 返回
+    /// 500——用于构造**同批请求部分失败**（分类改名的逐源移动里一个失败一个成功），
+    /// 验证失败项保留队项、成功项精确出队、重试后整体收敛。
+    pub fail_subscription_edit_for: Mutex<Option<String>>,
+    /// 故障注入（OPT-009 B2-R2）：置位后 GET subscription/list 返回 500——
+    /// 用于验证「未知远端目标的退订」在**重复目标发现（列表）失败**时保留可恢复
+    /// 意图：不发送半套退订、不确认出队；恢复 list 后重试才收敛清除所有同 URL 项。
+    pub fail_subscription_list: std::sync::atomic::AtomicBool,
+    /// 故障注入（OPT-009 B2-R2 复审 P2-C）：置位后 `ac=unsubscribe` 对**不在
+    /// `subscriptions` 列表里的 id** 返回 HTTP 400 —— 复刻 pinned FreshRSS 的
+    /// `subscriptionEdit`：`!($feedId > 0 && deleteFeed($feedId))` → `badRequest()`
+    /// → `400 Bad Request`（`freshrss-greader.php:122-128/468-471`）。
+    /// 默认关闭：既有用例继续按「无条件 200」的宽松模型运行。
+    pub unsubscribe_unknown_id_returns_400: std::sync::atomic::AtomicBool,
+    /// 故障注入（OPT-009 B2-R2）：置位后 quickadd 对同 URL **非幂等**——跳过
+    /// `existing_feed_urls` 查找，每次调用都新建一个远端订阅（新的数字 id）。
+    /// 用于验证恢复路径对解析结果**只做一次 quick_add**（不持久化就会在列表
+    /// 长期失败/重试时无界造重复项），并靠列表正面证据清除所有同 URL 订阅。
+    pub quickadd_non_idempotent: std::sync::atomic::AtomicBool,
     /// 最近一次 subscription/edit 请求的表单键值（A-2 断言 t=/a= 参数）
     pub last_subscription_edit_form: Mutex<Vec<(String, String)>>,
+    /// OPT-009 阶段 B：subscription/edit 响应屏障（见槽位类型说明）。
+    pub subscription_edit_barrier: Mutex<SubscriptionEditBarrierSlot>,
+    /// OPT-009 阶段 B1-R2：subscription/quickadd 响应屏障（见槽位类型说明）。
+    pub quickadd_barrier: Mutex<QuickaddBarrierSlot>,
     /// 远端分类（GET tag/list 返回的 folder）
     pub folders: Mutex<Vec<String>>,
     pub next_feed_id: Mutex<i64>,
@@ -135,6 +195,14 @@ pub struct MockGReader {
     /// TASK-101：收到的 Fever 请求原始 query（'?' 后的部分；无 query 为空串）。
     /// 用于断言「请求 query 中不含 api_key」（防回退，兼消除其进访问日志的泄露面）。
     pub fever_query_strings: Mutex<Vec<String>>,
+    /// OPT-017D：Fever 信封是否真正服务 `entries`（默认 **false** = 保持旧行为：
+    /// unread/saved/items 一律空集）。置位后按 Fever 协议形状返回 `srv.entries`：
+    /// `unread_item_ids`/`saved_item_ids` 为 CSV 权威集合、`items` 支持
+    /// `since_id`（id >）、`max_id`（id <，最近 50 条）、`with_ids` 精确过滤；
+    /// feed_id 按下标映射为 Fever 数字 id（与 envelope 里 feeds 列表同规则）。
+    /// 默认关是为了对既有套件零影响——只有显式置位的测试（封面补全覆盖面夹具）
+    /// 才消费该数据。
+    pub fever_serve_entries: std::sync::atomic::AtomicBool,
     /// TASK-059：收到的全部请求（`"{METHOD} {path}"`，含被前缀规则拒绝的）。
     /// 用于证明「探测有界」与「解析结果已缓存、后续同步不再探测」——
     /// 只看状态码无法区分「试了 1 次」与「试了 2 次」。
@@ -144,6 +212,24 @@ pub struct MockGReader {
     /// entries——模拟「拉取进行中（id 列举之后、游标推进之前）服务端出现的变更」，
     /// 该条目因此不在本轮结果里，用于锁定「下一轮增量必须拉回它」。
     pub pending_injection: Mutex<Option<MockEntry>>,
+    /// OPT-007 屏障（响应在途时序）：匹配的 `stream/items/ids` 请求在响应体
+    /// **算定之后、写回之前**挂起，直到测试显式放行。测试可在此期间对本地库
+    /// 执行真实操作（本地状态写入 / 模拟推送确认清队）——复现「请求已发出 →
+    /// 本地变更 → 旧快照返回」的可控时序（不靠 sleep 碰运气）。
+    pub stream_ids_barrier: Mutex<StreamIdsBarrierSlot>,
+    /// OPT-007 屏障：第 N 次（1 基计数）`stream/items/contents` 请求在响应体
+    /// 算定后挂起——驱动「新条目入库后、同批下一页在途时本地变更」的场景。
+    pub contents_barrier: Mutex<ContentsBarrierSlot>,
+    /// contents 请求计数（contents_barrier 的匹配依据）。
+    pub contents_calls: std::sync::atomic::AtomicUsize,
+}
+
+/// OPT-007 网络屏障的测试端句柄：`arrived` 在响应即将写回前收到信号，
+/// `release` 放行响应。测试顺序：等 arrived → 执行本地真实操作 → release。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，只被其中一个消费
+pub struct MockBarrier {
+    pub arrived: tokio::sync::oneshot::Receiver<()>,
+    pub release: tokio::sync::oneshot::Sender<()>,
 }
 
 impl MockGReader {
@@ -161,7 +247,14 @@ impl MockGReader {
             corrupt_starred_continuation: std::sync::atomic::AtomicBool::new(false),
             fail_quick_add: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
+            fail_subscription_edit: std::sync::atomic::AtomicBool::new(false),
+            fail_subscription_edit_for: Mutex::new(None),
+            fail_subscription_list: std::sync::atomic::AtomicBool::new(false),
+            unsubscribe_unknown_id_returns_400: std::sync::atomic::AtomicBool::new(false),
+            quickadd_non_idempotent: std::sync::atomic::AtomicBool::new(false),
             last_subscription_edit_form: Mutex::new(Vec::new()),
+            subscription_edit_barrier: Mutex::new(None),
+            quickadd_barrier: Mutex::new(None),
             status_updates: Mutex::new(Vec::new()),
             subscribed_urls: Mutex::new(Vec::new()),
             created_feeds: Mutex::new(Vec::new()),
@@ -196,8 +289,12 @@ impl MockGReader {
             fever_reject_auth: std::sync::atomic::AtomicBool::new(false),
             fever_expected_api_key: Mutex::new(String::new()),
             fever_query_strings: Mutex::new(Vec::new()),
+            fever_serve_entries: std::sync::atomic::AtomicBool::new(false),
             requests: Mutex::new(Vec::new()),
             pending_injection: Mutex::new(None),
+            stream_ids_barrier: Mutex::new(None),
+            contents_barrier: Mutex::new(None),
+            contents_calls: std::sync::atomic::AtomicUsize::new(0),
         });
 
         let srv = server.clone();
@@ -268,6 +365,74 @@ impl MockGReader {
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// 置位后 subscription/edit（含 edit/unsubscribe）返回 500（OPT-009 阶段 B：
+    /// 验证「远端已建、绑定完成、分类挂载失败」保留队项且不重复 quick_add）。
+    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_fail_subscription_edit(&self, fail: bool) {
+        self.fail_subscription_edit
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// OPT-009 阶段 B2：只对 `s=` 含该子串的 subscription/edit 返回 500
+    /// （None = 清除注入）。用于「同批逐源请求部分失败」的传播验证。
+    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_fail_subscription_edit_for(&self, s_contains: Option<&str>) {
+        *self.fail_subscription_edit_for.lock().unwrap() = s_contains.map(str::to_string);
+    }
+
+    /// OPT-009 B2-R2：置位后 subscription/list 返回 500（重复目标发现失败）。
+    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_fail_subscription_list(&self, fail: bool) {
+        self.fail_subscription_list
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// OPT-009 B2-R2：置位后 quickadd 对同 URL 非幂等（每次调用新建订阅）。
+    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_quickadd_non_idempotent(&self, on: bool) {
+        self.quickadd_non_idempotent
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// OPT-009 B2-R2 复审 P2-C：置位后 unsubscribe 未知 id 返回 400（FreshRSS 形态）。
+    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_unsubscribe_unknown_id_returns_400(&self, on: bool) {
+        self.unsubscribe_unknown_id_returns_400
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// OPT-009 阶段 B：对 s= 参数包含 `s_contains` 的 subscription/edit 请求，
+    /// 在路由状态变更**之后**、HTTP 响应写回**之前**挂起，返回测试端句柄。
+    /// 用于复现「旧 HTTP 响应在途 → 本地新意图入队 → 旧响应返回」的时序：
+    /// 旧响应成功也不得确认（prune）新的意图。
+    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn arm_subscription_edit_barrier(&self, s_contains: &str) -> MockBarrier {
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.subscription_edit_barrier.lock().unwrap() =
+            Some((s_contains.to_string(), arrived_tx, release_rx));
+        MockBarrier {
+            arrived: arrived_rx,
+            release: release_tx,
+        }
+    }
+
+    /// OPT-009 阶段 B1-R2：对 quickadd= 参数包含 `url_contains` 的订阅请求，
+    /// 在服务端创建订阅（或命中既有）**之后**、HTTP 响应写回**之前**挂起。
+    /// 用于复现「quick_add 响应在途期间 record_feed_edit 原地更新同一订阅行的
+    /// desired 目标（A→B）」——执行器必须发送重读后的最新目标，不得用旧快照。
+    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn arm_quickadd_barrier(&self, url_contains: &str) -> MockBarrier {
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.quickadd_barrier.lock().unwrap() =
+            Some((url_contains.to_string(), arrived_tx, release_rx));
+        MockBarrier {
+            arrived: arrived_rx,
+            release: release_tx,
+        }
+    }
+
     /// 置位后 ClientLogin 一律 401（模拟凭据被拒）。
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_reject_login(&self, reject: bool) {
@@ -328,6 +493,14 @@ impl MockGReader {
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn fever_query_log(&self) -> Vec<String> {
         self.fever_query_strings.lock().unwrap().clone()
+    }
+
+    /// OPT-017D：是否按 Fever 协议形状真正服务 `srv.entries`（见字段说明）。
+    /// 默认 false = 旧行为（空集合）；只有显式置位的测试才消费条目数据。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_fever_serve_entries(&self, on: bool) {
+        self.fever_serve_entries
+            .store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 收到的请求记录（`"{METHOD} {path}"`）。
@@ -474,6 +647,33 @@ impl MockGReader {
         });
     }
 
+    /// OPT-007：在第 N 次（1 基）`stream/items/contents` 响应「算定后、写回前」
+    /// 挂起，返回测试端句柄（见 [`MockBarrier`]）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn arm_contents_barrier(&self, call_index: usize) -> MockBarrier {
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.contents_barrier.lock().unwrap() = Some((call_index, arrived_tx, release_rx));
+        MockBarrier {
+            arrived: arrived_rx,
+            release: release_tx,
+        }
+    }
+
+    /// OPT-007：对 s= 参数包含 `stream_contains` 的 `stream/items/ids` 请求
+    /// （响应算定后、写回前）挂起，返回测试端句柄（见 [`MockBarrier`]）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn arm_stream_ids_barrier(&self, stream_contains: &str) -> MockBarrier {
+        let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.stream_ids_barrier.lock().unwrap() =
+            Some((stream_contains.to_string(), arrived_tx, release_rx));
+        MockBarrier {
+            arrived: arrived_rx,
+            release: release_tx,
+        }
+    }
+
     /// 同 add_entry_ret，但可指定正文 HTML 与 enclosures（播客/封面回归用）。
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
@@ -571,6 +771,105 @@ async fn handle_conn(
     }
 
     let (status, json) = route(&srv, method, path, path_query, &body, &head);
+
+    // OPT-007 网络屏障：命中的请求在响应体**算定之后、写回之前**挂起——
+    // 测试可在此期间对本地库执行真实操作（本地写入 / 模拟推送确认清队），
+    // 复现「请求已发出 → 本地变更 → 旧快照返回」的可控时序（不靠 sleep）。
+    if path.ends_with("/reader/api/0/stream/items/ids") {
+        let barrier = {
+            let mut slot = srv.stream_ids_barrier.lock().unwrap();
+            let matched = slot
+                .as_ref()
+                .map(|(stream, _, _)| {
+                    let q = parse_query(path_query);
+                    let s = q.get("s").cloned().unwrap_or_default();
+                    s.contains(stream.as_str())
+                })
+                .unwrap_or(false);
+            if matched {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, arrived, release)) = barrier {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
+    if path.ends_with("/reader/api/0/stream/items/contents") {
+        let n = srv
+            .contents_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let barrier = {
+            let mut slot = srv.contents_barrier.lock().unwrap();
+            let matched = slot.as_ref().map(|(idx, _, _)| *idx == n).unwrap_or(false);
+            if matched {
+                slot.take().map(|(_, arrived, release)| (arrived, release))
+            } else {
+                None
+            }
+        };
+        if let Some((arrived, release)) = barrier {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
+    // OPT-009 阶段 B：subscription/edit 响应屏障（状态已变更、响应未写回）。
+    if path.ends_with("/reader/api/0/subscription/edit") {
+        let barrier = {
+            let mut slot = srv.subscription_edit_barrier.lock().unwrap();
+            let matched = slot
+                .as_ref()
+                .map(|(s_contains, _, _)| {
+                    let form = parse_form(&body);
+                    let s = form
+                        .get("s")
+                        .and_then(|v| v.first().cloned())
+                        .unwrap_or_default();
+                    s.contains(s_contains.as_str())
+                })
+                .unwrap_or(false);
+            if matched {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, arrived, release)) = barrier {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
+
+    // OPT-009 阶段 B1-R2：subscription/quickadd 响应屏障（创建已发生、响应未写回）。
+    if path.ends_with("/reader/api/0/subscription/quickadd") {
+        let barrier = {
+            let mut slot = srv.quickadd_barrier.lock().unwrap();
+            let matched = slot
+                .as_ref()
+                .map(|(url_contains, _, _)| {
+                    let form = parse_form(&body);
+                    let url = form
+                        .get("quickadd")
+                        .and_then(|v| v.first().cloned())
+                        .unwrap_or_default();
+                    url.contains(url_contains.as_str())
+                })
+                .unwrap_or(false);
+            if matched {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, arrived, release)) = barrier {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
+
     write_json(&mut stream, status, &json).await
 }
 
@@ -579,8 +878,9 @@ async fn handle_conn(
 /// 只拦截「受布局影响」的端点（ClientLogin / reader API / Fever），
 /// 避免影响 mock 自身的其它路由。
 fn path_outside_configured_prefix(srv: &MockGReader, path: &str) -> Option<String> {
-    const GREADER_SUFFIXES: [&str; 9] = [
+    const GREADER_SUFFIXES: [&str; 10] = [
         "/accounts/ClientLogin",
+        "/reader/api/0/token",
         "/reader/api/0/subscription/list",
         "/reader/api/0/tag/list",
         "/reader/api/0/stream/items/ids",
@@ -720,6 +1020,11 @@ fn route(
                 )
             }
         }
+        // OPT-004：action token（GET）。Miniflux 形态返回登录 auth 本身
+        // （mock 的固定 auth = "mock/abc"）；FreshRSS 返回另一字符串的严格形态
+        // 在 tests/greader_compat_e2e.rs 的独立夹具里验证。现有套件只依赖
+        // 「POST 的 T 从这里取」这一行为，不依赖具体值。
+        ("GET", p) if p.ends_with("/reader/api/0/token") => (200, "mock/abc".into()),
         // TASK-059：Fever 信封（Miniflux 的 /fever/?api 与 FreshRSS 的 /api/fever.php 共用）。
         // 带一份最小分组/订阅数据，使「解析出的端点能被真正使用」可验证——
         // 只回信封的话，客户端只能证明连接成功，证明不了后续调用打对了地址。
@@ -766,19 +1071,133 @@ fn route(
                     serde_json::json!({ "id": (i as i64) + 1, "title": s.title, "url": s.url })
                 })
                 .collect();
-            (
-                200,
-                serde_json::json!({
-                    "api_version": v,
-                    "auth": auth,
-                    "groups": groups,
-                    "feeds": feeds,
-                })
-                .to_string(),
-            )
+            // OPT-005：生产 FeverClient 对「数据方法响应缺对应字段」是协议错误
+            // （缺字段 ≠ 空集合）。本 mock 此前对所有 action 只回 groups/feeds，
+            // 现按请求里的 action 补上对应字段（内容保持宽松空集，现有断言不变）。
+            // 注：action 是无值参数（`?api&items`），故按原始 query 子串判定。
+            let mut envelope = serde_json::json!({
+                "api_version": v,
+                "auth": auth,
+                "groups": groups,
+                "feeds": feeds,
+            });
+            if let Some(obj) = envelope.as_object_mut() {
+                // OPT-017D：默认（未置位）保持旧行为——各数据方法一律回空集合。
+                // 置位后按 Fever 协议形状返回 `srv.entries`（字段见 mock 头注），
+                // feed_id 按下标映射为 Fever 数字 id（与上方 feeds 列表同规则，
+                // 否则 2 号订阅的条目会被挂到别的 feed 上）。
+                let serve_entries = srv
+                    .fever_serve_entries
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let snapshot: Vec<MockEntry> = if serve_entries {
+                    srv.entries.lock().unwrap().clone()
+                } else {
+                    Vec::new()
+                };
+                let sub_ids: Vec<String> = srv
+                    .subscriptions
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect();
+                let fever_feed_id = |greader_feed_id: i64| -> i64 {
+                    let want = format!("feed/{greader_feed_id}");
+                    sub_ids
+                        .iter()
+                        .position(|id| *id == want)
+                        .map(|i| i as i64 + 1)
+                        .unwrap_or(greader_feed_id)
+                };
+                if path_query.contains("unread_item_ids") {
+                    let ids: Vec<String> = snapshot
+                        .iter()
+                        .filter(|e| !e.read)
+                        .map(|e| e.id.to_string())
+                        .collect();
+                    obj.insert(
+                        "unread_item_ids".into(),
+                        serde_json::Value::String(ids.join(",")),
+                    );
+                }
+                if path_query.contains("saved_item_ids") {
+                    let ids: Vec<String> = snapshot
+                        .iter()
+                        .filter(|e| e.starred)
+                        .map(|e| e.id.to_string())
+                        .collect();
+                    obj.insert(
+                        "saved_item_ids".into(),
+                        serde_json::Value::String(ids.join(",")),
+                    );
+                }
+                if path_query.contains("items") {
+                    let q = parse_query(path_query);
+                    let mut ordered: Vec<&MockEntry> = snapshot.iter().collect();
+                    ordered.sort_by_key(|e| e.id);
+                    let selected: Vec<&MockEntry> = if let Some(raw) = q.get("with_ids") {
+                        let want: Vec<i64> = raw
+                            .split(',')
+                            .filter_map(|s| s.trim().parse::<i64>().ok())
+                            .collect();
+                        ordered
+                            .into_iter()
+                            .filter(|e| want.contains(&e.id))
+                            .collect()
+                    } else if let Some(max) = q.get("max_id").and_then(|v| v.parse::<i64>().ok()) {
+                        // `id < max_id` 的最近一页（≤50 条，最近的在前）
+                        let mut older: Vec<&MockEntry> =
+                            ordered.into_iter().filter(|e| e.id < max).collect();
+                        older.reverse();
+                        older.truncate(50);
+                        older
+                    } else if let Some(since) = q
+                        .get("since_id")
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .filter(|v| *v > 0)
+                    {
+                        // `id > since_id` 的增量页（≤50 条，升序）
+                        ordered
+                            .into_iter()
+                            .filter(|e| e.id > since)
+                            .take(50)
+                            .collect()
+                    } else {
+                        // 最近 50 条（最近的在前）
+                        ordered.reverse();
+                        ordered.truncate(50);
+                        ordered
+                    };
+                    let items: Vec<serde_json::Value> = selected
+                        .iter()
+                        .map(|e| {
+                            serde_json::json!({
+                                "id": e.id,
+                                "feed_id": fever_feed_id(e.feed_id),
+                                "title": e.title,
+                                "html": e.content,
+                                "url": e.url,
+                                "is_read": i64::from(e.read),
+                                "is_saved": i64::from(e.starred),
+                                "created_on_time": e.published,
+                                "changed_on_time": e.changed_at,
+                            })
+                        })
+                        .collect();
+                    obj.insert("items".into(), serde_json::Value::Array(items));
+                }
+            }
+            (200, envelope.to_string())
         }
         // 订阅列表
         ("GET", p) if p.ends_with("/reader/api/0/subscription/list") => {
+            // OPT-009 B2-R2 故障注入：列表暂时不可用（未知 id 退订的重复目标发现失败）
+            if srv
+                .fail_subscription_list
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return (500, r#"{"error_message":"injected list failure"}"#.into());
+            }
             let subs = srv.subscriptions.lock().unwrap();
             let arr: Vec<serde_json::Value> = subs
                 .iter()
@@ -828,10 +1247,17 @@ fn route(
             }
             let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
-            // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）
+            // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）。
+            // R3 夹具修正（协议依据）：Google Reader 的 `user/-/state/com.google/read`
+            // 与 `.../starred` 是**正交的 tag 流**——成员资格 = 条目携带该 tag，
+            // 与另一状态无关（真实 Miniflux GReader shim / FreshRSS 同样只按对应
+            // 状态过滤）。旧实现用 (read,starred) 双约束 (true,false)/(false,true)，
+            // 顺带要求了「未收藏才算已读 / 已读不算收藏」——非协议规则，会让
+            // read+starred 条目从两个流里同时消失，reconcile 误判「远端取消了收藏」。
+            // 故每流只约束自己的布尔位（None = 不约束另一位）。
             let state_filter = match stream.as_str() {
-                "user/-/state/com.google/read" => Some((true, false)), // 只看已读
-                "user/-/state/com.google/starred" => Some((false, true)), // 只看收藏
+                "user/-/state/com.google/read" => Some((Some(true), None)), // 只看已读
+                "user/-/state/com.google/starred" => Some((None, Some(true))), // 只看收藏
                 _ => None,
             };
             let feed_filter: Option<i64> =
@@ -843,7 +1269,10 @@ fn route(
                 .iter()
                 .filter(|e| feed_filter.map_or(true, |f| e.feed_id == f))
                 .filter(|e| match state_filter {
-                    Some((is_read, is_starred)) => (e.read == is_read) && (e.starred == is_starred),
+                    Some((want_read, want_starred)) => {
+                        want_read.map_or(true, |v| e.read == v)
+                            && want_starred.map_or(true, |v| e.starred == v)
+                    }
                     None => true,
                 })
                 .filter(|e| e.changed_at >= ot)
@@ -1009,13 +1438,21 @@ fn route(
                 .get("quickadd")
                 .and_then(|v| v.first().cloned())
                 .unwrap_or_default();
-            let existing = srv
-                .existing_feed_urls
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|(u, _)| *u == url)
-                .map(|(_, id)| *id);
+            // OPT-009 B2-R2：非幂等模型（每次调用新建）——恢复路径必须先持久化
+            // 解析结果，否则列表长期失败时每轮重试都会再造一个远端订阅。
+            let non_idempotent = srv
+                .quickadd_non_idempotent
+                .load(std::sync::atomic::Ordering::SeqCst);
+            let existing = if non_idempotent {
+                None
+            } else {
+                srv.existing_feed_urls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(u, _)| *u == url)
+                    .map(|(_, id)| *id)
+            };
             if let Some(id) = existing {
                 (
                     200,
@@ -1030,6 +1467,19 @@ fn route(
                     *n += 1;
                     *n
                 };
+                // 幂等登记（B2-R1）：真实服务端的 quick_add 对已订阅 URL 返回既有
+                // 订阅的 id（固定上游 quickadd → addFeed 返回 `feed/<id>`；本仓 B1
+                // 决策与既有用例也以「quick_add 幂等」为前提，见 adopt_remote_id_for_pending
+                // 注释与 subscribe_bind_failure_* 用例）。这里把新创建的订阅登记进
+                // `existing_feed_urls`，使**同 URL 的再次 quick_add 返回同一 id**——
+                // 退订意图的「未知 id 恢复」路径依赖这一契约（不得建模成每次新建）。
+                // 非幂等注入（B2-R2）下**不登记**：后续同 URL 调用继续新建。
+                if !non_idempotent {
+                    srv.existing_feed_urls
+                        .lock()
+                        .unwrap()
+                        .push((url.clone(), feed_id));
+                }
                 (
                     200,
                     serde_json::json!({"numResults": 1, "streamId": format!("feed/{feed_id}")})
@@ -1039,6 +1489,16 @@ fn route(
         }
         // subscription/edit：订阅/退订/编辑
         ("POST", p) if p.ends_with("/reader/api/0/subscription/edit") => {
+            // OPT-009 阶段 B 故障注入：分类挂载/编辑失败（队项保留、下轮重试）
+            if srv
+                .fail_subscription_edit
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return (
+                    500,
+                    r#"{"error_message":"injected subscription edit failure"}"#.into(),
+                );
+            }
             let form = parse_form(body);
             let ac = form
                 .get("ac")
@@ -1048,10 +1508,19 @@ fn route(
                 .get("s")
                 .and_then(|v| v.first().cloned())
                 .unwrap_or_default();
+            // OPT-009 阶段 B2：逐源失败注入（同批请求部分失败）
+            if let Some(only) = srv.fail_subscription_edit_for.lock().unwrap().clone() {
+                if s_val.contains(&only) {
+                    return (
+                        500,
+                        r#"{"error_message":"injected per-feed edit failure"}"#.into(),
+                    );
+                }
+            }
             srv.subscription_edits
                 .lock()
                 .unwrap()
-                .push((ac.clone(), s_val));
+                .push((ac.clone(), s_val.clone()));
             {
                 let mut form_out = srv.last_subscription_edit_form.lock().unwrap();
                 form_out.clear();
@@ -1065,6 +1534,20 @@ fn route(
                         .get("s")
                         .and_then(|v| v.first().cloned())
                         .unwrap_or_default();
+                    // OPT-009 B2-R2 复审 P2-C：复刻 FreshRSS 对不存在/删除失败 id 的
+                    // badRequest() → 400（注入开关，默认关闭保持既有宽松模型）。
+                    if srv
+                        .unsubscribe_unknown_id_returns_400
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        && !srv
+                            .subscriptions
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|sub| sub.id == s_val)
+                    {
+                        return (400, "Bad Request!".into());
+                    }
                     // 真实行为：退订后远端订阅列表不再包含该订阅。
                     // TASK-055 故障注入：置位时仍回 200 但保留订阅（「2xx 但未生效」）。
                     if !srv
@@ -1081,11 +1564,53 @@ fn route(
                 // TASK-070：原 `"subscribe" => …` 分支随 GReaderClient::subscribe 的
                 // 删除而不可达（生产侧只发 ac=unsubscribe / ac=edit，订阅走 quickadd），
                 // 故移除；订阅路径的记录由 quickadd 分支负责。
+                "edit" => {
+                    // OPT-004 R1（P2-2）：`a`/`r` 是完整 label stream id
+                    // （`user/-/label/<名>` / `user/<user>/label/<名>`），不是裸目录名。
+                    // OPT-009 阶段 B：严格按真实 wire 语义建模——`a` 追加目标 label、
+                    // `r` 移除旧 label、**其余 label 保留**（跨服务端「移动」= a+r，
+                    // 只发 a 是追加分类而不是移动）。裸名不是有效 stream id → 忽略。
+                    // B2：`t` 同样按真实行为写回标题（FreshRSS renameFeed / Miniflux
+                    // 更新订阅标题）——导入/命名的标题目标断言以远端存储为准。
+                    let mut subs = srv.subscriptions.lock().unwrap();
+                    if let Some(sub) = subs.iter_mut().find(|s| s.id == s_val) {
+                        if let Some(t) = form.get("t").and_then(|v| v.first().cloned()) {
+                            if !t.is_empty() {
+                                sub.title = t;
+                            }
+                        }
+                        if let Some(a) = form.get("a").and_then(|v| v.first().cloned()) {
+                            if let Some(label) = greader_wire_label(&a) {
+                                if !sub.categories.iter().any(|(l, _)| *l == label) {
+                                    sub.categories.push((label, "folder".into()));
+                                }
+                            }
+                        }
+                        for r in form.get("r").cloned().unwrap_or_default() {
+                            if let Some(label) = greader_wire_label(&r) {
+                                sub.categories.retain(|(l, _)| *l != label);
+                            }
+                        }
+                    }
+                    (200, "OK".into())
+                }
                 _ => (200, "OK".into()),
             }
         }
         _ => (404, r#"{"error_message":"not found"}"#.into()),
     }
+}
+
+/// 从完整 label stream id 解析裸目录名（`user/-/label/<名>` /
+/// `user/<user>/label/<名>` 前缀规则，与 greader::category_name 同构）。
+/// 裸名不是有效 stream id → None（真实服务端会把它落到默认分类）。
+#[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+fn greader_wire_label(stream_id: &str) -> Option<String> {
+    stream_id
+        .strip_prefix("user/")
+        .and_then(|rest| rest.split_once("/label/"))
+        .map(|(_, name)| name.to_string())
+        .filter(|name| !name.is_empty())
 }
 
 /// 最近一次 subscription/edit 请求的表单键值（A-2 断言 t=/a=）。

@@ -39,6 +39,131 @@ pub struct SyncReport {
     /// P3-11（TASK-074）：本轮因远端已退订而从本地删除的源数。
     pub removed_feeds: usize,
     pub errors: Vec<String>,
+    /// R3（F11）：本轮是否产生**实际条目数据变化**——新插入、既有行可见字段
+    /// （正文/元数据/封面/附件）真实改变、远端绑定真实变化、读藏值实际改变、
+    /// 对账值条件写命中。只信「前后数据比对 / 值条件写命中行数 / 真实绑定变化」，
+    /// 绝不拿处理次数、守卫通过、同值 UPDATE 的 changes() 冒充变化。
+    /// `pulled_entries` 是旧口径「处理过/已接受」计数（含守卫通过但值未变的
+    /// 条目），不参与事件判定；`merged_states` 在判定中兼容保留（states 阶段
+    /// 来源是对账值条件写命中行数=真实变化；订阅阶段该计数的性质与可达性见
+    /// `has_data_change` 注释）。
+    ///
+    /// `serde(skip)`：这是内部判定信号，不是 IPC 面——对外 JSON 形状零变化，
+    /// 前端无需感知（选型说明：bool 足够表达「有无实际变化」；未用富结构是因为
+    /// 消费点只有事件判定，多出的字段会成为无人消费的 API 面）。
+    #[serde(skip)]
+    pub entries_data_changed: bool,
+}
+
+impl SyncReport {
+    /// 本轮是否产生了**用户可见的数据变化**（事件层单点判定，OPT-007 / F11；
+    /// R3 立口径，R4 按主控 rg 核对修正 `merged_states` 的归属）。
+    ///
+    /// 判定只数「实际变更」：
+    /// - `entries_data_changed`：条目层实际变化（新插入 / 正文·绑定 / 真实读藏
+    ///   变化 / 纯读藏对账），由各生产合并点用前后比对、值条件写命中行数、
+    ///   真实绑定变化**即时**接线（R4：每个成功变更点立即合并——GR 逐语句提交
+    ///   无页事务，后续步骤失败不得让已提交的变化失去信号）；
+    /// - `merged_states`：**states 阶段**来源为对账值条件写命中行数
+    ///   （`greader_pull.rs` / `fever_pull.rs` 的 reconcile——真实变化，主控
+    ///   rg 核对）；**订阅阶段** `subscriptions.rs` 对每个匹配上的既有远端 feed
+    ///   **无条件** +1（前置 `set_feed_remote_id` / `update_feed_title_if_empty`
+    ///   还以 `let _` 吞错），那里不是真实变化计数。本判定的唯一生产消费者是
+    ///   scheduler，其输入 `sync_light` 只跑 states_phase（feeds 阶段不进入），
+    ///   订阅计数不在该消费路径上——谓词保留 `merged_states` 仅就该路径而言不
+    ///   产生误发；不对订阅阶段作泛化可达性声明；
+    /// - `pulled_feeds` / `removed_feeds`：订阅层增删。
+    ///
+    /// 明确**不**包含：`pulled_entries`（旧口径计数——守卫通过但值未变的条目
+    /// 也计数，不能冒充语义变化）、`pushed_states` / `pushed_feeds`（本地变更
+    /// 推送成功——UI 早已按本地意图显示）、`errors`（失败不是数据变化，由错误
+    /// 呈现通道承担）。全零 = 空变化，**不 emit**（不制造无谓 reload）；
+    /// `false` 返回是这一契约的单点实现，供 scheduler 与测试共用。
+    pub fn has_data_change(&self) -> bool {
+        self.entries_data_changed
+            || self.merged_states > 0
+            || self.pulled_feeds > 0
+            || self.removed_feeds > 0
+    }
+}
+
+#[cfg(test)]
+mod report_change_tests {
+    use super::*;
+
+    /// OPT-007（F11）/ R3+R4+R5 判别力：
+    /// - 条目层实际变化（标记）与订阅层增删必须算数据变化；
+    /// - `merged_states` 判定兼容保留：唯一生产消费路径（scheduler ← sync_light）
+    ///   上是 states 阶段对账值条件写命中行数（真实变化）；订阅阶段的无条件绑定
+    ///   计数不进入该路径（feeds 阶段不跑）——来源与边界见 `has_data_change` 注释；
+    /// - `pulled_entries` 是「处理过/已接受」计数（守卫通过但值未变也计数）——
+    ///   单独为真**不算**（R3 反例：内容真实改变但计数为 0 时不得漏报）；
+    /// - 仅推送成功 / 仅错误不算数据变化；空 report 必须 false。
+    #[test]
+    fn has_data_change_counts_only_actual_changes() {
+        assert!(!SyncReport::default().has_data_change(), "空变化不得发事件");
+
+        // 条目层实际变化（新插入/正文·绑定/真实读藏变化/对账）
+        let entries_changed = SyncReport {
+            entries_data_changed: true,
+            ..Default::default()
+        };
+        assert!(
+            entries_changed.has_data_change(),
+            "实际条目变化必须发数据变化"
+        );
+
+        // 订阅层增删
+        assert!(SyncReport {
+            pulled_feeds: 1,
+            ..Default::default()
+        }
+        .has_data_change());
+        assert!(SyncReport {
+            removed_feeds: 1,
+            ..Default::default()
+        }
+        .has_data_change());
+
+        // merged_states：唯一生产消费路径上为 states 阶段对账值条件写命中行数
+        // （真实变化）；订阅阶段的无条件绑定计数不进入该路径（feeds 不跑）——
+        // 兼容判定为变化（R5 按主控复核限定口径，见 has_data_change 注释）。
+        let merged_only = SyncReport {
+            merged_states: 3,
+            ..Default::default()
+        };
+        assert!(
+            merged_only.has_data_change(),
+            "merged_states 在消费路径（states）上为真实变化计数，兼容保留在判定中"
+        );
+
+        // pulled_entries：「处理过/已接受」计数——守卫通过但值未变也计数，
+        // 单独为真不得冒充语义变化
+        let pulled_only = SyncReport {
+            pulled_entries: 7,
+            ..Default::default()
+        };
+        assert!(
+            !pulled_only.has_data_change(),
+            "pulled_entries 是处理计数，不得冒充语义变化"
+        );
+
+        // 仅推送成功 / 仅错误：不算数据变化（不 emit）
+        let pushed_only = SyncReport {
+            pushed_states: 3,
+            pushed_feeds: 2,
+            ..Default::default()
+        };
+        assert!(
+            !pushed_only.has_data_change(),
+            "本地意图推送成功不改变可见数据（UI 已是本地态），不得触发 reload"
+        );
+        let errors_only = SyncReport {
+            errors: vec!["拉取条目正文失败: timeout".into()],
+            ..Default::default()
+        };
+        assert!(!errors_only.has_data_change(), "错误不是数据变化");
+    }
 }
 
 /* ============================================================
@@ -63,6 +188,7 @@ mod fever_pull;
 mod greader_pull;
 mod phases;
 mod push;
+mod session;
 mod subscriptions;
 
 pub use credentials::*;
@@ -81,3 +207,4 @@ TASK-113：conflict_policy 例外——不参与裸名 glob 重导出。其消�
 use entries::*;
 use fever_pull::*;
 use greader_pull::*;
+use session::*;

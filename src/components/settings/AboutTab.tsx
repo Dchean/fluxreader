@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useAppStore } from '../../store';
 import { SettingCard } from '../primitives';
 import { openExternal } from '../../lib/external';
+import { api, extractError } from '../../lib/api';
 import { isComparableVersion, shouldOfferUpdate } from './compareVersions';
 
 /* ---------- TAB 8: 关于 ---------- */
@@ -45,22 +46,24 @@ export function AboutTab() {
         showToast('无法确定本地版本号，请稍后重试');
         return;
       }
-      const res = await fetch('https://api.github.com/repos/Dchean/fluxreader/releases/latest');
-      if (!res.ok) throw new Error(String(res.status));
-      const data = (await res.json()) as { tag_name?: string; html_url?: string };
-      const remote = (data.tag_name ?? '').replace(/^v/, '');
-      if (!remote) throw new Error('empty tag');
-      setLatestInfo({ version: remote, url: data.html_url ?? 'https://github.com/Dchean/fluxreader/releases' });
-      setUpdateState(shouldOfferUpdate(remote, local) ? 'available' : 'upToDate');
-    } catch {
+      /* OPT-014 / F16：出网检查收口到 Rust 固定目的地命令——前端不再直接
+         fetch GitHub，生产 CSP 的 connect-src 不放宽，webview 也没有任意
+         URL 代理能力；下载地址已由后端限制在本仓库 releases 域。
+         远端 tag 不可比较（异常响应）时按失败处理，不误报「已是最新」。
+         Note: 见 .agents/notes/implemented/architecture/2026-10-08-凭据失败关闭与受控更新检查.md */
+      const res = await api.checkForUpdates();
+      if (!res || !isComparableVersion(res.version)) throw new Error('响应缺少可用版本号');
+      setLatestInfo({ version: res.version, url: res.url });
+      setUpdateState(shouldOfferUpdate(res.version, local) ? 'available' : 'upToDate');
+    } catch (e) {
       setUpdateState('failed');
-      showToast('检查更新失败，请稍后重试');
+      showToast(`检查更新失败：${extractError(e)}`);
     }
   };
 
   return (
     <>
-      <SettingCard title="客户端版本" desc={`FluxReader v${version || '…'} (Build 2026.08)`}>
+      <SettingCard title="客户端版本" desc={`FluxReader v${version || '…'}`}>
         <span className="about-arch-tag">Tauri 2 + Rust + SQLite</span>
       </SettingCard>
       {/* TASK-102：desc 复述「检查更新」标题 → 删除（按钮文案已自解释） */}

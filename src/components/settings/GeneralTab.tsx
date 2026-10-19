@@ -20,7 +20,7 @@ export function GeneralTab() {
           <input
             type="range"
             min={5}
-            max={120}
+            max={720}
             value={settings.refreshInterval}
             className="range-input"
             onChange={(e) => updateSettings({ refreshInterval: Number(e.target.value) })}

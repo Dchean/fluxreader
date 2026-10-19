@@ -3,9 +3,11 @@ import type {
   ArticleEntry,
   CategoryGroup,
   ContentLayoutType,
+  FeedAiMode,
   FeedItem,
   ViewFilterType,
 } from '../types';
+import { normalizeFeedAiMode, resolveFeedAiMode } from '../types';
 import { isSameLocalDay } from '../lib/format';
 import { getBodyEntry } from './bodyCache';
 import type { BodyEntry, BodyState } from './bodyCache';
@@ -60,6 +62,11 @@ export interface ArticleBodyView {
   rawContent: string;
   translatedContent: string;
   aiSummary: string;
+  /** OPT-013 B1/B3：产物缓存签名（null = 旧无签名产物；产物非空而签名为空 →
+      stale「已过期」——五态判定在 store/slices/ai.ts 的 selectAiProductState，
+      命中判定在动作时刻经后端 ai_cache_check 完成后短路）。 */
+  aiSummarySig: string | null;
+  translatedSig: string | null;
   fulltextExtracted: boolean;
   /** missing/failed 的呈现文案（其余态为空） */
   message: string;
@@ -73,6 +80,8 @@ const UNREQUESTED_BODY: ArticleBodyView = {
   rawContent: '',
   translatedContent: '',
   aiSummary: '',
+  aiSummarySig: null,
+  translatedSig: null,
   fulltextExtracted: false,
   message: '',
   contentRevision: 0,
@@ -85,6 +94,8 @@ function bodyViewFrom(rec: BodyEntry): ArticleBodyView {
     rawContent: rec.rawContent,
     translatedContent: rec.translatedContent,
     aiSummary: rec.aiSummary,
+    aiSummarySig: rec.aiSummarySig,
+    translatedSig: rec.translatedSig,
     fulltextExtracted: rec.fulltextExtracted,
     message: rec.message,
     contentRevision: rec.contentRevision,
@@ -111,6 +122,8 @@ export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bo
       rawContent: entry.rawContent ?? '',
       translatedContent: entry.translatedContent,
       aiSummary: entry.aiSummary,
+      aiSummarySig: entry.aiSummarySig ?? null,
+      translatedSig: entry.translatedSig ?? null,
       fulltextExtracted: entry.fulltextExtracted ?? false,
       message: '',
       contentRevision: 0,
@@ -122,27 +135,35 @@ export function selectArticleBody(s: Pick<AppState, 'entries' | 'dataMode' | 'bo
     rawContent: '',
     translatedContent: entry.translatedContent,
     aiSummary: entry.aiSummary,
+    aiSummarySig: entry.aiSummarySig ?? null,
+    translatedSig: entry.translatedSig ?? null,
     fulltextExtracted: entry.fulltextExtracted ?? false,
     message: '',
     contentRevision: 0,
   };
 }
 
-/** TASK-122：单张卡片「需要水合正文」的判定 —— 条目仍在 && bodyById 无记录。
+/** TASK-122：单张卡片「需要水合正文」的判定 —— 条目仍在 && （bodyById 无记录
+    或记录是**正文已失效清空的 cleared**）。
     记录存在即不需要水合：loading=在途（重复入队由记录状态拦下，替代原模块级
-    hydrationInFlight）、ready=已水合（含空正文终态）、cleared=AI 失效但正文
-    保留、missing/failed=终态（失败走内联重试 retryHydration 删记录重入队，
-    不自动重试）。useLazyHydrate 按 id 订阅本判定的布尔值：快照替换（reload /
-    缓存恢复）或 LRU 淘汰让条件重新成立时布尔翻转 → effect 重新入队，消除
-    「显示加载中但无请求在途」的死区（REQ-001）；预算淘汰（记录被删）→ 回
-    未请求态 → 自动重取（TASK-111 内存预算纪律的淘汰语义）。
+    hydrationInFlight）、ready=已水合（含空正文终态）、missing/failed=终态（失败
+    走内联重试 retryHydration 删记录重入队，不自动重试）；cleared 分两种形态：
+    AI 产物被清理（正文保留）→ 不需要重取（原语义）；**正文修订失效**
+    （OPT-008B：row 的 (contentId, revision) 变化，见 bodyCache.invalidateContentRevision
+    → content 被清空）→ 需要按新修订重取，否则懒水合卡片停在空正文、正文与
+    DB 真值脱离（本谓词与 reader.ts 的 cleared 重入队路径同一判定）。
+    useLazyHydrate 按 id 订阅本判定的布尔值：快照替换（reload / 缓存恢复）或
+    LRU 淘汰让条件重新成立时布尔翻转 → effect 重新入队，消除「显示加载中但
+    无请求在途」的死区（REQ-001）；预算淘汰（记录被删）→ 回未请求态 → 自动
+    重取（TASK-111 内存预算纪律的淘汰语义）。
     重复入队由 hydrateArticleContent 的记录守卫兜底，这里不观察请求本身。 */
 export function entryNeedsHydration(
   s: Pick<AppState, 'entries' | 'bodyCacheNonce'>,
   id: string,
 ): boolean {
   void s.bodyCacheNonce; // 订阅依赖：记录写入 bump nonce，useLazyHydrate 的订阅才能重算
-  if (getBodyEntry(id)) return false;
+  const rec = getBodyEntry(id);
+  if (rec) return rec.state === 'cleared' && rec.content === '';
   return s.entries.some((a) => a.id === id);
 }
 
@@ -236,8 +257,23 @@ export function selectVisibleEntries(s: AppState): ArticleEntry[] {
     （timelineFilter）影响：显示全部时 = 全部文章数，显示未读时 = 未读数；
     其余 view filter（今天/未读/收藏）各自独立计数。 */
 export function selectViewCounts(
-  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts'>,
+  s: Pick<AppState, 'activeContentLayout' | 'activeFeedFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts' | 'scopeCounts' | 'settings'>,
 ) {
+  /* OPT-008B R1：smartDedup 开启且快照**布局与开关都匹配**时，聚合 scope 的
+     角标直接取 scope_counts 快照（该 scope 显示集合的精确计数，与列表同一
+     谓词族）。快照带 layout/dedup 来源：旧布局或旧开关口径的快照一律不消费
+     （R2/N3 偏差 B 下旧口径快照必须失效）；快照缺失（开关关闭 / mock / 旧
+     后端 / 取数失败）回退既有「按源求和」口径。
+     feedCounts 始终是与布局无关的按源计数（不得被单布局快照覆盖）。 */
+  const snap = s.scopeCounts;
+  if (snap && snap.layout === s.activeContentLayout && snap.dedup === s.settings.smartDedup) {
+    const key = s.activeFeedFilter;
+    const exact = key === 'all' ? snap.all : key.startsWith('cat-') ? snap.folders.get(key) : null;
+    if (exact) {
+      const all = s.timelineFilter === 'unread' ? exact.unread : exact.total;
+      return { all, today: exact.today, unread: exact.unread, starred: exact.starred };
+    }
+  }
   // 用后端精确计数（feedCounts）聚合，而非前端 entries——entries 受分页 limit
   // 截断，会导致「全部/未读数字不准确」。遍历 feedIndex，按「当前布局 × 订阅范围」
   // 累加各 feed 的 total/unread/starred/today。
@@ -270,17 +306,12 @@ export function selectViewCounts(
     布局与视图构成两道筛选条件，树不再另设 unread/total 之类的第二套数字。
     计数用严格判定（不含 openedReadIds 会话保留）：侧栏数字是导航概览，
     不随点开文章逐条抖动，与 Miniflux 未读语义一致。 */
-/** 从 store 的字符串 id（纯数字 / 'cat-'/'feed-' 前缀两种形态）提取后端数字 id。
-    历史 bug：mock 用 'feed-'+Date.now() 前缀、真实数据用 String(row.id) 纯数字，
-    定长 slice(2)/slice(4) 会把 '26'.slice(2) 截成 ''→NaN，布局/AI 开关等
-    全部写库失败且被乐观更新掩盖（7 类模式 C 契约断裂变体）。 */
-export function numericId(id: string): number {
-  const m = id.match(/(\d+)/);
-  return m ? Number(m[1]) : NaN;
-}
+/* OPT-017F：numericId 单点实现移至 ./scopeId（internals 的 scope 派生同引用，
+   原两份逐字相同的副本收敛为一处）；此处保留公共导出，既有消费路径不变。 */
+export { numericId } from './scopeId';
 
 export function selectTreeCounts(
-  s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts'>,
+  s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts' | 'scopeCounts' | 'settings'>,
 ): Map<string, number> {
   // 订阅树角标：数字 = 该行在「当前布局 × 当前视图 × 显示: 全部/未读」筛选下的
   // 条目数。用后端精确计数聚合（feedCounts），不受文章列表分页 limit 影响。
@@ -288,33 +319,74 @@ export function selectTreeCounts(
   // 与「全部」键动态数字一致；否则按 activeViewFilter（全部→total、未读→unread…）。
   const counts = new Map<string, number>();
   const bump = (key: string, n: number) => counts.set(key, (counts.get(key) ?? 0) + n);
+  // 「显示: 未读」只在「全部」视图生效（与 selectVisibleEntries 同口径），
+  // 其余视图按各自筛选语义。
+  const viewOf = (c: { total: number; unread: number; starred: number; today: number }): number =>
+    s.activeViewFilter === 'all' && s.timelineFilter === 'unread'
+      ? c.unread
+      : s.activeViewFilter === 'unread' ? c.unread
+      : s.activeViewFilter === 'starred' ? c.starred
+      : s.activeViewFilter === 'today' ? c.today
+      : c.total;
+  /* OPT-008B R1：源角标始终取 feedCounts（布局无关的按源精确计数，按当前布局
+     过滤 feedIndex）；分类与「全部」角标在 **scopeCounts 快照布局匹配**时直接取
+     该 scope 的显示集合计数（层级去重的总数不可由子集数字相加重建），否则回退
+     按成员求和。旧布局快照不得按新布局显示（快照 layout 与当前不等即忽略）。 */
+  const snap = s.scopeCounts && s.scopeCounts.layout === s.activeContentLayout && s.scopeCounts.dedup === s.settings.smartDedup ? s.scopeCounts : null;
+  let fallbackAll = 0;
   for (const [feedId, binding] of s.feedIndex) {
     if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
     /* L2：feedCounts 缺该源 → 不建角标（与 selectViewCounts 同一取舍：精确计数
        缺失时保守留空，不退回受分页截断的 entries 计数）。 */
     const c = s.feedCounts.get(feedId);
     if (!c) continue;
-    // 「显示: 未读」只在「全部」视图生效（与 selectVisibleEntries 同口径），
-    // 其余视图按各自筛选语义。
-    const n = s.activeViewFilter === 'all' && s.timelineFilter === 'unread'
-      ? c.unread
-      : s.activeViewFilter === 'unread' ? c.unread
-      : s.activeViewFilter === 'starred' ? c.starred
-      : s.activeViewFilter === 'today' ? c.today
-      : c.total;
+    const n = viewOf(c);
     bump(feedId, n);
-    bump(binding.cat.id, n);
-    bump('all', n);
+    fallbackAll += n;
+  }
+  if (snap) {
+    for (const [key, c] of snap.folders) bump(key, viewOf(c));
+    bump('all', viewOf(snap.all));
+  } else {
+    // 回退：分类 = 成员求和（按 feedIndex 归属逐源累加）；全部 = 全部成员求和
+    for (const [feedId, binding] of s.feedIndex) {
+      if (resolveFeedLayout(binding.feed, binding.cat.layout) !== s.activeContentLayout) continue;
+      const c = s.feedCounts.get(feedId);
+      if (!c) continue;
+      bump(binding.cat.id, viewOf(c));
+    }
+    bump('all', fallbackAll);
   }
   return counts;
 }
 
-/** 订阅源 → AI 配置解析（feed 值总是存在，绑定缺失即无配置） */
+/** 订阅源 → AI 配置解析（唯一 resolver，OPT-011）：
+    - 真值 = 源的三态 mode（旧行/旧 mock 缺 mode 时按旧 bool 映射，见 types.ts）；
+    - 'inherit' → 跟随所属分类的布尔默认；'on'/'off' → 源的显式选择
+      （显式关闭压过分类开启——不以 OR 合并，保证可关闭）；
+    - 旧 bool 字段（feed.autoSummary/autoTranslate）只作为缺 mode 的映射输入，
+      不再是有效真值：任何组件都不得绕过本函数直读源上的旧 bool。
+    绑定缺失即无配置（false）。返回 mode 供设置页三态控件回显。
+    Note: 三态真值、bool 兼容输入与单一 resolver 的取舍 — 见
+    .agents/notes/implemented/architecture/2026-10-08-AI配置继承与派生索引单点.md */
 export function selectFeedConfig(s: Pick<AppState, 'feedIndex'>, feedId: string) {
   const binding = s.feedIndex.get(feedId);
+  if (!binding) {
+    return {
+      autoSummary: false,
+      autoTranslate: false,
+      summaryMode: 'off' as FeedAiMode,
+      translateMode: 'off' as FeedAiMode,
+    };
+  }
+  const { feed, cat } = binding;
+  const summaryMode = normalizeFeedAiMode(feed.summaryMode, feed.autoSummary);
+  const translateMode = normalizeFeedAiMode(feed.translateMode, feed.autoTranslate);
   return {
-    autoSummary: binding?.feed.autoSummary ?? false,
-    autoTranslate: binding?.feed.autoTranslate ?? false,
+    autoSummary: resolveFeedAiMode(summaryMode, cat.autoSummary),
+    autoTranslate: resolveFeedAiMode(translateMode, cat.autoTranslate),
+    summaryMode,
+    translateMode,
   };
 }
 

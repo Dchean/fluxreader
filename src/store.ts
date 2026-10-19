@@ -30,7 +30,19 @@ import { createSettingsSlice } from './store/slices/settings';
    不参与任何取值——不会出现同名 key 被后展开的 slice 覆盖。
    ============================================================ */
 
-export { bootstrapGithubAuth } from './store/slices/bootstrap';
+export { bootstrapGithubAuth, confirmAppliedConfig } from './store/slices/bootstrap';
+/* OPT-011 R5：配置应用/上传的协调入口经 store 公开面导出——组件一律经本模块
+   （测试工具链把 src/store.ts 别名到唯一 store 实例）消费协调协议，避免深层
+   子路径在别名体系下形成第二个协议实例（写队列/屏障必须与 store 的写入口同一份）。 */
+export { awaitAiWriteFrontier, markAiConfigUnconfirmed, runConfigApplyBarrier } from './store/aiConfigWrites';
+/* OPT-008B R3（P2-N3）：app_settings 的写前沿 / 应用边界 / 真实回读与未确认
+   标记——与 AI 协议同构的最小协调面（独立模块状态，不复制 AI 内核）。 */
+export {
+  awaitAppSettingsWriteFrontier,
+  markAppSettingsUnconfirmed,
+  readBackAppliedAppSettings,
+  runAppSettingsApplyBoundary,
+} from './store/slices/settings';
 
 /* Note: 为何按领域拆 slice（而不是像后端那样按文件搬函数），以及键集如何保证不重不漏：
    slice 类型写成 Pick<AppState, …>，9 个 Pick 的并集必须恰好等于 AppState ——
@@ -61,4 +73,16 @@ bindBodyCacheNotify(() => useAppStore.setState((s) => ({ bodyCacheNonce: s.bodyC
 
 export * from './store/selectors';
 
-export type { AppState, PodcastPlayerState, SettingsState, ToastMessage } from './store/types';
+/* OPT-013 B3：AI 五态单点真值——判定与生成入口/在途表同一 slice，Reader 与卡片
+   一律经本导出消费（不在组件内复制判定逻辑）。 */
+export { selectAiProductState } from './store/slices/ai';
+export type { AiProductState } from './store/slices/ai';
+
+export type { AppState, AiCacheStatus, AiProductKind, PodcastPlayerState, SettingsState, ToastMessage, AppErrorEntry } from './store/types';
+
+/* OPT-017E：错误中心上限常量（ui slice 是唯一来源；面板提示直接消费，
+   不在组件里复制数字）。 */
+export { ERROR_CENTER_MAX } from './store/slices/ui';
+/* OPT-018：toast 退场定时器清理入口——组件回归夹具经本模块（dist-test/store.js
+   的唯一 store 实例）调用，避免深层子路径在别名体系下形成第二个模块实例。 */
+export { clearToastTimers } from './store/slices/ui';

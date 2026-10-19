@@ -23,9 +23,23 @@ pub async fn opml_import(
     state: State<'_, AppState>,
     content: String,
 ) -> AppResult<OpmlImportReport> {
-    let feeds = crate::opml::parse(&content)?;
-    let conn = state.db.lock().await;
-    import_feeds(&conn, &feeds)
+    let report = {
+        let conn = state.db.lock().await;
+        opml_import_for_test(&conn, &content)?
+    };
+    // OPT-009 B3：导入若已连接，订阅写回意图与本地导入同事务入队——锁外广播
+    // 订阅写回回执（未连接/未入队时 notify 内部静默或同快照）。
+    crate::sync::notify_subscription_outbox_changed(&state.db).await;
+    Ok(report)
+}
+
+/// doc(hidden) 集成测试入口：**与 `opml_import` 命令同一实现**（不持 Tauri
+/// State，测试用本地文件库）——避免「测试绿但命令路径未接线」。
+/// 不是 IPC，webview 不可达。
+#[doc(hidden)]
+pub fn opml_import_for_test(conn: &Connection, content: &str) -> AppResult<OpmlImportReport> {
+    let feeds = crate::opml::parse(content)?;
+    import_feeds(conn, &feeds)
 }
 
 /// 导入循环本体（从 opml_import 抽出以便测试）。
@@ -89,11 +103,33 @@ fn import_feeds(
         // 同 URL 的删除墓碑，否则 pull 永久跳过该源（不绑 remote_id）、其未推送
         // 状态 30 天后被 prune_stale_unbound 物理删除。
         db::remove_feed_tombstone(&tx, &f.feed_url)?;
-        // 新增订阅入同步队列（连接 Miniflux 后补推）。payload 必须是含 folder_id
-        // 的 JSON——push_feeds 据此把订阅挂到远端对应分类；此前误传标题字符串，
-        // serde_json 解析失败导致 payload 丢弃、源被推到远端默认分类（目录丢失）。
-        let payload = serde_json::json!({ "folder_id": folder_id }).to_string();
-        db::enqueue_sync(&tx, None, Some(&f.feed_url), "add_feed", Some(&payload))?;
+        // OPT-009 阶段 B1-R3（复审 P2-2）：新增订阅的**类型化**写回意图与本地
+        // 新增同一事务——quick_add 成功后的绑定/分类挂载失败会保留队项重试。
+        // 此前写 legacy `sync_queue.add_feed`：push_feeds 在 quick_add 成功时立即
+        // 把队项加入 done 并剪除，「源已创建」被当成「完整订阅意图已完成」，
+        // 分类挂载失败后无持久载体可重试（与执行器也会双重推送）。
+        // 目录目标在入队时解析成 label（执行器挂载用）；未连接 → 仅本地
+        // （首连弹窗的 sync_local_feeds 再推）；凭据读取失败 → Err 整体回滚。
+        // B2-5：非空导入标题进入 typed subscribe 的 desired_title（quick_add 后
+        // 用真实 t= 写回远端）；空标题不产生标题目标（不伪造远端标题）。
+        // Note: OPML 导入与 add_feed 同一类型化接线 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
+        if let Some(ctx) = crate::sync::current_account(&tx)? {
+            let folder_label = db::folder_name(&tx, folder_id)?;
+            // B2-5：非空导入标题进入 typed subscribe 的 desired_title（quick_add 后
+            // 用真实 t= 写回远端）。**标题等于 URL** = 该 outlin 没给可用标题
+            // （opml::parse 的 URL 兜底），不是用户意图 → 不产生标题目标
+            // （否则会把 URL 当标题推到远端）。
+            let title = f.title.trim();
+            let desired_title = (!title.is_empty() && title != f.feed_url).then_some(title);
+            db::enqueue_subscribe(
+                &tx,
+                ctx.generation,
+                &ctx.key,
+                &f.feed_url,
+                desired_title,
+                folder_label.as_deref(),
+            )?;
+        }
         report.imported += 1;
     }
     tx.commit()?;
@@ -212,12 +248,22 @@ mod tests {
     /// 源/目录/队列/事务内墓碑清除全部撤销（修前逐条自动提交会残留半套）。
     /// 生产代码无注入点，用测试侧 RAISE(ABORT) 触发器在第 2 条的入队处注入
     /// 真实失败（SQLITE_CONSTRAINT 走的就是生产 Err 路径）。
+    /// OPT-009 阶段 B1-R3：入队目标从 legacy `sync_queue.add_feed` 换成类型化
+    /// `subscription_outbox`（复审 P2-2），注入点随之迁移；并预置凭据使
+    /// current_account 命中（未连接时本就不入队，注入会失效）。
     #[test]
     fn import_feeds_midway_failure_rolls_back_everything() {
         let conn = conn();
+        db::set_setting(&conn, "greader_endpoint", "https://example.com").unwrap();
+        db::set_setting(&conn, "greader_username", "u").unwrap();
+        db::set_setting(&conn, "greader_password", "pw").unwrap();
+        assert!(
+            crate::sync::current_account(&conn).unwrap().is_some(),
+            "前置：凭据必须可读（否则不入队，注入失效）"
+        );
         conn.execute_batch(
-            "CREATE TRIGGER test_fail_second_enqueue BEFORE INSERT ON sync_queue
-             WHEN NEW.action = 'add_feed' AND NEW.feed_url = 'https://boom.example/rss' BEGIN
+            "CREATE TRIGGER test_fail_second_enqueue BEFORE INSERT ON subscription_outbox
+             WHEN NEW.feed_url = 'https://boom.example/rss' BEGIN
                  SELECT RAISE(ABORT, 'simulated midway failure');
              END;",
         )
@@ -248,15 +294,50 @@ mod tests {
             "导入目录必须随事务回滚"
         );
         assert_eq!(
-            count(&conn, "SELECT COUNT(*) FROM sync_queue"),
+            count(&conn, "SELECT COUNT(*) FROM subscription_outbox"),
             0,
-            "add_feed 队项必须随事务回滚"
+            "类型化订阅队项必须随事务回滚"
         );
         assert!(
             db::feed_tombstones(&conn)
                 .unwrap()
                 .contains(&"http://a.example/rss".to_string()),
             "事务内的墓碑清除必须被回滚（否则半套状态破坏删除语义）"
+        );
+    }
+
+    /// OPT-009 阶段 B1-R3（复审 P2-2）：导入入队的是**类型化** subscribe 意图
+    /// （带账号 key/代际与目录 label），不再写 legacy add_feed——
+    /// 后者在 quick_add 成功后即被剪队，分类挂载失败无持久载体可重试。
+    /// 判别力：仍写 legacy 时本用例的 outbox 计数为 0、legacy 计数为 1。
+    #[test]
+    fn import_feeds_enqueues_typed_subscribe_not_legacy_add_feed() {
+        let conn = conn();
+        db::set_setting(&conn, "greader_endpoint", "https://opml.example").unwrap();
+        db::set_setting(&conn, "greader_username", "u").unwrap();
+        db::set_setting(&conn, "greader_password", "pw").unwrap();
+        let ctx = crate::sync::current_account(&conn).unwrap().unwrap();
+
+        let report =
+            import_feeds(&conn, &[feed("https://a.example/rss", "A", Some("技术"))]).unwrap();
+        assert_eq!(report.imported, 1);
+        let items = db::pending_outbox(&conn).unwrap();
+        assert_eq!(items.len(), 1, "必须写入类型化订阅意图: {items:?}");
+        assert_eq!(items[0].action, "subscribe");
+        assert_eq!(items[0].account_key, ctx.key);
+        assert_eq!(items[0].account_generation, ctx.generation);
+        assert_eq!(
+            items[0].desired_folder.as_deref(),
+            Some("技术"),
+            "导入目录必须成为远端目标"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM sync_queue WHERE action = 'add_feed'"
+            ),
+            0,
+            "不得再写 legacy add_feed（与执行器双重推送；quick_add 后即被剪掉）"
         );
     }
 }

@@ -25,6 +25,9 @@ fn row_serialization_matches_fixture() {
         layout: "article".into(),
         auto_summary: true,
         auto_translate: false,
+        // OPT-011：两个 mode 取不同值——fixture 比对能抓住「接错数据源/漏映射」
+        summary_mode: "inherit".into(),
+        translate_mode: "off".into(),
         fetch_failed: false,
         fetch_error: None,
         last_fetched_at: None,
@@ -48,6 +51,13 @@ fn row_serialization_matches_fixture() {
         content_html: Some("<p>body</p>".into()),
         translated_content: Some("<p>translated</p>".into()),
         fulltext_extracted: false,
+        // OPT-008B 第二阶段：正文身份/修订（前端失效依据）
+        content_id: Some(9),
+        content_revision: 3,
+        // OPT-013 B1：AI 产物缓存签名（wire 契约的一部分——前端「未标记版本」
+        // 判定与命中语义依赖；fixture 用不同值抓「接错字段」）
+        ai_summary_sig: Some("sig-summary-fixture".into()),
+        translated_sig: Some("sig-translated-fixture".into()),
     };
 
     let feed_json = serde_json::to_value(&feed).expect("FeedRow 序列化");

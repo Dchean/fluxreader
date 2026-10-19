@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Icons } from './icons';
+import type { FeedAiMode } from '../types';
 
 /* ============================================================
    自定义 Mica 下拉选择框 —— 对应规范 §5.1 FluxDropdown
@@ -212,6 +213,40 @@ export function Switch({ checked, onChange, id, compact }: SwitchProps) {
 export function SwitchInline({ checked, onChange, id, compact }: SwitchProps) {
   return (
     <SwitchTrack checked={checked} onChange={onChange} id={id} compact={compact} Container="span" />
+  );
+}
+
+/* ============================================================
+   OPT-011：源级 AI 开关三态控件（继承分类 / 开启 / 关闭）
+   - 「继承」选项标签携带分类当前默认的生效值（继承（开/关）），
+     让用户在不展开分类行时也知道当前真实行为；
+   - 显式关闭压过分类开启（解析在 store 的 selectFeedConfig 唯一 resolver）。
+   ============================================================ */
+
+interface AiModeSelectProps {
+  mode: FeedAiMode;
+  /** 所属分类的布尔默认（仅用于「继承（开/关）」标签回显） */
+  categoryOn: boolean;
+  onChange: (mode: FeedAiMode) => void;
+  /** 悬停说明（如「关闭只阻止尚未发起的自动请求」） */
+  title?: string;
+  width?: number | string;
+}
+
+export function AiModeSelect({ mode, categoryOn, onChange, title, width = 96 }: AiModeSelectProps) {
+  return (
+    <span className="ai-mode-select" title={title}>
+      <FluxDropdown
+        width={width}
+        value={mode}
+        onChange={(v) => onChange(v as FeedAiMode)}
+        options={[
+          { value: 'inherit', label: `继承（${categoryOn ? '开' : '关'}）` },
+          { value: 'on', label: '开启' },
+          { value: 'off', label: '关闭' },
+        ]}
+      />
+    </span>
   );
 }
 

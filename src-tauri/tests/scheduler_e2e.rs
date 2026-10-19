@@ -1,13 +1,14 @@
 //! 调度器无头集成测试：到期判定 → 并发抓取 → 退避 → 设置实时生效。
-//! 用本地 HTTP feed server（127.0.0.1:8765）+ 临时数据库，不依赖外网和 UI。
+//! 自托管本地 HTTP feed 服务（OPT-016A：common::LocalFeedServer，绑定
+//! 127.0.0.1:0、内容由端口注入）+ 临时数据库，不依赖外网和 UI，不占用固定
+//! 端口 8765，也不借用用户现有服务。CI 默认运行（无 #[ignore]）。
 //!
 //! 由于调度器核心循环绑定了 AppHandle（事件 emit），可测部分拆为两层：
 //! 1. `db::feeds_due_for_refresh` 到期/退避判定（纯 SQL，直接断言）
 //! 2. `refresh_feed_staged` 三段式管线（锁外 HTTP + 状态写回）
 //!    ——并发重叠已有专门测试（staged_refresh_e2e），此处只测调度语义
 //!
-//! 运行：先 python -m http.server 8765 --bind 127.0.0.1（serve fixtures 目录）
-//! 然后 cargo test --test scheduler_e2e -- --ignored --nocapture
+//! 运行：cargo test --test scheduler_e2e -- --nocapture
 
 use app_lib::db;
 use app_lib::ingestion;
@@ -16,19 +17,11 @@ use tokio::sync::Mutex;
 
 mod common;
 
-const FEED_URL: &str = "http://127.0.0.1:8765/local_feed.xml";
-
-/// 搭测试环境：临时 DB + 两个源（一个指向本地 server，一个指向死地址）
-async fn setup() -> (
-    Arc<Mutex<rusqlite::Connection>>,
-    reqwest::Client,
-    std::path::PathBuf,
-) {
-    let tmp = common::unique_db_path("scheduler_test");
-    let _ = std::fs::remove_file(&tmp);
-    let conn = db::open(&tmp).expect("open db");
+/// 搭测试环境：临时 DB + 两个源（一个指向自托管 feed 服务，一个指向死地址）
+async fn setup(tmp: &std::path::Path) -> (Arc<Mutex<rusqlite::Connection>>, reqwest::Client) {
+    let conn = db::open(tmp).expect("open db");
     let client = ingestion::build_client(30);
-    (Arc::new(Mutex::new(conn)), client, tmp)
+    (Arc::new(Mutex::new(conn)), client)
 }
 
 /// 刷新到期源：直接走三段式管线（生产同款，Semaphore 并发由调度器持有）
@@ -56,9 +49,17 @@ async fn refresh_due(
 }
 
 #[tokio::test]
-#[ignore = "requires local feed server on 127.0.0.1:8765"]
 async fn scheduler_due_backoff_and_interval_pipeline() {
-    let (db, client, tmp) = setup().await;
+    // 自托管 feed 服务：绑定 127.0.0.1:0，端口注入固定内容
+    let server = common::LocalFeedServer::start_with_feed(common::local_feed_xml)
+        .await
+        .expect("start local feed server");
+    let feed_url = server.url("/local_feed.xml");
+
+    // 临时库守卫先于 Connection 声明：正常返回与 panic 展开都删除库文件（含 WAL 旁路）
+    let tmp = common::unique_db_path("scheduler_test");
+    let _cleanup = common::TempDbGuard::new(tmp.clone());
+    let (db, client) = setup(&tmp).await;
 
     // ---------- 场景：1 个好源 + 1 个坏源 ----------
     {
@@ -69,7 +70,7 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
         let conn = db.lock().await;
         db::insert_feed(
             &conn,
-            FEED_URL,
+            &feed_url,
             None,
             "Local Test Feed",
             None,
@@ -84,6 +85,7 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
         let conn = db.lock().await;
         db::insert_feed(
             &conn,
+            // 死地址：本机回环上无监听，连接立即被拒（不触外网，也不借用任何服务）
             "http://127.0.0.1:1/dead.xml",
             None,
             "Dead Feed",
@@ -177,7 +179,7 @@ async fn scheduler_due_backoff_and_interval_pipeline() {
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(v["autoRefresh"], false, "settings round-trip for scheduler");
 
-    let _ = std::fs::remove_file(&tmp);
+    server.stop().await;
     println!("ALL SCHEDULER ASSERTIONS PASSED");
 }
 
@@ -220,7 +222,7 @@ fn seed_mode_feeds(conn: &rusqlite::Connection) -> (i64, i64) {
 #[test]
 fn sync_mode_hybrid_skips_miniflux_feeds_in_due_query() {
     let tmp = common::unique_db_path(&format!("mode_{}", line!()));
-    let _ = std::fs::remove_file(&tmp);
+    let _cleanup = common::TempDbGuard::new(tmp.clone());
     let conn = db::open(&tmp).unwrap();
     let (direct, mf) = seed_mode_feeds(&conn);
 
@@ -249,7 +251,7 @@ fn sync_mode_hybrid_skips_miniflux_feeds_in_due_query() {
 #[test]
 fn sync_mode_manual_refresh_always_includes_miniflux_feeds() {
     let tmp = common::unique_db_path(&format!("mode_{}_", line!()));
-    let _ = std::fs::remove_file(&tmp);
+    let _cleanup = common::TempDbGuard::new(tmp.clone());
     let conn = db::open(&tmp).unwrap();
     let (direct, mf) = seed_mode_feeds(&conn);
 
@@ -264,7 +266,7 @@ fn sync_mode_manual_refresh_always_includes_miniflux_feeds() {
 #[test]
 fn sync_mode_default_is_direct_when_unset() {
     let tmp = common::unique_db_path(&format!("mode_{}", line!()));
-    let _ = std::fs::remove_file(&tmp);
+    let _cleanup = common::TempDbGuard::new(tmp.clone());
     let conn = db::open(&tmp).unwrap();
     // 未写 app_settings → 读到默认 "direct"（scheduler 的判定依赖此默认）
     // 复刻 scheduler 私有函数的读取逻辑：

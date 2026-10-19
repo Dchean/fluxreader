@@ -1254,20 +1254,25 @@ body {
   font-weight: 600;
 }
 
-/* Gallery Grid */
+/* Gallery Grid：列模型 + 垂直虚拟化（OPT-017C 有界渲染）。
+   旧实现是 CSS 多列（column-count 4/3/2 + break-inside: avoid）全量渲染；
+   浏览器分列无法与「只渲染窗口内条目」共存（窗口内容会被重新分列），故改为
+   显式列模型：列数/列宽由组件按 GalleryLayout.ts 的断点与公式计算（与旧
+   column-count/column-gap 的列宽公式 (W − (n−1)×14px) / n 逐字等价），
+   窗口内卡片绝对定位在 .gallery-virtual-item 里。 */
 .gallery-masonry-grid {
-  column-count: 4;
-  column-gap: 14px;
+  position: relative;
   width: 100%;
   margin: 0;
 }
 
-@media (max-width: 1200px) { .gallery-masonry-grid { column-count: 3; } }
-@media (max-width: 800px) { .gallery-masonry-grid { column-count: 2; } }
+/* 虚拟化条目：位置（top/left/width/transform）由组件按 lane 与虚拟偏移内联设置 */
+.gallery-virtual-item {
+  position: absolute;
+  top: 0;
+}
 
 .gallery-card {
-  break-inside: avoid;
-  margin-bottom: 14px;
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
@@ -1817,6 +1822,41 @@ body {
   gap: 6px;
 }
 
+/* OPT-013 B1/B3：产物状态标记——旧无签名/签名不匹配的 AI 产物可显示但不冒充
+   已验证缓存（B3 起五态判定经 store/slices/ai.ts 的 selectAiProductState 单点
+   计算，该标记对应 stale =「已过期」；命中判定在动作时刻经后端 ai_cache_check）。 */
+.ai-unverified-tag {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 30%, transparent);
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* OPT-013 B3：partial（部分完成）提示与状态行——与「已过期」标记/重试按钮同一行。 */
+.ai-partial-hint {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--accent-light);
+  background: color-mix(in srgb, var(--accent-light) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-light) 30%, transparent);
+  white-space: nowrap;
+}
+
+.ai-state-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
 .ai-body-content {
   font-size: 12.5px;
   line-height: 1.6;
@@ -2015,6 +2055,19 @@ body {
 .article-prose.raw-render-mode table,
 .article-prose.raw-render-mode blockquote {
   font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+/* 源码显示（OPT-012 / 审计 F14）：源码态改为 <pre class="reader-source-view">
+   内的**转义文本**（组件 ReaderProse；修前只是同一 HTML 容器多挂 raw-render-mode
+   类，审计实测点击前后 innerHTML 完全一致）。长行折行、超长不可断 token 强制
+   断行，双保险不撑破阅读栏；仅作用于源码容器，渲染态排版不受影响。
+   决定与取舍见 .agents/notes/implemented/bug-fix/2026-10-08-阅读器源码显示契约.md */
+.article-prose .reader-source-view {
+  margin: 0;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* -------------------------------------------------------------
@@ -2511,6 +2564,22 @@ body {
   /* 60px = 紧凑开关 32 + 间距 4 + 两个汉字（分类行与源行文字等宽，列宽恒定） */
 }
 
+/* OPT-011：源行三态 AI 开关（继承/开启/关闭）——比两态开关宽，
+   定宽列保证同列对齐；分类行保持原有 60px 开关列。 */
+.mgr-ai-mode-label {
+  font-size: 11.5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  flex: 0 0 128px; /* 96px 下拉 + 4px 间距 + 两个汉字 */
+}
+
+.ai-mode-select {
+  display: inline-flex;
+  align-items: center;
+}
+
 .group-mgr-body {
   /* 水平 padding 归零：源行自带 12px 行内边距，与 header 同基准对齐（双层缩进会让按键列错 12px） */
   padding: 10px 0;
@@ -2751,6 +2820,39 @@ body {
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+/* ---------- OPT-010：配置应用预览卡（纵向：说明 + 变更清单 + 确认动作） ---------- */
+.config-plan-preview {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.config-plan-preview .setting-card-text {
+  flex: 1 1 auto;
+}
+
+.config-plan-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  word-break: break-all;
+}
+
+.config-plan-danger {
+  color: var(--danger);
+}
+
+.config-plan-warning {
+  color: var(--text-tertiary);
+}
+
+.config-plan-preview .mini-dialog-actions {
+  margin-top: 4px;
 }
 
 .about-update-hint {
@@ -3073,6 +3175,129 @@ body.has-player-expanded .toast-layer {
 
 .toast-action-btn:hover {
   filter: brightness(1.15);
+}
+
+/* ---------- 错误中心（OPT-017E）：重试入口持久可达 ---------- */
+/* 入口：侧栏底部固定区（仅 errors 非空时渲染，条目清空即消失——
+   不与 toast 角区/播放条互挤；toast 只是瞬时通知，持久入口在主框架上） */
+.sidebar-error-center {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border-strong));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.sidebar-error-center:hover {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+
+.sidebar-error-center .svg-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--danger);
+}
+
+.error-center-badge {
+  margin-left: auto;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* 面板：mini-dialog 形态（440px，复用既有对话框语言） */
+.error-center-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.error-center-close,
+.error-center-dismiss {
+  display: flex;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition-fast);
+}
+
+.error-center-close:hover,
+.error-center-dismiss:hover {
+  color: var(--text-primary);
+}
+
+.error-center-close .svg-icon { width: 14px; height: 14px; }
+.error-center-dismiss .svg-icon { width: 12px; height: 12px; }
+
+.error-center-list {
+  margin: 10px 0;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.error-center-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+}
+
+.error-center-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.error-center-retry {
+  flex-shrink: 0;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 3px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.error-center-retry:hover {
+  filter: brightness(1.15);
+}
+
+.error-center-empty {
+  margin: 18px 0;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12.5px;
 }
 
 /* ---------- AI 内联错误行（摘要/翻译失败：错误信息 + 重试按钮） ---------- */

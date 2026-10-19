@@ -2,11 +2,13 @@ import type {
   ArticleEntry,
   CategoryGroup,
   ContentLayoutType,
+  FeedAiMode,
   FeedItem,
   PaletteTheme,
   ThemeMode,
   ViewFilterType,
 } from '../types';
+import type { SubscriptionCapabilities, SubscriptionOutboxStats, TranslationSegmentPlan } from '../lib/api';
 
 export interface PodcastPlayerState {
   isActive: boolean;
@@ -27,6 +29,10 @@ export interface PodcastPlayerState {
   /** seek 请求（非 null 时 PlayerBar 执行 audio.currentTime 赋值后清回 null） */
   seekToSec: number | null;
 }
+
+/** OPT-015：SMTC 媒体键动作（Rust `player-media` 事件的 payload 域）。
+ *  play/pause 是「目标态」语义（重复按不翻转），toggle 才是切换。 */
+export type MediaAction = 'play' | 'pause' | 'toggle' | 'stop';
 
 export interface SettingsState {
   /* 通用 */
@@ -69,13 +75,30 @@ export interface SettingsState {
 }
 
 /** leaving=true 时先走 CSS 退场过渡，200ms 后再卸载 DOM。
-    action：可选操作按钮（失败 toast 的一键重试） */
+    action：可选操作按钮（失败 toast 的一键重试；与 showToast 的动作对象同形，
+    含可选 key——错误中心按它去重，见 AppErrorEntry）。 */
 export type ToastMessage = {
   id: number;
   text: string;
   leaving?: boolean;
-  action?: { label: string; run: () => void };
+  action?: { label: string; run: () => void; key?: string };
 };
+
+/** OPT-017E：错误中心条目——带重试动作的失败提示的**持久可达副本**。
+ *  toast 层会被上限（4 条）与停留时长（4.2s）清掉唯一重试入口；错误中心以
+ *  有界列表承接：去重键取「显式操作实体 key 优先、缺省回落文案」（R1 返工：
+ *  同文案不同实体不得合并），`count` 记录合并次数、`at` 为最近一次写入时间
+ *  （TTL 惰性清理依据）。 */
+export interface AppErrorEntry {
+  id: number;
+  key: string;
+  text: string;
+  action: { label: string; run: () => void; key?: string };
+  /** 同 key 合并次数（首次为 1；重试派发清除后再次失败会从 1 重新计数） */
+  count: number;
+  /** 最近一次写入时间（ms epoch；同 key 合并时刷新，TTL 按它计算） */
+  at: number;
+}
 
 /** TASK-117：per-scope keyset 分页游标（articlesCursor 的值类型）。
  *  - lastPublished：已加载窗口最后一行的 published_at **原文**（RFC3339 字符串，
@@ -89,6 +112,40 @@ export interface ArticlesCursorState {
   lastPublished: string | null;
   lastId: number | null;
   loaded: number;
+}
+
+/** 计数行（total/unread/starred/today 四元组）。 */
+export interface CountsRow {
+  total: number;
+  unread: number;
+  starred: number;
+  today: number;
+}
+
+/** OPT-013 B3：AI 产物种类（摘要/翻译；与后端 AiKind 的 id 域逐字一致）。 */
+export type AiProductKind = 'summary' | 'translation';
+
+/** OPT-013 B3：单个条目的 AI 校验状态（`ai_cache_check` 成功结果的最小快照）。
+ *  只在校验成功时写入；失败保留现有值——校验故障既不得把可用产物误标为
+ *  已过期，也不触发重新生成（B1 保守语义）。五态判定（slices/ai.ts 的
+ *  selectAiProductState）以它为「签名是否与当前输入匹配」的唯一验证数据源：
+ *  没有它就不存在 complete（不存在「产物非空 = complete」的回退路径）。 */
+export interface AiCacheStatus {
+  summaryVerified: boolean;
+  translationVerified: boolean;
+  /** 当前签名下的翻译分段进度（partial 判定与「已 N/M 段」展示的数据源） */
+  translationSegments: TranslationSegmentPlan;
+}
+
+/** OPT-008B R1：scope_counts 的 store 快照（带来源元数据）。
+    布局是快照的一部分：选择器只在该 layout 与当前 activeContentLayout 相等时
+    消费（旧布局快照不得按新布局显示）；`dedup` 记录产生快照时的开关值（口径
+    标签）。分类分组计数在 `folders`（键 'cat-N'）。 */
+export interface ScopeCountsSnapshot {
+  layout: ContentLayoutType;
+  dedup: boolean;
+  all: CountsRow;
+  folders: Map<string, CountsRow>;
 }
 
 export interface AppState {
@@ -129,8 +186,17 @@ export interface AppState {
 
   /** 后端聚合的精确计数（feedId → total/unread/starred/today）。
       侧边栏角标用——不受文章列表分页 limit 影响，保证数字准确。
-      （「全部/未读数字被 limit 截断」的根因修复） */
+      （「全部/未读数字被 limit 截断」的根因修复）
+      注：这是**与布局无关的按源计数**（feed_counts），选择器据此按当前布局
+      过滤求和——聚合角标回退路径的底座。 */
   feedCounts: Map<string, { total: number; unread: number; starred: number; today: number }>;
+
+  /** OPT-008B R1：smartDedup 显示集合的 **scope 精确计数快照**
+      （scope_counts：全部 / 每分类 / 每源，按 snapshot.layout 布局过滤）。
+      仅开关开启且取到数据时非空——选择器只在 `layout === activeContentLayout`
+      时消费（旧布局快照不得按新布局显示）；缺快照回退按源求和。
+      独立于 feedCounts：feedCounts 是布局无关的源计数，不得被单布局快照覆盖。 */
+  scopeCounts: ScopeCountsSnapshot | null;
 
   /* ---------- 播客播放器 ---------- */
   player: PodcastPlayerState;
@@ -156,6 +222,11 @@ export interface AppState {
 
   /* ---------- Toast 与同步 ---------- */
   toasts: ToastMessage[];
+  /** OPT-017E：错误中心——带重试动作的失败提示的持久可达层（有界 20 条、
+   *  同 key（默认取文案）合并最新、TTL 24h 惰性清理）。普通提示仍只走 toast。 */
+  errors: AppErrorEntry[];
+  /** OPT-017E：错误中心面板开态（App Esc 链与浮层让路清单的字段源） */
+  errorCenterOpen: boolean;
   syncStatus: 'synced' | 'syncing' | 'error';
   /** 后台自动同步进行中（scheduler sync-running/sync-idle 事件驱动；与手动 syncStatus 独立） */
   backgroundSyncing: boolean;
@@ -170,6 +241,14 @@ export interface AppState {
   /** TASK-124：队列最近一次推送失败的错误摘要（「部分失败」的错误行）。
    *  sync-queue-changed 事件 / reload 顺带刷新写入；未失败为 null。 */
   syncQueueLastError: string | null;
+  /** OPT-009 B3：订阅写回回执（**当前账号限定**：pending/failed/local_only/
+   *  最近错误；异账号暂停项不混入）。subscription-outbox-changed 事件与挂载
+   *  刷新写入同一状态源；null = 未加载（不渲染、不冒充「无待办」）。 */
+  subOutboxStats: SubscriptionOutboxStats | null;
+  /** OPT-009 B3：订阅写回能力矩阵（subscription_capabilities 只读 IPC；设置页
+   *  能力卡与 FeedsTab 确认弹窗远端语义句的**单一事实源**）。null = 未加载
+   *  （界面省略能力句，不伪造能力）。 */
+  subscriptionCapabilities: SubscriptionCapabilities | null;
 
   /** GitHub 设备流登录：等待授权态（user_code 常驻显示；组件 unmount 不影响后端轮询） */
   githubFlow: { user_code: string; verification_uri: string; interval: number } | null;
@@ -268,8 +347,10 @@ export interface AppState {
   toggleReaderRenderMode: () => void;
   /** 全文视图切换：RSS 原文 ↔ Readability 全文（已提取则直接切换，不重复请求） */
   toggleReaderFulltext: () => void;
-  /** opts.silent：源级开关自动触发时静默失败（未配置 AI 不弹 toast） */
-  toggleReaderTranslation: (opts?: { silent?: boolean }) => void;
+  /** opts.silent：源级开关自动触发时静默失败（未配置 AI 不弹 toast）。
+   *  opts.force（OPT-013 B3）：继续/重新生成入口——跳过「已显示则关闭」的切换
+   *  语义，确保译文显示并走校验/生成（partial 继续 / stale 重新生成 / failed 重试）。 */
+  toggleReaderTranslation: (opts?: { silent?: boolean; force?: boolean }) => void;
   triggerReaderSummary: (opts?: { silent?: boolean }) => void;
   /** 列表卡片就地摘要（通知布局）：按文章 id 流式生成，不依赖阅读器选中态 */
   summarizeEntry: (id: string, opts?: { silent?: boolean }) => void;
@@ -282,6 +363,20 @@ export interface AppState {
   /** TASK-065 N11：该 id 的 translatedContent 当前是未消毒的流式产物——渲染契约：
       有标记按纯文本渲染（模型原始输出不得进 HTML 渲染路径），消毒回读成功后清除 */
   rawTranslatedIds: Record<string, true>;
+  /** OPT-013 B3：AI 校验状态缓存（`ai_cache_check` 成功结果按条目落账；五态判定的
+      验证数据源，见 AiCacheStatus 注释）。写入点收口在 slices/ai.ts：
+      checkCache / hintSegmentPlan / refreshAiStatus（生成结束后的刷新也经它）。 */
+  aiStatusById: Record<string, AiCacheStatus>;
+  /** OPT-013 B3：拉取后端权威校验状态并缓存（Reader 打开文章、生成结束等时机；
+      在途去重，失败保留现有状态）。 */
+  refreshAiStatus: (id: string) => void;
+  /** OPT-013 B3：仅当本会话尚无该条目校验状态时拉取（卡片展示路径的惰性补齐；
+      已存在状态不重复 IPC——动作时刻仍走 ai_cache_check 权威复核）。 */
+  ensureAiStatus: (id: string) => void;
+  /** OPT-013 B3「清除」入口：调用后端清除命令（删除该条目该产物在**所有签名**
+      下的持久化片段与整篇产物/签名、推进清除代次），成功后清前端状态——该条目
+      回到「无产物/未生成」，不得再显示 partial。失败如实 toast 且不改前端状态。 */
+  clearAiProduct: (id: string, kind: AiProductKind) => Promise<boolean>;
   /** 正文懒加载水合（选中文章 / 社交卡片挂载） */
   ensureArticleContent: (id: string, opts?: { extractFulltext?: boolean }) => void;
   /** 批量水合正文：一批 id 一次 IPC 拉取、一次 set 更新（消除逐篇洪峰） */
@@ -306,6 +401,11 @@ export interface AppState {
   /* ---------- Actions: 播客 ---------- */
   playPodcastEpisode: (title: string, showName: string, cover: string, audioUrl: string, entryId?: string) => void;
   togglePlayerPlay: () => void;
+  /** OPT-015：媒体键动作幂等消费（App.tsx `player-media` 事件唯一落点）。
+   *  play/pause = 目标态（已在目标态则 no-op，不翻转）；toggle = 切换；
+   *  stop = 关闭播放条。未激活（无剧集）时 play/pause/toggle 无任何副作用
+   *  ——媒体键不得凭空启动无源播放器。 */
+  applyMediaAction: (action: MediaAction) => void;
   cyclePlaybackSpeed: () => void;
   closePodcastBar: () => void;
   /** Full Player 展开态（大播放器覆盖层；Esc/再次点击收起） */
@@ -336,32 +436,62 @@ export interface AppState {
   closeMiniModal: (which: 'newCategory' | 'addFeed' | 'editFeed' | 'renameCat') => void;
 
   /* ---------- Actions: Toast / 同步 ---------- */
-  /** text + 可选操作按钮（label/run：失败场景的一键重试） */
-  showToast: (text: string, action?: { label: string; run: () => void }) => void;
+  /** text + 可选操作按钮（label/run：失败场景的一键重试；key：操作实体标识）。
+   *  OPT-017E：带动作的提示同时写入错误中心（去重 + 上限 + TTL），使重试入口不因
+   *  toast 上限/停留时长而消失；普通提示语义不变。
+   *  R1 返工：key 为可选操作实体标识（命名 `域:操作:实体`，如 `feed:refresh:10`）
+   *  ——错误中心按「显式 key 优先、缺省回落文案」去重；带重试动作的调用点一律
+   *  传 key，避免同文案不同实体被合并成一条（迁移完整性由域回归 (e9) 守卫）。 */
+  showToast: (text: string, action?: { label: string; run: () => void; key?: string }) => void;
+  /** OPT-017E：派发错误重试并消费条目（错误中心面板与瞬时 toast 的两个表示面
+   *  同一语义）。id 先按错误中心条目匹配；找不到（条目已被同 key 合并/逐出而
+   *  toast 仍在屏上）回落到同 id 的带动作 toast。消费先于执行：动作内同步重报
+   *  的失败条目在消费之后写入 → 保留（失败不丢入口）；同步抛错则恢复消费前
+   *  快照（同样不丢入口）。 */
+  retryError: (id: number) => void;
+  /** OPT-017E：忽略（删除）单个错误条目 */
+  dismissError: (id: number) => void;
+  /** OPT-017E：清空错误中心（面板「全部清除」） */
+  clearErrors: () => void;
+  openErrorCenter: () => void;
+  closeErrorCenter: () => void;
   triggerManualSync: () => void;
   /** TASK-124：sync-queue-changed 事件落地（App.tsx 监听器调用）。
    *  payload = Rust sync_queue_stats 三元组 {waiting, failed, last_error}。
    *  只写队列三字段，绝不触碰 syncConnected——未配置静默语义在 Rust 发射点
    *  （无凭据不发事件），pill 的本地模式分支不因本动作破坏。 */
   applySyncQueueChanged: (stats: { waiting: number; failed: number; last_error: string | null }) => void;
+  /** OPT-009 B3：subscription-outbox-changed 事件落地（App.tsx 监听器调用）。
+   *  payload = Rust 当前账号回执 `{pending, failed, local_only, last_error}`。
+   *  只写回执字段，绝不触碰队列统计与 syncConnected（越权防护；未配置同步
+   *  静默语义在 Rust 发射点——无凭据不发事件）。 */
+  applySubscriptionOutboxChanged: (stats: SubscriptionOutboxStats) => void;
+  /** OPT-009 B3：拉取当前账号的订阅写回回执（设置页挂载/手动刷新路径）。
+   *  失败**保持原值**（读失败不得冒充「无待办」）。 */
+  refreshSubscriptionOutboxStats: () => Promise<void>;
+  /** OPT-009 B3：拉取订阅写回能力矩阵（挂载/保存/断开后刷新）。失败保持原值
+   *  （不伪造未连接、不伪造能力句）。 */
+  loadSubscriptionCapabilities: () => Promise<void>;
 
   /* ---------- Actions: 订阅管理 ---------- */
   createCategory: (name: string, layout: ContentLayoutType) => void;
   deleteCategory: (catId: string) => void;
   /** 分类改名（连接 Miniflux 时同步远端） */
   renameCategory: (catId: string, name: string) => void;
-  addFeed: (catId: string, url: string, title: string, layout: string, autoSummary: boolean, autoTranslate: boolean, syncToBackend?: boolean) => void;
+  addFeed: (catId: string, url: string, title: string, layout: string, summaryMode: FeedAiMode, translateMode: FeedAiMode, syncToBackend?: boolean) => void;
   deleteFeed: (catId: string, feedId: string) => void;
-  /** 编辑源：改名/移动分类/布局/AI 开关一次性提交 */
-  editFeed: (feedId: string, next: { title: string; catId: string; layout: string; autoSummary: boolean; autoTranslate: boolean }) => void;
+  /** 编辑源：改名/移动分类/布局/AI 开关一次性提交。
+   * OPT-011：AI 开关以三态 mode 为真值（修正此前 bool 回显覆盖用户选择）。 */
+  editFeed: (feedId: string, next: { title: string; catId: string; layout: string; summaryMode: FeedAiMode; translateMode: FeedAiMode }) => void;
   /** 单源手动刷新（直连），toast 反馈新增条数 */
   refreshOneFeed: (feedId: string) => void;
   updateCatLayout: (catId: string, layout: ContentLayoutType) => void;
   updateFeedLayout: (catId: string, feedId: string, layout: string) => void;
   toggleCatSummary: (catId: string, val: boolean) => void;
   toggleCatTranslate: (catId: string, val: boolean) => void;
-  toggleFeedSummary: (catId: string, feedId: string, val: boolean) => void;
-  toggleFeedTranslate: (catId: string, feedId: string, val: boolean) => void;
+  /** OPT-011：源级三态开关（'inherit' | 'on' | 'off'）——显式关闭压过分类开启 */
+  toggleFeedSummary: (catId: string, feedId: string, mode: FeedAiMode) => void;
+  toggleFeedTranslate: (catId: string, feedId: string, mode: FeedAiMode) => void;
   toggleFolderCollapse: (catId: string) => void;
   toggleAllFolders: () => void;
   toggleSettingsCatCollapse: (catId: string) => void;

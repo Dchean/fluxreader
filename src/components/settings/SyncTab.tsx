@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../../store';
-import { api, extractError, type SyncQueueStats } from '../../lib/api';
-import { syncStateSummary } from '../../lib/syncPill';
+import { api, extractError, type SyncQueueStats, type PendingConnection } from '../../lib/api';
+import { syncStateSummary, subscriptionWriteSummary, subscriptionActionLine } from '../../lib/syncPill';
 import { FluxDropdown, Switch, SettingCard, ConfirmDialog } from '../primitives';
 import { CacheCleanupSection } from './CacheCleanupSection';
 import { ConfigSyncSection } from './ConfigSyncSection';
@@ -24,6 +24,10 @@ export function SyncTab() {
   const reloadFromBackend = useAppStore((s) => s.reloadFromBackend);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  /** OPT-009 B3：订阅写回回执（当前账号限定）与能力矩阵——事件与挂载刷新
+   *  写入同一状态源，摘要卡/能力卡直接订阅（不依赖用户手动刷新）。 */
+  const subOutboxStats = useAppStore((s) => s.subOutboxStats);
+  const caps = useAppStore((s) => s.subscriptionCapabilities);
   const [endpoint, setEndpoint] = useState('');
   const [protocol, setProtocol] = useState<'greader' | 'fever'>('greader');
   const [username, setUsername] = useState('');
@@ -39,6 +43,11 @@ export function SyncTab() {
   /** 首连弹窗：本地未绑定源数（>0 弹「同步本地订阅到后端」确认） */
   const [pendingLocalSync, setPendingLocalSync] = useState(0);
   const [syncingLocal, setSyncingLocal] = useState(false);
+  /** OPT-006：配置导入留下的待确认连接建议（需重新输入凭据后保存才会激活） */
+  const [pendingConn, setPendingConn] = useState<PendingConnection | null>(null);
+  /** 激活意图：用户点了「填入表单并激活」后记录建议版本，保存时回传后端做 CAS。
+   * 普通保存（未点激活）= undefined，后端不消费任何建议。 */
+  const [activateVersion, setActivateVersion] = useState<number | undefined>(undefined);
 
   /* 打开设置时读取当前连接状态 */
   useEffect(() => {
@@ -51,7 +60,13 @@ export function SyncTab() {
       if (st.connected && st.endpoint) setEndpoint(st.endpoint);
       setProtocol(st.protocol === 'fever' ? 'fever' : 'greader');
     }).catch(() => { /* TASK-067 N10：挂载期状态拉取失败静默兜底（默认态可用） */ });
+    /* OPT-006：待确认连接建议（配置导入只落建议，激活要走保存流程） */
+    void api.syncPendingConnection().then((p) => setPendingConn(p)).catch(() => { /* 同上：静默兜底 */ });
     refreshQueueStats(setQueueStats);
+    /* OPT-009 B3：订阅写回回执与能力矩阵挂载即取一次真值（事件缺失时
+       摘要卡/能力卡仍与后端一致；读取失败保持原值） */
+    void useAppStore.getState().refreshSubscriptionOutboxStats();
+    void useAppStore.getState().loadSubscriptionCapabilities();
   }, [dataMode]);
 
   /* TASK-124：摘要卡实时跟随 sync-queue-changed——store 三字段由 App.tsx 监听器
@@ -84,9 +99,10 @@ export function SyncTab() {
     }
   };
 
-  /** 保存并后台同步：保存秒回（只做轻量测试+落库），
-      订阅/状态的拉取全部后台执行，设置页可随时关闭。
-      已连接且 Token 留空 = 复用已存 Token（仅改 Endpoint） */
+  /** 保存并同步：保存（轻量测试+事务落库）→ 后台链路（feeds → states → 直连抓新源）
+      全部在 `saving` 覆盖下 await 完成——F06 修复点之一：此前后台链 fire-and-forget，
+      「保存中…」在真正同步结束前就消失，失败也可能只留一个转瞬即逝的 toast。
+      已连接且密码留空 = 复用已存密码（仅改 Endpoint 的场景，同账号更新保留数据） */
   const doSaveAndSync = async () => {
     if (!endpoint.trim()) {
       showToast('请填写 Endpoint');
@@ -98,8 +114,12 @@ export function SyncTab() {
     }
     setSaving(true);
     try {
-      const result = await api.syncSave(protocol, endpoint.trim(), username.trim(), password.trim());
+      const result = await api.syncSave(protocol, endpoint.trim(), username.trim(), password.trim(), activateVersion);
       setConnected(true);
+      /* OPT-006 R1：激活成功由后端 CAS 消费建议；普通保存不消费。统一重读一次
+         真实状态（激活成功 = 无建议；普通保存 = 建议仍在，继续展示）。 */
+      setActivateVersion(undefined);
+      void api.syncPendingConnection().then((p) => setPendingConn(p)).catch(() => { /* 静默兜底 */ });
       /* 保存成功即刷新账户名显示 */
       void api.syncStatus().then((st) => { if (st) setAccount(st.account); });
       setPassword('');
@@ -109,48 +129,74 @@ export function SyncTab() {
       if (result?.firstConnect && result.unboundLocalFeeds > 0) {
         setPendingLocalSync(result.unboundLocalFeeds);
       }
-      /* 全后台链：feeds 阶段（快）→ states 阶段（慢，含全量对账）→ 直连抓新源。
-         TASK-058：后端在 errors 非空时仍返回 Ok（单项失败不中断整链），故失败必须
-         在此**主动读取** report 才能被用户看到。成功路径的既有文案与顺序逐字不变。 */
+      /* TASK-058：后端在 errors 非空时仍返回 Ok（单项失败不中断整链），故失败必须
+         在链路内**主动读取** report 才能被用户看到。成功路径的既有文案与顺序不变。 */
       const failures: string[] = [];
       /* TASK-100 P3-9：后端对账删除计数（SyncReport.removed_feeds）——纯信息展示 */
       let removedFeeds = 0;
-      void api
-        .syncPhase('feeds')
-        .then(async (feedsReport) => {
-          await reloadFromBackend();
-          const fail = syncFailureMessage(feedsReport);
-          if (fail) failures.push(fail);
-          else showToast('已拉取订阅源，正在同步文章状态…');
-          if (feedsReport?.removed_feeds) removedFeeds += feedsReport.removed_feeds;
-          return api.syncPhase('states', true);
-        })
-        .then(async (statesReport) => {
-          await reloadFromBackend();
-          const fail = syncFailureMessage(statesReport);
-          if (fail) failures.push(fail);
-          if (statesReport?.removed_feeds) removedFeeds += statesReport.removed_feeds;
-          return api.refreshAllFeeds().catch(() => null);
-        })
-        .then(() => reloadFromBackend())
-        .then(() => {
-          useAppStore.setState({ syncStatus: 'synced', syncConnected: true });
-          /* 有失败项时给出「有 N 项失败」而不是纯粹的「后端同步完成」；
-             errors 为空则与改动前**逐字相同**。 */
-          showToast(failures.length > 0 ? failures.join('；') : '后端同步完成');
-          /* TASK-100 P3-9：对账移除了远端已删除的订阅源——纯信息展示，单列一条 */
-          if (removedFeeds > 0) showToast(`本次对账移除 ${removedFeeds} 个已在服务端删除的订阅源`);
-          /* TASK-116：本次同步链可能已清空队列或标记失败项，摘要卡跟着刷新 */
-          refreshQueueStats(setQueueStats);
-        })
-        .catch((e: unknown) => {
-          const m = extractError(e);
-          showToast(`后台同步失败：${m}`, { label: '重试', run: () => { void doSaveAndSync(); } });
-        });
+      try {
+        const feedsReport = await api.syncPhase('feeds');
+        await reloadFromBackend();
+        const fail = syncFailureMessage(feedsReport);
+        if (fail) failures.push(fail);
+        else showToast('已拉取订阅源，正在同步文章状态…');
+        if (feedsReport?.removed_feeds) removedFeeds += feedsReport.removed_feeds;
+        const statesReport = await api.syncPhase('states', true);
+        await reloadFromBackend();
+        const fail2 = syncFailureMessage(statesReport);
+        if (fail2) failures.push(fail2);
+        if (statesReport?.removed_feeds) removedFeeds += statesReport.removed_feeds;
+        await api.refreshAllFeeds().catch(() => null);
+        await reloadFromBackend();
+      } catch (e) {
+        /* 链路任一步硬失败：必须显式呈现错误（不假成功），并给出重试入口 */
+        showToast(`后台同步失败：${extractError(e)}`, { label: '重试', key: 'sync:save-and-sync', run: () => { void doSaveAndSync(); } });
+        return;
+      }
+      useAppStore.setState({ syncStatus: 'synced', syncConnected: true });
+      /* 有失败项时给出「有 N 项失败」而不是纯粹的「后端同步完成」；
+         errors 为空则与改动前**逐字相同**。 */
+      showToast(failures.length > 0 ? failures.join('；') : '后端同步完成');
+      /* TASK-100 P3-9：对账移除了远端已删除的订阅源——纯信息展示，单列一条 */
+      if (removedFeeds > 0) showToast(`本次对账移除 ${removedFeeds} 个已在服务端删除的订阅源`);
+      /* TASK-116：本次同步链可能已清空队列或标记失败项，摘要卡跟着刷新 */
+      refreshQueueStats(setQueueStats);
+      /* OPT-009 B3：保存可能更换协议/账号——订阅回执与能力矩阵重读 */
+      void useAppStore.getState().refreshSubscriptionOutboxStats();
+      void useAppStore.getState().loadSubscriptionCapabilities();
     } catch (e) {
       showToast(`保存失败：${endpointHint(extractError(e))}`);
+      /* OPT-006 R1：保存失败（含 staleActivation：建议在验证期间被新导入替换）
+         之后重读建议——界面必须显示当前真实待确认状态，不能残留旧版本。 */
+      void api.syncPendingConnection().then((p) => { setPendingConn(p); setActivateVersion(undefined); }).catch(() => { /* 静默兜底 */ });
     } finally {
       setSaving(false);
+    }
+  };
+
+  /** OPT-006：把配置导入的待确认建议填入表单（不激活——必须重新输入密码后保存） */
+  const doApplyPending = () => {
+    if (!pendingConn) return;
+    if (pendingConn.sync_protocol === 'fever' || pendingConn.sync_protocol === 'greader') {
+      setProtocol(pendingConn.sync_protocol);
+    }
+    if (pendingConn.greader_endpoint) setEndpoint(pendingConn.greader_endpoint);
+    if (pendingConn.greader_username) setUsername(pendingConn.greader_username);
+    setPassword('');
+    /* 记录激活版本：保存时回传后端（后端独立做版本/身份 CAS，不信任 UI） */
+    setActivateVersion(pendingConn.version);
+    showToast('已填入待确认连接信息：请重新输入密码后点「保存并同步」激活');
+  };
+
+  /** OPT-006：放弃待确认建议（不触碰当前连接与本地数据） */
+  const doDismissPending = async () => {
+    try {
+      await api.syncDismissPendingConnection();
+      setPendingConn(null);
+      setActivateVersion(undefined);
+      showToast('已忽略配置导入的连接建议');
+    } catch (e) {
+      showToast(`忽略失败：${extractError(e)}`);
     }
   };
 
@@ -181,6 +227,9 @@ export function SyncTab() {
       setConnected(false);
       setAccount(null);
       setPassword('');
+      /* OPT-009 B3：断开后协议/账号不再生效——订阅回执与能力矩阵重读 */
+      void useAppStore.getState().refreshSubscriptionOutboxStats();
+      void useAppStore.getState().loadSubscriptionCapabilities();
       /* TASK-100 P3-8：断开与「断开后的本地刷新」分开处理——此前 reload 失败
          重抛被同一个 catch 捕获，把「已断开成功」误报成「断开失败」。 */
       try {
@@ -214,13 +263,19 @@ export function SyncTab() {
   const accountTag = account ? `账户 ${account} · ` : '';
 
   /* TASK-116 X2：四态摘要口径收口到纯函数 syncStateSummary（src/lib/syncPill.ts，
-     契约 X2/X3 如实原则；真值表由回归网 t116 断言驱动）。 */
+     契约 X2/X3 如实原则；真值表由回归网 t116 断言驱动）。
+     OPT-009 B3：订阅写回回执行由 subscriptionWriteSummary 纯函数追加——无待办
+     时不新增噪音行；local_only 项如实点名「仅本地生效」（不写成成功也不隐藏）。 */
   const waiting = queueStats?.waiting ?? 0;
   const failedCount = queueStats?.failed ?? 0;
-  const syncStateDesc = syncStateSummary(
-    queueStats ?? { waiting: 0, failed: 0, last_error: null },
-    lastSync,
+  const subscriptionLine = subscriptionWriteSummary(
+    subOutboxStats ?? { pending: 0, failed: 0, local_only: 0, last_error: null },
+    caps?.protocol ?? null,
   );
+  const syncStateDesc = [
+    syncStateSummary(queueStats ?? { waiting: 0, failed: 0, last_error: null }, lastSync),
+    subscriptionLine,
+  ].filter(Boolean).join('；');
 
   return (
     <>
@@ -233,6 +288,24 @@ export function SyncTab() {
       >
         <span className="about-arch-tag">{connected ? (account ?? '已连接') : '未连接'}</span>
       </SettingCard>
+      {/* OPT-006：配置导入的待确认连接建议——只展示非敏感字段；激活必须重新输入
+          密码后经「保存并同步」专用流程（历史实现的导入直接改写活动地址 + 旧密码，
+          会把旧密码拼给新服务端）。 */}
+      {pendingConn && (
+        <SettingCard
+          title="配置导入的连接建议"
+          desc={`来自配置同步：${pendingConn.sync_protocol === 'fever' ? 'Fever' : 'GReader'} · ${pendingConn.greader_endpoint ?? '（未提供地址）'} · ${pendingConn.greader_username ?? '（未提供用户名）'}。激活需重新输入密码后保存，当前连接不受影响。`}
+        >
+          <div className="settings-action-row">
+            <button className="toggle-action-btn btn-primary" disabled={saving} onClick={doApplyPending}>
+              填入表单并激活
+            </button>
+            <button className="toggle-action-btn" disabled={saving} onClick={() => void doDismissPending()}>
+              忽略
+            </button>
+          </div>
+        </SettingCard>
+      )}
       {/* TASK-116 X2：四态摘要卡。状态标签 = 四态中的当下态（部分失败 > 等待同步 >
          本地已保存）——「远端已确认」随成功 prune 即时出队、不可作常驻态展示（X3）；
          desc 收尾即「本地已保存」说明句（状态变更已事务化落库，TASK-108） */}
@@ -241,6 +314,23 @@ export function SyncTab() {
           {failedCount > 0 ? '部分失败' : waiting > 0 ? '等待同步' : '本地已保存'}
         </span>
       </SettingCard>
+      {/* OPT-009 B3：订阅写回能力卡——矩阵/概述/限制全部来自
+          subscription_capabilities 单一事实源（UI 不另写一套说法）。未连接不
+          渲染（不制造噪音）；Fever 下概述明说「仅本地生效」，local_only 计数
+          由上方摘要行如实呈现（不得写成成功也不得隐藏）。 */}
+      {caps?.connected && (
+        <>
+          <SettingCard title="订阅写回" desc={caps.overview}>
+            <span className="about-arch-tag">{caps.protocol === 'fever' ? '仅本地' : '写回远端'}</span>
+          </SettingCard>
+          <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.6, color: 'var(--text-tertiary)' }}>
+            <div>{subscriptionActionLine(caps)}</div>
+            {caps.limitations.map((l) => (
+              <div key={l.code}>· {l.detail}</div>
+            ))}
+          </div>
+        </>
+      )}
       {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
           深浅主题外观与展开行为都与 FluxDropdown 不一致。
           TASK-102：FluxDropdown 必须是 SettingCard 的直接子元素（.setting-card

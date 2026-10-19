@@ -1,4 +1,5 @@
-import type { ArticleEntry, CategoryGroup, FeedItem } from '../types';
+import type { ArticleEntry, CategoryGroup, FeedItem, FeedAiMode } from '../types';
+import { normalizeFeedAiMode } from '../types';
 
 /* ============================================================
    Tauri invoke 封装 —— 浏览器开发环境回退 mock
@@ -21,6 +22,16 @@ export function extractError(e: unknown): string {
     if (typeof rec.code === 'string') return `[${rec.code}]`;
   }
   return String(e);
+}
+
+/** 从 IPC 错误对象提取稳定错误码（extractError 只给消息；分支处置如
+ * 「stalePreview 要求重新预览」需要码）。非对象/无码返回 null。 */
+export function extractErrorCode(e: unknown): string | null {
+  if (typeof e === 'object' && e !== null) {
+    const rec = e as Record<string, unknown>;
+    if (typeof rec.code === 'string') return rec.code;
+  }
+  return null;
 }
 
 async function getInvoke(): Promise<Invoke | null> {
@@ -52,8 +63,12 @@ export interface FeedRow {
   title: string;
   favicon_url: string | null;
   layout: string;
+  /** 旧兼容列（不再是有效真值；仅作为缺 summary_mode 时的映射输入） */
   auto_summary: boolean;
   auto_translate: boolean;
+  /** OPT-011：AI 开关三态真值（旧后端行/schema1 可缺 → 按 bool 映射） */
+  summary_mode?: string | null;
+  translate_mode?: string | null;
   fetch_failed: boolean;
   fetch_error: string | null;
   last_fetched_at: string | null;
@@ -79,6 +94,15 @@ export interface ArticleListItemRow {
   content_html?: string | null;
   translated_content?: string | null;
   fulltext_extracted?: boolean;
+  /** OPT-008B 第二阶段：内容身份 + 修订（前端失效依据；两种模式都返回） */
+  content_id?: number | null;
+  content_revision?: number;
+  /** OPT-013 B1：AI 产物缓存签名（生成时输入身份的 sha256；存量/未生成行 null）。
+   *  产物非空且签名为空 = 旧无签名产物——可显示、可重新生成，但不冒充缓存
+   *  （B3 起 UI 五态判定呈现为「已过期」，见 store/slices/ai.ts 的
+   *  selectAiProductState）。 */
+  ai_summary_sig?: string | null;
+  translated_sig?: string | null;
 }
 
 export interface ArticleDetailRow extends ArticleListItemRow {
@@ -93,19 +117,101 @@ export interface RefreshSummary {
   failed_feeds: number;
 }
 
-/** config_sync_apply 的结果计数（TASK-074：updated 与 skipped 语义分离）。 */
+/** config_sync_apply 的结果计数（TASK-074：updated 与 skipped 语义分离）。
+ * OPT-006：pendingConnection = 配置导入留下的待确认连接建议（协议/地址/用户名，
+ * 无密码）——导入不改活动凭据；激活必须在「后端配置」重新输入密码后经
+ * sync_save 保存。
+ * OPT-010：removedFeeds / removedFolders / affectedArticleCount = 镜像模式
+ * 实际删除的对象数与级联文章数（合并模式恒为 0）。 */
 export interface ConfigSyncApplyResult {
+  mode?: 'merge' | 'mirror';
   imported: number;
   updated: number;
   skipped: number;
+  removedFeeds?: number;
+  removedFolders?: number;
+  affectedArticleCount?: number;
+  pendingConnection?: PendingConnection | null;
+}
+
+/** OPT-010 预览条目：kind 区分源/分类（Rust 侧 serde 契约）。
+ * feed 的 affectedArticleCount 仅删除项携带；folder 删除项带 feedCount。 */
+export interface ConfigSyncPlanFeedItem {
+  kind: 'feed';
+  url: string;
+  title: string;
+  folder: string;
+  changes?: string[];
+  affectedArticleCount?: number;
+}
+export interface ConfigSyncPlanFolderItem {
+  kind: 'folder';
+  name: string;
+  previousName?: string;
+  changes?: string[];
+  feedCount?: number;
+  affectedArticleCount?: number;
+}
+export type ConfigSyncPlanItem = ConfigSyncPlanFeedItem | ConfigSyncPlanFolderItem;
+
+/** OPT-010 两段式预览结果（config_sync_plan）：
+ * additions/updates/removals 为结构化变更清单；snapshotHash 与 currentVersion
+ * 是 apply 的 CAS 凭据（任一不符后端返回 stalePreview、零写入）。 */
+export interface ConfigSyncPlanResult {
+  mode: 'merge' | 'mirror';
+  snapshotHash: string;
+  currentVersion: string;
+  affectedArticleCount: number;
+  additions: ConfigSyncPlanItem[];
+  updates: ConfigSyncPlanItem[];
+  removals: ConfigSyncPlanItem[];
+  settingsChangedKeys: string[];
+  settingsRemovedKeys: string[];
+  pendingConnection: boolean;
+  warnings: string[];
+}
+
+/** 待确认连接建议（OPT-006 R1）：仅非敏感字段 + 激活 CAS 版本号；
+ * 激活需重新输入密码，并把 `version` 原样回传给 syncSave（后端独立校验，不信任 UI）。 */
+export interface PendingConnection {
+  version: number;
+  sync_protocol?: string | null;
+  greader_endpoint?: string | null;
+  greader_username?: string | null;
 }
 
 /** extract_fulltext 的结果（TASK-076 / P2-10 后半）：降级不再静默。
- * degraded=true 时 html 是保留的原文，reason 说明为何没采用提取结果。 */
+ * degraded=true 时 html 是保留的原文，reason 说明为何没采用提取结果。
+ * OPT-008B R3（wire 增字段）：提交成功时携带实际内容身份/修订（Rust 侧
+ * camelCase 序列化为 contentId/contentRevision）——前端落 bodyCache 记录，
+ * 下一次 reload 不把刚成功提取的正文按「修订变化」清空重取。旧后端缺省/
+ * 降级时为 undefined（前端保持记录现值，行为与旧版一致）。 */
 export interface ExtractFulltextResult {
   html: string;
   degraded: boolean;
   reason: string | null;
+  contentId?: number | null;
+  contentRevision?: number;
+}
+
+/** OPT-013 B2：翻译分段计划（ai_cache_check 响应的一部分）。
+ *  - total：当前输入下的总段数（短文 = 1；空正文 = 0）；
+ *  - completed：当前签名下已持久化的完成段数（重启后可恢复的依据）；
+ *  - discarded：因输入变化（模型/提示词/正文修订/分段策略）作废的旧片段数——
+ *    > 0 表示存在作废旧片段、界面必须如实告知（B2 最小提示）；但**不**一律
+ *    等于整篇重新生成：`0 < completed < total` 时复用已完成段、从第
+ *    completed+1 段继续（R2 复审口径收紧）。 */
+export interface TranslationSegmentPlan {
+  total: number;
+  completed: number;
+  discarded: number;
+}
+
+/** OPT-013 B1/B2：ai_cache_check 响应（命中判定 + 翻译分段计划）。 */
+export interface AiCacheCheckResult {
+  summaryVerified: boolean;
+  translationVerified: boolean;
+  translationSegments: TranslationSegmentPlan;
 }
 
 export interface SyncReport {
@@ -140,12 +246,69 @@ export interface SyncQueueStats {
   last_error: string | null;
 }
 
+/* ---------- OPT-009 B3：订阅写回能力矩阵与持久回执 ---------- */
+
+/** 单动作的远端写回支持度。**逐字对应 Rust `SubscriptionWriteSupport` 的
+ *  serde 输出**（src-tauri/src/commands/sync.rs）——改任一侧必须同步改另一侧
+ *  （Rust 单测锁定 serde 名称）。 */
+export type SubscriptionWriteSupport = 'Supported' | 'LocalOnly' | 'Unsupported';
+
+/** 单动作的能力声明：结构化枚举 + 面向用户的如实说明（与 support 同源；
+ *  确认弹窗/能力卡直接采用，不在 UI 另写一套说法）。 */
+export interface SubscriptionActionCapability {
+  support: SubscriptionWriteSupport;
+  detail: string;
+}
+
+/** B2 已登记的能力边界（code 为稳定标识，detail 为用户可读说明）。 */
+export interface SubscriptionCapabilityLimit {
+  code: string;
+  detail: string;
+}
+
+/** subscription_capabilities 返回（OPT-009 B3；后端单一事实源，只读）。 */
+export interface SubscriptionCapabilities {
+  connected: boolean;
+  /** "greader" | "fever"；未连接为 null */
+  protocol: 'greader' | 'fever' | null;
+  /** 能力边界的一句话概述（设置页能力卡/提示条直接采用） */
+  overview: string;
+  subscribe: SubscriptionActionCapability;
+  edit_title: SubscriptionActionCapability;
+  move_folder: SubscriptionActionCapability;
+  unsubscribe: SubscriptionActionCapability;
+  rename_folder: SubscriptionActionCapability;
+  delete_folder: SubscriptionActionCapability;
+  empty_folder_remote: SubscriptionActionCapability;
+  limitations: SubscriptionCapabilityLimit[];
+}
+
+/** subscription_outbox_stats 返回（OPT-009 B3）：**当前账号限定**的订阅写回
+ *  回执（异账号暂停的队项不混入）。pending = 待推/待重试；failed = pending 中
+ *  attempts>0 的子集；local_only = 远端不支持、仅本地生效的终态项；
+ *  last_error = 最近失败摘要（Rust 侧已截断）。 */
+export interface SubscriptionOutboxStats {
+  pending: number;
+  failed: number;
+  local_only: number;
+  last_error: string | null;
+}
+
 /** sync_save 返回：首连且本地有未绑定源时 firstConnect=true
  *（前端据此弹「同步本地订阅到后端」确认框） */
 export interface SyncSaveResult {
   message: string;
   firstConnect: boolean;
   unboundLocalFeeds: number;
+}
+
+/** check_for_updates 返回（OPT-014 / F16）：Rust 侧固定请求官方仓库
+ * releases/latest（禁止跟随重定向）；url 只可能是本仓库 releases 域——
+ * html_url 缺失时回落后端官方发布页，已提供但非受信/非法时整体报错
+ * （不会拿官方页顶替）。版本比较仍在前端 compareVersions。 */
+export interface UpdateCheckResult {
+  version: string;
+  url: string;
 }
 
 export interface ArticleListArgs {
@@ -171,6 +334,12 @@ export interface ArticleListArgs {
   last_id?: number | null;
 }
 
+/** OPT-008B R2（N1）：读写入回执行——读闭包真实翻转的条目（含同 URL 副本）。 */
+export interface ReadWriteReceipt {
+  id: number;
+  feed_id: number;
+}
+
 /** 后端聚合的精确条目计数（按 feed 分组）——侧边栏数字用，不受列表分页 limit 影响 */
 export interface FeedCountsRow {
   feed_id: number;
@@ -178,6 +347,23 @@ export interface FeedCountsRow {
   unread: number;
   starred: number;
   today: number;
+}
+
+/** OPT-008B：显示集合（smartDedup）的 scope 精确计数行。 */
+export interface ScopeCountsRow {
+  scope_id: number;
+  total: number;
+  unread: number;
+  starred: number;
+  today: number;
+}
+
+/** OPT-008B：`scope_counts` 返回——全部 / 每分类 / 每源（当前布局过滤后），
+    与列表/搜索/markAll 同一显示集合谓词族。 */
+export interface ScopeCountsDetailRow {
+  all: { total: number; unread: number; starred: number; today: number };
+  folders: ScopeCountsRow[];
+  feeds: ScopeCountsRow[];
 }
 
 /* ============================================================
@@ -205,19 +391,30 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('list_feeds') as FeedRow[]) : null;
   },
-  /** 精确条目计数（后端聚合，按 feed 分组），侧边栏角标用 */
-  async feedCounts(): Promise<FeedCountsRow[] | null> {
+  /* OPT-017F：feedCounts / scopeCounts 两个分项读取包装已删（全仓零调用方；
+     OPT-008B R2 起计数统一走下方 countsSnapshot 组合快照）。对应 IPC 命令
+     （feed_counts / scope_counts）保留在 Rust 注册表，命令签名不随包装器删除
+     ——见 .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md。 */
+  /** OPT-008B R2（N2/P3-4）：**计数组合快照**——同一开关值、同一 DB 锁内返回
+      源计数（布局无关）+ scope 精确计数（按布局）。对账/启动装载只发这一条
+      IPC，源键与聚合键不会来自两个时刻。 */
+  async countsSnapshot(layout?: string): Promise<{ feeds: FeedCountsRow[]; scope: ScopeCountsDetailRow } | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('feed_counts') as FeedCountsRow[]) : null;
+    return inv
+      ? (await inv('counts_snapshot', { layout: layout ?? null }) as { feeds: FeedCountsRow[]; scope: ScopeCountsDetailRow })
+      : null;
   },
+  /** 添加订阅源（OPT-011：新 UI 传三态 mode；旧 caller 可省略 mode 走旧 bool 显式语义） */
   async addFeed(
     feedUrl: string,
     title: string | null,
     folderId: number | null,
     layout: string,
-    autoSummary: boolean,
-    autoTranslate: boolean,
+    autoSummary: boolean | null,
+    autoTranslate: boolean | null,
     syncToBackend: boolean,
+    summaryMode?: FeedAiMode,
+    translateMode?: FeedAiMode,
   ): Promise<FeedRow | null> {
     const inv = await getInvoke();
     return inv
@@ -228,6 +425,8 @@ export const api = {
           layout,
           autoSummary,
           autoTranslate,
+          summaryMode: summaryMode ?? null,
+          translateMode: translateMode ?? null,
           syncToBackend,
         }) as FeedRow)
       : null;
@@ -236,7 +435,9 @@ export const api = {
     const mount = await getInvoke();
     return mount ? (await mount('delete_feed', { id }) as null) : null;
   },
-  /** 编辑源：标题/分类/布局/AI 开关一次性更新（undefined 字段保持不变） */
+  /** 编辑源：标题/分类/布局/AI 开关一次性更新（undefined 字段保持不变）。
+   * OPT-011：新 UI 传三态 summaryMode/translateMode；旧 caller 仍可只传 bool
+   * （后端映射显式 on/off，见 db::update_feed_full）。 */
   async updateFeed(args: {
     id: number;
     title?: string;
@@ -244,6 +445,8 @@ export const api = {
     layout?: string;
     autoSummary?: boolean;
     autoTranslate?: boolean;
+    summaryMode?: FeedAiMode;
+    translateMode?: FeedAiMode;
   }): Promise<null> {
     const inv = await getInvoke();
     return inv ? (await inv('update_feed', args) as null) : null;
@@ -286,15 +489,19 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('get_articles', { ids }) as ArticleDetailRow[]) : null;
   },
-  async setRead(id: number, read: boolean): Promise<null> {
+  /** 单条标读/取消标读。R2（N1）：读闭包可能一并标读同 URL 未读副本——
+   * 返回**真实翻转行回执**（`[{id, feed_id}]`），供前端让受影响条目/计数本地
+   * 收敛；mock/旧后端返回 null 时按无回执处理（仅乐观行）。 */
+  async setRead(id: number, read: boolean): Promise<ReadWriteReceipt[] | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_read', { id, read }) as null) : null;
+    return inv ? (await inv('set_read', { id, read }) as ReadWriteReceipt[]) : null;
   },
   /** 批量标读：一次 IPC 处理整批 id（AUDIT P3[F4]）。语义与逐条 setRead 等价，见
-   *  Rust 侧 set_read_bulk 的契约注释（每个 id 都走 record_read_state + 入队）。 */
-  async setReadBulk(ids: number[], read: boolean): Promise<null> {
+   *  Rust 侧 set_read_bulk 的契约注释（每个 id 都走 record_read_state + 入队）。
+   *  R2（N1）：返回整批真实翻转行回执（去重升序；含闭包副本）。 */
+  async setReadBulk(ids: number[], read: boolean): Promise<ReadWriteReceipt[] | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_read_bulk', { ids, read }) as null) : null;
+    return inv ? (await inv('set_read_bulk', { ids, read }) as ReadWriteReceipt[]) : null;
   },
   async setStarred(id: number, starred: boolean): Promise<null> {
     const inv = await getInvoke();
@@ -329,18 +536,46 @@ export const api = {
     return inv ? (await inv('set_setting', { key, value }) as null) : null;
   },
 
+  /* ---- 更新检查（OPT-014：出网收口在 Rust，固定目的地，无 URL 入参） ---- */
+  /** 检查官方仓库最新发布。失败（含 404/429/5xx/无 tag）抛 AppError 拒绝；
+   * 浏览器环境无 IPC → 返回 null（调用方按失败处理）。 */
+  async checkForUpdates(): Promise<UpdateCheckResult | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('check_for_updates') as UpdateCheckResult) : null;
+  },
+
   /* ---- 分类/订阅源级设置落库（接线后端已有命令） ---- */
   async setFolderCollapsed(id: number, collapsed: boolean): Promise<null> {
     const inv = await getInvoke();
     return inv ? (await inv('set_folder_collapsed', { id, collapsed }) as null) : null;
   },
-  async setFolderAiFlags(id: number, autoSummary: boolean, autoTranslate: boolean): Promise<null> {
+  /** OPT-011：分类 AI 默认单字段 patch——undefined 的字段不发送（只写被改字段）。
+   * 旧 full 调用（两字段都给）语义不变；两字段独立落库，并发乱序不互相覆盖。 */
+  async setFolderAiFlags(id: number, autoSummary?: boolean, autoTranslate?: boolean): Promise<null> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_folder_ai_flags', { id, summary: autoSummary, translate: autoTranslate }) as null) : null;
+    if (!inv) return null;
+    const args: Record<string, unknown> = { id };
+    if (autoSummary !== undefined) args.summary = autoSummary;
+    if (autoTranslate !== undefined) args.translate = autoTranslate;
+    return (await inv('set_folder_ai_flags', args) as null);
   },
-  async setFeedAiFlags(id: number, autoSummary: boolean, autoTranslate: boolean): Promise<null> {
+  /* OPT-017F：旧 bool 双字段包装 setFeedAiFlags 已删（全仓零调用方；OPT-011
+     起的唯一真值入口是下方三态 setFeedAiModes）。对应 IPC 命令
+     set_feed_ai_flags 保留（旧 bool→显式 on/off 的映射语义在 Rust 侧有单测
+     锁定），命令签名不随包装器删除——见
+     .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md。 */
+  /** OPT-011：源级 AI 开关三态（新真值入口；只动给出的字段，undefined 不改）。
+   * 与后端旧 bool 入口（set_feed_ai_flags，命令保留）的边界一致：只写本地，
+   * 不推远端。 */
+  async setFeedAiModes(id: number, summaryMode?: FeedAiMode, translateMode?: FeedAiMode): Promise<null> {
     const inv = await getInvoke();
-    return inv ? (await inv('set_feed_ai_flags', { id, summary: autoSummary, translate: autoTranslate }) as null) : null;
+    return inv
+      ? (await inv('set_feed_ai_modes', {
+          id,
+          summaryMode: summaryMode ?? null,
+          translateMode: translateMode ?? null,
+        }) as null)
+      : null;
   },
 
   /* ---- AI 引擎（OpenAI 兼容：官方 / DeepSeek / GLM / newapi） ---- */
@@ -401,6 +636,40 @@ export const api = {
       else if (m.type === 'error') onError(String(m.data ?? 'AI 错误'));
     };
     return (await inv('ai_translate', { articleId, onChannel: channel })) as string;
+  },
+
+  /** OPT-013 B1：AI 缓存签名校验（后端权威结论）。
+   *
+   *  签名输入（模型/endpoint/提示词/正文哈希/修订）只有后端在同一份配置快照下
+   *  能算——前端不再自行以「产物非空」短路，命中判定在动作时刻经本命令取回：
+   *  对应项 true = 产物非空且签名匹配当前输入，可复用展示；false = 未生成、
+   *  无签名（存量）或已过期（换模型/提示词/正文修订）→ 走重新生成。
+   *  浏览器环境无 IPC → null（调用方按「无后端可校验」处理）。
+   *
+   *  Note: 命中判定/代次/在途契约 — 见
+   *  .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md（OPT-013 B1 追加）。 */
+  async aiCacheCheck(
+    articleId: number,
+  ): Promise<AiCacheCheckResult | null> {
+    const inv = await getInvoke();
+    return inv
+      ? (await inv('ai_cache_check', { articleId }) as AiCacheCheckResult)
+      : null;
+  },
+
+  /** OPT-013 B3：按「条目 × 产物」清除 AI 缓存（真实消费者「清除」入口的后端接线）。
+   *
+   *  product = 'summary' | 'translation'（与后端 AiKind::id 的签名字符串域逐字一致）。
+   *  后端在单事务内：清产物列与签名列、`ai_epoch + 1`（在途迟到提交被拒）、删除该
+   *  条目该产物在**所有签名**下的持久化片段——清除后「继续」零恢复，且不可能再
+   *  显示 partial。条目不存在/取值非法 → AppError（前端如实 toast，不清前端状态）。
+   *  浏览器环境无 IPC → null（调用方按不可用处理）。 */
+  async aiClearCache(
+    articleId: number,
+    product: 'summary' | 'translation',
+  ): Promise<null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('ai_clear_cache', { articleId, product }) as null) : null;
   },
 
   /** 全文提取（Readability）：拉原文网页抽正文并覆盖缓存。
@@ -467,13 +736,27 @@ export const api = {
     return (await inv('config_sync_download')) as string;
   },
 
-  /** 应用下载的配置。返回 { imported, updated, skipped }。
+  /** OPT-010：预览下载的配置（只读）——返回结构化新增/更新/删除清单、受影响
+   * 文章数、快照 hash 与本地配置版本签名。取消 = 不调用 configSyncApply。 */
+  async configSyncPlan(payload: string, mode: 'merge' | 'mirror'): Promise<ConfigSyncPlanResult | null> {
+    const inv = await getInvoke();
+    if (!inv) return null;
+    return (await inv('config_sync_plan', { payload, mode })) as ConfigSyncPlanResult;
+  },
+
+  /** 应用下载的配置（OPT-010：必须携带预览返回的两个签名）。
    * TASK-074：updated=已存在且确有改动、已写库的源数；skipped=已存在但内容
-   * 与远端一致、真的无需改动的源数（此前 skipped 实为已更新数）。 */
-  async configSyncApply(payload: string): Promise<ConfigSyncApplyResult> {
+   * 与远端一致、真的无需改动的源数（此前 skipped 实为已更新数）。
+   * 签名不符后端返回 stalePreview（code）且零写入——调用方应清除预览要求重新预览。 */
+  async configSyncApply(
+    payload: string,
+    mode: 'merge' | 'mirror',
+    expectedSnapshotHash: string,
+    expectedVersion: string,
+  ): Promise<ConfigSyncApplyResult> {
     const inv = await getInvoke();
     if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('config_sync_apply', { payload })) as ConfigSyncApplyResult;
+    return (await inv('config_sync_apply', { payload, mode, expectedSnapshotHash, expectedVersion })) as ConfigSyncApplyResult;
   },
 
   /* ---- GitHub 设备流登录 ---- */
@@ -526,11 +809,18 @@ export const api = {
   },
   /** 保存凭据（先测试，失败不保存）。重活（拉订阅/同步状态）由前端随后台阶段执行。
    * 返回 JSON：{ message, firstConnect, unboundLocalFeeds }——首连且本地有
-   * 未绑定源时前端弹「同步本地订阅」确认框 */
-  async syncSave(protocol: string, endpoint: string, username: string, password: string): Promise<SyncSaveResult | null> {
+   * 未绑定源时前端弹「同步本地订阅」确认框。
+   * OPT-006 R1：`activatePendingVersion` 仅在**专用激活**配置导入建议时传入
+   * （值取自 syncPendingConnection().version）；普通保存不传 = 不消费任何建议。
+   * 后端在 HTTP 前与提交事务内两次做版本/身份校验（CAS），不匹配整体拒绝。 */
+  async syncSave(protocol: string, endpoint: string, username: string, password: string, activatePendingVersion?: number): Promise<SyncSaveResult | null> {
     const inv = await getInvoke();
     if (!inv) return null;
-    const raw = (await inv('sync_save', { protocol, endpoint, username, password })) as string;
+    const args: Record<string, unknown> = { protocol, endpoint, username, password };
+    if (activatePendingVersion !== undefined) {
+      args.activatePendingVersion = activatePendingVersion;
+    }
+    const raw = (await inv('sync_save', args)) as string;
     try {
       return JSON.parse(raw) as SyncSaveResult;
     } catch {
@@ -567,11 +857,34 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('sync_status') as SyncStatusInfo) : null;
   },
+  /** 配置导入的待确认连接建议（OPT-006）：只读展示；激活走 syncSave
+   * （需重新输入密码），放弃走 syncDismissPendingConnection。浏览器环境返回 null。 */
+  async syncPendingConnection(): Promise<PendingConnection | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('sync_pending_connection') as PendingConnection | null) : null;
+  },
+  /** 放弃待确认连接建议（不触碰活动凭据/绑定）。 */
+  async syncDismissPendingConnection(): Promise<void> {
+    const inv = await getInvoke();
+    if (inv) await inv('sync_dismiss_pending_connection');
+  },
   /** 同步队列统计（TASK-116 四态展示：等待/部分失败 + 最近错误摘要）。
    * 浏览器环境返回 null */
   async syncQueueStats(): Promise<SyncQueueStats | null> {
     const inv = await getInvoke();
     return inv ? (await inv('sync_queue_stats') as SyncQueueStats) : null;
+  },
+  /** 订阅写回能力矩阵（OPT-009 B3 只读 IPC；设置页能力卡与确认弹窗远端语义
+   *  句的单一事实源）。浏览器环境返回 null */
+  async subscriptionCapabilities(): Promise<SubscriptionCapabilities | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('subscription_capabilities') as SubscriptionCapabilities) : null;
+  },
+  /** 订阅写回回执（OPT-009 B3 只读 IPC；当前账号限定的 pending/failed/
+   *  local_only/最近错误——异账号暂停项不混入）。浏览器环境返回 null */
+  async subscriptionOutboxStats(): Promise<SubscriptionOutboxStats | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('subscription_outbox_stats') as SubscriptionOutboxStats) : null;
   },
 };
 
@@ -605,6 +918,10 @@ export function feedRowToItem(row: FeedRow): FeedItem {
     layout: row.layout as FeedItem['layout'],
     autoSummary: row.auto_summary,
     autoTranslate: row.auto_translate,
+    /* OPT-011：mode 为真值；旧行/旧 mock 缺 mode（schema1/旧后端）时按旧 bool
+       映射显式 on/off——升级不把原本关闭的源推向付费 AI。 */
+    summaryMode: normalizeFeedAiMode(row.summary_mode, row.auto_summary),
+    translateMode: normalizeFeedAiMode(row.translate_mode, row.auto_translate),
     fetchFailed: row.fetch_failed,
   };
 }
@@ -650,5 +967,14 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
        真值，未水合卡片的即时显示源（过渡兼容位，见 ArticleEntry 注释）。 */
     translatedContent: row.translated_content ?? '',
     fulltextExtracted: row.fulltext_extracted ?? false,
+    /* OPT-008B 第二阶段：内容身份/修订进视图行——前端失效判定依据
+       （列表快照合并与时序水合守卫消费，见 internals/bodyCache）。 */
+    contentId: row.content_id ?? null,
+    contentRevision: row.content_revision ?? 0,
+    /* OPT-013 B1/B3：AI 产物缓存签名进视图行（null/undefined = 旧无签名产物——
+       五态判定（slices/ai.ts）据此呈「已过期」；命中判定同样在 store/slices/ai.ts
+       经后端 ai_cache_check 完成，前端不自算签名）。 */
+    aiSummarySig: row.ai_summary_sig ?? null,
+    translatedSig: row.translated_sig ?? null,
   };
 }

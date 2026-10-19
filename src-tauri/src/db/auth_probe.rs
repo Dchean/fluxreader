@@ -19,6 +19,13 @@ use std::sync::Mutex;
 static FILTER: Mutex<Option<(c_int, Option<String>)>> = Mutex::new(None);
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// 全局串行锁：FILTER/COUNT 是**进程级**状态，而 `cargo test` 把同一测试二进制的
+/// 多个 `#[test]` 并发跑在线程里——两个探针用例交叠时，一方会把另一方（乃至任意
+/// 并发 SQL）的 prepare 事件计进自己的数，断言随机失真（M-9 的「事件数随 N 增长」
+/// 判别力自检与 M-14 的「零 UPDATE」都曾因此 flaky）。探针调用全程互斥，使每条
+/// 断言只计自己那段 SQL。
+static PROBE_LOCK: Mutex<()> = Mutex::new(());
+
 extern "C" fn on_auth(
     _p: *mut c_void,
     action: c_int,
@@ -49,6 +56,8 @@ pub(crate) fn with_count<T>(
     filter: Option<(c_int, &str)>,
     f: impl FnOnce() -> T,
 ) -> (T, usize) {
+    // 进程级探针状态：同一时刻只允许一个 with_count 生效（见 PROBE_LOCK 注释）。
+    let _serial = PROBE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     *FILTER.lock().unwrap() = filter.map(|(a, t)| (a, Some(t.to_string())));
     COUNT.store(0, Ordering::SeqCst);
     let rc =
