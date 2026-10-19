@@ -4,10 +4,10 @@
 // 取证边界：不触网。`check_for_updates` 是受控 IPC（Rust 侧固定目的地 HTTP 的
 // 本地单测已由 OPT-014 覆盖），本文件只证明生产组件 AboutTab 的真实点击 →
 // api.checkForUpdates → 三种结果文案与错误账本行为；@tauri-apps/api/app 的
-// getVersion 由 tauri-compat-loader 桩为可比版本（0.17.1）。
+// getVersion 由 tauri-compat-loader 桩为 package.json 驱动的可比版本。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { componentTest, mount, flush, waitFor, resetStore, useAppStore } from './harness.mjs';
+import { componentTest, mount, flush, resetStore, useAppStore } from './harness.mjs';
 import { installBackend, clearInvokeCalls, setPlan, resetPlan, invokeCount } from './fixtures.mjs';
 
 /* 本地版本以 package.json 为准，远端「有更新」版本按 minor 递增派生：
@@ -23,12 +23,24 @@ const REMOTE_VERSION = nextMinor(LOCAL_VERSION);
 const REMOTE_URL = `https://github.com/Dchean/fluxreader/releases/tag/v${REMOTE_VERSION}`;
 
 async function mountAbout() {
-  const { createElement } = await import('react');
+  const { act, createElement } = await import('react');
   const { AboutTab } = await import('../../src/components/settings/AboutTab.tsx');
   const entry = await mount(createElement(AboutTab));
-  await waitFor(() => entry.container.textContent.includes(`FluxReader v${LOCAL_VERSION}`), {
-    label: '本地版本经 getVersion 就绪',
-  });
+  /* Node 22 的 React 调度会在 mount() 的 act 结束后才让 resolveLocalVersion 的
+     异步 setVersion 落地（动态 import + getVersion），从而报「not wrapped in
+     act」。这里在 mount 后立即用多次 act 覆盖整个异步窗口：每次 act 等待一个
+     宏任务让 import/getVersion 推进，act 结束时提交 setVersion；检查放在 act
+     之外（act 回调内读不到尚未提交的文本）。不抑制 console.error、不放宽账本。 */
+  const start = Date.now();
+  for (;;) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    if (entry.container.textContent.includes(`FluxReader v${LOCAL_VERSION}`)) break;
+    if (Date.now() - start > 4000) {
+      throw new Error('waitFor 超时（4000ms）：本地版本经 getVersion 就绪');
+    }
+  }
   return entry;
 }
 
