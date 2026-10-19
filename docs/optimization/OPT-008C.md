@@ -1,6 +1,6 @@
 # OPT-008C：内容所有权收口取证与身份不变量
 
-Status: queued
+Status: verified-ci
 父卡：OPT-008。前置：OPT-008A、OPT-008B（均 verified-ci）。
 
 ## 主控读码确认的事实（2026-10-19，独立只读审计）
@@ -79,3 +79,27 @@ Status: queued
 `cargo test`（分批执行，单次不得超宿主 10 分钟上限）；触及前端时补
 `npm run lint`、`npm run build`、`npm run test:frontend`、`npm run test:components`。
 证据存 `tmp/optimization-20261008/OPT-008C/evidence/`。
+
+## 主控验收记录（2026-10-19）
+
+- 编码会话 `code-opt008c-20261019`；独立只读复审两轮：
+  首轮 `audit-opt008c-20261019` **PASS WITH FINDINGS**（P0/P1=0、P2×1、P3×4），
+  返工后聚焦复审 `audit-opt008c-r2-20261019` **PASS WITH FINDINGS**
+  （P0/P1/P2=0、P3×2），两项 P3 已 tidy（补非规范身份守卫测试、重生成变异还原证据）。
+  报告：`tmp/optimization-20261008/OPT-008C/{REVIEW.md,codebuddy-review-r2.log}`。
+- **identity 裁决 a 落地**：`repair_extracted_body_if_mismatch` 修复后按字节重算
+  identity；命中同 source + 同 HTML + 同 body 的已有行时，重指全部引用条目、
+  目标 `revision+1`、提取标志取并集、删除原行；碰撞按 `base|c<len>` 加盐、
+  16 次不收敛报错；整组可嵌套 SAVEPOINT。存量「旧实现只改 body 未改 identity」
+  的行在再次触达时**运行期惰性收敛**（无等价行只换 identity、不 bump revision）。
+- 补齐验收：v21 两源同 URL / 不同正文 / 不同 AI 迁移无损 + 外键检查 + 重开幂等；
+  AI 年龄清理共享兄弟分叉 + 回执纯函数单测；五布局读藏隔离 + 共享正文修订；
+  非规范身份（`e|` / `|c`）不被误改。
+- 返工后全量 Rust 门禁 **734 passed / 0 failed / 0 ignored**（7 chunk + lib/bins +
+  doc，逐 chunk `exit=0`）；tidy 仅新增 1 条测试并复验 contents 套件
+  **29 passed**、`cargo fmt`/`clippy` `EXIT=0`。最终提交树的完整套件由 CI 复核。
+- 提交 `bf9abe4` 推送 dev；提交级 CI run 233
+  （[39192812933](https://github.com/Dchean/fluxreader/actions/runs/39192812933)）
+  completed success（7m26s）。
+- 遗留：存量收敛是惰性的（未触达行不动，一次性回填不在本卡）；live 三套件未跑；
+  md5 碰撞路径不可实测；v21 夹具是按当时 SQL 合成的旧形状。

@@ -16,7 +16,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 
 ## 进度快照（2026-10-15，Asia/Shanghai）
 
-- **18 张主卡：16 张完成验收并通过提交级 CI，2 张尚未完成。** 未完成项为 OPT-008 总收口、OPT-018 最终验收与发布；父子卡不重复计数，不按卡片数量推算工作量百分比。
+- **18 张主卡：17 张完成验收并通过提交级 CI，1 张尚未完成。** 未完成项为 OPT-018 最终验收与发布；父子卡不重复计数，不按卡片数量推算工作量百分比。
 - 已完成：OPT-001～007、OPT-009（B1/B2/B3 已随 55c379b 通过 CI）、010、011、012、013（013A/B1/B2/B3 全部 CI 通过）、014、015、015Q、016。
 - 剩余：008（主卡总收口，待 018）、017（已拆 017B～017F 五个子卡，逐卡派发）、018（最终验收、main 合并与发布）。
 - 状态取值：`queued`（未开工）/ `coding`（实现中）/ `review`（实现完成、门禁通过、待独立复审，尚未提交/CI）/ `verified-local`（本地/夹具已验收）/ `verified-ci`（已提交并通过提交级 CI）。
@@ -33,7 +33,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-005](OPT-005.md) | Fever 身份与完整历史回溯 | F03,F19 | OPT-004 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-006](OPT-006.md) | 账号生命周期与配置导入隔离 | F05,F06 | OPT-001, OPT-004 | verified-ci | 已提交、独立审查及 CI 通过 |
 | [OPT-007](OPT-007.md) | 可恢复 pull 与提交时冲突保护 | F09,F10,F11 | OPT-005, OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
-| [OPT-008](OPT-008.md) | 内容身份与保守去重 | F12 | OPT-007 | verified-ci | 008A及008B第二阶段本地门禁、独立复审与Windows CI通过；待总收口 |
+| [OPT-008](OPT-008.md) | 内容身份与保守去重 | F12 | OPT-007 | verified-ci | 008A/008B/008C 全部 verified-ci；008C 补齐 identity 不变量与迁移/读藏/AI 分叉反例，bf9abe4 / CI 39192812933；父卡收口完成 |
 | [OPT-009](OPT-009.md) | 可靠订阅写回和能力声明 | F17 | OPT-006, OPT-008 | verified-ci | 55c379b 整卡初审 PASS、主控复核与 [CI 38677466863](https://github.com/Dchean/fluxreader/actions/runs/38677466863) 成功；待 OPT-008 总收口 |
 | [OPT-010](OPT-010.md) | 配置快照合并与镜像语义 | F18 | OPT-006, OPT-009 | verified-ci | 7339679 初审/返工/复审与主控复核通过，[CI 38697114198](https://github.com/Dchean/fluxreader/actions/runs/38697114198) 成功；待 OPT-008 总收口 |
 | [OPT-011](OPT-011.md) | AI 设置单点与输入范围一致 | F13,refreshInterval | OPT-006 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
@@ -69,7 +69,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | --- | --- | --- | --- |
 | [OPT-008A](OPT-008A.md) | 保守 URL 匹配与版本化重建 | verified-ci | 008：仍缺内容/条目实体分离 |
 | [OPT-008B](OPT-008B.md) | 内容实体与各订阅源条目分离 | verified-ci | R3A独立复审通过；提交8156726的Windows CI 38381181417成功；待总收口 |
-| [OPT-008C](OPT-008C.md) | 内容所有权收口取证与身份不变量 | queued | 2026-10-19 总收口审计发现 3 类缺口：identity 修复不重算、v21 同 URL 迁移反例缺失、AI 分叉/五布局读藏覆盖不足；FTS 口径需改写 |
+| [OPT-008C](OPT-008C.md) | 内容所有权收口取证与身份不变量 | verified-ci | bf9abe4 / CI 39192812933；identity 重算+等价合并+存量惰性收敛；v21 两源迁移、AI 分叉、五布局读藏、回执反例补齐 |
 | [OPT-013A](OPT-013A.md) | SSE 完成信号与错误分型 | verified-ci | 013：仍缺长文分段、缓存版本与恢复 |
 | [OPT-015N](OPT-015N.md) | 隔离 Windows 原生窗口恢复验收 | verified-local | 八场景及独立审查通过；物理拔屏、动态 DPI 与完整 SMTC 音频链未覆盖 |
 | [OPT-015P](OPT-015P.md) | 原生最大化首显闪烁修复 | verified-ci | 已提交并通过 CI |
