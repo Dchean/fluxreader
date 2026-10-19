@@ -16,7 +16,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 
 ## 进度快照（2026-10-19，Asia/Shanghai）
 
-- **18 张主卡：17 张完成验收并通过提交级 CI，仅 OPT-018（最终验收与发布）尚未完成。** 父子卡不重复计数，不按卡片数量推算工作量百分比。
+- **18 张主卡全部完成验收并通过提交级 CI。** 发布序列（dev→main、版本 bump、main CI、tag/release）按 `docs/release.md` 执行中；父子卡不重复计数，不按卡片数量推算工作量百分比。
 - 已完成：OPT-001～007；OPT-008（008A/B/C 全部 verified-ci）；OPT-009（B1/B2/B3 已随 55c379b 通过 CI）；OPT-010～014；OPT-015（含 015N/P/Q）；OPT-016（含 016A/B/C）；OPT-017（017A 本地基线 + 017B～017G 六张实现子卡提交级证据）。
 - 剩余：OPT-018（最终验收、main 合并与发布）。
 - 状态取值：`queued`（未开工）/ `coding`（实现中）/ `review`（实现完成、门禁通过、待独立复审，尚未提交/CI）/ `verified-local`（本地/夹具已验收）/ `verified-ci`（已提交并通过提交级 CI）。
@@ -44,7 +44,7 @@ CodeBuddy 首选 --model deepseek-v4.1-flash --effort max。仅确认为配额/t
 | [OPT-015Q](OPT-015Q.md) | 生产自动建窗路径冷启位置恢复 | F23 | OPT-015 | verified-ci | R2 差集 12/12 绿、015N 8/8、独立复审条件通过；dev 未复现跳位，生产零改动；e80957b CI 38714382972 通过；待随 OPT-015 系列合并后请用户实机复测 |
 | [OPT-016](OPT-016.md) | 行为回归分层与依赖卫生 | 测试网,依赖,CI | OPT-003, OPT-012, OPT-013, OPT-015 | verified-ci | c25d367 独立审查、主控复核与提交级CI通过 |
 | [OPT-017](OPT-017.md) | 有基线的搜索和媒体性能 | FTS,画廊,缓存,观测 | OPT-007, OPT-008, OPT-016 | verified-ci | 017A 基线 + 017B/017C/017D/017E/017F/017G 六张实现子卡全部有提交级证据；真实 WebView 性能测量作为缺口显式转入 OPT-018 |
-| [OPT-018](OPT-018.md) | 全量收口和发布前验收 | 全部审计项 | OPT-001 至 OPT-017 | review | 实现与本地门禁完成；独立复审完成（PASS WITH FINDINGS），返工项已收口；待提交与提交级 CI |
+| [OPT-018](OPT-018.md) | 全量收口和发布前验收 | 全部审计项 | OPT-001 至 OPT-017 | verified-ci | 578c855 / CI 39199313440；跨卡审计 + 文档真相修正 + AboutTab/sync_queue 验收补强；run 235 的 Node 22 act 警告已修复 |
 
 状态：queued / coding / review / rework / verified-local / verified-ci / integrated。未取得完整作用域证据的卡片不得记 complete。卡片中的写集可在读码后由主控明确调整，不允许执行者自行扩展。
 
