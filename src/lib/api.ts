@@ -391,17 +391,10 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('list_feeds') as FeedRow[]) : null;
   },
-  /** 精确条目计数（后端聚合，按 feed 分组），侧边栏角标用 */
-  async feedCounts(): Promise<FeedCountsRow[] | null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('feed_counts') as FeedCountsRow[]) : null;
-  },
-  /** OPT-008B：显示集合的 scope 精确计数（全部/每分类/每源，当前布局过滤）。
-      仅 smartDedup 开启时需要——聚合数字与列表同一谓词族，保证“数字 == 列表”。 */
-  async scopeCounts(layout?: string): Promise<ScopeCountsDetailRow | null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('scope_counts', { layout: layout ?? null }) as ScopeCountsDetailRow) : null;
-  },
+  /* OPT-017F：feedCounts / scopeCounts 两个分项读取包装已删（全仓零调用方；
+     OPT-008B R2 起计数统一走下方 countsSnapshot 组合快照）。对应 IPC 命令
+     （feed_counts / scope_counts）保留在 Rust 注册表，命令签名不随包装器删除
+     ——见 .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md。 */
   /** OPT-008B R2（N2/P3-4）：**计数组合快照**——同一开关值、同一 DB 锁内返回
       源计数（布局无关）+ scope 精确计数（按布局）。对账/启动装载只发这一条
       IPC，源键与聚合键不会来自两个时刻。 */
@@ -566,12 +559,14 @@ export const api = {
     if (autoTranslate !== undefined) args.translate = autoTranslate;
     return (await inv('set_folder_ai_flags', args) as null);
   },
-  async setFeedAiFlags(id: number, autoSummary: boolean, autoTranslate: boolean): Promise<null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('set_feed_ai_flags', { id, summary: autoSummary, translate: autoTranslate }) as null) : null;
-  },
+  /* OPT-017F：旧 bool 双字段包装 setFeedAiFlags 已删（全仓零调用方；OPT-011
+     起的唯一真值入口是下方三态 setFeedAiModes）。对应 IPC 命令
+     set_feed_ai_flags 保留（旧 bool→显式 on/off 的映射语义在 Rust 侧有单测
+     锁定），命令签名不随包装器删除——见
+     .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md。 */
   /** OPT-011：源级 AI 开关三态（新真值入口；只动给出的字段，undefined 不改）。
-   * 与 setFeedAiFlags 的边界一致：只写本地，不推远端。 */
+   * 与后端旧 bool 入口（set_feed_ai_flags，命令保留）的边界一致：只写本地，
+   * 不推远端。 */
   async setFeedAiModes(id: number, summaryMode?: FeedAiMode, translateMode?: FeedAiMode): Promise<null> {
     const inv = await getInvoke();
     return inv

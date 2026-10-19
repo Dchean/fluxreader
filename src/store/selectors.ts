@@ -306,14 +306,9 @@ export function selectViewCounts(
     布局与视图构成两道筛选条件，树不再另设 unread/total 之类的第二套数字。
     计数用严格判定（不含 openedReadIds 会话保留）：侧栏数字是导航概览，
     不随点开文章逐条抖动，与 Miniflux 未读语义一致。 */
-/** 从 store 的字符串 id（纯数字 / 'cat-'/'feed-' 前缀两种形态）提取后端数字 id。
-    历史 bug：mock 用 'feed-'+Date.now() 前缀、真实数据用 String(row.id) 纯数字，
-    定长 slice(2)/slice(4) 会把 '26'.slice(2) 截成 ''→NaN，布局/AI 开关等
-    全部写库失败且被乐观更新掩盖（7 类模式 C 契约断裂变体）。 */
-export function numericId(id: string): number {
-  const m = id.match(/(\d+)/);
-  return m ? Number(m[1]) : NaN;
-}
+/* OPT-017F：numericId 单点实现移至 ./scopeId（internals 的 scope 派生同引用，
+   原两份逐字相同的副本收敛为一处）；此处保留公共导出，既有消费路径不变。 */
+export { numericId } from './scopeId';
 
 export function selectTreeCounts(
   s: Pick<AppState, 'activeContentLayout' | 'activeViewFilter' | 'timelineFilter' | 'feedIndex' | 'feedCounts' | 'scopeCounts' | 'settings'>,

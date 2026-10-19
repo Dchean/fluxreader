@@ -12,6 +12,9 @@ import type {
 } from '../types';
 import { getBodyEntry, invalidateContentRevision, reconcileBodyEntities } from './bodyCache';
 import type { BodyRowFact } from './bodyCache';
+/* OPT-017F：id 解析单点——原模块内私有同名副本（避免 internals ↔ selectors
+   循环依赖）已收敛到共享叶模块，两个层级都只依赖 ./scopeId。 */
+import { numericId } from './scopeId';
 import type { AppState, ArticlesCursorState, ScopeCountsSnapshot } from './types';
 
 /* ============================================================
@@ -177,22 +180,16 @@ export function advanceArticlesCursor(base: ArticlesCursorState, rows: ArticleLi
   };
 }
 
-/** 从字符串 id（纯数字 / 'cat-' / 'feed-' 前缀）提取后端数字 id。
-    （与 selectors.numericId 同形；此处模块内私有，避免 internals ↔ selectors 循环依赖） */
-function scopeNumericId(raw: string): number {
-  const m = raw.match(/(\d+)/);
-  return m ? Number(m[1]) : NaN;
-}
-
 /** 订阅范围 → 后端范围维度（feed_id / folder_id）。
     TASK-109：从 scopeQueryArgs 拆出的最底层派生——「与排序、布局无关」的标写
     范围（mark_all_read，经 QueryScope.markScope）与列表查询共用同一份映射，
-    'cat-N' → folder_id、'all' → 双 null、其余 → feed_id=数字。 */
+    'cat-N' → folder_id、'all' → 双 null、其余 → feed_id=数字。
+    OPT-017F：数字提取走共享叶模块 numericId（原模块内私有副本已删）。 */
 function scopeFilterArgs(scope: string): { feed_id: number | null; folder_id: number | null } {
   const isCat = scope.startsWith('cat-');
   return {
-    feed_id: scope === 'all' || isCat ? null : scopeNumericId(scope),
-    folder_id: isCat ? scopeNumericId(scope) : null,
+    feed_id: scope === 'all' || isCat ? null : numericId(scope),
+    folder_id: isCat ? numericId(scope) : null,
   };
 }
 

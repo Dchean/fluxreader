@@ -230,7 +230,6 @@ pub struct QuickAddResponse {
 pub mod tags {
     pub const READ: &str = "user/-/state/com.google/read";
     pub const STARRED: &str = "user/-/state/com.google/starred";
-    pub const KEPT_UNREAD: &str = "user/-/state/com.google/kept-unread";
     pub const READING_LIST: &str = "user/-/state/com.google/reading-list";
 }
 
@@ -697,6 +696,11 @@ impl GReaderClient {
 ============================================================ */
 
 /// 从 `feed/42` 流 id 提取数字 id。
+///
+/// 与条目 id 解析（[`parse_item_id`]，经 `sync/entries.rs::item_numeric_id`）是
+/// **两个协议形态**、不共用也不互为副本：这里只认 `feed/<十进制>` 前缀，条目
+/// 解析另有「长格式 tag 尾十六进制 / 无前缀纯十进制」规则（OPT-017F 逐一核对，
+/// 不收敛——见 .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md）。
 pub fn parse_feed_numeric_id(stream_id: &str) -> Option<i64> {
     stream_id.strip_prefix("feed/")?.parse().ok()
 }
@@ -777,15 +781,6 @@ pub fn category_name(id: &str, label: Option<&str>, type_: Option<&str>) -> Opti
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .or_else(|| from_id.map(str::to_string))
-}
-
-/* ============================================================
-集成测试入口（供 tests/ 复用）
-============================================================ */
-
-#[doc(hidden)]
-pub fn client_login_url(base: &str) -> String {
-    format!("{}/accounts/ClientLogin", base.trim_end_matches('/'))
 }
 
 /* ============================================================

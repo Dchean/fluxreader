@@ -76,8 +76,10 @@ async fn resolve_close(
         v["closeToTray"] = serde_json::json!(to_tray);
         v["closePromptShown"] = serde_json::json!(true);
         let _ = crate::db::set_setting(&conn, "app_settings", &v.to_string());
-        /* 设置页的开关镜像同步（前端 bootstrapSettings 恢复，当前会话里
-        事件通知前端刷新——见 close-resolved 事件） */
+        /* 设置页的开关镜像由前端在 `answerCloseAsk` 调用点自行同步
+        （store/slices/ui.ts，本次会话即时一致；下次启动由 bootstrapSettings
+        恢复）。OPT-017F：原 `close-resolved` emit 全仓零监听，已删除——见
+        .agents/notes/implemented/simplification/2026-10-16-零消费入口清理与id解析单点.md。 */
     }
     if let Some(win) = app.get_webview_window("main") {
         if to_tray {
@@ -86,7 +88,6 @@ async fn resolve_close(
             app.exit(0);
         }
     }
-    let _ = app.emit("close-resolved", to_tray);
     Ok(())
 }
 

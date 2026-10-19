@@ -175,8 +175,8 @@ FreshRSS 的具体部署版本未逐一实机验收**——本列不能当作「
 - **L3 GR 单向的对称缺口**：远端「显式标未读」不经 GR 轻量对账回流；
   该方向变更只能等全量同步（同源合并路径的 `accept_unread`）或由本端
   push 覆盖。跨源副本的未读在任何路径都不落地（§3）。
-- **L4 kept-unread 不识别**：GR `kept-unread` 标签常量已定义但无消费方，
-  「保持未读」意图按普通未读处理。
+- **L4 kept-unread 不识别**：GR `kept-unread` 标签（`user/-/state/com.google/kept-unread`）
+  无识别/消费方（OPT-017F 已删除仅剩定义的常量），「保持未读」意图按普通未读处理。
 - **L5 Fever 截断不可检测**：unread/saved 集合是单请求全集响应，无
   continuation 可校验；GR 侧的截断检测纪律在 Fever 协议上无对应
   机制（依赖服务端响应完整性）。
