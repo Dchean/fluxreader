@@ -2,6 +2,8 @@
 
 性能结论必须附带构建、数据与测量范围。历史 v0.17.0 的文本布局测量不能证明媒体或当前大正文场景无需优化；OPT-017A 的隔离基线已发现搜索、计数和批量标读的慢路径。本文分列历史应用级数字与新的生产 DB API 基线，不能混用，也不以基线完成代替性能优化完成。
 
+**当前证据边界**：本文的隔离 SQLite、jsdom 与组件回归数字都不覆盖真实 WebView 的滚动帧率、图片解码与布局。真实窗口下的滚动 p95、解码开销、真实高度分布与同构建端到端前后对照仍未测；引用任何数字时必须带上所属小节的构建、语料与范围。
+
 测量工具（CDP 测量电池、合成规模数据注入、owner 实机清单）已移到存档分支
 `archive/tooling-and-reports`（`archive/tools/phase4_measure.mjs`、`phase4_seed.py`、
 `phase4_checklist.md`），原始输出在 `archive/measurements/phase4/`。重新测量前请先读那份清单——它有若干条前置条件（窗口必须在副屏、磁盘余量、Node 版本）。
@@ -40,7 +42,7 @@
 
 构建：`956cd59` + 本卡未提交改动（工作区完整 diff 与其哈希见 tmp/optimization-20261008/OPT-017B/evidence/build-workspace.diff 与 RESULT.md）。语料：复制自 OPT-017A 的 20k×8KiB 与 50k×8KiB 库（同种子规则，未覆盖旧样本），首次打开执行 v19/v20→v29 升级链；driver 与 JSON 全部落在 tmp/optimization-20261008/OPT-017B/（与 017A 原始样本分开）。
 
-**本卡变更**：v29 删除零 MATCH 消费者的 `articles_fts`（unicode61 派生表 + 四维护触发器 + `rebuild_fts` 维护面），contents 回收改独立触发器 `trg_articles_recycle_ad`；新增候选索引 `articles_trigram_idx`（FTS5 trigram、`detail=none`、`content='' + contentless_delete=1`，迁移回填 + 四触发器维护）。`search_articles` 对 ≥3 字符词加候选 MATCH（AND-of-trigrams，超集），结果仍由既有 LIKE 逐行验证；短词/索引缺失/损坏回落纯 LIKE。
+**本卡变更**：v29 删除零 MATCH 消费者的 `articles_fts`（unicode61 派生表 + 四个维护触发器），生产路径不再维护 FTS；`rebuild_fts` 函数本身保留，仅由 v22 历史迁移调用（历史迁移不可改），生产维护路径没有调用点。contents 回收改独立触发器 `trg_articles_recycle_ad`；新增候选索引 `articles_trigram_idx`（FTS5 trigram、`detail=none`、`content='' + contentless_delete=1`，迁移回填 + 四触发器维护）。`search_articles` 对 ≥3 字符词加候选 MATCH（AND-of-trigrams，超集），结果仍由既有 LIKE 逐行验证；短词/索引缺失/损坏回落纯 LIKE。
 
 搜索（同构建同语料，中位，limit=200，n=9；A=候选索引、B=删索引对象回落 LIKE-only）：
 
