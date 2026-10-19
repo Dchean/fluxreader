@@ -22,6 +22,8 @@ pub async fn get_setting(state: State<'_, AppState>, key: String) -> AppResult<O
 /// - 活动凭据四键：协议 / 地址 / 用户名 / 密码；
 /// - 代际与两类游标、Fever 历史状态、端点解析缓存：绕过写入会让在途会话的
 ///   代际复核失真或让新账号继承旧进度；
+/// - 账号级订阅发现节流键：与游标同属同步内部状态，通用 IPC 不得改写；
+/// - 账号级绑定完整性 marker：跨 feeds/states 命令阻断条目窗口；
 /// - 待确认连接建议：由导入与专用保存/放弃命令管理。
 // Note: 通用 IPC 不得绕过账号生命周期（写入侧收口） — 见 .agents/notes/implemented/architecture/2026-10-08-账号会话与配置应用边界.md
 const PROTECTED_SETTING_KEYS: &[&str] = &[
@@ -42,7 +44,10 @@ const PROTECTED_SETTING_KEYS: &[&str] = &[
 pub(crate) fn apply_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> AppResult<()> {
     // OPT-006：活动连接/代际/进度键必须走专用保存流程（含代际推进与并发校验），
     // 通用写入是一条会绕过账号生命周期守卫的旁路——在此拒绝。
-    if PROTECTED_SETTING_KEYS.contains(&key) {
+    if PROTECTED_SETTING_KEYS.contains(&key)
+        || key.starts_with(db::ZERO_BINDING_DISCOVERY_KEY_PREFIX)
+        || key.starts_with(db::BINDING_INCOMPLETE_KEY_PREFIX)
+    {
         return Err(AppError::new(
             "protectedSetting",
             format!("设置键「{key}」受账号生命周期保护，请使用「同步」设置页的保存/断开流程"),
@@ -234,6 +239,8 @@ mod protected_setting_tests {
             "fever_history_state",
             "endpoint_resolved",
             "pending_connection_config",
+            "sync_zero_binding_discovery_at:greader|https://a.example|alice",
+            "sync_binding_incomplete:greader|https://a.example|alice",
         ] {
             let err = apply_setting(&conn, key, "tampered").expect_err("受保护键必须拒绝");
             assert_eq!(err.code, "protectedSetting", "{key} 应返回明确错误码");

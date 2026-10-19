@@ -5,9 +5,14 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::fever;
 use crate::greader::GReaderClient;
+use chrono::Utc;
 use rusqlite::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// 条目 pull 全局串行：cursor/history 的失败恢复依赖本轮快照不被另一 pull
+/// 交错改写。锁只覆盖同步编排，数据库锁仍按既有短临界区获取。
+static PULL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// feeds 阶段（订阅层）：push_feeds + pull_feeds。秒级，首连先跑这段。
 /// 锁纪律：HTTP 全在锁外；DB 读写在锁内短临界区完成。
@@ -67,6 +72,26 @@ async fn feeds_phase_in_session(
     Ok(report)
 }
 
+async fn begin_subscription_discovery(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+) -> AppResult<bool> {
+    let conn = db.lock().await;
+    session.ensure_current(&conn)?;
+    let account = super::current_account(&conn)?.ok_or_else(|| {
+        AppError::new(
+            "notConnected",
+            "订阅发现缺少当前同步账号身份，本轮不发起远端请求",
+        )
+    })?;
+    let now = Utc::now().timestamp();
+    if !db::zero_binding_discovery_due(&conn, &account.key, now)? {
+        return Ok(false);
+    }
+    db::mark_zero_binding_discovery_attempt(&conn, &account.key, now)?;
+    Ok(true)
+}
+
 /// states 阶段（状态+条目层）：push 队列 + pull entries。
 /// `full=true` 含绑定回填+全量对账（手动同步/首连）；false 只做增量（后台自动同步）。
 pub async fn states_phase(
@@ -100,6 +125,27 @@ pub async fn states_phase(
         }
     };
     let mut report = SyncReport::default();
+    // OPT-019 P2-1：只读订阅发现与“是否有绑定”无关，只由独立节流键控制。
+    // 该路径绝不执行 push_feeds/subscription outbox，因此不会自动推送本地
+    // 订阅或绕过首连确认；发现时间也不写条目 last_sync_ts。
+    let discovery_attempted = if !full {
+        match begin_subscription_discovery(db, &session).await {
+            Ok(due) => due,
+            Err(e) => {
+                report
+                    .errors
+                    .push(format!("订阅发现节流检查失败，本轮不发起远端请求: {e}"));
+                return Ok(report);
+            }
+        }
+    } else {
+        false
+    };
+    if discovery_attempted {
+        pull_feeds(db, &session, &mut report).await;
+    } else if !full {
+        log::debug!("sync: 订阅发现尚未到期，本轮跳过只读订阅拉取");
+    }
     // 推送段进 PUSH_LOCK（与 push_states_now/feeds_phase 的推送互斥，防 prune 竞态）
     {
         let _guard = PUSH_LOCK.lock().await;
@@ -137,7 +183,30 @@ pub async fn states_phase(
             notify_queue_changed(db).await;
         }
     }
-    pull_entries(db, &session, &mut report, full).await?;
+    {
+        let _pull_guard = PULL_LOCK.lock().await;
+        pull_entries(db, &session, &mut report, full).await?;
+        if report.binding_incomplete {
+            let retry_discovery = if discovery_attempted {
+                true
+            } else {
+                match begin_subscription_discovery(db, &session).await {
+                    Ok(due) => due,
+                    Err(e) => {
+                        report.errors.push(format!(
+                            "条目绑定不完整后的订阅发现检查失败，本轮不重试: {e}"
+                        ));
+                        false
+                    }
+                }
+            };
+            if retry_discovery {
+                pull_feeds(db, &session, &mut report).await;
+                // 只重试一次；若仍不完整，report 保留错误供下一节流窗口处理。
+                pull_entries(db, &session, &mut report, full).await?;
+            }
+        }
+    }
     // pull 后补推：pull 会为「本地已读但后端刚抓取成功的文章」绑定
     // remote_id（此前未绑定，push 段跳过）。绑定后再推一次，把它们的
     // pending read/star 推到后端——否则这些文章要等下一轮同步才同步状态，
@@ -203,6 +272,57 @@ pub async fn sync_light(
     http: &reqwest::Client,
 ) -> AppResult<SyncReport> {
     states_phase(db, http, false).await
+}
+
+/// 仅由自动调度器使用的订阅发现路径：节流到期时只读 `pull_feeds`。若本轮
+/// 新增了远端 feed 绑定，再拉一次条目状态；不执行订阅推送/outbox。
+pub async fn sync_subscription_discovery(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+) -> AppResult<SyncReport> {
+    let session = match build_session(db, http).await {
+        Ok(c) => c,
+        Err(ClientBuildFailure::NotConfigured) => {
+            return Err(AppError::new(
+                "notConnected",
+                "未配置同步后端（Google Reader / Fever 凭据）",
+            ));
+        }
+        Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
+        Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
+        Err(ClientBuildFailure::Failed(e)) => {
+            record_push_block(db, &e).await;
+            return Err(AppError::new(
+                "notConnected",
+                "未配置同步后端（Google Reader / Fever 凭据）",
+            ));
+        }
+    };
+    let mut report = SyncReport::default();
+    if !begin_subscription_discovery(db, &session).await? {
+        return Ok(report);
+    }
+    let before = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        db::remote_feed_binding_count(&conn)?
+    };
+    pull_feeds(db, &session, &mut report).await;
+    let after = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        db::remote_feed_binding_count(&conn)?
+    };
+    if after > before {
+        let _pull_guard = PULL_LOCK.lock().await;
+        pull_entries(db, &session, &mut report, false).await?;
+        if report.binding_incomplete {
+            // 新订阅在首次发现与条目读取之间才变为可见时，再发现并重试一次。
+            pull_feeds(db, &session, &mut report).await;
+            pull_entries(db, &session, &mut report, false).await?;
+        }
+    }
+    Ok(report)
 }
 
 /// 测试连接（设置页「测试连接」按钮）。

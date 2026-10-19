@@ -133,12 +133,14 @@ struct FeverEnvelope {
     api_version: i64,
     #[serde(default)]
     auth: i64,
+    /// 订阅层 action 的集合字段：认证/`mark` 响应可以不带，读取这些 action 的
+    /// 方法必须按各自契约检查 `Some(_)`；缺失 ≠ 空数组。
     #[serde(default)]
-    groups: Vec<FeverGroup>,
+    groups: Option<Vec<FeverGroup>>,
     #[serde(default)]
-    feeds_groups: Vec<FeverFeedsGroup>,
+    feeds_groups: Option<Vec<FeverFeedsGroup>>,
     #[serde(default)]
-    feeds: Vec<FeverFeed>,
+    feeds: Option<Vec<FeverFeed>>,
     /// `items` 方法必须带 `items` 字段——**缺失 ≠ 空数组**（缺失是协议错误，
     /// 不得静默当作「没有条目」耗尽历史）。非 items 方法（认证探针等）响应
     /// 不含该字段，故为 Option。
@@ -413,8 +415,13 @@ impl FeverClient {
     /// 拉分组（分类）→ 统一 `TagRef`（folder 类型，label = group title）。
     pub async fn tags(&self) -> AppResult<Vec<TagRef>> {
         let env = self.call("groups", &[]).await?;
-        Ok(env
-            .groups
+        let groups = env.groups.ok_or_else(|| {
+            AppError::new(
+                "protocol",
+                "Fever groups 响应缺少 groups 字段（缺失不得当空集合）",
+            )
+        })?;
+        Ok(groups
             .into_iter()
             .map(|g| TagRef {
                 id: format!("user/-/label/{}", g.title),
@@ -430,21 +437,47 @@ impl FeverClient {
         let feeds_env = self.call("feeds", &[]).await?;
         let groups_env = self.call("groups", &[]).await?;
 
+        // Note: Fever 集合字段按 action 校验；缺失是协议错误，显式空数组合法 — 见
+        // .agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md
+        let feeds = feeds_env.feeds.ok_or_else(|| {
+            AppError::new(
+                "protocol",
+                "Fever feeds 响应缺少 feeds 字段（缺失不得当空集合）",
+            )
+        })?;
+        feeds_env.feeds_groups.ok_or_else(|| {
+            AppError::new(
+                "protocol",
+                "Fever feeds 响应缺少 feeds_groups 字段（缺失不得当空集合）",
+            )
+        })?;
+        let groups = groups_env.groups.ok_or_else(|| {
+            AppError::new(
+                "protocol",
+                "Fever groups 响应缺少 groups 字段（缺失不得当空集合）",
+            )
+        })?;
+        let feeds_groups = groups_env.feeds_groups.ok_or_else(|| {
+            AppError::new(
+                "protocol",
+                "Fever groups 响应缺少 feeds_groups 字段（缺失不得当空集合）",
+            )
+        })?;
+
         let mut group_title: HashMap<i64, String> = HashMap::new();
-        for g in &groups_env.groups {
+        for g in &groups {
             group_title.insert(g.id.get(), g.title.clone());
         }
         // feed_id → 第一个归属 group_id（feed_ids 是 CSV；非法项显式报错，
         // 不得 filter_map 静默跳过——那会把归属错误当成「无分类」悄悄落地）。
         let mut feed_group: HashMap<i64, i64> = HashMap::new();
-        for fg in &groups_env.feeds_groups {
+        for fg in &feeds_groups {
             for fid in parse_csv_ids(&fg.feed_ids, "feeds_groups.feed_ids")? {
                 feed_group.entry(fid).or_insert(fg.group_id.get());
             }
         }
 
-        Ok(feeds_env
-            .feeds
+        Ok(feeds
             .into_iter()
             .map(|f| {
                 let categories = feed_group

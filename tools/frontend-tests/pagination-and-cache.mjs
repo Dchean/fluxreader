@@ -104,6 +104,185 @@ export async function run(ctx) {
     S.invokeCalls.filter((c) => c.cmd === 'list_articles').length === 1);
 
   /* ============================================================
+     OPT-020 P1-C1：load-more 重试携带失败时的范围/布局/排序/游标/视图快照
+     ============================================================ */
+  await resetStore({ activeFeedFilter: '10', activeContentLayout: 'article' });
+  const opt020PageRows = [];
+  for (let i = 0; i < 503; i += 1) {
+    opt020PageRows.push(mkRow({
+      id: 8000 + i,
+      feed_id: 10,
+      title: `A续页${i}`,
+      published_at: iso(NOW - i * 1000),
+    }));
+    opt020PageRows.push(mkRow({
+      id: 9000 + i,
+      feed_id: 12,
+      title: `B续页${i}`,
+      published_at: iso(NOW - i * 1000 - 500),
+    }));
+  }
+  S.backendRows = opt020PageRows;
+  await store.getState().bootstrapFromBackend();
+  checkNew('(OPT-020 load-more) 前置：范围 A 已有可续拉首屏',
+    store.getState().entries.length === 500
+    && store.getState().entries.every((e) => e.feedId === '10')
+    && store.getState().articlesCursor['article|10']?.loaded === 500);
+
+  S.listPlan = { mode: 'reject', error: { message: 'A 续页失败' } };
+  S.invokeCalls.length = 0;
+  await store.getState().loadMoreArticles();
+  const opt020ListAError = store.getState().errors.find((e) => e.key.startsWith('list:load-more'));
+  checkNew('(OPT-020 load-more) 失败条目 key 含范围/排序/视图/游标上下文',
+    typeof opt020ListAError?.key === 'string'
+    && opt020ListAError.key.startsWith('list:load-more:')
+    && opt020ListAError.key.includes('article|10')
+    && opt020ListAError.key.includes('all')
+    && opt020ListAError.key.includes('500'));
+
+  const opt020ListAOldId = opt020ListAError?.id;
+  store.getState().retryError?.(opt020ListAOldId);
+  await nTick(20);
+  const opt020ListARetryError = store.getState().errors.find(
+    (e) => e.key === opt020ListAError?.key,
+  );
+  checkNew('(OPT-020 load-more) 同上下文重试再次失败仍写回同一 key 的可重试入口',
+    !!opt020ListARetryError && opt020ListARetryError.id !== opt020ListAOldId);
+
+  /* 同范围/同游标、但首屏代际推进：这是新的查询实例，错误中心不得复用旧 key。 */
+  S.listPlan = null;
+  const opt020CursorBeforeReload = store.getState().articlesCursor['article|10'];
+  await store.getState().reloadFromBackend();
+  checkNew('(OPT-020 load-more) 前置：同数据重载后查询代际推进但 keyset 游标保持同值',
+    JSON.stringify(store.getState().articlesCursor['article|10'])
+      === JSON.stringify(opt020CursorBeforeReload));
+  S.listPlan = { mode: 'reject', error: { message: 'A 新一代续页失败' } };
+  await store.getState().loadMoreArticles();
+  const opt020ListAcrossGenerations = store.getState().errors.filter(
+    (e) => e.key.startsWith('list:load-more:article|10:'),
+  );
+  checkNew('(OPT-020 load-more) 同范围/同游标但首屏代际不同：失败条目使用不同 key，不跨查询实例合并',
+    opt020ListAcrossGenerations.length === 2
+    && opt020ListAcrossGenerations[0].key !== opt020ListAcrossGenerations[1].key);
+
+  S.listPlan = null;
+  store.getState().selectFeed('12');
+  await nTick(40);
+  checkNew('(OPT-020 load-more) 前置：切到范围 B 后列表与游标均为 B 自己的首屏',
+    store.getState().activeFeedFilter === '12'
+    && store.getState().entries.length === 500
+    && store.getState().entries.every((e) => e.feedId === '12')
+    && store.getState().articlesCursor['article|12']?.loaded === 500);
+
+  S.listPlan = { mode: 'reject', error: { message: 'B 续页失败' } };
+  await store.getState().loadMoreArticles();
+  const opt020ListErrors = store.getState().errors.filter((e) => e.key.startsWith('list:load-more'));
+  checkNew('(OPT-020 load-more) 范围 A/B 及 A 的两个查询实例均不共享固定 key（逐条可追溯）',
+    opt020ListErrors.length === 3
+    && new Set(opt020ListErrors.map((e) => e.key)).size === 3);
+
+  const opt020RangeBBefore = store.getState().entries.map((e) => e.id).join(',');
+  const opt020RangeACursorBefore = store.getState().articlesCursor['article|10'];
+  S.listPlan = null;
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020ListARetryError?.id);
+  await nTick(20);
+  const opt020InvalidContextToast = store.getState().toasts.find(
+    (t) => t.text.includes('加载更多重试上下文已失效'),
+  );
+  checkNew('(OPT-020 load-more) 切到 B 后旧 A 重试安全 no-op：不发 B 续页请求、不把 A 续页拼到 B',
+    S.invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0
+    && store.getState().entries.map((e) => e.id).join(',') === opt020RangeBBefore
+    && store.getState().articlesCursor['article|10']?.loaded === opt020RangeACursorBefore?.loaded
+    && !!opt020InvalidContextToast
+    && !opt020InvalidContextToast.action
+    && !store.getState().errors.some((e) => e.key === opt020ListARetryError?.key));
+
+  /* 重试与另一笔续页并发：错误中心已先消费，忙锁拒绝时必须按原 key/动作重新登记。 */
+  await resetStore({ activeFeedFilter: '10', activeContentLayout: 'article' });
+  S.backendRows = opt020PageRows;
+  await store.getState().bootstrapFromBackend();
+  S.listPlan = { mode: 'reject', error: { message: '忙锁夹具首轮失败' } };
+  await store.getState().loadMoreArticles();
+  const opt020BusyError = store.getState().errors.find(
+    (e) => e.key.startsWith('list:load-more:'),
+  );
+  const opt020BusyPendingStart = S.pendingList.length;
+  S.listPlan = { mode: 'defer' };
+  S.invokeCalls.length = 0;
+  const opt020BusyRequest = store.getState().loadMoreArticles();
+  await nTick(0);
+  const opt020BusyPending = S.pendingList[opt020BusyPendingStart];
+  checkNew('(OPT-020 load-more busy) 前置：当前续页请求在途且加载锁为真',
+    !!opt020BusyPending && store.getState().articlesLoading === true
+    && S.invokeCalls.filter((c) => c.cmd === 'list_articles').length === 1);
+  store.getState().retryError?.(opt020BusyError?.id);
+  await nTick(5);
+  const opt020BusyRequeued = store.getState().errors.find(
+    (e) => e.key === opt020BusyError?.key,
+  );
+  checkNew('(OPT-020 load-more busy) 忙锁拒绝重试后入口仍在且不重复发 IPC',
+    !!opt020BusyRequeued?.action?.run
+    && opt020BusyRequeued.id !== opt020BusyError?.id
+    && S.invokeCalls.filter((c) => c.cmd === 'list_articles').length === 1);
+
+  opt020BusyPending.resolve([]);
+  await opt020BusyRequest;
+  await nTick(5);
+  S.listPlan = null;
+  S.invokeCalls.length = 0;
+  store.getState().retryError?.(opt020BusyRequeued?.id);
+  await nTick(5);
+  checkNew('(OPT-020 load-more exhausted) 已到底时重试明确提示且不重复发 IPC',
+    store.getState().articlesExhausted === true
+    && S.invokeCalls.filter((c) => c.cmd === 'list_articles').length === 0
+    && store.getState().toasts.some((t) => t.text.includes('已到底'))
+    && !store.getState().errors.some((e) => e.key === opt020BusyRequeued?.key));
+
+  /* 请求锁所有权：A 的迟到完成不得清掉随后 B 请求的 articlesLoading。 */
+  await resetStore({ activeFeedFilter: '10', activeContentLayout: 'article' });
+  S.backendRows = opt020PageRows;
+  await store.getState().bootstrapFromBackend();
+  S.listPlan = { mode: 'defer' };
+  const opt020OverlapA = store.getState().loadMoreArticles();
+  await nTick(0);
+  const opt020PendingA = S.pendingList.find((p) => p.args.feed_id === 10);
+  S.listPlan = null;
+  store.getState().selectFeed('12');
+  await nTick(40);
+  S.listPlan = { mode: 'defer' };
+  const opt020OverlapB = store.getState().loadMoreArticles();
+  await nTick(0);
+  const opt020PendingB = S.pendingList.find((p) => p.args.feed_id === 12);
+  checkNew('(OPT-020 load-more) A/B 续页请求可重叠（B 导航已复位加载态并开始新请求）',
+    !!opt020PendingA && !!opt020PendingB && store.getState().articlesLoading === true);
+
+  opt020PendingA.resolve([mkRow({
+    id: 8501,
+    feed_id: 10,
+    published_at: iso(NOW - 501000),
+  })]);
+  await opt020OverlapA;
+  await nTick(5);
+  checkNew('(OPT-020 load-more) 旧 A 迟到完成不得清掉 B 的加载锁',
+    store.getState().articlesLoading === true);
+
+  opt020PendingB.resolve([mkRow({
+    id: 9501,
+    feed_id: 12,
+    published_at: iso(NOW - 501500),
+  })]);
+  await opt020OverlapB;
+  await nTick(5);
+  checkNew('(OPT-020 load-more) 当前 B 完成才清锁，且 A 的迟到页未进入 B 列表',
+    store.getState().articlesLoading === false
+    && store.getState().activeFeedFilter === '12'
+    && store.getState().entries.every((e) => e.feedId === '12')
+    && store.getState().entries.some((e) => e.id === '9501')
+    && !store.getState().entries.some((e) => e.id === '8501'));
+  S.listPlan = null;
+
+  /* ============================================================
      TASK-052：per-scope 分页游标（缺陷 P1-14「口径」半边）
      覆盖 (s1)…(s6)，全部为本轮新增断言（checkNew）。
 
@@ -861,11 +1040,16 @@ export async function run(ctx) {
 
     /* -- t109-markscope-derivation：标写范围派生收口（源级）-- */
     {
-      const markSrc = nav109.slice(nav109.indexOf('markCurrentViewAllRead: () => {'));
+      const runMarkSrc = nav109.slice(
+        nav109.indexOf('const runMarkAllRead'),
+        nav109.indexOf('markCurrentViewAllRead: () => {'),
+      );
+      const markActionSrc = nav109.slice(nav109.indexOf('markCurrentViewAllRead: () => {'));
       checkNew('(t109-markscope-derivation) markCurrentViewAllRead 标写范围经 QueryScope.markScope（仅订阅维度），layout 由 markAllRead 独立参数承载',
-        markSrc.includes('QueryScope.markScope(scope)')
-        && !markSrc.includes('scopeQueryArgs(')
-        && markSrc.includes('api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout })'));
+        markActionSrc.includes('QueryScope.markScope(scope)')
+        && !runMarkSrc.includes('scopeQueryArgs(')
+        && runMarkSrc.includes('api.markAllRead(context.feedId, context.folderId, {')
+        && runMarkSrc.includes('layout: context.layout'));
     }
 
     /* -- t109-cache-restore-preserves-claim：R2 裁定角例修后行为（判别，行为级）--

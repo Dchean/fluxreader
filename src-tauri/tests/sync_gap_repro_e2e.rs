@@ -1060,13 +1060,20 @@ async fn reconcile_skipped_when_state_fetch_fails() {
         .fail_stream_ids
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
-    // 轻量同步触发对账：read/starred 集合拉取失败 → 必须跳过对账
+    // 轻量同步触发对账：read/starred 都失败 → 两字段分别跳过并记录
     let report = sync::states_phase(&db, &http, false)
         .await
         .expect("states phase 3");
     assert!(
-        report.errors.iter().any(|e| e.contains("状态对账跳过")),
-        "修复期望：对账因集合拉取失败被跳过并记录 errors"
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("read 权威集合拉取失败"))
+            && report
+                .errors
+                .iter()
+                .any(|e| e.contains("starred 权威集合拉取失败")),
+        "修复期望：两侧集合失败分别跳过并记录 errors"
     );
 
     // 本地收藏保持：绝不被"空集合对账"静默取消

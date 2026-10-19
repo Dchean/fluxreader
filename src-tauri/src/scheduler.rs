@@ -216,7 +216,8 @@ async fn auto_sync_backend(
     http: &reqwest::Client,
     app: &AppHandle,
 ) {
-    let (on, interval_min, connected, last_sync) = {
+    let now = chrono::Utc::now().timestamp();
+    let (on, interval_min, connected, last_sync, has_binding, discovery_due) = {
         let conn = db.lock().await;
         /* TASK-068/069：autoSync 布尔读取收口为类型化助手（默认值语义不变） */
         let on = crate::db::app_settings_bool(&conn, "autoSync", true);
@@ -236,27 +237,49 @@ async fn auto_sync_backend(
         // OPT-014 R1：凭据读取/解密失败（密文损坏）不等于「未配置」——
         // 记警告并跳过本轮自动同步（不发任何请求；可见失败由推送路径的
         // last_error 呈现），不得静默当作离线。
-        let connected = match crate::sync::read_credentials(&conn) {
-            Ok(Some(_)) => true,
-            Ok(None) => false,
+        let (connected, account_key) = match crate::sync::current_account(&conn) {
+            Ok(Some(ctx)) => (true, Some(ctx.key)),
+            Ok(None) => (false, None),
             Err(e) => {
                 log::warn!("scheduler: 凭据读取失败，跳过本轮后端自动同步: {e}");
-                false
+                (false, None)
             }
         };
         let last = crate::db::last_sync_ts(&conn).unwrap_or(0);
-        (on, interval, connected, last)
+        let has_binding = match crate::db::has_remote_feed_binding(&conn) {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("scheduler: 读取远端 feed 绑定状态失败，跳过本轮自动同步: {e}");
+                return;
+            }
+        };
+        let discovery_due = match account_key.as_deref() {
+            Some(key) => match crate::db::zero_binding_discovery_due(&conn, key, now) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("scheduler: 读取订阅发现节流状态失败，跳过本轮自动同步: {e}");
+                    return;
+                }
+            },
+            None => false,
+        };
+        (on, interval, connected, last, has_binding, discovery_due)
     };
     if !on || !connected {
         return;
     }
-    let now = chrono::Utc::now().timestamp();
-    if now - last_sync < interval_min * 60 {
+    let normal_due = has_binding && backend_sync_due(now, interval_min, true, last_sync, false);
+    if !normal_due && !discovery_due {
         return;
     }
     log::info!("scheduler: 后端自动同步开始（间隔 {interval_min} 分钟到期）");
     let _ = app.emit("sync-running", serde_json::json!({ "source": "auto" }));
-    match crate::sync::sync_light(db, http).await {
+    let result = if normal_due {
+        crate::sync::sync_light(db, http).await
+    } else {
+        crate::sync::sync_subscription_discovery(db, http).await
+    };
+    match result {
         Ok(r) => {
             log::info!(
                 "scheduler: 后端自动同步完成：推 {}/拉 {} 项、对账 {} 项，{} 错误",
@@ -290,6 +313,22 @@ async fn auto_sync_backend(
         Err(e) => log::warn!("scheduler: 后端自动同步失败: {e}"),
     }
     let _ = app.emit("sync-idle", ());
+}
+
+/// 有绑定时沿用条目游标间隔；零绑定时改用独立发现节流，避免 `last_sync_ts=0`
+/// 令 scheduler 每个 TICK 都发起认证/订阅请求。
+fn backend_sync_due(
+    now: i64,
+    interval_min: i64,
+    has_binding: bool,
+    last_sync: i64,
+    discovery_due: bool,
+) -> bool {
+    if has_binding {
+        now - last_sync >= interval_min * 60
+    } else {
+        discovery_due
+    }
 }
 
 /// 通知开关开启 且 主窗口不可见（最小化到托盘/失焦）。
@@ -790,7 +829,7 @@ OPT-011：refreshInterval 读取口径单元测试（5–720 整数；与前端�
 ============================================================ */
 #[cfg(test)]
 mod refresh_interval_tests {
-    use super::read_refresh_interval;
+    use super::{backend_sync_due, read_refresh_interval};
     use serde_json::json;
 
     /// (opt011-int) 区间边界与整数口径：5 / 720 接受；4 / 721 拒绝；
@@ -831,6 +870,24 @@ mod refresh_interval_tests {
             None
         );
         assert_eq!(read_refresh_interval(&json!({})), None);
+    }
+
+    #[test]
+    fn zero_binding_gate_uses_discovery_throttle_not_last_sync_zero() {
+        let now = 1_700_000_000;
+        assert!(
+            !backend_sync_due(now, 30, false, 0, false),
+            "零绑定时 last_sync=0 不得让 scheduler 每个 TICK 启动"
+        );
+        assert!(
+            backend_sync_due(now, 30, false, 0, true),
+            "独立发现节流到期后仍应允许自动发现"
+        );
+        assert!(
+            !backend_sync_due(now, 30, true, now - 60, false),
+            "有绑定时继续按条目游标间隔节流"
+        );
+        assert!(backend_sync_due(now, 30, true, now - 30 * 60, false));
     }
 }
 

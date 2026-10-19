@@ -333,6 +333,7 @@ pub(super) async fn pull_entries(
     report: &mut SyncReport,
     full: bool,
 ) -> AppResult<()> {
+    report.binding_incomplete = false;
     match &session.client {
         Backend::GReader(g) => pull_entries_greader(db, session, g, report, full).await,
         Backend::Fever(f) => pull_entries_fever(db, session, f, report, full).await,

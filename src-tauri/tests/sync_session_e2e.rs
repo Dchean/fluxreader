@@ -268,7 +268,10 @@ fn route(path: &str, body: &str, st: &Arc<MockState>) -> (&'static str, &'static
         return (
             "200 OK",
             "application/json",
-            r#"{"api_version":4,"auth":1,"feeds":[],"groups":[],"feeds_groups":[],"unread_item_ids":"","saved_item_ids":""}"#.into(),
+            format!(
+                r#"{{"api_version":4,"auth":1,"feeds":[{{"id":1,"title":"Fever Feed","url":"{}","site_url":""}}],"groups":[{{"id":1,"title":"Fever Cat"}}],"feeds_groups":[{{"group_id":1,"feed_ids":"1"}}],"unread_item_ids":"","saved_item_ids":""}}"#,
+                st.feed_url
+            ),
         );
     }
     ("404 Not Found", "text/plain", String::new())
@@ -523,6 +526,11 @@ async fn stale_items_response_after_disconnect_writes_no_articles_no_cursor() {
 
     let db = Arc::new(tokio::sync::Mutex::new(conn));
     let http = app_lib::ingestion::build_client(10);
+    // OPT-019：先建立远端 feed 绑定，确保本用例验证的是“条目响应在途失效”，
+    // 而不是零绑定守卫的良性跳过。
+    app_lib::sync::feeds_phase(&db, &http)
+        .await
+        .expect("建立远端 feed 绑定");
     server.gate.arm("stream/items/contents");
 
     let mut fut = Box::pin(app_lib::sync::states_phase(&db, &http, true));
@@ -573,6 +581,26 @@ async fn stale_fever_page_after_disconnect_keeps_history_unknown() {
 
     let db = Arc::new(tokio::sync::Mutex::new(conn));
     let http = app_lib::ingestion::build_client(10);
+    // OPT-019：同 GR 用例，先绑定 Fever 远端 feed，再验证历史页在途代际。
+    let feed_report = app_lib::sync::feeds_phase(&db, &http)
+        .await
+        .expect("建立 Fever 远端 feed 绑定");
+    assert!(
+        feed_report.errors.is_empty(),
+        "Fever 绑定期不应有错误：{:?}",
+        feed_report.errors
+    );
+    {
+        let conn = db.lock().await;
+        let bound: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE remote_id IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(bound > 0, "Fever 远端订阅必须建立 feed 绑定");
+    }
     server.gate.arm("with_ids");
 
     let mut fut = Box::pin(app_lib::sync::states_phase(&db, &http, true));

@@ -7,7 +7,7 @@ import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, applyReadReceipt, appStore, 
 import { applyConfigRead, beginConfigRead } from '../aiConfigWrites';
 import type { EntryRollbackClaim } from '../internals';
 import type { AppState, ArticlesCursorState } from '../types';
-import type { ContentLayoutType } from '../../types';
+import type { ContentLayoutType, ViewFilterType } from '../../types';
 
 /** 启动与数据快照 slice：SQLite ⇄ mock 数据源、全量/分页/筛选拉取与锚定打开。
  *
@@ -197,6 +197,8 @@ async function fetchWindowRows(
  *  在途期间一律拦截续拉——reload 落地时 entries 与游标原子对齐，之后哨兵/
  *  refill effect 随 items 变化重新触发，不会丢加载。 */
 let backendReloadInFlight = 0;
+let loadMoreRequestSeq = 0;
+let activeLoadMoreRequest = 0;
 
 /** 是否有后端 reload 在途（loadMoreArticles 的入口守卫之一） */
 export function isBackendReloadInFlight(): boolean {
@@ -212,6 +214,33 @@ export function isBackendReloadInFlight(): boolean {
     （TASK-122 实体缓存），快照替换不触碰它（刷新不丢已加载正文）。 */
 function layoutNeedsBody(_layout: ContentLayoutType): boolean {
   return false;
+}
+
+type LoadMoreSnapshot = {
+  scope: string;
+  layout: ContentLayoutType;
+  sort: 'newest' | 'oldest';
+  view: ViewFilterType;
+  scopeKey: string;
+  queryKey: string;
+  cursor: ArticlesCursorState;
+  firstPageGen: number;
+  requestArgs: Parameters<typeof api.listArticles>[0];
+  key: string;
+};
+
+function loadMoreSnapshotKey(snapshot: Omit<LoadMoreSnapshot, 'key'>): string {
+  // Note: 续页重试按查询上下文 + 首页代际 + keyset 锚分条 — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md
+  return [
+    'list:load-more',
+    snapshot.scopeKey,
+    snapshot.sort,
+    snapshot.view,
+    snapshot.firstPageGen,
+    snapshot.cursor.lastPublished ?? 'none',
+    snapshot.cursor.lastId ?? 'none',
+    snapshot.cursor.loaded,
+  ].join(':');
 }
 
 /** 应用启动时恢复登录态（设备流 token 持久化在 SQLite，与组件无关） */
@@ -241,7 +270,111 @@ export async function confirmAppliedConfig(): Promise<void> {
   appStore().setState(reconcileCategories(appStore().getState(), categories));
 }
 
-export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice> = (set, get) => ({
+export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice> = (set, get) => {
+  const runLoadMore = async (snapshot: LoadMoreSnapshot, replay: boolean): Promise<void> => {
+    const showLoadMoreRetry = (message: string): void => {
+      get().showToast(message, {
+        label: '重试',
+        key: snapshot.key,
+        run: () => { void runLoadMore(snapshot, true); },
+      });
+    };
+    const now = get();
+    if (now.dataMode !== 'tauri') return;
+    if (replay) {
+      const nowScopeKey = QueryScope.pageKey(now.activeFeedFilter, now.activeContentLayout);
+      const nowCursor = now.articlesCursor[snapshot.scopeKey]
+        ?? emptyArticlesCursor(now.articlesLimit);
+      const sameContext = nowScopeKey === snapshot.scopeKey
+        && now.timelineSort === snapshot.sort
+        && now.activeViewFilter === snapshot.view
+        && nowCursor.lastPublished === snapshot.cursor.lastPublished
+        && nowCursor.lastId === snapshot.cursor.lastId
+        && nowCursor.loaded === snapshot.cursor.loaded
+        && currentFirstPageSerial(snapshot.queryKey) === snapshot.firstPageGen
+        && !isBackendReloadInFlight();
+      if (!sameContext) {
+        get().showToast('加载更多重试上下文已失效，未执行');
+        return;
+      }
+      /* Note: busy/exhausted 的 replay 不能静默消费重试入口 — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md */
+      if (now.articlesLoading) {
+        showLoadMoreRetry('加载更多重试仍在进行，请稍后重试');
+        return;
+      }
+      if (now.articlesExhausted) {
+        get().showToast('加载更多重试上下文已失效：当前范围已到底，未执行');
+        return;
+      }
+    }
+    if (now.articlesLoading || now.articlesExhausted) return;
+    const requestToken = ++loadMoreRequestSeq;
+    activeLoadMoreRequest = requestToken;
+    const finishLoadMore = (): void => {
+      if (activeLoadMoreRequest !== requestToken) return;
+      activeLoadMoreRequest = 0;
+      set({ articlesLoading: false });
+    };
+    set({ articlesLoading: true });
+    try {
+      const rows = await api.listArticles(snapshot.requestArgs);
+      if (
+        QueryScope.paginationStale(
+          {
+            scopeKey: snapshot.scopeKey,
+            sort: snapshot.sort,
+            cursor: snapshot.cursor,
+            view: snapshot.view,
+          },
+          {
+            scopeKey: QueryScope.pageKey(get().activeFeedFilter, get().activeContentLayout),
+            sort: get().timelineSort,
+            cursor: get().articlesCursor[snapshot.scopeKey]
+              ?? emptyArticlesCursor(get().articlesLimit),
+            view: get().activeViewFilter,
+          },
+        )
+      ) {
+        finishLoadMore();
+        return;
+      }
+      if (currentFirstPageSerial(snapshot.queryKey) !== snapshot.firstPageGen) {
+        finishLoadMore();
+        return;
+      }
+      if (activeLoadMoreRequest !== requestToken) return;
+      activeLoadMoreRequest = 0;
+      const seen = new Set(get().entries.map((e) => e.id));
+      const next = (rows ? rows.map(articleRowToEntry) : []).filter((a) => {
+        if (seen.has(a.id)) return false;
+        seen.add(a.id);
+        return true;
+      });
+      const fetched = rows ? rows.length : 0;
+      const nextCursor = advanceArticlesCursor(snapshot.cursor, rows ?? []);
+      if (fetched < ARTICLES_PAGE_SIZE) {
+        set((s) => ({
+          entries: next.length ? [...s.entries, ...next] : s.entries,
+          articlesLimit: nextCursor.loaded,
+          articlesCursor: { ...s.articlesCursor, [snapshot.scopeKey]: nextCursor },
+          articlesLoading: false,
+          articlesExhausted: true,
+        }));
+      } else {
+        set((s) => ({
+          entries: next.length ? [...s.entries, ...next] : s.entries,
+          articlesLimit: nextCursor.loaded,
+          articlesCursor: { ...s.articlesCursor, [snapshot.scopeKey]: nextCursor },
+          articlesLoading: false,
+        }));
+      }
+    } catch (e) {
+      finishLoadMore();
+      showLoadMoreRetry(`加载更多失败：${extractError(e)}`);
+    }
+  };
+
+  return {
   /* 启动用空数据 + dataLoading 骨架（不用 mock 先行渲染——曾导致卸载重装后
      「测试订阅一闪而过」，同步后被真实空库替换；蓝图中 P1/I3 要求首帧即真实态） */
   categories: [],
@@ -496,122 +629,45 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   loadMoreArticles: async () => {
     const st = get();
     if (st.dataMode !== 'tauri') return;
-    if (st.articlesLoading || st.articlesExhausted) return; // 已在加载 / 已到底
-    /* TASK-100 P3-1：reload（全量/筛选）在途期间拦截续拉——此刻 entries 仍是
-       旧口径快照（切布局/切范围先写游标镜像、reload 未返回），放行会把新口径
-       一页 append 到旧列表尾。reload 落地后 refill/哨兵 effect 会重新触发。 */
+    if (st.articlesLoading || st.articlesExhausted) return;
     if (isBackendReloadInFlight()) return;
-    /* 发起时快照「范围 + 布局 + 排序 + 游标 + 视图」：五者必须来自同一时刻，否则请求参数与
-       竞态比较的基准会互相错位（例如请求用旧范围、比较用新范围）。 */
     const scope = st.activeFeedFilter;
     const layoutAtStart = st.activeContentLayout;
     const viewAtStart = st.activeViewFilter;
     const scopeKey = QueryScope.pageKey(scope, layoutAtStart);
-    const scopeArgs = { ...QueryScope.args(scope, st.timelineSort, layoutAtStart), ...QueryScope.viewFilter(viewAtStart) };
-    /* TASK-119：续页携带「首页代际」= 该键最近一次首屏类发起的序号（续页不是新
-       查询实例：不 bump——无锚回落 offset 的退化形态同样是窗口续期）。期间若无
-       更新首屏（reload/锚定/同键筛选），落地时键现值与携带值恒等。 */
+    const scopeArgs = {
+      ...QueryScope.args(scope, st.timelineSort, layoutAtStart),
+      ...QueryScope.viewFilter(viewAtStart),
+    };
     const queryKey = QueryScope.viewKey(layoutAtStart, viewAtStart, scope);
     const firstPageGen = currentFirstPageSerial(queryKey);
-    /* TASK-117：keyset 锚 = 该 scope 游标现值（最后一行锚点 + loaded 计数）。
-       游标表缺键（理论上仅 mock 残留/异常窗口）时以 articlesLimit 兜底——
-       lastPublished 为 null → 请求不带 keyset 键，后端回落 OFFSET 语义。 */
     const cursorAtStart = st.articlesCursor[scopeKey] ?? emptyArticlesCursor(st.articlesLimit);
-    /* F1（Batch 1/2 独立审查 P3）：排序也必须参与竞态比较——keyset 锚的含义随排序
-       翻转（同锚点在 newest/oldest 下指向不同的后续集合）。守卫原本只比
-       scopeKey 与游标：旧排序在途的分页响应若晚于「切排序后的重拉」到达，且重拉
-       后游标恰好仍等于该锚点，就会被放行，把旧排序第 2 页接到新排序列表后
-       （审查探针实测 duplicates 100 / missing 100）。发起时快照排序，返回时排序
-       已翻转 ⇒ 该响应属于另一个查询口径，整体丢弃（与 scopeKey 同一判据粒度）。 */
     const sortAtStart = st.timelineSort;
-    set({ articlesLoading: true });
-    try {
-      const rows = await api.listArticles({
-        ...scopeArgs,
-        limit: ARTICLES_PAGE_SIZE,
-        /* TASK-117：OFFSET 停用（缺陷手法本身），由 keyset 锚承接续拉位置；
-           无锚回落（见 cursorAtStart 注释）才带 offset。 */
-        ...(cursorAtStart.lastPublished != null && cursorAtStart.lastId != null
-          ? { last_published: cursorAtStart.lastPublished, last_id: cursorAtStart.lastId }
-          : { offset: cursorAtStart.loaded }),
-        with_content: layoutNeedsBody(layoutAtStart),
-      });
-      // 竞态保护：加载期间游标被重置（reload / selectView 命中缓存恢复快照 / 切换
-      // 范围或布局加载了该口径自己的游标），丢弃本次追加。必须顺手复位 articlesLoading
-      // （D3）：否则该标志永久为 true，被入口守卫（articlesLoading || articlesExhausted）
-      // 永久挡住后续所有 loadMoreArticles —— 列表停在半截且加载动画常驻。
-      // TASK-052 把比较基准从「全局 articlesLimit」收紧为「该范围的游标」：A 源在途时
-      // 切到 B 源，B 源自己的游标可能与锚点数值相同（例如都是 500），若只比数值会
-      // 把属于 A 的迟到数据错接到 B 的列表上；带上 scopeKey 后这种串台也会被丢弃。
-      // F1：排序翻转同样使该响应过期（见发起时的 sortAtStart 注释）。
-      // TASK-094（R7）：布局切换改变整个 entries 序列与游标键，布局在途响应一并过期。
-      // TASK-109①：判据收口为具名守卫 paginationStale（语义见 internals）。
-      // TASK-110①：view 入守卫——筛选视图分页化后切视图会整体替换 entries 并重置
-      // 同键游标，旧视图的在途分页响应不得追加进新视图列表（锚点数值可能恰好
-      // 相等，须显式比较视图维度）。
-      // TASK-117：游标比较改为 keyset 三元组（lastPublished/lastId/loaded 任一
-      // 漂移即过期——锚点推进与 reload 重置两种竞态都覆盖）。
-      if (
-        QueryScope.paginationStale(
-          { scopeKey, sort: sortAtStart, cursor: cursorAtStart, view: viewAtStart },
-          {
-            scopeKey: QueryScope.pageKey(get().activeFeedFilter, get().activeContentLayout),
-            sort: get().timelineSort,
-            cursor: get().articlesCursor[scopeKey] ?? emptyArticlesCursor(get().articlesLimit),
-            view: get().activeViewFilter,
-          },
-        )
-      ) {
-        set({ articlesLoading: false });
-        return;
-      }
-      /* TASK-119（审计 P2-4①）：续页代际守卫——落地仅当该键此后没有更新的首屏类
-         发起（reload/锚定/同键筛选）。三元组守卫在「新首屏（同数据重拉）落地后
-         游标与发起时全等」时放行——参数比较识别不了同一查询的旧版本（审计原话：
-         不能只比较查询参数是否相同），代际判据补上这一层。 */
-      if (currentFirstPageSerial(queryKey) !== firstPageGen) {
-        set({ articlesLoading: false });
-        return;
-      }
-      /* TASK-110②：追加按 id 去重——稳定序策略「**追加去重保序**」。TASK-117 后
-         续拉锚是最后一行锚点而非偏移量，插入漂移不再使续拉区间与已加载集合重叠
-         （keyset 天然免疫，t117-3 断言锁定）；去重保留作 duplicate key 的兜底防线
-         （集合收缩场景锚点前移等极端窗口）。游标推进 = 锚更新为**本页最后一行**，
-         loaded 累加拉取行数。 */
-      const seen = new Set(get().entries.map((e) => e.id));
-      const next = (rows ? rows.map(articleRowToEntry) : []).filter((a) => {
-        if (seen.has(a.id)) return false;
-        seen.add(a.id);
-        return true;
-      });
-      const fetched = rows ? rows.length : 0;
-      const nextCursor = advanceArticlesCursor(cursorAtStart, rows ?? []);
-      if (fetched < ARTICLES_PAGE_SIZE) {
-        // 不足一页 → 已到底（按**拉取行数**判定：与追加去重无关，见 t110 既有语义）
-        set((s) => ({
-          entries: next.length ? [...s.entries, ...next] : s.entries,
-          articlesLimit: nextCursor.loaded,
-          articlesCursor: { ...s.articlesCursor, [scopeKey]: nextCursor },
-          articlesLoading: false,
-          articlesExhausted: true,
-        }));
-      } else {
-        set((s) => ({
-          entries: next.length ? [...s.entries, ...next] : s.entries,
-          articlesLimit: nextCursor.loaded,
-          articlesCursor: { ...s.articlesCursor, [scopeKey]: nextCursor },
-          articlesLoading: false,
-        }));
-      }
-    } catch (e) {
-      /* D2：此前这里完全吞错（只复位加载态）——用户侧零提示，滚动加载静默
-         停摆、也无人知道原因。与 refreshOneFeed / extractCurrentArticle 同口径：
-         复位加载态 + 可见 toast + 一键重试。 */
-      set({ articlesLoading: false });
-      get().showToast(`加载更多失败：${extractError(e)}`, { label: '重试', key: 'list:load-more', run: () => void get().loadMoreArticles() });
-    }
+    const requestArgs = {
+      ...scopeArgs,
+      limit: ARTICLES_PAGE_SIZE,
+      ...(cursorAtStart.lastPublished != null && cursorAtStart.lastId != null
+        ? { last_published: cursorAtStart.lastPublished, last_id: cursorAtStart.lastId }
+        : { offset: cursorAtStart.loaded }),
+      with_content: layoutNeedsBody(layoutAtStart),
+    };
+    const snapshotBase = {
+      scope,
+      layout: layoutAtStart,
+      sort: sortAtStart,
+      view: viewAtStart,
+      scopeKey,
+      queryKey,
+      cursor: cursorAtStart,
+      firstPageGen,
+      requestArgs,
+    };
+    const snapshot: LoadMoreSnapshot = {
+      ...snapshotBase,
+      key: loadMoreSnapshotKey(snapshotBase),
+    };
+    await runLoadMore(snapshot, false);
   },
-
   /** 切换视图到收藏/未读/今天时，按后端筛选拉取列表首屏。
       TASK-110①：真分页——废除 limit:100000 近似全集（审计「旧文章在筛选视图
       不可达」根因）：首屏只取 ARTICLES_PAGE_SIZE，articlesExhausted 改真实判定
@@ -916,4 +972,5 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     set({ bootstrapError: null, dataLoading: true });
     await get().bootstrapFromBackend();
   },
-});
+  };
+};

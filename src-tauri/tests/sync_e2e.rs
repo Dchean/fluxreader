@@ -522,9 +522,9 @@ async fn remote_unsubscribe_keeps_feed_with_pending_queue_item() {
     );
 }
 
-/// B②' 未绑定 remote_id 的源（origin='remote' 但 remote_id 为空）不得被删除。
+/// B②' 远端 URL 已不在权威列表时，历史未绑定 remote 孤儿应被清理。
 #[tokio::test]
-async fn remote_unsubscribe_keeps_unbound_feed() {
+async fn remote_unsubscribe_cleans_historical_unbound_remote_feed() {
     let (db, http, server) = setup_remote_unsub("unbound").await;
 
     {
@@ -549,9 +549,10 @@ async fn remote_unsubscribe_keeps_unbound_feed() {
     sync::feeds_phase(&db, &http).await.expect("pull");
 
     let conn = db.lock().await;
-    assert!(
-        feed_id_by_url(&conn, "http://example.com/never-listed.xml").is_some(),
-        "remote feed without a bound remote_id must not be deleted"
+    assert_eq!(
+        feed_id_by_url(&conn, "http://example.com/never-listed.xml"),
+        None,
+        "historical unbound remote feed absent from the authoritative URL set must be cleaned"
     );
 }
 

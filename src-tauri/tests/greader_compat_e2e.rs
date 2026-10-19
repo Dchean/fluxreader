@@ -61,6 +61,7 @@ struct Sub {
 struct Hit {
     method: String,
     path: String,
+    query: String,
     authorization: Option<String>,
     form: Vec<(String, String)>,
 }
@@ -87,6 +88,15 @@ struct StrictServer {
     /// 仅当覆盖为「200 + trim 后 OK」时才真正应用状态；其余覆盖返回响应但
     /// **不应用状态**（模拟真实「2xx 但写未生效」）。
     edit_tag_override: Mutex<Option<(u16, String)>>,
+    /// 只读端点响应原样覆盖：`path suffix → HTTP 200 body`。
+    /// OPT-019 缺字段夹具用；覆盖仍先经过认证/T 校验。
+    read_overrides: Mutex<HashMap<String, String>>,
+    /// 仅覆盖 reading-list 的 itemRefs 响应；read/starred 流保持真实。
+    reading_list_ids_override: Mutex<Option<String>>,
+    read_ids_override: Mutex<Option<String>>,
+    starred_ids_override: Mutex<Option<String>>,
+    /// 首次 subscription/list 响应算定后追加到下一次列表的远端订阅。
+    subscription_late_add: Mutex<Option<Sub>>,
 }
 
 impl StrictServer {
@@ -115,6 +125,11 @@ impl StrictServer {
             hits: Mutex::new(Vec::new()),
             token_override: Mutex::new(None),
             edit_tag_override: Mutex::new(None),
+            read_overrides: Mutex::new(HashMap::new()),
+            reading_list_ids_override: Mutex::new(None),
+            read_ids_override: Mutex::new(None),
+            starred_ids_override: Mutex::new(None),
+            subscription_late_add: Mutex::new(None),
         });
         let srv = server.clone();
         tokio::spawn(async move {
@@ -218,6 +233,69 @@ impl StrictServer {
         *self.edit_tag_override.lock().unwrap() = None;
     }
 
+    fn set_read_override(&self, path_suffix: &str, body: &str) {
+        self.read_overrides
+            .lock()
+            .unwrap()
+            .insert(path_suffix.to_string(), body.to_string());
+    }
+
+    fn set_reading_list_ids_override(&self, body: &str) {
+        *self.reading_list_ids_override.lock().unwrap() = Some(body.to_string());
+    }
+
+    fn set_read_ids_override(&self, body: &str) {
+        *self.read_ids_override.lock().unwrap() = Some(body.to_string());
+    }
+
+    fn set_starred_ids_override(&self, body: &str) {
+        *self.starred_ids_override.lock().unwrap() = Some(body.to_string());
+    }
+
+    fn set_entry_read(&self, id: i64, read: bool) {
+        if let Some(e) = self.entries.lock().unwrap().iter_mut().find(|e| e.id == id) {
+            e.read = read;
+        }
+    }
+
+    fn add_subscription_after_first_list(
+        &self,
+        id: &str,
+        title: &str,
+        url: &str,
+        category: Option<&str>,
+    ) {
+        *self.subscription_late_add.lock().unwrap() = Some(Sub {
+            id: id.to_string(),
+            title: title.to_string(),
+            url: url.to_string(),
+            category: category.map(str::to_string),
+        });
+    }
+
+    fn set_entry_starred(&self, id: i64, starred: bool) {
+        if let Some(e) = self.entries.lock().unwrap().iter_mut().find(|e| e.id == id) {
+            e.starred = starred;
+        }
+    }
+
+    fn subscription_list_requests(&self) -> usize {
+        self.hits()
+            .iter()
+            .filter(|h| h.path.ends_with("/reader/api/0/subscription/list"))
+            .count()
+    }
+
+    fn item_ids_requests_containing(&self, needle: &str) -> usize {
+        self.hits()
+            .iter()
+            .filter(|h| {
+                h.path.ends_with("/reader/api/0/stream/items/ids")
+                    && url_decode(&h.query).contains(needle)
+            })
+            .count()
+    }
+
     /// 远端订阅当前的分类名（None = 无分类/默认分类）。
     fn subscription_category(&self, id: &str) -> Option<String> {
         self.subscriptions
@@ -281,6 +359,10 @@ async fn handle_conn(mut stream: TcpStream, srv: Arc<StrictServer>) -> std::io::
     let method = parts.next().unwrap_or("").to_string();
     let path_query = parts.next().unwrap_or("");
     let path = path_query.split('?').next().unwrap_or("").to_string();
+    let query = path_query
+        .split_once('?')
+        .map(|(_, q)| q.to_string())
+        .unwrap_or_default();
 
     let mut headers: HashMap<String, String> = HashMap::new();
     for line in lines {
@@ -293,6 +375,7 @@ async fn handle_conn(mut stream: TcpStream, srv: Arc<StrictServer>) -> std::io::
     let hit = Hit {
         method: method.clone(),
         path: path.clone(),
+        query: query.clone(),
         authorization,
         form: if body.is_empty() {
             Vec::new()
@@ -359,6 +442,16 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
         return (401, "Unauthorized!".into());
     }
 
+    if let Some((_, body)) = srv
+        .read_overrides
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(suffix, _)| path.ends_with(suffix.as_str()))
+    {
+        return (200, body.clone());
+    }
+
     /* ---------- 读端点 ---------- */
     if method == "GET" && path.ends_with("/reader/api/0/subscription/list") {
         let subs = srv.subscriptions.lock().unwrap();
@@ -389,7 +482,12 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
                 })
             })
             .collect();
-        return (200, serde_json::json!({ "subscriptions": arr }).to_string());
+        let body = serde_json::json!({ "subscriptions": arr }).to_string();
+        drop(subs);
+        if let Some(late) = srv.subscription_late_add.lock().unwrap().take() {
+            srv.subscriptions.lock().unwrap().push(late);
+        }
+        return (200, body);
     }
     if method == "GET" && path.ends_with("/reader/api/0/tag/list") {
         let folders = srv.folders.lock().unwrap();
@@ -414,6 +512,43 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
             });
         }
         return (200, serde_json::json!({ "tags": tags }).to_string());
+    }
+
+    if method == "GET" && path.ends_with("/reader/api/0/stream/items/ids") {
+        let decoded_query = url_decode(&hit.query);
+        if decoded_query.contains("state/com.google/reading-list") {
+            if let Some(body) = srv.reading_list_ids_override.lock().unwrap().clone() {
+                return (200, body);
+            }
+        } else if decoded_query.contains("s=user/-/state/com.google/read&") {
+            if let Some(body) = srv.read_ids_override.lock().unwrap().clone() {
+                return (200, body);
+            }
+        } else if decoded_query.contains("s=user/-/state/com.google/starred&") {
+            if let Some(body) = srv.starred_ids_override.lock().unwrap().clone() {
+                return (200, body);
+            }
+        }
+        let entries = srv.entries.lock().unwrap();
+        let item_refs: Vec<serde_json::Value> = entries
+            .iter()
+            .filter(|e| {
+                if decoded_query.contains("state/com.google/reading-list") {
+                    true
+                } else if decoded_query.contains("state/com.google/read") {
+                    e.read
+                } else if decoded_query.contains("state/com.google/starred") {
+                    e.starred
+                } else {
+                    false
+                }
+            })
+            .map(|e| serde_json::json!({ "id": e.id.to_string() }))
+            .collect();
+        return (
+            200,
+            serde_json::json!({ "itemRefs": item_refs }).to_string(),
+        );
     }
 
     /* ---------- 条目端点 ---------- */
@@ -600,6 +735,141 @@ fn url_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn seed_sync_db(
+    tag: &str,
+    srv: &StrictServer,
+) -> (
+    Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    std::path::PathBuf,
+) {
+    let tmp = common::unique_db_path(tag);
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).expect("open db");
+    db::set_setting(&conn, "sync_protocol", "greader").unwrap();
+    db::set_setting(&conn, "greader_endpoint", &srv.url()).unwrap();
+    db::set_setting(&conn, "greader_username", USER).unwrap();
+    db::set_setting(&conn, "greader_password", PASS).unwrap();
+    let account = app_lib::sync::current_account(&conn)
+        .unwrap()
+        .expect("test account");
+    db::mark_zero_binding_discovery_attempt(&conn, &account.key, chrono::Utc::now().timestamp())
+        .unwrap();
+    (Arc::new(tokio::sync::Mutex::new(conn)), tmp)
+}
+
+fn seed_remote_article(
+    conn: &rusqlite::Connection,
+    feed_url: &str,
+    remote_feed_id: i64,
+    remote_article_id: i64,
+) -> (i64, i64) {
+    let folder = db::create_folder(conn, "远端分类", "article").unwrap();
+    let feed = db::insert_feed_origin(
+        conn,
+        feed_url,
+        None,
+        "远端源",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+        "remote",
+    )
+    .unwrap();
+    db::set_feed_remote_id(conn, feed, remote_feed_id).unwrap();
+    let article = db::NewArticle {
+        guid: format!("remote-guid-{remote_article_id}"),
+        url: Some(format!("https://e.example/{remote_article_id}")),
+        title: "远端条目".into(),
+        author: None,
+        summary: None,
+        content_html: None,
+        body_text: "body".into(),
+        image_url: None,
+        enclosure_url: None,
+        enclosure_mime: None,
+        duration_sec: None,
+        published_at: Some("2026-01-01T00:00:00+00:00".into()),
+        source: "remote".into(),
+    };
+    let article_id = db::upsert_article_with_feed(conn, feed, &article, false)
+        .unwrap()
+        .0;
+    db::set_article_remote_id(conn, article_id, remote_article_id).unwrap();
+    (feed, article_id)
+}
+
+fn seed_unbound_remote_feed(conn: &rusqlite::Connection, feed_url: &str) -> i64 {
+    let folder = db::create_folder(conn, "未绑定远端分类", "article").unwrap();
+    db::insert_feed_origin(
+        conn,
+        feed_url,
+        None,
+        "未绑定远端源",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+        "remote",
+    )
+    .unwrap()
+}
+
+fn seed_local_article(conn: &rusqlite::Connection) -> i64 {
+    let folder = db::create_folder(conn, "本地分类", "article").unwrap();
+    let feed = db::insert_feed(
+        conn,
+        "https://local.example/feed.xml",
+        None,
+        "本地源",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    let article = db::NewArticle {
+        guid: "local-guid".into(),
+        url: Some("https://local.example/article".into()),
+        title: "本地条目".into(),
+        author: None,
+        summary: None,
+        content_html: None,
+        body_text: "body".into(),
+        image_url: None,
+        enclosure_url: None,
+        enclosure_mime: None,
+        duration_sec: None,
+        published_at: Some("2026-01-01T00:00:00+00:00".into()),
+        source: "direct".into(),
+    };
+    db::upsert_article_with_feed(conn, feed, &article, false)
+        .unwrap()
+        .0
+}
+
+fn feed_count(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM feeds", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn article_count(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn article_state(conn: &rusqlite::Connection, article_id: i64) -> (bool, bool) {
+    conn.query_row(
+        "SELECT is_read, is_starred FROM articles WHERE id = ?1",
+        [article_id],
+        |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)? != 0)),
+    )
+    .unwrap()
 }
 
 /* ============================================================
@@ -1174,4 +1444,1197 @@ async fn freshrss_subscription_edit_moves_category_with_full_stream_id() {
         hits[1].form_first("a").as_deref(),
         Some("user/-/label/user/-/label/伪装")
     );
+}
+
+/* ============================================================
+OPT-019：权威集合缺字段失败关闭 / 零远端绑定的 pull 守卫
+============================================================ */
+
+/// HTTP 200 `{}` 不等于「远端没有订阅」：subscription/list 缺权威数组时，
+/// feeds_phase 必须报协议错误，既有 remote 源与文章不得被删除对账清掉。
+#[tokio::test]
+async fn missing_subscription_list_field_preserves_remote_feed_and_articles() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_read_override("subscription/list", "{}");
+    let (db, tmp) = seed_sync_db("opt019_gr_missing_subscriptions", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+    }
+
+    let report = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("feeds phase completes with a reported protocol error");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("subscriptions") || e.contains("协议")),
+        "缺 subscriptions 必须可见：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(feed_count(&conn), 1, "缺字段不得触发退订删除");
+    assert_eq!(article_count(&conn), 1, "文章应随源保留");
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 与缺字段相反，显式 `subscriptions: []` 是权威空集：可以正常执行退订对账。
+#[tokio::test]
+async fn explicit_empty_subscription_list_remains_authoritative() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_read_override("subscription/list", r#"{"subscriptions":[]}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_empty_subscriptions", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+    }
+
+    let report = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("explicit empty list is valid");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let conn = db.lock().await;
+    assert_eq!(feed_count(&conn), 0, "显式空集应执行权威退订对账");
+    assert_eq!(article_count(&conn), 0);
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// reading-list 的 itemRefs 缺失是协议错误：本轮不得推进时间游标，也不得
+/// 把随后的空权威集合解释成「远端取消收藏」。
+#[tokio::test]
+async fn missing_item_refs_keeps_cursor_and_does_not_clear_star() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_read_override("stream/items/ids", "{}");
+    let (db, tmp) = seed_sync_db("opt019_gr_missing_item_refs", &srv);
+    let article_id = {
+        let conn = db.lock().await;
+        let (_, article_id) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_starred(&conn, article_id, true).unwrap();
+        db::set_last_sync_ts(&conn, 123_456).unwrap();
+        article_id
+    };
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase completes with a reported protocol error");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("itemRefs") || e.contains("条目 id")),
+        "缺 itemRefs 必须可见：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(
+        db::last_sync_ts(&conn).unwrap(),
+        123_456,
+        "缺 itemRefs 不得推进 last_sync_ts"
+    );
+    assert!(
+        article_state(&conn, article_id).1,
+        "缺 itemRefs 后不得执行空集合星标对账"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// items 缺失同样失败关闭：正文块失败后不得用一份随后请求到的集合清状态，
+/// 也不得推进 last_sync_ts。
+#[tokio::test]
+async fn missing_item_contents_field_keeps_cursor_and_local_star() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "A");
+    srv.set_entry_starred(1, true);
+    srv.set_read_override("stream/items/contents", "{}");
+    let (db, tmp) = seed_sync_db("opt019_gr_missing_item_contents", &srv);
+    let article_id = {
+        let conn = db.lock().await;
+        let (_, article_id) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_starred(&conn, article_id, true).unwrap();
+        db::set_last_sync_ts(&conn, 234_567).unwrap();
+        article_id
+    };
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase completes with a reported protocol error");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("items") || e.contains("正文")),
+        "缺 items 必须可见：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(
+        db::last_sync_ts(&conn).unwrap(),
+        234_567,
+        "缺 items 不得推进 last_sync_ts"
+    );
+    assert!(
+        article_state(&conn, article_id).1,
+        "独立的 starred 权威集合仍应保留本地收藏"
+    );
+    assert!(
+        srv.item_ids_requests_containing("s=user/-/state/com.google/starred&") > 0,
+        "正文失败不得连带跳过独立的 starred 对账"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 零远端 feed 绑定的 light sync 不请求条目/权威状态，不推进游标；本地文章
+/// 与该空绑定事实无关，必须原样保留。
+#[tokio::test]
+async fn greader_light_sync_without_remote_feed_binding_skips_pull_entirely() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "remote-but-unbound");
+    let (db, tmp) = seed_sync_db("opt019_gr_zero_binding", &srv);
+    {
+        let conn = db.lock().await;
+        seed_local_article(&conn);
+        db::set_last_sync_ts(&conn, 345_678).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("no remote feed binding is a benign skip");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(
+        srv.hits().iter().all(|h| {
+            !h.path.ends_with("/reader/api/0/stream/items/ids")
+                && !h.path.ends_with("/reader/api/0/stream/items/contents")
+        }),
+        "零绑定不得请求条目或权威状态"
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 345_678);
+    assert_eq!(article_count(&conn), 1, "预置文章不得被消费");
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 守卫只拦「零绑定」：至少一个远端 feed 绑定时，正常增量仍应拉取并推进游标。
+#[tokio::test]
+async fn greader_light_sync_with_bound_feed_still_pulls() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "A");
+    let (db, tmp) = seed_sync_db("opt019_gr_bound_green", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_last_sync_ts(&conn, 456_789).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("bound feed should pull normally");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(
+        srv.hits()
+            .iter()
+            .any(|h| h.path.ends_with("/reader/api/0/stream/items/ids"))
+            && srv
+                .hits()
+                .iter()
+                .any(|h| h.path.ends_with("/reader/api/0/stream/items/contents")),
+        "至少一个绑定时必须走正常条目 pull"
+    );
+    let conn = db.lock().await;
+    assert!(db::last_sync_ts(&conn).unwrap() > 456_789);
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2-1：空账号的 light sync 可以只读发现远端首个订阅，并在后续轮次自动
+/// 绑定和拉条目；发现尝试有独立节流，不写 `last_sync_ts`，也不自动推送本地
+/// 订阅。
+#[tokio::test]
+async fn greader_zero_binding_light_discovers_first_remote_feed_without_subscription_write() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    let (db, tmp) = seed_sync_db("opt019_gr_discovery", &srv);
+    {
+        let conn = db.lock().await;
+        db::clear_zero_binding_discovery_attempts(&conn).unwrap();
+    }
+
+    let first = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("first discovery round");
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    assert_eq!(
+        srv.subscription_list_requests(),
+        1,
+        "空账号首轮应只读发现一次远端订阅"
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(db::last_sync_ts(&conn).unwrap(), 0);
+    }
+
+    let second = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("throttled discovery round");
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    assert_eq!(
+        srv.subscription_list_requests(),
+        1,
+        "发现尝试必须节流，下一 TICK 不得重复请求"
+    );
+
+    srv.set_subscriptions(vec![(
+        "feed/10",
+        "首订阅",
+        "http://example.com/first.xml",
+        None,
+    )]);
+    srv.add_entry(1, 10, "首条");
+    {
+        let conn = db.lock().await;
+        db::clear_zero_binding_discovery_attempts(&conn).unwrap();
+    }
+
+    let third = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("automatic discovery and pull");
+    assert!(third.errors.is_empty(), "{:?}", third.errors);
+    assert!(third.pulled_feeds >= 1);
+    assert!(third.pulled_entries >= 1);
+    {
+        let conn = db.lock().await;
+        let remote_feed: Option<i64> = conn
+            .query_row(
+                "SELECT remote_id FROM feeds WHERE feed_url = ?1",
+                ["http://example.com/first.xml"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remote_feed, Some(10));
+        let remote_article: Option<i64> = conn
+            .query_row(
+                "SELECT remote_id FROM articles WHERE url = ?1",
+                ["http://example.com/e/1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remote_article, Some(1), "发现订阅后同轮应拉回条目");
+        assert!(db::last_sync_ts(&conn).unwrap() > 0);
+    }
+    assert!(
+        srv.hits().iter().all(|h| {
+            !h.path.ends_with("/reader/api/0/subscription/edit")
+                && !h.path.ends_with("/reader/api/0/subscription/quickadd")
+        }),
+        "自动发现不得推送本地订阅或绕过首连确认"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2-2：只要还有一个 `origin='remote'` 源没有 remote_id，本轮 pull 就必须
+/// 在请求条目前停下，保留游标并显式报告。
+#[tokio::test]
+async fn greader_partial_remote_feed_binding_keeps_cursor() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "bound");
+    srv.add_entry(2, 11, "unbound");
+    let (db, tmp) = seed_sync_db("opt019_gr_partial_binding", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/bound.xml", 10, 1);
+        seed_unbound_remote_feed(&conn, "http://example.com/unbound.xml");
+        db::set_last_sync_ts(&conn, 567_890).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("partial binding is reported without aborting the phase");
+    assert!(
+        report.errors.iter().any(|e| e.contains("remote_id")),
+        "部分绑定必须显式可见：{:?}",
+        report.errors
+    );
+    assert_eq!(
+        srv.item_ids_requests_containing("state/com.google/reading-list"),
+        0,
+        "存在未绑定远端源时不得开始条目窗口"
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 567_890);
+    assert_eq!(article_count(&conn), 1, "未绑定 feed 的条目不得被消费");
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2-2 的条目级分支：远端条目 origin 指向本地不存在的 feed 时，同样不得
+/// 把该窗口记为已消费。
+#[tokio::test]
+async fn greader_entry_feed_without_local_binding_keeps_cursor() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 11, "unknown-feed");
+    let (db, tmp) = seed_sync_db("opt019_gr_unknown_entry_feed", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/bound.xml", 10, 99);
+        db::set_last_sync_ts(&conn, 579_013).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("unknown entry feed is reported");
+    assert!(
+        report.errors.iter().any(|e| e.contains("所属远端 feed")),
+        "条目级未绑定必须显式可见：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 579_013);
+    assert_eq!(article_count(&conn), 1, "未绑定 feed 的条目不得入库");
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2-3：reading-list 失败与 read/starred 权威集合彼此独立；后者成功时仍须
+/// 执行对账。
+#[tokio::test]
+async fn missing_reading_list_ids_does_not_block_valid_read_star_reconcile() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "A");
+    srv.set_reading_list_ids_override("{}");
+    let (db, tmp) = seed_sync_db("opt019_gr_reconcile_isolation", &srv);
+    let article_id = {
+        let conn = db.lock().await;
+        let (_, article_id) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_starred(&conn, article_id, true).unwrap();
+        db::set_last_sync_ts(&conn, 678_901).unwrap();
+        article_id
+    };
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report.errors.iter().any(|e| e.contains("itemRefs")),
+        "主列表缺字段仍应报告：{:?}",
+        report.errors
+    );
+    assert!(
+        srv.item_ids_requests_containing("s=user/-/state/com.google/read&") > 0
+            && srv.item_ids_requests_containing("s=user/-/state/com.google/starred&") > 0,
+        "主列表失败不得阻断两个独立权威集合请求"
+    );
+    let conn = db.lock().await;
+    assert!(
+        !article_state(&conn, article_id).1,
+        "有效的空 starred 集合仍应按权威语义取消收藏"
+    );
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 678_901);
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1 返工：read 集合失败时，成功拉到的 starred 权威集合仍必须独立对账。
+#[tokio::test]
+async fn read_collection_failure_does_not_skip_successful_star_reconcile() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "A");
+    srv.set_read_ids_override("{}");
+    let (db, tmp) = seed_sync_db("opt019_gr_read_fail_star_ok", &srv);
+    let article_id = {
+        let conn = db.lock().await;
+        let (_, article_id) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_starred(&conn, article_id, true).unwrap();
+        db::set_last_sync_ts(&conn, 681_001).unwrap();
+        article_id
+    };
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report.errors.iter().any(|e| e.contains("read")),
+        "read 侧失败必须可见：{:?}",
+        report.errors
+    );
+    assert!(
+        srv.item_ids_requests_containing("s=user/-/state/com.google/starred&") > 0,
+        "starred 集合仍应请求"
+    );
+    let conn = db.lock().await;
+    assert!(
+        !article_state(&conn, article_id).1,
+        "成功拉到的空 starred 集合仍应收敛收藏"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1 返工：starred 集合失败时，成功拉到的 read 集合仍必须独立对账。
+#[tokio::test]
+async fn star_collection_failure_does_not_skip_successful_read_reconcile() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "A");
+    srv.set_entry_read(1, true);
+    srv.set_entry_starred(1, true);
+    srv.set_starred_ids_override("{}");
+    let (db, tmp) = seed_sync_db("opt019_gr_star_fail_read_ok", &srv);
+    let article_id = {
+        let conn = db.lock().await;
+        let (_, article_id) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_starred(&conn, article_id, true).unwrap();
+        db::set_last_sync_ts(&conn, 681_002).unwrap();
+        article_id
+    };
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report.errors.iter().any(|e| e.contains("starred")),
+        "starred 侧失败必须可见：{:?}",
+        report.errors
+    );
+    assert!(
+        srv.item_ids_requests_containing("s=user/-/state/com.google/read&") > 0,
+        "read 集合仍应请求"
+    );
+    let conn = db.lock().await;
+    let (read, starred) = article_state(&conn, article_id);
+    assert!(read, "成功的 read 集合仍应把本地条目标为已读");
+    assert!(starred, "starred 失败时不得清掉本地收藏");
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P3-4：HTTP 200 的 JSON 解码错误与 schema 缺字段都属于协议错误，不是网络错误。
+#[tokio::test]
+async fn greader_schema_and_json_decode_failures_use_protocol_error_code() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "A");
+    let client = GReaderClient::login_resolved(&srv.url(), USER, PASS, reqwest::Client::new())
+        .await
+        .expect("login");
+
+    srv.set_read_override("subscription/list", "{}");
+    let err = client.subscriptions().await.unwrap_err();
+    assert_eq!(err.code, "protocol", "{err}");
+
+    srv.set_read_override("subscription/list", "not-json");
+    let err = client.subscriptions().await.unwrap_err();
+    assert_eq!(err.code, "protocol", "{err}");
+
+    srv.set_read_override("stream/items/ids", "{}");
+    let err = client
+        .item_ids(
+            "user/-/state/com.google/reading-list",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, "protocol", "{err}");
+
+    srv.set_read_override("stream/items/contents", "{}");
+    let err = client.item_contents(&[1]).await.unwrap_err();
+    assert_eq!(err.code, "protocol", "{err}");
+}
+
+/// P2 返工：非法 itemRefs id 必须 protocol 失败关闭且不推进游标。
+#[tokio::test]
+async fn invalid_item_ref_id_is_protocol_and_keeps_cursor() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_reading_list_ids_override(r#"{"itemRefs":[{"id":"not-an-id"}]}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_invalid_item_ref", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 99);
+        db::set_last_sync_ts(&conn, 681_003).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report.errors.iter().any(|e| e.contains("[protocol]")),
+        "非法 itemRefs id 必须映射 protocol：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 681_003);
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2 返工：非法 continuation 必须 protocol 失败关闭且不推进游标。
+#[tokio::test]
+async fn invalid_item_ref_continuation_is_protocol_and_keeps_cursor() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_reading_list_ids_override(r#"{"itemRefs":[{"id":"1"}],"continuation":"not-a-number"}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_invalid_continuation", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 99);
+        db::set_last_sync_ts(&conn, 681_004).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report.errors.iter().any(|e| e.contains("[protocol]")),
+        "非法 continuation 必须映射 protocol：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 681_004);
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1-B：主列表返回数字但重复的 continuation 时，必须在第二轮识别并失败，
+/// 不得继续无限请求；条目游标保持。
+#[tokio::test]
+async fn repeated_reading_list_continuation_is_protocol_and_bounded() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_reading_list_ids_override(r#"{"itemRefs":[{"id":"1"}],"continuation":"0"}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_repeated_continuation", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 99);
+        db::set_last_sync_ts(&conn, 690_003).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("[protocol]") && e.contains("continuation")),
+        "{:?}",
+        report.errors
+    );
+    assert_eq!(
+        srv.item_ids_requests_containing("state/com.google/reading-list"),
+        2,
+        "重复 continuation 应在第二次响应后停止"
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 690_003);
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1 返工：主 itemRefs 空页 + 合法 continuation 是协议结构错误，不得继续
+/// 分页或推进 last_sync_ts。
+#[tokio::test]
+async fn reading_list_empty_page_with_continuation_is_protocol() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_reading_list_ids_override(r#"{"itemRefs":[],"continuation":"0"}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_main_empty_cont", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 99);
+        db::set_last_sync_ts(&conn, 690_008).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("[protocol]") && e.contains("continuation")),
+        "{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 690_008);
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1-B：read/starred 权威集合同样记录 continuation；重复数字必须在字段内
+/// protocol 失败，并阻断本轮条目游标推进。
+#[tokio::test]
+async fn repeated_star_continuation_is_protocol_and_keeps_cursor() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "A");
+    srv.set_starred_ids_override(r#"{"itemRefs":[{"id":"1"}],"continuation":"0"}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_repeated_star_continuation", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_last_sync_ts(&conn, 690_004).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("starred") && e.contains("[protocol]")),
+        "{:?}",
+        report.errors
+    );
+    assert_eq!(
+        srv.item_ids_requests_containing("s=user/-/state/com.google/starred&"),
+        2,
+        "权威集合重复 continuation 应有限停止"
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 690_004);
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1 返工：read 权威集合返回空 itemRefs + 合法 continuation 时必须是
+/// protocol、跳过 read 字段并保留 last_sync_ts，不得包装成 network。
+#[tokio::test]
+async fn read_empty_page_with_continuation_is_protocol_and_keeps_cursor() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "A");
+    srv.set_entry_starred(1, true);
+    srv.set_read_ids_override(r#"{"itemRefs":[],"continuation":"0"}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_read_empty_cont", &srv);
+    {
+        let conn = db.lock().await;
+        let (_, aid) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_starred(&conn, aid, true).unwrap();
+        db::set_last_sync_ts(&conn, 690_006).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("read 权威集合") && e.contains("[protocol]")),
+        "{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 690_006);
+    let (read, starred) = article_state(
+        &conn,
+        conn.query_row("SELECT id FROM articles WHERE remote_id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap(),
+    );
+    assert!(!read, "read 字段失败时不得对账");
+    assert!(starred, "read 字段失败不得误清 star");
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1 返工：starred 空页 + 合法 continuation 同样 protocol 失败，字段跳过、
+/// 不清本地收藏，且保留 last_sync_ts。
+#[tokio::test]
+async fn starred_empty_page_with_continuation_is_protocol_and_keeps_cursor() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 10, "A");
+    srv.set_entry_starred(1, true);
+    srv.set_starred_ids_override(r#"{"itemRefs":[],"continuation":"0"}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_star_empty_cont", &srv);
+    {
+        let conn = db.lock().await;
+        let (_, aid) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_starred(&conn, aid, true).unwrap();
+        db::set_last_sync_ts(&conn, 690_007).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("starred 权威集合") && e.contains("[protocol]")),
+        "{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 690_007);
+    let aid: i64 = conn
+        .query_row("SELECT id FROM articles WHERE remote_id = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(
+        article_state(&conn, aid).1,
+        "starred 字段失败时不得清空本地收藏"
+    );
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1 返工：已有绑定也会在独立发现节流到期时只读拉订阅，绑定新增 feed 后
+/// 同轮拉回其条目。
+#[tokio::test]
+async fn greader_existing_binding_discovers_new_remote_feed() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_subscriptions(vec![
+        ("feed/10", "旧订阅", "http://example.com/a.xml", None),
+        ("feed/11", "新增订阅", "http://example.com/b.xml", None),
+    ]);
+    srv.add_entry(2, 11, "新源条目");
+    let (db, tmp) = seed_sync_db("opt019_gr_discover_with_binding", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        conn.execute(
+            "DELETE FROM settings WHERE key LIKE 'sync_zero_binding_discovery_at:%'",
+            [],
+        )
+        .unwrap();
+    }
+
+    let report = sync::sync_subscription_discovery(&db, &reqwest::Client::new())
+        .await
+        .expect("discovery with existing binding");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let conn = db.lock().await;
+    let new_feed: Option<i64> = conn
+        .query_row(
+            "SELECT remote_id FROM feeds WHERE feed_url = ?1",
+            ["http://example.com/b.xml"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(new_feed, Some(11));
+    let new_article: Option<i64> = conn
+        .query_row(
+            "SELECT remote_id FROM articles WHERE url = ?1",
+            ["http://example.com/e/2"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(new_article, Some(2));
+    drop(conn);
+    assert!(
+        srv.hits().iter().all(|h| {
+            !h.path.ends_with("/reader/api/0/subscription/edit")
+                && !h.path.ends_with("/reader/api/0/subscription/quickadd")
+        }),
+        "只读发现不得推送本地订阅"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1 返工：新 feed 在首轮发现之后才出现在远端时，条目页先报告未知 feed，
+/// states 应在同一发现窗口再拉一次订阅、绑定后只重试一次条目 pull。
+#[tokio::test]
+async fn greader_unknown_feed_after_discovery_retries_once() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_subscriptions(vec![(
+        "feed/10",
+        "旧订阅",
+        "http://example.com/a.xml",
+        None,
+    )]);
+    srv.add_subscription_after_first_list(
+        "feed/11",
+        "晚到订阅",
+        "http://example.com/late.xml",
+        None,
+    );
+    srv.add_entry(2, 11, "晚到条目");
+    let (db, tmp) = seed_sync_db("opt019_gr_retry_unknown_feed", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::clear_zero_binding_discovery_attempts(&conn).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("unknown feed retry");
+    assert!(
+        report.errors.iter().any(|e| e.contains("所属远端 feed")),
+        "首轮未知 feed 必须可见：{:?}",
+        report.errors
+    );
+    assert_eq!(
+        srv.subscription_list_requests(),
+        2,
+        "unknown feed 后只允许多做一次发现"
+    );
+    let conn = db.lock().await;
+    let bound: Option<i64> = conn
+        .query_row(
+            "SELECT remote_id FROM feeds WHERE feed_url = ?1",
+            ["http://example.com/late.xml"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(bound, Some(11));
+    let article: Option<i64> = conn
+        .query_row(
+            "SELECT remote_id FROM articles WHERE url = ?1",
+            ["http://example.com/e/2"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(article, Some(2), "重试必须拉回晚到 feed 的条目");
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1 返工：发现阶段的 remote_id 绑定写失败必须进入 report，不得假成功。
+#[tokio::test]
+async fn greader_discovery_binding_write_failure_is_reported() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_subscriptions(vec![(
+        "feed/10",
+        "首订阅",
+        "http://example.com/first.xml",
+        None,
+    )]);
+    let (db, tmp) = seed_sync_db("opt019_gr_discovery_bind_fail", &srv);
+    {
+        let conn = db.lock().await;
+        conn.execute(
+            "DELETE FROM settings WHERE key LIKE 'sync_zero_binding_discovery_at:%'",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER opt019_fail_remote_binding
+             BEFORE UPDATE OF remote_id ON feeds
+             WHEN NEW.remote_id IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'injected remote binding failure'); END;",
+        )
+        .unwrap();
+    }
+
+    let report = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("binding error is reported in SyncReport");
+    assert!(
+        report.errors.iter().any(|e| e.contains("绑定")),
+        "绑定写错误必须沿调用链进入 report：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    let feed_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+            ["http://example.com/first.xml"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(feed_count, 0, "insert+绑定失败必须整体回滚，不留下孤儿");
+    drop(conn);
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1-A：feeds 阶段的绑定失败必须持久化，随后独立 states 调用即使在“无未知
+/// 条目页”时也不得请求条目或推进 last_sync_ts；完整重试绑定后才解除。
+#[tokio::test]
+async fn greader_binding_failure_blocks_separate_states_phase() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_subscriptions(vec![
+        ("feed/10", "旧订阅", "http://example.com/a.xml", None),
+        ("feed/11", "待绑定订阅", "http://example.com/b.xml", None),
+    ]);
+    let (db, tmp) = seed_sync_db("opt019_gr_binding_marker", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        let local_folder = db::create_folder(&conn, "本地源", "article").unwrap();
+        db::insert_feed(
+            &conn,
+            "http://example.com/b.xml",
+            None,
+            "本地待绑定源",
+            None,
+            local_folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        db::set_last_sync_ts(&conn, 690_001).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER opt019_fail_remote_11
+             BEFORE UPDATE OF remote_id ON feeds
+             WHEN NEW.remote_id = 11
+             BEGIN SELECT RAISE(ABORT, 'injected remote 11 binding failure'); END;",
+        )
+        .unwrap();
+    }
+
+    let feed_report = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("feeds phase");
+    assert!(
+        feed_report.errors.iter().any(|e| e.contains("绑定")),
+        "{:?}",
+        feed_report.errors
+    );
+    assert_eq!(feed_report.pulled_feeds, 0, "绑定失败不得计为发现成功");
+
+    let ids_before = srv.item_ids_requests_containing("state/com.google/reading-list");
+    let states_report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert!(
+        states_report
+            .errors
+            .iter()
+            .any(|e| e.contains("持久绑定不完整")),
+        "{:?}",
+        states_report.errors
+    );
+    assert_eq!(
+        srv.item_ids_requests_containing("state/com.google/reading-list"),
+        ids_before,
+        "持久标记存在时不得请求条目窗口"
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(db::last_sync_ts(&conn).unwrap(), 690_001);
+        let account = app_lib::sync::current_account(&conn).unwrap().unwrap();
+        assert!(db::binding_incomplete(&conn, &account.key).unwrap());
+        conn.execute("DROP TRIGGER opt019_fail_remote_11", [])
+            .unwrap();
+    }
+
+    let retry = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("feeds retry");
+    assert!(retry.errors.is_empty(), "{:?}", retry.errors);
+    {
+        let conn = db.lock().await;
+        let account = app_lib::sync::current_account(&conn).unwrap().unwrap();
+        assert!(!db::binding_incomplete(&conn, &account.key).unwrap());
+    }
+    sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states after repair");
+    assert!(
+        srv.item_ids_requests_containing("state/com.google/reading-list") > ids_before,
+        "绑定完整后 states 应恢复条目请求"
+    );
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1-1：新源 insert+绑定失败必须回滚孤儿；远端随后取消该源时，feeds 完成
+/// 权威清理并清除 marker，states 恢复拉取。
+#[tokio::test]
+async fn greader_orphan_rollback_and_remote_cancel_recovers_states() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_subscriptions(vec![
+        ("feed/10", "旧订阅", "http://example.com/a.xml", None),
+        ("feed/11", "失败新源", "http://example.com/new.xml", None),
+    ]);
+    let (db, tmp) = seed_sync_db("opt019_gr_orphan_recovery", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_last_sync_ts(&conn, 690_009).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER opt019_orphan_fail_bind
+             BEFORE UPDATE OF remote_id ON feeds
+             WHEN NEW.remote_id = 11
+             BEGIN SELECT RAISE(ABORT, 'injected orphan bind failure'); END;",
+        )
+        .unwrap();
+    }
+
+    let failed = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("feeds failure");
+    assert_eq!(failed.pulled_feeds, 0);
+    {
+        let conn = db.lock().await;
+        let orphan_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://example.com/new.xml'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_count, 0, "insert+绑定失败必须整体回滚");
+
+        // 模拟历史版本遗留的孤儿；下一轮远端已不含该 URL，应权威清理。
+        let folder = db::create_folder(&conn, "历史孤儿", "article").unwrap();
+        db::insert_feed_origin(
+            &conn,
+            "http://example.com/historical-orphan.xml",
+            None,
+            "历史孤儿",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+            "remote",
+        )
+        .unwrap();
+    }
+    {
+        let conn = db.lock().await;
+        conn.execute("DROP TRIGGER opt019_orphan_fail_bind", [])
+            .unwrap();
+    }
+    srv.set_subscriptions(vec![(
+        "feed/10",
+        "旧订阅",
+        "http://example.com/a.xml",
+        None,
+    )]);
+    let recovered = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("feeds recovery");
+    assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+    {
+        let conn = db.lock().await;
+        let orphan_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'http://example.com/historical-orphan.xml'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan_count, 0, "远端取消后应清理历史未绑定 remote 孤儿");
+        let account = app_lib::sync::current_account(&conn).unwrap().unwrap();
+        assert!(!db::binding_incomplete(&conn, &account.key).unwrap());
+    }
+    let before = srv.item_ids_requests_containing("state/com.google/reading-list");
+    sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states recovery");
+    assert!(
+        srv.item_ids_requests_containing("state/com.google/reading-list") > before,
+        "清理 marker 后 states 应恢复条目请求"
+    );
+    {
+        let conn = db.lock().await;
+        assert!(db::last_sync_ts(&conn).unwrap() > 690_009);
+    }
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P1-A：tombstone 未知是 fail-closed；即使其它源已完整绑定，也不得清除
+/// 既有 binding marker 或放行 states。
+#[tokio::test]
+async fn greader_tombstone_failure_does_not_clear_binding_marker() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_subscriptions(vec![(
+        "feed/10",
+        "已绑定订阅",
+        "http://example.com/a.xml",
+        None,
+    )]);
+    let (db, tmp) = seed_sync_db("opt019_gr_tombstone_marker", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_last_sync_ts(&conn, 690_005).unwrap();
+        db::set_setting(&conn, "feed_tombstones", "not-json").unwrap();
+        let account = app_lib::sync::current_account(&conn).unwrap().unwrap();
+        db::mark_binding_incomplete(&conn, &account.key).unwrap();
+    }
+
+    let report = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("feeds phase");
+    assert!(
+        report.errors.iter().any(|e| e.contains("订阅墓碑")),
+        "{:?}",
+        report.errors
+    );
+    {
+        let conn = db.lock().await;
+        let account = app_lib::sync::current_account(&conn).unwrap().unwrap();
+        assert!(
+            db::binding_incomplete(&conn, &account.key).unwrap(),
+            "tombstone 失败不得清除既有 marker"
+        );
+    }
+    let ids_before = srv.item_ids_requests_containing("state/com.google/reading-list");
+    sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase");
+    assert_eq!(
+        srv.item_ids_requests_containing("state/com.google/reading-list"),
+        ids_before
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(db::last_sync_ts(&conn).unwrap(), 690_005);
+        db::set_setting(&conn, "feed_tombstones", "[]").unwrap();
+    }
+
+    let repaired = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("feeds retry");
+    assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+    {
+        let conn = db.lock().await;
+        let account = app_lib::sync::current_account(&conn).unwrap().unwrap();
+        assert!(!db::binding_incomplete(&conn, &account.key).unwrap());
+    }
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// P2 返工：失败的发现尝试同样占用节流窗口，下一 TICK 不得重复请求。
+#[tokio::test]
+async fn failed_subscription_discovery_is_throttled() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_read_override("subscription/list", "{}");
+    let (db, tmp) = seed_sync_db("opt019_gr_failed_discovery_throttle", &srv);
+    {
+        let conn = db.lock().await;
+        db::clear_zero_binding_discovery_attempts(&conn).unwrap();
+    }
+
+    let first = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("discovery protocol failure is report-visible");
+    assert!(!first.errors.is_empty(), "首次发现失败必须可见");
+    assert_eq!(srv.subscription_list_requests(), 1);
+
+    let second = sync::sync_light(&db, &reqwest::Client::new())
+        .await
+        .expect("throttled retry");
+    assert!(
+        second.errors.iter().any(|e| e.contains("持久绑定不完整")),
+        "失败的发现轮必须让后续 states 保持阻断：{:?}",
+        second.errors
+    );
+    assert_eq!(
+        srv.subscription_list_requests(),
+        1,
+        "失败尝试后的节流窗口内不得重复发现"
+    );
+    drop(db);
+    let _ = std::fs::remove_file(&tmp);
 }

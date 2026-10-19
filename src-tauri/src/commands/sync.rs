@@ -358,11 +358,15 @@ fn commit_account_settings(
         db::set_setting_with(&tx, "sync_last_sync", "0", encrypt)?;
         db::set_setting_with(&tx, "sync_last_entry_id", "0", encrypt)?;
         db::reset_fever_history_state(&tx)?;
+        db::clear_zero_binding_discovery_attempts(&tx)?;
+        db::clear_binding_incomplete_attempts(&tx)?;
     } else if plan.old_was_empty {
         // 首连（此前无凭据）：游标/历史未知状态归零，从全量开始。
         db::set_setting_with(&tx, "sync_last_sync", "0", encrypt)?;
         db::set_setting_with(&tx, "sync_last_entry_id", "0", encrypt)?;
         db::reset_fever_history_state(&tx)?;
+        db::clear_zero_binding_discovery_attempts(&tx)?;
+        db::clear_binding_incomplete_attempts(&tx)?;
     } else if plan.password_changed {
         // 同账号仅密码变化：数据/游标/Fever 历史进度**保留**（不清内容、不重置
         // 历史）；代际推进在下方统一做——旧请求仍失效（OPT-006 明确边界）。
@@ -432,6 +436,8 @@ fn commit_disconnect(
     // 账号时仍要防「已删订阅复活」（TASK-055）。
     db::set_setting_with(&tx, "sync_last_entry_id", "0", encrypt)?;
     db::reset_fever_history_state(&tx)?;
+    db::clear_zero_binding_discovery_attempts(&tx)?;
+    db::clear_binding_incomplete_attempts(&tx)?;
     crate::endpoint_resolve::clear_cached_base(&tx)?;
     db::bump_sync_generation(&tx)?;
     tx.commit()?;
@@ -1210,6 +1216,8 @@ mod account_commit_tests {
         db::set_fever_history_complete(&conn).unwrap();
         db::set_last_sync_ts(&conn, 4321).unwrap();
         db::set_last_sync_entry_id(&conn, 987).unwrap();
+        db::mark_zero_binding_discovery_attempt(&conn, "old-account", 1234).unwrap();
+        db::mark_binding_incomplete(&conn, "old-account").unwrap();
         db::set_setting(
             &conn,
             "feed_tombstones",
@@ -1271,6 +1279,22 @@ mod account_commit_tests {
             db::fever_history_state(&conn).unwrap(),
             db::FeverHistoryState::Unknown,
             "Fever 历史状态回 Unknown（不继承旧 Complete/页游标）"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM settings WHERE key LIKE 'sync_zero_binding_discovery_at:%'"
+            ),
+            0,
+            "换号必须清旧账号的订阅发现节流键"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM settings WHERE key LIKE 'sync_binding_incomplete:%'"
+            ),
+            0,
+            "换号必须清旧账号的绑定不完整标记"
         );
         assert!(
             db::feed_tombstones(&conn).unwrap().is_empty(),
@@ -1384,6 +1408,8 @@ mod account_commit_tests {
         seed_old_account(&conn);
         seed_remote(&conn);
         db::set_fever_history_pending(&conn, 55).unwrap();
+        db::mark_zero_binding_discovery_attempt(&conn, "old-account", 1234).unwrap();
+        db::mark_binding_incomplete(&conn, "old-account").unwrap();
         db::set_setting(
             &conn,
             "feed_tombstones",
@@ -1410,6 +1436,22 @@ mod account_commit_tests {
             db::fever_history_state(&conn).unwrap(),
             db::FeverHistoryState::Unknown,
             "断开必须把 Fever 历史状态回 Unknown"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM settings WHERE key LIKE 'sync_zero_binding_discovery_at:%'"
+            ),
+            0,
+            "断开必须清订阅发现节流键"
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT COUNT(*) FROM settings WHERE key LIKE 'sync_binding_incomplete:%'"
+            ),
+            0,
+            "断开必须清绑定不完整标记"
         );
         assert!(
             crate::endpoint_resolve::cached_base(&conn, "greader", "http://old.example").is_none(),

@@ -84,7 +84,72 @@ function extractIdentity(res: { contentId?: number | null; contentRevision?: num
   return { contentId: typeof res.contentId === 'number' ? res.contentId : null, contentRev: res.contentRevision };
 }
 
-export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (set, get) => ({
+export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (set, get) => {
+  /* Note: 正文重试只认失败文章 id；allowDetached 允许视图外/已切走的目标继续走 by-id 详情链 — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md */
+  const retryArticleContentFor = (id: string): void => {
+    get().ensureArticleContent(id, { extractFulltext: true, allowDetached: true });
+  };
+  const showArticleContentRetry = (id: string, message: string): void => {
+    get().showToast(message, {
+      label: '重试',
+      key: `reader:content:${id}`,
+      run: () => retryArticleContentFor(id),
+    });
+  };
+
+  // Note: 全文重试只使用失败时文章 id，不得回读 activeArticleId — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md
+  const extractFulltextFor = (
+    id: string,
+    opts?: { announce?: boolean; allowDetached?: boolean },
+  ): void => {
+    const { entries, dataMode } = get();
+    if (dataMode !== 'tauri') return;
+    const art = entries.find((a) => a.id === id);
+    if (!art && !opts?.allowDetached) {
+      if (opts?.announce) get().showToast('全文提取重试目标已失效，未执行');
+      return;
+    }
+    const rec = getBodyEntry(id);
+    if (!rec && !opts?.allowDetached) {
+      get().ensureArticleContent(id, { extractFulltext: true });
+      return;
+    }
+    if (!opts?.allowDetached && !art?.url) {
+      get().showToast('该条目没有原文链接');
+      return;
+    }
+    if (opts?.announce) {
+      get().showToast(rec?.fulltextExtracted ? '正在刷新全文…' : '正在提取全文…');
+    }
+    void api
+      .extractFulltext(Number(id))
+      .then((res) => {
+        if (!res) return;
+        if (res.degraded) {
+          get().showToast(
+            `未采用全文提取：${res.reason ?? '提取结果不可用'}`,
+            {
+              label: '重试',
+              key: `reader:fulltext:${id}`,
+              run: () => extractFulltextFor(id, { announce: true, allowDetached: true }),
+            },
+          );
+          return;
+        }
+        applyExtractedFulltext(id, res.html, extractIdentity(res));
+        if (get().activeArticleId === id) set({ showFulltext: true });
+        if (opts?.announce) get().showToast('全文提取完成');
+      })
+      .catch((e: unknown) => {
+        get().showToast(`全文提取失败：${extractError(e)}`, {
+          label: '重试',
+          key: `reader:fulltext:${id}`,
+          run: () => extractFulltextFor(id, { announce: true, allowDetached: true }),
+        });
+      });
+  };
+
+  return ({
   activeArticleId: null,
   isShowingTranslatedProse: false,
   isRawRenderMode: false,
@@ -166,7 +231,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     const { dataMode, entries } = get();
     if (dataMode !== 'tauri') return;
     const art = entries.find((a) => a.id === id);
-    if (!art) return;
+    if (!art && !opts?.allowDetached) return;
     if (opts?.extractFulltext) {
       /* 打开文章：需要完整详情（含 url/fulltext_extracted）+ 智能全文判定。
          若已水合（列表卡片批量水合过），content 已有，但仍需取详情以判断
@@ -179,6 +244,12 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
           /* 详情缺行 = 文章不存在（旧实现静默 return，记录卡 loading；TASK-122
              终态化：missing 呈现「文章不存在」，可经 retryHydration 幂等重试） */
           markBodyMissing(id, stamp);
+          if (opts.allowDetached) {
+            showArticleContentRetry(
+              id,
+              `正文加载失败：${getBodyEntry(id)?.message ?? '文章不存在或已被删除'}`,
+            );
+          }
           return;
         }
         const cur = get().entries.find((a) => a.id === id);
@@ -219,18 +290,26 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
               if (res.degraded) {
                 get().showToast(
                   `未采用全文提取：${res.reason ?? '提取结果不可用'}`,
-                  { label: '重试', key: `reader:fulltext:${id}`, run: () => get().extractCurrentArticle() },
+                  {
+                    label: '重试',
+                    key: `reader:fulltext:${id}`,
+                    run: () => extractFulltextFor(id, { announce: true, allowDetached: true }),
+                  },
                 );
                 return;
               }
               /* R3：以响应携带的提交后身份落记录——下一次 reload 修订比较相等，
                  刚提取的正文不被清空重取（active Reader / 卡片 / AI 输入同源）。 */
               applyExtractedFulltext(id, res.html, extractIdentity(res));
-              set({ showFulltext: true });
+              if (get().activeArticleId === id) set({ showFulltext: true });
             })
             .catch((e: unknown) => {
               const msg = extractError(e);
-              get().showToast(`全文提取失败：${msg}`, { label: '重试', key: `reader:fulltext:${id}`, run: () => get().extractCurrentArticle() });
+              get().showToast(`全文提取失败：${msg}`, {
+                label: '重试',
+                key: `reader:fulltext:${id}`,
+                run: () => extractFulltextFor(id, { announce: true, allowDetached: true }),
+              });
             });
         }
       }).catch((e: unknown) => {
@@ -238,7 +317,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
            TASK-122：失败落 bodyById failed 态（卡片内联重试入口可用） */
         const msg = extractError(e);
         markBodyFailed(id, stamp, msg);
-        get().showToast(`正文加载失败：${msg}`, { label: '重试', key: `reader:content:${id}`, run: () => get().ensureArticleContent(id, { extractFulltext: true }) });
+        showArticleContentRetry(id, `正文加载失败：${msg}`);
       });
       return;
     }
@@ -372,43 +451,9 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       rawContent 始终保留 RSS 原文（供「全文 ↔ RSS 正文」切换回跳）。
       提取成功后进入全文视图。 */
   extractCurrentArticle: () => {
-    const { activeArticleId, entries, dataMode, showToast } = get();
-    if (!activeArticleId || dataMode !== 'tauri') return;
-    const art = entries.find((a) => a.id === activeArticleId);
-    if (!art) return;
-    const rec = getBodyEntry(activeArticleId);
-    if (!rec) {
-      /* 正文尚未水合（无记录）：先取详情再提取（与打开文章同一详情链路） */
-      get().ensureArticleContent(activeArticleId, { extractFulltext: true });
-      return;
-    }
-    if (!art.url) {
-      showToast('该条目没有原文链接');
-      return;
-    }
-    showToast(rec.fulltextExtracted ? '正在刷新全文…' : '正在提取全文…');
-    void api
-      .extractFulltext(Number(activeArticleId))
-      .then((res) => {
-        if (!res) return;
-        const id = activeArticleId;
-        /* TASK-076：改判结构化 degraded 标志。此前靠「返回内容 == 当前正文」猜，
-           且为了绕开「已提取过的刷新本来就会相同」还要额外判断 fulltextExtracted，
-           逻辑脆弱；现在后端直接说明本次是否采用了提取结果，手动刷新与自动全文
-           两条路径用同一判据。 */
-        if (res.degraded) {
-          showToast(`未采用全文提取：${res.reason ?? '提取结果不可用'}`);
-          return;
-        }
-        /* R3：手动提取同样以响应身份落记录（见 ensureArticleContent 分支注释）。 */
-        applyExtractedFulltext(id, res.html, extractIdentity(res));
-        set({ showFulltext: true });
-        showToast('全文提取完成');
-      })
-      .catch((e: unknown) => {
-        const msg = extractError(e);
-        showToast(`全文提取失败：${msg}`, { label: '重试', key: `reader:fulltext:${activeArticleId}`, run: () => get().extractCurrentArticle() });
-      });
+    const id = get().activeArticleId;
+    if (!id) return;
+    extractFulltextFor(id, { announce: true });
   },
 
   /** 全文视图切换：已提取全文 → 在 RSS 原文与全文间切换（不重复请求）；
@@ -537,4 +582,5 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       (msg) => (field === 'isRead' ? `标读保存失败：${msg}` : `收藏保存失败：${msg}`),
     );
   },
-});
+  });
+};

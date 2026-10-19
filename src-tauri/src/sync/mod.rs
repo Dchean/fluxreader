@@ -53,6 +53,10 @@ pub struct SyncReport {
     /// 消费点只有事件判定，多出的字段会成为无人消费的 API 面）。
     #[serde(skip)]
     pub entries_data_changed: bool,
+    /// 本轮条目页遇到尚无本地 feed 绑定的远端 feed。内部信号：states 阶段可
+    /// 在只读订阅发现后重试一次；不属于对外 report schema。
+    #[serde(skip)]
+    pub binding_incomplete: bool,
 }
 
 impl SyncReport {
@@ -64,14 +68,10 @@ impl SyncReport {
     ///   变化 / 纯读藏对账），由各生产合并点用前后比对、值条件写命中行数、
     ///   真实绑定变化**即时**接线（R4：每个成功变更点立即合并——GR 逐语句提交
     ///   无页事务，后续步骤失败不得让已提交的变化失去信号）；
-    /// - `merged_states`：**states 阶段**来源为对账值条件写命中行数
-    ///   （`greader_pull.rs` / `fever_pull.rs` 的 reconcile——真实变化，主控
-    ///   rg 核对）；**订阅阶段** `subscriptions.rs` 对每个匹配上的既有远端 feed
-    ///   **无条件** +1（前置 `set_feed_remote_id` / `update_feed_title_if_empty`
-    ///   还以 `let _` 吞错），那里不是真实变化计数。本判定的唯一生产消费者是
-    ///   scheduler，其输入 `sync_light` 只跑 states_phase（feeds 阶段不进入），
-    ///   订阅计数不在该消费路径上——谓词保留 `merged_states` 仅就该路径而言不
-    ///   产生误发；不对订阅阶段作泛化可达性声明；
+    /// - `merged_states`：来源为 states 阶段对账值条件写命中行数
+    ///   （`greader_pull.rs` / `fever_pull.rs` 的 reconcile——真实变化）。
+    ///   订阅发现只产生真实的 `pulled_feeds`/`removed_feeds`；既有源匹配不再
+    ///   伪造计数，绑定写错误进入 report 而不是被吞掉；
     /// - `pulled_feeds` / `removed_feeds`：订阅层增删。
     ///
     /// 明确**不**包含：`pulled_entries`（旧口径计数——守卫通过但值未变的条目
@@ -93,9 +93,8 @@ mod report_change_tests {
 
     /// OPT-007（F11）/ R3+R4+R5 判别力：
     /// - 条目层实际变化（标记）与订阅层增删必须算数据变化；
-    /// - `merged_states` 判定兼容保留：唯一生产消费路径（scheduler ← sync_light）
-    ///   上是 states 阶段对账值条件写命中行数（真实变化）；订阅阶段的无条件绑定
-    ///   计数不进入该路径（feeds 阶段不跑）——来源与边界见 `has_data_change` 注释；
+    /// - `merged_states` 判定兼容保留：来源是 states 阶段对账值条件写命中行数
+    ///   （真实变化）；订阅发现不伪造该计数——见 `has_data_change` 注释；
     /// - `pulled_entries` 是「处理过/已接受」计数（守卫通过但值未变也计数）——
     ///   单独为真**不算**（R3 反例：内容真实改变但计数为 0 时不得漏报）；
     /// - 仅推送成功 / 仅错误不算数据变化；空 report 必须 false。
@@ -126,7 +125,7 @@ mod report_change_tests {
         .has_data_change());
 
         // merged_states：唯一生产消费路径上为 states 阶段对账值条件写命中行数
-        // （真实变化）；订阅阶段的无条件绑定计数不进入该路径（feeds 不跑）——
+        // （真实变化）；订阅发现只计真实增删，既有源匹配不再伪造计数——
         // 兼容判定为变化（R5 按主控复核限定口径，见 has_data_change 注释）。
         let merged_only = SyncReport {
             merged_states: 3,

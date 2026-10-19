@@ -14,7 +14,7 @@
 // 文案），本文件用同形夹具验证「后端数据 → UI 呈现」的接线与行为，不代替
 // Rust 侧对文案本体的断言。
 import assert from 'node:assert/strict';
-import { componentTest, mount, flush, waitFor, resetStore, useAppStore } from './harness.mjs';
+import { componentTest, mount, unmount, flush, waitFor, resetStore, useAppStore } from './harness.mjs';
 import { installBackend, seedFromRows, mkRow, clearInvokeCalls, setPlan, resetPlan, FOLDERS } from './fixtures.mjs';
 
 const ROWS = [mkRow({ id: 101, feed_id: 10, title: 'A1 文章' })];
@@ -60,6 +60,18 @@ function capsFixture(protocol) {
 
 function remoteLineOf(msg) {
   return msg.includes('同步服务端不受影响');
+}
+
+async function setInputValue(input, value) {
+  const { act } = await import('react');
+  const setter = Object.getOwnPropertyDescriptor(
+    globalThis.window.HTMLInputElement.prototype,
+    'value',
+  )?.set;
+  await act(async () => {
+    setter.call(input, value);
+    input.dispatchEvent(new globalThis.window.Event('input', { bubbles: true }));
+  });
 }
 
 componentTest('OPT-009 B3 FeedsTab：删除源确认弹窗如实呈现持久退订语义（GReader）', { timeout: 40000 }, async () => {
@@ -229,6 +241,597 @@ componentTest('OPT-009 B3：subscription-outbox-changed 事件链驱动 SyncTab 
     assert.ok(!cardDesc('同步状态').includes('订阅写回'),
       `清空后不得残留噪音行：${cardDesc('同步状态')}`);
   } finally {
+    resetPlan();
+  }
+});
+
+componentTest('OPT-020 P1-C1：SyncTab 阶段失败只重跑同步阶段，不改写已编辑的 B 表单', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+
+  const saves = [];
+  let phaseCalls = 0;
+  setPlan({
+    sync_save: (args) => {
+      saves.push(args);
+      return Promise.resolve(JSON.stringify({
+        message: '已保存',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    },
+    sync_phase: () => {
+      phaseCalls += 1;
+      return Promise.reject({ message: `同步阶段失败 ${phaseCalls}` });
+    },
+  });
+
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const entry = await mount(createElement(SyncTab));
+    await flush(8);
+
+    const inputs = [...entry.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    assert.equal(inputs.length, 3, '前置：Endpoint / 用户名 / 密码三个真实受控输入');
+    await setInputValue(inputs[0], 'https://a.example');
+    await setInputValue(inputs[1], 'alice');
+    await setInputValue(inputs[2], 'secret-a');
+
+    const saveButton = () => [...entry.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存并同步'));
+    await act(async () => { saveButton().click(); });
+    await waitFor(
+      () => useAppStore.getState().errors.some((e) => e.key.startsWith('sync:save-and-sync')),
+      { label: '表单 A 的 save-and-sync 失败进入错误中心', timeout: 8000 },
+    );
+    await waitFor(() => !saveButton().disabled, { label: '表单 A 失败后保存按钮复位', timeout: 8000 });
+    assert.equal(saves.length, 1, '前置：表单 A 已真实调用 sync_save');
+    assert.equal(saves[0].endpoint, 'https://a.example');
+    assert.equal(saves[0].username, 'alice');
+    assert.equal(saves[0].password, 'secret-a');
+
+    const errorA = useAppStore.getState().errors.find(
+      (e) => e.key.startsWith('sync:save-and-sync'),
+    );
+    assert.ok(errorA, '表单 A 失败后必须保留可重试入口');
+    assert.match(errorA.key, /^sync:save-and-sync:\d+:(save|sync)$/,
+      'save-and-sync key 必须是阶段化的 opaque 草稿 id，不得使用密码哈希');
+
+    /* 重试前把界面改成表单 B：旧入口必须仍调用 A 的完整草稿。 */
+    await setInputValue(inputs[0], 'https://b.example');
+    await setInputValue(inputs[1], 'bob');
+    await setInputValue(inputs[2], 'secret-b');
+    await act(async () => { useAppStore.getState().retryError(errorA.id); });
+    await waitFor(
+      () => phaseCalls === 2
+        && useAppStore.getState().errors.some(
+          (e) => e.key === errorA.key && e.id !== errorA.id,
+        ),
+      { label: '旧阶段重试再次失败并保留同上下文入口', timeout: 8000 },
+    );
+    await waitFor(() => !saveButton().disabled, { label: '旧重试失败后保存按钮复位', timeout: 8000 });
+    assert.equal(saves.length, 1, 'phase 失败重试不得再次调用 sync_save（旧 activateVersion 已被消费）');
+    assert.equal(inputs[0].value, 'https://b.example', '旧阶段重试不得改写当前 B Endpoint');
+    assert.equal(inputs[1].value, 'bob', '旧阶段重试不得改写当前 B 用户名');
+    assert.equal(inputs[2].value, 'secret-b', '旧阶段重试不得清空当前 B 密码');
+
+    /* 新的手动提交使用 C 表单：与 A 的旧错误不得共用固定 key 合并。 */
+    await setInputValue(inputs[0], 'https://c.example');
+    await setInputValue(inputs[1], 'carol');
+    await setInputValue(inputs[2], 'secret-c');
+    await act(async () => { saveButton().click(); });
+    await waitFor(
+      () => saves.length === 2
+        && useAppStore.getState().errors.filter(
+          (e) => e.key.startsWith('sync:save-and-sync'),
+        ).length === 2,
+      { label: '表单 C 的失败与表单 A 上下文分条保存', timeout: 8000 },
+    );
+    const syncErrors = useAppStore.getState().errors.filter(
+      (e) => e.key.startsWith('sync:save-and-sync'),
+    );
+    assert.equal(new Set(syncErrors.map((e) => e.key)).size, 2,
+      '不同表单草稿的 save-and-sync 失败必须使用不同稳定 key，不得跨上下文合并');
+  } finally {
+    resetPlan();
+  }
+});
+
+componentTest('OPT-020 P1-C1：save 失败重试仍保留入口，旧草稿成功不污染 B 凭据且清理已消费激活令牌', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+
+  const saves = [];
+  let saveCalls = 0;
+  let phaseCalls = 0;
+  setPlan({
+    sync_pending_connection: () => Promise.resolve({
+      version: 77,
+      sync_protocol: 'greader',
+      greader_endpoint: 'https://a.example',
+      greader_username: 'alice',
+    }),
+    sync_save: (args) => {
+      saveCalls += 1;
+      saves.push(args);
+      if (saveCalls <= 2) {
+        return Promise.reject({ message: `保存失败 ${saveCalls}` });
+      }
+      return Promise.resolve(JSON.stringify({
+        message: '已保存',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    },
+    sync_phase: () => {
+      phaseCalls += 1;
+      if (phaseCalls === 1) return Promise.reject({ message: '同步阶段失败' });
+      return Promise.resolve({ errors: [], removed_feeds: 0 });
+    },
+  });
+
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const entry = await mount(createElement(SyncTab));
+    await flush(8);
+
+    const inputs = [...entry.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    const applyButton = () => [...entry.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('填入表单并激活'));
+    const saveButton = () => [...entry.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存并同步'));
+    const connectionTag = () => {
+      const card = [...entry.container.querySelectorAll('.setting-card')]
+        .find((c) => c.querySelector('h5')?.textContent === '连接状态');
+      return card?.querySelector('.about-arch-tag')?.textContent ?? '';
+    };
+
+    await waitFor(() => !!applyButton(), { label: '待确认连接建议已挂载', timeout: 8000 });
+    await act(async () => { applyButton().click(); });
+    await flush(3);
+    assert.equal(inputs[0].value, 'https://a.example');
+    assert.equal(inputs[1].value, 'alice');
+    await setInputValue(inputs[2], 'secret-a');
+
+    await act(async () => { saveButton().click(); });
+    await waitFor(
+      () => useAppStore.getState().errors.some((e) => e.key.startsWith('sync:save-and-sync')),
+      { label: '首次 sync_save 失败必须留下重试入口', timeout: 8000 },
+    );
+    await waitFor(() => !saveButton().disabled, { label: '首次保存失败后按钮复位', timeout: 8000 });
+    const saveError1 = useAppStore.getState().errors.find(
+      (e) => e.key.startsWith('sync:save-and-sync'),
+    );
+    assert.match(saveError1.key, /^sync:save-and-sync:\d+:save$/,
+      'sync_save 失败 key 必须带 opaque 草稿 id 与 save 阶段');
+
+    await setInputValue(inputs[0], 'https://b.example');
+    await setInputValue(inputs[1], 'bob');
+    await setInputValue(inputs[2], 'secret-b');
+
+    await act(async () => { useAppStore.getState().retryError(saveError1.id); });
+    await waitFor(
+      () => saveCalls === 2
+        && useAppStore.getState().errors.some(
+          (e) => e.key === saveError1.key && e.id !== saveError1.id,
+        ),
+      { label: 'save 重试再次失败仍保留同 key 入口', timeout: 8000 },
+    );
+    const saveError2 = useAppStore.getState().errors.find((e) => e.key === saveError1.key);
+
+    await act(async () => { useAppStore.getState().retryError(saveError2.id); });
+    await waitFor(
+      () => saveCalls === 3
+        && phaseCalls === 1
+        && useAppStore.getState().errors.some((e) => !e.key.endsWith(':save')),
+      { label: '旧草稿保存成功、阶段失败进入新入口', timeout: 8000 },
+    );
+    await waitFor(() => !saveButton().disabled, { label: '旧草稿阶段失败后按钮复位', timeout: 8000 });
+
+    assert.equal(inputs[0].value, 'https://b.example', '旧草稿成功不得覆盖 B Endpoint');
+    assert.equal(inputs[1].value, 'bob', '旧草稿成功不得覆盖 B 用户名');
+    assert.equal(inputs[2].value, 'secret-b', '旧草稿成功不得清空 B 密码');
+    assert.equal(connectionTag(), '未连接', '旧草稿成功不得把 B 的连接状态改成已连接');
+
+    const phaseError = useAppStore.getState().errors.find((e) => e.key.endsWith(':sync'));
+    assert.ok(phaseError, '激活草稿 save 成功、phase 失败后必须保留 phase 入口');
+    await act(async () => { useAppStore.getState().retryError(phaseError.id); });
+    await waitFor(
+      () => saveCalls === 3
+        && phaseCalls === 3
+        && !useAppStore.getState().errors.some((e) => e.key === phaseError.key),
+      { label: '激活成功的旧草稿重试只跑 phase 且成功清除入口', timeout: 8000 },
+    );
+    assert.equal(saves.length, 3,
+      '激活成功后 phase 重试不得再次 sync_save（旧 activateVersion 已被消费）');
+
+    await act(async () => { saveButton().click(); });
+    await waitFor(
+      () => saveCalls === 4,
+      { label: 'B 表单手动保存调用 sync_save', timeout: 8000 },
+    );
+    await flush(8);
+    assert.equal(phaseCalls, 5,
+      `A 的失败/成功 phase 与 B 的 feeds+states 合计应为 5 次（实际 ${phaseCalls}）`);
+    assert.equal(saves[3].activatePendingVersion, undefined,
+      'A 已消费版本 77 后，B 后续保存不得再次携带旧激活令牌');
+    await waitFor(() => connectionTag() === '已连接' || connectionTag() === 'alice',
+      { label: 'B 保存成功后连接态更新', timeout: 8000 });
+  } finally {
+    resetPlan();
+  }
+});
+
+componentTest('OPT-020 P1-C1：最新提交代际使旧 save/phase action 跨重挂失效', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+
+  let saveCalls = 0;
+  let phaseCalls = 0;
+  setPlan({
+    sync_save: () => {
+      saveCalls += 1;
+      if (saveCalls === 1) return Promise.reject({ message: 'A1 保存失败' });
+      return Promise.resolve(JSON.stringify({
+        message: '已保存',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    },
+    sync_phase: () => {
+      phaseCalls += 1;
+      if (phaseCalls === 1) return Promise.reject({ message: 'A2 阶段失败' });
+      return Promise.resolve({ errors: [], removed_feeds: 0 });
+    },
+  });
+
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const first = await mount(createElement(SyncTab));
+    await flush(8);
+    const firstInputs = [...first.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    const firstSave = () => [...first.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存并同步'));
+
+    await setInputValue(firstInputs[0], 'https://a1.example');
+    await setInputValue(firstInputs[1], 'alice1');
+    await setInputValue(firstInputs[2], 'secret-a1');
+    await act(async () => { firstSave().click(); });
+    await waitFor(
+      () => useAppStore.getState().errors.some((e) => e.key.endsWith(':save')),
+      { label: 'A1 save 失败入口生成', timeout: 8000 },
+    );
+    const oldSaveError = useAppStore.getState().errors.find((e) => e.key.endsWith(':save'));
+
+    await waitFor(() => !firstSave().disabled, { label: 'A1 失败后按钮复位', timeout: 8000 });
+    await setInputValue(firstInputs[0], 'https://a2.example');
+    await setInputValue(firstInputs[1], 'alice2');
+    await setInputValue(firstInputs[2], 'secret-a2');
+    await act(async () => { firstSave().click(); });
+    await waitFor(
+      () => saveCalls === 2 && phaseCalls === 1
+        && useAppStore.getState().errors.some((e) => e.key.endsWith(':sync')),
+      { label: 'A2 save 成功、phase 失败入口生成', timeout: 8000 },
+    );
+    const oldPhaseError = useAppStore.getState().errors.find((e) => e.key.endsWith(':sync'));
+    await unmount(first);
+
+    const second = await mount(createElement(SyncTab));
+    await flush(8);
+    const secondInputs = [...second.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    const secondSave = () => [...second.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存并同步'));
+    await setInputValue(secondInputs[0], 'https://b.example');
+    await setInputValue(secondInputs[1], 'bob');
+    await setInputValue(secondInputs[2], 'secret-b');
+    await act(async () => { secondSave().click(); });
+    await waitFor(
+      () => saveCalls === 3 && phaseCalls === 3,
+      { label: 'B 草稿 save + feeds/states 成功提交', timeout: 8000 },
+    );
+
+    const saveCallsAtCommit = saveCalls;
+    const phaseCallsAtCommit = phaseCalls;
+    await act(async () => {
+      useAppStore.getState().retryError(oldSaveError.id);
+      useAppStore.getState().retryError(oldPhaseError.id);
+    });
+    await flush(6);
+    assert.equal(saveCalls, saveCallsAtCommit,
+      'B 成功提交后，旧 save action 不得再调用 sync_save');
+    assert.equal(phaseCalls, phaseCallsAtCommit,
+      'B 成功提交后，旧 phase action 不得再调用 sync_phase');
+    assert.ok(useAppStore.getState().toasts.some((t) => t.text.includes('保存草稿已失效')),
+      '旧草稿重试必须提示失效，而不是静默执行');
+  } finally {
+    resetPlan();
+  }
+});
+
+componentTest('OPT-020 P1-C1：sync_save 在途编辑字段仍保持全局忙锁且不能二次保存', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+
+  let saveCalls = 0;
+  let resolveSave = null;
+  let phaseCalls = 0;
+  setPlan({
+    sync_save: () => {
+      saveCalls += 1;
+      return new Promise((resolve) => { resolveSave = resolve; });
+    },
+    sync_phase: () => {
+      phaseCalls += 1;
+      return Promise.reject({ message: '阶段失败' });
+    },
+  });
+
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const entry = await mount(createElement(SyncTab));
+    await flush(8);
+    const inputs = [...entry.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    const saveButton = () => [...entry.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存中…') || b.textContent.includes('保存并同步'));
+
+    await setInputValue(inputs[0], 'https://busy.example');
+    await setInputValue(inputs[1], 'busy-user');
+    await setInputValue(inputs[2], 'busy-secret');
+    await act(async () => { saveButton().click(); });
+    await waitFor(() => saveCalls === 1 && saveButton().disabled,
+      { label: 'sync_save 在途时按钮禁用', timeout: 8000 });
+
+    await setInputValue(inputs[2], 'edited-during-save');
+    assert.equal(saveButton().disabled, true,
+      '编辑字段只应让旧草稿失去 UI 写权，不得提前释放全局忙锁');
+    await act(async () => { saveButton().click(); });
+    await flush(2);
+    assert.equal(saveCalls, 1, '忙锁期间按钮不可用，不能发起第二次 sync_save');
+
+    await act(async () => {
+      resolveSave(JSON.stringify({
+        message: '已保存',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    });
+    await waitFor(() => !saveButton().disabled && phaseCalls === 1,
+      { label: 'save+phase settle 后忙锁释放', timeout: 8000 });
+  } finally {
+    resetPlan();
+  }
+});
+
+componentTest('OPT-020 P1-C1：stale draft 重试挂起时全局忙锁阻止 B 再次保存', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+
+  let saveCalls = 0;
+  let resolveStaleRetry = null;
+  setPlan({
+    sync_save: () => {
+      saveCalls += 1;
+      if (saveCalls === 1) return Promise.reject({ message: 'A 首次失败' });
+      if (saveCalls === 2) {
+        return new Promise((resolve) => { resolveStaleRetry = resolve; });
+      }
+      return Promise.resolve(JSON.stringify({
+        message: '新保存',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    },
+    sync_phase: () => Promise.resolve({ errors: [], removed_feeds: 0 }),
+  });
+
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const entry = await mount(createElement(SyncTab));
+    await flush(8);
+    const inputs = [...entry.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    const saveButton = () => [...entry.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存中…') || b.textContent.includes('保存并同步'));
+
+    await setInputValue(inputs[0], 'https://stale-a.example');
+    await setInputValue(inputs[1], 'stale-a');
+    await setInputValue(inputs[2], 'stale-a-pass');
+    await act(async () => { saveButton().click(); });
+    await waitFor(
+      () => useAppStore.getState().errors.some((e) => e.key.endsWith(':save')),
+      { label: 'A 首次失败入口生成', timeout: 8000 },
+    );
+    const staleSaveError = useAppStore.getState().errors.find((e) => e.key.endsWith(':save'));
+
+    await setInputValue(inputs[0], 'https://b-locked.example');
+    await setInputValue(inputs[1], 'b-locked');
+    await setInputValue(inputs[2], 'b-locked-pass');
+    await act(async () => { useAppStore.getState().retryError(staleSaveError.id); });
+    await waitFor(() => saveCalls === 2,
+      { label: 'stale A retry 进入 sync_save', timeout: 8000 });
+    assert.equal(saveButton().disabled, true,
+      'stale draft retry 在途也必须禁用当前 B 的保存按钮');
+
+    await act(async () => { saveButton().click(); });
+    await flush(2);
+    assert.equal(saveCalls, 2, 'stale retry 在途时再点保存必须 0 新 IPC');
+
+    await act(async () => {
+      resolveStaleRetry(JSON.stringify({
+        message: 'A 重试保存成功',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    });
+    await waitFor(() => !saveButton().disabled,
+      { label: 'stale retry settle 后忙锁释放', timeout: 8000 });
+  } finally {
+    if (resolveStaleRetry) {
+      await Promise.resolve();
+    }
+    resetPlan();
+  }
+});
+
+componentTest('OPT-020 P1-C1：A 在途卸载重挂仍持锁，A settle 后 B 才可保存', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+
+  let saveCalls = 0;
+  let phaseCalls = 0;
+  let resolveInFlightSave = null;
+  let resolveInFlightPhase = null;
+  setPlan({
+    sync_save: () => {
+      saveCalls += 1;
+      if (saveCalls === 1) {
+        return new Promise((resolve) => { resolveInFlightSave = resolve; });
+      }
+      return Promise.resolve(JSON.stringify({
+        message: 'B 已保存',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    },
+    sync_phase: () => {
+      phaseCalls += 1;
+      if (phaseCalls === 1) {
+        return new Promise((resolve) => { resolveInFlightPhase = resolve; });
+      }
+      return Promise.resolve({ errors: [], removed_feeds: 0 });
+    },
+  });
+
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const first = await mount(createElement(SyncTab));
+    await flush(8);
+    const firstInputs = [...first.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    const firstSave = () => [...first.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存中…') || b.textContent.includes('保存并同步'));
+    await setInputValue(firstInputs[0], 'https://unmounted-a.example');
+    await setInputValue(firstInputs[1], 'unmounted-a');
+    await setInputValue(firstInputs[2], 'unmounted-a-pass');
+    await act(async () => { firstSave().click(); });
+    await waitFor(() => saveCalls === 1 && firstSave().disabled,
+      { label: 'A 在途进入全局忙锁', timeout: 8000 });
+    await unmount(first);
+
+    const second = await mount(createElement(SyncTab));
+    await flush(8);
+    const secondInputs = [...second.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    const secondSave = () => [...second.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存中…') || b.textContent.includes('保存并同步'));
+    assert.equal(secondSave().disabled, true,
+      'A 在途时卸载重挂，B 必须看到同一全局忙锁');
+    await setInputValue(secondInputs[0], 'https://after-a.example');
+    await setInputValue(secondInputs[1], 'after-a');
+    await setInputValue(secondInputs[2], 'after-a-pass');
+    await act(async () => { secondSave().click(); });
+    await flush(2);
+    assert.equal(saveCalls, 1, 'A settle 前 B 不得发 sync_save');
+
+    await act(async () => {
+      resolveInFlightSave(JSON.stringify({
+        message: 'A 已保存',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    });
+    await waitFor(() => phaseCalls === 1,
+      { label: 'A 进入 phase 且仍持锁', timeout: 8000 });
+    assert.equal(secondSave().disabled, true,
+      'A 的 phase 在途时 B 仍必须被全局忙锁挡住');
+
+    await act(async () => {
+      resolveInFlightPhase({ errors: [], removed_feeds: 0 });
+    });
+    await waitFor(() => !secondSave().disabled,
+      { label: 'A 的 save+phase settle 后释放全局忙锁', timeout: 8000 });
+    await act(async () => { secondSave().click(); });
+    await waitFor(() => saveCalls === 2,
+      { label: 'A settle 后 B 才发 sync_save', timeout: 8000 });
+    assert.equal(saveCalls, 2,
+      '不允许 B 在 A 迟到完成前成功提交');
+  } finally {
+    if (resolveInFlightSave) await Promise.resolve();
+    if (resolveInFlightPhase) await Promise.resolve();
+    resetPlan();
+  }
+});
+
+componentTest('OPT-020 P3：全局忙锁拒绝 retry 时按原 key 重报可重试入口', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+
+  let saveCalls = 0;
+  let resolveBlockingSave = null;
+  setPlan({
+    sync_save: () => {
+      saveCalls += 1;
+      if (saveCalls === 1) return Promise.reject({ message: '首次失败' });
+      return new Promise((resolve) => { resolveBlockingSave = resolve; });
+    },
+    sync_phase: () => Promise.resolve({ errors: [], removed_feeds: 0 }),
+  });
+
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const entry = await mount(createElement(SyncTab));
+    await flush(8);
+    const inputs = [...entry.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    const saveButton = () => [...entry.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存中…') || b.textContent.includes('保存并同步'));
+    await setInputValue(inputs[0], 'https://retry-busy.example');
+    await setInputValue(inputs[1], 'retry-busy');
+    await setInputValue(inputs[2], 'retry-busy-pass');
+
+    await act(async () => { saveButton().click(); });
+    await waitFor(() => useAppStore.getState().errors.some((e) => e.key.endsWith(':save')),
+      { label: '首次失败入口', timeout: 8000 });
+    const retryBusyError = useAppStore.getState().errors.find((e) => e.key.endsWith(':save'));
+
+    await act(async () => { saveButton().click(); }); // 新草稿占住全局锁
+    await waitFor(() => saveCalls === 2 && saveButton().disabled,
+      { label: '新草稿持锁', timeout: 8000 });
+
+    await act(async () => { useAppStore.getState().retryError(retryBusyError.id); });
+    await flush(3);
+    const requeued = useAppStore.getState().errors.find((e) => e.key === retryBusyError.key);
+    assert.ok(requeued?.action?.run,
+      'begin 被全局忙锁拒绝时必须按原 key 重报入口，不能因 retryError 已消费而丢失');
+
+    await act(async () => {
+      resolveBlockingSave(JSON.stringify({
+        message: '阻塞操作完成',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    });
+    await waitFor(() => !saveButton().disabled,
+      { label: '阻塞操作 settle', timeout: 8000 });
+  } finally {
+    if (resolveBlockingSave) await Promise.resolve();
     resetPlan();
   }
 });

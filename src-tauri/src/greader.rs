@@ -120,18 +120,19 @@ pub struct TagRef {
     pub r#type: Option<String>,
 }
 
-/// 订阅列表（subscription/list 响应）
+/// 订阅列表（subscription/list 响应）。
+/// Note: 缺 `subscriptions` 是协议错误，显式空数组才代表权威空集 — 见
+/// `.agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md`
 #[derive(Debug, Deserialize)]
 pub struct SubscriptionListResponse {
-    #[serde(default)]
     pub subscriptions: Vec<Subscription>,
 }
 
 /// 条目 id 列表（stream/items/ids 响应）
+/// Note: `itemRefs` 与下面 contents 的 `items` 同样必须存在；缺失不得当空集合。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemIdsResponse {
-    #[serde(default)]
     pub item_refs: Vec<ItemRef>,
     /// 续读游标：数字 offset，JSON 字符串
     #[serde(default)]
@@ -146,7 +147,6 @@ pub struct ItemRef {
 /// 条目内容列表（stream/items/contents 响应）
 #[derive(Debug, Deserialize)]
 pub struct ItemContentsResponse {
-    #[serde(default)]
     pub items: Vec<ItemContent>,
 }
 
@@ -247,6 +247,20 @@ pub struct GReaderClient {
     /// 失败不缓存：错误返回后下次调用会重试（OnceCell 的 get_or_try_init 语义）。
     action_token: tokio::sync::OnceCell<String>,
     http: Client,
+}
+
+/// HTTP 传输/读取失败仍是 network；成功响应的 JSON 解码或 schema 失败是
+/// protocol。不能继续用 `Response::json()`，其错误统一被 reqwest 包装成 network。
+async fn decode_json_response<T: for<'de> Deserialize<'de>>(
+    resp: reqwest::Response,
+    request: &str,
+) -> AppResult<T> {
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::network(format!("{request} 成功但读取响应体失败（{e}）")))?;
+    serde_json::from_slice(&body)
+        .map_err(|e| AppError::new("protocol", format!("{request} 响应解析失败：{e}")))
 }
 
 impl GReaderClient {
@@ -379,7 +393,7 @@ impl GReaderClient {
         if !resp.status().is_success() {
             return Err(AppError::network(format!("GET {path} → {}", resp.status())));
         }
-        Ok(resp.json().await?)
+        decode_json_response(resp, &format!("GET {path}")).await
     }
 
     /// 写操作专用 action token（`GET /reader/api/0/token`），同一客户端只取一次。
@@ -480,7 +494,7 @@ impl GReaderClient {
         form: &[(&str, String)],
     ) -> AppResult<T> {
         let resp = self.post_with_action_token(path, form).await?;
-        Ok(resp.json().await?)
+        decode_json_response(resp, &format!("POST {path}")).await
     }
 
     /// POST 请求返回纯文本（edit-tag / subscription/edit 成功时返回 `OK`）。
@@ -570,7 +584,30 @@ impl GReaderClient {
         if let Some(v) = c {
             path.push_str(&format!("&c={v}"));
         }
-        self.get_json(&path).await
+        let response: ItemIdsResponse = self.get_json(&path).await?;
+        for item in &response.item_refs {
+            let id = item.id.parse::<i64>().map_err(|_| {
+                AppError::new(
+                    "protocol",
+                    format!("GReader itemRefs.id 不是合法十进制 id：{:?}", item.id),
+                )
+            })?;
+            if id < 0 {
+                return Err(AppError::new(
+                    "protocol",
+                    format!("GReader itemRefs.id 不得为负值：{id}"),
+                ));
+            }
+        }
+        if let Some(continuation) = response.continuation.as_deref() {
+            if !continuation.is_empty() && continuation.parse::<u64>().is_err() {
+                return Err(AppError::new(
+                    "protocol",
+                    format!("GReader continuation 不是合法非负整数：{continuation:?}"),
+                ));
+            }
+        }
+        Ok(response)
     }
 
     /// 拉条目正文（按十进制 id，可重复）。返回 items 含状态/正文/enclosure。

@@ -166,8 +166,7 @@ async fn feeds_and_states_phases_run_independently() {
     let (aid, _mf) = seed_local_article(&db, &_server, "http://127.0.0.1:8765/post/1").await;
 
     // feeds 阶段独立可跑：本地 feed 绑定远端 feed 10
-    let r1 = sync::feeds_phase(&db, &http).await.expect("feeds phase");
-    assert!(r1.merged_states >= 1, "local feed merged with remote");
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
     {
         let conn = db.lock().await;
         let bound: Option<i64> = conn

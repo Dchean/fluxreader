@@ -1,9 +1,9 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
-import { beginEntryFieldWrite, beginLocalFlagWrite, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCountsOrdered, scheduleCountsReconcile, syncCurrentViewCache, viewEntriesCache } from '../internals';
+import { beginEntryFieldWrite, beginLocalFlagWrite, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCountsOrdered, scheduleCountsReconcile, viewEntriesCache } from '../internals';
 import { selectScopeEntries, selectVisibleEntries } from '../selectors';
 import type { AppState } from '../types';
-import type { ViewFilterType } from '../../types';
+import type { ContentLayoutType, ViewFilterType } from '../../types';
 
 /** 导航与筛选 slice：内容布局 / 视图 / 订阅范围 / 时间流筛选状态，及其导航 action。
  *
@@ -33,7 +33,241 @@ function startOfLocalDayMs(): number {
   return d.getTime();
 }
 
-export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, get) => ({
+interface MarkAllReadContext {
+  scope: string;
+  feedId: number | null;
+  folderId: number | null;
+  view: ViewFilterType;
+  timelineFilter: 'all' | 'unread';
+  layout: ContentLayoutType;
+  starredOnly: boolean;
+  sinceMs?: number;
+  ids: string[];
+  attemptReadById?: Record<string, boolean>;
+  attemptFeedIdById?: Record<string, string>;
+  operationVersionById?: Record<string, number>;
+  key: string;
+}
+
+function markAllReadContextKey(
+  context: Omit<MarkAllReadContext, 'ids' | 'attemptReadById' | 'attemptFeedIdById' | 'operationVersionById' | 'key'>,
+): string {
+  // Note: 范围类失败按“范围 × 视图 × 布局 × 时间界”分条 — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md
+  return [
+    'mark:all-read',
+    context.scope,
+    context.feedId ?? 'none',
+    context.folderId ?? 'none',
+    context.view,
+    context.timelineFilter,
+    context.layout,
+    context.sinceMs ?? 'none',
+    context.starredOnly ? 'starred' : 'all',
+  ].join(':');
+}
+
+export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, get) => {
+  const runMarkAllRead = (context: MarkAllReadContext, replay: boolean): void => {
+    const targetExists = context.feedId !== null
+      ? get().feedIndex.has(String(context.feedId))
+      : context.folderId !== null
+        ? get().categories.some((c) => c.id === `cat-${context.folderId}`)
+        : true;
+    if (!targetExists) {
+      if (replay) get().showToast('全部已读重试目标已失效，未执行');
+      return;
+    }
+    const st = get();
+    if (st.dataMode !== 'tauri') return;
+    const matchesCurrentContext = (state: AppState): boolean =>
+      state.activeFeedFilter === context.scope
+      && state.activeViewFilter === context.view
+      && state.timelineFilter === context.timelineFilter
+      && state.activeContentLayout === context.layout;
+    const contextIsCurrent = matchesCurrentContext(st);
+    const ids = new Set(context.ids);
+    const targetCacheKey = QueryScope.viewKey(context.layout, context.view, context.scope);
+    const attemptSourceEntries = contextIsCurrent
+      ? st.entries
+      : (viewEntriesCache.get(targetCacheKey)?.entries ?? []);
+    const attemptReadById = Object.fromEntries(
+      context.ids.flatMap((id) => {
+        const entry = attemptSourceEntries.find((candidate) => candidate.id === id);
+        return entry ? [[id, entry.isRead] as const] : [];
+      }),
+    );
+    const attemptFeedIdById = Object.fromEntries(
+      context.ids.flatMap((id) => {
+        const entry = attemptSourceEntries.find((candidate) => candidate.id === id);
+        return entry ? [[id, entry.feedId] as const] : [];
+      }),
+    );
+    const prevReadById = contextIsCurrent
+      ? new Map(Object.entries(attemptReadById))
+      : new Map<string, boolean>();
+    const prevOpenedReadIds = st.openedReadIds;
+    let clearedOpenedReadIds: Record<string, boolean> | null = null;
+    const operationIds = new Set(context.ids);
+    if (contextIsCurrent) {
+      for (const entry of selectScopeEntries({
+        ...st,
+        activeContentLayout: context.layout,
+        activeFeedFilter: context.scope,
+      })) {
+        operationIds.add(entry.id);
+      }
+    }
+    if (contextIsCurrent) {
+      markEntriesRead(ids);
+      clearedOpenedReadIds = {};
+      set({ openedReadIds: clearedOpenedReadIds });
+    }
+    const operationVersionById = Object.fromEntries(
+      [...operationIds].map((id) => [id, getEntryVersion(id, 'isRead')] as const),
+    );
+    const actionContext: MarkAllReadContext = {
+      ...context,
+      attemptReadById,
+      attemptFeedIdById,
+      operationVersionById,
+    };
+    const optimisticVersionById = new Map<string, number>();
+    for (const [id, prev] of prevReadById) {
+      if (!prev) optimisticVersionById.set(id, getEntryVersion(id, 'isRead'));
+    }
+    const hasOptimisticWrite = optimisticVersionById.size > 0;
+    if (hasOptimisticWrite) {
+      beginLocalFlagWrite();
+      for (const id of optimisticVersionById.keys()) beginEntryFieldWrite(id, 'isRead');
+    }
+
+    const convergeLoadedScopeToRead = () => {
+      const current = get();
+      const inScope = selectScopeEntries({
+        ...current,
+        activeContentLayout: context.layout,
+        activeFeedFilter: context.scope,
+      });
+      const since = context.view === 'today' ? context.sinceMs : undefined;
+      const targetIds = new Set(
+        inScope
+          .filter((e) =>
+            getEntryVersion(e.id, 'isRead') === actionContext.operationVersionById?.[e.id]
+            && (context.view === 'starred' ? e.isStarred
+              : context.view === 'today' ? e.publishedAt >= (since ?? 0)
+              : true),
+          )
+          .map((e) => e.id),
+      );
+      if (targetIds.size > 0) markEntriesRead(targetIds);
+    };
+    const updateCapturedViewCache = (mode: 'read' | 'restore') => {
+      const cacheKey = QueryScope.viewKey(actionContext.layout, actionContext.view, actionContext.scope);
+      const cached = viewEntriesCache.get(cacheKey);
+      if (!cached) return;
+      viewEntriesCache.set(cacheKey, {
+        ...cached,
+        entries: cached.entries.map((entry) => {
+          if (!ids.has(entry.id)) return entry;
+          const operationVersion = actionContext.operationVersionById?.[entry.id];
+          if (typeof operationVersion !== 'number'
+            || getEntryVersion(entry.id, 'isRead') !== operationVersion) {
+            return entry;
+          }
+          const isRead = mode === 'read' ? true : actionContext.attemptReadById?.[entry.id];
+          if (typeof isRead !== 'boolean' || entry.isRead === isRead) return entry;
+          return { ...entry, isRead };
+        }),
+      });
+    };
+
+    void api.markAllRead(context.feedId, context.folderId, {
+      starredOnly: context.starredOnly,
+      sinceMs: context.sinceMs,
+      layout: context.layout,
+    }).then(() => {
+      if (hasOptimisticWrite) {
+        endLocalFlagWrite();
+        for (const id of optimisticVersionById.keys()) endEntryFieldWrite(id, 'isRead');
+      }
+      get().showToast('已全部标为已读');
+      /* affected=0 也是成功终态（目标已全读）：仍按捕获上下文收敛缓存并重新对账，
+         否则「首次已提交但响应丢失 → 切 B → 重试返回 0」会留下旧缓存未读。 */
+      if (matchesCurrentContext(get())) convergeLoadedScopeToRead();
+      updateCapturedViewCache('read');
+      const reconcileCounts = (): Promise<'applied' | 'stale' | 'empty'> =>
+        reconcileCountsOrdered().then((outcome) => {
+          if (outcome === 'failed') throw new Error('计数对账读取失败');
+          if (outcome === 'skipped') return 'empty';
+          return outcome;
+        });
+      const runCountReconcile = (allowRetry: boolean) => {
+        reconcileCounts().then((outcome) => {
+          if (outcome === 'stale' && allowRetry) {
+            void reconcileCounts().catch(() => { /* 重取失败：放弃，计数由下次 reload 自愈 */ });
+          }
+        }).catch(() => {
+          if (!allowRetry) return;
+          get().showToast('全部已读已保存，未读计数刷新失败');
+          setTimeout(() => {
+            void reconcileCounts().catch(() => { /* 重试仍失败：放弃，计数由下次 reload 自愈 */ });
+          }, 3000);
+        });
+      };
+      runCountReconcile(true);
+    }).catch((e: unknown) => {
+      if (hasOptimisticWrite) {
+        endLocalFlagWrite();
+        for (const id of optimisticVersionById.keys()) endEntryFieldWrite(id, 'isRead');
+      }
+      const current = get();
+      let changed = false;
+      let takenOver = false;
+      const unreadRestore = new Map<string, number>();
+      for (const [id, version] of optimisticVersionById) {
+        if (getEntryVersion(id, 'isRead') !== version) {
+          takenOver = true;
+          continue;
+        }
+        const feedId = actionContext.attemptFeedIdById?.[id];
+        if (feedId) unreadRestore.set(feedId, (unreadRestore.get(feedId) ?? 0) + 1);
+      }
+      const entries = current.entries.map((a) => {
+        if (!ids.has(a.id)) return a;
+        const prev = prevReadById.get(a.id);
+        if (prev !== false || a.isRead !== true) return a;
+        if (getEntryVersion(a.id, 'isRead') !== optimisticVersionById.get(a.id)) return a;
+        changed = true;
+        return { ...a, isRead: prev };
+      });
+      let feedCounts = current.feedCounts;
+      if (unreadRestore.size > 0) {
+        feedCounts = new Map(current.feedCounts);
+        for (const [fid, delta] of unreadRestore) {
+          const count = feedCounts.get(fid);
+          if (count) feedCounts.set(fid, { ...count, unread: Math.max(0, count.unread + delta) });
+        }
+      }
+      const next: Partial<AppState> = {};
+      if (changed) {
+        next.entries = entries;
+      }
+      if (unreadRestore.size > 0) next.feedCounts = feedCounts;
+      if (clearedOpenedReadIds && current.openedReadIds === clearedOpenedReadIds) {
+        next.openedReadIds = prevOpenedReadIds;
+      }
+      set(next);
+      updateCapturedViewCache('restore');
+      scheduleCountsReconcile(takenOver ? { force: true } : undefined);
+      get().showToast(`全部已读保存失败：${extractError(e)}`, {
+        label: '重试',
+        key: actionContext.key,
+        run: () => runMarkAllRead(actionContext, true),
+      });
+    });
+  };
+
+  return {
   activeContentLayout: 'article',
   activeViewFilter: 'all',
   activeFeedFilter: 'all',
@@ -284,169 +518,37 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
   },
 
   markCurrentViewAllRead: () => {
-    const ids = new Set(selectVisibleEntries(get()).map((i) => i.id));
-    if (get().dataMode !== 'tauri') {
+    const st = get();
+    const ids = selectVisibleEntries(st).map((i) => i.id);
+    if (st.dataMode !== 'tauri') {
       /* mock 模式：无库可写，仅本地标读 + 提示，绝不伪造落库（(f) 契约不变） */
-      markEntriesRead(ids);
+      markEntriesRead(new Set(ids));
       set({ openedReadIds: {} });
       get().showToast('已全部标为已读');
       return;
     }
-    /* 范围语义与后端一致：当前 feed/分类范围（all 时两者皆 null）。
-       TASK-109①：标写范围派生收口到 QueryScope.markScope——只取订阅维度
-       （feed_id/folder_id）：排序与标写无关、布局由下方 api.markAllRead 的独立
-       layout 参数承载；不再借道 scopeQueryArgs 传入 layout/sort 又丢弃。 */
-    const scope = get().activeFeedFilter;
+    const scope = st.activeFeedFilter;
     const { feed_id: feedId, folder_id: folderId } = QueryScope.markScope(scope);
-    /* F8：视图口径必须与界面一致——收藏/今天视图只标该视图可见的文章，
-       否则会把范围内未显示的文章一并标读（并推给远端），与文案不符 */
-    const view = get().activeViewFilter;
+    const view = st.activeViewFilter;
     const starredOnly = view === 'starred';
     const sinceMs = view === 'today' ? startOfLocalDayMs() : undefined;
-    const layout = get().activeContentLayout;
-    /* TASK-107（REQ-003）：本地已加载条目乐观先行（读态即时变化不等落库），
-       但必须保存被翻转条目的原读态——失败时逐条恢复，不允许「计数已扣、
-       状态已改」的假成功。 */
-    const prevReadById = new Map<string, boolean>();
-    for (const e of get().entries) {
-      if (ids.has(e.id)) prevReadById.set(e.id, e.isRead);
-    }
-    const prevOpenedReadIds = get().openedReadIds;
-    markEntriesRead(ids);
-    /* TASK-107 R1（F1）：乐观写入后快照各 id 的变更版本——失败回滚只恢复
-       「版本仍等于快照值」的条目。仅凭「当前值仍等于乐观写入值」的值守卫
-       无法区分「用户已接管（同值覆盖写入）」与「未被触碰」：在途失败期间
-       用户连点两次 toggle 停在与乐观写入相同的值时，迟到回滚会误踩用户最终
-       意图而 DB 已是新值（审查探针 C3 实测）。版本由 internals 的三个真实
-       写入点维护：flipEntryFlag（单条 toggle）/ markEntriesRead（本操作的
-       乐观写入与批量标读）/ mergeSnapshotEntries（快照替换带后端真值）。
-       TASK-118（审计 P1-2）：快照与守卫都取 **isRead 字段**版本——修前文章级
-       共享版本下，窗口内用户收藏（bump isStarred）会把读回滚误判成已接管而
-       跳过（应恢复未读却停在乐观已读）。 */
-    const optimisticVersionById = new Map<string, number>();
-    for (const [id, prev] of prevReadById) {
-      if (!prev) optimisticVersionById.set(id, getEntryVersion(id, 'isRead'));
-    }
-    /* R2/N1：成功后把**已加载范围内**（含当前不可见但在窗口内的同 URL 副本）
-       的条目本地收敛为已读——与后端 mark_all_read 的 范围×视图×布局 参数
-       逐项同构；`markEntriesRead` 内部只翻未读行（不会重复计数）。 */
-    const convergeLoadedScopeToRead = (viewFilter: ViewFilterType) => {
-      const st = get();
-      const inScope = selectScopeEntries(st);
-      const since = viewFilter === 'today' ? startOfLocalDayMs() : undefined;
-      const ids = new Set(
-        inScope
-          .filter((e) =>
-            viewFilter === 'starred' ? e.isStarred
-            : viewFilter === 'today' ? e.publishedAt >= (since ?? 0)
-            : true,
-          )
-          .map((e) => e.id),
-      );
-      if (ids.size > 0) markEntriesRead(ids);
+    const layout = st.activeContentLayout;
+    const contextBase = {
+      scope,
+      feedId,
+      folderId,
+      view,
+      timelineFilter: st.timelineFilter,
+      layout,
+      starredOnly,
+      sinceMs,
     };
-    set({ openedReadIds: {} });
-    /* R2/N2：markAll 是本地写意图——在途期间计数快照不得落地覆盖其乐观值。
-       R4：被乐观翻转的行×字段同时登记为在途写（articles 快照读取发起时的
-       保护集合用；范围=本次真实翻转的 id 集合）。 */
-    beginLocalFlagWrite();
-    for (const id of optimisticVersionById.keys()) beginEntryFieldWrite(id, 'isRead');
-    void api.markAllRead(feedId, folderId, { starredOnly, sinceMs, layout }).then((affected) => {
-      endLocalFlagWrite();
-      for (const id of optimisticVersionById.keys()) endEntryFieldWrite(id, 'isRead');
-      /* TASK-107：成功以后端为准对账。mark_all_read 影响整个范围（含未加载
-         条目），此前忽略返回值、只按已加载条目推算计数——审计探针：范围 600
-         条未读、前端加载 1 条，后端成功 600 条后界面仍显示 599。范围总量前端
-         不可知（分页只加载首批），affected 无法直接换算计数，对账收口为
-         「重取计数整体替换」（与 reloadFromBackend 同一计数来源）；
-         affected 是后端对本次操作的实际影响报告（0 = 范围内本就没有未读，
-         此时乐观写入也未翻转任何条目，无需重取）。 */
-      get().showToast('已全部标为已读');
-      if (affected === 0) return;
-      /* R2/N1：乐观段只覆盖"当前可见集合"；后端读闭包改的是整个范围（含被
-         显示聚合折叠/不在可见集合但在已加载窗口内的同 URL 副本）。成功后把这些
-         已加载条目本地收敛为已读——仅计数重取不够（entries/视图缓存里的兄弟
-         仍是未读）。范围×视图口径与后端 mark_all_read 参数逐项同构。 */
-      convergeLoadedScopeToRead(view);
-      /* TASK-119（审计 P2-4②探针 P6）：对账发起时记录本地读/藏写入序号
-         （currentLocalFlagWriteSerial，bump 点矩阵见 internals）——落地仅当
-         「期间无本地读/藏写入」才整体替换：替换会把乐观计数踩回旧值（改回未读
-         后迟到计数落地 → 文章未读但未读数 0）。
-         OPT-008B R1：对账统一收口到 internals.reconcileCountsOrdered——同一守卫
-         族外加「布局 / 开关代次 + 计数读取令牌 + 在途意图」（迟到响应不得跨布局
-         回填、旧 reload 不得覆盖新对账）；单次 counts_snapshot 同取源/聚合两份
-         计数（同一时刻）。过期则丢弃并**立即重取一次**；重取仍过期/失败则放弃，
-         计数由下次 reload 自愈（不循环重试）。 */
-      const reconcileCounts = (): Promise<'applied' | 'stale' | 'empty'> => {
-        return reconcileCountsOrdered().then((outcome) => {
-          if (outcome === 'failed') throw new Error('计数对账读取失败');
-          if (outcome === 'skipped') return 'empty';
-          return outcome;
-        });
-      };
-      const runCountReconcile = (allowRetry: boolean) => {
-        reconcileCounts().then((outcome) => {
-          if (outcome === 'stale' && allowRetry) {
-            /* 过期丢弃 → 立即重取一次（不再级联：重取的过期/失败都放弃） */
-            void reconcileCounts().catch(() => { /* 重取失败：放弃，计数由下次 reload 自愈 */ });
-          }
-        }).catch(() => {
-          /* TASK-107 R1（F2）：对账重取失败不再完全静默——落库已成功但计数残留
-             乐观值（600/1 形态下显示 599、DB 真值 0），先给一条诊断提示（≤40 字，
-             与「保存失败」文案明确区分：标读本身没有失败），并安排一次 3s 延迟
-             重试；重试仍失败则放弃，依赖既有 reload 自愈（下次任意
-             reloadFromBackend 重取同一计数来源，审查探针 F2 证实自愈有效）。 */
-          if (!allowRetry) return;
-          get().showToast('全部已读已保存，未读计数刷新失败');
-          setTimeout(() => {
-            void reconcileCounts().catch(() => { /* 重试仍失败：放弃，计数由下次 reload 自愈 */ });
-          }, 3000);
-        });
-      };
-      runCountReconcile(true);
-    }).catch((e: unknown) => {
-      endLocalFlagWrite();
-      for (const id of optimisticVersionById.keys()) endEntryFieldWrite(id, 'isRead');
-      /* TASK-107：失败回滚——乐观翻转到原读态、逐 feed 回补未读计数、还原
-         「已读保留」快照并同步视图缓存。恢复前提从「当前值仍等于乐观写入值」
-         升级为 R1 的版本守卫（值守卫保留作快速短路：值已不同必然已被接管）。
-         成功 toast 已移入 .then（落库确认后才弹），此处只给失败 toast + 重试。 */
-      const s = get();
-      let changed = false;
-      /* R2：接管检测——乐观声明的 isRead 版本已前进（后端快照替换/其他真实写入
-         接管了读字段）。此时回滚无法线性复原计数（快照不按行 ±1，且其在途计数
-         可能被本操作未提交意图挡下）——失败后必须强制一次权威计数对账，否则
-         计数停留在乐观值（N1 关闭 dedup 时无其他收敛路径）。 */
-      let takenOver = false;
-      for (const [id, version] of optimisticVersionById) {
-        if (getEntryVersion(id, 'isRead') !== version) { takenOver = true; break; }
-      }
-      const unreadRestore = new Map<string, number>();
-      const entries = s.entries.map((a) => {
-        if (!ids.has(a.id)) return a;
-        const prev = prevReadById.get(a.id);
-        if (prev !== false || a.isRead !== true) return a;
-        if (getEntryVersion(a.id, 'isRead') !== optimisticVersionById.get(a.id)) return a; // R1 + TASK-118：期间已被其他**读态**写入接管（收藏 bump 的是 isStarred 字段，不再使读回滚失效）
-        changed = true;
-        unreadRestore.set(a.feedId, (unreadRestore.get(a.feedId) ?? 0) + 1);
-        return { ...a, isRead: prev };
-      });
-      let feedCounts = s.feedCounts;
-      if (changed) {
-        feedCounts = new Map(s.feedCounts);
-        for (const [fid, delta] of unreadRestore) {
-          const c = feedCounts.get(fid);
-          if (c) feedCounts.set(fid, { ...c, unread: Math.max(0, c.unread + delta) });
-        }
-      }
-      set(changed ? { entries, feedCounts, openedReadIds: prevOpenedReadIds } : { openedReadIds: prevOpenedReadIds });
-      if (changed) syncCurrentViewCache(entries);
-      /* OPT-008B R1/R2：失败回滚后同样对账（本地与后端一致时幂等；不一致时
-         收敛）；回滚被接管跳过（takenOver）时不受 dedup 门控强制重取——
-         乐观计数无其他复原路径（dedup 关闭时读闭包回执行不存在，因为写已失败）。 */
-      scheduleCountsReconcile(takenOver ? { force: true } : undefined);
-      /* TASK-067 N10：失败必须可见；本地已回滚，文案不再断言「重启后可能回退」 */
-      get().showToast(`全部已读保存失败：${extractError(e)}`, { label: '重试', key: 'mark:all-read', run: () => get().markCurrentViewAllRead() });
-    });
+    const context: MarkAllReadContext = {
+      ...contextBase,
+      ids: [...ids],
+      key: markAllReadContextKey(contextBase),
+    };
+    runMarkAllRead(context, false);
   },
-});
+  };
+};

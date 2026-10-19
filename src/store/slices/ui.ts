@@ -24,6 +24,7 @@ export type UiSlice = Pick<
   | 'toasts'
   | 'errors'
   | 'errorCenterOpen'
+  | 'saveAndSyncBusyOwner'
   | 'openSettings'
   | 'closeSettings'
   | 'switchSettingsTab'
@@ -44,6 +45,8 @@ export type UiSlice = Pick<
   | 'clearErrors'
   | 'openErrorCenter'
   | 'closeErrorCenter'
+  | 'beginSaveAndSync'
+  | 'endSaveAndSync'
 >;
 
 /* ============================================================
@@ -56,10 +59,10 @@ export type UiSlice = Pick<
    决策：`showToast(text, action)` 带动作时**同时**写入错误中心——一个有界列表
    （上限 20 条）、按 key 合并最新、TTL 24h 惰性清理；面板经侧栏入口打开，
    逐条可重试/忽略/全部清除。普通提示不进错误中心、形态与时长不变。
-   去重键（R1 返工）：**显式操作实体 key 优先**（`action.key`，命名 `域:操作:实体`
-   如 `feed:refresh:10`；全部带重试动作的调用点都已迁移），缺省回落文案——同文案
-   不同实体不得合并成一条（否则多源同类失败只能重试最新一个）；迁移完整性由域
-   回归 (e9) 的源级守卫钉住。
+   去重键（R1/OPT-020）：**显式操作实体或上下文 key 优先**（`action.key`，如
+   `feed:refresh:10`、`mark:all-read:<context>`；全部带重试动作的调用点都已迁移），
+   缺省回落文案——同文案不同实体/上下文不得合并成一条。重试 run 由调用点捕获
+   失败时实体、范围、游标或表单草稿；迁移与快照完整性由域回归 (e9)/OPT-020 钉住。
    取舍与替代方案见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md。 */
 export const ERROR_CENTER_MAX = 20;
 export const ERROR_CENTER_TTL_MS = 24 * 60 * 60 * 1000;
@@ -128,6 +131,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   toasts: [],
   errors: [],
   errorCenterOpen: false,
+  saveAndSyncBusyOwner: null,
 
   /* ================= 弹层 ================= */
 
@@ -177,8 +181,8 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
       if (!action) return { toasts };
       /* OPT-017E：带重试动作的失败同时写入错误中心——有界（≤20）+ 同 key
          合并最新 + 惰性 TTL 清理；id 复用 toast 计数（单调唯一）。
-         R1 返工：去重键 = 显式操作实体 key 优先、缺省回落文案——同文案不同
-         实体（多源同类失败）各自成条、各自可重试。 */
+         去重键 = 显式操作实体/上下文 key 优先、缺省回落文案——同文案不同
+         实体或不同范围/分页上下文各自成条、各自可重试。 */
       const key = action.key ?? text;
       const kept = pruneErrorEntries(s.errors, now);
       const prev = kept.find((e) => e.key === key);
@@ -235,4 +239,16 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   clearErrors: () => set({ errors: [] }),
   openErrorCenter: () => set({ errorCenterOpen: true }),
   closeErrorCenter: () => set({ errorCenterOpen: false }),
+  beginSaveAndSync: (owner) => {
+    let acquired = false;
+    set((s) => {
+      if (s.saveAndSyncBusyOwner !== null) return {};
+      acquired = true;
+      return { saveAndSyncBusyOwner: owner };
+    });
+    return acquired;
+  },
+  endSaveAndSync: (owner) => set((s) => (
+    s.saveAndSyncBusyOwner === owner ? { saveAndSyncBusyOwner: null } : {}
+  )),
 });

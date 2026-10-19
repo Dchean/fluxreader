@@ -347,6 +347,14 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
 
   /* ---------- 生成流程（三个入口共用：请求代次 + 落地守卫） ---------- */
 
+  /** 摘要失败入口只认捕获 id：不检查当前 entries，直接重走生成链。 */
+  function retrySummaryFor(id: string): void {
+    if (get().dataMode !== 'tauri') return;
+    const key = aiKeyOf(id, 'summary');
+    if (aiInFlight.has(key)) return;
+    runSummaryRequest(id, false);
+  }
+
   /** 摘要生成/重试：清错误与半截 → 流式 → Done 后安全回读（含签名）。 */
   const runSummaryRequest = (id: string, silent: boolean): void => {
     const key = aiKeyOf(id, 'summary');
@@ -401,7 +409,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           });
           refreshAiStatus(id); // B3：失败分型落定后刷新（failed/partial 的数据源）
           if (!silent) {
-            get().showToast(`摘要失败：${msg}`, { label: '重试', key: `ai:summary:${id}`, run: () => get().summarizeEntry(id) });
+            get().showToast(`摘要失败：${msg}`, { label: '重试', key: `ai:summary:${id}`, run: () => retrySummaryFor(id) });
           }
         },
       )
@@ -417,11 +425,21 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         });
         refreshAiStatus(id);
         if (!silent) {
-          get().showToast('摘要失败：请先在设置中配置 AI 服务', { label: '重试', key: `ai:summary:${id}`, run: () => get().summarizeEntry(id) });
+          get().showToast('摘要失败：请先在设置中配置 AI 服务', { label: '重试', key: `ai:summary:${id}`, run: () => retrySummaryFor(id) });
         }
       });
     trackAiRequest(key, p);
   };
+
+  /** 翻译失败入口只认捕获 id：直接走卡片级 per-id 生成，不检查当前 entries。 */
+  function retryTranslationFor(id: string): void {
+    const s = get();
+    if (s.dataMode !== 'tauri') return;
+    const key = aiKeyOf(id, 'translation');
+    if (aiInFlight.has(key)) return;
+    if (s.activeArticleId === id) runReaderTranslation(id, false);
+    else runCardTranslation(id, false);
+  }
 
   /** 卡片级翻译生成/重试（状态按条目隔离，不复用全局 translating 单布尔）。
       `plan` 为 undefined 时自查分段计划并提示（提示不阻塞生成；B2 最小 UI）。 */
@@ -491,7 +509,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               /* 失败态放行重试（D1 语义），不残留渲染风险 */
               writeAiProduct(id, 'translatedContent', '');
               refreshAiStatus(id);
-              if (!silent) get().showToast('译文回读失败', { label: '重试', key: `ai:translate:${id}`, run: () => get().translateEntry(id) });
+              if (!silent) get().showToast('译文回读失败', { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
             });
         },
         (msg) => {
@@ -514,7 +532,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           });
           refreshAiStatus(id); // B3：失败分型落定后刷新（partial/failed 的数据源）
           if (!silent) {
-            get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => get().translateEntry(id) });
+            get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
           }
         },
       )
@@ -534,7 +552,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         });
         refreshAiStatus(id); // B3：失败分型落定后刷新（与 summary catch / Reader catch / 三处错误回调同口径）
         if (!silent) {
-          get().showToast('翻译失败：AI 服务未配置或不可达', { label: '重试', key: `ai:translate:${id}`, run: () => get().translateEntry(id) });
+          get().showToast('翻译失败：AI 服务未配置或不可达', { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
         }
       });
     trackAiRequest(key, p);
@@ -551,11 +569,12 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     const key = aiKeyOf(id, 'translation');
     const gen = beginAiRequest(key);
     const current = (): boolean => isCurrentAiRequest(key, gen);
+    const ownsReaderView = (): boolean => get().activeArticleId === id;
     /* 重试语义：清上次的错误与半截译文（签名随产物清空），重新走完整流 */
     writeAiProduct(id, 'translatedContent', '', null);
+    const showReaderTranslation = ownsReaderView();
     set((st) => ({
-      translating: true,
-      isShowingTranslatedProse: true,
+      ...(showReaderTranslation ? { translating: true, isShowingTranslatedProse: true } : {}),
       /* OPT-013 B3：Reader 级生成同样登记 per-id 在途标记——五态判定（generating）
          与快照合并/reconcile 的「生成中不覆盖流式产物」守卫都消费它。 */
       translatingIds: { ...st.translatingIds, [id]: true },
@@ -579,10 +598,14 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
              未消毒译文永久留在渲染路径 + unhandled rejection）。
              OPT-013 B1：回读行的签名与产物成对落账；过时回读整体丢弃。 */
           if (!current()) return;
+          const ownsView = ownsReaderView();
           set((st) => {
             const nextIds = { ...st.translatingIds };
             delete nextIds[id];
-            return { translating: false, translatingIds: nextIds };
+            return {
+              ...(ownsView ? { translating: false } : {}),
+              translatingIds: nextIds,
+            };
           });
           const readGen = gen;
           void api
@@ -612,7 +635,11 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               writeAiProduct(id, 'translatedContent', '');
               refreshAiStatus(id);
               if (!silent) {
-                get().showToast('译文回读失败', { label: '重试', key: `ai:translate:${id}`, run: () => get().toggleReaderTranslation() });
+                get().showToast('译文回读失败', {
+                  label: '重试',
+                  key: `ai:translate:${id}`,
+                  run: () => retryTranslationFor(id),
+                });
               }
             });
         },
@@ -623,44 +650,52 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
              留着会让后续水合写回的 DB 消毒译文走纯文本分支（字面显示 <p>…</p>，
              即 P2-9 标记粘连）；有半截则保留，按纯文本渲染（重试语义，D1b）。 */
           if (!current()) return;
+          const ownsView = ownsReaderView();
           set((st) => {
             const nextRaw = { ...st.rawTranslatedIds };
             const nextIds = { ...st.translatingIds };
             delete nextIds[id];
             if (!effectiveAi(id, 'translatedContent')) delete nextRaw[id];
             return {
-              translating: false,
+              ...(ownsView ? { translating: false, isShowingTranslatedProse: false } : {}),
               translatingIds: nextIds,
-              isShowingTranslatedProse: false,
               rawTranslatedIds: nextRaw,
               translateErrors: { ...st.translateErrors, [id]: msg },
             };
           });
           refreshAiStatus(id); // B3：失败分型落定后刷新（partial/failed 的数据源）
           if (!silent) {
-            get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => get().toggleReaderTranslation() });
+            get().showToast(`翻译失败：${msg}`, {
+              label: '重试',
+              key: `ai:translate:${id}`,
+              run: () => retryTranslationFor(id),
+            });
           }
         },
       )
       .catch(() => {
         /* F3：同上——清标记与「是否有未消毒半截」绑定（与 translateEntry 同口径） */
         if (!current()) return;
+        const ownsView = ownsReaderView();
         set((st) => {
           const nextRaw = { ...st.rawTranslatedIds };
           const nextIds = { ...st.translatingIds };
           delete nextIds[id];
           if (!effectiveAi(id, 'translatedContent')) delete nextRaw[id];
           return {
-            translating: false,
+            ...(ownsView ? { translating: false, isShowingTranslatedProse: false } : {}),
             translatingIds: nextIds,
-            isShowingTranslatedProse: false,
             rawTranslatedIds: nextRaw,
             translateErrors: { ...st.translateErrors, [id]: 'AI 服务未配置或不可达' },
           };
         });
         refreshAiStatus(id);
         if (!silent) {
-          get().showToast('翻译失败：请先在设置中配置 AI 服务', { label: '重试', key: `ai:translate:${id}`, run: () => get().toggleReaderTranslation() });
+          get().showToast('翻译失败：请先在设置中配置 AI 服务', {
+            label: '重试',
+            key: `ai:translate:${id}`,
+            run: () => retryTranslationFor(id),
+          });
         }
       });
     trackAiRequest(key, p);

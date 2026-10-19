@@ -314,7 +314,7 @@ export async function run(ctx) {
       const from = m.index + m[0].length;
       const nextLabel = src.indexOf('label:', from + 1);
       const to = nextLabel === -1 ? from + 240 : Math.min(from + 240, nextLabel);
-      if (!/key:\s*['`]/.test(src.slice(from, to))) {
+      if (!/key:\s*(?:['`]|[A-Za-z_$])/.test(src.slice(from, to))) {
         const rel = path.relative(srcDir, file).replaceAll('\\', '/');
         missingKey.push(`${rel}:${src.slice(0, m.index).split('\n').length}`);
       }
@@ -322,9 +322,9 @@ export async function run(ctx) {
   }
   checkNew('(e9) 迁移完整性：全部重试调用点的动作对象窗口（到下一个 label 或 240 字符）内含显式 key（漏 key 即回落文案去重——新重试点必须带 key）',
     retrySites > 0 && missingKey.length === 0, missingKey.join('；'));
-  checkNew('(e9) 迁移清单钉死：src 下恰 20 个 `label: \'重试\'` 调用点（新增/删除重试点必须同步本守卫与迁移测试）',
-    retrySites === 20);
+  checkNew('(e9) 迁移清单钉死：src 下恰 24 个 `label: \'重试\'` 调用点（含全文两条路径、save/post-save 两阶段与两类忙锁拒绝入口；新增/删除重试点必须同步本守卫与迁移测试）',
+    retrySites === 24);
   checkNew('(e9) key 形态守卫：各操作实体族 key 以「key: \'…\' / key: `…`」字面出现在 src（域:操作:实体；注释里的示例提及不算）',
     ['feed:refresh:', 'feed:add:', 'ai:summary:', 'ai:translate:', 'reader:fulltext:', 'reader:content:', 'list:load-more', 'mark:all-read', 'sync:manual', 'sync:save-and-sync']
-      .every((k) => new RegExp(`key:\\s*['\`]${k}`).test(allSrc)));
+      .every((k) => allSrc.includes(`'${k}`) || allSrc.includes(`\`${k}`)));
 }

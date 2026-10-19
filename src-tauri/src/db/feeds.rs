@@ -2,6 +2,108 @@ use super::*;
 use rusqlite::params;
 use serde::Serialize;
 
+/// 轻量同步只读发现远端订阅的最小节流间隔。
+pub const ZERO_BINDING_DISCOVERY_INTERVAL_SECS: i64 = 5 * 60;
+pub const ZERO_BINDING_DISCOVERY_KEY_PREFIX: &str = "sync_zero_binding_discovery_at:";
+pub const BINDING_INCOMPLETE_KEY_PREFIX: &str = "sync_binding_incomplete:";
+
+pub fn zero_binding_discovery_key(account_key: &str) -> String {
+    format!("{ZERO_BINDING_DISCOVERY_KEY_PREFIX}{account_key}")
+}
+
+pub fn binding_incomplete_key(account_key: &str) -> String {
+    format!("{BINDING_INCOMPLETE_KEY_PREFIX}{account_key}")
+}
+
+pub fn binding_incomplete(conn: &Connection, account_key: &str) -> AppResult<bool> {
+    Ok(get_setting(conn, &binding_incomplete_key(account_key))?.is_some())
+}
+
+pub fn mark_binding_incomplete(conn: &Connection, account_key: &str) -> AppResult<()> {
+    set_setting(conn, &binding_incomplete_key(account_key), "1")
+}
+
+pub fn clear_binding_incomplete(conn: &Connection, account_key: &str) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM settings WHERE key = ?1",
+        params![binding_incomplete_key(account_key)],
+    )?;
+    Ok(())
+}
+
+pub fn clear_binding_incomplete_attempts(conn: &Connection) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM settings WHERE key LIKE ?1",
+        params![format!("{BINDING_INCOMPLETE_KEY_PREFIX}%")],
+    )?;
+    Ok(())
+}
+
+/// 当前库是否至少有一个远端 feed 绑定。
+pub fn has_remote_feed_binding(conn: &Connection) -> AppResult<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM feeds WHERE remote_id IS NOT NULL)",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? != 0)
+}
+
+pub fn remote_feed_binding_count(conn: &Connection) -> AppResult<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM feeds WHERE remote_id IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// 仍缺远端 id 的服务端来源。pull 遇到非空集合时必须失败关闭，避免另一批
+/// 已绑定 feed 的条目把游标推过未绑定源的窗口。
+pub fn unbound_remote_feeds(conn: &Connection) -> AppResult<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, feed_url FROM feeds
+         WHERE origin = 'remote' AND remote_id IS NULL
+         ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// 独立于条目游标的订阅发现节流。缺失/损坏时间戳按首次到期处理；成功尝试后
+/// 写入新时间戳。
+pub fn zero_binding_discovery_due(
+    conn: &Connection,
+    account_key: &str,
+    now: i64,
+) -> AppResult<bool> {
+    let key = zero_binding_discovery_key(account_key);
+    let last = get_setting(conn, &key)?
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    Ok(last <= 0 || last > now || now.saturating_sub(last) >= ZERO_BINDING_DISCOVERY_INTERVAL_SECS)
+}
+
+/// 发起订阅发现前先记时间：失败尝试同样占用一个节流窗口，避免失败时每 TICK
+/// 重打远端。
+pub fn mark_zero_binding_discovery_attempt(
+    conn: &Connection,
+    account_key: &str,
+    now: i64,
+) -> AppResult<()> {
+    set_setting(
+        conn,
+        &zero_binding_discovery_key(account_key),
+        &now.to_string(),
+    )
+}
+
+pub fn clear_zero_binding_discovery_attempts(conn: &Connection) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM settings WHERE key LIKE ?1",
+        params![format!("{ZERO_BINDING_DISCOVERY_KEY_PREFIX}%")],
+    )?;
+    Ok(())
+}
+
 /* ============================================================
 OPT-011（F13）：源级 AI 开关三态 —— 唯一真值与兼容规则都收口在这里。
 
@@ -599,6 +701,128 @@ pub fn feed_folder_label(conn: &Connection, id: i64) -> AppResult<Option<String>
     match folder_id {
         Some(fid) => super::folders::folder_name(conn, fid),
         None => Ok(None),
+    }
+}
+
+/* ============================================================
+OPT-019 P2-1：零绑定订阅发现节流 / 绑定完整性读入口
+============================================================ */
+#[cfg(test)]
+mod discovery_integrity_tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn zero_binding_discovery_is_throttled_independently() {
+        let conn = test_conn();
+        let now = 1_700_000_000;
+        let account = "greader|https://a.example|alice";
+        assert!(zero_binding_discovery_due(&conn, account, now).unwrap());
+        mark_zero_binding_discovery_attempt(&conn, account, now).unwrap();
+        assert!(
+            !zero_binding_discovery_due(
+                &conn,
+                account,
+                now + ZERO_BINDING_DISCOVERY_INTERVAL_SECS - 1
+            )
+            .unwrap(),
+            "同一 TICK/节流窗口内不得重复发现"
+        );
+        assert!(
+            zero_binding_discovery_due(&conn, account, now + ZERO_BINDING_DISCOVERY_INTERVAL_SECS)
+                .unwrap(),
+            "到达独立发现间隔后应允许下一次只读发现"
+        );
+    }
+
+    #[test]
+    fn zero_binding_discovery_is_account_scoped_and_clearable() {
+        let conn = test_conn();
+        let now = 1_700_000_000;
+        let account_a = "greader|https://a.example|alice";
+        let account_b = "fever|https://b.example|bob";
+        mark_zero_binding_discovery_attempt(&conn, account_a, now).unwrap();
+        assert!(
+            !zero_binding_discovery_due(&conn, account_a, now + 60).unwrap(),
+            "A 的尝试不得被 B 的查询共享"
+        );
+        assert!(
+            zero_binding_discovery_due(&conn, account_b, now + 60).unwrap(),
+            "账号 B 应有独立首次发现窗口"
+        );
+        clear_zero_binding_discovery_attempts(&conn).unwrap();
+        assert!(zero_binding_discovery_due(&conn, account_a, now + 60).unwrap());
+    }
+
+    #[test]
+    fn future_discovery_timestamp_is_treated_as_due_after_clock_rollback() {
+        let conn = test_conn();
+        let account = "greader|https://a.example|alice";
+        let now = 1_700_000_000;
+        mark_zero_binding_discovery_attempt(&conn, account, now + 3600).unwrap();
+        assert!(
+            zero_binding_discovery_due(&conn, account, now).unwrap(),
+            "未来时间戳不得把发现永久锁死；时钟回拨后应按首次到期处理"
+        );
+    }
+
+    #[test]
+    fn binding_incomplete_marker_is_account_scoped_and_clearable() {
+        let conn = test_conn();
+        let account_a = "greader|https://a.example|alice";
+        let account_b = "fever|https://b.example|bob";
+        mark_binding_incomplete(&conn, account_a).unwrap();
+        assert!(binding_incomplete(&conn, account_a).unwrap());
+        assert!(
+            !binding_incomplete(&conn, account_b).unwrap(),
+            "A 的绑定失败不得阻断 B"
+        );
+        clear_binding_incomplete(&conn, account_a).unwrap();
+        assert!(!binding_incomplete(&conn, account_a).unwrap());
+    }
+
+    #[test]
+    fn unbound_remote_feed_query_is_origin_scoped() {
+        let conn = test_conn();
+        let folder = super::super::create_folder(&conn, "分类", "article").unwrap();
+        insert_feed(
+            &conn,
+            "https://local.example/rss",
+            None,
+            "本地",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let remote = insert_feed_origin(
+            &conn,
+            "https://remote.example/rss",
+            None,
+            "远端",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+            "remote",
+        )
+        .unwrap();
+        assert_eq!(
+            unbound_remote_feeds(&conn).unwrap(),
+            vec![(remote, "https://remote.example/rss".into())]
+        );
+        assert!(!has_remote_feed_binding(&conn).unwrap());
+        set_feed_remote_id(&conn, remote, 10).unwrap();
+        assert!(has_remote_feed_binding(&conn).unwrap());
+        assert!(unbound_remote_feeds(&conn).unwrap().is_empty());
     }
 }
 

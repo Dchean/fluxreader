@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../store';
-import { api, extractError, type SyncQueueStats, type PendingConnection } from '../../lib/api';
+import { api, extractError, extractErrorCode, type SyncQueueStats, type PendingConnection } from '../../lib/api';
 import { syncStateSummary, subscriptionWriteSummary, subscriptionActionLine } from '../../lib/syncPill';
 import { FluxDropdown, Switch, SettingCard, ConfirmDialog } from '../primitives';
 import { CacheCleanupSection } from './CacheCleanupSection';
@@ -18,6 +18,42 @@ function refreshQueueStats(setter: (q: SyncQueueStats | null) => void) {
     .catch(() => { /* 统计拉取失败静默兜底（默认零值可用） */ });
 }
 
+type SaveAndSyncDraft = {
+  id: number;
+  revision: number;
+  protocol: 'greader' | 'fever';
+  endpoint: string;
+  username: string;
+  password: string;
+  connected: boolean;
+  activateVersion?: number;
+};
+
+let saveAndSyncDraftSeq = 0;
+let latestCommittedDraftId = 0;
+
+function nextSaveAndSyncDraftId(): number {
+  saveAndSyncDraftSeq += 1;
+  return saveAndSyncDraftSeq;
+}
+
+function saveStageKey(draft: SaveAndSyncDraft): string {
+  // Note: 表单失败按 opaque 草稿 id 分阶段复报，重试重放草稿而非当前输入 — 见 .agents/notes/implemented/feature/2026-10-16-重试入口持久可达与错误中心.md
+  return `sync:save-and-sync:${draft.id}:save`;
+}
+
+function syncStageKey(draft: SaveAndSyncDraft): string {
+  return `sync:save-and-sync:${draft.id}:sync`;
+}
+
+function isSupersededDraft(draft: SaveAndSyncDraft): boolean {
+  return draft.id < latestCommittedDraftId;
+}
+
+function markDraftCommitted(draft: SaveAndSyncDraft): void {
+  latestCommittedDraftId = Math.max(latestCommittedDraftId, draft.id);
+}
+
 export function SyncTab() {
   const showToast = useAppStore((s) => s.showToast);
   const dataMode = useAppStore((s) => s.dataMode);
@@ -28,6 +64,9 @@ export function SyncTab() {
    *  写入同一状态源，摘要卡/能力卡直接订阅（不依赖用户手动刷新）。 */
   const subOutboxStats = useAppStore((s) => s.subOutboxStats);
   const caps = useAppStore((s) => s.subscriptionCapabilities);
+  const saveAndSyncBusyOwner = useAppStore((s) => s.saveAndSyncBusyOwner);
+  const beginSaveAndSync = useAppStore((s) => s.beginSaveAndSync);
+  const endSaveAndSync = useAppStore((s) => s.endSaveAndSync);
   const [endpoint, setEndpoint] = useState('');
   const [protocol, setProtocol] = useState<'greader' | 'fever'>('greader');
   const [username, setUsername] = useState('');
@@ -38,7 +77,8 @@ export function SyncTab() {
   /** TASK-116 X2：同步队列统计（等待/部分失败 + 最新错误摘要） */
   const [queueStats, setQueueStats] = useState<SyncQueueStats | null>(null);
   const [testing, setTesting] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const saving = saveAndSyncBusyOwner !== null || disconnecting;
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   /** 首连弹窗：本地未绑定源数（>0 弹「同步本地订阅到后端」确认） */
   const [pendingLocalSync, setPendingLocalSync] = useState(0);
@@ -48,12 +88,24 @@ export function SyncTab() {
   /** 激活意图：用户点了「填入表单并激活」后记录建议版本，保存时回传后端做 CAS。
    * 普通保存（未点激活）= undefined，后端不消费任何建议。 */
   const [activateVersion, setActivateVersion] = useState<number | undefined>(undefined);
+  const formRevisionRef = useRef(0);
+
+  const touchForm = () => {
+    formRevisionRef.current += 1;
+  };
+
+  const ownsDraft = (draft: SaveAndSyncDraft) => formRevisionRef.current === draft.revision;
+
+  const showSupersededDraft = () => {
+    showToast('保存草稿已失效：已有更新的连接配置提交');
+  };
 
   /* 打开设置时读取当前连接状态 */
   useEffect(() => {
     if (dataMode !== 'tauri') return;
     void api.syncStatus().then((st) => {
       if (!st) return;
+      touchForm();
       setConnected(st.connected);
       setAccount(st.account);
       setLastSync(st.last_sync);
@@ -99,40 +151,22 @@ export function SyncTab() {
     }
   };
 
-  /** 保存并同步：保存（轻量测试+事务落库）→ 后台链路（feeds → states → 直连抓新源）
-      全部在 `saving` 覆盖下 await 完成——F06 修复点之一：此前后台链 fire-and-forget，
-      「保存中…」在真正同步结束前就消失，失败也可能只留一个转瞬即逝的 toast。
-      已连接且密码留空 = 复用已存密码（仅改 Endpoint 的场景，同账号更新保留数据） */
-  const doSaveAndSync = async () => {
-    if (!endpoint.trim()) {
-      showToast('请填写 Endpoint');
+  /** 保存后的同步阶段：只消费已成功保存的草稿，绝不重跑 sync_save。 */
+  async function runPostSaveSync(draft: SaveAndSyncDraft, manageSaving = true): Promise<void> {
+    if (isSupersededDraft(draft)) {
+      showSupersededDraft();
       return;
     }
-    if ((!username.trim() || !password.trim()) && !connected) {
-      showToast('请填写用户名和密码');
+    if (manageSaving && !beginSaveAndSync(draft.id)) {
+      showToast('已有同步操作进行中，请稍候', {
+        label: '重试',
+        key: syncStageKey(draft),
+        run: () => { void runPostSaveSync(draft); },
+      });
       return;
     }
-    setSaving(true);
     try {
-      const result = await api.syncSave(protocol, endpoint.trim(), username.trim(), password.trim(), activateVersion);
-      setConnected(true);
-      /* OPT-006 R1：激活成功由后端 CAS 消费建议；普通保存不消费。统一重读一次
-         真实状态（激活成功 = 无建议；普通保存 = 建议仍在，继续展示）。 */
-      setActivateVersion(undefined);
-      void api.syncPendingConnection().then((p) => setPendingConn(p)).catch(() => { /* 静默兜底 */ });
-      /* 保存成功即刷新账户名显示 */
-      void api.syncStatus().then((st) => { if (st) setAccount(st.account); });
-      setPassword('');
-      showToast(result?.message ?? '已保存，正在后台同步…');
-      /* 首连且本地有未绑定的直连源 → 弹「同步本地订阅到后端」
-         （不自动推：推送会改变服务端数据，必须用户确认） */
-      if (result?.firstConnect && result.unboundLocalFeeds > 0) {
-        setPendingLocalSync(result.unboundLocalFeeds);
-      }
-      /* TASK-058：后端在 errors 非空时仍返回 Ok（单项失败不中断整链），故失败必须
-         在链路内**主动读取** report 才能被用户看到。成功路径的既有文案与顺序不变。 */
       const failures: string[] = [];
-      /* TASK-100 P3-9：后端对账删除计数（SyncReport.removed_feeds）——纯信息展示 */
       let removedFeeds = 0;
       try {
         const feedsReport = await api.syncPhase('feeds');
@@ -149,34 +183,114 @@ export function SyncTab() {
         await api.refreshAllFeeds().catch(() => null);
         await reloadFromBackend();
       } catch (e) {
-        /* 链路任一步硬失败：必须显式呈现错误（不假成功），并给出重试入口 */
-        showToast(`后台同步失败：${extractError(e)}`, { label: '重试', key: 'sync:save-and-sync', run: () => { void doSaveAndSync(); } });
+        showToast(`后台同步失败：${extractError(e)}`, {
+          label: '重试',
+          key: syncStageKey(draft),
+          run: () => { void runPostSaveSync(draft); },
+        });
         return;
       }
       useAppStore.setState({ syncStatus: 'synced', syncConnected: true });
-      /* 有失败项时给出「有 N 项失败」而不是纯粹的「后端同步完成」；
-         errors 为空则与改动前**逐字相同**。 */
       showToast(failures.length > 0 ? failures.join('；') : '后端同步完成');
-      /* TASK-100 P3-9：对账移除了远端已删除的订阅源——纯信息展示，单列一条 */
       if (removedFeeds > 0) showToast(`本次对账移除 ${removedFeeds} 个已在服务端删除的订阅源`);
-      /* TASK-116：本次同步链可能已清空队列或标记失败项，摘要卡跟着刷新 */
       refreshQueueStats(setQueueStats);
-      /* OPT-009 B3：保存可能更换协议/账号——订阅回执与能力矩阵重读 */
       void useAppStore.getState().refreshSubscriptionOutboxStats();
       void useAppStore.getState().loadSubscriptionCapabilities();
-    } catch (e) {
-      showToast(`保存失败：${endpointHint(extractError(e))}`);
-      /* OPT-006 R1：保存失败（含 staleActivation：建议在验证期间被新导入替换）
-         之后重读建议——界面必须显示当前真实待确认状态，不能残留旧版本。 */
-      void api.syncPendingConnection().then((p) => { setPendingConn(p); setActivateVersion(undefined); }).catch(() => { /* 静默兜底 */ });
     } finally {
-      setSaving(false);
+      if (manageSaving) endSaveAndSync(draft.id);
     }
-  };
+  }
 
+  /** 保存并同步：保存（轻量测试+事务落库）→ 后台同步阶段。
+      草稿一旦捕获便只使用该快照；save 失败与 post-save sync 失败各留可重试入口。
+      表单 UI 写入仅在当前 revision 仍属于同一草稿时允许。 */
+  async function runSaveAndSync(draft: SaveAndSyncDraft): Promise<void> {
+    if (isSupersededDraft(draft)) {
+      showSupersededDraft();
+      return;
+    }
+    if (!draft.endpoint) {
+      showToast('请填写 Endpoint');
+      return;
+    }
+    if ((!draft.username || !draft.password) && !draft.connected) {
+      showToast('请填写用户名和密码');
+      return;
+    }
+    if (!beginSaveAndSync(draft.id)) {
+      showToast('已有同步操作进行中，请稍候', {
+        label: '重试',
+        key: saveStageKey(draft),
+        run: () => { void runSaveAndSync(draft); },
+      });
+      return;
+    }
+    try {
+      let result: Awaited<ReturnType<typeof api.syncSave>>;
+      try {
+        result = await api.syncSave(
+          draft.protocol,
+          draft.endpoint,
+          draft.username,
+          draft.password,
+          draft.activateVersion,
+        );
+      } catch (e) {
+        showToast(`保存失败：${endpointHint(extractError(e))}`, {
+          label: '重试',
+          key: saveStageKey(draft),
+          run: () => { void runSaveAndSync(draft); },
+        });
+        const errorCode = extractErrorCode(e);
+        if (ownsDraft(draft)) {
+          void api.syncPendingConnection().then((p) => {
+            if (!ownsDraft(draft)) return;
+            setPendingConn(p);
+            if (errorCode === 'staleActivation') setActivateVersion(undefined);
+          }).catch(() => { /* 静默兜底 */ });
+        }
+        return;
+      }
+
+      markDraftCommitted(draft);
+      const stillOwned = ownsDraft(draft);
+      if (stillOwned) {
+        setConnected(true);
+        setPassword('');
+        if (result?.firstConnect && result.unboundLocalFeeds > 0) {
+          setPendingLocalSync(result.unboundLocalFeeds);
+        }
+      }
+      setActivateVersion((current) => (
+        current === draft.activateVersion ? undefined : current
+      ));
+      void api.syncPendingConnection().then((p) => {
+        if (ownsDraft(draft)) setPendingConn(p);
+      }).catch(() => { /* 静默兜底 */ });
+      void api.syncStatus().then((st) => {
+        if (st && ownsDraft(draft)) setAccount(st.account);
+      });
+      showToast(result?.message ?? '已保存，正在后台同步…');
+      await runPostSaveSync(draft, false);
+    } finally {
+      endSaveAndSync(draft.id);
+    }
+  }
+
+  const doSaveAndSync = () => runSaveAndSync({
+    id: nextSaveAndSyncDraftId(),
+    revision: formRevisionRef.current,
+    protocol,
+    endpoint: endpoint.trim(),
+    username: username.trim(),
+    password: password.trim(),
+    connected,
+    activateVersion,
+  });
   /** OPT-006：把配置导入的待确认建议填入表单（不激活——必须重新输入密码后保存） */
   const doApplyPending = () => {
     if (!pendingConn) return;
+    touchForm();
     if (pendingConn.sync_protocol === 'fever' || pendingConn.sync_protocol === 'greader') {
       setProtocol(pendingConn.sync_protocol);
     }
@@ -192,6 +306,7 @@ export function SyncTab() {
   const doDismissPending = async () => {
     try {
       await api.syncDismissPendingConnection();
+      touchForm();
       setPendingConn(null);
       setActivateVersion(undefined);
       showToast('已忽略配置导入的连接建议');
@@ -221,9 +336,10 @@ export function SyncTab() {
   };
 
   const doDisconnect = async () => {
-    setSaving(true);
+    setDisconnecting(true);
     try {
       const msg = await api.syncDisconnect();
+      touchForm();
       setConnected(false);
       setAccount(null);
       setPassword('');
@@ -242,7 +358,7 @@ export function SyncTab() {
     } catch (e) {
       showToast(`断开失败：${extractError(e)}`);
     } finally {
-      setSaving(false);
+      setDisconnecting(false);
     }
   };
 
@@ -343,7 +459,10 @@ export function SyncTab() {
         <FluxDropdown
           width={220}
           value={protocol}
-          onChange={(v) => setProtocol(v === 'fever' ? 'fever' : 'greader')}
+          onChange={(v) => {
+            touchForm();
+            setProtocol(v === 'fever' ? 'fever' : 'greader');
+          }}
           options={[
             { value: 'greader', label: 'Google Reader（推荐）' },
             { value: 'fever', label: 'Fever' },
@@ -359,7 +478,10 @@ export function SyncTab() {
           className="setting-input"
           placeholder={ENDPOINT_PLACEHOLDER}
           value={endpoint}
-          onChange={(e) => setEndpoint(e.target.value)}
+          onChange={(e) => {
+            touchForm();
+            setEndpoint(e.target.value);
+          }}
         />
       </SettingCard>
       <SettingCard
@@ -371,7 +493,10 @@ export function SyncTab() {
           className="setting-input"
           placeholder="集成用户名"
           value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          onChange={(e) => {
+            touchForm();
+            setUsername(e.target.value);
+          }}
         />
       </SettingCard>
       {/* TASK-102：断开态不设 desc——「集成密码」字面解释复述标题，共用语义已由
@@ -385,7 +510,10 @@ export function SyncTab() {
           className="setting-input"
           placeholder={connected ? '●●●●●●●●（已保存）' : '密码'}
           value={password}
-          onChange={(e) => setPassword(e.target.value)}
+          onChange={(e) => {
+            touchForm();
+            setPassword(e.target.value);
+          }}
         />
       </SettingCard>
       <div className="settings-action-row">

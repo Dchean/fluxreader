@@ -911,6 +911,73 @@ pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &re
 }
 
 /// 拉远端分类+订阅，URL 碰撞合并（三段式：锁外拉取 → 锁内合并）
+async fn mark_subscription_import_incomplete(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    account_key: &str,
+    report: &mut SyncReport,
+) {
+    let conn = db.lock().await;
+    if session.ensure_current(&conn).is_err() {
+        return;
+    }
+    if let Err(e) = db::mark_binding_incomplete(&conn, account_key) {
+        report
+            .errors
+            .push(format!("写入订阅绑定不完整 marker 失败: {e}"));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_remote_feed_bound(
+    conn: &mut Connection,
+    url: &str,
+    site_url: Option<&str>,
+    title: &str,
+    folder_id: i64,
+    remote_id: i64,
+) -> AppResult<i64> {
+    let tx = conn.transaction()?;
+    let feed_id = db::insert_feed_origin(
+        &tx, url, site_url, title, None, folder_id, "inherit", false, false, "remote",
+    )?;
+    db::set_feed_remote_id(&tx, feed_id, remote_id)?;
+    tx.commit()?;
+    Ok(feed_id)
+}
+
+fn prune_historical_unbound_remote_orphans(
+    conn: &Connection,
+    remote_urls: &[String],
+    report: &mut SyncReport,
+) -> bool {
+    let remote: std::collections::HashSet<String> = remote_urls
+        .iter()
+        .map(|url| db::normalize_url(url))
+        .collect();
+    let candidates = match db::unbound_remote_feeds(conn) {
+        Ok(v) => v,
+        Err(e) => {
+            report.errors.push(format!(
+                "历史未绑定远端源清理：读取候选失败（fail-closed）: {e}"
+            ));
+            return false;
+        }
+    };
+    for (feed_id, feed_url) in candidates {
+        if remote.contains(&db::normalize_url(&feed_url)) {
+            continue;
+        }
+        if let Err(e) = db::delete_feed(conn, feed_id) {
+            report
+                .errors
+                .push(format!("历史未绑定远端源 {} 清理失败: {e}", feed_url));
+            return false;
+        }
+    }
+    true
+}
+
 pub(super) async fn pull_feeds(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
@@ -923,6 +990,24 @@ pub(super) async fn pull_feeds(
             .push("同步会话已失效（账号配置已变更），跳过订阅拉取".into());
         return;
     }
+    let account_key = {
+        let conn = db.lock().await;
+        match super::current_account(&conn) {
+            Ok(Some(ctx)) => ctx.key,
+            Ok(None) => {
+                report
+                    .errors
+                    .push("订阅拉取：当前无同步账号身份，本轮跳过（fail-closed）".into());
+                return;
+            }
+            Err(e) => {
+                report.errors.push(format!(
+                    "订阅拉取：读取同步账号身份失败，本轮跳过（fail-closed）: {e}"
+                ));
+                return;
+            }
+        }
+    };
     // Google Reader：subscription/list 同时含订阅 + 分类（categories 里的 label/folder）。
     // tag/list 提供独立分类（含空分类）。分类映射用 tag/list 的 label。
     let (remote_tags, remote_subs) =
@@ -930,9 +1015,13 @@ pub(super) async fn pull_feeds(
             (Ok(t), Ok(s)) => (t, s),
             (Err(e), _) | (_, Err(e)) => {
                 report.errors.push(format!("拉取订阅失败: {e}"));
+                mark_subscription_import_incomplete(db, session, &account_key, report).await;
                 return;
             }
         };
+
+    let mut import_incomplete = false;
+    let mut subscriptions_exhausted = true;
 
     // 锁内：分类按 label 匹配本地 folder，不存在则创建。
     // Google Reader 分类没有数字 id，用 label 名做键（与 Miniflux 的 category id 不同）。
@@ -962,27 +1051,17 @@ pub(super) async fn pull_feeds(
         // 空集合继续（空集合会把已改名/删除的分类按远端旧 label 复活，并静默丢弃
         // 当前账号的墓碑），记同步错误并跳过本轮分类与订阅导入（订阅导入依赖
         // label → folder 映射，映射不可信时不写任何依赖它的本地状态）。
-        let account_key = match super::current_account(&conn) {
-            Ok(Some(ctx)) => ctx.key,
-            Ok(None) => {
-                report.errors.push(
-                    "分类墓碑：当前无同步账号身份，本轮跳过分类与订阅导入（fail-closed）".into(),
-                );
-                return;
-            }
-            Err(e) => {
-                report.errors.push(format!(
-                    "分类墓碑：读取同步账号身份失败，本轮跳过分类与订阅导入（fail-closed）: {e}"
-                ));
-                return;
-            }
-        };
         let active = match active_folder_tombstones(&conn, &account_key, &remote_labels) {
             Ok(v) => v,
             Err(e) => {
                 report.errors.push(format!(
                     "分类墓碑读取/回收失败，本轮跳过分类与订阅导入（fail-closed，保留原值待重试）: {e}"
                 ));
+                if let Err(mark_err) = db::mark_binding_incomplete(&conn, &account_key) {
+                    report.errors.push(format!(
+                        "分类墓碑失败后写入绑定不完整 marker 失败: {mark_err}"
+                    ));
+                }
                 return;
             }
         };
@@ -990,12 +1069,22 @@ pub(super) async fn pull_feeds(
             if active.iter().any(|t| t == label) {
                 continue; // 本地已改名/删除：不按远端旧 label 复活目录
             }
-            let existing = db::find_folder_by_name(&conn, label).ok().flatten();
+            let existing = match db::find_folder_by_name(&conn, label) {
+                Ok(v) => v,
+                Err(e) => {
+                    import_incomplete = true;
+                    report
+                        .errors
+                        .push(format!("读取远端分类「{label}」对应本地目录失败: {e}"));
+                    continue;
+                }
+            };
             if existing.is_none() {
                 // TASK-056 修复轮 1（审查 FINDING 3）：此前是 `let _ = create_folder(...)`。
                 // 静默失败会让后续 find_folder_by_name 落空 → 该分类下的订阅被改挂「未分类」，
                 // **用户的目录结构无声丢失**——与本任务修复的外键缺陷同族。
                 if let Err(e) = db::create_folder(&conn, label, "article") {
+                    import_incomplete = true;
                     report
                         .errors
                         .push(format!("建远端分类「{label}」失败: {e}"));
@@ -1006,7 +1095,7 @@ pub(super) async fn pull_feeds(
 
     // 锁内：订阅按 URL 碰撞合并
     {
-        let conn = db.lock().await;
+        let mut conn = db.lock().await;
         // OPT-006：绑定/建源也是回写边界——代际失配整段丢弃（不建源、不绑定）。
         if let Err(e) = session.ensure_current(&conn) {
             log::warn!("sync: 订阅导入前账号代际已变更，丢弃本轮响应: {e}");
@@ -1031,14 +1120,22 @@ pub(super) async fn pull_feeds(
                 false
             }
         };
+        if !tombstones_known {
+            import_incomplete = true;
+            subscriptions_exhausted = false;
+        }
         for rf in &remote_subs {
-            if !tombstones_known {
-                break; // 状态未知：导入整段停止，无任何写路径被触发
+            if import_incomplete || !tombstones_known {
+                subscriptions_exhausted = false;
+                break; // 状态未知/已有失败：停止后续订阅写入
             }
             match db::feed_url_tombstoned(&conn, &rf.url) {
-                Ok(true) => continue, // 本地已删除且远端仍列出：保留墓碑，跳过复活
+                // known tombstone 是用户本机主动删除的预期 continue，不计 incomplete。
+                Ok(true) => continue,
                 Ok(false) => {}
                 Err(e) => {
+                    import_incomplete = true;
+                    subscriptions_exhausted = false;
                     report.errors.push(format!(
                         "订阅墓碑读取失败，本轮停止订阅导入（保留原值待重试）: {e}"
                     ));
@@ -1048,7 +1145,17 @@ pub(super) async fn pull_feeds(
             // 用规范化 URL 匹配本地 feed（后端返回的 URL 与本地直连添加时
             // 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成新订阅 → 同一
             // 订阅出现两个本地 feed，文章翻倍、状态分裂、数量对不齐）。
-            let local_feed = db::feed_id_by_url_normalized(&conn, &rf.url).ok().flatten();
+            let local_feed = match db::feed_id_by_url_normalized(&conn, &rf.url) {
+                Ok(v) => v,
+                Err(e) => {
+                    import_incomplete = true;
+                    report.errors.push(format!(
+                        "订阅 {} 本地 URL 匹配失败（保留未确认状态待重试）: {e}",
+                        rf.url
+                    ));
+                    continue;
+                }
+            };
             // 远端 feed 数字 id（读响应用 feed/数字）
             let remote_feed_id = greader::parse_feed_numeric_id(&rf.id);
             // 分类归属：subscription 的第一个分类 category。
@@ -1062,7 +1169,21 @@ pub(super) async fn pull_feeds(
                 Some(lid) => {
                     // 已存在（本地直连添加过）→ 绑定 remote_id，本地分类/布局保留。
                     if let Some(nid) = remote_feed_id {
-                        let _ = db::set_feed_remote_id(&conn, lid, nid);
+                        if let Err(e) = db::set_feed_remote_id(&conn, lid, nid) {
+                            import_incomplete = true;
+                            report.errors.push(format!(
+                                "绑定远端订阅 {} → feed/{nid} 失败（保留未绑定状态待重试）: {e}",
+                                rf.url
+                            ));
+                            continue;
+                        }
+                    } else {
+                        import_incomplete = true;
+                        report.errors.push(format!(
+                            "远端订阅 {} 缺少可绑定的数字 feed id（保留未绑定状态待重试）",
+                            rf.url
+                        ));
+                        continue;
                     }
                     // 远端标题仅在本地标题等于 URL（从未抓取成功过）时回填
                     let _ = db::update_feed_title_if_empty(
@@ -1071,13 +1192,8 @@ pub(super) async fn pull_feeds(
                         &rf.title,
                         rf.html_url.as_deref(),
                     );
-                    // R5 注释澄清（不改行为）：本行对每个匹配上的既有远端 feed
-                    // **无条件** +1（前置的 set_feed_remote_id /
-                    // update_feed_title_if_empty 还以 `let _` 吞错）——它不是
-                    // 「真实变化计数」。后台 sync_light 只跑 states_phase、不跑
-                    // feeds 阶段，故本计数不在 has_data_change 的生产消费路径上；
-                    // 订阅层的真实增删仍由 pulled_feeds / removed_feeds 表达。
-                    report.merged_states += 1;
+                    // 既有源匹配本身不是真实数据变化；绑定是否实际改变由下一轮
+                    // pull 的条目/状态变化表达。避免仅做订阅发现时误发 feeds-updated。
                 }
                 None => {
                     // 本地没有 → 建本地 feed（挂到远端分类对应的本地 folder）
@@ -1088,14 +1204,31 @@ pub(super) async fn pull_feeds(
                     // `feeds.folder_id REFERENCES folders(id)` 外键违约（连接开启了
                     // `PRAGMA foreign_keys=ON`）→ 插入失败。改用既有
                     // `ensure_uncategorized_folder`（不存在则创建「未分类」），保证外键成立。
-                    let folder_id: i64 = match remote_folder_label
-                        .as_deref()
-                        .and_then(|label| db::find_folder_by_name(&conn, label).ok().flatten())
-                    {
-                        Some(fid) => fid,
+                    let folder_id: i64 = match remote_folder_label.as_deref() {
+                        Some(label) => match db::find_folder_by_name(&conn, label) {
+                            Ok(Some(fid)) => fid,
+                            Ok(None) => match db::ensure_uncategorized_folder(&conn) {
+                                Ok(fid) => fid,
+                                Err(e) => {
+                                    import_incomplete = true;
+                                    report
+                                        .errors
+                                        .push(format!("订阅 {} 建目录失败: {e}", rf.url));
+                                    continue;
+                                }
+                            },
+                            Err(e) => {
+                                import_incomplete = true;
+                                report
+                                    .errors
+                                    .push(format!("订阅 {} 本地目录读取失败: {e}", rf.url));
+                                continue;
+                            }
+                        },
                         None => match db::ensure_uncategorized_folder(&conn) {
                             Ok(fid) => fid,
                             Err(e) => {
+                                import_incomplete = true;
                                 report
                                     .errors
                                     .push(format!("订阅 {} 建目录失败: {e}", rf.url));
@@ -1103,37 +1236,48 @@ pub(super) async fn pull_feeds(
                             }
                         },
                     };
-                    let inserted = db::insert_feed_origin(
-                        &conn,
+                    let Some(remote_id) = remote_feed_id else {
+                        import_incomplete = true;
+                        report.errors.push(format!(
+                            "新发现订阅 {} 缺少可绑定的数字 feed id（拒绝插入未绑定孤儿）",
+                            rf.url
+                        ));
+                        continue;
+                    };
+                    let inserted = insert_remote_feed_bound(
+                        &mut conn,
                         &rf.url,
                         rf.html_url.as_deref(),
                         &rf.title,
-                        None, // favicon 留空，交给本地直连抓取的 discover_favicon 发现
                         folder_id,
-                        "inherit",
-                        false,
-                        false,
-                        "remote",
+                        remote_id,
                     );
                     // TASK-056：失败必须可见。此前是无 else 的 `if let Ok(fid)`，
                     // 错误被静默吞掉、report.errors 保持为空，前端仍提示「已拉取订阅源」
                     // 「后端同步完成」——用户看到成功、实际零订阅。
                     match inserted {
-                        Ok(fid) => {
-                            if let Some(nid) = remote_feed_id {
-                                let _ = db::set_feed_remote_id(&conn, fid, nid);
-                            }
+                        Ok(_) => {
                             report.pulled_feeds += 1;
                         }
                         Err(e) => {
-                            report
-                                .errors
-                                .push(format!("拉取订阅 {} 建本地失败: {e}", rf.url));
+                            import_incomplete = true;
+                            report.errors.push(format!(
+                                "拉取订阅 {} 建本地并绑定失败（事务已回滚）: {e}",
+                                rf.url
+                            ));
                         }
                     }
                 }
             }
         }
+        if !prune_historical_unbound_remote_orphans(&conn, &remote_urls, report) {
+            import_incomplete = true;
+        }
+    }
+
+    if import_incomplete || !subscriptions_exhausted {
+        mark_subscription_import_incomplete(db, session, &account_key, report).await;
+        return;
     }
 
     // ============================================================
@@ -1180,6 +1324,7 @@ pub(super) async fn pull_feeds(
             }) {
             Ok(v) => v,
             Err(e) => {
+                import_incomplete = true;
                 report
                     .errors
                     .push(format!("远端退订对账：读取候选源失败，本轮跳过删除: {e}"));
@@ -1208,12 +1353,22 @@ pub(super) async fn pull_feeds(
                 report
                     .errors
                     .push("远端退订对账：当前无同步账号身份，本轮跳过删除（fail-closed）".into());
+                if let Err(mark_err) = db::mark_binding_incomplete(&conn, &account_key) {
+                    report
+                        .errors
+                        .push(format!("写入绑定不完整 marker 失败: {mark_err}"));
+                }
                 return;
             }
             Err(e) => {
                 report.errors.push(format!(
                     "远端退订对账：读取同步账号身份失败，本轮跳过删除（fail-closed）: {e}"
                 ));
+                if let Err(mark_err) = db::mark_binding_incomplete(&conn, &account_key) {
+                    report
+                        .errors
+                        .push(format!("写入绑定不完整 marker 失败: {mark_err}"));
+                }
                 return;
             }
         };
@@ -1223,6 +1378,12 @@ pub(super) async fn pull_feeds(
                 report.errors.push(format!(
                     "远端退订对账：读取本地未推送保护集合失败，本轮跳过删除（fail-closed）: {e}"
                 ));
+                let marker = db::mark_binding_incomplete(&conn, &account_key);
+                if let Err(mark_err) = marker {
+                    report
+                        .errors
+                        .push(format!("写入绑定不完整 marker 失败: {mark_err}"));
+                }
                 return;
             }
         };
@@ -1241,11 +1402,36 @@ pub(super) async fn pull_feeds(
                         "pull_feeds: removed locally-deleted remote subscription {feed_url}"
                     );
                 }
-                Err(e) => report
-                    .errors
-                    .push(format!("远端已退订、删除本地源 {feed_url} 失败: {e}")),
+                Err(e) => {
+                    import_incomplete = true;
+                    report
+                        .errors
+                        .push(format!("远端已退订、删除本地源 {feed_url} 失败: {e}"));
+                }
             }
         }
+    }
+
+    let conn = db.lock().await;
+    if let Err(e) = session.ensure_current(&conn) {
+        log::warn!("sync: 写入绑定完整性标记前账号已变更，丢弃本轮结果: {e}");
+        return;
+    }
+    let should_mark = import_incomplete || !subscriptions_exhausted;
+    let marker = if should_mark {
+        db::mark_binding_incomplete(&conn, &account_key)
+    } else {
+        db::clear_binding_incomplete(&conn, &account_key)
+    };
+    if let Err(e) = marker {
+        report.errors.push(format!(
+            "写入账号绑定完整性标记失败（{}）: {e}",
+            if should_mark {
+                "incomplete"
+            } else {
+                "complete"
+            }
+        ));
     }
 }
 
