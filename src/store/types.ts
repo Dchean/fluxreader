@@ -34,6 +34,29 @@ export interface PodcastPlayerState {
  *  play/pause 是「目标态」语义（重复按不翻转），toggle 才是切换。 */
 export type MediaAction = 'play' | 'pause' | 'toggle' | 'stop';
 
+/** OPT-022：手动同步的活动阶段。states 是 Rust 的复合阶段（push + pull_entries），
+ *  前端只能在 IPC 返回时确认整段完成；期间队列事件只用于补充“远端已写回”事实，
+ *  不能把整轮同步提前标成完成。 */
+export type ManualSyncStage = 'feeds' | 'states' | 'refresh' | 'reload';
+
+export interface ManualSyncFailure {
+  stage: ManualSyncStage;
+  message: string;
+}
+
+/** OPT-022 复审：所有会写全局同步状态的异步生产链共用一个所有者枚举。
+ *  owner 只用于诊断/展示；真正的防覆盖凭据是 beginSyncActivity 返回的 generation。 */
+export type SyncActivityOwner =
+  | 'manual'
+  | 'feed-add'
+  | 'save-and-sync'
+  | 'github-disconnect';
+
+export interface SyncActivityUpdate {
+  stage?: ManualSyncStage | null;
+  remoteWriteConfirmed?: boolean;
+}
+
 export interface SettingsState {
   /* 通用 */
   autoRefresh: boolean;
@@ -231,6 +254,20 @@ export interface AppState {
    *  该锁覆盖 save + post-save phase，跨组件卸载/重挂持续。 */
   saveAndSyncBusyOwner: number | null;
   syncStatus: 'synced' | 'syncing' | 'error';
+  /** 当前展示中的同步活动 owner（null = 没有进行中的活动）。 */
+  syncActivityOwner: SyncActivityOwner | null;
+  /** 当前展示中的同步活动 generation；所有更新/结束都必须携带它。 */
+  syncActivityToken: number | null;
+  /** 当前同步活动阶段（可缺省）；供侧栏/设置页解释长链路仍在做什么。 */
+  syncStage: ManualSyncStage | null;
+  /** 当前同步活动开始时刻；阶段推进不重置，用于如实显示已等待时长。 */
+  syncStartedAt: number | null;
+  /** 当前轮次是否已收到“远端状态队列已清空”的证据。它只确认远端写回，
+   *  绝不代表 pull_entries / refreshAllFeeds / reload 已完成。 */
+  syncRemoteWriteConfirmed: boolean;
+  /** 最新同步 activity 的失败阶段与原因（手动/添加/保存后同步等共用）；
+   *  成功终态会清空。 */
+  syncFailure: ManualSyncFailure | null;
   /** 后台自动同步进行中（scheduler sync-running/sync-idle 事件驱动；与手动 syncStatus 独立） */
   backgroundSyncing: boolean;
   /** 后端真实的 Miniflux 连接态（bootstrap/sync 后刷新），未连接时侧栏不显示"已同步" */
@@ -463,11 +500,23 @@ export interface AppState {
   beginSaveAndSync: (owner: number) => boolean;
   /** 仅释放自己持有的全局忙锁；旧 owner 不能清掉新 owner。 */
   endSaveAndSync: (owner: number) => void;
-  triggerManualSync: () => void;
+  /** 开启一次会写全局 syncStatus 的异步活动，返回不可伪造的 generation。 */
+  beginSyncActivity: (owner: SyncActivityOwner) => number;
+  /** 仅更新仍在活动表中的 generation；旧活动不能覆盖新活动的展示阶段。 */
+  updateSyncActivity: (token: number, patch: SyncActivityUpdate) => boolean;
+  /** 结束指定 generation。只有启动序号更新的终态才可成为全局终态；
+   *  较早请求即使迟到失败也不能覆盖较晚请求。 */
+  finishSyncActivity: (
+    token: number,
+    status: 'synced' | 'error',
+    failure?: ManualSyncFailure | null,
+  ) => boolean;
+  /** 发起一轮手动同步；重复点击返回同一在途 Promise，终态后释放忙锁。 */
+  triggerManualSync: () => Promise<void>;
   /** TASK-124：sync-queue-changed 事件落地（App.tsx 监听器调用）。
    *  payload = Rust sync_queue_stats 三元组 {waiting, failed, last_error}。
-   *  只写队列三字段，绝不触碰 syncConnected——未配置静默语义在 Rust 发射点
-   *  （无凭据不发事件），pill 的本地模式分支不因本动作破坏。 */
+   *  写队列三字段，并可在手动同步 states 阶段补记远端写回确认；绝不触碰
+   *  syncConnected，也不以队列清空结束整轮 syncing。 */
   applySyncQueueChanged: (stats: { waiting: number; failed: number; last_error: string | null }) => void;
   /** OPT-009 B3：subscription-outbox-changed 事件落地（App.tsx 监听器调用）。
    *  payload = Rust 当前账号回执 `{pending, failed, local_only, last_error}`。

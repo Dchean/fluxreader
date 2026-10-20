@@ -2309,17 +2309,23 @@ fn scope_counts_sql(
         )
     };
     let (total, unread, starred, today) = if dedup {
+        // Note: 空集聚合仍产出一行，所有 smartDedup 计数必须由 SQL 归零 — 见
+        // .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
+        let sum_or_zero = |predicate: String| format!("COALESCE(SUM({predicate}), 0)");
         (
-            format!("SUM({})", exists("")),
-            format!("SUM(a.is_read = 0 AND {})", exists(" AND b.is_read = 0")),
-            format!(
-                "SUM(a.is_starred = 1 AND {})",
+            sum_or_zero(exists("")),
+            sum_or_zero(format!(
+                "a.is_read = 0 AND {}",
+                exists(" AND b.is_read = 0")
+            )),
+            sum_or_zero(format!(
+                "a.is_starred = 1 AND {}",
                 exists(" AND b.is_starred = 1")
-            ),
-            format!(
-                "SUM(date(a.published_at, 'localtime') = date('now', 'localtime') AND {})",
+            )),
+            sum_or_zero(format!(
+                "date(a.published_at, 'localtime') = date('now', 'localtime') AND {}",
                 exists(" AND date(b.published_at, 'localtime') = date('now', 'localtime')")
-            ),
+            )),
         )
     } else {
         (

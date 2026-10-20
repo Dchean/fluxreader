@@ -146,8 +146,9 @@ export default function App() {
      即时推送与 states 推送段确认·失败、认证/网络阻塞后发 sync-queue-changed
      （payload = {waiting, failed, last_error}）。此前队列统计只随 reloadFromBackend
      刷新——本地标读入队后 pill 仍显示「后端已同步」（探针 P8 本体）。
-     监听器只调 applySyncQueueChanged（store 动作，只写队列三字段，不触碰
-     syncConnected）：未配置同步时 Rust 不发事件，pill 保持「本地模式」分支不误报。 */
+     监听器只调 applySyncQueueChanged（store 动作）：写队列三字段，并可在手动
+     同步 states 阶段补记远端写回确认；不触碰 syncConnected，也不以队列清空
+     结束整轮 syncing。未配置同步时 Rust 不发事件，pill 保持「本地模式」不误报。 */
   useEffect(() => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
     let unlisten: (() => void) | undefined;
