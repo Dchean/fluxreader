@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import {
   useAppStore,
@@ -11,6 +11,7 @@ import {
 } from '../store';
 import { Icons } from './icons';
 import { syncPillLabel } from '../lib/syncPill';
+import { syncActivityLabel } from '../store/slices/sync';
 import type { ContentLayoutType, ViewFilterType } from '../types';
 
 /* ============================================================
@@ -59,6 +60,11 @@ export function Sidebar() {
   const activeViewFilter = useAppStore((s) => s.activeViewFilter);
   const activeFeedFilter = useAppStore((s) => s.activeFeedFilter);
   const syncStatus = useAppStore((s) => s.syncStatus);
+  const syncActivityOwner = useAppStore((s) => s.syncActivityOwner);
+  const syncActivityToken = useAppStore((s) => s.syncActivityToken);
+  const syncStage = useAppStore((s) => s.syncStage);
+  const syncStartedAt = useAppStore((s) => s.syncStartedAt);
+  const syncRemoteWriteConfirmed = useAppStore((s) => s.syncRemoteWriteConfirmed);
   const backgroundSyncing = useAppStore((s) => s.backgroundSyncing);
   const syncConnected = useAppStore((s) => s.syncConnected);
   /* TASK-116 四态展示：队列统计（等待/部分失败），启动装载与同步完成后的 reload 刷新 */
@@ -87,6 +93,14 @@ export function Sidebar() {
   const badge = useAppStore(useShallow(selectViewCounts));
   const treeCounts = useAppStore(useShallow(selectTreeCounts));
 
+  /* OPT-022：只显示真实已等待时长；它解释“仍在哪个阶段”，不参与终态判定。 */
+  const [syncClock, setSyncClock] = useState(() => Date.now());
+  useEffect(() => {
+    if (syncStatus !== 'syncing' || syncStartedAt == null) return;
+    const timer = setInterval(() => setSyncClock(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [syncStatus, syncStartedAt]);
+
   /* 仅展示与当前布局匹配的分类组及其子源（分类布局匹配 or 任一子源覆盖匹配） */
   const filteredCategories = categories.filter(
     (c) => c.layout === activeContentLayout || c.feeds.some((f) => resolveFeedLayout(f, c.layout) === activeContentLayout),
@@ -99,13 +113,21 @@ export function Sidebar() {
      优先级 error > syncing > waiting > connected，修复「手动同步进行中失败态
      被 syncing 覆盖」；waiting>0 显示「等待同步 N 条」，failed>0 追加
      「· 部分失败」。真值表由回归网 t116 断言驱动。 */
-  const syncLabel = syncPillLabel({
-    syncStatus,
-    backgroundSyncing,
-    syncConnected,
-    waiting: syncWaiting,
-    failed: syncFailed,
-  });
+  const syncLabel =
+    syncStatus === 'syncing' && syncActivityOwner && syncActivityToken != null
+      ? `${syncActivityLabel({
+          owner: syncActivityOwner,
+          stage: syncStage,
+          remoteConfirmed: syncRemoteWriteConfirmed,
+          elapsedMs: syncStartedAt == null ? 0 : Math.max(0, syncClock - syncStartedAt),
+        })}${syncFailed > 0 ? ' · 部分失败' : ''}`
+      : syncPillLabel({
+          syncStatus,
+          backgroundSyncing,
+          syncConnected,
+          waiting: syncWaiting,
+          failed: syncFailed,
+        });
 
   return (
     <aside className="sidebar">

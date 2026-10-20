@@ -2099,7 +2099,7 @@ export async function run(ctx) {
     syncConnected: false, syncWaiting: 0, syncFailed: 0, syncQueueLastError: null,
     syncStatus: 'synced', backgroundSyncing: false,
   });
-  checkNew('(t124-5) 未配置静默（半边：事件缺失）：未连接且无事件时 pill 保持「本地模式 · 直连抓取」（不误报不刷状态）；越权防护：applySyncQueueChanged 只写队列三字段，动作体内不触碰 syncConnected（连接态只属 syncStatus/sync_save 链路）',
+  checkNew('(t124-5) 未配置静默（半边：事件缺失）：未连接且无事件时 pill 保持「本地模式 · 直连抓取」（不误报不刷状态）；越权防护：applySyncQueueChanged 写队列三字段并仅补远端确认，不写 syncConnected 或整轮终态',
     pillOf124(store.getState()) === '本地模式 · 直连抓取'
     && (() => {
       const before = store.getState().syncConnected;
@@ -2326,4 +2326,9 @@ export async function run(ctx) {
     && pmBlock.includes('applyMediaAction(action)')
     && !pmBlock.includes('togglePlayerPlay()') && !pmBlock.includes('isActive'));
 }
+
+  /* OPT-022：行为回归独立成文件，由现有 ui-contracts 域在末尾驱动，避免扩大
+     回归入口写集；标记仍归属 ui-contracts 域。 */
+  const { run: runManualSyncStatus } = await import('./manual-sync-status.mjs');
+  await runManualSyncStatus(ctx);
 }

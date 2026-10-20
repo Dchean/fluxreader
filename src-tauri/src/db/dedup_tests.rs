@@ -850,3 +850,202 @@ fn display_dedup_search_representative_within_match_set() {
         "关闭开关后 B 在列表中可见且可锚定"
     );
 }
+
+/* ============================================================
+OPT-021：smartDedup 合法空集合的计数契约
+============================================================ */
+
+fn opt021_conn() -> Connection {
+    let mut conn = Connection::open_in_memory().unwrap();
+    MIGRATIONS.to_latest(&mut conn).unwrap();
+    conn
+}
+
+fn opt021_list_count(
+    conn: &Connection,
+    feed: Option<i64>,
+    folder: Option<i64>,
+    unread: bool,
+    starred: bool,
+    today: bool,
+    layout: Option<&str>,
+) -> i64 {
+    let mut q = dq(feed, folder, unread, layout);
+    q.only_starred = starred;
+    q.only_today = today;
+    ids_of(conn, &q).len() as i64
+}
+
+fn opt021_assert_counts_match_lists(
+    conn: &Connection,
+    label: &str,
+    counts: (i64, i64, i64, i64),
+    feed: Option<i64>,
+    folder: Option<i64>,
+    layout: Option<&str>,
+) {
+    let (total, unread, starred, today) = counts;
+    assert_eq!(
+        total,
+        opt021_list_count(conn, feed, folder, false, false, false, layout),
+        "{label} total 必须等于同 scope 列表集合大小"
+    );
+    assert_eq!(
+        unread,
+        opt021_list_count(conn, feed, folder, true, false, false, layout),
+        "{label} unread 必须等于未读列表集合大小"
+    );
+    assert_eq!(
+        starred,
+        opt021_list_count(conn, feed, folder, false, true, false, layout),
+        "{label} starred 必须等于收藏列表集合大小"
+    );
+    assert_eq!(
+        today,
+        opt021_list_count(conn, feed, folder, false, false, true, layout),
+        "{label} today 必须等于今日列表集合大小"
+    );
+}
+
+#[test]
+fn opt021_smart_dedup_empty_database_returns_zero_scope_counts() {
+    let conn = opt021_conn();
+    set_smart_dedup(&conn, true);
+
+    let counts = scope_counts(&conn, Some("article")).unwrap();
+
+    assert_eq!(
+        counts.all,
+        ScopeCounts::default(),
+        "空库开启 smartDedup 时，全部 scope 的所有计数必须是 0"
+    );
+    assert!(counts.folders.is_empty());
+    assert!(counts.feeds.is_empty());
+}
+
+#[test]
+fn opt021_smart_dedup_counts_snapshot_empty_database_has_non_null_all_total() {
+    let conn = opt021_conn();
+    set_smart_dedup(&conn, true);
+
+    let snapshot = counts_snapshot(&conn, Some("article")).unwrap();
+
+    assert_eq!(snapshot.scope.all, ScopeCounts::default());
+    assert!(snapshot.feeds.is_empty());
+    let json = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(
+        json.pointer("/scope/all/total").and_then(|v| v.as_i64()),
+        Some(0),
+        "counts_snapshot 的 all.total 必须序列化为 0，不能是 null"
+    );
+}
+
+#[test]
+fn opt021_smart_dedup_layout_without_articles_returns_zero_counts() {
+    let conn = opt021_conn();
+    let folder = create_folder(&conn, "文章", "article").unwrap();
+    let feed = insert_feed(
+        &conn,
+        "https://opt021.example/feed",
+        None,
+        "opt021",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    upsert_article_with_feed(
+        &conn,
+        feed,
+        &new_article("https://opt021.example/article", "g1"),
+        false,
+    )
+    .unwrap();
+    set_smart_dedup(&conn, true);
+
+    let article_counts = scope_counts(&conn, Some("article")).unwrap();
+    assert_eq!(article_counts.all.total, 1, "夹具文章必须属于 article 布局");
+
+    let social_counts = scope_counts(&conn, Some("social")).unwrap();
+    assert_eq!(
+        social_counts.all,
+        ScopeCounts::default(),
+        "有源且文章存在，但当前 layout 无文章时仍必须返回零值计数"
+    );
+}
+
+#[test]
+fn opt021_smart_dedup_disabled_empty_database_keeps_zero_counts() {
+    let conn = opt021_conn();
+    set_smart_dedup(&conn, false);
+
+    let counts = scope_counts(&conn, Some("article")).unwrap();
+    let snapshot = counts_snapshot(&conn, Some("article")).unwrap();
+
+    assert_eq!(counts.all, ScopeCounts::default());
+    assert_eq!(snapshot.scope.all, ScopeCounts::default());
+    assert!(snapshot.feeds.is_empty());
+}
+
+#[test]
+fn opt021_smart_dedup_nonempty_counts_match_filtered_lists() {
+    let fx = display_fixture();
+    set_smart_dedup(&fx.conn, true);
+    set_starred(&fx.conn, fx.x1, true).unwrap();
+    set_starred(&fx.conn, fx.z1, true).unwrap();
+    let today = chrono::Local::now().to_rfc3339();
+    for id in [fx.x1, fx.z1] {
+        fx.conn
+            .execute(
+                "UPDATE articles SET published_at = ?1 WHERE id = ?2",
+                rusqlite::params![today, id],
+            )
+            .unwrap();
+    }
+
+    let snapshot = counts_snapshot(&fx.conn, Some("article")).unwrap();
+    let all = snapshot.scope.all;
+    assert!(
+        all.total > 0 && all.unread > 0 && all.starred > 0 && all.today > 0,
+        "夹具必须让全部四个视图计数都非零：{all:?}"
+    );
+    opt021_assert_counts_match_lists(
+        &fx.conn,
+        "全部",
+        (all.total, all.unread, all.starred, all.today),
+        None,
+        None,
+        Some("article"),
+    );
+
+    for folder in &snapshot.scope.folders {
+        assert!(
+            folder.total > 0 && folder.unread > 0 && folder.starred > 0 && folder.today > 0,
+            "分类夹具必须让四个视图计数都非零：{folder:?}"
+        );
+        opt021_assert_counts_match_lists(
+            &fx.conn,
+            &format!("分类 {}", folder.scope_id),
+            (folder.total, folder.unread, folder.starred, folder.today),
+            None,
+            Some(folder.scope_id),
+            Some("article"),
+        );
+    }
+    for feed in &snapshot.scope.feeds {
+        assert!(
+            feed.total > 0 && feed.unread > 0 && feed.starred > 0 && feed.today > 0,
+            "源夹具必须让四个视图计数都非零：{feed:?}"
+        );
+        opt021_assert_counts_match_lists(
+            &fx.conn,
+            &format!("源 {}", feed.scope_id),
+            (feed.total, feed.unread, feed.starred, feed.today),
+            Some(feed.scope_id),
+            None,
+            Some("article"),
+        );
+    }
+}

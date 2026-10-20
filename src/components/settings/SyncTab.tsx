@@ -7,6 +7,11 @@ import { CacheCleanupSection } from './CacheCleanupSection';
 import { ConfigSyncSection } from './ConfigSyncSection';
 import { ENDPOINT_DESC, ENDPOINT_PLACEHOLDER, endpointHint } from './endpointHint';
 import { syncFailureMessage } from '../../store/syncErrors';
+import {
+  manualSyncStageName,
+  syncActivityLabel,
+  SYNC_UNRESPONSIVE_AFTER_MS,
+} from '../../store/slices/sync';
 
 /* ---------- TAB 6: 同步 ---------- */
 
@@ -57,6 +62,13 @@ function markDraftCommitted(draft: SaveAndSyncDraft): void {
 export function SyncTab() {
   const showToast = useAppStore((s) => s.showToast);
   const dataMode = useAppStore((s) => s.dataMode);
+  const syncStatus = useAppStore((s) => s.syncStatus);
+  const syncActivityOwner = useAppStore((s) => s.syncActivityOwner);
+  const syncActivityToken = useAppStore((s) => s.syncActivityToken);
+  const syncStage = useAppStore((s) => s.syncStage);
+  const syncStartedAt = useAppStore((s) => s.syncStartedAt);
+  const syncRemoteWriteConfirmed = useAppStore((s) => s.syncRemoteWriteConfirmed);
+  const syncFailure = useAppStore((s) => s.syncFailure);
   const reloadFromBackend = useAppStore((s) => s.reloadFromBackend);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
@@ -76,6 +88,7 @@ export function SyncTab() {
   const [lastSync, setLastSync] = useState(0);
   /** TASK-116 X2：同步队列统计（等待/部分失败 + 最新错误摘要） */
   const [queueStats, setQueueStats] = useState<SyncQueueStats | null>(null);
+  const [syncClock, setSyncClock] = useState(() => Date.now());
   const [testing, setTesting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const saving = saveAndSyncBusyOwner !== null || disconnecting;
@@ -89,6 +102,13 @@ export function SyncTab() {
    * 普通保存（未点激活）= undefined，后端不消费任何建议。 */
   const [activateVersion, setActivateVersion] = useState<number | undefined>(undefined);
   const formRevisionRef = useRef(0);
+
+  /* OPT-022：阶段计时只解释仍在执行的轮次；终态由 store 状态机统一写入。 */
+  useEffect(() => {
+    if (syncStatus !== 'syncing' || syncStartedAt == null) return;
+    const timer = setInterval(() => setSyncClock(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [syncStatus, syncStartedAt]);
 
   const touchForm = () => {
     formRevisionRef.current += 1;
@@ -165,24 +185,58 @@ export function SyncTab() {
       });
       return;
     }
+    const syncToken = useAppStore.getState().beginSyncActivity('save-and-sync');
     try {
       const failures: string[] = [];
       let removedFeeds = 0;
+      let refreshError: string | null = null;
+      let stage: 'feeds' | 'states' | 'refresh' | 'reload' = 'feeds';
+      useAppStore.getState().updateSyncActivity(syncToken, { stage });
       try {
         const feedsReport = await api.syncPhase('feeds');
+        stage = 'reload';
+        useAppStore.getState().updateSyncActivity(syncToken, { stage });
         await reloadFromBackend();
         const fail = syncFailureMessage(feedsReport);
         if (fail) failures.push(fail);
         else showToast('已拉取订阅源，正在同步文章状态…');
         if (feedsReport?.removed_feeds) removedFeeds += feedsReport.removed_feeds;
+        stage = 'states';
+        useAppStore.getState().updateSyncActivity(syncToken, { stage });
         const statesReport = await api.syncPhase('states', true);
+        stage = 'reload';
+        useAppStore.getState().updateSyncActivity(syncToken, { stage });
         await reloadFromBackend();
         const fail2 = syncFailureMessage(statesReport);
         if (fail2) failures.push(fail2);
         if (statesReport?.removed_feeds) removedFeeds += statesReport.removed_feeds;
-        await api.refreshAllFeeds().catch(() => null);
+        stage = 'refresh';
+        useAppStore.getState().updateSyncActivity(syncToken, { stage });
+        try {
+          await api.refreshAllFeeds();
+        } catch (e) {
+          refreshError = extractError(e).trim() || '内容抓取失败（原因未提供）';
+        }
+        stage = 'reload';
+        useAppStore.getState().updateSyncActivity(syncToken, { stage });
         await reloadFromBackend();
+        if (refreshError !== null) {
+          useAppStore.getState().finishSyncActivity(syncToken, 'error', {
+            stage: 'refresh',
+            message: refreshError,
+          });
+          showToast(`后台同步失败：${refreshError}`, {
+            label: '重试',
+            key: syncStageKey(draft),
+            run: () => { void runPostSaveSync(draft); },
+          });
+          return;
+        }
       } catch (e) {
+        useAppStore.getState().finishSyncActivity(syncToken, 'error', {
+          stage,
+          message: extractError(e),
+        });
         showToast(`后台同步失败：${extractError(e)}`, {
           label: '重试',
           key: syncStageKey(draft),
@@ -190,7 +244,8 @@ export function SyncTab() {
         });
         return;
       }
-      useAppStore.setState({ syncStatus: 'synced', syncConnected: true });
+      useAppStore.getState().finishSyncActivity(syncToken, 'synced');
+      useAppStore.setState({ syncConnected: true });
       showToast(failures.length > 0 ? failures.join('；') : '后端同步完成');
       if (removedFeeds > 0) showToast(`本次对账移除 ${removedFeeds} 个已在服务端删除的订阅源`);
       refreshQueueStats(setQueueStats);
@@ -384,14 +439,43 @@ export function SyncTab() {
      时不新增噪音行；local_only 项如实点名「仅本地生效」（不写成成功也不隐藏）。 */
   const waiting = queueStats?.waiting ?? 0;
   const failedCount = queueStats?.failed ?? 0;
+  const syncElapsedMs = syncStartedAt == null
+    ? 0
+    : Math.max(0, syncClock - syncStartedAt);
+  const syncProgressLine =
+    syncStatus === 'syncing' && syncActivityOwner && syncActivityToken != null
+      ? `整轮同步进行中：${syncActivityLabel({
+          owner: syncActivityOwner,
+          stage: syncStage,
+          remoteConfirmed: syncRemoteWriteConfirmed,
+          elapsedMs: syncElapsedMs,
+        })}`
+      : '';
+  const syncFailureLine = syncFailure
+    ? `上次同步失败于${manualSyncStageName(syncFailure.stage)}：${syncFailure.message}`
+    : '';
   const subscriptionLine = subscriptionWriteSummary(
     subOutboxStats ?? { pending: 0, failed: 0, local_only: 0, last_error: null },
     caps?.protocol ?? null,
   );
   const syncStateDesc = [
+    syncProgressLine,
+    syncFailureLine,
     syncStateSummary(queueStats ?? { waiting: 0, failed: 0, last_error: null }, lastSync),
     subscriptionLine,
   ].filter(Boolean).join('；');
+  const syncStateTag =
+    syncStatus === 'error'
+      ? '同步失败'
+      : failedCount > 0
+        ? '部分失败'
+        : syncStatus === 'syncing'
+          ? syncElapsedMs >= SYNC_UNRESPONSIVE_AFTER_MS
+            ? '未返回'
+            : '同步中'
+          : waiting > 0
+            ? '等待同步'
+            : '本地已保存';
 
   return (
     <>
@@ -427,7 +511,7 @@ export function SyncTab() {
          desc 收尾即「本地已保存」说明句（状态变更已事务化落库，TASK-108） */}
       <SettingCard title="同步状态" desc={syncStateDesc}>
         <span className="about-arch-tag">
-          {failedCount > 0 ? '部分失败' : waiting > 0 ? '等待同步' : '本地已保存'}
+          {syncStateTag}
         </span>
       </SettingCard>
       {/* OPT-009 B3：订阅写回能力卡——矩阵/概述/限制全部来自

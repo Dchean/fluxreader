@@ -123,7 +123,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
          feeds.folder_id 外键违约，首次使用添加订阅必然失败。 */
       const parsed = Number(catId.replace('cat-', ''));
       const folderId = Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-      set({ syncStatus: 'syncing' });
+      const activityToken = get().beginSyncActivity('feed-add');
       /* OPT-011：AI 开关以三态 mode 为真值传给后端；旧 bool 参数传 null
          （后端合并规则：mode 优先，缺 mode 才按 bool 映射）。 */
       /* OPT-007-UI 补件：add_feed 已落库后的尾链分两段，语义严格分开——
@@ -136,21 +136,21 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
          无论它整体成功还是部分失败，都必须再回读一次本地真实结果：已写入的
          订阅（含失败前已导入的部分）不能不可见。无同步选择/未连接时保持原有
          单次回读，不额外请求。 */
-      const finishAdd = async (): Promise<void> => {
+      const finishAdd = async (token: number): Promise<void> => {
         /* ① 首次回读：本地新订阅立即可见（无同步选择/未连接时就是唯一一次）。 */
         try {
           await get().reloadFromBackend();
         } catch (e) {
-          set({ syncStatus: 'error' });
+          get().finishSyncActivity(token, 'error');
           get().showToast(`订阅已添加，刷新失败：${extractError(e)}`, {
             label: '重试',
             key: `feed:add:${url}`,
-            run: () => { void finishAdd(); },
+            run: retryFinishAdd,
           });
           return;
         }
         if (!(syncToBackend && get().syncConnected)) {
-          set({ syncStatus: 'synced' });
+          get().finishSyncActivity(token, 'synced');
           get().showToast(`已添加订阅源：${title || url}`);
           return;
         }
@@ -169,24 +169,28 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
           readbackError = extractError(e);
         }
         if (syncError || readbackError) {
-          set({ syncStatus: 'error' });
+          get().finishSyncActivity(token, 'error');
           const detail = [syncError ? `同步失败：${syncError}` : '', readbackError ? `刷新失败：${readbackError}` : '']
             .filter(Boolean)
             .join('；');
           get().showToast(`订阅已添加，${detail}`, {
             label: '重试',
             key: `feed:add:${url}`,
-            run: () => { void finishAdd(); },
+            run: retryFinishAdd,
           });
           return;
         }
-        set({ syncStatus: 'synced' });
+        get().finishSyncActivity(token, 'synced');
         get().showToast(`已添加订阅源：${title || url}`);
+      };
+      const retryFinishAdd = () => {
+        const retryToken = get().beginSyncActivity('feed-add');
+        void finishAdd(retryToken);
       };
       void api
         .addFeed(url, title || null, folderId, layout, null, null, syncToBackend, summaryMode, translateMode)
-        .then(finishAdd, (e: unknown) => {
-          set({ syncStatus: 'error' });
+        .then(() => finishAdd(activityToken), (e: unknown) => {
+          get().finishSyncActivity(activityToken, 'error');
           const msg = extractError(e);
           get().showToast(`添加失败：${msg}`, {
             label: '重试',

@@ -835,3 +835,307 @@ componentTest('OPT-020 P3：全局忙锁拒绝 retry 时按原 key 重报可重�
     resetPlan();
   }
 });
+
+componentTest('OPT-022 P1-1：SyncTab 保存后同步使用统一 generation，旧活动迟到失败不覆盖新终态', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore({ dataMode: 'tauri' });
+  seedFromRows(ROWS, { layout: 'article' });
+
+  let saveCalls = 0;
+  setPlan({
+    sync_status: () => Promise.resolve({
+      connected: true,
+      account: 'alice',
+      endpoint: 'https://a.example',
+      protocol: 'greader',
+      last_sync: 0,
+    }),
+    sync_save: () => {
+      saveCalls += 1;
+      return Promise.resolve(JSON.stringify({
+        message: '已保存',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    },
+    sync_phase: () => Promise.resolve({
+      pushed_states: 0,
+      pushed_feeds: 0,
+      pulled_feeds: 0,
+      pulled_entries: 0,
+      merged_states: 0,
+      removed_feeds: 0,
+      errors: [],
+    }),
+    refresh_all_feeds: () => Promise.resolve({ new_articles: 0, failed_feeds: 0 }),
+  });
+
+  const oldToken = useAppStore.getState().beginSyncActivity('manual');
+  useAppStore.getState().updateSyncActivity(oldToken, { stage: 'states' });
+  let oldFinished = false;
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const entry = await mount(createElement(SyncTab));
+    await flush(8);
+
+    const inputs = [...entry.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    assert.equal(inputs.length, 3, '前置：Endpoint / 用户名 / 密码三个真实受控输入');
+    await setInputValue(inputs[0], 'https://a.example');
+    await setInputValue(inputs[1], 'alice');
+    await setInputValue(inputs[2], 'secret');
+    const saveButton = () => [...entry.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存并同步'));
+
+    await act(async () => { saveButton().click(); });
+    await waitFor(
+      () => saveCalls === 1 && useAppStore.getState().saveAndSyncBusyOwner === null,
+      { label: 'save-and-sync 完整链完成并释放草稿锁', timeout: 10000 },
+    );
+
+    assert.equal(useAppStore.getState().syncActivityOwner, 'manual',
+      '较新的 save-and-sync 已终态、旧活动仍 pending 时，应如实回到仍在执行的活动');
+
+    await act(async () => {
+      oldFinished = useAppStore.getState().finishSyncActivity(oldToken, 'error', {
+        stage: 'states',
+        message: '旧活动迟到失败',
+      });
+    });
+    assert.equal(oldFinished, true, '旧活动应可由自己的 generation 正常收尾');
+    await flush(3);
+    assert.equal(useAppStore.getState().syncStatus, 'synced',
+      '较早活动的迟到 error 不得覆盖较新的 save-and-sync 成功终态');
+    assert.equal(useAppStore.getState().syncFailure, null,
+      '被 generation 淘汰的旧失败不得写入当前失败摘要');
+  } finally {
+    if (!oldFinished) useAppStore.getState().finishSyncActivity(oldToken, 'synced');
+    resetPlan();
+  }
+});
+
+componentTest('OPT-022 P1：SyncTab 保存链 refresh reject（含空消息）不得吞错发布 synced', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore({ dataMode: 'tauri' });
+  seedFromRows(ROWS, { layout: 'article' });
+
+  let saveCalls = 0;
+  let refreshCalls = 0;
+  let folderReads = 0;
+  let refreshReject = new Error('刷新源站失败');
+  setPlan({
+    sync_status: () => Promise.resolve({
+      connected: true,
+      account: 'alice',
+      endpoint: 'https://a.example',
+      protocol: 'greader',
+      last_sync: 0,
+    }),
+    sync_save: () => {
+      saveCalls += 1;
+      return Promise.resolve(JSON.stringify({
+        message: '已保存',
+        firstConnect: false,
+        unboundLocalFeeds: 0,
+      }));
+    },
+    sync_phase: () => Promise.resolve({
+      pushed_states: 0,
+      pushed_feeds: 0,
+      pulled_feeds: 0,
+      pulled_entries: 0,
+      merged_states: 0,
+      removed_feeds: 0,
+      errors: [],
+    }),
+    refresh_all_feeds: () => {
+      refreshCalls += 1;
+      return Promise.reject(refreshReject);
+    },
+    list_folders: () => {
+      folderReads += 1;
+      return Promise.resolve(FOLDERS);
+    },
+  });
+
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const entry = await mount(createElement(SyncTab));
+    await flush(8);
+
+    const inputs = [...entry.container.querySelectorAll('input.setting-input')].slice(0, 3);
+    await setInputValue(inputs[0], 'https://a.example');
+    await setInputValue(inputs[1], 'alice');
+    await setInputValue(inputs[2], 'secret');
+    const saveButton = () => [...entry.container.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('保存并同步'));
+
+    await act(async () => { saveButton().click(); });
+    await waitFor(
+      () => saveCalls === 1
+        && refreshCalls === 1
+        && useAppStore.getState().saveAndSyncBusyOwner === null,
+      { label: 'refresh reject 后保存链收尾并释放忙锁', timeout: 10000 },
+    );
+
+    const final = useAppStore.getState();
+    assert.equal(folderReads, 3,
+      'refresh reject 后仍应完成最后一次本地回读再发布失败终态');
+    assert.equal(final.syncStatus, 'error');
+    assert.equal(final.syncFailure?.stage, 'refresh');
+    assert.match(final.syncFailure?.message ?? '', /刷新源站失败/);
+    assert.equal(final.syncActivityOwner, null);
+    assert.equal(final.syncActivityToken, null);
+    assert.equal(final.saveAndSyncBusyOwner, null);
+    assert.ok(final.toasts.some((t) => t.text.includes('后台同步失败：刷新源站失败')),
+      '真实 refresh reject 必须给出失败与重试提示');
+    assert.ok(!final.toasts.some((t) => t.text.includes('后端同步完成')),
+      'refresh reject 后不得发布成功 toast');
+
+    refreshReject = new Error('');
+    await act(async () => {
+      useAppStore.setState({ toasts: [] });
+      saveButton().click();
+    });
+    await waitFor(
+      () => saveCalls === 2
+        && refreshCalls === 2
+        && useAppStore.getState().saveAndSyncBusyOwner === null,
+      { label: '空消息 refresh reject 保存链收尾并释放忙锁', timeout: 10000 },
+    );
+    const emptyMessageFinal = useAppStore.getState();
+    assert.equal(folderReads, 6,
+      '空消息 reject 同样应完成最后一次本地回读');
+    assert.equal(emptyMessageFinal.syncStatus, 'error');
+    assert.equal(emptyMessageFinal.syncFailure?.stage, 'refresh');
+    assert.equal(emptyMessageFinal.syncFailure?.message, '内容抓取失败（原因未提供）');
+    assert.equal(emptyMessageFinal.syncActivityOwner, null);
+    assert.equal(emptyMessageFinal.syncActivityToken, null);
+    assert.equal(emptyMessageFinal.saveAndSyncBusyOwner, null);
+    assert.ok(emptyMessageFinal.toasts.some(
+      (t) => t.text.includes('后台同步失败：内容抓取失败（原因未提供）'),
+    ), '空错误消息必须使用原因未提供兜底');
+    assert.ok(!emptyMessageFinal.toasts.some((t) => t.text.includes('后端同步完成')),
+      '空消息 refresh reject 也不得发布成功 toast');
+  } finally {
+    resetPlan();
+  }
+});
+
+componentTest('OPT-022 P1-2：deferred sync_phase pending 时跨挂载显示未返回，settle 后才释放忙锁', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore({ dataMode: 'tauri' });
+  seedFromRows(ROWS, { layout: 'article' });
+
+  let resolveStates;
+  let statesResolved = false;
+  let refreshCalls = 0;
+  setPlan({
+    sync_phase: (args) => {
+      if (args?.which === 'feeds') {
+        return Promise.resolve({
+          pushed_states: 0,
+          pushed_feeds: 0,
+          pulled_feeds: 0,
+          pulled_entries: 0,
+          merged_states: 0,
+          errors: [],
+        });
+      }
+      return new Promise((resolve) => { resolveStates = resolve; });
+    },
+    refresh_all_feeds: () => {
+      refreshCalls += 1;
+      return Promise.resolve({ new_articles: 0, failed_feeds: 0 });
+    },
+  });
+
+  const pending = useAppStore.getState().triggerManualSync();
+  let token = null;
+  try {
+    const { createElement, act } = await import('react');
+    const { SyncTab } = await import('../../src/components/settings/SyncTab.tsx');
+    const cardDesc = (entry) => {
+      const card = [...entry.container.querySelectorAll('.setting-card')]
+        .find((c) => c.querySelector('h5')?.textContent === '同步状态');
+      return card?.querySelector('p')?.textContent ?? '';
+    };
+    const cardTag = (entry) => {
+      const card = [...entry.container.querySelectorAll('.setting-card')]
+        .find((c) => c.querySelector('h5')?.textContent === '同步状态');
+      return card?.querySelector('.about-arch-tag')?.textContent ?? '';
+    };
+
+    await waitFor(
+      () => useAppStore.getState().syncStage === 'states'
+        && useAppStore.getState().syncActivityToken != null,
+      { label: 'deferred states IPC 已进入 pending', timeout: 8000 },
+    );
+    token = useAppStore.getState().syncActivityToken;
+    useAppStore.getState().applySyncQueueChanged({ waiting: 0, failed: 0, last_error: null });
+    await act(async () => {
+      useAppStore.setState({ syncStartedAt: Date.now() - 65_000 });
+    });
+
+    const first = await mount(createElement(SyncTab));
+    await flush(8);
+    assert.match(cardDesc(first), /远端已写回，同步未返回（状态与条目同步，已等待 1 分 5 秒）/,
+      '首次挂载必须明确显示同步未返回及真实等待时长');
+    assert.equal(cardTag(first), '未返回', '状态标签也不得继续伪装成普通“同步中”');
+
+    await unmount(first);
+    assert.equal(useAppStore.getState().syncStatus, 'syncing',
+      '组件卸载不得释放全局同步忙锁');
+    assert.equal(useAppStore.getState().syncActivityToken, token,
+      '组件卸载不得改写活动 generation');
+
+    const second = await mount(createElement(SyncTab));
+    await flush(8);
+    assert.match(cardDesc(second), /同步未返回（状态与条目同步，已等待 1 分 5 秒）/,
+      '重新挂载后必须从 store 恢复同一“未返回”阶段');
+    assert.equal(cardTag(second), '未返回', '重挂后标签仍应显示未返回');
+
+    await act(async () => {
+      statesResolved = true;
+      resolveStates({
+        pushed_states: 0,
+        pushed_feeds: 0,
+        pulled_feeds: 0,
+        pulled_entries: 0,
+        merged_states: 0,
+        errors: [],
+      });
+      await pending;
+    });
+    await waitFor(
+      () => useAppStore.getState().syncStatus !== 'syncing',
+      { label: 'deferred IPC settle 后退出忙锁', timeout: 8000 },
+    );
+    assert.doesNotMatch(cardDesc(second), /同步未返回/,
+      'deferred IPC settle 后才退出未返回展示');
+    assert.equal(useAppStore.getState().syncStatus, 'synced');
+    assert.equal(useAppStore.getState().syncActivityOwner, null);
+    assert.equal(useAppStore.getState().syncActivityToken, null);
+    assert.equal(refreshCalls, 1, '原 deferred 同步链应继续走到 refresh 并完成');
+  } finally {
+    if (!statesResolved && resolveStates) {
+      resolveStates({
+        pushed_states: 0,
+        pushed_feeds: 0,
+        pulled_feeds: 0,
+        pulled_entries: 0,
+        merged_states: 0,
+        errors: [],
+      });
+      await Promise.resolve(pending).catch(() => {});
+    }
+    if (token != null && useAppStore.getState().syncActivityToken === token) {
+      useAppStore.getState().finishSyncActivity(token, 'synced');
+    }
+    resetPlan();
+  }
+});
