@@ -39,8 +39,8 @@ v0.18.0 已发布。发布后只读审计确认 `P0=0 / P1=4`，本轮不再扩�
 
 | 卡片 | 交付边界 | 实机证据 | 状态 |
 | --- | --- | --- | --- |
-| [OPT-021](OPT-021.md) | 空集 smartDedup 计数返回 NULL，启动装载失败 | `articles=0 + smartDedup=true` 可稳定触发 | review |
-| [OPT-022](OPT-022.md) | 远端写回成功但手动同步 UI 长期停在 syncing | 远端已读成功，客户端仍显示同步中 | review |
+| [OPT-021](OPT-021.md) | 空集 smartDedup 计数返回 NULL，启动装载失败 | `articles=0 + smartDedup=true` 可稳定触发 | verified-ci |
+| [OPT-022](OPT-022.md) | 远端写回成功但手动同步 UI 长期停在 syncing | 远端已读成功，客户端仍显示同步中 | verified-ci |
 
 两卡写集互不重叠，可并行实现；OPT-021 是启动阻断，优先验收。两卡完成后分别由
 未参与实现的全新只读代理复审，再由主控提交和验证 CI。
