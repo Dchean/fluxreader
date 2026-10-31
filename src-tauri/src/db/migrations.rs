@@ -942,6 +942,20 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
             ON articles(url_norm) WHERE is_read = 0;
     "#,
         ),
+        // B2（空 link 跨源塌缩）：空/纯空白 link 的存量 url_norm='' 清洗为 NULL。
+        // '' 是合法匹配键，会把所有无 link 条目归入同一 url_norm 组——
+        // smartDedup 只显示 1 行代表、标读其一经读闭包/读广播传播到其余
+        // （审计实测的跨源塌缩）。入库路径（normalized_url_key）已改为空 link
+        // 归一 NULL；本迁移幂等清洗存量，重跑零写。
+        // **不动 contents.url_norm**：contents 行身份由内容哈希承担、url_norm
+        // 只是附带列，B4 已改 body_text 口径——再动 contents 会把共享内容行的
+        // 身份漂移面扩大；空 link 的既有 contents 行保持原状。
+        // user_version=31。
+        M::up(
+            r#"
+        UPDATE articles SET url_norm = NULL WHERE url_norm = '';
+    "#,
+        ),
     ])
 });
 
@@ -1015,7 +1029,11 @@ fn ensure_url_norm_backfill(conn: &Connection) -> AppResult<bool> {
     let tx = conn.unchecked_transaction()?;
     let rows: Vec<(i64, String, Option<String>)> = {
         let mut stmt = tx.prepare(
-            "SELECT id, url, url_norm FROM articles WHERE url IS NOT NULL AND url != ''",
+            // B2：空/纯空白 link 与入库路径（normalized_url_key）同口径不产键
+            // ——TRIM 后为空的 url 若不排除，normalize_url 会给出 '' 并把 v31
+            // 清洗过的 url_norm 重新写回 ''。
+            "SELECT id, url, url_norm FROM articles \
+             WHERE url IS NOT NULL AND url != '' AND TRIM(url) != ''",
         )?;
         let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         it.collect::<Result<Vec<_>, _>>()?
