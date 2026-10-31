@@ -268,12 +268,15 @@ async fn miniflux_existing_entry_backfills_cover() {
     }
 
     // Miniflux 端该条目正文补上图（模拟服务端重新抓取后 content 带图）。
-    // changed_at 必须一起前移：真实 Miniflux 重新抓取会更新 crawl/change 时间，而
-    // 增量拉取按 `changed_at >= ot` 过滤，ot 是上一轮同步写入的**拉取起点墙钟秒**
-    // （TASK-097 后游标取 id 列举开始前；此前取拉取结束墙钟，窗口更窄）。本条目的
-    // changed_at 停在首次抓取时刻（早于上一轮起点），只改 content 不改 changed_at
-    // 时本条被判为窗口外、根本不会被重拉——断言变成「与机器时钟赛跑」，实测在
-    // 负载下随机失败（cover 未回填）。
+    // changed_at 一起前移（真实 Miniflux 重新抓取会更新 crawl/change 时间；
+    // 见 mock_greader 文件头契约）。ot 窗口过滤列是 published（严格大于），
+    // 本条目的 published 停在首次抓取时刻（早于上一轮起点游标）——真实服务端
+    // 语义下它本就**不会**经增量窗口重拉；把游标拨回 published 之前，使该条目
+    // 合法地落回窗口（published > ot），以此驱动 existing 分支的合并路径。
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, 0).unwrap();
+    }
     {
         let mut es = server.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == mf_id) {
@@ -355,12 +358,14 @@ fn normalized_url_match_maps_same_article() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// ④ 核心回归：origin='remote' 源的历史文章（published_at 早于增量游标）
-/// 必须被全量拉取并对齐状态。此前用 after=last_sync_ts（按 published_at 过滤）
-/// 会漏掉发布时间早于游标的历史文章——这是「跟随服务端」模式下客户端文章数
-/// 少于 Miniflux、且已读状态对不齐的根因。
+/// ④ 核心回归（真实 ot 语义）：origin='remote' 源的历史文章（published_at 早于
+/// 增量游标）**不在** light 增量窗口内——真实 Miniflux 把 ot 映射为
+/// `published_at > ot` 严格大于（过滤列是发布时间），published 早于游标的条目
+/// 不经增量窗口进入拉取，也不发生状态对齐；手动全量（ot=0）能拉入合并。
+/// 旧断言（「历史文章必须被 light 拉入」）锁的是 mock 的 changed_at 语义失真，
+/// 方向与真实服务端相反（2026-10-31 审计证伪）。
 #[tokio::test]
-async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
+async fn miniflux_entry_published_before_cursor_stays_out_of_light_window() {
     let (db, http, server) = setup("history_pull").await;
 
     // 先 feeds 阶段：把远端 feed 11（remote-only）拉到本地（origin='remote'）
@@ -385,8 +390,28 @@ async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
         db::set_last_sync_ts(&conn, chrono::Utc::now().timestamp()).unwrap();
     }
 
-    // 后台轻量同步（full=false）——必须拉入历史文章并对齐 read 状态
+    // 后台轻量同步（full=false）：published 早于游标 → ot 窗口不含它 → 不入库。
     sync::sync_light(&db, &http).await.expect("light sync");
+
+    {
+        let conn = db.lock().await;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM articles WHERE url = 'http://example.com/remote-only/post/history-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "published_at 早于游标的条目不在 light 增量窗口（真实 Miniflux published_at > ot）"
+        );
+    }
+
+    // 手动全量（full=true，ot=0）：全窗口列举 → 历史文章拉入合并并对齐 read 状态。
+    sync::states_phase(&db, &http, true)
+        .await
+        .expect("full pull");
 
     {
         let conn = db.lock().await;
@@ -404,7 +429,7 @@ async fn miniflux_origin_pulls_historical_entries_regardless_of_published_at() {
                 },
             )
             .unwrap();
-        assert_eq!(count, 1, "历史文章（published_at 早于游标）必须被拉入本地");
+        assert_eq!(count, 1, "手动全量（ot=0）必须拉入历史文章");
         assert_eq!(source, "miniflux");
         assert!(is_read, "Miniflux 端已读的历史文章，客户端必须对齐为已读");
     }

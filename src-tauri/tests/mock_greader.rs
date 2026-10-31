@@ -3,25 +3,26 @@
 //! stream/items/ids、stream/items/contents、edit-tag、subscription/edit/quickadd），
 //! 用于同步引擎端到端测试（不依赖真实服务端）。
 //!
-//! ## changed_at 语义契约（TASK-097 全面核对后固化）
+//! ## ot 窗口语义契约（2026-10-31 审计修正后固化）
 //!
-//! `changed_at`（unix 秒）= 服务端视角「该条目最后入库/变更时刻」，是增量拉取
-//! `stream/items/ids` 的 ot 过滤列（本 mock 实现：`changed_at >= ot`）。对照真实
-//! Miniflux（v2 main，internal/storage/entry.go）语义，任何改写 mock 条目的代码
-//! （mock 路由内部或测试直接改 `entries`）必须遵守：
-//! 1. 条目新增（抓取入库）：changed_at = 抓取时刻（见 `add_entry_with_published`）。
-//! 2. 条目内容变更（重新抓取补正文/封面等）：**必须**前移 changed_at——真实
-//!    Miniflux 重新抓取会更新变更时间；只改内容不改时间会与增量窗口赛跑造成
-//!    假 flaky（09-23 已订正 sync_content_e2e 的
-//!    `miniflux_existing_entry_backfills_cover` 一处）。
-//! 3. 状态变更（read/starred 切换）：真实 Miniflux 的 SetEntriesStatus /
-//!    SetEntriesStarredState 对命中行 `SET changed_at=now()`——本 mock 的
-//!    edit-tag 路由同样前移；测试直接改 `e.read`/`e.starred` 的写点也须随之
-//!    前移（已在 dual_client_e2e / sync_e2e 的直接写点补齐）。
-//! 4. 构造「很久以前的旧变更」时，必须**显式**把 changed_at 拨回过去
-//!    （如 sync_content_e2e / sync_phases_e2e 的 stale-read 用例所做），
-//!    不得只改状态而不动 changed_at。
-//! 5. 订阅/分类层变更（退订、改名、删源）不属于条目变更，不触碰 changed_at。
+//! 增量拉取 `stream/items/ids` 的 ot 过滤列是 **published_at（严格大于）**：
+//! `published > ot`。对齐真实 Miniflux（v2 main）固定源码：
+//! internal/googlereader/handler.go 把 ot 映射为 `AfterPublishedDate`，
+//! internal/storage/entry_query_builder.go 展开为 `e.published_at > $N`
+//! （reading-list / starred / read / feed 四类流全部适用）。任何改写 mock
+//! 条目的代码（mock 路由内部或测试直接改 `entries`）必须遵守：
+//! 1. 条目新增（抓取入库）：published = 条目发布时间；真实抓取场景下新抓
+//!    条目的 published 即抓取时刻（见 `add_entry_with_published`）。
+//! 2. `changed_at`（unix 秒）保留为服务端视角「最后入库/变更时刻」，**不再
+//!    参与 ot 窗口判定**；状态/内容变更仍前移它（真实 Miniflux 的
+//!    SetEntriesStatus / 重新抓取会更新变更时间，见 TASK-097 契约），但它
+//!    只影响 mock 内部记账，不影响增量窗口可见性。
+//! 3. published 早于游标的条目**不会**经 ot 窗口进入增量拉取（真实语义）：
+//!    构造这类条目用 `add_entry_with_published` / `add_entry_with_times`；
+//!    让它们进入本地只能靠手动全量（ot=0）或对账权威集合。
+//! 4. 构造「published 早于游标但 changed_at 晚于游标」的分歧条目用
+//!    `add_entry_with_times`（分歧本身锁定窗口列，见 pull_window_e2e）。
+//! 5. 订阅/分类层变更（退订、改名、删源）不属于条目变更，不触碰上述时间。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -572,8 +573,9 @@ impl MockGReader {
     }
 
     /// 同 add_entry_ret，但可指定 published（unix 秒，模拟「原文发布时间早、
-    /// 但刚被抓取入库」的历史文章）。changed_at 固定为现在（抓取时刻），
-    /// 与真实 Google Reader 语义一致：ot 游标按 crawl/change 时间过滤，而非 published。
+    /// 但刚被抓取入库」的历史文章）。changed_at 固定为现在（抓取时刻）。
+    /// 注意 ot 窗口按 published 严格大于过滤（见文件头契约）：published 早于
+    /// 游标的条目**不在**增量窗口内，只能靠手动全量（ot=0）拉入。
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn add_entry_with_published(
         &self,
@@ -633,8 +635,9 @@ impl MockGReader {
     }
 
     /// TASK-097：注册一条「首轮 reading-list id 列举的响应快照计算完成之后」
-    /// 才出现的条目（changed_at 由调用方指定，必须落在受控时间线的
-    /// 「拉取起点游标」与「修前结束墙钟游标」之间）。见 pending_injection 字段说明。
+    /// 才出现的条目（published = changed_at = 调用方指定值，必须大于受控
+    /// 时间线的「拉取起点游标」、小于真实墙钟——窗口列是 published，见文件头
+    /// 契约）。见 pending_injection 字段说明。
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn arm_inject_entry_after_first_reading_list_ids(
         &self,
@@ -1285,6 +1288,11 @@ fn route(
             }
             let offset: usize = q.get("c").and_then(|v| v.parse().ok()).unwrap_or(0);
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
+            // ot 窗口（2026-10-31 审计修正）：过滤列 = published_at、严格大于，
+            // 对齐真实 Miniflux AfterPublishedDate（`e.published_at > $N`）。
+            // 旧实现按 changed_at >= ot 过滤是 FreshRSS 式「变更时间」语义的
+            // 失真——会让 published 早于游标的历史条目经增量窗口进入拉取，
+            // 与真实 Miniflux 行为相反（它们只能靠手动全量 ot=0 拉入）。
             // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）。
             // R3 夹具修正（协议依据）：Google Reader 的 `user/-/state/com.google/read`
             // 与 `.../starred` 是**正交的 tag 流**——成员资格 = 条目携带该 tag，
@@ -1313,7 +1321,7 @@ fn route(
                     }
                     None => true,
                 })
-                .filter(|e| e.changed_at >= ot)
+                .filter(|e| e.published > ot)
                 .map(|e| e.id)
                 .collect();
             let total = ids.len();
@@ -1440,9 +1448,10 @@ fn route(
                 if !ids.contains(&e.id) {
                     continue;
                 }
-                // TASK-097 契约（见文件头第 3 条）：状态写入即变更——真实 Miniflux
+                // TASK-097 契约：状态写入即变更——真实 Miniflux
                 // SetEntriesStatus / SetEntriesStarredState 对命中行 SET changed_at=now()，
-                // 这里同样前移，被推送/被标读的条目保持增量窗口（changed_at >= ot）可见。
+                // 这里同样前移。注意 changed_at 不再是 ot 窗口过滤列（见文件头
+                // 契约），前移只保留「服务端记账」语义。
                 e.changed_at = chrono::Utc::now().timestamp();
                 for tag in &add {
                     if tag.ends_with("/read") {

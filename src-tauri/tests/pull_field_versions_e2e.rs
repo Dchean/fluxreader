@@ -189,9 +189,11 @@ async fn simulate_push_confirmed(db: &Arc<Mutex<rusqlite::Connection>>) {
     );
 }
 
-/// 直接改写 mock 的服务端条目（仅测试夹具用）：按 changed_at 契约第 4 条
-/// **显式**拨回旧时间——构造「远端早已存在的状态变更」（不在本轮增量窗口里，
-/// 只能靠 reconcile 的权威集合看到）。
+/// 直接改写 mock 的服务端条目（仅测试夹具用）：把 changed_at **显式**拨回旧
+/// 时间，构造「远端早已存在的旧变更」。2026-10-31 起增量窗口过滤列是
+/// published（严格大于，见 mock_greader 文件头契约）：这些条目 published =
+/// 首次抓取时刻 < 游标，本就天然在窗口外、只能靠 reconcile 的权威集合看到；
+/// changed_at 拨回只保留「远端旧变更」的记账语义，不再是窗口判定依据。
 fn mutate_server_entry(
     server: &MockGReader,
     eid: i64,
@@ -242,7 +244,8 @@ async fn stale_unstar_snapshot_cannot_rollback_pushed_local_star() {
         .await
         .expect("feeds phase binds feed/10");
 
-    // 远端事实：A 未读未收藏，changed_at 旧（不在增量窗口）。
+    // 远端事实：A 未读未收藏。窗口过滤列是 published（条目 published=抓取时刻
+    // < 首轮 full 游标），A 本就不在下一轮 light 增量窗口里。
     let eid = server.add_entry_ret(10, "https://example.com/stale-a", "A", false, false);
     // 首轮 full 把 A 合并入库（此时本地未收藏）
     sync::states_phase(&db, &http, true)
@@ -257,7 +260,8 @@ async fn stale_unstar_snapshot_cannot_rollback_pushed_local_star() {
         "初态：未读未收藏"
     );
 
-    // 把 changed_at 拨回过去：下一轮增量列举不再包含它，状态只能在 reconcile 中见
+    // 把 changed_at 拨回过去（旧变更记账；窗口可见性由 published 决定）：
+    // 下一轮增量列举不包含它，状态只能在 reconcile 中见
     mutate_server_entry(&server, eid, None, None, Some(1_700_000_000));
 
     // 屏障：starred 权威集合的响应在途挂起
@@ -314,7 +318,8 @@ async fn snapshot_before_any_http_protects_write_during_id_listing() {
         .expect("A 已入库");
     assert_eq!(status_of(&db, aid).await, (false, true), "初态：远端已收藏");
 
-    // 远端取消收藏，changed_at 拨回旧时间：不在下一轮增量窗口里，状态只能经
+    // 远端取消收藏，changed_at 拨回旧时间（窗口列是 published，条目本就在
+    // 下一轮增量窗口外）：状态只能经
     // reconcile 的 starred 权威集合（不含 A）看到——「旧远端 unstar 快照」构造。
     mutate_server_entry(&server, eid, None, Some(false), Some(1_700_000_000));
 
@@ -970,7 +975,9 @@ async fn own_bound_row_backfill_still_reports_data_change() {
         "前置：本地标读/收藏已确认"
     );
 
-    // 远端后补正文（changed_at 前移到增量窗口），read/star 与本地一致。
+    // 远端后补正文（changed_at 前移），read/star 与本地一致。ot 窗口过滤列是
+    // published（严格大于）：条目 published = 首次抓取时刻，已早于首轮 full
+    // 写下的游标——把游标拨回 published 之前，使该条目合法落回窗口、走合并路径。
     let now = chrono::Utc::now().timestamp();
     {
         let mut entries = server.entries.lock().unwrap();
@@ -982,6 +989,10 @@ async fn own_bound_row_backfill_still_reports_data_change() {
         e.read = true;
         e.starred = true;
         e.changed_at = now;
+    }
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, 1_700_000_000).unwrap();
     }
 
     let report = sync::states_phase(&db, &http, false)
@@ -1040,9 +1051,10 @@ async fn new_row_pull_sets_data_change() {
     assert!(report.has_data_change(), "新文章必须发数据事件");
 }
 
-/// ⑪ 同值 replay：only 前移 changed_at（字段全同）让条目留在增量窗口——
-/// 守卫通过、旧计数照常累计（pulled_entries ≥ 1），但**实际数据零变化**：
-/// 不得置标记、不得发事件。锁定「计数 ≠ 语义变化」的分离（R3 核心口径）。
+/// ⑪ 同值 replay：条目重进增量窗口（字段全同）——守卫通过、旧计数照常累计
+/// （pulled_entries ≥ 1），但**实际数据零变化**：不得置标记、不得发事件。
+/// 锁定「计数 ≠ 语义变化」的分离（R3 核心口径）。ot 窗口过滤列是 published：
+/// 把游标拨回 published 之前使重进窗口真实发生（changed_at touch 不再影响窗口）。
 #[tokio::test]
 async fn same_value_replay_counts_no_data_change() {
     let (db, http, server, _guard) = setup("r3_same_value").await;
@@ -1063,9 +1075,14 @@ async fn same_value_replay_counts_no_data_change() {
         content_html_of(&db, aid).await,
     );
 
-    // 仅前移 changed_at（模拟服务端 touch，不改任何字段值）→ 仍进增量窗口。
+    // 仅前移 changed_at（模拟服务端 touch，不改任何字段值）+ 游标拨回
+    // published 之前 → 重进增量窗口（窗口列是 published，touch 本身不影响窗口）。
     let now = chrono::Utc::now().timestamp();
     mutate_server_entry(&server, eid, None, None, Some(now));
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, 1_700_000_000).unwrap();
+    }
 
     let report = sync::states_phase(&db, &http, false)
         .await
@@ -1126,9 +1143,9 @@ async fn gr_committed_read_change_still_marks_after_star_write_failure() {
         (0, 0, 0, 0),
         "前置：未读未收藏、版本 0"
     );
-    let t0 = last_sync(&db).await;
-
-    // 远端 read/star 同时变 true（changed_at 前移 → 本轮增量窗口内，走正文合并）。
+    // 远端 read/star 同时变 true。ot 窗口过滤列是 published（严格大于）：条目
+    // published = 首次抓取时刻，早于首轮 full 游标——把游标拨回 published 之前，
+    // 使变更经增量窗口走正文合并路径。
     mutate_server_entry(
         &server,
         eid,
@@ -1136,6 +1153,11 @@ async fn gr_committed_read_change_still_marks_after_star_write_failure() {
         Some(true),
         Some(chrono::Utc::now().timestamp()),
     );
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, 1_700_000_000).unwrap();
+    }
+    let t0 = 1_700_000_000;
     // 注入：star 的值条件写 ABORT（read 写不受影响）。
     {
         let conn = db.lock().await;
@@ -1188,9 +1210,8 @@ async fn gr_pure_star_failure_without_committed_change_does_not_mark() {
         .await
         .expect("首轮 full 同步");
     let aid = article_id_by_url(&db, url).await.expect("条目已入库");
-    let t0 = last_sync(&db).await;
-
-    // 远端只改 star（read 不变；changed_at 前移 → 走正文合并路径）。
+    // 远端只改 star（read 不变）。ot 窗口列是 published：同 ⑫ 把游标拨回
+    // published 之前，使变更走正文合并路径。
     mutate_server_entry(
         &server,
         eid,
@@ -1198,6 +1219,11 @@ async fn gr_pure_star_failure_without_committed_change_does_not_mark() {
         Some(true),
         Some(chrono::Utc::now().timestamp()),
     );
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, 1_700_000_000).unwrap();
+    }
+    let t0 = 1_700_000_000;
     {
         let conn = db.lock().await;
         install_star_update_failure(&conn);
