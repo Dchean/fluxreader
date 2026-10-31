@@ -108,6 +108,7 @@ type QuickaddBarrierSlot = Option<(
 /// 仍以 HTTP 200 回 `numResults: 0`（freshrss-greader.php quickadd()）；
 /// Miniflux 的 subscribe 失败走 JSONServerError → HTTP 500
 /// （internal/googlereader/handler.go quickAddHandler）。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，变体只被部分二进制消费
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum QuickaddDuplicate {
     /// FreshRSS 形态：200 + `numResults: 0`（无 streamId）。
@@ -1540,8 +1541,8 @@ fn route(
                     .find(|(u, _)| *u == url)
                     .map(|(_, id)| *id)
             };
-            if existing.is_some() {
-                match *srv.quickadd_duplicate.lock().unwrap() {
+            match existing {
+                Some(id) => match *srv.quickadd_duplicate.lock().unwrap() {
                     QuickaddDuplicate::FreshRssNumResultsZero => (
                         200,
                         serde_json::json!({"numResults": 0, "error": "feed already exists"})
@@ -1551,38 +1552,36 @@ fn route(
                         500,
                         r#"{"error_message":"feed_already_exists"}"#.to_string(),
                     ),
-                    QuickaddDuplicate::ReturnExistingId => {
-                        let id = existing.expect("checked above");
-                        (
-                            200,
-                            serde_json::json!({"numResults": 1, "streamId": format!("feed/{id}")})
-                                .to_string(),
-                        )
+                    QuickaddDuplicate::ReturnExistingId => (
+                        200,
+                        serde_json::json!({"numResults": 1, "streamId": format!("feed/{id}")})
+                            .to_string(),
+                    ),
+                },
+                None => {
+                    srv.subscribed_urls.lock().unwrap().push(url.clone());
+                    srv.created_feeds.lock().unwrap().push((url.clone(), 1));
+                    let feed_id = {
+                        let mut n = srv.next_feed_id.lock().unwrap();
+                        *n += 1;
+                        *n
+                    };
+                    // 登记新创建的订阅进 `existing_feed_urls`（「远端当前持有」注册表，
+                    // 后续同 URL quickadd 按重复语义拒绝）；退订意图的「未知 id 恢复」
+                    // 依赖注册表与订阅列表证据，不依赖「重复 quick_add 返回既有 id」。
+                    // 非幂等注入（B2-R2）下**不登记**：后续同 URL 调用继续新建。
+                    if !non_idempotent {
+                        srv.existing_feed_urls
+                            .lock()
+                            .unwrap()
+                            .push((url.clone(), feed_id));
                     }
+                    (
+                        200,
+                        serde_json::json!({"numResults": 1, "streamId": format!("feed/{feed_id}")})
+                            .to_string(),
+                    )
                 }
-            } else {
-                srv.subscribed_urls.lock().unwrap().push(url.clone());
-                srv.created_feeds.lock().unwrap().push((url.clone(), 1));
-                let feed_id = {
-                    let mut n = srv.next_feed_id.lock().unwrap();
-                    *n += 1;
-                    *n
-                };
-                // 登记新创建的订阅进 `existing_feed_urls`（「远端当前持有」注册表，
-                // 后续同 URL quickadd 按重复语义拒绝）；退订意图的「未知 id 恢复」
-                // 依赖注册表与订阅列表证据，不依赖「重复 quick_add 返回既有 id」。
-                // 非幂等注入（B2-R2）下**不登记**：后续同 URL 调用继续新建。
-                if !non_idempotent {
-                    srv.existing_feed_urls
-                        .lock()
-                        .unwrap()
-                        .push((url.clone(), feed_id));
-                }
-                (
-                    200,
-                    serde_json::json!({"numResults": 1, "streamId": format!("feed/{feed_id}")})
-                        .to_string(),
-                )
             }
         }
         // subscription/edit：订阅/退订/编辑

@@ -1441,8 +1441,13 @@ async fn quickadd_duplicate_url_is_rejected_by_real_servers_and_intent_is_kept()
         );
         assert_eq!(
             quickadd_count(&server, &url),
+            0,
+            "[{name}] 重复 URL 不得创建新远端订阅（created-count 为 0）"
+        );
+        assert_eq!(
+            quickadd_requests(&server),
             1,
-            "[{name}] 本轮只发一次 quick_add"
+            "[{name}] 本轮只发一次 quick_add（request-level）"
         );
         let _ = std::fs::remove_file(&tmp);
     }
@@ -2811,6 +2816,10 @@ R1-4. 在途 quick_add + 换号：旧账号的 id 不得进入新账号，回原
 #[tokio::test]
 async fn inflight_quickadd_response_after_account_switch_stays_scoped_to_old_account() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2）：切回 A 后的 quick_add-by-URL 解析依赖「重复
+    // quick_add 返回既有 id」的旧 mock 契约；真实服务端拒绝重复 URL。
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r1_switch");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
