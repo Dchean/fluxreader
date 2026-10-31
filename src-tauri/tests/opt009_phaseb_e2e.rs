@@ -1371,41 +1371,64 @@ async fn opml_import_quickadd_failure_retries_without_duplicate_remote_subscript
 /// 真实服务端对重复 URL 的 quickadd 语义（2026-10-31 审计对齐，mock 默认）：
 /// FreshRSS 返回 200 + numResults=0（无 streamId，freshrss-greader.php
 /// quickadd() 的 catch 分支）、Miniflux 返回 500（feed_already_exists，
-/// handler.go quickAddHandler → JSONServerError）。产品当前对两者都只能
-/// Retry 保留意图（按列表证据解析 = B1 修复项），且不得重复创建远端订阅。
+/// handler.go quickAddHandler → JSONServerError）。
+/// 场景是真实世界的列表滞后窗口：远端已持有该订阅（existing 注册表）但
+/// 订阅列表尚未列出——产品发送 quickadd 被拒后，两种形态都必须按「未创建」
+/// 处理：意图保留（Retry + last_error）、零重复远端创建，等列表证据出现后
+/// 收敛（见 quickadd_response_lost_across_restart_converges_via_list_evidence）。
+/// 判别力（旧 mock 语义）：重复 quickadd 返回既有 id → 产品误判成功绑定。
 #[tokio::test]
 async fn quickadd_duplicate_url_is_rejected_by_real_servers_and_intent_is_kept() {
-    for (name, mode) in [
+    for (name, mode, miniflux_500) in [
         (
             "freshrss",
             mock_greader::QuickaddDuplicate::FreshRssNumResultsZero,
+            false,
         ),
-        ("miniflux", mock_greader::QuickaddDuplicate::Miniflux500),
+        (
+            "miniflux",
+            mock_greader::QuickaddDuplicate::Miniflux500,
+            true,
+        ),
     ] {
         let server = MockGReader::start().await.expect("start mock");
         server.set_quickadd_duplicate(mode);
-        let tmp = common::unique_db_path(&format!("opt009b_dup_{name}"));
-        let _ = std::fs::remove_file(&tmp);
         let http = app_lib::ingestion::build_client(10);
         let url = format!("{}/opt009-dup-{name}.xml", server.url());
         let key = acct_key("greader", &server, "test");
 
-        // 远端已持有该订阅
+        // 远端已持有该订阅，但订阅列表滞后（清空预设列表，模拟窗口）
         server
             .existing_feed_urls
             .lock()
             .unwrap()
             .push((url.clone(), 40));
-        *server.subscriptions.lock().unwrap() = vec![MockSubscription {
-            id: "feed/40".into(),
-            title: "Existing".into(),
-            url: url.clone(),
-            html_url: None,
-            categories: vec![],
-        }];
+        server.subscriptions.lock().unwrap().clear();
+
+        // 客户端级：锁定两种真实响应形态——FreshRSS 200 不携带 streamId、
+        // Miniflux 是传输级错误。
+        let client = app_lib::greader::GReaderClient::new(&server.url(), "mock/abc", http.clone());
+        let resp = client.quick_add(&url).await;
+        if miniflux_500 {
+            assert!(
+                resp.is_err(),
+                "[{name}] Miniflux 形态必须是错误（feed_already_exists 500）"
+            );
+        } else {
+            let resp = resp.expect("[{name}] FreshRSS 形态是 200，不是传输错误");
+            assert_eq!(resp.num_results, 0, "[{name}] numResults=0");
+            assert!(resp.stream_id.is_none(), "[{name}] 不携带 streamId");
+        }
+
+        // 执行器级：列表滞后窗口内发送 quickadd 被拒 → Retry 保留意图
+        let tmp = common::unique_db_path(&format!("opt009b_dup_{name}"));
+        let _ = std::fs::remove_file(&tmp);
 
         let dbm = {
-            let conn = open_with_credentials(&server, "greader", "test");
+            let conn = db::open(&tmp).unwrap();
+            db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+            db::set_setting(&conn, "greader_username", "test").unwrap();
+            db::set_setting(&conn, "greader_password", "test-token").unwrap();
             let folder = db::create_folder(&conn, "分类", "article").unwrap();
             db::insert_feed(
                 &conn, &url, None, "Dup", None, folder, "inherit", true, false,
@@ -1429,15 +1452,18 @@ async fn quickadd_duplicate_url_is_rejected_by_real_servers_and_intent_is_kept()
                 items[0].attempts >= 1,
                 "[{name}] 失败必须累计 attempts: {items:?}"
             );
+            assert!(
+                items[0].last_error.is_some(),
+                "[{name}] 失败必须记录 last_error: {items:?}"
+            );
+            assert_eq!(
+                items[0].remote_id, None,
+                "[{name}] 被拒不产生已验证 id: {items:?}"
+            );
         }
         assert!(
             server.created_feeds.lock().unwrap().is_empty(),
             "[{name}] 重复 URL 不得再创建远端订阅"
-        );
-        assert_eq!(
-            server.subscriptions.lock().unwrap().len(),
-            1,
-            "[{name}] 远端订阅集合不变"
         );
         assert_eq!(
             quickadd_count(&server, &url),
@@ -1446,8 +1472,8 @@ async fn quickadd_duplicate_url_is_rejected_by_real_servers_and_intent_is_kept()
         );
         assert_eq!(
             quickadd_requests(&server),
-            1,
-            "[{name}] 本轮只发一次 quick_add（request-level）"
+            2,
+            "[{name}] 客户端形态探测 + 执行器各一次 quick_add"
         );
         let _ = std::fs::remove_file(&tmp);
     }
@@ -1469,7 +1495,11 @@ async fn quickadd_response_lost_across_restart_converges_via_list_evidence() {
     let key = acct_key("greader", &server, "test");
 
     let dbm = {
-        let conn = open_with_credentials(&server, "greader", "test");
+        // 两轮共用同一文件库：round 2 重开 tmp 即「崩溃后重启」。
+        let conn = db::open(&tmp).unwrap();
+        db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+        db::set_setting(&conn, "greader_username", "test").unwrap();
+        db::set_setting(&conn, "greader_password", "test-token").unwrap();
         let folder = db::create_folder(&conn, "分类", "article").unwrap();
         db::insert_feed(
             &conn,
