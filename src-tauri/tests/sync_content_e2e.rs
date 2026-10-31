@@ -361,9 +361,11 @@ fn normalized_url_match_maps_same_article() {
 /// ④ 核心回归（真实 ot 语义）：origin='remote' 源的历史文章（published_at 早于
 /// 增量游标）**不在** light 增量窗口内——真实 Miniflux 把 ot 映射为
 /// `published_at > ot` 严格大于（过滤列是发布时间），published 早于游标的条目
-/// 不经增量窗口进入拉取，也不发生状态对齐；手动全量（ot=0）能拉入合并。
+/// 不经增量窗口进入拉取；手动全量（ot=0）能拉入合并。
 /// 旧断言（「历史文章必须被 light 拉入」）锁的是 mock 的 changed_at 语义失真，
-/// 方向与真实服务端相反（2026-10-31 审计证伪）。
+/// 方向与真实服务端相反（2026-10-31 审计证伪）。夹具用 **unread** 条目隔离
+/// 窗口语义：read/starred 权威集合成员已由 B2 的 contents 回补在 light 收敛
+/// （锁在 sync_phases_e2e 的回补用例），不能再用它们锁「不入库」。
 #[tokio::test]
 async fn miniflux_entry_published_before_cursor_stays_out_of_light_window() {
     let (db, http, server) = setup("history_pull").await;
@@ -372,13 +374,13 @@ async fn miniflux_entry_published_before_cursor_stays_out_of_light_window() {
     sync::feeds_phase(&db, &http).await.expect("feeds phase");
 
     // 服务端 feed 11 加一条「历史文章」：published_at 拨到 3 天前（早于增量游标），
-    // 状态为 read（后端已读）。
+    // 状态为 unread（后端未读——read 集合成员的 light 收敛归 B2 回补管）。
     let old_ts = (chrono::Utc::now() - chrono::Duration::days(3)).timestamp();
     server.add_entry_with_published(
         11,
         "http://example.com/remote-only/post/history-1",
-        "Historical read article",
-        true,
+        "Historical unread article",
+        false, // unread：不在 read/starred 权威集合，light 无任何拉取通道
         false,
         old_ts,
     );
@@ -431,7 +433,10 @@ async fn miniflux_entry_published_before_cursor_stays_out_of_light_window() {
             .unwrap();
         assert_eq!(count, 1, "手动全量（ot=0）必须拉入历史文章");
         assert_eq!(source, "miniflux");
-        assert!(is_read, "Miniflux 端已读的历史文章，客户端必须对齐为已读");
+        assert!(
+            !is_read,
+            "unread 历史文章经全量拉入后按 own unread 落地，保持未读"
+        );
     }
 }
 

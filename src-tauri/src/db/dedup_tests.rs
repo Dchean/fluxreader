@@ -1062,7 +1062,7 @@ scope dedup 计数改写的行级参照等价。
 /// （display_dedup_* 既有用例锁定）。
 #[test]
 fn blank_link_entries_stay_independent_without_group_broadcast() {
-    let conn = Connection::open_in_memory().unwrap();
+    let mut conn = Connection::open_in_memory().unwrap();
     MIGRATIONS.to_latest(&mut conn).unwrap();
     set_smart_dedup(&conn, true);
     let folder = create_folder(&conn, "空link夹具", "article").unwrap();
@@ -1133,7 +1133,7 @@ fn blank_link_entries_stay_independent_without_group_broadcast() {
 /// `"  "` 通过 `?2 != ''` 检查后把 url_norm 覆盖成 normalize("  ") = ''。
 #[test]
 fn blank_link_refresh_keeps_existing_url_norm() {
-    let conn = Connection::open_in_memory().unwrap();
+    let mut conn = Connection::open_in_memory().unwrap();
     MIGRATIONS.to_latest(&mut conn).unwrap();
     let folder = create_folder(&conn, "刷新夹具", "article").unwrap();
     let feed = insert_feed(
@@ -1187,7 +1187,7 @@ fn blank_link_refresh_keeps_existing_url_norm() {
 /// 参照实现锁「去掉 JOIN feeds 的改写」语义不变（四视图 × 三层级）。
 #[test]
 fn feed_scope_dedup_counts_match_row_level_reference() {
-    let conn = Connection::open_in_memory().unwrap();
+    let mut conn = Connection::open_in_memory().unwrap();
     MIGRATIONS.to_latest(&mut conn).unwrap();
     set_smart_dedup(&conn, true);
     let folder = create_folder(&conn, "参照夹具", "article").unwrap();
