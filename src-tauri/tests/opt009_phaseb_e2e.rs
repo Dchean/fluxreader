@@ -1177,11 +1177,6 @@ fn quickadd_requests(server: &MockGReader) -> usize {
 /// 判别力：legacy 路径下挂载失败时队项已被剪掉（outbox 为空即红）。
 #[tokio::test]
 async fn opml_import_mount_failure_keeps_folder_target_then_converges() {
-    let server = MockGReader::start().await.expect("start mock");
-    // 阶段 B 红门禁候选（F2 quick_add 跨重启收敛）：依赖「重复 quick_add 返回
-    // 既有 id」的旧 mock 契约；真实服务端拒绝重复 URL，恢复需走列表证据。
-    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
-    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_opml_mount");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -1295,7 +1290,11 @@ async fn opml_import_mount_failure_keeps_folder_target_then_converges() {
             .unwrap();
         assert_eq!(bound, Some(30), "绑定必须完成");
     }
-    assert_eq!(quickadd_requests(&server), 1, "重试不得重复 quick_add");
+    assert_eq!(
+        quickadd_requests(&server),
+        0,
+        "远端已持有同 URL 订阅：列表证据直接解析，全程零 quick_add"
+    );
     let _ = std::fs::remove_file(&tmp);
 }
 
@@ -1451,6 +1450,112 @@ async fn quickadd_duplicate_url_is_rejected_by_real_servers_and_intent_is_kept()
         );
         let _ = std::fs::remove_file(&tmp);
     }
+}
+
+/// B1（F2）核心时序：quick_add 已被服务端执行（创建+登记）、响应以 500 丢失，
+/// 且服务端列表尚未列出该订阅（崩溃窗口）——pending 行不得盲目重发 quick_add
+/// （真实服务端会拒绝重复 URL 且无法推进阶段）；恢复轮以订阅列表证据解析出
+/// 已创建的 feed，直接绑定收敛，零重复订阅、零二次 quick_add。
+/// 判别力（修前实现：重启后盲发 quick_add）：重复 URL 被拒 → 永久 Retry，
+/// 第二次 quick_add 请求与收敛失败即红。
+#[tokio::test]
+async fn quickadd_response_lost_across_restart_converges_via_list_evidence() {
+    let server = MockGReader::start().await.expect("start mock");
+    let tmp = common::unique_db_path("opt009b_crash_window");
+    let _ = std::fs::remove_file(&tmp);
+    let http = app_lib::ingestion::build_client(10);
+    let url = format!("{}/opt009-crash-window.xml", server.url());
+    let key = acct_key("greader", &server, "test");
+
+    let dbm = {
+        let conn = open_with_credentials(&server, "greader", "test");
+        let folder = db::create_folder(&conn, "分类", "article").unwrap();
+        db::insert_feed(
+            &conn,
+            &url,
+            None,
+            "Crash Window",
+            None,
+            folder,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        let gen = db::sync_generation(&conn).unwrap();
+        db::enqueue_subscribe(&conn, gen, &key, &url, None, Some("分类")).unwrap();
+        Arc::new(Mutex::new(conn))
+    };
+
+    // 崩溃窗口：quick_add 创建后响应丢失；列表尚未列出该订阅（服务端列表滞后）
+    // → 解析未见 → 保留意图、无 remote_id、零二次 quick_add。
+    server.set_quickadd_applied_then_fail(true);
+    sync::feeds_phase(&dbm, &http)
+        .await
+        .expect("feeds phase (crash window)");
+    let remote_id = {
+        let id = server
+            .existing_feed_urls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(u, _)| u == &url)
+            .expect("quick_add 创建必须登记既有 id")
+            .1;
+        // 真实服务端的订阅列表会列出这条已创建的订阅（供恢复轮发现）
+        server.subscriptions.lock().unwrap().push(MockSubscription {
+            id: format!("feed/{id}"),
+            title: "Crash Window".into(),
+            url: url.clone(),
+            html_url: None,
+            categories: vec![],
+        });
+        id
+    };
+    {
+        let conn = dbm.lock().await;
+        let items = db::pending_outbox(&conn).unwrap();
+        assert_eq!(items.len(), 1, "崩溃窗口后意图必须保留: {items:?}");
+        assert_eq!(items[0].remote_id, None, "响应未处理：无已验证 id");
+        assert!(items[0].attempts >= 1, "失败必须累计 attempts");
+    }
+    // 重启（重开同一文件库）后列表已列出该订阅：列表证据解析 → 绑定收敛，
+    // 不重发 quick_add、不新建重复订阅。
+    server.set_quickadd_applied_then_fail(false);
+    let dbm = Arc::new(Mutex::new(db::open(&tmp).unwrap()));
+    sync::feeds_phase(&dbm, &http)
+        .await
+        .expect("feeds phase (recovered)");
+    {
+        let conn = dbm.lock().await;
+        assert!(
+            db::pending_outbox(&conn).unwrap().is_empty(),
+            "列表证据解析后精确出队"
+        );
+        let bound: Option<i64> = conn
+            .query_row(
+                "SELECT remote_id FROM feeds WHERE feed_url = ?1",
+                [&url],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, Some(remote_id), "必须绑定到已创建的远端订阅");
+        let dup: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
+                [&url],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dup, 1, "不得产生重复本地 feed 行");
+    }
+    assert_eq!(
+        quickadd_requests(&server),
+        1,
+        "恢复全程只有崩溃前那一次 quick_add（不得重发）"
+    );
+    assert_eq!(quickadd_count(&server, &url), 1, "远端只创建一次");
+    let _ = std::fs::remove_file(&tmp);
 }
 
 /* ============================================================
@@ -2290,9 +2395,6 @@ B2-5. OPML 标题：desired_title + 真实 t= wire
 #[tokio::test]
 async fn opml_import_title_lands_on_remote_wire_and_mock() {
     let server = MockGReader::start().await.expect("start mock");
-    // 阶段 B 红门禁候选（F2）：重复 URL 导入依赖旧幂等契约，真实服务端拒绝。
-    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
-    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_b2_opml_title");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -2816,10 +2918,6 @@ R1-4. 在途 quick_add + 换号：旧账号的 id 不得进入新账号，回原
 #[tokio::test]
 async fn inflight_quickadd_response_after_account_switch_stays_scoped_to_old_account() {
     let server = MockGReader::start().await.expect("start mock");
-    // 阶段 B 红门禁候选（F2）：切回 A 后的 quick_add-by-URL 解析依赖「重复
-    // quick_add 返回既有 id」的旧 mock 契约；真实服务端拒绝重复 URL。
-    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
-    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r1_switch");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -2997,9 +3095,6 @@ R1-5. 移动成功后删除 + 重加：已接受的 label 必须被移除（F-1�
 #[tokio::test]
 async fn move_success_then_delete_readd_removes_accepted_label() {
     let server = MockGReader::start().await.expect("start mock");
-    // 阶段 B 红门禁候选（F2）：删除后重加回绑既有远端订阅依赖旧幂等契约。
-    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
-    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r1_readd");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -3542,10 +3637,6 @@ async fn mount_window_in_place_update_is_not_pruned_by_old_target() {
 #[tokio::test]
 async fn mount_window_production_edit_survives_old_mount_success() {
     let server = MockGReader::start().await.expect("start mock");
-    // 阶段 B 红门禁候选（F2）：订阅命中既有远端源依赖旧幂等契约，真实服务端
-    // 拒绝重复 URL、解析需走列表证据。
-    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
-    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_mount_prod");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -3693,8 +3784,8 @@ async fn mount_window_production_edit_survives_old_mount_success() {
     }
     assert_eq!(
         quickadd_requests(&server),
-        1,
-        "重试不得重复 quick_add（行已 remote_created）"
+        0,
+        "远端已持有该订阅：列表证据直接解析，全程零 quick_add"
     );
     let _ = std::fs::remove_file(&tmp);
 }
@@ -3858,17 +3949,15 @@ async fn global_folder_tombstone_survives_single_account_pull_and_suppresses_oth
 R2-2. 未知 id 退订：列表发现失败不得确认；解析目标持久化；恢复后收敛
 ============================================================ */
 
-/// OPT-009B2 复审 R2-2（P2）：`remote_id` 未知的退订意图（删除撞上在途 quick_add）
-/// 在**订阅列表读取失败**时不得只退掉解析出的单个 id 便确认——非幂等服务端上
-/// 只退一个会漏删原订阅并丢掉唯一持久意图。修复后的契约：
-/// 1. 解析（幂等 quick_add）成功 → 已验证 id **先持久化**（重启/列表长期失败后
-///    重试都不再重复 quick_add，不无界造重复项）；
-/// 2. 列表读失败 = 重复目标发现未完成 → 保留 pending 队项、本轮不发任何退订；
-/// 3. 恢复后按「解析 id ∪ 列表同 URL id」逐一退订，全部 2xx 才精确出队。
-/// 判别力（旧实现：列表失败只记日志，仍退掉解析出的单个 id 并 Confirmed）：
-/// 第一轮结束时队项被清空（意图丢失）、远端仍残留原订阅 feed/40——两条断言必红。
+/// OPT-009B2 复审 R2-2（P2，B1 契约）：`remote_id` 未知的退订意图（删除撞上在途
+/// quick_add）在**订阅列表读取失败**时不得发送任何退订、也不得确认出队——列表是
+/// 唯一可靠证据源（真实服务端拒绝重复 URL，恢复路径零 quick_add）。修复后的契约：
+/// 1. 列表读失败 = 重复目标发现未完成 → 保留 pending 队项、本轮零发送；
+/// 2. 重启（重开同一文件库）后同样只靠列表证据，等待期不发任何写请求；
+/// 3. 列表恢复 → 按列表证据退订全部同 URL id，全部 2xx 才精确出队。
+/// 判别力（旧实现：列表失败仍发解析退订并确认）：第一轮若有任何退订请求即红。
 #[tokio::test]
-async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quickadd() {
+async fn unsubscribe_recovery_list_failure_keeps_intent_without_sending() {
     let server = MockGReader::start().await.expect("start mock");
     let tmp = common::unique_db_path("opt009b_r2_unsub_list");
     let _ = std::fs::remove_file(&tmp);
@@ -3876,7 +3965,7 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quicka
     let url = format!("{}/opt009-r2-unsub.xml", server.url());
     let key = acct_key("greader", &server, "test");
 
-    // 远端已有一条同 URL 订阅（历史遗留；非幂等 quick_add 不会命中它）
+    // 远端已有一条同 URL 订阅（删除撞上在途 quick_add 的历史现场）
     *server.subscriptions.lock().unwrap() = vec![MockSubscription {
         id: "feed/40".into(),
         title: "Existing Twin".into(),
@@ -3884,8 +3973,6 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quicka
         html_url: None,
         categories: vec![("原分类".into(), "folder".into())],
     }];
-    // 非幂等模型：同 URL 的 quick_add 每次都新建远端订阅（生成新的数字 id）
-    server.set_quickadd_non_idempotent(true);
     // 列表暂时不可用：重复目标发现失败
     server.set_fail_subscription_list(true);
 
@@ -3922,24 +4009,10 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quicka
         assert_eq!(items[0].remote_id, None, "id 此刻不可知（响应丢失）");
     }
 
-    // 第一轮：quick_add（非幂等）解析出一个**新建**的远端 id；列表失败 →
-    // 重复目标发现未完成：不得发送半套退订、不得确认出队。
-    let report = sync::feeds_phase(&dbm, &http)
+    // 第一轮：列表失败 = 重复目标发现未完成 → 队项保留、本轮零发送。
+    sync::feeds_phase(&dbm, &http)
         .await
         .expect("feeds phase (list down)");
-    let created_id = {
-        let id = *server.next_feed_id.lock().unwrap();
-        assert_eq!(id, 101, "非幂等 quick_add 必须新建远端订阅: {report:?}");
-        // 真实服务端的列表会列出这条新订阅（供下一轮发现）
-        server.subscriptions.lock().unwrap().push(MockSubscription {
-            id: format!("feed/{id}"),
-            title: "Created By Recovery".into(),
-            url: url.clone(),
-            html_url: None,
-            categories: vec![],
-        });
-        id
-    };
     {
         let conn = dbm.lock().await;
         let items = db::pending_outbox(&conn).unwrap();
@@ -3954,9 +4027,8 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quicka
             "解析结果写独立持久字段，不冒充「入队时已知的远端绑定」"
         );
         assert_eq!(
-            items[0].resolved_remote_id,
-            Some(created_id),
-            "解析出的已验证 id 必须先持久化: {items:?}"
+            items[0].resolved_remote_id, None,
+            "列表失败时无可解析目标（零 quick_add，不得用服务端副作用伪造 id）: {items:?}"
         );
         assert!(items[0].attempts >= 1, "失败必须累计 attempts");
         assert!(
@@ -3978,7 +4050,7 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quicka
         mock_greader::subscription_edit_actions(&server)
             .iter()
             .all(|(ac, _)| ac != "unsubscribe"),
-        "列表失败时不得发送任何半套退订（旧实现会退掉解析出的单个 id）"
+        "列表失败时不得发送任何半套退订"
     );
     assert!(
         server
@@ -3989,10 +4061,13 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quicka
             .any(|s| s.id == "feed/40"),
         "原订阅必须原样（旧实现只退新 id 便确认，此处已漏删）"
     );
-    assert_eq!(quickadd_requests(&server), 1, "解析只允许一次 quick_add");
+    assert_eq!(
+        quickadd_requests(&server),
+        0,
+        "恢复路径零 quick_add：列表是唯一证据源（真实服务端拒绝重复 URL）"
+    );
 
-    // 第二轮：重启（丢连接重开同一文件库）+ 列表仍不可用 → 持久字段足以恢复：
-    // 不得重复 quick_add（非幂等模型下每重复一次都会新建一个重复订阅）。
+    // 第二轮：重启（丢连接重开同一文件库）+ 列表仍不可用 → 仍然零发送、意图原样。
     drop(dbm);
     let dbm = Arc::new(Mutex::new(db::open(&tmp).unwrap()));
     sync::feeds_phase(&dbm, &http)
@@ -4002,35 +4077,34 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quicka
         let conn = dbm.lock().await;
         let items = db::pending_outbox(&conn).unwrap();
         assert_eq!(items.len(), 1, "重启后意图原样");
-        assert_eq!(items[0].resolved_remote_id, Some(created_id));
+        assert_eq!(items[0].resolved_remote_id, None);
     }
     assert_eq!(
         quickadd_requests(&server),
-        1,
-        "列表长期失败时不得无界反复 quick_add（非幂等模型下即无界造重复订阅）"
+        0,
+        "列表长期失败也不得改用 quick_add 试探"
     );
-    assert_eq!(
-        quickadd_count(&server, url.as_str()),
-        1,
-        "远端只创建过一次（解析的那次）"
+    assert!(
+        mock_greader::subscription_edit_actions(&server)
+            .iter()
+            .all(|(ac, _)| ac != "unsubscribe"),
+        "重启轮同样零发送"
     );
 
-    // 第三轮：列表恢复 → 收敛清除**所有**同 URL 订阅（原订阅 + 解析新建的），
-    // 再精确出队；墓碑在 pull 确认后回收，本地不复活。
+    // 第三轮：列表恢复 → 按列表证据退订同 URL 全部 id（feed/40），精确出队；
+    // 墓碑在 pull 确认后回收，本地不复活。
     server.set_fail_subscription_list(false);
     sync::feeds_phase(&dbm, &http)
         .await
         .expect("feeds phase (list recovered)");
     {
         let actions = mock_greader::subscription_edit_actions(&server);
-        for id in [40, created_id] {
-            assert!(
-                actions
-                    .iter()
-                    .any(|(ac, s)| ac == "unsubscribe" && s == &format!("feed/{id}")),
-                "必须逐一退订同 URL 的远端 id feed/{id}: {actions:?}"
-            );
-        }
+        assert!(
+            actions
+                .iter()
+                .any(|(ac, s)| ac == "unsubscribe" && s == "feed/40"),
+            "必须按列表证据退订 feed/40: {actions:?}"
+        );
         assert!(
             server
                 .subscriptions
@@ -4058,31 +4132,24 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quicka
             .unwrap();
         assert_eq!(revived, 0, "收敛后仍不得复活");
     }
-    assert_eq!(
-        quickadd_requests(&server),
-        1,
-        "恢复轮也不得重复 quick_add（解析结果已持久化）"
-    );
+    assert_eq!(quickadd_requests(&server), 0, "恢复全程零 quick_add");
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// OPT-009B2 复审 R2-2（P2，账号边界）：解析结果的持久推进必须限定同
-/// account_key/generation——A 的解析落库后换到 B，B 的轮次不得发送、回收或改写
-/// A 的退订意图；切回 A 后按已持久化的解析结果收敛，且全程只 quick_add 一次。
+/// OPT-009B2 复审 R2-2（P2，账号边界；B1 契约）：解析结果的持久推进必须限定同
+/// account_key/generation——A 的列表证据解析落库后换到 B，B 的轮次不得发送、
+/// 回收或改写 A 的退订意图；切回 A 后按已持久化的解析结果收敛，全程零 quick_add
+/// （列表是唯一证据源，真实服务端拒绝重复 URL）。
 #[tokio::test]
 async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
     let server = MockGReader::start().await.expect("start mock");
-    // 阶段 B 红门禁候选（F2）：退订恢复的 quick_add-by-URL 解析依赖旧幂等契约，
-    // 真实服务端拒绝重复 URL（FreshRSS numResults=0 / Miniflux 500）。
-    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
-    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r2_unsub_switch");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
     let url = format!("{}/opt009-r2-switch.xml", server.url());
     let key_a = acct_key("greader", &server, "user-a");
 
-    // A 的远端已有该订阅（幂等 quick_add 会解析出这个 id）
+    // A 的远端已有该订阅（列表证据会解析出这个 id）
     *server.subscriptions.lock().unwrap() = vec![MockSubscription {
         id: "feed/40".into(),
         title: "Scoped".into(),
@@ -4095,7 +4162,8 @@ async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
         .lock()
         .unwrap()
         .push((url.clone(), 40));
-    server.set_fail_subscription_list(true);
+    // 第一轮让退订发送失败（订阅编辑注入 500）：解析已持久化、意图保留
+    server.set_fail_subscription_edit(true);
 
     let conn = open_with_credentials(&server, "greader", "user-a");
     let feed_id = {
@@ -4114,7 +4182,7 @@ async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
         app_lib::commands::record_feed_deletion(&conn, feed_id).expect("record deletion");
     }
 
-    // A 的第一轮：解析成功并持久化，列表失败 → 保留意图
+    // A 的第一轮：列表证据解析 feed/40 并持久化；退订发送被注入拒绝 → 保留意图
     sync::feeds_phase(&dbm, &http)
         .await
         .expect("feeds phase (A, list down)");
@@ -4129,7 +4197,11 @@ async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
             "A 的解析结果必须持久化: {items:?}"
         );
     }
-    assert_eq!(quickadd_requests(&server), 1);
+    assert_eq!(
+        quickadd_requests(&server),
+        0,
+        "恢复解析走列表证据，零 quick_add"
+    );
 
     // 换到 B：B 的轮次不得发送任何订阅写请求，也不得改写 A 的持久推进
     {
@@ -4166,7 +4238,7 @@ async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
         );
     }
 
-    // 切回 A、列表恢复 → 按持久化解析结果退订收敛；全程仍只 quick_add 一次
+    // 切回 A、解除注入 → 按持久化解析结果退订收敛；全程零 quick_add
     {
         let mut conn = dbm.lock().await;
         app_lib::commands::save_account_for_test(
@@ -4179,7 +4251,7 @@ async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
         )
         .expect("switch back to A");
     }
-    server.set_fail_subscription_list(false);
+    server.set_fail_subscription_edit(false);
     server.clear_request_log();
     sync::feeds_phase(&dbm, &http)
         .await
@@ -4225,9 +4297,6 @@ R2-3. 移动确认出队后删除再快速重加：远端旧 label 必须持久�
 #[tokio::test]
 async fn readd_after_confirmed_move_and_delete_carries_remote_old_label() {
     let server = MockGReader::start().await.expect("start mock");
-    // 阶段 B 红门禁候选（F2）：重加回绑既有远端订阅依赖旧幂等契约。
-    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
-    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r2_readd");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -4637,27 +4706,26 @@ async fn readd_while_unsubscribe_inflight_keeps_replacement_converging() {
 R2 复审 P2-C. 退订目标被外部删除（FreshRSS 400）不得永久 Retry
 ============================================================ */
 
-/// OPT-009B2 R2 复审 P2-C：已持久化的解析目标被**外部删除**后，FreshRSS 的
+/// OPT-009B2 R2 复审 P2-C（B1 契约）：已持久化的解析目标被**外部删除**后，FreshRSS 的
 /// `subscriptionEdit` 对不存在 id 走 `badRequest()` → HTTP 400（pinned 上游
 /// `freshrss-greader.php:122-128` 的 400 形态 + `:468-471` 的
 /// `!($feedId > 0 && deleteFeed($feedId))` 分支）。旧实现任一 Err 立即 Retry：
 /// 队项永久卡住、attempts 无界增长，列表恢复后同 URL 的其它 id 也永不被退订。
 /// 修后：400/404 = 目标已不存在（退订意图已满足，非致命）——本轮继续退订其它
 /// 同 URL 目标并精确出队；5xx/网络错误仍是 Retry。
+/// B1 起解析走列表证据（零 quick_add）：第一轮以订阅编辑注入 500 让「解析已
+/// 持久化、发送失败」的意图保留到第二轮。
 /// 判别力（旧实现）：第二轮后队项仍为 1、feed/50 未被退订——下面断言必红。
 #[tokio::test]
 async fn unsubscribe_recovery_missing_resolved_target_converges_instead_of_stuck_retry() {
     let server = MockGReader::start().await.expect("start mock");
-    // 阶段 B 红门禁候选（F2）：退订恢复的 quick_add-by-URL 解析依赖旧幂等契约。
-    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
-    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r2_missing");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
     let url = format!("{}/opt009-r2-missing.xml", server.url());
     let key = acct_key("greader", &server, "test");
 
-    // 远端同 URL 两条（非幂等历史的重复项）：feed/40 稍后被外部删除，feed/50 保留
+    // 远端同 URL 两条（历史遗留的重复项）：feed/40 稍后被外部删除，feed/50 保留
     *server.subscriptions.lock().unwrap() = vec![
         MockSubscription {
             id: "feed/40".into(),
@@ -4679,7 +4747,8 @@ async fn unsubscribe_recovery_missing_resolved_target_converges_instead_of_stuck
         .lock()
         .unwrap()
         .push((url.clone(), 40));
-    server.set_fail_subscription_list(true);
+    // 第一轮让退订发送失败（订阅编辑注入 500）：解析已持久化、意图保留
+    server.set_fail_subscription_edit(true);
 
     let (dbm, feed_id) = {
         let conn = db::open(&tmp).unwrap();
@@ -4702,10 +4771,10 @@ async fn unsubscribe_recovery_missing_resolved_target_converges_instead_of_stuck
         app_lib::commands::record_feed_deletion(&conn, feed_id).expect("record deletion");
     }
 
-    // 第一轮：列表故障 → 只解析（幂等 quick_add 命中既有 feed/40）并持久化，零发送
+    // 第一轮：列表证据解析 feed/40 并持久化；退订发送被注入拒绝 → 保留意图
     sync::feeds_phase(&dbm, &http)
         .await
-        .expect("feeds phase (list down)");
+        .expect("feeds phase (round 1)");
     {
         let conn = dbm.lock().await;
         let items = db::pending_outbox(&conn).unwrap();
@@ -4713,7 +4782,13 @@ async fn unsubscribe_recovery_missing_resolved_target_converges_instead_of_stuck
         assert_eq!(
             items[0].resolved_remote_id,
             Some(40),
-            "前置：解析目标已持久化: {items:?}"
+            "前置：列表证据解析目标已持久化: {items:?}"
+        );
+        assert!(items[0].attempts >= 1, "前置：发送失败累计 attempts");
+        assert_eq!(
+            quickadd_requests(&server),
+            0,
+            "恢复解析零 quick_add（列表是唯一证据源）"
         );
     }
     assert!(
@@ -4735,7 +4810,7 @@ async fn unsubscribe_recovery_missing_resolved_target_converges_instead_of_stuck
         .lock()
         .unwrap()
         .retain(|(u, _)| u != &url);
-    server.set_fail_subscription_list(false);
+    server.set_fail_subscription_edit(false);
     server.set_unsubscribe_unknown_id_returns_400(true);
 
     // 第二轮：40 已被外部删除 → 400 必须视为「已不存在」而非永久 Retry；
@@ -4813,9 +4888,6 @@ R2 复审 P3-A. 移动未发送 + 删除 + 快速重加：链起点必须成为�
 #[tokio::test]
 async fn unsent_move_then_delete_and_readd_removes_remote_old_label() {
     let server = MockGReader::start().await.expect("start mock");
-    // 阶段 B 红门禁候选（F2）：重加回绑既有远端订阅依赖旧幂等契约。
-    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
-    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r2_unsent");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);

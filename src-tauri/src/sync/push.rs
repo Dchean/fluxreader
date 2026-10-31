@@ -152,23 +152,34 @@ pub(super) async fn exec_push(
             }
         }
     }
-    // 收藏：star/unstar（Google Reader 有明确的 add/remove 语义，非 toggle）
+    // 收藏：star/unstar。GReader 的 edit-tag 是绝对 add/remove，直接发送；
+    // Fever 的 mark 语义按服务端变体收敛（B1）：Miniflux（api_version 3）的
+    // saved/unsaved 都是 ToggleStarred 取反——必须探测后按需发送，否则「响应
+    // 丢失重发」与「另一设备已改到目标态」都会把星标翻反；FreshRSS（>=4）
+    // 是绝对赋值，保持总是发送。两种形态下 Ok 都视为意图已收敛
+    // （sent=false = 服务端已处目标态，无需发送）。
     for (qid, remote_id, want_star) in &plan.stars {
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送批次发送前检测到账号代际变更，停止后续推送（star）");
             return (done, failed);
         }
-        let result = if *want_star {
-            session.client.mark_starred(&[*remote_id]).await
-        } else {
-            session.client.mark_unstarred(&[*remote_id]).await
+        let result = match &session.client {
+            Backend::GReader(c) => {
+                let r = if *want_star {
+                    c.mark_starred(&[*remote_id]).await
+                } else {
+                    c.mark_unstarred(&[*remote_id]).await
+                };
+                r.map(|_| true)
+            }
+            Backend::Fever(c) => c.push_star_state(*remote_id, *want_star).await,
         };
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送响应返回时账号代际已变更，丢弃该批次确认（star）");
             return (done, failed);
         }
         match result {
-            Ok(()) => {
+            Ok(_sent) => {
                 report.pushed_states += 1;
                 done.push(*qid);
             }

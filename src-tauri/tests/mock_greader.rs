@@ -115,10 +115,6 @@ pub enum QuickaddDuplicate {
     FreshRssNumResultsZero,
     /// Miniflux 形态：500 + feed_already_exists。
     Miniflux500,
-    /// 旧 mock 契约（重复 URL 返回既有 id）。没有任何真实服务端这样表现，
-    /// 仅供阶段 B（F2 quick_add 跨重启收敛）候选用例在源码修复前继续运行，
-    /// 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md。
-    ReturnExistingId,
 }
 
 pub struct MockGReader {
@@ -161,6 +157,10 @@ pub struct MockGReader {
     /// 故障注入（TASK-074）：置位后 subscription/quickadd 返回 500——push 失败、
     /// 队项保留，用于验证「有未推送变更的源不被远端快照删除」
     pub fail_quick_add: std::sync::atomic::AtomicBool,
+    /// B1 故障注入：置位后 quickadd **先创建并登记订阅、再以 500 返回**——
+    /// 忠实模拟「服务端已执行、响应在传输中丢失」（客户端看到失败、远端已变），
+    /// 用于崩溃窗口收敛用例（与 fail_quick_add 的「服务端未执行」相区别）。
+    pub quickadd_applied_then_fail: std::sync::atomic::AtomicBool,
     /// 故障注入（TASK-055）：置位后退订仍返回 200，但**服务端保留该订阅**——
     /// 模拟真实 GReader 后端在 token 失效/权限不足/目标不存在时「2xx + 未生效」的响应。
     pub unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool,
@@ -181,11 +181,6 @@ pub struct MockGReader {
     /// → `400 Bad Request`（`freshrss-greader.php:122-128/468-471`）。
     /// 默认关闭：既有用例继续按「无条件 200」的宽松模型运行。
     pub unsubscribe_unknown_id_returns_400: std::sync::atomic::AtomicBool,
-    /// 故障注入（OPT-009 B2-R2）：置位后 quickadd 对同 URL **非幂等**——跳过
-    /// `existing_feed_urls` 查找，每次调用都新建一个远端订阅（新的数字 id）。
-    /// 用于验证恢复路径对解析结果**只做一次 quick_add**（不持久化就会在列表
-    /// 长期失败/重试时无界造重复项），并靠列表正面证据清除所有同 URL 订阅。
-    pub quickadd_non_idempotent: std::sync::atomic::AtomicBool,
     /// quickadd 对重复 URL 的响应形态（默认 FreshRSS 200 + numResults=0）。
     pub quickadd_duplicate: Mutex<QuickaddDuplicate>,
     /// 最近一次 subscription/edit 请求的表单键值（A-2 断言 t=/a= 参数）
@@ -274,12 +269,12 @@ impl MockGReader {
             empty_page_with_continuation: std::sync::atomic::AtomicBool::new(false),
             corrupt_starred_continuation: std::sync::atomic::AtomicBool::new(false),
             fail_quick_add: std::sync::atomic::AtomicBool::new(false),
+            quickadd_applied_then_fail: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
             fail_subscription_edit: std::sync::atomic::AtomicBool::new(false),
             fail_subscription_edit_for: Mutex::new(None),
             fail_subscription_list: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_unknown_id_returns_400: std::sync::atomic::AtomicBool::new(false),
-            quickadd_non_idempotent: std::sync::atomic::AtomicBool::new(false),
             quickadd_duplicate: Mutex::new(QuickaddDuplicate::FreshRssNumResultsZero),
             last_subscription_edit_form: Mutex::new(Vec::new()),
             subscription_edit_barrier: Mutex::new(None),
@@ -406,6 +401,13 @@ impl MockGReader {
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// B1 注入开关：quickadd 创建成功后以 500 返回（响应丢失语义）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_quickadd_applied_then_fail(&self, on: bool) {
+        self.quickadd_applied_then_fail
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// 置位后 subscription/edit（含 edit/unsubscribe）返回 500（OPT-009 阶段 B：
     /// 验证「远端已建、绑定完成、分类挂载失败」保留队项且不重复 quick_add）。
     #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
@@ -426,13 +428,6 @@ impl MockGReader {
     pub fn set_fail_subscription_list(&self, fail: bool) {
         self.fail_subscription_list
             .store(fail, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// OPT-009 B2-R2：置位后 quickadd 对同 URL 非幂等（每次调用新建订阅）。
-    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
-    pub fn set_quickadd_non_idempotent(&self, on: bool) {
-        self.quickadd_non_idempotent
-            .store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// 设置 quickadd 对重复 URL 的响应形态（见 [`QuickaddDuplicate`]）。
@@ -1526,21 +1521,13 @@ fn route(
                 .get("quickadd")
                 .and_then(|v| v.first().cloned())
                 .unwrap_or_default();
-            // OPT-009 B2-R2：非幂等模型（每次调用新建）——恢复路径必须先持久化
-            // 解析结果，否则列表长期失败时每轮重试都会再造一个远端订阅。
-            let non_idempotent = srv
-                .quickadd_non_idempotent
-                .load(std::sync::atomic::Ordering::SeqCst);
-            let existing = if non_idempotent {
-                None
-            } else {
-                srv.existing_feed_urls
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|(u, _)| *u == url)
-                    .map(|(_, id)| *id)
-            };
+            let existing = srv
+                .existing_feed_urls
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(u, _)| *u == url)
+                .map(|(_, id)| *id);
             match existing {
                 Some(id) => match *srv.quickadd_duplicate.lock().unwrap() {
                     QuickaddDuplicate::FreshRssNumResultsZero => (
@@ -1551,11 +1538,6 @@ fn route(
                     QuickaddDuplicate::Miniflux500 => (
                         500,
                         r#"{"error_message":"feed_already_exists"}"#.to_string(),
-                    ),
-                    QuickaddDuplicate::ReturnExistingId => (
-                        200,
-                        serde_json::json!({"numResults": 1, "streamId": format!("feed/{id}")})
-                            .to_string(),
                     ),
                 },
                 None => {
@@ -1569,12 +1551,20 @@ fn route(
                     // 登记新创建的订阅进 `existing_feed_urls`（「远端当前持有」注册表，
                     // 后续同 URL quickadd 按重复语义拒绝）；退订意图的「未知 id 恢复」
                     // 依赖注册表与订阅列表证据，不依赖「重复 quick_add 返回既有 id」。
-                    // 非幂等注入（B2-R2）下**不登记**：后续同 URL 调用继续新建。
-                    if !non_idempotent {
-                        srv.existing_feed_urls
-                            .lock()
-                            .unwrap()
-                            .push((url.clone(), feed_id));
+                    srv.existing_feed_urls
+                        .lock()
+                        .unwrap()
+                        .push((url.clone(), feed_id));
+                    // B1 注入：订阅已创建并登记，但响应以 500 返回——忠实模拟
+                    // 「服务端已执行、响应在传输中丢失」。
+                    if srv
+                        .quickadd_applied_then_fail
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return (
+                            500,
+                            r#"{"error_message":"quickadd applied then response lost"}"#.into(),
+                        );
                     }
                     (
                         200,

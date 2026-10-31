@@ -77,6 +77,8 @@ struct FixtureOptions {
     dup_echo: bool,
     /// mark=item 的星标语义变体（默认 FreshRSS 绝对赋值）。
     star_mark: StarMark,
+    /// 信封 api_version（None = FreshRSS 实测 4；Miniflux 固定源码为 3）。
+    api_version: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -134,6 +136,10 @@ struct Fixture {
     ignore_max_id: bool,
     dup_echo: bool,
     star_mark: StarMark,
+    /// 信封 api_version。
+    api_version: i64,
+    /// mark=item 应用后以 500 返回（响应丢失语义，B1 收敛用例）。
+    mark_applied_then_fail: AtomicBool,
     /// 第 N 次 max_id 调用返回 500（1 起算），用于分页失败可重试用例。
     max_id_fail_at: Mutex<Option<usize>>,
     max_id_calls: AtomicUsize,
@@ -197,6 +203,7 @@ impl Fixture {
             ignore_max_id: opts.ignore_max_id,
             dup_echo: opts.dup_echo,
             star_mark: opts.star_mark,
+            api_version: opts.api_version.unwrap_or(4),
             max_id_fail_at: Mutex::new(None),
             max_id_calls: AtomicUsize::new(0),
             since_id_fail_at: Mutex::new(None),
@@ -368,6 +375,18 @@ impl Fixture {
             .find(|e| e.id == id)
             .map(|e| e.saved)
             .unwrap_or(false)
+    }
+
+    /// 直接改写服务端条目的收藏态（模拟另一台设备先改到目标态）。
+    fn set_entry_saved(&self, id: i64, saved: bool) {
+        if let Some(e) = self.entries.lock().unwrap().iter_mut().find(|e| e.id == id) {
+            e.saved = saved;
+        }
+    }
+
+    /// B1 注入开关：mark 应用后以 500 返回（响应丢失语义）。
+    fn set_mark_applied_then_fail(&self, on: bool) {
+        self.mark_applied_then_fail.store(on, Ordering::SeqCst);
     }
 
     fn hits(&self) -> Vec<Hit> {
@@ -563,7 +582,7 @@ fn route(srv: &Fixture, hit: &Hit) -> (u16, String) {
     if body_key != API_KEY {
         return (
             200,
-            serde_json::json!({ "api_version": 4, "auth": 0 }).to_string(),
+            serde_json::json!({ "api_version": srv.api_version, "auth": 0 }).to_string(),
         );
     }
 
@@ -574,7 +593,10 @@ fn route(srv: &Fixture, hit: &Hit) -> (u16, String) {
         }
     }
     let mut resp = serde_json::Map::new();
-    resp.insert("api_version".into(), serde_json::Value::from(4));
+    resp.insert(
+        "api_version".into(),
+        serde_json::Value::from(srv.api_version),
+    );
     resp.insert("auth".into(), serde_json::Value::from(1));
     resp.insert(
         "last_refreshed_on_time".into(),
@@ -715,6 +737,14 @@ fn route(srv: &Fixture, hit: &Hit) -> (u16, String) {
                 );
             }
             _ => {}
+        }
+        // B1 注入：mark 已应用到服务端条目，但响应以 500 返回——忠实模拟
+        // 「服务端已执行、响应在传输中丢失」（客户端看到失败、远端已变）。
+        if srv.mark_applied_then_fail.load(Ordering::SeqCst) {
+            return (
+                500,
+                r#"{"error_message":"mark applied then response lost"}"#.into(),
+            );
         }
     }
 
@@ -2201,6 +2231,8 @@ async fn mark_sends_one_decimal_id_per_request() {
 async fn miniflux_star_mark_toggles_current_state() {
     let srv = Fixture::start_with(FixtureOptions {
         star_mark: StarMark::Toggle,
+        // B1：变体判定走 api_version（3 = Miniflux 家族 → toggle 语义 + 探测）。
+        api_version: Some(3),
         ..Default::default()
     })
     .await;
@@ -2236,6 +2268,141 @@ async fn miniflux_star_mark_toggles_current_state() {
         !srv.entry_saved(7),
         "Miniflux 变体：已收藏条目再收 as=saved 必须翻转（ToggleStarred）"
     );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// B1 红门禁（Miniflux toggle 星标修复，a）：推送响应丢失（服务端已应用、客户端
+/// 见 500）→ 队列保留 → 下轮重发**不得再发 mark**（探测发现已处目标态）——远端
+/// 终态必须收敛到用户意图。修前实现无条件重发 as=saved → toggle 把星标翻回
+/// 未收藏（判别力：第二轮后的 mark 请求计数与服务端终态双断言）。
+#[tokio::test]
+async fn miniflux_star_push_response_lost_resend_converges_without_flip() {
+    let srv = Fixture::start_with(FixtureOptions {
+        star_mark: StarMark::Toggle,
+        api_version: Some(3),
+        ..Default::default()
+    })
+    .await;
+    srv.set_groups(vec![(1, "分类")]);
+    srv.set_feeds(vec![(10, "源", "http://example.com/f.rss")]);
+    srv.add_entry(7, 10, "A", false, false);
+
+    let (db, tmp) = seed_db("fever_compat_star_lost", &srv);
+    sync::sync_now(&db, &http()).await.expect("full sync");
+    {
+        let conn = db.lock().await;
+        let aid: i64 = conn
+            .query_row("SELECT id FROM articles WHERE remote_id = 7", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        db::set_starred(&conn, aid, true).unwrap();
+        db::enqueue_sync(&conn, Some(aid), None, "star", None).unwrap();
+    }
+
+    // 第一轮：mark 已应用（远端 saved=true）但响应以 500 返回 → 队列保留
+    srv.set_mark_applied_then_fail(true);
+    sync::push_states_now(&db, &http()).await;
+    assert!(srv.entry_saved(7), "服务端已应用收藏（响应丢失语义）");
+    {
+        let conn = db.lock().await;
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1, "响应失败：队列必须保留待重试");
+    }
+
+    // 第二轮：探测发现已处目标态 → 不再发 mark → 收敛确认，星标不被翻反
+    srv.set_mark_applied_then_fail(false);
+    sync::push_states_now(&db, &http()).await;
+    assert!(
+        srv.entry_saved(7),
+        "重发后星标终态必须保持收藏（修前 toggle 会翻成未收藏）"
+    );
+    {
+        let conn = db.lock().await;
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "已收敛：队列确认清空");
+    }
+    let marks = srv
+        .hits()
+        .into_iter()
+        .filter(|h| h.query_param("mark").as_deref() == Some("item"))
+        .count();
+    assert_eq!(marks, 1, "只有丢失响应的那一次 mark；重发轮必须零 mark");
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// B1 红门禁（Miniflux toggle 星标修复，b）：另一设备已把条目改到目标态时，
+/// 本地 stale 队列项不得把它翻反——探测发现当前态==目标态 → 不发 mark、队列按
+/// 「已收敛」确认。unstar 方向同理锁定。
+#[tokio::test]
+async fn miniflux_stale_star_queue_item_does_not_flip_server_state() {
+    let srv = Fixture::start_with(FixtureOptions {
+        star_mark: StarMark::Toggle,
+        api_version: Some(3),
+        ..Default::default()
+    })
+    .await;
+    srv.set_groups(vec![(1, "分类")]);
+    srv.set_feeds(vec![(10, "源", "http://example.com/f.rss")]);
+    srv.add_entry(7, 10, "A", false, false);
+
+    let (db, tmp) = seed_db("fever_compat_star_stale", &srv);
+    sync::sync_now(&db, &http()).await.expect("full sync");
+    let aid = {
+        let conn = db.lock().await;
+        conn.query_row("SELECT id FROM articles WHERE remote_id = 7", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+
+    // 本地 star 入队后，另一台设备先把条目改到目标态
+    {
+        let conn = db.lock().await;
+        db::set_starred(&conn, aid, true).unwrap();
+        db::enqueue_sync(&conn, Some(aid), None, "star", None).unwrap();
+    }
+    srv.set_entry_saved(7, true);
+    sync::push_states_now(&db, &http()).await;
+    assert!(
+        srv.entry_saved(7),
+        "服务端已处目标态：stale 队列项不得翻反（修前 as=saved 会 toggle 成未收藏）"
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(article_state(&conn, 7).unwrap().1, true, "本地意图保持");
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "已收敛：队列确认清空");
+    }
+
+    // unstar 方向：另一设备已取消收藏 → stale unstar 也不得翻回收藏
+    {
+        let conn = db.lock().await;
+        db::set_starred(&conn, aid, false).unwrap();
+        db::enqueue_sync(&conn, Some(aid), None, "unstar", None).unwrap();
+    }
+    srv.set_entry_saved(7, false);
+    sync::push_states_now(&db, &http()).await;
+    assert!(!srv.entry_saved(7), "unstar 方向同样收敛：不得翻回收藏");
+    {
+        let conn = db.lock().await;
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "已收敛：队列确认清空");
+    }
+    let marks = srv
+        .hits()
+        .into_iter()
+        .filter(|h| h.query_param("mark").as_deref() == Some("item"))
+        .count();
+    assert_eq!(marks, 0, "两个方向都已在目标态：全程零 mark");
     let _ = std::fs::remove_file(&tmp);
 }
 
