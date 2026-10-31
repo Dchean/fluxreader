@@ -138,3 +138,73 @@ fn real_dpapi_legacy_migration_upgrades_and_is_idempotent() {
         "已升级后幂等，不重复计数"
     );
 }
+
+/* ============================================================
+B4：通用 get_setting/set_setting IPC 对 DPAPI 保护键收口
+============================================================ */
+
+/// 通用 IPC 面不得读出/写入 DPAPI 加密凭据键（审计 B4）：
+/// ① 通用读实现（get_setting 命令共用内核）对敏感键拒绝——即使存量行存在，
+///    也不解密返回明文、错误不回显敏感值；② 通用写实现拒绝且不改写存量值；
+/// ③ 专用命令内核（db::get/set_setting，get_ai_config/save_ai_config 的真实
+/// 实现）不受影响，写入+读取往返保持。
+#[test]
+fn generic_ipc_rejects_sensitive_keys_dedicated_commands_keep_working() {
+    let conn = fresh_conn("cred_ipc_sensitive_gate");
+
+    // 通用读：ai_config 存量明文行（模拟历史库）——必须拒绝而不是解密返回
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES ('ai_config', '{\"apiKey\":\"sk-legacy-secret\"}')",
+        [],
+    )
+    .unwrap();
+    let err = app_lib::commands::read_setting(&conn, "ai_config")
+        .expect_err("通用 get_setting 必须拒绝敏感键，而不是解密返回明文");
+    assert_eq!(err.code, "protectedSetting");
+    assert!(
+        !err.message.contains("sk-legacy-secret"),
+        "错误不得回显存量敏感值: {err}"
+    );
+
+    // 通用写：拒绝且存量值原样保留
+    let err = app_lib::commands::apply_setting(&conn, "ai_config", "tampered")
+        .expect_err("通用 set_setting 必须拒绝敏感键");
+    assert_eq!(err.code, "protectedSetting");
+    assert_eq!(
+        raw_value(&conn, "ai_config").unwrap(),
+        "{\"apiKey\":\"sk-legacy-secret\"}",
+        "写拒绝后存量值必须原样保留"
+    );
+
+    // 专用命令内核（save_ai_config / get_ai_config 的真实实现）保持可用
+    let fresh =
+        r#"{"preset":"custom","baseUrl":"https://api.example","apiKey":"sk-new","model":"m"}"#;
+    db::set_setting(&conn, "ai_config", fresh).unwrap();
+    assert_eq!(
+        db::get_setting(&conn, "ai_config").unwrap().unwrap(),
+        fresh,
+        "专用命令内核读写往返必须保持"
+    );
+
+    // 其余保护键同轴：通用读/写一律拒绝（greader_password 另受账号生命周期保护）
+    for key in [
+        "config_sync_credentials",
+        "miniflux_token",
+        "greader_password",
+    ] {
+        assert_eq!(
+            app_lib::commands::read_setting(&conn, key)
+                .unwrap_err()
+                .code,
+            "protectedSetting",
+            "{key} 通用读取必须拒绝"
+        );
+        assert_eq!(
+            app_lib::commands::apply_setting(&conn, key, "x")
+                .unwrap_err()
+                .code,
+            "protectedSetting",
+            "{key} 通用写入必须拒绝"
+        );
+    }
+}

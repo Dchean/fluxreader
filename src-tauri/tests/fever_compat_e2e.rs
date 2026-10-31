@@ -204,6 +204,7 @@ impl Fixture {
             dup_echo: opts.dup_echo,
             star_mark: opts.star_mark,
             api_version: opts.api_version.unwrap_or(4),
+            mark_applied_then_fail: AtomicBool::new(false),
             max_id_fail_at: Mutex::new(None),
             max_id_calls: AtomicUsize::new(0),
             since_id_fail_at: Mutex::new(None),
