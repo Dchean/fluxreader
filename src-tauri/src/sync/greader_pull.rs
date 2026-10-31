@@ -18,6 +18,15 @@ use tokio::sync::Mutex;
 static PULL_CLOCK_OVERRIDE: AtomicI64 = AtomicI64::new(0);
 const GREADER_MAX_ID_PAGES: usize = 200;
 
+/// B2 权威集合回补的单请求块大小（与主列举正文分块一致，100 条/请求）。
+const GR_BACKFILL_CHUNK_SIZE: usize = 100;
+
+/// B2 权威集合回补的每轮每集合预算（2000 条 = 至多 20 次请求/集合/轮）。
+/// 预算到达**不是失败**：集合 id 列表本身完整（fetch_stream_ids 自带截断
+/// 守卫），本轮已回补的子集照常参与对账，剩余未绑定 id 下一轮 light 同步
+/// 续补；只有单请求失败才按「该侧跳过 + 游标保留」fail-closed 处理。
+const GR_BACKFILL_MAX_IDS_PER_SYNC: usize = 2000;
+
 /// greader pull 的「现在」（unix 秒）：未注入时即系统墙钟。
 fn pull_now() -> i64 {
     let injected = PULL_CLOCK_OVERRIDE.load(Ordering::Relaxed);
@@ -386,18 +395,54 @@ pub(super) async fn pull_entries_greader(
                 None
             }
         };
-        if read_ids.is_some() || starred_ids.is_some() {
+        // B2 回补：权威集合里「不在 mf_id_to_article 映射」的 id 没有本地行，
+        // reconcile 对它们无行可写——read 永远收敛不到、starred 的双向判定也
+        // 摸不到。先把缺失 id 逐块拉 stream/items/contents（镜像 fever_pull 的
+        // with_ids 回补结构），走 merge_pulled_entry 既有四分支匹配链自然绑定
+        // 并应用状态；冲突方向仍只消费 conflict_policy 单点。
+        // 回补软失败 = 该侧本轮跳过对账（fail-closed），游标经
+        // authority_cursor_failures 保留；Err 仅限会话代际失配，整轮终止。
+        // Note: 回补块大小/预算与失败语义的取舍 — 见 .agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md
+        let mut read_for_reconcile = read_ids;
+        let mut starred_for_reconcile = starred_ids;
+        if let Some(ids) = read_for_reconcile.as_ref() {
+            match backfill_authority_collection(db, session, client, "read", ids, &mut maps, report)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    authority_cursor_failures += 1;
+                    read_for_reconcile = None;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if let Some(ids) = starred_for_reconcile.as_ref() {
+            match backfill_authority_collection(
+                db, session, client, "starred", ids, &mut maps, report,
+            )
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    authority_cursor_failures += 1;
+                    starred_for_reconcile = None;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if read_for_reconcile.is_some() || starred_for_reconcile.is_some() {
             let conn = db.lock().await;
             // OPT-006：对账是回写边界——代际失配丢弃整份成功集合。
             session.ensure_current(&conn)?;
-            if let Some(ids) = read_ids.as_deref() {
+            if let Some(ids) = read_for_reconcile.as_deref() {
                 if let Err(e) = reconcile_reader_state(&conn, Some(ids), None, &maps, report) {
                     report.errors.push(format!(
                         "read 状态对账中断：本地写入失败（{e}），下一轮重放"
                     ));
                 }
             }
-            if let Some(ids) = starred_ids.as_deref() {
+            if let Some(ids) = starred_for_reconcile.as_deref() {
                 if let Err(e) = reconcile_reader_state(&conn, None, Some(ids), &maps, report) {
                     report.errors.push(format!(
                         "starred 状态对账中断：本地写入失败（{e}），下一轮重放"
@@ -426,6 +471,97 @@ pub(super) async fn pull_entries_greader(
         );
     }
     Ok(())
+}
+
+/// B2：把权威集合中「尚无本地行」的 id 逐块拉 contents 并合并。
+/// 返回 `Ok(true)` = 该集合全部处理完成（含预算内子集）；`Ok(false)` =
+/// 单请求/合并失败（错误已记入 report），调用方跳过该侧对账并保留游标；
+/// `Err` 仅限会话代际失配（整轮终止）。
+///
+/// 只补集合内缺失的 id（unbound = 集合 id − maps.mf_id_to_article 的键），
+/// 绝不额外列举；合并走 [`merge_pulled_entry`] 既有四分支匹配链（远端 feed
+/// 未绑定的条目按有限兼容分支记账 + 已读广播，与主列举分块同口径）。
+/// 回补结果不推动任何游标——游标只由主列举窗口的成败决定。
+async fn backfill_authority_collection(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    client: &GReaderClient,
+    collection: &'static str,
+    ids: &[i64],
+    maps: &mut db::SyncMatchMaps,
+    report: &mut SyncReport,
+) -> AppResult<bool> {
+    let unbound_ids: Vec<i64> = ids
+        .iter()
+        .copied()
+        .filter(|id| !maps.mf_id_to_article.contains_key(id))
+        .collect();
+    if unbound_ids.is_empty() {
+        return Ok(true);
+    }
+    let budget = unbound_ids.len().min(GR_BACKFILL_MAX_IDS_PER_SYNC);
+    if budget < unbound_ids.len() {
+        report.errors.push(format!(
+            "GR {collection} 集合回补达到每轮 {GR_BACKFILL_MAX_IDS_PER_SYNC} 条预算 \
+             （本轮补 {budget} 条，剩余下轮续补；集合本身完整，对账照常执行）"
+        ));
+    }
+    for chunk in unbound_ids[..budget].chunks(GR_BACKFILL_CHUNK_SIZE) {
+        // OPT-006：每个回补请求前复核代际。
+        if !session_is_current(db, session).await {
+            return Err(SyncSession::stale_error());
+        }
+        let entries = match client.item_contents(chunk).await {
+            Ok(v) => v,
+            Err(e) => {
+                report.errors.push(format!(
+                    "GR {collection} 集合回补请求失败，该侧本轮跳过对账（游标保留）: {e}"
+                ));
+                return Ok(false);
+            }
+        };
+        // 远端 feed 未绑定的条目按有限兼容合并（镜像主列举分块的既有口径）：
+        // 记 binding_incomplete 并继续，不算本侧软失败。
+        let mut unbound_feeds = BTreeSet::new();
+        for e in &entries {
+            if let Some(feed_id) = item_feed_remote_id(e) {
+                if !maps.feed_mf_to_id.contains_key(&feed_id) {
+                    unbound_feeds.insert(feed_id);
+                }
+            }
+        }
+        if !unbound_feeds.is_empty() {
+            report.binding_incomplete = true;
+            report.errors.push(format!(
+                "GR {collection} 回补条目所属远端 feed 尚无本地绑定，按有限兼容合并: {:?}",
+                unbound_feeds
+            ));
+        }
+        let mut merge_error: Option<AppError> = None;
+        {
+            let conn = db.lock().await;
+            // OPT-006：合并是回写边界——响应在途期间换号则本块丢弃。
+            if session.ensure_current(&conn).is_err() {
+                return Err(SyncSession::stale_error());
+            }
+            for e in &entries {
+                if let Err(err) = merge_pulled_entry(&conn, e, maps, report) {
+                    merge_error = Some(err);
+                    break;
+                }
+            }
+        }
+        if let Some(err) = merge_error {
+            // GR 逐语句提交：maps 的每次突变都对应已提交的 DB 写；失败条目
+            // 之后的条目未处理——本侧立即停止（不继续消耗预算），按软失败
+            // 跳过该侧对账，游标保留，下一轮重拉同一集合续补。
+            report.errors.push(format!(
+                "GR {collection} 集合回复合并失败，该侧本轮跳过对账（游标保留）: {err}"
+            ));
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// 分页拉取某 Google Reader stream 的全部条目 id（read / starred 权威集合）。
