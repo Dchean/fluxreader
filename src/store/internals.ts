@@ -654,12 +654,26 @@ let countsFetchSerial = 0;
     计数落地要求为 0——发起前已有但尚未提交的意图不得被服务端快照覆盖。 */
 let localFlagWritesInFlight = 0;
 
+/** 本地读/藏写**结算**序号：每次写落定（成功或回滚）推进（endLocalFlagWrite 唯一写点）。
+    计数落地第三判据的依据：counts_snapshot 与 set_read 在后端共用同一把 DB 锁
+    （commands/articles.rs），快照读取与写提交的服务端先后序由锁竞争决定，前端
+    无法从响应到达顺序推断快照是否已含该写——「取数窗口内发生过结算」⇒ 快照
+    相对终态可能陈旧，拒落并补一次权威对账（宁可多一次 IPC，不落可能陈旧的数字）。
+    Note: 计数落地第三判据（写结算序号）— 见 .agents/notes/implemented/bug-fix/2026-10-31-计数落地写结算判据与窄列视觉修复.md */
+let localFlagWriteSettleSerial = 0;
+
+/** TASK-B3：读当前写结算序号（计数读取发起时快照、落地时比对，判据见上）。 */
+export function currentFlagWriteSettleSerial(): number {
+  return localFlagWriteSettleSerial;
+}
+
 export function beginLocalFlagWrite(): void {
   localFlagWritesInFlight += 1;
 }
 
 export function endLocalFlagWrite(): void {
   localFlagWritesInFlight = Math.max(0, localFlagWritesInFlight - 1);
+  localFlagWriteSettleSerial += 1;
 }
 
 /** 计数读取发起（reload 与对账共用）：返回本次读取令牌。 */
@@ -742,6 +756,7 @@ export async function reconcileCountsOrdered(): Promise<CountsReconcileOutcome> 
   const layout = s0.activeContentLayout;
   const dedup = s0.settings.smartDedup;
   const flagSerial = currentLocalFlagWriteSerial();
+  const settleSerial = currentFlagWriteSettleSerial();
   const token = beginCountsFetch();
   let snap: Awaited<ReturnType<typeof api.countsSnapshot>>;
   try {
@@ -753,6 +768,13 @@ export async function reconcileCountsOrdered(): Promise<CountsReconcileOutcome> 
   const s1 = appStore().getState();
   if (currentLocalFlagWriteSerial() !== flagSerial) return 'stale';
   if (!canLandCounts(token)) return 'stale';
+  if (currentFlagWriteSettleSerial() !== settleSerial) {
+    /* B3：取数窗口内发生过写结算（快照可能不含该写，服务端锁序不定向）——
+       拒落并安排权威对账：该结算自身的 scheduleCountsReconcile 在 dedup 关闭时
+       是 no-op，必须在此兜底；再拒落只由新的结算事件触发，必然收敛。 */
+    scheduleCountsReconcile({ force: true });
+    return 'stale';
+  }
   if (s1.settings.smartDedup !== dedup) return 'stale';
   const feedCounts = feedCountsFromRows(snap.feeds);
   if (!feedCounts) return 'skipped';

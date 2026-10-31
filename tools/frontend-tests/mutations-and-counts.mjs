@@ -7,7 +7,7 @@
 export const id = 'mutations-and-counts';
 
 export async function run(ctx) {
-  const { S, store, checkNew, nTick, resetStore, bootFixture, NOW, iso, mkRow, countsFromRows, selectVisibleEntries, selectTreeCounts, selectViewCounts, bodyOf, overrideGlobal, viewEntriesCache } = ctx;
+  const { S, store, checkNew, nTick, resetStore, bootFixture, NOW, iso, mkRow, countsFromRows, COUNTS, selectVisibleEntries, selectTreeCounts, selectViewCounts, bodyOf, overrideGlobal, viewEntriesCache } = ctx;
   await ctx.useMainBackend();
 
   /* ============================================================
@@ -66,6 +66,63 @@ export async function run(ctx) {
   checkNew('(e) 后端计数已为 0 时标读不产生负数（未读计数夹取在 0）',
     store.getState().feedCounts.get('12')?.unread === 0
     && store.getState().entries.find((a) => a.id === '104')?.isRead === true);
+
+  /* ============================================================
+     (e2) B3 计数落地窗口：写结算于 reload 计数 fetch 窗口内 → 终态计数不得回退
+
+     复现审计探针场景 B：单条 set_read **在途**时发起 reload，结算（endLocalFlagWrite）
+     落在 counts_snapshot 取数窗口内。后端 counts_snapshot 与 set_read 共用同一把
+     DB 锁（commands/articles.rs），快照读取与写提交的服务端先后序不定向——修前
+     落地守卫（令牌最新 + 写前沿未动 + 落地时无在途写）对该窗口双盲：toggle 的
+     bump 已计入发起时写前沿、结算又清空在途计数 → 陈旧快照照常落地 → unread
+     回退而条目 isRead=true，dedup 关闭时无自愈。（toggle 晚于 reload 发起的形态
+     由既有写前沿比对守卫拒落，不需要本判据——时序必须按审计形态摆。）
+     修后：结算序号在窗口内推进 → 快照拒落 + 强制对账收敛到后端口径。
+     夹具口径：feedCountsImpl = countsFromRows（忠实聚合，对账可收敛）；set_read
+     响应经 overrideGlobal 挂起、释放时手动落库（模拟后端在快照读取之后提交）；
+     释放的陈旧快照传静态 COUNTS（= set_read 提交前的读数：101 仍未读）。
+     ============================================================ */
+  await bootFixture();
+  S.feedCountsImpl = countsFromRows;
+  store.setState({
+    settings: { ...store.getState().settings, smartDedup: false },
+    activeArticleId: '101',
+  });
+  S.invokeCalls.length = 0;
+  /* 挂起 set_read 响应：toggle 发起（乐观段 + 写前沿 bump + 在途登记）但未结算 */
+  let releaseSetRead = null;
+  const heldSetRead = new Promise((resolve) => { releaseSetRead = resolve; });
+  const originalInvoke = globalThis.__INVOKE__;
+  const restoreInvoke = overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
+    if (cmd === 'set_read') {
+      S.invokeCalls.push({ cmd, args });
+      return heldSetRead;
+    }
+    return originalInvoke(cmd, args);
+  });
+  store.getState().toggleCurrentReadStatus();
+  try {
+    await nTick(2); // 乐观段落定（101 未读 → 未读 3→2）；set_read 仍在途
+    /* 挂起 reload 的 counts_snapshot（一次性 defer 计划）——发起时快照含 toggle 的写前沿 */
+    S.feedCountsPlan = { mode: 'defer' };
+    void store.getState().reloadFromBackend();
+    await nTick(2); // 4 个 IPC 发出，counts_snapshot 挂起（取数窗口开启）
+    /* set_read 结算于计数窗口内：先落库（模拟后端提交晚于快照读取），再回响应 */
+    S.backendRows.find((r) => r.id === 101).is_read = true;
+    releaseSetRead(null);
+    await nTick(2);
+    /* 释放陈旧快照（set_read 提交前的读数：feed10 unread=3，与行级终态 1 矛盾） */
+    S.pendingCounts[0].resolve(COUNTS);
+    await nTick(15);
+  } finally {
+    restoreInvoke();
+  }
+  const e2 = store.getState();
+  const e2CountsCalls = S.invokeCalls.filter((c) => c.cmd === 'counts_snapshot').length;
+  checkNew('(e2-b3) 写结算于计数 fetch 窗口内：陈旧快照拒落 + 补对账，终态未读=后端口径 1（修前落地陈旧值 3 回退）',
+    e2CountsCalls === 2
+    && e2.entries.find((a) => a.id === '101')?.isRead === true
+    && e2.feedCounts.get('10')?.unread === 1);
 
   /* ============================================================
      (f) markAllRead / markCurrentViewAllRead 的范围语义
