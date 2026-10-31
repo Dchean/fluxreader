@@ -50,6 +50,6 @@ CI 固定在 Windows 上跑 Rust：这是纯 Windows 客户端，DPAPI 凭据加
 
 ## 仓库卫生
 
-- 不要提交 `node_modules/`、`dist/`、`src-tauri/target/`、`*.db`、`tmp/`（都已在 `.gitignore` / `.zcodeignore` 中）。
+- 不要提交 `node_modules/`、`dist/`、`src-tauri/target/`、`*.db`、`tmp/`（都已在 `.gitignore` 中；`.zcodeignore` 为工具自生成的本机可选配置，不入库）。
 - 一次性探针与调研报告放在存档分支 `archive/tooling-and-reports`，不进主线。
 - 历史材料的定位（含 2026-09-16 历史重写前后的提交号对照）见 [docs/roadmap.md](docs/roadmap.md) 第七节。

@@ -1296,8 +1296,8 @@ body {
   width: 100%;
   display: block;
   /* 加载期占位：auto <ratio> = 有固有比例用固有（加载后自然比例），无则回落
-     4:3——与 estimateGalleryCardHeight 的估算口径（列宽×0.72+meta）一致，
-     消除「加载期塌缩 → 加载后跳高」的瀑布流重排。
+     4:3——与 estimateGalleryCardHeight 同为近似占位，真实高度由
+     measureElement 修正，消除「加载期塌缩 → 加载后跳高」的瀑布流重排。
      Note: 画廊加载占位 — 见 .agents/notes/implemented/bug-fix/2026-10-31-计数落地写结算判据与窄列视觉修复.md */
   aspect-ratio: auto 4 / 3;
 }

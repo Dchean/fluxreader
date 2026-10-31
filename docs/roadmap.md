@@ -1,6 +1,6 @@
 # 当前缺口与已知限制
 
-记录截至 2026-10-19 仍成立的未完成项与已知边界，按影响分层。已收口的事项不再列出；修复方案不在本文展开。为什么这样取舍见 `.agents/notes/`，测量边界见 [performance.md](performance.md)，协议语义见 [sync-compat-matrix.md](sync-compat-matrix.md)。
+记录截至 2026-10-31 仍成立的未完成项与已知边界，按影响分层。已收口的事项不再列出；修复方案不在本文展开。为什么这样取舍见 `.agents/notes/`，测量边界见 [performance.md](performance.md)，协议语义见 [sync-compat-matrix.md](sync-compat-matrix.md)。
 
 ## 一、用户可见的缺口
 
@@ -59,10 +59,9 @@
 
 ## 四、已评估并明确不修的边界
 
-这两条不是遗漏，改动它们需要新的决策：
+这一条不是遗漏，改动它需要新的决策：
 
 - **流式翻译的 delta 不经过 sanitizer**。逐 delta 过 sanitizer 可能切断跨 delta 的 HTML 标签，破坏流式渲染。行为折中是「流式期间按纯文本渲染，`done` 后切 HTML」，靠 CSP 的 `default-src 'self'`（脚本继承该值）作为纵深防御。当前原始 delta 使用 React 纯文本插值，完成后回读净化版；不能把「未逐段清洗」单独等同 XSS，也不能据此放宽 CSP。
-- **`get_setting` 对敏感键解密后可经通用 IPC 出 webview**。DPAPI 加密保护的是磁盘上的静态数据，不是 webview 运行时；改法需要给敏感键单独开命令并做调用方校验，收益与改动量不成比例。
 
 ## 五、代码卫生
 
@@ -73,3 +72,14 @@
 ## 六、产品语义待确认
 
 内容/条目分离已实现（v22 `contents` + `articles.content_id`），正文单一所有权与最后引用回收已落地。剩余是跨源同文的产品语义——read 广播、star 不广播——尚未由产品最终确认；同文副本的读状态传播政策仍是未经产品确认的默认（见 [sync-compat-matrix.md](sync-compat-matrix.md) §3）。
+
+## 七、收敛轮（2026-10-31）遗留与不做项
+
+2026-10-31 门禁先行收敛轮（阶段 A 替身语义对齐、阶段 B1-B4 源码修复、阶段 C 全新代理证伪复核）已收口的清单见 [审计修复收敛路线](../.agents/notes/implemented/process/2026-10-31-审计修复收敛路线.md)。以下为本轮明确不做、留待后续决策的项：
+
+- **P3 与美观批次**：WCAG 对比度批量收敛（五调色盘 × 深浅色 230 项关键配对计算 95 项违例，浅色 `star-color`/`danger`/`accent-light` 最重）；模态焦点陷阱缺失（Tab 可穿透到背景）；dialog 语义覆盖 1/9；产品树无 ErrorBoundary；settings 组件 async setState 无 alive 守卫（6 文件）。
+- **供应链**：ammonia/rustls/webpki-roots/tokio 等 12 条可修复 RustSec 升级（`cargo update` 级别，ammonia 需过清洗 payload 矩阵回归）；npm 开发链 vite/undici 2 个 high；CI action 未 SHA pin；安装包无 Windows 代码签名。
+- **性能**：同步端到端耗时基线缺失（需真实账号并单独约定读写边界）；Fever 空正文条目每轮 with_ids 重拉一次（回补记账候选）；F1 计数绝对耗时跨 SQLite 构建不可比（查询计划形态已由 CI 断言锁定）。
+- **架构**：`state ↔ github_auth ↔ config_sync` 三节点模块环；`internals.ts` 46 导出共享内核；`subscriptions.rs pull_feeds`（约 465 行）与 `fever_pull.rs pull_entries_fever`（505 行）超长函数；9 个零直测生产模块；组件直调 `api.*` 37 处无自动门禁。
+- **协议残留**：Fever 星标探测→mark 的 TOCTOU（Fever 协议无条件写，双设备并发同条目低频）；GR 远端显式标未读不在轻量同步回流（文档化 read-wins 政策，是否改双向属产品决策）；迁移 v31 无专属单测。
+- **流程遗留（不可逆）**：提交 `a26e8b4` 信息为 B1 夹具修复，实际卷入 B4 的 5 个文件（B4 代码唯一落点，内容正确但归属失真）。
