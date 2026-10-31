@@ -551,9 +551,11 @@ async fn gr_backfill_failure_skips_reconcile_side_and_keeps_cursor() {
 B2：Fever with_ids 回补的本地正文预过滤（请求计数）
 ============================================================ */
 
-/// 门禁（B2 Fever 预过滤）：首轮 full 后已有正文的条目不再出现在 with_ids
-/// 请求里；正文被清空的条目仍回补。修前 unread∪saved 全集每轮重拉
-/// （审计实测：2 万条库最坏 403 次串行往返/轮）。
+/// 门禁（B2 Fever 预过滤）：已有正文的条目不再出现在 with_ids 请求里；
+/// 服务端空正文的条目（首轮已拉、id ≤ 游标、本地无正文）仍回补。修前
+/// unread∪saved 全集每轮重拉（审计实测：2 万条库最坏 403 次串行往返/轮）。
+/// 空正文夹具用 `add_entry_full(content="")`：空内容走条目私有 contents 行，
+/// 不会连带清掉 e1-e3 共享的正文行（同内容按内容哈希共享行）。
 #[tokio::test]
 async fn fever_with_ids_backfill_skips_entries_with_local_body() {
     let server = MockGReader::start().await.expect("start mock server");
@@ -574,8 +576,17 @@ async fn fever_with_ids_backfill_skips_entries_with_local_body() {
     let e1 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p1", "P1", false, false);
     let e2 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p2", "P2", false, false);
     let e3 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p3", "P3", false, false);
+    let e4 = server.add_entry_full(
+        10,
+        "http://127.0.0.1:8765/fever/p4",
+        "P4",
+        false,
+        false,
+        "", // 服务端空正文：本地拉入后仍无正文，每轮留在 with_ids 通道
+        Vec::new(),
+    );
 
-    // 首轮 full：历史回溯取尽三条并写入正文
+    // 首轮 full：历史回溯取尽四条；e1-e3 有正文，e4 空正文
     let r1 = sync::states_phase(&db, &http, true)
         .await
         .expect("fever full");
@@ -584,17 +595,6 @@ async fn fever_with_ids_backfill_skips_entries_with_local_body() {
         "fever full 轮不应有错误：{:?}",
         r1.errors
     );
-
-    // 人为清空 p2 的正文 → 只有它仍需回补
-    {
-        let conn = db.lock().await;
-        conn.execute(
-            "UPDATE contents SET body_text = '', content_html = NULL
-             WHERE id = (SELECT content_id FROM articles WHERE url = ?1)",
-            rusqlite::params!["http://127.0.0.1:8765/fever/p2"],
-        )
-        .unwrap();
-    }
 
     let log_before = server.fever_query_log().len();
     let r2 = sync::states_phase(&db, &http, false)
@@ -616,25 +616,22 @@ async fn fever_with_ids_backfill_skips_entries_with_local_body() {
             requested.extend(csv.split(',').filter_map(|s| s.parse::<i64>().ok()));
         }
     }
-    assert!(
-        requested.contains(&e2),
-        "无正文的条目仍必须经 with_ids 回补：{requested:?}"
-    );
-    assert!(
-        !requested.contains(&e1) && !requested.contains(&e3),
-        "已有正文的条目不得再出现在 with_ids 请求中（审计 F1 固定成本）：{requested:?}"
+    requested.sort_unstable();
+    requested.dedup();
+    assert_eq!(
+        requested,
+        vec![e4],
+        "with_ids 必须只回补无正文的 e4；已有正文的 e1-e3 不得重拉（审计 F1 固定成本）"
     );
     {
         let conn = db.lock().await;
-        let bodies: i64 = conn
+        let bound: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM articles a JOIN contents c ON c.id = a.content_id
-                 WHERE a.url IN ('http://127.0.0.1:8765/fever/p1','http://127.0.0.1:8765/fever/p2','http://127.0.0.1:8765/fever/p3')
-                   AND (c.body_text != '' OR c.content_html IS NOT NULL)",
-                [],
+                "SELECT COUNT(*) FROM articles WHERE url = ?1 AND remote_id = ?2",
+                rusqlite::params!["http://127.0.0.1:8765/fever/p4", e4],
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(bodies, 3, "p2 经回补后正文应恢复（三条都有正文）");
+        assert_eq!(bound, 1, "e4 经 with_ids 回补后保持绑定");
     }
 }

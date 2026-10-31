@@ -1383,14 +1383,16 @@ pub fn upsert_remote_article(
     })
 }
 
-/// Fever with_ids 回补预过滤（B2）：返回 `ids` 中**本地还没有正文**的子集
-/// （绑定行的 content_html 与 body_text 均空，或该 id 尚无绑定行）。
-/// 正文判定与 `contents::content_non_empty` 同口径（html 或纯文本任一非空
-/// 即视为已有正文），分块查询避免超出 SQLite 变量上限。读失败透传 Err——
-/// 调用方必须退回全量回补，不得把失败当「全部已有正文」（那会漏补正文）。
-pub fn remote_ids_missing_body(conn: &Connection, ids: &[i64]) -> AppResult<Vec<i64>> {
+/// Fever with_ids 回补预过滤（B2）：返回 `ids` 中**本地已有正文**的子集
+/// （绑定行的 content_html 或 body_text 任一非空；判定与
+/// `contents::content_non_empty` 同口径）。返回的是「已有正文」集合，调用方
+/// 取补集得到仍需回补的 id——无绑定行的 id 天然不在本集合里，未拉过的
+/// 远端条目不会被误跳过。分块查询避免超出 SQLite 变量上限。读失败透传
+/// Err——调用方必须把补集视为全集（全量回补），不得把失败当「全部已有
+/// 正文」（那会漏补正文）。
+pub fn remote_ids_with_body(conn: &Connection, ids: &[i64]) -> AppResult<Vec<i64>> {
     const CHUNK: usize = 500;
-    let mut missing: Vec<i64> = Vec::new();
+    let mut with_body: Vec<i64> = Vec::new();
     for chunk in ids.chunks(CHUNK) {
         let placeholders = std::iter::repeat("?")
             .take(chunk.len())
@@ -1398,18 +1400,18 @@ pub fn remote_ids_missing_body(conn: &Connection, ids: &[i64]) -> AppResult<Vec<
             .join(",");
         let sql = format!(
             "SELECT a.remote_id FROM articles a \
-             LEFT JOIN contents c ON c.id = a.content_id \
+             JOIN contents c ON c.id = a.content_id \
              WHERE a.remote_id IN ({placeholders}) \
-               AND (c.body_text IS NULL OR c.body_text = '') \
-               AND (c.content_html IS NULL OR c.content_html = '')"
+               AND ((c.body_text IS NOT NULL AND c.body_text != '') \
+                 OR (c.content_html IS NOT NULL AND c.content_html != ''))"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
             r.get::<_, i64>(0)
         })?;
-        missing.extend(rows.collect::<Result<Vec<_>, _>>()?);
+        with_body.extend(rows.collect::<Result<Vec<_>, _>>()?);
     }
-    Ok(missing)
+    Ok(with_body)
 }
 
 /// 插入新文章（upsert_article_with_feed 的兜底路径）。
