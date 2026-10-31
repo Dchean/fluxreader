@@ -164,14 +164,16 @@ pub(super) async fn exec_push(
             return (done, failed);
         }
         let result = match &session.client {
-            Backend::GReader(c) => {
+            // GReader 走既有绝对语义通道（edit-tag add/remove）。
+            Backend::GReader(_) => {
                 let r = if *want_star {
-                    c.mark_starred(&[*remote_id]).await
+                    session.client.mark_starred(&[*remote_id]).await
                 } else {
-                    c.mark_unstarred(&[*remote_id]).await
+                    session.client.mark_unstarred(&[*remote_id]).await
                 };
                 r.map(|_| true)
             }
+            // Fever 按 api_version 变体收敛（Miniflux toggle 探测 / FreshRSS 直发）。
             Backend::Fever(c) => c.push_star_state(*remote_id, *want_star).await,
         };
         if !session_is_current(db, session).await {

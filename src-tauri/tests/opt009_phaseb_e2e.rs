@@ -1177,6 +1177,7 @@ fn quickadd_requests(server: &MockGReader) -> usize {
 /// 判别力：legacy 路径下挂载失败时队项已被剪掉（outbox 为空即红）。
 #[tokio::test]
 async fn opml_import_mount_failure_keeps_folder_target_then_converges() {
+    let server = MockGReader::start().await.expect("start mock");
     let tmp = common::unique_db_path("opt009b_opml_mount");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);

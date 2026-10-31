@@ -1529,7 +1529,7 @@ fn route(
                 .find(|(u, _)| *u == url)
                 .map(|(_, id)| *id);
             match existing {
-                Some(id) => match *srv.quickadd_duplicate.lock().unwrap() {
+                Some(_) => match *srv.quickadd_duplicate.lock().unwrap() {
                     QuickaddDuplicate::FreshRssNumResultsZero => (
                         200,
                         serde_json::json!({"numResults": 0, "error": "feed already exists"})
