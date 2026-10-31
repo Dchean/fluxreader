@@ -421,6 +421,7 @@ impl FeverClient {
             base: base.trim().trim_end_matches('/').to_string(),
             api_key: self.api_key.clone(),
             http: self.http.clone(),
+            api_version: self.api_version.clone(),
         }
     }
 
