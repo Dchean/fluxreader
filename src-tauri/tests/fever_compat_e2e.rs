@@ -2375,7 +2375,7 @@ async fn miniflux_stale_star_queue_item_does_not_flip_server_state() {
     );
     {
         let conn = db.lock().await;
-        assert_eq!(article_state(&conn, 7).unwrap().1, true, "本地意图保持");
+        assert!(article_state(&conn, 7).unwrap().1, "本地意图保持");
         let left: i64 = conn
             .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
             .unwrap();
