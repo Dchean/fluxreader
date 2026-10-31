@@ -42,6 +42,25 @@ fn unbound_page_feeds(page: &[ItemContent], maps: &db::SyncMatchMaps) -> BTreeSe
         .collect()
 }
 
+/// B2：with_ids 回补的 need 集合构造（预过滤的纯逻辑部分，返回**未排序**的
+/// 候选，由调用方 sort+dedup 后作为请求集合）。三个排除维度彼此独立：
+/// - `seen`：本轮页事务已合并过的条目（重复处理无意义）；
+/// - `missing_body`：DB 侧判定「本地还没有正文」的 id——只有它里面的 id 才
+///   需要点查正文；已有正文的条目每轮重拉是纯固定成本（审计 F1 反例）。
+fn with_ids_need(
+    unread: &[i64],
+    starred: &[i64],
+    seen: &HashSet<i64>,
+    missing_body: &HashSet<i64>,
+) -> Vec<i64> {
+    unread
+        .iter()
+        .chain(starred.iter())
+        .copied()
+        .filter(|id| !seen.contains(id) && missing_body.contains(id))
+        .collect()
+}
+
 fn restore_fever_pull_state(
     conn: &mut Connection,
     previous_entry_id: i64,
@@ -632,12 +651,37 @@ pub(super) async fn pull_entries_fever(
 
     // ④ 权威集合中本地还没有正文的条目（未读/收藏），用 with_ids 分块补齐。
     // 这是 id 精确通道，结果**不**推动 `last_sync_entry_id`（游标纪律）。
-    let mut need: Vec<i64> = unread
+    let candidates: Vec<i64> = unread
         .iter()
         .chain(starred.iter())
         .copied()
         .filter(|id| !seen.contains(id))
         .collect();
+    // B2 预过滤：构造 need 前先按 DB 排除「本地已有正文」的 id——注释声称的
+    // 语义此前只排除了本轮 seen，权威集合里已有正文的条目每轮被全量重拉
+    // （审计实测：2 万条库最坏 403 次串行往返/轮的固定成本）。状态对账由 ⑤
+    // 的权威集合独立承担，不依赖本次正文往返。DB 读失败 = 无法判定哪些已有
+    // 正文 = 不排除任何 id（fail-open 退回全量重拉：宁多打请求，不漏补正文）。
+    // Note: 预过滤口径与 fail-open 方向的取舍 — 见 .agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md
+    let missing_body: HashSet<i64> = if candidates.is_empty() {
+        HashSet::new()
+    } else {
+        {
+            let conn = db.lock().await;
+            // OPT-006：DB 读取前复核代际。
+            session.ensure_current(&conn)?;
+            match db::remote_ids_missing_body(&conn, &candidates) {
+                Ok(missing) => missing.into_iter().collect(),
+                Err(e) => {
+                    report
+                        .errors
+                        .push(format!("读取本地正文覆盖失败，with_ids 退回全量补齐: {e}"));
+                    candidates.iter().copied().collect()
+                }
+            }
+        }
+    };
+    let mut need = with_ids_need(&unread, &starred, &seen, &missing_body);
     need.sort_unstable();
     need.dedup();
     for chunk in need.chunks(50) {
@@ -1069,6 +1113,95 @@ mod tests {
         assert_eq!(
             db::fever_history_state(&conn).unwrap(),
             db::FeverHistoryState::Pending(55)
+        );
+    }
+
+    /// B2 预过滤纯逻辑锁定：need = 权威集合 − seen − 已有正文。判别力：
+    /// 去掉 missing_body 过滤（回退旧行为）时「已有正文」断言红；去掉 seen
+    /// 过滤时 seen 条目断言红。
+    #[test]
+    fn with_ids_need_excludes_seen_and_entries_with_local_body() {
+        let seen: HashSet<i64> = [3].into_iter().collect();
+        let missing_body: HashSet<i64> = [2, 4].into_iter().collect();
+        let need = with_ids_need(&[1, 3], &[3, 4], &seen, &missing_body);
+        let mut sorted = need.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted,
+            vec![2, 4],
+            "已有正文的 1 不得出现在请求集合；seen 的 3 不得出现；无正文的 2/4 仍回补"
+        );
+        // 未读与收藏集合的并集去重由调用方 sort+dedup 承担。
+        assert_eq!(need.len(), sorted.len(), "夹具无重复输入");
+    }
+
+    /// B2 预过滤 DB 判定锁定：`remote_ids_missing_body` 只保留「无绑定行 /
+    /// 绑定行正文（html 与纯文本）均空」的 id；有正文的绑定行不再回补。
+    /// 判别力：判定改成恒空集（全部视为已有正文）时无正文 id 断言红；改成
+    /// 恒全集时已有正文 id 断言红。
+    #[test]
+    fn remote_ids_missing_body_keeps_only_entries_without_local_body() {
+        let conn = conn();
+        let folder = db::create_folder(&conn, "分类", "article").unwrap();
+        let feed = db::insert_feed(
+            &conn,
+            "https://f.example/body-prefilter",
+            None,
+            "F",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let with_body = NewArticle {
+            guid: "g-body".into(),
+            url: Some("https://e.example/with-body".into()),
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>正文</p>".into()),
+            body_text: "正文".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-01-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let aid_body = db::upsert_article_with_feed(&conn, feed, &with_body, false)
+            .unwrap()
+            .0;
+        db::set_article_remote_id(&conn, aid_body, 101).unwrap();
+        let empty_body = NewArticle {
+            guid: "g-empty".into(),
+            url: Some("https://e.example/empty-body".into()),
+            title: "t".into(),
+            author: None,
+            summary: None,
+            content_html: None,
+            body_text: String::new(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-01-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let aid_empty = db::upsert_article_with_feed(&conn, feed, &empty_body, false)
+            .unwrap()
+            .0;
+        db::set_article_remote_id(&conn, aid_empty, 102).unwrap();
+
+        // 101 已有正文；102 绑定行无正文；103 无任何绑定行（远端未拉过）。
+        let mut missing = db::remote_ids_missing_body(&conn, &[101, 102, 103]).unwrap();
+        missing.sort_unstable();
+        assert_eq!(
+            missing,
+            vec![102, 103],
+            "已有正文 101 必须被排除；无正文 102 与未绑定 103 仍需回补"
         );
     }
 }
