@@ -1,9 +1,10 @@
 //! 同步引擎三期改造的端到端测试：
 //! ① 即时状态推送（push_states_now）：只推不拉、read 广播副本、队列清空
 //! ② 分步同步（feeds_phase / states_phase）：两阶段独立可跑、锁不跨 await
-//! ③ 旧变更收敛：changed_at 早于增量游标的远端已读，full 对账路径能追上
-//!    （light 路径追不上——分层设计：快路径便宜、慢路径彻底）
-//! 运行：cargo test --test sync_phases_e2e -- --ignored --nocapture
+//! ③ 旧变更收敛：远端已读经 read/starred 权威集合对账收敛——已绑定行 light
+//!    即收敛；未绑定行（直连抓取、发布时间早于增量游标）经权威集合
+//!    item_contents 回补绑定后收敛（阶段 B2）；full 对账路径同样收敛
+//! 运行：cargo test --test sync_phases_e2e --nocapture
 
 mod common;
 mod mock_greader;

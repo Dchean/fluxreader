@@ -1506,8 +1506,8 @@ fn route(
             (200, "OK".into())
         }
         // quickadd：订阅。重复 URL 按真实服务端语义拒绝（默认 FreshRSS
-        // 200 + numResults=0；可切换 Miniflux 500），返回既有 id 只是旧 mock
-        // 契约、需显式开启（阶段 B 候选用例）。
+        // 200 + numResults=0；可切换 Miniflux 500）——客户端须按
+        // resolve_existing_feed_id 先解析既有订阅，不得依赖幂等重发。
         ("POST", p) if p.ends_with("/reader/api/0/subscription/quickadd") => {
             // TASK-074 故障注入：push 失败 → 队项保留在 sync_queue
             if srv.fail_quick_add.load(std::sync::atomic::Ordering::SeqCst) {
