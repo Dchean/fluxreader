@@ -81,6 +81,10 @@ jobs:
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
+      - name: Type check (cargo check)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
       - name: Lint (clippy, deny warnings)
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
