@@ -573,9 +573,10 @@ async fn fever_with_ids_backfill_skips_entries_with_local_body() {
     sync::feeds_phase(&db, &http)
         .await
         .expect("fever feeds phase");
-    let e1 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p1", "P1", false, false);
-    let e2 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p2", "P2", false, false);
-    let e3 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p3", "P3", false, false);
+    // e1-e3 携带默认正文（断言只经 with_ids 请求集合间接锁定，id 无需绑定）
+    let _e1 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p1", "P1", false, false);
+    let _e2 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p2", "P2", false, false);
+    let _e3 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p3", "P3", false, false);
     let e4 = server.add_entry_full(
         10,
         "http://127.0.0.1:8765/fever/p4",
