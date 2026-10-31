@@ -103,6 +103,23 @@ type QuickaddBarrierSlot = Option<(
     tokio::sync::oneshot::Receiver<()>,
 )>;
 
+/// quickadd 对「远端已持有的同 URL」的响应形态（2026-10-31 审计对齐）。
+/// 真实服务端没有一家对重复 URL 返回既有 id：FreshRSS 捕获 addFeed 异常后
+/// 仍以 HTTP 200 回 `numResults: 0`（freshrss-greader.php quickadd()）；
+/// Miniflux 的 subscribe 失败走 JSONServerError → HTTP 500
+/// （internal/googlereader/handler.go quickAddHandler）。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum QuickaddDuplicate {
+    /// FreshRSS 形态：200 + `numResults: 0`（无 streamId）。
+    FreshRssNumResultsZero,
+    /// Miniflux 形态：500 + feed_already_exists。
+    Miniflux500,
+    /// 旧 mock 契约（重复 URL 返回既有 id）。没有任何真实服务端这样表现，
+    /// 仅供阶段 B（F2 quick_add 跨重启收敛）候选用例在源码修复前继续运行，
+    /// 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md。
+    ReturnExistingId,
+}
+
 pub struct MockGReader {
     pub port: u16,
     pub entries: Mutex<Vec<MockEntry>>,
@@ -114,7 +131,8 @@ pub struct MockGReader {
     pub created_feeds: Mutex<Vec<(String, i64)>>,
     /// 兼容旧测试断言：收到的收藏切换
     pub bookmark_toggles: Mutex<Vec<i64>>,
-    /// 服务端"已有"订阅（url → feed_id）：quickadd 同 URL 返回既有 id
+    /// 服务端"已有"订阅（url → feed_id）：quickadd 同 URL 按重复语义拒绝
+    /// （`quickadd_duplicate`；旧幂等形态需显式切换），新建的订阅也会登记
     pub existing_feed_urls: Mutex<Vec<(String, i64)>>,
     /// 远端订阅列表（GET subscription/list 返回）
     pub subscriptions: Mutex<Vec<MockSubscription>>,
@@ -167,6 +185,8 @@ pub struct MockGReader {
     /// 用于验证恢复路径对解析结果**只做一次 quick_add**（不持久化就会在列表
     /// 长期失败/重试时无界造重复项），并靠列表正面证据清除所有同 URL 订阅。
     pub quickadd_non_idempotent: std::sync::atomic::AtomicBool,
+    /// quickadd 对重复 URL 的响应形态（默认 FreshRSS 200 + numResults=0）。
+    pub quickadd_duplicate: Mutex<QuickaddDuplicate>,
     /// 最近一次 subscription/edit 请求的表单键值（A-2 断言 t=/a= 参数）
     pub last_subscription_edit_form: Mutex<Vec<(String, String)>>,
     /// OPT-009 阶段 B：subscription/edit 响应屏障（见槽位类型说明）。
@@ -259,6 +279,7 @@ impl MockGReader {
             fail_subscription_list: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_unknown_id_returns_400: std::sync::atomic::AtomicBool::new(false),
             quickadd_non_idempotent: std::sync::atomic::AtomicBool::new(false),
+            quickadd_duplicate: Mutex::new(QuickaddDuplicate::FreshRssNumResultsZero),
             last_subscription_edit_form: Mutex::new(Vec::new()),
             subscription_edit_barrier: Mutex::new(None),
             quickadd_barrier: Mutex::new(None),
@@ -411,6 +432,12 @@ impl MockGReader {
     pub fn set_quickadd_non_idempotent(&self, on: bool) {
         self.quickadd_non_idempotent
             .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 设置 quickadd 对重复 URL 的响应形态（见 [`QuickaddDuplicate`]）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_quickadd_duplicate(&self, mode: QuickaddDuplicate) {
+        *self.quickadd_duplicate.lock().unwrap() = mode;
     }
 
     /// OPT-009 B2-R2 复审 P2-C：置位后 unsubscribe 未知 id 返回 400（FreshRSS 形态）。
@@ -1482,7 +1509,9 @@ fn route(
             }
             (200, "OK".into())
         }
-        // quickadd：订阅（幂等：已存在返回既有 id）
+        // quickadd：订阅。重复 URL 按真实服务端语义拒绝（默认 FreshRSS
+        // 200 + numResults=0；可切换 Miniflux 500），返回既有 id 只是旧 mock
+        // 契约、需显式开启（阶段 B 候选用例）。
         ("POST", p) if p.ends_with("/reader/api/0/subscription/quickadd") => {
             // TASK-074 故障注入：push 失败 → 队项保留在 sync_queue
             if srv.fail_quick_add.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1511,12 +1540,26 @@ fn route(
                     .find(|(u, _)| *u == url)
                     .map(|(_, id)| *id)
             };
-            if let Some(id) = existing {
-                (
-                    200,
-                    serde_json::json!({"numResults": 1, "streamId": format!("feed/{id}")})
-                        .to_string(),
-                )
+            if existing.is_some() {
+                match *srv.quickadd_duplicate.lock().unwrap() {
+                    QuickaddDuplicate::FreshRssNumResultsZero => (
+                        200,
+                        serde_json::json!({"numResults": 0, "error": "feed already exists"})
+                            .to_string(),
+                    ),
+                    QuickaddDuplicate::Miniflux500 => (
+                        500,
+                        r#"{"error_message":"feed_already_exists"}"#.to_string(),
+                    ),
+                    QuickaddDuplicate::ReturnExistingId => {
+                        let id = existing.expect("checked above");
+                        (
+                            200,
+                            serde_json::json!({"numResults": 1, "streamId": format!("feed/{id}")})
+                                .to_string(),
+                        )
+                    }
+                }
             } else {
                 srv.subscribed_urls.lock().unwrap().push(url.clone());
                 srv.created_feeds.lock().unwrap().push((url.clone(), 1));
@@ -1525,12 +1568,9 @@ fn route(
                     *n += 1;
                     *n
                 };
-                // 幂等登记（B2-R1）：真实服务端的 quick_add 对已订阅 URL 返回既有
-                // 订阅的 id（固定上游 quickadd → addFeed 返回 `feed/<id>`；本仓 B1
-                // 决策与既有用例也以「quick_add 幂等」为前提，见 adopt_remote_id_for_pending
-                // 注释与 subscribe_bind_failure_* 用例）。这里把新创建的订阅登记进
-                // `existing_feed_urls`，使**同 URL 的再次 quick_add 返回同一 id**——
-                // 退订意图的「未知 id 恢复」路径依赖这一契约（不得建模成每次新建）。
+                // 登记新创建的订阅进 `existing_feed_urls`（「远端当前持有」注册表，
+                // 后续同 URL quickadd 按重复语义拒绝）；退订意图的「未知 id 恢复」
+                // 依赖注册表与订阅列表证据，不依赖「重复 quick_add 返回既有 id」。
                 // 非幂等注入（B2-R2）下**不登记**：后续同 URL 调用继续新建。
                 if !non_idempotent {
                     srv.existing_feed_urls

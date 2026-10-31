@@ -458,6 +458,11 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
 #[tokio::test]
 async fn create_feed_conflict_returns_existing_id() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2）：本用例直接锁定「重复 quick_add 返回既有 id」的
+    // 旧 mock 契约；真实服务端拒绝重复 URL（FreshRSS 200+numResults=0 /
+    // Miniflux 500）。源码修复与去糖原子替换，
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let http = app_lib::ingestion::build_client(10);
     let client = app_lib::greader::GReaderClient::new(&server.url(), "mock/abc", http.clone());
 

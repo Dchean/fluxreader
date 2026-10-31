@@ -51,6 +51,17 @@ enum IdStyle {
     JsonNumber,
 }
 
+/// mark=item&as=saved/unsaved 的星标语义（2026-10-31 审计对齐）。
+#[derive(Clone, Copy, Default, PartialEq)]
+enum StarMark {
+    /// FreshRSS（及 Fever 规范字面义）：绝对赋值（saved→收藏、unsaved→取消）。
+    #[default]
+    Absolute,
+    /// Miniflux 固定源码（internal/fever/handler.go:443-467）：saved 与 unsaved
+    /// 都走 storage.ToggleStarred——语义由条目当前状态决定。
+    Toggle,
+}
+
 #[derive(Default)]
 struct FixtureOptions {
     id_style: IdStyle,
@@ -64,6 +75,8 @@ struct FixtureOptions {
     ignore_max_id: bool,
     /// true 时每个历史页把首个条目重复一遍（分页窗口重复），锁去重。
     dup_echo: bool,
+    /// mark=item 的星标语义变体（默认 FreshRSS 绝对赋值）。
+    star_mark: StarMark,
 }
 
 #[derive(Clone)]
@@ -120,6 +133,7 @@ struct Fixture {
     max_id_asc_page: bool,
     ignore_max_id: bool,
     dup_echo: bool,
+    star_mark: StarMark,
     /// 第 N 次 max_id 调用返回 500（1 起算），用于分页失败可重试用例。
     max_id_fail_at: Mutex<Option<usize>>,
     max_id_calls: AtomicUsize,
@@ -182,6 +196,7 @@ impl Fixture {
             max_id_asc_page: opts.max_id_asc_page,
             ignore_max_id: opts.ignore_max_id,
             dup_echo: opts.dup_echo,
+            star_mark: opts.star_mark,
             max_id_fail_at: Mutex::new(None),
             max_id_calls: AtomicUsize::new(0),
             since_id_fail_at: Mutex::new(None),
@@ -676,8 +691,12 @@ fn route(srv: &Fixture, hit: &Hit) -> (u16, String) {
                 match as_.as_str() {
                     "read" => e.read = true,
                     "unread" => e.read = false,
-                    "saved" => e.saved = true,
-                    "unsaved" => e.saved = false,
+                    // 星标语义按服务端变体：FreshRSS 绝对赋值；Miniflux 对
+                    // saved/unsaved 都取反（ToggleStarred）。
+                    "saved" | "unsaved" => match srv.star_mark {
+                        StarMark::Absolute => e.saved = as_ == "saved",
+                        StarMark::Toggle => e.saved = !e.saved,
+                    },
                     _ => {}
                 }
             }
@@ -2170,6 +2189,54 @@ async fn mark_sends_one_decimal_id_per_request() {
         );
     }
     assert!(srv.entry_read(5705) && srv.entry_read(LONG_ID));
+}
+
+/// Miniflux 星标语义（2026-10-31 审计对齐）：mark=item&as=saved/unsaved 都是对
+/// 当前状态的取反切换（internal/fever/handler.go:443-467 → storage.ToggleStarred）。
+/// 从未收藏 → 单次 as=saved 推送天然收敛（「从未收藏→收藏单次推送」用例在两种
+/// 变体下都绿）；「远端已收藏再推 as=saved」会翻转成未收藏——产品当前的绝对赋值
+/// 假设与该语义冲突（星标判向 = B1 修复项），翻转场景由阶段 B 配对红门禁锁定，
+/// 本用例锁「单次推送收敛 + 夹具真实语义判别」。
+#[tokio::test]
+async fn miniflux_star_mark_toggles_current_state() {
+    let srv = Fixture::start_with(FixtureOptions {
+        star_mark: StarMark::Toggle,
+        ..Default::default()
+    })
+    .await;
+    srv.set_groups(vec![(1, "分类")]);
+    srv.set_feeds(vec![(10, "源", "http://example.com/f.rss")]);
+    srv.add_entry(7, 10, "A", false, false);
+
+    let (db, tmp) = seed_db("fever_compat_star_toggle", &srv);
+    sync::sync_now(&db, &http())
+        .await
+        .expect("full sync 应成功");
+    {
+        let conn = db.lock().await;
+        let aid: i64 = conn
+            .query_row("SELECT id FROM articles WHERE remote_id = 7", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        db::set_starred(&conn, aid, true).unwrap();
+        db::enqueue_sync(&conn, Some(aid), None, "star", None).unwrap();
+    }
+    sync::push_states_now(&db, &http()).await;
+    assert!(
+        srv.entry_saved(7),
+        "从未收藏 → as=saved 单次推送必须收敛为收藏（toggle 下同样成立）"
+    );
+
+    // 夹具语义判别（真实 Miniflux 行为，不经产品 push）：已收藏条目再收到一次
+    // as=saved（重复推送/丢失响应后的重试形态）会翻转为未收藏。
+    let client = FeverClient::new(&srv.url(), USER, PASS, http()).at_resolved(&srv.api_root());
+    client.mark_starred(&[7]).await.expect("mark 调用成功");
+    assert!(
+        !srv.entry_saved(7),
+        "Miniflux 变体：已收藏条目再收 as=saved 必须翻转（ToggleStarred）"
+    );
+    let _ = std::fs::remove_file(&tmp);
 }
 
 /* ============================================================

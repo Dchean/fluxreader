@@ -1178,6 +1178,10 @@ fn quickadd_requests(server: &MockGReader) -> usize {
 #[tokio::test]
 async fn opml_import_mount_failure_keeps_folder_target_then_converges() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2 quick_add 跨重启收敛）：依赖「重复 quick_add 返回
+    // 既有 id」的旧 mock 契约；真实服务端拒绝重复 URL，恢复需走列表证据。
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_opml_mount");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -1362,6 +1366,86 @@ async fn opml_import_quickadd_failure_retries_without_duplicate_remote_subscript
         "最终挂载必须带分类目标，实际 {form:?}"
     );
     let _ = std::fs::remove_file(&tmp);
+}
+
+/// 真实服务端对重复 URL 的 quickadd 语义（2026-10-31 审计对齐，mock 默认）：
+/// FreshRSS 返回 200 + numResults=0（无 streamId，freshrss-greader.php
+/// quickadd() 的 catch 分支）、Miniflux 返回 500（feed_already_exists，
+/// handler.go quickAddHandler → JSONServerError）。产品当前对两者都只能
+/// Retry 保留意图（按列表证据解析 = B1 修复项），且不得重复创建远端订阅。
+#[tokio::test]
+async fn quickadd_duplicate_url_is_rejected_by_real_servers_and_intent_is_kept() {
+    for (name, mode) in [
+        (
+            "freshrss",
+            mock_greader::QuickaddDuplicate::FreshRssNumResultsZero,
+        ),
+        ("miniflux", mock_greader::QuickaddDuplicate::Miniflux500),
+    ] {
+        let server = MockGReader::start().await.expect("start mock");
+        server.set_quickadd_duplicate(mode);
+        let tmp = common::unique_db_path(&format!("opt009b_dup_{name}"));
+        let _ = std::fs::remove_file(&tmp);
+        let http = app_lib::ingestion::build_client(10);
+        let url = format!("{}/opt009-dup-{name}.xml", server.url());
+        let key = acct_key("greader", &server, "test");
+
+        // 远端已持有该订阅
+        server
+            .existing_feed_urls
+            .lock()
+            .unwrap()
+            .push((url.clone(), 40));
+        *server.subscriptions.lock().unwrap() = vec![MockSubscription {
+            id: "feed/40".into(),
+            title: "Existing".into(),
+            url: url.clone(),
+            html_url: None,
+            categories: vec![],
+        }];
+
+        let dbm = {
+            let conn = open_with_credentials(&server, "greader", "test");
+            let folder = db::create_folder(&conn, "分类", "article").unwrap();
+            db::insert_feed(
+                &conn, &url, None, "Dup", None, folder, "inherit", true, false,
+            )
+            .unwrap();
+            let gen = db::sync_generation(&conn).unwrap();
+            db::enqueue_subscribe(&conn, gen, &key, &url, None, None).unwrap();
+            Arc::new(Mutex::new(conn))
+        };
+
+        sync::feeds_phase(&dbm, &http).await.expect("feeds phase");
+        {
+            let conn = dbm.lock().await;
+            let items = db::pending_outbox(&conn).unwrap();
+            assert_eq!(
+                items.len(),
+                1,
+                "[{name}] 被拒的订阅意图必须保留（Retry）: {items:?}"
+            );
+            assert!(
+                items[0].attempts >= 1,
+                "[{name}] 失败必须累计 attempts: {items:?}"
+            );
+        }
+        assert!(
+            server.created_feeds.lock().unwrap().is_empty(),
+            "[{name}] 重复 URL 不得再创建远端订阅"
+        );
+        assert_eq!(
+            server.subscriptions.lock().unwrap().len(),
+            1,
+            "[{name}] 远端订阅集合不变"
+        );
+        assert_eq!(
+            quickadd_count(&server, &url),
+            1,
+            "[{name}] 本轮只发一次 quick_add"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /* ============================================================
@@ -2201,6 +2285,9 @@ B2-5. OPML 标题：desired_title + 真实 t= wire
 #[tokio::test]
 async fn opml_import_title_lands_on_remote_wire_and_mock() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2）：重复 URL 导入依赖旧幂等契约，真实服务端拒绝。
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_b2_opml_title");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -2901,6 +2988,9 @@ R1-5. 移动成功后删除 + 重加：已接受的 label 必须被移除（F-1�
 #[tokio::test]
 async fn move_success_then_delete_readd_removes_accepted_label() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2）：删除后重加回绑既有远端订阅依赖旧幂等契约。
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r1_readd");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -3443,6 +3533,10 @@ async fn mount_window_in_place_update_is_not_pruned_by_old_target() {
 #[tokio::test]
 async fn mount_window_production_edit_survives_old_mount_success() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2）：订阅命中既有远端源依赖旧幂等契约，真实服务端
+    // 拒绝重复 URL、解析需走列表证据。
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_mount_prod");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -3969,6 +4063,10 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_repeating_quicka
 #[tokio::test]
 async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2）：退订恢复的 quick_add-by-URL 解析依赖旧幂等契约，
+    // 真实服务端拒绝重复 URL（FreshRSS numResults=0 / Miniflux 500）。
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r2_unsub_switch");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -4118,6 +4216,9 @@ R2-3. 移动确认出队后删除再快速重加：远端旧 label 必须持久�
 #[tokio::test]
 async fn readd_after_confirmed_move_and_delete_carries_remote_old_label() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2）：重加回绑既有远端订阅依赖旧幂等契约。
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r2_readd");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -4538,6 +4639,9 @@ R2 复审 P2-C. 退订目标被外部删除（FreshRSS 400）不得永久 Retry
 #[tokio::test]
 async fn unsubscribe_recovery_missing_resolved_target_converges_instead_of_stuck_retry() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2）：退订恢复的 quick_add-by-URL 解析依赖旧幂等契约。
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r2_missing");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
@@ -4700,6 +4804,9 @@ R2 复审 P3-A. 移动未发送 + 删除 + 快速重加：链起点必须成为�
 #[tokio::test]
 async fn unsent_move_then_delete_and_readd_removes_remote_old_label() {
     let server = MockGReader::start().await.expect("start mock");
+    // 阶段 B 红门禁候选（F2）：重加回绑既有远端订阅依赖旧幂等契约。
+    // 见 .agents/notes/implemented/testing/2026-10-31-测试替身对齐真实服务端语义.md
+    server.set_quickadd_duplicate(mock_greader::QuickaddDuplicate::ReturnExistingId);
     let tmp = common::unique_db_path("opt009b_r2_unsent");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
