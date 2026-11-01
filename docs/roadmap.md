@@ -95,6 +95,7 @@
 ### P3（新增，摘要）
 
 - favicon 探测与全文提取的响应体读取无大小上限（feed 主管线有 16MiB 界，两条旁路没有；`ingestion/favicon.rs:46`、`commands/settings.rs` 全文提取段）；SMTC 线程对超大有限浮点入参 panic 后静默失效（`media.rs:133/147`）。**2026-11-02 已修复**：两条旁路统一经 `read_body_capped` 的 16MiB 界（favicon 超限并入「任何失败返回 None」负缓存、全文提取返回 `responseTooLarge` 业务文案）；SMTC 三处入参改经 `media_secs` 饱和（NaN/负→0、超大值与 +inf 钳 7 天上界），线程不再 panic 静默失效。
+- 图片代理 `settings.rs:561` 的 `resp.bytes()` 先完整收体再检查 `MAX_IMAGE_BYTES`（Content-Length 预检只挡诚实大响应，无定界/谎报流式响应先把内存吃满才被拒）——与已修复的两条旁路同族，待统一经 `read_body_capped` 的图片界收口。
 - push_feeds 分类挂载失败后队项照常剪除、pull 不回灌既有源远端分类——远端订阅永久留默认分类且无收敛通道（`subscriptions.rs:303/325/1245`）。**2026-11-01 W2-A 已修复**：挂载失败保留队项、下轮零 quick_add 重试挂载。push_feeds 绑定查找吞 DB 错误且未走规范化 URL 匹配（`:291`，仅 legacy add_feed 行）仍待修。**2026-11-02 已修复**：绑定查找改 `feed_id_by_url_normalized`（与 pull/OPML 去重同口径），DB 错误 warn + 落 `report.errors` 且队项保留下轮重试。
 - 订阅 outbox 对已消失账号无生命周期终点，pending 行连同 attempts/last_error 永久滞留（`db/outbox.rs:103`；`commit_account_settings` / `commit_disconnect` 均不清理）。**2026-11-02 登记待产品决策**：可选处置是身份切换即清账（已消失账号生命周期终结），但需放弃「换号 → 回原账号恢复」的语义，须产品拍板后另行立项；outbox 生命周期本轮不修。
 - `aiStatusById` 不随 AI 配置（模型/提示词/base_url）变化失效，配置变更后旧 verified 结果短暂滞留显示层（动作时刻有权威复核兜底）；清除单一产物推进共享 `ai_epoch` 会连带拒绝另一产物的在途提交（保守正确但无声明，`db/articles.rs:982-992`）。

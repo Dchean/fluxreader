@@ -432,11 +432,18 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
             resp.status()
         )));
     }
-    // 全文提取与 feed 主管线共用 16 MiB 响应体界（防 Content-Length 谎报的
-    // 流式响应撑爆内存）；超限是可预期的失败形态，用业务文案如实上报。
+    // 全文提取与 feed 主管线共用 16 MiB 响应体界（防无 Content-Length 定界的
+    // 超量流式响应撑爆内存）；超限是可预期的失败形态，用业务文案如实上报。
+    // 收字节后按 Content-Type charset 解码（GBK 站点硬按 UTF-8 会把乱码
+    // 写进正文并推进修订），语义与原 resp.text() 一致。
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let html =
         match crate::ingestion::read_body_capped(resp, crate::ingestion::MAX_BODY_BYTES).await {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Ok(bytes) => crate::ingestion::decode_body_bytes(&bytes, content_type.as_deref()),
             Err(e) if e.code == "responseTooLarge" => {
                 return Err(AppError::new(
                     "responseTooLarge",
@@ -1075,10 +1082,11 @@ mod extract_fulltext_commit_tests {
         assert_eq!(wire["degraded"], serde_json::json!(false));
     }
 
-    /// 谎报 Content-Length 的静态网页 mock：声称 10 字节、实发超过 16 MiB——
-    /// 预检分支不拦（Content-Length 是小值），必须由 read_body_capped 的
-    /// 累计分支中止，全文提取以业务文案显式失败且不污染库内正文。
-    fn start_lying_oversize_mock() -> u16 {
+    /// 无 Content-Length 定界的超量网页 mock：Connection: close + EOF 定界，
+    /// 实发超过 16 MiB——hyper 客户端按 CL 定界，谎报小 CL 只会让 body 提前
+    /// 完成；超量数据必须无 CL 发送，由 read_body_capped 的累计分支中止，
+    /// 全文提取以业务文案显式失败且不污染库内正文。
+    fn start_oversize_eof_mock() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
@@ -1098,7 +1106,7 @@ mod extract_fulltext_commit_tests {
                 }
             }
             let head = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-                        Content-Length: 10\r\nConnection: close\r\n\r\n";
+                        Connection: close\r\n\r\n";
             let _ = stream.write_all(head.as_bytes());
             let chunk = vec![b'a'; 64 * 1024];
             // 客户端超限中止后写入会失败——忽略，测试只关心读取侧结果
@@ -1114,7 +1122,7 @@ mod extract_fulltext_commit_tests {
 
     #[tokio::test]
     async fn oversized_fulltext_body_reports_response_too_large() {
-        let port = start_lying_oversize_mock();
+        let port = start_oversize_eof_mock();
         let state = setup(port);
         let err = extract_fulltext_inner(&state, 1)
             .await

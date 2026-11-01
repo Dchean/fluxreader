@@ -14,6 +14,7 @@ const MAX_MEDIA_SECS: f64 = 86_400.0 * 7.0;
 
 /// 浮点入参饱和：NaN/负值归 0，超大有限值与 +inf 钳到语义上界，
 /// 保证 `Duration::from_secs_f64` 不 panic。
+// Note: from_secs_f64 入参必须经 media_secs 饱和 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅绑定规范化与旁路16MiB界与SMTC浮点饱和.md
 fn media_secs(v: f64) -> f64 {
     // f64::clamp(NaN, …) 返回 NaN（IEEE 754 语义），须先单独归零。
     if v.is_nan() {

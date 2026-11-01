@@ -1,6 +1,6 @@
 //! favicon 自动发现：站点 `<link rel~=icon>` 优先，退回 `<origin>/favicon.ico`。
 
-use super::http::{read_body_capped, MAX_BODY_BYTES};
+use super::http::{decode_body_bytes, read_body_capped, MAX_BODY_BYTES};
 use super::parse::resolve_url;
 use reqwest::Client;
 
@@ -28,6 +28,7 @@ pub(super) async fn discover_favicon(client: &Client, site_url: &str) -> Option<
     // ① 站点首页 HTML 里的 <link rel="icon">（rel 包含 icon 的各种变体）。
     // 首页读取与 feed 主管线共用 16 MiB 界——恶意/异常站点可回无界大响应，
     // favicon 是锦上添花，超限等同读取失败（返回 None，走负缓存）。
+    // 解码按 Content-Type charset（GBK 站点的 rel 属性也要正确识别）。
     let resp = client
         .get(&base)
         .header("User-Agent", BROWSER_UA)
@@ -35,8 +36,13 @@ pub(super) async fn discover_favicon(client: &Client, site_url: &str) -> Option<
         .send()
         .await
         .ok()?;
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     let bytes = read_body_capped(resp, MAX_BODY_BYTES).await.ok()?;
-    let html = String::from_utf8_lossy(&bytes).into_owned();
+    let html = decode_body_bytes(&bytes, content_type.as_deref());
     let link_icon = extract_icon_link(&html).map(|href| resolve_url(&href, &base));
 
     // ② 兜底 /favicon.ico
@@ -142,8 +148,9 @@ mod favicon_tests {
     use super::*;
     use std::io::{Read, Write};
 
-    /// 谎报 Content-Length 的静态首页 mock：声称 10 字节、实发超过 16 MiB——
-    /// 预检分支不拦（Content-Length 是小值），必须由累计分支中止读取。
+    /// 无 Content-Length 定界的超量首页 mock（Connection: close + EOF）：
+    /// 实发超过 16 MiB——hyper 客户端按 CL 定界，超量数据必须无 CL 发送，
+    /// 由 read_body_capped 的累计分支中止读取，发现并入「失败返回 None」。
     #[tokio::test]
     async fn oversized_homepage_folds_into_discovery_failure() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -164,8 +171,10 @@ mod favicon_tests {
                     break;
                 }
             }
+            // 无 Content-Length 定界（Connection: close + EOF）：hyper 客户端按
+            // CL 定界，谎报小 CL 只会让 body 提前完成，超量数据必须无 CL 发送
             let head = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-                        Content-Length: 10\r\nConnection: close\r\n\r\n";
+                        Connection: close\r\n\r\n";
             let _ = stream.write_all(head.as_bytes());
             let chunk = vec![b'a'; 64 * 1024];
             // 客户端超限中止后写入会失败——忽略，测试只关心读取侧结果
@@ -179,7 +188,7 @@ mod favicon_tests {
         let client = super::super::build_client(10);
         let site = format!("http://127.0.0.1:{port}/feed.xml");
         assert_eq!(
-            discover_favicon(&client, &site),
+            discover_favicon(&client, &site).await,
             None,
             "超大首页必须并入「任何失败返回 None」（负缓存）"
         );
