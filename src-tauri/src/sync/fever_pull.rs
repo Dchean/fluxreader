@@ -96,10 +96,6 @@ async fn fetch_with_ids_batch(
     client: &fever::FeverClient,
     batch: &[&[i64]],
 ) -> Vec<FeverPageFetch> {
-    debug_assert!(
-        batch.len() <= PULL_FETCH_CONCURRENCY,
-        "批次大小必须不超过并发度"
-    );
     match batch.len() {
         0 => Vec::new(),
         1 => vec![fetch_with_ids_page(db, session, client, batch[0]).await],
@@ -110,7 +106,9 @@ async fn fetch_with_ids_batch(
             );
             vec![a, b]
         }
-        _ => {
+        // 与 greader_pull::fetch_chunk_batch 同契约：臂随 PULL_FETCH_CONCURRENCY
+        // 同步扩展，超界显式 panic（release 生效）——绝不静默丢块（W3 审计 P3-1）。
+        3 => {
             let (a, b, c) = tokio::join!(
                 fetch_with_ids_page(db, session, client, batch[0]),
                 fetch_with_ids_page(db, session, client, batch[1]),
@@ -118,6 +116,9 @@ async fn fetch_with_ids_batch(
             );
             vec![a, b, c]
         }
+        n => panic!(
+            "fetch_with_ids_batch 批次大小 {n} 超出已实现的并发臂（PULL_FETCH_CONCURRENCY={PULL_FETCH_CONCURRENCY}）；调大并发常量必须同步扩展本 match 的臂"
+        ),
     }
 }
 

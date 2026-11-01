@@ -157,15 +157,18 @@ fn cache_store(identity: String, generation: i64, session: &Arc<SyncSession>) {
     });
 }
 
-/// 剔除：仅当槽内仍是同一账号条目时清除——期间换号重建的新条目不受影响。
-fn cache_evict(identity: &str, generation: i64) {
+/// 剔除：仅当槽内是**同一租约会话实例**（Arc::ptr_eq）的条目时清除。
+/// 键（身份+代际）只保证「同账号」：并发双入口持有同键租约都见认证失败时，
+/// 先到者剔除并重建的新会话不得被后到者的剔除误杀（误杀后果仅多一次
+/// ClientLogin，无正确性影响，但仍属无谓挤兑——W3 审计 P3-2）。
+fn cache_evict(identity: &str, generation: i64, session: &Arc<SyncSession>) {
     let Some(cache) = SESSION_CACHE.get() else {
         return;
     };
     let mut slot = cache.lock().expect("session cache poisoned");
-    let matches = slot
-        .as_ref()
-        .is_some_and(|e| e.identity == identity && e.generation == generation);
+    let matches = slot.as_ref().is_some_and(|e| {
+        e.identity == identity && e.generation == generation && Arc::ptr_eq(&e.session, session)
+    });
     if matches {
         *slot = None;
     }
@@ -256,7 +259,7 @@ pub(super) async fn reauth_after_auth_failure(
     http: &reqwest::Client,
     lease: &SessionLease,
 ) -> Option<Arc<SyncSession>> {
-    cache_evict(&lease.identity, lease.generation);
+    cache_evict(&lease.identity, lease.generation, &lease.session);
     log::warn!("sync: 同步收到认证类失败，已剔除缓存会话并重认证重试一次");
     match acquire_session(db, http).await {
         Ok(fresh) => Some(fresh.session),
@@ -581,13 +584,28 @@ mod tests {
         });
         cache_store("greader|http://a.example|user-a".into(), 3, &session);
         // 异账号剔除：no-op，条目仍在
-        cache_evict("greader|http://a.example|user-b", 3);
+        cache_evict("greader|http://a.example|user-b", 3, &session);
         assert!(cache_lookup("greader|http://a.example|user-a", 3).is_some());
         // 同账号异代际剔除：no-op（代际推进后的新会话不得被旧键误杀）
-        cache_evict("greader|http://a.example|user-a", 2);
+        cache_evict("greader|http://a.example|user-a", 2, &session);
         assert!(cache_lookup("greader|http://a.example|user-a", 3).is_some());
-        // 精确匹配剔除：条目消失
-        cache_evict("greader|http://a.example|user-a", 3);
+        // 同键但**异会话实例**（并发双入口各持同键租约的挤兑形态）：
+        // 后到者的剔除不得误杀先到者重建并写入的新会话（P3-2）
+        let other = Arc::new(SyncSession {
+            generation: 3,
+            client: Backend::GReader(crate::greader::GReaderClient::new(
+                "http://127.0.0.1:1",
+                "t2",
+                reqwest::Client::new(),
+            )),
+        });
+        cache_evict("greader|http://a.example|user-a", 3, &other);
+        assert!(
+            cache_lookup("greader|http://a.example|user-a", 3).is_some(),
+            "同键异实例剔除不得误杀槽内会话"
+        );
+        // 同键同实例（自己租约）剔除：条目消失
+        cache_evict("greader|http://a.example|user-a", 3, &session);
         assert!(cache_lookup("greader|http://a.example|user-a", 3).is_none());
         clear_session_cache_for_tests();
     }

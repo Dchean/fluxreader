@@ -77,10 +77,6 @@ async fn fetch_chunk_batch(
     client: &GReaderClient,
     batch: &[&[i64]],
 ) -> Vec<ContentFetch> {
-    debug_assert!(
-        batch.len() <= PULL_FETCH_CONCURRENCY,
-        "批次大小必须不超过并发度"
-    );
     match batch.len() {
         0 => Vec::new(),
         1 => vec![fetch_content_chunk(db, session, client, batch[0]).await],
@@ -91,7 +87,11 @@ async fn fetch_chunk_batch(
             );
             vec![a, b]
         }
-        _ => {
+        // 并发度由 PULL_FETCH_CONCURRENCY 常量决定，本 match 的臂必须随常量
+        // **同步扩展**。长度超界时显式 panic（release 构建同样生效）——绝不
+        // 静默丢块：丢块既无请求也无失败计数，游标守卫不会触发，窗口会被
+        // 假成功吞掉（W3 审计 P3-1）。
+        3 => {
             let (a, b, c) = tokio::join!(
                 fetch_content_chunk(db, session, client, batch[0]),
                 fetch_content_chunk(db, session, client, batch[1]),
@@ -99,6 +99,9 @@ async fn fetch_chunk_batch(
             );
             vec![a, b, c]
         }
+        n => panic!(
+            "fetch_chunk_batch 批次大小 {n} 超出已实现的并发臂（PULL_FETCH_CONCURRENCY={PULL_FETCH_CONCURRENCY}）；调大并发常量必须同步扩展本 match 的臂"
+        ),
     }
 }
 
