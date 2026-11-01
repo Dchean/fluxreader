@@ -26,11 +26,11 @@
 | 编号 | 领域 | 问题 | 影响 |
 | --- | --- | --- | --- |
 | A-P2-1 | 同步/账号 | feed 墓碑没有账号归属 | 断开后换号，旧账号的删除墓碑仍会压制新账号同 URL 的订阅（2026-11-01 复核：部分修复——直连换号已同事务清墓碑；「断开→连新账号」仍泄漏。**2026-11-01 W1-B 已修复**：断开时刻写账号身份见证，跨身份连接时清理 feed 墓碑；升级前旧版断开留下的一次性间隙无法回溯补写见证，属残留边界） |
-| A-P2-2 | 同步/账号 | 订阅 outbox 未接入自动调度 | 重启后的后台自动同步不处理订阅 outbox；「离线或重启自动重试」的文案不成立，行会一直停在 pending |
-| A-P2-3 | 同步/账号 | subscribe 挂载失败后移动丢失链起点；成功挂载未参与后继重定 | 删除后重加再移动时，远端旧分类可能永不移除，后续 pull 也不会修正（2026-11-01 复核：部分修复——in-place 合并与 edit 链重定已修；subscribe 行链起点与挂载成功重定两窗口仍在） |
+| A-P2-2 | 同步/账号 | 订阅 outbox 未接入自动调度 | 重启后的后台自动同步不处理订阅 outbox；「离线或重启自动重试」的文案不成立，行会一直停在 pending。**2026-11-01 W2-A 已修复**：调度器本地查 pending（零网络成本）才构建会话执行写回，重试节奏为 tick 级 |
+| A-P2-3 | 同步/账号 | subscribe 挂载失败后移动丢失链起点；成功挂载未参与后继重定 | 删除后重加再移动时，远端旧分类可能永不移除，后续 pull 也不会修正（2026-11-01 复核：部分修复——in-place 合并与 edit 链重定已修。**2026-11-01 W2-A 已修复**：subscribe 行链起点保留与 ConfirmedSubscribe 参与重定两窗口收口；发送成功与重定间进程死亡的信息丢失窗口与 B1-R3 同级，为既有边界） |
 | A-P2-4 | 同步/账号 | 条目状态字段缺省为 false | 部分响应缺状态字段时，本地读/藏会被回滚成远端的「未读/未收藏」（2026-11-01 复核：部分修复——集合级已失败关闭；条目级缺省 false 仍在） |
 | A-P2-5 | 同步/账号 | 分类集合缺省为空 | 账号专属分类墓碑被误回收，目录结构丢失；后续可能重新导入已删除的旧分类（2026-11-01 复核：部分修复——Fever groups 已失败关闭。**2026-11-01 W1-B 已修复**：GR tag/list 缺 `tags` 字段判协议错误，异常 200 不再触达空集回收） |
-| A-P2-6 | 同步/账号 | 订阅 outbox 的 session 构建失败不写 attempts/last_error | 认证/端点/网络失败时 UI 只能显示「等待」，无法解释原因，也没有失败记录 |
+| A-P2-6 | 同步/账号 | 订阅 outbox 的 session 构建失败不写 attempts/last_error | 认证/端点/网络失败时 UI 只能显示「等待」，无法解释原因，也没有失败记录。**2026-11-01 W2-A 已修复**：构建失败为当前账号全部 pending 行落 attempts+1/last_error 并发事件；NotConfigured 与 Stale 不落账（无归属身份/旧会话作废） |
 | A-P2-7 | 同步/账号 | `item_contents` 对非空请求返回空 items 仍视为成功 | 已列举的条目正文被永久跳过，游标照常推进。**2026-11-01 W1-B 已修复**：非空请求返回条数少于请求数（含 0）判协议错误，按块失败保留游标；FreshRSS 对同请求重复 id 去重的理论性边界属良性 fail-closed |
 | B-P2-1 | AI/配置 | 正文修订或全文提取后 `aiStatusById` 不失效 | 旧 AI 产物仍显示「完整」，与实际正文不匹配 |
 | B-P2-2 | AI/配置 | 卡片 partial 在重启后不可达 | 重启后只有片段、没有整篇产物的条目不再取校验状态，用户必须打开阅读器才能看到 partial |
@@ -87,7 +87,7 @@
 
 | 编号 | 领域 | 问题 | 影响 |
 | --- | --- | --- | --- |
-| R2-P2-1 | OPML/目录 | OPML 导入不复用已有同名分类，`folders.name` 无 UNIQUE 约束 | 已有同名分类时静默新建重复目录，订阅分裂；重复目录经配置快照上传会放大 B-P2-4 的按名歧义（`commands/opml.rs:83`、`db/folders.rs:39`，无测试锁定） |
+| R2-P2-1 | OPML/目录 | OPML 导入不复用已有同名分类，`folders.name` 无 UNIQUE 约束 | 已有同名分类时静默新建重复目录，订阅分裂；重复目录经配置快照上传会放大 B-P2-4 的按名歧义（`commands/opml.rs:83`、`db/folders.rs:39`，无测试锁定）。**2026-11-01 W2-B 已修复**：导入命中同名即复用（保留既有设置）、手工创建同名拒绝 `duplicateFolderName`、按名映射固定最旧一条；`folders.name` UNIQUE 迁移（需先去重存量）明确不做、待独立立项 |
 | R2-P2-2 | AI/安全 | 清除缓存与在途流式生成无互斥，`rawTranslatedIds` 保护标记被提前删除 | 五态 partial 时「清除」+「继续」并发，未消毒模型输出可进 `dangerouslySetInnerHTML` 渲染路径（`ai.ts:720/739`、`Timeline.tsx:941/1430`）；恶意 feed 诱导模型输出标记时构成本地 XSS 窗口，持续到流结束 |
 | R2-P2-3 | AI/状态 | 全局 `translating` 布尔的终态复位被 ownsView 门控 | 生成中切文章后布尔永久卡死，自动翻译静默失效、翻译错误行被隐藏，直到用户完整留守一次生成或重启（`ai.ts:577/606/660/686`、`reader.ts:207/441`） |
 | R2-P2-4 | AI/错误 | 三处 AI 流程 catch 吞掉 rejection，硬编码「AI 服务未配置或不可达」 | 正文超 64 KiB、429、欠费、网络超时全部同文案，无法诊断；invoke rejection 是唯一错误通道（`ai.ts:416/539/676`，`extractError` 已导入未用于此） |
@@ -95,7 +95,7 @@
 ### P3（新增，摘要）
 
 - favicon 探测与全文提取的响应体读取无大小上限（feed 主管线有 16MiB 界，两条旁路没有；`ingestion/favicon.rs:46`、`commands/settings.rs` 全文提取段）；SMTC 线程对超大有限浮点入参 panic 后静默失效（`media.rs:133/147`）。
-- push_feeds 分类挂载失败后队项照常剪除、pull 不回灌既有源远端分类——远端订阅永久留默认分类且无收敛通道（`subscriptions.rs:303/325/1245`）；push_feeds 绑定查找吞 DB 错误且未走规范化 URL 匹配（`:291`，仅 legacy add_feed 行）。
+- push_feeds 分类挂载失败后队项照常剪除、pull 不回灌既有源远端分类——远端订阅永久留默认分类且无收敛通道（`subscriptions.rs:303/325/1245`）。**2026-11-01 W2-A 已修复**：挂载失败保留队项、下轮零 quick_add 重试挂载。push_feeds 绑定查找吞 DB 错误且未走规范化 URL 匹配（`:291`，仅 legacy add_feed 行）仍待修。
 - 订阅 outbox 对已消失账号无生命周期终点，pending 行连同 attempts/last_error 永久滞留（`db/outbox.rs:103`；`commit_account_settings` / `commit_disconnect` 均不清理）。
 - `aiStatusById` 不随 AI 配置（模型/提示词/base_url）变化失效，配置变更后旧 verified 结果短暂滞留显示层（动作时刻有权威复核兜底）；清除单一产物推进共享 `ai_epoch` 会连带拒绝另一产物的在途提交（保守正确但无声明，`db/articles.rs:982-992`）。
 - `folders.name` 无 UNIQUE 使「remote_labels 按名映射」不变量无 schema 背书，重名目录间映射取 rowid 首个（`db/migrations.rs:23`、`db/sync_map.rs:747`，与 R2-P2-1 同根）。
