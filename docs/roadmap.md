@@ -9,7 +9,7 @@
 | 「滚动出列表即标为已读」的前置条件未声明 | 只在「显示: 未读」模式下生效（`Timeline.tsx` 的 `if (timelineFilter !== 'unread') return;`），设置页与文案都没说 | 用户以为这个开关一直有效 |
 | 配置同步的镜像删除不产生远端退订意图 | mirror 模式的本地 feed/分类删除已实现；普通 UI 删除走 typed outbox 持久退订；镜像删除明确不调用 `enqueue_unsubscribe` | 镜像同步后远端订阅可能残留，需用户手动退订 |
 | 封面候选仍无质量启发式 | 候选已扩到全来源「无封面 + 有原文 URL」；`first_image`/og:image 仍无尺寸/角色判断，头像、emoji、favicon 可能被当封面；本地为服务端文章补上的封面不参与失效清理（保守边界） | 部分文章无封面或封面不正确 |
-| `--text-tertiary` 深色下对比度约 4:1 | 处于 WCAG AA 边缘，属于全局视觉 token | 低视力用户在深色模式下阅读辅助文字吃力（**2026-11-01 W4 已修复点名项**：dark blue 调至 `#828c9c`，对卡片底色 4.69:1 达 AA；其余调色盘与瞬态底色的全量批量收敛待用户决策，见 rejected Note） |
+| `--text-tertiary` 深色下对比度约 4:1 | 处于 WCAG AA 边缘，属于全局视觉 token | 低视力用户在深色模式下阅读辅助文字吃力（**2026-11-01 W4 已修复点名项**；**2026-11-02 全量收敛落地**：五调色盘 × 深浅色 720 项全矩阵配对违例清零，dark blue tertiary 现值 `#8891a1`，浅色语义色新增覆盖块，见 [五调色盘WCAG全量收敛落地](../.agents/notes/implemented/feature/2026-11-02-五调色盘WCAG全量收敛落地.md)；探针证据仅本机留存） |
 
 ## 二、同步与数据正确性（2026-10-19 审计）
 
@@ -72,7 +72,7 @@
 
 2026-10-31 门禁先行收敛轮（阶段 A 替身语义对齐、阶段 B1-B4 源码修复、阶段 C 全新代理证伪复核）已收口的清单见 [审计修复收敛路线](../.agents/notes/implemented/process/2026-10-31-审计修复收敛路线.md)。以下为本轮明确不做、留待后续决策的项：
 
-- **P3 与美观批次**：WCAG 对比度批量收敛（五调色盘 × 深浅色 230 项关键配对计算 95 项违例，浅色 `star-color`/`danger`/`accent-light` 最重；**2026-11-01 W4 已修复其中点名项** dark blue `--text-tertiary`，其余待用户决策）；模态焦点陷阱缺失（Tab 可穿透到背景）——**2026-11-01 W4 已修复**（共享 useFocusTrap：打开移入/Tab 循环/关闭还原，四处浮层共用）；dialog 语义覆盖 1/9——**2026-11-01 W4 已修复**（role=dialog 面 11/11 全带 aria-modal 与名字）；产品树无 ErrorBoundary——**2026-11-01 W4 已修复**（顶层边界 + componentStack 归因 + 全屏兜底）；settings 组件 async setState 无 alive 守卫（6 文件）——不属本批，保留原样。
+- **P3 与美观批次**：WCAG 对比度批量收敛（五调色盘 × 深浅色 230 项关键配对计算 95 项违例，浅色 `star-color`/`danger`/`accent-light` 最重；**2026-11-01 W4 已修复点名项**；**2026-11-02 用户批准全量落地**，720 项全矩阵口径清零，见 [五调色盘WCAG全量收敛落地](../.agents/notes/implemented/feature/2026-11-02-五调色盘WCAG全量收敛落地.md)）；模态焦点陷阱缺失（Tab 可穿透到背景）——**2026-11-01 W4 已修复**（共享 useFocusTrap：打开移入/Tab 循环/关闭还原，四处浮层共用）；dialog 语义覆盖 1/9——**2026-11-01 W4 已修复**（role=dialog 面 11/11 全带 aria-modal 与名字）；产品树无 ErrorBoundary——**2026-11-01 W4 已修复**（顶层边界 + componentStack 归因 + 全屏兜底）；settings 组件 async setState 无 alive 守卫（6 文件）——不属本批，保留原样。
 - **供应链**（2026-11-01 OSV 全量比对口径；**当日 W1-A 已收口其中两项**：13 条 cargo-update 级通告经定向升级全部清零并过 CI 清洗矩阵回归、CI action 已全部 SHA pin）——仍遗留：glib 1 条（需跨大版本，非 update 级）+ 10 条 unmaintained；npm 开发链 5 个 high（vite 8.2.2×1、undici 7.30.0×4，均不进产物，本机 npm registry 不可达暂缓）；安装包无 Windows 代码签名；action pin 无保活机制（候选：dependabot github-actions 通道）。
 - **性能**：同步端到端耗时基线缺失（需真实账号并单独约定读写边界）；Fever 空正文条目每轮 with_ids 重拉一次（回补记账候选）；F1 计数绝对耗时跨 SQLite 构建不可比（查询计划形态已由 CI 断言锁定）。
 - **架构**：`state ↔ github_auth ↔ config_sync` 三节点模块环；`internals.ts` 47 导出共享内核；`subscriptions.rs pull_feeds`（约 465 行）与 `fever_pull.rs pull_entries_fever`（505 行）超长函数；9 个零直测生产模块；组件直调 `api.*` 37 处无自动门禁。
@@ -88,16 +88,16 @@
 | 编号 | 领域 | 问题 | 影响 |
 | --- | --- | --- | --- |
 | R2-P2-1 | OPML/目录 | OPML 导入不复用已有同名分类，`folders.name` 无 UNIQUE 约束 | 已有同名分类时静默新建重复目录，订阅分裂；重复目录经配置快照上传会放大 B-P2-4 的按名歧义（`commands/opml.rs:83`、`db/folders.rs:39`，无测试锁定）。**2026-11-01 W2-B 已修复**：导入命中同名即复用（保留既有设置）、手工创建同名拒绝 `duplicateFolderName`、按名映射固定最旧一条；`folders.name` UNIQUE 迁移（需先去重存量）明确不做、待独立立项 |
-| R2-P2-2 | AI/安全 | 清除缓存与在途流式生成无互斥，`rawTranslatedIds` 保护标记被提前删除 | 五态 partial 时「清除」+「继续」并发，未消毒模型输出可进 `dangerouslySetInnerHTML` 渲染路径（`ai.ts:720/739`、`Timeline.tsx:941/1430`）；恶意 feed 诱导模型输出标记时构成本地 XSS 窗口，持续到流结束 |
-| R2-P2-3 | AI/状态 | 全局 `translating` 布尔的终态复位被 ownsView 门控 | 生成中切文章后布尔永久卡死，自动翻译静默失效、翻译错误行被隐藏，直到用户完整留守一次生成或重启（`ai.ts:577/606/660/686`、`reader.ts:207/441`） |
-| R2-P2-4 | AI/错误 | 三处 AI 流程 catch 吞掉 rejection，硬编码「AI 服务未配置或不可达」 | 正文超 64 KiB、429、欠费、网络超时全部同文案，无法诊断；invoke rejection 是唯一错误通道（`ai.ts:416/539/676`，`extractError` 已导入未用于此） |
+| R2-P2-2 | AI/安全 | 清除缓存与在途流式生成无互斥，`rawTranslatedIds` 保护标记被提前删除 | 五态 partial 时「清除」+「继续」并发，未消毒模型输出可进 `dangerouslySetInnerHTML` 渲染路径（`ai.ts:720/739`、`Timeline.tsx:941/1430`）；恶意 feed 诱导模型输出标记时构成本地 XSS 窗口，持续到流结束。**2026-11-01 W1-C 已修复**：清除与在途流式硬闸互斥 + 续跑自愈（见 [清除与在途流式互斥](../.agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md)） |
+| R2-P2-3 | AI/状态 | 全局 `translating` 布尔的终态复位被 ownsView 门控 | 生成中切文章后布尔永久卡死，自动翻译静默失效、翻译错误行被隐藏，直到用户完整留守一次生成或重启（`ai.ts:577/606/660/686`、`reader.ts:207/441`）。**2026-11-01 W1-C 已修复**：终态复位脱离 ownsView 门控（见 [translating终态复位与全局单布尔](../.agents/notes/implemented/bug-fix/2026-11-01-translating终态复位与全局单布尔.md)） |
+| R2-P2-4 | AI/错误 | 三处 AI 流程 catch 吞掉 rejection，硬编码「AI 服务未配置或不可达」 | 正文超 64 KiB、429、欠费、网络超时全部同文案，无法诊断；invoke rejection 是唯一错误通道（`ai.ts:416/539/676`，`extractError` 已导入未用于此）。**2026-11-01 W1-C 已修复**：三处 catch 改 `extractError`/`extractErrorCode` 透传后端错误分型 |
 
 ### P3（新增，摘要）
 
 - favicon 探测与全文提取的响应体读取无大小上限（feed 主管线有 16MiB 界，两条旁路没有；`ingestion/favicon.rs:46`、`commands/settings.rs` 全文提取段）；SMTC 线程对超大有限浮点入参 panic 后静默失效（`media.rs:133/147`）。**2026-11-02 已修复**：两条旁路统一经 `read_body_capped` 的 16MiB 界（favicon 超限并入「任何失败返回 None」负缓存、全文提取返回 `responseTooLarge` 业务文案）；SMTC 三处入参改经 `media_secs` 饱和（NaN/负→0、超大值与 +inf 钳 7 天上界），线程不再 panic 静默失效。
 - 图片代理 `settings.rs:561` 的 `resp.bytes()` 先完整收体再检查 `MAX_IMAGE_BYTES`（Content-Length 预检只挡诚实大响应，无定界/谎报流式响应先把内存吃满才被拒）——与已修复的两条旁路同族，待统一经 `read_body_capped` 的图片界收口。**2026-11-02 已修复**：`fetch_image` 改经 `read_body_capped` 的 25MiB 界流式收体（CL 预检 + 累计上限两道防线；bytes 直接使用，不经 decode），超限对齐 `responseTooLarge` 口径，前端 catch 降级路径零变化；无 CL 超量流用例锁定「客户端中止、不完整收体」，见 [封面图流式收体闭合旁路](../.agents/notes/implemented/bug-fix/2026-11-02-封面图流式收体闭合旁路.md)。
 - 401 回落判据串匹配 `report.errors` 文案（`[auth] ` 前缀与 `→ 401/403` 子串）——URL 类错误理论上可伪造标记，错误措辞变更也会静默弄坏回落。**2026-11-02 已修复**：`AppError` 增加认证失败结构化标记（greader/fever 的 401/403 状态码构造点与 Fever api_key 失败打标，Display 与 IPC 形状不变），各 HTTP 捕获点经 `SyncReport::note_client_error` 汇入内部信号 `auth_failure`，`report_has_auth_failure` 改读标记、串匹配删除；见 [认证回落判据结构化](../.agents/notes/implemented/bug-fix/2026-11-02-认证回落判据结构化.md)。
-- push_feeds 分类挂载失败后队项照常剪除、pull 不回灌既有源远端分类——远端订阅永久留默认分类且无收敛通道（`subscriptions.rs:303/325/1245`）。**2026-11-01 W2-A 已修复**：挂载失败保留队项、下轮零 quick_add 重试挂载。push_feeds 绑定查找吞 DB 错误且未走规范化 URL 匹配（`:291`，仅 legacy add_feed 行）仍待修。**2026-11-02 已修复**：绑定查找改 `feed_id_by_url_normalized`（与 pull/OPML 去重同口径），DB 错误 warn + 落 `report.errors` 且队项保留下轮重试。
+- push_feeds 分类挂载失败后队项照常剪除、pull 不回灌既有源远端分类——远端订阅永久留默认分类且无收敛通道（`subscriptions.rs:303/325/1245`）。**2026-11-01 W2-A 已修复**：挂载失败保留队项、下轮零 quick_add 重试挂载。push_feeds 绑定查找吞 DB 错误且未走规范化 URL 匹配（`:291`，仅 legacy add_feed 行）。**2026-11-02 已修复**：绑定查找改 `feed_id_by_url_normalized`（与 pull/OPML 去重同口径），DB 错误 warn + 落 `report.errors` 且队项保留下轮重试。
 - 订阅 outbox 对已消失账号无生命周期终点，pending 行连同 attempts/last_error 永久滞留（`db/outbox.rs:103`；`commit_account_settings` / `commit_disconnect` 均不清理）。**2026-11-02 已修复（产品拍板）**：身份切换即清账——`abandon_stale_outbox` 在 `commit_account_settings` 的 identity_changed 与「断开后换身份重连」两分支、同一事务内删除全部非当前身份队项；断开与同身份重连保留；显式放弃「换号 → 回原账号恢复 pending 意图」语义（代价：在途 quick_add 已建的远端订阅成为无人退订的孤儿，由用户手动清理），见 [订阅outbox生命周期终点](../.agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md)。
 - `aiStatusById` 不随 AI 配置（模型/提示词/base_url）变化失效，配置变更后旧 verified 结果短暂滞留显示层（动作时刻有权威复核兜底）；清除单一产物推进共享 `ai_epoch` 会连带拒绝另一产物的在途提交（保守正确但无声明，`db/articles.rs:982-992`）。
 - `folders.name` 无 UNIQUE 使「remote_labels 按名映射」不变量无 schema 背书，重名目录间映射取 rowid 首个（`db/migrations.rs:23`、`db/sync_map.rs:747`，与 R2-P2-1 同根）。
