@@ -31,8 +31,8 @@ pub async fn feeds_phase(
         // R1：坏代际是可见协议错误（原样上报，不伪装 notConnected）
         Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
         // A-P2-6：订阅 outbox 的 pending 行同样被本轮构建失败阻塞，落账可见。
-        Err(ClientBuildFailure::Failed(f)) => {
-            record_outbox_session_block(db, &f.err, &f.endpoint, &f.username).await;
+        Err(ClientBuildFailure::Failed { err, endpoint, username }) => {
+            record_outbox_session_block(db, &err, &endpoint, &username).await;
             return Err(AppError::new(
                 "notConnected",
                 "未配置同步后端（Google Reader / Fever 凭据）",
@@ -61,8 +61,8 @@ pub async fn feeds_phase_at(
         Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
         Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
         // A-P2-6：同 feeds_phase——构建失败为订阅 outbox pending 行落账。
-        Err(ClientBuildFailure::Failed(f)) => {
-            record_outbox_session_block(db, &f.err, &f.endpoint, &f.username).await;
+        Err(ClientBuildFailure::Failed { err, endpoint, username }) => {
+            record_outbox_session_block(db, &err, &endpoint, &username).await;
             return Err(AppError::new(
                 "notConnected",
                 "未配置同步后端（Google Reader / Fever 凭据）",
@@ -139,8 +139,8 @@ pub async fn states_phase(
         // （attempts/last_error 此前对这类失败永不记录）+ 发 sync-queue-changed。
         // 返回错误保持既有 notConnected 形态：手动同步的「未连接静默跳过」前端
         // 语义（isNotConnectedError）不因本卡改变；可见性由 pill/摘要卡承担。
-        Err(ClientBuildFailure::Failed(f)) => {
-            record_push_block(db, &f.err).await;
+        Err(ClientBuildFailure::Failed { err, .. }) => {
+            record_push_block(db, &err).await;
             return Err(AppError::new(
                 "notConnected",
                 "未配置同步后端（Google Reader / Fever 凭据）",
@@ -313,8 +313,8 @@ pub async fn sync_subscription_discovery(
         }
         Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
         Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
-        Err(ClientBuildFailure::Failed(f)) => {
-            record_push_block(db, &f.err).await;
+        Err(ClientBuildFailure::Failed { err, .. }) => {
+            record_push_block(db, &err).await;
             return Err(AppError::new(
                 "notConnected",
                 "未配置同步后端（Google Reader / Fever 凭据）",
