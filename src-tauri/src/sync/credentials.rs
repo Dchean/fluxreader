@@ -95,8 +95,16 @@ pub(super) enum ClientBuildFailure {
     /// 队列保留，连接后补推；不发事件不报警）。
     NotConfigured,
     /// 有凭据但构建失败（认证被拒 / 端点解析不到 / 网络不可达）。
-    /// 带实际错误——调用方据此记录阻塞标记并发 sync-queue-changed。
-    Failed(AppError),
+    /// 带实际错误与**凭据快照**的端点/用户名（登录期间已在内存解密，直传即可，
+    /// 不得为取摘要二次 DPAPI 解密）：换号竞态下落账按当前账号 key，摘要标注
+    /// 失败会话身份便于人工辨认归属偏差（W2 复审 P3-4）。凭据读取/解密失败
+    /// 时快照身份未知，两字段为空（调用方不得伪造标注）。
+    /// 调用方据此记录阻塞标记并发 sync-queue-changed。
+    Failed {
+        err: AppError,
+        endpoint: String,
+        username: String,
+    },
     /// OPT-006：登录/探测期间账号配置已变更（代际失配）。既非身份错误也不该
     /// 记录阻塞标记——调用方直接丢弃本轮（不落库、不发请求）。
     Stale,

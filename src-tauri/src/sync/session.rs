@@ -90,7 +90,14 @@ pub(super) async fn build_session(
         let credentials = match read_credentials(&conn) {
             Ok(Some(c)) => c,
             Ok(None) => return Err(ClientBuildFailure::NotConfigured),
-            Err(e) => return Err(ClientBuildFailure::Failed(e)),
+            // 解密失败：失败会话的身份（端点/用户名）无从得知，如实留空
+            Err(e) => {
+                return Err(ClientBuildFailure::Failed {
+                    err: e,
+                    endpoint: String::new(),
+                    username: String::new(),
+                })
+            }
         };
         // 同一次持锁内捕获代际（与凭据同源快照）。R1：现存非法代际是**可见的
         // 协议错误**（不按 0 与会话假匹配），单列 CorruptGeneration 交给调用方。
@@ -125,7 +132,11 @@ pub(super) async fn build_session(
                         Ok(()) => client,
                         Err(e) => {
                             log::warn!("sync: Fever 认证失败: {e}");
-                            return Err(ClientBuildFailure::Failed(e));
+                            return Err(ClientBuildFailure::Failed {
+                                err: e,
+                                endpoint: endpoint.clone(),
+                                username: username.clone(),
+                            });
                         }
                     }
                 }
@@ -133,7 +144,11 @@ pub(super) async fn build_session(
                     Ok(client) => client,
                     Err(e) => {
                         log::warn!("sync: Fever 端点解析/认证失败: {e}");
-                        return Err(ClientBuildFailure::Failed(e));
+                        return Err(ClientBuildFailure::Failed {
+                            err: e,
+                            endpoint: endpoint.clone(),
+                            username: username.clone(),
+                        });
                     }
                 },
             };
@@ -168,7 +183,11 @@ pub(super) async fn build_session(
                 }
                 Err(e) => {
                     log::warn!("sync: ClientLogin 失败: {e}");
-                    return Err(ClientBuildFailure::Failed(e));
+                    return Err(ClientBuildFailure::Failed {
+                        err: e,
+                        endpoint: endpoint.clone(),
+                        username: username.clone(),
+                    });
                 }
             }
         }

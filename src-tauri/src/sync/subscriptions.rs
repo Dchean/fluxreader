@@ -22,6 +22,13 @@ OPT-009 B3：subscription-outbox-changed 事件总线
 static SUBSCRIPTION_EVENT_TARGET: std::sync::OnceLock<tauri::AppHandle> =
     std::sync::OnceLock::new();
 
+/// 进程内上一次实际发射的订阅写回 payload（跨发射点同值去重，W2 复审 P3-2）：
+/// 离线重试期「record 落账 + try_push 兜底」每 tick 会产生 2–4 个同值事件——
+/// payload 未变不重发。消费方语义是「状态变化通知」，同值不刷新正确；账号切换
+/// 的可见性由挂载/保存/断开后的主动刷新承担（B3 既有口径），不依赖事件。
+static LAST_OUTBOX_PAYLOAD: std::sync::OnceLock<std::sync::Mutex<Option<serde_json::Value>>> =
+    std::sync::OnceLock::new();
+
 /// setup 时注册事件目标（lib.rs；幂等：重复注册以首次为准）。
 pub fn init_subscription_event_target(app: tauri::AppHandle) {
     let _ = SUBSCRIPTION_EVENT_TARGET.set(app);
@@ -33,7 +40,8 @@ pub fn init_subscription_event_target(app: tauri::AppHandle) {
 /// 锁纪律：调用方必须在 **DB 锁外** 调用——本函数内部自己短持锁。
 /// 静默规则（与 notify_queue_changed 同源）：未配置同步（无凭据）→ 不发事件；
 /// 事件目标未注册（集成测试）→ no-op；账号/统计读取失败 → 记日志跳过
-/// （不编造零值事件冒充「无待办」）。
+/// （不编造零值事件冒充「无待办」）；与上次实际发射的 payload 同值 → 跳过
+/// （W2 复审 P3-2 的跨发射点去重，见 [`LAST_OUTBOX_PAYLOAD`]）。
 pub async fn notify_subscription_outbox_changed(db: &Arc<Mutex<Connection>>) {
     let Some(app) = SUBSCRIPTION_EVENT_TARGET.get() else {
         return;
@@ -53,10 +61,24 @@ pub async fn notify_subscription_outbox_changed(db: &Arc<Mutex<Connection>>) {
             }
         }
     };
-    if let Some(p) = payload {
-        use tauri::Emitter;
-        let _ = app.emit("subscription-outbox-changed", p);
+    let Some(p) = payload else {
+        // None（未配置/读取失败）：清空缓存——重新配置后即使统计与上次相同
+        // 也必须再发（摘要卡需要重新出现），不得用旧缓存吞掉连续性断点。
+        if let Some(last) = LAST_OUTBOX_PAYLOAD.get() {
+            *last.lock().unwrap() = None;
+        }
+        return;
+    };
+    {
+        let last = LAST_OUTBOX_PAYLOAD.get_or_init(|| std::sync::Mutex::new(None));
+        let mut guard = last.lock().unwrap();
+        if guard.as_ref() == Some(&p) {
+            return;
+        }
+        *guard = Some(p.clone());
     }
+    use tauri::Emitter;
+    let _ = app.emit("subscription-outbox-changed", p);
 }
 
 /// 推送订阅编辑（改名 / 移动目录）到远端（best-effort，A-2）。
@@ -229,6 +251,10 @@ pub(super) async fn push_feeds(
     // quick_add；quick_add 未返回 id（FreshRSS numResults=0）或失败时同样转
     // 列表证据解析——创建可能已在错误返回前落地。
     let mut done: Vec<i64> = Vec::new();
+    // 挂载失败保留的 legacy 队项（W2 复审 P3-3）：保留 ≠ 无记录——落账
+    // attempts/last_error（与 outbox 的 Retry 口径一致），否则 attempts 恒 0、
+    // waiting 永不清零，失败不可见。
+    let mut mount_failed: Vec<(i64, String)> = Vec::new();
     for it in &items {
         // OPT-006：每个订阅推送（新批次）前复核代际——账号已切换即停止后续请求。
         if !session_is_current(db, session).await {
@@ -313,10 +339,14 @@ pub(super) async fn push_feeds(
                     .await
                 {
                     Ok(()) => done.push(it.queue_id),
-                    Err(e) => report.errors.push(format!(
-                        "订阅 {} 挂载分类「{label}」失败（保留队项下轮重试）: {e}",
-                        it.url
-                    )),
+                    Err(e) => {
+                        let summary = format!(
+                            "订阅 {} 挂载分类「{label}」失败（保留队项下轮重试）: {e}",
+                            it.url
+                        );
+                        report.errors.push(summary.clone());
+                        mount_failed.push((it.queue_id, summary));
+                    }
                 }
             }
             // 无本地绑定（本地已删除）或无目标分类：无挂载可做，照常出队
@@ -330,6 +360,15 @@ pub(super) async fn push_feeds(
         log::warn!("sync: 订阅推送确认时账号代际已变更，跳过剪除与僵尸清理");
         return;
     }
+    // P3-3：失败标记与剪除同一代际守卫边界（旧代际的失败不落到新队列）。
+    if !mount_failed.is_empty() {
+        if let Err(err) = db::mark_push_failed(&conn, &mount_failed) {
+            log::warn!(
+                "sync: 挂载失败保留队项的失败标记落库失败（{} 项）: {err}",
+                mount_failed.len()
+            );
+        }
+    }
     // P3[1]：剪除已推送队项失败此前静默——残留队项会被下一轮重复推送（重复订阅
     // 动作），且无日志可查。改为 warn（失败不中断：下轮会再尝试剪除）。
     if let Err(err) = db::prune_sync(&conn, &done) {
@@ -342,6 +381,11 @@ pub(super) async fn push_feeds(
         log::warn!("sync: 清理 remove_feed 僵尸队项失败: {err}");
     }
     drop(conn);
+    // P3-3：失败标记改变了队列统计（waiting 中的 failed 计数升）——即时推送
+    // pill（notify 内部自持短锁，此处已在 DB 锁外）。
+    if !mount_failed.is_empty() {
+        notify_queue_changed(db).await;
+    }
 }
 
 /// 单条订阅 outbox 的执行结果。
@@ -994,7 +1038,8 @@ async fn exec_unsubscribe_recovery(
 /// B3：无论本轮是否发出请求，结束都广播一次订阅写回状态（`subscription-
 /// outbox-changed`）——「入队刚发生而会话构建失败（离线/认证失败）」时，事件
 /// 是 UI 看到「等待 N 项」的即时通道；执行器内的确认/失败路径已各自通知，
-/// 重复载荷是同一快照（无害）。未配置同步时 notify 内部静默。
+/// 重复载荷由 notify 单点同值去重（W2 复审 P3-2）：入队可见性由第一次发射
+/// 保障，同值不重发。未配置同步时 notify 内部静默。
 pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) {
     match build_session(db, http).await {
         Ok(session) => {
@@ -1005,7 +1050,9 @@ pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &re
         // 认证/端点/网络失败为当前账号 pending 行落账（attempts/last_error + 事件），
         // UI 摘要卡才能解释「为什么一直等待」。未配置（无归属身份）与代际失配
         // （旧会话作废，OPT-006）不落账。
-        Err(ClientBuildFailure::Failed(e)) => record_outbox_session_block(db, &e).await,
+        Err(ClientBuildFailure::Failed(f)) => {
+            record_outbox_session_block(db, &f.err, &f.endpoint, &f.username).await
+        }
         Err(ClientBuildFailure::NotConfigured) => {}
         Err(ClientBuildFailure::Stale) => {}
         Err(ClientBuildFailure::CorruptGeneration(e)) => {
@@ -1019,17 +1066,16 @@ pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &re
 /// TASK-124 模式）：有凭据但认证/端点/网络失败时，当前账号的全部 pending 队项
 /// 累计一次失败尝试并记录摘要，确有标记行时广播 `subscription-outbox-changed`
 /// ——「等待 N 项」必须能解释原因，而不是永远停在等待。
+/// 摘要携带失败会话的端点/用户名（W2 复审 P3-4）：换号竞态下落账按当前账号
+/// key，标注失败会话身份便于人工辨认归属偏差；快照身份未知（解密失败）不伪造。
 /// 未配置（无账号身份可归属）与读取失败跳过；落账只做 DB 标记，事件在锁外发。
 pub(super) async fn record_outbox_session_block(
     db: &Arc<Mutex<Connection>>,
     err: &crate::error::AppError,
+    session_endpoint: &str,
+    session_username: &str,
 ) {
-    let msg = err.message.trim();
-    let summary = if err.code == "auth" {
-        format!("订阅写回认证失败：{msg}")
-    } else {
-        format!("订阅写回被阻塞（网络/端点失败）：{msg}")
-    };
+    let summary = outbox_block_summary(err, session_endpoint, session_username);
     log::warn!("sync: 订阅写回被阻塞（会话构建失败）: {summary}");
     let marked = {
         let conn = db.lock().await;
@@ -1047,6 +1093,31 @@ pub(super) async fn record_outbox_session_block(
         Ok(n) if n > 0 => notify_subscription_outbox_changed(db).await,
         Ok(_) => {}
         Err(e) => log::warn!("sync: 订阅 outbox 阻塞标记落库失败: {e}"),
+    }
+}
+
+/// 会话构建失败的落账摘要单点（W2 复审 P3-1/P3-4）。
+/// 判定与 push.rs `push_block_summary` 同判据——**code=auth 之外还必须认
+/// ClientLogin 文案**：GReader 凭据错误经 ClientLogin 报出，错误 code 实为
+/// network（push.rs `push_block_summary_distinguishes_auth_from_network`
+/// 锁定的协议事实），只判 code 会把 GReader 认证失败标成「网络/端点失败」。
+/// `session_*` 是失败会话的凭据快照（见 `ClientBuildFailure::Failed`）；
+/// 两者皆空（解密失败、身份未知）时不伪造标注。
+fn outbox_block_summary(
+    err: &crate::error::AppError,
+    session_endpoint: &str,
+    session_username: &str,
+) -> String {
+    let msg = err.message.trim();
+    let core = if err.code == "auth" || msg.contains("ClientLogin") {
+        format!("订阅写回认证失败：{msg}")
+    } else {
+        format!("订阅写回被阻塞（网络/端点失败）：{msg}")
+    };
+    if session_endpoint.is_empty() && session_username.is_empty() {
+        core
+    } else {
+        format!("{core}（失败会话端点 {session_endpoint}，用户 {session_username}）")
     }
 }
 
@@ -1641,4 +1712,44 @@ fn pending_protected_feed_ids(
         }
     }
     Ok(pending_feed_ids)
+}
+
+/* ============================================================
+W2 复审 P3-1：会话构建失败摘要的判定单测
+（行为验证由 CI 执行；本机不可链接）
+============================================================ */
+#[cfg(test)]
+mod outbox_block_summary_tests {
+    use super::outbox_block_summary;
+    use crate::error::AppError;
+
+    /// 与 push.rs `push_block_summary_distinguishes_auth_from_network` 同形：
+    /// GReader 凭据错误经 ClientLogin 报出、错误 code 实为 network——只判
+    /// code 会把它标成「网络/端点失败」（判别力：删掉 ClientLogin 判据必红）。
+    #[test]
+    fn outbox_block_summary_distinguishes_auth_from_network() {
+        // Fever：code=auth
+        let fever_auth = AppError::new("auth", "Fever 认证失败（api_key 不正确）");
+        assert!(outbox_block_summary(&fever_auth, "", "").starts_with("订阅写回认证失败："));
+
+        // GReader：路径存在但凭据被拒（实际文案，code 为 network）
+        let greader_401 = AppError::network(
+            "ClientLogin → 401 Unauthorized（已定位 API：https://example.com/api/greader.php）",
+        );
+        assert!(
+            outbox_block_summary(&greader_401, "", "").starts_with("订阅写回认证失败："),
+            "GReader 凭据错误经 ClientLogin 报出（code=network），必须归入认证失败"
+        );
+
+        // 网络/端点失败：不冒充认证失败
+        let dns = AppError::network("error sending request for url (https://example.com/)");
+        assert!(outbox_block_summary(&dns, "", "").starts_with("订阅写回被阻塞（网络/端点失败）："));
+
+        // 快照会话标注（P3-4）：非空时携带、便于辨认换号竞态下的归属；
+        // 空（解密失败、身份未知）不伪造
+        let with_session = outbox_block_summary(&dns, "https://a.example/api/greader.php", "alice");
+        assert!(with_session.contains("失败会话端点 https://a.example/api/greader.php"));
+        assert!(with_session.contains("用户 alice"));
+        assert!(!outbox_block_summary(&dns, "", "").contains("失败会话端点"));
+    }
 }

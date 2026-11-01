@@ -4770,6 +4770,25 @@ async fn push_feeds_mount_failure_keeps_legacy_queue_item_until_converges() {
             queued, 1,
             "挂载失败不得剪除队项（pull 不回灌既有源分类，剪除即永久缺口）"
         );
+        let (attempts, last_error): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT attempts, last_error FROM sync_queue
+                  WHERE feed_url = ?1 AND action = 'add_feed'",
+                [&url],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            attempts, 1,
+            "保留的 legacy 队项必须落账失败尝试（attempts 恒 0 则失败不可见，W2 复审 P3-3）"
+        );
+        assert!(
+            last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("挂载分类"),
+            "last_error 必须携带挂载失败摘要: {last_error:?}"
+        );
         let labels: Vec<String> = server.subscriptions.lock().unwrap()[0]
             .categories
             .iter()

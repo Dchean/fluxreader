@@ -331,8 +331,8 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
         }
         // TASK-124：认证/端点/网络失败——记录阻塞标记 + 发事件（此前在此提前返回，
         // 用户在 UI 上永远看不到「为什么一直不同步」，审计 P2-6②）
-        Err(ClientBuildFailure::Failed(e)) => {
-            record_push_block(db, &e).await;
+        Err(ClientBuildFailure::Failed(f)) => {
+            record_push_block(db, &f.err).await;
             return;
         }
     };
