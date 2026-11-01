@@ -71,6 +71,18 @@ export type BootstrapSlice = Pick<
 let queryGeneration = 0;
 const firstPageSerialByKey = new Map<string, number>();
 
+/* 启动并行装载的「落库有序」门（审计卡2-5）。App 挂载只发起
+   bootstrapFromBackend；bootstrapFromBackend 在发出数据查询的同一时刻并行
+   启动 bootstrapSettings（首读并行），并把自己的完成 promise 记到本变量——
+   reloadFromBackend 发起时同步捕获（一次性），落地前等待它：设置接受
+   （settings/activeViewFilter/timelineFilter 写入）必须先于数据快照落地，
+   否则落地时读 settings.smartDedup 会拿默认值（scopeCounts 快照缺失）、
+   完成时的 activeViewFilter 复查拿不到恢复的 startupView（筛选视图缺首拉）、
+   首帧主题闪默认值。等待后复核查询代际：门等待期间可能已有更新的查询发起，
+   拒落语义与下方代际早退一致。 */
+// Note: 写集核实结论、落库顺序依赖的三个后果与「门为何在 bootstrapFromBackend 内部」 — 见 .agents/notes/implemented/feature/2026-11-02-前端交互正确性与感知体验.md
+let pendingStartupLandGate: Promise<void> | null = null;
+
 /** per-key 首屏代际记录：每次首屏类发起推进该键序号（键内单调）。 */
 function recordFirstPageStart(queryKey: string): number {
   const serial = (firstPageSerialByKey.get(queryKey) ?? 0) + 1;
@@ -419,6 +431,11 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       消费顶条锚回位（审计「后台刷新保留当前阅读位置」）；导航路径不传，
       锚机制对用户主动切换保持沉默（分流显式化）。 */
   reloadFromBackend: async (opts) => {
+    /* 启动落库门发起时捕获（见 pendingStartupLandGate 头注）：同步读取后立即
+       清空——只有「与设置恢复同时发起」的那一次 reload 受约束；期间被事件
+       触发的其它 reload 捕获到 null，不受牵连。 */
+    const landGate = pendingStartupLandGate;
+    pendingStartupLandGate = null;
     /* TASK-109①：发起时一次性快照「范围×布局×排序」——查询参数、分页游标键
        与「全部」视图缓存键全部从该快照派生。原实现在 await 之后读「完成时」
        的 activeFeedFilter/activeContentLayout 充当游标键与缓存键口径（注释
@@ -491,8 +508,35 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
         get().showToast(`刷新失败：${extractError(e)}`);
         throw e;
       }
-      if (gen !== queryGeneration) return; // TASK-119：全局已有更新的查询发起（统一查询代际，语义同原 reloadGeneration）
-      if (!folders || !feeds || articles === null) return;
+      /* TASK-119：全局已有更新的查询发起（统一查询代际，语义同原 reloadGeneration） */
+      if (gen !== queryGeneration) {
+        /* 审计（splash 永挂）：静默早退是 dataLoading 的漏关闭点——启动首屏被
+           事件触发的更新查询抢占时（splash 期间 feeds-updated 到达），本快照
+           拒落且 bootstrapFromBackend 的 await 正常返回，无人再关 dataLoading。
+           这里兜底只关不开（非启动路径 dataLoading 本就 false，写不发生）；
+           bootstrapError 不在此写——更新的查询正持有落地权，其成败才是本轮
+           最终态（失败已有 toast 可见性），误标会让落了地的数据被错误浮层盖住。 */
+        if (get().dataLoading) set({ dataLoading: false });
+        return;
+      }
+      if (!folders || !feeds || articles === null) {
+        /* 空快照拒落（后端契约异常，正常 tauri 流程不可达）：与上一分支同理
+           兜底 dataLoading；启动窗口（dataLoading 仍开）落 bootstrapError 亮
+           错误态 + 重试入口——数据没到且无更新查询接手，静默空屏不可诊断。
+           非启动窗口保持旧静默语义（后台刷新拒落不劫持 UI；重试可恢复）。 */
+        if (get().dataLoading) set({ dataLoading: false, bootstrapError: '后端返回空快照，装载中止' });
+        return;
+      }
+      if (landGate) {
+        /* 落库有序门（仅启动并行装载路径非空，见 pendingStartupLandGate 头注）。
+           放在落地计算之前：下方 scopeCounts 快照读 settings.smartDedup、
+           落地后的筛选视图补拉读 activeViewFilter，都必须看到设置接受后的值。 */
+        await landGate.catch(() => undefined);
+        if (gen !== queryGeneration) {
+          if (get().dataLoading) set({ dataLoading: false });
+          return;
+        }
+      }
 
       /* TASK-123：保位窗口重取——keepReadingPosition 不再只拉首屏：keyset 续页
          重取 [首屏..窗口末]（底边界 = 发起时游标窗口底锚，插头部使窗口按实际
@@ -981,6 +1025,14 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       }
       return;
     }
+    /* 启动并行装载（审计卡2-5，「首读并行、落库有序」）：设置恢复与数据查询
+       同时发起——设置读取与 list_folders/list_feeds/list_articles/counts_snapshot
+       并行在途，首屏等待从「设置+数据」串行和缩为两者较慢者。顺序依赖的收敛
+       在落地侧：pendingStartupLandGate 把本 promise 移交 reloadFromBackend，
+       数据快照落地前等待设置接受（机制见其头注）。bootstrapSettings 自吞错误
+       （内部 catch），门不会因设置读取失败而悬挂。 */
+    const settingsTask = get().bootstrapSettings();
+    pendingStartupLandGate = settingsTask;
     try {
       await get().reloadFromBackend();
     } catch (e) {

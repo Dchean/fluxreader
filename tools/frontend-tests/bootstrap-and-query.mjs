@@ -86,6 +86,93 @@ export async function run(ctx) {
   checkNew('(a) 旧代际 reload 结果被丢弃：entries 保持最新代际快照（布局不回退）',
     store.getState().entries.length === 1 && store.getState().entries[0].id === '301');
 
+  /* 审计卡2-5：静默早退兜底——reloadFromBackend 的两处静默 return 此前是
+     dataLoading 的漏关闭点，bootstrap 路径会理论永挂 splash。
+     场景 1：启动首屏被更新查询抢占（splash 期间 feeds-updated 到达）→ 旧
+     代际拒落，dataLoading 必须已兜底关闭（修前此处仍为 true）；
+     场景 2：后端空快照拒落（契约异常）→ dataLoading 关闭 + bootstrapError
+     亮错误态（重试入口），重试后恢复。 */
+  await resetStore({ dataMode: 'tauri', dataLoading: true, entries: [], categories: [], feedIndex: new Map() });
+  S.listPlan = { mode: 'defer' };
+  const pStaleBoot = store.getState().bootstrapFromBackend();
+  await nTick(0);
+  const pFresh = store.getState().reloadFromBackend();
+  await nTick(0);
+  checkNew('(a) 启动首屏在途 + 更新查询发起：两次 list_articles 同时在途（抢占场景成立）', S.pendingList.length === 2);
+  S.pendingList[0].resolve([mkRow({ id: 101, feed_id: 10, title: '被抢占的旧代际' })]);
+  await nTick(0);
+  checkNew('(a) 旧代际静默早退后 dataLoading 已兜底关闭（splash 不永挂）',
+    store.getState().dataLoading === false);
+  S.pendingList[1].resolve([mkRow({ id: 301, feed_id: 20, title: '新代际' })]);
+  await Promise.all([pStaleBoot, pFresh]);
+  S.listPlan = null;
+  checkNew('(a) 抢占方正常落地：entries 为新代际、bootstrapError 未被误标',
+    store.getState().entries.length === 1 && store.getState().entries[0].id === '301'
+    && store.getState().bootstrapError === null);
+
+  await resetStore({ dataMode: 'tauri', dataLoading: true, entries: [], categories: [], feedIndex: new Map() });
+  S.listPlan = { mode: 'defer' };
+  const pNullBoot = store.getState().bootstrapFromBackend();
+  await nTick(0);
+  checkNew('(a) 空快照场景：单次 list_articles 在途', S.pendingList.length === 1);
+  S.pendingList[0].resolve(null); // 后端契约异常：articles = null（正常流程不可达）
+  await pNullBoot;
+  S.listPlan = null;
+  checkNew('(a) 空快照静默早退：dataLoading 关闭 + bootstrapError 亮错误态（重试入口可达）',
+    store.getState().dataLoading === false
+    && typeof store.getState().bootstrapError === 'string' && store.getState().bootstrapError.length > 0);
+  await store.getState().retryBootstrap();
+  checkNew('(a) 空快照错误态经重试恢复（错误清零、数据装载）',
+    store.getState().bootstrapError === null && store.getState().entries.length === 8);
+
+  /* 审计返工 P2-3：落库门「设置接受先于数据落地」的直接取证——get_setting
+     挂起到晚于 list_articles 返回：落地必须被门挡到设置接受之后；接受后恢复的
+     startupView=starred 在落地完成时被读到 → 触发筛选视图补拉（list_articles
+     第二次、带 only_starred）。修前（无落库门）落地先于设置接受，完成时读到
+     'all' → 不补拉，list_articles 仅 1 次。 */
+  {
+    await resetStore({ dataMode: 'tauri', dataLoading: true, entries: [], categories: [], feedIndex: new Map() });
+    S.listPlan = { mode: 'defer' };
+    const installedInvoke = globalThis.__INVOKE__;
+    let releaseSetting = () => {};
+    const gateInvoke = (cmd, args) => {
+      if (cmd === 'get_setting') {
+        return new Promise((resolve) => { releaseSetting = () => resolve(S.settingsRaw); });
+      }
+      return installedInvoke(cmd, args);
+    };
+    const restoreInvoke = overrideGlobal(globalThis, '__INVOKE__', gateInvoke);
+    try {
+      S.settingsRaw = JSON.stringify({ startupView: 'starred' });
+      const pBoot = store.getState().bootstrapFromBackend();
+      await nTick(0);
+      checkNew('(a) 落库门场景成立：settings 读取与 list_articles 同时在途',
+        typeof releaseSetting === 'function' && S.pendingList.length === 1);
+      S.pendingList[0].resolve([mkRow({ id: 101, feed_id: 10, title: '首屏行' })]);
+      await nTick(0);
+      checkNew('(a) list_articles 已返回但设置未接受：落地被门挡住（dataLoading 仍开、无补拉）',
+        store.getState().dataLoading === true
+        && S.invokeCalls.filter((c) => c.cmd === 'list_articles').length === 1);
+      releaseSetting();
+      await nTick(0); await nTick(0); await nTick(0);
+      const listCalls = S.invokeCalls.filter((c) => c.cmd === 'list_articles');
+      checkNew('(a) 设置接受后落地：恢复的 startupView=starred 触发筛选视图补拉（list_articles 第二次带 only_starred）',
+        listCalls.length === 2 && listCalls[1].args.args.only_starred === true);
+      S.pendingList[S.pendingList.length - 1].resolve([mkRow({ id: 201, feed_id: 20, title: '收藏行', is_starred: true })]);
+      await pBoot;
+      await nTick(0); await nTick(0);
+      S.listPlan = null;
+      checkNew('(a) 落库门放行后按序收尾：dataLoading 关闭、视图为恢复的 starred、补拉快照落地',
+        store.getState().dataLoading === false
+        && store.getState().activeViewFilter === 'starred'
+        && store.getState().entries.some((e) => e.id === '201'));
+    } finally {
+      restoreInvoke();
+      S.listPlan = null;
+      S.settingsRaw = null;
+    }
+  }
+
   /* ============================================================
      (b) 订阅源/分类选择与派生树计数
      ============================================================ */

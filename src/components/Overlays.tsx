@@ -66,55 +66,63 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
   /* 键盘移动标记：scrollIntoView 只在键盘导航时触发 */
   const keyboardNav = useRef(false);
 
-  /* 180ms 防抖 */
+  /* 文章搜索防抖（审计卡2-6）：单段 250ms。原双段（180ms 输入防抖 + 搜索
+     effect 里再 250ms 发起延迟）合计 430ms 才发出首查，感知明显迟滞；合并后
+     输入停稳 250ms 即发。命令/订阅源是本地即时过滤（直接吃原始输入 q），
+     不经防抖——见 items useMemo。searching 随 debounced 同帧置真（发出即
+     「搜索中」，响应落地/失败后复位），避免在搜索 effect 内同步 setState。
+     同值守卫（审计返工 P2-1）：fire 时 next === debounced（窗口内删回同值）
+     则搜索 effect 不会重跑，此处不得再置 searching——否则「搜索中」卡真
+     永挂（finally 永不执行）。 */
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(q.trim()), 180);
+    const t = setTimeout(() => {
+      const next = q.trim();
+      if (next !== debounced) {
+        setDebounced(next);
+        setSearching(next !== '');
+      }
+    }, 250);
     return () => clearTimeout(t);
-  }, [q]);
+  }, [q, debounced]);
 
-  /* 文章搜索：后端 FTS5（防抖后触发）；浏览器环境回退内存匹配 */
+  /* 文章搜索：后端 FTS5（debounced 落定即发，延迟已由上方单段防抖承担）；
+     浏览器环境回退内存匹配 */
   useEffect(() => {
     const query = debounced;
-    // Note: set-state-in-effect — 此处确有「effect 内 setState」；因该状态仅由本浮层的
-    // 打开/关闭驱动、且需在渲染提交后同步，故按 lint 建议显式标注而非改写。
     if (!query) return;
     /* F20：代际守卫——慢查询晚于新查询返回时不得覆盖新结果 */
     let alive = true;
-    const t = setTimeout(() => {
-      setSearching(true);
-      api
-        .searchArticles(query, 10)
-        .then((rows) => {
-          if (!alive) return;
-          setSearchError(false);
-          if (!rows) {
-            const lower = query.toLowerCase();
-            setResults(
-              useAppStore
-                .getState()
-                .entries.filter(
-                  (a) =>
-                    a.title.toLowerCase().includes(lower) ||
-                    a.snippet.toLowerCase().includes(lower),
-                )
-                .slice(0, 10),
-            );
-            return;
-          }
-          setResults(rows.map(articleRowToEntry));
-        })
-        .catch(() => {
-          if (!alive) return;
-          setSearchError(true);
-          setResults([]);
-        })
-        .finally(() => {
-          if (alive) setSearching(false);
-        });
-    }, 250);
+    api
+      .searchArticles(query, 10)
+      .then((rows) => {
+        if (!alive) return;
+        setSearchError(false);
+        if (!rows) {
+          const lower = query.toLowerCase();
+          setResults(
+            useAppStore
+              .getState()
+              .entries.filter(
+                (a) =>
+                  a.title.toLowerCase().includes(lower) ||
+                  a.snippet.toLowerCase().includes(lower),
+              )
+              .slice(0, 10),
+          );
+          return;
+        }
+        setResults(rows.map(articleRowToEntry));
+      })
+      .catch(() => {
+        if (!alive) return;
+        setSearchError(true);
+        setResults([]);
+      })
+      .finally(() => {
+        if (alive) setSearching(false);
+      });
     return () => {
       alive = false;
-      clearTimeout(t);
     };
   }, [debounced]);
 
@@ -126,7 +134,9 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
   /* 命令表：全部命令（含快捷键 hint）；订阅源/文章按当前过滤 */
   const items = useMemo<PaletteItem[]>(() => {
     const s = useAppStore.getState();
-    const query = debounced.toLowerCase();
+    /* 命令/订阅源本地即时过滤：吃原始输入（不经防抖），打字即过滤；
+       文章组仍按防抖后的 resultsEffective 呈现（上方单段 250ms）。 */
+    const query = q.trim().toLowerCase();
     const out: PaletteItem[] = [];
 
     const commands: { label: string; hint: string; run: () => void }[] = [
@@ -196,7 +206,7 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
       }
     }
     return out;
-  }, [debounced, feedIndex, resultsEffective]);
+  }, [q, feedIndex, resultsEffective]);
 
   /* 光标重置：渲染期键检测模式，避免 set-state-in-effect */
   // Note: set-state-in-effect — 此处确有「effect 内 setState」；因该状态仅由本浮层的
@@ -209,7 +219,9 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     if (listRef.current) listRef.current.scrollTop = 0;
-  }, [debounced]);
+    /* 本地过滤（命令/订阅源）随原始输入即时变化：列表内容可能在 debounced
+       落定前已替换，滚动归零跟原始输入走，避免停在小防抖窗口的旧深度上。 */
+  }, [q]);
 
   /* 键盘选中行滚动到可见（仅键盘导航触发；鼠标 hover 不滚动） */
   useEffect(() => {

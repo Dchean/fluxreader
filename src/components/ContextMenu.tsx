@@ -28,8 +28,32 @@ interface MenuItem {
 export function ContextMenuHost() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  /* 打开前持有焦点的元素：关闭时还原（键盘用户回到触发处，不落 body）。 */
+  const previousFocusRef = useRef<HTMLElement | null>(null);
 
   const close = useCallback(() => setMenu(null), []);
+
+  /** 当前可用（未禁用）菜单项，按 DOM 顺序——方向键/Home/End 的移动集合。 */
+  const enabledItems = (): HTMLElement[] =>
+    Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])') ?? []);
+
+  /* 打开即焦点入首项（WAI-ARIA menu 模式，审计卡2-7）：此前菜单仅鼠标可达度
+     完整，键盘用户要先 Tab 逐项摸索。焦点定位在提交后（portal 已挂载真实
+     DOM），preventScroll 避免定位引发的意外滚动。审计返工 P3-2：打开时记录
+     打开前的焦点元素，菜单关闭（effect 清理 = 卸载/重建）时还原——触发元素
+     已被移出文档则跳过（不得聚焦游离节点）。 */
+  useEffect(() => {
+    if (!menu) return;
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
+    enabledItems()[0]?.focus({ preventScroll: true });
+    return () => {
+      const prev = previousFocusRef.current;
+      previousFocusRef.current = null;
+      if (prev && prev.isConnected) prev.focus({ preventScroll: true });
+    };
+    // Note: exhaustive-deps — enabledItems 读 menuRef（ref 不入依赖）；随 menu 重开执行一次。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [menu]);
 
   /* 全局 contextmenu：禁用默认菜单 + 按目标构建自定义菜单 */
   useEffect(() => {
@@ -58,7 +82,12 @@ export function ContextMenuHost() {
       close();
     };
     const onEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close();
+      if (e.key === 'Escape') {
+        close();
+        /* 审计返工 P3-2：菜单优先消费 Esc 并截停——防止事件继续到达 App 全局
+           监听后按序关闭下一层浮层（菜单是当前最顶层，一次 Esc 只关一层）。 */
+        e.stopPropagation();
+      }
     };
     const onScroll = () => close();
     const onResize = () => close();
@@ -89,7 +118,39 @@ export function ContextMenuHost() {
   return createPortal(
     /* role=menu：菜单项可被键盘 Tab 进入并操作（此前仅鼠标可达）。
        ref 上仍是同一个 mousedown/Esc/scroll 关闭逻辑，行为未变。 */
-    <div className="ctx-menu" style={style} ref={menuRef} role="menu" onClick={(e) => e.stopPropagation()}>
+    <div
+      className="ctx-menu"
+      style={style}
+      ref={menuRef}
+      role="menu"
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        /* 单键快捷键让路（审计返工 P2-2）：菜单不在 shortcutYield 的浮层集合
+           内，j/k/s/m（含大写）若继续冒泡会到达 App 全局监听并作用于菜单
+           背后的当前文章（inInput=false、浮层让路判定不含本菜单）——在容器
+           层截停。方向键分支已有 preventDefault，不受影响。 */
+        if (/^[smjkSMJK]$/.test(e.key)) {
+          e.stopPropagation();
+          return;
+        }
+        /* 方向键导航（WAI-ARIA menu 模式，审计卡2-7）：↑↓ 循环、Home/End
+           跳首/末，跳过禁用项（不在移动集合里）。Esc 关闭由 document 捕获级
+           监听承担（既有逻辑，不变）。焦点不在项上（如刚点开未落焦）时
+           ↓ 视为到首项、↑ 视为到末项。 */
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+        const items = enabledItems();
+        if (items.length === 0) return;
+        e.preventDefault();
+        const current = items.indexOf(document.activeElement as HTMLElement);
+        let next: number;
+        if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = items.length - 1;
+        else if (e.key === 'ArrowDown') next = current < 0 ? 0 : (current + 1) % items.length;
+        else if (e.key === 'ArrowUp') next = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length;
+        else return;
+        items[next]?.focus({ preventScroll: true });
+      }}
+    >
       {menu.items.map((it, i) => (
         <div
           key={i}

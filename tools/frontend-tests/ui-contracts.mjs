@@ -2446,6 +2446,74 @@ export async function run(ctx) {
       trapW4.includes('export function trapModalTab')
       && trapW4.includes('panel.focus({ preventScroll: true })')
       && trapW4.includes('!panel.contains(active)'));
+
+    /* 审计卡2（前端交互正确性与感知体验）源码契约钉 */
+    {
+      const appK2 = rdW4('../../src/App.tsx');
+      const readerK2 = rdW4('../../src/components/Reader.tsx');
+      const timelineK2 = rdW4('../../src/components/Timeline.tsx');
+      const overlaysK2 = rdW4('../../src/components/Overlays.tsx');
+      const ctxMenuK2 = rdW4('../../src/components/ContextMenu.tsx');
+      const bootstrapK2 = rdW4('../../src/store/slices/bootstrap.ts');
+
+      /* (k2-1) IME Escape 守卫：全局 Escape 分支内先判 isComposing / keyCode 229
+         （App 监听为原生事件，无 nativeEvent 前缀），守卫先于浮层关闭链 */
+      const escIdxK2 = appK2.indexOf("if (e.key === 'Escape')");
+      const guardIdxK2 = appK2.indexOf('e.isComposing || e.keyCode === 229');
+      checkNew('(k2-1) App 全局 Escape 分支补 IME 守卫（isComposing / keyCode 229 直接 return，先于浮层关闭链）',
+        escIdxK2 >= 0 && guardIdxK2 > escIdxK2
+        && appK2.slice(guardIdxK2, guardIdxK2 + 80).includes('return'));
+
+      /* (k2-2) Reader 正文三态：failed/missing/loading·unrequested 分支先于
+         ReaderProse（译文视图不走分支），failed 走 retryHydration */
+      checkNew('(k2-2) Reader 正文三态与卡片同构：loading/unrequested 占位、failed 走 .hydrate-retry + retryHydration、missing 出文案',
+        readerK2.includes("body.state === 'failed'")
+        && readerK2.includes("body.state === 'missing'")
+        && readerK2.includes("body.state === 'unrequested'")
+        && readerK2.includes('retryHydration(art.id)')
+        && readerK2.indexOf('hydrate-retry') >= 0
+        && readerK2.indexOf('hydrate-retry') < readerK2.indexOf('<ReaderProse'));
+
+      /* (k2-3) 行虚拟化对齐：两实例（行 + 画廊）均显式 useFlushSync:false */
+      checkNew('(k2-3) Timeline 两个虚拟化实例均 useFlushSync:false（行实例与画廊实例同口径）',
+        (timelineK2.match(/useFlushSync: false/g) || []).length === 2);
+
+      /* (k2-4) 空态/加载态分流 + 哨兵让位 */
+      checkNew('(k2-4) Timeline 空态分流：在途渲染加载形态（隐藏空态文案），哨兵在空+在途窗口让位',
+        timelineK2.includes('articlesLoading ? (')
+        && timelineK2.includes('aria-label="加载中"')
+        && timelineK2.includes('!(items.length === 0 && articlesLoading)'));
+
+      /* (k2-5) bootstrap 并行装载：App 串行 .then 清零；bootstrapFromBackend
+         内并行发起设置恢复 + 一次性落库门；两处静默早退兜底 dataLoading */
+      checkNew('(k2-5) bootstrap 启动并行装载（首读并行/落库有序）：设置恢复随数据装载同时发起、一次性落库门、两处静默早退兜底（空快照另落 bootstrapError）',
+        !appK2.includes('.bootstrapSettings().then(')
+        && bootstrapK2.includes('pendingStartupLandGate = settingsTask')
+        && bootstrapK2.includes('if (get().dataLoading) set({ dataLoading: false });')
+        && bootstrapK2.includes("bootstrapError: '后端返回空快照，装载中止'"));
+
+      /* (k2-6) 搜索防抖单段 250ms：180ms 首段清零、搜索 effect 内第二段
+         setTimeout 清零（全文件仅防抖 effect 一处 }, 250);）；命令/订阅源
+         即时过滤吃原始输入 q */
+      checkNew('(k2-6) 搜索防抖合并为单段 250ms（文章结果路径）；命令/订阅源本地即时过滤吃原始输入',
+        overlaysK2.includes('setDebounced(next)')
+        && /setSearching\(next !== ''\)/.test(overlaysK2)
+        && !overlaysK2.includes(', 180)')
+        && (overlaysK2.match(/\}, 250\);/g) || []).length === 1
+        && overlaysK2.includes('const query = q.trim().toLowerCase();'));
+
+      /* (k2-7) ContextMenu 方向键：↑↓ 循环 + Home/End + 打开即焦点入首项 */
+      checkNew('(k2-7) ContextMenu 键盘导航：ArrowUp/ArrowDown 循环 + Home/End + 打开即焦点入首项',
+        ctxMenuK2.includes("e.key === 'ArrowDown'")
+        && ctxMenuK2.includes("e.key === 'ArrowUp'")
+        && ctxMenuK2.includes("e.key === 'Home'")
+        && ctxMenuK2.includes("e.key === 'End'")
+        && ctxMenuK2.includes('enabledItems()[0]?.focus({ preventScroll: true })'));
+
+      /* (k2-8) splash 可达性：role=status + aria-label 同元素 */
+      checkNew('(k2-8) 启动 splash 容器 role="status" + aria-label（读屏可达）',
+        /className="app-loading-splash" role="status" aria-label="加载中"/.test(appK2));
+    }
   }
 
   /* OPT-022：行为回归独立成文件，由现有 ui-contracts 域在末尾驱动，避免扩大
