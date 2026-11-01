@@ -4537,8 +4537,11 @@ async fn setup_carryover_fixture(
     (Arc::new(Mutex::new(conn)), server, http, key)
 }
 
-async fn add_feed_queue_count(db: &Arc<Mutex<rusqlite::Connection>>, url: &str) -> i64 {
-    let conn = db.lock().await;
+/// 注意：本 helper 是**同步**函数、只消费调用方已持有的 `&Connection`——
+/// 2026-11-02 CI 根因修复：曾作 async helper 内部再 `db.lock().await`，
+/// 被两个结转用例在**已持锁的断言临界区**里调用，tokio Mutex 不可重入，
+/// 同任务自我死锁（CI Run tests 挂死/硬超时的真凶）。
+fn add_feed_queue_count(conn: &rusqlite::Connection, url: &str) -> i64 {
     conn.query_row(
         "SELECT COUNT(*) FROM sync_queue WHERE action = 'add_feed' AND feed_url = ?1",
         [url],
@@ -4595,7 +4598,7 @@ async fn carryover_unsubscribe_commits_all_three_writes_with_rid_case() {
         assert_eq!(items[0].feed_url, url);
         assert_eq!(items[0].account_key, key, "退订意图必须归属同一账号");
         assert_eq!(
-            add_feed_queue_count(&db, url).await,
+            add_feed_queue_count(&conn, url),
             0,
             "结转退订必须清除同 URL 旧 add_feed 队项（同事务 DELETE）"
         );
@@ -4648,7 +4651,7 @@ async fn carryover_unsubscribe_insert_failure_rolls_back_all_three_writes_case()
         assert_eq!(items[0].stage, "remote_created", "回滚后行阶段原样");
         assert_eq!(items[0].remote_id, Some(42), "回滚后行远端 id 原样");
         assert_eq!(
-            add_feed_queue_count(&db, url).await,
+            add_feed_queue_count(&conn, url),
             1,
             "回滚必须恢复被 DELETE 的旧 add_feed 队项"
         );
@@ -4666,7 +4669,7 @@ async fn carryover_unsubscribe_insert_failure_rolls_back_all_three_writes_case()
         assert_eq!(items[0].action, "unsubscribe");
         assert_eq!(items[0].remote_id, Some(42), "重试结转的远端 id 不变");
         assert_eq!(
-            add_feed_queue_count(&db, url).await,
+            add_feed_queue_count(&conn, url),
             0,
             "解除注入后三写原子提交"
         );
