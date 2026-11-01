@@ -364,6 +364,114 @@ fn backend_sync_due(
     }
 }
 
+/* ============================================================
+W3-3：窗口聚焦触发的 light 同步（60s 节流；30 分钟周期判据零改动）
+============================================================ */
+
+/// 聚焦触发的最小间隔（秒）：距上次触发不足 60s 直接跳过。
+/// 依据：回窗口即看到服务端新状态（同步即得性）与代价（每次 light 全链
+/// 的往返）的折中——连续 alt-tab 不重复发起；60s 与调度 TICK 同量级，
+/// 不引入新节拍。聚焦只约束自身触发，不影响 refresh/同步调度循环的节奏。
+const FOCUS_SYNC_THROTTLE_SECS: i64 = 60;
+
+/// 上次聚焦触发时刻（unix 秒；0 = 从未触发）。事件回调内 CAS 认领窗口，
+/// 并发焦点事件只有一个胜出——节流判定与计时更新是同一原子操作，无竞态。
+static FOCUS_LAST_TRIGGER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// 节流判据（纯函数，单测锁定）：now 距上次触发 ≥ 60s 才允许再次触发。
+fn focus_sync_due(now: i64, last_trigger: i64) -> bool {
+    now.saturating_sub(last_trigger) >= FOCUS_SYNC_THROTTLE_SECS
+}
+
+/// 窗口获得焦点（Focused(true)）时的同步入口（lib.rs on_window_event 调用）。
+/// 认领节流窗口后异步执行：前置判定（autoSync 开启 + 有可用凭据，与
+/// auto_sync_backend 同源）→ outbox pending 写回（有 pending 才发请求）→
+/// sync_light 全链。节流窗口按「焦点事件」计：认领后即使前置判定不通过
+/// 也不回滚（换取无竞察的单一触发，代价只是启用 autoSync 后首窗最多顺延 60s）。
+pub fn on_window_focused(app: AppHandle) {
+    use std::sync::atomic::Ordering;
+    let now = chrono::Utc::now().timestamp();
+    let last = FOCUS_LAST_TRIGGER.load(Ordering::Relaxed);
+    if !focus_sync_due(now, last) {
+        return;
+    }
+    if FOCUS_LAST_TRIGGER
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return; // 并发焦点事件已被认领，跳过
+    }
+    tauri::async_runtime::spawn(async move {
+        focus_triggered_sync(&app).await;
+    });
+}
+
+/// 聚焦同步执行体：与 auto_sync_backend 的 normal_due 分支同链
+/// （outbox pending 检查 → 订阅写回 → sync_light → 数据变化事件），
+/// 但不做 30 分钟/发现节流判定——聚焦只受自身 60s 节流约束。周期同步的
+/// 到期判定、发现节流与调度循环节奏零改动。
+async fn focus_triggered_sync(app: &AppHandle) {
+    let db = app.state::<AppState>().db.clone();
+    let http = app.state::<AppState>().http.clone();
+    // 前置判定与 auto_sync_backend 同源（autoSync 默认开；凭据读取失败按
+    // 「本轮跳过」的失败关闭口径，不静默当作离线）。
+    let (on, connected, outbox_pending) = {
+        let conn = db.lock().await;
+        let on = crate::db::app_settings_bool(&conn, "autoSync", true);
+        let (connected, account_key) = match crate::sync::current_account(&conn) {
+            Ok(Some(ctx)) => (true, Some(ctx.key)),
+            Ok(None) => (false, None),
+            Err(e) => {
+                log::warn!("scheduler: 聚焦同步凭据读取失败，跳过本轮: {e}");
+                (false, None)
+            }
+        };
+        // A-P2-2 同款：outbox 有 pending 才执行写回（本地查询零网络成本）；
+        // 读取失败仅跳过写回段（不影响 light），下一窗口重试。
+        let outbox_pending = match account_key.as_deref() {
+            Some(key) => crate::db::outbox_has_pending(&conn, key).unwrap_or_else(|e| {
+                log::warn!("scheduler: 聚焦同步读取订阅写回队列状态失败，跳过写回段: {e}");
+                false
+            }),
+            None => false,
+        };
+        (on, connected, outbox_pending)
+    };
+    if !on || !connected {
+        return;
+    }
+    let _ = app.emit("sync-running", serde_json::json!({ "source": "focus" }));
+    if outbox_pending {
+        // Note: 订阅 outbox 接入后台自动调度 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
+        crate::sync::try_push_subscription_outbox(&db, &http).await;
+    }
+    match crate::sync::sync_light(&db, &http).await {
+        Ok(r) => {
+            log::info!(
+                "scheduler: 聚焦同步完成：推 {}/拉 {} 项、对账 {} 项，{} 错误",
+                r.pushed_states,
+                r.pulled_entries,
+                r.merged_states,
+                r.errors.len()
+            );
+            // 数据变化事件判定与 auto_sync_backend 同单点（has_data_change）。
+            if r.has_data_change() {
+                let _ = app.emit(
+                    "feeds-updated",
+                    serde_json::json!({
+                        "new_articles": 0,
+                        "failed_feeds": 0,
+                        "pulled_entries": r.pulled_entries,
+                        "merged_states": r.merged_states
+                    }),
+                );
+            }
+        }
+        Err(e) => log::warn!("scheduler: 聚焦同步失败: {e}"),
+    }
+    let _ = app.emit("sync-idle", ());
+}
+
 /// 通知开关开启 且 主窗口不可见（最小化到托盘/失焦）。
 async fn should_notify(
     db: &Arc<tokio::sync::Mutex<rusqlite::Connection>>,
@@ -862,7 +970,9 @@ OPT-011：refreshInterval 读取口径单元测试（5–720 整数；与前端�
 ============================================================ */
 #[cfg(test)]
 mod refresh_interval_tests {
-    use super::{backend_sync_due, read_refresh_interval};
+    use super::{
+        backend_sync_due, focus_sync_due, read_refresh_interval, FOCUS_SYNC_THROTTLE_SECS,
+    };
     use serde_json::json;
 
     /// (opt011-int) 区间边界与整数口径：5 / 720 接受；4 / 721 拒绝；
@@ -921,6 +1031,22 @@ mod refresh_interval_tests {
             "有绑定时继续按条目游标间隔节流"
         );
         assert!(backend_sync_due(now, 30, true, now - 30 * 60, false));
+    }
+
+    /// W3-3：聚焦节流判据（纯函数锁定）——距上次触发 <60s 跳过，≥60s 允许；
+    /// last=0（从未触发）不受负窗口影响恒允许。判别力：把比较方向写反
+    /// （窗口内反而触发）或用 `>` 边界（恰好 60s 被跳过）的实现会红。
+    #[test]
+    fn focus_sync_due_throttles_within_window() {
+        let last = 1_700_000_000;
+        assert!(!focus_sync_due(last + 59, last), "窗口内必须跳过");
+        assert!(focus_sync_due(last + FOCUS_SYNC_THROTTLE_SECS, last));
+        assert!(focus_sync_due(last + FOCUS_SYNC_THROTTLE_SECS + 1, last));
+        assert!(
+            focus_sync_due(last, 0),
+            "从未触发（last=0）不得被负窗口卡住"
+        );
+        assert_eq!(FOCUS_SYNC_THROTTLE_SECS, 60, "节流常量变更需同步注释");
     }
 }
 

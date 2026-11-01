@@ -101,10 +101,11 @@ pub async fn edit_remote_subscription(
 ) -> bool {
     // TASK-124：build_client Result 化——两类失败（未配置/认证·网络失败）对
     // 订阅编辑推送的既有行为一致（best-effort，失败仅记 false），此处不记录不发事件。
-    let session = match build_session(db, http).await {
-        Ok(c) => c,
+    let lease = match acquire_session(db, http).await {
+        Ok(l) => l,
         Err(_) => return false,
     };
+    let session = lease.session;
     if session.generation != expected_generation {
         log::warn!("sync: 订阅编辑的账号代际已变更，取消向新账号发送旧 remote_id");
         return false;
@@ -156,10 +157,11 @@ pub async fn unsubscribe_remote(
     let _ = feed_url;
     // TASK-124：build_client Result 化——两类失败（未配置/认证·网络失败）对
     // 退订推送的既有行为一致（best-effort，失败仅记 false），此处不记录不发事件。
-    let session = match build_session(db, http).await {
-        Ok(c) => c,
+    let lease = match acquire_session(db, http).await {
+        Ok(l) => l,
         Err(_) => return false,
     };
+    let session = lease.session;
     if session.generation != expected_generation {
         log::warn!("sync: 退订的账号代际已变更，取消向新账号发送旧 remote_id");
         return false;
@@ -1041,11 +1043,8 @@ async fn exec_unsubscribe_recovery(
 /// 重复载荷由 notify 单点同值去重（W2 复审 P3-2）：入队可见性由第一次发射
 /// 保障，同值不重发。未配置同步时 notify 内部静默。
 pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) {
-    match build_session(db, http).await {
-        Ok(session) => {
-            let mut report = SyncReport::default();
-            push_subscription_outbox(db, &session, &mut report).await;
-        }
+    let lease = match acquire_session(db, http).await {
+        Ok(l) => Some(l),
         // A-P2-6：构建失败不再静默吞掉——对齐推送侧 TASK-124 的 record_push_block：
         // 认证/端点/网络失败为当前账号 pending 行落账（attempts/last_error + 事件），
         // UI 摘要卡才能解释「为什么一直等待」。未配置（无归属身份）与代际失配
@@ -1054,11 +1053,32 @@ pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &re
             err,
             endpoint,
             username,
-        }) => record_outbox_session_block(db, &err, &endpoint, &username).await,
-        Err(ClientBuildFailure::NotConfigured) => {}
-        Err(ClientBuildFailure::Stale) => {}
+        }) => {
+            record_outbox_session_block(db, &err, &endpoint, &username).await;
+            None
+        }
+        Err(ClientBuildFailure::NotConfigured) => None,
+        Err(ClientBuildFailure::Stale) => None,
         Err(ClientBuildFailure::CorruptGeneration(e)) => {
             log::warn!("sync: 订阅写回即时推送因同步代际损坏中止: {e}");
+            None
+        }
+    };
+    let auth_failed = match &lease {
+        Some(l) => {
+            let mut report = SyncReport::default();
+            push_subscription_outbox(db, &l.session, &mut report).await;
+            report_has_auth_failure(&report)
+        }
+        None => false,
+    };
+    // W3-1：401/认证类失败回落（命中缓存会话才触发；只重试一次）。
+    if let Some(l) = &lease {
+        if l.from_cache && auth_failed {
+            if let Some(fresh) = reauth_after_auth_failure(db, http, l).await {
+                let mut report = SyncReport::default();
+                push_subscription_outbox(db, &fresh, &mut report).await;
+            }
         }
     }
     notify_subscription_outbox_changed(db).await;

@@ -25,8 +25,8 @@ pub async fn feeds_phase(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
 ) -> AppResult<SyncReport> {
-    let session = match build_session(db, http).await {
-        Ok(session) => session,
+    let lease = match acquire_session(db, http).await {
+        Ok(l) => l,
         Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
         // R1：坏代际是可见协议错误（原样上报，不伪装 notConnected）
         Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
@@ -49,7 +49,15 @@ pub async fn feeds_phase(
             ));
         }
     };
-    feeds_phase_in_session(db, &session).await
+    let mut report = feeds_phase_in_session(db, &lease.session).await?;
+    // W3-1：401/认证类失败回落——命中缓存的会话可能已被服务端吊销，剔除后
+    // 重认证并只重试一次（重试租约 from_cache=false，不再触发回落）。
+    if lease.from_cache && report_has_auth_failure(&report) {
+        if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
+            report = feeds_phase_in_session(db, &fresh).await?;
+        }
+    }
+    Ok(report)
 }
 
 /// feeds 阶段的会话版本（sync_local_feeds 用）：要求当前代际等于
@@ -60,8 +68,8 @@ pub async fn feeds_phase_at(
     http: &reqwest::Client,
     expected_generation: i64,
 ) -> AppResult<SyncReport> {
-    let session = match build_session(db, http).await {
-        Ok(session) => session,
+    let lease = match acquire_session(db, http).await {
+        Ok(l) => l,
         Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
         Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
         // A-P2-6：同 feeds_phase——构建失败为订阅 outbox pending 行落账。
@@ -83,10 +91,20 @@ pub async fn feeds_phase_at(
             ));
         }
     };
-    if session.generation != expected_generation {
+    if lease.session.generation != expected_generation {
         return Err(SyncSession::stale_error());
     }
-    feeds_phase_in_session(db, &session).await
+    let mut report = feeds_phase_in_session(db, &lease.session).await?;
+    // W3-1：同 feeds_phase 的 401 回落；重试前复核代际仍是调用方捕获的期望值
+    // （期间换号则维持首轮结果，不向新账号重放旧意图）。
+    if lease.from_cache && report_has_auth_failure(&report) {
+        if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
+            if fresh.generation == expected_generation {
+                report = feeds_phase_in_session(db, &fresh).await?;
+            }
+        }
+    }
+    Ok(report)
 }
 
 async fn feeds_phase_in_session(
@@ -130,7 +148,7 @@ pub async fn states_phase(
     http: &reqwest::Client,
     full: bool,
 ) -> AppResult<SyncReport> {
-    let session = match build_session(db, http).await {
+    let lease = match acquire_session(db, http).await {
         Ok(c) => c,
         Err(ClientBuildFailure::NotConfigured) => {
             return Err(AppError::new(
@@ -155,14 +173,11 @@ pub async fn states_phase(
             ));
         }
     };
-    let mut report = SyncReport::default();
-    // OPT-019 P2-1：只读订阅发现与“是否有绑定”无关，只由独立节流键控制。
-    // 该路径绝不执行 push_feeds/subscription outbox，因此不会自动推送本地
-    // 订阅或绕过首连确认；发现时间也不写条目 last_sync_ts。
     let discovery_attempted = if !full {
-        match begin_subscription_discovery(db, &session).await {
+        match begin_subscription_discovery(db, &lease.session).await {
             Ok(due) => due,
             Err(e) => {
+                let mut report = SyncReport::default();
                 report
                     .errors
                     .push(format!("订阅发现节流检查失败，本轮不发起远端请求: {e}"));
@@ -172,8 +187,28 @@ pub async fn states_phase(
     } else {
         false
     };
+    let mut report = states_phase_in_session(db, &lease.session, full, discovery_attempted).await?;
+    // W3-1：401/认证类失败回落（只在命中缓存的租约上触发；重试一次）。
+    if lease.from_cache && report_has_auth_failure(&report) {
+        if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
+            report = states_phase_in_session(db, &fresh, full, discovery_attempted).await?;
+        }
+    }
+    Ok(report)
+}
+
+/// states 阶段的会话版本（W3-1 拆分：会话由 acquire 提供，401 回落重放同一体）。
+/// `discovery_attempted` 沿用首轮的只读订阅发现判定——发现尝试已在首轮记账，
+/// 重试时不得重复节流判定，也不得因节流窗口错过重拉。
+async fn states_phase_in_session(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    full: bool,
+    discovery_attempted: bool,
+) -> AppResult<SyncReport> {
+    let mut report = SyncReport::default();
     if discovery_attempted {
-        pull_feeds(db, &session, &mut report).await;
+        pull_feeds(db, session, &mut report).await;
     } else if !full {
         log::debug!("sync: 订阅发现尚未到期，本轮跳过只读订阅拉取");
     }
@@ -188,7 +223,7 @@ pub async fn states_phase(
             let stale = age_stale_queue(&conn, &mut report);
             (plan_push(&conn)?, stale)
         };
-        let (done, failed) = exec_push(db, &session, &plan, &mut report).await;
+        let (done, failed) = exec_push(db, session, &plan, &mut report).await;
         {
             let conn = db.lock().await;
             // OPT-006：推送确认/失败标记/剪除都是回写边界——账号已变更时旧队项
@@ -216,12 +251,12 @@ pub async fn states_phase(
     }
     {
         let _pull_guard = PULL_LOCK.lock().await;
-        pull_entries(db, &session, &mut report, full).await?;
+        pull_entries(db, session, &mut report, full).await?;
         if report.binding_incomplete {
             let retry_discovery = if discovery_attempted {
                 true
             } else {
-                match begin_subscription_discovery(db, &session).await {
+                match begin_subscription_discovery(db, session).await {
                     Ok(due) => due,
                     Err(e) => {
                         report.errors.push(format!(
@@ -232,9 +267,9 @@ pub async fn states_phase(
                 }
             };
             if retry_discovery {
-                pull_feeds(db, &session, &mut report).await;
+                pull_feeds(db, session, &mut report).await;
                 // 只重试一次；若仍不完整，report 保留错误供下一节流窗口处理。
-                pull_entries(db, &session, &mut report, full).await?;
+                pull_entries(db, session, &mut report, full).await?;
             }
         }
     }
@@ -251,7 +286,7 @@ pub async fn states_phase(
             (plan_push(&conn)?, stale)
         };
         if !plan.status.is_empty() || !plan.stars.is_empty() {
-            let (done, failed) = exec_push(db, &session, &plan, &mut report).await;
+            let (done, failed) = exec_push(db, session, &plan, &mut report).await;
             {
                 let conn = db.lock().await;
                 // TASK-116：失败项落库标记（pull 后补推段，同首次 push 段口径）
@@ -311,7 +346,7 @@ pub async fn sync_subscription_discovery(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
 ) -> AppResult<SyncReport> {
-    let session = match build_session(db, http).await {
+    let lease = match acquire_session(db, http).await {
         Ok(c) => c,
         Err(ClientBuildFailure::NotConfigured) => {
             return Err(AppError::new(
@@ -330,15 +365,35 @@ pub async fn sync_subscription_discovery(
         }
     };
     let mut report = SyncReport::default();
-    if !begin_subscription_discovery(db, &session).await? {
+    if !begin_subscription_discovery(db, &lease.session).await? {
         return Ok(report);
     }
+    discovery_pull_in_session(db, &lease.session, &mut report).await?;
+    // W3-1：401/认证类失败回落。发现尝试已在首轮记账，重试直接重放发现体
+    // （不做节流判定——避免「认证失败撞上发现窗口」后整个发现窗口被吞）。
+    if lease.from_cache && report_has_auth_failure(&report) {
+        if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
+            let mut retry_report = SyncReport::default();
+            discovery_pull_in_session(db, &fresh, &mut retry_report).await?;
+            report = retry_report;
+        }
+    }
+    Ok(report)
+}
+
+/// 订阅发现体的会话版本：绑定计数前后比对 → pull_feeds →（有新增绑定）
+/// PULL_LOCK 下拉条目 + 绑定不完整重试一次。
+async fn discovery_pull_in_session(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    report: &mut SyncReport,
+) -> AppResult<()> {
     let before = {
         let conn = db.lock().await;
         session.ensure_current(&conn)?;
         db::remote_feed_binding_count(&conn)?
     };
-    pull_feeds(db, &session, &mut report).await;
+    pull_feeds(db, session, report).await;
     let after = {
         let conn = db.lock().await;
         session.ensure_current(&conn)?;
@@ -346,14 +401,14 @@ pub async fn sync_subscription_discovery(
     };
     if after > before {
         let _pull_guard = PULL_LOCK.lock().await;
-        pull_entries(db, &session, &mut report, false).await?;
+        pull_entries(db, session, report, false).await?;
         if report.binding_incomplete {
             // 新订阅在首次发现与条目读取之间才变为可见时，再发现并重试一次。
-            pull_feeds(db, &session, &mut report).await;
-            pull_entries(db, &session, &mut report, false).await?;
+            pull_feeds(db, session, report).await;
+            pull_entries(db, session, report, false).await?;
         }
     }
-    Ok(report)
+    Ok(())
 }
 
 /// 测试连接（设置页「测试连接」按钮）。

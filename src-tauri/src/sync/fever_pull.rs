@@ -62,6 +62,65 @@ fn with_ids_need(
         .collect()
 }
 
+/// W3-2：单页 with_ids 并发拉取的结果（代际失配与网络失败分开——前者不发
+/// 请求、不计数，直接 staleSession 终止；后者按既有 fetch_failures 语义计数）。
+enum FeverPageFetch {
+    Page(Vec<ItemContent>),
+    Failed(AppError),
+    Stale,
+}
+
+/// 单页 with_ids 拉取：请求前复核代际（与串行版 `session_is_current` 同语义）。
+async fn fetch_with_ids_page(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    client: &fever::FeverClient,
+    ids: &[i64],
+) -> FeverPageFetch {
+    if !session_is_current(db, session).await {
+        return FeverPageFetch::Stale;
+    }
+    match client.items_with_ids(ids).await {
+        Ok(page) => FeverPageFetch::Page(page),
+        Err(e) => FeverPageFetch::Failed(e),
+    }
+}
+
+/// 批内并发拉取（`tokio::join!` 定元数展开；并发度复用
+/// `greader_pull::PULL_FETCH_CONCURRENCY`，与 GR 两个独立请求通道同口径）；
+/// 返回按**原页顺序**排列的结果，调用方逐页顺序合并（seen/maps 就地突变
+/// 依赖顺序）。批间天然构成同步屏障，在途响应内存有界。
+async fn fetch_with_ids_batch(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    client: &fever::FeverClient,
+    batch: &[&[i64]],
+) -> Vec<FeverPageFetch> {
+    debug_assert!(
+        batch.len() <= PULL_FETCH_CONCURRENCY,
+        "批次大小必须不超过并发度"
+    );
+    match batch.len() {
+        0 => Vec::new(),
+        1 => vec![fetch_with_ids_page(db, session, client, batch[0]).await],
+        2 => {
+            let (a, b) = tokio::join!(
+                fetch_with_ids_page(db, session, client, batch[0]),
+                fetch_with_ids_page(db, session, client, batch[1]),
+            );
+            vec![a, b]
+        }
+        _ => {
+            let (a, b, c) = tokio::join!(
+                fetch_with_ids_page(db, session, client, batch[0]),
+                fetch_with_ids_page(db, session, client, batch[1]),
+                fetch_with_ids_page(db, session, client, batch[2]),
+            );
+            vec![a, b, c]
+        }
+    }
+}
+
 fn restore_fever_pull_state(
     conn: &mut Connection,
     previous_entry_id: i64,
@@ -687,49 +746,57 @@ pub(super) async fn pull_entries_fever(
     let mut need = with_ids_need(&unread, &starred, &seen, &has_body);
     need.sort_unstable();
     need.dedup();
-    for chunk in need.chunks(50) {
-        // OPT-006：补齐请求前复核代际。
-        if !session_is_current(db, session).await {
-            return Err(SyncSession::stale_error());
-        }
-        match client.items_with_ids(chunk).await {
-            Ok(page) => {
-                let unbound_feeds = unbound_page_feeds(&page, &maps);
-                if !unbound_feeds.is_empty() {
-                    report.binding_incomplete = true;
-                    report.errors.push(format!(
-                        "Fever with_ids 补齐页含尚无本地绑定的远端 feed，未合并且游标不动: {:?}",
-                        unbound_feeds
-                    ));
-                    return restore_after_binding_failure(
-                        db,
-                        session,
-                        previous_entry_id,
-                        history_state,
-                        report,
-                    )
-                    .await;
+    // W3-2：with_ids 回补**有界并发**（批内 ≤ PULL_FETCH_CONCURRENCY 个在途，
+    // 按原页顺序逐页短事务合并）；首块失败即停（fetch_failures 计数、游标不动
+    // 语义逐字不变），同批在途请求不可撤回属既有「已发出的请求不能撤回」边界，
+    // 后续批次不再发起。分页列举（since/max_id 链）保持串行不变。
+    let page_slices: Vec<&[i64]> = need.chunks(50).collect();
+    'with_ids: for start in (0..page_slices.len()).step_by(PULL_FETCH_CONCURRENCY) {
+        let end = (start + PULL_FETCH_CONCURRENCY).min(page_slices.len());
+        let results = fetch_with_ids_batch(db, session, client, &page_slices[start..end]).await;
+        for result in results {
+            match result {
+                // OPT-006：补齐请求前复核代际。
+                FeverPageFetch::Stale => return Err(SyncSession::stale_error()),
+                FeverPageFetch::Failed(e) => {
+                    fetch_failures += 1;
+                    report.errors.push(format!("拉取未读/收藏条目失败: {e}"));
+                    break 'with_ids;
                 }
-                // 页事务（无游标写入）：失败整页回滚，**不**推动任何游标。
-                let mut guard = db.lock().await;
-                // OPT-006：合并是回写边界——代际失配整页丢弃。
-                session.ensure_current(&guard)?;
-                if let Err(e) = merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, None)
-                {
-                    merge_failures += 1;
-                    report
-                        .errors
-                        .push(format!("with_ids 补齐页合并失败（已回滚，游标不动）: {e}"));
-                    if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
-                        return Ok(()); // R3-P1：重建失败立即终止本轮
+                FeverPageFetch::Page(page) => {
+                    let unbound_feeds = unbound_page_feeds(&page, &maps);
+                    if !unbound_feeds.is_empty() {
+                        report.binding_incomplete = true;
+                        report.errors.push(format!(
+                            "Fever with_ids 补齐页含尚无本地绑定的远端 feed，未合并且游标不动: {:?}",
+                            unbound_feeds
+                        ));
+                        return restore_after_binding_failure(
+                            db,
+                            session,
+                            previous_entry_id,
+                            history_state,
+                            report,
+                        )
+                        .await;
                     }
-                    break;
+                    // 页事务（无游标写入）：失败整页回滚，**不**推动任何游标。
+                    let mut guard = db.lock().await;
+                    // OPT-006：合并是回写边界——代际失配整页丢弃。
+                    session.ensure_current(&guard)?;
+                    if let Err(e) =
+                        merge_page_tx(&mut guard, page, &mut seen, &mut maps, report, None)
+                    {
+                        merge_failures += 1;
+                        report
+                            .errors
+                            .push(format!("with_ids 补齐页合并失败（已回滚，游标不动）: {e}"));
+                        if rebuild_maps_after_failure(&guard, &mut maps, report).is_err() {
+                            return Ok(()); // R3-P1：重建失败立即终止本轮
+                        }
+                        break 'with_ids;
+                    }
                 }
-            }
-            Err(e) => {
-                fetch_failures += 1;
-                report.errors.push(format!("拉取未读/收藏条目失败: {e}"));
-                break;
             }
         }
     }

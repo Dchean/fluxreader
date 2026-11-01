@@ -200,6 +200,10 @@ pub struct MockGReader {
     /// TASK-059：置位后 ClientLogin 返回 401（模拟凭据被拒，用于验证
     /// 「凭据错误不得被误报成找不到 API」）。
     pub reject_login: std::sync::atomic::AtomicBool,
+    /// W3-1：置位后**已认证**的 GReader API 端点（/reader/api/0/*）一律返回
+    /// 401——模拟「ClientLogin 仍可通过、但会话 token 已被服务端吊销」，
+    /// 用于验证会话缓存的 401 剔除重认证回落（ClientLogin 本身不受影响）。
+    pub api_unauthorized: std::sync::atomic::AtomicBool,
     /// TASK-059：Fever 端点路径（"" = 走 `{base}/fever/?api` 的 Miniflux 形态；
     /// "/api/fever.php" = FreshRSS 形态）。非该路径的 Fever 请求返回 404。
     pub fever_endpoint: Mutex<String>,
@@ -308,6 +312,7 @@ impl MockGReader {
             next_entry_id: Mutex::new(500),
             greader_api_prefix: Mutex::new(String::new()),
             reject_login: std::sync::atomic::AtomicBool::new(false),
+            api_unauthorized: std::sync::atomic::AtomicBool::new(false),
             fever_endpoint: Mutex::new(String::new()),
             fever_api_version: Mutex::new(3),
             fever_reject_auth: std::sync::atomic::AtomicBool::new(false),
@@ -1051,6 +1056,14 @@ fn route(
     body: &str,
     _head: &str,
 ) -> (u16, String) {
+    // W3-1：会话 token 吊销注入——ClientLogin 之外的 reader API 一律 401。
+    if srv
+        .api_unauthorized
+        .load(std::sync::atomic::Ordering::SeqCst)
+        && path.contains("/reader/api/0/")
+    {
+        return (401, r#"{"error_message":"Unauthorized"}"#.into());
+    }
     match (method, path) {
         // ClientLogin：默认任何 Email/Passwd 都返回固定 token；
         // TASK-059 故障注入下返回 401（模拟凭据被拒）

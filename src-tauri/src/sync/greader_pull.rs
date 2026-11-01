@@ -27,6 +27,162 @@ const GR_BACKFILL_CHUNK_SIZE: usize = 100;
 /// 续补；只有单请求失败才按「该侧跳过 + 游标保留」fail-closed 处理。
 const GR_BACKFILL_MAX_IDS_PER_SYNC: usize = 2000;
 
+/// W3-2：独立请求通道的有界并发度（单批在途请求上限）。
+/// 依据：服务端友好（个人规模 Miniflux/FreshRSS 实例）+ 客户端内存有界
+/// （在途响应 ≤ 并发度 × 单请求块大小）。3 = 任务卡给定的 2–4 区间中值，
+/// 把串行往返的 RTT 排队压缩约 1/3。消费范围：GR 主列举正文分块、GR 权威
+/// 集合回补、Fever `with_ids` 回补（fever_pull.rs 经 super::* 取用）；
+/// **分页列举不在其列**——continuation / since_id 游标链必须串行，
+/// PULL_LOCK 覆盖整个 pull 的编排约束不变。
+pub(super) const PULL_FETCH_CONCURRENCY: usize = 3;
+
+/// W3-2：单块正文并发拉取的结果。代际失配与网络失败分开——前者不发请求、
+/// 不计失败，直接 staleSession 终止；后者按既有 chunk_failures 语义计数。
+enum ContentFetch {
+    Entries(Vec<greader::ItemContent>),
+    Failed(AppError),
+    Stale,
+}
+
+/// W3-2：单块锁内合并后的循环控制（计数与错误上报都在 [`merge_content_chunk`]
+/// 内按串行版原样完成，这里只表达「继续 / 代际失配终止 / 重建失败终止」）。
+enum ChunkMerge {
+    Continue,
+    Stale,
+    Abort,
+}
+
+/// 单块正文拉取：请求前复核代际（与串行版的 `session_is_current` 同语义）。
+async fn fetch_content_chunk(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    client: &GReaderClient,
+    ids: &[i64],
+) -> ContentFetch {
+    if !session_is_current(db, session).await {
+        return ContentFetch::Stale;
+    }
+    match client.item_contents(ids).await {
+        Ok(v) => ContentFetch::Entries(v),
+        Err(e) => ContentFetch::Failed(e),
+    }
+}
+
+/// 批内并发拉取（`tokio::join!` 定元数展开——仓库无 futures 依赖下的最简
+/// 有界并发形态）；返回按**原块顺序**排列的结果，调用方逐块顺序合并。
+/// 批间天然构成同步屏障：上一批全部合并完才发起下一批，在途响应内存有界。
+async fn fetch_chunk_batch(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    client: &GReaderClient,
+    batch: &[&[i64]],
+) -> Vec<ContentFetch> {
+    debug_assert!(
+        batch.len() <= PULL_FETCH_CONCURRENCY,
+        "批次大小必须不超过并发度"
+    );
+    match batch.len() {
+        0 => Vec::new(),
+        1 => vec![fetch_content_chunk(db, session, client, batch[0]).await],
+        2 => {
+            let (a, b) = tokio::join!(
+                fetch_content_chunk(db, session, client, batch[0]),
+                fetch_content_chunk(db, session, client, batch[1]),
+            );
+            vec![a, b]
+        }
+        _ => {
+            let (a, b, c) = tokio::join!(
+                fetch_content_chunk(db, session, client, batch[0]),
+                fetch_content_chunk(db, session, client, batch[1]),
+                fetch_content_chunk(db, session, client, batch[2]),
+            );
+            vec![a, b, c]
+        }
+    }
+}
+
+/// 单块正文的锁内合并（W3-2 抽取：串行版循环体逐字搬移——unbound 计数、
+/// 代际复核、逐条合并、失败重建映射的语义与错误文案全部不变）。
+async fn merge_content_chunk(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    entries: &[greader::ItemContent],
+    maps: &mut db::SyncMatchMaps,
+    report: &mut SyncReport,
+    chunk_failures: &mut usize,
+    binding_failures: &mut usize,
+) -> ChunkMerge {
+    let mut unbound_feeds = BTreeSet::new();
+    for e in entries {
+        if let Some(feed_id) = item_feed_remote_id(e) {
+            if !maps.feed_mf_to_id.contains_key(&feed_id) {
+                unbound_feeds.insert(feed_id);
+            }
+        }
+    }
+    if !unbound_feeds.is_empty() {
+        *binding_failures += 1;
+        report.binding_incomplete = true;
+        report.errors.push(format!(
+            "条目所属远端 feed 尚无本地绑定，本轮保留游标并继续有限兼容合并: {:?}",
+            unbound_feeds
+        ));
+    }
+    // R2：entries 的合并链路 Result 化——DB 写失败不得吞。本块中途失败即计数
+    // （时间戳游标不推进，下一轮重拉同一窗口），已处理条目留库（GR 无页事务，
+    // 细粒度恢复仍归 OPT-007）。错误信息带条目 URL（TASK-056 可定位性契约）。
+    let mut merge_error: Option<(String, AppError)> = None;
+    {
+        let conn = db.lock().await;
+        // OPT-006：合并是回写边界——响应在途期间换号则整块丢弃。
+        if session.ensure_current(&conn).is_err() {
+            return ChunkMerge::Stale;
+        }
+        for e in entries {
+            if let Err(err) = merge_pulled_entry(&conn, e, maps, report) {
+                let url = e
+                    .alternate
+                    .first()
+                    .map(|a| a.href.clone())
+                    .unwrap_or_default();
+                merge_error = Some((url, err));
+                break;
+            }
+        }
+    }
+    if let Some((url, err)) = merge_error {
+        *chunk_failures += 1;
+        report
+            .errors
+            .push(format!("合并条目 {url} 失败（本块中止，游标保留）: {err}"));
+        // OPT-007：失败块按 DB 现状**重建匹配映射**——合并是逐语句回写
+        // 并就地改内存 maps，中途失败后不得让后续块继续用可能带半程突变
+        // 的映射（否则失败窗口重拉时按被污染绑定「合法跳过」）。重建
+        // 继续不了就终止本轮（游标已因 chunk_failures 保留，不假成功）。
+        // 字段版本快照经 keep_field_versions_from **保持轮内原值**：重建
+        // 不回刷版本，否则「pull 起点 ~ 重建点」的本地写入会被洗成「起点
+        // 无变化」，后续块的旧远端状态即可回滚用户意图。
+        let conn = db.lock().await;
+        if session.ensure_current(&conn).is_err() {
+            return ChunkMerge::Stale;
+        }
+        match db::sync_match_maps(&conn) {
+            Ok(mut m) => {
+                m.keep_field_versions_from(maps);
+                *maps = m;
+            }
+            Err(e) => {
+                report.errors.push(format!(
+                    "合并失败后重建匹配映射失败（本轮终止，游标保留）: {e}"
+                ));
+                return ChunkMerge::Abort;
+            }
+        }
+    }
+    ChunkMerge::Continue
+}
+
 /// greader pull 的「现在」（unix 秒）：未注入时即系统墙钟。
 fn pull_now() -> i64 {
     let injected = PULL_CLOCK_OVERRIDE.load(Ordering::Relaxed);
@@ -263,93 +419,55 @@ pub(super) async fn pull_entries_greader(
     // 分批拉正文（每次 100 条，避免单请求过大），锁内合并。
     // TASK-068：分块失败计数——失败块的条目本轮丢失，若游标照常推进，下一轮
     // 增量从新游标起步，这些条目就只能等全量同步补回（「偶发漏文章」的温床）。
+    // W3-2：正文请求**有界并发**（批内 ≤ PULL_FETCH_CONCURRENCY 个在途，批间
+    // 按原块顺序逐块短事务合并）——失败计数/绑定计数/映射重建/游标守卫语义
+    // 与串行版逐字一致，仅 HTTP 段并发化；合并仍串行（maps 就地突变依赖顺序）。
+    let chunk_slices: Vec<&[i64]> = all_item_ids.chunks(100).collect();
     let mut chunk_failures = 0usize;
     let mut binding_failures = 0usize;
-    for chunk in all_item_ids.chunks(100) {
-        // OPT-006：每块正文请求前复核代际。
-        if !session_is_current(db, session).await {
-            stale = true;
+    for start in (0..chunk_slices.len()).step_by(PULL_FETCH_CONCURRENCY) {
+        let end = (start + PULL_FETCH_CONCURRENCY).min(chunk_slices.len());
+        let results = fetch_chunk_batch(db, session, client, &chunk_slices[start..end]).await;
+        let mut batch_abort = false;
+        for result in results {
+            match result {
+                // OPT-006：每块正文请求前复核代际（并发形态在拉取 future 内完成）。
+                ContentFetch::Stale => {
+                    stale = true;
+                    batch_abort = true;
+                }
+                ContentFetch::Failed(e) => {
+                    chunk_failures += 1;
+                    report.errors.push(format!("拉取条目正文失败: {e}"));
+                }
+                ContentFetch::Entries(entries) => {
+                    match merge_content_chunk(
+                        db,
+                        session,
+                        &entries,
+                        &mut maps,
+                        report,
+                        &mut chunk_failures,
+                        &mut binding_failures,
+                    )
+                    .await
+                    {
+                        ChunkMerge::Continue => {}
+                        ChunkMerge::Stale => {
+                            stale = true;
+                            batch_abort = true;
+                        }
+                        // 重建映射失败：本轮终止（游标已因 chunk_failures 保留）。
+                        ChunkMerge::Abort => batch_abort = true,
+                    }
+                }
+            }
+            if batch_abort {
+                break;
+            }
+        }
+        if batch_abort {
             break;
-        }
-        let entries = match client.item_contents(chunk).await {
-            Ok(v) => v,
-            Err(e) => {
-                chunk_failures += 1;
-                report.errors.push(format!("拉取条目正文失败: {e}"));
-                continue;
-            }
-        };
-        let mut unbound_feeds = BTreeSet::new();
-        for e in &entries {
-            if let Some(feed_id) = item_feed_remote_id(e) {
-                if !maps.feed_mf_to_id.contains_key(&feed_id) {
-                    unbound_feeds.insert(feed_id);
-                }
-            }
-        }
-        if !unbound_feeds.is_empty() {
-            binding_failures += 1;
-            report.binding_incomplete = true;
-            report.errors.push(format!(
-                "条目所属远端 feed 尚无本地绑定，本轮保留游标并继续有限兼容合并: {:?}",
-                unbound_feeds
-            ));
-        }
-        // R2：entries 的合并链路 Result 化——DB 写失败不得吞。本块中途失败即计数
-        // （时间戳游标不推进，下一轮重拉同一窗口），已处理条目留库（GR 无页事务，
-        // 细粒度恢复仍归 OPT-007）。错误信息带条目 URL（TASK-056 可定位性契约）。
-        let mut merge_error: Option<(String, AppError)> = None;
-        {
-            let conn = db.lock().await;
-            // OPT-006：合并是回写边界——响应在途期间换号则整块丢弃。
-            if session.ensure_current(&conn).is_err() {
-                stale = true;
-            } else {
-                for e in &entries {
-                    if let Err(err) = merge_pulled_entry(&conn, e, &mut maps, report) {
-                        let url = e
-                            .alternate
-                            .first()
-                            .map(|a| a.href.clone())
-                            .unwrap_or_default();
-                        merge_error = Some((url, err));
-                        break;
-                    }
-                }
-            }
-        }
-        if stale {
-            break;
-        }
-        if let Some((url, err)) = merge_error {
-            chunk_failures += 1;
-            report
-                .errors
-                .push(format!("合并条目 {url} 失败（本块中止，游标保留）: {err}"));
-            // OPT-007：失败块按 DB 现状**重建匹配映射**——合并是逐语句回写
-            // 并就地改内存 maps，中途失败后不得让后续块继续用可能带半程突变
-            // 的映射（否则失败窗口重拉时按被污染绑定「合法跳过」）。重建
-            // 继续不了就终止本轮（游标已因 chunk_failures 保留，不假成功）。
-            // 字段版本快照经 keep_field_versions_from **保持轮内原值**：重建
-            // 不回刷版本，否则「pull 起点 ~ 重建点」的本地写入会被洗成「起点
-            // 无变化」，后续块的旧远端状态即可回滚用户意图。
-            let conn = db.lock().await;
-            if session.ensure_current(&conn).is_err() {
-                stale = true;
-            } else {
-                match db::sync_match_maps(&conn) {
-                    Ok(mut m) => {
-                        m.keep_field_versions_from(&maps);
-                        maps = m;
-                    }
-                    Err(e) => {
-                        report.errors.push(format!(
-                            "合并失败后重建匹配映射失败（本轮终止，游标保留）: {e}"
-                        ));
-                        break;
-                    }
-                }
-            }
         }
     }
     if stale {
@@ -506,59 +624,67 @@ async fn backfill_authority_collection(
              （本轮补 {budget} 条，剩余下轮续补；集合本身完整，对账照常执行）"
         ));
     }
-    for chunk in unbound_ids[..budget].chunks(GR_BACKFILL_CHUNK_SIZE) {
-        // OPT-006：每个回补请求前复核代际。
-        if !session_is_current(db, session).await {
-            return Err(SyncSession::stale_error());
-        }
-        let entries = match client.item_contents(chunk).await {
-            Ok(v) => v,
-            Err(e) => {
+    // W3-2：回补请求同样有界并发（批内 ≤ PULL_FETCH_CONCURRENCY、按原块顺序
+    // 逐块合并）；首块失败即该侧软失败（fail-closed），同批在途请求无法撤回
+    // 属既有「已发出的请求不能撤回」边界，后续批次不再发起。
+    let chunk_slices: Vec<&[i64]> = unbound_ids[..budget]
+        .chunks(GR_BACKFILL_CHUNK_SIZE)
+        .collect();
+    for start in (0..chunk_slices.len()).step_by(PULL_FETCH_CONCURRENCY) {
+        let end = (start + PULL_FETCH_CONCURRENCY).min(chunk_slices.len());
+        let results = fetch_chunk_batch(db, session, client, &chunk_slices[start..end]).await;
+        for result in results {
+            let entries = match result {
+                // OPT-006：每个回补请求前复核代际。
+                ContentFetch::Stale => return Err(SyncSession::stale_error()),
+                ContentFetch::Failed(e) => {
+                    report.errors.push(format!(
+                        "GR {collection} 集合回补请求失败，该侧本轮跳过对账（游标保留）: {e}"
+                    ));
+                    return Ok(false);
+                }
+                ContentFetch::Entries(v) => v,
+            };
+            // 远端 feed 未绑定的条目按有限兼容合并（镜像主列举分块的既有口径）：
+            // 记 binding_incomplete 并继续，不算本侧软失败。
+            let mut unbound_feeds = BTreeSet::new();
+            for e in &entries {
+                if let Some(feed_id) = item_feed_remote_id(e) {
+                    if !maps.feed_mf_to_id.contains_key(&feed_id) {
+                        unbound_feeds.insert(feed_id);
+                    }
+                }
+            }
+            if !unbound_feeds.is_empty() {
+                report.binding_incomplete = true;
                 report.errors.push(format!(
-                    "GR {collection} 集合回补请求失败，该侧本轮跳过对账（游标保留）: {e}"
+                    "GR {collection} 回补条目所属远端 feed 尚无本地绑定，按有限兼容合并: {:?}",
+                    unbound_feeds
+                ));
+            }
+            let mut merge_error: Option<AppError> = None;
+            {
+                let conn = db.lock().await;
+                // OPT-006：合并是回写边界——响应在途期间换号则本块丢弃。
+                if session.ensure_current(&conn).is_err() {
+                    return Err(SyncSession::stale_error());
+                }
+                for e in &entries {
+                    if let Err(err) = merge_pulled_entry(&conn, e, maps, report) {
+                        merge_error = Some(err);
+                        break;
+                    }
+                }
+            }
+            if let Some(err) = merge_error {
+                // GR 逐语句提交：maps 的每次突变都对应已提交的 DB 写；失败条目
+                // 之后的条目未处理——本侧立即停止（不继续消耗预算），按软失败
+                // 跳过该侧对账，游标保留，下一轮重拉同一集合续补。
+                report.errors.push(format!(
+                    "GR {collection} 集合回复合并失败，该侧本轮跳过对账（游标保留）: {err}"
                 ));
                 return Ok(false);
             }
-        };
-        // 远端 feed 未绑定的条目按有限兼容合并（镜像主列举分块的既有口径）：
-        // 记 binding_incomplete 并继续，不算本侧软失败。
-        let mut unbound_feeds = BTreeSet::new();
-        for e in &entries {
-            if let Some(feed_id) = item_feed_remote_id(e) {
-                if !maps.feed_mf_to_id.contains_key(&feed_id) {
-                    unbound_feeds.insert(feed_id);
-                }
-            }
-        }
-        if !unbound_feeds.is_empty() {
-            report.binding_incomplete = true;
-            report.errors.push(format!(
-                "GR {collection} 回补条目所属远端 feed 尚无本地绑定，按有限兼容合并: {:?}",
-                unbound_feeds
-            ));
-        }
-        let mut merge_error: Option<AppError> = None;
-        {
-            let conn = db.lock().await;
-            // OPT-006：合并是回写边界——响应在途期间换号则本块丢弃。
-            if session.ensure_current(&conn).is_err() {
-                return Err(SyncSession::stale_error());
-            }
-            for e in &entries {
-                if let Err(err) = merge_pulled_entry(&conn, e, maps, report) {
-                    merge_error = Some(err);
-                    break;
-                }
-            }
-        }
-        if let Some(err) = merge_error {
-            // GR 逐语句提交：maps 的每次突变都对应已提交的 DB 写；失败条目
-            // 之后的条目未处理——本侧立即停止（不继续消耗预算），按软失败
-            // 跳过该侧对账，游标保留，下一轮重拉同一集合续补。
-            report.errors.push(format!(
-                "GR {collection} 集合回复合并失败，该侧本轮跳过对账（游标保留）: {err}"
-            ));
-            return Ok(false);
         }
     }
     Ok(true)

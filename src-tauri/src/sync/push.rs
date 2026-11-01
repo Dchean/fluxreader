@@ -315,7 +315,7 @@ pub(super) async fn record_push_block(db: &Arc<Mutex<Connection>>, err: &crate::
 }
 
 pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) {
-    let session = match build_session(db, http).await {
+    let lease = match acquire_session(db, http).await {
         Ok(c) => c,
         // 未配置：静默返回（队列保留，连接后补推）——不发事件不报警（A-5 语义不变）
         Err(ClientBuildFailure::NotConfigured) => return,
@@ -336,6 +336,19 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
             return;
         }
     };
+    let auth_failed = push_states_with_session(db, &lease.session).await;
+    // W3-1：401/认证类失败回落——即时推送命中缓存会话且出现认证类失败时，
+    // 剔除缓存重认证并只重试一次（重试租约 from_cache=false，不再触发回落）。
+    if lease.from_cache && auth_failed {
+        if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
+            push_states_with_session(db, &fresh).await;
+        }
+    }
+}
+
+/// 即时推送的会话版本（W3-1 拆分）：串行化与记账段原样搬移，返回本轮是否
+/// 出现认证类失败（供会话缓存的 401 回落判定；失败项仍按既有口径落库标记）。
+async fn push_states_with_session(db: &Arc<Mutex<Connection>>, session: &SyncSession) -> bool {
     // 串行化：与 states_phase/feeds_phase 的推送段互斥（见 PUSH_LOCK 注释）
     let _guard = PUSH_LOCK.lock().await;
     let (plan, mut report, stale) = {
@@ -343,7 +356,7 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
         // OPT-006：计划构建是回写前边界（age_stale_queue 会写库）——代际失配即弃。
         if session.ensure_current(&conn).is_err() {
             log::info!("sync: 即时推送计划构建时账号代际已变更，丢弃本轮");
-            return;
+            return false;
         }
         let mut report = SyncReport::default();
         let stale = age_stale_queue(&conn, &mut report);
@@ -351,7 +364,7 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
             Ok(p) => (p, report, stale),
             Err(e) => {
                 log::warn!("sync: 读队列失败: {e}");
-                return;
+                return false;
             }
         }
     };
@@ -360,16 +373,16 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
         if stale > 0 {
             notify_queue_changed(db).await;
         }
-        return;
+        return false;
     }
-    let (done, failed) = exec_push(db, &session, &plan, &mut report).await;
+    let (done, failed) = exec_push(db, session, &plan, &mut report).await;
     {
         let conn = db.lock().await;
         // OPT-006：确认/失败标记/剪除都是回写边界——账号已变更时旧队项已清空，
         // 不得把旧批次的记账落回（更不得动新账号的队项）。
         if session.ensure_current(&conn).is_err() {
             log::info!("sync: 即时推送回写时账号代际已变更，丢弃确认与标记");
-            return;
+            return false;
         }
         // TASK-116：失败项落库标记（attempts+1 / last_error）——即时推送失败此前
         // 只进日志，用户在 UI 上永远看不到「部分失败」。标记失败不影响队列保留。
@@ -393,6 +406,7 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
     } else {
         log::info!("sync: 即时推送 {} 项状态", report.pushed_states);
     }
+    report_has_auth_failure(&report)
 }
 
 /* ============================================================
