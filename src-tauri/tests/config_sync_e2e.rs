@@ -738,6 +738,61 @@ fn apply_upserts_feeds_and_overrides_settings() {
     let _ = std::fs::remove_file(&tmp);
 }
 
+/// R2-P2-1：存量同名「导入」目录多条时，sink 落点必须确定（id/rowid 升序取
+/// 最旧，修前 list_folder_id_by_name 无 ORDER BY）；且命中即复用，不再新建
+/// 第三个「导入」。
+#[test]
+fn sink_resolution_picks_oldest_folder_when_duplicates_exist() {
+    let tmp = common::unique_db_path("cfgsync_test_sink_oldest");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    let oldest = db::create_folder(&conn, "导入", "article").unwrap();
+    db::create_folder(&conn, "导入", "podcast").unwrap();
+
+    let payload = SyncPayload {
+        schema: 1,
+        uploaded_at: "2026-11-01T00:00:00Z".into(),
+        folders: vec![],
+        feeds: vec![FeedSpec {
+            url: "https://sink.example/rss".into(),
+            title: "未知归属".into(),
+            folder: "不存在".into(),
+            layout: "inherit".into(),
+            auto_summary: false,
+            auto_translate: false,
+            summary_mode: None,
+            translate_mode: None,
+            site_url: None,
+            favicon_url: None,
+        }],
+        app_settings: None,
+        connection_config: None,
+    };
+    let outcome = apply_payload(&conn, &payload).unwrap();
+    assert_eq!(outcome.imported, 1);
+
+    let bound: i64 = conn
+        .query_row(
+            "SELECT folder_id FROM feeds WHERE feed_url = 'https://sink.example/rss'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        bound, oldest,
+        "sink 必须落最旧（id 升序首个）的「导入」目录"
+    );
+    let dup: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM folders WHERE name = '导入'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(dup, 2, "命中既有目录即复用，不得新建第三个「导入」");
+    let _ = std::fs::remove_file(&tmp);
+}
+
 /// OPT-011：快照里的非法 AI mode 必须让整包导入失败（不悄悄回默认、不留半套）。
 #[test]
 fn apply_rejects_illegal_feed_mode_and_rolls_back() {

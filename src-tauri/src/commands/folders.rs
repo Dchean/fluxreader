@@ -17,6 +17,22 @@ pub async fn list_folders(state: State<'_, AppState>) -> AppResult<Vec<db::Folde
     db::list_folders(&conn)
 }
 
+/// create_folder 命令的真实逻辑（命令与测试共用，对齐本文件 record_* 形态）。
+/// R2-P2-1：同名拒绝——db::create_folder 恒 INSERT 且 folders.name 无 UNIQUE，
+/// 不拦截会把手工创建静默分裂成两个同名目录（订阅分裂、快照按名歧义放大）；
+/// 类型化 duplicateFolderName 供前端按 code 识别。OPML 导入 / 配置同步 /
+/// pull 等内部创建路径不走本命令，各自先查重复用而非报错。
+/// Note: 目录重名的复用与同名拒绝 — 见 .agents/notes/implemented/bug-fix/2026-11-01-目录重名复用与同名拒绝.md
+fn create_folder_checked(conn: &rusqlite::Connection, name: &str, layout: &str) -> AppResult<i64> {
+    if db::find_folder_by_name(conn, name)?.is_some() {
+        return Err(AppError::new(
+            "duplicateFolderName",
+            format!("分类「{name}」已存在"),
+        ));
+    }
+    db::create_folder(conn, name, layout)
+}
+
 #[tauri::command]
 pub async fn create_folder(
     state: State<'_, AppState>,
@@ -24,7 +40,7 @@ pub async fn create_folder(
     layout: String,
 ) -> AppResult<i64> {
     let conn = state.db.lock().await;
-    db::create_folder(&conn, &name, &layout)
+    create_folder_checked(&conn, &name, &layout)
 }
 
 /// 分类改名（命令与测试共用的真实逻辑）：本地改名 + 旧 label 墓碑（A-4）+ 成员
@@ -388,6 +404,38 @@ mod tests {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         db::MIGRATIONS.to_latest(&mut conn).unwrap();
         conn
+    }
+
+    /// R2-P2-1：手工创建同名分类 → 类型化拒绝（修前静默插入第二个同名目录，
+    /// 订阅分裂、快照按名歧义放大）。
+    #[test]
+    fn create_folder_rejects_duplicate_name() {
+        let conn = test_conn();
+        let first = create_folder_checked(&conn, "技术", "article").unwrap();
+        let err = create_folder_checked(&conn, "技术", "podcast").unwrap_err();
+        assert_eq!(
+            err.code, "duplicateFolderName",
+            "必须是类型化 duplicateFolderName: {err}"
+        );
+        assert_eq!(
+            db::find_folder_by_name(&conn, "技术").unwrap(),
+            Some(first),
+            "拒绝后不得残留第二个同名目录（命中的仍是首建目录）"
+        );
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM folders WHERE name = '技术'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 1);
+        let layout: String = conn
+            .query_row("SELECT layout FROM folders WHERE id = ?1", [first], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(layout, "article", "被拒调用的 layout 不得落到首建目录");
     }
 
     fn minimal_parsed() -> ingestion::ParsedFeed {
