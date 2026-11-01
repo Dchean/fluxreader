@@ -353,12 +353,17 @@ async fn full_reconcile_backfills_missing_local_entries() {
 }
 
 /* ============================================================
-B2：GR read/starred 权威集合的 contents 回补（未绑定行收敛）
+B2：GR starred 权威集合的 contents 回补（未绑定行收敛）
+（2026-11-01 改未读差分：light 轮不再拉 read 集合，read 侧回补随集合一并
+ 退场；未读集合仅服务差分、不做回补——未绑定未读条目维持无 light 通道，
+ 由 full 同步 / 增量窗口收敛，锁定在 sync_content_e2e 的窗口语义用例。
+ 本节以 starred 集合锁定回补通道本身：绑定收敛 / URL 不匹配独立成行 /
+ 失败 fail-closed）
 ============================================================ */
 
 /// 夹具：feeds_phase 绑定 mock feed 10 → 本地源；直连入库一行（URL 给定）；
-/// 远端加一条「已读、published 早于游标」的条目——它不在 light 增量窗口
-/// （窗口列 published 严格大于），只能经 read 权威集合的回补通道可达。
+/// 远端加一条「已收藏、published 早于游标」的条目——它不在 light 增量窗口
+/// （窗口列 published 严格大于），只能经 starred 权威集合的回补通道可达。
 /// 返回 (直连行 id, 远端 entry id, 直连行所在本地 feed id)。
 async fn seed_backfill_fixture(
     db: &Arc<Mutex<rusqlite::Connection>>,
@@ -373,8 +378,8 @@ async fn seed_backfill_fixture(
         10,
         entry_url,
         "Backfill entry",
-        true, // read 权威集合成员
         false,
+        true,     // starred 权威集合成员（未读集合仅服务差分、不回补）
         t0 - 100, // published 早于游标：不在 light 增量窗口
         t0 + 10,
     );
@@ -412,10 +417,10 @@ async fn seed_backfill_fixture(
 }
 
 /// 门禁 a（B2 回补核心症状）：直连入库、URL 可归一匹配、从未被列举窗口绑定
-/// 的行，经 light 同步从 read 权威集合收敛为已读并绑定同一行——修前该行
-/// 永久漂移（reconcile 对不在映射里的 id 无行可写）。
+/// 的行，经 light 同步从 starred 权威集合回补绑定同一行并按权威语义收敛
+/// 收藏——修前该行永久漂移（reconcile 对不在映射里的 id 无行可写）。
 #[tokio::test]
-async fn light_sync_backfills_read_collection_row_missing_from_listing_window() {
+async fn light_sync_backfills_starred_collection_row_missing_from_listing_window() {
     const T0: i64 = 1_700_000_000;
     let (db, http, server) = setup("gr_backfill_read").await;
     let (_aid, eid, _feed) = seed_backfill_fixture(
@@ -432,15 +437,18 @@ async fn light_sync_backfills_read_collection_row_missing_from_listing_window() 
     assert!(r.errors.is_empty(), "light 轮不应有错误：{:?}", r.errors);
     {
         let conn = db.lock().await;
-        let (count, is_read, remote): (i64, i64, Option<i64>) = conn
+        let (count, is_starred, remote): (i64, i64, Option<i64>) = conn
             .query_row(
-                "SELECT COUNT(*), MAX(is_read), MAX(remote_id) FROM articles WHERE url = ?1",
+                "SELECT COUNT(*), MAX(is_starred), MAX(remote_id) FROM articles WHERE url = ?1",
                 rusqlite::params!["http://127.0.0.1:8765/backfill/a"],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
         assert_eq!(count, 1, "回补必须命中既有行，不得另开新行");
-        assert_eq!(is_read, 1, "read 权威集合的未绑定行必须收敛为已读");
+        assert_eq!(
+            is_starred, 1,
+            "starred 权威集合的未绑定行回补绑定后按权威语义收敛收藏"
+        );
         assert_eq!(remote, Some(eid), "回补行必须绑定远端 entry id");
         assert!(
             db::last_sync_ts(&conn).unwrap() > T0,
@@ -470,25 +478,25 @@ async fn light_sync_backfill_does_not_bind_url_mismatched_rows() {
     {
         let conn = db.lock().await;
         // 直连行：保持未读、未绑定、URL 不被改写
-        let (is_read, remote): (i64, Option<i64>) = conn
+        let (is_starred, remote): (i64, Option<i64>) = conn
             .query_row(
-                "SELECT is_read, remote_id FROM articles WHERE id = ?1",
+                "SELECT is_starred, remote_id FROM articles WHERE id = ?1",
                 [aid],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(is_read, 0, "URL 不匹配的直连行不得被误标已读");
+        assert_eq!(is_starred, 0, "URL 不匹配的直连行不得被误收藏");
         assert_eq!(remote, None, "URL 不匹配的直连行不得被误绑");
         // 回补条目：独立新行（source='miniflux'），自己的读状态照常落地
-        let (count, new_read, new_remote, source): (i64, i64, Option<i64>, Option<String>) = conn
+        let (count, new_starred, new_remote, source): (i64, i64, Option<i64>, Option<String>) = conn
             .query_row(
-                "SELECT COUNT(*), MAX(is_read), MAX(remote_id), MAX(source) FROM articles WHERE url = ?1",
+                "SELECT COUNT(*), MAX(is_starred), MAX(remote_id), MAX(source) FROM articles WHERE url = ?1",
                 rusqlite::params!["http://127.0.0.1:8765/backfill/b"],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert_eq!(count, 1, "回补条目独立成行（③ 分支行为不变）");
-        assert_eq!(new_read, 1);
+        assert_eq!(new_starred, 1, "starred 集合成员按远端收藏状态落地");
         assert_eq!(new_remote, Some(eid));
         assert_eq!(source.as_deref(), Some("miniflux"));
     }
@@ -500,7 +508,7 @@ async fn light_sync_backfill_does_not_bind_url_mismatched_rows() {
 async fn gr_backfill_failure_skips_reconcile_side_and_keeps_cursor() {
     const T0: i64 = 1_700_000_000;
     let (db, http, server) = setup("gr_backfill_failure").await;
-    let (aid, _eid, _feed) = seed_backfill_fixture(
+    let (aid, eid, _feed) = seed_backfill_fixture(
         &db,
         &server,
         &http,
@@ -515,14 +523,14 @@ async fn gr_backfill_failure_skips_reconcile_side_and_keeps_cursor() {
     assert!(!r1.errors.is_empty(), "回补失败必须可见：{:?}", r1.errors);
     {
         let conn = db.lock().await;
-        let (is_read, remote): (i64, Option<i64>) = conn
+        let (is_starred, remote): (i64, Option<i64>) = conn
             .query_row(
-                "SELECT is_read, remote_id FROM articles WHERE id = ?1",
+                "SELECT is_starred, remote_id FROM articles WHERE id = ?1",
                 [aid],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
-        assert_eq!(is_read, 0, "回补失败侧跳过对账：状态必须守恒");
+        assert_eq!(is_starred, 0, "回补失败侧跳过对账：状态必须守恒");
         assert_eq!(remote, None, "回补失败轮不得留下半程绑定");
         assert_eq!(
             db::last_sync_ts(&conn).unwrap(),
@@ -538,12 +546,19 @@ async fn gr_backfill_failure_skips_reconcile_side_and_keeps_cursor() {
     assert!(r2.errors.is_empty(), "恢复轮不应有错误：{:?}", r2.errors);
     {
         let conn = db.lock().await;
-        let is_read: i64 = conn
-            .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| {
-                r.get(0)
-            })
+        let (is_starred, remote): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT is_starred, remote_id FROM articles WHERE id = ?1",
+                [aid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
-        assert_eq!(is_read, 1, "下一轮回补恢复后必须收敛");
+        assert_eq!(is_starred, 1, "恢复轮回补收敛收藏");
+        assert_eq!(
+            remote,
+            Some(eid),
+            "下一轮回补恢复后必须完成绑定（本用例的判别断言）"
+        );
         assert!(db::last_sync_ts(&conn).unwrap() > T0, "恢复轮游标照常推进");
     }
 }

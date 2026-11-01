@@ -1060,7 +1060,7 @@ async fn reconcile_skipped_when_state_fetch_fails() {
         .fail_stream_ids
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
-    // 轻量同步触发对账：read/starred 都失败 → 两字段分别跳过并记录
+    // 轻量同步触发对账：unread/starred 都失败 → 两字段分别跳过并记录
     let report = sync::states_phase(&db, &http, false)
         .await
         .expect("states phase 3");
@@ -1068,7 +1068,7 @@ async fn reconcile_skipped_when_state_fetch_fails() {
         report
             .errors
             .iter()
-            .any(|e| e.contains("read 权威集合拉取失败"))
+            .any(|e| e.contains("unread 权威集合拉取失败"))
             && report
                 .errors
                 .iter()

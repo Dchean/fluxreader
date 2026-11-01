@@ -23,6 +23,16 @@
 //! 4. 构造「published 早于游标但 changed_at 晚于游标」的分歧条目用
 //!    `add_entry_with_times`（分歧本身锁定窗口列，见 pull_window_e2e）。
 //! 5. 订阅/分类层变更（退订、改名、删源）不属于条目变更，不触碰上述时间。
+//!
+//! ## xt 排除语义契约（2026-11-01 未读差分新增）
+//!
+//! `stream/items/ids` 支持 `xt=<tag 流>` 排除参数：条目携带该 tag 即从结果
+//! 排除，与 `s=` 的正向过滤**正交**（真实 GR / Miniflux / FreshRSS 服务端均
+//! 官方支持，Bazqux 官方推荐的同步方式即 xt 形态）。替身支持两个排除位：
+//! `xt=user/-/state/com.google/read`（排除已读）与 `.../starred`（排除收藏）。
+//! 客户端未读差分请求 `s=reading-list&xt=read` 的响应 = reading-list 全集 −
+//! 已读，即当前未读全集；published > ot 过滤照常适用（未读差分以 ot=0 全集
+//! 请求，见 greader_pull.rs 的 fetch_stream_ids）。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -145,6 +155,10 @@ pub struct MockGReader {
     /// 故障注入（TASK-069 审查 F1）：置位后仅 reading-list 的 stream/items/ids 返回 500
     /// （read/starred 对账仍成功）——验证「id 列举失败同样不推进游标」
     pub fail_reading_list_ids: std::sync::atomic::AtomicBool,
+    /// 故障注入（2026-11-01 未读差分）：置位后仅携带 xt=read 的 stream/items/ids
+    /// 返回 500（主列举与 starred 对账仍成功）——验证未读集合请求失败时 read
+    /// 差分整轮跳过、不误标（fail-closed 完整性守卫）。
+    pub fail_unread_stream_ids: std::sync::atomic::AtomicBool,
     /// OPT-019：强制 item ids 单页大小（0 = 使用请求 n），用于真实 c 分页边界。
     pub forced_item_ids_page_size: std::sync::atomic::AtomicUsize,
     /// OPT-019：reading-list 返回空 itemRefs + 合法 continuation（非法结构）。
@@ -269,6 +283,7 @@ impl MockGReader {
             fail_edit_tag: std::sync::atomic::AtomicBool::new(false),
             fail_item_contents: std::sync::atomic::AtomicBool::new(false),
             fail_reading_list_ids: std::sync::atomic::AtomicBool::new(false),
+            fail_unread_stream_ids: std::sync::atomic::AtomicBool::new(false),
             forced_item_ids_page_size: std::sync::atomic::AtomicUsize::new(0),
             empty_page_with_continuation: std::sync::atomic::AtomicBool::new(false),
             corrupt_starred_continuation: std::sync::atomic::AtomicBool::new(false),
@@ -375,6 +390,13 @@ impl MockGReader {
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn set_fail_reading_list_ids(&self, fail: bool) {
         self.fail_reading_list_ids
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 置位后仅 xt=read 的未读列举返回 500（未读差分完整性守卫测试用）。
+    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，只被其中一个消费
+    pub fn set_fail_unread_stream_ids(&self, fail: bool) {
+        self.fail_unread_stream_ids
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -1315,6 +1337,20 @@ fn route(
                     r#"{"error_message":"injected reading-list failure"}"#.into(),
                 );
             }
+            // xt 排除参数（未读差分契约，见文件头）：条目携带该 tag 即排除，
+            // 与 s= 的正向过滤正交。按 tag 常量后缀匹配（client 只发
+            // user/-/state/... 形态；`reading-list` 不含 `/read` 后缀歧义，
+            // 不得用 contains 误伤 reading-list 本流）。
+            let xt_value = q.get("xt").cloned().unwrap_or_default();
+            let exclude_read = xt_value.ends_with("state/com.google/read");
+            let exclude_starred = xt_value.ends_with("state/com.google/starred");
+            if srv
+                .fail_unread_stream_ids
+                .load(std::sync::atomic::Ordering::SeqCst)
+                && exclude_read
+            {
+                return (500, r#"{"error_message":"injected unread failure"}"#.into());
+            }
             let mut n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(10000);
             let forced_size = srv
                 .forced_item_ids_page_size
@@ -1357,6 +1393,8 @@ fn route(
                     }
                     None => true,
                 })
+                .filter(|e| !exclude_read || !e.read)
+                .filter(|e| !exclude_starred || !e.starred)
                 .filter(|e| e.published > ot)
                 .map(|e| e.id)
                 .collect();

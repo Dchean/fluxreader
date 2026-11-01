@@ -356,7 +356,7 @@ pub(super) async fn pull_entries_greader(
                 "user/-/state/com.google/reading-list",
                 ot,
                 None,
-                Some(1000),
+                Some(10000),
                 continuation,
             )
             .await
@@ -478,8 +478,12 @@ pub(super) async fn pull_entries_greader(
     }
 
     // 轻量同步（full=false）状态对账：增量 item_contents 只覆盖「变更过的」条目，
-    // 漏掉「手机很早前标读 / 收藏、changed_at 早于游标」的旧变更。这里用 read /
-    // starred 权威 id 集合补齐（与 Fever 的 unread/saved 对账对称）。
+    // 漏掉「手机很早前标读、changed_at 早于游标」的旧变更。read 侧不再全量拉
+    // read 集合（ot×状态流增量已被服务端实现证伪，见 docs/sync-compat-matrix.md
+    // §1），改拉 reading-list + xt=read 的当前未读全集，与本地未读绑定行差分出
+    // 「远端新变已读」（xt= 三家服务端官方支持的等价替代）；starred 侧保持
+    // 全量双向权威对账不变（取消收藏信号必须可信，集合缺失才可解释为「远端已
+    // 取消收藏」——未读差分形态对 starred 不可行，详见未读差分 Note）。
     let mut authority_cursor_failures = 0usize;
     if !full {
         // OPT-006：对账集合请求前复核代际。
@@ -488,11 +492,19 @@ pub(super) async fn pull_entries_greader(
         }
         // 拉取失败 ≠ 空集合（C-1）：任一权威集合拉取失败即跳过本轮对账，
         // 避免把网络/服务端错误当成"远端什么都没有"，静默清空本地收藏
-        let (read_result, starred_result) = tokio::join!(
-            fetch_stream_ids(client, greader::tags::READ),
-            fetch_stream_ids(client, greader::tags::STARRED),
+        let (unread_result, starred_result) = tokio::join!(
+            fetch_stream_ids(
+                client,
+                greader::tags::READING_LIST,
+                Some(greader::tags::READ),
+            ),
+            fetch_stream_ids(client, greader::tags::STARRED, None),
         );
-        let read_ids = match read_result {
+        // 完整性守卫（结构性）：fetch_stream_ids 的 P2-1 纪律保证 Ok(ids) ⟺
+        // continuation 耗尽——页上限命中 / 请求失败 / 损坏 continuation 一律
+        // Err，本轮跳过 read 差分（fail-closed），不落地任何差分结果；游标
+        // 语义不变（是否推进仍由下方 failures 汇总决定）。
+        let curr_unread: Option<Vec<i64>> = match unread_result {
             Ok(ids) => Some(ids),
             Err(e) => {
                 if e.code == "protocol" {
@@ -500,7 +512,7 @@ pub(super) async fn pull_entries_greader(
                 }
                 report
                     .errors
-                    .push(format!("read 权威集合拉取失败，本字段跳过对账: {e}"));
+                    .push(format!("unread 权威集合拉取失败，本轮跳过 read 差分: {e}"));
                 None
             }
         };
@@ -516,28 +528,18 @@ pub(super) async fn pull_entries_greader(
                 None
             }
         };
-        // B2 回补：权威集合里「不在 mf_id_to_article 映射」的 id 没有本地行，
-        // reconcile 对它们无行可写——read 永远收敛不到、starred 的双向判定也
-        // 摸不到。先把缺失 id 逐块拉 stream/items/contents（镜像 fever_pull 的
-        // with_ids 回补结构），走 merge_pulled_entry 既有四分支匹配链自然绑定
-        // 并应用状态；冲突方向仍只消费 conflict_policy 单点。
+        // B2 回补（starred 侧保留）：starred 集合里「不在 mf_id_to_article 映射」
+        // 的 id 没有本地行，双向判定摸不到——先逐块拉 stream/items/contents
+        // 走 merge_pulled_entry 既有四分支匹配链绑定并应用状态（镜像 fever_pull
+        // 的 with_ids 回补结构；冲突方向仍只消费 conflict_policy 单点）。
+        // read 侧回补随 read 集合退场：远端已读且未绑定的条目改由 full 同步 /
+        // 增量窗口收敛；未读集合仅服务差分，不做回补（未绑定未读条目维持
+        // 既有 L1 残余场景，不新增绑定通道——取舍记录于未读差分 Note）。
         // 回补软失败 = 该侧本轮跳过对账（fail-closed），游标经
         // authority_cursor_failures 保留；Err 仅限会话代际失配，整轮终止。
         // Note: 回补块大小/预算与失败语义的取舍 — 见 .agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md
-        let mut read_for_reconcile = read_ids;
+        // Note: 未读差分机制与完整性守卫取舍 — 见 .agents/notes/implemented/architecture/2026-11-01-GR未读差分对账.md
         let mut starred_for_reconcile = starred_ids;
-        if let Some(ids) = read_for_reconcile.as_ref() {
-            match backfill_authority_collection(db, session, client, "read", ids, &mut maps, report)
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    authority_cursor_failures += 1;
-                    read_for_reconcile = None;
-                }
-                Err(e) => return Err(e),
-            }
-        }
         if let Some(ids) = starred_for_reconcile.as_ref() {
             match backfill_authority_collection(
                 db, session, client, "starred", ids, &mut maps, report,
@@ -552,17 +554,31 @@ pub(super) async fn pull_entries_greader(
                 Err(e) => return Err(e),
             }
         }
-        if read_for_reconcile.is_some() || starred_for_reconcile.is_some() {
+        // read 差分：只依赖「curr_unread 完整 + maps/DB」。差分域 = maps 绑定行，
+        // curr_unread 中未绑定的 id 不进域（无行可写，维持既有「无通道」行为，
+        // 由 full / 增量窗口收敛）。
+        if let Some(curr_unread_ids) = curr_unread.as_ref() {
+            let candidates =
+                collect_unread_diff_candidates(db, session, curr_unread_ids, &maps).await?;
+            let confirmed = probe_unread_diff_candidates(client, &candidates, report).await;
+            if !confirmed.is_empty() {
+                let conn = db.lock().await;
+                // OPT-006：差分落地是回写边界——代际失配丢弃整份确认集。
+                session.ensure_current(&conn)?;
+                if let Err(e) =
+                    apply_unread_diff_marks(&conn, &confirmed, &candidates, &maps, report)
+                {
+                    report.errors.push(format!(
+                        "read 差分落地中断：本地写入失败（{e}），下一轮重放"
+                    ));
+                }
+                drop(conn);
+            }
+        }
+        if starred_for_reconcile.is_some() {
             let conn = db.lock().await;
             // OPT-006：对账是回写边界——代际失配丢弃整份成功集合。
             session.ensure_current(&conn)?;
-            if let Some(ids) = read_for_reconcile.as_deref() {
-                if let Err(e) = reconcile_reader_state(&conn, Some(ids), None, &maps, report) {
-                    report.errors.push(format!(
-                        "read 状态对账中断：本地写入失败（{e}），下一轮重放"
-                    ));
-                }
-            }
             if let Some(ids) = starred_for_reconcile.as_deref() {
                 if let Err(e) = reconcile_reader_state(&conn, None, Some(ids), &maps, report) {
                     report.errors.push(format!(
@@ -584,7 +600,13 @@ pub(super) async fn pull_entries_greader(
     if failures == 0 {
         let conn = db.lock().await;
         session.ensure_current(&conn)?;
-        let _ = db::set_last_sync_ts(&conn, cursor_candidate);
+        // 审计（2026-11-01）：写失败此前静默吞掉——窗口已拿全却没留下游标痕迹，
+        // 用户与日志都无从区分「推进成功」与「写入失败」。改为 warn + report
+        // 可见；游标不前进的语义不变（本轮没写上，下一轮窗口起点不变）。
+        if let Err(e) = db::set_last_sync_ts(&conn, cursor_candidate) {
+            log::warn!("greader pull: 游标推进写入失败（本轮窗口保持旧游标）: {e}");
+            report.errors.push(format!("游标推进写入失败: {e}"));
+        }
         drop(conn);
     } else {
         log::warn!(
@@ -693,7 +715,8 @@ async fn backfill_authority_collection(
     Ok(true)
 }
 
-/// 分页拉取某 Google Reader stream 的全部条目 id（read / starred 权威集合）。
+/// 分页拉取某 Google Reader stream 的全部条目 id（unread / starred 权威集合）。
+/// `xt` 为 GR 排除 tag 参数：unread 集合 = reading-list + xt=read（当前未读全集）。
 ///
 /// P2-1（自检 2026-09-29）：分页未走完（continuation 非数字 / 有 continuation
 /// 但本页无可用 id）必须报错中止——与主列举循环的 TASK-069-F1 守卫同口径。
@@ -701,7 +724,11 @@ async fn backfill_authority_collection(
 /// `reconcile_reader_state` 后，排在截断点之后的已收藏条目被误判为「远端已
 /// 取消收藏」（本地星标静默丢失，无队列记录、无报错）。报 Err 后由调用方的
 /// 既有 C-1 守卫（「失败 ≠ 空集合」）跳过本轮对账，下一轮重拉完整集合。
-async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec<i64>> {
+async fn fetch_stream_ids(
+    client: &GReaderClient,
+    stream: &str,
+    xt: Option<&str>,
+) -> AppResult<Vec<i64>> {
     let mut ids: Vec<i64> = Vec::new();
     let mut continuation: Option<u64> = None;
     let mut seen_continuations = HashSet::new();
@@ -714,7 +741,7 @@ async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec
             ));
         }
         let r = client
-            .item_ids(stream, Some(0), None, Some(1000), continuation)
+            .item_ids_excluding(stream, Some(0), None, Some(10000), continuation, xt)
             .await?;
         pages += 1;
         let mut got = 0;
@@ -758,9 +785,132 @@ async fn fetch_stream_ids(client: &GReaderClient, stream: &str) -> AppResult<Vec
     Ok(ids)
 }
 
-/// Google Reader 权威状态对账（轻量同步用）：
-/// - read 集合含 remote_id → 远端已读 → 本地已读（read-wins，不反向复活未读）
-/// - starred 集合含 remote_id → 本地收藏；不含 → 取消收藏
+/// 未读差分候选收集：`prev_unread − curr_unread` 的 maps 域截面。差分域与旧
+/// read 全量对账（[`reconcile_reader_state`]）一致取 `maps.mf_id_to_article`
+/// （远端 feed 绑定行），叠加「本地未读」过滤——本地已读行不进域（旧路径对
+/// 它们也写 0 行，幂等等价）；remote_id ∉ curr_unread 即「远端不再报未读」。
+/// 返回 (remote_id, aid) 列表；`Err` 仅限会话代际失配。
+async fn collect_unread_diff_candidates(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    curr_unread: &[i64],
+    maps: &db::SyncMatchMaps,
+) -> AppResult<Vec<(i64, i64)>> {
+    let curr_unread_set: HashSet<i64> = curr_unread.iter().copied().collect();
+    let conn = db.lock().await;
+    session.ensure_current(&conn)?;
+    let mut stmt =
+        conn.prepare("SELECT remote_id FROM articles WHERE is_read = 0 AND remote_id IS NOT NULL")?;
+    let unread_remote: HashSet<i64> = stmt
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(stmt);
+    Ok(maps
+        .mf_id_to_article
+        .iter()
+        .filter(|(remote_id, _)| {
+            unread_remote.contains(remote_id) && !curr_unread_set.contains(remote_id)
+        })
+        .map(|(remote_id, aid)| (*remote_id, *aid))
+        .collect())
+}
+
+/// 差分候选的 contents 存在性校验（批块优先，失败逐 id），返回确认仍被远端
+/// 跟踪的 remote id（即 curr_unread 请求覆盖范围内的成员）。
+///
+/// 「远端已读」与「远端已删除」在未读集合中同样缺席，凭未读集合本身不可分；
+/// 差分不能把缺席一律解释成已读（远端删除的未读条目会被误标）。以
+/// stream/items/contents 的响应条数为准：返回条数少于请求条数判 Err（缺条
+/// 判协议错误，见 greader.rs 的响应条数守卫），不校验 id 级对应；块 Err 再
+/// 逐 id 探测——`protocol`（缺条/删除形态）静默跳过该候选，`network`/HTTP 型
+/// 失败计入聚合诊断并推进连续失败计数，连续 2 次即 fail-fast 本 chunk 剩余
+/// 兜底（防最坏 100 次/块串行重试），剩余候选按「网络未确认」计入同一条
+/// 聚合诊断（fail-closed：宁漏标一轮、下一轮重差分，绝不把删除误标成已读）。
+/// 候选稳态为 0（两端一致时 id ∈ curr_unread），批块探测把代价摊到 ≤1 请求/
+/// 百候选；确认集整体经调用方的回写边界代际复核后才落地。
+async fn probe_unread_diff_candidates(
+    client: &GReaderClient,
+    candidates: &[(i64, i64)],
+    report: &mut SyncReport,
+) -> Vec<i64> {
+    let mut confirmed: Vec<i64> = Vec::new();
+    let mut network_unconfirmed: usize = 0;
+    for chunk in candidates.chunks(GR_BACKFILL_CHUNK_SIZE) {
+        let ids: Vec<i64> = chunk.iter().map(|(remote_id, _)| *remote_id).collect();
+        match client.item_contents(&ids).await {
+            Ok(_) => confirmed.extend(ids),
+            Err(_) => {
+                let mut network_streak = 0usize;
+                for (idx, id) in ids.iter().copied().enumerate() {
+                    if network_streak >= 2 {
+                        // fail-fast：本 chunk 剩余候选不再逐个探测，按网络未确认计。
+                        network_unconfirmed += ids.len() - idx;
+                        break;
+                    }
+                    match client.item_contents(&[id]).await {
+                        Ok(_) => confirmed.push(id),
+                        Err(e) if e.code == "protocol" => {
+                            log::debug!(
+                                "greader pull: read 差分候选 {id} 存在性校验未确认（缺条/删除形态），本轮跳过: {e}"
+                            );
+                        }
+                        Err(e) => {
+                            network_unconfirmed += 1;
+                            network_streak += 1;
+                            log::debug!("greader pull: read 差分候选 {id} 存在性校验网络失败: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if network_unconfirmed > 0 {
+        report.errors.push(format!(
+            "read 差分存在性校验 {network_unconfirmed} 条未确认（网络型，本轮不落地、下一轮重差分）"
+        ));
+    }
+    confirmed
+}
+
+/// 把「确认远端已读」的差分候选按政策单向落地。复用 conflict_policy 单点
+/// （字段版本守卫 + pending 保护 + 值条件写幂等），与旧 read 全量对账的命中侧
+/// 逐列一致；远端未读不回写（不复活未读）的政策语义由候选域本身保证
+/// （候选必然 ∉ curr_unread）。
+fn apply_unread_diff_marks(
+    conn: &Connection,
+    confirmed: &[i64],
+    candidates: &[(i64, i64)],
+    maps: &db::SyncMatchMaps,
+    report: &mut SyncReport,
+) -> AppResult<()> {
+    let confirmed_set: HashSet<i64> = confirmed.iter().copied().collect();
+    for (remote_id, aid) in candidates {
+        if !confirmed_set.contains(remote_id) {
+            continue;
+        }
+        // OPT-007：字段版本快照（pull 起点）+ 字段 pending 交给政策守卫；
+        // 快照缺失（理论不可达）按 (0,0) 保守处理——与 reconcile 一致。
+        let (snap_read, _) = maps.id_to_versions.get(aid).copied().unwrap_or((0, 0));
+        let rows = conflict_policy::apply_read_by_policy(
+            conn,
+            conflict_policy::GR_READ_DIRECTION,
+            true,
+            *aid,
+            snap_read,
+            maps.pending_read_ids.contains(aid),
+        )?;
+        if rows > 0 {
+            report.entries_data_changed = true;
+        }
+        report.merged_states += rows;
+    }
+    Ok(())
+}
+
+/// Google Reader 权威状态对账：
+/// - read 集合含 remote_id → 远端已读 → 本地已读（read-wins，不反向复活未读；
+///   生产 light 路径已改未读差分，read 侧保留为全量语义契约与政策锁定测试锚点）
+/// - starred 集合含 remote_id → 本地收藏；不含 → 取消收藏（light 轮唯一生产消费面）
 /// - 字段守卫（OPT-007 / 任务卡负例②）：pull 起点版本快照 + 当前 DB 版本 +
 ///   该字段 pending——按 **字段** 独立判定（本地只改过读时，收藏照常收敛；
 ///   aid 级 pending 并集会错误地把无冲突字段一起跳过）

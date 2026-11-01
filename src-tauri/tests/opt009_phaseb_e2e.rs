@@ -4496,6 +4496,152 @@ async fn readd_after_confirmed_move_and_delete_carries_remote_old_label() {
 }
 
 /* ============================================================
+结转退订事务分支（2026-11-01 事务补口的直达 e2e）：subscribe 行已
+remote_created、本地 feed 消失、无替代行 → DELETE pending（同账号同 URL
+subscribe 行）/ DELETE add_feed（兼容队列行）/ INSERT 退订意图三写同事务。
+此前既有用例只覆盖相邻的 adopt 结转分支（响应在途形态），本节直达
+exec_subscribe_item 的 Ok(None) 结转路径。
+============================================================ */
+
+/// 直达分支夹具：remote_created 订阅行（远端 id 夹具给定 42，执行器不再发
+/// quick_add）+ 同 URL 旧 add_feed 兼容队行（DELETE add_feed 的观察对象）+
+/// 本地无该 feed（feed_id_by_url_normalized → None 的结转路径）。
+/// `fail_subscription_list` 置位让 push_feeds 的旧队列段按「列表不可用」保留
+/// add_feed 行（不 quickadd、不建本地源、不剪除），排除其对夹具的干扰。
+async fn setup_carryover_fixture(
+    url: &str,
+) -> (
+    Arc<Mutex<rusqlite::Connection>>,
+    Arc<MockGReader>,
+    reqwest::Client,
+    String,
+) {
+    let server = MockGReader::start().await.expect("start mock");
+    server.set_fail_subscription_list(true);
+    let key = acct_key("greader", &server, "test");
+    let conn = open_with_credentials(&server, "greader", "test");
+    let gen = db::sync_generation(&conn).unwrap();
+    conn.execute(
+        "INSERT INTO subscription_outbox
+            (account_generation, account_key, action, feed_url, remote_id, stage, status)
+         VALUES (?1, ?2, 'subscribe', ?3, 42, 'remote_created', 'pending')",
+        rusqlite::params![gen, key, url],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO sync_queue (feed_url, action, payload) VALUES (?1, 'add_feed', ?2)",
+        rusqlite::params![url, r#"{"folder_id": 1}"#],
+    )
+    .unwrap();
+    let http = app_lib::ingestion::build_client(10);
+    (Arc::new(Mutex::new(conn)), server, http, key)
+}
+
+async fn add_feed_queue_count(db: &Arc<Mutex<rusqlite::Connection>>, url: &str) -> i64 {
+    let conn = db.lock().await;
+    conn.query_row(
+        "SELECT COUNT(*) FROM sync_queue WHERE action = 'add_feed' AND feed_url = ?1",
+        [url],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+/// 成功路径：结转退订三写原子提交——subscribe 行被退订意图替换（携带结转
+/// rid=42）、旧 add_feed 兼容队项随同删除；remote_created 行不得再发 quick_add。
+#[tokio::test]
+async fn carryover_unsubscribe_commits_all_three_writes_with_rid() {
+    let url = "http://127.0.0.1:1/opt009-r12-carry.xml";
+    let (db, server, http, key) = setup_carryover_fixture(url).await;
+
+    sync::feeds_phase(&db, &http).await.expect("feeds phase");
+    {
+        let conn = db.lock().await;
+        let items = db::pending_outbox(&conn).unwrap();
+        assert_eq!(items.len(), 1, "只应剩退订意图: {items:?}");
+        assert_eq!(
+            items[0].action, "unsubscribe",
+            "subscribe 行必须被退订意图替换（同账号同 URL DELETE）"
+        );
+        assert_eq!(
+            items[0].remote_id,
+            Some(42),
+            "退订意图必须携带结转的远端 id: {items:?}"
+        );
+        assert_eq!(items[0].feed_url, url);
+        assert_eq!(items[0].account_key, key, "退订意图必须归属同一账号");
+        assert_eq!(
+            add_feed_queue_count(&db, url).await,
+            0,
+            "结转退订必须清除同 URL 旧 add_feed 队项（同事务 DELETE）"
+        );
+        assert_eq!(
+            quickadd_count(&server, url),
+            0,
+            "remote_created 行已携带远端 id，不得再发 quick_add"
+        );
+    }
+}
+
+/// 原子性：INSERT 退订失败（真实 SQLite RAISE(ABORT) 注入）→ 三写整体回滚——
+/// subscribe 行保全（stage/remote_id 原样）、被 DELETE 的旧 add_feed 队项恢复、
+/// 无退订意图残留；解除注入后重试收敛（同一事务语义的正反两面）。
+#[tokio::test]
+async fn carryover_unsubscribe_insert_failure_rolls_back_all_three_writes() {
+    let url = "http://127.0.0.1:1/opt009-r12-rollback.xml";
+    let (db, _server, http, _key) = setup_carryover_fixture(url).await;
+
+    {
+        let conn = db.lock().await;
+        conn.execute(
+            "CREATE TRIGGER fail_carryover_unsubscribe BEFORE INSERT ON subscription_outbox
+             WHEN NEW.action = 'unsubscribe'
+             BEGIN SELECT RAISE(ABORT, 'injected unsubscribe insert failure'); END;",
+            [],
+        )
+        .unwrap();
+    }
+
+    let _report = sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase (trigger 注入下仍须正常返回：结转失败是软失败)");
+    {
+        let conn = db.lock().await;
+        let items = db::pending_outbox(&conn).unwrap();
+        assert_eq!(items.len(), 1, "回滚后只应剩原 subscribe 行: {items:?}");
+        assert_eq!(
+            items[0].action, "subscribe",
+            "INSERT 失败必须回滚：退订意图不得出现"
+        );
+        assert_eq!(items[0].stage, "remote_created", "回滚后行阶段原样");
+        assert_eq!(items[0].remote_id, Some(42), "回滚后行远端 id 原样");
+        assert_eq!(
+            add_feed_queue_count(&db, url).await,
+            1,
+            "回滚必须恢复被 DELETE 的旧 add_feed 队项"
+        );
+        conn.execute("DROP TRIGGER fail_carryover_unsubscribe", [])
+            .unwrap();
+    }
+
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("feeds phase (retry)");
+    {
+        let conn = db.lock().await;
+        let items = db::pending_outbox(&conn).unwrap();
+        assert_eq!(items.len(), 1, "重试后只应剩退订意图: {items:?}");
+        assert_eq!(items[0].action, "unsubscribe");
+        assert_eq!(items[0].remote_id, Some(42), "重试结转的远端 id 不变");
+        assert_eq!(
+            add_feed_queue_count(&db, url).await,
+            0,
+            "解除注入后三写原子提交"
+        );
+    }
+}
+
+/* ============================================================
 8c. 挂载成功 + 在途生产编辑：替代行移除基准重定为已接受目标（A-P2-3①+②）
 ============================================================ */
 

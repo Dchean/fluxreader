@@ -96,8 +96,10 @@ struct StrictServer {
     read_overrides: Mutex<HashMap<String, String>>,
     /// 仅覆盖 reading-list 的 itemRefs 响应；read/starred 流保持真实。
     reading_list_ids_override: Mutex<Option<String>>,
-    read_ids_override: Mutex<Option<String>>,
     starred_ids_override: Mutex<Option<String>>,
+    /// 仅覆盖携带 xt=read 的未读列举（2026-11-01 未读差分）：优先级高于
+    /// reading_list_ids_override（同属 reading-list 流，靠 xt 区分）。
+    unread_ids_override: Mutex<Option<String>>,
     /// 首次 subscription/list 响应算定后追加到下一次列表的远端订阅。
     subscription_late_add: Mutex<Option<Sub>>,
     /// >0 时强制 item ids 单页大小（测试 continuation 分页用）。
@@ -132,8 +134,8 @@ impl StrictServer {
             edit_tag_override: Mutex::new(None),
             read_overrides: Mutex::new(HashMap::new()),
             reading_list_ids_override: Mutex::new(None),
-            read_ids_override: Mutex::new(None),
             starred_ids_override: Mutex::new(None),
+            unread_ids_override: Mutex::new(None),
             subscription_late_add: Mutex::new(None),
             forced_ids_page_size: std::sync::atomic::AtomicUsize::new(0),
         });
@@ -263,8 +265,9 @@ impl StrictServer {
         *self.reading_list_ids_override.lock().unwrap() = Some(body.to_string());
     }
 
-    fn set_read_ids_override(&self, body: &str) {
-        *self.read_ids_override.lock().unwrap() = Some(body.to_string());
+    /// 仅覆盖携带 xt=read 的未读列举响应（未读差分完整性守卫用）。
+    fn set_unread_ids_override(&self, body: &str) {
+        *self.unread_ids_override.lock().unwrap() = Some(body.to_string());
     }
 
     fn set_starred_ids_override(&self, body: &str) {
@@ -535,12 +538,23 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
 
     if method == "GET" && path.ends_with("/reader/api/0/stream/items/ids") {
         let decoded_query = url_decode(&hit.query);
-        if decoded_query.contains("state/com.google/reading-list") {
-            if let Some(body) = srv.reading_list_ids_override.lock().unwrap().clone() {
+        // xt（未读差分，2026-11-01）：先于 reading-list 覆盖判定——未读请求同属
+        // reading-list 流，靠 xt 区分。排除语义：携带该 tag 即从结果排除。
+        let xt_value = decoded_query
+            .split('&')
+            .find_map(|kv| {
+                kv.split_once('=')
+                    .filter(|(k, _)| *k == "xt")
+                    .map(|(_, v)| v.to_string())
+            })
+            .unwrap_or_default();
+        if xt_value.ends_with("state/com.google/read") {
+            if let Some(body) = srv.unread_ids_override.lock().unwrap().clone() {
                 return (200, body);
             }
-        } else if decoded_query.contains("s=user/-/state/com.google/read&") {
-            if let Some(body) = srv.read_ids_override.lock().unwrap().clone() {
+        }
+        if decoded_query.contains("state/com.google/reading-list") {
+            if let Some(body) = srv.reading_list_ids_override.lock().unwrap().clone() {
                 return (200, body);
             }
         } else if decoded_query.contains("s=user/-/state/com.google/starred&") {
@@ -582,6 +596,11 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
                 } else {
                     false
                 }
+            })
+            .filter(|e| match xt_value.as_str() {
+                "user/-/state/com.google/read" => !e.read,
+                "user/-/state/com.google/starred" => !e.starred,
+                _ => true,
             })
             .collect();
         let total = matched.len();
@@ -2025,9 +2044,9 @@ async fn missing_reading_list_ids_does_not_block_valid_read_star_reconcile() {
         report.errors
     );
     assert!(
-        srv.item_ids_requests_containing("s=user/-/state/com.google/read&") > 0
+        srv.item_ids_requests_containing("xt=user/-/state/com.google/read") > 0
             && srv.item_ids_requests_containing("s=user/-/state/com.google/starred&") > 0,
-        "主列表失败不得阻断两个独立权威集合请求"
+        "主列表失败不得阻断未读差分与 starred 两个独立权威集合请求"
     );
     let conn = db.lock().await;
     assert!(
@@ -2039,12 +2058,13 @@ async fn missing_reading_list_ids_does_not_block_valid_read_star_reconcile() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// P1 返工：read 集合失败时，成功拉到的 starred 权威集合仍必须独立对账。
+/// P1 返工（2026-11-01 改未读差分）：未读集合失败时，成功拉到的 starred
+/// 权威集合仍必须独立对账；read 差分整轮跳过（fail-closed），不误标。
 #[tokio::test]
-async fn read_collection_failure_does_not_skip_successful_star_reconcile() {
+async fn unread_collection_failure_does_not_skip_successful_star_reconcile() {
     let srv = StrictServer::start(Mode::Miniflux).await;
     srv.add_entry(1, 10, "A");
-    srv.set_read_ids_override("{}");
+    srv.set_unread_ids_override("{}");
     let (db, tmp) = seed_sync_db("opt019_gr_read_fail_star_ok", &srv);
     let article_id = {
         let conn = db.lock().await;
@@ -2058,24 +2078,27 @@ async fn read_collection_failure_does_not_skip_successful_star_reconcile() {
         .await
         .expect("states phase");
     assert!(
-        report.errors.iter().any(|e| e.contains("read")),
-        "read 侧失败必须可见：{:?}",
+        report.errors.iter().any(|e| e.contains("unread 权威集合")),
+        "未读侧失败必须可见：{:?}",
         report.errors
     );
     assert!(
-        srv.item_ids_requests_containing("s=user/-/state/com.google/starred&") > 0,
+        srv.item_ids_requests_containing("xt=user/-/state/com.google/read") > 0
+            && srv.item_ids_requests_containing("s=user/-/state/com.google/starred&") > 0,
         "starred 集合仍应请求"
     );
     let conn = db.lock().await;
     assert!(
         !article_state(&conn, article_id).1,
-        "成功拉到的空 starred 集合仍应收敛收藏"
+        "成功拉到的空 starred 集合仍应收敛收藏；未读集合失败时 read 差分跳过（本地未读守恒）"
     );
     drop(conn);
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// P1 返工：starred 集合失败时，成功拉到的 read 集合仍必须独立对账。
+/// P1 返工（2026-11-01 改未读差分）：starred 集合失败时，read 差分仍必须独立
+/// 收敛。游标拨到 published 之后使条目落在增量窗口外——标读只能由「未读差分 +
+/// contents 存在性校验」通道完成（正文合并不可达）。
 #[tokio::test]
 async fn star_collection_failure_does_not_skip_successful_read_reconcile() {
     let srv = StrictServer::start(Mode::Miniflux).await;
@@ -2088,7 +2111,7 @@ async fn star_collection_failure_does_not_skip_successful_read_reconcile() {
         let conn = db.lock().await;
         let (_, article_id) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
         db::set_starred(&conn, article_id, true).unwrap();
-        db::set_last_sync_ts(&conn, 681_002).unwrap();
+        db::set_last_sync_ts(&conn, 1_800_000_000).unwrap();
         article_id
     };
 
@@ -2101,12 +2124,12 @@ async fn star_collection_failure_does_not_skip_successful_read_reconcile() {
         report.errors
     );
     assert!(
-        srv.item_ids_requests_containing("s=user/-/state/com.google/read&") > 0,
-        "read 集合仍应请求"
+        srv.item_ids_requests_containing("xt=user/-/state/com.google/read") > 0,
+        "未读差分集合仍应请求"
     );
     let conn = db.lock().await;
     let (read, starred) = article_state(&conn, article_id);
-    assert!(read, "成功的 read 集合仍应把本地条目标为已读");
+    assert!(read, "成功的未读差分仍应把本地条目标为已读");
     assert!(starred, "starred 失败时不得清掉本地收藏");
     drop(conn);
     let _ = std::fs::remove_file(&tmp);
@@ -2235,10 +2258,13 @@ async fn repeated_reading_list_continuation_is_protocol_and_bounded() {
         "{:?}",
         report.errors
     );
+    // light 轮还有一条独立的未读差分分页链（同属 reading-list 流，靠 xt 区分），
+    // 它同样会被本覆盖击中并有限停止——主列举计数须剔除后再断言。
+    let unread_reqs = srv.item_ids_requests_containing("xt=user/-/state/com.google/read");
     assert_eq!(
-        srv.item_ids_requests_containing("state/com.google/reading-list"),
+        srv.item_ids_requests_containing("state/com.google/reading-list") - unread_reqs,
         2,
-        "重复 continuation 应在第二次响应后停止"
+        "重复 continuation 应在第二次响应后停止（未读差分链独立有限停止）"
     );
     let conn = db.lock().await;
     assert_eq!(db::last_sync_ts(&conn).unwrap(), 690_003);
@@ -2315,14 +2341,15 @@ async fn repeated_star_continuation_is_protocol_and_keeps_cursor() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// P1 返工：read 权威集合返回空 itemRefs + 合法 continuation 时必须是
-/// protocol、跳过 read 字段并保留 last_sync_ts，不得包装成 network。
+/// P1 返工（2026-11-01 改未读差分）：未读权威集合返回空 itemRefs + 合法
+/// continuation 时必须是 protocol、整轮跳过 read 差分并保留 last_sync_ts，
+/// 不得包装成 network。
 #[tokio::test]
-async fn read_empty_page_with_continuation_is_protocol_and_keeps_cursor() {
+async fn unread_empty_page_with_continuation_is_protocol_and_keeps_cursor() {
     let srv = StrictServer::start(Mode::Miniflux).await;
     srv.add_entry(1, 10, "A");
     srv.set_entry_starred(1, true);
-    srv.set_read_ids_override(r#"{"itemRefs":[],"continuation":"0"}"#);
+    srv.set_unread_ids_override(r#"{"itemRefs":[],"continuation":"0"}"#);
     let (db, tmp) = seed_sync_db("opt019_gr_read_empty_cont", &srv);
     {
         let conn = db.lock().await;
@@ -2338,7 +2365,7 @@ async fn read_empty_page_with_continuation_is_protocol_and_keeps_cursor() {
         report
             .errors
             .iter()
-            .any(|e| e.contains("read 权威集合") && e.contains("[protocol]")),
+            .any(|e| e.contains("unread 权威集合") && e.contains("[protocol]")),
         "{:?}",
         report.errors
     );
@@ -2352,7 +2379,10 @@ async fn read_empty_page_with_continuation_is_protocol_and_keeps_cursor() {
         .unwrap(),
     );
     assert!(!read, "read 字段失败时不得对账");
-    assert!(starred, "read 字段失败不得误清 star");
+    assert!(
+        starred,
+        "未读集合失败不得误清 star（starred 独立对账不受影响）"
+    );
     drop(conn);
     drop(db);
     let _ = std::fs::remove_file(&tmp);
