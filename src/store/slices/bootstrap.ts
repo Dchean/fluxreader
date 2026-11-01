@@ -3,7 +3,7 @@ import type { StateCreator } from 'zustand';
 import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
 import type { ArticleListItemRow } from '../../lib/api';
-import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, applyReadReceipt, appStore, asReadReceipts, beginCountsFetch, beginEntryFieldWrite, beginLocalFlagWrite, buildFeedIndex, buildScopeCountsSnapshot, canLandCounts, currentLocalFlagWriteSerial, emptyArticlesCursor, endEntryFieldWrite, endLocalFlagWrite, entryInFlightFieldKeys, feedCountsFromRows, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, rollbackEntryClaims, scheduleCountsReconcile, setViewEntriesSnapshot } from '../internals';
+import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, applyReadReceipt, appStore, asReadReceipts, beginCountsFetch, beginEntryFieldWrite, beginLocalFlagWrite, buildFeedIndex, buildScopeCountsSnapshot, canLandCounts, currentFlagWriteSettleSerial, currentLocalFlagWriteSerial, emptyArticlesCursor, endEntryFieldWrite, endLocalFlagWrite, entryInFlightFieldKeys, feedCountsFromRows, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, rollbackEntryClaims, scheduleCountsReconcile, setViewEntriesSnapshot } from '../internals';
 import { applyConfigRead, beginConfigRead } from '../aiConfigWrites';
 import type { EntryRollbackClaim } from '../internals';
 import type { AppState, ArticlesCursorState } from '../types';
@@ -471,6 +471,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
          writtenAfterSerial），不被旧响应翻回。 */
       const countsToken = beginCountsFetch();
       const flagSerialAtStart = currentLocalFlagWriteSerial();
+      /* B3：写结算序号快照——「取数窗口内发生过写结算」是拒落的第三判据
+         （快照与写提交在后端共用一把 DB 锁，先后序不定向；判据依据与取舍见
+         internals 的 currentFlagWriteSettleSerial 与归属 Note）。 */
+      const settleSerialAtStart = currentFlagWriteSettleSerial();
       /* R4：读取发起时**已在途**的写行×字段（不依赖 IPC FIFO——读取请求可能
          先于这些写到达后端；其乐观值不得被读前快照翻回）。 */
       const inFlightAtStart = entryInFlightFieldKeys();
@@ -531,7 +535,19 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
          读取/对账收敛），绝不"旧 reload 盖新对账"。
          R3（P2-2）：再加读取发起后的本地写前沿比对——旧响应不得覆已提交的
          读/藏计数（写后对账的同一前沿语义；更晚发起的新鲜读取照常接受）。 */
-      const countsLand = canLandCounts(countsToken) && currentLocalFlagWriteSerial() === flagSerialAtStart;
+      /* B3：第三判据——取数窗口内发生过写结算（结算序号推进）⇒ 快照相对终态
+         可能陈旧（服务端锁序不定向），拒落。仅因本判据拒落（令牌仍最新、写前沿
+         未动、无在途写）时补一次权威对账自愈：否则 dedup 关闭时再无任何计数
+         写者，陈旧快照永久留存（审计探针实测复现：unread 回退而条目
+         isRead=true）。其余拒落原因（更新的读取 / 在途写）已有各自的收敛路径，
+         不重复安排。取舍（b 案：窗口重叠才补对账）见归属 Note。 */
+      const settleAdvanced = currentFlagWriteSettleSerial() !== settleSerialAtStart;
+      const countsLand = canLandCounts(countsToken)
+        && currentLocalFlagWriteSerial() === flagSerialAtStart
+        && !settleAdvanced;
+      if (!countsLand && settleAdvanced && canLandCounts(countsToken) && currentLocalFlagWriteSerial() === flagSerialAtStart) {
+        scheduleCountsReconcile({ force: true });
+      }
       const feedCounts = countsLand ? feedCountsFromRows(countsSnap?.feeds ?? null) : null;
       const scopeSnapshot =
         countsLand && get().settings.smartDedup

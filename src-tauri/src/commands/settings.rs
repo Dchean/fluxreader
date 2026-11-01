@@ -13,7 +13,32 @@ Settings
 #[tauri::command]
 pub async fn get_setting(state: State<'_, AppState>, key: String) -> AppResult<Option<String>> {
     let conn = state.db.lock().await;
-    db::get_setting(&conn, &key)
+    read_setting(&conn, &key)
+}
+
+/// 通用设置读取的真实实现（命令与单测/e2e 共用；单测无法构造 State）。
+/// B4 读侧收口：DPAPI 加密凭据键（ai_config / config_sync_credentials /
+/// miniflux_token / greader_password）不得经通用 IPC 读出——通用 get_setting
+/// 对落盘密文透明解密（db::get_setting），等于把静态加密的明文交回 webview；
+/// 前端被攻破或任何恶意 IPC 调用即拿走凭据。合法消费方走专用命令
+/// （get_ai_config / save_ai_config、config_sync 与同步连接的后端内核）。
+// Note: 通用 IPC 敏感键收口 — 见 .agents/notes/implemented/bug-fix/2026-10-31-安全横向面收口.md
+pub fn read_setting(conn: &rusqlite::Connection, key: &str) -> AppResult<Option<String>> {
+    if crate::credentials::is_sensitive_key(key) {
+        return Err(sensitive_setting_rejected(key));
+    }
+    db::get_setting(conn, key)
+}
+
+/// 敏感键通用读写被拒的统一错误（与账号生命周期拦截同码，语义同属
+/// 「通用设置命令不得触碰该键」；差别只在文案指向的专用流程）。
+fn sensitive_setting_rejected(key: &str) -> AppError {
+    AppError::new(
+        "protectedSetting",
+        format!(
+            "设置键「{key}」为加密凭据，禁止经通用设置命令读取/写入，请使用对应的专用设置页/命令"
+        ),
+    )
 }
 
 /// OPT-006：活动账号与同步进度键——通用 `set_setting` 不得改写。
@@ -34,6 +59,7 @@ const PROTECTED_SETTING_KEYS: &[&str] = &[
     "sync_generation",
     "sync_last_sync",
     "sync_last_entry_id",
+    "sync_last_disconnected_account_key",
     "fever_history_state",
     "endpoint_resolved",
     "pending_connection_config",
@@ -41,7 +67,7 @@ const PROTECTED_SETTING_KEYS: &[&str] = &[
 ];
 
 /// 通用设置写入的真实实现（命令与单测共用；单测无法构造 State）。
-pub(crate) fn apply_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> AppResult<()> {
+pub fn apply_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> AppResult<()> {
     // OPT-006：活动连接/代际/进度键必须走专用保存流程（含代际推进与并发校验），
     // 通用写入是一条会绕过账号生命周期守卫的旁路——在此拒绝。
     if PROTECTED_SETTING_KEYS.contains(&key)
@@ -52,6 +78,11 @@ pub(crate) fn apply_setting(conn: &rusqlite::Connection, key: &str, value: &str)
             "protectedSetting",
             format!("设置键「{key}」受账号生命周期保护，请使用「同步」设置页的保存/断开流程"),
         ));
+    }
+    // B4 写侧收口：DPAPI 加密凭据键不得经通用 IPC 写入——合法保存只走专用
+    // 命令（save_ai_config、config_sync/github_auth 凭据内核、同步连接事务）。
+    if crate::credentials::is_sensitive_key(key) {
+        return Err(sensitive_setting_rejected(key));
     }
     // smartDedup 关闭瞬间清去重墓碑：用户显式想让重复文章回来，
     // 之后的抓取按无去重语义正常入库（不清的话墓碑会继续拦截）
@@ -260,6 +291,46 @@ mod protected_setting_tests {
         apply_setting(&conn, "app_settings", r#"{"themeMode":"dark"}"#).unwrap();
         let saved = db::get_setting(&conn, "app_settings").unwrap().unwrap();
         assert!(saved.contains("dark"));
+    }
+
+    /// B4：DPAPI 加密凭据键双向收口——通用读实现拒绝（即使存量行存在，也
+    /// 不得解密返回明文、不得回显敏感值）、通用写实现拒绝且不改写存量行；
+    /// 专用命令内核（db::get/set_setting，get_ai_config/save_ai_config 的
+    /// 真实实现）不受影响。
+    #[test]
+    fn sensitive_keys_rejected_on_generic_read_and_write() {
+        let conn = conn();
+        for key in crate::credentials::SENSITIVE_KEYS {
+            // 读侧：存量明文行（模拟历史库）存在时，通用读取必须拒绝
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, '存量秘密标记')",
+                rusqlite::params![key],
+            )
+            .unwrap();
+            let err = read_setting(&conn, key).expect_err("敏感键通用读取必须拒绝");
+            assert_eq!(err.code, "protectedSetting", "{key} 应返回明确错误码");
+            assert!(
+                !err.message.contains("存量秘密标记"),
+                "{key} 错误不得回显存量敏感值: {err}"
+            );
+            // 写侧：拒绝且存量值原样保留（破坏性写入不得发生）
+            let err = apply_setting(&conn, key, "tampered").expect_err("敏感键通用写入必须拒绝");
+            assert_eq!(err.code, "protectedSetting", "{key} 应返回明确错误码");
+            let stored: String = conn
+                .query_row(
+                    "SELECT value FROM settings WHERE key = ?1",
+                    rusqlite::params![key],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, "存量秘密标记", "{key} 写拒绝后存量值必须原样保留");
+        }
+        // 对照：专用命令内核照常读写（save_ai_config 路径不因读侧收口受影响）
+        db::set_setting(&conn, "ai_config", r#"{"apiKey":"k"}"#).unwrap();
+        assert_eq!(
+            db::get_setting(&conn, "ai_config").unwrap().unwrap(),
+            r#"{"apiKey":"k"}"#
+        );
     }
 }
 

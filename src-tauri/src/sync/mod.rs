@@ -193,6 +193,9 @@ mod subscriptions;
 pub use credentials::*;
 pub use phases::*;
 pub use push::*;
+/// W3-1：会话缓存注册/复位。session 模块本体仍是 sync 内部实现细节（见下方
+/// 私有 glob 说明），只有这两个接线点是 lib.rs / 集成测试的公共面。
+pub use session::{clear_session_cache_for_tests, init_session_cache};
 pub use subscriptions::*;
 
 /// TASK-097：唯一从「无 pub 项」子模块显式重导出的项（见上方例外说明）。

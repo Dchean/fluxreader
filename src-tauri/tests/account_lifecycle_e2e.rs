@@ -452,11 +452,12 @@ async fn sync_local_feeds_pushes_unbound_local_feeds() {
     let _ = std::fs::remove_file(&tmp_path);
 }
 
-/// create_feed 409 幂等：对 mock 已有的 feed 10 URL（GET /v1/feeds 静态预置）
-/// 再 create → 409 + feed_id → create_feed 返回既有 id 而非报错。
-/// Google Reader quick_add 幂等：已存在同 URL 订阅返回既有 feed id。
+/// 真实服务端 quick_add 对已订阅 URL 的形态（2026-10-31 审计对齐）：
+/// FreshRSS 捕获 addFeed 异常后仍回 HTTP 200 + `numResults: 0`（无 streamId），
+/// 绝不返回既有 feed id、不重复创建。执行器层的「冲突收敛到既有 feed」由
+/// opt009_phaseb_e2e 的列表证据解析用例锁定（B1 F2 契约）。
 #[tokio::test]
-async fn create_feed_conflict_returns_existing_id() {
+async fn quickadd_duplicate_url_returns_numresults_zero_without_duplicate_creation() {
     let server = MockGReader::start().await.expect("start mock");
     let http = app_lib::ingestion::build_client(10);
     let client = app_lib::greader::GReaderClient::new(&server.url(), "mock/abc", http.clone());
@@ -466,12 +467,14 @@ async fn create_feed_conflict_returns_existing_id() {
     let r = client
         .quick_add(existing_url)
         .await
-        .expect("quick_add should resolve existing feed");
-    // 幂等：返回既有 feed id 10，不重复创建
+        .expect("重复 URL 是 200 + numResults=0，不是传输错误");
     assert_eq!(
-        r.stream_id.as_deref(),
-        Some("feed/10"),
-        "conflict resolves to the pre-existing feed id"
+        r.num_results, 0,
+        "真实服务端对已订阅 URL 回 numResults=0（无既有 id）"
+    );
+    assert!(
+        r.stream_id.is_none(),
+        "numResults=0 不携带 streamId（旧 mock 幂等契约已废除）"
     );
 
     // 且不重复入 subscribed_urls（幂等，不产生重复创建记录）

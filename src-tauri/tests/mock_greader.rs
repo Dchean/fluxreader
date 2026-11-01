@@ -3,25 +3,26 @@
 //! stream/items/ids、stream/items/contents、edit-tag、subscription/edit/quickadd），
 //! 用于同步引擎端到端测试（不依赖真实服务端）。
 //!
-//! ## changed_at 语义契约（TASK-097 全面核对后固化）
+//! ## ot 窗口语义契约（2026-10-31 审计修正后固化）
 //!
-//! `changed_at`（unix 秒）= 服务端视角「该条目最后入库/变更时刻」，是增量拉取
-//! `stream/items/ids` 的 ot 过滤列（本 mock 实现：`changed_at >= ot`）。对照真实
-//! Miniflux（v2 main，internal/storage/entry.go）语义，任何改写 mock 条目的代码
-//! （mock 路由内部或测试直接改 `entries`）必须遵守：
-//! 1. 条目新增（抓取入库）：changed_at = 抓取时刻（见 `add_entry_with_published`）。
-//! 2. 条目内容变更（重新抓取补正文/封面等）：**必须**前移 changed_at——真实
-//!    Miniflux 重新抓取会更新变更时间；只改内容不改时间会与增量窗口赛跑造成
-//!    假 flaky（09-23 已订正 sync_content_e2e 的
-//!    `miniflux_existing_entry_backfills_cover` 一处）。
-//! 3. 状态变更（read/starred 切换）：真实 Miniflux 的 SetEntriesStatus /
-//!    SetEntriesStarredState 对命中行 `SET changed_at=now()`——本 mock 的
-//!    edit-tag 路由同样前移；测试直接改 `e.read`/`e.starred` 的写点也须随之
-//!    前移（已在 dual_client_e2e / sync_e2e 的直接写点补齐）。
-//! 4. 构造「很久以前的旧变更」时，必须**显式**把 changed_at 拨回过去
-//!    （如 sync_content_e2e / sync_phases_e2e 的 stale-read 用例所做），
-//!    不得只改状态而不动 changed_at。
-//! 5. 订阅/分类层变更（退订、改名、删源）不属于条目变更，不触碰 changed_at。
+//! 增量拉取 `stream/items/ids` 的 ot 过滤列是 **published_at（严格大于）**：
+//! `published > ot`。对齐真实 Miniflux（v2 main）固定源码：
+//! internal/googlereader/handler.go 把 ot 映射为 `AfterPublishedDate`，
+//! internal/storage/entry_query_builder.go 展开为 `e.published_at > $N`
+//! （reading-list / starred / read / feed 四类流全部适用）。任何改写 mock
+//! 条目的代码（mock 路由内部或测试直接改 `entries`）必须遵守：
+//! 1. 条目新增（抓取入库）：published = 条目发布时间；真实抓取场景下新抓
+//!    条目的 published 即抓取时刻（见 `add_entry_with_published`）。
+//! 2. `changed_at`（unix 秒）保留为服务端视角「最后入库/变更时刻」，**不再
+//!    参与 ot 窗口判定**；状态/内容变更仍前移它（真实 Miniflux 的
+//!    SetEntriesStatus / 重新抓取会更新变更时间，见 TASK-097 契约），但它
+//!    只影响 mock 内部记账，不影响增量窗口可见性。
+//! 3. published 早于游标的条目**不会**经 ot 窗口进入增量拉取（真实语义）：
+//!    构造这类条目用 `add_entry_with_published` / `add_entry_with_times`；
+//!    让它们进入本地只能靠手动全量（ot=0）或对账权威集合。
+//! 4. 构造「published 早于游标但 changed_at 晚于游标」的分歧条目用
+//!    `add_entry_with_times`（分歧本身锁定窗口列，见 pull_window_e2e）。
+//! 5. 订阅/分类层变更（退订、改名、删源）不属于条目变更，不触碰上述时间。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -102,6 +103,20 @@ type QuickaddBarrierSlot = Option<(
     tokio::sync::oneshot::Receiver<()>,
 )>;
 
+/// quickadd 对「远端已持有的同 URL」的响应形态（2026-10-31 审计对齐）。
+/// 真实服务端没有一家对重复 URL 返回既有 id：FreshRSS 捕获 addFeed 异常后
+/// 仍以 HTTP 200 回 `numResults: 0`（freshrss-greader.php quickadd()）；
+/// Miniflux 的 subscribe 失败走 JSONServerError → HTTP 500
+/// （internal/googlereader/handler.go quickAddHandler）。
+#[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，变体只被部分二进制消费
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum QuickaddDuplicate {
+    /// FreshRSS 形态：200 + `numResults: 0`（无 streamId）。
+    FreshRssNumResultsZero,
+    /// Miniflux 形态：500 + feed_already_exists。
+    Miniflux500,
+}
+
 pub struct MockGReader {
     pub port: u16,
     pub entries: Mutex<Vec<MockEntry>>,
@@ -113,7 +128,8 @@ pub struct MockGReader {
     pub created_feeds: Mutex<Vec<(String, i64)>>,
     /// 兼容旧测试断言：收到的收藏切换
     pub bookmark_toggles: Mutex<Vec<i64>>,
-    /// 服务端"已有"订阅（url → feed_id）：quickadd 同 URL 返回既有 id
+    /// 服务端"已有"订阅（url → feed_id）：quickadd 同 URL 按重复语义拒绝
+    /// （`quickadd_duplicate`；旧幂等形态需显式切换），新建的订阅也会登记
     pub existing_feed_urls: Mutex<Vec<(String, i64)>>,
     /// 远端订阅列表（GET subscription/list 返回）
     pub subscriptions: Mutex<Vec<MockSubscription>>,
@@ -141,6 +157,10 @@ pub struct MockGReader {
     /// 故障注入（TASK-074）：置位后 subscription/quickadd 返回 500——push 失败、
     /// 队项保留，用于验证「有未推送变更的源不被远端快照删除」
     pub fail_quick_add: std::sync::atomic::AtomicBool,
+    /// B1 故障注入：置位后 quickadd **先创建并登记订阅、再以 500 返回**——
+    /// 忠实模拟「服务端已执行、响应在传输中丢失」（客户端看到失败、远端已变），
+    /// 用于崩溃窗口收敛用例（与 fail_quick_add 的「服务端未执行」相区别）。
+    pub quickadd_applied_then_fail: std::sync::atomic::AtomicBool,
     /// 故障注入（TASK-055）：置位后退订仍返回 200，但**服务端保留该订阅**——
     /// 模拟真实 GReader 后端在 token 失效/权限不足/目标不存在时「2xx + 未生效」的响应。
     pub unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool,
@@ -161,11 +181,8 @@ pub struct MockGReader {
     /// → `400 Bad Request`（`freshrss-greader.php:122-128/468-471`）。
     /// 默认关闭：既有用例继续按「无条件 200」的宽松模型运行。
     pub unsubscribe_unknown_id_returns_400: std::sync::atomic::AtomicBool,
-    /// 故障注入（OPT-009 B2-R2）：置位后 quickadd 对同 URL **非幂等**——跳过
-    /// `existing_feed_urls` 查找，每次调用都新建一个远端订阅（新的数字 id）。
-    /// 用于验证恢复路径对解析结果**只做一次 quick_add**（不持久化就会在列表
-    /// 长期失败/重试时无界造重复项），并靠列表正面证据清除所有同 URL 订阅。
-    pub quickadd_non_idempotent: std::sync::atomic::AtomicBool,
+    /// quickadd 对重复 URL 的响应形态（默认 FreshRSS 200 + numResults=0）。
+    pub quickadd_duplicate: Mutex<QuickaddDuplicate>,
     /// 最近一次 subscription/edit 请求的表单键值（A-2 断言 t=/a= 参数）
     pub last_subscription_edit_form: Mutex<Vec<(String, String)>>,
     /// OPT-009 阶段 B：subscription/edit 响应屏障（见槽位类型说明）。
@@ -183,6 +200,10 @@ pub struct MockGReader {
     /// TASK-059：置位后 ClientLogin 返回 401（模拟凭据被拒，用于验证
     /// 「凭据错误不得被误报成找不到 API」）。
     pub reject_login: std::sync::atomic::AtomicBool,
+    /// W3-1：置位后**已认证**的 GReader API 端点（/reader/api/0/*）一律返回
+    /// 401——模拟「ClientLogin 仍可通过、但会话 token 已被服务端吊销」，
+    /// 用于验证会话缓存的 401 剔除重认证回落（ClientLogin 本身不受影响）。
+    pub api_unauthorized: std::sync::atomic::AtomicBool,
     /// TASK-059：Fever 端点路径（"" = 走 `{base}/fever/?api` 的 Miniflux 形态；
     /// "/api/fever.php" = FreshRSS 形态）。非该路径的 Fever 请求返回 404。
     pub fever_endpoint: Mutex<String>,
@@ -252,12 +273,13 @@ impl MockGReader {
             empty_page_with_continuation: std::sync::atomic::AtomicBool::new(false),
             corrupt_starred_continuation: std::sync::atomic::AtomicBool::new(false),
             fail_quick_add: std::sync::atomic::AtomicBool::new(false),
+            quickadd_applied_then_fail: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_returns_2xx_without_removing: std::sync::atomic::AtomicBool::new(false),
             fail_subscription_edit: std::sync::atomic::AtomicBool::new(false),
             fail_subscription_edit_for: Mutex::new(None),
             fail_subscription_list: std::sync::atomic::AtomicBool::new(false),
             unsubscribe_unknown_id_returns_400: std::sync::atomic::AtomicBool::new(false),
-            quickadd_non_idempotent: std::sync::atomic::AtomicBool::new(false),
+            quickadd_duplicate: Mutex::new(QuickaddDuplicate::FreshRssNumResultsZero),
             last_subscription_edit_form: Mutex::new(Vec::new()),
             subscription_edit_barrier: Mutex::new(None),
             quickadd_barrier: Mutex::new(None),
@@ -290,6 +312,7 @@ impl MockGReader {
             next_entry_id: Mutex::new(500),
             greader_api_prefix: Mutex::new(String::new()),
             reject_login: std::sync::atomic::AtomicBool::new(false),
+            api_unauthorized: std::sync::atomic::AtomicBool::new(false),
             fever_endpoint: Mutex::new(String::new()),
             fever_api_version: Mutex::new(3),
             fever_reject_auth: std::sync::atomic::AtomicBool::new(false),
@@ -383,6 +406,13 @@ impl MockGReader {
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// B1 注入开关：quickadd 创建成功后以 500 返回（响应丢失语义）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_quickadd_applied_then_fail(&self, on: bool) {
+        self.quickadd_applied_then_fail
+            .store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// 置位后 subscription/edit（含 edit/unsubscribe）返回 500（OPT-009 阶段 B：
     /// 验证「远端已建、绑定完成、分类挂载失败」保留队项且不重复 quick_add）。
     #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
@@ -405,11 +435,10 @@ impl MockGReader {
             .store(fail, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// OPT-009 B2-R2：置位后 quickadd 对同 URL 非幂等（每次调用新建订阅）。
-    #[allow(dead_code)] // 共享 mock 模块被多个 test 二进制 include!，各二进制只用到其中一部分
-    pub fn set_quickadd_non_idempotent(&self, on: bool) {
-        self.quickadd_non_idempotent
-            .store(on, std::sync::atomic::Ordering::SeqCst);
+    /// 设置 quickadd 对重复 URL 的响应形态（见 [`QuickaddDuplicate`]）。
+    #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
+    pub fn set_quickadd_duplicate(&self, mode: QuickaddDuplicate) {
+        *self.quickadd_duplicate.lock().unwrap() = mode;
     }
 
     /// OPT-009 B2-R2 复审 P2-C：置位后 unsubscribe 未知 id 返回 400（FreshRSS 形态）。
@@ -572,8 +601,9 @@ impl MockGReader {
     }
 
     /// 同 add_entry_ret，但可指定 published（unix 秒，模拟「原文发布时间早、
-    /// 但刚被抓取入库」的历史文章）。changed_at 固定为现在（抓取时刻），
-    /// 与真实 Google Reader 语义一致：ot 游标按 crawl/change 时间过滤，而非 published。
+    /// 但刚被抓取入库」的历史文章）。changed_at 固定为现在（抓取时刻）。
+    /// 注意 ot 窗口按 published 严格大于过滤（见文件头契约）：published 早于
+    /// 游标的条目**不在**增量窗口内，只能靠手动全量（ot=0）拉入。
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn add_entry_with_published(
         &self,
@@ -633,8 +663,9 @@ impl MockGReader {
     }
 
     /// TASK-097：注册一条「首轮 reading-list id 列举的响应快照计算完成之后」
-    /// 才出现的条目（changed_at 由调用方指定，必须落在受控时间线的
-    /// 「拉取起点游标」与「修前结束墙钟游标」之间）。见 pending_injection 字段说明。
+    /// 才出现的条目（published = changed_at = 调用方指定值，必须大于受控
+    /// 时间线的「拉取起点游标」、小于真实墙钟——窗口列是 published，见文件头
+    /// 契约）。见 pending_injection 字段说明。
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
     pub fn arm_inject_entry_after_first_reading_list_ids(
         &self,
@@ -1025,6 +1056,14 @@ fn route(
     body: &str,
     _head: &str,
 ) -> (u16, String) {
+    // W3-1：会话 token 吊销注入——ClientLogin 之外的 reader API 一律 401。
+    if srv
+        .api_unauthorized
+        .load(std::sync::atomic::Ordering::SeqCst)
+        && path.contains("/reader/api/0/")
+    {
+        return (401, r#"{"error_message":"Unauthorized"}"#.into());
+    }
     match (method, path) {
         // ClientLogin：默认任何 Email/Passwd 都返回固定 token；
         // TASK-059 故障注入下返回 401（模拟凭据被拒）
@@ -1285,6 +1324,11 @@ fn route(
             }
             let offset: usize = q.get("c").and_then(|v| v.parse().ok()).unwrap_or(0);
             let ot: i64 = q.get("ot").and_then(|v| v.parse().ok()).unwrap_or(0);
+            // ot 窗口（2026-10-31 审计修正）：过滤列 = published_at、严格大于，
+            // 对齐真实 Miniflux AfterPublishedDate（`e.published_at > $N`）。
+            // 旧实现按 changed_at >= ot 过滤是 FreshRSS 式「变更时间」语义的
+            // 失真——会让 published 早于游标的历史条目经增量窗口进入拉取，
+            // 与真实 Miniflux 行为相反（它们只能靠手动全量 ot=0 拉入）。
             // 过滤：feed/数字 按 feed_id；read/starred 按状态；否则全部（reading-list）。
             // R3 夹具修正（协议依据）：Google Reader 的 `user/-/state/com.google/read`
             // 与 `.../starred` 是**正交的 tag 流**——成员资格 = 条目携带该 tag，
@@ -1313,7 +1357,7 @@ fn route(
                     }
                     None => true,
                 })
-                .filter(|e| e.changed_at >= ot)
+                .filter(|e| e.published > ot)
                 .map(|e| e.id)
                 .collect();
             let total = ids.len();
@@ -1440,9 +1484,10 @@ fn route(
                 if !ids.contains(&e.id) {
                     continue;
                 }
-                // TASK-097 契约（见文件头第 3 条）：状态写入即变更——真实 Miniflux
+                // TASK-097 契约：状态写入即变更——真实 Miniflux
                 // SetEntriesStatus / SetEntriesStarredState 对命中行 SET changed_at=now()，
-                // 这里同样前移，被推送/被标读的条目保持增量窗口（changed_at >= ot）可见。
+                // 这里同样前移。注意 changed_at 不再是 ot 窗口过滤列（见文件头
+                // 契约），前移只保留「服务端记账」语义。
                 e.changed_at = chrono::Utc::now().timestamp();
                 for tag in &add {
                     if tag.ends_with("/read") {
@@ -1473,7 +1518,9 @@ fn route(
             }
             (200, "OK".into())
         }
-        // quickadd：订阅（幂等：已存在返回既有 id）
+        // quickadd：订阅。重复 URL 按真实服务端语义拒绝（默认 FreshRSS
+        // 200 + numResults=0；可切换 Miniflux 500）——客户端须按
+        // resolve_existing_feed_id 先解析既有订阅，不得依赖幂等重发。
         ("POST", p) if p.ends_with("/reader/api/0/subscription/quickadd") => {
             // TASK-074 故障注入：push 失败 → 队项保留在 sync_queue
             if srv.fail_quick_add.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1487,53 +1534,57 @@ fn route(
                 .get("quickadd")
                 .and_then(|v| v.first().cloned())
                 .unwrap_or_default();
-            // OPT-009 B2-R2：非幂等模型（每次调用新建）——恢复路径必须先持久化
-            // 解析结果，否则列表长期失败时每轮重试都会再造一个远端订阅。
-            let non_idempotent = srv
-                .quickadd_non_idempotent
-                .load(std::sync::atomic::Ordering::SeqCst);
-            let existing = if non_idempotent {
-                None
-            } else {
-                srv.existing_feed_urls
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .find(|(u, _)| *u == url)
-                    .map(|(_, id)| *id)
-            };
-            if let Some(id) = existing {
-                (
-                    200,
-                    serde_json::json!({"numResults": 1, "streamId": format!("feed/{id}")})
-                        .to_string(),
-                )
-            } else {
-                srv.subscribed_urls.lock().unwrap().push(url.clone());
-                srv.created_feeds.lock().unwrap().push((url.clone(), 1));
-                let feed_id = {
-                    let mut n = srv.next_feed_id.lock().unwrap();
-                    *n += 1;
-                    *n
-                };
-                // 幂等登记（B2-R1）：真实服务端的 quick_add 对已订阅 URL 返回既有
-                // 订阅的 id（固定上游 quickadd → addFeed 返回 `feed/<id>`；本仓 B1
-                // 决策与既有用例也以「quick_add 幂等」为前提，见 adopt_remote_id_for_pending
-                // 注释与 subscribe_bind_failure_* 用例）。这里把新创建的订阅登记进
-                // `existing_feed_urls`，使**同 URL 的再次 quick_add 返回同一 id**——
-                // 退订意图的「未知 id 恢复」路径依赖这一契约（不得建模成每次新建）。
-                // 非幂等注入（B2-R2）下**不登记**：后续同 URL 调用继续新建。
-                if !non_idempotent {
+            let existing = srv
+                .existing_feed_urls
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(u, _)| *u == url)
+                .map(|(_, id)| *id);
+            match existing {
+                Some(_) => match *srv.quickadd_duplicate.lock().unwrap() {
+                    QuickaddDuplicate::FreshRssNumResultsZero => (
+                        200,
+                        serde_json::json!({"numResults": 0, "error": "feed already exists"})
+                            .to_string(),
+                    ),
+                    QuickaddDuplicate::Miniflux500 => (
+                        500,
+                        r#"{"error_message":"feed_already_exists"}"#.to_string(),
+                    ),
+                },
+                None => {
+                    srv.subscribed_urls.lock().unwrap().push(url.clone());
+                    srv.created_feeds.lock().unwrap().push((url.clone(), 1));
+                    let feed_id = {
+                        let mut n = srv.next_feed_id.lock().unwrap();
+                        *n += 1;
+                        *n
+                    };
+                    // 登记新创建的订阅进 `existing_feed_urls`（「远端当前持有」注册表，
+                    // 后续同 URL quickadd 按重复语义拒绝）；退订意图的「未知 id 恢复」
+                    // 依赖注册表与订阅列表证据，不依赖「重复 quick_add 返回既有 id」。
                     srv.existing_feed_urls
                         .lock()
                         .unwrap()
                         .push((url.clone(), feed_id));
+                    // B1 注入：订阅已创建并登记，但响应以 500 返回——忠实模拟
+                    // 「服务端已执行、响应在传输中丢失」。
+                    if srv
+                        .quickadd_applied_then_fail
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return (
+                            500,
+                            r#"{"error_message":"quickadd applied then response lost"}"#.into(),
+                        );
+                    }
+                    (
+                        200,
+                        serde_json::json!({"numResults": 1, "streamId": format!("feed/{feed_id}")})
+                            .to_string(),
+                    )
                 }
-                (
-                    200,
-                    serde_json::json!({"numResults": 1, "streamId": format!("feed/{feed_id}")})
-                        .to_string(),
-                )
             }
         }
         // subscription/edit：订阅/退订/编辑

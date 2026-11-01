@@ -45,6 +45,9 @@ struct Entry {
     title: String,
     read: bool,
     starred: bool,
+    /// 条目发布时间（unix 秒）。ot 窗口过滤列（严格大于），对齐真实 Miniflux
+    /// AfterPublishedDate（`e.published_at > $N`）——2026-10-31 审计对齐。
+    published: i64,
 }
 
 struct Sub {
@@ -97,6 +100,8 @@ struct StrictServer {
     starred_ids_override: Mutex<Option<String>>,
     /// 首次 subscription/list 响应算定后追加到下一次列表的远端订阅。
     subscription_late_add: Mutex<Option<Sub>>,
+    /// >0 时强制 item ids 单页大小（测试 continuation 分页用）。
+    forced_ids_page_size: std::sync::atomic::AtomicUsize,
 }
 
 impl StrictServer {
@@ -130,6 +135,7 @@ impl StrictServer {
             read_ids_override: Mutex::new(None),
             starred_ids_override: Mutex::new(None),
             subscription_late_add: Mutex::new(None),
+            forced_ids_page_size: std::sync::atomic::AtomicUsize::new(0),
         });
         let srv = server.clone();
         tokio::spawn(async move {
@@ -152,13 +158,26 @@ impl StrictServer {
     }
 
     fn add_entry(&self, id: i64, feed_id: i64, title: &str) {
+        self.add_entry_published(id, feed_id, title, 1_700_000_000);
+    }
+
+    /// 指定发布时间加条目（ot 窗口判别用）：published 早于游标的条目不进
+    /// 增量窗口（真实 Miniflux published_at > ot）。
+    fn add_entry_published(&self, id: i64, feed_id: i64, title: &str, published: i64) {
         self.entries.lock().unwrap().push(Entry {
             id,
             feed_id,
             title: title.to_string(),
             read: false,
             starred: false,
+            published,
         });
+    }
+
+    /// 强制 item ids 单页大小（0 = 按请求 n），用于驱动 continuation 分页。
+    fn set_forced_ids_page_size(&self, n: usize) {
+        self.forced_ids_page_size
+            .store(n, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn is_read(&self, id: i64) -> bool {
@@ -529,9 +548,30 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
                 return (200, body);
             }
         }
+        // ot 窗口 + continuation（2026-10-31 对齐真实 Miniflux）：
+        // - ot → published_at > ot 严格大于（AfterPublishedDate，四类流都适用）；
+        // - c → 已消费条数的 offset 推进；有剩余时回传下一 offset。
+        // 旧实现忽略 ot/c，窗口类行为对本套件不可判别。
+        let query_param = |key: &str| -> Option<i64> {
+            decoded_query.split('&').find_map(|kv| {
+                kv.split_once('=')
+                    .filter(|(k, _)| *k == key)
+                    .and_then(|(_, v)| v.parse().ok())
+            })
+        };
+        let ot = query_param("ot").unwrap_or(0);
+        let mut n = query_param("n").map(|v| v as usize).unwrap_or(1000);
+        let forced = srv
+            .forced_ids_page_size
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if forced > 0 {
+            n = n.min(forced);
+        }
+        let offset = query_param("c").map(|v| v as usize).unwrap_or(0);
         let entries = srv.entries.lock().unwrap();
-        let item_refs: Vec<serde_json::Value> = entries
+        let matched: Vec<&Entry> = entries
             .iter()
+            .filter(|e| e.published > ot)
             .filter(|e| {
                 if decoded_query.contains("state/com.google/reading-list") {
                     true
@@ -543,11 +583,23 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
                     false
                 }
             })
+            .collect();
+        let total = matched.len();
+        let item_refs: Vec<serde_json::Value> = matched
+            .iter()
+            .skip(offset)
+            .take(n)
             .map(|e| serde_json::json!({ "id": e.id.to_string() }))
             .collect();
+        let end = offset.saturating_add(item_refs.len());
+        let continuation = if end < total {
+            Some(end.to_string())
+        } else {
+            None
+        };
         return (
             200,
-            serde_json::json!({ "itemRefs": item_refs }).to_string(),
+            serde_json::json!({ "itemRefs": item_refs, "continuation": continuation }).to_string(),
         );
     }
 
@@ -575,7 +627,7 @@ fn route(srv: &StrictServer, hit: &Hit) -> (u16, String) {
                     "id": format!("tag:google.com,2005:reader/item/{:016x}", e.id),
                     "categories": cats,
                     "title": e.title,
-                    "published": 1700000000,
+                    "published": e.published,
                     "alternate": [{"href": format!("http://example.com/e/{}", e.id), "type": "text/html"}],
                     "summary": {"content": "fixture"},
                     "content": {"content": "fixture"},
@@ -1588,6 +1640,77 @@ async fn missing_item_contents_field_keeps_cursor_and_local_star() {
     let _ = std::fs::remove_file(&tmp);
 }
 
+/// tag/list 200 但缺 `tags` 字段与缺 `subscriptions` 同口径：协议错误、不当
+/// 空集。分类墓碑的「远端缺席回收」因此不被异常 200 触达——墓碑原样保留。
+#[tokio::test]
+async fn tag_list_missing_tags_field_fails_closed_and_keeps_folder_tombstones() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_read_override("tag/list", "{}");
+    let (db, tmp) = seed_sync_db("opt019_gr_tag_list_missing_tags", &srv);
+    {
+        let conn = db.lock().await;
+        let key = sync::current_account(&conn)
+            .unwrap()
+            .expect("已配置账号")
+            .key;
+        db::add_folder_tombstone(&conn, &key, "已消失分类").unwrap();
+    }
+
+    let report = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("feeds phase completes with a reported protocol error");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("拉取订阅失败") && e.contains("tag/list")),
+        "缺 tags 必须可见地失败：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert!(
+        db::folder_tombstones(&conn)
+            .unwrap()
+            .iter()
+            .any(|t| t.label == "已消失分类"),
+        "缺 tags 的异常 200 不得触达空集回收路径（墓碑被误清）"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 正文块返回条数少于请求数（含 0）与缺 items 同口径：协议错误、按块失败
+/// 计数、游标不推进——不得把截断响应当成「本轮无新条目」。
+#[tokio::test]
+async fn item_contents_short_response_fails_chunk_and_keeps_cursor() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 200, "A"); // published 200 > ot 100：落在增量窗口内
+    srv.set_read_override("stream/items/contents", r#"{"items": []}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_short_item_contents", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_last_sync_ts(&conn, 100).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase completes with a reported protocol error");
+    assert!(
+        report.errors.iter().any(|e| e.contains("拉取条目正文失败")),
+        "短响应必须按块失败可见：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(
+        db::last_sync_ts(&conn).unwrap(),
+        100,
+        "正文块失败不得推进 last_sync_ts（下一轮重拉同一窗口）"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
 /// 零远端 feed 绑定的 light sync 不请求条目/权威状态，不推进游标；本地文章
 /// 与该空绑定事实无关，必须原样保留。
 #[tokio::test]
@@ -1616,6 +1739,85 @@ async fn greader_light_sync_without_remote_feed_binding_skips_pull_entirely() {
     assert_eq!(db::last_sync_ts(&conn).unwrap(), 345_678);
     assert_eq!(article_count(&conn), 1, "预置文章不得被消费");
     drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 窗口语义判别（2026-10-31 对齐真实 Miniflux）：StrictServer 的 ot 过滤是
+/// published_at > ot（严格大于）。published 早于游标的条目不进 light 增量窗口
+/// （不入库、状态不对齐）；手动全量（ot=0）拉入合并。两种服务端形态都判别。
+async fn published_before_cursor_window_semantic(mode: Mode, tag: &str) {
+    let srv = StrictServer::start(mode).await;
+    srv.add_entry_published(2, 10, "published-before-cursor", 100_000);
+    let (db, tmp) = seed_sync_db(tag, &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_last_sync_ts(&conn, 123_456).unwrap();
+    }
+
+    // light 增量：published 早于游标 → ot 窗口不含它 → 不入库。
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("light sync");
+    assert!(report.errors.is_empty(), "{report:?}");
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            article_count(&conn),
+            1,
+            "published 早于游标的条目不得经 light 增量窗口入库（真实 Miniflux published_at > ot）"
+        );
+    }
+
+    // 手动全量（ot=0）：全窗口列举 → 拉入合并。
+    let report = sync::states_phase(&db, &reqwest::Client::new(), true)
+        .await
+        .expect("full sync");
+    assert!(report.errors.is_empty(), "{report:?}");
+    {
+        let conn = db.lock().await;
+        assert_eq!(article_count(&conn), 2, "手动全量（ot=0）必须拉入该条目");
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn miniflux_ot_window_excludes_entry_published_before_cursor() {
+    published_before_cursor_window_semantic(Mode::Miniflux, "gr_strict_win_miniflux").await;
+}
+
+#[tokio::test]
+async fn freshrss_ot_window_excludes_entry_published_before_cursor() {
+    published_before_cursor_window_semantic(Mode::FreshRss, "gr_strict_win_freshrss").await;
+}
+
+/// continuation 语义（Miniflux 形态：c= 已消费条数的 offset 推进）：强制单页
+/// 大小后，多页列举必须经 continuation 收敛且不丢条目、不重复。
+#[tokio::test]
+async fn item_ids_continuation_advances_offset_and_pulls_all_pages() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_forced_ids_page_size(2);
+    srv.add_entry(1, 10, "A");
+    srv.add_entry(2, 10, "B");
+    srv.add_entry(3, 10, "C");
+    let (db, tmp) = seed_sync_db("gr_strict_continuation", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), true)
+        .await
+        .expect("full sync");
+    assert!(report.errors.is_empty(), "{report:?}");
+    {
+        let conn = db.lock().await;
+        assert_eq!(article_count(&conn), 3, "多页 continuation 必须取全部条目");
+    }
+    assert!(
+        srv.item_ids_requests_containing("c=2") > 0,
+        "第二页必须携带 offset 形态的 continuation（c=2）"
+    );
     let _ = std::fs::remove_file(&tmp);
 }
 
@@ -1941,6 +2143,16 @@ async fn greader_schema_and_json_decode_failures_use_protocol_error_code() {
     assert_eq!(err.code, "protocol", "{err}");
 
     srv.set_read_override("stream/items/contents", "{}");
+    let err = client.item_contents(&[1]).await.unwrap_err();
+    assert_eq!(err.code, "protocol", "{err}");
+
+    // 缺 tags 字段与缺 subscriptions 同口径：异常 200 不得当权威空集。
+    srv.set_read_override("tag/list", "{}");
+    let err = client.tags().await.unwrap_err();
+    assert_eq!(err.code, "protocol", "{err}");
+
+    // 非空请求返回 items 数量少于请求数（含 0）→ 协议错误，不是空集成功。
+    srv.set_read_override("stream/items/contents", r#"{"items": []}"#);
     let err = client.item_contents(&[1]).await.unwrap_err();
     assert_eq!(err.code, "protocol", "{err}");
 }

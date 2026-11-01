@@ -1,5 +1,5 @@
 import type { StateCreator } from 'zustand';
-import { api, extractError } from '../../lib/api';
+import { api, extractError, extractErrorCode } from '../../lib/api';
 import type { AiCacheCheckResult, TranslationSegmentPlan } from '../../lib/api';
 import { appendAiDelta, applyAiProduct, getBodyEntry } from '../bodyCache';
 import type { AiProductKind } from '../types';
@@ -169,6 +169,15 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     getBodyEntry(id)?.[field] ?? get().entries.find((a) => a.id === id)?.[field] ?? '';
 
   const streamAiDelta = (id: string, field: 'aiSummary' | 'translatedContent', delta: string): void => {
+    /* 清除×流式互斥的自愈侧：流式在途期间标记被任何路径丢掉（如 clearAiProduct
+       的 await 返回后删除），下一个 delta 必须先补回标记再追加——
+       「凡 translatedContent 可能含未消毒 delta，rawTranslatedIds[id] 必为 true」
+       — 见 .agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md */
+    if (field === 'translatedContent' && get().rawTranslatedIds[id] !== true) {
+      set((st) => (st.rawTranslatedIds[id] === true
+        ? st
+        : { rawTranslatedIds: { ...st.rawTranslatedIds, [id]: true } }));
+    }
     if (appendAiDelta(id, field, delta)) return;
     set((st) => {
       const cur = st.entries.find((a) => a.id === id);
@@ -190,6 +199,13 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
       : (field === 'aiSummary' ? { aiSummarySig: signature } : { translatedSig: signature });
     set((st) => ({ entries: st.entries.map((a) => (a.id === id ? { ...a, [field]: value, ...sigPatch } : a)) }));
   };
+
+  /* 流式请求 promise-rejection（三处 .catch）的文案：后端 AppError 携带稳定码
+     （aiNotConfigured/aiTooLong/aiStale/…）→ extractError 原样透传消息（后端
+     文案已含分型语义，如 aiTooLong 的「超过单次摘要预算」）；无码 = IPC/传输层
+     故障，保持通用文案契约（与修前一致），不把底层报错原文泼给用户。 */
+  const aiRejectionMessage = (e: unknown): string =>
+    extractErrorCode(e) === null ? 'AI 服务未配置或不可达' : extractError(e);
 
   /** 生成入口的统一形态：`plan` 由验签链透传（undefined = 未取到，入口自查）；
       null = 已确认不可用（不重复取）。 */
@@ -413,19 +429,20 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           }
         },
       )
-      .catch(() => {
+      .catch((e) => {
         if (!current()) return;
+        const msg = aiRejectionMessage(e);
         set((st) => {
           const nextIds = { ...st.summarizingIds };
           delete nextIds[id];
           return {
             summarizingIds: nextIds,
-            summaryErrors: { ...st.summaryErrors, [id]: 'AI 服务未配置或不可达' },
+            summaryErrors: { ...st.summaryErrors, [id]: msg },
           };
         });
         refreshAiStatus(id);
         if (!silent) {
-          get().showToast('摘要失败：请先在设置中配置 AI 服务', { label: '重试', key: `ai:summary:${id}`, run: () => retrySummaryFor(id) });
+          get().showToast(`摘要失败：${msg}`, { label: '重试', key: `ai:summary:${id}`, run: () => retrySummaryFor(id) });
         }
       });
     trackAiRequest(key, p);
@@ -536,8 +553,9 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           }
         },
       )
-      .catch(() => {
+      .catch((e) => {
         if (!current()) return;
+        const msg = aiRejectionMessage(e);
         set((st) => {
           const nextIds = { ...st.translatingIds };
           delete nextIds[id];
@@ -547,12 +565,12 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           return {
             translatingIds: nextIds,
             rawTranslatedIds: nextRaw,
-            translateErrors: { ...st.translateErrors, [id]: 'AI 服务未配置或不可达' },
+            translateErrors: { ...st.translateErrors, [id]: msg },
           };
         });
         refreshAiStatus(id); // B3：失败分型落定后刷新（与 summary catch / Reader catch / 三处错误回调同口径）
         if (!silent) {
-          get().showToast('翻译失败：AI 服务未配置或不可达', { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
+          get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
         }
       });
     trackAiRequest(key, p);
@@ -593,17 +611,21 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         () => {
           /* TASK-065 N11：流式结束回读 DB 的消毒版译文（后端 ai_translate 落库前
              已 sanitize，流中 delta 是未消毒原样）。translating 维持既有时序（done
-             即清）；消毒时序由 rawTranslatedIds 承担——回读成功用消毒版覆盖后才
+             即清，终态复位不随 ownsView 门控）；消毒时序由 rawTranslatedIds 承担——回读成功用消毒版覆盖后才
              清除并切 HTML 渲染；失败则丢弃未消毒半截 + toast（此前无 .catch：半截
              未消毒译文永久留在渲染路径 + unhandled rejection）。
              OPT-013 B1：回读行的签名与产物成对落账；过时回读整体丢弃。 */
           if (!current()) return;
-          const ownsView = ownsReaderView();
           set((st) => {
             const nextIds = { ...st.translatingIds };
             delete nextIds[id];
+            /* translating 是全局单布尔：终态复位不随 ownsView 门控——发起后用户
+               切走时三处复位全被拦下，布尔永久卡 true（自动翻译触发与错误行
+               均被阻断）。并发他篇仍在生成时本复位会提前收掉共享布尔，按 id
+               在途真值在 translatingIds（五态/流式渲染消费它），展示态不受影响。
+               — 见 .agents/notes/implemented/bug-fix/2026-11-01-translating终态复位与全局单布尔.md */
             return {
-              ...(ownsView ? { translating: false } : {}),
+              translating: false,
               translatingIds: nextIds,
             };
           });
@@ -657,7 +679,8 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             delete nextIds[id];
             if (!effectiveAi(id, 'translatedContent')) delete nextRaw[id];
             return {
-              ...(ownsView ? { translating: false, isShowingTranslatedProse: false } : {}),
+              translating: false,
+              ...(ownsView ? { isShowingTranslatedProse: false } : {}),
               translatingIds: nextIds,
               rawTranslatedIds: nextRaw,
               translateErrors: { ...st.translateErrors, [id]: msg },
@@ -673,7 +696,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           }
         },
       )
-      .catch(() => {
+      .catch((e) => {
         /* F3：同上——清标记与「是否有未消毒半截」绑定（与 translateEntry 同口径） */
         if (!current()) return;
         const ownsView = ownsReaderView();
@@ -683,15 +706,16 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
           delete nextIds[id];
           if (!effectiveAi(id, 'translatedContent')) delete nextRaw[id];
           return {
-            ...(ownsView ? { translating: false, isShowingTranslatedProse: false } : {}),
+            translating: false,
+            ...(ownsView ? { isShowingTranslatedProse: false } : {}),
             translatingIds: nextIds,
             rawTranslatedIds: nextRaw,
-            translateErrors: { ...st.translateErrors, [id]: 'AI 服务未配置或不可达' },
+            translateErrors: { ...st.translateErrors, [id]: aiRejectionMessage(e) },
           };
         });
         refreshAiStatus(id);
         if (!silent) {
-          get().showToast('翻译失败：请先在设置中配置 AI 服务', {
+          get().showToast(`翻译失败：${aiRejectionMessage(e)}`, {
             label: '重试',
             key: `ai:translate:${id}`,
             run: () => retryTranslationFor(id),
@@ -724,11 +748,31 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         return false;
       }
       if (!s.entries.some((a) => a.id === id)) return false;
+      /* 清除×流式互斥的硬闸侧：该 (条目, 产物) 有在途请求（验签+条件生成整链）
+         时拒绝清除——否则 await 返回后删除 rawTranslatedIds，后续未消毒 delta
+         走 HTML 渲染（XSS 窗口）；后端清除也会与生成落库互相复活/清空。
+         — 见 .agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md */
+      if (aiInFlight.has(aiKeyOf(id, kind))) {
+        /* 文案不承诺「停止」：全库无停止生成入口，挂死的 IPC 会让该
+           (条目, 产物) 的清除被永久拒绝，只给可自愈的出路。 */
+        get().showToast('生成进行中，完成后再清除；若长时间无响应可重启应用');
+        return false;
+      }
+      const clearKey = aiKeyOf(id, kind);
+      const genAtClear = aiRequestGen.get(clearKey);
       try {
         await api.aiClearCache(Number(id), kind);
       } catch (e) {
         get().showToast(`清除失败：${extractError(e)}`);
         return false;
+      }
+      /* Done 后的安全回读不在 trackAiRequest 链上（invoke settle 即摘除在途，
+         b1-2 契约），硬闸放行的清除完成后，迟到回读携清除前行数据会复活已清
+         产物——清除成功即推进该 (条目, 产物) 的请求代次，使旧回读整体丢弃
+         （isCurrentAiRequest 失配）。await 期间已有更晚请求接管（代次已变）
+         则不 bump，不杀新请求的流内回包。— 见 Note（同上） */
+      if (genAtClear !== undefined && aiRequestGen.get(clearKey) === genAtClear) {
+        aiRequestGen.set(clearKey, genAtClear + 1);
       }
       const field = kind === 'summary' ? 'aiSummary' : 'translatedContent';
       /* 产物清空即签名失效（签名不得脱离产物独立存活）；正文保留 */
@@ -737,7 +781,11 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         const nextErrors = { ...(kind === 'summary' ? st.summaryErrors : st.translateErrors) };
         delete nextErrors[id];
         const nextRaw = { ...st.rawTranslatedIds };
-        delete nextRaw[id];
+        /* 未消毒标记只属于译文产物：summary 清除不得跨 kind 删除——否则译文侧
+           「半截+标记」的失败重试语义被拆开，无后续 delta 的未消毒半截长期
+           滞留 Timeline 的 HTML 渲染路径（持续态，非竞态窗口）。
+           — 见 .agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md */
+        if (kind === 'translation') delete nextRaw[id];
         const prev = st.aiStatusById[id];
         const status = {
           summaryVerified: kind === 'summary' ? false : prev?.summaryVerified ?? false,
@@ -750,7 +798,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         };
         return {
           ...(kind === 'summary' ? { summaryErrors: nextErrors } : { translateErrors: nextErrors }),
-          rawTranslatedIds: nextRaw,
+          ...(kind === 'translation' ? { rawTranslatedIds: nextRaw } : {}),
           aiStatusById: { ...st.aiStatusById, [id]: status },
           // 正在展示译文时清除译文：切回原文，不留下空白译文视图
           ...(kind === 'translation' && st.activeArticleId === id

@@ -147,6 +147,13 @@
 
 **未测边界（验收缺口，不以此节关闭）**：真实库的补全请求总量与全量补完耗时未实测（本卡的证据是本地 mock 服务器下的确定性夹具与红绿/变异日志，见 `tmp/optimization-20261008/OPT-017D/evidence/`）；**隐私边界**：扩面后客户端会直接请求服务端收录文章的第三方源站页面（抓 og:image），客户端 IP 对更多第三方站点可见，这是候选扩展的已知代价；**扫描游标**（`CoverBackfillState::scan_offset`，R1-P2-2）保证候选集在有限轮数内全覆盖（按已扫描行推进、扫到底回绕，不落盘）；「服务端文章本地补上的封面不参与失效清理（404 时显示占位、进程内不重试）」是保留的保守边界；`first_image`/og:image 的质量启发式仍缺（见 [roadmap.md](roadmap.md)）。
 
+## 计数慢路径收口（2026-10-31）
+
+- **构建**：修复前 `d98ca3a^`（B2 改写前）与修复后 `f4368d0`（dev tip）。语料：node:sqlite 内置引擎合成 50k 文章（含 contents 与 trigram 索引；与 OPT-017A 的 rusqlite bundled 语料同规则、不同构建）。
+- **scope_counts dedup 变体（feed 级）**：修复前 4.75–15.8s——EXISTS 子查询被规划器支配为逐行 `idx_articles_feed` 搜索；2026-10-31 审计轮同形查询曾测得 155.4s（跨构建/时点不可比，量级结论一致）。修复后 0.13–0.21s，走 `idx_articles_url_norm[_unread]`；四视图结果逐字段一致。
+- **门禁**：EXPLAIN QUERY PLAN 计划断言已入 `src-tauri/src/db/articles.rs`（禁 TEMP B-TREE、禁逐行 rowid 搜索、必走 url_norm 索引），防止计划回归；`counts_snapshot` 返回形状与锁结构未变（前端写结算判据依赖该前提）。
+- 方法与探针在忽略的 tmp/phaseC-sync/f1_node_sqlite.mjs；取舍与否定备选见 [GR回补与拉取侧身份与性能修复](../.agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md)。
+
 ## 历史实测数字（v0.17.0 构建，实机）
 
 环境：本机实装 v0.17.0，WebView2 远程调试端口 9222，应用窗口置于副屏，合成为 20k / 50k 篇文章（RFC3339 时间戳）。

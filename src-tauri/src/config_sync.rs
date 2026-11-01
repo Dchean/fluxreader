@@ -376,7 +376,11 @@ fn is_local_only_setting(key: &str) -> bool {
 }
 
 fn list_folder_id_by_name(conn: &rusqlite::Connection, name: &str) -> AppResult<Option<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM folders WHERE name = ?1")?;
+    // 不变量：同名多条（存量重复目录，folders.name 无 UNIQUE）时取 id/rowid
+    // 升序最旧一条——sink 落点必须确定且跨次一致（修前无 ORDER BY，落点只是
+    // 恰好按 rowid 返回的隐式假设），与 find_folder_by_name 同一契约。
+    // Note: 目录重名的复用与落点确定性 — 见 .agents/notes/implemented/bug-fix/2026-11-01-目录重名复用与同名拒绝.md
+    let mut stmt = conn.prepare("SELECT id FROM folders WHERE name = ?1 ORDER BY id LIMIT 1")?;
     let mut rows = stmt.query_map(rusqlite::params![name], |r| r.get(0))?;
     Ok(rows.next().transpose()?)
 }

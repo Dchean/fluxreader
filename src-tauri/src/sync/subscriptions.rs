@@ -22,6 +22,13 @@ OPT-009 B3：subscription-outbox-changed 事件总线
 static SUBSCRIPTION_EVENT_TARGET: std::sync::OnceLock<tauri::AppHandle> =
     std::sync::OnceLock::new();
 
+/// 进程内上一次实际发射的订阅写回 payload（跨发射点同值去重，W2 复审 P3-2）：
+/// 离线重试期「record 落账 + try_push 兜底」每 tick 会产生 2–4 个同值事件——
+/// payload 未变不重发。消费方语义是「状态变化通知」，同值不刷新正确；账号切换
+/// 的可见性由挂载/保存/断开后的主动刷新承担（B3 既有口径），不依赖事件。
+static LAST_OUTBOX_PAYLOAD: std::sync::OnceLock<std::sync::Mutex<Option<serde_json::Value>>> =
+    std::sync::OnceLock::new();
+
 /// setup 时注册事件目标（lib.rs；幂等：重复注册以首次为准）。
 pub fn init_subscription_event_target(app: tauri::AppHandle) {
     let _ = SUBSCRIPTION_EVENT_TARGET.set(app);
@@ -33,7 +40,8 @@ pub fn init_subscription_event_target(app: tauri::AppHandle) {
 /// 锁纪律：调用方必须在 **DB 锁外** 调用——本函数内部自己短持锁。
 /// 静默规则（与 notify_queue_changed 同源）：未配置同步（无凭据）→ 不发事件；
 /// 事件目标未注册（集成测试）→ no-op；账号/统计读取失败 → 记日志跳过
-/// （不编造零值事件冒充「无待办」）。
+/// （不编造零值事件冒充「无待办」）；与上次实际发射的 payload 同值 → 跳过
+/// （W2 复审 P3-2 的跨发射点去重，见 [`LAST_OUTBOX_PAYLOAD`]）。
 pub async fn notify_subscription_outbox_changed(db: &Arc<Mutex<Connection>>) {
     let Some(app) = SUBSCRIPTION_EVENT_TARGET.get() else {
         return;
@@ -53,10 +61,24 @@ pub async fn notify_subscription_outbox_changed(db: &Arc<Mutex<Connection>>) {
             }
         }
     };
-    if let Some(p) = payload {
-        use tauri::Emitter;
-        let _ = app.emit("subscription-outbox-changed", p);
+    let Some(p) = payload else {
+        // None（未配置/读取失败）：清空缓存——重新配置后即使统计与上次相同
+        // 也必须再发（摘要卡需要重新出现），不得用旧缓存吞掉连续性断点。
+        if let Some(last) = LAST_OUTBOX_PAYLOAD.get() {
+            *last.lock().unwrap() = None;
+        }
+        return;
+    };
+    {
+        let last = LAST_OUTBOX_PAYLOAD.get_or_init(|| std::sync::Mutex::new(None));
+        let mut guard = last.lock().unwrap();
+        if guard.as_ref() == Some(&p) {
+            return;
+        }
+        *guard = Some(p.clone());
     }
+    use tauri::Emitter;
+    let _ = app.emit("subscription-outbox-changed", p);
 }
 
 /// 推送订阅编辑（改名 / 移动目录）到远端（best-effort，A-2）。
@@ -79,10 +101,11 @@ pub async fn edit_remote_subscription(
 ) -> bool {
     // TASK-124：build_client Result 化——两类失败（未配置/认证·网络失败）对
     // 订阅编辑推送的既有行为一致（best-effort，失败仅记 false），此处不记录不发事件。
-    let session = match build_session(db, http).await {
-        Ok(c) => c,
+    let lease = match acquire_session(db, http).await {
+        Ok(l) => l,
         Err(_) => return false,
     };
+    let session = lease.session;
     if session.generation != expected_generation {
         log::warn!("sync: 订阅编辑的账号代际已变更，取消向新账号发送旧 remote_id");
         return false;
@@ -134,10 +157,11 @@ pub async fn unsubscribe_remote(
     let _ = feed_url;
     // TASK-124：build_client Result 化——两类失败（未配置/认证·网络失败）对
     // 退订推送的既有行为一致（best-effort，失败仅记 false），此处不记录不发事件。
-    let session = match build_session(db, http).await {
-        Ok(c) => c,
+    let lease = match acquire_session(db, http).await {
+        Ok(l) => l,
         Err(_) => return false,
     };
+    let session = lease.session;
     if session.generation != expected_generation {
         log::warn!("sync: 退订的账号代际已变更，取消向新账号发送旧 remote_id");
         return false;
@@ -224,57 +248,111 @@ pub(super) async fn push_feeds(
     if items.is_empty() {
         return;
     }
-    // 锁外：逐个订阅（quick_add 自动发现 feed，幂等——已存在返回既有 stream_id）
+    // 锁外：逐个订阅。B1（F2）：先以列表证据解析「是否已订阅」（崩溃窗口/
+    // 另一设备已订阅都会让重复 quick_add 被真服务端拒绝），确认不存在才
+    // quick_add；quick_add 未返回 id（FreshRSS numResults=0）或失败时同样转
+    // 列表证据解析——创建可能已在错误返回前落地。
     let mut done: Vec<i64> = Vec::new();
+    // 挂载失败保留的 legacy 队项（W2 复审 P3-3）：保留 ≠ 无记录——落账
+    // attempts/last_error（与 outbox 的 Retry 口径一致），否则 attempts 恒 0、
+    // waiting 永不清零，失败不可见。
+    let mut mount_failed: Vec<(i64, String)> = Vec::new();
     for it in &items {
         // OPT-006：每个订阅推送（新批次）前复核代际——账号已切换即停止后续请求。
         if !session_is_current(db, session).await {
             log::warn!("sync: 订阅推送期间账号代际已变更，停止后续推送");
             break;
         }
-        match session.client.quick_add(&it.url).await {
-            Ok(r) => {
-                report.pushed_feeds += 1;
-                done.push(it.queue_id);
-                // 锁内：绑定本地 feed（URL 匹配），若 quick_add 返回了数字 id
-                let bound_remote_id = {
-                    let conn = db.lock().await;
-                    // OPT-006：绑定是回写边界——响应在途期间换号时不得写绑定。
-                    if session.ensure_current(&conn).is_err() {
-                        log::warn!("sync: quick_add 响应返回时账号代际已变更，丢弃绑定");
-                        break;
-                    }
-                    let mut nid = None;
-                    if let Some(local_id) = db::feed_id_by_url(&conn, &it.url).ok().flatten() {
-                        if let Some(stream_id) = r.stream_id.as_deref() {
-                            if let Some(n) = greader::parse_feed_numeric_id(stream_id) {
-                                // P3[1]：绑定写失败此前静默——绑定缺失会让该源在下次 pull
-                                // 被当作未绑定源重复处理。改为 warn（可自愈，不中断）。
-                                if let Err(err) = db::set_feed_remote_id(&conn, local_id, n) {
-                                    log::warn!(
-                                        "sync: quick_add 后绑定远端 id 失败（feed={local_id} remote={n}）: {err}"
-                                    );
-                                }
-                                nid = Some(n);
-                            }
-                        }
-                    }
-                    nid
-                };
-                // A-3：锁外补挂目标分类（best-effort，失败仅记日志——订阅已推送）
-                if let (Some(nid), Some(label)) = (bound_remote_id, it.folder_label.as_deref()) {
-                    if let Err(e) = session
-                        .client
-                        .edit_subscription(nid, None, Some(label), None)
-                        .await
+        let mut created = false;
+        let rid = match resolve_existing_feed_id(session, &it.url).await {
+            Ok(Some(v)) => v,
+            Ok(None) => match session.client.quick_add(&it.url).await {
+                Ok(r) => {
+                    created = true;
+                    match r
+                        .stream_id
+                        .as_deref()
+                        .and_then(greader::parse_feed_numeric_id)
                     {
-                        report
-                            .errors
-                            .push(format!("订阅 {} 挂载分类「{label}」失败: {e}", it.url));
+                        Some(v) => v,
+                        None => match resolve_existing_feed_id(session, &it.url).await {
+                            Ok(Some(v)) => v,
+                            _ => {
+                                report.errors.push(format!(
+                                    "推送订阅 {} 失败: quick_add 未返回 stream id 且列表未见同 URL 订阅（保留队项下轮重试）",
+                                    it.url
+                                ));
+                                continue;
+                            }
+                        },
+                    }
+                }
+                Err(e) => match resolve_existing_feed_id(session, &it.url).await {
+                    Ok(Some(v)) => v,
+                    _ => {
+                        report.errors.push(format!("推送订阅 {} 失败: {e}", it.url));
+                        continue;
+                    }
+                },
+            },
+            Err(e) => {
+                report.errors.push(format!(
+                    "解析订阅 {} 是否已存在失败（保留队项下轮重试）: {e}",
+                    it.url
+                ));
+                continue;
+            }
+        };
+        if created {
+            report.pushed_feeds += 1;
+        }
+        // 锁内：绑定本地 feed（URL 匹配）
+        let bound_remote_id = {
+            let conn = db.lock().await;
+            // OPT-006：绑定是回写边界——响应在途期间换号时不得写绑定。
+            if session.ensure_current(&conn).is_err() {
+                log::warn!("sync: quick_add 响应返回时账号代际已变更，丢弃绑定");
+                break;
+            }
+            let mut nid = None;
+            if let Some(local_id) = db::feed_id_by_url(&conn, &it.url).ok().flatten() {
+                // P3[1]：绑定写失败此前静默——绑定缺失会让该源在下次 pull
+                // 被当作未绑定源重复处理。改为 warn（可自愈，不中断）。
+                if let Err(err) = db::set_feed_remote_id(&conn, local_id, rid) {
+                    log::warn!(
+                        "sync: quick_add 后绑定远端 id 失败（feed={local_id} remote={rid}）: {err}"
+                    );
+                }
+                nid = Some(rid);
+            }
+            nid
+        };
+        // A-3：锁外补挂目标分类。挂载失败**保留队项**（不进 done → 不剪除）：
+        // pull 对既有源不回灌远端分类（2026-11-01 审计 R2-P3），剪除后「远端订阅
+        // 留在默认分类」的差距没有任何收敛通道。保留后下一轮先以列表证据解析
+        // 既有 id（不重复 quick_add），只重试挂载——与订阅 outbox 的 Retry
+        // 保留队项语义一致。
+        // Note: 挂载失败保留队项的重试语义 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
+        match (bound_remote_id, it.folder_label.as_deref()) {
+            (Some(nid), Some(label)) => {
+                match session
+                    .client
+                    .edit_subscription(nid, None, Some(label), None)
+                    .await
+                {
+                    Ok(()) => done.push(it.queue_id),
+                    Err(e) => {
+                        let summary = format!(
+                            "订阅 {} 挂载分类「{label}」失败（保留队项下轮重试）: {e}",
+                            it.url
+                        );
+                        report.errors.push(summary.clone());
+                        mount_failed.push((it.queue_id, summary));
                     }
                 }
             }
-            Err(e) => report.errors.push(format!("推送订阅 {} 失败: {e}", it.url)),
+            // 无本地绑定（本地已删除）或无目标分类：无挂载可做，照常出队
+            _ => done.push(it.queue_id),
         }
     }
     let conn = db.lock().await;
@@ -283,6 +361,15 @@ pub(super) async fn push_feeds(
     if session.ensure_current(&conn).is_err() {
         log::warn!("sync: 订阅推送确认时账号代际已变更，跳过剪除与僵尸清理");
         return;
+    }
+    // P3-3：失败标记与剪除同一代际守卫边界（旧代际的失败不落到新队列）。
+    if !mount_failed.is_empty() {
+        if let Err(err) = db::mark_push_failed(&conn, &mount_failed) {
+            log::warn!(
+                "sync: 挂载失败保留队项的失败标记落库失败（{} 项）: {err}",
+                mount_failed.len()
+            );
+        }
     }
     // P3[1]：剪除已推送队项失败此前静默——残留队项会被下一轮重复推送（重复订阅
     // 动作），且无日志可查。改为 warn（失败不中断：下轮会再尝试剪除）。
@@ -296,6 +383,11 @@ pub(super) async fn push_feeds(
         log::warn!("sync: 清理 remove_feed 僵尸队项失败: {err}");
     }
     drop(conn);
+    // P3-3：失败标记改变了队列统计（waiting 中的 failed 计数升）——即时推送
+    // pill（notify 内部自持短锁，此处已在 DB 锁外）。
+    if !mount_failed.is_empty() {
+        notify_queue_changed(db).await;
+    }
 }
 
 /// 单条订阅 outbox 的执行结果。
@@ -316,6 +408,20 @@ enum OutboxOutcome {
 
 /// subscribe 的已发送目标快照：`(id, 标题, 分类, 旧 label)`——确认逐字段比对用。
 type SentSubscribeTarget = (i64, Option<String>, Option<String>, Option<String>);
+
+/// 按规范化 URL 在远端订阅列表中解析既有 feed 的数字 id（B1 F2 收敛）。
+///
+/// 真实服务端对重复 URL 的 quick_add 一律拒绝（FreshRSS 200+numResults=0、
+/// Miniflux 500 feed_already_exists），「已订阅与否」的唯一可靠证据是订阅列表。
+/// 列表读取失败向上传播——调用方在「无法确认缺席」时**不得**盲发 quick_add。
+async fn resolve_existing_feed_id(session: &SyncSession, feed_url: &str) -> AppResult<Option<i64>> {
+    let norm = db::normalize_url(feed_url);
+    let subs = session.client.subscriptions().await?;
+    Ok(subs
+        .iter()
+        .filter(|s| db::normalize_url(&s.url) == norm)
+        .find_map(|s| greader::parse_feed_numeric_id(&s.id)))
+}
 
 /// 订阅 outbox 生产执行器（OPT-009 阶段 B）。
 ///
@@ -459,6 +565,13 @@ pub(super) async fn push_subscription_outbox(
                 done_plain.push(item.id)
             }
             OutboxOutcome::ConfirmedSubscribe(title, folder, prev) => {
+                // A-P2-3②：挂载成功的 `a=目标` 与 edit 移动同属「远端已接受该
+                // label」的账号作用域发送事实——确认落空（行被替换）时同样由
+                // ④b 把替代行的移除基准重定为已接受目标，否则替代行按链起点
+                // 发 r=，远端残留已接受的中间 label。
+                if let Some(target) = folder.clone() {
+                    sent_moves.push((item.id, item.feed_url.clone(), target));
+                }
                 done_subscribe.push((item.id, title, folder, prev))
             }
             OutboxOutcome::Retry(summary) => {
@@ -558,28 +671,59 @@ async fn exec_subscribe_item(
     item: &db::SubscriptionOutboxItem,
     report: &mut SyncReport,
 ) -> OutboxOutcome {
-    // 阶段一：远端 id（pending 阶段必须先 quick_add；remote_created 直接用已记录的 id）
+    // 阶段一：远端 id（pending 阶段先按列表证据解析「是否已订阅」，确认不存在
+    // 才 quick_add；remote_created 直接用已记录的 id）
     let rid = match item.remote_id {
         Some(v) => v,
-        None => match session.client.quick_add(&item.feed_url).await {
-            Ok(r) => {
-                report.pushed_feeds += 1;
-                match r
-                    .stream_id
-                    .as_deref()
-                    .and_then(greader::parse_feed_numeric_id)
-                {
-                    Some(v) => v,
-                    None => {
-                        return OutboxOutcome::Retry(format!(
-                            "推送订阅 {} 失败: quick_add 未返回 stream id（下轮幂等重试）",
-                            item.feed_url
-                        ))
+        None => {
+            // B1（F2 跨重启收敛）：pending 行的重发不再盲目——崩溃窗口内的
+            // quick_add 可能已被服务端执行，而真实服务端对重复 URL 一律拒绝
+            // （FreshRSS 200+numResults=0、Miniflux 500 feed_already_exists）。
+            // 先以订阅列表按 URL 解析既有 feed；列表读失败 = 无法确认缺席，
+            // 同样不发 quick_add（fail-closed），保留队项下轮重试。
+            match resolve_existing_feed_id(session, &item.feed_url).await {
+                Ok(Some(v)) => v,
+                Ok(None) => match session.client.quick_add(&item.feed_url).await {
+                    Ok(r) => {
+                        report.pushed_feeds += 1;
+                        match r
+                            .stream_id
+                            .as_deref()
+                            .and_then(greader::parse_feed_numeric_id)
+                        {
+                            Some(v) => v,
+                            // 真实服务端对已存在 URL 不返回 stream id（FreshRSS
+                            // numResults=0）；Miniflux 已存在走 Err。二者都转列表
+                            // 证据解析——创建可能已在错误返回前落地。
+                            None => match resolve_existing_feed_id(session, &item.feed_url).await {
+                                Ok(Some(v)) => v,
+                                _ => {
+                                    return OutboxOutcome::Retry(format!(
+                                        "推送订阅 {} 失败: quick_add 未返回 stream id 且列表未见同 URL 订阅（下轮重试）",
+                                        item.feed_url
+                                    ))
+                                }
+                            },
+                        }
                     }
+                    Err(e) => match resolve_existing_feed_id(session, &item.feed_url).await {
+                        Ok(Some(v)) => v,
+                        _ => {
+                            return OutboxOutcome::Retry(format!(
+                                "推送订阅 {} 失败: {e}",
+                                item.feed_url
+                            ))
+                        }
+                    },
+                },
+                Err(e) => {
+                    return OutboxOutcome::Retry(format!(
+                        "解析订阅 {} 是否已存在失败（保留队项，下轮重试）: {e}",
+                        item.feed_url
+                    ))
                 }
             }
-            Err(e) => return OutboxOutcome::Retry(format!("推送订阅 {} 失败: {e}", item.feed_url)),
-        },
+        }
     };
 
     // 阶段二：锁内推进阶段 + 绑定本地 feed + 重读最新目标（回写边界，代际复核）
@@ -750,17 +894,18 @@ async fn exec_edit_item(session: &SyncSession, item: &db::SubscriptionOutboxItem
 /// 这类行只在删除时同账号同 URL 仍有 pending 队项（可能已发出的 quick_add）时
 /// 写入——远端可能已经存在这次创建，但 id 在响应丢失/换代/重启后拿不到
 /// （`adopt_remote_id_for_pending` 只覆盖「响应在本地、同 key 同代际」的窗口）。
-/// 恢复分两段，**两段都完成才可能确认出队**：
-/// 1. **解析**：幂等 `quick_add`-by-URL 取回已验证 id；成功后**立即持久化**
-///    （`advance_unsubscribe_resolution` → `resolved_remote_id`）。列表长期失败/
-///    重启/换代后的重试都直接采用持久化结果，**不再重复 quick_add**——非幂等的
-///    quick_add 实现（本仓 pinned 上游未证明所有服务端幂等）每重复一次都会新建
-///    一个重复订阅，不持久化即无界造重复项。
-/// 2. **发现**：读远端订阅列表收集同 URL 的其它 id（只作正面证据：还要移除谁）。
-///    列表读失败 = 重复目标发现未完成 → `Retry` 保留队项，**本轮不发送任何退订**；
-///    解析失败同理 `Retry`（不把「未观察到 URL」当远端缺席证明，也不在缺席上清队）。
+/// 真实服务端对重复 URL 一律拒绝（FreshRSS 200+numResults=0、Miniflux 500），
+/// 「幂等 quick_add-by-URL 解析」在恢复路径上不成立——B1 起解析与发现共用
+/// **一次订阅列表读取**：
+/// 1. **解析**：列表里同 URL 的第一个 id 即已验证目标；成功后**立即持久化**
+///    （`advance_unsubscribe_resolution` → `resolved_remote_id`，按
+///    account_key+generation 严格限定作用域），重启/换代/换号后的重试直接采用。
+/// 2. **发现**：同一次列表读取收集同 URL 的其它 id。列表读失败 = 重复目标发现
+///    未完成 → `Retry` 保留队项，**本轮零发送**；列表读成功但无同 URL id =
+///    远端没有可退订目标 → 意图已满足，直接 `Confirmed`。
 ///
-/// 两段都成功后才对「解析 id ∪ 列表同 URL id」逐一退订，全部真实 2xx 才 `Confirmed`。
+/// 发送对象 = 持久化解析目标 ∪ 列表同 URL id，全部真实 2xx（目标已不存在按
+/// 400/404 = 已满足，见 `GReaderClient::unsubscribe`）才 `Confirmed`。
 async fn exec_unsubscribe_item(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
@@ -779,37 +924,41 @@ async fn exec_unsubscribe_item(
 }
 
 /// 未知远端目标的退订恢复（见 [`exec_unsubscribe_item`] 的恢复规则）。
+///
+/// B1（F2）：解析与发现共用**一次**订阅列表读取——真实服务端对重复 URL 一律
+/// 拒绝，「幂等 quick_add-by-URL 解析」不再成立，列表是唯一可靠证据源：
+/// - 列表读失败 = 重复目标发现未完成 → 保留队项重试，本轮零发送；
+/// - 列表读成功且无同 URL id → 远端没有可退订目标 = 意图已满足，直接确认；
+/// - 已持久化的解析目标仍参与退订（它在远端消失 = 400/404 = 已满足，由客户端
+///   2xx-strict 容错吸收），不得因它缺席而永久 Retry。
 async fn exec_unsubscribe_recovery(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     item: &db::SubscriptionOutboxItem,
 ) -> OutboxOutcome {
-    // ① 解析段：本轮新解析出的 id 必须**先落库**再进入发现/发送；已持久化的
-    //    解析结果直接采用（重启/换代/换号后不重复 quick_add）。
-    let resolved = match item.resolved_remote_id {
-        Some(v) => v,
-        None => {
-            let v = match session.client.quick_add(&item.feed_url).await {
-                Ok(r) => match r
-                    .stream_id
-                    .as_deref()
-                    .and_then(greader::parse_feed_numeric_id)
-                {
-                    Some(v) => v,
-                    None => {
-                        return OutboxOutcome::Retry(format!(
-                            "退订 {} 解析远端目标失败: quick_add 未返回 stream id（保留队项重试）",
-                            item.feed_url
-                        ))
-                    }
-                },
-                Err(e) => {
-                    return OutboxOutcome::Retry(format!(
-                        "退订 {} 解析远端目标失败（未完成发现前不发送退订，保留队项）: {e}",
-                        item.feed_url
-                    ))
-                }
-            };
+    // ①②解析+发现段（B1）：共用一次列表读取。
+    let subs = match session.client.subscriptions().await {
+        Ok(v) => v,
+        Err(e) => {
+            return OutboxOutcome::Retry(format!(
+                "退订 {} 列远端订阅失败: 重复目标发现未完成，保留队项（下轮重试）: {e}",
+                item.feed_url
+            ))
+        }
+    };
+    let norm = db::normalize_url(&item.feed_url);
+    let mut targets: Vec<i64> = Vec::new();
+    for s in subs.iter().filter(|s| db::normalize_url(&s.url) == norm) {
+        if let Some(id) = greader::parse_feed_numeric_id(&s.id) {
+            if !targets.contains(&id) {
+                targets.push(id);
+            }
+        }
+    }
+    // 首次解析到的已验证 id 先落库（重启/换代/换号后的重试直接采用；写入按
+    // account_key+generation 严格限定作用域）。列表成功但无同 URL id 时不持久化。
+    if item.resolved_remote_id.is_none() {
+        if let Some(&first) = targets.first() {
             let stored = {
                 let conn = db.lock().await;
                 if session.ensure_current(&conn).is_err() {
@@ -819,7 +968,8 @@ async fn exec_unsubscribe_recovery(
                     );
                     return OutboxOutcome::Skipped;
                 }
-                match db::advance_unsubscribe_resolution(&conn, item.id, session.generation, v) {
+                match db::advance_unsubscribe_resolution(&conn, item.id, session.generation, first)
+                {
                     Ok(true) => true,
                     Ok(false) => {
                         // 行已被替换/删除（新意图接管）：把已验证 id 结转替代行，
@@ -829,14 +979,14 @@ async fn exec_unsubscribe_recovery(
                             &item.account_key,
                             session.generation,
                             &item.feed_url,
-                            v,
+                            first,
                         ) {
                             Ok(true) => log::info!(
-                                "sync: 退订 {} 行已被替换，远端已解析 id {v} 已结转替代行",
+                                "sync: 退订 {} 行已被替换，远端已解析 id {first} 已结转替代行",
                                 item.feed_url
                             ),
                             Ok(false) => log::warn!(
-                                "sync: 退订 {} 行已被替换且无替代行可结转远端 id {v}",
+                                "sync: 退订 {} 行已被替换且无替代行可结转远端 id {first}",
                                 item.feed_url
                             ),
                             Err(e) => log::warn!("sync: 退订解析目标结转替代行失败: {e}"),
@@ -854,30 +1004,18 @@ async fn exec_unsubscribe_recovery(
             if !stored {
                 return OutboxOutcome::Skipped;
             }
-            v
         }
-    };
-
-    // ② 发现段：列表里同 URL 的其它 id（非幂等服务端的重复创建）。列表读失败 =
-    //    重复目标发现未完成 → 保留队项重试，本轮不发送任何退订、绝不确认。
-    let mut targets: Vec<i64> = vec![resolved];
-    match session.client.subscriptions().await {
-        Ok(subs) => {
-            let norm = db::normalize_url(&item.feed_url);
-            for s in subs.iter().filter(|s| db::normalize_url(&s.url) == norm) {
-                if let Some(id) = greader::parse_feed_numeric_id(&s.id) {
-                    if !targets.contains(&id) {
-                        targets.push(id);
-                    }
-                }
-            }
+    }
+    // 已持久化的解析目标也参与退订：它在远端消失 = 400/404 = 意图已满足
+    //（由 `GReaderClient::unsubscribe` 的 2xx-strict 容错吸收），不得永久 Retry。
+    if let Some(v) = item.resolved_remote_id {
+        if !targets.contains(&v) {
+            targets.push(v);
         }
-        Err(e) => {
-            return OutboxOutcome::Retry(format!(
-                "退订 {} 列远端订阅失败: 重复目标发现未完成，保留队项（解析目标已记录，下轮不重复 quick_add）: {e}",
-                item.feed_url
-            ))
-        }
+    }
+    if targets.is_empty() {
+        // 成功读取的列表不含同 URL 订阅：远端没有可退订目标 = 意图已满足。
+        return OutboxOutcome::Confirmed;
     }
 
     for rid in targets {
@@ -894,20 +1032,115 @@ async fn exec_unsubscribe_recovery(
     OutboxOutcome::Confirmed
 }
 
-/// 命令层 best-effort 一次性推送订阅 outbox（本地已入队；任何失败静默——
-/// 队列保留，下一轮同步自动重试）。命令返回不阻塞在网络上太久：与旧
-/// `edit_remote_subscription` 的调用成本同量级（都需构建一次会话/登录）。
+/// 命令层 best-effort 一次性推送订阅 outbox（本地已入队；执行失败静默——
+/// 队列保留，下一轮同步自动重试；会话构建失败由 [`record_outbox_session_block`]
+/// 落账，A-P2-6）。命令返回不阻塞在网络上太久：与旧 `edit_remote_subscription`
+/// 的调用成本同量级（都需构建一次会话/登录）。
 ///
 /// B3：无论本轮是否发出请求，结束都广播一次订阅写回状态（`subscription-
 /// outbox-changed`）——「入队刚发生而会话构建失败（离线/认证失败）」时，事件
 /// 是 UI 看到「等待 N 项」的即时通道；执行器内的确认/失败路径已各自通知，
-/// 重复载荷是同一快照（无害）。未配置同步时 notify 内部静默。
+/// 重复载荷由 notify 单点同值去重（W2 复审 P3-2）：入队可见性由第一次发射
+/// 保障，同值不重发。未配置同步时 notify 内部静默。
 pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) {
-    if let Ok(session) = build_session(db, http).await {
-        let mut report = SyncReport::default();
-        push_subscription_outbox(db, &session, &mut report).await;
+    let lease = match acquire_session(db, http).await {
+        Ok(l) => Some(l),
+        // A-P2-6：构建失败不再静默吞掉——对齐推送侧 TASK-124 的 record_push_block：
+        // 认证/端点/网络失败为当前账号 pending 行落账（attempts/last_error + 事件），
+        // UI 摘要卡才能解释「为什么一直等待」。未配置（无归属身份）与代际失配
+        // （旧会话作废，OPT-006）不落账。
+        Err(ClientBuildFailure::Failed {
+            err,
+            endpoint,
+            username,
+        }) => {
+            record_outbox_session_block(db, &err, &endpoint, &username).await;
+            None
+        }
+        Err(ClientBuildFailure::NotConfigured) => None,
+        Err(ClientBuildFailure::Stale) => None,
+        Err(ClientBuildFailure::CorruptGeneration(e)) => {
+            log::warn!("sync: 订阅写回即时推送因同步代际损坏中止: {e}");
+            None
+        }
+    };
+    let auth_failed = match &lease {
+        Some(l) => {
+            let mut report = SyncReport::default();
+            push_subscription_outbox(db, &l.session, &mut report).await;
+            report_has_auth_failure(&report)
+        }
+        None => false,
+    };
+    // W3-1：401/认证类失败回落（命中缓存会话才触发；只重试一次）。
+    if let Some(l) = &lease {
+        if l.from_cache && auth_failed {
+            if let Some(fresh) = reauth_after_auth_failure(db, http, l).await {
+                let mut report = SyncReport::default();
+                push_subscription_outbox(db, &fresh, &mut report).await;
+            }
+        }
     }
     notify_subscription_outbox_changed(db).await;
+}
+
+/// 订阅 outbox 的会话构建失败落账（A-P2-6；对齐 push.rs record_push_block 的
+/// TASK-124 模式）：有凭据但认证/端点/网络失败时，当前账号的全部 pending 队项
+/// 累计一次失败尝试并记录摘要，确有标记行时广播 `subscription-outbox-changed`
+/// ——「等待 N 项」必须能解释原因，而不是永远停在等待。
+/// 摘要携带失败会话的端点/用户名（W2 复审 P3-4）：换号竞态下落账按当前账号
+/// key，标注失败会话身份便于人工辨认归属偏差；快照身份未知（解密失败）不伪造。
+/// 未配置（无账号身份可归属）与读取失败跳过；落账只做 DB 标记，事件在锁外发。
+pub(super) async fn record_outbox_session_block(
+    db: &Arc<Mutex<Connection>>,
+    err: &crate::error::AppError,
+    session_endpoint: &str,
+    session_username: &str,
+) {
+    let summary = outbox_block_summary(err, session_endpoint, session_username);
+    log::warn!("sync: 订阅写回被阻塞（会话构建失败）: {summary}");
+    let marked = {
+        let conn = db.lock().await;
+        match super::current_account(&conn) {
+            Ok(Some(ctx)) => db::mark_outbox_session_blocked(&conn, &ctx.key, &summary),
+            // 未配置：无账号身份可归属（B3 口径：未连接统计为空），不标记
+            Ok(None) => Ok(0),
+            Err(e) => {
+                log::warn!("sync: 订阅 outbox 落账读取账号身份失败: {e}");
+                Ok(0)
+            }
+        }
+    };
+    match marked {
+        Ok(n) if n > 0 => notify_subscription_outbox_changed(db).await,
+        Ok(_) => {}
+        Err(e) => log::warn!("sync: 订阅 outbox 阻塞标记落库失败: {e}"),
+    }
+}
+
+/// 会话构建失败的落账摘要单点（W2 复审 P3-1/P3-4）。
+/// 判定与 push.rs `push_block_summary` 同判据——**code=auth 之外还必须认
+/// ClientLogin 文案**：GReader 凭据错误经 ClientLogin 报出，错误 code 实为
+/// network（push.rs `push_block_summary_distinguishes_auth_from_network`
+/// 锁定的协议事实），只判 code 会把 GReader 认证失败标成「网络/端点失败」。
+/// `session_*` 是失败会话的凭据快照（见 `ClientBuildFailure::Failed`）；
+/// 两者皆空（解密失败、身份未知）时不伪造标注。
+fn outbox_block_summary(
+    err: &crate::error::AppError,
+    session_endpoint: &str,
+    session_username: &str,
+) -> String {
+    let msg = err.message.trim();
+    let core = if err.code == "auth" || msg.contains("ClientLogin") {
+        format!("订阅写回认证失败：{msg}")
+    } else {
+        format!("订阅写回被阻塞（网络/端点失败）：{msg}")
+    };
+    if session_endpoint.is_empty() && session_username.is_empty() {
+        core
+    } else {
+        format!("{core}（失败会话端点 {session_endpoint}，用户 {session_username}）")
+    }
 }
 
 /// 拉远端分类+订阅，URL 碰撞合并（三段式：锁外拉取 → 锁内合并）
@@ -1501,4 +1734,44 @@ fn pending_protected_feed_ids(
         }
     }
     Ok(pending_feed_ids)
+}
+
+/* ============================================================
+W2 复审 P3-1：会话构建失败摘要的判定单测
+（行为验证由 CI 执行；本机不可链接）
+============================================================ */
+#[cfg(test)]
+mod outbox_block_summary_tests {
+    use super::outbox_block_summary;
+    use crate::error::AppError;
+
+    /// 与 push.rs `push_block_summary_distinguishes_auth_from_network` 同形：
+    /// GReader 凭据错误经 ClientLogin 报出、错误 code 实为 network——只判
+    /// code 会把它标成「网络/端点失败」（判别力：删掉 ClientLogin 判据必红）。
+    #[test]
+    fn outbox_block_summary_distinguishes_auth_from_network() {
+        // Fever：code=auth
+        let fever_auth = AppError::new("auth", "Fever 认证失败（api_key 不正确）");
+        assert!(outbox_block_summary(&fever_auth, "", "").starts_with("订阅写回认证失败："));
+
+        // GReader：路径存在但凭据被拒（实际文案，code 为 network）
+        let greader_401 = AppError::network(
+            "ClientLogin → 401 Unauthorized（已定位 API：https://example.com/api/greader.php）",
+        );
+        assert!(
+            outbox_block_summary(&greader_401, "", "").starts_with("订阅写回认证失败："),
+            "GReader 凭据错误经 ClientLogin 报出（code=network），必须归入认证失败"
+        );
+
+        // 网络/端点失败：不冒充认证失败
+        let dns = AppError::network("error sending request for url (https://example.com/)");
+        assert!(outbox_block_summary(&dns, "", "").starts_with("订阅写回被阻塞（网络/端点失败）："));
+
+        // 快照会话标注（P3-4）：非空时携带、便于辨认换号竞态下的归属；
+        // 空（解密失败、身份未知）不伪造
+        let with_session = outbox_block_summary(&dns, "https://a.example/api/greader.php", "alice");
+        assert!(with_session.contains("失败会话端点 https://a.example/api/greader.php"));
+        assert!(with_session.contains("用户 alice"));
+        assert!(!outbox_block_summary(&dns, "", "").contains("失败会话端点"));
+    }
 }

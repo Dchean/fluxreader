@@ -11,8 +11,13 @@
 
 mod common;
 
+use app_lib::ai::{self, AiConfig};
 use app_lib::db::{self, ArticleQuery, NewArticle};
+use app_lib::ingestion;
 use app_lib::sanitize::sanitize;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex as StdMutex};
 
 /// F07 反例原文（audit-2026-10-08）：任意 iframe + 事件属性 + script + 相对路径图 + 合法文本。
 const POLLUTED: &str = r#"<iframe src="https://evil.invalid/embed"></iframe><img src="/x.png" onerror="x()"><script>alert(1)</script><p>保留</p>"#;
@@ -693,5 +698,166 @@ fn list_with_content_sanitizes_renderable_fields_meta_only_does_not() {
     assert!(
         meta[0].translated_content.is_none(),
         "只元数据的列表不携带译文"
+    );
+}
+
+/* ============================================================
+B4：script/style 子树文本不进 body_text / AI 摘要输入
+============================================================ */
+
+/// 完整 SSE 流（与 commands/ai.rs 单测 COMPLETE_SSE 同形：增量 + finish + [DONE]）。
+const SUMMARY_SSE: &str = concat!(
+    "data: {\"choices\":[{\"delta\":{\"content\":\"要点\"}}]}\r\n\r\n",
+    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\n",
+    "data: [DONE]\r\n\r\n"
+);
+
+/// 捕获请求体的 OpenAI 兼容 SSE mock：按 Content-Length 读全 POST body
+/// （摘要输入在其中），回完整 SSE 流。只服务一条连接（stream_chat 单请求）。
+fn start_capturing_sse(captured: Arc<StdMutex<String>>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let Some(Ok(mut stream)) = listener.incoming().next() else {
+            return;
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let head_end = loop {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos;
+            }
+            let n = stream.read(&mut tmp).unwrap_or(0);
+            if n == 0 {
+                return;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+        let want: usize = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        let mut body = buf[head_end + 4..].to_vec();
+        while body.len() < want {
+            let n = stream.read(&mut tmp).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&tmp[..n]);
+        }
+        *captured.lock().unwrap() = String::from_utf8_lossy(&body).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{SUMMARY_SSE}"
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    });
+    port
+}
+
+/// B4 全链：feed HTML 含 `<script>hidden指令</script>` 与 `<style>…</style>`——
+/// 经生产摄取链（parse_feed → upsert，body_text 由生产 html_to_text 计算）落库，
+/// 断言 body_text 不含隐藏文本；再取生产摘要输入源（get_article_for_summary），
+/// 按 ai_summarize 同构拼装 user 消息（`标题：{title}\n\n正文：\n{body}`），经
+/// 真实 stream_chat 发往捕获型 mock，断言模型请求体同样不含隐藏文本（可见正文
+/// 完整保留）。渲染链 sanitize 的消毒行为不在本用例范围（上组用例锁定）。
+#[tokio::test]
+async fn script_style_text_stays_out_of_body_text_and_summary_input() {
+    let rss = r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+  <title>T</title><link>https://feed.example/</link><description>d</description>
+  <item>
+    <title>测试文章</title>
+    <link>https://feed.example/post/1</link>
+    <guid isPermaLink="false">g-b4-script-style</guid>
+    <description><![CDATA[<p>可见正文甲</p><script>hidden指令</script><style>.x{color:red}样式藏匿词</style><p>可见正文乙</p>]]></description>
+  </item>
+</channel></rss>"#;
+
+    let parsed =
+        ingestion::parse_feed(rss.as_bytes(), "https://feed.example/").expect("parse feed");
+    assert_eq!(parsed.articles.len(), 1, "夹具必须解析出一条条目");
+
+    let tmp = common::unique_db_path("b4_script_style");
+    let _cleanup = common::TempDbGuard::new(tmp.clone());
+    let conn = db::open(&tmp).expect("open temp db");
+    let folder = db::create_folder(&conn, "F", "article").unwrap();
+    let feed_id = db::insert_feed(
+        &conn,
+        "https://feed.example/rss",
+        None,
+        "源",
+        None,
+        folder,
+        "inherit",
+        true,
+        false,
+    )
+    .unwrap();
+    let (aid, _) =
+        db::upsert_article_with_feed(&conn, feed_id, &parsed.articles[0], false).unwrap();
+
+    // ① 落库 body_text：隐藏文本不进、可见正文保留
+    let stored: String = conn
+        .query_row(
+            "SELECT COALESCE(c.body_text, '') FROM articles a
+             LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
+            [aid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        stored.contains("可见正文甲") && stored.contains("可见正文乙"),
+        "可见正文必须保留: {stored}"
+    );
+    assert!(
+        !stored.contains("hidden指令"),
+        "script 文本不得进入 body_text: {stored}"
+    );
+    assert!(
+        !stored.contains("样式藏匿词"),
+        "style 文本不得进入 body_text: {stored}"
+    );
+
+    // ② 摘要请求输入：生产输入源 + ai_summarize 同构拼装 → 真实 stream_chat
+    //    → 捕获型 mock 断言请求体
+    let (title, body_text, _summary, _sig) =
+        db::get_article_for_summary(&conn, aid).unwrap().unwrap();
+    let user = format!("标题：{title}\n\n正文：\n{body_text}");
+
+    let captured = Arc::new(StdMutex::new(String::new()));
+    let port = start_capturing_sse(captured.clone());
+    let cfg = AiConfig {
+        api_key: "sk-test".into(),
+        model: "m1".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+    };
+    let client = ingestion::build_client(30);
+    let mut sink = |_: &str| true;
+    let outcome = ai::stream_chat(
+        &client,
+        &cfg,
+        "sys",
+        &user,
+        &mut sink,
+        ai::SUMMARY_MAX_TOKENS,
+    )
+    .await
+    .unwrap();
+    assert!(outcome.completed, "mock SSE 必须完整消费（夹具有效性）");
+
+    let req_body = captured.lock().unwrap().clone();
+    assert!(
+        req_body.contains("可见正文甲"),
+        "请求体应携带可见正文: {req_body}"
+    );
+    assert!(
+        !req_body.contains("hidden指令"),
+        "script 文本不得进入模型请求输入: {req_body}"
+    );
+    assert!(
+        !req_body.contains("样式藏匿词"),
+        "style 文本不得进入模型请求输入: {req_body}"
     );
 }

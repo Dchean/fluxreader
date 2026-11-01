@@ -1096,6 +1096,17 @@ fn visible_fields(conn: &Connection, id: i64) -> AppResult<VisibleFields> {
     Ok(f)
 }
 
+/// 空/纯空白 link 的规范化匹配键：归一为 None（不写 ''）。
+/// '' 是合法 SQLite 键——所有无 link 条目会共享同一 url_norm 组（B2 审计
+/// 反例：跨源塌缩成 1 行显示、标读其一经读闭包广播其余）。空 link 没有
+/// 身份语义，必须 NULL 化；存量 '' 由迁移 v31 幂等清洗，contents.url_norm
+/// 不动（内容身份由内容哈希承担，url_norm 只是附带列）。
+fn normalized_url_key(url: Option<&str>) -> Option<String> {
+    url.map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(normalize_url)
+}
+
 /// R3 核心：返回富结果的 upsert。匹配逻辑与旧入口完全同源（本函数即原实现，
 /// 旧入口为薄包装）——禁止在别处再写第二份 URL/guid 匹配。
 ///
@@ -1129,7 +1140,7 @@ pub fn upsert_article_with_feed_tracked(
             inserted: false,
             content_changed: before != visible_fields(conn, id)?,
         })
-    } else if let Some(url) = a.url.as_deref().filter(|u| !u.is_empty()) {
+    } else if let Some(url) = a.url.as_deref().filter(|u| !u.trim().is_empty()) {
         // 同 feed 内按规范化 URL 兜底去重：direct 抓取与 Miniflux 同步的 guid 不同
         // （direct 用原始 guid，Miniflux 用 `miniflux-{id}`），但 URL 相同是同一篇。
         // 命中已有文章时只更新内容（正文/标题/封面/附件），**保留 source 与状态**
@@ -1175,7 +1186,9 @@ pub fn upsert_article_with_feed_tracked(
 /// 「空串 ≡ NULL」归一由本函数承担，调用方负责前后快照比对）。
 /// `include_url=true` 时同语句刷新 url/url_norm（guid 命中分支保留「原始 url
 /// 只在有值时覆盖」的既有语义）；URL 命中分支不触碰 url（避免把已有原始链接
-/// 换成远端饰词形态）。
+/// 换成远端饰词形态）。B2：url_norm 只在归一键存在（link 非空白）时跟随
+/// 更新——空白 link 不得把既有 url_norm 洗成 ''/NULL（CASE 以 ?11 判空，
+/// 不再以原始 url 判空）。
 fn refresh_existing_article(
     conn: &Connection,
     id: i64,
@@ -1218,7 +1231,7 @@ fn refresh_existing_article(
             body_text: a.body_text.clone(),
             extraction_source: super::contents::SOURCE_RSS.to_string(),
             fulltext_extracted: false,
-            url_norm: a.url.as_deref().map(normalize_url),
+            url_norm: normalized_url_key(a.url.as_deref()),
         };
         /* R3（内容重指故障原子性）：ensure_content 的 INSERT 与条目重指/旧行回收
         必须同生共死——UPDATE 失败（外键/触发器等）时整体回滚，不留无引用
@@ -1249,7 +1262,7 @@ fn refresh_existing_article(
         conn.execute(
             "UPDATE articles SET
                 url = COALESCE(?2, url),
-                url_norm = CASE WHEN ?2 IS NOT NULL AND ?2 != '' THEN ?11 ELSE url_norm END,
+                url_norm = CASE WHEN ?11 IS NOT NULL THEN ?11 ELSE url_norm END,
                 title = ?3,
                 author = COALESCE(?4, author),
                 summary = COALESCE(?5, summary),
@@ -1270,7 +1283,7 @@ fn refresh_existing_article(
                 a.enclosure_mime,
                 a.duration_sec,
                 a.published_at,
-                a.url.as_deref().map(normalize_url),
+                normalized_url_key(a.url.as_deref()),
             ],
         )?;
     } else {
@@ -1339,7 +1352,7 @@ pub fn upsert_remote_article(
             content_changed: before != visible_fields(conn, id)?,
         });
     }
-    if let Some(url) = a.url.as_deref().filter(|u| !u.is_empty()) {
+    if let Some(url) = a.url.as_deref().filter(|u| !u.trim().is_empty()) {
         let by_url: Option<(i64, bool, Option<i64>)> = conn
             .query_row(
                 "SELECT a.id, COALESCE(c.fulltext_extracted, 0), a.remote_id
@@ -1368,6 +1381,37 @@ pub fn upsert_remote_article(
         inserted,
         content_changed: false,
     })
+}
+
+/// Fever with_ids 回补预过滤（B2）：返回 `ids` 中**本地已有正文**的子集
+/// （绑定行的 content_html 或 body_text 任一非空；判定与
+/// `contents::content_non_empty` 同口径）。返回的是「已有正文」集合，调用方
+/// 取补集得到仍需回补的 id——无绑定行的 id 天然不在本集合里，未拉过的
+/// 远端条目不会被误跳过。分块查询避免超出 SQLite 变量上限。读失败透传
+/// Err——调用方必须把补集视为全集（全量回补），不得把失败当「全部已有
+/// 正文」（那会漏补正文）。
+pub fn remote_ids_with_body(conn: &Connection, ids: &[i64]) -> AppResult<Vec<i64>> {
+    const CHUNK: usize = 500;
+    let mut with_body: Vec<i64> = Vec::new();
+    for chunk in ids.chunks(CHUNK) {
+        let placeholders = std::iter::repeat("?")
+            .take(chunk.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT a.remote_id FROM articles a \
+             JOIN contents c ON c.id = a.content_id \
+             WHERE a.remote_id IN ({placeholders}) \
+               AND ((c.body_text IS NOT NULL AND c.body_text != '') \
+                 OR (c.content_html IS NOT NULL AND c.content_html != ''))"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+            r.get::<_, i64>(0)
+        })?;
+        with_body.extend(rows.collect::<Result<Vec<_>, _>>()?);
+    }
+    Ok(with_body)
 }
 
 /// 插入新文章（upsert_article_with_feed 的兜底路径）。
@@ -1399,7 +1443,7 @@ fn insert_new_article(conn: &Connection, feed_id: i64, a: &NewArticle) -> AppRes
                 a.duration_sec,
                 a.published_at,
                 a.source,
-                a.url.as_deref().map(normalize_url)
+                normalized_url_key(a.url.as_deref())
             ],
         )?;
         let id = conn.last_insert_rowid();
@@ -1408,7 +1452,7 @@ fn insert_new_article(conn: &Connection, feed_id: i64, a: &NewArticle) -> AppRes
             body_text: a.body_text.clone(),
             extraction_source: super::contents::SOURCE_RSS.to_string(),
             fulltext_extracted: false,
-            url_norm: a.url.as_deref().map(normalize_url),
+            url_norm: normalized_url_key(a.url.as_deref()),
         };
         let (content_id, _rev, _created) = super::contents::ensure_content(conn, &input, Some(id))?;
         conn.execute(
@@ -2284,27 +2328,42 @@ fn counts_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ScopedCountsRow> {
 
 /// 生成某层级 scope 的计数 SQL + 绑定。
 /// 占位符次序 = SQL 文本次序：SELECT 列表里的 4 个 EXISTS（各在 layout 给定时
-/// 绑一次）在前，外层 WHERE 的 layout 绑定在后。
+/// 绑一次；feed 级无布局占位，见 F1 注释）在前，外层 WHERE 的 layout 绑定在后。
 fn scope_counts_sql(
     level: ScopeLevel,
     dedup: bool,
     layout: Option<&str>,
 ) -> (String, Vec<rusqlite::types::Value>) {
     let b_layout = layout.is_some();
+    // F1（B2）：feed 级 EXISTS 的内层约束 `b.feed_id = a.feed_id` 使 fb 与外层
+    // fa 是同一行，b_layout_cond 与外层 WHERE 的布局条件逐字同构——layout 给定
+    // 时不匹配的 feed 整组已被外层排除，组内 b 的布局复核恒真。因此 feed 级
+    // 去掉 `JOIN feeds fb` 与布局复核：子查询回到单表形态，计划稳定为
+    // `SEARCH b USING INDEX idx_articles_url_norm[_unread] (url_norm=? AND rowid<?)`
+    // （修前 JOIN feeds 形态在真实语料上退化为逐行 rowid 范围搜索，
+    // 50k 行实测 155s/轮；改写后与无去重变体同量级）。All/Folder 级的 b 可能
+    // 来自其它 feed，仍需 fb 参与 scope/布局判定，保持原模板。
+    // Note: feed 级去 fb join 的等价性论证与 ANALYZE 否决 — 见 .agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md
+    let feed_level = level == ScopeLevel::Feed;
     let b_scope = match level {
         ScopeLevel::All => "",
         ScopeLevel::Feed => " AND b.feed_id = a.feed_id",
         ScopeLevel::Folder => " AND fb.folder_id = fo.id",
     };
-    let b_layout_cond = if b_layout {
+    let b_layout_cond = if b_layout && !feed_level {
         " AND (CASE WHEN fb.layout != 'inherit' THEN fb.layout \
            ELSE (SELECT fo5.layout FROM folders fo5 WHERE fo5.id = fb.folder_id) END) = ?"
     } else {
         ""
     };
     let exists = |view: &str| {
+        let from = if feed_level {
+            "FROM articles b"
+        } else {
+            "FROM articles b JOIN feeds fb ON fb.id = b.feed_id"
+        };
         format!(
-            "NOT EXISTS (SELECT 1 FROM articles b JOIN feeds fb ON fb.id = b.feed_id \
+            "NOT EXISTS (SELECT 1 {from} \
              WHERE b.url_norm = a.url_norm AND b.id < a.id{b_scope}{b_layout_cond}{view})"
         )
     };
@@ -2371,11 +2430,11 @@ fn scope_counts_sql(
         ""
     };
     let sql = format!("{head}{join_fo}{outer_where}{group}");
-    // 绑定：先 SELECT 列表里 4 个 b_layout 占位（仅 dedup 开启时存在），
-    // 再外层 layout（SQL 文本次序）。
+    // 绑定：先 SELECT 列表里 4 个 b_layout 占位（仅 dedup 开启且非 feed 级
+    // 时存在——feed 级 b_layout_cond 已去掉），再外层 layout（SQL 文本次序）。
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
     if let Some(l) = layout {
-        if dedup {
+        if dedup && !feed_level {
             for _ in 0..4 {
                 params.push(l.to_string().into());
             }
@@ -3211,6 +3270,50 @@ mod tests {
             !plan.contains("USE TEMP B-TREE"),
             "article_index 窗口仍有 TEMP B-TREE：\n{plan}"
         );
+    }
+
+    /// F1（B2）：scope_counts dedup 变体（feed 级）的查询计划必须走
+    /// url_norm 索引的等值 + rowid 范围，禁止 TEMP B-TREE 与逐行 rowid 搜索
+    /// （`SEARCH ... USING INTEGER PRIMARY KEY (rowid<?)`——修前 `JOIN feeds`
+    /// 形态在真实语料上的计划形态，50k 行实测 155s/轮）。layout 两态都断言
+    /// （feed 级模板已无 SELECT 列表布局占位，绑定数由 scope_counts_sql 同源
+    /// 给出，不另抄绑定）。
+    #[test]
+    fn scope_counts_feed_dedup_plan_avoids_temp_btree_and_per_row_search() {
+        let conn = seed_plan_fixture();
+        // 补 url_norm 群组（seed_plan_fixture 的行 url_norm 为 NULL），让
+        // EXISTS 的等值探测有真实群组形态（NULL 行永不命中组，两者都要覆盖）。
+        conn.execute(
+            "UPDATE articles SET url_norm = 'https://n.example/' || (id % 400) WHERE id % 2 = 0",
+            [],
+        )
+        .unwrap();
+        for layout in [None, Some("article")] {
+            let (sql, p) = scope_counts_sql(ScopeLevel::Feed, true, layout);
+            // 模板形态：feed 级必须没有 fb join 与布局复核（SELECT 列表布局
+            // 占位随之消失，绑定只剩外层一处——由下面 explain 的绑定数同源验证）。
+            assert!(
+                !sql.contains("JOIN feeds fb"),
+                "layout={layout:?} feed 级模板不得再 join feeds：\n{sql}"
+            );
+            assert!(
+                !sql.contains("fo5"),
+                "layout={layout:?} feed 级模板不得再做组内布局复核：\n{sql}"
+            );
+            let plan = explain(&conn, &sql, &p).unwrap();
+            assert!(
+                !plan.contains("USE TEMP B-TREE"),
+                "layout={layout:?} dedup 计数出现 TEMP B-TREE：\n{plan}"
+            );
+            assert!(
+                !plan.contains("SEARCH b USING INTEGER PRIMARY KEY"),
+                "layout={layout:?} EXISTS 退化为对 b 的逐行 rowid 搜索（F1 慢路径）：\n{plan}"
+            );
+            assert!(
+                plan.contains("idx_articles_url_norm"),
+                "layout={layout:?} EXISTS 未走 url_norm 索引：\n{plan}"
+            );
+        }
     }
 
     /// 等价性夹具：2 分类 × 4 源 × 12 条，布局覆盖/继承混合（含无分类源），

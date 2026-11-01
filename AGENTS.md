@@ -42,14 +42,14 @@ Note 的路径即分类：`{lifecycle}/{class}/yyyy-mm-dd-topic.md`，lifecycle 
 | --- | --- |
 | `npm run lint`（oxlint）、`npm run build`（tsc + vite）、`npm run test:frontend`（前端状态回归）、`npm run test:components`（组件真实挂载回归） | 本地与 CI |
 | `cargo fmt --all -- --check`（在 `src-tauri/` 下执行） | 本地与 CI |
-| `cargo clippy --all-targets -- -D warnings`、`cargo test`（在 `src-tauri/` 下执行） | 本地（当前已可链接）与 CI（windows-latest） |
+| `cargo clippy --all-targets -- -D warnings`、`cargo test`、`cargo check`（在 `src-tauri/` 下执行） | CI（windows-latest） |
 
-2026-10-08 已通过实际命令确认本机可链接并运行完整 `cargo test` 和 `cargo clippy --all-targets`；本地与 CI 的 rust job 共同承担，不能继续沿用旧的“本机缺 MSVC 链接器”结论——**每一项都必须有承担者**，不能出现「本地不跑、CI 也不跑」的检查。CI 只跑 6 个受约束的 mock 集成套件与默认测试集；`#[ignore]` 的 live 测试（真实服务端）需在具体任务里单独约定读写边界后执行，不作为统一门禁。
+2026-10-31 实测本机**不可链接**（三项独立确认：零依赖探针、hello-world cargo build、VS 目录为空），`cargo test` / `cargo clippy` / `cargo check` 由 CI 的 rust job（windows-latest）承担，本地只跑 `cargo fmt --check` 与前端门禁——不能沿用 2026-10-08 的「本机已可链接」结论。**每一项都必须有承担者**，不能出现「本地不跑、CI 也不跑」的检查。CI 只跑 6 个受约束的 mock 集成套件与默认测试集；`#[ignore]` 的 live 测试（真实服务端）需在具体任务里单独约定读写边界后执行，不作为统一门禁。
 
 CI 固定在 Windows 上跑 Rust：这是纯 Windows 客户端，DPAPI 凭据加密与 SMTC 媒体控制等 Windows 专有功能只在 Windows 编译；在 Linux 上检查的是 `#[cfg(not(windows))]` 降级分支，真正的生产代码路径反而被跳过。
 
 ## 仓库卫生
 
-- 不要提交 `node_modules/`、`dist/`、`src-tauri/target/`、`*.db`、`tmp/`（都已在 `.gitignore` / `.zcodeignore` 中）。
+- 不要提交 `node_modules/`、`dist/`、`src-tauri/target/`、`*.db`、`tmp/`（都已在 `.gitignore` 中；`.zcodeignore` 为工具自生成的本机可选配置，不入库）。
 - 一次性探针与调研报告放在存档分支 `archive/tooling-and-reports`，不进主线。
 - 历史材料的定位（含 2026-09-16 历史重写前后的提交号对照）见 [docs/roadmap.md](docs/roadmap.md) 第七节。

@@ -47,6 +47,9 @@ pub fn opml_import_for_test(conn: &Connection, content: &str) -> AppResult<OpmlI
 /// folder_ids 缓存——TASK-062 修复 N1：此前 None 分支每条都无条件
 /// create_folder，而 folders.name 无 UNIQUE，导入 N 条根级订阅会产生
 /// N 个同名「导入」目录。
+/// R2-P2-1：缓存 miss 时先按名查既有目录，命中即复用（保留其布局/折叠等
+/// 用户设置，只取 id 不改写），未命中才创建——导入不再对库内同名分类
+/// 静默新建第二个目录。
 fn import_feeds(
     conn: &Connection,
     feeds: &[crate::opml::ImportedFeed],
@@ -83,7 +86,11 @@ fn import_feeds(
         let folder_id = match folder_ids.get(name) {
             Some(id) => *id,
             None => {
-                let id = db::create_folder(&tx, name, "article")?;
+                // Note: 导入复用既有同名目录而非静默新建 — 见 .agents/notes/implemented/bug-fix/2026-11-01-目录重名复用与同名拒绝.md
+                let id = match db::find_folder_by_name(&tx, name)? {
+                    Some(existing) => existing,
+                    None => db::create_folder(&tx, name, "article")?,
+                };
                 folder_ids.insert(name.to_string(), id);
                 id
             }
@@ -205,6 +212,59 @@ mod tests {
         assert_eq!(
             count(&conn, "SELECT COUNT(*) FROM folders WHERE name = '技术'"),
             1
+        );
+    }
+
+    /// R2-P2-1：导入前已有同名目录 → 复用而非静默新建第二个（修前行为）；
+    /// 且只取 id，既有目录的布局/折叠状态原样保留（导入不得改写用户设置）。
+    #[test]
+    fn import_reuses_existing_folder_preserving_its_settings() {
+        let conn = conn();
+        let existing = db::create_folder(&conn, "技术", "podcast").unwrap();
+        db::set_folder_collapsed(&conn, existing, false).unwrap();
+
+        let report =
+            import_feeds(&conn, &[feed("https://a.example/rss", "A", Some("技术"))]).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM folders WHERE name = '技术'"),
+            1,
+            "同名目录必须复用，不得静默新建第二个"
+        );
+        let (layout, collapsed): (String, i64) = conn
+            .query_row(
+                "SELECT layout, collapsed FROM folders WHERE id = ?1",
+                [existing],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(layout, "podcast", "既有目录的布局不得被导入改写");
+        assert_eq!(collapsed, 0, "既有目录的折叠状态不得被导入改写");
+        let bound: i64 = conn
+            .query_row(
+                "SELECT folder_id FROM feeds WHERE feed_url = 'https://a.example/rss'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, existing, "订阅必须挂到既有目录");
+    }
+
+    /// R2-P2-1：跨次导入复用——第一次导入创建的目录，第二次导入同名时落进
+    /// 同一目录（修前每次导入各建一个同名目录）。
+    #[test]
+    fn second_import_reuses_folder_created_by_first() {
+        let conn = conn();
+        import_feeds(&conn, &[feed("https://a.example/rss", "A", Some("技术"))]).unwrap();
+        import_feeds(&conn, &[feed("https://b.example/rss", "B", Some("技术"))]).unwrap();
+        assert_eq!(
+            count(&conn, "SELECT COUNT(*) FROM folders WHERE name = '技术'"),
+            1
+        );
+        assert_eq!(
+            count(&conn, "SELECT COUNT(DISTINCT folder_id) FROM feeds"),
+            1,
+            "两次导入的订阅必须落在同一目录"
         );
     }
 

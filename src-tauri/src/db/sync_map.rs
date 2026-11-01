@@ -743,11 +743,16 @@ pub fn get_article_remote_id(conn: &Connection, article_id: i64) -> AppResult<Op
     Ok(remote_id.flatten())
 }
 
-/// 按名称查询 folder id（Pull 段分类匹配用）
+/// 按名称查询 folder id（Pull 段分类匹配用）。
+///
+/// 同名多条（存量重复目录，folders.name 无 UNIQUE）时取 id/rowid 升序最旧
+/// 一条：按名映射的落点必须确定且跨次一致，与 config_sync 的
+/// list_folder_id_by_name、ensure_uncategorized_folder 同一不变量。
+/// Note: 目录重名的复用与落点确定性 — 见 .agents/notes/implemented/bug-fix/2026-11-01-目录重名复用与同名拒绝.md
 pub fn find_folder_by_name(conn: &Connection, name: &str) -> AppResult<Option<i64>> {
     let id = conn
         .query_row(
-            "SELECT id FROM folders WHERE name = ?1",
+            "SELECT id FROM folders WHERE name = ?1 ORDER BY id LIMIT 1",
             params![name],
             |r| r.get(0),
         )

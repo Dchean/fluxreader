@@ -1,9 +1,10 @@
 //! 同步引擎三期改造的端到端测试：
 //! ① 即时状态推送（push_states_now）：只推不拉、read 广播副本、队列清空
 //! ② 分步同步（feeds_phase / states_phase）：两阶段独立可跑、锁不跨 await
-//! ③ 旧变更收敛：changed_at 早于增量游标的远端已读，full 对账路径能追上
-//!    （light 路径追不上——分层设计：快路径便宜、慢路径彻底）
-//! 运行：cargo test --test sync_phases_e2e -- --ignored --nocapture
+//! ③ 旧变更收敛：远端已读经 read/starred 权威集合对账收敛——已绑定行 light
+//!    即收敛；未绑定行（直连抓取、发布时间早于增量游标）经权威集合
+//!    item_contents 回补绑定后收敛（阶段 B2）；full 对账路径同样收敛
+//! 运行：cargo test --test sync_phases_e2e --nocapture
 
 mod common;
 mod mock_greader;
@@ -348,5 +349,291 @@ async fn full_reconcile_backfills_missing_local_entries() {
             is_read,
             "pending 守卫必须生效：本地已读不得被陈旧的远端未读覆盖"
         );
+    }
+}
+
+/* ============================================================
+B2：GR read/starred 权威集合的 contents 回补（未绑定行收敛）
+============================================================ */
+
+/// 夹具：feeds_phase 绑定 mock feed 10 → 本地源；直连入库一行（URL 给定）；
+/// 远端加一条「已读、published 早于游标」的条目——它不在 light 增量窗口
+/// （窗口列 published 严格大于），只能经 read 权威集合的回补通道可达。
+/// 返回 (直连行 id, 远端 entry id, 直连行所在本地 feed id)。
+async fn seed_backfill_fixture(
+    db: &Arc<Mutex<rusqlite::Connection>>,
+    server: &MockGReader,
+    http: &reqwest::Client,
+    entry_url: &str,
+    direct_url: &str,
+    t0: i64,
+) -> (i64, i64, i64) {
+    sync::feeds_phase(db, http).await.expect("feeds phase");
+    let eid = server.add_entry_with_times(
+        10,
+        entry_url,
+        "Backfill entry",
+        true, // read 权威集合成员
+        false,
+        t0 - 100, // published 早于游标：不在 light 增量窗口
+        t0 + 10,
+    );
+    let (aid, feed_id) = {
+        let conn = db.lock().await;
+        let feed_id: i64 = conn
+            .query_row("SELECT id FROM feeds WHERE remote_id = 10", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let a = db::NewArticle {
+            guid: format!("direct-{direct_url}"),
+            url: Some(direct_url.into()),
+            title: "Direct article".into(),
+            author: None,
+            summary: None,
+            content_html: Some("<p>direct body</p>".into()),
+            body_text: "direct body".into(),
+            image_url: None,
+            enclosure_url: None,
+            enclosure_mime: None,
+            duration_sec: None,
+            published_at: Some("2026-01-01T00:00:00+00:00".into()),
+            source: "direct".into(),
+        };
+        let (aid, inserted) = db::upsert_article_with_feed(&conn, feed_id, &a, false).unwrap();
+        assert!(inserted, "直连行必须新插入");
+        (aid, feed_id)
+    };
+    {
+        let conn = db.lock().await;
+        db::set_last_sync_ts(&conn, t0).unwrap();
+    }
+    (aid, eid, feed_id)
+}
+
+/// 门禁 a（B2 回补核心症状）：直连入库、URL 可归一匹配、从未被列举窗口绑定
+/// 的行，经 light 同步从 read 权威集合收敛为已读并绑定同一行——修前该行
+/// 永久漂移（reconcile 对不在映射里的 id 无行可写）。
+#[tokio::test]
+async fn light_sync_backfills_read_collection_row_missing_from_listing_window() {
+    const T0: i64 = 1_700_000_000;
+    let (db, http, server) = setup("gr_backfill_read").await;
+    let (_aid, eid, _feed) = seed_backfill_fixture(
+        &db,
+        &server,
+        &http,
+        "http://127.0.0.1:8765/backfill/a",
+        "http://127.0.0.1:8765/backfill/a",
+        T0,
+    )
+    .await;
+
+    let r = sync::states_phase(&db, &http, false).await.expect("light");
+    assert!(r.errors.is_empty(), "light 轮不应有错误：{:?}", r.errors);
+    {
+        let conn = db.lock().await;
+        let (count, is_read, remote): (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(is_read), MAX(remote_id) FROM articles WHERE url = ?1",
+                rusqlite::params!["http://127.0.0.1:8765/backfill/a"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "回补必须命中既有行，不得另开新行");
+        assert_eq!(is_read, 1, "read 权威集合的未绑定行必须收敛为已读");
+        assert_eq!(remote, Some(eid), "回补行必须绑定远端 entry id");
+        assert!(
+            db::last_sync_ts(&conn).unwrap() > T0,
+            "回补成功轮的游标照常推进"
+        );
+    }
+}
+
+/// 门禁 b：URL 归一化不匹配的直连行不得被误绑/误标——回补走 ③ 分支独立
+/// upsert 新行（各自绑定/读藏），旧行为不变。
+#[tokio::test]
+async fn light_sync_backfill_does_not_bind_url_mismatched_rows() {
+    const T0: i64 = 1_700_000_000;
+    let (db, http, server) = setup("gr_backfill_mismatch").await;
+    let (aid, eid, _feed) = seed_backfill_fixture(
+        &db,
+        &server,
+        &http,
+        "http://127.0.0.1:8765/backfill/b",
+        "http://127.0.0.1:8765/direct/own-b",
+        T0,
+    )
+    .await;
+
+    let r = sync::states_phase(&db, &http, false).await.expect("light");
+    assert!(r.errors.is_empty(), "light 轮不应有错误：{:?}", r.errors);
+    {
+        let conn = db.lock().await;
+        // 直连行：保持未读、未绑定、URL 不被改写
+        let (is_read, remote): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT is_read, remote_id FROM articles WHERE id = ?1",
+                [aid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(is_read, 0, "URL 不匹配的直连行不得被误标已读");
+        assert_eq!(remote, None, "URL 不匹配的直连行不得被误绑");
+        // 回补条目：独立新行（source='miniflux'），自己的读状态照常落地
+        let (count, new_read, new_remote, source): (i64, i64, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(is_read), MAX(remote_id), MAX(source) FROM articles WHERE url = ?1",
+                rusqlite::params!["http://127.0.0.1:8765/backfill/b"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "回补条目独立成行（③ 分支行为不变）");
+        assert_eq!(new_read, 1);
+        assert_eq!(new_remote, Some(eid));
+        assert_eq!(source.as_deref(), Some("miniflux"));
+    }
+}
+
+/// 门禁 c：contents 回补请求失败 → 该侧跳过对账、直连行状态守恒（不误标）、
+/// 游标保留；下一轮恢复后收敛。
+#[tokio::test]
+async fn gr_backfill_failure_skips_reconcile_side_and_keeps_cursor() {
+    const T0: i64 = 1_700_000_000;
+    let (db, http, server) = setup("gr_backfill_failure").await;
+    let (aid, _eid, _feed) = seed_backfill_fixture(
+        &db,
+        &server,
+        &http,
+        "http://127.0.0.1:8765/backfill/c",
+        "http://127.0.0.1:8765/backfill/c",
+        T0,
+    )
+    .await;
+
+    server.set_fail_item_contents(true);
+    let r1 = sync::states_phase(&db, &http, false).await.expect("light");
+    assert!(!r1.errors.is_empty(), "回补失败必须可见：{:?}", r1.errors);
+    {
+        let conn = db.lock().await;
+        let (is_read, remote): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT is_read, remote_id FROM articles WHERE id = ?1",
+                [aid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(is_read, 0, "回补失败侧跳过对账：状态必须守恒");
+        assert_eq!(remote, None, "回补失败轮不得留下半程绑定");
+        assert_eq!(
+            db::last_sync_ts(&conn).unwrap(),
+            T0,
+            "回补失败必须保留游标（fail-closed）"
+        );
+    }
+
+    server.set_fail_item_contents(false);
+    let r2 = sync::states_phase(&db, &http, false)
+        .await
+        .expect("light retry");
+    assert!(r2.errors.is_empty(), "恢复轮不应有错误：{:?}", r2.errors);
+    {
+        let conn = db.lock().await;
+        let is_read: i64 = conn
+            .query_row("SELECT is_read FROM articles WHERE id = ?1", [aid], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(is_read, 1, "下一轮回补恢复后必须收敛");
+        assert!(db::last_sync_ts(&conn).unwrap() > T0, "恢复轮游标照常推进");
+    }
+}
+
+/* ============================================================
+B2：Fever with_ids 回补的本地正文预过滤（请求计数）
+============================================================ */
+
+/// 门禁（B2 Fever 预过滤）：已有正文的条目不再出现在 with_ids 请求里；
+/// 服务端空正文的条目（首轮已拉、id ≤ 游标、本地无正文）仍回补。修前
+/// unread∪saved 全集每轮重拉（审计实测：2 万条库最坏 403 次串行往返/轮）。
+/// 空正文夹具用 `add_entry_full(content="")`：空内容走条目私有 contents 行，
+/// 不会连带清掉 e1-e3 共享的正文行（同内容按内容哈希共享行）。
+#[tokio::test]
+async fn fever_with_ids_backfill_skips_entries_with_local_body() {
+    let server = MockGReader::start().await.expect("start mock server");
+    let tmp = common::unique_db_path("phases_fever_prefilter");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).expect("open db");
+    db::set_setting(&conn, "sync_protocol", "fever").unwrap();
+    db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+    db::set_setting(&conn, "greader_username", "user-f").unwrap();
+    db::set_setting(&conn, "greader_password", "pw-f").unwrap();
+    server.set_fever_serve_entries(true);
+    let db = Arc::new(Mutex::new(conn));
+    let http = app_lib::ingestion::build_client(10);
+
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("fever feeds phase");
+    // e1-e3 携带默认正文（断言只经 with_ids 请求集合间接锁定，id 无需绑定）
+    let _e1 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p1", "P1", false, false);
+    let _e2 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p2", "P2", false, false);
+    let _e3 = server.add_entry_ret(10, "http://127.0.0.1:8765/fever/p3", "P3", false, false);
+    let e4 = server.add_entry_full(
+        10,
+        "http://127.0.0.1:8765/fever/p4",
+        "P4",
+        false,
+        false,
+        "", // 服务端空正文：本地拉入后仍无正文，每轮留在 with_ids 通道
+        Vec::new(),
+    );
+
+    // 首轮 full：历史回溯取尽四条；e1-e3 有正文，e4 空正文
+    let r1 = sync::states_phase(&db, &http, true)
+        .await
+        .expect("fever full");
+    assert!(
+        r1.errors.is_empty(),
+        "fever full 轮不应有错误：{:?}",
+        r1.errors
+    );
+
+    let log_before = server.fever_query_log().len();
+    let r2 = sync::states_phase(&db, &http, false)
+        .await
+        .expect("fever light");
+    assert!(
+        r2.errors.is_empty(),
+        "fever light 轮不应有错误：{:?}",
+        r2.errors
+    );
+
+    let mut requested: Vec<i64> = Vec::new();
+    for q in server.fever_query_log().into_iter().skip(log_before) {
+        if let Some(pos) = q.find("with_ids=") {
+            let csv = q[pos + "with_ids=".len()..]
+                .split('&')
+                .next()
+                .unwrap_or_default();
+            requested.extend(csv.split(',').filter_map(|s| s.parse::<i64>().ok()));
+        }
+    }
+    requested.sort_unstable();
+    requested.dedup();
+    assert_eq!(
+        requested,
+        vec![e4],
+        "with_ids 必须只回补无正文的 e4；已有正文的 e1-e3 不得重拉（审计 F1 固定成本）"
+    );
+    {
+        let conn = db.lock().await;
+        let bound: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM articles WHERE url = ?1 AND remote_id = ?2",
+                rusqlite::params!["http://127.0.0.1:8765/fever/p4", e4],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bound, 1, "e4 经 with_ids 回补后保持绑定");
     }
 }

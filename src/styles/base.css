@@ -807,6 +807,10 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  /* 320px 最小列宽下标题+三按钮放不下一行：让筛选组换到第二行（margin-left:auto
+     保持靠右），标题不再被收缩成单字省略；宽列下单行形态不变。
+     Note: 窄列标题换行取舍 — 见 .agents/notes/implemented/bug-fix/2026-10-31-计数落地写结算判据与窄列视觉修复.md */
+  flex-wrap: wrap;
   -webkit-app-region: no-drag;
 }
 
@@ -835,6 +839,8 @@ body {
   gap: 6px;
   flex-wrap: nowrap;
   flex-shrink: 0;
+  /* 换行后仍贴右缘；单行时吸收剩余空间，与 space-between 同形 */
+  margin-left: auto;
 }
 
 .toggle-action-btn {
@@ -1289,6 +1295,11 @@ body {
 .gallery-card img {
   width: 100%;
   display: block;
+  /* 加载期占位：auto <ratio> = 有固有比例用固有（加载后自然比例），无则回落
+     4:3——与 estimateGalleryCardHeight 同为近似占位，真实高度由
+     measureElement 修正，消除「加载期塌缩 → 加载后跳高」的瀑布流重排。
+     Note: 画廊加载占位 — 见 .agents/notes/implemented/bug-fix/2026-10-31-计数落地写结算判据与窄列视觉修复.md */
+  aspect-ratio: auto 4 / 3;
 }
 
 /* 无封面图（源没给 image_url）的画廊卡片占位：保持卡片高度一致，不显示破图 */

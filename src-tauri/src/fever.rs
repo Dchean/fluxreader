@@ -33,6 +33,12 @@
 //! - `unread_item_ids`/`saved_item_ids` 是权威**全量** id 集合（不受 50 条限制）；
 //!   响应缺该字段是协议错误，**不得当空集合**（空集合会触发双向对账清状态）。
 //! - `mark=item` 只接受**单个** id（逗号分隔无效），推送需逐个条目调用。
+//! - **mark 星标语义按服务端变体分野（B1）**：FreshRSS（api_version 实测 4）的
+//!   `as=saved/unsaved` 是绝对赋值（`markFavorite(id, true/false)`）；Miniflux
+//!   （固定源码 `baseResponse` 恒为 `api_version: 3`）的 `as=saved` 与
+//!   `as=unsaved` **都**走 `storage.ToggleStarred` 取反——星标推送经
+//!   [`FeverClient::push_star_state`] 按 api_version 分派，toggle 型先探测当前
+//!   is_saved、仅在与目标不一致时发送。
 //! - 不支持添加订阅（Fever 协议无写订阅端点）——`quick_add` 由上层降级处理。
 //!
 //! 结构映射：Fever 的 item id 即 Miniflux entry id（十进制），与 Google Reader
@@ -49,6 +55,8 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 /* ============================================================
 Fever 数值 id（审计 F03）
@@ -251,11 +259,18 @@ async fn read_envelope(mut resp: reqwest::Response, action: &str) -> AppResult<F
 const AUTH_FAILED_MSG: &str =
     "Fever 认证失败（api_key 不正确；FreshRSS 请使用个人设置里的「API 密码」）";
 
+/// mark 星标语义的变体分界：`api_version >= 4`（FreshRSS 实测 4）为绝对赋值；
+/// `api_version 3`（Miniflux 固定源码）为 toggle（saved/unsaved 都取反）。
+const STAR_ABSOLUTE_MIN_API_VERSION: i64 = 4;
+
 #[derive(Clone)]
 pub struct FeverClient {
     base: String,
     api_key: String,
     http: Client,
+    /// 最近一次响应信封里的 api_version（0 = 本轮尚无任何响应）。Fever 每个
+    /// 响应都携带该字段，星标推送的变体分派据此判定，无需额外探测请求。
+    api_version: Arc<AtomicI64>,
 }
 
 impl FeverClient {
@@ -267,6 +282,7 @@ impl FeverClient {
             base: endpoint.trim_end_matches('/').to_string(),
             api_key,
             http,
+            api_version: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -330,6 +346,7 @@ impl FeverClient {
             return Ok((None, status));
         }
         let env: FeverEnvelope = read_envelope(resp, action).await?;
+        self.api_version.store(env.api_version, Ordering::Relaxed);
         // TASK-059（owner 授权放宽）：原为 `!= 3` 即拒绝，但 FreshRSS 的 Fever 实测返回
         // `{"api_version":4,"auth":0}`——它用 4 表示自身实现版本，而**信封结构与 v3 一致**
         // （`api_version` + `auth` 两字段语义不变）。故改为**兼容 3 及以上**。
@@ -404,6 +421,7 @@ impl FeverClient {
             base: base.trim().trim_end_matches('/').to_string(),
             api_key: self.api_key.clone(),
             http: self.http.clone(),
+            api_version: self.api_version.clone(),
         }
     }
 
@@ -548,8 +566,11 @@ impl FeverClient {
     /// 历史回溯：`id < max_id` 的最近一页（`max_id` 不超过 50 条/页）。
     ///
     /// 语义（协议/两家固定实现一致，见模块头）：「向更旧翻页」——调用方以
-    /// **页内最小 id** 作为下一页游标（与页内顺序无关：FreshRSS DESC、
-    /// Miniflux 升序），重复请求直到返回空数组即取尽服务端保留历史。
+    /// **页内最小 id** 作为下一页游标（与页内顺序无关；2026-10-31 源码更正：
+    /// 两家固定实现的 max_id 页**均为** `ORDER BY id DESC`——FreshRSS
+    /// `p/api/fever.php` 的 `findEntries` 与 Miniflux max_id 分支的
+    /// `WithSorting("id", "DESC")`，升序页只是测试夹具的泛化鲁棒性对照），
+    /// 重复请求直到返回空数组即取尽服务端保留历史。
     pub async fn items_before(&self, max_id: i64) -> AppResult<Vec<ItemContent>> {
         let env = self
             .call("items", &[("max_id", max_id.to_string())])
@@ -593,6 +614,50 @@ impl FeverClient {
     }
     pub async fn mark_unstarred(&self, ids: &[i64]) -> AppResult<()> {
         self.mark_items(ids, "unsaved").await
+    }
+
+    /// 收藏推送的幂等收敛入口（B1：Miniflux toggle 星标翻转修复）。
+    ///
+    /// - api_version >= 4（FreshRSS 家族）：mark 是绝对赋值，保持总是发送
+    ///   （零探测开销；重复发送对绝对赋值幂等）。
+    /// - api_version 3（Miniflux 家族）或版本未知（本轮尚无任何响应）：先以
+    ///   `items&with_ids` 探测当前 is_saved，**仅当当前态≠目标态才发送**——
+    ///   「响应丢失后的重发」与「另一设备已改到目标态」都收敛到用户意图；
+    ///   盲发在 toggle 型上会把已处目标态的条目翻反。
+    ///
+    /// 探测失败或条目在响应中不可见 → 保守报错（队列保留，下轮重试），绝不盲发。
+    /// 返回是否实际发送 mark（false = 服务端已处目标态，无需发送）。
+    pub async fn push_star_state(&self, id: i64, target_saved: bool) -> AppResult<bool> {
+        if self.api_version.load(Ordering::Relaxed) >= STAR_ABSOLUTE_MIN_API_VERSION {
+            if target_saved {
+                self.mark_starred(&[id]).await?;
+            } else {
+                self.mark_unstarred(&[id]).await?;
+            }
+            return Ok(true);
+        }
+        let items = self.items_with_ids(&[id]).await?;
+        let current_saved = items
+            .iter()
+            .find(|it| it.id == id.to_string())
+            .map(|it| crate::greader::has_tag(&it.categories, tags::STARRED))
+            .ok_or_else(|| {
+                AppError::new(
+                    "protocol",
+                    format!(
+                        "Fever 探测收藏态失败：条目 {id} 不在 with_ids 响应中（保守跳过，不盲发）"
+                    ),
+                )
+            })?;
+        if current_saved == target_saved {
+            return Ok(false);
+        }
+        if target_saved {
+            self.mark_starred(&[id]).await?;
+        } else {
+            self.mark_unstarred(&[id]).await?;
+        }
+        Ok(true)
     }
 
     async fn mark_items(&self, ids: &[i64], mark: &str) -> AppResult<()> {

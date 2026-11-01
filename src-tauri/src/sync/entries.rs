@@ -233,7 +233,14 @@ pub(super) fn merge_pulled_entry(
     let eid = item_numeric_id(e);
     let feed_remote = item_feed_id(e);
     let remote_read = greader::has_tag(&e.categories, "/com.google/read");
-    let norm = item_url(e).as_deref().map(db::normalize_url);
+    // B2（空 link 身份）：normalize_url 把空串归一为 ''，而 '' 是合法匹配键——
+    // 同轮多条空 link 条目会经 feed_url_to_id[""] 互相借位绑定。与入库路径
+    // （normalized_url_key）同口径：空/纯空白 link 无身份语义，匹配键为 None。
+    // Note: 空 link 身份契约与迁移边界 — 见 .agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md
+    let norm = item_url(e)
+        .as_deref()
+        .map(db::normalize_url)
+        .filter(|n| !n.is_empty());
 
     // ① 精确协议 entry ID 优先。
     if let Some(eid) = eid {
@@ -405,7 +412,11 @@ fn upsert_remote_entry(
     maps.id_to_versions.entry(aid).or_insert((0, 0));
     // OPT-008B：把轮内新增行补进 URL 映射族——同一轮后续条目/广播按最新
     // 行集选行（否则本轮新行要到下一轮快照才可见，时序偏差会漏匹配）。
-    let norm = a.url.as_deref().map(db::normalize_url);
+    let norm = a
+        .url
+        .as_deref()
+        .map(db::normalize_url)
+        .filter(|n| !n.is_empty());
     if let Some(norm) = norm.as_deref() {
         maps.url_to_id.entry(norm.to_string()).or_insert(aid);
         maps.feed_url_to_id

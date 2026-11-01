@@ -12,15 +12,20 @@ on:
   pull_request:
     branches: [main]
 
+# CI 的 GITHUB_TOKEN 只被 checkout 消费（只读）：显式收口最小权限，
+# 与 release.yml 的 job 级 contents: write 形成分域。
+permissions:
+  contents: read
+
 jobs:
   frontend:
     name: Type-check, lint & build frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .node-version
           cache: npm
@@ -55,17 +60,17 @@ jobs:
     # 与 release workflow（windows-latest）平台不一致。故 rust job 固定在 Windows。
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         id: checkout
 
       - name: Setup Rust
         id: toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
 
       - name: Cache Rust build
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri
 
@@ -80,6 +85,10 @@ jobs:
       - name: Format (cargo fmt --check)
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Type check (cargo check)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 
       - name: Lint (clippy, deny warnings)
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}

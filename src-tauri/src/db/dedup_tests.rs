@@ -1049,3 +1049,287 @@ fn opt021_smart_dedup_nonempty_counts_match_filtered_lists() {
         );
     }
 }
+
+/* ============================================================
+B2：空 link 的 url_norm 身份（'' 跨源塌缩修复）与 F1 feed 级
+scope dedup 计数改写的行级参照等价。
+============================================================ */
+
+/// B2（空 link 塌缩）：空/纯空白 link 的条目 url_norm 必须是 NULL。
+/// '' 是合法匹配键——修前 3 个不同源的空 link 条目共享同一 url_norm 组：
+/// smartDedup 全部视图只显示 1 行代表、标读其一经读闭包广播其余。
+/// 修后各自独立成行，标读互不传播；有正常 link 的同文组去重不受影响
+/// （display_dedup_* 既有用例锁定）。
+#[test]
+fn blank_link_entries_stay_independent_without_group_broadcast() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    MIGRATIONS.to_latest(&mut conn).unwrap();
+    set_smart_dedup(&conn, true);
+    let folder = create_folder(&conn, "空link夹具", "article").unwrap();
+    let mut rows: Vec<i64> = Vec::new();
+    for i in 1..=3i64 {
+        let feed = insert_feed(
+            &conn,
+            &format!("https://blank.example/f{i}"),
+            None,
+            &format!("f{i}"),
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let mut a = new_article("", &format!("g{i}"));
+        if i == 2 {
+            a.url = Some("   ".into()); // 纯空白与空串同口径
+        }
+        let (id, inserted) = upsert_article_with_feed(&conn, feed, &a, false).unwrap();
+        assert!(inserted, "空 link 条目必须各自成行（feed {i}）");
+        rows.push(id);
+    }
+
+    let empty_norms: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE url_norm = ''",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(empty_norms, 0, "空/纯空白 link 不得产生 '' 匹配键");
+    let null_norms: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM articles WHERE url_norm IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(null_norms, 3, "空/纯空白 link 的匹配键必须是 NULL");
+
+    // smartDedup 开启：3 行全部可见（NULL 不成组，无跨源塌缩）
+    assert_eq!(
+        ids_of(&conn, &dq(None, None, false, None)).len(),
+        3,
+        "不同源的空 link 条目不得塌缩成 1 行"
+    );
+    let sc = scope_counts(&conn, None).unwrap();
+    assert_eq!(sc.all.total, 3, "计数与列表同口径（3 行）");
+    assert_eq!(sc.all.unread, 3);
+
+    // 标读其一：NULL 组无读闭包目标，不广播其余
+    set_read(&conn, rows[0], true).unwrap();
+    for id in rows.iter().skip(1) {
+        let is_read: i64 = conn
+            .query_row("SELECT is_read FROM articles WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(is_read, 0, "空 link 条目之间不得经读闭包广播");
+    }
+}
+
+/// B2（空 link 身份）：guid 命中刷新携带空白 link 时不得把既有 url_norm
+/// 洗成 ''/NULL——归一键缺失时保持原值。修前 CASE 以原始 url 判空，
+/// `"  "` 通过 `?2 != ''` 检查后把 url_norm 覆盖成 normalize("  ") = ''。
+#[test]
+fn blank_link_refresh_keeps_existing_url_norm() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    MIGRATIONS.to_latest(&mut conn).unwrap();
+    let folder = create_folder(&conn, "刷新夹具", "article").unwrap();
+    let feed = insert_feed(
+        &conn,
+        "https://blank.example/refresh",
+        None,
+        "f",
+        None,
+        folder,
+        "inherit",
+        false,
+        false,
+    )
+    .unwrap();
+    let first = new_article("https://n.example/keep", "g-refresh");
+    let (id, inserted) = upsert_article_with_feed(&conn, feed, &first, false).unwrap();
+    assert!(inserted);
+    let norm_before: Option<String> = conn
+        .query_row("SELECT url_norm FROM articles WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+
+    // 同 guid 重放，但 link 变成纯空白
+    let mut blank = new_article("", "g-refresh");
+    blank.url = Some("   ".into());
+    let (id2, inserted2) = upsert_article_with_feed(&conn, feed, &blank, false).unwrap();
+    assert_eq!(id2, id, "同 guid 重放必须命中同一行");
+    assert!(!inserted2);
+    let norm_after: Option<String> = conn
+        .query_row("SELECT url_norm FROM articles WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        norm_after, norm_before,
+        "空白 link 刷新不得改写既有 url_norm"
+    );
+    assert_ne!(
+        norm_after.as_deref(),
+        Some(""),
+        "url_norm 不得落成 ''（跨源塌缩键）"
+    );
+}
+
+/// B2（F1 等价性）：feed 级 scope dedup 计数与**行级参照实现**逐字段一致。
+/// 参照语义 = 生产谓词：同 feed 内、同 url_norm（非 NULL）的更低 id 行在
+/// 同一视图谓词下存在 → 本行不是该视图的代表；NULL url_norm 永不成组。
+/// 列表侧同口径已由 opt021_smart_dedup_nonempty_counts_match_filtered_lists
+/// 经另一条 SQL 形态（dedup_exists_clause 标量子查询）锁定；本用例用独立
+/// 参照实现锁「去掉 JOIN feeds 的改写」语义不变（四视图 × 三层级）。
+#[test]
+fn feed_scope_dedup_counts_match_row_level_reference() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    MIGRATIONS.to_latest(&mut conn).unwrap();
+    set_smart_dedup(&conn, true);
+    let folder = create_folder(&conn, "参照夹具", "article").unwrap();
+    let f = [1, 2, 3]
+        .iter()
+        .map(|i| {
+            insert_feed(
+                &conn,
+                &format!("https://f1ref.example/f{i}"),
+                None,
+                &format!("f{i}"),
+                None,
+                folder,
+                "inherit",
+                false,
+                false,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let old = "2026-01-01T00:00:00Z".to_string();
+    let today = chrono::Local::now().to_rfc3339();
+    // (feed 下标, url_norm, is_read, is_starred, 是否今天)
+    // 布局覆盖：跨源同 norm 组（U1: f0/f1、U3: f0/f2）、同源同 norm 组
+    // （U1、U2 在 f1 内多行）、NULL norm 行（f2 空白 link）、today/已读/收藏混合。
+    let spec: [(usize, Option<&str>, i64, i64, bool); 9] = [
+        (0, Some("u1"), 0, 0, false),
+        (1, Some("u1"), 1, 1, false),
+        (1, Some("u1"), 0, 0, true),
+        (0, Some("u2"), 0, 1, false),
+        (1, Some("u2"), 0, 0, true),
+        (2, None, 0, 0, true),
+        (2, None, 0, 1, false),
+        (0, Some("u3"), 1, 0, false),
+        (2, Some("u3"), 0, 0, false),
+    ];
+    let mut rows: Vec<(i64, usize, Option<String>, bool, bool, bool)> = Vec::new();
+    for (idx, (fi, norm, read, star, is_today)) in spec.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO articles (feed_id, guid, url, url_norm, title, published_at, is_read, is_starred)
+             VALUES (?1, ?2, ?3, ?4, 't', ?5, ?6, ?7)",
+            rusqlite::params![
+                f[*fi],
+                format!("ref-g{idx}"),
+                norm,
+                norm,
+                if *is_today { today.clone() } else { old.clone() },
+                read,
+                star,
+            ],
+        )
+        .unwrap();
+        rows.push((
+            conn.last_insert_rowid(),
+            *fi,
+            norm.map(str::to_string),
+            *read != 0,
+            *star != 0,
+            *is_today,
+        ));
+    }
+
+    // 行级参照：视图谓词同时用于「本行入集」与「更低 id 同组行 → 非代表」，
+    // 与 SQL 的 a 侧条件 / EXISTS 内 b 侧条件逐字同构。
+    type Row = (i64, usize, Option<String>, bool, bool, bool);
+    fn count_view(all: &[Row], scope_feed: Option<usize>, view: impl Fn(&Row) -> bool) -> i64 {
+        let in_scope: Vec<&Row> = all
+            .iter()
+            .filter(|r| scope_feed.map_or(true, |fi| r.1 == fi))
+            .collect();
+        in_scope
+            .iter()
+            .filter(|r| {
+                view(r)
+                    && r.2.as_ref().map_or(true, |n| {
+                        !in_scope
+                            .iter()
+                            .any(|o| o.0 < r.0 && o.2.as_deref() == Some(n.as_str()) && view(o))
+                    })
+            })
+            .count() as i64
+    }
+    let unread = |r: &Row| !r.3;
+    let starred = |r: &Row| r.4;
+    let is_today = |r: &Row| r.5;
+    let noview = |_: &Row| true;
+
+    let snapshot = counts_snapshot(&conn, None).unwrap();
+    let check = |label: &str, got: (i64, i64, i64, i64), want: (i64, i64, i64, i64)| {
+        assert_eq!(got, want, "{label} 计数与行级参照不一致");
+    };
+    check(
+        "全部",
+        (
+            snapshot.scope.all.total,
+            snapshot.scope.all.unread,
+            snapshot.scope.all.starred,
+            snapshot.scope.all.today,
+        ),
+        (
+            count_view(&rows, None, noview),
+            count_view(&rows, None, unread),
+            count_view(&rows, None, starred),
+            count_view(&rows, None, is_today),
+        ),
+    );
+    check(
+        "分类",
+        (
+            snapshot.scope.folders[0].total,
+            snapshot.scope.folders[0].unread,
+            snapshot.scope.folders[0].starred,
+            snapshot.scope.folders[0].today,
+        ),
+        (
+            count_view(&rows, None, noview),
+            count_view(&rows, None, unread),
+            count_view(&rows, None, starred),
+            count_view(&rows, None, is_today),
+        ),
+    );
+    assert_eq!(
+        snapshot.scope.feeds.len(),
+        3,
+        "三个源都必须出现在 feed 级计数里"
+    );
+    for (fi, feed_counts) in snapshot.scope.feeds.iter().enumerate() {
+        assert_eq!(feed_counts.scope_id, f[fi]);
+        check(
+            &format!("源 {}", feed_counts.scope_id),
+            (
+                feed_counts.total,
+                feed_counts.unread,
+                feed_counts.starred,
+                feed_counts.today,
+            ),
+            (
+                count_view(&rows, Some(fi), noview),
+                count_view(&rows, Some(fi), unread),
+                count_view(&rows, Some(fi), starred),
+                count_view(&rows, Some(fi), is_today),
+            ),
+        );
+    }
+}

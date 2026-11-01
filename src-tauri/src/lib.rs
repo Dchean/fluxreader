@@ -167,6 +167,9 @@ pub fn run() {
             // OPT-009 B3：subscription-outbox-changed 事件目标注册（订阅写回
             // 入队/确认/失败/local_only 标记后发，设置页持久回执即时跟随）。
             sync::init_subscription_event_target(app.handle().clone());
+            // W3-1：同步会话缓存启用（键 = 账号身份+代际，TTL 10 分钟，401 回落
+            // 由 sync 引擎入口承担）。未注册时引擎与无缓存行为一致（集成测试不注册）。
+            sync::init_session_cache();
 
             // 后台刷新调度循环（读 app_settings 的 autoRefresh/refreshInterval）
             scheduler::spawn_scheduler(app.handle().clone());
@@ -225,6 +228,14 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // W3-3：窗口获得焦点 → 触发一次 light 同步（60s 节流；autoSync 开启
+            // 且有凭据时执行，走 outbox 写回 + sync_light 全链——与后台自动同步
+            // 同一执行体，不影响 30 分钟周期的既有节奏）。
+            if let tauri::WindowEvent::Focused(true) = event {
+                if window.label() == "main" {
+                    scheduler::on_window_focused(window.app_handle().clone());
+                }
+            }
             // 关闭按钮：首次关闭询问（closePromptShown 未置位 → 弹窗让用户选）；
             // 已选过 → 直接按 closeToTray 设置走（隐藏到托盘 / 退出）
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

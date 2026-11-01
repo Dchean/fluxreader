@@ -251,7 +251,12 @@ fn clone_children(src: NodeRef<'_, Node>, dst: &mut NodeMut<'_, Node>) {
     }
 }
 
-/// HTML → 纯文本（snippet / 正文文本列）
+/// HTML → 纯文本（snippet / 正文文本列）。
+/// script/style 子树整体跳过：二者内容用户不可见（渲染链 sanitize 剥离
+/// script、style 本就不在保留标签内），body_text 必须与「用户可见」同口径，
+/// 否则内联脚本/样式文本会混入搜索索引与 AI 摘要输入。
+// Note: B4 安全横向收口（body_text 剔除 script/style 子树） — 见
+// .agents/notes/implemented/bug-fix/2026-10-31-安全横向面收口.md
 pub fn html_to_text(html: &str) -> String {
     let doc = Html::parse_document(html);
     let selector: LazyLock<Selector> =
@@ -259,9 +264,35 @@ pub fn html_to_text(html: &str) -> String {
     let text = doc
         .select(&selector)
         .next()
-        .map(|b| b.text().collect::<String>())
+        .map(|b| {
+            b.descendants()
+                .filter(|n| !inside_hidden_text_subtree(*n))
+                .filter_map(|n| match n.value() {
+                    Node::Text(t) => Some(t.to_string()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
         .unwrap_or_default();
     normalize_ws(&text)
+}
+
+/// 节点本身或任一祖先是 script/style（其子树文本用户不可见，不进 body_text）。
+/// 按解析树上溯判定而非字符串剥除：注释/属性引号/大小写变体由 html5ever
+/// 语义吸收（同 iframe 策略的 R1 教训）。
+fn inside_hidden_text_subtree(mut node: NodeRef<'_, Node>) -> bool {
+    loop {
+        if let Node::Element(el) = node.value() {
+            let name = &*el.name.local;
+            if name == "script" || name == "style" {
+                return true;
+            }
+        }
+        match node.parent() {
+            Some(p) => node = p,
+            None => return false,
+        }
+    }
 }
 
 /// 正文第一张图（卡片缩略图兜底）
@@ -432,5 +463,49 @@ mod tests {
             let out = sanitize(input, None);
             assert!(!out.contains("<iframe"), "{input} → {out}");
         }
+    }
+
+    /// B4：html_to_text 不得把 script/style 子树文本带进正文文本列
+    /// （用户不可见内容不得进入搜索索引与 AI 摘要输入）；可见正文不受影响。
+    #[test]
+    fn html_to_text_excludes_script_and_style_subtree_text() {
+        let html = r#"<p>可见正文段落</p><script>hidden指令</script><style>.x { color: red; } /* 样式藏匿词 */</style><p>更多可见内容</p>"#;
+        let out = html_to_text(html);
+        assert!(out.contains("可见正文段落"), "可见正文必须保留: {out}");
+        assert!(out.contains("更多可见内容"), "后续可见正文必须保留: {out}");
+        assert!(
+            !out.contains("hidden指令"),
+            "script 文本不得进入 body_text: {out}"
+        );
+        assert!(
+            !out.contains("藏匿词"),
+            "style 文本不得进入 body_text: {out}"
+        );
+    }
+
+    /// 大小写写法、嵌套（svg 内 style）与 head/title 都按解析树语义判定；
+    /// body-only 口径保持（title 不进 body_text）。
+    #[test]
+    fn html_to_text_hidden_subtree_variants_follow_parser_semantics() {
+        // 大写标签名 + script 内伪标签文本（不得被字符串切片式误判迷惑）
+        let mixed = html_to_text(r#"<SCRIPT>藏匿甲</SCRIPT><P>可见甲</P>"#);
+        assert!(
+            mixed.contains("可见甲") && !mixed.contains("藏匿甲"),
+            "{mixed}"
+        );
+        // 外来内容（svg）内的 style 同样剔除
+        let nested = html_to_text(r#"<p>可见乙</p><svg><style>藏匿乙</style></svg>"#);
+        assert!(
+            nested.contains("可见乙") && !nested.contains("藏匿乙"),
+            "{nested}"
+        );
+        // head/title 不进入 body_text（既有 body-only 口径）
+        let head = html_to_text(
+            r#"<html><head><title>页面标题藏匿词</title></head><body><p>可见丙</p></body></html>"#,
+        );
+        assert!(
+            head.contains("可见丙") && !head.contains("页面标题藏匿词"),
+            "{head}"
+        );
     }
 }

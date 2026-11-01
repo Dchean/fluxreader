@@ -2229,6 +2229,29 @@ export async function run(ctx) {
 }
 
 /* ============================================================
+   B3（审计修复 P2/P3 视觉项）：窄列标题换行 + 画廊加载占位的 CSS 契约。
+   无 DOM 布局引擎可断言换行/占位的实测几何（harness offsetHeight 是替身），
+   证据形态与 fix-11/12 / opt012-e1 一致：锁 base.css 规则形态（删规则即红）。
+   ============================================================ */
+{
+  const fsB3 = await import('node:fs');
+  const cssB3 = fsB3.readFileSync(new URL('../../src/styles/base.css', import.meta.url), 'utf8');
+  /* 标题截断（320px 列宽「文章 · 收藏」→「文…」）：修复 = control-bar 主行允许
+     换行（筛选组掉到第二行、margin-left:auto 保持靠右），标题不再被 flex 挤缩。
+     删除 flex-wrap 或靠右锚点即红。 */
+  checkNew('(b3-ui1) 窄列标题可读：.control-bar-main-row 允许换行（flex-wrap:wrap）+ .filter-sort-group margin-left:auto 贴右——删任一即回退为标题被挤成单字省略',
+    /\.control-bar-main-row\s*\{[^}]*flex-wrap:\s*wrap/s.test(cssB3)
+    && /\.filter-sort-group\s*\{[^}]*margin-left:\s*auto/s.test(cssB3));
+  /* 画廊加载塌缩（无占位 → 卡片 63.5px ↔ 427px 跳变）：.gallery-card img 必须带
+     auto 4/3 占位（有固有比例用固有 = 加载后自然比例不变；无则 4:3 回落 = 加载期
+     占位与估算高同口径）。width:100% 与不裁切（无 object-fit）的既有契约保持。 */
+  checkNew('(b3-ui2) 画廊加载占位：.gallery-card img 带 aspect-ratio:auto 4/3（加载后固有比例优先），且 width:100%、无 object-fit 的自然比例契约不破坏',
+    /\.gallery-card img\s*\{[^}]*aspect-ratio:\s*auto\s+4\s*\/\s*3/s.test(cssB3)
+    && /\.gallery-card img\s*\{[^}]*width:\s*100%/s.test(cssB3)
+    && !/\.gallery-card img\s*\{[^}]*object-fit/s.test(cssB3));
+}
+
+/* ============================================================
    OPT-015（F23 媒体键）：SMTC 媒体动作幂等回归。
    证据分层（如实说明）：
    - 行为层：直接驱动**真实 store**（dist-test 同一模块图实例）的

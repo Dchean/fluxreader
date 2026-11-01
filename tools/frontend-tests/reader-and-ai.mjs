@@ -64,6 +64,22 @@ export async function run(ctx) {
   checkNew('(l) silent 模式失败不弹 toast（源级自动摘要不打扰用户）', lRej.toasts.length === 0);
 
   await bootFixture();
+  store.setState({ toasts: [] });
+  S.aiSum = {
+    deltas: [],
+    error: null,
+    reject: { code: 'aiTooLong', message: '文章正文 90000 字节，超过单次摘要预算 60000 字节：未生成摘要（不截断、不假称完整）' },
+    finish: true,
+    holdIds: [],
+  };
+  store.getState().summarizeEntry('105');
+  await nTick(20);
+  const lTypedRej = store.getState();
+  checkNew('(l) 摘要带后端分型码 reject：文案原样透传（aiTooLong 保留超预算语义，不再一律「不可达」）',
+    lTypedRej.summaryErrors['105'] === '文章正文 90000 字节，超过单次摘要预算 60000 字节：未生成摘要（不截断、不假称完整）'
+    && lTypedRej.toasts[0]?.text.startsWith('摘要失败：文章正文 90000 字节'));
+
+  await bootFixture();
   S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
   S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
   S.invokeCalls.length = 0;
@@ -148,6 +164,14 @@ export async function run(ctx) {
     store.getState().rawTranslatedIds['201'] === undefined
     && bodyOf(store.getState(), '201').translatedContent === ''
     && store.getState().translateErrors['201'] === 'AI 服务未配置或不可达');
+
+  await bootFixture();
+  S.detailImpl = (id) => mkRow({ id, content_html: '<p>详情</p>', translated_content: '<p>已消毒译文</p>' });
+  S.aiTr = { deltas: [], error: null, reject: { code: 'aiNotConfigured', message: '请先在设置中配置 AI 服务' }, finish: true, holdIds: [] };
+  store.getState().translateEntry('201');
+  await nTick(20);
+  checkNew('(l2) 翻译带后端分型码 reject：文案原样透传（aiNotConfigured →「请先在设置中配置 AI 服务」）',
+    store.getState().translateErrors['201'] === '请先在设置中配置 AI 服务');
 
   /* ---------- (n7) TASK-065：锚定打开复位阅读视图标志（与 selectArticle 同口径） ---------- */
   await bootFixture();
@@ -528,7 +552,8 @@ export async function run(ctx) {
     && store.getState().isShowingTranslatedProse === true
     && bodyOf(store.getState(), '105').translatedContent === '<p>当前文章成功译文</p>');
 
-  /* A/B 并发：A 的迟到流错误不得关闭 B 的全局 translating / 译文展示。 */
+  /* A/B 并发：全局 translating 是单布尔，终态复位无条件执行（修前被 ownsView
+     门控 → 发起后切走即卡死）；B 的按 id 在途真值在 translatingIds，展示态不受影响。 */
   await bootFixture();
   S.detailImpl = (id) => mkRow({
     id,
@@ -553,9 +578,10 @@ export async function run(ctx) {
   opt020ReaderAStream.ch.onmessage?.({ type: 'error', data: 'A 迟到流失败' });
   opt020ReaderAStream.resolve('');
   await nTick(5);
-  checkNew('(OPT-020 reader translation A/B) A 迟到流失败不得关闭 B 的全局生成/译文展示',
+  checkNew('(OPT-020 reader translation A/B) A 迟到流失败：全局布尔终态复位（不随 ownsView 门控），B 的按 id 在途态与译文展示不受影响',
     store.getState().activeArticleId === '104'
-    && store.getState().translating === true
+    && store.getState().translating === false
+    && store.getState().translatingIds['104'] === true
     && store.getState().isShowingTranslatedProse === true
     && store.getState().translateErrors['101'] === 'A 迟到流失败');
   opt020ReaderBStream.ch.onmessage?.({ type: 'delta', data: '<p>B 并发译文</p>' });
@@ -593,10 +619,11 @@ export async function run(ctx) {
     const opt020ReaderBReject = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 104);
     rejectReaderA?.({ message: 'A 迟到 reject' });
     await nTick(10);
-    checkNew('(OPT-020 reader translation A/B) A 迟到 reject 不得关闭 B 的全局生成/译文展示',
+  checkNew('(OPT-020 reader translation A/B) A 迟到 reject：全局布尔终态复位，B 的按 id 在途态与译文展示不受影响',
       !!opt020ReaderBReject
       && store.getState().activeArticleId === '104'
-      && store.getState().translating === true
+    && store.getState().translating === false
+    && store.getState().translatingIds['104'] === true
       && store.getState().isShowingTranslatedProse === true);
     opt020ReaderBReject.ch.onmessage?.({ type: 'done' });
     opt020ReaderBReject.resolve('');
@@ -609,7 +636,7 @@ export async function run(ctx) {
     restoreReaderReject();
   }
 
-  /* A 的迟到 done 也不得清掉仍在生成的 B 的全局 translating。 */
+  /* A 的迟到 done 同样执行全局布尔终态复位（B 的按 id 在途态不受影响）。 */
   await bootFixture();
   S.detailImpl = (id) => mkRow({
     id,
@@ -629,9 +656,10 @@ export async function run(ctx) {
   opt020ReaderASuccess.ch.onmessage?.({ type: 'done' });
   opt020ReaderASuccess.resolve('');
   await nTick(5);
-  checkNew('(OPT-020 reader translation A/B) A 迟到 done 不得清掉仍在生成的 B 的全局 translating',
+  checkNew('(OPT-020 reader translation A/B) A 迟到 done：全局布尔终态复位，B 的按 id 在途态保持',
     store.getState().activeArticleId === '104'
-    && store.getState().translating === true
+    && store.getState().translating === false
+    && store.getState().translatingIds['104'] === true
     && store.getState().isShowingTranslatedProse === true);
   opt020ReaderBSuccess.ch.onmessage?.({ type: 'done' });
   opt020ReaderBSuccess.resolve('');
