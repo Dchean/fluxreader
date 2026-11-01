@@ -963,16 +963,22 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
       /* 浏览器开发预览：亮出 mock 数据供看效果。动态 import（仅本分支可达）：
          生产构建（Tauri）走不到这里，vite 把 mockData 切成独立 chunk，
-         主 bundle 不再携带 10KB 级演示数据。 */
-      const { createInitialCategories, createInitialEntries } = await import('../../mockData');
-      const cats = createInitialCategories();
-      set({
-        categories: cats,
-        entries: createInitialEntries(),
-        feedIndex: buildFeedIndex(cats),
-        dataMode: 'mock',
-        dataLoading: false,
-      });
+         主 bundle 不再携带 10KB 级演示数据。chunk 加载失败与后端分支同契约
+         （复核 P3-2）：bootstrapError + 重试入口，dataLoading 不永卡骨架。 */
+      try {
+        const { createInitialCategories, createInitialEntries } = await import('../../mockData');
+        const cats = createInitialCategories();
+        set({
+          categories: cats,
+          entries: createInitialEntries(),
+          feedIndex: buildFeedIndex(cats),
+          dataMode: 'mock',
+          dataLoading: false,
+        });
+      } catch (e) {
+        console.error('mock data chunk load failed:', e);
+        set({ dataLoading: false, bootstrapError: extractError(e) });
+      }
       return;
     }
     try {

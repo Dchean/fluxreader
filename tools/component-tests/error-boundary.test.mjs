@@ -3,7 +3,8 @@
 // 取证方式（证据分层，与仓库既有口径一致）：
 // - 行为腿：真实挂载生产 ErrorBoundary，子树为**崩溃探针**（渲染时抛错的测试
 //   组件——不是替身被测组件，是触发边界的标准手段）。断言：全屏兜底态
-//   （role=alert + 复用 bootstrap-error 视觉）、componentDidCatch 记 log 且带
+//   （role=alert + 复用 bootstrap-error 文案视觉 + 自带全屏居中）、
+//   componentDidCatch 记 log 且带
 //   componentStack（归因需求，roadmap NotifCard #185）、重试清除错误态后子树
 //   重新渲染。
 // - 接线腿（App 是否真的包了产品树、窗口控制是否在边界外）：源码形态断言
@@ -37,8 +38,9 @@ componentTest('W4 ErrorBoundary：子树崩溃出全屏兜底 + componentDidCatc
   const entry = await mount(createElement(ErrorBoundary, null, createElement(Bomb)));
   await flush(2);
 
-  /* 兜底态：全屏视觉（复用启动失败态类）+ role=alert + 消息 + 重试入口 */
-  const fallback = entry.container.querySelector('.app-loading-splash.bootstrap-error');
+  /* 兜底态：全屏视觉（error-boundary-splash 自带居中，bootstrap-error 提供文案样式）
+     + role=alert + 消息 + 重试入口 */
+  const fallback = entry.container.querySelector('.error-boundary-splash.bootstrap-error');
   assert.ok(fallback, '崩溃后应渲染全屏兜底态');
   assert.equal(fallback.getAttribute('role'), 'alert', '兜底态应带 role="alert"');
   assert.ok(fallback.textContent.includes('探针崩溃'), '兜底态应展示错误消息');
@@ -55,6 +57,6 @@ componentTest('W4 ErrorBoundary：子树崩溃出全屏兜底 + componentDidCatc
   Bomb.disarm();
   await act(async () => { retry.click(); });
   await flush(2);
-  assert.equal(entry.container.querySelector('.app-loading-splash.bootstrap-error'), null,
+  assert.equal(entry.container.querySelector('.error-boundary-splash.bootstrap-error'), null,
     '重试后兜底态应消失（子树重新渲染）');
 });

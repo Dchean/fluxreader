@@ -341,11 +341,18 @@ function PlayerFullOverlay({
   const fullCardRef = useRef<HTMLDivElement>(null);
   const { onTrapKeyDown } = useFocusTrap(open, fullCardRef);
   return (
-    <div className={`player-full-overlay ${open ? 'open' : ''}`} role="dialog" aria-modal="true" onClick={onClose}>
+    /* 复核 P3-1：role 与 aria-label 必须同元素——读屏把带 role 的外层 overlay
+       播报为「无名对话框」；内层 card 只承担焦点陷阱面板（tabIndex=-1）。 */
+    <div
+      className={`player-full-overlay ${open ? 'open' : ''}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label="全屏播放器"
+      onClick={onClose}
+    >
       <div
         ref={fullCardRef}
         tabIndex={-1}
-        aria-label="全屏播放器"
         className="player-full-card"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={onTrapKeyDown}

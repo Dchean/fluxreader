@@ -13,7 +13,7 @@
 // 即「读改写 SQLite 单值」），连通性测试用受控 deferred 模拟「t1 慢、t2 快」。
 
 import assert from 'node:assert/strict';
-import { componentTest, mount, flush, resetStore, dom } from './harness.mjs';
+import { componentTest, mount, flush, resetStore, dom, useAppStore } from './harness.mjs';
 import { installBackend, clearInvokeCalls, invokeCalls, setPlan, resetPlan } from './fixtures.mjs';
 
 componentTest('W4 AiTab 串行化：测试在途时编辑 Key 再保存，新 Key 必须落库（不被旧快照覆盖）', { timeout: 40000 }, async () => {
@@ -84,5 +84,56 @@ componentTest('W4 AiTab 串行化：测试在途时编辑 Key 再保存，新 Ke
   const firstSave = cmdSeq.indexOf('save_ai_config');
   const secondSave = cmdSeq.lastIndexOf('save_ai_config');
   assert.ok(firstSave < secondSave, '落库按点击顺序：t1 先、s2 后（修复前 s2 先落、t1 后落）');
+  resetPlan();
+});
+
+componentTest('W4 AiTab 串行化：首笔写 reject 后队列续跑，后笔基于库内最新读取合并（then(op, op) 失败不阻断）', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  let saved = null;
+  let failNextSave = true;
+  setPlan({
+    get_ai_config: () => Promise.resolve(saved ? JSON.stringify(saved) : null),
+    /* 第一笔落库 reject（模拟 IPC/DB 失败）；其后恢复成功——锁定 enqueueAiConfigWrite
+       的 then(op, op)：链不因前序失败卡死，后笔照常执行。 */
+    save_ai_config: (args) => {
+      if (failNextSave) { failNextSave = false; return Promise.reject(new Error('db busy（注入失败）')); }
+      saved = JSON.parse(args.value);
+      return Promise.resolve(null);
+    },
+  });
+
+  const { createElement, act } = await import('react');
+  const { AiTab } = await import('../../src/components/settings/AiTab.tsx');
+  const entry = await mount(createElement(AiTab));
+  await flush(2);
+
+  const promptsBtn = [...entry.container.querySelectorAll('button')].find((b) => b.textContent.includes('保存提示词'));
+  assert.ok(promptsBtn, '「保存提示词」按钮存在');
+
+  /* 第一笔：落库 reject → 入口报「保存失败」，但链必须活着 */
+  await act(async () => { promptsBtn.click(); });
+  await flush(3);
+  assert.ok(useAppStore.getState().toasts.some((t) => t.text === '保存失败'),
+    '第一笔失败应如实提示（不静默）');
+
+  /* 第二笔：编辑提示词后再保存——若链被前序失败卡死，此笔永不执行 */
+  const summaryInput = entry.container.querySelector('.setting-prompt-textarea');
+  assert.ok(summaryInput, '摘要提示词编辑器存在');
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(summaryInput, '自定义摘要提示词');
+    summaryInput.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+  });
+  await act(async () => { promptsBtn.click(); });
+  await flush(4);
+
+  assert.equal(failNextSave, false, '注入失败只发生一次（场景成立）');
+  assert.ok(saved, '第二笔必须真实落库（链失败续跑即本用例判据）');
+  assert.equal(saved.summaryPrompt, '自定义摘要提示词', '后笔重放执行时刻的表单字段');
+  assert.ok(saved.translatePrompt, '第二笔基于库内最新读取合并（旧 blob 为空时以 fields 重建，两提示词齐备）');
+  const saveCalls = invokeCalls.filter((c) => c.cmd === 'save_ai_config');
+  assert.equal(saveCalls.length, 2, '两笔写请求都已发出（一次 reject、一次成功）');
   resetPlan();
 });

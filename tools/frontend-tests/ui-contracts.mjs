@@ -2395,8 +2395,8 @@ export async function run(ctx) {
       && boundaryW4.includes('info.componentStack')
       && boundaryW4.includes('getDerivedStateFromError'));
 
-    /* (w4-2) Tauri 监听竞态：七事件全部走 useTauriEvent；hook 有 disposed 自摘除 */
-    checkNew('(w4-2) App.tsx 六处（七事件）Tauri 监听统一经 useTauriEvent（旧 let unlisten 内联模式清零）；hook 对「cleanup 先于注册完成」自摘除',
+    /* (w4-2) Tauri 监听竞态：七处（七事件，sync-running/sync-idle 各一处）全走 useTauriEvent；hook 有 disposed 自摘除 */
+    checkNew('(w4-2) App.tsx 七处（七事件）Tauri 监听统一经 useTauriEvent（旧 let unlisten 内联模式清零）；hook 对「cleanup 先于注册完成」自摘除',
       appW4.includes("from './components/useTauriEvent'")
       && ['feeds-updated', 'sync-running', 'sync-idle', 'sync-queue-changed', 'subscription-outbox-changed', 'player-media', 'close-ask']
         .every((ev) => appW4.includes(`'${ev}'`))
@@ -2404,9 +2404,10 @@ export async function run(ctx) {
       && hookW4.includes('if (disposed) {')
       && hookW4.includes('unlisten = undefined'));
 
-    /* (w4-3) dialog 语义 9 面：ModalOverlay 容器统一 role+aria-modal+ariaLabel
-       （8 面传名），Lightbox / PlayerFullOverlay / ConfirmDialog 直接补齐 */
-    checkNew('(w4-3) 9 个模态面 dialog 语义：8 个 ModalOverlay 面传 ariaLabel、Lightbox/PlayerFullOverlay/ConfirmDialog 直接补齐 role+aria-modal+label',
+    /* (w4-3) dialog 语义 11 面（8 ModalOverlay + Lightbox + PlayerFullOverlay +
+       ConfirmDialog）：role 与 aria-label 必须同元素（复核 P3-1——role 在 overlay、
+       label 在内层卡的旧形态 = 读屏无名对话框） */
+    checkNew('(w4-3) 11 个模态面 dialog 语义：8 个 ModalOverlay 面传 ariaLabel、Lightbox/ConfirmDialog 直接补齐，PlayerFullOverlay 的 role 与 aria-label 同元素（overlay 上）',
       primitivesW4.includes('aria-label={ariaLabel}')
       && primitivesW4.includes('aria-modal="true"')
       && ['搜索与命令面板', '新建订阅分类', '添加订阅源', '编辑订阅源', '重命名分类', '关闭 FluxReader']
@@ -2414,7 +2415,8 @@ export async function run(ctx) {
       && errorCenterW4.includes('ariaLabel="错误中心"')
       && settingsW4.includes('ariaLabel="设置"')
       && overlaysW4.includes('aria-label="图片预览"')
-      && playerW4.includes('aria-label="全屏播放器"')
+      && /role="dialog"\s+aria-modal="true"\s+aria-label="全屏播放器"/.test(playerW4)
+      && (playerW4.match(/aria-label="全屏播放器"/g) || []).length === 1
       && playerW4.includes('useFocusTrap(open, fullCardRef)')
       && primitivesW4.includes('useFocusTrap(open, dialogRef)')
       && primitivesW4.includes('aria-label={title}'));
@@ -2427,10 +2429,12 @@ export async function run(ctx) {
       && aiTabW4.includes('cfgRef.current')
       && !aiTabW4.includes('JSON.stringify(cfg)'));
 
-    /* (w4-5) mockData 动态 import：无顶层静态 import，仅 mock 分支动态拉取 */
-    checkNew('(w4-5) bootstrap.ts 的 mockData 仅在浏览器 mock 分支 await import（顶层静态 import 清零，生产主 bundle 不携带演示数据）',
+    /* (w4-5) mockData 动态 import：无顶层静态 import，仅 mock 分支动态拉取；
+       chunk 加载失败与后端分支同契约（复核 P3-2：bootstrapError + 重试，不永卡骨架） */
+    checkNew('(w4-5) bootstrap.ts 的 mockData 仅在浏览器 mock 分支 await import 且失败落入 bootstrapError 契约（顶层静态 import 清零，生产主 bundle 不携带演示数据）',
       !bootstrapW4.includes("from '../../mockData'")
-      && /await import\('\.\.\/\.\.\/mockData'\)/.test(bootstrapW4));
+      && /await import\('\.\.\/\.\.\/mockData'\)/.test(bootstrapW4)
+      && /catch \(e\) \{\s*console\.error\('mock data chunk load failed:', e\);\s*set\(\{ dataLoading: false, bootstrapError: extractError\(e\) \}\);/.test(bootstrapW4));
 
     /* (w4-6) 对比度点名值：dark blue --text-tertiary ≥4.5:1（对 bg-card） */
     checkNew('(w4-6) tokens.css dark blue --text-tertiary 收口 #828c9c（对 bg-card 4.69:1，AA 达标；旧 #7a8494 清零）',
