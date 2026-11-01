@@ -8,6 +8,8 @@ import { SettingsModal } from './components/SettingsModal';
 import { SearchModal, Lightbox, NewCategoryModal, AddFeedModal, EditFeedModal, RenameCategoryModal, CloseAskDialog } from './components/Overlays';
 import { ErrorCenterDialog } from './components/ErrorCenter';
 import { ContextMenuHost } from './components/ContextMenu';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { useTauriEvent } from './components/useTauriEvent';
 import { anyOverlayOpen, shouldYieldToOverlay } from './components/shortcutYield';
 import { jkLayoutAllowed, jkNextIndex } from './lib/jkNavigation';
 /* ============================================================
@@ -79,67 +81,32 @@ export default function App() {
   }, []);
 
   /* ---------- 后台刷新调度器事件：新文章到达即重载列表 + toast ---------- */
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      try {
-        const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<{
+  useTauriEvent<{
           new_articles: number;
           failed_feeds: number;
-          /* OPT-007（F11）：后台同步的数据变化事件按实际变更集驱动——纯读藏
-             对账（merged_states>0、无新文章）也会到达本监听器；两字段仅为
-             可诊断性随 payload 下发，落地动作与两条既有通道一致。 */
-          pulled_entries?: number;
-          merged_states?: number;
-        }>(
-          'feeds-updated',
-          (e) => {
-            const { new_articles, failed_feeds } = e.payload;
-            /* TASK-098（与 F5 同口径）：失败提示由 reloadFromBackend 的 toast 给出，这里吞掉 toast 后的重抛 */
-            /* TASK-111②：后台刷新路径携带保位请求——落地时发出保位信号，
-               Timeline 消费顶条锚回位（审计「后台刷新保留当前阅读位置」）。
-               OPT-007：纯对账变化（new_articles=0）同样走这条保位 reload——
-               列表/计数/Reader 跟随更新，锚点保留；空变化不在 Rust 侧发事件。 */
-            void useAppStore.getState().reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
-            if (new_articles > 0) {
-              useAppStore.getState().showToast(`后台刷新：新文章 ${new_articles} 篇`);
-            } else if (failed_feeds > 0) {
-              useAppStore.getState().showToast(`后台刷新：${failed_feeds} 个源抓取失败`);
-            }
-          },
-        );
-      } catch {
-        /* 事件监听失败不影响主流程 */
-      }
-    })();
-    return () => unlisten?.();
-  }, []);
+    /* OPT-007（F11）：后台同步的数据变化事件按实际变更集驱动——纯读藏
+       对账（merged_states>0、无新文章）也会到达本监听器；两字段仅为
+       可诊断性随 payload 下发，落地动作与两条既有通道一致。 */
+    pulled_entries?: number;
+    merged_states?: number;
+  }>('feeds-updated', (e) => {
+    const { new_articles, failed_feeds } = e;
+    /* TASK-098（与 F5 同口径）：失败提示由 reloadFromBackend 的 toast 给出，这里吞掉 toast 后的重抛 */
+    /* TASK-111②：后台刷新路径携带保位请求——落地时发出保位信号，
+       Timeline 消费顶条锚回位（审计「后台刷新保留当前阅读位置」）。
+       OPT-007：纯对账变化（new_articles=0）同样走这条保位 reload——
+       列表/计数/Reader 跟随更新，锚点保留；空变化不在 Rust 侧发事件。 */
+    void useAppStore.getState().reloadFromBackend({ keepReadingPosition: true }).catch(() => { /* 失败已可见（reloadFromBackend 内 toast） */ });
+    if (new_articles > 0) {
+      useAppStore.getState().showToast(`后台刷新：新文章 ${new_articles} 篇`);
+    } else if (failed_feeds > 0) {
+      useAppStore.getState().showToast(`后台刷新：${failed_feeds} 个源抓取失败`);
+    }
+  });
 
   /* ---------- 后台 Miniflux 自动同步进行中状态（侧栏 spinner 可见性） ---------- */
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
-    const unlistens: Array<() => void> = [];
-    void (async () => {
-      try {
-        const { listen } = await import('@tauri-apps/api/event');
-        unlistens.push(
-          await listen('sync-running', () => {
-            useAppStore.setState({ backgroundSyncing: true });
-          }),
-        );
-        unlistens.push(
-          await listen('sync-idle', () => {
-            useAppStore.setState({ backgroundSyncing: false });
-          }),
-        );
-      } catch {
-        /* 事件监听失败不影响主流程 */
-      }
-    })();
-    return () => unlistens.forEach((u) => u());
-  }, []);
+  useTauriEvent('sync-running', () => useAppStore.setState({ backgroundSyncing: true }));
+  useTauriEvent('sync-idle', () => useAppStore.setState({ backgroundSyncing: false }));
 
   /* ---------- TASK-124（审计 P2-6①）：同步队列变化事件——四态展示接入真实链路 ----------
      Rust 在本地入队事务提交（set_read/set_starred/set_read_bulk/mark_all_read）、
@@ -149,24 +116,9 @@ export default function App() {
      监听器只调 applySyncQueueChanged（store 动作）：写队列三字段，并可在手动
      同步 states 阶段补记远端写回确认；不触碰 syncConnected，也不以队列清空
      结束整轮 syncing。未配置同步时 Rust 不发事件，pill 保持「本地模式」不误报。 */
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      try {
-        const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<{ waiting: number; failed: number; last_error: string | null }>(
-          'sync-queue-changed',
-          (e) => {
-            useAppStore.getState().applySyncQueueChanged(e.payload);
-          },
-        );
-      } catch {
-        /* 事件监听失败不影响主流程 */
-      }
-    })();
-    return () => unlisten?.();
-  }, []);
+  useTauriEvent<{ waiting: number; failed: number; last_error: string | null }>('sync-queue-changed', (e) => {
+    useAppStore.getState().applySyncQueueChanged(e);
+  });
 
   /* ---------- OPT-009 B3：订阅 outbox 状态变化事件——持久回执接入真实链路 ----------
      Rust 在订阅写回入队（新增/编辑/删除/分类操作/OPML/首连推送，事务提交后）
@@ -175,69 +127,32 @@ export default function App() {
      设置页同步摘要卡与能力卡经 store 字段即时跟随，不依赖用户手动刷新。
      未配置同步时 Rust 不发事件（不制造噪音）；监听器只写回执字段，
      不触碰队列统计与连接态。 */
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      try {
-        const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<{ pending: number; failed: number; local_only: number; last_error: string | null }>(
-          'subscription-outbox-changed',
-          (e) => {
-            useAppStore.getState().applySubscriptionOutboxChanged(e.payload);
-          },
-        );
-      } catch {
-        /* 事件监听失败不影响主流程 */
-      }
-    })();
-    return () => unlisten?.();
-  }, []);
+  useTauriEvent<{ pending: number; failed: number; local_only: number; last_error: string | null }>(
+    'subscription-outbox-changed',
+    (e) => {
+      useAppStore.getState().applySubscriptionOutboxChanged(e);
+    },
+  );
 
   /* ---------- SMTC 系统媒体键回调：媒体键/音量浮层控制播放 ---------- */
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      try {
-        const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<string>('player-media', (e) => {
-          /* OPT-015：媒体键语义（play/pause 目标态幂等、toggle 才切换、未激活
-             不启动、stop 关闭）单点在 store.applyMediaAction；这里只收窄
-             payload，不再内联播放判定——此前 play/pause/toggle 全部
-             togglePlayerPlay，播放中按「播放」会反被暂停。 */
-          const st = useAppStore.getState();
-          const action = e.payload;
-          if (action === 'play' || action === 'pause' || action === 'toggle' || action === 'stop') {
-            st.applyMediaAction(action);
-          }
-        });
-      } catch {
-        /* 事件监听失败不影响主流程 */
-      }
-    })();
-    return () => unlisten?.();
-  }, []);
+  useTauriEvent<string>('player-media', (action) => {
+    /* OPT-015：媒体键语义（play/pause 目标态幂等、toggle 才切换、未激活
+       不启动、stop 关闭）单点在 store.applyMediaAction；这里只收窄
+       payload，不再内联播放判定——此前 play/pause/toggle 全部
+       togglePlayerPlay，播放中按「播放」会反被暂停。 */
+    const st = useAppStore.getState();
+    if (action === 'play' || action === 'pause' || action === 'toggle' || action === 'stop') {
+      st.applyMediaAction(action);
+    }
+  });
 
   /* ---------- 首次关闭询问：Rust CloseRequested 判断未问过 → 弹窗 ---------- */
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
-    let unlisten: (() => void) | undefined;
-    void (async () => {
-      try {
-        const { listen, emit } = await import('@tauri-apps/api/event');
-        unlisten = await listen('close-ask', () => {
-          useAppStore.setState({ closeAskVisible: true });
-          /* 回 ack：让 Rust 侧知道前端已接管（10s 无 ack Rust 会兜底隐藏，
-             避免窗口"关不掉"；ack 前提是弹窗真的弹出来了） */
-          void emit('close-ask-ack', 'frontend-ready');
-        });
-      } catch {
-        /* 忽略：监听失败时 Rust 10s 兜底按默认行为处理 */
-      }
-    })();
-    return () => unlisten?.();
-  }, []);
+  useTauriEvent('close-ask', () => {
+    useAppStore.setState({ closeAskVisible: true });
+    /* 回 ack：让 Rust 侧知道前端已接管（10s 无 ack Rust 会兜底隐藏，
+       避免窗口"关不掉"；ack 前提是弹窗真的弹出来了） */
+    void import('@tauri-apps/api/event').then(({ emit }) => emit('close-ask-ack', 'frontend-ready'));
+  });
 
   /* ---------- 主题引擎：data-theme × data-palette 应用到 <html> ---------- */
   useEffect(() => {
@@ -394,63 +309,68 @@ export default function App() {
         <button className="win-btn close" title="关闭" onClick={closeWindow}>✕</button>
       </div>
 
-      <div className={`app-root ${gridClass}`} id="appRoot" style={{ '--list-width': `${effectiveListWidth}px` } as React.CSSProperties}>
-        {/* 首屏加载骨架：dataLoading 期间不渲染真实 UI（避免空闪/测试数据闪现） */}
-        {dataLoading ? (
-          <div className="app-loading-splash">
-            <div className="app-loading-logo"><img src="/logo.svg" alt="" draggable={false} /></div>
-            <div className="app-loading-bar" />
-          </div>
-        ) : bootstrapError ? (
-          <div className="app-loading-splash bootstrap-error">
-            <div className="app-loading-logo"><img src="/logo.svg" alt="" draggable={false} /></div>
-            <p className="bootstrap-error-text">启动失败：{bootstrapError}</p>
-            <button
-              className="bootstrap-error-retry"
-              onClick={() => {
-                void useAppStore.getState().retryBootstrap();
-              }}
-            >
-              重试
-            </button>
-          </div>
-        ) : (
-          <>
-            <Sidebar />
-            <Timeline />
-            {activeContentLayout === 'article' && (
-              <div className="reader-resize-handle" onMouseDown={startDragListWidth} title="拖动调整列表宽度" />
-            )}
-            <Reader />
-          </>
-        )}
-      </div>
+      {/* 产品树错误边界：主内容 + 浮层 + toast 崩溃时出全屏兜底态；
+          窗口控制留在边界外——无边框窗口在崩溃态下仍必须能最小化/关闭。
+          Note: 归因与分层取舍见 .agents/notes/implemented/architecture/2026-11-01-产品树错误边界放顶层.md */}
+      <ErrorBoundary>
+        <div className={`app-root ${gridClass}`} id="appRoot" style={{ '--list-width': `${effectiveListWidth}px` } as React.CSSProperties}>
+          {/* 首屏加载骨架：dataLoading 期间不渲染真实 UI（避免空闪/测试数据闪现） */}
+          {dataLoading ? (
+            <div className="app-loading-splash">
+              <div className="app-loading-logo"><img src="/logo.svg" alt="" draggable={false} /></div>
+              <div className="app-loading-bar" />
+            </div>
+          ) : bootstrapError ? (
+            <div className="app-loading-splash bootstrap-error">
+              <div className="app-loading-logo"><img src="/logo.svg" alt="" draggable={false} /></div>
+              <p className="bootstrap-error-text">启动失败：{bootstrapError}</p>
+              <button
+                className="bootstrap-error-retry"
+                onClick={() => {
+                  void useAppStore.getState().retryBootstrap();
+                }}
+              >
+                重试
+              </button>
+            </div>
+          ) : (
+            <>
+              <Sidebar />
+              <Timeline />
+              {activeContentLayout === 'article' && (
+                <div className="reader-resize-handle" onMouseDown={startDragListWidth} title="拖动调整列表宽度" />
+              )}
+              <Reader />
+            </>
+          )}
+        </div>
 
-      <PlayerBar />
+        <PlayerBar />
 
-      {/* 浮层 */}
-      <SettingsModal />
-      <SearchModal />
-      <Lightbox />
-      <NewCategoryModal />
-      <AddFeedModal />
-      <EditFeedModal />
-      <RenameCategoryModal />
-      {/* OPT-017E：错误中心面板（侧栏入口打开；Esc/✕/遮罩可关） */}
-      <ErrorCenterDialog />
-      <CloseAskDialog />
-      {/* 全局右键菜单（替换 WebView2 默认菜单） */}
-      <ContextMenuHost />
+        {/* 浮层 */}
+        <SettingsModal />
+        <SearchModal />
+        <Lightbox />
+        <NewCategoryModal />
+        <AddFeedModal />
+        <EditFeedModal />
+        <RenameCategoryModal />
+        {/* OPT-017E：错误中心面板（侧栏入口打开；Esc/✕/遮罩可关） */}
+        <ErrorCenterDialog />
+        <CloseAskDialog />
+        {/* 全局右键菜单（替换 WebView2 默认菜单） */}
+        <ContextMenuHost />
 
-      {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
-          退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。
-          带操作按钮（action）的失败 toast 可一键重试——经 store.retryError 派发，
-          与错误中心面板同一语义（重试即消费对应条目，失败路径重报写回）。 */}
-      <div className="toast-layer" aria-live="polite">
-        {toasts.map((t) => (
-          <ToastPill key={t.id} id={t.id} text={t.text} leaving={!!t.leaving} action={t.action} />
-        ))}
-      </div>
+        {/* Toast：进场 = 挂载后下一帧切 visible（触发 transition）；
+            退场 = store 标 leaving 后摘掉 visible，过渡完成再卸载。
+            带操作按钮（action）的失败 toast 可一键重试——经 store.retryError 派发，
+            与错误中心面板同一语义（重试即消费对应条目，失败路径重报写回）。 */}
+        <div className="toast-layer" aria-live="polite">
+          {toasts.map((t) => (
+            <ToastPill key={t.id} id={t.id} text={t.text} leaving={!!t.leaving} action={t.action} />
+          ))}
+        </div>
+      </ErrorBoundary>
     </>
   );
 }

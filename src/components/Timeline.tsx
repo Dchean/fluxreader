@@ -610,7 +610,7 @@ export function Timeline() {
                   className="gallery-virtual-item"
                   style={{ position: 'absolute', top: 0, left: placement.left, width: placement.width, transform: `translateY(${vi.start}px)` }}
                 >
-                  <GalleryCard item={img} cardIndex={vi.index} tabbable={vi.index === galleryTabbable} onMoveFocus={moveCardFocus} />
+                  <GalleryCard item={img} cardIndex={vi.index} tabbable={vi.index === galleryTabbable} lanes={galleryLanes} onMoveFocus={moveCardFocus} />
                 </div>
               );
             })}
@@ -1035,10 +1035,11 @@ const SocialCard = memo(function SocialCard({ item, onSelect, cardIndex, tabbabl
 
 /* ---------- 画廊卡片 ---------- */
 
-const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMoveFocus }: {
+const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes, onMoveFocus }: {
   item: ArticleEntry;
   cardIndex: number;
   tabbable: boolean;
+  lanes: number;
   onMoveFocus: (from: number, delta: number) => void;
 }) {
   const toggleEntryFlag = useAppStore((s) => s.toggleEntryFlag);
@@ -1102,8 +1103,15 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMov
           tabIndex={tabbable ? 0 : -1}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(); return; }
-            if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
-            else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+            /* 行优先 lanes 的几何语义（C-P2-2）：Right/Left = 同排相邻 ±1、
+               Down/Up = 同列跨排 ±列数。边界 clamp：目标越界（首尾卡）不动——
+               不跳列、不回绕（moveCardFocus 的越界 no-op 即 clamp，最小惊讶）。
+               贪心最短列分配在卡片高度不均时会偏离严格行列网格，±列数是同列
+               语义的工程近似。Note: 见 .agents/notes/implemented/bug-fix/2026-11-01-画廊方向键行优先语义.md */
+            if (e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
+            else if (e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+            else if (e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, lanes); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -lanes); }
           }}
           alt={item.title}
           referrerPolicy="no-referrer"
@@ -1118,8 +1126,11 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, onMov
           data-cover-state={imgFailed ? 'failed' : 'empty'}
           onKeyDown={(e) => {
             if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openImage(); return; }
-            if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
-            else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+            /* 同上：行优先 lanes 几何语义 + 越界 clamp（见本组件 img 分支注释） */
+            if (e.key === 'ArrowRight') { e.preventDefault(); onMoveFocus(cardIndex, 1); }
+            else if (e.key === 'ArrowLeft') { e.preventDefault(); onMoveFocus(cardIndex, -1); }
+            else if (e.key === 'ArrowDown') { e.preventDefault(); onMoveFocus(cardIndex, lanes); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); onMoveFocus(cardIndex, -lanes); }
           }}
         >{imgFailed ? <Icons.image /> : '无图'}</div>
       )}

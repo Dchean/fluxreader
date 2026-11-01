@@ -42,7 +42,7 @@ export function SettingsModal() {
   };
 
   return (
-    <ModalOverlay open={settingsOpen} onClose={handleClose}>
+    <ModalOverlay open={settingsOpen} onClose={handleClose} ariaLabel="设置">
       <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
         {/* 左侧导航 */}
         <div className="settings-sidebar">

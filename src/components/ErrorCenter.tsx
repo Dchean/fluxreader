@@ -22,7 +22,7 @@ export function ErrorCenterDialog() {
   const clearErrors = useAppStore((s) => s.clearErrors);
 
   return (
-    <ModalOverlay open={open} onClose={closeErrorCenter}>
+    <ModalOverlay open={open} onClose={closeErrorCenter} ariaLabel="错误中心">
       <div className="mini-dialog error-center-dialog">
         <div className="error-center-head">
           <div className="mini-dialog-title">错误中心</div>

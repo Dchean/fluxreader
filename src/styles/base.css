@@ -1443,7 +1443,6 @@ body {
 .notif-card {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
-  border-left: 3px solid var(--accent);
   border-radius: var(--radius-md);
   padding: 14px 16px;
   transition: background var(--transition-fast), opacity var(--transition-fast);
@@ -3707,6 +3706,21 @@ body.has-player-expanded .toast-layer {
 }
 .bootstrap-error .bootstrap-error-retry:hover {
   opacity: 0.8;
+}
+
+/* ErrorBoundary 崩溃兜底态（W4）：挂在 #root 下、不在 .app-root grid 内，
+   复用 .app-loading-splash 会顶对齐——兜底根自带全屏居中。 */
+.error-boundary-splash {
+  position: fixed;
+  inset: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: var(--bg-base);
+  z-index: 5000;
 }
 
 /* ============================================================

@@ -1,6 +1,5 @@
 // Note: 水合触发判定读实体缓存状态而非「快照是否被替换过」；刷新不丢正文 — 见 .agents/notes/implemented/bug-fix/2026-10-05-正文水合生命周期统一.md
 import type { StateCreator } from 'zustand';
-import { createInitialCategories, createInitialEntries } from '../../mockData';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
 import type { ArticleListItemRow } from '../../lib/api';
 import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, applyReadReceipt, appStore, asReadReceipts, beginCountsFetch, beginEntryFieldWrite, beginLocalFlagWrite, buildFeedIndex, buildScopeCountsSnapshot, canLandCounts, currentFlagWriteSettleSerial, currentLocalFlagWriteSerial, emptyArticlesCursor, endEntryFieldWrite, endLocalFlagWrite, entryInFlightFieldKeys, feedCountsFromRows, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, rollbackEntryClaims, scheduleCountsReconcile, setViewEntriesSnapshot } from '../internals';
@@ -962,15 +961,24 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
     防止历史「测试订阅一闪而过」——卸载重装后真实空库替换 mock 的时序问题）。 */
   bootstrapFromBackend: async () => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
-      /* 浏览器开发预览：亮出 mock 数据供看效果 */
-      const cats = createInitialCategories();
-      set({
-        categories: cats,
-        entries: createInitialEntries(),
-        feedIndex: buildFeedIndex(cats),
-        dataMode: 'mock',
-        dataLoading: false,
-      });
+      /* 浏览器开发预览：亮出 mock 数据供看效果。动态 import（仅本分支可达）：
+         生产构建（Tauri）走不到这里，vite 把 mockData 切成独立 chunk，
+         主 bundle 不再携带 10KB 级演示数据。chunk 加载失败与后端分支同契约
+         （复核 P3-2）：bootstrapError + 重试入口，dataLoading 不永卡骨架。 */
+      try {
+        const { createInitialCategories, createInitialEntries } = await import('../../mockData');
+        const cats = createInitialCategories();
+        set({
+          categories: cats,
+          entries: createInitialEntries(),
+          feedIndex: buildFeedIndex(cats),
+          dataMode: 'mock',
+          dataLoading: false,
+        });
+      } catch (e) {
+        console.error('mock data chunk load failed:', e);
+        set({ dataLoading: false, bootstrapError: extractError(e) });
+      }
       return;
     }
     try {

@@ -4,6 +4,7 @@ import { api } from '../lib/api';
 import { formatDuration } from '../lib/format';
 import { Icons } from './icons';
 import { CoverImage } from './CoverImage';
+import { useFocusTrap } from './useFocusTrap';
 
 /* ============================================================
    播客底部播放条 —— Mini Player
@@ -334,9 +335,28 @@ function PlayerFullOverlay({
     const ratio = (clientX - rect.left) / rect.width;
     onSeek(Math.max(0, Math.min(1, ratio)) * player.durationSec);
   };
+  /* 与 ModalOverlay 同口径（共享 useFocusTrap）：打开时焦点移入面板、Tab/Shift+Tab
+     循环限制在播放器卡内、关闭时焦点还原到触发元素（此前有 role=dialog 无焦点
+     管理，Tab 会穿透到被覆盖的三栏）。 */
+  const fullCardRef = useRef<HTMLDivElement>(null);
+  const { onTrapKeyDown } = useFocusTrap(open, fullCardRef);
   return (
-    <div className={`player-full-overlay ${open ? 'open' : ''}`} role="dialog" aria-modal="true" onClick={onClose}>
-      <div className="player-full-card" onClick={(e) => e.stopPropagation()}>
+    /* 复核 P3-1：role 与 aria-label 必须同元素——读屏把带 role 的外层 overlay
+       播报为「无名对话框」；内层 card 只承担焦点陷阱面板（tabIndex=-1）。 */
+    <div
+      className={`player-full-overlay ${open ? 'open' : ''}`}
+      role="dialog"
+      aria-modal="true"
+      aria-label="全屏播放器"
+      onClick={onClose}
+    >
+      <div
+        ref={fullCardRef}
+        tabIndex={-1}
+        className="player-full-card"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={onTrapKeyDown}
+      >
         <div className="player-full-cover-wrap">
           <CoverImage
             src={player.cover}

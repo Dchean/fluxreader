@@ -44,7 +44,10 @@
   --border-strong: rgba(255, 255, 255, 0.15);
   --text-primary: #f1f3f7;
   --text-secondary: #959fae;
-  --text-tertiary: #7a8494;
+  /* W4（2026-11-01）：原值对卡片底色 4.22:1 → 4.69:1（WCAG AA）。
+     仅收口 roadmap 点名的这一处；五调色盘全量批量收敛待用户决策（含 hover/
+     active 等瞬态底色的残留），见 .agents/notes/rejected/feature/2026-11-01-五调色盘WCAG全量批量收敛.md */
+  --text-tertiary: #828c9c;
   --accent: #4880c8;
   --accent-light: #6a9ee2;
   --accent-glow: rgba(72, 128, 200, 0.22);

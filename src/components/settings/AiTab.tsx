@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../store';
 import { api, extractError } from '../../lib/api';
 import { Icons } from '../icons';
 import { FluxDropdown, SettingCard } from '../primitives';
 import { AI_PRESETS, DEFAULT_PROMPTS, type AiConfigState } from './shared';
-import { mergeConfigFields, mergePromptsOnly } from './aiConfig';
+import { enqueueAiConfigWrite, mergeConfigFields, mergePromptsOnly } from './aiConfig';
 
 /* ---------- TAB 5: AI服务 ---------- */
 
@@ -21,6 +21,13 @@ export function AiTab() {
   const [models, setModels] = useState<string[]>([]);
   const [testing, setTesting] = useState(false);
   const [savingPrompts, setSavingPrompts] = useState(false);
+  /* 队列写入执行时读最新表单态：入口排队期间用户仍可编辑（测试按钮 testing
+     期间禁用，但 Key 输入框与提示词编辑器不禁用）——后写者重放的是**执行时刻**
+     的字段值，不是点击时的闭包快照（否则「测试在途改 Key」的编辑会丢）。 */
+  const cfgRef = useRef(cfg);
+  useEffect(() => {
+    cfgRef.current = cfg;
+  });
 
   /* 打开设置时从后端恢复已存配置 */
   useEffect(() => {
@@ -58,11 +65,25 @@ export function AiTab() {
     if (!cfg.apiKey.trim()) { showToast('请填写 API Key'); return; }
     setTesting(true);
     try {
-      const list = await api.aiListModels(cfg.baseUrl.trim(), cfg.apiKey.trim());
-      if (!list) { showToast('演示模式无法测试'); return; }
-      setModels(list);
-      await api.saveAiConfig(JSON.stringify(cfg));
-      showToast(`连通成功：${list.length} 个可用模型`);
+      /* 整个入口（含连通性测试）入队：串行化判据是「点击顺序」。若只把落库段
+         入队，后点先测完的写入会先执行，仍会乱序覆盖。
+         落库只重放端点四字段（不再整包快照 stringify）——测试+保存不应
+         顺手覆盖并发中的提示词/模型写入；写时重读库内最新配置合并。 */
+      await enqueueAiConfigWrite(async () => {
+        const list = await api.aiListModels(cfgRef.current.baseUrl.trim(), cfgRef.current.apiKey.trim());
+        if (!list) { showToast('演示模式无法测试'); return; }
+        setModels(list);
+        const persisted = await api.getAiConfig();
+        /* 落库时刻重读表单态：入队/在途期间的编辑（如改 Key）一并落库 */
+        const cur = cfgRef.current;
+        await api.saveAiConfig(mergeConfigFields(persisted, {
+          preset: cur.preset,
+          baseUrl: cur.baseUrl.trim(),
+          apiKey: cur.apiKey.trim(),
+          model: cur.model,
+        }));
+        showToast(`连通成功：${list.length} 个可用模型`);
+      });
     } catch (e) {
       showToast(`连通失败：${extractError(e)}`);
     } finally {
@@ -71,16 +92,18 @@ export function AiTab() {
   };
 
   /** 仅保存提示词（不动端点配置）：先读回库里的现有配置，只覆盖两个提示词字段。
-      P2-4：此前直接 JSON.stringify(cfg) 落库，等于把端点配置（含未确认可用的
+      P2-4：此前直接把表单整份快照落库，等于把端点配置（含未确认可用的
       API Key）一起保存，与按钮语义相反。 */
   const savePrompts = async () => {
     setSavingPrompts(true);
     try {
-      const persisted = await api.getAiConfig();
-      await api.saveAiConfig(mergePromptsOnly(persisted, {
-        summaryPrompt: cfg.summaryPrompt,
-        translatePrompt: cfg.translatePrompt,
-      }));
+      await enqueueAiConfigWrite(async () => {
+        const persisted = await api.getAiConfig();
+        await api.saveAiConfig(mergePromptsOnly(persisted, {
+          summaryPrompt: cfgRef.current.summaryPrompt,
+          translatePrompt: cfgRef.current.translatePrompt,
+        }));
+      });
       showToast('提示词已保存');
     } catch {
       showToast('保存失败');
@@ -99,8 +122,10 @@ export function AiTab() {
   const selectModel = async (v: string) => {
     setCfg((c) => ({ ...c, model: v }));
     try {
-      const persisted = await api.getAiConfig();
-      await api.saveAiConfig(mergeConfigFields(persisted, { model: v }));
+      await enqueueAiConfigWrite(async () => {
+        const persisted = await api.getAiConfig();
+        await api.saveAiConfig(mergeConfigFields(persisted, { model: v }));
+      });
       showToast(`已切换模型：${v}`);
     } catch (e) {
       showToast(`模型保存失败：${extractError(e)}`);

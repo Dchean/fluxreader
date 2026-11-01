@@ -186,7 +186,10 @@ componentTest('OPT-017C 画廊键盘焦点：跨窗口滚动后仍有可 Tab 卡
   assert.equal(Number(tabbables[0].getAttribute('data-card-index')), firstIndex,
     '兜底可 Tab 卡应为窗口首卡（保证 Tab 进入的是当前能看到的区域）');
 
-  /* 反例 2b：方向键从窗口首卡向下移动 → 精确到相邻卡（index + 1），焦点不丢。 */
+  /* 反例 2b：方向键按行优先 lanes 的几何语义移动（W4，C-P2-2 修复后口径）：
+     ArrowRight/Left = 同排相邻（±1）、ArrowDown/Up = 同列跨排（±列数）；
+     测试环境 matchMedia 替身恒 false → lanes = GALLERY_LANES_WIDE(4)，
+     且 harness 等高前提下列分配退化为轮转（index % 4），±4 恰为同列下一行。 */
   const startEl = focusableOf(wrappers[0]);
   startEl.focus();
   assert.equal(document.activeElement, startEl, '前置：焦点落在窗口首卡');
@@ -204,17 +207,22 @@ componentTest('OPT-017C 画廊键盘焦点：跨窗口滚动后仍有可 Tab 卡
     await flush(4, 30);
   };
 
-  await pressArrow('ArrowDown');
-  const afterDown = document.activeElement;
-  assert.ok(afterDown && afterDown !== document.body, 'ArrowDown 后焦点不应丢失到 body');
-  assert.equal(Number(afterDown.getAttribute('data-card-index')), firstIndex + 1,
-    `ArrowDown 应停在相邻下一卡（${firstIndex + 1}），实际 ${afterDown?.getAttribute?.('data-card-index')}`);
-  assert.ok(document.contains(afterDown), 'ArrowDown 后焦点元素应仍在挂载树内（目标卡已入窗）');
+  const pressAndLand = async (key, expectedIndex, label) => {
+    await pressArrow(key);
+    const after = document.activeElement;
+    assert.ok(after && after !== document.body, `${key} 后焦点不应丢失到 body`);
+    assert.equal(Number(after.getAttribute('data-card-index')), expectedIndex,
+      `${label}：实际 ${after?.getAttribute?.('data-card-index')}`);
+    assert.ok(document.contains(after), `${key} 后焦点元素应仍在挂载树内（目标卡已入窗）`);
+    return after;
+  };
 
-  await pressArrow('ArrowUp');
-  const afterUp = document.activeElement;
-  assert.equal(Number(afterUp.getAttribute('data-card-index')), firstIndex,
-    `ArrowUp 应回到原卡（${firstIndex}），实际 ${afterUp?.getAttribute?.('data-card-index')}`);
+  /* ArrowDown = +列数（同列下一行，不是相邻下一卡）——修复前 +1 与 ArrowRight 等价，本断言修复前必红 */
+  await pressAndLand('ArrowDown', firstIndex + GALLERY_LANES_WIDE, `ArrowDown 应停在同列下一卡（${firstIndex + GALLERY_LANES_WIDE}）`);
+  await pressAndLand('ArrowUp', firstIndex, 'ArrowUp 应回到原卡（-列数）');
+  /* ArrowRight = +1（同排下一卡）、ArrowLeft = -1（同排上一卡） */
+  await pressAndLand('ArrowRight', firstIndex + 1, `ArrowRight 应停在相邻下一卡（${firstIndex + 1}）`);
+  await pressAndLand('ArrowLeft', firstIndex, 'ArrowLeft 应回到原卡（-1）');
 });
 
 componentTest('OPT-017C 画廊灯箱：打开→关闭后滚动位置不动、焦点回到原卡（跨窗口滚动后成立）', { timeout: 60000 }, async () => {

@@ -1417,13 +1417,18 @@ export async function run(ctx) {
         && timeline.includes('<NotifCard item={item} cardIndex={vi.index}'));
 
     /* UI P2-7：浮层焦点移入/归还 */
-    checkNew('(t100-uip2-7) ModalOverlay 打开移焦入容器（tabIndex=-1，子组件 autoFocus 优先）、关闭归还触发元素',
-      primitives.includes('cardRef.current?.focus({ preventScroll: true })')
-        && primitives.includes('restoreRef.current.focus({ preventScroll: true })')
-        && primitives.includes('tabIndex={-1}'));
-    checkNew('(t100-uip2-7) Lightbox 记录打开时 document.activeElement 并在关闭时归还',
-      overlays.includes('overlayRef.current?.focus({ preventScroll: true })')
-        && overlays.includes('restoreRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;'));
+    /* 【2026-11-01 W4 改写理由】移入/归还契约从 ModalOverlay/Lightbox 各自的内联
+       effect 收口为共享 useFocusTrap（ConfirmDialog / PlayerFullOverlay 同一实现），
+       并升级为「移入 + 归还 + Tab 循环」完整陷阱。断言随 wire 形态改写锁定新契约
+       （TASK-111② 先例：断言锁定当前 wire，非为过门禁而弱化）。 */
+    checkNew('(t100-uip2-7/W4) ModalOverlay 焦点契约经共享 useFocusTrap（打开移入/autoFocus 优先/关闭归还/Tab 循环），容器 tabIndex=-1 + role=dialog',
+      primitives.includes('useFocusTrap(open, cardRef)')
+        && primitives.includes('tabIndex={-1}')
+        && primitives.includes('role="dialog"')
+        && primitives.includes('onKeyDown={onTrapKeyDown}'));
+    checkNew('(t100-uip2-7/W4) Lightbox 焦点契约同源 useFocusTrap（打开移入/关闭归还/Tab 循环）',
+      overlays.includes('useFocusTrap(!!lightboxUrl, overlayRef)')
+        && overlays.includes('onKeyDown={onTrapKeyDown}'));
 
     /* U7：Esc 链补 closeAskVisible */
     checkNew('(t100-u7) App.tsx Esc 链首支补 closeAskVisible（确认框 3000 自带 Esc > 弹窗 150 > 播放器 140）',
@@ -2112,10 +2117,13 @@ export async function run(ctx) {
   const appSrc124 = src124('../../src/App.tsx');
   const syncSliceSrc124 = src124('../../src/store/slices/sync.ts');
   const typesSrc124 = src124('../../src/store/types.ts');
-  checkNew('(t124-6) 接线（源级）：App.tsx 监听 sync-queue-changed 且回调唯一落点 applySyncQueueChanged(e.payload)（删掉监听/改 payload 键名必红）；store 声明 applySyncQueueChanged + syncQueueLastError（事件与 reload 同一状态源）',
-    appSrc124.includes("await listen<{ waiting: number; failed: number; last_error: string | null }>(")
+  /* 【2026-11-01 W4 改写理由】App.tsx 六处 Tauri 监听统一改经 useTauriEvent hook
+     （disposed 自摘除修竞态），listen 调用随 hook 移出 App.tsx——断言锁定新
+     wire 形态（hook + 事件名 + payload 直收）。 */
+  checkNew('(t124-6) 接线（源级）：App.tsx 经 useTauriEvent 监听 sync-queue-changed 且回调唯一落点 applySyncQueueChanged(e)（删掉监听/改 payload 键名必红）；store 声明 applySyncQueueChanged + syncQueueLastError（事件与 reload 同一状态源）',
+    appSrc124.includes("useTauriEvent<{ waiting: number; failed: number; last_error: string | null }>('sync-queue-changed'")
     && appSrc124.includes("'sync-queue-changed'")
-    && appSrc124.includes('applySyncQueueChanged(e.payload)')
+    && appSrc124.includes('applySyncQueueChanged(e)')
     && typesSrc124.includes('applySyncQueueChanged:')
     && typesSrc124.includes('syncQueueLastError: string | null')
     && syncSliceSrc124.includes('syncQueueLastError: stats.last_error ?? null'));
@@ -2342,13 +2350,103 @@ export async function run(ctx) {
   /* ---- 接线层：App.tsx player-media 监听 ---- */
   const fsOpt15 = await import('node:fs');
   const appSrcOpt15 = fsOpt15.readFileSync(new URL('../../src/App.tsx', import.meta.url), 'utf8');
-  const pmStart = appSrcOpt15.indexOf("listen<string>('player-media'");
+  /* 【2026-11-01 W4 改写理由】监听统一经 useTauriEvent（payload 直收），锚点随新 wire 改写。 */
+  const pmStart = appSrcOpt15.indexOf("useTauriEvent<string>('player-media'");
   const pmBlock = pmStart < 0 ? '' : appSrcOpt15.slice(pmStart, appSrcOpt15.indexOf('});', pmStart));
   checkNew('(opt015-m10) App.tsx 接线：player-media 收窄四个动作后唯一落点 applyMediaAction(action)；播放判定不再内联（无 togglePlayerPlay() 调用 / 无 isActive 早退）',
     pmBlock.includes("'play'") && pmBlock.includes("'pause'") && pmBlock.includes("'toggle'") && pmBlock.includes("'stop'")
     && pmBlock.includes('applyMediaAction(action)')
     && !pmBlock.includes('togglePlayerPlay()') && !pmBlock.includes('isActive'));
 }
+
+  /* ============================================================
+     W4（2026-11-01 前端体验批次）：接线层源码形态断言。
+     ——产品树 ErrorBoundary、Tauri 监听竞态 hook、dialog 语义 9 面、
+     AiTab 卡内写链、mockData 动态 import、对比度点名值。
+     证据边界：组件行为腿在 component-tests（error-boundary / modal-focus /
+     ai-config-race / gallery-virtual），此处只锁「接线存在且形态正确」。
+     ============================================================ */
+  {
+    const fsW4 = await import('node:fs');
+    const rdW4 = (p) => fsW4.readFileSync(new URL(p, import.meta.url), 'utf8');
+    const appW4 = rdW4('../../src/App.tsx');
+    const boundaryW4 = rdW4('../../src/components/ErrorBoundary.tsx');
+    const hookW4 = rdW4('../../src/components/useTauriEvent.ts');
+    const trapW4 = rdW4('../../src/components/useFocusTrap.ts');
+    const primitivesW4 = rdW4('../../src/components/primitives.tsx');
+    const playerW4 = rdW4('../../src/components/PlayerBar.tsx');
+    const overlaysW4 = rdW4('../../src/components/Overlays.tsx');
+    const errorCenterW4 = rdW4('../../src/components/ErrorCenter.tsx');
+    const settingsW4 = rdW4('../../src/components/SettingsModal.tsx');
+    const aiTabW4 = rdW4('../../src/components/settings/AiTab.tsx');
+    const aiConfigW4 = rdW4('../../src/components/settings/aiConfig.ts');
+    const bootstrapW4 = rdW4('../../src/store/slices/bootstrap.ts');
+    const tokensW4 = rdW4('../../src/styles/tokens.css');
+
+    /* (w4-1) 产品树错误边界：产品树在边界内、窗口控制在边界外 */
+    const ebStartW4 = appW4.indexOf('<ErrorBoundary>');
+    const ebEndW4 = appW4.indexOf('</ErrorBoundary>');
+    checkNew('(w4-1) App 产品树包在 ErrorBoundary 内（appRoot 与浮层在边界内），窗口控制在边界外（崩溃态仍可关窗）；componentDidCatch 留 componentStack',
+      ebStartW4 >= 0 && ebEndW4 > ebStartW4
+      && appW4.indexOf('id="appRoot"') > ebStartW4 && appW4.indexOf('id="appRoot"') < ebEndW4
+      && appW4.indexOf('<CloseAskDialog />') > ebStartW4 && appW4.indexOf('<CloseAskDialog />') < ebEndW4
+      && appW4.indexOf('immersive-win-controls') < ebStartW4
+      && boundaryW4.includes('componentDidCatch')
+      && boundaryW4.includes('info.componentStack')
+      && boundaryW4.includes('getDerivedStateFromError'));
+
+    /* (w4-2) Tauri 监听竞态：七处（七事件，sync-running/sync-idle 各一处）全走 useTauriEvent；hook 有 disposed 自摘除 */
+    checkNew('(w4-2) App.tsx 七处（七事件）Tauri 监听统一经 useTauriEvent（旧 let unlisten 内联模式清零）；hook 对「cleanup 先于注册完成」自摘除',
+      appW4.includes("from './components/useTauriEvent'")
+      && ['feeds-updated', 'sync-running', 'sync-idle', 'sync-queue-changed', 'subscription-outbox-changed', 'player-media', 'close-ask']
+        .every((ev) => appW4.includes(`'${ev}'`))
+      && !appW4.includes('let unlisten')
+      && hookW4.includes('if (disposed) {')
+      && hookW4.includes('unlisten = undefined'));
+
+    /* (w4-3) dialog 语义 11 面（8 ModalOverlay + Lightbox + PlayerFullOverlay +
+       ConfirmDialog）：role 与 aria-label 必须同元素（复核 P3-1——role 在 overlay、
+       label 在内层卡的旧形态 = 读屏无名对话框） */
+    checkNew('(w4-3) 11 个模态面 dialog 语义：8 个 ModalOverlay 面传 ariaLabel、Lightbox/ConfirmDialog 直接补齐，PlayerFullOverlay 的 role 与 aria-label 同元素（overlay 上）',
+      primitivesW4.includes('aria-label={ariaLabel}')
+      && primitivesW4.includes('aria-modal="true"')
+      && ['搜索与命令面板', '新建订阅分类', '添加订阅源', '编辑订阅源', '重命名分类', '关闭 FluxReader']
+        .every((l) => overlaysW4.includes(`ariaLabel="${l}"`))
+      && errorCenterW4.includes('ariaLabel="错误中心"')
+      && settingsW4.includes('ariaLabel="设置"')
+      && overlaysW4.includes('aria-label="图片预览"')
+      && /role="dialog"\s+aria-modal="true"\s+aria-label="全屏播放器"/.test(playerW4)
+      && (playerW4.match(/aria-label="全屏播放器"/g) || []).length === 1
+      && playerW4.includes('useFocusTrap(open, fullCardRef)')
+      && primitivesW4.includes('useFocusTrap(open, dialogRef)')
+      && primitivesW4.includes('aria-label={title}'));
+
+    /* (w4-4) AiTab 卡内写链：三入口串行化、执行时读最新表单态、整包快照落库清零 */
+    checkNew('(w4-4) AiTab 三入口经 enqueueAiConfigWrite 串行化，写入执行时读最新表单态（cfgRef），JSON.stringify(cfg) 整包快照清零',
+      aiConfigW4.includes('let aiConfigWriteChain')
+      && aiConfigW4.includes('export function enqueueAiConfigWrite')
+      && (aiTabW4.match(/await enqueueAiConfigWrite/g) || []).length === 3
+      && aiTabW4.includes('cfgRef.current')
+      && !aiTabW4.includes('JSON.stringify(cfg)'));
+
+    /* (w4-5) mockData 动态 import：无顶层静态 import，仅 mock 分支动态拉取；
+       chunk 加载失败与后端分支同契约（复核 P3-2：bootstrapError + 重试，不永卡骨架） */
+    checkNew('(w4-5) bootstrap.ts 的 mockData 仅在浏览器 mock 分支 await import 且失败落入 bootstrapError 契约（顶层静态 import 清零，生产主 bundle 不携带演示数据）',
+      !bootstrapW4.includes("from '../../mockData'")
+      && /await import\('\.\.\/\.\.\/mockData'\)/.test(bootstrapW4)
+      && /catch \(e\) \{\s*console\.error\('mock data chunk load failed:', e\);\s*set\(\{ dataLoading: false, bootstrapError: extractError\(e\) \}\);/.test(bootstrapW4));
+
+    /* (w4-6) 对比度点名值：dark blue --text-tertiary ≥4.5:1（对 bg-card） */
+    checkNew('(w4-6) tokens.css dark blue --text-tertiary 收口 #828c9c（对 bg-card 4.69:1，AA 达标；旧 #7a8494 清零）',
+      tokensW4.includes('--text-tertiary: #828c9c;')
+      && !tokensW4.includes('#7a8494'));
+
+    /* (w4-7) 焦点陷阱契约形态：Tab 循环 + 无焦点面板钉容器 + portal 焦点不拦截 */
+    checkNew('(w4-7) useFocusTrap 契约形态：边界回绕拦截、面板内无可聚焦元素时焦点钉回容器、焦点在面板 DOM 之外（portal）不拦截',
+      trapW4.includes('export function trapModalTab')
+      && trapW4.includes('panel.focus({ preventScroll: true })')
+      && trapW4.includes('!panel.contains(active)'));
+  }
 
   /* OPT-022：行为回归独立成文件，由现有 ui-contracts 域在末尾驱动，避免扩大
      回归入口写集；标记仍归属 ui-contracts 域。 */

@@ -9,7 +9,7 @@
 | 「滚动出列表即标为已读」的前置条件未声明 | 只在「显示: 未读」模式下生效（`Timeline.tsx` 的 `if (timelineFilter !== 'unread') return;`），设置页与文案都没说 | 用户以为这个开关一直有效 |
 | 配置同步的镜像删除不产生远端退订意图 | mirror 模式的本地 feed/分类删除已实现；普通 UI 删除走 typed outbox 持久退订；镜像删除明确不调用 `enqueue_unsubscribe` | 镜像同步后远端订阅可能残留，需用户手动退订 |
 | 封面候选仍无质量启发式 | 候选已扩到全来源「无封面 + 有原文 URL」；`first_image`/og:image 仍无尺寸/角色判断，头像、emoji、favicon 可能被当封面；本地为服务端文章补上的封面不参与失效清理（保守边界） | 部分文章无封面或封面不正确 |
-| `--text-tertiary` 深色下对比度约 4:1 | 处于 WCAG AA 边缘，属于全局视觉 token | 低视力用户在深色模式下阅读辅助文字吃力 |
+| `--text-tertiary` 深色下对比度约 4:1 | 处于 WCAG AA 边缘，属于全局视觉 token | 低视力用户在深色模式下阅读辅助文字吃力（**2026-11-01 W4 已修复点名项**：dark blue 调至 `#828c9c`，对卡片底色 4.69:1 达 AA；其余调色盘与瞬态底色的全量批量收敛待用户决策，见 rejected Note） |
 
 ## 二、同步与数据正确性（2026-10-19 审计）
 
@@ -37,7 +37,7 @@
 | B-P2-3 | AI/配置 | `cache_cleanup(scope='ai')` 对仅片段条目不推进 epoch | 批量清理后，仍在途的旧请求可以写回片段或整篇产物 |
 | B-P2-4 | AI/配置 | 配置快照重复分类名静默歧义 | 同名不同 `sync_id` 的分类对象级折叠已由 OPT-010 修复（身份优先匹配、重复 sync_id 拒收）；但快照 `FeedSpec.folder` 只携带名称，feed 归属仍按名折叠——第二个同名分类被新建却收不到源，预览无法分辨（2026-11-01 复核：原「合并到第一个」的机制描述已过时，残余后果仍成立，根因是快照格式） |
 | B-P2-5 | AI/配置 | AI 校验状态请求没有代次守卫 | 清除或新生成之后返回的旧回包可覆盖新状态，重新显示 partial/stale/complete |
-| C-P2-2 | UI/性能 | 画廊方向键语义回归 | 行优先 lanes 下 `ArrowDown` 实际向右，与 `ArrowRight` 等价；现有测试把回归锁成预期 |
+| C-P2-2 | UI/性能 | 画廊方向键语义回归 | 行优先 lanes 下 `ArrowDown` 实际向右，与 `ArrowRight` 等价；现有测试把回归锁成预期。**2026-11-01 W4 已修复**：Right/Left=±1、Down/Up=±列数、越界 clamp，断言随新语义改写（先红后绿） |
 | C-P2-3 | UI/性能 | 同一 URL 的后续条目在扫描窗/批次外被负缓存跳过 | 指向同一 URL 的其它条目在本进程内不再补封面，只有重启或缓存逐出后才可能重试 |
 | C-P2-4 | 测试/文档 | act 警告降为计数后没有阈值与按用例归属 | 真实的 act 外更新、定时器泄漏或卸载后更新可以静默通过，回归不可归因 |
 | C-P2-5 | 测试/文档 | 优化卡与优化索引的最终 tip、main 合并与发布状态落后于仓库事实 | 追溯证据时会读到过期状态；涉及历史材料，随其归档决策一并处理（2026-11-01 复核：优化索引已加状态注记更正关键漂移，卡片原文按历史记录保留） |
@@ -50,7 +50,7 @@
 - **AboutTab 更新检查的真实组件点击未覆盖**：现有证据是 Rust 本地 HTTP 单测、`compareVersions` 纯函数单测与源级接线；真实点击 → 提示的整链没有组件回归（用例因 Node 22 的 act 调度不稳定已撤回）。
 - **服务端 × 版本兼容未实机验收**：兼容矩阵的「已验证」列只覆盖测试替身与严格夹具，不代表任何具体部署版本；真实 Miniflux / FreshRSS 未逐一实机验收。
 - **存量 identity 惰性收敛**：identity 重算与等价合并只对触达行生效，未触达的旧行不会一次性回填；收敛随读取/写入逐步发生。
-- **NotifCard #185 待观察**：浏览器 mock 模式下点「通知」布局曾崩溃渲染树（`getSnapshot should be cached` → React #185），后续复现尝试全部阴性；真机 Tauri 下是否复现尚未验证。测量电池与实机清单在存档分支，主线没有对应错误钩子；若实机复发，须先补 `componentStack` 捕获才能归因。
+- **NotifCard #185 待观察**：浏览器 mock 模式下点「通知」布局曾崩溃渲染树（`getSnapshot should be cached` → React #185），后续复现尝试全部阴性；真机 Tauri 下是否复现尚未验证。测量电池与实机清单在存档分支。**2026-11-01 W4 起主线常驻产品树 ErrorBoundary**（`componentDidCatch` 记 error + componentStack）——实机复发时归因所需的 componentStack 已有捕获点，不再需要先补钩子；见 [.agents/notes/implemented/architecture/2026-11-01-产品树错误边界放顶层.md](../.agents/notes/implemented/architecture/2026-11-01-产品树错误边界放顶层.md)。
 
 ## 四、已评估并明确不修的边界
 
@@ -72,7 +72,7 @@
 
 2026-10-31 门禁先行收敛轮（阶段 A 替身语义对齐、阶段 B1-B4 源码修复、阶段 C 全新代理证伪复核）已收口的清单见 [审计修复收敛路线](../.agents/notes/implemented/process/2026-10-31-审计修复收敛路线.md)。以下为本轮明确不做、留待后续决策的项：
 
-- **P3 与美观批次**：WCAG 对比度批量收敛（五调色盘 × 深浅色 230 项关键配对计算 95 项违例，浅色 `star-color`/`danger`/`accent-light` 最重）；模态焦点陷阱缺失（Tab 可穿透到背景）；dialog 语义覆盖 1/9；产品树无 ErrorBoundary；settings 组件 async setState 无 alive 守卫（6 文件）。
+- **P3 与美观批次**：WCAG 对比度批量收敛（五调色盘 × 深浅色 230 项关键配对计算 95 项违例，浅色 `star-color`/`danger`/`accent-light` 最重；**2026-11-01 W4 已修复其中点名项** dark blue `--text-tertiary`，其余待用户决策）；模态焦点陷阱缺失（Tab 可穿透到背景）——**2026-11-01 W4 已修复**（共享 useFocusTrap：打开移入/Tab 循环/关闭还原，四处浮层共用）；dialog 语义覆盖 1/9——**2026-11-01 W4 已修复**（role=dialog 面 11/11 全带 aria-modal 与名字）；产品树无 ErrorBoundary——**2026-11-01 W4 已修复**（顶层边界 + componentStack 归因 + 全屏兜底）；settings 组件 async setState 无 alive 守卫（6 文件）——不属本批，保留原样。
 - **供应链**（2026-11-01 OSV 全量比对口径；**当日 W1-A 已收口其中两项**：13 条 cargo-update 级通告经定向升级全部清零并过 CI 清洗矩阵回归、CI action 已全部 SHA pin）——仍遗留：glib 1 条（需跨大版本，非 update 级）+ 10 条 unmaintained；npm 开发链 5 个 high（vite 8.2.2×1、undici 7.30.0×4，均不进产物，本机 npm registry 不可达暂缓）；安装包无 Windows 代码签名；action pin 无保活机制（候选：dependabot github-actions 通道）。
 - **性能**：同步端到端耗时基线缺失（需真实账号并单独约定读写边界）；Fever 空正文条目每轮 with_ids 重拉一次（回补记账候选）；F1 计数绝对耗时跨 SQLite 构建不可比（查询计划形态已由 CI 断言锁定）。
 - **架构**：`state ↔ github_auth ↔ config_sync` 三节点模块环；`internals.ts` 47 导出共享内核；`subscriptions.rs pull_feeds`（约 465 行）与 `fever_pull.rs pull_entries_fever`（505 行）超长函数；9 个零直测生产模块；组件直调 `api.*` 37 处无自动门禁。

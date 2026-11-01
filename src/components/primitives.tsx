@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Icons } from './icons';
+import { useFocusTrap } from './useFocusTrap';
 import type { FeedAiMode } from '../types';
 
 /* ============================================================
@@ -299,6 +300,8 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const { onTrapKeyDown } = useFocusTrap(open, dialogRef);
   useEffect(() => {
     if (!open) return;
     const onEsc = (e: KeyboardEvent) => {
@@ -316,7 +319,16 @@ export function ConfirmDialog({
 
   return createPortal(
     <div className="modal-overlay confirm-overlay open" onClick={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
-      <div className="mini-dialog confirm-dialog" onClick={(e) => e.stopPropagation()}>
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className="mini-dialog confirm-dialog"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={onTrapKeyDown}
+      >
         <div className="confirm-icon-badge"><Icons.trash /></div>
         <div className="confirm-title">{title}</div>
         <div className="confirm-message">{message}</div>
@@ -338,28 +350,24 @@ interface ModalOverlayProps {
   onClose: () => void;
   children: ReactNode;
   contentWidth?: number | string;
+  /** 无障碍名：读屏播报的对话框标题（role="dialog" 必备） */
+  ariaLabel: string;
 }
 
-export function ModalOverlay({ open, onClose, children, contentWidth }: ModalOverlayProps) {
+export function ModalOverlay({ open, onClose, children, contentWidth, ariaLabel }: ModalOverlayProps) {
   /* TASK-100 B（UI P2-7 最小实现）：打开时把焦点移入弹窗容器（tabIndex=-1），
      关闭时归还触发元素焦点。此前打开态焦点仍留在触发控件上，Tab 可从弹窗
      游走到背后三栏内容（REQ-047 只管了关闭态 inert），关闭后焦点落回 body。
      注意：children 自带 autoFocus 的输入框（搜索框、改名输入框等）优先——
      React 在提交时先应用子组件的 autoFocus，effect 运行时若焦点已在弹窗内
      则不再抢占。 */
+  /* TASK-100 B（UI P2-7）：打开时焦点移入弹窗容器、关闭时归还触发元素——
+     children 自带 autoFocus 的输入框（搜索框、改名输入框等）优先（effect 运行时
+     焦点已在弹窗内则不抢占）。2026-11-01 升级为共享 useFocusTrap：同一契约由
+     ConfirmDialog / PlayerFullOverlay / Lightbox 复用，并补 Tab 循环——焦点
+     不再从打开的弹窗穿透到被覆盖的三栏内容（见 useFocusTrap 头注 Note）。 */
   const cardRef = useRef<HTMLDivElement>(null);
-  const restoreRef = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    if (open) {
-      restoreRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      const active = document.activeElement;
-      const insideCard = cardRef.current && active instanceof Node && cardRef.current.contains(active);
-      if (!insideCard) cardRef.current?.focus({ preventScroll: true });
-    } else if (restoreRef.current) {
-      restoreRef.current.focus({ preventScroll: true });
-      restoreRef.current = null;
-    }
-  }, [open]);
+  const { onTrapKeyDown } = useFocusTrap(open, cardRef);
   return (
     <div
       className={`modal-overlay ${open ? 'open' : ''}`}
@@ -376,8 +384,12 @@ export function ModalOverlay({ open, onClose, children, contentWidth }: ModalOve
       <div
         ref={cardRef}
         tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={ariaLabel}
         className="modal-card"
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={onTrapKeyDown}
         style={
           contentWidth
             ? { width: contentWidth, background: 'var(--bg-elevated)', border: '1px solid var(--border-strong)', borderRadius: 'var(--radius-lg)', boxShadow: 'var(--shadow-elevation)', overflow: 'hidden' }
