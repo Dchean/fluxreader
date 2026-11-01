@@ -2,6 +2,8 @@
 
 日期：2026-10-08（Asia/Shanghai）。基线：425c6360995ddd9e89c4b2ac2aebf0e927bdc3b9，v0.17.1。
 
+> **状态注记（2026-11-01）**：本文件是历史执行记录，按 [docs/README](../README.md) 约定只读留存。其中两处事实已落后于仓库现状，以此注记为准：①下文进度快照的「未合并 main，未发布」——18 张主卡与 OPT-019/021/022 均已 verified-ci，并经 dev→main 常规合并完成发布（v0.18.0 → v0.18.2，序列见 [release.md](release.md)）；②「每卡固定验收」第 5 条「本机已证实可以完整链接」——2026-10-31 实测本机不可链接，`cargo clippy/test/check` 由 CI 的 windows-latest rust job 承担（见 AGENTS.md）。授权边界、验收纪律、状态取值与写集约束等决策内容不受影响，仍然有效。
+
 ## 目标与授权
 
 用户授权主控依据审计持续推进：Codex 制定路线/任务卡并验收；CodeBuddy 编写产品代码和回归；每次编写后独立子代理 review，反馈返工仍交原 CodeBuddy 会话。现有派发/返工烟测已完成，但不代表下列产品任务已完成。

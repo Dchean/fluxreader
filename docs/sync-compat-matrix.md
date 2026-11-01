@@ -210,6 +210,13 @@ FreshRSS 的具体部署版本未逐一实机验收**——本列不能当作「
   冲突方向仍只消费 `conflict_policy` 单点。单请求/合并失败 = 该侧本轮跳过
   对账 + 游标保留（fail-closed，对齐主列举分块守卫）；URL 归一化不匹配的行
   走 ③ 分支独立 upsert，不误绑/误标既有行。残余场景见 L1 收窄段。
+- **L8 Fever `as=unread` 为实现扩展（2026-11-01 登记）**：官方 Fever 规范的
+  `mark` 写操作只定义 `as=read|saved|unsaved`，「恢复未读」的原语义是
+  `unread_recently_read=1` 配合已读集合；本客户端使用的 `mark=item&as=unread`
+  是 FreshRSS 与 Miniflux 各自实现的扩展（两者均支持，已核对 FreshRSS
+  Fever API 文档与 Miniflux `internal/fever/handler.go`）。§1「取消标读
+  （推送）」行按此口径理解；若未来接入仅按原规范实现的 Fever 服务端，
+  该推送路径需按 `unread_recently_read` 收敛。
 
 测试索引（对账方向的锁定分层）：
 
