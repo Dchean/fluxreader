@@ -1050,9 +1050,11 @@ pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &re
         // 认证/端点/网络失败为当前账号 pending 行落账（attempts/last_error + 事件），
         // UI 摘要卡才能解释「为什么一直等待」。未配置（无归属身份）与代际失配
         // （旧会话作废，OPT-006）不落账。
-        Err(ClientBuildFailure::Failed { err, endpoint, username }) => {
-            record_outbox_session_block(db, &err, &endpoint, &username).await
-        }
+        Err(ClientBuildFailure::Failed {
+            err,
+            endpoint,
+            username,
+        }) => record_outbox_session_block(db, &err, &endpoint, &username).await,
         Err(ClientBuildFailure::NotConfigured) => {}
         Err(ClientBuildFailure::Stale) => {}
         Err(ClientBuildFailure::CorruptGeneration(e)) => {

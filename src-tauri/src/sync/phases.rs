@@ -31,7 +31,11 @@ pub async fn feeds_phase(
         // R1：坏代际是可见协议错误（原样上报，不伪装 notConnected）
         Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
         // A-P2-6：订阅 outbox 的 pending 行同样被本轮构建失败阻塞，落账可见。
-        Err(ClientBuildFailure::Failed { err, endpoint, username }) => {
+        Err(ClientBuildFailure::Failed {
+            err,
+            endpoint,
+            username,
+        }) => {
             record_outbox_session_block(db, &err, &endpoint, &username).await;
             return Err(AppError::new(
                 "notConnected",
@@ -61,7 +65,11 @@ pub async fn feeds_phase_at(
         Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
         Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
         // A-P2-6：同 feeds_phase——构建失败为订阅 outbox pending 行落账。
-        Err(ClientBuildFailure::Failed { err, endpoint, username }) => {
+        Err(ClientBuildFailure::Failed {
+            err,
+            endpoint,
+            username,
+        }) => {
             record_outbox_session_block(db, &err, &endpoint, &username).await;
             return Err(AppError::new(
                 "notConnected",
