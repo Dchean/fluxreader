@@ -141,8 +141,9 @@ DB 写失败向上传播不再吞成 0）：
   404 顺延（`src-tauri/tests/fever_freshrss_e2e.rs`）；id 字符串形态由
   `FeverId` 按十进制解析；短页与 hook-含-with_ids 语义由 `fever_compat_e2e`
   的「LIMIT 后过滤」夹具锁定（「列表覆盖不到但按 id 可取」只作合成用例标注）。
-- **mock_greader（测试替身）**：ids 路由实现为 `changed_at >= ot`（边界
-  含入）。与真实 Miniflux 的差异意味着**测试锁定的是客户端语义（起点候选
+- **mock_greader（测试替身）**：ids 路由自 2026-10-31 起实现为
+  `published_at > ot`（严格大于，与真实 Miniflux 对齐，见
+  `tests/mock_greader.rs` 头注）。**测试锁定的是客户端语义（起点候选
   + 幂等合并 + 失败守卫），不是任何特定服务端的过滤列**。
 
 **版本验证声明（复述，见文首）**：以上「协议/服务端支持」事实来自源码查阅
