@@ -146,8 +146,20 @@ async fn auth_failure_on_cached_session_reauths_and_retries_once() {
     }
 
     // 服务端恢复：回落重建的会话已在缓存——零认证、正常拉取、游标推进。
+    //
+    // marker 收敛前置（A-P2-3 生命周期，既有 fail-closed 设计，与本卡无关）：
+    // 运行 1 的 pull_feeds 吃 401 时会写入「绑定不完整」持久 marker，清除条件
+    // 是**成功的 pull_feeds**。恢复轮的轻量同步里只读发现被 5 分钟节流挡住
+    // （运行 1 已记账 ZERO_BINDING_DISCOVERY_INTERVAL_SECS），不会自动跑
+    // pull_feeds——生产等价路径是下一轮 feeds 阶段（手动 sync_now / 到期发现）。
+    // 故恢复段先显式跑 feeds_phase 收敛 marker（同样命中缓存会话、零认证），
+    // 再验证条目拉取与游标推进；重放链路本身在发现已尝试时会重跑 pull_feeds，
+    // 服务端放行即收敛，无生产缺陷。
     server.api_unauthorized.store(false, Ordering::SeqCst);
     server.clear_request_log();
+    sync::feeds_phase(&db, &http)
+        .await
+        .expect("恢复轮 feeds 阶段（收敛绑定完整性 marker）");
     let recovered = sync::states_phase(&db, &http, false)
         .await
         .expect("recovered states");
@@ -155,7 +167,7 @@ async fn auth_failure_on_cached_session_reauths_and_retries_once() {
     assert_eq!(
         server.login_request_count(),
         0,
-        "恢复轮必须复用回落重建的会话"
+        "恢复轮（feeds + states 两阶段）必须复用回落重建的会话"
     );
     {
         let conn = db.lock().await;
