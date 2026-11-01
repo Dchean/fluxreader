@@ -25,6 +25,20 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 const T0: i64 = 1_700_000_000;
+/// 用例硬超时：正常夹具的全部链路（认证 + 列举 + 正文 + 差分）是毫秒级回环
+/// 请求，单个请求另有 build_client(10) 的 10s 总超时兜底；120s 只可能在
+/// 「某段等待永远不满足」时触发。挂起形态在此转为带诊断的红色失败，
+/// CI 的 Run tests 步骤不再可能被本套件永久占住。
+const TEST_HARD_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 用例体统一经硬超时驱动（挂起诊断锚点：超时消息携带用例名）。
+async fn run_bounded(name: &str, case: impl std::future::Future<Output = ()>) {
+    if tokio::time::timeout(TEST_HARD_LIMIT, case).await.is_err() {
+        panic!(
+            "unread_diff_e2e 用例 {name} 硬超时（{TEST_HARD_LIMIT:?}）：存在未在时限内收敛的等待"
+        );
+    }
+}
 
 async fn setup(
     name: &str,
@@ -104,6 +118,10 @@ async fn is_read(db: &Arc<Mutex<rusqlite::Connection>>, aid: i64) -> bool {
 /// 状态写入；游标照常推进。
 #[tokio::test]
 async fn diff_marks_locally_unread_row_read_when_remote_read() {
+    run_bounded("mark_read", case_mark_read()).await;
+}
+
+async fn case_mark_read() {
     let (db, http, server, tmp) = setup("mark_read").await;
     let (aid, _eid) = seed_bound_row(
         &db,
@@ -136,6 +154,10 @@ async fn diff_marks_locally_unread_row_read_when_remote_read() {
 /// ② 本地已读幂等：已读行不进差分域，整轮 0 行状态写入。
 #[tokio::test]
 async fn diff_is_idempotent_for_locally_read_rows() {
+    run_bounded("idempotent", case_idempotent()).await;
+}
+
+async fn case_idempotent() {
     let (db, http, server, tmp) = setup("idempotent").await;
     let (aid, _eid) = seed_bound_row(
         &db,
@@ -159,6 +181,10 @@ async fn diff_is_idempotent_for_locally_read_rows() {
 /// 确认远端已不再跟踪该 id → 不落地差分（本地未读守恒、无错误）。
 #[tokio::test]
 async fn diff_does_not_mark_deleted_unread_entries() {
+    run_bounded("deleted", case_deleted()).await;
+}
+
+async fn case_deleted() {
     let (db, http, server, tmp) = setup("deleted").await;
     let (aid, eid) = seed_bound_row(
         &db,
@@ -199,6 +225,10 @@ async fn diff_does_not_mark_deleted_unread_entries() {
 /// （fail-closed），不落地任何差分结果；解除注入后下一轮收敛。
 #[tokio::test]
 async fn diff_skips_entirely_when_unread_collection_fails() {
+    run_bounded("incomplete", case_incomplete()).await;
+}
+
+async fn case_incomplete() {
     let (db, http, server, tmp) = setup("incomplete").await;
     let (aid, _eid) = seed_bound_row(
         &db,
@@ -237,6 +267,10 @@ async fn diff_skips_entirely_when_unread_collection_fails() {
 /// 后下一轮差分收敛。
 #[tokio::test]
 async fn diff_reports_network_failures_during_existence_probe() {
+    run_bounded("probe_network", case_probe_network()).await;
+}
+
+async fn case_probe_network() {
     let (db, http, server, tmp) = setup("probe_network").await;
     let (aid, _eid) = seed_bound_row(
         &db,

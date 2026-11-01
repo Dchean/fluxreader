@@ -4549,8 +4549,32 @@ async fn add_feed_queue_count(db: &Arc<Mutex<rusqlite::Connection>>, url: &str) 
 
 /// 成功路径：结转退订三写原子提交——subscribe 行被退订意图替换（携带结转
 /// rid=42）、旧 add_feed 兼容队项随同删除；remote_created 行不得再发 quick_add。
+/// 用例硬超时（2026-11-02 CI 加固）：结转用例全链路是毫秒级回环请求 +
+/// build_client(10) 单请求超时；120s 只可能在「某段等待永不满足」时触发。
+/// 挂起形态在此转为带诊断的红色失败，Run tests 步骤不再可能被本套件永久占住。
+const CARRYOVER_TEST_HARD_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+async fn run_carryover_bounded(name: &str, case: impl std::future::Future<Output = ()>) {
+    if tokio::time::timeout(CARRYOVER_TEST_HARD_LIMIT, case)
+        .await
+        .is_err()
+    {
+        panic!(
+            "opt009 结转退订用例 {name} 硬超时（{CARRYOVER_TEST_HARD_LIMIT:?}）：存在未在时限内收敛的等待"
+        );
+    }
+}
+
 #[tokio::test]
 async fn carryover_unsubscribe_commits_all_three_writes_with_rid() {
+    run_carryover_bounded(
+        "commits_all_three_writes_with_rid",
+        carryover_unsubscribe_commits_all_three_writes_with_rid_case(),
+    )
+    .await;
+}
+
+async fn carryover_unsubscribe_commits_all_three_writes_with_rid_case() {
     let url = "http://127.0.0.1:1/opt009-r12-carry.xml";
     let (db, server, http, key) = setup_carryover_fixture(url).await;
 
@@ -4588,6 +4612,14 @@ async fn carryover_unsubscribe_commits_all_three_writes_with_rid() {
 /// 无退订意图残留；解除注入后重试收敛（同一事务语义的正反两面）。
 #[tokio::test]
 async fn carryover_unsubscribe_insert_failure_rolls_back_all_three_writes() {
+    run_carryover_bounded(
+        "insert_failure_rolls_back_all_three_writes",
+        carryover_unsubscribe_insert_failure_rolls_back_all_three_writes_case(),
+    )
+    .await;
+}
+
+async fn carryover_unsubscribe_insert_failure_rolls_back_all_three_writes_case() {
     let url = "http://127.0.0.1:1/opt009-r12-rollback.xml";
     let (db, _server, http, _key) = setup_carryover_fixture(url).await;
 
