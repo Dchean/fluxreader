@@ -315,15 +315,34 @@ pub(super) async fn push_feeds(
                 break;
             }
             let mut nid = None;
-            if let Some(local_id) = db::feed_id_by_url(&conn, &it.url).ok().flatten() {
-                // P3[1]：绑定写失败此前静默——绑定缺失会让该源在下次 pull
-                // 被当作未绑定源重复处理。改为 warn（可自愈，不中断）。
-                if let Err(err) = db::set_feed_remote_id(&conn, local_id, rid) {
-                    log::warn!(
+            // 绑定查找走规范化 URL（与 pull_feeds、OPML 去重同口径）：队列携带的
+            // 字符串与本地入库的 URL 常有尾斜杠/www. 差异，精确匹配会漏判成
+            // 「本地已删除」→ 永不绑定。DB 错误不再 `.ok()` 吞掉：沿用 folder_label
+            // 的处置（warn + report.errors + continue，队项不进 done，下轮重试）。
+            // Note: 绑定查找必须走规范化 URL 且 DB 错误不得吞 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅绑定规范化与旁路16MiB界与SMTC浮点饱和.md
+            match db::feed_id_by_url_normalized(&conn, &it.url) {
+                Ok(Some(local_id)) => {
+                    // P3[1]：绑定写失败此前静默——绑定缺失会让该源在下次 pull
+                    // 被当作未绑定源重复处理。改为 warn（可自愈，不中断）。
+                    if let Err(err) = db::set_feed_remote_id(&conn, local_id, rid) {
+                        log::warn!(
                         "sync: quick_add 后绑定远端 id 失败（feed={local_id} remote={rid}）: {err}"
                     );
+                    }
+                    nid = Some(rid);
                 }
-                nid = Some(rid);
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!(
+                        "sync: 解析队列项 {} 的本地 feed 绑定失败（下轮重试）: {e}",
+                        it.queue_id
+                    );
+                    report.errors.push(format!(
+                        "解析订阅 {} 的本地绑定失败（下轮重试）: {e}",
+                        it.url
+                    ));
+                    continue;
+                }
             }
             nid
         };

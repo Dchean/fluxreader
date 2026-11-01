@@ -325,6 +325,11 @@ export interface AppState {
   articlesCursor: Record<string, ArticlesCursorState>;
   /** 正在加载下一批文章（列表底部加载动画） */
   articlesLoading: boolean;
+  /** 后端 reload（全量/筛选）在途计数的 store 镜像：模块级计数闭包外读不到，
+      Timeline 需要在启动装载/后台刷新在途时区分「真空」与「还没落地」。
+      镜像只读模块计数，不接管计数逻辑（isBackendReloadInFlight 守卫语义不变）。
+      见 .agents/notes/implemented/bug-fix/2026-11-02-启动抢占期假空态.md */
+  backendReloadsInFlight: number;
   /** 已加载完所有文章（列表底部显示「到底了」） */
   articlesExhausted: boolean;
   /** TASK-111②：后台刷新保位信号（nonce）。内容刷新路径（feeds-updated /

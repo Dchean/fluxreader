@@ -55,6 +55,7 @@ export function Timeline() {
   const markCurrentViewAllRead = useAppStore((s) => s.markCurrentViewAllRead);
   const loadMoreArticles = useAppStore((s) => s.loadMoreArticles);
   const articlesLoading = useAppStore((s) => s.articlesLoading);
+  const backendReloadsInFlight = useAppStore((s) => s.backendReloadsInFlight);
   const articlesExhausted = useAppStore((s) => s.articlesExhausted);
   const activeArticleId = useAppStore((s) => s.activeArticleId);
 
@@ -589,7 +590,13 @@ export function Timeline() {
              「暂无匹配内容」——数据未落地就宣判「没有内容」是假空态；改渲染
              加载形态，数据落地后按真值恢复（空且已到底 → 文案；有数据 → 列表）。
              此时哨兵同为 loading 形态，这里就不再重复渲染哨兵 spinner。 */
-          articlesLoading ? (
+          /* 启动抢占期（bootstrapFromBackend → reloadFromBackend，及筛选视图
+             的 reloadFilteredEntries）articlesLoading 尚未置真而 entries 仍是
+             旧快照/空数组，只看 articlesLoading 会闪「暂无匹配内容」假空态；
+             故并入后端 reload 在途计数。Note: 计数含兄弟窗口在途 reload，
+             不能改用 isBackendReloadInFlight 之类的「有没有」判据 —
+             见 .agents/notes/implemented/bug-fix/2026-11-02-启动抢占期假空态.md */
+          articlesLoading || backendReloadsInFlight > 0 ? (
             <div className="timeline-empty-state" role="status" aria-label="加载中">
               <span className="load-more-spinner" aria-hidden="true" />
             </div>
@@ -666,7 +673,7 @@ export function Timeline() {
             TASK-094（REQ-107）：容器不可滚动时「滚动加载更多」不可执行，改为可点击的
             「加载更多」按钮（原生 button：键盘可聚焦，Enter/空格原生触发）。 */}
         {/* 空列表且装载在途时，加载形态已由空态区渲染（见上），这里让位避免同屏双 spinner。 */}
-        {sentinel !== 'hidden' && !(items.length === 0 && articlesLoading) && (
+        {sentinel !== 'hidden' && !(items.length === 0 && (articlesLoading || backendReloadsInFlight > 0)) && (
           <div className="timeline-load-more">
             {sentinel === 'loading' ? (
               <span className="load-more-spinner" aria-label="加载中" />

@@ -2479,10 +2479,14 @@ export async function run(ctx) {
         (timelineK2.match(/useFlushSync: false/g) || []).length === 2);
 
       /* (k2-4) 空态/加载态分流 + 哨兵让位 */
+      /* 2026-11-02：判据并入后端 reload 在途计数（启动抢占期假空态），
+         articlesLoading 之外的第三形态见 .agents/notes/implemented/bug-fix/
+         2026-11-02-启动抢占期假空态.md */
       checkNew('(k2-4) Timeline 空态分流：在途渲染加载形态（隐藏空态文案），哨兵在空+在途窗口让位',
-        timelineK2.includes('articlesLoading ? (')
+        timelineK2.includes('useAppStore((s) => s.backendReloadsInFlight)')
+        && timelineK2.includes('articlesLoading || backendReloadsInFlight > 0 ? (')
         && timelineK2.includes('aria-label="加载中"')
-        && timelineK2.includes('!(items.length === 0 && articlesLoading)'));
+        && timelineK2.includes('!(items.length === 0 && (articlesLoading || backendReloadsInFlight > 0))'));
 
       /* (k2-5) bootstrap 并行装载：App 串行 .then 清零；bootstrapFromBackend
          内并行发起设置恢复 + 一次性落库门；两处静默早退兜底 dataLoading */

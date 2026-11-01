@@ -75,6 +75,9 @@ await import('./component-tests/subscription-writeback.test.mjs');
    dialog 语义、AiTab 读改写卡内串行化（新 Key 竞态回归）。 */
 await import('./component-tests/error-boundary.test.mjs');
 await import('./component-tests/modal-focus.test.mjs');
+/* 2026-11-02：关闭态浮层输入不抢焦——ModalOverlay 常驻挂载 + 条件 autoFocus
+   的真实挂载回归（jsdom 不尊崇 inert，修前该通道必红）。 */
+await import('./component-tests/modal-autofocus.test.mjs');
 await import('./component-tests/ai-config-race.test.mjs');
 await import('./component-tests/runner-selfcheck.test.mjs');
 
