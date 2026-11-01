@@ -4507,15 +4507,32 @@ async fn readd_after_confirmed_move_and_delete_carries_remote_old_label() {
 ///   的移除基准重定为 B（修前 sent_moves 只收 edit 行，替代行按链起点 A 发
 ///   r= 是 no-op，远端残留 B）。
 /// 判别力：修前②时远端最终为 {B, C}；修后远端只剩 C。
+/// 前置：远端**已有**该订阅（feed/10，无分类）——mock 替身的 quickadd 创建
+/// 不进入订阅列表/模型，需要断言远端 label 效果的用例必须显式种子（与
+/// `mount_window_production_edit_*` 同款前置），否则 edit 对模型是 no-op。
 #[tokio::test]
 async fn mount_window_success_rebases_replacement_removal_basis() {
     let server = MockGReader::start().await.expect("start mock");
-    server.subscriptions.lock().unwrap().clear();
     let tmp = common::unique_db_path("opt009b_mount_rebase");
     let _ = std::fs::remove_file(&tmp);
     let http = app_lib::ingestion::build_client(10);
     let url = format!("{}/opt009-mount-rebase.xml", server.url());
     let key = acct_key("greader", &server, "test");
+    // 远端已有该订阅（feed/10，无分类）：mock 替身的 quickadd 创建不进入订阅
+    // 列表/模型（既有契约——需要断言远端 label 效果的用例一律显式种子，见
+    // mount_window_production_edit_* 同款前置），挂载/移动的真实远端效果由此可断言。
+    server
+        .existing_feed_urls
+        .lock()
+        .unwrap()
+        .push((url.clone(), 10));
+    *server.subscriptions.lock().unwrap() = vec![MockSubscription {
+        id: "feed/10".into(),
+        title: "挂载重定".into(),
+        url: url.clone(),
+        html_url: None,
+        categories: vec![],
+    }];
 
     let (dbm, feed_id, folder_c) = {
         let conn = db::open(&tmp).unwrap();
@@ -4663,8 +4680,8 @@ async fn mount_window_success_rebases_replacement_removal_basis() {
     }
     assert_eq!(
         quickadd_requests(&server),
-        1,
-        "替代行携带远端绑定：全程只发生第一轮的一次 quick_add"
+        0,
+        "远端已持有该订阅（种子）：列表证据直接解析，全程零 quick_add"
     );
     let _ = std::fs::remove_file(&tmp);
 }
