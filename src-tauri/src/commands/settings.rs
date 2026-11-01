@@ -432,7 +432,19 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
             resp.status()
         )));
     }
-    let html = resp.text().await?;
+    // 全文提取与 feed 主管线共用 16 MiB 响应体界（防 Content-Length 谎报的
+    // 流式响应撑爆内存）；超限是可预期的失败形态，用业务文案如实上报。
+    let html =
+        match crate::ingestion::read_body_capped(resp, crate::ingestion::MAX_BODY_BYTES).await {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) if e.code == "responseTooLarge" => {
+                return Err(AppError::new(
+                    "responseTooLarge",
+                    "网页正文超过 16 MiB，已放弃提取",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
 
     // Readability 不是 Send → spawn_blocking 里跑
     let base = url.clone();
@@ -1061,5 +1073,70 @@ mod extract_fulltext_commit_tests {
         assert_eq!(wire["contentId"], serde_json::json!(cid));
         assert_eq!(wire["contentRevision"], serde_json::json!(rev));
         assert_eq!(wire["degraded"], serde_json::json!(false));
+    }
+
+    /// 谎报 Content-Length 的静态网页 mock：声称 10 字节、实发超过 16 MiB——
+    /// 预检分支不拦（Content-Length 是小值），必须由 read_body_capped 的
+    /// 累计分支中止，全文提取以业务文案显式失败且不污染库内正文。
+    fn start_lying_oversize_mock() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Some(Ok(mut stream)) = listener.incoming().next() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let mut req = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                req.extend_from_slice(&buf[..n]);
+                if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                        Content-Length: 10\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            let chunk = vec![b'a'; 64 * 1024];
+            // 客户端超限中止后写入会失败——忽略，测试只关心读取侧结果
+            for _ in 0..(crate::ingestion::MAX_BODY_BYTES / chunk.len() + 4) {
+                if stream.write_all(&chunk).is_err() {
+                    return;
+                }
+            }
+            let _ = stream.flush();
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn oversized_fulltext_body_reports_response_too_large() {
+        let port = start_lying_oversize_mock();
+        let state = setup(port);
+        let err = extract_fulltext_inner(&state, 1)
+            .await
+            .expect_err("超限网页必须显式失败，不得静默截断或污染正文");
+        assert_eq!(err.code, "responseTooLarge");
+        assert!(
+            err.message.contains("16 MiB"),
+            "超限文案必须可读: {}",
+            err.message
+        );
+        let conn = state.db.lock().await;
+        let (html, rev): (String, i64) = conn
+            .query_row(
+                "SELECT COALESCE(content_html, ''), revision FROM contents WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (html.as_str(), rev),
+            ("<p>RSS 摘要</p>", 1),
+            "超限失败不得改动正文与修订"
+        );
     }
 }

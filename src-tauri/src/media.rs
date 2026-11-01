@@ -5,6 +5,24 @@
 
 use crate::error::AppResult;
 
+/// SMTC 时长的语义上界：7 天。播客单集时长的现实极值远低于此；超过只可能
+/// 来自前端的除零/未初始化浮点（1e30、+inf 等）。必须先饱和再交给
+/// `Duration::from_secs_f64`——该构造器对超出范围（含 +inf）与 NaN 直接
+/// panic，而 panic 发生在 SMTC 专用线程的指令循环里，线程静默死亡，
+/// 此后所有媒体键/进度条更新全部失效且无任何日志。
+const MAX_MEDIA_SECS: f64 = 86_400.0 * 7.0;
+
+/// 浮点入参饱和：NaN/负值归 0，超大有限值与 +inf 钳到语义上界，
+/// 保证 `Duration::from_secs_f64` 不 panic。
+fn media_secs(v: f64) -> f64 {
+    // f64::clamp(NaN, …) 返回 NaN（IEEE 754 语义），须先单独归零。
+    if v.is_nan() {
+        0.0
+    } else {
+        v.clamp(0.0, MAX_MEDIA_SECS)
+    }
+}
+
 /// 线程安全的投递端：AppState 持有，命令层调用
 #[derive(Clone)]
 pub struct MediaHandle {
@@ -146,15 +164,15 @@ pub fn spawn_media_thread(app: &tauri::AppHandle) -> MediaHandle {
                     } => {
                         let playback = if playing {
                             MediaPlayback::Playing {
-                                progress: Some(MediaPosition(Duration::from_secs_f64(
-                                    position_sec.max(0.0),
-                                ))),
+                                progress: Some(MediaPosition(Duration::from_secs_f64(media_secs(
+                                    position_sec,
+                                )))),
                             }
                         } else {
                             MediaPlayback::Paused {
-                                progress: Some(MediaPosition(Duration::from_secs_f64(
-                                    position_sec.max(0.0),
-                                ))),
+                                progress: Some(MediaPosition(Duration::from_secs_f64(media_secs(
+                                    position_sec,
+                                )))),
                             }
                         };
                         let _ = controls.set_playback(playback);
@@ -163,7 +181,7 @@ pub fn spawn_media_thread(app: &tauri::AppHandle) -> MediaHandle {
                             artist: Some(&show),
                             album: None,
                             cover_url: None,
-                            duration: Some(Duration::from_secs_f64(duration_sec.max(0.0))),
+                            duration: Some(Duration::from_secs_f64(media_secs(duration_sec))),
                         });
                     }
                     MediaCmd::Stop => {
@@ -209,4 +227,18 @@ pub fn media_update_full(
 pub fn media_stop(state: tauri::State<'_, crate::state::AppState>) -> AppResult<()> {
     state.media.stop();
     Ok(())
+}
+
+#[cfg(test)]
+mod media_secs_tests {
+    use super::*;
+
+    #[test]
+    fn saturates_pathological_floats() {
+        assert!(media_secs(f64::NAN) == 0.0, "NaN 归 0（clamp 不处理 NaN）");
+        assert_eq!(media_secs(-1.0), 0.0, "负值归 0");
+        assert_eq!(media_secs(1e30), MAX_MEDIA_SECS, "超大有限值钳到上界");
+        assert_eq!(media_secs(f64::INFINITY), MAX_MEDIA_SECS, "+inf 钳到上界");
+        assert_eq!(media_secs(42.0), 42.0, "正常值原样保留");
+    }
 }

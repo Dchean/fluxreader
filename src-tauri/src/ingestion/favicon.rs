@@ -1,5 +1,6 @@
 //! favicon 自动发现：站点 `<link rel~=icon>` 优先，退回 `<origin>/favicon.ico`。
 
+use super::http::{read_body_capped, MAX_BODY_BYTES};
 use super::parse::resolve_url;
 use reqwest::Client;
 
@@ -17,19 +18,25 @@ pub(super) static FAVICON_TRIED: std::sync::LazyLock<
 /// 探测发生在刷新信号量内，超时越长并发刷新被拖得越久。
 pub(super) async fn discover_favicon(client: &Client, site_url: &str) -> Option<String> {
     let origin = url::Url::parse(site_url).ok()?;
-    let base = format!("{}://{}", origin.scheme(), origin.host_str()?);
+    // base 保留显式端口：探测必须打回源站同一 origin——丢端口会把带端口的
+    // 源（含本机 loopback 测试）探到默认端口的另一个服务上。
+    let mut base = format!("{}://{}", origin.scheme(), origin.host_str()?);
+    if let Some(port) = origin.port() {
+        base = format!("{base}:{port}");
+    }
 
-    // ① 站点首页 HTML 里的 <link rel="icon">（rel 包含 icon 的各种变体）
-    let html = client
+    // ① 站点首页 HTML 里的 <link rel="icon">（rel 包含 icon 的各种变体）。
+    // 首页读取与 feed 主管线共用 16 MiB 界——恶意/异常站点可回无界大响应，
+    // favicon 是锦上添花，超限等同读取失败（返回 None，走负缓存）。
+    let resp = client
         .get(&base)
         .header("User-Agent", BROWSER_UA)
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await
-        .ok()?
-        .text()
-        .await
         .ok()?;
+    let bytes = read_body_capped(resp, MAX_BODY_BYTES).await.ok()?;
+    let html = String::from_utf8_lossy(&bytes).into_owned();
     let link_icon = extract_icon_link(&html).map(|href| resolve_url(&href, &base));
 
     // ② 兜底 /favicon.ico
@@ -133,6 +140,50 @@ const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 #[cfg(test)]
 mod favicon_tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    /// 谎报 Content-Length 的静态首页 mock：声称 10 字节、实发超过 16 MiB——
+    /// 预检分支不拦（Content-Length 是小值），必须由累计分支中止读取。
+    #[tokio::test]
+    async fn oversized_homepage_folds_into_discovery_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Some(Ok(mut stream)) = listener.incoming().next() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let mut req = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                req.extend_from_slice(&buf[..n]);
+                if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                        Content-Length: 10\r\nConnection: close\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            let chunk = vec![b'a'; 64 * 1024];
+            // 客户端超限中止后写入会失败——忽略，测试只关心读取侧结果
+            for _ in 0..(MAX_BODY_BYTES / chunk.len() + 4) {
+                if stream.write_all(&chunk).is_err() {
+                    return;
+                }
+            }
+            let _ = stream.flush();
+        });
+        let client = super::super::build_client(10);
+        let site = format!("http://127.0.0.1:{port}/feed.xml");
+        assert_eq!(
+            discover_favicon(&client, &site),
+            None,
+            "超大首页必须并入「任何失败返回 None」（负缓存）"
+        );
+    }
 
     #[test]
     fn extract_icon_link_finds_variants() {

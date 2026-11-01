@@ -5002,6 +5002,100 @@ async fn push_feeds_mount_failure_keeps_legacy_queue_item_until_converges() {
 }
 
 /* ============================================================
+9b. legacy add_feed：本地 URL 变体与队列字符串仅规范化后相等 →
+    quick_add 后绑定必须命中本地源
+============================================================ */
+
+/// 审计 P3（2026-11-02）：push_feeds 的绑定查找原用 `feed_id_by_url` 精确
+/// 匹配且 `.ok()` 吞 DB 错误——队列携带的 URL 与本地入库字符串常有尾斜杠/
+/// www. 差异，quick_add 成功却永不绑定（该源在 pull 侧被当未绑定源重复
+/// 处理）。修后走 `feed_id_by_url_normalized`（与 pull_feeds、OPML 去重
+/// 同口径），DB 错误落 report.errors 且队项保留。
+#[tokio::test]
+async fn push_feeds_binds_local_feed_via_normalized_url_variant() {
+    let server = MockGReader::start().await.expect("start mock");
+    let tmp = common::unique_db_path("opt009b_legacy_bind_norm");
+    let _ = std::fs::remove_file(&tmp);
+    let http = app_lib::ingestion::build_client(10);
+    let url = format!("{}/opt009-legacy-bind.xml", server.url());
+    // 本地入库带尾斜杠变体；legacy 队项（与 quick_add、列表证据）携带原字符串
+    let local_url = format!("{url}/");
+
+    // 清空远端订阅列表：列表证据解析不到 → 必须走 quick_add 新建
+    *server.subscriptions.lock().unwrap() = vec![];
+
+    let dbm = {
+        let conn = db::open(&tmp).unwrap();
+        db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+        db::set_setting(&conn, "greader_username", "test").unwrap();
+        db::set_setting(&conn, "greader_password", "test-token").unwrap();
+        let folder = db::create_folder(&conn, "B分类", "article").unwrap();
+        db::insert_feed(
+            &conn,
+            &local_url,
+            None,
+            "规范化绑定",
+            None,
+            folder,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        db::enqueue_sync(&conn, None, Some(&url), "add_feed", None).unwrap();
+        Arc::new(Mutex::new(conn))
+    };
+
+    let report = sync::feeds_phase(&dbm, &http).await.expect("feeds phase");
+    assert!(
+        report.errors.is_empty(),
+        "正常收敛不得有错误: {:?}",
+        report.errors
+    );
+    {
+        let conn = dbm.lock().await;
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE feed_url = ?1 AND action = 'add_feed'",
+                [&url],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            queued, 0,
+            "quick_add 成功且无分类挂载：队项照常出队: {report:?}"
+        );
+        let remote_registered = server
+            .existing_feed_urls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(u, _)| u == &url)
+            .map(|(_, id)| *id)
+            .expect("quick_add 必须在远端登记新订阅");
+        let (bound, dupes): (Option<i64>, i64) = conn
+            .query_row(
+                "SELECT remote_id, COUNT(*) FROM feeds WHERE feed_url = ?1",
+                [&local_url],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(dupes, 1, "不得因绑定漏判新建重复本地源");
+        assert_eq!(
+            bound,
+            Some(remote_registered),
+            "绑定查找必须按规范化 URL 命中本地尾斜杠变体"
+        );
+    }
+    assert_eq!(
+        quickadd_requests(&server),
+        1,
+        "远端无此订阅：恰好一次 quick_add"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/* ============================================================
 10. 会话构建失败落账（A-P2-6）：pending 行 attempts/last_error 可见
 ============================================================ */
 
