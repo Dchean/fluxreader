@@ -279,15 +279,6 @@ pub(super) async fn reauth_after_auth_failure(
     }
 }
 
-/// 认证类失败判定（401 回落的触发条件）：
-/// - Fever：信封 `auth != 1` → code="auth"（fever.rs AUTH_FAILED_MSG）；
-/// - GReader：会话内 token 失效经 network code 报出，消息形态
-///   `GET/POST … → 401/403 …`（greader.rs 既有文案；ClientLogin 的构建期
-///   失败不经本判定——那走 ClientBuildFailure::Failed 的既有处理）。
-pub(super) fn is_auth_failure(err: &AppError) -> bool {
-    err.code == "auth" || err.message.contains("→ 401") || err.message.contains("→ 403")
-}
-
 /// 报告级认证失败检测：pull/push 的认证失败按 fail-closed 语义进
 /// `report.errors` 而非 Err（不中止本轮），401 回落因此在报告层检测。
 /// 错误串由 AppError Display（`[code] message`）与 greader.rs 状态码文案
