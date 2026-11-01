@@ -3,7 +3,7 @@
 //! 机制：light 轮不再全量拉 read 集合，改拉 reading-list + xt=read 的当前未读
 //! 全集（fetch_stream_ids 的 P2-1 纪律保证 Ok ⟺ continuation 耗尽，完整性守卫
 //! 是结构性的），与本地「已绑定未读」行差分出「远端新变已读」，经
-//! conflict_policy 单向落地。本文件锁定四个等价性用例：
+//! conflict_policy 单向落地。本文件锁定五个等价性用例：
 //! ① 远端新标已读 → 本地落已读（条目 published 早于游标使增量窗口不可达，
 //!    差分是唯一 read 通道）；
 //! ② 本地已读幂等 0 行（已读行不进差分域）；

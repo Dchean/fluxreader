@@ -630,8 +630,11 @@ mod image_proxy_tests {
     }
 
     /// 无 Content-Length 定界的超量流 mock（EOF 定界）：实发超过 25 MiB 图片界。
-    /// 客户端在累计上限中止读取后连接关闭——后续写入失败，mock 经通道上报
-    /// 实际写出的块数，测试据此断言「连接被客户端中止」（不再完整收体）。
+    /// 客户端在累计上限中止读取后，Windows 回环的写入失败时序不确定（TCP
+    /// 缓冲可吞掉可观余量），阻塞式 write_all 可能长时间不返回导致测试挂起
+    /// （CI 实证）。写侧改非阻塞 + 3s 截止：WouldBlock 短暂退避后重试、连接
+    /// 断开（其他错误类）立即结束、到截止放弃等待——mock 必然结束，结束时
+    /// 无条件上报实发字节数，recv_timeout 必有值。
     fn start_oversize_image_eof_mock(sent_chunks: mpsc::Sender<usize>) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -655,19 +658,26 @@ mod image_proxy_tests {
                         Connection: close\r\n\r\n";
             let _ = stream.write_all(head.as_bytes());
             let chunk = vec![b'a'; 64 * 1024];
-            let planned = MAX_IMAGE_BYTES / chunk.len() + 64;
-            let mut sent = 0usize;
-            for _ in 0..planned {
-                if stream.write_all(&chunk).is_err() {
-                    break;
+            let _ = stream.set_nonblocking(true);
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let mut sent_bytes = 0usize;
+            while sent_bytes < OVERSHOOT_PLANNED_BYTES && std::time::Instant::now() < deadline {
+                match stream.write(&chunk) {
+                    Ok(n) => sent_bytes += n,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break, // 连接已断：客户端中止读取
                 }
-                sent += 1;
             }
             let _ = stream.flush();
-            let _ = sent_chunks.send(sent);
+            let _ = sent_chunks.send(sent_bytes);
         });
         port
     }
+
+    /// 计划超量字节数（25 MiB 界 + 64 块余量）：mock 与测试断言共用的同一值。
+    const OVERSHOOT_PLANNED_BYTES: usize = MAX_IMAGE_BYTES + 64 * 1024 * 64;
 
     /// 图片代理旁路闭合（2026-11-02）：无 CL 超量流必须由 read_body_capped 的
     /// 累计分支在 25 MiB 处中止（responseTooLarge），且连接被客户端中止——
@@ -684,13 +694,14 @@ mod image_proxy_tests {
             err.code, "responseTooLarge",
             "超限对齐 responseTooLarge 口径: {err}"
         );
-        // 连接被客户端中止：mock 未能把计划内的超量数据全部写出
+        // 连接被客户端中止：mock 未能把计划内的超量数据全部写出（若 TCP 缓冲
+        // 恰好吞掉剩余导致 sent == planned，断言给出可诊断失败而非挂起）
         let sent = sent_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("mock 必须结束（客户端中止后写入失败或发送完毕）");
         assert!(
-            sent < MAX_IMAGE_BYTES / (64 * 1024) + 64,
-            "客户端必须在累计上限处中止读取（mock 实发 {sent} 块）"
+            sent < OVERSHOOT_PLANNED_BYTES,
+            "客户端必须在累计上限处中止读取（mock 实发 {sent} 字节）"
         );
     }
 }

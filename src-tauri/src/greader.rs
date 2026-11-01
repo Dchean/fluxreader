@@ -69,7 +69,7 @@ pub fn parse_client_login(body: &str) -> AppResult<String> {
     }
     match error_code {
         Some(code) if !code.is_empty() => {
-            Err(AppError::network(format!("ClientLogin 失败：{code}")))
+            Err(AppError::network(format!("ClientLogin 失败：{code}")).auth())
         }
         _ => Err(AppError::network(
             "ClientLogin 响应既非 JSON 也未包含 Auth= 行",

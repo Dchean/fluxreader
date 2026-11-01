@@ -316,11 +316,15 @@ pub(super) async fn pull_entries_greader(
     //   之外——只能等全量对账补回（JOURNAL 09-24 登记的漏拉窗口，拉取越慢漏得越多）。
     // - 无重：本轮已合并的条目凡 changed_at ≥ C，下一轮会重复列举；合并幂等
     //   （upsert + 状态写同值 + 正文/封面只回填空位），不产生重复数据。
-    // - 比较方向：服务端过滤为 changed_at >= ot（mock_greader.rs 的 ids 路由实现；
-    //   真实 Miniflux main 分支把 ot 映射为 published_at > ot 严格大于，过滤列与
-    //   方向随服务端版本/实现而异）。边界包含（>=）使「changed_at 恰等于起点游标」
-    //   的条目会被重复拉——幂等合并下可接受；若是严格 >，「同一秒内、id 列举先于
-    //   变更」的条目（changed_at == 起点）会被漏掉、重新打开漏拉窗口，故边界必须含入。
+    // - 比较方向：服务端过滤为 published > ot（**严格大于**）——mock_greader.rs
+    //   的 ids 路由与真实 Miniflux v2 main 同口径（ot → AfterPublishedDate →
+    //   `published_at > $N`；契约与分歧条目构造见 mock 头注，pull_window_e2e
+    //   锁定）。无漏性在严格大于下依然成立，但论证载体从 changed_at 换成
+    //   published：新抓条目的 published 即入库时刻（墙钟单调），本轮窗口
+    //   (上轮起点, ∞) 覆盖「本轮列举时刻之前已入库」的全部新条目；列举之后
+    //   入库的条目 published > 本轮起点候选（列举开始前墙钟），必然落进下一轮
+    //   窗口。旧条目的状态变更不改 published、不进增量窗口——由权威集合对账
+    //   （unread/starred）与 with_ids 回补承担，这是设计分工而非漏拉窗口。
     // - 首次同步：last_sync_ts 为空取 0，ot=0 即全窗口列举，成功后写起点候选，
     //   与「游标 0 ⇒ 视为未同步」的既有语义兼容；全量（full=true，ot=0）同理写起点。
     let cursor_candidate = pull_now();
@@ -844,7 +848,8 @@ async fn probe_unread_diff_candidates(
         let ids: Vec<i64> = chunk.iter().map(|(remote_id, _)| *remote_id).collect();
         match client.item_contents(&ids).await {
             Ok(_) => confirmed.extend(ids),
-            Err(_) => {
+            Err(e) => {
+                report.note_client_error(&e);
                 let mut network_streak = 0usize;
                 for (idx, id) in ids.iter().copied().enumerate() {
                     if network_streak >= 2 {
@@ -860,6 +865,7 @@ async fn probe_unread_diff_candidates(
                             );
                         }
                         Err(e) => {
+                            report.note_client_error(&e);
                             network_unconfirmed += 1;
                             network_streak += 1;
                             log::debug!("greader pull: read 差分候选 {id} 存在性校验网络失败: {e}");
