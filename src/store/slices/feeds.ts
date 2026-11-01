@@ -1,5 +1,5 @@
 import type { StateCreator } from 'zustand';
-import { api, extractError } from '../../lib/api';
+import { api, extractError, extractErrorCode } from '../../lib/api';
 import {
   applyCategoryAiFlagPatch,
   applyFeedAiModePatch,
@@ -46,7 +46,11 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
       void api
         .createFolder(name, layout)
         .then(() => get().reloadFromBackend())
-        .catch(() => get().showToast('创建分类失败'));
+        .catch((e) =>
+          get().showToast(
+            extractErrorCode(e) === 'duplicateFolderName' ? '分类已存在' : '创建分类失败',
+          ),
+        );
       return;
     }
     set((s) => {
