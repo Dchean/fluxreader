@@ -81,14 +81,15 @@ pub(crate) use migrations::MIGRATIONS;
 /// sync_queue 分离）。本阶段只交付表/语义/数据层入口——推送执行、GReader
 /// wire、Fever local-only 命令层接线不在阶段 A。
 pub use outbox::{
-    adopt_remote_id_for_pending, advance_subscribe_stage, advance_unsubscribe_resolution,
-    confirm_subscribe_if_desired_unchanged, enqueue_edit, enqueue_subscribe, enqueue_unsubscribe,
-    mark_outbox_failed, mark_outbox_local_only, mark_outbox_session_blocked, outbox_has_pending,
-    outbox_pending_by_id, outbox_pending_for_url, pending_outbox, prune_outbox,
-    rebase_successor_edit_prev, rebind_outbox_generation, subscription_outbox_changed_payload,
-    subscription_outbox_stats, update_pending_subscribe_desired, SubscriptionOutboxItem,
-    SubscriptionOutboxStats, ACTION_EDIT, ACTION_SUBSCRIBE, ACTION_UNSUBSCRIBE, STAGE_PENDING,
-    STAGE_REMOTE_CREATED, STATUS_LOCAL_ONLY, STATUS_PENDING,
+    abandon_stale_outbox, adopt_remote_id_for_pending, advance_subscribe_stage,
+    advance_unsubscribe_resolution, confirm_subscribe_if_desired_unchanged, enqueue_edit,
+    enqueue_subscribe, enqueue_unsubscribe, mark_outbox_failed, mark_outbox_local_only,
+    mark_outbox_session_blocked, outbox_has_pending, outbox_pending_by_id, outbox_pending_for_url,
+    pending_outbox, prune_outbox, rebase_successor_edit_prev, rebind_outbox_generation,
+    subscription_outbox_changed_payload, subscription_outbox_stats,
+    update_pending_subscribe_desired, SubscriptionOutboxItem, SubscriptionOutboxStats, ACTION_EDIT,
+    ACTION_SUBSCRIBE, ACTION_UNSUBSCRIBE, STAGE_PENDING, STAGE_REMOTE_CREATED, STATUS_LOCAL_ONLY,
+    STATUS_PENDING,
 };
 pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
 /* OPT-014 R1：账号提交事务内核/可注入写入——crate 内部（命令层）使用，

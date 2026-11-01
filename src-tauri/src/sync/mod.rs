@@ -57,9 +57,26 @@ pub struct SyncReport {
     /// 在只读订阅发现后重试一次；不属于对外 report schema。
     #[serde(skip)]
     pub binding_incomplete: bool,
+    /// 本轮出现**认证类失败**（greader/fever 的 401/403 状态码错误与 Fever
+    /// api_key 失败——错误构造点的结构化标记，经各捕获点 [`SyncReport::note_client_error`]
+    /// 汇入）。会话缓存回落（`report_has_auth_failure`）的判定输入，取代曾经的
+    /// `report.errors` 文案串匹配——URL 类错误伪造「→ 401」文案的口子就此关闭。
+    /// `serde(skip)`：内部信号，不属于对外 report schema（同上两字段的选型）。
+    #[serde(skip)]
+    pub auth_failure: bool,
 }
 
 impl SyncReport {
+    /// 客户端错误进报告前的标记登记：错误文案仍由调用方照旧拼接进 `errors`
+    /// （IPC 面逐字不变），仅当错误携带认证失败标记（`AppError::auth` /
+    /// `auth_if`）时置位 `auth_failure`。各 HTTP 捕获点在 push 进 errors 前调用；
+    /// DB/合并类错误无认证标记，不需要调用。
+    pub fn note_client_error(&mut self, err: &crate::error::AppError) {
+        if err.is_auth_failure() {
+            self.auth_failure = true;
+        }
+    }
+
     /// 本轮是否产生了**用户可见的数据变化**（事件层单点判定，OPT-007 / F11；
     /// R3 立口径，R4 按主控 rg 核对修正 `merged_states` 的归属）。
     ///

@@ -308,7 +308,8 @@ impl FeverClient {
         let (env, status) = self.call_probe(action, extra).await?;
         match env {
             Some(env) => Ok(env),
-            None => Err(AppError::network(format!("Fever {action} → {status}"))),
+            None => Err(AppError::network(format!("Fever {action} → {status}"))
+                .auth_if(AppError::is_auth_status(status))),
         }
     }
 
@@ -358,7 +359,7 @@ impl FeverClient {
             ));
         }
         if env.auth != 1 {
-            return Err(AppError::new("auth", AUTH_FAILED_MSG));
+            return Err(AppError::new("auth", AUTH_FAILED_MSG).auth());
         }
         Ok((Some(env), status))
     }
@@ -400,7 +401,8 @@ impl FeverClient {
             // 路径存在但请求被拒（多为凭据问题）——立即停下如实报错
             return Err(AppError::network(format!(
                 "Fever 认证被拒 → {status}（已定位 API：{base}）"
-            )));
+            ))
+            .auth_if(AppError::is_auth_status(status)));
         }
 
         Err(AppError::network(match last_status {
@@ -678,14 +680,16 @@ impl FeverClient {
                 .send()
                 .await?;
             if !resp.status().is_success() {
+                let status = resp.status().as_u16();
                 return Err(AppError::network(format!(
                     "Fever mark {mark} {id} → {}",
                     resp.status()
-                )));
+                ))
+                .auth_if(AppError::is_auth_status(status)));
             }
             let env: FeverEnvelope = read_envelope(resp, "mark").await?;
             if env.auth != 1 {
-                return Err(AppError::new("auth", AUTH_FAILED_MSG));
+                return Err(AppError::new("auth", AUTH_FAILED_MSG).auth());
             }
         }
         Ok(())

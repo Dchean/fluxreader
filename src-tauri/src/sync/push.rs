@@ -141,6 +141,7 @@ pub(super) async fn exec_push(
             }
             Err(e) => {
                 // 聚合报告与 per-item 摘要同文：errors 口径逐字保持修前形态
+                report.note_client_error(&e);
                 let summary = format!("状态推送失败: {e}");
                 report.errors.push(summary.clone());
                 failed.extend(
@@ -186,6 +187,7 @@ pub(super) async fn exec_push(
                 done.push(*qid);
             }
             Err(e) => {
+                report.note_client_error(&e);
                 let summary = format!("收藏同步失败: entry {remote_id}: {e}");
                 report.errors.push(summary.clone());
                 failed.push((*qid, summary));

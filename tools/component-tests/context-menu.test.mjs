@@ -126,9 +126,9 @@ componentTest('ContextMenu 打开时 j/k/s/m 被截停：不冒泡到 App 全局
   await pressOnFocused(act, 'Escape');
   await flush(2);
   assert.ok(!document.querySelector('.ctx-menu'), '菜单应已关闭');
-  /* 向卡片派发而非 activeElement：App 挂载后关闭态搜索面板的 input 持焦
-     （既有行为），inInput 会让 s 落空——正控制要验证的是「事件不再被菜单
-     截停」，目标用非输入元素保证键路判定干净。 */
+  /* 向卡片派发而非 activeElement：正控制要验证的是「事件不再被菜单截停」，
+     目标用非输入元素保证 inInput 判定与键路干净（关闭态 autoFocus 加固后
+     挂载时焦点在 body，此处派发目标与焦点状态解耦，两种行为下都成立）。 */
   await act(async () => {
     card.dispatchEvent(new KeyboardEvent('keydown', { key: 's', bubbles: true, cancelable: true }));
   });

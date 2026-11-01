@@ -284,15 +284,12 @@ pub(super) async fn reauth_after_auth_failure(
 
 /// 报告级认证失败检测：pull/push 的认证失败按 fail-closed 语义进
 /// `report.errors` 而非 Err（不中止本轮），401 回落因此在报告层检测。
-/// 错误串由 AppError Display（`[code] message`）与 greader.rs 状态码文案
-/// 组成，二者都是仓内单点；URL 类错误理论上可伪造标记，后果仅是多一次
-/// 有界的剔除重认证（无循环——重试租约不再触发）。
+/// 判据是**结构化标记**（`AppError::auth`/`auth_if`——greader/fever 的 401/403
+/// 状态码构造点与 Fever api_key 失败打标），由各 HTTP 捕获点经
+/// `SyncReport::note_client_error` 汇入 `report.auth_failure`；不再串匹配错误
+/// 文案（URL 类错误可伪造「→ 401」文案的口子就此关闭，纯网络失败无误报）。
 pub(super) fn report_has_auth_failure(report: &SyncReport) -> bool {
-    report.errors.iter().any(|msg| is_auth_failure_message(msg))
-}
-
-fn is_auth_failure_message(msg: &str) -> bool {
-    msg.contains("[auth] ") || msg.contains("→ 401") || msg.contains("→ 403")
+    report.auth_failure
 }
 
 /// 锁内读凭据 + 捕获代际 → 锁外按协议构建 client → 再锁内复核代际后才写
@@ -546,26 +543,68 @@ mod tests {
         assert!(!cache_entry_fresh(Duration::from_secs(601)));
     }
 
-    /// W3-1：报告级检测——错误串经 AppError Display（`[code] message`）嵌入，
-    /// `[auth] ` 与 `→ 401/403` 都要能从组合串里识别；纯网络失败不误报。
+    /// W3-1（2026-11-02 结构化）：报告级检测只认错误构造点的认证标记——
+    /// 文案相同但未标记的错误（如 URL 路径恰好含「→ 401」）不得触发；
+    /// 401/403/Fever api_key 三类构造点的标记经 note_client_error 汇入都必须
+    /// 生效；错误文案本身照旧进 errors（IPC 面不变）。
     #[test]
-    fn report_has_auth_failure_scans_composed_strings() {
+    fn report_has_auth_failure_reads_structured_marker_not_text() {
         let mut report = SyncReport::default();
         assert!(!report_has_auth_failure(&report));
+        // 串匹配口子已关闭：文案含「→ 401」但未标记 → 不触发
         report
             .errors
             .push("拉取条目正文失败: [network] GET /x → 500".into());
-        assert!(!report_has_auth_failure(&report));
         report
             .errors
             .push("拉取条目 id 失败: [network] GET /x → 401 Unauthorized".into());
-        assert!(report_has_auth_failure(&report));
-        let mut fever_report = SyncReport::default();
-        fever_report.errors.push(
-            "状态对账跳过：Fever 状态集合拉取失败（[auth] Fever 认证失败（api_key 不正确；FreshRSS 请使用个人设置里的「API 密码」））"
-                .into(),
+        assert!(!report_has_auth_failure(&report));
+
+        // GReader 401 构造点标记（生产形态：AppError::network(..).auth_if(..)）+
+        // 捕获点 note_client_error 登记 → 触发；错误文案照旧进 errors
+        let greader_401 = crate::error::AppError::network(
+            "GET /reader/api/0/stream/items/ids → 401 Unauthorized",
+        )
+        .auth_if(crate::error::AppError::is_auth_status(401));
+        report.note_client_error(&greader_401);
+        report
+            .errors
+            .push(format!("拉取条目 id 失败: {greader_401}"));
+        assert!(
+            report.errors.iter().any(|e| e.contains("→ 401")),
+            "错误文案照旧进 errors（IPC 面不变）: {:?}",
+            report.errors
         );
+        assert!(report_has_auth_failure(&report));
+
+        // Fever api_key 构造点（无条件 auth 标记）与 403 构造点同样生效
+        let fever_auth = crate::error::AppError::new(
+            "auth",
+            "Fever 认证失败（api_key 不正确；FreshRSS 请使用个人设置里的「API 密码」）",
+        )
+        .auth();
+        let mut fever_report = SyncReport::default();
+        fever_report.note_client_error(&fever_auth);
+        fever_report.errors.push(format!(
+            "状态对账跳过：Fever 状态集合拉取失败（{fever_auth}）"
+        ));
         assert!(report_has_auth_failure(&fever_report));
+
+        let greader_403 = crate::error::AppError::network("GET /x → 403 Forbidden")
+            .auth_if(crate::error::AppError::is_auth_status(403));
+        let mut case_403 = SyncReport::default();
+        case_403.note_client_error(&greader_403);
+        case_403.errors.push(format!("拉取订阅失败: {greader_403}"));
+        assert!(report_has_auth_failure(&case_403));
+
+        // 纯网络失败（无标记）不触发（note_client_error 是 no-op）
+        let plain_network = crate::error::AppError::network("GET /x → 500 Internal Server Error");
+        let mut plain = SyncReport::default();
+        plain.note_client_error(&plain_network);
+        plain
+            .errors
+            .push(format!("拉取条目 id 失败: {plain_network}"));
+        assert!(!report_has_auth_failure(&plain));
     }
 
     /// W3-1：剔除只命中同一账号条目——期间换号重建的新条目不受影响。

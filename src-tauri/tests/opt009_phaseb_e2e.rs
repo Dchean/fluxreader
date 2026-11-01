@@ -533,11 +533,15 @@ async fn stale_edit_response_does_not_confirm_newer_intent() {
 }
 
 /* ============================================================
-5. 跨账号同 URL：不得因 B 的本地动作删除 A 的远端已建意图
+5. 跨账号同 URL：身份切换清旧账号队项（2026-11-02 语义），B 的意图独立收敛
 ============================================================ */
 
+/// 原「换号暂停、回原账号恢复」语义已被生命周期终点取代（2026-11-02）：
+/// 切换账号时旧账号的队项（含 remote_created 在途窗口）被整体清账，B 的本地
+/// 动作只服务 B 自己的意图。保留的断言面：A 的远端 id 不得被发给 B、B 的
+/// subscribe 全程只创建一次。判别力：若清理漏掉 remote_created 窗口即红。
 #[tokio::test]
-async fn cross_account_same_url_preserves_other_account_intent() {
+async fn account_switch_abandons_old_account_intent_and_b_intents_stay_scoped() {
     let server = MockGReader::start().await.expect("start mock");
     server.subscriptions.lock().unwrap().clear();
     let tmp = common::unique_db_path("opt009b_cross");
@@ -594,18 +598,19 @@ async fn cross_account_same_url_preserves_other_account_intent() {
         db::sync_generation(&conn).unwrap()
     };
 
-    // B 的本地新增：同 URL 入队 subscribe —— 不得删除 A 的 remote_created 意图
+    // B 的本地新增：同 URL 入队 subscribe —— A 的行已在切换时清账，表内只剩 B
     {
         let conn = dbm.lock().await;
         db::enqueue_subscribe(&conn, gen_b, &key_b, url, None, None).unwrap();
         let items = db::pending_outbox(&conn).unwrap();
-        let a = items
-            .iter()
-            .find(|i| i.id == id_a)
-            .expect("B 的本地动作不得删除 A 的远端已建意图（否则远端孤儿）");
-        assert_eq!(a.account_key, key_a);
-        assert_eq!(a.stage, "remote_created");
-        assert_eq!(a.remote_id, Some(42));
+        assert!(
+            items.iter().all(|i| i.id != id_a),
+            "身份切换已清账：A 的 remote_created 队项不再跨换号存活: {items:?}"
+        );
+        assert!(
+            items.iter().all(|i| i.account_key == key_b),
+            "切换后表内只剩 B 的队项: {items:?}"
+        );
     }
     // B 的退订不得借用/删除 A 的目标（结转按 key 屏障 + 删除按 key 限定）。
     // R1 起 B 会有**自己**的退订意图（证据 = 上一步 B 自己的 pending subscribe；
@@ -617,8 +622,8 @@ async fn cross_account_same_url_preserves_other_account_intent() {
         assert!(queued, "B 有自己的创建证据：应写入 B 自己的退订意图");
         let items = db::pending_outbox(&conn).unwrap();
         assert!(
-            items.iter().any(|i| i.id == id_a),
-            "B 的退订入队同样不得删除 A 的行"
+            items.iter().all(|i| i.account_key == key_b),
+            "B 的退订入队不产生异账号行（入队级 key 屏障保持）"
         );
         let b_row = items
             .iter()
@@ -643,11 +648,9 @@ async fn cross_account_same_url_preserves_other_account_intent() {
         let items = db::pending_outbox(&conn).unwrap();
         assert_eq!(
             items.len(),
-            1,
-            "B 的 subscribe 应完成出队，只剩 A 的暂停意图: {items:?}（report {report:?}）"
+            0,
+            "B 的 subscribe 应完成出队，A 的行已在切换时清账: {items:?}（report {report:?}）"
         );
-        assert_eq!(items[0].id, id_a);
-        assert_eq!(items[0].account_generation, 0, "A 行代际不得被 B 重绑");
     }
     // A 的远端 id 从未出现在任何请求中
     let edits = mock_greader::subscription_edit_actions(&server);
@@ -974,18 +977,9 @@ async fn paused_other_account_intent_does_not_block_pull_removal() {
     let key_a = acct_key("greader", &server, "user-a");
 
     let mut conn = open_with_credentials(&server, "greader", "user-a");
-    // 账号 A：同 URL 的暂停意图（已 remote_created，换号后不得执行）
-    let id_a = {
-        let gen = db::sync_generation(&conn).unwrap();
-        db::enqueue_subscribe(&conn, gen, &key_a, &url, None, None).unwrap();
-        let id = db::pending_outbox(&conn).unwrap()[0].id;
-        assert!(
-            db::advance_subscribe_stage(&conn, id, gen, 7).unwrap(),
-            "前置：A 的意图推进 remote_created"
-        );
-        id
-    };
-    // 切到账号 B（身份变化）
+    // 切到账号 B（身份变化）。2026-11-02 起换号即清账——异账号行只能以
+    // 「升级前旧库存」的形态存在，这里直写模拟该形态，锁定「拉取保护只算
+    // 当前账号」的读取面（清账只发生在账号提交内核）。
     app_lib::commands::save_account_for_test(
         &mut conn,
         "greader",
@@ -995,6 +989,13 @@ async fn paused_other_account_intent_does_not_block_pull_removal() {
         &server.url(),
     )
     .expect("switch account");
+    let key_gen = db::sync_generation(&conn).unwrap();
+    db::enqueue_subscribe(&conn, key_gen, &key_a, &url, None, None).unwrap();
+    let id_a = db::pending_outbox(&conn).unwrap()[0].id;
+    assert!(
+        db::advance_subscribe_stage(&conn, id_a, key_gen, 7).unwrap(),
+        "前置：A 的残留意图推进 remote_created"
+    );
     // B 自己的服务端来源订阅：B 已在远端退订（远端列表不含它）
     let feed_id = {
         let folder = db::create_folder(&conn, "B分类", "article").unwrap();
@@ -1035,7 +1036,7 @@ async fn paused_other_account_intent_does_not_block_pull_removal() {
         assert_eq!(
             items.len(),
             1,
-            "A 的暂停意图必须原样保留（回 A 后仍可收敛）: {items:?}"
+            "异账号残留行不参与 B 的执行，也不被 B 的轮次清理（清账只在账号提交内核）: {items:?}"
         );
         assert_eq!(items[0].id, id_a);
         assert_eq!(items[0].account_key, key_a);
@@ -2939,15 +2940,15 @@ async fn record_feed_deletion_outbox_failure_rolls_back_local_and_tombstone() {
 }
 
 /* ============================================================
-R1-4. 在途 quick_add + 换号：旧账号的 id 不得进入新账号，回原账号才收敛
+R1-4. 在途 quick_add + 换号：清账后在途响应零写入，远端孤儿如实保留
 ============================================================ */
 
-/// OPT-009B2 复审 P2（返工 R1，账号边界）：在途 quick_add 的响应在**换号之后**
-/// 才返回——代际守卫拦下 adopt，退订意图保持「未知 id」；新账号轮次不得看到/发送
-/// 旧账号的意图与 id；切回原账号后由幂等 quick_add-by-URL 解析出**同一个**已验证
-/// id 并退订，远端与本地同时收敛。
+/// OPT-009B2 复审 P2（返工 R1，账号边界）+ 2026-11-02 生命周期终点：在途
+/// quick_add 的响应在**换号（已清账）之后**才返回——行已不存在，代际守卫与
+/// adopt 守卫叠加保证零写入；新账号轮次零订阅写请求；旧语义的「切回原账号
+/// 幂等解析收敛」已放弃，远端孤儿如实保留（由用户手动清理）。
 #[tokio::test]
-async fn inflight_quickadd_response_after_account_switch_stays_scoped_to_old_account() {
+async fn inflight_quickadd_response_after_account_switch_writes_nothing_after_cleanup() {
     let server = MockGReader::start().await.expect("start mock");
     let tmp = common::unique_db_path("opt009b_r1_switch");
     let _ = std::fs::remove_file(&tmp);
@@ -3022,13 +3023,10 @@ async fn inflight_quickadd_response_after_account_switch_stays_scoped_to_old_acc
         .expect("feeds phase (in-flight, switched)");
     {
         let conn = dbm.lock().await;
-        let items = db::pending_outbox(&conn).unwrap();
-        assert_eq!(items.len(), 1, "A 的意图必须保留（暂停，不被 purge 清掉）");
-        assert_eq!(items[0].account_key, key_a);
-        assert_eq!(
-            items[0].remote_id, None,
-            "代际已变：adopt 必须被拦下（旧响应不得确认/回写新代际）"
-        );
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subscription_outbox", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 0, "换号已清账：在途响应不得写回任何行（含 adopt）");
     }
     assert!(
         mock_greader::subscription_edit_actions(&server)
@@ -3049,16 +3047,13 @@ async fn inflight_quickadd_response_after_account_switch_stays_scoped_to_old_acc
             "B 的轮次不得发出任何订阅编辑/退订请求: {log:?}"
         );
         let conn = dbm.lock().await;
-        let items = db::pending_outbox(&conn).unwrap();
-        assert!(
-            items
-                .iter()
-                .any(|i| i.account_key == key_a && i.remote_id.is_none()),
-            "A 的意图在 B 轮次后原样暂停"
-        );
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subscription_outbox", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 0, "B 轮次后仍无任何队项");
     }
 
-    // 切回 A：幂等 quick_add-by-URL 解析出同一个已验证 id 并退订
+    // 切回 A：旧语义「幂等解析收敛」已放弃——零退订请求、远端孤儿保留
     {
         let mut conn = dbm.lock().await;
         app_lib::commands::save_account_for_test(
@@ -3078,13 +3073,13 @@ async fn inflight_quickadd_response_after_account_switch_stays_scoped_to_old_acc
         assert!(
             mock_greader::subscription_edit_actions(&server)
                 .iter()
-                .any(|(ac, s)| ac == "unsubscribe" && s == &format!("feed/{remote_id}")),
-            "回原账号必须按幂等解析出的同一 id 退订（不得新建重复订阅）"
+                .all(|(ac, _)| ac != "unsubscribe"),
+            "清账后没有任何退订意图可执行（远端孤儿由用户手动清理）"
         );
         assert_eq!(
             quickadd_count(&server, url.as_str()),
             1,
-            "解析用的 quick_add 命中既有订阅（幂等），不得再创建第二个远端订阅"
+            "全程只有 A 在途那一次 quick_add（无新意图可重发）"
         );
         assert!(
             server
@@ -3092,22 +3087,14 @@ async fn inflight_quickadd_response_after_account_switch_stays_scoped_to_old_acc
                 .lock()
                 .unwrap()
                 .iter()
-                .all(|s| s.id != format!("feed/{remote_id}")),
-            "远端订阅已移除"
+                .any(|s| s.id == format!("feed/{remote_id}")),
+            "语义放弃的代价：远端孤儿订阅如实保留（本用例锁定该形态）"
         );
         let conn = dbm.lock().await;
         assert!(
             db::pending_outbox(&conn).unwrap().is_empty(),
-            "A 的退订意图确认后出队"
+            "A 回场后也无队项（清账即生命周期终点）"
         );
-        let revived: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM feeds WHERE feed_url = ?1",
-                [&url],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(revived, 0, "不得复活（墓碑在远端确认前一直有效）");
     }
     let _ = std::fs::remove_file(&tmp);
 }
@@ -4167,12 +4154,11 @@ async fn unsubscribe_recovery_list_failure_keeps_intent_without_sending() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// OPT-009B2 复审 R2-2（P2，账号边界；B1 契约）：解析结果的持久推进必须限定同
-/// account_key/generation——A 的列表证据解析落库后换到 B，B 的轮次不得发送、
-/// 回收或改写 A 的退订意图；切回 A 后按已持久化的解析结果收敛，全程零 quick_add
-/// （列表是唯一证据源，真实服务端拒绝重复 URL）。
+/// OPT-009B2 复审 R2-2（P2，账号边界；B1 契约）+ 2026-11-02 生命周期终点：
+/// A 的列表证据解析落库后换到 B——换号清账，已持久化的解析结果随行消亡；
+/// B 的轮次零订阅写请求；切回 A 后零退订、远端孤儿如实保留，全程零 quick_add。
 #[tokio::test]
-async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
+async fn account_switch_clears_unsubscribe_resolution_and_orphan_persists() {
     let server = MockGReader::start().await.expect("start mock");
     let tmp = common::unique_db_path("opt009b_r2_unsub_switch");
     let _ = std::fs::remove_file(&tmp);
@@ -4234,7 +4220,7 @@ async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
         "恢复解析走列表证据，零 quick_add"
     );
 
-    // 换到 B：B 的轮次不得发送任何订阅写请求，也不得改写 A 的持久推进
+    // 换到 B：换号清账（A 的行与已持久化解析结果一并消亡），B 的轮次零订阅写请求
     {
         let mut conn = dbm.lock().await;
         app_lib::commands::save_account_for_test(
@@ -4259,17 +4245,13 @@ async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
             "B 的轮次不得发出 A 的订阅写请求（list 读取是 pull 正常行为）: {log:?}"
         );
         let conn = dbm.lock().await;
-        let items = db::pending_outbox(&conn).unwrap();
-        assert_eq!(items.len(), 1, "A 的意图暂停保留");
-        assert_eq!(items[0].account_key, key_a);
-        assert_eq!(
-            items[0].resolved_remote_id,
-            Some(40),
-            "B 不得改写 A 的持久推进"
-        );
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM subscription_outbox", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 0, "换号清账：已持久化的解析结果不跨换号存活");
     }
 
-    // 切回 A、解除注入 → 按持久化解析结果退订收敛；全程零 quick_add
+    // 切回 A、解除注入 → 零退订、远端孤儿保留；全程零 quick_add
     {
         let mut conn = dbm.lock().await;
         app_lib::commands::save_account_for_test(
@@ -4291,8 +4273,8 @@ async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
         assert!(
             mock_greader::subscription_edit_actions(&server)
                 .iter()
-                .any(|(ac, s)| ac == "unsubscribe" && s == "feed/40"),
-            "回 A 后必须按已持久化的解析结果退订"
+                .all(|(ac, _)| ac != "unsubscribe"),
+            "清账后没有任何退订意图可执行（远端孤儿由用户手动清理）"
         );
         assert!(
             server
@@ -4300,16 +4282,19 @@ async fn unsubscribe_recovery_resolution_stays_scoped_across_account_switch() {
                 .lock()
                 .unwrap()
                 .iter()
-                .all(|s| s.id != "feed/40"),
-            "远端订阅已移除"
+                .any(|s| s.id == "feed/40"),
+            "语义放弃的代价：远端孤儿订阅如实保留（本用例锁定该形态）"
         );
         let conn = dbm.lock().await;
-        assert!(db::pending_outbox(&conn).unwrap().is_empty(), "确认后出队");
+        assert!(
+            db::pending_outbox(&conn).unwrap().is_empty(),
+            "A 回场后也无队项（清账即生命周期终点）"
+        );
     }
     assert_eq!(
         quickadd_requests(&server),
         0,
-        "解析结果持久化后回原账号的收敛轮不得再 quick_add"
+        "全程零 quick_add（无新意图可重发）"
     );
     let _ = std::fs::remove_file(&tmp);
 }

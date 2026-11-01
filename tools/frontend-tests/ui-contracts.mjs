@@ -2436,10 +2436,12 @@ export async function run(ctx) {
       && /await import\('\.\.\/\.\.\/mockData'\)/.test(bootstrapW4)
       && /catch \(e\) \{\s*console\.error\('mock data chunk load failed:', e\);\s*set\(\{ dataLoading: false, bootstrapError: extractError\(e\) \}\);/.test(bootstrapW4));
 
-    /* (w4-6) 对比度点名值：dark blue --text-tertiary ≥4.5:1（对 bg-card） */
-    checkNew('(w4-6) tokens.css dark blue --text-tertiary 收口 #828c9c（对 bg-card 4.69:1，AA 达标；旧 #7a8494 清零）',
-      tokensW4.includes('--text-tertiary: #828c9c;')
-      && !tokensW4.includes('#7a8494'));
+    /* (w4-6) 对比度点名值：dark blue --text-tertiary ≥4.5:1（对 bg-card 及
+       hover/active 瞬态底色；2026-11-02 五调色盘 WCAG 全量收敛轮再上调） */
+    checkNew('(w4-6) tokens.css dark blue --text-tertiary 收口 #8891a1（对 bg-card 5.02:1、对瞬态底色 ≥4.5:1，AA 达标；W4 值 #828c9c 与更早 #7a8494 清零）',
+      tokensW4.includes('--text-tertiary: #8891a1;')
+      && !tokensW4.includes('#7a8494')
+      && !tokensW4.includes('#828c9c'));
 
     /* (w4-7) 焦点陷阱契约形态：Tab 循环 + 无焦点面板钉容器 + portal 焦点不拦截 */
     checkNew('(w4-7) useFocusTrap 契约形态：边界回绕拦截、面板内无可聚焦元素时焦点钉回容器、焦点在面板 DOM 之外（portal）不拦截',

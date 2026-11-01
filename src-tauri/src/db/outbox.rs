@@ -11,8 +11,13 @@
 //! - `account_generation` = 入队时会话代际（同一账号改密码也会推进）。
 //!
 //! 推送门槛：key 匹配当前会话才可发；key 匹配但代际落后 → 重绑代际后发送
-//! （同账号的意图仍然有效）；key 不匹配 → 暂停（换号不得把旧意图发给新账号，
-//! 回原账号后恢复可发）。
+//! （同账号的意图仍然有效）；key 不匹配 → 暂停（换号不得把旧意图发给新账号）。
+//!
+//! 生命周期终点：身份切换（含断开后换身份重连）在账号提交事务内清掉旧账号的
+//! 全部队项（[`abandon_stale_outbox`]）；同身份重连与断开保留。旧「换号暂停、
+//! 回原账号恢复」的语义已放弃（2026-11-02 产品拍板：已消失账号的 pending 行
+//! 不再永久滞留）。
+// Note: 同身份保留、身份切换清账（语义放弃的取舍） — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md
 //!
 //! ## 合并与确认
 //! 连续修改合并「最后 desired」= 删除同 URL 旧行 + 插入新行。id 为 AUTOINCREMENT
@@ -68,7 +73,8 @@ pub struct SubscriptionOutboxItem {
 /// 源新增入队（本地入库同一事务内调用）。
 /// 合并规则：**同账号**（account_key 相同）同 URL 的既有队项一律替换为新意图——
 /// 新意图即该账号视角的最新本地状态；异账号同 URL 队项**保留**（换号暂停，
-/// 回原账号后仍可发——B 的本地动作不得删除 A 的远端已建意图造成孤儿）。
+/// B 的本地动作不得删除 A 的远端已建意图造成孤儿；身份切换的整体清账只发生在
+/// 账号提交内核 [`abandon_stale_outbox`]，入队动作不做跨账号清理）。
 /// 同时清掉同 URL 的历史 `add_feed` 兼容队项（该队列随账号 purge，无跨账号
 /// 归属问题；新 outbox 已接管订阅推送，留着会造成双份 quick_add）。
 ///
@@ -402,7 +408,8 @@ pub fn pending_outbox(conn: &Connection) -> AppResult<Vec<SubscriptionOutboxItem
 
 /// 同账号（key 相同）但代际落后的待推队项重绑到当前代际：
 /// 同一账号改密码/重新保存会推进代际，旧意图仍属于该账号，重绑后继续可发。
-/// key 不匹配的行一律不touch（换号后暂停，回原账号才恢复）。
+/// key 不匹配的行一律不touch（换号后暂停；身份切换时由 [`abandon_stale_outbox`]
+/// 整体清账，重绑只服务同账号的代际推进）。
 pub fn rebind_outbox_generation(
     conn: &Connection,
     account_key: &str,
@@ -412,6 +419,23 @@ pub fn rebind_outbox_generation(
         "UPDATE subscription_outbox SET account_generation = ?1, updated_at = datetime('now')
           WHERE account_key = ?2 AND account_generation <> ?1 AND status = 'pending'",
         params![account_generation, account_key],
+    )?;
+    Ok(n)
+}
+
+/// 订阅 outbox 的生命周期终点（2026-11-02 语义）：删除**非当前身份**的全部
+/// 队项，返回删除行数。账号提交事务内调用（`commit_account_settings` 的
+/// identity_changed 与「断开后换身份重连」分支，`bump_sync_generation` 之前）；
+/// 断开不调用（行保留），同身份重连自然保留。
+///
+/// 旧语义「换号暂停、回原账号恢复」就此放弃：已消失账号的 pending 行连同
+/// attempts/last_error 不再永久滞留；代价是 A 在途 quick_add 已建的远端订阅
+/// 可能成为无人退订的孤儿（取舍见 Note）。
+// Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md
+pub fn abandon_stale_outbox(conn: &Connection, current_key: &str) -> AppResult<usize> {
+    let n = conn.execute(
+        "DELETE FROM subscription_outbox WHERE account_key <> ?1",
+        params![current_key],
     )?;
     Ok(n)
 }
@@ -445,7 +469,7 @@ pub fn advance_subscribe_stage(
 ///
 /// 守卫 (id, generation, action='unsubscribe', status='pending', remote_id IS NULL)：
 /// 过期响应/换代/被合并替换/已确认的行不得被旧解析结果推进 —— 未推进时调用方
-/// 本轮不发请求、不确认（行保持未知 id，由新意图或回原账号的轮次接管）。
+/// 本轮不发请求、不确认（行保持未知 id，由新意图或下一轮的列表解析接管）。
 pub fn advance_unsubscribe_resolution(
     conn: &Connection,
     id: i64,
