@@ -216,10 +216,11 @@ mod read_body_capped_tests {
             "中文",
             "charset=GBK 必须生效（原 text() 的解码语义）"
         );
-        // 无 charset 头默认 UTF-8；注意 GBK 字节对 D6D0/CEC4 恰是合法的
-        // 两字节 UTF-8 序列（解码为错误但有效的字符），lossy 断言须用
-        // 真正非法的 UTF-8 字节（FF/FE 永不合法）→ 两个 U+FFFD
-        assert_eq!(decode_body_bytes(&[0xFFu8, 0xFE], None), "\u{FFFD}\u{FFFD}");
+        // 无 charset 头默认 UTF-8；注意两点：GBK 字节对 D6D0/CEC4 恰是
+        // 合法的两字节 UTF-8 序列（解码为错误但有效的字符），而 FF/FE
+        // 是 UTF-16LE BOM 会被 decode() 的 BOM 嗅探按 UTF-16LE 解码——
+        // lossy 断言须用 FF/FF：永不合法且非 BOM 前缀 → 两个 U+FFFD
+        assert_eq!(decode_body_bytes(&[0xFFu8, 0xFF], None), "\u{FFFD}\u{FFFD}");
         assert_eq!(
             decode_body_bytes("中文".as_bytes(), Some("text/plain")),
             "中文"
