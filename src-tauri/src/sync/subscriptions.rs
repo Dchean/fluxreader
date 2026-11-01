@@ -278,7 +278,6 @@ pub(super) async fn push_feeds(
         if created {
             report.pushed_feeds += 1;
         }
-        done.push(it.queue_id);
         // 锁内：绑定本地 feed（URL 匹配）
         let bound_remote_id = {
             let conn = db.lock().await;
@@ -300,17 +299,28 @@ pub(super) async fn push_feeds(
             }
             nid
         };
-        // A-3：锁外补挂目标分类（best-effort，失败仅记日志——订阅已推送）
-        if let (Some(nid), Some(label)) = (bound_remote_id, it.folder_label.as_deref()) {
-            if let Err(e) = session
-                .client
-                .edit_subscription(nid, None, Some(label), None)
-                .await
-            {
-                report
-                    .errors
-                    .push(format!("订阅 {} 挂载分类「{label}」失败: {e}", it.url));
+        // A-3：锁外补挂目标分类。挂载失败**保留队项**（不进 done → 不剪除）：
+        // pull 对既有源不回灌远端分类（2026-11-01 审计 R2-P3），剪除后「远端订阅
+        // 留在默认分类」的差距没有任何收敛通道。保留后下一轮先以列表证据解析
+        // 既有 id（不重复 quick_add），只重试挂载——与订阅 outbox 的 Retry
+        // 保留队项语义一致。
+        // Note: 挂载失败保留队项的重试语义 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
+        match (bound_remote_id, it.folder_label.as_deref()) {
+            (Some(nid), Some(label)) => {
+                match session
+                    .client
+                    .edit_subscription(nid, None, Some(label), None)
+                    .await
+                {
+                    Ok(()) => done.push(it.queue_id),
+                    Err(e) => report.errors.push(format!(
+                        "订阅 {} 挂载分类「{label}」失败（保留队项下轮重试）: {e}",
+                        it.url
+                    )),
+                }
             }
+            // 无本地绑定（本地已删除）或无目标分类：无挂载可做，照常出队
+            _ => done.push(it.queue_id),
         }
     }
     let conn = db.lock().await;
@@ -509,6 +519,13 @@ pub(super) async fn push_subscription_outbox(
                 done_plain.push(item.id)
             }
             OutboxOutcome::ConfirmedSubscribe(title, folder, prev) => {
+                // A-P2-3②：挂载成功的 `a=目标` 与 edit 移动同属「远端已接受该
+                // label」的账号作用域发送事实——确认落空（行被替换）时同样由
+                // ④b 把替代行的移除基准重定为已接受目标，否则替代行按链起点
+                // 发 r=，远端残留已接受的中间 label。
+                if let Some(target) = folder.clone() {
+                    sent_moves.push((item.id, item.feed_url.clone(), target));
+                }
                 done_subscribe.push((item.id, title, folder, prev))
             }
             OutboxOutcome::Retry(summary) => {
@@ -969,20 +986,68 @@ async fn exec_unsubscribe_recovery(
     OutboxOutcome::Confirmed
 }
 
-/// 命令层 best-effort 一次性推送订阅 outbox（本地已入队；任何失败静默——
-/// 队列保留，下一轮同步自动重试）。命令返回不阻塞在网络上太久：与旧
-/// `edit_remote_subscription` 的调用成本同量级（都需构建一次会话/登录）。
+/// 命令层 best-effort 一次性推送订阅 outbox（本地已入队；执行失败静默——
+/// 队列保留，下一轮同步自动重试；会话构建失败由 [`record_outbox_session_block`]
+/// 落账，A-P2-6）。命令返回不阻塞在网络上太久：与旧 `edit_remote_subscription`
+/// 的调用成本同量级（都需构建一次会话/登录）。
 ///
 /// B3：无论本轮是否发出请求，结束都广播一次订阅写回状态（`subscription-
 /// outbox-changed`）——「入队刚发生而会话构建失败（离线/认证失败）」时，事件
 /// 是 UI 看到「等待 N 项」的即时通道；执行器内的确认/失败路径已各自通知，
 /// 重复载荷是同一快照（无害）。未配置同步时 notify 内部静默。
 pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) {
-    if let Ok(session) = build_session(db, http).await {
-        let mut report = SyncReport::default();
-        push_subscription_outbox(db, &session, &mut report).await;
+    match build_session(db, http).await {
+        Ok(session) => {
+            let mut report = SyncReport::default();
+            push_subscription_outbox(db, &session, &mut report).await;
+        }
+        // A-P2-6：构建失败不再静默吞掉——对齐推送侧 TASK-124 的 record_push_block：
+        // 认证/端点/网络失败为当前账号 pending 行落账（attempts/last_error + 事件），
+        // UI 摘要卡才能解释「为什么一直等待」。未配置（无归属身份）与代际失配
+        // （旧会话作废，OPT-006）不落账。
+        Err(ClientBuildFailure::Failed(e)) => record_outbox_session_block(db, &e).await,
+        Err(ClientBuildFailure::NotConfigured) => {}
+        Err(ClientBuildFailure::Stale) => {}
+        Err(ClientBuildFailure::CorruptGeneration(e)) => {
+            log::warn!("sync: 订阅写回即时推送因同步代际损坏中止: {e}");
+        }
     }
     notify_subscription_outbox_changed(db).await;
+}
+
+/// 订阅 outbox 的会话构建失败落账（A-P2-6；对齐 push.rs record_push_block 的
+/// TASK-124 模式）：有凭据但认证/端点/网络失败时，当前账号的全部 pending 队项
+/// 累计一次失败尝试并记录摘要，确有标记行时广播 `subscription-outbox-changed`
+/// ——「等待 N 项」必须能解释原因，而不是永远停在等待。
+/// 未配置（无账号身份可归属）与读取失败跳过；落账只做 DB 标记，事件在锁外发。
+pub(super) async fn record_outbox_session_block(
+    db: &Arc<Mutex<Connection>>,
+    err: &crate::error::AppError,
+) {
+    let msg = err.message.trim();
+    let summary = if err.code == "auth" {
+        format!("订阅写回认证失败：{msg}")
+    } else {
+        format!("订阅写回被阻塞（网络/端点失败）：{msg}")
+    };
+    log::warn!("sync: 订阅写回被阻塞（会话构建失败）: {summary}");
+    let marked = {
+        let conn = db.lock().await;
+        match super::current_account(&conn) {
+            Ok(Some(ctx)) => db::mark_outbox_session_blocked(&conn, &ctx.key, &summary),
+            // 未配置：无账号身份可归属（B3 口径：未连接统计为空），不标记
+            Ok(None) => Ok(0),
+            Err(e) => {
+                log::warn!("sync: 订阅 outbox 落账读取账号身份失败: {e}");
+                Ok(0)
+            }
+        }
+    };
+    match marked {
+        Ok(n) if n > 0 => notify_subscription_outbox_changed(db).await,
+        Ok(_) => {}
+        Err(e) => log::warn!("sync: 订阅 outbox 阻塞标记落库失败: {e}"),
+    }
 }
 
 /// 拉远端分类+订阅，URL 碰撞合并（三段式：锁外拉取 → 锁内合并）

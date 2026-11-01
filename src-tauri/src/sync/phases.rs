@@ -16,23 +16,35 @@ static PULL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// feeds 阶段（订阅层）：push_feeds + pull_feeds。秒级，首连先跑这段。
 /// 锁纪律：HTTP 全在锁外；DB 读写在锁内短临界区完成。
-/// TASK-124：feeds 阶段的构建失败不记录不发事件（记录/呈现职责在 states 段与
-/// 即时推送，见 push.rs record_push_block）——「未配置」与「失败」对订阅层同步
-/// 的既有行为一致（都是中止），两类失败映射回同一 notConnected 错误。
+/// TASK-124：构建失败对调用方的既有行为不变（都是中止，映射回同一 notConnected
+/// 错误）；A-P2-6 起「有凭据但认证/端点/网络失败」额外为订阅 outbox 的 pending
+/// 行落账（attempts/last_error + 事件，见 record_outbox_session_block）——
+/// 「未配置」仍不落账（无归属身份）。
 /// OPT-006：会话代际失配（账号在构建期间被切换）→ staleSession 错误，不落库。
 pub async fn feeds_phase(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
 ) -> AppResult<SyncReport> {
-    let session = build_session(db, http).await.map_err(|e| match e {
-        ClientBuildFailure::Stale => SyncSession::stale_error(),
+    let session = match build_session(db, http).await {
+        Ok(session) => session,
+        Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
         // R1：坏代际是可见协议错误（原样上报，不伪装 notConnected）
-        ClientBuildFailure::CorruptGeneration(err) => err,
-        _ => AppError::new(
-            "notConnected",
-            "未配置同步后端（Google Reader / Fever 凭据）",
-        ),
-    })?;
+        Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
+        // A-P2-6：订阅 outbox 的 pending 行同样被本轮构建失败阻塞，落账可见。
+        Err(ClientBuildFailure::Failed(e)) => {
+            record_outbox_session_block(db, &e).await;
+            return Err(AppError::new(
+                "notConnected",
+                "未配置同步后端（Google Reader / Fever 凭据）",
+            ));
+        }
+        Err(ClientBuildFailure::NotConfigured) => {
+            return Err(AppError::new(
+                "notConnected",
+                "未配置同步后端（Google Reader / Fever 凭据）",
+            ));
+        }
+    };
     feeds_phase_in_session(db, &session).await
 }
 
@@ -44,14 +56,25 @@ pub async fn feeds_phase_at(
     http: &reqwest::Client,
     expected_generation: i64,
 ) -> AppResult<SyncReport> {
-    let session = build_session(db, http).await.map_err(|e| match e {
-        ClientBuildFailure::Stale => SyncSession::stale_error(),
-        ClientBuildFailure::CorruptGeneration(err) => err,
-        _ => AppError::new(
-            "notConnected",
-            "未配置同步后端（Google Reader / Fever 凭据）",
-        ),
-    })?;
+    let session = match build_session(db, http).await {
+        Ok(session) => session,
+        Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
+        Err(ClientBuildFailure::CorruptGeneration(err)) => return Err(err),
+        // A-P2-6：同 feeds_phase——构建失败为订阅 outbox pending 行落账。
+        Err(ClientBuildFailure::Failed(e)) => {
+            record_outbox_session_block(db, &e).await;
+            return Err(AppError::new(
+                "notConnected",
+                "未配置同步后端（Google Reader / Fever 凭据）",
+            ));
+        }
+        Err(ClientBuildFailure::NotConfigured) => {
+            return Err(AppError::new(
+                "notConnected",
+                "未配置同步后端（Google Reader / Fever 凭据）",
+            ));
+        }
+    };
     if session.generation != expected_generation {
         return Err(SyncSession::stale_error());
     }

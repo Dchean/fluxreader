@@ -217,7 +217,7 @@ async fn auto_sync_backend(
     app: &AppHandle,
 ) {
     let now = chrono::Utc::now().timestamp();
-    let (on, interval_min, connected, last_sync, has_binding, discovery_due) = {
+    let (on, interval_min, connected, last_sync, has_binding, discovery_due, outbox_pending) = {
         let conn = db.lock().await;
         /* TASK-068/069：autoSync 布尔读取收口为类型化助手（默认值语义不变） */
         let on = crate::db::app_settings_bool(&conn, "autoSync", true);
@@ -263,21 +263,54 @@ async fn auto_sync_backend(
             },
             None => false,
         };
-        (on, interval, connected, last, has_binding, discovery_due)
+        // A-P2-2：订阅 outbox 是否有待推行（本地查询，零网络成本）。有 pending
+        // 才值得构建会话执行写回；无 pending 不发任何请求，后台同步保持便宜。
+        // key 屏障与执行器一致（异账号暂停行不触发）；读取失败仅跳过本轮
+        // outbox 触发（记警告，不影响 light/discovery 的既有判定），下一 tick 重试。
+        let outbox_pending = match account_key.as_deref() {
+            Some(key) => match crate::db::outbox_has_pending(&conn, key) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!("scheduler: 读取订阅写回队列状态失败，本轮跳过订阅 outbox: {e}");
+                    false
+                }
+            },
+            None => false,
+        };
+        (
+            on,
+            interval,
+            connected,
+            last,
+            has_binding,
+            discovery_due,
+            outbox_pending,
+        )
     };
     if !on || !connected {
         return;
     }
     let normal_due = has_binding && backend_sync_due(now, interval_min, true, last_sync, false);
-    if !normal_due && !discovery_due {
+    if !normal_due && !discovery_due && !outbox_pending {
         return;
     }
-    log::info!("scheduler: 后端自动同步开始（间隔 {interval_min} 分钟到期）");
+    log::info!("scheduler: 后端自动同步开始");
     let _ = app.emit("sync-running", serde_json::json!({ "source": "auto" }));
+    // A-P2-2：outbox 有 pending 时先执行订阅写回。执行器自带 PUSH_LOCK 串行化
+    // 与账号 key/代际屏障（见 push_subscription_outbox）；构建失败的落账由
+    // try_push 内的 record_outbox_session_block 承担（A-P2-6）。排在 light/
+    // discovery 之前：先收敛本地意图，再做拉取对账（与 feeds_phase 的 push →
+    // pull 次序一致）。
+    // Note: 订阅 outbox 接入后台自动调度 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
+    if outbox_pending {
+        crate::sync::try_push_subscription_outbox(db, http).await;
+    }
     let result = if normal_due {
         crate::sync::sync_light(db, http).await
-    } else {
+    } else if discovery_due {
         crate::sync::sync_subscription_discovery(db, http).await
+    } else {
+        Ok(crate::sync::SyncReport::default())
     };
     match result {
         Ok(r) => {

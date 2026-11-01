@@ -261,8 +261,19 @@ pub fn enqueue_edit(
     let folder = desired_folder
         .map(str::to_string)
         .or_else(|| prev_desired_folder.clone());
-    // 既有 edit 行带未发送移动目标 → 远端仍在链起点；用链起点作为移除基准。
-    let chain_origin_is_remote_state = prev_action == ACTION_EDIT && prev_desired_folder.is_some();
+    // 既有行带未发送的移动/挂载目标 → 远端尚未收到任何 a=，仍持有链起点；
+    // 用链起点作为移除基准（A-P2-3① 起覆盖两类行）：
+    // - edit 行：未发送移动链的起点（B1-R3 复审 P2-1）；
+    // - subscribe 行：挂载目标未发送，远端持有其 prev_folder（删除后重加继承
+    //   的基准 / remote_created 窗口首值）。挂载失败的窗口同此——这正是
+    //   roadmap A-P2-3① 的「挂载失败后用户再移动，远端旧分类永不移除」。
+    //   subscribe 行没有链起点（prev NULL）时维持既有口径：用新操作的 prev
+    //   （远端从无此 label 时 r= 是无害 no-op，与 remote_created 窗口挂载的
+    //   既有假定同级）。
+    // Note: 订阅行链起点与挂载成功的后继重定 — 见 .agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md
+    let chain_origin_is_remote_state = prev_desired_folder.is_some()
+        && (prev_action == ACTION_EDIT
+            || (prev_action == ACTION_SUBSCRIBE && prev_prev_folder.is_some()));
     let old_label = if chain_origin_is_remote_state {
         prev_prev_folder.clone()
     } else {
@@ -671,6 +682,37 @@ pub fn outbox_pending_for_url(
         |r| r.get(0),
     )?;
     Ok(n > 0)
+}
+
+/// 当前账号是否仍有待推队项（A-P2-2：后台调度器的零网络成本触发查询）。
+/// 只回答「是否值得一轮会话构建」；key 屏障与执行器一致——异账号（换号暂停）
+/// 的 pending 行不触发当前账号的推送轮；代际不在此判定（重绑在执行器计划阶段）。
+pub fn outbox_has_pending(conn: &Connection, account_key: &str) -> AppResult<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM subscription_outbox
+          WHERE account_key = ?1 AND status = 'pending'",
+        params![account_key],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// 会话构建失败落账（A-P2-6，对齐推送侧 record_push_block / TASK-124）：
+/// 当前账号**全部** pending 队项 attempts+1、last_error 记同一摘要。
+/// 不带代际守卫：会话没建起来 = 本轮对所有 pending 行同样不可达（代际重绑
+/// 发生在会话内的计划阶段，此处无从区分）；跨账号由 key 谓词隔离。
+pub fn mark_outbox_session_blocked(
+    conn: &Connection,
+    account_key: &str,
+    summary: &str,
+) -> AppResult<usize> {
+    let n = conn.execute(
+        "UPDATE subscription_outbox
+            SET attempts = attempts + 1, last_error = ?1, updated_at = datetime('now')
+          WHERE account_key = ?2 AND status = 'pending'",
+        params![super::sync_queue::truncate_last_error(summary), account_key],
+    )?;
+    Ok(n)
 }
 
 /* ============================================================
@@ -1666,5 +1708,138 @@ mod t_opt009_tests {
             p0["last_error"].is_null(),
             "无错误摘要为 null（不伪造空串）"
         );
+    }
+
+    /// A-P2-3①：pending subscribe 行带未发送挂载目标时被 enqueue_edit 替换，
+    /// 必须保留其 prev_folder 作为链起点——挂载从未成功 = 远端仍持有链起点
+    /// （删除后重加继承的基准 / remote_created 窗口首值），挂载失败窗口同此。
+    /// 判别力：修前移除基准被调用方新值覆盖 → wire `r=调用方 prev`，远端旧
+    /// 分类永不移除（roadmap A-P2-3）。
+    /// 对照面：subscribe 行没有链起点（prev NULL，B1-R3 场景三）时维持既有
+    /// 口径——用新操作的 prev。
+    #[test]
+    fn subscribe_row_merge_keeps_chain_origin_of_unsent_mount() {
+        let c = conn();
+        // 生产形态：入队目标 A → 未绑定窗口移动 A→B 经
+        // update_pending_subscribe_desired 折叠为 (desired=B, prev=A)。
+        enqueue_subscribe(&c, 0, "k", "https://f.example/rss", None, Some("A")).unwrap();
+        update_pending_subscribe_desired(
+            &c,
+            "k",
+            "https://f.example/rss",
+            None,
+            Some("B"),
+            Some("A"),
+        )
+        .unwrap();
+        // 本地已绑定（远端 id 可见）后用户移动 B→C：调用方 prev=B（本地当前 label）
+        enqueue_edit(
+            &c,
+            0,
+            "k",
+            "https://f.example/rss",
+            10,
+            None,
+            Some("C"),
+            Some("B"),
+        )
+        .unwrap();
+        let item = &pending_outbox(&c).unwrap()[0];
+        assert_eq!(item.action, "edit");
+        assert_eq!(item.desired_folder.as_deref(), Some("C"));
+        assert_eq!(
+            item.prev_folder.as_deref(),
+            Some("A"),
+            "挂载未发送：远端仍持有链起点 A，移除基准不得被调用方 prev 覆盖: {item:?}"
+        );
+
+        // 对照：subscribe 行没有链起点（prev NULL）→ 用新操作的 prev（既有口径，
+        // 远端从无此 label 时 r= 是无害 no-op）
+        enqueue_subscribe(&c, 0, "k", "https://g.example/rss", None, Some("X")).unwrap();
+        enqueue_edit(
+            &c,
+            0,
+            "k",
+            "https://g.example/rss",
+            11,
+            None,
+            Some("Y"),
+            Some("X"),
+        )
+        .unwrap();
+        let g = pending_outbox(&c)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.feed_url.contains("g.example"))
+            .unwrap();
+        assert_eq!(g.prev_folder.as_deref(), Some("X"));
+    }
+
+    /// A-P2-2：调度触发查询按账号 key 限定——异账号（换号暂停）的 pending 行
+    /// 不触发当前账号的推送轮；local_only 终态不算待推。
+    #[test]
+    fn outbox_has_pending_is_account_scoped() {
+        let c = conn();
+        assert!(!outbox_has_pending(&c, "k").unwrap());
+        enqueue_subscribe(&c, 1, "k", "https://f.example/rss", None, None).unwrap();
+        assert!(outbox_has_pending(&c, "k").unwrap());
+        // 换号暂停的行只属于原账号
+        enqueue_subscribe(&c, 1, "acct-A", "https://g.example/rss", None, None).unwrap();
+        assert!(outbox_has_pending(&c, "acct-A").unwrap());
+        let id_a = pending_outbox(&c)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.account_key == "acct-A")
+            .unwrap()
+            .id;
+        mark_outbox_local_only(&c, &[(id_a, 1)]).unwrap();
+        assert!(
+            !outbox_has_pending(&c, "acct-A").unwrap(),
+            "local_only 终态不触发推送轮"
+        );
+    }
+
+    /// A-P2-6：会话构建失败落账——同账号全部 pending 行 attempts+1、last_error
+    /// 记同一摘要；异账号行与 local_only 终态行不触碰。
+    #[test]
+    fn session_block_marks_only_same_account_pending_rows() {
+        let c = conn();
+        enqueue_subscribe(&c, 3, "k", "https://f.example/rss", None, None).unwrap();
+        enqueue_subscribe(&c, 3, "other", "https://f.example/rss", None, None).unwrap();
+        enqueue_subscribe(&c, 3, "k", "https://g.example/rss", None, None).unwrap();
+        let id_g = pending_outbox(&c)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.feed_url.contains("g.example"))
+            .unwrap()
+            .id;
+        mark_outbox_local_only(&c, &[(id_g, 3)]).unwrap();
+        let n = mark_outbox_session_blocked(&c, "k", "订阅写回被阻塞（网络/端点失败）：连接超时")
+            .unwrap();
+        assert_eq!(
+            n, 1,
+            "只标记同账号的 pending 行（异账号与 local_only 不触碰）"
+        );
+        let items = pending_outbox(&c).unwrap();
+        let mine = items
+            .iter()
+            .find(|i| i.account_key == "k" && i.feed_url.contains("f.example"))
+            .unwrap();
+        assert_eq!(mine.attempts, 1);
+        assert_eq!(
+            mine.last_error.as_deref(),
+            Some("订阅写回被阻塞（网络/端点失败）：连接超时")
+        );
+        let other = items.iter().find(|i| i.account_key == "other").unwrap();
+        assert_eq!(other.attempts, 0);
+        assert!(other.last_error.is_none());
+        // 重复落账继续累加（与 mark_outbox_failed 的 attempts 口径一致）
+        mark_outbox_session_blocked(&c, "k", "订阅写回被阻塞（网络/端点失败）： again").unwrap();
+        let mine = pending_outbox(&c)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.account_key == "k" && i.feed_url.contains("f.example"))
+            .unwrap();
+        assert_eq!(mine.attempts, 2);
     }
 }

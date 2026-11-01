@@ -4495,6 +4495,356 @@ async fn readd_after_confirmed_move_and_delete_carries_remote_old_label() {
     let _ = std::fs::remove_file(&tmp);
 }
 
+/* ============================================================
+8c. 挂载成功 + 在途生产编辑：替代行移除基准重定为已接受目标（A-P2-3①+②）
+============================================================ */
+
+/// A-P2-3①+② 联动回归。场景：订阅行经未绑定窗口移动折叠为
+/// (desired=B, prev=A)（链起点 A），绑定后挂载（a=B, r=A）响应在途期间
+/// 生产命令移动 B→C → 生成替代 edit 行。
+/// - ①替代行必须保留链起点 A（挂载尚未成功，不能被调用方 prev=B 覆盖）；
+/// - ②挂载成功的 2xx =「远端当下持有 B」的账号作用域事实，④b 必须把替代行
+///   的移除基准重定为 B（修前 sent_moves 只收 edit 行，替代行按链起点 A 发
+///   r= 是 no-op，远端残留 B）。
+/// 判别力：修前②时远端最终为 {B, C}；修后远端只剩 C。
+#[tokio::test]
+async fn mount_window_success_rebases_replacement_removal_basis() {
+    let server = MockGReader::start().await.expect("start mock");
+    server.subscriptions.lock().unwrap().clear();
+    let tmp = common::unique_db_path("opt009b_mount_rebase");
+    let _ = std::fs::remove_file(&tmp);
+    let http = app_lib::ingestion::build_client(10);
+    let url = format!("{}/opt009-mount-rebase.xml", server.url());
+    let key = acct_key("greader", &server, "test");
+
+    let (dbm, feed_id, folder_c) = {
+        let conn = db::open(&tmp).unwrap();
+        db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+        db::set_setting(&conn, "greader_username", "test").unwrap();
+        db::set_setting(&conn, "greader_password", "test-token").unwrap();
+        let folder_a = db::create_folder(&conn, "A分类", "article").unwrap();
+        let folder_b = db::create_folder(&conn, "B分类", "article").unwrap();
+        let folder_c = db::create_folder(&conn, "C分类", "article").unwrap();
+        let feed = db::insert_feed(
+            &conn,
+            &url,
+            None,
+            "挂载重定",
+            None,
+            folder_a,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        let gen = db::sync_generation(&conn).unwrap();
+        db::enqueue_subscribe(&conn, gen, &key, &url, None, Some("A分类")).unwrap();
+        // 未绑定窗口移动 A→B：折叠为 (desired=B, prev=A)（链起点首值）
+        let push = app_lib::commands::record_feed_edit(
+            &conn,
+            feed,
+            None,
+            Some(folder_b),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(push.is_none(), "未绑定窗口：编辑并入订阅行，无直接推送目标");
+        {
+            let items = db::pending_outbox(&conn).unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].action, "subscribe");
+            assert_eq!(items[0].desired_folder.as_deref(), Some("B分类"));
+            assert_eq!(
+                items[0].prev_folder.as_deref(),
+                Some("A分类"),
+                "前置：未绑定窗口移动的链起点"
+            );
+        }
+        (Arc::new(Mutex::new(conn)), feed, folder_c)
+    };
+
+    // 第一轮：quick_add → 绑定 → 挂载（a=B, r=A）响应在途
+    let barrier = server.arm_subscription_edit_barrier("feed/");
+    let db2 = dbm.clone();
+    let http2 = http.clone();
+    let handle = tokio::spawn(async move { sync::feeds_phase(&db2, &http2).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), barrier.arrived)
+        .await
+        .expect("执行器必须在期限内发出挂载（网络屏障）")
+        .expect("barrier arrived");
+
+    // 在途期间：绑定已完成 → 生产命令移动 B→C 生成替代 edit 行。
+    // A-P2-3①：subscribe 行的链起点 A 保留为替代行移除基准。
+    {
+        let conn = dbm.lock().await;
+        let push = app_lib::commands::record_feed_edit(
+            &conn,
+            feed_id,
+            None,
+            Some(folder_c),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(push.is_some(), "绑定已完成：生产编辑必须携带远端推送目标");
+        let items = db::pending_outbox(&conn).unwrap();
+        assert_eq!(items.len(), 1, "同 URL 只保留最新意图");
+        assert_eq!(items[0].action, "edit", "绑定完成后的编辑走 edit 行");
+        assert_eq!(items[0].desired_folder.as_deref(), Some("C分类"));
+        assert_eq!(
+            items[0].prev_folder.as_deref(),
+            Some("A分类"),
+            "A-P2-3①：替代行必须保留 subscribe 行的链起点（挂载尚未成功）: {items:?}"
+        );
+    }
+
+    barrier.release.send(()).unwrap();
+    let _ = handle
+        .await
+        .expect("join feeds_phase")
+        .expect("feeds phase (mount window rebase)");
+    {
+        let form = last_subscription_edit_form(&server);
+        assert!(
+            form_has(&form, "a", "user/-/label/B分类")
+                && form_has(&form, "r", "user/-/label/A分类"),
+            "挂载按发送时目标发出（a=B, r=A），实际 {form:?}"
+        );
+        let conn = dbm.lock().await;
+        let items = db::pending_outbox(&conn).unwrap();
+        assert_eq!(items.len(), 1, "旧挂载成功不得确认在途新意图");
+        assert_eq!(
+            items[0].prev_folder.as_deref(),
+            Some("B分类"),
+            "A-P2-3②：挂载成功的 2xx = 远端当下持有 B，替代行移除基准重定为 B: {items:?}"
+        );
+    }
+
+    // 第二轮：替代行以重定后的基准推达（a=C, r=B），远端只剩 C
+    sync::feeds_phase(&dbm, &http)
+        .await
+        .expect("feeds phase (converge)");
+    {
+        let form = last_subscription_edit_form(&server);
+        assert!(
+            form_has(&form, "a", "user/-/label/C分类")
+                && form_has(&form, "r", "user/-/label/B分类"),
+            "替代行必须移除已接受的 B（修前 r=A 是 no-op，B 残留），实际 {form:?}"
+        );
+        let labels: Vec<String> = server
+            .subscriptions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.url == url)
+            .expect("远端订阅仍在")
+            .categories
+            .iter()
+            .map(|(l, _)| l.clone())
+            .collect();
+        assert!(
+            labels.contains(&"C分类".to_string())
+                && !labels.contains(&"B分类".to_string())
+                && !labels.contains(&"A分类".to_string()),
+            "远端必须只剩最终分类（无中间 label 残留）: {labels:?}"
+        );
+        let conn = dbm.lock().await;
+        assert!(
+            db::pending_outbox(&conn).unwrap().is_empty(),
+            "替代行确认后精确出队"
+        );
+    }
+    assert_eq!(
+        quickadd_requests(&server),
+        1,
+        "替代行携带远端绑定：全程只发生第一轮的一次 quick_add"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/* ============================================================
+9. legacy add_feed：挂载失败保留队项（pull 不回灌既有源分类，剪除即永久缺口）
+============================================================ */
+
+/// 审计 R2-P3（2026-11-01）：push_feeds 的分类挂载失败此前只记 report.errors、
+/// 队项照常剪除，而 pull 对既有源不回灌远端分类 → 远端订阅永久留在默认分类
+/// 且无收敛通道。修后：挂载失败不进 done（不剪除，保留重试）；下一轮经列表
+/// 证据解析既有 id（零 quick_add）只重试挂载，收敛后照常出队。
+#[tokio::test]
+async fn push_feeds_mount_failure_keeps_legacy_queue_item_until_converges() {
+    let server = MockGReader::start().await.expect("start mock");
+    let tmp = common::unique_db_path("opt009b_legacy_mount");
+    let _ = std::fs::remove_file(&tmp);
+    let http = app_lib::ingestion::build_client(10);
+    let url = format!("{}/opt009-legacy-mount.xml", server.url());
+
+    // 远端已有该订阅（feed/20，无分类）：列表证据直接解析，不走 quick_add
+    server
+        .existing_feed_urls
+        .lock()
+        .unwrap()
+        .push((url.clone(), 20));
+    *server.subscriptions.lock().unwrap() = vec![MockSubscription {
+        id: "feed/20".into(),
+        title: "legacy 挂载".into(),
+        url: url.clone(),
+        html_url: None,
+        categories: vec![],
+    }];
+
+    let dbm = {
+        let conn = db::open(&tmp).unwrap();
+        db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
+        db::set_setting(&conn, "greader_username", "test").unwrap();
+        db::set_setting(&conn, "greader_password", "test-token").unwrap();
+        let folder_a = db::create_folder(&conn, "A分类", "article").unwrap();
+        db::insert_feed(
+            &conn,
+            &url,
+            None,
+            "legacy 挂载",
+            None,
+            folder_a,
+            "inherit",
+            true,
+            false,
+        )
+        .unwrap();
+        // legacy add_feed 队项（payload 携带目标分类，与历史版本同形）
+        db::enqueue_sync(
+            &conn,
+            None,
+            Some(&url),
+            "add_feed",
+            Some(&format!(r#"{{"folder_id":{folder_a}}}"#)),
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    };
+
+    // 第一轮：挂载失败注入 → 队项必须保留（否则差距无收敛通道）
+    server.set_fail_subscription_edit_for(Some("feed/20"));
+    let report = sync::feeds_phase(&dbm, &http)
+        .await
+        .expect("feeds phase (mount fail)");
+    server.set_fail_subscription_edit_for(None);
+    assert!(
+        report.errors.iter().any(|e| e.contains("挂载分类")),
+        "挂载失败必须可见: {:?}",
+        report.errors
+    );
+    {
+        let conn = dbm.lock().await;
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE feed_url = ?1 AND action = 'add_feed'",
+                [&url],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            queued, 1,
+            "挂载失败不得剪除队项（pull 不回灌既有源分类，剪除即永久缺口）"
+        );
+        let labels: Vec<String> = server.subscriptions.lock().unwrap()[0]
+            .categories
+            .iter()
+            .map(|(l, _)| l.clone())
+            .collect();
+        assert!(labels.is_empty(), "远端仍未挂载分类: {labels:?}");
+    }
+
+    // 第二轮：注入清除 → 只重试挂载（零 quick_add）→ 收敛出队
+    sync::feeds_phase(&dbm, &http)
+        .await
+        .expect("feeds phase (converge)");
+    {
+        let conn = dbm.lock().await;
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_queue WHERE feed_url = ?1 AND action = 'add_feed'",
+                [&url],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 0, "挂载成功后队项照常出队");
+    }
+    assert_eq!(
+        quickadd_requests(&server),
+        0,
+        "重试经列表证据解析既有订阅，全程零 quick_add"
+    );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/* ============================================================
+10. 会话构建失败落账（A-P2-6）：pending 行 attempts/last_error 可见
+============================================================ */
+
+/// try_push_subscription_outbox 的 `if let Ok(session)` 此前静默吞掉构建失败：
+/// 认证/端点/网络失败时 UI 只能显示「等待」。修后对齐推送侧 TASK-124：
+/// 有凭据但构建失败 → 当前账号全部 pending 行 attempts+1、last_error 记摘要；
+/// 异账号行不触碰；队项全部保留（失败是重试不是放弃）。
+#[tokio::test]
+async fn try_push_records_session_block_on_build_failure() {
+    let tmp = common::unique_db_path("opt009b_session_block");
+    let _ = std::fs::remove_file(&tmp);
+    let http = app_lib::ingestion::build_client(10);
+    // 死地址：本机回环无监听，会话构建立即失败（不触外网）
+    let dead = "http://127.0.0.1:1";
+
+    let dbm = {
+        let conn = db::open(&tmp).unwrap();
+        db::set_setting(&conn, "greader_endpoint", dead).unwrap();
+        db::set_setting(&conn, "greader_username", "test").unwrap();
+        db::set_setting(&conn, "greader_password", "test-token").unwrap();
+        let key = format!("greader|{dead}|test");
+        let gen = db::sync_generation(&conn).unwrap();
+        db::enqueue_subscribe(&conn, gen, &key, "https://f.example/rss", None, None).unwrap();
+        db::enqueue_subscribe(
+            &conn,
+            gen,
+            "other-acct",
+            "https://g.example/rss",
+            None,
+            None,
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    };
+
+    sync::try_push_subscription_outbox(&dbm, &http).await;
+
+    let conn = dbm.lock().await;
+    let items = db::pending_outbox(&conn).unwrap();
+    assert_eq!(items.len(), 2, "队项全部保留（失败是重试不是放弃）");
+    let mine = items
+        .iter()
+        .find(|i| i.account_key.starts_with("greader|"))
+        .unwrap();
+    assert_eq!(mine.attempts, 1, "构建失败必须落账（此前静默吞掉）");
+    assert!(
+        mine.last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("订阅写回"),
+        "last_error 携带订阅写回摘要: {mine:?}"
+    );
+    let other = items
+        .iter()
+        .find(|i| i.account_key == "other-acct")
+        .unwrap();
+    assert_eq!(other.attempts, 0, "异账号行不触碰");
+    assert!(other.last_error.is_none());
+}
+
 /// OPT-009B2 复审 R2-3（对照时序）：unsubscribe **已被服务端确认并出队**后再重加
 /// ——被替换的退订行已不存在，重加行不得凭空携带移除基准（无 r=），远端只留新
 /// 目标；两段时序的差异被分别断言（上一条对应「未确认被替换」）。
