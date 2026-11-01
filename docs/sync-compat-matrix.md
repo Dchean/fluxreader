@@ -185,10 +185,12 @@ FreshRSS 的具体部署版本未逐一实机验收**——本列不能当作「
 - **L5 Fever 截断不可检测**：unread/saved 集合是单请求全集响应，无
   continuation 可校验；GR 侧的截断检测纪律在 Fever 协议上无对应
   机制（依赖服务端响应完整性）。
-- **L6 GR 缺字段未失败关闭（已解决；2026-10-20 收敛）**：GR 的
-  `subscription/list`、`stream/items/ids`、`item_contents` 返回 200 但缺
-  `subscriptions` / `itemRefs` / `items` 时，现均映射为 `protocol`，不得当空
-  集合；非法 `itemRefs.id` 与非法 continuation 同样失败关闭并保留游标。
+- **L6 GR 缺字段未失败关闭（已解决；2026-10-20 收敛；2026-11-01 补口）**：GR 的
+  `subscription/list`、`tag/list`、`stream/items/ids`、`item_contents` 返回
+  200 但缺 `subscriptions` / `tags` / `itemRefs` / `items` 时，现均映射为
+  `protocol`，不得当空集合；`item_contents` 非空请求返回条数少于请求数
+  （含 0）同样判 `protocol`（服务端截断/异常不得伪装成已同步），按块失败
+  保留游标；非法 `itemRefs.id` 与非法 continuation 同样失败关闭并保留游标。
   continuation 另外记录已见值、要求严格前进并限制 200 页；重复数字不会无限
   分页。订阅绑定失败会写账号级持久 marker，独立 states 命令在首个 HTTP 前
   即阻断条目/权威集合请求与游标推进。marker 只在订阅遍历完整、所有远端订阅
