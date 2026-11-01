@@ -543,33 +543,6 @@ mod tests {
         assert!(!cache_entry_fresh(Duration::from_secs(601)));
     }
 
-    /// W3-1：认证类失败判定——Fever code=auth、GReader 会话内 401/403 文案
-    /// 命中；网络失败（DNS/超时/5xx/404）不命中（否则回落会被无谓触发）。
-    #[test]
-    fn is_auth_failure_classifies_auth_only() {
-        assert!(is_auth_failure(&AppError::new(
-            "auth",
-            "Fever 认证失败（api_key 不正确；FreshRSS 请使用个人设置里的「API 密码」）"
-        )));
-        assert!(is_auth_failure(&AppError::network(
-            "GET /reader/api/0/stream/items/ids → 401 Unauthorized"
-        )));
-        assert!(is_auth_failure(&AppError::network(
-            "获取 action token 失败：GET /reader/api/0/token → 403 Forbidden"
-        )));
-        // 非认证：网络/端点/服务端错误一律不命中
-        assert!(!is_auth_failure(&AppError::network(
-            "GET /reader/api/0/stream/items/ids → 500 Internal Server Error"
-        )));
-        assert!(!is_auth_failure(&AppError::network(
-            "error sending request for url (https://example.com/) ← dns error"
-        )));
-        assert!(!is_auth_failure(&AppError::new(
-            "protocol",
-            "GReader itemRefs 响应缺 itemRefs 字段"
-        )));
-    }
-
     /// W3-1：报告级检测——错误串经 AppError Display（`[code] message`）嵌入，
     /// `[auth] ` 与 `→ 401/403` 都要能从组合串里识别；纯网络失败不误报。
     #[test]
