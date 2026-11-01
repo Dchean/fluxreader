@@ -324,7 +324,8 @@ fn resolve_save_plan(
 /// - 提交前复核 `plan.expected_generation`（保存开始验证时捕获）——两个保存
 ///   并发时迟到者整体失败，不覆盖较新保存；
 /// - `identity_changed`（协议/规范化根/用户名变化）→ 清远端数据、清旧账号
-///   退订墓碑（不污染新账号）、重置两端游标 + Fever 历史回 Unknown、清端点缓存；
+///   退订墓碑（不污染新账号）、清旧账号订阅写回队项（outbox 生命周期终点）、
+///   重置两端游标 + Fever 历史回 Unknown、清端点缓存；
 /// - 仅密码变化（同账号）→ 保留全部数据与历史进度，只推进代际使旧请求失效；
 /// - 待确认建议只在**专用激活提交**（`plan.activate_pending`）里消费：与当前
 ///   建议做版本/身份 CAS，命中才清除；普通保存（None）绝不触碰建议；CAS 不匹配
@@ -351,6 +352,15 @@ fn commit_account_settings(
     if plan.identity_changed {
         let (feeds, _) = db::purge_remote_data_in(&tx)?;
         log::info!("sync: 账号切换，清理旧账号数据：{feeds} 个订阅");
+        // 订阅 outbox 生命周期终点：身份切换即清旧账号队项（同一事务、
+        // bump 代际之前）。旧「换号暂停、回原账号恢复」语义就此放弃——
+        // 已消失账号的 pending 行不再永久滞留。
+        // Note: 同身份保留、身份切换清账 — 见 .agents/notes/implemented/bug-fix/2026-11-02-订阅outbox生命周期终点.md
+        let new_key = crate::sync::account_key(&plan.protocol, &plan.endpoint, &plan.username);
+        let removed = db::abandon_stale_outbox(&tx, &new_key)?;
+        if removed > 0 {
+            log::info!("sync: 账号切换，清理旧账号订阅写回队项 {removed} 行");
+        }
         // 旧账号的删除墓碑不压制新账号订阅导入（F05；断开不调用，保防复活）。
         db::clear_feed_tombstones(&tx)?;
         crate::endpoint_resolve::clear_cached_base(&tx)?;
@@ -371,6 +381,12 @@ fn commit_account_settings(
             if last_key != new_key {
                 log::info!("sync: 断开前账号与新身份不同，清理遗留订阅删除墓碑");
                 db::clear_feed_tombstones(&tx)?;
+                // 订阅 outbox 生命周期终点：换身份重连同样清旧账号队项
+                // （同一事务、bump 代际之前）；同身份重连走不到这里，行保留。
+                let removed = db::abandon_stale_outbox(&tx, &new_key)?;
+                if removed > 0 {
+                    log::info!("sync: 断开前账号与新身份不同，清理旧账号订阅写回队项 {removed} 行");
+                }
             }
         }
         // 游标/历史未知状态归零，从全量开始。
@@ -2223,7 +2239,9 @@ mod opt009_b3_tests {
     }
 
     /// B3：回执统计三态——未连接全零（无当前账号，计数无归属）；连接后按
-    /// **当前账号**限定（换号后旧账号暂停项不可见，回原账号恢复）；表级读取
+    /// **当前账号**限定（换号后旧账号暂停项不可见；身份切换清账只发生在账号
+    /// 提交内核，见 opt009_phaseb3_e2e——本用例 seed_creds 直写凭据，行保留，
+    /// 只锁「统计按当前账号 key 过滤」的读取面）；表级读取
     /// 失败必须 Err。
     /// 判别力：全库口径实现下「换号后 pending 应为 0」的断言即红。
     #[test]
@@ -2256,7 +2274,8 @@ mod opt009_b3_tests {
             "异账号暂停的队项不得混入当前账号（全库口径实现会红）"
         );
 
-        // 回原账号：暂停行恢复可见（回原账号可发）
+        // 回原账号：同 key 重新在场即恢复可见（seed_creds 绕过提交内核，行未被
+        // 清账；真实路径的身份切换清账在 opt009_phaseb3_e2e 锁定）
         seed_creds(&c, "greader", "u");
         assert_eq!(subscription_outbox_stats_from_conn(&c).unwrap().pending, 1);
 

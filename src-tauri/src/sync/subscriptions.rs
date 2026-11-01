@@ -290,12 +290,14 @@ pub(super) async fn push_feeds(
                 Err(e) => match resolve_existing_feed_id(session, &it.url).await {
                     Ok(Some(v)) => v,
                     _ => {
+                        report.note_client_error(&e);
                         report.errors.push(format!("推送订阅 {} 失败: {e}", it.url));
                         continue;
                     }
                 },
             },
             Err(e) => {
+                report.note_client_error(&e);
                 report.errors.push(format!(
                     "解析订阅 {} 是否已存在失败（保留队项下轮重试）: {e}",
                     it.url
@@ -361,6 +363,7 @@ pub(super) async fn push_feeds(
                 {
                     Ok(()) => done.push(it.queue_id),
                     Err(e) => {
+                        report.note_client_error(&e);
                         let summary = format!(
                             "订阅 {} 挂载分类「{label}」失败（保留队项下轮重试）: {e}",
                             it.url
@@ -568,8 +571,8 @@ pub(super) async fn push_subscription_outbox(
         }
         let outcome = match item.action.as_str() {
             db::ACTION_SUBSCRIBE => exec_subscribe_item(db, session, &key, item, report).await,
-            db::ACTION_EDIT => exec_edit_item(session, item).await,
-            db::ACTION_UNSUBSCRIBE => exec_unsubscribe_item(db, session, item).await,
+            db::ACTION_EDIT => exec_edit_item(session, item, report).await,
+            db::ACTION_UNSUBSCRIBE => exec_unsubscribe_item(db, session, item, report).await,
             other => OutboxOutcome::Retry(format!(
                 "订阅写回包含未知动作「{other}」，保留队项（不猜测语义）"
             )),
@@ -728,18 +731,20 @@ async fn exec_subscribe_item(
                     Err(e) => match resolve_existing_feed_id(session, &item.feed_url).await {
                         Ok(Some(v)) => v,
                         _ => {
+                            report.note_client_error(&e);
                             return OutboxOutcome::Retry(format!(
                                 "推送订阅 {} 失败: {e}",
                                 item.feed_url
-                            ))
+                            ));
                         }
                     },
                 },
                 Err(e) => {
+                    report.note_client_error(&e);
                     return OutboxOutcome::Retry(format!(
                         "解析订阅 {} 是否已存在失败（保留队项，下轮重试）: {e}",
                         item.feed_url
-                    ))
+                    ));
                 }
             }
         }
@@ -882,10 +887,13 @@ async fn exec_subscribe_item(
             .await
         {
             Ok(()) => OutboxOutcome::ConfirmedSubscribe(fresh_title, fresh_folder, fresh_prev),
-            Err(e) => OutboxOutcome::Retry(format!(
-                "订阅 {} 挂载目标（标题/分类）失败: {e}",
-                item.feed_url
-            )),
+            Err(e) => {
+                report.note_client_error(&e);
+                OutboxOutcome::Retry(format!(
+                    "订阅 {} 挂载目标（标题/分类）失败: {e}",
+                    item.feed_url
+                ))
+            }
         }
     } else {
         OutboxOutcome::ConfirmedSubscribe(fresh_title, fresh_folder, fresh_prev)
@@ -893,7 +901,11 @@ async fn exec_subscribe_item(
 }
 
 /// edit 项：改名 `t` + 移动 `a`/`r`（旧 label 移除）。
-async fn exec_edit_item(session: &SyncSession, item: &db::SubscriptionOutboxItem) -> OutboxOutcome {
+async fn exec_edit_item(
+    session: &SyncSession,
+    item: &db::SubscriptionOutboxItem,
+    report: &mut SyncReport,
+) -> OutboxOutcome {
     let Some(rid) = item.remote_id else {
         return OutboxOutcome::Retry(format!(
             "编辑订阅 {} 缺远端绑定，保留队项待绑定回填",
@@ -911,7 +923,10 @@ async fn exec_edit_item(session: &SyncSession, item: &db::SubscriptionOutboxItem
         .await
     {
         Ok(()) => OutboxOutcome::Confirmed,
-        Err(e) => OutboxOutcome::Retry(format!("订阅编辑 {} 推送失败: {e}", item.feed_url)),
+        Err(e) => {
+            report.note_client_error(&e);
+            OutboxOutcome::Retry(format!("订阅编辑 {} 推送失败: {e}", item.feed_url))
+        }
     }
 }
 
@@ -941,16 +956,20 @@ async fn exec_unsubscribe_item(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     item: &db::SubscriptionOutboxItem,
+    report: &mut SyncReport,
 ) -> OutboxOutcome {
     let Some(known) = item.remote_id else {
-        return exec_unsubscribe_recovery(db, session, item).await;
+        return exec_unsubscribe_recovery(db, session, item, report).await;
     };
     match session.client.unsubscribe(known).await {
         Ok(()) => OutboxOutcome::Confirmed,
-        Err(e) => OutboxOutcome::Retry(format!(
-            "退订 {}（远端 id {known}）推送失败: {e}",
-            item.feed_url
-        )),
+        Err(e) => {
+            report.note_client_error(&e);
+            OutboxOutcome::Retry(format!(
+                "退订 {}（远端 id {known}）推送失败: {e}",
+                item.feed_url
+            ))
+        }
     }
 }
 
@@ -966,15 +985,17 @@ async fn exec_unsubscribe_recovery(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     item: &db::SubscriptionOutboxItem,
+    report: &mut SyncReport,
 ) -> OutboxOutcome {
     // ①②解析+发现段（B1）：共用一次列表读取。
     let subs = match session.client.subscriptions().await {
         Ok(v) => v,
         Err(e) => {
+            report.note_client_error(&e);
             return OutboxOutcome::Retry(format!(
                 "退订 {} 列远端订阅失败: 重复目标发现未完成，保留队项（下轮重试）: {e}",
                 item.feed_url
-            ))
+            ));
         }
     };
     let norm = db::normalize_url(&item.feed_url);
@@ -1053,10 +1074,11 @@ async fn exec_unsubscribe_recovery(
         match session.client.unsubscribe(rid).await {
             Ok(()) => {}
             Err(e) => {
+                report.note_client_error(&e);
                 return OutboxOutcome::Retry(format!(
                     "退订 {}（远端 id {rid}）推送失败: {e}",
                     item.feed_url
-                ))
+                ));
             }
         }
     }
@@ -1278,6 +1300,7 @@ pub(super) async fn pull_feeds(
         match tokio::join!(session.client.tags(), session.client.subscriptions()) {
             (Ok(t), Ok(s)) => (t, s),
             (Err(e), _) | (_, Err(e)) => {
+                report.note_client_error(&e);
                 report.errors.push(format!("拉取订阅失败: {e}"));
                 mark_subscription_import_incomplete(db, session, &account_key, report).await;
                 return;

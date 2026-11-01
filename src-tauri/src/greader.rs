@@ -355,10 +355,12 @@ impl GReaderClient {
         if !resp.status().is_success() {
             // 路径存在但请求被拒（多为凭据问题）——立即停下，如实报错，
             // 不得继续尝试其它候选而掩盖真实原因。
+            let status = resp.status().as_u16();
             return Err(AppError::network(format!(
                 "ClientLogin → {}（已定位 API：{base}）",
                 resp.status()
-            )));
+            ))
+            .auth_if(AppError::is_auth_status(status)));
         }
         // 双格式：先 JSON（Miniflux），失败回退经典文本 Auth= 行（FreshRSS）。
         let body = resp.text().await?;
@@ -392,7 +394,9 @@ impl GReaderClient {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(AppError::network(format!("GET {path} → {}", resp.status())));
+            let status = resp.status().as_u16();
+            return Err(AppError::network(format!("GET {path} → {}", resp.status()))
+                .auth_if(AppError::is_auth_status(status)));
         }
         decode_json_response(resp, &format!("GET {path}")).await
     }
@@ -436,7 +440,8 @@ impl GReaderClient {
         if !resp.status().is_success() {
             return Err(AppError::network(format!(
                 "获取 action token 失败：GET /reader/api/0/token → {status}"
-            )));
+            ))
+            .auth_if(AppError::is_auth_status(status)));
         }
         // 不把响应体裁剪进错误/日志：token 与凭据同属敏感值。
         let body = resp.text().await.map_err(|e| {
@@ -480,10 +485,11 @@ impl GReaderClient {
     ) -> AppResult<reqwest::Response> {
         let resp = self.post_action_token_raw(path, form).await?;
         if !resp.status().is_success() {
-            return Err(AppError::network(format!(
-                "POST {path} → {}",
-                resp.status()
-            )));
+            let status = resp.status().as_u16();
+            return Err(
+                AppError::network(format!("POST {path} → {}", resp.status()))
+                    .auth_if(AppError::is_auth_status(status)),
+            );
         }
         Ok(resp)
     }
@@ -529,10 +535,11 @@ impl GReaderClient {
                 );
                 return Ok(());
             }
-            return Err(AppError::network(format!(
-                "POST {path} → {}",
-                resp.status()
-            )));
+            let status = resp.status().as_u16();
+            return Err(
+                AppError::network(format!("POST {path} → {}", resp.status()))
+                    .auth_if(AppError::is_auth_status(status)),
+            );
         }
         let body = resp
             .text()

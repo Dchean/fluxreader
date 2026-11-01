@@ -364,6 +364,7 @@ pub(super) async fn pull_entries_greader(
             Ok(r) => r,
             Err(e) => {
                 id_failures += 1;
+                report.note_client_error(&e);
                 report.errors.push(format!("拉取条目 id 失败: {e}"));
                 break;
             }
@@ -441,6 +442,7 @@ pub(super) async fn pull_entries_greader(
                 }
                 ContentFetch::Failed(e) => {
                     chunk_failures += 1;
+                    report.note_client_error(&e);
                     report.errors.push(format!("拉取条目正文失败: {e}"));
                 }
                 ContentFetch::Entries(entries) => {
@@ -510,6 +512,7 @@ pub(super) async fn pull_entries_greader(
                 if e.code == "protocol" {
                     authority_cursor_failures += 1;
                 }
+                report.note_client_error(&e);
                 report
                     .errors
                     .push(format!("unread 权威集合拉取失败，本轮跳过 read 差分: {e}"));
@@ -522,6 +525,7 @@ pub(super) async fn pull_entries_greader(
                 if e.code == "protocol" {
                     authority_cursor_failures += 1;
                 }
+                report.note_client_error(&e);
                 report
                     .errors
                     .push(format!("starred 权威集合拉取失败，本字段跳过对账: {e}"));
@@ -663,6 +667,7 @@ async fn backfill_authority_collection(
                 // OPT-006：每个回补请求前复核代际。
                 ContentFetch::Stale => return Err(SyncSession::stale_error()),
                 ContentFetch::Failed(e) => {
+                    report.note_client_error(&e);
                     report.errors.push(format!(
                         "GR {collection} 集合回补请求失败，该侧本轮跳过对账（游标保留）: {e}"
                     ));

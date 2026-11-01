@@ -513,7 +513,7 @@ const IMAGE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
 /// 图片字节上限（防恶意/误配 URL 撑爆内存）。
-const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 
 /// Referer 候选链：防盗链双向——黑名单式（sinaimg.cn 拒外来 Referer、只认裸请求）
 /// 与白名单式（少数派 cdnfile.sspai.com 拒裸请求、要求 sspai.com Referer）无法用
@@ -547,13 +547,21 @@ pub async fn fetch_image(
     url: String,
     page_url: Option<String>,
 ) -> AppResult<Vec<u8>> {
+    fetch_image_inner(&state.http, &url, page_url.as_deref()).await
+}
+
+/// [`fetch_image`] 的纯 HTTP 内核（不依赖 AppState，模块单测直接调用）。
+async fn fetch_image_inner(
+    http: &reqwest::Client,
+    url: &str,
+    page_url: Option<&str>,
+) -> AppResult<Vec<u8>> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(AppError::new("badImageUrl", "仅支持 http/https 图片"));
     }
-    let http = &state.http;
     let mut last_err = AppError::new("imageFetch", "图片抓取失败");
-    for referer in referer_candidates(&url, page_url.as_deref()) {
-        let mut req = http.get(&url).header("User-Agent", IMAGE_UA);
+    for referer in referer_candidates(url, page_url) {
+        let mut req = http.get(url).header("User-Agent", IMAGE_UA);
         if let Some(r) = &referer {
             req = req.header("Referer", r.as_str());
         }
@@ -562,14 +570,15 @@ pub async fn fetch_image(
             Ok(resp) => match resp.error_for_status() {
                 Err(e) => last_err = AppError::new("imageFetch", format!("HTTP 错误: {e}")),
                 Ok(resp) => {
-                    if resp.content_length().is_some_and(|n| n > MAX_IMAGE_BYTES) {
-                        return Err(AppError::new("imageTooLarge", "图片过大"));
-                    }
-                    let bytes = resp.bytes().await?;
-                    if bytes.len() as u64 > MAX_IMAGE_BYTES {
-                        return Err(AppError::new("imageTooLarge", "图片过大"));
-                    }
-                    return Ok(bytes.to_vec());
+                    // 流式收体（read_body_capped）：CL 预检 + 累计上限两道防线，
+                    // 无 Content-Length 定界（chunked/EOF）的超量流不再先把内存
+                    // 吃满才被拒。图是二进制：bytes 直接使用，不经
+                    // decode_body_bytes。超限 = responseTooLarge（与 favicon/
+                    // 全文提取同口径）；前端对 fetchImage 失败统一 catch 降级
+                    // （隐藏/回退原 src），错误码仅用于诊断，行为面不变。
+                    // Note: 图片代理旁路闭合 — 见 .agents/notes/implemented/bug-fix/2026-11-02-封面图流式收体闭合旁路.md
+                    let bytes = crate::ingestion::read_body_capped(resp, MAX_IMAGE_BYTES).await?;
+                    return Ok(bytes);
                 }
             },
         }
@@ -578,7 +587,11 @@ pub async fn fetch_image(
 }
 #[cfg(test)]
 mod image_proxy_tests {
-    use super::referer_candidates;
+    use super::{fetch_image_inner, referer_candidates, MAX_IMAGE_BYTES};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     /// Referer 候选链：无 Referer → 图床 origin → 文章 URL（白名单式防盗链靠最后一项）。
     #[test]
@@ -614,6 +627,71 @@ mod image_proxy_tests {
     fn referer_candidates_dedupes_page_equal_to_origin() {
         let got = referer_candidates("https://ex.com/a.png", Some("https://ex.com/"));
         assert_eq!(got, vec![None, Some("https://ex.com/".to_string())]);
+    }
+
+    /// 无 Content-Length 定界的超量流 mock（EOF 定界）：实发超过 25 MiB 图片界。
+    /// 客户端在累计上限中止读取后连接关闭——后续写入失败，mock 经通道上报
+    /// 实际写出的块数，测试据此断言「连接被客户端中止」（不再完整收体）。
+    fn start_oversize_image_eof_mock(sent_chunks: mpsc::Sender<usize>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Some(Ok(mut stream)) = listener.incoming().next() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let mut req = Vec::new();
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                req.extend_from_slice(&buf[..n]);
+                if req.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\n\
+                        Connection: close\r\n\r\n";
+            let _ = stream.write_all(head.as_bytes());
+            let chunk = vec![b'a'; 64 * 1024];
+            let planned = MAX_IMAGE_BYTES / chunk.len() + 64;
+            let mut sent = 0usize;
+            for _ in 0..planned {
+                if stream.write_all(&chunk).is_err() {
+                    break;
+                }
+                sent += 1;
+            }
+            let _ = stream.flush();
+            let _ = sent_chunks.send(sent);
+        });
+        port
+    }
+
+    /// 图片代理旁路闭合（2026-11-02）：无 CL 超量流必须由 read_body_capped 的
+    /// 累计分支在 25 MiB 处中止（responseTooLarge），且连接被客户端中止——
+    /// 旧 `resp.bytes()` 实现会先把超量响应完整收进内存才在事后拒绝。
+    #[tokio::test]
+    async fn oversized_image_body_without_content_length_aborts_midstream() {
+        let (sent_tx, sent_rx) = mpsc::channel();
+        let port = start_oversize_image_eof_mock(sent_tx);
+        let http = crate::ingestion::build_client(30);
+        let err = fetch_image_inner(&http, &format!("http://127.0.0.1:{port}/cover.jpg"), None)
+            .await
+            .expect_err("超量图片必须显式失败，不得完整收体后拒绝");
+        assert_eq!(
+            err.code, "responseTooLarge",
+            "超限对齐 responseTooLarge 口径: {err}"
+        );
+        // 连接被客户端中止：mock 未能把计划内的超量数据全部写出
+        let sent = sent_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("mock 必须结束（客户端中止后写入失败或发送完毕）");
+        assert!(
+            sent < MAX_IMAGE_BYTES / (64 * 1024) + 64,
+            "客户端必须在累计上限处中止读取（mock 实发 {sent} 块）"
+        );
     }
 }
 
