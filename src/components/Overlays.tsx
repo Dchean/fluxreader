@@ -31,7 +31,7 @@ export function SearchModal() {
 
   return (
     <ModalOverlay open={searchOpen} onClose={closeSearch} contentWidth={580} ariaLabel="搜索与命令面板">
-      <SearchModalBody key={String(searchOpen)} onClose={closeSearch} />
+      <SearchModalBody key={String(searchOpen)} autoFocusInput={searchOpen} onClose={closeSearch} />
     </ModalOverlay>
   );
 }
@@ -54,7 +54,7 @@ interface PaletteItem {
   run: () => void;
 }
 
-function SearchModalBody({ onClose }: { onClose: () => void }) {
+function SearchModalBody({ autoFocusInput, onClose }: { autoFocusInput: boolean; onClose: () => void }) {
   const [q, setQ] = useState('');
   const [debounced, setDebounced] = useState('');
   const [results, setResults] = useState<ArticleEntry[]>([]);
@@ -292,7 +292,10 @@ function SearchModalBody({ onClose }: { onClose: () => void }) {
         <Icons.search />
         <input
           type="text"
-          autoFocus
+          /* ModalOverlay 关闭态仍挂载 children（只靠 inert 挡焦点），裸 autoFocus
+             会在关闭态挂载时抢焦点（jsdom 无 inert 即复现；条件 autoFocus 是
+             源码级保证，不依赖各引擎 inert 实现差异）。 */
+          autoFocus={autoFocusInput}
           placeholder="搜索文章、订阅源，或运行命令…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
@@ -747,16 +750,18 @@ export function RenameCategoryModal() {
 
   return (
     <ModalOverlay open={open} onClose={() => closeMiniModal('renameCat')} ariaLabel="重命名分类">
-      {cat && <RenameCatModalBody key={targetId + String(open)} initialName={cat.name} onCancel={() => closeMiniModal('renameCat')} onSubmit={(name) => { renameCategory(targetId, name); closeMiniModal('renameCat'); }} />}
+      {cat && <RenameCatModalBody key={targetId + String(open)} autoFocusInput={open} initialName={cat.name} onCancel={() => closeMiniModal('renameCat')} onSubmit={(name) => { renameCategory(targetId, name); closeMiniModal('renameCat'); }} />}
     </ModalOverlay>
   );
 }
 
 function RenameCatModalBody({
+  autoFocusInput,
   initialName,
   onCancel,
   onSubmit,
 }: {
+  autoFocusInput: boolean;
   initialName: string;
   onCancel: () => void;
   onSubmit: (name: string) => void;
@@ -772,7 +777,7 @@ function RenameCatModalBody({
           className="setting-input"
           style={{ width: '100%' }}
           value={name}
-          autoFocus
+          autoFocus={autoFocusInput}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && name.trim()) onSubmit(name);

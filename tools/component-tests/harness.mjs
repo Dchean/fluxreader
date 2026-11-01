@@ -495,6 +495,7 @@ export function resetStore(extra = {}) {
     articlesLimit: 0,
     articlesCursor: {},
     articlesLoading: false,
+    backendReloadsInFlight: 0,
     articlesExhausted: true,
     positionRestoreNonce: 0,
     switchRestoreNonce: 0,

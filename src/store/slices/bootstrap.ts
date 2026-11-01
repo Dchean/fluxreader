@@ -24,6 +24,7 @@ export type BootstrapSlice = Pick<
   | 'bootstrapError'
   | 'articlesLimit'
   | 'articlesLoading'
+  | 'backendReloadsInFlight'
   | 'articlesExhausted'
   | 'articlesCursor'
   | 'positionRestoreNonce'
@@ -282,6 +283,13 @@ export async function confirmAppliedConfig(): Promise<void> {
 }
 
 export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice> = (set, get) => {
+  /* 启动抢占期假空态（修法 (b)）：模块级 backendReloadInFlight 计数闭包外读不到，
+     这对助手把当前计数镜像进 store 供 Timeline 订阅——只追加镜像，不接管
+     计数逻辑（含自身计数的 isBackendReloadInFlight 守卫语义保持逐字不变）。
+     见 .agents/notes/implemented/bug-fix/2026-11-02-启动抢占期假空态.md */
+  const beginBackendReload = (): void => { set({ backendReloadsInFlight: backendReloadInFlight }); };
+  const endBackendReload = (): void => { set({ backendReloadsInFlight: backendReloadInFlight }); };
+
   const runLoadMore = async (snapshot: LoadMoreSnapshot, replay: boolean): Promise<void> => {
     const showLoadMoreRetry = (message: string): void => {
       get().showToast(message, {
@@ -404,6 +412,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   /* TASK-052：per-scope 游标表（'all' | feedId | 'cat-N' → 已加载条数） */
   articlesCursor: {},
   articlesLoading: false,
+  backendReloadsInFlight: 0,
   articlesExhausted: false,
   /* TASK-111②：后台刷新保位信号（nonce）。仅 reloadFromBackend /
      reloadFilteredEntries 以 keepReadingPosition 落地时 bump（feeds-updated /
@@ -468,6 +477,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        （晚于该时刻的写入不回退，见 bodyCache.reconcileBodyEntities） */
     const rowsFetchedAt = Date.now();
     backendReloadInFlight++;
+    beginBackendReload();
     try {
       const scopeKey = QueryScope.pageKey(scopeAtStart, layoutAtStart);
       const scopeArgs = QueryScope.args(scopeAtStart, sortAtStart, layoutAtStart);
@@ -667,6 +677,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       if (view !== 'all') void get().reloadFilteredEntries(view, keepReadingPosition ? { keepReadingPosition: true } : undefined);
     } finally {
       backendReloadInFlight--;
+      endBackendReload();
     }
   },
 
@@ -743,6 +754,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
   reloadFilteredEntries: async (view, opts) => {
     if (get().dataMode !== 'tauri') return;
     backendReloadInFlight++;
+    beginBackendReload();
     /* R3（P2-2）：读取发起时刻的本地写前沿——旧响应不得把已提交的点读/藏
        翻回（与 reloadFromBackend 同一守卫；本入口不落计数）。
        R4：同时捕获在途写集合（同上，不依赖 IPC FIFO）。 */
@@ -813,6 +825,7 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       return;
     } finally {
       backendReloadInFlight--;
+      endBackendReload();
     }
     if (!rows) return;
     // 竞态保护：拉取期间用户又切了视图，丢弃过期结果
