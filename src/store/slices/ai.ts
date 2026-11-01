@@ -753,14 +753,26 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
          走 HTML 渲染（XSS 窗口）；后端清除也会与生成落库互相复活/清空。
          — 见 .agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md */
       if (aiInFlight.has(aiKeyOf(id, kind))) {
-        get().showToast('生成中，先等完成或停止后再清除');
+        /* 文案不承诺「停止」：全库无停止生成入口，挂死的 IPC 会让该
+           (条目, 产物) 的清除被永久拒绝，只给可自愈的出路。 */
+        get().showToast('生成进行中，完成后再清除；若长时间无响应可重启应用');
         return false;
       }
+      const clearKey = aiKeyOf(id, kind);
+      const genAtClear = aiRequestGen.get(clearKey);
       try {
         await api.aiClearCache(Number(id), kind);
       } catch (e) {
         get().showToast(`清除失败：${extractError(e)}`);
         return false;
+      }
+      /* Done 后的安全回读不在 trackAiRequest 链上（invoke settle 即摘除在途，
+         b1-2 契约），硬闸放行的清除完成后，迟到回读携清除前行数据会复活已清
+         产物——清除成功即推进该 (条目, 产物) 的请求代次，使旧回读整体丢弃
+         （isCurrentAiRequest 失配）。await 期间已有更晚请求接管（代次已变）
+         则不 bump，不杀新请求的流内回包。— 见 Note（同上） */
+      if (genAtClear !== undefined && aiRequestGen.get(clearKey) === genAtClear) {
+        aiRequestGen.set(clearKey, genAtClear + 1);
       }
       const field = kind === 'summary' ? 'aiSummary' : 'translatedContent';
       /* 产物清空即签名失效（签名不得脱离产物独立存活）；正文保留 */
@@ -769,7 +781,11 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         const nextErrors = { ...(kind === 'summary' ? st.summaryErrors : st.translateErrors) };
         delete nextErrors[id];
         const nextRaw = { ...st.rawTranslatedIds };
-        delete nextRaw[id];
+        /* 未消毒标记只属于译文产物：summary 清除不得跨 kind 删除——否则译文侧
+           「半截+标记」的失败重试语义被拆开，无后续 delta 的未消毒半截长期
+           滞留 Timeline 的 HTML 渲染路径（持续态，非竞态窗口）。
+           — 见 .agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md */
+        if (kind === 'translation') delete nextRaw[id];
         const prev = st.aiStatusById[id];
         const status = {
           summaryVerified: kind === 'summary' ? false : prev?.summaryVerified ?? false,
@@ -782,7 +798,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         };
         return {
           ...(kind === 'summary' ? { summaryErrors: nextErrors } : { translateErrors: nextErrors }),
-          rawTranslatedIds: nextRaw,
+          ...(kind === 'translation' ? { rawTranslatedIds: nextRaw } : {}),
           aiStatusById: { ...st.aiStatusById, [id]: status },
           // 正在展示译文时清除译文：切回原文，不留下空白译文视图
           ...(kind === 'translation' && st.activeArticleId === id

@@ -385,20 +385,30 @@ export async function run(ctx) {
   store.setState({ toasts: [] });
   S.invokeCalls.length = 0;
   const clearWhileStreaming = await store.getState().clearAiProduct('201', 'translation');
-  checkNew('(b3-6) 翻译在途时清除被拒绝：不调后端、未消毒标记保留、提示先等完成或停止',
+  checkNew('(b3-6) 翻译在途时清除被拒绝：不调后端、未消毒标记保留、提示完成后再清除（不承诺不存在的停止入口）',
     clearWhileStreaming === false
     && S.invokeCalls.filter((c) => c.cmd === 'ai_clear_cache').length === 0
     && store.getState().rawTranslatedIds['201'] === true
-    && store.getState().toasts[store.getState().toasts.length - 1]?.text === '生成中，先等完成或停止后再清除');
+    && store.getState().toasts[store.getState().toasts.length - 1]?.text === '生成进行中，完成后再清除；若长时间无响应可重启应用');
   const heldB36 = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
   heldB36.ch.onmessage?.({ type: 'delta', data: '<p>在途半截' });
   checkNew('(b3-6) 拒绝清除后流式继续：半截仍按纯文本口径（标记未被清除动作打掉）',
     store.getState().rawTranslatedIds['201'] === true);
-  /* 自愈侧：标记被任何路径丢掉（模拟清除 await 竞态残留）后，下一个 delta 补回 */
+  /* 自愈侧：标记被任何路径丢掉（模拟清除 await 竞态残留）后，下一个 delta 补回。
+     顺序契约（审计 P3-2）：补回必须先于追加——存在一帧「标记已为 true、
+     delta 尚未落地」的 store 更新；追加先落地再补回即红。 */
   store.setState({ rawTranslatedIds: {} });
+  let restoreBeforeAppend = false;
+  const unsubRestoreOrder = store.subscribe((st) => {
+    if (st.rawTranslatedIds['201'] === true
+      && !bodyOf(st, '201').translatedContent.includes('<script>alert(1)</script>')) {
+      restoreBeforeAppend = true;
+    }
+  });
   heldB36.ch.onmessage?.({ type: 'delta', data: '<script>alert(1)</script>' });
-  checkNew('(b3-6) 流式在途标记丢失后 delta 自愈补回（未消毒内容不落 HTML 渲染路径）',
-    store.getState().rawTranslatedIds['201'] === true);
+  unsubRestoreOrder();
+  checkNew('(b3-6) 流式在途标记丢失后 delta 自愈补回，且补回先于追加（追加落地时标记已为 true）',
+    restoreBeforeAppend && store.getState().rawTranslatedIds['201'] === true);
   /* 摘要同闸：与渲染风险无关，但后端清除与生成落库互斥（Done 回写会复活已清缓存） */
   S.aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [202] };
   store.getState().summarizeEntry('202');
@@ -408,6 +418,54 @@ export async function run(ctx) {
   checkNew('(b3-6) 摘要在途时清除同样被拒绝',
     clearSummaryWhileStreaming === false
     && S.invokeCalls.filter((c) => c.cmd === 'ai_clear_cache').length === 0);
+
+  /* 跨 kind（审计 P2）：译文失败留半截（「半截+标记」成对保留的重试语义）后
+     清除 summary——summary 清除不得触碰译文侧未消毒标记，否则无后续 delta 的
+     未消毒半截长期滞留 Timeline 的 HTML 渲染路径（持续态，非竞态窗口）。 */
+  await bootFixture();
+  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
+  store.getState().translateEntry('201');
+  await nTick(5);
+  const heldHalf = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
+  heldHalf.ch.onmessage?.({ type: 'delta', data: '<b>半截' });
+  heldHalf.ch.onmessage?.({ type: 'error', data: '限流' });
+  await nTick(10);
+  checkNew('(b3-6) 前置：译文流错误留半截且未消毒标记保留（失败重试语义）',
+    store.getState().rawTranslatedIds['201'] === true
+    && bodyOf(store.getState(), '201').translatedContent === '<b>半截');
+  S.invokeCalls.length = 0;
+  const clearedSummaryCrossKind = await store.getState().clearAiProduct('201', 'summary');
+  checkNew('(b3-6) 跨 kind：清除 summary 不删译文的未消毒标记（半截不得转入 HTML 渲染路径）',
+    clearedSummaryCrossKind === true
+    && S.invokeCalls.filter((c) => c.cmd === 'ai_clear_cache').length === 1
+    && store.getState().rawTranslatedIds['201'] === true
+    && bodyOf(store.getState(), '201').translatedContent === '<b>半截');
+
+  /* 回读尾巴与清除竞态（审计 P3-3）：done 后的安全回读不在 trackAiRequest 链上
+     （invoke settle 即摘除在途，b1-2 契约），硬闸放行的清除完成后，迟到回读
+     携清除前行数据会复活已清产物。清除成功后推进该 (条目, 产物) 的请求代次 →
+     旧回读整体丢弃（无 XSS：回读内容本就是 DB 消毒版）。 */
+  await bootFixture();
+  const clearRaceReadback = deferred();
+  S.detailImpl = () => clearRaceReadback.promise.then(() => mkRow({ id: 201, content_html: '<p>详情</p>', translated_content: '<p>清除前旧译文</p>', translated_sig: 'sig-old' }));
+  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [], deferIds: [201] };
+  store.getState().translateEntry('201');
+  await nTick(5);
+  const heldClearRace = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
+  heldClearRace.ch.onmessage?.({ type: 'done' });
+  heldClearRace.resolve(''); // invoke settle：在途摘除（硬闸放行），回读仍挂起
+  await nTick(5);
+  S.invokeCalls.length = 0;
+  const clearedRace = await store.getState().clearAiProduct('201', 'translation');
+  checkNew('(b3-6) 回读挂起时硬闸放行清除：清除真实成功（在途表只认 invoke settle）',
+    clearedRace === true
+    && S.invokeCalls.filter((c) => c.cmd === 'ai_clear_cache').length === 1);
+  clearRaceReadback.resolve(); // 迟到回读落地
+  await nTick(20);
+  checkNew('(b3-6) 清除后迟到回读不得复活已清产物（清除推进代次，回读整体丢弃）',
+    bodyOf(store.getState(), '201').translatedContent === ''
+    && store.getState().rawTranslatedIds['201'] === undefined
+    && (store.getState().entries.find((a) => a.id === '201')?.translatedSig ?? null) === null);
   await bootFixture();
 
   /* ---------- (b3-4) stale：如实标注 + 重新生成真实发起（不再被旧产物短路） ---------- */
