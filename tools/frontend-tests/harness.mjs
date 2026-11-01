@@ -538,7 +538,9 @@ async function resetStore(extra) {
     activeContentLayout: 'article', activeViewFilter: 'all', activeFeedFilter: 'all',
     timelineFilter: 'all', timelineSort: 'newest',
     activeArticleId: null, isShowingTranslatedProse: false, isRawRenderMode: false, showFulltext: false,
-    summarizingIds: {}, translatingIds: {}, translating: false, summaryErrors: {}, translateErrors: {},
+    /* rawTranslatedIds 与 translatingIds 同批复位（与 slice 初始值一致）——
+       流式半截用例留下的未消毒标记不得跨夹具存活（b3-6 暴露）。 */
+    summarizingIds: {}, translatingIds: {}, rawTranslatedIds: {}, translating: false, summaryErrors: {}, translateErrors: {},
     /* OPT-013 B3：校验状态缓存是 store 状态（five-state 显示的数据源）——随夹具
        复位，避免上一用例的验证结论/分段进度被下一个用例读到。 */
     aiStatusById: {},

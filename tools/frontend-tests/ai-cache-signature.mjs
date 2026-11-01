@@ -374,6 +374,42 @@ export async function run(ctx) {
     && !store.getState().toasts.some((t) => t.text.includes('继续')));
   await bootFixture();
 
+  /* ---------- (b3-6) 清除×流式互斥：在途生成期间清除被拒绝（XSS 窗口防线） ----------
+     clearAiProduct 先 await 后端再删 rawTranslatedIds；流式在途时这个 await 之后的
+     删除会让后续未消毒 delta 走 dangerouslySetInnerHTML。修后：该 (条目, 产物) 有
+     在途请求（验签+生成整链）即拒绝清除；即便标记被任何路径丢掉，下一个 delta
+     也会自愈补回（不变量：凡 translatedContent 可能含未消毒 delta，标记必为 true）。 */
+  S.aiTr = { deltas: [], error: null, reject: null, finish: true, holdIds: [201] };
+  store.getState().translateEntry('201');
+  await nTick(5);
+  store.setState({ toasts: [] });
+  S.invokeCalls.length = 0;
+  const clearWhileStreaming = await store.getState().clearAiProduct('201', 'translation');
+  checkNew('(b3-6) 翻译在途时清除被拒绝：不调后端、未消毒标记保留、提示先等完成或停止',
+    clearWhileStreaming === false
+    && S.invokeCalls.filter((c) => c.cmd === 'ai_clear_cache').length === 0
+    && store.getState().rawTranslatedIds['201'] === true
+    && store.getState().toasts[store.getState().toasts.length - 1]?.text === '生成中，先等完成或停止后再清除');
+  const heldB36 = S.heldAi.find((h) => h.cmd === 'ai_translate' && h.id === 201);
+  heldB36.ch.onmessage?.({ type: 'delta', data: '<p>在途半截' });
+  checkNew('(b3-6) 拒绝清除后流式继续：半截仍按纯文本口径（标记未被清除动作打掉）',
+    store.getState().rawTranslatedIds['201'] === true);
+  /* 自愈侧：标记被任何路径丢掉（模拟清除 await 竞态残留）后，下一个 delta 补回 */
+  store.setState({ rawTranslatedIds: {} });
+  heldB36.ch.onmessage?.({ type: 'delta', data: '<script>alert(1)</script>' });
+  checkNew('(b3-6) 流式在途标记丢失后 delta 自愈补回（未消毒内容不落 HTML 渲染路径）',
+    store.getState().rawTranslatedIds['201'] === true);
+  /* 摘要同闸：与渲染风险无关，但后端清除与生成落库互斥（Done 回写会复活已清缓存） */
+  S.aiSum = { deltas: [], error: null, reject: null, finish: true, holdIds: [202] };
+  store.getState().summarizeEntry('202');
+  await nTick(5);
+  S.invokeCalls.length = 0;
+  const clearSummaryWhileStreaming = await store.getState().clearAiProduct('202', 'summary');
+  checkNew('(b3-6) 摘要在途时清除同样被拒绝',
+    clearSummaryWhileStreaming === false
+    && S.invokeCalls.filter((c) => c.cmd === 'ai_clear_cache').length === 0);
+  await bootFixture();
+
   /* ---------- (b3-4) stale：如实标注 + 重新生成真实发起（不再被旧产物短路） ---------- */
   await bootFixture();
   S.backendRows = BASE_ROWS.map((r) => (r.id === 201 ? { ...r, translated_content: '<p>旧译文</p>', translated_sig: 'sig-old' } : r));

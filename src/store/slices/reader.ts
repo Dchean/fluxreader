@@ -211,6 +211,12 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       isShowingTranslatedProse: false,
       isRawRenderMode: false,
       showFulltext: false,
+      /* 全局 translating 单布尔不跨文章继承：在途请求的终态复位虽已无条件执行，
+         但复位前打开新文章会让自动翻译触发（!st.translating）被他篇在途误拦
+         （effect 依赖不含 translating，错过即整篇不再自动翻译）；同篇在途仍由
+         translatingIds[id] 守卫，复位不构成双发窗口。
+         — 见 .agents/notes/implemented/bug-fix/2026-11-01-translating终态复位与全局单布尔.md */
+      translating: false,
     }));
     /* 打开文章：触发「智能全文」判定（摘要型源才提取原文；列表卡片水合不触发） */
     get().ensureArticleContent(id, { extractFulltext: true });
@@ -445,6 +451,8 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       isShowingTranslatedProse: false,
       isRawRenderMode: false,
       showFulltext: false,
+      /* 关闭阅读器同样不遗留他篇在途的全局布尔（与 openArticle 同口径，同 Note） */
+      translating: false,
     })),
 
   /** 手动全文提取：Readability 拉原文网页存 content（TASK-122：落 bodyById）；
