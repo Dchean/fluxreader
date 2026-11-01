@@ -12,6 +12,11 @@ on:
   pull_request:
     branches: [main]
 
+# CI 的 GITHUB_TOKEN 只被 checkout 消费（只读）：显式收口最小权限，
+# 与 release.yml 的 job 级 contents: write 形成分域。
+permissions:
+  contents: read
+
 jobs:
   frontend:
     name: Type-check, lint & build frontend
