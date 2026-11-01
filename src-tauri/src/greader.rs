@@ -105,9 +105,10 @@ pub struct CategoryRef {
 }
 
 /// 标签列表（tag/list 响应）
+/// Note: 缺 `tags` 是协议错误，显式空数组才代表权威空集 — 见
+/// `.agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md`
 #[derive(Debug, Deserialize)]
 pub struct TagListResponse {
-    #[serde(default)]
     pub tags: Vec<TagRef>,
 }
 
@@ -619,6 +620,20 @@ impl GReaderClient {
         let r: ItemContentsResponse = self
             .post_form("/reader/api/0/stream/items/contents?output=json", &form)
             .await?;
+        // 协议对每个 i 参数逐条返回（重复 id 逐条重复）：返回条数少于请求数
+        // （含空 items）是服务端截断/异常，不是「权威空集」——静默当成功会把
+        // 未取到的窗口伪装成已同步（失败 ≠ 空集合），调用方按块失败保留游标。
+        // Note: 正文缺条判协议错误 — 见 .agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md
+        if r.items.len() < ids.len() {
+            return Err(AppError::new(
+                "protocol",
+                format!(
+                    "stream/items/contents 响应条数不足：请求 {} 条，返回 {} 条",
+                    ids.len(),
+                    r.items.len()
+                ),
+            ));
+        }
         Ok(r.items)
     }
 

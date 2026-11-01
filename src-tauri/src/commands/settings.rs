@@ -59,6 +59,7 @@ const PROTECTED_SETTING_KEYS: &[&str] = &[
     "sync_generation",
     "sync_last_sync",
     "sync_last_entry_id",
+    "sync_last_disconnected_account_key",
     "fever_history_state",
     "endpoint_resolved",
     "pending_connection_config",

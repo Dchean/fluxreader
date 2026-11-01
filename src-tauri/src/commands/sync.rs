@@ -361,7 +361,19 @@ fn commit_account_settings(
         db::clear_zero_binding_discovery_attempts(&tx)?;
         db::clear_binding_incomplete_attempts(&tx)?;
     } else if plan.old_was_empty {
-        // 首连（此前无凭据）：游标/历史未知状态归零，从全量开始。
+        // 无凭据的保存 = 首连或「断开后重连」。断开时刻刻意保留的墓碑属于
+        // 断开前的身份：本次连接身份不同则一并清理（对齐 identity_changed
+        // 路径，旧账号删除意图不得压制新账号同 URL 订阅——F05）；重连同一
+        // 身份则保留（TASK-055 防复活）。身份判定复用 account_key 单点指纹。
+        // Note: 断开→新身份清理墓碑 — 见 .agents/notes/implemented/bug-fix/2026-11-01-断开重连墓碑身份见证.md
+        if let Some(last_key) = db::get_setting(&tx, LAST_DISCONNECTED_ACCOUNT_KEY)? {
+            let new_key = crate::sync::account_key(&plan.protocol, &plan.endpoint, &plan.username);
+            if last_key != new_key {
+                log::info!("sync: 断开前账号与新身份不同，清理遗留订阅删除墓碑");
+                db::clear_feed_tombstones(&tx)?;
+            }
+        }
+        // 游标/历史未知状态归零，从全量开始。
         db::set_setting_with(&tx, "sync_last_sync", "0", encrypt)?;
         db::set_setting_with(&tx, "sync_last_entry_id", "0", encrypt)?;
         db::reset_fever_history_state(&tx)?;
@@ -409,6 +421,27 @@ fn commit_account_settings(
     Ok(unbound_local)
 }
 
+/// 断开时刻的账号身份见证键（settings 明文；值 = [`crate::sync::account_key`]
+/// 指纹）。commit_disconnect 写入，供下次「无凭据保存」判定新身份是否不同。
+const LAST_DISCONNECTED_ACCOUNT_KEY: &str = "sync_last_disconnected_account_key";
+
+/// 断开时刻的账号身份指纹。断开是损坏密文的恢复路径，绝不触碰
+/// `greader_password`（不做 DPAPI 解密）——只按协议 + 端点 + 用户名拼
+/// [`crate::sync::account_key`]。未配置 → None。
+fn disconnected_account_key(conn: &rusqlite::Connection) -> AppResult<Option<String>> {
+    let endpoint = db::get_setting(conn, "greader_endpoint")?.unwrap_or_default();
+    let username = db::get_setting(conn, "greader_username")?.unwrap_or_default();
+    if endpoint.trim().is_empty() || username.trim().is_empty() {
+        return Ok(None);
+    }
+    let protocol = db::get_setting(conn, "sync_protocol")?
+        .filter(|p| p == "fever" || p == "greader")
+        .unwrap_or_else(|| "greader".to_string());
+    Ok(Some(crate::sync::account_key(
+        &protocol, &endpoint, &username,
+    )))
+}
+
 /// 断开提交事务内核（OPT-014 R1；OPT-006 代际）：服务端数据清理 + 凭据/游标
 /// 清空 + Fever 历史回 Unknown + 端点缓存清除 + 代际推进在同一短事务内全有全无。
 /// `encrypt` 注入仅本模块单测使用。
@@ -425,6 +458,11 @@ fn commit_disconnect(
             "staleAccountSave",
             "账号配置已在其他窗口变更，断开未执行（请刷新后重试）",
         ));
+    }
+    // 断开时刻记录账号身份指纹（凭据仍在场）：墓碑仍刻意保留（TASK-055），
+    // 该见证只供下次「无凭据保存」判定是否换了身份。
+    if let Some(key) = disconnected_account_key(&tx)? {
+        db::set_setting(&tx, LAST_DISCONNECTED_ACCOUNT_KEY, &key)?;
     }
     let r = db::purge_remote_data_in(&tx)?;
     db::set_setting_with(&tx, "greader_endpoint", "", encrypt)?;
@@ -1920,6 +1958,80 @@ mod account_commit_tests {
         )
         .unwrap();
         assert!(p.identity_changed && !p.old_was_empty && !p.password_changed);
+    }
+
+    /// 断开→重连的墓碑身份见证：重连同身份保留墓碑（TASK-055）；断开后连接
+    /// 不同身份 → 清理 feed 墓碑（对齐 identity_changed 路径）。带 key 的分类
+    /// 墓碑按 v24 隔离保留——异账号本就不互相压制，也不互删。
+    /// 判别力：删掉断开侧的见证写入或 old_was_empty 分支的比对，末段断言即红。
+    #[test]
+    fn disconnect_reconnect_clears_feed_tombstones_only_for_new_identity() {
+        let mut conn = conn();
+        save_account_for_test(
+            &mut conn,
+            "greader",
+            "http://a.example",
+            "user-a",
+            "pw-a",
+            "http://a.example",
+        )
+        .unwrap();
+        db::add_feed_tombstone(&conn, "http://a.example/feed.xml").unwrap();
+        let key_a = crate::sync::account_key("greader", "http://a.example", "user-a");
+        db::add_folder_tombstone(&conn, &key_a, "A已删").unwrap();
+
+        disconnect_for_test(&mut conn).unwrap();
+        assert_eq!(
+            db::get_setting(&conn, LAST_DISCONNECTED_ACCOUNT_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(key_a.as_str()),
+            "断开必须记录断开前身份指纹"
+        );
+
+        // 重连同身份（端点等价形态经 normalized_server_root 归并）：墓碑保留。
+        save_account_for_test(
+            &mut conn,
+            "greader",
+            "http://a.example/",
+            "user-a",
+            "pw-a2",
+            "http://a.example",
+        )
+        .unwrap();
+        assert!(
+            !db::feed_tombstones(&conn).unwrap().is_empty(),
+            "重连同一身份不得清理墓碑（TASK-055 防复活）"
+        );
+
+        // 断开后连接不同身份：feed 墓碑清理；A 的分类墓碑按 key 隔离保留。
+        disconnect_for_test(&mut conn).unwrap();
+        save_account_for_test(
+            &mut conn,
+            "greader",
+            "http://a.example",
+            "user-b",
+            "pw-b",
+            "http://a.example",
+        )
+        .unwrap();
+        assert!(
+            db::feed_tombstones(&conn).unwrap().is_empty(),
+            "断开→新身份必须清理遗留订阅墓碑（否则 A 的删除意图压制 B 的同 URL 订阅）"
+        );
+        let key_b = crate::sync::account_key("greader", "http://a.example", "user-b");
+        let left = db::folder_tombstones(&conn).unwrap();
+        assert!(
+            left.iter()
+                .any(|t| t.account_key == key_a && t.label == "A已删"),
+            "分类墓碑按 key 隔离保留（对 A 的 pull 仍防复活）"
+        );
+        assert!(
+            !left
+                .iter()
+                .any(|t| t.account_key == key_b && t.label == "A已删"),
+            "A 的分类墓碑对 B 不生效（folder_tombstones_for 按 key 过滤）"
+        );
     }
 }
 

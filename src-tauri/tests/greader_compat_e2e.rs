@@ -1640,6 +1640,77 @@ async fn missing_item_contents_field_keeps_cursor_and_local_star() {
     let _ = std::fs::remove_file(&tmp);
 }
 
+/// tag/list 200 但缺 `tags` 字段与缺 `subscriptions` 同口径：协议错误、不当
+/// 空集。分类墓碑的「远端缺席回收」因此不被异常 200 触达——墓碑原样保留。
+#[tokio::test]
+async fn tag_list_missing_tags_field_fails_closed_and_keeps_folder_tombstones() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.set_read_override("tag/list", "{}");
+    let (db, tmp) = seed_sync_db("opt019_gr_tag_list_missing_tags", &srv);
+    {
+        let conn = db.lock().await;
+        let key = sync::current_account(&conn)
+            .unwrap()
+            .expect("已配置账号")
+            .key;
+        db::add_folder_tombstone(&conn, &key, "已消失分类").unwrap();
+    }
+
+    let report = sync::feeds_phase(&db, &reqwest::Client::new())
+        .await
+        .expect("feeds phase completes with a reported protocol error");
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("拉取订阅失败") && e.contains("tag/list")),
+        "缺 tags 必须可见地失败：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert!(
+        db::folder_tombstones(&conn)
+            .unwrap()
+            .iter()
+            .any(|t| t.label == "已消失分类"),
+        "缺 tags 的异常 200 不得触达空集回收路径（墓碑被误清）"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// 正文块返回条数少于请求数（含 0）与缺 items 同口径：协议错误、按块失败
+/// 计数、游标不推进——不得把截断响应当成「本轮无新条目」。
+#[tokio::test]
+async fn item_contents_short_response_fails_chunk_and_keeps_cursor() {
+    let srv = StrictServer::start(Mode::Miniflux).await;
+    srv.add_entry(1, 200, "A"); // published 200 > ot 100：落在增量窗口内
+    srv.set_read_override("stream/items/contents", r#"{"items": []}"#);
+    let (db, tmp) = seed_sync_db("opt019_gr_short_item_contents", &srv);
+    {
+        let conn = db.lock().await;
+        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        db::set_last_sync_ts(&conn, 100).unwrap();
+    }
+
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
+        .await
+        .expect("states phase completes with a reported protocol error");
+    assert!(
+        report.errors.iter().any(|e| e.contains("拉取条目正文失败")),
+        "短响应必须按块失败可见：{:?}",
+        report.errors
+    );
+    let conn = db.lock().await;
+    assert_eq!(
+        db::last_sync_ts(&conn).unwrap(),
+        100,
+        "正文块失败不得推进 last_sync_ts（下一轮重拉同一窗口）"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
 /// 零远端 feed 绑定的 light sync 不请求条目/权威状态，不推进游标；本地文章
 /// 与该空绑定事实无关，必须原样保留。
 #[tokio::test]
@@ -2072,6 +2143,16 @@ async fn greader_schema_and_json_decode_failures_use_protocol_error_code() {
     assert_eq!(err.code, "protocol", "{err}");
 
     srv.set_read_override("stream/items/contents", "{}");
+    let err = client.item_contents(&[1]).await.unwrap_err();
+    assert_eq!(err.code, "protocol", "{err}");
+
+    // 缺 tags 字段与缺 subscriptions 同口径：异常 200 不得当权威空集。
+    srv.set_read_override("tag/list", "{}");
+    let err = client.tags().await.unwrap_err();
+    assert_eq!(err.code, "protocol", "{err}");
+
+    // 非空请求返回 items 数量少于请求数（含 0）→ 协议错误，不是空集成功。
+    srv.set_read_override("stream/items/contents", r#"{"items": []}"#);
     let err = client.item_contents(&[1]).await.unwrap_err();
     assert_eq!(err.code, "protocol", "{err}");
 }
