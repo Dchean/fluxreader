@@ -3,6 +3,7 @@ import { useAppStore, CONTENT_LAYOUTS, LAYOUT_NAMES } from '../store';
 import { api, articleRowToEntry } from '../lib/api';
 import { Icons, LayoutIcon } from './icons';
 import { ModalOverlay, FluxDropdown, SwitchInline, AiModeSelect } from './primitives';
+import { useFocusTrap } from './useFocusTrap';
 import { LAYOUT_NO_AI } from './settings/shared';
 import { normalizeFeedAiMode } from '../types';
 import type { ArticleEntry, ContentLayoutType, FeedAiMode, FeedItem } from '../types';
@@ -29,7 +30,7 @@ export function SearchModal() {
   const closeSearch = useAppStore((s) => s.closeSearch);
 
   return (
-    <ModalOverlay open={searchOpen} onClose={closeSearch} contentWidth={580}>
+    <ModalOverlay open={searchOpen} onClose={closeSearch} contentWidth={580} ariaLabel="搜索与命令面板">
       <SearchModalBody key={String(searchOpen)} onClose={closeSearch} />
     </ModalOverlay>
   );
@@ -325,29 +326,23 @@ export function Lightbox() {
   const lightboxUrl = useAppStore((s) => s.lightboxUrl);
   const lightboxEntryId = useAppStore((s) => s.lightboxEntryId);
   const closeLightbox = useAppStore((s) => s.closeLightbox);
-  /* TASK-100 B（UI P2-7 最小实现）：打开时焦点移入灯箱容器（tabIndex=-1），
-     关闭时归还触发元素焦点。此前打开态焦点仍留在触发按钮上，Tab 会游走到
-     背后内容，且关闭后焦点落回 body 而非触发元素。 */
   const overlayRef = useRef<HTMLDivElement>(null);
-  const restoreRef = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    if (lightboxUrl) {
-      restoreRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      overlayRef.current?.focus({ preventScroll: true });
-    } else if (restoreRef.current) {
-      restoreRef.current.focus({ preventScroll: true });
-      restoreRef.current = null;
-    }
-  }, [lightboxUrl]);
+  /* 同 ModalOverlay：焦点移入/归还与 Tab 循环由共享 useFocusTrap 提供
+     （灯箱内无 tabbable 元素 → Tab 焦点钉在容器上，不逃逸到背景）。 */
+  const { onTrapKeyDown } = useFocusTrap(!!lightboxUrl, overlayRef);
   return (
     <div
       ref={overlayRef}
       tabIndex={-1}
+      role="dialog"
+      aria-modal="true"
+      aria-label="图片预览"
       className={`modal-overlay lightbox-overlay ${lightboxUrl ? 'open' : ''}`}
       /* 同 ModalOverlay：外层常驻 DOM，关闭时只切类名，
          故必须靠 inert 让关闭态不可聚焦（见 REQ-047）。 */
       inert={!lightboxUrl}
       onClick={closeLightbox}
+      onKeyDown={onTrapKeyDown}
     >
       {/* 大图：共享 CoverImage（按 imageProxy 判定代理/直连；失败出占位，点击/Esc 关闭不变） */}
       {lightboxUrl && (
@@ -368,6 +363,7 @@ export function NewCategoryModal() {
     <ModalOverlay
       open={newCategoryModalOpen}
       onClose={() => closeMiniModal('newCategory')}
+      ariaLabel="新建订阅分类"
     >
       <div className="mini-dialog">
         <div className="mini-dialog-title">新建订阅分类</div>
@@ -426,7 +422,7 @@ export function AddFeedModal() {
 
   /* 每次打开重挂载（key），初始值即打开瞬间的目标分类 */
   return (
-    <ModalOverlay open={addFeedModalOpen} onClose={() => closeMiniModal('addFeed')}>
+    <ModalOverlay open={addFeedModalOpen} onClose={() => closeMiniModal('addFeed')} ariaLabel="添加订阅源">
       <AddFeedModalBody
         key={addFeedTargetCatId + String(addFeedModalOpen)}
         initialCatId={addFeedTargetCatId || categories[0]?.id || ''}
@@ -586,7 +582,7 @@ export function EditFeedModal() {
   const binding = useAppStore((s) => (s.editFeedTargetId ? s.feedIndex.get(s.editFeedTargetId) ?? null : null));
 
   return (
-    <ModalOverlay open={open} onClose={() => closeMiniModal('editFeed')}>
+    <ModalOverlay open={open} onClose={() => closeMiniModal('editFeed')} ariaLabel="编辑订阅源">
       {binding && (
         <EditFeedModalBody
           key={targetId + String(open)}
@@ -738,7 +734,7 @@ export function RenameCategoryModal() {
   const cat = useAppStore((s) => s.categories.find((c) => c.id === s.renameCatTargetId) ?? null);
 
   return (
-    <ModalOverlay open={open} onClose={() => closeMiniModal('renameCat')}>
+    <ModalOverlay open={open} onClose={() => closeMiniModal('renameCat')} ariaLabel="重命名分类">
       {cat && <RenameCatModalBody key={targetId + String(open)} initialName={cat.name} onCancel={() => closeMiniModal('renameCat')} onSubmit={(name) => { renameCategory(targetId, name); closeMiniModal('renameCat'); }} />}
     </ModalOverlay>
   );
@@ -794,7 +790,7 @@ export function CloseAskDialog() {
   const [remember, setRemember] = useState(true);
 
   return (
-    <ModalOverlay open={visible} onClose={() => answerCloseAsk('tray', remember)}>
+    <ModalOverlay open={visible} onClose={() => answerCloseAsk('tray', remember)} ariaLabel="关闭 FluxReader">
       <div className="mini-dialog">
         <div className="mini-dialog-title">关闭 FluxReader</div>
         <div className="mini-dialog-hint" style={{ marginTop: 0 }}>

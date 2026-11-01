@@ -36,3 +36,20 @@ export function mergePromptsOnly(persisted: string | null, prompts: PromptFields
     translatePrompt: prompts.translatePrompt,
   });
 }
+
+/* 卡内读改写串行化：AI 配置的三个写入口（AiTab 的 testAndSave / savePrompts /
+   selectModel）共用一条模块级在途链。前序写完成后，队列里的后写者才执行——
+   执行时**重新读取**库内最新配置、只重放自己的字段变更（mergeConfigFields），
+   并发时不再发生「后完成者用旧快照整包覆盖先写者」。
+   Note: 取舍与替代方案 — 见 .agents/notes/implemented/bug-fix/2026-11-01-AI配置读改写卡内串行化.md */
+let aiConfigWriteChain: Promise<void> = Promise.resolve();
+
+/** 排入 AI 配置写链：返回 op 自身的 promise（失败向调用方透传，不阻断后续写入）。 */
+export function enqueueAiConfigWrite<T>(op: () => Promise<T>): Promise<T> {
+  const run = aiConfigWriteChain.then(op, op);
+  aiConfigWriteChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
