@@ -423,7 +423,7 @@ async fn local_change_in_one_field_does_not_block_the_other_field() {
     );
 }
 
-/// 负例③：新条目入库后立即本地变更，同轮后续（第二正文块 + 权威集合对账）
+/// 负例③：新条目入库后立即本地变更，同轮后续（后续正文批 + 权威集合对账）
 /// 也受保护——版本快照在该条目入库时记录，本地写入把版本推过它。
 #[tokio::test]
 async fn local_change_after_new_insert_survives_rest_of_round() {
@@ -432,10 +432,10 @@ async fn local_change_after_new_insert_survives_rest_of_round() {
         .await
         .expect("feeds phase binds feed/10");
 
-    // 150 条：reading-list 一页列举（<1000），正文分两块（100 + 50）。
-    // 目标条目落在第一块。
+    // 400 条：reading-list 一页列举（<1000），正文分四块（100×4）。
+    // 目标条目（下标 0）落在块 1。
     let target_url = "https://example.com/many/0";
-    for i in 0..150 {
+    for i in 0..400 {
         server.add_entry_ret(
             10,
             &format!("https://example.com/many/{i}"),
@@ -445,17 +445,23 @@ async fn local_change_after_new_insert_survives_rest_of_round() {
         );
     }
 
-    // 屏障：第二块正文的响应在途挂起（第一块已合并完成）
-    let barrier = server.arm_contents_barrier(2);
+    // 屏障：批 2 的 contents 请求在途挂起。W3-2 有界并发后正文拉取是
+    // 「整批拉完（并发 3）→ 顺序合并 → 下一批」：批 1 = 块 1-3、批 2 = 块 4，
+    // contents 屏障按**请求到达序**计数，第 4 个请求（批 2 唯一请求）只在
+    // 批 1 全部合并完成后才发出——停靠时刻即「target 已随批 1 入库、本轮
+    // 其余部分（批 2 + 权威集合对账）未跑」的确定性窗口。旧串行流下
+    // 「第 2 个请求到达」曾等价于「块 1 已合并」，批内并发后该等价失效，
+    // 屏障同步点必须锚定批边界（契约见 2026-11-01 W3 Note）。
+    let barrier = server.arm_contents_barrier(4);
     let db2 = db.clone();
     let http2 = http.clone();
     let task = tokio::spawn(async move { sync::states_phase(&db2, &http2, false).await });
     barrier.arrived.await.expect("屏障已停靠");
 
-    // 目标条目已在第一块入库；立即本地收藏 + 模拟推送确认清队
+    // 目标条目已随批 1 入库；立即本地收藏 + 模拟推送确认清队
     let aid = article_id_by_url(&db, target_url)
         .await
-        .expect("目标条目已随第一块入库");
+        .expect("目标条目已随批 1（块 1-3）入库");
     {
         let conn = db.lock().await;
         db::set_starred_with_enqueue(&conn, aid, true).unwrap();
@@ -475,10 +481,10 @@ async fn local_change_after_new_insert_survives_rest_of_round() {
     );
     assert!(
         status_of(&db, aid).await.1,
-        "新入库后立即本地收藏：同轮后续（第二块 + 对账空 starred 集合）\
+        "新入库后立即本地收藏：同轮后续（批 2 + 对账空 starred 集合）\
          不得回滚——版本快照在入库时记录，本地写入必须使其失效"
     );
-    // 恢复完整窗口的旁证：150 条全部入库
+    // 恢复完整窗口的旁证：400 条全部入库
     let count: i64 = {
         let conn = db.lock().await;
         conn.query_row(
@@ -488,7 +494,7 @@ async fn local_change_after_new_insert_survives_rest_of_round() {
         )
         .unwrap()
     };
-    assert_eq!(count, 150, "本轮两块正文都必须落库");
+    assert_eq!(count, 400, "本轮四块正文都必须落库");
 }
 
 /// 负例④a：GR 匹配映射构建失败**不得空映射假成功**。
