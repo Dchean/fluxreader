@@ -21,6 +21,7 @@ jobs:
   frontend:
     name: Type-check, lint & build frontend
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -59,6 +60,9 @@ jobs:
     # 降级分支（生产环境根本不执行），真正的 Windows 代码路径反而被跳过，
     # 与 release workflow（windows-latest）平台不一致。故 rust job 固定在 Windows。
     runs-on: windows-latest
+    # Note: 基线约 9 分钟；不设上限时挂起的测试会占满 360 分钟默认超时。
+    # 45 分钟 = 5 倍基线余量，同时把病态挂起压缩为快速失败并可取日志。
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         id: checkout

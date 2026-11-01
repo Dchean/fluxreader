@@ -783,14 +783,26 @@ async fn exec_subscribe_item(
                 }
             }
             Ok(None) => {
-                match db::enqueue_unsubscribe(
-                    &conn,
-                    session.generation,
-                    key,
-                    &item.feed_url,
-                    Some(rid),
-                    None,
-                ) {
+                // 结转退订 = enqueue_unsubscribe 内部的 DELETE pending + DELETE
+                // add_feed 队项 + INSERT 退订三写。崩溃窗口会留下「旧创建意图
+                // 已删、退订意图未落」的半程状态（远端订阅永久无人退订）。全库
+                // 其余调用方均在事务内执行（commands/folders.rs 退订命令等），
+                // 此处对齐同一口径；开事务/入队/提交任一步失败按既有软失败处理
+                // （warn + Skipped，事务对象 drop 自动回滚）。
+                let carried = (|| -> AppResult<bool> {
+                    let tx = conn.unchecked_transaction()?;
+                    let queued = db::enqueue_unsubscribe(
+                        &tx,
+                        session.generation,
+                        key,
+                        &item.feed_url,
+                        Some(rid),
+                        None,
+                    )?;
+                    tx.commit()?;
+                    Ok(queued)
+                })();
+                match carried {
                     Ok(queued) => log::warn!(
                         "sync: 订阅 {} 本地已删除，远端已建 id {rid} 结转退订（queued={queued}）",
                         item.feed_url

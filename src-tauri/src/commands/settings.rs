@@ -93,7 +93,11 @@ pub fn apply_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> App
             .and_then(|v| v.get("smartDedup").and_then(|b| b.as_bool()))
             .unwrap_or(false);
         if was_on && !now_on {
-            let _ = db::clear_dedup_tombstones(conn);
+            // 审计（2026-11-01）：失败静默会让「关闭 smartDedup」看起来成功，
+            // 墓碑却仍在拦截重复文章——至少在日志里可见，行为其余不变。
+            if let Err(e) = db::clear_dedup_tombstones(conn) {
+                log::warn!("settings: 关闭 smartDedup 时清去重墓碑失败: {e}");
+            }
         }
     }
     db::set_setting(conn, key, value)

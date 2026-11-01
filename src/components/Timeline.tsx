@@ -175,6 +175,9 @@ export function Timeline() {
     overscan: 8,
     getItemKey: (index) => items[index]?.id ?? index,
     enabled: activeContentLayout !== 'image',
+    /* 与画廊实例（下方）同口径：卡片测量回调不走 flushSync 强制同步提交。
+       Note: 依据与取舍见同文件画廊实例注释与 docs/performance.md。 */
+    useFlushSync: false,
   });
   /* 画廊有界渲染：lanes 列模型 + 垂直虚拟化。可见范围 = 每列视口覆盖条数 +
      两端 overscan，挂载数与条目总数无关（窗口上界推导、列宽公式与「为什么
@@ -582,9 +585,19 @@ export function Timeline() {
         onScroll={handleScroll}
       >
         {items.length === 0 && (
-          <div className="timeline-empty-state">
-            {activeViewFilter === 'starred' ? '暂无收藏内容' : activeViewFilter === 'today' ? '今天暂无新内容' : '暂无匹配内容'}
-          </div>
+          /* 空态/加载态不混同（审计卡2-4）：装载在途且列表为空时不出
+             「暂无匹配内容」——数据未落地就宣判「没有内容」是假空态；改渲染
+             加载形态，数据落地后按真值恢复（空且已到底 → 文案；有数据 → 列表）。
+             此时哨兵同为 loading 形态，这里就不再重复渲染哨兵 spinner。 */
+          articlesLoading ? (
+            <div className="timeline-empty-state" role="status" aria-label="加载中">
+              <span className="load-more-spinner" aria-hidden="true" />
+            </div>
+          ) : (
+            <div className="timeline-empty-state">
+              {activeViewFilter === 'starred' ? '暂无收藏内容' : activeViewFilter === 'today' ? '今天暂无新内容' : '暂无匹配内容'}
+            </div>
+          )
         )}
 
         {/* 画廊（瀑布流多列）：lanes 列模型 + 垂直虚拟化——只渲染窗口内卡片
@@ -652,7 +665,8 @@ export function Timeline() {
             真正到底（空且已到底）时不渲染，避免「没有更多了」与「暂无匹配内容」重复。
             TASK-094（REQ-107）：容器不可滚动时「滚动加载更多」不可执行，改为可点击的
             「加载更多」按钮（原生 button：键盘可聚焦，Enter/空格原生触发）。 */}
-        {sentinel !== 'hidden' && (
+        {/* 空列表且装载在途时，加载形态已由空态区渲染（见上），这里让位避免同屏双 spinner。 */}
+        {sentinel !== 'hidden' && !(items.length === 0 && articlesLoading) && (
           <div className="timeline-load-more">
             {sentinel === 'loading' ? (
               <span className="load-more-spinner" aria-label="加载中" />

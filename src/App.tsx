@@ -72,10 +72,19 @@ export default function App() {
 
   /* ---------- 数据源装载：Tauri 环境从 SQLite 拉全量；浏览器保持 mock ---------- */
   useEffect(() => {
-    /* 设置恢复先于数据装载：主题/视图等在首帧就位，避免闪默认值 */
-    void useAppStore.getState().bootstrapSettings().then(() => {
-      useAppStore.getState().bootstrapFromBackend();
-    });
+    /* 启动装载并行化（审计卡2-5）：原「设置恢复 → 数据装载」串行链的首屏
+       等待是两者之和；现改为同时发起，等待缩为两者较慢者。写集核实：
+       bootstrapSettings 只写 settings 对象与 activeViewFilter/timelineFilter，
+       reloadFromBackend 发起时读的范围快照（activeFeedFilter/
+       activeContentLayout/timelineSort）都不在其写集内——首读无依赖。但
+       **落库有顺序依赖**：数据快照落地时读 settings.smartDedup（scopeCounts
+       快照）、完成时读 activeViewFilter（决定筛选视图补拉），且设置接受必须
+       先于首帧渲染（主题不闪默认值）。故按「首读并行、落库有序」实现：
+       设置恢复由 bootstrapFromBackend 在数据查询发起的同时并行启动，
+       reloadFromBackend 在落地前等待其接受完成（等待后复核查询代际，机制见
+       bootstrap.ts 的启动落库门）。splash 门控不变：仍由数据装载落地关闭
+       dataLoading，设置恢复不参与门控。 */
+    void useAppStore.getState().bootstrapFromBackend();
     /* GitHub 登录态恢复（设备流 token 持久化在 SQLite，启动即还原账户显示） */
     void bootstrapGithubAuth();
   }, []);
@@ -186,6 +195,12 @@ export default function App() {
         return;
       }
       if (e.key === 'Escape') {
+        /* IME 守卫（审计卡2-1，口径同 Overlays 命令面板 Enter 的 isComposing 判）：
+           输入法合成中的 Escape（nativeEvent.isComposing，或 Chromium/WebView2
+           合成期的 keyCode 229）语义是「取消选词」，不得关闭浮层。本分支位于
+           inInput 判断之前，输入框内合成同样会到达这里，故不能依赖焦点守卫。 */
+        // Note: 守卫口径与「为何不全局拦截」 — 见 .agents/notes/implemented/feature/2026-11-02-前端交互正确性与感知体验.md
+        if (e.isComposing || e.keyCode === 229) return;
         /* 浮层从最顶层开始依次关闭。
            TASK-100 U7：补 closeAskVisible——此前 CloseAskDialog 是唯一 Esc 关不掉
            的浮层。关序与视觉层级一致（视觉在上者先关）：确认框 3000（自带 Esc，
@@ -316,7 +331,7 @@ export default function App() {
         <div className={`app-root ${gridClass}`} id="appRoot" style={{ '--list-width': `${effectiveListWidth}px` } as React.CSSProperties}>
           {/* 首屏加载骨架：dataLoading 期间不渲染真实 UI（避免空闪/测试数据闪现） */}
           {dataLoading ? (
-            <div className="app-loading-splash">
+            <div className="app-loading-splash" role="status" aria-label="加载中">
               <div className="app-loading-logo"><img src="/logo.svg" alt="" draggable={false} /></div>
               <div className="app-loading-bar" />
             </div>

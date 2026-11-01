@@ -71,7 +71,7 @@ body {
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-size: 11px;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), color var(--transition-fast);
 }
 
 .win-btn:hover {
@@ -114,7 +114,7 @@ body {
   gap: 8px;
   cursor: pointer;
   color: var(--text-primary);
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
   min-height: 28px;
 }
 
@@ -194,7 +194,7 @@ body {
   align-items: center;
   justify-content: space-between;
   color: var(--text-secondary);
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), color var(--transition-fast);
   gap: 10px;
   white-space: nowrap;
 }
@@ -311,7 +311,7 @@ body {
   padding: 6px 10px;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
   margin: 0 4px 8px;
 }
 
@@ -360,7 +360,7 @@ body {
   color: var(--text-secondary);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
   padding: 0;
 }
 
@@ -525,7 +525,7 @@ body {
   color: var(--text-secondary);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), color var(--transition-fast);
   margin-top: 1px;
   background: transparent;
   border: none;
@@ -747,7 +747,7 @@ body {
   justify-content: center;
   padding: 4px;
   border-radius: 4px;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
 }
 
 .sync-refresh-btn:hover {
@@ -854,7 +854,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast), opacity var(--transition-fast);
   font-family: inherit;
   /* 控件文字单行：容器挤压时按钮宁可换位（父级 flex-wrap）也不折字 */
   white-space: nowrap;
@@ -2160,7 +2160,7 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), color var(--transition-fast);
   background: transparent;
   border: none;
   text-align: left;
@@ -2333,7 +2333,7 @@ body {
   cursor: pointer;
   inset: 0;
   background-color: var(--border-strong);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   border-radius: 20px;
 }
 
@@ -2345,7 +2345,7 @@ body {
   left: 3px;
   bottom: 3px;
   background-color: white;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   border-radius: 50%;
 }
 
@@ -2447,7 +2447,7 @@ body {
   color: var(--text-primary);
   font-family: inherit;
   cursor: pointer;
-  transition: all var(--transition-fast);
+  transition: background-color var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .palette-card-btn:hover {
@@ -3111,17 +3111,19 @@ body {
      等于让本任务要交付的「失败可见」在窄窗口失效。
      保持既有 460px 上限，同时允许收窄到视口内（并给右侧 20px 留位）。 */
   max-width: min(460px, calc(100vw - 40px));
-  transition: bottom 0.25s ease;
+  /* 播放器活跃时的抬升改为 transform 位移：等价于 bottom 24→96 的 72px 差值，
+     过渡不再监听布局属性 */
+  transition: transform 0.25s ease;
 }
 
 body.has-player .toast-layer {
-  bottom: 96px; /* PlayerBar 高度 + 间距 */
+  transform: translateY(-72px); /* PlayerBar 高度 + 间距（原 bottom 96 − 24） */
 }
 
 /* 全屏播放器展开（REQ-004）：迷你栏已隐藏 → toast 回到右下贴底，
    并保持在播放器覆盖层之上（播放器 z-index 140 < toast 500，fix-7） */
 body.has-player-expanded .toast-layer {
-  bottom: 24px;
+  transform: translateY(0);
 }
 
 .toast-pill {
@@ -3137,7 +3139,7 @@ body.has-player-expanded .toast-layer {
   opacity: 0;
   pointer-events: none;
   transform: translateY(12px) scale(0.96);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   text-align: center;
   /* TASK-058：由 `nowrap` 改为可换行。
      原为 `nowrap` + 无宽度约束的右对齐元素 → 长文案向左溢出视口（实测最小宽度下 315px，
@@ -3339,7 +3341,7 @@ body.has-player-expanded .toast-layer {
   font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease;
 }
 
 .ai-retry-btn:hover {
@@ -3609,6 +3611,27 @@ body.has-player-expanded .toast-layer {
 .notif-card .hydrate-retry {
   display: block;
   min-height: 60px;
+  line-height: 1.55;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  text-align: left;
+  text-decoration: underline;
+}
+
+/* Reader 实例的水合同形接入：与 .social-text / .notif-card 同一观感，
+   否则退回 UA 默认按钮且不继承用户字体设置 */
+.reader-active-view .hydrate-placeholder {
+  display: block;
+  line-height: 1.55;
+}
+
+.reader-active-view .hydrate-retry {
+  display: block;
   line-height: 1.55;
   background: none;
   border: none;

@@ -572,7 +572,26 @@ impl GReaderClient {
         n: Option<u32>,
         c: Option<u64>,
     ) -> AppResult<ItemIdsResponse> {
+        self.item_ids_excluding(stream, ot, nt, n, c, None).await
+    }
+
+    /// 拉条目 id，可携带 `xt`（排除 tag 流，GR 官方参数）：条目携带该 tag 即从
+    /// 结果排除，与 `s=` 的正向过滤正交。未读差分用
+    /// `stream=reading-list, xt=user/-/state/com.google/read` 拉当前未读全集。
+    /// `xt=None` 时与 [`Self::item_ids`] 逐字等价（item_ids 即本方法的薄壳）。
+    pub async fn item_ids_excluding(
+        &self,
+        stream: &str,
+        ot: Option<i64>,
+        nt: Option<i64>,
+        n: Option<u32>,
+        c: Option<u64>,
+        xt: Option<&str>,
+    ) -> AppResult<ItemIdsResponse> {
         let mut path = format!("/reader/api/0/stream/items/ids?output=json&s={stream}");
+        if let Some(v) = xt {
+            path.push_str(&format!("&xt={v}"));
+        }
         if let Some(v) = ot {
             path.push_str(&format!("&ot={v}"));
         }

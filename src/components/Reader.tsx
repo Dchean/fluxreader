@@ -410,18 +410,42 @@ export function Reader() {
             {/* 正文：源码/渲染/流式三条路径收口在 ReaderProse（F14/OPT-012）。
                 传参含义：renderHtml 走渲染态（含代理产物），sourceText 走源码态
                 （原始文本，不经代理），isStreamingTranslation 走纯文本。 */}
-            <ReaderProse
-              renderHtml={renderHtml}
-              sourceText={sourceText}
-              isSourceMode={isRawRenderMode}
-              isStreamingTranslation={isShowingTranslatedProse && !!rawStream}
-              style={{
-                fontFamily: settings.fontFamily,
-                fontSize: settings.fontSize,
-                lineHeight: settings.lineHeight / 100,
-              }}
-              onClick={handleProseClick}
-            />
+            {!isShowingTranslatedProse
+              && (body.state === 'loading' || body.state === 'failed' || body.state === 'missing' || body.state === 'unrequested') ? (
+              /* 正文三态（审计卡2-2，与 SocialCard 同构、对照 t114-x1b 回归）：
+                 水合在途/失败/缺失此前直传 ReaderProse（正文整块空白，与卡片
+                 的三态呈现不一致）。failed=内联重试（retryHydration 删记录
+                 重入队）；missing=缺行文案；loading/未请求=加载占位。译文视图
+                 不走本分支（切译文前正文已 ready；译文为空时由 ReaderProse
+                按既有契约呈现。
+                  Note: 为何在调用点分支、译文与空正文的边界 — 见
+                  .agents/notes/implemented/feature/2026-11-02-前端交互正确性与感知体验.md */
+              body.state === 'failed' ? (
+                <button
+                  className="hydrate-retry"
+                  onClick={() => useAppStore.getState().retryHydration(art.id)}
+                >
+                  正文加载失败：{body.message}（点击重试）
+                </button>
+              ) : body.state === 'missing' ? (
+                <span className="hydrate-placeholder">{body.message}</span>
+              ) : (
+                <span className="hydrate-placeholder">加载正文…</span>
+              )
+            ) : (
+              <ReaderProse
+                renderHtml={renderHtml}
+                sourceText={sourceText}
+                isSourceMode={isRawRenderMode}
+                isStreamingTranslation={isShowingTranslatedProse && !!rawStream}
+                style={{
+                  fontFamily: settings.fontFamily,
+                  fontSize: settings.fontSize,
+                  lineHeight: settings.lineHeight / 100,
+                }}
+                onClick={handleProseClick}
+              />
+            )}
           </div>
         </div>
       )}

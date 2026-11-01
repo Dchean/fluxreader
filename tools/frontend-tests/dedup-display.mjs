@@ -328,6 +328,12 @@ export async function run(ctx) {
       resetBackend(rows, smartDedup);
       await resetStore({ settings: { ...store.getState().settings, smartDedup } });
       await store.getState().bootstrapFromBackend();
+      /* 审计卡2-5 后：bootstrapFromBackend 会并行发起设置恢复（生产语义 =
+         启动后基线已知）。本域 R3-R6 校准/回读探针的受控起点是「基线未知」
+         （由 resetStore 构造），这里把设置持久化链状态复位回探针前置——
+         只影响本域探针起点，不改变被测机器（校准/回读协议）本身。 */
+      const { resetAppSettingsWriteStateForTests } = await import('../../dist-test/store/slices/settings.js');
+      resetAppSettingsWriteStateForTests();
     };
 
     /* ============================================================

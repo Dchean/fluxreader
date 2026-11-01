@@ -38,6 +38,14 @@ await import('./component-tests/layouts.test.mjs');
 /* OPT-017C：画廊有界渲染——5000 项挂载数上界/键盘焦点/灯箱返回/加载更多/列分配。 */
 await import('./component-tests/gallery-virtual.test.mjs');
 await import('./component-tests/close-ask.test.mjs');
+/* 审计卡2（前端交互正确性与感知体验）：IME Escape 守卫、Reader 正文三态、
+   右键菜单键盘导航、空态/加载态分流。 */
+await import('./component-tests/ime-escape.test.mjs');
+await import('./component-tests/reader-body-states.test.mjs');
+await import('./component-tests/context-menu.test.mjs');
+await import('./component-tests/timeline-empty-loading.test.mjs');
+/* 审计返工 P2-1：防抖窗口内删回同值——searching 不卡真、不重发。 */
+await import('./component-tests/search-debounce.test.mjs');
 /* OPT-017E：错误中心——侧栏入口可见/面板可关闭/重试与忽略真实生效/普通 toast 不回归。 */
 await import('./component-tests/error-center.test.mjs');
 await import('./component-tests/hydrate.test.mjs');
