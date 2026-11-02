@@ -35,33 +35,28 @@ Release 正文 = annotated tag 的附注。`release.yml` 通过 GitHub API 读 t
 ```text
 FluxReader vX.Y.Z
 
-距 v(X-1).Y.Z 共 N 个提交，主题是「…」。
+一句话概览：这一版给用户带来了什么。
 
-行为修复：
+新功能：
 - …
 
-健壮性（Rust）：
+问题修复：
 - …
 
-一致性统一（UI）：
+改进：
 - …
 
-测试与基建：
+其他：
 - …
-
-门禁数字与独立审查结论
-已知限制（沿承上版）
 ```
 
-附注结构与 `v0.16.0` 起的历次发布一致（`v0.17.0` 改用主题式叙述，是唯一一次偏离）。格式是书面惯例而非强制，没有脚本核对。
+附注面向**用户**，不面向项目内部：不写提交数、门禁数字、测试与审查流程、Note 引用等过程性内容（这些留在 Notes 与 roadmap），只写用户可感知的变化。小节按实际内容取舍，没有的不写。2026-11-02 起 28 个版本的 Release web 正文已全部按此口径重写；tag 附注属历史产物不再回改，此后新版本的 tag 附注直接采用本结构。
 
 ## 存量说明
 
-`v0.8.0`–`v0.16.0` 的 GitHub Release web 正文仍是旧的 `tauri-action` 静态文案；这些版本的完整说明以 tag 附注为准。需要修正某个版本的 web 正文时：
+2026-11-02 前，`v0.8.0`–`v0.16.0` 的 GitHub Release web 正文是旧的 `tauri-action` 静态文案，`v0.16.1`–`v0.18.7` 混有内部进度式表述；当日起全部 28 个版本的 web 正文已按上面的用户口径重写。此后需要修正某个版本的 web 正文时：
 
-```bash
-gh release edit vX.Y.Z --notes-file <(git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' vX.Y.Z)
-```
+`gh release edit vX.Y.Z --notes-file <正文文件>`（历史 tag 附注不回改；旧版 web 正文与 tag 附注的分叉由正文内的溯源说明声明，2026-11-02 重写稿不再携带溯源注）。
 
 ## 提交信息约定
 
