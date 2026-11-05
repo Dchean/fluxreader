@@ -28,6 +28,8 @@ git push origin main
 
 Note 的路径即分类：`{lifecycle}/{class}/yyyy-mm-dd-topic.md`，lifecycle 取 `proposed` / `implemented` / `rejected` / `archived`，class 取 `feature` / `bug-fix` / `simplification` / `architecture` / `process` / `testing`。每篇前三行是 `# Agent Note: <标题>` + 空行 + `Status: <状态>`，正文以 `## Problem` 开头，必含 `## Alternatives considered`。
 
+归档头块遵循封印工具的例外契约：`archived/` 中第 3 行保留 `Status: implemented`，第 4 行紧接 `Archived: YYYY-MM-DD`，第 5 行为空；生命周期由路径和归档日期共同表达。归档正文及既有 manifest 封印冻结，后继决定链接写在活跃 Note。未封印旧档只能在核对历史后规范头块、首次建立封印，不伪造历史封印；本仓首次规范化记录见[修复波次的分批、证伪审计与证据门槛](.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md)。
+
 **关键实现点要留反向注释**，从代码能走回决定：
 
 ```ts
@@ -41,10 +43,11 @@ Note 的路径即分类：`{lifecycle}/{class}/yyyy-mm-dd-topic.md`，lifecycle 
 | 检查 | 在哪跑 |
 | --- | --- |
 | `npm run lint`（oxlint）、`npm run build`（tsc + vite）、`npm run test:frontend`（前端状态回归）、`npm run test:components`（组件真实挂载回归） | 本地与 CI |
+| `npm run test:ui-layout`（Windows Edge headless + CDP：五布局 footer、七类社交正文（长文、data URI 图、HTTP 延迟图、HTTP 失败图、视频、短文、空正文）的固定外高/空态/展开往返/裁切/横向溢出、视频 `readyState=0 → metadata 自然尺寸 → poster 撑高`、1440×900 与 980×640；画廊两视口分波异步自然比例图片与指定可见锚漂移；另加 1536×900 / 1280×800 / 980×640 三档 J/K、Tab/Space、源行 padding 鼠标热区、AX 与响应式回归） | 本地与 CI（windows-latest `ui-layout` job；失败证据由 artifact 上传） |
 | `cargo fmt --all -- --check`（在 `src-tauri/` 下执行） | 本地与 CI |
-| `cargo clippy --all-targets -- -D warnings`、`cargo test`、`cargo check`（在 `src-tauri/` 下执行） | CI（windows-latest） |
+| `cargo clippy --all-targets -- -D warnings`、`cargo test`、`cargo check`（在 `src-tauri/` 下执行） | CI（windows-latest）；当前工作区的 `tmp/rust-env/` 隔离环境亦可本地执行 |
 
-2026-10-31 实测本机**不可链接**（三项独立确认：零依赖探针、hello-world cargo build、VS 目录为空），`cargo test` / `cargo clippy` / `cargo check` 由 CI 的 rust job（windows-latest）承担，本地只跑 `cargo fmt --check` 与前端门禁——不能沿用 2026-10-08 的「本机已可链接」结论。**每一项都必须有承担者**，不能出现「本地不跑、CI 也不跑」的检查。CI 只跑 6 个受约束的 mock 集成套件与默认测试集；`#[ignore]` 的 live 测试（真实服务端）需在具体任务里单独约定读写边界后执行，不作为统一门禁。
+2026-11-03 起，当前工作区的隔离 Rust/MSVC 环境（`tmp/rust-env/`，rustc/cargo `1.98.1` + clang-cl/lld-link）已可真实执行 `cargo test` / `cargo check` / `cargo clippy`。这是当前工作区的证据，不外推到其他机器；CI 的 rust job（windows-latest）仍是最终跨环境门禁。本地必须跑 `cargo fmt --all -- --check` 与前端门禁，Rust 全量检查可由隔离环境执行或由 CI 承担——**每一项都必须有承担者**，不能出现「本地不跑、CI 也不跑」的检查。CI 执行默认 `cargo test`（全部未忽略的单元与集成测试），并额外显式运行 6 个受约束的 mock 集成套件；`#[ignore]` 的 live 测试（真实服务端）需在具体任务里单独约定读写边界后执行，不作为统一门禁。
 
 CI 固定在 Windows 上跑 Rust：这是纯 Windows 客户端，DPAPI 凭据加密与 SMTC 媒体控制等 Windows 专有功能只在 Windows 编译；在 Linux 上检查的是 `#[cfg(not(windows))]` 降级分支，真正的生产代码路径反而被跳过。
 
@@ -52,4 +55,4 @@ CI 固定在 Windows 上跑 Rust：这是纯 Windows 客户端，DPAPI 凭据加
 
 - 不要提交 `node_modules/`、`dist/`、`src-tauri/target/`、`*.db`、`tmp/`（都已在 `.gitignore` 中；`.zcodeignore` 为工具自生成的本机可选配置，不入库）。
 - 一次性探针与调研报告放在存档分支 `archive/tooling-and-reports`，不进主线。
-- 历史材料的定位（含 2026-09-16 历史重写前后的提交号对照）见 [docs/roadmap.md](docs/roadmap.md) 第七节。
+- 历史材料的定位（含 2026-09-16 历史重写前后的提交号对照）见 [docs/README.md](docs/README.md) 的「历史材料」节。
