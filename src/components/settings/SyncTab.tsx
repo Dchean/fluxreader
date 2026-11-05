@@ -1,6 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../store';
-import { api, extractError, extractErrorCode, type SyncQueueStats, type PendingConnection } from '../../lib/api';
+import {
+  api,
+  extractError,
+  extractErrorCode,
+  type PendingConnection,
+  type SyncQueueStats,
+  type SyncStatusInfo,
+} from '../../lib/api';
 import { syncStateSummary, subscriptionWriteSummary, subscriptionActionLine } from '../../lib/syncPill';
 import { FluxDropdown, Switch, SettingCard, ConfirmDialog } from '../primitives';
 import { CacheCleanupSection } from './CacheCleanupSection';
@@ -14,14 +21,6 @@ import {
 } from '../../store/slices/sync';
 
 /* ---------- TAB 6: 同步 ---------- */
-
-/** TASK-116：拉取同步队列统计进摘要卡。失败静默——纯提示性数据（TASK-067 N10
- *  口径）。模块级函数（只依赖注入的 setter），供挂载 effect 与同步链尾复用。 */
-function refreshQueueStats(setter: (q: SyncQueueStats | null) => void) {
-  void api.syncQueueStats()
-    .then((q) => { if (q) setter(q); })
-    .catch(() => { /* 统计拉取失败静默兜底（默认零值可用） */ });
-}
 
 type SaveAndSyncDraft = {
   id: number;
@@ -37,9 +36,32 @@ type SaveAndSyncDraft = {
 let saveAndSyncDraftSeq = 0;
 let latestCommittedDraftId = 0;
 
+function syncStatusIdentityKey(st: SyncStatusInfo): string {
+  const connected = st.connected === true;
+  const protocol =
+    st.protocol === 'fever' || st.protocol === 'greader' ? st.protocol : '';
+  return [
+    connected ? '1' : '0',
+    connected ? (st.account?.trim() ?? '') : '',
+    connected ? protocol : '',
+    connected ? (st.endpoint?.trim() ?? '') : '',
+  ].join('|');
+}
+
 function nextSaveAndSyncDraftId(): number {
   saveAndSyncDraftSeq += 1;
   return saveAndSyncDraftSeq;
+}
+
+function normalizedSyncRoot(endpoint: string): string {
+  const trimmed = endpoint.trim().replace(/\/+$/, '');
+  try {
+    const url = new URL(trimmed);
+    const port = url.port || (url.protocol === 'http:' ? '80' : url.protocol === 'https:' ? '443' : '');
+    return `${url.protocol}//${url.hostname.toLowerCase()}${port ? `:${port}` : ''}${url.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return trimmed.toLowerCase();
+  }
 }
 
 function saveStageKey(draft: SaveAndSyncDraft): string {
@@ -62,13 +84,29 @@ function markDraftCommitted(draft: SaveAndSyncDraft): void {
 export function SyncTab() {
   const showToast = useAppStore((s) => s.showToast);
   const dataMode = useAppStore((s) => s.dataMode);
+  const settingsOpen = useAppStore((s) => s.settingsOpen);
   const syncStatus = useAppStore((s) => s.syncStatus);
+  const backgroundSyncing = useAppStore((s) => s.backgroundSyncing);
   const syncActivityOwner = useAppStore((s) => s.syncActivityOwner);
   const syncActivityToken = useAppStore((s) => s.syncActivityToken);
   const syncStage = useAppStore((s) => s.syncStage);
   const syncStartedAt = useAppStore((s) => s.syncStartedAt);
   const syncRemoteWriteConfirmed = useAppStore((s) => s.syncRemoteWriteConfirmed);
   const syncFailure = useAppStore((s) => s.syncFailure);
+  const syncConnected = useAppStore((s) => s.syncConnected);
+  const syncAccount = useAppStore((s) => s.syncAccount);
+  const syncProtocol = useAppStore((s) => s.syncProtocol);
+  const syncEndpoint = useAppStore((s) => s.syncEndpoint);
+  const syncLastSync = useAppStore((s) => s.syncLastSync);
+  const syncWaiting = useAppStore((s) => s.syncWaiting);
+  const syncTerminalFailed = useAppStore((s) => s.syncTerminalFailed);
+  const syncLocalOnly = useAppStore((s) => s.syncLocalOnly);
+  const syncBindableRetry = useAppStore((s) => s.syncBindableRetry);
+  const syncRetryWait = useAppStore((s) => s.syncRetryWait);
+  const syncExpiredUnconfirmed = useAppStore((s) => s.syncExpiredUnconfirmed);
+  const syncQueueLastError = useAppStore((s) => s.syncQueueLastError);
+  const refreshSyncStatus = useAppStore((s) => s.refreshSyncStatus);
+  const refreshSyncQueueStats = useAppStore((s) => s.refreshSyncQueueStats);
   const reloadFromBackend = useAppStore((s) => s.reloadFromBackend);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
@@ -83,17 +121,18 @@ export function SyncTab() {
   const [protocol, setProtocol] = useState<'greader' | 'fever'>('greader');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [connected, setConnected] = useState(false);
-  const [account, setAccount] = useState<string | null>(null);
-  const [lastSync, setLastSync] = useState(0);
-  /** TASK-116 X2：同步队列统计（等待/部分失败 + 最新错误摘要） */
-  const [queueStats, setQueueStats] = useState<SyncQueueStats | null>(null);
   const [syncClock, setSyncClock] = useState(() => Date.now());
   const [testing, setTesting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [retryingExpired, setRetryingExpired] = useState(false);
+  const retryExpiredBusyRef = useRef(false);
+  const [expiredQueueSnapshot, setExpiredQueueSnapshot] = useState<SyncQueueStats | null>(null);
+  const [pendingIdentitySave, setPendingIdentitySave] = useState<SaveAndSyncDraft | null>(null);
   const saving = saveAndSyncBusyOwner !== null || disconnecting;
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-  /** 首连弹窗：本地未绑定源数（>0 弹「同步本地订阅到后端」确认） */
+  const [showWritebackDetails, setShowWritebackDetails] = useState(false);
+  const [showActionHelp, setShowActionHelp] = useState(false);
+  /** 首连弹窗：本地未绑定源数（>0 弹「同步本地订阅到账户」确认） */
   const [pendingLocalSync, setPendingLocalSync] = useState(0);
   const [syncingLocal, setSyncingLocal] = useState(false);
   /** OPT-006：配置导入留下的待确认连接建议（需重新输入凭据后保存才会激活） */
@@ -102,6 +141,10 @@ export function SyncTab() {
    * 普通保存（未点激活）= undefined，后端不消费任何建议。 */
   const [activateVersion, setActivateVersion] = useState<number | undefined>(undefined);
   const formRevisionRef = useRef(0);
+  const formDirtyRef = useRef(false);
+  const formStatusSeqRef = useRef(0);
+  const formAppliedIdentityRef = useRef('');
+  const settingsWasOpenRef = useRef(false);
 
   /* OPT-022：阶段计时只解释仍在执行的轮次；终态由 store 状态机统一写入。 */
   useEffect(() => {
@@ -114,6 +157,39 @@ export function SyncTab() {
     formRevisionRef.current += 1;
   };
 
+  const markFormEdited = () => {
+    formDirtyRef.current = true;
+    touchForm();
+  };
+
+  const applyStatusToForm = useCallback((st: SyncStatusInfo) => {
+    touchForm();
+    setEndpoint(st.connected ? (st.endpoint ?? '') : '');
+    setUsername(st.connected ? (st.account ?? '') : '');
+    setPassword('');
+    setProtocol(st.protocol === 'fever' ? 'fever' : 'greader');
+    formDirtyRef.current = false;
+    formAppliedIdentityRef.current = syncStatusIdentityKey(st);
+  }, []);
+
+  const refreshFormFromStatus = useCallback(() => {
+    const seq = ++formStatusSeqRef.current;
+    void refreshSyncStatus((st) => {
+      /* store 写入会立刻触发 identity effect；先登记本次响应的身份，
+         让该 effect 认出这不是外部连接变化，不追发第三次读取。 */
+      formAppliedIdentityRef.current = syncStatusIdentityKey(st);
+    }).then((st) => {
+      if (!st || seq !== formStatusSeqRef.current) return;
+      if (formDirtyRef.current) {
+        // 响应仍是最新事实：记下身份，避免 store 更新反向触发第三次读取；
+        // 但不得覆盖用户正在编辑的表单。
+        formAppliedIdentityRef.current = syncStatusIdentityKey(st);
+        return;
+      }
+      applyStatusToForm(st);
+    }).catch(() => { /* 读取失败保持当前表单；不把未知折成断开 */ });
+  }, [applyStatusToForm, refreshSyncStatus]);
+
   const ownsDraft = (draft: SaveAndSyncDraft) => formRevisionRef.current === draft.revision;
 
   const showSupersededDraft = () => {
@@ -123,36 +199,49 @@ export function SyncTab() {
   /* 打开设置时读取当前连接状态 */
   useEffect(() => {
     if (dataMode !== 'tauri') return;
-    void api.syncStatus().then((st) => {
-      if (!st) return;
-      touchForm();
-      setConnected(st.connected);
-      setAccount(st.account);
-      setLastSync(st.last_sync);
-      if (st.connected && st.endpoint) setEndpoint(st.endpoint);
-      setProtocol(st.protocol === 'fever' ? 'fever' : 'greader');
-    }).catch(() => { /* TASK-067 N10：挂载期状态拉取失败静默兜底（默认态可用） */ });
+    refreshFormFromStatus();
     /* OPT-006：待确认连接建议（配置导入只落建议，激活要走保存流程） */
     void api.syncPendingConnection().then((p) => setPendingConn(p)).catch(() => { /* 同上：静默兜底 */ });
-    refreshQueueStats(setQueueStats);
+    void refreshSyncQueueStats();
     /* OPT-009 B3：订阅写回回执与能力矩阵挂载即取一次真值（事件缺失时
        摘要卡/能力卡仍与后端一致；读取失败保持原值） */
     void useAppStore.getState().refreshSubscriptionOutboxStats();
     void useAppStore.getState().loadSubscriptionCapabilities();
-  }, [dataMode]);
+  }, [dataMode, refreshFormFromStatus, refreshSyncQueueStats]);
 
-  /* TASK-124：摘要卡实时跟随 sync-queue-changed——store 三字段由 App.tsx 监听器
-     （事件）与 reloadFromBackend（顺带刷新）写入（单一状态源）。这里订阅 store，
-     变化镜像进本地 queueStats（挂载/保存链尾的 refreshQueueStats 主动拉取保留：
-     打开设置页即取一次最新真值；事件缺失时摘要卡维持 t116 既有行为）。
-     setState 位于订阅回调（事件驱动的外部系统同步），非 effect 体同步 setState。 */
-  useEffect(
-    () =>
-      useAppStore.subscribe((s) => {
-        setQueueStats({ waiting: s.syncWaiting, failed: s.syncFailed, last_error: s.syncQueueLastError });
-      }),
-    [],
-  );
+  /* 设置弹窗隐藏但不卸载：重新打开或外部连接身份 A→B 变化时重新读一次；
+     用户已编辑表单时保留输入（dirty 判定，读取返回后仍会复核）。 */
+  const syncIdentityKey = [
+    syncConnected ? '1' : '0',
+    syncAccount ?? '',
+    syncProtocol ?? '',
+    syncEndpoint ?? '',
+  ].join('|');
+  const syncIdentityRef = useRef(syncIdentityKey);
+  syncIdentityRef.current = syncIdentityKey;
+  useEffect(() => {
+    setExpiredQueueSnapshot(null);
+    if (dataMode !== 'tauri' || !syncConnected) return;
+    let active = true;
+    void api.syncQueueStats().then((stats) => {
+      if (active) setExpiredQueueSnapshot(stats);
+    }).catch(() => { /* 未知代际不提供恢复操作 */ });
+    return () => { active = false; };
+  }, [dataMode, syncConnected, syncIdentityKey, syncExpiredUnconfirmed]);
+  useEffect(() => {
+    if (dataMode !== 'tauri') {
+      settingsWasOpenRef.current = false;
+      return;
+    }
+    const wasOpen = settingsWasOpenRef.current;
+    settingsWasOpenRef.current = settingsOpen;
+    if (!settingsOpen) return;
+    /* 重开设置必须重新读一次（外部连接可能已变）；仅由本次响应回填造成的
+       identity 变化由 applied 标记吸收，不追发第三次请求。 */
+    if (!wasOpen || syncIdentityKey !== formAppliedIdentityRef.current) {
+      refreshFormFromStatus();
+    }
+  }, [dataMode, refreshFormFromStatus, settingsOpen, syncIdentityKey]);
 
   /* 轻量连通测试：不落库不做同步（填表时快速验证） */
   const doTest = async () => {
@@ -188,28 +277,31 @@ export function SyncTab() {
     const syncToken = useAppStore.getState().beginSyncActivity('save-and-sync');
     try {
       const failures: string[] = [];
+      let failureStage: 'feeds' | 'states' = 'states';
       let removedFeeds = 0;
       let refreshError: string | null = null;
       let stage: 'feeds' | 'states' | 'refresh' | 'reload' = 'feeds';
       useAppStore.getState().updateSyncActivity(syncToken, { stage });
       try {
-        const feedsReport = await api.syncPhase('feeds');
+        const result = await api.syncRun();
+        if (!result) throw new Error('同步服务未返回本轮结果');
+        if (result.error) {
+          stage = result.error.stage;
+          throw result.error;
+        }
+        if (!result.feeds || !result.states) throw new Error('同步服务未返回完整阶段结果');
+        for (const current of ['feeds', 'states'] as const) {
+          const report = result[current];
+          const failure = syncFailureMessage(report);
+          if (failure) {
+            if (failures.length === 0) failureStage = current;
+            failures.push(failure);
+          }
+          removedFeeds += report?.removed_feeds ?? 0;
+        }
         stage = 'reload';
         useAppStore.getState().updateSyncActivity(syncToken, { stage });
         await reloadFromBackend();
-        const fail = syncFailureMessage(feedsReport);
-        if (fail) failures.push(fail);
-        else showToast('已拉取订阅源，正在同步文章状态…');
-        if (feedsReport?.removed_feeds) removedFeeds += feedsReport.removed_feeds;
-        stage = 'states';
-        useAppStore.getState().updateSyncActivity(syncToken, { stage });
-        const statesReport = await api.syncPhase('states', true);
-        stage = 'reload';
-        useAppStore.getState().updateSyncActivity(syncToken, { stage });
-        await reloadFromBackend();
-        const fail2 = syncFailureMessage(statesReport);
-        if (fail2) failures.push(fail2);
-        if (statesReport?.removed_feeds) removedFeeds += statesReport.removed_feeds;
         stage = 'refresh';
         useAppStore.getState().updateSyncActivity(syncToken, { stage });
         try {
@@ -244,14 +336,26 @@ export function SyncTab() {
         });
         return;
       }
-      useAppStore.getState().finishSyncActivity(syncToken, 'synced');
-      useAppStore.setState({ syncConnected: true });
-      showToast(failures.length > 0 ? failures.join('；') : '后端同步完成');
-      if (removedFeeds > 0) showToast(`本次对账移除 ${removedFeeds} 个已在服务端删除的订阅源`);
-      refreshQueueStats(setQueueStats);
+      if (failures.length > 0) {
+        useAppStore.getState().finishSyncActivity(syncToken, 'error', {
+          stage: failureStage,
+          message: failures.join('；'),
+        });
+        showToast(failures.join('；'), {
+          label: '重试',
+          key: syncStageKey(draft),
+          run: () => { void runPostSaveSync(draft); },
+        });
+      } else {
+        useAppStore.getState().finishSyncActivity(syncToken, 'synced');
+        showToast('账户同步完成');
+      }
+      if (removedFeeds > 0) showToast(`本次对账移除 ${removedFeeds} 个已在同步账户删除的订阅源`);
+    } finally {
+      void refreshSyncStatus();
+      void refreshSyncQueueStats();
       void useAppStore.getState().refreshSubscriptionOutboxStats();
       void useAppStore.getState().loadSubscriptionCapabilities();
-    } finally {
       if (manageSaving) endSaveAndSync(draft.id);
     }
   }
@@ -310,7 +414,7 @@ export function SyncTab() {
       markDraftCommitted(draft);
       const stillOwned = ownsDraft(draft);
       if (stillOwned) {
-        setConnected(true);
+        formDirtyRef.current = false;
         setPassword('');
         if (result?.firstConnect && result.unboundLocalFeeds > 0) {
           setPendingLocalSync(result.unboundLocalFeeds);
@@ -322,9 +426,7 @@ export function SyncTab() {
       void api.syncPendingConnection().then((p) => {
         if (ownsDraft(draft)) setPendingConn(p);
       }).catch(() => { /* 静默兜底 */ });
-      void api.syncStatus().then((st) => {
-        if (st && ownsDraft(draft)) setAccount(st.account);
-      });
+      refreshFormFromStatus();
       showToast(result?.message ?? '已保存，正在后台同步…');
       await runPostSaveSync(draft, false);
     } finally {
@@ -332,20 +434,56 @@ export function SyncTab() {
     }
   }
 
-  const doSaveAndSync = () => runSaveAndSync({
-    id: nextSaveAndSyncDraftId(),
-    revision: formRevisionRef.current,
-    protocol,
-    endpoint: endpoint.trim(),
-    username: username.trim(),
-    password: password.trim(),
-    connected,
-    activateVersion,
-  });
+  const doSaveAndSync = () => {
+    const draft: SaveAndSyncDraft = {
+      id: nextSaveAndSyncDraftId(),
+      revision: formRevisionRef.current,
+      protocol,
+      endpoint: endpoint.trim(),
+      username: username.trim(),
+      password: password.trim(),
+      connected: syncConnected,
+      activateVersion,
+    };
+    const identityChanged = syncConnected && (
+      draft.protocol !== (syncProtocol ?? 'greader')
+      || normalizedSyncRoot(draft.endpoint) !== normalizedSyncRoot(syncEndpoint ?? '')
+      || (draft.username || syncAccount) !== syncAccount
+    );
+    if (identityChanged) setPendingIdentitySave(draft);
+    else void runSaveAndSync(draft);
+  };
+
+  const doRetryExpired = async () => {
+    const generation = expiredQueueSnapshot?.account_generation;
+    if (retryExpiredBusyRef.current || generation == null || !syncConnected) return;
+    const identity = syncIdentityKey;
+    retryExpiredBusyRef.current = true;
+    setRetryingExpired(true);
+    try {
+      const result = await api.syncRetryExpired(generation);
+      if (identity !== syncIdentityRef.current) return;
+      if (!result) throw new Error('同步服务未返回重试结果');
+      showToast(`已重新排队 ${result.requeued} 项：待推送 ${result.bound_pending}，等待身份 ${result.bindable_retry}，仅本机 ${result.local_only}${result.remaining_expired ? `；仍有 ${result.remaining_expired} 项过期未确认` : ''}。待推送项将在下次同步时重试`);
+    } catch (error) {
+      if (identity === syncIdentityRef.current) showToast(`重试过期项失败：${extractError(error)}`);
+    } finally {
+      retryExpiredBusyRef.current = false;
+      setRetryingExpired(false);
+      void refreshSyncQueueStats();
+      if (identity === syncIdentityRef.current) {
+        void api.syncQueueStats().then((stats) => {
+          if (identity === syncIdentityRef.current) setExpiredQueueSnapshot(stats);
+        }).catch(() => {
+          if (identity === syncIdentityRef.current) setExpiredQueueSnapshot(null);
+        });
+      }
+    }
+  };
   /** OPT-006：把配置导入的待确认建议填入表单（不激活——必须重新输入密码后保存） */
   const doApplyPending = () => {
     if (!pendingConn) return;
-    touchForm();
+    markFormEdited();
     if (pendingConn.sync_protocol === 'fever' || pendingConn.sync_protocol === 'greader') {
       setProtocol(pendingConn.sync_protocol);
     }
@@ -379,10 +517,27 @@ export function SyncTab() {
     }
     setSyncingLocal(true);
     try {
-      const msg = await api.syncLocalFeeds();
+      const result = await api.syncLocalFeeds();
       await reloadFromBackend();
       setPendingLocalSync(0);
-      showToast(msg ?? '同步完成');
+      void refreshSyncStatus();
+      void refreshSyncQueueStats();
+      void useAppStore.getState().refreshSubscriptionOutboxStats();
+      if (!result) {
+        showToast('同步完成');
+      } else if (result.ok) {
+        showToast(result.message || '同步完成');
+      } else {
+        const detail = result.errors.join('；') || result.message || '同步服务返回失败';
+        showToast(
+          result.structured === false
+            ? `同步本地订阅，结果未知：${detail}`
+            : result.failed > 0
+              ? `同步本地订阅，${result.failed} 项未同步：${detail}`
+              : detail,
+          { label: '重试', key: 'sync:local-feeds', run: () => { void doSyncLocal(); } },
+        );
+      }
     } catch (e) {
       showToast(`同步本地订阅失败：${extractError(e)}`);
     } finally {
@@ -391,13 +546,21 @@ export function SyncTab() {
   };
 
   const doDisconnect = async () => {
+    /* 断开是连接身份切换：先推进表单请求代次，任何在途旧 status 响应都不得
+       再把已断开的表单写回旧账户。 */
+    formStatusSeqRef.current += 1;
     setDisconnecting(true);
     try {
       const msg = await api.syncDisconnect();
-      touchForm();
-      setConnected(false);
-      setAccount(null);
-      setPassword('');
+      useAppStore.getState().applySyncStatus(null);
+      useAppStore.setState({ syncSucceededAt: null });
+      applyStatusToForm({
+        connected: false,
+        endpoint: null,
+        account: null,
+        last_sync: 0,
+        protocol: null,
+      });
       /* OPT-009 B3：断开后协议/账号不再生效——订阅回执与能力矩阵重读 */
       void useAppStore.getState().refreshSubscriptionOutboxStats();
       void useAppStore.getState().loadSubscriptionCapabilities();
@@ -413,6 +576,7 @@ export function SyncTab() {
     } catch (e) {
       showToast(`断开失败：${extractError(e)}`);
     } finally {
+      void refreshSyncStatus();
       setDisconnecting(false);
     }
   };
@@ -420,7 +584,7 @@ export function SyncTab() {
   if (dataMode !== 'tauri') {
     return (
       <>
-        <div className="settings-group-title">后端配置</div>
+        <div className="settings-group-title">同步服务</div>
         <SettingCard title="演示模式" desc="同步功能需要运行在 Tauri 客户端内（npm run tauri dev）">
           <span className="about-arch-tag">不支持同步</span>
         </SettingCard>
@@ -431,14 +595,21 @@ export function SyncTab() {
   /* TASK-102 X3：账户前缀提为常量——空串字面量与「从未」引号留在同一行时，
      文案扫描会把两个引号间的模板内容误配成假长文案（'…' 对跨模板配对）；
      分行后字面量配对只在单行内成立，扫描恢复零误报。渲染输出不变。 */
-  const accountTag = account ? `账户 ${account} · ` : '';
+  const accountTag = syncAccount ? `账户 ${syncAccount} · ` : '';
 
   /* TASK-116 X2：四态摘要口径收口到纯函数 syncStateSummary（src/lib/syncPill.ts，
      契约 X2/X3 如实原则；真值表由回归网 t116 断言驱动）。
      OPT-009 B3：订阅写回回执行由 subscriptionWriteSummary 纯函数追加——无待办
      时不新增噪音行；local_only 项如实点名「仅本地生效」（不写成成功也不隐藏）。 */
-  const waiting = queueStats?.waiting ?? 0;
-  const failedCount = queueStats?.failed ?? 0;
+  const waiting = syncWaiting;
+  const failedCount =
+    syncTerminalFailed + syncRetryWait + (subOutboxStats?.failed ?? 0);
+  const unresolvedCount =
+    syncLocalOnly
+    + syncBindableRetry
+    + syncExpiredUnconfirmed
+    + (subOutboxStats?.pending ?? 0)
+    + (subOutboxStats?.local_only ?? 0);
   const syncElapsedMs = syncStartedAt == null
     ? 0
     : Math.max(0, syncClock - syncStartedAt);
@@ -454,39 +625,55 @@ export function SyncTab() {
   const syncFailureLine = syncFailure
     ? `上次同步失败于${manualSyncStageName(syncFailure.stage)}：${syncFailure.message}`
     : '';
-  const subscriptionLine = subscriptionWriteSummary(
-    subOutboxStats ?? { pending: 0, failed: 0, local_only: 0, last_error: null },
-    caps?.protocol ?? null,
-  );
+  const subscriptionUnknown = subOutboxStats == null;
+  const subscriptionLine = subscriptionUnknown
+    ? '订阅状态未加载（未知）'
+    : subscriptionWriteSummary(subOutboxStats, caps?.protocol ?? null);
   const syncStateDesc = [
     syncProgressLine,
     syncFailureLine,
-    syncStateSummary(queueStats ?? { waiting: 0, failed: 0, last_error: null }, lastSync),
+    syncStateSummary({
+      waiting: syncWaiting,
+      failed: syncTerminalFailed,
+      retry_wait: syncRetryWait,
+      local_only: syncLocalOnly,
+      bindable_retry: syncBindableRetry,
+      expired_unconfirmed: syncExpiredUnconfirmed,
+      last_error: syncQueueLastError,
+    }, syncLastSync),
     subscriptionLine,
   ].filter(Boolean).join('；');
   const syncStateTag =
-    syncStatus === 'error'
-      ? '同步失败'
-      : failedCount > 0
-        ? '部分失败'
-        : syncStatus === 'syncing'
-          ? syncElapsedMs >= SYNC_UNRESPONSIVE_AFTER_MS
-            ? '未返回'
-            : '同步中'
+    syncStatus === 'syncing' || backgroundSyncing
+      ? syncElapsedMs >= SYNC_UNRESPONSIVE_AFTER_MS
+        ? '未返回'
+        : '同步中'
+      : syncStatus === 'error'
+        ? '同步失败'
+        : failedCount > 0
+          ? '失败'
           : waiting > 0
-            ? '等待同步'
-            : '本地已保存';
+            ? '状态待推送'
+            : unresolvedCount > 0
+              ? '未同步'
+              : subscriptionUnknown
+                ? '订阅未知'
+                : '本地已保存';
 
   return (
     <>
-      <div className="settings-group-title">后端配置</div>
+      <div className="settings-group-title">同步服务</div>
       <SettingCard
         title="连接状态"
-        desc={connected
-          ? `${accountTag}上次同步 ${lastSync > 0 ? new Date(lastSync * 1000).toLocaleString() : '从未'}`
+        desc={syncConnected
+          ? syncAccount
+            ? `${accountTag}上次同步 ${syncLastSync > 0 ? new Date(syncLastSync * 1000).toLocaleString() : '从未'}`
+            : '未验证：已配置同步服务地址，但缺少账户信息'
           : '未连接（客户端可独立使用：直连抓取、阅读、收藏均正常）'}
       >
-        <span className="about-arch-tag">{connected ? (account ?? '已连接') : '未连接'}</span>
+        <span className="about-arch-tag">
+          {syncConnected ? (syncAccount ?? '未验证（账户缺失）') : '未连接'}
+        </span>
       </SettingCard>
       {/* OPT-006：配置导入的待确认连接建议——只展示非敏感字段；激活必须重新输入
           密码后经「保存并同步」专用流程（历史实现的导入直接改写活动地址 + 旧密码，
@@ -510,25 +697,49 @@ export function SyncTab() {
          本地已保存）——「远端已确认」随成功 prune 即时出队、不可作常驻态展示（X3）；
          desc 收尾即「本地已保存」说明句（状态变更已事务化落库，TASK-108） */}
       <SettingCard title="同步状态" desc={syncStateDesc}>
-        <span className="about-arch-tag">
-          {syncStateTag}
-        </span>
+        <div className="settings-action-row">
+          <span className="about-arch-tag">{syncStateTag}</span>
+          {syncExpiredUnconfirmed > 0 && syncConnected && (
+            <button
+              className="toggle-action-btn"
+              disabled={saving || retryingExpired || expiredQueueSnapshot?.account_generation == null}
+              title="按当前本地已读与收藏状态重新排队；没有远端身份的项仍需等待绑定"
+              onClick={() => void doRetryExpired()}
+            >
+              {retryingExpired ? '正在重排…' : '重试过期项'}
+            </button>
+          )}
+        </div>
       </SettingCard>
-      {/* OPT-009 B3：订阅写回能力卡——矩阵/概述/限制全部来自
-          subscription_capabilities 单一事实源（UI 不另写一套说法）。未连接不
-          渲染（不制造噪音）；Fever 下概述明说「仅本地生效」，local_only 计数
-          由上方摘要行如实呈现（不得写成成功也不得隐藏）。 */}
+      {/* OPT-009 B3：订阅写回能力卡——概述常驻，矩阵/限制来自同一份
+          subscription_capabilities 数据，按需展开。未连接不渲染。
+          Note: 主界面单句、细节折叠 — 见 .agents/notes/implemented/simplification/2026-11-04-用户文案精简与能力矩阵折叠.md */}
       {caps?.connected && (
         <>
           <SettingCard title="订阅写回" desc={caps.overview}>
-            <span className="about-arch-tag">{caps.protocol === 'fever' ? '仅本地' : '写回远端'}</span>
+            <span className="about-arch-tag">{caps.protocol === 'fever' ? '仅本地' : '写回账户'}</span>
           </SettingCard>
-          <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.6, color: 'var(--text-tertiary)' }}>
-            <div>{subscriptionActionLine(caps)}</div>
-            {caps.limitations.map((l) => (
-              <div key={l.code}>· {l.detail}</div>
-            ))}
+          <div className="subscription-details-toggle">
+            <button
+              className="toggle-action-btn"
+              aria-expanded={showWritebackDetails}
+              aria-controls="subscription-writeback-details"
+              onClick={() => setShowWritebackDetails((open) => !open)}
+            >
+              {showWritebackDetails ? '收起写回细节' : '查看写回细节'}
+            </button>
           </div>
+          {showWritebackDetails && (
+            <div
+              id="subscription-writeback-details"
+              className="subscription-details-body"
+            >
+              <div>{subscriptionActionLine(caps)}</div>
+              {caps.limitations.map((l) => (
+                <div key={l.code}>· {l.detail}</div>
+              ))}
+            </div>
+          )}
         </>
       )}
       {/* REQ-008：全应用统一控件——此前是全仓唯一的原生 <select>，
@@ -544,7 +755,7 @@ export function SyncTab() {
           width={220}
           value={protocol}
           onChange={(v) => {
-            touchForm();
+            markFormEdited();
             setProtocol(v === 'fever' ? 'fever' : 'greader');
           }}
           options={[
@@ -554,31 +765,33 @@ export function SyncTab() {
         />
       </SettingCard>
       <SettingCard
-        title="后端 Endpoint"
+        title="同步服务地址"
         desc={ENDPOINT_DESC}
       >
         <input
           type="text"
+          aria-label="同步服务地址"
           className="setting-input"
           placeholder={ENDPOINT_PLACEHOLDER}
           value={endpoint}
           onChange={(e) => {
-            touchForm();
+            markFormEdited();
             setEndpoint(e.target.value);
           }}
         />
       </SettingCard>
       <SettingCard
         title="用户名"
-        desc="Miniflux「集成」页配置的用户名，GReader / Fever 共用（非账号密码）"
+        desc="同步服务生成的 API 用户名；Miniflux 在「集成」页查看（非登录密码）"
       >
         <input
           type="text"
+          aria-label="用户名"
           className="setting-input"
           placeholder="集成用户名"
           value={username}
           onChange={(e) => {
-            touchForm();
+            markFormEdited();
             setUsername(e.target.value);
           }}
         />
@@ -587,52 +800,81 @@ export function SyncTab() {
           协议卡 desc 与用户名卡承载（X3：无复述标题的 desc） */}
       <SettingCard
         title="密码"
-        desc={connected ? '已保存（出于安全不回显）。留空提交 = 保持当前密码；填写新值 = 更换账号' : undefined}
+        desc={syncConnected ? '已保存且不回显。留空保持密码；填写新值只更新密码；换账号需同时改地址或用户名。' : undefined}
       >
         <input
           type="password"
+          aria-label="密码"
           className="setting-input"
-          placeholder={connected ? '●●●●●●●●（已保存）' : '密码'}
+          placeholder={syncConnected ? '●●●●●●●●（已保存）' : '密码'}
           value={password}
           onChange={(e) => {
-            touchForm();
+            markFormEdited();
             setPassword(e.target.value);
           }}
         />
       </SettingCard>
-      <div className="settings-action-row">
-        <button className="toggle-action-btn" disabled={testing || saving} onClick={() => void doTest()}>
-          {testing ? '测试中…' : '测试连接'}
-        </button>
-        <button className="toggle-action-btn btn-primary" disabled={testing || saving} onClick={() => void doSaveAndSync()}>
-          {saving ? '保存中…' : '保存并同步'}
-        </button>
-        {connected && (
+      <div
+        className="settings-action-block"
+        onFocus={() => setShowActionHelp(true)}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setShowActionHelp(false);
+          }
+        }}
+        onMouseEnter={() => setShowActionHelp(true)}
+        onMouseLeave={() => setShowActionHelp(false)}
+      >
+        <div className="settings-action-row">
           <button
             className="toggle-action-btn"
-            disabled={syncingLocal || saving}
-            onClick={() => void doSyncLocal()}
-            title="把本地直连添加的订阅推送到服务端（已同步的自动跳过）"
+            disabled={testing || saving}
+            onClick={() => void doTest()}
+            title="只验证登录与地址，不会保存配置，也不拉取订阅或文章"
+            aria-describedby="sync-test-help"
           >
-            {syncingLocal ? '同步中…' : '同步本地订阅'}
+            {testing ? '测试中…' : '测试连接'}
           </button>
-        )}
-        {connected && (
-          <button className="toggle-action-btn" disabled={testing || saving} onClick={() => setConfirmDisconnect(true)}>
-            断开连接
+          <button
+            className="toggle-action-btn btn-primary"
+            disabled={testing || saving}
+            onClick={() => void doSaveAndSync()}
+            title="保存后拉取订阅、阅读状态与文章并刷新内容；不会推送已有本地订阅"
+            aria-describedby="sync-save-help"
+          >
+            {saving ? '保存中…' : '保存并同步'}
           </button>
-        )}
-      </div>
-      {/* TASK-102：单行 ≤40 字，只保留两按钮语义对齐——「断开会移除拉取内容」由
-          断开确认框承载、「已读/收藏约 1 秒回传」为解释性冗余，均不再常驻 */}
-      <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        「测试连接」仅验证登录；「保存并同步」确认后拉取订阅与文章。
+          {syncConnected && syncProtocol !== 'fever' && (
+            <button
+              className="toggle-action-btn"
+              disabled={syncingLocal || saving}
+              onClick={() => void doSyncLocal()}
+              title="把本地直连添加的订阅推送到同步账户（已绑定的自动跳过）"
+            >
+              {syncingLocal ? '同步中…' : '同步本地订阅'}
+            </button>
+          )}
+          {syncConnected && (
+            <button className="toggle-action-btn" disabled={testing || saving} onClick={() => setConfirmDisconnect(true)}>
+              断开连接
+            </button>
+          )}
+        </div>
+        <div
+          id="sync-action-help"
+          className="settings-action-help"
+          hidden={!showActionHelp}
+          role="note"
+        >
+          <p id="sync-test-help">测试连接：只验证登录与地址，不会保存配置，也不拉取订阅或文章。</p>
+          <p id="sync-save-help">保存并同步：保存后拉取订阅、阅读状态与文章并刷新内容；不会推送已有本地订阅。</p>
+        </div>
       </div>
 
       <div className="settings-group-title" style={{ marginTop: 20 }}>自动同步</div>
       <SettingCard
         title="同步模式"
-        desc="本机抓取 = 直连各订阅源（离线可用）；跟随服务端 = 内容由后端提供，多设备一致"
+        desc="本机抓取：离线可用；跟随同步服务：多设备一致"
       >
         <FluxDropdown
           width={130}
@@ -640,11 +882,11 @@ export function SyncTab() {
           onChange={(v) => updateSettings({ syncMode: v as 'direct' | 'hybrid' })}
           options={[
             { value: 'direct', label: '本机抓取' },
-            { value: 'hybrid', label: '跟随服务端' },
+            { value: 'hybrid', label: '跟随同步服务' },
           ]}
         />
       </SettingCard>
-      <SettingCard title="后台自动同步" desc="按刷新间隔到期时自动做轻量增量同步（拉取服务端状态变化）">
+      <SettingCard title="后台自动同步" desc="按刷新间隔增量同步账户状态">
         <Switch checked={settings.autoSync} onChange={(v) => updateSettings({ autoSync: v })} />
       </SettingCard>
 
@@ -653,20 +895,33 @@ export function SyncTab() {
 
       <ConfirmDialog
         open={confirmDisconnect}
-        title="断开后端连接"
-        message="断开后将移除从服务端拉取的订阅与文章（含已读/收藏绑定），本地直连添加的订阅不受影响。确定断开吗？"
+        title="断开同步服务"
+        message="断开后将移除从同步服务拉取的订阅与文章，并放弃尚未确认的已读/收藏同步队列。本地直连订阅及其已读/收藏值保留，但这些旧意图不会在重连后自动补推。确定断开吗？"
         confirmText="断开并清理"
         onConfirm={() => { setConfirmDisconnect(false); void doDisconnect(); }}
         onCancel={() => setConfirmDisconnect(false)}
+      />
+
+      <ConfirmDialog
+        open={pendingIdentitySave !== null}
+        title="更换同步账户"
+        message="更换账户将清理原账户的远端订阅与文章，并放弃尚未确认的已读/收藏同步队列。本地直连订阅及其已读/收藏值保留，旧意图不会迁移或自动补推到新账户。确定更换吗？"
+        confirmText="更换并清理"
+        onConfirm={() => {
+          const draft = pendingIdentitySave;
+          setPendingIdentitySave(null);
+          if (draft) void runSaveAndSync(draft);
+        }}
+        onCancel={() => setPendingIdentitySave(null)}
       />
 
       {/* 首连且本地有未绑定源：询问是否把本地订阅推送到服务端
           （推送会改变服务端数据——必须用户确认，不自动执行） */}
       <ConfirmDialog
         open={pendingLocalSync > 0}
-        title="同步本地订阅到后端"
-        message={`检测到本地有 ${pendingLocalSync} 个直连添加的订阅尚未同步到服务端。是否现在同步？同步后它们会出现在你的后端账户中，其他设备也能看到。`}
-        confirmText="同步到服务端"
+        title="同步本地订阅到账户"
+        message={`检测到本地有 ${pendingLocalSync} 个直连添加的订阅尚未同步到账户。是否现在同步？同步后它们会出现在你的同步账户中，其他设备也能看到。`}
+        confirmText="同步到账户"
         onConfirm={() => { setPendingLocalSync(0); void doSyncLocal(); }}
         onCancel={() => setPendingLocalSync(0)}
       />

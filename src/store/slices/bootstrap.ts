@@ -657,18 +657,15 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
           ? { positionRestoreNonce: s.positionRestoreNonce + 1 }
           : {}),
       }));
-      /* 顺带刷新连接态：连接/断开后前端标签即时一致 */
-      void api.syncStatus().then((st) => {
-        if (st && gen === queryGeneration) set({ syncConnected: st.connected });
-      }).catch(() => { /* TASK-067 N10：纯提示性刷新，失败不打扰 */ });
-      /* TASK-116 四态展示：顺带刷新同步队列统计（侧栏 pill 的「等待同步 N 条 /
-         部分失败」口径）。挂载（bootstrap 首次 reload）与手动同步完成（末次
-         reload）都经过这里——契约约定的两个刷新点，无需另设事件。
+      /* 顺带刷新连接态/账户/协议/上次同步：连接/断开后前端标签即时一致 */
+      void get().refreshSyncStatus();
+      /* TASK-116 四态展示：顺带刷新同步队列统计（侧栏灯只显示账户名/本地模式/
+         同步中/同步完成/同步失败，数量与失败原因进详情）。挂载（bootstrap 首次
+         reload）与手动同步完成（末次 reload）都经过这里——契约约定的两个刷新点，
+         无需另设事件。
          TASK-124：补写 lastError（syncQueueLastError，摘要卡错误行）——队列
          统计的 store 字段自此为事件与 reload 共用的单一状态源。 */
-      void api.syncQueueStats().then((q) => {
-        if (q && gen === queryGeneration) set({ syncWaiting: q.waiting, syncFailed: q.failed, syncQueueLastError: q.last_error ?? null });
-      }).catch(() => { /* 纯提示性刷新，失败不打扰 */ });
+      void get().refreshSyncQueueStats();
       // 当前在筛选视图（收藏/未读/今天）时，reload 后重新拉取完整筛选列表
       // （状态/内容可能变化，entries 需同步刷新为筛选结果）
       // TASK-111②：保位请求随路径透传——'all' 快照只是过渡态，信号由筛选
@@ -1038,6 +1035,13 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       }
       return;
     }
+    /* 迁移前自动备份失败不阻塞启动，但必须在首次界面上可见；后端以一次性
+       settings 警告承接，读取即消费，避免每次启动重复提示。 */
+    void api.takeStartupBackupWarning()
+      .then((warning) => {
+        if (warning) get().showToast(warning);
+      })
+      .catch(() => { /* 警告通道失败不阻塞启动装载 */ });
     /* 启动并行装载（审计卡2-5，「首读并行、落库有序」）：设置恢复与数据查询
        同时发起——设置读取与 list_folders/list_feeds/list_articles/counts_snapshot
        并行在途，首屏等待从「设置+数据」串行和缩为两者较慢者。顺序依赖的收敛

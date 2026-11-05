@@ -5,6 +5,11 @@ import { formatDuration } from '../lib/format';
 import { Icons } from './icons';
 import { CoverImage } from './CoverImage';
 import { useFocusTrap } from './useFocusTrap';
+import {
+  audioFailureKey,
+  shouldReportAudioFailure,
+  type AudioFailureSnapshot,
+} from '../lib/copyPolicy';
 
 /* ============================================================
    播客底部播放条 —— Mini Player
@@ -52,6 +57,20 @@ export function PlayerBar() {
   const pendingResumeRef = useRef<{ url: string; pos: number } | null>(null);
   /** 落库节流：记录上次写入的整秒 */
   const lastSaveRef = useRef(-1);
+  /** play reject 与 error 事件共用同一失败周期，避免同一次失败弹两条 toast。 */
+  const lastAudioFailureRef = useRef<AudioFailureSnapshot>(null);
+
+  const reportAudioFailure = (url: string) => {
+    const key = audioFailureKey(url);
+    const now = Date.now();
+    if (!shouldReportAudioFailure(lastAudioFailureRef.current, key, now)) return;
+    lastAudioFailureRef.current = { key, at: now };
+    showToast('无法播放音频，请检查网络或音频地址', {
+      label: '重试播放',
+      key,
+      run: () => useAppStore.getState().togglePlayerPlay(),
+    });
+  };
 
   /** 续播 seek：只有元数据就绪（readyState ≥ HAVE_METADATA = 1）后才能安全设
       currentTime。两个触发点共用：① loadedmetadata/durationchange 事件；
@@ -99,9 +118,10 @@ export function PlayerBar() {
     if (player.isPlaying) void el.play().catch(() => {
       /* 自动播放被拒或网络失败：回落暂停态并提示 */
       useAppStore.getState().togglePlayerPlay();
-      useAppStore.getState().showToast('音频加载失败');
+      reportAudioFailure(player.audioUrl);
     });
     else el.pause();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [player.isPlaying, player.audioUrl]);
 
   useEffect(() => {
@@ -125,6 +145,9 @@ export function PlayerBar() {
       // 续播：元数据就绪后再 seek（此时可安全设 currentTime）
       applyPendingResume(el, player.audioUrl);
     };
+    const onPlaying = () => {
+      lastAudioFailureRef.current = null;
+    };
     const onTime = () => {
       syncPlayerProgress(el.currentTime, el.duration || 0);
       // 节流落库（整秒变化才写，避免每帧写）
@@ -143,13 +166,20 @@ export function PlayerBar() {
       playerEnded();
       clearPlayback();
     };
-    const onError = () => showToast('音频播放出错');
+    const onError = () => {
+      if (useAppStore.getState().player.isPlaying) {
+        useAppStore.getState().togglePlayerPlay();
+      }
+      reportAudioFailure(player.audioUrl);
+    };
+    el.addEventListener('playing', onPlaying);
     el.addEventListener('timeupdate', onTime);
     el.addEventListener('loadedmetadata', onMeta);
     el.addEventListener('durationchange', onMeta);
     el.addEventListener('ended', onEnd);
     el.addEventListener('error', onError);
     return () => {
+      el.removeEventListener('playing', onPlaying);
       el.removeEventListener('timeupdate', onTime);
       el.removeEventListener('loadedmetadata', onMeta);
       el.removeEventListener('durationchange', onMeta);

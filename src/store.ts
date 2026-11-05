@@ -11,6 +11,7 @@ import { createUiSlice } from './store/slices/ui';
 import { createSyncSlice } from './store/slices/sync';
 import { createFeedsSlice } from './store/slices/feeds';
 import { createSettingsSlice } from './store/slices/settings';
+import { bindExternalOpenFailureHandler } from './lib/external';
 
 /* ============================================================
    全局客户端状态机 —— 对应规范 §2.2 + 原型交互引擎
@@ -64,6 +65,7 @@ export const useAppStore = create<AppState>((...a) => ({
 /* 注入 store 句柄：供跨 slice 的模块级 helper（视图缓存、标读/收藏收口、
    GitHub 轮询）读写。与原实现时序一致——模块求值期不会调用它们。 */
 bindAppStore(useAppStore);
+bindExternalOpenFailureHandler((message) => useAppStore.getState().showToast(message));
 
 /* TASK-122：注入 bodyById 写入通知——模块级正文/AI 缓存的每次真实写入 bump
    AppState.bodyCacheNonce，使经 useAppStore 订阅 entryNeedsHydration /

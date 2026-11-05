@@ -1,4 +1,4 @@
-// Note: J/K 门控用「排除 image」而非白名单，新增虚拟化布局自动获得 — 见 .agents/notes/implemented/feature/2026-10-06-键盘导航、焦点与卡片角色.md
+// Note: J/K 覆盖全部五种布局，选中与 DOM 焦点由 Timeline 单点同步 — 见 .agents/notes/implemented/architecture/2026-11-04-全布局键盘焦点与响应式阅读列.md
 import type { ContentLayoutType } from '../types';
 
 /* ============================================================
@@ -11,24 +11,29 @@ import type { ContentLayoutType } from '../types';
    store/selectors.ts 的既有做法：判定收口到纯函数，两侧共用同一份。
 
    契约（UI-CONTRACT-TASK-114-LAYOUT-CONSISTENCY.md X3）：
-   - J/K 选中切换（循环回绕）从「仅 article」扩展到全部虚拟化布局
-     （article/social/podcast/notification，复用 Timeline 的
-     moveCardFocus/focusIndex 基建与 focusIndex 跟随选中 effect）；
-   - 画廊（image）：不支持 J/K——产品判断（快捷键页明示）；OPT-017C 起画廊
-     改为列模型虚拟化，但本门控维持「排除 image」不变；
+   - J/K 选中切换（循环回绕）覆盖 article/social/image/podcast/notification；
+   - Timeline 在 activeArticleId 变化后执行 scrollToIndex + DOM focus，
+     画廊与四类单列布局共用同一选中/焦点/可见态；
    - 输入框守卫（inInput）与浮层让路（shouldYieldToOverlay）规则不变。
    ============================================================ */
 
 /**
- * J/K 布局门控：image 之外全部放行。
+ * J/K 布局门控：五种现有布局全部放行。
  *
- * 用「排除 image」而非四布局白名单：未来新增虚拟化布局自动获得 J/K，无需
- * 同步本处。画廊不支持 J/K 是明确的产品判断（不因为「有没有定位基建」而变；
- * OPT-017C 起画廊已是列模型虚拟化，门控仍排除 image）——与 Timeline 的行
- * 虚拟化开关（enabled: activeContentLayout !== 'image'）保持同一表达。
+ * 保留纯函数作为 App 与回归网的共同契约；新增布局时必须显式决定其键盘
+ * 语义，不再依赖「排除某一布局」的隐式继承。
  */
 export function jkLayoutAllowed(layout: ContentLayoutType): boolean {
-  return layout !== 'image';
+  switch (layout) {
+    case 'article':
+    case 'social':
+    case 'image':
+    case 'podcast':
+    case 'notification':
+      return true;
+    default:
+      return false;
+  }
 }
 
 /**

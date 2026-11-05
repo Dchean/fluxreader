@@ -8,6 +8,7 @@ import { normalizeFeedAiMode } from '../../types';
 import type { ContentLayoutType } from '../../types';
 import { LAYOUT_OPTIONS } from './layoutOptions';
 import { LAYOUT_NO_AI, type PendingDelete } from './shared';
+import { unknownDeleteImpactWarning } from '../../lib/copyPolicy';
 
 /* ---------- TAB 4: 订阅 ----------
    交互结构：
@@ -34,6 +35,7 @@ export function FeedsTab() {
   const toggleSettingsCatCollapse = useAppStore((s) => s.toggleSettingsCatCollapse);
   const showToast = useAppStore((s) => s.showToast);
   const reloadFromBackend = useAppStore((s) => s.reloadFromBackend);
+  const syncConnected = useAppStore((s) => s.syncConnected);
   /** OPT-009 B3：订阅写回能力矩阵（确认弹窗远端语义句的单一事实源）。 */
   const caps = useAppStore((s) => s.subscriptionCapabilities);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -83,14 +85,19 @@ export function FeedsTab() {
      OPT-009 B3：远端语义句统一取自 subscription_capabilities（与能力矩阵同源，
      不再写「同步服务端不受影响」——删除现在会产生持久退订意图）；分类删除按
      有无成员分别取「成员逐源退订」与「空分类无可验证远端表达（仅本地）」的
-     说明；caps 未加载时省略该句（不编造远端语义）。 */
+     说明。已连接但 caps 未加载时必须明确“账户影响未知”，不得只留本地后果。 */
   const memberCount = pending?.kind === 'category'
     ? categories.find((c) => c.id === pending.catId)?.feeds.length ?? 0
     : 0;
   const remoteLine = pending
     ? deleteRemoteLine(caps, pending.kind === 'category' ? 'folder' : 'feed', memberCount)
     : null;
-  const withRemote = (base: string) => (remoteLine ? `${base}；${remoteLine}` : `${base}。`);
+  const unknownImpact = unknownDeleteImpactWarning(syncConnected, caps !== null);
+  const withRemote = (base: string) => {
+    const impact = remoteLine ?? unknownImpact;
+    return impact ? `${base}；${impact}。` : `${base}。`;
+  };
+  const feverLocal = caps?.connected === true && caps.protocol === 'fever';
   const dialogText = pending
     ? pending.kind === 'category'
       ? {
@@ -106,25 +113,24 @@ export function FeedsTab() {
   return (
     <>
       <div className="feeds-tab-toolbar">
-        <span className="feeds-tab-hint">点击分类名可展开/收起管理组内源</span>
         <input ref={fileInputRef} type="file" accept=".opml,.xml" style={{ display: 'none' }} onChange={handleOpmlImport} />
-        <button className="toggle-action-btn" onClick={() => fileInputRef.current?.click()} title="从 OPML 文件导入订阅">
-          导入 OPML
-        </button>
-        <button className="toggle-action-btn" onClick={handleOpmlExport} title="导出全部订阅为 OPML 文件">
-          导出 OPML
-        </button>
-        <button className="toggle-action-btn btn-primary" onClick={openNewCategoryModal}>
-          + 新建分类
-        </button>
+        <div className="feeds-tab-actions">
+          <button className="toggle-action-btn" onClick={() => fileInputRef.current?.click()} title="从 OPML 文件导入订阅">
+            导入 OPML
+          </button>
+          <button className="toggle-action-btn" onClick={handleOpmlExport} title="导出全部订阅为 OPML 文件">
+            导出 OPML
+          </button>
+          <button className="toggle-action-btn btn-primary" onClick={openNewCategoryModal}>
+            + 新建分类
+          </button>
+        </div>
       </div>
 
-      {/* OPT-009 B3：Fever 连接下常驻能力提示——新增/编辑/退订/分类变更仅本地
-          生效（概述取自 subscription_capabilities 单一事实源，不出现「已同步」
-          错觉）。GReader/未连接不渲染（不制造噪音）。 */}
-      {caps?.connected && caps.protocol === 'fever' && (
+      {/* Fever 的常驻句与操作标题都明确本地边界；完整矩阵在同步页展开。 */}
+      {feverLocal && (
         <div className="mini-dialog-hint" style={{ marginTop: 0, marginBottom: 8 }}>
-          {caps.overview}
+          {caps?.overview}
         </div>
       )}
 
@@ -149,7 +155,9 @@ export function FeedsTab() {
                 <button
                   className="toggle-action-btn"
                   onClick={() => openAddFeedModal(cat.id)}
-                  title="在该分类下添加订阅源"
+                  title={feverLocal
+                    ? 'Fever：新订阅仅本地保存，同步服务不会改变'
+                    : '在该分类下添加订阅源'}
                 >
                   <Icons.plus />
                   {/* TASK-100 U2：叫法统一「添加订阅源」（此前「添加源」） */}
@@ -163,6 +171,7 @@ export function FeedsTab() {
                 >
                   <SwitchInline
                     compact
+                    ariaLabel={`${cat.name}默认自动摘要`}
                     checked={cat.autoSummary}
                     onChange={(v) => toggleCatSummary(cat.id, v)}
                   />
@@ -175,6 +184,7 @@ export function FeedsTab() {
                 >
                   <SwitchInline
                     compact
+                    ariaLabel={`${cat.name}默认自动翻译`}
                     checked={cat.autoTranslate}
                     onChange={(v) => toggleCatTranslate(cat.id, v)}
                   />
@@ -184,6 +194,7 @@ export function FeedsTab() {
                 <div className="group-mgr-layout-control">
                   <FluxDropdown
                     width={96}
+                    ariaLabel={`${cat.name}默认布局`}
                     value={cat.layout}
                     onChange={(v) => updateCatLayout(cat.id, v as ContentLayoutType)}
                     options={LAYOUT_OPTIONS}
@@ -192,7 +203,9 @@ export function FeedsTab() {
 
                 <button
                   className="toggle-action-btn icon-btn"
-                  title="重命名该分类"
+                  title={feverLocal
+                    ? 'Fever：分类改名仅本地，同步服务不会改变'
+                    : '重命名该分类'}
                   onClick={() => openRenameCatModal(cat.id)}
                 >
                   <Icons.edit />
@@ -200,7 +213,9 @@ export function FeedsTab() {
                 <button
                   className="toggle-action-btn btn-danger-text"
                  
-                  title="删除该分类及其全部订阅源"
+                  title={feverLocal
+                    ? 'Fever：分类删除仅本地，同步服务不会改变'
+                    : '删除该分类及其全部订阅源'}
                   onClick={() => setPending({ kind: 'category', catId: cat.id, catName: cat.name })}
                 >
                   <Icons.trash />
@@ -211,7 +226,7 @@ export function FeedsTab() {
 
             <div className={`group-mgr-body${cat.settingsCollapsed ? '' : ' open'}`}>
               {cat.feeds.length === 0 && (
-                <div className="group-mgr-empty">该分类还没有订阅源</div>
+                <div className="group-mgr-empty">此分类还没有订阅源</div>
               )}
               {cat.feeds.map((f) => {
                 /* AI 开关只对使用 AI 的布局有意义（文章/通知/社交——翻译）；
@@ -245,6 +260,7 @@ export function FeedsTab() {
                         categoryOn={cat.autoSummary}
                         onChange={(m) => toggleFeedSummary(cat.id, f.id, m)}
                         title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                        ariaLabel={`${f.name}自动摘要`}
                       />
                       摘要
                     </span>
@@ -257,11 +273,13 @@ export function FeedsTab() {
                         categoryOn={cat.autoTranslate}
                         onChange={(m) => toggleFeedTranslate(cat.id, f.id, m)}
                         title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                        ariaLabel={`${f.name}自动翻译`}
                       />
                       翻译
                     </span>
                     <FluxDropdown
                       width={96}
+                      ariaLabel={`${f.name}内容布局`}
                       value={f.layout}
                       onChange={(v) => updateFeedLayout(cat.id, f.id, v)}
                       options={[
@@ -271,7 +289,9 @@ export function FeedsTab() {
                     />
                     <button
                       className="toggle-action-btn icon-btn"
-                      title="编辑该订阅源（重命名/移动分类/布局/AI 开关）"
+                      title={feverLocal
+                        ? 'Fever：编辑仅本地保存，同步服务不会改变'
+                        : '编辑该订阅源（重命名/移动分类/布局/AI 开关）'}
                       onClick={() => openEditFeedModal(f.id)}
                     >
                       <Icons.edit />
@@ -279,7 +299,9 @@ export function FeedsTab() {
                     <button
                       className="toggle-action-btn btn-danger-text"
 
-                      title="删除该订阅源"
+                      title={feverLocal
+                        ? 'Fever：删除仅本地，同步服务中的订阅不会改变'
+                        : '删除该订阅源'}
                       onClick={() => setPending({ kind: 'feed', catId: cat.id, catName: cat.name, feedId: f.id, feedName: f.name })}
                     >
                       <Icons.trash />

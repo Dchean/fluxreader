@@ -10,6 +10,8 @@ export type ContentLayoutType = 'article' | 'social' | 'image' | 'podcast' | 'no
 export type ViewFilterType = 'all' | 'today' | 'unread' | 'starred';
 export type PaletteTheme = 'blue' | 'zinc' | 'purple' | 'emerald' | 'terracotta';
 export type ThemeMode = 'dark' | 'light' | 'auto';
+/** published_at 的来源：源日期 | 未来源日期被钳制 | 首次见到时间兜底 | 旧库无法判定。 */
+export type PublishedAtSource = 'feed' | 'feed_clamped' | 'inferred_fetch' | 'legacy_unknown';
 
 /* ---- 设置项的运行时取值清单（D4/D5） ----
    同一份声明既供设置页下拉渲染，又供 store 的写/读校验使用：两份清单
@@ -90,6 +92,10 @@ export interface ArticleEntry {
   title: string;
   /** 条目发布时间（unix 毫秒）。排序/今天/相对时间全部由此派生。 */
   publishedAt: number;
+  /** 永久首次见到时间（unix 毫秒）。旧库行由迁移从 fetched_at 回填。 */
+  firstSeenAt?: number;
+  /** 发布时间来源；feed_clamped 表示实际值是钳制抓取时刻，inferred_fetch 表示首次见到兜底。 */
+  publishedAtSource?: PublishedAtSource;
   isRead: boolean;
   isStarred: boolean;
   /** RSS item 的 categories 标签（本就是数组） */

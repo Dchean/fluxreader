@@ -25,6 +25,7 @@ export function ReadingTab() {
         <div className="range-slider-wrap">
           <input
             type="range"
+            aria-label="字号"
             min={13}
             max={24}
             value={settings.fontSize}
@@ -38,6 +39,7 @@ export function ReadingTab() {
         <div className="range-slider-wrap">
           <input
             type="range"
+            aria-label="行高"
             min={130}
             max={240}
             value={settings.lineHeight}
@@ -53,6 +55,7 @@ export function ReadingTab() {
         <div className="range-slider-wrap">
           <input
             type="range"
+            aria-label="正文最大宽度"
             min={560}
             max={1100}
             step={20}

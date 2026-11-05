@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Icons } from './icons';
 import { useFocusTrap } from './useFocusTrap';
@@ -16,18 +16,23 @@ export interface DropdownOption {
   icon?: ReactNode;
 }
 
+/** 设置卡片标题向内部原生控件提供稳定名称；控件自己的 ariaLabel 优先。 */
+const SettingCardLabelContext = createContext<string | null>(null);
+
 interface FluxDropdownProps {
   options: DropdownOption[];
   value: string;
   onChange: (value: string) => void;
   width?: number | string;
+  ariaLabel?: string;
 }
 
-export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDropdownProps) {
+export function FluxDropdown({ options, value, onChange, width = 160, ariaLabel }: FluxDropdownProps) {
   const [open, setOpen] = useState(false);
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
   const triggerRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const settingLabel = useContext(SettingCardLabelContext);
   /* 键盘高亮项：与选中项分开——方向键移动高亮，Enter 才提交（与原生 select 一致） */
   const [activeIndex, setActiveIndex] = useState(-1);
 
@@ -129,7 +134,7 @@ export function FluxDropdown({ options, value, onChange, width = 160 }: FluxDrop
         tabIndex={0}
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label={current?.label}
+        aria-label={ariaLabel ?? settingLabel ?? current?.label}
         onKeyDown={onTriggerKeyDown}
         onClick={() => setOpen((v) => {
           if (!v) setActiveIndex(selectedIndex);
@@ -176,6 +181,8 @@ interface SwitchProps {
   checked: boolean;
   onChange: (val: boolean) => void;
   id?: string;
+  /** 无可见 label 包裹时（如设置卡片右列）使用的稳定名称。 */
+  ariaLabel?: string;
   /** 紧凑档：定宽密集控制列用 32×18，常规档为 40×22 */
   compact?: boolean;
 }
@@ -185,14 +192,17 @@ function SwitchTrack({
   checked,
   onChange,
   id,
+  ariaLabel,
   compact,
   Container,
 }: SwitchProps & { Container: 'label' | 'span' }) {
+  const settingLabel = useContext(SettingCardLabelContext);
   return (
     <Container className={compact ? 'switch-control compact' : 'switch-control'}>
       <input
         type="checkbox"
         id={id}
+        aria-label={ariaLabel ?? settingLabel ?? undefined}
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
       />
@@ -202,18 +212,18 @@ function SwitchTrack({
 }
 
 /** 独立开关：自带 label，整块可点（设置卡片右侧） */
-export function Switch({ checked, onChange, id, compact }: SwitchProps) {
+export function Switch({ checked, onChange, id, ariaLabel, compact }: SwitchProps) {
   return (
-    <SwitchTrack checked={checked} onChange={onChange} id={id} compact={compact} Container="label" />
+    <SwitchTrack checked={checked} onChange={onChange} id={id} ariaLabel={ariaLabel} compact={compact} Container="label" />
   );
 }
 
 /** 行内开关：不渲染自身 label，供外层 label 包裹。
  *  嵌套 label 是无效 HTML，且点文字会双触发；用非 label 容器后，
  *  外层 label 的文字与开关共用一次点击语义。 */
-export function SwitchInline({ checked, onChange, id, compact }: SwitchProps) {
+export function SwitchInline({ checked, onChange, id, ariaLabel, compact }: SwitchProps) {
   return (
-    <SwitchTrack checked={checked} onChange={onChange} id={id} compact={compact} Container="span" />
+    <SwitchTrack checked={checked} onChange={onChange} id={id} ariaLabel={ariaLabel} compact={compact} Container="span" />
   );
 }
 
@@ -232,14 +242,16 @@ interface AiModeSelectProps {
   /** 悬停说明（如「关闭只阻止尚未发起的自动请求」） */
   title?: string;
   width?: number | string;
+  ariaLabel?: string;
 }
 
-export function AiModeSelect({ mode, categoryOn, onChange, title, width = 96 }: AiModeSelectProps) {
+export function AiModeSelect({ mode, categoryOn, onChange, title, width = 96, ariaLabel }: AiModeSelectProps) {
   return (
     <span className="ai-mode-select" title={title}>
       <FluxDropdown
         width={width}
         value={mode}
+        ariaLabel={ariaLabel}
         onChange={(v) => onChange(v as FeedAiMode)}
         options={[
           { value: 'inherit', label: `继承（${categoryOn ? '开' : '关'}）` },
@@ -262,14 +274,17 @@ interface SettingCardProps {
 }
 
 export function SettingCard({ title, desc, children }: SettingCardProps) {
+  const titleId = useId();
   return (
-    <div className="setting-card">
+    <div className="setting-card" role="group" aria-labelledby={titleId}>
       {/* 左列文字允许收缩（min-width:0 在 CSS），控件列 flex-shrink:0 —— 窄窗口下文字不再被压到一字一行 */}
       <div className="setting-card-text">
-        <h5>{title}</h5>
+        <h5 id={titleId}>{title}</h5>
         {desc && <p>{desc}</p>}
       </div>
-      {children}
+      <SettingCardLabelContext.Provider value={title}>
+        {children}
+      </SettingCardLabelContext.Provider>
     </div>
   );
 }

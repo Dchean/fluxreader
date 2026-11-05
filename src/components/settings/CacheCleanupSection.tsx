@@ -6,6 +6,7 @@ import { CACHE_PERIODS } from './shared';
 
 /* ---------- 缓存清理（文章 / AI 产物） ---------- */
 
+// Note: 未读永不清理与远端回灌语义 — 见 .agents/notes/implemented/bug-fix/2026-11-05-缓存清理语义与未读保护.md
 export function CacheCleanupSection() {
   const showToast = useAppStore((s) => s.showToast);
   const dataMode = useAppStore((s) => s.dataMode);
@@ -41,7 +42,7 @@ export function CacheCleanupSection() {
   return (
     <>
       <div className="settings-group-title" style={{ marginTop: 20 }}>缓存清理</div>
-      <SettingCard title="清理时间范围" desc="删除该时间之前的本地缓存（收藏文章与待同步状态始终保留）">
+      <SettingCard title="清理时间范围" desc="只删已读、未收藏且无待同步状态的旧文章；未读文章不会清理">
         <FluxDropdown
           width={110}
           value={String(days)}
@@ -60,13 +61,14 @@ export function CacheCleanupSection() {
       {/* TASK-102：压缩至 ≤48 字——（收藏除外）/正文保留两条约束保留，
           「重新打开文章可再次生成」为推导性解释 → 删除 */}
       <div className="mini-dialog-hint" style={{ marginTop: 8 }}>
-        「清理旧文章」删指定时间前文章（收藏除外）；「清理 AI 缓存」仅清摘要与翻译缓存，正文保留。
+        未读文章不会清理；远端仍有的内容可能在同步后重新导入。
+        「清理 AI 缓存」仅清摘要与翻译缓存，正文保留。
       </div>
       <ConfirmDialog
         open={confirm !== null}
         title={confirm === 'articles' ? '清理旧文章' : '清理 AI 缓存'}
         message={confirm === 'articles'
-          ? `将删除 ${CACHE_PERIODS.find((p) => p.days === days)?.label ?? `${days} 天`} 之前的文章（收藏与待同步项保留），此操作不可撤销。`
+          ? `将删除 ${CACHE_PERIODS.find((p) => p.days === days)?.label ?? `${days} 天`} 之前已读、未收藏且无待同步状态的文章；未读文章不会清理；远端仍有的内容可能在同步后重新导入。此操作不可撤销。`
           : `将清除 ${CACHE_PERIODS.find((p) => p.days === days)?.label ?? `${days} 天`} 之前文章的 AI 摘要与翻译缓存，正文保留。`}
         confirmText="确认清理"
         onConfirm={() => { if (confirm) void run(confirm); }}

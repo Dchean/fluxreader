@@ -19,6 +19,7 @@ export function GeneralTab() {
         <div className="range-slider-wrap">
           <input
             type="range"
+            aria-label="刷新间隔"
             min={5}
             max={720}
             value={settings.refreshInterval}
@@ -32,6 +33,7 @@ export function GeneralTab() {
         <div className="range-slider-wrap">
           <input
             type="range"
+            aria-label="并发抓取数"
             min={1}
             max={16}
             step={1}

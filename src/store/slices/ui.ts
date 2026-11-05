@@ -32,6 +32,7 @@ export type UiSlice = Pick<
   | 'openSearch'
   | 'closeSearch'
   | 'answerCloseAsk'
+  | 'dismissCloseAsk'
   | 'openLightbox'
   | 'closeLightbox'
   | 'openNewCategoryModal'
@@ -136,7 +137,14 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   /* ================= 弹层 ================= */
 
   openSettings: () => set({ settingsOpen: true }),
-  closeSettings: () => set({ settingsOpen: false }),
+  // Note: 设置关闭的所有入口必须经此守卫；授权流中只能提示、不得卸载弹窗 — 见 .agents/notes/implemented/bug-fix/2026-11-04-关闭取消语义与授权关闭守卫.md
+  closeSettings: () => {
+    if (get().githubFlow || get().githubLoggingIn) {
+      get().showToast('GitHub 授权进行中，等待网页授权完成后再关闭');
+      return;
+    }
+    set({ settingsOpen: false });
+  },
   switchSettingsTab: (tab) => set({ settingsTab: tab }),
   openSettingsTab: (tab) => set({ settingsOpen: true, settingsTab: tab }),
   openSearch: () => set({ searchOpen: true }),
@@ -157,6 +165,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
         ),
       );
   },
+  dismissCloseAsk: () => set({ closeAskVisible: false }),
   openLightbox: (url, entryId) => set({ lightboxUrl: url, lightboxEntryId: entryId ?? null }),
   closeLightbox: () => set({ lightboxUrl: null, lightboxEntryId: null }),
   openNewCategoryModal: () => set({ newCategoryModalOpen: true }),

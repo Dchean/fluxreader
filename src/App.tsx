@@ -10,8 +10,10 @@ import { ErrorCenterDialog } from './components/ErrorCenter';
 import { ContextMenuHost } from './components/ContextMenu';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { useTauriEvent } from './components/useTauriEvent';
-import { anyOverlayOpen, shouldYieldToOverlay } from './components/shortcutYield';
+import { anyOverlayOpen, isInteractiveSpaceTarget, shouldYieldToOverlay } from './components/shortcutYield';
 import { jkLayoutAllowed, jkNextIndex } from './lib/jkNavigation';
+import type { SyncQueueStats } from './lib/api';
+import type { BackendSyncActivityEvent } from './store/types';
 /* ============================================================
    Application Shell
 
@@ -113,20 +115,33 @@ export default function App() {
     }
   });
 
-  /* ---------- 后台 Miniflux 自动同步进行中状态（侧栏 spinner 可见性） ---------- */
-  useTauriEvent('sync-running', () => useAppStore.setState({ backgroundSyncing: true }));
-  useTauriEvent('sync-idle', () => useAppStore.setState({ backgroundSyncing: false }));
+  useTauriEvent<BackendSyncActivityEvent>('sync-activity', (event) => {
+    useAppStore.getState().applyBackendSyncActivity(event);
+  });
 
   /* ---------- TASK-124（审计 P2-6①）：同步队列变化事件——四态展示接入真实链路 ----------
      Rust 在本地入队事务提交（set_read/set_starred/set_read_bulk/mark_all_read）、
      即时推送与 states 推送段确认·失败、认证/网络阻塞后发 sync-queue-changed
-     （payload = {waiting, failed, last_error}）。此前队列统计只随 reloadFromBackend
+     （payload = 队列生命周期分类统计）。此前队列统计只随 reloadFromBackend
      刷新——本地标读入队后 pill 仍显示「后端已同步」（探针 P8 本体）。
-     监听器只调 applySyncQueueChanged（store 动作）：写队列三字段，并可在手动
-     同步 states 阶段补记远端写回确认；不触碰 syncConnected，也不以队列清空
-     结束整轮 syncing。未配置同步时 Rust 不发事件，pill 保持「本地模式」不误报。 */
-  useTauriEvent<{ waiting: number; failed: number; last_error: string | null }>('sync-queue-changed', (e) => {
+     监听器只调 applySyncQueueChanged（store 动作）：写队列分类字段，并按最新
+     统计设置或撤销手动同步 states 阶段的远端写回确认；不触碰 syncConnected，
+     也不以队列清空结束整轮 syncing。未配置同步时 Rust 不发事件，pill 保持
+     「本地模式」不误报。 */
+  useTauriEvent<SyncQueueStats>('sync-queue-changed', (e) => {
     useAppStore.getState().applySyncQueueChanged(e);
+  });
+
+  /* 即时状态推送的基础设施错误（计划构建/失败标记/出队写库失败）不能只进
+     Rust 日志：转换为带重试入口的可见错误，普通推送失败仍由队列 last_error
+     负责，不在这里重复刷屏。 */
+  useTauriEvent<{ message: string }>('sync-error', (e) => {
+    const message = e?.message?.trim() || '状态同步失败';
+    useAppStore.getState().showToast(message, {
+      label: '重试',
+      key: 'sync:instant-push',
+      run: () => { void useAppStore.getState().triggerManualSync(); },
+    });
   });
 
   /* ---------- OPT-009 B3：订阅 outbox 状态变化事件——持久回执接入真实链路 ----------
@@ -201,13 +216,12 @@ export default function App() {
            inInput 判断之前，输入框内合成同样会到达这里，故不能依赖焦点守卫。 */
         // Note: 守卫口径与「为何不全局拦截」 — 见 .agents/notes/implemented/feature/2026-11-02-前端交互正确性与感知体验.md
         if (e.isComposing || e.keyCode === 229) return;
-        /* 浮层从最顶层开始依次关闭。
-           TASK-100 U7：补 closeAskVisible——此前 CloseAskDialog 是唯一 Esc 关不掉
-           的浮层。关序与视觉层级一致（视觉在上者先关）：确认框 3000（自带 Esc，
-           捕获级 stopPropagation）> 各弹窗 150 > 全屏播放器 140。
-           Esc 语义 = 本次按「最小化到托盘」应答且**不记住选择**（不替用户做出
-           「不再询问」的决定，下次关闭仍会询问；记住需显式勾选）。 */
-        if (s.closeAskVisible) s.answerCloseAsk('tray', false);
+        /* 浮层按既有 Esc 链依次关闭。CloseAskDialog 与其他 ModalOverlay 同为
+           z-index 150，本身不监听 Esc；本分支先取消关闭询问，再关闭搜索/迷你
+           弹窗/错误中心/设置，最后处理灯箱、全屏播放器与阅读器。
+           Esc 语义 = 仅取消本次关闭询问：不最小化、不退出、不写 remember；
+           只有显式按钮才提交关闭动作。 */
+        if (s.closeAskVisible) s.dismissCloseAsk();
         else if (s.searchOpen) s.closeSearch();
         else if (s.newCategoryModalOpen) s.closeMiniModal('newCategory');
         else if (s.addFeedModalOpen) s.closeMiniModal('addFeed');
@@ -251,12 +265,12 @@ export default function App() {
       }
 
       /* Space：播放器激活时播放/暂停（快捷键表承诺）。
-         但若该按键已被更具体的控件消费（卡片/下拉/菜单等补了 role+tabIndex 后
-         可按 Space 激活自身，见 REQ-008），则让路——否则同一次 Space 会
-         既执行控件动作、又切换播放（双重动作）。
-         只在此分支判断 defaultPrevented，不动其它快捷键的既有语义。 */
+         原生交互控件（按钮/链接/表单/菜单项等）拥有自己的 Space 语义，必须
+         整体让路；卡片虽常带 role=button，但不在此清单内，仍交给播放器全局
+         切换。defaultPrevented 继续兜住更具体的自定义控件处理器。
+         只在此分支判断，不动其它快捷键的既有语义。 */
       if (e.key === ' ' && s.player.isActive) {
-        if (e.defaultPrevented) return;
+        if (e.defaultPrevented || isInteractiveSpaceTarget(target)) return;
         e.preventDefault();
         s.togglePlayerPlay();
         return;
@@ -270,14 +284,10 @@ export default function App() {
         s.toggleCurrentReadStatus();
         return;
       }
-      /* J/K 键盘流：选中即打开（已确认的产品决策）。
-         TASK-114 X3：布局门控从「仅 article」扩展为「image 之外全部放行」——
-         全部虚拟化布局复用 Timeline 的 moveCardFocus/focusIndex 基建（选中切换
-         后 focusIndex 经既有 effect 跟随，卡片 roving tabindex 同步）；画廊
-         （image）：不支持 J/K——产品判断（OPT-017C 起画廊为列模型虚拟化，
-         门控维持排除 image 不变）。门控与推进判定收口在纯函数
-         jkLayoutAllowed/jkNextIndex（src/lib/jkNavigation.ts，与 Timeline
-         虚拟化开关同一口径），回归网直接断言真值表与 store 层五布局模拟。 */
+      /* J/K 键盘流：五布局统一「选中即打开」。activeArticleId 变化后由
+         Timeline 负责目标卡入窗 + DOM focus + aria-current；门控与推进判定
+         仍收口在纯函数 jkLayoutAllowed/jkNextIndex，回归网直接断言真值表、
+         五布局 store 模拟与真实组件焦点。 */
       if (e.key === 'j' || e.key === 'k') {
         if (!jkLayoutAllowed(s.activeContentLayout)) return;
         const items = selectVisibleEntries(s);
@@ -292,16 +302,17 @@ export default function App() {
 
   const gridClass = activeContentLayout === 'article' ? 'layout-3col' : 'layout-2col';
 
-  /* 列表列宽拖动：拖动分隔条调整文章列表列宽（280–560px），松手持久化。
+  /* 列表列宽拖动：拖动分隔条调整文章列表列宽（280–420px），松手持久化。
+     视口过窄时 CSS 还会按 37vw 收缩，保证阅读列不被固定列宽挤没。
      TASK-067 N9：拖动期间只更新本地拖拽态——此前 onMove 每像素调一次
      updateSettings（整包序列化 + set_setting IPC + 全 App 重渲染），一次拖动
      几十上百次写库；松手才一次性持久化。 */
   const startDragListWidth = (e: React.MouseEvent) => {
     e.preventDefault();
     const startX = e.clientX;
-    const startWidth = listWidth;
+    const startWidth = Math.min(420, listWidth);
     const onMove = (ev: MouseEvent) => {
-      setDragWidth(Math.min(560, Math.max(280, startWidth + (ev.clientX - startX))));
+      setDragWidth(Math.min(420, Math.max(280, startWidth + (ev.clientX - startX))));
     };
     const onUp = () => {
       window.removeEventListener('mousemove', onMove);

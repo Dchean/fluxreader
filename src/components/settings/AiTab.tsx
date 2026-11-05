@@ -146,6 +146,7 @@ export function AiTab() {
       <SettingCard title="API Base URL" desc={cfg.preset === 'custom' ? '任意 OpenAI 兼容地址（newapi 等）' : '预设自动填入，可覆盖'}>
         <input
           type="text"
+          aria-label="API Base URL"
           className="setting-input"
           placeholder="https://your-newapi.example.com/v1"
           value={cfg.baseUrl}
@@ -155,6 +156,7 @@ export function AiTab() {
       <SettingCard title="API Key" desc="密钥仅存本地 SQLite">
         <input
           type="password"
+          aria-label="API Key"
           className="setting-input"
           placeholder="sk-…"
           value={cfg.apiKey}
@@ -172,6 +174,7 @@ export function AiTab() {
         ) : (
           <input
             type="text"
+            aria-label="当前使用模型"
             className="setting-input"
             placeholder="模型名（测试后可选）"
             value={cfg.model}
@@ -192,16 +195,18 @@ export function AiTab() {
 
       <div className="settings-group-title">系统提示词</div>
       <div className="prompt-editor-card">
-        <div className="prompt-editor-title">AI 摘要提示词 (Prompt)</div>
+        <div className="prompt-editor-title">摘要提示词</div>
         <textarea
+          aria-label="摘要提示词"
           className="setting-prompt-textarea"
           value={cfg.summaryPrompt}
           onChange={(e) => setCfg((c) => ({ ...c, summaryPrompt: e.target.value }))}
         />
       </div>
       <div className="prompt-editor-card">
-        <div className="prompt-editor-title">AI 翻译提示词 (Prompt)</div>
+        <div className="prompt-editor-title">翻译提示词</div>
         <textarea
+          aria-label="翻译提示词"
           className="setting-prompt-textarea"
           value={cfg.translatePrompt}
           onChange={(e) => setCfg((c) => ({ ...c, translatePrompt: e.target.value }))}

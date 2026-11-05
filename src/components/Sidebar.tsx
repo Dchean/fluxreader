@@ -10,8 +10,7 @@ import {
   resolveFeedLayout,
 } from '../store';
 import { Icons } from './icons';
-import { syncPillLabel } from '../lib/syncPill';
-import { syncActivityLabel } from '../store/slices/sync';
+import { SYNC_SUCCESS_LABEL_MS, syncPillView } from '../lib/syncPill';
 import type { ContentLayoutType, ViewFilterType } from '../types';
 
 /* ============================================================
@@ -60,16 +59,21 @@ export function Sidebar() {
   const activeViewFilter = useAppStore((s) => s.activeViewFilter);
   const activeFeedFilter = useAppStore((s) => s.activeFeedFilter);
   const syncStatus = useAppStore((s) => s.syncStatus);
-  const syncActivityOwner = useAppStore((s) => s.syncActivityOwner);
-  const syncActivityToken = useAppStore((s) => s.syncActivityToken);
-  const syncStage = useAppStore((s) => s.syncStage);
-  const syncStartedAt = useAppStore((s) => s.syncStartedAt);
-  const syncRemoteWriteConfirmed = useAppStore((s) => s.syncRemoteWriteConfirmed);
+  const syncFailure = useAppStore((s) => s.syncFailure);
   const backgroundSyncing = useAppStore((s) => s.backgroundSyncing);
   const syncConnected = useAppStore((s) => s.syncConnected);
+  const syncAccount = useAppStore((s) => s.syncAccount);
+  const syncProtocol = useAppStore((s) => s.syncProtocol);
+  const syncLastSync = useAppStore((s) => s.syncLastSync);
+  const syncSucceededAt = useAppStore((s) => s.syncSucceededAt);
   /* TASK-116 四态展示：队列统计（等待/部分失败），启动装载与同步完成后的 reload 刷新 */
   const syncWaiting = useAppStore((s) => s.syncWaiting);
   const syncFailed = useAppStore((s) => s.syncFailed);
+  const syncLocalOnly = useAppStore((s) => s.syncLocalOnly);
+  const syncBindableRetry = useAppStore((s) => s.syncBindableRetry);
+  const syncExpiredUnconfirmed = useAppStore((s) => s.syncExpiredUnconfirmed);
+  const syncQueueLastError = useAppStore((s) => s.syncQueueLastError);
+  const subOutboxStats = useAppStore((s) => s.subOutboxStats);
 
   const selectLayout = useAppStore((s) => s.selectLayout);
   const selectView = useAppStore((s) => s.selectView);
@@ -93,41 +97,49 @@ export function Sidebar() {
   const badge = useAppStore(useShallow(selectViewCounts));
   const treeCounts = useAppStore(useShallow(selectTreeCounts));
 
-  /* OPT-022：只显示真实已等待时长；它解释“仍在哪个阶段”，不参与终态判定。 */
+  /* 同步中每秒刷新一次；成功文案到期由独立 timeout 触发重渲染。 */
   const [syncClock, setSyncClock] = useState(() => Date.now());
   useEffect(() => {
-    if (syncStatus !== 'syncing' || syncStartedAt == null) return;
+    if (syncStatus !== 'syncing' && !backgroundSyncing) return;
     const timer = setInterval(() => setSyncClock(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [syncStatus, syncStartedAt]);
+  }, [syncStatus, backgroundSyncing]);
+  useEffect(() => {
+    if (syncSucceededAt == null) return;
+    const now = Date.now();
+    const remaining = SYNC_SUCCESS_LABEL_MS - (now - syncSucceededAt);
+    if (remaining <= 0) {
+      return;
+    }
+    const timer = setTimeout(() => setSyncClock(Date.now()), remaining + 20);
+    return () => clearTimeout(timer);
+  }, [syncSucceededAt]);
 
   /* 仅展示与当前布局匹配的分类组及其子源（分类布局匹配 or 任一子源覆盖匹配） */
   const filteredCategories = categories.filter(
     (c) => c.layout === activeContentLayout || c.feeds.some((f) => resolveFeedLayout(f, c.layout) === activeContentLayout),
   );
 
-  const isBusy = syncStatus === 'syncing' || backgroundSyncing;
-  /* 提示语一律用「同步」口径：本指示器描述的是与后端的同步状态，
-     与「刷新此源 / 刷新全部订阅源」这类抓取动作是两件事，不得混用。
-     TASK-116 X1：文案收口到纯函数 syncPillLabel（src/lib/syncPill.ts）——
-     优先级 error > syncing > waiting > connected，修复「手动同步进行中失败态
-     被 syncing 覆盖」；waiting>0 显示「等待同步 N 条」，failed>0 追加
-     「· 部分失败」。真值表由回归网 t116 断言驱动。 */
-  const syncLabel =
-    syncStatus === 'syncing' && syncActivityOwner && syncActivityToken != null
-      ? `${syncActivityLabel({
-          owner: syncActivityOwner,
-          stage: syncStage,
-          remoteConfirmed: syncRemoteWriteConfirmed,
-          elapsedMs: syncStartedAt == null ? 0 : Math.max(0, syncClock - syncStartedAt),
-        })}${syncFailed > 0 ? ' · 部分失败' : ''}`
-      : syncPillLabel({
-          syncStatus,
-          backgroundSyncing,
-          syncConnected,
-          waiting: syncWaiting,
-          failed: syncFailed,
-        });
+  /* 常驻文案只表达账户/同步态；数量与原因收进 tooltip 和 aria 详情。 */
+  const syncView = syncPillView({
+    syncStatus,
+    backgroundSyncing,
+    syncConnected,
+    account: syncAccount,
+    protocol: syncProtocol,
+    lastSync: syncLastSync,
+    waiting: syncWaiting,
+    failed: syncFailed,
+    localOnly: syncLocalOnly,
+    bindableRetry: syncBindableRetry,
+    expiredUnconfirmed: syncExpiredUnconfirmed,
+    subscription: subOutboxStats,
+    succeededAt: syncSucceededAt,
+    lastError: syncFailure?.message ?? syncQueueLastError,
+    now: syncSucceededAt != null && syncClock < syncSucceededAt
+      ? syncSucceededAt
+      : syncClock,
+  });
 
   return (
     <aside className="sidebar">
@@ -140,12 +152,11 @@ export function Sidebar() {
           </div>
         </div>
 
-        <div className="sidebar-search-pill" onClick={openSearch} role="button" tabIndex={0}
-          onKeyDown={(e) => e.key === 'Enter' && openSearch()}>
+        <button type="button" className="sidebar-search-pill" onClick={openSearch}>
           <Icons.search />
           <span>全局搜索…</span>
           <span className="kbd-tag">Ctrl+K</span>
-        </div>
+        </button>
 
         {/* Section 1: 视图 */}
         <div className="nav-section-title">视图</div>
@@ -154,6 +165,7 @@ export function Sidebar() {
             key={v.id}
             className={`nav-tab-item ${activeViewFilter === v.id ? 'active-view' : ''}`}
             onClick={() => selectView(v.id)}
+            aria-pressed={activeViewFilter === v.id}
           >
             <span className="nav-icon"><v.icon /></span>
             <span>{v.label}</span>
@@ -168,6 +180,7 @@ export function Sidebar() {
             key={l.id}
             className={`nav-tab-item ${activeContentLayout === l.id ? 'active-layout' : ''}`}
             onClick={() => selectLayout(l.id)}
+            aria-pressed={activeContentLayout === l.id}
           >
             <span className="nav-icon"><l.icon /></span>
             <span>{l.label}</span>
@@ -200,6 +213,7 @@ export function Sidebar() {
         <button
           className={`feed-leaf-item feed-all-row ${activeFeedFilter === 'all' ? 'active-feed' : ''}`}
           onClick={() => selectFeed('all')}
+          aria-current={activeFeedFilter === 'all' ? 'true' : undefined}
         >
           <div className="feed-leaf-name">
             <span className="feed-favicon-fallback"><Icons.grid /></span>
@@ -221,16 +235,15 @@ export function Sidebar() {
           return (
             <div className="feed-group-tree" key={cat.id}>
               <div className={`feed-folder-header ${activeFeedFilter === cat.id ? 'active-feed' : ''}`}>
-                <div
+                <button
+                  type="button"
                   className="feed-folder-title"
                   onClick={() => selectFeed(cat.id)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => e.key === 'Enter' && selectFeed(cat.id)}
+                  aria-current={activeFeedFilter === cat.id ? 'true' : undefined}
                 >
                   <span className="nav-icon"><Icons.folder /></span>
                   <span>{cat.name}</span>
-                </div>
+                </button>
                 <div className="feed-folder-right">
                   <span className="feed-count-badge" title="当前筛选下的条数">{treeCounts.get(cat.id) ?? 0}</span>
                   <button
@@ -262,52 +275,64 @@ export function Sidebar() {
                     <div
                       key={f.id}
                       className={`feed-leaf-item ${activeFeedFilter === f.id ? 'active-feed' : ''}`}
-                      onClick={() => selectFeed(f.id)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => e.key === 'Enter' && selectFeed(f.id)}
                       title={f.name}
                       data-ctx="feed"
                       data-id={f.id}
                       data-cat={cat.id}
+                      onClick={(e) => {
+                        const target = e.target as Element;
+                        if (target.closest('button, [role="menu"], [role="menuitem"]')) return;
+                        selectFeed(f.id);
+                      }}
                     >
-                      <div className="feed-leaf-name">
-                        <FeedFavicon src={f.favicon ?? ''} />
-                        <span className="feed-leaf-title">{f.name}</span>
-                        {f.fetchFailed && (
-                          <span
-                            className="feed-error-dot"
-                            title="最近一次抓取失败"
-                          >
-                            ⚠
-                          </span>
-                        )}
-                      </div>
-                      <div className="feed-leaf-right">
-                        <span className="feed-leaf-actions">
-                          <button
-                            className="feed-row-act-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              refreshOneFeed(f.id);
-                            }}
-                            title="刷新此源"
-                          >
-                            <Icons.refresh />
-                          </button>
-                          <button
-                            className="feed-row-act-btn"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openEditFeedModal(f.id);
-                            }}
-                            title="编辑订阅源"
-                          >
-                            <Icons.edit />
-                          </button>
+                      <button
+                        type="button"
+                        className="feed-leaf-select"
+                        onClick={() => selectFeed(f.id)}
+                        aria-current={activeFeedFilter === f.id ? 'true' : undefined}
+                      >
+                        <span className="feed-leaf-name">
+                          <FeedFavicon src={f.favicon ?? ''} />
+                          <span className="feed-leaf-title">{f.name}</span>
+                          {f.fetchFailed && (
+                            <span
+                              className="feed-error-dot"
+                              title="最近一次抓取失败"
+                            >
+                              ⚠
+                            </span>
+                          )}
                         </span>
                         <span className="feed-count-badge" title="当前筛选下的条数">{treeCounts.get(f.id) ?? 0}</span>
-                      </div>
+                      </button>
+                      <span className="feed-leaf-actions">
+                        <button
+                          type="button"
+                          className="feed-row-act-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            refreshOneFeed(f.id);
+                          }}
+                          title="刷新此源"
+                          aria-label={`刷新订阅源 ${f.name}`}
+                          data-feed-action="refresh"
+                        >
+                          <Icons.refresh />
+                        </button>
+                        <button
+                          type="button"
+                          className="feed-row-act-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openEditFeedModal(f.id);
+                          }}
+                          title="编辑订阅源"
+                          aria-label={`编辑订阅源 ${f.name}`}
+                          data-feed-action="edit"
+                        >
+                          <Icons.edit />
+                        </button>
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -332,28 +357,31 @@ export function Sidebar() {
             <span className="error-center-badge">{errors.length}</span>
           </button>
         )}
-        <div className="sync-status-row">
-          <button className="sync-status-pill" onClick={() => openSettingsTab('sync')}>
-            <div className={`sync-dot ${syncConnected ? '' : 'sync-dot-off'}`} />
-            <span>{syncLabel}</span>
+        <div className={`sync-status-row sync-status-row--${syncView.tone}`}>
+          <button
+            type="button"
+            className="sync-indicator-button"
+            onClick={() => { void triggerManualSync(); }}
+            disabled={syncView.busy}
+            aria-label={syncView.syncAriaLabel}
+            aria-busy={syncView.busy}
+            title={syncView.title}
+          >
+            <span className={`sync-dot sync-dot--${syncView.tone}`} aria-hidden="true" />
           </button>
           <button
-            className={`sync-refresh-btn ${isBusy ? 'spinning' : ''}`}
-            onClick={triggerManualSync}
-            disabled={isBusy}
-            title="刷新全部订阅源"
+            type="button"
+            className="sync-status-pill"
+            onClick={() => openSettingsTab('sync')}
+            aria-label={syncView.settingsAriaLabel}
+            title={syncView.title}
           >
-            <Icons.refresh />
+            <span>{syncView.label}</span>
           </button>
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {syncView.announcement}
+          </span>
         </div>
-        <button
-          className="sidebar-refresh-all btn-primary"
-          onClick={triggerManualSync}
-          disabled={isBusy}
-        >
-          <Icons.refresh />
-          <span>{isBusy ? '刷新中…' : '刷新全部订阅源'}</span>
-        </button>
         <button className="nav-tab-item" onClick={openSettings}>
           <span className="nav-icon"><Icons.settings /></span>
           <span>设置中心</span>

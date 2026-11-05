@@ -9,6 +9,12 @@ import { normalizeFeedAiMode } from '../types';
 import type { ArticleEntry, ContentLayoutType, FeedAiMode, FeedItem } from '../types';
 import { anchorScopeNav } from './anchorScopeNav';
 import { CoverImage } from './CoverImage';
+import {
+  addFeedShowsSyncSwitch,
+  addFeedSyncHint,
+  refreshAllLabel,
+  searchErrorVisible,
+} from '../lib/copyPolicy';
 
 /* TASK-100：LAYOUT_NO_AI 双定义收敛——唯一定义在 settings/shared.ts，
    此处（与设置页）共用同一份，避免改一处漏一处。 */
@@ -59,9 +65,11 @@ function SearchModalBody({ autoFocusInput, onClose }: { autoFocusInput: boolean;
   const [debounced, setDebounced] = useState('');
   const [results, setResults] = useState<ArticleEntry[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchNonce, setSearchNonce] = useState(0);
   const [cursor, setCursor] = useState(0);
   const [searchError, setSearchError] = useState(false);
   const feedIndex = useAppStore((s) => s.feedIndex);
+  const syncMode = useAppStore((s) => s.settings.syncMode);
   const listRef = useRef<HTMLDivElement>(null);
   /* 键盘移动标记：scrollIntoView 只在键盘导航时触发 */
   const keyboardNav = useRef(false);
@@ -124,12 +132,18 @@ function SearchModalBody({ autoFocusInput, onClose }: { autoFocusInput: boolean;
     return () => {
       alive = false;
     };
-  }, [debounced]);
+  }, [debounced, searchNonce]);
 
   /* 派生值：空查询时渲染归零，避免同步 setState */
   const resultsEffective = debounced ? results : EMPTY_RESULTS;
   const searchingEffective = debounced !== '' && searching;
   const searchErrorEffective = debounced ? searchError : false;
+  const retrySearch = () => {
+    if (!debounced) return;
+    setSearchError(false);
+    setSearching(true);
+    setSearchNonce((nonce) => nonce + 1);
+  };
 
   /* 命令表：全部命令（含快捷键 hint）；订阅源/文章按当前过滤 */
   const items = useMemo<PaletteItem[]>(() => {
@@ -140,7 +154,7 @@ function SearchModalBody({ autoFocusInput, onClose }: { autoFocusInput: boolean;
     const out: PaletteItem[] = [];
 
     const commands: { label: string; hint: string; run: () => void }[] = [
-      { label: '刷新全部订阅源', hint: '', run: () => s.triggerManualSync() },
+      { label: refreshAllLabel(syncMode), hint: '', run: () => s.triggerManualSync() },
       { label: '将当前列表全部标为已读', hint: '', run: () => s.markCurrentViewAllRead() },
       { label: '切换 未读/全部 筛选', hint: '', run: () => s.toggleTimelineFilter() },
       { label: '切换深色 / 浅色模式', hint: '', run: () => {
@@ -206,7 +220,7 @@ function SearchModalBody({ autoFocusInput, onClose }: { autoFocusInput: boolean;
       }
     }
     return out;
-  }, [q, feedIndex, resultsEffective]);
+  }, [q, feedIndex, resultsEffective, syncMode]);
 
   /* 光标重置：渲染期键检测模式，避免 set-state-in-effect */
   // Note: set-state-in-effect — 此处确有「effect 内 setState」；因该状态仅由本浮层的
@@ -292,6 +306,7 @@ function SearchModalBody({ autoFocusInput, onClose }: { autoFocusInput: boolean;
         <Icons.search />
         <input
           type="text"
+          aria-label="全局搜索"
           /* ModalOverlay 关闭态仍挂载 children（只靠 inert 挡焦点），裸 autoFocus
              会在关闭态挂载时抢焦点（jsdom 无 inert 即复现；条件 autoFocus 是
              源码级保证，不依赖各引擎 inert 实现差异）。 */
@@ -304,11 +319,25 @@ function SearchModalBody({ autoFocusInput, onClose }: { autoFocusInput: boolean;
         />
         <span className="kbd-tag" style={{ marginLeft: 0 }}>Esc</span>
       </div>
+      {searchErrorVisible(debounced, searchError) && (
+        <div className="search-error-state" role="alert">
+          <span>本地搜索失败</span>
+          <button
+            className="toggle-action-btn"
+            aria-label="重试本地搜索"
+            onClick={retrySearch}
+          >
+            重试
+          </button>
+        </div>
+      )}
       <div className="cp-list" ref={listRef} role="listbox">
         {items.length === 0 ? (
-          <div className="search-empty">
-            {searchingEffective ? '搜索中…' : searchErrorEffective ? '搜索失败，请检查网络' : '没有结果'}
-          </div>
+          searchErrorEffective ? null : (
+            <div className="search-empty">
+              {searchingEffective ? '搜索中…' : '没有匹配结果'}
+            </div>
+          )
         ) : (
           <>
             {renderGroup('command', '操作')}
@@ -322,7 +351,6 @@ function SearchModalBody({ autoFocusInput, onClose }: { autoFocusInput: boolean;
         <span><kbd>⏎</kbd> 打开</span>
         <span><kbd>Esc</kbd> 关闭</span>
         <div style={{ flex: 1 }} />
-        <span>支持文章 · 订阅源 · 命令</span>
       </div>
     </>
   );
@@ -387,6 +415,7 @@ export function NewCategoryModal() {
           <label>分类名称</label>
           <input
             type="text"
+            aria-label="分类名称"
             className="setting-input"
             style={{ width: '100%' }}
             placeholder="例如：人工智能前沿、设计影像"
@@ -399,6 +428,7 @@ export function NewCategoryModal() {
           <label>默认内容布局</label>
           <FluxDropdown
             width={'100%'}
+            ariaLabel="默认内容布局"
             value={layout}
             onChange={(v) => setLayout(v as ContentLayoutType)}
             options={LAYOUT_OPTIONS}
@@ -434,6 +464,7 @@ export function AddFeedModal() {
   const addFeed = useAppStore((s) => s.addFeed);
   const categories = useAppStore((s) => s.categories);
   const syncConnected = useAppStore((s) => s.syncConnected);
+  const syncProtocol = useAppStore((s) => s.syncProtocol);
 
   /* 每次打开重挂载（key），初始值即打开瞬间的目标分类 */
   return (
@@ -443,6 +474,7 @@ export function AddFeedModal() {
         initialCatId={addFeedTargetCatId || categories[0]?.id || ''}
         categories={categories}
         syncConnected={syncConnected}
+        syncProtocol={syncProtocol}
         onCancel={() => closeMiniModal('addFeed')}
         onSubmit={addFeed}
       />
@@ -454,12 +486,14 @@ function AddFeedModalBody({
   initialCatId,
   categories,
   syncConnected,
+  syncProtocol,
   onCancel,
   onSubmit,
 }: {
   initialCatId: string;
   categories: { id: string; name: string; layout?: string; autoSummary?: boolean; autoTranslate?: boolean }[];
   syncConnected: boolean;
+  syncProtocol: 'greader' | 'fever' | null;
   onCancel: () => void;
   onSubmit: (catId: string, url: string, title: string, layout: string, summaryMode: FeedAiMode, translateMode: FeedAiMode, syncToBackend: boolean) => void;
 }) {
@@ -470,7 +504,16 @@ function AddFeedModalBody({
   /* OPT-011：新增源默认继承分类（默认分类仍 false，先不烧 AI）；用户可显式开/关 */
   const [summaryMode, setSummaryMode] = useState<FeedAiMode>('inherit');
   const [translateMode, setTranslateMode] = useState<FeedAiMode>('inherit');
-  const [syncToBackend, setSyncToBackend] = useState(true);
+  const [syncToBackend, setSyncToBackend] = useState(false);
+  /* 连接协议切换到 Fever 时清掉本次同步选择：Fever 没有订阅写回端点，
+     不能把上一次 GReader 的勾选带进提交（后端另有协议门控）。
+     渲染期对账而非 effect：协议变化的下一次 commit 即清除，避免 effect
+     额外一帧里客户端仍持有旧勾选。 */
+  const [lastSyncProtocol, setLastSyncProtocol] = useState(syncProtocol);
+  if (lastSyncProtocol !== syncProtocol) {
+    setLastSyncProtocol(syncProtocol);
+    if (syncProtocol === 'fever' && syncToBackend) setSyncToBackend(false);
+  }
   /* 生效布局：显式选择优先，否则目标分类的布局——画廊/播客布局隐藏 AI 开关 */
   const curCat = categories.find((c) => c.id === catId);
   const curCatLayout = curCat?.layout ?? 'article';
@@ -484,6 +527,7 @@ function AddFeedModalBody({
           <label>归属分类</label>
           <FluxDropdown
             width={'100%'}
+            ariaLabel="归属分类"
             value={catId}
             onChange={setCatId}
             options={categories.map((c) => ({ value: c.id, label: c.name }))}
@@ -494,6 +538,7 @@ function AddFeedModalBody({
           <label>RSS/Atom 订阅地址</label>
           <input
             type="text"
+            aria-label="RSS/Atom 订阅地址"
             className="setting-input"
             style={{ width: '100%' }}
             placeholder="https://example.com/rss.xml"
@@ -501,7 +546,7 @@ function AddFeedModalBody({
             onChange={(e) => setUrl(e.target.value)}
           />
           <div className="mini-dialog-hint">
-            未连接后端也能添加：客户端会直接抓取源站，连接后端后自动同步。
+            {addFeedSyncHint(syncConnected, syncProtocol)}
           </div>
         </div>
 
@@ -509,6 +554,7 @@ function AddFeedModalBody({
           <label>订阅源名称</label>
           <input
             type="text"
+            aria-label="订阅源名称"
             className="setting-input"
             style={{ width: '100%' }}
             placeholder="例如：OpenAI Blog"
@@ -521,6 +567,7 @@ function AddFeedModalBody({
           <label>内容布局绑定</label>
           <FluxDropdown
             width={'100%'}
+            ariaLabel="内容布局绑定"
             value={layout}
             onChange={setLayout}
             options={[
@@ -539,6 +586,7 @@ function AddFeedModalBody({
                   categoryOn={curCat?.autoSummary ?? false}
                   onChange={setSummaryMode}
                   title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                  ariaLabel="自动摘要"
                 />
                 自动摘要
               </label>
@@ -548,15 +596,16 @@ function AddFeedModalBody({
                   categoryOn={curCat?.autoTranslate ?? false}
                   onChange={setTranslateMode}
                   title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                  ariaLabel="自动翻译"
                 />
                 自动翻译
               </label>
             </>
           )}
-          {syncConnected && (
+          {addFeedShowsSyncSwitch(syncConnected, syncProtocol) && (
             <label className="mini-dialog-checkbox">
               <SwitchInline checked={syncToBackend} onChange={(v) => setSyncToBackend(v)} />
-              同步到后端
+              同步到账户
             </label>
           )}
         </div>
@@ -650,7 +699,7 @@ function EditFeedModalBody({
 
       <div className="mini-dialog-field">
         <label>订阅源地址</label>
-        <input type="text" className="setting-input" style={{ width: '100%' }} value={feed.url} disabled />
+        <input type="text" aria-label="订阅源地址" className="setting-input" style={{ width: '100%' }} value={feed.url} disabled />
         <div className="mini-dialog-hint">地址不可修改（如需更换请删除后重新添加）</div>
       </div>
 
@@ -658,6 +707,7 @@ function EditFeedModalBody({
         <label>订阅源名称</label>
         <input
           type="text"
+          aria-label="订阅源名称"
           className="setting-input"
           style={{ width: '100%' }}
           placeholder={feed.name}
@@ -670,6 +720,7 @@ function EditFeedModalBody({
         <label>归属分类</label>
         <FluxDropdown
           width={'100%'}
+          ariaLabel="归属分类"
           value={catId}
           onChange={setCatId}
           options={categories.map((c) => ({ value: c.id, label: c.name }))}
@@ -680,6 +731,7 @@ function EditFeedModalBody({
         <label>内容布局绑定</label>
         <FluxDropdown
           width={'100%'}
+          ariaLabel="内容布局绑定"
           value={layout}
           onChange={setLayout}
           options={[
@@ -702,6 +754,7 @@ function EditFeedModalBody({
                   categoryOn={curCatAutoSummary}
                   onChange={setSummaryMode}
                   title="自动摘要：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                  ariaLabel="自动摘要"
                 />
                 自动摘要
               </label>
@@ -711,6 +764,7 @@ function EditFeedModalBody({
                   categoryOn={curCatAutoTranslate}
                   onChange={setTranslateMode}
                   title="自动翻译：继承分类默认 / 开启 / 关闭。关闭只阻止尚未发起的自动请求，已发送的请求不会撤销。"
+                  ariaLabel="自动翻译"
                 />
                 自动翻译
               </label>
@@ -774,6 +828,7 @@ function RenameCatModalBody({
         <label>分类名称</label>
         <input
           type="text"
+          aria-label="分类名称"
           className="setting-input"
           style={{ width: '100%' }}
           value={name}
@@ -804,10 +859,12 @@ function RenameCatModalBody({
 export function CloseAskDialog() {
   const visible = useAppStore((s) => s.closeAskVisible);
   const answerCloseAsk = useAppStore((s) => s.answerCloseAsk);
+  const dismissCloseAsk = useAppStore((s) => s.dismissCloseAsk);
   const [remember, setRemember] = useState(true);
 
+  // Note: 遮罩/Esc 只取消询问，只有显式按钮提交关闭动作 — 见 .agents/notes/implemented/bug-fix/2026-11-04-关闭取消语义与授权关闭守卫.md
   return (
-    <ModalOverlay open={visible} onClose={() => answerCloseAsk('tray', remember)} ariaLabel="关闭 FluxReader">
+    <ModalOverlay open={visible} onClose={dismissCloseAsk} ariaLabel="关闭 FluxReader">
       <div className="mini-dialog">
         <div className="mini-dialog-title">关闭 FluxReader</div>
         <div className="mini-dialog-hint" style={{ marginTop: 0 }}>

@@ -1,4 +1,10 @@
-import type { ArticleEntry, CategoryGroup, FeedItem, FeedAiMode } from '../types';
+import type {
+  ArticleEntry,
+  CategoryGroup,
+  FeedItem,
+  FeedAiMode,
+  PublishedAtSource,
+} from '../types';
 import { normalizeFeedAiMode } from '../types';
 
 /* ============================================================
@@ -103,6 +109,10 @@ export interface ArticleListItemRow {
    *  selectAiProductState）。 */
   ai_summary_sig?: string | null;
   translated_sig?: string | null;
+  /** v33：永久首次见到时间（RFC3339）；发布时间的兜底/推断标记据此判定。 */
+  first_seen_at?: string | null;
+  /** v33：published_at 来源（feed / feed_clamped / inferred_fetch / legacy_unknown）。 */
+  published_at_source?: PublishedAtSource;
 }
 
 export interface ArticleDetailRow extends ArticleListItemRow {
@@ -119,7 +129,7 @@ export interface RefreshSummary {
 
 /** config_sync_apply 的结果计数（TASK-074：updated 与 skipped 语义分离）。
  * OPT-006：pendingConnection = 配置导入留下的待确认连接建议（协议/地址/用户名，
- * 无密码）——导入不改活动凭据；激活必须在「后端配置」重新输入密码后经
+ * 无密码）——导入不改活动凭据；激活必须在「同步服务」重新输入密码后经
  * sync_save 保存。
  * OPT-010：removedFeeds / removedFolders / affectedArticleCount = 镜像模式
  * 实际删除的对象数与级联文章数（合并模式恒为 0）。 */
@@ -132,6 +142,20 @@ export interface ConfigSyncApplyResult {
   removedFolders?: number;
   affectedArticleCount?: number;
   pendingConnection?: PendingConnection | null;
+  /** 镜像删除前自动创建/复用的可恢复快照（合并或零删除时为 null）。 */
+  backup?: DatabaseBackupInfo | null;
+}
+
+/** 完整数据库快照（手动备份、迁移前/镜像删除前自动快照共用）。 */
+export interface DatabaseBackupInfo {
+  path: string;
+  fileName: string;
+  sizeBytes: number;
+  schemaVersion: number;
+  fromVersion: number;
+  toVersion: number;
+  createdAt: string;
+  kind: 'manual' | 'migration' | 'mirror' | string;
 }
 
 /** OPT-010 预览条目：kind 区分源/分类（Rust 侧 serde 契约）。
@@ -169,6 +193,10 @@ export interface ConfigSyncPlanResult {
   settingsRemovedKeys: string[];
   pendingConnection: boolean;
   warnings: string[];
+  /** 镜像删除前快照；无删除或创建失败时为 null。 */
+  backup?: DatabaseBackupInfo | null;
+  /** 预览阶段自动备份失败的可见说明；确认后 apply 会重试并阻止无备份删除。 */
+  backupWarning?: string | null;
 }
 
 /** 待确认连接建议（OPT-006 R1）：仅非敏感字段 + 激活 CAS 版本号；
@@ -226,6 +254,21 @@ export interface SyncReport {
   errors: string[];
 }
 
+export interface SyncRunResult {
+  activity_id: number;
+  feeds: SyncReport | null;
+  states: SyncReport | null;
+  error: { stage: 'feeds' | 'states'; code: string; message: string } | null;
+}
+
+export interface ExpiredRetryResult {
+  requeued: number;
+  bound_pending: number;
+  bindable_retry: number;
+  local_only: number;
+  remaining_expired: number;
+}
+
 export interface SyncStatusInfo {
   connected: boolean;
   endpoint: string | null;
@@ -236,14 +279,39 @@ export interface SyncStatusInfo {
   protocol?: string | null;
 }
 
-/** sync_queue_stats 返回（TASK-116 四态展示）。
- * waiting = sync_queue 现存行数（「等待同步 N 条」的 N）；
- * failed = attempts>0 的行数（「部分失败」的 N，是 waiting 的子集）；
- * last_error = 最近一次推送失败的错误摘要（Rust 侧已截断到 200 字符）。 */
+/** sync_queue_stats 返回（TASK-116 四态展示 + 队列生命周期分类）。
+ * waiting = 真正可推送且未确认的 bound_pending + retry_wait；
+ * failed = 终态 failed；retry_wait = 可重试失败（前端可合并展示「部分失败」）；
+ * local_only / bindable_retry / expired_unconfirmed 单独给出，不再混入 waiting；
+ * last_error = retry_wait/failed 中最近一次推送失败摘要（Rust 侧截断到 200 字符）。
+ *
+ * 新增字段在旧事件载荷/旧测试夹具中可能缺失，故保持可选；Rust IPC 与事件
+ * 始终返回完整分类，组件由 store 的同步字段补齐。 */
 export interface SyncQueueStats {
+  account_generation?: number;
   waiting: number;
   failed: number;
+  local_only?: number;
+  bindable_retry?: number;
+  bound_pending?: number;
+  retry_wait?: number;
+  expired_unconfirmed?: number;
   last_error: string | null;
+}
+
+/** sync_local_feeds 的结构化结果。**部分失败仍是可消费结果**：
+ * `ok=false` 且 `failed>0`，调用方不得把整次添加/同步宣布成功。 */
+export interface SyncLocalFeedsResult {
+  ok: boolean;
+  protocol: 'greader' | 'fever' | null;
+  writeBack: boolean;
+  queued: number;
+  pushed: number;
+  failed: number;
+  errors: string[];
+  message: string;
+  /** 前端兼容层字段：旧后端纯文本回执解析失败时为 false（未知，不得当成功）。 */
+  structured?: boolean;
 }
 
 /* ---------- OPT-009 B3：订阅写回能力矩阵与持久回执 ---------- */
@@ -295,7 +363,7 @@ export interface SubscriptionOutboxStats {
 }
 
 /** sync_save 返回：首连且本地有未绑定源时 firstConnect=true
- *（前端据此弹「同步本地订阅到后端」确认框） */
+ *（前端据此弹「同步本地订阅到账户」确认框） */
 export interface SyncSaveResult {
   message: string;
   firstConnect: boolean;
@@ -535,6 +603,17 @@ export const api = {
     const inv = await getInvoke();
     return inv ? (await inv('set_setting', { key, value }) as null) : null;
   },
+  /** 创建当前数据库的完整手动快照（不参与自动保留清理）。 */
+  async createDatabaseBackup(): Promise<DatabaseBackupInfo> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('create_database_backup')) as DatabaseBackupInfo;
+  },
+  /** 读取并消费迁移前自动备份失败的一次性警告。 */
+  async takeStartupBackupWarning(): Promise<string | null> {
+    const inv = await getInvoke();
+    return inv ? (await inv('take_startup_backup_warning') as string | null) : null;
+  },
 
   /* ---- 更新检查（OPT-014：出网收口在 Rust，固定目的地，无 URL 入参） ---- */
   /** 检查官方仓库最新发布。失败（含 404/429/5xx/无 tag）抛 AppError 拒绝；
@@ -753,10 +832,17 @@ export const api = {
     mode: 'merge' | 'mirror',
     expectedSnapshotHash: string,
     expectedVersion: string,
+    expectedBackupPath?: string | null,
   ): Promise<ConfigSyncApplyResult> {
     const inv = await getInvoke();
     if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('config_sync_apply', { payload, mode, expectedSnapshotHash, expectedVersion })) as ConfigSyncApplyResult;
+    return (await inv('config_sync_apply', {
+      payload,
+      mode,
+      expectedSnapshotHash,
+      expectedVersion,
+      expectedBackupPath: expectedBackupPath ?? null,
+    })) as ConfigSyncApplyResult;
   },
 
   /* ---- GitHub 设备流登录 ---- */
@@ -772,6 +858,14 @@ export const api = {
     const inv = await getInvoke();
     if (!inv) throw new Error('仅 Tauri 客户端可用');
     return (await inv('github_login_poll')) as { login: string } | null;
+  },
+
+  /** 取消后端设备流并递增代次；旧 poll 只能返回 cancelled/stale。
+   *  cancelled=false 表示调用时没有可取消的流，不得当作取消成功。 */
+  async githubLoginCancel(): Promise<{ cancelled: boolean }> {
+    const inv = await getInvoke();
+    if (!inv) throw new Error('仅 Tauri 客户端可用');
+    return (await inv('github_login_cancel')) as { cancelled: boolean };
   },
 
   /** 已登录账户名；未登录返回 null。 */
@@ -829,21 +923,81 @@ export const api = {
     }
   },
   /** 把本地直连订阅（未绑定的）推送到后端。幂等：已绑定的跳过、
-   * 服务端已存在回查绑定不报错 */
-  async syncLocalFeeds(): Promise<string | null> {
+   * 服务端已存在回查绑定不报错。返回结构化结果，部分失败保留错误列表。
+   * `feedId`/`feedUrl` 用于 AddFeed 的定向同步：只处理本次新增订阅；
+   * 两者都省略时才走手工「同步本地订阅」的全量语义。 */
+  async syncLocalFeeds(filter: { feedId?: number; feedUrl?: string } = {}): Promise<SyncLocalFeedsResult | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('sync_local_feeds') as string) : null;
+    if (!inv) return null;
+    const args: Record<string, unknown> = {};
+    if (filter.feedId != null) args.feedId = filter.feedId;
+    if (Object.prototype.hasOwnProperty.call(filter, 'feedUrl')) {
+      const url = filter.feedUrl?.trim();
+      if (!url) {
+        throw new Error('同步目标 feedUrl 不能为空（空 selector 不得回退为全量同步）');
+      }
+      args.feedUrl = url;
+    }
+    const raw = await inv('sync_local_feeds', args) as unknown;
+    const structuredResult = (value: unknown): SyncLocalFeedsResult | null => (
+      value != null
+      && typeof value === 'object'
+      && typeof (value as { ok?: unknown }).ok === 'boolean'
+        ? value as SyncLocalFeedsResult
+        : null
+    );
+    const unknownResult = (detail: string): SyncLocalFeedsResult => ({
+      ok: false,
+      protocol: null,
+      writeBack: false,
+      queued: 0,
+      pushed: 0,
+      failed: 0,
+      errors: [detail],
+      message: `旧版同步服务返回了非结构化回执，无法确认同步结果：${detail}`,
+      structured: false,
+    });
+    if (typeof raw !== 'string') {
+      const direct = structuredResult(raw);
+      if (direct) return direct;
+      let detail: string;
+      try {
+        detail = JSON.stringify(raw) ?? String(raw);
+      } catch {
+        detail = String(raw);
+      }
+      return unknownResult(detail);
+    }
+    /* 兼容旧后端字符串回执：JSON 可解析则按结构化结果；纯文本无法证明成功，
+       按 unknown 返回并提示，绝不折叠成 ok:true。 */
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      const structured = structuredResult(parsed);
+      if (structured) return structured;
+      throw new Error('non-structured');
+    } catch {
+      return unknownResult(raw);
+    }
   },
   /** 分步同步：which='feeds'（订阅层）| 'states'（状态+条目层）。full=true 含全量对账 */
   async syncPhase(which: 'feeds' | 'states', full = false): Promise<SyncReport | null> {
     const inv = await getInvoke();
     return inv ? (await inv('sync_phase', { which, full }) as SyncReport) : null;
   },
+  async syncRun(): Promise<SyncRunResult | null> {
+    const inv = await getInvoke();
+    return inv ? await inv('sync_run') as SyncRunResult : null;
+  },
+  async syncRetryExpired(expectedAccountGeneration: number): Promise<ExpiredRetryResult | null> {
+    const inv = await getInvoke();
+    return inv ? await inv('sync_retry_expired', { expectedAccountGeneration }) as ExpiredRetryResult : null;
+  },
   async syncDisconnect(): Promise<string | null> {
     const inv = await getInvoke();
     return inv ? (await inv('sync_disconnect') as string) : null;
   },
-  /** 缓存清理：days 天前的文章（收藏保留）或 AI 缓存。scope='articles'|'ai' */
+  /** 缓存清理：days 天前「已读且未收藏、无待同步」的文章，或 AI 缓存。
+   * 未读文章永不清理；远端仍存在的已读文章可能在下次同步后重新导入。 */
   async cacheCleanup(days: number, scope: 'articles' | 'ai'): Promise<string | null> {
     const inv = await getInvoke();
     return inv ? (await inv('cache_cleanup', { days, scope }) as string) : null;
@@ -948,6 +1102,8 @@ export function articleRowToEntry(row: ArticleListItemRow): ArticleEntry {
     feedId: String(row.feed_id),
     title: row.title,
     publishedAt: parseTs(row.published_at),
+    firstSeenAt: row.first_seen_at ? parseTs(row.first_seen_at) : undefined,
+    publishedAtSource: row.published_at_source ?? 'legacy_unknown',
     isRead: row.is_read,
     isStarred: row.is_starred,
     tags: [],

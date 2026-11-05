@@ -22,7 +22,6 @@ export function SettingsModal() {
   const settingsTab = useAppStore((s) => s.settingsTab);
   const closeSettings = useAppStore((s) => s.closeSettings);
   const switchSettingsTab = useAppStore((s) => s.switchSettingsTab);
-  const showToast = useAppStore((s) => s.showToast);
 
   /* 切换左侧页签时右侧内容区淡入一次（REQ-005） */
   const paneRef = useRef<HTMLDivElement>(null);
@@ -30,19 +29,8 @@ export function SettingsModal() {
 
   const meta = TAB_META.find((t) => t.id === settingsTab) ?? TAB_META[0];
 
-  /* GitHub 等待授权期间锁定弹窗：遮罩点击/Esc 不关闭——切到网页输入代码时
-     误关会让用户看不到授权进度与常驻代码（轮询已常驻 store，不受影响） */
-  const ghFlow = useAppStore((s) => s.githubFlow);
-  const handleClose = () => {
-    if (ghFlow) {
-      showToast('GitHub 授权进行中，等待网页授权完成后再关闭');
-      return;
-    }
-    closeSettings();
-  };
-
   return (
-    <ModalOverlay open={settingsOpen} onClose={handleClose} ariaLabel="设置">
+    <ModalOverlay open={settingsOpen} onClose={closeSettings} ariaLabel="设置">
       <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
         {/* 左侧导航 */}
         <div className="settings-sidebar">
@@ -56,6 +44,7 @@ export function SettingsModal() {
                 key={m.id}
                 className={`settings-nav-item ${settingsTab === m.id ? 'active' : ''}`}
                 onClick={() => switchSettingsTab(m.id)}
+                aria-current={settingsTab === m.id ? 'page' : undefined}
               >
                 <m.icon />
                 <span>{m.title}</span>

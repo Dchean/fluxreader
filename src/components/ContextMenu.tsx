@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Reac
 import { createPortal } from 'react-dom';
 import { useAppStore } from '../store';
 import { Icons } from './icons';
-import { openExternal } from '../lib/external';
+import { openExternalWithFeedback } from '../lib/external';
+import { refreshAllLabel } from '../lib/copyPolicy';
 
 /* ============================================================
    全局右键菜单 —— 替换 WebView2 默认右键菜单（Copy/Cut/Paste/Select All）
@@ -211,7 +212,7 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
           ? [{
               label: '查看原文',
               icon: <Icons.externalLink />,
-              onSelect: () => { void openExternal(art.url); },
+              onSelect: () => { void openExternalWithFeedback(art.url); },
             },
             {
               label: '复制链接',
@@ -304,7 +305,7 @@ function buildMenuFor(target: HTMLElement): MenuItem[] {
           onSelect: () => st.openAddFeedModal(''),
         },
         {
-          label: '刷新全部订阅源',
+          label: refreshAllLabel(st.settings.syncMode),
           icon: <Icons.refresh />,
           onSelect: () => st.triggerManualSync(),
         },

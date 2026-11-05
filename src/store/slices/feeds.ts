@@ -119,7 +119,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
     get().showToast(`分类已改名：${trimmed}`);
   },
 
-  addFeed: (catId, url, title, layout, summaryMode, translateMode, syncToBackend = true) => {
+  addFeed: (catId, url, title, layout, summaryMode, translateMode, syncToBackend = false) => {
     if (get().dataMode === 'tauri') {
       /* fix-1（自检 P1-1）：提不出数字 id（如全新安装 0 个分类时 AddFeedModal 传
          空串，Number('') === 0）必须传 null——后端 add_feed 对 folder_id=None 有
@@ -140,7 +140,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
          无论它整体成功还是部分失败，都必须再回读一次本地真实结果：已写入的
          订阅（含失败前已导入的部分）不能不可见。无同步选择/未连接时保持原有
          单次回读，不额外请求。 */
-      const finishAdd = async (token: number): Promise<void> => {
+      const finishAdd = async (token: number, feedId: number | null): Promise<void> => {
         /* ① 首次回读：本地新订阅立即可见（无同步选择/未连接时就是唯一一次）。 */
         try {
           await get().reloadFromBackend();
@@ -153,7 +153,7 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
           });
           return;
         }
-        if (!(syncToBackend && get().syncConnected)) {
+        if (!(syncToBackend && get().syncConnected && get().syncProtocol !== 'fever')) {
           get().finishSyncActivity(token, 'synced');
           get().showToast(`已添加订阅源：${title || url}`);
           return;
@@ -161,8 +161,20 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
         /* ② 勾选同步且已连接：syncLocalFeeds（推送本地直连源、回查绑定；前端
            契约按「可能导入/修改订阅」对待）——成功或部分失败都再回读。 */
         let syncError: string | null = null;
+        let partialFailed = 0;
+        let syncUnknown = false;
         try {
-          await api.syncLocalFeeds();
+          const result = await api.syncLocalFeeds({
+            feedId: feedId ?? undefined,
+            feedUrl: url,
+          });
+          if (result && !result.ok) {
+            partialFailed = result.failed;
+            syncUnknown = result.structured === false;
+            syncError = result.errors.join('；')
+              || result.message.trim()
+              || '同步服务返回失败';
+          }
         } catch (e) {
           syncError = extractError(e);
         }
@@ -173,11 +185,19 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
           readbackError = extractError(e);
         }
         if (syncError || readbackError) {
-          get().finishSyncActivity(token, 'error');
+          get().finishSyncActivity(token, 'error', {
+            stage: 'states',
+            message: [syncError, readbackError].filter(Boolean).join('；'),
+          });
           const detail = [syncError ? `同步失败：${syncError}` : '', readbackError ? `刷新失败：${readbackError}` : '']
             .filter(Boolean)
             .join('；');
-          get().showToast(`订阅已添加，${detail}`, {
+          const prefix = partialFailed > 0
+            ? `已添加，${partialFailed} 项未同步`
+            : syncUnknown
+              ? '已添加，同步状态未知'
+            : '订阅已添加，同步失败';
+          get().showToast(`${prefix}${detail ? `：${detail.replace(/^同步失败：/, '')}` : ''}`, {
             label: '重试',
             key: `feed:add:${url}`,
             run: retryFinishAdd,
@@ -185,15 +205,17 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
           return;
         }
         get().finishSyncActivity(token, 'synced');
+        void get().refreshSyncStatus();
+        void get().refreshSyncQueueStats();
         get().showToast(`已添加订阅源：${title || url}`);
       };
       const retryFinishAdd = () => {
         const retryToken = get().beginSyncActivity('feed-add');
-        void finishAdd(retryToken);
+        void finishAdd(retryToken, null);
       };
       void api
         .addFeed(url, title || null, folderId, layout, null, null, syncToBackend, summaryMode, translateMode)
-        .then(() => finishAdd(activityToken), (e: unknown) => {
+        .then((row) => finishAdd(activityToken, row?.id ?? null), (e: unknown) => {
           get().finishSyncActivity(activityToken, 'error');
           const msg = extractError(e);
           get().showToast(`添加失败：${msg}`, {
@@ -393,7 +415,6 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
      落库 fire-and-forget，失败 toast 提醒（本地状态不回滚，下次同步对齐）。 */
   updateCatLayout: (catId, layout) => {
     set((s) => reconcileCategories(s, s.categories.map((c) => (c.id === catId ? { ...c, layout } : c))));
-    get().showToast('布局已更新');
     void api
       .updateFolderLayout(Number(catId.replace('cat-', '')), layout)
       .catch(() => get().showToast('布局未能保存，重启后可能回退'));
@@ -414,7 +435,6 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
         ),
       ),
     );
-    get().showToast('布局已更新');
     void api
       .updateFeedLayout(numericId(feedId), next)
       .catch(() => get().showToast('布局未能保存，重启后可能回退'));
@@ -499,7 +519,6 @@ export const createFeedsSlice: StateCreator<AppState, [], [], FeedsSlice> = (set
   toggleAllFolders: () => {
     const anyOpen = get().categories.some((c) => !c.collapsed);
     set((s) => ({ categories: s.categories.map((c) => ({ ...c, collapsed: anyOpen })) }));
-    get().showToast(anyOpen ? '已收起全部分类' : '已展开全部分类');
     /* 批量落库折叠状态：TASK-100 P3-4——此前逐分类发 N 次 IPC、失败逐个 toast
        （几十个分类一次点击几十次往返 + 连环弹窗）。改为并发聚合，失败合并成
        一条 toast（含失败个数）。 */

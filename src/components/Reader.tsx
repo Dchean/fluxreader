@@ -3,10 +3,11 @@ import { useShallow } from 'zustand/react/shallow';
 import { useAppStore, selectArticleBody, selectAiProductState, selectFeedConfig } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
-import { openExternal, handleArticleLinkClick } from '../lib/external';
+import { handleArticleLinkClick, openExternalWithFeedback } from '../lib/external';
 import { proxyImagesInHtml } from '../lib/imageProxy';
 import { useEnteringClass } from './useEnteringClass';
 import { ReaderProse } from './ReaderProse';
+import { HydrateFailure } from './HydrateFailure';
 
 /* ============================================================
    Reader —— 右侧沉浸阅读器
@@ -239,7 +240,7 @@ export function Reader() {
               className="toggle-action-btn"
               onClick={() => {
                 if (!art.url) { showToast('该条目没有原文链接'); return; }
-                void openExternal(art.url).catch(() => showToast('打开失败'));
+                void openExternalWithFeedback(art.url);
               }}
               title="在浏览器中查看原文"
             >
@@ -328,7 +329,7 @@ export function Reader() {
                     </button>
                     <button
                       className="ai-retry-btn"
-                      title="删除后端保存的全部分段进度与整篇译文，之后重新生成从零开始"
+                      title="删除本机保存的全部分段进度与整篇译文，之后重新生成从零开始"
                       onClick={() => void clearAiProduct(art.id, 'translation')}
                     >
                       清除
@@ -421,12 +422,10 @@ export function Reader() {
                   Note: 为何在调用点分支、译文与空正文的边界 — 见
                   .agents/notes/implemented/feature/2026-11-02-前端交互正确性与感知体验.md */
               body.state === 'failed' ? (
-                <button
-                  className="hydrate-retry"
-                  onClick={() => useAppStore.getState().retryHydration(art.id)}
-                >
-                  正文加载失败：{body.message}（点击重试）
-                </button>
+                <HydrateFailure
+                  message={body.message}
+                  onRetry={() => useAppStore.getState().retryHydration(art.id)}
+                />
               ) : body.state === 'missing' ? (
                 <span className="hydrate-placeholder">{body.message}</span>
               ) : (

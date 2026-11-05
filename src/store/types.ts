@@ -8,7 +8,13 @@ import type {
   ThemeMode,
   ViewFilterType,
 } from '../types';
-import type { SubscriptionCapabilities, SubscriptionOutboxStats, TranslationSegmentPlan } from '../lib/api';
+import type {
+  SubscriptionCapabilities,
+  SubscriptionOutboxStats,
+  SyncQueueStats,
+  SyncStatusInfo,
+  TranslationSegmentPlan,
+} from '../lib/api';
 
 export interface PodcastPlayerState {
   isActive: boolean;
@@ -50,7 +56,18 @@ export type SyncActivityOwner =
   | 'manual'
   | 'feed-add'
   | 'save-and-sync'
+  | 'background'
   | 'github-disconnect';
+
+export interface BackendSyncActivityEvent {
+  id: number;
+  sequence: number;
+  source: string;
+  phase: 'started' | 'stage' | 'finished';
+  stage?: 'feeds' | 'states' | null;
+  outcome?: 'success' | 'partial' | 'error' | 'cancelled' | 'not_configured' | null;
+  message?: string | null;
+}
 
 export interface SyncActivityUpdate {
   stage?: ManualSyncStage | null;
@@ -93,7 +110,7 @@ export interface SettingsState {
   autoSync: boolean;
   /** 同步模式（UI 词条：本机抓取 / 跟随服务端——命名直指差异点"内容从哪来"）：
    *  'direct' 本机抓取（默认）：全部源由 FluxReader 直连抓取，Miniflux 只同步状态；
-   *  'hybrid' 跟随服务端：后台刷新跳过服务端来源的源，内容由 Miniflux 同步提供 */
+   *  'hybrid' 跟随服务端：后台/手动/托盘刷新都只抓本地来源的源，内容由服务端同步提供 */
   syncMode: 'direct' | 'hybrid';
 }
 
@@ -262,22 +279,45 @@ export interface AppState {
   syncStage: ManualSyncStage | null;
   /** 当前同步活动开始时刻；阶段推进不重置，用于如实显示已等待时长。 */
   syncStartedAt: number | null;
-  /** 当前轮次是否已收到“远端状态队列已清空”的证据。它只确认远端写回，
-   *  绝不代表 pull_entries / refreshAllFeeds / reload 已完成。 */
+  /** 当前轮次最近一次收到的“远端状态队列已清空”证据。后续任一未同步分类
+   *  非零会撤销；它绝不代表 pull_entries / refreshAllFeeds / reload 已完成。 */
   syncRemoteWriteConfirmed: boolean;
   /** 最新同步 activity 的失败阶段与原因（手动/添加/保存后同步等共用）；
    *  成功终态会清空。 */
   syncFailure: ManualSyncFailure | null;
-  /** 后台自动同步进行中（scheduler sync-running/sync-idle 事件驱动；与手动 syncStatus 独立） */
+  /** 后端活动表尚有未结束轮次，按活动 ID 收敛。 */
   backgroundSyncing: boolean;
   /** 后端真实的 Miniflux 连接态（bootstrap/sync 后刷新），未连接时侧栏不显示"已同步" */
   syncConnected: boolean;
-  /** TASK-116 四态展示：同步队列现存行数（「等待同步 N 条」）。
+  /** 后端同步服务账户名（唯一来源：sync_status.account；不得复用 GitHub login）。 */
+  syncAccount: string | null;
+  /** 当前同步协议（sync_status.protocol；null = 未连接/未知）。 */
+  syncProtocol: 'greader' | 'fever' | null;
+  /** 当前同步服务 Endpoint（sync_status.endpoint；null = 未连接）。 */
+  syncEndpoint: string | null;
+  /** 后端记录的上次同步时间（Unix 秒；0 = 从未）。 */
+  syncLastSync: number;
+  /** 最近一次手动/保存链成功终态时刻；Status 圆点短时显示「同步完成」。 */
+  syncSucceededAt: number | null;
+  /** TASK-116 四态展示：后端 sync_queue_stats.waiting（可推送且未确认的队列行数）。
+   *  只含 bound_pending + retry_wait；local_only/等待身份/过期项分别见下。
    *  启动装载（bootstrap/reload）与手动同步完成后的 reload 刷新；
    *  TASK-124 起 sync-queue-changed 事件即时刷新（同一状态源）。 */
   syncWaiting: number;
-  /** TASK-116：队列中推送失败过的行数（attempts>0，「部分失败」） */
+  /** TASK-116：失败可见计数 = retry_wait + 终态 failed（用于既有「部分失败」文案）。 */
   syncFailed: number;
+  /** 无远端身份、当前不可推送的本地意图。 */
+  syncLocalOnly: number;
+  /** 同源已绑定、等待具体条目身份。 */
+  syncBindableRetry: number;
+  /** 已有 remote_id、等待推送。 */
+  syncBoundPending: number;
+  /** 失败但仍在自动重试窗口。 */
+  syncRetryWait: number;
+  /** 终态 failed（与 retry_wait 分开保存）。 */
+  syncTerminalFailed: number;
+  /** 超过保留期、停止自动推送但保留本地状态。 */
+  syncExpiredUnconfirmed: number;
   /** TASK-124：队列最近一次推送失败的错误摘要（「部分失败」的错误行）。
    *  sync-queue-changed 事件 / reload 顺带刷新写入；未失败为 null。 */
   syncQueueLastError: string | null;
@@ -296,6 +336,13 @@ export interface AppState {
   githubAccount: { login: string } | null;
   /** 登录进行中（按钮防抖） */
   githubLoggingIn: boolean;
+  /** 底层 github_login_start IPC 尚未 settle。取消后仍保持，直到旧请求
+   *  结算，防止并发第二次发起。 */
+  githubLoginStartPending: boolean;
+  /** github_login_poll IPC 在途。取消后仍保持到旧轮询结算，防止并发新发起。 */
+  githubPollPending: boolean;
+  /** github_login_cancel IPC 在途。结算前禁止新发起，避免取消与新流交错。 */
+  githubLoginCancelPending: boolean;
 
   /* ---------- 数据源模式 ---------- */
   /** tauri = 真实 SQLite 后端；mock = 浏览器开发回退 */
@@ -465,6 +512,8 @@ export interface AppState {
 
   /* ---------- Actions: 弹层 ---------- */
   openSettings: () => void;
+  /** 设置关闭的唯一入口：GitHub 设备授权进行中拒绝关闭并提示；
+   *  无授权流时正常关闭。X / Esc / Ctrl+, / 遮罩均走这里。 */
   closeSettings: () => void;
   switchSettingsTab: (tab: string) => void;
   openSettingsTab: (tab: string) => void;
@@ -472,6 +521,8 @@ export interface AppState {
   closeSearch: () => void;
   /** 首次关闭询问的应答（Rust resolve_close 执行隐藏/退出；remember 时同步设置镜像） */
   answerCloseAsk: (action: 'tray' | 'exit', remember: boolean) => void;
+  /** 取消首次关闭询问：只隐藏弹窗，不提交 resolve_close，也不写记住选择。 */
+  dismissCloseAsk: () => void;
   openLightbox: (url: string, entryId?: string) => void;
   closeLightbox: () => void;
   openNewCategoryModal: () => void;
@@ -518,11 +569,22 @@ export interface AppState {
   ) => boolean;
   /** 发起一轮手动同步；重复点击返回同一在途 Promise，终态后释放忙锁。 */
   triggerManualSync: () => Promise<void>;
+  applyBackendSyncActivity: (event: BackendSyncActivityEvent) => void;
+  /** 写入一份 sync_status 快照（连接/断开/保存后由调用方提供真值）。 */
+  applySyncStatus: (status: SyncStatusInfo | null) => void;
+  /** 主动读取 sync_status 并原子更新连接态/账户/协议/上次同步；失败保持原值。
+   * `beforeApply` 在最新响应写入 store 前调用，供表单先登记已应用 identity，
+   * 避免 store 更新反向触发表单重复读取。 */
+  refreshSyncStatus: (
+    beforeApply?: (status: SyncStatusInfo) => void,
+  ) => Promise<SyncStatusInfo | null>;
+  /** 主动读取同步队列统计并走与事件相同的落点。 */
+  refreshSyncQueueStats: () => Promise<void>;
   /** TASK-124：sync-queue-changed 事件落地（App.tsx 监听器调用）。
-   *  payload = Rust sync_queue_stats 三元组 {waiting, failed, last_error}。
-   *  写队列三字段，并可在手动同步 states 阶段补记远端写回确认；绝不触碰
-   *  syncConnected，也不以队列清空结束整轮 syncing。 */
-  applySyncQueueChanged: (stats: { waiting: number; failed: number; last_error: string | null }) => void;
+   *  payload = Rust sync_queue_stats 生命周期分类。
+   *  写队列分类字段，并按最新统计设置或撤销手动同步 states 阶段的远端写回
+   *  确认；绝不触碰 syncConnected，也不以队列清空结束整轮 syncing。 */
+  applySyncQueueChanged: (stats: SyncQueueStats) => void;
   /** OPT-009 B3：subscription-outbox-changed 事件落地（App.tsx 监听器调用）。
    *  payload = Rust 当前账号回执 `{pending, failed, local_only, last_error}`。
    *  只写回执字段，绝不触碰队列统计与 syncConnected（越权防护；未配置同步
@@ -560,6 +622,8 @@ export interface AppState {
 
   /** 发起 GitHub 设备流登录（轮询不依赖组件生命周期） */
   githubLoginStart: () => Promise<void>;
+  /** 取消后端设备流并等待结果；成功才清 flow。不撤销网页侧授权。 */
+  githubLoginCancel: () => Promise<void>;
   /** 断开 GitHub 登录 */
   githubLoginDisconnect: () => Promise<void>;
 }

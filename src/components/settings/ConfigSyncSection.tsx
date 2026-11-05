@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { awaitAiWriteFrontier, awaitAppSettingsWriteFrontier, confirmAppliedConfig, markAiConfigUnconfirmed, markAppSettingsUnconfirmed, readBackAppliedAppSettings, runAppSettingsApplyBoundary, runConfigApplyBarrier, useAppStore } from '../../store';
 import { api, extractError, extractErrorCode } from '../../lib/api';
 import type { ConfigSyncPlanItem, ConfigSyncPlanResult } from '../../lib/api';
-import { openExternal } from '../../lib/external';
+import { openExternalWithFeedback } from '../../lib/external';
 import { FluxDropdown, SettingCard } from '../primitives';
 
 /* ---------- 配置同步（GitHub Gist / WebDAV）---------- */
@@ -39,14 +39,18 @@ export function ConfigSyncSection() {
   const [status, setStatus] = useState<{ configured: boolean; backend?: string; lastUpload?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   /** OPT-010：下载预览的待确认结果（payload 原文 + 结构化 plan）。
-   * 取消 = 直接清除（零写入）；apply 失败/签名失效也必须清除（要求重新预览）。 */
+   * 取消 = 直接清除（数据库零写入）；apply 失败/签名失效也必须清除（要求重新预览）。 */
   const [preview, setPreview] = useState<{ payload: string; plan: ConfigSyncPlanResult } | null>(null);
 
   /* ---- GitHub 设备流登录态（状态与轮询在 store 层，组件只做展示触发） ---- */
   const ghAccount = useAppStore((s) => s.githubAccount);
   const ghFlow = useAppStore((s) => s.githubFlow);
   const ghLoggingIn = useAppStore((s) => s.githubLoggingIn);
+  const ghStartPending = useAppStore((s) => s.githubLoginStartPending);
+  const ghPollPending = useAppStore((s) => s.githubPollPending);
+  const ghCancelPending = useAppStore((s) => s.githubLoginCancelPending);
   const githubLoginStart = useAppStore((s) => s.githubLoginStart);
+  const githubLoginCancel = useAppStore((s) => s.githubLoginCancel);
   const githubLoginDisconnect = useAppStore((s) => s.githubLoginDisconnect);
 
   const doGhLogin = () => void githubLoginStart();
@@ -114,7 +118,8 @@ export function ConfigSyncSection() {
     }
   };
 
-  /** 第一步：下载 + 只读预览（结构化变更清单 + 两个签名）。不写任何本地数据。 */
+  /** 第一步：下载 + 只读预览（结构化变更清单 + 两个签名）。不写主库数据；
+   * 镜像有删除项时会创建删除前快照文件。 */
   const doPreview = async () => {
     setBusy(true);
     try {
@@ -148,7 +153,13 @@ export function ConfigSyncSection() {
       let readbackError: string | null = null;
       let settingsReadbackError: string | null = null;
       const r = await runConfigApplyBarrier(() => runAppSettingsApplyBoundary(async () => {
-        const res = await api.configSyncApply(payload, plan.mode, plan.snapshotHash, plan.currentVersion);
+        const res = await api.configSyncApply(
+          payload,
+          plan.mode,
+          plan.snapshotHash,
+          plan.currentVersion,
+          plan.backup?.path,
+        );
         try {
           /* 真实配置回读确认/对齐——不把可能被查询代际淘汰的 reload 当已确认。 */
           await confirmAppliedConfig();
@@ -187,15 +198,18 @@ export function ConfigSyncSection() {
         parts.push(`删除 ${removedFeeds} 个源、${removedFolders} 个分类（含 ${r.affectedArticleCount ?? 0} 篇文章）`);
       }
       showToast(`配置已应用：${parts.join('，')}`);
+      if (r.backup) {
+        showToast(`镜像前备份：${r.backup.path}`);
+      }
       if (readbackError) {
         showToast(`配置已应用，但配置回读失败：${readbackError}（本地界面值未确认）`);
       }
       if (settingsReadbackError) {
         showToast(`配置已应用，但界面设置回读失败：${settingsReadbackError}（本地界面值未确认）`);
       }
-      // OPT-006：导入不会改动活动连接；若含连接信息则提示到「后端配置」激活
+      // OPT-006：导入不会改动活动连接；若含连接信息则提示到「同步服务」激活
       if (r.pendingConnection) {
-        showToast('检测到连接信息：请到「后端配置」重新输入密码后保存以激活（当前连接不受影响）');
+        showToast('检测到连接信息：请到「同步服务」重新输入密码后保存以激活（当前连接不受影响）');
       }
     } catch (e) {
       /* 失败（含 stalePreview 签名失效）：预览一律作废，要求重新下载预览——
@@ -215,6 +229,8 @@ export function ConfigSyncSection() {
   const addCounts = plan ? countPlanItems(plan.additions) : null;
   const updCounts = plan ? countPlanItems(plan.updates) : null;
   const remCounts = plan ? countPlanItems(plan.removals) : null;
+  const mirrorNeedsBackup = plan?.mode === 'mirror'
+    && ((remCounts?.feeds ?? 0) + (remCounts?.folders ?? 0) > 0);
 
   return (
     <>
@@ -235,24 +251,62 @@ export function ConfigSyncSection() {
         >
           <div className="device-code-block">
             <span className="device-code-value">{ghFlow.user_code}</span>
-            <span className="device-code-hint">在授权页输入该代码</span>
+            <span className="device-code-hint">输入代码完成授权；取消只停止本机等待</span>
           </div>
-          <button
-            className="toggle-action-btn"
-            onClick={() => void openExternal(ghFlow.verification_uri)}
-            title="重新打开授权页"
-          >
-            打开授权页
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className="toggle-action-btn"
+              onClick={() => void openExternalWithFeedback(ghFlow.verification_uri)}
+              title="重新打开授权页"
+            >
+              打开授权页
+            </button>
+            <button
+              className="toggle-action-btn"
+              disabled={ghCancelPending}
+              onClick={() => void githubLoginCancel()}
+              title="停止本机等待；网页上的授权不会被撤销"
+            >
+              {ghCancelPending ? '取消中…' : '取消授权'}
+            </button>
+          </div>
         </SettingCard>
       ) : (
         <SettingCard
           title="网页登录 GitHub"
           desc="跳转浏览器完成 GitHub 授权，登录后配置同步到你的私有 Gist"
         >
-          <button className="toggle-action-btn btn-primary" disabled={ghLoggingIn} onClick={() => void doGhLogin()}>
-            {ghLoggingIn ? '发起中…' : '登录 GitHub'}
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className="toggle-action-btn btn-primary"
+              disabled={ghLoggingIn || ghStartPending || ghPollPending || ghCancelPending}
+              onClick={() => void doGhLogin()}
+              title={
+                ghStartPending
+                  ? '上一次发起请求尚未结算，结束后可重试'
+                  : ghPollPending
+                    ? '上一次轮询尚未结算，结束后可重试'
+                    : undefined
+              }
+            >
+              {ghLoggingIn
+                ? '发起中…'
+                : ghStartPending
+                  ? '等待上次发起结束…'
+                  : ghPollPending
+                    ? '等待上次轮询结束…'
+                    : '登录 GitHub'}
+            </button>
+            {ghLoggingIn && (
+              <button
+                className="toggle-action-btn"
+                disabled={ghCancelPending}
+                onClick={() => void githubLoginCancel()}
+              >
+                {ghCancelPending ? '取消中…' : '取消发起'}
+              </button>
+            )}
+          </div>
         </SettingCard>
       )}
 
@@ -267,7 +321,7 @@ export function ConfigSyncSection() {
       </SettingCard>
       {/* TASK-102：三处 desc 压缩至 ≤48 字，约束语义（classic PAT / gist scope /
           fine-grained 不支持 / 配置文件名）逐条保留 */}
-      <SettingCard title="同步后端" desc="Gist 可网页登录自动配置，或手填 classic PAT；WebDAV 填服务器与账号">
+      <SettingCard title="配置文件服务" desc="Gist 可网页登录自动配置，或手填 classic PAT；WebDAV 填服务器与账号">
         <FluxDropdown
           width={140}
           value={backend}
@@ -282,8 +336,8 @@ export function ConfigSyncSection() {
       <SettingCard
         title="应用模式"
         desc={mode === 'mirror'
-          ? '镜像：以远端为准，确认后删除本地多出的源与分类'
-          : '合并：保留本地独有的源与分类，只更新远端列出的对象'}
+          ? '镜像：以同步副本为准，确认后删除本地多出的源与分类'
+          : '合并：保留本地独有的源与分类，只更新同步副本列出的对象'}
       >
         <FluxDropdown
           width={140}
@@ -303,6 +357,7 @@ export function ConfigSyncSection() {
         <SettingCard title="GitHub Token（classic PAT）" desc="手动填入；classic PAT 需勾 gist scope，fine-grained 不支持">
           <input
             type="password"
+            aria-label="GitHub Token（classic PAT）"
             className="setting-input"
             placeholder="ghp_…"
             value={token}
@@ -315,6 +370,7 @@ export function ConfigSyncSection() {
           <SettingCard title="WebDAV 服务器" desc="配置在服务器存为 fluxreader-config.json">
             <input
               type="text"
+              aria-label="WebDAV 服务器"
               className="setting-input"
               placeholder="https://dav.example.com/path"
               value={server}
@@ -324,6 +380,7 @@ export function ConfigSyncSection() {
           <SettingCard title="WebDAV 用户名">
             <input
               type="text"
+              aria-label="WebDAV 用户名"
               className="setting-input"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
@@ -332,6 +389,7 @@ export function ConfigSyncSection() {
           <SettingCard title="WebDAV 密码" desc="应用专用密码更安全（坚果云等用应用密码）">
             <input
               type="password"
+              aria-label="WebDAV 密码"
               className="setting-input"
               value={token}
               onChange={(e) => setToken(e.target.value)}
@@ -340,15 +398,16 @@ export function ConfigSyncSection() {
         </>
       )}
       {/* OPT-010 预览卡：下载后只读展示将发生的新增/更新/删除，用户确认才应用；
-          取消 = 清除预览（零写入）；失败/签名失效也清除并要求重新预览。 */}
+          取消 = 清除预览（数据库零写入）；失败/签名失效也清除并要求重新预览。
+          镜像备份失败时仍允许确认：apply 会重试备份，失败则零改动阻止删除。 */}
       {plan && (
         <div className="setting-card config-plan-preview">
           <div className="setting-card-text">
-            <h5>{plan.mode === 'mirror' ? '镜像预览（以远端为准）' : '合并预览（保留本地独有）'}</h5>
+            <h5>{plan.mode === 'mirror' ? '镜像预览（以同步副本为准）' : '合并预览（保留本地独有）'}</h5>
             <p>
               {plan.mode === 'mirror'
-                ? '确认后将删除本地多出的源与分类：仅影响本机，不会退订服务端订阅。'
-                : '只更新远端列出的对象；本地独有的源与分类不会被删除。'}
+                ? '确认后将删除本地多出的源与分类：仅影响本机，不会退订同步账户的订阅。'
+                : '只更新同步副本列出的对象；本地独有的源与分类不会被删除。'}
             </p>
           </div>
           <div className="config-plan-body">
@@ -358,6 +417,14 @@ export function ConfigSyncSection() {
               <div className="config-plan-line config-plan-danger">
                 删除：源 {remCounts?.feeds ?? 0} 个 / 分类 {remCounts?.folders ?? 0} 个（含 {plan.affectedArticleCount} 篇文章与读藏状态，随本地级联删除）
               </div>
+            )}
+            {mirrorNeedsBackup && (
+              <div className="config-plan-line">
+                自动备份：{plan.backup?.path ?? '未创建'}
+              </div>
+            )}
+            {plan.backupWarning && (
+              <div className="config-plan-line config-plan-danger">{plan.backupWarning}</div>
             )}
             {plan.removals.length > 0 && (
               <div className="config-plan-line">
@@ -369,7 +436,7 @@ export function ConfigSyncSection() {
               界面设置：覆盖 {plan.settingsChangedKeys.length} 个键 / 删除 {plan.settingsRemovedKeys.length} 个键；AI 服务配置（模型/密钥）不参与同步。
             </div>
             {plan.pendingConnection && (
-              <div className="config-plan-line">快照含连接信息建议：应用后需到「后端配置」重新输入密码激活（当前连接不受影响）。</div>
+              <div className="config-plan-line">快照含连接信息建议：应用后需到「同步服务」重新输入密码激活（当前连接不受影响）。</div>
             )}
             {plan.warnings.map((w, i) => (
               <div key={i} className="config-plan-line config-plan-warning">{w}</div>
@@ -386,6 +453,9 @@ export function ConfigSyncSection() {
             <button
               className={plan.mode === 'mirror' ? 'toggle-action-btn btn-danger' : 'toggle-action-btn btn-primary'}
               disabled={busy}
+              title={mirrorNeedsBackup && !plan.backup
+                ? '应用前会重试自动备份；备份仍失败将阻止删除且本地零改动'
+                : undefined}
               onClick={() => void doApply()}
             >
               {busy ? '处理中…' : plan.mode === 'mirror' ? '确认镜像应用' : '确认应用'}
