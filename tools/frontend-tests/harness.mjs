@@ -289,6 +289,10 @@ globalThis.__INVOKE__ = (cmd, args) => {
       return Promise.resolve(payload());
     }
     case 'sync_status': return Promise.resolve({ connected: false });
+    case 'sync_run': return Promise.resolve({
+      activity_id: 1, feeds: null, states: null,
+      error: { stage: 'feeds', code: 'notConnected', message: '未配置同步服务' },
+    });
     case 'list_articles': {
       if (S.listPlan && S.listPlan.mode === 'reject') return Promise.reject(S.listPlan.error);
       const a = (args && args.args) || {};
@@ -550,6 +554,12 @@ async function resetStore(extra) {
     /* OPT-009 B3：订阅写回回执与能力矩阵（事件/挂载写入）随基线清空，
        避免跨用例残留（上一域的 local_only 计数被下一域读到）。 */
     subOutboxStats: null, subscriptionCapabilities: null,
+    /* 同步账户/队列分类/成功短窗同样是跨用例真实事件源。 */
+    syncStatus: 'synced', backgroundSyncing: false, syncConnected: false,
+    syncAccount: null, syncProtocol: null, syncEndpoint: null, syncLastSync: 0,
+    syncSucceededAt: null, syncWaiting: 0, syncFailed: 0, syncLocalOnly: 0,
+    syncBindableRetry: 0, syncBoundPending: 0, syncRetryWait: 0,
+    syncTerminalFailed: 0, syncExpiredUnconfirmed: 0, syncQueueLastError: null,
     entries: [], categories: [], feedIndex: new Map(), feedCounts: new Map(), scopeCounts: null,
     articlesLimit: 0, articlesLoading: false, articlesExhausted: false,
     player: { isActive: false, isPlaying: false, speed: 1, title: '', showName: '', cover: '', audioUrl: '', positionSec: 0, durationSec: 0, seekToSec: null },

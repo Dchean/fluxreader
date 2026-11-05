@@ -21,6 +21,7 @@
     "src/lib/api.ts",
     "src/lib/format.ts",
     "src/lib/external.ts",
+    "src/lib/copyPolicy.ts",
     "src/store/settingsValidation.ts",
     "src/components/settings/compareVersions.ts",
     "src/components/settings/aiConfig.ts",

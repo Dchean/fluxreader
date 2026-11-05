@@ -70,9 +70,15 @@ componentTest('OPT-016B 正文水合：跨延迟/失败/缺行的真实 effect �
   for (const id of ['201', '202', '203']) {
     assert.equal(getBodyEntry(id)?.state, 'failed', `id=${id} 失败应落 failed 记录`);
     const card = entry.container.querySelector(`.social-card[data-id="${id}"]`);
-    const retry = card.querySelector('.hydrate-retry');
-    assert.ok(retry?.textContent.includes('正文加载失败'), `id=${id} 卡片应出现失败文案与重试入口`);
-    assert.equal(retry.textContent.includes(getBodyEntry(id).message), true, `id=${id} 卡片文案取自同一记录 message`);
+    const failure = card.querySelector('.hydrate-failure');
+    const retry = failure?.querySelector('.hydrate-retry');
+    assert.ok(failure?.textContent.includes('正文暂时无法加载'), `id=${id} 卡片应出现失败文案`);
+    assert.equal(retry?.textContent.trim(), '重试', `id=${id} 应有独立重试按钮`);
+    assert.equal(
+      failure.querySelector('.hydrate-failure-text')?.getAttribute('title'),
+      getBodyEntry(id).message,
+      `id=${id} 错误详情取自同一记录 message`,
+    );
   }
 
   // ---- 场景 3：失败重试（延迟→命中）——同一挂载树内恢复 ----

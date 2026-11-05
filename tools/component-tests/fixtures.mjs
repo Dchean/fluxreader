@@ -84,6 +84,15 @@ export function setPlan(next) { plan = { ...plan, ...next }; }
 
 export function resetPlan() { plan = {}; }
 
+export function syncRunFixture(phase = () => Promise.resolve({ errors: [] })) {
+  return async () => ({
+    activity_id: 1,
+    feeds: await phase({ which: 'feeds', full: false }),
+    states: await phase({ which: 'states', full: true }),
+    error: null,
+  });
+}
+
 /** 默认行为：完美行——但 hydrate 场景由用例显式覆写 get_articles（延迟/缺行/失败）。 */
 function defaultHandler(cmd, args) {
   switch (cmd) {
@@ -115,7 +124,12 @@ function defaultHandler(cmd, args) {
     case 'set_read_bulk': return Promise.resolve(null);
     case 'get_setting': return Promise.resolve(null);
     case 'sync_status': return Promise.resolve({ connected: false, endpoint: null, account: null, last_sync: 0 });
-    case 'sync_queue_stats': return Promise.resolve({ waiting: 0, failed: 0, last_error: null });
+    case 'sync_queue_stats': return Promise.resolve({
+      account_generation: 0,
+      waiting: 0, failed: 0, local_only: 0, bindable_retry: 0,
+      bound_pending: 0, retry_wait: 0, expired_unconfirmed: 0, last_error: null,
+    });
+    case 'sync_run': return syncRunFixture()();
     /* OPT-009 B3：订阅写回只读 IPC 的缺省（未连接/无待办——与真实后端未连接
        态同形；用例需要时经 setPlan 覆写）。 */
     case 'subscription_outbox_stats': return Promise.resolve({ pending: 0, failed: 0, local_only: 0, last_error: null });
@@ -133,17 +147,18 @@ function defaultHandler(cmd, args) {
     case 'subscription_capabilities': return Promise.resolve({
       connected: false,
       protocol: null,
-      overview: '未连接同步：本地操作照常保存；不产生远端写回。',
-      subscribe: { support: 'LocalOnly', detail: '未连接同步：仅本地新增。' },
-      edit_title: { support: 'LocalOnly', detail: '未连接同步：仅本地生效。' },
-      move_folder: { support: 'LocalOnly', detail: '未连接同步：仅本地生效。' },
-      unsubscribe: { support: 'LocalOnly', detail: '未连接同步：仅本地删除。' },
-      rename_folder: { support: 'LocalOnly', detail: '未连接同步：仅本地改名。' },
-      delete_folder: { support: 'LocalOnly', detail: '未连接同步：仅本地删除。' },
-      empty_folder_remote: { support: 'Unsupported', detail: '未连接同步：无远端写回。' },
+      overview: '未连接同步服务；本地操作照常保存。连接后可在「同步本地订阅」中确认推送。',
+      subscribe: { support: 'LocalOnly', detail: '未连接同步：新订阅只保存在本机。' },
+      edit_title: { support: 'LocalOnly', detail: '未连接同步：编辑只保存在本机。' },
+      move_folder: { support: 'LocalOnly', detail: '未连接同步：分类变化只保存在本机。' },
+      unsubscribe: { support: 'LocalOnly', detail: '未连接同步：删除只移除本机订阅。' },
+      rename_folder: { support: 'LocalOnly', detail: '未连接同步：分类改名只在本机生效。' },
+      delete_folder: { support: 'LocalOnly', detail: '未连接同步：分类删除只在本机生效。' },
+      empty_folder_remote: { support: 'Unsupported', detail: '未连接同步：空分类只从本机删除或改名。' },
       limitations: [],
     });
     case 'github_login_status': return Promise.resolve(null);
+    case 'github_login_cancel': return Promise.resolve({ cancelled: true });
     /* OPT-013 B1：缓存签名校验（前端命中判定的后端权威）。夹具缺省「命中」——
        行里携带的产物都生成于同一份夹具配置下；测「未标记版本/旧签名不短路」
        的用例经 setPlan 覆写为未命中。 */

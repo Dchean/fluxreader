@@ -16,9 +16,13 @@ const MOCKS = {
      测试通道互不影响）。 */
   '@tauri-apps/plugin-opener': `
 export async function openUrl(url) {
+  const failure = globalThis.__OPEN_URL_ERROR__;
+  if (failure) throw failure;
   (globalThis.__OPEN_URLS__ ??= []).push(String(url));
 }
-export async function revealItemInDir() {}
+export async function revealItemInDir(path) {
+  (globalThis.__REVEALED_ITEMS__ ??= []).push(String(path));
+}
 `,
   '@tauri-apps/api/event': `
 const __handlers = new Map();

@@ -1,5 +1,5 @@
 // 审计卡2-4：空态/加载态不混同（真实 Timeline 挂载）——列表为空且装载在途
-// 时不出「暂无匹配内容」假空态，改渲染加载形态；数据落地后按真值恢复。
+// 时不出空态假文案，改渲染加载形态；数据落地后按真值恢复。
 // 同窗口哨兵让位（不出现同屏双 spinner）；loading 结束后空态文案照旧
 // （gallery-virtual 用例已锁「清空 entries（非在途）→ 文案」的既有行为）。
 
@@ -24,11 +24,11 @@ componentTest('Timeline 空态/加载态分流：在途出加载形态（隐藏�
   assert.ok(emptyState, '空态容器应渲染');
   assert.ok(emptyState.querySelector('.load-more-spinner'), '在途时应渲染加载形态（spinner）');
   assert.equal(emptyState.getAttribute('aria-label'), '加载中', '加载形态应对读屏可用');
-  assert.ok(!entry.container.textContent.includes('暂无匹配内容'), '在途时不得出现「暂无匹配内容」假空态');
+  assert.ok(!entry.container.textContent.includes('没有未读文章'), '在途时不得出现空态假文案');
   assert.ok(!entry.container.querySelector('.timeline-load-more'), '哨兵应让位（不出现同屏双 spinner）');
 
   // 落地（仍在途结束、集合为空且已到底）：空态文案恢复
   await act(async () => { useAppStore.setState({ articlesLoading: false, articlesExhausted: true }); });
   await flush(2);
-  assert.ok(entry.container.textContent.includes('暂无匹配内容'), '落地后空态文案按真值恢复');
+  assert.ok(entry.container.textContent.includes('没有未读文章'), '落地后空态文案按真值恢复');
 });

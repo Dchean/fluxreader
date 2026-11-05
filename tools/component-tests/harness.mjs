@@ -232,6 +232,8 @@ export const resetBodyCacheForTests = bodyCacheMod.resetBodyCacheForTests;
    清空，避免上一用例挂起的在途请求（受控 Promise 永不 settle）吞掉下一用例的同键触发。 */
 const aiSliceMod = await import('../../dist-test/store/slices/ai.js');
 export const resetAiRequestStateForTests = aiSliceMod.resetAiRequestStateForTests;
+const syncSliceMod = await import('../../dist-test/store/slices/sync.js');
+export const resetGithubLoginForTests = syncSliceMod.resetGithubLoginForTests;
 
 /* ------------------------------------------------------------------
    6) 统一错误账本（R1 修复）：console.error / jsdom 未捕获 / React 三通道错误
@@ -485,6 +487,31 @@ export function resetStore(extra = {}) {
     errors: [],
     errorCenterOpen: false,
     saveAndSyncBusyOwner: null,
+    /* 同步账户/队列/订阅回执是跨用例真实事件源；基线清空防止上一用例的
+       账户名、橙色灯或 outbox 计数泄漏到下一用例。 */
+    syncStatus: 'synced',
+    backgroundSyncing: false,
+    syncConnected: false,
+    syncAccount: null,
+    syncProtocol: null,
+    syncEndpoint: null,
+    syncLastSync: 0,
+    syncSucceededAt: null,
+    syncWaiting: 0,
+    syncFailed: 0,
+    syncLocalOnly: 0,
+    syncBindableRetry: 0,
+    syncBoundPending: 0,
+    syncRetryWait: 0,
+    syncTerminalFailed: 0,
+    syncExpiredUnconfirmed: 0,
+    syncQueueLastError: null,
+    githubFlow: null,
+    githubAccount: null,
+    githubLoggingIn: false,
+    githubLoginStartPending: false,
+    githubPollPending: false,
+    githubLoginCancelPending: false,
     /* OPT-009 B3：订阅写回回执与能力矩阵是事件/挂载写入的模块状态——
        基线清空，避免跨用例残留（上一用例的能力矩阵被下一个用例读到）。 */
     subOutboxStats: null,
@@ -504,6 +531,7 @@ export function resetStore(extra = {}) {
   });
   resetBodyCacheForTests();
   resetAiRequestStateForTests();
+  resetGithubLoginForTests();
 }
 
 /** 全量清理：卸载所有挂载树（聚合错误）、复位 store、移除遗留 DOM、关闭 jsdom。

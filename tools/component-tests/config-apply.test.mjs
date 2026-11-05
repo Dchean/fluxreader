@@ -778,6 +778,17 @@ componentTest('OPT-010：镜像预览展示删除后果与确认按钮；stalePr
     settingsRemovedKeys: [],
     pendingConnection: false,
     warnings: ['1 个被删除的源存在未推送的远端写回意图：意图保留、不因镜像删除而推送退订，也不会被清除'],
+    backup: {
+      path: 'C:\\Users\\tester\\AppData\\Roaming\\com.fluxreader.app\\backups\\mirror-v34-to-v34-test.db',
+      fileName: 'mirror-v34-to-v34-test.db',
+      sizeBytes: 4096,
+      schemaVersion: 34,
+      fromVersion: 34,
+      toVersion: 34,
+      createdAt: '2026-11-04T10:00:00.000Z',
+      kind: 'mirror',
+    },
+    backupWarning: null,
   };
   setPlan({
     config_sync_status: () => new Promise((resolve) => { resolveStatus = resolve; }),
@@ -802,8 +813,10 @@ componentTest('OPT-010：镜像预览展示删除后果与确认按钮；stalePr
     assert.ok(text.includes('删除：源 1 个 / 分类 1 个'), `删除计数如实: ${text}`);
     assert.ok(text.includes('含 3 篇文章与读藏状态'), `受影响文章数与级联语义如实: ${text}`);
     assert.ok(text.includes('源B（3 篇文章）') && text.includes('旧分类（1 个源）'), `关键对象如实列出: ${text}`);
-    assert.ok(text.includes('不会退订服务端订阅'), `镜像的远端语义如实（不偷偷退订）: ${text}`);
+    assert.ok(text.includes('不会退订同步账户的订阅'), `镜像的账户语义如实（不偷偷退订）: ${text}`);
     assert.ok(text.includes('未推送的远端写回意图'), `未推意图的保留策略如实提示: ${text}`);
+    assert.ok(text.includes('自动备份：C:\\Users\\tester\\AppData\\Roaming\\com.fluxreader.app\\backups\\mirror-v34-to-v34-test.db'),
+      `确认卡必须显示可恢复快照路径: ${text}`);
     const confirmBtn = [...card.querySelectorAll('button')].find((b) => b.textContent.includes('确认镜像应用'));
     assert.ok(confirmBtn, '镜像的确认按钮单独标注（明确确认）');
     assert.equal(invokeCount('config_sync_apply'), 0, '预览零写入');
@@ -815,6 +828,11 @@ componentTest('OPT-010：镜像预览展示删除后果与确认按钮；stalePr
     assert.equal(applies[0].args.mode, 'mirror');
     assert.equal(applies[0].args.expectedSnapshotHash, 'h-mirror');
     assert.equal(applies[0].args.expectedVersion, 'v-local');
+    assert.equal(
+      applies[0].args.expectedBackupPath,
+      PLAN_MIRROR.backup.path,
+      'apply 兼容传递预览路径，本次恢复路径由后端新建后返回',
+    );
     await act(async () => {
       applies[0].reject({ code: 'stalePreview', message: '预览已失效（本地配置在预览后已变化）：请重新下载预览并确认后再应用' });
     });
@@ -830,6 +848,86 @@ componentTest('OPT-010：镜像预览展示删除后果与确认按钮；stalePr
     const cancelBtn = [...planCard(entry).querySelectorAll('button')].find((b) => b.textContent === '取消');
     await act(async () => { cancelBtn.click(); });
     await flush(2);
+  } finally {
+    await drainControlled(act, [{ kind: 'reject', items: applies }]);
+    await flush(1);
+    resetPlan();
+  }
+});
+
+/* ============================================================
+   数据安全：镜像预览备份失败时仍允许确认，由 apply 重试备份；
+   重试仍失败则返回 backupRequired、零改动并清除预览。
+   ============================================================ */
+componentTest('数据安全：镜像预览备份失败保留确认入口；apply 重试失败零改动拦截', { timeout: 40000 }, async () => {
+  installBackend();
+  clearInvokeCalls();
+  resetStore();
+  seedFromRows(ROWS, { layout: 'article' });
+
+  const applies = [];
+  let resolveStatus = null;
+  const PLAN_MIRROR_WITHOUT_BACKUP = {
+    mode: 'mirror',
+    snapshotHash: 'h-mirror-no-backup',
+    currentVersion: 'v-local',
+    affectedArticleCount: 2,
+    additions: [],
+    updates: [],
+    removals: [
+      { kind: 'feed', url: 'https://b.example/rss', title: '源B', folder: '旧分类', affectedArticleCount: 2 },
+    ],
+    settingsChangedKeys: [],
+    settingsRemovedKeys: [],
+    pendingConnection: false,
+    warnings: [],
+    backup: null,
+    backupWarning: '镜像删除前自动备份失败：磁盘空间不足；应用时将重试，失败会阻止删除。',
+  };
+  setPlan({
+    config_sync_status: () => new Promise((resolve) => { resolveStatus = resolve; }),
+    config_sync_download: () => Promise.resolve(JSON.stringify({ uploaded_at: 'x', feeds: [] })),
+    config_sync_plan: () => Promise.resolve(deepCopy(PLAN_MIRROR_WITHOUT_BACKUP)),
+    config_sync_apply: (args) => new Promise((resolve, reject) => { applies.push({ args, resolve, reject }); }),
+  });
+  const { act } = await import('react');
+  try {
+    const { entry, previewBtn } = await mountSection();
+    await enableSection(act, resolveStatus, previewBtn);
+    await selectMode(act, entry, '镜像');
+
+    await act(async () => { previewBtn.click(); });
+    await flush(3);
+    const card = planCard(entry);
+    assert.ok(card, '镜像预览卡存在');
+    assert.ok(card.textContent.includes('自动备份：未创建'), `没有快照时必须如实说明: ${card.textContent}`);
+    assert.ok(card.textContent.includes('磁盘空间不足'), `备份失败原因必须可见: ${card.textContent}`);
+
+    const confirmBtn = [...card.querySelectorAll('button')]
+      .find((b) => b.textContent.includes('确认镜像应用'));
+    assert.ok(confirmBtn, '备份失败时仍保留确认入口');
+    assert.equal(confirmBtn.disabled, false, '不得静默锁死重试入口');
+    assert.ok(confirmBtn.title.includes('重试自动备份'), `确认入口说明 apply 会重试: ${confirmBtn.title}`);
+    assert.equal(invokeCount('config_sync_apply'), 0, '预览未执行删除');
+
+    await act(async () => { confirmBtn.click(); });
+    await flush(3);
+    assert.equal(applies.length, 1, '确认后 apply 才发出');
+    assert.equal(applies[0].args.mode, 'mirror');
+    assert.equal(applies[0].args.expectedBackupPath, null, '预览无快照时 apply 请求后端重新创建');
+
+    await act(async () => {
+      applies[0].reject({
+        code: 'backupRequired',
+        message: '镜像删除前自动备份失败，已阻止应用（本地未改动）：磁盘空间不足',
+      });
+    });
+    await flush(3);
+    assert.ok(
+      useAppStore.getState().toasts.some((t) => t.text.includes('应用失败') && t.text.includes('已阻止应用')),
+      '重试仍失败必须如实显示零改动拦截',
+    );
+    assert.equal(planCard(entry), null, '失败后旧预览作废');
   } finally {
     await drainControlled(act, [{ kind: 'reject', items: applies }]);
     await flush(1);

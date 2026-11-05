@@ -8,10 +8,11 @@
 //      - S/M 真的改这篇文章的收藏/读态（打开即标读为真实初态）。
 //   B. CloseAskDialog 实际出现在 DOM 后：j/k/s/S/m/M **逐键、单次、每一步**断言
 //      读/藏/导航与写 IPC 全不变（不双次按压回原值来掩盖变化）。
-//   C. Escape 按原规则应答：action='tray'、remember=false（不替用户记住选择），
-//      且不落入「关闭阅读器」分支；resolve_close 经真实 IPC mock 落库调用可查。
+//   C. 遮罩与 Escape 只取消：隐藏弹窗、不发 resolve_close、不写记住选择，
+//      焦点回到打开前的窗口控件，且不落入「关闭阅读器」分支。
 //   D. 真实点击「退出 FluxReader」按钮：action='exit'、remember=true（默认勾选）。
-//   E. 其它浮层（搜索面板）同口径：打开时按键让路、Escape 关闭面板而非阅读器。
+//   E. 显式取消勾选后点「最小化到托盘」：action='tray'、remember=false。
+//   F. 其它浮层（搜索面板）同口径：打开时按键让路、Escape 关闭面板而非阅读器。
 // 未预期 console/jsdom/React 错误由 componentTest 的统一账本终检（R1）。
 
 import assert from 'node:assert/strict';
@@ -29,7 +30,7 @@ function rows() {
   ];
 }
 
-componentTest('OPT-016B CloseAskDialog：实际出现时键盘不改背后文章，Escape/按钮应答走真实 IPC', { timeout: 40000 }, async () => {
+componentTest('OPT-016B CloseAskDialog：实际出现时键盘不改背后文章，遮罩/Esc 只取消、显式按钮走真实 IPC', { timeout: 40000 }, async () => {
   installBackend();
   clearInvokeCalls();
   resetStore();
@@ -104,34 +105,96 @@ componentTest('OPT-016B CloseAskDialog：实际出现时键盘不改背后文章
     assert.equal(writesSoFar(), writesBefore, `确认框打开时按「${key}」不得产生读/藏写 IPC`);
   }
 
-  // ---- C. Escape 按原规则应答（tray + 不记住）----
-  await act(async () => { pressKey('Escape'); });
+  // ---- C. 遮罩 / Escape 只取消，不提交关闭动作 ----
+  clearInvokeCalls();
+  const openAsk = entry.container.querySelector('.modal-overlay.open');
+  assert.ok(openAsk, '前置：关闭确认框处于打开态');
+  await act(async () => { openAsk.click(); });
   await flush(2);
-  assert.equal(useAppStore.getState().closeAskVisible, false, 'Escape 应关闭确认框');
-  const resolveCalls = invokeCalls.filter((c) => c.cmd === 'resolve_close');
-  assert.equal(resolveCalls.length, 1, '应答应经真实 resolve_close IPC 发出一次');
-  assert.deepEqual(resolveCalls[0].args, { action: 'tray', remember: false }, 'Escape = 本次最小化到托盘且不记住选择');
-  assert.equal(active(), '103', 'Escape 不得落入「关闭阅读器」分支（文章仍选中）');
+  assert.equal(useAppStore.getState().closeAskVisible, false, '遮罩点击应隐藏确认框');
+  assert.equal(invokeCalls.filter((c) => c.cmd === 'resolve_close').length, 0, '遮罩点击不得提交 resolve_close');
+  assert.equal(active(), '103', '遮罩取消不得落入「关闭阅读器」分支（文章仍选中）');
   assert.equal(useAppStore.getState().settings.closePromptShown, false, '不记住选择：closePromptShown 不得被写成 true');
   assert.equal(useAppStore.getState().settings.closeToTray, true, '不记住选择：closeToTray 保持原值（默认 true）');
 
-  // ---- D. 真实点击「退出 FluxReader」按钮 ----
+  const focusTrigger = entry.container.querySelector('.immersive-win-controls .win-btn');
+  assert.ok(focusTrigger, '窗口控制按钮存在（焦点归还目标）');
+  focusTrigger.focus();
   await act(async () => { useAppStore.setState({ closeAskVisible: true }); });
-  await flush(1);
-  clearInvokeCalls();
-  const exitBtn = [...entry.container.querySelectorAll('.mini-dialog-actions button')]
-    .find((b) => b.textContent.includes('退出 FluxReader'));
-  assert.ok(exitBtn, '确认框应有「退出 FluxReader」按钮');
-  await act(async () => { exitBtn.click(); });
   await flush(2);
-  const exitCall = invokeCalls.filter((c) => c.cmd === 'resolve_close');
-  assert.deepEqual(exitCall.map((c) => c.args), [{ action: 'exit', remember: true }],
-    '点击退出：action=exit、remember=true（默认勾选记住）');
-  assert.equal(useAppStore.getState().closeAskVisible, false);
-  assert.equal(useAppStore.getState().settings.closeToTray, false, 'remember=true 时应同步设置镜像 closeToTray=false');
-  assert.equal(useAppStore.getState().settings.closePromptShown, true, 'remember=true 应标记已询问');
+  const escCard = entry.container.querySelector('.modal-overlay.open .modal-card');
+  assert.equal(document.activeElement, escCard, '前置：确认框打开后焦点移入面板');
+  await act(async () => { pressKey('Escape'); });
+  await flush(2);
+  assert.equal(useAppStore.getState().closeAskVisible, false, 'Escape 应隐藏确认框');
+  assert.equal(invokeCalls.filter((c) => c.cmd === 'resolve_close').length, 0, 'Escape 不得提交 resolve_close');
+  assert.equal(document.activeElement, focusTrigger, 'Escape 取消后焦点应回到原窗口控件');
+  assert.equal(active(), '103', 'Escape 取消不得落入「关闭阅读器」分支');
+  assert.equal(useAppStore.getState().settings.closePromptShown, false, 'Escape 取消不得写 closePromptShown');
+  assert.equal(useAppStore.getState().settings.closeToTray, true, 'Escape 取消不得写 closeToTray');
 
-  // ---- E. 其它浮层（搜索面板）同口径回归 ----
+  focusTrigger.focus();
+  await act(async () => { useAppStore.setState({ closeAskVisible: true }); });
+  await flush(2);
+  const backdropCard = entry.container.querySelector('.modal-overlay.open .modal-card');
+  assert.equal(document.activeElement, backdropCard, '前置：确认框打开后焦点移入面板');
+  await act(async () => { backdropCard.parentElement.click(); });
+  await flush(2);
+  assert.equal(useAppStore.getState().closeAskVisible, false, '遮罩点击应隐藏确认框');
+  assert.equal(invokeCalls.filter((c) => c.cmd === 'resolve_close').length, 0, '遮罩取消不得提交 resolve_close');
+  assert.equal(document.activeElement, focusTrigger, '遮罩取消后焦点应回到原窗口控件');
+  assert.equal(invokeCalls.filter((c) => c.cmd === 'set_setting').length, 0, '取消询问不得写 set_setting');
+
+  // ---- D. 显式按钮四组合：tray / exit × remember true / false ----
+  const combinations = [
+    { action: 'exit', remember: true, label: '退出 FluxReader' },
+    { action: 'tray', remember: false, label: '最小化到托盘' },
+    { action: 'tray', remember: true, label: '最小化到托盘' },
+    { action: 'exit', remember: false, label: '退出 FluxReader' },
+  ];
+  for (const combo of combinations) {
+    await act(async () => {
+      useAppStore.setState((s) => ({
+        closeAskVisible: true,
+        settings: { ...s.settings, closeToTray: true, closePromptShown: false },
+      }));
+    });
+    await flush(2);
+    const askOverlay = entry.container.querySelector('.modal-overlay.open');
+    const rememberBox = askOverlay.querySelector('.mini-dialog-checkbox input[type="checkbox"]');
+    if (rememberBox.checked !== combo.remember) {
+      await act(async () => { rememberBox.click(); });
+      await flush(1);
+    }
+    assert.equal(rememberBox.checked, combo.remember, `前置：记住选择=${combo.remember}`);
+
+    clearInvokeCalls();
+    const actionBtn = [...askOverlay.querySelectorAll('.mini-dialog-actions button')]
+      .find((b) => b.textContent.includes(combo.label));
+    assert.ok(actionBtn, `确认框应有「${combo.label}」按钮`);
+    await act(async () => { actionBtn.click(); });
+    await flush(2);
+
+    assert.deepEqual(
+      invokeCalls.filter((c) => c.cmd === 'resolve_close').map((c) => c.args),
+      [{ action: combo.action, remember: combo.remember }],
+      `${combo.label} / remember=${combo.remember}：resolve_close 参数正确`,
+    );
+    assert.equal(invokeCount('set_setting'), 0, '显式关闭按钮不得发 set_setting IPC');
+    assert.equal(useAppStore.getState().closeAskVisible, false, '显式按钮应关闭确认框');
+    assert.equal(
+      useAppStore.getState().settings.closeToTray,
+      combo.remember ? combo.action === 'tray' : true,
+      `remember=${combo.remember} 时 closeToTray 镜像正确`,
+    );
+    assert.equal(
+      useAppStore.getState().settings.closePromptShown,
+      combo.remember,
+      `remember=${combo.remember} 时 closePromptShown 镜像正确`,
+    );
+  }
+
+  // ---- F. 其它浮层（搜索面板）同口径回归 ----
   await act(async () => { useAppStore.getState().openSearch(); });
   await flush(2);
   assert.ok(entry.container.querySelector('.search-modal-input'), '搜索面板应真实出现');

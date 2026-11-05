@@ -58,9 +58,33 @@ async function settleWithin(promise, timeoutMs = 500) {
   ]);
 }
 
+let backendActivityId = 10_000;
+let backendEventSequence = 10_000;
+
 function installCommands(ctx, handlers, calls) {
   return ctx.overrideGlobal(globalThis, '__INVOKE__', (cmd, args) => {
     calls.push({ cmd, args });
+    if (cmd === 'sync_run') {
+      const id = ++backendActivityId;
+      const emit = (phase, extra = {}) => ctx.store.getState().applyBackendSyncActivity({
+        id, sequence: ++backendEventSequence, source: 'manual', phase, ...extra,
+      });
+      return (async () => {
+        const result = { activity_id: id, feeds: null, states: null, error: null };
+        emit('started');
+        for (const stage of ['feeds', 'states']) {
+          emit('stage', { stage });
+          try {
+            result[stage] = await handlers.phase({ which: stage, full: stage === 'states' });
+          } catch (error) {
+            result.error = { stage, code: error.code ?? 'internal', message: error.message ?? String(error) };
+            break;
+          }
+        }
+        emit('finished', { outcome: result.error ? 'error' : 'success' });
+        return result;
+      })();
+    }
     const handler = handlers[cmd];
     return handler ? handler(args) : Promise.resolve(null);
   });
@@ -89,7 +113,7 @@ export async function run(ctx) {
     let refreshCalls = 0;
     let reloadCalls = 0;
     const restoreInvoke = installCommands(ctx, {
-      sync_phase: (args) => {
+      phase: (args) => {
         if (args?.which === 'feeds') return Promise.resolve(report());
         statesCalls += 1;
         return statesGate.promise;
@@ -113,12 +137,34 @@ export async function run(ctx) {
           && pulling.syncStage === 'states'
           && typeof pulling.syncStartedAt === 'number');
 
+      store.getState().applySyncQueueChanged({
+        waiting: 0, failed: 0, bindable_retry: 1, last_error: null,
+      });
+      checkNew('(opt022-a2a) 仍有等待远端身份的意图：push 队列清空也不得标记远端写回确认',
+        store.getState().syncRemoteWriteConfirmed === false
+          && store.getState().syncBindableRetry === 1);
+
       store.getState().applySyncQueueChanged({ waiting: 0, failed: 0, last_error: null });
       const confirmed = store.getState();
       checkNew('(opt022-a2) push 快速清空队列后只确认远端写回，仍在 states 拉取且绝不提前写 synced',
         confirmed.syncRemoteWriteConfirmed === true
           && confirmed.syncStatus === 'syncing'
           && confirmed.syncStage === 'states');
+
+      store.getState().applySyncQueueChanged({
+        waiting: 0, failed: 0, bindable_retry: 44, last_error: null,
+      });
+      const revoked = store.getState();
+      const revokedLabel = syncModule.manualSyncStageLabel?.('states', {
+        remoteConfirmed: revoked.syncRemoteWriteConfirmed,
+        elapsedMs: 0,
+      });
+      checkNew('(opt022-a2b) 已确认后收到 44 条未同步意图：撤销远端写回确认，阶段文案不再声称远端已写回',
+        revoked.syncRemoteWriteConfirmed === false
+          && revoked.syncBindableRetry === 44
+          && revokedLabel === '同步状态并拉取条目中…'
+          && !revokedLabel.includes('远端已写回'));
+      store.getState().applySyncQueueChanged({ waiting: 0, failed: 0, last_error: null });
 
       await nTick(40);
       checkNew('(opt022-a3) pull Promise 未返回时保持可解释的等待阶段，不用固定延时伪造完成',
@@ -153,12 +199,63 @@ export async function run(ctx) {
     }
   }
 
+  /* ---------- states 零错误但队列仍有未绑定意图：成功终态也不得确认远端写回 ---------- */
+  {
+    await resetManualSyncState(ctx);
+    const refreshGate = deferred();
+    const calls = [];
+    let refreshCalls = 0;
+    let reloadCalls = 0;
+    const restoreInvoke = installCommands(ctx, {
+      phase: (args) => {
+        if (args?.which === 'feeds') return Promise.resolve(report());
+        store.getState().applySyncQueueChanged({
+          waiting: 0,
+          failed: 0,
+          bindable_retry: 44,
+          last_error: null,
+        });
+        return Promise.resolve(report());
+      },
+      refresh_all_feeds: () => {
+        refreshCalls += 1;
+        return refreshGate.promise;
+      },
+    }, calls);
+    const restoreReload = await withReload(store, async () => {
+      reloadCalls += 1;
+    });
+    try {
+      const pending = store.getState().triggerManualSync();
+      await waitUntil(() => refreshCalls === 1);
+      const atRefresh = store.getState();
+
+      refreshGate.resolve({ new_articles: 0, failed_feeds: 0 });
+      await waitUntil(() => reloadCalls === 1);
+      const settled = await settleWithin(pending);
+      const final = store.getState();
+      checkNew('(opt022-a7) states 零 errors 但仍有 44 条等待身份：refresh 与成功终态都不得确认远端写回',
+        settled
+          && atRefresh.syncStatus === 'syncing'
+          && atRefresh.syncStage === 'refresh'
+          && atRefresh.syncBindableRetry === 44
+          && atRefresh.syncRemoteWriteConfirmed === false
+          && final.syncStatus === 'synced'
+          && final.syncStage === null
+          && final.syncRemoteWriteConfirmed === false);
+    } finally {
+      restoreReload();
+      restoreInvoke();
+      store.setState({ toasts: [] });
+    }
+  }
+
   /* ---------- refresh / reload / IPC reject：终态必须退出 syncing ---------- */
   {
     await resetManualSyncState(ctx);
     const calls = [];
     const restoreInvoke = installCommands(ctx, {
-      sync_phase: () => Promise.resolve(report()),
+      phase: () => Promise.resolve(report()),
       refresh_all_feeds: () => Promise.reject({ message: '源站超时' }),
     }, calls);
     const restoreReload = await withReload(store, async () => {});
@@ -184,7 +281,7 @@ export async function run(ctx) {
     await resetManualSyncState(ctx);
     const calls = [];
     const restoreInvoke = installCommands(ctx, {
-      sync_phase: () => Promise.resolve(report()),
+      phase: () => Promise.resolve(report()),
       refresh_all_feeds: () => Promise.resolve({ new_articles: 1, failed_feeds: 0 }),
     }, calls);
     const restoreReload = await withReload(store, async () => {
@@ -212,7 +309,7 @@ export async function run(ctx) {
     const calls = [];
     let statesCalls = 0;
     const restoreInvoke = installCommands(ctx, {
-      sync_phase: (args) => {
+      phase: (args) => {
         if (args?.which === 'feeds') return Promise.resolve(report());
         statesCalls += 1;
         if (statesCalls === 1) {
@@ -254,7 +351,7 @@ export async function run(ctx) {
     const calls = [];
     let statesCalls = 0;
     const restoreInvoke = installCommands(ctx, {
-      sync_phase: (args) => {
+      phase: (args) => {
         if (args?.which === 'feeds') return Promise.resolve(report());
         statesCalls += 1;
         return statesGate.promise;
@@ -301,7 +398,7 @@ export async function run(ctx) {
     const calls = [];
     let statesCalls = 0;
     const restoreInvoke = installCommands(ctx, {
-      sync_phase: (args) => {
+      phase: (args) => {
         if (args?.which === 'feeds') return Promise.resolve(report());
         statesCalls += 1;
         return statesGate.promise;
@@ -338,7 +435,7 @@ export async function run(ctx) {
     const statesGate = deferred();
     const calls = [];
     const restoreInvoke = installCommands(ctx, {
-      sync_phase: (args) => args?.which === 'feeds' ? Promise.resolve(report()) : statesGate.promise,
+      phase: (args) => args?.which === 'feeds' ? Promise.resolve(report()) : statesGate.promise,
       refresh_all_feeds: () => Promise.resolve({ new_articles: 0, failed_feeds: 0 }),
     }, calls);
     const restoreReload = await withReload(store, async () => {});

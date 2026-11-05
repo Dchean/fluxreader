@@ -402,7 +402,8 @@ componentTest('OPT-017C 画廊列布局：列分配与列宽/列距公式一致�
   assert.equal(byLane.size, lanes, `首屏应覆盖全部 ${lanes} 列（实际 ${byLane.size}）`);
 
   /* 同列内：左缘完全一致，纵向 top（translateY）严格递增且间隔 = 卡片高 + gap（不重叠）。 */
-  const ys = (w) => Number((w.style.transform.match(/translateY\(([-0-9.]+)px\)/) ?? [])[1]);
+  const ys = (w) => Number((w.style.transform.match(/translateY\(([-0-9.]+)px\)/)
+    ?? w.style.transform.match(/translate3d\(0, ([-0-9.]+)px, 0\)/) ?? [])[1]);
   for (const [lane, list] of byLane) {
     for (let i = 1; i < list.length; i++) {
       assert.equal(list[i].style.left, list[i - 1].style.left, `列 ${lane} 内左缘应一致`);
@@ -433,5 +434,5 @@ componentTest('OPT-017C 画廊列布局：列分配与列宽/列距公式一致�
   assert.equal(entry.container.querySelectorAll('.gallery-card').length, 0, '空集合不应残留挂载卡片');
   assert.equal(entry.container.querySelector('.gallery-masonry-grid')?.style.height, '0px',
     '空集合时网格高度应为 0');
-  assert.ok(entry.container.textContent.includes('暂无匹配内容'), '空态文案应照旧显示');
+  assert.ok(entry.container.textContent.includes('没有未读文章'), '空态文案应说明当前视图没有未读内容');
 });

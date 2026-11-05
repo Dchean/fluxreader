@@ -28,8 +28,11 @@ import * as d13 from './frontend-tests/gallery-window.mjs';
 import * as d14 from './frontend-tests/error-center.mjs';
 /* OPT-017F：id 解析单点收敛域（numericId 真值表 / 消费等值 / 单点性源级守卫）。 */
 import * as d15 from './frontend-tests/scope-id.mjs';
+/* 2026-11-04：同步灯/账户状态机、成功短窗与 sync_status 事实源。 */
+import * as d16 from './frontend-tests/sync-indicator.mjs';
+import * as d17 from './frontend-tests/backend-sync-runtime.mjs';
 
-const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15];
+const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15, d16, d17];
 
 const argv = process.argv.slice(2);
 const selected = [];

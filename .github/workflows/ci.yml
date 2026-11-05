@@ -19,11 +19,63 @@ permissions:
 
 jobs:
   frontend:
-    name: Type-check, lint & build frontend
+    name: Lint, build & frontend regressions
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node
+        id: node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install dependencies
+        id: install
+        run: npm ci
+
+      # Note: 四个前端门禁各自可跑、失败信息指向自身——lint/build 的任一失败不得
+      # 挡住后面的状态与挂载回归；安装失败时后续步骤没有可执行前提，才统一跳过。
+      # 任一失败仍让 job 变红，不用 continue-on-error 掩盖。理由与断言纪律见
+      # .agents/notes/implemented/testing/2026-09-16-测试门禁与断言纪律.md
+      - name: Lint (oxlint)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: npm run lint
+
+      - name: Build (tsc + vite)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: npm run build
+
+      # Note: 前端回归接入 CI 的理由——它是纯逻辑状态机断言（node 直跑，不需浏览器），
+      # 能在几十毫秒内拦住 store/selector 的行为回归；备选是 Playwright 级 UI 测试，
+      # 但更慢更脆，故作为补充而非替代。
+      - name: Frontend regression (node state-machine checks)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: npm run test:frontend
+
+      # Note: 真实挂载回归（OPT-016B）——jsdom + React createRoot/act 挂载生产组件，
+      # 覆盖 effect/事件/异步链与真实 DOM 契约（ReaderProse 源码态、Timeline 五布局、
+      # CloseAskDialog 键盘、正文水合），与上面的纯逻辑通道共用同一份 loader 与
+      # store/bodyCache 实例。不跑 effect 的 SSR/静态断言不能替代它，故单列一步。
+      - name: Component mount regression (jsdom + React act)
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' && steps.install.outcome == 'success' }}
+        run: npm run test:components
+
+  ui-layout:
+    name: UI layout & social hydration (Edge CDP)
+    # 真实 Chromium 几何验收：jsdom 的 offsetHeight/getBoundingClientRect 是替身，
+    # 无法拦截 footer 被 flex 压缩或社交正文先以完整高度进入布局。windows-latest
+    # 自带 Edge；脚本启动本地 Vite + headless Edge，失败时在日志与 tmp 证据中给出
+    # 首屏/底部截图和逐帧 metrics（tmp/ 不入库，CI 只以退出码为门禁）。
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -34,24 +86,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Lint (oxlint)
-        run: npm run lint
+      - name: Real browser layout regression
+        run: npm run test:ui-layout
 
-      - name: Build (tsc + vite)
-        run: npm run build
-
-      # Note: 前端回归接入 CI 的理由——它是纯逻辑状态机断言（node 直跑，不需浏览器），
-      # 能在几十毫秒内拦住 store/selector 的行为回归；备选是 Playwright 级 UI 测试，
-      # 但更慢更脆，故作为补充而非替代。
-      - name: Frontend regression (node state-machine checks)
-        run: npm run test:frontend
-
-      # Note: 真实挂载回归（OPT-016B）——jsdom + React createRoot/act 挂载生产组件，
-      # 覆盖 effect/事件/异步链与真实 DOM 契约（ReaderProse 源码态、Timeline 五布局、
-      # CloseAskDialog 键盘、正文水合），与上面的纯逻辑通道共用同一份 loader 与
-      # store/bodyCache 实例。不跑 effect 的 SSR/静态断言不能替代它，故单列一步。
-      - name: Component mount regression (jsdom + React act)
-        run: npm run test:components
+      - name: Upload UI layout evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ui-layout-evidence
+          path: tmp/ui-layout-evidence/
+          if-no-files-found: warn
 
   rust:
     name: Check & test Rust (src-tauri)
