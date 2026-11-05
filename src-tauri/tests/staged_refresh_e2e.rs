@@ -14,6 +14,13 @@ use tokio::sync::Mutex;
 
 mod common;
 
+fn applied_count(outcome: ingestion::RefreshApplyOutcome) -> usize {
+    match outcome {
+        ingestion::RefreshApplyOutcome::Applied(n) => n,
+        ingestion::RefreshApplyOutcome::Superseded => panic!("测试请求不应被更新代际取代"),
+    }
+}
+
 /// 直连条目的测试夹具（字段口径与生产 NewArticle 一致）。
 fn direct_article(
     guid: &str,
@@ -152,9 +159,12 @@ async fn staged_refresh_http_overlaps_under_concurrency() {
         let conn = db.lock().await;
         db::create_folder(&conn, "并发", "article").unwrap();
         for i in 0..4 {
+            // 在途键按规范化 URL 去重，fragment 会被吸收；用不同路径保持四个独立源，
+            // 本用例只验证 HTTP 在锁外重叠。
+            let feed_url = url.replace(".xml", &format!("-{i}.xml"));
             db::insert_feed(
                 &conn,
-                &format!("{url}#{i}"),
+                &feed_url,
                 None,
                 &format!("S{i}"),
                 None,
@@ -178,7 +188,7 @@ async fn staged_refresh_http_overlaps_under_concurrency() {
     }
     let mut new_total = 0;
     for h in handles {
-        new_total += h.await.unwrap().unwrap();
+        new_total += h.await.unwrap().unwrap().new_articles();
     }
     let elapsed = start.elapsed();
 
@@ -240,11 +250,15 @@ async fn staged_refresh_304_keeps_conditional_headers() {
     ingestion::apply_refresh_result(
         &conn,
         1,
+        &ingestion::RefreshWriteContext::new(
+            "http://127.0.0.1:9/x.xml",
+            0,
+            Some("W/\"abc\""),
+            Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+        ),
         &ingestion::Fetched::NotModified,
         &parsed,
         false,
-        Some("W/\"abc\""),
-        Some("Wed, 21 Oct 2026 07:28:00 GMT"),
     )
     .unwrap();
 
@@ -411,11 +425,15 @@ fn staged_refresh_rolls_back_atomically_on_article_insert_failure() {
     let err = ingestion::apply_refresh_result(
         &conn,
         1,
+        &ingestion::RefreshWriteContext::new(
+            "http://127.0.0.1:9/atomic.xml",
+            0,
+            Some("W/\"old\""),
+            Some("Mon, 01 Jan 2024 00:00:00 GMT"),
+        ),
         &fetched,
         &parsed,
         false,
-        Some("W/\"old\""),
-        Some("Mon, 01 Jan 2024 00:00:00 GMT"),
     )
     .expect_err("触发器 ABORT 必须让整次写回失败");
     assert!(
@@ -475,16 +493,22 @@ fn staged_refresh_rolls_back_atomically_on_article_insert_failure() {
     // 去掉触发器，同一结果重跑：两篇均成功，ETag 只在成功后更新
     conn.execute_batch("DROP TRIGGER test_abort_second_article;")
         .unwrap();
-    let new_count = ingestion::apply_refresh_result(
-        &conn,
-        1,
-        &fetched,
-        &parsed,
-        false,
-        Some("W/\"old\""),
-        Some("Mon, 01 Jan 2024 00:00:00 GMT"),
-    )
-    .unwrap();
+    let new_count = applied_count(
+        ingestion::apply_refresh_result(
+            &conn,
+            1,
+            &ingestion::RefreshWriteContext::new(
+                "http://127.0.0.1:9/atomic.xml",
+                0,
+                Some("W/\"old\""),
+                Some("Mon, 01 Jan 2024 00:00:00 GMT"),
+            ),
+            &fetched,
+            &parsed,
+            false,
+        )
+        .unwrap(),
+    );
     assert_eq!(new_count, 2, "触发器移除后两篇均入库");
     let total: i64 = conn
         .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
@@ -584,7 +608,8 @@ fn staged_refresh_fulltext_boundary_and_guid_refresh_stay_same_source() {
             "标题一",
             "<p>新RSS摘要一</p>",
             "新RSS摘要一",
-        )],
+        )
+        .into()],
     };
     let fetched = ingestion::Fetched::Body {
         bytes: Vec::new(),
@@ -592,7 +617,15 @@ fn staged_refresh_fulltext_boundary_and_guid_refresh_stay_same_source() {
         etag: None,
         last_modified: None,
     };
-    ingestion::apply_refresh_result(&conn, 1, &fetched, &parsed, false, None, None).unwrap();
+    ingestion::apply_refresh_result(
+        &conn,
+        1,
+        &ingestion::RefreshWriteContext::new("http://127.0.0.1:9/ft.xml", 0, None, None),
+        &fetched,
+        &parsed,
+        false,
+    )
+    .unwrap();
 
     let (html, body, flag): (Option<String>, String, i64) = conn
         .query_row(
@@ -676,7 +709,8 @@ fn staged_refresh_recomputes_stale_body_text_on_historical_fulltext_refresh() {
             "标题二",
             "<p>新RSS摘要二</p>",
             "新RSS摘要二",
-        )],
+        )
+        .into()],
     };
     let fetched = ingestion::Fetched::Body {
         bytes: Vec::new(),
@@ -684,7 +718,15 @@ fn staged_refresh_recomputes_stale_body_text_on_historical_fulltext_refresh() {
         etag: None,
         last_modified: None,
     };
-    ingestion::apply_refresh_result(&conn, 1, &fetched, &parsed, false, None, None).unwrap();
+    ingestion::apply_refresh_result(
+        &conn,
+        1,
+        &ingestion::RefreshWriteContext::new("http://127.0.0.1:9/ft2.xml", 0, None, None),
+        &fetched,
+        &parsed,
+        false,
+    )
+    .unwrap();
 
     let (html, body, flag): (Option<String>, String, i64) = conn
         .query_row(
@@ -746,8 +788,17 @@ fn staged_refresh_empty_valid_feed_is_success_not_failure() {
         etag: None,
         last_modified: None,
     };
-    let n =
-        ingestion::apply_refresh_result(&conn, 1, &fetched, &parsed, false, None, None).unwrap();
+    let n = applied_count(
+        ingestion::apply_refresh_result(
+            &conn,
+            1,
+            &ingestion::RefreshWriteContext::new("http://127.0.0.1:9/empty.xml", 0, None, None),
+            &fetched,
+            &parsed,
+            false,
+        )
+        .unwrap(),
+    );
     assert_eq!(n, 0, "空 feed 是 0 条新增，不是错误");
 
     let (failed, error, title, fetched_at): (i64, Option<String>, String, Option<String>) = conn
@@ -816,13 +867,7 @@ fn staged_refresh_dedup_flag_no_longer_drops_identity() {
         title: Some("B".into()),
         site_url: None,
         icon: None,
-        articles: vec![direct_article(
-            "b1",
-            "https://d.example/x",
-            "B 篇",
-            "<p>B</p>",
-            "B",
-        )],
+        articles: vec![direct_article("b1", "https://d.example/x", "B 篇", "<p>B</p>", "B").into()],
     };
     let fetched = ingestion::Fetched::Body {
         bytes: Vec::new(),
@@ -832,7 +877,17 @@ fn staged_refresh_dedup_flag_no_longer_drops_identity() {
     };
 
     // dedup 开启：条目身份保留（旧期望 0 已按新语义迁移；显示层聚合另行消费）
-    let n = ingestion::apply_refresh_result(&conn, 2, &fetched, &parsed, true, None, None).unwrap();
+    let n = applied_count(
+        ingestion::apply_refresh_result(
+            &conn,
+            2,
+            &ingestion::RefreshWriteContext::new("http://127.0.0.1:9/b.xml", 0, None, None),
+            &fetched,
+            &parsed,
+            true,
+        )
+        .unwrap(),
+    );
     assert_eq!(n, 1, "dedup 开启时跨源同 URL 同样独立入库");
     let in_b: i64 = conn
         .query_row("SELECT COUNT(*) FROM articles WHERE feed_id = 2", [], |r| {
@@ -847,8 +902,17 @@ fn staged_refresh_dedup_flag_no_longer_drops_identity() {
     assert_eq!(tombstones, 0, "入库不再写内容去重墓碑");
 
     // 重复刷新（开关任意）：同源同 URL 命中既有行，不新增（幂等）
-    let again =
-        ingestion::apply_refresh_result(&conn, 2, &fetched, &parsed, false, None, None).unwrap();
+    let again = applied_count(
+        ingestion::apply_refresh_result(
+            &conn,
+            2,
+            &ingestion::RefreshWriteContext::new("http://127.0.0.1:9/b.xml", 0, None, None),
+            &fetched,
+            &parsed,
+            false,
+        )
+        .unwrap(),
+    );
     assert_eq!(again, 0, "重放不得新增行");
     let in_b2: i64 = conn
         .query_row("SELECT COUNT(*) FROM articles WHERE feed_id = 2", [], |r| {

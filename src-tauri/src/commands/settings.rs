@@ -106,7 +106,12 @@ pub fn apply_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> App
 #[tauri::command]
 pub async fn set_setting(state: State<'_, AppState>, key: String, value: String) -> AppResult<()> {
     let conn = state.db.lock().await;
-    apply_setting(&conn, &key, &value)
+    apply_setting(&conn, &key, &value)?;
+    if key == "app_settings" {
+        let mode = db::app_settings_str(&conn, "syncMode", "direct");
+        crate::scheduler::set_tray_refresh_mode(&mode);
+    }
+    Ok(())
 }
 
 /* ============================================================

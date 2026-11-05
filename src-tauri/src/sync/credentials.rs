@@ -193,6 +193,31 @@ impl Backend {
         }
     }
 
+    /// 状态写回后的只读验证：返回实际存在的条目及其三态状态字段。
+    /// GReader/Fever 都按 id 精确查询；`complete=false` 表示请求 id 未全部
+    /// 命中（空/短/重复/无关条目），调用方必须按 inconclusive 保留队列，
+    /// 不能把缺条当 target_missing。
+    pub(super) async fn items_for_state_verification(
+        &self,
+        ids: &[i64],
+    ) -> AppResult<greader::VerificationItems> {
+        match self {
+            Backend::GReader(c) => c.item_contents_for_verification(ids).await,
+            Backend::Fever(c) => {
+                let items = c.items_with_ids(ids).await?;
+                // 与 GReader 同口径：重复/无关条目不能凑数，必须逐个请求 id 命中。
+                let returned: std::collections::HashSet<i64> = items
+                    .iter()
+                    .filter_map(|item| greader::parse_item_id(&item.id))
+                    .collect();
+                Ok(greader::VerificationItems {
+                    complete: ids.iter().all(|id| returned.contains(id)),
+                    items,
+                })
+            }
+        }
+    }
+
     /// 订阅新源。Fever 协议无写订阅端点，降级为明确错误。
     pub(super) async fn quick_add(&self, url: &str) -> AppResult<greader::QuickAddResponse> {
         match self {

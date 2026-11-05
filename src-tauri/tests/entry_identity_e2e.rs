@@ -963,7 +963,7 @@ async fn same_feed_distinct_remote_ids_survive_real_direct_refresh() {
     );
 
     // 真实 direct refresh（生产入口）：RSS 与两行同 URL、guid 不同。
-    let (new_articles, failed) = app_lib::scheduler::refresh_all(&dbm, &http).await;
+    let (new_articles, failed) = app_lib::scheduler::refresh_all(&dbm, &http).await.unwrap();
     assert_eq!(failed, 0, "direct refresh 不得失败");
     assert_eq!(new_articles, 0, "同 feed 同 URL 已有行 → 不新增第三行");
 

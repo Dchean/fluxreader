@@ -37,6 +37,8 @@
     "content_id": 9,
     "content_revision": 3,
     "ai_summary_sig": "sig-summary-fixture",
-    "translated_sig": "sig-translated-fixture"
+    "translated_sig": "sig-translated-fixture",
+    "first_seen_at": "2026-09-18T00:00:00+08:00",
+    "published_at_source": "feed_clamped"
   }
 }

@@ -6,7 +6,7 @@
 //!
 //! 凭据字段排除：greader_password, ai_config, config_sync_credentials, miniflux_token。
 //! 不含正文/媒体/AI 缓存（按设计文档边界 DEC-008/009）。
-//! 字段清单：白名单由本模块集中定义（见下方 SYNCED_SETTING_KEYS / 各域读取函数），
+//! 字段清单：白名单由本模块集中定义（见 `build_payload` 与各域读取函数），
 //! 新增可同步字段必须同时在此登记，避免「加了字段但没进同步」的静默缺口。
 //!
 //! OPT-010：应用改为两段式——`plan_config_apply` 预览（结构化 additions/updates/
@@ -622,9 +622,11 @@ pub async fn config_sync_download(state: State<'_, AppState>) -> AppResult<Strin
     Ok(json)
 }
 
-/// 预览下载的 payload（OPT-010 两段式第一步，只读）：
+/// 预览下载的 payload（OPT-010 两段式第一步）。
 /// 返回结构化 additions/updates/removals（含受影响文章数）、快照 hash 与本地
-/// 配置版本签名——前端展示给用户确认；取消 = 不调用 apply，零写入。
+/// 配置版本签名——前端展示给用户确认；取消 = 不调用 apply，数据库零写入。
+/// 镜像预览若会删除对象，会同时创建删除前快照并把路径放进确认卡；创建失败
+/// 只产生可见警告，apply 会重试且失败时阻止删除。
 #[tauri::command]
 pub async fn config_sync_plan(
     state: State<'_, AppState>,
@@ -638,7 +640,79 @@ pub async fn config_sync_plan(
     };
     let conn = state.db.lock().await;
     let preview = plan_payload(&conn, &p, mode)?;
-    Ok(serde_json::to_value(preview)?)
+    let mirror_removals = mode == ApplyMode::Mirror && !preview.removals.is_empty();
+    let mut backup = None;
+    let mut backup_warning = None;
+    if mirror_removals {
+        match db::create_mirror_backup(&conn) {
+            Ok(info) => backup = Some(info),
+            Err(e) => {
+                let warning = mirror_backup_failure(&conn, &e);
+                backup_warning = Some(warning);
+            }
+        }
+    }
+    let mut value = serde_json::to_value(preview)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("backup".into(), serde_json::to_value(backup)?);
+        obj.insert(
+            "backupWarning".into(),
+            serde_json::to_value(backup_warning)?,
+        );
+    }
+    Ok(value)
+}
+
+/// 执行配置应用，并在成功后把原生托盘菜单刷新文案同步到新的 syncMode。
+/// 配置快照可能改写 app_settings；若不在这里同步，托盘会继续显示旧范围，
+/// 与实际刷新集合相反。
+fn apply_payload_and_refresh_tray(
+    conn: &rusqlite::Connection,
+    payload: &SyncPayload,
+    mode: ApplyMode,
+    expected_snapshot_hash: Option<&str>,
+    expected_version: Option<&str>,
+) -> AppResult<ApplyOutcome> {
+    let outcome = apply_payload_checked(
+        conn,
+        payload,
+        mode,
+        expected_snapshot_hash,
+        expected_version,
+    )?;
+    let sync_mode = db::app_settings_str(conn, "syncMode", "direct");
+    crate::scheduler::set_tray_refresh_mode(&sync_mode);
+    Ok(outcome)
+}
+
+fn apply_with_mirror_backup(
+    conn: &rusqlite::Connection,
+    payload: &SyncPayload,
+    mode: ApplyMode,
+    expected_snapshot_hash: Option<&str>,
+    expected_version: Option<&str>,
+    _expected_backup_path: Option<&str>,
+) -> AppResult<(ApplyOutcome, Option<db::BackupInfo>)> {
+    // Note: 镜像删除前可恢复快照与 apply 时机 — 见
+    // .agents/notes/implemented/architecture/2026-11-05-数据库快照与恢复边界.md
+    let preview = plan_payload(conn, payload, mode)?;
+    let mirror_removals = mode == ApplyMode::Mirror && !preview.removals.is_empty();
+    let backup = if mirror_removals {
+        // 预览文件只是确认卡上的提示。AI 产物、正文等不在配置版本签名内，
+        // 因而 apply 必须在同一数据库锁内重新生成删除前快照，不能把旧路径
+        // 当成本次删除的恢复点。
+        Some(ensure_mirror_backup(conn)?)
+    } else {
+        None
+    };
+    let outcome = apply_payload_and_refresh_tray(
+        conn,
+        payload,
+        mode,
+        expected_snapshot_hash,
+        expected_version,
+    )?;
+    Ok((outcome, backup))
 }
 
 /// 应用下载的 payload（OPT-010 两段式第二步：前端确认后调用）。
@@ -655,16 +729,18 @@ pub async fn config_sync_apply(
     mode: String,
     expected_snapshot_hash: String,
     expected_version: String,
+    expected_backup_path: Option<String>,
 ) -> AppResult<serde_json::Value> {
     let p: SyncPayload = serde_json::from_str(&payload)?;
     let mode = ApplyMode::parse(&mode)?;
     let conn = state.db.lock().await;
-    let outcome = apply_payload_checked(
+    let (outcome, backup) = apply_with_mirror_backup(
         &conn,
         &p,
         mode,
         Some(&expected_snapshot_hash),
         Some(&expected_version),
+        expected_backup_path.as_deref(),
     )?;
     // TASK-074：如实分开 imported / updated / skipped（此前 skipped 是已更新数）
     // OPT-006：pendingConnection = 待确认连接建议——前端必须展示「需重新输入凭据
@@ -679,7 +755,35 @@ pub async fn config_sync_apply(
         "removedFolders": outcome.removed_folders,
         "affectedArticleCount": outcome.affected_article_count,
         "pendingConnection": outcome.pending_connection,
+        "backup": backup,
     }))
+}
+
+fn mirror_backup_failure(conn: &rusqlite::Connection, error: &AppError) -> String {
+    format!(
+        "镜像删除前自动备份失败：{}；应用时将重试，失败会阻止删除。",
+        mirror_backup_error_detail(conn, error)
+    )
+}
+
+fn mirror_backup_error_detail(conn: &rusqlite::Connection, error: &AppError) -> String {
+    let app_dir = db::database_path(conn)
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    db::sanitize_log_text(&app_dir, &error.message)
+}
+
+fn ensure_mirror_backup(conn: &rusqlite::Connection) -> AppResult<db::BackupInfo> {
+    db::create_mirror_backup(conn).map_err(|e| {
+        AppError::new(
+            "backupRequired",
+            format!(
+                "镜像删除前自动备份失败，已阻止应用（本地未改动）：{}",
+                mirror_backup_error_detail(conn, &e)
+            ),
+        )
+    })
 }
 
 /// 状态：远端配置时间戳 vs 本地上次同步时间。
@@ -719,4 +823,349 @@ pub async fn webdav_get_for_test(
     cred: &SyncCredentials,
 ) -> AppResult<String> {
     webdav_get(http, cred, CONFIG_FILE_NAME).await
+}
+
+#[cfg(test)]
+mod tray_mode_tests {
+    use super::*;
+    use crate::db::MIGRATIONS;
+    use std::sync::{LazyLock, Mutex};
+
+    static CAPTURED_LABEL: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+
+    fn capture_tray_text(label: &str) {
+        *CAPTURED_LABEL.lock().unwrap() = Some(label.to_string());
+    }
+
+    #[test]
+    fn config_apply_refreshes_tray_mode_from_merged_settings() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let _ = crate::scheduler::take_last_tray_refresh_mode_for_test();
+        *CAPTURED_LABEL.lock().unwrap() = None;
+        crate::scheduler::set_tray_text_writer_for_test(Some(capture_tray_text));
+
+        let payload: SyncPayload = serde_json::from_value(serde_json::json!({
+            "schema": 2,
+            "uploaded_at": "2026-11-04T00:00:00Z",
+            "folders": [],
+            "feeds": [],
+            "app_settings": "{\"syncMode\":\"hybrid\"}",
+            "connection_config": null
+        }))
+        .unwrap();
+        apply_payload_and_refresh_tray(&conn, &payload, ApplyMode::Merge, None, None).unwrap();
+        assert_eq!(
+            crate::scheduler::take_last_tray_refresh_mode_for_test().as_deref(),
+            Some("hybrid"),
+            "配置应用成功后必须把新 syncMode 推到托盘文案"
+        );
+        assert_eq!(
+            CAPTURED_LABEL.lock().unwrap().as_deref(),
+            Some("刷新本地订阅源"),
+            "测试注入点必须收到由新 syncMode 计算出的菜单文案"
+        );
+        crate::scheduler::set_tray_text_writer_for_test(None);
+    }
+}
+
+#[cfg(test)]
+mod mirror_backup_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_db(base: &str) -> std::path::PathBuf {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fluxreader_mirror_backup_{base}_{pid}_{nanos}_{seq}",
+            pid = std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("fluxreader.db")
+    }
+
+    fn local_fixture(conn: &rusqlite::Connection) {
+        let folder = db::create_folder(conn, "本地", "article").unwrap();
+        let feed = db::insert_feed(
+            conn,
+            "https://local.example/rss",
+            None,
+            "本地源",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO articles (feed_id, guid, title) VALUES (?1, 'local-1', '本地文章')",
+            rusqlite::params![feed],
+        )
+        .unwrap();
+    }
+
+    fn empty_remote_payload() -> SyncPayload {
+        serde_json::from_value(serde_json::json!({
+            "schema": 2,
+            "uploaded_at": "2026-11-04T00:00:00Z",
+            "folders": [],
+            "feeds": [],
+            "app_settings": null,
+            "connection_config": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn mirror_creates_openable_pre_delete_snapshot() {
+        let path = temp_db("ok");
+        let _ = std::fs::remove_file(&path);
+        let conn = db::open(&path).unwrap();
+        local_fixture(&conn);
+        let payload = empty_remote_payload();
+        let preview = plan_payload(&conn, &payload, ApplyMode::Mirror).unwrap();
+        assert!(!preview.removals.is_empty(), "前置：镜像确实会删除本地对象");
+        let preview_backup = db::create_mirror_backup(&conn).unwrap();
+
+        let (outcome, backup) = apply_with_mirror_backup(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&preview.snapshot_hash),
+            Some(&preview.current_version),
+            Some(&preview_backup.path),
+        )
+        .unwrap();
+        let backup = backup.expect("镜像删除前必须返回快照路径");
+        assert_ne!(
+            backup.path, preview_backup.path,
+            "apply 必须返回本次删除前新建的快照，不能复用预览文件"
+        );
+        assert!(std::path::Path::new(&preview_backup.path).is_file());
+        assert_eq!(outcome.removed_feeds, 1);
+        assert!(backup.path.contains("backups"));
+        assert!(backup.file_name.starts_with("mirror-v"));
+        assert!(backup.size_bytes > 0);
+        assert_eq!(
+            db::list_feeds(&conn).unwrap().len(),
+            0,
+            "原库对象已按镜像删除"
+        );
+
+        let snap = rusqlite::Connection::open(&backup.path).unwrap();
+        let feeds: i64 = snap
+            .query_row(
+                "SELECT COUNT(*) FROM feeds WHERE feed_url = 'https://local.example/rss'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let articles: i64 = snap
+            .query_row("SELECT COUNT(*) FROM articles", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(feeds, 1, "快照必须保留镜像删除前的源");
+        assert_eq!(articles, 1, "快照必须保留随源级联删除的文章");
+        let quick: String = snap
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(quick, "ok");
+        drop(snap);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn mirror_apply_backup_includes_ai_summary_committed_after_preview() {
+        let path = temp_db("post_preview_ai");
+        let conn = db::open(&path).unwrap();
+        local_fixture(&conn);
+        let payload = empty_remote_payload();
+        let preview = plan_payload(&conn, &payload, ApplyMode::Mirror).unwrap();
+        let preview_backup = db::create_mirror_backup(&conn).unwrap();
+        let writer = rusqlite::Connection::open(&path).unwrap();
+        writer
+            .execute(
+                "UPDATE articles SET ai_summary = 'synthetic-after-preview' WHERE guid = 'local-1'",
+                [],
+            )
+            .unwrap();
+        drop(writer);
+        assert_eq!(
+            plan_payload(&conn, &payload, ApplyMode::Mirror)
+                .unwrap()
+                .current_version,
+            preview.current_version,
+            "AI 产物不在配置预览签名内，合法预览仍须备份其最新内容"
+        );
+
+        let (outcome, backup) = apply_with_mirror_backup(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&preview.snapshot_hash),
+            Some(&preview.current_version),
+            Some(&preview_backup.path),
+        )
+        .unwrap();
+        let backup = backup.unwrap();
+        assert_eq!(outcome.removed_feeds, 1);
+        assert_ne!(backup.path, preview_backup.path);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM articles", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let snapshot = rusqlite::Connection::open_with_flags(
+            &backup.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let summary: String = snapshot
+            .query_row(
+                "SELECT ai_summary FROM articles WHERE guid = 'local-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(summary, "synthetic-after-preview");
+        let old_snapshot = rusqlite::Connection::open_with_flags(
+            &preview_backup.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let old_summary: Option<String> = old_snapshot
+            .query_row(
+                "SELECT ai_summary FROM articles WHERE guid = 'local-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_summary, None, "预览文件仍保留其原始时点内容");
+        drop(old_snapshot);
+        drop(snapshot);
+        drop(conn);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn mirror_old_backup_cannot_bypass_new_backup_failure() {
+        let path = temp_db("old_backup_new_failure");
+        let conn = db::open(&path).unwrap();
+        local_fixture(&conn);
+        let payload = empty_remote_payload();
+        let preview = plan_payload(&conn, &payload, ApplyMode::Mirror).unwrap();
+        let preview_backup = db::create_mirror_backup(&conn).unwrap();
+        let before_changes = conn.total_changes();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let error = apply_with_mirror_backup(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&preview.snapshot_hash),
+            Some(&preview.current_version),
+            Some(&preview_backup.path),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "backupRequired", "{error}");
+        assert_eq!(
+            conn.total_changes(),
+            before_changes,
+            "备份失败不能写业务数据"
+        );
+        assert_eq!(db::list_feeds(&conn).unwrap().len(), 1);
+        assert_eq!(db::list_folders(&conn).unwrap().len(), 1);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM articles", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(std::path::Path::new(&preview_backup.path).is_file());
+        conn.execute_batch("ROLLBACK").unwrap();
+        drop(conn);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn mirror_backup_does_not_bypass_stale_preview() {
+        let path = temp_db("stale_preview");
+        let conn = db::open(&path).unwrap();
+        local_fixture(&conn);
+        let payload = empty_remote_payload();
+        let preview = plan_payload(&conn, &payload, ApplyMode::Mirror).unwrap();
+        let preview_backup = db::create_mirror_backup(&conn).unwrap();
+        conn.execute("UPDATE articles SET is_read = 1 WHERE guid = 'local-1'", [])
+            .unwrap();
+        let before_changes = conn.total_changes();
+
+        let error = apply_with_mirror_backup(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&preview.snapshot_hash),
+            Some(&preview.current_version),
+            Some(&preview_backup.path),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "stalePreview", "{error}");
+        assert_eq!(conn.total_changes(), before_changes);
+        assert_eq!(db::list_feeds(&conn).unwrap().len(), 1);
+        let is_read: bool = conn
+            .query_row(
+                "SELECT is_read FROM articles WHERE guid = 'local-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(is_read, "预览失效后保留当前读藏状态与文章");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn mirror_backup_failure_blocks_deletion_with_zero_writes() {
+        let path = temp_db("fail");
+        let _ = std::fs::remove_file(&path);
+        let conn = db::open(&path).unwrap();
+        local_fixture(&conn);
+        let dir = path.parent().unwrap().join("backups");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::write(&dir, b"not-a-directory").unwrap();
+
+        let payload = empty_remote_payload();
+        let preview = plan_payload(&conn, &payload, ApplyMode::Mirror).unwrap();
+        let err = apply_with_mirror_backup(
+            &conn,
+            &payload,
+            ApplyMode::Mirror,
+            Some(&preview.snapshot_hash),
+            Some(&preview.current_version),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "backupRequired", "{err}");
+        assert_eq!(
+            db::list_feeds(&conn).unwrap().len(),
+            1,
+            "备份失败时镜像删除必须被阻止（源原样）"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM articles", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "备份失败时文章不得被级联删除"
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }

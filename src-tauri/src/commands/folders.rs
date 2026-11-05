@@ -1,6 +1,6 @@
 //! commands 的 folders 领域子模块（TASK-044 从 commands.rs 按既有章节拆分，纯搬运）。
 
-use super::{read_dedup_flag, sync_configured};
+use super::{read_dedup_flag, subscription_write_back_supported, sync_configured};
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::ingestion;
@@ -364,25 +364,39 @@ fn persist_new_feed(
         translate_mode,
         "local",
     )?;
+    if let Some(user_title) = title.map(str::trim).filter(|t| !t.is_empty()) {
+        db::set_feed_custom_title(&tx, feed_id, user_title)?;
+    }
     // TASK-064 N4：重新添加 = 用户改变主意的最强证据——清掉同 URL 的删除
     // 墓碑。此前墓碑只在 pull 的「远端不再列出」分支清除，重新添加的源被永久
-    // 压制：pull 跳过绑定、其未推送状态 30 天后被 prune_stale_unbound 物理删除。
+    // 压制：pull 跳过绑定、其未推送状态 30 天后被转为 expired_unconfirmed。
     db::remove_feed_tombstone(&tx, feed_url)?;
     db::set_feed_fetch_state(&tx, feed_id, false, None, etag, last_modified)?;
     let dedup = read_dedup_flag(&tx);
     for a in &parsed.articles {
-        db::upsert_article_with_feed(&tx, feed_id, a, dedup)?;
+        db::upsert_article_with_feed_source(
+            &tx,
+            feed_id,
+            &a.article,
+            dedup,
+            a.published_at_clamped,
+        )?;
     }
-    // 勾选「同步到后端」且已连接 → 入队类型化订阅 outbox（feeds 阶段推远端）。
+    // 勾选「同步到账户」且已连接 → 入队类型化订阅 outbox（feeds 阶段推远端）。
     // OPT-014 R1：凭据读取失败 → Err（不得静默当未连接跳过入队）。
     // OPT-009 阶段 B：与本地入库同一事务、携带账号 key/代际；远端确认按
     // (id, generation) 精确出队（由 sync 的订阅执行器处理）。
-    if sync_to_backend {
+    if sync_to_backend && {
+        let protocol = db::get_setting(&tx, "sync_protocol")?
+            .filter(|p| p == "fever" || p == "greader")
+            .unwrap_or_else(|| "greader".into());
+        subscription_write_back_supported(&protocol)
+    } {
         if let Some(ctx) = crate::sync::current_account(&tx)? {
             let folder_label = db::folder_name(&tx, folder_id)?;
             // B2-5：用户/来源给的标题作为**目标**随队项落库（挂载时用真实 t=
             // 写回）；URL 兜底标题不是用户意图（会把 URL 当标题推到远端）→ 不推。
-            let desired_title = (final_title != feed_url).then_some(final_title.as_str());
+            let desired_title = db::explicit_feed_title(&final_title, feed_url);
             db::enqueue_subscribe(
                 &tx,
                 ctx.generation,
@@ -480,7 +494,7 @@ mod tests {
     }
 
     /// N4：重新添加清墓碑——先删源留墓碑，再 persist 同 URL，墓碑必须消失
-    /// （否则 pull 永久跳过该源，其未推送状态 30 天后被老化物理删除）。
+    /// （否则 pull 永久跳过该源，其未推送状态 30 天后被老化转过期）。
     #[test]
     fn republishing_a_url_clears_its_tombstone() {
         let conn = test_conn();
@@ -699,7 +713,7 @@ mod tests {
         db::add_feed_tombstone(&conn, "https://f.example/rss").unwrap();
 
         let mut parsed = minimal_parsed();
-        parsed.articles.push(db::NewArticle {
+        parsed.push_article(db::NewArticle {
             guid: "boom".into(),
             url: Some("https://e.example/boom".into()),
             title: "boom".into(),
@@ -942,6 +956,70 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inherit_count, 1, "库内真值列确实写了 inherit");
+    }
+
+    /// P2：Fever 没有订阅写回端点——即使旧前端/恶意调用传 sync_to_backend=true，
+    /// add_feed 也不得写订阅 outbox；GReader 对照仍正常入队。
+    #[test]
+    fn persist_new_feed_fever_never_enqueues_subscription_outbox() {
+        let conn = test_conn();
+        db::set_setting(
+            &conn,
+            "greader_endpoint",
+            "http://127.0.0.1:1/api/greader.php",
+        )
+        .unwrap();
+        db::set_setting(&conn, "greader_username", "t").unwrap();
+        db::set_setting(&conn, "greader_password", "pw").unwrap();
+        db::set_setting(&conn, "sync_protocol", "fever").unwrap();
+
+        let parsed = minimal_parsed();
+        persist_new_feed(
+            &conn,
+            "https://f.example/fever.xml",
+            &parsed,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            db::FeedAiMode::Inherit,
+            db::FeedAiMode::Inherit,
+            true,
+        )
+        .unwrap();
+        assert!(
+            db::pending_outbox(&conn).unwrap().is_empty(),
+            "Fever 下 add_feed 不得入订阅 outbox"
+        );
+
+        db::set_setting(&conn, "sync_protocol", "greader").unwrap();
+        let parsed_control = ingestion::parse_feed(
+            br#"<?xml version="1.0"?><rss version="2.0"><channel><title>T2</title>
+<item><title>b</title><link>https://e.example/2</link><guid>g2</guid></item>
+</channel></rss>"#,
+            "https://f.example/greader.xml",
+        )
+        .unwrap();
+        persist_new_feed(
+            &conn,
+            "https://f.example/greader.xml",
+            &parsed_control,
+            None,
+            None,
+            None,
+            None,
+            "inherit",
+            db::FeedAiMode::Inherit,
+            db::FeedAiMode::Inherit,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            db::pending_outbox(&conn).unwrap().len(),
+            1,
+            "GReader 对照必须正常入队（证明门控不是恒关）"
+        );
     }
 
     /// record_feed_edit 的新真值入口：只改一个 mode、其余字段不动；

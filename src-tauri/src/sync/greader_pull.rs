@@ -212,7 +212,8 @@ pub fn set_greader_pull_clock_override(ts: Option<i64>) {
 /// 拉远端条目（新条目 + 状态变化），按 remote_id/URL 匹配合并。
 /// 分页三段式：每页「锁外拉取 → 锁内合并」，锁从不跨分页 HTTP await。
 /// `full=true`（手动同步/首连）：先做绑定回填 + 全量状态对账。
-/// `full=false`（后台自动同步）：只拉增量（ot 游标），便宜。
+/// `full=false`（后台自动同步）：普通正文按 ot 窗口增量拉取，另取完整
+/// unread/starred 集合做状态对账及有界的缺身份/正文回补。
 ///
 /// OPT-006：`session` 的代际在每个 HTTP→DB 边界复核（游标读、每页 id 请求、
 /// 每块正文合并、状态对账、游标推进）；代际失配立即以 `staleSession` 终止本轮，
@@ -245,7 +246,7 @@ pub(super) async fn pull_entries_greader(
     let since_s = {
         let conn = db.lock().await;
         session.ensure_current(&conn)?;
-        db::last_sync_ts(&conn).unwrap_or(0)
+        db::last_sync_ts(&conn)?
     };
 
     // OPT-007 字段版本快照：必须在**任何 HTTP 请求之前**抓取（任务卡「版号快照在
@@ -307,26 +308,10 @@ pub(super) async fn pull_entries_greader(
         return Ok(());
     }
 
-    // TASK-097 游标语义修正：本轮游标候选在 id 列举**开始前**取（拉取起点墙钟），
-    // 拉取成功时写候选，而非修前的「拉取结束墙钟」。论证（起点游标 + 合并幂等 ⇒ 无漏无重）：
-    // - 无漏：设起点候选为 C、id 列举时刻为 L（C ≤ L）。凡列举时刻已存在且
-    //   changed_at ≥ 旧游标的条目已被本轮列举；凡**未被本轮列举**的服务端变更
-    //   （列举之后才入库/变更）必有 changed_at ≥ L ≥ C，必然落进下一轮增量窗口
-    //   （ot = C）。修前写结束墙钟 E 时，changed_at ∈ [L, E) 的变更被排除在下一轮
-    //   之外——只能等全量对账补回（JOURNAL 09-24 登记的漏拉窗口，拉取越慢漏得越多）。
-    // - 无重：本轮已合并的条目凡 changed_at ≥ C，下一轮会重复列举；合并幂等
-    //   （upsert + 状态写同值 + 正文/封面只回填空位），不产生重复数据。
-    // - 比较方向：服务端过滤为 published > ot（**严格大于**）——mock_greader.rs
-    //   的 ids 路由与真实 Miniflux v2 main 同口径（ot → AfterPublishedDate →
-    //   `published_at > $N`；契约与分歧条目构造见 mock 头注，pull_window_e2e
-    //   锁定）。无漏性在严格大于下依然成立，但论证载体从 changed_at 换成
-    //   published：新抓条目的 published 即入库时刻（墙钟单调），本轮窗口
-    //   (上轮起点, ∞) 覆盖「本轮列举时刻之前已入库」的全部新条目；列举之后
-    //   入库的条目 published > 本轮起点候选（列举开始前墙钟），必然落进下一轮
-    //   窗口。旧条目的状态变更不改 published、不进增量窗口——由权威集合对账
-    //   （unread/starred）与 with_ids 回补承担，这是设计分工而非漏拉窗口。
-    // - 首次同步：last_sync_ts 为空取 0，ot=0 即全窗口列举，成功后写起点候选，
-    //   与「游标 0 ⇒ 视为未同步」的既有语义兼容；全量（full=true，ot=0）同理写起点。
+    // Note: published 是源发布时间，不能当服务端入库墙钟；晚到旧文由完整 unread/starred 集合回补 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
+    // ot 在固定 Miniflux 实现上是 published > ot，起点墙钟只缩小普通增量窗口。
+    // 它不能保证抓到晚收录旧文或旧文章状态变化；完整权威集合负责状态与缺文发现。
+    // 已读且未收藏的旧文章仍由 full 的 ot=0 列举覆盖，不把发布时间用作冲突时钟。
     let cursor_candidate = pull_now();
 
     // 拉取目标：reading-list 全部条目 id（分页），full 时 ot=0（全量），增量时 ot=since_s
@@ -483,8 +468,8 @@ pub(super) async fn pull_entries_greader(
         return Err(SyncSession::stale_error());
     }
 
-    // 轻量同步（full=false）状态对账：增量 item_contents 只覆盖「变更过的」条目，
-    // 漏掉「手机很早前标读、changed_at 早于游标」的旧变更。read 侧不再全量拉
+    // 轻量同步（full=false）状态对账：ot 过滤发布时间，不能覆盖旧文章的状态
+    // 变更或晚收录旧文；完整状态集合提供独立的对账/回补通道。read 侧不再全量拉
     // read 集合（ot×状态流增量已被服务端实现证伪，见 docs/sync-compat-matrix.md
     // §1），改拉 reading-list + xt=read 的当前未读全集，与本地未读绑定行差分出
     // 「远端新变已读」（xt= 三家服务端官方支持的等价替代）；starred 侧保持
@@ -510,12 +495,10 @@ pub(super) async fn pull_entries_greader(
         // continuation 耗尽——页上限命中 / 请求失败 / 损坏 continuation 一律
         // Err，本轮跳过 read 差分（fail-closed），不落地任何差分结果；游标
         // 语义不变（是否推进仍由下方 failures 汇总决定）。
-        let curr_unread: Option<Vec<i64>> = match unread_result {
+        let mut curr_unread: Option<Vec<i64>> = match unread_result {
             Ok(ids) => Some(ids),
             Err(e) => {
-                if e.code == "protocol" {
-                    authority_cursor_failures += 1;
-                }
+                authority_cursor_failures += 1;
                 report.note_client_error(&e);
                 report
                     .errors
@@ -526,9 +509,7 @@ pub(super) async fn pull_entries_greader(
         let starred_ids = match starred_result {
             Ok(ids) => Some(ids),
             Err(e) => {
-                if e.code == "protocol" {
-                    authority_cursor_failures += 1;
-                }
+                authority_cursor_failures += 1;
                 report.note_client_error(&e);
                 report
                     .errors
@@ -536,17 +517,15 @@ pub(super) async fn pull_entries_greader(
                 None
             }
         };
-        // B2 回补（starred 侧保留）：starred 集合里「不在 mf_id_to_article 映射」
-        // 的 id 没有本地行，双向判定摸不到——先逐块拉 stream/items/contents
-        // 走 merge_pulled_entry 既有四分支匹配链绑定并应用状态（镜像 fever_pull
-        // 的 with_ids 回补结构；冲突方向仍只消费 conflict_policy 单点）。
-        // read 侧回补随 read 集合退场：远端已读且未绑定的条目改由 full 同步 /
-        // 增量窗口收敛；未读集合仅服务差分，不做回补（未绑定未读条目维持
-        // 既有 L1 残余场景，不新增绑定通道——取舍记录于未读差分 Note）。
-        // 回补软失败 = 该侧本轮跳过对账（fail-closed），游标经
-        // authority_cursor_failures 保留；Err 仅限会话代际失配，整轮终止。
-        // Note: 回补块大小/预算与失败语义的取舍 — 见 .agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md
-        // Note: 未读差分机制与完整性守卫取舍 — 见 .agents/notes/implemented/architecture/2026-11-01-GR未读差分对账.md
+        // Note: 两个完整集合都补缺身份/正文，保持 read-wins、pending/版本守卫 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
+        if let Some(ids) = curr_unread.as_ref() {
+            if !backfill_authority_collection(db, session, client, "unread", ids, &mut maps, report)
+                .await?
+            {
+                authority_cursor_failures += 1;
+                curr_unread = None;
+            }
+        }
         let mut starred_for_reconcile = starred_ids;
         if let Some(ids) = starred_for_reconcile.as_ref() {
             match backfill_authority_collection(
@@ -562,9 +541,7 @@ pub(super) async fn pull_entries_greader(
                 Err(e) => return Err(e),
             }
         }
-        // read 差分：只依赖「curr_unread 完整 + maps/DB」。差分域 = maps 绑定行，
-        // curr_unread 中未绑定的 id 不进域（无行可写，维持既有「无通道」行为，
-        // 由 full / 增量窗口收敛）。
+        // read 差分复用回补后的映射，集合不完整或回补失败时本字段不落差分。
         if let Some(curr_unread_ids) = curr_unread.as_ref() {
             let candidates =
                 collect_unread_diff_candidates(db, session, curr_unread_ids, &maps).await?;
@@ -624,15 +601,15 @@ pub(super) async fn pull_entries_greader(
     Ok(())
 }
 
-/// B2：把权威集合中「尚无本地行」的 id 逐块拉 contents 并合并。
+/// 把权威集合中缺本地身份或正文的 id 逐块拉 contents 并合并。
 /// 返回 `Ok(true)` = 该集合全部处理完成（含预算内子集）；`Ok(false)` =
 /// 单请求/合并失败（错误已记入 report），调用方跳过该侧对账并保留游标；
-/// `Err` 仅限会话代际失配（整轮终止）。
+/// `Err` 包括会话代际失配及正文预过滤/进度读写的数据库失败，整轮终止。
 ///
-/// 只补集合内缺失的 id（unbound = 集合 id − maps.mf_id_to_article 的键），
+/// 只补集合内缺身份或正文的 id，
 /// 绝不额外列举；合并走 [`merge_pulled_entry`] 既有四分支匹配链（远端 feed
 /// 未绑定的条目按有限兼容分支记账 + 已读广播，与主列举分块同口径）。
-/// 回补结果不推动任何游标——游标只由主列举窗口的成败决定。
+/// 成功后保存本代际遍历位置；失败保留遍历位置及主列举游标。
 async fn backfill_authority_collection(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
@@ -642,25 +619,34 @@ async fn backfill_authority_collection(
     maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
 ) -> AppResult<bool> {
-    let unbound_ids: Vec<i64> = ids
-        .iter()
-        .copied()
-        .filter(|id| !maps.mf_id_to_article.contains_key(id))
-        .collect();
-    if unbound_ids.is_empty() {
+    let progress_key = format!("greader_backfill_{collection}");
+    let (mut needed_ids, previous_id) = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        let with_body: HashSet<i64> = db::remote_ids_with_body(&conn, ids)?.into_iter().collect();
+        let needed: BTreeSet<i64> = ids
+            .iter()
+            .copied()
+            .filter(|id| !with_body.contains(id))
+            .collect();
+        let previous = db::get_setting(&conn, &progress_key)?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .filter(|value| value["generation"].as_i64() == Some(session.generation))
+            .and_then(|value| value["last_id"].as_i64());
+        (needed.into_iter().collect::<Vec<_>>(), previous)
+    };
+    if needed_ids.is_empty() {
         return Ok(true);
     }
-    let budget = unbound_ids.len().min(GR_BACKFILL_MAX_IDS_PER_SYNC);
-    if budget < unbound_ids.len() {
-        report.errors.push(format!(
-            "GR {collection} 集合回补达到每轮 {GR_BACKFILL_MAX_IDS_PER_SYNC} 条预算 \
-             （本轮补 {budget} 条，剩余下轮续补；集合本身完整，对账照常执行）"
-        ));
+    if let Some(previous_id) = previous_id {
+        let start = needed_ids.partition_point(|id| *id <= previous_id);
+        needed_ids.rotate_left(start);
     }
+    let budget = needed_ids.len().min(GR_BACKFILL_MAX_IDS_PER_SYNC);
     // W3-2：回补请求同样有界并发（批内 ≤ PULL_FETCH_CONCURRENCY、按原块顺序
     // 逐块合并）；首块失败即该侧软失败（fail-closed），同批在途请求无法撤回
     // 属既有「已发出的请求不能撤回」边界，后续批次不再发起。
-    let chunk_slices: Vec<&[i64]> = unbound_ids[..budget]
+    let chunk_slices: Vec<&[i64]> = needed_ids[..budget]
         .chunks(GR_BACKFILL_CHUNK_SIZE)
         .collect();
     for start in (0..chunk_slices.len()).step_by(PULL_FETCH_CONCURRENCY) {
@@ -677,7 +663,14 @@ async fn backfill_authority_collection(
                     ));
                     return Ok(false);
                 }
-                ContentFetch::Entries(v) => v,
+                ContentFetch::Entries(mut entries) => {
+                    for entry in &mut entries {
+                        if entry.read_state() == greader::RemoteState::False {
+                            entry.read_state_override = Some(greader::RemoteState::Missing);
+                        }
+                    }
+                    entries
+                }
             };
             // 远端 feed 未绑定的条目按有限兼容合并（镜像主列举分块的既有口径）：
             // 记 binding_incomplete 并继续，不算本侧软失败。
@@ -721,6 +714,17 @@ async fn backfill_authority_collection(
             }
         }
     }
+    let conn = db.lock().await;
+    session.ensure_current(&conn)?;
+    db::set_setting(
+        &conn,
+        &progress_key,
+        &serde_json::json!({
+            "generation": session.generation,
+            "last_id": needed_ids[budget - 1],
+        })
+        .to_string(),
+    )?;
     Ok(true)
 }
 
@@ -798,7 +802,7 @@ async fn fetch_stream_ids(
 /// read 全量对账（[`reconcile_reader_state`]）一致取 `maps.mf_id_to_article`
 /// （远端 feed 绑定行），叠加「本地未读」过滤——本地已读行不进域（旧路径对
 /// 它们也写 0 行，幂等等价）；remote_id ∉ curr_unread 即「远端不再报未读」。
-/// 返回 (remote_id, aid) 列表；`Err` 仅限会话代际失配。
+/// 返回 (remote_id, aid) 列表；会话代际失配或数据库读取失败返回 `Err`。
 async fn collect_unread_diff_candidates(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
@@ -829,8 +833,7 @@ async fn collect_unread_diff_candidates(
 ///
 /// 「远端已读」与「远端已删除」在未读集合中同样缺席，凭未读集合本身不可分；
 /// 差分不能把缺席一律解释成已读（远端删除的未读条目会被误标）。以
-/// stream/items/contents 的响应条数为准：返回条数少于请求条数判 Err（缺条
-/// 判协议错误，见 greader.rs 的响应条数守卫），不校验 id 级对应；块 Err 再
+/// stream/items/contents 必须覆盖请求 ID（重复/无关条目不能凑数）；块 Err 再
 /// 逐 id 探测——`protocol`（缺条/删除形态）静默跳过该候选，`network`/HTTP 型
 /// 失败计入聚合诊断并推进连续失败计数，连续 2 次即 fail-fast 本 chunk 剩余
 /// 兜底（防最坏 100 次/块串行重试），剩余候选按「网络未确认」计入同一条

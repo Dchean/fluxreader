@@ -39,8 +39,9 @@ pub fn init_subscription_event_target(app: tauri::AppHandle) {
 ///
 /// 锁纪律：调用方必须在 **DB 锁外** 调用——本函数内部自己短持锁。
 /// 静默规则（与 notify_queue_changed 同源）：未配置同步（无凭据）→ 不发事件；
-/// 事件目标未注册（集成测试）→ no-op；账号/统计读取失败 → 记日志跳过
-/// （不编造零值事件冒充「无待办」）；与上次实际发射的 payload 同值 → 跳过
+/// 事件目标未注册（集成测试）→ no-op；账号/统计读取失败 → 发可重试
+/// `sync-error` 并跳过统计通知（不编造零值冒充「无待办」）；与上次实际
+/// 发射的 payload 同值 → 跳过
 /// （W2 复审 P3-2 的跨发射点去重，见 [`LAST_OUTBOX_PAYLOAD`]）。
 pub async fn notify_subscription_outbox_changed(db: &Arc<Mutex<Connection>>) {
     let Some(app) = SUBSCRIPTION_EVENT_TARGET.get() else {
@@ -50,13 +51,18 @@ pub async fn notify_subscription_outbox_changed(db: &Arc<Mutex<Connection>>) {
         let conn = db.lock().await;
         match super::current_account(&conn) {
             // 当前账号限定：异账号暂停行不进入展示口径
-            Ok(Some(ctx)) => db::subscription_outbox_stats(&conn, &ctx.key)
-                .ok()
-                .and_then(|s| db::subscription_outbox_changed_payload(&s, true)),
+            Ok(Some(ctx)) => match db::subscription_outbox_stats(&conn, &ctx.key) {
+                Ok(stats) => db::subscription_outbox_changed_payload(&stats, true),
+                Err(error) => {
+                    emit_sync_error(&format!("订阅写回状态读取失败，请重试：{error}"));
+                    None
+                }
+            },
             // 未配置：静默（不误报、不刷状态）
             Ok(None) => None,
             Err(e) => {
                 log::warn!("sync: 订阅写回状态通知读取账号失败，跳过本轮通知: {e}");
+                emit_sync_error(&format!("订阅写回账号读取失败，请重试：{e}"));
                 None
             }
         }
@@ -69,20 +75,21 @@ pub async fn notify_subscription_outbox_changed(db: &Arc<Mutex<Connection>>) {
         }
         return;
     };
-    {
-        let last = LAST_OUTBOX_PAYLOAD.get_or_init(|| std::sync::Mutex::new(None));
-        let mut guard = last.lock().unwrap();
-        if guard.as_ref() == Some(&p) {
-            return;
-        }
-        *guard = Some(p.clone());
+    let last = LAST_OUTBOX_PAYLOAD.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = last.lock().unwrap();
+    if guard.as_ref() == Some(&p) {
+        return;
     }
     use tauri::Emitter;
-    let _ = app.emit("subscription-outbox-changed", p);
+    if app.emit("subscription-outbox-changed", &p).is_ok() {
+        *guard = Some(p);
+    } else {
+        crate::diagnostics::record(0, "subscriptions", "event_failed", None);
+    }
 }
 
 /// 推送订阅编辑（改名 / 移动目录）到远端（best-effort，A-2）。
-/// 失败仅记日志：本地已生效，靠下次 pull 对账或用户重试收敛，不阻塞 UI。
+/// 这是旧直接调用接口，失败返回 false；生产编辑经持久 outbox 执行并上报活动终态。
 ///
 /// OPT-006：`expected_generation` 是命令在**同一持锁内**读远端 id 时捕获的代际
 /// （record_feed_edit 返回）。构建会话期间账号被切换（代际不等）→ 不向新账号
@@ -177,6 +184,7 @@ pub(super) async fn push_feeds(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     report: &mut SyncReport,
+    queue_scope: Option<&std::collections::HashSet<i64>>,
 ) {
     // add_feed 队列动作：锁内读出全部待处理项（feed_url + 目标分类）
     struct PendingFeed {
@@ -205,10 +213,15 @@ pub(super) async fn push_feeds(
         };
         let mut out = Vec::new();
         for item in queued {
+            if queue_scope.is_some_and(|scope| !scope.contains(&item.id)) {
+                continue;
+            }
             if item.action != "add_feed" {
                 continue;
             }
-            let Some(url) = item.feed_url else { continue };
+            let Some(url) = item.feed_url.filter(|u| !u.trim().is_empty()) else {
+                continue;
+            };
             // P3-2（自检 2026-09-29）：folder_name 的 Err 不再被 `.ok()` 压成 None。
             // 处置选择：warn + 记入 report.errors + 跳过该队项（不中止本轮）——
             // 依据：push_feeds 是 best-effort 阶段（A-2），单条目录名解析失败不应
@@ -398,11 +411,14 @@ pub(super) async fn push_feeds(
     if let Err(err) = db::prune_sync(&conn, &done) {
         log::warn!("sync: 剪除已推送队列项失败（{} 项）: {err}", done.len());
     }
-    // remove_feed 语义（SUB-4/SYN-1）：本地删除不推远端。历史版本可能在
-    // delete_feed 时建过 remove_feed 队项（从未被消费）——此处统一清僵尸项，
-    // 与 delete_feed 命令「不再建 remove_feed」的新语义一致。
-    if let Err(err) = db::purge_remove_feed_zombies(&conn) {
-        log::warn!("sync: 清理 remove_feed 僵尸队项失败: {err}");
+    // 定向同步不得借道清理其它队列行；僵尸清理只属于全量 feeds 阶段。
+    if queue_scope.is_none() {
+        // remove_feed 语义（SUB-4/SYN-1）：本地删除不推远端。历史版本可能在
+        // delete_feed 时建过 remove_feed 队项（从未被消费）——此处统一清僵尸项，
+        // 与 delete_feed 命令「不再建 remove_feed」的新语义一致。
+        if let Err(err) = db::purge_remove_feed_zombies(&conn) {
+            log::warn!("sync: 清理 remove_feed 僵尸队项失败: {err}");
+        }
     }
     drop(conn);
     // P3-3：失败标记改变了队列统计（waiting 中的 failed 计数升）——即时推送
@@ -448,7 +464,8 @@ async fn resolve_existing_feed_id(session: &SyncSession, feed_url: &str) -> AppR
 /// 订阅 outbox 生产执行器（OPT-009 阶段 B）。
 ///
 /// ## 账号屏障与代际
-/// - 计划只取 **account_key 等于当前会话账号** 的行（换号暂停，回原账号恢复）；
+/// - 计划只取 **account_key 等于当前会话账号** 的行；异 key 在本层跳过。
+///   身份切换由账号提交事务清理旧队项，旧操作不会在切回原账号时恢复；
 /// - 同 key、旧代际的行在计划前**明确重绑**到当前代际（同账号改密码后旧意图
 ///   仍有效，继续可发）；异 key 一律不 touch。
 ///
@@ -475,6 +492,7 @@ pub(super) async fn push_subscription_outbox(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     report: &mut SyncReport,
+    outbox_scope: Option<&std::collections::HashSet<i64>>,
 ) {
     // 与 state 推送/命令层一次性推送串行化（同一时刻一个 outbox 推送在飞）。
     let _guard = PUSH_LOCK.lock().await;
@@ -496,7 +514,14 @@ pub(super) async fn push_subscription_outbox(
                 return;
             }
         };
-        if let Err(e) = db::rebind_outbox_generation(&conn, &key, session.generation) {
+        let rebind_result = match outbox_scope {
+            Some(scope) => {
+                let ids: Vec<i64> = scope.iter().copied().collect();
+                db::rebind_outbox_generation_for_ids(&conn, &key, session.generation, &ids)
+            }
+            None => db::rebind_outbox_generation(&conn, &key, session.generation),
+        };
+        if let Err(e) = rebind_result {
             // 重绑失败不阻断：本轮仍只发代际相等的行（下轮再重绑）
             report.errors.push(format!("订阅队项代际重绑失败: {e}"));
         }
@@ -506,10 +531,15 @@ pub(super) async fn push_subscription_outbox(
                 let mine: Vec<db::SubscriptionOutboxItem> = items
                     .into_iter()
                     .filter(|i| i.account_key == key && i.account_generation == session.generation)
+                    .filter(|i| {
+                        outbox_scope.map_or(true, |scope| {
+                            scope.contains(&i.id) && i.action == db::ACTION_SUBSCRIBE
+                        })
+                    })
                     .collect();
-                if mine.len() < total {
+                if outbox_scope.is_none() && mine.len() < total {
                     log::info!(
-                        "sync: 订阅 outbox 跳过 {} 项非当前账号（暂停，回原账号后恢复）",
+                        "sync: 订阅 outbox 跳过 {} 项账号或代际不匹配队项（身份切换会清理旧操作，切回原账号不恢复）",
                         total - mine.len()
                     );
                 }
@@ -1085,7 +1115,7 @@ async fn exec_unsubscribe_recovery(
     OutboxOutcome::Confirmed
 }
 
-/// 命令层 best-effort 一次性推送订阅 outbox（本地已入队；执行失败静默——
+/// 命令层一次性推送订阅 outbox（本地已入队；执行失败发布活动终态，
 /// 队列保留，下一轮同步自动重试；会话构建失败由 [`record_outbox_session_block`]
 /// 落账，A-P2-6）。命令返回不阻塞在网络上太久：与旧 `edit_remote_subscription`
 /// 的调用成本同量级（都需构建一次会话/登录）。
@@ -1096,8 +1126,32 @@ async fn exec_unsubscribe_recovery(
 /// 重复载荷由 notify 单点同值去重（W2 复审 P3-2）：入队可见性由第一次发射
 /// 保障，同值不重发。未配置同步时 notify 内部静默。
 pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &reqwest::Client) {
+    let _ = push_subscription_changes(db, http).await;
+}
+
+pub async fn push_subscription_changes(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+) -> AppResult<SyncReport> {
+    let runtime = runtime::for_db(db);
+    let db = db.clone();
+    let http = http.clone();
+    runtime
+        .run("subscriptions", async move {
+            let result = push_subscription_changes_inner(&db, &http).await;
+            notify_subscription_outbox_changed(&db).await;
+            result
+        })
+        .await
+}
+
+async fn push_subscription_changes_inner(
+    db: &Arc<Mutex<Connection>>,
+    http: &reqwest::Client,
+) -> AppResult<SyncReport> {
+    runtime::check_generation(db).await?;
     let lease = match acquire_session(db, http).await {
-        Ok(l) => Some(l),
+        Ok(lease) => lease,
         // A-P2-6：构建失败不再静默吞掉——对齐推送侧 TASK-124 的 record_push_block：
         // 认证/端点/网络失败为当前账号 pending 行落账（attempts/last_error + 事件），
         // UI 摘要卡才能解释「为什么一直等待」。未配置（无归属身份）与代际失配
@@ -1108,33 +1162,32 @@ pub async fn try_push_subscription_outbox(db: &Arc<Mutex<Connection>>, http: &re
             username,
         }) => {
             record_outbox_session_block(db, &err, &endpoint, &username).await;
-            None
+            return Err(err);
         }
-        Err(ClientBuildFailure::NotConfigured) => None,
-        Err(ClientBuildFailure::Stale) => None,
+        Err(ClientBuildFailure::NotConfigured) => {
+            return Err(crate::error::AppError::new(
+                "notConnected",
+                "未配置同步服务",
+            ))
+        }
+        Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
         Err(ClientBuildFailure::CorruptGeneration(e)) => {
             log::warn!("sync: 订阅写回即时推送因同步代际损坏中止: {e}");
-            None
+            return Err(e);
         }
     };
-    let auth_failed = match &lease {
-        Some(l) => {
-            let mut report = SyncReport::default();
-            push_subscription_outbox(db, &l.session, &mut report).await;
-            report_has_auth_failure(&report)
-        }
-        None => false,
-    };
+    runtime::accept_generation(lease.session.generation)?;
+    let mut report = SyncReport::default();
+    push_subscription_outbox(db, &lease.session, &mut report, None).await;
     // W3-1：401/认证类失败回落（命中缓存会话才触发；只重试一次）。
-    if let Some(l) = &lease {
-        if l.from_cache && auth_failed {
-            if let Some(fresh) = reauth_after_auth_failure(db, http, l).await {
-                let mut report = SyncReport::default();
-                push_subscription_outbox(db, &fresh, &mut report).await;
-            }
+    if lease.from_cache && report_has_auth_failure(&report) {
+        if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
+            runtime::accept_generation(fresh.generation)?;
+            report = SyncReport::default();
+            push_subscription_outbox(db, &fresh, &mut report, None).await;
         }
     }
-    notify_subscription_outbox_changed(db).await;
+    Ok(report)
 }
 
 /// 订阅 outbox 的会话构建失败落账（A-P2-6；对齐 push.rs record_push_block 的
@@ -1160,14 +1213,17 @@ pub(super) async fn record_outbox_session_block(
             Ok(None) => Ok(0),
             Err(e) => {
                 log::warn!("sync: 订阅 outbox 落账读取账号身份失败: {e}");
-                Ok(0)
+                Err(e)
             }
         }
     };
     match marked {
         Ok(n) if n > 0 => notify_subscription_outbox_changed(db).await,
         Ok(_) => {}
-        Err(e) => log::warn!("sync: 订阅 outbox 阻塞标记落库失败: {e}"),
+        Err(e) => {
+            log::warn!("sync: 订阅 outbox 阻塞标记落库失败: {e}");
+            emit_sync_error(&format!("订阅写回阻塞标记落库失败：{e}"));
+        }
     }
 }
 

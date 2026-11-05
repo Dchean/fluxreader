@@ -58,6 +58,9 @@ fn row_serialization_matches_fixture() {
         // 判定与命中语义依赖；fixture 用不同值抓「接错字段」）
         ai_summary_sig: Some("sig-summary-fixture".into()),
         translated_sig: Some("sig-translated-fixture".into()),
+        // v33：发布时间来源与永久首次见到时间（前端后续标注「推断时间」用）
+        first_seen_at: Some("2026-09-18T00:00:00+08:00".into()),
+        published_at_source: "feed_clamped".into(),
     };
 
     let feed_json = serde_json::to_value(&feed).expect("FeedRow 序列化");

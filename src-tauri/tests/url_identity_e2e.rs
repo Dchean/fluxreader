@@ -68,6 +68,17 @@ fn rollback_v22_shape(conn: &rusqlite::Connection) {
         DROP INDEX IF EXISTS idx_subscription_outbox_url;
         DROP INDEX IF EXISTS idx_subscription_outbox_pending;
         DROP TABLE IF EXISTS subscription_outbox;
+        -- v32 物理回拨：sync_queue 生命周期列、状态索引与绑定触发器（不回拨
+        -- 则重放 v32 的 ALTER/CREATE 报 duplicate column / already exists）。
+        DROP TRIGGER IF EXISTS trg_sync_queue_article_bound;
+        DROP INDEX IF EXISTS idx_sync_queue_status;
+        ALTER TABLE sync_queue DROP COLUMN last_error_class;
+        ALTER TABLE sync_queue DROP COLUMN unbound_reason;
+        ALTER TABLE sync_queue DROP COLUMN updated_at;
+        ALTER TABLE sync_queue DROP COLUMN status;
+        ALTER TABLE sync_queue DROP COLUMN desired_state;
+        ALTER TABLE sync_queue DROP COLUMN field;
+        ALTER TABLE sync_queue DROP COLUMN kind;
         -- OPT-010 v26 物理回拨：分类稳定身份列（folders 表无后续重建迁移，
         -- 不回拨则重放 v26 的 ALTER 报 duplicate column）。
         ALTER TABLE folders DROP COLUMN sync_id;
@@ -78,6 +89,17 @@ fn rollback_v22_shape(conn: &rusqlite::Connection) {
         -- OPT-013 v28 物理回拨：翻译片段表（不回拨则重放 v28 的 CREATE TABLE
         -- 报 already exists）。
         DROP TABLE IF EXISTS ai_segments;
+        -- v33 物理回拨：发布时间来源与首次见到时间列（不回拨则重放 v33 的
+        -- ALTER TABLE 报 duplicate column）。
+        DROP TRIGGER IF EXISTS trg_articles_first_seen_fallback_ins;
+        ALTER TABLE articles DROP COLUMN first_seen_at;
+        ALTER TABLE articles DROP COLUMN published_at_source;
+        -- v34 物理回拨：刷新代际 + 标题分域列与插入触发器（不回拨则重放
+        -- v34 的 ALTER 报 duplicate column、CREATE TRIGGER 报 already exists）。
+        DROP TRIGGER IF EXISTS trg_feeds_refresh_title_defaults_ins;
+        ALTER TABLE feeds DROP COLUMN fetch_generation;
+        ALTER TABLE feeds DROP COLUMN title_custom;
+        ALTER TABLE feeds DROP COLUMN fetched_title;
         CREATE VIRTUAL TABLE articles_fts USING fts5(title, body_text, author, ai_summary, translated_content,
             content='articles', content_rowid='id', tokenize='unicode61');
         CREATE TRIGGER articles_ai AFTER INSERT ON articles BEGIN

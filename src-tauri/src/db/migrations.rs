@@ -956,17 +956,354 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         UPDATE articles SET url_norm = NULL WHERE url_norm = '';
     "#,
         ),
+        // 同步队列生命周期（审计 #1/#6）：显式区分文章状态意图是否可推送。
+        // - 旧列全部保留；新列只做增量，旧二进制仍可读写旧列。
+        // - status 的默认值故意取 bound_pending：旧代码/测试若直接 INSERT 一条
+        //   尚未带状态的行，plan_push 仍会按真实 remote_id 重新分类；生产入口
+        //   enqueue_sync 总会显式写状态。
+        // - 无 remote_id 的旧意图不再计入「等待同步」：同 feed 已绑定则
+        //   bindable_retry（等待后续同源条目绑定），否则 local_only；超过 30 天
+        //   的无绑定项迁为 expired_unconfirmed，但仍保留整行与本地 read/star。
+        // - add_feed 是历史订阅形态，标记 legacy_add_feed；有 feed_url 才能进
+        //   feeds 阶段，否则 local_only 并写 no_feed_url。其它历史动作保留为
+        //   可见的 legacy_other，写 unsupported_legacy_action；两者都不承诺推送。
+        // - 绑定再驱动由 articles.remote_id 的 AFTER UPDATE 触发器完成：这是
+        //   pull 已确认的同源身份写入口，不引入全局 URL/标题/时间猜测。
+        // user_version=32。
+        // Note: 队列状态机与不静默删除本地意图 — 见
+        // .agents/notes/implemented/architecture/2026-11-03-同步队列生命周期与本地意图.md
+        M::up(
+            r#"
+        ALTER TABLE sync_queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'article_state';
+        ALTER TABLE sync_queue ADD COLUMN field TEXT;
+        ALTER TABLE sync_queue ADD COLUMN desired_state INTEGER;
+        ALTER TABLE sync_queue ADD COLUMN status TEXT NOT NULL DEFAULT 'bound_pending'
+            CHECK (status IN ('local_only', 'bindable_retry', 'bound_pending',
+                              'retry_wait', 'failed', 'expired_unconfirmed'));
+        ALTER TABLE sync_queue ADD COLUMN updated_at TEXT;
+        ALTER TABLE sync_queue ADD COLUMN unbound_reason TEXT;
+        ALTER TABLE sync_queue ADD COLUMN last_error_class TEXT;
+
+        UPDATE sync_queue
+           SET kind = CASE
+                        WHEN action = 'add_feed' THEN 'legacy_add_feed'
+                        WHEN action IN ('read', 'unread', 'star', 'unstar') THEN 'article_state'
+                        ELSE 'legacy_other'
+                      END,
+               field = CASE
+                         WHEN action IN ('read', 'unread') THEN 'read'
+                         WHEN action IN ('star', 'unstar') THEN 'star'
+                         ELSE NULL
+                       END,
+               desired_state = CASE
+                                 WHEN action IN ('read', 'star') THEN 1
+                                 WHEN action IN ('unread', 'unstar') THEN 0
+                                 ELSE NULL
+                               END,
+               updated_at = COALESCE(created_at, datetime('now')),
+               status = CASE
+                 WHEN action = 'add_feed'
+                      AND feed_url IS NOT NULL AND trim(feed_url) != ''
+                   THEN 'bound_pending'
+                 WHEN action IN ('read', 'unread', 'star', 'unstar')
+                      AND EXISTS (
+                        SELECT 1 FROM articles a
+                         WHERE a.id = sync_queue.article_id
+                           AND a.remote_id IS NOT NULL
+                      )
+                   THEN CASE WHEN attempts > 0 THEN 'retry_wait' ELSE 'bound_pending' END
+                 WHEN action IN ('read', 'unread', 'star', 'unstar')
+                      AND created_at < datetime('now', '-30 days')
+                   THEN 'expired_unconfirmed'
+                 WHEN action IN ('read', 'unread', 'star', 'unstar')
+                      AND EXISTS (
+                        SELECT 1
+                          FROM articles a
+                          JOIN feeds f ON f.id = a.feed_id
+                         WHERE a.id = sync_queue.article_id
+                           AND f.remote_id IS NOT NULL
+                      )
+                   THEN 'bindable_retry'
+                 ELSE 'local_only'
+               END,
+               unbound_reason = CASE
+                 WHEN action IN ('read', 'unread', 'star', 'unstar')
+                      AND EXISTS (
+                        SELECT 1 FROM articles a
+                         WHERE a.id = sync_queue.article_id
+                           AND a.remote_id IS NOT NULL
+                      )
+                   THEN NULL
+                 WHEN action IN ('read', 'unread', 'star', 'unstar')
+                      AND created_at < datetime('now', '-30 days')
+                   THEN CASE
+                          WHEN EXISTS (
+                            SELECT 1
+                              FROM articles a
+                              JOIN feeds f ON f.id = a.feed_id
+                             WHERE a.id = sync_queue.article_id
+                               AND f.remote_id IS NOT NULL
+                          ) THEN 'awaiting_remote_identity'
+                          ELSE 'no_remote_identity'
+                        END
+                 WHEN action IN ('read', 'unread', 'star', 'unstar')
+                      AND EXISTS (
+                        SELECT 1
+                          FROM articles a
+                          JOIN feeds f ON f.id = a.feed_id
+                         WHERE a.id = sync_queue.article_id
+                           AND f.remote_id IS NOT NULL
+                      )
+                   THEN 'awaiting_remote_identity'
+                 WHEN action IN ('read', 'unread', 'star', 'unstar')
+                   THEN 'no_remote_identity'
+                 WHEN action = 'add_feed'
+                      AND (feed_url IS NULL OR trim(feed_url) = '')
+                   THEN 'no_feed_url'
+                 WHEN action NOT IN ('read', 'unread', 'star', 'unstar', 'add_feed')
+                   THEN 'unsupported_legacy_action'
+                 ELSE NULL
+               END,
+               last_error_class = CASE
+                 WHEN action IN ('read', 'unread', 'star', 'unstar')
+                      AND created_at < datetime('now', '-30 days')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM articles a
+                         WHERE a.id = sync_queue.article_id
+                           AND a.remote_id IS NOT NULL
+                      )
+                   THEN 'expired_unconfirmed'
+                 WHEN (
+                        action = 'add_feed'
+                        AND (feed_url IS NULL OR trim(feed_url) = '')
+                      )
+                      OR action NOT IN ('read', 'unread', 'star', 'unstar', 'add_feed')
+                   THEN 'unbound'
+                 WHEN attempts > 0 THEN 'legacy_push_failure'
+                 WHEN action IN ('read', 'unread', 'star', 'unstar')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM articles a
+                         WHERE a.id = sync_queue.article_id
+                           AND a.remote_id IS NOT NULL
+                      )
+                   THEN 'unbound'
+                 ELSE NULL
+               END;
+
+        CREATE INDEX idx_sync_queue_status ON sync_queue(status);
+
+        CREATE TRIGGER trg_sync_queue_article_bound
+        AFTER UPDATE OF remote_id ON articles
+        WHEN NEW.remote_id IS NOT NULL
+             AND (OLD.remote_id IS NULL OR OLD.remote_id IS NOT NEW.remote_id)
+        BEGIN
+            UPDATE sync_queue
+               SET status = 'bound_pending',
+                   unbound_reason = NULL,
+                   last_error = NULL,
+                   last_error_class = NULL,
+                   updated_at = datetime('now')
+             WHERE article_id = NEW.id
+               AND kind = 'article_state'
+               AND status IN ('local_only', 'bindable_retry');
+        END;
+    "#,
+        ),
+        // v33：发布时间来源与永久首次见到时间（审计 #P1-6）。
+        //
+        // 背景：旧 parser 在源缺 pubDate/updated 时把 Utc::now() 写进
+        // published_at，刷新 UPDATE 又用 COALESCE 覆盖，造成「永远今天」；同时
+        // 无 id 条目用 title+published_at 当 guid，发布时间漂移会改身份。
+        //
+        // 本迁移只做增量：
+        // - first_seen_at：新行首次写入（RFC3339），此后永不更新。存量行唯一可
+        //   得且不伪造的「首次见到」证据是 fetched_at（插入时间，历史上从不更新），
+        //   因此按 fetched_at 回填；legacy SQLite 空格格式归一为现行 RFC3339。
+        // - published_at_source：存量行一律 legacy_unknown——旧库无法区分「源日期」
+        //   与「抓取时间兜底」，不得猜成 feed/inferred_fetch。新写入显式标
+        //   feed / feed_clamped / inferred_fetch；未来日期被钳制后的值不是源日期。
+        // - 旧二进制插入不带 first_seen_at 时由 AFTER INSERT 触发器回填，避免
+        //   旧 schema 风格 INSERT 在 v33 库永久留下 NULL。优先 fetched_at（插入
+        //   时间，与迁移回填同义），再 published_at，最后当前时间；空格格式归一
+        //   为 RFC3339。published_at_source 仍取默认 legacy_unknown（旧二进制
+        //   没有来源证据）。
+        // - 旧列全部保留；旧二进制仍可读写旧列，新列有默认值，不改变旧 SQL 语义。
+        // - rusqlite_migration 的 M::up 在单事务内执行；任何语句失败整体回滚，
+        //   user_version 不推进，下次打开可重试。没有 DROP/重建，不存在半表回滚。
+        // user_version=33。
+        M::up(
+            r#"
+        ALTER TABLE articles ADD COLUMN first_seen_at TEXT;
+        ALTER TABLE articles ADD COLUMN published_at_source TEXT NOT NULL DEFAULT 'legacy_unknown'
+            CHECK (published_at_source IN ('feed', 'feed_clamped', 'inferred_fetch', 'legacy_unknown'));
+
+        UPDATE articles
+           SET first_seen_at = CASE
+             WHEN fetched_at IS NULL OR trim(fetched_at) = '' THEN NULL
+             WHEN fetched_at GLOB
+                  '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+               THEN replace(fetched_at, ' ', 'T') || '+00:00'
+             ELSE fetched_at
+           END;
+
+        CREATE TRIGGER trg_articles_first_seen_fallback_ins
+        AFTER INSERT ON articles
+        WHEN NEW.first_seen_at IS NULL OR trim(NEW.first_seen_at) = ''
+        BEGIN
+            UPDATE articles
+               SET first_seen_at = COALESCE(
+                 CASE
+                   WHEN NEW.fetched_at IS NULL OR trim(NEW.fetched_at) = '' THEN NULL
+                   WHEN NEW.fetched_at GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+                     THEN replace(NEW.fetched_at, ' ', 'T') || '+00:00'
+                   ELSE NEW.fetched_at
+                 END,
+                 CASE
+                   WHEN NEW.published_at IS NULL OR trim(NEW.published_at) = '' THEN NULL
+                   WHEN NEW.published_at GLOB
+                        '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]'
+                     THEN replace(NEW.published_at, ' ', 'T') || '+00:00'
+                   ELSE NEW.published_at
+                 END,
+                 strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+               )
+             WHERE id = NEW.id;
+        END;
+    "#,
+        ),
+        // v34：刷新代际与标题分域（刷新竞态 / 用户改名保护）。
+        //
+        // - fetch_generation：每次三段式抓取开始前在同一事务内自增，HTTP 完成后的
+        //   所有写回都带 `WHERE fetch_generation = <本轮值>`。旧请求晚到时命中 0 行，
+        //   不得覆盖新请求的 ETag / last_fetched_at / 失败状态 / 标题 / 文章。
+        // - fetched_title：源站（或远端同步）抓到的标题，只在抓取写回时更新。
+        // - title_custom：用户显式改名，NULL/空串表示未自定义；刷新不得覆盖。
+        // - title 保留为显示缓存：有自定义标题时等于 title_custom，否则等于
+        //   fetched_title（旧代码继续读 title 仍看到当前应显示的名字）。
+        //
+        // 旧库无法反推「当前 title 是抓取名还是用户改名」，因此用当前 title 回填
+        // fetched_title、title_custom 置 NULL 作为「未知」哨兵。新写入明确无自定义
+        // 时写空串；首次刷新若抓取标题与旧 title 不同，则把旧 title 固化为
+        // title_custom，宁可暂时冻结一个自动标题，也不吞掉可能存在的用户改名。
+        // 若首次刷新标题相同，则把 NULL 收敛为空串，后续正常跟随源站。
+        // 所有列均为增量、带默认值，旧二进制仍可读写旧列；新增列失败时
+        // rusqlite_migration 单事务回滚，user_version 不推进。
+        // user_version=34。
+        M::up(
+            r#"
+        ALTER TABLE feeds ADD COLUMN fetched_title TEXT NOT NULL DEFAULT '';
+        ALTER TABLE feeds ADD COLUMN title_custom TEXT;
+        ALTER TABLE feeds ADD COLUMN fetch_generation INTEGER NOT NULL DEFAULT 0;
+
+        UPDATE feeds SET fetched_title = title;
+
+        CREATE TRIGGER trg_feeds_refresh_title_defaults_ins
+        AFTER INSERT ON feeds
+        WHEN NEW.fetched_title = '' OR NEW.title_custom IS NULL
+        BEGIN
+            UPDATE feeds
+               SET fetched_title = CASE
+                     WHEN NEW.fetched_title = '' THEN NEW.title
+                     ELSE NEW.fetched_title
+                   END,
+                   title_custom = CASE
+                     WHEN NEW.title_custom IS NULL THEN ''
+                     ELSE NEW.title_custom
+                   END
+             WHERE id = NEW.id;
+        END;
+    "#,
+        ),
     ])
 });
 
+/// 当前迁移集的最新 schema 版本。追加迁移时必须同步；单测用全新库的实际
+/// `user_version` 对照，防止常量与迁移集漂移。
+pub(crate) const LATEST_SCHEMA_VERSION: i64 = 34;
+
 /// 打开数据库并应用迁移。WAL 模式 + foreign_keys + busy_timeout。
 pub fn open(path: &Path) -> AppResult<Connection> {
+    open_with_report(path)
+}
+
+/// 打开数据库，并在 `user_version` 将要升级时创建迁移前快照。
+///
+/// 快照失败不阻塞启动：迁移与启动照常继续，但错误会落到日志与一次性的
+/// settings 警告，前端启动时消费并显示。迁移失败时错误文案附带
+/// `backups/<文件名>`（用户可见且不含账户目录），确保仍能找回升级前状态。
+// Note: WAL 安全迁移快照与失败边界 — 见 .agents/notes/implemented/architecture/2026-11-05-数据库快照与恢复边界.md
+pub(crate) fn open_with_report(path: &Path) -> AppResult<Connection> {
     let mut conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", 5000)?;
-    MIGRATIONS.to_latest(&mut conn)?;
+
+    let from_version = super::backup::user_version(&conn)?;
+    let has_tables: bool = conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM sqlite_master
+              WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         )",
+        [],
+        |r| r.get(0),
+    )?;
+    let will_upgrade = from_version < LATEST_SCHEMA_VERSION && (from_version > 0 || has_tables);
+
+    // 快照必须只带 DPAPI 密文：若旧库仍有历史明文凭据，先完成失败关闭的
+    // 加密迁移，再创建快照。v1 没有 settings 表，跳过；迁移到最新后会照常补跑。
+    if will_upgrade && from_version >= 2 {
+        let _ = crate::credentials::migrate_legacy_plaintext(&conn)?;
+    }
+
+    let mut backup: Option<super::backup::BackupInfo> = None;
+    let mut backup_warning: Option<String> = None;
+    if will_upgrade {
+        match super::backup::create_migration_backup(
+            &conn,
+            path,
+            from_version,
+            LATEST_SCHEMA_VERSION,
+        ) {
+            Ok(info) => {
+                log::info!(
+                    "backup: 已创建迁移前快照 {}（v{} → v{}）",
+                    info.file_name,
+                    from_version,
+                    LATEST_SCHEMA_VERSION
+                );
+                backup = Some(info);
+            }
+            Err(e) => {
+                let app_dir = path.parent().unwrap_or_else(|| Path::new("."));
+                let safe = super::backup::sanitize_log_text(app_dir, &e.message);
+                log::error!(
+                    "backup: 迁移前快照失败（v{from_version} → v{LATEST_SCHEMA_VERSION}），继续启动: {safe}"
+                );
+                backup_warning = Some(format!(
+                    "迁移前自动备份失败：{}。升级将继续，但本次没有可回滚快照。",
+                    safe
+                ));
+            }
+        }
+    }
+
+    if let Err(e) = MIGRATIONS.to_latest(&mut conn) {
+        let mut err: crate::error::AppError = e.into();
+        if let Some(info) = &backup {
+            err.message
+                .push_str(&format!("（迁移前备份：backups/{}）", info.file_name));
+        } else if let Some(warning) = &backup_warning {
+            err.message.push_str(&format!("（{warning}）"));
+        }
+        return Err(err);
+    }
+
+    if let Some(warning) = backup_warning.as_deref() {
+        super::backup::record_startup_backup_warning(&conn, warning);
+    }
+
     // v7 的 SQL 回填只是 lower(url) 占位；Rust 端 normalize_url 才是完整
     // 规范化（剥跟踪参数/www./AMP/锚点）。M-14：完成判定改用 settings 标记
     // 而非 user_version——旧实现以 prev_version < 7 为闸门，回填在迁移事务外
@@ -1534,6 +1871,311 @@ mod req108_migration_tests {
 }
 
 /* ============================================================
+v33：发布时间来源与永久首次见到时间（旧库回填 / 幂等重放）
+============================================================ */
+#[cfg(test)]
+mod v33_time_identity_migration_tests {
+    use super::*;
+
+    fn article_row(conn: &Connection, guid: &str) -> (String, Option<String>, String) {
+        conn.query_row(
+            "SELECT published_at, first_seen_at, published_at_source
+               FROM articles WHERE guid = ?1",
+            params![guid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    fn first_seen_trigger_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+              WHERE type = 'trigger' AND name = 'trg_articles_first_seen_fallback_ins'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            params![table, column],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            > 0
+    }
+
+    #[test]
+    fn v33_backfills_first_seen_without_faking_published_source() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 32).unwrap();
+        conn.execute_batch(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+             INSERT INTO articles
+               (feed_id, guid, title, fetched_at, published_at, is_read, is_starred)
+             VALUES
+               (1, 'space', 'legacy-space', '2026-09-01 10:00:00',
+                '2024-01-01T00:00:00+00:00', 1, 0),
+               (1, 'rfc', 'legacy-rfc', '2026-09-02T10:00:00+00:00',
+                '2024-02-01T00:00:00+00:00', 0, 1);",
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let cols: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('articles') ORDER BY cid")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(cols.iter().any(|c| c == "first_seen_at"));
+        assert!(cols.iter().any(|c| c == "published_at_source"));
+
+        // 存量行唯一可得的首次见到证据是 fetched_at（插入时间，历史从不更新）；
+        // legacy SQLite 空格格式归一为 RFC3339，已是 RFC3339 的原样保留。
+        assert_eq!(
+            article_row(&conn, "space"),
+            (
+                "2024-01-01T00:00:00+00:00".into(),
+                Some("2026-09-01T10:00:00+00:00".into()),
+                "legacy_unknown".into(),
+            )
+        );
+        assert_eq!(
+            article_row(&conn, "rfc"),
+            (
+                "2024-02-01T00:00:00+00:00".into(),
+                Some("2026-09-02T10:00:00+00:00".into()),
+                "legacy_unknown".into(),
+            )
+        );
+        // 状态与旧列零改动
+        let states: Vec<(i64, i64)> = {
+            let mut stmt = conn
+                .prepare("SELECT is_read, is_starred FROM articles ORDER BY guid")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(states, vec![(0, 1), (1, 0)]);
+
+        // 重复升级 no-op：数据与版本保持稳定。
+        let before: Vec<(String, String, Option<String>, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT guid, published_at, first_seen_at, published_at_source
+                       FROM articles ORDER BY guid",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let after: Vec<(String, String, Option<String>, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT guid, published_at, first_seen_at, published_at_source
+                       FROM articles ORDER BY guid",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(after, before, "重复升级必须零改动");
+
+        // 旧二进制/裸 SQL 插入不带新列 → source 默认 legacy_unknown；
+        // first_seen_at 由 AFTER INSERT 触发器回填，不留下永久 NULL。
+        conn.execute(
+            "INSERT INTO articles (feed_id, guid, title) VALUES (1, 'bare', 'bare')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            article_row(&conn, "bare").2,
+            "legacy_unknown",
+            "未显式写 source 的旧路径必须落 legacy_unknown"
+        );
+        let bare = article_row(&conn, "bare");
+        assert!(
+            bare.1.is_some(),
+            "旧 schema 风格 INSERT 后 first_seen_at 必须非 NULL"
+        );
+        assert_eq!(bare.2, "legacy_unknown");
+    }
+
+    #[test]
+    fn v33_trigger_backfills_old_schema_insert_and_repeat_upgrade_is_noop() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 32).unwrap();
+        conn.execute(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F')",
+            [],
+        )
+        .unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        assert_eq!(first_seen_trigger_count(&conn), 1);
+
+        // 旧二进制只写旧列（不含 first_seen_at/published_at_source）。
+        conn.execute(
+            "INSERT INTO articles
+               (feed_id, guid, title, fetched_at, published_at)
+             VALUES (1, 'old-style', 'Old',
+                     '2025-01-01 00:00:00', '2024-01-01T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let row = article_row(&conn, "old-style");
+        assert_eq!(
+            row.1.as_deref(),
+            Some("2025-01-01T00:00:00+00:00"),
+            "first_seen_at 应取 fetched_at 并归一为 RFC3339"
+        );
+        assert_eq!(row.2, "legacy_unknown");
+
+        let before = article_row(&conn, "old-style");
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        assert_eq!(first_seen_trigger_count(&conn), 1, "重复升级不得复制触发器");
+        assert_eq!(article_row(&conn, "old-style"), before);
+    }
+
+    #[test]
+    fn v33_trigger_creation_failure_rolls_back_and_retry_succeeds() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 32).unwrap();
+        conn.execute_batch(
+            "INSERT INTO feeds (feed_url, title) VALUES ('https://f.example/rss', 'F');
+             CREATE TRIGGER trg_articles_first_seen_fallback_ins
+             AFTER INSERT ON articles BEGIN SELECT 1; END;",
+        )
+        .unwrap();
+
+        let err = MIGRATIONS
+            .to_latest(&mut conn)
+            .expect_err("同名触发器必须让 v33 迁移失败而不是静默复用");
+        assert!(
+            err.to_string().contains("trigger")
+                || err.to_string().to_lowercase().contains("already exists"),
+            "unexpected migration error: {err}"
+        );
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 32, "失败迁移不得推进 user_version");
+        assert!(!table_has_column(&conn, "articles", "first_seen_at"));
+        assert!(!table_has_column(&conn, "articles", "published_at_source"));
+        assert_eq!(first_seen_trigger_count(&conn), 1, "预置触发器保留");
+
+        conn.execute("DROP TRIGGER trg_articles_first_seen_fallback_ins", [])
+            .unwrap();
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let latest = {
+            let mut fresh = Connection::open_in_memory().unwrap();
+            MIGRATIONS.to_latest(&mut fresh).unwrap();
+            fresh
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            latest,
+            "重试必须推进到当前最新迁移，而不是停在 v33"
+        );
+        assert!(table_has_column(&conn, "articles", "first_seen_at"));
+        assert_eq!(first_seen_trigger_count(&conn), 1);
+    }
+}
+
+/* ============================================================
+v34：刷新代际与标题分域迁移
+============================================================ */
+#[cfg(test)]
+mod v34_refresh_identity_migration_tests {
+    use super::*;
+
+    fn feed_column_names(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('feeds') ORDER BY cid")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn v34_backfills_fetched_title_and_defaults_generation() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 33).unwrap();
+        conn.execute(
+            "INSERT INTO feeds (feed_url, title, etag) VALUES
+                ('https://old.example/rss', '旧展示名', 'W/\"old\"')",
+            [],
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let cols = feed_column_names(&conn);
+        for expected in ["fetched_title", "title_custom", "fetch_generation"] {
+            assert!(cols.iter().any(|c| c == expected), "缺少列 {expected}");
+        }
+        let (fetched_title, title_custom, generation, etag): (
+            String,
+            Option<String>,
+            i64,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT fetched_title, title_custom, fetch_generation, etag
+                   FROM feeds WHERE feed_url = 'https://old.example/rss'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(fetched_title, "旧展示名", "旧 title 回填到 fetched_title");
+        assert_eq!(title_custom, None, "历史改名不可反推，不伪造自定义标记");
+        assert_eq!(generation, 0, "新代际列从 0 开始");
+        assert_eq!(etag.as_deref(), Some("W/\"old\""), "既有条件头不丢");
+
+        // 旧二进制/旧插入语句（不带新列）仍可写：触发器把 title 复制到
+        // fetched_title，并把 title_custom 明确标成空串（已知无自定义）。
+        conn.execute(
+            "INSERT INTO feeds (feed_url, title) VALUES
+                ('https://old-binary.example/rss', '旧二进制新源')",
+            [],
+        )
+        .unwrap();
+        let (fetched_title, title_custom): (String, Option<String>) = conn
+            .query_row(
+                "SELECT fetched_title, title_custom FROM feeds
+                   WHERE feed_url = 'https://old-binary.example/rss'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(fetched_title, "旧二进制新源");
+        assert_eq!(
+            title_custom.as_deref(),
+            Some(""),
+            "触发器把旧插入的未知 NULL 收敛为明确无自定义"
+        );
+    }
+}
+
+/* ============================================================
 TASK-116 v16 单元测试：sync_queue 增 attempts/last_error + 旧库升级
 （cargo test 由 CI 执行，DEC-local-cargo-gate-20261005）
 ============================================================ */
@@ -1626,6 +2268,20 @@ mod t116_migration_tests {
             )
             .unwrap();
         assert_eq!(null_errors, 0, "升级后既有行 last_error 全为 NULL");
+        let (unbound_reason, last_error_class): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT unbound_reason, last_error_class
+                   FROM sync_queue WHERE action = 'read'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            unbound_reason.as_deref(),
+            Some("no_remote_identity"),
+            "v32 原因必须落在 unbound_reason，而不是 last_error"
+        );
+        assert_eq!(last_error_class.as_deref(), Some("unbound"));
 
         // 新列立即可写（失败标记路径在升级库上可用）
         conn.execute(
@@ -1980,8 +2636,9 @@ mod opt001_migration_tests {
             "v18 必须把 sync_queue 重建为 AUTOINCREMENT：{sql}"
         );
 
-        // 列序不变量：v17 全列按原顺序保留（应用写入依赖列位置无关，但迁移
-        // 拷贝按列名，顺序漂移会暴露拷贝语句与旧表不同构）
+        // 列序不变量：v17 全列按原顺序保留；v32 只允许在其后追加生命周期列。
+        // （应用写入依赖列位置无关，但迁移拷贝按列名，前缀漂移会暴露拷贝语句
+        // 与旧表不同构。）
         let cols: Vec<String> = {
             let mut stmt = conn
                 .prepare("SELECT name FROM pragma_table_info('sync_queue') ORDER BY cid")
@@ -1992,7 +2649,7 @@ mod opt001_migration_tests {
                 .unwrap()
         };
         assert_eq!(
-            cols,
+            cols.iter().take(8).map(String::as_str).collect::<Vec<_>>(),
             vec![
                 "id",
                 "article_id",
@@ -2003,8 +2660,22 @@ mod opt001_migration_tests {
                 "attempts",
                 "last_error",
             ],
-            "v18 必须保留全部列且顺序不变"
+            "v18 必须保留旧列前缀且顺序不变"
         );
+        for appended in [
+            "kind",
+            "field",
+            "desired_state",
+            "status",
+            "updated_at",
+            "unbound_reason",
+            "last_error_class",
+        ] {
+            assert!(
+                cols.iter().any(|c| c.as_str() == appended),
+                "v32 追加列 {appended} 必须存在"
+            );
+        }
 
         // FK 保留：article 级队项仍随文章删除级联
         let (fk_table, fk_col, fk_on_delete): (String, String, String) = conn
@@ -2082,8 +2753,10 @@ mod opt001_migration_tests {
     /// 判别力：迁移语句若被拆出事务（或半途提交），后续断言必红。
     #[test]
     fn v18_migration_failure_leaves_no_partial_table_and_recovers() {
-        let path = unique_test_db("opt001_fail");
-        let _ = std::fs::remove_file(&path);
+        let root = unique_test_db("opt001_fail").with_extension("snapshot-dir");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("fluxreader.db");
 
         // v17 夹具 + 悬空 article_id=999 的孤儿队项：仅夹具连接显式 FK OFF 种
         // 数据（bundled SQLite 默认 FK ON，裸连接不关就插不进去）；生产 open
@@ -2110,6 +2783,39 @@ mod opt001_migration_tests {
             err.message.contains("FOREIGN KEY"),
             "失败原因必须暴露 FK 违例：{err}"
         );
+        assert!(
+            err.message.contains("迁移前备份"),
+            "迁移失败必须给出可找回的备份位置：{err}"
+        );
+        let marker = "迁移前备份：";
+        let start = err.message.find(marker).expect("错误必须携带备份路径") + marker.len();
+        let end = err.message[start..]
+            .find('）')
+            .map(|i| start + i)
+            .expect("备份路径必须以右括号收尾");
+        let relative = err.message[start..end]
+            .strip_prefix("backups/")
+            .unwrap_or(&err.message[start..end]);
+        let backup = path.parent().unwrap().join("backups").join(relative);
+        let backup_name = backup.file_name().map(|n| n.to_string_lossy().to_string());
+        assert!(
+            backup_name
+                .as_deref()
+                .map(|n| n.starts_with("migration-v17-to-v"))
+                .unwrap_or(false),
+            "失败迁移必须保留升级前快照：{}",
+            backup.display()
+        );
+        let snap = Connection::open(backup).unwrap();
+        let v: i64 = snap
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 17, "失败迁移的快照必须停在升级前版本");
+        let quick: String = snap
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(quick, "ok");
+        drop(snap);
 
         // 回滚现场：原表（非 AUTOINCREMENT）/全部行/两个索引/版本号原样，无半张新表
         {
@@ -2160,7 +2866,163 @@ mod opt001_migration_tests {
         let ids: Vec<i64> = queue_rows(&conn).iter().map(|r| r.0).collect();
         assert_eq!(ids, vec![1], "修复后迁移保留健康行");
         drop(conn);
-        std::fs::remove_file(&path).expect("清理临时库失败");
+        std::fs::remove_dir_all(&root).expect("清理临时库目录失败");
+    }
+}
+
+#[cfg(test)]
+mod backup_snapshot_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_test_db(base: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fluxreader_migr_backup_{base}_{pid}_{nanos}_{seq}",
+            pid = std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("fluxreader.db")
+    }
+
+    fn latest_for_fresh_db() -> i64 {
+        let mut fresh = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_latest(&mut fresh).unwrap();
+        fresh
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn latest_schema_constant_matches_applied_migrations() {
+        assert_eq!(
+            latest_for_fresh_db(),
+            LATEST_SCHEMA_VERSION,
+            "新增迁移后必须同步 LATEST_SCHEMA_VERSION（迁移前备份的升级判据）"
+        );
+    }
+
+    /// 生产 open 在升级前经 VACUUM INTO 生成快照；连接保持开启时最新提交仍在
+    /// WAL，快照必须直接可打开且包含该行（不依赖 -wal 副本或先 checkpoint）。
+    #[test]
+    fn migration_snapshot_reads_uncheckpointed_wal_without_sidecars() {
+        let path = unique_test_db("wal_snapshot");
+        let _ = std::fs::remove_file(&path);
+        let from = (LATEST_SCHEMA_VERSION - 1) as usize;
+
+        let old = {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+            MIGRATIONS.to_version(&mut conn, from).unwrap();
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('wal_snapshot_probe', 'latest-value')",
+                [],
+            )
+            .unwrap();
+            conn
+        };
+        let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
+        assert!(
+            std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0) > 0,
+            "前置：最新提交必须在未 checkpoint 的 WAL 中"
+        );
+
+        let conn = open_with_report(&path).expect("生产打开必须完成迁移");
+        let warning: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'backup_startup_warning'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(warning.is_none(), "正常快照不得产生备份警告：{warning:?}");
+        let dir = path.parent().unwrap().join("backups");
+        let backup = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|p| {
+                p.file_name()
+                    .map(|n| {
+                        n.to_string_lossy()
+                            .starts_with(&format!("migration-v{from}-to-v"))
+                    })
+                    .unwrap_or(false)
+            })
+            .expect("升级前必须留下迁移快照");
+        let snap = Connection::open(&backup).unwrap();
+        let v: i64 = snap
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, from as i64, "快照必须停在迁移前 schema");
+        let value: String = snap
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'wal_snapshot_probe'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            value, "latest-value",
+            "未 checkpoint 的 WAL 数据必须进入快照"
+        );
+        let quick: String = snap
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(quick, "ok");
+
+        drop(snap);
+        drop(conn);
+        drop(old);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn backup_failure_does_not_block_upgrade_and_leaves_visible_warning() {
+        let path = unique_test_db("backup_failure");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            MIGRATIONS
+                .to_version(&mut conn, (LATEST_SCHEMA_VERSION - 1) as usize)
+                .unwrap();
+        }
+        let backups = path.parent().unwrap().join("backups");
+        std::fs::write(&backups, b"block backup directory").unwrap();
+
+        let conn = open_with_report(&path).expect("备份失败不得阻塞数据库升级");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, LATEST_SCHEMA_VERSION);
+        let warning = super::backup::take_startup_backup_warning(&conn)
+            .unwrap()
+            .expect("备份失败必须留下可见的一次性警告");
+        assert!(
+            warning.contains("迁移前自动备份失败"),
+            "警告应说明发生了什么：{warning}"
+        );
+        if let Ok(user) = std::env::var("USERNAME") {
+            if !user.is_empty() {
+                assert!(
+                    !warning.contains(&user),
+                    "警告不得回显含账户名的绝对路径：{warning}"
+                );
+            }
+        }
+        assert!(super::backup::take_startup_backup_warning(&conn)
+            .unwrap()
+            .is_none());
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
 
@@ -3035,7 +3897,6 @@ mod opt017b_migration_tests {
 
     /// v27/v28 存量库夹具（生产 API 建库到目标版本后写数据；正文共享组一行）。
     fn seed_legacy_db(version: usize) -> Connection {
-        use crate::db::NewArticle;
         let mut conn = Connection::open_in_memory().unwrap();
         MIGRATIONS.to_version(&mut conn, version).unwrap();
         let folder = crate::db::create_folder(&conn, "迁移分类", "article").unwrap();
@@ -3051,43 +3912,50 @@ mod opt017b_migration_tests {
             false,
         )
         .unwrap();
-        let na = |guid: &str, title: &str, body: &str| NewArticle {
-            guid: guid.into(),
-            url: Some(format!("https://m.example/{guid}")),
-            title: title.into(),
-            author: None,
-            summary: None,
-            content_html: Some(format!("<p>{body}</p>")),
-            body_text: body.into(),
-            image_url: None,
-            enclosure_url: None,
-            enclosure_mime: None,
-            duration_sec: None,
-            published_at: Some("2026-01-01T00:00:00+00:00".into()),
-            source: "direct".into(),
+        // 旧版本 schema 没有 v33 的 first_seen_at/published_at_source；不能用
+        // 现行 upsert（生产函数按最新 schema 写）。按 v27/v28 的真实列集插入。
+        let insert_content = |identity: &str, html: &str, body: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO contents (identity, content_html, body_text)
+                 VALUES (?1, ?2, ?3)",
+                params![identity, html, body],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
         };
-        let (a1, _) = crate::db::upsert_article_with_feed(
-            &conn,
-            feed,
-            &na("lg1", "迁移标题一", "迁移正文甲，含深度学习和科技。"),
-            false,
-        )
-        .unwrap();
-        let _ = crate::db::upsert_article_with_feed(
-            &conn,
-            feed,
-            &na("lg2", "迁移标题二", "共享片段正文乙。"),
-            false,
-        )
-        .unwrap();
-        let _ = crate::db::upsert_article_with_feed(
-            &conn,
-            feed,
-            &na("lg3", "迁移标题三", "共享片段正文乙。"),
-            false,
-        )
-        .unwrap();
-        crate::db::set_article_ai_fields(&conn, a1, Some("迁移AI摘要"), Some("迁移译文")).unwrap();
+        let c1 = insert_content(
+            "legacy-v27-lg1",
+            "<p>迁移正文甲，含深度学习和科技。</p>",
+            "迁移正文甲，含深度学习和科技。",
+        );
+        let c2 = insert_content(
+            "legacy-v27-shared",
+            "<p>共享片段正文乙。</p>",
+            "共享片段正文乙。",
+        );
+        let insert_article = |guid: &str, title: &str, content_id: i64, ai: bool| {
+            conn.execute(
+                "INSERT INTO articles
+                   (feed_id, guid, url, url_norm, title, content_id, published_at, source,
+                    ai_summary, translated_content)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '2026-01-01T00:00:00+00:00', 'direct',
+                         ?7, ?8)",
+                params![
+                    feed,
+                    guid,
+                    format!("https://m.example/{guid}"),
+                    crate::db::normalize_url(&format!("https://m.example/{guid}")),
+                    title,
+                    content_id,
+                    ai.then_some("迁移AI摘要"),
+                    ai.then_some("迁移译文"),
+                ],
+            )
+            .unwrap();
+        };
+        insert_article("lg1", "迁移标题一", c1, true);
+        insert_article("lg2", "迁移标题二", c2, false);
+        insert_article("lg3", "迁移标题三", c2, false);
         conn
     }
 
@@ -3122,11 +3990,25 @@ mod opt017b_migration_tests {
     fn search_hits(conn: &Connection) -> serde_json::Value {
         let mut out = Vec::new();
         for t in SEARCH_TERMS {
-            let ids: Vec<i64> = crate::db::search_articles(conn, t, 50)
+            // 冻结 LIKE 口径（不调用生产 search_articles：它按最新 schema
+            // 投影 v33 列，不能用于迁移前旧库）。
+            let mut stmt = conn
+                .prepare(
+                    "SELECT a.id FROM articles a
+                       LEFT JOIN contents c ON c.id = a.content_id
+                      WHERE a.title LIKE ?1
+                         OR COALESCE(c.body_text, '') LIKE ?1
+                         OR COALESCE(a.ai_summary, '') LIKE ?1
+                         OR COALESCE(a.translated_content, '') LIKE ?1
+                      ORDER BY a.published_at DESC
+                      LIMIT 50",
+                )
+                .unwrap();
+            let ids: Vec<i64> = stmt
+                .query_map([format!("%{t}%")], |r| r.get::<_, i64>(0))
                 .unwrap()
-                .into_iter()
-                .map(|r| r.id)
-                .collect();
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
             out.push(serde_json::json!({ "term": t, "ids": ids }));
         }
         out.into()
@@ -3220,7 +4102,9 @@ mod opt017b_migration_tests {
         );
         assert!(recycle_trigger_present(&conn));
 
-        // 触发器清单固化：articles/contents 上只应有下列触发器
+        // 触发器清单按“必须存在 + 不得残留旧 FTS”校验，不锁精确全量：
+        // v32 起 articles 还会增加 sync_queue 绑定触发器，后续迁移也可能追加。
+        // 旧 FTS 触发器残留仍由 legacy_fts_objects（名称/SQL 引用）单独拦截。
         let trigger_names = |tbl: &str| -> Vec<String> {
             let mut stmt = conn
                 .prepare(
@@ -3232,22 +4116,34 @@ mod opt017b_migration_tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
         };
-        assert_eq!(
-            trigger_names("articles"),
-            vec![
-                "trg_articles_published_fallback_ins",
-                "trg_articles_published_fallback_upd",
-                "trg_articles_recycle_ad",
-                "trg_articles_trigram_ad",
-                "trg_articles_trigram_ai",
-                "trg_articles_trigram_au",
-            ],
-            "articles 触发器清单必须收敛为兜底/回收/候选索引维护三组"
+        let articles_triggers = trigger_names("articles");
+        for required in [
+            "trg_articles_published_fallback_ins",
+            "trg_articles_published_fallback_upd",
+            "trg_articles_recycle_ad",
+            "trg_articles_trigram_ad",
+            "trg_articles_trigram_ai",
+            "trg_articles_trigram_au",
+        ] {
+            assert!(
+                articles_triggers.iter().any(|name| name == required),
+                "articles 缺少必须触发器 {required}: {articles_triggers:?}"
+            );
+        }
+        assert!(
+            articles_triggers.iter().all(|name| !name.contains("_fts_")),
+            "articles 上仍残留旧 FTS 触发器: {articles_triggers:?}"
         );
-        assert_eq!(
-            trigger_names("contents"),
-            vec!["trg_contents_trigram_au"],
-            "contents 触发器清单只剩候选索引维护"
+        let contents_triggers = trigger_names("contents");
+        assert!(
+            contents_triggers
+                .iter()
+                .any(|name| name == "trg_contents_trigram_au"),
+            "contents 缺少候选索引维护触发器: {contents_triggers:?}"
+        );
+        assert!(
+            contents_triggers.iter().all(|name| !name.contains("_fts_")),
+            "contents 上仍残留旧 FTS 触发器: {contents_triggers:?}"
         );
 
         // 写路径（入库/改正文/写 AI）后仍无旧 FTS 面；候选索引跟随更新
@@ -3398,7 +4294,6 @@ mod opt017g_migration_tests {
     /// 含数据旧库（v29）：同 url_norm 组（跨条目读传播现场）+ 独立条目 +
     /// 混合读藏 + 一条 read 队列项 + 一条内容修好（正文共享组）。
     fn seed_v29_data(conn: &Connection) -> serde_json::Value {
-        use crate::db::NewArticle;
         let folder = crate::db::create_folder(conn, "迁移分类", "article").unwrap();
         let feed = crate::db::insert_feed(
             conn,
@@ -3412,44 +4307,52 @@ mod opt017g_migration_tests {
             false,
         )
         .unwrap();
-        let na = |guid: &str, url: &str| NewArticle {
-            guid: guid.into(),
-            url: Some(url.into()),
-            title: format!("G 标题 {guid}"),
-            author: None,
-            summary: None,
-            content_html: Some("<p>G 正文</p>".into()),
-            body_text: "G 正文".into(),
-            image_url: None,
-            enclosure_url: None,
-            enclosure_mime: None,
-            duration_sec: None,
-            published_at: Some("2026-10-01T00:00:00+00:00".into()),
-            source: "direct".into(),
+        // v29 schema 无 v33 列，按旧列集原生插入（共享同一 contents 行）。
+        conn.execute(
+            "INSERT INTO contents (identity, content_html, body_text)
+             VALUES ('legacy-v29-g', '<p>G 正文</p>', 'G 正文')",
+            [],
+        )
+        .unwrap();
+        let content_id = conn.last_insert_rowid();
+        let insert_g = |guid: &str, url: &str| -> i64 {
+            conn.execute(
+                "INSERT INTO articles
+                   (feed_id, guid, url, url_norm, title, content_id, published_at, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '2026-10-01T00:00:00+00:00', 'direct')",
+                params![
+                    feed,
+                    guid,
+                    url,
+                    crate::db::normalize_url(url),
+                    format!("G 标题 {guid}"),
+                    content_id,
+                ],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
         };
-        let (g1, _) = crate::db::upsert_article_with_feed(
-            conn,
-            feed,
-            &na("g-1", "https://g.example/same"),
-            false,
+        let g1 = insert_g("g-1", "https://g.example/same");
+        let g2 = insert_g("g-2", "https://g.example/same");
+        let g3 = insert_g("g-3", "https://g.example/other");
+
+        // 本夹具运行在 v29 schema 上：v32 的 *_with_enqueue helper 会写尚未存在的
+        // kind/status 列，不能提前调用。按旧生产顺序复刻读广播（主行 + 同 url_norm
+        // 未读副本）与旧队列插入，再让迁移按真实顺序接管。
+        for id in [g1, g2] {
+            crate::db::set_read(conn, id, true).unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue (article_id, action) VALUES (?1, 'read')",
+                params![id],
+            )
+            .unwrap();
+        }
+        crate::db::set_starred(conn, g3, true).unwrap();
+        conn.execute(
+            "INSERT INTO sync_queue (article_id, action) VALUES (?1, 'star')",
+            params![g3],
         )
         .unwrap();
-        let (_g2, _) = crate::db::upsert_article_with_feed(
-            conn,
-            feed,
-            &na("g-2", "https://g.example/same"),
-            false,
-        )
-        .unwrap();
-        let (g3, _) = crate::db::upsert_article_with_feed(
-            conn,
-            feed,
-            &na("g-3", "https://g.example/other"),
-            false,
-        )
-        .unwrap();
-        crate::db::set_read_with_enqueue(conn, g1, true).unwrap();
-        crate::db::set_starred_with_enqueue(conn, g3, true).unwrap();
 
         seed_snapshot_states(conn)
     }
@@ -3561,6 +4464,225 @@ mod opt017g_migration_tests {
             sql_of(&fresh),
             sql_of(&upgraded),
             "全新库与 v29 升级库的索引定义必须逐字一致"
+        );
+    }
+}
+
+/* ============================================================
+v32：同步队列生命周期分类（旧库升级 / 幂等 / 不删除用户意图）
+============================================================ */
+#[cfg(test)]
+mod sync_queue_lifecycle_migration_tests {
+    use super::*;
+
+    fn snapshot(conn: &Connection) -> Vec<(i64, String, String, Option<i64>, i64)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, action, status, article_id, attempts
+                   FROM sync_queue ORDER BY id",
+            )
+            .unwrap();
+        stmt.query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
+    #[test]
+    fn v31_rows_are_classified_without_deletion_and_upgrade_is_idempotent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 31).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO feeds (feed_url, title, remote_id)
+            VALUES ('https://bound.example/rss', '已绑定源', 10);
+            INSERT INTO feeds (feed_url, title)
+            VALUES ('https://local.example/rss', '仅本机源');
+
+            INSERT INTO articles
+                (id, feed_id, guid, title, remote_id, is_read, is_starred)
+            VALUES
+                (1, 1, 'g-bound', '已绑定文章', 100, 1, 0),
+                (2, 2, 'g-local', '仅本机文章', NULL, 1, 1),
+                (3, 1, 'g-wait', '等待身份文章', NULL, 0, 0),
+                (4, 1, 'g-retry', '可重试文章', 104, 1, 0);
+
+            INSERT INTO sync_queue
+                (id, article_id, feed_url, action, payload, created_at, attempts, last_error)
+            VALUES
+                (101, 1, NULL, 'read', NULL, datetime('now'), 0, NULL),
+                (102, 2, NULL, 'star', NULL, datetime('now', '-40 days'), 0, NULL),
+                (103, 3, NULL, 'read', NULL, datetime('now'), 0, NULL),
+                (104, 4, NULL, 'unread', NULL, datetime('now'), 2, '历史推送失败'),
+                (105, NULL, 'https://new.example/rss', 'add_feed', '{}', datetime('now'), 0, NULL);
+            "#,
+        )
+        .unwrap();
+        let before_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before_count, 5);
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        let rows = snapshot(&conn);
+        assert_eq!(rows.len(), 5, "迁移不得删除任何旧队列行");
+        assert_eq!(
+            rows[0],
+            (101, "read".into(), "bound_pending".into(), Some(1), 0)
+        );
+        assert_eq!(
+            rows[1],
+            (102, "star".into(), "expired_unconfirmed".into(), Some(2), 0),
+            "超过 30 天的无身份意图转为可见过期项"
+        );
+        assert_eq!(
+            rows[2],
+            (103, "read".into(), "bindable_retry".into(), Some(3), 0),
+            "同 feed 已绑定时等待远端条目身份"
+        );
+        assert_eq!(
+            rows[3],
+            (104, "unread".into(), "retry_wait".into(), Some(4), 2),
+            "有身份的旧失败保留 attempts 并进入可重试"
+        );
+        assert_eq!(
+            rows[4],
+            (105, "add_feed".into(), "bound_pending".into(), None, 0),
+            "历史 add_feed 保留供 feeds 阶段消费"
+        );
+        let local_state: (i64, i64) = conn
+            .query_row(
+                "SELECT is_read, is_starred FROM articles WHERE id = 2",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(local_state, (1, 1), "过期分类不得回滚本地 read/star");
+        let kind: String = conn
+            .query_row("SELECT kind FROM sync_queue WHERE id = 105", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(kind, "legacy_add_feed");
+        let waiting_error: Option<String> = conn
+            .query_row(
+                "SELECT last_error FROM sync_queue WHERE id = 103",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            waiting_error.is_none(),
+            "无身份原因必须留在 unbound_reason，不得污染真实 last_error"
+        );
+        let waiting_reason: Option<String> = conn
+            .query_row(
+                "SELECT unbound_reason FROM sync_queue WHERE id = 103",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            waiting_reason.as_deref(),
+            Some("awaiting_remote_identity"),
+            "无身份原因必须可见"
+        );
+        let expired_class: Option<String> = conn
+            .query_row(
+                "SELECT last_error_class FROM sync_queue WHERE id = 102",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            expired_class.as_deref(),
+            Some("expired_unconfirmed"),
+            "迁移分类与运行时老化必须使用同一错误类别"
+        );
+
+        // 重复 to_latest 是框架级 no-op；队列分类与行集逐字不变。
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+        assert_eq!(snapshot(&conn), rows, "重复升级必须幂等");
+        let trigger: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'trigger' AND name = 'trg_sync_queue_article_bound'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger, 1, "绑定后重驱动触发器必须存在");
+    }
+
+    #[test]
+    fn legacy_local_only_rows_get_explanatory_unbound_metadata() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut conn, 31).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO sync_queue
+                (id, article_id, feed_url, action, payload, created_at, attempts, last_error)
+            VALUES
+                (201, NULL, '   ', 'add_feed', '{}', datetime('now'), 0, NULL),
+                (202, NULL, NULL, 'legacy_other_action', '{}', datetime('now'), 0, NULL);
+            "#,
+        )
+        .unwrap();
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let add_feed: (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT kind, status, unbound_reason, last_error_class, last_error
+                   FROM sync_queue WHERE id = 201",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            add_feed,
+            (
+                "legacy_add_feed".into(),
+                "local_only".into(),
+                Some("no_feed_url".into()),
+                Some("unbound".into()),
+                None,
+            ),
+            "trim 后为空的 add_feed 必须说明缺少 URL，且不得污染真实 last_error"
+        );
+
+        let legacy_other: (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT kind, status, unbound_reason, last_error_class, last_error
+                   FROM sync_queue WHERE id = 202",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            legacy_other,
+            (
+                "legacy_other".into(),
+                "local_only".into(),
+                Some("unsupported_legacy_action".into()),
+                Some("unbound".into()),
+                None,
+            ),
+            "其它历史动作必须说明不支持远端写回，且不得伪造推送失败"
         );
     }
 }

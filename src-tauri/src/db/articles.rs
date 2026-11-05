@@ -31,6 +31,10 @@ pub struct ArticleRow {
     /// 前端以「产物非空 && 签名为空」呈「未标记版本」；命中判定在命令层做。
     pub ai_summary_sig: Option<String>,
     pub translated_sig: Option<String>,
+    /// 永久首次见到时间（RFC3339）。存量行由 v33 从 fetched_at 回填；新行只写一次。
+    pub first_seen_at: Option<String>,
+    /// published_at 的来源：feed / feed_clamped / inferred_fetch / legacy_unknown。
+    pub published_at_source: String,
 }
 
 /// 列表页条目（轻量：默认不含正文 HTML，snippet 截断；with_content 时附带正文，
@@ -63,13 +67,24 @@ pub struct ArticleListItem {
     /// 摘要的「未标记版本」判定依赖它）
     pub ai_summary_sig: Option<String>,
     pub translated_sig: Option<String>,
+    /// 永久首次见到时间（RFC3339）；列表行也返回，供后续 UI 标「推断时间」。
+    pub first_seen_at: Option<String>,
+    /// published_at 的来源：feed / feed_clamped / inferred_fetch / legacy_unknown。
+    pub published_at_source: String,
 }
 
 /* ============================================================
 读取与检索：行/列表模型、分页游标、搜索、按 URL 去重查询
 ============================================================ */
 
-/// 抓取管线产出的新条目（source 由抓取层决定）
+/// 抓取管线产出的新条目（source 由抓取层决定）。
+///
+/// `published_at` 的 `Some/None` 同时承载「源是否提供日期」这一事实：
+/// - `Some`：源 feed/协议确实提供了日期；未来值可由解析层钳制，是否钳制
+///   通过 [`upsert_article_with_feed_source`] 的独立参数传入，不能从值反推；
+/// - `None`：源未提供日期，DB 新行用 first_seen_at 兜底并标 `inferred_fetch`。
+///
+/// 抓取时间不得再被写成 `Some(Utc::now())`。
 #[derive(Debug)]
 pub struct NewArticle {
     pub guid: String,
@@ -90,7 +105,7 @@ pub struct NewArticle {
 /// 详情/水合查询列（OPT-008B 第二阶段：正文只从 contents 取；条目级字段从 a 取）。
 /// 尾部两列为 content_id/content_revision（前端修订失效依据）；
 /// OPT-013 B1：再追加两列 AI 产物缓存签名。
-const ARTICLE_COLS: &str = "a.id, a.feed_id, a.url, a.title, a.author, a.summary, c.content_html, a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec, a.ai_summary, a.translated_content, a.source, a.published_at, a.is_read, a.is_starred, COALESCE(c.fulltext_extracted, 0), a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig";
+const ARTICLE_COLS: &str = "a.id, a.feed_id, a.url, a.title, a.author, a.summary, c.content_html, a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec, a.ai_summary, a.translated_content, a.source, a.published_at, a.is_read, a.is_starred, COALESCE(c.fulltext_extracted, 0), a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig, a.first_seen_at, a.published_at_source";
 
 /// 详情/水合查询的 FROM（单一正文所有权 JOIN）。
 const ARTICLE_FROM: &str = " FROM articles a LEFT JOIN contents c ON c.id = a.content_id";
@@ -119,6 +134,8 @@ fn article_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleRow> {
         content_revision: r.get(19)?,
         ai_summary_sig: r.get(20)?,
         translated_sig: r.get(21)?,
+        first_seen_at: r.get(22)?,
+        published_at_source: r.get(23)?,
     })
 }
 
@@ -148,6 +165,8 @@ fn article_list_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<ArticleListItem>
         content_revision: r.get(19)?,
         ai_summary_sig: r.get(20)?,
         translated_sig: r.get(21)?,
+        first_seen_at: r.get(22)?,
+        published_at_source: r.get(23)?,
     })
 }
 
@@ -181,7 +200,8 @@ pub struct ArticleQuery {
 /// `list_articles` 与 `article_index` 的窗口排序共用同一常量，保证「绝对位置」
 /// 与「列表顺序」同口径。published_at 非空不变量由 v14 迁移的触发器 + 写入兜底
 /// 固化（见 db/migrations.rs），使本表达式与旧 `COALESCE(published_at, fetched_at)`
-/// 逐行等价（由 migrations 的排序等价测试锁定）。
+/// 逐行等价（由 migrations 的排序等价测试锁定）。v33 起该值可能是源日期，也可能
+/// 是无源日期时的 first_seen_at 兜底；来源以 `published_at_source` 区分，排序语义不变。
 ///
 // Note: 分页谓词必须与 ORDER BY 逐字同构（裸字符串比较，成对给出游标） — 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
 /// TASK-117（审计 P1-1）：keyset 分页要求排序键是**全序**——published_at 是
@@ -322,7 +342,8 @@ fn list_articles_sql(q: &ArticleQuery, dedup: bool) -> (String, Vec<rusqlite::ty
                 COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
                 a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
-                {content_cols}, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig
+                {content_cols}, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig,
+                a.first_seen_at, a.published_at_source
          FROM articles a LEFT JOIN contents c ON c.id = a.content_id",
     );
     // 值全部走绑定参数（占位符序号即绑定顺序），条件文本只拼固定字符串
@@ -798,7 +819,8 @@ fn build_search_sql(
                 COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                 a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
                 a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
-                NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig
+                NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig,
+                a.first_seen_at, a.published_at_source
          FROM {from_clause}
          WHERE {where}{candidate_sql}{dedup_sql}
          ORDER BY a.published_at DESC
@@ -902,6 +924,7 @@ pub(crate) fn purge_remote_data_in(tx: &rusqlite::Transaction<'_>) -> AppResult<
 /// 下一次全量同步会按服务器状态重新拉回（Miniflux 端仍是 unread），数据
 /// 打架等于白删；scope='ai' 只清 AI 摘要与翻译缓存（正文保留，重新打开
 /// 可再生成）。返回 (删文章数, 清 AI 字段数)。
+// Note: 清理边界与远端回灌文案 — 见 .agents/notes/implemented/bug-fix/2026-11-05-缓存清理语义与未读保护.md
 pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult<(usize, usize)> {
     let tx = conn.transaction()?;
     // P3[5]（REQ-104）：cutoff 此前是 datetime('now','-N days','localtime')，而 published_at
@@ -1013,10 +1036,15 @@ pub fn clear_article_ai_product(
 写入与状态：文章入库（含智能去重）、已读/收藏、AI 字段、未读数
 ============================================================ */
 
-/// 抓取/同步入库（带 feed_id）：guid 冲突或同 feed 同 URL 命中时仅更新内容字段
+/// 抓取/同步入库（带 feed_id）：按稳定来源身份命中既有行时仅更新内容字段
 /// （正文/图片/enclosure/来源），已读/收藏/AI 产物等用户状态字段不动 —— 直连
-/// 重抓到已读文章时不会"复活"它。匹配键用规范化 URL（url_norm）：跟踪参数/
-/// www./m./协议/尾斜杠/AMP 差异不再产生同源重复文章。
+/// 重抓到已读文章时不会"复活"它。
+///
+/// 直连身份顺序：真实 feed id/guid → 同 feed 规范化 URL → 有源日期时
+/// title+date → 无 URL/date 时 title+HTML+正文指纹。抓取时间不参与身份；无源日期
+/// 的条目由 DB 写 first_seen_at 兜底并标 inferred_fetch，后续刷新不覆盖。
+/// 匹配键用规范化 URL（url_norm）：跟踪参数/www./m./协议/尾斜杠/AMP 差异
+/// 不再产生同源重复文章。
 ///
 /// OPT-008B 第一阶段（条目身份）：**入库不再跨源丢弃同 URL 条目**——条目是
 /// 订阅源/远端 ID 的独立实体，智能去重从「入库丢身份」改为查询呈现层的聚合
@@ -1034,7 +1062,23 @@ pub fn upsert_article_with_feed(
     a: &NewArticle,
     dedup: bool,
 ) -> AppResult<(i64, bool)> {
-    let o = upsert_article_with_feed_tracked(conn, feed_id, a, dedup)?;
+    let o = upsert_article_with_feed_tracked_impl(conn, feed_id, a, dedup, false)?;
+    Ok((o.id, o.inserted))
+}
+
+/// 直连解析条目的 upsert：`published_at_clamped` 由解析层显式给出。
+///
+/// 未来日期被钳制后，`published_at` 是抓取时刻而不是源日期；DB 以
+/// `published_at_source='feed_clamped'` 持久化这一事实。普通调用方仍使用
+/// [`upsert_article_with_feed`]，只有确实携带源日期元数据的解析路径使用本函数。
+pub fn upsert_article_with_feed_source(
+    conn: &Connection,
+    feed_id: i64,
+    a: &NewArticle,
+    dedup: bool,
+    published_at_clamped: bool,
+) -> AppResult<(i64, bool)> {
+    let o = upsert_article_with_feed_tracked_impl(conn, feed_id, a, dedup, published_at_clamped)?;
     Ok((o.id, o.inserted))
 }
 
@@ -1063,6 +1107,7 @@ struct VisibleFields {
     enclosure_mime: Option<String>,
     duration_sec: Option<i64>,
     published_at: Option<String>,
+    published_at_source: String,
     /// OPT-008B 第二阶段：正文身份（重指/分叉在内容变化判定内，不只看字节相等）
     content_id: Option<i64>,
 }
@@ -1073,7 +1118,8 @@ struct VisibleFields {
 fn visible_fields(conn: &Connection, id: i64) -> AppResult<VisibleFields> {
     let f = conn.query_row(
         "SELECT a.url, a.title, a.author, a.summary, c.content_html, c.body_text, a.image_url,
-                a.enclosure_url, a.enclosure_mime, a.duration_sec, a.published_at, a.content_id
+                a.enclosure_url, a.enclosure_mime, a.duration_sec, a.published_at,
+                a.published_at_source, a.content_id
          FROM articles a LEFT JOIN contents c ON c.id = a.content_id WHERE a.id = ?1",
         params![id],
         |r| {
@@ -1089,7 +1135,8 @@ fn visible_fields(conn: &Connection, id: i64) -> AppResult<VisibleFields> {
                 enclosure_mime: null_if_empty(r.get(8)?),
                 duration_sec: r.get(9)?,
                 published_at: null_if_empty(r.get(10)?),
-                content_id: r.get(11)?,
+                published_at_source: r.get(11)?,
+                content_id: r.get(12)?,
             })
         },
     )?;
@@ -1107,6 +1154,105 @@ fn normalized_url_key(url: Option<&str>) -> Option<String> {
         .map(normalize_url)
 }
 
+#[derive(Debug)]
+struct ExistingArticle {
+    id: i64,
+    guid: String,
+    fulltext_extracted: bool,
+}
+
+fn find_article_by_guid(
+    conn: &Connection,
+    feed_id: i64,
+    guid: &str,
+) -> AppResult<Option<ExistingArticle>> {
+    Ok(conn
+        .query_row(
+            "SELECT a.id, a.guid, COALESCE(c.fulltext_extracted, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.feed_id = ?1 AND a.guid = ?2",
+            params![feed_id, guid],
+            |r| {
+                Ok(ExistingArticle {
+                    id: r.get(0)?,
+                    guid: r.get(1)?,
+                    fulltext_extracted: r.get::<_, i64>(2)? != 0,
+                })
+            },
+        )
+        .optional()?)
+}
+
+fn find_article_by_url(
+    conn: &Connection,
+    feed_id: i64,
+    url_norm: &str,
+) -> AppResult<Option<ExistingArticle>> {
+    Ok(conn
+        .query_row(
+            "SELECT a.id, a.guid, COALESCE(c.fulltext_extracted, 0)
+             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
+             WHERE a.feed_id = ?1 AND a.url_norm = ?2 ORDER BY a.id LIMIT 1",
+            params![feed_id, url_norm],
+            |r| {
+                Ok(ExistingArticle {
+                    id: r.get(0)?,
+                    guid: r.get(1)?,
+                    fulltext_extracted: r.get::<_, i64>(2)? != 0,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// 供既有弱身份升级/换形匹配的重算候选（按身份优先级去重）。
+fn identity_candidates(a: &NewArticle) -> Vec<String> {
+    let mut out = Vec::with_capacity(4);
+    let mut push = |guid: String| {
+        if !out.contains(&guid) {
+            out.push(guid);
+        }
+    };
+    push(a.guid.clone());
+    if let Some(url) = a.url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        push(url_identity_guid(url));
+    }
+    if let Some(published) = a
+        .published_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        push(title_date_identity_guid(&a.title, published));
+    }
+    push(content_identity_guid(
+        &a.title,
+        a.content_html.as_deref(),
+        &a.body_text,
+    ));
+    out
+}
+
+/// 仅允许把合成身份升级为真实 feed id；唯一键冲突时保持旧身份（不改写别的行）。
+fn promote_synthetic_guid(
+    conn: &Connection,
+    feed_id: i64,
+    id: i64,
+    old_guid: &str,
+    new_guid: &str,
+) -> AppResult<bool> {
+    let n = conn.execute(
+        "UPDATE articles SET guid = ?1
+          WHERE id = ?2 AND guid = ?3
+            AND NOT EXISTS (
+                SELECT 1 FROM articles x
+                 WHERE x.feed_id = ?4 AND x.guid = ?1 AND x.id != ?2
+            )",
+        params![new_guid, id, old_guid, feed_id],
+    )?;
+    Ok(n > 0)
+}
+
 /// R3 核心：返回富结果的 upsert。匹配逻辑与旧入口完全同源（本函数即原实现，
 /// 旧入口为薄包装）——禁止在别处再写第二份 URL/guid 匹配。
 ///
@@ -1118,62 +1264,72 @@ pub fn upsert_article_with_feed_tracked(
     a: &NewArticle,
     dedup: bool,
 ) -> AppResult<ArticleUpsert> {
+    upsert_article_with_feed_tracked_impl(conn, feed_id, a, dedup, false)
+}
+
+fn upsert_article_with_feed_tracked_impl(
+    conn: &Connection,
+    feed_id: i64,
+    a: &NewArticle,
+    dedup: bool,
+    published_at_clamped: bool,
+) -> AppResult<ArticleUpsert> {
     // 兼容参数：智能去重的入库闸门已移除（见函数注释与
     // upsert_article_with_feed 的 OPT-008B 说明）。
     let _ = dedup;
-    let existing: Option<(i64, bool)> = conn
-        .query_row(
-            "SELECT a.id, COALESCE(c.fulltext_extracted, 0)
-             FROM articles a LEFT JOIN contents c ON c.id = a.content_id
-             WHERE a.feed_id = ?1 AND a.guid = ?2",
-            params![feed_id, a.guid],
-            |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
-        )
-        .optional()?;
-    if let Some((id, ft_extracted)) = existing {
-        // R3：既有行先抓可见字段快照，UPDATE 后复读比对（同值 replay →
-        // content_changed=false；不能拿 changes() 冒充变化）。
-        let before = visible_fields(conn, id)?;
-        refresh_existing_article(conn, id, a, ft_extracted, true)?;
-        Ok(ArticleUpsert {
-            id,
-            inserted: false,
-            content_changed: before != visible_fields(conn, id)?,
-        })
-    } else if let Some(url) = a.url.as_deref().filter(|u| !u.trim().is_empty()) {
+    let mut matched = None;
+    // 身份顺序：真实 feed id/guid → 同 feed 规范化 URL → title+date →
+    // title+HTML+正文指纹。真实 id 必须单独先行，避免合成键抢在 URL 之前。
+    if !is_synthetic_guid(&a.guid) {
+        if let Some(existing) = find_article_by_guid(conn, feed_id, &a.guid)? {
+            matched = Some((existing, true));
+        }
+    }
+    if matched.is_none() {
         // 同 feed 内按规范化 URL 兜底去重：direct 抓取与 Miniflux 同步的 guid 不同
-        // （direct 用原始 guid，Miniflux 用 `miniflux-{id}`），但 URL 相同是同一篇。
+        // （direct 用原始 guid，Miniflux 用 `remote-{id}`），但 URL 相同是同一篇。
         // 命中已有文章时只更新内容（正文/标题/封面/附件），**保留 source 与状态**
         // （is_read/is_starred/remote_id）——抓取只负责内容、同步只负责状态，
         // 避免「切换本地抓取后数量翻倍」与「状态被抓取覆盖回未读」。
-        let by_url: Option<(i64, bool)> = conn
-            .query_row(
-                "SELECT a.id, COALESCE(c.fulltext_extracted, 0)
-                 FROM articles a LEFT JOIN contents c ON c.id = a.content_id
-                 WHERE a.feed_id = ?1 AND a.url_norm = ?2 ORDER BY a.id LIMIT 1",
-                params![feed_id, normalize_url(url)],
-                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
-            )
-            .optional()?;
-        if let Some((id, ft_extracted)) = by_url {
-            // R3：同 guid 分支——前后快照比对给出 content_changed。
-            let before = visible_fields(conn, id)?;
-            refresh_existing_article(conn, id, a, ft_extracted, false)?;
-            Ok(ArticleUpsert {
-                id,
-                inserted: false,
-                content_changed: before != visible_fields(conn, id)?,
-            })
-        } else {
-            let (id, inserted) = insert_new_article(conn, feed_id, a)?;
-            Ok(ArticleUpsert {
-                id,
-                inserted,
-                content_changed: false,
-            })
+        if let Some(url_norm) = normalized_url_key(a.url.as_deref()) {
+            if let Some(existing) = find_article_by_url(conn, feed_id, &url_norm)? {
+                matched = Some((existing, false));
+            }
         }
+    }
+    if matched.is_none() {
+        for guid in identity_candidates(a) {
+            if !is_synthetic_guid(&guid) {
+                continue;
+            }
+            if let Some(existing) = find_article_by_guid(conn, feed_id, &guid)? {
+                matched = Some((existing, true));
+                break;
+            }
+        }
+    }
+    if let Some((existing, include_url)) = matched {
+        // R3：既有行先抓可见字段快照，UPDATE 后复读比对（同值 replay →
+        // content_changed=false；不能拿 changes() 冒充变化）。
+        let before = visible_fields(conn, existing.id)?;
+        refresh_existing_article(
+            conn,
+            existing.id,
+            a,
+            existing.fulltext_extracted,
+            include_url,
+            published_at_clamped,
+        )?;
+        if !is_synthetic_guid(&a.guid) && is_synthetic_guid(&existing.guid) {
+            promote_synthetic_guid(conn, feed_id, existing.id, &existing.guid, &a.guid)?;
+        }
+        Ok(ArticleUpsert {
+            id: existing.id,
+            inserted: false,
+            content_changed: before != visible_fields(conn, existing.id)?,
+        })
     } else {
-        let (id, inserted) = insert_new_article(conn, feed_id, a)?;
+        let (id, inserted) = insert_new_article(conn, feed_id, a, published_at_clamped)?;
         Ok(ArticleUpsert {
             id,
             inserted,
@@ -1195,6 +1351,7 @@ fn refresh_existing_article(
     a: &NewArticle,
     _ft_extracted: bool,
     include_url: bool,
+    published_at_clamped: bool,
 ) -> AppResult<()> {
     /// 条目当前指向的内容快照（正文保护判定用）：
     /// (content_id, extraction_source, fulltext_extracted)。正文本身不进快照——
@@ -1257,7 +1414,11 @@ fn refresh_existing_article(
         })?;
     }
     // 条目级字段（正文列已不在 articles；其余同旧语义：非空才覆盖/COALESCE 保护）。
-    // guid 与规范化 URL 两条命中路径同口径。
+    // guid 与规范化 URL 两条命中路径同口径。发布时间按来源升级/保留：
+    // - feed 已是权威：后续 feed/钳制日期、推断值、抓取时间都不再覆盖；
+    // - feed_clamped：保留首次钳制值；后续真实非钳制日期可升级为 feed；
+    // - inferred_fetch / legacy_unknown：源日期可升级；钳制日期标 feed_clamped；
+    // - first_seen_at 永不在此 UPDATE 中出现（仅新行写入一次）。
     if include_url {
         conn.execute(
             "UPDATE articles SET
@@ -1270,7 +1431,20 @@ fn refresh_existing_article(
                 enclosure_url = COALESCE(?7, enclosure_url),
                 enclosure_mime = COALESCE(?8, enclosure_mime),
                 duration_sec = COALESCE(?9, duration_sec),
-                published_at = COALESCE(?10, published_at)
+                published_at = CASE
+                    WHEN published_at_source = 'feed' THEN published_at
+                    WHEN ?10 IS NOT NULL AND trim(?10) != '' AND ?12 = 0 THEN ?10
+                    WHEN published_at_source = 'feed_clamped' THEN published_at
+                    WHEN ?10 IS NOT NULL AND trim(?10) != '' THEN ?10
+                    ELSE published_at
+                END,
+                published_at_source = CASE
+                    WHEN published_at_source = 'feed' THEN 'feed'
+                    WHEN ?10 IS NOT NULL AND trim(?10) != '' AND ?12 = 0 THEN 'feed'
+                    WHEN published_at_source = 'feed_clamped' THEN 'feed_clamped'
+                    WHEN ?10 IS NOT NULL AND trim(?10) != '' THEN 'feed_clamped'
+                    ELSE published_at_source
+                END
              WHERE id = ?1",
             params![
                 id,
@@ -1284,6 +1458,7 @@ fn refresh_existing_article(
                 a.duration_sec,
                 a.published_at,
                 normalized_url_key(a.url.as_deref()),
+                published_at_clamped as i64,
             ],
         )?;
     } else {
@@ -1298,7 +1473,20 @@ fn refresh_existing_article(
                 enclosure_url = COALESCE(?5, enclosure_url),
                 enclosure_mime = COALESCE(?6, enclosure_mime),
                 duration_sec = COALESCE(?7, duration_sec),
-                published_at = COALESCE(?8, published_at)
+                published_at = CASE
+                    WHEN published_at_source = 'feed' THEN published_at
+                    WHEN ?8 IS NOT NULL AND trim(?8) != '' AND ?10 = 0 THEN ?8
+                    WHEN published_at_source = 'feed_clamped' THEN published_at
+                    WHEN ?8 IS NOT NULL AND trim(?8) != '' THEN ?8
+                    ELSE published_at
+                END,
+                published_at_source = CASE
+                    WHEN published_at_source = 'feed' THEN 'feed'
+                    WHEN ?8 IS NOT NULL AND trim(?8) != '' AND ?10 = 0 THEN 'feed'
+                    WHEN published_at_source = 'feed_clamped' THEN 'feed_clamped'
+                    WHEN ?8 IS NOT NULL AND trim(?8) != '' THEN 'feed_clamped'
+                    ELSE published_at_source
+                END
              WHERE id = ?9",
             params![
                 a.title,
@@ -1310,6 +1498,7 @@ fn refresh_existing_article(
                 a.duration_sec,
                 a.published_at,
                 id,
+                published_at_clamped as i64,
             ],
         )?;
     }
@@ -1345,7 +1534,7 @@ pub fn upsert_remote_article(
         .optional()?;
     if let Some((id, ft_extracted)) = existing {
         let before = visible_fields(conn, id)?;
-        refresh_existing_article(conn, id, a, ft_extracted, true)?;
+        refresh_existing_article(conn, id, a, ft_extracted, true, false)?;
         return Ok(ArticleUpsert {
             id,
             inserted: false,
@@ -1365,7 +1554,7 @@ pub fn upsert_remote_article(
         if let Some((id, ft_extracted, bound)) = by_url {
             if bound.is_none() || bound == eid {
                 let before = visible_fields(conn, id)?;
-                refresh_existing_article(conn, id, a, ft_extracted, false)?;
+                refresh_existing_article(conn, id, a, ft_extracted, false, false)?;
                 return Ok(ArticleUpsert {
                     id,
                     inserted: false,
@@ -1375,7 +1564,7 @@ pub fn upsert_remote_article(
             // 候选行属于另一个精确 entry：不复用——独立新行（下方 insert）。
         }
     }
-    let (id, inserted) = insert_new_article(conn, feed_id, a)?;
+    let (id, inserted) = insert_new_article(conn, feed_id, a, false)?;
     Ok(ArticleUpsert {
         id,
         inserted,
@@ -1383,12 +1572,12 @@ pub fn upsert_remote_article(
     })
 }
 
-/// Fever with_ids 回补预过滤（B2）：返回 `ids` 中**本地已有正文**的子集
+/// 权威集合正文回补预过滤：返回 `ids` 中**本地已有正文**的子集
 /// （绑定行的 content_html 或 body_text 任一非空；判定与
 /// `contents::content_non_empty` 同口径）。返回的是「已有正文」集合，调用方
 /// 取补集得到仍需回补的 id——无绑定行的 id 天然不在本集合里，未拉过的
 /// 远端条目不会被误跳过。分块查询避免超出 SQLite 变量上限。读失败透传
-/// Err——调用方必须把补集视为全集（全量回补），不得把失败当「全部已有
+/// Err——调用方可以失败关闭或安全地全量回补，不得把失败当「全部已有
 /// 正文」（那会漏补正文）。
 pub fn remote_ids_with_body(conn: &Connection, ids: &[i64]) -> AppResult<Vec<i64>> {
     const CHUNK: usize = 500;
@@ -1420,16 +1609,36 @@ pub fn remote_ids_with_body(conn: &Connection, ids: &[i64]) -> AppResult<Vec<i64
 /// content_id 更新写索引）。
 /// R3（故障原子性）：三步在**同一 SAVEPOINT** 内——任一步失败整体回滚，极端
 /// 崩溃窗口不再留下「content_id NULL 且 FTS 正文为空」的半插入条目。
-fn insert_new_article(conn: &Connection, feed_id: i64, a: &NewArticle) -> AppResult<(i64, bool)> {
+fn insert_new_article(
+    conn: &Connection,
+    feed_id: i64,
+    a: &NewArticle,
+    published_at_clamped: bool,
+) -> AppResult<(i64, bool)> {
     super::contents::with_write_savepoint(conn, "contents_insert_article", || {
-        // M-5：published_at 写入兜底——程序路径不允许产生 NULL（v14 触发器再兜住
-        // 裸 SQL 路径），使「published_at 非空」不变量成立，列表排序可退化为纯
-        // ORDER BY published_at（与旧 COALESCE 口径逐行等价，见 migrations v14 注释）。
+        // first_seen_at 只在新行写入一次，之后任何刷新路径都不更新。源未提供
+        // 日期时 published_at 取同一值作为排序/显示兜底，并标 inferred_fetch；
+        // 源提供日期时 published_at 用源值、标 feed。published_at 仍保持非空
+        // （v14 触发器继续兜住裸 SQL 路径），列表排序契约不变。
+        let first_seen_at = chrono::Utc::now().to_rfc3339();
+        let source_published_at = a
+            .published_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let published_at_source = match (source_published_at.is_some(), published_at_clamped) {
+            (true, true) => "feed_clamped",
+            (true, false) => "feed",
+            (false, _) => "inferred_fetch",
+        };
         conn.execute(
             "INSERT INTO articles
                 (feed_id, guid, url, url_norm, title, author, summary, image_url,
-                 enclosure_url, enclosure_mime, duration_sec, published_at, source)
-             VALUES (?1, ?2, ?3, ?13, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, datetime('now')), ?12)",
+                 enclosure_url, enclosure_mime, duration_sec, published_at, source,
+                 first_seen_at, published_at_source)
+             VALUES (?1, ?2, ?3, ?13, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                     COALESCE(?11, ?14), ?12, ?14, ?15)",
             params![
                 feed_id,
                 a.guid,
@@ -1441,9 +1650,11 @@ fn insert_new_article(conn: &Connection, feed_id: i64, a: &NewArticle) -> AppRes
                 a.enclosure_url,
                 a.enclosure_mime,
                 a.duration_sec,
-                a.published_at,
+                source_published_at,
                 a.source,
-                normalized_url_key(a.url.as_deref())
+                normalized_url_key(a.url.as_deref()),
+                first_seen_at,
+                published_at_source
             ],
         )?;
         let id = conn.last_insert_rowid();
@@ -2168,9 +2379,31 @@ pub fn mark_all_read_with_enqueue(
     );
     tx.execute(&del, refs.as_slice())?;
     let ins = format!(
-        "INSERT INTO sync_queue (article_id, feed_url, action, payload, created_at)
-         SELECT a.id, NULL, 'read', NULL, datetime('now')
-           FROM articles a WHERE a.is_read = 0 AND {clause}"
+        "INSERT INTO sync_queue
+             (article_id, feed_url, action, payload, created_at, kind, field,
+              desired_state, status, updated_at, unbound_reason, last_error_class)
+         SELECT a.id, NULL, 'read', NULL, datetime('now'), 'article_state', 'read',
+                1,
+                CASE
+                  WHEN a.remote_id IS NOT NULL THEN 'bound_pending'
+                  WHEN f.fr_remote_id IS NOT NULL THEN 'bindable_retry'
+                  ELSE 'local_only'
+                END,
+                datetime('now'),
+                CASE
+                  WHEN a.remote_id IS NOT NULL THEN NULL
+                  WHEN f.fr_remote_id IS NOT NULL THEN 'awaiting_remote_identity'
+                  ELSE 'no_remote_identity'
+                END,
+                CASE
+                  WHEN a.remote_id IS NOT NULL THEN NULL
+                  ELSE 'unbound'
+                END
+           FROM articles a
+           LEFT JOIN (
+             SELECT id AS fr_id, remote_id AS fr_remote_id FROM feeds
+           ) f ON f.fr_id = a.feed_id
+          WHERE a.is_read = 0 AND {clause}"
     );
     tx.execute(&ins, refs.as_slice())?;
     // OPT-007：标读与 read_version 递增同语句同事务——「全部已读」也是本地
@@ -3091,6 +3324,56 @@ mod tests {
         let (deleted, _) = cleanup_cache(&mut conn, 7, "articles").unwrap();
 
         assert_eq!(deleted, 1, "9 天前的已读未收藏文章应被清理");
+    }
+
+    /// 清理边界逐项锁定：未读、收藏、待同步任一条件命中都不得删除；
+    /// 只有「已读 + 未收藏 + 无队列行」的旧文章才会离开本地。
+    #[test]
+    fn cleanup_cache_keeps_unread_starred_and_pending_articles() {
+        let mut conn = conn();
+        let folder = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://c.example/feed",
+            None,
+            "C",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let old = chrono::Utc::now() - chrono::Duration::days(9);
+        let insert = |guid: &str| {
+            upsert_article_with_feed(&conn, feed, &na(guid, Some(old.to_rfc3339())), false)
+                .unwrap()
+                .0
+        };
+        let deletable = insert("deletable");
+        let unread = insert("unread");
+        let starred = insert("starred");
+        let pending = insert("pending");
+        set_read(&conn, deletable, true).unwrap();
+        set_read(&conn, starred, true).unwrap();
+        set_starred(&conn, starred, true).unwrap();
+        set_read(&conn, pending, true).unwrap();
+        enqueue_sync(&conn, Some(pending), None, "read", None).unwrap();
+
+        let (deleted, _) = cleanup_cache(&mut conn, 7, "articles").unwrap();
+        assert_eq!(deleted, 1, "只有已读、未收藏且不在队列的旧文章被清理");
+        let left: Vec<i64> = {
+            let mut stmt = conn.prepare("SELECT id FROM articles ORDER BY id").unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            left,
+            vec![unread, starred, pending],
+            "未读/收藏/待同步文章必须全部保留"
+        );
     }
 
     /* ---------- P3[8]：search_articles 的 LIMIT 必须是绑定参数且有上界 ---------- */
@@ -4248,7 +4531,8 @@ mod opt017b_search_tests {
                     COALESCE(NULLIF(a.summary, ''), substr(COALESCE(c.body_text, ''), 1, 280)) AS snippet,
                     a.image_url, a.enclosure_url, a.enclosure_mime, a.duration_sec,
                     a.ai_summary, a.source, a.published_at, a.is_read, a.is_starred,
-                    NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig
+                    NULL, NULL, NULL, 0, a.content_id, COALESCE(c.revision, 0), a.ai_summary_sig, a.translated_sig,
+                    a.first_seen_at, a.published_at_source
              FROM articles a LEFT JOIN contents c ON c.id = a.content_id
              WHERE {}{dedup_sql}
              ORDER BY a.published_at DESC

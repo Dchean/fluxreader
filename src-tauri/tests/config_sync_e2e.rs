@@ -685,6 +685,18 @@ fn apply_upserts_feeds_and_overrides_settings() {
         .find(|f| f.feed_url == "https://a.com/rss")
         .unwrap();
     assert_eq!(a.title, "源A");
+    let (custom, fetched_title): (Option<String>, String) = conn
+        .query_row(
+            "SELECT title_custom, fetched_title FROM feeds WHERE feed_url = 'https://a.com/rss'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(custom.as_deref(), Some("源A"), "配置显式标题进入自定义域");
+    assert_eq!(
+        fetched_title, "本地已有源A",
+        "配置标题只写自定义域，不篡改上一次抓取的标题"
+    );
     assert_eq!(a.site_url, Some("https://a.com".to_string()));
     // OPT-011：mode 是真值——已存在源被快照的 mode 覆盖，bool 兼容列镜像 mode
     assert_eq!(
@@ -735,6 +747,162 @@ fn apply_upserts_feeds_and_overrides_settings() {
         (0, 0, 4),
         "重复应用必须幂等：mode 参与逐字段比较，全部跳过"
     );
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn empty_or_url_titles_do_not_overwrite_existing_custom_title() {
+    let tmp = common::unique_db_path("cfgsync_test_title_fallback");
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::open(&tmp).unwrap();
+    seed_db(&conn);
+    let feed_id: i64 = conn
+        .query_row(
+            "SELECT id FROM feeds WHERE feed_url = 'https://a.com/rss'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db::set_feed_custom_title(&conn, feed_id, "用户改名").unwrap();
+
+    let feed_with = |title: &str, layout: &str, site_url: Option<&str>| FeedSpec {
+        url: "https://a.com/rss".into(),
+        title: title.into(),
+        folder: "技术".into(),
+        layout: layout.into(),
+        auto_summary: true,
+        auto_translate: false,
+        summary_mode: Some("on".into()),
+        translate_mode: Some("off".into()),
+        site_url: site_url.map(str::to_string),
+        favicon_url: None,
+    };
+    let payload_with = |feed: FeedSpec| SyncPayload {
+        schema: 2,
+        uploaded_at: "2026-11-04T00:00:00Z".into(),
+        folders: vec![FolderSpec {
+            name: "技术".into(),
+            layout: "article".into(),
+            auto_summary: true,
+            auto_translate: false,
+            position: 0,
+            sync_id: None,
+        }],
+        feeds: vec![feed],
+        app_settings: None,
+        connection_config: None,
+    };
+
+    // 空标题 + 其他字段变化 → 更新其他字段，但标题分域原样保留。
+    apply_payload(&conn, &payload_with(feed_with("", "social", None))).unwrap();
+    let (title, custom): (String, Option<String>) = conn
+        .query_row(
+            "SELECT title, title_custom FROM feeds WHERE id = ?1",
+            [feed_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "用户改名");
+    assert_eq!(custom.as_deref(), Some("用户改名"));
+
+    // URL 兜底标题同样不是用户意图；用 siteUrl 变化驱动一次实际更新。
+    apply_payload(
+        &conn,
+        &payload_with(feed_with(
+            "https://a.com/rss",
+            "social",
+            Some("https://a.com/new"),
+        )),
+    )
+    .unwrap();
+    let (title, custom, site_url): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT title, title_custom, site_url FROM feeds WHERE id = ?1",
+            [feed_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "用户改名");
+    assert_eq!(custom.as_deref(), Some("用户改名"));
+    assert_eq!(site_url.as_deref(), Some("https://a.com/new"));
+
+    // 同一空/URL 标题快照重复应用必须幂等（不得每轮都记 updated）。
+    let outcome = apply_payload(
+        &conn,
+        &payload_with(feed_with(
+            "https://a.com/rss",
+            "social",
+            Some("https://a.com/new"),
+        )),
+    )
+    .unwrap();
+    assert_eq!(
+        (outcome.imported, outcome.updated, outcome.skipped),
+        (0, 0, 1)
+    );
+
+    let add_payload = SyncPayload {
+        schema: 2,
+        uploaded_at: "2026-11-04T00:00:01Z".into(),
+        folders: vec![FolderSpec {
+            name: "技术".into(),
+            layout: "article".into(),
+            auto_summary: true,
+            auto_translate: false,
+            position: 0,
+            sync_id: None,
+        }],
+        feeds: vec![
+            FeedSpec {
+                url: "https://empty-add.example/rss".into(),
+                title: String::new(),
+                folder: "技术".into(),
+                layout: "inherit".into(),
+                auto_summary: false,
+                auto_translate: false,
+                summary_mode: Some("off".into()),
+                translate_mode: Some("off".into()),
+                site_url: None,
+                favicon_url: None,
+            },
+            FeedSpec {
+                url: "https://url-add.example/rss".into(),
+                title: "https://url-add.example/rss".into(),
+                folder: "技术".into(),
+                layout: "inherit".into(),
+                auto_summary: false,
+                auto_translate: false,
+                summary_mode: Some("off".into()),
+                translate_mode: Some("off".into()),
+                site_url: None,
+                favicon_url: None,
+            },
+        ],
+        app_settings: None,
+        connection_config: None,
+    };
+    apply_payload(&conn, &add_payload).unwrap();
+    for url in [
+        "https://empty-add.example/rss",
+        "https://url-add.example/rss",
+    ] {
+        let (custom, fetched_title): (Option<String>, String) = conn
+            .query_row(
+                "SELECT title_custom, fetched_title FROM feeds WHERE feed_url = ?1",
+                [url],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            custom.as_deref(),
+            Some(""),
+            "配置新增源的空/URL 兜底标题不得进入自定义域"
+        );
+        assert_eq!(
+            fetched_title, url,
+            "新增源仍以 URL 作为抓取标题域占位，后续刷新可自然替换"
+        );
+    }
     let _ = std::fs::remove_file(&tmp);
 }
 

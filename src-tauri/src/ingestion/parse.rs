@@ -17,7 +17,37 @@ pub struct ParsedFeed {
     pub title: Option<String>,
     pub site_url: Option<String>,
     pub icon: Option<String>,
-    pub articles: Vec<NewArticle>,
+    pub articles: Vec<ParsedArticle>,
+}
+
+impl ParsedFeed {
+    pub fn push_article(&mut self, article: NewArticle) {
+        self.articles.push(article.into());
+    }
+}
+
+/// 单条直连条目及其日期来源元数据。未来日期被钳制后，值不再是源发布时间；
+/// 该标记必须随条目一起进入 DB，不能靠比较 `published_at` 与当前时间反推。
+pub struct ParsedArticle {
+    pub article: NewArticle,
+    pub published_at_clamped: bool,
+}
+
+impl std::ops::Deref for ParsedArticle {
+    type Target = NewArticle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.article
+    }
+}
+
+impl From<NewArticle> for ParsedArticle {
+    fn from(article: NewArticle) -> Self {
+        Self {
+            article,
+            published_at_clamped: false,
+        }
+    }
 }
 
 pub fn parse_feed(bytes: &[u8], base_url: &str) -> AppResult<ParsedFeed> {
@@ -71,7 +101,7 @@ fn clamp_publish_date(date: DateTime<Utc>) -> DateTime<Utc> {
     }
 }
 
-fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
+fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
     let url = e
         .links
         .iter()
@@ -85,26 +115,7 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
         .map(|t| t.content.trim().to_string())
         .filter(|t| !t.is_empty());
 
-    // 发布时间：源未提供 pubDate/updated 时，回退为抓取时间（否则 published_at
-    // 为 NULL，前端 publishedAt=0 显示成 1970-01-01，且「今天」过滤/排序都失准）。
-    // 有真实 guid 的条目去重键不依赖时间，兜底不影响去重。
-    let published_at = e
-        .published
-        .or(e.updated)
-        .map(clamp_publish_date)
-        .unwrap_or_else(Utc::now)
-        .to_rfc3339();
-    let published_at = Some(published_at);
-
-    // 去重键优先级：真实 guid → title+日期 → URL
-    let guid = if !e.id.trim().is_empty() && e.id != NO_STABLE_ID {
-        e.id.clone()
-    } else if let Some(t) = title.as_deref() {
-        format!("{t}\u{1f}{}", published_at.as_deref().unwrap_or(""))
-    } else {
-        url.clone()?
-    };
-
+    let title_text = title.unwrap_or_else(|| "(untitled)".into());
     let raw_html = e
         .content
         .as_ref()
@@ -118,6 +129,33 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
         Some(crate::sanitize::sanitize(&raw_html, Some(base)))
     };
     let body_text = crate::sanitize::html_to_text(&raw_html);
+
+    // 源日期与「是否缺失」是两件事：缺失时 published_at 保持 None，由 DB 用
+    // first_seen_at 兜底并把来源标为 inferred_fetch；不能在这里写 Utc::now()，
+    // 否则每次刷新都会把抓取时间伪装成发布时间、并污染无 id 条目的身份。
+    let source_date = e.published.or(e.updated);
+    let is_future = source_date
+        .as_ref()
+        .is_some_and(|d| *d > Utc::now() + chrono::Duration::hours(24));
+    // 未来日期仍按既有策略钳制为当前时间；但身份不能使用钳制后的 now（否则每
+    // 次刷新身份漂移），因此未来日期场景退回内容指纹身份。
+    let identity_date = source_date
+        .as_ref()
+        .filter(|_| !is_future)
+        .map(|d| d.to_rfc3339());
+    let published_at = source_date.map(|d| clamp_publish_date(d).to_rfc3339());
+
+    // 持久身份顺序：真实 feed id/guid → 同 feed 规范化 URL → 有源日期时
+    // title+date → 无 URL/date 时的 title+HTML+正文指纹。禁止抓取时间参与。
+    let guid = if !e.id.trim().is_empty() && e.id != NO_STABLE_ID {
+        e.id.clone()
+    } else if let Some(url) = url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        crate::db::url_identity_guid(url)
+    } else if let Some(date) = identity_date.as_deref() {
+        crate::db::title_date_identity_guid(&title_text, date)
+    } else {
+        crate::db::content_identity_guid(&title_text, content_html.as_deref(), &body_text)
+    };
 
     let summary = e
         .summary
@@ -182,20 +220,23 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<NewArticle> {
         .map(|d| d.as_secs().min(i64::MAX as u64) as i64)
         .filter(|d| *d > 0);
 
-    Some(NewArticle {
-        guid,
-        url,
-        title: title.unwrap_or_else(|| "(untitled)".into()),
-        author: e.authors.first().map(|p| p.name.clone()),
-        summary,
-        content_html,
-        body_text,
-        image_url,
-        enclosure_url: enclosure.as_ref().map(|(u, _, _)| u.clone()),
-        enclosure_mime: enclosure.as_ref().and_then(|(_, m, _)| m.clone()),
-        duration_sec,
-        published_at,
-        source: "direct".into(),
+    Some(ParsedArticle {
+        article: NewArticle {
+            guid,
+            url,
+            title: title_text,
+            author: e.authors.first().map(|p| p.name.clone()),
+            summary,
+            content_html,
+            body_text,
+            image_url,
+            enclosure_url: enclosure.as_ref().map(|(u, _, _)| u.clone()),
+            enclosure_mime: enclosure.as_ref().and_then(|(_, m, _)| m.clone()),
+            duration_sec,
+            published_at,
+            source: "direct".into(),
+        },
+        published_at_clamped: is_future,
     })
 }
 
@@ -213,5 +254,76 @@ fn mime_from_url(url: &str) -> Option<&'static str> {
         "webm" => Some("video/webm"),
         "mov" => Some("video/quicktime"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed(items: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>F</title><link>https://feed.example/</link><description>d</description>
+{items}
+</channel></rss>"#
+        )
+    }
+
+    #[test]
+    fn missing_date_is_none_and_fingerprint_identity_is_repeatable() {
+        let xml = feed(r#"<item><title>Same</title><description>same body</description></item>"#);
+        let first = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        let second = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        assert!(first.articles[0].published_at.is_none());
+        assert_eq!(first.articles[0].guid, second.articles[0].guid);
+        assert!(first.articles[0].guid.starts_with('\u{1}'));
+    }
+
+    #[test]
+    fn future_date_is_clamped_but_never_enters_identity() {
+        let xml = feed(
+            r#"<item>
+                 <title>Future</title>
+                 <description>future body</description>
+                 <pubDate>Wed, 24 Aug 2033 11:00:00 GMT</pubDate>
+               </item>"#,
+        );
+        let first = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let second = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        assert_eq!(
+            first.articles[0].guid, second.articles[0].guid,
+            "钳制后的当前时间不得进入持久身份"
+        );
+        let published = first.articles[0]
+            .published_at
+            .as_deref()
+            .expect("源日期存在（已钳制）");
+        assert!(published.starts_with("20"));
+        assert!(
+            first.articles[0].published_at_clamped,
+            "钳制后的值必须携带独立来源标记"
+        );
+    }
+
+    #[test]
+    fn real_id_precedes_url_and_url_identity_is_synthetic() {
+        let xml = feed(
+            r#"<item>
+                 <title>With id</title>
+                 <guid isPermaLink="false">real-id</guid>
+                 <link>https://e.example/a</link>
+               </item>
+               <item>
+                 <title>URL only</title>
+                 <link>https://e.example/a</link>
+               </item>"#,
+        );
+        let parsed = parse_feed(xml.as_bytes(), "https://feed.example/rss").unwrap();
+        assert_eq!(parsed.articles[0].guid, "real-id");
+        assert!(parsed.articles[1].guid.starts_with('\u{1}'));
+        assert_ne!(parsed.articles[0].guid, parsed.articles[1].guid);
     }
 }

@@ -95,7 +95,7 @@ fn import_feeds(
                 id
             }
         };
-        db::insert_feed(
+        let feed_id = db::insert_feed(
             &tx,
             &f.feed_url,
             None,
@@ -106,9 +106,13 @@ fn import_feeds(
             true,
             false,
         )?;
+        // 空标题与 URL 兜底不是用户改名；只有真实标题才进入 title_custom。
+        if let Some(title) = db::explicit_feed_title(&f.title, &f.feed_url) {
+            db::set_feed_custom_title(&tx, feed_id, title)?;
+        }
         // TASK-064 N4：同 add_feed——重新导入 = 用户改变主意的最强证据，清掉
         // 同 URL 的删除墓碑，否则 pull 永久跳过该源（不绑 remote_id）、其未推送
-        // 状态 30 天后被 prune_stale_unbound 物理删除。
+        // 状态 30 天后被转为 expired_unconfirmed（保留本地意图）。
         db::remove_feed_tombstone(&tx, &f.feed_url)?;
         // OPT-009 阶段 B1-R3（复审 P2-2）：新增订阅的**类型化**写回意图与本地
         // 新增同一事务——quick_add 成功后的绑定/分类挂载失败会保留队项重试。
@@ -126,8 +130,7 @@ fn import_feeds(
             // 用真实 t= 写回远端）。**标题等于 URL** = 该 outlin 没给可用标题
             // （opml::parse 的 URL 兜底），不是用户意图 → 不产生标题目标
             // （否则会把 URL 当标题推到远端）。
-            let title = f.title.trim();
-            let desired_title = (!title.is_empty() && title != f.feed_url).then_some(title);
+            let desired_title = db::explicit_feed_title(&f.title, &f.feed_url);
             db::enqueue_subscribe(
                 &tx,
                 ctx.generation,
@@ -285,7 +288,7 @@ mod tests {
     }
 
     /// N4：重新导入清墓碑——先删源留墓碑，再导入同 URL，墓碑必须消失
-    /// （否则 pull 永久跳过该源，其未推送状态 30 天后被老化物理删除）。
+    /// （否则 pull 永久跳过该源，其未推送状态 30 天后被老化转过期）。
     /// 注意墓碑按 normalize_url 存储（https 统一为 http）。
     #[test]
     fn reimporting_a_url_clears_its_tombstone() {
@@ -399,5 +402,42 @@ mod tests {
             0,
             "不得再写 legacy add_feed（与执行器双重推送；quick_add 后即被剪掉）"
         );
+    }
+
+    #[test]
+    fn empty_and_url_fallback_import_titles_do_not_become_custom() {
+        let conn = conn();
+        let empty_url = "https://empty.example/rss";
+        let url_title = "https://url-title.example/rss";
+        import_feeds(
+            &conn,
+            &[feed(empty_url, "", None), feed(url_title, url_title, None)],
+        )
+        .unwrap();
+
+        for url in [empty_url, url_title] {
+            let (id, custom): (i64, Option<String>) = conn
+                .query_row(
+                    "SELECT id, title_custom FROM feeds WHERE feed_url = ?1",
+                    [url],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                custom.as_deref(),
+                Some(""),
+                "空标题/URL 兜底不得固化为自定义标题"
+            );
+            db::set_feed_title_and_icon(&conn, id, Some("源站真实标题"), None, None).unwrap();
+            let (title, custom): (String, Option<String>) = conn
+                .query_row(
+                    "SELECT title, title_custom FROM feeds WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(title, "源站真实标题");
+            assert_eq!(custom.as_deref(), Some(""));
+        }
     }
 }

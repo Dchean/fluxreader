@@ -320,16 +320,19 @@ pub async fn refresh_feed(state: State<'_, AppState>, feed_id: i64) -> AppResult
         let conn = db.lock().await;
         read_dedup_flag(&conn)
     };
-    ingestion::refresh_feed_staged(&db, &client, feed_id, dedup).await
+    ingestion::refresh_feed_staged(&db, &client, feed_id, dedup)
+        .await
+        .map(|outcome| outcome.new_articles())
 }
 
-/// 刷新全部订阅源（直连，并发上限 = 设置 fetchConcurrency，默认 4）。
+/// 手动/托盘全刷（直连，并发上限 = 设置 fetchConcurrency，默认 4）。
+/// direct 抓全部来源；hybrid 排除服务端来源（与「刷新本地订阅源」文案一致）。
 /// 复用调度器的三段式管线：HTTP 锁外并行，写库短暂持锁。
 #[tauri::command]
 pub async fn refresh_all_feeds(state: State<'_, AppState>) -> AppResult<RefreshSummary> {
     let db = state.db.clone();
     let http = state.http.clone();
-    let (n, f) = crate::scheduler::refresh_all(&db, &http).await;
+    let (n, f) = crate::scheduler::refresh_all(&db, &http).await?;
     Ok(RefreshSummary {
         new_articles: n,
         failed_feeds: f,

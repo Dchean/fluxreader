@@ -678,7 +678,8 @@ async fn cover_backfill_direct_ingestion_matrix() {
 
     let added = app_lib::ingestion::refresh_feed_staged(&db, &http, f, false)
         .await
-        .expect("direct refresh");
+        .expect("direct refresh")
+        .new_articles();
     assert_eq!(added, 2, "两条条目入库");
 
     let (img_id, img_cover, img_source) = row_by_url(&db, &body_img).await;

@@ -375,6 +375,38 @@ mod tests {
     }
 
     #[test]
+    fn relative_translation_links_are_absolute_and_non_http_schemes_do_not_gain_privileges() {
+        let out = sanitize(
+            r#"<p><a href="../news/relative"><strong>link</strong></a><a href="javascript:alert(1)">bad</a></p>"#,
+            Some("https://example.com/section/article"),
+        );
+        assert!(
+            out.contains(r#"href="https://example.com/news/relative""#),
+            "{out}"
+        );
+        assert!(out.contains("<strong>link</strong>"), "{out}");
+        assert!(!out.contains("javascript:"), "{out}");
+    }
+
+    #[test]
+    fn media_embed_attributes_survive_navigation_defense_without_active_document_tags() {
+        let out = sanitize(
+            r#"<base href="https://evil.invalid/"><form action="https://evil.invalid/post"><input></form><object data="https://evil.invalid/object"></object><iframe src="https://www.youtube.com/embed/a" allow="autoplay; encrypted-media" allowfullscreen></iframe>"#,
+            None,
+        );
+        assert!(out.contains("<iframe"), "{out}");
+        assert!(
+            out.contains(r#"allow="autoplay; encrypted-media""#),
+            "{out}"
+        );
+        assert!(out.contains("allowfullscreen"), "{out}");
+        assert!(!out.contains("sandbox"), "{out}");
+        for tag in ["<base", "<form", "<input", "<object"] {
+            assert!(!out.contains(tag), "{tag}: {out}");
+        }
+    }
+
+    #[test]
     fn iframe_relative_src_demoted_not_absolutized() {
         // 相对 src 不在 http 白名单入口（可能被 base 改写指向任意站）→ 降级丢弃
         let html = r#"<iframe src="/embed/local"></iframe>"#;

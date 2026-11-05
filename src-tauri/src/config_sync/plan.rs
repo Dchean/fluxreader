@@ -175,6 +175,7 @@ struct FeedAdd {
     site_url: Option<String>,
     favicon_url: Option<String>,
     title_for_display: String,
+    custom_title: Option<String>,
 }
 
 /// 源的目标归属：远端快照中的分类槽位，或 merge 的「导入」兜底。
@@ -185,7 +186,7 @@ enum FolderRef {
 
 struct FeedUpdate {
     id: i64,
-    title: String,
+    custom_title: Option<String>,
     folder: FolderRef,
     layout: String,
     summary: FeedAiMode,
@@ -486,6 +487,7 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
 
     for f in &p.feeds {
         let (summary, translate) = resolve_spec_modes(f)?;
+        let custom_title = db::explicit_feed_title(&f.title, f.url.trim()).map(str::to_string);
         let folder_ref = match slot_by_name.get(f.folder.trim()) {
             Some(slot) => FolderRef::Slot(*slot),
             None => {
@@ -513,7 +515,10 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
                     FolderRef::Sink => sink_folder_id,
                 };
                 let mut changes: Vec<String> = Vec::new();
-                if lf.title != f.title {
+                if custom_title
+                    .as_ref()
+                    .is_some_and(|title| lf.title != *title)
+                {
                     changes.push("title".into());
                 }
                 match target_folder_id {
@@ -541,14 +546,14 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
                 } else {
                     updates.push(PlanItem::Feed {
                         url: f.url.trim().to_string(),
-                        title: display_title.clone(),
+                        title: custom_title.clone().unwrap_or_else(|| lf.title.clone()),
                         folder: display_folder,
                         changes: Some(changes),
                         affected_article_count: None,
                     });
                     feed_updates.push(FeedUpdate {
                         id: lf.id,
-                        title: f.title.clone(),
+                        custom_title,
                         folder: folder_ref,
                         layout: f.layout.clone(),
                         summary,
@@ -575,6 +580,7 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
                     site_url: f.site_url.clone(),
                     favicon_url: f.favicon_url.clone(),
                     title_for_display: display_title,
+                    custom_title,
                 });
             }
         }
@@ -786,7 +792,7 @@ fn execute_plan(tx: &Connection, plan: &PreparedPlan) -> AppResult<ApplyOutcome>
     };
     for fa in &plan.feed_adds {
         let folder_id = resolve_folder(&fa.folder)?;
-        db::insert_feed_origin_modes(
+        let feed_id = db::insert_feed_origin_modes(
             tx,
             &fa.url,
             fa.site_url.as_deref(),
@@ -798,16 +804,23 @@ fn execute_plan(tx: &Connection, plan: &PreparedPlan) -> AppResult<ApplyOutcome>
             fa.translate,
             "local",
         )?;
+        // 配置快照里的真实标题是用户配置态，不应被后续抓取标题覆盖；
+        // 空标题/URL 兜底不进入 title_custom。
+        if let Some(title) = fa.custom_title.as_deref() {
+            db::set_feed_custom_title(tx, feed_id, title)?;
+        }
     }
     for fu in &plan.feed_updates {
         let folder_id = resolve_folder(&fu.folder)?;
         tx.execute(
-            "UPDATE feeds SET title = ?1, folder_id = ?2, layout = ?3,
+            "UPDATE feeds SET title = COALESCE(?1, title),
+                              title_custom = COALESCE(?1, title_custom),
+                              folder_id = ?2, layout = ?3,
                               auto_summary = ?4, auto_translate = ?5,
                               summary_mode = ?6, translate_mode = ?7,
                               site_url = ?8, favicon_url = ?9 WHERE id = ?10",
             rusqlite::params![
-                fu.title,
+                fu.custom_title,
                 folder_id,
                 fu.layout,
                 fu.summary.mirrors_legacy_bool() as i64,

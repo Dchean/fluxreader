@@ -53,10 +53,10 @@ pub struct SubscriptionOutboxItem {
     pub action: String,
     pub feed_url: String,
     pub remote_id: Option<i64>,
-    /// 恢复路径（`remote_id IS NULL` 的退订）经幂等 `quick_add` 解析出的已验证 id。
+    /// 恢复路径（`remote_id IS NULL` 的退订）经订阅列表解析出的已验证 id。
     /// 与 `remote_id` 分开：解析结果**不**等于「入队时已知的远端绑定」——恢复路径
-    /// 必须在解析之外继续做列表发现（防非幂等服务端的重复创建）。
-    /// 在列表/发送之前持久化：列表长期失败或重启后不重复 quick_add（B2-R2）。
+    /// 必须在同次列表发现中收集同 URL 其他目标，避免遗漏已有重复订阅。
+    /// 在发送之前持久化；重试仍复核列表，不通过 quick_add 创建目标。
     pub resolved_remote_id: Option<i64>,
     pub desired_title: Option<String>,
     pub desired_folder: Option<String>,
@@ -84,7 +84,7 @@ pub struct SubscriptionOutboxItem {
 ///
 /// **被替换的 pending 退订行携带的移除基准必须继承（B2-R2/R2-3）**：删除后快速
 /// 重加同一 URL 时，退订很可能尚未被服务端确认——远端订阅仍持有旧 label，而
-/// quick_add（幂等）会返回它的 id；若重加行不带 `prev_folder`，挂载只发 `a=` 会
+/// 新增碰到重复 URL 后会回查列表取得 id；若重加行不带 `prev_folder`，挂载只发 `a=` 会
 /// 永久残留旧 label。继承只读被替换行**已持久化**的基准，不猜测。
 pub fn enqueue_subscribe(
     conn: &Connection,
@@ -93,7 +93,7 @@ pub fn enqueue_subscribe(
     feed_url: &str,
     desired_title: Option<&str>,
     desired_folder: Option<&str>,
-) -> AppResult<()> {
+) -> AppResult<i64> {
     let inherited_prev: Option<String> = conn
         .query_row(
             "SELECT prev_folder FROM subscription_outbox
@@ -127,7 +127,7 @@ pub fn enqueue_subscribe(
             inherited_prev
         ],
     )?;
-    Ok(())
+    Ok(conn.last_insert_rowid())
 }
 
 /// 退订入队（本地删除 feed 的同一事务内调用）。
@@ -139,10 +139,10 @@ pub fn enqueue_subscribe(
 /// **未知远端目标也必须落可恢复意图（B2-R1 复审 P2）**：删除发生在同账号同 URL
 /// 仍有 pending 队项时（典型：`quick_add` 已发出、响应在途/丢失/进程重启），远端
 /// 可能已经存在这次创建——此刻无从得知 id，但意图必须持久化：写入 `remote_id`
-/// 为 NULL 的 unsubscribe 行，由执行器在发送前用**幂等 quick_add-by-URL**解析出
+/// 为 NULL 的 unsubscribe 行，由执行器在发送前查询订阅列表取得
 /// 已验证 id 再退订（见 `exec_unsubscribe_item`）。没有创建证据（同账号同 URL 无
-/// pending 队项）时不写行——从未推送过，远端不可能有它，写了只会让执行器对不存在
-/// 的订阅做一次创建+删除。**删除先于 quick_add 发出**的普通场景正落在这一分支：
+/// pending 队项）时不写行；恢复不会调用 quick_add 创建目标。
+/// **删除先于 quick_add 发出**且尚无队项的普通场景正落在这一分支：
 /// 无队项可删、无在途请求，本地墓碑已足够。
 /// 返回 true = 已写入退订队项（`remote_id` 可能待解析）；false = 无创建证据、未写入。
 ///
@@ -347,7 +347,7 @@ pub fn update_pending_subscribe_desired(
 /// remote_id 补给**同账号同代际**的替代 pending 行，避免远端孤儿：
 /// - 替代行是 unsubscribe（本地已删）→ 填入远端 id，下一轮退订收敛；
 /// - 替代行是 subscribe（合并/重新添加）→ 填入远端 id 并推进 remote_created，
-///   下一轮直接绑定（quick_add 幂等，本可不填；填上避免重复请求）。
+///   下一轮直接绑定，避免重复创建请求及远端副作用。
 ///
 /// 只在行还处于「无 remote_id」时补——已有目标的行使旧响应彻底落空（不覆盖）。
 pub fn adopt_remote_id_for_pending(
@@ -423,6 +423,27 @@ pub fn rebind_outbox_generation(
     Ok(n)
 }
 
+/// 只把调用方明确选中的 pending outbox 行重绑到当前代际。
+/// 定向同步不得经全量重绑改动其它账号/其它意图的 `updated_at` 与代际。
+pub fn rebind_outbox_generation_for_ids(
+    conn: &Connection,
+    account_key: &str,
+    account_generation: i64,
+    ids: &[i64],
+) -> AppResult<usize> {
+    let mut n = 0;
+    for id in ids {
+        n += conn.execute(
+            "UPDATE subscription_outbox
+                SET account_generation = ?1, updated_at = datetime('now')
+              WHERE id = ?2 AND account_key = ?3 AND status = 'pending'
+                AND account_generation <> ?1",
+            params![account_generation, id, account_key],
+        )?;
+    }
+    Ok(n)
+}
+
 /// 订阅 outbox 的生命周期终点（2026-11-02 语义）：删除**非当前身份**的全部
 /// 队项，返回删除行数。账号提交事务内调用（`commit_account_settings` 的
 /// identity_changed 与「断开后换身份重连」分支，`bump_sync_generation` 之前）；
@@ -463,9 +484,8 @@ pub fn advance_subscribe_stage(
 }
 
 /// 退订恢复路径的**解析推进**（B2-R2 复审 P2）：`remote_id IS NULL` 的退订行经
-/// 幂等 `quick_add`-by-URL 解析出已验证 id 后，在列表发现/发送之前先把结果落库——
-/// 订阅列表长期失败或进程重启后，下一轮直接采用该 id，**不再重复 quick_add**
-/// （非幂等 quick_add 的服务端上，每重复一次都会新建一个重复订阅）。
+/// 订阅列表解析出已验证 id 后，在发送之前先把结果落库。
+/// 下一轮仍复核完整订阅列表，同时保留该已知目标；恢复路径不调用 quick_add。
 ///
 /// 守卫 (id, generation, action='unsubscribe', status='pending', remote_id IS NULL)：
 /// 过期响应/换代/被合并替换/已确认的行不得被旧解析结果推进 —— 未推进时调用方

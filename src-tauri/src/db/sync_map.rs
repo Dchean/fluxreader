@@ -772,7 +772,8 @@ pub fn get_first_folder_id(conn: &Connection) -> AppResult<Option<i64>> {
     Ok(id)
 }
 
-/// 更新 feed 标题和站点 URL（仅当本地标题等于 feed_url 时，Pull 段远端标题回填用）
+/// 更新抓取标题和站点 URL（仅当本地显示名仍是 feed_url 时，Pull 段远端标题
+/// 回填用）。只写 fetched_title；title 仅在没有用户自定义标题时跟随显示。
 pub fn update_feed_title_if_empty(
     conn: &Connection,
     feed_id: i64,
@@ -781,7 +782,13 @@ pub fn update_feed_title_if_empty(
 ) -> AppResult<()> {
     conn.execute(
         "UPDATE feeds SET
-            title = CASE WHEN title = feed_url THEN ?1 ELSE title END,
+            fetched_title = CASE WHEN title = feed_url THEN ?1 ELSE fetched_title END,
+            title_custom = CASE WHEN title = feed_url THEN '' ELSE title_custom END,
+            title = CASE
+                WHEN NULLIF(trim(COALESCE(title_custom, '')), '') IS NOT NULL THEN title
+                WHEN title = feed_url THEN ?1
+                ELSE title
+            END,
             site_url = COALESCE(site_url, ?2)
          WHERE id = ?3",
         params![title, site_url, feed_id],

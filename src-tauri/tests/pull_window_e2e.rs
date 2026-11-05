@@ -68,7 +68,7 @@ async fn entry_changed_during_pull_is_pulled_by_next_increment() {
         10,
         "https://example.com/win/b",
         "B",
-        false,
+        true,
         false,
         T_B,
     );
@@ -78,6 +78,7 @@ async fn entry_changed_during_pull_is_pulled_by_next_increment() {
         db::set_last_sync_ts(&conn, T0).unwrap();
     }
 
+    // 注入的 B 已读且未收藏，权威集合不回补它；本用例独立锁定普通增量窗口。
     // 注入游标墙钟（= 受控拉取起点），跑第一轮增量拉取
     sync::set_greader_pull_clock_override(Some(V));
     let r1 = sync::states_phase(&db, &http, false)
@@ -137,7 +138,7 @@ async fn entry_changed_during_pull_is_pulled_by_next_increment() {
 /// changed_at。published 早于游标、changed_at 晚于游标的条目在旧 mock 语义
 /// （changed_at >= ot）下会被增量窗口列出并入库——真实 Miniflux
 /// （published_at > ot）不会。本用例在两种语义下必然分叉（旧语义此断言红）：
-/// 这类条目不进 light 增量窗口（不入库、状态不对齐），手动全量（ot=0）能拉入。
+/// 已读且未收藏的这类条目不进 light 增量窗口或回补集合，full 能拉入。
 #[tokio::test]
 async fn entry_published_before_cursor_is_not_in_light_window_even_if_changed_after() {
     const T0: i64 = 1_700_000_000; // 游标
@@ -159,7 +160,7 @@ async fn entry_published_before_cursor_is_not_in_light_window_even_if_changed_af
         10,
         "https://example.com/divergent/d",
         "D",
-        false,
+        true,
         false,
         T0 - 100, // published < T0（真实语义：窗口外）
         T0 + 100, // changed_at > T0（旧 mock 语义：窗口内）

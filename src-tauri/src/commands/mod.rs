@@ -71,11 +71,17 @@ pub(crate) fn sync_configured(conn: &rusqlite::Connection) -> AppResult<bool> {
     Ok(crate::sync::read_credentials(conn)?.is_some())
 }
 
+/// 订阅写回协议门（sync_local_feeds 与 add_feed 共用）：Fever 没有订阅写回端点。
+pub(crate) fn subscription_write_back_supported(protocol: &str) -> bool {
+    protocol == "greader"
+}
+
 /* ============================================================
 领域子模块声明与重导出
 ============================================================ */
 mod ai;
 mod articles;
+mod backup;
 mod folders;
 mod opml;
 mod settings;
@@ -83,6 +89,7 @@ mod sync;
 
 pub use ai::*;
 pub use articles::*;
+pub use backup::*;
 pub use folders::*;
 pub use opml::*;
 pub use settings::*;

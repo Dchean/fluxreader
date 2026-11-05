@@ -63,3 +63,7 @@ souvlaki = "0.8.3"
 # DPAPI 凭据加密（SEC-2）：CryptProtectData/CryptUnprotectData
 windows = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 base64 = "0.22"
+
+[dev-dependencies]
+# 集成测试用 mock runtime 直接走真实 IPC 命令分发（sync_local_feeds 定向过滤证据）。
+tauri = { version = "2.11.3", features = ["test"] }

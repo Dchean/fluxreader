@@ -7,7 +7,7 @@
 //!   `id < max_id ORDER BY id DESC LIMIT 50`；`unread_item_ids`/`saved_item_ids`
 //!   为逗号分隔字符串全集；`mark=item` 只接受单个 `ctype_digit` 的 id。
 //! - Miniflux `internal/fever/handler.go`：同一能力，`id`/`feed_id` 为 JSON 数字，
-//!   条目升序返回（夹具用 `max_id_asc` 模拟，锁「游标与页内顺序无关」）。
+//!   max_id 页同为降序；`max_id_asc_page` 仅作升序兼容变体，锁「游标与页内顺序无关」。
 //!
 //! 夹具只记录与校验请求；断言对象是**生产代码**（`FeverClient` / `sync::sync_now` /
 //! `sync::sync_light`）发出的请求与产生的结果。本文件只声称「严格夹具 × 固定源码
@@ -51,14 +51,13 @@ enum IdStyle {
     JsonNumber,
 }
 
-/// mark=item&as=saved/unsaved 的星标语义（2026-10-31 审计对齐）。
+/// mark=item&as=saved/unsaved 的兼容夹具语义；版本号不编码此行为。
 #[derive(Clone, Copy, Default, PartialEq)]
 enum StarMark {
-    /// FreshRSS（及 Fever 规范字面义）：绝对赋值（saved→收藏、unsaved→取消）。
+    /// 绝对赋值（saved→收藏、unsaved→取消），与已核对的 FreshRSS 和 Miniflux faecfa2 一致。
     #[default]
     Absolute,
-    /// Miniflux 固定源码（internal/fever/handler.go:443-467）：saved 与 unsaved
-    /// 都走 storage.ToggleStarred——语义由条目当前状态决定。
+    /// Toggle 兼容变体：saved 与 unsaved 都取反，不代表所有 api_version 3 服务端。
     Toggle,
 }
 
@@ -105,7 +104,7 @@ struct RawResponse {
 
 /// 一条被夹具记录下来的请求。夹具用它做校验（拒绝不合法请求），
 /// 测试用它断言生产客户端「发了什么」。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Hit {
     method: String,
     path: String,
@@ -148,6 +147,8 @@ struct Fixture {
     since_id_calls: AtomicUsize,
     /// 响应中省略 `items` 字段（协议错误用例）。
     omit_items: AtomicBool,
+    /// 响应中的条目省略 `is_read` / `is_saved`（状态三态/写回验证用例）。
+    omit_item_state_fields: AtomicBool,
     /// 响应中省略 `unread_item_ids` / `saved_item_ids` 字段（协议错误用例）。
     omit_unread: AtomicBool,
     omit_saved: AtomicBool,
@@ -210,6 +211,7 @@ impl Fixture {
             since_id_fail_at: Mutex::new(None),
             since_id_calls: AtomicUsize::new(0),
             omit_items: AtomicBool::new(false),
+            omit_item_state_fields: AtomicBool::new(false),
             omit_unread: AtomicBool::new(false),
             omit_saved: AtomicBool::new(false),
             omit_feeds: AtomicBool::new(false),
@@ -293,6 +295,10 @@ impl Fixture {
 
     fn set_omit_items(&self, v: bool) {
         self.omit_items.store(v, Ordering::SeqCst);
+    }
+
+    fn set_omit_item_state_fields(&self, v: bool) {
+        self.omit_item_state_fields.store(v, Ordering::SeqCst);
     }
 
     fn set_omit_unread(&self, v: bool) {
@@ -434,7 +440,7 @@ impl Fixture {
         } else {
             format!("<p>{}</p>", e.title)
         };
-        serde_json::json!({
+        let mut item = serde_json::json!({
             "id": id_value,
             "feed_id": self.render_feed_id(e.feed_id),
             "title": e.title,
@@ -444,7 +450,14 @@ impl Fixture {
             "is_saved": if e.saved { 1 } else { 0 },
             "is_read": if e.read { 1 } else { 0 },
             "created_on_time": 1_700_000_000 + (e.id % 1000),
-        })
+        });
+        if self.omit_item_state_fields.load(Ordering::SeqCst) {
+            if let Some(obj) = item.as_object_mut() {
+                obj.remove("is_read");
+                obj.remove("is_saved");
+            }
+        }
+        item
     }
 
     /// 权威未读集合（CSV，十进制字面值）。
@@ -714,8 +727,7 @@ fn route(srv: &Fixture, hit: &Hit) -> (u16, String) {
                 match as_.as_str() {
                     "read" => e.read = true,
                     "unread" => e.read = false,
-                    // 星标语义按服务端变体：FreshRSS 绝对赋值；Miniflux 对
-                    // saved/unsaved 都取反（ToggleStarred）。
+                    // 星标语义由夹具显式配置：Absolute 按目标赋值，Toggle 取反。
                     "saved" | "unsaved" => match srv.star_mark {
                         StarMark::Absolute => e.saved = as_ == "saved",
                         StarMark::Toggle => e.saved = !e.saved,
@@ -2222,17 +2234,14 @@ async fn mark_sends_one_decimal_id_per_request() {
     assert!(srv.entry_read(5705) && srv.entry_read(LONG_ID));
 }
 
-/// Miniflux 星标语义（2026-10-31 审计对齐）：mark=item&as=saved/unsaved 都是对
-/// 当前状态的取反切换（internal/fever/handler.go:443-467 → storage.ToggleStarred）。
-/// 从未收藏 → 单次 as=saved 推送天然收敛（「从未收藏→收藏单次推送」用例在两种
-/// 变体下都绿）；「远端已收藏再推 as=saved」会翻转成未收藏——产品当前的绝对赋值
-/// 假设与该语义冲突（星标判向 = B1 修复项），翻转场景由阶段 B 配对红门禁锁定，
-/// 本用例锁「单次推送收敛 + 夹具真实语义判别」。
+/// Toggle 夹具的 saved/unsaved 都取反；从未收藏发送一次 saved 仍可收敛。
+/// 本例同时锁定产品读前探测和夹具重复 saved 会翻转的区别，不将 api_version 3
+/// 当作 toggle 声明。已核对的固定 Miniflux faecfa2 使用条件绝对赋值。
 #[tokio::test]
-async fn miniflux_star_mark_toggles_current_state() {
+async fn toggle_fixture_star_mark_toggles_current_state() {
     let srv = Fixture::start_with(FixtureOptions {
         star_mark: StarMark::Toggle,
-        // B1：变体判定走 api_version（3 = Miniflux 家族 → toggle 语义 + 探测）。
+        // 版本 3 触发产品保守探测；toggle 语义由 star_mark 独立指定。
         api_version: Some(3),
         ..Default::default()
     })
@@ -2261,23 +2270,23 @@ async fn miniflux_star_mark_toggles_current_state() {
         "从未收藏 → as=saved 单次推送必须收敛为收藏（toggle 下同样成立）"
     );
 
-    // 夹具语义判别（真实 Miniflux 行为，不经产品 push）：已收藏条目再收到一次
+    // Toggle 夹具语义判别（不经产品 push）：已收藏条目再收到一次
     // as=saved（重复推送/丢失响应后的重试形态）会翻转为未收藏。
     let client = FeverClient::new(&srv.url(), USER, PASS, http()).at_resolved(&srv.api_root());
     client.mark_starred(&[7]).await.expect("mark 调用成功");
     assert!(
         !srv.entry_saved(7),
-        "Miniflux 变体：已收藏条目再收 as=saved 必须翻转（ToggleStarred）"
+        "Toggle 夹具：已收藏条目再收 as=saved 必须翻转"
     );
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// B1 红门禁（Miniflux toggle 星标修复，a）：推送响应丢失（服务端已应用、客户端
+/// Toggle 兼容回归（a）：推送响应丢失（服务端已应用、客户端
 /// 见 500）→ 队列保留 → 下轮重发**不得再发 mark**（探测发现已处目标态）——远端
 /// 终态必须收敛到用户意图。修前实现无条件重发 as=saved → toggle 把星标翻回
 /// 未收藏（判别力：第二轮后的 mark 请求计数与服务端终态双断言）。
 #[tokio::test]
-async fn miniflux_star_push_response_lost_resend_converges_without_flip() {
+async fn toggle_fixture_star_push_response_lost_resend_converges_without_flip() {
     let srv = Fixture::start_with(FixtureOptions {
         star_mark: StarMark::Toggle,
         api_version: Some(3),
@@ -2336,11 +2345,11 @@ async fn miniflux_star_push_response_lost_resend_converges_without_flip() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// B1 红门禁（Miniflux toggle 星标修复，b）：另一设备已把条目改到目标态时，
+/// Toggle 兼容回归（b）：另一设备已把条目改到目标态时，
 /// 本地 stale 队列项不得把它翻反——探测发现当前态==目标态 → 不发 mark、队列按
 /// 「已收敛」确认。unstar 方向同理锁定。
 #[tokio::test]
-async fn miniflux_stale_star_queue_item_does_not_flip_server_state() {
+async fn toggle_fixture_stale_star_queue_item_does_not_flip_server_state() {
     let srv = Fixture::start_with(FixtureOptions {
         star_mark: StarMark::Toggle,
         api_version: Some(3),
@@ -3726,6 +3735,245 @@ async fn fever_push_confirmed_read_then_next_round_explicit_unread_revives() {
             "远端合并不递增版本（版本只记录本地意图）"
         );
         assert_eq!(queued_read_count(&conn), 0, "远端 unread 不产生推送队项");
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/* ============================================================
+ACK 写回确认（2026-11-03）：Fever mark=item 的宽松 200 不得直接出队
+============================================================ */
+
+fn seed_ack_article(conn: &rusqlite::Connection, remote_id: i64) -> i64 {
+    conn.execute(
+        "INSERT OR IGNORE INTO feeds (feed_url, title)
+         VALUES ('https://fever-ack.example/rss', 'ACK')",
+        [],
+    )
+    .unwrap();
+    let feed_id: i64 = conn
+        .query_row(
+            "SELECT id FROM feeds WHERE feed_url = 'https://fever-ack.example/rss'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO articles (feed_id, guid, title, url)
+         VALUES (?1, ?2, 'ACK', ?3)",
+        rusqlite::params![
+            feed_id,
+            format!("fever-ack-{remote_id}"),
+            format!("https://fever-ack.example/{remote_id}")
+        ],
+    )
+    .unwrap();
+    let aid = conn.last_insert_rowid();
+    db::set_article_remote_id(conn, aid, remote_id).unwrap();
+    aid
+}
+
+fn sole_queue_class(conn: &rusqlite::Connection) -> (String, Option<String>) {
+    conn.query_row(
+        "SELECT status, last_error_class FROM sync_queue ORDER BY id LIMIT 1",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn fever_normal_read_is_confirmed_by_with_ids_before_prune() {
+    let srv = Fixture::start().await;
+    srv.add_entry(8101, 1, "normal", false, false);
+    let (db, tmp) = seed_db("fever_ack_normal", &srv);
+    {
+        let conn = db.lock().await;
+        let aid = seed_ack_article(&conn, 8101);
+        db::set_read_with_enqueue(&conn, aid, true).unwrap();
+    }
+
+    sync::push_states_now(&db, &http()).await;
+
+    {
+        let conn = db.lock().await;
+        assert!(db::take_sync_queue(&conn).unwrap().is_empty());
+    }
+    assert!(srv
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.id == 8101 && entry.read));
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn fever_unknown_target_with_auth1_ack_stays_retry_wait_inconclusive() {
+    let srv = Fixture::start().await;
+    let (db, tmp) = seed_db("fever_ack_missing", &srv);
+    {
+        let conn = db.lock().await;
+        let aid = seed_ack_article(&conn, 8999);
+        db::set_read_with_enqueue(&conn, aid, true).unwrap();
+    }
+
+    sync::push_states_now(&db, &http()).await;
+
+    let conn = db.lock().await;
+    let queued = db::take_sync_queue(&conn).unwrap();
+    assert_eq!(queued.len(), 1, "未知 target 不得因 auth=1 出队");
+    assert_eq!(queued[0].status, db::STATUS_RETRY_WAIT);
+    let (status, class) = sole_queue_class(&conn);
+    assert_eq!(status, "retry_wait");
+    assert_eq!(class.as_deref(), Some("verification"));
+    let last_error: String = conn
+        .query_row(
+            "SELECT last_error FROM sync_queue ORDER BY id LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        last_error.contains("inconclusive"),
+        "空 with_ids 响应必须报告 inconclusive：{last_error:?}"
+    );
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn fever_ack_with_readback_failure_stays_retry_wait() {
+    let srv = Fixture::start().await;
+    srv.add_entry(8201, 1, "readback", false, false);
+    srv.set_omit_items(true);
+    let (db, tmp) = seed_db("fever_ack_readback_fail", &srv);
+    {
+        let conn = db.lock().await;
+        let aid = seed_ack_article(&conn, 8201);
+        db::set_read_with_enqueue(&conn, aid, true).unwrap();
+    }
+
+    sync::push_states_now(&db, &http()).await;
+
+    let conn = db.lock().await;
+    let queued = db::take_sync_queue(&conn).unwrap();
+    assert_eq!(queued.len(), 1, "读回失败不得出队");
+    assert_eq!(queued[0].status, db::STATUS_RETRY_WAIT);
+    assert_eq!(
+        sole_queue_class(&conn),
+        ("retry_wait".into(), Some("verification".into()))
+    );
+    drop(conn);
+    assert!(srv
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.id == 8201 && entry.read));
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn fever_short_readback_keeps_the_missing_row_in_retry_wait() {
+    let srv = Fixture::start().await;
+    srv.add_entry(8301, 1, "present", false, false);
+    let (db, tmp) = seed_db("fever_ack_partial", &srv);
+    let (present_aid, missing_aid) = {
+        let conn = db.lock().await;
+        let present_aid = seed_ack_article(&conn, 8301);
+        db::set_read_with_enqueue(&conn, present_aid, true).unwrap();
+        let missing_aid = seed_ack_article(&conn, 8998);
+        db::set_read_with_enqueue(&conn, missing_aid, true).unwrap();
+        (present_aid, missing_aid)
+    };
+
+    sync::push_states_now(&db, &http()).await;
+
+    let conn = db.lock().await;
+    let queued = db::take_sync_queue(&conn).unwrap();
+    assert_eq!(queued.len(), 1, "只保留缺失目标的队项");
+    assert_eq!(queued[0].article_id, Some(missing_aid));
+    assert_ne!(queued[0].article_id, Some(present_aid));
+    assert_eq!(queued[0].status, db::STATUS_RETRY_WAIT);
+    assert_eq!(
+        sole_queue_class(&conn),
+        ("retry_wait".into(), Some("verification".into()))
+    );
+    drop(conn);
+    assert!(srv
+        .entries
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.id == 8301 && entry.read));
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[tokio::test]
+async fn fever_star_probe_missing_is_saved_does_not_send_mark() {
+    let srv = Fixture::start_with(FixtureOptions {
+        api_version: Some(3),
+        ..Default::default()
+    })
+    .await;
+    srv.add_entry(8401, 1, "star probe", false, false);
+    srv.set_omit_item_state_fields(true);
+    let client = FeverClient::new(&srv.url(), USER, PASS, http()).at_resolved(&srv.api_root());
+
+    let err = client
+        .push_star_state(8401, true)
+        .await
+        .expect_err("缺少 is_saved 时不得盲发 mark");
+    assert_eq!(err.code, "verification");
+    assert!(
+        err.message.contains("is_saved"),
+        "错误应指出缺少 is_saved：{}",
+        err.message
+    );
+    let marks: Vec<Hit> = srv
+        .hits()
+        .into_iter()
+        .filter(|h| h.query_param("mark").as_deref() == Some("item"))
+        .collect();
+    assert!(marks.is_empty(), "探测不可确认时不得发送 mark：{marks:?}");
+}
+
+#[tokio::test]
+async fn fever_states_round_sends_mark_item_once_after_verification_failure() {
+    let srv = Fixture::start().await;
+    srv.add_entry(8501, 1, "same round", false, false);
+    srv.set_omit_item_state_fields(true);
+    let (db, tmp) = seed_db("fever_ack_same_round_once", &srv);
+    {
+        let conn = db.lock().await;
+        let aid = seed_ack_article(&conn, 8501);
+        db::set_read_with_enqueue(&conn, aid, true).unwrap();
+    }
+
+    let report = sync::sync_light(&db, &http())
+        .await
+        .expect("same-round sync");
+    assert!(
+        report.errors.iter().any(|e| e.contains("inconclusive")),
+        "缺字段读回必须在 report 中可见：{:?}",
+        report.errors
+    );
+    let marks: Vec<Hit> = srv
+        .hits()
+        .into_iter()
+        .filter(|h| h.query_param("mark").as_deref() == Some("item"))
+        .collect();
+    assert_eq!(
+        marks.len(),
+        1,
+        "同一 states 轮不得对已尝试过的队项重发 mark=item：{marks:?}"
+    );
+    {
+        let conn = db.lock().await;
+        assert_eq!(
+            sole_queue_class(&conn),
+            ("retry_wait".into(), Some("verification".into()))
+        );
     }
     let _ = std::fs::remove_file(&tmp);
 }

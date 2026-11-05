@@ -241,6 +241,18 @@ pub fn find_feed_by_url(conn: &Connection, url: &str) -> AppResult<Option<i64>> 
     Ok(id)
 }
 
+/// 按 feed id 取 URL（定向同步的 selector 解析；不存在返回 None）。
+pub fn feed_url_by_id(conn: &Connection, feed_id: i64) -> AppResult<Option<String>> {
+    let url = conn
+        .query_row(
+            "SELECT feed_url FROM feeds WHERE id = ?1",
+            params![feed_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(url)
+}
+
 /// 新增订阅源。参数即 feeds 表列（URL/站点/标题/分类/布局/AI 开关）——
 /// 结构与表一一对应，收窄成结构体反而隔着一层，接受 9 参。
 #[allow(clippy::too_many_arguments)]
@@ -336,6 +348,32 @@ pub fn insert_feed_origin_modes(
     Ok(conn.last_insert_rowid())
 }
 
+/// 把一次显式用户/配置导入的标题持久化为自定义标题。
+/// 新增源时 `insert_*` 先把传入标题同时写进 title/fetched_title；只有调用方
+/// 能证明这是用户意图（添加表单、OPML、配置导入）时才调用本函数，远端订阅
+/// 发现与 RSS 刷新仍走抓取标题域，不能把服务端标题误标成用户改名。
+/// 空标题与 URL 兜底（导入解析器在缺失标题时用 URL 填充）都不是用户意图；
+/// 即使调用方漏判，本函数也拒绝把它们固化进 title_custom。
+pub fn set_feed_custom_title(conn: &Connection, id: i64, title: &str) -> AppResult<()> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE feeds SET title = ?1, title_custom = ?1
+          WHERE id = ?2 AND ?1 <> feed_url",
+        params![title, id],
+    )?;
+    Ok(())
+}
+
+/// 导入/配置快照的显式标题归一：去空白后非空且不等于源 URL 才是用户意图。
+/// OPML 等解析器会用 URL 作为缺省标题；该兜底不得变成自定义标题。
+pub fn explicit_feed_title<'a>(title: &'a str, feed_url: &str) -> Option<&'a str> {
+    let title = title.trim();
+    (!title.is_empty() && title != feed_url).then_some(title)
+}
+
 pub fn delete_feed(conn: &Connection, id: i64) -> AppResult<()> {
     conn.execute("DELETE FROM feeds WHERE id = ?1", params![id])?;
     Ok(())
@@ -369,33 +407,152 @@ pub fn set_feed_fetch_state(
     Ok(())
 }
 
+/// 带刷新代际的状态写回：只有 `feed_generation` 仍等于本请求开始时的值才写。
+/// 返回 false 表示本轮已被更新的一次抓取取代，调用方必须丢弃整个写回结果
+/// （包括文章），不能把旧 ETag/失败状态覆盖到新轮次上。
+pub fn set_feed_fetch_state_if_generation(
+    conn: &Connection,
+    id: i64,
+    generation: i64,
+    failed: bool,
+    error: Option<&str>,
+    etag: Option<&str>,
+    last_modified: Option<&str>,
+) -> AppResult<bool> {
+    let changed = conn.execute(
+        "UPDATE feeds SET
+            fetch_failed = ?1,
+            fetch_error = ?2,
+            etag = ?3,
+            last_modified = ?4,
+            last_fetched_at = datetime('now'),
+            fail_count = CASE WHEN ?1 THEN fail_count + 1 ELSE 0 END,
+            next_retry_at = CASE
+                WHEN ?1 THEN datetime('now', '+' || (CASE fail_count
+                    WHEN 0 THEN 5 WHEN 1 THEN 5 WHEN 2 THEN 30 ELSE 120 END) || ' minutes')
+                ELSE NULL END
+         WHERE id = ?5 AND fetch_generation = ?6",
+        params![failed as i64, error, etag, last_modified, id, generation],
+    )?;
+    Ok(changed == 1)
+}
+
+/// 开始一轮抓取：锁内自增代际并抓取本轮快照。即使随后的网络请求失败或
+/// 进程被中断，代际也已推进，上一轮迟到结果无法再通过 CAS。
+pub struct FeedRefreshAttempt {
+    pub feed_url: String,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub generation: i64,
+}
+
+pub fn begin_feed_refresh(conn: &Connection, feed_id: i64) -> AppResult<FeedRefreshAttempt> {
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
+        "UPDATE feeds SET fetch_generation = fetch_generation + 1 WHERE id = ?1",
+        params![feed_id],
+    )?;
+    if changed == 0 {
+        return Err(crate::error::AppError::not_found(format!(
+            "feed {feed_id} not found"
+        )));
+    }
+    let attempt = tx.query_row(
+        "SELECT feed_url, etag, last_modified, fetch_generation
+           FROM feeds WHERE id = ?1",
+        params![feed_id],
+        |r| {
+            Ok(FeedRefreshAttempt {
+                feed_url: r.get(0)?,
+                etag: r.get(1)?,
+                last_modified: r.get(2)?,
+                generation: r.get(3)?,
+            })
+        },
+    )?;
+    tx.commit()?;
+    Ok(attempt)
+}
+
 /// 调度器取"到期"的源：超过全局间隔未抓 且 不在退避窗口内。
 /// last_fetched_at 为 NULL（从未抓过）的源立即视为到期。
-/// 到期源 id。`include_remote = false`（跟随服务端同步模式）时跳过
+/// 到期候选带规范化 URL，供跨批次 footprint 去重；rowid 可复用，不能作为键。
+/// `include_remote = false`（跟随服务端同步模式）时跳过
 /// origin='remote' 的源——服务端源的内容由 Miniflux 同步提供，
 /// 直连抓取会与服务端状态产生两份不一致的真相。
-pub fn feeds_due_for_refresh(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedRefreshCandidate {
+    pub id: i64,
+    pub normalized_url: String,
+}
+
+fn collect_refresh_candidates(
+    rows: rusqlite::MappedRows<
+        '_,
+        impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<(i64, String)>,
+    >,
+) -> AppResult<Vec<FeedRefreshCandidate>> {
+    let mut candidates = Vec::new();
+    for row in rows {
+        let (id, feed_url) = row?;
+        candidates.push(FeedRefreshCandidate {
+            id,
+            normalized_url: normalize_url(&feed_url),
+        });
+    }
+    Ok(candidates)
+}
+
+pub fn feeds_due_for_refresh_candidates(
     conn: &Connection,
     interval_min: i64,
     include_remote: bool,
-) -> AppResult<Vec<i64>> {
+) -> AppResult<Vec<FeedRefreshCandidate>> {
     let mut stmt = conn.prepare(
-        "SELECT id FROM feeds
+        "SELECT id, feed_url FROM feeds
          WHERE (last_fetched_at IS NULL
             OR ( (julianday('now') - julianday(last_fetched_at)) * 1440.0 >= ?1
                  AND (next_retry_at IS NULL OR julianday('now') >= julianday(next_retry_at)) ))
            AND (?2 OR origin != 'remote')",
     )?;
-    let rows = stmt.query_map(params![interval_min, include_remote], |r| r.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    let rows = stmt.query_map(params![interval_min, include_remote], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })?;
+    collect_refresh_candidates(rows)
 }
 
-/// 全部源 id（托盘「刷新全部订阅」与手动全刷入口，忽略到期与退避）。
-/// 手动入口始终包含 Miniflux 源（用户显式动作 = 要全部内容）。
+pub fn feeds_due_for_refresh(
+    conn: &Connection,
+    interval_min: i64,
+    include_remote: bool,
+) -> AppResult<Vec<i64>> {
+    Ok(
+        feeds_due_for_refresh_candidates(conn, interval_min, include_remote)?
+            .into_iter()
+            .map(|candidate| candidate.id)
+            .collect(),
+    )
+}
+
+/// 全量抓取候选 id（忽略到期与退避）。
+/// `include_remote=false` 是 hybrid/跟随服务端的「刷新本地订阅源」语义：
+/// 排除 origin='remote'，保留 local 及其它非 remote 来源；direct/本机抓取
+/// 才传入 true 抓全部来源。
+pub fn feeds_all_candidates(
+    conn: &Connection,
+    include_remote: bool,
+) -> AppResult<Vec<FeedRefreshCandidate>> {
+    let mut stmt =
+        conn.prepare("SELECT id, feed_url FROM feeds WHERE (?1 OR origin != 'remote')")?;
+    let rows = stmt.query_map(params![include_remote], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    collect_refresh_candidates(rows)
+}
+
 pub fn feeds_all_ids(conn: &Connection, include_remote: bool) -> AppResult<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT id FROM feeds WHERE (?1 OR origin != 'remote')")?;
-    let rows = stmt.query_map(params![include_remote], |r| r.get(0))?;
-    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    Ok(feeds_all_candidates(conn, include_remote)?
+        .into_iter()
+        .map(|candidate| candidate.id)
+        .collect())
 }
 
 pub fn set_feed_title_and_icon(
@@ -407,10 +564,30 @@ pub fn set_feed_title_and_icon(
 ) -> AppResult<()> {
     let title = title.filter(|t| !t.trim().is_empty());
     let favicon = favicon.filter(|f| !f.trim().is_empty());
-    // 只覆盖非空值：用户手动重命名的标题不被下一次抓取冲掉
+    // 抓取只更新 fetched_title；显示名 title 在有 title_custom 时保持用户值，
+    // 否则跟随新的抓取标题。title_custom=NULL 只存在于 v34 前的旧行：首次刷新
+    // 若标题变化，就把旧 title 固化自定义（保护无法反推的历史改名）；标题未变
+    // 则收敛为空串，后续照常跟随源站。
+    // Note: 抓取标题/用户标题分域的旧库保守迁移 — 见 .agents/notes/implemented/architecture/2026-11-04-刷新编排与源名分域.md
     conn.execute(
         "UPDATE feeds SET
-            title = COALESCE(?1, title),
+            fetched_title = COALESCE(?1, fetched_title),
+            title_custom = CASE
+                WHEN NULLIF(trim(COALESCE(title_custom, '')), '') IS NOT NULL
+                    THEN title_custom
+                WHEN title_custom IS NULL AND ?1 IS NOT NULL AND ?1 <> title AND title <> feed_url
+                    THEN title
+                WHEN title_custom IS NULL
+                    THEN ''
+                ELSE title_custom
+            END,
+            title = CASE
+                WHEN NULLIF(trim(COALESCE(title_custom, '')), '') IS NOT NULL
+                    THEN title_custom
+                WHEN title_custom IS NULL AND ?1 IS NOT NULL AND ?1 <> title AND title <> feed_url
+                    THEN title
+                ELSE COALESCE(?1, NULLIF(fetched_title, ''), title)
+            END,
             favicon_url = COALESCE(?2, favicon_url),
             site_url = COALESCE(?3, site_url)
          WHERE id = ?4",
@@ -474,6 +651,7 @@ pub fn update_feed_full(
     conn.execute(
         "UPDATE feeds SET
             title = COALESCE(?1, title),
+            title_custom = COALESCE(?1, title_custom),
             folder_id = COALESCE(?2, folder_id),
             layout = COALESCE(?3, layout),
             summary_mode = COALESCE(?4, summary_mode),
@@ -1024,5 +1202,57 @@ mod ai_mode_tests {
         let err = FeedAiMode::parse("maybe").unwrap_err();
         assert_eq!(err.code, "validate");
         assert!(err.message.contains("maybe"), "错误必须指出非法值: {err}");
+    }
+}
+
+#[cfg(test)]
+mod title_domain_tests {
+    use super::*;
+
+    fn conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        super::super::MIGRATIONS.to_latest(&mut conn).unwrap();
+        super::super::create_folder(&conn, "分类", "article").unwrap();
+        conn
+    }
+
+    #[test]
+    fn empty_and_url_fallback_titles_are_not_custom() {
+        let conn = conn();
+        let id = insert_feed(
+            &conn,
+            "https://fallback.example/rss",
+            None,
+            "初始标题",
+            None,
+            1,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+
+        set_feed_custom_title(&conn, id, "   ").unwrap();
+        set_feed_custom_title(&conn, id, "https://fallback.example/rss").unwrap();
+        let (title, custom): (String, Option<String>) = conn
+            .query_row(
+                "SELECT title, title_custom FROM feeds WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "初始标题");
+        assert_eq!(custom.as_deref(), Some(""));
+
+        set_feed_custom_title(&conn, id, " 用户改名 ").unwrap();
+        let (title, custom): (String, Option<String>) = conn
+            .query_row(
+                "SELECT title, title_custom FROM feeds WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "用户改名");
+        assert_eq!(custom.as_deref(), Some("用户改名"));
     }
 }

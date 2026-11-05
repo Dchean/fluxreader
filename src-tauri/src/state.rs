@@ -18,15 +18,19 @@ pub struct AppState {
     pub media: MediaHandle,
     /// 进行中的 GitHub 设备流登录（发起 → 轮询完成期间持有；一次性短命态不落库）
     pub github_flow: SharedDeviceFlow,
+    pub sync_runtime: Arc<crate::sync::runtime::SyncRuntime>,
 }
 
 impl AppState {
     pub fn new(db: Connection, http: Client, media: MediaHandle) -> Self {
+        let db = Arc::new(Mutex::new(db));
+        let sync_runtime = crate::sync::runtime::for_db(&db);
         Self {
-            db: Arc::new(Mutex::new(db)),
+            db,
             http,
             media,
-            github_flow: Arc::new(Mutex::new(None)),
+            github_flow: Arc::new(Mutex::new(Default::default())),
+            sync_runtime,
         }
     }
 }

@@ -67,6 +67,19 @@ pub struct SyncReport {
 }
 
 impl SyncReport {
+    pub fn absorb(&mut self, other: Self) {
+        self.pushed_states += other.pushed_states;
+        self.pushed_feeds += other.pushed_feeds;
+        self.pulled_feeds += other.pulled_feeds;
+        self.pulled_entries += other.pulled_entries;
+        self.merged_states += other.merged_states;
+        self.removed_feeds += other.removed_feeds;
+        self.entries_data_changed |= other.entries_data_changed;
+        self.binding_incomplete |= other.binding_incomplete;
+        self.auth_failure |= other.auth_failure;
+        self.errors.extend(other.errors);
+    }
+
     /// 客户端错误进报告前的标记登记：错误文案仍由调用方照旧拼接进 `errors`
     /// （IPC 面逐字不变），仅当错误携带认证失败标记（`AppError::auth` /
     /// `auth_if`）时置位 `auth_failure`。各 HTTP 捕获点在 push 进 errors 前调用；
@@ -204,6 +217,7 @@ mod fever_pull;
 mod greader_pull;
 mod phases;
 mod push;
+pub mod runtime;
 mod session;
 mod subscriptions;
 

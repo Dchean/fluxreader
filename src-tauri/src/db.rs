@@ -1,7 +1,7 @@
 //! SQLite 数据层：schema + 迁移 + 类型化数据访问。
 //!
 //! 实现按领域拆分在 db/ 子模块（migrations / folders / feeds / articles /
-//! contents / url_norm / settings / sync_queue / sync_map / outbox）；本文件
+//! contents / identity / url_norm / settings / sync_queue / sync_map / outbox）；本文件
 //! 只保留共享 import、子模块声明与再导出，使 crate::db:: 的既有调用路径保持不变。
 //! 迁移为追加式：已发布的迁移不可修改，只能新增 M::up。
 
@@ -25,9 +25,11 @@ fn null_if_empty(v: Option<String>) -> Option<String> {
 
 mod ai_segments;
 mod articles;
+mod backup;
 mod contents;
 mod feeds;
 mod folders;
+mod identity;
 mod migrations;
 mod outbox;
 mod settings;
@@ -47,32 +49,43 @@ pub use articles::{
     remote_ids_with_body, replace_article_content_checked, scope_counts, search_articles,
     set_article_ai_fields, set_article_ai_fields_checked, set_read, set_read_bulk_with_enqueue,
     set_read_with_enqueue, set_starred, set_starred_with_enqueue, upsert_article_with_feed,
-    upsert_article_with_feed_tracked, upsert_remote_article, AiCommitToken, AiProduct,
-    ArticleListItem, ArticleQuery, ArticleRow, ArticleUpsert, ContentCommitToken, CountsSnapshot,
-    FeedCounts, NewArticle, ReadWriteReceipt, ScopeCounts, ScopeCountsDetail, ScopedCounts,
+    upsert_article_with_feed_source, upsert_article_with_feed_tracked, upsert_remote_article,
+    AiCommitToken, AiProduct, ArticleListItem, ArticleQuery, ArticleRow, ArticleUpsert,
+    ContentCommitToken, CountsSnapshot, FeedCounts, NewArticle, ReadWriteReceipt, ScopeCounts,
+    ScopeCountsDetail, ScopedCounts,
 };
+pub use backup::{
+    backup_dir_for_db, create_manual_backup, database_path, user_version, BackupInfo,
+    BACKUP_RETENTION,
+};
+pub(crate) use backup::{create_mirror_backup, sanitize_log_text, take_startup_backup_warning};
 /// OPT-008B 第二阶段：contents 单一正文所有权（常量/判空辅助供 db 各子模块与
 /// 命令层经 `crate::db::` 路径消费；写入路径经 `super::contents::` 直接调用）。
 pub use contents::{content_non_empty, SOURCE_READABILITY, SOURCE_RSS};
 pub use feeds::{
-    add_feed_tombstone, binding_incomplete, binding_incomplete_key, clear_binding_incomplete,
-    clear_binding_incomplete_attempts, clear_feed_tombstones,
-    clear_zero_binding_discovery_attempts, delete_feed, feed_folder_label, feed_remote_info,
-    feed_tombstones, feed_url_tombstoned, feeds_all_ids, feeds_due_for_refresh, find_feed_by_url,
+    add_feed_tombstone, begin_feed_refresh, binding_incomplete, binding_incomplete_key,
+    clear_binding_incomplete, clear_binding_incomplete_attempts, clear_feed_tombstones,
+    clear_zero_binding_discovery_attempts, delete_feed, explicit_feed_title, feed_folder_label,
+    feed_remote_info, feed_tombstones, feed_url_by_id, feed_url_tombstoned, feeds_all_candidates,
+    feeds_all_ids, feeds_due_for_refresh, feeds_due_for_refresh_candidates, find_feed_by_url,
     has_remote_feed_binding, insert_feed, insert_feed_origin, insert_feed_origin_modes,
     legacy_feed_tombstones, list_feeds, mark_binding_incomplete,
     mark_zero_binding_discovery_attempt, prune_feed_tombstones, remote_feed_binding_count,
-    remove_feed_tombstone, set_feed_ai_flags, set_feed_ai_modes, set_feed_fetch_state,
-    set_feed_title_and_icon, unbound_remote_feeds, update_feed, update_feed_full,
-    update_feed_layout, zero_binding_discovery_due, zero_binding_discovery_key, FeedAiMode,
-    FeedRow, BINDING_INCOMPLETE_KEY_PREFIX, ZERO_BINDING_DISCOVERY_INTERVAL_SECS,
-    ZERO_BINDING_DISCOVERY_KEY_PREFIX,
+    remove_feed_tombstone, set_feed_ai_flags, set_feed_ai_modes, set_feed_custom_title,
+    set_feed_fetch_state, set_feed_fetch_state_if_generation, set_feed_title_and_icon,
+    unbound_remote_feeds, update_feed, update_feed_full, update_feed_layout,
+    zero_binding_discovery_due, zero_binding_discovery_key, FeedAiMode, FeedRefreshAttempt,
+    FeedRefreshCandidate, FeedRow, BINDING_INCOMPLETE_KEY_PREFIX,
+    ZERO_BINDING_DISCOVERY_INTERVAL_SECS, ZERO_BINDING_DISCOVERY_KEY_PREFIX,
 };
 pub use folders::{
     add_folder_tombstone, create_folder, create_folder_with_sync_id, delete_folder, folder_members,
     folder_name, folder_tombstones, folder_tombstones_for, list_folders, prune_folder_tombstones,
     rename_folder, set_folder_ai_flags, set_folder_ai_flags_partial, set_folder_collapsed,
     set_folder_sync_id, update_folder_layout, FolderRow, FolderTombstone,
+};
+pub(crate) use identity::{
+    content_identity_guid, is_synthetic_guid, title_date_identity_guid, url_identity_guid,
 };
 pub use migrations::open;
 #[cfg(test)]
@@ -86,10 +99,10 @@ pub use outbox::{
     enqueue_subscribe, enqueue_unsubscribe, mark_outbox_failed, mark_outbox_local_only,
     mark_outbox_session_blocked, outbox_has_pending, outbox_pending_by_id, outbox_pending_for_url,
     pending_outbox, prune_outbox, rebase_successor_edit_prev, rebind_outbox_generation,
-    subscription_outbox_changed_payload, subscription_outbox_stats,
-    update_pending_subscribe_desired, SubscriptionOutboxItem, SubscriptionOutboxStats, ACTION_EDIT,
-    ACTION_SUBSCRIBE, ACTION_UNSUBSCRIBE, STAGE_PENDING, STAGE_REMOTE_CREATED, STATUS_LOCAL_ONLY,
-    STATUS_PENDING,
+    rebind_outbox_generation_for_ids, subscription_outbox_changed_payload,
+    subscription_outbox_stats, update_pending_subscribe_desired, SubscriptionOutboxItem,
+    SubscriptionOutboxStats, ACTION_EDIT, ACTION_SUBSCRIBE, ACTION_UNSUBSCRIBE, STAGE_PENDING,
+    STAGE_REMOTE_CREATED, STATUS_LOCAL_ONLY, STATUS_PENDING,
 };
 pub use settings::{app_settings_bool, app_settings_str, get_setting, set_setting};
 /* OPT-014 R1：账号提交事务内核/可注入写入——crate 内部（命令层）使用，
@@ -115,9 +128,32 @@ pub use sync_map::{
     update_article_image_if_empty, update_feed_title_if_empty, FeverHistoryState, SyncMatchMaps,
 };
 pub use sync_queue::{
-    enqueue_sync, mark_push_blocked, mark_push_failed, prune_stale_unbound, prune_sync,
-    purge_remove_feed_zombies, queue_changed_payload, sync_queue_stats, take_sync_queue,
-    SyncQueueItem, SyncQueueStats,
+    article_queue_identity,
+    enqueue_sync,
+    mark_push_blocked,
+    mark_push_failed,
+    mark_push_verification_failed,
+    mark_queue_bound_pending,
+    mark_queue_identity_waiting,
+    mark_queue_target_missing,
+    prune_stale_unbound,
+    prune_sync,
+    purge_remove_feed_zombies,
+    queue_changed_payload,
+    retry_expired_intents,
+    retry_target_missing,
+    sync_queue_stats,
+    take_sync_queue,
+    ExpiredRetryResult,
+    SyncQueueItem,
+    SyncQueueStats,
+    STATUS_BINDABLE_RETRY,
+    STATUS_BOUND_PENDING,
+    // Note: outbox 已有同名 STATUS_LOCAL_ONLY；必须保留别名，否则 E0252。
+    STATUS_EXPIRED_UNCONFIRMED,
+    STATUS_FAILED,
+    STATUS_LOCAL_ONLY as SYNC_QUEUE_STATUS_LOCAL_ONLY,
+    STATUS_RETRY_WAIT,
 };
 pub use url_norm::normalize_url;
 /* OPT-008A R1：旧算法规范化快照——只供 db/feeds.rs 的 legacy 退订墓碑匹配/回收，

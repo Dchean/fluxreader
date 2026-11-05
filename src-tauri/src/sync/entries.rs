@@ -38,13 +38,13 @@ fn item_content_html(e: &ItemContent) -> String {
 }
 
 /// 从 ItemContent 提取发布时间（unix 秒 → RFC3339）。
-fn item_published_at(e: &ItemContent) -> String {
+/// `None` 表示协议没有提供可用日期；由 DB 写 first_seen_at 兜底并标
+/// `inferred_fetch`，不得在这里用当前时间冒充源发布时间。
+fn item_published_at(e: &ItemContent) -> Option<String> {
     if e.published > 0 {
-        DateTime::from_timestamp(e.published, 0)
-            .map(|d| d.with_timezone(&Utc).to_rfc3339())
-            .unwrap_or_else(|| Utc::now().to_rfc3339())
+        DateTime::from_timestamp(e.published, 0).map(|d| d.with_timezone(&Utc).to_rfc3339())
     } else {
-        Utc::now().to_rfc3339()
+        None
     }
 }
 
@@ -100,32 +100,37 @@ fn merge_remote_status(
     // 避免时序偏差（重复页/同页回响）。
     maps.id_to_mf_id.insert(aid, Some(eid));
     maps.mf_id_to_article.insert(eid, aid);
-    let remote_read = greader::has_tag(&e.categories, "/com.google/read");
-    let remote_starred = greader::has_tag(&e.categories, "/com.google/starred");
+    let remote_read = e.read_state();
+    let remote_starred = e.starred_state();
     let local_bound = db::article_by_remote_id(conn, eid)?.is_some();
-    if remote_read || (accept_unread && local_bound) {
+    let apply_read = remote_read == greader::RemoteState::True
+        || (remote_read == greader::RemoteState::False && accept_unread && local_bound);
+    let apply_star = remote_starred != greader::RemoteState::Missing;
+    if apply_read || apply_star {
         // OPT-007：逐字段过版本守卫（pull 起点快照 + 当前 DB 版本 + 该字段
         // pending）。任一方被本地新写入/未推送意图压住时只跳过该字段，另一
         // 字段不受牵连；两侧都过才把整条计入 pulled_entries（与旧口径「状态
         // 已接受」对齐）。merge_remote_status 只在 merge_pulled_entry 的 own
         // 分支调用（同库测试锁定时序），入参 maps 与写入同处一个 DB 临界区。
         let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
-        let read_ok = conflict_policy::field_accepts_remote(
-            conn,
-            aid,
-            conflict_policy::SyncField::Read,
-            snap_read,
-            maps.pending_read_ids.contains(&aid),
-        )?;
-        let star_ok = conflict_policy::field_accepts_remote(
-            conn,
-            aid,
-            conflict_policy::SyncField::Star,
-            snap_star,
-            maps.pending_star_ids.contains(&aid),
-        )?;
+        let read_ok = apply_read
+            && conflict_policy::field_accepts_remote(
+                conn,
+                aid,
+                conflict_policy::SyncField::Read,
+                snap_read,
+                maps.pending_read_ids.contains(&aid),
+            )?;
+        let star_ok = apply_star
+            && conflict_policy::field_accepts_remote(
+                conn,
+                aid,
+                conflict_policy::SyncField::Star,
+                snap_star,
+                maps.pending_star_ids.contains(&aid),
+            )?;
         if read_ok {
-            if remote_read {
+            if remote_read == greader::RemoteState::True {
                 let rows = db::sync_mark_read_if_unread_at_version(conn, aid, snap_read)?;
                 if rows > 0 {
                     report.entries_data_changed = true;
@@ -140,7 +145,7 @@ fn merge_remote_status(
             }
         }
         if star_ok {
-            let rows = if remote_starred {
+            let rows = if remote_starred == greader::RemoteState::True {
                 db::sync_mark_starred_if_unstarred_at_version(conn, aid, snap_star)?
             } else {
                 db::sync_mark_unstarred_if_starred_at_version(conn, aid, snap_star)?
@@ -232,7 +237,7 @@ pub(super) fn merge_pulled_entry(
 ) -> AppResult<()> {
     let eid = item_numeric_id(e);
     let feed_remote = item_feed_id(e);
-    let remote_read = greader::has_tag(&e.categories, "/com.google/read");
+    let remote_read = e.read_state();
     // B2（空 link 身份）：normalize_url 把空串归一为 ''，而 '' 是合法匹配键——
     // 同轮多条空 link 条目会经 feed_url_to_id[""] 互相借位绑定。与入库路径
     // （normalized_url_key）同口径：空/纯空白 link 无身份语义，匹配键为 None。
@@ -299,7 +304,7 @@ pub(super) fn merge_pulled_entry(
             if let Some(eid) = eid {
                 db::add_article_dup_entry(conn, aid, eid)?;
             }
-            if remote_read {
+            if remote_read == greader::RemoteState::True {
                 mark_read_guarded(conn, aid, maps, report)?;
             }
         }
@@ -314,11 +319,11 @@ fn merge_own_entry(
     e: &ItemContent,
     maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
-    remote_read: bool,
+    remote_read: greader::RemoteState,
     norm: Option<&str>,
 ) -> AppResult<()> {
     merge_remote_status(conn, aid, e, maps, report, true)?;
-    if remote_read {
+    if remote_read == greader::RemoteState::True {
         if let Some(norm) = norm {
             broadcast_read_to_siblings(conn, aid, norm, maps, report)?;
         }
@@ -373,8 +378,8 @@ fn upsert_remote_entry(
         None => (None, None),
     };
 
-    let remote_read = greader::has_tag(&e.categories, "/com.google/read");
-    let remote_starred = greader::has_tag(&e.categories, "/com.google/starred");
+    let remote_read = e.read_state();
+    let remote_starred = e.starred_state();
 
     let a = NewArticle {
         guid: item_numeric_id(e)
@@ -393,7 +398,7 @@ fn upsert_remote_entry(
         enclosure_url: enc_url,
         enclosure_mime: enc_mime,
         duration_sec: None,
-        published_at: Some(published),
+        published_at: published,
         source: "miniflux".into(),
     };
     // TASK-056 语义保留（失败必须可见），R2 升级形态：整条链路 Result 化——
@@ -450,9 +455,14 @@ fn upsert_remote_entry(
         // 兄弟广播 / 既有本地已读）→ 新副本按读落定——否则「先建读行再建未读行」
         // 与「先建未读行再广播」两种同轮顺序会给出不同结果（本页顺序不得决定
         // 状态）。对照：同组无任何已读信号时，own unread 照常生效。
-        let effective_read =
-            remote_read || (!remote_read && group_has_read_this_round(maps, aid, norm.as_deref()));
-        db::sync_set_article_status(conn, aid, effective_read, remote_starred)?;
+        let group_read = group_has_read_this_round(maps, aid, norm.as_deref());
+        let effective_read = remote_read == greader::RemoteState::True || group_read;
+        if effective_read {
+            db::sync_set_read_at_version(conn, aid, true, 0)?;
+        }
+        if remote_starred == greader::RemoteState::True {
+            db::sync_set_star_at_version(conn, aid, true, 0)?;
+        }
         report.pulled_entries += 1;
         if effective_read {
             maps.explicit_read_ids.insert(aid);
@@ -465,22 +475,26 @@ fn upsert_remote_entry(
         // R3/R4：状态写用值条件原语，命中行数当场进标记（守卫通过但值未变仍按
         // 旧口径计入 pulled_entries，保持统计兼容；写 Err 不置位——失败不是变化）。
         let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
-        let read_ok = conflict_policy::field_accepts_remote(
-            conn,
-            aid,
-            conflict_policy::SyncField::Read,
-            snap_read,
-            maps.pending_read_ids.contains(&aid),
-        )?;
-        let star_ok = conflict_policy::field_accepts_remote(
-            conn,
-            aid,
-            conflict_policy::SyncField::Star,
-            snap_star,
-            maps.pending_star_ids.contains(&aid),
-        )?;
+        let apply_read = remote_read != greader::RemoteState::Missing;
+        let apply_star = remote_starred != greader::RemoteState::Missing;
+        let read_ok = apply_read
+            && conflict_policy::field_accepts_remote(
+                conn,
+                aid,
+                conflict_policy::SyncField::Read,
+                snap_read,
+                maps.pending_read_ids.contains(&aid),
+            )?;
+        let star_ok = apply_star
+            && conflict_policy::field_accepts_remote(
+                conn,
+                aid,
+                conflict_policy::SyncField::Star,
+                snap_star,
+                maps.pending_star_ids.contains(&aid),
+            )?;
         if read_ok {
-            if remote_read {
+            if remote_read == greader::RemoteState::True {
                 let rows = db::sync_mark_read_if_unread_at_version(conn, aid, snap_read)?;
                 if rows > 0 {
                     report.entries_data_changed = true;
@@ -495,7 +509,7 @@ fn upsert_remote_entry(
             }
         }
         if star_ok {
-            let rows = if remote_starred {
+            let rows = if remote_starred == greader::RemoteState::True {
                 db::sync_mark_starred_if_unstarred_at_version(conn, aid, snap_star)?
             } else {
                 db::sync_mark_unstarred_if_starred_at_version(conn, aid, snap_star)?
@@ -510,7 +524,7 @@ fn upsert_remote_entry(
     }
     // 已读广播：本条远端已读 → 同文兄弟条目一并标读（读到哪算读）。放在新行/
     // 既有行两分支之后统一执行——新行入库同样要广播（本轮先处理的行）。
-    if remote_read {
+    if remote_read == greader::RemoteState::True {
         if let Some(norm) = norm.as_deref() {
             broadcast_read_to_siblings(conn, aid, norm, maps, report)?;
         }
@@ -560,4 +574,129 @@ fn backfill_entry_content(conn: &Connection, aid: i64, e: &ItemContent) -> AppRe
         enc_url.as_deref(),
         enc_mime.as_deref(),
     )
+}
+
+#[cfg(test)]
+mod tri_state_tests {
+    use super::*;
+
+    fn conn_with_bound_article() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO feeds (feed_url, title, remote_id)
+             VALUES ('https://tri.example/rss', 'tri', 10);
+             INSERT INTO articles
+                 (feed_id, guid, title, url, is_read, is_starred, remote_id)
+             VALUES (1, 'tri-1', 'Tri', 'https://tri.example/1', 1, 1, 9001);",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// 判别力：删除 categories 后 `has_tag` 仍会返回 false；合并若继续使用它，
+    /// 本用例的本地 read/star 会被回滚。三态路径必须把缺失当未知并跳过状态写。
+    #[test]
+    fn missing_categories_only_updates_content() {
+        let conn = conn_with_bound_article();
+        let remote: ItemContent = serde_json::from_str(
+            r#"{
+                "id":"tag:google.com,2005:reader/item/2329",
+                "title":"remote",
+                "summary":{"content":"<p>filled from remote</p>"}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(remote.read_state(), greader::RemoteState::Missing);
+        assert_eq!(remote.starred_state(), greader::RemoteState::Missing);
+
+        let mut maps = db::sync_match_maps(&conn).unwrap();
+        let mut report = SyncReport::default();
+        merge_pulled_entry(&conn, &remote, &mut maps, &mut report).unwrap();
+
+        let (read, starred, body): (i64, i64, String) = conn
+            .query_row(
+                "SELECT a.is_read, a.is_starred, COALESCE(c.body_text, '')
+                   FROM articles a
+                   LEFT JOIN contents c ON c.id = a.content_id
+                  WHERE a.id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((read, starred), (1, 1), "缺 categories 不得改写本地读/藏");
+        assert!(
+            body.contains("filled from remote"),
+            "缺状态字段时内容仍应允许回填"
+        );
+    }
+
+    /// 三态的另一半：显式空 categories 是明确 false，不是未知。
+    #[test]
+    fn explicit_empty_categories_are_false() {
+        let conn = conn_with_bound_article();
+        let remote: ItemContent = serde_json::from_str(
+            r#"{
+                "id":"tag:google.com,2005:reader/item/2329",
+                "title":"remote",
+                "categories":[]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(remote.read_state(), greader::RemoteState::False);
+        assert_eq!(remote.starred_state(), greader::RemoteState::False);
+
+        let mut maps = db::sync_match_maps(&conn).unwrap();
+        let mut report = SyncReport::default();
+        merge_pulled_entry(&conn, &remote, &mut maps, &mut report).unwrap();
+
+        let (read, starred): (i64, i64) = conn
+            .query_row(
+                "SELECT is_read, is_starred FROM articles WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (read, starred),
+            (0, 0),
+            "显式 []=false 必须与缺字段未知区分"
+        );
+    }
+
+    /// Fever 侧的同构保护：categories 存在（含 reading-list）但 is_read/is_saved
+    /// 缺失时，解析器把两个 override 置为 Missing；合并同样不得改写本地状态。
+    #[test]
+    fn missing_fever_state_overrides_preserve_local_state() {
+        let conn = conn_with_bound_article();
+        let mut remote: ItemContent = serde_json::from_str(
+            r#"{
+                "id":"tag:google.com,2005:reader/item/2329",
+                "title":"remote",
+                "categories":["user/-/state/com.google/reading-list"]
+            }"#,
+        )
+        .unwrap();
+        remote.read_state_override = Some(greader::RemoteState::Missing);
+        remote.starred_state_override = Some(greader::RemoteState::Missing);
+        assert_eq!(remote.read_state(), greader::RemoteState::Missing);
+        assert_eq!(remote.starred_state(), greader::RemoteState::Missing);
+
+        let mut maps = db::sync_match_maps(&conn).unwrap();
+        let mut report = SyncReport::default();
+        merge_pulled_entry(&conn, &remote, &mut maps, &mut report).unwrap();
+
+        let (read, starred): (i64, i64) = conn
+            .query_row(
+                "SELECT is_read, is_starred FROM articles WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (read, starred),
+            (1, 1),
+            "Fever 缺 is_read/is_saved 不得当 false 回写"
+        );
+    }
 }

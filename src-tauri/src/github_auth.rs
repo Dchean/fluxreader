@@ -57,6 +57,13 @@ pub struct GitHubAccount {
     pub login: String,
 }
 
+/// 取消设备流的结果。`cancelled=false` 表示调用时没有可取消的发起/等待流
+/// （例如授权刚完成），前端不得据此宣称「已取消」。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GithubLoginCancelResult {
+    pub cancelled: bool,
+}
+
 /* ============================================================
 内部逻辑（与命令分离，便于测试注入 base URL）
 ============================================================ */
@@ -193,14 +200,35 @@ pub async fn github_login_start(
     client_id: Option<String>,
     force: Option<bool>,
 ) -> AppResult<DeviceLoginStart> {
+    github_login_start_impl(&state, client_id, force, GITHUB_BASE).await
+}
+
+async fn github_login_start_impl(
+    state: &AppState,
+    client_id: Option<String>,
+    force: Option<bool>,
+    github_base: &str,
+) -> AppResult<DeviceLoginStart> {
+    /* 发起即取得新代次并立即作废旧 flow：即使用户随后取消发起、另一个
+    start 抢先完成，或本次因 WebDAV 冲突被拒绝，旧 poll 也不能继续把旧
+    token 落到当前槽。 */
+    let generation = state.github_flow.lock().await.begin_start();
     if !force.unwrap_or(false) {
-        let existing = {
+        let existing_result = {
             let conn = state.db.lock().await;
-            db::get_setting(&conn, "config_sync_credentials")?
+            db::get_setting(&conn, "config_sync_credentials")
+        };
+        let existing = match existing_result {
+            Ok(existing) => existing,
+            Err(e) => {
+                state.github_flow.lock().await.abandon_start(generation);
+                return Err(e);
+            }
         };
         if let Some(raw) = existing {
             if let Ok(c) = serde_json::from_str::<SyncCredentials>(&raw) {
                 if c.backend == "webdav" {
+                    state.github_flow.lock().await.abandon_start(generation);
                     return Err(AppError::new(
                         "webdavConflict",
                         "当前配置同步使用 WebDAV。登录 GitHub 会把同步后端切换为 Gist 并替换 WebDAV 凭据",
@@ -213,16 +241,27 @@ pub async fn github_login_start(
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty());
     let cid = override_cid.unwrap_or_else(|| GH_CLI_CLIENT_ID.to_string());
-    let (user_code, device_code, verification_uri, interval) =
-        device_code_request(&state.http, GITHUB_BASE, &cid).await?;
+    let request = device_code_request(&state.http, github_base, &cid).await;
+    let (user_code, device_code, verification_uri, interval) = match request {
+        Ok(v) => v,
+        Err(e) => {
+            state.github_flow.lock().await.abandon_start(generation);
+            return Err(e);
+        }
+    };
     /* device_code 与 interval 存内存态：轮询命令从 AppState 取（单窗口单流程足够；
     不落库——设备码是一次性短命凭证） */
     let device_flow = DeviceFlowState {
+        generation,
         client_id: cid,
         device_code,
         started_at: std::time::Instant::now(),
     };
-    *state.github_flow.lock().await = Some(device_flow);
+    state
+        .github_flow
+        .lock()
+        .await
+        .bind_start(generation, device_flow)?;
     Ok(DeviceLoginStart {
         user_code,
         verification_uri,
@@ -234,26 +273,42 @@ pub async fn github_login_start(
 /// 未批准时返回 Ok(None)（前端继续按 interval 轮询）。
 #[tauri::command]
 pub async fn github_login_poll(state: State<'_, AppState>) -> AppResult<Option<GitHubAccount>> {
-    let flow = {
-        let f = state.github_flow.lock().await;
-        f.clone()
-    };
-    let Some(flow) = flow else {
-        return Err(AppError::new("badRequest", "尚未发起登录（设备码缺失）"));
+    github_login_poll_impl(&state, GITHUB_BASE, API_BASE).await
+}
+
+async fn github_login_poll_impl(
+    state: &AppState,
+    github_base: &str,
+    api_base: &str,
+) -> AppResult<Option<GitHubAccount>> {
+    let (flow, generation) = {
+        let slot = state.github_flow.lock().await;
+        let Some(flow) = slot.flow.clone() else {
+            return Err(slot.missing_flow_error());
+        };
+        let generation = flow.generation;
+        (flow, generation)
     };
     if flow.started_at.elapsed().as_secs() > DEVICE_TTL_SECS {
-        *state.github_flow.lock().await = None;
+        state.github_flow.lock().await.expire(generation)?;
         return Err(AppError::network("登录等待超时（设备码过期），请重新发起"));
     }
-    let token = match token_poll_once(&state.http, GITHUB_BASE, &flow.client_id, &flow.device_code)
-        .await?
-    {
-        Some(t) => t,
-        None => return Ok(None), // 仍在等待用户在浏览器授权
-    };
-    /* 拿到 token：流程结束，清设备码态；失败也清（token 已消耗） */
-    *state.github_flow.lock().await = None;
-    let account = fetch_account(&state.http, API_BASE, &token).await?;
+    let token =
+        match token_poll_once(&state.http, github_base, &flow.client_id, &flow.device_code).await {
+            Ok(Some(token)) => token,
+            Ok(None) => {
+                state.github_flow.lock().await.check_active(generation)?;
+                return Ok(None); // 仍在等待用户在浏览器授权
+            }
+            Err(e) => {
+                state.github_flow.lock().await.check_active(generation)?;
+                return Err(e);
+            }
+        };
+    state.github_flow.lock().await.check_active(generation)?;
+    let account_result = fetch_account(&state.http, api_base, &token).await;
+    state.github_flow.lock().await.check_active(generation)?;
+    let account = account_result?;
     let cred = SyncCredentials {
         backend: "gist".to_string(),
         token,
@@ -261,6 +316,11 @@ pub async fn github_login_poll(state: State<'_, AppState>) -> AppResult<Option<G
         username: account.login.clone(),
         gist_id: None,
     };
+    /* 从复核到三项设置落库都在同一 flow 槽锁内完成：cancel 要么先取得锁并
+    令本 poll 返回 cancelled/stale，要么等本次已完成的写库结束后再取消。
+    旧 poll 不会在新流开始后再清掉新流槽。 */
+    let mut slot = state.github_flow.lock().await;
+    slot.consume(generation)?;
     {
         let conn = state.db.lock().await;
         db::set_setting(
@@ -274,6 +334,19 @@ pub async fn github_login_poll(state: State<'_, AppState>) -> AppResult<Option<G
         db::set_setting(&conn, "github_login_name", &account.login)?;
     }
     Ok(Some(account))
+}
+
+/// 取消当前 GitHub 设备流：清后端 flow、递增代次。已在途的旧 poll 在写库前
+/// 复核失败，只能返回 `cancelled`/`stale`，不能落库或返回账户。
+/// 不撤销网页侧已经发生的 GitHub 授权；设备码仍由 GitHub 按自身生命周期过期。
+#[tauri::command]
+pub async fn github_login_cancel(state: State<'_, AppState>) -> AppResult<GithubLoginCancelResult> {
+    github_login_cancel_impl(&state).await
+}
+
+async fn github_login_cancel_impl(state: &AppState) -> AppResult<GithubLoginCancelResult> {
+    let cancelled = state.github_flow.lock().await.cancel();
+    Ok(GithubLoginCancelResult { cancelled })
 }
 
 /// 已登录账户名（设置页展示）。未登录返回 None。
@@ -316,12 +389,147 @@ pub async fn github_login_disconnect(state: State<'_, AppState>) -> AppResult<()
 
 #[derive(Debug, Clone)]
 pub struct DeviceFlowState {
+    generation: u64,
     client_id: String,
     device_code: String,
     started_at: std::time::Instant,
 }
 
-pub type SharedDeviceFlow = Arc<Mutex<Option<DeviceFlowState>>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowFailure {
+    Cancelled,
+    Stale,
+}
+
+impl FlowFailure {
+    fn error(self) -> AppError {
+        match self {
+            Self::Cancelled => AppError::new("cancelled", "GitHub 登录已取消，旧授权结果不会写入"),
+            Self::Stale => AppError::new("stale", "GitHub 登录已被新的授权流替换，旧授权结果作废"),
+        }
+    }
+}
+
+/// 单槽设备流状态：`generation` 在每次 start/cancel/consume 时前进。
+/// `pending_start` 覆盖设备码网络请求尚未返回的窗口，使 cancel 同样能作废它。
+// Note: 代次比较、清槽/绑槽和最终写库必须共用本槽锁 — 见 .agents/notes/implemented/bug-fix/2026-11-04-GitHub设备流后端取消与代次.md
+#[derive(Debug, Clone, Default)]
+pub struct GithubFlowSlot {
+    generation: u64,
+    flow: Option<DeviceFlowState>,
+    pending_start: Option<u64>,
+    cancelled_generation: Option<u64>,
+}
+
+impl GithubFlowSlot {
+    fn next_generation(&self) -> u64 {
+        self.generation.saturating_add(1)
+    }
+
+    fn begin_start(&mut self) -> u64 {
+        self.generation = self.next_generation();
+        self.flow = None;
+        self.pending_start = Some(self.generation);
+        self.cancelled_generation = None;
+        self.generation
+    }
+
+    fn bind_start(&mut self, generation: u64, flow: DeviceFlowState) -> Result<(), AppError> {
+        if self.generation != generation || self.pending_start != Some(generation) {
+            return Err(self
+                .failure_for(generation)
+                .unwrap_or(FlowFailure::Stale)
+                .error());
+        }
+        self.pending_start = None;
+        self.flow = Some(flow);
+        Ok(())
+    }
+
+    fn abandon_start(&mut self, generation: u64) {
+        if self.generation == generation && self.pending_start == Some(generation) {
+            self.pending_start = None;
+            self.generation = self.next_generation();
+            self.cancelled_generation = Some(generation);
+        }
+    }
+
+    fn cancel(&mut self) -> bool {
+        let active = self
+            .flow
+            .as_ref()
+            .map(|flow| flow.generation)
+            .or(self.pending_start);
+        self.flow = None;
+        self.pending_start = None;
+        self.generation = self.next_generation();
+        match active {
+            Some(generation) => {
+                self.cancelled_generation = Some(generation);
+                true
+            }
+            None => {
+                self.cancelled_generation = None;
+                false
+            }
+        }
+    }
+
+    fn check_active(&self, generation: u64) -> Result<(), AppError> {
+        if self
+            .flow
+            .as_ref()
+            .is_some_and(|flow| flow.generation == generation)
+        {
+            return Ok(());
+        }
+        Err(self
+            .failure_for(generation)
+            .unwrap_or(FlowFailure::Stale)
+            .error())
+    }
+
+    fn consume(&mut self, generation: u64) -> Result<(), AppError> {
+        self.check_active(generation)?;
+        self.flow = None;
+        self.pending_start = None;
+        self.generation = self.next_generation();
+        self.cancelled_generation = None;
+        Ok(())
+    }
+
+    fn expire(&mut self, generation: u64) -> Result<(), AppError> {
+        self.consume(generation)
+    }
+
+    fn failure_for(&self, generation: u64) -> Option<FlowFailure> {
+        if self.cancelled_generation == Some(generation) {
+            Some(FlowFailure::Cancelled)
+        } else if self.generation != generation
+            || self.flow.is_some()
+            || self.pending_start.is_some()
+        {
+            Some(FlowFailure::Stale)
+        } else {
+            None
+        }
+    }
+
+    fn missing_flow_error(&self) -> AppError {
+        if self.cancelled_generation.is_some() {
+            return FlowFailure::Cancelled.error();
+        }
+        if self.pending_start.is_some() {
+            return AppError::new("badRequest", "GitHub 登录仍在发起中（设备码尚未就绪）");
+        }
+        if self.generation != 0 {
+            return FlowFailure::Stale.error();
+        }
+        AppError::new("badRequest", "尚未发起登录（设备码缺失）")
+    }
+}
+
+pub type SharedDeviceFlow = Arc<Mutex<GithubFlowSlot>>;
 
 /* ============================================================
 测试后门（tests/github_auth_e2e.rs）：注入 mock base URL
@@ -353,4 +561,39 @@ pub async fn fetch_account_for_test(
     token: &str,
 ) -> AppResult<GitHubAccount> {
     fetch_account(http, api_base, token).await
+}
+
+#[doc(hidden)]
+pub async fn github_login_start_for_test(
+    state: &AppState,
+    github_base: &str,
+    client_id: Option<String>,
+    force: Option<bool>,
+) -> AppResult<DeviceLoginStart> {
+    github_login_start_impl(state, client_id, force, github_base).await
+}
+
+#[doc(hidden)]
+pub async fn github_login_poll_for_test(
+    state: &AppState,
+    github_base: &str,
+    api_base: &str,
+) -> AppResult<Option<GitHubAccount>> {
+    github_login_poll_impl(state, github_base, api_base).await
+}
+
+#[doc(hidden)]
+pub async fn github_login_cancel_for_test(state: &AppState) -> AppResult<GithubLoginCancelResult> {
+    github_login_cancel_impl(state).await
+}
+
+#[doc(hidden)]
+pub async fn github_flow_generation_for_test(state: &AppState) -> Option<u64> {
+    state
+        .github_flow
+        .lock()
+        .await
+        .flow
+        .as_ref()
+        .map(|flow| flow.generation)
 }
