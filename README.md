@@ -12,6 +12,8 @@ FluxReader 是一款本地优先的 Windows 桌面 RSS 客户端：全部数据�
 - **桌面集成**：系统托盘、SMTC 媒体键控制、系统通知、开机自启与窗口状态记忆。
 - **配置同步**：通过 Gist 或 WebDAV 在多台设备间同步订阅源与客户端设置；AI 配置（含模型名）以及 API Key、密码等敏感凭据始终保留在本机，不参与同步。
 
+当前版本在同步、正文切换、播放器和画廊上的已知限制，以及桌面集成的验证范围，见[当前缺口与已知限制](docs/roadmap.md)。
+
 ## 安装
 
 前往 GitHub [Releases](https://github.com/Dchean/fluxreader/releases) 下载 Windows x64 安装包：`setup.exe` 或 `.msi`。

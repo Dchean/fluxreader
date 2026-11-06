@@ -693,7 +693,8 @@ pub fn subscription_outbox_stats(
 /// `{pending, failed, local_only, last_error}` 与 [`SubscriptionOutboxStats`] /
 /// 前端 `SubscriptionOutboxStats`（src/lib/api.ts）三方同形。configured=false →
 /// None：未配置同步静默不发事件（与 queue_changed_payload 同一「未配置不刷
-/// 状态」纪律）。payload 只承载计数与错误摘要——不带 URL、账号或任何凭据。
+/// 状态」纪律）。顶层仅上述四个字段；last_error 可含自有 feed URL（含查询参数）
+/// 以及失败会话的端点、用户名，不能把字段清单解释成摘要没有这些信息。
 pub fn subscription_outbox_changed_payload(
     stats: &SubscriptionOutboxStats,
     configured: bool,

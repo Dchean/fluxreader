@@ -994,7 +994,7 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
 ///
 /// 返回 `false` = 条目不存在（调用方如实报 not_found，不静默成功）。
 /// Note: 清除语义与三入口 — 见 .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md
-/// 末节「OPT-013 B3 追加（2026-10-15）」。
+/// 「显示、清除与边界」一节。
 pub fn clear_article_ai_product(
     conn: &mut Connection,
     article_id: i64,
@@ -1796,7 +1796,7 @@ pub fn article_ai_commit_token(conn: &Connection, id: i64) -> AppResult<Option<A
 /// 不允许出现「新产物 + 旧签名」或「新签名 + 旧产物」（OPT-013 B1 定版 §1）。
 ///
 /// Note: 提交前提与签名身份 — 见 .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md
-/// 末节「OPT-013 B1 追加（2026-10-15）」。
+/// 「输入身份与提交条件」一节。
 #[derive(Debug, Clone, Copy)]
 pub enum AiProduct<'a> {
     Summary { text: &'a str, signature: &'a str },

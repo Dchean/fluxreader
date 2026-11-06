@@ -149,7 +149,7 @@ pub const SUMMARY_INPUT_MAX_BYTES: usize = 64 * 1024;
 ///
 /// Note: 命中判定 / 同锁快照 / 提交与代次守卫 — 见
 /// .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md
-/// 末节「OPT-013 B1 追加（2026-10-15）」。
+/// 「输入身份与提交条件」一节。
 #[derive(Debug, Clone, Copy)]
 pub struct AiCacheInputs<'a> {
     /// 产物类型标识（"summary" / "translation"；改动即让全部旧签名失效）。

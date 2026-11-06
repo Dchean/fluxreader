@@ -108,7 +108,7 @@ export function selectAiProductState(
 
    Note: 命中判定取后端权威（无签名/过期产物不得短路）、代次/在途守卫与
    回读时序契约 — 见 .agents/notes/implemented/architecture/2026-10-08-AI完成信号与缓存提交.md
-   末节「OPT-013 B1 追加（2026-10-15）」。
+   「输入身份与提交条件」一节。
 
    - 代次：每个 (条目, 产物) 发起请求时自增。delta / Done / getArticle 安全回读
      全部携带发起时代次，落地时不等即整体丢弃——过时回包不得覆盖较新成功结果，

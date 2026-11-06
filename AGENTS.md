@@ -20,23 +20,26 @@ git push origin main
 
 ## 文档约定
 
-| 想写什么 | 写在哪 |
+| 信息 | 归属 |
 | --- | --- |
-| 为什么这样改、当时放弃了哪些方案 | [`.agents/notes/`](.agents/notes/)，一篇一个决定 |
-| 需要长期与代码同步维护的事实（协议矩阵、性能基线、发布流程） | [`docs/`](docs/README.md) |
-| 还没做的事、已知限制 | [docs/roadmap.md](docs/roadmap.md) |
+| 难以从代码/测试恢复、未来仍需重访的重要理由与取舍 | [`.agents/notes/`](.agents/notes/)，一篇一个决定；普通局部修复不自动新增 |
+| 需随产品长期维护的事实、协议矩阵、性能基线与发布操作 | [`docs/`](docs/README.md) |
+| 仍存在的缺口、接受的边界和未完成验证 | [docs/roadmap.md](docs/roadmap.md) |
+| 当轮范围、计数、提交与检查状态 | 既有交接/验收入口或当次交付，不复制进每篇主题 Note |
 
-Note 的路径即分类：`{lifecycle}/{class}/yyyy-mm-dd-topic.md`，lifecycle 取 `proposed` / `implemented` / `rejected` / `archived`，class 取 `feature` / `bug-fix` / `simplification` / `architecture` / `process` / `testing`。每篇前三行是 `# Agent Note: <标题>` + 空行 + `Status: <状态>`，正文以 `## Problem` 开头，必含 `## Alternatives considered`。
+沿用现有路径 `{lifecycle}/{class}/yyyy-mm-dd-topic.md`；lifecycle 为 proposed / implemented / rejected / archived，class 为 feature / bug-fix / simplification / architecture / process / testing。日期是首次记录决定的日期，不随整理更新。活跃篇前三行是 `# Agent Note: <标题>`、空行、`Status: <状态>`，正文从 `## Problem` 开始，含 `## Alternatives considered`。implemented 保留 Decision 与 Consequences；备选只记真实考虑过的方案，无真实备选可明确写无，不凑数。
 
-归档头块遵循封印工具的例外契约：`archived/` 中第 3 行保留 `Status: implemented`，第 4 行紧接 `Archived: YYYY-MM-DD`，第 5 行为空；生命周期由路径和归档日期共同表达。归档正文及既有 manifest 封印冻结，后继决定链接写在活跃 Note。未封印旧档只能在核对历史后规范头块、首次建立封印，不伪造历史封印；本仓首次规范化记录见[修复波次的分批、证伪审计与证据门槛](.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md)。
+决定理由未变时更新归属篇事实；重要决定变化须保留原由和后继关系。部分取代明确各自仍有效的范围，不能把旧决定重写成从未作过的反面。`implemented` 不代表测试、审计或发布通过；历史验证需附日期/基线/范围，未验证如实保留。更新应通读相关收益、代价和验证边界，不只在顶部追加补丁。
 
-**关键实现点要留反向注释**，从代码能走回决定：
+仅当独特有效约束已由活跃记录承接或确已不适用，才归档。归档第 3 行保留 `Status: implemented`、第 4 行 `Archived: YYYY-MM-DD`，其余原正文保全；新封印只追加，旧正文和 manifest 条目冻结。旧 WCAG 档案的历史头块例外及首次封印原因见[现有记录](.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md)。不以重算哈希掩盖历史改写。
+
+关键实现点保留能回到决定的反向注释，链接变化时同步必要注释，不为整理改产品逻辑：
 
 ```ts
-// Note: 分页谓词必须与 ORDER BY 逐字同构 — 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
+// Note: 分页谓词必须与 ORDER BY 同构 — 见 .agents/notes/implemented/architecture/2026-10-05-查询与分页契约.md
 ```
 
-改代码时若发现某篇 Note 的事实已过时，**就地更新那一篇**；方案被完全取代时才新建一篇并把旧的移到 `archived/`。
+清理旧执行材料须先保全独特理由、当前约束及引用入口。已清出的历史审计/任务卡通过固定 Git 提交恢复，定位见 [docs/README.md](docs/README.md)；不能称作已存入一个实际没有这些文件的归档分支。记录技能不承担审批、调度或提交，执行仍遵守当前适用的协作规范与授权。
 
 ## 门禁
 
@@ -54,5 +57,5 @@ CI 固定在 Windows 上跑 Rust：这是纯 Windows 客户端，DPAPI 凭据加
 ## 仓库卫生
 
 - 不要提交 `node_modules/`、`dist/`、`src-tauri/target/`、`*.db`、`tmp/`（都已在 `.gitignore` 中；`.zcodeignore` 为工具自生成的本机可选配置，不入库）。
-- 一次性探针与调研报告放在存档分支 `archive/tooling-and-reports`，不进主线。
+- 一次性探针与完整调研输出不进主线；既有材料位于存档分支 `archive/tooling-and-reports`，本机新审计证据保留在忽略的 `tmp/`。历史审计/任务卡另按固定提交追溯，见下方索引。
 - 历史材料的定位（含 2026-09-16 历史重写前后的提交号对照）见 [docs/README.md](docs/README.md) 的「历史材料」节。

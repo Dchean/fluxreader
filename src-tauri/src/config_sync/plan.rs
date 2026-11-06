@@ -1,6 +1,6 @@
 //! 配置快照的「预览（plan）→ 确认（apply）」引擎（OPT-010）。
 //!
-//! 产品契约（docs/optimization/OPT-010.md 定版）：
+//! 产品契约（.agents/notes/implemented/architecture/2026-10-15-配置快照镜像应用.md）：
 //! - 两种应用模式：`merge`（默认，保守合并：只更新远端列出的对象，本地独有
 //!   对象保留）与 `mirror`（镜像：以远端快照为准，删除本地多出的源与分类）。
 //! - `config_sync_plan(payload, mode)` 只读：返回结构化 additions/updates/removals

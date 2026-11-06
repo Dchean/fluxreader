@@ -845,7 +845,7 @@ pub(crate) static MIGRATIONS: LazyLock<Migrations> = LazyLock::new(|| {
         // user_version=29。
         // Note: 删除无消费者 FTS、候选索引与 LIKE 等值约束 — 见
         // .agents/notes/implemented/architecture/2026-10-12-订阅条目与共享内容身份.md
-        // 末节「OPT-017B 追加（2026-10-16）」。
+        // 「修复身份与派生索引」一节。
         M::up(
             r#"
         DROP TRIGGER IF EXISTS trg_articles_fts_ai;
