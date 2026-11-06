@@ -1,16 +1,13 @@
 name: CI
 
 on:
-  # dev 为开发分支（携带工作流记录），推送即跑 CI，供合并进 main 前的验证；
-  # main 为纯项目代码主分支，发布 tag 的 CI 门控依赖本工作流在 main 上的运行。
-  # v* tag push 同样触发本工作流（只做门禁，不自动发布）：release.yml 要求
-  # tagged commit 上 ci.yml 全绿，而 tag 可能指向没有 main/dev push run 的提交
-  # ——此前会让门禁空等 45 分钟超时，tag 触发补齐该 run。
+  # 分支与 PR 使用同一套门禁；发布 tag 由 release.yml 调用本提交的工作流，
+  # 避免独立 tag CI 与 Release 重复运行、轮询历史结果造成歧义。
   push:
     branches: [main, dev]
-    tags: ["v*"]
   pull_request:
     branches: [main]
+  workflow_call:
 
 # CI 的 GITHUB_TOKEN 只被 checkout 消费（只读）：显式收口最小权限，
 # 与 release.yml 的 job 级 contents: write 形成分域。
@@ -26,6 +23,8 @@ jobs:
       - name: Checkout
         id: checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         id: node
@@ -37,6 +36,10 @@ jobs:
       - name: Install dependencies
         id: install
         run: npm ci
+
+      - name: Release workflow regression
+        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.node.outcome == 'success' }}
+        run: node --test tools/release/release.test.mjs
 
       # Note: 四个前端门禁各自可跑、失败信息指向自身——lint/build 的任一失败不得
       # 挡住后面的状态与挂载回归；安装失败时后续步骤没有可执行前提，才统一跳过。
@@ -76,6 +79,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -110,6 +115,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         id: checkout
+        with:
+          ref: ${{ github.sha }}
 
       - name: Setup Rust
         id: toolchain
