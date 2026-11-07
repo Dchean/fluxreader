@@ -2,7 +2,7 @@ import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
 import { applyBodyRow, applyExtractedFulltext, dropBodyEntry, getBodyEntry, markBodyFailed, markBodyLoading, markBodyMissing } from '../bodyCache';
 import type { EntryRollbackClaim } from '../internals';
-import { appStore, applyReadReceipt, asReadReceipts, beginEntryFieldWrite, beginLocalFlagWrite, currentLocalFlagWriteSerial, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, optimisticEntryFlagToggle, rollbackEntryClaims, scheduleCountsReconcile, syncCurrentViewCache } from '../internals';
+import { appStore, applyReadReceipt, asReadReceipts, beginEntryFieldWrite, beginLocalFlagWrite, currentLocalFlagWriteSerial, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, optimisticEntryFlagToggle, scheduleCountsReconcile, syncCurrentViewCache, trackEntryFlagWrite } from '../internals';
 import type { AppState } from '../types';
 
 /** 阅读器 slice：选中文章、正文水合（懒加载 + 批量合批）与卡片就地标读/收藏。
@@ -184,12 +184,14 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          使卡片在未读筛选下原地变灰而非消失）。 */
       markEntriesRead(new Set([id]));
       const claim: EntryRollbackClaim = { id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') };
+      const settle = trackEntryFlagWrite(claim, true);
       beginLocalFlagWrite();
       beginEntryFieldWrite(id, 'isRead'); // R4：articles 快照的在途写保护
       const flagSerialAtRequest = currentLocalFlagWriteSerial();
       void api.setRead(Number(id), true).then((receipt) => {
         endLocalFlagWrite();
         endEntryFieldWrite(id, 'isRead');
+        settle(false);
         /* OPT-008B R2/N1：读闭包可能一并标读同 URL 未读副本——回执驱动条目/
            计数本地收敛（被点行已乐观翻转，跳过重复扣减）。 */
         applyReadReceipt(asReadReceipts(receipt), new Set([id]), flagSerialAtRequest);
@@ -197,7 +199,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       }).catch((e) => {
         endLocalFlagWrite();
         endEntryFieldWrite(id, 'isRead');
-        const outcome = rollbackEntryClaims([claim]);
+        const outcome = settle(true);
         /* R2：回滚被接管跳过（如快照替换）时乐观计数不可线性复原——强制一次
            权威对账（不受 dedup 门控），失败保守留待下次 reload 自愈。 */
         scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
@@ -266,11 +268,11 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
            仅视图行轻字段同步跳过。 */
         const generating = !!(get().summarizingIds[id] || get().translatingIds[id]);
         const rec = getBodyEntry(id);
-        applyBodyRow(id, row, stamp, {
+        const accepted = applyBodyRow(id, row, stamp, {
           aiSummary: generating ? (cur?.aiSummary || '') : (rec?.aiSummary ?? cur?.aiSummary ?? ''),
           translatedContent: generating ? (cur?.translatedContent || '') : (rec?.translatedContent ?? cur?.translatedContent ?? ''),
         });
-        if (!cur) return;
+        if (!accepted || !cur) return;
         /* 视图行轻字段照旧同步：snippet/url（列表行可能缺 url）；无变化不 set
            （保持 entries 引用稳定，避免无谓重渲染） */
         const nextUrl = cur.url ?? row.url ?? undefined;
@@ -379,24 +381,9 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     const stamps = new Map<string, number>(pending.map((id) => [id, markBodyLoading(id)] as const));
     const pendingSet = new Set(pending);
     void api.getArticles(pending.map(Number)).then((rows) => {
-      /* 构建 id → 详情 映射，一次性合并（单次 map，单次 set） */
+      /* 正文接受资格同时约束轻字段，迟到旧批次不能先覆盖 snippet/url。 */
       const byId = new Map((rows ?? []).map((r) => [String(r.id), r] as const));
-      /* TASK-122：视图行侧只同步轻字段（snippet/url）；正文/AI 落 bodyById */
-      set((s) => {
-        let changed = false;
-        const entries = s.entries.map((a) => {
-          if (!pendingSet.has(a.id)) return a;
-          const row = byId.get(a.id);
-          if (!row) return a;
-          const nextUrl = a.url ?? row.url ?? undefined;
-          const nextSnippet = row.snippet || a.snippet;
-          if (nextUrl === a.url && nextSnippet === a.snippet) return a;
-          changed = true;
-          return { ...a, url: nextUrl, snippet: nextSnippet };
-        });
-        if (changed) syncCurrentViewCache(entries);
-        return changed ? { entries } : {};
-      });
+      const acceptedIds = new Set<string>();
       /* 正文/AI 落记录：逐 id 现态复核——只写仍是 **loading** 的记录（本批的
          在途标记）：他路已水合（selectArticle 详情先落地 → ready）、显式失效
          （cleared）的 id 一律跳过——迟到的旧批次不得覆盖新状态（TASK-103 语义，
@@ -417,11 +404,26 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         }
         const generating = !!(get().summarizingIds[id] || get().translatingIds[id]);
         const entry = get().entries.find((a) => a.id === id);
-        applyBodyRow(id, row, stamps.get(id) ?? 0, {
+        const accepted = applyBodyRow(id, row, stamps.get(id) ?? 0, {
           aiSummary: generating ? (entry?.aiSummary || '') : (rec.aiSummary || entry?.aiSummary || ''),
           translatedContent: generating ? (entry?.translatedContent || '') : (rec.translatedContent || entry?.translatedContent || ''),
         });
+        if (accepted) acceptedIds.add(id);
       }
+      set((s) => {
+        let changed = false;
+        const entries = s.entries.map((a) => {
+          if (!pendingSet.has(a.id) || !acceptedIds.has(a.id)) return a;
+          const row = byId.get(a.id)!;
+          const nextUrl = a.url ?? row.url ?? undefined;
+          const nextSnippet = row.snippet || a.snippet;
+          if (nextUrl === a.url && nextSnippet === a.snippet) return a;
+          changed = true;
+          return { ...a, url: nextUrl, snippet: nextSnippet };
+        });
+        if (changed) syncCurrentViewCache(entries);
+        return changed ? { entries } : {};
+      });
     }).catch((e: unknown) => {
       /* 批量水合失败：错误落到对应记录（卡片内联重试），不再静默假加载。
          TASK-103：只对「仍在途（loading）」的 id 落 failed——过期失败不得污染
@@ -456,7 +458,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     })),
 
   /** 手动全文提取：Readability 拉原文网页存 content（TASK-122：落 bodyById）；
-      rawContent 始终保留 RSS 原文（供「全文 ↔ RSS 正文」切换回跳）。
+      rawContent 仅在当前缓存确实持有 RSS 原文时可用于回切；不承诺跨重开保留。
       提取成功后进入全文视图。 */
   extractCurrentArticle: () => {
     const id = get().activeArticleId;
@@ -473,8 +475,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
     const rec = getBodyEntry(activeArticleId);
     if (!rec) return;
     if (rec.fulltextExtracted) {
-      // 已提取：直接切换视图
-      set({ showFulltext: !showFulltext });
+      if (rec.rawContent && rec.rawContent !== rec.content) set({ showFulltext: !showFulltext });
     } else {
       // 未提取：触发提取
       get().extractCurrentArticle();
@@ -551,6 +552,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
          不再只提示不回滚。openedReadIds 不回撤：「打开过」的原地变灰保留语义
          不随落库失败撤销（与打开即标读回滚的边界裁定同口径）。 */
       const claims: EntryRollbackClaim[] = unread.map((id) => ({ id, field: 'isRead', prev: false, version: getEntryVersion(id, 'isRead') }));
+      const settlements = claims.map((claim) => trackEntryFlagWrite(claim, true));
       beginLocalFlagWrite();
       for (const id of unread) beginEntryFieldWrite(id, 'isRead'); // R4：articles 快照的在途写保护
       const flagSerialAtRequest = currentLocalFlagWriteSerial();
@@ -558,15 +560,16 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       void api.setReadBulk(unread.map((id) => Number(id)), true).then((receipt) => {
         endLocalFlagWrite();
         for (const id of unread) endEntryFieldWrite(id, 'isRead');
+        for (const settle of settlements) settle(false);
         /* OPT-008B R2/N1：整批回执（含闭包副本）驱动条目/计数本地收敛。 */
         applyReadReceipt(asReadReceipts(receipt), listed, flagSerialAtRequest);
         scheduleCountsReconcile();
       }).catch(() => {
         endLocalFlagWrite();
         for (const id of unread) endEntryFieldWrite(id, 'isRead');
-        const outcome = rollbackEntryClaims(claims);
+        const takenOver = settlements.map((settle) => settle(true)).some((outcome) => outcome.takenOver);
         /* R2：同单条路径——存在被接管跳过的声明时强制权威对账。 */
-        scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
+        scheduleCountsReconcile(takenOver ? { force: true } : undefined);
         get().showToast('批量标读失败');
       });
     }

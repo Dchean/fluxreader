@@ -12,6 +12,7 @@ import { createSyncSlice } from './store/slices/sync';
 import { createFeedsSlice } from './store/slices/feeds';
 import { createSettingsSlice } from './store/slices/settings';
 import { bindExternalOpenFailureHandler } from './lib/external';
+import { bindAiCacheInvalidationHandler } from './lib/api';
 
 /* ============================================================
    全局客户端状态机 —— 对应规范 §2.2 + 原型交互引擎
@@ -66,6 +67,7 @@ export const useAppStore = create<AppState>((...a) => ({
    GitHub 轮询）读写。与原实现时序一致——模块求值期不会调用它们。 */
 bindAppStore(useAppStore);
 bindExternalOpenFailureHandler((message) => useAppStore.getState().showToast(message));
+bindAiCacheInvalidationHandler(() => useAppStore.setState((s) => ({ aiStatusRevision: s.aiStatusRevision + 1 })));
 
 /* TASK-122：注入 bodyById 写入通知——模块级正文/AI 缓存的每次真实写入 bump
    AppState.bodyCacheNonce，使经 useAppStore 订阅 entryNeedsHydration /
@@ -77,7 +79,7 @@ export * from './store/selectors';
 
 /* OPT-013 B3：AI 五态单点真值——判定与生成入口/在途表同一 slice，Reader 与卡片
    一律经本导出消费（不在组件内复制判定逻辑）。 */
-export { selectAiProductState } from './store/slices/ai';
+export { selectAiProductState, selectAiStatusInput, selectAiCacheStatus } from './store/slices/ai';
 export type { AiProductState } from './store/slices/ai';
 
 export type { AppState, AiCacheStatus, AiProductKind, PodcastPlayerState, SettingsState, ToastMessage, AppErrorEntry } from './store/types';

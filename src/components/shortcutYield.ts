@@ -38,6 +38,7 @@ export const OVERLAY_YIELD_KEYS: readonly string[] = ['s', 'S', 'm', 'M', 'j', '
    与 OVERLAY_YIELD_KEYS 的既有做法一致。 */
 export interface OverlayState {
   searchOpen: boolean;
+  contextMenuOpen?: boolean;
   settingsOpen: boolean;
   newCategoryModalOpen: boolean;
   addFeedModalOpen: boolean;
@@ -60,6 +61,7 @@ export const OVERLAY_SOURCES: readonly {
   isOpen: (s: OverlayState) => boolean;
 }[] = [
   { name: 'search', isOpen: (s) => s.searchOpen },
+  { name: 'contextMenu', isOpen: (s) => !!s.contextMenuOpen },
   { name: 'settings', isOpen: (s) => s.settingsOpen },
   { name: 'newCategory', isOpen: (s) => s.newCategoryModalOpen },
   { name: 'addFeed', isOpen: (s) => s.addFeedModalOpen },

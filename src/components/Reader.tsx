@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
-import { useAppStore, selectArticleBody, selectAiProductState, selectFeedConfig } from '../store';
+import { useAppStore, selectArticleBody, selectAiProductState, selectAiCacheStatus, selectAiStatusInput, selectFeedConfig } from '../store';
 import { Icons } from './icons';
 import { formatRelativeTime } from '../lib/format';
 import { handleArticleLinkClick, openExternalWithFeedback } from '../lib/external';
@@ -50,8 +50,9 @@ export function Reader() {
   const translationState = useAppStore((s) => (art ? selectAiProductState(s, art.id, 'translation') : null));
   const summaryState = useAppStore((s) => (art ? selectAiProductState(s, art.id, 'summary') : null));
   const translationSegments = useAppStore((s) =>
-    (art ? s.aiStatusById[art.id]?.translationSegments ?? null : null),
+    (art ? selectAiCacheStatus(s, art.id)?.translationSegments ?? null : null),
   );
+  const aiStatusInput = useAppStore(useShallow((s) => selectAiStatusInput(s, s.activeArticleId ?? '')));
   /* TASK-122：正文/AI 产物读取单点——selectArticleBody（真值源 bodyById）。
      body 是快照对象（记录写入即换引用），nonce 依赖在 selector 内部建立。
      【为何必须包 useShallow】selectArticleBody 每次调用都经 bodyViewFrom(rec)
@@ -68,7 +69,8 @@ export function Reader() {
   /* 正文图片代理（防盗链）：对少数派等白名单式防盗链域名，走后端 fetch_image
      拿 bytes 转 data: URL 替换。代理目标 = 当前要显示的基础 HTML（全文或 RSS 原文），
      按 baseHtml 缓存，避免每次渲染重复抓图。 */
-  const baseHtml = showFulltext ? body.content : body.rawContent;
+  const canSwitchFulltext = !!body.rawContent && body.rawContent !== body.content;
+  const baseHtml = showFulltext || !body.rawContent ? body.content : body.rawContent;
   const [proxiedContent, setProxiedContent] = useState<{ key: string; html: string } | null>(null);
   useEffect(() => {
     if (!baseHtml) { setProxiedContent(null); return; }
@@ -144,20 +146,18 @@ export function Reader() {
   const activeArticleKey = art?.id;
   useEffect(() => {
     if (!activeArticleKey) return;
-    if (body.state !== 'cleared' || body.content !== '') return;
+    if (body.state !== 'unrequested' && (body.state !== 'cleared' || body.content !== '')) return;
     useAppStore.getState().ensureArticleContent(activeArticleKey);
     // Note: exhaustive-deps — 只随「目标文章 × 失效条件」执行；body 快照其余字段
     // 变化（AI 增量等）不该重复触发（重复入队由记录状态守卫兜底）。
   }, [activeArticleKey, body.state, body.content]);
-  /* OPT-013 B3：打开文章即取后端权威校验状态（五态显示的数据源）——刷新/重进
-     阅读器后 stale（签名不匹配/缺失）与 partial（0 < completed < total）仍如实
-     呈现，partial 不被当完整缓存。失败静默（校验故障不改变显示，也不触发重烧）。 */
+  /* 可见目标的输入变化才惰性只读验签：正文/提取/配置改变立即停止沿用旧 complete。
+     校验不会触发生成；相同输入的 Reader/卡片共用在途与缓存。 */
   useEffect(() => {
     if (!art) return;
-    useAppStore.getState().refreshAiStatus(art.id);
-    // Note: exhaustive-deps — 只在切换目标文章时刷新一次；art 其余字段变化不重取。
+    useAppStore.getState().ensureAiStatus(art.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [art?.id]);
+  }, [art?.id, aiStatusInput]);
 
   useEffect(() => {
     if (!art || !hydrated) return;
@@ -270,7 +270,7 @@ export function Reader() {
                 {/* TASK-100：署名中文化（此前 `By {author}` 中英混杂，其余 UI 全中文） */}
                 {art.author && <span>作者：{art.author}</span>}
               {art.author && <span>·</span>}
-              <span>{formatRelativeTime(art.publishedAt)}</span>
+              <span className="reader-meta-time">{formatRelativeTime(art.publishedAt)}</span>
               {art.tags.length > 0 && (
                 <>
                   <span>·</span>
@@ -280,7 +280,7 @@ export function Reader() {
               {settings.showReadTime && readTime && (
                 <>
                   <span>·</span>
-                  <span>{readTime}</span>
+                  <span className="reader-meta-read-time">{readTime}</span>
                 </>
               )}
             </div>
@@ -336,7 +336,7 @@ export function Reader() {
                     </button>
                   </>
                 ) : null}
-                {dataMode === 'tauri' && (
+                {dataMode === 'tauri' && (body.state === 'ready' || (body.state === 'cleared' && body.content !== '')) && (!body.fulltextExtracted || canSwitchFulltext) && (
                   <button
                     className={`toggle-action-btn ${showFulltext ? 'active-accent' : ''}`}
                     onClick={toggleReaderFulltext}

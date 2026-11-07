@@ -11,6 +11,7 @@ export type UiSlice = Pick<
   | 'settingsOpen'
   | 'settingsTab'
   | 'searchOpen'
+  | 'contextMenuOpen'
   | 'closeAskVisible'
   | 'lightboxUrl'
   | 'lightboxEntryId'
@@ -118,6 +119,7 @@ export const createUiSlice: StateCreator<AppState, [], [], UiSlice> = (set, get)
   settingsOpen: false,
   settingsTab: 'general',
   searchOpen: false,
+  contextMenuOpen: false,
   closeAskVisible: false,
   lightboxUrl: null,
   lightboxEntryId: null,

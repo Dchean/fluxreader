@@ -3,7 +3,7 @@ import { api, extractError, extractErrorCode } from '../../lib/api';
 import type { AiCacheCheckResult, TranslationSegmentPlan } from '../../lib/api';
 import { appendAiDelta, applyAiProduct, getBodyEntry } from '../bodyCache';
 import type { AiProductKind } from '../types';
-import type { AppState } from '../types';
+import type { AppState, AiCacheStatus, AiStatusInput } from '../types';
 
 /** AI slice：摘要与翻译的流式生成（按条目 id 隔离状态），含卡片级与 Reader 级入口。
  *
@@ -18,6 +18,7 @@ export type AiSlice = Pick<
   | 'translatingIds'
   | 'rawTranslatedIds'
   | 'aiStatusById'
+  | 'aiStatusRevision'
   | 'translateEntry'
   | 'toggleReaderTranslation'
   | 'summarizeEntry'
@@ -61,7 +62,43 @@ type AiStateView = Pick<
   | 'entries'
   | 'bodyCacheNonce'
   | 'aiStatusById'
+  | 'aiStatusRevision'
 >;
+
+/** 显示验签的输入身份；正文/提取/配置/生成/清除任一变化即不能沿用旧完整态。
+ *  DB 内容身份稳定的普通水合不使校验无故失效；旧后端无身份时比较实际正文。
+ *  不使用 contentRevision（缓存写戳）：AI 流式/落账也会推进它，并非正文身份。 */
+export function selectAiStatusInput(s: AiStateView, id: string): AiStatusInput {
+  const rec = getBodyEntry(id);
+  const entry = s.entries.find((a) => a.id === id);
+  const contentId = rec?.contentId ?? entry?.contentId ?? null;
+  const contentRevision = rec?.contentRev || entry?.contentRevision || 0;
+  const fulltextExtracted = rec?.fulltextExtracted ?? entry?.fulltextExtracted ?? false;
+  return {
+    revision: s.aiStatusRevision,
+    mutation: aiStatusMutation.get(id) ?? 0,
+    feedId: entry?.feedId ?? '',
+    title: entry?.title ?? '',
+    url: entry?.url ?? '',
+    snippet: entry?.snippet ?? '',
+    contentId,
+    contentRevision,
+    fulltextExtracted,
+    content: contentId === null || fulltextExtracted ? rec?.content ?? entry?.content ?? '' : null,
+    summarySig: rec ? rec.aiSummarySig : entry?.aiSummarySig ?? null,
+    translationSig: rec ? rec.translatedSig : entry?.translatedSig ?? null,
+  };
+}
+
+function sameAiStatusInput(a: AiStatusInput | undefined, b: AiStatusInput): boolean {
+  return !!a && (Object.keys(b) as Array<keyof AiStatusInput>).every((key) => a[key] === b[key]);
+}
+
+/** 状态与分段进度共同消费资格：旧 partial 也不能绕过输入守卫进入卡片。 */
+export function selectAiCacheStatus(s: AiStateView, id: string): AiCacheStatus | undefined {
+  const status = s.aiStatusById[id];
+  return status && sameAiStatusInput(status.input, selectAiStatusInput(s, id)) ? status : undefined;
+}
 
 /** 单点状态判定（规则与优先级见上）。返回 null = 五态之外（未生成/未判定）。 */
 export function selectAiProductState(
@@ -86,13 +123,13 @@ export function selectAiProductState(
   /* 「干净产物」：非空、非未消毒流式残段、且不是失败留下的半截（带错 + 无签名——
      run* 开跑即清产物，此组合只可能是流式残段；stale 只描述干净旧产物）。 */
   const clean = text.trim() !== '' && !raw && !(hasError && sig === null);
-  const status = s.aiStatusById[id];
+  const status = selectAiCacheStatus(s, id);
   const verified =
     !!status && (kind === 'summary' ? status.summaryVerified : status.translationVerified);
   if (clean) {
     if (sig === null) return 'stale'; // 签名缺失：不可能等于期望签名（无签名不得冒充已验证）
     if (verified) return 'complete';
-    if (status) return 'stale'; // 已校验且不匹配
+    if (status || s.aiStatusById[id]) return 'stale'; // 不匹配，或已知输入发生变化
     return null; // 未判定：不宣称 complete、也不误标已过期
   }
   if (kind === 'translation' && status) {
@@ -124,7 +161,16 @@ export function selectAiProductState(
 const aiRequestGen = new Map<string, number>();
 const aiInFlight = new Map<string, Promise<unknown>>();
 /** OPT-013 B3：校验状态的在途去重（同一篇文章至多一笔在途 ai_cache_check）。 */
-const aiStatusInFlight = new Map<string, Promise<void>>();
+const aiStatusInFlight = new Map<string, { input: AiStatusInput; promise: Promise<void> }>();
+/** 显式产物写入推进：旧校验不得在清除/新生成之后恢复旧显示状态。 */
+const aiStatusMutation = new Map<string, number>();
+let aiStatusReadSerial = 0;
+const aiStatusLatestRead = new Map<string, number>();
+function beginAiStatusRead(id: string): number {
+  const serial = ++aiStatusReadSerial;
+  aiStatusLatestRead.set(id, serial);
+  return serial;
+}
 const aiKeyOf = (id: string, kind: AiProductKind): string => `${id}:${kind}`;
 
 /** 请求发起：代次自增并返回本次代次（此后所有回包都按它守卫）。 */
@@ -152,6 +198,8 @@ export function resetAiRequestStateForTests(): void {
   aiRequestGen.clear();
   aiInFlight.clear();
   aiStatusInFlight.clear();
+  aiStatusMutation.clear();
+  aiStatusLatestRead.clear();
 }
 
 export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get) => {
@@ -193,6 +241,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     value: string,
     signature?: string | null,
   ): void => {
+    aiStatusMutation.set(id, (aiStatusMutation.get(id) ?? 0) + 1);
     if (applyAiProduct(id, field, value, signature)) return;
     const sigPatch = signature === undefined
       ? {}
@@ -213,11 +262,13 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
 
   /** OPT-013 B3：一次成功校验结果的唯一写入点（checkCache / hintSegmentPlan /
    *  refreshAiStatus 共用）——五态判定的验证数据源（见 AiCacheStatus 注释）。 */
-  const storeAiStatus = (id: string, res: AiCacheCheckResult): void => {
+  const storeAiStatus = (id: string, res: AiCacheCheckResult, input: AiStatusInput, serial: number): boolean => {
+    if (aiStatusLatestRead.get(id) !== serial || !sameAiStatusInput(input, selectAiStatusInput(get(), id))) return false;
     set((st) => ({
       aiStatusById: {
         ...st.aiStatusById,
         [id]: {
+          input,
           summaryVerified: res.summaryVerified,
           translationVerified: res.translationVerified,
           // 旧后端可能缺字段：缺省 = 无进度（不伪造 partial）
@@ -225,33 +276,35 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         },
       },
     }));
+    return true;
   };
 
   /** OPT-013 B3：拉取并缓存某条目的校验状态（Reader 打开文章、生成结束后的静默
    *  刷新）。失败保留现有状态——校验故障既不得把可用产物误标为已过期，也不触发
    *  重新生成（B1 保守语义）。在途去重：同一篇文章至多一笔在途校验。 */
-  const refreshAiStatus = (id: string): void => {
+  const refreshAiStatus = (id: string, afterGeneration = false): void => {
     if (get().dataMode !== 'tauri') return;
-    if (aiStatusInFlight.has(id)) return;
+    const input = selectAiStatusInput(get(), id);
+    if (!afterGeneration && sameAiStatusInput(aiStatusInFlight.get(id)?.input, input)) return;
+    const serial = beginAiStatusRead(id);
     let chain: Promise<void> | null = null;
     chain = api
       .aiCacheCheck(Number(id))
       .then((res) => {
-        if (res) storeAiStatus(id, res);
+        if (res) storeAiStatus(id, res, input, serial);
       })
       .catch(() => {
         /* 校验失败：保留现有状态（宁可不重烧，也不因校验故障清空可用产物） */
       })
       .finally(() => {
-        if (aiStatusInFlight.get(id) === chain) aiStatusInFlight.delete(id);
+        if (aiStatusInFlight.get(id)?.promise === chain) aiStatusInFlight.delete(id);
       });
-    aiStatusInFlight.set(id, chain);
+    aiStatusInFlight.set(id, { input, promise: chain });
   };
 
-  /** OPT-013 B3：惰性补齐校验状态——本会话已有状态则不再发 IPC（卡片滚动渲染
-   *  不造成 IPC 洪峰）；动作时刻仍走 ai_cache_check 权威复核（本缓存只服务显示）。 */
+  /** 同输入复用、变化后惰性补齐；只服务显示，不会从校验发起付费生成。 */
   const ensureAiStatus = (id: string): void => {
-    if (get().aiStatusById[id]) return;
+    if (selectAiCacheStatus(get(), id)) return;
     refreshAiStatus(id);
   };
 
@@ -270,10 +323,15 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     id: string,
     kind: AiProductKind,
   ): Promise<{ hit: boolean; plan: TranslationSegmentPlan | null }> => {
+    const input = selectAiStatusInput(get(), id);
+    const serial = beginAiStatusRead(id);
     try {
       const res = await api.aiCacheCheck(Number(id));
       if (!res) return { hit: true, plan: null };
-      storeAiStatus(id, res);
+      // 等待期间输入已变：此次动作放弃生成，避免按旧 miss 追加付费请求。
+      if (!sameAiStatusInput(input, selectAiStatusInput(get(), id))) return { hit: true, plan: null };
+      // 同输入的新显示读取可接管显示落地，但不取消这次用户已发出的生成决策。
+      storeAiStatus(id, res, input, serial);
       return {
         hit: kind === 'summary' ? res.summaryVerified : res.translationVerified,
         // 分段计划只与翻译有关；摘要入口不消费（避免无人消费字段）
@@ -351,11 +409,13 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
   /** 取分段计划并提示（生成入口自带的一次轻量 IPC；失败静默——提示不是生成前提）。
    *  OPT-013 B3：顺手落 aiStatusById（这条 IPC 的结果本就是五态判定的数据源）。 */
   const hintSegmentPlan = (id: string, silent: boolean): void => {
+    const input = selectAiStatusInput(get(), id);
+    const serial = beginAiStatusRead(id);
     void api
       .aiCacheCheck(Number(id))
       .then((res) => {
         if (!res) return;
-        storeAiStatus(id, res);
+        if (!storeAiStatus(id, res, input, serial)) return;
         notifySegmentPlan(res.translationSegments, silent);
       })
       .catch(() => { /* 计划不可用不影响生成 */ });
@@ -411,7 +471,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               if (dbSummary !== null && dbSummary.trim() !== '') {
                 writeAiProduct(id, 'aiSummary', dbSummary, row?.ai_summary_sig ?? null);
               }
-              refreshAiStatus(id);
+              refreshAiStatus(id, true);
             })
             .catch(() => { /* 回读失败：保留流式产物，不置错误态（与生成成功无关） */ });
         },
@@ -423,7 +483,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             delete nextIds[id];
             return { summarizingIds: nextIds, summaryErrors: { ...st.summaryErrors, [id]: msg } };
           });
-          refreshAiStatus(id); // B3：失败分型落定后刷新（failed/partial 的数据源）
+          refreshAiStatus(id, true); // 生成终态必须读新状态，不 join 生成中的早期校验。
           if (!silent) {
             get().showToast(`摘要失败：${msg}`, { label: '重试', key: `ai:summary:${id}`, run: () => retrySummaryFor(id) });
           }
@@ -440,7 +500,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             summaryErrors: { ...st.summaryErrors, [id]: msg },
           };
         });
-        refreshAiStatus(id);
+        refreshAiStatus(id, true);
         if (!silent) {
           get().showToast(`摘要失败：${msg}`, { label: '重试', key: `ai:summary:${id}`, run: () => retrySummaryFor(id) });
         }
@@ -461,11 +521,6 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
   /** 卡片级翻译生成/重试（状态按条目隔离，不复用全局 translating 单布尔）。
       `plan` 为 undefined 时自查分段计划并提示（提示不阻塞生成；B2 最小 UI）。 */
   const runCardTranslation = (id: string, silent: boolean, plan?: TranslationSegmentPlan | null): void => {
-    if (plan === undefined) {
-      hintSegmentPlan(id, silent);
-    } else {
-      notifySegmentPlan(plan, silent);
-    }
     const key = aiKeyOf(id, 'translation');
     const gen = beginAiRequest(key);
     const current = (): boolean => isCurrentAiRequest(key, gen);
@@ -479,6 +534,8 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
       rawTranslatedIds: { ...st.rawTranslatedIds, [id]: true },
       translateErrors: { ...st.translateErrors, [id]: '' },
     }));
+    if (plan === undefined) hintSegmentPlan(id, silent);
+    else notifySegmentPlan(plan, silent);
     const p = api
       .aiTranslate(
         Number(id),
@@ -511,7 +568,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               });
               /* 回读不到消毒版（含 row 为空）：丢弃未消毒半截，不留 XSS 窗口 */
               writeAiProduct(id, 'translatedContent', safe, row?.translated_sig ?? null);
-              refreshAiStatus(id); // B3：提交后的校验状态刷新（complete/stale 的判定依据）
+              refreshAiStatus(id, true); // B3：提交后重新校验，不 join 提交前读取。
             })
             .catch(() => {
               if (!isCurrentAiRequest(key, readGen)) return;
@@ -525,7 +582,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               });
               /* 失败态放行重试（D1 语义），不残留渲染风险 */
               writeAiProduct(id, 'translatedContent', '');
-              refreshAiStatus(id);
+              refreshAiStatus(id, true);
               if (!silent) get().showToast('译文回读失败', { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
             });
         },
@@ -547,7 +604,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               translateErrors: { ...st.translateErrors, [id]: msg },
             };
           });
-          refreshAiStatus(id); // B3：失败分型落定后刷新（partial/failed 的数据源）
+          refreshAiStatus(id, true); // B3：失败后的当前 partial/failed。
           if (!silent) {
             get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
           }
@@ -568,7 +625,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             translateErrors: { ...st.translateErrors, [id]: msg },
           };
         });
-        refreshAiStatus(id); // B3：失败分型落定后刷新（与 summary catch / Reader catch / 三处错误回调同口径）
+        refreshAiStatus(id, true); // B3：失败后的当前 partial/failed。
         if (!silent) {
           get().showToast(`翻译失败：${msg}`, { label: '重试', key: `ai:translate:${id}`, run: () => retryTranslationFor(id) });
         }
@@ -579,11 +636,6 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
   /** Reader 级翻译生成/重试（复用全局 translating 单布尔 + 展示态切换）。
       `plan` 语义同 runCardTranslation。 */
   const runReaderTranslation = (id: string, silent: boolean, plan?: TranslationSegmentPlan | null): void => {
-    if (plan === undefined) {
-      hintSegmentPlan(id, silent);
-    } else {
-      notifySegmentPlan(plan, silent);
-    }
     const key = aiKeyOf(id, 'translation');
     const gen = beginAiRequest(key);
     const current = (): boolean => isCurrentAiRequest(key, gen);
@@ -600,6 +652,8 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
       rawTranslatedIds: { ...st.rawTranslatedIds, [id]: true },
       translateErrors: { ...st.translateErrors, [id]: '' },
     }));
+    if (plan === undefined) hintSegmentPlan(id, silent);
+    else notifySegmentPlan(plan, silent);
     const p = api
       .aiTranslate(
         Number(id),
@@ -642,7 +696,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               });
               /* 回读不到消毒版（含 row 为空）：丢弃未消毒半截，不留 XSS 窗口 */
               writeAiProduct(id, 'translatedContent', safe, row?.translated_sig ?? null);
-              refreshAiStatus(id); // B3：提交后的校验状态刷新（complete/stale 的判定依据）
+              refreshAiStatus(id, true); // B3：提交后重新校验，不 join 提交前读取。
             })
             .catch(() => {
               if (!isCurrentAiRequest(key, readGen)) return;
@@ -655,7 +709,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
                 };
               });
               writeAiProduct(id, 'translatedContent', '');
-              refreshAiStatus(id);
+              refreshAiStatus(id, true);
               if (!silent) {
                 get().showToast('译文回读失败', {
                   label: '重试',
@@ -686,7 +740,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
               translateErrors: { ...st.translateErrors, [id]: msg },
             };
           });
-          refreshAiStatus(id); // B3：失败分型落定后刷新（partial/failed 的数据源）
+          refreshAiStatus(id, true); // B3：失败后的当前 partial/failed。
           if (!silent) {
             get().showToast(`翻译失败：${msg}`, {
               label: '重试',
@@ -713,7 +767,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
             translateErrors: { ...st.translateErrors, [id]: aiRejectionMessage(e) },
           };
         });
-        refreshAiStatus(id);
+        refreshAiStatus(id, true);
         if (!silent) {
           get().showToast(`翻译失败：${aiRejectionMessage(e)}`, {
             label: '重试',
@@ -733,6 +787,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
     translatingIds: {},
     rawTranslatedIds: {},
     aiStatusById: {},
+    aiStatusRevision: 0,
 
     refreshAiStatus,
     ensureAiStatus,
@@ -775,6 +830,7 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
         aiRequestGen.set(clearKey, genAtClear + 1);
       }
       const field = kind === 'summary' ? 'aiSummary' : 'translatedContent';
+      const previousStatus = selectAiCacheStatus(get(), id);
       /* 产物清空即签名失效（签名不得脱离产物独立存活）；正文保留 */
       writeAiProduct(id, field, '', null);
       set((st) => {
@@ -786,8 +842,9 @@ export const createAiSlice: StateCreator<AppState, [], [], AiSlice> = (set, get)
            滞留 Timeline 的 HTML 渲染路径（持续态，非竞态窗口）。
            — 见 .agents/notes/implemented/bug-fix/2026-11-01-清除与在途流式互斥.md */
         if (kind === 'translation') delete nextRaw[id];
-        const prev = st.aiStatusById[id];
+        const prev = previousStatus;
         const status = {
+          input: selectAiStatusInput(st, id),
           summaryVerified: kind === 'summary' ? false : prev?.summaryVerified ?? false,
           translationVerified: kind === 'translation' ? false : prev?.translationVerified ?? false,
           // 清除影响**所有签名**的片段：进度归零（防止状态缓存残留 partial）

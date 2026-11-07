@@ -653,6 +653,7 @@ let countsFetchSerial = 0;
 /** 本地读/藏写意图在途计数：乐观写入起、请求落定（成功或回滚）止。
     计数落地要求为 0——发起前已有但尚未提交的意图不得被服务端快照覆盖。 */
 let localFlagWritesInFlight = 0;
+let countsReconcileAfterWrites = false;
 
 /** 本地读/藏写**结算**序号：每次写落定（成功或回滚）推进（endLocalFlagWrite 唯一写点）。
     计数落地第三判据的依据：counts_snapshot 与 set_read 在后端共用同一把 DB 锁
@@ -674,6 +675,10 @@ export function beginLocalFlagWrite(): void {
 export function endLocalFlagWrite(): void {
   localFlagWritesInFlight = Math.max(0, localFlagWritesInFlight - 1);
   localFlagWriteSettleSerial += 1;
+  if (localFlagWritesInFlight === 0 && countsReconcileAfterWrites) {
+    countsReconcileAfterWrites = false;
+    scheduleCountsReconcile({ force: true });
+  }
 }
 
 /** 计数读取发起（reload 与对账共用）：返回本次读取令牌。 */
@@ -800,7 +805,16 @@ export async function reconcileCountsOrdered(): Promise<CountsReconcileOutcome> 
     计数（不受 dedup 门控；dedup 关闭时对账只落 feedCounts，语义同口径）。 */
 export function scheduleCountsReconcile(opts?: { force?: boolean }): void {
   if (!opts?.force && !appStore().getState().settings.smartDedup) return;
-  void reconcileCountsOrdered().catch(() => { /* 保守：保留现值 */ });
+  if (opts?.force && localFlagWritesInFlight > 0) {
+    countsReconcileAfterWrites = true;
+    return;
+  }
+  void reconcileCountsOrdered().then((outcome) => {
+    // 不确定计数只做一次有界补查；有更新的在途写则由最后一笔结算接手。
+    if (!opts?.force || outcome !== 'stale') return;
+    if (localFlagWritesInFlight > 0) countsReconcileAfterWrites = true;
+    else void reconcileCountsOrdered().catch(() => { /* 保留现值，下次正常刷新可恢复 */ });
+  }).catch(() => { /* 保守：保留现值 */ });
 }
 
 /** 读写入回执的本地收敛（R2/N1 建立，R3/P2-1 逐行凭据化）：把**真实翻转行**
@@ -823,45 +837,16 @@ export function applyReadReceipt(
   flagSerialAtRequest?: number,
 ): void {
   if (!receipts || receipts.length === 0) return;
-  const s = appStore().getState();
-  const entriesById = new Map(s.entries.map((e) => [e.id, e] as const));
-  const applied: Array<{ id: string; feedId: string }> = [];
+  const applied: EntryFlagProjection[] = [];
   for (const r of receipts) {
     const id = String(r.id);
     if (skipIds?.has(id)) continue;
     if (flagSerialAtRequest !== undefined && entryFieldWrittenAfter(id, 'isRead', flagSerialAtRequest)) {
       continue; // 该行读字段已被请求发起后的更新写接管：不翻、不扣（回执不等于当前状态）
     }
-    const entry = entriesById.get(id);
-    if (entry?.isRead) continue; // 已是已读：翻转已由该次写/更早收敛计过数，不重复扣减
-    applied.push({ id, feedId: String(r.feed_id) });
+    applied.push({ id, field: 'isRead', value: true, fallback: { feedId: String(r.feed_id), value: false } });
   }
-  if (applied.length === 0) return;
-  bumpLocalFlagWrite(); // 本地状态因回执再次变化：在途对账/后续回执据此判过期
-  const extraByFeed = new Map<string, number>();
-  for (const { feedId } of applied) extraByFeed.set(feedId, (extraByFeed.get(feedId) ?? 0) + 1);
-  let feedCounts = s.feedCounts;
-  for (const [feedId, n] of extraByFeed) {
-    const c = feedCounts.get(feedId);
-    if (!c) continue;
-    if (feedCounts === s.feedCounts) feedCounts = new Map(s.feedCounts);
-    feedCounts.set(feedId, { ...c, unread: Math.max(0, c.unread - n) });
-  }
-  /* 条目翻转：仅窗口内的行（窗口外兄弟无本地条目可翻，计数照扣）。 */
-  const appliedInWindow = new Set(applied.filter((x) => entriesById.has(x.id)).map((x) => x.id));
-  let entries = s.entries;
-  let changed = false;
-  if (appliedInWindow.size > 0) {
-    entries = entries.map((e) => {
-      if (!appliedInWindow.has(e.id) || e.isRead) return e;
-      changed = true;
-      bumpEntryVersion(e.id, 'isRead'); // 已确认翻转：使更早的失败回滚声明失效
-      return { ...e, isRead: true };
-    });
-  }
-  for (const { id } of applied) recordEntryFieldWrite(id, 'isRead'); // R3：逐行写序号（后续回执/快照保留判据）
-  appStore().setState({ entries, feedCounts });
-  if (changed) syncCurrentViewCache(entries);
+  projectEntryFlags(applied);
 }
 
 /** 乐观更新某篇条目的 isRead/isStarred，并同步 feedCounts 的未读/收藏计数。
@@ -881,24 +866,7 @@ export function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
   const s = appStore().getState();
   const entry = s.entries.find((e) => e.id === id);
   if (!entry) return;
-  const nextVal = !entry[field];
-  const entries = s.entries.map((e) => (e.id === id ? { ...e, [field]: nextVal } : e));
-  bumpEntryVersion(id, field); // TASK-118：按旗标类型 bump 对应字段版本
-  bumpLocalFlagWrite(); // TASK-119：本地读/藏写入（计数对账过期判据，矩阵见上）
-  recordEntryFieldWrite(id, field); // R3：字段写序号（回执逐行凭据 / 快照保留判据）
-  const c = s.feedCounts.get(entry.feedId);
-  let feedCounts = s.feedCounts;
-  if (c) {
-    const key = field === 'isRead' ? 'unread' : 'starred';
-    const delta = field === 'isRead' ? (nextVal ? -1 : 1) : (nextVal ? 1 : -1);
-    feedCounts = new Map(s.feedCounts);
-    feedCounts.set(entry.feedId, { ...c, [key]: Math.max(0, c[key] + delta) });
-    /* OPT-008B R1：聚合角标不再按条目 ±1 推算（折叠组非线性）——写请求落定后
-       由调用方 scheduleCountsReconcile() 以真实计数整体替换。 */
-  }
-  appStore().setState({ entries, feedCounts });
-  /* 同步当前视图缓存：避免切走再切回时，缓存恢复旧状态（标读/收藏回退闪烁） */
-  syncCurrentViewCache(entries);
+  projectEntryFlags([{ id, field, value: !entry[field] }]);
 }
 
 /** 批量标已读：同步 feedCounts 的未读计数（每篇 -1）。
@@ -914,35 +882,8 @@ export function flipEntryFlag(id: string, field: 'isRead' | 'isStarred') {
     TASK-118：标读只 bump isRead 字段版本（收藏写入不再牵连本字段的回滚判定）。 */
 export function markEntriesRead(ids: Set<string>) {
   const s = appStore().getState();
-  let entries = s.entries;
-  const unreadDeltas = new Map<string, number>();
-  const changedIds: string[] = [];
-  let changed = false;
-  // 一次遍历：标记 entries + 聚合每个 feed 的未读减少数
-  entries = entries.map((e) => {
-    if (ids.has(e.id) && !e.isRead) {
-      changed = true;
-      changedIds.push(e.id);
-      bumpEntryVersion(e.id, 'isRead'); // TASK-107 R1 + TASK-118：真实翻转必 bump isRead 字段版本（回滚归属判定）
-      unreadDeltas.set(e.feedId, (unreadDeltas.get(e.feedId) ?? 0) + 1);
-      return { ...e, isRead: true };
-    }
-    return e;
-  });
-  if (!changed) return;
-  bumpLocalFlagWrite(); // TASK-119：本地批量读态写入（markEntriesReadBulk / 全部已读乐观段共用此径）
-  for (const id of changedIds) recordEntryFieldWrite(id, 'isRead'); // R3：字段写序号（逐行）
-  // 一次更新 feedCounts（按源 -1；聚合角标由写请求落定后的有序对账替换）
-  let feedCounts = s.feedCounts;
-  for (const [feedId, delta] of unreadDeltas) {
-    const c = feedCounts.get(feedId);
-    if (c) {
-      if (feedCounts === s.feedCounts) feedCounts = new Map(s.feedCounts); // 惰性复制
-      feedCounts.set(feedId, { ...c, unread: Math.max(0, c.unread - delta) });
-    }
-  }
-  appStore().setState({ entries, feedCounts });
-  syncCurrentViewCache(entries);
+  projectEntryFlags(s.entries.filter((entry) => ids.has(entry.id) && !entry.isRead)
+    .map((entry) => ({ id: entry.id, field: 'isRead', value: true })));
 }
 
 /** TASK-118：乐观写失败的统一回滚助手——三条乐观路径共用这**一份**实现，
@@ -985,54 +926,110 @@ export interface RollbackOutcome {
 }
 
 export function rollbackEntryClaims(claims: readonly EntryRollbackClaim[]): RollbackOutcome {
-  if (claims.length === 0) return { restored: false, takenOver: false };
+  return projectEntryFlags(claims.map((claim) => ({ id: claim.id, field: claim.field, value: claim.prev, version: claim.version })), { bumpVersion: false });
+}
+
+interface EntryFlagProjection {
+  id: string;
+  field: 'isRead' | 'isStarred';
+  value: boolean;
+  version?: number;
+  /** 回执中真实翻转的窗口外行，计数基线由提交事实提供。 */
+  fallback?: { feedId: string; value: boolean };
+}
+
+/** 字段投影唯一提交点：活跃行与所有现存缓存同一次接受/拒收，计数按实体计一次。
+    不创建缓存成员；回滚可用在途链的轻量投影基线，LRU淘汰不再丢失计数归属。
+    范围提交不猜全量计数（countChanges=false），scopeCounts仍只由权威协议写入。
+    Note: 责任边界见 .agents/notes/implemented/architecture/2026-10-05-乐观写入的版本守卫.md */
+export function projectEntryFlags(
+  projections: readonly EntryFlagProjection[],
+  options: { bumpVersion?: boolean; countChanges?: boolean } = {},
+): RollbackOutcome {
+  if (projections.length === 0) return { restored: false, takenOver: false };
   const s = appStore().getState();
-  const claimByKey = new Map(claims.map((c) => [entryVersionKey(c.id, c.field), c] as const));
-  /* 接管检测先行：覆盖已从 entries 移除的声明（快照替换/筛出），恢复循环漏掉
-     的形态同样计入。 */
-  let takenOver = false;
-  for (const c of claims) {
-    if (getEntryVersion(c.id, c.field) !== c.version) takenOver = true;
+  const activeById = new Map(s.entries.map((entry) => [entry.id, entry]));
+  const cached = [...viewEntriesCache.entries()]; // LRU set会改变迭代序，先固定本次集合。
+  const cachedById = new Map<string, ArticleEntry>();
+  const cachedSourceConflicts = new Set<string>();
+  for (const [, snapshot] of cached) for (const entry of snapshot.entries) {
+    const previous = cachedById.get(entry.id);
+    if (previous && previous.feedId !== entry.feedId) cachedSourceConflicts.add(entry.id);
+    if (!cachedById.has(entry.id)) cachedById.set(entry.id, entry);
   }
-  let changed = false;
-  const restoredFields: Array<{ id: string; field: 'isRead' | 'isStarred' }> = [];
-  const unreadRestore = new Map<string, number>();
-  const starredRestore = new Map<string, number>();
-  const entries = s.entries.map((a) => {
-    let next = a;
-    const readClaim = claimByKey.get(entryVersionKey(a.id, 'isRead'));
-    if (readClaim && a.isRead !== readClaim.prev && getEntryVersion(a.id, 'isRead') === readClaim.version) {
-      changed = true;
-      next = { ...next, isRead: readClaim.prev };
-      restoredFields.push({ id: a.id, field: 'isRead' });
-      unreadRestore.set(a.feedId, (unreadRestore.get(a.feedId) ?? 0) + (readClaim.prev ? -1 : 1));
-    }
-    const starClaim = claimByKey.get(entryVersionKey(a.id, 'isStarred'));
-    if (starClaim && a.isStarred !== starClaim.prev && getEntryVersion(a.id, 'isStarred') === starClaim.version) {
-      changed = true;
-      next = { ...next, isStarred: starClaim.prev };
-      restoredFields.push({ id: a.id, field: 'isStarred' });
-      starredRestore.set(a.feedId, (starredRestore.get(a.feedId) ?? 0) + (starClaim.prev ? 1 : -1));
-    }
-    return next;
-  });
-  if (!changed) return { restored: false, takenOver };
-  bumpLocalFlagWrite(); // TASK-119：回滚恢复也是本地读/藏写入（失败回滚后使在途计数对账过期）
-  for (const { id, field } of restoredFields) recordEntryFieldWrite(id, field); // R3：恢复也是真实本地写入（后续回执/快照保留判据）
+  const accepted = new Map<string, EntryFlagProjection>();
+  const changedFields: EntryFlagProjection[] = [];
   let feedCounts = s.feedCounts;
-  const applyDelta = (feedId: string, key: 'unread' | 'starred', delta: number) => {
-    const c = feedCounts.get(feedId);
-    if (!c) return;
-    if (feedCounts === s.feedCounts) feedCounts = new Map(s.feedCounts); // 惰性复制
-    feedCounts.set(feedId, { ...c, [key]: Math.max(0, c[key] + delta) });
+  let takenOver = false;
+  let needsCounts = false;
+  // 去重后每个id×field只接受一次，不能按缓存副本数增减源计数。
+  for (const [key, projection] of new Map(projections.map((item) => [entryVersionKey(item.id, item.field), item]))) {
+    const version = getEntryVersion(projection.id, projection.field);
+    if (projection.version !== undefined && projection.version !== version) {
+      takenOver = true;
+      continue;
+    }
+    const active = activeById.get(projection.id);
+    const chain = flagWrites.get(key);
+    const tracked = chain?.version === version ? chain : undefined;
+    const representative = active ?? cachedById.get(projection.id);
+    const baseline = active ? { value: active[projection.field], feedId: active.feedId }
+      : tracked?.projected ?? (representative ? { value: representative[projection.field], feedId: representative.feedId } : projection.fallback);
+    accepted.set(key, projection);
+    // 离屏源归属不能仅凭旧缓存推断：立即做已知投影差，同时最后结算后权威校准。
+    if (!active && tracked) needsCounts = true;
+    const sourceChanged = cachedSourceConflicts.has(projection.id)
+      || (active && tracked?.projected && active.feedId !== tracked.projected.feedId)
+      || (representative && projection.fallback && representative.feedId !== projection.fallback.feedId);
+    if (sourceChanged) needsCounts = true;
+    if (baseline && baseline.value !== projection.value) {
+      changedFields.push(projection);
+      if (options.countChanges !== false && !sourceChanged) {
+        const counts = feedCounts.get(baseline.feedId);
+        if (counts) {
+          const field = projection.field === 'isRead' ? 'unread' : 'starred';
+          const delta = projection.field === 'isRead' ? (projection.value ? -1 : 1) : (projection.value ? 1 : -1);
+          if (feedCounts === s.feedCounts) feedCounts = new Map(feedCounts);
+          feedCounts.set(baseline.feedId, { ...counts, [field]: Math.max(0, counts[field] + delta) });
+        } else needsCounts = true;
+      }
+    }
+    if (tracked && baseline) tracked.projected = { feedId: baseline.feedId, value: projection.value };
+  }
+  const update = (entries: ArticleEntry[]): ArticleEntry[] => {
+    let changed = false;
+    const next = entries.map((entry) => {
+      let projected = entry;
+      for (const field of ['isRead', 'isStarred'] as const) {
+        const target = accepted.get(entryVersionKey(entry.id, field));
+        if (!target || projected[field] === target.value) continue;
+        changed = true;
+        projected = { ...projected, [field]: target.value };
+      }
+      return projected;
+    });
+    return changed ? next : entries;
   };
-  for (const [fid, delta] of unreadRestore) applyDelta(fid, 'unread', delta);
-  for (const [fid, delta] of starredRestore) applyDelta(fid, 'starred', delta);
-  /* OPT-008B R1：聚合角标由回滚调用方的 scheduleCountsReconcile() 以真实计数
-     整体替换（折叠组非线性，不做逐条 ±1 推算）。 */
-  appStore().setState({ entries, feedCounts });
-  syncCurrentViewCache(entries);
-  return { restored: true, takenOver };
+  const entries = update(s.entries);
+  let cachedChanged = false;
+  for (const [key, snapshot] of cached) {
+    const next = update(snapshot.entries);
+    if (next === snapshot.entries) continue;
+    cachedChanged = true;
+    viewEntriesCache.set(key, { ...snapshot, entries: next });
+  }
+  if (changedFields.length > 0) {
+    bumpLocalFlagWrite();
+    for (const { id, field } of changedFields) {
+      if (options.bumpVersion !== false) bumpEntryVersion(id, field);
+      recordEntryFieldWrite(id, field);
+    }
+  }
+  // 乐观写可建立当前快照；回滚绝不重建已淘汰缓存，也不插入已离开窗口的成员。
+  if (entries !== s.entries && options.bumpVersion !== false) syncCurrentViewCache(entries);
+  if (entries !== s.entries || feedCounts !== s.feedCounts) appStore().setState({ entries, feedCounts });
+  if (needsCounts) scheduleCountsReconcile({ force: true });
+  return { restored: changedFields.length > 0 || cachedChanged, takenOver };
 }
 
 /** F2/F3（Batch 1/2 独立审查 P3）收口：乐观标志写的唯一实现——卡片
@@ -1045,6 +1042,43 @@ export function rollbackEntryClaims(claims: readonly EntryRollbackClaim[]): Roll
       （字段级版本守卫 + 值等快速短路）——与批量标读、打开即标读同一份实现；
     - 失败 toast 由调用方给文案模板（保持各入口既有文案）；成功提示（若有）通过
       onSuccess 在**落库成功后**出现——与 P1-5「去假成功」同口径，不得提前乐观弹。 */
+type FlagIntent = { value: boolean; pending: boolean; failed: boolean };
+interface FlagWriteChain {
+  baseline: boolean;
+  version: number;
+  intents: FlagIntent[];
+  projected?: { feedId: string; value: boolean };
+}
+const flagWrites = new Map<string, FlagWriteChain>();
+
+/** 乐观字段真实翻转后登记：单条、批量和打开标读共享失败基线。
+    每个调用点在同步翻转后立即签发 claim（该次翻转恰推进一次字段版本）。
+    外部快照/其它真实写入推进版本时不续接旧链；结算仍经统一版本回滚助手。 */
+export function trackEntryFlagWrite(claim: EntryRollbackClaim, target: boolean): (failed: boolean) => RollbackOutcome {
+  const key = entryVersionKey(claim.id, claim.field);
+  const existing = flagWrites.get(key);
+  const writes: FlagWriteChain = existing?.version === claim.version - 1
+    ? existing
+    : { baseline: claim.prev, version: claim.version, intents: [] };
+  writes.version = claim.version;
+  const entry = appStore().getState().entries.find((row) => row.id === claim.id);
+  if (entry) writes.projected = { feedId: entry.feedId, value: target };
+  const intent: FlagIntent = { value: target, pending: true, failed: false };
+  writes.intents.push(intent);
+  flagWrites.set(key, writes);
+  return (failed) => {
+    if (!intent.pending) return { restored: false, takenOver: false };
+    intent.pending = false;
+    intent.failed = failed;
+    const value = writes.intents.reduce((prev, item) => item.failed ? prev : item.value, writes.baseline);
+    const outcome = writes.intents.some((item) => item.failed)
+      ? rollbackEntryClaims([{ ...claim, prev: value, version: writes.version }])
+      : { restored: false, takenOver: false };
+    if (!writes.intents.some((item) => item.pending) && flagWrites.get(key) === writes) flagWrites.delete(key);
+    return outcome;
+  };
+}
+
 export function optimisticEntryFlagToggle(
   id: string,
   field: 'isRead' | 'isStarred',
@@ -1060,7 +1094,7 @@ export function optimisticEntryFlagToggle(
   flipEntryFlag(id, field);
   /* TASK-118：乐观翻转（flipEntryFlag 已 bump 对应字段）后快照该字段版本，
      失败交给统一回滚助手——跨字段写入（如收藏）不再使本字段的回滚失效。 */
-  const claim: EntryRollbackClaim = { id, field, prev, version: getEntryVersion(id, field) };
+  const settle = trackEntryFlagWrite({ id, field, prev, version: getEntryVersion(id, field) }, optimistic);
   /* R2/N2：在途意图计数（起于乐观写入、止于请求落定）——期间任何计数快照都
      不得落地覆盖这个未提交意图；结束点用 endLocalFlagWrite 精确配对。 */
   beginLocalFlagWrite();
@@ -1069,6 +1103,7 @@ export function optimisticEntryFlagToggle(
   void request(optimistic).then((receipt) => {
     endLocalFlagWrite();
     endEntryFieldWrite(id, field);
+    settle(false);
     /* R2/N1：读闭包可能一并标读同 URL 未读副本——回执行让受影响条目/计数
        本地收敛（本次被点行已乐观翻转，跳过其重复扣减）。 */
     if (field === 'isRead' && optimistic) {
@@ -1079,7 +1114,7 @@ export function optimisticEntryFlagToggle(
   }).catch((e: unknown) => {
     endLocalFlagWrite();
     endEntryFieldWrite(id, field);
-    const outcome = rollbackEntryClaims([claim]);
+    const outcome = settle(true);
     /* R2：回滚被接管跳过时计数不可线性复原——权威修复（快照在途计数可能被本次
        未提交意图挡下，关闭 dedup 时此前无人收敛）。 */
     scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);

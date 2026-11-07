@@ -48,6 +48,36 @@ async function getInvoke(): Promise<Invoke | null> {
   return invokeFn;
 }
 
+// 本机读/藏写入在进入 IPC 前按调用顺序登记；DB Mutex 本身不保证 IPC FIFO。
+// read 共用一条前沿以包含 bulk、范围标读与同文读闭包；收藏独立，不互相阻塞。
+// Note: 顺序与失败边界 — 见 .agents/notes/implemented/architecture/2026-10-05-乐观写入的版本守卫.md
+const localFlagWriteFrontiers: Record<'read' | 'starred', Promise<void> | null> = {
+  read: null,
+  starred: null,
+};
+function runLocalFlagWrite<T>(field: 'read' | 'starred', write: () => Promise<T>): Promise<T> {
+  const task = (localFlagWriteFrontiers[field] ?? Promise.resolve()).then(write);
+  const tail = task.then(() => {}, () => {});
+  localFlagWriteFrontiers[field] = tail;
+  void tail.then(() => {
+    if (localFlagWriteFrontiers[field] === tail) localFlagWriteFrontiers[field] = null;
+  });
+  return task;
+}
+
+/** 只读等待：测试harness在复位/卸载前等待调用时已登记的读/藏写；不能改写或清空队列。
+    store 的 UI action 多为 void，故测试不能通过 await action 判断这些 IPC 已结束。 */
+export async function awaitLocalFlagWriteFrontier(): Promise<void> {
+  await Promise.all([localFlagWriteFrontiers.read, localFlagWriteFrontiers.starred]);
+}
+
+/** 由实际 store 装配注入：成功保存/应用配置、批量清理后使显示验签过时。
+    API 层不导入 store，保存失败不会发失效信号。 */
+let aiCacheInvalidated: (() => void) | null = null;
+export function bindAiCacheInvalidationHandler(handler: () => void): void {
+  aiCacheInvalidated = handler;
+}
+
 /* ============================================================
    后端行类型（Rust 侧 Serialize 的镜像）
    ============================================================ */
@@ -561,35 +591,43 @@ export const api = {
    * 返回**真实翻转行回执**（`[{id, feed_id}]`），供前端让受影响条目/计数本地
    * 收敛；mock/旧后端返回 null 时按无回执处理（仅乐观行）。 */
   async setRead(id: number, read: boolean): Promise<ReadWriteReceipt[] | null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('set_read', { id, read }) as ReadWriteReceipt[]) : null;
+    return runLocalFlagWrite('read', async () => {
+      const inv = await getInvoke();
+      return inv ? (await inv('set_read', { id, read }) as ReadWriteReceipt[]) : null;
+    });
   },
   /** 批量标读：一次 IPC 处理整批 id（AUDIT P3[F4]）。语义与逐条 setRead 等价，见
    *  Rust 侧 set_read_bulk 的契约注释（每个 id 都走 record_read_state + 入队）。
    *  R2（N1）：返回整批真实翻转行回执（去重升序；含闭包副本）。 */
   async setReadBulk(ids: number[], read: boolean): Promise<ReadWriteReceipt[] | null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('set_read_bulk', { ids, read }) as ReadWriteReceipt[]) : null;
+    return runLocalFlagWrite('read', async () => {
+      const inv = await getInvoke();
+      return inv ? (await inv('set_read_bulk', { ids, read }) as ReadWriteReceipt[]) : null;
+    });
   },
   async setStarred(id: number, starred: boolean): Promise<null> {
-    const inv = await getInvoke();
-    return inv ? (await inv('set_starred', { id, starred }) as null) : null;
+    return runLocalFlagWrite('starred', async () => {
+      const inv = await getInvoke();
+      return inv ? (await inv('set_starred', { id, starred }) as null) : null;
+    });
   },
   async markAllRead(
     feedId: number | null,
     folderId: number | null,
     opts?: { starredOnly?: boolean; sinceMs?: number; layout?: string },
   ): Promise<number | null> {
-    const inv = await getInvoke();
-    return inv
-      ? (await inv('mark_all_read', {
-          feedId,
-          folderId,
-          starredOnly: opts?.starredOnly ?? false,
-          sinceMs: opts?.sinceMs ?? null,
-          layout: opts?.layout ?? null,
-        }) as number)
-      : null;
+    return runLocalFlagWrite('read', async () => {
+      const inv = await getInvoke();
+      return inv
+        ? (await inv('mark_all_read', {
+            feedId,
+            folderId,
+            starredOnly: opts?.starredOnly ?? false,
+            sinceMs: opts?.sinceMs ?? null,
+            layout: opts?.layout ?? null,
+          }) as number)
+        : null;
+    });
   },
   async refreshAllFeeds(): Promise<RefreshSummary | null> {
     const inv = await getInvoke();
@@ -664,7 +702,10 @@ export const api = {
   },
   async saveAiConfig(value: string): Promise<null> {
     const inv = await getInvoke();
-    return inv ? (await inv('save_ai_config', { value }) as null) : null;
+    if (!inv) return null;
+    const result = await inv('save_ai_config', { value }) as null;
+    aiCacheInvalidated?.();
+    return result;
   },
   /** 连通性测试 + 拉模型列表；失败抛错（UI 层 toast） */
   async aiListModels(baseUrl: string, apiKey: string): Promise<string[] | null> {
@@ -836,13 +877,15 @@ export const api = {
   ): Promise<ConfigSyncApplyResult> {
     const inv = await getInvoke();
     if (!inv) throw new Error('仅 Tauri 客户端可用');
-    return (await inv('config_sync_apply', {
+    const result = (await inv('config_sync_apply', {
       payload,
       mode,
       expectedSnapshotHash,
       expectedVersion,
       expectedBackupPath: expectedBackupPath ?? null,
     })) as ConfigSyncApplyResult;
+    aiCacheInvalidated?.();
+    return result;
   },
 
   /* ---- GitHub 设备流登录 ---- */
@@ -1000,7 +1043,10 @@ export const api = {
    * 未读文章永不清理；远端仍存在的已读文章可能在下次同步后重新导入。 */
   async cacheCleanup(days: number, scope: 'articles' | 'ai'): Promise<string | null> {
     const inv = await getInvoke();
-    return inv ? (await inv('cache_cleanup', { days, scope }) as string) : null;
+    if (!inv) return null;
+    const result = await inv('cache_cleanup', { days, scope }) as string;
+    if (scope === 'ai') aiCacheInvalidated?.();
+    return result;
   },
   /** 首次关闭询问的应答：action='tray'|'exit'；remember=true 持久化选择 */
   async resolveClose(action: 'tray' | 'exit', remember: boolean): Promise<void> {

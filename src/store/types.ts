@@ -165,12 +165,30 @@ export interface CountsRow {
 /** OPT-013 B3：AI 产物种类（摘要/翻译；与后端 AiKind 的 id 域逐字一致）。 */
 export type AiProductKind = 'summary' | 'translation';
 
+/** 校验时的本地输入快照；仅用于拒收过时响应，签名正确性仍由后端判定。 */
+export interface AiStatusInput {
+  revision: number;
+  mutation: number;
+  feedId: string;
+  title: string;
+  url: string;
+  snippet: string;
+  contentId: number | null;
+  contentRevision: number;
+  fulltextExtracted: boolean;
+  /** 有 DB 身份时不复制正文；无身份/全文提取的兼容路径按实际 HTML 比较。 */
+  content: string | null;
+  summarySig: string | null;
+  translationSig: string | null;
+}
+
 /** OPT-013 B3：单个条目的 AI 校验状态（`ai_cache_check` 成功结果的最小快照）。
  *  只在校验成功时写入；失败保留现有值——校验故障既不得把可用产物误标为
  *  已过期，也不触发重新生成（B1 保守语义）。五态判定（slices/ai.ts 的
  *  selectAiProductState）以它为「签名是否与当前输入匹配」的唯一验证数据源：
  *  没有它就不存在 complete（不存在「产物非空 = complete」的回退路径）。 */
 export interface AiCacheStatus {
+  input: AiStatusInput;
   summaryVerified: boolean;
   translationVerified: boolean;
   /** 当前签名下的翻译分段进度（partial 判定与「已 N/M 段」展示的数据源） */
@@ -245,6 +263,7 @@ export interface AppState {
   settingsOpen: boolean;
   settingsTab: string;
   searchOpen: boolean;
+  contextMenuOpen: boolean;
   /** 首次关闭询问弹窗（Rust close-ask 事件驱动） */
   closeAskVisible: boolean;
   lightboxUrl: string | null;
@@ -459,11 +478,13 @@ export interface AppState {
       验证数据源，见 AiCacheStatus 注释）。写入点收口在 slices/ai.ts：
       checkCache / hintSegmentPlan / refreshAiStatus（生成结束后的刷新也经它）。 */
   aiStatusById: Record<string, AiCacheStatus>;
+  /** 已保存 AI 配置/批量清理的本地代次；不承载配置或后端签名。 */
+  aiStatusRevision: number;
   /** OPT-013 B3：拉取后端权威校验状态并缓存（Reader 打开文章、生成结束等时机；
       在途去重，失败保留现有状态）。 */
   refreshAiStatus: (id: string) => void;
-  /** OPT-013 B3：仅当本会话尚无该条目校验状态时拉取（卡片展示路径的惰性补齐；
-      已存在状态不重复 IPC——动作时刻仍走 ai_cache_check 权威复核）。 */
+  /** 当前输入尚无有效校验时惰性拉取；相同输入复用，输入改变重新只读校验。
+      动作时刻仍走 ai_cache_check 权威复核。 */
   ensureAiStatus: (id: string) => void;
   /** OPT-013 B3「清除」入口：调用后端清除命令（删除该条目该产物在**所有签名**
       下的持久化片段与整篇产物/签名、推进清除代次），成功后清前端状态——该条目

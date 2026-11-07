@@ -1,6 +1,6 @@
 import type { StateCreator } from 'zustand';
 import { api, extractError } from '../../lib/api';
-import { beginEntryFieldWrite, beginLocalFlagWrite, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCountsOrdered, scheduleCountsReconcile, viewEntriesCache } from '../internals';
+import { beginEntryFieldWrite, beginLocalFlagWrite, endEntryFieldWrite, endLocalFlagWrite, getEntryVersion, markEntriesRead, mergeSnapshotEntries, projectEntryFlags, QueryScope, reconcileCountsOrdered, scheduleCountsReconcile, trackEntryFlagWrite, viewEntriesCache } from '../internals';
 import { selectScopeEntries, selectVisibleEntries } from '../selectors';
 import type { AppState } from '../types';
 import type { ContentLayoutType, ViewFilterType } from '../../types';
@@ -114,6 +114,8 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
         activeContentLayout: context.layout,
         activeFeedFilter: context.scope,
       })) {
+        if (context.view === 'starred' && !entry.isStarred) continue;
+        if (context.view === 'today' && entry.publishedAt < (context.sinceMs ?? 0)) continue;
         operationIds.add(entry.id);
       }
     }
@@ -135,57 +137,20 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
     for (const [id, prev] of prevReadById) {
       if (!prev) optimisticVersionById.set(id, getEntryVersion(id, 'isRead'));
     }
+    const settlements = [...optimisticVersionById].map(([id, version]) =>
+      trackEntryFlagWrite({ id, field: 'isRead', prev: false, version }, true));
     const hasOptimisticWrite = optimisticVersionById.size > 0;
     if (hasOptimisticWrite) {
       beginLocalFlagWrite();
       for (const id of optimisticVersionById.keys()) beginEntryFieldWrite(id, 'isRead');
     }
 
-    const convergeLoadedScopeToRead = () => {
-      const current = get();
-      const inScope = selectScopeEntries({
-        ...current,
-        activeContentLayout: context.layout,
-        activeFeedFilter: context.scope,
-      });
-      const since = context.view === 'today' ? context.sinceMs : undefined;
-      const targetIds = new Set(
-        inScope
-          .filter((e) =>
-            getEntryVersion(e.id, 'isRead') === actionContext.operationVersionById?.[e.id]
-            && (context.view === 'starred' ? e.isStarred
-              : context.view === 'today' ? e.publishedAt >= (since ?? 0)
-              : true),
-          )
-          .map((e) => e.id),
-      );
-      if (targetIds.size > 0) markEntriesRead(targetIds);
-    };
-    const updateCapturedViewCache = (mode: 'read' | 'restore') => {
-      const cacheKey = QueryScope.viewKey(actionContext.layout, actionContext.view, actionContext.scope);
-      const cached = viewEntriesCache.get(cacheKey);
-      if (!cached) return;
-      viewEntriesCache.set(cacheKey, {
-        ...cached,
-        entries: cached.entries.map((entry) => {
-          if (!ids.has(entry.id)) return entry;
-          const operationVersion = actionContext.operationVersionById?.[entry.id];
-          if (typeof operationVersion !== 'number'
-            || getEntryVersion(entry.id, 'isRead') !== operationVersion) {
-            return entry;
-          }
-          const isRead = mode === 'read' ? true : actionContext.attemptReadById?.[entry.id];
-          if (typeof isRead !== 'boolean' || entry.isRead === isRead) return entry;
-          return { ...entry, isRead };
-        }),
-      });
-    };
-
     void api.markAllRead(context.feedId, context.folderId, {
       starredOnly: context.starredOnly,
       sinceMs: context.sinceMs,
       layout: context.layout,
     }).then(() => {
+      for (const settle of settlements) settle(false);
       if (hasOptimisticWrite) {
         endLocalFlagWrite();
         for (const id of optimisticVersionById.keys()) endEntryFieldWrite(id, 'isRead');
@@ -193,8 +158,10 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       get().showToast('已全部标为已读');
       /* affected=0 也是成功终态（目标已全读）：仍按捕获上下文收敛缓存并重新对账，
          否则「首次已提交但响应丢失 → 切 B → 重试返回 0」会留下旧缓存未读。 */
-      if (matchesCurrentContext(get())) convergeLoadedScopeToRead();
-      updateCapturedViewCache('read');
+      // 已乐观的行/离屏重试均由同一字段提交者更新现存副本；范围总计数由下方权威读取负责。
+      projectEntryFlags([...operationIds].map((id) => ({
+        id, field: 'isRead', value: true, version: actionContext.operationVersionById?.[id],
+      })), { countChanges: false });
       const reconcileCounts = (): Promise<'applied' | 'stale' | 'empty'> =>
         reconcileCountsOrdered().then((outcome) => {
           if (outcome === 'failed') throw new Error('计数对账读取失败');
@@ -216,48 +183,16 @@ export const createNavSlice: StateCreator<AppState, [], [], NavSlice> = (set, ge
       };
       runCountReconcile(true);
     }).catch((e: unknown) => {
+      const outcomes = settlements.map((settle) => settle(true));
       if (hasOptimisticWrite) {
         endLocalFlagWrite();
         for (const id of optimisticVersionById.keys()) endEntryFieldWrite(id, 'isRead');
       }
-      const current = get();
-      let changed = false;
-      let takenOver = false;
-      const unreadRestore = new Map<string, number>();
-      for (const [id, version] of optimisticVersionById) {
-        if (getEntryVersion(id, 'isRead') !== version) {
-          takenOver = true;
-          continue;
-        }
-        const feedId = actionContext.attemptFeedIdById?.[id];
-        if (feedId) unreadRestore.set(feedId, (unreadRestore.get(feedId) ?? 0) + 1);
+      // 字段/计数恢复已经由settlements统一投影，不能再按“当前是否离屏”重复回补。
+      const takenOver = outcomes.some((outcome) => outcome.takenOver);
+      if (clearedOpenedReadIds && get().openedReadIds === clearedOpenedReadIds) {
+        set({ openedReadIds: prevOpenedReadIds });
       }
-      const entries = current.entries.map((a) => {
-        if (!ids.has(a.id)) return a;
-        const prev = prevReadById.get(a.id);
-        if (prev !== false || a.isRead !== true) return a;
-        if (getEntryVersion(a.id, 'isRead') !== optimisticVersionById.get(a.id)) return a;
-        changed = true;
-        return { ...a, isRead: prev };
-      });
-      let feedCounts = current.feedCounts;
-      if (unreadRestore.size > 0) {
-        feedCounts = new Map(current.feedCounts);
-        for (const [fid, delta] of unreadRestore) {
-          const count = feedCounts.get(fid);
-          if (count) feedCounts.set(fid, { ...count, unread: Math.max(0, count.unread + delta) });
-        }
-      }
-      const next: Partial<AppState> = {};
-      if (changed) {
-        next.entries = entries;
-      }
-      if (unreadRestore.size > 0) next.feedCounts = feedCounts;
-      if (clearedOpenedReadIds && current.openedReadIds === clearedOpenedReadIds) {
-        next.openedReadIds = prevOpenedReadIds;
-      }
-      set(next);
-      updateCapturedViewCache('restore');
       scheduleCountsReconcile(takenOver ? { force: true } : undefined);
       get().showToast(`全部已读保存失败：${extractError(e)}`, {
         label: '重试',

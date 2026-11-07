@@ -2,7 +2,7 @@
 import type { StateCreator } from 'zustand';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
 import type { ArticleListItemRow } from '../../lib/api';
-import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, applyReadReceipt, appStore, asReadReceipts, beginCountsFetch, beginEntryFieldWrite, beginLocalFlagWrite, buildFeedIndex, buildScopeCountsSnapshot, canLandCounts, currentFlagWriteSettleSerial, currentLocalFlagWriteSerial, emptyArticlesCursor, endEntryFieldWrite, endLocalFlagWrite, entryInFlightFieldKeys, feedCountsFromRows, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, rollbackEntryClaims, scheduleCountsReconcile, setViewEntriesSnapshot } from '../internals';
+import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, applyReadReceipt, appStore, asReadReceipts, beginCountsFetch, beginEntryFieldWrite, beginLocalFlagWrite, buildFeedIndex, buildScopeCountsSnapshot, canLandCounts, currentFlagWriteSettleSerial, currentLocalFlagWriteSerial, emptyArticlesCursor, endEntryFieldWrite, endLocalFlagWrite, entryInFlightFieldKeys, feedCountsFromRows, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, scheduleCountsReconcile, setViewEntriesSnapshot, trackEntryFlagWrite } from '../internals';
 import { applyConfigRead, beginConfigRead } from '../aiConfigWrites';
 import type { EntryRollbackClaim } from '../internals';
 import type { AppState, ArticlesCursorState } from '../types';
@@ -75,7 +75,7 @@ const firstPageSerialByKey = new Map<string, number>();
 /* 启动并行装载的「落库有序」门（审计卡2-5）。App 挂载只发起
    bootstrapFromBackend；bootstrapFromBackend 在发出数据查询的同一时刻并行
    启动 bootstrapSettings（首读并行），并把自己的完成 promise 记到本变量——
-   reloadFromBackend 发起时同步捕获（一次性），落地前等待它：设置接受
+   reloadFromBackend 发起时同步捕获，设置未落定期间所有接手 reload 的落地都等待它：设置接受
    （settings/activeViewFilter/timelineFilter 写入）必须先于数据快照落地，
    否则落地时读 settings.smartDedup 会拿默认值（scopeCounts 快照缺失）、
    完成时的 activeViewFilter 复查拿不到恢复的 startupView（筛选视图缺首拉）、
@@ -440,11 +440,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       消费顶条锚回位（审计「后台刷新保留当前阅读位置」）；导航路径不传，
       锚机制对用户主动切换保持沉默（分流显式化）。 */
   reloadFromBackend: async (opts) => {
-    /* 启动落库门发起时捕获（见 pendingStartupLandGate 头注）：同步读取后立即
-       清空——只有「与设置恢复同时发起」的那一次 reload 受约束；期间被事件
-       触发的其它 reload 捕获到 null，不受牵连。 */
+    /* 启动设置未落定时，接手的后台 reload 同样等待设置接受；不能由第一笔
+       消费后清空，否则接手者按默认 all 落地，设置迟到再切 unread 会漏掉首拉。 */
     const landGate = pendingStartupLandGate;
-    pendingStartupLandGate = null;
     /* TASK-109①：发起时一次性快照「范围×布局×排序」——查询参数、分页游标键
        与「全部」视图缓存键全部从该快照派生。原实现在 await 之后读「完成时」
        的 activeFeedFilter/activeContentLayout 充当游标键与缓存键口径（注释
@@ -908,19 +906,21 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
            activeArticleId（文章刚被锚定打开，用户还在读）。 */
         markEntriesRead(new Set([targetId]));
         const claim: EntryRollbackClaim = { id: targetId, field: 'isRead', prev: false, version: getEntryVersion(targetId, 'isRead') };
+        const settle = trackEntryFlagWrite(claim, true);
         beginLocalFlagWrite();
         beginEntryFieldWrite(targetId, 'isRead'); // R4：articles 快照的在途写保护
         const flagSerialAtRequest = currentLocalFlagWriteSerial();
         void api.setRead(Number(targetId), true).then((receipt) => {
           endLocalFlagWrite();
           endEntryFieldWrite(targetId, 'isRead');
+          settle(false);
           /* R2/N1：回执行驱动条目/计数本地收敛（被打开行已乐观翻转，跳过）。 */
           applyReadReceipt(asReadReceipts(receipt), new Set([targetId]), flagSerialAtRequest);
           scheduleCountsReconcile();
         }).catch((e) => {
           endLocalFlagWrite();
           endEntryFieldWrite(targetId, 'isRead');
-          const outcome = rollbackEntryClaims([claim]);
+          const outcome = settle(true);
           /* R2：同 selectArticle——回滚被接管跳过时强制权威对账修复计数。 */
           scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
           get().showToast(`标读失败：${extractError(e)}`);
@@ -1050,6 +1050,10 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
        （内部 catch），门不会因设置读取失败而悬挂。 */
     const settingsTask = get().bootstrapSettings();
     pendingStartupLandGate = settingsTask;
+    const releaseSettingsGate = () => {
+      if (pendingStartupLandGate === settingsTask) pendingStartupLandGate = null;
+    };
+    void settingsTask.then(releaseSettingsGate, releaseSettingsGate);
     try {
       await get().reloadFromBackend();
     } catch (e) {

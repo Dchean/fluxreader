@@ -249,6 +249,7 @@ export default function App() {
          （审查 TASK-081-F2 登记的遗留）。 */
       const overlayOpen = anyOverlayOpen({
         searchOpen: s.searchOpen,
+        contextMenuOpen: s.contextMenuOpen,
         settingsOpen: s.settingsOpen,
         newCategoryModalOpen: s.newCategoryModalOpen,
         addFeedModalOpen: s.addFeedModalOpen,

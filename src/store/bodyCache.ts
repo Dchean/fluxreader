@@ -47,7 +47,7 @@
         落地即执行本对齐——这就是清理链路的显式失效点）；
       - 行 AI 产物非空且与记录不同（ready 记录）→ 对齐为行真值（含他端再生）；
       - 行 snippet 与记录所对应的视图行不同 → 该文章已被源站重新同步，正文可能
-        陈旧 → 记录失效（删记录回未请求态，懒水合自动重取）——探针 P4
+        陈旧 → 记录置 cleared 并推进失效戳，懒水合自动重取——探针 P4
         「snippet 更新后正文陈旧、entryNeedsHydration=false 不重取」的修复本体。
         判据 = 「新行 snippet ≠ 被替换视图行的 snippet」：记录存活意味着其水合后
         未曾失效，视图行 snippet 即水合时基线；不按 aiWrittenAt 豁免（正文陈旧
@@ -97,7 +97,7 @@ export interface BodyEntry {
   state: BodyState;
   /** 渲染态正文 HTML（Readability 全文提取后 = 全文；空串 = 后端无正文） */
   content: string;
-  /** RSS 原始正文（「全文 ↔ RSS 正文」切换回跳用） */
+  /** 本会话实际持有的 RSS 正文；详情仅返回提取全文时为空，不冒充 RSS 来源。 */
   rawContent: string;
   /** 译文（cleared 后为空串） */
   translatedContent: string;
@@ -165,6 +165,13 @@ class BodyLru extends Map<string, BodyEntry> {
 }
 
 const bodyById: Map<string, BodyEntry> = new BodyLru(BODY_CACHE_MAX);
+// 淘汰/重试后新请求也不得复用旧戳；只保存单调序号，不另留每文章墓碑。
+let bodyRevisionSequence = 0;
+function nextRevision(current?: number): number {
+  const revision = current === undefined ? bodyRevisionSequence + 1 : current + 1;
+  bodyRevisionSequence = Math.max(bodyRevisionSequence, revision);
+  return revision;
+}
 
 /* ── 写入通知（响应性接线）────────────────────────────────────
    本缓存是模块级状态（不在 store 快照内），而组件经 useAppStore 的 selector
@@ -204,7 +211,7 @@ function emptyRecord(state: BodyState): BodyEntry {
     aiSummarySig: null,
     translatedSig: null,
     fulltextExtracted: false,
-    contentRevision: 0,
+    contentRevision: nextRevision(),
     contentId: null,
     contentRev: 0,
     entryAnchor: null,
@@ -224,8 +231,9 @@ function emptyRecord(state: BodyState): BodyEntry {
 export function markBodyLoading(id: string): number {
   const existing = bodyById.get(id);
   if (existing && existing.state !== 'cleared') return existing.contentRevision;
-  const revision = existing?.contentRevision ?? 0;
-  bodyById.set(id, { ...emptyRecord('loading'), contentRevision: revision });
+  const next = { ...emptyRecord('loading'), ...(existing ?? {}), state: 'loading' as const };
+  const revision = next.contentRevision;
+  bodyById.set(id, next);
   touch();
   return revision;
 }
@@ -234,7 +242,7 @@ export function markBodyLoading(id: string): number {
     刷新 AI 写入时刻。state 由调用方给定（生成 → ready 解除 cleared；
     失效 → cleared）。 */
 function withExplicitAiWrite(rec: BodyEntry, state: BodyState): BodyEntry {
-  return { ...rec, state, contentRevision: rec.contentRevision + 1, aiWrittenAt: Date.now() };
+  return { ...rec, state, contentRevision: nextRevision(rec.contentRevision), aiWrittenAt: Date.now() };
 }
 
 /** OPT-008B R3：由后端行（详情/批量水合）计算条目身份锚。行缺 feed_id/title
@@ -249,16 +257,17 @@ function anchorOfRow(row: { feed_id?: number | null; title?: string | null }): s
       本响应过期，整行丢弃（cleared/最新状态不被旧响应复活）；
     - aiFallback：行 AI 列为 NULL 时保留的现值（流式半截/未落库产物，
       规则见模块头注「水合 AI 列的回退规则」）；
-    - 无记录（LRU 淘汰后迟到落地等）→ 以空记录为底新建，stamp=0 恒匹配。 */
+    - 无记录（LRU 淘汰后迟到落地等）→ 拒绝；下次请求签发新的戳，旧请求不复活记录。
+    返回值同时决定详情轻字段是否有资格落地。 */
 export function applyBodyRow(
   id: string,
   row: { content_html?: string | null; translated_content?: string | null; ai_summary?: string | null; fulltext_extracted?: boolean | null; content_id?: number | null; content_revision?: number | null; feed_id?: number | null; title?: string | null; ai_summary_sig?: string | null; translated_sig?: string | null },
   stamp: number,
   aiFallback: { translatedContent: string; aiSummary: string },
-): void {
+): boolean {
   const current = bodyById.get(id);
-  if (current && current.contentRevision !== stamp) return; // 显式失效在途 → 响应过期
-  const base = current ?? emptyRecord('ready');
+  if (!current || current.contentRevision !== stamp) return false;
+  const base = current;
   /* OPT-013 B1：签名随产物来源走——行携带产物（非 NULL）时签名取行值
      （行缺省签名字段 = 旧无签名产物 → null）；行产物为 NULL（回退到 aiFallback
      的流式半截）时保留记录现值（签名不脱离产物独立改写）。 */
@@ -268,7 +277,7 @@ export function applyBodyRow(
     ...base,
     state: 'ready',
     content: row.content_html ?? '',
-    rawContent: row.content_html ?? '',
+    rawContent: row.fulltext_extracted ? base.rawContent : row.content_html ?? '',
     translatedContent: row.translated_content ?? aiFallback.translatedContent,
     aiSummary: row.ai_summary ?? aiFallback.aiSummary,
     aiSummarySig: summarySig,
@@ -284,6 +293,7 @@ export function applyBodyRow(
     message: '',
   });
   touch();
+  return true;
 }
 
 /** OPT-008B 第二阶段：正文真值修订变化（列表快照合并发现条目引用的 contents
@@ -317,7 +327,7 @@ export function invalidateContentRevision(
     contentId,
     contentRev: revision,
     entryAnchor: anchor ?? current.entryAnchor,
-    contentRevision: current.contentRevision + 1,
+    contentRevision: nextRevision(current.contentRevision),
   });
   touch();
   return true;
@@ -326,7 +336,7 @@ export function invalidateContentRevision(
 /** 水合响应缺行（含空 rows）：文章不存在终态。stamp 比对同 applyBodyRow。 */
 export function markBodyMissing(id: string, stamp: number): void {
   const current = bodyById.get(id);
-  if (current && current.contentRevision !== stamp) return;
+  if (!current || current.contentRevision !== stamp) return;
   bodyById.set(id, { ...(current ?? emptyRecord('missing')), state: 'missing', message: BODY_MISSING_MESSAGE });
   touch();
 }
@@ -334,7 +344,7 @@ export function markBodyMissing(id: string, stamp: number): void {
 /** 水合失败：failed 终态 + 错误文案（内联重试依据）。stamp 比对同 applyBodyRow。 */
 export function markBodyFailed(id: string, stamp: number, message: string): void {
   const current = bodyById.get(id);
-  if (current && current.contentRevision !== stamp) return;
+  if (!current || current.contentRevision !== stamp) return;
   bodyById.set(id, { ...(current ?? emptyRecord('failed')), state: 'failed', message });
   touch();
 }
@@ -346,7 +356,7 @@ export function dropBodyEntry(id: string): void {
 }
 
 /** 全文提取成功：正文被 Readability 结果覆盖（rawContent 保留 RSS 原文）。
-    AI 字段不动；不 bump revision（非显式失效，同一实体的正文内容更新）。
+    AI 字段不动；推进失效戳，提取前在途的旧详情不得覆盖已提交的新全文。
     无记录 = 未水合，提取前提不成立（调用方守卫），此处防御性忽略。
     OPT-008B R3：identity = 提取响应携带的提交后 (contentId, contentRev)
     ——落记录使下一次 reload 的修订比较**相等**（DB 行已是该修订），刚成功
@@ -361,6 +371,7 @@ export function applyExtractedFulltext(
   bodyById.set(id, {
     ...current,
     content: html,
+    contentRevision: nextRevision(current.contentRevision),
     fulltextExtracted: true,
     state: 'ready',
     contentId: identity ? identity.contentId : current.contentId,
@@ -437,12 +448,13 @@ export function reconcileBodyEntities(
     if (isGenerating(id)) continue;
     const fact = facts.get(id);
     if (!fact) continue;
-    /* P4（探针 P4 修复本体）：行 snippet 变化 = 文章被重新同步 → 正文可能陈旧
-       → 删记录回未请求态（懒水合自动重取）。见模块头注「显式失效规则 1」。 */
+    /* snippet 与内容身份同时变化也必须保留失效记录，旧响应资格不能因删档复活。 */
     const prevSnippet = prevSnippets.get(id);
     if (prevSnippet !== undefined && prevSnippet !== fact.snippet) {
-      bodyById.delete(id);
-      touch();
+      if (rec.state !== 'cleared' || rec.content !== '') {
+        bodyById.set(id, { ...rec, state: 'cleared', content: '', rawContent: '', fulltextExtracted: false, contentRevision: nextRevision(rec.contentRevision) });
+        touch();
+      }
       continue;
     }
     const hadAi = rec.aiSummary !== '' || rec.translatedContent !== '';

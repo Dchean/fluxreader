@@ -54,7 +54,7 @@ export function GeneralTab() {
       <SettingCard title="滚动到底部时标为已读" desc="正文滚至末尾才算读过">
         <Switch checked={settings.markReadOnScrollBottom} onChange={(v) => updateSettings({ markReadOnScrollBottom: v })} />
       </SettingCard>
-      <SettingCard title="滚动出列表区域时标为已读">
+      <SettingCard title="滚动出列表区域时标为已读" desc="仅在未读列表中生效">
         <Switch checked={settings.markReadOnScrollOut} onChange={(v) => updateSettings({ markReadOnScrollOut: v })} />
       </SettingCard>
 
