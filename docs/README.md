@@ -36,4 +36,6 @@
 
 2026-11-05/06 只读审计原始报告、日志、截图和探针保留在本机忽略目录 `tmp/audit-2026-11-05/` 与 `tmp/audit-2026-11-06/`。它们不是每次克隆都会获得的附件；需复核对应本地证据时应保留整目录。长期事实在各主题文档中说明证据时点及上限，不把旧运行结果拼成当前全量通过。
 
+本轮修复与独立复审证据在本机 `tmp/repair-2026-11-06/`：`environment/evidence/` 保存限定真实服务端运行（`live-cd-final-summary.json`）、云备份 WebDAV 生产往返（`cloud-backup-r1/`）与原生隔离实机验证（`native-verify-r1/`，17 项结果与数据边界对照），`integration-rust/` 保存最终 Rust 五项整合门禁，`maintenance/` 保存依赖整合与目标平台静态分析，后端整合独审在 `audit-backend/cloud-integration-final/`；前端画廊/焦点批证据在 `tmp/frontend/gallery-ui-r1/final-r1/`（`ui-layout-r8/` 全量指标、`gates-r3/` 门禁摘录、`audit-row-root/` 独立诊断与定向复审）；AF1 根因诊断及最终投影证据另在 `tmp/frontend/diagnosis-af1-r2/`。限定通过范围、未关闭项与发布状态沿用上方验收入口；这些目录不入库，也没有被转存为线上归档。
+
 已封印的 `.agents/notes/archived/` 是历史快照，正文与既有 manifest 条目冻结。新解释和后继关系写在活跃篇；旧快照中的过去时结论不指导当前实现。

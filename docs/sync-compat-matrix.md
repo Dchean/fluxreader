@@ -4,7 +4,7 @@
 
 外部参照固定为 [Miniflux faecfa2](https://github.com/miniflux/v2/tree/faecfa2fac61a91f4f69550bb1afd506c4b51749) 与 [FreshRSS 4e8a258](https://github.com/FreshRSS/FreshRSS/tree/4e8a258b011aad190597d7953b7122fc43f4658f)。2026-11-03 的来源记录在 `tmp/audit-sync-core/upstream/provenance.json`，2026-11-06 对订阅更新/URL 匹配另有固定源码复核。旧鉴权材料的 FreshRSS `219eaf58` 属 2026-10-08 时点。夹具模拟这些形态，不等于某个真实部署版本已经验收。
 
-**验证上限**：生产客户端的受控 HTTP/SQLite 测试已覆盖下列有限路径；真实 FreshRSS/Miniflux 部署、全部版本与 live 写入尚未逐一实机验收。最近独立反例仍发现[同步正确性缺口](roadmap.md#sync-correctness)，因此“实现存在”不等于异常路径全部满足设计约束。
+**验证上限**：生产客户端的受控 HTTP/SQLite 测试已覆盖下列有限路径；本轮同步缺陷与重认证报告修复已在固定范围通过独立复审，版本与原始失败链见[验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md#本轮修复的限定验收2026-11-07)。FreshRSS 1.30.4、Miniflux 2.3.5 的隔离真实服务端已完成下方[限定 live 实测](#live-deployments)；这些结果不代表全部部署、版本或异常路径均已验收。
 
 ## 状态操作与冲突政策
 
@@ -32,8 +32,8 @@ GR 的 `kept-unread` 标签（`user/-/state/com.google/kept-unread`）目前没�
 | 状态三态 | GR 缺失/null categories 是 Missing，显式 `[]` 是 false；Fever 缺字段 Missing、0/1 为明确值，其他数字拒绝。Missing 只更新可接受内容，不覆盖已有读藏 |
 | ACK 不等于已应用 | 请求成功外观之后按目标 ID 读回；重复/无关 ID 不补足缺项。主目标存在且目标态一致才确认；空/短/缺状态/非法回包保留 retry_wait/verification，不猜目标删除 |
 | 广播确认 | 主目标决定出队，副本缺失记 partial。相同 states 轮已尝试过的 queue ID 不补推第二次 |
-| 入库归属 | 精确远端条目身份优先，URL 只能辅助匹配；缺归属需失败关闭是设计要求，但新条目缺 origin 的当前漏口仍会推进游标，见下方例外 |
-| 订阅身份 | 同一远端 feed ID 可以更改 URL；当前按规范 URL 匹配的实现会删旧建新，另可覆盖不同远端 ID。尚未修为 remote ID 优先，不把方案写成事实 |
+| 入库归属 | 精确远端条目身份优先，URL 只能辅助匹配。有效远端 ID 且 feed 已绑定时，缺/空/空白 URL 仍可独立入库，空白链接不产生匹配键；新 GR 条目缺有效 origin 明确失败并保留游标，已绑定 ID 的稀疏回包继续兼容 |
+| 订阅身份 | 远端 feed ID 优先，仅未绑定本地行参与 URL 兜底。远端来源的同 ID 改 URL 保留本地 ID、文章、布局、分类与自定义标题；本地来源的已绑定源保留本地 URL。多重绑定、规范 URL 多候选或唯一 URL 冲突明确报错并保留原值，退订对账按远端 ID 判断 |
 
 有远端身份的本地意图进入推送；无身份的 direct 条目按所属源区分 local_only 与 bindable_retry，不计作可推 waiting。超过 30 天转 expired_unconfirmed，保留队项和本地读藏。显式恢复用摘要 account_generation 复核当前账号、按文章当前目标建立新操作 ID；缺文章仍过期，恢复不等于确认。断开/换号放弃旧状态队列，本地直连读藏保留但不会自动迁入新账号。详见[队列生命周期](../.agents/notes/implemented/architecture/2026-11-03-同步队列生命周期与本地意图.md)及[回补与恢复](../.agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md)。
 
@@ -48,14 +48,11 @@ GR 的 `kept-unread` 标签（`user/-/state/com.google/kept-unread`）目前没�
 | Fever 历史 | max_id 向旧，页内最小ID为下页游标且严格减小；每轮最多200页 | Unknown/Pending/Complete，缺失Unknown、损坏明确报错；预算或失败保留Pending，自动light续取，full从顶部幂等重放。先存Pending才允许更大since；只有空页完成 |
 | Fever 点查 | with_ids 50 ID/批；i64::MAX 顶边界另点查 | 点查与Pending续取页不推进连续since，防跳过区间；初始或回滚后map读取失败即停止，不退空映射继续 |
 
-GR/Fever 协议响应使用16 MiB流式读取硬界，含解压后的大小。Fever时间戳只应在无失败且历史完成后维护；GR游标只应在主列举、合并、绑定和权威回补全部成功后推进。以下实际缺口使这些目标约束仍有例外：
+GR/Fever 协议响应使用16 MiB流式读取硬界，含解压后的大小。Fever完成时间写入只在无失败且历史完成后尝试，写入失败进入报告；GR游标在主列举、合并、绑定和权威回补全部成功后推进。绑定不完整或新条目缺归属时保留旧游标，下一轮可重试。
 
-- 两协议的空/缺/空白链接条目仍被跳过，Fever可能在漏项时标历史完成。
-- GR新条目缺origin时可能静默跳过；已知ID稀疏响应的兼容与新条目归属失败不能混同。
-- 首轮已提交数据后401重认证重试，返回变化标志可能漏掉首轮事实；队项出队确认失败与Fever完成时间写失败也可能未进入报告。
-- Fever单次高层写调用内部未逐次复核会话，断开之后仍可能继续发送后续mark。
+认证重试累计首轮已提交变化与统计，只过滤已恢复的认证故障。首轮非认证 SQL/协议错误继续作为注明“当时状态”的历史事实保留；重试成功不把旧“待重试”文案冒充当前队项状态，重认证登录失败也不替换原报告。远端已接受但本地确认出队失败时明确报告，队项留待重试。
 
-这些是2026-11-05/06生产探针的反例，不因页事务、版本守卫或当前Rust CI通过而关闭。详见[当前同步缺口](roadmap.md#sync-correctness)。普通125条分页、重复full幂等和四态正常写回的对照仍有效，不能反向说整个同步管线无实现。
+Fever 的每次实际探测/写请求前复核账号会话代次，断开后阻止新请求；已经发出的请求无法撤回。并发 discovery 的已发请求也属于这一边界。2026-11-05/06 的原始反例与后继复审均保留在验收入口所列本地证据中，不改写原失败。
 
 ## 固定服务端差异
 
@@ -82,6 +79,22 @@ GR/Fever 协议响应使用16 MiB流式读取硬界，含解压后的大小。Fe
 
 能力声明由生产能力矩阵和持久订阅回执承担，详见[能力矩阵与持久回执](../.agents/notes/implemented/architecture/2026-10-15-订阅写回能力矩阵与持久回执.md)、[订阅执行器](../.agents/notes/implemented/architecture/2026-10-14-订阅写回outbox执行器.md)。配置镜像仅本机，不产生远端退订；配置中的连接资料只作待确认建议，不混旧凭据激活新地址。
 
+配置快照保持 schema2，新导出的源用可选 `folder_sync_id` 精确引用快照内分类，身份未知时整体拒绝；旧文件缺字段才按未裁剪的精确分类名匹配，重名取快照首槽并在预览警告。旧客户端可忽略新增字段，但这不能补回旧版本的同名分类归属能力。恢复本机源只在新增事务内解除该 URL 的当前/legacy 墓碑，不产生远端订退、不迁移账号，也不清除此前明确入队的远端退订；预览会提示其之后仍可能执行。完整数据库恢复另见[备份说明](backup.md)。
+
+<a id="live-deployments"></a>
+## 真实服务端的限定实测
+
+2026-11-07，客户端从 `dev@1bb698c` 加修复后的固定 `snapshot-cd` 重编，运行既有生产 live 测试，原测试未改。每套服务使用2源120篇合成文章，GR 3项为认证/订阅、ID/正文、收藏写回恢复；Fever 4项为认证/订阅、未读/收藏/条目、读藏写回恢复及空临时库的完整同步。完整同步实测为 Fever 引擎的2源120篇落库，不外推为已跑 GR 引擎完整同步。
+
+| 服务端与运行环境 | 实际输入地址 | 已通过覆盖 | 仍未通过或未覆盖 |
+| --- | --- | --- | --- |
+| Miniflux2.3.5，固定 faecfa2，Go1.26构建、PostgreSQL17.6 | 根地址 `http://127.0.0.1:1922` | GR 3项、Fever 4项，各项恰1 passed且exit0；完整未读/收藏ID集合前后相同 | 其他版本、部署反代、多设备并发与全部异常输入未逐一覆盖 |
+| FreshRSS1.30.4，PHP8.4.27内置服务器 | GR `http://127.0.0.1:13555/api/greader.php`；Fever `http://127.0.0.1:13555/api/fever.php` | GR 3项、Fever 4项，各项恰1 passed且exit0；完整未读/收藏ID集合前后相同 | 本配置的根地址自动发现失败，显式路径通过不关闭该失败；其他Web服务器、反代和版本未逐一覆盖 |
+
+FreshRSS 首次输入根地址时，未知 `/accounts/ClientLogin` 被 PHP 内置服务器交给上级入口，302后返回200 HTML，客户端未得到认证体而失败；该次未改变服务端状态。明确 API 路径是现有产品支持的输入，没有修改客户端或测试来绕过断言。此结果限定当前服务器路由形态，不推导所有 FreshRSS 根地址都失败。
+
+原始每项结果、服务端完整ID快照和148文件客户端绑定在本机 `tmp/repair-2026-11-06/environment/evidence/live-cd-final-summary.json` 及其所列目录；当时活动工作区只多出已记录的 scheduler 注释变化。上述为真实生产客户端的定向运行证据，未单独作独立审计，也不替代安装版/WebView2、真实用户库或最终集成门禁。
+
 ## 验证入口与边界
 
 | 检查对象 | 已有可执行覆盖 |
@@ -90,7 +103,8 @@ GR/Fever 协议响应使用16 MiB流式读取硬界，含解压后的大小。Fe
 | 集合完整/游标 | greader_compat_e2e、star_reconcile_truncation_e2e、pull_cursor_e2e、pull_window_e2e；缺字段/重复continuation/短contents/请求ID覆盖 |
 | Fever历史与恢复 | fever_compat_e2e：125条、非空短页、Unknown/Pending、200页续取、i64::MAX、页写失败/重建map失败、流式收体与字符串ID |
 | ACK和本地意图 | sync_ack_verification_e2e、sync_gap_repro_e2e、expired recovery、sync-recovery组件；未知不判删除、主目标结算、过期重建与账号代次 |
+| 本轮同步正确性 | sync_correctness_e2e；断开逐请求、无 URL、新条目缺归属、重认证保变化/故障、出队与时间持久化失败、远端 ID 优先及冲突保全。独立反例与最终 setter 的固定版本证据见验收入口 |
 | 鉴权/分类 | greader_compat_e2e的两种严格认证形态、feed_edit与sync_gap分类移动；普通mock_greader不验证真实认证 |
-| 真实部署 | fever_live/fever_sync_live/greader_live等ignored套件须单独约定账号与读写边界；没有用CI默认测试冒充实机通过 |
+| 真实部署 | greader_live_e2e、fever_live_e2e、fever_sync_live_e2e的原7个ignored用例已在上表两套服务端逐项运行；仅覆盖约定合成账号/读写恢复范围，不由CI默认测试推定 |
 
 测试名是覆盖入口，不是当前全部通过的结论。精确提交的门禁状态与最近证伪结果由[验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md)集中记录；未解决行为留在roadmap，避免矩阵与每篇Note复制轮次进度。
