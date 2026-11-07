@@ -417,7 +417,7 @@ body {
 }
 
 .nav-tab-item.active-layout {
-  background: var(--accent) !important;
+  background: var(--nav-selected-bg, var(--accent)) !important;
   color: #ffffff !important;
   font-weight: 600;
   box-shadow: 0 2px 8px var(--accent-glow);
@@ -1922,9 +1922,21 @@ body {
   font-size: 12px;
   color: var(--text-tertiary);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
+  gap: 4px 12px;
   margin-bottom: 14px;
+}
+
+.reader-byline > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.reader-byline .reader-meta-time,
+.reader-byline .reader-meta-read-time {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .reader-actions-toolbar {
@@ -2319,7 +2331,7 @@ body {
 }
 
 .settings-nav-item.active {
-  background: var(--accent);
+  background: var(--nav-selected-bg, var(--accent));
   color: #fff;
   font-weight: 600;
 }
