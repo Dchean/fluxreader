@@ -961,7 +961,8 @@ pub fn cleanup_cache(conn: &mut Connection, days: i64, scope: &str) -> AppResult
             &format!(
                 "UPDATE articles SET ai_summary = NULL, translated_content = NULL,
                         ai_summary_sig = NULL, translated_sig = NULL, ai_epoch = ai_epoch + 1
-                 WHERE (ai_summary IS NOT NULL OR translated_content IS NOT NULL)
+                 WHERE (ai_summary IS NOT NULL OR translated_content IS NOT NULL
+                        OR EXISTS (SELECT 1 FROM ai_segments s WHERE s.article_id = articles.id))
                    AND datetime(published_at) < {cutoff}"
             ),
             [],
@@ -1862,6 +1863,8 @@ pub fn set_article_ai_fields_checked(
 pub struct ContentCommitToken {
     pub content_id: Option<i64>,
     pub content_revision: i64,
+    /// 提取输入也包含原文地址：仅订正 URL 时正文修订可能不变。
+    pub url: Option<String>,
 }
 
 pub fn article_content_commit_token(
@@ -1870,7 +1873,7 @@ pub fn article_content_commit_token(
 ) -> AppResult<Option<(ContentCommitToken, String)>> {
     let row = conn
         .query_row(
-            "SELECT a.content_id, COALESCE(c.revision, 0), COALESCE(c.content_html, '')
+            "SELECT a.content_id, COALESCE(c.revision, 0), COALESCE(c.content_html, ''), a.url
              FROM articles a LEFT JOIN contents c ON c.id = a.content_id
              WHERE a.id = ?1",
             params![id],
@@ -1879,6 +1882,7 @@ pub fn article_content_commit_token(
                     ContentCommitToken {
                         content_id: r.get(0)?,
                         content_revision: r.get(1)?,
+                        url: r.get(3)?,
                     },
                     r.get::<_, String>(2)?,
                 ))
@@ -2146,9 +2150,8 @@ pub fn set_read_bulk_with_enqueue(
 /// `COALESCE(新值, 旧值)`（远端给出非空新图会覆盖本地值，NULL 保留本地值，
 /// R1-P2-1 修正）。因此候选不再按 source 过滤。
 ///
-/// 边界保留：失效上报通道 [`clear_article_cover_if_matches`] 仍只清
-/// `source='direct'` 的封面（保守语义，OPT-017D 明确不改）——服务端文章本地
-/// 补上的封面若失效，走前端占位而不回清。
+/// 失效上报按当前图片URL精确CAS对全来源清本机封面，不推远端；成功缓存由
+/// 同一AppState持有并随失败上报撤销，避免刚清空又把同一个坏缓存填回。
 // Note: 覆盖面扩展与请求预算的完整理由 — 见 .agents/notes/implemented/feature/2026-10-16-封面补全覆盖面与预算边界.md
 pub fn articles_without_cover(
     conn: &Connection,
@@ -2168,12 +2171,8 @@ pub fn articles_without_cover(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// 清除一个已失效的直连封面，只有上报 URL 仍与库中当前值完全一致时才生效。
-///
-/// source='direct' 是**有意保留的保守边界**（OPT-017D 明确不改）：服务端文章的
-/// 封面字段不由客户端失效通道改写。注意它不再等价于「服务端文章没有本地补的
-/// 封面」——候选查询已扩展到全来源（见 [`articles_without_cover`]），服务端文章
-/// 本地补上的封面若失效，前端走失败占位，不会被清空重试。
+/// 清除一个已失效的本机封面，只有上报 URL 仍与库中当前值完全一致时生效。
+/// 全来源覆盖本地补图；不推远端、不改身份，后续pull仍可提供新的权威图。
 pub fn clear_article_cover_if_matches(
     conn: &Connection,
     article_id: i64,
@@ -2185,8 +2184,7 @@ pub fn clear_article_cover_if_matches(
          WHERE id = ?1
            AND image_url = ?2
            AND image_url IS NOT NULL
-           AND image_url != ''
-           AND source = 'direct'",
+           AND image_url != ''",
         params![article_id, url],
     )?)
 }
@@ -3901,6 +3899,111 @@ mod tests {
             )
             .unwrap();
         assert_eq!(kept.as_deref(), Some("s"), "新于 cutoff 的行不得被清");
+    }
+
+    #[test]
+    fn cleanup_segment_only_cache_advances_epoch_and_rejects_both_late_writes() {
+        let mut conn = conn();
+        let folder = create_folder(&conn, "F", "article").unwrap();
+        let feed = insert_feed(
+            &conn,
+            "https://example.com/feed",
+            None,
+            "f",
+            None,
+            folder,
+            "inherit",
+            false,
+            false,
+        )
+        .unwrap();
+        let mut ids = Vec::new();
+        for (guid, age) in [
+            ("old-partial", 30),
+            ("young-partial", 1),
+            ("old-no-cache", 30),
+        ] {
+            let (id, _) = upsert_article_with_feed(
+                &conn,
+                feed,
+                &na(
+                    guid,
+                    Some((chrono::Utc::now() - chrono::Duration::days(age)).to_rfc3339()),
+                ),
+                false,
+            )
+            .unwrap();
+            ids.push(id);
+        }
+        let token = article_ai_commit_token(&conn, ids[0]).unwrap().unwrap();
+        for id in &ids[..2] {
+            assert!(super::super::upsert_ai_segment(
+                &conn,
+                *id,
+                "translation",
+                "sig",
+                0,
+                "<p>part</p>",
+                0
+            )
+            .unwrap());
+        }
+        assert_eq!(
+            cleanup_cache(&mut conn, 7, "ai").unwrap(),
+            (0, 1),
+            "回执按受影响文章计，片段-only也算一个"
+        );
+        let epoch = article_ai_commit_token(&conn, ids[0])
+            .unwrap()
+            .unwrap()
+            .ai_epoch;
+        assert_eq!(epoch, token.ai_epoch + 1);
+        assert!(!super::super::upsert_ai_segment(
+            &conn,
+            ids[0],
+            "translation",
+            "sig",
+            1,
+            "late",
+            token.ai_epoch
+        )
+        .unwrap());
+        assert!(!set_article_ai_fields_checked(
+            &conn,
+            ids[0],
+            &token,
+            AiProduct::Translation {
+                text: "late full",
+                signature: "sig"
+            }
+        )
+        .unwrap());
+        assert!(
+            super::super::list_ai_segments(&conn, ids[0], "translation", "sig")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            super::super::list_ai_segments(&conn, ids[1], "translation", "sig")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            article_ai_commit_token(&conn, ids[1])
+                .unwrap()
+                .unwrap()
+                .ai_epoch,
+            0
+        );
+        assert_eq!(
+            article_ai_commit_token(&conn, ids[2])
+                .unwrap()
+                .unwrap()
+                .ai_epoch,
+            0
+        );
+        assert_eq!(cleanup_cache(&mut conn, 7, "ai").unwrap(), (0, 0));
     }
 
     /// P3-4（自检 2026-09-29）：limit 夹取——负数在 SQLite 的 LIMIT 语义是

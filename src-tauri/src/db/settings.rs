@@ -103,6 +103,27 @@ mod tests {
         assert_eq!(app_settings_str(&conn, "syncMode", "direct"), "direct");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn sensitive_setter_encrypts_plaintext_with_dpapi_prefix() {
+        let conn = conn();
+        let plain = "dpapi:literal-password-not-an-envelope";
+        set_setting(&conn, "greader_password", plain).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'greader_password'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(stored, plain);
+        assert!(stored.starts_with("dpapi:"));
+        assert_eq!(
+            get_setting(&conn, "greader_password").unwrap().as_deref(),
+            Some(plain)
+        );
+    }
+
     #[test]
     fn app_settings_helpers_read_present_values() {
         let conn = conn();

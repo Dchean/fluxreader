@@ -405,23 +405,18 @@ pub async fn extract_fulltext(
 /// 同 ai.rs 的 `*_inner` 形态）：测试可在**网络在途窗口**内校验「不持 DB 锁」
 /// 与提交前提守卫（迟到结果不落已替换内容）。命令包装保持原签名不变。
 async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<ExtractOutcome> {
-    let url: Option<String> = {
-        let conn = state.db.lock().await;
-        db::get_article_url(&conn, article_id)?
-    };
-    let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
-        return Err(AppError::not_found("该条目没有原文网页地址"));
-    };
-    /* OPT-008B 第二阶段：捕获**发起时**的提交前提（内容身份/修订）与原文——
+    /* 捕获发起时的原文地址、内容身份/修订与正文，全部来自同一 DB 锁——
     网络期间不持 DB 锁；落地时经带前提校验的提交，迟到提取不得写到已删除/
-    已分叉/已替换的内容上（不新增第二套版本；`(content_id, revision)` 即
-    交付给 013 复用的稳定内容版本接口）。 */
+    已分叉/已替换或仅订正了 URL 的内容上；AI 仍使用自己的 AiCommitToken。 */
     let (content_token, original) = {
         let conn = state.db.lock().await;
         match db::article_content_commit_token(&conn, article_id)? {
-            Some((token, _html)) => (token, db::get_article_content_html(&conn, article_id)?),
+            Some(snapshot) => snapshot,
             None => return Err(AppError::not_found("条目不存在或已被清理")),
         }
+    };
+    let Some(url) = content_token.url.clone().filter(|u| !u.trim().is_empty()) else {
+        return Err(AppError::not_found("该条目没有原文网页地址"));
     };
 
     // 拉网页（复用抓取 client；30s 超时）
@@ -441,6 +436,7 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
     // 超量流式响应撑爆内存）；超限是可预期的失败形态，用业务文案如实上报。
     // 收字节后按 Content-Type charset 解码（GBK 站点硬按 UTF-8 会把乱码
     // 写进正文并推进修订），语义与原 resp.text() 一致。
+    let final_url = resp.url().to_string();
     let content_type = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -459,7 +455,7 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
         };
 
     // Readability 不是 Send → spawn_blocking 里跑
-    let base = url.clone();
+    let base = final_url.clone();
     let html2 = html.clone();
     let extracted =
         tokio::task::spawn_blocking(move || crate::extraction::extract_article(&html, &base))
@@ -467,7 +463,7 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
             .map_err(|e| AppError::internal(format!("blocking task: {e}")))??;
 
     // 头图兜底（正文没封面时）
-    let base2 = url.clone();
+    let base2 = final_url;
     let image = tokio::task::spawn_blocking(move || crate::extraction::lead_image(&html2, &base2))
         .await
         .map_err(|e| AppError::internal(format!("blocking task: {e}")))?
@@ -500,7 +496,10 @@ async fn extract_fulltext_inner(state: &AppState, article_id: i64) -> AppResult<
             ));
         };
         if !image.is_empty() {
-            db::update_article_image_if_empty(&conn, article_id, &image)?;
+            // 正文已经提交：封面是可重试的补充元数据，不能把已成功的提取倒挂成失败。
+            if let Err(err) = db::update_article_image_if_empty(&conn, article_id, &image) {
+                log::warn!("全文提取已成功，补充封面失败：{err}");
+            }
         }
         Ok(ExtractOutcome::extracted(
             extracted,
@@ -1060,7 +1059,7 @@ mod extract_fulltext_commit_tests {
                  content_html TEXT, body_text TEXT NOT NULL DEFAULT '',
                  extraction_source TEXT NOT NULL DEFAULT 'rss',
                  fulltext_extracted INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL DEFAULT 1);
-             CREATE TABLE articles (id INTEGER PRIMARY KEY, url TEXT, content_id INTEGER,
+             CREATE TABLE articles (id INTEGER PRIMARY KEY, url TEXT, content_id INTEGER, image_url TEXT,
                  ai_summary TEXT, translated_content TEXT, ai_epoch INTEGER NOT NULL DEFAULT 0);
              INSERT INTO contents (id, identity, content_html, body_text)
                  VALUES (1, 'h|extract-test', '<p>RSS 摘要</p>', 'RSS 摘要');
@@ -1126,6 +1125,105 @@ mod extract_fulltext_commit_tests {
             ("<p>RSS 摘要</p>", 2),
             "拒绝后正文保持、修订保留推进值"
         );
+    }
+
+    #[tokio::test]
+    async fn url_only_change_rejects_old_webpage_without_advancing_content_revision() {
+        const PAGE: &str = "<html><head><title>Article</title></head><body><article><p>A complete article with substantially more text than the RSS excerpt, sufficient for extraction.</p><p>The second paragraph preserves enough meaningful content for Readability.</p></article></body></html>";
+        let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let port = start_blocking_html(PAGE, received_tx, release_rx);
+        let state = setup(port);
+        let change_url = async {
+            tokio::time::timeout(Duration::from_secs(5), received_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let conn = state.db.lock().await;
+            conn.execute(
+                "UPDATE articles SET url = 'https://corrected.example/article' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+            drop(conn);
+            release_tx.send(()).unwrap();
+        };
+        let (outcome, ()) = tokio::join!(extract_fulltext_inner(&state, 1), change_url);
+        assert!(outcome.unwrap().degraded);
+        let conn = state.db.lock().await;
+        let (token, html) = db::article_content_commit_token(&conn, 1).unwrap().unwrap();
+        assert_eq!(token.content_id, Some(1));
+        assert_eq!(token.content_revision, 1);
+        assert_eq!(html, "<p>RSS 摘要</p>");
+    }
+
+    #[tokio::test]
+    async fn redirect_resolves_article_resources_and_cover_against_final_response_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let n = stream.read(&mut buffer).unwrap();
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                if index == 0 {
+                    stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /new/deep/article\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                } else {
+                    assert!(String::from_utf8_lossy(&request).starts_with("GET /new/deep/article "));
+                    let page = format!("<html><head><title>Article</title><meta property=\"og:image\" content=\"cover.jpg\"></head><body><article>{}<p><a href=\"related.html\">Related article</a><img src=\"photo.jpg\"></p></article></body></html>", "<p>Useful article content with complete sentences that can be extracted into a longer article body.</p>".repeat(12));
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}", page.len()).unwrap();
+                }
+            }
+        });
+        let state = setup(port);
+        let outcome = extract_fulltext_inner(&state, 1).await.unwrap();
+        server.join().unwrap();
+        assert!(!outcome.degraded);
+        assert!(outcome
+            .html
+            .contains(&format!("http://127.0.0.1:{port}/new/deep/related.html")));
+        assert!(outcome
+            .html
+            .contains(&format!("http://127.0.0.1:{port}/new/deep/photo.jpg")));
+        let conn = state.db.lock().await;
+        let cover: String = conn
+            .query_row("SELECT image_url FROM articles WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(cover, format!("http://127.0.0.1:{port}/new/deep/cover.jpg"));
+    }
+
+    #[tokio::test]
+    async fn cover_failure_reports_success_for_already_committed_fulltext() {
+        const PAGE: &str = "<html><head><title>Article</title><meta property=\"og:image\" content=\"https://example.com/cover.jpg\"></head><body><article><p>A complete article with substantially more text than the RSS excerpt, sufficient for extraction.</p><p>The second paragraph preserves enough meaningful content for Readability.</p></article></body></html>";
+        let (received_tx, mut received_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let port = start_blocking_html(PAGE, received_tx, release_rx);
+        let state = setup(port);
+        state.db.lock().await.execute_batch("CREATE TRIGGER fail_cover BEFORE UPDATE OF image_url ON articles BEGIN SELECT RAISE(ABORT, 'injected cover failure'); END;").unwrap();
+        let release = async {
+            tokio::time::timeout(Duration::from_secs(5), received_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            release_tx.send(()).unwrap();
+        };
+        let (outcome, ()) = tokio::join!(extract_fulltext_inner(&state, 1), release);
+        let outcome = outcome.expect("正文已成功提交，封面补写失败不应改变回执");
+        assert!(!outcome.degraded);
+        let conn = state.db.lock().await;
+        let (token, html) = db::article_content_commit_token(&conn, 1).unwrap().unwrap();
+        assert_eq!(outcome.content_id, token.content_id);
+        assert_eq!(outcome.content_revision, token.content_revision);
+        assert_eq!(outcome.html, html);
     }
 
     /// R3（wire 增字段）：成功提取的 outcome 必须携带**提交后的实际内容身份/

@@ -16,8 +16,8 @@ mod parse;
 mod staged;
 
 pub use http::{
-    build_client, conditional_get, decode_body_bytes, read_body_capped, Fetched, MAX_BODY_BYTES,
-    USER_AGENT,
+    build_client, conditional_get, decode_body_bytes, read_body_capped, read_error_detail,
+    read_text_capped, Fetched, MAX_BODY_BYTES, USER_AGENT,
 };
 pub use parse::{parse_feed, ParsedArticle, ParsedFeed};
 pub use staged::{

@@ -52,6 +52,9 @@ pub fn sanitize(html: &str, base: Option<&str>) -> String {
     builder
         .link_rel(Some("noopener noreferrer nofollow"))
         .add_generic_attributes(["loading"])
+        // 有序列表的显示序号是正文语义，翻译分段重组和读回必须使用同一白名单。
+        .add_tag_attributes("ol", ["start", "reversed", "type"])
+        .add_tag_attributes("li", ["value"])
         // 图片不携带 Referer（绕过常见图床防盗链）
         .set_tag_attribute_value("img", "referrerpolicy", "no-referrer")
         // 正文内嵌媒体：src 走默认 scheme 白名单（http/https）
@@ -297,18 +300,82 @@ fn inside_hidden_text_subtree(mut node: NodeRef<'_, Node>) -> bool {
 
 /// 正文第一张图（卡片缩略图兜底）
 pub fn first_image(html: &str) -> Option<String> {
+    let html = preprocess_html(html);
     let img_selector: LazyLock<Selector> =
         LazyLock::new(|| Selector::parse("img[src]").expect("valid selector"));
-    Html::parse_document(html)
+    Html::parse_document(&html)
         .select(&img_selector)
         .find_map(|i| {
-            let src = i.value().attr("src")?;
-            if src.starts_with("data:") {
-                None
-            } else {
-                Some(src.to_string())
-            }
+            let element = i.value();
+            let src = element.attr("src")?.trim();
+            let dimension = |name| {
+                element
+                    .attr(name)
+                    .and_then(|raw| raw.trim().trim_end_matches("px").parse().ok())
+            };
+            let roles = ["class", "id", "alt", "role"]
+                .iter()
+                .filter_map(|name| element.attr(name))
+                .collect::<Vec<_>>()
+                .join(" ");
+            (element.attr("aria-hidden") != Some("true")
+                && cover_image_candidate(src, dimension("width"), dimension("height"), &roles))
+            .then(|| src.to_string())
         })
+}
+
+/// 只剔除有明确小尺寸或角色证据的封面候选；缺尺寸的正常新闻图保留。
+/// 不下载图片探测像素，避免给每个条目再加网络请求。
+pub(crate) fn cover_image_candidate(
+    url: &str,
+    width: Option<u32>,
+    height: Option<u32>,
+    roles: &str,
+) -> bool {
+    if url.is_empty() || url.starts_with("data:") {
+        return false;
+    }
+    if width.is_some_and(|value| value <= 32)
+        || height.is_some_and(|value| value <= 32)
+        || matches!((width, height), (Some(w), Some(h)) if w <= 64 && h <= 64)
+    {
+        return false;
+    }
+    const DECORATIVE: &[&str] = &[
+        "avatar",
+        "emoji",
+        "emoticon",
+        "icon",
+        "tracking",
+        "pixel",
+        "spacer",
+        "badge",
+        "presentation",
+    ];
+    if roles
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| {
+            DECORATIVE
+                .iter()
+                .any(|role| token.eq_ignore_ascii_case(role))
+        })
+    {
+        return false;
+    }
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let file = path
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    ![
+        "pixel.gif",
+        "spacer.gif",
+        "tracking.gif",
+        "1x1.gif",
+        "transparent.gif",
+    ]
+    .contains(&file.as_str())
 }
 
 fn normalize_ws(s: &str) -> String {
@@ -318,6 +385,30 @@ fn normalize_ws(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_image_skips_explicit_decoration_and_small_images_but_keeps_unknown_size_news() {
+        let html = r#"<img src="https://example.com/avatar.jpg" class="author-avatar" width="120" height="120"><img src="https://example.com/tiny.jpg" width="1" height="1"><img src="https://example.com/emoji.png" alt="emoji"><img src="https://example.com/news.jpg">"#;
+        assert_eq!(
+            first_image(html).as_deref(),
+            Some("https://example.com/news.jpg")
+        );
+        assert_eq!(first_image(r#"<img width="48" height="48" src="small.jpg"><img width="600" height="400" src="large.jpg">"#).as_deref(), Some("large.jpg"));
+        assert_eq!(first_image(r#"<img src="data:image/gif;base64,AA" data-src="photo.jpg" width="600" height="400">"#).as_deref(), Some("photo.jpg"));
+    }
+
+    #[test]
+    fn ordered_list_numbering_attributes_survive_both_write_and_read_sanitization() {
+        let html = "<ol start=\"9\" reversed type=\"A\" onclick=\"bad()\"><li value=\"-3\" onmouseover=\"bad()\">text</li></ol>";
+        let once = sanitize(html, None);
+        let twice = sanitize(&once, None);
+        assert_eq!(once, twice);
+        for attribute in ["start=\"9\"", "reversed", "type=\"A\"", "value=\"-3\""] {
+            assert!(twice.contains(attribute));
+        }
+        assert!(!twice.contains("onclick"));
+        assert!(!twice.contains("onmouseover"));
+    }
 
     #[test]
     fn video_audio_survive_with_attributes() {

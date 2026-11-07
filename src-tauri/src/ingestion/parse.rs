@@ -169,7 +169,15 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
         .iter()
         .find_map(|m| {
             m.thumbnails
-                .first()
+                .iter()
+                .find(|thumbnail| {
+                    crate::sanitize::cover_image_candidate(
+                        &thumbnail.image.uri,
+                        thumbnail.image.width,
+                        thumbnail.image.height,
+                        "",
+                    )
+                })
                 .map(|t| t.image.uri.clone())
                 .or_else(|| {
                     m.content.iter().find_map(|c| {
@@ -178,7 +186,16 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
                             .as_ref()
                             .map(|t| t.ty().as_str() == "image")
                             .unwrap_or(false);
-                        if is_img {
+                        if is_img
+                            && c.url.as_ref().is_some_and(|url| {
+                                crate::sanitize::cover_image_candidate(
+                                    url.as_str(),
+                                    c.width,
+                                    c.height,
+                                    "",
+                                )
+                            })
+                        {
                             c.url.as_ref().map(|u| u.to_string())
                         } else {
                             None
@@ -187,9 +204,12 @@ fn map_entry(e: &feed_rs::model::Entry, base: &str) -> Option<ParsedArticle> {
                 })
         })
         .or_else(|| {
-            content_html
-                .as_deref()
-                .and_then(crate::sanitize::first_image)
+            crate::sanitize::first_image(&raw_html).and_then(|raw| {
+                let resolved = url::Url::parse(&raw)
+                    .or_else(|_| url::Url::parse(base).and_then(|base| base.join(&raw)))
+                    .ok()?;
+                matches!(resolved.scheme(), "http" | "https").then(|| resolved.to_string())
+            })
         });
 
     // 播客 enclosure：音频/视频媒体（type 缺失时按扩展名推断）
@@ -260,6 +280,26 @@ fn mime_from_url(url: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cover_selection_rejects_tiny_media_and_decorative_body_before_normal_photo() {
+        let xml = r#"<rss version="2.0" xmlns:media="http://search.yahoo.com/mrss/"><channel><title>F</title><link>https://example.com</link><description>F</description><item><guid>x</guid><title>T</title><link>https://example.com/post</link><media:thumbnail url="https://example.com/tiny.jpg" width="1" height="1"/><media:content url="https://example.com/tiny-content.jpg" type="image/jpeg" width="32" height="32"/><description><![CDATA[<img class="author-avatar" src="https://example.com/avatar.jpg" width="120" height="120"><img src="/photo.jpg">]]></description></item></channel></rss>"#;
+        let feed = parse_feed(xml.as_bytes(), "https://example.com/feed").unwrap();
+        assert_eq!(
+            feed.articles[0].image_url.as_deref(),
+            Some("https://example.com/photo.jpg")
+        );
+        let xml = xml.replace("width=\"1\" height=\"1\"", "width=\"640\" height=\"360\"");
+        assert_eq!(
+            parse_feed(xml.as_bytes(), "https://example.com/feed")
+                .unwrap()
+                .articles[0]
+                .image_url
+                .as_deref(),
+            Some("https://example.com/tiny.jpg"),
+            "正常媒体缩略图仍优先"
+        );
+    }
 
     fn feed(items: &str) -> String {
         format!(

@@ -97,8 +97,132 @@ pub async fn report_broken_cover(
     article_id: i64,
     url: String,
 ) -> AppResult<bool> {
+    report_broken_cover_inner(&state, article_id, &url).await
+}
+
+async fn report_broken_cover_inner(
+    state: &AppState,
+    article_id: i64,
+    url: &str,
+) -> AppResult<bool> {
+    // 与scheduler同序 db→cache 短锁，清库与撤成功缓存之间不留重填窗口。
     let conn = state.db.lock().await;
-    Ok(db::clear_article_cover_if_matches(&conn, article_id, &url)? > 0)
+    let page_url = db::get_article_url(&conn, article_id)?;
+    let mut cover = state.cover_backfill.lock().await;
+    let changed = db::clear_article_cover_if_matches(&conn, article_id, url)? > 0;
+    if changed {
+        if let Some(page_url) = page_url {
+            cover.report_broken(&page_url, url);
+        }
+    }
+    Ok(changed)
+}
+
+#[cfg(test)]
+mod broken_cover_runtime_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[tokio::test]
+    async fn broken_report_and_scheduler_share_cache_and_stale_report_keeps_new_cover() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let page = format!("http://{}/article", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let n = stream.read(&mut buffer).unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..n]);
+            }
+            let body = "<meta property=\"og:image\" content=\"https://example.com/broken.jpg\">";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut connection).unwrap();
+        connection.execute_batch("INSERT INTO folders(id,name) VALUES(1,'F'); INSERT INTO feeds(id,folder_id,feed_url,title) VALUES(1,1,'https://example.com/rss','F');").unwrap();
+        connection.execute("INSERT INTO articles(id,feed_id,guid,title,url,source,is_starred) VALUES(1,1,'g','T',?1,'miniflux',1)", [&page]).unwrap();
+        let state = AppState::new(
+            connection,
+            reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            crate::media::MediaHandle::inactive(),
+        );
+        let shutdown = crate::scheduler::ShutdownToken::new();
+        assert_eq!(
+            crate::scheduler::cover_backfill_round(
+                &state.db,
+                &state.http,
+                &state.cover_backfill,
+                &shutdown
+            )
+            .await,
+            1
+        );
+        server.join().unwrap();
+        assert!(
+            report_broken_cover_inner(&state, 1, "https://example.com/broken.jpg")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            crate::scheduler::cover_backfill_round(
+                &state.db,
+                &state.http,
+                &state.cover_backfill,
+                &shutdown
+            )
+            .await,
+            0,
+            "同一成功缓存已撤销，不能重填或立即重抓"
+        );
+        let connection = state.db.lock().await;
+        let row: (Option<String>, String, i64) = connection
+            .query_row(
+                "SELECT image_url, source, is_starred FROM articles WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (None, "miniflux".into(), 1));
+        connection
+            .execute(
+                "UPDATE articles SET image_url='https://example.com/new.jpg' WHERE id=1",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(
+            !report_broken_cover_inner(&state, 1, "https://example.com/broken.jpg")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            state
+                .db
+                .lock()
+                .await
+                .query_row("SELECT image_url FROM articles WHERE id=1", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "https://example.com/new.jpg"
+        );
+    }
 }
 
 /// 全文搜索（FTS5）：标题/正文/作者/AI 摘要/翻译

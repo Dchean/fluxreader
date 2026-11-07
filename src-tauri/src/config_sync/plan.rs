@@ -286,6 +286,7 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
         if f.name.trim().is_empty() {
             return Err(AppError::new("validate", "快照包含空名称的分类，拒绝导入"));
         }
+        super::validate_layout(&f.layout, false)?;
         if let Some(uid) = uid_of(f.sync_id.as_deref()) {
             if !folder_uids.insert(uid.to_string()) {
                 return Err(AppError::new(
@@ -301,6 +302,8 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
         if url.is_empty() {
             return Err(AppError::new("validate", "快照包含空 URL 的源，拒绝导入"));
         }
+        crate::opml::validate_feed_url(url)?;
+        super::validate_layout(&f.layout, true)?;
         if !feed_urls.insert(url.to_string()) {
             return Err(AppError::new(
                 "validate",
@@ -335,8 +338,16 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
     let mut updates: Vec<PlanItem> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut slot_by_name: HashMap<&str, usize> = HashMap::new();
+    let mut slot_by_uid: HashMap<&str, usize> = HashMap::new();
+    let mut ambiguous_names = HashSet::new();
     for (slot, rf) in p.folders.iter().enumerate() {
+        if slot_by_name.contains_key(rf.name.as_str()) {
+            ambiguous_names.insert(rf.name.as_str());
+        }
         slot_by_name.entry(rf.name.as_str()).or_insert(slot);
+        if let Some(uid) = uid_of(rf.sync_id.as_deref()) {
+            slot_by_uid.insert(uid, slot);
+        }
         let remote_uid = uid_of(rf.sync_id.as_deref()).map(str::to_string);
         let mut matched: Option<usize> = None;
         if let Some(uid) = remote_uid.as_deref() {
@@ -467,30 +478,36 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
     let mut skipped_feeds = 0usize;
     let mut sink_needed = false;
     let sink_folder_id = list_folder_id_by_name(conn, "导入")?;
-
-    // 镜像：源的分类引用必须在快照分类列表内（不引入本地兜底目录——否则
-    // 「导入」目录会被镜像当成远端不存在的对象反复删除/重建）。
-    if mode == ApplyMode::Mirror {
-        for f in &p.feeds {
-            let name = f.folder.trim();
-            if name.is_empty() || !slot_by_name.contains_key(name) {
-                return Err(AppError::new(
-                    "validate",
-                    format!(
-                        "镜像快照中的源 {} 引用了不存在的分类「{}」，为避免误删拒绝执行（可改用合并应用）",
-                        f.url, f.folder
-                    ),
-                ));
-            }
-        }
-    }
+    let pending_unsubscribe_urls: Vec<String> = {
+        let mut statement = conn.prepare("SELECT feed_url FROM subscription_outbox WHERE action = 'unsubscribe' AND status = 'pending'")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
 
     for f in &p.feeds {
         let (summary, translate) = resolve_spec_modes(f)?;
         let custom_title = db::explicit_feed_title(&f.title, f.url.trim()).map(str::to_string);
-        let folder_ref = match slot_by_name.get(f.folder.trim()) {
-            Some(slot) => FolderRef::Slot(*slot),
+        let slot = if let Some(raw_uid) = f.folder_sync_id.as_deref() {
+            let uid = uid_of(Some(raw_uid))
+                .ok_or_else(|| AppError::new("validate", format!("源 {} 的分类身份为空", f.url)))?;
+            Some(*slot_by_uid.get(uid).ok_or_else(|| {
+                AppError::new(
+                    "validate",
+                    format!("源 {} 引用了不存在的分类身份 {uid}", f.url),
+                )
+            })?)
+        } else {
+            if ambiguous_names.contains(f.folder.as_str()) {
+                warnings.push(format!("源 {} 的旧快照只有同名分类「{}」：按快照首个分类归属，旧文件未保存的身份无法恢复", f.url, f.folder));
+            }
+            slot_by_name.get(f.folder.as_str()).copied()
+        };
+        let folder_ref = match slot {
+            Some(slot) => FolderRef::Slot(slot),
             None => {
+                if mode == ApplyMode::Mirror {
+                    return Err(AppError::new("validate", format!("镜像快照中的源 {} 引用了不存在的分类「{}」，为避免误删拒绝执行（可改用合并应用）", f.url, f.folder)));
+                }
                 // merge 兜底：未知/空归属落「导入」（既有保守语义）。
                 sink_needed = sink_needed || sink_folder_id.is_none();
                 FolderRef::Sink
@@ -564,6 +581,18 @@ fn prepare_plan(conn: &Connection, p: &SyncPayload, mode: ApplyMode) -> AppResul
                 }
             }
             None => {
+                let norm = db::normalize_url(&f.url);
+                let legacy_norm = db::legacy_v1_normalize(&f.url);
+                let has_unsubscribe = pending_unsubscribe_urls.iter().any(|pending_url| {
+                    db::normalize_url(pending_url) == norm
+                        || db::legacy_v1_normalize(pending_url) == legacy_norm
+                });
+                if has_unsubscribe {
+                    warnings.push(format!(
+                        "恢复源 {} 只恢复本机订阅；此前待发送的远端退订仍保留，之后可能继续执行",
+                        f.url
+                    ));
+                }
                 additions.push(PlanItem::Feed {
                     url: f.url.trim().to_string(),
                     title: display_title.clone(),
@@ -804,6 +833,9 @@ fn execute_plan(tx: &Connection, plan: &PreparedPlan) -> AppResult<ApplyOutcome>
             fa.translate,
             "local",
         )?;
+        // 显式恢复本机源解除对应 URL 的删除屏障，与 OPML 重加使用同一规范化/
+        // legacy 墓碑原语；仍不产生远端订阅，也不取消另一次显式远端退订意图。
+        db::remove_feed_tombstone(tx, &fa.url)?;
         // 配置快照里的真实标题是用户配置态，不应被后续抓取标题覆盖；
         // 空标题/URL 兜底不进入 title_custom。
         if let Some(title) = fa.custom_title.as_deref() {
@@ -1061,6 +1093,7 @@ pub(super) fn merged_app_settings_json(
     remote_raw: &str,
 ) -> AppResult<(serde_json::Value, Vec<String>, Vec<String>)> {
     let remote: serde_json::Value = serde_json::from_str(remote_raw)?;
+    super::validate_remote_settings(&remote)?;
     let remote_interval = super::validated_remote_refresh_interval(&remote)?;
     let local_raw = db::get_setting(conn, "app_settings")?;
     let mut merged = if let Some(local_raw) = local_raw {
@@ -1135,6 +1168,219 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         crate::db::MIGRATIONS.to_latest(&mut conn).unwrap();
         conn
+    }
+
+    fn payload(folders: serde_json::Value, feeds: serde_json::Value) -> SyncPayload {
+        serde_json::from_value(serde_json::json!({"schema":2,"uploaded_at":"test","folders":folders,"feeds":feeds,"app_settings":null,"connection_config":null})).unwrap()
+    }
+
+    fn folder(name: &str, uid: &str) -> serde_json::Value {
+        serde_json::json!({"name":name,"layout":"article","auto_summary":false,"auto_translate":false,"position":0,"sync_id":uid})
+    }
+
+    fn feed(url: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({"url":url,"title":"test","folder":name,"layout":"inherit","auto_summary":false,"auto_translate":false,"site_url":null,"favicon_url":null})
+    }
+
+    #[test]
+    fn snapshot_roundtrip_preserves_exact_whitespace_names_and_duplicate_identities() {
+        let source = test_conn();
+        let first = db::create_folder(&source, " Tech ", "article").unwrap();
+        // 存量同名分类是合法数据库形态，不应合并或猜测引用。
+        let second = db::create_folder(&source, " Tech ", "social").unwrap();
+        for (index, folder) in [first, second].into_iter().enumerate() {
+            db::insert_feed(
+                &source,
+                &format!("https://example.com/{index}"),
+                None,
+                "f",
+                None,
+                folder,
+                "inherit",
+                false,
+                false,
+            )
+            .unwrap();
+        }
+        let snapshot = super::super::build_payload(&source).unwrap();
+        assert_ne!(
+            snapshot.feeds[0].folder_sync_id,
+            snapshot.feeds[1].folder_sync_id
+        );
+        let own = plan_payload(&source, &snapshot, ApplyMode::Mirror).unwrap();
+        assert!(own.removals.is_empty());
+        for mode in [ApplyMode::Merge, ApplyMode::Mirror] {
+            let target = test_conn();
+            let preview = plan_payload(&target, &snapshot, mode).unwrap();
+            let applied = apply_payload_checked(
+                &target,
+                &snapshot,
+                mode,
+                Some(&preview.snapshot_hash),
+                Some(&preview.current_version),
+            )
+            .unwrap();
+            assert_eq!(applied.imported, 2);
+            let restored = super::super::build_payload(&target).unwrap();
+            for original in &snapshot.feeds {
+                let result = restored
+                    .feeds
+                    .iter()
+                    .find(|f| f.url == original.url)
+                    .unwrap();
+                assert_eq!(result.folder, original.folder);
+                assert_eq!(result.folder_sync_id, original.folder_sync_id);
+            }
+            let repeated = plan_payload(&target, &snapshot, mode).unwrap();
+            assert!(repeated.removals.is_empty());
+            assert!(repeated.additions.is_empty());
+        }
+    }
+
+    #[test]
+    fn legacy_folder_reference_is_exact_and_ambiguity_is_visible() {
+        let conn = test_conn();
+        let p = payload(
+            serde_json::json!([folder(" Tech ", "a"), folder(" Tech ", "b")]),
+            serde_json::json!([feed("https://example.com/rss", " Tech ")]),
+        );
+        let preview = plan_payload(&conn, &p, ApplyMode::Mirror).unwrap();
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("首个分类")));
+        apply_payload_checked(
+            &conn,
+            &p,
+            ApplyMode::Mirror,
+            Some(&preview.snapshot_hash),
+            Some(&preview.current_version),
+        )
+        .unwrap();
+        let restored = super::super::build_payload(&conn).unwrap();
+        assert_eq!(restored.feeds[0].folder_sync_id.as_deref(), Some("a"));
+        assert_eq!(restored.feeds[0].folder, " Tech ");
+    }
+
+    #[test]
+    fn explicit_unknown_folder_identity_rejects_before_mirror_deletes() {
+        let conn = test_conn();
+        db::create_folder(&conn, "keep", "article").unwrap();
+        let mut f = feed("https://example.com/rss", "known");
+        f["folder_sync_id"] = serde_json::json!("missing");
+        let p = payload(
+            serde_json::json!([folder("known", "a")]),
+            serde_json::json!([f]),
+        );
+        for mode in [ApplyMode::Merge, ApplyMode::Mirror] {
+            assert_eq!(plan_payload(&conn, &p, mode).unwrap_err().code, "validate");
+            assert!(apply_payload_checked(&conn, &p, mode, None, None).is_err());
+        }
+        assert_eq!(db::list_folders(&conn).unwrap()[0].name, "keep");
+        assert!(db::list_feeds(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restored_feed_clears_only_its_tombstone_and_keeps_explicit_remote_intents() {
+        let conn = test_conn();
+        let url = "https://example.com/rss";
+        let unrelated = "https://other.example/rss";
+        db::add_feed_tombstone(&conn, url).unwrap();
+        db::add_feed_tombstone(&conn, unrelated).unwrap();
+        for (key, rid, queued_url) in [
+            (
+                "account-a",
+                42,
+                "http://www.example.com/rss/?utm_source=legacy",
+            ),
+            ("account-b", 43, url),
+        ] {
+            db::enqueue_unsubscribe(&conn, 1, key, queued_url, Some(rid), Some("old")).unwrap();
+        }
+        let before = serde_json::to_string(&db::pending_outbox(&conn).unwrap()).unwrap();
+        let p = payload(
+            serde_json::json!([folder(" Tech ", "a")]),
+            serde_json::json!([feed(url, " Tech ")]),
+        );
+        let preview = plan_payload(&conn, &p, ApplyMode::Merge).unwrap();
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("远端退订仍保留")));
+        super::super::apply_payload(&conn, &p).unwrap();
+        assert!(!db::feed_url_tombstoned(&conn, url).unwrap());
+        assert!(db::feed_url_tombstoned(&conn, unrelated).unwrap());
+        assert_eq!(
+            serde_json::to_string(&db::pending_outbox(&conn).unwrap()).unwrap(),
+            before
+        );
+        assert_eq!(db::list_feeds(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn restore_tombstone_removal_rolls_back_with_failed_apply() {
+        let conn = test_conn();
+        let url = "https://example.com/rss";
+        db::add_feed_tombstone(&conn, url).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_title BEFORE UPDATE OF title_custom ON feeds BEGIN SELECT RAISE(ABORT, 'injected title failure'); END;").unwrap();
+        let p = payload(
+            serde_json::json!([folder("f", "a")]),
+            serde_json::json!([feed(url, "f")]),
+        );
+        assert!(super::super::apply_payload(&conn, &p).is_err());
+        assert!(db::feed_url_tombstoned(&conn, url).unwrap());
+        assert!(db::list_feeds(&conn).unwrap().is_empty());
+        assert!(db::list_folders(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn snapshot_validation_rejects_bad_consumed_fields_before_writes() {
+        let conn = test_conn();
+        for (key, invalid) in [
+            ("syncMode", serde_json::json!("bad")),
+            ("fontSize", serde_json::json!("bad")),
+            ("fontSize", serde_json::json!(99)),
+            ("autoRefresh", serde_json::json!("true")),
+        ] {
+            let mut p = payload(
+                serde_json::json!([folder("f", "a")]),
+                serde_json::json!([feed("https://example.com/rss", "f")]),
+            );
+            p.app_settings = Some(serde_json::json!({key:invalid}).to_string());
+            assert_eq!(
+                super::super::apply_payload(&conn, &p).unwrap_err().code,
+                "validate"
+            );
+            assert!(db::list_folders(&conn).unwrap().is_empty());
+        }
+        for (url, layout) in [
+            ("javascript:alert(1)", "inherit"),
+            ("https://example.com/rss", "unknown"),
+        ] {
+            let mut f = feed(url, "f");
+            f["layout"] = serde_json::json!(layout);
+            let p = payload(
+                serde_json::json!([folder("f", "a")]),
+                serde_json::json!([f]),
+            );
+            assert_eq!(
+                plan_payload(&conn, &p, ApplyMode::Merge).unwrap_err().code,
+                "validate"
+            );
+        }
+        assert!(db::list_feeds(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn future_unconsumed_setting_does_not_block_known_settings() {
+        let conn = test_conn();
+        let mut p = payload(serde_json::json!([]), serde_json::json!([]));
+        p.app_settings = Some(
+            serde_json::json!({"themeMode":"dark", "futureClientField":{"new":"shape"}})
+                .to_string(),
+        );
+        super::super::apply_payload(&conn, &p).unwrap();
+        assert_eq!(db::app_settings_str(&conn, "themeMode", "light"), "dark");
     }
 
     /// 模式解析严格：未知/大小写变体一律拒绝（不悄悄回默认）。

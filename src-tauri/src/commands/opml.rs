@@ -54,6 +54,9 @@ fn import_feeds(
     conn: &Connection,
     feeds: &[crate::opml::ImportedFeed],
 ) -> AppResult<OpmlImportReport> {
+    for feed in feeds {
+        crate::opml::validate_feed_url(&feed.feed_url)?;
+    }
     let mut report = OpmlImportReport {
         imported: 0,
         skipped: 0,
@@ -177,6 +180,19 @@ mod tests {
 
     fn count(conn: &Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn invalid_url_in_later_outline_rejects_before_any_import_write() {
+        let conn = conn();
+        let xml = r#"<opml version="2.0"><head/><body><outline text="valid" xmlUrl="https://example.com/rss"/><outline text="bad" xmlUrl="javascript:alert(1)"/></body></opml>"#;
+        assert_eq!(
+            opml_import_for_test(&conn, xml).unwrap_err().code,
+            "validate"
+        );
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM feeds"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM folders"), 0);
+        assert_eq!(count(&conn, "SELECT COUNT(*) FROM subscription_outbox"), 0);
     }
 
     /// N1 缺陷复现：两条根级订阅只允许产生一个「导入」目录（修前为 2 个）

@@ -19,6 +19,7 @@ pub struct AppState {
     /// 进行中的 GitHub 设备流登录（发起 → 轮询完成期间持有；一次性短命态不落库）
     pub github_flow: SharedDeviceFlow,
     pub sync_runtime: Arc<crate::sync::runtime::SyncRuntime>,
+    pub cover_backfill: Arc<Mutex<crate::scheduler::CoverBackfillState>>,
 }
 
 impl AppState {
@@ -31,6 +32,7 @@ impl AppState {
             media,
             github_flow: Arc::new(Mutex::new(Default::default())),
             sync_runtime,
+            cover_backfill: Arc::new(Mutex::new(crate::scheduler::CoverBackfillState::new())),
         }
     }
 }

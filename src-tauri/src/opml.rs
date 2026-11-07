@@ -5,6 +5,7 @@ use opml::{Head, Outline, OPML};
 use std::collections::BTreeMap;
 
 /// 从 OPML 解析出的一条订阅。
+#[derive(Debug)]
 pub struct ImportedFeed {
     pub feed_url: String,
     pub title: String,
@@ -17,6 +18,7 @@ pub struct ImportedFeed {
 /// 标题里裸写 `&`（如 `?type=etoc&feed=rss`）而不是规范的 `&amp;`，严格
 /// XML 解析器遇到第一个就拒掉整份文档，没有这步整个导入静默失败。
 pub fn parse(content: &str) -> AppResult<Vec<ImportedFeed>> {
+    validate_xml_depth(content)?;
     let doc = OPML::from_str(&tidy(content)).map_err(|e| AppError::new("opml", e.to_string()))?;
     // 真实导出常把同一 URL 重复放在多个目录（NetNewsWire 的 Today/All/Unread
     // 视图都指向同一源）。按 xml_url 去重，保留首次出现（原目录归属）。
@@ -26,12 +28,98 @@ pub fn parse(content: &str) -> AppResult<Vec<ImportedFeed>> {
     for outline in &doc.body.outlines {
         collect(outline, None, &mut collect_into);
     }
-    for feed in collect_into {
+    for mut feed in collect_into {
+        feed.feed_url = feed.feed_url.trim().to_string();
+        validate_feed_url(&feed.feed_url)?;
         if seen.insert(feed.feed_url.clone()) {
             feeds.push(feed);
         }
     }
     Ok(feeds)
+}
+
+/// 导入只接受可以抓取的绝对 HTTP(S) 源地址，整包验证后才开始写库。
+pub(crate) fn validate_feed_url(raw: &str) -> AppResult<()> {
+    match url::Url::parse(raw) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() => Ok(()),
+        _ => Err(AppError::new(
+            "validate",
+            format!("订阅源地址必须是完整的 HTTP/HTTPS URL：{raw}"),
+        )),
+    }
+}
+
+/// opml/hard-xml 的树反序列化先于 collect，必须在进入递归解析器前约束
+/// XML 深度。80 层容纳既有 64 层目录对照及 opml/body 容器；注释、CDATA、
+/// PI 与引号/内部 DTD 中的尖括号不计作元素。这里只做预算，合法性仍由 XML
+/// 解析器判断，不能用解析后数深度（其构造或 drop 已可能耗尽工作线程栈）。
+fn validate_xml_depth(content: &str) -> AppResult<()> {
+    const MAX_XML_DEPTH: usize = 80;
+    let bytes = content.as_bytes();
+    let mut cursor = 0;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        let Some(offset) = content[cursor..].find('<') else {
+            break;
+        };
+        cursor += offset;
+        let rest = &content[cursor..];
+        let skip = if rest.starts_with("<!--") {
+            rest.find("-->").map(|end| end + 3)
+        } else if rest.starts_with("<![CDATA[") {
+            rest.find("]]>").map(|end| end + 3)
+        } else if rest.starts_with("<?") {
+            rest.find("?>").map(|end| end + 2)
+        } else {
+            None
+        };
+        if let Some(skip) = skip {
+            cursor += skip;
+            continue;
+        }
+        let declaration = rest.starts_with("<!");
+        let mut quote = None;
+        let mut brackets = 0usize;
+        let mut end = cursor + 1;
+        while end < bytes.len() {
+            let byte = bytes[end];
+            match quote {
+                Some(q) if byte == q => quote = None,
+                Some(_) => {}
+                None => match byte {
+                    b'\'' | b'"' => quote = Some(byte),
+                    b'[' if declaration => brackets += 1,
+                    b']' if declaration => brackets = brackets.saturating_sub(1),
+                    b'>' if brackets == 0 => break,
+                    _ => {}
+                },
+            }
+            end += 1;
+        }
+        if end == bytes.len() {
+            break;
+        }
+        if !declaration {
+            if bytes.get(cursor + 1) == Some(&b'/') {
+                depth = depth.saturating_sub(1);
+            } else if bytes[cursor + 1..end]
+                .iter()
+                .rev()
+                .find(|b| !b.is_ascii_whitespace())
+                != Some(&b'/')
+            {
+                depth += 1;
+                if depth > MAX_XML_DEPTH {
+                    return Err(AppError::new(
+                        "opml",
+                        format!("OPML 嵌套超过 {MAX_XML_DEPTH} 层，已拒绝导入"),
+                    ));
+                }
+            }
+        }
+        cursor = end + 1;
+    }
+    Ok(())
 }
 
 /// 把裸 `&`（未开启合法 XML 实体的）转义为 `&amp;`，让不规范文件可解析。
@@ -157,6 +245,33 @@ pub fn build(feeds: &[(String, String, Option<String>)]) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::{build, parse};
+
+    #[test]
+    fn deeply_nested_opml_is_rejected_before_recursive_parser() {
+        std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(|| {
+            for depth in [64, 256] {
+                let xml = format!("<opml version=\"2.0\"><head/><body>{}<outline text=\"f\" xmlUrl=\"https://example.com/feed\"/>{}</body></opml>", "<outline text=\"folder\">".repeat(depth), "</outline>".repeat(depth));
+                let result = parse(&xml);
+                if depth == 64 { assert_eq!(result.unwrap().len(), 1); }
+                else { assert!(result.unwrap_err().message.contains("嵌套")); }
+            }
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn invalid_feed_urls_reject_the_document() {
+        for url in [
+            "",
+            "file:///tmp/feed",
+            "javascript:alert(1)",
+            "/relative/feed",
+        ] {
+            let xml = format!(
+                r#"<opml version="2.0"><head/><body><outline xmlUrl="https://valid.example/feed"/><outline xmlUrl="{url}"/></body></opml>"#
+            );
+            assert!(parse(&xml).is_err(), "必须拒绝 {url}");
+        }
+    }
 
     #[test]
     fn parses_flat_feed_list() {

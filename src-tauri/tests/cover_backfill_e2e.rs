@@ -373,10 +373,9 @@ async fn broken_cover_report_clears_matching_direct_cover_and_backfills_it() {
     assert!(remaining.is_empty(), "补全后候选队列应为空：{remaining:?}");
 }
 
-/// 失效上报通道对**服务端来源**仍保守不清空（有意边界，OPT-017D 保留）：
-/// 服务端文章的候选覆盖由下方矩阵测试锁定，本测试只锁 clear 的边界不回归。
+/// 本机补图不限来源；URL精确CAS清理不向远端写，也不改变文章来源/状态。
 #[tokio::test]
-async fn broken_cover_report_keeps_miniflux_cover() {
+async fn broken_cover_report_clears_matching_miniflux_cover_but_not_later_replacement() {
     let path = temp_db("broken_miniflux");
     let conn = db::open(&path).expect("open db");
     let f = feed(
@@ -397,8 +396,8 @@ async fn broken_cover_report_keeps_miniflux_cover() {
 
     assert_eq!(
         db::clear_article_cover_if_matches(&conn, id, url).unwrap(),
-        0,
-        "非 direct 源不得清空封面"
+        1,
+        "服务端条目的本机坏图也应可清空"
     );
     assert_eq!(
         conn.query_row(
@@ -407,7 +406,144 @@ async fn broken_cover_report_keeps_miniflux_cover() {
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
         )
         .unwrap(),
-        (Some(url.to_string()), "miniflux".to_string())
+        (None, "miniflux".to_string())
+    );
+    conn.execute(
+        "UPDATE articles SET image_url = 'https://img.example.com/new.jpg' WHERE id = ?1",
+        [id],
+    )
+    .unwrap();
+    assert_eq!(
+        db::clear_article_cover_if_matches(&conn, id, url).unwrap(),
+        0,
+        "旧404不能清后来新封面"
+    );
+}
+
+#[tokio::test]
+async fn successful_page_cache_fills_same_url_beyond_scan_window_and_later_articles() {
+    let site = ArticleSite::start();
+    let path = temp_db("cached_success_late_rows");
+    let conn = db::open(&path).unwrap();
+    let f = feed(&conn, folder(&conn), "http://cover.test/cache.xml", "cache");
+    let shared = site.url("/ok/cached-shared");
+    let first = article(&conn, f, 0, &shared, None);
+    // 让同URL另一行在首轮扫描窗外，期间候选只失败且留下队列。
+    for index in 1..100 {
+        article(
+            &conn,
+            f,
+            index,
+            &site.url(&format!("/nom/filler-{index}")),
+            None,
+        );
+    }
+    let outside = article(&conn, f, 200, &shared, None);
+    let db = Arc::new(tokio::sync::Mutex::new(conn));
+    let state = new_state();
+    let shutdown = new_shutdown();
+    let http = new_http();
+    for _ in 0..8 {
+        cover_backfill_round(&db, &http, &state, &shutdown).await;
+    }
+    assert!(cover_of(&db, first).await.is_some());
+    assert!(
+        cover_of(&db, outside).await.is_some(),
+        "已知成功图不能因曾尝试URL而永久跳过窗外条目"
+    );
+    assert_eq!(site.hits_of("/ok/cached-shared"), 1);
+    let later = {
+        let conn = db.lock().await;
+        article(&conn, f, 300, &shared, None)
+    };
+    for _ in 0..4 {
+        cover_backfill_round(&db, &http, &state, &shutdown).await;
+    }
+    assert!(cover_of(&db, later).await.is_some());
+    assert_eq!(
+        site.hits_of("/ok/cached-shared"),
+        1,
+        "新增同URL条目复用有界成功缓存，不新增源站请求"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduler_webpage_cap_rejects_cl_and_eof_oversize_before_cover_commit() {
+    install_log_capture();
+    for length in [true, false] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let page = format!("http://{}/article", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let n = stream.read(&mut buffer).unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..n]);
+            }
+            let prefix =
+                "<meta property=\"og:image\" content=\"https://example.com/oversize.jpg\">";
+            let total = app_lib::ingestion::MAX_BODY_BYTES + 1;
+            let cl = if length {
+                format!("Content-Length: {total}\r\n")
+            } else {
+                String::new()
+            };
+            if write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n{cl}Connection: close\r\n\r\n{prefix}").is_err() { return; }
+            let buffer = vec![b'x'; 16 * 1024];
+            let mut remaining = total - prefix.len();
+            while remaining > 0 {
+                let n = remaining.min(buffer.len());
+                if stream.write_all(&buffer[..n]).is_err() {
+                    return;
+                }
+                remaining -= n;
+            }
+        });
+        let path = temp_db(if length {
+            "body_cap_cl"
+        } else {
+            "body_cap_eof"
+        });
+        let conn = db::open(&path).unwrap();
+        let f = feed(&conn, folder(&conn), "http://cover.test/cap.xml", "cap");
+        let id = article(&conn, f, 0, &page, None);
+        let db = Arc::new(tokio::sync::Mutex::new(conn));
+        let state = new_state();
+        let mark = log_mark();
+        assert_eq!(
+            cover_backfill_round(&db, &new_http(), &state, &new_shutdown()).await,
+            0
+        );
+        server.join().unwrap();
+        assert_eq!(cover_of(&db, id).await, None);
+        assert_logged_since(mark, "responseTooLarge");
+    }
+    // 正常正控制沿同一生产round，不因增加预算让补图路径不可达。
+    let site = ArticleSite::start();
+    let path = temp_db("body_cap_normal");
+    let conn = db::open(&path).unwrap();
+    let f = feed(
+        &conn,
+        folder(&conn),
+        "http://cover.test/control.xml",
+        "control",
+    );
+    let id = article(&conn, f, 0, &site.url("/ok/cap-normal"), None);
+    let db = Arc::new(tokio::sync::Mutex::new(conn));
+    assert_eq!(
+        cover_backfill_round(&db, &new_http(), &new_state(), &new_shutdown()).await,
+        1
+    );
+    assert_eq!(
+        cover_of(&db, id).await.as_deref(),
+        Some("https://img.example.com/cap-normal.jpg")
     );
 }
 

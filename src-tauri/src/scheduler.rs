@@ -912,19 +912,24 @@ const COVER_BACKFILL_CONCURRENCY: usize = 2;
 const COVER_BACKFILL_TICK: Duration = Duration::from_secs(60);
 /// 单请求（抓文章页）超时。
 const COVER_BACKFILL_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// 进程内「已尝试 URL」负缓存上限（OPT-017D）。
+/// 进程内封面 URL 结果缓存上限（OPT-017D；成功与失败共用容量）。
 ///
-/// 语义：一次尝试**完整结束后**（成功 / 无 og:image / 抓取失败）URL 记入负缓存，
-/// 本进程内不再重试；DB 写失败与终止信号中断不算「已尝试」。
-/// 缓存有上限：写满后按插入序逐出最旧的 URL——逐出只把「本进程永不重试」放宽为
-/// 「至少要再排 CAP 条其它尝试之后才可能被重试」，每轮请求量仍由
+/// 语义：尝试成功记有限成功图（同URL后继条目复用），无图/抓取失败记10分钟
+/// 负缓存；DB 写失败与终止信号中断不算「已尝试」。
+/// 缓存写满按插入序逐出最旧 URL；失败在 TTL 到期或被逐出后可重试，每轮请求量由
 /// [`COVER_BACKFILL_BATCH`] / [`COVER_BACKFILL_CONCURRENCY`] / 扫描页数约束，
-/// 不存在对单个 URL 的无界重试。上限本身约束内存（约 100B/条 × 1024 ≈ 100KB）。
+/// 不存在对单个 URL 的逐轮无间隔重试。此上限是条目数预算，不是严格字节预算。
 pub const COVER_BACKFILL_ATTEMPT_CACHE_MAX: usize = 1024;
+const COVER_FAILURE_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// 进程内「已尝试 URL」负缓存（带容量上限，逐出最旧）。
+enum CachedCover {
+    Failed(Instant),
+    Image(String),
+}
+
+/// 进程内有界URL结果缓存；成功保留可复用图片，失败按TTL恢复机会。
 pub struct CoverAttemptCache {
-    set: std::collections::HashSet<String>,
+    set: HashMap<String, CachedCover>,
     order: std::collections::VecDeque<String>,
     cap: usize,
 }
@@ -944,27 +949,46 @@ impl CoverAttemptCache {
     /// 指定上限（测试用小容量验证逐出；cap=0 表示不缓存）。
     pub fn with_capacity(cap: usize) -> Self {
         Self {
-            set: std::collections::HashSet::new(),
+            set: HashMap::new(),
             order: std::collections::VecDeque::new(),
             cap,
         }
     }
 
     pub fn contains(&self, url: &str) -> bool {
-        self.set.contains(url)
+        self.contains_at(url, Instant::now())
     }
 
-    /// 记入一次「已尝试」。重复记入不改变顺序；超出上限时逐出最旧。
-    pub fn insert(&mut self, url: String) {
-        if !self.set.insert(url.clone()) {
-            return;
+    fn contains_at(&self, url: &str, now: Instant) -> bool {
+        match self.set.get(url) {
+            Some(CachedCover::Image(_)) => true,
+            Some(CachedCover::Failed(at)) => now.saturating_duration_since(*at) < COVER_FAILURE_TTL,
+            None => false,
         }
-        self.order.push_back(url);
+    }
+
+    fn image(&self, url: &str) -> Option<String> {
+        match self.set.get(url) {
+            Some(CachedCover::Image(image)) => Some(image.clone()),
+            _ => None,
+        }
+    }
+
+    fn remember(&mut self, url: String, value: CachedCover) {
+        let exists = self.set.insert(url.clone(), value).is_some();
+        if !exists {
+            self.order.push_back(url);
+        }
         while self.order.len() > self.cap {
             if let Some(oldest) = self.order.pop_front() {
                 self.set.remove(&oldest);
             }
         }
+    }
+
+    /// 记入一次失败完成时刻；重复不改变逐出顺序，TTL从最近实际失败计算。
+    pub fn insert(&mut self, url: String) {
+        self.remember(url, CachedCover::Failed(Instant::now()));
     }
 
     pub fn len(&self) -> usize {
@@ -978,7 +1002,7 @@ impl CoverAttemptCache {
 
 /// 封面补全的进程内状态（**跨轮持久**）。
 ///
-/// - `attempts`：负缓存，一次尝试完整结束后记入（见 [`CoverAttemptCache`]）。
+/// - `attempts`：结果缓存；成功图可复用，失败10分钟内跳过（见 [`CoverAttemptCache`]）。
 /// - `scan_offset`：候选扫描游标（行偏移）。每轮从上次结束处继续扫描，按
 ///   **已扫描行数**推进（负缓存命中 / 同 URL 重复 / 批次已满都算扫描过），
 ///   扫到候选集末尾（读到空页）回绕到 0。
@@ -1023,6 +1047,19 @@ impl CoverBackfillState {
     /// 当前扫描游标（行偏移）。
     pub fn scan_offset(&self) -> i64 {
         self.scan_offset
+    }
+
+    /// 同一成功图被前端确认失效后撤掉可复用值，并保留短期失败屏障。
+    /// 与数据库精确 CAS 同一命令接线；后来不同图URL的迟到失败不影响新缓存。
+    pub fn report_broken(&mut self, page_url: &str, image_url: &str) {
+        if self
+            .attempts
+            .image(page_url)
+            .as_deref()
+            .map_or(true, |cached| cached == image_url)
+        {
+            self.attempts.insert(page_url.to_string());
+        }
     }
 }
 
@@ -1081,7 +1118,7 @@ const COVER_BACKFILL_SCAN_PAGES: usize = 4;
 /// 列表卡片无封面。此循环对「无封面 + 有原文 URL 的文章」（直连与各服务端
 /// 协议后端同列——正文首图兜底后仍无图的缺口集合）抓文章页 og:image 补封面
 /// （复用 extraction::lead_image），低优先级、限并发、单请求超时、失败
-/// 负缓存（同一 URL 本进程不重试，避免反复轰炸源站）。
+/// 结果缓存（同一 URL 失败10分钟内不重试，成功图直接复用，避免反复请求源站）。
 ///
 /// 生命周期（OPT-017D）：`shutdown` 触发后循环立即退出（等待期与轮内两处
 /// 都消费信号）；轮内在途请求被取消、全部子任务随 round 返回结束——应用
@@ -1099,7 +1136,7 @@ pub fn spawn_cover_backfill(app: AppHandle, shutdown: ShutdownToken) {
         }
         let db = app.state::<AppState>().db.clone();
         let http = app.state::<AppState>().http.clone();
-        let state = Arc::new(tokio::sync::Mutex::new(CoverBackfillState::new()));
+        let state = app.state::<AppState>().cover_backfill.clone();
         loop {
             if shutdown.is_triggered() {
                 log::info!("scheduler: 封面补全循环退出（收到终止信号）");
@@ -1125,8 +1162,8 @@ pub fn spawn_cover_backfill(app: AppHandle, shutdown: ShutdownToken) {
     });
 }
 
-/// 单轮封面补全（可测试入口）：从**持久扫描游标**处分页扫描候选、跳过本进程
-/// 已尝试过的 URL，并发抓取最多 COVER_BACKFILL_BATCH 篇，返回本轮补到封面的篇数。
+/// 单轮封面补全（可测试入口）：从跨轮扫描游标处分页扫描候选、跳过未过期失败，
+/// 复用成功图或并发抓取最多 COVER_BACKFILL_BATCH 篇，返回本轮补图条目数。
 ///
 /// 窗口推进（REQ-106①）：候选队列里「抓过但没图」的条目不会被移除，若每轮
 /// 只看 ORDER BY published_at DESC 的第一页，最新一批全部拿不到图时更老的
@@ -1151,9 +1188,8 @@ pub async fn cover_backfill_round(
         log::debug!("scheduler: 封面补全已收到终止信号，本轮跳过");
         return 0;
     }
-    // 目标按 URL 分组：同一 URL 一轮只请求一次，但**所有**指向该 URL 的条目都要
-    // 写入封面（不同源可能收录同一篇原文；只填第一篇会让同 URL 的其它条目永久空缺，
-    // 且该 URL 已进负缓存、本进程内不会再轮到它们）。
+    // 目标按URL分组，同轮同URL只请求一次；窗外/后新增同URL候选在后续扫描中
+    // 复用已缓存的成功图，不为了填全部同URL条目做额外全库扫描。
     let targets: Vec<(String, Vec<i64>)> = {
         let conn = db.lock().await;
         let mut state = state.lock().await;
@@ -1184,7 +1220,7 @@ pub async fn cover_backfill_round(
             }
             offset += page.len() as i64;
             for (aid, url) in page {
-                if state.attempts().contains(&url) {
+                if state.attempts().contains(&url) && state.attempts().image(&url).is_none() {
                     // 负缓存命中：跳过请求，但该行已计入 offset 推进（下方统一写回）。
                     continue;
                 }
@@ -1229,7 +1265,7 @@ pub async fn cover_backfill_round(
     let mut filled = 0usize;
     for h in handles {
         match h.await {
-            Ok(CoverAttempt::Settled(n)) => filled += n,
+            Ok(CoverAttempt::Settled(n)) | Ok(CoverAttempt::Filled(n)) => filled += n,
             Ok(CoverAttempt::Cancelled) | Ok(CoverAttempt::DbWriteFailed) => {}
             // 子任务 panic（join 失败）不得静默跳过：该 URL 未记入负缓存，
             // 下一轮会重新尝试；记错误便于诊断。
@@ -1243,9 +1279,9 @@ pub async fn cover_backfill_round(
 
 /// 单次尝试的结局（决定是否记入负缓存、是否计入补全数）。
 enum CoverAttempt {
-    /// 尝试完整结束（成功写库 n 条 / 页面无 og:image / 抓取失败）——
-    /// 结果对本进程是确定的，记入负缓存，本进程内不再重复尝试。
+    /// 页面无图或抓取失败，记10分钟失败缓存；n保留既有回执形态。
     Settled(usize),
+    Filled(usize),
     /// 终止信号中断了这次尝试（未完成，不记负缓存）。
     Cancelled,
     /// 数据库写入失败：不记负缓存（那不是「已处理」），下轮重试；已记错误日志。
@@ -1271,13 +1307,19 @@ async fn backfill_cover_once(
     if shutdown.is_triggered() {
         return CoverAttempt::Cancelled;
     }
-    // 负缓存：本进程已尝试过（失败/无图）的 URL 不再重试。
-    // 这里返回 Settled(0) 会重复记入同一 URL——幂等且不改变插入序。
-    if state.lock().await.attempts().contains(url) {
-        return CoverAttempt::Settled(0);
+    // 成功可直接填扫描到的候选；失败TTL内直接返回，不续期失败时钟。
+    {
+        let cache = state.lock().await;
+        if let Some(image) = cache.attempts().image(url) {
+            drop(cache);
+            return fill_cover(db, state, aids, url, &image).await;
+        }
+        if cache.attempts().contains(url) {
+            return CoverAttempt::Settled(0);
+        }
     }
-    let outcome = attempt_cover(http, db, shutdown, aids, url).await;
-    // 成功 / 无图 / 抓取失败都算「本进程已尝试」——但必须发生在尝试**之后**。
+    let outcome = attempt_cover(http, db, state, shutdown, aids, url).await;
+    // 实际完成失败后才写入失败时刻，成功图在写库同锁内记入。
     if matches!(outcome, CoverAttempt::Settled(_)) {
         state.lock().await.attempts_mut().insert(url.to_string());
     }
@@ -1288,6 +1330,7 @@ async fn backfill_cover_once(
 async fn attempt_cover(
     http: &reqwest::Client,
     db: &Arc<tokio::sync::Mutex<Connection>>,
+    state: &Arc<tokio::sync::Mutex<CoverBackfillState>>,
     shutdown: &ShutdownToken,
     aids: &[i64],
     url: &str,
@@ -1311,10 +1354,11 @@ async fn attempt_cover(
             return CoverAttempt::Settled(0);
         }
     };
+    let base = resp.url().to_string();
     let html = tokio::select! {
         biased;
         _ = shutdown.wait() => return CoverAttempt::Cancelled,
-        h = resp.text() => h,
+        h = crate::ingestion::read_text_capped(resp, crate::ingestion::MAX_BODY_BYTES) => h,
     };
     let html = match html {
         Ok(h) => h,
@@ -1324,7 +1368,6 @@ async fn attempt_cover(
         }
     };
     // lead_image 是纯同步（scraper）返回 Option<String>，spawn_blocking 里跑避免阻塞 async worker
-    let base = url.to_string();
     let image = match tokio::task::spawn_blocking(move || {
         crate::extraction::lead_image(&html, &base)
     })
@@ -1343,12 +1386,27 @@ async fn attempt_cover(
     // 落库（幂等：已有封面不覆盖）。NULLIF 把空串也视为「没有封面」——候选查询
     // （image_url IS NULL OR image_url = ''）把空串计入队列，而 COALESCE 只判 NULL，
     // 空串行会一直留在队列里且每轮都被算作「已补全」。
+    fill_cover(db, state, aids, url, &image).await
+}
+
+async fn fill_cover(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    state: &Arc<tokio::sync::Mutex<CoverBackfillState>>,
+    aids: &[i64],
+    url: &str,
+    image: &str,
+) -> CoverAttempt {
     let conn = db.lock().await;
+    let mut cache = state.lock().await;
+    if cache.attempts().contains(url) && cache.attempts().image(url).is_none() {
+        // 请求在途期间失败上报已清掉该图；不能把刚失败的结果重新填回。
+        return CoverAttempt::Cancelled;
+    }
     let mut filled = 0;
     for aid in aids {
         match conn.execute(
-            "UPDATE articles SET image_url = COALESCE(NULLIF(image_url, ''), ?1) WHERE id = ?2",
-            rusqlite::params![image, aid],
+            "UPDATE articles SET image_url = ?1 WHERE id = ?2 AND url = ?3 AND (image_url IS NULL OR image_url = '')",
+            rusqlite::params![image, aid, url],
         ) {
             Ok(n) => filled += n,
             Err(e) => {
@@ -1358,7 +1416,10 @@ async fn attempt_cover(
             }
         }
     }
-    CoverAttempt::Settled(filled)
+    cache
+        .attempts_mut()
+        .remember(url.to_string(), CachedCover::Image(image.to_string()));
+    CoverAttempt::Filled(filled)
 }
 
 /* ============================================================
@@ -1617,7 +1678,96 @@ OPT-017D：封面补全负缓存（上限与逐出）单元测试
 ============================================================ */
 #[cfg(test)]
 mod cover_attempt_cache_tests {
-    use super::{CoverAttemptCache, COVER_BACKFILL_ATTEMPT_CACHE_MAX};
+    use super::{
+        CachedCover, CoverAttemptCache, CoverBackfillState, COVER_BACKFILL_ATTEMPT_CACHE_MAX,
+        COVER_FAILURE_TTL,
+    };
+
+    #[test]
+    fn negative_cache_expires_and_success_report_does_not_poison_new_image() {
+        let now = std::time::Instant::now();
+        let mut cache = CoverAttemptCache::with_capacity(2);
+        cache.remember("failed".into(), CachedCover::Failed(now));
+        assert!(cache.contains_at(
+            "failed",
+            now + COVER_FAILURE_TTL - std::time::Duration::from_millis(1)
+        ));
+        assert!(!cache.contains_at("failed", now + COVER_FAILURE_TTL));
+        cache.remember("good".into(), CachedCover::Image("new.jpg".into()));
+        assert!(cache.contains_at("good", now + COVER_FAILURE_TTL * 100));
+        assert_eq!(cache.image("good").as_deref(), Some("new.jpg"));
+        let mut state = CoverBackfillState::new();
+        state
+            .attempts
+            .remember("page".into(), CachedCover::Image("new.jpg".into()));
+        state.report_broken("page", "old.jpg");
+        assert_eq!(state.attempts.image("page").as_deref(), Some("new.jpg"));
+        state.report_broken("page", "new.jpg");
+        assert!(state.attempts.image("page").is_none());
+        assert!(state.attempts.contains("page"));
+    }
+
+    #[tokio::test]
+    async fn expired_failure_retries_real_http_and_fills_after_recovery() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/article", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut bytes = [0; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = stream.read(&mut bytes).unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&bytes[..n]);
+            }
+            let body = "<meta property=\"og:image\" content=\"https://example.com/recovered.jpg\">";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::MIGRATIONS.to_latest(&mut connection).unwrap();
+        connection.execute_batch("INSERT INTO folders(id,name) VALUES(1,'F'); INSERT INTO feeds(id,folder_id,feed_url,title) VALUES(1,1,'https://example.com/rss','F');").unwrap();
+        connection
+            .execute(
+                "INSERT INTO articles(id,feed_id,guid,title,url) VALUES(1,1,'g','T',?1)",
+                [&url],
+            )
+            .unwrap();
+        let db = std::sync::Arc::new(tokio::sync::Mutex::new(connection));
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(CoverBackfillState::new()));
+        state.lock().await.attempts_mut().remember(
+            url.clone(),
+            CachedCover::Failed(std::time::Instant::now() - COVER_FAILURE_TTL),
+        );
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        assert_eq!(
+            super::cover_backfill_round(&db, &http, &state, &super::ShutdownToken::new()).await,
+            1
+        );
+        server.join().unwrap();
+        let image: String = db
+            .lock()
+            .await
+            .query_row("SELECT image_url FROM articles WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(image, "https://example.com/recovered.jpg");
+    }
 
     /// 上限之外必须逐出最旧（插入序）；重复记入不得改变顺序或触发逐出；
     /// 默认构造必须用到生产上限常量而不是 0（防「容量为 0 悄悄禁掉缓存」）。

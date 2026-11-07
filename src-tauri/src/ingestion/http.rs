@@ -63,6 +63,43 @@ pub async fn read_body_capped(mut resp: reqwest::Response, max_bytes: usize) -> 
     Ok(buf)
 }
 
+/// 文本消费方复用同一收体预算和 charset 解码，不能先 text()/json() 后再检查。
+pub async fn read_text_capped(resp: reqwest::Response, max_bytes: usize) -> AppResult<String> {
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let bytes = read_body_capped(resp, max_bytes).await?;
+    Ok(decode_body_bytes(&bytes, content_type.as_deref()))
+}
+
+/// 错误详情只需要有界前缀。读到 8 KiB 后最多再看一块以判定截断，随后释放
+/// 响应；不为一条错误通知收集整页/无限流，截断以明确标记呈现。
+pub async fn read_error_detail(mut resp: reqwest::Response) -> AppResult<String> {
+    const MAX_ERROR_BYTES: usize = 8 * 1024;
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    while let Some(chunk) = resp.chunk().await? {
+        let remaining = MAX_ERROR_BYTES - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if chunk.len() > remaining {
+            truncated = true;
+            break;
+        }
+    }
+    let mut text = decode_body_bytes(&bytes, content_type.as_deref());
+    if truncated {
+        text.push_str("…（响应详情已截断）");
+    }
+    Ok(text)
+}
+
 /// 按 Content-Type 的 charset 参数解码响应体，语义与 `reqwest::text()`
 /// 一致：无 charset 头或未知标签按 UTF-8，BOM 优先于标签，无效字节
 /// lossy 替换。read_body_capped 收的是原始字节，文本类调用方必须经

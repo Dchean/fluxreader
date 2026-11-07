@@ -1234,6 +1234,14 @@ pub fn open(path: &Path) -> AppResult<Connection> {
 /// `backups/<文件名>`（用户可见且不含账户目录），确保仍能找回升级前状态。
 // Note: WAL 安全迁移快照与失败边界 — 见 .agents/notes/implemented/architecture/2026-11-05-数据库快照与恢复边界.md
 pub(crate) fn open_with_report(path: &Path) -> AppResult<Connection> {
+    open_with_credential_migration(path, crate::credentials::migrate_legacy_plaintext)
+}
+
+/// 生产始终传入真实凭据迁移器；私有注入点只验证预快照失败关闭的调用顺序。
+fn open_with_credential_migration(
+    path: &Path,
+    migrate_credentials: fn(&Connection) -> AppResult<usize>,
+) -> AppResult<Connection> {
     let mut conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -1251,10 +1259,16 @@ pub(crate) fn open_with_report(path: &Path) -> AppResult<Connection> {
     )?;
     let will_upgrade = from_version < LATEST_SCHEMA_VERSION && (from_version > 0 || has_tables);
 
-    // 快照必须只带 DPAPI 密文：若旧库仍有历史明文凭据，先完成失败关闭的
-    // 加密迁移，再创建快照。v1 没有 settings 表，跳过；迁移到最新后会照常补跑。
-    if will_upgrade && from_version >= 2 {
-        let _ = crate::credentials::migrate_legacy_plaintext(&conn)?;
+    // 只要旧库实际有 settings，先迁移其中的历史明文再创建快照。首迁移已含
+    // settings，不能凭版本号假定 v1 没有。此防御覆盖合成早库；历史发布的 v1
+    // 是否自然保存这些敏感键仍未证实，不据此推导真实用户泄露。
+    let has_settings: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings')",
+        [],
+        |row| row.get(0),
+    )?;
+    if will_upgrade && has_settings {
+        let _ = migrate_credentials(&conn)?;
     }
 
     let mut backup: Option<super::backup::BackupInfo> = None;
@@ -1314,7 +1328,7 @@ pub(crate) fn open_with_report(path: &Path) -> AppResult<Connection> {
     // 进入一次新算法重算；算法再变化时递增版本即可再次触发。
     ensure_url_norm_backfill(&conn)?;
     // 启动迁移：历史明文敏感凭据升级为 DPAPI 密文（SEC-2）。幂等。
-    let _ = crate::credentials::migrate_legacy_plaintext(&conn)?;
+    let _ = migrate_credentials(&conn)?;
     Ok(conn)
 }
 
@@ -2905,6 +2919,168 @@ mod backup_snapshot_tests {
             LATEST_SCHEMA_VERSION,
             "新增迁移后必须同步 LATEST_SCHEMA_VERSION（迁移前备份的升级判据）"
         );
+    }
+
+    /// 这是合成 v1 的防御回归，不代表已确认发布过的用户库自然含此敏感键。
+    #[cfg(windows)]
+    #[test]
+    fn synthetic_v1_and_v2_secrets_are_encrypted_before_migration_snapshot() {
+        const SECRET: &str = "synthetic-v1-secret-not-a-real-user-credential";
+        for old_version in [1, 2] {
+            let path = unique_test_db(&format!("synthetic_v{old_version}_credentials"));
+            {
+                let mut connection = Connection::open(&path).unwrap();
+                MIGRATIONS.to_version(&mut connection, old_version).unwrap();
+                connection
+                    .execute(
+                        "INSERT INTO settings(key, value) VALUES ('miniflux_token', ?1)",
+                        [SECRET],
+                    )
+                    .unwrap();
+            }
+            let connection = open_with_report(&path).unwrap();
+            assert_eq!(
+                super::backup::user_version(&connection).unwrap(),
+                LATEST_SCHEMA_VERSION
+            );
+            let live: String = connection
+                .query_row(
+                    "SELECT value FROM settings WHERE key = 'miniflux_token'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(live.starts_with("dpapi:"));
+            assert_ne!(live, SECRET);
+            assert_eq!(
+                crate::db::get_setting(&connection, "miniflux_token")
+                    .unwrap()
+                    .as_deref(),
+                Some(SECRET)
+            );
+            let backups: Vec<_> = std::fs::read_dir(path.parent().unwrap().join("backups"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(&format!("migration-v{old_version}-to-v"))
+                })
+                .collect();
+            assert_eq!(backups.len(), 1);
+            let backup = Connection::open_with_flags(
+                &backups[0],
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            assert_eq!(
+                super::backup::user_version(&backup).unwrap(),
+                old_version as i64
+            );
+            let stored: String = backup
+                .query_row(
+                    "SELECT value FROM settings WHERE key = 'miniflux_token'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(stored.starts_with("dpapi:"));
+            assert_ne!(stored, SECRET);
+            assert_eq!(
+                crate::db::get_setting(&backup, "miniflux_token")
+                    .unwrap()
+                    .as_deref(),
+                Some(SECRET)
+            );
+            assert_eq!(
+                backup
+                    .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            drop(backup);
+            drop(connection);
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn credential_migration_failure_prevents_plaintext_snapshot_and_schema_upgrade() {
+        let path = unique_test_db("prebackup_encryption_failure");
+        {
+            let mut connection = Connection::open(&path).unwrap();
+            MIGRATIONS.to_version(&mut connection, 1).unwrap();
+            connection.execute("INSERT INTO settings(key, value) VALUES ('miniflux_token', 'synthetic-secret')", []).unwrap();
+        }
+        let error = open_with_credential_migration(&path, |_| {
+            Err(crate::error::AppError::new(
+                "credentialEncrypt",
+                "injected encryption failure",
+            ))
+        })
+        .expect_err("加密失败必须在创建快照前终止");
+        assert_eq!(error.code, "credentialEncrypt");
+        assert!(
+            !path.parent().unwrap().join("backups").exists(),
+            "不能先留下明文快照再报错"
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(super::backup::user_version(&connection).unwrap(), 1);
+        let stored: String = connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'miniflux_token'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "synthetic-secret");
+        drop(connection);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn legacy_database_without_settings_skips_prebackup_credentials_but_still_upgrades() {
+        let path = unique_test_db("legacy_no_settings");
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch("CREATE TABLE legacy_probe(value TEXT); INSERT INTO legacy_probe VALUES ('retained');").unwrap();
+        }
+        let connection = open_with_report(&path).unwrap();
+        assert_eq!(
+            super::backup::user_version(&connection).unwrap(),
+            LATEST_SCHEMA_VERSION
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT value FROM legacy_probe", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "retained"
+        );
+        let backup = std::fs::read_dir(path.parent().unwrap().join("backups"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("migration-v0-to-v")
+            })
+            .unwrap();
+        let old = Connection::open(&backup).unwrap();
+        assert_eq!(super::backup::user_version(&old).unwrap(), 0);
+        let count: i64 = old
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'settings'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "旧库确无settings，不是伪对照");
+        drop(old);
+        drop(connection);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// 生产 open 在升级前经 VACUUM INTO 生成快照；连接保持开启时最新提交仍在
@@ -4683,6 +4859,117 @@ mod sync_queue_lifecycle_migration_tests {
                 None,
             ),
             "其它历史动作必须说明不支持远端写回，且不得伪造推送失败"
+        );
+    }
+}
+
+/// v31 专属：实际执行已发布迁移，不复制 UPDATE 字串来替代迁移框架。
+#[cfg(test)]
+mod v31_empty_url_migration_tests {
+    use super::*;
+
+    #[test]
+    fn migration31_clears_empty_article_keys_without_touching_content_or_local_state() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        MIGRATIONS.to_version(&mut connection, 30).unwrap();
+        connection.execute_batch(
+            "INSERT INTO settings(key, value) VALUES ('app_settings', '{\"smartDedup\":true}');
+             INSERT INTO folders(id, name) VALUES (1, 'F');
+             INSERT INTO feeds(id, folder_id, feed_url, title) VALUES (1, 1, 'https://a.example/rss', 'A'), (2, 1, 'https://b.example/rss', 'B');
+             INSERT INTO contents(id, identity, url_norm, content_html, body_text) VALUES (1, 'synthetic-v31', '', '<p>shared body retained</p>', 'shared body retained');
+             INSERT INTO articles(id, feed_id, guid, url, url_norm, title, content_id, is_read, is_starred, read_version, star_version)
+             VALUES (1, 1, 'first', NULL, '', 'first', 1, 1, 0, 2, 3), (2, 2, 'second', '', '', 'second', 1, 0, 1, 4, 5),
+                    (3, 1, 'normal', 'https://example.com/post', 'http://example.com/post', 'normal', 1, 0, 0, 0, 0);
+             INSERT INTO sync_queue(article_id, action) VALUES (1, 'read'), (2, 'star');"
+        ).unwrap();
+        let visible_ids = |connection: &Connection| -> Vec<i64> {
+            // v31 时尚无v33日期元数据；实际显示聚合谓词只依赖url_norm/id。
+            let mut statement = connection.prepare("SELECT a.id FROM articles a WHERE NOT EXISTS (SELECT 1 FROM articles b WHERE b.url_norm = a.url_norm AND b.id < a.id) ORDER BY a.id").unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let invariant = |connection: &Connection| -> serde_json::Value {
+            let mut statement = connection.prepare("SELECT id, feed_id, guid, url, content_id, is_read, is_starred, read_version, star_version FROM articles ORDER BY id").unwrap();
+            let rows: Vec<serde_json::Value> = statement
+                .query_map([], |row| {
+                    Ok(serde_json::json!([
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?
+                    ]))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let content: (String, String, String) = connection
+                .query_row(
+                    "SELECT url_norm, content_html, body_text FROM contents WHERE id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            let mut statement = connection
+                .prepare("SELECT article_id, action FROM sync_queue ORDER BY id")
+                .unwrap();
+            let queue: Vec<(i64, String)> = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            serde_json::json!({"articles":rows,"contents":content,"queue":queue})
+        };
+        let before = invariant(&connection);
+        assert_eq!(
+            visible_ids(&connection),
+            [1, 3],
+            "前置：旧空键导致第二跨源文章被错误聚合"
+        );
+        MIGRATIONS.to_version(&mut connection, 31).unwrap();
+        assert_eq!(super::backup::user_version(&connection).unwrap(), 31);
+        assert_eq!(visible_ids(&connection), [1, 2, 3]);
+        assert_eq!(invariant(&connection), before);
+        let keys: Vec<Option<String>> = {
+            let mut statement = connection
+                .prepare("SELECT url_norm FROM articles ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(keys, [None, None, Some("http://example.com/post".into())]);
+        MIGRATIONS.to_version(&mut connection, 31).unwrap();
+        assert_eq!(invariant(&connection), before);
+        assert_eq!(visible_ids(&connection), [1, 2, 3]);
+        // 最新公开消费者确认修复对smartDedup真入口生效，迁移31之后的追加不改键。
+        MIGRATIONS.to_latest(&mut connection).unwrap();
+        let query = crate::db::ArticleQuery {
+            feed_id: None,
+            folder_id: None,
+            only_unread: false,
+            only_starred: false,
+            only_today: false,
+            newest_first: true,
+            limit: 20,
+            offset: 0,
+            with_content: false,
+            layout: None,
+            last_published: None,
+            last_id: None,
+        };
+        assert_eq!(
+            crate::db::list_articles(&connection, &query).unwrap().len(),
+            3
         );
     }
 }

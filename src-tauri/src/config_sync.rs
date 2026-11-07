@@ -71,7 +71,7 @@ impl ConnectionConfig {
 /// 配置导入的待确认连接建议（settings，非敏感：协议/地址/用户名，**无密码**）。
 /// 导入只写这条建议，不改活动凭据/绑定；激活必须经 sync_save 专用保存流程
 /// （重新输入凭据 + 携带本建议的 version 做 CAS），提交成功后同一事务消费本键。
-/// 每次写入（即便同值重复导入）都递增 `version`——旧激活 token 不得误消费新建议。
+/// 内容改变或清空后重导递增 `version`；同值重复导入沿用同一建议 token。
 // Note: 导入不直接应用连接配置、激活 CAS 与版本语义 — 见 .agents/notes/implemented/architecture/2026-10-08-账号会话与配置应用边界.md
 pub(crate) const PENDING_CONNECTION_KEY: &str = "pending_connection_config";
 
@@ -183,6 +183,10 @@ pub struct FeedSpec {
     pub url: String,
     pub title: String,
     pub folder: String,
+    /// 新快照按稳定身份引用分类，旧快照缺字段时才按精确名称保守解析。
+    /// 保留 schema2：旧 serde 消费者忽略未知字段，但不能因此修复其重名归属。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_sync_id: Option<String>,
     pub layout: String,
     pub auto_summary: bool,
     pub auto_translate: bool,
@@ -243,6 +247,11 @@ pub fn build_payload(conn: &rusqlite::Connection) -> AppResult<SyncPayload> {
             url: f.feed_url.clone(),
             title: f.title.clone(),
             folder: folder_names.get(&f.folder_id).cloned().unwrap_or_default(),
+            folder_sync_id: folders
+                .iter()
+                .find(|folder| folder.id == f.folder_id)
+                .and_then(|folder| folder.sync_id.clone())
+                .filter(|uid| !uid.trim().is_empty()),
             layout: f.layout.clone(),
             // 旧 bool 字段照旧导出（旧客户端读同一快照时的兼容输入），
             // 新真值 mode 同时携带（新客户端以 mode 为准）。
@@ -345,6 +354,77 @@ fn validated_remote_refresh_interval(remote: &serde_json::Value) -> AppResult<Op
             "validate",
             format!("配置快照的 refreshInterval 非法（必须为 5–720 整数）：{v}"),
         )),
+    }
+}
+
+/// 与前端 settingsValidation 的现用字段契约一致；本机专属字段仍忽略。
+/// 旧版非对象 app_settings 保持无操作兼容，不让畸形结构触发删除。
+fn validate_remote_settings(remote: &serde_json::Value) -> AppResult<()> {
+    let Some(object) = remote.as_object() else {
+        return Ok(());
+    };
+    for (key, value) in object {
+        if is_local_only_setting(key) {
+            continue;
+        }
+        let valid = match key.as_str() {
+            "refreshInterval" => validated_remote_refresh_interval(remote).is_ok(),
+            "fetchConcurrency" => number_in_range(value, 1.0, 16.0),
+            "fontSize" => number_in_range(value, 13.0, 24.0),
+            "lineHeight" => number_in_range(value, 130.0, 240.0),
+            "maxWidth" => number_in_range(value, 560.0, 1100.0),
+            "listWidth" => number_in_range(value, 280.0, 560.0),
+            "startupView" => enum_value(value, &["unread", "all", "today", "starred"]),
+            "themeMode" => enum_value(value, &["light", "dark", "auto"]),
+            "palette" => enum_value(value, &["blue", "zinc", "purple", "emerald", "terracotta"]),
+            "defaultOpenMode" => enum_value(value, &["rss", "fulltext"]),
+            "syncMode" => enum_value(value, &["direct", "hybrid"]),
+            "fontFamily" => value.as_str().is_some_and(|text| !text.trim().is_empty()),
+            "autoRefresh"
+            | "markReadOnOpen"
+            | "markReadOnScrollBottom"
+            | "markReadOnScrollOut"
+            | "hideReadOnStartup"
+            | "showReadTime"
+            | "smartDedup"
+            | "closeToTray"
+            | "notifyOnNewArticles"
+            | "autoSync" => value.is_boolean(),
+            // 未识别键不参与校验，保留旧快照/未来字段的兼容；客户端不消费它。
+            _ => true,
+        };
+        if !valid {
+            return Err(AppError::new(
+                "validate",
+                format!("配置快照的 {key} 类型或取值不受支持"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn number_in_range(value: &serde_json::Value, min: f64, max: f64) -> bool {
+    value
+        .as_f64()
+        .is_some_and(|number| number.is_finite() && (min..=max).contains(&number))
+}
+
+fn enum_value(value: &serde_json::Value, allowed: &[&str]) -> bool {
+    value.as_str().is_some_and(|text| allowed.contains(&text))
+}
+
+fn validate_layout(layout: &str, feed: bool) -> AppResult<()> {
+    if matches!(
+        layout,
+        "article" | "social" | "image" | "podcast" | "notification"
+    ) || (feed && layout == "inherit")
+    {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            "validate",
+            format!("配置快照包含不支持的布局：{layout}"),
+        ))
     }
 }
 
@@ -452,20 +532,7 @@ pub async fn gist_upsert(
                 .timeout(std::time::Duration::from_secs(30))
                 .send()
                 .await?;
-            let status = resp.status();
-            let text = resp.text().await?;
-            if !status.is_success() {
-                /* 字符级截断：字节位置 200 可能落在多字节字符中间（panic） */
-                let head: String = text.chars().take(200).collect();
-                return Err(AppError::network(format!(
-                    "Gist 创建失败：HTTP {status}：{head}"
-                )));
-            }
-            let v: serde_json::Value = serde_json::from_str(&text)?;
-            v.get("id")
-                .and_then(|i| i.as_str())
-                .map(String::from)
-                .ok_or_else(|| AppError::network("Gist 响应缺少 id"))
+            read_created_gist(resp).await
         }
     }
 }
@@ -488,16 +555,136 @@ pub async fn gist_read(
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await?;
+    read_gist_file(resp, file_name).await
+}
+
+async fn read_created_gist(resp: reqwest::Response) -> AppResult<String> {
     let status = resp.status();
-    let text = resp.text().await?;
+    if !status.is_success() {
+        let detail = crate::ingestion::read_error_detail(resp).await?;
+        return Err(AppError::network(format!(
+            "Gist 创建失败：HTTP {status}：{detail}"
+        )));
+    }
+    let text = crate::ingestion::read_text_capped(resp, crate::ingestion::MAX_BODY_BYTES).await?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    value
+        .get("id")
+        .and_then(|id| id.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| AppError::network("Gist 响应缺少 id"))
+}
+
+async fn read_gist_file(resp: reqwest::Response, file_name: &str) -> AppResult<String> {
+    let status = resp.status();
     if !status.is_success() {
         return Err(AppError::network(format!("Gist 读取失败：HTTP {status}")));
     }
+    let text = crate::ingestion::read_text_capped(resp, crate::ingestion::MAX_BODY_BYTES).await?;
     let v: serde_json::Value = serde_json::from_str(&text)?;
     v.pointer(&format!("/files/{file_name}/content"))
         .and_then(|c| c.as_str())
         .map(String::from)
         .ok_or_else(|| AppError::not_found(format!("Gist 中没有文件 {file_name}")))
+}
+
+#[cfg(test)]
+mod gist_body_budget_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
+    async fn response(
+        body: Vec<u8>,
+        length: bool,
+        status: &str,
+    ) -> (reqwest::Response, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let status = status.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = stream.read(&mut buffer).unwrap();
+                if n == 0 {
+                    return;
+                }
+                request.extend_from_slice(&buffer[..n]);
+            }
+            let cl = if length {
+                format!("Content-Length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
+            if write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{cl}Connection: close\r\n\r\n").is_ok() {
+                for chunk in body.chunks(16 * 1024) { if stream.write_all(chunk).is_err() { break; } }
+            }
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        (response, handle)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gist_create_and_read_use_bounded_production_response_consumers() {
+        for length in [true, false] {
+            for create in [true, false] {
+                let (resp, server) = response(
+                    vec![b'x'; crate::ingestion::MAX_BODY_BYTES + 1],
+                    length,
+                    "200 OK",
+                )
+                .await;
+                let error = if create {
+                    read_created_gist(resp).await
+                } else {
+                    read_gist_file(resp, "config.json").await
+                }
+                .unwrap_err();
+                assert_eq!(error.code, "responseTooLarge");
+                server.join().unwrap();
+            }
+        }
+        let (resp, server) = response(br#"{"id":"test-id"}"#.to_vec(), true, "201 Created").await;
+        assert_eq!(read_created_gist(resp).await.unwrap(), "test-id");
+        server.join().unwrap();
+        let (resp, server) = response(
+            br#"{"files":{"config.json":{"content":"{\"schema\":2}"}}}"#.to_vec(),
+            true,
+            "200 OK",
+        )
+        .await;
+        assert_eq!(
+            read_gist_file(resp, "config.json").await.unwrap(),
+            r#"{"schema":2}"#
+        );
+        server.join().unwrap();
+        let (resp, server) = response(
+            vec![b'e'; crate::ingestion::MAX_BODY_BYTES + 1],
+            false,
+            "503 Unavailable",
+        )
+        .await;
+        let error = read_created_gist(resp).await.unwrap_err();
+        assert!(error.message.contains("503"));
+        assert!(error.message.contains("已截断"));
+        assert!(error.message.len() < 8500);
+        server.join().unwrap();
+    }
 }
 
 /// WebDAV：PUT 写入。
@@ -544,7 +731,7 @@ pub async fn webdav_get(
             resp.status()
         )));
     }
-    Ok(resp.text().await?)
+    crate::ingestion::read_text_capped(resp, crate::ingestion::MAX_BODY_BYTES).await
 }
 
 /* ============================================================

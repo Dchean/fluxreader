@@ -116,7 +116,7 @@ pub use sync_map::{
     feed_id_by_url_normalized, fever_history_state, find_folder_by_name, folder_exists,
     get_article_content_html, get_article_for_summary, get_article_for_translation,
     get_article_remote_id, get_article_url, get_first_folder_id, last_sync_entry_id, last_sync_ts,
-    list_unbound_local_feeds, list_unread_ids_scoped, read_broadcast_targets,
+    list_unbound_local_feeds, list_unread_ids_scoped, match_remote_feed, read_broadcast_targets,
     reset_fever_history_state, set_article_remote_id, set_feed_remote_id,
     set_fever_history_complete, set_fever_history_pending, set_last_sync_entry_id,
     set_last_sync_ts, sync_generation, sync_mark_read_if_unread,
