@@ -1,8 +1,8 @@
 //! OPT-013 B2：翻译的长文 HTML 分段器（纯函数，无 IO）。
 //!
 //! 目标：把长正文切成**可重组**的片段——每段都是自包含的合法 HTML 片段
-//! （标签配对、不断开 UTF-8 字符与 HTML 实体），最终产物按段拼接后保持链接、
-//! 列表、表格与嵌套结构。
+//! （标签配对、不断开 UTF-8 字符与 HTML 实体）。列表在最终产物中按源 DOM
+//! 边界计划重组，同一 li 的续段不会变成新增项目，原本独立列表也不被合并。
 //!
 //! 策略（确定性；任何变化必须同步递增 `ai::SEGMENT_POLICY_VERSION`）：
 //! - 用既有依赖 `scraper`（html5ever）解析片段 DOM，按**节点序列化字节数**分组；
@@ -27,22 +27,118 @@
 //! 已含 `SEGMENT_POLICY_VERSION` 与整篇正文哈希，因此「同一签名的片段序列」是
 //! 稳定可复现的——片段持久化只按签名与序号绑定，无需单独存段内容哈希。
 
+use crate::error::{AppError, AppResult};
+use ego_tree::NodeId;
 use scraper::{ElementRef, Html, Node};
+
+#[derive(Clone)]
+struct SplitShell {
+    id: NodeId,
+    name: String,
+}
+
+struct SplitPart {
+    html: String,
+    head: Vec<SplitShell>,
+    tail: Vec<SplitShell>,
+}
+
+impl SplitPart {
+    fn atomic(html: String) -> Self {
+        Self {
+            html,
+            head: Vec::new(),
+            tail: Vec::new(),
+        }
+    }
+}
+
+/// 只在原 DOM 确认属于同一个列表节点的分段边界重合克隆壳。
+/// 计划每次从输入正文确定重建，不进入持久格式，也不依赖模型保留内部标记。
+pub struct HtmlSegmentPlan {
+    segments: Vec<String>,
+    joins: Vec<Vec<String>>,
+}
+
+impl HtmlSegmentPlan {
+    pub fn segments(&self) -> &[String] {
+        &self.segments
+    }
+
+    /// 在落片段前验证必需的边界壳；列表内部允许模型改变段落、强调等排版。
+    /// 无列表重合边界的旧路径不要求模型复刻整棵 HTML 树。
+    pub fn validate_part(&self, index: usize, html: &str) -> AppResult<()> {
+        let doc = Html::parse_fragment(html);
+        let root = content_root(doc.tree.root());
+        if index > 0 {
+            validate_boundary(root, &self.joins[index - 1], true)?;
+        }
+        if index < self.joins.len() {
+            validate_boundary(root, &self.joins[index], false)?;
+        }
+        Ok(())
+    }
+
+    pub fn reassemble(&self, translated: &[String]) -> AppResult<String> {
+        if translated.len() != self.segments.len() {
+            return Err(structure_error());
+        }
+        let Some(first) = translated.first() else {
+            return Ok(String::new());
+        };
+        let mut full = first.clone();
+        for (index, part) in translated.iter().enumerate().skip(1) {
+            let path = &self.joins[index - 1];
+            if path.is_empty() {
+                full.push_str(part);
+            } else {
+                let left = Html::parse_fragment(&full);
+                let right = Html::parse_fragment(part);
+                full = merge_boundary(
+                    content_root(left.tree.root()),
+                    content_root(right.tree.root()),
+                    path,
+                )?;
+            }
+        }
+        Ok(full)
+    }
+}
+
+pub fn plan_html_segments(html: &str, budget: usize) -> HtmlSegmentPlan {
+    let doc = Html::parse_fragment(html);
+    let parts = split_children(content_root(doc.tree.root()), budget.max(1), 0);
+    let joins = parts
+        .windows(2)
+        .map(|pair| {
+            let path: Vec<String> = pair[0]
+                .tail
+                .iter()
+                .zip(&pair[1].head)
+                .take_while(|(left, right)| left.id == right.id)
+                .map(|(shell, _)| shell.name.clone())
+                .collect();
+            path
+        })
+        .collect();
+    HtmlSegmentPlan {
+        segments: parts.into_iter().map(|part| part.html).collect(),
+        joins,
+    }
+}
 
 /// 段落/嵌套深度的防御上限：超过即原子保留（不无限递归）。
 const MAX_SPLIT_DEPTH: usize = 64;
 
-/// 把 HTML 切成长度不超过 `budget` 字节（尽量）的连续片段，拼接即为原文档的
-/// 等价重组（结构保持；相邻段可直接相接，无需补标签）。
+/// 把 HTML 切成长度不超过 `budget` 字节（尽量）的连续、自包含片段。
+/// 这只是发送序列；列表译文必须通过 `HtmlSegmentPlan::reassemble` 重组，
+/// 不能直接 concat 重复的 ol/li 壳并声称编号语义不变。
 ///
 /// 空输入返回空 Vec（调用方对空正文与「无内容节点」的退化输入分别守卫）；未超
 /// 预算的输入返回一个片段，内容为其 html5ever 序列化（规范序列化输入逐字，
 /// 非规范输入先经规范化——见模块头注）。
 pub fn split_html_segments(html: &str, budget: usize) -> Vec<String> {
-    let budget = budget.max(1);
-    let doc = Html::parse_fragment(html);
-    let root = content_root(doc.tree.root());
-    split_children(root, budget, 0)
+    plan_html_segments(html, budget).segments
 }
 
 /// 解析器为片段补出的容器（`html`/`body`）不是输入内容的一部分：单子节点且为
@@ -65,24 +161,28 @@ fn content_root(root: ego_tree::NodeRef<'_, Node>) -> ego_tree::NodeRef<'_, Node
 }
 
 /// 拆分一个节点的子序列（返回 ≥1 个「若干子节点连成的组」，每组 ≤ budget）。
-fn split_children(node: ego_tree::NodeRef<'_, Node>, budget: usize, depth: usize) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut current = String::new();
+fn split_children(
+    node: ego_tree::NodeRef<'_, Node>,
+    budget: usize,
+    depth: usize,
+) -> Vec<SplitPart> {
+    let mut out = Vec::new();
+    let mut current = SplitPart::atomic(String::new());
     for child in node.children() {
         let html = node_html(child);
         if html.is_empty() {
             continue;
         }
         if html.len() <= budget {
-            push_group(&mut out, &mut current, &html, budget);
+            push_group(&mut out, &mut current, SplitPart::atomic(html), budget);
             continue;
         }
         // 单个子节点超预算 → 递归拆分（可能返回多个自包含片段）
         for part in split_node(child, budget, depth + 1) {
-            push_group(&mut out, &mut current, &part, budget);
+            push_group(&mut out, &mut current, part, budget);
         }
     }
-    if !current.is_empty() {
+    if !current.html.is_empty() {
         out.push(current);
     }
     out
@@ -93,13 +193,112 @@ fn split_children(node: ego_tree::NodeRef<'_, Node>, budget: usize, depth: usize
 /// 下游（切分点保护、模型、sanitize）都可见。
 fn node_html(node: ego_tree::NodeRef<'_, Node>) -> String {
     match node.value() {
-        Node::Element(_) => ElementRef::wrap(node).map(|e| e.html()).unwrap_or_default(),
+        Node::Element(_) => ElementRef::wrap(node)
+            .map(|e| canonical_attribute_order(&e.html()))
+            .unwrap_or_default(),
         Node::Text(t) => escape_text(t),
         Node::Comment(c) => format!("<!--{}-->", &**c),
         Node::Doctype(d) => format!("<!DOCTYPE {}>", d.name()),
         // 文档/片段/处理指令：正文片段场景不可达；空串由调用方跳过
         _ => String::new(),
     }
+}
+
+/// scraper 默认属性表是 HashMap；同一正文重新 parse 可能换属性次序。
+/// 保留 html5ever 已完成的转义，只排列开标签里的完整属性 token，不重写值。
+/// raw-text 元素里的尖括号属于文本，不能当作待排序的子标签。
+fn canonical_attribute_order(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut cursor = 0;
+    while let Some(offset) = html[cursor..].find('<') {
+        let start = cursor + offset;
+        out.push_str(&html[cursor..start]);
+        if html[start..].starts_with("<!--") {
+            let Some(end) = html[start..].find("-->").map(|end| start + end + 3) else {
+                out.push_str(&html[start..]);
+                return out;
+            };
+            out.push_str(&html[start..end]);
+            cursor = end;
+            continue;
+        }
+        let mut quote = None;
+        let Some(end) = html.as_bytes()[start + 1..]
+            .iter()
+            .position(|byte| {
+                match quote {
+                    Some(q) if *byte == q => quote = None,
+                    Some(_) => {}
+                    None if *byte == b'"' || *byte == b'\'' => quote = Some(*byte),
+                    None if *byte == b'>' => return true,
+                    None => {}
+                }
+                false
+            })
+            .map(|offset| start + 1 + offset)
+        else {
+            out.push_str(&html[start..]);
+            return out;
+        };
+        let inside = &html[start + 1..end];
+        if inside.starts_with(['/', '!', '?']) {
+            out.push_str(&html[start..=end]);
+            cursor = end + 1;
+            continue;
+        }
+        let name_end = inside.find(char::is_whitespace).unwrap_or(inside.len());
+        let name = &inside[..name_end];
+        let mut tokens = Vec::new();
+        let mut token_start = name_end;
+        let bytes = inside.as_bytes();
+        while token_start < bytes.len() {
+            while token_start < bytes.len() && bytes[token_start].is_ascii_whitespace() {
+                token_start += 1;
+            }
+            if token_start == bytes.len() {
+                break;
+            }
+            let mut token_end = token_start;
+            let mut quote = None;
+            while token_end < bytes.len() {
+                let byte = bytes[token_end];
+                match quote {
+                    Some(q) if byte == q => quote = None,
+                    Some(_) => {}
+                    None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+                    None if byte.is_ascii_whitespace() => break,
+                    None => {}
+                }
+                token_end += 1;
+            }
+            tokens.push(&inside[token_start..token_end]);
+            token_start = token_end;
+        }
+        tokens.sort_unstable();
+        out.push('<');
+        out.push_str(name);
+        for token in tokens {
+            out.push(' ');
+            out.push_str(token);
+        }
+        out.push('>');
+        cursor = end + 1;
+        if matches!(
+            name,
+            "script" | "style" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext"
+        ) {
+            if let Some(offset) = html[cursor..].find(&format!("</{name}>")) {
+                let close = cursor + offset;
+                out.push_str(&html[cursor..close]);
+                cursor = close;
+            } else {
+                out.push_str(&html[cursor..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(&html[cursor..]);
+    out
 }
 
 /// html5ever 序列化器的文本转义规则（与 ElementRef::html 的输出口径一致）。
@@ -118,47 +317,63 @@ fn escape_text(s: &str) -> String {
 }
 
 /// 追加一片到当前组；装满即落盘开新组。
-fn push_group(out: &mut Vec<String>, current: &mut String, part: &str, budget: usize) {
-    if !current.is_empty() && current.len() + part.len() > budget {
-        out.push(std::mem::take(current));
+fn push_group(out: &mut Vec<SplitPart>, current: &mut SplitPart, part: SplitPart, budget: usize) {
+    if !current.html.is_empty() && current.html.len() + part.html.len() > budget {
+        out.push(std::mem::replace(current, SplitPart::atomic(String::new())));
     }
-    current.push_str(part);
+    if current.html.is_empty() {
+        current.head = part.head;
+    }
+    current.tail = part.tail;
+    current.html.push_str(&part.html);
 }
 
 /// 拆分单个节点：`html` 为该节点的完整序列化（文本节点为转义文本）。
-fn split_node(node: ego_tree::NodeRef<'_, Node>, budget: usize, depth: usize) -> Vec<String> {
+fn split_node(node: ego_tree::NodeRef<'_, Node>, budget: usize, depth: usize) -> Vec<SplitPart> {
     let html = node_html(node);
     if html.len() <= budget || depth > MAX_SPLIT_DEPTH {
-        return vec![html];
+        return vec![SplitPart::atomic(html)];
     }
     match node.value() {
-        Node::Text(_) => split_escaped_text(&html, budget),
+        Node::Text(_) => split_escaped_text(&html, budget)
+            .into_iter()
+            .map(SplitPart::atomic)
+            .collect(),
         Node::Element(el) => {
             // 从自身的序列化里摘开始/结束标签（不经手写重建，属性转义/顺序保真）
             let Some((open, close)) = split_outer_tag(&html, el.name()) else {
-                return vec![html]; // 无结束标签（void 元素/自闭合）→ 原子保留
+                return vec![SplitPart::atomic(html)]; // void 元素 → 原子保留
             };
             let overhead = open.len() + close.len();
             if overhead >= budget {
                 // 标签本身超预算：原子保留（有界拆分下限，见模块头注）
-                return vec![html];
+                return vec![SplitPart::atomic(html)];
             }
             let inner = &html[open.len()..html.len() - close.len()];
             if inner.trim().is_empty() {
-                return vec![html]; // 无子内容可拆（如超长属性值的 img）→ 原子保留
+                return vec![SplitPart::atomic(html)];
             }
             let inner_budget = budget - overhead;
             let parts = split_inner(inner, node, inner_budget, depth + 1);
             if parts.len() <= 1 {
-                return vec![html];
+                return vec![SplitPart::atomic(html)];
             }
             parts
                 .into_iter()
-                .map(|p| format!("{open}{p}{close}"))
+                .map(|mut part| {
+                    let shell = SplitShell {
+                        id: node.id(),
+                        name: el.name().to_string(),
+                    };
+                    part.head.insert(0, shell.clone());
+                    part.tail.insert(0, shell);
+                    part.html = format!("{open}{}{close}", part.html);
+                    part
+                })
                 .collect()
         }
         // 注释/DOCTYPE/处理指令等：原子保留（可能单段超预算）
-        _ => vec![html],
+        _ => vec![SplitPart::atomic(html)],
     }
 }
 
@@ -169,34 +384,227 @@ fn split_inner(
     node: ego_tree::NodeRef<'_, Node>,
     inner_budget: usize,
     depth: usize,
-) -> Vec<String> {
+) -> Vec<SplitPart> {
     let children: Vec<_> = node.children().collect();
     if children.is_empty() {
-        return split_escaped_text(inner, inner_budget);
+        return split_escaped_text(inner, inner_budget)
+            .into_iter()
+            .map(SplitPart::atomic)
+            .collect();
     }
-    let mut out: Vec<String> = Vec::new();
-    let mut current = String::new();
+    let mut out = Vec::new();
+    let mut current = SplitPart::atomic(String::new());
     for child in children {
         let html = node_html(child);
         if html.is_empty() {
             continue;
         }
         if html.len() <= inner_budget {
-            push_group(&mut out, &mut current, &html, inner_budget);
+            push_group(
+                &mut out,
+                &mut current,
+                SplitPart::atomic(html),
+                inner_budget,
+            );
             continue;
         }
         for part in split_node(child, inner_budget, depth + 1) {
-            push_group(&mut out, &mut current, &part, inner_budget);
+            push_group(&mut out, &mut current, part, inner_budget);
         }
     }
-    if !current.is_empty() {
+    if !current.html.is_empty() {
         out.push(current);
     }
     if out.is_empty() {
-        vec![inner.to_string()]
+        vec![SplitPart::atomic(inner.to_string())]
     } else {
         out
     }
+}
+
+fn is_list_tag(name: &str) -> bool {
+    matches!(name, "ol" | "ul" | "li")
+}
+
+fn structure_error() -> AppError {
+    AppError::new(
+        "aiStructure",
+        "模型改变了列表的必要结构，未提交完整译文；已完成片段保留，可重试",
+    )
+}
+
+fn meaningful(node: ego_tree::NodeRef<'_, Node>) -> bool {
+    !matches!(node.value(), Node::Comment(_))
+        && !matches!(node.value(), Node::Text(text) if text.trim().is_empty())
+}
+
+fn boundary_child<'a>(
+    node: ego_tree::NodeRef<'a, Node>,
+    first: bool,
+) -> Option<ego_tree::NodeRef<'a, Node>> {
+    if first {
+        node.children().find(|node| meaningful(*node))
+    } else {
+        node.children().rev().find(|node| meaningful(*node))
+    }
+}
+
+fn validate_boundary(
+    mut node: ego_tree::NodeRef<'_, Node>,
+    path: &[String],
+    first: bool,
+) -> AppResult<()> {
+    let required = path
+        .iter()
+        .rposition(|name| is_list_tag(name))
+        .map_or(0, |index| index + 1);
+    for tag in &path[..required] {
+        let child = boundary_child(node, first).ok_or_else(structure_error)?;
+        if !child
+            .value()
+            .as_element()
+            .is_some_and(|element| element.name() == tag)
+        {
+            return Err(structure_error());
+        }
+        node = child;
+    }
+    Ok(())
+}
+
+fn children_html(node: ego_tree::NodeRef<'_, Node>) -> String {
+    node.children().map(node_html).collect()
+}
+
+fn merge_boundary(
+    left: ego_tree::NodeRef<'_, Node>,
+    right: ego_tree::NodeRef<'_, Node>,
+    path: &[String],
+) -> AppResult<String> {
+    let Some((tag, remaining)) = path.split_first() else {
+        return Ok(format!("{}{}", children_html(left), children_html(right)));
+    };
+    let left_children: Vec<_> = left.children().collect();
+    let right_children: Vec<_> = right.children().collect();
+    let left_index = left_children
+        .iter()
+        .rposition(|node| meaningful(*node))
+        .ok_or_else(structure_error)?;
+    let right_index = right_children
+        .iter()
+        .position(|node| meaningful(*node))
+        .ok_or_else(structure_error)?;
+    let l = left_children[left_index];
+    let r = right_children[right_index];
+    let matching = [l, r].iter().all(|node| {
+        node.value()
+            .as_element()
+            .is_some_and(|element| element.name() == tag)
+    });
+    if !matching && !is_list_tag(tag) && !remaining.iter().any(|name| is_list_tag(name)) {
+        // 模型可改变列表项内部的普通段落排版；这些壳不承载编号，保持其返回结构。
+        return Ok(format!("{}{}", children_html(left), children_html(right)));
+    }
+    if !matching {
+        return Err(structure_error());
+    }
+    let outer = node_html(l);
+    let (open, close) = split_outer_tag(&outer, tag).ok_or_else(structure_error)?;
+    let inner = merge_boundary(l, r, remaining)?;
+    let before: String = left_children[..left_index]
+        .iter()
+        .copied()
+        .map(node_html)
+        .collect();
+    let after: String = left_children[left_index + 1..]
+        .iter()
+        .chain(&right_children[..right_index])
+        .chain(&right_children[right_index + 1..])
+        .copied()
+        .map(node_html)
+        .collect();
+    Ok(format!("{before}{open}{inner}{close}{after}"))
+}
+
+/// 列表的编号属性属于源结构。只检查列表树（不要求段落/强调结构逐字复刻），
+/// 并把 start/reversed/type/value 从已净化源片段恢复到已净化模型结果；修改了
+/// 列表层级或项目数时显式拒绝，不能把多一个 li 当“保留结构”的完整译文。
+pub fn restore_list_semantics(source: &str, translated: &str) -> AppResult<String> {
+    let source = Html::parse_fragment(source);
+    let mut target = Html::parse_fragment(translated);
+    let source_nodes: Vec<_> = source
+        .tree
+        .root()
+        .descendants()
+        .filter(|node| {
+            node.value()
+                .as_element()
+                .is_some_and(|element| is_list_tag(element.name()))
+        })
+        .collect();
+    if source_nodes.is_empty() {
+        return Ok(translated.to_string());
+    }
+    let target_nodes: Vec<_> = target
+        .tree
+        .root()
+        .descendants()
+        .filter(|node| {
+            node.value()
+                .as_element()
+                .is_some_and(|element| is_list_tag(element.name()))
+        })
+        .collect();
+    let source_ids: Vec<_> = source_nodes.iter().map(|node| node.id()).collect();
+    let target_ids: Vec<_> = target_nodes.iter().map(|node| node.id()).collect();
+    let source_shape: Vec<_> = source_nodes
+        .iter()
+        .map(|node| {
+            (
+                node.value().as_element().unwrap().name().to_string(),
+                node.ancestors()
+                    .find_map(|ancestor| source_ids.iter().position(|id| *id == ancestor.id())),
+            )
+        })
+        .collect();
+    let target_shape: Vec<_> = target_nodes
+        .iter()
+        .map(|node| {
+            (
+                node.value().as_element().unwrap().name().to_string(),
+                node.ancestors()
+                    .find_map(|ancestor| target_ids.iter().position(|id| *id == ancestor.id())),
+            )
+        })
+        .collect();
+    if source_shape != target_shape {
+        return Err(structure_error());
+    }
+    let semantic_attribute = |name: &str| matches!(name, "start" | "reversed" | "type" | "value");
+    let attributes: Vec<_> = source_nodes
+        .iter()
+        .map(|node| {
+            node.value()
+                .as_element()
+                .unwrap()
+                .attrs
+                .iter()
+                .filter(|(name, _)| semantic_attribute(&name.local))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    for (id, attrs) in target_ids.into_iter().zip(attributes) {
+        let mut node = target.tree.get_mut(id).ok_or_else(structure_error)?;
+        let Node::Element(element) = node.value() else {
+            return Err(structure_error());
+        };
+        element
+            .attrs
+            .retain(|name, _| !semantic_attribute(&name.local));
+        element.attrs.extend(attrs);
+    }
+    Ok(children_html(content_root(target.tree.root())))
 }
 
 /// 从元素自身的序列化里摘出（开始标签, 结束标签）切片。
@@ -379,6 +787,90 @@ pub(crate) fn unbalanced_tags(html: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use scraper::Html;
+
+    #[test]
+    fn splitting_attribute_order_is_deterministic_with_quoted_boundaries_and_unicode() {
+        let html = format!("<div title=\"引号 &quot; 与 &gt; 和 &amp;\" lang=\"zh\"><ol reversed start=\"12\" type=\"I\"><li value=\"-3\"><p title=\"a &gt; b\">{}</p><ol start=\"4\"><li>nested</li></ol></li><li>next</li></ol></div>", "中文 &amp; body ".repeat(200));
+        let expected = split_html_segments(&html, 240);
+        assert!(expected.len() > 2);
+        for _ in 0..25 {
+            assert_eq!(split_html_segments(&html, 240), expected);
+        }
+        let joined = expected.concat();
+        let parsed = Html::parse_fragment(&joined);
+        let titles: Vec<_> = parsed
+            .tree
+            .root()
+            .descendants()
+            .filter_map(|node| {
+                node.value()
+                    .as_element()
+                    .and_then(|element| element.attr("title"))
+            })
+            .collect();
+        assert!(
+            titles.contains(&"引号 \" 与 > 和 &"),
+            "序列化实体写法可规范化，属性解码值必须保持"
+        );
+        assert!(titles.contains(&"a > b"));
+        assert_eq!(text_of(&html), text_of(&joined));
+        for segment in expected {
+            assert!(unbalanced_tags(&segment).is_empty());
+        }
+    }
+
+    #[test]
+    fn list_echo_reassembles_source_nodes_and_keeps_numbering_semantics() {
+        for attributes in ["", " start=\"7\"", " reversed", " reversed start=\"12\""] {
+            let html = format!("<div><ol{attributes}><li>first {}</li><li value=\"-4\"><p>second {}</p><p>end</p></li><li>third</li></ol><ol start=\"40\"><li>separate</li></ol></div>", "alpha ".repeat(50), "beta ".repeat(120));
+            let plan = plan_html_segments(&html, 180);
+            assert!(plan.segments().len() > 3);
+            let translated: Vec<_> = plan
+                .segments()
+                .iter()
+                .enumerate()
+                .map(|(index, segment)| {
+                    let safe = crate::sanitize::sanitize(segment, None);
+                    let safe = restore_list_semantics(&safe, &safe).unwrap();
+                    plan.validate_part(index, &safe).unwrap();
+                    safe
+                })
+                .collect();
+            let full = crate::sanitize::sanitize(&plan.reassemble(&translated).unwrap(), None);
+            assert_eq!(
+                full,
+                crate::sanitize::sanitize(&html, None),
+                "cloned li must merge while two intentional ol remain separate"
+            );
+            assert_eq!(full.matches("<ol").count(), 2);
+            assert_eq!(full.matches("<li").count(), 4);
+        }
+    }
+
+    #[test]
+    fn list_translation_accepts_internal_prose_changes_but_rejects_item_loss() {
+        let source =
+            "<ol reversed start=\"9\"><li value=\"5\"><p>source</p></li><li>next</li></ol>";
+        let modified =
+            "<ol><li><div><em>translated</em></div></li><li><p>next translated</p></li></ol>";
+        let restored = restore_list_semantics(source, modified).unwrap();
+        assert!(restored.contains("reversed"));
+        assert!(restored.contains("start=\"9\""));
+        assert!(restored.contains("value=\"5\""));
+        assert!(restored.contains("<em>translated</em>"));
+        assert_eq!(
+            restore_list_semantics(source, "<ol><li>lost item</li></ol>")
+                .unwrap_err()
+                .code,
+            "aiStructure"
+        );
+        assert_eq!(
+            restore_list_semantics(source, "<ol><li><ul><li>nested instead</li></ul></li></ol>")
+                .unwrap_err()
+                .code,
+            "aiStructure"
+        );
+    }
 
     /// 把 HTML 的可见文本抽出来（与拼接后逐段文本比较，防丢字/截断实体）。
     fn text_of(html: &str) -> String {

@@ -543,8 +543,9 @@ async fn ai_translate_inner(
         return Err(AppError::not_found("文章无正文可翻译"));
     }
 
-    let segments =
-        crate::ai_segments::split_html_segments(&snap.body, crate::ai::TRANSLATE_SEGMENT_MAX_BYTES);
+    let segment_plan =
+        crate::ai_segments::plan_html_segments(&snap.body, crate::ai::TRANSLATE_SEGMENT_MAX_BYTES);
+    let segments = segment_plan.segments();
     let total = segments.len();
     // 同一签名下已完成的片段（恢复依据）：只重发缺失段，已完成段直接复用。
     let completed: std::collections::HashMap<i64, String> = {
@@ -563,6 +564,7 @@ async fn ai_translate_inner(
     for (index, segment) in segments.iter().enumerate() {
         let key = index as i64;
         if let Some(done) = completed.get(&key) {
+            segment_plan.validate_part(index, done)?;
             parts.push(done.clone());
             continue;
         }
@@ -605,6 +607,9 @@ async fn ai_translate_inner(
             let _ = on_channel.send(AiEvent::Done);
             return Ok(outcome.text);
         }
+        let source = crate::sanitize::sanitize(segment, None);
+        let safe = crate::ai_segments::restore_list_semantics(&source, &safe)?;
+        segment_plan.validate_part(index, &safe)?;
         {
             let conn = state.db.lock().await;
             // OPT-013 B3：片段写入带清除代次前提——生成在途时用户清除（ai_epoch
@@ -633,7 +638,7 @@ async fn ai_translate_inner(
         parts.push(safe);
     }
     debug_assert_eq!(parts.len(), total, "全部片段就位后才允许拼整篇");
-    let full = parts.concat();
+    let full = segment_plan.reassemble(&parts)?;
 
     // OPT-013A：同 ai_summarize——保存失败必须 Err，不得 Done 假成功。
     // OPT-008B 第二阶段：带前提校验（迟到译文不写已替换/已清理内容）。
@@ -1678,6 +1683,104 @@ mod ai_segment_tests {
 
     fn expected_segments(html: &str) -> Vec<String> {
         crate::ai_segments::split_html_segments(html, crate::ai::TRANSLATE_SEGMENT_MAX_BYTES)
+    }
+
+    #[tokio::test]
+    async fn ordered_list_echo_preserves_numbering_items_and_separate_lists_through_readback() {
+        for (label, attrs, huge_item) in [
+            ("plain", "", false),
+            ("start", " start=\"7\"", false),
+            ("reversed", " reversed", false),
+            (
+                "reversed-start-and-split-li",
+                " reversed start=\"12\"",
+                true,
+            ),
+        ] {
+            let filler =
+                "Substantial ordered instruction text. ".repeat(if huge_item { 500 } else { 180 });
+            let html = format!("<ol{attrs}><li><p>FIRST {filler}</p></li><li value=\"-4\">SECOND {filler}</li><li>THIRD {filler}</li></ol><ol start=\"40\"><li>separate list</li></ol>");
+            let expected = expected_segments(&html);
+            assert!(expected.len() >= 3);
+            let script = expected
+                .iter()
+                .map(|html| Reply::Text(html.clone()))
+                .collect();
+            let (port, requests) = start_recording_sse(script);
+            let tmp = TempAiDb::new(label);
+            let state = setup_migrated(&tmp.path, port, &html, "body");
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let channel = recording_channel(events.clone());
+            let output = ai_translate_inner(&state, 1, &channel).await.unwrap();
+            let safe_original = crate::sanitize::sanitize(&html, None);
+            assert_eq!(
+                output, safe_original,
+                "{label}: echo must reassemble original list structure"
+            );
+            let conn = state.db.lock().await;
+            let row = db::get_article(&conn, 1).unwrap().unwrap();
+            assert_eq!(
+                row.translated_content.as_deref(),
+                Some(safe_original.as_str())
+            );
+            drop(conn);
+            assert_eq!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|request| sent_segment(request))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|event| *event == "done")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_list_segment_is_retryable_and_does_not_poison_completed_parts() {
+        let html = format!(
+            "<ol><li>{}</li><li>{}</li><li>{}</li></ol>",
+            "first ".repeat(1000),
+            "second ".repeat(1000),
+            "third ".repeat(1000)
+        );
+        let expected = expected_segments(&html);
+        assert!(expected.len() >= 3);
+        let mut script = vec![
+            Reply::Text(expected[0].clone()),
+            Reply::Text("<p>model dropped list</p>".into()),
+        ];
+        script.extend(expected.iter().skip(1).cloned().map(Reply::Text));
+        let (port, requests) = start_recording_sse(script);
+        let tmp = TempAiDb::new("list-retry");
+        let state = setup_migrated(&tmp.path, port, &html, "body");
+        let channel = recording_channel(Arc::new(StdMutex::new(Vec::new())));
+        assert_eq!(
+            ai_translate_inner(&state, 1, &channel)
+                .await
+                .unwrap_err()
+                .code,
+            "aiStructure"
+        );
+        assert_eq!(segments_snapshot(&state).await.len(), 1);
+        assert!(translated_of(&state).await.is_none());
+        let reopened = reopen_migrated(&tmp.path);
+        let result = ai_translate_inner(&reopened, 1, &channel).await.unwrap();
+        assert_eq!(result, crate::sanitize::sanitize(&html, None));
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            expected.len() + 1,
+            "only failed/missing parts retry"
+        );
     }
 
     /// 反例 1（命令层，真实 wire）：超长 HTML 分段后，实际发送的多段输入 =
