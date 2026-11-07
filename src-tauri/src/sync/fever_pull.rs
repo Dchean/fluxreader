@@ -436,10 +436,10 @@ pub(super) async fn pull_entries_fever(
         (Ok(u), Ok(s)) => (u, s, true),
         (Err(e), _) | (_, Err(e)) => {
             collection_failures += 1;
-            report.note_client_error(&e);
-            report.errors.push(format!(
-                "状态对账跳过：Fever 状态集合拉取失败（{e}），本轮不合并远端状态"
-            ));
+            report.push_client_error(
+                &e,
+                format!("状态对账跳过：Fever 状态集合拉取失败（{e}），本轮不合并远端状态"),
+            );
             (Vec::new(), Vec::new(), false)
         }
     };
@@ -469,8 +469,7 @@ pub(super) async fn pull_entries_fever(
                 Ok(p) => p,
                 Err(e) => {
                     fetch_failures += 1;
-                    report.note_client_error(&e);
-                    report.errors.push(format!("拉取增量条目失败: {e}"));
+                    report.push_client_error(&e, format!("拉取增量条目失败: {e}"));
                     break;
                 }
             };
@@ -600,8 +599,7 @@ pub(super) async fn pull_entries_fever(
                 Err(e) => {
                     // 顶覆盖网络失败 = 历史阶段没有开始：Pending=MAX 保留。
                     fetch_failures += 1;
-                    report.note_client_error(&e);
-                    report.errors.push(format!("拉取历史条目前失败: {e}"));
+                    report.push_client_error(&e, format!("拉取历史条目前失败: {e}"));
                     boundary_ok = false;
                 }
             }
@@ -627,10 +625,10 @@ pub(super) async fn pull_entries_fever(
                     Ok(p) => p,
                     Err(e) => {
                         fetch_failures += 1;
-                        report.note_client_error(&e);
-                        report
-                            .errors
-                            .push(format!("拉取历史条目失败（Pending={cursor} 保留）: {e}"));
+                        report.push_client_error(
+                            &e,
+                            format!("拉取历史条目失败（Pending={cursor} 保留）: {e}"),
+                        );
                         break;
                     }
                 };
@@ -765,8 +763,7 @@ pub(super) async fn pull_entries_fever(
                 FeverPageFetch::Stale => return Err(SyncSession::stale_error()),
                 FeverPageFetch::Failed(e) => {
                     fetch_failures += 1;
-                    report.note_client_error(&e);
-                    report.errors.push(format!("拉取未读/收藏条目失败: {e}"));
+                    report.push_client_error(&e, format!("拉取未读/收藏条目失败: {e}"));
                     break 'with_ids;
                 }
                 FeverPageFetch::Page(page) => {
@@ -832,7 +829,11 @@ pub(super) async fn pull_entries_fever(
     session.ensure_current(&conn)?;
     let failures = fetch_failures + collection_failures + merge_failures;
     if failures == 0 {
-        let _ = db::set_last_sync_ts(&conn, Utc::now().timestamp());
+        if let Err(e) = db::set_last_sync_ts(&conn, Utc::now().timestamp()) {
+            report.errors.push(format!(
+                "Fever 同步完成时间写入失败（保留旧时间，下轮重试）: {e}"
+            ));
+        }
     } else {
         log::warn!(
             "fever pull: {fetch_failures} fetch(es) + {collection_failures} collection + {merge_failures} merge failure(s); keeping last_sync_ts"

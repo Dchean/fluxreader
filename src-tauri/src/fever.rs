@@ -261,6 +261,12 @@ const AUTH_FAILED_MSG: &str =
 /// 版本号不是 toggle 能力声明，v3 的条件绝对赋值同样走兼容探测路径。
 const STAR_ABSOLUTE_MIN_API_VERSION: i64 = 4;
 
+type RequestGuard = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
 #[derive(Clone)]
 pub struct FeverClient {
     base: String,
@@ -269,6 +275,7 @@ pub struct FeverClient {
     /// 最近一次响应信封里的 api_version（0 = 本轮尚无任何响应）。Fever 每个
     /// 响应都携带该字段，星标推送的变体分派据此判定，无需额外探测请求。
     api_version: Arc<AtomicI64>,
+    request_guard: Option<RequestGuard>,
 }
 
 impl FeverClient {
@@ -281,7 +288,21 @@ impl FeverClient {
             api_key,
             http,
             api_version: Arc::new(AtomicI64::new(0)),
+            request_guard: None,
         }
+    }
+
+    /// 同步会话注入逐请求检查；独立协议客户端不持有数据库或会话依赖。
+    pub(crate) fn with_request_guard(mut self, guard: RequestGuard) -> Self {
+        self.request_guard = Some(guard);
+        self
+    }
+
+    async fn ensure_request_current(&self) -> AppResult<()> {
+        if let Some(check) = &self.request_guard {
+            check().await?;
+        }
+        Ok(())
     }
 
     /// API 入口（不含 query）。各后端形态不同：
@@ -334,6 +355,7 @@ impl FeverClient {
         // Miniflux 用 r.FormValue 取值，query 与 form body 都收，形状兼容不回退。
         // action/mark/as/id/with_ids/since_id 等留在 query（两类后端均走 $_REQUEST/
         // FormValue）；api_key 不再出现在 URL，顺带消除进服务器访问日志的泄露面。
+        self.ensure_request_current().await?;
         let resp = self
             .http
             .post(&url)
@@ -422,6 +444,7 @@ impl FeverClient {
             api_key: self.api_key.clone(),
             http: self.http.clone(),
             api_version: self.api_version.clone(),
+            request_guard: self.request_guard.clone(),
         }
     }
 
@@ -680,6 +703,9 @@ impl FeverClient {
             // fever.php 只读 `$_POST['api_key']`——此前 api_key 拼 query、POST 空
             // body，FreshRSS 上「拉得到、推不出去」的认证侧根因）；mark/as/id 留
             // query（FreshRSS 走 $_REQUEST，Miniflux 实证 query 可用，不动）。
+            // 一次高层调用可含多个 mark；探测返回后也必须重新检查。
+            // 检查不跨 HTTP 持锁，已经发出的请求仍可能在断开后才完成。
+            self.ensure_request_current().await?;
             let resp = self
                 .http
                 .post(&url)

@@ -303,18 +303,19 @@ pub(super) async fn push_feeds(
                 Err(e) => match resolve_existing_feed_id(session, &it.url).await {
                     Ok(Some(v)) => v,
                     _ => {
-                        report.note_client_error(&e);
-                        report.errors.push(format!("推送订阅 {} 失败: {e}", it.url));
+                        report.push_client_error(&e, format!("推送订阅 {} 失败: {e}", it.url));
                         continue;
                     }
                 },
             },
             Err(e) => {
-                report.note_client_error(&e);
-                report.errors.push(format!(
-                    "解析订阅 {} 是否已存在失败（保留队项下轮重试）: {e}",
-                    it.url
-                ));
+                report.push_client_error(
+                    &e,
+                    format!(
+                        "解析订阅 {} 是否已存在失败（保留队项下轮重试）: {e}",
+                        it.url
+                    ),
+                );
                 continue;
             }
         };
@@ -376,12 +377,11 @@ pub(super) async fn push_feeds(
                 {
                     Ok(()) => done.push(it.queue_id),
                     Err(e) => {
-                        report.note_client_error(&e);
                         let summary = format!(
                             "订阅 {} 挂载分类「{label}」失败（保留队项下轮重试）: {e}",
                             it.url
                         );
-                        report.errors.push(summary.clone());
+                        report.push_client_error(&e, summary.clone());
                         mount_failed.push((it.queue_id, summary));
                     }
                 }
@@ -439,9 +439,17 @@ enum OutboxOutcome {
     ConfirmedSubscribe(Option<String>, Option<String>, Option<String>),
     /// 本轮失败：保留队项、累计 attempts/last_error，下轮重试。
     Retry(String),
+    /// 客户端错误与显示消息一起传递，延迟汇聚不能丢认证分类。
+    ClientRetry(String, bool),
     /// 结构性跳过（响应在途期间行被替换/删除/动作改变、本地订阅已删除并结转
     /// 退订）——不发请求、不确认、不记失败：旧响应不得触碰新意图。
     Skipped,
+}
+
+impl OutboxOutcome {
+    fn client_retry(err: &crate::error::AppError, message: String) -> Self {
+        Self::ClientRetry(message, err.is_auth_failure())
+    }
 }
 
 /// subscribe 的已发送目标快照：`(id, 标题, 分类, 旧 label)`——确认逐字段比对用。
@@ -601,8 +609,8 @@ pub(super) async fn push_subscription_outbox(
         }
         let outcome = match item.action.as_str() {
             db::ACTION_SUBSCRIBE => exec_subscribe_item(db, session, &key, item, report).await,
-            db::ACTION_EDIT => exec_edit_item(session, item, report).await,
-            db::ACTION_UNSUBSCRIBE => exec_unsubscribe_item(db, session, item, report).await,
+            db::ACTION_EDIT => exec_edit_item(session, item).await,
+            db::ACTION_UNSUBSCRIBE => exec_unsubscribe_item(db, session, item).await,
             other => OutboxOutcome::Retry(format!(
                 "订阅写回包含未知动作「{other}」，保留队项（不猜测语义）"
             )),
@@ -628,6 +636,10 @@ pub(super) async fn push_subscription_outbox(
             }
             OutboxOutcome::Retry(summary) => {
                 report.errors.push(summary.clone());
+                failed.push((item.id, session.generation, summary));
+            }
+            OutboxOutcome::ClientRetry(summary, is_auth) => {
+                report.push_classified_error(summary.clone(), is_auth);
                 failed.push((item.id, session.generation, summary));
             }
             OutboxOutcome::Skipped => {}
@@ -674,7 +686,7 @@ pub(super) async fn push_subscription_outbox(
                 Ok(false) => log::warn!(
                     "sync: 订阅队项 {id} 发送后目标已被更新，保留队项待下轮发送最新目标（旧成功不得确认新意图）"
                 ),
-                Err(e) => log::warn!("sync: 订阅队项 {id} 确认出队失败: {e}"),
+                Err(e) => report.errors.push(format!("订阅队项 {id} 确认出队失败（远端已接受，队项保留待重试）: {e}")),
             }
         }
         if !done_plain.is_empty() {
@@ -685,7 +697,9 @@ pub(super) async fn push_subscription_outbox(
                     Ok(_) => log::warn!(
                         "sync: 订阅队项 {id} 精确确认落空（已被合并替换或删除），旧成功不确认新意图"
                     ),
-                    Err(e) => log::warn!("sync: 订阅队项 {id} 确认出队失败: {e}"),
+                    Err(e) => report.errors.push(format!(
+                        "订阅队项 {id} 确认出队失败（远端已接受，队项保留待重试）: {e}"
+                    )),
                 }
             }
         }
@@ -761,20 +775,21 @@ async fn exec_subscribe_item(
                     Err(e) => match resolve_existing_feed_id(session, &item.feed_url).await {
                         Ok(Some(v)) => v,
                         _ => {
-                            report.note_client_error(&e);
-                            return OutboxOutcome::Retry(format!(
-                                "推送订阅 {} 失败: {e}",
-                                item.feed_url
-                            ));
+                            return OutboxOutcome::client_retry(
+                                &e,
+                                format!("推送订阅 {} 失败: {e}", item.feed_url),
+                            );
                         }
                     },
                 },
                 Err(e) => {
-                    report.note_client_error(&e);
-                    return OutboxOutcome::Retry(format!(
-                        "解析订阅 {} 是否已存在失败（保留队项，下轮重试）: {e}",
-                        item.feed_url
-                    ));
+                    return OutboxOutcome::client_retry(
+                        &e,
+                        format!(
+                            "解析订阅 {} 是否已存在失败（保留队项，下轮重试）: {e}",
+                            item.feed_url
+                        ),
+                    );
                 }
             }
         }
@@ -917,13 +932,10 @@ async fn exec_subscribe_item(
             .await
         {
             Ok(()) => OutboxOutcome::ConfirmedSubscribe(fresh_title, fresh_folder, fresh_prev),
-            Err(e) => {
-                report.note_client_error(&e);
-                OutboxOutcome::Retry(format!(
-                    "订阅 {} 挂载目标（标题/分类）失败: {e}",
-                    item.feed_url
-                ))
-            }
+            Err(e) => OutboxOutcome::client_retry(
+                &e,
+                format!("订阅 {} 挂载目标（标题/分类）失败: {e}", item.feed_url),
+            ),
         }
     } else {
         OutboxOutcome::ConfirmedSubscribe(fresh_title, fresh_folder, fresh_prev)
@@ -931,11 +943,7 @@ async fn exec_subscribe_item(
 }
 
 /// edit 项：改名 `t` + 移动 `a`/`r`（旧 label 移除）。
-async fn exec_edit_item(
-    session: &SyncSession,
-    item: &db::SubscriptionOutboxItem,
-    report: &mut SyncReport,
-) -> OutboxOutcome {
+async fn exec_edit_item(session: &SyncSession, item: &db::SubscriptionOutboxItem) -> OutboxOutcome {
     let Some(rid) = item.remote_id else {
         return OutboxOutcome::Retry(format!(
             "编辑订阅 {} 缺远端绑定，保留队项待绑定回填",
@@ -954,8 +962,7 @@ async fn exec_edit_item(
     {
         Ok(()) => OutboxOutcome::Confirmed,
         Err(e) => {
-            report.note_client_error(&e);
-            OutboxOutcome::Retry(format!("订阅编辑 {} 推送失败: {e}", item.feed_url))
+            OutboxOutcome::client_retry(&e, format!("订阅编辑 {} 推送失败: {e}", item.feed_url))
         }
     }
 }
@@ -986,20 +993,16 @@ async fn exec_unsubscribe_item(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     item: &db::SubscriptionOutboxItem,
-    report: &mut SyncReport,
 ) -> OutboxOutcome {
     let Some(known) = item.remote_id else {
-        return exec_unsubscribe_recovery(db, session, item, report).await;
+        return exec_unsubscribe_recovery(db, session, item).await;
     };
     match session.client.unsubscribe(known).await {
         Ok(()) => OutboxOutcome::Confirmed,
-        Err(e) => {
-            report.note_client_error(&e);
-            OutboxOutcome::Retry(format!(
-                "退订 {}（远端 id {known}）推送失败: {e}",
-                item.feed_url
-            ))
-        }
+        Err(e) => OutboxOutcome::client_retry(
+            &e,
+            format!("退订 {}（远端 id {known}）推送失败: {e}", item.feed_url),
+        ),
     }
 }
 
@@ -1015,17 +1018,18 @@ async fn exec_unsubscribe_recovery(
     db: &Arc<Mutex<Connection>>,
     session: &SyncSession,
     item: &db::SubscriptionOutboxItem,
-    report: &mut SyncReport,
 ) -> OutboxOutcome {
     // ①②解析+发现段（B1）：共用一次列表读取。
     let subs = match session.client.subscriptions().await {
         Ok(v) => v,
         Err(e) => {
-            report.note_client_error(&e);
-            return OutboxOutcome::Retry(format!(
-                "退订 {} 列远端订阅失败: 重复目标发现未完成，保留队项（下轮重试）: {e}",
-                item.feed_url
-            ));
+            return OutboxOutcome::client_retry(
+                &e,
+                format!(
+                    "退订 {} 列远端订阅失败: 重复目标发现未完成，保留队项（下轮重试）: {e}",
+                    item.feed_url
+                ),
+            );
         }
     };
     let norm = db::normalize_url(&item.feed_url);
@@ -1104,11 +1108,10 @@ async fn exec_unsubscribe_recovery(
         match session.client.unsubscribe(rid).await {
             Ok(()) => {}
             Err(e) => {
-                report.note_client_error(&e);
-                return OutboxOutcome::Retry(format!(
-                    "退订 {}（远端 id {rid}）推送失败: {e}",
-                    item.feed_url
-                ));
+                return OutboxOutcome::client_retry(
+                    &e,
+                    format!("退订 {}（远端 id {rid}）推送失败: {e}", item.feed_url),
+                );
             }
         }
     }
@@ -1183,8 +1186,10 @@ async fn push_subscription_changes_inner(
     if lease.from_cache && report_has_auth_failure(&report) {
         if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
             runtime::accept_generation(fresh.generation)?;
-            report = SyncReport::default();
-            push_subscription_outbox(db, &fresh, &mut report, None).await;
+            let mut retry_report = SyncReport::default();
+            push_subscription_outbox(db, &fresh, &mut retry_report, None).await;
+            retry_report.preserve_changes_from(&report);
+            report = retry_report;
         }
     }
     Ok(report)
@@ -1356,8 +1361,7 @@ pub(super) async fn pull_feeds(
         match tokio::join!(session.client.tags(), session.client.subscriptions()) {
             (Ok(t), Ok(s)) => (t, s),
             (Err(e), _) | (_, Err(e)) => {
-                report.note_client_error(&e);
-                report.errors.push(format!("拉取订阅失败: {e}"));
+                report.push_client_error(&e, format!("拉取订阅失败: {e}"));
                 mark_subscription_import_incomplete(db, session, &account_key, report).await;
                 return;
             }
@@ -1485,22 +1489,33 @@ pub(super) async fn pull_feeds(
                     break;
                 }
             }
-            // 用规范化 URL 匹配本地 feed（后端返回的 URL 与本地直连添加时
-            // 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成新订阅 → 同一
-            // 订阅出现两个本地 feed，文章翻倍、状态分裂、数量对不齐）。
-            let local_feed = match db::feed_id_by_url_normalized(&conn, &rf.url) {
+            let Some(remote_feed_id) = greader::parse_feed_numeric_id(&rf.id) else {
+                import_incomplete = true;
+                report.errors.push(format!(
+                    "远端订阅 {} 缺少可绑定的数字 feed id（保留原值待重试）",
+                    rf.url
+                ));
+                continue;
+            };
+            // 稳定远端 ID 优先；弱 URL 仅兜底未绑定源。元数据与绑定同事务，
+            // 唯一 URL 冲突不能改绑或删旧建新。
+            let local_feed = match db::match_remote_feed(
+                &conn,
+                remote_feed_id,
+                &rf.url,
+                &rf.title,
+                rf.html_url.as_deref(),
+            ) {
                 Ok(v) => v,
                 Err(e) => {
                     import_incomplete = true;
                     report.errors.push(format!(
-                        "订阅 {} 本地 URL 匹配失败（保留未确认状态待重试）: {e}",
+                        "订阅 {} 身份匹配/绑定更新失败（保留原值待重试）: {e}",
                         rf.url
                     ));
                     continue;
                 }
             };
-            // 远端 feed 数字 id（读响应用 feed/数字）
-            let remote_feed_id = greader::parse_feed_numeric_id(&rf.id);
             // 分类归属：subscription 的第一个分类 category。
             // FreshRSS 的 category 形如 {id:"user/-/label/名", label:"名"}——**没有 type**，
             // 靠 id 的 label 前缀识别；Miniflux 仍是 type:folder。规则同 tag/list 收口在
@@ -1509,34 +1524,8 @@ pub(super) async fn pull_feeds(
                 greader::category_name(&c.id, c.label.as_deref(), c.r#type.as_deref())
             });
             match local_feed {
-                Some(lid) => {
-                    // 已存在（本地直连添加过）→ 绑定 remote_id，本地分类/布局保留。
-                    if let Some(nid) = remote_feed_id {
-                        if let Err(e) = db::set_feed_remote_id(&conn, lid, nid) {
-                            import_incomplete = true;
-                            report.errors.push(format!(
-                                "绑定远端订阅 {} → feed/{nid} 失败（保留未绑定状态待重试）: {e}",
-                                rf.url
-                            ));
-                            continue;
-                        }
-                    } else {
-                        import_incomplete = true;
-                        report.errors.push(format!(
-                            "远端订阅 {} 缺少可绑定的数字 feed id（保留未绑定状态待重试）",
-                            rf.url
-                        ));
-                        continue;
-                    }
-                    // 远端标题仅在本地标题等于 URL（从未抓取成功过）时回填
-                    let _ = db::update_feed_title_if_empty(
-                        &conn,
-                        lid,
-                        &rf.title,
-                        rf.html_url.as_deref(),
-                    );
-                    // 既有源匹配本身不是真实数据变化；绑定是否实际改变由下一轮
-                    // pull 的条目/状态变化表达。避免仅做订阅发现时误发 feeds-updated。
+                Some((_lid, changed)) => {
+                    report.feeds_data_changed |= changed;
                 }
                 None => {
                     // 本地没有 → 建本地 feed（挂到远端分类对应的本地 folder）
@@ -1579,21 +1568,13 @@ pub(super) async fn pull_feeds(
                             }
                         },
                     };
-                    let Some(remote_id) = remote_feed_id else {
-                        import_incomplete = true;
-                        report.errors.push(format!(
-                            "新发现订阅 {} 缺少可绑定的数字 feed id（拒绝插入未绑定孤儿）",
-                            rf.url
-                        ));
-                        continue;
-                    };
                     let inserted = insert_remote_feed_bound(
                         &mut conn,
                         &rf.url,
                         rf.html_url.as_deref(),
                         &rf.title,
                         folder_id,
-                        remote_id,
+                        remote_feed_id,
                     );
                     // TASK-056：失败必须可见。此前是无 else 的 `if let Ok(fid)`，
                     // 错误被静默吞掉、report.errors 保持为空，前端仍提示「已拉取订阅源」
@@ -1633,7 +1614,7 @@ pub(super) async fn pull_feeds(
     //    本地直连添加（origin='local'）与未绑定源一律保留——即使用户在服务端
     //    退掉了曾经 URL 碰撞绑定的本地源，也不动本地数据（这是最容易丢数据的
     //    方向，故从保守侧处理）。
-    // ② 仅当该源的规范化 URL 不在本轮的远端订阅列表里才删。
+    // ② 已绑定源只按明确的远端 ID 判断退订，URL 改变不代表订阅消失。
     // ③ **不写 feed_tombstone**：墓碑的语义是「用户本地删除、不许复活」。这里
     //    是跟随远端事实删除；若用户在服务端重新订阅，下一轮 pull 应当把源正常
     //    建回来。写墓碑反而会让它在服务端重新出现时被永久跳过。
@@ -1650,19 +1631,18 @@ pub(super) async fn pull_feeds(
             log::warn!("sync: 退订对账前账号代际已变更，跳过删除段: {e}");
             return;
         }
-        // 本轮远端订阅的规范化 URL 集合（判据②）
-        let remote_norm_set: std::collections::HashSet<String> = remote_subs
+        let remote_id_set: std::collections::HashSet<i64> = remote_subs
             .iter()
-            .map(|rf| db::normalize_url(&rf.url))
+            .filter_map(|rf| greader::parse_feed_numeric_id(&rf.id))
             .collect();
         // 查询失败不阻塞本轮（订阅层是尽力而为）：记错误并跳过删除段
-        let candidates: Vec<(i64, String)> = match conn
+        let candidates: Vec<(i64, String, i64)> = match conn
             .prepare(
-                "SELECT id, feed_url FROM feeds WHERE origin = 'remote' AND remote_id IS NOT NULL",
+                "SELECT id, feed_url, remote_id FROM feeds WHERE origin = 'remote' AND remote_id IS NOT NULL",
             )
             .and_then(|mut stmt| {
                 let rows =
-                    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+                    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?;
                 rows.collect::<Result<Vec<_>, _>>()
             }) {
             Ok(v) => v,
@@ -1730,9 +1710,8 @@ pub(super) async fn pull_feeds(
                 return;
             }
         };
-        for (feed_id, feed_url) in candidates {
-            let norm = db::normalize_url(&feed_url);
-            if remote_norm_set.contains(&norm) {
+        for (feed_id, feed_url, remote_id) in candidates {
+            if remote_id_set.contains(&remote_id) {
                 continue; // 远端仍订阅：保留
             }
             if pending_feed_ids.contains(&feed_id) {

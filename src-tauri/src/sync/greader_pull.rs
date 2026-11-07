@@ -353,8 +353,7 @@ pub(super) async fn pull_entries_greader(
             Ok(r) => r,
             Err(e) => {
                 id_failures += 1;
-                report.note_client_error(&e);
-                report.errors.push(format!("拉取条目 id 失败: {e}"));
+                report.push_client_error(&e, format!("拉取条目 id 失败: {e}"));
                 break;
             }
         };
@@ -431,8 +430,7 @@ pub(super) async fn pull_entries_greader(
                 }
                 ContentFetch::Failed(e) => {
                     chunk_failures += 1;
-                    report.note_client_error(&e);
-                    report.errors.push(format!("拉取条目正文失败: {e}"));
+                    report.push_client_error(&e, format!("拉取条目正文失败: {e}"));
                 }
                 ContentFetch::Entries(entries) => {
                     match merge_content_chunk(
@@ -499,10 +497,10 @@ pub(super) async fn pull_entries_greader(
             Ok(ids) => Some(ids),
             Err(e) => {
                 authority_cursor_failures += 1;
-                report.note_client_error(&e);
-                report
-                    .errors
-                    .push(format!("unread 权威集合拉取失败，本轮跳过 read 差分: {e}"));
+                report.push_client_error(
+                    &e,
+                    format!("unread 权威集合拉取失败，本轮跳过 read 差分: {e}"),
+                );
                 None
             }
         };
@@ -510,10 +508,10 @@ pub(super) async fn pull_entries_greader(
             Ok(ids) => Some(ids),
             Err(e) => {
                 authority_cursor_failures += 1;
-                report.note_client_error(&e);
-                report
-                    .errors
-                    .push(format!("starred 权威集合拉取失败，本字段跳过对账: {e}"));
+                report.push_client_error(
+                    &e,
+                    format!("starred 权威集合拉取失败，本字段跳过对账: {e}"),
+                );
                 None
             }
         };
@@ -657,10 +655,12 @@ async fn backfill_authority_collection(
                 // OPT-006：每个回补请求前复核代际。
                 ContentFetch::Stale => return Err(SyncSession::stale_error()),
                 ContentFetch::Failed(e) => {
-                    report.note_client_error(&e);
-                    report.errors.push(format!(
-                        "GR {collection} 集合回补请求失败，该侧本轮跳过对账（游标保留）: {e}"
-                    ));
+                    report.push_client_error(
+                        &e,
+                        format!(
+                            "GR {collection} 集合回补请求失败，该侧本轮跳过对账（游标保留）: {e}"
+                        ),
+                    );
                     return Ok(false);
                 }
                 ContentFetch::Entries(mut entries) => {
@@ -847,6 +847,7 @@ async fn probe_unread_diff_candidates(
 ) -> Vec<i64> {
     let mut confirmed: Vec<i64> = Vec::new();
     let mut network_unconfirmed: usize = 0;
+    let mut all_unconfirmed_auth = true;
     for chunk in candidates.chunks(GR_BACKFILL_CHUNK_SIZE) {
         let ids: Vec<i64> = chunk.iter().map(|(remote_id, _)| *remote_id).collect();
         match client.item_contents(&ids).await {
@@ -869,6 +870,7 @@ async fn probe_unread_diff_candidates(
                         }
                         Err(e) => {
                             report.note_client_error(&e);
+                            all_unconfirmed_auth &= e.is_auth_failure();
                             network_unconfirmed += 1;
                             network_streak += 1;
                             log::debug!("greader pull: read 差分候选 {id} 存在性校验网络失败: {e}");
@@ -879,9 +881,12 @@ async fn probe_unread_diff_candidates(
         }
     }
     if network_unconfirmed > 0 {
-        report.errors.push(format!(
+        report.push_classified_error(
+            format!(
             "read 差分存在性校验 {network_unconfirmed} 条未确认（网络型，本轮不落地、下一轮重差分）"
-        ));
+        ),
+            all_unconfirmed_auth,
+        );
     }
     confirmed
 }

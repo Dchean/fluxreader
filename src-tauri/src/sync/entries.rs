@@ -25,7 +25,10 @@ pub(super) fn item_numeric_id(e: &ItemContent) -> Option<i64> {
 
 /// 从 ItemContent 提取原文 URL（alternate[0].href）。
 fn item_url(e: &ItemContent) -> Option<String> {
-    e.alternate.first().map(|a| a.href.clone())
+    e.alternate
+        .first()
+        .map(|a| a.href.clone())
+        .filter(|url| !url.trim().is_empty())
 }
 
 /// 从 ItemContent 提取正文 HTML（content 优先，summary 兜底）。
@@ -269,9 +272,21 @@ pub(super) fn merge_pulled_entry(
         }
     }
 
-    // ② 同 feed URL 兜底（含 ③ 该源尚无行 → 独立入库）。
-    if let (Some(feed_remote), Some(norm)) = (feed_remote, norm.as_deref()) {
-        if let Some(&local_feed) = maps.feed_mf_to_id.get(&feed_remote) {
+    // 已知 entry 的稀疏回包可走①；新身份没有归属则不能消费列举窗口。
+    // Note: 精确身份与 URL 兜底边界 — 见 .agents/notes/implemented/bug-fix/2026-10-08-保守URL匹配与重建标记.md
+    let Some(feed_remote) = feed_remote else {
+        return Err(crate::error::AppError::new(
+            "protocol",
+            format!(
+                "新条目 {} 缺少有效 origin feed，无法确认归属（保留游标待重试）",
+                e.id
+            ),
+        ));
+    };
+
+    // ② URL 只辅助绑定同 feed 的未绑定行；空链接不影响稳定远端身份入库。
+    if let Some(&local_feed) = maps.feed_mf_to_id.get(&feed_remote) {
+        if let Some(norm) = norm.as_deref() {
             if let Some(&aid) = maps.feed_url_to_id.get(&(local_feed, norm.to_string())) {
                 let bound = maps.id_to_mf_id.get(&aid).copied().flatten();
                 if bound.is_none() {
@@ -293,9 +308,9 @@ pub(super) fn merge_pulled_entry(
                 upsert_remote_entry(conn, local_feed, e, maps, report)?;
                 return Ok(());
             }
-            upsert_remote_entry(conn, local_feed, e, maps, report)?;
-            return Ok(());
         }
+        upsert_remote_entry(conn, local_feed, e, maps, report)?;
+        return Ok(());
     }
 
     // ④ 远端 feed 未绑定：有限兼容（副本记账 + 已读广播）；不猜 feed。

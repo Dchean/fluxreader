@@ -7,7 +7,7 @@
 //! 另注：feeds.fetch_failed 在 Rust 侧没有读取方；抓取退避由 fail_count /
 //! next_retry_at 承担（db/feeds.rs 的 set_feed_fetch_state 写入、
 //! feeds_due_for_refresh 按 next_retry_at 过滤），该列现存用途是下发前端做失败标记。
-//! 运行：cargo test --test sync_e2e -- --ignored --nocapture
+//! 运行：cargo test --test sync_e2e -- --include-ignored --nocapture
 
 mod common;
 mod mock_greader;

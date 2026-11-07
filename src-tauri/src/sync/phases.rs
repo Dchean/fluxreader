@@ -72,7 +72,9 @@ async fn feeds_phase_inner(
     if lease.from_cache && report_has_auth_failure(&report) {
         if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
             runtime::accept_generation(fresh.generation)?;
-            report = feeds_phase_in_session(db, &fresh).await?;
+            let mut retry_report = feeds_phase_in_session(db, &fresh).await?;
+            retry_report.preserve_changes_from(&report);
+            report = retry_report;
         }
     }
     Ok(report)
@@ -145,7 +147,10 @@ async fn feeds_phase_at_scoped_inner(
     if lease.from_cache && report_has_auth_failure(&report) {
         if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
             if fresh.generation == expected_generation {
-                report = feeds_phase_in_session_scoped(db, &fresh, scope.as_ref()).await?;
+                let mut retry_report =
+                    feeds_phase_in_session_scoped(db, &fresh, scope.as_ref()).await?;
+                retry_report.preserve_changes_from(&report);
+                report = retry_report;
             }
         }
     }
@@ -270,7 +275,10 @@ async fn states_phase_inner(
     if lease.from_cache && report_has_auth_failure(&report) {
         if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
             runtime::accept_generation(fresh.generation)?;
-            report = states_phase_in_session(db, &fresh, full, discovery_attempted).await?;
+            let mut retry_report =
+                states_phase_in_session(db, &fresh, full, discovery_attempted).await?;
+            retry_report.preserve_changes_from(&report);
+            report = retry_report;
         }
     }
     Ok(report)
@@ -552,6 +560,7 @@ async fn sync_subscription_discovery_inner(
             runtime::accept_generation(fresh.generation)?;
             let mut retry_report = SyncReport::default();
             discovery_pull_in_session(db, &fresh, &mut retry_report).await?;
+            retry_report.preserve_changes_from(&report);
             report = retry_report;
         }
     }

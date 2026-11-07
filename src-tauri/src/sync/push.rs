@@ -329,8 +329,9 @@ fn record_failure(
     queue_id: i64,
     summary: String,
     class: PushFailureClass,
+    is_auth: bool,
 ) {
-    report.errors.push(summary.clone());
+    report.push_classified_error(summary.clone(), is_auth);
     outcome.failures.push(PushFailure {
         queue_id,
         summary,
@@ -369,6 +370,7 @@ fn apply_readback(
                 status.queue_id,
                 format!("状态写回后读回未确认（inconclusive）: {message}"),
                 PushFailureClass::Verification,
+                false,
             ),
         }
     }
@@ -429,7 +431,6 @@ pub(super) async fn exec_push(
                         if !session_is_current(db, session).await {
                             return outcome;
                         }
-                        report.note_client_error(&e);
                         let summary =
                             format!("{action} 写回后读回失败（服务端已 ACK，目标态未确认）: {e}");
                         for status in &statuses {
@@ -439,6 +440,7 @@ pub(super) async fn exec_push(
                                 status.queue_id,
                                 summary.clone(),
                                 PushFailureClass::Verification,
+                                e.is_auth_failure(),
                             );
                         }
                         continue;
@@ -459,7 +461,6 @@ pub(super) async fn exec_push(
                 );
             }
             Err(e) => {
-                report.note_client_error(&e);
                 let summary = format!("状态推送失败: {e}");
                 for status in &statuses {
                     record_failure(
@@ -468,6 +469,7 @@ pub(super) async fn exec_push(
                         status.queue_id,
                         summary.clone(),
                         PushFailureClass::Push,
+                        e.is_auth_failure(),
                     );
                 }
             }
@@ -505,7 +507,6 @@ pub(super) async fn exec_push(
                         if !session_is_current(db, session).await {
                             return outcome;
                         }
-                        report.note_client_error(&e);
                         record_failure(
                             &mut outcome,
                             report,
@@ -514,6 +515,7 @@ pub(super) async fn exec_push(
                                 "收藏写回后读回失败（entry {remote_id}，服务端已 ACK，目标态未确认）: {e}"
                             ),
                             PushFailureClass::Verification,
+                            e.is_auth_failure(),
                         );
                         continue;
                     }
@@ -533,11 +535,11 @@ pub(super) async fn exec_push(
                         *qid,
                         format!("收藏写回后读回未确认（inconclusive）: {message}"),
                         PushFailureClass::Verification,
+                        false,
                     ),
                 }
             }
             Err(e) => {
-                report.note_client_error(&e);
                 let summary = format!("收藏同步失败: entry {remote_id}: {e}");
                 record_failure(
                     &mut outcome,
@@ -549,6 +551,7 @@ pub(super) async fn exec_push(
                         "verification" => PushFailureClass::Verification,
                         _ => PushFailureClass::Push,
                     },
+                    e.is_auth_failure(),
                 );
             }
         }
@@ -754,7 +757,9 @@ async fn push_states_now_inner(
     if lease.from_cache && report_has_auth_failure(&report) {
         if let Some(fresh) = reauth_after_auth_failure(db, http, &lease).await {
             runtime::accept_generation(fresh.generation)?;
-            report = push_states_with_session(db, &fresh).await?;
+            let mut retry_report = push_states_with_session(db, &fresh).await?;
+            retry_report.preserve_changes_from(&report);
+            report = retry_report;
         }
     }
     Ok(report)

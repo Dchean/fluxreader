@@ -468,13 +468,95 @@ pub fn reset_fever_history_state(conn: &Connection) -> AppResult<()> {
     set_setting(conn, FEVER_HISTORY_STATE_KEY, "")
 }
 
-/// feeds 的 remote_id 绑定
+/// feeds 的 remote_id 绑定。拉取调用方必须先用 match_remote_feed 确认强身份；
+/// 此公共原语保留已有写回/历史数据构造的语义，不承担全局唯一性约束。
 pub fn set_feed_remote_id(conn: &Connection, feed_id: i64, remote_id: i64) -> AppResult<()> {
     conn.execute(
         "UPDATE feeds SET remote_id = ?1 WHERE id = ?2",
         params![remote_id, feed_id],
     )?;
     Ok(())
+}
+
+/// 订阅拉取的强身份匹配与短事务更新。URL 仅兜底未绑定行；已绑定远端源
+/// 可改 URL，保留本地 id、布局、分类和文章。歧义/唯一 URL 冲突整段回滚。
+// Note: 源与条目的强身份边界 — 见 .agents/notes/implemented/bug-fix/2026-10-08-保守URL匹配与重建标记.md
+pub fn match_remote_feed(
+    conn: &Connection,
+    remote_id: i64,
+    feed_url: &str,
+    title: &str,
+    site_url: Option<&str>,
+) -> AppResult<Option<(i64, bool)>> {
+    let tx = conn.unchecked_transaction()?;
+    let ids: Vec<i64> = {
+        let mut stmt = tx.prepare("SELECT id FROM feeds WHERE remote_id = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([remote_id], |r| r.get(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let local_id = match ids.as_slice() {
+        [id] => Some(*id),
+        [] => {
+            let norm = normalize_url(feed_url);
+            let candidates: Vec<(i64, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id, feed_url FROM feeds WHERE remote_id IS NULL ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect::<Result<_, _>>()?
+            };
+            if let Some((id, _)) = candidates.iter().find(|(_, url)| url == feed_url) {
+                Some(*id)
+            } else {
+                let normalized: Vec<i64> = candidates
+                    .iter()
+                    .filter(|(_, url)| !norm.is_empty() && normalize_url(url) == norm)
+                    .map(|(id, _)| *id)
+                    .collect();
+                match normalized.as_slice() {
+                    [] => None,
+                    [id] => Some(*id),
+                    _ => {
+                        return Err(crate::error::AppError::new(
+                            "identityConflict",
+                            format!("远端 feed/{remote_id} 命中多个未绑定 URL 候选，保留原值"),
+                        ))
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(crate::error::AppError::new(
+                "identityConflict",
+                format!("远端 feed/{remote_id} 存在多个本地绑定，保留原值"),
+            ))
+        }
+    };
+    let Some(local_id) = local_id else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    set_feed_remote_id(&tx, local_id, remote_id)?;
+    let before: (String, String, Option<String>) = tx.query_row(
+        "SELECT feed_url,title,site_url FROM feeds WHERE id = ?1",
+        [local_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    // 先按旧 URL 判断占位标题；URL 更新不能令旧占位标题失去回填资格。
+    update_feed_title_if_empty(&tx, local_id, title, site_url)?;
+    tx.execute(
+        "UPDATE feeds SET feed_url = ?1, site_url = COALESCE(?2, site_url)
+          WHERE id = ?3 AND origin = 'remote'
+            AND (feed_url IS NOT ?1 OR site_url IS NOT COALESCE(?2, site_url))",
+        params![feed_url, site_url, local_id],
+    )?;
+    let after: (String, String, Option<String>) = tx.query_row(
+        "SELECT feed_url,title,site_url FROM feeds WHERE id = ?1",
+        [local_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    tx.commit()?;
+    Ok(Some((local_id, before != after)))
 }
 
 /// 按 URL 找本地 feed（首次同步的碰撞检测键）
@@ -500,7 +582,8 @@ pub fn feed_exists_by_url(conn: &Connection, feed_url: &str) -> AppResult<bool> 
 }
 
 /// 按规范化 URL 找本地 feed（与条目侧的规范化匹配同口径）。
-/// 用于 pull_feeds 与 Miniflux 的 feed_url 碰撞匹配：Miniflux 返回的 URL 与
+/// 用于订阅写回定位本地意图；拉取用 match_remote_feed 的 remote ID 优先规则。
+/// Miniflux 返回的 URL 与
 /// 本地直连添加时的 URL 常有协议/www./尾斜杠/跟踪参数差异，精确匹配会漏判成
 /// 新订阅 → 同一订阅出现两个本地 feed（文章翻倍、状态分裂、数量与未读数
 /// 对不齐的根因）。feeds 数量少（个人订阅几十个），内存规范化匹配即可。

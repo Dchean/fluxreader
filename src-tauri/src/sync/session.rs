@@ -346,13 +346,28 @@ pub(super) async fn build_session(
     // 未命中 ⇒ 客户端自己探测，探测成功即已认证，无需再登录一次。
     let (backend, resolved) = match protocol.as_str() {
         "fever" => {
+            let weak_db = Arc::downgrade(db);
             let probe =
-                crate::fever::FeverClient::new(&endpoint, &username, &password, http.clone());
+                crate::fever::FeverClient::new(&endpoint, &username, &password, http.clone())
+                    .with_request_guard(Arc::new(move || {
+                        let weak_db = weak_db.clone();
+                        Box::pin(async move {
+                            let db = weak_db.upgrade().ok_or_else(SyncSession::stale_error)?;
+                            let conn = db.lock().await;
+                            if db::sync_generation(&conn)? != generation {
+                                return Err(SyncSession::stale_error());
+                            }
+                            Ok(())
+                        })
+                    }));
             let client = match &cached {
                 Some(base) => {
                     let client = probe.at_resolved(base);
                     match client.verify().await {
                         Ok(()) => client,
+                        Err(e) if e.code == "staleSession" => {
+                            return Err(ClientBuildFailure::Stale)
+                        }
                         Err(e) => {
                             log::warn!("sync: Fever 认证失败: {e}");
                             return Err(ClientBuildFailure::Failed {
@@ -365,6 +380,7 @@ pub(super) async fn build_session(
                 }
                 None => match probe.resolve().await {
                     Ok(client) => client,
+                    Err(e) if e.code == "staleSession" => return Err(ClientBuildFailure::Stale),
                     Err(e) => {
                         log::warn!("sync: Fever 端点解析/认证失败: {e}");
                         return Err(ClientBuildFailure::Failed {
