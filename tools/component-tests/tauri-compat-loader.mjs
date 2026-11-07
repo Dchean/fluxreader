@@ -68,6 +68,9 @@ export function getCurrentWindow() {
    not wrapped in act，失败随机落到后续用例）。当前没有任何组件用例依赖真实
    版本文本；需要版本数据的用例应显式注入（如 props），不要依赖本桩。 */
 export async function getVersion() {
+  if (globalThis.__APP_VERSION_FOR_TESTS__ !== undefined) {
+    return await globalThis.__APP_VERSION_FOR_TESTS__;
+  }
   throw new Error('component-test: getVersion 未注入');
 }
 export async function getName() { return 'fluxreader-test'; }

@@ -413,6 +413,8 @@ export async function run(ctx) {
     && S.invokeCalls.some((c) => c.cmd === 'get_article')
     && store.getState().entries.some((e) => e.id === '301'));
 
+  const { awaitLocalFlagWriteFrontier } = await import('../../dist-test/lib/api.js');
+  await awaitLocalFlagWriteFrontier(); // 先完成前一真实锚定的标读，不能归到下面mock动作。
   store.setState({ dataMode: 'mock', activeArticleId: null, entries: [], articlesLimit: 0 });
   S.invokeCalls.length = 0;
   await store.getState().anchorToArticle('101');

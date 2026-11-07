@@ -495,6 +495,8 @@ function overrideGlobal(target, key, value) {
 // ---- 复位 / 规范化装载（原文件逐字迁移，S. 归属重写）----
 /* ---------- 状态复位 / 规范化装载 ---------- */
 async function resetStore(extra) {
+  const { awaitLocalFlagWriteFrontier } = await import('../../dist-test/lib/api.js');
+  await awaitLocalFlagWriteFrontier();
   /* TASK-107：行对象深拷贝——假后端的 set_read / mark_all_read 会就地翻转
      is_read（忠实模拟落库），浅引用会让突变跨用例残留（污染 BASE_ROWS） */
   S.backendRows = BASE_ROWS.map((r) => ({ ...r }));
@@ -548,6 +550,7 @@ async function resetStore(extra) {
     /* OPT-013 B3：校验状态缓存是 store 状态（five-state 显示的数据源）——随夹具
        复位，避免上一用例的验证结论/分段进度被下一个用例读到。 */
     aiStatusById: {},
+    aiStatusRevision: 0,
     hydrationErrors: {}, hydratedIds: {}, openedReadIds: {}, toasts: [],
     /* OPT-017E：错误中心（带重试错误的持久可达层）随基线清空——跨用例隔离。 */
     errors: [], errorCenterOpen: false,

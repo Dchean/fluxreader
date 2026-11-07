@@ -218,3 +218,32 @@ componentTest('刷新文案随 store.syncMode 在真实右键菜单与命令面�
   assert.equal(paletteRefreshLabel(), '刷新全部订阅源',
     '命令面板保持打开时也必须跟随 store.syncMode 更新');
 });
+
+componentTest('NF3 待决聚焦帧在菜单接管后失效；焦点离开菜单时全局快捷键仍让路', { timeout: 40000 }, async (t) => {
+  installBackend(); resetStore(); seedFromRows(ROWS, { layout: 'article' });
+  const { createElement, act } = await import('react');
+  const { default: App } = await import('../../src/App.tsx');
+  const entry = await mount(createElement(App));
+  await waitFor(() => entry.container.querySelectorAll('.article-card').length === 2, { label: 'two cards' });
+  const originalFrame = globalThis.requestAnimationFrame;
+  const originalCancel = globalThis.cancelAnimationFrame;
+  let sequence = 0;
+  const frames = new Map();
+  globalThis.requestAnimationFrame = (callback) => { frames.set(++sequence, callback); return sequence; };
+  globalThis.cancelAnimationFrame = (frame) => frames.delete(frame);
+  t.after(() => { globalThis.requestAnimationFrame = originalFrame; globalThis.cancelAnimationFrame = originalCancel; });
+  await act(async () => { useAppStore.getState().selectArticle('102'); });
+  const pending = [...frames.values()];
+  assert.ok(pending.length > 0, '真实选中动作已排入聚焦帧');
+  const card = entry.container.querySelector('.article-card[data-id="101"]');
+  await openMenuOn(act, card);
+  const menuFocus = document.activeElement;
+  const before = invokeCalls.filter((call) => ['set_read', 'set_starred'].includes(call.cmd)).length;
+  // 即使已取消的帧被交给执行端，也必须由所有权守卫拒绝。
+  await act(async () => { for (const callback of pending) callback(performance.now()); });
+  assert.ok(document.activeElement === menuFocus, '旧帧不能抢走菜单焦点');
+  await act(async () => { card.focus(); });
+  for (const key of ['j', 'k', 's', 'm']) await pressOnFocused(act, key);
+  assert.equal(useAppStore.getState().activeArticleId, '102', '菜单打开时背后选择保持');
+  assert.equal(invokeCalls.filter((call) => ['set_read', 'set_starred'].includes(call.cmd)).length, before, '不新增读藏写入');
+});

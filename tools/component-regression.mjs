@@ -37,6 +37,7 @@ await import('./component-tests/reader-prose.test.mjs');
 await import('./component-tests/layouts.test.mjs');
 /* OPT-017C：画廊有界渲染——5000 项挂载数上界/键盘焦点/灯箱返回/加载更多/列分配。 */
 await import('./component-tests/gallery-virtual.test.mjs');
+await import('./component-tests/gallery-controls-startup.test.mjs');
 await import('./component-tests/close-ask.test.mjs');
 /* 2026-11-04：设置关闭守卫——GitHub 授权中 X/Esc/Ctrl+,/遮罩统一拦截。 */
 await import('./component-tests/settings-close-guard.test.mjs');
@@ -45,6 +46,8 @@ await import('./component-tests/settings-close-guard.test.mjs');
 await import('./component-tests/ime-escape.test.mjs');
 await import('./component-tests/reader-body-states.test.mjs');
 await import('./component-tests/context-menu.test.mjs');
+await import('./component-tests/audit-repairs.test.mjs');
+await import('./component-tests/player-focus-ai.test.mjs');
 await import('./component-tests/timeline-empty-loading.test.mjs');
 /* 2026-11-04：五布局 J/K 选中/焦点/aria、收藏移除焦点迁移、源行 Tab/动作按钮、
    播放器 Space 让路、live region polite/atomic、设置页表单可访问名。 */

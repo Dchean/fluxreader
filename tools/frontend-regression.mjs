@@ -31,8 +31,11 @@ import * as d15 from './frontend-tests/scope-id.mjs';
 /* 2026-11-04：同步灯/账户状态机、成功短窗与 sync_status 事实源。 */
 import * as d16 from './frontend-tests/sync-indicator.mjs';
 import * as d17 from './frontend-tests/backend-sync-runtime.mjs';
+import * as d18 from './frontend-tests/audit-repairs.mjs';
+import * as d19 from './frontend-tests/flag-projection.mjs';
+import * as d20 from './frontend-tests/ai-status-lifetime.mjs';
 
-const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15, d16, d17];
+const DOMAINS = [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15, d16, d17, d18, d19, d20];
 
 const argv = process.argv.slice(2);
 const selected = [];
@@ -69,6 +72,8 @@ for (const domain of runList) {
   console.log('\n--- [domain: ' + domain.id + '] ---');
   ctx.beginDomain(domain.id);
   await domain.run(ctx);
+  const { awaitLocalFlagWriteFrontier } = await import('../dist-test/lib/api.js');
+  await awaitLocalFlagWriteFrontier();
 }
 
 const failed = ctx.results.filter((r) => !r.pass);

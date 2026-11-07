@@ -21,10 +21,10 @@ const ROW = (revision, html) => mkRow({
   id: 201,
   feed_id: 11,
   title: '修订恢复 201',
-  snippet: 's201',
   url: 'https://example.com/201',
-  content_id: 7001,
+  content_id: 7000 + revision,
   content_revision: revision,
+  snippet: `s201 revision ${revision}`,
   content_html: html,
 });
 
@@ -44,9 +44,6 @@ componentTest('OPT-008B R3 Reader 修订恢复：无 Timeline 卡片也能自动
   const entry = await mount(createElement(Reader));
   await flush(3);
 
-  /* 打开文章：显式置 activeArticleId（不挂 Timeline，无任何卡片节点）。 */
-  await act(async () => { useAppStore.setState({ activeArticleId: '201' }); });
-  await flush(2);
   assert.equal(entry.container.querySelectorAll('.article-card, .social-card, .notif-card, .gallery-card, .podcast-card').length, 0,
     '前置：本用例不挂任何列表卡片（重水合不能由 useLazyHydrate 承担）');
 
@@ -59,7 +56,8 @@ componentTest('OPT-008B R3 Reader 修订恢复：无 Timeline 卡片也能自动
       return d.promise;
     },
   });
-  await act(async () => { useAppStore.getState().hydrateArticleContent(['201']); });
+  /* 首次 unrequested 也由 Reader 自动补取；计划必须在打开前安装，不能错过请求。 */
+  await act(async () => { useAppStore.setState({ activeArticleId: '201' }); });
   await flush(2);
   assert.equal(batches.length, 1, '初始水合发出一次 get_articles');
   await act(async () => { batches.at(-1).d.resolve(rows1); });

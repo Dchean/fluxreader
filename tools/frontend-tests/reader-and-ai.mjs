@@ -782,7 +782,8 @@ export async function run(ctx) {
       t103b101.content === '<p>101 正文</p>' && t103b101.rawContent === '<p>101 正文</p>'
       && t103AfterReload.entries.find((a) => a.id === '101')?.url === 'https://example.com/101'
       && t103b102.content === '' && getBodyEntryT122('102')?.state === 'ready'
-      && t103b103.content === '<p>103 正文</p>' && t103b103.rawContent === '<p>103 正文</p>'
+      // NF2：首次详情已是全文，没有独立 RSS 字节；仍保留唯一正文与全部 AI 产物。
+      && t103b103.content === '<p>103 正文</p>' && t103b103.rawContent === ''
       && t103b103.translatedContent === '<p>103 译文</p>'
       && t103b103.aiSummary === '103 摘要'
       && t103b103.fulltextExtracted === true
@@ -1053,8 +1054,8 @@ export async function run(ctx) {
     /* 源站重新同步了该文章：正文变 → 列表行 snippet 随之更新 → reload 带回新行 */
     S.backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, snippet: '新摘要行' } : r));
     await store.getState().reloadFromBackend();
-    checkNew('(t122-2) 行 snippet 变化 → 记录失效（回未请求态），懒水合判定重新成立（探针 P4：正文不再陈旧）',
-      REC('104') === undefined && NEED122(store.getState(), '104') === true
+    checkNew('(t122-2) 行 snippet 变化 → cleared保留戳且清空正文，懒水合判定重新成立（探针 P4：正文不再陈旧）',
+      REC('104')?.state === 'cleared' && REC('104')?.content === '' && NEED122(store.getState(), '104') === true
       && store.getState().entries.find((a) => a.id === '104')?.snippet === '新摘要行');
     S.getArticlesPlan = { rows: [socialRow122({ id: 104, content_html: '<p>新正文</p>', snippet: '新摘要行' })] };
     store.getState().hydrateArticleContent(['104']);
@@ -1103,13 +1104,13 @@ export async function run(ctx) {
     const t122evBase = 900000;
     for (let i = 0; i < BODY_CACHE_MAX; i += 1) {
       const eid = String(t122evBase + i);
-      markLoading122(eid);
-      applyRow122(eid, t122evictRow, 0, { aiSummary: '', translatedContent: '' });
+      const stamp = markLoading122(eid);
+      applyRow122(eid, t122evictRow, stamp, { aiSummary: '', translatedContent: '' });
     }
     /* 插入第 2001 条 → 最久未使用（id 900000）被淘汰；期间不做任何读取
        （getBodyEntry 命中会刷新 LRU 新鲜度，影响淘汰序） */
-    markLoading122(String(t122evBase + BODY_CACHE_MAX));
-    applyRow122(String(t122evBase + BODY_CACHE_MAX), t122evictRow, 0, { aiSummary: '', translatedContent: '' });
+    const overflowStamp = markLoading122(String(t122evBase + BODY_CACHE_MAX));
+    applyRow122(String(t122evBase + BODY_CACHE_MAX), t122evictRow, overflowStamp, { aiSummary: '', translatedContent: '' });
     checkNew('(t122-4) 超限插入 → 最久未使用条目被淘汰（LRU；上限恰 2000 条）',
       REC(String(t122evBase)) === undefined
       && REC(String(t122evBase + 1))?.state === 'ready'

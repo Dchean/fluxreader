@@ -2323,8 +2323,11 @@ export async function run(ctx) {
       subscription: st124a.subOutboxStats,
     }).tone === 'success');
   /* 真实标读腿：store 动作触发 set_read IPC（Rust 侧在事务提交后发事件） */
+  const { awaitLocalFlagWriteFrontier } = await import('../../dist-test/lib/api.js');
+  await awaitLocalFlagWriteFrontier();
+  S.invokeCalls.length = 0; // 单用例调用基线：前一块已确认完成后再计数。
   store.getState().toggleCurrentReadStatus();
-  await nTick(20);
+  await awaitLocalFlagWriteFrontier();
   const setRead124 = S.invokeCalls.filter((c) => c.cmd === 'set_read');
   checkNew('(t124-1) 真实行为（探针 P8 本体）：set_read 入队 IPC 已发出，事件落 store 后账户名保持、tone 立即转橙，数量只进详情',
     setRead124.length === 1 && setRead124[0].args.id === 9001 && setRead124[0].args.read === true

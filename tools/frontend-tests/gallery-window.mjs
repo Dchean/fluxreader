@@ -29,6 +29,8 @@ export async function run(ctx) {
     galleryItemPlacement,
     galleryMountBound,
     galleryTabbableIndex,
+    galleryWindowIndexes,
+    galleryVisibleIndexes,
   } = await import('../../src/components/GalleryLayout.ts');
   const { sentinelMode } = await import('../../src/components/timelineSentinel.ts');
 
@@ -83,6 +85,24 @@ export async function run(ctx) {
     && galleryTabbableIndex([10, 11, 12], 999) === 10
     && galleryTabbableIndex([10, 11, 12], -1) === 10
     && galleryTabbableIndex([], 3) === -1);
+  const laneEnds = [0, 0, 0, 0];
+  const mixed = Array.from({ length: 5000 }, (_, index) => {
+    const lane = index % 4;
+    const start = laneEnds[lane];
+    const end = start + [300, 800, 1000, 160][lane];
+    laneEnds[lane] = end + GALLERY_COLUMN_GAP;
+    return { index, lane, start, end };
+  });
+  for (const offset of [8100, 16200, 24300]) {
+    const indexes = galleryWindowIndexes(mixed, offset, 824, 4);
+    const visible = mixed.filter((item) => item.end >= offset && item.start <= offset + 824);
+    checkNew(`(g1) 混合高度深滚 ${offset}：逐列窗口含全部可见项且挂载不越实际最小高的界`,
+      visible.every((item) => indexes.includes(item.index))
+      && indexes.length <= galleryMountBound(824, 160, 4));
+    const tab = galleryVisibleIndexes(indexes.map((i) => mixed[i]), offset, 824);
+    checkNew(`(g1) 深滚 ${offset}：Tab候选只来自真实几何可见项，不把mounted当visible`,
+      tab.length > 0 && tab.every((i) => mixed[i].start >= offset && mixed[i].end <= offset + 824));
+  }
 
   /* ============================================================
      (w5) 图片布局 store 状态迁移：打开灯箱（即标读 + 未读筛选原地保留）/ 关闭清空
@@ -168,14 +188,14 @@ export async function run(ctx) {
   checkNew('(w7) Timeline 画廊分支：经 lanes 虚拟化实例渲染窗口（galleryVirtualItems.map + measureElement + lane 定位），不再 items.map 全量',
     galleryBlock.length > 0
     && galleryBlock.includes('galleryVirtualItems.map((vi) =>')
-    && galleryBlock.includes('ref={galleryVirtualizer.measureElement}')
+    && galleryBlock.includes('ref={measureGalleryElement}')
     && galleryBlock.includes('data-gallery-lane={vi.lane}')
     && galleryBlock.includes('galleryItemPlacement(vi.lane, galleryLanes)')
     && !galleryBlock.includes('items.map(')
     && timelineW.includes('lanes: galleryLanes')
     && timelineW.includes('useFlushSync: false'));
   checkNew('(w7) roving 焦点消费窗口兜底判定（galleryTabbableIndex 单点，不再直接 idx === tabbableIndex 全量口径）',
-    timelineW.includes('galleryTabbableIndex(galleryVirtualItems.map((vi) => vi.index), tabbableIndex)'));
+    timelineW.includes('galleryTabbableIndex(galleryVisibleIndexes(galleryVirtualItems'));
   const galleryCss = cssW.slice(cssW.indexOf('.gallery-masonry-grid'), cssW.indexOf('.gallery-meta {'));
   checkNew('(w7) CSS：画廊不再用 CSS 多列（column-count 清零）、卡片定位交给 .gallery-virtual-item；图片宽度 100% 且不裁切（自然比例保持）',
     !galleryCss.includes('column-count') && !galleryCss.includes('break-inside')

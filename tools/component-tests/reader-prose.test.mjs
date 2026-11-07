@@ -65,7 +65,7 @@ componentTest('OPT-016B ReaderProse：源码→渲染→源码同一挂载树，
   assert.equal(useAppStore.getState().lightboxUrl, 'https://images.example.com/p.png', 'img 点击应走灯箱（事件代理真实接线）');
   await act(async () => { useAppStore.getState().closeLightbox(); });
   await act(async () => { proseRender.querySelector('a').click(); });
-  await flush(2);
+  await waitFor(() => (globalThis.__OPEN_URLS__ ?? []).includes('https://example.com/link'), { label: '正文链接真实到达opener' });
   assert.ok((globalThis.__OPEN_URLS__ ?? []).includes('https://example.com/link'), 'a 点击应走 openExternal（Tauri opener 边界被真实调用）');
 
   globalThis.__OPEN_URL_ERROR__ = new Error('no default browser');

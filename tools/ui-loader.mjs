@@ -38,7 +38,11 @@ const SRC_DIR = fileURLToPath(new URL('../src/', import.meta.url));
  *  形成两个互相独立的 zustand store（组件读到的状态与断言读到的不是一份），
  *  断言就失去意义。这里把 src/store.ts 统一重定向到 dist-test/store.js，
  *  保证「组件看到的就是被断言的那份状态」。 */
-const STORE_ALIAS = new Map([[`${SRC_DIR}store.ts`, 'dist-test/store.js']]);
+const STORE_ALIAS = new Map([
+  [`${SRC_DIR}store.ts`, 'dist-test/store.js'],
+  // API 的成功保存失效通知必须与 store 装配同实例，不能在组件端另建无监听副本。
+  [`${SRC_DIR}lib${process.platform === 'win32' ? '\\' : '/'}api.ts`, 'dist-test/lib/api.js'],
+]);
 
 let rolldownPromise = null;
 async function getRolldown() {
@@ -68,6 +72,9 @@ export async function resolve(specifier, context, nextResolve) {
      tools/test-loader.mjs 会给任何无扩展名相对路径盲加 .js（它是为 dist-test
      产物写的），若不抢先，src/store.ts 会被解析成不存在的 src/store.js。 */
   if (specifier.startsWith('.') && context.parentURL) {
+    // 显式 public-store 路径（包括测试从 src/store.ts 读取身份）也须归到同一实例。
+    const explicitAlias = STORE_ALIAS.get(fileURLToPath(new URL(specifier, context.parentURL)));
+    if (explicitAlias) return { url: pathToFileURL(explicitAlias).href, shortCircuit: true };
     const parent = fileURLToPath(context.parentURL);
     if (parent.startsWith(SRC_DIR)) {
       const direct = await tryExtensions(specifier, context);

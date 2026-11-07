@@ -534,6 +534,7 @@ async function installLayoutFixture(cdp) {
     useAppStore.setState({
       dataMode: 'mock',
       entries,
+      activeContentLayout: 'article',
       activeViewFilter: 'all',
       activeFeedFilter: 'all',
       timelineFilter: 'all',
@@ -543,6 +544,9 @@ async function installLayoutFixture(cdp) {
       activeArticleId: null,
     });
     window.__uiLayoutSelect = async (layout) => {
+      // 先归零再切布局；等待组件 effect 归零会让旧深滚位置短暂挂载并误发新图请求。
+      const root = document.getElementById('timelineContentScroll');
+      if (root) root.scrollTop = 0;
       useAppStore.setState({
         activeContentLayout: layout,
         activeViewFilter: 'all',
@@ -768,6 +772,99 @@ async function runGalleryLoadingCheck(cdp, evidence, viewportLabel, media) {
   result.bottom = await scrollLayoutToBottom(cdp);
   assert.equal(result.bottom.footerInScrollerViewport, true, `[${viewportLabel}] 画廊异步测量后底部页脚可见`);
   assert.equal(result.bottom.footerWithinScrollerBottom, true, `[${viewportLabel}] 画廊异步测量后页脚不越界`);
+}
+
+/** G1：真实解码混合比例深滚，挂载必须是逐列窗口并集，Tab不得回到屏外overscan。
+    与上面的G2异步逐帧锚位分开验收；原≤3px断言保持原位置与原门槛。 */
+async function runGalleryWindowCheck(cdp, evidence, viewportLabel) {
+  await installLayoutFixture(cdp);
+  const runs = [];
+  evidence.galleryWindow = runs;
+  for (const shape of ['mixed', 'uniform', 'flat']) {
+    await evalValue(cdp, `(async () => {
+      await window.__uiLayoutSelect('article');
+      const store = window.__uiLayoutStore;
+      const template = store.getState().entries.find((entry) => entry.feedId === 'f-nasa');
+      const heights = ${JSON.stringify(shape)} === 'mixed' ? [300,800,1000,160]
+        : ${JSON.stringify(shape)} === 'flat' ? [10] : [800];
+      const width = ${JSON.stringify(shape)} === 'flat' ? 1800 : 600;
+      const now = Date.now();
+      store.setState({ entries: Array.from({ length: 5000 }, (_, index) => ({
+        ...template, id: 'window-' + index, title: 'Gallery window ' + index,
+        isRead: false, isStarred: false, publishedAt: now - index * 60000,
+        imageUrl: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + heights[index % heights.length] + '"><rect width="100%" height="100%" fill="#315b7d"/></svg>'),
+      })), articlesExhausted: true });
+      await window.__uiLayoutSelect('image');
+    })()`);
+    const samples = [];
+    for (let phase = 0; phase < (shape === 'mixed' ? 3 : 1); phase++) {
+      const sample = await evalValue(cdp, `(async () => {
+        const { galleryMountBound } = await import('/src/components/GalleryLayout.ts');
+        const root = document.querySelector('#timelineContentScroll');
+        for (let frame=0;frame<180;frame++) {
+          root.scrollTop += 45;
+          await new Promise(requestAnimationFrame);
+        }
+        for(let frame=0;frame<12;frame++) await new Promise(requestAnimationFrame);
+        const rect=root.getBoundingClientRect();
+        const cards=[...root.querySelectorAll('.gallery-virtual-item')].map((element)=>{
+          const bounds=element.getBoundingClientRect();const target=element.querySelector('[data-card-index]');
+          return {index:Number(element.dataset.index),lane:Number(element.dataset.galleryLane),top:bounds.top-rect.top,bottom:bounds.bottom-rect.top,height:bounds.height,tab:target?.tabIndex,decoded:element.querySelector('img')?.naturalWidth>0};
+        });
+        const height=Math.min(...cards.map(card=>card.height).filter(height=>height>0));
+        const lanes=new Set(cards.map(card=>card.lane)).size;
+        return {scrollTop:root.scrollTop,mounted:cards.length,visible:cards.filter(card=>card.bottom>0&&card.top<root.clientHeight).length,
+          bound:galleryMountBound(root.clientHeight,height,lanes),clientHeight:root.clientHeight,scrollWidth:root.scrollWidth,clientWidth:root.clientWidth,cards};
+      })()`, 20000);
+      samples.push(sample);
+      assert.ok(sample.visible > 0, `[${viewportLabel}/${shape}] 深滚后必须有可见卡`);
+      assert.ok(sample.cards.some((card) => card.decoded), `[${viewportLabel}/${shape}] 图片必须真实解码`);
+      assert.ok(sample.mounted <= sample.bound,
+        `[${viewportLabel}/${shape}] scroll=${sample.scrollTop} 挂载${sample.mounted}超过逐列界${sample.bound}`);
+      assert.ok(sample.scrollWidth <= sample.clientWidth + 1, `[${viewportLabel}/${shape}] 不可横向溢出`);
+      assert.equal(sample.cards.filter((card) => card.tab === 0).length, 1, `[${viewportLabel}/${shape}] 恰有一个Tab入口`);
+    }
+    await evalValue(cdp, `document.querySelector('.timeline-control-bar button[title="将当前列表全部标为已读"]').focus({preventScroll:true})`);
+    const beforeTab = await evalValue(cdp, `(() => {
+      const root=document.querySelector('#timelineContentScroll'),rect=root.getBoundingClientRect();
+      const target=root.querySelector('[data-card-index][tabindex="0"]');
+      const card=target?.closest('.gallery-card');
+      const wrapper=target?.closest('.gallery-virtual-item');
+      const bounds=wrapper?.getBoundingClientRect();
+      return {
+        scrollTop:root.scrollTop,
+        clientHeight:root.clientHeight,
+        target:target ? {
+          id:card?.dataset.id,
+          index:Number(target.dataset.cardIndex),
+          top:bounds.top-rect.top,
+          bottom:bounds.bottom-rect.top,
+        } : null,
+      };
+    })()`);
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    const keyboard = await evalValue(cdp, `(async()=>{
+      for(let frame=0;frame<12;frame++) await new Promise(requestAnimationFrame);
+      const root=document.querySelector('#timelineContentScroll'),rect=root.getBoundingClientRect();
+      const focused=document.activeElement,card=focused?.closest('.gallery-card'),bounds=focused?.getBoundingClientRect();
+      return {id:card?.dataset.id,index:Number(focused?.dataset.cardIndex),top:bounds?.top-rect.top,bottom:bounds?.bottom-rect.top,scrollTop:root.scrollTop,clientHeight:root.clientHeight};
+    })()`);
+    runs.push({ shape, samples, beforeTab, keyboard });
+    assert.ok(keyboard.id, `[${viewportLabel}/${shape}] Tab须进入真实画廊卡`);
+    assert.ok(keyboard.bottom > 0 && keyboard.top < keyboard.clientHeight, `[${viewportLabel}/${shape}] Tab最终焦点必须可见`);
+    assert.ok(beforeTab.target, `[${viewportLabel}/${shape}] 按Tab前应有唯一画廊候选`);
+    assert.ok(beforeTab.target.bottom > 0 && beforeTab.target.top < beforeTab.clientHeight,
+      `[${viewportLabel}/${shape}] Tab候选必须已在视口内（top=${beforeTab.target.top}, bottom=${beforeTab.target.bottom}）`);
+    assert.equal(keyboard.id, beforeTab.target.id,
+      `[${viewportLabel}/${shape}] Tab必须落到按Tab前的可见候选，而非屏外历史卡`);
+    assert.equal(keyboard.index, beforeTab.target.index,
+      `[${viewportLabel}/${shape}] Tab焦点下标必须与候选一致`);
+    const revealScroll = Math.max(0, -beforeTab.target.top, beforeTab.target.bottom - beforeTab.clientHeight);
+    assert.ok(Math.abs(keyboard.scrollTop - beforeTab.scrollTop) <= revealScroll + 3,
+      `[${viewportLabel}/${shape}] Tab只可为完整显示当前候选微调滚动：实际 ${keyboard.scrollTop - beforeTab.scrollTop}px，上限 ${Math.ceil(revealScroll + 3)}px`);
+  }
+  await screenshot(cdp, path.join(EVIDENCE_DIR, `${viewportLabel}-gallery-deep-window.png`));
 }
 
 async function pressBrowserKey(cdp, key, code, windowsVirtualKeyCode, text = undefined) {
@@ -2995,6 +3092,7 @@ async function main() {
       };
       if (CHECK_GROUP === 'all') await runLayoutChecks(cdp, evidence.viewports[viewport.label], viewport.label);
       await runGalleryLoadingCheck(cdp, evidence.viewports[viewport.label], viewport.label, media);
+      await runGalleryWindowCheck(cdp, evidence.viewports[viewport.label], viewport.label);
     }
     for (const viewport of CHECK_GROUP === 'all' ? SELECTED_VIEWPORTS : []) {
       activeViewportLabel = viewport.label;

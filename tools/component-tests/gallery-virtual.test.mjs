@@ -57,6 +57,16 @@ async function scrollToOffset(act, scroller, top) {
     scroller.dispatchEvent(new Event('scroll'));
   });
   await flush(3);
+  // 浏览器会随容器总高变化夹取 scrollTop；jsdom 的独立 scrollHeight 桩不会。
+  // 旧夹具允许 600 张约 4万 px 的画廊停在 8万 px，那里实际没有可见卡，
+  // 不能拿这个不可达几何要求 Tab 落到屏外最后一张。按生产容器实际高度收敛。
+  for (let i = 0; i < 3; i++) {
+    const extent = Number.parseFloat(scroller.querySelector('.gallery-masonry-grid')?.style.height ?? '');
+    const max = Math.max(0, extent - scroller.offsetHeight);
+    if (!Number.isFinite(extent) || scroller.scrollTop <= max) break;
+    await act(async () => { scroller.scrollTop = max; scroller.dispatchEvent(new Event('scroll')); });
+    await flush(3);
+  }
 }
 
 /** 窗口内挂载的画廊卡 wrapper（.gallery-virtual-item：带 data-index，供 measureElement）。 */
@@ -182,9 +192,21 @@ componentTest('OPT-017C 画廊键盘焦点：跨窗口滚动后仍有可 Tab 卡
     .map((w) => focusableOf(w))
     .filter((el) => el && el.getAttribute('tabindex') === '0');
   assert.equal(tabbables.length, 1,
-    `窗口内应恰有 1 张可 Tab 卡片（实际 ${tabbables.length}）——焦点卡不在窗口时兜底到窗口首卡`);
-  assert.equal(Number(tabbables[0].getAttribute('data-card-index')), firstIndex,
-    '兜底可 Tab 卡应为窗口首卡（保证 Tab 进入的是当前能看到的区域）');
+    `窗口内应恰有 1 张可 Tab 卡片（实际 ${tabbables.length}）——scroll=${scroller.scrollTop}, nodes=${JSON.stringify(wrappers.map(w=>({index:wrapperIndex(w),position:w.style.transform,tab:focusableOf(w)?.tabIndex})))}`);
+  const tabbableWrap = tabbables[0].closest('.gallery-virtual-item');
+  const top = Number(tabbableWrap.style.transform.match(/translateY\(([-\d.]+)px\)/)?.[1]);
+  assert.ok(top >= scroller.scrollTop && top + tabbableWrap.offsetHeight <= scroller.scrollTop + scroller.offsetHeight,
+    '兜底可 Tab 卡应实际完整可见；overscan 的窗口首项可能在屏外');
+  const actionTabs = wrappers.map((wrap) => ({
+    index: wrapperIndex(wrap),
+    tabs: [...wrap.querySelectorAll('button')].map((button) => button.tabIndex),
+  }));
+  const tabbableActions = actionTabs.find(({ index }) => index === wrapperIndex(tabbableWrap));
+  assert.ok(tabbableActions.tabs.every((tab) => tab === 0),
+    `当前可 Tab 卡的两个操作按钮应顺序可达：${JSON.stringify(tabbableActions)}`);
+  assert.ok(actionTabs.filter(({ index }) => index !== wrapperIndex(tabbableWrap))
+    .every(({ tabs }) => tabs.every((tab) => tab === -1)),
+  `屏外 overscan 卡的操作按钮不得进入 Tab 顺序：${JSON.stringify(actionTabs)}`);
 
   /* 反例 2b：方向键按行优先 lanes 的几何语义移动（W4，C-P2-2 修复后口径）：
      ArrowRight/Left = 同排相邻（±1）、ArrowDown/Up = 同列跨排（±列数）；

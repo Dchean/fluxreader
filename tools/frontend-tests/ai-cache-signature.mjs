@@ -18,6 +18,7 @@ function deferred() {
 export async function run(ctx) {
   const { S, store, checkNew, nTick, bootFixture, mkRow, BASE_ROWS, bodyOf, selectAiProductState } = ctx;
   await ctx.useMainBackend();
+  const { selectAiStatusInput } = await import('../../dist-test/store.js');
 
   /* ---------- (b1-1) 无签名/旧签名产物不得被前端非空短路（后端判定未命中） ----------
      行为断言：条目上已显示旧摘要（列表行携带、无签名），此时调用摘要入口必须
@@ -281,13 +282,13 @@ export async function run(ctx) {
   /* complete：产物 + 签名 + 后端校验通过 */
   S.backendRows = BASE_ROWS.map((r) => (r.id === 104 ? { ...r, ai_summary: '已生成摘要', ai_summary_sig: 'sig-ok' } : r));
   await store.getState().reloadFromBackend();
-  store.setState({ summarizingIds: {}, aiStatusById: { 104: { summaryVerified: true, translationVerified: false, translationSegments: zeroPlan } } });
+  store.setState({ summarizingIds: {}, aiStatusById: { 104: { input: selectAiStatusInput(store.getState(), '104'), summaryVerified: true, translationVerified: false, translationSegments: zeroPlan } } });
   checkNew('(b3-1) complete：产物非空且签名经后端校验通过（唯一 complete 路径）',
     stateOf('104', 'summary') === 'complete');
   checkNew('(b3-1) complete 与 stale 互斥：校验通过的产物不得同时被判已过期',
     stateOf('104', 'summary') !== 'stale');
   /* stale（校验不匹配：换模型/提示词/正文修订） */
-  store.setState({ aiStatusById: { 104: { summaryVerified: false, translationVerified: false, translationSegments: zeroPlan } } });
+  store.setState({ aiStatusById: { 104: { input: selectAiStatusInput(store.getState(), '104'), summaryVerified: false, translationVerified: false, translationSegments: zeroPlan } } });
   checkNew('(b3-1) stale：产物非空但校验不匹配',
     stateOf('104', 'summary') === 'stale');
   /* stale（签名缺失）——旧无签名产物；没有校验数据也必须如实标注 */
@@ -304,7 +305,7 @@ export async function run(ctx) {
     stateOf('104', 'summary') === null);
   /* partial：无干净产物 + 当前签名 0 < completed < total */
   await bootFixture();
-  store.setState({ aiStatusById: { 201: { summaryVerified: false, translationVerified: false, translationSegments: { total: 3, completed: 1, discarded: 0 } } } });
+  store.setState({ aiStatusById: { 201: { input: selectAiStatusInput(store.getState(), '201'), summaryVerified: false, translationVerified: false, translationSegments: { total: 3, completed: 1, discarded: 0 } } } });
   checkNew('(b3-1) partial：无完整产物但当前签名有可续片段（0<completed<total）',
     stateOf('201', 'translation') === 'partial');
   checkNew('(b3-1) partial 与 stale 互斥：无产物不得误标已过期', stateOf('201', 'translation') !== 'stale');
