@@ -39,6 +39,8 @@ await import('./component-tests/layouts.test.mjs');
 await import('./component-tests/gallery-virtual.test.mjs');
 await import('./component-tests/gallery-controls-startup.test.mjs');
 await import('./component-tests/close-ask.test.mjs');
+await import('./component-tests/modifier-shortcuts.test.mjs');
+await import('./component-tests/entry-actions.test.mjs');
 /* 2026-11-04：设置关闭守卫——GitHub 授权中 X/Esc/Ctrl+,/遮罩统一拦截。 */
 await import('./component-tests/settings-close-guard.test.mjs');
 /* 审计卡2（前端交互正确性与感知体验）：IME Escape 守卫、Reader 正文三态、

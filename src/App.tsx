@@ -195,16 +195,17 @@ export default function App() {
   /* ---------- 全局快捷键 ---------- */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const s = useAppStore.getState();
       const target = e.target as HTMLElement;
       const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
 
-      if (e.ctrlKey && e.key.toLowerCase() === 'k') {
+      if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         if (s.searchOpen) s.closeSearch(); else s.openSearch();
         return;
       }
-      if (e.ctrlKey && e.key === ',') {
+      if (e.ctrlKey && !e.altKey && !e.metaKey && e.key === ',') {
         e.preventDefault();
         if (s.settingsOpen) s.closeSettings(); else s.openSettings();
         return;
@@ -234,7 +235,8 @@ export default function App() {
         else if (s.activeArticleId) s.clearReaderSelection();
         return;
       }
-      if (inInput) return;
+      // 已声明的组合键在上方消费；其它修饰组合不能降级为背后的单键动作。
+      if (inInput || e.ctrlKey || e.metaKey || e.altKey) return;
 
       /* P3[F2]（REQ-104）：任一浮层打开时，**单键快捷键**（S/M/J/K）一律让路。
          此前只有 Space 判断了 defaultPrevented，S/M/J/K 不看浮层状态——设置页、
@@ -285,7 +287,7 @@ export default function App() {
         s.toggleCurrentReadStatus();
         return;
       }
-      /* J/K 键盘流：五布局统一「选中即打开」。activeArticleId 变化后由
+      /* J/K 键盘流：五布局统一选中；文章分区同时打开正文。activeArticleId 变化后由
          Timeline 负责目标卡入窗 + DOM focus + aria-current；门控与推进判定
          仍收口在纯函数 jkLayoutAllowed/jkNextIndex，回归网直接断言真值表、
          五布局 store 模拟与真实组件焦点。 */
@@ -367,7 +369,7 @@ export default function App() {
               {activeContentLayout === 'article' && (
                 <div className="reader-resize-handle" onMouseDown={startDragListWidth} title="拖动调整列表宽度" />
               )}
-              <Reader />
+              {activeContentLayout === 'article' && <Reader />}
             </>
           )}
         </div>

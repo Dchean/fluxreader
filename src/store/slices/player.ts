@@ -49,8 +49,7 @@ export const createPlayerSlice: StateCreator<AppState, [], [], PlayerSlice> = (s
       },
     });
     get().showToast(`正在播放：${title}`);
-    /* 点播放即视为已读（与打开文章同语义） */
-    if (entryId) get().markEntriesReadBulk([entryId]);
+    if (entryId) get().markEntryOpened(entryId);
   },
 
   togglePlayerPlay: () =>

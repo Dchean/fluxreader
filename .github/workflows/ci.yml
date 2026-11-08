@@ -149,17 +149,9 @@ jobs:
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-      - name: Run tests
+      # 默认 cargo test 自动发现 tests/*.rs；六套自托管 mock 与 ingestion/
+      # scheduler 均无 #[ignore]，由这一步完整执行一次。真实账户 live 测试
+      # 继续保持 ignored，只有具体任务另行约定外部读写边界后才显式运行。
+      - name: Run tests (unit and all non-ignored integrations)
         if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-
-      # 注意：这里必须用 --include-ignored（跑「非 ignored + ignored 全部」），
-      # 不能用 --ignored（只跑被标 #[ignore] 的）。这 6 个自托管 mock 套件里
-      # 一个 #[ignore] 都没有 —— 若写成 --ignored，本步骤会匹配 0 个用例却依然绿灯，
-      # 等于整条 mock 集成测试通道从未在 CI 里真正跑过。各文件头部文档写的也是
-      # --include-ignored（如 account_lifecycle_e2e.rs 的运行示例）。
-      # 注意：ingestion_e2e / scheduler_e2e 各自自托管 127.0.0.1 临时 feed 服务
-      # （OPT-016A，无 #[ignore]），由上面的默认 `cargo test` 步骤真实执行。
-      - name: Run self-hosted mock integration tests (core sync/AI protocols)
-        if: ${{ (success() || failure()) && steps.checkout.outcome == 'success' && steps.toolchain.outcome == 'success' }}
-        run: cargo test --manifest-path src-tauri/Cargo.toml --test account_lifecycle_e2e --test ai_e2e --test dual_client_e2e --test sync_content_e2e --test sync_e2e --test sync_phases_e2e -- --include-ignored
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-fail-fast

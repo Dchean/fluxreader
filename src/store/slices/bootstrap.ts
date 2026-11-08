@@ -2,9 +2,8 @@
 import type { StateCreator } from 'zustand';
 import { api, articleRowToEntry, extractError, folderRowsToCategories } from '../../lib/api';
 import type { ArticleListItemRow } from '../../lib/api';
-import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, applyReadReceipt, appStore, asReadReceipts, beginCountsFetch, beginEntryFieldWrite, beginLocalFlagWrite, buildFeedIndex, buildScopeCountsSnapshot, canLandCounts, currentFlagWriteSettleSerial, currentLocalFlagWriteSerial, emptyArticlesCursor, endEntryFieldWrite, endLocalFlagWrite, entryInFlightFieldKeys, feedCountsFromRows, getEntryVersion, markEntriesRead, mergeSnapshotEntries, QueryScope, reconcileCategories, scheduleCountsReconcile, setViewEntriesSnapshot, trackEntryFlagWrite } from '../internals';
+import { advanceArticlesCursor, ARTICLES_PAGE_SIZE, appStore, beginCountsFetch, buildFeedIndex, buildScopeCountsSnapshot, canLandCounts, currentFlagWriteSettleSerial, currentLocalFlagWriteSerial, emptyArticlesCursor, entryInFlightFieldKeys, feedCountsFromRows, mergeSnapshotEntries, QueryScope, reconcileCategories, scheduleCountsReconcile, setViewEntriesSnapshot } from '../internals';
 import { applyConfigRead, beginConfigRead } from '../aiConfigWrites';
-import type { EntryRollbackClaim } from '../internals';
 import type { AppState, ArticlesCursorState } from '../types';
 import type { ContentLayoutType, ViewFilterType } from '../../types';
 
@@ -894,40 +893,9 @@ export const createBootstrapSlice: StateCreator<AppState, [], [], BootstrapSlice
       offset: 0,
       with_content: layoutNeedsBody(st.activeContentLayout),
     };
-    /* 打开收尾（两条路径共用）：按设置标已读（含 R1 计数对账）+ 智能全文触发。 */
+    /* 搜索锚定与普通选择共用动作入口：只有文章分区实际打开正文，其余仅定位。 */
     const finishOpen = (targetId: string) => {
-      const { settings: stSettings, dataMode: stMode } = get();
-      const target = get().entries.find((a) => a.id === targetId);
-      if (stMode === 'tauri' && stSettings.markReadOnOpen && target && !target.isRead) {
-        /* TASK-118（审计相邻缺口）：与 selectArticle 同口径——打开即标读失败走
-           统一回滚助手 rollbackEntryClaims（乐观置位后快照 isRead 字段版本；
-           恢复读态 + 逐 feed 回补 unread，版本守卫：期间已被接管则跳过），
-           不再只提示。边界裁定同 selectArticle：失败只回滚读态与计数，不清
-           activeArticleId（文章刚被锚定打开，用户还在读）。 */
-        markEntriesRead(new Set([targetId]));
-        const claim: EntryRollbackClaim = { id: targetId, field: 'isRead', prev: false, version: getEntryVersion(targetId, 'isRead') };
-        const settle = trackEntryFlagWrite(claim, true);
-        beginLocalFlagWrite();
-        beginEntryFieldWrite(targetId, 'isRead'); // R4：articles 快照的在途写保护
-        const flagSerialAtRequest = currentLocalFlagWriteSerial();
-        void api.setRead(Number(targetId), true).then((receipt) => {
-          endLocalFlagWrite();
-          endEntryFieldWrite(targetId, 'isRead');
-          settle(false);
-          /* R2/N1：回执行驱动条目/计数本地收敛（被打开行已乐观翻转，跳过）。 */
-          applyReadReceipt(asReadReceipts(receipt), new Set([targetId]), flagSerialAtRequest);
-          scheduleCountsReconcile();
-        }).catch((e) => {
-          endLocalFlagWrite();
-          endEntryFieldWrite(targetId, 'isRead');
-          const outcome = settle(true);
-          /* R2：同 selectArticle——回滚被接管跳过时强制权威对账修复计数。 */
-          scheduleCountsReconcile(outcome.takenOver ? { force: true } : undefined);
-          get().showToast(`标读失败：${extractError(e)}`);
-        });
-      }
-      // 打开文章：触发智能全文（与 selectArticle 一致）
-      get().ensureArticleContent(targetId, { extractFulltext: true });
+      get().selectArticle(targetId);
     };
     let pos;
     try {

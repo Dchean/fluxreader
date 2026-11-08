@@ -1,5 +1,6 @@
 // tools/frontend-tests/ui-contracts.mjs
-// 领域模块：组件/文案/SSR 与源码形态契约（含真实 SSR 输出与源级防回退）
+// 领域模块：组件/文案/SSR 与仍需静态佐证的接线契约。
+// 源码断言只能逐项在行为覆盖成立后退出；替代对应见测试门禁与断言纪律 Note。
 // OPT-016C 拆分自 tools/frontend-regression.mjs（旧行区间 5553-5888、5889-5943、5945-6004、6006-6270、6272-6475、6477-6579、6581-7026、7028-7125、7127-7228、7230-7412、7414-7515、7517-7646、7648-7743、7745-7842）；
 // 断言名称/条件文本原样迁移，仅做路径深度适配（import.meta.url 与动态 import 深一层）与
 // 共享可变状态的 S. 归属重写。数据所有权：共享假后端/夹具/记录归 harness（见 harness.mjs 头注），
@@ -750,9 +751,8 @@ export async function run(ctx) {
       checkNew('(cov-c9) 灯箱携带条目 id（画廊）/ 正文图为 null；关闭同时清空 url 与 id',
         lbOpen.url === DOUBAN && lbOpen.id === '21' && lbProse === null
         && store.getState().lightboxUrl === null && store.getState().lightboxEntryId === null);
-      const tl = readSrc('../../src/components/Timeline.tsx');
-      checkNew('(cov-c9) 画廊打开灯箱时带上条目 id（灯箱失败可按条目上报）',
-        tl.includes('if (lightboxSrc) openLightbox(lightboxSrc, item.id);'));
+      // 画廊真实打开携带身份由 component-tests/gallery-virtual.test.mjs 和
+      // entry-actions.test.mjs 断言实际 store 结果，不锁 openImage 的分支文本。
     }
   } finally {
     process.off('unhandledRejection', onUnhandled);
@@ -2707,14 +2707,11 @@ export async function run(ctx) {
     const appW4 = rdW4('../../src/App.tsx');
     const boundaryW4 = rdW4('../../src/components/ErrorBoundary.tsx');
     const hookW4 = rdW4('../../src/components/useTauriEvent.ts');
-    const trapW4 = rdW4('../../src/components/useFocusTrap.ts');
     const primitivesW4 = rdW4('../../src/components/primitives.tsx');
     const playerW4 = rdW4('../../src/components/PlayerBar.tsx');
     const overlaysW4 = rdW4('../../src/components/Overlays.tsx');
     const errorCenterW4 = rdW4('../../src/components/ErrorCenter.tsx');
     const settingsW4 = rdW4('../../src/components/SettingsModal.tsx');
-    const aiTabW4 = rdW4('../../src/components/settings/AiTab.tsx');
-    const aiConfigW4 = rdW4('../../src/components/settings/aiConfig.ts');
     const bootstrapW4 = rdW4('../../src/store/slices/bootstrap.ts');
     const tokensW4 = rdW4('../../src/styles/tokens.css');
 
@@ -2756,13 +2753,8 @@ export async function run(ctx) {
       && primitivesW4.includes('useFocusTrap(open, dialogRef)')
       && primitivesW4.includes('aria-label={title}'));
 
-    /* (w4-4) AiTab 卡内写链：三入口串行化、执行时读最新表单态、整包快照落库清零 */
-    checkNew('(w4-4) AiTab 三入口经 enqueueAiConfigWrite 串行化，写入执行时读最新表单态（cfgRef），JSON.stringify(cfg) 整包快照清零',
-      aiConfigW4.includes('let aiConfigWriteChain')
-      && aiConfigW4.includes('export function enqueueAiConfigWrite')
-      && (aiTabW4.match(/await enqueueAiConfigWrite/g) || []).length === 3
-      && aiTabW4.includes('cfgRef.current')
-      && !aiTabW4.includes('JSON.stringify(cfg)'));
+    /* (w4-4) 已由 component-tests/ai-config-race.test.mjs 的真实保存/迟到响应
+       与提示词合并承接；不锁队列实现，也不再要求把未测试的新草稿当成功配置落库。 */
 
     /* (w4-5) mockData 动态 import：无顶层静态 import，仅 mock 分支动态拉取；
        chunk 加载失败与后端分支同契约（复核 P3-2：bootstrapError + 重试，不永卡骨架） */
@@ -2778,52 +2770,26 @@ export async function run(ctx) {
       && !tokensW4.includes('#7a8494')
       && !tokensW4.includes('#828c9c'));
 
-    /* (w4-7) 焦点陷阱契约形态：Tab 循环 + 无焦点面板钉容器 + portal 焦点不拦截 */
-    checkNew('(w4-7) useFocusTrap 契约形态：边界回绕拦截、面板内无可聚焦元素时焦点钉回容器、焦点在面板 DOM 之外（portal）不拦截',
-      trapW4.includes('export function trapModalTab')
-      && trapW4.includes('panel.focus({ preventScroll: true })')
-      && trapW4.includes('!panel.contains(active)'));
+    /* (w4-7) Tab 回绕、空面板、portal 的真实事件与焦点结果由
+       component-tests/modal-focus.test.mjs 承接，不要求具体函数名或分支文本。 */
 
     /* 审计卡2（前端交互正确性与感知体验）源码契约钉 */
     {
       const appK2 = rdW4('../../src/App.tsx');
-      const readerK2 = rdW4('../../src/components/Reader.tsx');
       const timelineK2 = rdW4('../../src/components/Timeline.tsx');
       const overlaysK2 = rdW4('../../src/components/Overlays.tsx');
-      const ctxMenuK2 = rdW4('../../src/components/ContextMenu.tsx');
       const bootstrapK2 = rdW4('../../src/store/slices/bootstrap.ts');
 
-      /* (k2-1) IME Escape 守卫：全局 Escape 分支内先判 isComposing / keyCode 229
-         （App 监听为原生事件，无 nativeEvent 前缀），守卫先于浮层关闭链 */
-      const escIdxK2 = appK2.indexOf("if (e.key === 'Escape')");
-      const guardIdxK2 = appK2.indexOf('e.isComposing || e.keyCode === 229');
-      checkNew('(k2-1) App 全局 Escape 分支补 IME 守卫（isComposing / keyCode 229 直接 return，先于浮层关闭链）',
-        escIdxK2 >= 0 && guardIdxK2 > escIdxK2
-        && appK2.slice(guardIdxK2, guardIdxK2 + 80).includes('return'));
-
-      /* (k2-2) Reader 正文三态：failed/missing/loading·unrequested 分支先于
-         ReaderProse（译文视图不走分支），failed 走 retryHydration */
-      checkNew('(k2-2) Reader 正文三态与卡片同构：loading/unrequested 占位、failed 走 HydrateFailure + retryHydration、missing 出文案',
-        readerK2.includes("body.state === 'failed'")
-        && readerK2.includes("body.state === 'missing'")
-        && readerK2.includes("body.state === 'unrequested'")
-        && readerK2.includes('retryHydration(art.id)')
-        && readerK2.indexOf('<HydrateFailure') >= 0
-        && readerK2.indexOf('<HydrateFailure') < readerK2.indexOf('<ReaderProse'));
+      /* (k2-1/2) component-tests/ime-escape.test.mjs 真实派发两种合成期 Escape
+         并保留正常 Escape 对照；reader-body-states.test.mjs 驱动在途、失败、
+         点击重试与缺行，核对实际正文 DOM。源码分支顺序不再是产品契约。 */
 
       /* (k2-3) 行虚拟化对齐：两实例（行 + 画廊）均显式 useFlushSync:false */
       checkNew('(k2-3) Timeline 两个虚拟化实例均 useFlushSync:false（行实例与画廊实例同口径）',
         (timelineK2.match(/useFlushSync: false/g) || []).length === 2);
 
-      /* (k2-4) 空态/加载态分流 + 哨兵让位 */
-      /* 2026-11-02：判据并入后端 reload 在途计数（启动抢占期假空态），
-         articlesLoading 之外的第三形态见 .agents/notes/implemented/bug-fix/
-         2026-11-02-启动抢占期假空态.md */
-      checkNew('(k2-4) Timeline 空态分流：在途渲染加载形态（隐藏空态文案），哨兵在空+在途窗口让位',
-        timelineK2.includes('useAppStore((s) => s.backendReloadsInFlight)')
-        && timelineK2.includes('articlesLoading || backendReloadsInFlight > 0 ? (')
-        && timelineK2.includes('aria-label="加载中"')
-        && timelineK2.includes('!(items.length === 0 && (articlesLoading || backendReloadsInFlight > 0))'));
+      /* (k2-4) component-tests/timeline-empty-loading.test.mjs 分别驱动分页加载
+         与后端重载在途：真实 DOM 的加载/空态、可访问名、哨兵互斥与终态恢复。 */
 
       /* (k2-5) bootstrap 并行装载：App 串行 .then 清零；bootstrapFromBackend
          内并行发起设置恢复 + 一次性落库门；两处静默早退兜底 dataLoading */
@@ -2843,13 +2809,8 @@ export async function run(ctx) {
         && (overlaysK2.match(/\}, 250\);/g) || []).length === 1
         && overlaysK2.includes('const query = q.trim().toLowerCase();'));
 
-      /* (k2-7) ContextMenu 方向键：↑↓ 循环 + Home/End + 打开即焦点入首项 */
-      checkNew('(k2-7) ContextMenu 键盘导航：ArrowUp/ArrowDown 循环 + Home/End + 打开即焦点入首项',
-        ctxMenuK2.includes("e.key === 'ArrowDown'")
-        && ctxMenuK2.includes("e.key === 'ArrowUp'")
-        && ctxMenuK2.includes("e.key === 'Home'")
-        && ctxMenuK2.includes("e.key === 'End'")
-        && ctxMenuK2.includes('enabledItems()[0]?.focus({ preventScroll: true })'));
+      /* (k2-7) component-tests/context-menu.test.mjs 真实右键打开与逐键派发，
+         检查焦点顺序/回绕、Home/End、Enter 动作与 Esc 关闭，覆盖实际消费链。 */
 
       /* (k2-8) splash 可达性：role=status + aria-label 同元素 */
       checkNew('(k2-8) 启动 splash 容器 role="status" + aria-label（读屏可达）',

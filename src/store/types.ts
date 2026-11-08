@@ -452,6 +452,8 @@ export interface AppState {
 
   /* ---------- Actions: 阅读器 ---------- */
   selectArticle: (id: string) => void;
+  /** 文章打开、图片预览与播放共用的自动标读入口；显式手动标读不走此策略。 */
+  markEntryOpened: (id: string) => void;
   clearReaderSelection: () => void;
   toggleCurrentReadStatus: () => void;
   toggleCurrentStar: () => void;

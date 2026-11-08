@@ -8,6 +8,20 @@ import { enqueueAiConfigWrite, mergeConfigFields, mergePromptsOnly } from './aiC
 
 /* ---------- TAB 5: AI服务 ---------- */
 
+const ENDPOINT_FIELDS = ['preset', 'baseUrl', 'apiKey', 'model'] as const;
+const PROMPT_FIELDS = ['summaryPrompt', 'translatePrompt'] as const;
+
+function parseSavedConfig(raw: string | null): Partial<AiConfigState> {
+  if (raw === null) return {};
+  const value: unknown = JSON.parse(raw);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('AI 配置格式无效');
+  const saved = value as Record<string, unknown>;
+  for (const key of [...ENDPOINT_FIELDS, ...PROMPT_FIELDS]) {
+    if (saved[key] !== undefined && typeof saved[key] !== 'string') throw new Error('AI 配置格式无效');
+  }
+  return saved as Partial<AiConfigState>;
+}
+
 export function AiTab() {
   const showToast = useAppStore((s) => s.showToast);
   const [cfg, setCfg] = useState<AiConfigState>({
@@ -21,48 +35,78 @@ export function AiTab() {
   const [models, setModels] = useState<string[]>([]);
   const [testing, setTesting] = useState(false);
   const [savingPrompts, setSavingPrompts] = useState(false);
-  /* 队列写入执行时读最新表单态：入口排队期间用户仍可编辑（测试按钮 testing
-     期间禁用，但 Key 输入框与提示词编辑器不禁用）——后写者重放的是**执行时刻**
-     的字段值，不是点击时的闭包快照（否则「测试在途改 Key」的编辑会丢）。 */
+  const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  /* 初始回读只拥有尚未被用户意图接管的字段；编辑和显式操作均会接管。
+     接管直到卸载才结束，成功/失败不能把字段重新交给更早的初始快照。
+     Note: .agents/notes/implemented/bug-fix/2026-11-01-AI配置读改写卡内串行化.md */
   const cfgRef = useRef(cfg);
+  const claimedFields = useRef(new Set<keyof AiConfigState>());
+  const endpointRevision = useRef(0);
+  const mounted = useRef(true);
   useEffect(() => {
-    cfgRef.current = cfg;
-  });
-
-  /* 打开设置时从后端恢复已存配置 */
-  useEffect(() => {
-    void api.getAiConfig().then((raw) => {
-      if (!raw) return;
-      try {
-        const saved = JSON.parse(raw) as Partial<AiConfigState>;
-        setCfg((c) => ({
-          ...c,
-          preset: saved.preset ?? c.preset,
-          baseUrl: saved.baseUrl ?? c.baseUrl,
-          apiKey: saved.apiKey ?? c.apiKey,
-          model: saved.model ?? c.model,
-          summaryPrompt: saved.summaryPrompt ?? c.summaryPrompt,
-          translatePrompt: saved.translatePrompt ?? c.translatePrompt,
-        }));
-      } catch { /* 忽略坏 JSON */ }
-    }).catch(() => { /* TASK-067 N10：挂载期配置恢复失败静默兜底（默认配置可用） */ });
+    mounted.current = true;
+    return () => { mounted.current = false; };
   }, []);
+  const claimFields = (fields: readonly (keyof AiConfigState)[]) => {
+    for (const key of fields) claimedFields.current.add(key);
+  };
+  const showFeedback = (message: string) => {
+    if (mounted.current) showToast(message);
+  };
+  const changeDraft = (patch: Partial<AiConfigState>) => {
+    claimFields(Object.keys(patch) as (keyof AiConfigState)[]);
+    if (ENDPOINT_FIELDS.some((key) => key in patch)) endpointRevision.current++;
+    if (['preset', 'baseUrl', 'apiKey'].some((key) => key in patch)) setModels([]);
+    cfgRef.current = { ...cfgRef.current, ...patch };
+    setCfg(cfgRef.current);
+  };
+
+  /* 重挂载先等待此前已授权写入的前沿。仅空屏障入写链，慢配置读取本身不占链，
+     当前页面仍可编辑、测试和保存提示词；迟到响应统一按字段所有权决定资格。 */
+  useEffect(() => {
+    let active = true;
+    const frontier = enqueueAiConfigWrite(async () => {});
+    void frontier.then(() => active ? api.getAiConfig() : null).then((raw) => {
+      if (!active) return;
+      const saved = parseSavedConfig(raw);
+      const next = { ...cfgRef.current };
+      for (const key of Object.keys(next) as (keyof AiConfigState)[]) {
+        if (!claimedFields.current.has(key) && typeof saved[key] === 'string') next[key] = saved[key];
+      }
+      if (ENDPOINT_FIELDS.some((key) => next[key] !== cfgRef.current[key])) {
+        endpointRevision.current++;
+        setModels([]);
+      }
+      cfgRef.current = next;
+      setCfg(next);
+      setLoadError('');
+    }).catch((error: unknown) => {
+      if (active) setLoadError(`AI 配置读取失败：${extractError(error)}`);
+    });
+    return () => { active = false; };
+  }, [loadAttempt]);
 
   const applyPreset = (p: string) => {
     const preset = AI_PRESETS[p];
-    setCfg((c) => ({
-      ...c,
+    changeDraft({
       preset: p,
-      baseUrl: p === 'custom' ? c.baseUrl : preset.url,
-      model: p === 'custom' ? c.model : preset.model,
-    }));
-    setModels([]);
+      baseUrl: p === 'custom' ? cfgRef.current.baseUrl : preset.url,
+      model: p === 'custom' ? cfgRef.current.model : preset.model,
+    });
   };
 
   /** 测试连通性（/models）→ 拉模型列表 → 保存配置 */
   const testAndSave = async () => {
-    if (!cfg.baseUrl.trim()) { showToast('请填写 Base URL'); return; }
-    if (!cfg.apiKey.trim()) { showToast('请填写 API Key'); return; }
+    if (!cfg.baseUrl.trim()) { showFeedback('请填写 Base URL'); return; }
+    if (!cfg.apiKey.trim()) { showFeedback('请填写 API Key'); return; }
+    claimFields(ENDPOINT_FIELDS);
+    const tested = {
+      preset: cfg.preset, baseUrl: cfg.baseUrl.trim(), apiKey: cfg.apiKey.trim(), model: cfg.model,
+    };
+    const revision = endpointRevision.current;
+    const unchanged = () => endpointRevision.current === revision;
+    const changedMessage = '配置已更改，请重新测试并保存';
     setTesting(true);
     try {
       /* 整个入口（含连通性测试）入队：串行化判据是「点击顺序」。若只把落库段
@@ -70,24 +114,23 @@ export function AiTab() {
          落库只重放端点四字段（不再整包快照 stringify）——测试+保存不应
          顺手覆盖并发中的提示词/模型写入；写时重读库内最新配置合并。 */
       await enqueueAiConfigWrite(async () => {
-        const list = await api.aiListModels(cfgRef.current.baseUrl.trim(), cfgRef.current.apiKey.trim());
-        if (!list) { showToast('演示模式无法测试'); return; }
-        setModels(list);
+        if (!unchanged()) { showFeedback(changedMessage); return; }
+        const list = await api.aiListModels(tested.baseUrl, tested.apiKey);
+        if (!list) { showFeedback('演示模式无法测试'); return; }
+        if (!unchanged()) { showFeedback(changedMessage); return; }
         const persisted = await api.getAiConfig();
-        /* 落库时刻重读表单态：入队/在途期间的编辑（如改 Key）一并落库 */
-        const cur = cfgRef.current;
-        await api.saveAiConfig(mergeConfigFields(persisted, {
-          preset: cur.preset,
-          baseUrl: cur.baseUrl.trim(),
-          apiKey: cur.apiKey.trim(),
-          model: cur.model,
-        }));
-        showToast(`连通成功：${list.length} 个可用模型`);
+        parseSavedConfig(persisted);
+        if (!unchanged()) { showFeedback(changedMessage); return; }
+        await api.saveAiConfig(mergeConfigFields(persisted, tested));
+        if (!mounted.current) return;
+        if (!unchanged()) { showFeedback('已保存测试配置；当前更改尚未保存'); return; }
+        setModels(list);
+        showFeedback(`连通成功：${list.length} 个可用模型`);
       });
     } catch (e) {
-      showToast(`连通失败：${extractError(e)}`);
+      showFeedback(`连通失败：${extractError(e)}`);
     } finally {
-      setTesting(false);
+      if (mounted.current) setTesting(false);
     }
   };
 
@@ -95,20 +138,22 @@ export function AiTab() {
       P2-4：此前直接把表单整份快照落库，等于把端点配置（含未确认可用的
       API Key）一起保存，与按钮语义相反。 */
   const savePrompts = async () => {
+    claimFields(PROMPT_FIELDS);
     setSavingPrompts(true);
     try {
       await enqueueAiConfigWrite(async () => {
         const persisted = await api.getAiConfig();
+        parseSavedConfig(persisted);
         await api.saveAiConfig(mergePromptsOnly(persisted, {
           summaryPrompt: cfgRef.current.summaryPrompt,
           translatePrompt: cfgRef.current.translatePrompt,
         }));
       });
-      showToast('提示词已保存');
+      showFeedback('提示词已保存');
     } catch {
-      showToast('保存失败');
+      showFeedback('保存失败');
     } finally {
-      setSavingPrompts(false);
+      if (mounted.current) setSavingPrompts(false);
     }
   };
 
@@ -120,20 +165,27 @@ export function AiTab() {
       就不生效（后端 load_ai_config 读的是库里的 model）——用户以为换了模型，
       实际仍用旧模型。这里只覆盖 model 一个字段，不动其它端点配置。 */
   const selectModel = async (v: string) => {
-    setCfg((c) => ({ ...c, model: v }));
+    changeDraft({ model: v });
     try {
       await enqueueAiConfigWrite(async () => {
         const persisted = await api.getAiConfig();
+        parseSavedConfig(persisted);
         await api.saveAiConfig(mergeConfigFields(persisted, { model: v }));
       });
-      showToast(`已切换模型：${v}`);
+      showFeedback(`已切换模型：${v}`);
     } catch (e) {
-      showToast(`模型保存失败：${extractError(e)}`);
+      showFeedback(`模型保存失败：${extractError(e)}`);
     }
   };
 
   return (
     <>
+      {loadError && (
+        <div role="alert" className="settings-action-row">
+          <span>{loadError}</span>
+          <button className="toggle-action-btn" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>重试读取</button>
+        </div>
+      )}
       <div className="settings-group-title">API 端点</div>
       <SettingCard title="服务商预设" desc="官方端点一键填入；newapi 中转选自定义">
         <FluxDropdown
@@ -150,7 +202,7 @@ export function AiTab() {
           className="setting-input"
           placeholder="https://your-newapi.example.com/v1"
           value={cfg.baseUrl}
-          onChange={(e) => setCfg((c) => ({ ...c, baseUrl: e.target.value }))}
+          onChange={(e) => changeDraft({ baseUrl: e.target.value })}
         />
       </SettingCard>
       <SettingCard title="API Key" desc="密钥仅存本地 SQLite">
@@ -160,7 +212,7 @@ export function AiTab() {
           className="setting-input"
           placeholder="sk-…"
           value={cfg.apiKey}
-          onChange={(e) => setCfg((c) => ({ ...c, apiKey: e.target.value }))}
+          onChange={(e) => changeDraft({ apiKey: e.target.value })}
         />
       </SettingCard>
       <SettingCard title="当前使用模型" desc={models.length > 0 ? `端点返回 ${models.length} 个模型` : '测试连通性后自动拉取'}>
@@ -178,7 +230,7 @@ export function AiTab() {
             className="setting-input"
             placeholder="模型名（测试后可选）"
             value={cfg.model}
-            onChange={(e) => setCfg((c) => ({ ...c, model: e.target.value }))}
+            onChange={(e) => changeDraft({ model: e.target.value })}
           />
         )}
       </SettingCard>
@@ -200,7 +252,7 @@ export function AiTab() {
           aria-label="摘要提示词"
           className="setting-prompt-textarea"
           value={cfg.summaryPrompt}
-          onChange={(e) => setCfg((c) => ({ ...c, summaryPrompt: e.target.value }))}
+          onChange={(e) => changeDraft({ summaryPrompt: e.target.value })}
         />
       </div>
       <div className="prompt-editor-card">
@@ -209,7 +261,7 @@ export function AiTab() {
           aria-label="翻译提示词"
           className="setting-prompt-textarea"
           value={cfg.translatePrompt}
-          onChange={(e) => setCfg((c) => ({ ...c, translatePrompt: e.target.value }))}
+          onChange={(e) => changeDraft({ translatePrompt: e.target.value })}
         />
       </div>
       <div className="settings-action-row">

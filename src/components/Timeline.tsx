@@ -31,6 +31,7 @@ import { refillDecision } from './timelineRefill';
 import { anchorRestoreIndex, clearTopAnchor, ANCHOR_RECORD_THROTTLE_MS, commitTopAnchor, peekReturnAnchor, peekTopAnchor, recordTopAnchor, readerFocusReturnIndex, rearmTopAnchor, stashTopAnchorForReturn } from './timelineAnchor';
 import { GALLERY_COLUMN_GAP, GALLERY_OVERSCAN, estimateGalleryCardHeight, galleryItemPlacement, galleryTabbableIndex, galleryVisibleIndexes, galleryWindowIndexes, resolveGalleryLaneCount } from './GalleryLayout';
 import { HydrateFailure } from './HydrateFailure';
+import { anyOverlayOpen } from './shortcutYield';
 
 /* 折叠态外高是不变量，不是估算值：正文区固定 150px，整卡固定 310px。正文是否
    含图、列表行有没有 imageUrl、摘要长短都不参与高度计算。展开或显示译文时
@@ -200,9 +201,10 @@ export function Timeline() {
     const isCurrent = () => {
       const state = useAppStore.getState();
       return focusTaskRef.current === task && filterKeyOf(state) === taskFilterKey
-        && !state.contextMenuOpen
+        && !anyOverlayOpen({ ...state, playerActive: state.player.isActive })
         && !document.activeElement?.closest('[role="menu"], [role="dialog"]');
     };
+    if (!isCurrent()) return;
     setFocusIndex(index);
     suppressNextScrollEvents();
     /* 画廊走 lanes 虚拟化实例（与行虚拟化同容器同 align:auto 语义：原卡可见
@@ -744,26 +746,9 @@ export function Timeline() {
     }
   }, [rowVirtualizer.range?.startIndex, items, timelineFilter]);
 
-  /* 选中文章（搜索/命令面板/J/K 导航）→ 滚动定位到该卡片。虚拟化下卡片
-     可能不在可视区（不渲染），不能用 scrollIntoView；改用 virtualizer 的
-     scrollToIndex。
-     align:'auto' 只在目标不完全可见时才滚动，点击可见卡片不会抖动。
-     只依赖 activeArticleId：定位是「选中文章变化」这个动作的副作用，必须
-     只在此时触发一次。此前依赖 totalSize/items（为了在动态测量后微调），
-     但副作用是——用户手动滚动列表时，滚动触发 measureElement → totalSize 变、
-     或滚动到底触发 loadMoreArticles → items 变，都会重新 scrollToIndex 把列表
-     拉回选中文章（「列表滚一会又跳回原位」的根因）。动态高度下首次定位的
-     少量误差可接受（估算行高），远好于「无法自由滚动」。 */
-  useEffect(() => {
-    if (!activeArticleId) return;
-    const idx = items.findIndex((a) => a.id === activeArticleId);
-    if (idx < 0) return; // 目标不在当前 items（如 anchorToArticle 异步窗口），跳过
-    /* 程序性定位（J/K / 搜索锚定 / focusIndex 跟随）：先开抑制窗口再滚——
-       K 在顶部回绕到末项时 startIndex 0→N，修前会被当成用户滚动整段标读 */
-    suppressNextScrollEvents();
-    rowVirtualizer.scrollToIndex(idx, { align: 'auto' });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeArticleId]);
+  /* 选中后的入窗统一由上方 focusCardAt 完成，按当前布局选择虚拟器并先检查
+     浮层所有权。旧独立 effect 无条件调用 rowVirtualizer，会在画廊打开灯箱时
+     再次滚动并绕过浮层让路；不得重建第二条 activeArticleId → scroll 链。 */
 
   /* TASK-111②：后台刷新保位——消费顶条锚。reloadFromBackend 以
      keepReadingPosition 落地（feeds-updated / 手动同步 / 单源刷新路径）时
@@ -1620,19 +1605,15 @@ const GalleryCard = memo(function GalleryCard({ item, cardIndex, tabbable, lanes
     setImgFailed(false);
   }
   const imgSrc = proxiedSrc ?? item.imageUrl;
-  /* 打开灯箱 = 用户"看到"了这张图；画廊布局下无阅读器列，
-     以灯箱打开作为已读触发点（与 markReadOnOpen 设置解耦——
-     点开大图本身就是"阅读完成"，不标读会出现永远未读的幽灵项） */
+  /* 打开有效图片才算阅读动作，自动标读与文章/播客消费同一设置。 */
   const openImage = () => {
     /* 灯箱用代理后的 data: URL（若有）：豆瓣等防盗链图，原始 URL 在灯箱里
        no-referrer 也会 418；代理成功则用 data: URL 放大。 */
     const lightboxSrc = proxiedSrc ?? item.imageUrl;
-    if (lightboxSrc) openLightbox(lightboxSrc, item.id);
-    if (!item.isRead) {
-      useAppStore.getState().markEntriesReadBulk([item.id]);
-    } else {
-      selectArticle(item.id);
-    }
+    selectArticle(item.id);
+    if (!lightboxSrc) return;
+    openLightbox(lightboxSrc, item.id);
+    useAppStore.getState().markEntryOpened(item.id);
   };
   const onImgError = () => {
     if (imgSrc) onCoverError(imgSrc);

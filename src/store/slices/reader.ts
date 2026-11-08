@@ -18,6 +18,7 @@ export type ReaderSlice = Pick<
   | 'bodyCacheNonce'
   | 'openedReadIds'
   | 'selectArticle'
+  | 'markEntryOpened'
   | 'ensureArticleContent'
   | 'retryHydration'
   | 'hydrateArticleContent'
@@ -167,7 +168,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
 
   /* ================= 阅读器 ================= */
 
-  selectArticle: (id) => {
+  markEntryOpened: (id) => {
     const { entries, settings, dataMode } = get();
     const art = entries.find((a) => a.id === id);
     if (!art) return;
@@ -206,6 +207,14 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
         get().showToast(`标读失败：${extractError(e)}`);
       });
     }
+  },
+
+  selectArticle: (id) => {
+    const st = get();
+    if (!st.entries.some((entry) => entry.id === id)) return;
+    // 文章分区选中即展示正文；其它分区只选中，不借隐藏 Reader 发起阅读副作用。
+    const opensReader = st.activeContentLayout === 'article';
+    if (opensReader) get().markEntryOpened(id);
     set((s) => ({
       /* 记录"本次会话中被打开过"：即使标已读，在未读筛选下也保留显示（原地变灰） */
       openedReadIds: { ...s.openedReadIds, [id]: true },
@@ -221,7 +230,7 @@ export const createReaderSlice: StateCreator<AppState, [], [], ReaderSlice> = (s
       translating: false,
     }));
     /* 打开文章：触发「智能全文」判定（摘要型源才提取原文；列表卡片水合不触发） */
-    get().ensureArticleContent(id, { extractFulltext: true });
+    if (opensReader) get().ensureArticleContent(id, { extractFulltext: true });
   },
 
   /** 正文懒加载（幂等）：列表快照不含 HTML，选中/社交卡片挂载时拉详情水合。

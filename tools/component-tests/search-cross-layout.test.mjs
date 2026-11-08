@@ -27,6 +27,44 @@ import { installBackend, seedFromRows, mkRow, setPlan, resetPlan, clearInvokeCal
 
 const { selectVisibleEntries } = storeMod;
 
+for (const [layout, feedId, card] of [['article', 10, '.article-card'], ['image', 12, '.gallery-card']]) {
+  for (const markReadOnOpen of [true, false]) {
+    componentTest(`真实搜索${layout}命中 / 自动标读${markReadOnOpen ? '开' : '关'}：按实际展示动作处理读态与全文`, { timeout: 20000 }, async () => {
+      installBackend(); resetPlan(); resetStore();
+      const rows = [mkRow({ id: 801, feed_id: feedId, title: '搜索动作目标', image_url: 'https://image.example/a.png', content_html: '<p>目标正文</p>' })];
+      seedFromRows(rows, { layout: 'article' });
+      setPlan({ search_articles: () => Promise.resolve(rows), article_index: () => Promise.resolve(0) });
+      const { createElement, act } = await import('react');
+      const { default: App } = await import('../../src/App.tsx');
+      try {
+        const entry = await mount(createElement(App));
+        await flush(3);
+        await act(async () => {
+          useAppStore.setState((s) => ({ settings: { ...s.settings, markReadOnOpen } }));
+          useAppStore.getState().selectLayout(layout);
+        });
+        await waitFor(() => entry.container.querySelector(card));
+        await act(async () => { useAppStore.getState().openSearch(); });
+        await flush(2);
+        const input = entry.container.querySelector('.search-modal-input');
+        await act(async () => { typeInput(input, '搜索动作目标'); });
+        await waitFor(() => [...entry.container.querySelectorAll('.cp-item')].some((el) => el.textContent.includes('搜索动作目标')));
+        const result = [...entry.container.querySelectorAll('.cp-item')].find((el) => el.textContent.includes('搜索动作目标'));
+        clearInvokeCalls();
+        await act(async () => { result.click(); });
+        await waitFor(() => useAppStore.getState().activeArticleId === '801');
+        await flush(3);
+        assert.equal(useAppStore.getState().entries.find((item) => item.id === '801').isRead, layout === 'article' && markReadOnOpen);
+        assert.equal(!!entry.container.querySelector('.reader-active-view'), layout === 'article', '只有文章分区真正打开Reader');
+        assert.equal(useAppStore.getState().lightboxUrl, null, '搜索画廊只定位，不主动打开大图');
+        assert.equal(invokeCalls.filter((call) => call.cmd === 'get_article').length, layout === 'article' ? 1 : 0,
+          '画廊搜索不得发起Reader详情/全文链');
+        assert.equal(invokeCalls.filter((call) => call.cmd === 'set_read').length, layout === 'article' && markReadOnOpen ? 1 : 0);
+      } finally { resetPlan(); }
+    });
+  }
+}
+
 /** 真实输入：绕过 React value tracker 后派发 input 事件（触发 onchange 真实路径）。 */
 function typeInput(input, value) {
   const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;

@@ -50,7 +50,7 @@ git push origin main
 | `cargo fmt --all -- --check`（在 `src-tauri/` 下执行） | 本地与 CI |
 | `cargo clippy --all-targets -- -D warnings`、`cargo test`、`cargo check`（在 `src-tauri/` 下执行） | CI（windows-latest）；当前工作区的 `tmp/rust-env/` 隔离环境亦可本地执行 |
 
-2026-11-03 起，当前工作区的隔离 Rust/MSVC 环境（`tmp/rust-env/`，rustc/cargo `1.98.1` + clang-cl/lld-link）已可真实执行 `cargo test` / `cargo check` / `cargo clippy`。这是当前工作区的证据，不外推到其他机器；CI 的 rust job（windows-latest）仍是最终跨环境门禁。本地必须跑 `cargo fmt --all -- --check` 与前端门禁，Rust 全量检查可由隔离环境执行或由 CI 承担——**每一项都必须有承担者**，不能出现「本地不跑、CI 也不跑」的检查。CI 执行默认 `cargo test`（全部未忽略的单元与集成测试），并额外显式运行 6 个受约束的 mock 集成套件；`#[ignore]` 的 live 测试（真实服务端）需在具体任务里单独约定读写边界后执行，不作为统一门禁。
+2026-11-03 起，当前工作区的隔离 Rust/MSVC 环境（`tmp/rust-env/`，rustc/cargo `1.98.1` + clang-cl/lld-link）已可真实执行 `cargo test` / `cargo check` / `cargo clippy`。这是当前工作区的证据，不外推到其他机器；CI 的 rust job（windows-latest）仍是最终跨环境门禁。本地必须跑 `cargo fmt --all -- --check` 与前端门禁，Rust 全量检查可由隔离环境执行或由 CI 承担——**每一项都必须有承担者**，不能出现「本地不跑、CI 也不跑」的检查。CI 执行一次 `cargo test --no-fail-fast`，覆盖全部未忽略的单元与集成测试（含 6 个受约束的 mock 套件及 ingestion/scheduler 自托管测试）；测试目标失败后仍执行其余目标，最终退出仍非零。`#[ignore]` 的 live 测试（真实服务端）需在具体任务里单独约定读写边界后执行，不作为统一门禁。
 
 CI 固定在 Windows 上跑 Rust：这是纯 Windows 客户端，DPAPI 凭据加密与 SMTC 媒体控制等 Windows 专有功能只在 Windows 编译；在 Linux 上检查的是 `#[cfg(not(windows))]` 降级分支，真正的生产代码路径反而被跳过。
 
