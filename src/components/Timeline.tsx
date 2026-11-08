@@ -466,12 +466,20 @@ export function Timeline() {
   const consumeDeferredScroll = (
     pendingRef: { current: { offset: number; adjustments: number; behavior?: ScrollBehavior } | null },
     instance: { scrollElement?: { scrollTo?: (options: { top: number; behavior?: ScrollBehavior }) => void } | null },
+    readLayoutBeforePublish?: () => void,
   ) => {
     const pending = pendingRef.current;
     if (!pending) return;
     pendingRef.current = null;
     const element = scrollRef.current;
     if (element && Math.abs(pending.offset - element.scrollTop) > 1.5) return;
+    /* CI run 42462857980 画廊波：业务几何直写与补偿发布同栈完成，但可观察采样
+       里原生 scrollTop 先于坐标/总高变化（+295/+159 各一坏帧）。发布前对真实
+       网格读一次布局，让本同步点先收敛布局再发布滚动；不等待帧、不改补偿量与
+       锚语义。只挂在画廊补偿消费上——普通滚动、无补偿 onChange 与 row 路径不
+       增加同步布局读取。可测试候选，有效性由目标 CI 证明。Note: 见
+       .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+    readLayoutBeforePublish?.();
     instance.scrollElement?.scrollTo?.({ top: pending.offset + pending.adjustments, behavior: pending.behavior });
   };
   /* virtual-core 的 getScrollOffset 在 .d.ts 标记 private，但运行时是实例方法
@@ -492,7 +500,10 @@ export function Timeline() {
     }
     // core 先更新逻辑 offset，业务先发布全部已挂节点坐标/容器，再发布 DOM scrollTop。
     // 禁止先滚、等下一 React commit 才补坐标；不改正常用户滚动或 scrollToIndex。
-    consumeDeferredScroll(galleryPendingScrollRef, instance);
+    consumeDeferredScroll(galleryPendingScrollRef, instance, () => {
+      const grid = scrollRef.current?.querySelector<HTMLElement>('.gallery-masonry-grid');
+      if (grid) void grid.offsetHeight;
+    });
   };
   const galleryVirtualizer: ReactVirtualizer<HTMLDivElement, Element> = useVirtualizer({
     count: items.length,
