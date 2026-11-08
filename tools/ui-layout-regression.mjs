@@ -1910,8 +1910,7 @@ async function installSocialFixture(cdp, baseId, mediaBaseUrl) {
       const scrollHeightBefore = scroller.scrollHeight;
       const frames = [];
       let running = true;
-      const loop = () => {
-        if (!running) return;
+      const recordFrame = () => {
         const frame = snapshot();
         frames.push({
           t: frame.t,
@@ -1934,7 +1933,20 @@ async function installSocialFixture(cdp, baseId, mediaBaseUrl) {
             }))
             : [],
         });
-        requestAnimationFrame(loop);
+      };
+      recordFrame();
+      const loop = () => {
+        if (!running) return;
+        /* rAF 回调处于本帧渲染步进之前：异步二次高度变化（展开后仍会到达的
+           字体/重排）在该帧 RO 回调里已被测量+坐标直写收敛，paint 前完成，
+           用户不可见；在 rAF 相位采样会记录一个从未上屏的中间态。延到渲染
+           步进结束（setTimeout(0)）再采样，在本帧 RO 收敛后采样，过滤相位中间态；重叠阈值仍为 0。
+           Note: 采样语义与坐标单一写入者 — 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+        requestAnimationFrame(() => setTimeout(() => {
+          if (!running) return;
+          recordFrame();
+          loop();
+        }, 0));
       };
       loop();
       const expandButton = findButton();

@@ -347,6 +347,12 @@ export function Timeline() {
       } else elementScroll(offset, options, instance);
     },
     onChange: (instance) => {
+      /* 测量驱动的重排（含 measureElement 的 ResizeObserver 路径）只更新虚拟化
+         内部测量；transform 与容器高必须在同一次 notify 里直写 DOM，否则慢调度
+         下会 paint 出「卡片已变高、邻居仍在旧位置」的一帧。滚动消费仍按契约
+         排在坐标发布之后。
+         Note: 行坐标单一写入者与采样对齐 — 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+      syncRowGeometryNow();
       consumeDeferredScroll(rowPendingScrollRef, instance);
     },
   });
@@ -1029,7 +1035,12 @@ export function Timeline() {
                   data-virtual-size={vi.size}
                   ref={rowVirtualizer.measureElement}
                   className="timeline-virtual-item"
-                  style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${vi.start}px)` }}
+                  /* transform 不进 React 快照：唯一写入者是 syncRowGeometryNow
+                     （onChange/measure/layout effect 同步直写），避免慢调度下
+                     旧 render 提交把新坐标打回上一帧。挂载当帧由 layout effect
+                     在 paint 前落位。
+                     Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+                  style={{ position: 'absolute', top: 0, left: 0, width: '100%' }}
                 >
                   {activeContentLayout === 'article' && <ArticleCard art={item} onSelect={selectArticle} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
                   {/* TASK-114 X2：Social/Notif 卡补 onSelect（Enter/Space=选中，与 ArticleCard 同语义） */}
