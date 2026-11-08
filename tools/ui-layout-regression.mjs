@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { connectPage, evalValue, navigate, saveJson, screenshot, setViewport, waitFor } from './ui-layout/cdp.mjs';
+import { injectTimelineTrace } from './ui-layout/g2-timeline-inject.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const EVIDENCE_REL = process.env.UI_LAYOUT_EVIDENCE_DIR ?? 'tmp/ui-layout-evidence';
@@ -26,6 +27,15 @@ if (!EVIDENCE_DIR.startsWith(`${TMP_ROOT}${path.sep}`)) {
 const MUTATION = process.env.UI_LAYOUT_MUTATION ?? 'none';
 const CHECK_GROUP = process.env.UI_LAYOUT_CHECK_GROUP ?? 'all';
 if (!['all', 'gallery'].includes(CHECK_GROUP)) throw new Error(`未知 UI_LAYOUT_CHECK_GROUP：${CHECK_GROUP}`);
+/* G2 诊断插桩（临时诊断提交，采集后随修复一并撤除）：默认开启，UI_LAYOUT_TRACE=0 可关闭。
+   仅 tools 层生效——页面运行时经 Page.addScriptToEvaluateOnNewDocument 注入；
+   Timeline 事件点在 vite dev 服务的模块响应文本上注入，产品源码零改动。 */
+const G2_TRACE = (process.env.UI_LAYOUT_TRACE ?? '1') === '1';
+const G2_TRACE_RUNTIME_PATH = path.join(REPO_ROOT, 'tools', 'ui-layout', 'g2-trace-runtime.js');
+const G2_TRACE_INJECTOR_PATH = path.join(REPO_ROOT, 'tools', 'ui-layout', 'g2-timeline-inject.mjs');
+if (G2_TRACE && !fs.existsSync(G2_TRACE_RUNTIME_PATH)) throw new Error(`G2 插桩缺少运行时：${G2_TRACE_RUNTIME_PATH}`);
+if (G2_TRACE && !fs.existsSync(G2_TRACE_INJECTOR_PATH)) throw new Error(`G2 插桩缺少模块注入器：${G2_TRACE_INJECTOR_PATH}`);
+const G2_TRACE_SOURCE = G2_TRACE ? fs.readFileSync(G2_TRACE_RUNTIME_PATH, 'utf8') : null;
 const HYDRATE_DELAY_MS = 1300;
 const SAMPLE_MS = 2800;
 const VIEWPORTS = [
@@ -654,8 +664,44 @@ async function runLayoutChecks(cdp, evidence, viewportLabel) {
 
 async function runGalleryLoadingCheck(cdp, evidence, viewportLabel, media) {
   await installLayoutFixture(cdp);
+  if (G2_TRACE) {
+    const traceReady = await evalValue(cdp, 'Boolean(window.__g2Trace)');
+    if (!traceReady) throw new Error('插桩运行时未注入（window.__g2Trace 缺失）');
+    await evalValue(cdp, 'window.__g2Mark("fixture-installed")');
+  }
   const runKey = `${viewportLabel}-${Date.now()}`;
   const waves = [runKey + '-1', runKey + '-2'];
+  try {
+    await runGalleryLoadingWaves(cdp, evidence, viewportLabel, media, runKey, waves);
+  } finally {
+    if (G2_TRACE) {
+      try {
+        await dumpG2Trace(cdp, viewportLabel, runKey, media);
+      } catch (dumpError) {
+        /* dump 失败不得掩盖原检查失败；CI 日志可见，metrics 记录仅成功路径可见。 */
+        console.error(`[g2-trace] dump 失败：${dumpError?.stack ?? dumpError}`);
+        evidence.g2TraceDumpError = String(dumpError?.stack ?? dumpError);
+      }
+    }
+  }
+}
+
+const g2TraceAccumulator = {};
+async function dumpG2Trace(cdp, viewportLabel, runKey, media) {
+  await evalValue(cdp, 'window.__g2Sampling = false');
+  const trace = await evalValue(cdp, 'window.__g2Trace.dump()');
+  trace.config = { viewport: viewportLabel, runKey, waveOrder: 'natural' };
+  trace.mediaRequests = media.requests.filter((request) => request.galleryWave !== null);
+  trace.runtimeSource = 'tools/ui-layout/g2-trace-runtime.js（经 Page.addScriptToEvaluateOnNewDocument 注入）';
+  trace.timelineModule = '/src/components/Timeline.tsx 由 tools/ui-layout/g2-timeline-inject.mjs 在 vite dev 响应文本上注入，产品源码未改动';
+  await fsp.writeFile(path.join(EVIDENCE_DIR, `g2-trace-${viewportLabel}.json`), JSON.stringify(trace));
+  g2TraceAccumulator[viewportLabel] = trace;
+  await fsp.writeFile(path.join(EVIDENCE_DIR, 'g2-trace.json'), JSON.stringify(g2TraceAccumulator));
+  await fsp.writeFile(path.join(EVIDENCE_DIR, 'g2-trace-runtime.used.js'), G2_TRACE_SOURCE);
+  await evalValue(cdp, 'window.__g2Trace.clear()');
+}
+
+async function runGalleryLoadingWaves(cdp, evidence, viewportLabel, media, runKey, waves) {
   await evalValue(cdp, `(async () => {
     await window.__uiLayoutSelect('article');
     const store = window.__uiLayoutStore;
@@ -707,6 +753,7 @@ async function runGalleryLoadingCheck(cdp, evidence, viewportLabel, media) {
         cards,
       };
     };
+    window.__g2Mark?.('gallery-ready');
   })()`);
   const result = { waves, phases: [] };
   evidence.galleryLoading = result;
@@ -722,6 +769,7 @@ async function runGalleryLoadingCheck(cdp, evidence, viewportLabel, media) {
     assert.ok(before.cards.some((card) => card.image && !card.image.complete), `[${viewportLabel}] 必须在真实 HTTP 图片仍 pending 时采样`);
     const phase = { before, frames: [] };
     result.phases.push(phase);
+    if (G2_TRACE) await evalValue(cdp, `window.__g2Sampling = true; window.__g2Mark('wave-${index + 1}-before-release')`);
     media.releaseGalleryWave(wave);
     phase.frames = await evalValue(cdp, `(async () => {
       const frames = [];
@@ -732,6 +780,7 @@ async function runGalleryLoadingCheck(cdp, evidence, viewportLabel, media) {
       }
       return frames;
     })()`);
+    if (G2_TRACE) await evalValue(cdp, `window.__g2Sampling = false; window.__g2Mark('wave-${index + 1}-frames-end')`);
     phase.after = phase.frames.at(-1);
     phase.maxAnchorDrift = Math.max(...phase.frames.map((frame) => frame.anchor
       ? Math.abs(frame.anchor.top - before.anchor.top) : Number.POSITIVE_INFINITY));
@@ -2890,6 +2939,11 @@ async function main() {
   const evidence = {
     generatedAt: new Date().toISOString(),
     mutation: MUTATION,
+    g2TraceConfig: G2_TRACE ? {
+      runtime: 'tools/ui-layout/g2-trace-runtime.js',
+      timelineInjection: 'tools/ui-layout/g2-timeline-inject.mjs',
+      traceFile: 'g2-trace.json',
+    } : null,
     viewports: {},
     keyboardViewports: {},
     browser: null,
@@ -2960,6 +3014,41 @@ async function main() {
             type: event.type,
           });
         });
+
+        if (G2_TRACE) {
+          await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: G2_TRACE_SOURCE });
+          await cdp.send('Fetch.enable', {
+            patterns: [{ urlPattern: '*Timeline.tsx*', requestStage: 'Response' }],
+          });
+          cdp.on('Fetch.requestPaused', async (params) => {
+            try {
+              if (!/\/src\/components\/Timeline\.tsx/.test(params.request.url) || params.responseStatusCode == null) {
+                await cdp.send('Fetch.continueRequest', { requestId: params.requestId });
+                return;
+              }
+              const body = await cdp.send('Fetch.getResponseBody', { requestId: params.requestId });
+              const source = body.base64Encoded ? Buffer.from(body.body, 'base64').toString('utf8') : body.body;
+              const injected = injectTimelineTrace(source);
+              await cdp.send('Fetch.fulfillRequest', {
+                requestId: params.requestId,
+                responseCode: params.responseStatusCode,
+                responseHeaders: params.responseHeaders ?? [],
+                body: Buffer.from(injected, 'utf8').toString('base64'),
+              });
+            } catch (error) {
+              evidence.exceptions.push(`g2 Timeline 模块注入失败：${error?.stack ?? error}`);
+              try {
+                await cdp.send('Fetch.continueResponse', { requestId: params.requestId });
+              } catch {
+                try {
+                  await cdp.send('Fetch.continueRequest', { requestId: params.requestId });
+                } catch {
+                  /* 页面可能已销毁 */
+                }
+              }
+            }
+          });
+        }
 
         await setViewport(cdp, 1440, 900);
         const navigateStartedAt = performance.now();
