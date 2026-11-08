@@ -1,6 +1,6 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { scrollAwayRange, isUserScrollEvent, PROGRAMMATIC_SCROLL_SUPPRESS_MS } from './scrollAwayRead';
-import { elementScroll, useVirtualizer, type ReactVirtualizer } from '@tanstack/react-virtual';
+import { elementScroll, useVirtualizer, type ReactVirtualizer, type VirtualItem } from '@tanstack/react-virtual';
 import { useShallow } from 'zustand/react/shallow';
 import {
   useAppStore,
@@ -66,6 +66,45 @@ function focusedCardDescriptor(target: Element | null): Omit<FocusedCard, 'filte
   const index = Number(indexNode?.dataset.cardIndex);
   if (!Number.isInteger(index)) return null;
   return { id: card.dataset.id, index };
+}
+
+/* 行虚拟项容器。transform 不进 React 快照（写入者约定见 syncRowGeometryNow），
+   但 dataset（data-virtual-start/size）随 commit 落地；若坐标直写只依赖虚拟器
+   onChange 与父级 layout effect 兜底，慢调度下会出现「快照已新、transform 仍旧
+   值」的跨帧窗口（CI run 5c9f8b5 动作帧：目标已变高、已挂载邻居仍在折叠起点）。
+   这里在行项自身 layout effect 中按当次渲染的 vi.start 提交内直写，使任何携带
+   新 dataset 的 commit 在同一提交、paint 前把 transform 一并写齐；挂载当帧同样
+   由本 effect 与 measureRowElement 落位。Notify/父级 layout effect 仍负责
+   commit 间隙（RO 驱动的 resizeItem）与全窗口兜底。
+   Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+function TimelineRowItem({ vi, item, measureRef, children }: {
+  vi: VirtualItem;
+  item: ArticleEntry;
+  measureRef: (node: HTMLDivElement | null) => void;
+  children: ReactNode;
+}) {
+  const elementRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const element = elementRef.current;
+    if (element) element.style.transform = `translateY(${vi.start}px)`;
+  }, [vi.start]);
+  const setNode = useCallback((node: HTMLDivElement | null) => {
+    elementRef.current = node;
+    measureRef(node);
+  }, [measureRef]);
+  return (
+    <div
+      data-index={vi.index}
+      data-card-id={item.id}
+      data-virtual-start={vi.start}
+      data-virtual-size={vi.size}
+      ref={setNode}
+      className="timeline-virtual-item"
+      style={{ position: 'absolute', top: 0, left: 0, width: '100%' }}
+    >
+      {children}
+    </div>
+  );
 }
 
 /* ============================================================
@@ -384,6 +423,23 @@ export function Timeline() {
   useLayoutEffect(() => {
     syncRowGeometryNow();
   });
+  /* 行虚拟项挂载/复用时在 ref 回调（commit layout 阶段附着、paint 前）落位。
+     虚拟器重新启用或窗口扩张的首个 commit 渲染时可能还没有 scrollRect，JSX
+     先渲染出空窗口，卡片要等下一次 rerender 才插入；与画廊
+     measureGalleryElement 同模式：measureElement 同步测量后按当次渲染的测量
+     写坐标，插入即带定位，不依赖 querySelector/根查找与 effect 时序。
+     key 守卫只拒绝不匹配条目的坐标写入（测量/缓存注册仍照常进行）；正常
+     enabled、key 匹配的挂载定位由此保证，更新路径由 geom 直写与行项
+     layout effect 收敛。
+     Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
+  const measureRowElement = useCallback((element: HTMLDivElement | null) => {
+    rowVirtualizer.measureElement(element);
+    if (!element) return;
+    const measurement = rowVirtualizer.measurementsCache[Number(element.dataset.index)];
+    if (measurement && String(measurement.key) === element.dataset.cardId) {
+      element.style.transform = `translateY(${measurement.start}px)`;
+    }
+  }, [rowVirtualizer]);
   /* 画廊有界渲染：lanes 列模型 + 垂直虚拟化。可见范围 = 每列视口覆盖条数 +
      两端 overscan，挂载数与条目总数无关（窗口上界推导、列宽公式与「为什么
      不用 CSS 多列」见 GalleryLayout.ts 头注与 docs/performance.md 画廊节）。
@@ -1028,26 +1084,18 @@ export function Timeline() {
               const item = items[vi.index];
               if (!item) return null;
               return (
-                <div
+                <TimelineRowItem
                   key={vi.key}
-                  data-index={vi.index}
-                  data-virtual-start={vi.start}
-                  data-virtual-size={vi.size}
-                  ref={rowVirtualizer.measureElement}
-                  className="timeline-virtual-item"
-                  /* transform 不进 React 快照：唯一写入者是 syncRowGeometryNow
-                     （onChange/measure/layout effect 同步直写），避免慢调度下
-                     旧 render 提交把新坐标打回上一帧。挂载当帧由 layout effect
-                     在 paint 前落位。
-                     Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
-                  style={{ position: 'absolute', top: 0, left: 0, width: '100%' }}
+                  vi={vi}
+                  item={item}
+                  measureRef={measureRowElement}
                 >
                   {activeContentLayout === 'article' && <ArticleCard art={item} onSelect={selectArticle} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
                   {/* TASK-114 X2：Social/Notif 卡补 onSelect（Enter/Space=选中，与 ArticleCard 同语义） */}
                   {activeContentLayout === 'social' && <SocialCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle} onMoveFocus={moveCardFocus} onLayoutHeight={syncSocialItemHeight} />}
                   {activeContentLayout === 'podcast' && <PodcastCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onMoveFocus={moveCardFocus} />}
                   {activeContentLayout === 'notification' && <NotifCard item={item} cardIndex={vi.index} tabbable={vi.index === tabbableIndex} onSelect={selectArticle} onMoveFocus={moveCardFocus} />}
-                </div>
+                </TimelineRowItem>
               );
             })}
           </div>
