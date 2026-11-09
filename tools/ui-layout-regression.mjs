@@ -64,9 +64,105 @@ const SELECTED_KEYBOARD_VIEWPORTS = process.env.UI_LAYOUT_VIEWPORTS
   ? KEYBOARD_VIEWPORTS.filter((viewport) => process.env.UI_LAYOUT_VIEWPORTS.split(',').includes(viewport.label))
   : KEYBOARD_VIEWPORTS;
 const SOCIAL_ID_BASE = { '1440x900': 9001, '980x640': 10001 };
+// 显式覆盖两种系统动效偏好，避免本机与 CI 的 OS 设置决定实际门禁分支。
+// 每种模式运行原场景与原断言；reduce 的社交 ID 另开空间，防正文缓存代替水合。
+const MOTION_MODES = ['no-preference', 'reduce'];
+const LAYOUT_CASES = MOTION_MODES.flatMap((motion) => SELECTED_VIEWPORTS.map((viewport) => ({
+  ...viewport,
+  motion,
+  label: `${viewport.label}-${motion}`,
+  socialBaseId: SOCIAL_ID_BASE[viewport.label] + (motion === 'reduce' ? 20000 : 0),
+})));
+const KEYBOARD_CASES = MOTION_MODES.flatMap((motion) => SELECTED_KEYBOARD_VIEWPORTS.map((viewport) => ({
+  ...viewport,
+  motion,
+  label: `${viewport.label}-${motion}`,
+})));
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runMotionContractCheck(cdp, evidence, motion) {
+  const result = {};
+  let failure;
+  evidence.motionContracts ??= {};
+  evidence.motionContracts[motion] = result;
+  try {
+    result.geometry = await evalValue(cdp, `(async () => {
+      const fixture = document.createElement('div');
+      fixture.id = 'ui-motion-contract';
+      fixture.style.cssText = 'position:fixed;inset:0;z-index:999999;background:white;padding:20px;overflow:hidden';
+      fixture.innerHTML = '<div class="feed-leaf-item" data-id="motion-first"><button class="feed-leaf-select">First</button><span class="feed-leaf-actions"><button class="feed-row-act-btn" data-feed-action="refresh">R</button><button class="feed-row-act-btn" data-feed-action="edit">E</button></span></div>'
+        + '<div class="feed-leaf-item" data-id="motion-second"><button class="feed-leaf-select">Second</button><span class="feed-leaf-actions"><button class="feed-row-act-btn" data-feed-action="refresh">R</button><button class="feed-row-act-btn" data-feed-action="edit">E</button></span></div>'
+        + '<div class="timeline-virtual-wrap" style="height:1500px;width:500px;position:relative"><div class="timeline-virtual-item" style="transform:translateY(100px);height:100px;width:500px"></div></div>'
+        + '<div class="social-text collapsed">Margin</div><div data-motion-animation></div>'
+        + '<style>@keyframes uiMotionContract { from { opacity:0 } to { opacity:1 } } [data-motion-animation].running { animation:uiMotionContract 1s linear }</style>';
+      const previousFocus = document.activeElement;
+      document.body.appendChild(fixture);
+      const row = fixture.querySelector('.timeline-virtual-item');
+      const wrap = row.parentElement;
+      const text = fixture.querySelector('.social-text');
+      const animated = fixture.querySelector('[data-motion-animation]');
+      const inspect = (node) => {
+        const css = getComputedStyle(node);
+        return { transform:css.transform, height:css.height, marginBottom:css.marginBottom,
+          visibility:css.visibility, transitionDuration:css.transitionDuration,
+          animationDuration:css.animationDuration,
+          transitions:node.getAnimations().filter(animation=>animation instanceof CSSTransition).map(animation=>animation.transitionProperty) };
+      };
+      window.__motionContract = { fixture, previousFocus, animationEvents:[] };
+      animated.addEventListener('animationend', event => window.__motionContract.animationEvents.push(event.animationName));
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      const before = { row:inspect(row), wrap:inspect(wrap), text:inspect(text) };
+      row.style.transform='translateY(200px)';
+      wrap.style.height='1600px';
+      text.classList.remove('collapsed');
+      animated.classList.add('running');
+      fixture.querySelector('.feed-leaf-select').focus();
+      return { before, after:{row:inspect(row),wrap:inspect(wrap),text:inspect(text),animation:inspect(animated)},
+        actions:[...fixture.querySelectorAll('[data-id="motion-first"] .feed-row-act-btn')].map(inspect) };
+    })()`);
+    assert.equal(result.geometry.after.row.transform, 'matrix(1, 0, 0, 1, 0, 200)', `[${motion}] 虚拟坐标必须同步发布`);
+    assert.equal(result.geometry.after.wrap.height, '1600px', `[${motion}] 虚拟总高必须同步发布`);
+    assert.equal(result.geometry.after.text.marginBottom, '8px', `[${motion}] 社交展开边距必须同步发布`);
+    assert.ok(result.geometry.actions.every((action) => action.visibility === 'visible' && action.transitions.length === 0),
+      `[${motion}] 焦点进入源行时子操作按钮必须立即可见且没有 visibility 过渡`);
+    result.tabs = [];
+    for (let index = 0; index < 2; index += 1) {
+      await pressBrowserKey(cdp, 'Tab', 'Tab', 9);
+      result.tabs.push(await evalValue(cdp, `({
+        row:document.activeElement.closest('.feed-leaf-item')?.dataset.id,
+        action:document.activeElement.dataset.feedAction,
+      })`));
+    }
+    assert.deepEqual(result.tabs, [
+      { row: 'motion-first', action: 'refresh' },
+      { row: 'motion-first', action: 'edit' },
+    ], `[${motion}] 原生 Tab 必须依次进入同一源行的刷新和编辑`);
+    if (motion === 'reduce') {
+      assert.equal(result.geometry.after.animation.animationDuration, '1e-05s', 'reduce 应保留近瞬时 animation');
+      await waitFor(cdp, 'window.__motionContract.animationEvents.includes("uiMotionContract")', 1000);
+      result.animationEvents = await evalValue(cdp, 'window.__motionContract.animationEvents');
+    } else {
+      assert.equal(result.geometry.after.animation.animationDuration, '1s', '默认模式不应缩短装饰 animation');
+    }
+  } catch (error) {
+    failure = error;
+  } finally {
+    try {
+      await evalValue(cdp, `(() => {
+        const state=window.__motionContract;
+        state?.fixture.remove();
+        if(state?.previousFocus?.isConnected) state.previousFocus.focus?.();
+        delete window.__motionContract;
+      })()`);
+    } catch (error) {
+      result.cleanupError = error?.stack ?? String(error);
+      failure ??= error;
+    }
+  }
+  if (failure) throw failure;
 }
 
 async function freePort() {
@@ -129,6 +225,17 @@ const MEDIA_VIDEO_MP4 = Buffer.from(
 async function startMediaServer() {
   const port = await freePort();
   const requests = [];
+  const phaseEvents = [];
+  const releasedPhases = new Set();
+  const pendingPhases = new Map();
+  const releaseMediaPhase = (phase) => {
+    if (releasedPhases.has(phase)) return;
+    releasedPhases.add(phase);
+    phaseEvents.push({ event: 'release', phase, at: Date.now() });
+    const pending = pendingPhases.get(phase) ?? [];
+    pendingPhases.delete(phase);
+    for (const respond of pending) respond();
+  };
   const galleryReleased = new Set();
   const galleryPending = new Map();
   const releaseGalleryWave = (wave) => {
@@ -141,6 +248,8 @@ async function startMediaServer() {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1');
     const delayMs = Math.max(0, Math.min(3000, Number(url.searchParams.get('delay') ?? 600)));
     const startedAt = Date.now();
+    const phase = url.searchParams.get('phase');
+    if (phase) phaseEvents.push({ event: 'request', phase, at: startedAt, path: request.url });
     const finish = (status, headers, body) => {
       const bytes = Buffer.isBuffer(body) ? body : Buffer.from(String(body));
       response.writeHead(status, {
@@ -159,7 +268,9 @@ async function startMediaServer() {
         finishedAt: Date.now(),
         bytes: bytes.length,
         range: request.headers.range ?? null,
+        phase,
       });
+      if (phase) phaseEvents.push({ event: 'response', phase, at: Date.now(), path: request.url, status });
     };
     if (url.pathname === '/gallery-image.svg') {
       const wave = url.searchParams.get('wave');
@@ -170,7 +281,7 @@ async function startMediaServer() {
       else galleryPending.set(wave, [...(galleryPending.get(wave) ?? []), respond]);
       return;
     }
-    setTimeout(() => {
+    const respondMedia = () => {
       if (url.pathname === '/delayed-image.svg') {
         finish(200, { 'Content-Type': 'image/svg+xml' }, MEDIA_SVG(800, 1100, 'HTTP_IMAGE_MARKER'));
         return;
@@ -206,7 +317,11 @@ async function startMediaServer() {
         return;
       }
       finish(404, { 'Content-Type': 'text/plain' }, 'missing media');
-    }, delayMs);
+    };
+    if (phase) {
+      if (releasedPhases.has(phase)) respondMedia();
+      else pendingPhases.set(phase, [...(pendingPhases.get(phase) ?? []), respondMedia]);
+    } else setTimeout(respondMedia, delayMs);
   });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -215,9 +330,12 @@ async function startMediaServer() {
   return {
     url: `http://127.0.0.1:${port}`,
     requests,
+    phaseEvents,
+    releaseMediaPhase,
     releaseGalleryWave,
     close: () => {
       for (const wave of galleryPending.keys()) releaseGalleryWave(wave);
+      for (const phase of pendingPhases.keys()) releaseMediaPhase(phase);
       return new Promise((resolve) => server.close(resolve));
     },
   };
@@ -695,6 +813,8 @@ async function runGalleryLoadingCheck(cdp, evidence, viewportLabel, media) {
             width: imageRect.width,
             height: imageRect.height,
             src: image.currentSrc,
+            attributeSrc: image.getAttribute('src'),
+            loading: image.loading,
           } : null,
         };
       });
@@ -747,7 +867,8 @@ async function runGalleryLoadingCheck(cdp, evidence, viewportLabel, media) {
       `[${viewportLabel}] 延迟图片第 ${index + 1} 波使 anchor ${before.anchor.id} 漂移 ${phase.maxAnchorDrift}px（最终 ${phase.settledAnchorDrift}px）`);
     assert.ok(phase.frames.every((frame) => frame.scrollWidth <= frame.clientWidth + 1), `[${viewportLabel}] 异步测量期间不可横向溢出`);
   }
-  await waitFor(cdp, `(() => {
+  try {
+    await waitFor(cdp, `(() => {
     const root = document.querySelector('#timelineContentScroll');
     const bounds = root.getBoundingClientRect();
     const visibleImages = [...root.querySelectorAll('.gallery-card img')].filter((image) => {
@@ -755,8 +876,15 @@ async function runGalleryLoadingCheck(cdp, evidence, viewportLabel, media) {
       return rect.bottom > bounds.top && rect.top < bounds.bottom;
     });
     return visibleImages.length > 0 && visibleImages.every((image) => image.complete && image.naturalWidth > 0);
-  })()`,
-    10000);
+    })()`, 10000);
+  } catch (error) {
+    result.failedSettle = await evalValue(cdp, `({
+      snapshot: window.__galleryReadAnchor(),
+      visibility: document.visibilityState,
+      windowFocused: document.hasFocus(),
+    })`).catch(() => null);
+    throw error;
+  }
   result.settled = await evalValue(cdp, 'window.__galleryReadAnchor()');
   const naturalRatios = new Set();
   for (const card of result.settled.cards) {
@@ -902,7 +1030,7 @@ async function clickBrowserAt(cdp, x, y) {
   });
 }
 
-async function runKeyboardA11yChecks(cdp, evidence, viewportLabel) {
+async function runKeyboardA11yChecks(cdp, evidence, viewportLabel, media) {
   const result = {};
   evidence.keyboardA11y = result;
   await cdp.send('Accessibility.enable');
@@ -1124,35 +1252,68 @@ async function runKeyboardA11yChecks(cdp, evidence, viewportLabel) {
     `[${viewportLabel}] AX 树中不得出现 button 父/子嵌套：${JSON.stringify(nestedAxButtons)}`);
 
   const sourceTabStart = await evalValue(cdp, `(() => {
+    const describe = (node) => node ? ({
+      tag: node.tagName, id: node.id, className: node.className,
+      role: node.getAttribute('role'), tabIndex: node.tabIndex,
+      action: node.getAttribute('data-feed-action'), label: node.getAttribute('aria-label'),
+      rowId: node.closest('.feed-leaf-item')?.dataset.id ?? null,
+    }) : null;
     const row = document.querySelector('.feed-leaf-item[data-id]');
     const select = row?.querySelector('.feed-leaf-select');
     const actions = row?.querySelector('.feed-leaf-actions');
+    const beforeFocus = describe(document.activeElement);
     select?.focus();
     return {
       rowId: row?.getAttribute('data-id') ?? null,
       tag: select?.tagName ?? null,
+      currentUrl: location.href,
+      windowFocused: document.hasFocus(),
+      beforeFocus,
+      afterFocus: describe(document.activeElement),
+      selectionFocused: document.activeElement === select,
+      buttons: [...(row?.querySelectorAll('button') ?? [])].map(describe),
+      openOverlays: [...document.querySelectorAll('.modal-overlay.open')].map(describe),
       visibility: actions ? getComputedStyle(actions).visibility : null,
       opacity: actions ? getComputedStyle(actions).opacity : null,
+      transition: actions ? getComputedStyle(actions).transition : null,
     };
   })()`);
+  result.sourceTabStart = sourceTabStart;
   assert.ok(sourceTabStart.rowId, `[${viewportLabel}] 应存在订阅源行`);
   assert.equal(sourceTabStart.tag, 'BUTTON', `[${viewportLabel}] 源行主选择应为真实 button`);
   assert.equal(sourceTabStart.visibility, 'visible',
     `[${viewportLabel}] 焦点进入源行后操作按钮应可见`);
 
   const sourceTabOrder = [];
+  result.sidebarTabs = sourceTabOrder;
   for (let step = 0; step < 2; step += 1) {
-    await pressBrowserKey(cdp, 'Tab', 'Tab', 9);
-    await delay(90);
-    sourceTabOrder.push(await evalValue(cdp, `(() => {
+    const beforeKey = await evalValue(cdp, `(() => {
       const active = document.activeElement;
       return {
+        at: performance.now(), currentUrl: location.href, windowFocused: document.hasFocus(),
+        tag: active?.tagName ?? null, id: active?.id ?? null, className: active?.className ?? null,
+        role: active?.getAttribute?.('role') ?? null, tabIndex: active?.tabIndex ?? null,
+        action: active?.getAttribute?.('data-feed-action') ?? null,
+        rowId: active?.closest?.('.feed-leaf-item')?.dataset.id ?? null,
+      };
+    })()`);
+    await pressBrowserKey(cdp, 'Tab', 'Tab', 9);
+    await delay(90);
+    sourceTabOrder.push({ beforeKey, ...await evalValue(cdp, `(() => {
+      const active = document.activeElement;
+      return {
+        at: performance.now(), currentUrl: location.href, windowFocused: document.hasFocus(),
         tag: active?.tagName ?? null,
+        id: active?.id ?? null,
+        className: active?.className ?? null,
+        role: active?.getAttribute?.('role') ?? null,
+        tabIndex: active?.tabIndex ?? null,
+        rowId: active?.closest?.('.feed-leaf-item')?.dataset.id ?? null,
         action: active?.getAttribute?.('data-feed-action') ?? null,
         label: active?.getAttribute?.('aria-label') ?? null,
         visibility: getComputedStyle(document.querySelector('.feed-leaf-actions')).visibility,
       };
-    })()`));
+    })()`) });
   }
   assert.deepEqual(sourceTabOrder.map((item) => item.action), ['refresh', 'edit'],
     `[${viewportLabel}] Tab 应从源行主选择依次到刷新、编辑`);
@@ -1225,8 +1386,45 @@ async function runKeyboardA11yChecks(cdp, evidence, viewportLabel) {
     return true;
   })()`);
 
+  // 键盘消费用可解码的本地媒体。虚构外网 URL 的迟到 error 会在 Space 已切换后
+  // 触发生产暂停，污染本断言；真实失败/重试由 player-focus-ai 的 F4 与受控网络反例覆盖。
+  const spaceMediaUrl = `${media.url}/video.mp4?delay=0&fixture=space&case=${encodeURIComponent(viewportLabel)}`;
   const playerProbe = await evalValue(cdp, `(() => {
     const store = window.__uiLayoutStore;
+    window.__uiLayoutStopSpaceTrace?.();
+    const trace = [];
+    window.__uiLayoutSpaceTrace = trace;
+    const record = (event) => trace.push({ at:performance.now(), ...event });
+    const playerState = (player) => ({ isActive:player.isActive, isPlaying:player.isPlaying,
+      audioUrl:player.audioUrl, positionSec:player.positionSec, durationSec:player.durationSec });
+    const mediaState = (element) => element ? ({ src:element.getAttribute('src'), currentSrc:element.currentSrc,
+      paused:element.paused, ended:element.ended, readyState:element.readyState, networkState:element.networkState,
+      currentTime:element.currentTime, error:element.error ? {code:element.error.code,message:element.error.message} : null }) : null;
+    const describe = (element) => ({ tag:element?.tagName, className:element?.className,
+      role:element?.getAttribute?.('role'), action:element?.getAttribute?.('data-feed-action') });
+    const captureKey = (event) => record({kind:'keydown-capture',key:event.key,defaultPrevented:event.defaultPrevented,
+      target:describe(event.target),player:playerState(store.getState().player)});
+    const bubbleKey = (event) => record({kind:'keydown-window',key:event.key,defaultPrevented:event.defaultPrevented,
+      target:describe(event.target),player:playerState(store.getState().player)});
+    const captureMedia = (event) => {
+      if(event.target instanceof HTMLMediaElement) record({kind:'media',event:event.type,
+        media:mediaState(event.target),player:playerState(store.getState().player)});
+    };
+    const mediaEvents=['error','ended','play','pause','playing','abort','emptied'];
+    document.addEventListener('keydown',captureKey,true);
+    window.addEventListener('keydown',bubbleKey);
+    for(const name of mediaEvents) document.addEventListener(name,captureMedia,true);
+    const unsubscribe=store.subscribe((next,previous)=>{
+      if(next.player!==previous.player) record({kind:'store',before:playerState(previous.player),after:playerState(next.player)});
+    });
+    window.__uiLayoutReadSpaceState = () => ({ at:performance.now(),windowFocused:document.hasFocus(),
+      focus:describe(document.activeElement),player:playerState(store.getState().player),
+      audio:[...document.querySelectorAll('audio')].map(mediaState),events:trace.slice() });
+    window.__uiLayoutStopSpaceTrace=()=>{
+      unsubscribe();document.removeEventListener('keydown',captureKey,true);window.removeEventListener('keydown',bubbleKey);
+      for(const name of mediaEvents) document.removeEventListener(name,captureMedia,true);
+      delete window.__uiLayoutStopSpaceTrace;
+    };
     const state = store.getState();
     store.setState({
       player: {
@@ -1234,13 +1432,20 @@ async function runKeyboardA11yChecks(cdp, evidence, viewportLabel) {
         isActive: true,
         isPlaying: false,
         title: 'Space probe',
-        audioUrl: 'https://audio.example/probe.mp3',
+        audioUrl: ${JSON.stringify(spaceMediaUrl)},
       },
       playerExpanded: false,
     });
     return { feedId: document.querySelector('.feed-leaf-item[data-id]')?.getAttribute('data-id') ?? null };
   })()`);
   assert.ok(playerProbe.feedId, `[${viewportLabel}] Space 探针需要订阅源行`);
+  await waitFor(cdp, `(() => {
+    const audio=document.querySelector('audio');
+    return audio?.currentSrc === ${JSON.stringify(spaceMediaUrl)} && audio.readyState >= 1 && audio.error === null;
+  })()`, 5000);
+  // 样本不足两秒；循环只防正常 ended 与稍后的键盘动作竞争，play/pause 保持原生。
+  await evalValue(cdp, 'document.querySelector("audio").loop = true');
+  result.spaceLocalMetadata = await evalValue(cdp, 'window.__uiLayoutReadSpaceState()');
 
   await evalValue(cdp, `(() => {
     const button = document.querySelector('.sidebar-search-pill');
@@ -1321,18 +1526,6 @@ async function runKeyboardA11yChecks(cdp, evidence, viewportLabel) {
   await pressBrowserKey(cdp, 'j', 'KeyJ', 74);
   await delay(180);
   await evalValue(cdp, `(() => {
-    const proto = HTMLMediaElement.prototype;
-    const originalPlay = proto.play;
-    const originalPause = proto.pause;
-    window.__uiLayoutRestoreMedia = () => {
-      proto.play = originalPlay;
-      proto.pause = originalPause;
-    };
-    proto.play = () => Promise.resolve();
-    proto.pause = () => {};
-    return true;
-  })()`);
-  await evalValue(cdp, `(() => {
     const store = window.__uiLayoutStore;
     const state = store.getState();
     store.setState({
@@ -1341,6 +1534,7 @@ async function runKeyboardA11yChecks(cdp, evidence, viewportLabel) {
     });
     return true;
   })()`);
+  result.cardSpaceBefore = await evalValue(cdp, 'window.__uiLayoutReadSpaceState()');
   await pressBrowserKey(cdp, ' ', 'Space', 32);
   await delay(180);
   const cardSpace = await evalValue(cdp, `(() => ({
@@ -1350,13 +1544,17 @@ async function runKeyboardA11yChecks(cdp, evidence, viewportLabel) {
     focusTag: document.activeElement?.tagName ?? null,
     focusClass: document.activeElement?.className ?? null,
   }))()`);
+  result.cardSpace = { ...cardSpace, observation: await evalValue(cdp, 'window.__uiLayoutReadSpaceState()') };
+  await evalValue(cdp, 'window.__uiLayoutStopSpaceTrace?.()');
   assert.match(String(cardSpace.focusClass), /article-card/,
     `[${viewportLabel}] 卡片 Space 探针应聚焦在文章卡`);
   assert.equal(cardSpace.isPlaying, true,
     `[${viewportLabel}] 卡片焦点上的 Space 仍应切换播放`);
+  assert.ok(result.cardSpace.observation.audio.some((audio) => audio.currentSrc === spaceMediaUrl
+    && audio.readyState >= 2 && !audio.paused && audio.error === null),
+  `[${viewportLabel}] Space 后本地媒体应实际解码并播放`);
 
   await evalValue(cdp, `(() => {
-    window.__uiLayoutRestoreMedia?.();
     const store = window.__uiLayoutStore;
     const state = store.getState();
     store.setState({
@@ -1514,12 +1712,12 @@ async function installSocialFixture(cdp, baseId, mediaBaseUrl) {
     const failedImageBody = '<p>FAILED_IMAGE_MARKER 图片加载失败</p><img src="'
       + mediaUrl('/failed-image.svg', 500)
       + '" alt="" />';
-    /* poster 延迟到视频 metadata 之后返回；metadata 先用真实 176×144 尺寸
-       触发内层增长，随后 poster 再把视觉高度抬到其自然比例。 */
+    /* 两响应分别受runner阶段屏障控制；延迟数字不能保证浏览器实际请求顺序。
+       初态取样后才释放video，真实metadata取样后才释放poster。 */
     const videoBody = '<p>VIDEO_BODY_MARKER 视频 poster 延迟加载</p><video src="'
-      + mediaUrl('/video.mp4', 900)
+      + mediaUrl('/video.mp4', 0) + '&phase=' + baseId + ':video'
       + '" poster="'
-      + mediaUrl('/poster.svg', 1600)
+      + mediaUrl('/poster.svg', 0) + '&phase=' + baseId + ':poster'
       + '" preload="metadata" controls muted playsinline></video>';
     const emptyBody = '';
     const kindOf = (id) => kinds[(Number(id) - baseId) % kinds.length];
@@ -2035,6 +2233,8 @@ async function installSocialFixture(cdp, baseId, mediaBaseUrl) {
 }
 
 async function runSocialCheck(cdp, evidence, viewportLabel, baseId, media) {
+  const mediaStages = { videoPhase: `${baseId}:video`, posterPhase: `${baseId}:poster` };
+  evidence.socialMediaStages = mediaStages;
   await installSocialFixture(cdp, baseId, media.url);
   await delay(140);
   const placeholder = await evalValue(cdp, `({
@@ -2048,7 +2248,10 @@ async function runSocialCheck(cdp, evidence, viewportLabel, baseId, media) {
       && video?.readyState === 0;
   })()`, HYDRATE_DELAY_MS + 5000);
   const videoInitial = await evalValue(cdp, `window.__socialAudit.captureCurrentCardAt(0)?.card ?? null`);
+  mediaStages.initial = videoInitial;
   await screenshot(cdp, path.join(EVIDENCE_DIR, `${viewportLabel}-social-video-initial.png`));
+  assert.equal(videoInitial?.videoReadyState, 0, '[social] 释放视频前必须实际观察 readyState=0');
+  media.releaseMediaPhase(mediaStages.videoPhase);
   await waitFor(cdp, `(() => {
     const item = document.querySelector('.timeline-virtual-item[data-index="0"]');
     const video = item?.querySelector('.social-text-inner video');
@@ -2058,7 +2261,11 @@ async function runSocialCheck(cdp, evidence, viewportLabel, baseId, media) {
     () => requestAnimationFrame(() => setTimeout(resolve, 80)),
   ))`);
   const videoMetadata = await evalValue(cdp, `window.__socialAudit.captureCurrentCardAt(0)?.card ?? null`);
+  mediaStages.metadata = videoMetadata;
   await screenshot(cdp, path.join(EVIDENCE_DIR, `${viewportLabel}-social-video-metadata.png`));
+  assert.equal(videoMetadata?.videoWidth, 176, '[social] 释放poster前必须观察真实视频自然宽度');
+  assert.equal(videoMetadata?.videoHeight, 144, '[social] 释放poster前必须观察真实视频自然高度');
+  media.releaseMediaPhase(mediaStages.posterPhase);
   await waitFor(cdp, `(() => {
     const item = document.querySelector('.timeline-virtual-item[data-index="0"]');
     const video = item?.querySelector('.social-text-inner video');
@@ -2068,6 +2275,7 @@ async function runSocialCheck(cdp, evidence, viewportLabel, baseId, media) {
     () => requestAnimationFrame(() => setTimeout(resolve, 80)),
   ))`);
   const videoPoster = await evalValue(cdp, `window.__socialAudit.captureCurrentCardAt(0)?.card ?? null`);
+  mediaStages.poster = videoPoster;
   await screenshot(cdp, path.join(EVIDENCE_DIR, `${viewportLabel}-social-video-poster.png`));
   await waitFor(cdp, 'window.__socialAudit && window.__socialAudit.running === false', SAMPLE_MS + 5000);
   /* 采样窗口恰好在某张视频卡 poster 到达的同帧结束时，mutation 后的 rAF
@@ -2926,6 +3134,7 @@ async function main() {
   try {
     media = await startMediaServer();
     evidence.media = { url: media.url };
+    evidence.mediaPhaseEvents = media.phaseEvents;
     let startupReady = false;
     for (let attempt = 1; attempt <= 2; attempt++) {
       const attemptStartedAt = performance.now();
@@ -3123,12 +3332,15 @@ async function main() {
     await delay(300);
     await applyRuntimeMutation(cdp);
 
-    for (const viewport of SELECTED_VIEWPORTS) {
+    for (const viewport of LAYOUT_CASES) {
       activeViewportLabel = viewport.label;
+      await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: viewport.motion }] });
       await setViewport(cdp, viewport.width, viewport.height);
       await delay(220);
+      if (!evidence.motionContracts?.[viewport.motion]) await runMotionContractCheck(cdp, evidence, viewport.motion);
       evidence.viewports[viewport.label] = {
         viewport: { width: viewport.width, height: viewport.height },
+        motion: viewport.motion,
         layouts: {},
         socialHydration: null,
         keyboardA11y: null,
@@ -3139,23 +3351,26 @@ async function main() {
       if (TRACE_MODE === 'viewport') await evalValue(cdp, 'window.__viewportTrace.endPhase()');
       await runGalleryWindowCheck(cdp, evidence.viewports[viewport.label], viewport.label);
     }
-    for (const viewport of CHECK_GROUP === 'all' ? SELECTED_VIEWPORTS : []) {
+    for (const viewport of CHECK_GROUP === 'all' ? LAYOUT_CASES : []) {
       activeViewportLabel = viewport.label;
+      await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: viewport.motion }] });
       await setViewport(cdp, viewport.width, viewport.height);
       await delay(220);
       if (TRACE_MODE === 'viewport') await evalValue(cdp, `window.__viewportTrace.beginPhase(${JSON.stringify(`social:${viewport.label}`)})`);
-      await runSocialCheck(cdp, evidence.viewports[viewport.label], viewport.label, SOCIAL_ID_BASE[viewport.label], media);
+      await runSocialCheck(cdp, evidence.viewports[viewport.label], viewport.label, viewport.socialBaseId, media);
       if (TRACE_MODE === 'viewport') await evalValue(cdp, 'window.__viewportTrace.endPhase()');
     }
-    for (const viewport of CHECK_GROUP === 'all' ? SELECTED_KEYBOARD_VIEWPORTS : []) {
+    for (const viewport of CHECK_GROUP === 'all' ? KEYBOARD_CASES : []) {
       activeViewportLabel = viewport.label;
+      await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: viewport.motion }] });
       await setViewport(cdp, viewport.width, viewport.height);
       await delay(220);
       evidence.keyboardViewports[viewport.label] = {
         viewport: { width: viewport.width, height: viewport.height },
+        motion: viewport.motion,
         keyboardA11y: null,
       };
-      await runKeyboardA11yChecks(cdp, evidence.keyboardViewports[viewport.label], viewport.label);
+      await runKeyboardA11yChecks(cdp, evidence.keyboardViewports[viewport.label], viewport.label, media);
     }
 
     evidence.mediaRequests = media.requests;
@@ -3223,6 +3438,7 @@ async function main() {
           bodyText: document.body.innerText.slice(0, 1000),
           root: !!document.querySelector('.app-root'),
           splash: !!document.querySelector('.app-loading-splash'),
+          spaceProbe: window.__uiLayoutReadSpaceState?.() ?? null,
           resources: performance.getEntriesByType('resource').slice(-30).map((entry) => ({
             name: entry.name,
             duration: entry.duration,

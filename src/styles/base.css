@@ -4390,23 +4390,25 @@ a[href]:focus-visible,
 }
 
 /* ---------- prefers-reduced-motion（REQ-005） ----------
-   系统开启「减弱动态效果」时，本文件全部过渡与动画压缩到近瞬时。
-   用 0.01ms 而不是 none：transitionend / animationend 仍会触发，依赖这些
-   事件的代码不会因为过渡被移除而停在中间状态。
+   系统开启「减弱动态效果」时，transition 直接完成，animation 压缩到近瞬时。
+   不能给所有元素非零 transition-duration：默认 property:all 会使原本没有
+   过渡的虚拟几何与继承 visibility 产生 CSSTransition，延迟坐标或跳过 Tab 按钮。
+   当前产品和运行依赖没有 transitionend 状态消费者；animationend 仍由
+   useEnteringClass 消费，所以 animation-duration 保留 0.01ms。
    下面显式 animation:none 的是本任务新增的挂载即播入场动画；
    播放条 / 全屏播放器 / 下拉菜单 / AI / 通知区块 / 译文块 / 设置页
    分类分组用的是 transition（含 display 的 allow-discrete 离散过渡），
-   由上面的全局 transition-duration: 0.01ms 一并压平，两个方向都不会有
-   可感知动效。
+   在此模式的两个方向都立即切换。
    例外：加载指示器是进度反馈而非装饰动效，保留旋转——停转会让用户误判
-   「卡死了」，这比动效本身更糟。 */
+   「卡死了」，这比动效本身更糟。
+   Note: 见 .agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    transition-duration: 0s !important;
     transition-delay: 0ms !important;
   }
 

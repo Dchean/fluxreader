@@ -2,7 +2,7 @@
 
 性能结论必须附日期、构建、语料与测量范围。以下历史 DB 和应用级数据保留原方法及限制，不能外推当前全部场景，也不能把基线完成写成优化完成。旧 OPT 编号只用于定位固定历史材料，不是当前执行任务。
 
-**最近复核（2026-11-06，dev@91ece562）**：混合比例画廊挂载上界和图片加载过程锚稳定均有反例；两项已于2026-11-07随画廊/焦点批修复并在最终候选字节复验，见[画廊证据](#gallery-evidence)。当前真实 WebView2 滚动 p95、解码、自然语料和同构建端到端对照仍未测；Chromium rAF 间隔不等于硬件呈现 FPS。
+**最近复核（2026-11-09，诊断基线dev@87119b2）**：逐列挂载上界的后继修复保留；过程锚稳定与社交重叠在后续CI再次失败，不能用2026-11-07本机全绿覆盖。最新有效trace与同宿主对照将失配定位到 reduced-motion 全局非零 duration 激活虚拟几何的默认 `transition-property:all`，见[画廊证据](#gallery-evidence)。当前真实 WebView2 滚动 p95、解码、自然语料和同构建端到端对照仍未测；Chromium rAF 间隔不等于硬件呈现 FPS。
 
 测量工具（CDP 测量电池、合成规模数据注入、owner 实机清单）已移到存档分支
 `archive/tooling-and-reports`（`archive/tools/phase4_measure.mjs`、`phase4_seed.py`、
@@ -116,7 +116,9 @@
 | 同提交独立复核，8100px路程 | 混合比例192挂载/17可见/界48；统一600×800为28/12/界28。极扁1800×10旧对照52–64≤72 | 比例分布改变结果；矮卡对照本身不越界 |
 | 2026-11-06，91ece562的Windows Edge CI，1440×900图片第1波 | 44个rAF样本1次指定锚211→52→211，最大159px、最终0px | 过程稳定性门禁失败；最终回正不满足过程≤3px要求 |
 
-原始几何/图片证据分别在 `tmp/convergence-c/gallery-final2/`、`tmp/audit-2026-11-05/cdp-followup/`、`tmp/audit-2026-11-06/ui/`。历史CI [42032209262](https://github.com/Dchean/fluxreader/actions/runs/42032209262)的artifact绑定91ece562，不能称作当前未提交整合差异的运行结果。2026-11-07原实现的710条完整插桩捕获先滚后写几何的同栈瞬时偏移，但两波rAF漂移均为0，未复现旧CI的异帧失败。候选改为先发布总高/已挂节点几何再释放滚动补偿，未开启flushSync；该顺序与每帧≤3px断言已在 `test:ui-layout` r8 的最终候选字节上全量通过（两视口四波漂移为0），G1/G2与行侧陈旧滚动位置随画廊/焦点批关闭，后继状态由[验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md)集中维护。
+原始几何/图片证据分别在 `tmp/convergence-c/gallery-final2/`、`tmp/audit-2026-11-05/cdp-followup/`、`tmp/audit-2026-11-06/ui/`。历史CI [42032209262](https://github.com/Dchean/fluxreader/actions/runs/42032209262)的artifact绑定91ece562，不能称作当前未提交整合差异的运行结果。2026-11-07原实现的710条插桩捕获先滚后写几何的同栈瞬时偏移，但两波rAF漂移均为0，未复现旧CI的异帧失败。候选改为先发布总高/已挂节点几何再释放滚动补偿，未开启flushSync；`test:ui-layout` r8 的本机候选字节两视口四波为0，当时按该范围关闭G1/G2，但后继 `9e9319a` CI 42519067493 再次出现159px，已否定该本地结论可外推系统偏好分支。G1逐列挂载修复与行侧陈旧滚动位置不是本次CSS根因，仍各自按原证据维护。
+
+2026-11-09，精确诊断提交 `87119b2` 的 CI 42602153277（Edg156.0.4314.58/JS15.6.12.10）在画廊四波0漂移后，以社交3帧/maxOverlap10失败。有效style写入命中与节点身份显示 inline/measurement 已新、computed仍旧，元素transition是0.01ms。随后本机Edg157.0.4341.42以CDP仅切系统媒体偏好，同一生产CSS在no-preference立即落新几何，reduce则生成backwards-fill的CSSTransition；应用原门禁独立复现画廊295px/final0和社交3帧/maxOverlap10。最初五节点例外虽关闭已测几何反例，完整门禁又暴露源行子button继承visibility仍被同一全局duration激活，原生Tab跳过刷新/编辑。确认产品没有transitionend状态消费者、而animationend有实际消费者后，最终候选只把reduce的transition-duration统一改0s，保留animation-duration0.01ms、默认媒体模式动效与加载旋转；现门禁显式跑两种偏好和最小几何/可见性/Tab/animationend契约、原场景及阈值不变。原始证据在 `tmp/refactor-2026-11-09/{ci-42602153277-trace,motion-probe,motion-before-reduce,motion-before-social-reduce,motion-full-quiet}/`，机制与历史取舍见[即时几何Note](../.agents/notes/implemented/bug-fix/2026-11-07-社交虚拟行坐标单一写入者与动作采样对齐paint.md)。本段不宣称整版已验收，批次结果与仍未验证项由[验收入口](../.agents/notes/implemented/process/2026-11-03-修复波次的分批、证伪审计与证据门槛.md)集中维护。
 
 2026-11-06开发Chromium合成5000条五布局、两视口短时程序滚动的rAF p95约16.8–16.9ms。这是回调时间戳间隔，不是硬件FPS、INP或真实库持续性能；firstResult仅卡片ID集合变化，stable仅ID连续三帧不变，也不等于图片解码/全部DOM稳定。当前缺口见[roadmap](roadmap.md#interface-and-media)。
 
