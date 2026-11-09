@@ -26,6 +26,8 @@ if (!EVIDENCE_DIR.startsWith(`${TMP_ROOT}${path.sep}`)) {
 const MUTATION = process.env.UI_LAYOUT_MUTATION ?? 'none';
 const CHECK_GROUP = process.env.UI_LAYOUT_CHECK_GROUP ?? 'all';
 if (!['all', 'gallery'].includes(CHECK_GROUP)) throw new Error(`未知 UI_LAYOUT_CHECK_GROUP：${CHECK_GROUP}`);
+const TRACE_MODE = process.env.UI_LAYOUT_TRACE ?? 'none';
+if (!['none', 'viewport'].includes(TRACE_MODE)) throw new Error(`未知 UI_LAYOUT_TRACE：${TRACE_MODE}`);
 const HYDRATE_DELAY_MS = 1300;
 const SAMPLE_MS = 2800;
 const VIEWPORTS = [
@@ -279,7 +281,7 @@ async function startVite() {
 async function startBrowser(profileDir) {
   const debugPort = await freePort();
   const browserPath = findBrowser();
-  const child = spawn(browserPath, [
+  const launchArgs = [
     '--headless=new',
     `--remote-debugging-port=${debugPort}`,
     `--user-data-dir=${profileDir}`,
@@ -292,7 +294,8 @@ async function startBrowser(profileDir) {
     '--disable-sync',
     '--mute-audio',
     'about:blank',
-  ], {
+  ];
+  const child = spawn(browserPath, launchArgs, {
     cwd: REPO_ROOT,
     stdio: 'ignore',
     windowsHide: true,
@@ -306,7 +309,7 @@ async function startBrowser(profileDir) {
       cause: error,
     });
   }
-  return { child, debugPort, browserPath };
+  return { child, debugPort, browserPath, launchArgs };
 }
 
 async function readBootstrapError(cdp) {
@@ -684,6 +687,7 @@ async function runGalleryLoadingCheck(cdp, evidence, viewportLabel, media) {
           top: rect.top - rootRect.top,
           bottom: rect.bottom - rootRect.top,
           height: rect.height,
+          ...(window.__viewportTrace?.inspect(element) ?? {}),
           image: image ? {
             complete: image.complete,
             naturalWidth: image.naturalWidth,
@@ -1755,6 +1759,7 @@ async function installSocialFixture(cdp, baseId, mediaBaseUrl) {
       return {
         id: inner?.dataset.id ?? null,
         index: Number(outer.dataset.index),
+        ...(window.__viewportTrace?.inspect(outer) ?? {}),
         virtualStart: Number(outer.dataset.virtualStart),
         virtualSize: Number(outer.dataset.virtualSize),
         top: rect.top,
@@ -1930,6 +1935,12 @@ async function installSocialFixture(cdp, baseId, mediaBaseUrl) {
               textClass: card.textClass,
               virtualStart: card.virtualStart,
               virtualSize: card.virtualSize,
+              ...(window.__viewportTrace ? {
+                nodeId: card.nodeId,
+                inlineTransform: card.inlineTransform,
+                computedTransform: card.computedTransform,
+                measurement: card.measurement,
+              } : {}),
             }))
             : [],
         });
@@ -2862,7 +2873,8 @@ async function runSocialCheck(cdp, evidence, viewportLabel, baseId, media) {
 async function main() {
   await fsp.mkdir(EVIDENCE_DIR, { recursive: true });
   for (const name of await fsp.readdir(EVIDENCE_DIR)) {
-    if (name === 'metrics.json' || name === 'failure.png'
+    if (name === 'metrics.json' || name === 'viewport-trace.json'
+      || name === 'viewport-trace-error.json' || name === 'failure.png'
       || name.endsWith('-failure.png')
       || (name.endsWith('.png') && (name.includes('layout-') || name.includes('social-')))) {
       await fsp.unlink(path.join(EVIDENCE_DIR, name));
@@ -2887,6 +2899,7 @@ async function main() {
   let media;
   let browser;
   let cdp;
+  let traceEnvironment = null;
   const evidence = {
     generatedAt: new Date().toISOString(),
     mutation: MUTATION,
@@ -2945,6 +2958,19 @@ async function main() {
         evidence.browser = { path: browser.browserPath, headless: true };
         const page = await connectPage(browser.debugPort, 'about:blank');
         cdp = page.cdp;
+        if (TRACE_MODE === 'viewport') {
+          // 由当前实际进程回答；可执行路径或 UA 的 major 版本不能证明精确引擎版本。
+          const version = await cdp.send('Browser.getVersion');
+          traceEnvironment = {
+            version,
+            launchArgs: browser.launchArgs.map((argument) => argument.startsWith('--user-data-dir=')
+              ? '--user-data-dir=<temporary-profile>' : argument),
+          };
+          evidence.browser.version = version;
+          await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+            source: await fsp.readFile(path.join(REPO_ROOT, 'tools/ui-layout/viewport-trace-runtime.js'), 'utf8'),
+          });
+        }
         cdp.on('Runtime.consoleAPICalled', (event) => {
           const text = event.args.map((arg) => arg.value ?? arg.description ?? '').join(' ');
           evidence.consoleMessages.push({ type: event.type, text });
@@ -3046,6 +3072,11 @@ async function main() {
       }
     }
     if (!startupReady) throw new Error('ui-layout 启动重试后仍未就绪');
+    if (TRACE_MODE === 'viewport') {
+      const selfcheck = await evalValue(cdp, 'window.__viewportTrace?.selfcheck ?? null');
+      assert.deepEqual(selfcheck, { style: true, scrollTop: true, scrollTo: true },
+        'viewport trace 的三类真实宿主写入必须命中，未命中不能出具写入者结论');
+    }
     if (FAULT_MODE !== 'none') {
       const attempts = evidence.startup.attempts;
       assert.equal(attempts.length, 2,
@@ -3103,14 +3134,18 @@ async function main() {
         keyboardA11y: null,
       };
       if (CHECK_GROUP === 'all') await runLayoutChecks(cdp, evidence.viewports[viewport.label], viewport.label);
+      if (TRACE_MODE === 'viewport') await evalValue(cdp, `window.__viewportTrace.beginPhase(${JSON.stringify(`gallery:${viewport.label}`)})`);
       await runGalleryLoadingCheck(cdp, evidence.viewports[viewport.label], viewport.label, media);
+      if (TRACE_MODE === 'viewport') await evalValue(cdp, 'window.__viewportTrace.endPhase()');
       await runGalleryWindowCheck(cdp, evidence.viewports[viewport.label], viewport.label);
     }
     for (const viewport of CHECK_GROUP === 'all' ? SELECTED_VIEWPORTS : []) {
       activeViewportLabel = viewport.label;
       await setViewport(cdp, viewport.width, viewport.height);
       await delay(220);
+      if (TRACE_MODE === 'viewport') await evalValue(cdp, `window.__viewportTrace.beginPhase(${JSON.stringify(`social:${viewport.label}`)})`);
       await runSocialCheck(cdp, evidence.viewports[viewport.label], viewport.label, SOCIAL_ID_BASE[viewport.label], media);
+      if (TRACE_MODE === 'viewport') await evalValue(cdp, 'window.__viewportTrace.endPhase()');
     }
     for (const viewport of CHECK_GROUP === 'all' ? SELECTED_KEYBOARD_VIEWPORTS : []) {
       activeViewportLabel = viewport.label;
@@ -3202,6 +3237,21 @@ async function main() {
     await saveJson(path.join(EVIDENCE_DIR, 'metrics.json'), evidence);
     throw error;
   } finally {
+    if (TRACE_MODE === 'viewport' && cdp) {
+      try {
+        const trace = await evalValue(cdp, 'window.__viewportTrace?.dump() ?? null');
+        assert.ok(trace, 'viewport trace runtime 在采集结束前丢失');
+        trace.metadata = traceEnvironment;
+        await saveJson(path.join(EVIDENCE_DIR, 'viewport-trace.json'), trace);
+        assert.equal(trace.dropped, 0, 'viewport trace 缓冲已截断，不能作为完整写入序列');
+      } catch (error) {
+        // 诊断采集失败必须可见；不将产品断言成功/失败改写为相反结论。
+        console.error('[ui-layout] viewport trace 采集失败：', error?.stack ?? String(error));
+        await saveJson(path.join(EVIDENCE_DIR, 'viewport-trace-error.json'), { error: error?.stack ?? String(error) })
+          .catch(() => {}); // 证据目录写入失败也必须继续释放浏览器/Vite/HTTP 资源。
+        process.exitCode = 1;
+      }
+    }
     cdp?.close();
     terminateTree(browser?.child);
     terminateTree(vite?.child);

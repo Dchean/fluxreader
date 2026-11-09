@@ -92,6 +92,8 @@ jobs:
         run: npm ci
 
       - name: Real browser layout regression
+        env:
+          UI_LAYOUT_TRACE: viewport
         run: npm run test:ui-layout
 
       - name: Upload UI layout evidence
