@@ -651,12 +651,25 @@ impl FeverClient {
     /// 探测失败或条目在响应中不可见 → 保守报错（队列保留，下轮重试），绝不盲发。
     /// 返回是否实际发送 mark（false = 服务端已处目标态，无需发送）。
     pub async fn push_star_state(&self, id: i64, target_saved: bool) -> AppResult<bool> {
+        if !self.star_state_needs_write(id, target_saved).await? {
+            return Ok(false);
+        }
+        if target_saved {
+            self.mark_starred(&[id]).await?;
+        } else {
+            self.mark_unstarred(&[id]).await?;
+        }
+        Ok(true)
+    }
+
+    /// Split the optional toggle probe from its write so the sync owner can
+    /// recheck the captured source identity between the two HTTP requests.
+    pub(crate) async fn star_state_needs_write(
+        &self,
+        id: i64,
+        target_saved: bool,
+    ) -> AppResult<bool> {
         if self.api_version.load(Ordering::Relaxed) >= STAR_ABSOLUTE_MIN_API_VERSION {
-            if target_saved {
-                self.mark_starred(&[id]).await?;
-            } else {
-                self.mark_unstarred(&[id]).await?;
-            }
             return Ok(true);
         }
         let items = self.items_with_ids(&[id]).await?;
@@ -681,15 +694,7 @@ impl FeverClient {
                 ));
             }
         };
-        if current_saved == target_saved {
-            return Ok(false);
-        }
-        if target_saved {
-            self.mark_starred(&[id]).await?;
-        } else {
-            self.mark_unstarred(&[id]).await?;
-        }
-        Ok(true)
+        Ok(current_saved != target_saved)
     }
 
     async fn mark_items(&self, ids: &[i64], mark: &str) -> AppResult<()> {

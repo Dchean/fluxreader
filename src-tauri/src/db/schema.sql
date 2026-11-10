@@ -63,7 +63,7 @@ CREATE TABLE articles (
             published_at  TEXT,
             fetched_at    TEXT NOT NULL DEFAULT (datetime('now')),
             is_read       INTEGER NOT NULL DEFAULT 0,
-            is_starred    INTEGER NOT NULL DEFAULT 0, remote_id INTEGER, url_norm TEXT, read_version INTEGER NOT NULL DEFAULT 0, star_version INTEGER NOT NULL DEFAULT 0, content_id INTEGER REFERENCES contents(id), ai_epoch INTEGER NOT NULL DEFAULT 0, ai_summary_sig TEXT, translated_sig TEXT, first_seen_at TEXT, published_at_source TEXT NOT NULL DEFAULT 'legacy_unknown'
+            is_starred    INTEGER NOT NULL DEFAULT 0, remote_id INTEGER, remote_origin_feed_id INTEGER, url_norm TEXT, read_version INTEGER NOT NULL DEFAULT 0, star_version INTEGER NOT NULL DEFAULT 0, content_id INTEGER REFERENCES contents(id), ai_epoch INTEGER NOT NULL DEFAULT 0, ai_summary_sig TEXT, translated_sig TEXT, first_seen_at TEXT, published_at_source TEXT NOT NULL DEFAULT 'legacy_unknown'
             CHECK (published_at_source IN ('feed', 'feed_clamped', 'inferred_fetch', 'legacy_unknown')),
             rss_content_id INTEGER REFERENCES contents(id),
             images_json TEXT NOT NULL DEFAULT '[]',
@@ -154,6 +154,35 @@ CREATE INDEX idx_articles_unread    ON articles(is_read) WHERE is_read = 0;
 
 CREATE UNIQUE INDEX idx_articles_miniflux_id ON articles(remote_id) WHERE remote_id IS NOT NULL;
 
+-- An origin is evidence for this exact remote identity and source incarnation.
+-- Account purge clears remote_id; source rebind/retirement invalidates its evidence.
+CREATE TRIGGER articles_remote_origin_invalidate
+AFTER UPDATE OF remote_id, feed_id ON articles
+WHEN OLD.remote_id IS NOT NEW.remote_id OR OLD.feed_id IS NOT NEW.feed_id
+BEGIN
+    UPDATE articles SET remote_origin_feed_id = NULL WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER feeds_remote_origin_invalidate
+AFTER UPDATE OF remote_id, sync_id, lifecycle_version, active ON feeds
+WHEN OLD.remote_id IS NOT NEW.remote_id OR OLD.sync_id IS NOT NEW.sync_id
+    OR OLD.lifecycle_version IS NOT NEW.lifecycle_version OR OLD.active IS NOT NEW.active
+BEGIN
+    UPDATE articles SET remote_origin_feed_id = NULL WHERE feed_id = NEW.id;
+END;
+
+-- Reuse the source lifecycle as the in-flight identity token. Value comparison
+-- alone cannot reject a remote binding A -> NULL -> A while HTTP is in flight.
+CREATE TRIGGER feeds_remote_identity_advance
+AFTER UPDATE OF remote_id, sync_id ON feeds
+WHEN (OLD.remote_id IS NOT NEW.remote_id OR OLD.sync_id IS NOT NEW.sync_id)
+     AND OLD.lifecycle_version = NEW.lifecycle_version
+BEGIN
+    SELECT CASE WHEN OLD.lifecycle_version >= 9223372036854775807
+        THEN RAISE(ABORT, 'source lifecycle overflow') END;
+    UPDATE feeds SET lifecycle_version = lifecycle_version + 1 WHERE id=NEW.id;
+END;
+
 CREATE INDEX idx_articles_url_norm ON articles(url_norm);
 
 CREATE INDEX idx_articles_feed_published ON articles(feed_id, published_at);
@@ -231,9 +260,10 @@ CREATE TRIGGER trg_contents_trigram_au AFTER UPDATE OF body_text ON contents BEG
         END;
 
 CREATE TRIGGER trg_sync_queue_article_bound
-        AFTER UPDATE OF remote_id ON articles
-        WHEN NEW.remote_id IS NOT NULL
-             AND (OLD.remote_id IS NULL OR OLD.remote_id IS NOT NEW.remote_id)
+        AFTER UPDATE OF remote_origin_feed_id ON articles
+        WHEN NEW.remote_id IS NOT NULL AND NEW.remote_origin_feed_id IS NOT NULL
+             AND EXISTS(SELECT 1 FROM feeds f WHERE f.id=NEW.feed_id AND f.active=1
+                 AND (f.remote_id IS NULL OR f.remote_id=NEW.remote_origin_feed_id))
         BEGIN
             UPDATE sync_queue
                SET status = 'bound_pending',
@@ -244,6 +274,19 @@ CREATE TRIGGER trg_sync_queue_article_bound
              WHERE article_id = NEW.id
                AND kind = 'article_state'
                AND status IN ('local_only', 'bindable_retry');
+        END;
+
+CREATE TRIGGER trg_sync_queue_origin_waiting
+        AFTER UPDATE OF remote_origin_feed_id ON articles
+        WHEN NEW.remote_origin_feed_id IS NULL
+        BEGIN
+            UPDATE sync_queue
+               SET status = 'bindable_retry',
+                   unbound_reason = 'awaiting_verified_origin',
+                   last_error_class = 'unbound',
+                   updated_at = datetime('now')
+             WHERE article_id = NEW.id AND kind = 'article_state'
+               AND status IN ('bound_pending', 'retry_wait');
         END;
 
 CREATE TRIGGER trg_articles_first_seen_fallback_ins

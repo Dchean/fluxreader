@@ -29,18 +29,9 @@ fn page_id_bounds(page: &[ItemContent]) -> Option<(i64, i64)> {
     Some((min, max))
 }
 
-fn item_feed_remote_id(e: &ItemContent) -> Option<i64> {
-    e.origin
-        .as_ref()
-        .and_then(|o| crate::greader::parse_feed_numeric_id(&o.stream_id))
-}
-
 fn unbound_page_feeds(page: &[ItemContent], maps: &db::SyncMatchMaps) -> BTreeSet<i64> {
     page.iter()
-        .filter_map(item_feed_remote_id)
-        .filter(|feed_id| {
-            !maps.feed_mf_to_id.contains_key(feed_id) && !maps.excluded_feed_ids.contains(feed_id)
-        })
+        .filter_map(|entry| entry_unbound_feed(entry, maps))
         .collect()
 }
 
@@ -307,23 +298,11 @@ pub(super) async fn pull_entries_fever(
     full: bool,
     versions: Option<&db::SyncMatchMaps>,
 ) -> AppResult<()> {
-    let binding_incomplete = {
+    {
         let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        let account = super::current_account(&conn)?.ok_or_else(|| {
-            AppError::new(
-                "notConnected",
-                "Fever pull 缺少当前同步账号身份，本轮不请求条目",
-            )
-        })?;
-        db::binding_incomplete(&conn, &account.key)?
-    };
-    if binding_incomplete {
-        report.errors.push(
-            "持久绑定不完整标记存在：先完成 feeds 阶段绑定，本轮不请求条目/不推进游标或 checkpoint"
-                .into(),
-        );
-        return Ok(());
+        if !pull_admitted(&conn, session, report)? {
+            return Ok(());
+        }
     }
 
     // 匹配映射一次构建；逐页合并时增量更新（新绑定/新条目立即可被后续页匹配）。
@@ -351,33 +330,6 @@ pub(super) async fn pull_entries_fever(
         maps.keep_field_versions_from(versions);
         maps.pending_read_ids.extend(&versions.pending_read_ids);
         maps.pending_star_ids.extend(&versions.pending_star_ids);
-    }
-
-    let unbound_remote = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        match db::unbound_remote_feeds(&conn) {
-            Ok(v) => v,
-            Err(e) => {
-                report.errors.push(format!(
-                    "读取未绑定远端源失败，本轮不拉取条目（游标与历史状态保留）: {e}"
-                ));
-                return Ok(());
-            }
-        }
-    };
-    if !unbound_remote.is_empty() {
-        report.binding_incomplete = true;
-        report.errors.push(format!(
-            "存在 {} 个 origin='remote' 源仍缺 remote_id，本轮不拉取条目（游标与历史状态保留）: {}",
-            unbound_remote.len(),
-            unbound_remote
-                .iter()
-                .map(|(_, url)| url.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        return Ok(());
     }
 
     // Note: 零远端 feed 绑定不得初始化历史、请求集合或推进游标 — 见
@@ -447,19 +399,17 @@ pub(super) async fn pull_entries_fever(
     // TASK-069 审查 F1：该失败同时意味着「权威集合没拿全」，与②的分块失败同源，
     // 故一并计入守卫——否则时间戳游标照常推进，切回 greader 时会跳过这个窗口。
     let mut collection_failures = 0usize;
-    let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
-    let (unread, starred) = match (unread, starred) {
-        (Ok(u), Ok(s)) => (u, s),
-        (Err(e), _) | (_, Err(e)) => {
+    let authority = match report.authority_snapshot.clone() {
+        Some(authority) => authority,
+        None => load_fever_authority(client, None, report).await,
+    };
+    let (unread, starred) = match (&authority.unread, &authority.starred) {
+        (Some(unread), Some(starred)) => (unread.clone(), starred.clone()),
+        _ => {
             collection_failures += 1;
-            report.push_client_error(
-                &e,
-                format!("Fever 正文回补集合拉取失败（{e}），保留内容游标"),
-            );
             (Vec::new(), Vec::new())
         }
     };
-
     // 匹配映射已在权威集合请求前构建（字段版本快照必须早于任何 HTTP，见上方）。
 
     let mut seen: HashSet<i64> = HashSet::new();
@@ -763,8 +713,35 @@ pub(super) async fn pull_entries_fever(
         }
     };
     let mut need = with_ids_need(&unread, &starred, &seen, &has_body);
+    // Cold proof is separate from body presence. Reuse this Content lane's
+    // with_ids transport, at most 2000 cold identities per round, with rotation.
+    let mut cold: Vec<i64> = report
+        .unverified_state_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            !maps.verified_remote_ids.contains(id)
+                && !seen.contains(id)
+                && !report.content_requested_ids.contains(id)
+        })
+        .collect();
+    {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        let previous = db::get_setting(&conn, "fever_origin_proof_cursor")?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .filter(|value| value["generation"].as_i64() == Some(session.generation))
+            .and_then(|value| value["last_id"].as_i64());
+        if let Some(previous) = previous {
+            let start = cold.partition_point(|id| *id <= previous);
+            cold.rotate_left(start);
+        }
+    }
+    cold.truncate(2000usize.saturating_sub(report.origin_proof_requested_ids.len()));
+    need.extend(cold.iter().copied());
     need.sort_unstable();
     need.dedup();
+    let failures_before_proof = (fetch_failures, merge_failures);
     // W3-2：with_ids 回补**有界并发**（批内 ≤ PULL_FETCH_CONCURRENCY 个在途，
     // 按原页顺序逐页短事务合并）；首块失败即停（fetch_failures 计数、游标不动
     // 语义逐字不变），同批在途请求不可撤回属既有「已发出的请求不能撤回」边界，
@@ -772,6 +749,12 @@ pub(super) async fn pull_entries_fever(
     let page_slices: Vec<&[i64]> = need.chunks(50).collect();
     'with_ids: for start in (0..page_slices.len()).step_by(PULL_FETCH_CONCURRENCY) {
         let end = (start + PULL_FETCH_CONCURRENCY).min(page_slices.len());
+        for chunk in &page_slices[start..end] {
+            report.content_requested_ids.extend(chunk.iter().copied());
+            report
+                .origin_proof_requested_ids
+                .extend(chunk.iter().copied().filter(|id| cold.contains(id)));
+        }
         let results = fetch_with_ids_batch(db, session, client, &page_slices[start..end]).await;
         for result in results {
             match result {
@@ -820,6 +803,21 @@ pub(super) async fn pull_entries_fever(
         }
     }
 
+    if (fetch_failures, merge_failures) == failures_before_proof {
+        if let Some(last_id) = cold.last() {
+            let conn = db.lock().await;
+            session.ensure_current(&conn)?;
+            db::set_setting(
+                &conn,
+                "fever_origin_proof_cursor",
+                &serde_json::json!({
+                    "generation": session.generation, "last_id": last_id,
+                })
+                .to_string(),
+            )?;
+        }
+    }
+
     // Content collection snapshots above are only for missing-body discovery.
     // Existing bound flags belong exclusively to pull_states_fever.
 
@@ -842,6 +840,38 @@ pub(super) async fn pull_entries_fever(
     Ok(())
 }
 
+async fn load_fever_authority(
+    client: &fever::FeverClient,
+    previous: Option<&AuthoritySnapshot>,
+    report: &mut SyncReport,
+) -> Arc<AuthoritySnapshot> {
+    if let Some(previous) =
+        previous.filter(|snapshot| snapshot.unread.is_none() || snapshot.starred.is_none())
+    {
+        return Arc::new(previous.clone());
+    }
+    let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
+    let snapshot = match (unread, starred) {
+        (Ok(unread), Ok(starred)) => AuthoritySnapshot {
+            unread: Some(unread),
+            starred: Some(starred),
+        },
+        (Err(error), _) | (_, Err(error)) => {
+            report.push_client_error(
+                &error,
+                format!("状态对账跳过：Fever 状态集合拉取失败，本轮不合并远端状态: {error}"),
+            );
+            AuthoritySnapshot {
+                unread: None,
+                starred: None,
+            }
+        }
+    };
+    let snapshot = Arc::new(snapshot);
+    report.authority_snapshot = Some(snapshot.clone());
+    snapshot
+}
+
 /// A complete unread/saved pair is required. Failure is never an empty set.
 /// This method performs no since/history/with_ids content pagination.
 pub(super) async fn pull_states_fever(
@@ -853,7 +883,9 @@ pub(super) async fn pull_states_fever(
 ) -> AppResult<()> {
     let mut maps = {
         let conn = db.lock().await;
-        session.ensure_current(&conn)?;
+        if !pull_admitted(&conn, session, report)? {
+            return Ok(());
+        }
         db::sync_match_maps(&conn)?
     };
     if let Some(versions) = versions {
@@ -864,20 +896,17 @@ pub(super) async fn pull_states_fever(
     if maps.mf_id_to_article.is_empty() {
         return Ok(());
     }
-    let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
-    let (unread, starred) = match (unread, starred) {
-        (Ok(unread), Ok(starred)) => (unread, starred),
-        (Err(error), _) | (_, Err(error)) => {
-            report.push_client_error(
-                &error,
-                format!("Fever 状态集合拉取失败，本轮不合并远端状态: {error}"),
-            );
-            return Ok(());
-        }
+    let previous = report.authority_snapshot.clone();
+    let authority = load_fever_authority(client, previous.as_deref(), report).await;
+    let (Some(unread), Some(starred)) = (&authority.unread, &authority.starred) else {
+        return Ok(());
     };
     let conn = db.lock().await;
-    session.ensure_current(&conn)?;
-    if let Err(error) = reconcile_fever_state(&conn, &unread, &starred, &maps, report) {
+    if !pull_admitted(&conn, session, report)? {
+        return Ok(());
+    }
+    collect_unverified_state_ids(&conn, &maps, &authority, report)?;
+    if let Err(error) = reconcile_fever_state(&conn, unread, starred, &maps, report) {
         report.errors.push(format!(
             "Fever 状态对账写入失败，本轮剩余条目未对账: {error}"
         ));
@@ -918,7 +947,7 @@ fn reconcile_fever_state(
 
     for (remote_id, aid) in &maps.mf_id_to_article {
         let aid = *aid;
-        if !maps.article_source_is_current(conn, aid)? {
+        if !maps.state_binding_is_current(conn, aid, *remote_id)? {
             continue;
         }
         // OPT-007：字段版本快照（pull 起点；缺失按 (0,0) 保守处理）——
@@ -1016,6 +1045,8 @@ mod tests {
             .unwrap()
             .0;
         db::set_article_remote_id(conn, aid, remote_id).unwrap();
+        // Policy fixture: a prior content response explicitly supplied feed/10.
+        assert!(db::confirm_article_remote_origin(conn, aid, remote_id, 10).unwrap());
         aid
     }
 
@@ -1047,6 +1078,7 @@ mod tests {
             feed_mf_to_id: Default::default(),
             excluded_feed_ids: Default::default(),
             mf_id_to_article: std::iter::once((remote_id, aid)).collect(),
+            verified_remote_ids: db::sync_match_maps(conn).unwrap().verified_remote_ids,
         }
     }
 

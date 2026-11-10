@@ -1414,6 +1414,9 @@ async fn write_2xx_non_ok_body_fails_and_queue_survives() {
             .unwrap()
             .0;
         db::set_article_remote_id(&conn, id, 1).unwrap();
+        // Prior Content supplied feed/10; this case exercises the write body,
+        // not the cold-identity admission path.
+        assert!(db::confirm_article_remote_origin(&conn, id, 1, 10).unwrap());
         db::enqueue_sync(&conn, Some(id), None, "read", None).unwrap();
         id
     };
@@ -1783,7 +1786,10 @@ async fn published_before_cursor_window_semantic(mode: Mode, tag: &str) {
     let (db, tmp) = seed_sync_db(tag, &srv);
     {
         let conn = db.lock().await;
-        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        let (_, aid) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        // Historical local identity was previously observed as feed/10; the
+        // test targets the new entry 2's publication window, not cold proof.
+        assert!(db::confirm_article_remote_origin(&conn, aid, 1, 10).unwrap());
         db::set_last_sync_ts(&conn, 123_456).unwrap();
     }
 
@@ -2529,6 +2535,45 @@ async fn ordinary_contents_require_requested_id_coverage_and_ignore_extra_ids() 
     );
 }
 
+#[tokio::test]
+async fn proven_state_remains_independent_of_failed_body_backfill() {
+    let server = StrictServer::start(Mode::Miniflux).await;
+    server.add_entry_published(101, 10, "old unread", 100);
+    let (database, path) = seed_sync_db("proven_state_body_failure", &server);
+    let _cleanup = common::TempDbGuard::new(path);
+    let aid = {
+        let conn = database.lock().await;
+        let (_, aid) = seed_remote_article(&conn, "http://example.com/proven.xml", 10, 101);
+        // A prior complete Content response established feed/10; its body was
+        // subsequently reclaimed. Body presence is not the identity proof.
+        assert!(db::confirm_article_remote_origin(&conn, aid, 101, 10).unwrap());
+        conn.execute(
+            "UPDATE articles SET content_id=NULL,is_read=1 WHERE id=?1",
+            [aid],
+        )
+        .unwrap();
+        db::set_last_sync_ts(&conn, 1000).unwrap();
+        aid
+    };
+    server
+        .contents_status
+        .store(500, std::sync::atomic::Ordering::SeqCst);
+    let report = sync::states_phase(&database, &reqwest::Client::new(), false)
+        .await
+        .unwrap();
+    assert!(!report.errors.is_empty());
+    let conn = database.lock().await;
+    assert!(
+        !conn
+            .query_row("SELECT is_read FROM articles WHERE id=?1", [aid], |r| r
+                .get::<_, bool>(0))
+            .unwrap(),
+        "successful unread State is independent once the origin is proven"
+    );
+    assert_eq!(db::last_sync_ts(&conn).unwrap(), 1000);
+    assert!(db::verified_remote_binding(&conn, aid).unwrap().is_some());
+}
+
 /// P2 返工：非法 continuation 必须 protocol 失败关闭且不推进游标。
 #[tokio::test]
 async fn invalid_item_ref_continuation_is_protocol_and_keeps_cursor() {
@@ -3019,7 +3064,10 @@ async fn greader_orphan_rollback_and_remote_cancel_recovers_states() {
     let (db, tmp) = seed_sync_db("opt019_gr_orphan_recovery", &srv);
     {
         let conn = db.lock().await;
-        seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        let (_, aid) = seed_remote_article(&conn, "http://example.com/a.xml", 10, 1);
+        // Existing source/entry was content-proven before the failed new-feed
+        // import. The unknown new source remains unproved and must roll back.
+        assert!(db::confirm_article_remote_origin(&conn, aid, 1, 10).unwrap());
         db::set_last_sync_ts(&conn, 690_009).unwrap();
         conn.execute_batch(
             "CREATE TRIGGER opt019_orphan_fail_bind

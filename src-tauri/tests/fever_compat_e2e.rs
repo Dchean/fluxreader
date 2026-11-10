@@ -3717,9 +3717,8 @@ async fn fever_same_round_different_sources_keep_independent_states() {
     let _ = std::fs::remove_file(&tmp);
 }
 
-/// N4 集合失败与恢复（可解释链）：失败轮跳过对账但保留 items 合并的已读广播、
-/// 不推完成时间；恢复轮里读信号仍在 → 广播不被撤销；双方显式 unread（无读
-/// 信号）轮 → 双向 unread 权威恢复。
+/// 集合失败保留已绑定 flags 和完成时间；Content 只更新正文。
+/// 恢复轮由完整 State 集合收敛，两源同 URL 的状态仍各自独立。
 #[tokio::test]
 async fn fever_collection_failure_round_and_next_round_recovery_are_explainable() {
     const SHARED: &str = "http://127.0.0.1:8765/post/fever-collection-failure";
@@ -3733,7 +3732,7 @@ async fn fever_collection_failure_round_and_next_round_recovery_are_explainable(
         db::last_sync_ts(&conn).unwrap()
     };
 
-    // 失败轮：7101 远端已读 + unread 集合拉取失败（响应缺字段）。
+    // 失败轮：7201 远端已读 + unread 集合拉取失败（响应缺字段）。
     {
         let mut es = srv.entries.lock().unwrap();
         if let Some(e) = es.iter_mut().find(|e| e.id == 7201) {
@@ -3758,17 +3757,17 @@ async fn fever_collection_failure_round_and_next_round_recovery_are_explainable(
         );
         assert_eq!(
             article_state(&conn, 7201),
-            Some((true, false)),
-            "失败轮 items 合并仍生效：读行自身收敛"
+            Some((false, false)),
+            "集合失败不得由正文页越过State边界修改已绑定读状态"
         );
         assert_eq!(
             article_state(&conn, 7202),
             Some((false, false)),
-            "失败轮跳过对账不等于撤销 items 合并产生的已读广播"
+            "另一源仍保持自己的状态"
         );
     }
 
-    // 恢复轮：集合恢复（7201 仍读、7202 仍未读）。读信号仍在 → 广播不被撤销。
+    // 恢复轮：完整集合收敛7201，7202仍未读。
     srv.set_omit_unread(false);
     let r3 = sync::sync_now(&db, &http())
         .await
@@ -3776,10 +3775,11 @@ async fn fever_collection_failure_round_and_next_round_recovery_are_explainable(
     assert!(r3.errors.is_empty(), "{:?}", r3.errors);
     {
         let conn = db.lock().await;
+        assert_eq!(article_state(&conn, 7201), Some((true, false)));
         assert_eq!(
             article_state(&conn, 7202),
             Some((false, false)),
-            "恢复轮里同轮已读广播继续有效：own 远端 unread 不得撤销（N4 统一政策）"
+            "恢复轮各源按自己的远端状态收敛"
         );
     }
 
@@ -3930,6 +3930,9 @@ fn seed_ack_article(conn: &rusqlite::Connection, remote_id: i64) -> i64 {
     .unwrap();
     let aid = conn.last_insert_rowid();
     db::set_article_remote_id(conn, aid, remote_id).unwrap();
+    // These ACK fixtures model an earlier Fever item response with feed_id=1,
+    // including a target since removed. Bare/cold IDs are tested separately.
+    assert!(db::confirm_article_remote_origin(conn, aid, remote_id, 1).unwrap());
     aid
 }
 

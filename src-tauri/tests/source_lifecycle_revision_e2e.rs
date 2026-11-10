@@ -242,6 +242,15 @@ async fn remote_reappearing_subscription_reactivates_its_stable_source() {
         .unwrap();
     let old_id = old.id;
     let old_sync_id = old.sync_id.clone();
+    let old_lifecycle: i64 = database
+        .lock()
+        .await
+        .query_row(
+            "SELECT lifecycle_version FROM feeds WHERE id=?1",
+            [old_id],
+            |r| r.get(0),
+        )
+        .unwrap();
     let removed = {
         let mut subscriptions = server.subscriptions.lock().unwrap();
         let index = subscriptions
@@ -275,7 +284,8 @@ async fn remote_reappearing_subscription_reactivates_its_stable_source() {
         )
         .unwrap();
     assert_eq!(
-        lifecycle, 2,
+        lifecycle,
+        old_lifecycle + 2,
         "remote removal and reappearance each advance the same source lifecycle"
     );
 }

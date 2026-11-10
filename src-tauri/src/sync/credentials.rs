@@ -179,20 +179,6 @@ impl Backend {
         }
     }
 
-    pub(super) async fn mark_starred(&self, ids: &[i64]) -> AppResult<()> {
-        match self {
-            Backend::GReader(c) => c.mark_starred(ids).await,
-            Backend::Fever(c) => c.mark_starred(ids).await,
-        }
-    }
-
-    pub(super) async fn mark_unstarred(&self, ids: &[i64]) -> AppResult<()> {
-        match self {
-            Backend::GReader(c) => c.mark_unstarred(ids).await,
-            Backend::Fever(c) => c.mark_unstarred(ids).await,
-        }
-    }
-
     /// 状态写回后的只读验证：返回实际存在的条目及其三态状态字段。
     /// GReader/Fever 都按 id 精确查询；`complete=false` 表示请求 id 未全部
     /// 命中（空/短/重复/无关条目），调用方必须按 inconclusive 保留队列，

@@ -522,6 +522,8 @@ async fn cache_expiry_keeps_unconfirmed_read_intent_deliverable() {
     )
     .unwrap();
     db::set_article_remote_id(&conn, aid, rid).unwrap();
+    // This delivery/retry fixture represents an earlier Content feed/10 response.
+    assert!(db::confirm_article_remote_origin(&conn, aid, rid, 10).unwrap());
     db::set_read_with_enqueue(&conn, aid, true).unwrap();
     let before = db::take_sync_queue(&conn).unwrap();
     assert_eq!(before.len(), 1);
@@ -597,6 +599,8 @@ async fn greader_failed_push_retains_latest_intents_then_retries_all_four_assign
     )
     .unwrap();
     db::set_article_remote_id(&conn, aid, rid).unwrap();
+    // This delivery/retry fixture represents an earlier Content feed/10 response.
+    assert!(db::confirm_article_remote_origin(&conn, aid, rid, 10).unwrap());
     let dbm = Arc::new(Mutex::new(conn));
     let http = ingestion::build_client(10);
     for desired in [true, false] {
@@ -871,6 +875,8 @@ async fn scheduled_worker_retries_without_click_and_accepts_next_idle_notificati
     .unwrap()
     .0;
     db::set_article_remote_id(&conn, aid, rid).unwrap();
+    // This delivery/retry fixture represents an earlier Content feed/10 response.
+    assert!(db::confirm_article_remote_origin(&conn, aid, rid, 10).unwrap());
     db::set_read_with_enqueue(&conn, aid, true).unwrap();
     let database = Arc::new(Mutex::new(conn));
     let client = ingestion::build_client(3);

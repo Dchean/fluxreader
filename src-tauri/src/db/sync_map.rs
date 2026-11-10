@@ -54,6 +54,9 @@ pub struct SyncMatchMaps {
     pub feed_mf_to_id: HashMap<i64, i64>,
     /// article remote_id → article id
     pub mf_id_to_article: HashMap<i64, i64>,
+    /// Exact bindings whose origin was observed in a trusted content response.
+    /// Body presence, local source metadata and a bare remote_id are not evidence.
+    pub verified_remote_ids: HashSet<i64>,
 }
 
 impl SyncMatchMaps {
@@ -100,6 +103,24 @@ impl SyncMatchMaps {
             None => Ok(false),
         }
     }
+
+    /// Recheck provenance at the commit boundary, including triggers that may
+    /// have invalidated it while HTTP was in flight. An unknown local feed binding
+    /// retains the established exact-entry-ID compatibility rule.
+    pub fn state_binding_is_current(
+        &self,
+        conn: &Connection,
+        article_id: i64,
+        remote_id: i64,
+    ) -> AppResult<bool> {
+        Ok(
+            verified_remote_binding(conn, article_id)?.is_some_and(|binding| {
+                binding.remote_id == remote_id
+                    && self.source_versions.get(&binding.feed_id)
+                        == Some(&(binding.source_id, binding.lifecycle_version))
+            }),
+        )
+    }
 }
 
 /// 一次批量查询构建 Pull 合并所需的全部匹配映射。
@@ -116,11 +137,13 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
     let mut id_to_feed_mf: HashMap<i64, Option<i64>> = HashMap::new();
     // 6. mf_id → article id（仅已绑定的）
     let mut mf_id_to_article: HashMap<i64, i64> = HashMap::new();
+    let mut verified_remote_ids = HashSet::new();
     // 7. id → (read_version, star_version)：pull 起点字段版本快照（OPT-007）
     let mut id_to_versions: HashMap<i64, (i64, i64)> = HashMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT a.id, a.remote_id, f.remote_id, a.read_version, a.star_version FROM articles a
+            "SELECT a.id, a.remote_id, f.remote_id, a.read_version, a.star_version,
+                    a.remote_origin_feed_id FROM articles a
              JOIN feeds f ON f.id = a.feed_id WHERE f.active = 1",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -130,15 +153,20 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
                 r.get::<_, Option<i64>>(2)?,
                 r.get::<_, i64>(3)?,
                 r.get::<_, i64>(4)?,
+                r.get::<_, Option<i64>>(5)?,
             ))
         })?;
         for row in rows {
-            let (id, mf_id, feed_mf_id, read_version, star_version) = row?;
+            let (id, mf_id, feed_mf_id, read_version, star_version, observed_feed) = row?;
             id_to_mf_id.insert(id, mf_id);
             id_to_feed_mf.insert(id, feed_mf_id);
             id_to_versions.insert(id, (read_version, star_version));
             if let Some(mf) = mf_id {
                 mf_id_to_article.insert(mf, id);
+                if observed_feed.is_some() && (feed_mf_id.is_none() || observed_feed == feed_mf_id)
+                {
+                    verified_remote_ids.insert(mf);
+                }
             }
         }
     }
@@ -195,7 +223,63 @@ pub fn sync_match_maps(conn: &Connection) -> AppResult<SyncMatchMaps> {
         id_to_versions,
         feed_mf_to_id,
         mf_id_to_article,
+        verified_remote_ids,
     })
+}
+
+/// Only a protocol content response can supply `remote_feed_id`. Callers must
+/// already have checked the captured account/source generation; this final SQL
+/// also rejects a concurrent local rebind. Never infer this value from a feed row.
+pub fn confirm_article_remote_origin(
+    conn: &Connection,
+    article_id: i64,
+    remote_id: i64,
+    remote_feed_id: i64,
+) -> AppResult<bool> {
+    Ok(conn.execute(
+        "UPDATE articles SET remote_origin_feed_id=?3
+         WHERE id=?1 AND remote_id=?2 AND remote_origin_feed_id IS NOT ?3
+           AND EXISTS(SELECT 1 FROM feeds f WHERE f.id=articles.feed_id AND f.active=1
+             AND (f.remote_id IS NULL OR f.remote_id=?3))",
+        params![article_id, remote_id, remote_feed_id],
+    )? > 0)
+}
+
+/// The same identity proof gates inbound State and outgoing queue plans.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRemoteBinding {
+    pub article_id: i64,
+    pub remote_id: i64,
+    pub feed_id: i64,
+    pub source_id: String,
+    pub lifecycle_version: i64,
+    pub origin_feed_id: i64,
+}
+
+pub fn verified_remote_binding(
+    conn: &Connection,
+    article_id: i64,
+) -> AppResult<Option<VerifiedRemoteBinding>> {
+    Ok(conn
+        .query_row(
+            "SELECT a.remote_id,a.feed_id,f.sync_id,f.lifecycle_version,a.remote_origin_feed_id
+         FROM articles a JOIN feeds f ON f.id=a.feed_id
+         WHERE a.id=?1 AND a.remote_id IS NOT NULL AND f.active=1
+           AND a.remote_origin_feed_id IS NOT NULL
+           AND (f.remote_id IS NULL OR f.remote_id=a.remote_origin_feed_id)",
+            [article_id],
+            |row| {
+                Ok(VerifiedRemoteBinding {
+                    article_id,
+                    remote_id: row.get(0)?,
+                    feed_id: row.get(1)?,
+                    source_id: row.get(2)?,
+                    lifecycle_version: row.get(3)?,
+                    origin_feed_id: row.get(4)?,
+                })
+            },
+        )
+        .optional()?)
 }
 
 /// 绑定 Miniflux entry id（Pull 时首次见到该条目）。

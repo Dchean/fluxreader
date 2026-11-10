@@ -22,12 +22,65 @@ pub(super) struct PushPlan {
     pub(super) status: Vec<PushStatus>,
     /// (队列 id, entry id)——收藏切换（star/unstar 语义，Google Reader 无 toggle）
     pub(super) stars: Vec<(i64, i64, bool)>,
+    /// The content-origin proof captured with each queue item. Source lifecycle
+    /// and binding changes invalidate both an unsent request and a late ACK.
+    bindings: HashMap<i64, db::VerifiedRemoteBinding>,
     /// 本轮 plan_push 写回了多少条无身份/已绑定分类。调用方据此在队列没有
     /// 可推项时也发 `sync-queue-changed`（分类计数本身已变化）。
     pub(super) reclassified: usize,
 }
 
 impl PushPlan {
+    /// Per-write proof is scoped to this batch, never cached on the session.
+    fn request_guard(
+        &self,
+        database: &Arc<Mutex<Connection>>,
+        session: &SyncSession,
+        queue_ids: impl IntoIterator<Item = i64>,
+    ) -> crate::greader::RequestGuard {
+        let bindings: Vec<_> = queue_ids
+            .into_iter()
+            .map(|id| self.bindings.get(&id).cloned())
+            .collect();
+        let weak_db = Arc::downgrade(database);
+        let generation = session.generation;
+        Arc::new(move || {
+            let weak_db = weak_db.clone();
+            let bindings = bindings.clone();
+            Box::pin(async move {
+                let database = weak_db.upgrade().ok_or_else(SyncSession::stale_error)?;
+                let conn = database.lock().await;
+                if db::sync_generation(&conn)? != generation {
+                    return Err(SyncSession::stale_error());
+                }
+                for binding in &bindings {
+                    let Some(binding) = binding else {
+                        return Err(AppError::new(
+                            "staleBinding",
+                            "发送前条目来源凭据失效，队列保留",
+                        ));
+                    };
+                    if db::verified_remote_binding(&conn, binding.article_id)?.as_ref()
+                        != Some(binding)
+                    {
+                        return Err(AppError::new(
+                            "staleBinding",
+                            "发送前条目来源凭据失效，队列保留",
+                        ));
+                    }
+                }
+                Ok(())
+            })
+        })
+    }
+
+    fn binding_is_current(&self, conn: &Connection, queue_id: i64) -> AppResult<bool> {
+        let Some(binding) = self.bindings.get(&queue_id) else {
+            return Ok(false);
+        };
+        Ok(db::verified_remote_binding(conn, binding.article_id)?.as_ref() == Some(binding))
+    }
+
     /// states 同一轮的 pull 后补推只处理新绑定/新入队项；已经在本轮首推尝试过的
     /// queue id 不得再次发送（尤其 Fever toggle）。
     // Note: 同轮重试只补新绑定项，attempted 集合跨首推/补推保留 — 见
@@ -72,6 +125,35 @@ pub(super) struct PushFailure {
 }
 
 impl PushOutcome {
+    /// Call under the same DB lock as the ACK/failure commit. In particular a
+    /// stale failure must not change an invalidated queue item back to retry_wait.
+    pub(super) fn discard_stale(
+        &mut self,
+        conn: &Connection,
+        plan: &PushPlan,
+        report: &mut SyncReport,
+    ) -> AppResult<()> {
+        let mut current = HashSet::new();
+        for queue_id in self
+            .done
+            .iter()
+            .copied()
+            .chain(self.failures.iter().map(|f| f.queue_id))
+        {
+            if plan.binding_is_current(conn, queue_id)? {
+                current.insert(queue_id);
+            }
+        }
+        let previous_done = self.done.len();
+        self.done.retain(|id| current.contains(id));
+        self.failures
+            .retain(|failure| current.contains(&failure.queue_id));
+        report.pushed_states = report
+            .pushed_states
+            .saturating_sub(previous_done - self.done.len());
+        Ok(())
+    }
+
     pub(super) fn failures_for(&self, class: PushFailureClass) -> Vec<(i64, String)> {
         self.failures
             .iter()
@@ -115,6 +197,7 @@ pub(super) fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
     let mut plan = PushPlan {
         status: Vec::new(),
         stars: Vec::new(),
+        bindings: HashMap::new(),
         reclassified: 0,
     };
     for item in items {
@@ -160,6 +243,9 @@ pub(super) fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
             }
             continue;
         };
+        let Some(binding) = db::verified_remote_binding(conn, article_id)? else {
+            return Err(AppError::internal("队列身份与远端来源凭据不一致"));
+        };
         if item.status.as_str() == "failed"
             || item.status.as_str() == db::STATUS_EXPIRED_UNCONFIRMED
         {
@@ -188,6 +274,7 @@ pub(super) fn plan_push(conn: &Connection) -> AppResult<PushPlan> {
             "unstar" => plan.stars.push((item.id, remote_id, false)),
             _ => {}
         }
+        plan.bindings.insert(item.id, binding);
     }
     Ok(plan)
 }
@@ -254,14 +341,40 @@ fn verify_queue_status(
     }
 }
 
-async fn readback_states(session: &SyncSession, ids: &[i64]) -> AppResult<ReadbackStates> {
+async fn readback_states(
+    database: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    plan: &PushPlan,
+    ids: &[i64],
+) -> AppResult<ReadbackStates> {
     // 与两份服务端实现的单次 items 窗口上限对齐；分块后任一块失败仍整次
     // 读回失败（retry_wait），不会把被服务端截断的 id 误判成 target_missing。
     const VERIFICATION_CHUNK: usize = 50;
     let mut states = HashMap::new();
     let mut complete = true;
     for chunk in ids.chunks(VERIFICATION_CHUNK) {
-        let read = session.client.items_for_state_verification(chunk).await?;
+        let current = {
+            let conn = database.lock().await;
+            session.ensure_current(&conn)?;
+            let mut current = Vec::new();
+            for id in chunk {
+                for (queue_id, binding) in &plan.bindings {
+                    if binding.remote_id == *id && plan.binding_is_current(&conn, *queue_id)? {
+                        current.push(*id);
+                        break;
+                    }
+                }
+            }
+            current
+        };
+        complete &= current.len() == chunk.len();
+        if current.is_empty() {
+            continue;
+        }
+        let read = session
+            .client
+            .items_for_state_verification(&current)
+            .await?;
         complete &= read.complete;
         for item in read.items {
             let Some(id) = crate::greader::parse_item_id(&item.id) else {
@@ -274,6 +387,35 @@ async fn readback_states(session: &SyncSession, ids: &[i64]) -> AppResult<Readba
         }
     }
     Ok(ReadbackStates { states, complete })
+}
+
+async fn current_push_items(
+    database: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    plan: &PushPlan,
+    queue_ids: impl IntoIterator<Item = i64>,
+    report: &mut SyncReport,
+) -> Option<HashSet<i64>> {
+    let conn = database.lock().await;
+    if session.ensure_current(&conn).is_err() {
+        return None;
+    }
+    let mut current = HashSet::new();
+    for queue_id in queue_ids {
+        match plan.binding_is_current(&conn, queue_id) {
+            Ok(true) => {
+                current.insert(queue_id);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                report
+                    .errors
+                    .push(format!("推送来源凭据复核失败（队列保留）: {error}"));
+                return None;
+            }
+        }
+    }
+    Some(current)
 }
 
 fn record_failure(
@@ -325,7 +467,8 @@ fn apply_readback(
 /// 不存在目标也可能返回 200/OK。只有读回目标存在且三态字段等于 desired 的
 /// 队项才进入 `done`。读回失败/字段缺失/状态相反/短响应进入 `retry_wait`
 /// 的 verification/inconclusive；当前协议没有可从空/短响应证明 target_missing
-/// 的端点，缺条绝不升级成终态。本函数保持无业务 DB 访问，由调用方落库。
+/// 的端点，缺条绝不升级成终态。每次 HTTP 前复核身份，由调用方在同一
+/// DB 临界区再次复核来源凭据并落库。
 ///
 /// OPT-006：每个新批次发送前与会话返回后复核代际；旧账号结果不得落回本地。
 pub(super) async fn exec_push(
@@ -339,36 +482,98 @@ pub(super) async fn exec_push(
 
     // read/unread 聚合批量（Google Reader edit-tag 单请求可携带全部 id + tag）。
     for action in ["read", "unread"] {
-        let statuses: Vec<&PushStatus> =
+        let mut statuses: Vec<&PushStatus> =
             plan.status.iter().filter(|s| s.action == action).collect();
+        let Some(current) = current_push_items(
+            db,
+            session,
+            plan,
+            statuses.iter().map(|s| s.queue_id),
+            report,
+        )
+        .await
+        else {
+            return outcome;
+        };
+        statuses.retain(|status| current.contains(&status.queue_id));
         if statuses.is_empty() {
             continue;
         }
         let mut seen = std::collections::HashSet::new();
-        let ids: Vec<i64> = statuses
+        let mut ids: Vec<i64> = statuses
             .iter()
             .map(|s| s.entry_id)
             .filter(|id| seen.insert(*id))
             .collect();
-        for status in &statuses {
-            outcome.attempted.insert(status.queue_id);
-        }
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送批次发送前检测到账号代际变更，停止后续推送（{action}）");
             return outcome;
         }
-        let result = if action == "read" {
-            session.client.mark_read(&ids).await
+        let result = if matches!(session.client, Backend::Fever(_)) {
+            // Fever already uses one mark HTTP per ID. Recheck between writes,
+            // but preserve the existing 50-ID readback chunks after all marks.
+            // IDs skipped before a write never enter this batch's ACK domain.
+            let mut sent = HashSet::new();
+            let mut result = Ok(());
+            for id in &ids {
+                let Some(current) = current_push_items(
+                    db,
+                    session,
+                    plan,
+                    statuses
+                        .iter()
+                        .filter(|s| s.entry_id == *id)
+                        .map(|s| s.queue_id),
+                    report,
+                )
+                .await
+                else {
+                    return outcome;
+                };
+                if current.is_empty() {
+                    continue;
+                }
+                outcome.attempted.extend(current);
+                sent.insert(*id);
+                result = if action == "read" {
+                    session.client.mark_read(&[*id]).await
+                } else {
+                    session.client.mark_unread(&[*id]).await
+                };
+                if result.is_err() {
+                    break;
+                }
+            }
+            statuses.retain(|status| sent.contains(&status.entry_id));
+            ids.retain(|id| sent.contains(id));
+            result
         } else {
-            session.client.mark_unread(&ids).await
+            outcome
+                .attempted
+                .extend(statuses.iter().map(|status| status.queue_id));
+            let Backend::GReader(client) = &session.client else {
+                unreachable!("Fever handled above")
+            };
+            let guard =
+                plan.request_guard(db, session, statuses.iter().map(|status| status.queue_id));
+            let read = [crate::greader::tags::READ];
+            let (add, remove): (&[&str], &[&str]) = if action == "read" {
+                (&read, &[])
+            } else {
+                (&[], &read)
+            };
+            client.edit_tag_checked(&ids, add, remove, guard).await
         };
+        if statuses.is_empty() {
+            continue;
+        }
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送响应返回时账号代际已变更，丢弃该批次确认（{action}）");
             return outcome;
         }
         match result {
             Ok(()) => {
-                let states = match readback_states(session, &ids).await {
+                let states = match readback_states(db, session, plan, &ids).await {
                     Ok(states) => states,
                     Err(e) => {
                         if !session_is_current(db, session).await {
@@ -393,6 +598,18 @@ pub(super) async fn exec_push(
                     log::warn!("sync: 状态读回返回时账号代际已变更，丢弃该批次确认（{action}）");
                     return outcome;
                 }
+                let Some(current) = current_push_items(
+                    db,
+                    session,
+                    plan,
+                    statuses.iter().map(|s| s.queue_id),
+                    report,
+                )
+                .await
+                else {
+                    return outcome;
+                };
+                statuses.retain(|status| current.contains(&status.queue_id));
                 apply_readback(
                     &mut outcome,
                     report,
@@ -422,21 +639,49 @@ pub(super) async fn exec_push(
     // 收藏：star/unstar 逐条发送并逐条读回。GReader 是绝对 add/remove；Fever
     // 在 api_version<4 时先探测再发送，避免 toggle 重发翻反。
     for (qid, remote_id, want_star) in &plan.stars {
+        let Some(current) = current_push_items(db, session, plan, [*qid], report).await else {
+            return outcome;
+        };
+        if !current.contains(qid) {
+            continue;
+        }
         outcome.attempted.insert(*qid);
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送批次发送前检测到账号代际变更，停止后续推送（star）");
             return outcome;
         }
         let result = match &session.client {
-            Backend::GReader(_) => {
-                let r = if *want_star {
-                    session.client.mark_starred(&[*remote_id]).await
+            Backend::GReader(client) => {
+                let guard = plan.request_guard(db, session, [*qid]);
+                let star = [crate::greader::tags::STARRED];
+                let (add, remove): (&[&str], &[&str]) = if *want_star {
+                    (&star, &[])
                 } else {
-                    session.client.mark_unstarred(&[*remote_id]).await
+                    (&[], &star)
                 };
+                let r = client
+                    .edit_tag_checked(&[*remote_id], add, remove, guard)
+                    .await;
                 r.map(|_| true)
             }
-            Backend::Fever(c) => c.push_star_state(*remote_id, *want_star).await,
+            Backend::Fever(c) => match c.star_state_needs_write(*remote_id, *want_star).await {
+                Ok(false) => Ok(false),
+                Ok(true) => {
+                    let Some(current) = current_push_items(db, session, plan, [*qid], report).await
+                    else {
+                        return outcome;
+                    };
+                    if !current.contains(qid) {
+                        continue;
+                    }
+                    if *want_star {
+                        c.mark_starred(&[*remote_id]).await.map(|()| true)
+                    } else {
+                        c.mark_unstarred(&[*remote_id]).await.map(|()| true)
+                    }
+                }
+                Err(error) => Err(error),
+            },
         };
         if !session_is_current(db, session).await {
             log::warn!("sync: 推送响应返回时账号代际已变更，丢弃该批次确认（star）");
@@ -444,7 +689,7 @@ pub(super) async fn exec_push(
         }
         match result {
             Ok(_sent) => {
-                let states = match readback_states(session, &[*remote_id]).await {
+                let states = match readback_states(db, session, plan, &[*remote_id]).await {
                     Ok(states) => states,
                     Err(e) => {
                         if !session_is_current(db, session).await {
@@ -466,6 +711,13 @@ pub(super) async fn exec_push(
                 if !session_is_current(db, session).await {
                     log::warn!("sync: 收藏读回返回时账号代际已变更，丢弃该批次确认（star）");
                     return outcome;
+                }
+                let Some(current) = current_push_items(db, session, plan, [*qid], report).await
+                else {
+                    return outcome;
+                };
+                if !current.contains(qid) {
+                    continue;
                 }
                 match check_target(&states, *remote_id, VerifyField::Star, *want_star) {
                     TargetCheck::Confirmed => {
@@ -771,7 +1023,7 @@ async fn push_states_with_session(
         }
         return Ok(report);
     }
-    let outcome = exec_push(db, session, &plan, &mut report).await;
+    let mut outcome = exec_push(db, session, &plan, &mut report).await;
     let mut infra_errors: Vec<String> = Vec::new();
     {
         let conn = db.lock().await;
@@ -781,6 +1033,7 @@ async fn push_states_with_session(
             log::info!("sync: 即时推送回写时账号代际已变更，丢弃确认与标记");
             return Err(SyncSession::stale_error());
         }
+        outcome.discard_stale(&conn, &plan, &mut report)?;
         // TASK-116：失败项落库标记（attempts+1 / last_error）——即时推送失败此前
         // 只进日志，用户在 UI 上永远看不到「部分失败」。标记失败不影响队列保留。
         let retry_push = outcome.failures_for(PushFailureClass::Push);
@@ -976,15 +1229,15 @@ mod queue_plan_tests {
         );
     }
 
-    /// 有 remote_id 的队项保持原行为：进入推送计划，且不被无身份分类逻辑改写。
+    /// A previously content-proven binding enters the outgoing plan.
     #[test]
     fn bound_article_still_enters_push_plan() {
         let c = conn();
         c.execute_batch(
             "INSERT INTO feeds (feed_url, title, remote_id)
              VALUES ('https://plan.example/rss', 'P', 10);
-             INSERT INTO articles (feed_id, guid, title, remote_id)
-             VALUES (1, 'g-bound', 'P', 101);
+             INSERT INTO articles (feed_id, guid, title, remote_id, remote_origin_feed_id)
+             VALUES (1, 'g-bound', 'P', 101, 10);
              INSERT INTO sync_queue (article_id, action)
              VALUES (1, 'read');",
         )

@@ -137,7 +137,9 @@ pub fn article_queue_identity(
 ) -> AppResult<Option<(Option<i64>, Option<i64>)>> {
     let row: Option<(Option<i64>, Option<i64>)> = conn
         .query_row(
-            "SELECT a.remote_id, f.remote_id
+            "SELECT CASE WHEN f.active=1 AND a.remote_origin_feed_id IS NOT NULL
+                              AND (f.remote_id IS NULL OR f.remote_id=a.remote_origin_feed_id)
+                         THEN a.remote_id ELSE NULL END, f.remote_id
                FROM articles a
                JOIN feeds f ON f.id = a.feed_id
               WHERE a.id = ?1",
@@ -230,8 +232,11 @@ pub fn prune_stale_unbound(conn: &Connection, cutoff: &str) -> AppResult<usize> 
           WHERE created_at < ?1
             AND kind = 'article_state'
             AND status IN ('local_only', 'bindable_retry')
-            AND (article_id IS NULL
-                 OR article_id IN (SELECT id FROM articles WHERE remote_id IS NULL))",
+            AND NOT EXISTS (
+                SELECT 1 FROM articles a JOIN feeds f ON f.id=a.feed_id
+                WHERE a.id=sync_queue.article_id AND a.remote_id IS NOT NULL
+                  AND a.remote_origin_feed_id IS NOT NULL AND f.active=1
+                  AND (f.remote_id IS NULL OR f.remote_id=a.remote_origin_feed_id))",
         params![cutoff],
     )?;
     Ok(n)
@@ -589,7 +594,14 @@ fn attempts_of(c: &Connection, id: i64) -> i64 {
 }
 
 #[cfg(test)]
-fn seed_article(c: &Connection, feed_bound: bool, article_bound: bool) -> i64 {
+enum FixtureBinding {
+    Unbound,
+    /// A prior synthetic Content response supplied both entry ID and origin.
+    ContentProven,
+}
+
+#[cfg(test)]
+fn seed_article(c: &Connection, feed_bound: bool, binding: FixtureBinding) -> i64 {
     let seq: i64 = c
         .query_row("SELECT COALESCE(MAX(id), 0) + 1 FROM feeds", [], |r| {
             r.get(0)
@@ -601,10 +613,13 @@ fn seed_article(c: &Connection, feed_bound: bool, article_bound: bool) -> i64 {
     )
     .unwrap();
     let feed_id = c.last_insert_rowid();
+    // Fixed protocol fixture data, not a query that invents proof from whatever
+    // local feed binding currently happens to be stored.
+    let observed_origin = 10_000 + feed_id;
     if feed_bound {
         c.execute(
             "UPDATE feeds SET remote_id = ?1 WHERE id = ?2",
-            params![10_000 + feed_id, feed_id],
+            params![observed_origin, feed_id],
         )
         .unwrap();
     }
@@ -615,12 +630,16 @@ fn seed_article(c: &Connection, feed_bound: bool, article_bound: bool) -> i64 {
     )
     .unwrap();
     let article_id = c.last_insert_rowid();
-    if article_bound {
+    if matches!(binding, FixtureBinding::ContentProven) {
         c.execute(
             "UPDATE articles SET remote_id = ?1 WHERE id = ?2",
             params![20_000 + article_id, article_id],
         )
         .unwrap();
+        assert!(
+            confirm_article_remote_origin(c, article_id, 20_000 + article_id, observed_origin)
+                .unwrap()
+        );
     }
     article_id
 }
@@ -654,8 +673,8 @@ mod t116_tests {
     #[test]
     fn mark_push_failed_records_attempts_and_error() {
         let c = conn();
-        let aid_a = seed_article(&c, true, true);
-        let aid_b = seed_article(&c, true, true);
+        let aid_a = seed_article(&c, true, FixtureBinding::ContentProven);
+        let aid_b = seed_article(&c, true, FixtureBinding::ContentProven);
         enqueue_sync(&c, Some(aid_a), None, "read", None).unwrap();
         enqueue_sync(&c, Some(aid_b), None, "star", None).unwrap();
         let items = take_sync_queue(&c).unwrap();
@@ -711,8 +730,8 @@ mod t116_tests {
     #[test]
     fn successful_prune_zeros_stats_failed_rows_survive() {
         let c = conn();
-        let aid_a = seed_article(&c, true, true);
-        let aid_b = seed_article(&c, true, true);
+        let aid_a = seed_article(&c, true, FixtureBinding::ContentProven);
+        let aid_b = seed_article(&c, true, FixtureBinding::ContentProven);
         enqueue_sync(&c, Some(aid_a), None, "read", None).unwrap();
         enqueue_sync(&c, Some(aid_b), None, "unread", None).unwrap();
         let items = take_sync_queue(&c).unwrap();
@@ -752,9 +771,9 @@ mod t116_tests {
             "空队列 = 零值（新装用户无噪音）"
         );
 
-        let aid_a = seed_article(&c, true, true);
-        let aid_b = seed_article(&c, true, true);
-        let aid_c = seed_article(&c, true, true);
+        let aid_a = seed_article(&c, true, FixtureBinding::ContentProven);
+        let aid_b = seed_article(&c, true, FixtureBinding::ContentProven);
+        let aid_c = seed_article(&c, true, FixtureBinding::ContentProven);
         enqueue_sync(&c, Some(aid_a), None, "read", None).unwrap();
         enqueue_sync(&c, Some(aid_b), None, "star", None).unwrap();
         enqueue_sync(&c, Some(aid_c), None, "unstar", None).unwrap();
@@ -788,8 +807,8 @@ mod t116_tests {
     #[test]
     fn last_error_prefers_later_failure_over_larger_queue_id() {
         let c = conn();
-        let aid_a = seed_article(&c, true, true);
-        let aid_b = seed_article(&c, true, true);
+        let aid_a = seed_article(&c, true, FixtureBinding::ContentProven);
+        let aid_b = seed_article(&c, true, FixtureBinding::ContentProven);
         enqueue_sync(&c, Some(aid_a), None, "read", None).unwrap();
         enqueue_sync(&c, Some(aid_b), None, "read", None).unwrap();
         let items = take_sync_queue(&c).unwrap();
@@ -850,7 +869,7 @@ mod t124_tests {
         assert!(p["last_error"].is_null());
 
         // 探针 P8 本体（Rust 半边）：本地标读入队 → waiting=1（「等待同步 1 条」的 N）
-        let aid = seed_article(&c, true, true);
+        let aid = seed_article(&c, true, FixtureBinding::ContentProven);
         enqueue_sync(&c, Some(aid), None, "read", None).unwrap();
         let p = queue_changed_payload(&sync_queue_stats(&c).unwrap(), true).unwrap();
         assert_eq!(p["waiting"].as_u64(), Some(1));
@@ -886,8 +905,8 @@ mod t124_tests {
         assert_eq!(mark_push_blocked(&c, "认证失败：x").unwrap(), 0);
         assert_eq!(sync_queue_stats(&c).unwrap().waiting, 0);
 
-        let aid_a = seed_article(&c, true, true);
-        let aid_b = seed_article(&c, true, true);
+        let aid_a = seed_article(&c, true, FixtureBinding::ContentProven);
+        let aid_b = seed_article(&c, true, FixtureBinding::ContentProven);
         enqueue_sync(&c, Some(aid_a), None, "read", None).unwrap();
         enqueue_sync(&c, Some(aid_b), None, "star", None).unwrap();
         let items = take_sync_queue(&c).unwrap();
@@ -921,7 +940,7 @@ mod t124_tests {
         );
 
         // 新入队行是未失败的新行：retry_wait 是失败可见计数，不继承旧行标记
-        let aid_c = seed_article(&c, true, true);
+        let aid_c = seed_article(&c, true, FixtureBinding::ContentProven);
         enqueue_sync(&c, Some(aid_c), None, "read", None).unwrap();
         let s = sync_queue_stats(&c).unwrap();
         assert_eq!(s.waiting, 3, "新文章独立入队：追加一行");
@@ -953,9 +972,9 @@ mod lifecycle_tests {
     #[test]
     fn expired_recovery_uses_current_targets_new_ids_and_identity_classes() {
         let mut connection = conn();
-        let bound = seed_article(&connection, true, false);
-        let bindable = seed_article(&connection, true, false);
-        let local = seed_article(&connection, false, false);
+        let bound = seed_article(&connection, true, FixtureBinding::Unbound);
+        let bindable = seed_article(&connection, true, FixtureBinding::Unbound);
+        let local = seed_article(&connection, false, FixtureBinding::Unbound);
         for article_id in [bound, bindable, local] {
             enqueue_sync(&connection, Some(article_id), None, "read", None).unwrap();
         }
@@ -969,6 +988,14 @@ mod lifecycle_tests {
             .execute("UPDATE sync_queue SET status = 'expired_unconfirmed'", [])
             .unwrap();
         crate::db::set_article_remote_id(&connection, bound, 88_001).unwrap();
+        assert!(confirm_article_remote_origin(&connection, bound, 88_001, 10_001).unwrap());
+        assert!(
+            take_sync_queue(&connection)
+                .unwrap()
+                .iter()
+                .all(|item| item.status == STATUS_EXPIRED_UNCONFIRMED),
+            "content proof must not automatically revive expired intents"
+        );
         crate::db::set_read(&connection, bound, false).unwrap();
         crate::db::set_starred(&connection, bound, false).unwrap();
         let versions = crate::db::article_field_versions(&connection, bound).unwrap();
@@ -1012,7 +1039,7 @@ mod lifecycle_tests {
     #[test]
     fn expired_recovery_stale_generation_and_missing_article_keep_intents() {
         let mut connection = conn();
-        let article_id = seed_article(&connection, false, false);
+        let article_id = seed_article(&connection, false, FixtureBinding::Unbound);
         enqueue_sync(&connection, Some(article_id), None, "read", None).unwrap();
         connection
             .execute("UPDATE sync_queue SET status = 'expired_unconfirmed'", [])
@@ -1050,7 +1077,7 @@ mod lifecycle_tests {
     #[test]
     fn expired_recovery_insert_failure_rolls_back_and_bad_generation_is_visible() {
         let mut connection = conn();
-        let article_id = seed_article(&connection, true, false);
+        let article_id = seed_article(&connection, true, FixtureBinding::Unbound);
         enqueue_sync(&connection, Some(article_id), None, "read", None).unwrap();
         connection
             .execute("UPDATE sync_queue SET status = 'expired_unconfirmed'", [])
@@ -1072,7 +1099,7 @@ mod lifecycle_tests {
         let c = conn();
         let mut ids = Vec::new();
         for _ in 0..44 {
-            let aid = seed_article(&c, true, false);
+            let aid = seed_article(&c, true, FixtureBinding::Unbound);
             enqueue_sync(&c, Some(aid), None, "read", None).unwrap();
             ids.push(aid);
         }
@@ -1138,13 +1165,13 @@ mod lifecycle_tests {
         assert_eq!(ids.len(), 44);
     }
 
-    /// 绑定到真实 remote_id 后由 articles UPDATE 触发器单点恢复 pending；
-    /// 不依赖 URL/标题/时间，也不在绑定函数里再造第二套匹配规则。
+    /// A bare remote ID stays waiting; actual Content origin proof revives only
+    /// that article's nonterminal intent.
     #[test]
     fn article_remote_binding_revives_only_its_own_queue_intent() {
         let c = conn();
-        let aid = seed_article(&c, true, false);
-        let other = seed_article(&c, true, false);
+        let aid = seed_article(&c, true, FixtureBinding::Unbound);
+        let other = seed_article(&c, true, FixtureBinding::Unbound);
         enqueue_sync(&c, Some(aid), None, "read", None).unwrap();
         enqueue_sync(&c, Some(other), None, "read", None).unwrap();
         let qid: i64 = c
@@ -1157,6 +1184,12 @@ mod lifecycle_tests {
         assert_eq!(status_of(&c, qid), STATUS_BINDABLE_RETRY);
 
         assert!(crate::db::set_article_remote_id(&c, aid, 991_001).unwrap());
+        assert_eq!(
+            status_of(&c, qid),
+            STATUS_BINDABLE_RETRY,
+            "a bare ID is not a pushable identity"
+        );
+        assert!(confirm_article_remote_origin(&c, aid, 991_001, 10_001).unwrap());
         assert_eq!(
             status_of(&c, qid),
             STATUS_BOUND_PENDING,
@@ -1178,9 +1211,44 @@ mod lifecycle_tests {
     }
 
     #[test]
+    fn bulk_read_and_aging_preserve_cold_identity_intent_until_explicit_recovery() {
+        let c = conn();
+        let aid = seed_article(&c, true, FixtureBinding::Unbound);
+        set_article_remote_id(&c, aid, 991_002).unwrap();
+        set_read(&c, aid, false).unwrap();
+        assert_eq!(
+            mark_all_read_with_enqueue(&c, None, None, false, None, None).unwrap(),
+            1
+        );
+        let queued = take_sync_queue(&c).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].status, STATUS_BINDABLE_RETRY);
+        assert_eq!(sync_queue_stats(&c).unwrap().waiting, 0);
+        c.execute("UPDATE sync_queue SET created_at='2000-01-01 00:00:00'", [])
+            .unwrap();
+        assert_eq!(prune_stale_unbound(&c, "2000-02-01 00:00:00").unwrap(), 1);
+        assert_eq!(status_of(&c, queued[0].id), STATUS_EXPIRED_UNCONFIRMED);
+        assert!(confirm_article_remote_origin(&c, aid, 991_002, 10_001).unwrap());
+        assert_eq!(
+            status_of(&c, queued[0].id),
+            STATUS_EXPIRED_UNCONFIRMED,
+            "new proof cannot silently restart an expired intent"
+        );
+        assert_eq!(
+            take_sync_queue(&c).unwrap().len(),
+            1,
+            "aging retains the durable intent"
+        );
+        assert!(c
+            .query_row("SELECT is_read FROM articles WHERE id=?1", [aid], |r| r
+                .get::<_, bool>(0))
+            .unwrap());
+    }
+
+    #[test]
     fn local_only_is_visible_but_not_waiting_or_session_failed() {
         let c = conn();
-        let aid = seed_article(&c, false, false);
+        let aid = seed_article(&c, false, FixtureBinding::Unbound);
         enqueue_sync(&c, Some(aid), None, "read", None).unwrap();
         let stats = sync_queue_stats(&c).unwrap();
         assert_eq!((stats.waiting, stats.local_only, stats.failed), (0, 1, 0));
@@ -1204,7 +1272,7 @@ mod lifecycle_tests {
     #[test]
     fn terminal_failed_is_visible_but_not_counted_as_waiting() {
         let c = conn();
-        let aid = seed_article(&c, true, true);
+        let aid = seed_article(&c, true, FixtureBinding::ContentProven);
         enqueue_sync(&c, Some(aid), None, "read", None).unwrap();
         c.execute(
             "UPDATE sync_queue

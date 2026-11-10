@@ -418,6 +418,18 @@ pub(super) async fn build_session(
             match logged_in {
                 Ok(client) => {
                     let base = client.resolved_base().to_string();
+                    let weak_db = Arc::downgrade(db);
+                    let client = client.with_request_guard(Arc::new(move || {
+                        let weak_db = weak_db.clone();
+                        Box::pin(async move {
+                            let db = weak_db.upgrade().ok_or_else(SyncSession::stale_error)?;
+                            let conn = db.lock().await;
+                            if db::sync_generation(&conn)? != generation {
+                                return Err(SyncSession::stale_error());
+                            }
+                            Ok(())
+                        })
+                    }));
                     (Backend::GReader(client), base)
                 }
                 Err(e) => {

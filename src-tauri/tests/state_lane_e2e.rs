@@ -29,12 +29,13 @@ async fn setup(
     db::set_setting(&conn, "greader_endpoint", &server.url()).unwrap();
     db::set_setting(&conn, "greader_username", "test").unwrap();
     db::set_setting(&conn, "greader_password", "test-token").unwrap();
-    // An existing, bound entry. Fixture writes do not simulate a user mutation or ACK.
+    // A previously received content response proved entry 501 originates in
+    // feed/10. This fixture is the proven steady-state path, not a bare binding.
     conn.execute_batch(
         "INSERT INTO feeds(id,feed_url,title,remote_id)
          VALUES(1,'http://127.0.0.1:8765/local_feed.xml','State lane',10);
-         INSERT INTO articles(id,feed_id,guid,title,url,remote_id)
-         VALUES(1,1,'state-lane','State lane','https://state-lane.invalid/item',501);",
+         INSERT INTO articles(id,feed_id,guid,title,url,remote_id,remote_origin_feed_id)
+         VALUES(1,1,'state-lane','State lane','https://state-lane.invalid/item',501,10);",
     )
     .unwrap();
     let remote_id = server.add_entry_with_published(
@@ -262,6 +263,8 @@ async fn fever_state_and_local_push_continue_while_history_response_is_held() {
         // The shared mock's Fever feed IDs are subscription positions, not GR IDs.
         conn.execute("UPDATE feeds SET remote_id=1 WHERE id=1", [])
             .unwrap();
+        // This fixture's earlier Fever response used its own feed/1 namespace.
+        assert!(db::confirm_article_remote_origin(&conn, 1, remote_id, 1).unwrap());
     }
     let barrier = server.arm_fever_items_barrier(1);
     let slow = {
@@ -479,6 +482,7 @@ async fn fever_partial_commit_retains_refresh_signal() {
         db::set_setting(&conn, "sync_protocol", "fever").unwrap();
         conn.execute("UPDATE feeds SET remote_id=1 WHERE id=1", [])
             .unwrap();
+        assert!(db::confirm_article_remote_origin(&conn, 1, 501, 1).unwrap());
         conn.execute_batch(
             "CREATE TRIGGER audit_fail_star BEFORE UPDATE OF is_starred ON articles
              WHEN NEW.id=1 AND OLD.is_starred=0 AND NEW.is_starred=1
@@ -611,10 +615,18 @@ async fn discovery_receipt_keeps_old_source_lifecycle(protocol: &str) {
             db::set_setting(&conn, "sync_protocol", "fever").unwrap();
             conn.execute("UPDATE feeds SET remote_id=1 WHERE id=1", [])
                 .unwrap();
+            assert!(db::confirm_article_remote_origin(&conn, 1, 501, 1).unwrap());
             server.set_fever_serve_entries(true);
             server.set_fever_api_version(4);
         }
     }
+    let before_lifecycle: i64 = database
+        .lock()
+        .await
+        .query_row("SELECT lifecycle_version FROM feeds WHERE id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     let barrier = if protocol == "fever" {
         server.arm_fever_items_barrier(1)
     } else {
@@ -699,7 +711,7 @@ async fn discovery_receipt_keeps_old_source_lifecycle(protocol: &str) {
             .drain(Duration::from_secs(2))
             .await
     );
-    assert_eq!(version, 2);
+    assert_eq!(version, before_lifecycle + 2);
     assert_eq!(
         old_title, "State lane",
         "the old source token must never be replaced by discovery"

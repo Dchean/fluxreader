@@ -29,11 +29,13 @@ async fn old_content_must_not_undo_new_remote_flags(initial: bool) {
     conn.execute_batch(
         "INSERT INTO feeds(id,feed_url,title,remote_id)
          VALUES(1,'http://127.0.0.1:8765/local_feed.xml','Overlap',10);
-         INSERT INTO articles(id,feed_id,guid,title,url,remote_id)
-         VALUES(1,1,'overlap','Overlap','https://state-lane.invalid/overlap',501);",
+         INSERT INTO articles(id,feed_id,guid,title,url,remote_id,remote_origin_feed_id)
+         VALUES(1,1,'overlap','Overlap','https://state-lane.invalid/overlap',501,10);",
     )
     .unwrap();
     assert_eq!(remote_id, 501);
+    // This steady-state race starts after an earlier Content response proved
+    // feed/10. The held response is a later revision, not first identity proof.
     conn.execute(
         "UPDATE articles SET is_read=?1,is_starred=?1 WHERE id=1",
         [initial],

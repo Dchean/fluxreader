@@ -20,6 +20,7 @@
 use crate::error::{AppError, AppResult};
 use reqwest::Client;
 use serde::Deserialize;
+use std::sync::Arc;
 
 /* ============================================================
 行类型（Google Reader JSON 的最小子集）
@@ -333,7 +334,13 @@ pub mod tags {
 客户端
 ============================================================ */
 
-#[derive(Clone, Debug)]
+pub(crate) type RequestGuard = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<()>> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[derive(Clone)]
 pub struct GReaderClient {
     /// 后端根 URL（去尾部斜杠），如 `https://sync.example.invalid`
     base: String,
@@ -343,6 +350,15 @@ pub struct GReaderClient {
     /// 失败不缓存：错误返回后下次调用会重试（OnceCell 的 get_or_try_init 语义）。
     action_token: tokio::sync::OnceCell<String>,
     http: Client,
+    request_guard: Option<RequestGuard>,
+}
+
+impl std::fmt::Debug for GReaderClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GReaderClient")
+            .finish_non_exhaustive()
+    }
 }
 
 /// HTTP 传输/读取失败仍是 network；成功响应的 JSON 解码或 schema 失败是
@@ -369,7 +385,21 @@ impl GReaderClient {
             token: token.to_string(),
             action_token: tokio::sync::OnceCell::new(),
             http,
+            request_guard: None,
         }
+    }
+
+    /// Session-owned generation guard; standalone protocol clients have none.
+    pub(crate) fn with_request_guard(mut self, guard: RequestGuard) -> Self {
+        self.request_guard = Some(guard);
+        self
+    }
+
+    async fn ensure_request_current(&self) -> AppResult<()> {
+        if let Some(check) = &self.request_guard {
+            check().await?;
+        }
+        Ok(())
     }
 
     /// 两步认证：先 ClientLogin 换 token，再构建客户端。
@@ -463,6 +493,7 @@ impl GReaderClient {
             token,
             action_token: tokio::sync::OnceCell::new(),
             http: http.clone(),
+            request_guard: None,
         }))
     }
 
@@ -480,6 +511,7 @@ impl GReaderClient {
 
     /// GET 请求（带 `Authorization: GoogleLogin auth=<token>`）。
     async fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> AppResult<T> {
+        self.ensure_request_current().await?;
         let resp = crate::sync_http::send(
             self.http
                 .get(self.url(path))
@@ -513,6 +545,7 @@ impl GReaderClient {
     }
 
     async fn fetch_action_token(&self) -> AppResult<String> {
+        self.ensure_request_current().await?;
         let resp = crate::sync_http::send(
             self.http
                 .get(self.url("/reader/api/0/token"))
@@ -567,9 +600,24 @@ impl GReaderClient {
         path: &str,
         form: &[(&str, String)],
     ) -> AppResult<reqwest::Response> {
+        self.post_action_token_raw_checked(path, form, None).await
+    }
+
+    async fn post_action_token_raw_checked(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+        write_guard: Option<&RequestGuard>,
+    ) -> AppResult<reqwest::Response> {
         let token = self.action_token().await?.to_string();
         let mut params: Vec<(&str, String)> = vec![("T", token)];
         params.extend_from_slice(form);
+        // Token acquisition is a separate HTTP boundary. Recheck after it for
+        // every POST, and additionally check this state write's exact binding.
+        self.ensure_request_current().await?;
+        if let Some(check) = write_guard {
+            check().await?;
+        }
         crate::sync_http::send(
             self.http
                 .post(self.url(path))
@@ -627,7 +675,20 @@ impl GReaderClient {
         form: &[(&str, String)],
         tolerate_missing_target: bool,
     ) -> AppResult<()> {
-        let resp = self.post_action_token_raw(path, form).await?;
+        self.post_form_text_inner_checked(path, form, tolerate_missing_target, None)
+            .await
+    }
+
+    async fn post_form_text_inner_checked(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+        tolerate_missing_target: bool,
+        write_guard: Option<&RequestGuard>,
+    ) -> AppResult<()> {
+        let resp = self
+            .post_action_token_raw_checked(path, form, write_guard)
+            .await?;
         if !resp.status().is_success() {
             if tolerate_missing_target && matches!(resp.status().as_u16(), 400 | 404) {
                 log::warn!(
@@ -805,6 +866,27 @@ impl GReaderClient {
     /// 标读/未读、收藏/取消收藏。
     /// `add`/`remove` 是 tag 列表（如 `user/-/state/com.google/read`）。
     pub async fn edit_tag(&self, item_ids: &[i64], add: &[&str], remove: &[&str]) -> AppResult<()> {
+        self.edit_tag_inner(item_ids, add, remove, None).await
+    }
+
+    pub(crate) async fn edit_tag_checked(
+        &self,
+        item_ids: &[i64],
+        add: &[&str],
+        remove: &[&str],
+        write_guard: RequestGuard,
+    ) -> AppResult<()> {
+        self.edit_tag_inner(item_ids, add, remove, Some(&write_guard))
+            .await
+    }
+
+    async fn edit_tag_inner(
+        &self,
+        item_ids: &[i64],
+        add: &[&str],
+        remove: &[&str],
+        write_guard: Option<&RequestGuard>,
+    ) -> AppResult<()> {
         let mut form: Vec<(&str, String)> = Vec::new();
         for id in item_ids {
             form.push(("i", id.to_string()));
@@ -816,7 +898,8 @@ impl GReaderClient {
             form.push(("r", tag.to_string()));
         }
         // 注意：`a`/`r` 必须来自 body（PostForm），不能放 query。用 .form() 默认发 body。
-        self.post_form_text("/reader/api/0/edit-tag", &form).await
+        self.post_form_text_inner_checked("/reader/api/0/edit-tag", &form, false, write_guard)
+            .await
     }
 
     /// 标已读。

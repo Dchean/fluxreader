@@ -336,16 +336,17 @@ async fn states_phase_in_session(
             plan.reclassified += retried;
             (plan, stale)
         };
-        let outcome = exec_push(db, session, &plan, &mut report).await;
+        let mut outcome = exec_push(db, session, &plan, &mut report).await;
         attempted_this_round.extend(outcome.attempted.iter().copied());
-        let retry_push = outcome.failures_for(PushFailureClass::Push);
-        let retry_verification = outcome.failures_for(PushFailureClass::Verification);
-        let target_missing = outcome.failures_for(PushFailureClass::TargetMissing);
         {
             let conn = db.lock().await;
             // OPT-006：推送确认/失败标记/剪除都是回写边界——账号已变更时旧队项
             // 已随 purge 清空，且新账号可能复用编号语义，一律不得落库。
             session.ensure_current(&conn)?;
+            outcome.discard_stale(&conn, &plan, &mut report)?;
+            let retry_push = outcome.failures_for(PushFailureClass::Push);
+            let retry_verification = outcome.failures_for(PushFailureClass::Verification);
+            let target_missing = outcome.failures_for(PushFailureClass::TargetMissing);
             // TASK-116：失败项落库标记（attempts+1 / last_error，四态展示口径）
             if !retry_push.is_empty() {
                 if let Err(err) = db::mark_push_failed(&conn, &retry_push) {
@@ -392,11 +393,11 @@ async fn states_phase_in_session(
             notify_queue_changed(db).await;
         }
     }
-    report.absorb(read_states_in_session(db, session, Some(versions.clone())).await?);
+    report.absorb(read_states_in_session(db, session, Some(versions.clone()), None).await?);
     {
         let _pull_guard = PULL_LOCK.lock().await;
         pull_entries(db, session, &mut report, full, Some(&versions)).await?;
-        if report.binding_incomplete {
+        if report.binding_incomplete && !report.pull_admission_blocked {
             let retry_discovery = if discovery_attempted {
                 true
             } else {
@@ -443,15 +444,16 @@ async fn states_phase_in_session(
             (plan, stale)
         };
         if !plan.status.is_empty() || !plan.stars.is_empty() {
-            let outcome = exec_push(db, session, &plan, &mut report).await;
-            let retry_push = outcome.failures_for(PushFailureClass::Push);
-            let retry_verification = outcome.failures_for(PushFailureClass::Verification);
-            let target_missing = outcome.failures_for(PushFailureClass::TargetMissing);
+            let mut outcome = exec_push(db, session, &plan, &mut report).await;
             {
                 let conn = db.lock().await;
                 // TASK-116：失败项落库标记（pull 后补推段，同首次 push 段口径）
                 // OPT-006：同首次 push 段——回写前复核代际。
                 session.ensure_current(&conn)?;
+                outcome.discard_stale(&conn, &plan, &mut report)?;
+                let retry_push = outcome.failures_for(PushFailureClass::Push);
+                let retry_verification = outcome.failures_for(PushFailureClass::Verification);
+                let target_missing = outcome.failures_for(PushFailureClass::TargetMissing);
                 if !retry_push.is_empty() {
                     if let Err(err) = db::mark_push_failed(&conn, &retry_push) {
                         log::warn!("sync: 推送失败标记落库失败（states 补推）: {err}");
@@ -502,7 +504,10 @@ async fn states_phase_in_session(
     }
     // New identities/first bindings from the content pass now belong to the state
     // reader. Take a new snapshot, never reuse the pre-content remote flags.
-    report.absorb(read_states_in_session(db, session, Some(versions.clone())).await?);
+    let previous_authority = report.authority_snapshot.clone();
+    report.absorb(
+        read_states_in_session(db, session, Some(versions.clone()), previous_authority).await?,
+    );
     commit_content_cursor(db, session, &mut report).await?;
     Ok(report)
 }
@@ -570,11 +575,11 @@ pub async fn sync_states_now(
                 Err(ClientBuildFailure::CorruptGeneration(error))
                 | Err(ClientBuildFailure::Failed { err: error, .. }) => return Err(error),
             };
-            let mut report = read_states_in_session(&db, &lease.session, None).await?;
+            let mut report = read_states_in_session(&db, &lease.session, None, None).await?;
             if lease.from_cache && report_has_auth_failure(&report) {
                 if let Some(fresh) = reauth_after_auth_failure(&db, &http, &lease).await {
                     runtime::accept_generation(fresh.generation)?;
-                    let mut retry = read_states_in_session(&db, &fresh, None).await?;
+                    let mut retry = read_states_in_session(&db, &fresh, None, None).await?;
                     retry.preserve_changes_from(&report);
                     report = retry;
                 }
@@ -590,6 +595,7 @@ async fn read_states_in_session(
     db: &Arc<Mutex<Connection>>,
     session: &Arc<SyncSession>,
     versions: Option<Arc<db::SyncMatchMaps>>,
+    previous_authority: Option<Arc<AuthoritySnapshot>>,
 ) -> AppResult<SyncReport> {
     let runtime = runtime::for_db(db);
     let db = db.clone();
@@ -598,7 +604,10 @@ async fn read_states_in_session(
         .run_in(runtime::SyncLane::State, "states", async move {
             runtime::check_generation(&db).await?;
             runtime::accept_generation(session.generation)?;
-            let mut report = SyncReport::default();
+            let mut report = SyncReport {
+                authority_snapshot: previous_authority,
+                ..Default::default()
+            };
             let result = match &session.client {
                 Backend::GReader(client) => {
                     pull_states_greader(&db, &session, client, &mut report, versions.as_deref())
@@ -700,13 +709,14 @@ async fn discovery_pull_in_session(
     if after > before {
         let _pull_guard = PULL_LOCK.lock().await;
         pull_entries(db, session, report, false, None).await?;
-        if report.binding_incomplete {
+        if report.binding_incomplete && !report.pull_admission_blocked {
             // 新订阅在首次发现与条目读取之间才变为可见时，再发现并重试一次。
             pull_feeds(db, session, report).await;
             pull_entries(db, session, report, false, None).await?;
         }
         drop(_pull_guard);
-        report.absorb(read_states_in_session(db, session, None).await?);
+        let previous_authority = report.authority_snapshot.clone();
+        report.absorb(read_states_in_session(db, session, None, previous_authority).await?);
         commit_content_cursor(db, session, report).await?;
     }
     Ok(())

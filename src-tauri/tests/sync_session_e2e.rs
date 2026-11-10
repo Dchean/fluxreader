@@ -12,6 +12,227 @@
 
 mod common;
 
+// Independent audit: a durable, previously Content-proven identity can be used
+// by a fresh session whose lazy action token has not been fetched yet.
+async fn audit_token_wait_case(change: &str) {
+    let _serial = serialize().await;
+    let mut server_a = start_mock(&format!("audit_token_{change}_a")).await;
+    let (conn, path) = fresh_db(&format!("audit_token_{change}"));
+    let _cleanup = common::TempDbGuard::new(path);
+    seed_account(&conn, &server_a, "audit-a", "audit-pw-a");
+    let (feed, aid) = seed_local_bound_article(&conn, &server_a);
+    db::set_feed_remote_id(&conn, feed, 10).unwrap();
+    db::set_article_remote_id(&conn, aid, 500).unwrap();
+    assert!(db::confirm_article_remote_origin(&conn, aid, 500, 10).unwrap());
+    db::set_read(&conn, aid, true).unwrap();
+    db::set_read_with_enqueue(&conn, aid, false).unwrap();
+    let database = Arc::new(tokio::sync::Mutex::new(conn));
+    server_a.gate.arm("/reader/api/0/token");
+    let pushing = {
+        let database = database.clone();
+        tokio::spawn(async move {
+            app_lib::sync::push_states_now(&database, &app_lib::ingestion::build_client(5)).await;
+        })
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        server_a.parked_rx.recv(),
+    )
+    .await
+    .expect("lazy action token must reach the barrier")
+    .expect("server is alive");
+    assert_eq!(
+        server_a.gate.edit_tag_count(),
+        0,
+        "no write was sent before invalidation"
+    );
+    let mut server_b = None;
+    if change == "source" {
+        let conn = database.lock().await;
+        conn.execute("UPDATE feeds SET remote_id=NULL WHERE id=?1", [feed])
+            .unwrap();
+        db::set_feed_remote_id(&conn, feed, 10).unwrap();
+        assert!(db::verified_remote_binding(&conn, aid).unwrap().is_none());
+    } else if change == "account" {
+        let replacement = start_mock("audit_token_new_account").await;
+        let mut conn = database.lock().await;
+        app_lib::commands::save_account_for_test(
+            &mut conn,
+            "greader",
+            &replacement.base,
+            "audit-b",
+            "audit-pw-b",
+            &replacement.base,
+        )
+        .unwrap();
+        db::set_feed_remote_id(&conn, feed, 10).unwrap();
+        db::set_article_remote_id(&conn, aid, 500).unwrap();
+        assert!(db::confirm_article_remote_origin(&conn, aid, 500, 10).unwrap());
+        db::set_read_with_enqueue(&conn, aid, true).unwrap();
+        server_b = Some(replacement);
+    }
+    server_a.gate.release();
+    tokio::time::timeout(std::time::Duration::from_secs(10), pushing)
+        .await
+        .unwrap()
+        .unwrap();
+    let conn = database.lock().await;
+    let queue = db::take_sync_queue(&conn).unwrap();
+    let local_read: bool = conn
+        .query_row("SELECT is_read FROM articles WHERE id=?1", [aid], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let expected_writes = if change == "control" { 1 } else { 0 };
+    println!("AUDIT_TOKEN_WAIT case={change} expected_writes={expected_writes} actual_writes={} local_read={local_read} queue={queue:?} requests={:?}", server_a.gate.edit_tag_count(), server_a.gate.request_lines());
+    if change == "control" {
+        assert!(
+            queue.is_empty(),
+            "normal token response must still allow the intended write and ACK"
+        );
+        assert!(!local_read);
+    } else {
+        assert_eq!(queue.len(), 1, "no stale ACK may remove the current intent");
+        assert_eq!(local_read, change == "account");
+        if change == "source" {
+            assert_eq!(queue[0].status, db::STATUS_BINDABLE_RETRY);
+        }
+    }
+    if let Some(server_b) = server_b {
+        assert!(
+            server_b.gate.request_lines().is_empty(),
+            "old session must not touch account B"
+        );
+    }
+    drop(conn);
+    assert!(
+        app_lib::sync::runtime::for_db(&database)
+            .drain(std::time::Duration::from_secs(2))
+            .await
+    );
+    assert_eq!(
+        server_a.gate.edit_tag_count(),
+        expected_writes,
+        "token returned after identity invalidation: a new edit-tag must not follow"
+    );
+}
+
+#[tokio::test]
+async fn audit_token_wait_source_invalidation_stops_unsent_edit_tag() {
+    audit_token_wait_case("source").await;
+}
+
+#[tokio::test]
+async fn audit_token_wait_account_switch_stops_unsent_edit_tag() {
+    audit_token_wait_case("account").await;
+}
+
+#[tokio::test]
+async fn audit_token_wait_unchanged_identity_still_writes_and_confirms() {
+    audit_token_wait_case("control").await;
+}
+
+#[tokio::test]
+async fn subscription_write_after_token_wait_rechecks_account_generation() {
+    let _serial = serialize().await;
+    let mut server = start_mock("subscription_token_wait").await;
+    let (conn, path) = fresh_db("subscription_token_wait");
+    let _cleanup = common::TempDbGuard::new(path);
+    seed_account(&conn, &server, "subscriber", "synthetic-password");
+    let (feed, _) = seed_local_bound_article(&conn, &server);
+    db::set_feed_remote_id(&conn, feed, 10).unwrap();
+    let account = app_lib::sync::current_account(&conn).unwrap().unwrap();
+    db::enqueue_edit(
+        &conn,
+        account.generation,
+        &account.key,
+        &server.feed_url,
+        10,
+        Some("New title"),
+        None,
+        None,
+    )
+    .unwrap();
+    let expected_outbox = serde_json::to_value(db::pending_outbox(&conn).unwrap()).unwrap();
+    assert_eq!(expected_outbox.as_array().unwrap().len(), 1);
+    let database = Arc::new(tokio::sync::Mutex::new(conn));
+    server.gate.arm("/reader/api/0/token");
+    let editing = {
+        let database = database.clone();
+        tokio::spawn(async move {
+            app_lib::sync::feeds_phase(&database, &app_lib::ingestion::build_client(5)).await
+        })
+    };
+    let arrived =
+        tokio::time::timeout(std::time::Duration::from_secs(10), server.parked_rx.recv()).await;
+    if !matches!(arrived, Ok(Some(()))) {
+        server.gate.release();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), editing).await;
+        panic!("subscription token barrier not reached: {arrived:?}, result={result:?}");
+    }
+    assert!(!server
+        .gate
+        .request_lines()
+        .iter()
+        .any(|line| line.contains("subscription/edit")));
+    {
+        let mut conn = database.lock().await;
+        app_lib::commands::disconnect_for_test(&mut conn).unwrap();
+    }
+    server.gate.release();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), editing)
+        .await
+        .unwrap()
+        .unwrap();
+    // feeds_phase reports partial outbox failures through SyncReport, unlike
+    // the direct state entrypoint's Err. Assert that specific visible outcome.
+    let report = result.expect("feeds partial failure keeps its report");
+    assert_eq!(report.pushed_feeds, 0);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|error| error.contains("[staleSession]")),
+        "{report:?}"
+    );
+    assert!(
+        !server
+            .gate
+            .request_lines()
+            .iter()
+            .any(|line| line.contains("subscription/edit")),
+        "a token response after disconnect cannot start a subscription write"
+    );
+    {
+        let conn = database.lock().await;
+        assert!(app_lib::sync::current_account(&conn).unwrap().is_none());
+        assert_eq!(db::sync_generation(&conn).unwrap(), account.generation + 1);
+        // Disconnect preserves subscription intent for a same-identity
+        // reconnect; it must neither confirm nor mark this unsent old plan.
+        assert_eq!(
+            serde_json::to_value(db::pending_outbox(&conn).unwrap()).unwrap(),
+            expected_outbox
+        );
+    }
+    let requests_after_disconnect = server.gate.request_lines();
+    let retry = app_lib::sync::feeds_phase(&database, &app_lib::ingestion::build_client(5)).await;
+    assert_eq!(retry.unwrap_err().code, "notConnected");
+    assert_eq!(
+        server.gate.request_lines(),
+        requests_after_disconnect,
+        "disconnected retry cannot acquire a session or send retained outbox"
+    );
+    assert_eq!(
+        serde_json::to_value(db::pending_outbox(&*database.lock().await).unwrap()).unwrap(),
+        expected_outbox
+    );
+    assert!(
+        app_lib::sync::runtime::for_db(&database)
+            .drain(std::time::Duration::from_secs(2))
+            .await
+    );
+}
+
 use app_lib::db;
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -436,6 +657,9 @@ async fn stale_push_confirmation_after_account_switch_does_not_touch_new_account
     let (feed, aid) = seed_local_bound_article(&conn, &server_a);
     db::set_feed_remote_id(&conn, feed, 700).unwrap();
     db::set_article_remote_id(&conn, aid, 700).unwrap();
+    // Account A's earlier Content response established this exact origin. The
+    // regression must reach edit-tag before switching accounts, not discovery.
+    assert!(db::confirm_article_remote_origin(&conn, aid, 700, 700).unwrap());
     db::enqueue_sync(&conn, Some(aid), None, "read", None).unwrap();
     db::enqueue_sync(&conn, Some(aid), None, "star", None).unwrap();
 
@@ -470,6 +694,7 @@ async fn stale_push_confirmation_after_account_switch_does_not_touch_new_account
         assert!(generation >= 1, "换号必须推进代际");
         db::set_feed_remote_id(&conn, feed, 700).unwrap();
         db::set_article_remote_id(&conn, aid, 700).unwrap();
+        assert!(db::confirm_article_remote_origin(&conn, aid, 700, 700).unwrap());
         db::enqueue_sync(&conn, Some(aid), None, "read", None).unwrap();
     }
     server_a.gate.release();

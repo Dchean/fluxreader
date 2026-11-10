@@ -1302,7 +1302,9 @@ fn insert_remote_feed_bound(
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     tx.commit()?;
-    Ok((!existed && lifecycle == 0).then_some((feed_id, source_id, lifecycle)))
+    // The first remote binding now advances the same source lifecycle. Creation
+    // is proved by the transaction's absent pre-insert row, not a magic version.
+    Ok((!existed).then_some((feed_id, source_id, lifecycle)))
 }
 
 #[cfg(test)]
@@ -1324,7 +1326,7 @@ mod discovery_receipt_tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(version, 0);
+        assert_eq!(version, 1, "first remote binding advances source identity");
         assert!(!token.is_empty());
         db::delete_feed(&conn, id).unwrap();
         assert!(insert_remote_feed_bound(

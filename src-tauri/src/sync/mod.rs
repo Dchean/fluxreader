@@ -29,6 +29,16 @@
 
 use serde::Serialize;
 
+/// Internal per-attempt authority data, never a cross-round state cache.
+/// Content may reuse IDs for discovery only. A failed field is not re-requested
+/// by the same attempt's final state pass; successful fields are read fresh.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct AuthoritySnapshot {
+    pub unread: Option<Vec<i64>>,
+    pub starred: Option<Vec<i64>>,
+}
+
 #[derive(Debug, Default, Serialize)]
 pub struct SyncReport {
     pub pushed_states: usize,
@@ -60,6 +70,10 @@ pub struct SyncReport {
     /// 在只读订阅发现后重试一次；不属于对外 report schema。
     #[serde(skip)]
     pub binding_incomplete: bool,
+    /// The content pass was refused before HTTP by persistent source admission.
+    /// This is not a newly discovered feed and must not bypass discovery throttling.
+    #[serde(skip)]
+    pub pull_admission_blocked: bool,
     /// Complete content rounds retain their time cursor if the state phase failed.
     #[serde(skip)]
     pub states_incomplete: bool,
@@ -72,6 +86,20 @@ pub struct SyncReport {
     /// replace an already-captured lifecycle. They are not part of the IPC schema.
     #[serde(skip)]
     pub discovered_sources: std::collections::HashMap<i64, (String, i64)>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub authority_snapshot: Option<std::sync::Arc<AuthoritySnapshot>>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub unverified_state_ids: std::collections::BTreeSet<i64>,
+    /// Content IDs already requested in this attempt; cold proof never retries
+    /// the same failed body request under a different collection name.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub content_requested_ids: std::collections::HashSet<i64>,
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub origin_proof_requested_ids: std::collections::HashSet<i64>,
     /// 本轮出现**认证类失败**（greader/fever 的 401/403 状态码错误与 Fever
     /// api_key 失败——错误构造点的结构化标记，经各捕获点 [`SyncReport::note_client_error`]
     /// 汇入）。会话缓存回落（`report_has_auth_failure`）的判定输入，取代曾经的
@@ -97,6 +125,7 @@ impl SyncReport {
         self.entries_data_changed |= other.entries_data_changed;
         self.feeds_data_changed |= other.feeds_data_changed;
         self.binding_incomplete |= other.binding_incomplete;
+        self.pull_admission_blocked |= other.pull_admission_blocked;
         self.states_incomplete |= other.states_incomplete;
         self.content_cursor_candidate = other
             .content_cursor_candidate
@@ -104,6 +133,14 @@ impl SyncReport {
         for (id, token) in other.discovered_sources {
             self.discovered_sources.entry(id).or_insert(token);
         }
+        if other.authority_snapshot.is_some() {
+            self.authority_snapshot = other.authority_snapshot;
+        }
+        self.unverified_state_ids.extend(other.unverified_state_ids);
+        self.content_requested_ids
+            .extend(other.content_requested_ids);
+        self.origin_proof_requested_ids
+            .extend(other.origin_proof_requested_ids);
         self.auth_failure |= other.auth_failure;
         self.auth_error_indices.extend(
             other

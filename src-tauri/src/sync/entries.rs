@@ -9,11 +9,116 @@ use rusqlite::Connection;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Shared admission for Content and State. A source import/tombstone failure is
+/// not a trustworthy partial source map. Recheck this at state commit as well.
+pub(super) fn pull_admitted(
+    conn: &Connection,
+    session: &SyncSession,
+    report: &mut SyncReport,
+) -> AppResult<bool> {
+    session.ensure_current(conn)?;
+    let Some(account) = super::current_account(conn)? else {
+        return Err(crate::error::AppError::new(
+            "notConnected",
+            "缺少同步账号身份",
+        ));
+    };
+    if db::binding_incomplete(conn, &account.key)? {
+        report.binding_incomplete = true;
+        report.pull_admission_blocked = true;
+        report.errors.push(
+            "持久绑定不完整标记存在：先完成 feeds 阶段绑定，本轮不请求条目或权威集合/不推进游标"
+                .into(),
+        );
+        return Ok(false);
+    }
+    let unbound = db::unbound_remote_feeds(conn)?;
+    if !unbound.is_empty() {
+        report.binding_incomplete = true;
+        report.pull_admission_blocked = true;
+        report.errors.push(format!(
+            "存在 {} 个 origin='remote' 源仍缺 remote_id，本轮不请求条目或权威集合（游标保留）",
+            unbound.len(),
+        ));
+        return Ok(false);
+    }
+    db::has_remote_feed_binding(conn)
+}
+
+/// Only cold bindings that a state read or pending local action actually needs
+/// are sent to Content. The State lane never waits for their body/origin proof.
+pub(super) fn collect_unverified_state_ids(
+    conn: &Connection,
+    maps: &db::SyncMatchMaps,
+    authority: &AuthoritySnapshot,
+    report: &mut SyncReport,
+) -> AppResult<()> {
+    let unread: Option<std::collections::HashSet<_>> = authority
+        .unread
+        .as_ref()
+        .map(|ids| ids.iter().copied().collect());
+    let starred: Option<std::collections::HashSet<_>> = authority
+        .starred
+        .as_ref()
+        .map(|ids| ids.iter().copied().collect());
+    for (remote_id, aid) in &maps.mf_id_to_article {
+        if maps.verified_remote_ids.contains(remote_id)
+            || !maps.article_source_is_current(conn, *aid)?
+        {
+            continue;
+        }
+        let (read, star): (bool, bool) = conn.query_row(
+            "SELECT is_read,is_starred FROM articles WHERE id=?1",
+            [aid],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if maps.pending_ids.contains(aid)
+            || unread
+                .as_ref()
+                .is_some_and(|ids| read == ids.contains(remote_id))
+            || starred
+                .as_ref()
+                .is_some_and(|ids| star != ids.contains(remote_id))
+        {
+            report.unverified_state_ids.insert(*remote_id);
+        }
+    }
+    Ok(())
+}
+
 /// 从 ItemContent 提取远端 feed 数字 id（origin.stream_id = feed/42）。
 fn item_feed_id(e: &ItemContent) -> Option<i64> {
     e.origin
         .as_ref()
         .and_then(|o| greader::parse_feed_numeric_id(&o.stream_id))
+}
+
+fn feed_ids_compatible(local: Option<i64>, observed: Option<i64>) -> bool {
+    match (local, observed) {
+        (Some(local), Some(observed)) => local == observed,
+        _ => true,
+    }
+}
+
+/// A known exact entry with compatible/unknown local feed already has a merge
+/// destination. Do not classify it as a new source merely because feed_mf_to_id
+/// lacks its origin: that redundant discovery can invalidate its fresh proof.
+/// This only decides discovery; the commit path still rechecks the live source
+/// token and current feed compatibility before accepting content or provenance.
+pub(super) fn entry_unbound_feed(e: &ItemContent, maps: &db::SyncMatchMaps) -> Option<i64> {
+    let remote_feed = item_feed_id(e)?;
+    if maps.feed_mf_to_id.contains_key(&remote_feed)
+        || maps.excluded_feed_ids.contains(&remote_feed)
+    {
+        return None;
+    }
+    let exact_local_feed = item_numeric_id(e)
+        .and_then(|id| maps.mf_id_to_article.get(&id))
+        .and_then(|aid| maps.id_to_feed_mf.get(aid));
+    if exact_local_feed.is_some_and(|local| feed_ids_compatible(*local, Some(remote_feed))) {
+        return None;
+    }
+    Some(remote_feed)
 }
 
 /// 从 ItemContent 提取条目十进制 id。解析规则在 `greader::parse_item_id`
@@ -72,13 +177,13 @@ pub(super) fn merge_pulled_entry(
                 report.binding_incomplete = true;
                 return Ok(());
             }
-            let row_feed_mf = maps.id_to_feed_mf.get(&aid).copied().flatten();
-            let feed_compatible = match (row_feed_mf, feed_remote) {
-                (Some(a), Some(b)) => a == b,
-                _ => true,
-            };
-            if feed_compatible {
-                merge_own_entry(conn, aid, e, report)?;
+            let row_feed_mf: Option<i64> = conn.query_row(
+                "SELECT f.remote_id FROM articles a JOIN feeds f ON f.id=a.feed_id WHERE a.id=?1",
+                [aid],
+                |row| row.get(0),
+            )?;
+            if feed_ids_compatible(row_feed_mf, feed_remote) {
+                merge_own_entry(conn, aid, e, maps, report)?;
                 return Ok(());
             }
             // 精确绑定与 feed 元数据冲突（历史脏数据）：**干净拒绝**——既不改写
@@ -130,6 +235,7 @@ fn merge_own_entry(
     conn: &Connection,
     aid: i64,
     e: &ItemContent,
+    maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
 ) -> AppResult<()> {
     // Note: 不允许慢正文回写已绑定flags — 见
@@ -137,6 +243,22 @@ fn merge_own_entry(
     report.pulled_entries += 1;
     if db::refresh_bound_remote_article(conn, aid, &remote_article_input(e))? {
         report.entries_data_changed = true;
+    }
+    confirm_content_origin(conn, aid, e, maps)?;
+    Ok(())
+}
+
+fn confirm_content_origin(
+    conn: &Connection,
+    aid: i64,
+    entry: &ItemContent,
+    maps: &mut db::SyncMatchMaps,
+) -> AppResult<()> {
+    if let (Some(remote_id), Some(remote_feed_id)) = (item_numeric_id(entry), item_feed_id(entry)) {
+        db::confirm_article_remote_origin(conn, aid, remote_id, remote_feed_id)?;
+        if maps.state_binding_is_current(conn, aid, remote_id)? {
+            maps.verified_remote_ids.insert(remote_id);
+        }
     }
     Ok(())
 }
@@ -152,6 +274,7 @@ pub(super) async fn pull_entries(
     versions: Option<&db::SyncMatchMaps>,
 ) -> AppResult<()> {
     report.binding_incomplete = false;
+    report.pull_admission_blocked = false;
     report.content_cursor_candidate = None;
     match &session.client {
         Backend::GReader(g) => pull_entries_greader(db, session, g, report, full, versions).await,
@@ -209,6 +332,7 @@ fn upsert_remote_entry(
         maps.id_to_mf_id.insert(aid, Some(eid));
         maps.mf_id_to_article.insert(eid, aid);
     }
+    confirm_content_origin(conn, aid, e, maps)?;
     if outcome.inserted {
         // 真正的新行：插入发生在同一 DB 临界区内，其间不可能有本地写入，快照
         // (0,0) 与行初值恒等，整值写状态不会覆盖任何用户意图。远端确认不产生
@@ -330,6 +454,48 @@ mod tri_state_tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn discovery_uses_the_exact_identity_trust_matrix_without_reviving_retired_sources() {
+        for (label, local_feed, entry_id, active, discovered, proven) in [
+            ("exact unknown", None, 9001, true, None, true),
+            ("exact compatible", Some(10), 9001, true, None, true),
+            ("exact conflicting", Some(20), 9001, true, Some(10), false),
+            ("new known source", Some(10), 9002, true, None, true),
+            ("new unknown source", None, 9002, true, Some(10), false),
+            ("retired exact", Some(10), 9001, false, None, false),
+        ] {
+            let conn = conn_with_bound_article();
+            conn.execute(
+                "UPDATE feeds SET remote_id=?1,active=?2 WHERE id=1",
+                rusqlite::params![local_feed, active],
+            )
+            .unwrap();
+            let mut maps = db::sync_match_maps(&conn).unwrap();
+            let entry: ItemContent = serde_json::from_value(serde_json::json!({
+                "id": entry_id.to_string(), "title": "observed content",
+                "origin": {"streamId":"feed/10"},
+                "summary": {"content":"<p>observed content</p>"},
+            }))
+            .unwrap();
+            assert_eq!(entry_unbound_feed(&entry, &maps), discovered, "{label}");
+            let mut report = SyncReport::default();
+            merge_pulled_entry(&conn, &entry, &mut maps, &mut report).unwrap();
+            let proof = db::article_by_remote_id(&conn, entry_id)
+                .unwrap()
+                .and_then(|aid| db::verified_remote_binding(&conn, aid).unwrap());
+            assert_eq!(proof.is_some(), proven, "{label}");
+            if label == "exact conflicting" || !active {
+                assert_eq!(
+                    conn.query_row("SELECT title FROM articles WHERE id=1", [], |r| r
+                        .get::<_, String>(0))
+                        .unwrap(),
+                    "Tri",
+                    "{label}"
+                );
+            }
+        }
     }
 
     /// 判别力：删除 categories 后 `has_tag` 仍会返回 false；合并若继续使用它，

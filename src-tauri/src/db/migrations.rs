@@ -23,7 +23,7 @@ pub(crate) fn open_with_report(path: &Path) -> AppResult<Connection> {
             && (version != LATEST_SCHEMA_VERSION
                 || app_id != APPLICATION_ID
                 || check
-                    .prepare("SELECT image_source FROM articles LIMIT 0")
+                    .prepare("SELECT image_source, remote_origin_feed_id FROM articles LIMIT 0")
                     .is_err())
         {
             return Err(AppError::new("unsupported_database", format!("此数据库为不兼容的旧格式（版本 {version}）。原文件已保留：{}。请先关闭应用，将该文件及同名 -wal/-shm 文件移到备份目录，再启动以创建新库；不要覆盖原文件。", path.display())));

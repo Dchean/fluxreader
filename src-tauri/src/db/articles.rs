@@ -2604,23 +2604,29 @@ pub fn mark_all_read_with_enqueue(
          SELECT a.id, NULL, 'read', NULL, datetime('now'), 'article_state', 'read',
                 1,
                 CASE
-                  WHEN a.remote_id IS NOT NULL THEN 'bound_pending'
+                  WHEN a.remote_id IS NOT NULL AND a.remote_origin_feed_id IS NOT NULL
+                       AND f.fr_active=1 AND (f.fr_remote_id IS NULL OR f.fr_remote_id=a.remote_origin_feed_id)
+                    THEN 'bound_pending'
                   WHEN f.fr_remote_id IS NOT NULL THEN 'bindable_retry'
                   ELSE 'local_only'
                 END,
                 datetime('now'),
                 CASE
-                  WHEN a.remote_id IS NOT NULL THEN NULL
+                  WHEN a.remote_id IS NOT NULL AND a.remote_origin_feed_id IS NOT NULL
+                       AND f.fr_active=1 AND (f.fr_remote_id IS NULL OR f.fr_remote_id=a.remote_origin_feed_id)
+                    THEN NULL
                   WHEN f.fr_remote_id IS NOT NULL THEN 'awaiting_remote_identity'
                   ELSE 'no_remote_identity'
                 END,
                 CASE
-                  WHEN a.remote_id IS NOT NULL THEN NULL
+                  WHEN a.remote_id IS NOT NULL AND a.remote_origin_feed_id IS NOT NULL
+                       AND f.fr_active=1 AND (f.fr_remote_id IS NULL OR f.fr_remote_id=a.remote_origin_feed_id)
+                    THEN NULL
                   ELSE 'unbound'
                 END
            FROM articles a
            LEFT JOIN (
-             SELECT id AS fr_id, remote_id AS fr_remote_id FROM feeds
+             SELECT id AS fr_id, remote_id AS fr_remote_id, active AS fr_active FROM feeds
            ) f ON f.fr_id = a.feed_id
           WHERE {clause}"
     );

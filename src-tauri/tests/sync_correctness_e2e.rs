@@ -696,6 +696,9 @@ mod tests {
             let conn = database.lock().await;
             for id in 101..=103 {
                 seed_article(&conn, id, true, false);
+                // Earlier protocol content supplied feed/1. Reach the real
+                // first mark, then disconnect before any subsequent ID.
+                assert!(db::confirm_article_remote_origin(&conn, id, id, 1).unwrap());
                 db::enqueue_sync(&conn, Some(id), None, "read", None).unwrap();
             }
         }
@@ -729,6 +732,7 @@ mod tests {
         {
             let conn = database.lock().await;
             seed_article(&conn, 101, false, true);
+            assert!(db::confirm_article_remote_origin(&conn, 101, 101, 1).unwrap());
             db::enqueue_sync(&conn, Some(101), None, "star", None).unwrap();
         }
         server.arm(2);
@@ -1017,6 +1021,9 @@ mod tests {
             server.set_entries(vec![entry(101, false, false)]);
             let database = database(&server, protocol);
             seed_article(&*database.lock().await, 101, false, false);
+            assert!(
+                db::confirm_article_remote_origin(&*database.lock().await, 101, 101, 1).unwrap()
+            );
             let http = ingestion::build_client(5);
             let mut steps = vec![];
             for (field, desired) in [
@@ -1075,6 +1082,9 @@ mod tests {
             {
                 let conn = database.lock().await;
                 seed_article(&conn, 101, false, false);
+                // This no-op ACK control needs a previously proven identity
+                // so the injected write/readback path is actually exercised.
+                assert!(db::confirm_article_remote_origin(&conn, 101, 101, 1).unwrap());
                 db::set_read_with_enqueue(&conn, 101, true).unwrap();
             }
             sync::push_states_now(&database, &ingestion::build_client(5)).await;

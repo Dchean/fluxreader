@@ -192,3 +192,15 @@ fn pre_provenance_current_format_is_read_only_rejected() {
     assert_eq!(db::open(&path).unwrap_err().code, "unsupported_database");
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
 }
+
+#[test]
+fn pre_remote_origin_format_is_read_only_rejected() {
+    let path = common::unique_db_path("pre_remote_origin_format");
+    let _guard = common::TempDbGuard::new(path.clone());
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE articles(id INTEGER PRIMARY KEY,image_source TEXT);INSERT INTO articles VALUES(1,'remote');PRAGMA application_id=1179796018;PRAGMA user_version=1;").unwrap();
+    drop(conn);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(db::open(&path).unwrap_err().code, "unsupported_database");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}

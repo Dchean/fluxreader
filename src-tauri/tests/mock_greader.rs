@@ -268,6 +268,10 @@ pub struct MockGReader {
     /// Fever items response snapshot barrier (state-lane isolation regression).
     pub fever_items_barrier: Mutex<ContentsBarrierSlot>,
     pub fever_items_calls: std::sync::atomic::AtomicUsize,
+    /// Hold a mark response after the server applied it, before the next ID can
+    /// be sent. This tests source invalidation between per-ID Fever writes.
+    pub fever_mark_barrier: Mutex<ContentsBarrierSlot>,
+    pub fever_mark_calls: std::sync::atomic::AtomicUsize,
 }
 
 /// OPT-007 网络屏障的测试端句柄：`arrived` 在响应即将写回前收到信号，
@@ -349,6 +353,8 @@ impl MockGReader {
             contents_calls: std::sync::atomic::AtomicUsize::new(0),
             fever_items_barrier: Mutex::new(None),
             fever_items_calls: std::sync::atomic::AtomicUsize::new(0),
+            fever_mark_barrier: Mutex::new(None),
+            fever_mark_calls: std::sync::atomic::AtomicUsize::new(0),
         });
 
         let srv = server.clone();
@@ -763,6 +769,17 @@ impl MockGReader {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn arm_fever_mark_barrier(&self, call_index: usize) -> MockBarrier {
+        let (arrived, arrived_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        *self.fever_mark_barrier.lock().unwrap() = Some((call_index, arrived, release_rx));
+        MockBarrier {
+            arrived: arrived_rx,
+            release,
+        }
+    }
+
     /// OPT-007：对 s= 参数包含 `stream_contains` 的 `stream/items/ids` 请求
     /// （响应算定后、写回前）挂起，返回测试端句柄（见 [`MockBarrier`]）。
     #[allow(dead_code)] // 共享 mock 模块被 8 个 test 二进制 include!，各二进制只用到其中一部分
@@ -874,6 +891,29 @@ async fn handle_conn(
     }
 
     let (status, json) = route(&srv, method, path, path_query, &body, &head);
+
+    if path.contains("fever")
+        && parse_query(path_query)
+            .get("mark")
+            .is_some_and(|mark| mark == "item")
+    {
+        let call = srv
+            .fever_mark_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        let barrier = {
+            let mut slot = srv.fever_mark_barrier.lock().unwrap();
+            if slot.as_ref().is_some_and(|(index, _, _)| *index == call) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, arrived, release)) = barrier {
+            let _ = arrived.send(());
+            let _ = release.await;
+        }
+    }
 
     // Fever actions are bare query flags (`?api&items`), whereas parse_query
     // intentionally only returns key=value parameters for the GR fixtures.

@@ -118,12 +118,8 @@ async fn merge_content_chunk(
 ) -> ChunkMerge {
     let mut unbound_feeds = BTreeSet::new();
     for e in entries {
-        if let Some(feed_id) = item_feed_remote_id(e) {
-            if !maps.feed_mf_to_id.contains_key(&feed_id)
-                && !maps.excluded_feed_ids.contains(&feed_id)
-            {
-                unbound_feeds.insert(feed_id);
-            }
+        if let Some(feed_id) = entry_unbound_feed(e, maps) {
+            unbound_feeds.insert(feed_id);
         }
     }
     if !unbound_feeds.is_empty() {
@@ -198,12 +194,6 @@ fn pull_now() -> i64 {
     }
 }
 
-fn item_feed_remote_id(e: &greader::ItemContent) -> Option<i64> {
-    e.origin
-        .as_ref()
-        .and_then(|o| greader::parse_feed_numeric_id(&o.stream_id))
-}
-
 /// 注入 greader pull 的游标墙钟（`None` 恢复真实时钟）。
 /// `#[doc(hidden)]`：仅供集成测试构造确定性时间线（TASK-097 成对测试），非公开 API。
 #[doc(hidden)]
@@ -228,22 +218,11 @@ pub(super) async fn pull_entries_greader(
     full: bool,
     versions: Option<&db::SyncMatchMaps>,
 ) -> AppResult<()> {
-    let binding_incomplete = {
+    {
         let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        let account = super::current_account(&conn)?.ok_or_else(|| {
-            AppError::new(
-                "notConnected",
-                "GReader pull 缺少当前同步账号身份，本轮不请求条目",
-            )
-        })?;
-        db::binding_incomplete(&conn, &account.key)?
-    };
-    if binding_incomplete {
-        report.errors.push(
-            "持久绑定不完整标记存在：先完成 feeds 阶段绑定，本轮不请求条目/不推进游标".into(),
-        );
-        return Ok(());
+        if !pull_admitted(&conn, session, report)? {
+            return Ok(());
+        }
     }
 
     let since_s = {
@@ -281,37 +260,6 @@ pub(super) async fn pull_entries_greader(
         maps.pending_star_ids.extend(&versions.pending_star_ids);
     }
 
-    let unbound_remote = {
-        let conn = db.lock().await;
-        session.ensure_current(&conn)?;
-        match db::unbound_remote_feeds(&conn) {
-            Ok(v) => v,
-            Err(e) => {
-                report.errors.push(format!(
-                    "读取未绑定远端源失败，本轮不拉取条目（游标保留）: {e}"
-                ));
-                return Ok(());
-            }
-        }
-    };
-    if !unbound_remote.is_empty() {
-        report.binding_incomplete = true;
-        report.errors.push(format!(
-            "存在 {} 个 origin='remote' 源仍缺 remote_id，本轮不拉取条目（游标保留）: {}",
-            unbound_remote.len(),
-            unbound_remote
-                .iter()
-                .map(|(_, url)| url.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        return Ok(());
-    }
-
-    // 没有任何远端 feed 绑定时，订阅层尚未提供条目可归属的本地源。此时拉取
-    // 条目只会全部“合法跳过”，却仍可能推进时间游标；历史/权威集合请求也
-    // 没有可对账对象。直接跳过本轮条目 pull，等 feeds 阶段建立绑定。
-    // Note: 零远端 feed 绑定不得消费 pull 窗口 — 见 .agents/notes/implemented/bug-fix/2026-10-19-同步集合失败关闭.md
     if maps.feed_mf_to_id.is_empty() {
         log::debug!("greader pull: 尚无远端 feed 绑定，本轮跳过条目拉取");
         return Ok(());
@@ -428,6 +376,9 @@ pub(super) async fn pull_entries_greader(
     let mut binding_failures = 0usize;
     for start in (0..chunk_slices.len()).step_by(PULL_FETCH_CONCURRENCY) {
         let end = (start + PULL_FETCH_CONCURRENCY).min(chunk_slices.len());
+        for chunk in &chunk_slices[start..end] {
+            report.content_requested_ids.extend(chunk.iter().copied());
+        }
         let results = fetch_chunk_batch(db, session, client, &chunk_slices[start..end]).await;
         let mut batch_abort = false;
         for result in results {
@@ -488,42 +439,16 @@ pub(super) async fn pull_entries_greader(
         if !session_is_current(db, session).await {
             return Err(SyncSession::stale_error());
         }
-        // 拉取失败 ≠ 空集合（C-1）：任一权威集合拉取失败即跳过本轮对账，
-        // 避免把网络/服务端错误当成"远端什么都没有"，静默清空本地收藏
-        let (unread_result, starred_result) = tokio::join!(
-            fetch_stream_ids(
-                client,
-                greader::tags::READING_LIST,
-                Some(greader::tags::READ),
-            ),
-            fetch_stream_ids(client, greader::tags::STARRED, None),
-        );
-        // 完整性守卫（结构性）：fetch_stream_ids 的 P2-1 纪律保证 Ok(ids) ⟺
-        // continuation 耗尽——页上限命中 / 请求失败 / 损坏 continuation 一律
-        // Err，本轮跳过 read 差分（fail-closed），不落地任何差分结果；游标
-        // 语义不变（是否推进仍由下方 failures 汇总决定）。
-        let curr_unread: Option<Vec<i64>> = match unread_result {
-            Ok(ids) => Some(ids),
-            Err(e) => {
-                authority_cursor_failures += 1;
-                report.push_client_error(
-                    &e,
-                    format!("unread 权威集合拉取失败，本轮跳过 read 差分: {e}"),
-                );
-                None
-            }
+        // Reuse this attempt's authority results for discovery only. Never replay
+        // these old flags after content or borrow an independent State round.
+        let authority = match report.authority_snapshot.clone() {
+            Some(authority) => authority,
+            None => load_greader_authority(client, None, report).await,
         };
-        let starred_ids = match starred_result {
-            Ok(ids) => Some(ids),
-            Err(e) => {
-                authority_cursor_failures += 1;
-                report.push_client_error(
-                    &e,
-                    format!("starred 权威集合拉取失败，本字段跳过对账: {e}"),
-                );
-                None
-            }
-        };
+        let curr_unread = authority.unread.clone();
+        let starred_ids = authority.starred.clone();
+        authority_cursor_failures +=
+            usize::from(curr_unread.is_none()) + usize::from(starred_ids.is_none());
         // Note: 两个完整集合都补缺身份/正文，保持 pending/版本守卫 — 见 .agents/notes/implemented/bug-fix/2026-11-05-GR权威集合回补与过期意图恢复.md
         if let Some(ids) = curr_unread.as_ref() {
             if !backfill_authority_collection(db, session, client, "unread", ids, &mut maps, report)
@@ -546,6 +471,18 @@ pub(super) async fn pull_entries_greader(
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    // Cold identity proof is Content work, bounded and rotated by the same
+    // existing backfill engine. A trusted binding never enters this set.
+    let proof_ids: Vec<i64> = report.unverified_state_ids.iter().copied().collect();
+    if !proof_ids.is_empty()
+        && !backfill_authority_collection(
+            db, session, client, "origin", &proof_ids, &mut maps, report,
+        )
+        .await?
+    {
+        authority_cursor_failures += 1;
     }
 
     // 更新游标（unix 秒）。TASK-068/069：仅在本轮「窗口确实拿全」时推进——
@@ -575,6 +512,53 @@ pub(super) async fn pull_entries_greader(
     Ok(())
 }
 
+async fn load_greader_authority(
+    client: &GReaderClient,
+    previous: Option<&AuthoritySnapshot>,
+    report: &mut SyncReport,
+) -> Arc<AuthoritySnapshot> {
+    let (unread, starred) = tokio::join!(
+        async {
+            if previous.is_some_and(|snapshot| snapshot.unread.is_none()) {
+                None
+            } else {
+                Some(
+                    fetch_stream_ids(
+                        client,
+                        greader::tags::READING_LIST,
+                        Some(greader::tags::READ),
+                    )
+                    .await,
+                )
+            }
+        },
+        async {
+            if previous.is_some_and(|snapshot| snapshot.starred.is_none()) {
+                None
+            } else {
+                Some(fetch_stream_ids(client, greader::tags::STARRED, None).await)
+            }
+        },
+    );
+    let mut accept = |result: Option<AppResult<Vec<i64>>>, field: &str| match result {
+        Some(Ok(ids)) => Some(ids),
+        Some(Err(error)) => {
+            report.push_client_error(
+                &error,
+                format!("{field} 权威集合拉取失败，本字段跳过对账: {error}"),
+            );
+            None
+        }
+        None => None,
+    };
+    let snapshot = Arc::new(AuthoritySnapshot {
+        unread: accept(unread, "unread"),
+        starred: accept(starred, "starred"),
+    });
+    report.authority_snapshot = Some(snapshot.clone());
+    snapshot
+}
+
 /// Authority-only state read. The state lane serializes HTTP snapshot -> apply;
 /// content pages never reapply flags for existing bound identities.
 pub(super) async fn pull_states_greader(
@@ -586,7 +570,9 @@ pub(super) async fn pull_states_greader(
 ) -> AppResult<()> {
     let mut maps = {
         let conn = db.lock().await;
-        session.ensure_current(&conn)?;
+        if !pull_admitted(&conn, session, report)? {
+            return Ok(());
+        }
         db::sync_match_maps(&conn)?
     };
     if let Some(versions) = versions {
@@ -597,45 +583,30 @@ pub(super) async fn pull_states_greader(
     if maps.mf_id_to_article.is_empty() {
         return Ok(());
     }
-    let (unread_result, starred_result) = tokio::join!(
-        fetch_stream_ids(
-            client,
-            greader::tags::READING_LIST,
-            Some(greader::tags::READ)
-        ),
-        fetch_stream_ids(client, greader::tags::STARRED, None),
-    );
-    let curr_unread = match unread_result {
-        Ok(ids) => Some(ids),
-        Err(error) => {
-            report.push_client_error(
-                &error,
-                format!("unread 权威集合拉取失败，本字段跳过对账: {error}"),
-            );
-            None
+    let previous = report.authority_snapshot.clone();
+    let authority = load_greader_authority(client, previous.as_deref(), report).await;
+    let curr_unread = authority.unread.as_ref();
+    let starred_for_reconcile = authority.starred.as_ref();
+    {
+        let conn = db.lock().await;
+        if !pull_admitted(&conn, session, report)? {
+            return Ok(());
         }
-    };
-    let starred_for_reconcile = match starred_result {
-        Ok(ids) => Some(ids),
-        Err(error) => {
-            report.push_client_error(
-                &error,
-                format!("starred 权威集合拉取失败，本字段跳过对账: {error}"),
-            );
-            None
-        }
-    };
+        collect_unverified_state_ids(&conn, &maps, &authority, report)?;
+    }
     // Complete collection only; missing identities are left to the content lane.
-    if let Some(curr_unread_ids) = curr_unread.as_ref() {
+    if let Some(curr_unread_ids) = curr_unread {
         let unread_apply_result = {
             let conn = db.lock().await;
-            session.ensure_current(&conn)?;
+            if !pull_admitted(&conn, session, report)? {
+                return Ok(());
+            }
             (|| -> AppResult<()> {
                 for remote_id in curr_unread_ids {
                     let Some(&aid) = maps.mf_id_to_article.get(remote_id) else {
                         continue;
                     };
-                    if !maps.article_source_is_current(&conn, aid)? {
+                    if !maps.state_binding_is_current(&conn, aid, *remote_id)? {
                         continue;
                     }
                     let version = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0)).0;
@@ -664,7 +635,9 @@ pub(super) async fn pull_states_greader(
         if !confirmed.is_empty() {
             let conn = db.lock().await;
             // OPT-006：差分落地是回写边界——代际失配丢弃整份确认集。
-            session.ensure_current(&conn)?;
+            if !pull_admitted(&conn, session, report)? {
+                return Ok(());
+            }
             if let Err(e) = apply_unread_diff_marks(&conn, &confirmed, &candidates, &maps, report) {
                 report.errors.push(format!(
                     "read 差分落地中断：本地写入失败（{e}），下一轮重放"
@@ -676,8 +649,10 @@ pub(super) async fn pull_states_greader(
     if starred_for_reconcile.is_some() {
         let conn = db.lock().await;
         // OPT-006：对账是回写边界——代际失配丢弃整份成功集合。
-        session.ensure_current(&conn)?;
-        if let Some(ids) = starred_for_reconcile.as_deref() {
+        if !pull_admitted(&conn, session, report)? {
+            return Ok(());
+        }
+        if let Some(ids) = starred_for_reconcile {
             if let Err(e) = reconcile_reader_state(&conn, None, Some(ids), &maps, report) {
                 report.errors.push(format!(
                     "starred 状态对账中断：本地写入失败（{e}），下一轮重放"
@@ -715,7 +690,14 @@ async fn backfill_authority_collection(
         let needed: BTreeSet<i64> = ids
             .iter()
             .copied()
-            .filter(|id| !with_body.contains(id))
+            .filter(|id| {
+                if collection == "origin" {
+                    !maps.verified_remote_ids.contains(id)
+                        && !report.content_requested_ids.contains(id)
+                } else {
+                    !with_body.contains(id)
+                }
+            })
             .collect();
         let previous = db::get_setting(&conn, &progress_key)?
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
@@ -730,7 +712,15 @@ async fn backfill_authority_collection(
         let start = needed_ids.partition_point(|id| *id <= previous_id);
         needed_ids.rotate_left(start);
     }
-    let budget = needed_ids.len().min(GR_BACKFILL_MAX_IDS_PER_SYNC);
+    let remaining = if collection == "origin" {
+        GR_BACKFILL_MAX_IDS_PER_SYNC.saturating_sub(report.origin_proof_requested_ids.len())
+    } else {
+        GR_BACKFILL_MAX_IDS_PER_SYNC
+    };
+    let budget = needed_ids.len().min(remaining);
+    if budget == 0 {
+        return Ok(true);
+    }
     // W3-2：回补请求同样有界并发（批内 ≤ PULL_FETCH_CONCURRENCY、按原块顺序
     // 逐块合并）；首块失败即该侧软失败（fail-closed），同批在途请求无法撤回
     // 属既有「已发出的请求不能撤回」边界，后续批次不再发起。
@@ -739,6 +729,14 @@ async fn backfill_authority_collection(
         .collect();
     for start in (0..chunk_slices.len()).step_by(PULL_FETCH_CONCURRENCY) {
         let end = (start + PULL_FETCH_CONCURRENCY).min(chunk_slices.len());
+        for chunk in &chunk_slices[start..end] {
+            report.content_requested_ids.extend(chunk.iter().copied());
+            if collection == "origin" {
+                report
+                    .origin_proof_requested_ids
+                    .extend(chunk.iter().copied());
+            }
+        }
         let results = fetch_chunk_batch(db, session, client, &chunk_slices[start..end]).await;
         for result in results {
             let entries = match result {
@@ -765,12 +763,8 @@ async fn backfill_authority_collection(
             // 未绑定的源只跳过其条目，继续处理同块中已绑定的尾部；保留游标。
             let mut unbound_feeds = BTreeSet::new();
             for e in &entries {
-                if let Some(feed_id) = item_feed_remote_id(e) {
-                    if !maps.feed_mf_to_id.contains_key(&feed_id)
-                        && !maps.excluded_feed_ids.contains(&feed_id)
-                    {
-                        unbound_feeds.insert(feed_id);
-                    }
+                if let Some(feed_id) = entry_unbound_feed(e, maps) {
+                    unbound_feeds.insert(feed_id);
                 }
             }
             if !unbound_feeds.is_empty() {
@@ -913,7 +907,9 @@ async fn collect_unread_diff_candidates(
         .mf_id_to_article
         .iter()
         .filter(|(remote_id, _)| {
-            unread_remote.contains(remote_id) && !curr_unread_set.contains(remote_id)
+            maps.verified_remote_ids.contains(remote_id)
+                && unread_remote.contains(remote_id)
+                && !curr_unread_set.contains(remote_id)
         })
         .map(|(remote_id, aid)| (*remote_id, *aid))
         .collect())
@@ -995,7 +991,7 @@ fn apply_unread_diff_marks(
 ) -> AppResult<()> {
     let confirmed_set: HashSet<i64> = confirmed.iter().copied().collect();
     for (remote_id, aid) in candidates {
-        if !maps.article_source_is_current(conn, *aid)? {
+        if !maps.state_binding_is_current(conn, *aid, *remote_id)? {
             continue;
         }
         if !confirmed_set.contains(remote_id) {
@@ -1050,7 +1046,7 @@ fn reconcile_reader_state(
 
     for (remote_id, aid) in &maps.mf_id_to_article {
         let aid = *aid;
-        if !maps.article_source_is_current(conn, aid)? {
+        if !maps.state_binding_is_current(conn, aid, *remote_id)? {
             continue;
         }
         // OPT-007：字段版本快照（pull 起点）+ 字段 pending 交给政策守卫；
@@ -1150,6 +1146,9 @@ mod tests {
             .unwrap()
             .0;
         db::set_article_remote_id(conn, aid, remote_id).unwrap();
+        // This policy fixture represents a prior content response with origin
+        // feed/10. A bare local binding is covered separately as untrusted.
+        assert!(db::confirm_article_remote_origin(conn, aid, remote_id, 10).unwrap());
         aid
     }
 
@@ -1181,6 +1180,7 @@ mod tests {
             id_to_versions: std::iter::once((aid, (0, 0))).collect(),
             feed_mf_to_id: Default::default(),
             mf_id_to_article: std::iter::once((remote_id, aid)).collect(),
+            verified_remote_ids: db::sync_match_maps(conn).unwrap().verified_remote_ids,
         }
     }
 

@@ -86,6 +86,9 @@ fn seed_article_in(
     .unwrap();
     let article_id = conn.last_insert_rowid();
     db::set_article_remote_id(conn, article_id, remote_id).unwrap();
+    // ACK fixtures model an identity proved by an earlier feed/10 response,
+    // including entries subsequently removed remotely. Cold IDs are separate.
+    assert!(db::confirm_article_remote_origin(conn, article_id, remote_id, 10).unwrap());
     article_id
 }
 
