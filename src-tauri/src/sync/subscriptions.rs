@@ -1283,14 +1283,80 @@ fn insert_remote_feed_bound(
     title: &str,
     folder_id: i64,
     remote_id: i64,
-) -> AppResult<i64> {
+) -> AppResult<Option<(i64, String, i64)>> {
     let tx = conn.transaction()?;
+    // insert_feed_origin can reactivate a retained row. Establish creation from
+    // the actual pre-insert row, not from lifecycle_version==0 alone.
+    let existed: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM feeds WHERE feed_url=?1)",
+        [url],
+        |row| row.get(0),
+    )?;
     let feed_id = db::insert_feed_origin(
         &tx, url, site_url, title, None, folder_id, "inherit", false, false, "remote",
     )?;
     db::set_feed_remote_id(&tx, feed_id, remote_id)?;
+    let (source_id, lifecycle): (String, i64) = tx.query_row(
+        "SELECT sync_id,lifecycle_version FROM feeds WHERE id=?1 AND active=1",
+        [feed_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     tx.commit()?;
-    Ok(feed_id)
+    Ok((!existed && lifecycle == 0).then_some((feed_id, source_id, lifecycle)))
+}
+
+#[cfg(test)]
+mod discovery_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn only_successful_first_creation_produces_a_source_receipt() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::MIGRATIONS.to_latest(&mut conn).unwrap();
+        let folder = db::create_folder(&conn, "receipt", "article").unwrap();
+        let (id, token, version) = insert_remote_feed_bound(
+            &mut conn,
+            "https://receipt.invalid/new",
+            None,
+            "new",
+            folder,
+            10,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(version, 0);
+        assert!(!token.is_empty());
+        db::delete_feed(&conn, id).unwrap();
+        assert!(insert_remote_feed_bound(
+            &mut conn,
+            "https://receipt.invalid/new",
+            None,
+            "revived",
+            folder,
+            10
+        )
+        .unwrap()
+        .is_none());
+        conn.execute_batch(
+            "CREATE TRIGGER receipt_binding_failure BEFORE UPDATE OF remote_id ON feeds
+            WHEN NEW.remote_id=11 BEGIN SELECT RAISE(ABORT,'receipt binding failed'); END;",
+        )
+        .unwrap();
+        assert!(insert_remote_feed_bound(
+            &mut conn,
+            "https://receipt.invalid/failed",
+            None,
+            "failed",
+            folder,
+            11
+        )
+        .is_err());
+        let created: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM feeds WHERE feed_url='https://receipt.invalid/failed')", [], |row| row.get(0)).unwrap();
+        assert!(
+            !created,
+            "a failed binding transaction cannot expose a new-source receipt or row"
+        );
+    }
 }
 
 fn prune_historical_unbound_remote_orphans(
@@ -1599,8 +1665,14 @@ pub(super) async fn pull_feeds(
                     // 错误被静默吞掉、report.errors 保持为空，前端仍提示「已拉取订阅源」
                     // 「后端同步完成」——用户看到成功、实际零订阅。
                     match inserted {
-                        Ok(_) => {
+                        Ok(created) => {
                             report.pulled_feeds += 1;
+                            if let Some((id, source_id, lifecycle)) = created {
+                                report
+                                    .discovered_sources
+                                    .entry(id)
+                                    .or_insert((source_id, lifecycle));
+                            }
                         }
                         Err(e) => {
                             import_incomplete = true;

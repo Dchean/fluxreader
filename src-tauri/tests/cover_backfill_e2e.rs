@@ -931,7 +931,7 @@ async fn server_backend_matrix(shape: ServerShape) {
         "<p>no image in body</p>",
         Vec::new(),
     );
-    app_lib::sync::sync_light(&db, &http)
+    app_lib::sync::states_phase(&db, &http, false)
         .await
         .expect("light sync");
 

@@ -213,7 +213,9 @@ async fn stale_remote_read_converges_via_full_reconcile() {
     // light 增量：此前 changed_after 增量拉不到这条旧变更（changed_at 早于游标），
     // 导致「Miniflux 已读但本地未读」漂移。修复后 light 同步末尾有未读状态精确
     // 对账（GET /v1/entries/ids?status=unread），即使增量漏掉也能收敛。
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
     {
         let conn = db.lock().await;
         let is_read: bool = conn

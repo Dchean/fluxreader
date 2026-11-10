@@ -582,12 +582,41 @@ pub fn spawn_scheduler(app: AppHandle) {
         let db = state_app.state::<AppState>().db.clone();
         let http = state_app.state::<AppState>().http.clone();
         let runtime = crate::sync::runtime::for_db(&db);
+        // Recover durable intent once at startup. Periodic polls must not keep
+        // waking the mailbox and bypassing its exponential failure backoff.
+        let pending = {
+            let conn = db.lock().await;
+            crate::db::sync_queue_stats(&conn).map(|stats| stats.waiting > 0)
+        };
+        match pending {
+            Ok(true) => crate::commands::schedule_state_push_for_db(&db, &http),
+            Ok(false) => {}
+            Err(error) => crate::diagnostics::record(0, "push", "error", Some(&error)),
+        }
+        let mut delay = Duration::from_secs(30);
         loop {
             tokio::select! {
                 _=runtime.wait_for_stop()=>return,
-                _=tokio::time::sleep(Duration::from_secs(30))=>{},
+                _=tokio::time::sleep(delay)=>{},
             }
-            auto_sync_backend(&db, &http, &state_app).await;
+            delay = if run_background_states(&db, &http, false).await {
+                Duration::from_secs(30)
+            } else {
+                (delay * 2).min(Duration::from_secs(300))
+            };
+        }
+    });
+    let content_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let db = content_app.state::<AppState>().db.clone();
+        let http = content_app.state::<AppState>().http.clone();
+        let runtime = crate::sync::runtime::for_db(&db);
+        loop {
+            tokio::select! {
+                _ = runtime.wait_for_stop() => return,
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {},
+            }
+            auto_sync_backend(&db, &http, &content_app).await;
         }
     });
     tauri::async_runtime::spawn(async move {
@@ -639,16 +668,64 @@ pub fn spawn_scheduler(app: AppHandle) {
     });
 }
 
-/// 后端状态轮独立于内容刷新：autoSync开启时30秒唤醒，普通轮按至多1分钟间隔。
-/// 失败经同步活动终态上报；下个 tick 仍会因 last_sync 未推进而重试。
-/// 状态被拉平后发 feeds-updated——前端列表/未读计数与 DB 不再脱节
-/// （pull 改变了 is_read 但用户无感知的"静默漂移"问题）。
+/// Content/subscription work has its own bounded loop; its wait cannot hold the
+/// authority state reader. Existing cursor/discovery throttles remain here.
 async fn auto_sync_backend(
     db: &Arc<tokio::sync::Mutex<Connection>>,
     http: &reqwest::Client,
     app: &AppHandle,
 ) {
     run_background_sync(db, http, app, false).await;
+}
+
+async fn state_sync_enabled(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+) -> crate::error::AppResult<bool> {
+    let conn = db.lock().await;
+    let settings = crate::db::get_setting(&conn, "app_settings")?
+        .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+        .transpose()?;
+    if settings
+        .as_ref()
+        .and_then(|value| value.get("autoSync"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        return Ok(false);
+    }
+    if crate::sync::current_account(&conn)?.is_none() {
+        return Ok(false);
+    }
+    crate::db::has_remote_feed_binding(&conn)
+}
+
+/// No content cursor, subscription discovery or outbox is a prerequisite for a
+/// known entry's read/star state. The state reader emits its committed changes.
+async fn run_background_states(
+    db: &Arc<tokio::sync::Mutex<Connection>>,
+    http: &reqwest::Client,
+    focus: bool,
+) -> bool {
+    let runtime = crate::sync::runtime::for_db(db);
+    if runtime.is_stopped() || matches!(state_sync_enabled(db).await, Ok(false)) {
+        return true;
+    }
+    let db = db.clone();
+    let http = http.clone();
+    runtime
+        .run_in(
+            crate::sync::runtime::SyncLane::State,
+            if focus { "focus" } else { "auto" },
+            async move {
+                if !state_sync_enabled(&db).await? {
+                    return Ok(crate::sync::SyncReport::default());
+                }
+                crate::sync::runtime::stage("states");
+                crate::sync::sync_states_now(&db, &http).await
+            },
+        )
+        .await
+        .is_ok_and(|report| report.errors.is_empty())
 }
 
 struct BackendSyncPlan {
@@ -759,7 +836,7 @@ async fn run_background_sync(
             }
             crate::sync::runtime::stage("states");
             let result = if plan.normal_due {
-                crate::sync::sync_light(&db, &http).await
+                crate::sync::states_phase(&db, &http, false).await
             } else if plan.discovery_due {
                 crate::sync::sync_subscription_discovery(&db, &http).await
             } else {
@@ -878,7 +955,12 @@ pub fn on_window_focused(app: AppHandle) {
 async fn focus_triggered_sync(app: &AppHandle) {
     let db = app.state::<AppState>().db.clone();
     let http = app.state::<AppState>().http.clone();
-    run_background_sync(&db, &http, app, true).await;
+    // Both futures enter separate managed lanes. A slow subscription/content
+    // round cannot delay the first state request on returning to the window.
+    tokio::join!(
+        run_background_states(&db, &http, true),
+        run_background_sync(&db, &http, app, true),
+    );
 }
 
 /// 通知开关开启 且 主窗口不可见（最小化到托盘/失焦）。

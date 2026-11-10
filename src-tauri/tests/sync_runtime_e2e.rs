@@ -2,7 +2,7 @@ mod common;
 mod mock_greader;
 
 use app_lib::error::AppError;
-use app_lib::sync::runtime::{self, RuntimeEvent, SyncRuntime};
+use app_lib::sync::runtime::{self, RuntimeEvent, SyncLane, SyncRuntime};
 use app_lib::{db, sync};
 use mock_greader::MockGReader;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,6 +17,142 @@ fn observed_runtime() -> (Arc<SyncRuntime>, Arc<Mutex<Vec<RuntimeEvent>>>) {
         SyncRuntime::new(move |event| captured.lock().unwrap().push(event)),
         events,
     )
+}
+
+#[tokio::test]
+async fn three_lanes_overlap_but_each_lane_serializes_and_stop_cancels_all() {
+    let (runtime, events) = observed_runtime();
+    let mut tasks = Vec::new();
+    for lane in [SyncLane::Content, SyncLane::State, SyncLane::Push] {
+        let (started, arrived) = oneshot::channel();
+        let instance = runtime.clone();
+        tasks.push(tokio::spawn(async move {
+            instance
+                .run_in(lane, "auto", async move {
+                    started.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                    Ok(())
+                })
+                .await
+        }));
+        tokio::time::timeout(Duration::from_secs(2), arrived)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let unexpected = Arc::new(AtomicUsize::new(0));
+    for lane in [SyncLane::Content, SyncLane::State, SyncLane::Push] {
+        let instance = runtime.clone();
+        let unexpected = unexpected.clone();
+        tasks.push(tokio::spawn(async move {
+            instance
+                .run_in(lane, "focus", async move {
+                    unexpected.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+        }));
+    }
+    tokio::task::yield_now().await;
+    assert_eq!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.phase == "started")
+            .count(),
+        3
+    );
+    assert!(runtime.drain(Duration::from_secs(2)).await);
+    for task in tasks {
+        assert_eq!(task.await.unwrap().unwrap_err().code, "syncCancelled");
+    }
+    assert_eq!(unexpected.load(Ordering::SeqCst), 0);
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.phase == "finished")
+            .count(),
+        3
+    );
+    assert!(events
+        .windows(2)
+        .all(|pair| pair[0].sequence < pair[1].sequence));
+    assert!(events
+        .iter()
+        .filter(|event| event.phase == "finished")
+        .all(|event| event.outcome.as_deref() == Some("cancelled")));
+}
+
+#[tokio::test]
+async fn nested_content_to_state_waits_for_state_permit_and_reverse_nesting_errors() {
+    let (runtime, events) = observed_runtime();
+    let (started, arrived) = oneshot::channel();
+    let (release, held) = oneshot::channel();
+    let state = {
+        let instance = runtime.clone();
+        tokio::spawn(async move {
+            instance
+                .run_in(SyncLane::State, "auto", async move {
+                    started.send(()).unwrap();
+                    held.await.unwrap();
+                    Ok(())
+                })
+                .await
+        })
+    };
+    arrived.await.unwrap();
+    let entered = Arc::new(AtomicUsize::new(0));
+    let content = {
+        let instance = runtime.clone();
+        let nested = runtime.clone();
+        let entered = entered.clone();
+        tokio::spawn(async move {
+            instance
+                .run("manual", async move {
+                    nested
+                        .run_in(SyncLane::State, "states", async move {
+                            entered.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                        .await
+                })
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        0,
+        "same runtime cannot bypass another lane's permit"
+    );
+    release.send(()).unwrap();
+    state.await.unwrap().unwrap();
+    content.await.unwrap().unwrap();
+    assert_eq!(entered.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.phase == "started")
+            .count(),
+        2,
+        "nested state keeps the manual activity"
+    );
+    let nested = runtime.clone();
+    let error = runtime
+        .run_in(SyncLane::State, "focus", async move {
+            nested.run("manual", async { Ok(()) }).await
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "internal");
+    assert_eq!(
+        events.lock().unwrap().last().unwrap().outcome.as_deref(),
+        Some("error")
+    );
 }
 
 #[tokio::test]

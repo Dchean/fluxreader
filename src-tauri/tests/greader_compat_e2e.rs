@@ -1755,7 +1755,7 @@ async fn greader_light_sync_without_remote_feed_binding_skips_pull_entirely() {
         db::set_last_sync_ts(&conn, 345_678).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("no remote feed binding is a benign skip");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -1865,7 +1865,7 @@ async fn greader_light_sync_with_bound_feed_still_pulls() {
         db::set_last_sync_ts(&conn, 456_789).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("bound feed should pull normally");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -1897,7 +1897,7 @@ async fn greader_zero_binding_light_discovers_first_remote_feed_without_subscrip
         db::clear_zero_binding_discovery_attempts(&conn).unwrap();
     }
 
-    let first = sync::sync_light(&db, &reqwest::Client::new())
+    let first = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("first discovery round");
     assert!(first.errors.is_empty(), "{:?}", first.errors);
@@ -1911,7 +1911,7 @@ async fn greader_zero_binding_light_discovers_first_remote_feed_without_subscrip
         assert_eq!(db::last_sync_ts(&conn).unwrap(), 0);
     }
 
-    let second = sync::sync_light(&db, &reqwest::Client::new())
+    let second = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("throttled discovery round");
     assert!(second.errors.is_empty(), "{:?}", second.errors);
@@ -1933,7 +1933,7 @@ async fn greader_zero_binding_light_discovers_first_remote_feed_without_subscrip
         db::clear_zero_binding_discovery_attempts(&conn).unwrap();
     }
 
-    let third = sync::sync_light(&db, &reqwest::Client::new())
+    let third = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("automatic discovery and pull");
     assert!(third.errors.is_empty(), "{:?}", third.errors);
@@ -1984,7 +1984,7 @@ async fn greader_partial_remote_feed_binding_keeps_cursor() {
         db::set_last_sync_ts(&conn, 567_890).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("partial binding is reported without aborting the phase");
     assert!(
@@ -2017,7 +2017,7 @@ async fn greader_entry_feed_without_local_binding_keeps_cursor() {
         db::set_last_sync_ts(&conn, 579_013).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("unknown entry feed is reported");
     assert!(
@@ -2831,7 +2831,7 @@ async fn greader_unknown_feed_after_discovery_retries_once() {
         db::clear_zero_binding_discovery_attempts(&conn).unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("unknown feed retry");
     assert!(
@@ -2893,7 +2893,7 @@ async fn greader_discovery_binding_write_failure_is_reported() {
         .unwrap();
     }
 
-    let report = sync::sync_light(&db, &reqwest::Client::new())
+    let report = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("binding error is reported in SyncReport");
     assert!(
@@ -3180,13 +3180,13 @@ async fn failed_subscription_discovery_is_throttled() {
         db::clear_zero_binding_discovery_attempts(&conn).unwrap();
     }
 
-    let first = sync::sync_light(&db, &reqwest::Client::new())
+    let first = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("discovery protocol failure is report-visible");
     assert!(!first.errors.is_empty(), "首次发现失败必须可见");
     assert_eq!(srv.subscription_list_requests(), 1);
 
-    let second = sync::sync_light(&db, &reqwest::Client::new())
+    let second = sync::states_phase(&db, &reqwest::Client::new(), false)
         .await
         .expect("throttled retry");
     assert!(

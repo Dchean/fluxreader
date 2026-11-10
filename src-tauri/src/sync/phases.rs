@@ -289,7 +289,7 @@ async fn states_phase_inner(
 /// 重试时不得重复节流判定，也不得因节流窗口错过重拉。
 async fn states_phase_in_session(
     db: &Arc<Mutex<Connection>>,
-    session: &SyncSession,
+    session: &Arc<SyncSession>,
     full: bool,
     discovery_attempted: bool,
 ) -> AppResult<SyncReport> {
@@ -299,6 +299,22 @@ async fn states_phase_in_session(
     } else if !full {
         log::debug!("sync: 订阅发现尚未到期，本轮跳过只读订阅拉取");
     }
+    // This complete round keeps one local intent/source baseline across both
+    // authority reads and the content pass. A later HTTP request does not erase
+    // user actions that happened during this round, even after their ACK.
+    let mut versions = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        match db::sync_match_maps(&conn) {
+            Ok(maps) => Arc::new(maps),
+            Err(error) => {
+                report.errors.push(format!(
+                    "同步匹配映射构建失败，本轮不合并（游标保留）: {error}"
+                ));
+                return Ok(report);
+            }
+        }
+    };
     // 同一 states 轮的首推尝试集合：pull 后补推只消费新绑定/新入队项，
     // 不把本轮刚进入 retry_wait 的行（尤其 Fever toggle）再发一次。
     let mut attempted_this_round = std::collections::HashSet::new();
@@ -376,9 +392,10 @@ async fn states_phase_in_session(
             notify_queue_changed(db).await;
         }
     }
+    report.absorb(read_states_in_session(db, session, Some(versions.clone())).await?);
     {
         let _pull_guard = PULL_LOCK.lock().await;
-        pull_entries(db, session, &mut report, full).await?;
+        pull_entries(db, session, &mut report, full, Some(&versions)).await?;
         if report.binding_incomplete {
             let retry_discovery = if discovery_attempted {
                 true
@@ -395,8 +412,19 @@ async fn states_phase_in_session(
             };
             if retry_discovery {
                 pull_feeds(db, session, &mut report).await;
+                // Only this import's committed first-creation receipts extend
+                // the old baseline. Never refresh an old source's lifecycle or
+                // any local field version after an in-flight user operation.
+                let original = Arc::get_mut(&mut versions)
+                    .ok_or_else(|| AppError::internal("来源发现完成后同步基线仍被并发使用"))?;
+                for (id, token) in &report.discovered_sources {
+                    original
+                        .source_versions
+                        .entry(*id)
+                        .or_insert_with(|| token.clone());
+                }
                 // 只重试一次；若仍不完整，report 保留错误供下一节流窗口处理。
-                pull_entries(db, session, &mut report, full).await?;
+                pull_entries(db, session, &mut report, full, Some(&versions)).await?;
             }
         }
     }
@@ -472,7 +500,30 @@ async fn states_phase_in_session(
             notify_queue_changed(db).await;
         }
     }
+    // New identities/first bindings from the content pass now belong to the state
+    // reader. Take a new snapshot, never reuse the pre-content remote flags.
+    report.absorb(read_states_in_session(db, session, Some(versions.clone())).await?);
+    commit_content_cursor(db, session, &mut report).await?;
     Ok(report)
+}
+
+async fn commit_content_cursor(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    report: &mut SyncReport,
+) -> AppResult<()> {
+    if !report.states_incomplete && !report.binding_incomplete {
+        if let Some(candidate) = report.content_cursor_candidate.take() {
+            let conn = db.lock().await;
+            session.ensure_current(&conn)?;
+            if let Err(error) = db::set_last_sync_ts(&conn, candidate) {
+                report
+                    .errors
+                    .push(format!("同步完成时间/游标写入失败（保留旧游标）: {error}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// 完整同步（全量路径）：feeds 阶段 + states 阶段（full 对账）串联。
@@ -494,21 +545,82 @@ async fn sync_now_inner(
 ) -> AppResult<SyncReport> {
     let mut report = feeds_phase(db, http).await?;
     let states = states_phase(db, http, true).await?;
-    report.pushed_states = states.pushed_states;
-    report.pulled_entries = states.pulled_entries;
-    // R3：条目层实际变化标记必须跨阶段汇聚（缺了它，sync_now 路径上正文/
-    // 绑定/对账的真实变化会被漏发事件）。旧计数保持既有形状不动（兼容）。
-    report.entries_data_changed |= states.entries_data_changed;
-    report.errors.extend(states.errors);
+    report.absorb(states);
     Ok(report)
 }
 
-/// 轻量同步（后台自动调度）：push 队列 + 增量 pull。
-pub async fn sync_light(
+/// 快速状态读取：只读取已绑定条目的权威状态，不拉正文或订阅。
+/// 本机队列由持久mailbox独立推送；完整条目同步仍用states_phase。
+pub async fn sync_states_now(
     db: &Arc<Mutex<Connection>>,
     http: &reqwest::Client,
 ) -> AppResult<SyncReport> {
-    states_phase(db, http, false).await
+    let runtime = runtime::for_db(db);
+    let db = db.clone();
+    let http = http.clone();
+    runtime
+        .run_in(runtime::SyncLane::State, "states", async move {
+            runtime::check_generation(&db).await?;
+            let lease = match acquire_session(&db, &http).await {
+                Ok(lease) => lease,
+                Err(ClientBuildFailure::NotConfigured) => {
+                    return Err(AppError::new("notConnected", "未配置同步后端"));
+                }
+                Err(ClientBuildFailure::Stale) => return Err(SyncSession::stale_error()),
+                Err(ClientBuildFailure::CorruptGeneration(error))
+                | Err(ClientBuildFailure::Failed { err: error, .. }) => return Err(error),
+            };
+            let mut report = read_states_in_session(&db, &lease.session, None).await?;
+            if lease.from_cache && report_has_auth_failure(&report) {
+                if let Some(fresh) = reauth_after_auth_failure(&db, &http, &lease).await {
+                    runtime::accept_generation(fresh.generation)?;
+                    let mut retry = read_states_in_session(&db, &fresh, None).await?;
+                    retry.preserve_changes_from(&report);
+                    report = retry;
+                }
+            }
+            Ok(report)
+        })
+        .await
+}
+
+/// Reuses the caller's lifecycle and account generation, while acquiring the
+/// state lane if called from a complete content round.
+async fn read_states_in_session(
+    db: &Arc<Mutex<Connection>>,
+    session: &Arc<SyncSession>,
+    versions: Option<Arc<db::SyncMatchMaps>>,
+) -> AppResult<SyncReport> {
+    let runtime = runtime::for_db(db);
+    let db = db.clone();
+    let session = session.clone();
+    runtime
+        .run_in(runtime::SyncLane::State, "states", async move {
+            runtime::check_generation(&db).await?;
+            runtime::accept_generation(session.generation)?;
+            let mut report = SyncReport::default();
+            let result = match &session.client {
+                Backend::GReader(client) => {
+                    pull_states_greader(&db, &session, client, &mut report, versions.as_deref())
+                        .await
+                }
+                Backend::Fever(client) => {
+                    pull_states_fever(&db, &session, client, &mut report, versions.as_deref()).await
+                }
+            };
+            if let Err(error) = result {
+                if error.code == "staleSession" {
+                    return Err(error);
+                }
+                // Earlier rows may already be committed. Preserve both their event
+                // and the real failure instead of losing the report through `?`.
+                report.push_client_error(&error, format!("状态读取未完成: {error}"));
+            }
+            report.states_incomplete = !report.errors.is_empty();
+            notify_state_data_changed(&mut report);
+            Ok(report)
+        })
+        .await
 }
 
 /// 仅由自动调度器使用的订阅发现路径：节流到期时只读 `pull_feeds`。若本轮
@@ -571,7 +683,7 @@ async fn sync_subscription_discovery_inner(
 /// PULL_LOCK 下拉条目 + 绑定不完整重试一次。
 async fn discovery_pull_in_session(
     db: &Arc<Mutex<Connection>>,
-    session: &SyncSession,
+    session: &Arc<SyncSession>,
     report: &mut SyncReport,
 ) -> AppResult<()> {
     let before = {
@@ -587,12 +699,15 @@ async fn discovery_pull_in_session(
     };
     if after > before {
         let _pull_guard = PULL_LOCK.lock().await;
-        pull_entries(db, session, report, false).await?;
+        pull_entries(db, session, report, false, None).await?;
         if report.binding_incomplete {
             // 新订阅在首次发现与条目读取之间才变为可见时，再发现并重试一次。
             pull_feeds(db, session, report).await;
-            pull_entries(db, session, report, false).await?;
+            pull_entries(db, session, report, false, None).await?;
         }
+        drop(_pull_guard);
+        report.absorb(read_states_in_session(db, session, None).await?);
+        commit_content_cursor(db, session, report).await?;
     }
     Ok(())
 }

@@ -549,6 +549,32 @@ pub fn init_queue_event_target(app: tauri::AppHandle) {
     let _ = QUEUE_EVENT_TARGET.set(app);
 }
 
+/// Publish committed flags immediately, including inside a manual content round.
+/// Waiting for that round to finish would reintroduce the slow-body UI coupling.
+pub(super) fn notify_state_data_changed(report: &mut SyncReport) {
+    let Some(app) = QUEUE_EVENT_TARGET.get() else {
+        return;
+    };
+    if !report.has_data_change() {
+        return;
+    }
+    use tauri::Emitter;
+    if app
+        .emit(
+            "feeds-updated",
+            serde_json::json!({
+                "new_articles": 0, "failed_feeds": 0,
+                "pulled_entries": report.pulled_entries, "merged_states": report.merged_states,
+            }),
+        )
+        .is_err()
+    {
+        report
+            .errors
+            .push("状态已写入本机，但界面更新通知失败，请重试刷新".into());
+    }
+}
+
 /// 即时推送的基础设施错误（计划构建/失败标记/出队写库）走独立事件，前端
 /// 转成带重试入口的错误；普通协议失败仍由队列 `last_error` 展示，不在此重复。
 pub(super) fn emit_sync_error(message: &str) {
@@ -658,10 +684,9 @@ pub async fn push_states_now(db: &Arc<Mutex<Connection>>, http: &reqwest::Client
     let db = db.clone();
     let http = http.clone();
     let _ = runtime
-        .run(
-            "push",
-            async move { push_states_now_inner(&db, &http).await },
-        )
+        .run_in(runtime::SyncLane::Push, "push", async move {
+            push_states_now_inner(&db, &http).await
+        })
         .await;
 }
 

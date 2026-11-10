@@ -61,7 +61,9 @@ async fn miniflux_origin_feed_pulls_new_entries_in_light_sync() {
     );
 
     // 后台轻量同步（full=false）——旧实现只拉 fetch_failed 源，会漏掉这条
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     {
         let conn = db.lock().await;
@@ -208,7 +210,9 @@ async fn miniflux_enclosure_is_not_used_as_cover() {
         enclosures,
     );
 
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     let conn = db.lock().await;
     let (image_url, enclosure_url): (Option<String>, Option<String>) = conn
@@ -254,7 +258,9 @@ async fn miniflux_existing_entry_backfills_cover() {
     );
 
     // 首次 light 同步：new 分支入库，正文无图 → image_url 为 NULL
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
     {
         let conn = db.lock().await;
         let image: Option<String> = conn
@@ -286,7 +292,9 @@ async fn miniflux_existing_entry_backfills_cover() {
     }
 
     // 再次 light 同步：existing 分支（URL 匹配）必须回填封面
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     let conn = db.lock().await;
     let image_url: Option<String> = conn
@@ -394,7 +402,9 @@ async fn miniflux_entry_published_before_cursor_stays_out_of_light_window() {
     }
 
     // 后台轻量同步（full=false）：published 早于游标 → ot 窗口不含它 → 不入库。
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     {
         let conn = db.lock().await;
@@ -505,7 +515,9 @@ async fn light_sync_converges_stale_remote_read_via_unread_ids() {
 
     // light 同步（full=false）：changed_after 增量拉不到这条旧变更，但未读 id
     // 对账必须收敛——本地应从「未读」变为「已读」。
-    sync::sync_light(&db, &http).await.expect("light sync");
+    sync::states_phase(&db, &http, false)
+        .await
+        .expect("light sync");
 
     {
         let conn = db.lock().await;

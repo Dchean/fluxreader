@@ -200,6 +200,13 @@ fn merge_page_tx(
         }
         match merge_pulled_entry(&tx, &it, maps, report) {
             Ok(()) => {
+                if report.binding_incomplete {
+                    failure = Some(AppError::new(
+                        "bindingIncomplete",
+                        "条目来源基线失配，本页与游标保留供下一轮重试",
+                    ));
+                    break;
+                }
                 if let Some(id) = eid {
                     seen.insert(id);
                     added.push(id);
@@ -298,6 +305,7 @@ pub(super) async fn pull_entries_fever(
     client: &fever::FeverClient,
     report: &mut SyncReport,
     full: bool,
+    versions: Option<&db::SyncMatchMaps>,
 ) -> AppResult<()> {
     let binding_incomplete = {
         let conn = db.lock().await;
@@ -338,6 +346,12 @@ pub(super) async fn pull_entries_fever(
             }
         }
     };
+
+    if let Some(versions) = versions {
+        maps.keep_field_versions_from(versions);
+        maps.pending_read_ids.extend(&versions.pending_read_ids);
+        maps.pending_star_ids.extend(&versions.pending_star_ids);
+    }
 
     let unbound_remote = {
         let conn = db.lock().await;
@@ -428,21 +442,21 @@ pub(super) async fn pull_entries_fever(
     // maps 已在任何游标初始化/HTTP 请求前构建，见函数入口。
 
     // ① 权威状态集合（全量 id）：未读 + 收藏。
-    // 拉取失败 ≠ 空集合（C-1）：失败即跳过本轮对账（下方 ⑤ 用 reconcile_ok 守卫），
+    // 拉取失败 ≠ 空集合（C-1）：失败即跳过本轮集合正文回补，
     // 避免静默把本地全部标为已读 / 清空收藏——Fever 对账为远端权威双向语义，误判代价更高。
     // TASK-069 审查 F1：该失败同时意味着「权威集合没拿全」，与②的分块失败同源，
     // 故一并计入守卫——否则时间戳游标照常推进，切回 greader 时会跳过这个窗口。
     let mut collection_failures = 0usize;
     let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
-    let (unread, starred, reconcile_ok) = match (unread, starred) {
-        (Ok(u), Ok(s)) => (u, s, true),
+    let (unread, starred) = match (unread, starred) {
+        (Ok(u), Ok(s)) => (u, s),
         (Err(e), _) | (_, Err(e)) => {
             collection_failures += 1;
             report.push_client_error(
                 &e,
-                format!("状态对账跳过：Fever 状态集合拉取失败（{e}），本轮不合并远端状态"),
+                format!("Fever 正文回补集合拉取失败（{e}），保留内容游标"),
             );
-            (Vec::new(), Vec::new(), false)
+            (Vec::new(), Vec::new())
         }
     };
 
@@ -806,21 +820,8 @@ pub(super) async fn pull_entries_fever(
         }
     }
 
-    // ⑤ 权威状态对账：Fever 无法直接拉已读条目，靠「未读/收藏集合」反推。
-    // 集合拉取失败时整段跳过（C-1），绝不做"空集合 = 远端全变"的对账。
-    if reconcile_ok {
-        let conn = db.lock().await;
-        // OPT-006：对账是回写边界——代际失配丢弃整份权威集合。
-        session.ensure_current(&conn)?;
-        // 审计 P2-8③：对账内的 DB 写失败必须可见——记入 report.errors
-        // （不再被 unwrap_or(0) 伪装成 0 行变化）。已写入行不回滚，
-        // 剩余行下一轮同集合对账幂等重放。
-        if let Err(e) = reconcile_fever_state(&conn, &unread, &starred, &maps, report) {
-            report.errors.push(format!(
-                "状态对账中断：本地状态写入失败（{e}），本轮剩余条目未对账"
-            ));
-        }
-    }
+    // Content collection snapshots above are only for missing-body discovery.
+    // Existing bound flags belong exclusively to pull_states_fever.
 
     // ⑥ 完成时间。`last_sync_entry_id` 与历史 checkpoint 已在各页事务内提交
     // （页数据与游标同 commit），这里不再有「事务外的游标补写」。
@@ -830,18 +831,57 @@ pub(super) async fn pull_entries_fever(
     // OPT-006：完成时间推进前复核代际——旧会话不得写新账号的时间戳游标。
     session.ensure_current(&conn)?;
     let failures = fetch_failures + collection_failures + merge_failures;
-    if failures == 0 {
-        if let Err(e) = db::set_last_sync_ts(&conn, Utc::now().timestamp()) {
-            report.errors.push(format!(
-                "Fever 同步完成时间写入失败（保留旧时间，下轮重试）: {e}"
-            ));
-        }
+    if failures == 0 && !report.states_incomplete && !report.binding_incomplete {
+        report.content_cursor_candidate = Some(Utc::now().timestamp());
     } else {
         log::warn!(
             "fever pull: {fetch_failures} fetch(es) + {collection_failures} collection + {merge_failures} merge failure(s); keeping last_sync_ts"
         );
     }
     drop(conn);
+    Ok(())
+}
+
+/// A complete unread/saved pair is required. Failure is never an empty set.
+/// This method performs no since/history/with_ids content pagination.
+pub(super) async fn pull_states_fever(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    client: &fever::FeverClient,
+    report: &mut SyncReport,
+    versions: Option<&db::SyncMatchMaps>,
+) -> AppResult<()> {
+    let mut maps = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        db::sync_match_maps(&conn)?
+    };
+    if let Some(versions) = versions {
+        maps.keep_field_versions_from(versions);
+        maps.pending_read_ids.extend(&versions.pending_read_ids);
+        maps.pending_star_ids.extend(&versions.pending_star_ids);
+    }
+    if maps.mf_id_to_article.is_empty() {
+        return Ok(());
+    }
+    let (unread, starred) = tokio::join!(client.unread_item_ids(), client.saved_item_ids());
+    let (unread, starred) = match (unread, starred) {
+        (Ok(unread), Ok(starred)) => (unread, starred),
+        (Err(error), _) | (_, Err(error)) => {
+            report.push_client_error(
+                &error,
+                format!("Fever 状态集合拉取失败，本轮不合并远端状态: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    let conn = db.lock().await;
+    session.ensure_current(&conn)?;
+    if let Err(error) = reconcile_fever_state(&conn, &unread, &starred, &maps, report) {
+        report.errors.push(format!(
+            "Fever 状态对账写入失败，本轮剩余条目未对账: {error}"
+        ));
+    }
     Ok(())
 }
 
@@ -895,6 +935,10 @@ fn reconcile_fever_state(
             snap_read,
             maps.pending_read_ids.contains(&aid),
         )?;
+        // Each successful field may already be committed. A later field failure
+        // must not erase its refresh signal or actual changed-row count (A1).
+        report.entries_data_changed |= read_rows > 0;
+        report.merged_states += read_rows;
         // TASK-112 政策（FEVER_STAR_DIRECTION = AuthoritativeBidirectional 双向权威）：
         // 命中 → 收藏；未命中 → 取消收藏。
         let star_rows = conflict_policy::apply_star_by_policy(
@@ -905,10 +949,8 @@ fn reconcile_fever_state(
             snap_star,
             maps.pending_star_ids.contains(&aid),
         )?;
-        if read_rows > 0 || star_rows > 0 {
-            report.entries_data_changed = true;
-        }
-        report.merged_states += read_rows + star_rows;
+        report.entries_data_changed |= star_rows > 0;
+        report.merged_states += star_rows;
     }
     Ok(())
 }

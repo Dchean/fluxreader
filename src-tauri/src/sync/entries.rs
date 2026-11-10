@@ -51,116 +51,6 @@ fn item_published_at(e: &ItemContent) -> Option<String> {
     }
 }
 
-/// 状态合并的守卫语义（pull_entries 与对账共用）：
-/// - 待推保护：本地有未推送变更 → 跳过该**字段**（本地优先，防乒乓）；
-/// - OPT-007 字段版本守卫：pull 起点版本快照 != 当前 DB 版本 → 跳过该字段
-///   （拉取期间本地写过；即使推送已确认、队列已清，版本仍保留）；
-/// - 双向接受精确条目的远端读/藏状态，其他源没有状态传播路径。
-///
-/// OPT-008B 第一阶段：本函数只由**结构性命中自己的行**的调用点进入——
-/// 精确 entry ID 直配（同一 eid 的行）或同 feed URL 兜底（未绑定行首绑）。
-/// 旧 `same_feed_trusted` 启发式（article remote_id + feed remote_id 推导）
-/// 被结构匹配取代：跨源 entry 在选行阶段就不会落到本行，「远端 unread 不得
-/// 复活另一源条目」由身份层而非合并守卫承担。`accept_unread` 保留为显式
-/// 参数，便于未来策略单点扩展。
-///
-/// 字段彼此独立：读的守卫不压收藏的合并，反之亦然（任务卡负例②）。
-///
-/// R2：所有 DB 写失败**透传 Err**（不再 warn 后继续）——Fever 侧据此整页回滚
-/// 并保留输入页游标；GR 侧由调用方记错误且不推进游标（不吞失败）。
-///
-/// R3：状态写改用**值条件**原语（`*_if_unread/_if_read/_if_unstarred/_if_starred`
-/// 的 at_version 形态）——命中行数 = 值实际改变的证据，据此置
-/// `report.entries_data_changed`；`pulled_entries` 仍按旧口径（守卫通过即计数，
-/// 含同值）累计，保持对外统计兼容，但不再充当事件判定依据。
-///
-/// R4：标记在**每个成功实际变更点立即合并**（不等函数尾）——GR 是逐语句提交
-/// （无页事务），绑定/read 写成功后同函数内的 star 写可能 Err，若攒到尾部再
-/// 置位，已提交的变化就失去事件信号。失败本身不算变化（Err 路径不置位），
-/// 只有 rows>0 / binding_changed 才置。
-fn merge_remote_status(
-    conn: &Connection,
-    aid: i64,
-    e: &ItemContent,
-    maps: &mut db::SyncMatchMaps,
-    report: &mut SyncReport,
-    accept_unread: bool,
-) -> AppResult<()> {
-    let Some(eid) = item_numeric_id(e) else {
-        return Ok(());
-    };
-    let binding_changed = db::set_article_remote_id(conn, aid, eid)?;
-    // R3/R4/R5：绑定本身是可见数据变化（NULL/旧 id → 该 entry 的 id）——在
-    // set_article_remote_id **成功之后立即**并入标记：其后任何可失败读取
-    // （article_by_remote_id、字段版本守卫等）或写入失败都不得让已提交的绑定
-    // 变化失去信号（GR 逐语句提交，无页事务）。纯失败不置位（binding_changed
-    // 仅在值实际变化时为 true）。
-    if binding_changed {
-        report.entries_data_changed = true;
-    }
-    // 同步 maps 的绑定状态：同一轮后续条目若命中原行，能读到「已绑定 eid」，
-    // 避免时序偏差（重复页/同页回响）。
-    maps.id_to_mf_id.insert(aid, Some(eid));
-    maps.mf_id_to_article.insert(eid, aid);
-    let remote_read = e.read_state();
-    let remote_starred = e.starred_state();
-    let local_bound = db::article_by_remote_id(conn, eid)?.is_some();
-    let apply_read = remote_read == greader::RemoteState::True
-        || (remote_read == greader::RemoteState::False && accept_unread && local_bound);
-    let apply_star = remote_starred != greader::RemoteState::Missing;
-    if apply_read || apply_star {
-        // OPT-007：逐字段过版本守卫（pull 起点快照 + 当前 DB 版本 + 该字段
-        // pending）。任一方被本地新写入/未推送意图压住时只跳过该字段，另一
-        // 字段不受牵连；两侧都过才把整条计入 pulled_entries（与旧口径「状态
-        // 已接受」对齐）。merge_remote_status 只在 merge_pulled_entry 的 own
-        // 分支调用（同库测试锁定时序），入参 maps 与写入同处一个 DB 临界区。
-        let (snap_read, snap_star) = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0));
-        let read_ok = apply_read
-            && conflict_policy::field_accepts_remote(
-                conn,
-                aid,
-                conflict_policy::SyncField::Read,
-                snap_read,
-                maps.pending_read_ids.contains(&aid),
-            )?;
-        let star_ok = apply_star
-            && conflict_policy::field_accepts_remote(
-                conn,
-                aid,
-                conflict_policy::SyncField::Star,
-                snap_star,
-                maps.pending_star_ids.contains(&aid),
-            )?;
-        if read_ok {
-            if remote_read == greader::RemoteState::True {
-                let rows = db::sync_mark_read_if_unread_at_version(conn, aid, snap_read)?;
-                if rows > 0 {
-                    report.entries_data_changed = true;
-                }
-            } else {
-                let rows = db::sync_mark_unread_if_read_at_version(conn, aid, snap_read)?;
-                if rows > 0 {
-                    report.entries_data_changed = true;
-                }
-            }
-        }
-        if star_ok {
-            let rows = if remote_starred == greader::RemoteState::True {
-                db::sync_mark_starred_if_unstarred_at_version(conn, aid, snap_star)?
-            } else {
-                db::sync_mark_unstarred_if_starred_at_version(conn, aid, snap_star)?
-            };
-            if rows > 0 {
-                report.entries_data_changed = true;
-            }
-        }
-        if read_ok || star_ok {
-            report.pulled_entries += 1;
-        }
-    }
-    Ok(())
-}
-
 /// 精确远端 ID 优先；新身份只在已绑定且有效的源内入库。
 /// URL 仅作为未绑定直连行的候选，正文、标题和附件相等才可首绑。
 /// 未知源不猜归属；调用方记录绑定不完整并保留游标。DB 失败透传。
@@ -172,23 +62,14 @@ pub(super) fn merge_pulled_entry(
 ) -> AppResult<()> {
     let eid = item_numeric_id(e);
     let feed_remote = item_feed_id(e);
-    let remote_read = e.read_state();
     if feed_remote.is_some_and(|id| maps.excluded_feed_ids.contains(&id)) {
         return Ok(());
     }
-    // B2（空 link 身份）：normalize_url 把空串归一为 ''，而 '' 是合法匹配键——
-    // 同轮多条空 link 条目会经 feed_url_to_id[""] 互相借位绑定。与入库路径
-    // （normalized_url_key）同口径：空/纯空白 link 无身份语义，匹配键为 None。
-    // Note: 空 link 身份契约与迁移边界 — 见 .agents/notes/implemented/bug-fix/2026-10-31-GR回补与拉取侧身份与性能修复.md
-    let norm = item_url(e)
-        .as_deref()
-        .map(db::normalize_url)
-        .filter(|n| !n.is_empty());
-
     // ① 精确协议 entry ID 优先。
     if let Some(eid) = eid {
         if let Some(&aid) = maps.mf_id_to_article.get(&eid) {
             if !maps.article_source_is_current(conn, aid)? {
+                report.binding_incomplete = true;
                 return Ok(());
             }
             let row_feed_mf = maps.id_to_feed_mf.get(&aid).copied().flatten();
@@ -197,7 +78,7 @@ pub(super) fn merge_pulled_entry(
                 _ => true,
             };
             if feed_compatible {
-                merge_own_entry(conn, aid, e, maps, report, remote_read, norm.as_deref())?;
+                merge_own_entry(conn, aid, e, report)?;
                 return Ok(());
             }
             // 精确绑定与 feed 元数据冲突（历史脏数据）：**干净拒绝**——既不改写
@@ -229,6 +110,11 @@ pub(super) fn merge_pulled_entry(
         // A local unsubscribe can occur while HTTP is in flight. Recheck at commit time.
         if maps.feed_source_is_current(conn, local_feed)? {
             upsert_remote_entry(conn, local_feed, e, maps, report)?;
+        } else {
+            // Missing/stale source evidence is a skipped content window, not an
+            // empty success. Retry may admit a committed new-source receipt;
+            // an old retired/reactivated source must wait for the next round.
+            report.binding_incomplete = true;
         }
         return Ok(());
     }
@@ -239,17 +125,16 @@ pub(super) fn merge_pulled_entry(
     Ok(())
 }
 
-/// 精确身份：逐字段合并状态，并接收同一远端条目的正文修订。
+/// 已绑定身份只接收正文修订；flags由独立状态通道唯一写入。
 fn merge_own_entry(
     conn: &Connection,
     aid: i64,
     e: &ItemContent,
-    maps: &mut db::SyncMatchMaps,
     report: &mut SyncReport,
-    _remote_read: greader::RemoteState,
-    _norm: Option<&str>,
 ) -> AppResult<()> {
-    merge_remote_status(conn, aid, e, maps, report, true)?;
+    // Note: 不允许慢正文回写已绑定flags — 见
+    // .agents/notes/implemented/architecture/2026-11-05-同步运行生命周期与诊断.md
+    report.pulled_entries += 1;
     if db::refresh_bound_remote_article(conn, aid, &remote_article_input(e))? {
         report.entries_data_changed = true;
     }
@@ -264,11 +149,13 @@ pub(super) async fn pull_entries(
     session: &SyncSession,
     report: &mut SyncReport,
     full: bool,
+    versions: Option<&db::SyncMatchMaps>,
 ) -> AppResult<()> {
     report.binding_incomplete = false;
+    report.content_cursor_candidate = None;
     match &session.client {
-        Backend::GReader(g) => pull_entries_greader(db, session, g, report, full).await,
-        Backend::Fever(f) => pull_entries_fever(db, session, f, report, full).await,
+        Backend::GReader(g) => pull_entries_greader(db, session, g, report, full, versions).await,
+        Backend::Fever(f) => pull_entries_fever(db, session, f, report, full, versions).await,
     }
 }
 
@@ -311,6 +198,9 @@ fn upsert_remote_entry(
     if outcome.inserted || outcome.content_changed {
         report.entries_data_changed = true;
     }
+    // Read the actual binding at commit time, not only the pre-HTTP maps. A
+    // concurrent first bind may already have handed flags to the state lane.
+    let was_bound = db::get_article_remote_id(conn, aid)?.is_some();
     if let Some(eid) = item_numeric_id(e) {
         // R4：绑定成功即置位（后续步骤失败不回退已提交的绑定变化）。
         if db::set_article_remote_id(conn, aid, eid)? {
@@ -333,9 +223,9 @@ fn upsert_remote_entry(
             db::sync_set_star_at_version(conn, aid, true, 0)?;
         }
         report.pulled_entries += 1;
-    } else {
-        // 既有行（典型：pull 起点快照之后直连入库、快照映射尚未包含的同 feed 同
-        // URL 行）：状态逐字段过版本/pending 守卫，与 merge_remote_status 同一套
+    } else if !was_bound {
+        // 首次绑定的既有行（典型：pull 起点快照之后直连入库、快照映射尚未包含的同 feed 同
+        // URL 行）：状态逐字段过版本/pending 守卫，与权威状态读取同一套
         // 语义（read/star 彼此独立，无冲突字段照常收敛）——整值 sync_set_article_status
         // 在这里会回滚快照之后用户的标读/收藏（R2 修复的 P2 反例）。
         // R3/R4：状态写用值条件原语，命中行数当场进标记（守卫通过但值未变仍按
@@ -479,7 +369,8 @@ mod tri_state_tests {
         );
     }
 
-    /// 三态的另一半：显式空 categories 是明确 false，不是未知。
+    /// Parsing still distinguishes false from Missing; neither value lets a
+    /// slow content response take ownership of an already-bound entry's flags.
     #[test]
     fn explicit_empty_categories_are_false() {
         let conn = conn_with_bound_article();
@@ -507,9 +398,47 @@ mod tri_state_tests {
             .unwrap();
         assert_eq!(
             (read, starred),
-            (0, 0),
-            "显式 []=false 必须与缺字段未知区分"
+            (1, 1),
+            "显式false仍不得让正文通道覆盖已绑定状态"
         );
+    }
+
+    #[test]
+    fn first_bind_initializes_remote_flags_but_keeps_field_pending() {
+        for pending in [false, true] {
+            let conn = conn_with_bound_article();
+            conn.execute(
+                "UPDATE articles SET guid=?1,remote_id=NULL WHERE id=1",
+                [db::remote_identity_guid("9001")],
+            )
+            .unwrap();
+            if pending {
+                db::set_read_with_enqueue(&conn, 1, true).unwrap();
+            }
+            let remote: ItemContent = serde_json::from_str(
+                r#"{
+                "id":"9001","title":"remote","categories":[],
+                "origin":{"streamId":"feed/10"}
+            }"#,
+            )
+            .unwrap();
+            let mut maps = db::sync_match_maps(&conn).unwrap();
+            let mut report = SyncReport::default();
+            merge_pulled_entry(&conn, &remote, &mut maps, &mut report).unwrap();
+            let flags: (bool, bool) = conn
+                .query_row(
+                    "SELECT is_read,is_starred FROM articles WHERE id=1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                flags,
+                (pending, false),
+                "first binding preserves only the pending field"
+            );
+            assert_eq!(db::get_article_remote_id(&conn, 1).unwrap(), Some(9001));
+        }
     }
 
     /// Fever 侧的同构保护：categories 存在（含 reading-list）但 is_read/is_saved

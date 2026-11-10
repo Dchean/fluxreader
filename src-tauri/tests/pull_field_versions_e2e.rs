@@ -874,7 +874,7 @@ async fn concurrent_direct_row_binding_change_still_reports_data_change() {
     let barrier = server.arm_stream_ids_barrier("reading-list");
     let db2 = db.clone();
     let http2 = http.clone();
-    let task = tokio::spawn(async move { sync::sync_light(&db2, &http2).await });
+    let task = tokio::spawn(async move { sync::states_phase(&db2, &http2, false).await });
     barrier.arrived.await.expect("屏障已停靠");
 
     // 在途期间：直连入库同 feed 同 URL 行 + 标读 + 收藏 + 模拟推送确认清队。

@@ -988,7 +988,7 @@ async fn refactor_deleted_feed_does_not_block_remaining_feed(full: bool) {
         );
         sync::states_phase(&dbm, &client, true).await.unwrap()
     } else {
-        sync::sync_light(&dbm, &client).await.unwrap()
+        sync::states_phase(&dbm, &client, false).await.unwrap()
     };
     assert!(
         report.errors.is_empty(),
@@ -1041,7 +1041,7 @@ async fn refactor_fever_follows_both_read_and_star_directions() {
             entries[0].read = read;
             entries[0].saved = saved;
         }
-        let report = sync::sync_light(&dbm, &client).await.unwrap();
+        let report = sync::states_phase(&dbm, &client, false).await.unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         let conn = dbm.lock().await;
         assert_eq!(article_state(&conn, 1), Some((read, saved)));
@@ -1510,7 +1510,7 @@ async fn full_sync_reaches_all_125_including_read_non_saved_history() {
     srv.add_entry(126, 10, "条目126", true, false);
     srv.add_entry(127, 10, "条目127", false, false);
     let before_light = srv.hits().len();
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -1854,7 +1854,7 @@ async fn fever_light_sync_without_remote_feed_binding_skips_pull_entirely() {
         db::set_fever_history_pending(&conn, 55).unwrap();
     }
 
-    let report = sync::sync_light(&db, &http())
+    let report = sync::states_phase(&db, &http(), false)
         .await
         .expect("no remote feed binding is a benign skip");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
@@ -1897,7 +1897,7 @@ async fn fever_partial_remote_feed_binding_keeps_cursor_and_history() {
         db::set_fever_history_pending(&conn, 55).unwrap();
     }
 
-    let report = sync::sync_light(&db, &http())
+    let report = sync::states_phase(&db, &http(), false)
         .await
         .expect("partial binding is reported without aborting the phase");
     assert!(
@@ -1941,7 +1941,7 @@ async fn fever_entry_feed_without_local_binding_keeps_cursor_and_history() {
         db::reset_fever_history_state(&conn).unwrap();
     }
 
-    let report = sync::sync_light(&db, &http())
+    let report = sync::states_phase(&db, &http(), false)
         .await
         .expect("unknown entry feed is reported");
     assert!(
@@ -2150,7 +2150,7 @@ async fn malformed_json_items_response_fails_closed_end_to_end() {
         db::set_fever_history_complete(&conn).unwrap();
     }
 
-    let report = sync::sync_light(&db, &http())
+    let report = sync::states_phase(&db, &http(), false)
         .await
         .expect("malformed JSON is report-visible");
     assert!(
@@ -2623,7 +2623,7 @@ async fn history_state_write_failure_blocks_since_and_light_retries() {
         let conn = db.lock().await;
         remove_settings_write_failure(&conn);
     }
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -2681,7 +2681,7 @@ async fn page_insert_failure_rolls_back_page_with_pending_resume() {
         let conn = db.lock().await;
         remove_article_insert_failure(&conn);
     }
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -2743,7 +2743,7 @@ async fn failed_page_rollback_leaves_no_data_change_marker() {
         install_article_update_failure(&conn, "remote-85");
     }
 
-    let report = sync::sync_light(&db, &http_client)
+    let report = sync::states_phase(&db, &http_client, false)
         .await
         .expect("second sync");
     assert!(
@@ -2798,7 +2798,9 @@ async fn unknown_history_state_with_existing_since_auto_backfills() {
         db::set_setting(&conn, "sync_last_entry_id", "100").unwrap();
         // 旧库形态：无 fever_history_state 键（Unknown）。
     }
-    let report = sync::sync_light(&db, &http()).await.expect("light sync");
+    let report = sync::states_phase(&db, &http(), false)
+        .await
+        .expect("light sync");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     {
         let conn = db.lock().await;
@@ -2824,7 +2826,7 @@ async fn corrupt_history_state_errors_without_touching_cursor() {
         db::set_setting(&conn, "sync_last_entry_id", "100").unwrap();
         db::set_setting(&conn, "fever_history_state", "garbage-value").unwrap();
     }
-    let report = sync::sync_light(&db, &http()).await.expect("sync");
+    let report = sync::states_phase(&db, &http(), false).await.expect("sync");
     assert!(
         report
             .errors
@@ -2924,7 +2926,9 @@ async fn since_short_page_after_hook_filter_continues_to_empty() {
         // 历史已完成：本用例只测增量短页继续（Unknown 会自动补历史，混淆前提）。
         db::set_setting(&conn, "fever_history_state", "complete").unwrap();
     }
-    let report = sync::sync_light(&db, &http()).await.expect("light sync");
+    let report = sync::states_phase(&db, &http(), false)
+        .await
+        .expect("light sync");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     {
         let conn = db.lock().await;
@@ -2984,7 +2988,7 @@ async fn full_history_failure_then_light_resumes_automatically() {
     }
 
     // 不跑手动 full：普通 light 同步自动从 checkpoint 续取，直到取尽。
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -3023,7 +3027,7 @@ async fn incremental_failure_cursor_not_pushed_by_with_ids_backfill() {
         db::set_setting(&conn, "fever_history_state", "complete").unwrap();
     }
     let http_client = http();
-    let report = sync::sync_light(&db, &http_client)
+    let report = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(
@@ -3057,7 +3061,7 @@ async fn incremental_failure_cursor_not_pushed_by_with_ids_backfill() {
 
     // 清除注入后继续：从 150 起重新覆盖失败区间，全部 101..225 可达。
     srv.set_since_page_fail_at(9999);
-    let again = sync::sync_light(&db, &http_client)
+    let again = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync 继续");
     assert!(again.errors.is_empty(), "{:?}", again.errors);
@@ -3145,7 +3149,7 @@ async fn history_budget_200_pages_defers_and_light_resumes() {
     }
 
     // 下一次普通 light 自动续取剩余 50 条并完成。
-    let light = sync::sync_light(&db, &http_client)
+    let light = sync::states_phase(&db, &http_client, false)
         .await
         .expect("light sync");
     assert!(light.errors.is_empty(), "{:?}", light.errors);
@@ -3324,7 +3328,9 @@ async fn page_failure_then_rebuild_map_error_terminates_round() {
         ))
         .unwrap();
     }
-    let report = sync::sync_light(&db, &http()).await.expect("light sync");
+    let report = sync::states_phase(&db, &http(), false)
+        .await
+        .expect("light sync");
     assert!(
         report.errors.iter().any(|e| e.contains("增量页合并失败")),
         "页失败必须记录：{:?}",
@@ -4105,7 +4111,7 @@ async fn fever_states_round_sends_mark_item_once_after_verification_failure() {
         db::set_read_with_enqueue(&conn, aid, true).unwrap();
     }
 
-    let report = sync::sync_light(&db, &http())
+    let report = sync::states_phase(&db, &http(), false)
         .await
         .expect("same-round sync");
     assert!(

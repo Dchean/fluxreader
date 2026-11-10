@@ -17,9 +17,30 @@ type RuntimeRegistry = HashMap<usize, (Weak<AsyncMutex<Connection>>, Arc<SyncRun
 static REGISTRY: OnceLock<Mutex<RuntimeRegistry>> = OnceLock::new();
 static EVENT_SINK: OnceLock<EventSink> = OnceLock::new();
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+// Allocate IDs and deliver events in one order, including across runtime lanes.
+// Otherwise a paused old started event can arrive after a newer finished event.
+static EVENT_ORDER: Mutex<()> = Mutex::new(());
 
 tokio::task_local! {
-    static ACTIVE: (Arc<SyncRuntime>, u64, &'static str, AtomicI64);
+    static ACTIVE: Active;
+}
+
+#[derive(Clone)]
+struct Active {
+    runtime: Arc<SyncRuntime>,
+    id: u64,
+    source: &'static str,
+    generation: Arc<AtomicI64>,
+    lane: SyncLane,
+}
+
+/// Fixed concurrency budget: at most one content, state read and immediate push
+/// operation per database. Nested calls may only move to a later lane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyncLane {
+    Content,
+    State,
+    Push,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,7 +55,8 @@ pub struct RuntimeEvent {
 }
 
 pub struct SyncRuntime {
-    gate: AsyncMutex<()>,
+    gates: [AsyncMutex<()>; 3],
+    admission: Mutex<()>,
     stopped: watch::Sender<bool>,
     active_count: watch::Sender<usize>,
     sink: EventSink,
@@ -72,7 +94,8 @@ impl RuntimeResult for () {
 impl SyncRuntime {
     pub fn new(sink: impl Fn(RuntimeEvent) + Send + Sync + 'static) -> Arc<Self> {
         Arc::new(Self {
-            gate: AsyncMutex::new(()),
+            gates: std::array::from_fn(|_| AsyncMutex::new(())),
+            admission: Mutex::new(()),
             stopped: watch::channel(false).0,
             active_count: watch::channel(0).0,
             sink: Arc::new(sink),
@@ -80,6 +103,10 @@ impl SyncRuntime {
     }
 
     pub fn stop(&self) {
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         self.stopped.send_replace(true);
     }
 
@@ -122,16 +149,46 @@ impl SyncRuntime {
         T: RuntimeResult + Send + 'static,
         F: Future<Output = AppResult<T>> + Send + 'static,
     {
+        self.run_in(SyncLane::Content, source, operation)
+    }
+
+    // Note: 生命周期共用，慢正文不持状态许可 — 见
+    // .agents/notes/implemented/architecture/2026-11-05-同步运行生命周期与诊断.md
+    pub fn run_in<T, F>(
+        self: &Arc<Self>,
+        lane: SyncLane,
+        source: &'static str,
+        operation: F,
+    ) -> Pin<Box<dyn Future<Output = AppResult<T>> + Send>>
+    where
+        T: RuntimeResult + Send + 'static,
+        F: Future<Output = AppResult<T>> + Send + 'static,
+    {
         let runtime = self.clone();
         Box::pin(async move {
-            if ACTIVE
-                .try_with(|active| Arc::ptr_eq(&active.0, &runtime))
-                .unwrap_or(false)
-            {
-                if runtime.is_stopped() {
-                    return Err(cancelled());
+            let active = ACTIVE
+                .try_with(Clone::clone)
+                .ok()
+                .filter(|active| Arc::ptr_eq(&active.runtime, &runtime));
+            if let Some(mut active) = active {
+                runtime.ensure_running()?;
+                if active.lane == lane {
+                    return operation.await;
                 }
-                return operation.await;
+                if lane < active.lane {
+                    return Err(AppError::internal("同步通道不能反向嵌套"));
+                }
+                let mut stopped = runtime.stopped.subscribe();
+                let _permit = tokio::select! {
+                    biased;
+                    _ = wait_stopped(&mut stopped) => return Err(cancelled()),
+                    permit = runtime.gates[lane as usize].lock() => permit,
+                };
+                runtime.ensure_running()?;
+                active.lane = lane;
+                // Reuse the parent activity and its Arc generation; a nested lane
+                // must neither create an orphan activity nor reset the account.
+                return ACTIVE.scope(active, operation).await;
             }
             if runtime.is_stopped() {
                 return Err(cancelled());
@@ -141,21 +198,26 @@ impl SyncRuntime {
                 let permit = tokio::select! {
                     biased;
                     _ = wait_stopped(&mut stopped) => return Err(cancelled()),
-                    permit = runtime.gate.lock() => permit,
+                    permit = runtime.gates[lane as usize].lock() => permit,
                 };
-                if runtime.is_stopped() {
-                    return Err(cancelled());
-                }
-                let id = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-                let mut completion = Completion::new(runtime.clone(), id, source);
+                let mut completion = Completion::new(runtime.clone(), source)?;
                 let result = ACTIVE
-                    .scope((runtime.clone(), id, source, AtomicI64::new(-1)), async {
-                        tokio::select! {
-                            biased;
-                            _ = wait_stopped(&mut stopped) => Err(cancelled()),
-                            result = operation => result,
-                        }
-                    })
+                    .scope(
+                        Active {
+                            runtime: runtime.clone(),
+                            id: completion.id,
+                            source,
+                            generation: Arc::new(AtomicI64::new(-1)),
+                            lane,
+                        },
+                        async {
+                            tokio::select! {
+                                biased;
+                                _ = wait_stopped(&mut stopped) => Err(cancelled()),
+                                result = operation => result,
+                            }
+                        },
+                    )
                     .await;
                 completion.finish(&result);
                 drop(permit);
@@ -166,7 +228,11 @@ impl SyncRuntime {
         })
     }
 
-    fn emit(&self, event: RuntimeEvent) {
+    fn emit(&self, mut event: RuntimeEvent) {
+        let _order = EVENT_ORDER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        event.sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
         (self.sink)(event);
     }
 }
@@ -194,23 +260,44 @@ struct Completion {
 }
 
 impl Completion {
-    fn new(runtime: Arc<SyncRuntime>, id: u64, source: &'static str) -> Self {
-        runtime.active_count.send_modify(|count| *count += 1);
-        let completion = Self {
+    fn new(runtime: Arc<SyncRuntime>, source: &'static str) -> AppResult<Self> {
+        {
+            let _admission = runtime
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            runtime.ensure_running()?;
+            runtime.active_count.send_modify(|count| *count += 1);
+        }
+        let mut completion = Self {
             runtime,
-            id,
+            id: 0,
             source,
             finished: false,
         };
-        completion.event("started", None, None);
-        diagnostics::record(id, source, "started", None);
-        completion
+        {
+            let _order = EVENT_ORDER
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            completion.id = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            (completion.runtime.sink)(RuntimeEvent {
+                id: completion.id,
+                sequence: SEQUENCE.fetch_add(1, Ordering::Relaxed),
+                source: source.to_string(),
+                phase: "started".into(),
+                stage: None,
+                outcome: None,
+                message: None,
+            });
+        }
+        diagnostics::record(completion.id, source, "started", None);
+        Ok(completion)
     }
 
     fn event(&self, phase: &str, outcome: Option<&str>, message: Option<String>) {
         self.runtime.emit(RuntimeEvent {
             id: self.id,
-            sequence: SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            sequence: 0, // allocated under EVENT_ORDER by emit
             source: self.source.to_string(),
             phase: phase.to_string(),
             stage: None,
@@ -289,11 +376,11 @@ pub fn init_events(app: tauri::AppHandle) {
 }
 
 pub fn stage(stage: &str) {
-    let _ = ACTIVE.try_with(|(runtime, id, source, _)| {
-        runtime.emit(RuntimeEvent {
-            id: *id,
-            sequence: SEQUENCE.fetch_add(1, Ordering::Relaxed),
-            source: source.to_string(),
+    let _ = ACTIVE.try_with(|active| {
+        active.runtime.emit(RuntimeEvent {
+            id: active.id,
+            sequence: 0,
+            source: active.source.to_string(),
             phase: "stage".into(),
             stage: Some(stage.to_string()),
             outcome: None,
@@ -305,10 +392,12 @@ pub fn stage(stage: &str) {
 pub(super) fn accept_generation(generation: i64) -> AppResult<()> {
     ACTIVE
         .try_with(|active| {
-            match active
-                .3
-                .compare_exchange(-1, generation, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match active.generation.compare_exchange(
+                -1,
+                generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => Ok(()),
                 Err(expected) if expected == generation => Ok(()),
                 Err(_) => Err(super::SyncSession::stale_error()),
@@ -396,7 +485,7 @@ pub async fn run_manual(
     runtime
         .run("manual", async move {
             let mut result = SyncRunResult {
-                activity_id: ACTIVE.with(|active| active.1),
+                activity_id: ACTIVE.with(|active| active.id),
                 feeds: None,
                 states: None,
                 error: None,
@@ -427,6 +516,32 @@ pub async fn sync_run(state: State<'_, crate::state::AppState>) -> AppResult<Syn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn nested_lane_keeps_the_parent_account_generation() {
+        let runtime = SyncRuntime::new(|_| {});
+        let nested = runtime.clone();
+        let error = runtime
+            .run("manual", async move {
+                accept_generation(4)?;
+                nested
+                    .run_in(SyncLane::State, "states", async {
+                        accept_generation(5)?;
+                        Ok(())
+                    })
+                    .await
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "staleSession");
+        runtime
+            .run_in(SyncLane::State, "states", async {
+                accept_generation(5)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn returned_phase_failures_and_partial_reports_keep_diagnostic_classification() {

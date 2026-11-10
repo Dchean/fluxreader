@@ -60,6 +60,18 @@ pub struct SyncReport {
     /// 在只读订阅发现后重试一次；不属于对外 report schema。
     #[serde(skip)]
     pub binding_incomplete: bool,
+    /// Complete content rounds retain their time cursor if the state phase failed.
+    #[serde(skip)]
+    pub states_incomplete: bool,
+    /// Content window completed, but its time cursor is committed only after
+    /// the complete round's final state read. Page/history checkpoints are separate.
+    #[serde(skip)]
+    pub content_cursor_candidate: Option<i64>,
+    /// Only identities first created and committed by this round's feed import.
+    /// These receipts may extend a later content pass's source baseline, never
+    /// replace an already-captured lifecycle. They are not part of the IPC schema.
+    #[serde(skip)]
+    pub discovered_sources: std::collections::HashMap<i64, (String, i64)>,
     /// 本轮出现**认证类失败**（greader/fever 的 401/403 状态码错误与 Fever
     /// api_key 失败——错误构造点的结构化标记，经各捕获点 [`SyncReport::note_client_error`]
     /// 汇入）。会话缓存回落（`report_has_auth_failure`）的判定输入，取代曾经的
@@ -85,6 +97,13 @@ impl SyncReport {
         self.entries_data_changed |= other.entries_data_changed;
         self.feeds_data_changed |= other.feeds_data_changed;
         self.binding_incomplete |= other.binding_incomplete;
+        self.states_incomplete |= other.states_incomplete;
+        self.content_cursor_candidate = other
+            .content_cursor_candidate
+            .or(self.content_cursor_candidate);
+        for (id, token) in other.discovered_sources {
+            self.discovered_sources.entry(id).or_insert(token);
+        }
         self.auth_failure |= other.auth_failure;
         self.auth_error_indices.extend(
             other
@@ -335,6 +354,9 @@ mod push;
 pub mod runtime;
 mod session;
 mod subscriptions;
+
+#[cfg(test)]
+mod state_lane_tests;
 
 pub use credentials::*;
 pub use phases::*;

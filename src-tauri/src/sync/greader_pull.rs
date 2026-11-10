@@ -226,6 +226,7 @@ pub(super) async fn pull_entries_greader(
     client: &GReaderClient,
     report: &mut SyncReport,
     full: bool,
+    versions: Option<&db::SyncMatchMaps>,
 ) -> AppResult<()> {
     let binding_incomplete = {
         let conn = db.lock().await;
@@ -273,6 +274,12 @@ pub(super) async fn pull_entries_greader(
             }
         }
     };
+
+    if let Some(versions) = versions {
+        maps.keep_field_versions_from(versions);
+        maps.pending_read_ids.extend(&versions.pending_read_ids);
+        maps.pending_star_ids.extend(&versions.pending_star_ids);
+    }
 
     let unbound_remote = {
         let conn = db.lock().await;
@@ -495,7 +502,7 @@ pub(super) async fn pull_entries_greader(
         // continuation 耗尽——页上限命中 / 请求失败 / 损坏 continuation 一律
         // Err，本轮跳过 read 差分（fail-closed），不落地任何差分结果；游标
         // 语义不变（是否推进仍由下方 failures 汇总决定）。
-        let mut curr_unread: Option<Vec<i64>> = match unread_result {
+        let curr_unread: Option<Vec<i64>> = match unread_result {
             Ok(ids) => Some(ids),
             Err(e) => {
                 authority_cursor_failures += 1;
@@ -523,10 +530,9 @@ pub(super) async fn pull_entries_greader(
                 .await?
             {
                 authority_cursor_failures += 1;
-                curr_unread = None;
             }
         }
-        let mut starred_for_reconcile = starred_ids;
+        let starred_for_reconcile = starred_ids;
         if let Some(ids) = starred_for_reconcile.as_ref() {
             match backfill_authority_collection(
                 db, session, client, "starred", ids, &mut maps, report,
@@ -536,76 +542,9 @@ pub(super) async fn pull_entries_greader(
                 Ok(true) => {}
                 Ok(false) => {
                     authority_cursor_failures += 1;
-                    starred_for_reconcile = None;
                 }
                 Err(e) => return Err(e),
             }
-        }
-        // read 差分复用回补后的映射，集合不完整或回补失败时本字段不落差分。
-        if let Some(curr_unread_ids) = curr_unread.as_ref() {
-            let unread_apply_result = {
-                let conn = db.lock().await;
-                session.ensure_current(&conn)?;
-                (|| -> AppResult<()> {
-                    for remote_id in curr_unread_ids {
-                        let Some(&aid) = maps.mf_id_to_article.get(remote_id) else {
-                            continue;
-                        };
-                        if !maps.article_source_is_current(&conn, aid)? {
-                            continue;
-                        }
-                        let version = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0)).0;
-                        let rows = conflict_policy::apply_read_by_policy(
-                            &conn,
-                            conflict_policy::GR_READ_DIRECTION,
-                            false,
-                            aid,
-                            version,
-                            maps.pending_read_ids.contains(&aid),
-                        )?;
-                        report.entries_data_changed |= rows > 0;
-                        report.merged_states += rows;
-                    }
-                    Ok(())
-                })()
-            };
-            if let Err(e) = unread_apply_result {
-                authority_cursor_failures += 1;
-                report.errors.push(format!(
-                    "unread 状态对账中断：本地写入失败（{e}），下一轮重放"
-                ));
-            }
-            let candidates =
-                collect_unread_diff_candidates(db, session, curr_unread_ids, &maps).await?;
-            let confirmed = probe_unread_diff_candidates(client, &candidates, report).await;
-            if !confirmed.is_empty() {
-                let conn = db.lock().await;
-                // OPT-006：差分落地是回写边界——代际失配丢弃整份确认集。
-                session.ensure_current(&conn)?;
-                if let Err(e) =
-                    apply_unread_diff_marks(&conn, &confirmed, &candidates, &maps, report)
-                {
-                    authority_cursor_failures += 1;
-                    report.errors.push(format!(
-                        "read 差分落地中断：本地写入失败（{e}），下一轮重放"
-                    ));
-                }
-                drop(conn);
-            }
-        }
-        if starred_for_reconcile.is_some() {
-            let conn = db.lock().await;
-            // OPT-006：对账是回写边界——代际失配丢弃整份成功集合。
-            session.ensure_current(&conn)?;
-            if let Some(ids) = starred_for_reconcile.as_deref() {
-                if let Err(e) = reconcile_reader_state(&conn, None, Some(ids), &maps, report) {
-                    authority_cursor_failures += 1;
-                    report.errors.push(format!(
-                        "starred 状态对账中断：本地写入失败（{e}），下一轮重放"
-                    ));
-                }
-            }
-            drop(conn);
         }
     }
 
@@ -620,21 +559,132 @@ pub(super) async fn pull_entries_greader(
         + binding_failures
         + authority_cursor_failures
         + usize::from(report.binding_incomplete);
-    if failures == 0 {
+    if failures == 0 && !report.states_incomplete {
         let conn = db.lock().await;
         session.ensure_current(&conn)?;
         // 审计（2026-11-01）：写失败此前静默吞掉——窗口已拿全却没留下游标痕迹，
         // 用户与日志都无从区分「推进成功」与「写入失败」。改为 warn + report
         // 可见；游标不前进的语义不变（本轮没写上，下一轮窗口起点不变）。
-        if let Err(e) = db::set_last_sync_ts(&conn, cursor_candidate) {
-            log::warn!("greader pull: 游标推进写入失败（本轮窗口保持旧游标）: {e}");
-            report.errors.push(format!("游标推进写入失败: {e}"));
-        }
+        report.content_cursor_candidate = Some(cursor_candidate);
         drop(conn);
     } else {
         log::warn!(
             "greader pull: {id_failures} id-listing + {chunk_failures} chunk + {binding_failures} binding failure(s); keeping last_sync_ts（下一轮重拉同一窗口）"
         );
+    }
+    Ok(())
+}
+
+/// Authority-only state read. The state lane serializes HTTP snapshot -> apply;
+/// content pages never reapply flags for existing bound identities.
+pub(super) async fn pull_states_greader(
+    db: &Arc<Mutex<Connection>>,
+    session: &SyncSession,
+    client: &GReaderClient,
+    report: &mut SyncReport,
+    versions: Option<&db::SyncMatchMaps>,
+) -> AppResult<()> {
+    let mut maps = {
+        let conn = db.lock().await;
+        session.ensure_current(&conn)?;
+        db::sync_match_maps(&conn)?
+    };
+    if let Some(versions) = versions {
+        maps.keep_field_versions_from(versions);
+        maps.pending_read_ids.extend(&versions.pending_read_ids);
+        maps.pending_star_ids.extend(&versions.pending_star_ids);
+    }
+    if maps.mf_id_to_article.is_empty() {
+        return Ok(());
+    }
+    let (unread_result, starred_result) = tokio::join!(
+        fetch_stream_ids(
+            client,
+            greader::tags::READING_LIST,
+            Some(greader::tags::READ)
+        ),
+        fetch_stream_ids(client, greader::tags::STARRED, None),
+    );
+    let curr_unread = match unread_result {
+        Ok(ids) => Some(ids),
+        Err(error) => {
+            report.push_client_error(
+                &error,
+                format!("unread 权威集合拉取失败，本字段跳过对账: {error}"),
+            );
+            None
+        }
+    };
+    let starred_for_reconcile = match starred_result {
+        Ok(ids) => Some(ids),
+        Err(error) => {
+            report.push_client_error(
+                &error,
+                format!("starred 权威集合拉取失败，本字段跳过对账: {error}"),
+            );
+            None
+        }
+    };
+    // Complete collection only; missing identities are left to the content lane.
+    if let Some(curr_unread_ids) = curr_unread.as_ref() {
+        let unread_apply_result = {
+            let conn = db.lock().await;
+            session.ensure_current(&conn)?;
+            (|| -> AppResult<()> {
+                for remote_id in curr_unread_ids {
+                    let Some(&aid) = maps.mf_id_to_article.get(remote_id) else {
+                        continue;
+                    };
+                    if !maps.article_source_is_current(&conn, aid)? {
+                        continue;
+                    }
+                    let version = maps.id_to_versions.get(&aid).copied().unwrap_or((0, 0)).0;
+                    let rows = conflict_policy::apply_read_by_policy(
+                        &conn,
+                        conflict_policy::GR_READ_DIRECTION,
+                        false,
+                        aid,
+                        version,
+                        maps.pending_read_ids.contains(&aid),
+                    )?;
+                    report.entries_data_changed |= rows > 0;
+                    report.merged_states += rows;
+                }
+                Ok(())
+            })()
+        };
+        if let Err(e) = unread_apply_result {
+            report.errors.push(format!(
+                "unread 状态对账中断：本地写入失败（{e}），下一轮重放"
+            ));
+        }
+        let candidates =
+            collect_unread_diff_candidates(db, session, curr_unread_ids, &maps).await?;
+        let confirmed = probe_unread_diff_candidates(client, &candidates, report).await;
+        if !confirmed.is_empty() {
+            let conn = db.lock().await;
+            // OPT-006：差分落地是回写边界——代际失配丢弃整份确认集。
+            session.ensure_current(&conn)?;
+            if let Err(e) = apply_unread_diff_marks(&conn, &confirmed, &candidates, &maps, report) {
+                report.errors.push(format!(
+                    "read 差分落地中断：本地写入失败（{e}），下一轮重放"
+                ));
+            }
+            drop(conn);
+        }
+    }
+    if starred_for_reconcile.is_some() {
+        let conn = db.lock().await;
+        // OPT-006：对账是回写边界——代际失配丢弃整份成功集合。
+        session.ensure_current(&conn)?;
+        if let Some(ids) = starred_for_reconcile.as_deref() {
+            if let Err(e) = reconcile_reader_state(&conn, None, Some(ids), &maps, report) {
+                report.errors.push(format!(
+                    "starred 状态对账中断：本地写入失败（{e}），下一轮重放"
+                ));
+            }
+        }
+        drop(conn);
     }
     Ok(())
 }
